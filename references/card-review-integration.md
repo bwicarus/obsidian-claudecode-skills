@@ -96,7 +96,9 @@ __vcInfoCardEl(rc-voicecall:1256)是静态渲染器无编辑态;renderInfo(1270)
     - **拖出即钉**:`_bindCardDrag` up 松手落正文→`pinCardToPage(松手点)`(非正文=anchorFromPoint 落空→不钉、继续落定),治"拖到页面就消失"。
     - 坐标:📌 按钮无坐标→卡位置 + **视野中央回退**(卡落页边/空白时,E2E 实锤根因);拖出有坐标只认该点。
     - E2E:天气卡📌→html便签+内容/制卡卡📌→card便签/浮层转移floatClosed/后端存 card+html/清理 leftover=0。
-  - ⏳ 真机剩:圆球抓手**拖拽手势**(headless 测不了 touch;_bindCardDrag 松手钉页逻辑已写、待真机验)、**侧栏/收藏夹卡拖出**(现浮层卡=📌+拖出松手;侧栏 turnCard 卡/收藏夹 dock 卡的拖出交互待接)、拖出源卡设 `c.pinned` 全程显示
+  - **⭐⭐ 第二轮纠正(2026-07-20)**:①"参照便签系统"=借**锚定机制**,钉住的仍是**卡**(不是变成白便签)→ createCardAt/createHtmlAt 底色改 `#0d1322` 暗色玻璃(applyColor+isDarkBg 自动适配前景,零新机制,观感=卡);②**拖出松手钉页只对 `c.pinMode` 卡**(收藏夹 dock 拖出复制设 `pinned+pinMode`;浮动卡拖动=挪位**不误钉**),钉入点=**卡左上角 rect**(非指针);③📌 按钮仍通用(卡位+视野中央回退)。E2E:钉入便签 darkBody/darkFg、浮动卡拖到正文松手 floatSurvives+floatNotPinned。
+  - **⭐ 便签/卡片内容注入 AI 上下文(用户设计 2026-07-20)**:钉在页面上的便签/卡片有绑定对象 → 所有取页上下文的任务把内容插到绑定对象**所在句子末尾**,标「【便签内容：…】」/「【卡片：正面 → 背面】」。实现:`pdf_reader._pin_context_annotations(rel,page,text)`(锚 x,y→PyMuPDF words 最近词→文本中找词→句尾插入;定位不到→文末追加;html 便签剥标签),接在 `assistant._page_text` PDF 分支(一处接入:assistant/voice/make_anki/read_page 全生效,voice._page_text 委托 assistant)。E2E:锚"交换律"→标注恰在其句尾;删便签后零残留。⚠ EPUB 分支(epub_assistant section 文本)未接,待后续。
+  - ⏳ 真机剩:圆球抓手**拖拽手势**手感(pinMode 松手钉页逻辑已写、headless 测不了 touch)、**侧栏 turnCard 卡拖出**(dock 收藏夹拖出已设 pinMode;侧栏卡拖出交互待接)
 - ✅ **双实例状态同步**:侧栏 turnCard + 浮层 vc-card 两份 rc-flashcard 按 **gid 卡组**联动——两处 push 生成同 `_gid`(rc-voicecall 680/706),侧栏 addPart 与浮层 mount 都带 gid,turncard renderPart 串 `p.gid`;rc-flashcard `_groups[gid]={cards,conts}`:同 gid 实例**共享同一批卡对象** + 状态变化(编辑/入库/评分/删除)`broadcast` 重渲其它实例(edit/单卡 updateSlide、del renderTrack;except self 防光标跳)。E2E:shared/editSync/A入库→B learn+B拿note_id/A评分→B done
 
 ## 分批实施计划(原始)

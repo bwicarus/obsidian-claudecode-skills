@@ -6848,6 +6848,81 @@ def pdf_api_notes():
     return jsonify({"ok": True, "note": n})
 
 
+def _pin_context_annotations(rel: str, page: int, text: str) -> str:
+    """把钉在本页的便签/卡片内容插进 AI 上下文文本的绑定对象后方(用户设计 2026-07-20):
+    锚点(x,y)→最近词→该词所在**句子末尾**后插「【便签内容：…】」/「【卡片：…】」;
+    定位不到(词不在清洗后文本/扫描书无词层)→追加到文末。经 assistant._page_text 接入,
+    所有取页上下文的任务(assistant/voice/make_anki/read_page)统一生效。空标注列表零开销。"""
+    try:
+        items = [n for n in _notes_load(rel)
+                 if (n.get("anchor") or {}).get("kind") == "pdf"
+                 and int((n.get("anchor") or {}).get("page") or 0) == int(page)]
+        marks = []   # [(note, 标注文本)]
+        import re as _re
+        for n in items:
+            if isinstance(n.get("card"), dict) and (n["card"].get("cards") or []):
+                parts = []
+                for c in n["card"]["cards"][:6]:
+                    if c.get("cloze"):
+                        parts.append(str(c["cloze"])[:160])
+                    else:
+                        parts.append(str(c.get("front") or "")[:120]
+                                     + ((" → " + str(c.get("back") or "")[:160]) if c.get("back") else ""))
+                if parts:
+                    marks.append((n, "卡片：" + " ‖ ".join(parts)))
+            elif isinstance(n.get("html"), dict) and n["html"].get("content"):
+                plain = _re.sub(r"\s+", " ", _re.sub(r"<[^>]+>", " ", str(n["html"]["content"]))).strip()[:200]
+                if plain:
+                    marks.append((n, "卡片：" + plain))
+            elif (n.get("text") or "").strip():
+                marks.append((n, "便签内容：" + n["text"].strip()[:200]))
+        if not marks or not text:
+            return (text or "") + ("".join("\n【" + m + "】" for _, m in marks) if marks else "")
+        # 锚点 → 页面最近词(PyMuPDF words;锚 x/y 是页宽高 0-1 比例)
+        words = []
+        try:
+            import fitz
+            ap = (OBSIDIAN_ROOT / rel).resolve()
+            ap.relative_to(OBSIDIAN_ROOT.resolve())
+            doc = fitz.open(str(ap))
+            try:
+                pg = doc[max(0, min(int(page) - 1, doc.page_count - 1))]
+                pw, ph = pg.rect.width or 1, pg.rect.height or 1
+                words = [(w[0] / pw, w[1] / ph, w[2] / pw, w[3] / ph, w[4]) for w in pg.get_text("words")]
+            finally:
+                doc.close()
+        except Exception:
+            pass
+        _SENT_END = "。．！？!?\n"
+        inserts = []   # [(插入位置, 标注)]
+        tail = []
+        for n, mark in marks:
+            a = n.get("anchor") or {}
+            ax, ay = float(a.get("x") or 0), float(a.get("y") or 0)
+            pos = -1
+            if words:
+                best = min(words, key=lambda w: ((w[0] + w[2]) / 2 - ax) ** 2 + ((w[1] + w[3]) / 2 - ay) ** 2)
+                wtxt = (best[4] or "").strip()
+                if wtxt:
+                    wi = text.find(wtxt)
+                    if wi >= 0:   # 该词所在句子的末尾(下一个句读;绑定在句中某词 → 挂句尾,用户拍板)
+                        se = wi + len(wtxt)
+                        while se < len(text) and text[se] not in _SENT_END:
+                            se += 1
+                        pos = min(se + 1, len(text))
+            if pos >= 0:
+                inserts.append((pos, "【" + mark + "】"))
+            else:
+                tail.append("【" + mark + "】")
+        for pos, mk in sorted(inserts, key=lambda x: -x[0]):   # 从后往前插,免位移
+            text = text[:pos] + mk + text[pos:]
+        if tail:
+            text = text + "\n" + "".join(tail)
+        return text
+    except Exception:
+        return text
+
+
 def _note_composite_png(rel: str, nid: str):
     """便签合成图 PNG bytes(有手写笔画时把 文字+笔画 整体画成一张图;PIL 重绘:便签色底+文字排版+笔画)。
     /api/note-composite 路由与 assistant/epub_assistant 的 see_figure(kind:'note')共用。找不到便签 → None。"""

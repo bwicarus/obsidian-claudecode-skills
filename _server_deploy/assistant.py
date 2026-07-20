@@ -1725,6 +1725,12 @@ def _page_text(file_rel: str, page) -> str:
         # 剔噪后的干净文本(用户拍板:噪声在源头剔,AI 上下文不能是错的——
         # 插图竖线/振假名混排都在 _page_text_clean 里处理,与阅读器字符层同源)
         txt = _pdf()._page_text_clean(ap, rel, idx + 1, limit=4000)
+        # 钉在本页的便签/卡片 → 插进绑定对象所在句子末尾(「【便签内容：…】」/「【卡片：…】」,用户设计;
+        # assistant/voice/make_anki/read_page 全走这里,一处接入全生效)
+        try:
+            txt = _pdf()._pin_context_annotations(rel, idx + 1, txt)
+        except Exception:
+            pass
         # 插入页 overlay 未同步 → PDF 那页空白/旧,用 sidecar md 补真源(设计 v4 批次2 评审 major)
         supp = _overlay_md_for_page(rel, idx + 1)
         if supp:

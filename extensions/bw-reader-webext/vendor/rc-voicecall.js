@@ -2222,7 +2222,8 @@
           cardEl.addEventListener('pointermove', function (ev) {
             if (drag && (sy0 - ev.clientY) > 50) {
               drag = false;
-              _cardPush(it.isHtml ? it.raw : (it.raw || it.text), it.label, it.isHtml, false, it.cid || '');   // 95:拖出复制=同一张卡(同编号)
+              var _oc = _cardPush(it.isHtml ? it.raw : (it.raw || it.text), it.label, it.isHtml, false, it.cid || '');   // 95:拖出复制=同一张卡(同编号)
+              if (_oc) { _oc.pinned = true; _oc.pinMode = true; }   // 收藏夹拖出=默认钉子模式:不自动消失,拖动松手在正文=钉入(左上角为钉点)
               _dockPanel(false); _dockBtn();
             }
           });
@@ -2491,8 +2492,9 @@
           return;
         }
         if (moved && e3 && _inDockZone(e3.clientX, e3.clientY)) { _dockAdd(c); return; }   // 77b:松手在区内=收入收藏夹
-        if (moved && e3 && window.RC && RC.stickynote && (RC.stickynote.createCardAt || RC.stickynote.createHtmlAt)) {   // 拖到正文内容上松手 → 钉到该点(拖出即钉,治"拖到页面就消失")
-          if (pinCardToPage(c, e3.clientX, e3.clientY)) return;   // 落正文=转页面便签;非正文(anchorFromPoint 落空)=继续落定
+        if (moved && c.pinMode && e3 && window.RC && RC.stickynote) {   // 钉子模式卡(侧栏/收藏夹拖出源):松手=钉入,**方块左上角位置**就是钉入点(用户拍板)
+          var _pr = el.getBoundingClientRect();
+          if (pinCardToPage(c, _pr.left + 8, _pr.top + 8)) return;   // 落正文=钉住;非正文(anchorFromPoint 落空)=继续落定,卡保持显示
         }
         if (moved) {   // 落定:带一点弹性回落(overshoot 曲线),像重新"粘"回桌面
           el.style.transition = 'transform .38s cubic-bezier(.34,1.56,.64,1),box-shadow .3s,opacity .32s';

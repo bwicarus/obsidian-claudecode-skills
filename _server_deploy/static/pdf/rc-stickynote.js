@@ -1236,7 +1236,7 @@
     var anchor = null;
     for (var i = 0; i < cands.length && !anchor; i++) { try { anchor = O.anchorFromPoint(cands[i][0], cands[i][1]); } catch (e) {} }
     if (!anchor) { toastMsg('这里放不了(把卡片放到正文上再松手)'); return false; }
-    req('POST', { file: O.file, anchor: anchor, color: DEFAULT_COLOR, w: 300, h: 210, collapsed: false, card: { cards: cards, gid: gid || '' } }, function (d) {
+    req('POST', { file: O.file, anchor: anchor, color: '#0d1322', w: 300, h: 210, collapsed: false, card: { cards: cards, gid: gid || '' } }, function (d) {   // 暗色玻璃=卡片观感(用户:钉住的是卡,不是白便签)
       if (!d || !d.ok || !d.note) { toastMsg('✗ 便签创建失败'); return; }
       notes.push(d.note);
       if (!ensureMounted(d.note)) toastMsg('卡片便签已建(所在页尚未渲染,渲染后出现)');
@@ -1252,7 +1252,7 @@
     var anchor = null;
     for (var i = 0; i < cands.length && !anchor; i++) { try { anchor = O.anchorFromPoint(cands[i][0], cands[i][1]); } catch (e) {} }
     if (!anchor) { toastMsg('这里放不了(把卡片放到正文上再松手)'); return false; }
-    req('POST', { file: O.file, anchor: anchor, color: DEFAULT_COLOR, w: 300, h: 210, collapsed: false, html: { content: htmlObj.content, isHtml: !!htmlObj.isHtml, label: htmlObj.label || '' } }, function (d) {
+    req('POST', { file: O.file, anchor: anchor, color: '#0d1322', w: 300, h: 210, collapsed: false, html: { content: htmlObj.content, isHtml: !!htmlObj.isHtml, label: htmlObj.label || '' } }, function (d) {   // 暗色玻璃=卡片观感
       if (!d || !d.ok || !d.note) { toastMsg('✗ 便签创建失败'); return; }
       notes.push(d.note);
       if (!ensureMounted(d.note)) toastMsg('卡片便签已建(所在页尚未渲染,渲染后出现)');
