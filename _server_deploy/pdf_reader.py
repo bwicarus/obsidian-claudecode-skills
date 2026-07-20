@@ -7091,7 +7091,13 @@ def _pin_context_annotations(rel: str, page: int, text: str) -> str:
             ax, ay = float(a.get("x") or 0), float(a.get("y") or 0)
             pos = -1
             if words:
-                best = min(words, key=lambda w: ((w[0] + w[2]) / 2 - ax) ** 2 + ((w[1] + w[3]) / 2 - ay) ** 2)
+                # 行优先(用户拍板,与前端反馈同规则):锚点同行(±0.75行高)左侧最近词;无→全局欧氏最近
+                _rowc = [w for w in words
+                         if abs((w[1] + w[3]) / 2 - ay) <= max(w[3] - w[1], 0.015) * 0.75 and (w[0] + w[2]) / 2 <= ax]
+                if _rowc:
+                    best = max(_rowc, key=lambda w: (w[0] + w[2]) / 2)
+                else:
+                    best = min(words, key=lambda w: ((w[0] + w[2]) / 2 - ax) ** 2 + ((w[1] + w[3]) / 2 - ay) ** 2)
                 wtxt = (best[4] or "").strip()
                 if wtxt:
                     wi = text.find(wtxt)

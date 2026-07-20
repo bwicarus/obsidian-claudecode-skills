@@ -3846,12 +3846,18 @@
         // 落不到文字(纯图/页缝)→ 退回 section 相对 x/y 比例锚(旧语义)。
         noteWordRect: function (x, y) {
           // #51 粒度=单词:caret 命中字符→两侧扩至空白/标点(cap 11)→Range 精确框(容器内坐标);落空白/标点=null(→横线)
-          var pos = caretFromPoint(x, y);
-          if (!pos || !pos.node || pos.node.nodeType !== 3 || !col.contains(pos.node)) return null;
+          // 行优先(用户拍板):原点没中字时向**左**试探(锁左上角左侧同行文字,非斜上方)
+          var pos = null, SEP = /[\s、。,.!?！？;；:：「」『』()（）【】\u3000]/;
+          var _lx = [0, -14, -28, -44];
+          for (var _li = 0; _li < _lx.length; _li++) {
+            var p0 = caretFromPoint(x + _lx[_li], y);
+            if (p0 && p0.node && p0.node.nodeType === 3 && col.contains(p0.node)) {
+              var _ss = p0.node.nodeValue || '', _ii = Math.min(p0.offset, _ss.length - 1);
+              if (_ii >= 0 && !SEP.test(_ss[_ii] || '')) { pos = p0; break; }
+            }
+          }
+          if (!pos) return null;
           var s0 = pos.node.nodeValue || '', i0 = Math.min(pos.offset, s0.length - 1);
-          if (i0 < 0) return null;
-          var SEP = /[\s、。,.!?！？;；:：「」『』()（）【】\u3000]/;
-          if (SEP.test(s0[i0] || '')) return null;
           var a = i0, b = i0;
           while (a > 0 && !SEP.test(s0[a - 1]) && i0 - a < 11) a--;
           while (b < s0.length - 1 && !SEP.test(s0[b + 1]) && b - i0 < 11) b++;

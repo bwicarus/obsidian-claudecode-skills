@@ -10917,13 +10917,21 @@ if (window.PdfAdapter && PdfAdapter.bind) {
       if (!cbs || !cbs.length) return null;
       const r = pw.getBoundingClientRect();
       const px = x - r.left, py = y - r.top;
-      let best = null, bd = 1e18;
+      let best = null, bd = 1e18, bestRow = null, brd = 1e18;
       for (const cb of cbs) {
         if (cb.sp || !cb.width) continue;
         const cx = cb.left + cb.width / 2, cy = cb.top + cb.height / 2;
+        // 行优先(用户拍板 2026-07-21:锁**左上角左侧同行**文字,非斜上方——锚语义"插在这段文字之后"):
+        // 字符行高带内(±0.75字高)且在探测点左侧 → 按水平距离取最近;同行没有才退全局欧氏最近
+        const rowOk = Math.abs(cy - py) <= Math.max(cb.height, 14) * 0.75;
+        if (rowOk && cx <= px) {
+          const dh = px - cx;
+          if (dh < brd) { brd = dh; bestRow = cb; }
+        }
         const d = (cx - px) * (cx - px) + (cy - py) * (cy - py);
         if (d < bd) { bd = d; best = cb; }
       }
+      if (bestRow) { best = bestRow; bd = brd * brd; }
       if (!best) return null;
       let L = best.left, T = best.top, R2 = best.left + best.width, B = best.top + best.height;
       if (best.w !== -1) for (const cb of cbs) {
