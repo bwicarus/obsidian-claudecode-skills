@@ -652,13 +652,22 @@
   function _chipEnd(p) {
     if (!(window.RC && RC.toolChip)) return;
     try { _rtcCreFetch._t = 0; _rtcCreFetch(); } catch (e) {}   // 工具完成=可能有新创造物 → 强制刷新清单缓存
+    // P0(2026-07-21 用户实锤"制卡卡永远处理中"根因):工具一旦收尾=必须解除 turnCard 的 busy 转圈,
+    //   覆盖**所有**提前 return 分支(error / task_id 后台任务),不再只在正常分支末尾 idle
+    //   (旧:error/task_id 分支提前 return → turnCard.statusEl 的"处理中"旋转永不 hidden = 永远转圈)。
+    try { if (RC.turnCard && window.__asstVoiceTid) RC.turnCard.idle(window.__asstVoiceTid()); } catch (e) {}
     var c = _chipTake(p);
     if (!c) c = RC.toolChip.create({ tool: p.tool || '', label: p.label || '工具' });   // 没见过 running(缓存命中/补发)→ 现造一个直接收尾
     if (p.tool) { try { RC.toolChip.retype(c, p.tool); } catch (e) {} }   // 136:done 才拿到真实工具名 → 重判类型(执行类=完成即消失)
     if (p.sub_steps && p.sub_steps.length) { try { RC.toolChip.addSteps(c, p.sub_steps); } catch (e) {} }   // 137:工具内部子步骤 → 并进这张卡的步骤(不另起卡)
     if (p.vision && p.vision.length) { try { RC.toolChip.setVision(c, p.vision); } catch (e) {} }   // 141:真正喂给 AI 的图(see_ink 的笔迹合成图等)
     RC.toolChip.setMeta(c, _chipMeta(p));
-    if (p.status === 'error') { RC.toolChip.fail(c, p.label || '失败'); return; }
+    if (p.status === 'error') {
+      RC.toolChip.fail(c, p.label || '失败');
+      try { if (RC.turnCard && window.__asstVoiceTid) RC.turnCard.addPart(window.__asstVoiceTid(),
+        { kind: 'tool', tool: p.tool || '', label: (p.label || '工具') + '(失败)', error: p.label || '失败' }); } catch (e) {}
+      return;
+    }
     // 后台任务(制卡/记笔记/生词):工具只是"派发成功",真正的步骤与结果要继续轮询 task-status
     var tid = p.task_id || (p.result && p.result.task_id) || _pickTaskId(p.rag);
     // CLI 委托任务(make_paper/do_task):走**跟文字侧栏同一套** _trackCliTask —— 轮询 task-status 把 CLI
@@ -668,7 +677,15 @@
       try { RC.assistant.trackCliTask(window.__asstVoiceTid(), tid, p.label || p.tool || '造纸'); } catch (e) {}
       return;
     }
-    if (tid) { RC.toolChip.progress(c, '已派发,正在后台执行…'); _chipTrackTask(c, tid); return; }
+    if (tid) {
+      RC.toolChip.progress(c, '已派发,正在后台执行…');
+      _chipTrackTask(c, tid);
+      // turnCard 从"处理中"落成一张完成的 tool part(后台生成中);真完成 toolChip.track 会发系统通知
+      try { if (RC.turnCard && window.__asstVoiceTid) RC.turnCard.addPart(window.__asstVoiceTid(),
+        { kind: 'tool', tool: p.tool || '', label: p.label || '制卡', args: p.args || {},
+          result: '⏳ 已派发后台生成,完成会通知你', took_s: p.took_s }); } catch (e) {}
+      return;
+    }
     RC.toolChip.done(c, { summary: p.label || '完成', detail: p.rag || p.result_brief || '' });
     // 141(轮次容器):工具完成 → 把它作为一个 **tool part 注入本轮容器**(参数/子步骤/喂给 AI 的图/结果
     //   全在 part 里)。容器据此长出卡头 +【流程】按钮;part 落库 → 刷新后**照样是卡**(旧实现刷完就没了)。
@@ -3067,7 +3084,7 @@
           var tool = isNote ? 'make_note' : 'make_anki';
           var seed = ('(语音对话中用户请求做' + (isNote ? '笔记' : '卡片') + ')\n用户说:' + (_lastU || '(语音请求)') +
                       '\nAI 口头总结的要点:' + curAText).slice(0, 1600);
-          onToolStatus({ status: 'running', label: (isNote ? '记笔记' : '做卡片') + '(系统代提交)' });
+          onToolStatus({ status: 'running', tool: tool, label: (isNote ? '记笔记' : '做卡片') + '(系统代提交)' });
           var _ac2 = new AbortController();   // 142:这条是 fire-and-forget(不回填 function_call_output),挂了不会掐死对话,
           setTimeout(function () { try { _ac2.abort(); } catch (e) {} }, 60000);   //   但会留一张**永远转圈**的工具卡 → 同样封超时
           fetch('/api/assistant/voice-tool', { method: 'POST', headers: { 'Content-Type': 'application/json' },
