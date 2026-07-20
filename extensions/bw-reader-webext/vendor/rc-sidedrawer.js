@@ -289,10 +289,25 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
       var ss = document.createElement('div'); ss.id = 'ep-side-settings'; ss.style.display = 'none';
       ss.innerHTML = '<label class="ss-row"><span>悬浮显示(盖在正文上)</span><input type="checkbox" id="ep-gp-floating"></label>' +
         '<div class="ss-row ss-col"><span>背景模糊度 <small id="ep-gp-blur-val">20</small> px</span><input type="range" id="ep-gp-blur" min="0" max="40" step="1" value="20"></div>' +
-        '<div class="ss-row ss-col"><span>显示哪些 tab</span><div id="ep-tab-toggles"></div></div>';
+        '<div class="ss-row ss-col"><span>显示哪些 tab</span><div id="ep-tab-toggles"></div></div>' +
+        '<div class="ss-row ss-col"><button id="ep-force-refresh" style="background:#244470;border:1px solid #3b6db5;color:#cfe6ff;border-radius:8px;padding:8px;font-size:12px;cursor:pointer">⟳ 强制更新界面(保留已下载书籍)</button>' +
+        '<small id="ep-ver-stamp" style="color:#5a6680;font-size:10px;word-break:break-all"></small></div>';
       side.appendChild(ss);
       var _f = ss.querySelector('#ep-gp-floating'); if (_f) _f.addEventListener('change', function () { setFloating(this.checked); });
       var _b = ss.querySelector('#ep-gp-blur'); if (_b) _b.addEventListener('input', function () { setBlur(this.value); var v = document.getElementById('ep-gp-blur-val'); if (v) v.textContent = this.value; });
+      // 强制更新(2026-07-21 用户提案):只清代码壳缓存(pdf-shell-v1),**保留** pdf-cache-v3 里
+      // 已下载的书(页图/字符层);顺手触发 SW 更新检查,再整页重载 → 治 iOS 快照恢复/陈旧缓存滞留
+      var _fr = ss.querySelector('#ep-force-refresh');
+      if (_fr) _fr.addEventListener('click', function () {
+        _fr.textContent = '⟳ 更新中…'; _fr.disabled = true;
+        Promise.resolve()
+          .then(function () { return (window.caches && caches.delete) ? caches.delete('pdf-shell-v1') : null; })
+          .then(function () { return (navigator.serviceWorker && navigator.serviceWorker.getRegistration) ? navigator.serviceWorker.getRegistration().then(function (r) { return r && r.update(); }) : null; })
+          .catch(function () {})
+          .then(function () { try { location.reload(); } catch (e) {} });
+      });
+      var _vs = ss.querySelector('#ep-ver-stamp');
+      if (_vs) { try { _vs.textContent = '界面版本: ' + (window.__READER_GIT || '未知'); } catch (e) {} }
       try { document.addEventListener('pointerdown', function (e) {
         var m = document.getElementById('ep-side-settings');
         if (m && m.style.display === 'block' && !m.contains(e.target) && !(e.target.closest && e.target.closest('#ep-side-set-btn'))) m.style.display = 'none';

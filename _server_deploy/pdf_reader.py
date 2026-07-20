@@ -816,6 +816,7 @@ def _pdf_shared_js_v():
            原生回填/保存函数经 PdfAdapter.openSettings 的 onFill/onSave 复用,见 21-misc-ai.js)。"""
     mt = 0
     for name in ("rc-ink.js", "rc-core.js", "rc-md.js", "rc-result.js", "rc-wordpop.js", "rc-phrasepop.js",
+                 "rc-sidedrawer.js",   # 2026-07-21 实锤补漏:抽屉迁 rc-sidedrawer 后清单没跟上→v不跳+immutable=真机永远旧文件(测试环境无HTTP缓存看不出)
                  "rc-outbox.js", "rc-review.js", "rc-figures.js", "rc-highlight.js", "rc-knowledge.js", "rc-assistant.js", "rc-grammar.js",
                  "rc-settings.js", "rc-stickynote.js", "rc-favorites.js", "rc-userpages.js", "rc-video.js", "rc-voicecall.js", "rc-turncard.js", "rc-toolchip.js", "pdf-adapter.js",
                  "pdf-uishared.js", "pdf-tail.js", "pdf-styles.css"):   # 2026-07-06 架构优化:pdf_reader.html 抽出的内联 JS/CSS(改它们 → ?v 跳变)
