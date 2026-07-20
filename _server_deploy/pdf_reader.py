@@ -6871,7 +6871,12 @@ def _pin_context_annotations(rel: str, page: int, text: str) -> str:
                 if parts:
                     marks.append((n, "卡片：" + " ‖ ".join(parts)))
             elif isinstance(n.get("html"), dict) and n["html"].get("content"):
-                plain = _re.sub(r"\s+", " ", _re.sub(r"<[^>]+>", " ", str(n["html"]["content"]))).strip()[:200]
+                _c0 = str(n["html"]["content"])   # 图片进上下文=元数据不是图本身(用户拍板):<img alt> → [图:alt]
+                _c0 = _re.sub(r'<img[^>]*alt="([^"]*)"[^>]*>', r"[图:\1]", _c0)
+                _c0 = _re.sub(r"<img[^>]+>", "[图]", _c0)
+                plain = _re.sub(r"\s+", " ", _re.sub(r"<[^>]+>", " ", _c0)).strip()[:200]
+                if not plain and (n["html"].get("label") or "").strip():
+                    plain = "[图:" + n["html"]["label"].strip() + "]"
                 if plain:
                     marks.append((n, "卡片：" + plain))
             elif (n.get("text") or "").strip():

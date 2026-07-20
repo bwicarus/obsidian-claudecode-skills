@@ -10911,11 +10911,26 @@ if (window.PdfAdapter && PdfAdapter.bind) {
     },
     noteAnchorFromPoint: (x, y) => {
       const t = document.elementFromPoint(x, y);
-      const pw = t && t.closest ? t.closest('.page-wrap') : null;
-      if (!pw || pw.dataset.loaded !== '1') return null;
+      let pw = t && t.closest ? t.closest('.page-wrap') : null;
+      if (!pw || pw.dataset.loaded !== '1') {
+        // 任何位置都能钉(用户拍板 2026-07-20):点不在页上(页缝/灰区/被浮层元素挡)→ 找**最近的已渲染页**,
+        // 坐标 clamp 进页——钉页缝=贴上一页底部、水平位置保持(="内容排到上方最后的内容之后")
+        pw = null; let best = 1e18;
+        document.querySelectorAll('.page-wrap[data-loaded="1"]').forEach((p2) => {
+          const r2 = p2.getBoundingClientRect();
+          if (!r2.width || !r2.height) return;
+          const dx = x < r2.left ? r2.left - x : (x > r2.right ? x - r2.right : 0);
+          const dy = y < r2.top ? r2.top - y : (y > r2.bottom ? y - r2.bottom : 0);
+          const d2 = dx * dx + dy * dy;
+          if (d2 < best) { best = d2; pw = p2; }
+        });
+        if (!pw) return null;
+      }
       const r = pw.getBoundingClientRect();
       if (!r.width || !r.height) return null;
-      return { kind: 'pdf', page: parseInt(pw.dataset.pageNum || '0', 10) || 0, x: (x - r.left) / r.width, y: (y - r.top) / r.height };
+      return { kind: 'pdf', page: parseInt(pw.dataset.pageNum || '0', 10) || 0,
+               x: Math.max(0, Math.min(1, (x - r.left) / r.width)),
+               y: Math.max(0, Math.min(1, (y - r.top) / r.height)) };
     },
     // 阶段2 词组(rc-phrasepop):呼吸高亮层是 PDF 字符层几何 → 留底座,adapter 只接管查询+小框渲染。
     phraseHighlight: () => { try { return _showPhraseHighlight(_charSel && _charSel.pw); } catch (_) { return null; } },   // 返回本高亮 → onSolid 精确标它(并发多查询各标各的)

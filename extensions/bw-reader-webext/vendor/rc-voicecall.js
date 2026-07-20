@@ -1111,7 +1111,7 @@
     if (k === 'weather') return (card.title || '天气') + ':' + [d.loc, d.date, d.cond, (d.lo != null ? d.lo + '-' + d.hi + '°C' : ''), (d.precip != null ? '降水' + d.precip + '%' : ''), d.tip].filter(Boolean).join(',');
     if (k === 'news') return (card.title || '新闻') + ':' + (d.items || []).map(function (it) { return (it.t || '') + '(' + (it.s || '') + ')'; }).join(';');
     if (k === 'fact') return (card.title || '') + ':' + (d.answer || '') + ' ' + (d.detail || '');
-    if (k === 'images') return (card.title || '配图') + ':' + (d.items || []).map(function (it) { return (it.title || '图') + ' ' + (it.url || ''); }).join(';');
+    if (k === 'images') return (card.title || '配图') + ':' + (d.items || []).map(function (it) { return (it.title || '图') + (it.src ? '[源:' + it.src + ']' : ''); }).join(';') + '(图片本身在用户屏幕上;上下文只带元数据,不含图片/URL)';   // 用户拍板:带图卡入上下文=每张图的元数据,不是图本身
     if (k === 'videos') return (card.title || '视频') + ':' + (d.items || []).map(function (it) { return (it.title || '') + '(' + (it.channel || '') + ')' + (it.url || ''); }).join(';');
     return d.text || card.brief || card.title || '';
   }
