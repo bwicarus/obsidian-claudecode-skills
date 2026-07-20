@@ -165,18 +165,21 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
   body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floating #ep-top{padding-right:0}
   body.ep-side-open #ep-side-handle{right:58vw}
 }
-/* 顶部 tab 栏(照搬 PDF #side-tabs) */
-#ep-side-tabs{flex:0 0 auto;display:flex;align-items:center;gap:2px;padding:6px 8px;border-bottom:1px solid #2a3550}
+/* 顶部 tab 栏:外层固定条(动作钮+⚙ 永远可见)+ 内层滚动区(tab 超宽左右滑,2026-07-20 用户实锤"点不到⚙") */
+#ep-side-tabbar{flex:0 0 auto;display:flex;align-items:center;gap:2px;padding:6px 8px;border-bottom:1px solid #2a3550;min-width:0}
+#ep-side-tabs{flex:1 1 auto;display:flex;align-items:center;gap:2px;min-width:0;overflow-x:auto;-webkit-overflow-scrolling:touch;scrollbar-width:none;touch-action:pan-x}
+#ep-side-tabs::-webkit-scrollbar{display:none}
+#ep-side-tabs .ep-side-tab{flex:none}
 /* 单行永远放得下:抽屉窄(≲520px,即视口<1360)时 tab 只显图标(hover/长按有 title);不换行不裁切 */
 @media (max-width:1359px){#ep-side-tabs .ep-side-tab-lb{display:none}#ep-side-tabs .ep-side-tab .si{margin-right:0}}
 #ep-side-tabs .ep-side-tab{background:transparent;border:none;color:#7a8497;font-size:12px;cursor:pointer;padding:5px 8px;border-radius:6px;white-space:nowrap;display:inline-flex;align-items:center;-webkit-tap-highlight-color:transparent}
 #ep-side-tabs .ep-side-tab:hover{background:#1a2540;color:#cfe6ff}
 #ep-side-tabs .ep-side-tab.active{background:#1a2540;color:#7dd3fc;font-weight:600}
 #ep-side-tabs .ep-side-tab-sp{flex:1}
-#ep-side-tabs .ep-side-x{background:transparent;border:none;color:#7a8497;font-size:16px;cursor:pointer;padding:3px 8px;line-height:1;-webkit-tap-highlight-color:transparent}
-#ep-side-tabs .ep-side-x:hover{color:#fff}
+#ep-side-tabbar .ep-side-x{background:transparent;border:none;color:#7a8497;font-size:16px;cursor:pointer;padding:3px 8px;line-height:1;flex:none;-webkit-tap-highlight-color:transparent}
+#ep-side-tabbar .ep-side-x:hover{color:#fff}
 /* Apple/SF 描边图标(照搬 PDF .si) */
-#ep-side-tabs .si{width:15px;height:15px;vertical-align:-3px;margin-right:5px;flex:none}
+#ep-side-tabs .si,#ep-side-tabbar .si{width:15px;height:15px;vertical-align:-3px;margin-right:5px;flex:none}
 /* 侧栏外观设置弹层(照搬 PDF #side-settings):⚙ 开,悬浮显示 + 背景模糊度 */
 #ep-side-settings{position:absolute;top:42px;right:8px;z-index:10;background:#10162a;border:1px solid #2a3550;border-radius:10px;box-shadow:0 8px 24px rgba(0,0,0,.6);padding:8px;min-width:210px;font-size:12px}
 #ep-side-settings .ss-row{display:flex;align-items:center;justify-content:space-between;gap:10px;padding:7px 5px;color:#cfe6ff;cursor:pointer;border-radius:6px}
@@ -253,7 +256,8 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
 
     // tab 栏:prepend 到抽屉最上(pane 已在模板里)
     if (!document.getElementById('ep-side-tabs')) {
-      var bar = document.createElement('div'); bar.id = 'ep-side-tabs';
+      var outer = document.createElement('div'); outer.id = 'ep-side-tabbar';
+      var bar = document.createElement('div'); bar.id = 'ep-side-tabs';   // 滚动区(id 不变:后挂载注入/选择器全兼容)
       var tabs = (_opts.tabs && _opts.tabs.length) ? _opts.tabs : DEFAULT_TABS;
       tabs.forEach(function (t) {
         var b = document.createElement('button');
@@ -264,7 +268,8 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
         bar.appendChild(b);
       });
       var sp = document.createElement('span'); sp.className = 'ep-side-tab-sp'; bar.appendChild(sp);
-      // per-tab 动作按钮(泛化点:PDF「🗑 清空分析」只在 grammar tab 显示;setTab 里按 btn.tabs 切显隐)
+      outer.appendChild(bar);
+      // per-tab 动作按钮(泛化点:PDF「🗑 清空分析」只在 grammar tab 显示;setTab 里按 btn.tabs 切显隐)——放固定区
       (_opts.tabButtons || []).forEach(function (tb) {
         var b = document.createElement('button'); b.className = 'ep-side-x ep-side-tabact';
         if (tb.id) b.id = tb.id;
@@ -272,13 +277,13 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
         b.style.display = 'none';
         b.addEventListener('click', function (ev) { ev.stopPropagation(); try { tb.onClick && tb.onClick(); } catch (e) {} });
         b.__tabs = tb.tabs || [];
-        bar.appendChild(b);
+        outer.appendChild(b);
       });
       var setb = document.createElement('button'); setb.className = 'ep-side-x'; setb.id = 'ep-side-set-btn'; setb.title = '侧栏外观设置(悬浮 / 模糊度)';
       setb.innerHTML = '<svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" style="margin:0;width:16px;height:16px;vertical-align:-3px"><circle cx="12" cy="12" r="3"/><path d="M12 3v2.5M12 18.5V21M21 12h-2.5M5.5 12H3M18.4 5.6l-1.8 1.8M7.4 16.6l-1.8 1.8M18.4 18.4l-1.8-1.8M7.4 7.4L5.6 5.6"/></svg>';
-      setb.addEventListener('click', toggleSideSettings); bar.appendChild(setb);
+      setb.addEventListener('click', toggleSideSettings); outer.appendChild(setb);
       // ✕ 关闭按钮移除(用户拍板):关抽屉走把手 toggle / afterJump 自动收,tab 栏寸土寸金
-      side.insertBefore(bar, side.firstChild);
+      side.insertBefore(outer, side.firstChild);
     }
     if (!document.getElementById('ep-side-settings')) {
       var ss = document.createElement('div'); ss.id = 'ep-side-settings'; ss.style.display = 'none';
@@ -346,7 +351,7 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
     document.querySelectorAll('#ep-side .ep-side-pane').forEach(function (p) {
       p.classList.toggle('active', p.dataset.pane === name);
     });
-    document.querySelectorAll('#ep-side-tabs .ep-side-tabact').forEach(function (b) {   // per-tab 动作按钮显隐
+    document.querySelectorAll('#ep-side-tabbar .ep-side-tabact').forEach(function (b) {   // per-tab 动作按钮显隐(固定区)
       b.style.display = (b.__tabs && b.__tabs.indexOf(name) >= 0) ? '' : 'none';
     });
     try { if (typeof _opts.onTab === 'function') _opts.onTab(name); } catch (e) {}
