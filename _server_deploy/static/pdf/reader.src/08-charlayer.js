@@ -141,7 +141,8 @@ function renderVocabUnderlines(pw, marks) {
     let _dirty = false;
     marks = (marks || []).filter((m) => {
       const k = String(m.lemma || m.word || '').toLowerCase();
-      const srv = (m.label_slug === 'mastered');
+      let srv = (m.label_slug === 'mastered');
+      if (window.__masteredLocal) srv = window.__masteredLocal.has(k);   // §18.7 本地库=事实源(缓存 overlay 的 flag 可能陈旧)
       if (_ovr && _ovr.has(k)) {
         const loc = _ovr.get(k);
         if (loc === srv) { _ovr.delete(k); _dirty = true; return !srv; }   // 服务端已追上 → 收敛,清覆盖

@@ -560,9 +560,24 @@ window.__vocabOverridePersist = function () {
     localStorage.setItem(_VOVR_KEY, JSON.stringify(out));
   } catch (_) {}
 };
+// §18.7 本地掌握库:开书拉全量 mastered 清单落 localStorage(SW netFallback → 离线用缓存快照);
+// toggle 本地增删 → 掌握判定的**事实源在本地**(下划线过滤/wordpop 初始态都优先用它,脱离服务器)。
+window.__masteredLocal = (() => { try { const r0 = JSON.parse(localStorage.getItem('vocab-mastered-v1') || 'null'); return r0 && r0.set ? new Set(r0.set) : null; } catch (_) { return null; } })();
+window.__masteredLocalSave = function () { try { localStorage.setItem('vocab-mastered-v1', JSON.stringify({ ts: Date.now(), set: [...(window.__masteredLocal || [])] })); } catch (_) {} };
+(async () => {
+  try {
+    const d = await (await fetch('/pdf/api/vocab-mastery-map?all=1&file=' + encodeURIComponent(typeof FILE_REL !== 'undefined' ? FILE_REL : ''))).json();
+    if (d && d.ok && Array.isArray(d.mastered)) {
+      window.__masteredLocal = new Set(d.mastered.map((x) => String(x).toLowerCase()));
+      window.__masteredLocalSave();
+      document.querySelectorAll('.page-wrap[data-page-num]').forEach((pw) => { if (pw.__vocabMarks) { try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {} } });
+    }
+  } catch (_) {}
+})();
 window.applyVocabLocalOverride = function (lemma, mastered) {
   try {
     const k = String(lemma || '').toLowerCase();
+    if (window.__masteredLocal) { if (mastered) __masteredLocal.add(k); else __masteredLocal.delete(k); window.__masteredLocalSave(); }
     window.__vocabOverrideTs = window.__vocabOverrideTs || new Map();
     __vocabOverrideTs.set(k, Date.now());
     window.__vocabOverride.set(k, !!mastered);

@@ -8830,6 +8830,21 @@ def pdf_api_vocab_mastery_map():
                 out[wl] = {"label": slug, "mastery": round(_jp_mastery(e), 3)}
     except Exception:
         pass
+    if (request.args.get("all") or "") == "1":   # §18.7 本地掌握库:全量 mastered 清单一并下发
+        mset: list = []
+        try:
+            for w, info in (_vocab_idx() or {}).items():
+                if (info.get("label_slug") or "") == "mastered":
+                    mset.append(w)
+        except Exception:
+            pass
+        try:
+            for w, e in (_jp_vocab_load() or {}).items():
+                if _jp_vocab_is_trackable(w) and not _jp_vocab_slug(e):   # trackable 且 slug=None ⇒ 已掌握
+                    mset.append(w.lower())
+        except Exception:
+            pass
+        return jsonify({"ok": True, "map": out, "count": len(out), "mastered": mset})
     return jsonify({"ok": True, "map": out, "count": len(out)})
 
 

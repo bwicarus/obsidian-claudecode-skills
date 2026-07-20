@@ -419,7 +419,15 @@
     _wordPopState.lemma = d.lemma || word;
     _wordPopState.jp = !!d.jp;                                      // 掌握按钮按语言分流(jp/en 不同 store)
     _wordPopState.reading = (d.jp && d.reading) ? d.reading : '';   // 日语:发音念假名读音(保证读对)
-    _wordPopState.mastered = !!d.mastered;
+    _wordPopState.mastered = (function () {
+      // §18.7 本地掌握库优先:SW/跨站缓存里的 dict 响应 mastered 可能陈旧,本地库才是事实源
+      try {
+        var _k = String(d.lemma || d.word || '').toLowerCase();
+        if (window.__vocabOverride && window.__vocabOverride.has(_k)) return window.__vocabOverride.get(_k);
+        if (window.__masteredLocal) return window.__masteredLocal.has(_k);
+      } catch (_) {}
+      return !!d.mastered;
+    })();
     var defLines = (d.translation || d.definition || '(无释义)').split('\n').filter(Boolean).slice(0, 3).map(esc).join('<br>');
     var posTag = (d.pos ? '<span class="wp-pos-tag">' + esc(d.pos) + '</span>' : '');
     var inflectHtml = d.jp ? _jpInflectHtml(d.inflect, word) : _enFormsHtml(d.lemma || word, d.forms, word);
