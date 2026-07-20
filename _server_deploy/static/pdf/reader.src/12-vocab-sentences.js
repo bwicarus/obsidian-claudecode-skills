@@ -540,5 +540,15 @@ async function showSentenceTranslation(text, anchorBtn, preZh) {
 }
 window.showSentenceTranslation = showSentenceTranslation;
 window.refreshVocabUnderlinesForAllPages = refreshVocabUnderlinesForAllPages;
+// §18.5:掌握 toggle 的本地即时应用(0ms)——记覆盖 → 已渲染页用手头 __vocabMarks 本地重画,零网络
+window.applyVocabLocalOverride = function (lemma, mastered) {
+  try {
+    window.__vocabOverride = window.__vocabOverride || new Map();
+    window.__vocabOverride.set(String(lemma || '').toLowerCase(), !!mastered);
+    document.querySelectorAll('.page-wrap[data-page-num]').forEach((pw) => {
+      if (pw.__vocabMarks) { try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {} }
+    });
+  } catch (_) {}
+};
 
 // 找点击位置最近的非空格 char index

@@ -134,6 +134,16 @@ function _clickTranslateEnabled() {
 
 function renderVocabUnderlines(pw, marks) {
   if (!_vocabUnderlineEnabled()) return;
+  // §18.5 local-first:服务端回**全候选**(含已掌握,label_slug='mastered'),渲染时本地过滤;
+  // __vocabOverride = 掌握 toggle 的本地覆盖(0ms 消隐/复现,掌握变更不再重拉 overlay)
+  try {
+    const _ovr = window.__vocabOverride;
+    marks = (marks || []).filter((m) => {
+      const k = String(m.lemma || m.word || '').toLowerCase();
+      const mastered = (_ovr && _ovr.has(k)) ? _ovr.get(k) : (m.label_slug === 'mastered');
+      return !mastered;
+    });
+  } catch (_) {}
   // 确保有 layer（即使 marks 空也要清旧残留）
   let layer = pw.querySelector('.vocab-layer');
   if (!layer && marks && marks.length) {

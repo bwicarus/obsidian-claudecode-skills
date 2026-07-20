@@ -2517,6 +2517,16 @@ function _clickTranslateEnabled() {
 
 function renderVocabUnderlines(pw, marks) {
   if (!_vocabUnderlineEnabled()) return;
+  // §18.5 local-first:服务端回**全候选**(含已掌握,label_slug='mastered'),渲染时本地过滤;
+  // __vocabOverride = 掌握 toggle 的本地覆盖(0ms 消隐/复现,掌握变更不再重拉 overlay)
+  try {
+    const _ovr = window.__vocabOverride;
+    marks = (marks || []).filter((m) => {
+      const k = String(m.lemma || m.word || '').toLowerCase();
+      const mastered = (_ovr && _ovr.has(k)) ? _ovr.get(k) : (m.label_slug === 'mastered');
+      return !mastered;
+    });
+  } catch (_) {}
   // 确保有 layer（即使 marks 空也要清旧残留）
   let layer = pw.querySelector('.vocab-layer');
   if (!layer && marks && marks.length) {
@@ -3390,6 +3400,16 @@ async function showSentenceTranslation(text, anchorBtn, preZh) {
 }
 window.showSentenceTranslation = showSentenceTranslation;
 window.refreshVocabUnderlinesForAllPages = refreshVocabUnderlinesForAllPages;
+// §18.5:掌握 toggle 的本地即时应用(0ms)——记覆盖 → 已渲染页用手头 __vocabMarks 本地重画,零网络
+window.applyVocabLocalOverride = function (lemma, mastered) {
+  try {
+    window.__vocabOverride = window.__vocabOverride || new Map();
+    window.__vocabOverride.set(String(lemma || '').toLowerCase(), !!mastered);
+    document.querySelectorAll('.page-wrap[data-page-num]').forEach((pw) => {
+      if (pw.__vocabMarks) { try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {} }
+    });
+  } catch (_) {}
+};
 
 // 找点击位置最近的非空格 char index
 // 拖选期间要临时禁点的呼吸高亮 .hl（查词/词组/解释）——防拖选经过它们被截获(丢 move/up + 误弹)

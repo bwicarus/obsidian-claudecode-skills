@@ -3373,8 +3373,8 @@ def _build_vocab_marks(chars: list[dict]) -> list[dict]:
             return   # 属于已掌握收藏词组的字 → 整条不画(即便单词本身在生词库)
         if not info or not info.get("label_slug"):
             return
-        if info["label_slug"] == "mastered":
-            return   # 掌握的不画
+        # §18.5 local-first:mastered 也下发(label_slug='mastered'),过滤移到客户端
+        # → overlay 对掌握变更不敏感,标记掌握=前端 0ms 本地消隐,取消=0ms 复现
         # 合并同行 chars 成 rect 列表（pt 坐标）
         rects: list[list[float]] = []
         cur_rect = None
@@ -3552,7 +3552,7 @@ def _build_jp_vocab_marks(chars: list[dict]) -> list[dict]:
             base = (_jp_inflection(surf) or {}).get("base")
             if base:
                 info = idx.get(base.lower())
-        if info and info.get("label_slug") and info["label_slug"] != "mastered":
+        if info and info.get("label_slug"):   # §18.5:mastered 也下发,客户端过滤
             rects = []
             cur = None
             for t in toks:

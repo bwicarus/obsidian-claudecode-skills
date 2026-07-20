@@ -176,7 +176,10 @@
     return 'e' + _expandSeq;   // 兜底:本模块展开序号(仍能挡住本模块内 A→B 重入覆盖)
   }
   // EPUB 暂无字符层下划线;有全局刷新函数才调,否则 no-op(epub 之后接上自动生效)
-  function _refreshUnderlines() { try { if (typeof window.refreshVocabUnderlinesForAllPages === 'function') window.refreshVocabUnderlinesForAllPages(); } catch (_) {} }
+  function _refreshUnderlines(lemma, mastered) {
+    // §18.5:能本地就本地(PDF 提供 applyVocabLocalOverride → 0ms,治"消失又出现");未接宿主回退整页重拉
+    try { if (lemma != null && typeof window.applyVocabLocalOverride === 'function') { window.applyVocabLocalOverride(lemma, mastered); return; } } catch (_) {}
+    try { if (typeof window.refreshVocabUnderlinesForAllPages === 'function') window.refreshVocabUnderlinesForAllPages(); } catch (_) {} }
 
   // ─────────────────────────── 发音(照搬 reader.src/05-nav.js)───────────────────────────
   function _ttsWord(w, lang) {
@@ -495,7 +498,7 @@
     RC.reqJson('POST', url, { word: w, mark: mark }).then(function (d) {
       if (btn) btn.__busy = false;
       if (d && d.ok === false) throw new Error(d.error || 'fail');
-      _refreshUnderlines();   // 服务端权威(掌握列表变了 → 重算下划线)
+      _refreshUnderlines(w, next);   // §18.5:本地覆盖 0ms 应用(服务端已确认,无需重拉)
       try { if (_ctx.onMastered) _ctx.onMastered(w); } catch (_) {}
       RC.toast(next ? '已掌握 100，下划线消失' : '已设为未掌握');
     }).catch(function (err) {
@@ -503,6 +506,7 @@
       // 网络不通(fetch TypeError)且有 outbox → local-first:保持乐观态,入队恢复后自动补投
       if (RC.outbox && err && err.name === 'TypeError') {
         RC.outbox.send('vocab', url + '|' + w, url, { word: w, mark: mark });
+        _refreshUnderlines(w, next);   // 离线也本地生效
         RC.toast(next ? '已掌握(离线,恢复后自动同步)' : '已取消(离线,恢复后自动同步)');
         return;
       }
