@@ -1023,9 +1023,14 @@ def _task_anki(tid, params, ctx, base):
             _f = (c.get("cloze") or c.get("front") or "").strip().replace("\n", " ")[:60]
             _b = (c.get("back") or "").strip().replace("\n", " ")[:40]
             _brief.append(_f + ((" → " + _b) if _b else ""))
+        _cidg = ""
+        try:
+            _cidg = _pdf_mod()._entity_reg_cards(cards, {"src": link[:120]})   # 统一编号协议:全局卡编号
+        except Exception:
+            pass
         _vtask_set(tid, status="done", speak=f"做好了{len(cards)}张卡片草稿，在卡片上确认后入库",
                    steps=list(_steps),
-                   result={"kind": "anki", "deferred": True, "n": len(cards), "cards_brief": _brief,
+                   result={"kind": "anki", "deferred": True, "id": _cidg, "n": len(cards), "cards_brief": _brief,
                            "deck": out.get("anki_deck") or "QA", "cards": cards})
     elif out.get("ok"):
         _vtask_set(tid, status="error", error="AI 没生成卡片(内容可能不适合制卡)")

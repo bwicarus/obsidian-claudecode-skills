@@ -6951,6 +6951,65 @@ def pdf_api_asset(aid):
     return jsonify({"ok": False}), 404
 
 
+def _entity_reg_cards(cards: list, meta: dict | None = None) -> str:
+    """卡片批 → 全局编号 card_xxxxxx(用户设计 2026-07-21 统一编号协议:一张卡永远一个编号,
+    浮层/侧栏/便签/收藏夹/#id 引用全按编号取同一状态对象——"一张卡两种状态"从根上消失)。
+    存进同一 registry(kind='cards',data=卡数组,states=各卡 {_st,_nid,_next} 由前端回写)。"""
+    with _ASSET_LOCK:
+        d = _asset_load()
+        import uuid as _u3
+        aid = "card_" + _u3.uuid4().hex[:6]
+        e = {"kind": "cards", "url": "", "ts": int(__import__("time").time()), "local": "",
+             "data": [{k: c.get(k) for k in ("type", "front", "back", "cloze")} for c in (cards or [])],
+             "states": {}}
+        for k, v in (meta or {}).items():
+            if v:
+                e[k] = v
+        d[aid] = e
+        _asset_save(d)
+        return aid
+
+
+@bp.route("/api/entity/<aid>", methods=["GET", "PATCH"])
+def pdf_api_entity(aid):
+    """统一编号 resolve(用户设计:所有工具结果一套 保存/引用/渲染 规则)。
+    GET → {ok,id,kind,...}:cards→卡数组+states(前端 mountState 渲**活卡**);img/vid→url/meta。
+    PATCH {idx,state:{_st,_nid,_next}} → 卡状态回写(入库/评分后调;跨会话/跨宿主同一状态)。"""
+    import re as _re_e
+    if not _re_e.fullmatch(r"[a-z]{2,4}_[a-f0-9]{4,12}", aid or ""):
+        return jsonify({"ok": False}), 404
+    if request.method == "PATCH":
+        b = request.get_json(silent=True) or {}
+        try:
+            idx = int(b.get("idx") or 0)
+        except Exception:
+            idx = 0
+        stv = b.get("state") if isinstance(b.get("state"), dict) else None
+        if stv is None:
+            return jsonify({"ok": False, "error": "缺 state"}), 400
+        with _ASSET_LOCK:
+            d = _asset_load()
+            e = d.get(aid)
+            if not e or e.get("kind") != "cards":
+                return jsonify({"ok": False, "error": "无此卡片编号"}), 404
+            e.setdefault("states", {})[str(idx)] = {k: stv.get(k) for k in ("_st", "_nid", "_next", "_showBack") if k in stv}
+            _asset_save(d)
+        return jsonify({"ok": True})
+    e = _asset_load().get(aid)
+    if not e:
+        return jsonify({"ok": False, "error": "无此编号"}), 404
+    out = {"ok": True, "id": aid, "kind": e.get("kind")}
+    if e.get("kind") == "cards":
+        out["cards"] = e.get("data") or []
+        out["states"] = e.get("states") or {}
+    else:
+        out["url"] = "/pdf/api/asset/" + aid
+        for k in ("concept", "source", "matched_query", "page_url"):
+            if e.get(k):
+                out[k] = e[k]
+    return jsonify(out)
+
+
 def _asset_ids_in(text: str) -> list:
     import re as _re_a
     return _re_a.findall(r"/pdf/api/asset/([a-z]{2,4}_[a-f0-9]{4,12})", str(text or ""))

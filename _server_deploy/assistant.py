@@ -2228,8 +2228,13 @@ def _t_make_anki(args, ctx):
         _f = (c.get("cloze") or c.get("front") or "").strip().replace("\n", " ")[:60]
         _b = (c.get("back") or "").strip().replace("\n", " ")[:40]
         brief.append(_f + ((" → " + _b) if _b else ""))
-    return {"ok": True, "n": n, "cards_brief": brief, "cards": cards, "deferred": True,
-            "speak": f"做好了{n}张卡片草稿，你在卡片上确认后入库", "note": f"生成了{n}张卡片草稿(等你确认入库)"}
+    cid_g = ""
+    try:   # 统一编号协议(用户设计):卡片批发全局编号 card_xxx——所有宿主同编号取同一状态;AI 之后可 #编号 引用(前端渲活卡)
+        cid_g = _pdf()._entity_reg_cards(cards, {"src": src, "req": (req or "")[:120]})
+    except Exception:
+        pass
+    return {"ok": True, "id": cid_g, "n": n, "cards_brief": brief, "cards": cards, "deferred": True,
+            "speak": f"做好了{n}张卡片草稿，你在卡片上确认后入库", "note": f"生成了{n}张卡片草稿(编号 {cid_g},等你确认入库;之后可用 #{cid_g} 引用这批卡)"}
 
 
 def _t_make_note(args, ctx):

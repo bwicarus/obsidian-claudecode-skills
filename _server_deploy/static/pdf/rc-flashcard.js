@@ -189,12 +189,21 @@
       .then(function (r) { return r.json(); })
       .then(function (d) {
         if (!d || d.ok === false) { c._st = 'draft'; updateSlide(container, i); broadcast(st.gid, i, container); RC.toast && RC.toast('入库失败:' + ((d && d.error) || '?')); }
-        else { c._nid = (d.note_ids || [])[0]; broadcast(st.gid, i, container); RC.toast && RC.toast('✓ 已入 Anki,可直接复习这张'); }
+        else { c._nid = (d.note_ids || [])[0]; broadcast(st.gid, i, container); _stateSync(st, i); RC.toast && RC.toast('✓ 已入 Anki,可直接复习这张'); }
       })
       .catch(function (e) {
         if (RC.outbox && e && e.name === 'TypeError') { RC.outbox.send('fcadd', aid, '/pdf/api/anki-add-cards', payload); RC.toast && RC.toast('离线:入库已入队,恢复后自动同步'); }
         else { c._st = 'draft'; updateSlide(container, i); RC.toast && RC.toast('入库失败'); }
       });
+  }
+  function _stateSync(st, i) {
+    // 统一编号协议(用户设计 2026-07-21):gid 是全局卡编号(card_)时把卡状态回写服务端注册表——
+    //   刷新/#id 引用/其它宿主 mountState 时还原,"一张卡两种状态"跨会话也消失。fire-and-forget+outbox 兜。
+    if (!st || !/^card_/.test(st.gid || '')) return;
+    var c = st.cards[i]; if (!c) return;
+    var body = { idx: i, state: { _st: c._st, _nid: c._nid, _next: c._next } };
+    fetch('/pdf/api/entity/' + st.gid, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      .catch(function (e) { try { if (RC.outbox && e && e.name === 'TypeError') RC.outbox.send('entst', st.gid + ':' + i, '/pdf/api/entity/' + st.gid, body, 'PATCH'); } catch (e2) {} });
   }
   function dockToShell(container, st, c) {
     // ★ 复用 vc-card 外壳三态(圆/长条/方块):评分后把倒计时写进长条摘要 .vc-card-sum,单卡自动收成长条;
@@ -215,7 +224,7 @@
     c._st = 'done'; updateSlide(container, i); broadcast(st.gid, i, container);
     fetch('/pdf/api/review-answer', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       .then(function (r) { return r.json(); })
-      .then(function (d) { if (d && d.ok) { c._next = d.next || {}; updateSlide(container, i); dockToShell(container, st, c); broadcast(st.gid, i, container); } })
+      .then(function (d) { if (d && d.ok) { c._next = d.next || {}; updateSlide(container, i); dockToShell(container, st, c); broadcast(st.gid, i, container); _stateSync(st, i); } })
       .catch(function (e) { if (RC.outbox && e && e.name === 'TypeError') RC.outbox.send('rev', aid, '/pdf/api/review-answer', body); });
   }
   RC.flashcard = { mountDrafts: mountDrafts, mountPreview: mountPreview, mountState: mountState, pinToPage: pinToPage };

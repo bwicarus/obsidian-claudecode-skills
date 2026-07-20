@@ -685,7 +685,7 @@
           if (_sr && _sr.cards && _sr.cards.length) { _sc = _sr.cards; _sdrf = (_sr.deferred !== false); } } catch (e) {}
     if (_sc) {
       RC.toolChip.done(c, { summary: '生成了 ' + _sc.length + ' 张卡片草稿' });
-      var _gid = 'fcg_' + RC.voiceCard.mkCid();   // 双实例同 gid:侧栏/浮层两份卡状态联动
+      var _gid = (_sr.id && /^card_/.test(_sr.id)) ? _sr.id : ('fcg_' + RC.voiceCard.mkCid());   // 统一编号协议:优先服务端全局卡编号(所有宿主/跨会话同一状态);无则本地 gid
       var _stid = window.__asstVoiceTid && window.__asstVoiceTid();
       if (_stid && RC.turnCard) { RC.turnCard.idle(_stid); RC.turnCard.addPart(_stid, { kind: 'cards', cards: _sc, draft: _sdrf, gid: _gid }); }   // 侧栏
       if (RC.voiceCard && RC.flashcard) {   // 字幕浮层镜像(天气卡壳)+ 长按选中
@@ -712,7 +712,7 @@
         try {
           if (stt === 'done' && d && d.result && d.result.cards && d.result.cards.length) {
             var _cds = d.result.cards, _drf = !!d.result.deferred;
-            var _gid2 = 'fcg_' + RC.voiceCard.mkCid();
+            var _gid2 = (d.result.id && /^card_/.test(d.result.id)) ? d.result.id : ('fcg_' + RC.voiceCard.mkCid());   // 统一编号协议
             if (_turnTid && RC.turnCard) RC.turnCard.addPart(_turnTid, { kind: 'cards', cards: _cds, draft: _drf, gid: _gid2 });   // 侧栏:工具卡内
             // ④ 字幕模式浮层镜像(天气卡双宿主:侧栏开→容器隐藏、关侧栏=字幕模式浮现)+ 长按独立选中
             if (RC.voiceCard && RC.flashcard) {

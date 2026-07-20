@@ -1,4 +1,26 @@
-# 资产注册表(统一编号规则,2026-07-21 用户设计)
+# 统一实体编号协议(资产+卡片+…,2026-07-21 用户设计定稿)
+
+> 终局形态(用户拍板):**所有工具结果一套 保存/引用/渲染 规则**——统一编号保存{id→内容+元数据+渲染器kind},
+> 工具回报=编号+brief,前端见 #编号 就地渲染;**引用出来的卡=活的**(与新卡全功能等同)。
+
+## P1 已上线:卡片入全局编号
+
+- `_entity_reg_cards(cards, meta) → card_xxxxxx`(pdf_reader;registry 同表 kind='cards',data=卡数组,states=各卡状态)
+- make_anki(assistant/voice 双路)返回加 `id`;note 带"编号 card_xxx,可用 #编号 引用"
+- **`GET/PATCH /pdf/api/entity/<id>`** 统一 resolve:cards→卡数组+states;img/vid→url+元数据;PATCH {idx,state} 卡状态回写
+- 前端:制卡卡 gid=全局编号(_chipEnd 两处;所有宿主同编号=rc-flashcard._groups 共享同一状态对象);
+  入库/评分后 `_stateSync` PATCH 回写(离线 outbox 'entst' PATCH 兜);
+  `_assetInline` 扩 `#card_hex` → fetch entity → `mountState(cards+states 合并, gid=编号)` = **对话里渲出活卡**
+  (可翻面/评分/入库),重渲/刷新/他处引用一律还原到同一状态 → "一张卡两种状态"从根上消失
+- E2E:真制卡→card_253720→#编号渲活卡→评分→服务端 states {_st:done,_nid}→第二容器重渲直接"已复习"态
+
+## P2(待做)
+
+- 天气/新闻/视频结构卡入同一编号空间(#wthr_/#vid_,renderInfoCard 分发)
+- recall 统一入口按前缀分流;创造物 c_ id 规整进同一语法
+- 便签 card.gid 已存编号→重挂时也走 entity states(便签宿主状态还原)
+- states 与 anki-add-cards 幂等键(aid)联动;未使用条目 TTL 清理
+
 
 > 用户拍板:AI 上下文里不传图片 URL/图片本身——每张图发**编号**,{编号,URL,元数据} 服务端保存;
 > AI 用编号引用,程序自动查询翻译;**贴到页面时才实际下载**落盘,之后打开不再拉外链;
