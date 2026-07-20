@@ -151,19 +151,21 @@
     var s = _state; if (!s || !s.text) return;
     var t = s.text;
     var has = _favSet.has(t);
-    if (btn) btn.disabled = true;
+    var nowFav = !has;
+    // local-first:本地先翻集合+画面(与 15-phrase-wordpop::_phraseFav 同步改,2026-07-20)
+    if (nowFav) _favSet.add(t); else _favSet['delete'](t);
+    if (btn) { btn.disabled = false; btn.textContent = nowFav ? '★ 已收藏' : '☆ 收藏为词组'; btn.classList.toggle('wp-anki', nowFav); }
+    RC.toast(nowFav ? '已收藏，之后会作为一个词分词' : '已取消收藏');
+    try { if (_ctx.onFav) _ctx.onFav(t, nowFav); } catch (_) {}
     fetch('/pdf/api/phrases', {
       method: has ? 'DELETE' : 'POST',
       headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: t })
     }).then(function (r) { return r.json(); }).then(function (d) {
-      if (d && d.ok) {
-        _favSet = new Set(d.phrases || []);
-        var nowFav = _favSet.has(t);
-        if (btn) { btn.disabled = false; btn.textContent = nowFav ? '★ 已收藏' : '☆ 收藏为词组'; btn.classList.toggle('wp-anki', nowFav); }
-        RC.toast(nowFav ? '已收藏，之后会作为一个词分词' : '已取消收藏');
-        try { if (_ctx.onFav) _ctx.onFav(t, nowFav); } catch (_) {}
-      } else if (btn) { btn.disabled = false; }
-    }).catch(function () { if (btn) btn.disabled = false; });
+      if (d && d.ok) _favSet = new Set(d.phrases || []);
+    }).catch(function (e) {
+      if (window.RC && RC.outbox && e && e.name === 'TypeError')
+        RC.outbox.send('phrasefav', t, '/pdf/api/phrases', { text: t }, has ? 'DELETE' : 'POST');
+    });
   };
   // ☆ 标记掌握(照搬 15-phrase-wordpop.js::_wordPopMaster 的 phrase 分支):POST /pdf/api/phrase-mark。
   // PDF 此处有「乐观去下划线 + 失败回滚」(字符层专属) → reflow 退化成「POST + onMastered 刷新」。

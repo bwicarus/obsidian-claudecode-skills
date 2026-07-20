@@ -4751,20 +4751,23 @@ window._phraseFav = (btn) => {
   const s = _wordPopState; if (!s || !s.word) return;
   const t = s.word;
   const has = _phraseFavSet.has(t);
-  if (btn) btn.disabled = true;
+  const nowFav = !has;
+  // ① local-first(2026-07-20 用户实锤"点收藏要等 Pi"):本地先翻集合+画面,零等待
+  if (nowFav) _phraseFavSet.add(t); else _phraseFavSet.delete(t);
+  if (btn) { btn.disabled = false; btn.textContent = nowFav ? '★ 已收藏' : '☆ 收藏为词组'; btn.classList.toggle('wp-anki', nowFav); }
+  _toast?.(nowFav ? '已收藏，之后会作为一个词分词' : '已取消收藏');
+  if (nowFav) _removePhraseHighlight(t);   // 收藏后该词组变成划线(分词单元),只消除同文本的查询高亮(不动别的并存高亮)
+  refreshCharsWForAllPages();   // 让分词合并生效(需服务端重分词;离线时此步静默失败,恢复后自然刷新)
+  // ② 后台同步:成功用服务端全量校正;网络错 → outbox 入队(POST/DELETE 均幂等)
   fetch('/pdf/api/phrases', {
     method: has ? 'DELETE' : 'POST',
     headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text: t}),
   }).then(r => r.json()).then(d => {
-    if (d.ok) {
-      _phraseFavSet = new Set(d.phrases || []);
-      const nowFav = _phraseFavSet.has(t);
-      if (btn) { btn.disabled = false; btn.textContent = nowFav ? '★ 已收藏' : '☆ 收藏为词组'; btn.classList.toggle('wp-anki', nowFav); }
-      _toast?.(nowFav ? '已收藏，之后会作为一个词分词' : '已取消收藏');
-      if (nowFav) _removePhraseHighlight(t);   // 收藏后该词组变成划线(分词单元),只消除同文本的查询高亮(不动别的并存高亮)
-      refreshCharsWForAllPages();   // 让分词合并立即生效
-    } else if (btn) { btn.disabled = false; }
-  }).catch(() => { if (btn) btn.disabled = false; });
+    if (d && d.ok) _phraseFavSet = new Set(d.phrases || []);
+  }).catch((e) => {
+    if (window.RC && RC.outbox && e && e.name === 'TypeError')
+      RC.outbox.send('phrasefav', t, '/pdf/api/phrases', { text: t }, has ? 'DELETE' : 'POST');
+  });
 };
 // 收藏/取消后重拉各已渲染页 chars 的 w（原地更新，不重建 char-layer）→ 单击立即按新词组边界选
 // generation 守卫:快速收藏→立即取消两次调用交错时,旧轮迟到的响应不准写回(只让最新一轮落地);
