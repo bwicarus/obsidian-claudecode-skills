@@ -83,7 +83,15 @@ __vcInfoCardEl(rc-voicecall:1256)是静态渲染器无编辑态;renderInfo(1270)
 | 草稿不入库 | **需服务端改造**:snippets-to 加 `defer_add`(只生成返回卡草稿,不 addNotes);
   确认后走新端点 `anki-add-cards`(批量、幂等 c_ id)——outbox/攒批天然兼容 |
 
-## 分批实施计划
+## 分批实施进度(2026-07-21)
+- ✅ **B1 状态机+单卡**:草稿[删除/入库]→入库直进Anki→学习态四档→收起倒计时(defer_add服务端+anki-add-cards幂等)
+- ✅ **天气卡形态+字幕双宿主**:_cardPush加mount回调承载状态机卡;侧栏turnCard+字幕浮层镜像+pinBind选中;bare无双壳
+- ✅ **B2 多卡 scroll-snap 中线吸附左右滑动**(替代‹›按钮):.fc-track横向滑轨+圆点指示+滚动跟踪idx+就地重渲不跳位。E2E:3卡滑轨/snap:x mandatory/无箭头/编辑不跳位
+- 🔲 **B3 收纳链**:collapsed长条+倒计时已有;缺**圆球**态(卡→长条→圆球循环,接现有vc-card三态收纳语义)
+- 🔲 **B4 拖出钉页**:圆球抓手拖拽,便签式内容坐标锚定(rc-stickynote管线),侧栏+收藏夹两来源
+- 🔲 双实例状态同步:侧栏/浮层两份rc-flashcard独立,切宿主不同步→按cid联动
+
+## 分批实施计划(原始)
 
 1. **B1 状态机+单卡**:defer_add 服务端改造;卡草稿→编辑→撤销→完成→学习(翻面设置)→确认入库;turnCard 样式套用
 2. **B2 多卡滑动**:scroll-snap 容器;字幕模式/侧边栏共用同一卡实例
