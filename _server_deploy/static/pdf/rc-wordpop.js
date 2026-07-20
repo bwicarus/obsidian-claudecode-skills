@@ -414,7 +414,14 @@
   function _renderWordPop(word, ctx, d, rect) {
     var pop = _ensurePop();
     _wordPopState = { word: word, ctx: ctx || '', lemma: word };
-    if (!d || !d.ok) { pop.style.display = 'none'; window._expandWordFull(word, ctx); return; }   // ecdict 没有 → 直接完整
+    if (!d || !d.ok) {
+      if (_isJaWord(word)) {
+        // 词典无此词(常见=复合词/专有名词,2026-07-21 用户实锤「豆腐汁」):不再自动糊 AI 大框——
+        // 合成兜底词条走标准小框(掌握/语法/发音/定位全套白拿);「展开完整字典」→ AI 讲解成为用户主动动作
+        d = { ok: true, jp: true, word: word, lemma: word, forms: [],
+              translation: '', definition: '暂无词典释义(可能是复合词/专有名词)。点此展开,让 AI 结合上下文讲解', mastered: false };
+      } else { pop.style.display = 'none'; window._expandWordFull(word, ctx); return; }   // 英文 ecdict 没有 → 三源完整(原行为)
+    }
     try { _dictCache.set(word, d); if (_dictCache.size > 600) _dictCache.delete(_dictCache.keys().next().value); } catch (_) {}
     _wordPopState.lemma = d.lemma || word;
     _wordPopState.jp = !!d.jp;                                      // 掌握按钮按语言分流(jp/en 不同 store)
@@ -425,8 +432,8 @@
       if (!navigator.onLine && window.RC && RC.outbox) {
         var _eid = 'lk_' + Array.from(crypto.getRandomValues(new Uint8Array(8))).map(function (b) { return b.toString(16).padStart(2, '0'); }).join('');
         RC.outbox.send('lkevt', _eid, '/pdf/api/lookup-event',
-          { id: _eid, word: d.word || s.word, lemma: d.lemma || '', jp: !!d.jp,
-            file: (s.file || ''), page: (s.page || 0), context: (s.ctx || '').slice(0, 1500) });
+          { id: _eid, word: d.word || word, lemma: d.lemma || '', jp: !!d.jp,
+            file: (_ctx.file || ''), page: (_ctx.page || 0), context: (_ctx.ctx || '').slice(0, 1500) });
       }
     } catch (_) {}
     _wordPopState.mastered = (function () {

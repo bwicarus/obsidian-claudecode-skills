@@ -62,7 +62,7 @@
       _save(m);
       // 攒批窗口:首个待传改动起 5s 后统一发(窗口内同键反复改=只发终态);≥20 条提前发
       if (Object.keys(m).length >= 20) { if (RC.outbox._winT) { clearTimeout(RC.outbox._winT); RC.outbox._winT = null; } setTimeout(flush, 50); }
-      else if (!RC.outbox._winT) RC.outbox._winT = setTimeout(function () { RC.outbox._winT = null; flush(); }, 5000);
+      else if (!RC.outbox._winT) RC.outbox._winT = setTimeout(function () { RC.outbox._winT = null; flush(); }, 30000);   // 30s 窗口(2026-07-21 用户:5s 太频;队列落盘+离场 beacon 兜底,拉长零风险)
     },
     flush: flush,
     size: function () { return Object.keys(_load()).length; }
@@ -104,6 +104,6 @@
     });
   };
   window.addEventListener('online', function () { setTimeout(flush, 800); });
-  setInterval(function () { if (RC.outbox.size()) flush(); }, 15000);
+  setInterval(function () { if (RC.outbox.size()) flush(); }, 60000);   // 心跳对齐 30s 窗口(只兜卡住的队)
   setTimeout(flush, 2500);   // 开页补投上次遗留
 })();

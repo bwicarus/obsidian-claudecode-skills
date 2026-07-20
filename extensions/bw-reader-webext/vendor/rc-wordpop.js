@@ -178,7 +178,10 @@
     return 'e' + _expandSeq;   // 兜底:本模块展开序号(仍能挡住本模块内 A→B 重入覆盖)
   }
   // EPUB 暂无字符层下划线;有全局刷新函数才调,否则 no-op(epub 之后接上自动生效)
-  function _refreshUnderlines() { try { if (typeof window.refreshVocabUnderlinesForAllPages === 'function') window.refreshVocabUnderlinesForAllPages(); } catch (_) {} }
+  function _refreshUnderlines(lemma, mastered) {
+    // §18.5:能本地就本地(PDF 提供 applyVocabLocalOverride → 0ms,治"消失又出现");未接宿主回退整页重拉
+    try { if (lemma != null && typeof window.applyVocabLocalOverride === 'function') { window.applyVocabLocalOverride(lemma, mastered); return; } } catch (_) {}
+    try { if (typeof window.refreshVocabUnderlinesForAllPages === 'function') window.refreshVocabUnderlinesForAllPages(); } catch (_) {} }
 
   // ─────────────────────────── 发音(照搬 reader.src/05-nav.js)───────────────────────────
   function _ttsWord(w, lang) {
@@ -413,12 +416,37 @@
   function _renderWordPop(word, ctx, d, rect) {
     var pop = _ensurePop();
     _wordPopState = { word: word, ctx: ctx || '', lemma: word };
-    if (!d || !d.ok) { pop.style.display = 'none'; window._expandWordFull(word, ctx); return; }   // ecdict 没有 → 直接完整
+    if (!d || !d.ok) {
+      if (_isJaWord(word)) {
+        // 词典无此词(常见=复合词/专有名词,2026-07-21 用户实锤「豆腐汁」):不再自动糊 AI 大框——
+        // 合成兜底词条走标准小框(掌握/语法/发音/定位全套白拿);「展开完整字典」→ AI 讲解成为用户主动动作
+        d = { ok: true, jp: true, word: word, lemma: word, forms: [],
+              translation: '', definition: '暂无词典释义(可能是复合词/专有名词)。点此展开,让 AI 结合上下文讲解', mastered: false };
+      } else { pop.style.display = 'none'; window._expandWordFull(word, ctx); return; }   // 英文 ecdict 没有 → 三源完整(原行为)
+    }
     try { _dictCache.set(word, d); if (_dictCache.size > 600) _dictCache.delete(_dictCache.keys().next().value); } catch (_) {}
     _wordPopState.lemma = d.lemma || word;
     _wordPopState.jp = !!d.jp;                                      // 掌握按钮按语言分流(jp/en 不同 store)
     _wordPopState.reading = (d.jp && d.reading) ? d.reading : '';   // 日语:发音念假名读音(保证读对)
-    _wordPopState.mastered = !!d.mastered;
+    // 离线查词学习信号(2026-07-21):在线时 SWR 后台真实请求自然触发服务端记录;
+    // 仅离线(navigator.onLine=false 仍从本地缓存拿到词)时入 outbox,恢复后补报(端点幂等)。
+    try {
+      if (!navigator.onLine && window.RC && RC.outbox) {
+        var _eid = 'lk_' + Array.from(crypto.getRandomValues(new Uint8Array(8))).map(function (b) { return b.toString(16).padStart(2, '0'); }).join('');
+        RC.outbox.send('lkevt', _eid, '/pdf/api/lookup-event',
+          { id: _eid, word: d.word || word, lemma: d.lemma || '', jp: !!d.jp,
+            file: (_ctx.file || ''), page: (_ctx.page || 0), context: (_ctx.ctx || '').slice(0, 1500) });
+      }
+    } catch (_) {}
+    _wordPopState.mastered = (function () {
+      // §18.7 本地掌握库优先:SW/跨站缓存里的 dict 响应 mastered 可能陈旧,本地库才是事实源
+      try {
+        var _k = String(d.lemma || d.word || '').toLowerCase();
+        if (window.__vocabOverride && window.__vocabOverride.has(_k)) return window.__vocabOverride.get(_k);
+        if (window.__masteredLocal) return window.__masteredLocal.has(_k);
+      } catch (_) {}
+      return !!d.mastered;
+    })();
     var defLines = (d.translation || d.definition || '(无释义)').split('\n').filter(Boolean).slice(0, 3).map(esc).join('<br>');
     var posTag = (d.pos ? '<span class="wp-pos-tag">' + esc(d.pos) + '</span>' : '');
     var inflectHtml = d.jp ? _jpInflectHtml(d.inflect, word) : _enFormsHtml(d.lemma || word, d.forms, word);
@@ -497,7 +525,7 @@
     RC.reqJson('POST', url, { word: w, mark: mark }).then(function (d) {
       if (btn) btn.__busy = false;
       if (d && d.ok === false) throw new Error(d.error || 'fail');
-      _refreshUnderlines();   // 服务端权威(掌握列表变了 → 重算下划线)
+      _refreshUnderlines(w, next);   // §18.5:本地覆盖 0ms 应用(服务端已确认,无需重拉)
       try { if (_ctx.onMastered) _ctx.onMastered(w); } catch (_) {}
       RC.toast(next ? '已掌握 100，下划线消失' : '已设为未掌握');
     }).catch(function (err) {
@@ -505,6 +533,7 @@
       // 网络不通(fetch TypeError)且有 outbox → local-first:保持乐观态,入队恢复后自动补投
       if (RC.outbox && err && err.name === 'TypeError') {
         RC.outbox.send('vocab', url + '|' + w, url, { word: w, mark: mark });
+        _refreshUnderlines(w, next);   // 离线也本地生效
         RC.toast(next ? '已掌握(离线,恢复后自动同步)' : '已取消(离线,恢复后自动同步)');
         return;
       }
