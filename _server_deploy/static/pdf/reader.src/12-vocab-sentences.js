@@ -540,11 +540,33 @@ async function showSentenceTranslation(text, anchorBtn, preZh) {
 }
 window.showSentenceTranslation = showSentenceTranslation;
 window.refreshVocabUnderlinesForAllPages = refreshVocabUnderlinesForAllPages;
-// §18.5:掌握 toggle 的本地即时应用(0ms)——记覆盖 → 已渲染页用手头 __vocabMarks 本地重画,零网络
+// §18.5:掌握 toggle 的本地即时应用(0ms)——记覆盖 → 已渲染页用手头 __vocabMarks 本地重画,零网络。
+// §18.6(用户指出"应先存本地"):覆盖表**持久化** localStorage(离线标记后刷新不丢),48h TTL
+// (防多设备冲突:别处改了掌握态,本机陈旧覆盖最多赢 48h);服务端数据追上后由渲染层自动收敛清理。
+const _VOVR_KEY = 'vocab-override-v1';
+window.__vocabOverride = (() => {
+  const m = new Map();
+  try {
+    const raw = JSON.parse(localStorage.getItem(_VOVR_KEY) || '{}');
+    const now = Date.now();
+    for (const k in raw) { if (raw[k] && (now - (raw[k].ts || 0)) < 48 * 3600 * 1000) m.set(k, !!raw[k].v); }
+  } catch (_) {}
+  return m;
+})();
+window.__vocabOverridePersist = function () {
+  try {
+    const out = {};
+    window.__vocabOverride.forEach((v, k) => { out[k] = { v: v, ts: (window.__vocabOverrideTs && __vocabOverrideTs.get(k)) || Date.now() }; });
+    localStorage.setItem(_VOVR_KEY, JSON.stringify(out));
+  } catch (_) {}
+};
 window.applyVocabLocalOverride = function (lemma, mastered) {
   try {
-    window.__vocabOverride = window.__vocabOverride || new Map();
-    window.__vocabOverride.set(String(lemma || '').toLowerCase(), !!mastered);
+    const k = String(lemma || '').toLowerCase();
+    window.__vocabOverrideTs = window.__vocabOverrideTs || new Map();
+    __vocabOverrideTs.set(k, Date.now());
+    window.__vocabOverride.set(k, !!mastered);
+    window.__vocabOverridePersist();
     document.querySelectorAll('.page-wrap[data-page-num]').forEach((pw) => {
       if (pw.__vocabMarks) { try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {} }
     });
