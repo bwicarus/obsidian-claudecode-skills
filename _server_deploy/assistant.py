@@ -2209,7 +2209,13 @@ def _t_make_anki(args, ctx):
     if not cards:
         return {"error": "AI 没生成卡片(内容可能不适合制卡)"}
     n = len(cards)
-    return {"ok": True, "n": n, "cards": cards, "deferred": True,
+    brief = []   # 每张卡一行大意:喂回语音模型/recentTools/下一个制卡 CLI 都吃它(全文只给 UI;
+    #   截断喂回残 JSON=「AI 不知道自己做过什么卡」的根因,用户 2026-07-20 实锤)
+    for c in cards[:12]:
+        _f = (c.get("cloze") or c.get("front") or "").strip().replace("\n", " ")[:60]
+        _b = (c.get("back") or "").strip().replace("\n", " ")[:40]
+        brief.append(_f + ((" → " + _b) if _b else ""))
+    return {"ok": True, "n": n, "cards_brief": brief, "cards": cards, "deferred": True,
             "speak": f"做好了{n}张卡片草稿，你在卡片上确认后入库", "note": f"生成了{n}张卡片草稿(等你确认入库)"}
 
 
@@ -6496,6 +6502,27 @@ def assistant_history():
     return jsonify({"ok": True, "messages": _convo_load(session["user_id"])[-100:]})
 
 
+@bp.route("/voice-page-text", methods=["GET"])
+def assistant_voice_page_text():
+    """WebRTC 语音路的页文本兜底(用户实锤:扫描书/图片模式前端 pendText 采不到可见文本 →
+    通话 AI 不知道页面内容)。服务端 _page_text(OCR 文字层 + 钉入便签/卡片注入都在)截 1500,
+    前端缓存进 _rtc._ptCache,用户开口时随 _rtcFlushCtx 注入。"""
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    f = (request.args.get("file") or "").strip()
+    try:
+        pg = int(request.args.get("page") or 0)
+    except Exception:
+        pg = 0
+    if not f or not pg:
+        return jsonify({"ok": True, "text": ""})
+    try:
+        t = (_page_text(f, pg) or "")[:1500]
+    except Exception:
+        t = ""
+    return jsonify({"ok": True, "text": t})
+
+
 @bp.route("/voice-ctx", methods=["GET", "POST"])
 def assistant_voice_ctx():
     """语音伴读(S2S)的**直塞上下文**:圈画文字 + 本页插图离线描述——纯文本、现成可得的内容
@@ -7039,6 +7066,8 @@ def _build_rtc_session(uid, file_rel, page):
         _name = file_rel.rsplit("/", 1)[-1]
         parts.append(f"他正在读的书:《{_name}》(位置和页面内容会在他提问时以 system 消息给你;需要更多就调 read_page)。")
     parts.append(_route_line)
+    parts.append("**指代铁律**:他用『这个/这里/其他的/剩下的/把它…』这类指代而没点名对象时,默认指**当前页面内容或刚才工具的产出**;"
+                 "拿不准就先 read_page / recall_creation 看一眼再回应,别当成闲聊、别凭空猜。")
     parts.append("**页面内容铁律**:他问『这页写了什么/这页讲什么』而上下文里没有当前页文本时,永远**先调 read_page**;"
                  "回答『我看不到页面』或让他把内容/截图发给你,都是错误行为——你有工具,自己去看。")
     parts.append("页面实时状态(选中/手写笔迹)和翻页后的新页面内容会以 system 消息出现在对话里,永远以最新一条为准;"

@@ -2721,11 +2721,25 @@
     fetch('/api/assistant/creations-brief').then(function (r) { return r.json(); })
       .then(function (d) { if (d && d.ok) _rtc.creLine = d.line || ''; }).catch(function () {});
   }
+  function _rtcFetchPageText(pk) {   // 页文本兜底拉取(去重:同 key 只飞一发)
+    if (_rtc._ptBusy === pk) return;
+    _rtc._ptBusy = pk;
+    var _f = pk.slice(0, pk.lastIndexOf(':')), _p = pk.slice(pk.lastIndexOf(':') + 1);
+    fetch('/api/assistant/voice-page-text?file=' + encodeURIComponent(_f) + '&page=' + encodeURIComponent(_p))
+      .then(function (r) { return r.json(); })
+      .then(function (d) { _rtc._ptBusy = ''; if (d && d.ok && d.text) _rtc._ptCache = { k: pk, t: d.text }; })
+      .catch(function () { _rtc._ptBusy = ''; });
+  }
   function _rtcFlushCtx() {   // ㊵ 拉模式核心:用户开口/发文字的瞬间才注入"他正看着的位置+可见内容"(同状态去重)
     // 127:注入走**前端自己的 data channel**(浏览器→OpenAI 一跳)。绕 relay 的旧路 = OpenAI→Pi→OpenAI
     //   跨海往返,短问题时注入常赶不上 VAD 判完,模型只好凭空答(截图里"谁"那次就是)。
     try {
       var vt = _rtc.pendText || '';
+      if (!vt && _rtc.ctxFile && _rtc.ctxPage) {   // 扫描书/图片模式:前端可见文本采不到(用户实锤'AI 不知道页面内容'根因)
+        var _pk = _rtc.ctxFile + ':' + _rtc.ctxPage;   //   → 服务端 _page_text 兜底(OCR 文字层+钉入便签/卡片注入都在)
+        if (_rtc._ptCache && _rtc._ptCache.k === _pk) vt = _rtc._ptCache.t || '';
+        else _rtcFetchPageText(_pk);   // 异步填 cache:本轮可能赶不上(instructions 指代铁律兜),下一轮开口注入
+      }
       // ★创造物库告知(与文字侧同一个源;替代旧 __lastCheckResult 专线):只注入告知+句柄,内容 recall 取。
       _rtcCreFetch();
       var cre = (_rtc.creLine || '').replace(/\n/g, ';');
@@ -2983,23 +2997,27 @@
         var res = d.result || {};
         _rtcTool._silent = !!res.silent && localStorage.getItem('rc-voice-toolreply') !== '1';   // 74/89:静默入库;「工具口头回报」开=放行
         var ca = res.client_action; delete res.client_action;
-        try {   // 61b:最近工具结果环(搜索摘要/配图URL)——之后 make_anki/make_note 把对话现场带给制卡 AI
+        var _resFeed = res;   // 喂回模型/recentTools 的精简版:有 cards_brief 时删 cards 全文——
+        try {   //   截断喂回残 JSON=「AI 不知道自己做过什么卡」的根因(用户 2026-07-20);UI 走 onToolStatus 的完整 result
+          if (res.cards && res.cards_brief) { _resFeed = Object.assign({}, res); delete _resFeed.cards; }
+        } catch (e) {}
+        try {   // 61b:最近工具结果环(搜索摘要/配图URL/已做卡片大意)——之后 make_anki/make_note 把对话现场带给制卡 AI
           var _imgs = [];
           (res.images || []).forEach(function (im) { var _u = im.image_url || im.url; if (_u) _imgs.push(_u); });
-          (_rtc.recentTools = _rtc.recentTools || []).push({ tool: name, label: label, rag: JSON.stringify(res).slice(0, 600), images: _imgs.slice(0, 3) });
+          (_rtc.recentTools = _rtc.recentTools || []).push({ tool: name, label: label, rag: JSON.stringify(_resFeed).slice(0, 600), images: _imgs.slice(0, 3) });
           if (_rtc.recentTools.length > 6) _rtc.recentTools.splice(0, _rtc.recentTools.length - 6);
         } catch (e) {}
         if (ca && ca.fn) dispatch(ca.fn, ca.args);           // 页面副作用本地直执行(比经 relay 更直接)
         delete res._vision;   // 图像由后端 sideband 注入(带 rtc_call_id 时后端已处理);绝不经 dc 发——
                               // SCTP 单条上限(Safari≈64KB),超限发送会**直接关闭 data channel**=通话哑死
-        var slim = JSON.stringify(res);
+        var slim = JSON.stringify(_resFeed);
         out = (slim && slim.length > 2) ? slim.slice(0, 1800) : '(无文本结果,界面元素已显示在用户屏幕上)';
       }
     } catch (e) { ok = false; out = JSON.stringify({ error: String(e).slice(0, 200) }); }
     _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: out } });
     if (!_rtcTool._silent) _rtcRespCreate(name === 'deep_think' ? 'deep' : 'tool', ok && String(out || '').length > 800);   // 66c/74:silent=静默入库不发言
     _rtcTool._silent = false;
-    onToolStatus({ status: ok ? 'done' : 'error', tool: name, label: label, took_s: took, args: argsUsed, rag: out.slice(0, 1600) });
+    onToolStatus({ status: ok ? 'done' : 'error', tool: name, label: label, took_s: took, args: argsUsed, rag: out.slice(0, 1600), result: (typeof res === 'object' ? res : undefined) });   // result=完整体(UI 渲卡用;rag 是喂回模型的精简版)
   }
   // rtc 字幕队列:transcript delta 是文字生成速度(1-2s 内全到),远快于声音——直接 capStream 会瞬间跳到
   // 末句,且 response.done(生成完≠播完)后提前淡出(rtc 音频在 <audio> 元素,playing 队列看不见它)。

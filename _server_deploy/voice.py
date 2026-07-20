@@ -1008,9 +1008,14 @@ def _task_anki(tid, params, ctx, base):
                                       image_url=image_url or None, defer_add=True, requirement=_fullreq, on_step=_on_step)
     cards = out.get("anki_cards") or []
     if out.get("ok") and cards:
+        _brief = []
+        for c in cards[:12]:
+            _f = (c.get("cloze") or c.get("front") or "").strip().replace("\n", " ")[:60]
+            _b = (c.get("back") or "").strip().replace("\n", " ")[:40]
+            _brief.append(_f + ((" → " + _b) if _b else ""))
         _vtask_set(tid, status="done", speak=f"做好了{len(cards)}张卡片草稿，在卡片上确认后入库",
                    steps=list(_steps),
-                   result={"kind": "anki", "deferred": True, "n": len(cards),
+                   result={"kind": "anki", "deferred": True, "n": len(cards), "cards_brief": _brief,
                            "deck": out.get("anki_deck") or "QA", "cards": cards})
     elif out.get("ok"):
         _vtask_set(tid, status="error", error="AI 没生成卡片(内容可能不适合制卡)")
