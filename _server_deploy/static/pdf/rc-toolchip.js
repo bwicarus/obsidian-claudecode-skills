@@ -778,19 +778,20 @@
   function clearAll() { chips.slice().forEach(remove); try { window.__vcChipSeqClear && window.__vcChipSeqClear(); } catch (e) {} }
 
   // ── 后台任务(制卡/笔记/生词):轮询步骤 → 长条滚动;完成 → 方块(完整卡片预览)──
-  function track(chip, tid) {
+  function track(chip, tid, onFinal) {
     if (!chip || !tid) return;
     if (chip.nested) return;
     chip.bg = 1;   // 137:后台任务期间模型可继续调别的工具 → 那些不算嵌套
-    var n = 0;
+    var n = 0, _fin = false;
+    function fin(st, d) { if (_fin) return; _fin = true; try { onFinal && onFinal(st, d); } catch (e) {} }   // 联动:让调用方(如 turnCard 卡片预览)拿到最终结果
     (function poll() {
-      if (n++ > 240) { fail(chip, '等太久了'); return; }
+      if (n++ > 240) { fail(chip, '等太久了'); fin('error', null); return; }
       fetch('/api/voice/task-status?id=' + encodeURIComponent(tid))
         .then(function (r) { return r.json(); })
         .then(function (d) {
           if (!d || !d.ok) { setTimeout(poll, 1200); return; }
-          if (d.status === 'done') done(chip, { summary: d.speak || '完成', result: d.result || null, detail: d.speak || '', steps: d.steps || [] });
-          else if (d.status === 'error') fail(chip, d.error || '失败');
+          if (d.status === 'done') { done(chip, { summary: d.speak || '完成', result: d.result || null, detail: d.speak || '', steps: d.steps || [] }); fin('done', d); }
+          else if (d.status === 'error') { fail(chip, d.error || '失败'); fin('error', d); }
           else { if (d.steps) chip.steps = d.steps; progress(chip, d.step || '处理中…'); setTimeout(poll, 1200); }
         }).catch(function () { setTimeout(poll, 1600); });
     })();

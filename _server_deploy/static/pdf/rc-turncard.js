@@ -107,6 +107,9 @@
     } else if (p.kind === 'tool') {
       _ensureHead(t, p.label || p.tool || '工具');
       return null;   // 工具本身不在正文里占块 —— 它的细节收在【流程】按钮里(用户设计)
+    } else if (p.kind === 'cards') {
+      // 制卡结果卡片预览(语音/助手后台任务完成 → result.cards;只读,已入库)
+      try { if (window.RC && RC.flashcard && RC.flashcard.mountPreview) RC.flashcard.mountPreview(d, p.cards || []); else return null; } catch (e) { return null; }
     } else if (p.kind === 'meta') {
       return null;   // 设置项只落库,不显示(点【流程】能看到)
     } else {

@@ -679,11 +679,20 @@
     }
     if (tid) {
       RC.toolChip.progress(c, '已派发,正在后台执行…');
-      _chipTrackTask(c, tid);
-      // turnCard 从"处理中"落成一张完成的 tool part(后台生成中);真完成 toolChip.track 会发系统通知
-      try { if (RC.turnCard && window.__asstVoiceTid) RC.turnCard.addPart(window.__asstVoiceTid(),
-        { kind: 'tool', tool: p.tool || '', label: p.label || '制卡', args: p.args || {},
-          result: '⏳ 已派发后台生成,完成会通知你', took_s: p.took_s }); } catch (e) {}
+      var _turnTid = (window.__asstVoiceTid && window.__asstVoiceTid()) || null;   // 捕获当前轮(回调时可能已换轮)
+      // 后台任务完成 → 把 result.cards 渲进 turnCard 卡片预览(用户实锤"没看到卡片预览");失败落错误 part
+      _chipTrackTask(c, tid, function (stt, d) {
+        try {
+          if (!_turnTid || !RC.turnCard) return;
+          if (stt === 'done' && d && d.result && d.result.cards && d.result.cards.length) {
+            RC.turnCard.addPart(_turnTid, { kind: 'cards', cards: d.result.cards });
+          } else if (stt === 'error') {
+            RC.turnCard.addPart(_turnTid, { kind: 'text', text: '✗ 制卡没成:' + ((d && d.error) || '内容可能不适合制卡') });
+          }
+        } catch (e) {}
+      });
+      try { if (RC.turnCard && _turnTid) RC.turnCard.addPart(_turnTid,
+        { kind: 'text', text: '⏳ 正在后台生成卡片,完成会在这里显示预览…' }); } catch (e) {}
       return;
     }
     RC.toolChip.done(c, { summary: p.label || '完成', detail: p.rag || p.result_brief || '' });
@@ -702,7 +711,7 @@
   function _pickTaskId(rag) {   // 工具返回体里带 task_id(voice-tool 的 rag 是 JSON 字符串)
     try { var o = typeof rag === 'string' ? JSON.parse(rag) : rag; return (o && o.task_id) || ''; } catch (e) { return ''; }
   }
-  function _chipTrackTask(c, tid) { RC.toolChip.track(c, tid); }   // 轮询后台任务(组件内实现,与文字对话共用)
+  function _chipTrackTask(c, tid, onFinal) { RC.toolChip.track(c, tid, onFinal); }   // 轮询后台任务;onFinal 让调用方拿最终结果(卡片预览)
 
   function onToolStatus(p) {
     p = p || {};

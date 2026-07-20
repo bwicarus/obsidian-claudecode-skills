@@ -115,5 +115,28 @@
       });
   }
 
-  RC.flashcard = { mountDrafts: mountDrafts };
+  // 只读预览(语音/助手做的卡**已入库**,只给看不给改;正反同显,复用 fc-card 视觉,‹›切换)
+  function mountPreview(container, cards, opts) {
+    if (!container || !cards || !cards.length) return;
+    injectCss();
+    var i = 0;
+    function seg(t, showAns) { return md(String(t || '').replace(/\{\{c\d+::(.*?)(::[^}]*)?\}\}/g, showAns ? '<b>$1</b>' : '<b>[…]</b>')); }
+    function draw() {
+      var c = cards[i], front, back;
+      if ((c.type || 'basic') === 'cloze') { front = seg(c.cloze || c.text, false); back = seg(c.cloze || c.text, true); }
+      else { front = md(c.front || ''); back = md(c.back || ''); }
+      var nav = cards.length > 1
+        ? '<div class="fc-nav"><button data-p="prev">‹</button><span>卡 ' + (i + 1) + '/' + cards.length + '（✓ 已入 Anki）</span><button data-p="next">›</button></div>'
+        : '<div class="fc-nav"><span>✓ 已入 Anki · 卡片预览</span></div>';
+      container.innerHTML = '<div class="fc-wrap">' + nav + '<div class="fc-card"><div class="fc-lbl">正面</div>' + front +
+        '<div class="fc-back"><div class="fc-lbl">背面</div>' + back + '</div></div></div>';
+      try { RC.typeset && RC.typeset(container.querySelector('.fc-card')); } catch (e) {}
+      container.querySelectorAll('[data-p]').forEach(function (el) {
+        el.addEventListener('click', function (ev) { ev.stopPropagation();
+          i = el.dataset.p === 'prev' ? Math.max(0, i - 1) : Math.min(cards.length - 1, i + 1); draw(); });
+      });
+    }
+    draw();
+  }
+  RC.flashcard = { mountDrafts: mountDrafts, mountPreview: mountPreview };
 })();
