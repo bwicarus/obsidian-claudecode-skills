@@ -155,6 +155,8 @@
       '.rc-flow-cap{font-size:11px;color:#7f92b8;margin-bottom:4px}' +
       '.vc-card-hd{display:flex;align-items:center;gap:6px;font-size:12px;color:#b9a8ff;margin-bottom:6px;flex:none}' +
       '.vc-card-x{margin-left:auto;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.14);border:none;color:#e8e8ee;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;flex:none}' +
+      '.vc-card-pin{margin-left:auto;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.14);border:none;font-size:11px;line-height:22px;text-align:center;cursor:pointer;padding:0;flex:none}' +
+      '.vc-card-pin + .vc-card-p{margin-left:6px}' +
       '.vc-card-x svg{width:10px;height:10px}' +
       '.vc-card-p{margin-left:auto;width:22px;height:22px;border-radius:50%;background:rgba(123,108,255,.16);border:none;color:#9d8cff;' +
       'font-size:9px;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0 0 0 1px;flex:none;transition:transform .12s}' +
@@ -2335,6 +2337,31 @@
     setTimeout(function () { try { c.el.remove(); } catch (e) {} }, 320);
     _cardLayout();
   }
+  // 钉子模式:把浮动卡钉到书页(内容坐标便签)。制卡卡→card便签(保交互+同gid联动);其它(天气/搜索/图)→html便签(内容快照)。
+  //   钉页入口:卡头 📌 按钮(当前卡位)/ 拖到正文松手(该点)。钉成功=浮层卡转页面便签(_cardClose)。所有 vc-card 通用。
+  function pinCardToPage(c, x, y) {
+    if (!c || !c.el || !(window.RC && RC.stickynote)) return false;
+    var el = c.el, bd = el.querySelector('.vc-card-bd');
+    var pts = [];
+    if (x != null && y != null) { pts.push([x, y]); }   // 拖出松手:只认该点(非正文=不钉,落定)
+    else { var r = el.getBoundingClientRect(); pts.push([r.left + Math.min(60, r.width / 2), r.top + Math.min(40, r.height / 2)]); pts.push([(window.innerWidth || 1024) / 2, (window.innerHeight || 768) / 2]); }   // 📌 按钮:卡位置 + 视野中央回退(卡落页边/空白时)
+    function mk(px, py) {
+      try {
+        if (bd && bd.__fc && RC.stickynote.createCardAt) {   // 制卡卡:rc-flashcard 状态机 → card 便签
+          var st = bd.__fc;
+          var snap = st.cards.map(function (cc) { return { type: cc.type, front: cc.front, back: cc.back, cloze: cc.cloze, _st: cc._st, _showBack: cc._showBack, _nid: cc._nid, _next: cc._next }; });
+          return RC.stickynote.createCardAt(px, py, snap, st.gid);
+        } else if (bd && RC.stickynote.createHtmlAt) {   // 通用卡:HTML 快照 → html 便签
+          return RC.stickynote.createHtmlAt(px, py, { content: bd.innerHTML, isHtml: true, label: c.label || '卡片' });
+        }
+      } catch (e) {}
+      return false;
+    }
+    var ok = false;
+    for (var i = 0; i < pts.length && !ok; i++) ok = mk(pts[i][0], pts[i][1]);
+    if (ok) { try { _cardClose(c); } catch (e) {} }   // 浮层卡 → 页面便签(转移,不并存)
+    return ok;
+  }
   function _cardPush(text, kindLabel, isHtml, force, cid, opts) {
     opts = opts || {};
     // opts(工具指示器 v2):{tool,type,icon,dot:true 起手标记态,form:初始形态,busy:标记呼吸}
@@ -2351,6 +2378,7 @@
     el.dataset.vcCid = _cid;
     if (opts.type) el.style.setProperty('--vc-tc', opts.type);
     el.innerHTML = '<div class="vc-card-hd">' + (kindLabel || '文字回复') +
+      '<button type="button" class="vc-card-pin" aria-label="钉到书页">📌</button>' +
       '<button type="button" class="vc-card-p" aria-label="念">▶</button>' +
       '<button type="button" class="vc-card-x" aria-label="关闭">' +
       '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 3l6 6M9 3l-6 6"/></svg></button></div>' +
@@ -2391,6 +2419,8 @@
     });
 
     el.querySelector('.vc-card-x').addEventListener('click', function (ev) { ev.stopPropagation(); _cardClose(c); });
+    var _pinBtn = el.querySelector('.vc-card-pin');
+    if (_pinBtn) _pinBtn.addEventListener('click', function (ev) { ev.stopPropagation(); pinCardToPage(c); });   // 📌 钉到书页(当前卡位)
     el.addEventListener('pointerdown', function () {
       _armAuto(c, el);   // 碰了=在读:倒计时**重新开始**(旧版是永久掐掉 → 点一下就再也不消失了)
       _cards.topZ = (_cards.topZ || 500) + 1; el.style.zIndex = String(_cards.topZ);   // 69:点击=置顶
@@ -2459,6 +2489,9 @@
           return;
         }
         if (moved && e3 && _inDockZone(e3.clientX, e3.clientY)) { _dockAdd(c); return; }   // 77b:松手在区内=收入收藏夹
+        if (moved && e3 && window.RC && RC.stickynote && (RC.stickynote.createCardAt || RC.stickynote.createHtmlAt)) {   // 拖到正文内容上松手 → 钉到该点(拖出即钉,治"拖到页面就消失")
+          if (pinCardToPage(c, e3.clientX, e3.clientY)) return;   // 落正文=转页面便签;非正文(anchorFromPoint 落空)=继续落定
+        }
         if (moved) {   // 落定:带一点弹性回落(overshoot 曲线),像重新"粘"回桌面
           el.style.transition = 'transform .38s cubic-bezier(.34,1.56,.64,1),box-shadow .3s,opacity .32s';
           el.classList.remove('vc-lift');
@@ -2499,6 +2532,7 @@
     if (!_cardHideOn()) return;
     c.t = setTimeout(function () {
       if (el.classList.contains('vc-picked')) return;   // 选中 = 唯一豁免
+      if (c.pinned) return;   // 钉子模式 = 豁免(拖出/侧栏收藏夹来源默认钉住,不自动消失)
       _cardClose(c);
     }, _cardSecs() * 1000);
   }

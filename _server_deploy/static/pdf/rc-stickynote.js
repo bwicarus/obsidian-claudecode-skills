@@ -209,6 +209,10 @@
       '.rc-note.rc-note-hascard .rc-note-card{display:block;padding:2px 2px 4px}',
       '.rc-note.rc-note-hascard .rc-note-text,.rc-note.rc-note-hascard .rc-note-tools,.rc-note.rc-note-hascard .rc-note-ink{display:none}',
       '.rc-note.rc-note-hascard.rc-note-collapsed .rc-note-card{display:none}',
+      '.rc-note-html{display:none}',
+      '.rc-note.rc-note-hashtml .rc-note-html{display:block;padding:3px 5px 5px;font-size:14px;line-height:1.6;color:#e6e6f0;max-height:min(50vh,340px);overflow-y:auto;-webkit-overflow-scrolling:touch}',
+      '.rc-note.rc-note-hashtml .rc-note-text,.rc-note.rc-note-hashtml .rc-note-tools,.rc-note.rc-note-hashtml .rc-note-ink{display:none}',
+      '.rc-note.rc-note-hashtml.rc-note-collapsed .rc-note-html{display:none}',
       '.rc-note.rc-note-hasvideo .rc-vid-embed{border-radius:9px 9px 0 0;overflow:hidden}',
       '.rc-vc-rm{margin-left:auto;border:1px solid rgba(0,0,0,.2);background:rgba(255,255,255,.6);border-radius:5px;width:22px;height:20px;line-height:1;font-size:12px;cursor:pointer;color:#a33;padding:0}',
       // 暗底自动对比色(applyColor 按便签本色亮度 toggle .rc-note-darkbg):文字/placeholder/光标 →
@@ -296,6 +300,7 @@
       '<div class="rc-note-body">' +
         '<div class="rc-note-video"></div>' +
         '<div class="rc-note-card"></div>' +
+        '<div class="rc-note-html"></div>' +
         '<textarea class="rc-note-text" placeholder="输入文字…(笔=手写)"></textarea>' +
         '<canvas class="rc-note-ink"></canvas>' +
         '<div class="rc-note-tools"></div>' +
@@ -313,6 +318,7 @@
       cv: root.querySelector('.rc-note-ink'),
       video: root.querySelector('.rc-note-video'),
       card: root.querySelector('.rc-note-card'),
+      html: root.querySelector('.rc-note-html'),
       tools: root.querySelector('.rc-note-tools'),
       rs: root.querySelector('.rc-note-rs'),
       rsTL: root.querySelector('.rc-note-rs-tl'),
@@ -438,6 +444,18 @@
     if (box.__sig === sig) return;   // 无变化不重建(防 syncCtl 反复重挂丢状态)
     box.__sig = sig; box.innerHTML = '';
     try { RC.flashcard.mountState(box, card.cards, { bare: true, gid: card.gid, nopin: true }); } catch (e) {}
+  }
+  function renderNoteHtml(ctl) {
+    var h = ctl.note.html, box = ctl.html; if (!box) return;
+    if (!h || !h.content) { ctl.root.classList.remove('rc-note-hashtml'); box.innerHTML = ''; box.__sig = ''; return; }
+    ctl.root.classList.add('rc-note-hashtml');
+    var sig = JSON.stringify(h);
+    if (box.__sig === sig) return;
+    box.__sig = sig;
+    if (h.isHtml) box.innerHTML = h.content;
+    else if (window.RC && RC.md) box.innerHTML = RC.md(h.content);
+    else box.textContent = h.content;
+    try { window.RC && RC.typeset && RC.typeset(box); } catch (e) {}
   }
   function setNoteVideo(ctl, id) {   // 供拖放/入口共用:给便签设视频(保留已有起止等设置)
     var v = (ctl.note.video && ctl.note.video.id === id) ? ctl.note.video : { id: id, start: 0, end: 0, rate: 1, loop: false, cc: true };
@@ -637,6 +655,7 @@
     ctl.root.classList.toggle('rc-note-collapsed', !!n.collapsed);
     renderNoteVideo(ctl);   // 视频便签:有 video 则渲染播放器+控件(签名去重,无变化不重建)
     renderNoteCard(ctl);    // 卡片便签:有 card 则 mount rc-flashcard(同 gid → 与侧栏/浮层原卡联动)
+    renderNoteHtml(ctl);    // 通用卡便签:天气/搜索/图等 vc-card 的 HTML 快照
     // 正在输入时(聚焦)不回灌服务端文字,防清掉未保存输入
     if (document.activeElement !== ctl.ta && ctl.ta.value !== (n.text || '')) ctl.ta.value = n.text || '';
   }
@@ -1226,6 +1245,22 @@
     return true;
   }
 
+  // 通用卡便签:天气/搜索/图/文字等 vc-card 的 HTML 快照 → 钉页(不含交互,只留内容)
+  function createHtmlAt(clientX, clientY, htmlObj) {
+    if (!O || !O.anchorFromPoint || !htmlObj || !htmlObj.content) return false;
+    var cands = [[clientX, clientY], [clientX, clientY - 22], [clientX, clientY + 22], [clientX - 30, clientY], [clientX + 30, clientY]];
+    var anchor = null;
+    for (var i = 0; i < cands.length && !anchor; i++) { try { anchor = O.anchorFromPoint(cands[i][0], cands[i][1]); } catch (e) {} }
+    if (!anchor) { toastMsg('这里放不了(把卡片放到正文上再松手)'); return false; }
+    req('POST', { file: O.file, anchor: anchor, color: DEFAULT_COLOR, w: 300, h: 210, collapsed: false, html: { content: htmlObj.content, isHtml: !!htmlObj.isHtml, label: htmlObj.label || '' } }, function (d) {
+      if (!d || !d.ok || !d.note) { toastMsg('✗ 便签创建失败'); return; }
+      notes.push(d.note);
+      if (!ensureMounted(d.note)) toastMsg('卡片便签已建(所在页尚未渲染,渲染后出现)');
+      else toastMsg('✅ 卡片已钉到书页');
+    });
+    return true;
+  }
+
   // ─────────────────────────── 公开 API ───────────────────────────
   RC.stickynote = {
     // opts: {file, mount(anchor)->{el,w,h}|null, anchorFromPoint(x,y)->anchor|null, onDoubleTap(note)->bool, toast?}
@@ -1259,6 +1294,7 @@
     // 阶段 B:拖放建视频便签(助手视频卡长按拖到书页 → 该屏幕点建带 video 的便签)
     createVideoAt: createVideoAt,
     createCardAt: createCardAt,   // 卡片便签(制卡卡 📌 钉页 / 真机拖出复用)
+    createHtmlAt: createHtmlAt,   // 通用卡便签(天气/搜索/图等 vc-card 钉页)
     // ── 笔路由接口(页面 ink 层用,跨界三段切割;见上「编程式笔路由 API」注释)──
     penRoute: penRoute,     // (x,y|event) -> noteId|null  笔尖是否在某展开便签 body 上
     penBegin: penBegin,     // (event, {eraser?}) -> bool  在命中便签开一段(坐标归一化/PATCH 内部管理)

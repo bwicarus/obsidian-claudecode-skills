@@ -89,7 +89,14 @@ __vcInfoCardEl(rc-voicecall:1256)是静态渲染器无编辑态;renderInfo(1270)
 - ✅ **B2 多卡 scroll-snap 中线吸附左右滑动**(替代‹›按钮):.fc-track横向滑轨+圆点指示+滚动跟踪idx+就地重渲不跳位。E2E:3卡滑轨/snap:x mandatory/无箭头/编辑不跳位
 - ✅ **B3 收纳链(复用 vc-card 原生三态,不自造)**:圆vc-dot/长条vc-min/方块的形态收纳**完全交 vc-card 外壳**——制卡卡两处 push(rc-voicecall 680/706)加 `opts.dot:true, form:'full', icon:'🎴'` 即白得原生三态+`_cycleForm`单击循环(dot→min→full)。rc-flashcard 只管 bd 内容(draft/preview/done);评分后 `dockToShell` 把倒计时写进外壳 `.vc-card-sum` + 单卡自动 `RC.voiceCard.form(host,'min')` 收长条,侧栏/无外壳(closest 落空)优雅跳过。⚠ **我曾误在 rc-flashcard 手搓 fc-ball/fc-collapsed/cycle 一整套形态三态,被用户当场纠正"我们工具卡本就有三态"(第5次"复用现成别造新")** → 已删净改复用。E2E:hasdot/dotBtn/bornFull/cycleSeq=dot→min→full/评分后 autoMin+sum="🎴 已复习·距下次复习3天后"/noSelfBall
 - ✅ **B4 拖出钉页(核心已上线,圆球拖拽手势留真机)**:复用 rc-stickynote 便签管线,不自造——note 加 `card` 内容类型(照 video 便签):后端 `/api/notes` POST/PATCH 加 card 字段(白名单 6807 邻位),buildCtl 加 `.rc-note-card` 容器 + `renderNoteCard` mount rc-flashcard(`.rc-note-hascard` 隐藏文字/工具/墨迹层),`createCardAt(x,y,cards,gid)` 照 `createVideoAt` 在 `anchorFromPoint` 内容锚建 card 便签。rc-flashcard 加 `mountState`(保留 _st/_nid/_next 的 mount → 钉页卡保持草稿/学习/已复习态)+ 📌 钉页入口 `pinToPage`(同 gid → 便签卡与原卡联动)。**拖出=按钮/坐标共用 `createCardAt`**,真机圆球拖拽只需接 vc-card 圆点松手坐标(`_bindCardDrag` up 分支 rc-voicecall:2452,松手落内容区→createCardAt)。E2E:createCardAt建便签/hasFcCard/mountState保留done态/文字区隐藏/后端存card+_st=done/清理干净leftover=0。
-  - ⏳ 剩:真机圆球拖拽手势(headless 测不了 touch 拖拽,vc-card 圆点职责已满需真机边拖边调);收藏夹来源钉页(现只制卡卡 📌,收藏夹卡拖出待接)
+  - **⭐ 通用钉子模式(用户 2026-07-20 纠正:所有卡都要能钉,不只制卡卡)**:我第一版做窄了(只制卡卡卡内小 📌 + 只制卡卡便签),用户要 vc-card 全类型。重做:
+    - vc-card **卡头加 📌 钉子按钮**(所有结果卡,rc-voicecall 卡头 innerHTML)。`pinCardToPage(c,x,y)` 分类型:制卡卡(`bd.__fc` 有 rc-flashcard)→`createCardAt`(保交互+同 gid 联动);其它(天气/搜索/图)→`createHtmlAt`(**html 便签**=vc-card body innerHTML 快照)。钉成功→`_cardClose` 浮层卡**转移**成页面便签(不并存)。
+    - rc-stickynote 加第二种便签内容 **html**(`.rc-note-html`/renderNoteHtml/createHtmlAt,`.rc-note-hashtml` 隐藏文字/工具/墨迹);后端 `/api/notes` 再加 html 字段(白名单)。
+    - **消失逻辑**:`_armAuto` 加 `c.pinned` 豁免(钉子模式不消失);浮层卡未钉=自动消失(现状即"浮动卡消失")。
+    - **拖出即钉**:`_bindCardDrag` up 松手落正文→`pinCardToPage(松手点)`(非正文=anchorFromPoint 落空→不钉、继续落定),治"拖到页面就消失"。
+    - 坐标:📌 按钮无坐标→卡位置 + **视野中央回退**(卡落页边/空白时,E2E 实锤根因);拖出有坐标只认该点。
+    - E2E:天气卡📌→html便签+内容/制卡卡📌→card便签/浮层转移floatClosed/后端存 card+html/清理 leftover=0。
+  - ⏳ 真机剩:圆球抓手**拖拽手势**(headless 测不了 touch;_bindCardDrag 松手钉页逻辑已写、待真机验)、**侧栏/收藏夹卡拖出**(现浮层卡=📌+拖出松手;侧栏 turnCard 卡/收藏夹 dock 卡的拖出交互待接)、拖出源卡设 `c.pinned` 全程显示
 - ✅ **双实例状态同步**:侧栏 turnCard + 浮层 vc-card 两份 rc-flashcard 按 **gid 卡组**联动——两处 push 生成同 `_gid`(rc-voicecall 680/706),侧栏 addPart 与浮层 mount 都带 gid,turncard renderPart 串 `p.gid`;rc-flashcard `_groups[gid]={cards,conts}`:同 gid 实例**共享同一批卡对象** + 状态变化(编辑/入库/评分/删除)`broadcast` 重渲其它实例(edit/单卡 updateSlide、del renderTrack;except self 防光标跳)。E2E:shared/editSync/A入库→B learn+B拿note_id/A评分→B done
 
 ## 分批实施计划(原始)
