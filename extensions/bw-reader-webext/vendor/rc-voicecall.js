@@ -1954,6 +1954,7 @@
   RC.voiceCard = {
     css: function () { try { injectCss(); } catch (e) {} },   // 131:任何时候建卡/挂按钮前先确保样式在
     renderInto: function (host, spec) { try { return _renderInto(host, spec); } catch (e) { return null; } },   // 钉入书页:与浮层卡同一 _cardDom 渲染
+    trash: { show: function (on) { try { _trashShow(on); } catch (e) {} }, hot: function (on) { try { _trashHot(on); } catch (e) {} }, inZone: function (x, y) { try { return _inTrashZone(x, y); } catch (e) { return false; } } },   // 钉入卡拖到左上角删除(浮层同一删除区)
     push: function (text, label, isHtml, force, cid, opts) { try { return _cardPush(text, label, isHtml, force, cid, opts); } catch (e) { return null; } },
     close: function (c) { try { _cardClose(c); } catch (e) {} },
     form: function (el, f) { try { return _cardForm(el, f); } catch (e) { return 'full'; } },
@@ -2051,8 +2052,10 @@
             var px = gr ? gr.left : e3.clientX, py = gr ? gr.top : e3.clientY;
             var pinned = false;
             try {
+              var _k2 = { images: 'image', videos: 'video', weather: 'weather', news: 'news' }[rec2 && rec2.kind] || 'text';   // 浮层结果卡同映射(1320)
+              var _st2 = {}; try { _st2 = (window.RC && RC.toolChip && RC.toolChip.styleOf) ? RC.toolChip.styleOf(_k2) : {}; } catch (e2) {}
               if (window.RC && RC.stickynote && RC.stickynote.createHtmlAt && rec2)
-                pinned = RC.stickynote.createHtmlAt(px, py, { content: rec2.isHtml ? rec2.raw : String(rec2.raw || rec2.text || ''), isHtml: !!rec2.isHtml, label: rec2.label || '卡片', type: (el.style && el.style.getPropertyValue('--vc-tc')) || '' });
+                pinned = RC.stickynote.createHtmlAt(px, py, { content: rec2.isHtml ? rec2.raw : String(rec2.raw || rec2.text || ''), isHtml: !!rec2.isHtml, label: rec2.label || '卡片', type: _st2.color || '', icon: _st2.icon || '' });
             } catch (e) {}
             if (pinned) { _placeFx(e3.clientX, e3.clientY); }
             else {   // 松手不在正文(anchorFromPoint 落空)→ 回退:浮层钉子卡(不自动消失,可继续拖去钉)
@@ -2435,10 +2438,8 @@
     var el = d.el;
     el.classList.add('vc-pinned');
     if (spec.type) el.classList.add('vc-typed');   // 有色磨砂(浮层同规矩 1326:type 色卡 = --vc-tc + vc-typed,卡头/边框/辉光同色)
-    try { var pb = el.querySelector('.vc-card-pin'); if (pb) pb.remove(); } catch (e) {}
+    try { ['.vc-card-pin', '.vc-card-p', '.vc-card-x'].forEach(function (q) { var b0 = el.querySelector(q); if (b0) b0.remove(); }); } catch (e) {}   // 浮层结果卡同规矩(1328):▶/✕ 去掉;删除=拖到左上角删除区(用户拍板,无叉叉)
     try { var dup = d.bd.querySelector('.vc-if-hd'); if (dup) dup.remove(); } catch (e) {}
-    var xb = el.querySelector('.vc-card-x');
-    if (xb) xb.addEventListener('click', function (ev) { ev.stopPropagation(); try { spec.onClose && spec.onClose(); } catch (e) {} });
     var _emitForm = function () { try { spec.onForm && spec.onForm(_cardForm(el)); } catch (e) {} };
     var hd0 = el.querySelector('.vc-card-hd');
     if (hd0) hd0.addEventListener('click', function (ev) { if (ev.target.closest('button')) return; _cycleForm(el); _emitForm(); });   // 展开态标记隐藏→头部就是形态按钮(浮层 2420 同规矩)

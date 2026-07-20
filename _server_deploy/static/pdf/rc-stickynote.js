@@ -450,7 +450,7 @@
     ctl.root.classList.add('rc-note-hascard');
     try { ctl.cv.style.display = 'none'; ctl.body.style.background = 'transparent'; ctl.body.style.backdropFilter = ''; ctl.body.style.webkitBackdropFilter = ''; ctl.handle.style.background = 'transparent'; } catch (e) {}   // 便签壳透明(卡自己有玻璃);ink canvas 内联白块
     var sig = JSON.stringify(card, function (k, v) { return k === 'form' ? undefined : v; });   // form 变不重建(收纳循环别丢卡状态)
-    try { ctl.body.style.height = 'auto'; } catch (e) {}   // 卡高自适应内容(压 applySize 定高)
+    try { ctl.body.style.height = 'auto'; ctl.body.style.width = _formW(ctl, card.form); } catch (e) {}   // 壳跟卡形态收缩(否则收成标记后壳还横在页上挡内容)
     if (box.__sig === sig) return;   // 无变化不重建(防 syncCtl 反复重挂丢状态)
     box.__sig = sig; box.innerHTML = '';
     // 直接复用字幕浮层卡渲染代码(用户拍板):RC.voiceCard.renderInto = _cardPush 同一段 _cardDom
@@ -460,7 +460,7 @@
         done = !!RC.voiceCard.renderInto(box, { text: null, label: '🎴 卡片' + (card.cards.length > 1 ? '×' + card.cards.length : ''), isHtml: false, type: card.type || '#b9a8ff', icon: '🎴', form: card.form,
           mount: function (bd) { RC.flashcard.mountState(bd, card.cards, { bare: true, gid: card.gid, nopin: true }); },
           onClose: function () { try { ctl.del.click(); } catch (e) {} },
-          onForm: function (f) { try { card.form = f; ctl.note.card = card; patchNote(ctl.note, { card: card }); } catch (e) {} } });
+          onForm: function (f) { try { card.form = f; ctl.note.card = card; ctl.body.style.width = _formW(ctl, f); patchNote(ctl.note, { card: card }); } catch (e) {} } });
     } catch (e) {}
     if (!done) { try { RC.flashcard.mountState(box, card.cards, { bare: true, gid: card.gid, nopin: true }); } catch (e) {} }   // voiceCard 未载兜底
   }
@@ -470,7 +470,7 @@
     ctl.root.classList.add('rc-note-hashtml');
     try { ctl.cv.style.display = 'none'; ctl.body.style.background = 'transparent'; ctl.body.style.backdropFilter = ''; ctl.body.style.webkitBackdropFilter = ''; ctl.handle.style.background = 'transparent'; } catch (e) {}   // 便签壳透明(卡自己有玻璃)
     var sig = JSON.stringify(h, function (k, v) { return k === 'form' ? undefined : v; });   // form 变不重建
-    try { ctl.body.style.height = 'auto'; } catch (e) {}   // 卡高自适应内容
+    try { ctl.body.style.height = 'auto'; ctl.body.style.width = _formW(ctl, h.form); } catch (e) {}   // 壳跟卡形态收缩
     if (box.__sig === sig) return;
     box.__sig = sig; box.innerHTML = '';
     // 直接复用字幕浮层卡渲染代码(用户拍板):同一 _cardDom → 卡头/排版/样式与浮层卡永远一致;
@@ -480,7 +480,7 @@
       if (window.RC && RC.voiceCard && RC.voiceCard.renderInto)
         el2 = RC.voiceCard.renderInto(box, { text: h.content, label: h.label || '卡片', isHtml: !!h.isHtml, type: h.type, icon: h.icon, form: h.form,
           onClose: function () { try { ctl.del.click(); } catch (e) {} },
-          onForm: function (f) { try { h.form = f; ctl.note.html = h; patchNote(ctl.note, { html: h }); } catch (e) {} } });
+          onForm: function (f) { try { h.form = f; ctl.note.html = h; ctl.body.style.width = _formW(ctl, f); patchNote(ctl.note, { html: h }); } catch (e) {} } });
       done = !!el2;
     } catch (e) {}
     if (!done) { var fb = document.createElement('div'); if (h.isHtml) fb.innerHTML = h.content; else fb.textContent = h.content; box.appendChild(fb); }
@@ -761,6 +761,16 @@
   }
 
   // ─────────────────────────── handle 手势(长按 → EDIT;EDIT 内按下即拖 = 移动便签)───────────────────────────
+  function _isCardNote(ctl) { return !!(ctl && ctl.note && (ctl.note.card || ctl.note.html)); }
+  function _formW(ctl, f) { return (f === 'dot') ? '40px' : ((f === 'min') ? '300px' : ((ctl.note.w || 300) + 'px')); }   // 便签壳宽跟卡形态(dot 标记 40/长条 300/方块 note.w)
+  function _hardDelete(ctl) {   // 拖到左上角删除(无 confirm,浮层拖删同手感)
+    fetch(API + '?file=' + encodeURIComponent(O.file) + '&id=' + encodeURIComponent(ctl.note.id), { method: 'DELETE' }).catch(function () {});
+    try { exitEdit(); } catch (e) {}
+    try { ctl.root.remove(); } catch (e) {}
+    delete ctls[ctl.note.id];
+    for (var i = notes.length - 1; i >= 0; i--) if (notes[i].id === ctl.note.id) notes.splice(i, 1);
+    toastMsg('已删除');
+  }
   function onHandleDown(ctl, e) {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     if (_hd) cancelHandleGesture(true);
@@ -768,6 +778,7 @@
     if (!ctl.note.collapsed) portalIn(ctl);   // 展开态一碰即置顶(单击/长按/拖动统一,idempotent;折叠态由 toggleCollapsed 展开后再置顶)
     _hd = { ctl: ctl, sx: e.clientX, sy: e.clientY, lp: null, dragging: false, moved: false, rect0: null };
     if (EDIT && EDIT.ctl === ctl) startDrag(ctl);   // 已在 EDIT → 按下即拖
+    else if (_isCardNote(ctl)) startDrag(ctl);   // 卡片便签:按住卡头即拖(浮层卡同手感,不等长按)
     else _hd.lp = setTimeout(function () { if (_hd && _hd.ctl === ctl) { enterEdit(ctl); startDrag(ctl); } }, lpMs());
     document.addEventListener('pointermove', onHandleMove, true);
     document.addEventListener('pointerup', onHandleUp, true);
@@ -790,6 +801,7 @@
     e.preventDefault();
     _hd.moved = true;
     _hd.ctl.root.style.transform = 'translate(' + dx + 'px,' + dy + 'px) scale(1.03)';
+    if (_isCardNote(_hd.ctl) && window.RC && RC.voiceCard && RC.voiceCard.trash) { RC.voiceCard.trash.show(true); RC.voiceCard.trash.hot(RC.voiceCard.trash.inZone(e.clientX, e.clientY)); }   // 卡便签:拖起亮左上角删除区(浮层同区)
   }
   function onHandleUp(e) {
     var g = _hd; if (!g) return;
@@ -799,6 +811,10 @@
     if (g.dragging) {
       g.ctl.root.classList.remove('rc-note-lift');   // 浮起只随拖拽;EDIT 模式(🗑/色板/手柄)继续保持
       g.ctl._suppressTap = Date.now();
+      if (_isCardNote(g.ctl) && window.RC && RC.voiceCard && RC.voiceCard.trash) {
+        RC.voiceCard.trash.show(false);
+        if (g.moved && RC.voiceCard.trash.inZone(e.clientX, e.clientY)) { _hardDelete(g.ctl); return; }   // 拖到左上角松手=删除(浮层同交互,无叉叉按钮)
+      }
       if (g.moved) dropNote(g.ctl, g.rect0, e.clientX - g.sx, e.clientY - g.sy);
       else g.ctl.root.style.transform = '';   // 长按未拖:清暂态
     }
