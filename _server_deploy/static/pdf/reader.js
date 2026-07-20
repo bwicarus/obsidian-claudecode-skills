@@ -4812,6 +4812,43 @@ async function _showPhrasePopoverNative(text, opts) {
     '<button onclick="onExplain()" title="详细解释这个词组">💡 解释</button>' +
     '</div>';
 }
+// ── 收藏词组乐观长下划线(2026-07-21 用户实锤"生成太慢"):真分词=整本 chars 服务端重算(慢),
+//    这里用手头 charBoxes 客户端搜词组出现位置**即时**画线(几 ms);真渲染到位后 vocab-layer
+//    整层重画,临时件自然被清,无缝接管。取消收藏即时摘除同款临时件。──
+function _pfavPaint(t) {
+  const needle = String(t || ''); if (!needle) return 0;
+  let n = 0;
+  document.querySelectorAll('.page-wrap[data-page-num]').forEach((pw) => {
+    const chars = pw.__charBoxes; if (!chars || !chars.length) return;
+    let str = ''; const pos = [];
+    for (let i = 0; i < chars.length; i++) {
+      const cc = chars[i].c != null ? String(chars[i].c) : '';
+      for (let j = 0; j < cc.length; j++) { str += cc[j]; pos.push(i); }
+    }
+    let from = 0, idx;
+    const layer = ensurePageLayer(pw, 'vocab-layer'); if (!layer) return;
+    while ((idx = str.indexOf(needle, from)) >= 0) {
+      from = idx + needle.length;
+      const sIdx = pos[idx], eIdx = pos[idx + needle.length - 1];
+      if (sIdx == null || eIdx == null) continue;
+      const rects = _charsRangeToRects(chars, sIdx, eIdx) || [];
+      for (const r of rects) {
+        const d = document.createElement('div');
+        d.className = 'vocab-underline m-new';
+        d.dataset.pfav = encodeURIComponent(needle);
+        d.style.left = r.x0 + 'px'; d.style.top = (r.y1 + 1) + 'px'; d.style.width = (r.x1 - r.x0) + 'px';
+        layer.appendChild(d); n++;
+      }
+    }
+  });
+  return n;
+}
+function _pfavUnpaint(t) {
+  const k = encodeURIComponent(String(t || ''));
+  document.querySelectorAll('.vocab-underline[data-pfav="' + k + '"]').forEach((el) => el.remove());
+}
+try { window.__pfavPaint = _pfavPaint; window.__pfavUnpaint = _pfavUnpaint; } catch (_) {}
+
 window._phraseFav = (btn) => {
   const s = _wordPopState; if (!s || !s.word) return;
   const t = s.word;
@@ -4823,6 +4860,7 @@ window._phraseFav = (btn) => {
   _toast?.(nowFav ? '已收藏，之后会作为一个词分词' : '已取消收藏');
   if (nowFav) _removePhraseHighlight(t);   // 收藏后该词组变成划线(分词单元),只消除同文本的查询高亮(不动别的并存高亮)
   refreshCharsWForAllPages();   // 让分词合并生效(需服务端重分词;离线时此步静默失败,恢复后自然刷新)
+  if (nowFav) { try { _pfavPaint(t); } catch (_) {} } else { try { _pfavUnpaint(t); } catch (_) {} }   // 长下划线即时(先画后传)
   // ② 后台同步:成功用服务端全量校正;网络错 → outbox 入队(POST/DELETE 均幂等)
   fetch('/pdf/api/phrases', {
     method: has ? 'DELETE' : 'POST',

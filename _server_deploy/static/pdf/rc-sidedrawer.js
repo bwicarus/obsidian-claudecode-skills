@@ -288,7 +288,7 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
       ss.innerHTML = '<label class="ss-row"><span>悬浮显示(盖在正文上)</span><input type="checkbox" id="ep-gp-floating"></label>' +
         '<div class="ss-row ss-col"><span>背景模糊度 <small id="ep-gp-blur-val">20</small> px</span><input type="range" id="ep-gp-blur" min="0" max="40" step="1" value="20"></div>' +
         '<div class="ss-row ss-col"><span>显示哪些 tab</span><div id="ep-tab-toggles"></div></div>' +
-        '<div class="ss-row ss-col"><button id="ep-force-refresh" style="background:#244470;border:1px solid #3b6db5;color:#cfe6ff;border-radius:8px;padding:8px;font-size:12px;cursor:pointer">⟳ 强制更新界面(保留已下载书籍)</button>' +
+        '<div class="ss-row ss-col"><button id="ep-force-refresh" style="background:#244470;border:1px solid #3b6db5;color:#cfe6ff;border-radius:8px;padding:8px;font-size:12px;cursor:pointer">⟳ 强制更新界面(数据全保留:书/复习/词库/队列)</button>' +
         '<small id="ep-ver-stamp" style="color:#5a6680;font-size:10px;word-break:break-all"></small></div>';
       side.appendChild(ss);
       var _f = ss.querySelector('#ep-gp-floating'); if (_f) _f.addEventListener('change', function () { setFloating(this.checked); });
