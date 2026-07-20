@@ -21,7 +21,18 @@ review-answer 支持 note_id→card_id + 返回 cardsInfo.interval 倒计时。
 修法:turnTool 改**用户轮作用域**(删 3058 无条件复位,新增 turnToolAny + cardTaskDone 单槽,派发瞬间置位);
 ㊸b 改判 !turnToolAny && !cardTaskDone + 收紧正则;占位每轮唯一、结果就地替换而非并排 addPart。
 
-## 待接:天气卡形态 + 字幕模式(审计同上)
+## ④ 天气卡形态 + 字幕模式(用户 2026-07-21 明确三点 + 摸底方案)
+**用户要求**:① 字幕模式(浮层 vc-cards)只显卡片内容(像天气卡浮层,不套额外工具卡头);
+② 侧边栏里卡片包在工具卡片中且**可独立选中**(天气卡的 _pinBind 长按选中);③ 审美与现有卡片一致(vc-if/vc-card 观感)。
+**关键差异**(摸底 rc-voicecall):天气卡浮层 _cardPush 用 `_bd.innerHTML=text`(静态HTML);制卡卡是
+rc-flashcard 的**可操作状态机**(草稿编辑/入库/四档评分的 DOM+事件)→ 不能只塞 HTML 字符串。
+**落地方案**:
+1. `_cardPush` 加 `opts.mount(bd)` 回调:建好 vc-card 外壳后,有 mount 就调它填 bd(承载状态机卡),否则原 innerHTML。小改。
+2. 制卡结果走 renderInfo 式**双宿主**:侧边栏 turnCard(kind='cards',工具卡内,_pinBind 可选中)+ 字幕浮层 _cardPush(force + mount=挂 rc-flashcard)。现只进 turnCard,缺浮层镜像=字幕不出卡的根因。
+3. rc-flashcard 审美:fc-card 观感换 vc-card/vc-if(主题色 --vc-tc、圆角、字号统一);或内容直塞 vc-card-bd(外壳已是天气卡审美)。
+4. 可选中:vc-card 自带 _pinBind(长按选中,浮层/侧栏/收藏夹同 cid 同步),制卡卡进 vc-card 即得。
+**⚠ 风险**:改 rc-voicecall 浮层(通话核心)+ rc-turncard + rc-flashcard;这块历史反复返工(memory:
+reuse-existing-cards-not-new / cli-paper-card-design / verify-innermost-child)。宜用新鲜上下文单独批次做。
 制卡结果 kind='cards' 现只进侧栏 turnCard,缺 renderInfo 式浮层镜像 → 字幕模式不出卡。
 __vcInfoCardEl(rc-voicecall:1256)是静态渲染器无编辑态;renderInfo(1270)双宿主(turnCard+浮层)。
 接法待定:让制卡结果也镜像浮层 / 卡壳换 vc-if 天气卡观感。
