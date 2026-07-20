@@ -982,7 +982,7 @@
   function _assetInline(el) {   // 资产编号就地渲染(用户设计 2026-07-21):AI 文字里写 #img_xxxxxx → 前端读到命令字符就直接渲染成图
     //   (/pdf/api/asset/ 编号解析:本地化过走本地文件,否则302外链)。AI 零 URL、8字符引用一张图;code/pre/链接内不动。
     try {
-      var re = /#((?:img|vid|ast|card)_[a-f0-9]{4,12})\b/g;
+      var re = /#([a-z]{2,4}_[a-f0-9]{4,12})\b/g;   // 统一编号协议:任意前缀,按 kind 分发渲染器(img→图/card→活卡/结构卡→InfoCardEl)
       var walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT), tn, hits = [];
       while ((tn = walker.nextNode())) { if (re.test(tn.nodeValue)) hits.push(tn); re.lastIndex = 0; }
       hits.forEach(function (t) {
@@ -991,23 +991,28 @@
         re.lastIndex = 0;
         while ((m = re.exec(s0))) {
           frag.appendChild(document.createTextNode(s0.slice(last, m.index)));
-          if (m[1].indexOf('card_') === 0) {   // 卡片编号 → 渲**活卡**(mountState+states 还原;gid=编号与在场实例/跨会话共享状态)
-            var cd = document.createElement('div');
-            cd.dataset.aid = m[1]; cd.style.margin = '6px 0'; cd.textContent = '🎴 加载卡片…';
-            (function (host, cid2) {
-              fetch('/pdf/api/entity/' + cid2).then(function (r) { return r.json(); }).then(function (d) {
-                if (!(d && d.ok && d.kind === 'cards' && (d.cards || []).length)) { host.textContent = '(卡片 ' + cid2 + ' 不存在)'; return; }
-                var cards = d.cards.map(function (c0, i2) { var st0 = (d.states || {})[String(i2)] || {}; return Object.assign({}, c0, st0); });
-                host.textContent = '';
-                try { RC.flashcard.mountState(host, cards, { gid: cid2 }); } catch (e) { host.textContent = '(卡片渲染失败)'; }
-              }).catch(function () { host.textContent = '(卡片加载失败)'; });
-            })(cd, m[1]);
-            frag.appendChild(cd);
-          } else {
+          if (/^(img|vid|ast)_/.test(m[1])) {   // 媒体资产 → <img>(快路,不必 resolve)
             var im = document.createElement('img');
             im.src = '/pdf/api/asset/' + m[1]; im.dataset.aid = m[1];
             im.style.cssText = 'max-width:100%;border-radius:8px;display:block;margin:6px 0';
             frag.appendChild(im);
+          } else {   // 其它编号 → entity resolve 按 kind 分发:cards→活卡(states 还原);结构卡→__vcInfoCardEl;url→图
+            var cd = document.createElement('div');
+            cd.dataset.aid = m[1]; cd.style.margin = '6px 0'; cd.textContent = '⏳ ' + m[1] + ' 加载中…';
+            (function (host, cid2) {
+              fetch('/pdf/api/entity/' + cid2).then(function (r) { return r.json(); }).then(function (d) {
+                host.textContent = '';
+                if (d && d.ok && d.kind === 'cards' && (d.cards || []).length) {
+                  var cards = d.cards.map(function (c0, i2) { var st0 = (d.states || {})[String(i2)] || {}; return Object.assign({}, c0, st0); });
+                  try { RC.flashcard.mountState(host, cards, { gid: cid2 }); } catch (e) { host.textContent = '(卡片渲染失败)'; }
+                } else if (d && d.ok && d.card && window.__vcInfoCardEl) {   // 结构卡(天气/新闻/事实):实时与回放同一渲染器
+                  try { var el2 = __vcInfoCardEl(d.card); if (el2) host.appendChild(el2); } catch (e) { host.textContent = '(卡片渲染失败)'; }
+                } else if (d && d.ok && d.url) {
+                  var im2 = document.createElement('img'); im2.src = d.url; im2.style.cssText = 'max-width:100%;border-radius:8px;display:block'; host.appendChild(im2);
+                } else { host.textContent = '(编号 ' + cid2 + ' 不存在)'; }
+              }).catch(function () { host.textContent = '(编号加载失败)'; });
+            })(cd, m[1]);
+            frag.appendChild(cd);
           }
           last = m.index + m[0].length;
         }

@@ -458,7 +458,23 @@
     try {
       if (window.RC && RC.voiceCard && RC.voiceCard.renderInto)
         done = !!RC.voiceCard.renderInto(box, { text: null, label: '🎴 卡片' + (card.cards.length > 1 ? '×' + card.cards.length : ''), isHtml: false, type: card.type || '#b9a8ff', icon: '🎴', form: card.form,
-          mount: function (bd) { RC.flashcard.mountState(bd, card.cards, { bare: true, gid: card.gid, nopin: true }); },
+          mount: function (bd) {
+            RC.flashcard.mountState(bd, card.cards, { bare: true, gid: card.gid, nopin: true });
+            if (card.gid && /^card_/.test(card.gid)) {   // 统一编号协议:全局编号 → 服务端 states 还原(跨会话"一张卡一种状态";先渲快照防闪空)
+              fetch('/pdf/api/entity/' + card.gid).then(function (r) { return r.json(); }).then(function (d) {
+                if (!(d && d.ok && d.kind === 'cards' && (d.cards || []).length)) return;
+                var merged = d.cards.map(function (c0, i2) { return Object.assign({}, c0, (d.states || {})[String(i2)] || {}); });
+                var fc = bd.__fc;
+                if (!fc || !fc.cards) return;
+                if (JSON.stringify(merged.map(function (c) { return c._st; })) === JSON.stringify(fc.cards.map(function (c) { return c._st; }))) return;   // 状态一致不重挂
+                merged.forEach(function (mc, i2) {   // ⚠ 共享对象**就地更新**(rc-flashcard register 复用同 gid 共享数组,换引用会被换回旧的)
+                  var cc = fc.cards[i2]; if (!cc) return;
+                  ['_st', '_nid', '_next', '_showBack'].forEach(function (k) { if (mc[k] !== undefined) cc[k] = mc[k]; });
+                });
+                RC.flashcard.mountState(bd, fc.cards, { bare: true, gid: card.gid, nopin: true });   // 重挂渲新状态(register 复用已更新的共享对象)
+              }).catch(function () {});
+            }
+          },
           onClose: function () { try { ctl.del.click(); } catch (e) {} },
           onForm: function (f) { try { card.form = f; ctl.note.card = card; ctl.body.style.width = _formW(ctl, f); patchNote(ctl.note, { card: card }); } catch (e) {} } });
     } catch (e) {}

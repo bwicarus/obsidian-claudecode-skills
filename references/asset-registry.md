@@ -14,12 +14,20 @@
   (可翻面/评分/入库),重渲/刷新/他处引用一律还原到同一状态 → "一张卡两种状态"从根上消失
 - E2E:真制卡→card_253720→#编号渲活卡→评分→服务端 states {_st:done,_nid}→第二容器重渲直接"已复习"态
 
-## P2(待做)
+## P2 已上线(2026-07-21)
 
-- 天气/新闻/视频结构卡入同一编号空间(#wthr_/#vid_,renderInfoCard 分发)
+- **结构卡入编号空间**:`_entity_reg_data(kind, card)` → `wea_/new_/fac_` 等({kind3}_{hex6});
+  web_search 结构卡分支发编号(返回体 id);entity GET 结构卡→{card:完整卡对象}
+- **#编号 渲染通用化**:_assetInline 正则通配任意前缀——img/vid/ast→<img> 快路;其余 entity resolve
+  按 kind 分发:cards→活卡(states 还原)/card→`__vcInfoCardEl`(实时与回放同一渲染器)/url→图
+- **便签宿主 states 还原**:renderNoteCard mount 后 fetch entity,merged 状态**就地更新共享数组字段**
+  (⚠ 换引用会被 register 换回旧共享——同 gid 复用铁律)再重挂;状态一致不重挂
+- E2E:#wea_ 渲出天气 InfoCard/重开书便签内卡直接"已复习"态(服务端 states)/清理净
+
+## P3(待做)
+
 - recall 统一入口按前缀分流;创造物 c_ id 规整进同一语法
-- 便签 card.gid 已存编号→重挂时也走 entity states(便签宿主状态还原)
-- states 与 anki-add-cards 幂等键(aid)联动;未使用条目 TTL 清理
+- states 与 anki-add-cards 幂等键(aid)联动;未使用条目 TTL 清理;视频卡(vid_ 数据版)
 
 
 > 用户拍板:AI 上下文里不传图片 URL/图片本身——每张图发**编号**,{编号,URL,元数据} 服务端保存;

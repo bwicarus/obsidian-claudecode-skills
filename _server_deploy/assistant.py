@@ -2354,7 +2354,12 @@ def _t_web_search(args, ctx):
                 _ts = [it.get("t") or "" for it in (card.get("data") or {}).get("items") or [] if it.get("t")]
                 if _ts:
                     idx = " 卡片条目:" + ";".join(_ts[:5]) + "。"
-            return {"ok": True, "kind": card["kind"], "silent": True, "card": card,   # card 本体随 res 存进创造物 → recall 能重现结果卡(client_action 登记前已被 pop,存不下)
+            _eid = ""
+            try:   # 统一编号协议 P2:结构卡发全局编号——AI 之后写 #编号 就地重现这张卡(前端 entity resolve)
+                _eid = _pdf()._entity_reg_data(card["kind"], card)
+            except Exception:
+                pass
+            return {"ok": True, "id": _eid, "kind": card["kind"], "silent": True, "card": card,   # card 本体随 res 存进创造物 → recall 能重现结果卡(client_action 登记前已被 pop,存不下)
                     "note": "搜索结果已用卡片显示在用户屏幕上,本轮到此结束(系统不会请你发言)。"
                             "结果概况:" + brief + "。" + idx +
                             "用户下次说话时若与此相关,直接运用这些信息回答;不要主动复述卡片内容。",

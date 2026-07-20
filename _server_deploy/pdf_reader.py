@@ -6970,6 +6970,22 @@ def _entity_reg_cards(cards: list, meta: dict | None = None) -> str:
         return aid
 
 
+def _entity_reg_data(kind: str, data: dict, meta: dict | None = None) -> str:
+    """结构卡(天气/新闻/事实/视频等工具结果)→ 全局编号(统一编号协议 P2):
+    {kind3}_{hex6},data=渲染所需完整卡对象;#编号 引用时前端经 entity resolve 用 __vcInfoCardEl 重现。"""
+    with _ASSET_LOCK:
+        d = _asset_load()
+        import uuid as _u4
+        aid = (kind or "inf")[:3] + "_" + _u4.uuid4().hex[:6]
+        e = {"kind": kind, "url": "", "ts": int(__import__("time").time()), "local": "", "data": data}
+        for k, v in (meta or {}).items():
+            if v:
+                e[k] = v
+        d[aid] = e
+        _asset_save(d)
+        return aid
+
+
 @bp.route("/api/entity/<aid>", methods=["GET", "PATCH"])
 def pdf_api_entity(aid):
     """统一编号 resolve(用户设计:所有工具结果一套 保存/引用/渲染 规则)。
@@ -7002,6 +7018,8 @@ def pdf_api_entity(aid):
     if e.get("kind") == "cards":
         out["cards"] = e.get("data") or []
         out["states"] = e.get("states") or {}
+    elif isinstance(e.get("data"), dict):   # 结构卡(天气/新闻/事实):完整卡对象→前端 __vcInfoCardEl 重现
+        out["card"] = e["data"]
     else:
         out["url"] = "/pdf/api/asset/" + aid
         for k in ("concept", "source", "matched_query", "page_url"):
