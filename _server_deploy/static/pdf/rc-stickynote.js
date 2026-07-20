@@ -215,6 +215,7 @@
       '.rc-note.rc-note-hascard .rc-note-handle,.rc-note.rc-note-hashtml .rc-note-handle{position:absolute;left:0;top:0;width:100%;height:36px;background:transparent!important;box-shadow:none!important;z-index:5;border-radius:16px 16px 0 0}',
       '.rc-note.rc-note-hascard .rc-note-handle::after,.rc-note.rc-note-hashtml .rc-note-handle::after{display:none}',
       '.rc-note.rc-note-hascard .rc-note-body,.rc-note.rc-note-hashtml .rc-note-body{margin-top:0;border:none!important;box-shadow:none!important;background:transparent!important;border-radius:16px}',
+      '.rc-note.rc-note-hascard .rc-note-rs,.rc-note.rc-note-hascard .rc-note-rs-tl,.rc-note.rc-note-hascard .rc-note-del,.rc-note.rc-note-hashtml .rc-note-rs,.rc-note.rc-note-hashtml .rc-note-rs-tl,.rc-note.rc-note-hashtml .rc-note-del{display:none!important}',   // 白圆手柄/外部✕不属于卡观感;删卡走卡头✕(触发 del.click)
       '.rc-note-html{display:none}',
       '.rc-note.rc-note-hashtml .rc-note-html{display:block;padding:3px 5px 5px;font-size:14px;line-height:1.6;color:#e6e6f0;max-height:min(50vh,340px);overflow-y:auto;-webkit-overflow-scrolling:touch}',
       '.rc-note.rc-note-hashtml .rc-note-text,.rc-note.rc-note-hashtml .rc-note-tools,.rc-note.rc-note-hashtml .rc-note-ink{display:none!important}',
@@ -451,11 +452,15 @@
     var sig = JSON.stringify(card);
     if (box.__sig === sig) return;   // 无变化不重建(防 syncCtl 反复重挂丢状态)
     box.__sig = sig; box.innerHTML = '';
-    try { window.RC && RC.voiceCard && RC.voiceCard.css && RC.voiceCard.css(); } catch (e) {}   // vc-card 样式先注入
-    var vc = document.createElement('div'); vc.className = 'vc-card vc-pinned';   // 真 vc-card(和字幕浮层卡同 class 同 CSS)
-    vc.innerHTML = '<div class="vc-card-hd">🎴 卡片' + (card.cards.length > 1 ? '×' + card.cards.length : '') + '</div><div class="vc-card-bd" style="white-space:normal"></div>';
-    box.appendChild(vc);
-    try { RC.flashcard.mountState(vc.querySelector('.vc-card-bd'), card.cards, { bare: true, gid: card.gid, nopin: true }); } catch (e) {}
+    // 直接复用字幕浮层卡渲染代码(用户拍板):RC.voiceCard.renderInto = _cardPush 同一段 _cardDom
+    var done = false;
+    try {
+      if (window.RC && RC.voiceCard && RC.voiceCard.renderInto)
+        done = !!RC.voiceCard.renderInto(box, { text: null, label: '🎴 卡片' + (card.cards.length > 1 ? '×' + card.cards.length : ''), isHtml: false, type: card.type || '#b9a8ff',
+          mount: function (bd) { RC.flashcard.mountState(bd, card.cards, { bare: true, gid: card.gid, nopin: true }); },
+          onClose: function () { try { ctl.del.click(); } catch (e) {} } });
+    } catch (e) {}
+    if (!done) { try { RC.flashcard.mountState(box, card.cards, { bare: true, gid: card.gid, nopin: true }); } catch (e) {} }   // voiceCard 未载兜底
   }
   function renderNoteHtml(ctl) {
     var h = ctl.note.html, box = ctl.html; if (!box) return;
@@ -465,15 +470,17 @@
     var sig = JSON.stringify(h);
     if (box.__sig === sig) return;
     box.__sig = sig; box.innerHTML = '';
-    try { window.RC && RC.voiceCard && RC.voiceCard.css && RC.voiceCard.css(); } catch (e) {}
-    var vc = document.createElement('div'); vc.className = 'vc-card vc-pinned';   // 真 vc-card(和字幕浮层卡同 class 同 CSS)
-    vc.innerHTML = '<div class="vc-card-hd">' + String(h.label || '卡片').replace(/</g, '&lt;') + '</div><div class="vc-card-bd" style="white-space:normal;padding:0 13px 12px"></div>';
-    box.appendChild(vc);
-    var bd = vc.querySelector('.vc-card-bd');
-    if (h.isHtml) bd.innerHTML = h.content;
-    else if (window.RC && RC.md) bd.innerHTML = RC.md(h.content);
-    else bd.textContent = h.content;
-    try { window.RC && RC.typeset && RC.typeset(bd); } catch (e) {}
+    // 直接复用字幕浮层卡渲染代码(用户拍板):同一 _cardDom → 卡头/排版/样式与浮层卡永远一致;
+    //   content 自带 vc-if-hd 标题条时 renderInto 会剥掉(否则双标题)
+    var done = false, el2 = null;
+    try {
+      if (window.RC && RC.voiceCard && RC.voiceCard.renderInto)
+        el2 = RC.voiceCard.renderInto(box, { text: h.content, label: h.label || '卡片', isHtml: !!h.isHtml, type: h.type,
+          onClose: function () { try { ctl.del.click(); } catch (e) {} } });
+      done = !!el2;
+    } catch (e) {}
+    if (!done) { var fb = document.createElement('div'); if (h.isHtml) fb.innerHTML = h.content; else fb.textContent = h.content; box.appendChild(fb); }
+    try { window.RC && RC.typeset && RC.typeset(box); } catch (e) {}
   }
   function setNoteVideo(ctl, id) {   // 供拖放/入口共用:给便签设视频(保留已有起止等设置)
     var v = (ctl.note.video && ctl.note.video.id === id) ? ctl.note.video : { id: id, start: 0, end: 0, rate: 1, loop: false, cc: true };
@@ -1270,7 +1277,7 @@
     var anchor = null;
     for (var i = 0; i < cands.length && !anchor; i++) { try { anchor = O.anchorFromPoint(cands[i][0], cands[i][1]); } catch (e) {} }
     if (!anchor) { toastMsg('这里放不了(把卡片放到正文上再松手)'); return false; }
-    req('POST', { file: O.file, anchor: anchor, color: '#0d1322', w: 300, h: 210, collapsed: false, html: { content: htmlObj.content, isHtml: !!htmlObj.isHtml, label: htmlObj.label || '' } }, function (d) {   // 暗色玻璃=卡片观感
+    req('POST', { file: O.file, anchor: anchor, color: '#0d1322', w: 300, h: 210, collapsed: false, html: { content: htmlObj.content, isHtml: !!htmlObj.isHtml, label: htmlObj.label || '', type: htmlObj.type || '' } }, function (d) {   // 暗色玻璃=卡片观感
       if (!d || !d.ok || !d.note) { toastMsg('✗ 便签创建失败'); return; }
       notes.push(d.note);
       if (!ensureMounted(d.note)) toastMsg('卡片便签已建(所在页尚未渲染,渲染后出现)');

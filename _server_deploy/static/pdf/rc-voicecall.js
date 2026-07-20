@@ -1950,6 +1950,7 @@
   //   用户拍板:「我很喜欢这个方块的样式,在这个基础上进行修改就好」。
   RC.voiceCard = {
     css: function () { try { injectCss(); } catch (e) {} },   // 131:任何时候建卡/挂按钮前先确保样式在
+    renderInto: function (host, spec) { try { return _renderInto(host, spec); } catch (e) { return null; } },   // 钉入书页:与浮层卡同一 _cardDom 渲染
     push: function (text, label, isHtml, force, cid, opts) { try { return _cardPush(text, label, isHtml, force, cid, opts); } catch (e) { return null; } },
     close: function (c) { try { _cardClose(c); } catch (e) {} },
     form: function (el, f) { try { return _cardForm(el, f); } catch (e) { return 'full'; } },
@@ -2046,7 +2047,7 @@
             var pinned = false;
             try {
               if (window.RC && RC.stickynote && RC.stickynote.createHtmlAt && rec2)
-                pinned = RC.stickynote.createHtmlAt(px, py, { content: rec2.isHtml ? rec2.raw : String(rec2.raw || rec2.text || ''), isHtml: !!rec2.isHtml, label: rec2.label || '卡片' });
+                pinned = RC.stickynote.createHtmlAt(px, py, { content: rec2.isHtml ? rec2.raw : String(rec2.raw || rec2.text || ''), isHtml: !!rec2.isHtml, label: rec2.label || '卡片', type: (el.style && el.style.getPropertyValue('--vc-tc')) || '' });
             } catch (e) {}
             if (pinned) { _placeFx(e3.clientX, e3.clientY); }
             else {   // 松手不在正文(anchorFromPoint 落空)→ 回退:浮层钉子卡(不自动消失,可继续拖去钉)
@@ -2362,8 +2363,8 @@
           var st = bd.__fc;
           var snap = st.cards.map(function (cc) { return { type: cc.type, front: cc.front, back: cc.back, cloze: cc.cloze, _st: cc._st, _showBack: cc._showBack, _nid: cc._nid, _next: cc._next }; });
           return RC.stickynote.createCardAt(px, py, snap, st.gid);
-        } else if (bd && RC.stickynote.createHtmlAt) {   // 通用卡:HTML 快照 → html 便签
-          return RC.stickynote.createHtmlAt(px, py, { content: bd.innerHTML, isHtml: true, label: c.label || '卡片' });
+        } else if (bd && RC.stickynote.createHtmlAt) {   // 通用卡:HTML 快照 → html 便签(带主题色,钉入卡头同色)
+          return RC.stickynote.createHtmlAt(px, py, { content: bd.innerHTML, isHtml: true, label: c.label || '卡片', type: (el.style && el.style.getPropertyValue('--vc-tc')) || '' });
         }
       } catch (e) {}
       return false;
@@ -2373,20 +2374,15 @@
     if (ok) { try { _cardClose(c); } catch (e) {} }   // 浮层卡 → 页面便签(转移,不并存)
     return ok;
   }
-  function _cardPush(text, kindLabel, isHtml, force, cid, opts) {
+  function _cardDom(text, kindLabel, isHtml, opts) {
+    // 卡片 DOM 构建(从 _cardPush **机械抽出**,浮层卡与钉入书页卡共用同一段渲染 —— 用户拍板"直接复用字幕模式的卡片代码"):
+    //   卡头(label+📌+▶+✕)/形态 class/--vc-tc 主题色/TTS 念/bd 填充(mount/isHtml/renderMd)。
+    //   浮层专属(cid/定位/关闭/拖动/收纳/自动消失)仍在 _cardPush;钉入侧由 _renderInto 消费。
     opts = opts || {};
-    // opts(工具指示器 v2):{tool,type,icon,dot:true 起手标记态,form:初始形态,busy:标记呼吸}
-    if (!opts.dot && !opts.mount && (!text || (!isHtml && !text.trim()))) return null;   // mount 模式(制卡状态机卡)无 text,放行
-    if (_sideOpen() && !force && !opts.dot) return null;   // 侧栏开着=内容已在对话流,不弹;force=92 拖放例外
     injectCss();
-    var w = document.getElementById('vc-cards');
-    if (!w) { w = document.createElement('div'); w.id = 'vc-cards'; document.body.appendChild(w); }
-    if (force || opts.dot) _cardsVisSync();   // 92:侧栏开着 force 建卡→容器保持隐藏,关侧栏时浮现
     var _f0 = opts.form || (opts.dot ? 'dot' : 'full');   // 初始形态:工具卡=标记出生;结果卡=方块出生(仍可循环)
     var el = document.createElement('div');
     el.className = 'vc-card' + (opts.dot ? ' vc-hasdot' : '') + (_f0 === 'dot' ? ' vc-dot' : (_f0 === 'min' ? ' vc-min' : ''));
-    var _cid = cid || _mkCid();   // 95:卡片编号(浮层/侧栏/收藏夹同号 → 选中处处同步)
-    el.dataset.vcCid = _cid;
     if (opts.type) el.style.setProperty('--vc-tc', opts.type);
     el.innerHTML = '<div class="vc-card-hd">' + (kindLabel || '文字回复') +
       '<button type="button" class="vc-card-pin" aria-label="钉到书页"><svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9.9 2.1l4 4-2.9 1-1.5 4.4-5-5L8.9 5z"/><path d="M6 10L2.5 13.5"/></svg></button>' +
@@ -2423,6 +2419,36 @@
       else if (window.RC && RC.assistant && RC.assistant.renderMd) { RC.assistant.renderMd(_bd, text, true); _bd.style.whiteSpace = 'normal'; }
       else _bd.textContent = text;
     } catch (e) { _bd.textContent = String(text); }
+    return { el: el, bd: _bd, f0: _f0 };
+  }
+  // 钉入书页渲染(rc-stickynote card/html 便签调):同一 _cardDom → 观感/结构与字幕浮层卡永远一致。
+  //   已钉:卡头钉子按钮移除;✕=onClose(删便签);content 里若自带 vc-if-hd 标题条则剥掉(卡头已有 label,浮层同规矩:两条标题栏=bug)
+  function _renderInto(host, spec) {
+    spec = spec || {};
+    var d = _cardDom(spec.text, spec.label, !!spec.isHtml, { type: spec.type, mount: spec.mount });
+    var el = d.el;
+    el.classList.add('vc-pinned');
+    if (spec.type) el.classList.add('vc-typed');   // 有色磨砂(浮层同规矩 1326:type 色卡 = --vc-tc + vc-typed,卡头/边框/辉光同色)
+    try { var pb = el.querySelector('.vc-card-pin'); if (pb) pb.remove(); } catch (e) {}
+    try { var dup = d.bd.querySelector('.vc-if-hd'); if (dup) dup.remove(); } catch (e) {}
+    var xb = el.querySelector('.vc-card-x');
+    if (xb) xb.addEventListener('click', function (ev) { ev.stopPropagation(); try { spec.onClose && spec.onClose(); } catch (e) {} });
+    host.appendChild(el);
+    return el;
+  }
+  function _cardPush(text, kindLabel, isHtml, force, cid, opts) {
+    opts = opts || {};
+    // opts(工具指示器 v2):{tool,type,icon,dot:true 起手标记态,form:初始形态,busy:标记呼吸}
+    if (!opts.dot && !opts.mount && (!text || (!isHtml && !text.trim()))) return null;   // mount 模式(制卡状态机卡)无 text,放行
+    if (_sideOpen() && !force && !opts.dot) return null;   // 侧栏开着=内容已在对话流,不弹;force=92 拖放例外
+    injectCss();
+    var w = document.getElementById('vc-cards');
+    if (!w) { w = document.createElement('div'); w.id = 'vc-cards'; document.body.appendChild(w); }
+    if (force || opts.dot) _cardsVisSync();   // 92:侧栏开着 force 建卡→容器保持隐藏,关侧栏时浮现
+    var d0 = _cardDom(text, kindLabel, isHtml, opts);
+    var el = d0.el, _f0 = d0.f0, _bd = d0.bd;
+    var _cid = cid || _mkCid();   // 95:卡片编号(浮层/侧栏/收藏夹同号 → 选中处处同步)
+    el.dataset.vcCid = _cid;
     var c = { el: el, t: null, free: false, dx: 0, dy: 0, label: kindLabel || '文字回复', raw: text, isHtml: !!isHtml };
     // 85:卡片不可透过——事件在卡内消化,不冒泡到 document 级监听(点词/选中工具栏等都挂 document)
     ['pointerdown', 'pointerup', 'click', 'touchstart', 'touchend', 'dblclick'].forEach(function (evn) {
