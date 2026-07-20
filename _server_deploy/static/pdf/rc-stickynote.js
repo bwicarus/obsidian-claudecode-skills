@@ -207,11 +207,15 @@
       '.rc-note.rc-note-hasvideo.rc-note-collapsed .rc-note-body{display:none}',
       '.rc-note-card{display:none}',
       '.rc-note.rc-note-hascard .rc-note-card{display:block;padding:2px 2px 4px}',
-      '.rc-note.rc-note-hascard .rc-note-text,.rc-note.rc-note-hascard .rc-note-tools,.rc-note.rc-note-hascard .rc-note-ink{display:none}',
+      '.rc-note.rc-note-hascard .rc-note-text,.rc-note.rc-note-hascard .rc-note-tools,.rc-note.rc-note-hascard .rc-note-ink{display:none!important}',
       '.rc-note.rc-note-hascard.rc-note-collapsed .rc-note-card{display:none}',
+      // 卡片式便签(hascard/hashtml)= vc-card 观感:把手变全宽卡头(显标题,仍是拖动把手),body 圆角接在卡头下
+      '.rc-note.rc-note-hascard .rc-note-handle,.rc-note.rc-note-hashtml .rc-note-handle{width:100%;height:30px;border-radius:14px 14px 0 0;display:flex;align-items:center;padding:0 12px;font-size:12px;color:#cfd6e6;box-sizing:border-box;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}',
+      '.rc-note.rc-note-hascard .rc-note-handle::after,.rc-note.rc-note-hashtml .rc-note-handle::after{display:none}',
+      '.rc-note.rc-note-hascard .rc-note-body,.rc-note.rc-note-hashtml .rc-note-body{border-radius:0 0 14px 14px;margin-top:0}',
       '.rc-note-html{display:none}',
       '.rc-note.rc-note-hashtml .rc-note-html{display:block;padding:3px 5px 5px;font-size:14px;line-height:1.6;color:#e6e6f0;max-height:min(50vh,340px);overflow-y:auto;-webkit-overflow-scrolling:touch}',
-      '.rc-note.rc-note-hashtml .rc-note-text,.rc-note.rc-note-hashtml .rc-note-tools,.rc-note.rc-note-hashtml .rc-note-ink{display:none}',
+      '.rc-note.rc-note-hashtml .rc-note-text,.rc-note.rc-note-hashtml .rc-note-tools,.rc-note.rc-note-hashtml .rc-note-ink{display:none!important}',
       '.rc-note.rc-note-hashtml.rc-note-collapsed .rc-note-html{display:none}',
       '.rc-note.rc-note-hasvideo .rc-vid-embed{border-radius:9px 9px 0 0;overflow:hidden}',
       '.rc-vc-rm{margin-left:auto;border:1px solid rgba(0,0,0,.2);background:rgba(255,255,255,.6);border-radius:5px;width:22px;height:20px;line-height:1;font-size:12px;cursor:pointer;color:#a33;padding:0}',
@@ -437,9 +441,12 @@
   function renderNoteCard(ctl) {
     var card = ctl.note.card, box = ctl.card; if (!box) return;
     if (!card || !card.cards || !card.cards.length || !(window.RC && RC.flashcard && RC.flashcard.mountState)) {
-      ctl.root.classList.remove('rc-note-hascard'); box.innerHTML = ''; box.__sig = ''; return;
+      if (ctl.root.classList.contains('rc-note-hascard')) { ctl.root.classList.remove('rc-note-hascard'); try { ctl.handle.textContent = ''; ctl.cv.style.display = ''; } catch (e) {} }
+      box.innerHTML = ''; box.__sig = ''; return;
     }
     ctl.root.classList.add('rc-note-hascard');
+    try { ctl.cv.style.display = 'none'; } catch (e) {}   // ink canvas 有内联样式,类选择器压不住(白块盖 body 根因)
+    try { ctl.handle.textContent = '🎴 卡片' + (card.cards.length > 1 ? '×' + card.cards.length : ''); } catch (e) {}   // 把手=卡头(显标题)
     var sig = JSON.stringify(card);
     if (box.__sig === sig) return;   // 无变化不重建(防 syncCtl 反复重挂丢状态)
     box.__sig = sig; box.innerHTML = '';
@@ -447,8 +454,10 @@
   }
   function renderNoteHtml(ctl) {
     var h = ctl.note.html, box = ctl.html; if (!box) return;
-    if (!h || !h.content) { ctl.root.classList.remove('rc-note-hashtml'); box.innerHTML = ''; box.__sig = ''; return; }
+    if (!h || !h.content) { if (ctl.root.classList.contains('rc-note-hashtml')) { ctl.root.classList.remove('rc-note-hashtml'); try { ctl.handle.textContent = ''; ctl.cv.style.display = ''; } catch (e) {} } box.innerHTML = ''; box.__sig = ''; return; }
     ctl.root.classList.add('rc-note-hashtml');
+    try { ctl.cv.style.display = 'none'; } catch (e) {}   // ink canvas 内联样式压不住(白块盖 body 根因)
+    try { ctl.handle.textContent = h.label || '卡片'; } catch (e) {}   // 把手=卡头(显标题)
     var sig = JSON.stringify(h);
     if (box.__sig === sig) return;
     box.__sig = sig;

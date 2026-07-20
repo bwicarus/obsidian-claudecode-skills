@@ -2006,6 +2006,7 @@
       }
       function up(e3) {
         hd.removeEventListener('pointermove', mv); hd.removeEventListener('pointerup', up); hd.removeEventListener('pointercancel', up);
+        var gr = null; try { if (ghost) gr = ghost.getBoundingClientRect(); } catch (e) {}   // ghost 左上角=松手时卡的位置=钉入点(用户拍板)
         if (ghost) { ghost.remove(); ghost = null; }
         el.style.opacity = '';
         _dockHint(false); _trashShow(false);
@@ -2032,17 +2033,23 @@
           _placeFx(e3.clientX, e3.clientY);
           try { if (typeof _toast === 'function') _toast('已贴到页面'); } catch (e) {}
         } else if (moved && e3 && _sideOpen()) {
-          // 92(用户设计):从侧栏把卡拖出到阅读器区(没进收藏夹)=放入字幕浮层。侧栏开着浮层隐身,
-          // 只放"飞入"特效示意确实放过去了;关侧栏它就在那。
+          // 92→改(用户 2026-07-20):侧栏拖出=**默认钉子模式**,松手点直接**钉入页面**(ghost 左上角=卡左上角=钉入点)。
+          //   旧"放入字幕浮层"已按用户要求去掉(跟钉子模式矛盾:拖出后变普通浮动卡)。钉不上(松手不在正文)才回退浮层钉子卡。
           var sd2 = document.getElementById('ep-side');
           var sl = sd2 ? sd2.getBoundingClientRect().left : window.innerWidth;
           if (e3.clientX < sl - 30) {
             var rec2 = payloadFn();
-            var c2 = _cardPush(rec2.isHtml ? rec2.raw : (rec2.raw || rec2.text), rec2.label, !!rec2.isHtml, true,
-              (el.dataset && el.dataset.vcCid) || '');
-            if (c2) {
-              _placeFx(e3.clientX, e3.clientY);
-              try { if (typeof _toast === 'function') _toast('已放入字幕浮层(关闭侧栏可见)'); } catch (e) {}
+            var px = gr ? gr.left : e3.clientX, py = gr ? gr.top : e3.clientY;
+            var pinned = false;
+            try {
+              if (window.RC && RC.stickynote && RC.stickynote.createHtmlAt && rec2)
+                pinned = RC.stickynote.createHtmlAt(px, py, { content: rec2.isHtml ? rec2.raw : String(rec2.raw || rec2.text || ''), isHtml: !!rec2.isHtml, label: rec2.label || '卡片' });
+            } catch (e) {}
+            if (pinned) { _placeFx(e3.clientX, e3.clientY); }
+            else {   // 松手不在正文(anchorFromPoint 落空)→ 回退:浮层钉子卡(不自动消失,可继续拖去钉)
+              var c2 = _cardPush(rec2.isHtml ? rec2.raw : (rec2.raw || rec2.text), rec2.label, !!rec2.isHtml, true,
+                (el.dataset && el.dataset.vcCid) || '');
+              if (c2) { c2.pinned = true; c2.pinMode = true; _placeFx(e3.clientX, e3.clientY); try { if (typeof _toast === 'function') _toast('没落在正文上——卡片已浮出,拖到正文可钉住'); } catch (e) {} }
             }
           }
         }
