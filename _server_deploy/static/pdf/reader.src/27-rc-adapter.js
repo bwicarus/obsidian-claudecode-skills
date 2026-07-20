@@ -78,10 +78,14 @@ if (window.PdfAdapter && PdfAdapter.bind) {
       const cbs = pw && pw.__charBoxes;
       if (!cbs || !cbs.length) return null;
       const r = pw.getBoundingClientRect();
+      // #51 词框错位根因:charBoxes 坐标=建层时页尺寸;页重渲(缩放/适应)后尺寸变了坐标没跟 →
+      // 探测选错字+词框画错位(松手锚定用比例不受影响=「拖动显示与松手不一致」)。按 k 实时换算。
+      const k = (pw.__charsBaseW && pw.clientWidth) ? (pw.clientWidth / pw.__charsBaseW) : 1;
       const px = x - r.left, py = y - r.top;
       let best = null, bd = 1e18, bestRow = null, brd = 1e18;
-      for (const cb of cbs) {
-        if (cb.sp || !cb.width) continue;
+      for (const cb0 of cbs) {
+        if (cb0.sp || !cb0.width) continue;
+        const cb = { left: cb0.left * k, top: cb0.top * k, width: cb0.width * k, height: cb0.height * k, w: cb0.w, sp: cb0.sp };
         const cx = cb.left + cb.width / 2, cy = cb.top + cb.height / 2;
         // 行优先(用户拍板 2026-07-21:锁**左上角左侧同行**文字,非斜上方——锚语义"插在这段文字之后"):
         // 字符行高带内(±0.75字高)且在探测点左侧 → 按水平距离取最近;同行没有才退全局欧氏最近
@@ -96,10 +100,10 @@ if (window.PdfAdapter && PdfAdapter.bind) {
       if (bestRow) { best = bestRow; bd = brd * brd; }
       if (!best) return null;
       let L = best.left, T = best.top, R2 = best.left + best.width, B = best.top + best.height;
-      if (best.w !== -1) for (const cb of cbs) {
-        if (cb.w !== best.w || cb.sp) continue;
-        L = Math.min(L, cb.left); T = Math.min(T, cb.top);
-        R2 = Math.max(R2, cb.left + cb.width); B = Math.max(B, cb.top + cb.height);
+      if (best.w !== -1) for (const cb0 of cbs) {
+        if (cb0.w !== best.w || cb0.sp) continue;
+        L = Math.min(L, cb0.left * k); T = Math.min(T, cb0.top * k);
+        R2 = Math.max(R2, (cb0.left + cb0.width) * k); B = Math.max(B, (cb0.top + cb0.height) * k);
       }
       return { el: pw, left: L, top: T, width: R2 - L, height: B - T, dist: Math.sqrt(bd) };
     },

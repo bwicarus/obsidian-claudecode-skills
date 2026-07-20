@@ -65,6 +65,7 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
     wrap.appendChild(dbgLayer);
   }
   wrap.__charBoxes = charBoxes;
+  wrap.__charsBaseW = wrap.clientWidth || 0;   // #51:建层时页宽基准——页重渲(缩放/适应)后 charBoxes 坐标按 clientWidth/baseW 换算(词框错位根因)
   try { window.__applyPhraseMergesLocal && window.__applyPhraseMergesLocal(wrap); } catch (_) {}   // 本地词组合并(收藏集驱动,教义:本地算)
   window.dlog?.('chars: ' + charBoxes.length + ' on page ' + num);
   // 创建 char-layer（透明覆盖整个 page-wrap）→ 绑定后**选词此刻即可用**(不等 overlay)
@@ -98,6 +99,7 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
           const d2 = await (await fetch(charsUrl(ov.cv))).json();
           if (d2 && d2.ok && wrap.isConnected) {
             wrap.__charBoxes = _mapCharBoxes(d2.chars, viewport.scale);
+            wrap.__charsBaseW = wrap.clientWidth || 0;   // #51:cv 校正重建同步基准宽
             wrap.__pageWPt = d2.page_w; wrap.__pageHPt = d2.page_h;
             wrap.__furigana = d2.furigana || [];
             try { renderRubyLayer(wrap); } catch (_) {}
