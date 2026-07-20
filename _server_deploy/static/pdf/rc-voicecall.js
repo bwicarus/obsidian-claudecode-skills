@@ -1881,6 +1881,7 @@
       _rtcInterrupt();   // AI 正说话时打字发消息:不先打断会撞 conversation_already_has_active_response,这条 item 进了上下文却永远没 response(官方参考实现 handleSendTextMessage 第一行也是 interrupt)
       _rtcFlushCtx();   // ㊵ 拉模式:提问瞬间注入他正看着的内容
       _lastU = String(j.content).slice(0, 2000);   // ㉛:打字输入的问题也随轮次落库
+      _rtc.turnToolAny = false;   // ㊸b:打字新用户轮开始 → 清工具标志
       _dcSend({ type: 'conversation.item.create', item: { type: 'message', role: 'user', content: [{ type: 'input_text', text: _lastU }] } });
       _rtcRespCreate('user');
     } else if (t === 'cancel' || t === 'tool_abort') {
@@ -2759,7 +2760,7 @@
       return;   // 关键:不发 response.create
     }
     if (name === 'route_to_text') {   // 61(fallback 路径;控制面在时由 relay 执行):程序门控按当前模式,热切生效
-      _rtc.turnTool = true;
+      _rtc.turnTool = true; _rtc.turnToolAny = true;
       if (_voiceMode() !== 'route') {
         _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId,
                   output: '(当前输出模式未启用文字路由:请直接口头简要回答重点;想看长文可让用户切到「路由」模式)' } });
@@ -2814,7 +2815,7 @@
       })();
       return;
     }
-    _rtc.turnTool = true;   // ㊸:本轮真调了工具(承诺核查放行)
+    _rtc.turnTool = true; _rtc.turnToolAny = true;   // ㊸:本轮真调了工具(承诺核查放行;turnToolAny 用户轮作用域,不随 response 复位)
     if (name === 'read_selection' && _rtc.sel && _rtc.sel.trim()) {   // 74:选中在手=短路闪回(fallback 路径与 relay 同构)
       onToolStatus({ status: 'done', tool: name, label: '读取选中(免调用)', rag: _rtc.sel.slice(0, 300) });
       _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId,
@@ -2998,6 +2999,7 @@
       _rec.oab = true;   // **播完 / 被打断** → 此刻停录(blob 完整,不再靠估算)
       _recStop();
     } else if (t === 'input_audio_buffer.speech_stopped') {
+      _rtc.turnToolAny = false;   // ㊸b 承诺核查守卫:新用户语音轮开始 → 清"本轮调过任何工具"标志(用户轮作用域,不随 response 复位)
       // ★ 133-B1(对抗审查揪出的新单点故障):session 已改回**手动挡**(create_response=false),
       //   relay 成了 response 的**唯一发起者**。此处若仍"什么都不做",一旦 sideband(ctl WS)断开
       //   —— voice-rt 重启 / 网络抖动 / ctl 重连 5 次放弃 —— 就**没有任何一方发 create**:
@@ -3034,6 +3036,10 @@
         if (!_rtcCap.t && !_rtcCap.q.length) capUser(tx);   // whisper 迟到:AI 字幕在放就别插队打乱滚动(对话窗已有)
       }
     } else if (t === 'response.function_call_arguments.done') {
+      // ㊸b(2026-07-21 用户洞察:制卡工具"派发即返回"→AI 过早口头汇报"已做好"→触发承诺核查幻影补交):
+      //   模型一**发起**工具 function_call(不论 ctl 是否由 relay 执行、不等任务真完成)即算"本用户轮调过工具",
+      //   立即置 turnToolAny=true → 承诺核查绝不再补交第二个任务。这兜住 relay tool_status 迟到于正答轮的竞态。
+      if (e.name && e.name !== 'reply_text' && e.name !== 'wait_for_user') _rtc.turnToolAny = true;
       // ㊺P2 双通道分工:控制面在(ctl)→工具执行归 relay(sideband);前端只处理纯前端语义的
       // reply_text(显示/落库)与 wait_for_user(静音)。控制面断线=ctl false=回退前端全套。
       if (_rtc.ctl && e.name !== 'reply_text' && e.name !== 'wait_for_user') return;
@@ -3085,7 +3091,7 @@
       // ㊸b 承诺核查(用户设计:语音模型只是扳机、不产卡片内容——察觉"说了做卡却没调工具"时,
       // **程序直接替它把工具真调了**,种子=本轮对话上下文,后台制卡模型自己判断做什么卡;
       // 不再让语音模型多走一轮(那只是白烧一轮音频输出费),只留一条零成本 system 记录让它知道)
-      if (!_rtc.turnTool && /已经?[^。]{0,14}(整理成|做成|放进|加进|做好)[^。]{0,10}(卡片|カード|笔记|ノート)|(卡片|笔记)[^。]{0,6}(已|放进后台|做好了)/.test(curAText)
+      if (!_rtc.turnTool && !_rtc.turnToolAny && /已经?[^。]{0,14}(整理成|做成|放进|加进|做好)[^。]{0,10}(卡片|カード|笔记|ノート)|(卡片|笔记)[^。]{0,6}(已|放进后台|做好了)/.test(curAText)
           && Date.now() - (_rtc.scoldT || 0) > 60000) {
         _rtc.scoldT = Date.now();
         (function () {
@@ -3205,7 +3211,7 @@
           else if (m0.event === 'client_action') dispatch((m0.payload || {}).fn, (m0.payload || {}).args);
           else if (m0.event === 'tool_status') {
             var tp = m0.payload || {};
-            _rtc.turnTool = true;   // relay 执行了工具:承诺核查放行
+            _rtc.turnTool = true; _rtc.turnToolAny = true;   // relay 执行了工具:承诺核查放行
             // 边沿复位镜像:ctl 模式下 see_* 在 relay 跑,前端 _rtcTool 不经过——在这里复位
             if (tp.status === 'done' && /^(see_ink|see_page|see_figure)/.test(tp.tool || '')) _rtc.inkDirty = false;
             onToolStatus(tp);
