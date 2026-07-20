@@ -22,6 +22,7 @@
     var st = document.createElement('style'); st.id = 'rc-flashcard-css';
     st.textContent =
       '.fc-wrap{margin-top:8px}' +
+      '.fc-bare .fc-card{background:transparent;border:none;padding:2px 0}.fc-bare .fc-wrap{margin-top:0}.fc-bare .fc-nav{margin-bottom:4px}' +
       '.fc-nav{display:flex;align-items:center;gap:8px;font-size:12px;color:#8a9bb4;margin-bottom:6px}' +
       '.fc-nav button{background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:2px 10px;cursor:pointer;-webkit-tap-highlight-color:transparent}' +
       '.fc-card{background:#0d1322;border:1px solid #1f2740;border-radius:10px;padding:14px;font-size:15px;line-height:1.7;color:#e6e6f0}' +
@@ -56,6 +57,7 @@
   function mountDrafts(container, cards, opts) {
     if (!container || !cards || !cards.length) return;
     injectCss();
+    if (opts && opts.bare) container.classList.add('fc-bare');
     container.__fc = {
       cards: cards.map(function (c) {
         return { type: (c.type || 'basic'), front: c.front || '', back: c.back || '', cloze: c.cloze || c.text || '',
@@ -67,10 +69,11 @@
   }
 
   // 只读预览(已入库卡,不给编辑;正反同显)——语音路径若 result 非 deferred 时用
-  function mountPreview(container, cards) {
+  function mountPreview(container, cards, opts) {
     if (!container || !cards || !cards.length) return;
     injectCss();
-    container.__fc = { cards: cards.map(function (c) { return { type: (c.type || 'basic'), front: c.front || '', back: c.back || '', cloze: c.cloze || c.text || '', _st: 'preview' }; }), idx: 0, opts: {}, readonly: true };
+    if (opts && opts.bare) container.classList.add('fc-bare');
+    container.__fc = { cards: cards.map(function (c) { return { type: (c.type || 'basic'), front: c.front || '', back: c.back || '', cloze: c.cloze || c.text || '', _st: 'preview' }; }), idx: 0, opts: opts || {}, readonly: true };
     render(container);
   }
 

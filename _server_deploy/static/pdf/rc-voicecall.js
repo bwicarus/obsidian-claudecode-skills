@@ -683,11 +683,19 @@
       // 后台任务完成 → 把 result.cards 渲进 turnCard 卡片预览(用户实锤"没看到卡片预览");失败落错误 part
       _chipTrackTask(c, tid, function (stt, d) {
         try {
-          if (!_turnTid || !RC.turnCard) return;
           if (stt === 'done' && d && d.result && d.result.cards && d.result.cards.length) {
-            RC.turnCard.addPart(_turnTid, { kind: 'cards', cards: d.result.cards, draft: !!d.result.deferred });   // deferred=草稿→可编辑确认;否则只读预览
+            var _cds = d.result.cards, _drf = !!d.result.deferred;
+            if (_turnTid && RC.turnCard) RC.turnCard.addPart(_turnTid, { kind: 'cards', cards: _cds, draft: _drf });   // 侧栏:工具卡内
+            // ④ 字幕模式浮层镜像(天气卡双宿主:侧栏开→容器隐藏、关侧栏=字幕模式浮现)+ 长按独立选中
+            if (RC.voiceCard && RC.flashcard) {
+              var _fcc = RC.voiceCard.push(null, '🎴 制卡', false, true, RC.voiceCard.mkCid(), {
+                tool: 'make_anki', type: '#b9a8ff',
+                mount: function (bd) { if (_drf) RC.flashcard.mountDrafts(bd, _cds, { bare: true }); else RC.flashcard.mountPreview(bd, _cds, { bare: true }); }
+              });
+              if (_fcc && _fcc.el) RC.voiceCard.pinBind(_fcc.el, '卡片', function () { return _cds.map(function (x) { return (x.front || x.cloze || '') + (x.back ? ' / ' + x.back : ''); }).join('\n'); });
+            }
           } else if (stt === 'error') {
-            RC.turnCard.addPart(_turnTid, { kind: 'text', text: '✗ 制卡没成:' + ((d && d.error) || '内容可能不适合制卡') });
+            if (_turnTid && RC.turnCard) RC.turnCard.addPart(_turnTid, { kind: 'text', text: '✗ 制卡没成:' + ((d && d.error) || '内容可能不适合制卡') });
           }
         } catch (e) {}
       });
@@ -2313,7 +2321,7 @@
   function _cardPush(text, kindLabel, isHtml, force, cid, opts) {
     opts = opts || {};
     // opts(工具指示器 v2):{tool,type,icon,dot:true 起手标记态,form:初始形态,busy:标记呼吸}
-    if (!opts.dot && (!text || (!isHtml && !text.trim()))) return null;
+    if (!opts.dot && !opts.mount && (!text || (!isHtml && !text.trim()))) return null;   // mount 模式(制卡状态机卡)无 text,放行
     if (_sideOpen() && !force && !opts.dot) return null;   // 侧栏开着=内容已在对话流,不弹;force=92 拖放例外
     injectCss();
     var w = document.getElementById('vc-cards');
@@ -2354,7 +2362,8 @@
     })();
     var _bd = el.querySelector('.vc-card-bd');
     try {
-      if (isHtml) { _bd.innerHTML = text; _bd.style.whiteSpace = 'normal'; }
+      if (typeof opts.mount === 'function') { _bd.style.whiteSpace = 'normal'; opts.mount(_bd); }   // ④ 承载可操作状态机卡(制卡卡:rc-flashcard mountDrafts);其余原样
+      else if (isHtml) { _bd.innerHTML = text; _bd.style.whiteSpace = 'normal'; }
       else if (window.RC && RC.assistant && RC.assistant.renderMd) { RC.assistant.renderMd(_bd, text, true); _bd.style.whiteSpace = 'normal'; }
       else _bd.textContent = text;
     } catch (e) { _bd.textContent = String(text); }
