@@ -820,6 +820,9 @@
     _hd.dragging = true;
     ctl.root.style.transformOrigin = '0 0';   // #51:scale 以左上角为原点——拖动中视觉左上=translate 位置=松手最终位置(中心放大会外扩≈1.5%,松手跳位根因之一)
     _hd.rect0 = ctl.root.getBoundingClientRect();
+    // #51 用户真机实锤'拖动时渲染位置出错':页面缩放(zoom/适应)下便签在被缩放坐标系里,translate(手指px)被
+    // scale 放大/缩小=不跟手。位移按**元素有效缩放**(视觉宽/布局宽)换算→任何缩放环境 1:1 跟手(拖拽库标准做法)
+    _hd.scale = (ctl.root.offsetWidth ? _hd.rect0.width / ctl.root.offsetWidth : 1) || 1;
     ctl.root.classList.add('rc-note-lift');   // 浮起效果:只在拖拽进行时(松手/取消即撤)
   }
   function onHandleMove(e) {
@@ -831,7 +834,8 @@
     }
     e.preventDefault();
     _hd.moved = true;
-    _hd.ctl.root.style.transform = 'translate(' + dx + 'px,' + dy + 'px) scale(1.03)';
+    var _s9 = _hd.scale || 1;
+    _hd.ctl.root.style.transform = 'translate(' + (dx / _s9) + 'px,' + (dy / _s9) + 'px) scale(1.03)';
     if (_isCardNote(_hd.ctl) && window.RC && RC.voiceCard && RC.voiceCard.trash) { RC.voiceCard.trash.show(true); RC.voiceCard.trash.hot(RC.voiceCard.trash.inZone(e.clientX, e.clientY)); }   // 卡便签:拖起亮左上角删除区(浮层同区)
     try { var _rr9 = _hd.ctl.root.getBoundingClientRect(); anchorFxShow(_rr9.left + 1, _rr9.top + 1, _hd.ctl.root); } catch (e2) {}   // #51:探测点=**卡左上角**(=钉入点,用户拍板);隐自身穿透(拖已钉便签恒横线的根因)
   }
