@@ -2606,6 +2606,7 @@
         if (!moved && (Math.abs(nx - c.dx) + Math.abs(ny - c.dy)) > 6) {   // 粘滞阈值:拽过才起
           moved = true; c.free = true;
           el.style.transition = 'none';                     // 跟手期零动画(粘滞/闪烁的根治)
+          if (c.pinMode) el.style.transformOrigin = '0 0';   // #51:钉子卡 scale 左上原点——拖动中左上=钉入位置(中心放大外扩≈5px=松手跳位根因)
           el.classList.add('vc-lift');                      // 弹起态:scale 1.03+深阴影(见 CSS)
           _cardLayout();
         }
@@ -2615,7 +2616,7 @@
           _dockHint(_inDockZone(e2.clientX, e2.clientY));   // 77b:接近底部=收藏区光晕提示
           _trashShow(true);                                 // 134:拖起来就亮出左上角删除区
           _trashHot(_inTrashZone(e2.clientX, e2.clientY));
-          if (c.pinMode) { try { var _er9 = el.getBoundingClientRect(); _dragFx(_er9.left + 8, _er9.top + 8, el, el); } catch (e9) {} }   // #51:探测点=卡左上角(=钉入点);隐自身穿透
+          if (c.pinMode) { try { var _er9 = el.getBoundingClientRect(); _dragFx(_er9.left + 1, _er9.top + 1, el, el); } catch (e9) {} }   // #51:探测点=卡左上角+1(=钉入点);隐自身穿透
         }
       }
       function up(e3) {
@@ -2630,7 +2631,7 @@
         if (moved && e3 && _inDockZone(e3.clientX, e3.clientY)) { _dockAdd(c); return; }   // 77b:松手在区内=收入收藏夹
         if (moved && c.pinMode && e3 && window.RC && RC.stickynote) {   // 钉子模式卡(侧栏/收藏夹拖出源):松手=钉入,**方块左上角位置**就是钉入点(用户拍板)
           var _pr = el.getBoundingClientRect();
-          if (pinCardToPage(c, _pr.left + 8, _pr.top + 8)) return;   // 落正文=钉住;非正文(anchorFromPoint 落空)=继续落定,卡保持显示
+          if (pinCardToPage(c, _pr.left + 1, _pr.top + 1)) return;   // 落正文=钉住(偏移 +1 与拖动视觉对齐;旧 +8=8px 跳位);非正文=落定卡保持显示
         }
         if (moved) {   // 落定:带一点弹性回落(overshoot 曲线),像重新"粘"回桌面
           el.style.transition = 'transform .38s cubic-bezier(.34,1.56,.64,1),box-shadow .3s,opacity .32s';

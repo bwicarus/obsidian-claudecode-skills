@@ -159,7 +159,7 @@
       '.rc-note-handle::before{content:"";position:absolute;left:-8px;right:-8px;top:-8px;bottom:-8px}',
       '.rc-note-handle::after{content:"";position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:22px;height:4px;border-radius:2px;background:rgba(0,0,0,.22)}',
       // 浮起特效(阴影加深+微放大+轻微透明):只在 handle 拖拽进行时(EDIT 模式内静止不浮)
-      '.rc-note.rc-note-lift{transform:scale(1.03);opacity:.92}',
+      '.rc-note.rc-note-lift{transform:scale(1.03);transform-origin:0 0;opacity:.92}',
       '.rc-note.rc-note-lift .rc-note-handle{cursor:grabbing;box-shadow:0 10px 26px rgba(0,0,0,.5)}',
       '.rc-note.rc-note-lift .rc-note-body{box-shadow:0 12px 30px rgba(0,0,0,.45)}',
       /* 删除键:Apple 简约风——右上角小圆角标,毛玻璃深底 + 白色细线 ✕(不再红底红边飘右侧;确认弹窗才是危险动作) */
@@ -818,6 +818,7 @@
   function startDrag(ctl) {
     if (!_hd) return;
     _hd.dragging = true;
+    ctl.root.style.transformOrigin = '0 0';   // #51:scale 以左上角为原点——拖动中视觉左上=translate 位置=松手最终位置(中心放大会外扩≈1.5%,松手跳位根因之一)
     _hd.rect0 = ctl.root.getBoundingClientRect();
     ctl.root.classList.add('rc-note-lift');   // 浮起效果:只在拖拽进行时(松手/取消即撤)
   }
@@ -832,7 +833,7 @@
     _hd.moved = true;
     _hd.ctl.root.style.transform = 'translate(' + dx + 'px,' + dy + 'px) scale(1.03)';
     if (_isCardNote(_hd.ctl) && window.RC && RC.voiceCard && RC.voiceCard.trash) { RC.voiceCard.trash.show(true); RC.voiceCard.trash.hot(RC.voiceCard.trash.inZone(e.clientX, e.clientY)); }   // 卡便签:拖起亮左上角删除区(浮层同区)
-    try { var _rr9 = _hd.ctl.root.getBoundingClientRect(); anchorFxShow(_rr9.left + 8, _rr9.top + 8, _hd.ctl.root); } catch (e2) {}   // #51:探测点=**卡左上角**(=钉入点,用户拍板);隐自身穿透(拖已钉便签恒横线的根因)
+    try { var _rr9 = _hd.ctl.root.getBoundingClientRect(); anchorFxShow(_rr9.left + 1, _rr9.top + 1, _hd.ctl.root); } catch (e2) {}   // #51:探测点=**卡左上角**(=钉入点,用户拍板);隐自身穿透(拖已钉便签恒横线的根因)
   }
   function onHandleUp(e) {
     var g = _hd; if (!g) return;
@@ -894,7 +895,7 @@
     // 松手:便签左上角(+4px 进容器内)→ anchorFromPoint 重解析目标容器(支持拖过页/章边界)→ PATCH。
     // rect0=拖动起点屏幕矩形(fixed 也适用),reanchorAt 用屏幕坐标 elementFromPoint → portaled(fixed)照样正确。
     var wasPortaled = ctl.portaled;
-    var anchor = _probeHidden(ctl.root, function () { return reanchorAt(ctl, rect0.left + dx + 4, rect0.top + dy + 4); });   // #51:穿透自身探测(否则 EPUB 可能锚到便签自身文字/portal 态恒 fallback)
+    var anchor = _probeHidden(ctl.root, function () { return reanchorAt(ctl, rect0.left + dx + 1, rect0.top + dy + 1); });   // #51:穿透自身探测;偏移收敛 +1(旧 +4=松手右下跳 4px 的根因之一)
     ctl.root.style.transform = '';
     if (!anchor) { toastMsg('放不到这里(不在内容页上),已弹回'); return; }   // 清 transform→回原位(portaled 回 fixed 原点)
     ctl.note.anchor = anchor;
