@@ -791,7 +791,7 @@ def _epub_js_v():
     跟 reader.js 解耦:改了 epub 的 JS 也能 bust(否则 reader.js 没动 → ?v 不变 → 浏览器用旧缓存)。"""
     mt = 0
     for name in ("epub-html.js", "epub-styles.css", "rc-ink.js", "rc-core.js", "rc-md.js",
-                 "rc-outbox.js", "rc-figures.js", "rc-highlight.js", "rc-snippets.js", "rc-result.js", "rc-wordpop.js", "rc-phrasepop.js", "rc-settings.js", "rc-knowledge.js", "rc-assistant.js", "rc-sidedrawer.js", "rc-grammar.js", "rc-stickynote.js", "rc-favorites.js", "rc-userpages.js", "rc-video.js",
+                 "rc-outbox.js", "rc-review.js", "rc-figures.js", "rc-highlight.js", "rc-snippets.js", "rc-result.js", "rc-wordpop.js", "rc-phrasepop.js", "rc-settings.js", "rc-knowledge.js", "rc-assistant.js", "rc-sidedrawer.js", "rc-grammar.js", "rc-stickynote.js", "rc-favorites.js", "rc-userpages.js", "rc-video.js",
                  "rc-voicecall.js", "rc-turncard.js", "rc-toolchip.js"):   # 2026-07-13:此前缺席——只改语音层时 EPUB ?v 不跳变,immutable 缓存让 EPUB 一直跑旧语音代码(「EPUB 设置没有语音项」的根因)
         for base in ("/var/www/html/static/pdf",
                      str(Path(__file__).resolve().parent / "static" / "pdf")):
@@ -816,7 +816,7 @@ def _pdf_shared_js_v():
            原生回填/保存函数经 PdfAdapter.openSettings 的 onFill/onSave 复用,见 21-misc-ai.js)。"""
     mt = 0
     for name in ("rc-ink.js", "rc-core.js", "rc-md.js", "rc-result.js", "rc-wordpop.js", "rc-phrasepop.js",
-                 "rc-outbox.js", "rc-figures.js", "rc-highlight.js", "rc-knowledge.js", "rc-assistant.js", "rc-grammar.js",
+                 "rc-outbox.js", "rc-review.js", "rc-figures.js", "rc-highlight.js", "rc-knowledge.js", "rc-assistant.js", "rc-grammar.js",
                  "rc-settings.js", "rc-stickynote.js", "rc-favorites.js", "rc-userpages.js", "rc-video.js", "rc-voicecall.js", "rc-turncard.js", "rc-toolchip.js", "pdf-adapter.js",
                  "pdf-uishared.js", "pdf-tail.js", "pdf-styles.css"):   # 2026-07-06 架构优化:pdf_reader.html 抽出的内联 JS/CSS(改它们 → ?v 跳变)
         for base in ("/var/www/html/static/pdf",
@@ -1273,6 +1273,7 @@ self.addEventListener('fetch', (e) => {
     return;
   }
   // 侧数据(高亮/便签/生词映射/词组):在线永远走网络(写后读必新,零失效难题),断网回最后副本可读
+  if (p === '/pdf/api/review-queue') { e.respondWith(_netFallback(e.request)); return; }   // 复习队列:离线回最后快照
   if (p === '/pdf/api/highlights' || p === '/pdf/api/notes' || p === '/pdf/api/vocab-mastery-map'
       || p === '/pdf/api/phrases' || p === '/pdf/api/phrase-mark') { e.respondWith(_netFallback(e.request)); return; }
   if (p === '/pdf/api/epub-manifest' || p === '/pdf/api/epub-section') {
@@ -8798,6 +8799,74 @@ def pdf_api_epub_translate_section():
                 pass
     done = sum(1 for z in zhs if z)
     return jsonify({"ok": True, "translations": zhs, "translated": done, "total": len(texts)})
+
+
+@bp.route("/api/review-queue")
+def pdf_api_review_queue():
+    """本地复习 v1:到期卡队列(AnkiConnect is:due → cardsInfo)。前端缓存本地+SW 离线回落。"""
+    import requests as _rq
+    try:
+        limit = min(int(request.args.get("limit", "30") or 30), 60)
+    except ValueError:
+        limit = 30
+    aurl = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
+    def _ac(action, **params):
+        r = _rq.post(aurl, json={"action": action, "version": 6, "params": params}, timeout=12)
+        d = r.json()
+        if d.get("error"):
+            raise RuntimeError(str(d["error"]))
+        return d.get("result")
+    try:
+        ids_all = _ac("findCards", query="is:due") or []
+        info = _ac("cardsInfo", cards=ids_all[:limit]) or []
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)[:140]}), 502
+    cards = [{"id": c.get("cardId"), "question": c.get("question") or "", "answer": c.get("answer") or "",
+              "deck": c.get("deckName") or ""} for c in info]
+    return jsonify({"ok": True, "due_total": len(ids_all), "cards": cards})
+
+
+_REVIEW_SEEN_FILE = CLAUDE_DIR / "state" / "review-answers-seen.json"
+
+@bp.route("/api/review-answer", methods=["POST"])
+def pdf_api_review_answer():
+    """答题回流真 Anki(answerCards→scheduler.answerCard,FSRS 真调度)。
+    aid 幂等:outbox 补投重复不双答(seen 存 state,保 2000 条)。404=卡不存在(outbox 4xx 丢弃)。"""
+    import requests as _rq
+    body = request.get_json(silent=True) or {}
+    aid = (body.get("aid") or "").strip()[:64]
+    try:
+        cid = int(body.get("card_id"))
+        ease = int(body.get("ease") or 0)
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "bad card_id/ease"}), 400
+    if not (1 <= ease <= 4):
+        return jsonify({"ok": False, "error": "bad ease"}), 400
+    try:
+        seen = json.loads(_REVIEW_SEEN_FILE.read_text("utf-8"))
+        assert isinstance(seen, list)
+    except Exception:
+        seen = []
+    if aid and aid in seen:
+        return jsonify({"ok": True, "dedup": True})
+    aurl = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
+    try:
+        r = _rq.post(aurl, json={"action": "answerCards", "version": 6,
+                                 "params": {"answers": [{"cardId": cid, "ease": ease}]}}, timeout=12)
+        d = r.json()
+        if d.get("error"):
+            return jsonify({"ok": False, "error": str(d["error"])[:140]}), 502
+        if not (d.get("result") or [False])[0]:
+            return jsonify({"ok": False, "error": "card not found"}), 404
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)[:140]}), 502
+    if aid:
+        seen.append(aid)
+        try:
+            _REVIEW_SEEN_FILE.write_text(json.dumps(seen[-2000:]), "utf-8")
+        except Exception:
+            pass
+    return jsonify({"ok": True})
 
 
 @bp.route("/api/vocab-mastery-map")
