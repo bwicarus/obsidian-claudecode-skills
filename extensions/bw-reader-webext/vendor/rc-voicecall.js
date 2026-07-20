@@ -676,11 +676,12 @@
           if (_sr && _sr.cards && _sr.cards.length) { _sc = _sr.cards; _sdrf = (_sr.deferred !== false); } } catch (e) {}
     if (_sc) {
       RC.toolChip.done(c, { summary: '生成了 ' + _sc.length + ' 张卡片草稿' });
+      var _gid = 'fcg_' + RC.voiceCard.mkCid();   // 双实例同 gid:侧栏/浮层两份卡状态联动
       var _stid = window.__asstVoiceTid && window.__asstVoiceTid();
-      if (_stid && RC.turnCard) { RC.turnCard.idle(_stid); RC.turnCard.addPart(_stid, { kind: 'cards', cards: _sc, draft: _sdrf }); }   // 侧栏
+      if (_stid && RC.turnCard) { RC.turnCard.idle(_stid); RC.turnCard.addPart(_stid, { kind: 'cards', cards: _sc, draft: _sdrf, gid: _gid }); }   // 侧栏
       if (RC.voiceCard && RC.flashcard) {   // 字幕浮层镜像(天气卡壳)+ 长按选中
         var _fc2 = RC.voiceCard.push(null, '🎴 制卡', false, true, RC.voiceCard.mkCid(), { tool: 'make_anki', type: '#b9a8ff', dot: true, form: 'full', icon: '🎴',
-          mount: function (bd) { if (_sdrf) RC.flashcard.mountDrafts(bd, _sc, { bare: true }); else RC.flashcard.mountPreview(bd, _sc, { bare: true }); } });
+          mount: function (bd) { if (_sdrf) RC.flashcard.mountDrafts(bd, _sc, { bare: true, gid: _gid }); else RC.flashcard.mountPreview(bd, _sc, { bare: true, gid: _gid }); } });
         if (_fc2 && _fc2.el) RC.voiceCard.pinBind(_fc2.el, '卡片', function () { return _sc.map(function (x) { return (x.front || x.cloze || '') + (x.back ? ' / ' + x.back : ''); }).join('\n'); });
       }
       return;
@@ -702,12 +703,13 @@
         try {
           if (stt === 'done' && d && d.result && d.result.cards && d.result.cards.length) {
             var _cds = d.result.cards, _drf = !!d.result.deferred;
-            if (_turnTid && RC.turnCard) RC.turnCard.addPart(_turnTid, { kind: 'cards', cards: _cds, draft: _drf });   // 侧栏:工具卡内
+            var _gid2 = 'fcg_' + RC.voiceCard.mkCid();
+            if (_turnTid && RC.turnCard) RC.turnCard.addPart(_turnTid, { kind: 'cards', cards: _cds, draft: _drf, gid: _gid2 });   // 侧栏:工具卡内
             // ④ 字幕模式浮层镜像(天气卡双宿主:侧栏开→容器隐藏、关侧栏=字幕模式浮现)+ 长按独立选中
             if (RC.voiceCard && RC.flashcard) {
               var _fcc = RC.voiceCard.push(null, '🎴 制卡', false, true, RC.voiceCard.mkCid(), {
                 tool: 'make_anki', type: '#b9a8ff', dot: true, form: 'full', icon: '🎴',
-                mount: function (bd) { if (_drf) RC.flashcard.mountDrafts(bd, _cds, { bare: true }); else RC.flashcard.mountPreview(bd, _cds, { bare: true }); }
+                mount: function (bd) { if (_drf) RC.flashcard.mountDrafts(bd, _cds, { bare: true, gid: _gid2 }); else RC.flashcard.mountPreview(bd, _cds, { bare: true, gid: _gid2 }); }
               });
               if (_fcc && _fcc.el) RC.voiceCard.pinBind(_fcc.el, '卡片', function () { return _cds.map(function (x) { return (x.front || x.cloze || '') + (x.back ? ' / ' + x.back : ''); }).join('\n'); });
             }

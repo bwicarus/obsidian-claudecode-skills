@@ -89,7 +89,7 @@ __vcInfoCardEl(rc-voicecall:1256)是静态渲染器无编辑态;renderInfo(1270)
 - ✅ **B2 多卡 scroll-snap 中线吸附左右滑动**(替代‹›按钮):.fc-track横向滑轨+圆点指示+滚动跟踪idx+就地重渲不跳位。E2E:3卡滑轨/snap:x mandatory/无箭头/编辑不跳位
 - ✅ **B3 收纳链(复用 vc-card 原生三态,不自造)**:圆vc-dot/长条vc-min/方块的形态收纳**完全交 vc-card 外壳**——制卡卡两处 push(rc-voicecall 680/706)加 `opts.dot:true, form:'full', icon:'🎴'` 即白得原生三态+`_cycleForm`单击循环(dot→min→full)。rc-flashcard 只管 bd 内容(draft/preview/done);评分后 `dockToShell` 把倒计时写进外壳 `.vc-card-sum` + 单卡自动 `RC.voiceCard.form(host,'min')` 收长条,侧栏/无外壳(closest 落空)优雅跳过。⚠ **我曾误在 rc-flashcard 手搓 fc-ball/fc-collapsed/cycle 一整套形态三态,被用户当场纠正"我们工具卡本就有三态"(第5次"复用现成别造新")** → 已删净改复用。E2E:hasdot/dotBtn/bornFull/cycleSeq=dot→min→full/评分后 autoMin+sum="🎴 已复习·距下次复习3天后"/noSelfBall
 - 🔲 **B4 拖出钉页**:圆球抓手拖拽,便签式内容坐标锚定(rc-stickynote管线),侧栏+收藏夹两来源
-- 🔲 双实例状态同步:侧栏/浮层两份rc-flashcard独立,切宿主不同步→按cid联动
+- ✅ **双实例状态同步**:侧栏 turnCard + 浮层 vc-card 两份 rc-flashcard 按 **gid 卡组**联动——两处 push 生成同 `_gid`(rc-voicecall 680/706),侧栏 addPart 与浮层 mount 都带 gid,turncard renderPart 串 `p.gid`;rc-flashcard `_groups[gid]={cards,conts}`:同 gid 实例**共享同一批卡对象** + 状态变化(编辑/入库/评分/删除)`broadcast` 重渲其它实例(edit/单卡 updateSlide、del renderTrack;except self 防光标跳)。E2E:shared/editSync/A入库→B learn+B拿note_id/A评分→B done
 
 ## 分批实施计划(原始)
 

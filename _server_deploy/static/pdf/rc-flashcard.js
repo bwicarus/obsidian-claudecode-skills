@@ -11,6 +11,7 @@
   function md(x) { try { return RC.md ? RC.md(String(x || '')) : esc(x); } catch (e) { return esc(x); } }
   function clozeSeg(t, showAns) { return md(String(t || '').replace(/\{\{c\d+::(.*?)(::[^}]*)?\}\}/g, showAns ? '<b>$1</b>' : '<b>[…]</b>')); }
   var _EASE = [['1', '再来', 'e1'], ['2', '困难', 'e2'], ['3', '良好', 'e3'], ['4', '简单', 'e4']];
+  var _groups = {};   // gid → {cards:共享卡对象数组, conts:[渲染实例容器]}:同 gid 多宿主(侧栏/浮层)状态联动
   function injectCss() {
     if (document.getElementById('rc-flashcard-css')) return;
     var st = document.createElement('style'); st.id = 'rc-flashcard-css';
@@ -78,12 +79,12 @@
     slide.querySelectorAll('[data-fc]').forEach(function (el) {
       el.addEventListener('click', function (ev) {
         ev.stopPropagation(); var act = el.dataset.fc, cc = st.cards[i];
-        if (act === 'del') { st.cards.splice(i, 1); renderTrack(container); RC.toast && RC.toast('草稿已删除(未入库)'); }
+        if (act === 'del') { st.cards.splice(i, 1); renderTrack(container); broadcast(st.gid, null, container); RC.toast && RC.toast('草稿已删除(未入库)'); }
         else if (act === 'add') { addToAnki(container, i); }
-        else if (act === 'reveal') { cc._showBack = true; updateSlide(container, i); }
+        else if (act === 'reveal') { cc._showBack = true; updateSlide(container, i); broadcast(st.gid, i, container); }
       });
     });
-    slide.querySelectorAll('.fc-ed').forEach(function (ta) { ta.addEventListener('input', function () { st.cards[i][ta.dataset.f] = ta.value; }); });
+    slide.querySelectorAll('.fc-ed').forEach(function (ta) { ta.addEventListener('input', function () { st.cards[i][ta.dataset.f] = ta.value; broadcast(st.gid, i, container); }); });
     slide.querySelectorAll('.fc-e').forEach(function (el) { el.addEventListener('click', function (ev) { ev.stopPropagation(); rate(container, i, parseInt(el.dataset.ease, 10)); }); });
   }
   function updateSlide(container, i) {
@@ -126,11 +127,26 @@
       }, 90);
     }, { passive: true });
   }
+  function register(container, opts) {
+    var gid = opts && opts.gid; if (!gid) return;
+    container.__fc.gid = gid;
+    var g = _groups[gid] || (_groups[gid] = { cards: null, conts: [] });
+    g.conts = g.conts.filter(function (c) { return c && c.isConnected && c.__fc; });
+    if (g.cards) container.__fc.cards = g.cards;   // 同 gid 已有 → 复用共享卡对象(编辑/入库/评分天然同步)
+    else g.cards = container.__fc.cards;           // 首个实例:登记为共享源
+    g.conts.push(container);
+  }
+  function broadcast(gid, i, except) {
+    if (!gid) return; var g = _groups[gid]; if (!g) return;
+    g.conts = g.conts.filter(function (c) { return c && c.isConnected && c.__fc; });
+    g.conts.forEach(function (c) { if (c === except) return; if (typeof i === 'number') updateSlide(c, i); else renderTrack(c); });
+  }
   function mountDrafts(container, cards, opts) {
     if (!container || !cards || !cards.length) return;
     injectCss();
     if (opts && opts.bare) container.classList.add('fc-bare');
     container.__fc = { cards: cards.map(function (c) { return { type: (c.type || 'basic'), front: c.front || '', back: c.back || '', cloze: c.cloze || c.text || '', _st: 'draft', _showBack: false, _nid: null, _next: null }; }), idx: 0, opts: opts || {}, readonly: false };
+    register(container, opts);
     renderTrack(container);
   }
   function mountPreview(container, cards, opts) {
@@ -138,18 +154,19 @@
     injectCss();
     if (opts && opts.bare) container.classList.add('fc-bare');
     container.__fc = { cards: cards.map(function (c) { return { type: (c.type || 'basic'), front: c.front || '', back: c.back || '', cloze: c.cloze || c.text || '', _st: 'preview' }; }), idx: 0, opts: opts || {}, readonly: true };
+    register(container, opts);
     renderTrack(container);
   }
   function addToAnki(container, i) {
     var st = container.__fc, c = st.cards[i];
     var aid = 'fc_' + Array.from(crypto.getRandomValues(new Uint8Array(8))).map(function (b) { return b.toString(16).padStart(2, '0'); }).join('');
     var payload = { aid: aid, cards: [{ type: c.type, front: c.front, back: c.back, cloze: c.cloze }] };
-    c._st = 'learn'; c._showBack = false; updateSlide(container, i);
+    c._st = 'learn'; c._showBack = false; updateSlide(container, i); broadcast(st.gid, i, container);
     fetch('/pdf/api/anki-add-cards', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
       .then(function (r) { return r.json(); })
       .then(function (d) {
-        if (!d || d.ok === false) { c._st = 'draft'; updateSlide(container, i); RC.toast && RC.toast('入库失败:' + ((d && d.error) || '?')); }
-        else { c._nid = (d.note_ids || [])[0]; RC.toast && RC.toast('✓ 已入 Anki,可直接复习这张'); }
+        if (!d || d.ok === false) { c._st = 'draft'; updateSlide(container, i); broadcast(st.gid, i, container); RC.toast && RC.toast('入库失败:' + ((d && d.error) || '?')); }
+        else { c._nid = (d.note_ids || [])[0]; broadcast(st.gid, i, container); RC.toast && RC.toast('✓ 已入 Anki,可直接复习这张'); }
       })
       .catch(function (e) {
         if (RC.outbox && e && e.name === 'TypeError') { RC.outbox.send('fcadd', aid, '/pdf/api/anki-add-cards', payload); RC.toast && RC.toast('离线:入库已入队,恢复后自动同步'); }
@@ -172,10 +189,10 @@
     var st = container.__fc, c = st.cards[i];
     var aid = 'rv_' + Array.from(crypto.getRandomValues(new Uint8Array(8))).map(function (b) { return b.toString(16).padStart(2, '0'); }).join('');
     var body = { aid: aid, note_id: c._nid, ease: ease };
-    c._st = 'done'; updateSlide(container, i);
+    c._st = 'done'; updateSlide(container, i); broadcast(st.gid, i, container);
     fetch('/pdf/api/review-answer', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       .then(function (r) { return r.json(); })
-      .then(function (d) { if (d && d.ok) { c._next = d.next || {}; updateSlide(container, i); dockToShell(container, st, c); } })
+      .then(function (d) { if (d && d.ok) { c._next = d.next || {}; updateSlide(container, i); dockToShell(container, st, c); broadcast(st.gid, i, container); } })
       .catch(function (e) { if (RC.outbox && e && e.name === 'TypeError') RC.outbox.send('rev', aid, '/pdf/api/review-answer', body); });
   }
   RC.flashcard = { mountDrafts: mountDrafts, mountPreview: mountPreview };

@@ -112,8 +112,8 @@
       //   非 draft(已入库)→ mountPreview(只读)。B1 状态机统一入口。
       try {
         if (!(window.RC && RC.flashcard)) return null;
-        if (p.draft && RC.flashcard.mountDrafts) RC.flashcard.mountDrafts(d, p.cards || [], {});
-        else if (RC.flashcard.mountPreview) RC.flashcard.mountPreview(d, p.cards || []);
+        if (p.draft && RC.flashcard.mountDrafts) RC.flashcard.mountDrafts(d, p.cards || [], { gid: p.gid });
+        else if (RC.flashcard.mountPreview) RC.flashcard.mountPreview(d, p.cards || [], { gid: p.gid });
         else return null;
       } catch (e) { return null; }
     } else if (p.kind === 'meta') {
