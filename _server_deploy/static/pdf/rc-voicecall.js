@@ -441,6 +441,7 @@
       '.vc-if-src{opacity:.65}' +
       '.vc-ig{display:flex;flex-wrap:wrap;gap:8px}' +
       '.vc-ig-cell{position:relative;width:calc(50% - 4px);border-radius:10px;overflow:hidden;background:rgba(255,255,255,.04)}' +
+      '.vc-card.vc-drop-hot,.vc-if.vc-drop-hot{box-shadow:0 0 0 2.5px #0a84ff,0 12px 40px rgba(0,0,0,.4)!important;transition:box-shadow .12s}' +
       '.vc-imgdrop{margin-top:8px}' +
       '.vc-imgdrop img{max-width:100%;border-radius:8px;display:block}' +
       '.vc-imgdrop-t{font-size:11px;color:#9aa4b8;margin-top:3px}' +
@@ -2020,11 +2021,13 @@
           _pos(e2.clientX, e2.clientY);
           _dockHint(_inDockZone(e2.clientX, e2.clientY));
           _trashShow(true); _trashHot(_inTrashZone(e2.clientX, e2.clientY));   // 134:侧栏卡也能往左上角拖删
+          try { var _sd9 = document.getElementById('ep-side'); var _sl9 = _sd9 ? _sd9.getBoundingClientRect().left : window.innerWidth; if (e2.clientX < _sl9 - 30) _dragFx(e2.clientX, e2.clientY, el); else _dragFxEnd(); } catch (e9) {}   // #51:拖进阅读器区实时标锚定位置
         }
       }
       function up(e3) {
         hd.removeEventListener('pointermove', mv); hd.removeEventListener('pointerup', up); hd.removeEventListener('pointercancel', up);
         var gr = null; try { if (ghost) gr = ghost.getBoundingClientRect(); } catch (e) {}   // ghost 左上角=松手时卡的位置=钉入点(用户拍板)
+        _dragFxEnd();   // #51:反馈层清场
         if (ghost) { ghost.remove(); ghost = null; }
         el.style.opacity = '';
         _dockHint(false); _trashShow(false);
@@ -2077,6 +2080,22 @@
       hd.addEventListener('pointermove', mv); hd.addEventListener('pointerup', up); hd.addEventListener('pointercancel', up);
     });
   }
+  // ── 拖动反馈统一 helper(#51):落在卡上=目标卡高亮环;否则=锚定反馈(光带/插入线);清=两者都清 ──
+  var _dropHotEl = null;
+  function _dragFx(cx, cy, srcEl) {
+    var tgt = null;
+    try { var t0 = document.elementFromPoint(cx, cy); tgt = t0 && t0.closest && t0.closest('.vc-card, .vc-if, .vc-dk-card'); } catch (e) {}
+    if (tgt && srcEl && (tgt === srcEl || tgt.contains(srcEl))) tgt = null;   // 源卡自己不算目标
+    if (tgt && !tgt.closest('.rc-note')) {
+      if (_dropHotEl !== tgt) { _dragFxClearHot(); _dropHotEl = tgt; tgt.classList.add('vc-drop-hot'); }
+      try { RC.stickynote && RC.stickynote.anchorFx && RC.stickynote.anchorFx.hide(); } catch (e) {}
+    } else {
+      _dragFxClearHot();
+      try { RC.stickynote && RC.stickynote.anchorFx && RC.stickynote.anchorFx.show(cx, cy); } catch (e) {}
+    }
+  }
+  function _dragFxClearHot() { if (_dropHotEl) { try { _dropHotEl.classList.remove('vc-drop-hot'); } catch (e) {} _dropHotEl = null; } }
+  function _dragFxEnd() { _dragFxClearHot(); try { RC.stickynote && RC.stickynote.anchorFx && RC.stickynote.anchorFx.hide(); } catch (e) {} }
   // ── 单张图片拖出=图片便签(用户拍板 2026-07-20:侧栏/收藏夹/工具卡里按住一张图拖到正文=便签装图粘贴)──
   //   长按 300ms+位移>10 才起拖(静止长按后 iOS 不再把手势判给滚动;短滑=图库横滑照旧);
   //   capture 只监听不拦截(不吞卡内按钮/单选 click);松手 anchorFromPoint 命中正文才建,落空=放弃。
@@ -2099,12 +2118,13 @@
           document.body.appendChild(g.ghost);
         }
       }
-      if (g && g.moved && g.ghost) { ev.preventDefault(); g.ghost.style.left = (ev.clientX - 60) + 'px'; g.ghost.style.top = (ev.clientY - 40) + 'px'; }
+      if (g && g.moved && g.ghost) { ev.preventDefault(); g.ghost.style.left = (ev.clientX - 60) + 'px'; g.ghost.style.top = (ev.clientY - 40) + 'px'; _dragFx(ev.clientX, ev.clientY, g.img.closest('.vc-card, .vc-if, .vc-dk-card')); }
     }, true);
     document.addEventListener('pointerup', function (ev) {
       if (!g || ev.pointerId !== g.id) return;
       var was = g; g = null;
       if (was.ghost) { try { was.ghost.remove(); } catch (e) {} }
+      _dragFxEnd();
       if (!was.moved) return;
       // 元数据(用户拍板:图的元数据跟着进卡):alt + 图网格标题(.vc-ig-t)
       var _cap = was.img.alt || '';
@@ -2136,7 +2156,7 @@
             isHtml: true, label: _cap || '图片' });   // 松手不在正文=anchorFromPoint 落空,toast 提示,不误钉
       } catch (e) {}
     }, true);
-    document.addEventListener('pointercancel', function () { if (g && g.ghost) { try { g.ghost.remove(); } catch (e) {} } g = null; }, true);
+    document.addEventListener('pointercancel', function () { if (g && g.ghost) { try { g.ghost.remove(); } catch (e) {} } g = null; _dragFxEnd(); }, true);
   })();
   window.__vcDragToDock = function (el, payloadFn) { try { _dragToDock(el, payloadFn); } catch (e) {} };
   window.__vcTtsWarm = function () { try { _ttsEnsure(); } catch (e) {} };   // 82:必须在点击手势**同步栈**内调(iOS AudioContext 手势激活)
@@ -2595,11 +2615,12 @@
           _dockHint(_inDockZone(e2.clientX, e2.clientY));   // 77b:接近底部=收藏区光晕提示
           _trashShow(true);                                 // 134:拖起来就亮出左上角删除区
           _trashHot(_inTrashZone(e2.clientX, e2.clientY));
+          if (c.pinMode) { try { _dragFx(e2.clientX, e2.clientY, el); } catch (e9) {} }   // #51:钉子卡拖动实时标锚定位置
         }
       }
       function up(e3) {
         hd.removeEventListener('pointermove', mv); hd.removeEventListener('pointerup', up); hd.removeEventListener('pointercancel', up);
-        _dockHint(false); _trashShow(false);
+        _dockHint(false); _trashShow(false); _dragFxEnd();
         if (moved && e3 && _inTrashZone(e3.clientX, e3.clientY)) {   // 134:往上拖到左上角=删除(手动消失通道)
           try { el.style.transition = 'transform .26s ease,opacity .26s ease'; el.style.transform = 'translate(' + c.dx + 'px,' + c.dy + 'px) scale(.5)'; el.style.opacity = '0'; } catch (e) {}
           setTimeout(function () { _cardClose(c); }, 200);

@@ -90,9 +90,12 @@ if (window.PdfAdapter && PdfAdapter.bind) {
       }
       const r = pw.getBoundingClientRect();
       if (!r.width || !r.height) return null;
-      return { kind: 'pdf', page: parseInt(pw.dataset.pageNum || '0', 10) || 0,
+      const _cl = !(t && t.closest && t.closest('.page-wrap') === pw);   // 走了最近页 fallback=clamped(反馈层画插入横线)
+      const a0 = { kind: 'pdf', page: parseInt(pw.dataset.pageNum || '0', 10) || 0,
                x: Math.max(0, Math.min(1, (x - r.left) / r.width)),
                y: Math.max(0, Math.min(1, (y - r.top) / r.height)) };
+      if (_cl) a0.clamped = 1;
+      return a0;
     },
     // 阶段2 词组(rc-phrasepop):呼吸高亮层是 PDF 字符层几何 → 留底座,adapter 只接管查询+小框渲染。
     phraseHighlight: () => { try { return _showPhraseHighlight(_charSel && _charSel.pw); } catch (_) { return null; } },   // 返回本高亮 → onSolid 精确标它(并发多查询各标各的)

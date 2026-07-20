@@ -216,6 +216,12 @@
       '.rc-note.rc-note-hascard .rc-note-handle::after,.rc-note.rc-note-hashtml .rc-note-handle::after{display:none}',
       '.rc-note.rc-note-hascard .rc-note-body,.rc-note.rc-note-hashtml .rc-note-body{margin-top:0;border:none!important;box-shadow:none!important;background:transparent!important;border-radius:16px}',
       '.rc-note.rc-note-hascard .rc-note-rs,.rc-note.rc-note-hascard .rc-note-rs-tl,.rc-note.rc-note-hascard .rc-note-del,.rc-note.rc-note-hashtml .rc-note-rs,.rc-note.rc-note-hashtml .rc-note-rs-tl,.rc-note.rc-note-hashtml .rc-note-del{display:none!important}',   // 白圆手柄/外部✕不属于卡观感;删卡走卡头✕(触发 del.click)
+      // 拖动锚定反馈(用户设计 2026-07-21 #51):拖动时实时标出将绑定的位置——
+      //   光带=命中内容(锚到这段);横线=空白/clamp(内容插入位置,排到上方内容之后)。iOS 蓝,美观优先。
+      '.rc-anchor-fx{position:absolute;left:8px;right:8px;height:20px;border-radius:6px;background:rgba(10,132,255,.13);box-shadow:inset 0 0 0 1.5px rgba(10,132,255,.35);pointer-events:none;z-index:60;transition:top .07s linear}',
+      '.rc-anchor-fx.rc-afx-line{height:0;border-top:2px solid #0a84ff;border-radius:0;background:none;box-shadow:0 0 6px rgba(10,132,255,.5)}',
+      '.rc-anchor-fx.rc-afx-line::before{content:"";position:absolute;left:-4px;top:-5px;width:8px;height:8px;border-radius:50%;background:#0a84ff}',
+      '.rc-anchor-fx.rc-afx-line::after{content:"";position:absolute;right:-4px;top:-5px;width:8px;height:8px;border-radius:50%;background:#0a84ff}',
       '.rc-note-html{display:none}',
       '.rc-note.rc-note-hashtml .rc-note-html{display:block;padding:3px 5px 5px;font-size:14px;line-height:1.6;color:#e6e6f0;max-height:min(50vh,340px);overflow-y:auto;-webkit-overflow-scrolling:touch}',
       '.rc-note.rc-note-hashtml .rc-note-text,.rc-note.rc-note-hashtml .rc-note-tools,.rc-note.rc-note-hashtml .rc-note-ink{display:none!important}',
@@ -825,12 +831,14 @@
     _hd.moved = true;
     _hd.ctl.root.style.transform = 'translate(' + dx + 'px,' + dy + 'px) scale(1.03)';
     if (_isCardNote(_hd.ctl) && window.RC && RC.voiceCard && RC.voiceCard.trash) { RC.voiceCard.trash.show(true); RC.voiceCard.trash.hot(RC.voiceCard.trash.inZone(e.clientX, e.clientY)); }   // 卡便签:拖起亮左上角删除区(浮层同区)
+    try { anchorFxShow(e.clientX, e.clientY); } catch (e2) {}   // #51:拖动实时标出将锚定的位置(光带/插入线)
   }
   function onHandleUp(e) {
     var g = _hd; if (!g) return;
     cleanupHandleListeners();
     clearTimeout(g.lp);
     _hd = null;
+    try { anchorFxHide(); } catch (e2) {}
     if (g.dragging) {
       g.ctl.root.classList.remove('rc-note-lift');   // 浮起只随拖拽;EDIT 模式(🗑/色板/手柄)继续保持
       g.ctl._suppressTap = Date.now();
@@ -854,6 +862,7 @@
   function onHandleCancel() {
     var g = _hd; if (!g) return;
     cleanupHandleListeners();
+    try { anchorFxHide(); } catch (e2) {}
     clearTimeout(g.lp);
     _hd = null;
     if (g.dragging) { g.ctl.root.classList.remove('rc-note-lift'); g.ctl.root.style.transform = ''; g.ctl._suppressTap = Date.now(); }
@@ -1340,6 +1349,24 @@
     return true;
   }
 
+  // ── 拖动锚定反馈层(#51 用户设计,所有拖动统一挂:便签拖动/单图拖出/侧栏拖出/钉子卡拖动)──
+  var _afx = null;
+  function anchorFxShow(cx, cy) {
+    if (!O || !O.anchorFromPoint) return;
+    var a = null; try { a = O.anchorFromPoint(cx, cy); } catch (e) {}
+    if (!a) { anchorFxHide(); return; }
+    var m = null; try { m = O.mount(a); } catch (e) {}
+    if (!m || !m.el || typeof m.top !== 'number') { anchorFxHide(); return; }
+    if (!_afx) { _afx = document.createElement('div'); _afx.className = 'rc-anchor-fx'; }
+    // 横线=clamp(钉空白→排到上方内容之后)或 EPUB 章内比例锚(空白处);光带=命中内容(EPUB 字符锚/PDF 页内)
+    var line = !!a.clamped || (a.kind === 'epub' && a.off === undefined);
+    _afx.classList.toggle('rc-afx-line', line);
+    if (_afx.parentElement !== m.el) m.el.appendChild(_afx);
+    _afx.style.top = Math.max(0, m.top - (line ? 1 : 10)) + 'px';
+    _afx.style.display = 'block';
+  }
+  function anchorFxHide() { if (_afx) _afx.style.display = 'none'; }
+
   // ─────────────────────────── 公开 API ───────────────────────────
   RC.stickynote = {
     // opts: {file, mount(anchor)->{el,w,h}|null, anchorFromPoint(x,y)->anchor|null, onDoubleTap(note)->bool, toast?}
@@ -1374,6 +1401,7 @@
     createVideoAt: createVideoAt,
     createCardAt: createCardAt,   // 卡片便签(制卡卡 📌 钉页 / 真机拖出复用)
     createHtmlAt: createHtmlAt,   // 通用卡便签(天气/搜索/图等 vc-card 钉页)
+    anchorFx: { show: anchorFxShow, hide: anchorFxHide },   // 拖动锚定反馈(#51:光带=绑定内容/横线=插入位置)
     // ── 笔路由接口(页面 ink 层用,跨界三段切割;见上「编程式笔路由 API」注释)──
     penRoute: penRoute,     // (x,y|event) -> noteId|null  笔尖是否在某展开便签 body 上
     penBegin: penBegin,     // (event, {eraser?}) -> bool  在命中便签开一段(坐标归一化/PATCH 内部管理)

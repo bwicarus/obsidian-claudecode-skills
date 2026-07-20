@@ -3887,9 +3887,12 @@
           }
           var r = sec.getBoundingClientRect();
           if (!r.width || !r.height) return null;
-          return { kind: 'epub', section: parseInt(sec.dataset.idx, 10),
+          var _a0 = { kind: 'epub', section: parseInt(sec.dataset.idx, 10),
                    x: Math.max(0, Math.min(1, (x - r.left) / r.width)),
                    y: Math.max(0, Math.min(1, (y - r.top) / r.height)) };
+          var _t2 = document.elementFromPoint(x, y);
+          if (!(_t2 && _t2.closest && _t2.closest('.ep-sec') === sec)) _a0.clamped = 1;   // 最近章 fallback=clamped(插入横线)
+          return _a0;
         },
         // 阶段3 AI 注入:双击便签 → noteInject(助手开着才处理:无笔画走文本通道,有笔画走合成图/视觉通道)
         onDoubleTap: function (note) { try { return noteInject(note); } catch (e) { return false; } },
