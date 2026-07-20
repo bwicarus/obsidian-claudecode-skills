@@ -19,14 +19,14 @@
       '.fc-track{display:flex;overflow-x:auto;scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch;scrollbar-width:none;overscroll-behavior-x:contain}' +
       '.fc-track::-webkit-scrollbar{display:none}' +
       '.fc-slide{flex:0 0 100%;scroll-snap-align:center;box-sizing:border-box;min-width:0}' +
-      '.fc-dots{display:flex;justify-content:center;gap:6px;margin-top:8px}' +
-      '.fc-dot{width:7px;height:7px;border-radius:50%;background:#2a3550;cursor:pointer;transition:background .15s,transform .15s}' +
+      '.fc-dots{display:flex;justify-content:center;flex-wrap:wrap;gap:7px;margin-top:10px;padding:2px 4px}' +
+      '.fc-dot{width:8px;height:8px;border-radius:50%;background:#3a4560;cursor:pointer;flex:none;transition:background .15s,transform .15s}' +
       '.fc-dot.on{background:#7dd3fc;transform:scale(1.25)}' +
       '.fc-bare .fc-card{background:transparent;border:none;padding:2px 0}.fc-bare .fc-wrap{margin-top:0}' +
       '.fc-slbl{font-size:11px;color:#8a9bb4;margin-bottom:6px}' +
-      '.fc-card{background:#0d1322;border:1px solid #1f2740;border-radius:10px;padding:14px;font-size:15px;line-height:1.7;color:#e6e6f0}' +
+      '.fc-card{background:#0d1322;border:1px solid #1f2740;border-radius:10px;padding:14px;font-size:15px;line-height:1.7;color:#e6e6f0;max-height:min(46vh,300px);overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain}' +
       '.fc-lbl{font-size:10px;color:#7a8497;margin-bottom:3px}' +
-      '.fc-ed{width:100%;box-sizing:border-box;background:#10182c;border:1px solid #2a3550;border-radius:8px;color:#e6e6f0;font:inherit;font-size:14px;line-height:1.6;padding:10px 12px;min-height:110px;resize:vertical;margin-bottom:8px}' +
+      '.fc-ed{width:100%;box-sizing:border-box;background:#10182c;border:1px solid #2a3550;border-radius:8px;color:#e6e6f0;font:inherit;font-size:14px;line-height:1.6;padding:10px 12px;min-height:72px;resize:vertical;margin-bottom:8px}' +
       '.fc-btns{display:flex;gap:7px;margin-top:10px}' +
       '.fc-btns button{flex:1;border-radius:9px;padding:10px 0;font-size:13px;cursor:pointer;border:1px solid #2a3550;background:#1a2540;color:#cfe6ff;-webkit-tap-highlight-color:transparent}' +
       '.fc-del{border-color:#7f1d1d!important;color:#fca5a5!important;flex:0 0 42%!important}' +
@@ -47,28 +47,26 @@
     return '很快';
   }
   function cardHtml(st, c, i) {
-    var n = st.cards.length;
-    var stLabel = c._st === 'draft' ? '✏️ 草稿(可改)' : c._st === 'learn' ? '📖 学习中' : c._st === 'collapsed' ? '✓ 已入库' : '✓ 已入 Anki';
-    var slbl = '<div class="fc-slbl">卡 ' + (i + 1) + '/' + n + ' · ' + stLabel + (n > 1 ? ' · 左右滑动切卡 ⇆' : '') + '</div>';
-    if (c._st === 'collapsed') return slbl + '<div class="fc-collapsed" data-fc="expand">🗂 已入 Anki · 距下次复习 <b>' + esc(nextLabel(c._next)) + '</b> · 点看</div>';
+    // 顶部状态提示行已去掉(用户:下方圆点足够指示);卡片框固定大小、内容超出内部滚动(.fc-card max-height)
+    if (c._st === 'collapsed') return '<div class="fc-collapsed" data-fc="expand">🗂 已入 Anki · 距下次复习 <b>' + esc(nextLabel(c._next)) + '</b> · 点看</div>';
     if (c._st === 'draft') {
       var b = c.type === 'cloze'
         ? '<div class="fc-lbl">填空(cloze,答案用 {{c1::…}} 包住)</div><textarea class="fc-ed" data-f="cloze">' + esc(c.cloze) + '</textarea>'
         : '<div class="fc-lbl">正面</div><textarea class="fc-ed" data-f="front">' + esc(c.front) + '</textarea><div class="fc-lbl">背面</div><textarea class="fc-ed" data-f="back">' + esc(c.back) + '</textarea>';
       b += '<div class="fc-btns"><button class="fc-del" data-fc="del">🗑 删除</button><button class="fc-add" data-fc="add">✓ 入库到 Anki</button></div>';
-      return slbl + '<div class="fc-card">' + b + '</div>';
+      return '<div class="fc-card">' + b + '</div>';
     }
     if (c._st === 'preview') {
       var pf = c.type === 'cloze' ? clozeSeg(c.cloze, false) : md(c.front);
       var pb = c.type === 'cloze' ? clozeSeg(c.cloze, true) : md(c.back);
-      return slbl + '<div class="fc-card"><div class="fc-lbl">正面</div>' + pf + '<div class="fc-back"><div class="fc-lbl">背面</div>' + pb + '</div></div>';
+      return '<div class="fc-card"><div class="fc-lbl">正面</div>' + pf + '<div class="fc-back"><div class="fc-lbl">背面</div>' + pb + '</div></div>';
     }
     var front = c.type === 'cloze' ? clozeSeg(c.cloze, false) : md(c.front);
     var back = c.type === 'cloze' ? clozeSeg(c.cloze, true) : md(c.back);
     var body = !c._showBack
       ? '<div class="fc-face" data-fc="reveal">' + front + '<div class="fc-hint">点击显示答案 ▾</div></div>'
       : '<div class="fc-face">' + front + '<div class="fc-back">' + back + '</div></div><div class="fc-eases">' + _EASE.map(function (e) { return '<button class="fc-e ' + e[2] + '" data-ease="' + e[0] + '">' + e[1] + '</button>'; }).join('') + '</div>';
-    return slbl + '<div class="fc-card">' + body + '</div>';
+    return '<div class="fc-card">' + body + '</div>';
   }
   function bindSlide(container, slide, st, i) {
     slide.querySelectorAll('[data-fc]').forEach(function (el) {
