@@ -3870,10 +3870,26 @@
             if (_ur.width && _ur.height) return { kind: 'epub', section: _us.dataset.uid, x: (x - _ur.left) / _ur.width, y: (y - _ur.top) / _ur.height };
           }
           var sec = t && t.closest ? t.closest('.ep-sec') : null;
-          if (!sec || sec.classList.contains('ph')) return null;   // 占位章(未加载)不落锚
+          if (!sec || sec.classList.contains('ph')) {
+            // 任何位置都能钉(用户拍板 2026-07-21):点不在章上(章缝/页边灰区/被浮层元素挡)→ 找**最近的已加载章**,
+            // 比例 clamp 进章——钉章缝=贴上一章底部、水平位置保持(PDF 路同款 fallback,27-rc-adapter)
+            sec = null;
+            var best = 1e18;
+            col.querySelectorAll('.ep-sec:not(.ph)').forEach(function (s2) {
+              var r2 = s2.getBoundingClientRect();
+              if (!r2.width || !r2.height) return;
+              var dx2 = x < r2.left ? r2.left - x : (x > r2.right ? x - r2.right : 0);
+              var dy2 = y < r2.top ? r2.top - y : (y > r2.bottom ? y - r2.bottom : 0);
+              var d2 = dx2 * dx2 + dy2 * dy2;
+              if (d2 < best) { best = d2; sec = s2; }
+            });
+            if (!sec) return null;
+          }
           var r = sec.getBoundingClientRect();
           if (!r.width || !r.height) return null;
-          return { kind: 'epub', section: parseInt(sec.dataset.idx, 10), x: (x - r.left) / r.width, y: (y - r.top) / r.height };
+          return { kind: 'epub', section: parseInt(sec.dataset.idx, 10),
+                   x: Math.max(0, Math.min(1, (x - r.left) / r.width)),
+                   y: Math.max(0, Math.min(1, (y - r.top) / r.height)) };
         },
         // 阶段3 AI 注入:双击便签 → noteInject(助手开着才处理:无笔画走文本通道,有笔画走合成图/视觉通道)
         onDoubleTap: function (note) { try { return noteInject(note); } catch (e) { return false; } },
