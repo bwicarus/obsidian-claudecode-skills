@@ -1280,6 +1280,7 @@
     if (!anchor) { toastMsg('这里放不了便签(不在内容上)'); return; }
     req('POST', { file: O.file, anchor: anchor, color: DEFAULT_COLOR, w: 260, h: 180 }, function (d) {
       if (!d || !d.ok || !d.note) { toastMsg('✗ 便签创建失败'); return; }
+      if (d.note.anchor && anchor) d.note.anchor = anchor;   // vbook:响应锚=真成员局部页,与 DOM 页码空间(视图页)错位→挂错页(用户实锤钉入跳位);本地挂载用请求时的视图页锚,GET 时服务端才回转
       notes.push(d.note);
       if (!ensureMounted(d.note)) toastMsg('便签已创建(所在页尚未渲染,渲染后出现)');
     });
@@ -1310,6 +1311,7 @@
     req('POST', { file: O.file, anchor: anchor, color: DEFAULT_COLOR, w: 300, h: 210, collapsed: false,
                   video: _vid }, function (d) {
       if (!d || !d.ok || !d.note) { toastMsg('✗ 便签创建失败'); return; }
+      if (d.note.anchor && anchor) d.note.anchor = anchor;   // vbook:响应锚=真成员局部页,与 DOM 页码空间(视图页)错位→挂错页(用户实锤钉入跳位);本地挂载用请求时的视图页锚,GET 时服务端才回转
       notes.push(d.note);
       if (!ensureMounted(d.note)) toastMsg('视频便签已建(所在页尚未渲染,渲染后出现)');
       else toastMsg('✅ 视频已放进书页便签');
@@ -1327,6 +1329,7 @@
     var w0 = 300, bw0 = 0; try { var mm = O.mount(anchor); if (mm && mm.el && mm.el.clientWidth) { bw0 = mm.el.clientWidth; w0 = Math.max(240, Math.min(480, Math.round(bw0 * 0.44))); } } catch (e) {}   // 卡宽按页面宽自适应+记创建时页宽(缩放等比跟随,用户拍板)
     req('POST', { file: O.file, anchor: anchor, color: '#0d1322', w: w0, h: 210, collapsed: false, card: { cards: cards, gid: gid || '', base_w: bw0 } }, function (d) {   // 暗色玻璃=卡片观感(用户:钉住的是卡,不是白便签)
       if (!d || !d.ok || !d.note) { toastMsg('✗ 便签创建失败'); return; }
+      if (d.note.anchor && anchor) d.note.anchor = anchor;   // vbook:响应锚=真成员局部页,与 DOM 页码空间(视图页)错位→挂错页(用户实锤钉入跳位);本地挂载用请求时的视图页锚,GET 时服务端才回转
       notes.push(d.note);
       if (!ensureMounted(d.note)) toastMsg('卡片便签已建(所在页尚未渲染,渲染后出现)');
       else toastMsg('✅ 卡片已钉到书页');
@@ -1344,6 +1347,7 @@
     var w1 = 300, bw1 = 0; try { var mh = O.mount(anchor); if (mh && mh.el && mh.el.clientWidth) { bw1 = mh.el.clientWidth; w1 = Math.max(240, Math.min(480, Math.round(bw1 * 0.44))); } } catch (e) {}   // 卡宽按页面宽自适应+记创建时页宽
     req('POST', { file: O.file, anchor: anchor, color: '#0d1322', w: w1, h: 210, collapsed: false, html: { content: htmlObj.content, isHtml: !!htmlObj.isHtml, label: htmlObj.label || '', type: htmlObj.type || '', icon: htmlObj.icon || '', base_w: bw1 } }, function (d) {   // 暗色玻璃=卡片观感
       if (!d || !d.ok || !d.note) { toastMsg('✗ 便签创建失败'); return; }
+      if (d.note.anchor && anchor) d.note.anchor = anchor;   // vbook:响应锚=真成员局部页,与 DOM 页码空间(视图页)错位→挂错页(用户实锤钉入跳位);本地挂载用请求时的视图页锚,GET 时服务端才回转
       notes.push(d.note);
       if (!ensureMounted(d.note)) toastMsg('卡片便签已建(所在页尚未渲染,渲染后出现)');
       else toastMsg('✅ 卡片已钉到书页');
