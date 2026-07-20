@@ -817,10 +817,15 @@ def _t_recall_creation(args, ctx):
         out["内容"] = c.get("content") or "(这条没有存正文)"
         try:   # 结构卡重现(用户实锤 2026-07-21:recall 命中天气却只回文字——卡片应照当初一样再显示)
             _r0 = json.loads(c.get("content") or "")
-            _ca0 = _r0.get("client_action") if isinstance(_r0, dict) else None
-            if isinstance(_ca0, dict) and _ca0.get("fn") == "renderInfoCard":
-                out["client_action"] = _ca0
-                out["note"] = "结果卡已重新显示在用户屏幕上,口头讲要点即可"
+            if isinstance(_r0, dict):
+                _cd0 = _r0.get("card")
+                _ca0 = _r0.get("client_action")
+                if isinstance(_cd0, dict) and _cd0.get("kind"):
+                    out["client_action"] = {"fn": "renderInfoCard", "args": [_cd0]}
+                elif isinstance(_ca0, dict) and _ca0.get("fn") == "renderInfoCard":
+                    out["client_action"] = _ca0
+                if out.get("client_action"):
+                    out["note"] = "结果卡已重新显示在用户屏幕上,口头讲要点即可"
         except Exception:
             pass
     return out
@@ -2344,7 +2349,7 @@ def _t_web_search(args, ctx):
                 _ts = [it.get("t") or "" for it in (card.get("data") or {}).get("items") or [] if it.get("t")]
                 if _ts:
                     idx = " 卡片条目:" + ";".join(_ts[:5]) + "。"
-            return {"ok": True, "kind": card["kind"], "silent": True,
+            return {"ok": True, "kind": card["kind"], "silent": True, "card": card,   # card 本体随 res 存进创造物 → recall 能重现结果卡(client_action 登记前已被 pop,存不下)
                     "note": "搜索结果已用卡片显示在用户屏幕上,本轮到此结束(系统不会请你发言)。"
                             "结果概况:" + brief + "。" + idx +
                             "用户下次说话时若与此相关,直接运用这些信息回答;不要主动复述卡片内容。",
