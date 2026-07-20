@@ -3,6 +3,29 @@
 > Anki 卡片以**工具结果卡**为载体,贯穿"制卡→编辑→确认→学习→收纳→钉到页面"全生命周期;
 > 字幕模式与侧边栏共用同一张卡。美术与现有工具卡(rc-turncard/voiceCard 形态)完全一致化。
 
+## ⭐ 状态机(用户 2026-07-21 纠正定稿,取代早前误解)
+```
+draft 草稿(保留/修改):可编辑 + [🗑 删除] [✓ 入库到 Anki]
+   点入库 = **直接进 Anki**(即使不再操作也没关系);拿 note_id
+learn 学习态 = 普通 Anki 卡:正面 → 点击显示答案 → 四档(再来/困难/良好/简单,就是普通 Anki)
+   评分 → /pdf/api/review-answer{note_id,ease} → answerCards 真 FSRS + 返回下次到期
+collapsed 收起:长条 +「距下次复习 X」倒计时(Anki 冷却时间);可再点→圆球(B3)
+```
+**关键**:入库是唯一入库口(不是"完成→掌握确认"的三段式,那是我早前误解)。入库后即普通 Anki 卡。
+卡片版面后续直接复用到 rc-review 复习页(用户说之后再讨论)。已上线:rc-flashcard 三态 +
+review-answer 支持 note_id→card_id + 返回 cardsInfo.interval 倒计时。
+
+## 待修:语音制卡消息重复(审计 wj62f99wj,scratchpad/card-audit.json)
+根因(P0):turnTool 守卫在每个 response.created 复位,但一次制卡横跨两 response(工具在R1、AI汇报在R2)
+→ ㊸b 承诺核查在 R2.done 误判"没调工具"→ 幻影补交第二个 make_anki → 双任务/双占位/一成一败并存。
+修法:turnTool 改**用户轮作用域**(删 3058 无条件复位,新增 turnToolAny + cardTaskDone 单槽,派发瞬间置位);
+㊸b 改判 !turnToolAny && !cardTaskDone + 收紧正则;占位每轮唯一、结果就地替换而非并排 addPart。
+
+## 待接:天气卡形态 + 字幕模式(审计同上)
+制卡结果 kind='cards' 现只进侧栏 turnCard,缺 renderInfo 式浮层镜像 → 字幕模式不出卡。
+__vcInfoCardEl(rc-voicecall:1256)是静态渲染器无编辑态;renderInfo(1270)双宿主(turnCard+浮层)。
+接法待定:让制卡结果也镜像浮层 / 卡壳换 vc-if 天气卡观感。
+
 ## 卡片状态机(用户规格原文精神)
 
 ```

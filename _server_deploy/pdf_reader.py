@@ -9011,12 +9011,26 @@ def pdf_api_review_answer():
     body = request.get_json(silent=True) or {}
     aid = (body.get("aid") or "").strip()[:64]
     try:
-        cid = int(body.get("card_id"))
         ease = int(body.get("ease") or 0)
     except (TypeError, ValueError):
-        return jsonify({"ok": False, "error": "bad card_id/ease"}), 400
+        return jsonify({"ok": False, "error": "bad ease"}), 400
     if not (1 <= ease <= 4):
         return jsonify({"ok": False, "error": "bad ease"}), 400
+    aurl0 = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
+    cid = None
+    try:
+        if body.get("card_id"):
+            cid = int(body.get("card_id"))
+        elif body.get("note_id"):   # 融合复习卡:草稿入库拿到 note_id → 评分前转 card_id
+            _fc = _rq.post(aurl0, json={"action": "findCards", "version": 6,
+                                        "params": {"query": "nid:%d" % int(body["note_id"])}}, timeout=12).json()
+            _cids = _fc.get("result") or []
+            if _cids:
+                cid = int(_cids[0])
+    except (TypeError, ValueError, Exception):
+        cid = None
+    if not cid:
+        return jsonify({"ok": False, "error": "card not found"}), 404
     try:
         seen = json.loads(_REVIEW_SEEN_FILE.read_text("utf-8"))
         assert isinstance(seen, list)
@@ -9041,7 +9055,13 @@ def pdf_api_review_answer():
             _REVIEW_SEEN_FILE.write_text(json.dumps(seen[-2000:]), "utf-8")
         except Exception:
             pass
-    return jsonify({"ok": True})
+    nxt = {}   # 评分后拿这张卡的下次到期(供前端收起态倒计时)
+    try:
+        ci = (_rq.post(aurl, json={"action": "cardsInfo", "version": 6, "params": {"cards": [cid]}}, timeout=12).json().get("result") or [{}])[0]
+        nxt = {"interval": ci.get("interval"), "due": ci.get("due"), "queue": ci.get("queue"), "type": ci.get("type")}
+    except Exception:
+        pass
+    return jsonify({"ok": True, "next": nxt})
 
 
 @bp.route("/api/vocab-mastery-map")
