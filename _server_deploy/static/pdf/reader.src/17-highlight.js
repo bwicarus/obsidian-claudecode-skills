@@ -176,6 +176,20 @@ async function saveHighlight({pw, sIdx, eIdx, color, kind='note', sentence='', b
     localStorage.setItem('pdf-hl-last-color', color);
     return d.highlight;
   } catch (e) {
+    // 网络不通 + outbox → local-first:客户端生成 id(c_ 前缀),本地即时渲染,
+    // 入队恢复后补投(服务端 POST 幂等 upsert 同 id,重放安全)。2026-07-20 outbox 第二批。
+    if (window.RC && RC.outbox && e && e.name === 'TypeError') {
+      const cid = 'c_' + Array.from(crypto.getRandomValues(new Uint8Array(8))).map(b => b.toString(16).padStart(2, '0')).join('');
+      const h = Object.assign({ id: cid, time: Math.floor(Date.now() / 1000) }, payload);
+      _allHighlights.push(h);
+      (_hlByPage[pageNum] ||= []).push(h);
+      renderHighlightsOnPage(pw, pageNum);
+      _lastHlColor = color;
+      try { localStorage.setItem('pdf-hl-last-color', color); } catch (_) {}
+      RC.outbox.send('hl', cid, '/pdf/api/highlights', Object.assign({ id: cid }, payload));
+      if (RC.toast) RC.toast('已高亮(离线,恢复后自动同步)');
+      return h;
+    }
     alert('保存高亮异常：' + e.message);
     return null;
   }

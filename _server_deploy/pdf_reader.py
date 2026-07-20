@@ -10539,8 +10539,13 @@ def pdf_api_highlights_create():
         norm.append([round(x0,2), round(y0,2), round(x1,2), round(y1,2)])
     if not norm:
         return jsonify({"ok": False, "error": "no valid rects"}), 400
+    # local-first outbox:接受客户端生成 id(c_ 前缀)→ 幂等 upsert;离线补投重放安全,重复 POST 不重复建
+    import re as _re_cid
+    cid = (data.get("id") or "").strip()
+    if cid and not _re_cid.fullmatch(r"c_[a-f0-9]{8,32}", cid):
+        cid = ""
     obj = {
-        "id": "h_" + os.urandom(6).hex(),
+        "id": cid or ("h_" + os.urandom(6).hex()),
         "page": page,
         "rects": norm,
         "color": color,
@@ -10557,6 +10562,8 @@ def pdf_api_highlights_create():
             obj["page_w"] = float(pw); obj["page_h"] = float(ph)
         except (TypeError, ValueError): pass
     db = _hl_load(rel)
+    if cid:   # upsert:同 id 已在(上次重放已成功但客户端没收到确认)→ 覆盖而非重复追加
+        db["highlights"] = [h for h in db["highlights"] if h.get("id") != cid]
     db["highlights"].append(obj)
     _hl_save(rel, db)
     return jsonify({"ok": True, "id": obj["id"], "highlight": obj})
