@@ -1886,7 +1886,7 @@
       // ㊵ 拉模式(用户拍板"只在需要时读取"):翻页/滚动**只更新本地状态,一个字都不发**——
       // 内容在用户开口/发文字的瞬间经 _rtcFlushCtx 注入(不问=零注入);模型要更多内容自己调 read_page
       var np = j.page;
-      if (np && np !== _rtc.ctxPage) { _rtc._inkFp = ''; _rtc.inkDirty = false; }
+      if (np && np !== _rtc.ctxPage) { _rtc._inkFp = ''; _rtc.inkDirty = false; _rtc.inkText = ''; }
       if (np) _rtc.ctxPage = np;
       if (j.total) _rtc.ctxTotal = j.total | 0;   // 131:总页数(用户实测 AI 上下文里没有,答不出"这本书多少页/还剩多少")
       if (j.text != null) _rtc.pendText = String(j.text || '');
@@ -1901,7 +1901,8 @@
       // 探针证实墨迹推到了 relay(⇡ink),却没有任何 role=system 的 item 进过对话——_dcSend 在 dc 未 open 时
       // 是静默丢弃的,失败无声无息,于是 bca7bb7 的措辞等于从没生效。别再往这条哑路上加东西。
       // 本地状态(_rtc.ink/inkDirty)仍要维护:见 see_ink 成功后的边沿复位。
-      if (!strokes.length) { _rtc.inkDirty = false; return; }
+      if (!strokes.length) { _rtc.inkDirty = false; _rtc.inkText = ''; return; }
+      _rtcInkFetch(j.page || _rtc.ctxPage);   // 每次笔迹变化都刷圈中文字(防抖;fp 去重已挡重复事件)
       if (_rtc.inkDirty) return;
       _rtc.inkDirty = true;
     } else if (t === 'state') {
@@ -2719,6 +2720,19 @@
     fetch('/api/assistant/creations-brief').then(function (r) { return r.json(); })
       .then(function (d) { if (d && d.ok) _rtc.creLine = d.line || ''; }).catch(function () {});
   }
+  function _rtcInkFetch(pg) {   // 圈画→圈中文字(POST voice-ctx,豆包路同端点):存 _rtc.inkText,用户开口时随 _rtcFlushCtx 注入。
+    //   ⚠ 不走 ink 事件瞬间 _rtcSys 直发——那条路 dc 未 open 时静默丢弃,bca7bb7 实锤从没落地过(1899 注释)。
+    clearTimeout(_rtcInkFetch._t);
+    _rtcInkFetch._t = setTimeout(function () {
+      var f = _rtc.ctxFile, p2 = pg || _rtc.ctxPage, st = _rtc.ink || [];
+      if (!f || !p2 || !st.length) return;
+      fetch('/api/assistant/voice-ctx', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file: f, page: p2, strokes: st }) })
+        .then(function (r) { return r.json(); })
+        .then(function (d) { if (d && d.ok && p2 === _rtc.ctxPage) _rtc.inkText = (d.inked_text || '').slice(0, 400); })
+        .catch(function () {});
+    }, 800);
+  }
   function _rtcFetchPageText(pk) {   // 页文本兜底拉取(去重:同 key 只飞一发)
     if (_rtc._ptBusy === pk) return;
     _rtc._ptBusy = pk;
@@ -2746,11 +2760,17 @@
            + '。用户提到"刚才查的/搜的/那张纸/第几题的答案"→ **先 recall_creation 再答**;纸类条目会给题目+标准答案+检查报告——'
            + '题目是纸上自制的,书里没有逐字题目,别去 search_book 找题目原文')
         : '';
-      var fp = _rtc.ctxPage + '/' + (_rtc.ctxTotal || 0) + ':' + vt.length + ':' + vt.slice(0, 30) + ':' + cre.length + ':' + cre.slice(0, 24);
+      var ik = (_rtc.ink && _rtc.ink.length) ? (_rtc.inkText || '') : '';   // 圈画告知(用户实锤:圈完用代词问,AI 全然不知有圈中内容——WebRTC 路没 relay 注入)
+      var ikHint = '';
+      if (_rtc.ink && _rtc.ink.length) {
+        ikHint = ik ? ('。⚠ 他刚在本页**圈画**了内容:「' + ik + '」——他说『这个/这里/圈的/画的』时**优先指圈中内容**(优先级高于整页);要看圈画的视觉形态(箭头/图形/位置)才调 see_ink')
+                    : '。⚠ 他刚在本页**圈画**了内容(圈中文字提取不到,可能是图形/图片区)——他说『这个/这里/圈的』时优先指圈中内容,先调 see_ink 看圈了什么再回应';
+      }
+      var fp = _rtc.ctxPage + '/' + (_rtc.ctxTotal || 0) + ':' + vt.length + ':' + vt.slice(0, 30) + ':' + cre.length + ':' + cre.slice(0, 24) + ':' + ik.length + ':' + ((_rtc.ink && _rtc.ink.length) || 0);
       if (fp === _rtc._sentCtxFp) return;
       _rtc._sentCtxFp = fp;
       _rtcSys('(用户此刻在第 ' + _rtc.ctxPage + ' 页/章' + (_rtc.ctxTotal ? '(全书共 ' + _rtc.ctxTotal + ' 页)' : '') +
-              (vt ? ',当前可见内容:' + vt.slice(0, 1500) : ',需要页面内容就调 read_page') + rcHint +
+              (vt ? ',当前可见内容:' + vt.slice(0, 1500) : ',需要页面内容就调 read_page') + ikHint + rcHint +
               '。回答以本条为准;状态记录,不要回应本条。)');
     } catch (e) {}
   }
