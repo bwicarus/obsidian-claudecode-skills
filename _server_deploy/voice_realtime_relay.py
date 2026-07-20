@@ -1996,6 +1996,12 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                             except Exception:
                                 pass
                         asyncio.create_task(_refresh_pt())
+                elif t == "note":   # 统一注入端口(references/voice-context-injection.md):前端通告→存 book,下次开口(450)注入
+                    _nt0 = (j.get("text") or "").strip()[:800]
+                    if _nt0:
+                        book.setdefault("ctx_notes", []).append(_nt0)
+                        if len(book["ctx_notes"]) > 10:
+                            book["ctx_notes"] = book["ctx_notes"][-10:]
                 elif t == "state":
                     book["sel"] = (j.get("sel") or "").strip()[:400]
                 elif t == "ink":
@@ -3635,6 +3641,11 @@ async def handle_browser(bws):
                         elif ev == 450:   # 用户开口:①重推最新 SP(指纹确认制:没变且已确认的不推) ②打断深度思考播报(官方要求:被打断不补 end 包)
                             book["deep_abort"] = True
                             book["ack_rec"] = None   # 确认语合成被打断 → 丢弃残缺录音(防缓存半句)
+                            if book.get("ctx_notes"):   # 统一端口:pending 通告随开口注入(502 external_rag,append-only 不动 SP 前缀)
+                                _cn0 = book.pop("ctx_notes")
+                                _rag_n = json.dumps([{"title": "系统状态通告(背景信息,不要复述本条)",
+                                                      "content": ";".join(_cn0)[:1500]}], ensure_ascii=False)
+                                asyncio.create_task(dws.send(enc(T_FULL_CLIENT, 502, json.dumps({"external_rag": _rag_n}, ensure_ascii=False).encode(), session_id=sid)))
                             asyncio.create_task(_push_sp())
                         elif ev == 451:   # 记录用户语音终稿(笔迹询问程序兜底判定用)
                             try:

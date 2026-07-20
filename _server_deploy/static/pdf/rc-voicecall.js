@@ -1122,16 +1122,10 @@
     if (_pins.t) clearTimeout(_pins.t);
     _pins.t = setTimeout(function () {
       _pins.t = null;
-      var ks = Object.keys(_pins.map);
-      var fp = ks.sort().join('|');
-      if (fp === _pins.fp) return;
-      _pins.fp = fp;
-      if (!_rtc.on) return;
-      var msg = ks.length
-        ? '(参考内容更新(以本条为准,之前的带入/移除声明全部作废):用户当前带入 ' + ks.length + ' 项——' +
-          ks.map(function (k) { return '「' + k + '」:' + _pins.map[k]; }).join(';') + '。状态记录,不要回应本条。)'
-        : '(参考内容更新:用户已移除全部带入内容,之前的带入声明作废。状态记录,不要回应本条。)';
-      try { _rtcSys(msg); } catch (e) {}
+      // 统一端口迁移(references/voice-context-injection.md #1):fp/通道判定归 voiceCtx(投递成功才前移,
+      //   根治"通话外改 pin 推进 fp → 下通电话漏快照");文案在模块尾 register('pins') 的 text()
+      var ks = Object.keys(_pins.map).sort();
+      try { RC.voiceCtx && RC.voiceCtx.state('pins', { labels: ks, map: _pins.map }); } catch (e) {}
     }, 1200);
   }
   // 用户强调:同一编号(cid)的卡无论出现在字幕浮层 / 侧栏 / 收藏夹,选中一处则**处处高亮**,
@@ -1197,20 +1191,10 @@
       el.addEventListener(evn, function () { if (lpT) { clearTimeout(lpT); lpT = null; } });
     });
   }
-  var _goneBuf = [], _goneT = null;
-  function _imgGoneNote(it) {   // ✕删除通告(用户设计 2026-07-21):**不改历史**(改前缀=prompt 缓存全失效),
-    //   在上下文末尾**追加**一条说明——AI 之后知道"用户删了哪张";他说「找错了/重新找」AI 就知道指什么。
-    //   连删 800ms 合并一条;注册表不删(编号永久可解析,防已删编号渲染裂图);dc 未 open 不发(哑路教训),环里留底。
+  function _imgGoneNote(it) {   // ✕删除通告 → 统一端口 event(append-only 不改历史保缓存;800ms 合并;
+    //   无通话=pending 环留底,通话建立/文字 send 补投——根治"dc 没开时删图信息永久丢失+死环零消费")
     if (!it) return;
-    _goneBuf.push('「' + (it.title || '图') + '」' + (it.aid ? '(编号 ' + it.aid + ')' : ''));
-    try { window.__vcRemovedImgs = (window.__vcRemovedImgs || []).concat([{ aid: it.aid || '', title: it.title || '' }]).slice(-8); } catch (e) {}
-    clearTimeout(_goneT);
-    _goneT = setTimeout(function () {
-      var list = _goneBuf.splice(0).join('、');
-      if (!list) return;
-      if (_rtc.on && _rtc.dc && _rtc.dc.readyState === 'open')
-        _rtcSys('(用户点✕移除了配图卡里的:' + list + ' ——他不想要这些;他说「找错了/重新找」指的就是它们,换关键词重搜,别再展示这些编号。状态记录,不要回应本条。)');
-    }, 800);
+    try { RC.voiceCtx && RC.voiceCtx.event('removed_imgs', { aid: it.aid || '', title: it.title || '' }, { mergeMs: 800 }); } catch (e) {}
   }
   function _igWire(root, card) {   // 88/98:图卡+视频卡交互——✕移除;点封面=只选中这一张(带入上下文,再点取消);视频▶=播放
     if (!card || (card.kind !== 'images' && card.kind !== 'videos')) return;
@@ -1883,7 +1867,7 @@
     } catch (e) { return false; }
   };
   function _rtcShimWs() {   // 顶替全局 ws:同步消息翻译成 dc,二进制(音频)忽略(媒体走 WebRTC 轨)
-    return { readyState: 1, close: function () {}, send: function (data) {
+    return { readyState: 1, __shim: 1, close: function () {}, send: function (data) {
       if (typeof data !== 'string') return;
       // ㊺P2:上行状态(page/state/ink)镜像给控制 WS——relay 是工具执行者,ctx 要最新笔迹/选中/页码
       try { if (_rtc.ctlWs && _rtc.ctlWs.readyState === 1) _rtc.ctlWs.send(data); } catch (e) {}
@@ -3185,7 +3169,8 @@
         content: [{ type: 'input_text', text: '(更早的对话已压缩为摘要:' + summary.slice(0, 1500) + '\n——以此为背景延续对话;状态记录,不要回应本条。)' }] } });
       if (prevSumId) del.push({ id: prevSumId });   // 新摘要已插:旧摘要现在可以安全删
       del.forEach(function (it) { _dcSend({ type: 'conversation.item.delete', item_id: it.id }); });
-      _rtc._pageFp = ''; _rtc._inkFp = '';   // 旧 page/ink 注入可能被删:指纹作废,2s 轮询会把当前页/笔迹状态重推
+      _rtc._pageFp = ''; _rtc._inkFp = ''; _rtc._sentCtxFp = '';   // 旧注入可能被删:指纹全作废(盘点实锤:此前漏清 _sentCtxFp→删掉的 ctx 同状态不重推)
+      try { RC.voiceCtx && RC.voiceCtx.invalidate(); } catch (e) {}   // 统一端口指纹同步作废(唯一清理入口)
       try { threadMsg('asst-note', '📦 通话上下文已压缩(单轮输入 ' + Math.round(_rtc.inTok / 1000) + 'k tokens → 摘要+近几轮)'); } catch (e) {}
     } catch (e) { _rtc.lastCompact = 0; }
   }
@@ -3313,7 +3298,7 @@
       // ㊸b 承诺核查(用户设计:语音模型只是扳机、不产卡片内容——察觉"说了做卡却没调工具"时,
       // **程序直接替它把工具真调了**,种子=本轮对话上下文,后台制卡模型自己判断做什么卡;
       // 不再让语音模型多走一轮(那只是白烧一轮音频输出费),只留一条零成本 system 记录让它知道)
-      if (!_rtc.turnTool && !_rtc.turnToolAny && /已经?[^。]{0,14}(整理成|做成|放进|加进|做好)[^。]{0,10}(卡片|カード|笔记|ノート)|(卡片|笔记)[^。]{0,6}(已|放进后台|做好了)/.test(curAText)
+      if (!_rtc.turnTool && !_rtc.turnToolAny && /已经?[^。]{0,14}(整理成|做成|放进|加进|做好)[^。]{0,10}(卡片|カード|笔记|ノート)|(卡片|笔记)[^。]{0,4}(做好了|已做好|已生成|已入库|放进后台)/.test(curAText)   // 155b:裸'卡片…已'误伤'天气卡片里已经给出'(用户截图)——收紧为明确制作动作
           && Date.now() - (_rtc.scoldT || 0) > 60000) {
         _rtc.scoldT = Date.now();
         (function () {
@@ -3548,7 +3533,7 @@
       });
       var dc = pc.createDataChannel('oai-events');
       dc.onmessage = function (ev) { try { _rtcOnEvent(JSON.parse(ev.data)); } catch (e) {} };
-      dc.onopen = function () { if (!fresh) _rtcInjectHistory(); };   // ㉞:非新话题=把之前的对话记录带回来
+      dc.onopen = function () { if (!fresh) _rtcInjectHistory(); try { RC.voiceCtx && RC.voiceCtx.flushPending('rtc'); } catch (e) {} };   // ㉞:历史回放在前(延续语境),再补投 pending 通告(统一端口)
       dc.onclose = function () {   // 通话中 dc 意外关闭(如超限消息触发的规范性关闭)→ 重连自愈,别无声哑死
         if (_rtc.on && _rtc.dc === dc) _rtcDead('数据通道断开');
       };
@@ -4244,4 +4229,31 @@
   RC.voicecall = { toggle: toggle, isOpen: function () { return !!ws; }, setPage: setPage, syncInk: syncInk, syncState: syncState,
     // 设置面板改了语音配置 → 通知 relay 热更(S2S 通话中才有意义;relay 指纹含 tts,变了才真发 UpdateConfig)
     pushCfg: function () { try { if (ws && ws.readyState === 1 && mode === 's2s') ws.send(JSON.stringify({ type: 'cfg' })); } catch (e) {} } };
+  // ── 统一注入端口接线(references/voice-context-injection.md):通道 bind + kind 注册 ──
+  //   铁律:今后加任何注入只调 RC.voiceCtx.state/event,严禁直连 _rtcSys / relay ws。
+  try {
+    if (RC.voiceCtx) {
+      RC.voiceCtx.bindTransport('rtc', {
+        isOpen: function () { return !!(_rtc.on && _rtc.dc && _rtc.dc.readyState === 'open'); },
+        send: function (t) { if (!(_rtc.on && _rtc.dc && _rtc.dc.readyState === 'open')) return false; _rtcSys(t); return true; }
+      });
+      RC.voiceCtx.bindTransport('relay', {   // 豆包 S2S:经上行 {type:'note'},relay 存 book 下次开口注入
+        isOpen: function () { try { return !!(ws && !ws.__shim && ws.readyState === 1 && mode === 's2s' && !_rtc.on); } catch (e) { return false; } },   // __shim 排除:rtc 模式全局 ws 被 shim 顶替(readyState 恒1),不排除会把通告吞进假通道
+        send: function (t) { try { ws.send(JSON.stringify({ type: 'note', text: t })); return true; } catch (e) { return false; } }
+      });
+      RC.voiceCtx.register('pins', { cls: 'state', budget: 2500,
+        fp: function (p) { return (p.labels || []).join('¦'); },
+        text: function (p) {
+          var ks = p.labels || [];
+          if (!ks.length) return '参考内容更新:用户已移除全部带入内容,之前的带入声明作废';
+          return '参考内容更新(以本条为准,之前的带入/移除声明全部作废):用户当前带入 ' + ks.length + ' 项——' +
+                 ks.map(function (k) { return '「' + k + '」:' + (p.map[k] || ''); }).join(';');
+        } });
+      RC.voiceCtx.register('removed_imgs', { cls: 'event', budget: 600,
+        text: function (items) {
+          var list = (items || []).map(function (it) { return '「' + (it.title || '图') + '」' + (it.aid ? '(编号 ' + it.aid + ')' : ''); }).join('、');
+          return list ? ('用户点✕移除了配图卡里的:' + list + ' ——他不想要这些;他说「找错了/重新找」指的就是它们,换关键词重搜,别再展示这些编号') : '';
+        } });
+    }
+  } catch (e) {}
 })();

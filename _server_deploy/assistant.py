@@ -5202,11 +5202,25 @@ def _ctx_block(ctx):
             base += ("\n【用户提供的内容(独立片段,与整本书无关)】\n" + att +
                      "\n→ 用户仍显式带来了上面这些内容,请**针对它们**回答(可用 lookup_word/translate/explain/see_figure 处理它们),"
                      "只是别把它们跟书的其余内容/章节挂钩、也别为它们去 read_page。")
-        return base + _pinned_lines(ctx)
+        return base + _pinned_lines(ctx) + _announce_lines(ctx)
     full = _sys_prompt(ctx)
     i = full.rfind("【当前页面】")
     out = full[i:] if i >= 0 else ""
-    return out + _pinned_lines(ctx)
+    return out + _pinned_lines(ctx) + _announce_lines(ctx)
+
+
+def _announce_lines(ctx):
+    """统一注入端口·文字路(references/voice-context-injection.md):send 时 ctx.announcements=
+    {events:[...],states:[...]}(RC.voiceCtx.drainForSend)→ prompt【系统通告】段。event=append-only 必达
+    (无通话期间的删图等通告也经此送到);state=每轮重给当前值。"""
+    a = ctx.get("announcements") or {}
+    ev, st = (a.get("events") or []), (a.get("states") or [])
+    if not ev and not st:
+        return ""
+    out = "\n\n【系统通告(背景状态,不要复述本段)】"
+    for t in (list(ev) + list(st))[:8]:
+        out += "\n- " + str(t)[:500]
+    return out
 
 
 def _pinned_lines(ctx):

@@ -1849,6 +1849,10 @@
     }
     var sentCtx = ctx();                                // 发送时定格上下文(图/选中/页),气泡卡片与后端保存的元数据一致
     try { var _pn0 = window.__vcPins ? window.__vcPins() : []; if (_pn0.length) sentCtx.pinned = _pn0.slice(0, 8); } catch (e) {}   // 97:长按带入的卡片(文字模式同样入上下文)
+    try {   // 统一注入端口(references/voice-context-injection.md):无通话期间积累的通告(删图等)随 send 送达,event 出环
+      var _ann = window.RC && RC.voiceCtx ? RC.voiceCtx.drainForSend() : null;
+      if (_ann && ((_ann.events || []).length || (_ann.states || []).length)) sentCtx.announcements = _ann;
+    } catch (e) {}
     // 「书页」点暗(rcNoBook)= 脱离这本书问通用问题 → 只剥**书本大上下文**(章/页定位、视口文字、选中所在句);
     //   **保留**用户显式选中/带入的 chip(选中文字/图/便签/焦点)——它们变成"独立片段/图"仍喂给 AI(用户诉求:
     //   关书页不该连我选中的都看不见)。后端 _ctx_block(no_book) 会把这些当独立内容拼进去。
