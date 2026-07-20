@@ -832,7 +832,7 @@
     _hd.moved = true;
     _hd.ctl.root.style.transform = 'translate(' + dx + 'px,' + dy + 'px) scale(1.03)';
     if (_isCardNote(_hd.ctl) && window.RC && RC.voiceCard && RC.voiceCard.trash) { RC.voiceCard.trash.show(true); RC.voiceCard.trash.hot(RC.voiceCard.trash.inZone(e.clientX, e.clientY)); }   // 卡便签:拖起亮左上角删除区(浮层同区)
-    try { anchorFxShow(e.clientX, e.clientY); } catch (e2) {}   // #51:拖动实时标出将锚定的位置(光带/插入线)
+    try { var _rr9 = _hd.ctl.root.getBoundingClientRect(); anchorFxShow(_rr9.left + 8, _rr9.top + 8, _hd.ctl.root); } catch (e2) {}   // #51:探测点=**卡左上角**(=钉入点,用户拍板);隐自身穿透(拖已钉便签恒横线的根因)
   }
   function onHandleUp(e) {
     var g = _hd; if (!g) return;
@@ -894,7 +894,7 @@
     // 松手:便签左上角(+4px 进容器内)→ anchorFromPoint 重解析目标容器(支持拖过页/章边界)→ PATCH。
     // rect0=拖动起点屏幕矩形(fixed 也适用),reanchorAt 用屏幕坐标 elementFromPoint → portaled(fixed)照样正确。
     var wasPortaled = ctl.portaled;
-    var anchor = reanchorAt(ctl, rect0.left + dx + 4, rect0.top + dy + 4);
+    var anchor = _probeHidden(ctl.root, function () { return reanchorAt(ctl, rect0.left + dx + 4, rect0.top + dy + 4); });   // #51:穿透自身探测(否则 EPUB 可能锚到便签自身文字/portal 态恒 fallback)
     ctl.root.style.transform = '';
     if (!anchor) { toastMsg('放不到这里(不在内容页上),已弹回'); return; }   // 清 transform→回原位(portaled 回 fixed 原点)
     ctl.note.anchor = anchor;
@@ -1351,14 +1351,27 @@
   }
 
   // ── 拖动锚定反馈层(#51 用户设计,所有拖动统一挂:便签拖动/单图拖出/侧栏拖出/钉子卡拖动)──
+  function _probeHidden(el, fn) {
+    // 探测穿透(#51 修:拖动物自己压住内容,elementFromPoint/caretFromPoint 全命中它→恒横线/EPUB 甚至锚到便签自身文字)
+    // 同步 隐藏→探测→恢复 在同一帧内完成,不产生可见闪烁(拖拽库标准做法)。
+    if (!el) return fn();
+    var pv = el.style.visibility;
+    el.style.visibility = 'hidden';
+    try { return fn(); } finally { el.style.visibility = pv || ''; }
+  }
   var _afx = null;
-  function anchorFxShow(cx, cy) {
+  function anchorFxShow(cx, cy, ignoreEl) {
     // #51 粒度=单词(用户设计):近文字(词中心 ≤48px)→**单词精确框**(锚定=绑到这个词,注入=词所在句后方);
     //   超范围/空白/clamp → 横线(内容插入位置=排到上方内容/段落之后)。旧 20px 光带退役。
     if (!O) return;
     if (!_afx) { _afx = document.createElement('div'); _afx.className = 'rc-anchor-fx'; }
-    var wr = null;
-    try { wr = O.noteWordRect ? O.noteWordRect(cx, cy) : null; } catch (e) {}
+    var wr = null, _aa = null;
+    try {
+      _probeHidden(ignoreEl, function () {
+        try { wr = O.noteWordRect ? O.noteWordRect(cx, cy) : null; } catch (e) {}
+        if (!wr) { try { _aa = O.anchorFromPoint ? O.anchorFromPoint(cx, cy) : null; } catch (e) {} }
+      });
+    } catch (e) {}
     if (wr && wr.el && (wr.dist == null || wr.dist <= 48)) {
       _afx.classList.add('rc-afx-word'); _afx.classList.remove('rc-afx-line');
       if (_afx.parentElement !== wr.el) wr.el.appendChild(_afx);
@@ -1368,7 +1381,7 @@
       _afx.style.display = 'block';
       return;
     }
-    var a = null; try { a = O.anchorFromPoint ? O.anchorFromPoint(cx, cy) : null; } catch (e) {}
+    var a = _aa;
     if (!a) { anchorFxHide(); return; }
     var m = null; try { m = O.mount(a); } catch (e) {}
     if (!m || !m.el || typeof m.top !== 'number') { anchorFxHide(); return; }

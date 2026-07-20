@@ -2021,7 +2021,7 @@
           _pos(e2.clientX, e2.clientY);
           _dockHint(_inDockZone(e2.clientX, e2.clientY));
           _trashShow(true); _trashHot(_inTrashZone(e2.clientX, e2.clientY));   // 134:侧栏卡也能往左上角拖删
-          try { var _sd9 = document.getElementById('ep-side'); var _sl9 = _sd9 ? _sd9.getBoundingClientRect().left : window.innerWidth; if (e2.clientX < _sl9 - 30) _dragFx(e2.clientX, e2.clientY, el); else _dragFxEnd(); } catch (e9) {}   // #51:拖进阅读器区实时标锚定位置
+          try { var _sd9 = document.getElementById('ep-side'); var _sl9 = _sd9 ? _sd9.getBoundingClientRect().left : window.innerWidth; if (e2.clientX < _sl9 - 30) { var _gr9 = ghost ? ghost.getBoundingClientRect() : null; _dragFx(_gr9 ? _gr9.left : e2.clientX, _gr9 ? _gr9.top : e2.clientY, el, null); } else _dragFxEnd(); } catch (e9) {}   // #51:探测点=ghost 左上角(=钉入点,用户拍板)
         }
       }
       function up(e3) {
@@ -2082,16 +2082,16 @@
   }
   // ── 拖动反馈统一 helper(#51):落在卡上=目标卡高亮环;否则=锚定反馈(光带/插入线);清=两者都清 ──
   var _dropHotEl = null;
-  function _dragFx(cx, cy, srcEl) {
+  function _dragFx(cx, cy, srcEl, ignoreEl) {
     var tgt = null;
     try { var t0 = document.elementFromPoint(cx, cy); tgt = t0 && t0.closest && t0.closest('.vc-card, .vc-if, .vc-dk-card'); } catch (e) {}
-    if (tgt && srcEl && (tgt === srcEl || tgt.contains(srcEl))) tgt = null;   // 源卡自己不算目标
+    if (tgt && srcEl && (tgt === srcEl || tgt.contains(srcEl) || srcEl.contains(tgt))) tgt = null;   // 源卡自己不算目标
     if (tgt && !tgt.closest('.rc-note')) {
       if (_dropHotEl !== tgt) { _dragFxClearHot(); _dropHotEl = tgt; tgt.classList.add('vc-drop-hot'); }
       try { RC.stickynote && RC.stickynote.anchorFx && RC.stickynote.anchorFx.hide(); } catch (e) {}
     } else {
       _dragFxClearHot();
-      try { RC.stickynote && RC.stickynote.anchorFx && RC.stickynote.anchorFx.show(cx, cy); } catch (e) {}
+      try { RC.stickynote && RC.stickynote.anchorFx && RC.stickynote.anchorFx.show(cx, cy, ignoreEl); } catch (e) {}
     }
   }
   function _dragFxClearHot() { if (_dropHotEl) { try { _dropHotEl.classList.remove('vc-drop-hot'); } catch (e) {} _dropHotEl = null; } }
@@ -2615,7 +2615,7 @@
           _dockHint(_inDockZone(e2.clientX, e2.clientY));   // 77b:接近底部=收藏区光晕提示
           _trashShow(true);                                 // 134:拖起来就亮出左上角删除区
           _trashHot(_inTrashZone(e2.clientX, e2.clientY));
-          if (c.pinMode) { try { _dragFx(e2.clientX, e2.clientY, el); } catch (e9) {} }   // #51:钉子卡拖动实时标锚定位置
+          if (c.pinMode) { try { var _er9 = el.getBoundingClientRect(); _dragFx(_er9.left + 8, _er9.top + 8, el, el); } catch (e9) {} }   // #51:探测点=卡左上角(=钉入点);隐自身穿透
         }
       }
       function up(e3) {
