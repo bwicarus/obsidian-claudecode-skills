@@ -16,7 +16,9 @@
     if (document.getElementById('rc-flashcard-css')) return;
     var st = document.createElement('style'); st.id = 'rc-flashcard-css';
     st.textContent =
-      '.fc-wrap{margin-top:8px}' +
+      '.fc-wrap{margin-top:8px;position:relative}' +
+      '.fc-pin{position:absolute;top:-3px;right:2px;z-index:2;background:none;border:none;font-size:15px;cursor:pointer;opacity:.5;padding:2px 5px;-webkit-tap-highlight-color:transparent}' +
+      '.fc-pin:hover{opacity:1;transform:scale(1.1)}' +
       '.fc-track{display:flex;overflow-x:auto;scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch;scrollbar-width:none;overscroll-behavior-x:contain}' +
       '.fc-track::-webkit-scrollbar{display:none}' +
       '.fc-slide{flex:0 0 100%;scroll-snap-align:center;box-sizing:border-box;min-width:0}' +
@@ -105,7 +107,10 @@
     var slides = '';
     for (var i = 0; i < n; i++) slides += '<div class="fc-slide" data-i="' + i + '">' + cardHtml(st, st.cards[i], i) + '</div>';
     var dots = n > 1 ? '<div class="fc-dots">' + st.cards.map(function (_, j) { return '<span class="fc-dot' + (j === st.idx ? ' on' : '') + '" data-goto="' + j + '"></span>'; }).join('') + '</div>' : '';
-    container.innerHTML = '<div class="fc-wrap"><div class="fc-track">' + slides + '</div>' + dots + '</div>';
+    var pin = (window.RC && RC.stickynote && RC.stickynote.createCardAt && !(st.opts && st.opts.nopin)) ? '<button class="fc-pin" title="钉到书页">📌</button>' : '';
+    container.innerHTML = '<div class="fc-wrap">' + pin + '<div class="fc-track">' + slides + '</div>' + dots + '</div>';
+    var _pinBtn = container.querySelector('.fc-pin');
+    if (_pinBtn) _pinBtn.addEventListener('click', function (ev) { ev.stopPropagation(); pinToPage(container); });
     var track = container.querySelector('.fc-track');
     container.querySelectorAll('.fc-slide').forEach(function (sl, j) { bindSlide(container, sl, st, j); });
     try { RC.typeset && RC.typeset(container); } catch (e) {}
@@ -140,6 +145,23 @@
     if (!gid) return; var g = _groups[gid]; if (!g) return;
     g.conts = g.conts.filter(function (c) { return c && c.isConnected && c.__fc; });
     g.conts.forEach(function (c) { if (c === except) return; if (typeof i === 'number') updateSlide(c, i); else renderTrack(c); });
+  }
+  function mountState(container, cards, opts) {
+    // 保留每张卡的 _st/_nid/_next 的 mount(便签/收藏夹宿主用:钉出去的卡保持草稿/学习/已复习态)
+    if (!container || !cards || !cards.length) return;
+    injectCss();
+    if (opts && opts.bare) container.classList.add('fc-bare');
+    container.__fc = { cards: cards.map(function (c) { return { type: (c.type || 'basic'), front: c.front || '', back: c.back || '', cloze: c.cloze || c.text || '', _st: c._st || 'draft', _showBack: !!c._showBack, _nid: (c._nid != null ? c._nid : null), _next: c._next || null }; }), idx: 0, opts: opts || {}, readonly: false };
+    register(container, opts);
+    renderTrack(container);
+  }
+  function pinToPage(container) {
+    // 钉到书页:把当前卡组快照(含状态)交给 rc-stickynote 建 card 便签;同 gid → 便签卡与原卡联动。拖出手势(真机)复用同一 createCardAt
+    var st = container.__fc; if (!st || !(window.RC && RC.stickynote && RC.stickynote.createCardAt)) return;
+    var snap = st.cards.map(function (c) { return { type: c.type, front: c.front, back: c.back, cloze: c.cloze, _st: c._st, _showBack: c._showBack, _nid: c._nid, _next: c._next }; });
+    var cx = (window.innerWidth || 1024) / 2, cy = (window.innerHeight || 768) / 2;
+    RC.stickynote.createCardAt(cx, cy, snap, st.gid);
+    RC.toast && RC.toast('📌 已钉到书页');
   }
   function mountDrafts(container, cards, opts) {
     if (!container || !cards || !cards.length) return;
@@ -195,5 +217,5 @@
       .then(function (d) { if (d && d.ok) { c._next = d.next || {}; updateSlide(container, i); dockToShell(container, st, c); broadcast(st.gid, i, container); } })
       .catch(function (e) { if (RC.outbox && e && e.name === 'TypeError') RC.outbox.send('rev', aid, '/pdf/api/review-answer', body); });
   }
-  RC.flashcard = { mountDrafts: mountDrafts, mountPreview: mountPreview };
+  RC.flashcard = { mountDrafts: mountDrafts, mountPreview: mountPreview, mountState: mountState, pinToPage: pinToPage };
 })();

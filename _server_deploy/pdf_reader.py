@@ -6805,6 +6805,7 @@ def pdf_api_notes():
              "collapsed": bool(body.get("collapsed", False)),
              "strokes": body.get("strokes") if isinstance(body.get("strokes"), list) else [],
              "video": body.get("video") if isinstance(body.get("video"), dict) else None,   # 视频便签:{id,title,start,end,rate,loop,cc}
+             "card": body.get("card") if isinstance(body.get("card"), dict) else None,   # 卡片便签(拖出钉页):{cards:[{type,front,back,cloze,_st,_nid,_next}],gid?}
              "iar": (float(body["iar"]) if isinstance(body.get("iar"), (int, float)) and body.get("iar") else None),   # 手写锚定宽高比:笔画 letterbox 到此比例,便签任意 resize 不变形
              "created": now, "updated": now}
         if _cid:   # upsert:补投重放不重复建
@@ -6832,6 +6833,8 @@ def pdf_api_notes():
         n["strokes"] = body["strokes"]
     if "video" in body:
         n["video"] = body["video"] if isinstance(body.get("video"), dict) else None   # 传 null → 移除视频
+    if "card" in body:
+        n["card"] = body["card"] if isinstance(body.get("card"), dict) else None   # 卡片便签内容更新(传 null → 移除)
     if "iar" in body:
         try:
             n["iar"] = float(body["iar"]) if body.get("iar") else None   # 手写锚定宽高比(letterbox 防变形)
