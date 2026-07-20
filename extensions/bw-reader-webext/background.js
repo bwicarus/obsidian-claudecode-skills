@@ -113,6 +113,25 @@ chrome.runtime.onConnect.addListener((port) => {
       try { port.postMessage({ id, type: "error", error: "blocked: origin not allowed" }); } catch (_) {}
       return;
     }
+    // ── 查词跨站缓存(storage.local,键=word+langs;架构口诀"扩展采跨站的"第一实例)──
+    // 命中→秒答;真实请求照发(在线学习回写不断+缓存刷新);离线→命中即答。只缓存 ok:true
+    // (「伊部」教训:缓存失败态会把词典缺口放大成必现)。上限 800 词按 ts 淘汰。
+    const isDq = url.startsWith(ORIGIN + "/pdf/api/dict-quick?") && (!init || !init.method || init.method === "GET");
+    let dqKey = null, served = false;
+    if (isDq) {
+      try {
+        const u = new URL(url);
+        dqKey = "dq:" + (u.searchParams.get("word") || "") + ":" + (u.searchParams.get("langs") || "");
+        const st = await chrome.storage.local.get("dictCache");
+        const hit = st.dictCache && st.dictCache[dqKey];
+        if (hit && hit.body) {
+          port.postMessage({ id, type: "head", status: 200, statusText: "OK", headers: { "content-type": "application/json" } });
+          port.postMessage({ id, type: "chunk", b64: btoa(unescape(encodeURIComponent(hit.body))) });
+          port.postMessage({ id, type: "done" });
+          served = true;
+        }
+      } catch (_) {}
+    }
     const ac = new AbortController();
     aborts.set(id, ac);
     try {
@@ -126,20 +145,44 @@ chrome.runtime.onConnect.addListener((port) => {
       });
       const hdrs = {};
       resp.headers.forEach((v, k) => { hdrs[k] = v; });
-      port.postMessage({ id, type: "head", status: resp.status, statusText: resp.statusText, headers: hdrs });
+      if (!served) port.postMessage({ id, type: "head", status: resp.status, statusText: resp.statusText, headers: hdrs });
+      const accParts = [];
       if (resp.body) {
         const reader = resp.body.getReader();
         for (;;) {
           const { done, value } = await reader.read();
           if (done) break;
-          let bin = "";
-          for (let i = 0; i < value.length; i += 0x8000) bin += String.fromCharCode.apply(null, value.subarray(i, i + 0x8000));
-          port.postMessage({ id, type: "chunk", b64: btoa(bin) });
+          if (dqKey) accParts.push(value.slice());
+          if (!served) {
+            let bin = "";
+            for (let i = 0; i < value.length; i += 0x8000) bin += String.fromCharCode.apply(null, value.subarray(i, i + 0x8000));
+            port.postMessage({ id, type: "chunk", b64: btoa(bin) });
+          }
         }
       }
-      port.postMessage({ id, type: "done" });
+      if (!served) port.postMessage({ id, type: "done" });
+      if (dqKey && resp.ok && accParts.length) {
+        try {
+          let len = 0; for (const a of accParts) len += a.length;
+          const all = new Uint8Array(len); let off = 0;
+          for (const a of accParts) { all.set(a, off); off += a.length; }
+          const text = new TextDecoder().decode(all);
+          const data = JSON.parse(text);
+          if (data && data.ok === true) {
+            const st2 = await chrome.storage.local.get("dictCache");
+            const cache = st2.dictCache || {};
+            cache[dqKey] = { body: text, ts: Date.now() };
+            const keys = Object.keys(cache);
+            if (keys.length > 800) {
+              keys.sort((a, b) => (cache[a].ts || 0) - (cache[b].ts || 0));
+              for (const k of keys.slice(0, keys.length - 800)) delete cache[k];
+            }
+            await chrome.storage.local.set({ dictCache: cache });
+          }
+        } catch (_) {}
+      }
     } catch (e) {
-      try { port.postMessage({ id, type: "error", error: String((e && e.message) || e) }); } catch (_) {}
+      if (!served) { try { port.postMessage({ id, type: "error", error: String((e && e.message) || e) }); } catch (_) {} }
     } finally { aborts.delete(id); }
   });
   port.onDisconnect.addListener(() => { for (const c of aborts.values()) { try { c.abort(); } catch (_) {} } aborts.clear(); });

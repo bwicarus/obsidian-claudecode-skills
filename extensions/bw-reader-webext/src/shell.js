@@ -56,6 +56,36 @@ button{-webkit-appearance:none;appearance:none}
 `;
   headEl.appendChild(st);
 
+  // ── inline onclick 垫片:vendor 组件(rc-wordpop 等)模板里的 onclick="fn(this)" 属性会在
+  //    页面世界编译执行,找不到隔离世界的全局函数 → 静默哑火(实锤:☆标记掌握点了没反应)。
+  //    这里在 shadow 捕获阶段解析属性,调隔离世界的同名 window.fn。支持 fn()/fn(this)/
+  //    fn('str'[,this])/数字参,外加 new Audio('url').play() 特例。页面世界那份照常报它的错,无碍。
+  const shadowEl = window.__bwShadow;
+  shadowEl.addEventListener("click", (e) => {
+    let el = e.target;
+    while (el && el !== shadowEl && !(el.getAttribute && el.getAttribute("onclick"))) el = el.parentNode;
+    if (!el || el === shadowEl) return;
+    const code = el.getAttribute("onclick") || "";
+    const au = code.match(/^\s*new Audio\('((?:[^'\\]|\\.)*)'\)\.play\(\)\s*;?\s*$/);
+    if (au) { try { new Audio(au[1].replace(/\\'/g, "'")).play(); } catch (_) {} return; }
+    const m = code.match(/^\s*(?:window\.)?([A-Za-z_$][\w$]*)\s*\((.*)\)\s*;?\s*$/s);
+    if (!m) return;
+    const fn = window[m[1]];
+    if (typeof fn !== "function") return;
+    const args = [];
+    const raw = m[2].trim();
+    if (raw) {
+      for (const tok of raw.match(/(?:'(?:[^'\\]|\\.)*'|[^,])+/g) || []) {
+        const t = tok.trim();
+        if (t === "this") args.push(el);
+        else if (t[0] === "'") args.push(t.slice(1, -1).replace(/\\'/g, "'"));
+        else if (!isNaN(+t)) args.push(+t);
+        else return;   // 复杂表达式不硬猜,放弃(页面世界报错可见)
+      }
+    }
+    try { fn.apply(el, args); } catch (err) { try { console.warn("[bw] onclick 垫片:", m[1], err); } catch (_) {} }
+  }, true);
+
   // ── 抽屉骨架:#ep-side + 5 个 pane(与 rc-sidedrawer DEFAULT_TABS 对应;内容里程碑 2+ 填)──
   const side = document.createElement("aside");
   side.id = "ep-side";
