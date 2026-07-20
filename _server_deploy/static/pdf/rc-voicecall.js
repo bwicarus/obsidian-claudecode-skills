@@ -2074,6 +2074,44 @@
       hd.addEventListener('pointermove', mv); hd.addEventListener('pointerup', up); hd.addEventListener('pointercancel', up);
     });
   }
+  // ── 单张图片拖出=图片便签(用户拍板 2026-07-20:侧栏/收藏夹/工具卡里按住一张图拖到正文=便签装图粘贴)──
+  //   长按 300ms+位移>10 才起拖(静止长按后 iOS 不再把手势判给滚动;短滑=图库横滑照旧);
+  //   capture 只监听不拦截(不吞卡内按钮/单选 click);松手 anchorFromPoint 命中正文才建,落空=放弃。
+  (function () {
+    var g = null;
+    document.addEventListener('pointerdown', function (ev) {
+      var im = ev.target && ev.target.closest && ev.target.closest('.vc-card img, .vc-if img, .vc-dk-card img');
+      if (!im || !im.src || im.closest('.rc-note')) return;   // 已钉便签里的图不再拖出
+      g = { img: im, sx: ev.clientX, sy: ev.clientY, t0: Date.now(), moved: false, id: ev.pointerId };
+    }, true);
+    document.addEventListener('pointermove', function (ev) {
+      if (!g || ev.pointerId !== g.id) return;
+      var dist = Math.hypot(ev.clientX - g.sx, ev.clientY - g.sy);
+      if (!g.moved) {
+        if (dist > 10 && Date.now() - g.t0 < 300) { g = null; return; }   // 快滑=滚动/横滑,交还
+        if (dist > 10) {
+          g.moved = true;
+          g.ghost = document.createElement('img'); g.ghost.src = g.img.src;
+          g.ghost.style.cssText = 'position:fixed;z-index:2147481470;width:120px;border-radius:10px;pointer-events:none;opacity:.85;box-shadow:0 10px 30px rgba(0,0,0,.4)';
+          document.body.appendChild(g.ghost);
+        }
+      }
+      if (g && g.moved && g.ghost) { ev.preventDefault(); g.ghost.style.left = (ev.clientX - 60) + 'px'; g.ghost.style.top = (ev.clientY - 40) + 'px'; }
+    }, true);
+    document.addEventListener('pointerup', function (ev) {
+      if (!g || ev.pointerId !== g.id) return;
+      var was = g; g = null;
+      if (was.ghost) { try { was.ghost.remove(); } catch (e) {} }
+      if (!was.moved) return;
+      try {
+        if (window.RC && RC.stickynote && RC.stickynote.createHtmlAt)
+          RC.stickynote.createHtmlAt(ev.clientX, ev.clientY, {
+            content: '<img src="' + String(was.img.src).replace(/"/g, '&quot;') + '" style="max-width:100%;border-radius:8px;display:block">',
+            isHtml: true, label: was.img.alt || '图片' });   // 松手不在正文=anchorFromPoint 落空,toast 提示,不误钉
+      } catch (e) {}
+    }, true);
+    document.addEventListener('pointercancel', function () { if (g && g.ghost) { try { g.ghost.remove(); } catch (e) {} } g = null; }, true);
+  })();
   window.__vcDragToDock = function (el, payloadFn) { try { _dragToDock(el, payloadFn); } catch (e) {} };
   window.__vcTtsWarm = function () { try { _ttsEnsure(); } catch (e) {} };   // 82:必须在点击手势**同步栈**内调(iOS AudioContext 手势激活)
   window.__vcSpeakText = function (text) {   // 83:TTS 念一段文字(卡片/气泡播放钮);返回 stop 函数

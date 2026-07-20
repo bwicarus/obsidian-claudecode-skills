@@ -840,6 +840,11 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
         except Exception:
             _vision = []
         slim = {k: v for k, v in res.items() if not str(k).startswith("_") and k != "client_action"}
+        slim_full = dict(slim)   # 完整版(含 cards 全文)→ tool_status 帧给前端渲预览卡
+        if slim.get("cards") and slim.get("cards_brief"):
+            slim = {k: v for k, v in slim.items() if k != "cards"}   # 喂豆包吃大意(cards_brief);全文截断残 JSON=「AI 不知道做过什么卡」根因
+        if slim.get("images") and slim.get("found_brief"):
+            slim = {k: v for k, v in slim.items() if k != "images"}   # 图 URL 挤爆预算;found_brief/missed 顶上
         # v3-⑩:RAG 回填按工具分级限长(进历史的每个字后续轮轮计费)——列表类给短(模型只需播报要点),
         # 视觉/阅读类给足(信息密度高);统一 3000 的旧上限只留给未知工具兜底
         lim = _RAG_LIMIT.get(tool, 1400)
@@ -860,6 +865,7 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
                           "sel": len(ctx.get("selection") or "")},       # 随调用携带的页面上下文概要
             "rag": content[:1600],                                       # 喂回豆包播报的真实结果
             "vision": _vision,                                           # #8 实际发给 AI 的图 → 前端「AI 请求」节点展示
+            "result": (slim_full if slim_full.get("cards") else None),   # 制卡完整体(前端渲预览卡;rag 截断残 JSON=预览不弹的根因)
             "result_brief": _rb}}, ensure_ascii=False))   # slim=已剔 b64,不再裸露
         if d.get("ok") and d.get("cacheable"):   # 只读工具 → 按「工具+参数+页+墨迹版本」缓存,重复询问直接复用
             cache[_ckey(d.get("tool"), d.get("args"))] = {
