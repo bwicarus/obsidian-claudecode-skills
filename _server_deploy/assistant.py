@@ -2619,6 +2619,25 @@ def _t_search_video(args, ctx):
             "_note": "视频卡片已渲染(YouTube + Bilibili 两源、已按相关性筛过),用户可直接点开。简短说一句『给你找到这些视频(YT 和 B站都有)』,别复述标题/链接。"}
 
 
+_DICT_OVR_PATH = CLAUDE_DIR / "state" / "dict-overrides.json"
+
+
+def _dict_ovr_load() -> dict:
+    """词典修正层(用户设计 2026-07-20):机器生成的词典内容(unidic 拼接读音等)出错时,
+    AI 经 correct_dict 提议修正 → 落这里;lookup_word 查询时 override 优先。撤销=恢复 prev。"""
+    try:
+        return json.loads(_DICT_OVR_PATH.read_text("utf-8"))
+    except Exception:
+        return {}
+
+
+def _dict_ovr_save(d: dict):
+    try:
+        _DICT_OVR_PATH.write_text(json.dumps(d, ensure_ascii=False, indent=1), "utf-8")
+    except Exception:
+        pass
+
+
 def _t_lookup_word(args, ctx):
     """查词:走现成确定性词典 + unidic 权威读音(读音/释义以此为准,LLM 别自己编)。
     英文→ECDICT(音标+中文释义+原形);日语→unidic 离线读音+声调(权威,毫秒级)。args {word?}(不传用选中)。"""
@@ -2646,8 +2665,20 @@ def _t_lookup_word(args, ctx):
                     out["lemma"] = base
             except Exception:
                 pass
-            out["source"] = "unidic(离线权威读音)"
-            out["_note"] = "reading 是 unidic 权威平假名读音,**以它为准**,别自己编;含义请结合上下文用中文讲。"
+            _ovr = _dict_ovr_load().get(w)
+            _kn = sum(1 for c in w if "一" <= c <= "鿿")
+            _risky = _kn >= 3 or (_kn >= 2 and len(w) >= 4)   # 熟语/成语/专名:unidic 逐段拼接读音常错(实锤:一石二鳥→いちこくにちょう)
+            if _ovr and _ovr.get("field") == "reading" and _ovr.get("value"):
+                out["reading"] = _ovr["value"]
+                out["source"] = "词典修正层(此前机器读音有误,已校正)"
+                out["_note"] = "reading 是修正后的读音,以它为准。"
+            elif _risky:
+                out["source"] = "unidic(机器分词逐段拼接)"
+                out["_note"] = ("⚠ 此读音是机器分词**逐段拼接**——熟语/成语/专名常拼错。请用你自己的日语知识校验:"
+                                "确定它错了就按你的知识给出正确读音、向用户说明词典有误,并调 correct_dict 把词典改对。")
+            else:
+                out["source"] = "unidic(离线读音)"
+                out["_note"] = "单词读音通常可靠;若与你的日语知识明显冲突,以你的知识为准并说明,可调 correct_dict 修正词典。"
         else:
             ec = ds.lookup_ecdict(w) or {}
             if ec:
@@ -2664,6 +2695,35 @@ def _t_lookup_word(args, ctx):
     except Exception as e:
         return {"error": str(e)[:140]}
     return out
+
+
+def _t_correct_dict(args, ctx):
+    """AI 发现词典内容错误(机器拼接读音等)→ 提议修正:说明理由、立即生效、自动弹[↩撤销]卡
+    (undo_id 通用机制,高亮同款;用户点撤销=恢复原状)。存 state/dict-overrides.json,lookup_word 优先读。"""
+    w = (args.get("word") or "").strip()[:60]
+    field = (args.get("field") or "reading").strip()
+    val = (args.get("value") or "").strip()[:200]
+    reason = (args.get("reason") or "").strip()[:300]
+    if not w or not val:
+        return {"error": "缺 word/value"}
+    if field not in ("reading", "meaning"):
+        return {"error": "field 只支持 reading/meaning"}
+    if not reason:
+        return {"error": "必须给 reason(向用户说明为什么原内容是错的)"}
+    d = _dict_ovr_load()
+    prev = d.get(w)
+    d[w] = {"field": field, "value": val, "reason": reason,
+            "ts": int(__import__("time").time()), "by": "ai", "prev": prev}
+    _dict_ovr_save(d)
+    uid = None
+    try:
+        import voice as _voice
+        uid = _voice._undo_record("dict_fix", f"修正词典「{w}」{field}→「{val}」", {"word": w, "prev": prev}, owner=ctx.get("_uid"))
+    except Exception:
+        pass
+    return {"ok": True, "word": w, "field": field, "value": val, "undo_id": uid,
+            "note": f"已修正词典:「{w}」的 {field} 改为「{val}」。理由:{reason}(可点撤销恢复)",
+            "speak": f"我把词典里{w}的读音修正过来了,不对的话卡片上可以撤销"}
 
 
 def _viewshot_result(ctx, note_extra=""):
@@ -4560,8 +4620,12 @@ TOOLS = {
             "某章范围=该章起始页~下一同级条目起始页减1。args {}", _t_toc),
     "page_vocab": ("查掌握度数据库:不传 words=当前页『还没掌握』的生词(权威,跟页面下划线一致);"
                    "传 words(数组)=逐词查掌握度(英+日)。args {words?:[...]}", _t_page_vocab),
-    "lookup_word": ("查词典:英→ECDICT(音标+中文释义+原形)、日→unidic **权威读音+声调**。"
-                    "**读音/释义以它为准,别自己编读音**;你只结合上下文挑义项+讲解。args {word?}(不传用选中)", _t_lookup_word),
+    "lookup_word": ("查词典:英→ECDICT(音标+中文释义+原形)、日→unidic 读音+声调。"
+                    "**单词读音通常可靠;熟语/成语/专名是机器逐段拼接、可能错**(返回 _note 会标注)——"
+                    "与你的日语知识明显冲突时以你的知识为准并说明,可调 correct_dict 修正。args {word?}(不传用选中)", _t_lookup_word),
+    "correct_dict": ("修正词典错误:你**确定**词典返回的读音/释义是错的(如机器拼接的熟语读音)→ 调这个改对。"
+                     "必须带 reason 向用户说明;改动立即生效并弹[↩撤销]卡,用户可随时恢复。"
+                     "args {word, field:'reading'|'meaning', value, reason}", _t_correct_dict),
     "see_page": ("**真正看到**当前页(或指定页)的渲染图——图表/示意图/曲线/公式排版/手写等文字层读不到的东西。"
                  "**本页有手写批注时会自动把『页面+手写笔迹』合成进图**(读不到手写就靠它)。"
                  "read_page 只有文字层、看不见图形/手写;用户问『这张图/这个图表/这页的图/我写的/我圈的/看一下』时用 see_page。args {page?}", _t_see_page),

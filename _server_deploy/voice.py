@@ -808,6 +808,16 @@ def _undo_do(uid=None, owner=None):
             if fr and ids:
                 import pdf_reader
                 pdf_reader._notes_save(fr, [n for n in pdf_reader._notes_load(fr) if n.get("id") not in ids])
+        elif kind == "dict_fix":   # 词典修正撤销:恢复 prev(首次修正 prev=None → 删条目)
+            w2 = (handle.get("word") or "").strip()
+            if w2:
+                import assistant as _as_df
+                d2 = _as_df._dict_ovr_load()
+                if handle.get("prev") is None:
+                    d2.pop(w2, None)
+                else:
+                    d2[w2] = handle["prev"]
+                _as_df._dict_ovr_save(d2)
         elif kind == "sticky_edit":   # AI 改的便签文字/颜色:撤销=恢复旧值快照(绝不动 strokes/anchor/尺寸)
             fr = (handle.get("file_rel") or "").strip()
             nid = handle.get("id")

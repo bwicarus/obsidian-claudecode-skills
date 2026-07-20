@@ -2748,11 +2748,15 @@
            + '。用户提到"刚才查的/搜的/那张纸/第几题的答案"→ **先 recall_creation 再答**;纸类条目会给题目+标准答案+检查报告——'
            + '题目是纸上自制的,书里没有逐字题目,别去 search_book 找题目原文')
         : '';
-      var fp = _rtc.ctxPage + '/' + (_rtc.ctxTotal || 0) + ':' + vt.length + ':' + vt.slice(0, 30) + ':' + cre.length + ':' + cre.slice(0, 24);
+      // 圈画告知(用户拍板 2026-07-20:有笔迹**一律 see_ink** 看真实圈画——几何提取的'圈中文字'不可靠,不喂 AI)
+      var ikHint = (_rtc.ink && _rtc.ink.length)
+        ? '。⚠ 他在本页**圈画**了内容——他说『这个/这里/圈的/画的』时指圈中内容;**先调 see_ink 看圈了什么**再回应,不要凭整页文本猜'
+        : '';
+      var fp = _rtc.ctxPage + '/' + (_rtc.ctxTotal || 0) + ':' + vt.length + ':' + vt.slice(0, 30) + ':' + cre.length + ':' + cre.slice(0, 24) + ':' + ((_rtc.ink && _rtc.ink.length) || 0);
       if (fp === _rtc._sentCtxFp) return;
       _rtc._sentCtxFp = fp;
       _rtcSys('(用户此刻在第 ' + _rtc.ctxPage + ' 页/章' + (_rtc.ctxTotal ? '(全书共 ' + _rtc.ctxTotal + ' 页)' : '') +
-              (vt ? ',当前可见内容:' + vt.slice(0, 1500) : ',需要页面内容就调 read_page') + rcHint +
+              (vt ? ',当前可见内容:' + vt.slice(0, 1500) : ',需要页面内容就调 read_page') + ikHint + rcHint +
               '。回答以本条为准;状态记录,不要回应本条。)');
     } catch (e) {}
   }
