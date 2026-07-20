@@ -43,6 +43,28 @@
   var LS_KEY = 'ep-side-tab';
   // 侧栏外观持久化键(照搬 PDF reader.src/18-grammar.js 的 pdf-gp-{floating,blur};EPUB 不按排版分键 → 简单全局键)
   var LS_FLOAT = 'eph-gp-floating', LS_BLUR = 'eph-gp-blur';
+  // ── tab 模块化开关(2026-07-20 用户需求):关掉的 tab 按钮隐藏;设置在 ⚙ 外观弹层;
+  //    默认关 高亮(hl)+历史(hist);后挂载 tab(助手/复习)由 MutationObserver 补应用。──
+  var LS_TABS_OFF = 'ep-side-tabs-off';
+  function _tabsOff() {
+    try { var v = localStorage.getItem(LS_TABS_OFF); if (v === null) return ['hl', 'hist'];
+          var a = JSON.parse(v); return Array.isArray(a) ? a : []; } catch (e) { return ['hl', 'hist']; }
+  }
+  function _tabsOffSave(a) { try { localStorage.setItem(LS_TABS_OFF, JSON.stringify(a)); } catch (e) {} }
+  function _firstEnabledPane() {
+    var off = _tabsOff(), out = null;
+    document.querySelectorAll('#ep-side-tabs .ep-side-tab').forEach(function (b) {
+      if (!out && b.dataset.pane && off.indexOf(b.dataset.pane) < 0) out = b.dataset.pane;
+    });
+    return out;
+  }
+  function applyTabVisibility() {
+    var off = _tabsOff();
+    document.querySelectorAll('#ep-side-tabs .ep-side-tab').forEach(function (b) {
+      if (b.dataset.pane) b.style.display = (off.indexOf(b.dataset.pane) >= 0) ? 'none' : '';
+    });
+    if (_curTab && off.indexOf(_curTab) >= 0) { var f = _firstEnabledPane(); if (f) setTab(f); }
+  }
 
   function _lsGet(k, def) { try { var v = localStorage.getItem(k); return v === null ? def : v; } catch (e) { return def; } }
   function _lsSet(k, v) { try { localStorage.setItem(k, v); } catch (e) {} }
@@ -261,7 +283,8 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
     if (!document.getElementById('ep-side-settings')) {
       var ss = document.createElement('div'); ss.id = 'ep-side-settings'; ss.style.display = 'none';
       ss.innerHTML = '<label class="ss-row"><span>悬浮显示(盖在正文上)</span><input type="checkbox" id="ep-gp-floating"></label>' +
-        '<div class="ss-row ss-col"><span>背景模糊度 <small id="ep-gp-blur-val">20</small> px</span><input type="range" id="ep-gp-blur" min="0" max="40" step="1" value="20"></div>';
+        '<div class="ss-row ss-col"><span>背景模糊度 <small id="ep-gp-blur-val">20</small> px</span><input type="range" id="ep-gp-blur" min="0" max="40" step="1" value="20"></div>' +
+        '<div class="ss-row ss-col"><span>显示哪些 tab</span><div id="ep-tab-toggles"></div></div>';
       side.appendChild(ss);
       var _f = ss.querySelector('#ep-gp-floating'); if (_f) _f.addEventListener('change', function () { setFloating(this.checked); });
       var _b = ss.querySelector('#ep-gp-blur'); if (_b) _b.addEventListener('input', function () { setBlur(this.value); var v = document.getElementById('ep-gp-blur-val'); if (v) v.textContent = this.value; });
@@ -275,6 +298,27 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
     var f = document.getElementById('ep-gp-floating'); if (f) f.checked = getFloating();
     var b = document.getElementById('ep-gp-blur'); if (b) b.value = getBlur();
     var v = document.getElementById('ep-gp-blur-val'); if (v) v.textContent = getBlur();
+    var box = document.getElementById('ep-tab-toggles');
+    if (box) {
+      box.innerHTML = '';
+      var off = _tabsOff();
+      document.querySelectorAll('#ep-side-tabs .ep-side-tab').forEach(function (tb) {
+        var n = tb.dataset.pane; if (!n) return;
+        var lbEl = tb.querySelector('.ep-side-tab-lb');
+        var lb = (lbEl && lbEl.textContent) || tb.title || n;
+        var row = document.createElement('label');
+        row.style.cssText = 'display:flex;align-items:center;gap:8px;padding:3px 2px;color:#cfe6ff;font-size:12px;cursor:pointer';
+        var cb = document.createElement('input'); cb.type = 'checkbox'; cb.checked = off.indexOf(n) < 0;
+        cb.addEventListener('change', function () {
+          var cur = _tabsOff();
+          if (cb.checked) cur = cur.filter(function (x) { return x !== n; });
+          else if (cur.indexOf(n) < 0) cur.push(n);
+          _tabsOffSave(cur); applyTabVisibility();
+        });
+        row.appendChild(cb); row.appendChild(document.createTextNode(lb));
+        box.appendChild(row);
+      });
+    }
   }
   function toggleSideSettings(ev) {
     if (ev) ev.stopPropagation();
@@ -292,6 +336,7 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
         var _fb = _opts.defaultTab || 'asst';
         if (name !== _fb) name = _fb;
       }
+      if (_tabsOff().indexOf(name) >= 0) { var _fe = _firstEnabledPane(); if (_fe) name = _fe; }   // 关掉的 tab 不落座
     } catch (e) {}
     _curTab = name;
     try { localStorage.setItem(LS_KEY, name); } catch (e) {}
@@ -383,6 +428,14 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
       p.classList.toggle('active', p.dataset.pane === init0);
     });
     _curTab = init0;
+    applyTabVisibility();
+    try {   // 后挂载 tab(rc-assistant/rc-review 自注入)→ 补应用开关
+      var _bar = document.getElementById('ep-side-tabs');
+      if (_bar && !_bar.__tabsMo) {
+        _bar.__tabsMo = new MutationObserver(function () { try { applyTabVisibility(); } catch (e) {} });
+        _bar.__tabsMo.observe(_bar, { childList: true });
+      }
+    } catch (e) {}
     return RC.sidedrawer;
   }
 
