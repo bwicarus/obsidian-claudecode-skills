@@ -791,7 +791,7 @@ def _epub_js_v():
     跟 reader.js 解耦:改了 epub 的 JS 也能 bust(否则 reader.js 没动 → ?v 不变 → 浏览器用旧缓存)。"""
     mt = 0
     for name in ("epub-html.js", "epub-styles.css", "rc-ink.js", "rc-core.js", "rc-md.js",
-                 "rc-outbox.js", "rc-review.js", "rc-figures.js", "rc-highlight.js", "rc-snippets.js", "rc-result.js", "rc-wordpop.js", "rc-phrasepop.js", "rc-settings.js", "rc-knowledge.js", "rc-assistant.js", "rc-sidedrawer.js", "rc-grammar.js", "rc-stickynote.js", "rc-favorites.js", "rc-userpages.js", "rc-video.js",
+                 "rc-outbox.js", "rc-flashcard.js", "rc-review.js", "rc-figures.js", "rc-highlight.js", "rc-snippets.js", "rc-result.js", "rc-wordpop.js", "rc-phrasepop.js", "rc-settings.js", "rc-knowledge.js", "rc-assistant.js", "rc-sidedrawer.js", "rc-grammar.js", "rc-stickynote.js", "rc-favorites.js", "rc-userpages.js", "rc-video.js",
                  "rc-voicecall.js", "rc-turncard.js", "rc-toolchip.js"):   # 2026-07-13:此前缺席——只改语音层时 EPUB ?v 不跳变,immutable 缓存让 EPUB 一直跑旧语音代码(「EPUB 设置没有语音项」的根因)
         for base in ("/var/www/html/static/pdf",
                      str(Path(__file__).resolve().parent / "static" / "pdf")):
@@ -817,7 +817,7 @@ def _pdf_shared_js_v():
     mt = 0
     for name in ("rc-ink.js", "rc-core.js", "rc-md.js", "rc-result.js", "rc-wordpop.js", "rc-phrasepop.js",
                  "rc-sidedrawer.js",   # 2026-07-21 实锤补漏:抽屉迁 rc-sidedrawer 后清单没跟上→v不跳+immutable=真机永远旧文件(测试环境无HTTP缓存看不出)
-                 "rc-outbox.js", "rc-review.js", "rc-figures.js", "rc-highlight.js", "rc-knowledge.js", "rc-assistant.js", "rc-grammar.js",
+                 "rc-outbox.js", "rc-flashcard.js", "rc-review.js", "rc-figures.js", "rc-highlight.js", "rc-snippets.js", "rc-knowledge.js", "rc-assistant.js", "rc-grammar.js",
                  "rc-settings.js", "rc-stickynote.js", "rc-favorites.js", "rc-userpages.js", "rc-video.js", "rc-voicecall.js", "rc-turncard.js", "rc-toolchip.js", "pdf-adapter.js",
                  "pdf-uishared.js", "pdf-tail.js", "pdf-styles.css"):   # 2026-07-06 架构优化:pdf_reader.html 抽出的内联 JS/CSS(改它们 → ?v 跳变)
         for base in ("/var/www/html/static/pdf",
@@ -8802,6 +8802,95 @@ def pdf_api_epub_translate_section():
     return jsonify({"ok": True, "translations": zhs, "translated": done, "total": len(texts)})
 
 
+_ANKI_ADD_SEEN = CLAUDE_DIR / "state" / "anki-add-seen.json"
+
+@bp.route("/api/anki-add-cards", methods=["POST"])
+def pdf_api_anki_add_cards():
+    """B1 融合复习卡:确认后的草稿卡入库。POST {aid, cards:[{type,front,back,cloze|text}]}。
+    幂等:aid→note_ids 落 state(补投重放返回同一批 id,不重复建卡)。
+    逻辑与 _run_snippets_to 的 add 段同源:中文模型名动态探测 + createDeck + addNote + changeDeck 归位
+    (AnkiConnect×Anki25 deckName 不生效坑,见 memory ankiconnect-deckname-ignored)。"""
+    import urllib.request
+    body = request.get_json(silent=True) or {}
+    aid = (body.get("aid") or "").strip()[:64]
+    cards = body.get("cards") or []
+    if not isinstance(cards, list) or not cards or len(cards) > 20:
+        return jsonify({"ok": False, "error": "bad cards"}), 400
+    try:
+        seen = json.loads(_ANKI_ADD_SEEN.read_text("utf-8"))
+        assert isinstance(seen, dict)
+    except Exception:
+        seen = {}
+    if aid and aid in seen:
+        return jsonify({"ok": True, "dedup": True, "added": len(seen[aid]), "note_ids": seen[aid]})
+    ANKI_URL = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
+    def _ank(action, params=None):
+        rq = json.dumps({"action": action, "version": 6, "params": params or {}}).encode()
+        with urllib.request.urlopen(urllib.request.Request(
+                ANKI_URL, data=rq, headers={"Content-Type": "application/json"}), timeout=10) as rr:
+            return json.loads(rr.read())
+    try:
+        _mn = _ank("modelNames").get("result") or []
+    except Exception:
+        return jsonify({"ok": False, "error": "AnkiConnect 不可达"}), 502
+    def _pickm(cands, dflt):
+        for cc in cands:
+            if cc in _mn:
+                return cc
+        return dflt
+    basic_m = _pickm(["Basic", "基础的", "基本"], "Basic")
+    cloze_m = _pickm(["Cloze", "填空题", "挖空题"], "Cloze")
+    def _mf(m):
+        try:
+            return _ank("modelFieldNames", {"modelName": m}).get("result") or []
+        except Exception:
+            return []
+    _bf, _cf = _mf(basic_m), _mf(cloze_m)
+    b_front = _bf[0] if _bf else "Front"
+    b_back = _bf[1] if len(_bf) > 1 else (_bf[0] if _bf else "Back")
+    c_text = _cf[0] if _cf else "Text"
+    try:
+        _ank("createDeck", {"deck": "QA"})
+    except Exception:
+        pass
+    added, note_ids = 0, []
+    for c in cards:
+        if not isinstance(c, dict):
+            continue
+        ctype = (c.get("type") or "basic").lower()
+        if ctype == "cloze":
+            fields = {c_text: _anki_md_links((c.get("cloze") or c.get("text") or "")[:8000])}
+            model_name = cloze_m
+        else:
+            fields = {b_front: _anki_md_links((c.get("front") or "")[:8000]),
+                      b_back: _anki_md_links((c.get("back") or "")[:8000])}
+            model_name = basic_m
+        try:
+            resp = _ank("addNote", {"note": {"deckName": "QA", "modelName": model_name,
+                                             "fields": fields, "tags": ["pdf-snippets", "card-lab"]}})
+            if not resp.get("error") and resp.get("result"):
+                added += 1
+                note_ids.append(resp["result"])
+        except Exception:
+            pass
+    if note_ids:
+        try:
+            cids = (_ank("findCards", {"query": " or ".join(f"nid:{n}" for n in note_ids)}) or {}).get("result") or []
+            if cids:
+                _ank("changeDeck", {"cards": cids, "deck": "QA"})
+        except Exception:
+            pass
+    if not note_ids:
+        return jsonify({"ok": False, "error": "addNote 全部失败"}), 502
+    if aid:
+        seen[aid] = note_ids
+        try:
+            _ANKI_ADD_SEEN.write_text(json.dumps(dict(list(seen.items())[-500:])), "utf-8")
+        except Exception:
+            pass
+    return jsonify({"ok": True, "added": added, "note_ids": note_ids})
+
+
 @bp.route("/api/sync-batch", methods=["POST"])
 def pdf_api_sync_batch():
     """outbox 攒批传输(2026-07-21 用户提案;成熟形=write coalescing+batched writes)。
@@ -9342,6 +9431,7 @@ def _validate_snippets_body(body):
     return {
         "snippets": snippets, "make_note": make_note, "make_anki": make_anki,
         "note_name": note_name, "action": "explain", "uid": _reader_uid(),   # uid 在请求里取好(异步线程没 session)
+        "defer_add": bool(body.get("defer_add")),   # B1 融合复习卡:只生成草稿,不 addNotes(确认后经 /api/anki-add-cards 入库)
     }, None
 
 
@@ -9381,7 +9471,7 @@ def _download_image_for_anki(url, timeout=5, max_bytes=10 * 1024 * 1024):
         return None
 
 
-def _run_snippets_to(snippets, make_note, make_anki, note_name, action="explain", uid="", image_url=None,
+def _run_snippets_to(snippets, make_note, make_anki, note_name, action="explain", uid="", image_url=None, defer_add=False,
                      on_step=None) -> dict:
     """核心执行（同步/后台线程共用）：AI 整理勾选段落 → 创建笔记 / Anki 卡。返回 out dict。
 
@@ -9467,105 +9557,110 @@ def _run_snippets_to(snippets, make_note, make_anki, note_name, action="explain"
             cards_data = json.loads(raw[s_idx:e_idx+1]) if s_idx >= 0 else {"cards": []}
             cards = cards_data.get("cards") or []
             _step(f"正在写入 Anki（{len(cards)} 张）" if cards else "AI 没生成卡片")
-            # 通过 AnkiConnect 加入 Anki（deck 用 "QA"）
-            import urllib.request
-            ANKI_URL = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
-            def _ank(action, params=None):
-                rq = json.dumps({"action": action, "version": 6, "params": params or {}}).encode()
-                with urllib.request.urlopen(urllib.request.Request(
-                        ANKI_URL, data=rq, headers={"Content-Type": "application/json"}), timeout=10) as rr:
-                    return json.loads(rr.read())
-            # 本地化 Anki 模型名/字段名可能是中文（「基础的」正面/背面、「填空题」文字/背面额外），动态解析,
-            # 否则硬编码 Basic/Cloze + Front/Back 在中文 Anki 上 addNote 全失败（model was not found）
-            try:
-                _mn = _ank("modelNames").get("result") or []
-            except Exception:
-                _mn = []
-            def _pickm(cands, dflt):
-                for cc in cands:
-                    if cc in _mn:
-                        return cc
-                return dflt
-            basic_m = _pickm(["Basic", "基础的", "基本"], "Basic")
-            cloze_m = _pickm(["Cloze", "填空题", "挖空题"], "Cloze")
-            def _mf(m):
+            if defer_add:   # B1 融合复习卡:草稿不入库(未经确认的卡不能进 Anki 库——用户规格)
+                out["anki_deferred"] = True
+                out["anki_added"] = 0
+                out["anki_note_ids"] = []
+            else:
+                # 通过 AnkiConnect 加入 Anki（deck 用 "QA"）
+                import urllib.request
+                ANKI_URL = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
+                def _ank(action, params=None):
+                    rq = json.dumps({"action": action, "version": 6, "params": params or {}}).encode()
+                    with urllib.request.urlopen(urllib.request.Request(
+                            ANKI_URL, data=rq, headers={"Content-Type": "application/json"}), timeout=10) as rr:
+                        return json.loads(rr.read())
+                # 本地化 Anki 模型名/字段名可能是中文（「基础的」正面/背面、「填空题」文字/背面额外），动态解析,
+                # 否则硬编码 Basic/Cloze + Front/Back 在中文 Anki 上 addNote 全失败（model was not found）
                 try:
-                    return _ank("modelFieldNames", {"modelName": m}).get("result") or []
+                    _mn = _ank("modelNames").get("result") or []
                 except Exception:
-                    return []
-            _bf, _cf = _mf(basic_m), _mf(cloze_m)
-            b_front = _bf[0] if _bf else "Front"
-            b_back = _bf[1] if len(_bf) > 1 else (_bf[0] if _bf else "Back")
-            c_text = _cf[0] if _cf else "Text"
-            try:
-                _ank("createDeck", {"deck": "QA"})   # 幂等,确保牌组在(headless addNote 偶尔落系统默认)
-            except Exception:
-                pass
-            # 助手 search_image 找到的图,若一并要求做卡 → 真下载 + 存进 Anki 媒体库(不是外链,以后链接失效卡片也不烂)。
-            # 下载/存媒体任一步失败都静默跳过,不影响卡片本身正常生成。
-            img_tag = ""
-            if image_url:
+                    _mn = []
+                def _pickm(cands, dflt):
+                    for cc in cands:
+                        if cc in _mn:
+                            return cc
+                    return dflt
+                basic_m = _pickm(["Basic", "基础的", "基本"], "Basic")
+                cloze_m = _pickm(["Cloze", "填空题", "挖空题"], "Cloze")
+                def _mf(m):
+                    try:
+                        return _ank("modelFieldNames", {"modelName": m}).get("result") or []
+                    except Exception:
+                        return []
+                _bf, _cf = _mf(basic_m), _mf(cloze_m)
+                b_front = _bf[0] if _bf else "Front"
+                b_back = _bf[1] if len(_bf) > 1 else (_bf[0] if _bf else "Back")
+                c_text = _cf[0] if _cf else "Text"
                 try:
-                    dl = _download_image_for_anki(image_url)
-                    if dl:
-                        fname, b64data = dl
-                        mres = _ank("storeMediaFile", {"filename": fname, "data": b64data})
-                        if not mres.get("error"):
-                            img_tag = f'<br><img src="{fname}">'
+                    _ank("createDeck", {"deck": "QA"})   # 幂等,确保牌组在(headless addNote 偶尔落系统默认)
                 except Exception:
                     pass
-            added = 0
-            note_ids = []
-            for idx, c in enumerate(cards):
-                ctype = (c.get("type") or "basic").lower()
-                if ctype == "cloze":
-                    text_val = _anki_md_links(c.get("text", ""))
-                    if idx == 0 and img_tag:   # 只贴进本次生成的第一张卡,避免多卡重复贴同一张图
-                        text_val += img_tag
-                    fields = {c_text: text_val}
-                    model_name = cloze_m
-                else:
-                    back_val = _anki_md_links(c.get("back", ""))
-                    if idx == 0 and img_tag:
-                        back_val += img_tag
-                    fields = {b_front: _anki_md_links(c.get("front", "")), b_back: back_val}
-                    model_name = basic_m
-                req = json.dumps({
-                    "action": "addNote", "version": 6,
-                    "params": {"note": {
-                        "deckName": "QA",
-                        "modelName": model_name,
-                        "fields": fields,
-                        "tags": ["pdf-snippets"],
-                    }}
-                }).encode()
-                try:
-                    with urllib.request.urlopen(
-                        urllib.request.Request(ANKI_URL, data=req,
-                                                headers={"Content-Type":"application/json"}),
-                        timeout=10) as r:
-                        resp = json.loads(r.read())
-                        if not resp.get("error"):
-                            added += 1
-                            if resp.get("result"):
-                                note_ids.append(resp["result"])
-                except Exception:
-                    pass
-            out["anki_added"] = added
-            out["anki_note_ids"] = note_ids   # 供撤销:deleteNotes
-            # ⚠ AnkiConnect × Anki 25 的坑(2026-07-14 定位):addNote 的 deckName **不生效**——
-            #   插件用 `note.model()['did'] = deck_id` 指定牌组,而它调的 startEditing() → requireReset()
-            #   → mw.reset() 把 notetype 缓存清了,addNote 读回来的 did 已退回 notetype 自带的默认牌组
-            #   → 卡全落「系统默认」(QA 恒 0 的真凶,不是 AnkiWeb sync)。显式 changeDeck 归位。
-            #   (scripts/vocab/anki_from_word.py 早就这么兜底,所以 Vocab 牌组一直是对的)
-            if note_ids:
-                try:
-                    cids = (_ank("findCards", {"query": " or ".join(f"nid:{n}" for n in note_ids)})
-                            or {}).get("result") or []
-                    if cids:
-                        _ank("changeDeck", {"cards": cids, "deck": "QA"})
-                except Exception:
-                    pass
+                # 助手 search_image 找到的图,若一并要求做卡 → 真下载 + 存进 Anki 媒体库(不是外链,以后链接失效卡片也不烂)。
+                # 下载/存媒体任一步失败都静默跳过,不影响卡片本身正常生成。
+                img_tag = ""
+                if image_url:
+                    try:
+                        dl = _download_image_for_anki(image_url)
+                        if dl:
+                            fname, b64data = dl
+                            mres = _ank("storeMediaFile", {"filename": fname, "data": b64data})
+                            if not mres.get("error"):
+                                img_tag = f'<br><img src="{fname}">'
+                    except Exception:
+                        pass
+                added = 0
+                note_ids = []
+                for idx, c in enumerate(cards):
+                    ctype = (c.get("type") or "basic").lower()
+                    if ctype == "cloze":
+                        text_val = _anki_md_links(c.get("text", ""))
+                        if idx == 0 and img_tag:   # 只贴进本次生成的第一张卡,避免多卡重复贴同一张图
+                            text_val += img_tag
+                        fields = {c_text: text_val}
+                        model_name = cloze_m
+                    else:
+                        back_val = _anki_md_links(c.get("back", ""))
+                        if idx == 0 and img_tag:
+                            back_val += img_tag
+                        fields = {b_front: _anki_md_links(c.get("front", "")), b_back: back_val}
+                        model_name = basic_m
+                    req = json.dumps({
+                        "action": "addNote", "version": 6,
+                        "params": {"note": {
+                            "deckName": "QA",
+                            "modelName": model_name,
+                            "fields": fields,
+                            "tags": ["pdf-snippets"],
+                        }}
+                    }).encode()
+                    try:
+                        with urllib.request.urlopen(
+                            urllib.request.Request(ANKI_URL, data=req,
+                                                    headers={"Content-Type":"application/json"}),
+                            timeout=10) as r:
+                            resp = json.loads(r.read())
+                            if not resp.get("error"):
+                                added += 1
+                                if resp.get("result"):
+                                    note_ids.append(resp["result"])
+                    except Exception:
+                        pass
+                out["anki_added"] = added
+                out["anki_note_ids"] = note_ids   # 供撤销:deleteNotes
+                # ⚠ AnkiConnect × Anki 25 的坑(2026-07-14 定位):addNote 的 deckName **不生效**——
+                #   插件用 `note.model()['did'] = deck_id` 指定牌组,而它调的 startEditing() → requireReset()
+                #   → mw.reset() 把 notetype 缓存清了,addNote 读回来的 did 已退回 notetype 自带的默认牌组
+                #   → 卡全落「系统默认」(QA 恒 0 的真凶,不是 AnkiWeb sync)。显式 changeDeck 归位。
+                #   (scripts/vocab/anki_from_word.py 早就这么兜底,所以 Vocab 牌组一直是对的)
+                if note_ids:
+                    try:
+                        cids = (_ank("findCards", {"query": " or ".join(f"nid:{n}" for n in note_ids)})
+                                or {}).get("result") or []
+                        if cids:
+                            _ank("changeDeck", {"cards": cids, "deck": "QA"})
+                    except Exception:
+                        pass
             # 工具指示器 v2:完成卡=「完整卡片预览」(逐张正反面,含 $公式$ 与 <img>)→ 前端方块态渲染。
             # 原样带出 AI 生成的卡面(不做转义/截断,MathJax 与图片由前端渲染)。
             out["anki_cards"] = [{

@@ -44,9 +44,14 @@
         if (j.status === 'done') {
           clearInterval(iv);
           var r = j.result || {};
-          card.innerHTML = r.ok
-            ? ('✓ 已制卡' + (r.anki_added ? ' ×' + esc(r.anki_added) : ''))
-            : ('✗ ' + esc(r.error || '失败'));
+          if (r.ok && r.anki_deferred && r.anki_cards && r.anki_cards.length && window.RC && RC.flashcard) {
+            card.innerHTML = '';   // B1:草稿卡进状态机(编辑→完成→学习→掌握确认入库)
+            RC.flashcard.mountDrafts(card, r.anki_cards, {});
+          } else {
+            card.innerHTML = r.ok
+              ? ('✓ 已制卡' + (r.anki_added ? ' ×' + esc(r.anki_added) : ''))
+              : ('✗ ' + esc(r.error || '失败'));
+          }
         } else if (j.status === 'error') {
           clearInterval(iv); card.textContent = '✗ ' + (j.error || '失败');
         } else if (j.status === 'unknown') {
@@ -103,6 +108,7 @@
       var snip = { text: text, file: (opts.file != null ? opts.file : '') };
       if (opts.source) snip.source = opts.source;
       var body = { snippets: [snip], make_anki: true, make_note: false };
+      if (window.RC && RC.flashcard) body.defer_add = true;   // B1 融合复习卡:草稿模式(未确认不入库)
       if (opts.model) body.model = opts.model;
       if (opts.effort) body.effort = opts.effort;
       RC.reqJson('POST', ep.snippetsTo, body).then(function (d) {
