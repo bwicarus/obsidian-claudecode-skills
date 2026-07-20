@@ -164,6 +164,19 @@
     const isW = (c) => /[A-Za-z0-9'’\-]/.test(c) || /[぀-ヿ㐀-鿿가-힯一-鿿]/.test(c);
     let i = off; if (i >= sTxt.length) i = sTxt.length - 1; if (i < 0) return null;
     if (!isW(sTxt[i])) { if (i > 0 && isW(sTxt[i - 1])) i--; else return null; }
+    // CJK(日语无空格):正则扩张会把整句当一个词 → 用浏览器内建 Intl.Segmenter 按词切
+    //(Chromium/iOS Safari 16+ 原生支持;这就是"分词进浏览器"的现成大厂方案)
+    if (/[぀-ヿ㐀-鿿]/.test(sTxt[i]) && typeof Intl !== "undefined" && Intl.Segmenter) {
+      try {
+        const seg = new Intl.Segmenter("ja", { granularity: "word" });
+        for (const g of seg.segment(sTxt)) {
+          if (g.index <= i && i < g.index + g.segment.length) {
+            if (!g.isWordLike) return null;
+            return { node, start: g.index, end: g.index + g.segment.length, text: g.segment };
+          }
+        }
+      } catch (_) {}
+    }
     let lo = i, hi = i + 1;
     while (lo > 0 && isW(sTxt[lo - 1])) lo--;
     while (hi < sTxt.length && isW(sTxt[hi])) hi++;
