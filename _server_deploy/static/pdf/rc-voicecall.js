@@ -1197,6 +1197,21 @@
       el.addEventListener(evn, function () { if (lpT) { clearTimeout(lpT); lpT = null; } });
     });
   }
+  var _goneBuf = [], _goneT = null;
+  function _imgGoneNote(it) {   // ✕删除通告(用户设计 2026-07-21):**不改历史**(改前缀=prompt 缓存全失效),
+    //   在上下文末尾**追加**一条说明——AI 之后知道"用户删了哪张";他说「找错了/重新找」AI 就知道指什么。
+    //   连删 800ms 合并一条;注册表不删(编号永久可解析,防已删编号渲染裂图);dc 未 open 不发(哑路教训),环里留底。
+    if (!it) return;
+    _goneBuf.push('「' + (it.title || '图') + '」' + (it.aid ? '(编号 ' + it.aid + ')' : ''));
+    try { window.__vcRemovedImgs = (window.__vcRemovedImgs || []).concat([{ aid: it.aid || '', title: it.title || '' }]).slice(-8); } catch (e) {}
+    clearTimeout(_goneT);
+    _goneT = setTimeout(function () {
+      var list = _goneBuf.splice(0).join('、');
+      if (!list) return;
+      if (_rtc.on && _rtc.dc && _rtc.dc.readyState === 'open')
+        _rtcSys('(用户点✕移除了配图卡里的:' + list + ' ——他不想要这些;他说「找错了/重新找」指的就是它们,换关键词重搜,别再展示这些编号。状态记录,不要回应本条。)');
+    }, 800);
+  }
   function _igWire(root, card) {   // 88/98:图卡+视频卡交互——✕移除;点封面=只选中这一张(带入上下文,再点取消);视频▶=播放
     if (!card || (card.kind !== 'images' && card.kind !== 'videos')) return;
     root.addEventListener('click', function (ev) {
@@ -1219,6 +1234,7 @@
         var cell = x.closest('.vc-ig-cell');
         if (cell) cell.remove();
         try { (card.data.items || [])[i0]._gone = 1; } catch (e) {}
+        try { _imgGoneNote((card.data.items || [])[i0]); } catch (e) {}   // 删除通告(append-only 保缓存)
         return;
       }
       var img = ev.target.closest('.vc-ig-img');
