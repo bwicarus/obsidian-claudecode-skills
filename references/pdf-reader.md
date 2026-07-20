@@ -1289,3 +1289,20 @@ CDP `Network.requestWillBeSent` 的 initiator 调用栈(type=Document);注意阅
 - E2E:`scratchpad/localbook_e2e.py` 铸 cookie → 下载 → `set_offline(True)` → 重开断言页图+字符层。
 - iOS 注意:Safari 标签页与主屏 PWA 存储**不互通**,固定从主屏入口用;能力依据见
   `references/ios-webext-capabilities.md`(主屏 PWA 豁免七天清除 + persist 豁免逐出)。
+
+## §18 outbox 写队列(local-first 写路径,2026-07-20 四批)
+
+**架构**:`rc-outbox.js`(共享层,PDF 模板已载;EPUB 待接)。localStorage 队列 `rc-outbox-v1`,
+同 kind+key 合并留最新;重放=开页/online/15s 心跳,按插入序;网络错/5xx 保队,4xx 丢弃留痕;
+条目带 method(缺省 POST)。**服务端配套**:highlights/notes 的 POST 接受 `c_[a-f0-9]{8,32}`
+客户端 id 并同 id upsert(补投重放不重复建)。
+
+**两种接线手法**:
+1. 调用点 catch(err.name==='TypeError' 判网络错):单词掌握(rc-wordpop)/词组掌握(rc-phrasepop)/
+   阅读进度(pdf_reader.html 内联)/高亮新建(17-highlight.js,crypto 生成 c_ id 本地即渲)
+2. **fetch 层拦截**(rc-outbox 内,治调用点分散):高亮 PATCH/DELETE + 便签 POST/PATCH/DELETE——
+   网络错→入队+合成 `{ok:true,queued:true,...}`(便签 POST 在此层注入 c_ id、合成带默认字段的 note)
+   让乐观 UI 零改动获得离线能力
+
+**离线覆盖**:掌握标记/进度/高亮全生命周期/便签全生命周期。**剩**:查词日志事件化、EPUB 模板接入。
+E2E 模式:scratchpad 铸 cookie + set_offline,验"入队→重放→服务端终态→按条清理"。
