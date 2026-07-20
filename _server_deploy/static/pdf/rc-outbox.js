@@ -48,18 +48,32 @@
   window.fetch = function (input, init) {
     var url = (typeof input === 'string') ? input : ((input && input.url) || '');
     var method = (((init && init.method) || (input && input.method) || 'GET') + '').toUpperCase();
-    if (url.indexOf('/pdf/api/highlights') !== 0 || (method !== 'PATCH' && method !== 'DELETE')) return _f0(input, init);
+    var isHl = url.indexOf('/pdf/api/highlights') === 0 && (method === 'PATCH' || method === 'DELETE');
+    var isNote = url.indexOf('/pdf/api/notes') === 0 && (method === 'POST' || method === 'PATCH' || method === 'DELETE');
+    if (!isHl && !isNote) return _f0(input, init);
     return _f0(input, init).catch(function (e) {
       if (!(e && e.name === 'TypeError')) throw e;
       var body = null;
       try { body = (init && typeof init.body === 'string') ? JSON.parse(init.body) : null; } catch (_) {}
       var id = (body && body.id) || '';
       try { if (!id) id = new URL(url, location.origin).searchParams.get('id') || ''; } catch (_) {}
+      if (isNote && method === 'POST' && !id && body) {   // 便签离线新建:此层注入客户端 id(服务端幂等 upsert)
+        id = 'c_' + Array.from(crypto.getRandomValues(new Uint8Array(8))).map(function (b) { return b.toString(16).padStart(2, '0'); }).join('');
+        body.id = id;
+      }
       if (!id) throw e;   // 拿不到 id 没法幂等合并 → 维持原失败
-      var key = (method === 'DELETE') ? ('hld:' + id) : ('hlp:' + id + ':' + Object.keys(body || {}).sort().join(','));
-      RC.outbox.send('hl', key, url, body, method);
-      var synth = { ok: true, queued: true };
-      if (method === 'PATCH' && body) synth.highlight = body;   // 乐观更新方通常只读 ok/highlight.color|note
+      var tag = isHl ? 'hl' : 'note';
+      var key = (method === 'DELETE') ? (tag + 'd:' + id)
+        : (method === 'POST') ? (tag + 'c:' + id)
+        : (tag + 'p:' + id + ':' + Object.keys(body || {}).sort().join(','));
+      RC.outbox.send(tag, key, url, body, method);
+      var synth = { ok: true, queued: true, id: id };
+      if (isHl && method === 'PATCH' && body) synth.highlight = body;
+      if (isNote && (method === 'POST' || method === 'PATCH') && body) {
+        var now = Math.floor(Date.now() / 1000);
+        synth.note = Object.assign({ color: '#fff8c5', w: 260, h: 180, collapsed: false, strokes: [],
+                                     created: now, updated: now }, body);
+      }
       return new Response(JSON.stringify(synth), { status: 200, headers: { 'Content-Type': 'application/json' } });
     });
   };

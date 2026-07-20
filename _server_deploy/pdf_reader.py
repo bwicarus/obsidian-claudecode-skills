@@ -6789,7 +6789,11 @@ def pdf_api_notes():
         if not isinstance(anchor, dict) or anchor.get("kind") not in ("pdf", "epub"):
             return jsonify({"ok": False, "error": "缺少/非法 anchor"}), 400
         import uuid as _u
-        n = {"id": "n" + _u.uuid4().hex[:11], "anchor": anchor,
+        import re as _re_nid
+        _cid = (body.get("id") or "").strip()   # local-first outbox:客户端 id(c_ 前缀)→ 幂等 upsert
+        if _cid and not _re_nid.fullmatch(r"c_[a-f0-9]{8,32}", _cid):
+            _cid = ""
+        n = {"id": _cid or ("n" + _u.uuid4().hex[:11]), "anchor": anchor,
              "text": (body.get("text") or "")[:8000],
              "color": (body.get("color") or "#fff8c5"),
              "w": int(body.get("w") or 260), "h": int(body.get("h") or 180),
@@ -6798,6 +6802,8 @@ def pdf_api_notes():
              "video": body.get("video") if isinstance(body.get("video"), dict) else None,   # 视频便签:{id,title,start,end,rate,loop,cc}
              "iar": (float(body["iar"]) if isinstance(body.get("iar"), (int, float)) and body.get("iar") else None),   # 手写锚定宽高比:笔画 letterbox 到此比例,便签任意 resize 不变形
              "created": now, "updated": now}
+        if _cid:   # upsert:补投重放不重复建
+            items = [x for x in items if x.get("id") != _cid]
         items.append(n); _notes_save(rel, items)
         return jsonify({"ok": True, "id": n["id"], "note": n})
     # PATCH:字段级合并(anchor 移动/text 编辑/颜色/尺寸/折叠态/笔画 各自独立更新)
