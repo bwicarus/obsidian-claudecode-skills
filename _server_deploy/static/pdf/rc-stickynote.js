@@ -218,7 +218,8 @@
       '.rc-note.rc-note-hascard .rc-note-rs,.rc-note.rc-note-hascard .rc-note-rs-tl,.rc-note.rc-note-hascard .rc-note-del,.rc-note.rc-note-hashtml .rc-note-rs,.rc-note.rc-note-hashtml .rc-note-rs-tl,.rc-note.rc-note-hashtml .rc-note-del{display:none!important}',   // 白圆手柄/外部✕不属于卡观感;删卡走卡头✕(触发 del.click)
       // 拖动锚定反馈(用户设计 2026-07-21 #51):拖动时实时标出将绑定的位置——
       //   光带=命中内容(锚到这段);横线=空白/clamp(内容插入位置,排到上方内容之后)。iOS 蓝,美观优先。
-      '.rc-anchor-fx{position:absolute;left:8px;right:8px;height:20px;border-radius:6px;background:rgba(10,132,255,.13);box-shadow:inset 0 0 0 1.5px rgba(10,132,255,.35);pointer-events:none;z-index:60;transition:top .07s linear}',
+      '.rc-anchor-fx{position:absolute;pointer-events:none;z-index:60;transition:top .06s linear,left .06s linear,width .06s linear}',
+      '.rc-anchor-fx.rc-afx-word{border-radius:4px;background:rgba(10,132,255,.16);box-shadow:inset 0 0 0 1.5px rgba(10,132,255,.55)}',
       '.rc-anchor-fx.rc-afx-line{height:0;border-top:2px solid #0a84ff;border-radius:0;background:none;box-shadow:0 0 6px rgba(10,132,255,.5)}',
       '.rc-anchor-fx.rc-afx-line::before{content:"";position:absolute;left:-4px;top:-5px;width:8px;height:8px;border-radius:50%;background:#0a84ff}',
       '.rc-anchor-fx.rc-afx-line::after{content:"";position:absolute;right:-4px;top:-5px;width:8px;height:8px;border-radius:50%;background:#0a84ff}',
@@ -1352,17 +1353,29 @@
   // ── 拖动锚定反馈层(#51 用户设计,所有拖动统一挂:便签拖动/单图拖出/侧栏拖出/钉子卡拖动)──
   var _afx = null;
   function anchorFxShow(cx, cy) {
-    if (!O || !O.anchorFromPoint) return;
-    var a = null; try { a = O.anchorFromPoint(cx, cy); } catch (e) {}
+    // #51 粒度=单词(用户设计):近文字(词中心 ≤48px)→**单词精确框**(锚定=绑到这个词,注入=词所在句后方);
+    //   超范围/空白/clamp → 横线(内容插入位置=排到上方内容/段落之后)。旧 20px 光带退役。
+    if (!O) return;
+    if (!_afx) { _afx = document.createElement('div'); _afx.className = 'rc-anchor-fx'; }
+    var wr = null;
+    try { wr = O.noteWordRect ? O.noteWordRect(cx, cy) : null; } catch (e) {}
+    if (wr && wr.el && (wr.dist == null || wr.dist <= 48)) {
+      _afx.classList.add('rc-afx-word'); _afx.classList.remove('rc-afx-line');
+      if (_afx.parentElement !== wr.el) wr.el.appendChild(_afx);
+      _afx.style.left = (wr.left - 3) + 'px'; _afx.style.right = 'auto';
+      _afx.style.top = (wr.top - 2) + 'px';
+      _afx.style.width = (wr.width + 6) + 'px'; _afx.style.height = (wr.height + 4) + 'px';
+      _afx.style.display = 'block';
+      return;
+    }
+    var a = null; try { a = O.anchorFromPoint ? O.anchorFromPoint(cx, cy) : null; } catch (e) {}
     if (!a) { anchorFxHide(); return; }
     var m = null; try { m = O.mount(a); } catch (e) {}
     if (!m || !m.el || typeof m.top !== 'number') { anchorFxHide(); return; }
-    if (!_afx) { _afx = document.createElement('div'); _afx.className = 'rc-anchor-fx'; }
-    // 横线=clamp(钉空白→排到上方内容之后)或 EPUB 章内比例锚(空白处);光带=命中内容(EPUB 字符锚/PDF 页内)
-    var line = !!a.clamped || (a.kind === 'epub' && a.off === undefined);
-    _afx.classList.toggle('rc-afx-line', line);
+    _afx.classList.add('rc-afx-line'); _afx.classList.remove('rc-afx-word');
     if (_afx.parentElement !== m.el) m.el.appendChild(_afx);
-    _afx.style.top = Math.max(0, m.top - (line ? 1 : 10)) + 'px';
+    _afx.style.left = '8px'; _afx.style.right = '8px'; _afx.style.width = 'auto'; _afx.style.height = '0';
+    _afx.style.top = Math.max(0, m.top - 1) + 'px';
     _afx.style.display = 'block';
   }
   function anchorFxHide() { if (_afx) _afx.style.display = 'none'; }

@@ -3844,6 +3844,26 @@
         },
         // 创建/拖动松手取锚:caretFromPoint 在落点小范围候选点里找最近可数文字 → 内容锚;
         // 落不到文字(纯图/页缝)→ 退回 section 相对 x/y 比例锚(旧语义)。
+        noteWordRect: function (x, y) {
+          // #51 粒度=单词:caret 命中字符→两侧扩至空白/标点(cap 11)→Range 精确框(容器内坐标);落空白/标点=null(→横线)
+          var pos = caretFromPoint(x, y);
+          if (!pos || !pos.node || pos.node.nodeType !== 3 || !col.contains(pos.node)) return null;
+          var s0 = pos.node.nodeValue || '', i0 = Math.min(pos.offset, s0.length - 1);
+          if (i0 < 0) return null;
+          var SEP = /[\s、。,.!?！？;；:：「」『』()（）【】\u3000]/;
+          if (SEP.test(s0[i0] || '')) return null;
+          var a = i0, b = i0;
+          while (a > 0 && !SEP.test(s0[a - 1]) && i0 - a < 11) a--;
+          while (b < s0.length - 1 && !SEP.test(s0[b + 1]) && b - i0 < 11) b++;
+          var rg = document.createRange();
+          rg.setStart(pos.node, a); rg.setEnd(pos.node, b + 1);
+          var rr = rg.getBoundingClientRect();
+          if (!rr.width) return null;
+          var host = pos.node.parentElement && pos.node.parentElement.closest ? pos.node.parentElement.closest('.ep-sec, .ep-usec') : null;
+          if (!host) return null;
+          var hr = host.getBoundingClientRect();
+          return { el: host, left: rr.left - hr.left, top: rr.top - hr.top, width: rr.width, height: rr.height, dist: 0 };
+        },
         anchorFromPoint: function (x, y) {
           var cands = [[0, 0], [10, 8], [-10, 8], [24, 10], [0, 22], [-24, 10], [40, 12], [0, -14]];
           for (var i = 0; i < cands.length; i++) {

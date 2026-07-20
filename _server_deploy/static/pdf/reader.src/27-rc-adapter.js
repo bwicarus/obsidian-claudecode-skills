@@ -71,6 +71,30 @@ if (window.PdfAdapter && PdfAdapter.bind) {
       const x = Math.max(0, Math.min(1, anchor.x || 0)), y = Math.max(0, Math.min(1, anchor.y || 0));
       return { el: pw, left: x * pw.clientWidth, top: y * pw.clientHeight };
     },
+    noteWordRect: (x, y) => {
+      // #51 粒度=单词(用户设计):最近字符→同 w 词聚合精确框;dist 给调用方判"超范围→横线"
+      const t = document.elementFromPoint(x, y);
+      const pw = t && t.closest ? t.closest('.page-wrap') : null;
+      const cbs = pw && pw.__charBoxes;
+      if (!cbs || !cbs.length) return null;
+      const r = pw.getBoundingClientRect();
+      const px = x - r.left, py = y - r.top;
+      let best = null, bd = 1e18;
+      for (const cb of cbs) {
+        if (cb.sp || !cb.width) continue;
+        const cx = cb.left + cb.width / 2, cy = cb.top + cb.height / 2;
+        const d = (cx - px) * (cx - px) + (cy - py) * (cy - py);
+        if (d < bd) { bd = d; best = cb; }
+      }
+      if (!best) return null;
+      let L = best.left, T = best.top, R2 = best.left + best.width, B = best.top + best.height;
+      if (best.w !== -1) for (const cb of cbs) {
+        if (cb.w !== best.w || cb.sp) continue;
+        L = Math.min(L, cb.left); T = Math.min(T, cb.top);
+        R2 = Math.max(R2, cb.left + cb.width); B = Math.max(B, cb.top + cb.height);
+      }
+      return { el: pw, left: L, top: T, width: R2 - L, height: B - T, dist: Math.sqrt(bd) };
+    },
     noteAnchorFromPoint: (x, y) => {
       const t = document.elementFromPoint(x, y);
       let pw = t && t.closest ? t.closest('.page-wrap') : null;
@@ -192,6 +216,7 @@ if (window.PdfAdapter && PdfAdapter.bind) {
         file: FILE_REL,
         mount: (a) => PdfAdapter._host.noteMount(a),
         anchorFromPoint: (x, y) => PdfAdapter._host.noteAnchorFromPoint(x, y),
+        noteWordRect: (x, y) => { try { return PdfAdapter._host.noteWordRect(x, y); } catch (_) { return null; } },   // #51 词粒度反馈
         // 阶段3 AI 注入:双击便签 → 25-assistant __noteInject(助手开着才处理:无笔画走文本通道,有笔画走合成图/视觉通道)
         onDoubleTap: (note) => { try { return !!(window.__noteInject && window.__noteInject(note)); } catch (_) { return false; } },
         toast: (m) => { try { _toast?.(m); } catch (_) {} }
