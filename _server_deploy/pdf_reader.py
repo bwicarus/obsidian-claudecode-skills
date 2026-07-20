@@ -1263,7 +1263,10 @@ self.addEventListener('fetch', (e) => {
   }
   if (p === '/pdf/api/page-figures') { e.respondWith(_swr(e.request)); return; }   // 徽标:秒回缓存 + 后台更新
   if (p === '/pdf/api/book-meta') { e.respondWith(_swr(e.request)); return; }   // 书元数据:开机必经,离线回缓存(31-localbook 整本落盘的前提)
-  if (p === '/pdf/api/page-overlay') { e.respondWith(_swr(e.request)); return; }   // 浮层:本地秒回+后台刷新(local-first;cv 与 chars 自洽成对)
+  // 浮层回滚为网络优先(2026-07-20 用户实锤"标记掌握后下划线不消失/横跳"):overlay 是**动态**数据
+  // (服务端已按掌握态过滤),SWR 秒回旧缓存=写后读旧。真·local-first 方案(服务端回全候选+客户端本地
+  // 掌握集过滤,overlay 变静态)排期实施,见 references/pdf-reader.md §18。
+  if (p === '/pdf/api/page-overlay') { e.respondWith(_netFallback(e.request)); return; }
   if (p === '/pdf/api/dict-quick') {   // 查词 local-first:查过的词本地**秒答**;后台请求照发→学习回写(日志/暴露)不断,新数据落缓存
     const w = url.searchParams.get('word') || '', lg = url.searchParams.get('langs') || '';
     e.respondWith(_swr(e.request, '/pdf/api/dict-quick?word=' + encodeURIComponent(w) + '&langs=' + encodeURIComponent(lg)));

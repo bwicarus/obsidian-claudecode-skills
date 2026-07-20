@@ -1306,3 +1306,11 @@ CDP `Network.requestWillBeSent` 的 initiator 调用栈(type=Document);注意阅
 
 **离线覆盖**:掌握标记/进度/高亮全生命周期/便签全生命周期。**剩**:查词日志事件化、EPUB 模板接入。
 E2E 模式:scratchpad 铸 cookie + set_offline,验"入队→重放→服务端终态→按条清理"。
+
+### §18.5 生词下划线 local-first 改造(规划,2026-07-20)
+现状:overlay 的 vocab_marks 由服务端按掌握态**过滤后**下发(_build_vocab_marks 跳过 mastered)
+→ 掌握变更要求前端重拉全部已渲染页 overlay(_refreshUnderlines),慢且不能缓存(SWR 会读旧,已回滚)。
+**目标设计**:服务端回**全候选**(含 mastered 标志/lemma)→ overlay 变每页静态(只依赖书文本+词典)
+→ 可放心 SWR/cache-first;客户端持本地掌握集(vocab-mastery-map 一次拉+toggle 时本地增删)过滤渲染
+→ 标记掌握=0ms 本地消隐,新页下划线=缓存秒出。触点:_build_vocab_marks/_build_jp_vocab_marks(服务端)
++ 前端 vocab-layer 渲染过滤 + _wordPopMaster 本地集更新 + jp 分支同改。
