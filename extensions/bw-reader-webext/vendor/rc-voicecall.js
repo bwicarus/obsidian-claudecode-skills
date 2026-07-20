@@ -1888,7 +1888,14 @@
       // ㊵ 拉模式(用户拍板"只在需要时读取"):翻页/滚动**只更新本地状态,一个字都不发**——
       // 内容在用户开口/发文字的瞬间经 _rtcFlushCtx 注入(不问=零注入);模型要更多内容自己调 read_page
       var np = j.page;
-      if (np && np !== _rtc.ctxPage) { _rtc._inkFp = ''; _rtc.inkDirty = false; }
+      if (np && np !== _rtc.ctxPage) {
+        _rtc._inkFp = ''; _rtc.inkDirty = false;
+        _rtc.pageTs = Date.now();   // 用户注入策略:翻页时刻(停留 8s~12min 内开口才注入页面内容,省 token)
+        clearTimeout(_rtc._ptPreT);   // 停留 8s(确认在读,不是快速翻过)→ **预拉**页文本填 cache:首问就有,不再'开口才拉赶不上'
+        _rtc._ptPreT = setTimeout(function () {
+          if (_rtc.ctxPage === np && !_rtc.pendText && _rtc.ctxFile) _rtcFetchPageText(_rtc.ctxFile + ':' + np);
+        }, 8000);
+      }
       if (np) _rtc.ctxPage = np;
       if (j.total) _rtc.ctxTotal = j.total | 0;   // 131:总页数(用户实测 AI 上下文里没有,答不出"这本书多少页/还剩多少")
       if (j.text != null) _rtc.pendText = String(j.text || '');
@@ -2735,10 +2742,14 @@
     //   跨海往返,短问题时注入常赶不上 VAD 判完,模型只好凭空答(截图里"谁"那次就是)。
     try {
       var vt = _rtc.pendText || '';
-      if (!vt && _rtc.ctxFile && _rtc.ctxPage) {   // 扫描书/图片模式:前端可见文本采不到(用户实锤'AI 不知道页面内容'根因)
-        var _pk = _rtc.ctxFile + ':' + _rtc.ctxPage;   //   → 服务端 _page_text 兜底(OCR 文字层+钉入便签/卡片注入都在)
-        if (_rtc._ptCache && _rtc._ptCache.k === _pk) vt = _rtc._ptCache.t || '';
-        else _rtcFetchPageText(_pk);   // 异步填 cache:本轮可能赶不上(instructions 指代铁律兜),下一轮开口注入
+      if (!vt && _rtc.ctxFile && _rtc.ctxPage) {   // 扫描书/图片模式:前端可见文本采不到 → 服务端 _page_text 兜底(OCR+钉入便签/卡片注入)
+        // 用户注入策略(2026-07-20):翻到页后停留 ≥8s(在读)且 ≤12min(话题还新鲜)→ 开口注入;窗外不注入省 token(模型可 read_page)
+        var _dwell = Date.now() - (_rtc.pageTs || 0);
+        if (!_rtc.pageTs || (_dwell >= 8000 && _dwell <= 720000)) {
+          var _pk = _rtc.ctxFile + ':' + _rtc.ctxPage;
+          if (_rtc._ptCache && _rtc._ptCache.k === _pk) vt = _rtc._ptCache.t || '';
+          else _rtcFetchPageText(_pk);   // 预拉没赶上/通话刚建:现场补拉,下一轮开口注入
+        }
       }
       // ★创造物库告知(与文字侧同一个源;替代旧 __lastCheckResult 专线):只注入告知+句柄,内容 recall 取。
       _rtcCreFetch();
@@ -3002,8 +3013,9 @@
         _rtcTool._silent = !!res.silent && localStorage.getItem('rc-voice-toolreply') !== '1';   // 74/89:静默入库;「工具口头回报」开=放行
         var ca = res.client_action; delete res.client_action;
         var _resFeed = res;   // 喂回模型/recentTools 的精简版:有 cards_brief 时删 cards 全文——
-        try {   //   截断喂回残 JSON=「AI 不知道自己做过什么卡」的根因(用户 2026-07-20);UI 走 onToolStatus 的完整 result
+        try {   //   截断喂回残 JSON=「AI 不知道自己做过什么卡/哪些图搜到了」的根因(用户 2026-07-20);UI 走 onToolStatus 的完整 result
           if (res.cards && res.cards_brief) { _resFeed = Object.assign({}, res); delete _resFeed.cards; }
+          if (res.images && res.found_brief) { if (_resFeed === res) _resFeed = Object.assign({}, res); delete _resFeed.images; }   // 图 URL 对语音模型无用还挤爆 1800 预算;found_brief/missed 顶上
         } catch (e) {}
         try {   // 61b:最近工具结果环(搜索摘要/配图URL/已做卡片大意)——之后 make_anki/make_note 把对话现场带给制卡 AI
           var _imgs = [];

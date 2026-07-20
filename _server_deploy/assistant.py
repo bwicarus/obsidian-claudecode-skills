@@ -2441,11 +2441,13 @@ def _t_search_image(args, ctx):
                         "(日本特有事物用日语原名,通用/西方概念用英文通称/学名);"
                         "再搜不到就如实告诉用户没找到合适的图,绝不编图片链接。"}
     return {"ok": True, "count": len(found),
+            "found_brief": [f"{r['concept']}(命中词:{r.get('matched_query') or '?'})" for r in found],   # 一行/张:喂回模型用它
+            "missed": [r["concept"] for r in results if not r["found"]],   #   (images 的长 URL 会把喂回截断预算吃光——模型分不清哪些找到了的根因,用户实锤)
             "images": [{"concept": r["concept"], "image_url": r["image_url"], "page_url": r["page_url"],
                         "source": r.get("source", ""), "matched_query": r.get("matched_query", "")} for r in found],
-            "missed": [r["concept"] for r in results if not r["found"]],
-            "_note": "把这些图用 markdown ![简短中文说明](image_url) 插进回答里对应概念旁(每张配一句说明)。"
-                     "missed 里的没搜到图 → 别硬配、更别自己编图片链接。"}
+            "_note": "**只有 found_brief 列出的搜到了**;missed 里的没搜到——用户再要 missed 里的就换词重搜,"
+                     "绝不说'已经在屏幕上'。文字回答要插图就用 markdown ![简短中文说明](image_url) 放对应概念旁;"
+                     "missed 的别硬配、更别编图片链接。"}
 
 
 def _optimize_video_query(topic, r=None):
