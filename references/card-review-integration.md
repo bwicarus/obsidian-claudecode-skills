@@ -9,7 +9,7 @@ draft 草稿(保留/修改):可编辑 + [🗑 删除] [✓ 入库到 Anki]
    点入库 = **直接进 Anki**(即使不再操作也没关系);拿 note_id
 learn 学习态 = 普通 Anki 卡:正面 → 点击显示答案 → 四档(再来/困难/良好/简单,就是普通 Anki)
    评分 → /pdf/api/review-answer{note_id,ease} → answerCards 真 FSRS + 返回下次到期
-collapsed 收起:长条 +「距下次复习 X」倒计时(Anki 冷却时间);可再点→圆球(B3)
+collapsed 收起:长条 +「距下次复习 X」倒计时(Anki 冷却时间);点→ball圆球→点→done展开回看→点→collapsed(B3 已上线,单击循环)
 ```
 **关键**:入库是唯一入库口(不是"完成→掌握确认"的三段式,那是我早前误解)。入库后即普通 Anki 卡。
 卡片版面后续直接复用到 rc-review 复习页(用户说之后再讨论)。已上线:rc-flashcard 三态 +
@@ -87,7 +87,7 @@ __vcInfoCardEl(rc-voicecall:1256)是静态渲染器无编辑态;renderInfo(1270)
 - ✅ **B1 状态机+单卡**:草稿[删除/入库]→入库直进Anki→学习态四档→收起倒计时(defer_add服务端+anki-add-cards幂等)
 - ✅ **天气卡形态+字幕双宿主**:_cardPush加mount回调承载状态机卡;侧栏turnCard+字幕浮层镜像+pinBind选中;bare无双壳
 - ✅ **B2 多卡 scroll-snap 中线吸附左右滑动**(替代‹›按钮):.fc-track横向滑轨+圆点指示+滚动跟踪idx+就地重渲不跳位。E2E:3卡滑轨/snap:x mandatory/无箭头/编辑不跳位
-- 🔲 **B3 收纳链**:collapsed长条+倒计时已有;缺**圆球**态(卡→长条→圆球循环,接现有vc-card三态收纳语义)
+- ✅ **B3 收纳链**:collapsed长条 ⇄ ball圆球 ⇄ done展开回看,单击循环(卡→长条→圆球,方向/命名对齐vc-card三态)。评分后进collapsed(spec"自动收起为长条");圆球=54px玻璃球+紧凑倒计时(3d/5h/12m);done=正反面只读+"✓已复习·距下次X"。E2E走完整链:入库→learn→四档→长条→圆球→展开→回长条闭合。**内联**圆球(非fixed停靠,B4才拖出钉页)
 - 🔲 **B4 拖出钉页**:圆球抓手拖拽,便签式内容坐标锚定(rc-stickynote管线),侧栏+收藏夹两来源
 - 🔲 双实例状态同步:侧栏/浮层两份rc-flashcard独立,切宿主不同步→按cid联动
 

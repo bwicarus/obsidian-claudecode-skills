@@ -38,7 +38,12 @@
       '.fc-e.e1{border-color:#7f1d1d;color:#fca5a5}.fc-e.e2{border-color:#78350f;color:#fcd34d}' +
       '.fc-e.e3{border-color:#14532d;color:#86efac}.fc-e.e4{border-color:#1e3a8a;color:#93c5fd}' +
       '.fc-collapsed{display:flex;align-items:center;gap:10px;background:#0d1322;border:1px solid #1f2740;border-radius:10px;padding:12px 14px;cursor:pointer;font-size:13px;color:#8a9bb4}' +
-      '.fc-collapsed b{color:#86efac}';
+      '.fc-collapsed b{color:#86efac}' +
+      '.fc-donehd{display:flex;align-items:center;gap:8px;font-size:12px;color:#86efac;padding-bottom:9px;margin-bottom:10px;border-bottom:1px dashed #2a3550;cursor:pointer}' +
+      '.fc-donehd b{color:#bbf7d0}' +
+      '.fc-ball{display:inline-flex;flex-direction:column;align-items:center;justify-content:center;width:54px;height:54px;border-radius:50%;background:linear-gradient(150deg,#16233c,#0d1322);border:1px solid #24304e;box-shadow:0 3px 10px rgba(0,0,0,.35);cursor:pointer;color:#86efac;font-size:16px;line-height:1;transition:transform .15s,box-shadow .15s;-webkit-tap-highlight-color:transparent}' +
+      '.fc-ball:hover{transform:scale(1.06);box-shadow:0 5px 14px rgba(0,0,0,.45)}' +
+      '.fc-ball .fc-ball-t{font-size:9px;color:#8a9bb4;margin-top:3px;letter-spacing:.3px}';
     document.head.appendChild(st);
   }
   function nextLabel(next) {
@@ -46,9 +51,23 @@
     if (typeof iv === 'number' && iv > 0) return iv >= 1 ? (iv + ' 天后') : (Math.max(1, Math.round(iv * 24 * 60)) + ' 分钟后');
     return '很快';
   }
+  function nextLabelShort(next) {
+    next = next || {}; var iv = next.interval;
+    if (typeof iv === 'number' && iv > 0) {
+      if (iv >= 1) return Math.round(iv) + 'd';
+      var m = Math.max(1, Math.round(iv * 24 * 60)); return m >= 60 ? Math.round(m / 60) + 'h' : m + 'm';
+    }
+    return '✓';
+  }
   function cardHtml(st, c, i) {
     // 顶部状态提示行已去掉(用户:下方圆点足够指示);卡片框固定大小、内容超出内部滚动(.fc-card max-height)
-    if (c._st === 'collapsed') return '<div class="fc-collapsed" data-fc="expand">🗂 已入 Anki · 距下次复习 <b>' + esc(nextLabel(c._next)) + '</b> · 点看</div>';
+    if (c._st === 'ball') return '<div class="fc-ball" data-fc="cycle" title="已入 Anki · 点开看"><span class="fc-ball-ic">✓</span><span class="fc-ball-t">' + esc(nextLabelShort(c._next)) + '</span></div>';
+    if (c._st === 'done') {
+      var df = c.type === 'cloze' ? clozeSeg(c.cloze, false) : md(c.front);
+      var db = c.type === 'cloze' ? clozeSeg(c.cloze, true) : md(c.back);
+      return '<div class="fc-card"><div class="fc-donehd" data-fc="cycle">✓ 已复习 · 距下次 <b>' + esc(nextLabel(c._next)) + '</b> · 收起 ›</div><div class="fc-lbl">正面</div>' + df + '<div class="fc-back"><div class="fc-lbl">背面</div>' + db + '</div></div>';
+    }
+    if (c._st === 'collapsed') return '<div class="fc-collapsed" data-fc="cycle">🗂 已入 Anki · 距下次复习 <b>' + esc(nextLabel(c._next)) + '</b> · 收起 ›</div>';
     if (c._st === 'draft') {
       var b = c.type === 'cloze'
         ? '<div class="fc-lbl">填空(cloze,答案用 {{c1::…}} 包住)</div><textarea class="fc-ed" data-f="cloze">' + esc(c.cloze) + '</textarea>'
@@ -75,7 +94,7 @@
         if (act === 'del') { st.cards.splice(i, 1); renderTrack(container); RC.toast && RC.toast('草稿已删除(未入库)'); }
         else if (act === 'add') { addToAnki(container, i); }
         else if (act === 'reveal') { cc._showBack = true; updateSlide(container, i); }
-        else if (act === 'expand') { cc._st = 'learn'; cc._showBack = false; updateSlide(container, i); }
+        else if (act === 'cycle') { var _o = { collapsed: 'ball', ball: 'done', done: 'collapsed' }; cc._st = _o[cc._st] || 'collapsed'; updateSlide(container, i); }
       });
     });
     slide.querySelectorAll('.fc-ed').forEach(function (ta) { ta.addEventListener('input', function () { st.cards[i][ta.dataset.f] = ta.value; }); });
