@@ -998,18 +998,17 @@ def _task_anki(tid, params, ctx, base):
         _steps.append({"label": s, "t": round(time.time(), 1)})
         _vtask_set(tid, step=s, steps=list(_steps))
 
-    with _anki_lock:   # AnkiConnect 串行
-        out = _pdf_mod()._run_snippets_to([{"text": text, "source": link}], False, True, "", "opus", "high",
-                                          image_url=image_url or None, on_step=_on_step)
-    n = out.get("anki_added", 0)
-    if out.get("ok") and n:
-        uid = _undo_record("anki", f"{n} 张卡", {"note_ids": out.get("anki_note_ids") or []}, owner=ctx.get("_uid"))
-        # result 带**完整卡片内容**(正反面,含公式/图)→ 前端方块态「完整卡片预览」逐张翻看
-        _vtask_set(tid, status="done", speak=f"做好了，加了{n}张卡到 Anki",
+    # 2026-07-21 用户拍板:制卡工具统一走**草稿预览确认**(未确认不入库,与选段🎴/B1 一致);
+    #   直接入库另立工具(未讨论,不在 make_anki)。→ defer_add=True 只生成卡草稿,前端确认后经
+    #   /pdf/api/anki-add-cards 入库。AnkiConnect 不再在此调用 → 不必占 _anki_lock。
+    out = _pdf_mod()._run_snippets_to([{"text": text, "source": link}], False, True, "", "opus", "high",
+                                      image_url=image_url or None, defer_add=True, on_step=_on_step)
+    cards = out.get("anki_cards") or []
+    if out.get("ok") and cards:
+        _vtask_set(tid, status="done", speak=f"做好了{len(cards)}张卡片草稿，在卡片上确认后入库",
                    steps=list(_steps),
-                   result={"undo_id": uid, "kind": "anki",
-                           "n": n, "deck": out.get("anki_deck") or "QA",
-                           "cards": out.get("anki_cards") or []})
+                   result={"kind": "anki", "deferred": True, "n": len(cards),
+                           "deck": out.get("anki_deck") or "QA", "cards": cards})
     elif out.get("ok"):
         _vtask_set(tid, status="error", error="AI 没生成卡片(内容可能不适合制卡)")
     else:

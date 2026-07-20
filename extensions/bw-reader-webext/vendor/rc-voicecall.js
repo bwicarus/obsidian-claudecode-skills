@@ -687,7 +687,7 @@
         try {
           if (!_turnTid || !RC.turnCard) return;
           if (stt === 'done' && d && d.result && d.result.cards && d.result.cards.length) {
-            RC.turnCard.addPart(_turnTid, { kind: 'cards', cards: d.result.cards });
+            RC.turnCard.addPart(_turnTid, { kind: 'cards', cards: d.result.cards, draft: !!d.result.deferred });   // deferred=草稿→可编辑确认;否则只读预览
           } else if (stt === 'error') {
             RC.turnCard.addPart(_turnTid, { kind: 'text', text: '✗ 制卡没成:' + ((d && d.error) || '内容可能不适合制卡') });
           }
