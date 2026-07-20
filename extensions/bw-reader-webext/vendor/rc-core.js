@@ -7,7 +7,7 @@
  * 迁移策略:先抽共享模块 + 只接 EPUB 验证;再逐个把 PDF 部件 behind window.RC_USE.<mod> flag 切过来(旧实现保留)。
  */
 (function () {
-  if (window.RC) return;
+  if (window.RC && window.RC.use) return;   // 按能力守卫:别的模块先建了空 RC 壳(如曾被 rc-outbox 抢先)也不跳过初始化;已有成员由下方赋值保留语义=覆盖为正版
   // 【iOS 根治】button 的原生外观(push-button)会画一层浅色圆角块盖住自定义 background → 用户看到的「白色方块」。
   // 桌面 Chromium 不画 ⇒ headless 测不出。这里在共享层地基上兜底一次(最低优先级,零回归),覆盖没有引 pdf/epub-styles 的页面。
   try {
@@ -17,6 +17,7 @@
       (document.head || document.documentElement).insertBefore(_bs, (document.head || document.documentElement).firstChild);
     }
   } catch (e) {}
+  var _pre = window.RC || {};   // 先到的成员(如 rc-outbox.outbox)保留
   var RC = window.RC = {
     _adapter: null,
     // 各 reader 在自己脚本末尾 RC.use(adapter) 注册整套适配器方法
@@ -48,6 +49,7 @@
       clearTimeout(RC._toastT); RC._toastT = setTimeout(function () { el.style.opacity = '0'; }, 1400);
     }
   };
+  for (var k in _pre) { if (!(k in RC)) RC[k] = _pre[k]; }   // 合并先到成员
 })();
 
 })(window.__bwReaderDoc || document, window.__bwReaderFetch || window.fetch.bind(window));
