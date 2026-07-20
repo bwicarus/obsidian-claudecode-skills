@@ -65,6 +65,7 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
     wrap.appendChild(dbgLayer);
   }
   wrap.__charBoxes = charBoxes;
+  try { window.__applyPhraseMergesLocal && window.__applyPhraseMergesLocal(wrap); } catch (_) {}   // 本地词组合并(收藏集驱动,教义:本地算)
   window.dlog?.('chars: ' + charBoxes.length + ' on page ' + num);
   // 创建 char-layer（透明覆盖整个 page-wrap）→ 绑定后**选词此刻即可用**(不等 overlay)
   const cl = ensurePageLayer(wrap, 'char-layer');

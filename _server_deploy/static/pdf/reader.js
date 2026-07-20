@@ -2448,6 +2448,7 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
     wrap.appendChild(dbgLayer);
   }
   wrap.__charBoxes = charBoxes;
+  try { window.__applyPhraseMergesLocal && window.__applyPhraseMergesLocal(wrap); } catch (_) {}   // 本地词组合并(收藏集驱动,教义:本地算)
   window.dlog?.('chars: ' + charBoxes.length + ' on page ' + num);
   // 创建 char-layer（透明覆盖整个 page-wrap）→ 绑定后**选词此刻即可用**(不等 overlay)
   const cl = ensurePageLayer(wrap, 'char-layer');
@@ -4849,6 +4850,37 @@ function _pfavUnpaint(t) {
 }
 try { window.__pfavPaint = _pfavPaint; window.__pfavUnpaint = _pfavUnpaint; } catch (_) {}
 
+// ── 本地真分词(2026-07-21 用户教义:服务器只做必要任务/备份/中继——词组合并的输入(收藏集+字符盒)
+//    全在本地,分组计算就该在本地):对页内每个收藏词组出现位置,把这些字的 w 并成同组(借占位字既有
+//    w,保 block 编码);_w0 存原生值 → 幂等重套(取消收藏=还原后按剩余收藏集重算)。
+//    服务端不再为收藏触发整本 chars 重算;它的分词结果下次自然加载时到达,本函数重套幂等无冲突。──
+function _applyPhraseMergesLocal(pw) {
+  const chars = pw && pw.__charBoxes; if (!chars || !chars.length) return;
+  for (const cb of chars) if (cb._w0 !== undefined) cb.w = cb._w0;   // 先整体还原
+  const favs = (typeof _phraseFavSet !== 'undefined' && _phraseFavSet) ? [..._phraseFavSet] : [];
+  if (!favs.length) return;
+  let str = ''; const pos = [];
+  for (let i = 0; i < chars.length; i++) {
+    const cc = chars[i].c != null ? String(chars[i].c) : '';
+    for (let j = 0; j < cc.length; j++) { str += cc[j]; pos.push(i); }
+  }
+  for (const t of favs) {
+    if (!t) continue;
+    let from = 0, idx;
+    while ((idx = str.indexOf(t, from)) >= 0) {
+      from = idx + t.length;
+      const sIdx = pos[idx], eIdx = pos[idx + t.length - 1];
+      if (sIdx == null || eIdx == null) continue;
+      let wUse = -1;
+      for (let k = sIdx; k <= eIdx; k++) if (chars[k].w != null && chars[k].w >= 0) { wUse = chars[k].w; break; }
+      if (wUse < 0) continue;   // 无既有词 id 可借(w 编码含块 id)→ 保守跳过
+      for (let k = sIdx; k <= eIdx; k++) { const cb = chars[k]; if (cb._w0 === undefined) cb._w0 = cb.w; cb.w = wUse; }
+    }
+  }
+}
+function _applyPhraseMergesAll() { document.querySelectorAll('.page-wrap[data-page-num]').forEach((pw) => { try { _applyPhraseMergesLocal(pw); } catch (_) {} }); }
+try { window.__applyPhraseMergesLocal = _applyPhraseMergesLocal; } catch (_) {}
+
 window._phraseFav = (btn) => {
   const s = _wordPopState; if (!s || !s.word) return;
   const t = s.word;
@@ -4859,7 +4891,7 @@ window._phraseFav = (btn) => {
   if (btn) { btn.disabled = false; btn.textContent = nowFav ? '★ 已收藏' : '☆ 收藏为词组'; btn.classList.toggle('wp-anki', nowFav); }
   _toast?.(nowFav ? '已收藏，之后会作为一个词分词' : '已取消收藏');
   if (nowFav) _removePhraseHighlight(t);   // 收藏后该词组变成划线(分词单元),只消除同文本的查询高亮(不动别的并存高亮)
-  refreshCharsWForAllPages();   // 让分词合并生效(需服务端重分词;离线时此步静默失败,恢复后自然刷新)
+  _applyPhraseMergesAll();   // 本地真分词(教义:服务器只做备份/中继;整本重算已撤,服务端结果下次自然加载幂等重套)
   if (nowFav) { try { _pfavPaint(t); } catch (_) {} } else { try { _pfavUnpaint(t); } catch (_) {} }   // 长下划线即时(先画后传)
   // ② 后台同步:成功用服务端全量校正;网络错 → outbox 入队(POST/DELETE 均幂等)
   fetch('/pdf/api/phrases', {
@@ -4887,7 +4919,8 @@ async function _refreshOnePageCharsW(pw, num, gen) {
   if (gen !== _charsWGen) return;
   if (!d.ok || !d.chars) return;
   const newW = d.chars.map(c => (c.w == null ? -1 : c.w));
-  for (const cb of pw.__charBoxes) { if (cb._oi != null && cb._oi < newW.length) cb.w = newW[cb._oi]; }
+  for (const cb of pw.__charBoxes) { if (cb._oi != null && cb._oi < newW.length) { cb.w = newW[cb._oi]; delete cb._w0; } }
+  try { _applyPhraseMergesLocal(pw); } catch (_) {}   // 服务端 w 覆盖后重套本地收藏合并(幂等)
   if (d.furigana) {   // 收藏词组后:振假名已按整体读音合并(当試験→とうしけん 一条),刷新并重画 ruby
     pw.__furigana = d.furigana;
     try { if (_rubyEnabled()) renderRubyLayer(pw); } catch (_) {}
