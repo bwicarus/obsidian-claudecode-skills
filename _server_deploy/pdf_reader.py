@@ -8802,6 +8802,57 @@ def pdf_api_epub_translate_section():
     return jsonify({"ok": True, "translations": zhs, "translated": done, "total": len(texts)})
 
 
+_LOOKUP_EVT_SEEN = CLAUDE_DIR / "state" / "lookup-events-seen.json"
+
+@bp.route("/api/lookup-event", methods=["POST"])
+def pdf_api_lookup_event():
+    """离线查词学习信号补报(教义:服务器=事件中继/聚合)。在线查词的信号由 SWR 后台真实请求
+    自然触发,无需此端点;仅离线命中本地词典缓存的查询,恢复后经 outbox 补投到这里。
+    幂等:id 去重(seen 保 2000)。副作用与 dict-quick 非 prewarm 路径同款。"""
+    body = request.get_json(silent=True) or {}
+    eid = (body.get("id") or "").strip()[:64]
+    word = (body.get("word") or "").strip()[:80]
+    if not word:
+        return jsonify({"ok": False, "error": "no word"}), 400
+    try:
+        seen = json.loads(_LOOKUP_EVT_SEEN.read_text("utf-8"))
+        assert isinstance(seen, list)
+    except Exception:
+        seen = []
+    if eid and eid in seen:
+        return jsonify({"ok": True, "dedup": True})
+    rel = (body.get("file") or "").strip()
+    try:
+        page = int(body.get("page") or 0)
+    except (TypeError, ValueError):
+        page = 0
+    context = (body.get("context") or "")[:2000]
+    is_jp = bool(body.get("jp"))
+    try:
+        if is_jp:
+            _append_lookup_log(word, word, rel, page, context)
+            _jp_vocab_bump(word)
+        else:
+            _append_lookup_log(word.lower(), (body.get("lemma") or word).lower(), rel, page, context)
+            if rel and page > 0:
+                _trigger_vocab_note_async(word.lower(), rel, page, context)
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)[:120]}), 500
+    if eid:
+        seen.append(eid)
+        try:
+            _LOOKUP_EVT_SEEN.write_text(json.dumps(seen[-2000:]), "utf-8")
+        except Exception:
+            pass
+    return jsonify({"ok": True})
+
+
+@bp.route("/api/ui-version")
+def pdf_api_ui_version():
+    """界面版本探针(新版本提示条用):返回当前 shared_js_v。轻到可以每 5min 轮询。"""
+    return jsonify({"ok": True, "v": _pdf_shared_js_v()})
+
+
 @bp.route("/api/review-queue")
 def pdf_api_review_queue():
     """本地复习 v1:到期卡队列(AnkiConnect is:due → cardsInfo)。前端缓存本地+SW 离线回落。"""

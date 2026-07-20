@@ -486,6 +486,37 @@ window.toggleGrammarPanel = function () {
      阶段6 语法分析→rc-grammar(跟 EPUB 共用同一套块渲染/结构图/KG 跟踪逻辑;18-grammar.js 的
        onGrammarAnalyze/renderGrammarTrackList/loadGrammarHistory/setGrammarView 四个入口按 __uiShared 分流);
      reader.js 后加载、赢全局,门控点(__uiShared)决定路由。 -->
+<script>
+// ── 新版本提示条(2026-07-21,缓存惨案制度性防复发):比对加载时 v 与服务器现行 v,
+//    不一致 → 顶部小条一键更新(清代码壳缓存,数据全保留)。触发:回前台(iOS 快照恢复主场景)+ 5min。──
+(function () {
+  var MYV = {{ shared_js_v|tojson }};
+  var shown = false;
+  function check() {
+    if (shown || !navigator.onLine) return;
+    fetch('/pdf/api/ui-version', { cache: 'no-store' }).then(function (r) { return r.json(); }).then(function (d) {
+      if (!d || !d.ok || String(d.v) === String(MYV) || shown) return;
+      shown = true;
+      var bar = document.createElement('div');
+      bar.style.cssText = 'position:fixed;top:0;left:50%;transform:translateX(-50%);z-index:3000;background:#244470;border:1px solid #3b6db5;border-top:none;color:#cfe6ff;border-radius:0 0 10px 10px;padding:7px 14px;font-size:13px;display:flex;gap:10px;align-items:center;box-shadow:0 4px 16px rgba(0,0,0,.4)';
+      bar.innerHTML = '界面有新版本 <button id="bw-upd-go" style="background:#3b6db5;border:0;color:#fff;border-radius:7px;padding:5px 12px;font-size:13px;cursor:pointer">⟳ 更新(数据全保留)</button><button id="bw-upd-x" style="background:transparent;border:0;color:#8a9bb4;font-size:14px;cursor:pointer">✕</button>';
+      document.body.appendChild(bar);
+      document.getElementById('bw-upd-x').onclick = function () { bar.remove(); };
+      document.getElementById('bw-upd-go').onclick = function () {
+        this.textContent = '更新中…';
+        Promise.resolve()
+          .then(function () { return (window.caches && caches.delete) ? caches.delete('pdf-shell-v1') : null; })
+          .then(function () { return navigator.serviceWorker && navigator.serviceWorker.getRegistration ? navigator.serviceWorker.getRegistration().then(function (r) { return r && r.update(); }) : null; })
+          .catch(function () {})
+          .then(function () { location.reload(); });
+      };
+    }).catch(function () {});
+  }
+  document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'visible') setTimeout(check, 800); });
+  setInterval(check, 5 * 60000);
+  setTimeout(check, 15000);
+})();
+</script>
 <script src="/static/pdf/rc-core.js?v={{ shared_js_v }}"></script>
 <script src="/static/pdf/rc-outbox.js?v={{ shared_js_v }}"></script>
 <script src="/static/pdf/rc-review.js?v={{ shared_js_v }}"></script>

@@ -419,6 +419,16 @@
     _wordPopState.lemma = d.lemma || word;
     _wordPopState.jp = !!d.jp;                                      // 掌握按钮按语言分流(jp/en 不同 store)
     _wordPopState.reading = (d.jp && d.reading) ? d.reading : '';   // 日语:发音念假名读音(保证读对)
+    // 离线查词学习信号(2026-07-21):在线时 SWR 后台真实请求自然触发服务端记录;
+    // 仅离线(navigator.onLine=false 仍从本地缓存拿到词)时入 outbox,恢复后补报(端点幂等)。
+    try {
+      if (!navigator.onLine && window.RC && RC.outbox) {
+        var _eid = 'lk_' + Array.from(crypto.getRandomValues(new Uint8Array(8))).map(function (b) { return b.toString(16).padStart(2, '0'); }).join('');
+        RC.outbox.send('lkevt', _eid, '/pdf/api/lookup-event',
+          { id: _eid, word: d.word || s.word, lemma: d.lemma || '', jp: !!d.jp,
+            file: (s.file || ''), page: (s.page || 0), context: (s.ctx || '').slice(0, 1500) });
+      }
+    } catch (_) {}
     _wordPopState.mastered = (function () {
       // §18.7 本地掌握库优先:SW/跨站缓存里的 dict 响应 mastered 可能陈旧,本地库才是事实源
       try {
