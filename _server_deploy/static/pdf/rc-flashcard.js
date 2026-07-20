@@ -17,7 +17,8 @@
     var st = document.createElement('style'); st.id = 'rc-flashcard-css';
     st.textContent =
       '.fc-wrap{margin-top:8px;position:relative}' +
-      '.fc-pin{position:absolute;top:-3px;right:2px;z-index:2;background:none;border:none;font-size:15px;cursor:pointer;opacity:.5;padding:2px 5px;-webkit-tap-highlight-color:transparent}' +
+      '.fc-pin{position:absolute;top:-1px;right:2px;z-index:2;background:none;border:none;color:#8a9bb4;cursor:pointer;opacity:.7;padding:3px 5px;-webkit-tap-highlight-color:transparent}' +
+      '.fc-pin svg{width:13px;height:13px;display:block}' +
       '.fc-pin:hover{opacity:1;transform:scale(1.1)}' +
       '.fc-track{display:flex;overflow-x:auto;scroll-snap-type:x mandatory;-webkit-overflow-scrolling:touch;scrollbar-width:none;overscroll-behavior-x:contain}' +
       '.fc-track::-webkit-scrollbar{display:none}' +
@@ -107,7 +108,7 @@
     var slides = '';
     for (var i = 0; i < n; i++) slides += '<div class="fc-slide" data-i="' + i + '">' + cardHtml(st, st.cards[i], i) + '</div>';
     var dots = n > 1 ? '<div class="fc-dots">' + st.cards.map(function (_, j) { return '<span class="fc-dot' + (j === st.idx ? ' on' : '') + '" data-goto="' + j + '"></span>'; }).join('') + '</div>' : '';
-    var pin = (window.RC && RC.stickynote && RC.stickynote.createCardAt && !(st.opts && st.opts.nopin)) ? '<button class="fc-pin" title="钉到书页">📌</button>' : '';
+    var pin = (window.RC && RC.stickynote && RC.stickynote.createCardAt && !(st.opts && st.opts.nopin)) ? '<button class="fc-pin" title="钉到书页"><svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9.9 2.1l4 4-2.9 1-1.5 4.4-5-5L8.9 5z"/><path d="M6 10L2.5 13.5"/></svg></button>' : '';
     container.innerHTML = '<div class="fc-wrap">' + pin + '<div class="fc-track">' + slides + '</div>' + dots + '</div>';
     var _pinBtn = container.querySelector('.fc-pin');
     if (_pinBtn) _pinBtn.addEventListener('click', function (ev) { ev.stopPropagation(); pinToPage(container); });

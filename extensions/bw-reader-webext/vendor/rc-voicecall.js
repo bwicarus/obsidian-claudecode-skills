@@ -157,7 +157,10 @@
       '.rc-flow-cap{font-size:11px;color:#7f92b8;margin-bottom:4px}' +
       '.vc-card-hd{display:flex;align-items:center;gap:6px;font-size:12px;color:#b9a8ff;margin-bottom:6px;flex:none}' +
       '.vc-card-x{margin-left:auto;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.14);border:none;color:#e8e8ee;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;flex:none}' +
-      '.vc-card-pin{margin-left:auto;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.14);border:none;font-size:11px;line-height:22px;text-align:center;cursor:pointer;padding:0;flex:none}' +
+      '.vc-card-pin{margin-left:auto;width:22px;height:22px;border-radius:50%;background:rgba(255,255,255,.14);border:none;color:#e8e8ee;display:flex;align-items:center;justify-content:center;cursor:pointer;padding:0;flex:none}' +
+      '.vc-card-pin svg{width:11px;height:11px}' +
+      // 钉入书页态(便签壳内的真 vc-card):脱离浮层定位,静态占满便签宽
+      '.vc-card.vc-pinned{position:relative;right:auto;bottom:auto;left:auto;top:auto;width:100%;box-shadow:0 6px 22px rgba(0,0,0,.35)}' +
       '.vc-card-pin + .vc-card-p{margin-left:6px}' +
       '.vc-card-x svg{width:10px;height:10px}' +
       '.vc-card-p{margin-left:auto;width:22px;height:22px;border-radius:50%;background:rgba(123,108,255,.16);border:none;color:#9d8cff;' +
@@ -2388,7 +2391,7 @@
     el.dataset.vcCid = _cid;
     if (opts.type) el.style.setProperty('--vc-tc', opts.type);
     el.innerHTML = '<div class="vc-card-hd">' + (kindLabel || '文字回复') +
-      '<button type="button" class="vc-card-pin" aria-label="钉到书页">📌</button>' +
+      '<button type="button" class="vc-card-pin" aria-label="钉到书页"><svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9.9 2.1l4 4-2.9 1-1.5 4.4-5-5L8.9 5z"/><path d="M6 10L2.5 13.5"/></svg></button>' +
       '<button type="button" class="vc-card-p" aria-label="念">▶</button>' +
       '<button type="button" class="vc-card-x" aria-label="关闭">' +
       '<svg viewBox="0 0 12 12" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round"><path d="M3 3l6 6M9 3l-6 6"/></svg></button></div>' +

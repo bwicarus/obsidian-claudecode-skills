@@ -209,10 +209,12 @@
       '.rc-note.rc-note-hascard .rc-note-card{display:block;padding:2px 2px 4px}',
       '.rc-note.rc-note-hascard .rc-note-text,.rc-note.rc-note-hascard .rc-note-tools,.rc-note.rc-note-hascard .rc-note-ink{display:none!important}',
       '.rc-note.rc-note-hascard.rc-note-collapsed .rc-note-card{display:none}',
-      // 卡片式便签(hascard/hashtml)= vc-card 观感:把手变全宽卡头(显标题,仍是拖动把手),body 圆角接在卡头下
-      '.rc-note.rc-note-hascard .rc-note-handle,.rc-note.rc-note-hashtml .rc-note-handle{width:100%;height:30px;border-radius:14px 14px 0 0;display:flex;align-items:center;padding:0 12px;font-size:12px;color:#cfd6e6;box-sizing:border-box;overflow:hidden;white-space:nowrap;text-overflow:ellipsis}',
+      // 卡片式便签(hascard/hashtml)= **真 vc-card**(用户拍板:和字幕浮层卡一模一样,便签只当锚定壳):
+      //   便签壳全透明(背景/边框/阴影全清),body 里渲 .vc-card.vc-pinned(rc-voicecall 同一套 CSS);
+      //   handle 变透明层覆盖卡头区=拖动把手(拖动逻辑零改动)
+      '.rc-note.rc-note-hascard .rc-note-handle,.rc-note.rc-note-hashtml .rc-note-handle{position:absolute;left:0;top:0;width:100%;height:36px;background:transparent!important;box-shadow:none!important;z-index:5;border-radius:16px 16px 0 0}',
       '.rc-note.rc-note-hascard .rc-note-handle::after,.rc-note.rc-note-hashtml .rc-note-handle::after{display:none}',
-      '.rc-note.rc-note-hascard .rc-note-body,.rc-note.rc-note-hashtml .rc-note-body{border-radius:0 0 14px 14px;margin-top:0}',
+      '.rc-note.rc-note-hascard .rc-note-body,.rc-note.rc-note-hashtml .rc-note-body{margin-top:0;border:none!important;box-shadow:none!important;background:transparent!important;border-radius:16px}',
       '.rc-note-html{display:none}',
       '.rc-note.rc-note-hashtml .rc-note-html{display:block;padding:3px 5px 5px;font-size:14px;line-height:1.6;color:#e6e6f0;max-height:min(50vh,340px);overflow-y:auto;-webkit-overflow-scrolling:touch}',
       '.rc-note.rc-note-hashtml .rc-note-text,.rc-note.rc-note-hashtml .rc-note-tools,.rc-note.rc-note-hashtml .rc-note-ink{display:none!important}',
@@ -441,30 +443,37 @@
   function renderNoteCard(ctl) {
     var card = ctl.note.card, box = ctl.card; if (!box) return;
     if (!card || !card.cards || !card.cards.length || !(window.RC && RC.flashcard && RC.flashcard.mountState)) {
-      if (ctl.root.classList.contains('rc-note-hascard')) { ctl.root.classList.remove('rc-note-hascard'); try { ctl.handle.textContent = ''; ctl.cv.style.display = ''; } catch (e) {} }
+      if (ctl.root.classList.contains('rc-note-hascard')) { ctl.root.classList.remove('rc-note-hascard'); try { ctl.cv.style.display = ''; } catch (e) {} }
       box.innerHTML = ''; box.__sig = ''; return;
     }
     ctl.root.classList.add('rc-note-hascard');
-    try { ctl.cv.style.display = 'none'; } catch (e) {}   // ink canvas 有内联样式,类选择器压不住(白块盖 body 根因)
-    try { ctl.handle.textContent = '🎴 卡片' + (card.cards.length > 1 ? '×' + card.cards.length : ''); } catch (e) {}   // 把手=卡头(显标题)
+    try { ctl.cv.style.display = 'none'; ctl.body.style.background = 'transparent'; ctl.body.style.backdropFilter = ''; ctl.body.style.webkitBackdropFilter = ''; ctl.handle.style.background = 'transparent'; } catch (e) {}   // 便签壳透明(卡自己有玻璃);ink canvas 内联白块
     var sig = JSON.stringify(card);
     if (box.__sig === sig) return;   // 无变化不重建(防 syncCtl 反复重挂丢状态)
     box.__sig = sig; box.innerHTML = '';
-    try { RC.flashcard.mountState(box, card.cards, { bare: true, gid: card.gid, nopin: true }); } catch (e) {}
+    try { window.RC && RC.voiceCard && RC.voiceCard.css && RC.voiceCard.css(); } catch (e) {}   // vc-card 样式先注入
+    var vc = document.createElement('div'); vc.className = 'vc-card vc-pinned';   // 真 vc-card(和字幕浮层卡同 class 同 CSS)
+    vc.innerHTML = '<div class="vc-card-hd">🎴 卡片' + (card.cards.length > 1 ? '×' + card.cards.length : '') + '</div><div class="vc-card-bd" style="white-space:normal"></div>';
+    box.appendChild(vc);
+    try { RC.flashcard.mountState(vc.querySelector('.vc-card-bd'), card.cards, { bare: true, gid: card.gid, nopin: true }); } catch (e) {}
   }
   function renderNoteHtml(ctl) {
     var h = ctl.note.html, box = ctl.html; if (!box) return;
-    if (!h || !h.content) { if (ctl.root.classList.contains('rc-note-hashtml')) { ctl.root.classList.remove('rc-note-hashtml'); try { ctl.handle.textContent = ''; ctl.cv.style.display = ''; } catch (e) {} } box.innerHTML = ''; box.__sig = ''; return; }
+    if (!h || !h.content) { if (ctl.root.classList.contains('rc-note-hashtml')) { ctl.root.classList.remove('rc-note-hashtml'); try { ctl.cv.style.display = ''; } catch (e) {} } box.innerHTML = ''; box.__sig = ''; return; }
     ctl.root.classList.add('rc-note-hashtml');
-    try { ctl.cv.style.display = 'none'; } catch (e) {}   // ink canvas 内联样式压不住(白块盖 body 根因)
-    try { ctl.handle.textContent = h.label || '卡片'; } catch (e) {}   // 把手=卡头(显标题)
+    try { ctl.cv.style.display = 'none'; ctl.body.style.background = 'transparent'; ctl.body.style.backdropFilter = ''; ctl.body.style.webkitBackdropFilter = ''; ctl.handle.style.background = 'transparent'; } catch (e) {}   // 便签壳透明(卡自己有玻璃)
     var sig = JSON.stringify(h);
     if (box.__sig === sig) return;
-    box.__sig = sig;
-    if (h.isHtml) box.innerHTML = h.content;
-    else if (window.RC && RC.md) box.innerHTML = RC.md(h.content);
-    else box.textContent = h.content;
-    try { window.RC && RC.typeset && RC.typeset(box); } catch (e) {}
+    box.__sig = sig; box.innerHTML = '';
+    try { window.RC && RC.voiceCard && RC.voiceCard.css && RC.voiceCard.css(); } catch (e) {}
+    var vc = document.createElement('div'); vc.className = 'vc-card vc-pinned';   // 真 vc-card(和字幕浮层卡同 class 同 CSS)
+    vc.innerHTML = '<div class="vc-card-hd">' + String(h.label || '卡片').replace(/</g, '&lt;') + '</div><div class="vc-card-bd" style="white-space:normal;padding:0 13px 12px"></div>';
+    box.appendChild(vc);
+    var bd = vc.querySelector('.vc-card-bd');
+    if (h.isHtml) bd.innerHTML = h.content;
+    else if (window.RC && RC.md) bd.innerHTML = RC.md(h.content);
+    else bd.textContent = h.content;
+    try { window.RC && RC.typeset && RC.typeset(bd); } catch (e) {}
   }
   function setNoteVideo(ctl, id) {   // 供拖放/入口共用:给便签设视频(保留已有起止等设置)
     var v = (ctl.note.video && ctl.note.video.id === id) ? ctl.note.video : { id: id, start: 0, end: 0, rate: 1, loop: false, cc: true };
