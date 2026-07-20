@@ -13,30 +13,56 @@
   function _load() { try { return JSON.parse(localStorage.getItem(KEY) || '{}') || {}; } catch (e) { return {}; } }
   function _save(m) { try { localStorage.setItem(KEY, JSON.stringify(m)); } catch (e) {} }
   var _busy = false;
+  // v3(2026-07-21 用户提案"攒批分段传输"):全队打包为一次 /api/sync-batch(N 写一次连接,
+  // 服务端子请求分发,鉴权/幂等原样);同键合并早已保证"窗口内反复改不重发"。
   async function flush() {
     if (_busy) return;
     _busy = true;
     try {
       var m = _load(), ks = Object.keys(m);
-      for (var i = 0; i < ks.length; i++) {
-        var it = m[ks[i]], r;
-        try {
-          r = await fetch(it.url, { method: it.method || 'POST', headers: { 'Content-Type': 'application/json' },
-                          body: (it.body == null ? undefined : JSON.stringify(it.body)) });
-        } catch (e) { return; }               // 网络不通:停止本轮,整队保留
-        if (r.status >= 500) return;           // 服务端故障:保留下轮
-        var cur = _load();                     // 期间可能被同键新写覆盖 → 只删自己那个版本
-        if (cur[ks[i]] && cur[ks[i]].ts === it.ts) { delete cur[ks[i]]; _save(cur); }
-        if (r.status >= 400) { try { console.warn('[outbox] 服务端拒绝', it.url, r.status); } catch (e) {} }
+      if (!ks.length) return;
+      var ops = ks.map(function (k) { var it = m[k]; return { key: k, url: it.url, method: it.method || 'POST', body: it.body, ts: it.ts }; });
+      var r;
+      try {
+        r = await fetch('/pdf/api/sync-batch', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ ops: ops.map(function (o) { return { url: o.url, method: o.method, body: o.body }; }) }),
+                        keepalive: ops.length <= 8 });
+      } catch (e) { return; }               // 网络不通:整队保留
+      if (!r.ok) return;                     // 批量端点自身 4xx/5xx:保留下轮(部署过渡期兼容)
+      var d = null; try { d = await r.json(); } catch (e) {}
+      var res = (d && d.results) || [];
+      var cur = _load();
+      for (var i = 0; i < ops.length; i++) {
+        var st = (res[i] && res[i].status) || 0;
+        if (st >= 200 && st < 500) {         // 2xx 成功 / 4xx 数据性拒绝 → 出队;5xx/缺结果 → 留队
+          if (cur[ops[i].key] && cur[ops[i].key].ts === ops[i].ts) delete cur[ops[i].key];
+          if (st >= 400) { try { console.warn('[outbox] 服务端拒绝', ops[i].url, st); } catch (e) {} }
+        }
       }
+      _save(cur);
     } finally { _busy = false; }
   }
+  // 离场兜底:关页/切后台瞬间把整队 beacon 出去(读不到响应→队列保留,端点幂等→重投安全)。
+  // 扩展环境(跨源经 background 桥)beacon 打不到 Pi → 跳过,靠窗口/心跳。
+  function _beacon() {
+    try {
+      if (window.__bwReaderFetch) return;
+      var m = _load(), ks = Object.keys(m);
+      if (!ks.length || !navigator.sendBeacon) return;
+      var ops = ks.map(function (k) { var it = m[k]; return { url: it.url, method: it.method || 'POST', body: it.body }; });
+      navigator.sendBeacon('/pdf/api/sync-batch', new Blob([JSON.stringify({ ops: ops })], { type: 'application/json' }));
+    } catch (e) {}
+  }
+  window.addEventListener('pagehide', _beacon);
+  document.addEventListener('visibilitychange', function () { if (document.visibilityState === 'hidden') _beacon(); });
   RC.outbox = {
     send: function (kind, key, url, body, method) {
       var m = _load();
       m[kind + ':' + key] = { url: url, body: body, ts: Date.now(), kind: kind, method: method || 'POST' };
       _save(m);
-      setTimeout(flush, 50);
+      // 攒批窗口:首个待传改动起 5s 后统一发(窗口内同键反复改=只发终态);≥20 条提前发
+      if (Object.keys(m).length >= 20) { if (RC.outbox._winT) { clearTimeout(RC.outbox._winT); RC.outbox._winT = null; } setTimeout(flush, 50); }
+      else if (!RC.outbox._winT) RC.outbox._winT = setTimeout(function () { RC.outbox._winT = null; flush(); }, 5000);
     },
     flush: flush,
     size: function () { return Object.keys(_load()).length; }

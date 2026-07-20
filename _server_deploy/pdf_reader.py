@@ -8802,6 +8802,40 @@ def pdf_api_epub_translate_section():
     return jsonify({"ok": True, "translations": zhs, "translated": done, "total": len(texts)})
 
 
+@bp.route("/api/sync-batch", methods=["POST"])
+def pdf_api_sync_batch():
+    """outbox 攒批传输(2026-07-21 用户提案;成熟形=write coalescing+batched writes)。
+    每 op 在服务端以子请求完整分发(带原 Cookie → before_request 鉴权/各端点幂等逻辑原样生效),
+    一次连接跑 N 个写;返回逐 op status,客户端 2xx/4xx 出队、5xx/网络错留队。sendBeacon 场景
+    读不到响应 → 队列保留下次重投,端点全幂等所以安全。"""
+    from flask import current_app
+    from werkzeug.test import EnvironBuilder
+    body = request.get_json(silent=True) or {}
+    ops = body.get("ops") or []
+    if not isinstance(ops, list) or len(ops) > 100:
+        return jsonify({"ok": False, "error": "bad ops"}), 400
+    cookie = request.headers.get("Cookie", "")
+    out = []
+    for op in ops:
+        try:
+            url = str((op or {}).get("url") or "")
+            if not (url.startswith("/pdf/") or url.startswith("/api/")):
+                out.append({"status": 400}); continue
+            method = str(op.get("method") or "POST").upper()
+            if method not in ("POST", "PATCH", "DELETE", "PUT"):
+                out.append({"status": 400}); continue
+            b = EnvironBuilder(path=url, method=method,
+                               json=(op.get("body") if op.get("body") is not None else None),
+                               headers={"Cookie": cookie})
+            env = b.get_environ()
+            with current_app.request_context(env):
+                rv = current_app.full_dispatch_request()
+                out.append({"status": rv.status_code})
+        except Exception as ex:
+            out.append({"status": 500, "error": str(ex)[:80]})
+    return jsonify({"ok": True, "results": out})
+
+
 _LOOKUP_EVT_SEEN = CLAUDE_DIR / "state" / "lookup-events-seen.json"
 
 @bp.route("/api/lookup-event", methods=["POST"])
