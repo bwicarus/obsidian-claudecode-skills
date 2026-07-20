@@ -2452,8 +2452,10 @@ def _t_search_image(args, ctx):
             "images": [{"id": r.get("id", ""), "concept": r["concept"], "image_url": r["image_url"], "page_url": r["page_url"],
                         "source": r.get("source", ""), "matched_query": r.get("matched_query", "")} for r in found],
             "_note": "**只有 found_brief 列出的搜到了**;missed 里的没搜到——用户再要 missed 里的就换词重搜,"
-                     "绝不说'已经在屏幕上'。回答中要展示某张图,直接写它的编号(如 #img_ab12ef,独立成词)——"
-                     "界面会自动渲染成图片本身;**绝不要展开 URL、绝不自编编号**;missed 的别硬配。"}
+                     "绝不说'已经在屏幕上'。**引用协议(用户设计)**:"
+                     "① 搜完的回复里给用户报每张图的**内容描述+编号**(编号用纯文本,如 img_ab12ef——用户之后可指名它);"
+                     "② 之后对话中想**展示**某张图,写带#的编号(如 #img_ab12ef,独立成词)→ 界面自动把它渲染成图片本身;"
+                     "③ 语音口头回报只说描述不念编号。**绝不展开 URL、绝不自编编号**;missed 的别硬配。"}
 
 
 def _optimize_video_query(topic, r=None):
