@@ -49,15 +49,27 @@ if ($ahead -ne '0') { Fail "本地领先远端 $ahead 个提交,先 git push。"
 $local = (git rev-parse HEAD).Trim()
 Write-Host "── 本地 $branch @ $($local.Substring(0,8)),已与远端一致" -ForegroundColor Cyan
 
-# ── ② Pi 上拉到同一个提交 ───────────────────────────────────────────────
-Write-Host '── 在 Pi 上拉取同一分支' -ForegroundColor Cyan
-$pull = "cd $PiRoot && git fetch origin --prune && git checkout $branch && git pull --ff-only && git rev-parse HEAD"
-$piHead = (ssh $PiHost $pull | Select-Object -Last 1).Trim()
-if ($LASTEXITCODE -ne 0) { Fail 'Pi 侧 git 拉取失败(可能有未提交改动或分支冲突),请先上机处理。' }
+# ── ② 共享检出安全闸(Pi 侧只读判定,绝不远程改工作树)──────────────────
+# Pi 的检出是共享的(我 + Codex),而且每晚 daily 会重写 anki/records 与
+# dashboard.json —— "工作树是脏的"是常态,不能一刀切拒绝。闸门只拦真正危险的
+# 那一种:**本次要拉的提交,恰好会改到别人正在改的文件**。
+Write-Host '── 共享检出安全闸' -ForegroundColor Cyan
+ssh $PiHost "cd $PiRoot && bash scripts/deploy_remote_guard.sh $branch"
+switch ($LASTEXITCODE) {
+    0 { }
+    2 { Fail 'Pi 不在目标分支上。远程不切分支(共享检出),请上机确认。' }
+    3 { Fail 'Pi 上有人正在改本次要拉的文件。不自动 stash/reset,请上机协调。' }
+    default { Fail "安全闸执行失败(退出码 $LASTEXITCODE)。" }
+}
+
+# ── ③ Pi 上快进到同一个提交(只 ff,不切分支)───────────────────────────
+Write-Host '── 在 Pi 上快进到同一提交' -ForegroundColor Cyan
+$piHead = (ssh $PiHost "cd $PiRoot && git merge --ff-only origin/$branch >/dev/null && git rev-parse HEAD" | Select-Object -Last 1).Trim()
+if ($LASTEXITCODE -ne 0) { Fail 'Pi 侧快进失败,请上机处理。' }
 if ($piHead -ne $local) { Fail "Pi 的 HEAD ($($piHead.Substring(0,8))) 与本地 ($($local.Substring(0,8))) 不一致,已停止。" }
 Write-Host "── Pi HEAD 与本地一致 ✓" -ForegroundColor Cyan
 
-# ── ③ 调真正的部署脚本(门禁一条不少)────────────────────────────────────
+# ── ④ 调真正的部署脚本(门禁一条不少)────────────────────────────────────
 $args = if ($PreflightOnly) { '--preflight-only' } else { '' }
 Write-Host "── 触发 Pi 部署 $args" -ForegroundColor Cyan
 ssh $PiHost "cd $PiRoot && bash scripts/deploy_reader.sh $args"

@@ -92,10 +92,27 @@ test_vbook_resolver             test_codex_auth_lifecycle
 1. **Windows 编辑** → 跑那 44 个模块 + node 合同测试快速自检
 2. `git push` 到 `learning-loop-review-fixes`
 3. **Pi 上** `git pull` → 跑全量门禁 → `bash scripts/deploy_reader.sh`
-   （或从 Windows 用 `scripts/deploy_from_windows.ps1` 薄封装远程触发,门禁一条不少)
+   （或从 Windows 用 `scripts/deploy_from_windows.ps1` 远程触发,门禁一条不少)
 4. 真机验收 / E2E 只在 Pi
 
 **绝不要**在 Windows 上直接改 Pi 的生产文件,也不要用共享文件系统绕开 git。
+
+### 共享检出安全闸 `scripts/deploy_remote_guard.sh`
+
+Pi 的工作树**天生是脏的** —— 每晚 daily 会重写 `anki/records/*.json` 与 `dashboard.json`,
+再加上另一个 agent 的在制品。所以"脏就拒绝"这条规则不可用(封装会永远跑不起来)。
+
+闸门只拦真正危险的那一种:**本次要拉的提交,恰好会改到别人正在改的文件**。
+
+| 退出码 | 含义 | 处置 |
+|---|---|---|
+| 0 | 无来袭改动,或来袭与脏文件无交集 | 放行 |
+| 2 | Pi 不在目标分支 | 停 —— **远程绝不切分支**,上机确认 |
+| 3 | 来袭改动与脏文件有交集 | 停 —— 不自动 stash/reset,上机协调 |
+| 4 | git 操作失败 | 停 |
+
+闸门自身只做一次 `git fetch`,**不碰工作树**(隔离仓库三场景实测验证过)。
+封装脚本远程只执行 `git merge --ff-only`,已彻底移除 `git checkout <branch>`。
 
 ## 多方协作(Pi 检出 + Windows 检出 + Codex)
 

@@ -68,6 +68,15 @@ python3 extensions/bw-reader-webext/release_preflight.py \
 - 工作区长期包含用户和历史改动；禁止 `git reset --hard`、`git clean`、宽范围 checkout，
   也不得把无关差异带入当前工作。
 - 协作时先读共享状态并认领有界 scope；同一 checkout 不允许两个 agent 同时改同一组件。
+- **跨机(Pi + Windows 两份工作副本,2026-07-29 起)**:部署真源只有 Pi。Windows 不得直接改
+  Pi 工作树或生产文件，源码只经 git 上游流动；`scripts/deploy_from_windows.ps1` 只做远程
+  `merge --ff-only`，**绝不远程切分支**。
+- Pi 的检出是共享的(多 agent + 每晚 daily 会重写 `anki/records`、`dashboard.json`)，
+  所以"工作树脏"是常态。远程部署前先过 `scripts/deploy_remote_guard.sh`：只有当**本次要拉的
+  提交会改到别人正在改的文件**时才拦，拦住就停下协调，不自动 stash / reset / checkout。
+- 跨机在同一分支上双写同一文件 = 冲突源。要并行就各开分支 + worktree。
+- 别把别人的 WIP 收进自己的提交：共享检出上全树 `git add -A` 会连带对方在制品
+  (7-29 的快照 `4b3e84d` 就发生过，已在协作状态里登记)。
 - PWA 私有 anchor、PDF 几何、EPUB reflow 等只由对应 `DocumentHost` 解释；扩展只调用白名单。
 - token/namespace/owner token 不得进入页面、日志或文档；内容脚本不得获得明文凭据。
 - 同步、评分、Anki 添加等未知 mutation 结果一律 fail closed；不能为了“可用”冒险重复写。
@@ -85,6 +94,8 @@ python3 extensions/bw-reader-webext/release_preflight.py \
   `reader-extension-ownership.md`
 - 当前版本、Windows 环境、发布/回滚：`reader-extension-handoff.md`、
   `reader-collaboration-status.md`
+- 跨机开发(哪些测试能在 Windows 跑、换行契约、编码坑、不入库清单)：
+  `cross-machine-dev-setup.md`
 - 卡片/复习语义：`card-review-integration.md`、`anki-card-format.md`
 - Codex app-server、CLI、MCP：`codex-integration.md`、`mcp-server.md`
 - Obsidian/Anki 自动化：对应 `.claude/skills/*.md` 与下文列出的笔记规范
