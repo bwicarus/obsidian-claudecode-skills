@@ -29,6 +29,11 @@ $ErrorActionPreference = 'Stop'
 
 function Fail($msg) { Write-Host "❌ $msg" -ForegroundColor Red; exit 1 }
 
+# 自定位仓库根:脚本可能被从任意目录以 -File 调用(实测踩过),不能假设 cwd。
+$RepoRoot = Split-Path -Parent $PSScriptRoot
+if (-not (Test-Path (Join-Path $RepoRoot '.git'))) { Fail "$RepoRoot 不是 git 仓库。" }
+Set-Location $RepoRoot
+
 # ── ① 本地状态必须干净且已推送 ──────────────────────────────────────────
 $dirty = git status --porcelain
 if ($dirty) {
