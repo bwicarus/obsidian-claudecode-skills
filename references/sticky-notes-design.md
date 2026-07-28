@@ -163,3 +163,17 @@
 - **阶段 B 拖放建便签**(完成,手柄式根治触摸冲突):视频卡缩略图角上一个**拖动手柄 ⠿**,只在手柄 pointerdown 拖(不长按计时)→ 拖影跟手 → 松手在书页(不在助手面板内)→ `RC.stickynote.createVideoAt(x,y,vid)` 按 `anchorFromPoint` 就近建带 video 的便签。移动超阈值取消长按(=滚动)。
 - **阶段 C 视频卡持久化**(完成):EPUB 助手 worker 收 `actions` 事件时提取 `renderVideos` 的 videos → 存进 assistant 消息 meta.videos(`_econvo_append` 白名单加 videos);`loadHistory` 回放 assistant 消息后 `renderVideos(m.videos)` → 刷新不丢、清空才没。
 - **阶段 D 收藏视频**(完成):视频卡 ☆ → `/api/favorites` 加 `kind:'video'` 条目(无 file、用 `video:<vid>` 合成 key,收第一个夹/无则建「⭐我的收藏」);`_fav_norm_item`+`_fav_video_item` 物化成 section(收藏夹 section 走 raw 不消毒 → `.fav-video[data-yt]` + 缩略图保留);rc-video.js document 委托:收藏夹里点 `.fav-video` 缩略图 → 换 youtube-nocookie iframe 播放。
+
+## ⚠️ 去边(crop)模式坐标统一(2026-07-21,用户实测 vbook 扫描书拖动偏移)
+
+**症状**:开「去边」时,便签/卡片**拖动显示位置 ≠ 松手落点**,偏 -(cropL,cropT)(3% 去边≈十几~二十几 CSS px);关去边就正常。
+
+**根因**:去边靠 CSS `.crop-on>* { transform: translate(-cropL,-cropT) }`(pdf-styles.css)平移**所有**子层——包括便签 `.rc-note`、反馈层 `.rc-anchor-fx`。但 PDF host(`reader.src/27-rc-adapter.js`)原 `noteMount`/`noteAnchorFromPoint`/`noteWordRect` 用**裁后** `pw.clientWidth`(=可见窄宽)算锚/还原像素,没算这个 translate → 落点系统性偏 -(cropL,cropT)。三条链(重拖已钉便签 / 浮层卡钉入 / 侧栏拖出)都经这三个 host 函数,全偏。
+
+**修法**(统一基准,一处修好三条链):三个 host 函数改用 `_pdfNoteGeom(pw)` —— 以 **char-layer(`pw.__charLayer`,撑满整页 `--full-w`、与便签同吃 translate)的实时 `getBoundingClientRect()` + 整页布局宽**为基准。crop/zoom/祖先缩放全部自动含在 BCR 里,便签 append 进吃 translate 的 pw 自然对齐。char-layer 未就绪时回退 `pw BCR + --crop-l/--full-w` 手算。`reader.src/08-charlayer.js` 的 `__charsBaseW` 也改存**整页布局宽**(去边下=`--full-w`;charBox 本就是整页坐标)。anchor.x/y 语义从"裁后比例"变"整页比例"——非去边下两者恒等(char-layer=pw 全宽),旧便签零影响;去边旧便签本就偏,自动修正。⚠ 改 `reader.src/*` 后必须同步重建 `reader.js` 并 `sudo cp` 到 `/var/www/html/static/pdf/`(nginx 服务的才是真机加载的)。
+
+**顺带修 S1**(外部诊断确认的竞态,`rc-stickynote.js`):`dropNote` 探测点从 `rect0+指针位移` 改为**松手瞬间实时 BCR**(transform-origin '0 0' 下左上=视觉落点),与拖动反馈 `anchorFxShow` 一致;`repositionPortaled` 跳过拖动中的便签(防异步页渲染改写 `root.left`)。
+
+**验证**(headless Playwright,探测点→anchorFromPoint→noteMount→探针 BCR 闭环):单本 crop 开/关 **0.0px**、真实 vbook(料理师)**0.0px**、词框反馈 8/8 dist=0 覆盖字符、真实拖动松手前后 delta=(0,0)。
+
+**铁律**:今后任何"屏幕坐标 ↔ 页锚"的新功能,**必须走 char-layer BCR 基准**(或 `_pdfNoteGeom`),严禁直接用 `pw.clientWidth`(去边下是裁后窄宽,必偏)。

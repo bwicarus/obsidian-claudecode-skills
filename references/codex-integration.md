@@ -1,4 +1,4 @@
-# Codex 集成参考(exec 现状 + 升级路径)
+# Codex 集成参考（同一 CLI 的 exec 与 app-server）
 
 > 来源:GPT 整理的官方接口说明(2026-07,用户提供)+ 本项目实测。⚠ **GPT 转述部分未逐条验证**
 > (模型名/事件名可能有出入),动手前以 `codex --help` / `model/list` 运行时结果为准。
@@ -22,17 +22,37 @@
   ⚠ 配置陷阱(实测):`features.fast_mode` 键非法、`[mcp_servers.X] enabled=false` 覆盖语法非法
   (报 invalid transport)——**任一非法键=整份配置静默回默认**,改完必须看 configWarning/RUST_LOG。
   默认模型改 gpt-5.6-luna+low(官方定位:清晰重复的提取/转换/摘要=阅读场景)。
-- 定位:**只当纯文本/看图模型用**(read-only + approvalPolicy never + cwd=/tmp),不让它当 agent。
-  编排循环未接。
+- 定位:**只当纯文本/看图模型用**(read-only + approvalPolicy never + cwd=/tmp),不让它当 agent;
+  编排循环现已接入,见 §6。
 
 ## 1. 四种集成方式(升级路径)
+
+`app-server` 不是取代 `codex` 的另一套程序；它由同一个 CLI 二进制通过
+`codex app-server` 启动。与通常所说的“原来 CLI”相比，真正需要区分的是交互式 TUI、
+一次性自动化入口 `codex exec`，以及供自制客户端连接的长驻协议入口 `codex app-server`。
+
+| 对比 | `codex exec` | `codex app-server` |
+|---|---|---|
+| 生命周期 | 一次命令/一次任务，完成即退出 | 长驻进程，可承载多个 thread/turn |
+| 接口 | prompt + stdout/stderr；可选 JSONL | 双向 JSON-RPC，稳定 transport 为 stdio |
+| 状态 | 默认单次；可用 `resume` 显式恢复 | thread CRUD/fork/archive，进程内可直接多轮 |
+| 流式 | 进度/结构化 item 事件 | 文本 delta、item、工具、审批、turn 状态等细粒度事件 |
+| 运行中控制 | 通常等待或终止进程 | `turn/steer`、`turn/interrupt`、审批响应 |
+| 适合 | shell 脚本、CI、一次性后台任务 | PWA/桌面端/扩展配套的富客户端服务 |
+
+两者使用同一 Codex 登录和模型能力；`app-server` 的优势是协议、状态与控制能力，不代表
+模型更聪明，也不会把 ChatGPT 高级语音订阅自动变成可调用的 Realtime API。
+
+官方入口：
+[Codex App Server](https://learn.chatgpt.com/docs/app-server)；
+[Non-interactive mode](https://learn.chatgpt.com/docs/non-interactive-mode)。
 
 | 方式 | 场景 | 流式 | 会话 | 备注 |
 |---|---|---|---|---|
 | `codex exec` | 脚本/CI/一次性 ✅ 现用 | `--json` JSONL 事件级(非文字 delta) | `resume --last / resume <id>` ⚪ | 官方不建议做长期 API 层 |
 | `codex mcp-server` | 另一个 AI 调 Codex ⚪ | 由 MCP 客户端 | `threadId` 续会话 | 只暴露 `codex` + `codex-reply` 两工具 |
 | SDK(`@openai/codex-sdk` / `pip openai-codex`)⚪ | 后端程序集成 | 结构化事件流 | thread 恢复(`~/.codex/sessions`) | Python SDK beta |
-| `codex app-server` | 自制客户端/最完整 ⚪ | **真文字 delta**(`item/agentMessage/delta`) | thread 全套 CRUD+fork | JSON-RPC,stdio 或 ws(实验) |
+| `codex app-server` | 自制客户端/最完整 ✅ 官方文档+本机实测 | **真文字 delta**(`item/agentMessage/delta`) | thread 全套 CRUD+fork | JSON-RPC;stdio 稳定,ws 为实验/unsupported |
 
 **何时升级**:①要 codex 做多轮/编排(工具循环)→ mcp-server 或 app-server(threadId 续用,
 不重拼历史——服务端会话与 Anthropic 前缀缓存同解);②要流式打字机体验 → 只有 app-server 有
@@ -46,7 +66,8 @@
   approvalPolicy}`→`turn/start {threadId,input:[{type:"text",text}]}`;听
   `item/agentMessage/delta`(文字增量)/`turn/diff/updated`/`turn/completed{status:
   completed|interrupted|failed}`(**以此判结束,别靠静默超时**);中途 `turn/steer` 追加指令、
-  `turn/interrupt` 中止;`thread/fork` 分叉对比方案;`model/list` 动态拉型号+
+  `turn/interrupt {threadId,turnId}` 中止(⚠ **两个 ID 都是必填**);`thread/fork`
+  分叉对比方案;`model/list` 动态拉型号+
   `supportedReasoningEfforts`(**别写死档位清单**)。
 - **结构化输出**:exec `--output-schema schema.json` / SDK `outputSchema` / turn 参数
   `outputSchema` ——要机器可读结果就用 JSON Schema,别解析自然语言。
@@ -61,6 +82,9 @@
 - 沙盒三档:`read-only`(✅ 我们用)/ `workspace-write` / `danger-full-access`;
   审批三档:`untrusted / on-request / never`。**两者独立**:自动化场景=
   `approval-policy never + sandbox workspace-write`(不等人但锁在工作区)。
+- `read-only` 是**禁止写入**,不是禁止读取;默认 read access 仍可能是 full access。无密钥
+  协议探针把 `cwd` 设为空临时目录,只会降低模型偶然发现项目内容的概率,不能阻止绝对路径、
+  父目录或用户配置允许范围内的读取。不要把它写成“零文件读取权限”。
 - `--yolo`(=bypass approvals+sandbox)只允许在容器/VM 隔离环境;网络默认关(`--search`
   开实时搜索);多个并行 Codex 各用独立 worktree;app-server 对外必须认证+TLS。
 
@@ -70,12 +94,89 @@
 - 保存 `threadId`+工作目录+模型,后续**续 thread 而非重塞历史**。
 - 完成状态只认 `turn/completed status=completed`;failed/interrupted 不得报成功。
 
-## 5. Realtime 语音探测(2026-07-11,实测结论:暂不可用)
+## 5. Realtime 语音探测(2026-07-11 初测;2026-07-25 复测)
 
 - ✅ 0.144.1 接口真实存在(`codex app-server generate-json-schema` 为准):`thread/realtime/start|appendAudio|appendText|appendSpeech|stop` + transcript/outputAudio 事件;**transport 有 `websocket` 型**(不需要浏览器 WebRTC,纯服务端可接,GPT 说明书没提);Schema 有 **RealtimeVoice 19 音色枚举**(alloy/cedar/marin/sage…,说明书说"无 voice 字段"是错的);音频块 = {data, sampleRate, numChannels}。
 - ✅ 前置开关:feature **`realtime_conversation`**(underDevelopment,默认关)——不开报"thread does not support realtime conversation";`experimentalFeature/list`(带 cursor 翻页)可拉全部 90+ features 现状。已在 `~/.reader-codex/home/config.toml` 开启(无副作用)。
 - ❌ **认证卡死**:`thread/realtime/error: "realtime conversation requires API key auth"`——**ChatGPT 订阅登录不行,必须 OpenAI Platform API Key(独立按量计费)**。说明书"认证方式=已登录 ChatGPT 账号"实测为错。
-- 判断:即使掏 API Key,OpenAI Realtime 音频价(~$32/$64 每 M)比豆包 S2S 贵近一个量级,且我们豆包线已深度打磨——不值得切。留档等 OpenAI 把 Realtime 纳入订阅额度再启用(初始化需 `capabilities.experimentalApi: true`)。
+- 判断:当前 ChatGPT 登录边界已经足够否决“直接拿订阅高级语音替换现有 Realtime API”
+  的方案。若以后认证边界改变,再按当时官方价格、模型、音频 token 口径、延迟和质量重新
+  对比;本文不保存容易过期的价格数字。实验接口初始化需
+  `capabilities.experimentalApi: true`。
+
+### 可复跑的无密钥协议探针(2026-07-25)
+
+入口:`scripts/codex_appserver_probe.py`。它只使用**现有 ChatGPT/Codex 登录**。它仍会
+加载现有 Codex 本地配置,因此只应在**可信的本机配置和可信的 `--codex-command`**下运行;
+这不是隔离 hooks、MCP、Apps 或文件读取的安全边界:
+
+- 不打开/复制/打印 `auth.json`,也不索要或写入 API Key;
+- 启动子进程前剔除 `OPENAI_API_KEY` / `AZURE_OPENAI_API_KEY` / `CODEX_API_KEY`
+  等 API-key 环境变量;若 `codex login status` 不是 ChatGPT 登录则跳过 live 测试;
+- 在空临时目录中创建 `ephemeral + read-only + approvalPolicy=never` thread;空目录只降低
+  偶然读取项目的概率,`read-only` 不禁止读取;
+- 不打印 raw RPC/stderr/模型正文,只输出白名单化的能力和结果字段;
+- 审计模型产生的已知工具 item(`mcpToolCall` / `commandExecution` / `fileChange` /
+  `dynamicToolCall` / `collabAgentToolCall|collabToolCall` / `webSearch` / `imageView`),最终
+  断言数量为 0。`mcpServer/startupStatus/updated` 只是 MCP 启动状态,不算工具调用;
+  用户配置里的自动 hook 不属于这项审计,所以“0”不能解释成“隔离了用户配置”;
+- Realtime 探针不发送任何音频;若未来意外接通会立刻请求
+  `thread/realtime/stop`,分别记录停止请求是否被接受、是否收到
+  `thread/realtime/closed`;只有两者都成立才记 `safe_stop=true`。
+
+复跑:
+
+```bash
+# 当前安装版
+python3 scripts/codex_appserver_probe.py --timeout 120
+
+# 精确对照 0.145.0(不替换本机安装)
+python3 scripts/codex_appserver_probe.py \
+  --codex-command "npx -y @openai/codex@0.145.0" --timeout 120
+
+# 只看 help/schema/login,完全不发模型 turn
+python3 scripts/codex_appserver_probe.py --schema-only
+```
+
+同一 ChatGPT 登录的 live 实测矩阵(2026-07-25 留档):
+
+| 能力 | 本机 0.144.1 | `npx` 0.145.0 |
+|---|---|---|
+| `initialize` / ephemeral `thread/start` | ✅ | ✅ |
+| 最小文字 turn | ✅ `CODEX_PROBE_OK`,completed | ✅ `CODEX_PROBE_OK`,completed |
+| 运行中 `turn/interrupt {threadId,turnId}` | ✅ `interrupted` | ✅ `interrupted` |
+| 缺 `turnId` 的 interrupt | ✅ 被拒,`-32600`,归类 invalid_params | 同左 |
+| 未知方法错误路径 | ✅ 被拒,`-32600` | 同左 |
+| Realtime 方法 | start/appendAudio/appendText/appendSpeech/listVoices/stop | 同左 |
+| Realtime transport | WebSocket + WebRTC | 同左 |
+| Realtime 协议版本 | V1/V2 | V1/V2/**V3** |
+| `initialItems` / `codexResponseHandoffMode` | ❌ / ❌ | ✅ / ✅ |
+| ChatGPT 登录调用 Realtime | ❌ V2:`requires API key auth` | ❌ V3:`requires API key auth` |
+| `codex exec` 的文字/自动化 flags | JSONL、图片、output-schema、`-o`、ephemeral、resume 均有 | 同左 |
+| `codex exec` 音频/Realtime flag | **没有** | **没有** |
+
+两次 live 记录当时均 `passed:true`(耗时受当次 Pi 状态与网络影响,不作为性能基准)。
+此后只收紧了已知工具 item 审计、安全字段断言及“收到 Realtime closed 才算安全停止”的
+判定;没有为了文档重复消耗模型 turn。当前代码的离线聚焦测试与 `--schema-only` 已通过。
+`evaluate()` 会同时核验报告中的空临时目录、`read-only`、ephemeral 请求标志和服务端
+返回的 `ephemeral=true`,以及文字 marker 精确匹配、有效/无效 interrupt、未知方法错误
+路径和已知模型工具 item 为 0。这里核验的是探针自身设置与事件报告,不是操作系统级文件
+读取隔离。Realtime 的认证失败按错误结构分类,
+不依赖服务端完整英文措辞。若未来 Realtime 成功启动,结果记为
+`capability_available`;停止请求被接受记 `stop_request_accepted=true`,只有随后收到
+`thread/realtime/closed` 才记 `safe_stop=true` 并允许整次探针通过。
+0.145.0 的新增点是实验性 **V3/Frameless Bidi 协议字段**,不是把 ChatGPT 高级语音
+订阅开放给 CLI;认证边界没有变化。
+
+⚠ `RealtimeVoice` schema 总枚举有 19 个音色,但它**没有表达每个协议版本的兼容子集**。
+探针只从 schema 的版本/transport/voice 交集中选择,版本优先级显式为
+`V3 > V2 > V1`;当前 V2 优先 `marin`,V3 优先 `juniper`。不要因为总枚举含某音色就
+假定它能用于每个版本。
+
+✅ 生产 `_CodexApp.turn_stream()` 已保存 `turn/start` 返回的 turn ID;超时后使用 RPC
+`turn/interrupt {threadId,turnId}` 安全取消,不再发送缺 `turnId` 的 notification。
+`tests/test_codex_appserver_client.py` 用假 RPC 覆盖超时、缺 turn ID 和正常完成路径,
+不启动真实 Codex 或模型。
 
 ## 6. Codex 编排循环(㉖,2026-07-11,用户拍板接入)
 

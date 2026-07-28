@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width">
-  <title>BW 网页伴读</title>
+  <title>BW网页伴读</title>
   <style>
     body { width: 320px; padding: 14px; font: 14px system-ui, -apple-system, sans-serif; }
     h3 { margin: 0 0 10px; }
@@ -13,12 +13,17 @@
     button { flex: 1; padding: 8px 12px; border: 0; border-radius: 7px; background: #4f7cff; color: white; }
     #test { background: #6b7280; }
     #status { margin-top: 10px; white-space: pre-wrap; color: #333; min-height: 1.2em; }
+    .sync-panel { margin-top: 12px; padding-top: 12px; border-top: 1px solid #ddd; }
+    .sync-panel h4 { margin: 0 0 6px; font-size: 13px; }
+    #sync-status { margin: 0; white-space: pre-wrap; color: #444; line-height: 1.45; }
+    #sync-conflicts { margin: 7px 0 0; padding-left: 18px; color: #555; font-size: 12px; }
+    [hidden] { display: none !important; }
     .hint { margin-top: 12px; font-size: 12px; color: #888; line-height: 1.5; }
   </style>
   <script src="popup.js" defer></script>
 </head>
 <body>
-  <h3>BW 网页伴读</h3>
+  <h3>BW网页伴读</h3>
   <label for="token">设备令牌（Bearer token）</label>
   <input id="token" type="password" autocomplete="off" placeholder="从 /profile/ 创建">
   <div class="row">
@@ -26,7 +31,28 @@
     <button id="test">测试连接</button>
   </div>
   <p id="status"></p>
-  <p class="hint">在 Pi 的 /profile/ 页创建标签为「iPad Safari Extension」的 token。
-    token 只存本机 storage.local,不进代码/不外发。</p>
+  <section class="sync-panel" aria-labelledby="sync-heading">
+    <h4 id="sync-heading">跨设备同步</h4>
+    <p id="sync-status">正在读取同步状态……</p>
+    <ul id="sync-conflicts" hidden></ul>
+  </section>
+  <section class="sync-panel" aria-labelledby="computer-voice-heading">
+    <h4 id="computer-voice-heading">电脑客户端语音</h4>
+    <p id="computer-voice-status">正在读取桥接状态……</p>
+    <label for="computer-voice-pair-id">Reader 配对 ID</label>
+    <input id="computer-voice-pair-id" autocomplete="off"
+      placeholder="pair-…">
+    <label for="computer-voice-code" style="margin-top:7px">一次性配对码</label>
+    <input id="computer-voice-code" autocomplete="off"
+      placeholder="12 位配对码">
+    <div class="row">
+      <button id="computer-voice-pair">配对这台电脑</button>
+      <button id="computer-voice-refresh" type="button">刷新</button>
+    </div>
+    <p class="hint" id="computer-voice-extension-id"></p>
+  </section>
+  <p class="hint">首次使用请打开一次已登录的 BW 书籍 PWA，让扩展确认账户；
+    此后可以在任意网页管理和使用令牌。令牌只保存在扩展后台，
+    不会返回网页或显示在弹窗中。</p>
 </body>
 </html>

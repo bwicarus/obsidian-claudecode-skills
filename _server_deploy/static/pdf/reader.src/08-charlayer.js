@@ -65,7 +65,7 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
     wrap.appendChild(dbgLayer);
   }
   wrap.__charBoxes = charBoxes;
-  wrap.__charsBaseW = wrap.clientWidth || 0;   // #51:建层时页宽基准——页重渲(缩放/适应)后 charBoxes 坐标按 clientWidth/baseW 换算(词框错位根因)
+  wrap.__charsBaseW = wrap.classList.contains('crop-on') ? (parseFloat(wrap.style.getPropertyValue('--full-w')) || wrap.clientWidth || 0) : (wrap.clientWidth || 0);   // #51:建层整页布局宽基准(去边=整页 --full-w,charBox 是整页坐标;非去边=clientWidth);重渲后按 char-layer 实时 BCR/baseW 换算
   try { window.__applyPhraseMergesLocal && window.__applyPhraseMergesLocal(wrap); } catch (_) {}   // 本地词组合并(收藏集驱动,教义:本地算)
   window.dlog?.('chars: ' + charBoxes.length + ' on page ' + num);
   // 创建 char-layer（透明覆盖整个 page-wrap）→ 绑定后**选词此刻即可用**(不等 overlay)
@@ -99,7 +99,7 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
           const d2 = await (await fetch(charsUrl(ov.cv))).json();
           if (d2 && d2.ok && wrap.isConnected) {
             wrap.__charBoxes = _mapCharBoxes(d2.chars, viewport.scale);
-            wrap.__charsBaseW = wrap.clientWidth || 0;   // #51:cv 校正重建同步基准宽
+            wrap.__charsBaseW = wrap.classList.contains('crop-on') ? (parseFloat(wrap.style.getPropertyValue('--full-w')) || wrap.clientWidth || 0) : (wrap.clientWidth || 0);   // #51:cv 校正重建同步基准宽(整页布局宽)
             wrap.__pageWPt = d2.page_w; wrap.__pageHPt = d2.page_h;
             wrap.__furigana = d2.furigana || [];
             try { renderRubyLayer(wrap); } catch (_) {}
@@ -135,25 +135,51 @@ function _clickTranslateEnabled() {
   return v === null ? true : (v === '1');
 }
 
+// 共享 vocabulary-state 只参与可见投影；业务写入仍由 rc-wordpop/phrasepop 负责。
+// 仓库缺失、尚未 hydrate 或没有该词记录时返回 false，后面的本地镜像/服务端 label
+// 继续作为兼容 fallback。
+function _vocabularyStateRepo() {
+  try {
+    const repo = window.BWReaderRuntime && window.BWReaderRuntime.vocabularyState;
+    return repo &&
+      repo.CONTRACT === 'vocabulary-state/1' &&
+      typeof repo.isMastered === 'function'
+      ? repo
+      : null;
+  } catch (_) { return null; }
+}
+function _vocabularyStateMarkMastered(mark) {
+  const repo = _vocabularyStateRepo();
+  if (!repo || !mark) return false;
+  const word = String(mark.word || mark.surface || '').trim();
+  const lemma = String(mark.lemma || word).trim();
+  if (!lemma && !word) return false;
+  try {
+    return repo.isMastered({
+      kind: 'word',
+      language: mark.language || mark.lang || (mark.jp ? 'ja' : 'en'),
+      lemma: lemma || word,
+      word: word || lemma,
+      surface: word || lemma,
+      forms: Array.isArray(mark.forms) ? mark.forms : []
+    });
+  } catch (_) { return false; }
+}
+
 function renderVocabUnderlines(pw, marks) {
   if (!_vocabUnderlineEnabled()) return;
-  // §18.5 local-first:服务端回**全候选**(含已掌握,label_slug='mastered'),渲染时本地过滤;
-  // __vocabOverride = 掌握 toggle 的本地覆盖(0ms 消隐/复现,掌握变更不再重拉 overlay)
+  // §18.5 local-first:服务端回**全候选**(含已掌握,label_slug='mastered'),渲染时本地过滤。
+  // 共享仓库优先补充已掌握事实；旧 __masteredLocal/__vocabOverride 与服务端 label
+  // 继续兜底，且 dirty 标记只能在真正收到服务器 mastery snapshot 时收敛。
   try {
     const _ovr = window.__vocabOverride;
-    let _dirty = false;
     marks = (marks || []).filter((m) => {
       const k = String(m.lemma || m.word || '').toLowerCase();
-      let srv = (m.label_slug === 'mastered');
-      if (window.__masteredLocal) srv = window.__masteredLocal.has(k);   // §18.7 本地库=事实源(缓存 overlay 的 flag 可能陈旧)
-      if (_ovr && _ovr.has(k)) {
-        const loc = _ovr.get(k);
-        if (loc === srv) { _ovr.delete(k); _dirty = true; return !srv; }   // 服务端已追上 → 收敛,清覆盖
-        return !loc;
-      }
-      return !srv;
+      if (_vocabularyStateMarkMastered(m)) return false;
+      if (_ovr && _ovr.has(k)) return !_ovr.get(k);
+      if (window.__masteredLocal) return !window.__masteredLocal.has(k);
+      return m.label_slug !== 'mastered';
     });
-    if (_dirty && window.__vocabOverridePersist) window.__vocabOverridePersist();
   } catch (_) {}
   // 确保有 layer（即使 marks 空也要清旧残留）
   let layer = pw.querySelector('.vocab-layer');
@@ -191,4 +217,3 @@ function _vocabUnderlineEnabled() {
   const v = localStorage.getItem('pdf-vocab-underline');
   return v === null ? true : (v === '1');
 }
-

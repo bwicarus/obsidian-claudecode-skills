@@ -20,7 +20,10 @@ import argparse
 import hashlib
 import json
 import math
+import os
 import re
+from html import unescape as _html_unescape
+from html.parser import HTMLParser
 import sqlite3
 import sys
 import unicodedata
@@ -70,12 +73,82 @@ _DOMAIN_SET = _DomainSetProxy()
 DB = ATT_DIR / "events.db"
 FOCUS = ATT_DIR / "focus.json"
 STATE = Path(PROJECT_DIR) / "state"
+# This module is also imported by tests and CLI jobs whose CLAUDE_PROJECT may
+# intentionally point at a disposable data root.  Code modules still live next
+# to this script, so resolve the import path from __file__ instead of treating a
+# mutable data-root setting as a source-code location.
+_SERVER_DEPLOY_DIR = Path(__file__).resolve().parent.parent / "_server_deploy"
+sys.path.insert(0, str(_SERVER_DEPLOY_DIR))
+from web_cache_store import (  # noqa: E402
+    iter_account_web_cache,
+    normalize_user_id,
+    read_web_cache,
+)
+
+
+def _claimed_reader_sidecar():
+    """Return ``(uid, account_root)`` for the immutable legacy claim, if any.
+
+    Before the deployment cut-over there is no manifest and legacy paths remain
+    the active source.  Once the manifest exists, derived attention importers
+    must follow the claimed account copy; continuing to scan the old source
+    would silently stop seeing new highlights.
+    """
+    from reader_sidecar_store import (
+        ReaderStorageIdentity,
+        SidecarStore,
+        default_sidecar_root,
+    )
+
+    root = default_sidecar_root(Path(PROJECT_DIR))
+    if not (root / "legacy-claim.json").is_file():
+        return None
+    store = SidecarStore(root, STATE, lambda _identity: False)
+    claim = store.read_claim()
+    if claim is None:
+        return None
+    owner = claim["owner"]
+    identity = ReaderStorageIdentity(
+        int(owner["user_id"]),
+        str(owner["storage_namespace"]),
+    )
+    return str(identity.user_id), store.account_path(identity)
+
+
+def _private_attention_owner() -> str:
+    """Choose the one account whose private material may enter shared attention data.
+
+    The attention database and focus snapshot are still deployment-wide.  Until
+    their readers accept a uid, automatically preserve a one-account install,
+    but never merge two users' private web/highlight data.  Multi-account
+    deployments select an owner explicitly with ``READER_ATTENTION_OWNER_UID``.
+    """
+    selected = normalize_user_id(os.environ.get("READER_ATTENTION_OWNER_UID"))
+    if selected:
+        return selected
+    users = set()
+    claimed = _claimed_reader_sidecar()
+    if claimed:
+        users.add(claimed[0])
+    for base in (
+        STATE / "web-cache" / "by-user",
+        STATE / "html-highlights-by-user",
+    ):
+        try:
+            users.update(
+                path.name
+                for path in base.iterdir()
+                if path.is_dir() and normalize_user_id(path.name)
+            )
+        except OSError:
+            continue
+    return next(iter(users)) if len(users) == 1 else ""
 
 # ★焦点是**下游系统消费的关键数据**(不是给人看的榜)——三条硬要求(用户 2026-07-17 定调):
 #   可靠性:不做不可逆截断(源可重算的才允许截);账本(无上游)一律全文;抽取器版本可追。
 #   及时性:**读时保证新鲜**(_ensure_fresh:源 mtime 变了就增量导入)——不靠 15min timer。
 #   可回溯性:每个焦点词带证据链(evidence 事件 id + 分数构成 by_channel),explain() 可查。
-EXTRACTOR_VER = 9      # 抽取器版本(改分词/归一/权重算法就 +1;events.xver 记录,可查哪些事件是旧版抽的)。v5:笔记去 Excalidraw/压缩元数据 + IDF 只数真书(审查 #6);v8:指位词/元话语假词过滤 + qa_ai 渠道;v9:写时不过滤(terms 存 raw 全量,过滤下沉到读侧)
+EXTRACTOR_VER = 10     # 抽取器版本(改分词/归一/权重算法就 +1;events.xver 记录,可查哪些事件是旧版抽的)。v5:笔记去 Excalidraw/压缩元数据 + IDF 只数真书(审查 #6);v8:指位词/元话语假词过滤 + qa_ai 渠道;v9:写时不过滤(terms 存 raw 全量,过滤下沉到读侧);v10:Anki HTML 只取可见正文并剥阅读器来源链接
 TERMS_MAX = 40         # 单事件术语上限(原 12 → 实测 4 条事件撞顶=真丢词;40 足够,存的是 JSON 数组)
 TEXT_MAX = 4000        # 派生索引里留的原文(源还在,截了也能重算;账本不截,见 append_raw)
 
@@ -939,7 +1012,7 @@ def add_event(c, ts, channel, text, file="", page=0, uid="", weight=None, hint="
 
 
 # ── 导入器(全部幂等增量) ──────────────────────────────────────────────────────
-def _rel_by_sha():
+def _rel_by_sha(private_owner: str = ""):
     """sidecar 文件名(sha1(rel))→ rel 反查表(pdf+epub 全 vault)。"""
     m = {}
     for p in Path(VAULT_ROOT).rglob("*"):
@@ -952,13 +1025,14 @@ def _rel_by_sha():
             m[_h[:16]] = rel   # ★两种键都登记:各 sidecar 命名长度不一(pdf/epub 用 40 位,
             #                    html_reader 用 16 位)——只登 40 位会让网页高亮全部反查失败、
             #                    file='' 入库丢书锚(2026-07-19 审计实锤 0/5 命中)
-    try:   # 网页材料(审计 #15):web: 不是 vault 文件,rglob 扫不到 → 高亮/事件反查不到书锚、
-        #   file='' 入库,焦点榜/按书统计全归不到这个网页。从 web-cache 补登记。
-        for f in (STATE / "web-cache").glob("*.json"):
-            try:
-                u = json.loads(f.read_text("utf-8")).get("url")
-            except Exception:
-                continue
+    try:   # 网页材料不是 vault 文件；只枚举已明确选定的账户缓存。
+        if not private_owner:
+            return m
+        for _uid, _path, payload in iter_account_web_cache(
+            STATE / "web-cache",
+            user_id=private_owner,
+        ):
+            u = payload.get("url")
             if not u:
                 continue
             ref = "web:" + u
@@ -987,9 +1061,47 @@ def import_lookups(c):
 
 def import_highlights(c):
     n = 0
-    sha2rel = _rel_by_sha()
-    for dname in ("pdf-highlights", "epub-highlights", "html-highlights"):
-        d = STATE / dname
+    owner = _private_attention_owner()
+    claimed = _claimed_reader_sidecar()
+    claimed_root = (
+        claimed[1]
+        if claimed and owner and claimed[0] == owner
+        else None
+    )
+    sha2rel = _rel_by_sha(owner)
+    # Remove rows produced by the old deployment-wide HTML/web importer before
+    # importing the selected account.  PDF/EPUB rows are left untouched.
+    private_file_predicate = (
+        "file='' OR file LIKE 'web:%' OR file LIKE '%.html' OR "
+        "file LIKE '%.htm' OR file LIKE '%.md' OR file LIKE '%.markdown'"
+    )
+    if owner:
+        c.execute(
+            "DELETE FROM events WHERE channel='highlight' AND ("
+            + private_file_predicate
+            + ") AND (uid='' OR uid<>?)",
+            (owner,),
+        )
+    else:
+        c.execute(
+            "DELETE FROM events WHERE channel='highlight' AND ("
+            + private_file_predicate
+            + ")"
+        )
+    if claimed_root is not None:
+        # These rows are derived and can be regenerated from the verified
+        # account snapshot.  Remove pre-partition rows so the same highlight is
+        # not counted once without uid and once with the claimed owner.
+        c.execute(
+            "DELETE FROM events WHERE channel='highlight' "
+            "AND (uid='' OR uid<>?)",
+            (owner,),
+        )
+    reader_root = claimed_root if claimed is not None else STATE
+    for dname in ("pdf-highlights", "epub-highlights"):
+        if reader_root is None:
+            continue
+        d = reader_root / dname
         if not d.exists():
             continue
         for f in d.glob("*.json"):
@@ -1005,7 +1117,63 @@ def import_highlights(c):
                 if not isinstance(h, dict):
                     continue
                 txt = " ".join(x for x in (h.get("text"), h.get("sentence"), h.get("note")) if x)
-                n += add_event(c, h.get("time") or 0, "highlight", txt, rel, h.get("page") or 0)
+                n += add_event(
+                    c,
+                    h.get("time") or 0,
+                    "highlight",
+                    txt,
+                    rel,
+                    h.get("page") or 0,
+                    uid=(owner if claimed_root is not None else ""),
+                    hint=(
+                        "private-owner:" + owner
+                        if claimed_root is not None
+                        else ""
+                    ),
+                )
+    # HTML/web highlights are private account data.  The attention store still
+    # has one deployment-wide focus snapshot, so import only the selected owner.
+    private_dirs = []
+    if claimed_root is not None:
+        private_dirs.append(claimed_root / "html-highlights")
+    elif claimed is None and owner:
+        current = (STATE / "html-highlights-by-user" / owner)
+        try:
+            root = (STATE / "html-highlights-by-user").resolve()
+            if current.resolve().parent == root:
+                private_dirs.append(current)
+        except OSError:
+            pass
+        if os.environ.get("READER_LEGACY_HTML_HIGHLIGHT_OWNER_UID") == owner:
+            private_dirs.append(STATE / "html-highlights")
+    for d in private_dirs:
+        if not d.exists():
+            continue
+        for f in d.glob("*.json"):
+            rel = sha2rel.get(f.stem, "")
+            if not rel:
+                continue
+            try:
+                data = json.loads(f.read_text("utf-8"))
+            except Exception:
+                continue
+            hls = data.get("highlights") if isinstance(data, dict) else data
+            for h in (hls or []):
+                if not isinstance(h, dict):
+                    continue
+                txt = " ".join(
+                    x for x in (h.get("text"), h.get("sentence"), h.get("note")) if x
+                )
+                n += add_event(
+                    c,
+                    h.get("time") or 0,
+                    "highlight",
+                    txt,
+                    rel,
+                    h.get("page") or 0,
+                    uid=owner,
+                    hint="private-owner:" + owner,
+                )
     return n
 
 
@@ -1058,6 +1226,94 @@ def _import_qa_turns(c, msgs, uid):
 ANKI_RECORDS = Path(PROJECT_DIR) / "anki" / "records"
 
 
+class _AnkiVisibleTextParser(HTMLParser):
+    """只提取卡片可见正文；阅读器来源链接的文字与 URL 都不是知识内容。"""
+
+    _DROP_TAGS = {"script", "style", "svg", "math"}
+    _SOURCE_PATHS = (
+        "/pdf/view",
+        "/pdf/epub/view",
+        "/pdf/html/view",
+        "/pdf/fav/open",
+    )
+    _BREAK_TAGS = {
+        "br", "p", "div", "li", "tr", "table", "section", "article",
+        "h1", "h2", "h3", "h4", "h5", "h6",
+    }
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self.parts = []
+        self._drop_depth = 0
+        self._source_anchor_depth = 0
+
+    @classmethod
+    def _source_href(cls, attrs):
+        href = next(
+            (str(value or "") for key, value in attrs if key.lower() == "href"),
+            "",
+        ).strip()
+        return any(path in href for path in cls._SOURCE_PATHS)
+
+    def handle_starttag(self, tag, attrs):
+        tag = str(tag or "").lower()
+        if self._drop_depth:
+            self._drop_depth += 1
+            return
+        if tag in self._DROP_TAGS:
+            self._drop_depth = 1
+            return
+        if self._source_anchor_depth:
+            self._source_anchor_depth += 1
+            return
+        if tag == "a" and self._source_href(attrs):
+            self._source_anchor_depth = 1
+            return
+        if tag in self._BREAK_TAGS:
+            self.parts.append("\n")
+
+    def handle_startendtag(self, tag, attrs):
+        tag = str(tag or "").lower()
+        if not self._drop_depth and not self._source_anchor_depth and tag in self._BREAK_TAGS:
+            self.parts.append("\n")
+
+    def handle_endtag(self, tag):
+        tag = str(tag or "").lower()
+        if self._drop_depth:
+            self._drop_depth -= 1
+            return
+        if self._source_anchor_depth:
+            self._source_anchor_depth -= 1
+            return
+        if tag in self._BREAK_TAGS:
+            self.parts.append("\n")
+
+    def handle_data(self, data):
+        if not self._drop_depth and not self._source_anchor_depth:
+            self.parts.append(str(data or ""))
+
+    def text(self):
+        value = _html_unescape("".join(self.parts))
+        value = re.sub(r"\[sound:[^\]]+\]", " ", value, flags=re.I)
+        value = re.sub(r"(?i)\b(?:https?|file)://\S+", " ", value)
+        value = re.sub(r"[ \t\f\v]+", " ", value)
+        value = re.sub(r" *\n+ *", "\n", value)
+        return value.strip()
+
+
+def _anki_card_visible_text(value):
+    """把 Anki HTML 规范成可学习正文，绝不让 href/query/source footer 进入分词。"""
+    raw = str(value or "")
+    parser = _AnkiVisibleTextParser()
+    try:
+        parser.feed(raw)
+        parser.close()
+        return parser.text()
+    except Exception:
+        # 解析损坏时宁可保守剥掉全部标签，也不能把 href 查询串当概念。
+        return re.sub(r"\s+", " ", re.sub(r"<[^>]*>", " ", raw)).strip()
+
+
 def import_anki_cards(c):
     """登记流程制的卡(anki/records/*.json)→ card 渠道。每卡一条事件(每卡=独立知识点),
     text=front+back(信号源=卡片内容),file=来源笔记(与 note 渠道同锚),按 local_id 幂等。"""
@@ -1077,7 +1333,10 @@ def import_anki_cards(c):
         for card in (d.get("cards") or []):
             if card.get("status") in ("deleted", "removed"):
                 continue
-            txt = ((card.get("front") or "") + "\n" + (card.get("back") or "")).strip() or (card.get("text") or "")
+            txt = _anki_card_visible_text(
+                ((card.get("front") or "") + "\n" + (card.get("back") or "")).strip()
+                or (card.get("text") or "")
+            )
             txt = re.sub(r"\\[a-zA-Z]+|[\\${}\[\]()]", " ", txt)   # 剥 LaTeX:\dots/\ldots 会被抽成英文词 dots
             if not txt.strip():
                 continue
@@ -1146,17 +1405,15 @@ def _upage_text(rel, uid, limit=400):
     return ""
 
 
-def _page_text(rel, page, limit=400):
+def _page_text(rel, page, limit=400, *, user_id=""):
     """从 pdf-char-cache 直接拼页文本(不依赖 webapp 进程;读过的页基本都有缓存)。
-    网页(web:)读 state/web-cache(审计 #14:否则 import_dwell 的 `if not txt: continue`
-    会把网页阅读事件整批丢掉)。"""
+    网页(web:)只读显式 uid（或明确选定的单一 attention owner）的缓存。"""
     if isinstance(rel, str) and rel.startswith("web:"):
-        try:
-            k = hashlib.sha1(rel[4:].encode("utf-8")).hexdigest()[:20]
-            d = json.loads((STATE / "web-cache" / (k + ".json")).read_text("utf-8"))
-            return (d.get("text") or "")[:limit]
-        except Exception:
+        uid = normalize_user_id(user_id) or _private_attention_owner()
+        if not uid:
             return ""
+        data, _source = read_web_cache(STATE / "web-cache", uid, rel[4:])
+        return ((data or {}).get("text") or "")[:limit]
     sha = hashlib.sha1(rel.encode("utf-8")).hexdigest()[:16]
     cands = sorted((STATE / "pdf-char-cache").glob("%s-p%d-*.json" % (sha, page)))
     for f in reversed(cands):
@@ -1190,7 +1447,16 @@ def import_dwell(c):
     f = ATT_DIR / "dwell.jsonl"
     if not f.exists():
         return 0
-    agg = defaultdict(lambda: [0, 0])          # (file,page,day) → [secs, last_ts]
+    owner = _private_attention_owner()
+    if owner:
+        c.execute(
+            "DELETE FROM events WHERE channel='read' AND file LIKE 'web:%'"
+            " AND (uid='' OR uid<>?)",
+            (owner,),
+        )
+    else:
+        c.execute("DELETE FROM events WHERE channel='read' AND file LIKE 'web:%'")
+    agg = defaultdict(lambda: [0, 0])          # (file,page,day,uid) → [secs, last_ts]
     for ln in f.read_text("utf-8").splitlines():
         try:
             d = json.loads(ln)
@@ -1200,30 +1466,42 @@ def import_dwell(c):
         if not rel or "/.sandbox/" in rel:
             continue
         # 虚拟页码优先(自建页 uid 永不漂移);真实页用页码(靠 PAGE_ANCHOR_MIGRATIONS 迁移)
-        k = (rel, (d.get("upage") or int(d.get("page") or 0)), int((d.get("ts") or 0) // 86400))
+        uid = normalize_user_id(d.get("user_id") or d.get("uid"))
+        if rel.startswith("web:"):
+            uid = uid or owner
+            if not owner or uid != owner:
+                continue
+        k = (
+            rel,
+            (d.get("upage") or int(d.get("page") or 0)),
+            int((d.get("ts") or 0) // 86400),
+            uid,
+        )
         agg[k][0] += min(600, int(d.get("secs") or 0))
         agg[k][1] = max(agg[k][1], int(d.get("ts") or 0))
     n = 0
-    for (rel, page, day), (secs, ts) in agg.items():
+    for (rel, page, day, uid), (secs, ts) in agg.items():
         if secs < DWELL_MIN_S or not page:
             continue
         if isinstance(page, str):        # 自建页(虚拟页码):正文在 sidecar,不在 PDF 字符层
             txt = _upage_text(rel, page)
             page_no = 0
         else:
-            txt = _page_text(rel, page)
+            txt = _page_text(rel, page, user_id=uid)
             page_no = page
         if not txt:
             continue
         w = W["read"] * min(2.0, secs / 30.0)
-        key = hashlib.sha1(f"read|{rel}|{page}|{day}".encode()).hexdigest()[:20]
+        key = hashlib.sha1(
+            f"read|{rel}|{page}|{day}|{uid if rel.startswith('web:') else ''}".encode()
+        ).hexdigest()[:20]
         terms = extract_terms(txt, lang=_book_lang(rel))   # 页文本按书语言分词(纯汉字日语必须)
         if not terms:
             continue
         c.execute("INSERT OR REPLACE INTO events(id,ts,channel,weight,text,terms,file,page,uid,src_key,xver)"
                   " VALUES((SELECT id FROM events WHERE src_key=?),?,?,?,?,?,?,?,?,?,?)",
                   (key, ts, "read", w, txt[:TEXT_MAX], json.dumps(terms[:TERMS_MAX], ensure_ascii=False),
-                   rel, page_no, "", key, EXTRACTOR_VER))
+                   rel, page_no, uid, key, EXTRACTOR_VER))
         n += 1
     return n
 
@@ -1408,7 +1686,14 @@ def rebuild_profile(c, now=None):
 # ── 及时性:读时保证新鲜(下游拿到的永远是最新数据,不等 15min timer)──────────────────
 def _sources_fp():
     """所有源的指纹(mtime+size)。变了才需要导入 —— 没变时这一步是纯 stat,微秒级。"""
-    fp = []
+    owner = _private_attention_owner()
+    claimed = _claimed_reader_sidecar()
+    claimed_root = (
+        claimed[1]
+        if claimed and owner and claimed[0] == owner
+        else None
+    )
+    fp = ["private-owner:%s" % owner]
     for p_ in [STATE / "vocab-lookups.jsonl", ATT_DIR / "dwell.jsonl", RAW, ANKI_DB]:
         try:
             st = p_.stat()
@@ -1426,13 +1711,45 @@ def _sources_fp():
         fp.append("cards:%d:%d" % (_cm, sum(1 for _ in ANKI_RECORDS.glob("*.json"))))
     except Exception:
         pass
-    for d in ("pdf-highlights", "epub-highlights", "html-highlights", "assistant-convo",
-              "assistant-convo-archive", "reader-check-reports"):
+    reader_root = claimed_root if claimed is not None else STATE
+    for d in ("pdf-highlights", "epub-highlights"):
+        if reader_root is None:
+            continue
+        try:
+            dd = reader_root / d
+            mt = max((f.stat().st_mtime_ns for f in dd.glob("*")), default=0)
+            n = sum(1 for _ in dd.glob("*"))
+            fp.append("%s:%d:%d" % (d, mt, n))
+        except Exception:
+            pass
+    for d in ("assistant-convo", "assistant-convo-archive",
+              "reader-check-reports"):
         try:
             dd = STATE / d
             mt = max((f.stat().st_mtime_ns for f in dd.glob("*")), default=0)
             n = sum(1 for _ in dd.glob("*"))
             fp.append("%s:%d:%d" % (d, mt, n))
+        except Exception:
+            pass
+    private_dirs = []
+    if claimed_root is not None:
+        private_dirs.extend([
+            claimed_root / "html-highlights",
+            STATE / "web-cache" / "by-user" / owner,
+        ])
+    elif claimed is None and owner:
+        private_dirs.extend([
+            STATE / "html-highlights-by-user" / owner,
+            STATE / "web-cache" / "by-user" / owner,
+        ])
+        if os.environ.get("READER_LEGACY_HTML_HIGHLIGHT_OWNER_UID") == owner:
+            private_dirs.append(STATE / "html-highlights")
+    for dd in private_dirs:
+        try:
+            files = [f for f in dd.rglob("*") if f.is_file()]
+            mt = max((f.stat().st_mtime_ns for f in files), default=0)
+            size = sum(f.stat().st_size for f in files)
+            fp.append("%s:%d:%d:%d" % (dd.name, mt, len(files), size))
         except Exception:
             pass
     return hashlib.sha1("|".join(fp).encode()).hexdigest()[:16]
@@ -1739,6 +2056,10 @@ def obsidian_to_ref(link):
     if not link:
         return None
     t = link.strip()
+    # 新卡片把已经规范化的来源直接写进 <!--@src:...-->；不要再次当
+    # Obsidian 文件名解析，否则 book:/web:/note: 会被错误截断并丢失。
+    if re.match(r"^(?:book|note|web|kg|anki):", t):
+        return t
     t = re.sub(r"^!?\[\[|\]\]$", "", t).strip()        # 去 [[ ]] / ![[ ]]
     t = t.split("|", 1)[0].strip()                         # 去别名 [[x|显示]]
     idx = _vault_index()
@@ -2042,12 +2363,23 @@ def read_material(ref, limit=1500):
                 "note": "检查报告用 read_check_report 工具读(有专门的问答式接口)"}
     if kind == "web":   # 审计 #6:material_graph 会把 web: ref 当起点吐出来,AI 拿去必须读得到
         try:
+            owner = _private_attention_owner()
+            if not owner:
+                return {
+                    "error": "网页材料未选择账户；多账户部署需设置 READER_ATTENTION_OWNER_UID"
+                }
             import sys as _s
             _p = str(Path(PROJECT_DIR) / "_server_deploy")
             if _p not in _s.path:
                 _s.path.insert(0, _p)
             import html_reader as _HR
-            d = _HR.web_material(ref) or {}
+            d = _HR.web_material(ref, user_id=owner) or {}
+            if not d.get("text"):
+                return {
+                    "error": d.get("error") or "所选账户没有这份网页材料",
+                    "ref": ref,
+                    "kind": "web",
+                }
             return {"ok": True, "ref": ref, "kind": "web", "title": d.get("title") or "",
                     "url": d.get("url") or ref[4:], "content": (d.get("text") or "")[:limit]}
         except Exception as ex:

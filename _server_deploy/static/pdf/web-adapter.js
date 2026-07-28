@@ -1,12 +1,12 @@
-/* web-adapter.js — 实况网页 = PDF 阅读器的一种**内容源**(用户拍板 2026-07-19:
- * "直接用 pdf 的页面啊,就只是把书页的展示窗口换成网页罢了")。
+/* web-adapter.js — PWA 内实况网页的独立 DocumentHost adapter。
  *
- * 所以本文件**不建任何 UI**:顶栏 #pdf-top / 侧栏 #grammar-panel / 全部 rc-* / reader.js
- * 全部是 PDF 阅读器原样那一套(模板就是 pdf_reader.html)。这里只做三件事:
+ * 网页继续复用 PDF 阅读器模板里的顶栏、侧栏和共享 rc-* UI，但内容能力不继承 PdfAdapter：
  *   ① 顶栏标题位插一个地址栏(输网址/搜索、后退、📄阅读模式)
- *   ② 与同源代理 iframe 桥接:选区 → PDF 的选区工具条;整页正文 → AI 上下文
- *   ③ 覆写 PdfAdapter 的取上下文/选区两个点(其余契约原样继承 → 侧栏/助手/查词零改动)
- * 加载在 reader.js 之后(模板脚本序尾),此时 RC/PdfAdapter 已就位。
+ *   ② 与 opaque sandbox iframe 桥接选区/正文/沉浸翻译
+ *   ③ 以独立 window.WebAdapter 经 RC.use() 登记 kind=web
+ *
+ * WebAdapter 只组合共享 UI/assistant chrome；PDF 字符层、页几何、页锚、区域渲染和 PDF
+ * sidecar 从不转抄为网页能力。当前只支持 URL navigation；DOM/quote anchor 仍明确 pending。
  */
 (function () {
   var CFG = window.__PDF_CFG || {};
@@ -15,13 +15,30 @@
 
   var CUR = CFG.web_url;
   var _hist = [];
-  var _sel = { text: '', ctx: '', rect: null };
+  var _sel = { text: '', ctx: '', rect: null, clientRect: null };
   var _pageText = '', _title = '';
   var RBI = !!CFG.web_rbi;   // RBI 模式:iframe 内容来自 Pi 真 Chrome 渲染(过验证/带登录态)
-  function frameSrc(u) { return '/pdf/web/' + (RBI ? 'rbi' : 'frame') + '?url=' + encodeURIComponent(u); }
+  var BRIDGE = String(CFG.web_bridge_nonce || '');
+  var NAV_TICKET = String(CFG.web_navigation_ticket || '');
+  function frameSrc(u) {
+    var out = '/pdf/web/' + (RBI ? 'rbi' : 'frame') + '?url=' + encodeURIComponent(u);
+    if (NAV_TICKET) out += '&__bwnav=' + encodeURIComponent(NAV_TICKET);
+    return out;
+  }
   var TR_NAME = { para: '独立段落', small: '下方小字', replace: '替换原文' };
   var _trOn = false;
   var _trStyle = (function () { try { return localStorage.getItem('rcWebTrStyle') || 'para'; } catch (e) { return 'para'; } })();
+  function newBridgeNonce() {
+    try {
+      var bytes = new Uint8Array(24);
+      crypto.getRandomValues(bytes);
+      return Array.prototype.map.call(bytes, function (n) {
+        return n.toString(16).padStart(2, '0');
+      }).join('');
+    } catch (e) {
+      return '';
+    }
+  }
   function post(m) { try { frame().contentWindow.postMessage(m, '*'); } catch (e) {} }
 
   function frame() { return document.getElementById('wl-frame'); }
@@ -75,14 +92,14 @@
     rbi.onclick = function () { location.href = '/pdf/web/rbi-live?url=' + encodeURIComponent(CUR); };
     var key = document.createElement('button');
     key.id = 'wl-key'; key.textContent = '🔑';
-    key.title = '导入登录 cookie:在电脑浏览器登录该网站后,开发者工具复制 cookie 粘进来';
+    key.title = '导入登录 cookie：仅用于当前精确主机的 HTTPS 请求';
     key.onclick = function () {
-      var host = ''; try { host = new URL(CUR).hostname.replace(/^www\./, ''); } catch (e) {}
-      var dom = prompt('为哪个域名导入登录 cookie?', host);
+      var host = ''; try { host = new URL(CUR).hostname; } catch (e) {}
+      var dom = prompt('为哪个精确主机导入登录 cookie？不会发送给父域、兄弟子域或 HTTP。', host);
       if (!dom) return;
       var ck = prompt('粘贴该站的 cookie 字符串(形如 SESSDATA=xxx; bili_jct=yyy)。\n\n' +
                       '获取:电脑浏览器登录该站 → F12 开发者工具 → Application/存储 → Cookies → 复制。\n\n' +
-                      '⚠ 这是你的登录凭证,会保存在服务器上。服务器若被入侵,该账号可能被盗。仅对你信任的站这么做。');
+                      '⚠ 这是你的登录凭证，会以 Secure + 精确主机方式保存在服务器上。服务器若被入侵，该账号仍可能被盗。仅对你信任的站这么做。');
       if (!ck) return;
       fetch('/pdf/api/web-cookie', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ domain: dom, cookie: ck }) })
@@ -122,7 +139,11 @@
     if (push !== false && CUR) _hist.push(CUR);
     CUR = u; CFG.web_url = u; _pageText = '';
     var b = document.getElementById('wl-url'); if (b) b.value = u;
-    frame().src = frameSrc(u);   // 地址栏输入/后退;RBI 模式走真浏览器渲染
+    var targetFrame = frame();
+    var nextNonce = newBridgeNonce();
+    if (nextNonce) BRIDGE = nextNonce;
+    targetFrame.name = 'bw-web-bridge:' + BRIDGE;
+    targetFrame.src = frameSrc(u);   // 地址栏输入/后退;RBI 模式走真浏览器渲染
     try { history.replaceState(null, '', '/pdf/web/live?url=' + encodeURIComponent(u)); } catch (e) {}
     setTimeout(askText, 1200);
     if (_trOn) setTimeout(function () { post({ __rcweb: 'translate', on: true, style: _trStyle }); }, 1400);
@@ -151,74 +172,435 @@
     setTimeout(askText, 1200);
     if (_trOn) setTimeout(function () { post({ __rcweb: 'translate', on: true, style: _trStyle }); }, 1400);
   }
+  var _apiWindowAt = Date.now(), _apiCount = 0, _apiInflight = 0;
+  function safeExternalUrl(value) {
+    value = String(value || '').trim();
+    if (value.length > 8192) return '';
+    try {
+      var parsed = new URL(value);
+      return (parsed.protocol === 'http:' || parsed.protocol === 'https:') ? parsed.href : '';
+    } catch (e) { return ''; }
+  }
+  function sameExternalUrl(left, right) {
+    var a = safeExternalUrl(left), b = safeExternalUrl(right);
+    return !!a && !!b && a === b;
+  }
+  function safeRect(value) {
+    value = value || {};
+    var out = {};
+    ['left', 'top', 'right', 'bottom'].forEach(function (key) {
+      var number = Number(value[key]);
+      out[key] = Number.isFinite(number) ? Math.max(-100000, Math.min(100000, number)) : 0;
+    });
+    out.width = Math.max(0, out.right - out.left);
+    out.height = Math.max(0, out.bottom - out.top);
+    return out;
+  }
+  function shellRect(value) {
+    var inner = safeRect(value);
+    var fr = frame();
+    var outer = fr && fr.getBoundingClientRect ? fr.getBoundingClientRect() : { left: 0, top: 0 };
+    return {
+      left: outer.left + inner.left,
+      top: outer.top + inner.top,
+      right: outer.left + inner.right,
+      bottom: outer.top + inner.bottom,
+      width: inner.width,
+      height: inner.height
+    };
+  }
+  function selectionController() {
+    return window.__bwSelectionController || null;
+  }
+  function publishSelection() {
+    var controller = selectionController();
+    if (!controller || typeof controller.acceptExternal !== 'function') return false;
+    controller.acceptExternal({
+      source: 'web',
+      text: _sel.text,
+      context: _sel.ctx,
+      rect: _sel.clientRect,
+      data: { url: CUR }
+    });
+    return true;
+  }
+  function sharedAssistantHost() {
+    try {
+      return window.PdfAdapter && PdfAdapter._host && PdfAdapter._host.asst
+        ? PdfAdapter._host.asst : null;
+    } catch (e) { return null; }
+  }
+  function callSharedHost(name, args, fallback) {
+    var host = sharedAssistantHost();
+    if (host && typeof host[name] === 'function') {
+      try { return host[name].apply(host, args || []); } catch (e) {}
+    }
+    return typeof fallback === 'function' ? fallback() : fallback;
+  }
+  function webFile() { return 'web:' + CUR; }
+  function ensureResultConfig() {
+    if (!(window.RC && RC.result && RC.result.config) || WebAdapter._resultCfgDone) return;
+    RC.result.config({
+      draftKey: 'web-drafts',
+      aiParams: function () { return {}; },
+      beforeOpen: function () {
+        try { if (window._pushQueryHistory) window._pushQueryHistory(); } catch (e) {}
+      }
+    });
+    WebAdapter._resultCfgDone = true;
+  }
+
+  // 只组合与内容几何无关的共享 assistant chrome。这里没有 noteMount/anchorFromPoint、
+  // char range、page highlight 等 PDF host 方法，因此不会把“模板复用”误报成“网页支持 PDF 锚”。
+  var WebAssistantHost = {
+    md: function (text) {
+      return callSharedHost('md', [text], function () {
+        return window.RC && RC.md ? RC.md(text) : String(text == null ? '' : text);
+      });
+    },
+    toast: function (message) { return callSharedHost('toast', [message], function () { toast(message); }); },
+    fmtTime: function (ms) { return callSharedHost('fmtTime', [ms], ''); },
+    fileRel: webFile,
+    pdfNumPages: function () { return 1; },       // 共享侧栏历史 DTO 仍要求一个有限位置总数；不是 PDF 能力声明
+    locCount: function () { return 1; },
+    dispPage: function () { return 1; },
+    pdfFromDisp: function () { return 1; },
+    goTo: function () { return false; },          // URL 跳转只允许走 WebAdapter.navigate
+    changePage: function () { return false; },
+    fitWidth: function () { return false; },
+    zoomBy: function () { return false; },
+    toggleTranslate: function () {
+      var button = document.getElementById('wl-tr');
+      if (button) { button.click(); return true; }
+      return false;
+    },
+    openDrawer: function () { return callSharedHost('openDrawer', [], false); },
+    switchTab: function (name) { return callSharedHost('switchTab', [name], false); },
+    mountPanel: function () {
+      return document.getElementById('ep-side') || document.getElementById('grammar-panel');
+    },
+    mountTabs: function () {
+      return document.getElementById('ep-side-tabs') || document.getElementById('side-tabs');
+    },
+    asstOpen: function () { return callSharedHost('asstOpen', [], false); },
+    voiceContext: function () { return WebAdapter.getContext(); },
+    setFocusSel: function (text, kind) { return callSharedHost('setFocusSel', [text, kind], false); },
+    focusSel: function () { return callSharedHost('focusSel', [], null); },
+    clearFigFocus: function () { return callSharedHost('clearFigFocus', [], false); },
+    clearNoteAttached: function () { return callSharedHost('clearNoteAttached', [], false); },
+    renderNoteChips: function () { return callSharedHost('renderNoteChips', [], false); },
+    hlUrl: function () { return '/pdf/api/html-highlights'; },
+    notesUrl: function () { return '/pdf/api/notes'; },
+    noteCompositeUrl: function () { return '/pdf/api/note-composite'; },
+    chatUrl: function () { return '/api/assistant/chat'; },
+    historyUrl: function () { return '/api/assistant/history'; },
+    clearUrl: function () { return '/api/assistant/clear'; }
+  };
+
+  var WebAdapter = window.WebAdapter = {
+    kind: 'web',
+    _host: { asst: WebAssistantHost },
+    _resultCfgDone: false,
+    config: (window.RC && RC.contract && RC.contract.adapterConfig)
+      ? RC.contract.adapterConfig('web', {
+          isPDF: false,
+          reflow: true,
+          hasFigures: false,
+          hasImages: true,
+          renderRegion: false,
+          anchorKind: 'web-quote',
+          popupMode: 'fixed',
+          supportsVoice: true
+        })
+      : {
+          isPDF: false, reflow: true, hasFigures: false, hasImages: true,
+          renderRegion: false, anchorKind: 'web-quote', popupMode: 'fixed',
+          supportsVoice: true
+        },
+    fileInfo: function () { return { file: webFile(), url: CUR, title: _title || CUR }; },
+    getContext: function () {
+      var context = {
+        page_type: 'web',
+        file: webFile(),
+        book: _title || CUR,
+        book_name: _title || CUR,
+        url: CUR,
+        total: 1,
+        total_pages: 1,
+        page: 1,
+        pages: [1],
+        visible_text: _pageText.slice(0, 4000),
+        langs: langs()
+      };
+      if (_sel.text) {
+        context.selection = _sel.text;
+        context.selection_sentence = _sel.ctx;
+      }
+      return context;
+    },
+    captureSelection: function () {
+      if (!_sel.text) return null;
+      var selection = {
+        text: _sel.text,
+        context: _sel.ctx,
+        ctx: _sel.ctx,
+        sentence: _sel.ctx,
+        rect: _sel.clientRect,
+        anchor: null,
+        data: { url: CUR, source: 'web' }
+      };
+      return window.RC && RC.contract && RC.contract.selection
+        ? RC.contract.selection(selection) : selection;
+    },
+    clearSelection: function () {
+      _sel = { text: '', ctx: '', rect: null, clientRect: null };
+      var controller = selectionController();
+      if (controller && typeof controller.clearExternal === 'function') controller.clearExternal('web');
+    },
+    currentChapterText: function () { return _pageText.slice(0, 8000); },
+    currentLocation: function () {
+      return { unit: 'url', index: 0, total: 1, data: { url: CUR } };
+    },
+    navigate: function (target) {
+      var data = target && target.data ? target.data : (target || {});
+      if (!data.url) return false;
+      go(data.url);
+      return true;
+    },
+    getEndpoints: function () {
+      return {
+        dict: '/pdf/api/dict',
+        translate: '/pdf/api/translate',
+        explain: '/pdf/api/explain',
+        highlights: '/pdf/api/html-highlights'
+      };
+    },
+    lookupWord: function (opts) {
+      opts = opts || {};
+      var word = String(opts.word || '').trim();
+      if (!word) return;
+      if (!(window.RC && RC.wordpop && RC.wordpop.show)) {
+        if (opts.fallback) opts.fallback(word, opts.context || '');
+        return;
+      }
+      RC.wordpop.show({
+        word: word,
+        rect: opts.anchorRect || (_sel && _sel.clientRect) || null,
+        ctx: opts.context || '',
+        file: webFile(),
+        page: 0,
+        langs: opts.langs || langs(),
+        ignoreSelector: '#sel-toolbar',
+        showAnki: false,
+        onFallback: function (value) {
+          if (opts.fallback) opts.fallback(value, opts.context || '');
+        }
+      });
+    },
+    lookupPhrase: function (opts) {
+      opts = opts || {};
+      var text = String(opts.text || '').trim();
+      if (!text) return;
+      if (!(window.RC && RC.phrasepop && RC.phrasepop.show)) {
+        if (opts.fallback) opts.fallback();
+        return;
+      }
+      RC.phrasepop.show({
+        text: text,
+        rect: opts.anchorRect || (_sel && _sel.clientRect) || null,
+        result: opts.result || null,
+        file: webFile(),
+        langs: opts.langs || langs(),
+        ignoreSelector: '#sel-toolbar',
+        // Web 尚无 DOM/quote 持久锚：只复用词组浮层与账户级收藏/掌握，不伪造 PDF 呼吸层。
+        onFav: function () {},
+        onMastered: function () {},
+        onExplain: function () {
+          WebAdapter.explain({ text: text, context: _sel.ctx || '' });
+        }
+      });
+    },
+    translate: function (opts) {
+      opts = opts || {};
+      ensureResultConfig();
+      if (!(window.RC && RC.result && RC.result.aiCall)) {
+        if (opts.fallback) opts.fallback();
+        return;
+      }
+      RC.result.aiCall('/pdf/api/translate', {
+        text: opts.text || '', target_lang: '中文'
+      }, '🌐 翻译', {});
+    },
+    explain: function (opts) {
+      opts = opts || {};
+      ensureResultConfig();
+      if (!(window.RC && RC.result && RC.result.aiCall)) {
+        if (opts.fallback) opts.fallback();
+        return;
+      }
+      RC.result.aiCall('/pdf/api/explain', {
+        text: opts.text || '', context: opts.context || ''
+      }, '💡 AI 解释', { kind: 'explain' });
+    },
+    chat: function (opts) {
+      opts = opts || {};
+      if (window.RC && RC.ui && RC.ui.openSelectionChat
+          && RC.ui.openSelectionChat(opts.text || '', opts.context || '')) return;
+      ensureResultConfig();
+      if (!(window.RC && RC.result && RC.result.openChat)) {
+        if (opts.fallback) opts.fallback();
+        return;
+      }
+      RC.result.openChat(opts.text || '', opts.context || '', { kind: 'chat' });
+    },
+    openModelSettings: function (opts) {
+      opts = opts || {};
+      if (window.RC && RC.assistant && RC.assistant.openModelSettings) {
+        RC.assistant.openModelSettings(opts.focusAction);
+        return;
+      }
+      if (opts.fallback) opts.fallback();
+    },
+    splitFollowups: function (text, fallback) {
+      if (window.RC && RC.assistant && RC.assistant.splitFollowups) {
+        return RC.assistant.splitFollowups(text);
+      }
+      return fallback ? fallback(text) : null;
+    }
+  };
+
+  // web-adapter 是 parser-blocking classic script，而 reader.js 是 deferred module：先登记独立 web
+  // host，PWA runtime 在 DOMContentLoaded 启动时就不会短暂绑定 PdfAdapter。
+  try { if (window.RC && RC.use) RC.use(WebAdapter); } catch (e) {}
+
+  function apiReply(id, payload) {
+    post({ __rcweb: 'api-result', id: id, payload: payload || {} });
+  }
+  function validateSandboxApi(path, method, bodyText) {
+    var url;
+    try { url = new URL(path, location.origin); } catch (e) { throw new Error('invalid-api-url'); }
+    if (url.origin !== location.origin) throw new Error('cross-origin-api');
+    method = String(method || 'GET').toUpperCase();
+    var body = null;
+    if (bodyText) {
+      if (String(bodyText).length > 512 * 1024) throw new Error('api-body-too-large');
+      try { body = JSON.parse(String(bodyText)); } catch (e) { throw new Error('invalid-api-json'); }
+    }
+    function texts(limit) {
+      var list = body && body.texts;
+      if (!Array.isArray(list) || list.length > limit) throw new Error('invalid-api-texts');
+      list.forEach(function (text) {
+        if (typeof text !== 'string' || text.length > 3000) throw new Error('invalid-api-text');
+      });
+    }
+    if (url.pathname === '/pdf/api/web-translate' && method === 'POST') {
+      texts(200);
+      if (body && Object.prototype.hasOwnProperty.call(body, 'url')) throw new Error('api-url-forbidden');
+    } else if (url.pathname === '/pdf/api/web-vocab' && method === 'POST') {
+      texts(500);
+    } else {
+      throw new Error('api-not-allowed');
+    }
+    return {
+      path: url.pathname + url.search,
+      method: method,
+      body: bodyText ? String(bodyText) : null
+    };
+  }
+  function handleSandboxApi(message) {
+    var id = String(message.id || '');
+    if (!/^[A-Za-z0-9_-]{1,80}$/.test(id)) return;
+    var now = Date.now();
+    if (now - _apiWindowAt >= 60000) {
+      _apiWindowAt = now;
+      _apiCount = 0;
+    }
+    if (_apiCount >= 90 || _apiInflight >= 6) {
+      apiReply(id, { ok: false, status: 429, error: 'sandbox-api-rate-limit' });
+      return;
+    }
+    var request;
+    try {
+      request = validateSandboxApi(message.path, message.method, message.body);
+    } catch (error) {
+      apiReply(id, { ok: false, status: 400, error: String(error && error.message || error) });
+      return;
+    }
+    _apiCount += 1;
+    _apiInflight += 1;
+    var controller = typeof AbortController === 'function' ? new AbortController() : null;
+    var timer = setTimeout(function () { try { if (controller) controller.abort(); } catch (e) {} }, 30000);
+    fetch(request.path, {
+      method: request.method,
+      headers: request.body ? { 'Content-Type': 'application/json' } : {},
+      body: request.body,
+      credentials: 'same-origin',
+      cache: 'no-store',
+      signal: controller ? controller.signal : undefined
+    }).then(function (response) {
+      return response.text().then(function (text) {
+        if (text.length > 2 * 1024 * 1024) throw new Error('sandbox-api-response-too-large');
+        apiReply(id, {
+          ok: response.ok,
+          status: response.status,
+          contentType: response.headers.get('Content-Type') || '',
+          body: text
+        });
+      });
+    }).catch(function (error) {
+      apiReply(id, {
+        ok: false,
+        status: 502,
+        error: String(error && error.message || error)
+      });
+    }).then(function () {
+      clearTimeout(timer);
+      _apiInflight = Math.max(0, _apiInflight - 1);
+    });
+  }
   window.addEventListener('message', function (e) {
     var d = e.data || {};
-    if (d.__rcweb === 'located') { onLocated(d.url); return; }
-    if (d.__rcweb === 'nav') { go(d.url); return; }   // 兼容旧路径(地址栏输入/后退仍走 go）
-    if (d.__rcweb === 'ready') { _title = d.title || ''; askText(); return; }
-    if (d.__rcweb === 'text') { _pageText = (d.text || '').slice(0, 120000); _title = d.title || _title; return; }
+    var currentFrame = frame();
+    if (!currentFrame || e.source !== currentFrame.contentWindow || e.origin !== 'null') return;
+    if (!BRIDGE || d.__rcwebNonce !== BRIDGE) return;
+    if (d.__rcweb === 'api') { handleSandboxApi(d); return; }
+    if (d.__rcweb === 'located') {
+      var located = safeExternalUrl(d.url);
+      if (located) onLocated(located);
+      return;
+    }
+    if (d.__rcweb === 'nav') {
+      var navigation = safeExternalUrl(d.url);
+      if (navigation) go(navigation);
+      return;
+    }   // 兼容旧路径(地址栏输入/后退仍走 go）
+    if (d.__rcweb === 'ready') { _title = String(d.title || '').slice(0, 1000); askText(); return; }
+    if (d.__rcweb === 'text') {
+      _pageText = String(d.text || '').slice(0, 120000);
+      _title = String(d.title || _title).slice(0, 1000);
+      return;
+    }
     if (d.__rcweb === 'sel') {
-      _sel = { text: d.text || '', ctx: d.ctx || '', rect: d.rect };
-      // 复用 PDF **原有的**选区工具条(#sel-toolbar):它认 lastSelText/__lastSelMeta
-      try {
-        window.lastSelText = _sel.text;
-        window.__lastSelSentence = _sel.ctx;
-        window.__lastSelMeta = { page: 1, t: Date.now() };
-      } catch (_) {}
-      var bar = document.getElementById('sel-toolbar');
-      if (!bar) return;
-      // 审计 #11:工具条由 `.open` class 控制显示(CSS 里 #sel-toolbar{display:none}),
-      //   首版用 style.display='' 只是回落到 none → 网页里选中文字工具条根本不出现。
-      if (!_sel.text) { bar.classList.remove('open'); return; }
-      var fr = frame().getBoundingClientRect(), r = d.rect || { left: 20, bottom: 80 };
-      var pv = document.getElementById('sel-preview');
-      if (pv) pv.textContent = _sel.text.slice(0, 60);
-      // 审计 #12:按钮组(词/多选/词组)默认 display:none,唯一开关是 _updateToolbarMode —— 不调
-      //   的话即使工具条出来了也是空条。
-      try { if (window._updateToolbarMode) window._updateToolbarMode(_sel.text); } catch (_) {}
-      bar.style.position = 'fixed';
-      bar.style.left = Math.max(8, Math.min(window.innerWidth - (bar.offsetWidth || 320) - 8, fr.left + r.left)) + 'px';
-      bar.style.top = Math.min(window.innerHeight - 60, fr.top + r.bottom + 8) + 'px';
-      bar.style.zIndex = 900;
-      bar.classList.add('open');
+      var innerRect = safeRect(d.rect);
+      _sel = {
+        text: String(d.text || '').slice(0, 20000),
+        ctx: String(d.ctx || '').slice(0, 50000),
+        rect: innerRect,
+        clientRect: shellRect(innerRect)
+      };
+      // 唯一入口在 reader.src 的 SelectionController bridge 内：只有它能更新模块词法
+      // lastSelText / context / preview / toolbar。这里不再伪造 window 上的同名属性。
+      publishSelection();
     }
   });
 
-  // ── ③ 覆写 PdfAdapter 的两个取值点(其余契约原样继承)──
+  // ── ③ reader.js 就绪后补发早到的选区；WebAdapter 本身早已独立登记 ──
   document.addEventListener('DOMContentLoaded', function () {
     mountBar();
     var fr = frame();
     if (fr) fr.addEventListener('load', askText);
     setTimeout(askText, 1500);
-
-    var ad = null;
-    try { ad = window.RC && RC.adapter && RC.adapter(); } catch (e) {}
-    if (!ad) return;
-    var _origCtx = ad.getContext;
-    ad.getContext = function (opts) {
-      var c = null;
-      try { c = _origCtx ? _origCtx.call(ad, opts) : null; } catch (e) {}
-      c = c || {};
-      c.file = 'web:' + CUR;                 // 材料标识:高亮/对话/注意力都按它归档
-      c.book = _title || CUR;
-      c.book_name = _title || CUR;           // 审计 #8:后端 _sys_prompt 读的是 book_name/total
-      c.total = 1;
-      c.url = CUR;
-      c.visible_text = _pageText.slice(0, 4000);   // 网页整页正文(iframe 回传)
-      c.total_pages = 1; c.page = 1; c.pages = [1];
-      if (!c.selection && _sel.text) { c.selection = _sel.text; c.selection_sentence = _sel.ctx; }
-      c.langs = langs();
-      return c;
-    };
-    ad.captureSelection = function () {
-      return _sel.text ? { text: _sel.text, context: _sel.ctx, ctx: _sel.ctx, rect: _sel.rect } : null;
-    };
-    ad.currentChapterText = function () { return _pageText.slice(0, 8000); };
-    try {   // 审计 #2:网页高亮走字符偏移 sidecar(/pdf/api/html-highlights),不是 PDF 的几何锚
-      if (ad._host && ad._host.asst) ad._host.asst.hlUrl = function () { return '/pdf/api/html-highlights'; };
-      ad.getEndpoints = function () { return { dict: '/pdf/api/dict', translate: '/pdf/api/translate',
-                                               explain: '/pdf/api/explain', highlights: '/pdf/api/html-highlights' }; };
-    } catch (e) {}
+    publishSelection();
   });
 
   var _lang = null;

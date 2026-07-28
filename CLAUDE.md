@@ -20,6 +20,27 @@
   ```
 - 🧭 **接续工作/部署细节**:服务器侧 Claude Code 工作流 → `references/server-side-claude-code.md`;Pi 部署 → `references/raspberry-pi-deployment.md`;VPS 迁移 → `references/linux-server-migration.md`;本地实例(Windows Flask) → `references/webapp-development.md`「本地实例」章。
 
+## 🚨 浏览器扩展 / 阅读器统一层交接入口（2026-07-22）
+
+如果任务涉及浏览器扩展、PDF/PWA 交接、网页高亮/卡片/侧栏/沉浸翻译，**先完整阅读**
+`references/reader-extension-handoff.md` 和 `references/reader-runtime-architecture.md`，再按其中顺序读取能力归属、运行时冲突和视觉冲突登记。
+2026-07-25 起正式产品边界为：普通网页只有安装扩展后才启用完整 BW 功能；PWA 只阅读
+PDF、EPUB、导入 HTML/Markdown 和收藏书。真书无扩展时使用 PWA 完整界面，有扩展时由扩展接管
+共享 UI/网络/通用数据，PWA 保留渲染、精确锚点和书籍私有数据。旧 PWA 网页解析器、
+`/pdf/web/live` 阅读模式、五入口和 `?ui=legacy` provider-only 方案均已废弃。
+不要只凭旧会话 memory 或巨大的未提交 diff 推断现状；不要手改 `extensions/bw-reader-webext/vendor/`，
+不要为复用代码擅自删除 `conflict` / `pending` 功能。开始改动前先运行：
+
+```bash
+python3 extensions/bw-reader-webext/handoff_check.py
+```
+
+完成改动后运行：
+
+```bash
+python3 extensions/bw-reader-webext/handoff_check.py --full
+```
+
 ## Vault 位置
 > 见上「环境定向」表;下面按 Windows 主力机写,Linux 换对应根。
 - Vault 根目录：`C:\obsidian\`（Pi=`/home/bwicarus/obsidian`、VPS=`/root/obsidian`）
@@ -297,6 +318,7 @@ cfg 字段 `qa_remote_access`（父）+ `qa_remote_daemon`（子）。父开关�
 
 **阅读器 / AI 助手 / 语音源码**（都在 git，同 webapp 部署对应文件 + restart）：
 - `_server_deploy/pdf_reader.py` → PDF **和** EPUB 阅读器后端总入口（`register_pdf_reader`，url_prefix `/pdf`）：`/pdf/`、`/pdf/epub/view`、`/pdf/fav/view`、`/api/reading-pos`、`/api/userpages`、`/api/pdf-insert-page`、`/api/notes`、`/api/epub-*` 等
+- `_server_deploy/reader_sw_auth.py` → 根 PWA 与 PDF Service Worker 共用的唯一认证代际源码；`app.py`/`pdf_reader.py` 都在生成 SW 时注入该片段。⚠ 部署任一文件时必须同时部署本文件，否则导入失败或两个 scope 的缓存围栏漂移
 - **pdf_reader 拆分模块**（2026-07-06 结构拆分五刀，⚠ 部署时必须跟 pdf_reader.py 一起 cp 到 webapp）：`reader_events.py`（SSE 事件总线 `/api/reader-events`+`publish`）、`html_reader.py`（统一 HTML 阅读器 `/html/view`+html-highlights）、`book_toc.py`（书籍目录/AI 建目录/页偏移/章节 provenance）、`grammar_reader.py`（英语语法分析全域 8 路由+spacy 常驻 worker）、`favorites_reader.py`（收藏夹全域：CRUD/EPUB 物化/预建/PWA，6 路由）。模式统一：依赖经 `register_*(bp, …)` 同名显式注入（函数体机械原样搬，pyflakes 验零漂移）、路由 `add_url_rule` 挂同一个 bp（endpoint 名不变）、块外仍用的符号由 pdf_reader 回导入（如 `pdf._effective_toc` 供 assistant.py）；⚠ 注入 `_job_set`/`_ink_load` 等靠后定义的符号时，register 调用必须放它们定义之后
 - `_server_deploy/assistant.py` → PDF 侧栏 Copilot（沙盒 agent + 工具循环，`register_assistant`）
 - `_server_deploy/epub_assistant.py` → EPUB 侧栏助手 + **收藏集语境**分支（复用 assistant.py 骨架，section 级工具，独立对话历史命名空间）

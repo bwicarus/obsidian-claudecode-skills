@@ -1749,8 +1749,8 @@ def _action_undo(action):
         if file and ids:
             try:
                 pdf = _pdf()
-                items = [h for h in pdf._epub_hl_load(file) if h.get("id") not in ids]
-                pdf._epub_hl_save(file, items)
+                with pdf._epub_hl_edit(file) as items:
+                    items[:] = [h for h in items if h.get("id") not in ids]
             except Exception as e:
                 return False, str(e)[:120]
         action["undo"] = {"op": "hl_delete", "file": u.get("file") or "", "ids": []}
@@ -1761,7 +1761,8 @@ def _action_undo(action):
         if file and ids:
             try:
                 pdf = _pdf()
-                pdf._notes_save(file, [n for n in pdf._notes_load(file) if n.get("id") not in ids])
+                with pdf._notes_edit(file) as items:
+                    items[:] = [n for n in items if n.get("id") not in ids]
             except Exception as e:
                 return False, str(e)[:120]
         return True, None
@@ -1779,15 +1780,14 @@ def _sticky_set(p):
         return False, "缺 file / id"
     try:
         pdf = _pdf()
-        items = pdf._notes_load(file)
-        n = next((x for x in items if x.get("id") == nid), None)
-        if not n:
-            return False, "便签已不存在(可能被删了)"
-        for k in ("text", "color"):   # 白名单:只允许这两个字段
-            if k in fields:
-                n[k] = fields[k]
-        n["updated"] = int(time.time())
-        pdf._notes_save(file, items)
+        with pdf._notes_edit(file) as items:
+            n = next((x for x in items if x.get("id") == nid), None)
+            if not n:
+                return False, "便签已不存在(可能被删了)"
+            for k in ("text", "color"):   # 白名单:只允许这两个字段
+                if k in fields:
+                    n[k] = fields[k]
+            n["updated"] = int(time.time())
         return True, None
     except Exception as e:
         return False, str(e)[:120]
@@ -1854,16 +1854,15 @@ def _action_redo(action):
         try:
             import uuid as _u
             pdf = _pdf()
-            cur = pdf._epub_hl_load(file)
             new_ids = []
-            for it in items:
-                h = {"id": "e" + _u.uuid4().hex[:11], "cfi": (it.get("cfi") or ""),
-                     "anchor": {"section": it.get("section")},
-                     "text": (it.get("text") or "")[:2000], "color": (it.get("color") or "#ffd54a"),
-                     "note": "", "sentence": "", "body": "", "kind": "", "time": int(time.time())}
-                cur.append(h)
-                new_ids.append(h["id"])
-            pdf._epub_hl_save(file, cur)
+            with pdf._epub_hl_edit(file) as cur:
+                for it in items:
+                    h = {"id": "e" + _u.uuid4().hex[:11], "cfi": (it.get("cfi") or ""),
+                         "anchor": {"section": it.get("section")},
+                         "text": (it.get("text") or "")[:2000], "color": (it.get("color") or "#ffd54a"),
+                         "note": "", "sentence": "", "body": "", "kind": "", "time": int(time.time())}
+                    cur.append(h)
+                    new_ids.append(h["id"])
         except Exception as e:
             return False, str(e)[:120]
         action["undo"] = {"op": "hl_delete", "file": file, "ids": new_ids}
@@ -1875,12 +1874,11 @@ def _action_redo(action):
             return False, "没有可重建的便签快照"
         try:
             pdf = _pdf()
-            items = pdf._notes_load(file)
-            have = {x.get("id") for x in items}
-            for n in notes:
-                if n["id"] not in have:
-                    items.append(n)
-            pdf._notes_save(file, items)
+            with pdf._notes_edit(file) as items:
+                have = {x.get("id") for x in items}
+                for n in notes:
+                    if n["id"] not in have:
+                        items.append(n)
         except Exception as e:
             return False, str(e)[:120]
         return True, None

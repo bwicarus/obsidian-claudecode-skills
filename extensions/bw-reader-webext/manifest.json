@@ -1,10 +1,13 @@
 {
   "manifest_version": 3,
-  "name": "BW 网页伴读",
-  "version": "0.1.0",
-  "description": "在真实网页中提供查词、翻译、解释和学习功能（Safari/Chromium WebExtension）。",
+  "name": "BW网页伴读",
+  "version": "0.2.68",
+  "description": "把阅读器的查词、翻译、解释、卡片、绘图和 AI 助手带到任意网页，并在书籍 PWA 中自动接管共享界面。",
   "permissions": [
-    "storage"
+    "storage",
+    "alarms",
+    "nativeMessaging",
+    "offscreen"
   ],
   "host_permissions": [
     "https://bwicarus.taile44d0c.ts.net/*"
@@ -12,29 +15,78 @@
   "content_scripts": [
     {
       "matches": [
+        "https://bwicarus.taile44d0c.ts.net/pdf/view",
+        "https://bwicarus.taile44d0c.ts.net/pdf/view?*",
+        "https://bwicarus.taile44d0c.ts.net/pdf/epub/view",
+        "https://bwicarus.taile44d0c.ts.net/pdf/epub/view?*",
+        "https://bwicarus.taile44d0c.ts.net/pdf/html/view",
+        "https://bwicarus.taile44d0c.ts.net/pdf/html/view?*",
+        "https://bwicarus.taile44d0c.ts.net/pdf/fav/open",
+        "https://bwicarus.taile44d0c.ts.net/pdf/fav/open?*"
+      ],
+      "js": [
+        "src/pwa-marker.js"
+      ],
+      "run_at": "document_start",
+      "all_frames": false
+    },
+    {
+      "matches": [
         "https://*/*",
         "http://*/*"
       ],
-      "exclude_matches": [
-        "https://bwicarus.taile44d0c.ts.net/*",
-        "https://bwicarus.space/*"
-      ],
       "js": [
         "src/facade.js",
+        "src/settings-sync.js",
+        "vendor/html2canvas.min.js",
         "vendor/mathjax-full.js",
         "vendor/marked.js",
+        "vendor/reader-runtime-context-selection-registry.js",
+        "vendor/reader-runtime-interaction-policy.js",
+        "vendor/reader-runtime-vocabulary-state.js",
+        "vendor/reader-runtime-data-registry.js",
+        "vendor/reader-runtime-sync-gateway.js",
+        "vendor/reader-runtime-direct-sync-protocol.js",
+        "vendor/reader-runtime-direct-sync-signal-transport.js",
+        "vendor/reader-runtime-direct-sync-host.js",
+        "vendor/reader-runtime-computer-voice-webrtc.js",
         "vendor/rc-core.js",
+        "vendor/reader-runtime-card-improvement-actions.js",
+        "vendor/rc-ui.js",
+        "vendor/rc-flashcard.js",
+        "vendor/rc-snippets.js",
+        "vendor/rc-review.js",
         "vendor/rc-md.js",
-        "vendor/rc-toolchip.js",
-        "vendor/rc-turncard.js",
-        "vendor/rc-voicecall.js",
         "vendor/rc-result.js",
         "vendor/rc-wordpop.js",
         "vendor/rc-phrasepop.js",
+        "vendor/rc-figures.js",
+        "vendor/rc-highlight.js",
+        "vendor/rc-knowledge.js",
         "vendor/rc-sidedrawer.js",
         "vendor/rc-assistant.js",
+        "vendor/rc-grammar.js",
+        "vendor/rc-settings.js",
+        "vendor/rc-favorites.js",
+        "vendor/rc-video.js",
+        "vendor/rc-videoplayer.js",
+        "vendor/rc-toolchip.js",
+        "vendor/rc-turncard.js",
+        "vendor/rc-voicectx.js",
+        "vendor/rc-computer-voice.js",
+        "vendor/rc-voicecall.js",
+        "vendor/rc-ink.js",
+        "vendor/rc-stickynote.js",
+        "vendor/web-immersive.js",
+        "src/pwa-adapter.js",
         "src/web-adapter.js",
+        "src/web-decorations.js",
+        "src/web-highlights.js",
+        "src/web-pins.js",
+        "src/web-notes.js",
+        "src/web-ink.js",
         "src/shell.js",
+        "src/direct-sync-content-host.js",
         "content.js"
       ],
       "run_at": "document_idle",
@@ -49,10 +101,14 @@
     "persistent": false
   },
   "action": {
-    "default_title": "BW 网页伴读",
+    "default_title": "BW网页伴读",
     "default_popup": "popup.html"
   },
   "icons": {
+    "48": "icons/icon-48-opaque.png",
+    "96": "icons/icon-96-opaque.png",
+    "128": "icons/icon-128-opaque.png",
+    "256": "icons/icon-256-opaque.png",
     "512": "icons/icon-512.png"
   }
 }

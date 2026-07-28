@@ -10,6 +10,39 @@ function saveHlColors(arr) {
   localStorage.setItem('pdf-hl-colors', JSON.stringify(arr));
 }
 let _lastHlColor = localStorage.getItem('pdf-hl-last-color') || DEFAULT_HL_COLORS[0];
+// ── 高亮触摸手势:全阅读器**唯一实例**(照 EPUB epub-html.js 的 document 委托做法)。
+//    key = 高亮 id,故同一条高亮的多个重叠 rect 上的两次点会正确配对成双击。
+let _hlOpenedAt = 0;
+function _openHlEditorById(id) {
+  const now = Date.now(); if (now - _hlOpenedAt < 520) return;   // 去重:iOS 的 pointerup 与原生 dblclick 可能双触发
+  const h = _allHighlights.find((x) => x.id === id); if (!h) return;
+  const div = document.querySelector('.hl-saved[data-id="' + (window.CSS && CSS.escape ? CSS.escape(id) : id) + '"]');
+  const pw = div && div.closest ? div.closest('.page-wrap') : null;
+  if (!div || !pw) return;
+  _hlOpenedAt = now; openHlPopover(h, div, pw);
+}
+let _hlGestureSingleton = null;
+function _hlGesture() {
+  if (_hlGestureSingleton) return _hlGestureSingleton;
+  if (!(window.RC && RC.highlight && RC.highlight.gesture)) return null;
+  _hlGestureSingleton = RC.highlight.gesture({
+    onLongPress: (id) => {
+      const h = _allHighlights.find((x) => x.id === id);
+      if (h && window.__asstOpen && window.__asstOpen()) _pdfHlToAsst(h);
+    },
+    doubleTapMs: 420, moveTol: 12,
+    onDoubleTap: (id) => _openHlEditorById(id)
+  });
+  // 原生 dblclick 兜底:两次点落在不同 rect 时 dblclick 派发到公共祖先,故委托在 document 上按落点反查。
+  document.addEventListener('dblclick', (e) => {
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const hit = el && el.closest ? el.closest('.hl-saved') : null;
+    if (!hit || !hit.dataset.id) return;
+    e.preventDefault(); e.stopPropagation();
+    _openHlEditorById(hit.dataset.id);
+  }, true);
+  return _hlGestureSingleton;
+}
 let _allHighlights = [];
 let _hlByPage = {};
 let _resultContext = null;   // {charSel, text, sentence, kind} 由 onTranslate/onExplain 入口存
@@ -92,12 +125,12 @@ function renderHighlightsOnPage(pw, pageNum) {
       div.addEventListener('mouseup',    stop, true);
       div.addEventListener('touchstart', stop, {passive:true, capture:true});
       div.addEventListener('touchend',   stop, {passive:true, capture:true});
-      // 交互(2026-07-05,用户要求):长按 → 高亮弹框;助手开着时双击 → 高亮内容加入对话上下文。单击不再开框。
-      // 走共享 RC.highlight.gesture(与 EPUB 一致);RC 未加载(legacy)则兜底回原单击开框。
-      const _hg = (window.RC && RC.highlight && RC.highlight.gesture) ? RC.highlight.gesture({
-        onLongPress: () => openHlPopover(h, div, pw),
-        onDoubleTap: () => { if (window.__asstOpen && window.__asstOpen()) _pdfHlToAsst(h); }
-      }) : null;
+      // 交互(2026-07-05;2026-07-21 用户要求长按↔双击对调):长按 → 高亮内容加入对话上下文(助手开着时);双击 → 高亮弹框。单击不再开框。
+      // 走共享 RC.highlight.gesture 的**唯一实例**(与 EPUB 的 document 委托同构)。
+      // ⚠ 手势状态必须按 h.id 跨 rect 共享:一条高亮有多个**互相重叠**的 rect div,若每个 div 各持
+      //   一个 gesture 实例,两次点落在不同 rect 上就各自算「第一击」,原生 dblclick 又因 target
+      //   不同而派发到公共祖先 → iPad 上必须点三次才弹框(用户实测)。
+      const _hg = _hlGesture();
       if (_hg) {
         div.addEventListener('pointerdown',   (e) => { e.stopPropagation(); _hg.down(h.id, e.clientX, e.clientY); }, true);
         div.addEventListener('pointermove',   (e) => { _hg.move(e.clientX, e.clientY); }, true);
@@ -134,15 +167,16 @@ function _charsRangeToRects(chars, sIdx, eIdx) {
     }
     const x0 = c._x0, y0 = c._y0, x1 = c._x1, y1 = c._y1;
     const lineH = y1 - y0;
+    const _sameBk = cur && c.bk != null && cur.bk != null && c.bk >= 0 && c.bk === cur.bk;   // #56:同排版块=同视觉行(OCR justified),水平相邻即合并,不受块内字符 top 抖动分段(治句子/下划线在括号处断)
     if (cur &&
-        Math.abs(y0 - cur.y0) <= Math.max(2, (cur.y1 - cur.y0) * 0.5) &&
+        (_sameBk || Math.abs(y0 - cur.y0) <= Math.max(2, Math.max(cur.y1 - cur.y0, y1 - y0) * 0.6)) &&   // 跨块才按 y0 判行(跨行 y0 差>字高分段)
         x0 <= cur.x1 + Math.max(2, lineH * 0.6)) {
       cur.x1 = Math.max(cur.x1, x1);
       cur.y0 = Math.min(cur.y0, y0);
       cur.y1 = Math.max(cur.y1, y1);
     } else {
       if (cur) rects.push([cur.x0, cur.y0, cur.x1, cur.y1]);
-      cur = {x0, y0, x1, y1};
+      cur = {x0, y0, x1, y1, bk: c.bk};
     }
   }
   if (cur) rects.push([cur.x0, cur.y0, cur.x1, cur.y1]);
@@ -329,4 +363,3 @@ window._followupAsk = async () => {
   contentEl.scrollTop = contentEl.scrollHeight;
   try { addResultPickers(); } catch (_) {}   // 追问回答也加「+ 选段」，制 Anki(ankiFromResult)含全框选中
 };
-

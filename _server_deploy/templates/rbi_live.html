@@ -39,7 +39,11 @@
 <script src="/static/pdf/rrweb-record.umd.js?v={{ js_v }}"></script>
 <script>
 (function(){
-  var CFG = { url: {{ url|tojson }}, uid: {{ uid|tojson }} };
+  var CFG = {
+    url: {{ url|tojson }},
+    ticket: {{ rbi_ticket|tojson }},
+    ticketExpiresAt: {{ rbi_ticket_expires_at|tojson }}
+  };
   var stage=document.getElementById('stage'), st=document.getElementById('rbi-status'),
       load=document.getElementById('rbi-load'), urlbox=document.getElementById('rbi-url');
   function setSt(m){ try{ st.textContent=m; }catch(e){} }
@@ -56,12 +60,37 @@
 
   var proto = location.protocol==='https:' ? 'wss:' : 'ws:';
   var ws, reconnectT=null;
-  function connect(){
+  function retryConnect(){
+    if(reconnectT) return;
+    reconnectT=setTimeout(function(){ reconnectT=null; connect(); }, 2000);
+  }
+  async function ticketForConnect(){
+    var initial=CFG.ticket;
+    CFG.ticket='';                    // every reconnect obtains a fresh session-bound ticket
+    if(initial && Number(CFG.ticketExpiresAt||0)*1000>Date.now()+5000) return initial;
+    var r=await fetch('/pdf/api/rbi-ticket', {
+      method:'POST', credentials:'same-origin',
+      headers:{'X-BW-RBI':'1','Accept':'application/json'}
+    });
+    if(!r.ok) throw new Error('票据刷新失败 '+r.status);
+    var d=await r.json();
+    if(!d || !d.ok || typeof d.ticket!=='string') throw new Error('票据响应无效');
+    return d.ticket;
+  }
+  async function connect(){
+    var ticket;
+    try{ ticket=await ticketForConnect(); }
+    catch(e){ setSt('认证刷新失败,重试中…'); retryConnect(); return; }
     ws=new WebSocket(proto+'//'+location.host+'/rbi-ws');
-    ws.onopen=function(){ setSt('已连,请求页面…'); open(CFG.url); };
+    ws.onopen=function(){
+      setSt('已连,认证中…');
+      try{ ws.send(JSON.stringify({cmd:'auth', ticket:ticket})); }catch(_){}
+    };
     ws.onmessage=function(e){
       var m; try{ m=JSON.parse(e.data); }catch(_){ return; }
-      if(m.t==='ev'){
+      if(m.t==='ready'){
+        setSt('已认证,请求页面…'); open(CFG.url);
+      } else if(m.t==='ev'){
         var ev; try{ ev=JSON.parse(m.d); }catch(_){ return; }
         try{ replayer.addEvent(ev); }catch(err){ return; }
         if(ev.type===2){ gotFull=true; load.style.display='none';
@@ -74,10 +103,12 @@
         try{ history.replaceState(null,'','/pdf/web/rbi-live?url='+encodeURIComponent(m.url)); }catch(_){}
       } else if(m.t==='clickres'){ var r=m.r||{};
         setSt('Pi点击: '+(r.e?('✗'+r.e):(r.tag+(r.href?(' →'+String(r.href).slice(0,40)):''))));
-      } else if(m.t==='err'){ load.style.display='none'; setSt('✗ '+m.msg); }
+      } else if(m.t==='err'){
+        load.style.display='none'; setSt('✗ '+m.msg);
+        if(m.code==='AUTH'){ try{ ws.close(); }catch(_){} }
+      }
     };
-    ws.onclose=function(){ setSt('断开,重连中…'); if(reconnectT) return;
-      reconnectT=setTimeout(function(){ reconnectT=null; connect(); }, 2000); };
+    ws.onclose=function(){ setSt('断开,重连中…'); retryConnect(); };
     ws.onerror=function(){ setSt('ws 错误'); };
   }
   var _openT=0;
@@ -85,7 +116,7 @@
     if(!u) return;
     if(!/^https?:\/\//.test(u)) u='https://'+u;
     _openT=Date.now(); load.style.display='flex'; setSt('Pi 加载中…'); freshReplayer();
-    try{ ws.send(JSON.stringify({cmd:'open', url:u, uid:CFG.uid})); }catch(_){}
+    try{ ws.send(JSON.stringify({cmd:'open', url:u})); }catch(_){}
   }
   // ★ 交互回传(不变量3):rrweb Replayer 是"回放观看"模式,重建的 DOM **不接受任何交互**
   //   (点链接/搜索框都没反应的根因)。所以把用户在重建 DOM 上的点击/输入/滚动**回传 Pi 真 Chrome**

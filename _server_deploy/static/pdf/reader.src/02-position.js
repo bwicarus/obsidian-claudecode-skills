@@ -4,6 +4,7 @@ function _loadLastPositions() {
   try { return JSON.parse(localStorage.getItem(LAST_POS_KEY) || '{}'); }
   catch { return {}; }
 }
+let _ogLastPage = null;
 function _saveLastPosition(patch) {
   const all = _loadLastPositions();
   all[FILE_REL] = {...(all[FILE_REL] || {}), ...patch, ts: Date.now()};
@@ -16,6 +17,19 @@ function _saveLastPosition(patch) {
   } else {
     try { localStorage.setItem(LAST_POS_KEY, JSON.stringify(all)); } catch {}
   }
+  // 双向上下文同步:借用这个已有的翻页漏斗上报「当前活动文档」,不新增任何监听器。
+  // 开关关着时 RC.ctxSync.report 立即返回 false(零网络);开着时由共享层合并 + 1s trailing。
+  // 切页 → 丢弃绘图焦点(上一页的绘图区不再是"当前")。只在当前焦点确实是绘图时才发。
+  try { if ((patch && patch.page) && patch.page !== _ogLastPage) { _ogLastPage = patch.page;
+        window.RC?.outgoing?.dropDrawingFocus(); } } catch (_) {}
+  try {
+    window.RC?.ctxSync?.report({
+      kind: 'pdf', file: FILE_REL,
+      pos: (patch && patch.page) || currentPage,
+      total: (window.__GRP ? window.__GRP.total : (window.pdfDoc && pdfDoc.numPages)) || undefined,
+      title: document.title.replace(/ ·.*$/, '')
+    });
+  } catch (_) {}
 }
 function _getLastPosition() {
   return _loadLastPositions()[FILE_REL] || null;

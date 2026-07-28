@@ -9,6 +9,8 @@
 // 端点保持相对路径——facade.js 的 fetch 门面统一重写到 Pi + Bearer,这里零关心跨源。
 (function () {
   "use strict";
+  // 受信任 PWA 由 pwa-adapter 接管；不能先装 WebAdapter，否则助手会读取 iframe 外壳而非 PDF 上下文。
+  if (window.__bwPwaProviderOnly || window.__bwPwaBridge) return;
   var RC = window.RC;
   if (!RC || !RC.use) return;
   var shadow = window.__bwShadow;
@@ -58,33 +60,45 @@
       var sel = window.getSelection();
       if (!sel || sel.rangeCount === 0) return null;
       var rng = sel.getRangeAt(0);
-      if (host && host.contains(rng.commonAncestorContainer)) return null;   // 扩展自身 UI 的选区不算
+      if (shadow && shadow.contains(rng.commonAncestorContainer)) return null;   // 扩展自身 UI 的选区不算
       var txt = (sel.toString() || "").trim();
       if (!txt) return null;
       var rect = rng.getBoundingClientRect();
       var blk = rng.startContainer.nodeType === 3 ? rng.startContainer.parentElement : rng.startContainer;
       blk = blk && blk.closest ? blk.closest("p,li,td,blockquote,div,section,h1,h2,h3,h4") : null;
       var ctx = (blk ? (blk.textContent || "") : "").trim().slice(0, 1200);
-      return {
+      return RC.contract.selection({
         text: txt, context: ctx, ctx: ctx,
         anchor: null,   // 网页持久锚(字符偏移 sidecar)属里程碑 3;先不给假锚
         rect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
-      };
+      });
     } catch (e) { return null; }
   }
   function clearNativeSel() { try { var s = window.getSelection(); if (s) s.removeAllRanges(); } catch (e) {} }
 
-  // ── 端点(照搬 html-reader EP;相对路径,fetch 门面负责跨源)──
-  var EP = {
-    dict: "/pdf/api/dict", dictJp: "/pdf/api/dict-jp", dictJpAi: "/pdf/api/dict-jp-ai",
-    translate: "/pdf/api/translate", explain: "/pdf/api/explain",
-    vocabMap: "/pdf/api/vocab-mastery-map", vocabAnki: "/pdf/api/vocab-anki",
-    toNote: "/pdf/api/to-note", snippetsTo: "/pdf/api/snippets-to-async", jobStatus: "/pdf/api/job-status"
-  };
+  // ── 通用网络端点是已确认等价的共享契约；fetch 门面仍负责扩展跨源。──
+  var EP = RC.contract.endpoints();
+  function _visualSurface() {
+    try {
+      var snap = window.__bwWebInk && window.__bwWebInk.exportSnapshot
+        ? window.__bwWebInk.exportSnapshot() : null;
+      if (!snap) return null;
+      return {
+        element: document.body,
+        width: snap.width,
+        height: snap.height,
+        viewport: {
+          x: window.scrollX, y: window.scrollY,
+          width: window.innerWidth, height: window.innerHeight
+        },
+        strokes: snap.strokes || []
+      };
+    } catch (e) { return null; }
+  }
 
   var WebAdapter = {
     kind: "web",
-    config: { isPDF: false, reflow: true, hasFigures: false, hasFormula: true, dictMode: "sse", popupMode: "fixed", clickWordDetect: true, anchorKind: "offset" },
+    config: RC.contract.adapterConfig('web'),
     getEndpoints: function () { return EP; },
     fileInfo: function () { return { file: FREL, langs: _docLangs() }; },
     captureSelection: function () { return captureFromSelection(); },
@@ -100,15 +114,25 @@
           else if (c0 && c0.text) sel = { sel: c0.text, sent: c0.context || "" };
         } catch (e) {}
       }
+      var surface = _visualSurface(), ink = surface ? surface.strokes : [];
       return {
-        file: FREL, book: document.title, book_name: document.title,
+        page_type: "web",
+        file: FREL, file_rel: FREL, book: document.title, book_name: document.title,
         url: location.href,
         langs: _docLangs(),
         visible_text: _visibleText(),
+        page: 1, pages: [1], total: 1, total_pages: 1,
         current_section_idx: 0, total_sections: 1,
+        ink: ink.slice(0, 60), has_ink: ink.length > 0,
+        want_viewshot: ink.length > 0,
         selection: sel.sel || "", selection_sentence: sel.sent || "",
         selection_anchor: sel.anchor || undefined
       };
+    },
+    getVisualSurface: function () { return _visualSurface(); },
+    captureShot: function () {
+      return window.RC && RC.captureInkRegion
+        ? RC.captureInkRegion() : Promise.resolve(null);
     },
     currentLocation: function () { return { unit: "page", index: 0, total: 1 }; },
     collectFigures: function () { return []; },
@@ -121,11 +145,22 @@
         pdfNumPages: function () { return 1; },
         locCount: function () { return 1; },
         dispPage: function (p) { return p; }, pdfFromDisp: function (d) { return d; },
+        goTo: function () {},
+        goToInBook: function (file, page) {
+          try {
+            window.open(
+              'https://bwicarus.taile44d0c.ts.net/pdf/view?file=' +
+                encodeURIComponent(String(file || '')) +
+                '&page=' + Math.max(1, parseInt(page, 10) || 1),
+              '_blank'
+            );
+          } catch (e) {}
+        },
         changePage: function () {}, fitWidth: function () {}, zoomBy: function () {}, toggleTranslate: function () {},
         openDrawer: function () { try { RC.sidedrawer.open("asst"); } catch (e) {} },
         switchTab: function (n) { try { RC.sidedrawer.open(n); } catch (e) {} },
         asstOpen: function () { try { return !!(shadow && shadow.querySelector('.ep-side-pane[data-pane="asst"].active')); } catch (e) { return false; } },
-        voiceContext: function () { return null; },
+        voiceContext: function () { return WebAdapter.getContext(); },
         setFocusSel: function (t) { try { window.__focusSel = t ? { text: t } : null; } catch (e) {} },
         focusSel: function () { return window.__focusSel || null; },
         clearFigFocus: function () {}, figThumb: function () {},
@@ -144,7 +179,6 @@
         prewarm: function (off) { try { bwFetch("/api/assistant/prewarm", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(off ? { off: 1 } : {}) }); } catch (e) {} },
         getPaidNoted: function () { return !!window.__paidNoted; }, setPaidNoted: function (v) { window.__paidNoted = v; },
         showAction: function () { return null; }, queueAction: function () {}, taskAction: function () {},
-        voiceLog: function () {},
         // [挂载] rc-assistant.mountPdfSidebar 的容器钩子 → 扩展 Shadow DOM 里的抽屉
         mountPanel: function () { return shadow ? shadow.getElementById("ep-side") : null; },
         mountTabs: function () { return shadow ? shadow.getElementById("ep-side-tabs") : null; }

@@ -30,7 +30,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config  # noqa: E402
-sys.path.insert(0, str(config.PROJECT_DIR / "_client" / "core"))
+_CODE_ROOT = Path(__file__).resolve().parents[2]
+sys.path.insert(0, str(_CODE_ROOT / "_client" / "core"))
 from ai_backends import make_backend  # noqa: E402
 
 

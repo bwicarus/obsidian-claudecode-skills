@@ -19,6 +19,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config  # noqa: E402
 import attention_profile as AP  # noqa: E402
+from concept_node_service import stable_node_id  # noqa: E402
 
 KG_DIR = config.PROJECT_DIR / "knowledge_graph"
 EMERGENT = config.PROJECT_DIR / "state" / "attention" / "emergent-graph.json"
@@ -50,6 +51,7 @@ def build(write=False):
     rejected = set()   # 被否决的 emergent key(节点剔除 + 级联剔边)
     # authored_ref("book#nodeid") → 统一图节点 id,用于 emergent 边锚点重映射
     authored_id_by_ref = {}
+    authored_node_by_ref = {}
 
     # 1) 折入 authored KG(命名空间 <book>::<id>)
     for p in _real_kgs():
@@ -71,6 +73,7 @@ def build(write=False):
             un["src_id"] = str(nid)
             nodes.append(un)
             authored_id_by_ref["%s#%s" % (book, nid)] = un["id"]
+            authored_node_by_ref["%s#%s" % (book, nid)] = un
         for e in kg.get("edges", []):
             if not e.get("from") or not e.get("to"):
                 continue
@@ -79,17 +82,34 @@ def build(write=False):
                           "evidence": e.get("evidence", ""), "origin": "authored", "confirmed": True})
 
     # 2) emergent:新节点 + 合成 subject 章节;anchor(已在树)不新建,记它的 authored 统一 id
-    key2uid = {}   # emergent key → 统一图 node id(新节点=em::key;anchor=对应 authored id)
+    key2uid = {}   # emergent key → 统一图 node id(新节点=持久 node.id;anchor=对应 authored id)
     subj_l0 = {}
     try:
         g = json.loads(EMERGENT.read_text("utf-8"))
     except Exception:
         g = {"nodes": {}, "edges": []}
     for key, n in g.get("nodes", {}).items():
+        if not isinstance(n, dict) or n.get("deleted") or n.get("tombstone"):
+            rejected.add(key)
+            continue
+        persisted_id = str(n.get("id") or stable_node_id(key))
+        _cf = conf_nodes.get(persisted_id, conf_nodes.get(key))
         if n.get("in_authored_kg") and n.get("authored_ref") in authored_id_by_ref:
             key2uid[key] = authored_id_by_ref[n["authored_ref"]]     # anchor → 已有 authored 节点
+            authored_node = authored_node_by_ref.get(n["authored_ref"])
+            if authored_node is not None:
+                authored_node["emergent_provenance"] = list(n.get("provenance") or [])
+                authored_node["emergent_key"] = key
+                pages = set(authored_node.get("pages") or [])
+                for evidence in n.get("provenance") or []:
+                    try:
+                        source_page = int(evidence.get("page") or 0)
+                    except (TypeError, ValueError):
+                        source_page = 0
+                    if source_page > 0:
+                        pages.add(source_page)
+                authored_node["pages"] = sorted(pages)
             continue
-        _cf = conf_nodes.get(key)
         if _cf is False:              # 用户否决 → 从图剔除(级联剔边),也不建空章节
             rejected.add(key)
             continue
@@ -104,7 +124,7 @@ def build(write=False):
             nodes.append(dict(_chap, id=l0, level=0, name=subj, parent_id=""))
             nodes.append(dict(_chap, id=l1, level=1, name=subj, parent_id=l0))
             subj_l0[subj] = l1
-        uid = "em::" + key
+        uid = persisted_id
         key2uid[key] = uid
         nodes.append({"id": uid, "key": key, "level": 2, "name": n.get("surface") or key,
                       "parent_id": subj_l0[subj], "pages": [],
@@ -140,7 +160,7 @@ def build(write=False):
         if e.get("origin") == "emergent" and e.get("kind") == "prereq"            and e.get("status") in ("audited", "user_confirmed"):
             eff_pre.setdefault(e["to"], []).append(e["from"])
     for n in nodes:
-        if not str(n.get("id", "")).startswith("em::") or n.get("level") != 2:
+        if n.get("origin") != "emergent" or n.get("level") != 2:
             continue
         prs = eff_pre.get(n["id"], [])
         blocked = any((id2u.get(pid) or {}).get("progress") not in ("in_progress", "mastered")
@@ -189,8 +209,12 @@ if __name__ == "__main__":
         print("  books facet:", m["books"])
         print("  subjects facet:", m["subjects"])
         # 抽查:emergent 新概念挂进 authored 的跨源边
+        emergent_ids = {
+            n["id"] for n in r["nodes"]
+            if n.get("origin") == "emergent" and n.get("level") == 2
+        }
         cross = [e for e in r["edges"] if e["origin"] == "emergent"
-                 and (e["from"].startswith("em::") != e["to"].startswith("em::"))]
+                 and ((e["from"] in emergent_ids) != (e["to"] in emergent_ids))]
         id2 = {n["id"]: n.get("name") for n in r["nodes"]}
         print("  跨源边(emergent 新概念↔authored 骨架):")
         for e in cross[:8]:

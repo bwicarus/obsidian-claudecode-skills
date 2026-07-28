@@ -9,28 +9,189 @@ register_html_reader 注入(safe_vault_path/obsidian_root/claude_dir),避免循�
 用法(pdf_reader.py):
     from html_reader import register_html_reader
     register_html_reader(bp, safe_vault_path=_safe_vault_path,
-                         obsidian_root=OBSIDIAN_ROOT, claude_dir=CLAUDE_DIR)
+                         obsidian_root=OBSIDIAN_ROOT, claude_dir=CLAUDE_DIR,
+                         asset_cache_version=_static_asset_version,
+                         pdf_reader_js_v=_reader_js_v,
+                         pdf_shared_js_v=_pdf_shared_js_v,
+                         reader_sidecar_path=_reader_sidecar_path,
+                         reader_sidecar_lock=_reader_sidecar_edit_lock)
 路由:GET /pdf/html/view(?file=<vault-rel .html/.md>,无 file → 内置 sample)
      GET/POST/PATCH/DELETE /pdf/api/html-highlights(字符偏移锚 sidecar CRUD)
 部署:cp 本文件到 /home/bwicarus/webapp/(跟 pdf_reader.py 同目录)+ restart webapp。
 """
 import hashlib
+import importlib
 import json
 import os
+import secrets
 import time
 import uuid
+from contextlib import contextmanager
 from pathlib import Path
 
 import re
 import threading
-from flask import abort, jsonify, make_response, redirect, render_template, request, session, Response
-from urllib.parse import quote as _q, quote, urljoin, urlparse, parse_qs
+from flask import abort, current_app, g, jsonify, make_response, redirect, render_template, request, session, Response
+from urllib.parse import quote as _q, quote, urljoin, urlparse, parse_qs, parse_qsl, urlencode
 from html import escape as _hesc
+from web_proxy_cap import (
+    MAX_RESOURCE_BYTES_PER_RESPONSE,
+    WebProxyCapBudgetRegistry,
+    canonical_web_proxy_origin,
+    issue_web_proxy_cap,
+    normalize_web_proxy_origin,
+    normalize_web_proxy_scope,
+    verify_web_proxy_cap_details,
+    web_proxy_cap_matches_url,
+)
+from rbi_access import (
+    issue_rbi_ticket,
+    load_rbi_ticket_secret,
+    public_network_url_error,
+    verify_rbi_ticket,
+)
+from web_cookie_store import (
+    cookie_hosts,
+    cookie_values_for_url,
+    load_cookie_store,
+    put_cookie_header,
+    remove_cookie_host,
+    save_cookie_store,
+    update_cookie_values_for_url,
+)
+from web_cache_store import (
+    normalize_user_id as normalize_cache_user_id,
+    read_web_cache,
+    web_cache_path,
+    write_web_cache,
+)
 
 # register_html_reader 注入(模块 import 时为 None,注册后可用)
 _safe_vault_path = None   # callable: vault 相对路径 → 安全绝对 Path 或 None
 _OBSIDIAN_ROOT = None     # Path: vault 根
+_CLAUDE_DIR = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"))
 _HTML_HL_DIR = None       # Path: state/html-highlights/(高亮 sidecar 目录)
+_HTML_HL_USER_DIR = None  # Path: state/html-highlights-by-user/<uid>/
+_HTML_HL_ACCOUNT_PATH = None  # callable(*parts): 经验证账户的统一 sidecar 路径
+_HTML_HL_ACCOUNT_LOCK = None  # callable(dataset,key): owner 分区的跨进程 RMW 锁
+_HTML_HL_FALLBACK_LOCK = threading.RLock()  # 仅 standalone/单测兼容模式
+_WEB_JP_TAGGER = None     # 网页句子总词数(日语):fugashi 常驻，镜像 PDF 的句级判定
+_WEB_JP_TAGGER_TRIED = False
+_WEB_CJK_MATCHER_KEY = None
+_WEB_CJK_MATCHER = None
+_WEB_CJK_MATCHER_LOCK = threading.Lock()
+_ASSET_CACHE_VERSION = None  # callable:静态逻辑路径列表 → 可靠 cache-bust 指纹
+_PDF_READER_JS_V = None      # callable:PDF 壳 reader.js 指纹(/web/live 复用)
+_PDF_SHARED_JS_V = None      # callable:PDF 壳共享资源指纹(/web/live 复用)
+_RBI_TICKET_SECRET = None    # standalone RBI WS 与 Flask 共享的持久短期票密钥
+_WEB_PROXY_BUDGETS = WebProxyCapBudgetRegistry()
+_PWA_WEB_READER_RETIRED = "pwa_web_reader_retired"
+
+
+class _WebCjkMatcher:
+    """Single-pass matcher preserving the former longest-first semantics.
+
+    The old route ran ``re.finditer`` once per vocabulary form and sentence.
+    The input order is already longest-first; retaining each form's rank and
+    resolving candidates in rank order therefore produces the exact same
+    overlap decisions without rescanning the sentence hundreds of times.
+    """
+
+    __slots__ = ("_root",)
+
+    def __init__(self, words):
+        root = {}
+        for rank, raw_word in enumerate(words):
+            word = str(raw_word or "")
+            if not word:
+                continue
+            node = root
+            for char in word:
+                node = node.setdefault(char, {})
+            node.setdefault(None, []).append((rank, word))
+        self._root = root
+
+    def find_nonoverlapping(self, text):
+        text = str(text or "")
+        candidates = []
+        for start in range(len(text)):
+            node = self._root
+            for end in range(start, len(text)):
+                node = node.get(text[end])
+                if node is None:
+                    break
+                for rank, word in node.get(None, ()):
+                    candidates.append((rank, start, end + 1, word))
+
+        # rank is the former outer-loop order: longest forms first, then the
+        # stable vocabulary-index order.  start mirrors re.finditer's order
+        # within one form.  This deliberately is not merely leftmost-first.
+        candidates.sort(key=lambda item: (item[0], item[1]))
+        occupied = bytearray(len(text))
+        accepted = []
+        next_start_by_rank = {}
+        for _rank, start, end, word in candidates:
+            # ``re.finditer`` never reports overlapping occurrences of the
+            # same form, even when an earlier occurrence is later rejected
+            # because a longer form already owns part of its range.
+            if start < next_start_by_rank.get(_rank, 0):
+                continue
+            next_start_by_rank[_rank] = end
+            if any(occupied[start:end]):
+                continue
+            occupied[start:end] = b"\x01" * (end - start)
+            accepted.append((start, end, word))
+        return accepted
+
+
+def _web_cjk_matcher(words):
+    """Return an immutable matcher cached by the current unmastered-form set."""
+    global _WEB_CJK_MATCHER_KEY, _WEB_CJK_MATCHER
+    key = tuple(words or ())
+    if _WEB_CJK_MATCHER_KEY == key and _WEB_CJK_MATCHER is not None:
+        return _WEB_CJK_MATCHER
+    with _WEB_CJK_MATCHER_LOCK:
+        if _WEB_CJK_MATCHER_KEY != key or _WEB_CJK_MATCHER is None:
+            _WEB_CJK_MATCHER = _WebCjkMatcher(key)
+            _WEB_CJK_MATCHER_KEY = key
+        return _WEB_CJK_MATCHER
+
+
+def _retired_web_response():
+    """PWA 不再代浏览器抓取、代理或远程渲染第三方网页。"""
+    response = jsonify({
+        "ok": False,
+        "error": _PWA_WEB_READER_RETIRED,
+        "replacement": "browser_extension",
+    })
+    response.status_code = 410
+    response.headers["Cache-Control"] = "no-store"
+    return response
+
+
+def _retired_web_redirect_target(value: str) -> str:
+    """Validate a legacy /web/live target without dereferencing it server-side."""
+    raw = str(value or "").strip()
+    if not raw or len(raw) > 8192:
+        return ""
+    if any(ord(ch) < 0x20 or ord(ch) == 0x7F for ch in raw):
+        return ""
+    # Backslashes are interpreted inconsistently by browsers and URL parsers;
+    # credentials are unnecessary for a browser hand-off and may leak in logs.
+    if "\\" in raw:
+        return ""
+    try:
+        parsed = urlparse(raw)
+        if parsed.scheme.lower() not in ("http", "https"):
+            return ""
+        if not parsed.netloc or not parsed.hostname:
+            return ""
+        if parsed.username is not None or parsed.password is not None:
+            return ""
+        parsed.port  # force validation of malformed/out-of-range ports
+    except (TypeError, ValueError):
+        return ""
+    return raw
 
 # 内置 sample(无 file 时渲它,方便验收):中英文混排 + 若干英文词够测选区/查词/翻译/高亮。
 _HTML_SAMPLE = """
@@ -63,20 +224,78 @@ _HTML_DROP = ["script", "style", "iframe", "object", "embed", "link", "meta",
               "noscript", "head", "form", "input", "button", "svg", "video", "audio"]
 
 
+_HTML_CACHE_ASSETS = (
+    "pdf/rc-core.js",
+    "reader-runtime/book-host.js",
+    "reader-runtime/account-context.js",
+    "reader-runtime/interaction-policy.js",
+    "reader-runtime/document-host.js",
+    "reader-runtime/context-selection-registry.js",
+    "reader-runtime/data-store.js",
+    "reader-runtime/indexeddb-store.js",
+    "reader-runtime/data-registry.js",
+    "reader-runtime/sync-owner-lease.js",
+    "reader-runtime/sync-gateway.js",
+    "reader-runtime/server-sync-transport.js",
+    "reader-runtime/direct-sync-protocol.js",
+    "reader-runtime/direct-sync-signal-transport.js",
+    "reader-runtime/sync-coordinator.js",
+    "reader-runtime/sync-runtime.js",
+    "reader-runtime/sync-conflict-control.js",
+    "reader-runtime/direct-sync-host.js",
+    "reader-runtime/direct-sync-leader.js",
+    "reader-runtime/vocabulary-state.js",
+    "reader-runtime/computer-voice-webrtc.js",
+    "reader-runtime/preference-store.js",
+    "reader-runtime/storage-router.js",
+    "reader-runtime/runtime-selector.js",
+    "reader-runtime/legacy-rc-bridge.js",
+    "reader-runtime/pwa-service-bridge.js",
+    "reader-runtime/pwa-runtime.js",
+    "pdf/rc-ui.js",
+    "pdf/rc-flashcard.js",
+    "pdf/rc-review.js",
+    "pdf/rc-md.js",
+    "pdf/rc-highlight.js",
+    "pdf/rc-snippets.js",
+    "pdf/rc-result.js",
+    "pdf/rc-wordpop.js",
+    "pdf/rc-assistant.js",
+    "pdf/rc-settings.js",
+    "pdf/rc-sidedrawer.js",
+    "pdf/rc-toolchip.js",
+    "pdf/rc-turncard.js",
+    "pdf/rc-voicectx.js",
+    "pdf/rc-computer-voice.js",
+    "pdf/rc-voicecall.js",
+    "pdf/rc-phrasepop.js",
+    "pdf/html-reader.js",
+    "pdf/pwa-extension-bridge.js",
+)
+_WEB_ADAPTER_CACHE_ASSETS = ("pdf/web-adapter.js",)
+_RBI_LIVE_CACHE_ASSETS = ("pdf/rrweb-record.umd.js",)
+
+
+def _cache_version(asset_names) -> str:
+    """调用 PDF 域注入的唯一静态指纹实现；注册前仅供导入期安全兜底。"""
+    if _ASSET_CACHE_VERSION is None:
+        return "1"
+    return _ASSET_CACHE_VERSION(asset_names)
+
+
 def _html_js_v():
-    """统一 HTML 阅读器静态(html-reader.js + 全套 rc-*)的 cache-bust 版本 = 各文件 mtime 最大值。
-    跟 _epub_js_v 同构,只是把 epub 驱动换成 html-reader.js;rc-* 共享层任一改动也会 bust。"""
-    mt = 0
-    for name in ("html-reader.js", "rc-core.js", "rc-md.js", "rc-highlight.js",
-                 "rc-snippets.js", "rc-result.js", "rc-wordpop.js", "rc-settings.js",
-                 "rc-sidedrawer.js", "rc-phrasepop.js", "rc-assistant.js"):   # rc-assistant:2026-07-06 体检补(模板加载它却不在清单,immutable 下改它不 bust)
-        for base in ("/var/www/html/static/pdf",
-                     str(Path(__file__).resolve().parent / "static" / "pdf")):
-            try:
-                mt = max(mt, int(os.path.getmtime(os.path.join(base, name)))); break
-            except Exception:
-                continue
-    return str(mt or 1)
+    """统一 HTML 阅读器模板所加载的全部版本化资源指纹。"""
+    return _cache_version(_HTML_CACHE_ASSETS)
+
+
+def _web_adapter_js_v():
+    """PDF 壳内实况网页 adapter 的独立指纹。"""
+    return _cache_version(_WEB_ADAPTER_CACHE_ASSETS)
+
+
+def _rbi_live_js_v():
+    """RBI 实况页脚本的独立指纹。"""
+    return _cache_version(_RBI_LIVE_CACHE_ASSETS)
 
 
 def _md_to_html(text: str) -> str:
@@ -122,21 +341,123 @@ def _sanitize_html_doc(raw: str) -> str:
 
 # ── HTML 阅读器高亮 sidecar(字符偏移锚,独立 state/html-highlights/<sha>.json;照搬 epub-highlights 形态)──
 
-def _html_hl_path(rel: str) -> Path:
+def _html_hl_user_id(user_id: str | int | None = None) -> str:
+    return normalize_cache_user_id(_px_uid() if user_id is None else user_id)
+
+
+def _html_hl_path(
+    rel: str,
+    *,
+    user_id: str | int | None = None,
+    legacy: bool = False,
+) -> Path | None:
     key = rel or "__html_sample__"
-    return _HTML_HL_DIR / (hashlib.sha1(key.encode("utf-8")).hexdigest()[:16] + ".json")
+    name = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16] + ".json"
+    if legacy:
+        return (_HTML_HL_DIR / name) if _HTML_HL_DIR else None
+    if _HTML_HL_ACCOUNT_PATH is not None:
+        if user_id is not None:
+            raise PermissionError(
+                "生产 HTML 高亮路径只接受已认证账户上下文，不能按显式 uid 推断"
+            )
+        # 注入回调由统一 reader_sidecar_store 完成身份校验、旧数据认领，
+        # 并保证结果位于 by-user/<uid>/html-highlights/。解析失败必须向上
+        # 抛出，不能退回旧共享目录。
+        return Path(_HTML_HL_ACCOUNT_PATH("html-highlights", name))
+    uid = _html_hl_user_id(user_id)
+    if not uid or not _HTML_HL_USER_DIR:
+        return None
+    root = Path(_HTML_HL_USER_DIR).resolve()
+    account = (root / uid).resolve()
+    if account.parent != root:
+        return None
+    return account / name
 
 
-def _html_hl_load(rel: str) -> list:
+def _html_hl_load(
+    rel: str,
+    *,
+    user_id: str | int | None = None,
+) -> list:
+    """Load account data.
+
+    注册统一账户路径后只读取该路径；旧共享数据由 reader_sidecar_store
+    一次性复制认领。环境变量 owner 回退仅保留给未注册的独立模块模式。
+    """
+    if _HTML_HL_ACCOUNT_PATH is not None:
+        current = _html_hl_path(rel, user_id=user_id)
+        try:
+            data = json.loads(current.read_text("utf-8"))
+        except FileNotFoundError:
+            return []
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict) and isinstance(data.get("highlights"), list):
+            return data["highlights"]
+        raise ValueError(
+            f"invalid HTML highlight sidecar JSON shape: {current.name}"
+        )
+    uid = _html_hl_user_id(user_id)
+    current = _html_hl_path(rel, user_id=user_id)
+    legacy = (
+        _html_hl_path(rel, legacy=True)
+        if uid and os.environ.get("READER_LEGACY_HTML_HIGHLIGHT_OWNER_UID") == uid
+        else None
+    )
+    paths = (current, legacy)
+    for path in paths:
+        if path is None:
+            continue
+        try:
+            data = json.loads(path.read_text("utf-8"))
+        except Exception:
+            continue
+        if isinstance(data, list):
+            return data
+        if isinstance(data, dict) and isinstance(data.get("highlights"), list):
+            return data["highlights"]
+    return []
+
+
+def _html_hl_save(
+    rel: str,
+    items: list,
+    *,
+    user_id: str | int | None = None,
+):
+    path = _html_hl_path(rel, user_id=user_id)
+    if path is None:
+        raise ValueError("HTML 高亮缺少已认证用户上下文")
+    if _HTML_HL_ACCOUNT_PATH is not None:
+        from reader_sidecar_store import atomic_write_json
+
+        atomic_write_json(path, items, indent=None)
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
     try:
-        return json.loads(_html_hl_path(rel).read_text("utf-8"))
-    except Exception:
-        return []
+        tmp.write_text(json.dumps(items, ensure_ascii=False), "utf-8")
+        tmp.replace(path)
+    finally:
+        try:
+            tmp.unlink()
+        except FileNotFoundError:
+            pass
 
 
-def _html_hl_save(rel: str, items: list):
-    _HTML_HL_DIR.mkdir(parents=True, exist_ok=True)
-    _html_hl_path(rel).write_text(json.dumps(items, ensure_ascii=False), "utf-8")
+@contextmanager
+def _html_hl_edit(rel: str):
+    """Yield the latest list while holding the document's mutation lease."""
+    if _HTML_HL_ACCOUNT_PATH is not None:
+        if not callable(_HTML_HL_ACCOUNT_LOCK):
+            raise RuntimeError("HTML 高亮账户存储缺少统一写锁")
+        lease = _HTML_HL_ACCOUNT_LOCK("html-highlights", rel or "__html_sample__")
+    else:
+        lease = _HTML_HL_FALLBACK_LOCK
+    with lease:
+        items = _html_hl_load(rel)
+        yield items
+        _html_hl_save(rel, items)
 
 
 # ── 网页抓取 → 阅读器(2026-07-19,用户方向:浏览器 Copilot 的初版验证)────────────
@@ -150,25 +471,79 @@ _PRIVATE_NETS = ("127.", "10.", "192.168.", "169.254.", "0.")
 
 def _url_safe(url: str) -> str:
     """SSRF 防护:只放行公网 http(s)。返回错误串,空=安全。"""
-    from urllib.parse import urlparse
-    import socket, ipaddress
+    return public_network_url_error(url)
+
+
+def _public_http_open(
+    url: str,
+    *,
+    headers: dict | None = None,
+    timeout: int = 20,
+):
+    """Anonymous requests transport with a public-network check on every hop."""
+    import requests
+
+    sess = requests.Session()
+    current = str(url or "")
     try:
-        u = urlparse(url)
+        for hop in range(6):
+            error = _url_safe(current)
+            if error:
+                raise ValueError(f"blocked URL: {error}")
+            response = sess.get(
+                current,
+                timeout=timeout,
+                stream=True,
+                headers=headers or {},
+                allow_redirects=False,
+            )
+            location = str(response.headers.get("Location") or "").strip()
+            if response.status_code not in (301, 302, 303, 307, 308) or not location:
+                return sess, response
+            if hop >= 5:
+                response.close()
+                raise ValueError("too many redirects")
+            next_url = urljoin(str(getattr(response, "url", "") or current), location)
+            error = _url_safe(next_url)
+            response.close()
+            if error:
+                raise ValueError(f"blocked redirect: {error}")
+            current = next_url
     except Exception:
-        return "URL 无法解析"
-    if u.scheme not in ("http", "https"):
-        return "只支持 http/https"
-    host = (u.hostname or "").lower()
-    if not host or host in ("localhost",) or host.endswith((".local", ".ts.net", ".internal")):
-        return "不允许内网地址"
+        sess.close()
+        raise
+
+
+def _public_http_text(
+    url: str,
+    *,
+    headers: dict | None = None,
+    timeout: int = 20,
+    max_bytes: int = 8 * 1024 * 1024,
+) -> tuple[str, str]:
+    """Fetch anonymous public HTML with bounded bytes and safe redirects."""
+    sess, response = _public_http_open(url, headers=headers, timeout=timeout)
     try:
-        for ai in socket.getaddrinfo(host, None):
-            ip = ipaddress.ip_address(ai[4][0])
-            if ip.is_private or ip.is_loopback or ip.is_link_local or ip.is_reserved:
-                return "不允许内网地址"
-    except Exception:
-        return "域名解析失败"
-    return ""
+        response.raise_for_status()
+        raw = b""
+        for chunk in response.iter_content(65536):
+            raw += chunk
+            if len(raw) > max_bytes:
+                raise ValueError(f"页面超过 {max_bytes // (1024 * 1024)}MB")
+        encoding = str(getattr(response, "encoding", "") or "")
+        if not encoding or encoding.lower() == "iso-8859-1":
+            match = re.search(rb'charset=["\']?([\w-]+)', raw[:4096], re.I)
+            encoding = match.group(1).decode("ascii", "ignore") if match else "utf-8"
+        try:
+            text = raw.decode(encoding, errors="replace")
+        except LookupError:
+            text = raw.decode("utf-8", errors="replace")
+        return text, str(getattr(response, "url", "") or url)
+    finally:
+        try:
+            response.close()
+        finally:
+            sess.close()
 
 
 def _fetch_web_page(url: str) -> dict:
@@ -176,20 +551,12 @@ def _fetch_web_page(url: str) -> dict:
     err = _url_safe(url)
     if err:
         return {"ok": False, "error": err}
-    import requests
     try:
-        r = requests.get(url, timeout=20, stream=True, headers={
+        html_raw, _final_url = _public_http_text(url, timeout=20, headers={
             "User-Agent": "Mozilla/5.0 (X11; Linux aarch64) AppleWebKit/537.36 (KHTML, like Gecko) "
                           "Chrome/126.0 Safari/537.36",
-            "Accept-Language": "zh-CN,zh;q=0.9,ja;q=0.8,en;q=0.7"})
-        r.raise_for_status()
-        raw = b""
-        for chunk in r.iter_content(65536):
-            raw += chunk
-            if len(raw) > 8 * 1024 * 1024:
-                return {"ok": False, "error": "页面超过 8MB"}
-        enc = r.encoding if (r.encoding and r.encoding.lower() != "iso-8859-1") else (r.apparent_encoding or "utf-8")
-        html_raw = raw.decode(enc, errors="replace")
+            "Accept-Language": "zh-CN,zh;q=0.9,ja;q=0.8,en;q=0.7",
+        }, max_bytes=8 * 1024 * 1024)
     except Exception as ex:
         return {"ok": False, "error": f"抓取失败:{str(ex)[:120]}"}
     try:
@@ -331,13 +698,17 @@ def video_embed(url: str) -> str:
 # 实测:`?url=` 形态下文档地址是 /pdf/web/proxy,页面里任何**文档相对**地址(webpack 动态 chunk
 # 最典型)都会解析成 /pdf/web/app-runtime.xxx.css 打到我们身上 → github 118 / stackoverflow 407 条
 # 404。改成把真实地址镜进路径(Ultraviolet 同思路),相对解析天然落回原站结构,这一整类一次性消失。
-def _mirror(prefix: str, u: str) -> str:
+def _mirror(prefix: str, u: str, cap: str = "") -> str:
     try:
         p = urlparse(u)
         path = p.path or "/"
         out = f"/pdf/web/{prefix}/{p.scheme}/{p.netloc}{quote(path, safe='/@:+~!$&*,;=()')}"
-        if p.query:
-            out += "?" + p.query
+        query = [(k, v) for k, v in parse_qsl(p.query, keep_blank_values=True)
+                 if k != "__bwcap"]
+        if cap:
+            query.append(("__bwcap", cap))
+        if query:
+            out += "?" + urlencode(query, doseq=True)
         return out
     except Exception:
         return u
@@ -349,19 +720,21 @@ def unmirror(rest: str, query: str) -> str:
     if len(bits) < 2 or bits[0] not in ("http", "https"):
         return ""
     u = f"{bits[0]}://{bits[1]}/" + (bits[2] if len(bits) > 2 else "")
-    if query:
-        u += "?" + query
+    clean_query = [(k, v) for k, v in parse_qsl(query or "", keep_blank_values=True)
+                   if k != "__bwcap"]
+    if clean_query:
+        u += "?" + urlencode(clean_query, doseq=True)
     return u
 
 
-def _pxr(u: str) -> str:
+def _pxr(u: str, cap: str = "") -> str:
     """资源 → 子资源代理(路径镜像:JS 模块的 ./相对导入、CSS 的 ../ 也才解析得对)。"""
-    return _mirror("r", u)
+    return _mirror("r", u, cap)
 
 
-def _pxp(u: str) -> str:
+def _pxp(u: str, cap: str = "") -> str:
     """页面 → 主文档代理。"""
-    return _mirror("p", u)
+    return _mirror("p", u, cap)
 
 
 def _absu(u: str, base: str) -> str:
@@ -378,14 +751,14 @@ _CSS_URL = re.compile(r"""url\(\s*(['"]?)([^'")]+)\1\s*\)""", re.I)
 _CSS_IMP = re.compile(r"""@import\s+(['"])([^'"]+)\1""", re.I)
 
 
-def _rewrite_css(css: str, base: str) -> str:
+def _rewrite_css(css: str, base: str, cap: str = "") -> str:
     def _u(m):
         a = _absu(m.group(2), base)
-        return f"url({m.group(1)}{_pxr(a)}{m.group(1)})" if a else m.group(0)
+        return f"url({m.group(1)}{_pxr(a, cap)}{m.group(1)})" if a else m.group(0)
 
     def _i(m):
         a = _absu(m.group(2), base)
-        return f"@import {m.group(1)}{_pxr(a)}{m.group(1)}" if a else m.group(0)
+        return f"@import {m.group(1)}{_pxr(a, cap)}{m.group(1)}" if a else m.group(0)
 
     return _CSS_IMP.sub(_i, _CSS_URL.sub(_u, css))
 
@@ -402,11 +775,11 @@ _STYLE_TAG = re.compile(r"(<style\b[^>]*>)(.*?)(</style>)", re.I | re.S)
 _INTEGRITY = re.compile(r"""\s(?:integrity|nomodule)\s*=\s*(["'])[^"']*\1""", re.I)
 
 
-def rewrite_html(html: str, base: str) -> str:
+def rewrite_html(html: str, base: str, cap: str = "") -> str:
     """把页面里所有资源/导航 URL 重写到我们的代理(取代 <base href>——那个正是跨源被挡的根因)。"""
     def _res(m):
         a = _absu(m.group(3), base)
-        return f"{m.group(1)}{m.group(2)}{_pxr(a)}{m.group(2)}" if a else m.group(0)
+        return f"{m.group(1)}{m.group(2)}{_pxr(a, cap)}{m.group(2)}" if a else m.group(0)
 
     def _nav(m):
         # <a>/<form> 只绝对化、**不**代理:点击由注入脚本拦截后 postMessage 给外壳(它按真实地址走);
@@ -418,7 +791,7 @@ def rewrite_html(html: str, base: str) -> str:
         a = _absu(m.group(3), base)
         if not a:
             return m.group(0)
-        u = a if any(h in a for h in _EMBED_HOSTS) else _pxp(a)   # 官方 embed 直连
+        u = a if any(h in a for h in _EMBED_HOSTS) else _pxp(a, cap)   # 官方 embed 直连
         return f"{m.group(1)}{m.group(2)}{u}{m.group(2)}"
 
     def _ss(m):
@@ -429,7 +802,7 @@ def rewrite_html(html: str, base: str) -> str:
                 continue
             bits = part.split(None, 1)
             a = _absu(bits[0], base)
-            out.append((_pxr(a) if a else bits[0]) + ((" " + bits[1]) if len(bits) > 1 else ""))
+            out.append((_pxr(a, cap) if a else bits[0]) + ((" " + bits[1]) if len(bits) > 1 else ""))
         return f"{m.group(1)}{m.group(2)}{', '.join(out)}{m.group(2)}"
 
     html = _INTEGRITY.sub(" ", html)          # SRI 会因我们改写 CSS 而失败,必须剥
@@ -437,8 +810,8 @@ def rewrite_html(html: str, base: str) -> str:
     html = _RES_ATTR.sub(_res, html)
     html = _NAV_ATTR.sub(_nav, html)
     html = _SRCSET.sub(_ss, html)
-    html = _STYLE_ATTR.sub(lambda m: f"{m.group(1)}{m.group(2)}{_rewrite_css(m.group(3), base)}{m.group(2)}", html)
-    html = _STYLE_TAG.sub(lambda m: m.group(1) + _rewrite_css(m.group(2), base) + m.group(3), html)
+    html = _STYLE_ATTR.sub(lambda m: f"{m.group(1)}{m.group(2)}{_rewrite_css(m.group(3), base, cap)}{m.group(2)}", html)
+    html = _STYLE_TAG.sub(lambda m: m.group(1) + _rewrite_css(m.group(2), base, cap) + m.group(3), html)
     return html
 
 
@@ -448,12 +821,13 @@ def rewrite_html(html: str, base: str) -> str:
 # 满了就 503——掉一张图,远好过全站宕机。
 _RES_GATE = threading.Semaphore(10)
 
-# 子资源磁盘缓存:现代站的 js/css/字体都是内容哈希命名(不可变),重复代理纯属浪费,
+# 子资源磁盘缓存:现代站的 js/字体/图片多为内容哈希命名(不可变),重复代理纯属浪费,
 # 还会招来对方限流(实测 stackoverflow 一页 100+ 请求直接 429)。命中即免舱壁免上游。
+# CSS 会嵌入短期 capability 的递归资源地址，因此绝不能写入这份跨请求持久缓存。
 RESCACHE_DIR = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude")) / "state" / "web-rescache"
 _RESCACHE_MAX = 3 * 1024 * 1024
 _RESCACHE_TTL = 7 * 86400
-_RESCACHE_CT = ("javascript", "text/css", "image/", "font/", "application/font",
+_RESCACHE_CT = ("javascript", "image/", "font/", "application/font",
                 "application/x-font", "text/javascript")
 
 
@@ -462,8 +836,21 @@ def _rescache_ok(ct: str) -> bool:
     return any(x in c for x in _RESCACHE_CT)
 
 
-def _rescache_path(url: str) -> Path:
-    return RESCACHE_DIR / (hashlib.sha1((url or "").encode("utf-8")).hexdigest() + ".bin")
+def _rescache_path(
+    url: str,
+    *,
+    user_id: str | None = None,
+    scope_origin: str | None = None,
+) -> Path:
+    """Partition proxy cache by account and the capability's full origin."""
+    uid = str(_px_uid() if user_id is None else user_id)
+    scope = (
+        _active_proxy_origin()
+        if scope_origin is None
+        else normalize_web_proxy_origin(scope_origin)
+    )
+    partitioned = "\0".join((uid, scope, str(url or "")))
+    return RESCACHE_DIR / (hashlib.sha1(partitioned.encode("utf-8")).hexdigest() + ".bin")
 
 
 def _rescache_get(url: str):
@@ -490,46 +877,109 @@ def _rescache_put(url: str, body: bytes, ct: str):
         pass
 
 
-# 整页译文缓存:逐条的文本级缓存(scripts/vocab/translate.py)本就是**永久**的,所以同一句
-# 不会重复调翻译 API;但每开一次页仍要往服务端跑一趟、逐条查文件、等一个 RTT 才出字。
-# 这里再加一层**按 URL 的整页映射**:进页面先一次性把这页译过的全取回来,命中的段落**零请求**
-# 直接渲染(重访秒出),只有没译过的才发批量请求。
-WEBTR_DIR = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude")) / "state" / "web-trcache"
-_WEBTR_TTL = 30 * 86400        # 整页映射保 30 天(逐条那层仍是永久,过期只是重新聚合一次)
-_WEBTR_MAX_ITEMS = 500
+# state/web-trcache 历史文件原样保留；运行时代码不再定位、读取或写入。
+# 正式页面级缓存完全归扩展的账户分区 IndexedDB。
+_WEB_TRANSLATE_GOOGLE_NS = "web-google-v1-gtranslate-v2"
+_WEB_TRANSLATE_DOCUMENT_HEADER = "X-BW-Translate-Document"
+_WEB_TRANSLATE_ALLOWED_KEYS = frozenset(("texts", "backend", "glossary", "mode"))
+_WEB_TRANSLATE_MAX_TEXTS = 120
+_WEB_TRANSLATE_MAX_TEXT_CHARS = 4000
+_WEB_TRANSLATE_MAX_TOTAL_CHARS = 48000
+_WEB_TRANSLATE_MAX_GLOSSARY = 40
+_WEB_TRANSLATE_UUID4_RE = re.compile(
+    r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-"
+    r"[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+)
 
 
-def _webtr_path(url: str) -> Path:
-    return WEBTR_DIR / (hashlib.sha1((url or "").encode("utf-8")).hexdigest()[:20] + ".json")
+def _parse_web_translate_request(body) -> dict:
+    """严格解析网页句子批翻请求；auto 必须在可信扩展层先解析。"""
+    if not isinstance(body, dict):
+        raise ValueError("请求体必须是 JSON 对象")
+    unknown = sorted(set(body) - _WEB_TRANSLATE_ALLOWED_KEYS)
+    if unknown:
+        raise ValueError("不支持的字段:" + ",".join(unknown))
+    raw_texts = body.get("texts")
+    if not isinstance(raw_texts, list):
+        raise ValueError("texts 必须是数组")
+    if len(raw_texts) > _WEB_TRANSLATE_MAX_TEXTS:
+        raise ValueError(f"texts 最多 {_WEB_TRANSLATE_MAX_TEXTS} 项")
+    texts = []
+    total_chars = 0
+    for raw in raw_texts:
+        if not isinstance(raw, str):
+            raise ValueError("texts 每一项都必须是字符串")
+        text = raw.strip()
+        if len(text) > _WEB_TRANSLATE_MAX_TEXT_CHARS:
+            raise ValueError(f"单句最多 {_WEB_TRANSLATE_MAX_TEXT_CHARS} 字符")
+        total_chars += len(text)
+        if total_chars > _WEB_TRANSLATE_MAX_TOTAL_CHARS:
+            raise ValueError(f"文本总量最多 {_WEB_TRANSLATE_MAX_TOTAL_CHARS} 字符")
+        texts.append(text)
+    backend = body.get("backend", "google")
+    if not isinstance(backend, str) or backend not in ("google", "ai"):
+        raise ValueError("backend 只能是 google 或 ai")
+    mode = body.get("mode", "stateless")
+    if not isinstance(mode, str) or mode not in ("stateless", "session"):
+        raise ValueError("mode 只能是 stateless 或 session")
+    if backend == "google" and mode != "stateless":
+        raise ValueError("google 只允许默认 stateless mode")
+    raw_glossary = body.get("glossary", {})
+    if not isinstance(raw_glossary, dict):
+        raise ValueError("glossary 必须是对象")
+    if len(raw_glossary) > _WEB_TRANSLATE_MAX_GLOSSARY:
+        raise ValueError(f"glossary 最多 {_WEB_TRANSLATE_MAX_GLOSSARY} 项")
+    glossary = {}
+    for raw_key, raw_value in raw_glossary.items():
+        if not isinstance(raw_key, str) or not isinstance(raw_value, str):
+            raise ValueError("glossary 的键和值都必须是字符串")
+        key, value = raw_key.strip(), raw_value.strip()
+        if not key or not value or len(key) > 120 or len(value) > 240:
+            raise ValueError("glossary 键值为空或过长")
+        glossary[key] = value
+    if backend != "ai" and glossary:
+        raise ValueError("glossary 只允许用于 ai")
+    return {
+        "texts": texts,
+        "backend": backend,
+        "glossary": glossary,
+        "mode": mode,
+    }
 
 
-def _webtr_get(url: str) -> dict:
-    if not url:
-        return {}
-    p = _webtr_path(url)
+def _parse_web_translate_document(value, *, required=False):
+    """只接受 canonical lowercase RFC 4122 UUIDv4；不宽松修复或回显敌对值。"""
+    if value is None:
+        if required:
+            raise ValueError(f"{_WEB_TRANSLATE_DOCUMENT_HEADER} 必填")
+        return None
+    if not isinstance(value, str) or not _WEB_TRANSLATE_UUID4_RE.fullmatch(value):
+        raise ValueError(f"{_WEB_TRANSLATE_DOCUMENT_HEADER} 必须是规范 UUIDv4")
     try:
-        if time.time() - p.stat().st_mtime > _WEBTR_TTL:
-            return {}
-        return (json.loads(p.read_text("utf-8")) or {}).get("items") or {}
-    except Exception:
-        return {}
+        parsed = uuid.UUID(value)
+    except (ValueError, AttributeError):
+        raise ValueError(f"{_WEB_TRANSLATE_DOCUMENT_HEADER} 必须是规范 UUIDv4")
+    if (
+        str(parsed) != value
+        or parsed.version != 4
+        or parsed.variant != uuid.RFC_4122
+    ):
+        raise ValueError(f"{_WEB_TRANSLATE_DOCUMENT_HEADER} 必须是规范 UUIDv4")
+    return value
 
 
-def _webtr_put(url: str, pairs: dict):
-    if not (url and pairs):
-        return
-    try:
-        cur = _webtr_get(url)
-        cur.update(pairs)
-        if len(cur) > _WEBTR_MAX_ITEMS:          # 只留最近的一批,别让长页把文件撑爆
-            cur = dict(list(cur.items())[-_WEBTR_MAX_ITEMS:])
-        WEBTR_DIR.mkdir(parents=True, exist_ok=True)
-        p = _webtr_path(url)
-        tmp = p.with_suffix(".tmp")
-        tmp.write_text(json.dumps({"url": url, "items": cur}, ensure_ascii=False), "utf-8")
-        tmp.replace(p)
-    except Exception:
-        pass
+def _merge_web_translate_reasons(*values):
+    reasons = []
+    for value in values:
+        for item in str(value or "").split(";"):
+            item = item.strip()
+            if item and item not in reasons:
+                reasons.append(item)
+    return ";".join(reasons)
+
+
+def _cache_user_id(user_id: str | int | None = None) -> str:
+    return normalize_cache_user_id(_px_uid() if user_id is None else user_id)
 
 
 _JARS: dict = {}     # per-user cookie jar:很多站没 cookie 直接 403/跳登录
@@ -545,78 +995,248 @@ WEBCOOKIE_DIR = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude")) 
 
 def _px_uid() -> str:
     try:
-        return str(session.get("user_id") or "anon")
+        return str(session.get("user_id") or getattr(g, "web_proxy_user_id", "") or "anon")
     except Exception:
         return "anon"
 
 
-def _cookie_store(uid: str) -> dict:
+def _proxy_cap_secret():
+    return os.environ.get("READER_WEB_PROXY_SECRET") or current_app.secret_key
+
+
+def _rbi_ticket_secret() -> bytes:
+    global _RBI_TICKET_SECRET
+    if _RBI_TICKET_SECRET is None:
+        project = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"))
+        _RBI_TICKET_SECRET = load_rbi_ticket_secret(project)
+    return _RBI_TICKET_SECRET
+
+
+def _new_rbi_ticket() -> tuple[str, int]:
+    uid = _px_uid()
+    if not uid.isdigit() or int(uid) <= 0:
+        abort(403)
+    active_user_check = current_app.config.get("READER_ACTIVE_USER_CHECK")
+    if not callable(active_user_check) or not active_user_check(int(uid)):
+        # A stale signed session must not keep minting fresh RBI credentials
+        # after its account was removed or disabled.
+        abort(403)
+    ticket = issue_rbi_ticket(_rbi_ticket_secret(), int(uid))
+    claims = verify_rbi_ticket(_rbi_ticket_secret(), ticket)
+    if claims is None:
+        abort(403)
+    return ticket, claims.expires_at
+
+
+def _url_scope_host(url: str) -> str:
     try:
-        return json.loads((WEBCOOKIE_DIR / f"{uid}.json").read_text("utf-8")) or {}
+        return normalize_web_proxy_scope(urlparse(str(url or "")).hostname or "")
+    except ValueError:
+        return ""
+
+
+def _url_scope_origin(url: str) -> str:
+    try:
+        return normalize_web_proxy_origin(url)
+    except ValueError:
+        return ""
+
+
+def _active_proxy_scope() -> str:
+    try:
+        return str(getattr(g, "web_proxy_scope_host", "") or "")
     except Exception:
-        return {}
+        return ""
+
+
+def _active_proxy_origin() -> str:
+    try:
+        scheme = str(getattr(g, "web_proxy_scope_scheme", "") or "")
+        host = str(getattr(g, "web_proxy_scope_host", "") or "")
+        port = int(getattr(g, "web_proxy_scope_port", 0) or 0)
+        if not (scheme and host and port):
+            return ""
+        return canonical_web_proxy_origin(scheme, host, port)
+    except (RuntimeError, TypeError, ValueError):
+        return ""
+
+
+def _current_proxy_cap(
+    scope_url: str,
+    *,
+    fresh: bool = False,
+    allow_rescope: bool = False,
+    require_scope_match: bool = False,
+) -> str:
+    """Reuse a scoped cap; mint/re-scope only after an explicit outer-shell grant."""
+    uid = _px_uid()
+    if not uid.isdigit() or int(uid) <= 0:
+        abort(403)
+    scope_origin = _url_scope_origin(scope_url)
+    if not scope_origin:
+        abort(403)
+    incoming = str(request.args.get("__bwcap") or "")
+    details = verify_web_proxy_cap_details(_proxy_cap_secret(), incoming)
+    if details and details.user_id == int(uid):
+        g.web_proxy_scope_host = details.scope_host
+        g.web_proxy_scope_scheme = details.scope_scheme
+        g.web_proxy_scope_port = int(details.scope_port)
+        g.web_proxy_cap_expires_at = int(details.expires_at)
+        # A bearer capability must never be able to renew itself or pivot into a
+        # fresh scope.  A session cookie may ride sandbox requests, so it is not
+        # sufficient by itself: re-scoping also needs the outer-only nav ticket.
+        scope_matches = web_proxy_cap_matches_url(details, scope_url)
+        if require_scope_match and not scope_matches and not allow_rescope:
+            abort(403)
+        if (not fresh and (scope_matches or not require_scope_match)) or not allow_rescope:
+            return incoming
+    elif not session.get("user_id") or not allow_rescope:
+        abort(403)
+
+    token = issue_web_proxy_cap(
+        _proxy_cap_secret(),
+        int(uid),
+        scope_url=scope_url,
+    )
+    minted = verify_web_proxy_cap_details(_proxy_cap_secret(), token)
+    if not minted:  # defensive: issued tokens must always verify
+        abort(403)
+    g.web_proxy_scope_host = minted.scope_host
+    g.web_proxy_scope_scheme = minted.scope_scheme
+    g.web_proxy_scope_port = int(minted.scope_port)
+    g.web_proxy_cap_expires_at = int(minted.expires_at)
+    return token
+
+
+_WEB_NAV_TICKET_SESSION_KEY = "reader_web_navigation_ticket"
+
+
+def _web_navigation_ticket() -> str:
+    value = str(session.get(_WEB_NAV_TICKET_SESSION_KEY) or "")
+    if len(value) < 32:
+        value = secrets.token_urlsafe(32)
+        session[_WEB_NAV_TICKET_SESSION_KEY] = value
+    return value
+
+
+def _valid_web_navigation_ticket() -> bool:
+    expected = str(session.get(_WEB_NAV_TICKET_SESSION_KEY) or "")
+    supplied = str(request.args.get("__bwnav") or "")
+    return bool(
+        session.get("user_id")
+        and len(expected) >= 32
+        and len(supplied) == len(expected)
+        and secrets.compare_digest(supplied, expected)
+    )
+
+
+def _cookie_store(uid: str) -> dict:
+    return load_cookie_store(WEBCOOKIE_DIR, uid)
 
 
 def _cookie_store_save(uid: str, data: dict):
     try:
-        WEBCOOKIE_DIR.mkdir(parents=True, exist_ok=True)
-        p = WEBCOOKIE_DIR / f"{uid}.json"
-        tmp = p.with_suffix(".tmp")
-        tmp.write_text(json.dumps(data, ensure_ascii=False), "utf-8")
-        try:
-            os.chmod(tmp, 0o600)        # 登录凭证:仅属主可读
-        except Exception:
-            pass
-        tmp.replace(p)
+        save_cookie_store(WEBCOOKIE_DIR, uid, data)
     except Exception:
         pass
 
 
 def _cookies_for(url: str) -> dict:
-    """当前用户在该域(含父域)导入的 cookie。"""
-    try:
-        host = (urlparse(url).hostname or "").lower()
-    except Exception:
-        return {}
-    out = {}
-    for dom, cks in _cookie_store(_px_uid()).items():
-        d = str(dom).lstrip(".").lower()
-        if isinstance(cks, dict) and (host == d or host.endswith("." + d)):
-            out.update(cks)
-    return out
+    """Return Secure imported cookies only for the exact top-level HTTPS host."""
+    return cookie_values_for_url(
+        WEBCOOKIE_DIR,
+        _px_uid(),
+        url,
+        expected_host=_active_proxy_scope(),
+    )
 
 
 def _save_resp_cookies(url: str, r):
-    """只对**用户已导入**的域回存刷新后的 cookie(延续登录 session,不囤积无关 tracking)。"""
+    """Refresh an explicitly imported exact-host HTTPS jar with safe defaults."""
     try:
-        host = (urlparse(url).hostname or "").lower()
-        ck = {}
-        for k, v in dict(getattr(r, "cookies", {}) or {}).items():
-            ck[str(k)] = str(v)
-        if not ck:
-            return
-        uid = _px_uid()
-        store = _cookie_store(uid)
-        for dom in list(store):
-            d = str(dom).lstrip(".").lower()
-            if host == d or host.endswith("." + d):
-                if isinstance(store[dom], dict):
-                    store[dom].update(ck)
-                    _cookie_store_save(uid, store)
-                return
+        update_cookie_values_for_url(
+            WEBCOOKIE_DIR,
+            _px_uid(),
+            url,
+            dict(getattr(r, "cookies", {}) or {}),
+            expected_host=_active_proxy_scope(),
+        )
     except Exception:
         pass
 
 
-def _px_open(url: str, headers: dict, timeout: int = 25):
+def _px_open(
+    url: str,
+    headers: dict,
+    timeout: int = 25,
+    *,
+    redirect_scope_origin: str = "",
+):
     """新建 curl_cffi 会话(伪装 Chrome 指纹)+ 注入用户导入的 cookie。返回 (session, response)。
     ⚠ 调用方**必须** session.close();流式则交给 _gated(it, sess)。不复用会话——curl_cffi 同会话
-    的流没读完会卡死 handle(实测),每请求独立最稳。"""
+    的流没读完会卡死 handle(实测),每请求独立最稳。
+
+    Redirects are followed manually so every hop receives the same SSRF check.
+    Top-level documents may additionally pin redirects to their signed origin.
+    """
     from curl_cffi import requests as _cr
     s = _cr.Session(impersonate=IMPERSONATE)
-    r = s.get(url, headers=headers, cookies=_cookies_for(url),
-              stream=True, timeout=timeout, allow_redirects=True)
-    return s, r
+    current = str(url or "")
+    top_scope = ""
+    if redirect_scope_origin:
+        try:
+            top_scope = normalize_web_proxy_origin(redirect_scope_origin)
+        except ValueError:
+            s.close()
+            raise ValueError("invalid proxy redirect scope") from None
+    try:
+        for hop in range(6):
+            error = _url_safe(current)
+            if error:
+                raise ValueError(f"blocked proxy URL: {error}")
+            if top_scope and _url_scope_origin(current) != top_scope:
+                raise ValueError("blocked cross-scope document redirect")
+            r = s.get(
+                current,
+                headers=headers,
+                cookies=_cookies_for(current),
+                stream=True,
+                timeout=timeout,
+                allow_redirects=False,
+            )
+            location = str(r.headers.get("Location") or "").strip()
+            if r.status_code not in (301, 302, 303, 307, 308) or not location:
+                return s, r
+            if hop >= 5:
+                try:
+                    r.close()
+                except Exception:
+                    pass
+                raise ValueError("too many proxy redirects")
+            next_url = urljoin(str(getattr(r, "url", "") or current), location)
+            # Validate before closing/following so a public open redirect can
+            # never become a request to loopback, LAN, Tailscale, or metadata.
+            error = _url_safe(next_url)
+            if error:
+                try:
+                    r.close()
+                except Exception:
+                    pass
+                raise ValueError(f"blocked proxy redirect: {error}")
+            if top_scope and _url_scope_origin(next_url) != top_scope:
+                try:
+                    r.close()
+                except Exception:
+                    pass
+                raise ValueError("blocked cross-scope document redirect")
+            try:
+                r.close()
+            except Exception:
+                pass
+            current = next_url
+    except Exception:
+        s.close()
+        raise
 
 
 def _px_headers(url: str, extra_ref: str = "") -> dict:
@@ -635,6 +1255,10 @@ def _px_headers(url: str, extra_ref: str = "") -> dict:
 _PROXY_STRIP_HEADERS = {"x-frame-options", "content-security-policy",
                         "content-security-policy-report-only", "cross-origin-opener-policy",
                         "cross-origin-embedder-policy", "frame-options"}
+_WEB_PROXY_CSP = (
+    "sandbox allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox "
+    "allow-downloads allow-modals allow-presentation; frame-ancestors 'self'"
+)
 
 _PROXY_INJECT = """
 <style>
@@ -649,6 +1273,13 @@ body { -webkit-tap-highlight-color: rgba(0,0,0,0); }
 (function(){
   if(window.__rcShim) return;   // 幂等:注入位置调整过,别让同一份 shim 装两遍
   window.__rcShim = 1;
+  var _rcName = /^bw-web-bridge:([A-Za-z0-9_-]{32,128})$/.exec(window.name || '');
+  var _rcNonce = _rcName ? _rcName[1] : '';
+  function _rcPost(payload){
+    if(!_rcNonce || !payload) return;
+    payload.__rcwebNonce = _rcNonce;
+    try{ parent.postMessage(payload, '*'); }catch(_){}
+  }
   // 站内导航拦截:链接/表单跳转改走代理(留在我们的壳里);新窗口链接也接管
   document.addEventListener('click', function(e){
     var a = e.target && e.target.closest && e.target.closest('a[href]');
@@ -663,11 +1294,11 @@ body { -webkit-tap-highlight-color: rgba(0,0,0,0); }
     try{
       var s = getSelection(); var t = s && !s.isCollapsed ? String(s).trim() : '';
       var r = t && s.rangeCount ? s.getRangeAt(0).getBoundingClientRect() : null;
-      parent.postMessage({__rcweb:'sel', text: t,
+      _rcPost({__rcweb:'sel', text: t,
         rect: r ? {left:r.left, top:r.top, right:r.right, bottom:r.bottom} : null,
         ctx: t ? (function(){ var n = s.anchorNode; n = n && (n.nodeType===3?n.parentElement:n);
                    var b = n && n.closest ? n.closest('p,li,td,blockquote,h1,h2,h3,div') : null;
-                   return b ? (b.innerText||'').slice(0,1200) : ''; })() : ''}, '*');
+                   return b ? (b.innerText||'').slice(0,1200) : ''; })() : ''});
     }catch(_){}
   }
   // 长按开始就把链接的原生拖拽/预览掐掉(iOS 的 callout 已由上面的 CSS 关掉,这里管住残余路径:
@@ -680,14 +1311,24 @@ body { -webkit-tap-highlight-color: rgba(0,0,0,0); }
   document.addEventListener('touchend', function(){ setTimeout(report, 10); });
   // 供父壳取整页正文(AI 上下文/存档)
   window.addEventListener('message', function(e){
+    if(e.source !== parent) return;
     var d = e.data || {};
     if(d.__rcweb === 'getText'){
-      try{ parent.postMessage({__rcweb:'text', text:(document.body.innerText||'').slice(0,120000),
-                               title: document.title, url: location.__realBase || ''}, '*'); }catch(_){}
+      _rcPost({__rcweb:'text', text:(document.body.innerText||'').slice(0,120000),
+               title: document.title, url: location.__realBase || ''});
     }
   });
   // ── 运行时重写 shim(服务端只能改静态 HTML;页面 JS 跑起来发的请求得在这儿接)──
   var B = location.__realBase || location.href;
+  var CAP = String(location.__rcCap || '');
+  function WITHCAP(u){
+    if(!CAP) return u;
+    try{
+      var x = new URL(u, location.href);
+      x.searchParams.set('__bwcap', CAP);
+      return x.pathname + x.search;
+    }catch(e){ return u; }
+  }
   function ABS(u){ try{ return new URL(u, B).href; }catch(e){ return null; } }
   function RES(u){
     if(u==null) return u;
@@ -699,14 +1340,68 @@ body { -webkit-tap-highlight-color: rgba(0,0,0,0); }
     try{
       var p = new URL(a);
       if(p.origin === location.origin) return u;                 // 已在我们的域内,别再套一层
-      return '/pdf/web/r/' + p.protocol.replace(':','') + '/' + p.host + p.pathname + p.search;
+      return WITHCAP('/pdf/web/r/' + p.protocol.replace(':','') + '/' + p.host + p.pathname + p.search);
     }catch(e){ return u; }
   }
   // fetch
   var _f = window.fetch;
-  // ⚠ 留一条**未被代理**的通道:我们自己注入的引擎(web-immersive)要调 /pdf/api/*,
-  //   走 patch 过的 fetch 会被当成原站相对路径翻成 /pdf/web/r/https/<原站>/pdf/api/... → 405。
-  try{ window.__rcRawFetch = _f && _f.bind(window); }catch(_){}
+  // sandbox 去掉 allow-same-origin 后，页内不能携带 App cookie。沉浸翻译只通过父壳的
+  // 三端点白名单代理；第三方脚本不能再直接调用同源账户 API。
+  var _apiPending = {}, _apiSeq = 0;
+  window.addEventListener('message', function(e){
+    if(e.source !== parent) return;
+    var d = e.data || {};
+    if(d.__rcweb !== 'api-result' || !d.id || !_apiPending[d.id]) return;
+    var pending = _apiPending[d.id];
+    delete _apiPending[d.id];
+    clearTimeout(pending.timer);
+    var p = d.payload || {};
+    var response = {
+      ok: p.ok === true,
+      status: Number(p.status) || 0,
+      headers: { get: function(name){ return String(name || '').toLowerCase() === 'content-type' ? String(p.contentType || '') : null; } },
+      text: function(){ return Promise.resolve(String(p.body || '')); },
+      json: function(){
+        try{ return Promise.resolve(JSON.parse(String(p.body || '{}'))); }
+        catch(_){ return Promise.reject(new Error(p.error || 'invalid sandbox api response')); }
+      }
+    };
+    pending.resolve(response);
+  });
+  function _rcApiFetch(input, init){
+    init = init || {};
+    var path = typeof input === 'string' ? input : (input && input.url) || '';
+    var parsed;
+    var appOrigin;
+    try{
+      appOrigin = new URL(location.href).origin;
+      parsed = new URL(path, location.href);
+    }catch(_){ return Promise.reject(new Error('invalid sandbox api url')); }
+    if(parsed.origin !== appOrigin ||
+       ['/pdf/api/web-translate','/pdf/api/web-vocab'].indexOf(parsed.pathname) < 0){
+      return Promise.reject(new Error('sandbox api not allowed'));
+    }
+    var id = 'a' + Date.now().toString(36) + (++_apiSeq).toString(36);
+    return new Promise(function(resolve, reject){
+      var timer = setTimeout(function(){
+        delete _apiPending[id];
+        reject(new Error('sandbox api timeout'));
+      }, 35000);
+      _apiPending[id] = { resolve: resolve, reject: reject, timer: timer };
+      _rcPost({
+        __rcweb:'api',
+        id:id,
+        path:parsed.pathname + parsed.search,
+        method:String(init.method || 'GET').toUpperCase(),
+        body:init.body == null ? '' : String(init.body)
+      });
+    });
+  }
+  try{
+    Object.defineProperty(window, '__rcRawFetch', {
+      value:_rcApiFetch, writable:false, configurable:false
+    });
+  }catch(_){ window.__rcRawFetch = _rcApiFetch; }
   if(_f) window.fetch = function(input, init){
     try{
       if(typeof input === 'string') input = RES(input);
@@ -743,7 +1438,7 @@ body { -webkit-tap-highlight-color: rgba(0,0,0,0); }
               if(a0 && a0.indexOf(location.origin) !== 0){
                 var emb = ['youtube.com/embed/','youtube-nocookie.com/embed/','player.bilibili.com',
                            'player.vimeo.com','open.spotify.com/embed'].some(function(h){ return a0.indexOf(h)>=0; });
-                return d.set.call(this, emb ? a0 : ('/pdf/web/p/' + a0.replace('://','/')));
+                return d.set.call(this, emb ? a0 : WITHCAP('/pdf/web/p/' + a0.replace('://','/')));
               }
               return d.set.call(this, v);
             }
@@ -797,8 +1492,8 @@ body { -webkit-tap-highlight-color: rgba(0,0,0,0); }
   //     ① submit 事件根本不触发(form.submit() 按规范就**不**派发 submit 事件);
   //     ② 导航到绝对地址 https://www.google.com/search?... → iframe 加载真谷歌 →
   //        对方 X-Frame-Options 一挡 → chrome-error 空白页(实测复现)。
-  //   所以必须把这几个程序化入口全接管。(location.href= 的 setter 无法 patch,
-  //   由服务端的 referer 兜底救回,见 _leak_rescue。)
+  //   所以必须把这几个程序化入口全接管。location.href= 的 setter 无法 patch；
+  //   漏出的请求按普通 App 路由/404 处理，绝不靠 Referer 猜来源后代签代理请求。
   // ⚠ 剥壳(实测 B站根因):页面 JS 常读 location.href(此刻=**我们的代理地址**)再跳转,
   //   若不识别就会把代理地址当外部地址**再套一层代理** → host 变成我们自己的 .ts.net →
   //   被 SSRF 判"内网" → 整页崩。任何读 location.href 跳转的站(canonical / spm 追踪)都中招。
@@ -809,8 +1504,13 @@ body { -webkit-tap-highlight-color: rgba(0,0,0,0); }
         var pp = m.pathname;                       // 无反斜杠实现,免字符串转义告警
         if(pp.indexOf('/pdf/web/p/') === 0 || pp.indexOf('/pdf/web/r/') === 0){
           var bits = pp.slice(11).split('/');      // '/pdf/web/p/'.length === 11
-          if(bits.length >= 2 && (bits[0] === 'https' || bits[0] === 'http'))
-            return bits[0] + '://' + bits[1] + '/' + bits.slice(2).join('/') + m.search;
+          if(bits.length >= 2 && (bits[0] === 'https' || bits[0] === 'http')){
+            var clean = new URLSearchParams(m.search);
+            clean.delete('__bwcap');
+            return bits[0] + '://' + bits[1] + '/' + bits.slice(2).join('/') +
+                   (clean.toString() ? ('?' + clean.toString()) : '');
+          }
+          return '';
         }
         return '';   // 我们自己的其它页面(/pdf/web/live 等)——**不是**外部导航,忽略
       }
@@ -825,8 +1525,16 @@ body { -webkit-tap-highlight-color: rgba(0,0,0,0); }
     var real = _unmirror(u);
     if(real === '') return false;           // 自引用(已是我们自己的页面)→ 忽略
     real = real || (ABS(u) || u);
-    try{ parent.postMessage({__rcweb:'located', url: real}, '*'); }catch(_){}
-    location.href = '/pdf/web/frame?url=' + encodeURIComponent(real);
+    try{
+      // 跨站导航交回可信父壳：它持有不会传播进代理页的 nav ticket，
+      // 可为新顶层 host 签发新 scope。当前 bearer cap 本身绝不换域续签。
+      if(new URL(real).origin.toLowerCase() !== new URL(B).origin.toLowerCase()){
+        _rcPost({__rcweb:'nav', url: real});
+        return true;
+      }
+    }catch(_){}
+    _rcPost({__rcweb:'located', url: real});
+    location.href = WITHCAP('/pdf/web/frame?url=' + encodeURIComponent(real));
     return true;
   }
   function _navOut(u){ return _goProxy(u); }   // form/程序化导航共用同一条可靠路径
@@ -861,10 +1569,10 @@ body { -webkit-tap-highlight-color: rgba(0,0,0,0); }
       var u = new URL(f.getAttribute('action') || B, B);
       new FormData(f).forEach(function(v,k){ u.searchParams.set(k, v); });
       e.preventDefault();
-      parent.postMessage({__rcweb:'nav', url: u.href}, '*');
+      _rcPost({__rcweb:'nav', url: u.href});
     }catch(_){}
   }, true);
-  function _ready(){ try{ parent.postMessage({__rcweb:'ready', title: document.title}, '*'); }catch(_){} }
+  function _ready(){ _rcPost({__rcweb:'ready', title: document.title}); }
   if(document.readyState === 'loading') document.addEventListener('DOMContentLoaded', _ready);
   else _ready();
 })();
@@ -873,29 +1581,42 @@ body { -webkit-tap-highlight-color: rgba(0,0,0,0); }
 """
 
 
-def _proxy_page(url: str):
-    """代理一张网页:抓 → 剥框架限制头 → 注 <base> + 桥接脚本 → 当我们自己的文档吐出去。"""
+def _proxy_page(url: str, cap: str):
+    """代理网页在 opaque sandbox 中执行；cap 仅授权代理文档/子资源传输。"""
     err = _url_safe(url)
     if err:
         return None, err
+    cap_details = verify_web_proxy_cap_details(_proxy_cap_secret(), cap)
+    if not cap_details or not web_proxy_cap_matches_url(cap_details, url):
+        return None, "代理页面 capability scope 不匹配"
+    budget = _WEB_PROXY_BUDGETS.begin(cap, cap_details)
+    if budget is None:
+        return None, "网页代理短期访问额度已用完，请从阅读器重新打开页面"
     _pxs = None
     try:
         _h = _px_headers(url)
         _h["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
         _h.pop("Origin", None)                     # 顶层导航不带 Origin(带了反而像 CSRF 被拒)
-        _pxs, r = _px_open(url, _h, timeout=20)
+        _pxs, r = _px_open(
+            url,
+            _h,
+            timeout=20,
+            redirect_scope_origin=cap_details.scope_origin,
+        )
     except Exception as ex:
         return None, f"抓取失败:{str(ex)[:120]}"
     try:
         ct = (r.headers.get("Content-Type") or "").lower()
         if "html" not in ct:
             return None, f"不是网页({ct.split(';')[0] or '未知类型'});图片/PDF 等请直接在原站打开"
-        _save_resp_cookies(url, r)
+        _save_resp_cookies(str(getattr(r, "url", "") or url), r)
         raw = b""
         for chunk in r.iter_content(65536):
+            if not budget.consume(len(chunk)):
+                return None, "网页正文超过单次或短期访问流量上限"
             raw += chunk
             if len(raw) > 12 * 1024 * 1024:
-                break
+                return None, "网页正文超过 12MB 安全上限"
     finally:
         try:
             _pxs.close()
@@ -925,12 +1646,16 @@ def _proxy_page(url: str):
     # 页面自带的 <base> 必须先摘掉:留着它我们重写出来的 /pdf/web/res?url=… 会被再拼一次原站前缀。
     html = _re.sub(r"<base\b[^>]*>", "", html, flags=_re.I)
     _cache_raw = html                      # ★ 抽正文用**重写前**的原始 HTML(重写后 URL 全变代理链接)
-    html = rewrite_html(html, final)       # ★ 根因修复:资源/CSS/srcset 全部改走我们的代理
+    html = rewrite_html(html, final, cap)  # ★ 根因修复:资源/CSS/srcset 全部改走我们的代理
     # ⚠ shim 必须在**页面自己的脚本之前**跑(审计实锤):原来 `html += _PROXY_INJECT` 挂在文档末尾,
     #   而 reddit 的模块加载器在第 ~34000 字节就执行 `script.src = 绝对地址` —— 浏览器在赋值那刻
     #   就发请求,setter 陷阱那时还没装上,于是照样跨源被 CORS 挡死(实测 CORS 报错 6 条不减)。
     #   现在整块注入提到 <head> 最前,__realBase 也一并前置(RES() 依赖它解析相对地址)。
-    base_tag = f'<script>location.__realBase={json.dumps(final)};</script>' + _PROXY_INJECT
+    base_tag = (
+        f'<script>location.__realBase={json.dumps(final)};'
+        f'location.__rcCap={json.dumps(cap)};</script>'
+        + _PROXY_INJECT
+    )
     if _re.search(r"<head[^>]*>", html, _re.I):
         html = _re.sub(r"(<head[^>]*>)", r"\1" + base_tag, html, count=1, flags=_re.I)
     else:
@@ -981,7 +1706,7 @@ def _proxy_page(url: str):
                         "background:#fff5e6;border-bottom:1px solid #f0d9b0;color:#7a5520\">"
                         f"⚠ <b>{_hesc(host)}</b> 把这次搜索判成了自动程序流量(它的验证码在本站域名下无解)"
                         f"——已自动改用 Brave 搜索「{_hesc(kw)}」。</div>")
-                r2, e2 = _proxy_page(alt)
+                r2, e2 = _proxy_page(alt, cap)
                 if r2 is not None and not e2:
                     r2.set_data(_re.sub(r"(<body[^>]*>)", r"\1" + note, r2.get_data(as_text=True),
                                         count=1, flags=_re.I) or r2.get_data(as_text=True))
@@ -1004,6 +1729,8 @@ def _proxy_page(url: str):
     for h in list(resp.headers.keys()):
         if h.lower() in _PROXY_STRIP_HEADERS:
             del resp.headers[h]
+    resp.headers["Content-Security-Policy"] = _WEB_PROXY_CSP
+    resp.headers["Referrer-Policy"] = "no-referrer"
     return resp, ""
 
 
@@ -1013,13 +1740,33 @@ def _proxy_page(url: str):
 WEB_CACHE_DIR = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude")) / "state" / "web-cache"
 
 
-def _web_key(url: str) -> str:
-    return hashlib.sha1((url or "").encode("utf-8")).hexdigest()[:20]
+def _web_key(url: str, *, user_id: str | int | None = None) -> str:
+    uid = _cache_user_id(user_id)
+    if not uid:
+        return ""
+    return hashlib.sha256(str(url or "").encode("utf-8")).hexdigest()[:32]
 
 
-def _web_cache_put(url: str, raw_html: str):
+def _web_cache_path(
+    url: str,
+    *,
+    user_id: str | int | None = None,
+) -> Path | None:
+    uid = _cache_user_id(user_id)
+    if not WEB_CACHE_DIR or not uid:
+        return None
+    return web_cache_path(WEB_CACHE_DIR, uid, url)
+
+
+def _web_cache_put(
+    url: str,
+    raw_html: str,
+    *,
+    user_id: str | int | None = None,
+):
     """把代理过的页面抽成正文存缓存(AI 读页/搜索的数据源)。"""
-    if not WEB_CACHE_DIR:
+    uid = _cache_user_id(user_id)
+    if not uid:
         return
     try:
         from readability import Document
@@ -1032,48 +1779,78 @@ def _web_cache_put(url: str, raw_html: str):
     txt = BeautifulSoup(body or "", "html.parser").get_text("\n", strip=True)
     if len(txt) < 120:   # 抽取失败(纯 JS 页/首页型)→ 退回整页去标签,总比空好
         txt = BeautifulSoup(raw_html, "html.parser").get_text("\n", strip=True)
-    WEB_CACHE_DIR.mkdir(parents=True, exist_ok=True)
-    (WEB_CACHE_DIR / (_web_key(url) + ".json")).write_text(
-        json.dumps({"url": url, "title": title, "text": txt[:200000], "ts": int(time.time())},
-                   ensure_ascii=False), "utf-8")
+    write_web_cache(
+        WEB_CACHE_DIR,
+        uid,
+        url,
+        title=title,
+        text=txt,
+    )
 
 
-def web_material(ref: str) -> dict:
-    """★`web:<url>` → {url,title,text}。**中间转换层的后端 resolver**,给 assistant/工具用。
-    先查缓存(浏览时已写),miss 则实时抓一次。非 web: 引用返回 None。"""
+def web_material(
+    ref: str,
+    *,
+    user_id: str | int | None = None,
+) -> dict:
+    """`web:<url>` 旧资料 resolver；只读已有账户缓存，不再联网补抓。
+
+    身份形式继续保留，便于扩展/迁移工具引用历史资料；新网页正文应由扩展
+    本地读取并显式同步，而不是由 PWA 隐式抓取第三方站点。
+    """
     if not isinstance(ref, str) or not ref.startswith("web:"):
         return None
     url = ref[4:]
-    if WEB_CACHE_DIR:
-        p = WEB_CACHE_DIR / (_web_key(url) + ".json")
-        try:
-            d = json.loads(p.read_text("utf-8"))
-            if d.get("text"):
-                return d
-        except Exception:
-            pass
-    try:   # 缓存 miss(如 AI 先于渲染发问)→ 现抓一次
-        import requests
-        r = requests.get(url, timeout=15, headers={"User-Agent": "Mozilla/5.0 (X11; Linux aarch64) Chrome/126.0"})
-        _web_cache_put(url, r.text)
-        p = WEB_CACHE_DIR / (_web_key(url) + ".json")
-        return json.loads(p.read_text("utf-8"))
-    except Exception as ex:
-        return {"url": url, "title": "", "text": "", "error": f"网页内容取不到:{str(ex)[:80]}"}
+    uid = _cache_user_id(user_id)
+    if not uid:
+        return {
+            "url": url,
+            "title": "",
+            "text": "",
+            "error": "网页材料缺少已认证用户上下文",
+        }
+    cached, _source_path = read_web_cache(WEB_CACHE_DIR, uid, url)
+    if cached and cached.get("text"):
+        return cached
+    return {
+        "url": url,
+        "title": "",
+        "text": "",
+        "error": "网页资料不在旧缓存中；PWA 已停止联网抓取，请由浏览器扩展读取",
+    }
 
 
-def _web_last_get() -> str:
+def _web_last_path(user_id: str | int | None = None) -> Path | None:
+    uid = _cache_user_id(user_id)
+    if not _WEB_LAST or not uid:
+        return None
+    return _WEB_LAST.parent / "web-last-by-user" / (uid + ".json")
+
+
+def _web_last_get(*, user_id: str | int | None = None) -> str:
+    path = _web_last_path(user_id)
+    if path is None:
+        return ""
     try:
-        d = json.loads(_WEB_LAST.read_text("utf-8"))
+        d = json.loads(path.read_text("utf-8"))
         rel = str(d.get("file") or "")
         return rel if rel and (_OBSIDIAN_ROOT / rel).exists() else ""
     except Exception:
         return ""
 
 
-def _web_last_set(rel: str):
+def _web_last_set(rel: str, *, user_id: str | int | None = None):
+    path = _web_last_path(user_id)
+    if path is None:
+        return
     try:
-        _WEB_LAST.write_text(json.dumps({"file": rel, "ts": int(time.time())}, ensure_ascii=False), "utf-8")
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_suffix(".tmp")
+        tmp.write_text(
+            json.dumps({"file": rel, "ts": int(time.time())}, ensure_ascii=False),
+            "utf-8",
+        )
+        tmp.replace(path)
     except Exception:
         pass
 
@@ -1219,27 +1996,45 @@ document.addEventListener('DOMContentLoaded',()=>{
 """
 
 
-def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
+def register_html_reader(
+    bp,
+    *,
+    safe_vault_path,
+    obsidian_root,
+    claude_dir,
+    asset_cache_version,
+    pdf_reader_js_v,
+    pdf_shared_js_v,
+    reader_sidecar_path=None,
+    reader_sidecar_lock=None,
+    web_translate_protocol_module=None,
+):
     global _WEB_LAST, WEB_CACHE_DIR
     _WEB_LAST = Path(claude_dir) / "state" / "web-last.json"
     WEB_CACHE_DIR = Path(claude_dir) / "state" / "web-cache"   # 与模块级默认同值;显式对齐注入的 claude_dir
-    """挂 HTML 阅读器路由到 bp(url_prefix /pdf),并注入 pdf_reader 的三个依赖。"""
-    global _safe_vault_path, _OBSIDIAN_ROOT, _HTML_HL_DIR
+    """挂 HTML 阅读器路由到 bp(url_prefix /pdf),并注入路径与唯一静态指纹实现。"""
+    global _safe_vault_path, _OBSIDIAN_ROOT, _CLAUDE_DIR
+    global _HTML_HL_DIR, _HTML_HL_USER_DIR
+    global _HTML_HL_ACCOUNT_PATH, _HTML_HL_ACCOUNT_LOCK
+    global _ASSET_CACHE_VERSION, _PDF_READER_JS_V, _PDF_SHARED_JS_V
     _safe_vault_path = safe_vault_path
     _OBSIDIAN_ROOT = obsidian_root
+    _CLAUDE_DIR = Path(claude_dir)
     _HTML_HL_DIR = claude_dir / "state" / "html-highlights"
+    _HTML_HL_USER_DIR = claude_dir / "state" / "html-highlights-by-user"
+    _HTML_HL_ACCOUNT_PATH = reader_sidecar_path
+    _HTML_HL_ACCOUNT_LOCK = reader_sidecar_lock
+    _ASSET_CACHE_VERSION = asset_cache_version
+    _PDF_READER_JS_V = pdf_reader_js_v
+    _PDF_SHARED_JS_V = pdf_shared_js_v
 
     @bp.route("/html/view")
     def html_view():
         """统一 HTML 阅读器主页(架构验收)。?file=<vault-rel .html/.md>;无 file → 内置 sample。"""
         rel = (request.args.get("file") or "").strip()
         if rel == "__web__":
-            # 网页阅读主页(Google 式搜索页)在**阅读器壳内**渲 → 侧栏/助手第一屏可用(用户需求)
-            resp = make_response(render_template(
-                "html_reader.html", html_content=_web_home_content((request.args.get("q") or "").strip()),
-                file_rel="__web__", file_name="🌐 网页阅读", reader_js_v=_html_js_v()))
-            resp.headers["Cache-Control"] = "no-store"
-            return resp
+            # 兼容旧收藏/历史入口；本地 .html/.md 书籍阅读仍由下方路径处理。
+            return redirect("/pdf/")
         if rel:
             abs_path = _safe_vault_path(rel)
             if not abs_path or abs_path.suffix.lower() not in (".html", ".htm", ".md", ".markdown"):
@@ -1259,77 +2054,216 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
             title = "HTML 阅读器(示例)"
         resp = make_response(render_template(
             "html_reader.html", html_content=html_content, file_rel=rel_clean,
-            file_name=title, reader_js_v=_html_js_v()))
+            file_name=title, reader_js_v=_html_js_v(),
+            reader_app="html", reader_route="html"))
         return resp
 
     @bp.route("/web/proxy")
     def pdf_web_proxy():
-        """代理渲染真实网页(同源 → 外壳 JS 可直接操作它)。仅登录用户可用(/pdf 在鉴权前缀内)。"""
-        url = (request.args.get("url") or "").strip()
-        if not url:
-            abort(400)
-        resp, err = _proxy_page(url)
-        if err:
-            import html as _h
-            return make_response(
-                f'<body style="font:15px system-ui;padding:40px;color:#555">'
-                f'<p>⚠ {_h.escape(err)}</p>'
-                f'<p><a href="{_h.escape(url)}" target="_blank">在系统浏览器打开原页 →</a></p></body>', 200)
-        return resp
+        """Retired: third-party transport belongs to the browser extension."""
+        return _retired_web_response()
 
     @bp.route("/web/p/<path:rest>")
     def pdf_web_page_mirror(rest):
-        """路径镜像式主文档代理(见 _mirror 注释:根治文档相对地址打到我们身上)。"""
-        url = unmirror(rest, request.query_string.decode("utf-8", "ignore"))
-        if not url:
-            abort(400)
-        resp, err = _proxy_page(url)
-        if err:
-            import html as _h
-            return make_response(
-                f'<body style="font:15px system-ui;padding:40px;color:#555">'
-                f'<p>⚠ {_h.escape(err)}</p>'
-                f'<p><a href="{_h.escape(url)}" target="_blank">在系统浏览器打开原页 →</a></p></body>', 200)
-        return resp
+        """Retired path mirror; kept only as a deterministic Gone response."""
+        return _retired_web_response()
 
     @bp.route("/web/r/<path:rest>")
     def pdf_web_res_mirror(rest):
-        """路径镜像式子资源代理。"""
-        url = unmirror(rest, request.query_string.decode("utf-8", "ignore"))
-        if not url:
-            abort(400)
-        return _serve_res(url)
+        """Retired resource mirror; never read the old cache or upstream."""
+        return _retired_web_response()
 
     @bp.route("/api/web-trcache")
     def pdf_api_web_trcache():
-        """整页译文预取:GET ?url= → {ok, items:{原文: 译文}}。
-        引擎开译时先拿这个,命中的段落**零请求**直接渲染(重访这页几乎瞬时出双语)。"""
-        return jsonify({"ok": True, "items": _webtr_get((request.args.get("url") or "").strip())})
+        """Retired: page URL caches live only in the browser extension."""
+        return _retired_web_response()
 
     @bp.route("/api/web-translate", methods=["POST"])
     def pdf_api_web_translate():
-        """网页沉浸式翻译的批量端点。POST {texts:[...]} → {ok, zh:[...]}。
+        """网页句子批翻。默认 Google；AI 支持无状态批翻或文档内短时会话。
 
-        与 PDF 的「译页」**共用同一条管线**(scripts/vocab/translate.py:缓存 → Google 批量 →
-        no_ai 兜底),所以译文缓存跨 PDF/网页互通,同一句话不会翻两遍。
-        差别只在取句方式:PDF 从字符层切句,网页由前端按 DOM 段落给 —— 那才是网页的天然句段。
+        普通网页 URL 只供扩展本地页面缓存使用且不会进入请求体；服务端严格拒绝
+        URL、model、cache namespace 和 body session key。文档 UUID 只从可信扩展
+        写入的请求头读取，并与当前 uid 共同隔离会话。
         """
-        body = request.get_json(silent=True) or {}
-        texts = [str(t or "").strip() for t in (body.get("texts") or [])][:120]
-        if not texts:
-            return jsonify({"ok": True, "zh": []})
-        import sys as _sys
-        vp = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude")) / "scripts" / "vocab"
-        if str(vp) not in _sys.path:
-            _sys.path.insert(0, str(vp))
         try:
-            from translate import (gtranslate_batch as _gb, translate as _tr,
-                                   _cache_get as _cg, _cache_put as _cp)
+            parsed = _parse_web_translate_request(request.get_json(silent=True))
+            document_header = request.headers.get(_WEB_TRANSLATE_DOCUMENT_HEADER)
+            if parsed["mode"] == "session":
+                document_id = _parse_web_translate_document(
+                    document_header, required=True
+                )
+            else:
+                if document_header is not None:
+                    raise ValueError(
+                        f"{_WEB_TRANSLATE_DOCUMENT_HEADER} 只允许用于 session mode"
+                    )
+                document_id = None
+        except ValueError as ex:
+            return jsonify({
+                "ok": False,
+                "code": "invalid_web_translate_request",
+                "error": str(ex),
+            }), 400
+        texts = parsed["texts"]
+        backend = parsed["backend"]
+        mode_requested = parsed["mode"]
+        mode_resolved = mode_requested
+        uid = _px_uid()
+        profile = None
+        session_supported = False
+        cache_namespaces = {
+            "stateless": _WEB_TRANSLATE_GOOGLE_NS,
+            "session": _WEB_TRANSLATE_GOOGLE_NS,
+        }
+        degraded = False
+        reason = ""
+        if backend == "ai":
+            if not uid or uid == "anon":
+                return jsonify({"ok": False, "error": "authentication required"}), 401
+            try:
+                import assistant as _assistant
+                profile = _assistant.web_translate_profile(uid)
+            except Exception as ex:
+                return jsonify({"ok": False, "error": f"AI profile load fail: {ex}"}), 500
+            raw_namespaces = profile.get("cache_namespaces")
+            if not isinstance(raw_namespaces, dict):
+                raw_namespaces = {}
+            stateless_ns = str(
+                raw_namespaces.get("stateless")
+                or profile.get("cache_namespace")
+                or ""
+            )
+            session_ns = str(
+                raw_namespaces.get("session")
+                or (stateless_ns + "-session")
+            )
+            if not stateless_ns or not session_ns:
+                return jsonify({"ok": False, "error": "AI cache identity unavailable"}), 500
+            cache_namespaces = {
+                "stateless": stateless_ns,
+                "session": session_ns,
+            }
+            session_supported = bool(
+                profile.get(
+                    "session_supported",
+                    profile.get("backend") == "claude",
+                )
+            )
+            degraded = bool(profile.get("degraded"))
+            reason = str(profile.get("reason") or "")
+            if mode_requested == "session" and not session_supported:
+                mode_resolved = "stateless"
+                degraded = True
+                reason = _merge_web_translate_reasons(
+                    reason, "session_backend_unsupported"
+                )
+        if not texts:
+            return jsonify({
+                "ok": True,
+                "zh": [],
+                "sources": [],
+                "glossary": {},
+                "backendRequested": backend,
+                "backendUsed": "google" if backend == "google" else "none",
+                "modeRequested": mode_requested,
+                "modeResolved": mode_resolved,
+                "sessionSupported": session_supported,
+                "cacheNamespace": cache_namespaces[mode_resolved],
+                "cacheNamespaces": cache_namespaces,
+                "googleCacheNamespace": _WEB_TRANSLATE_GOOGLE_NS,
+                "degraded": degraded,
+                "reason": reason,
+                "translated": 0,
+                "total": 0,
+            })
+        try:
+            # 生产只认部署到 webapp 的模块名；不得再把开发仓库 scripts/vocab
+            # 动态塞进 sys.path。测试可通过 register 的显式 module 注入唯一源码。
+            _protocol = (
+                web_translate_protocol_module
+                if web_translate_protocol_module is not None
+                else importlib.import_module("web_translate_protocol")
+            )
+            _ab = _protocol.ai_translate_batch
+            _gb = _protocol.gtranslate_batch
+            _tr = _protocol.translate
+            _cg = _protocol._cache_get
+            _cp = _protocol._cache_put
         except Exception as ex:
             return jsonify({"ok": False, "error": f"translate load fail: {ex}"}), 500
-        zhs = [(_cg(t, "zh-CN") or "") if t else "" for t in texts]
+        # session 译文依赖文档上下文，绝不能命中跨文档的服务端文本缓存。
+        read_ai_cache = backend == "ai" and mode_resolved == "stateless"
+        read_cache_ns = (
+            cache_namespaces["stateless"]
+            if backend == "ai"
+            else _WEB_TRANSLATE_GOOGLE_NS
+        )
+        zhs = [
+            (
+                (_cg(t, "zh-CN", ns=read_cache_ns) or "")
+                if t and (backend != "ai" or read_ai_cache)
+                else ""
+            )
+            for t in texts
+        ]
+        sources = [("ai" if backend == "ai" else "google") if zhs[i] else "" for i in range(len(texts))]
         miss = [i for i, z in enumerate(zhs) if not z and texts[i]]
-        if miss:
+        glossary = dict(parsed["glossary"])
+        batch_meta = {"ai": 0, "google": 0, "blank": 0, "sources": []}
+        runtime = {
+            "mode": mode_resolved,
+            "reason": "",
+        }
+        session_attempted = backend == "ai" and mode_resolved == "session"
+        if miss and backend == "ai":
+            mt = [texts[i] for i in miss]
+
+            def _safe_generate(system_text, user_text):
+                if runtime["mode"] == "session":
+                    session_output = _assistant.web_translate_session_text(
+                        system_text,
+                        user_text,
+                        uid=uid,
+                        document_id=document_id,
+                        profile=profile,
+                        timeout=60,
+                    )
+                    if session_output:
+                        return session_output
+                    # 同一请求余下批次也固定退无状态，避免交替创建/失败会话。
+                    runtime["mode"] = "stateless"
+                    runtime["reason"] = _merge_web_translate_reasons(
+                        runtime["reason"],
+                        "session_unavailable_stateless_fallback",
+                    )
+                return _assistant.web_translate_text(
+                    system_text,
+                    user_text,
+                    uid=uid,
+                    profile=profile,
+                    timeout=60,
+                )
+
+            translated, glossary, batch_meta = _ab(
+                mt,
+                model=str(profile.get("variant") or "default"),
+                effort=str(profile.get("depth") or "none"),
+                glossary=glossary,
+                generator=_safe_generate,
+                cache_ns=(
+                    cache_namespaces["session"]
+                    if session_attempted
+                    else cache_namespaces["stateless"]
+                ),
+                fallback_cache_ns=_WEB_TRANSLATE_GOOGLE_NS,
+                with_meta=True,
+                cache_ai=not session_attempted,
+            )
+            for offset, original_i in enumerate(miss):
+                zhs[original_i] = translated[offset]
+                sources[original_i] = batch_meta["sources"][offset]
+        elif miss:
             mt = [texts[i] for i in miss]
             batch = None
             try:
@@ -1340,8 +2274,12 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
                 for k, i in enumerate(miss):
                     if batch[k]:
                         zhs[i] = batch[k]
+                        sources[i] = "google"
                         try:
-                            _cp(texts[i], "zh-CN", batch[k], "gtranslate")
+                            _cp(
+                                texts[i], "zh-CN", batch[k], "gtranslate",
+                                ns=_WEB_TRANSLATE_GOOGLE_NS,
+                            )
                         except Exception:
                             pass
             # 同 PDF 译页的教训:兜底**绝不落 AI CLI**,且带墙钟预算——否则 Google 故障窗
@@ -1352,94 +2290,120 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
                 if time.monotonic() > _dl:
                     break
                 try:
-                    z = _tr(texts[i], backend="no_ai")
+                    z = _tr(
+                        texts[i],
+                        backend="no_ai",
+                        cache_ns=_WEB_TRANSLATE_GOOGLE_NS,
+                    )
                     if z:
                         zhs[i] = z
-                        _cp(texts[i], "zh-CN", z, "no_ai")
+                        sources[i] = "google"
+                        _cp(
+                            texts[i], "zh-CN", z, "no_ai",
+                            ns=_WEB_TRANSLATE_GOOGLE_NS,
+                        )
                 except Exception:
                     pass
-        _webtr_put((body.get("url") or "").strip(),
-                   {t: z for t, z in zip(texts, zhs) if t and z})
-        return jsonify({"ok": True, "zh": zhs,
-                        "translated": sum(1 for z in zhs if z), "total": len(texts)})
+        mode_resolved = runtime["mode"]
+        reason = _merge_web_translate_reasons(reason, runtime["reason"])
+        if mode_requested != mode_resolved:
+            degraded = True
+        ai_count = sum(1 for source in sources if source == "ai")
+        google_count = sum(1 for source in sources if source == "google")
+        blank_count = sum(1 for i, source in enumerate(sources) if texts[i] and not source)
+        if backend == "ai" and (google_count or blank_count):
+            degraded = True
+            if google_count and ai_count:
+                reason = _merge_web_translate_reasons(
+                    reason, "ai_partial_google_fallback"
+                )
+            elif google_count:
+                reason = _merge_web_translate_reasons(
+                    reason, "ai_unavailable_google_fallback"
+                )
+            else:
+                reason = _merge_web_translate_reasons(reason, "ai_unavailable")
+        if backend == "ai":
+            if ai_count and google_count:
+                backend_used = str(profile.get("backend")) + "+google"
+            elif ai_count:
+                backend_used = str(profile.get("backend"))
+            elif google_count:
+                backend_used = "google"
+            else:
+                backend_used = "none"
+        else:
+            backend_used = "google"
+        return jsonify({
+            "ok": True,
+            "zh": zhs,
+            "sources": sources,
+            "glossary": glossary if backend == "ai" else {},
+            "backendRequested": backend,
+            "backendUsed": backend_used,
+            "modeRequested": mode_requested,
+            "modeResolved": mode_resolved,
+            "sessionSupported": session_supported,
+            # 单值必须跟实际解析模式一致；完整映射供切换/预加载时使用。
+            "cacheNamespace": cache_namespaces[mode_resolved],
+            "cacheNamespaces": cache_namespaces,
+            "googleCacheNamespace": _WEB_TRANSLATE_GOOGLE_NS,
+            "degraded": degraded,
+            "reason": reason,
+            "model": ({
+                "backend": profile.get("backend"),
+                "variant": profile.get("variant"),
+                "depth": profile.get("depth"),
+            } if profile else None),
+            "translated": sum(1 for z in zhs if z),
+            "total": len(texts),
+        })
 
-    # ⚠ 审计实锤(2026-07-19):挂 404 处理器**救不全**。泄漏路径一旦与 webapp 的**真实路由**撞名,
-    #   根本不会 404 —— 实测 /login /control/ /insights/ /dashboard/ /register /profile/ /admin/
-    #   /history/ 全部返回 200,于是**我们自己的页面被渲染进了别人的网页里**(既荒谬又像钓鱼)。
-    #   改成 before_app_request 无条件拦截,不再依赖"必须先 404"。
-    _RESCUE_SKIP = ("/pdf/", "/static/pdf/", "/static/qa/", "/static/icons/")
-
-    @bp.before_app_request
-    def _leak_rescue_early():
+    @bp.route("/api/web-translate-config")
+    def pdf_api_web_translate_config():
+        """返回当前账户的网页 AI action；缓存身份只能由服务端生成。"""
+        uid = _px_uid()
+        if not uid or uid == "anon":
+            return jsonify({"ok": False, "error": "authentication required"}), 401
         try:
-            p = request.path or ""
-            if any(p.startswith(x) for x in _RESCUE_SKIP):
-                return None          # 我们自己的应用与注入资源,绝不能被当成泄漏(踩过 4 次)
-            ref = request.headers.get("Referer") or ""
-            i = ref.find("/pdf/web/")
-            if i < 0:
-                return None
-            rest = ref[i + len("/pdf/web/"):]
-            kind, _, tail = rest.partition("/")
-            if kind not in ("p", "r"):
-                return None          # 只认代理文档;/pdf/web/live(外壳)发起的请求不算泄漏
-            src = unmirror(tail.split("?")[0], "")
-            if not src:
-                return None
-            pr = urlparse(src)
-            real = f"{pr.scheme}://{pr.netloc}{p}"
-            if request.query_string:
-                real += "?" + request.query_string.decode("utf-8", "ignore")
-            # ⚠ 第二处实锤:原来一律走 _pxp(主文档镜像)。可泄漏的多是 **子资源**(claude.ai 的
-            #   /cdn-cgi/*.js、Next.js 的 /_next/*.css)——主文档通道遇到非 HTML 会吐一张 HTML
-            #   错误页,浏览器于是报 "MIME type (text/html) is not executable"。
-            #   按 Sec-Fetch-Dest 分流才对(该头能穿过 nginx 到 Flask,已实测)。
-            dest = (request.headers.get("Sec-Fetch-Dest") or "").lower()
-            as_doc = dest in ("document", "iframe", "frame", "")
-            return redirect(_pxp(real) if as_doc else _pxr(real))
-        except Exception:
-            return None
+            import assistant as _assistant
+            profile = _assistant.web_translate_profile(uid)
+        except Exception as ex:
+            return jsonify({"ok": False, "error": f"AI profile load fail: {ex}"}), 500
+        return jsonify({
+            "ok": True,
+            "backend": profile["backend"],
+            "variant": profile["variant"],
+            "depth": profile["depth"],
+            "cacheNamespace": profile["cache_namespace"],
+            "cacheNamespaces": profile["cache_namespaces"],
+            "sessionSupported": bool(profile.get("session_supported")),
+            "googleCacheNamespace": _WEB_TRANSLATE_GOOGLE_NS,
+            "degraded": bool(profile.get("degraded")),
+            "reason": str(profile.get("reason") or ""),
+            "requestedBackend": str(profile.get("requested_backend") or ""),
+            "requestedVariant": str(profile.get("requested_variant") or ""),
+        })
 
-    @bp.app_errorhandler(404)
-    def _leak_rescue(e):
-        """代理页"漏出来"的导航救回。
-
-        页面里 `location.href = '/search?q=x'` 这类赋值**无法被 patch**(location 的 setter
-        不可覆写),于是 iframe 会带着原站的路径打到**我们**的域名上,拿一个 404 白页。
-        但请求头里的 Referer 忠实记着它是从哪个代理页发出的 —— 据此还原真实站点再重定向回代理,
-        就把这一整类漏网补上了(经典代理的 referer 兜底手法)。
-        """
-        try:
-            ref = request.headers.get("Referer") or ""
-            i = ref.find("/pdf/web/")
-            if i >= 0 and request.path and not request.path.startswith("/pdf/web/"):
-                rest = ref[i + len("/pdf/web/"):]
-                kind, _, tail = rest.partition("/")
-                if kind in ("p", "r"):
-                    src = unmirror(tail.split("?")[0], "")
-                    if src:
-                        p = urlparse(src)
-                        real = f"{p.scheme}://{p.netloc}{request.path}"
-                        if request.query_string:
-                            real += "?" + request.query_string.decode("utf-8", "ignore")
-                        return redirect(_pxp(real))
-        except Exception:
-            pass
-        return e
+    # Do not add a Referer-based "leaked path rescue" here.  Proxy documents
+    # deliberately emit Referrer-Policy:no-referrer, and transport endpoints
+    # require a signed capability.  Guessing an origin from an ambient Referer
+    # would both be dead code in the intended path and an authorization bypass
+    # if a browser/proxy ever supplied one.
 
     @bp.route("/api/web-vocab", methods=["POST"])
     def pdf_api_web_vocab():
-        """网页版「未掌握词多的段落」判定。POST {texts:[...]} → {ok, marks:[{i, count, words}]}。
+        """网页版句级生词判定。POST {texts:[句子...],threshold?,min_words?}。
 
-        与 PDF 阅读器的 `_build_unmastered_sentences` **同一个判定集**:凡查过且 label_slug
-        不是 mastered 的词都算(与生词下划线完全一致——不想被计数就把词标记掌握)。
-        差别只在粒度:PDF 按几何切句,网页按 DOM 段落 —— 段落本就是网页的天然语义块。
+        返回每句所有未掌握词的字符区间(用于真实词下划线)，并严格复用 PDF 的双条件：
+        未掌握 lemma >= 3 且句子总词数 >= 10 时 hot=true、后台预翻译、显示「译 N」。
         """
         body = request.get_json(silent=True) or {}
-        texts = [str(t or "") for t in (body.get("texts") or [])][:120]
+        texts = [str(t or "").strip()[:2000] for t in (body.get("texts") or [])][:160]
         thr = max(2, min(8, int(body.get("threshold") or 3)))
+        min_words = max(4, min(80, int(body.get("min_words") or 10)))
         if not texts:
-            return jsonify({"ok": True, "marks": []})
+            return jsonify({"ok": True, "items": [], "marks": []})
         import sys as _sys
         vp = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude")) / "scripts" / "vocab"
         if str(vp) not in _sys.path:
@@ -1448,150 +2412,113 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
             import vocab_index          # type: ignore
             idx = vocab_index.index() or {}
         except Exception:
-            return jsonify({"ok": True, "marks": []})     # 词库读不到 → 静默不标,别拦住翻译
-        unmastered = {f: i.get("lemma") or f for f, i in idx.items()
+            return jsonify({"ok": True, "items": [], "marks": []})     # 词库读不到 → 静默不标
+        unmastered = {f: i for f, i in idx.items()
                       if i.get("label_slug") and i["label_slug"] != "mastered"}
         if not unmastered:
-            return jsonify({"ok": True, "marks": []})
+            return jsonify({"ok": True, "items": [], "marks": []})
         # ⚠ 日语不能"切出词再查":日文没有词间空格,连续假名+汉字是一整串
         #   (实测 `没落する没落していく貿易ボタン` 被当成一个 token,一个也匹配不上)。
         #   反过来做——拿词库里的未掌握词去**子串搜**正文,这才是无分词语言的正确方向。
-        cjk_un = [w for w in unmastered if not w.isascii() and len(w) >= 2]
-        marks = []
+        cjk_un = sorted((w for w in unmastered if not w.isascii() and len(w) >= 2), key=len, reverse=True)
+        cjk_matcher = _web_cjk_matcher(cjk_un)
+        global _WEB_JP_TAGGER, _WEB_JP_TAGGER_TRIED
+        if not _WEB_JP_TAGGER_TRIED:
+            _WEB_JP_TAGGER_TRIED = True
+            try:
+                from fugashi import Tagger
+                _WEB_JP_TAGGER = Tagger()
+            except Exception:
+                _WEB_JP_TAGGER = None
+        items = []
         for i, t in enumerate(texts):
-            hit = {}
-            for w in re.findall(r"[A-Za-z][A-Za-z'-]{1,}", t):
-                lem = unmastered.get(w.lower()) or unmastered.get(w)
-                if lem:
-                    hit[lem] = hit.get(lem, 0) + 1
+            hit = set()
+            occ = []
+            en_words = list(re.finditer(r"[A-Za-z][A-Za-z'’\-]*", t))
+            total_words = len(en_words)
+            for m in en_words:
+                surf = m.group(0)
+                info = unmastered.get(surf.lower()) or unmastered.get(surf)
+                if info:
+                    lem = info.get("lemma") or surf.lower(); hit.add(lem)
+                    occ.append({"start": m.start(), "end": m.end(), "surface": surf, "lemma": lem,
+                                "label": info.get("label_slug") or "new", "mastery": info.get("mastery", 0)})
             if re.search(r"[぀-ヿ一-鿿]", t):
-                for w in cjk_un:
-                    if w in t:
-                        lem = unmastered[w]
-                        hit[lem] = hit.get(lem, 0) + 1
-            if len(hit) >= thr:
-                marks.append({"i": i, "count": len(hit), "words": sorted(hit)[:12]})
-        return jsonify({"ok": True, "marks": marks, "threshold": thr})
+                # 总词数用与 PDF 相同的 fugashi；不可用时仅以 CJK 字符数/2 保守近似。
+                cjk_runs = list(re.finditer(r"[぀-ヿ一-鿿]+", t))
+                if _WEB_JP_TAGGER:
+                    try:
+                        total_words += sum(sum(1 for _ in _WEB_JP_TAGGER(r.group(0))) for r in cjk_runs)
+                    except Exception:
+                        total_words += sum(max(1, len(r.group(0)) // 2) for r in cjk_runs)
+                else:
+                    total_words += sum(max(1, len(r.group(0)) // 2) for r in cjk_runs)
+                for start, end, w in cjk_matcher.find_nonoverlapping(t):
+                    info = unmastered[w]
+                    lem = info.get("lemma") or w; hit.add(lem)
+                    occ.append({"start": start, "end": end, "surface": w, "lemma": lem,
+                                "label": info.get("label_slug") or "new", "mastery": info.get("mastery", 0)})
+            occ.sort(key=lambda x: (x["start"], x["end"]))
+            hot = len(t) >= 12 and len(hit) >= thr and total_words >= min_words
+            items.append({"i": i, "count": len(hit), "words": sorted(hit)[:12], "total_words": total_words,
+                          "hot": hot, "occurrences": occ})
+        marks = [{k: x[k] for k in ("i", "count", "words", "total_words")} for x in items if x["hot"]]
+        return jsonify({"ok": True, "items": items, "marks": marks, "threshold": thr, "min_words": min_words})
 
     @bp.route("/api/web-cookie", methods=["GET", "POST"])
     def pdf_api_web_cookie():
-        """登录 cookie 导入(解决"代理没有你的登录态")。
-        GET → 已配置的域名列表(不返回值);POST {domain, cookie} 存;POST {domain, remove:1} 删。
-        cookie 存 state/web-cookies/<uid>.json(0600);之后该域的代理请求都带上它。
-        ⚠ 这是把第三方登录凭证放到服务器,前端弹窗已明确告知用户风险。"""
-        uid = _px_uid()
-        if request.method == "GET":
-            return jsonify({"ok": True, "domains": sorted(_cookie_store(uid).keys())})
-        body = request.get_json(silent=True) or {}
-        domain = (body.get("domain") or "").strip().lstrip(".").lower()
-        if not domain or "/" in domain:
-            return jsonify({"ok": False, "error": "域名无效"}), 400
-        store = _cookie_store(uid)
-        if body.get("remove"):
-            store.pop(domain, None)
-            _cookie_store_save(uid, store)
-            return jsonify({"ok": True, "removed": domain})
-        ck = {}
-        for part in (body.get("cookie") or "").split(";"):
-            if "=" in part:
-                k, v = part.split("=", 1)
-                k = k.strip()
-                if k:
-                    ck[k] = v.strip()
-        if not ck:
-            return jsonify({"ok": False, "error": "cookie 解析为空(应形如 name=value; name2=value2)"}), 400
-        store[domain] = ck
-        _cookie_store_save(uid, store)
-        return jsonify({"ok": True, "domain": domain, "count": len(ck)})
+        """Retired with the server-side proxy; saved cookie files stay untouched."""
+        return _retired_web_response()
+
+    @bp.route("/api/rbi-ticket", methods=["POST"])
+    def pdf_api_rbi_ticket():
+        """Retired: no new RBI browser session may be authorized."""
+        return _retired_web_response()
 
     @bp.route("/web/rbi-live")
     def pdf_web_rbi_live():
-        """RBI 实况网页(阶段1):真浏览器 DOM 流式桥接。渲染 rbi_live.html,前端连 wss /rbi-ws,
-        rrweb Replayer 重建 Pi 真 Chrome 的 DOM。查词/翻译作用于重建 DOM(阶段1b)。"""
-        import html as _hh
-        url = (request.args.get("url") or "").strip()
-        if not url:
-            return redirect("/pdf/web?home=1")
-        if not url.startswith(("http://", "https://")):
-            url = "https://" + url
-        return make_response(render_template(
-            "rbi_live.html", url=url, url_esc=_hh.escape(url),
-            uid=_px_uid(), js_v=_html_js_v()))
+        """Retired: RBI UI remains on disk only for offline recovery."""
+        return _retired_web_response()
 
     @bp.route("/web/rbi")
     def pdf_web_rbi():
-        """RBI 最小验证:Pi 真 Chrome 渲染后的 DOM(真实身份/过验证)→ 复用现有改写+注入 → iframe。
-        demo 阶段每次起一个 subprocess(慢 ~8s);正式阶段换常驻浏览器池 + 实时 DOM 同步。"""
-        url = (request.args.get("url") or "").strip()
-        if not url or _url_safe(url):
-            abort(400)
-        import subprocess
-        import sys as _sys
-        try:
-            script = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude")) / "scripts" / "rbi_render.py"
-            out = subprocess.run([_sys.executable, str(script), url],
-                                 capture_output=True, text=True, timeout=80)
-            data = json.loads(out.stdout or "{}")
-        except Exception as ex:
-            data = {"ok": False, "error": str(ex)[:150]}
-        if not data.get("ok"):
-            import html as _hh
-            return make_response(
-                f'<body style="font:14px/1.7 system-ui;padding:30px;color:#666">'
-                f'⚠ 真浏览器渲染失败:{_hh.escape(str(data.get("error") or "?"))}<br>'
-                f'(RBI demo 每次启一个 Chrome,首次或超时会失败,可重试)</body>', 200)
-        raw = data.get("html", "")
-        final = data.get("final") or url
-        html = re.sub(r"<base\b[^>]*>", "", raw, flags=re.I)
-        html = rewrite_html(html, final)      # 资源/导航改写走我们的代理,复用一整套(含 shim)
-        base_tag = f'<script>location.__realBase={json.dumps(final)};</script>' + _PROXY_INJECT
-        if re.search(r"<head[^>]*>", html, re.I):
-            html = re.sub(r"(<head[^>]*>)", r"\1" + base_tag, html, count=1, flags=re.I)
-        else:
-            html = base_tag + html
-        html = re.sub(r'<meta[^>]+http-equiv=["\']?content-security-policy["\']?[^>]*>', "", html, flags=re.I)
-        resp = make_response(html)
-        resp.headers["Content-Type"] = "text/html; charset=utf-8"
-        resp.headers["Cache-Control"] = "no-store"
-        for hk in list(resp.headers.keys()):
-            if hk.lower() in _PROXY_STRIP_HEADERS:
-                del resp.headers[hk]
-        return resp
+        """Retired: the server no longer launches a browser for third-party pages."""
+        return _retired_web_response()
 
     @bp.route("/web/frame")
     def pdf_web_frame():
-        """iframe 的唯一入口:服务端裁决——视频页 → 官方 embed(能真播),其余 → 代理渲染。
-        模板和前端 go() 都走这里,免得"哪些算视频"在两处各写一份。"""
-        url = (request.args.get("url") or "").strip()
-        if not url:
-            abort(400)
-        if not url.startswith(("http://", "https://")):
-            url = "https://" + url
-        emb = video_embed(url)
-        return redirect(emb or _pxp(url))
+        """Retired: no iframe/proxy fallback is allowed."""
+        return _retired_web_response()
 
     @bp.route("/web/res")
     def pdf_web_res():
-        """子资源代理(JS/CSS/图片/字体/XHR/媒体)。**这是"很多网页打不开"的根因修复**:
-        原先靠 <base> 让资源直连原站 → 每个都是跨源请求 → 被 ORB/CORS 挡死。
-        现在全部由我们同源吐出去。CSS 正文再递归重写 url()/@import;媒体透传 Range 支持拖动。"""
-        url = (request.args.get("url") or "").strip()
-        return _serve_res(url)
+        """Retired: do not serve old resource-cache entries through the proxy."""
+        return _retired_web_response()
 
     def _serve_res(url: str):
         if not url or _url_safe(url):
             abort(403)
+        cap = _current_proxy_cap(url)
+        cap_details = verify_web_proxy_cap_details(_proxy_cap_secret(), cap)
+        if not cap_details:
+            abort(403)
+        budget = _WEB_PROXY_BUDGETS.begin(cap, cap_details)
+        if budget is None:
+            return Response("proxy capability budget exhausted", status=429)
         hit = _rescache_get(url)      # 静态资源(hash 命名的 js/css/字体/图)命中即走,不占舱壁也不打上游
         if hit is not None:
             body, ct = hit
-            return Response(body, status=200, headers={
-                "Content-Type": ct, "Cache-Control": "public, max-age=604800",
-                "Access-Control-Allow-Origin": "*"})
+            if _rescache_ok(ct):
+                if not budget.consume(len(body)):
+                    return Response("proxy capability byte limit", status=429)
+                return Response(body, status=200, headers={
+                    "Content-Type": ct, "Cache-Control": "public, max-age=604800",
+                    "Access-Control-Allow-Origin": "*"})
         if not _RES_GATE.acquire(timeout=6):
             return Response("proxy busy", status=503)
         ok = False
         try:
-            resp = _serve_res_inner(url)
+            resp = _serve_res_inner(url, cap, budget)
             ok = True
             return resp
         finally:
@@ -1601,10 +2528,12 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
             if not ok:
                 _RES_GATE.release()
 
-    def _gated(it, sess=None):
-        """把"释放信号量 + 关 curl_cffi 会话"绑到流的生命周期上。"""
+    def _gated(it, sess=None, budget=None):
+        """把流量上限、释放信号量和会话关闭绑到流的生命周期。"""
         try:
             for chunk in it:
+                if budget is not None and not budget.consume(len(chunk)):
+                    break
                 yield chunk
         finally:
             if sess is not None:
@@ -1614,8 +2543,10 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
                     pass
             _RES_GATE.release()
 
-    def _serve_res_inner(url: str):
-        h = _px_headers(url, extra_ref=request.headers.get("Referer", ""))
+    def _serve_res_inner(url: str, cap: str, budget):
+        # Never forward the browser's internal /pdf/web/... Referer upstream:
+        # it may contain the bearer capability in its query string.
+        h = _px_headers(url)
         h["Accept"] = request.headers.get("Accept", "*/*")
         rng = request.headers.get("Range")
         if rng:
@@ -1623,7 +2554,6 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
         try:
             sess, r = _px_open(url, h, timeout=25)
         except Exception:
-            _RES_GATE.release()          # acquire 在 _serve_res,连不上上游也要放
             abort(502)
         ct = (r.headers.get("Content-Type") or "application/octet-stream")
         keep = {"content-type", "content-length", "content-range", "accept-ranges",
@@ -1632,7 +2562,17 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
               if k.lower() in keep and k.lower() not in ("content-length", "content-encoding")}
         hd["Access-Control-Allow-Origin"] = "*"
         hd["Content-Type"] = ct
-        _save_resp_cookies(url, r)
+        _save_resp_cookies(str(getattr(r, "url", "") or url), r)
+        try:
+            declared_length = int(r.headers.get("Content-Length") or 0)
+        except (TypeError, ValueError):
+            declared_length = 0
+        if declared_length > MAX_RESOURCE_BYTES_PER_RESPONSE:
+            try:
+                sess.close()
+            finally:
+                _RES_GATE.release()
+            return Response("proxy response too large", status=413)
         # 可缓存的小静态资源:iter_content 整读(curl_cffi stream 后不用 r.content)→ 落盘 → 就地返回
         if _rescache_ok(ct) and r.status_code == 200 and int(r.headers.get("Content-Length") or 0) <= _RESCACHE_MAX:
             try:
@@ -1645,7 +2585,11 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
                         break
                 if not too_big:
                     if "text/css" in ct.lower():
-                        raw = _rewrite_css(raw.decode("utf-8", "replace"), r.url or url).encode("utf-8")
+                        raw = _rewrite_css(raw.decode("utf-8", "replace"), r.url or url, cap).encode("utf-8")
+                    if not budget.consume(len(raw)):
+                        sess.close()
+                        _RES_GATE.release()
+                        return Response("proxy capability byte limit", status=429)
                     _rescache_put(url, raw, ct)
                     sess.close()
                     resp = Response(raw, status=200, headers=hd)
@@ -1656,7 +2600,11 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
                     yield pre
                     for c in it:
                         yield c
-                return Response(_gated(_cont(raw, r.iter_content(65536)), sess), status=200, headers=hd)
+                return Response(
+                    _gated(_cont(raw, r.iter_content(65536)), sess, budget),
+                    status=200,
+                    headers=hd,
+                )
             except Exception:
                 pass
         # 大 CSS(未缓存):读全 → 改写 url()/@import
@@ -1665,60 +2613,52 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
                 body = b""
                 for chunk in r.iter_content(65536):
                     body += chunk
-                resp = Response(_rewrite_css(body.decode("utf-8", "replace"), r.url or url),
-                                status=r.status_code, headers=hd)
+                    if len(body) > MAX_RESOURCE_BYTES_PER_RESPONSE:
+                        sess.close()
+                        _RES_GATE.release()
+                        return Response("proxy response too large", status=413)
+                rewritten = _rewrite_css(
+                    body.decode("utf-8", "replace"),
+                    r.url or url,
+                    cap,
+                ).encode("utf-8")
+                if not budget.consume(len(rewritten)):
+                    sess.close()
+                    _RES_GATE.release()
+                    return Response("proxy capability byte limit", status=429)
+                resp = Response(rewritten, status=r.status_code, headers=hd)
                 sess.close()
                 _RES_GATE.release()
                 return resp
             except Exception:
                 pass
         # 其它:流式透传,_gated 负责 close + release
-        return Response(_gated(r.iter_content(65536), sess), status=r.status_code, headers=hd)
+        return Response(
+            _gated(r.iter_content(65536), sess, budget),
+            status=r.status_code,
+            headers=hd,
+        )
 
     @bp.route("/web/live")
     def pdf_web_live():
-        """实况网页阅读(浏览器 Copilot 形态,用户拍板:要**原本的网页**):
-        顶栏地址栏 + 同源 iframe 真页面 + 右侧助手侧栏(选区经 postMessage 上来)。"""
-        import html as _h
-        url = (request.args.get("url") or "").strip()
-        if not url:
-            return redirect("/pdf/web?home=1")
-        if not url.startswith(("http://", "https://")):
-            url = "https://" + url
-        # ★直接用 **PDF 阅读器那张页面**(用户拍板:"就只是把书页的展示窗口换成网页"):
-        #   顶栏/侧栏/全部 rc-* 与 reader.js 原样复用,零新壳;reader.js 见 web_url 即跳过 PDF 加载。
-        return make_response(render_template(
-            "pdf_reader.html", web_url=url, web_rbi=("1" if request.args.get("rbi") else ""),
-            pdf_url="", file_rel="web:" + url,
-            file_name=url, page=1, page_ts=0, chars_ver=0, pdf_size=0,
-            compressed=0, comp_avail=0, ui_shared=1, group=None,
-            reader_js_v=_html_js_v(), js_v=_html_js_v()))
+        """Short compatibility hand-off: open the original page in the browser."""
+        target = _retired_web_redirect_target(request.args.get("url"))
+        if not target:
+            abort(400)
+        response = redirect(target, code=302)
+        response.headers["Cache-Control"] = "no-store"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
 
     @bp.route("/web")
     def pdf_web_portal():
-        """网页阅读入口(仲裁,像浏览器恢复会话):上次看过网页 → 直接恢复它;
-        没有(或 ?home=1)→ 搜索主页。两者都在 html/view 阅读器壳内(侧栏第一屏可用)。
-        与书的续读完全分离:状态存 state/web-last.json,html 阅读器不碰 reading-pos。"""
-        if request.args.get("q"):
-            return redirect("/pdf/web/live?url=" + _q(
-                WEB_SEARCH_URL.format(q=_q(request.args["q"], safe="")), safe=""))
-        if not request.args.get("home"):
-            last = _web_last_get()
-            if last and last.startswith("http"):
-                return redirect("/pdf/web/live?url=" + _q(last, safe=""))
-        # 主页 = **真的谷歌首页**(用户拍板:不要我们自制的搜索页,直接把原网站拉进来)
-        return redirect("/pdf/web/live?url=" + _q(WEB_HOME, safe=""))
+        """Retired PWA web-reader portal; old bookmarks return to the bookshelf."""
+        return redirect("/pdf/")
 
     @bp.route("/api/web-fetch", methods=["POST"])
     def pdf_api_web_fetch():
-        """抓网页进阅读器(浏览器 Copilot 初版)。POST {url} → {ok, file, title};
-        前端拿 file 跳 /pdf/html/view?file=... 即获全套阅读能力。"""
-        body = request.get_json(silent=True) or {}
-        url = (body.get("url") or "").strip()
-        if not url:
-            return jsonify({"ok": False, "error": "缺 url"}), 400
-        out = _fetch_web_page(url)
-        return jsonify(out), (200 if out.get("ok") else 422)
+        """Retired: the PWA never parses a third-party webpage into a book."""
+        return _retired_web_response()
 
     @bp.route("/api/html-highlights", methods=["GET", "POST", "PATCH", "DELETE"])
     def pdf_api_html_highlights():
@@ -1731,12 +2671,11 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
         if request.method == "DELETE":
             rel = (request.args.get("file") or "").strip()
             hid = (request.args.get("id") or "").strip()
-            items = [h for h in _html_hl_load(rel) if h.get("id") != hid]
-            _html_hl_save(rel, items)
+            with _html_hl_edit(rel) as items:
+                items[:] = [h for h in items if h.get("id") != hid]
             return jsonify({"ok": True})
         body = request.get_json(silent=True) or {}
         rel = (body.get("file") or "").strip()
-        items = _html_hl_load(rel)
         if request.method == "POST":
             try:
                 start = int(body.get("start"))
@@ -1749,16 +2688,17 @@ def register_html_reader(bp, *, safe_vault_path, obsidian_root, claude_dir):
                  "text": (body.get("text") or "")[:2000], "color": (body.get("color") or "#fff59d"),
                  "note": (body.get("note") or "")[:2000], "sentence": (body.get("sentence") or "")[:2000],
                  "time": int(time.time())}
-            items.append(h); _html_hl_save(rel, items)
+            with _html_hl_edit(rel) as items:
+                items.append(h)
             return jsonify({"ok": True, "id": h["id"], "highlight": h})
         # PATCH
         hid = (body.get("id") or "").strip()
-        h = next((x for x in items if x.get("id") == hid), None)
-        if not h:
-            return jsonify({"ok": False, "error": "未找到"}), 404
-        if "color" in body:
-            h["color"] = body.get("color") or h["color"]
-        if "note" in body:
-            h["note"] = (body.get("note") or "")[:2000]
-        _html_hl_save(rel, items)
+        with _html_hl_edit(rel) as items:
+            h = next((x for x in items if x.get("id") == hid), None)
+            if not h:
+                return jsonify({"ok": False, "error": "未找到"}), 404
+            if "color" in body:
+                h["color"] = body.get("color") or h["color"]
+            if "note" in body:
+                h["note"] = (body.get("note") or "")[:2000]
         return jsonify({"ok": True, "highlight": h})

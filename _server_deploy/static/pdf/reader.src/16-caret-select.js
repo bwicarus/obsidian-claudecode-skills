@@ -219,16 +219,33 @@ function paintSelectionOverlay() {
   }
 }
 
+function _ctxSelReport(txt) {
+  // 选区即时同步(用户拍板 2026-07-27):建立/改动/**清空**都立刻推,不走导航防抖。
+  // 传空串而不是省略字段 —— 省略会让快照留着上一次的旧选区(静默退化)。
+  try {
+    window.RC?.ctxSync?.report(
+      { kind: 'pdf', file: FILE_REL, selection: txt || '', sel_page: currentPage },
+      { immediate: true });
+    // 焦点通道(与选区并行,语义不同:选区是"选了什么文字",焦点是"当前对象是谁")。
+    // 取消必须显式发,否则上游会拿着已取消的对象当现状。
+    if (txt) window.RC?.outgoing?.focus('text', { file: FILE_REL, page: currentPage, text: txt.slice(0, 200) });
+    else window.RC?.outgoing?.cancel();
+  } catch (_) {}
+}
 function checkSelection() {
   const sel = window.getSelection();
   const txt = (sel.toString() || '').trim();
   if (!txt || txt.length < 2) {
     // 无原生 selection：char-layer 自定义选中(画在 sel-overlay、不走原生 selection)还在的话别清掉它
-    if (!(_charSel && lastSelText)) paintSelectionOverlay();
+    if (!(_charSel && lastSelText)) { paintSelectionOverlay(); _ctxSelReport(''); }
+    // char-layer 自定义选中仍在 → 屏幕上**确实还有选区**,要上报它而不是空;
+    // 原来这里整个跳过上报,导致"取消原生选中"后快照永远停在旧值(真机实测清空 0 次上报)。
+    else _ctxSelReport(lastSelText || '');
     return;
   }
   paintSelectionOverlay();
   lastSelText = txt;
+  _ctxSelReport(txt);
     _updateSelPreview(lastSelText);
   try {
     const rng = sel.getRangeAt(0);

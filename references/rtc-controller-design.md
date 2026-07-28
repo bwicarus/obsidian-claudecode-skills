@@ -100,3 +100,41 @@ tts 档的代念:relay 无法播——done 时经控制 WS 下行事件让前端
 - relay 重启=控制面断:前端 ctl 断线回退纯前端模式(P2 起必须实现回退开关)。
 - sideband 与 dc 事件顺序无保证:显示(dc)与执行(sideband)解耦,无共享状态,安全。
 - 双 response.create(前端漏改+relay 都发)→ 重复回答:P4 切换时前端分支必须同批部署。
+
+## 踩坑:三条 relay 引擎的 tool_status 字段不同步(2026-07-21,用户实锤"制卡预览不显示")
+
+**症状**:语音制卡后对话里只有 AI 自己写的一句描述("已帮你做成一组 Anki 草稿卡片啦…")+ 一个不起作用的 ▶,
+从来看不到真正的卡片预览(正面/背面/入库按钮)。
+
+**根因**:`voice_realtime_relay.py` 里其实有 **3 处**几乎相同的 `_tool()` 工具执行函数,对应 3 条历史遗留的
+引擎路径:①`handle_browser`豆包 WS(~840 行)②`handle_openai` WS/grok 引擎(~1650 行)③`handle_rtc_ctl`
+openai_rtc 控制面(~2800 行,**当前主力引擎**,`_ledger_tool("openai_rtc",...)` 可辨认)。三处各自独立组装
+`tool_status` 的 payload。①处正确:把 `res` 拆成 `slim`(喂回模型的精简版,遇到 `cards`+`cards_brief` 并存时
+剔掉 `cards` 全文)和 `slim_full`(完整版,塞进 `tool_status.result` 给前端渲预览卡)。②③处是后加的引擎,
+**漏抄了这个模式**——既不带 `result` 字段,也不剔 `cards` 就直接 `json.dumps(slim)[:1600]` 塞进 `rag`。
+制卡这类工具 `cards` 全文很容易超 1600 字符,被从中截断 → 前端 `_chipEnd`(rc-voicecall.js)
+`p.result` 是 undefined 只能退回 `JSON.parse(p.rag)`,解析残缺 JSON 直接抛异常,被吞掉,
+"制卡结果里有没有卡片数据"这个判断就此静默失败,退到最后的兜底分支(只留 AI 文字 + 空【流程】卡)。
+
+**修法(2026-07-21 二阶段,用户"把能合并的都合并")**:三处 `_tool()` 里"结果预处理"这段逐字重复的代码
+(剔控制字段 → cards/images 精简 → 限长兜底 → slim_full 完整体)**抽成模块级共享函数**,一次改、三处生效:
+- `_prep_tool_result(res, tool_name) → (slim, slim_full, rag)`:slim=喂回模型精简版、slim_full=完整体(渲预览卡)、
+  rag=按 `_RAG_LIMIT` 限长的串。三处调用一行 `slim, slim_full, out/content = _prep_tool_result(res, ...)`。
+- `_tool_preview_result(slim_full)`:tool_status.result 字段(有 cards 才给完整体,否则 None),三处统一。
+这不只是补齐②③,而是**从结构上消除**"三份手抄各自漏字段"的复发源:合并时还发现②③连 images/found_brief
+剔除都漏了(只有①有)——现在三处统一都有,search_image 在 grok/rtc 引擎上也不再挤爆 token 预算。
+**前端零改动**——`_chipEnd` 的提取逻辑本来就对,只是从未收到过它期待的字段。
+⚠ block2/3 的 `slim_full = None` 初始化必须保留:它们的 `_tool()` 有多个短路分支(recall_study/deep_think/
+route_to_text/cache 命中)不走 `_prep_tool_result`,而 tool_status 在 try/except 之后无条件发,不初始化会 NameError。
+
+**验证**:纯 Python 模拟 slim/slim_full 构造(cards 剔除后 `out` 远小于 1600、`result.cards` 完整);
+headless E2E 直接给 `RC.turnCard.addPart({kind:'cards',...})` 喂同形状数据,确认渲出 `.fc-card`
+(正面文本+入库按钮+多卡圆点)。
+
+**部署要点**:`voice-rt.service` 直接跑 `/home/bwicarus/claude/_server_deploy/voice_realtime_relay.py`
+**原地**(不经 `sudo cp` 到 webapp 目录——那份是没人 import 的陈旧遗留副本,纯属混淆源),
+改完直接 `sudo systemctl restart voice-rt`(必须先过 [[restart-voice-rt-check-active-call]] 的程序化 gate)。
+
+**遗留**:①处的 cache 命中分支(`tool_cache[ck] = {"out":..., "ca":...}`)没存 `slim_full`,
+命中缓存重放时同样会丢 `result`——但 make_anki 等写操作从不 cacheable,只有只读工具(如
+`search_image`)理论上会撞上,当前未见用户报告,标记为已知小缺口,不在本次范围内修。

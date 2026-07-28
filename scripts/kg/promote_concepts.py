@@ -24,9 +24,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config  # noqa: E402
+_CODE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import attention_profile as AP  # noqa: E402
 from config import NOTE_PATTERN  # noqa: E402
+from concept_node_service import ConceptNodeError, ConceptNodeService  # noqa: E402
 
 VAULT = Path(AP.VAULT_ROOT)
 OUT = config.PROJECT_DIR / "state" / "attention" / "emergent-graph.json"
@@ -35,6 +37,30 @@ KG_DIR = config.PROJECT_DIR / "knowledge_graph"
 
 STOP = {"我们", "称为", "定义", "全问未回答", "全問未回答", "如果", "可以", "一个", "这个",
         "那个", "以下", "进行", "了解", "实际上", "这种", "大多数", "一切", "过程", "离开"}
+
+
+def _semantic_payload(value):
+    """Drop write-time metadata from a durable KG operation identity."""
+    if isinstance(value, dict):
+        return {
+            key: _semantic_payload(item)
+            for key, item in value.items()
+            if key != "ts"
+        }
+    if isinstance(value, list):
+        return [_semantic_payload(item) for item in value]
+    return value
+
+
+def _semantic_digest(value):
+    return hashlib.sha256(
+        json.dumps(
+            _semantic_payload(value),
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode("utf-8")
+    ).hexdigest()
 
 
 def _vocab_set():
@@ -135,10 +161,123 @@ def build(write=False):
            "sources": ["note", "diagnostic", "autonote"]}}
     out["edges"] = derive_edges(out)
     if write:
-        OUT.parent.mkdir(parents=True, exist_ok=True)
-        tmp = OUT.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps(out, ensure_ascii=False, indent=1), "utf-8")
-        tmp.replace(OUT)
+        # 旧实现整表替换会抹掉 page-brief 节点、回滚墓碑和并发边审计。
+        # 现在所有种子先走唯一节点服务，再在同一事务锁下刷新派生边。
+        service = ConceptNodeService(
+            graph_path=OUT,
+            journal_path=OUT.parent / "kg-node-mutations.jsonl",
+            aliases_path=ALIASES_FILE,
+            confirmations_path=CONF_FILE,
+            kg_dir=KG_DIR,
+            concept_root=VAULT / "资源" / "概念",
+        )
+        candidates = []
+        for _key, seed in sorted(seeds.items()):
+            provenance = seed.get("provenance") or []
+            for occurrence in provenance:
+                kind = str(occurrence.get("type") or "")
+                ref = str(occurrence.get("ref") or "")
+                if kind not in ("note", "diagnostic") or not ref:
+                    continue
+                candidates.append({
+                    "surface": seed.get("surface") or _key,
+                    "sourceKind": kind,
+                    "sourceId": f"{kind}:{ref}",
+                    "documentRef": (
+                        "vault-note:" + ref
+                        if kind == "note"
+                        else "diagnostic:" + ref
+                    ),
+                })
+        basis = json.dumps(candidates, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
+        candidate_sha = hashlib.sha256(basis.encode("utf-8")).hexdigest()
+        digest = candidate_sha[:24]
+        if candidates:
+            service.upsert_candidates(
+                candidates,
+                mutation_id="promote-concepts:" + digest,
+                source="promote-concepts",
+                operation_contract="kg-op/promote-concepts-nodes/1",
+                operation_payload={"candidates": candidates},
+            )
+
+        current_projection = service.load_graph()
+        confirmation_edges = _load_conf_edges(strict=True)
+        view_payload = {
+            "candidateBatchSha256": candidate_sha,
+            "activeNodeProjectionSha256": _semantic_digest(
+                current_projection.get("nodes") or {}
+            ),
+            "edgeClaimsSha256": _semantic_digest(
+                current_projection.get("edge_claims") or {}
+            ),
+            "edgeAuditsSha256": _semantic_digest(
+                current_projection.get("edge_audits") or {}
+            ),
+            "confirmationEdgesSha256": hashlib.sha256(
+                json.dumps(
+                    confirmation_edges,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest(),
+            "edgeVersion": EDGE_VER,
+        }
+        view_digest = hashlib.sha256(
+            json.dumps(
+                view_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()[:24]
+
+        def refresh(graph):
+            if _load_conf_edges(strict=True) != confirmation_edges:
+                raise ConceptNodeError(
+                    "用户边确认在 KG 事务前发生变化",
+                    "BW_KG_NODE_STALE_EXTERNAL",
+                )
+            if (
+                _semantic_digest(graph.get("nodes") or {})
+                != view_payload["activeNodeProjectionSha256"]
+                or _semantic_digest(graph.get("edge_claims") or {})
+                != view_payload["edgeClaimsSha256"]
+                or _semantic_digest(graph.get("edge_audits") or {})
+                != view_payload["edgeAuditsSha256"]
+            ):
+                raise ConceptNodeError(
+                    "KG 派生视图的业务投影已变化",
+                    "BW_KG_NODE_STALE_GRAPH",
+                )
+            graph["edges"] = derive_edges(
+                graph,
+                confirmation_edges=confirmation_edges,
+            )
+            meta = graph.setdefault("meta", {})
+            meta["built"] = int(time.time())
+            meta["n"] = sum(
+                1 for node in graph.get("nodes", {}).values()
+                if isinstance(node, dict) and not node.get("deleted")
+            )
+            meta["n_new"] = sum(
+                1 for node in graph.get("nodes", {}).values()
+                if isinstance(node, dict)
+                and not node.get("deleted")
+                and not node.get("in_authored_kg")
+            )
+            meta["sources"] = ["note", "diagnostic", "autonote", "page-brief"]
+            return {"n": meta["n"], "nEdges": len(graph["edges"])}
+
+        service.mutate_graph(
+            mutation_id="promote-concepts-view:" + view_digest,
+            source="promote-concepts",
+            mutator=refresh,
+            operation_contract="kg-op/promote-concepts-view/1",
+            operation_payload=view_payload,
+        )
+        out = service.load_graph()
     return out
 
 
@@ -343,7 +482,7 @@ def confirm_candidates(cands, model="sonnet", effort="low", use_cache=True):
                   + "\n\n".join(lines)
                   + "\n\n只输出严格 JSON 数组,无其他文字: "
                     '[{"i":0,"verdict":"prereq|demote|drop","reason":"≤15字"}, ...]')
-        sys.path.insert(0, str(config.PROJECT_DIR / "_client" / "core"))
+        sys.path.insert(0, str(_CODE_ROOT / "_client" / "core"))
         from ai_backends import make_backend
         backend = make_backend("claude_cli", {"command": "/usr/bin/claude",
                                               "model": model, "effort": effort, "timeout": 180})
@@ -401,11 +540,22 @@ def upsert_claim(g, frm, to, kind, rel_detail, quote, quote_src, src_tier, metho
     return eid
 
 
-def _load_conf_edges():
+def _load_conf_edges(*, strict=False):
     """用户 override(第 4 层):emergent-confirmations.json edges,键归一为 "from|to"(兼容旧 "from|to|kind")。"""
     try:
-        raw = (json.loads(CONF_FILE.read_text("utf-8")) or {}).get("edges", {})
-    except Exception:
+        payload = json.loads(CONF_FILE.read_text("utf-8")) if CONF_FILE.exists() else {}
+        if not isinstance(payload, dict):
+            raise ValueError("confirmation root must be object")
+        raw = payload.get("edges", {})
+        if not isinstance(raw, dict):
+            raise ValueError("confirmation edges must be object")
+    except Exception as exc:
+        if strict:
+            raise ConceptNodeError(
+                "用户边确认文件损坏或不可读",
+                "BW_KG_NODE_CONFIRMATIONS_CORRUPT",
+                {"path": str(CONF_FILE), "error": str(exc)},
+            ) from exc
         raw = {}
     out = {}
     for k, v in raw.items():
@@ -418,12 +568,16 @@ def _load_conf_edges():
 _TIER_RANK = {"quote": 3, "book": 2, "prose": 1}
 
 
-def derive_edges(g):
+def derive_edges(g, *, confirmation_edges=None):
     """R4 派生视图:override > 墓碑(audit remove) > audited > auto。
     激活策略:related 生成即生效(auto);prereq 未审计= shadow(展示但不进 availability);
     unconfirmed 不产 claim(上游已 fail-closed)。防环:只在 effective(audited/user_confirmed)
     prereq 间检,环内证据最弱者**降 shadow**(非破坏)。"""
-    conf = _load_conf_edges()
+    conf = (
+        _load_conf_edges()
+        if confirmation_edges is None
+        else dict(confirmation_edges)
+    )
     audits = g.get("edge_audits", {})
     out = []
     for eid, c in (g.get("edge_claims") or {}).items():
@@ -486,21 +640,107 @@ def build_edges(model="sonnet", effort="low", write=False, candidates_only=False
         g["_candidates"] = cands
         return g
     verdicts = confirm_candidates(cands, model=model, effort=effort)
+    accepted = []
     for c in cands:
         v = verdicts.get((c["from"], c["to"]), {})
         vd = v.get("verdict", "unconfirmed")
         if vd in ("drop", "unconfirmed"):   # fail-closed:没点头的绝不进图,下轮重试
             continue
-        upsert_claim(g, c["from"], c["to"],
-                     kind=("prereq" if vd == "prereq" else "related"), rel_detail=vd,
-                     quote=c["quote"], quote_src=c["quote_src"], src_tier=c["src_tier"],
-                     method="aliasscan+sentconfirm", reason=v.get("reason", ""))
+        action = {
+            **c,
+            "kind": ("prereq" if vd == "prereq" else "related"),
+            "rel_detail": vd,
+            "reason": v.get("reason", ""),
+        }
+        accepted.append(action)
+        upsert_claim(g, action["from"], action["to"],
+                     kind=action["kind"], rel_detail=action["rel_detail"],
+                     quote=action["quote"], quote_src=action["quote_src"], src_tier=action["src_tier"],
+                     method="aliasscan+sentconfirm", reason=action["reason"])
     g["edges"] = derive_edges(g)          # R4:派生视图(override>墓碑>audited>auto;prereq未审=shadow)
     g["meta"]["n_edges"] = len(g["edges"])
     g["meta"]["edges_built"] = int(time.time())
     g["meta"]["edges_ver"] = EDGE_VER
     if write:
-        OUT.write_text(json.dumps(g, ensure_ascii=False, indent=1), "utf-8")
+        service = ConceptNodeService(
+            graph_path=OUT,
+            journal_path=OUT.parent / "kg-node-mutations.jsonl",
+            aliases_path=ALIASES_FILE,
+            confirmations_path=CONF_FILE,
+            kg_dir=KG_DIR,
+            concept_root=VAULT / "资源" / "概念",
+        )
+        current_graph = service.load_graph()
+        base_edge_claims_digest = _semantic_digest(
+            current_graph.get("edge_claims") or {}
+        )
+        confirmation_edges = _load_conf_edges(strict=True)
+        operation_payload = {
+            "actions": accepted,
+            "confirmationEdges": confirmation_edges,
+            "desiredEdgeClaimsSha256": _semantic_digest(
+                g.get("edge_claims") or {}
+            ),
+            "edgeAuditsSha256": _semantic_digest(
+                current_graph.get("edge_audits") or {}
+            ),
+            "edgeVersion": EDGE_VER,
+        }
+        basis = json.dumps(
+            operation_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        digest = hashlib.sha256(basis.encode("utf-8")).hexdigest()[:24]
+
+        def apply_edges(current):
+            if _load_conf_edges(strict=True) != confirmation_edges:
+                raise ConceptNodeError(
+                    "用户边确认在 KG 事务前发生变化",
+                    "BW_KG_NODE_STALE_EXTERNAL",
+                )
+            if (
+                _semantic_digest(current.get("edge_claims") or {})
+                != base_edge_claims_digest
+                or _semantic_digest(current.get("edge_audits") or {})
+                != operation_payload["edgeAuditsSha256"]
+            ):
+                raise ConceptNodeError(
+                    "KG 边业务投影已变化",
+                    "BW_KG_NODE_STALE_GRAPH",
+                )
+            for action in accepted:
+                upsert_claim(
+                    current,
+                    action["from"],
+                    action["to"],
+                    kind=action["kind"],
+                    rel_detail=action["rel_detail"],
+                    quote=action["quote"],
+                    quote_src=action["quote_src"],
+                    src_tier=action["src_tier"],
+                    method="aliasscan+sentconfirm",
+                    reason=action["reason"],
+                )
+            current["edges"] = derive_edges(
+                current,
+                confirmation_edges=confirmation_edges,
+            )
+            meta = current.setdefault("meta", {})
+            meta["n_edges"] = len(current["edges"])
+            meta["edges_built"] = int(time.time())
+            meta["edges_ver"] = EDGE_VER
+            return {"accepted": len(accepted), "nEdges": len(current["edges"])}
+
+        service.mutate_graph(
+            mutation_id="promote-edges:" + digest,
+            source="promote-concepts.build_edges",
+            mutator=apply_edges,
+            operation_contract="kg-op/promote-edges/1",
+            operation_payload=operation_payload,
+        )
+        g = service.load_graph()
     return g
 
 

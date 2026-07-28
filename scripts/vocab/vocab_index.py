@@ -12,6 +12,7 @@ import json
 import os
 import re
 import time
+from functools import lru_cache
 from pathlib import Path
 
 VAULT_ROOT = Path(os.environ.get("OBSIDIAN_VAULT", "/home/bwicarus/obsidian"))
@@ -59,6 +60,63 @@ def _parse_frontmatter(raw: str) -> dict:
     return fm
 
 
+@lru_cache(maxsize=4096)
+def _ecdict_lemma_for_form(form: str) -> str:
+    """Return ECDICT's validated lemma for an English surface form.
+
+    ``dict_sources.lookup_ecdict`` already owns the project's safeguards for
+    dirty ``0:`` redirects (for example ``also -> conjurer``), so the vocab
+    index must reuse it instead of growing a second lemmatizer.
+    """
+    if not re.fullmatch(r"[a-z][a-z'’-]*", form):
+        return ""
+    try:
+        from dict_sources import lookup_ecdict
+
+        entry = lookup_ecdict(form)
+    except Exception:
+        return ""
+    return str((entry or {}).get("lemma") or "").strip().lower()
+
+
+def _english_form_owner(form: str, candidates: list[dict]) -> dict:
+    """Choose one vocab card when English lemmas claim the same form.
+
+    A surface form is not globally unique (``was`` is both ``be``'s past form
+    and the plural recorded for the rare abbreviation ``wa``).  Previously the
+    last file returned by ``rglob`` silently won, so mastery depended on
+    filesystem traversal order.  Prefer the canonical lemma from the existing
+    ECDICT pipeline.  If ECDICT is unavailable, prefer the exact lemma and then
+    the most frequent BNC lemma as a deterministic, conservative fallback.
+    """
+    canonical = _ecdict_lemma_for_form(form)
+    if canonical:
+        for info in candidates:
+            if info["lemma"] == canonical:
+                return info
+
+    for info in candidates:
+        if info["lemma"] == form:
+            return info
+
+    def frequency_rank(info: dict) -> tuple[bool, int, str]:
+        freq = int(info.get("freq_bnc") or 0)
+        return (freq <= 0, freq if freq > 0 else 2**31 - 1, info["lemma"])
+
+    return min(candidates, key=frequency_rank)
+
+
+def _form_owner(form: str, candidates: list[dict]) -> dict:
+    if len(candidates) == 1:
+        return candidates[0]
+    if re.fullmatch(r"[a-z][a-z'’-]*", form):
+        return _english_form_owner(form, candidates)
+    # Japanese forms are already resolved by their morphology pipeline.  Keep
+    # the prior last-note-wins behaviour here rather than applying English
+    # frequency rules to a language where freq_bnc is intentionally zero.
+    return candidates[-1]
+
+
 def index(*, force_reload: bool = False) -> dict[str, dict]:
     vroot = _vocab_root()
     if not vroot.exists():
@@ -66,7 +124,7 @@ def index(*, force_reload: bool = False) -> dict[str, dict]:
     mtime = _scan_vroot_mtime(vroot)
     if (not force_reload) and _CACHE["data"] is not None and abs(_CACHE["vroot_mtime"] - mtime) < 0.5:
         return _CACHE["data"]
-    out: dict[str, dict] = {}
+    candidates_by_form: dict[str, list[dict]] = {}
     for p in vroot.rglob("*.md"):
         try:
             raw = p.read_text("utf-8")
@@ -92,7 +150,13 @@ def index(*, force_reload: bool = False) -> dict[str, dict]:
         for f in [lemma] + list(forms):
             f = f.strip().lower()
             if f:
-                out[f] = info
+                candidates = candidates_by_form.setdefault(f, [])
+                if not any(old["path"] == info["path"] for old in candidates):
+                    candidates.append(info)
+    out = {
+        form: _form_owner(form, candidates)
+        for form, candidates in candidates_by_form.items()
+    }
     _CACHE["data"] = out
     _CACHE["vroot_mtime"] = mtime
     _CACHE["ts_loaded"] = time.time()

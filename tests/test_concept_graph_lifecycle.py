@@ -6,13 +6,16 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT / "scripts" / "kg"))
 sys.path.insert(0, str(ROOT / "scripts"))
 import promote_concepts as PC  # noqa: E402
 import propose_concept_notes as PCN  # noqa: E402
+import build_unified_graph as BUG  # noqa: E402
 import attention_profile as AP  # noqa: E402
+from concept_node_service import stable_node_id  # noqa: E402
 
 
 class TwoNightLifecycle(unittest.TestCase):
@@ -64,6 +67,39 @@ class TwoNightLifecycle(unittest.TestCase):
         e = PC.derive_edges(g)[0]
         self.assertEqual(e["status"], "user_confirmed", "用户 True 压过审计墓碑(可复活)")
 
+    def test_write_snapshot_is_strict_and_frozen(self):
+        g = {"edge_claims": {}, "edge_audits": {}}
+        PC.upsert_claim(
+            g,
+            "A",
+            "B",
+            "related",
+            "related",
+            "q",
+            "note:x.md",
+            "quote",
+            "m",
+        )
+        PC.CONF_FILE.write_text("{broken", "utf-8")
+        with self.assertRaises(PC.ConceptNodeError) as caught:
+            PC._load_conf_edges(strict=True)
+        self.assertEqual(
+            caught.exception.code,
+            "BW_KG_NODE_CONFIRMATIONS_CORRUPT",
+        )
+        PC.CONF_FILE.write_text(
+            json.dumps({"edges": {"A|B": True}}),
+            "utf-8",
+        )
+        self.assertEqual(
+            PC.derive_edges(
+                g,
+                confirmation_edges={"A|B": False},
+            ),
+            [],
+            "事务必须消费 receipt 中冻结的确认快照，不能中途重读文件",
+        )
+
     def test_auto_text_never_feeds_edges(self):
         md = ("---\ntype: concept-auto\n---\n# X\n\n## 定义\n"
               "**AI 生成(仅参考,非原文)**:AI文本提到子空间。\n\n"
@@ -93,6 +129,165 @@ class IdentityResolve(unittest.TestCase):
             self.assertTrue(ident)
         finally:
             AP.VAULT_ROOT, PCN.EMERGENT = saved_vault, saved_em
+
+
+class UnifiedIdentityLifecycle(unittest.TestCase):
+    def setUp(self):
+        self.temp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self.temp.name)
+        self.saved = (BUG.KG_DIR, BUG.EMERGENT, BUG.OUT, BUG.CONF)
+        BUG.KG_DIR = self.tmp / "knowledge_graph"
+        BUG.EMERGENT = self.tmp / "emergent.json"
+        BUG.OUT = self.tmp / "unified.json"
+        BUG.CONF = self.tmp / "confirmations.json"
+        BUG.KG_DIR.mkdir()
+
+    def tearDown(self):
+        BUG.KG_DIR, BUG.EMERGENT, BUG.OUT, BUG.CONF = self.saved
+        self.temp.cleanup()
+
+    def test_persisted_id_survives_and_tombstone_never_reappears(self):
+        (BUG.KG_DIR / "book.json").write_text(json.dumps({
+            "book": "Book",
+            "nodes": [{
+                "id": "auth-1",
+                "level": 2,
+                "name": "Authored",
+                "pages": [1],
+            }],
+            "edges": [],
+        }), "utf-8")
+        active_id = stable_node_id("active")
+        BUG.EMERGENT.write_text(json.dumps({
+            "nodes": {
+                "active": {
+                    "id": active_id,
+                    "surface": "Active",
+                    "subject": "Subject",
+                    "origin": "emergent",
+                    "provenance": [],
+                },
+                "rolled-back": {
+                    "id": stable_node_id("rolled-back"),
+                    "surface": "Rolled back",
+                    "deleted": True,
+                    "tombstone": {"rollbackOf": "tx-1"},
+                },
+                "authored": {
+                    "id": stable_node_id("authored"),
+                    "surface": "Authored",
+                    "in_authored_kg": True,
+                    "authored_ref": "Book#auth-1",
+                    "provenance": [{"type": "page-brief", "page": 7}],
+                },
+            },
+            "edges": [{
+                "from": "active",
+                "to": "authored",
+                "kind": "related",
+                "status": "audited",
+                "quote": "evidence",
+            }],
+            "meta": {},
+        }), "utf-8")
+        BUG.CONF.write_text(json.dumps({"nodes": {}, "edges": {}}), "utf-8")
+
+        result = BUG.build(write=False)
+        ids = {node["id"] for node in result["nodes"]}
+        self.assertIn(active_id, ids)
+        self.assertNotIn(stable_node_id("rolled-back"), ids)
+        self.assertNotIn(stable_node_id("authored"), ids)
+        authored = next(node for node in result["nodes"] if node["id"] == "Book::auth-1")
+        self.assertEqual(authored["pages"], [1, 7])
+        self.assertEqual(authored["emergent_key"], "authored")
+        self.assertTrue(any(
+            edge["from"] == active_id and edge["to"] == "Book::auth-1"
+            for edge in result["edges"]
+        ))
+
+    def test_nightly_promote_merges_without_erasing_page_nodes_or_tombstones(self):
+        graph = {
+            "nodes": {
+                "page concept": {
+                    "id": stable_node_id("page concept"),
+                    "surface": "Page Concept",
+                    "origin": "emergent",
+                    # This fixture exercises merge preservation, not evidence
+                    # migration.  A provenance-bearing graph now requires its
+                    # durable mutation journal and is covered by KG-f tests.
+                    "signal": 0,
+                    "provenance": [],
+                },
+                "rolled back": {
+                    "id": stable_node_id("rolled back"),
+                    "surface": "Rolled Back",
+                    "origin": "emergent",
+                    "deleted": True,
+                    "tombstone": {"rollbackOf": "tx-old"},
+                },
+            },
+            "edges": [],
+            "edge_claims": {},
+            "edge_audits": {},
+            "meta": {},
+        }
+        saved = (
+            PC.OUT,
+            PC.ALIASES_FILE,
+            PC.CONF_FILE,
+            PC.KG_DIR,
+            PC.VAULT,
+        )
+        PC.OUT = self.tmp / "nightly-emergent.json"
+        PC.ALIASES_FILE = self.tmp / "aliases.json"
+        PC.CONF_FILE = self.tmp / "confirmations.json"
+        PC.KG_DIR = self.tmp / "nightly-kg"
+        PC.VAULT = self.tmp / "vault"
+        PC.OUT.write_text(json.dumps(graph), "utf-8")
+        PC.ALIASES_FILE.write_text("{}", "utf-8")
+        PC.CONF_FILE.write_text('{"nodes":{},"edges":{}}', "utf-8")
+        PC.KG_DIR.mkdir()
+        PC.VAULT.mkdir()
+        try:
+            with patch.object(PC, "collect_seeds", return_value={
+                "nightly concept": {
+                    "surface": "Nightly Concept",
+                    "sources": {"note"},
+                    "signal": 1,
+                    "provenance": [{"type": "note", "ref": "000-night.md"}],
+                },
+            }), patch.object(PC, "_authored_kg_terms", return_value={}):
+                result = PC.build(write=True)
+                graph_after_first = PC.OUT.read_bytes()
+                journal_path = PC.OUT.parent / "kg-node-mutations.jsonl"
+                journal_after_first = journal_path.read_bytes()
+                repeated = PC.build(write=True)
+                self.assertEqual(PC.OUT.read_bytes(), graph_after_first)
+                self.assertEqual(
+                    journal_path.read_bytes(),
+                    journal_after_first,
+                    "相同 nightly build 必须 exact replay，不能增长 journal",
+                )
+                self.assertEqual(
+                    repeated["nodes"],
+                    result["nodes"],
+                )
+        finally:
+            (
+                PC.OUT,
+                PC.ALIASES_FILE,
+                PC.CONF_FILE,
+                PC.KG_DIR,
+                PC.VAULT,
+            ) = saved
+
+        self.assertIn("page concept", result["nodes"])
+        self.assertIs(result["nodes"]["rolled back"]["deleted"], True)
+        self.assertEqual(
+            result["nodes"]["page concept"]["id"],
+            stable_node_id("page concept"),
+        )
+        self.assertIn("nightly concept", result["nodes"])
 
 
 if __name__ == "__main__":

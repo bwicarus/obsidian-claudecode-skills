@@ -73,6 +73,8 @@
   var LSK_LP = 'rc-note-longpress';     // 长按时长设置键(毫秒;rc-settings「便签」tab 滑块写)
   var TAP_WIN = 380, TAP_TOL = 10;      // 双击窗口/tap 位移容差(照 _tapCount 先例)
   var LP_TOL = 10;                      // 长按移动取消容差
+  var CARD_DRAG_HOLD_MS = 420;          // 卡头蓄力：与侧栏宽度把手采用同一成熟节奏
+  var CARD_DRAG_TOL = 8;                // 蓄力前超过容差即取消，快划不会误拖或切形态
 
   var O = null;        // opts
   var notes = [];      // 服务端便签列表(本地镜像)
@@ -86,6 +88,13 @@
   var _rz = null;      // 右下 resize {ctl, sx, sy, w0, h0, raf}
   var _rzTL = null;    // 左上 resize {ctl, sx, sy, w0, h0, shiftX, shiftY, raf}(右下角锚定:位置+尺寸同变)
   var _docBound = false;
+  // 存储边界：PWA 未迁移时仍走 legacy HTTP；扩展传入 scoped repository 后，
+  // 本组件的所有便签 I/O 只经 repository，绝不再碰 /pdf/api/notes。
+  var _generation = 0;
+  var _unsubscribe = null;
+  var _writeQueues = Object.create(null);   // noteId -> Promise；同一便签严格串行写
+  var _seenRevs = Object.create(null);      // CHANGE 先于 LIST/RESULT 时阻止旧快照回灌
+  var _mutationSeq = 0;
 
   function toastMsg(m) {
     try { if (O && O.toast) return O.toast(m); } catch (e) {}
@@ -162,6 +171,10 @@
       '.rc-note.rc-note-lift{transform:scale(1.03);transform-origin:0 0;opacity:.92}',
       '.rc-note.rc-note-lift .rc-note-handle{cursor:grabbing;box-shadow:0 10px 26px rgba(0,0,0,.5)}',
       '.rc-note.rc-note-lift .rc-note-body{box-shadow:0 12px 30px rgba(0,0,0,.45)}',
+      '.rc-note.rc-card-drag-charging .rc-note-handle{box-shadow:inset 0 -2px 0 rgba(125,211,252,.38)!important}',
+      '.rc-note.rc-card-drag-charging .rc-note-handle::before{content:"";position:absolute;left:0;bottom:0;height:2px;width:100%;border-radius:2px;background:#7dd3fc;transform-origin:left;animation:rc-card-drag-charge .42s linear both}',
+      '.rc-note.rc-card-drag-ready .rc-note-handle{box-shadow:inset 0 -2px 0 rgba(125,211,252,.9)!important}',
+      '@keyframes rc-card-drag-charge{from{transform:scaleX(0);opacity:.35}to{transform:scaleX(1);opacity:1}}',
       /* 删除键:Apple 简约风——右上角小圆角标,毛玻璃深底 + 白色细线 ✕(不再红底红边飘右侧;确认弹窗才是危险动作) */
       '.rc-note-del{position:absolute;top:-10px;right:-10px;z-index:6;width:24px;height:24px;border-radius:50%;border:none;background:rgba(28,28,30,.62);-webkit-backdrop-filter:blur(6px);backdrop-filter:blur(6px);color:#fff;line-height:0;display:none;align-items:center;justify-content:center;cursor:pointer;padding:0;box-shadow:0 1px 5px rgba(0,0,0,.32);-webkit-tap-highlight-color:transparent;transition:transform .12s ease,background .12s ease}',
       '.rc-note-del:hover{background:rgba(40,40,44,.72)}',
@@ -215,7 +228,7 @@
       '.rc-note.rc-note-hascard .rc-note-handle,.rc-note.rc-note-hashtml .rc-note-handle{position:absolute;left:0;top:0;width:100%;height:36px;background:transparent!important;box-shadow:none!important;z-index:5;border-radius:16px 16px 0 0}',
       '.rc-note.rc-note-hascard .rc-note-handle::after,.rc-note.rc-note-hashtml .rc-note-handle::after{display:none}',
       '.rc-note.rc-note-hascard .rc-note-body,.rc-note.rc-note-hashtml .rc-note-body{margin-top:0;border:none!important;box-shadow:none!important;background:transparent!important;border-radius:16px}',
-      '.rc-note.rc-note-hascard .rc-note-rs,.rc-note.rc-note-hascard .rc-note-rs-tl,.rc-note.rc-note-hascard .rc-note-del,.rc-note.rc-note-hashtml .rc-note-rs,.rc-note.rc-note-hashtml .rc-note-rs-tl,.rc-note.rc-note-hashtml .rc-note-del{display:none!important}',   // 白圆手柄/外部✕不属于卡观感;删卡走卡头✕(触发 del.click)
+      '.rc-note.rc-note-hascard .rc-note-rs,.rc-note.rc-note-hascard .rc-note-rs-tl,.rc-note.rc-note-hascard .rc-note-del,.rc-note.rc-note-hashtml .rc-note-rs,.rc-note.rc-note-hashtml .rc-note-rs-tl,.rc-note.rc-note-hashtml .rc-note-del{display:none!important}',   // 白圆手柄/外部✕不属于卡观感；删卡只走拖到左上角大投放区
       // 拖动锚定反馈(用户设计 2026-07-21 #51):拖动时实时标出将绑定的位置——
       //   光带=命中内容(锚到这段);横线=空白/clamp(内容插入位置,排到上方内容之后)。iOS 蓝,美观优先。
       '.rc-anchor-fx{position:absolute;pointer-events:none;z-index:60;transition:top .06s linear,left .06s linear,width .06s linear}',
@@ -265,17 +278,265 @@
     document.head.appendChild(css);
   }
 
-  // ─────────────────────────── API ───────────────────────────
-  function req(method, body, cb) {
-    fetch(API, { method: method, headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-      .then(function (r) { return r.json(); })
-      .then(function (d) { if (cb) cb(d); })
-      .catch(function () { if (cb) cb(null); });
+  // ─────────────────────────── 唯一 I/O 边界 ───────────────────────────
+  function repoMode() { return !!(O && O.repository); }
+  function repoReady() {
+    if (!repoMode()) return false;
+    var r = O.repository;
+    return !!(
+      O.documentId &&
+      typeof r.newId === 'function' &&
+      typeof r.list === 'function' &&
+      typeof r.get === 'function' &&
+      typeof r.create === 'function' &&
+      typeof r.patch === 'function' &&
+      typeof r.remove === 'function' &&
+      typeof r.subscribe === 'function'
+    );
+  }
+  function staleError() {
+    var e = new Error('便签页面身份已经变化');
+    e.code = 'BW_NOTE_STALE_GENERATION';
+    return e;
+  }
+  function ioError(error, prefix) {
+    if (error && error.code === 'BW_NOTE_STALE_GENERATION') return;
+    var detail = String(error && error.message || error || '').trim();
+    toastMsg('✗ ' + (prefix || '便签保存失败') + (detail ? '：' + detail : ''));
+  }
+  function cloneValue(value) {
+    if (value == null) return value;
+    try { return JSON.parse(JSON.stringify(value)); } catch (_) { return value; }
+  }
+  function mutationId(kind, noteId) {
+    var random = '';
+    try {
+      if (window.crypto && typeof window.crypto.randomUUID === 'function') random = window.crypto.randomUUID();
+    } catch (_) {}
+    if (!random) random = Date.now().toString(36) + '-' + (++_mutationSeq).toString(36);
+    return 'rc-note:' + kind + ':' + String(noteId || 'new') + ':' + random;
+  }
+  function noteIdOf(note) { return String(note && (note.noteId || note.id) || ''); }
+  function noteIndex(noteId) {
+    for (var i = 0; i < notes.length; i++) if (noteIdOf(notes[i]) === noteId) return i;
+    return -1;
+  }
+  function currentNote(noteId) {
+    var index = noteIndex(noteId);
+    return index >= 0 ? notes[index] : null;
+  }
+  function removeLocal(noteId) {
+    var ctl = ctls[noteId];
+    if (ctl) {
+      try { if (EDIT && EDIT.ctl === ctl) exitEdit(); } catch (_) {}
+      try { ctl.root.remove(); } catch (_) {}
+      try { if (ctl._ph) ctl._ph.remove(); } catch (_) {}
+      delete ctls[noteId];
+    }
+    var index = noteIndex(noteId);
+    if (index >= 0) notes.splice(index, 1);
+  }
+  // LIST、CHANGE 与本地操作 RESULT 共用同一增量投影。相同 rev 是同一次写的
+  // 重放，不重建 DOM；更旧 rev 永远不能覆盖。删除 CHANGE 即使先于旧 LIST
+  // 到达，也由 _seenRevs 留住 tombstone 的版本栅栏。
+  function upsertRecord(note, generation) {
+    if (generation !== _generation || !note) return null;
+    var id = noteIdOf(note), rev = Number(note.rev) || 0;
+    if (!id) return null;
+    var seen = Number(_seenRevs[id]) || 0;
+    if (rev < seen) return currentNote(id);
+    if (note.deleted === true) {
+      _seenRevs[id] = Math.max(seen, rev);
+      removeLocal(id);
+      return null;
+    }
+    var index = noteIndex(id), existing = index >= 0 ? notes[index] : null;
+    var existingRev = Number(existing && existing.rev) || 0;
+    if (existing && rev <= existingRev) {
+      _seenRevs[id] = Math.max(seen, existingRev);
+      return existing;
+    }
+    if (!existing && rev < seen) return null;
+    var next = cloneValue(note);
+    next.id = id; next.noteId = id;
+    _seenRevs[id] = Math.max(seen, rev);
+    if (index < 0) notes.push(next);
+    else notes[index] = next;
+    var ctl = ctls[id];
+    if (ctl) {
+      ctl.note = next;
+      syncCtl(ctl);
+      ensureMounted(next);
+    } else {
+      ensureMounted(next);
+    }
+    return next;
+  }
+  function eventData(event) {
+    if (!event) return null;
+    if (event.data && typeof event.data === 'object') return event.data;
+    return event;
+  }
+  function onRepositoryChange(event, generation) {
+    if (generation !== _generation) return;
+    var data = eventData(event);
+    if (!data) return;
+    if (data.error) {
+      ioError(data.error, '便签同步失败');
+      return;
+    }
+    var note = data.note || data.record || null;
+    if (!note) return;
+    if (note.documentId && note.documentId !== O.documentId) return;
+    upsertRecord(note, generation);
+  }
+  function enqueueWrite(noteId, generation, work) {
+    var key = String(noteId || '');
+    var previous = _writeQueues[key] || Promise.resolve();
+    var operation = previous.catch(function () {}).then(function () {
+      if (generation !== _generation) throw staleError();
+      return work();
+    });
+    _writeQueues[key] = operation;
+    operation.then(function () {
+      if (_writeQueues[key] === operation) delete _writeQueues[key];
+    }, function () {
+      if (_writeQueues[key] === operation) delete _writeQueues[key];
+    });
+    return operation;
+  }
+  function legacyJson(method, body) {
+    return fetch(API, {
+      method: method,
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).then(function (response) {
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      return response.json();
+    });
+  }
+  function ioList(generation) {
+    if (repoMode()) {
+      if (!repoReady()) return Promise.reject(new Error('便签 repository 合同不完整'));
+      var all = [], offset = 0, pageSize = 200, pageCount = 0;
+      var nextPage = function () {
+        return Promise.resolve(O.repository.list({
+          includeDeleted: false,
+          offset: offset,
+          limit: pageSize
+        })).then(function (result) {
+          if (generation !== _generation) throw staleError();
+          var items = Array.isArray(result) ? result :
+            (result && Array.isArray(result.notes) ? result.notes : []);
+          for (var i = 0; i < items.length; i++) all.push(items[i]);
+          pageCount += 1;
+          if (items.length < pageSize) return all;
+          // 防损坏 facade 恒返同页造成无限循环；正常仓库远低于此上限。
+          if (pageCount >= 100) throw new Error('便签分页超过 20000 条安全上限');
+          offset += items.length;
+          return nextPage();
+        });
+      };
+      return nextPage();
+    }
+    if (!O || !O.file) return Promise.resolve([]);
+    return fetch(API + '?file=' + encodeURIComponent(O.file)).then(function (response) {
+      if (!response.ok) throw new Error('HTTP ' + response.status);
+      return response.json();
+    }).then(function (data) {
+      if (!data || !data.ok) throw new Error('便签列表响应无效');
+      return data.notes || [];
+    });
+  }
+  function ioCreate(fields, generation) {
+    if (repoMode()) {
+      if (!repoReady()) return Promise.reject(new Error('便签 repository 合同不完整'));
+      return Promise.resolve(O.repository.newId()).then(function (noteId) {
+        if (generation !== _generation) throw staleError();
+        var input = { documentId: O.documentId, noteId: noteId };
+        for (var key in fields) if (Object.prototype.hasOwnProperty.call(fields, key)) input[key] = cloneValue(fields[key]);
+        var mid = mutationId('create', noteId);
+        return O.repository.create(input, { mutationId: mid });
+      });
+    }
+    var body = { file: O.file };
+    for (var key in fields) if (Object.prototype.hasOwnProperty.call(fields, key)) body[key] = fields[key];
+    return legacyJson('POST', body).then(function (data) {
+      if (!data || !data.ok || !data.note) throw new Error('便签创建响应无效');
+      return data.note;
+    });
   }
   function patchNote(note, fields, cb) {
-    var b = { file: O.file, id: note.id };
-    for (var k in fields) if (Object.prototype.hasOwnProperty.call(fields, k)) b[k] = fields[k];
-    req('PATCH', b, cb);
+    if (!O || !note || !noteIdOf(note)) return Promise.resolve(null);
+    var generation = _generation;
+    var id = noteIdOf(note);
+    var payload = cloneValue(fields || {});
+    var mid = mutationId('patch', id);   // 入队时生成，重放/重试始终同一个 ID
+    var operation;
+    if (repoMode()) {
+      operation = enqueueWrite(id, generation, function () {
+        if (!repoReady()) throw new Error('便签 repository 合同不完整');
+        var latest = currentNote(id);
+        if (!latest) throw new Error('便签已经不存在');
+        return O.repository.patch(id, payload, {
+          ifRev: Number(latest.rev) || 0,
+          mutationId: mid
+        });
+      }).then(function (result) {
+        return upsertRecord(result, generation) || currentNote(id);
+      });
+    } else {
+      var body = { file: O.file, id: id };
+      for (var key in payload) if (Object.prototype.hasOwnProperty.call(payload, key)) body[key] = payload[key];
+      operation = legacyJson('PATCH', body).then(function (data) {
+        if (data && data.note) return data.note;
+        return note;
+      });
+    }
+    operation.then(function (result) {
+      if (cb) cb({ ok: true, note: result });
+    }).catch(function (error) {
+      ioError(error, '便签保存失败');
+      if (cb) cb(null);
+    });
+    return operation;
+  }
+  function deleteNote(note, successMessage) {
+    if (!O || !note || !noteIdOf(note)) return Promise.resolve(false);
+    var generation = _generation;
+    var id = noteIdOf(note);
+    var mid = mutationId('remove', id);
+    var operation;
+    if (repoMode()) {
+      operation = enqueueWrite(id, generation, function () {
+        if (!repoReady()) throw new Error('便签 repository 合同不完整');
+        var latest = currentNote(id);
+        if (!latest) throw new Error('便签已经不存在');
+        return O.repository.remove(id, {
+          ifRev: Number(latest.rev) || 0,
+          mutationId: mid
+        });
+      }).then(function (result) {
+        upsertRecord(result, generation);
+        return true;
+      });
+    } else {
+      // @interaction document.note.remove
+      operation = fetch(
+        API + '?file=' + encodeURIComponent(O.file) + '&id=' + encodeURIComponent(id),
+        { method: 'DELETE' }
+      ).then(function (response) {
+        if (!response.ok) throw new Error('HTTP ' + response.status);
+        removeLocal(id);
+        return true;
+      });
+    }
+    operation.then(function () {
+      if (successMessage) toastMsg(successMessage);
+    }).catch(function (error) {
+      ioError(error, '便签删除失败');
+    });
+    return operation;
   }
 
   // ─────────────────────────── 笔画绘制/命中 = 共享核心 rc-ink.js(RCInk)───────────────────────────
@@ -301,6 +562,7 @@
     ctx.save(); ctx.translate(b.ox, b.oy);
     for (var i = 0; i < arr.length; i++) drawStroke(ctx, arr[i], b.w, b.h, dpr);
     ctx.restore();
+    try { ctl._strokeSig = JSON.stringify(arr); } catch (_) { ctl._strokeSig = ''; }
   }
   function strokeHit(s, pt, thr) { return RCInk.hit(s, pt, thr); }
 
@@ -409,12 +671,7 @@
     var onlyVideo = !(ctl.note.text || '').trim() && !(ctl.note.strokes && ctl.note.strokes.length);
     if (onlyVideo) {
       if (!window.confirm('这张便签只有视频,移除视频将删除整张便签,确定?')) return;
-      fetch(API + '?file=' + encodeURIComponent(O.file) + '&id=' + encodeURIComponent(ctl.note.id), { method: 'DELETE' }).catch(function () {});
-      try { exitEdit(); } catch (e2) {}
-      try { ctl.root.remove(); } catch (e2) {}
-      delete ctls[ctl.note.id];
-      for (var i = notes.length - 1; i >= 0; i--) if (notes[i].id === ctl.note.id) notes.splice(i, 1);
-      toastMsg('🗑 视频便签已删除');
+      deleteNote(ctl.note, '🗑 视频便签已删除');
       return;
     }
     if (!window.confirm('移除这个视频?(便签变回普通便签,保留文字/手写)')) return;
@@ -448,12 +705,134 @@
     };
     box.querySelector('.rc-vid-embed').addEventListener('click', function (e) { e.stopPropagation(); openPlayer(); });
   }
+  function cardContextText(cards) {
+    // AI 文本与结构化元数据必须来自同一份 live card snapshot。文本只做可读投影；
+    // 完整字段（含 Anki/source/entity/state）由 bindCardSelection 的 meta.cards 保留。
+    return (Array.isArray(cards) ? cards : []).map(function (c, index) {
+      c = c || {};
+      var front = c.front != null ? c.front : (c.q != null ? c.q : (c.cloze != null ? c.cloze : c.text));
+      var back = c.back != null ? c.back : c.a;
+      var lines = ['卡片 ' + (index + 1)];
+      if (front != null && String(front).trim()) lines.push('正面：' + String(front));
+      if (back != null && String(back).trim()) lines.push('背面：' + String(back));
+      return lines.join('\n');
+    }).join('\n\n');
+  }
+  function resolveCardSnapshot(cardsOrGetter) {
+    var cards = cardsOrGetter;
+    try {
+      if (typeof cardsOrGetter === 'function') cards = cardsOrGetter();
+    } catch (_) {
+      cards = [];
+    }
+    return Array.isArray(cards) ? cards : [];
+  }
+  function bindCardSelection(el, cardsOrGetter, gid, hostKind) {
+    gid = String(gid || '');
+    if (!el || !gid || !resolveCardSnapshot(cardsOrGetter).length ||
+        !(window.RC && RC.voiceCard && RC.voiceCard.pinBind)) return false;
+    // placement 自己有 noteId/wp_*，但上下文身份只能使用业务卡 gid；
+    // 同一张卡在侧栏、收藏、PWA 页和普通网页页因此永远命中 card:<gid>。
+    try { if (RC.voiceCard.pinReg) RC.voiceCard.pinReg(el, gid); } catch (e) {}
+    // owner 仍是整张卡（稳定 cid 与处处高亮），但长按监听只挂展开正文。
+    // 正面的 reveal 是可短点翻面的正文，不再用 [data-fc] 围栏挡掉长按；
+    // pinBind 自己排除真正的 button/link/input，并在长按成功后吞掉随后 click。
+    var pressTarget = null;
+    try {
+      pressTarget = el.querySelector && (
+        el.querySelector('.vc-card-bd') ||
+        el.querySelector('.fc-track')
+      );
+    } catch (e2) {}
+    pressTarget = pressTarget || el;
+    var selectionSpec = {
+      id: 'card:' + gid,
+      kind: 'card',
+      source: { cid: gid, gid: gid },
+      meta: {
+        contract: 'anki-card-context/1',
+        host: String(hostKind || 'page-placement'),
+        cards: []
+      }
+    };
+    RC.voiceCard.pinBind(el, '学习卡片', function () {
+      // mountState 会复制 placement 输入；每次真正选中前重新读取 body.__fc.cards，
+      // 让评分/离线队列/回滚后的 live 状态进入文本和完整结构化快照。
+      var live = resolveCardSnapshot(cardsOrGetter);
+      selectionSpec.meta.cards = live;
+      return cardContextText(live);
+    }, selectionSpec, pressTarget);
+    return true;
+  }
+  function resolveHtmlSnapshot(htmlOrGetter) {
+    var value = htmlOrGetter;
+    try {
+      if (typeof htmlOrGetter === 'function') value = htmlOrGetter();
+    } catch (_) {
+      value = null;
+    }
+    return value && typeof value === 'object' ? value : {};
+  }
+  function htmlCardContextText(el, html) {
+    var bodyText = '';
+    try {
+      var body = el && el.querySelector && (
+        el.querySelector('.vc-card-bd') || el
+      );
+      bodyText = String(body && body.textContent || '')
+        .replace(/\s+/g, ' ').trim();
+    } catch (_) {}
+    if (bodyText) return bodyText;
+    var content = String(html && html.content || '');
+    if (!html || !html.isHtml) return content;
+    try {
+      var tmp = document.createElement('div');
+      tmp.innerHTML = content;
+      return String(tmp.textContent || '').replace(/\s+/g, ' ').trim();
+    } catch (_) {
+      return content.replace(/<[^>]+>/g, ' ').replace(/\s+/g, ' ').trim();
+    }
+  }
+  function bindHtmlCardSelection(el, htmlOrGetter, cid, hostKind) {
+    cid = String(cid || '');
+    if (!el || !cid ||
+        !(window.RC && RC.voiceCard && RC.voiceCard.pinBind)) return false;
+    try { if (RC.voiceCard.pinReg) RC.voiceCard.pinReg(el, cid); } catch (e) {}
+    var pressTarget = null;
+    try {
+      pressTarget = el.querySelector && el.querySelector('.vc-card-bd');
+    } catch (_) {}
+    pressTarget = pressTarget || el;
+    var selectionSpec = {
+      id: 'card:' + cid,
+      kind: 'card',
+      source: { cid: cid },
+      meta: {
+        contract: 'tool-card-context/1',
+        host: String(hostKind || 'page-placement'),
+        card: {}
+      }
+    };
+    RC.voiceCard.pinBind(el, '工具卡片', function () {
+      var live = resolveHtmlSnapshot(htmlOrGetter);
+      selectionSpec.source.cid = cid;
+      selectionSpec.source.tool = String(live.tool || live.kind || '');
+      try { selectionSpec.meta.card = cloneValue(live); }
+      catch (_) { selectionSpec.meta.card = {}; }
+      return htmlCardContextText(el, live);
+    }, selectionSpec, pressTarget);
+    return true;
+  }
   function renderNoteCard(ctl) {
     var card = ctl.note.card, box = ctl.card; if (!box) return;
     if (!card || !card.cards || !card.cards.length || !(window.RC && RC.flashcard && RC.flashcard.mountState)) {
       if (ctl.root.classList.contains('rc-note-hascard')) { ctl.root.classList.remove('rc-note-hascard'); try { ctl.cv.style.display = ''; } catch (e) {} }
       box.innerHTML = ''; box.__sig = ''; return;
     }
+    var _idDirty = false;
+    if (!card.gid) { card.gid = card.cid || ('fcg_' + ((window.RC && RC.voiceCard && RC.voiceCard.mkCid) ? RC.voiceCard.mkCid() : Date.now().toString(36))); _idDirty = true; }
+    if (card.cid !== card.gid) { card.cid = card.gid; _idDirty = true; }   // 学习状态主键和外壳主键必须是同一号
+    if (_idDirty) { ctl.note.card = card; patchNote(ctl.note, { card: card }); }   // 存量卡一次性补稳定编号
     ctl.root.classList.add('rc-note-hascard');
     try { ctl.cv.style.display = 'none'; ctl.body.style.background = 'transparent'; ctl.body.style.backdropFilter = ''; ctl.body.style.webkitBackdropFilter = ''; ctl.handle.style.background = 'transparent'; } catch (e) {}   // 便签壳透明(卡自己有玻璃);ink canvas 内联白块
     var sig = JSON.stringify(card, function (k, v) { return k === 'form' ? undefined : v; });   // form 变不重建(收纳循环别丢卡状态)
@@ -461,12 +840,25 @@
     if (box.__sig === sig) return;   // 无变化不重建(防 syncCtl 反复重挂丢状态)
     box.__sig = sig; box.innerHTML = '';
     // 直接复用字幕浮层卡渲染代码(用户拍板):RC.voiceCard.renderInto = _cardPush 同一段 _cardDom
-    var done = false;
+    var done = false, cardEl = null, stateBody = null;
+    var onPlacementStateChange = function (snapshot, reason) {
+      // review-pending 也必须立即落盘：请求结果未知时刷新若恢复成未答，
+      // 用户会生成新 aid 再评一次。accepted/queued/reverted 再用后续快照覆盖。
+      if (!Array.isArray(snapshot) || !snapshot.length) return;
+      card.cards = cloneValue(snapshot);
+      ctl.note.card = card;
+      patchNote(ctl.note, { card: card });
+    };
     try {
       if (window.RC && RC.voiceCard && RC.voiceCard.renderInto)
-        done = !!RC.voiceCard.renderInto(box, { text: null, label: '🎴 卡片' + (card.cards.length > 1 ? '×' + card.cards.length : ''), isHtml: false, type: card.type || '#b9a8ff', icon: '🎴', form: card.form,
+        cardEl = RC.voiceCard.renderInto(box, { text: null, label: '🎴 卡片' + (card.cards.length > 1 ? '×' + card.cards.length : ''), isHtml: false, type: card.type || '#b9a8ff', icon: '🎴', form: card.form, cid: card.cid || card.gid,
+          onSize: function (size) {
+            ctl._cardPresentationSize = size || null;
+            try { ctl.body.style.width = _formW(ctl, card.form); } catch (_) {}
+          },
           mount: function (bd) {
-            RC.flashcard.mountState(bd, card.cards, { bare: true, gid: card.gid, nopin: true });
+            stateBody = bd;
+            RC.flashcard.mountState(bd, card.cards, { bare: true, gid: card.gid, nopin: true, onStateChange: onPlacementStateChange });
             if (card.gid && /^card_/.test(card.gid)) {   // 统一编号协议:全局编号 → 服务端 states 还原(跨会话"一张卡一种状态";先渲快照防闪空)
               fetch('/pdf/api/entity/' + card.gid).then(function (r) { return r.json(); }).then(function (d) {
                 if (!(d && d.ok && d.kind === 'cards' && (d.cards || []).length)) return;
@@ -478,35 +870,63 @@
                   var cc = fc.cards[i2]; if (!cc) return;
                   ['_st', '_nid', '_next', '_showBack'].forEach(function (k) { if (mc[k] !== undefined) cc[k] = mc[k]; });
                 });
-                RC.flashcard.mountState(bd, fc.cards, { bare: true, gid: card.gid, nopin: true });   // 重挂渲新状态(register 复用已更新的共享对象)
+                RC.flashcard.mountState(bd, fc.cards, { bare: true, gid: card.gid, nopin: true, onStateChange: onPlacementStateChange });   // 重挂渲新状态(register 复用已更新的共享对象)
               }).catch(function () {});
             }
           },
           onClose: function () { try { ctl.del.click(); } catch (e) {} },
           onForm: function (f) { try { card.form = f; ctl.note.card = card; ctl.body.style.width = _formW(ctl, f); patchNote(ctl.note, { card: card }); } catch (e) {} } });
+      done = !!cardEl;
     } catch (e) {}
-    if (!done) { try { RC.flashcard.mountState(box, card.cards, { bare: true, gid: card.gid, nopin: true }); } catch (e) {} }   // voiceCard 未载兜底
+    if (!done) { try { stateBody = box; RC.flashcard.mountState(box, card.cards, { bare: true, gid: card.gid, nopin: true, onStateChange: onPlacementStateChange }); } catch (e) {} }   // voiceCard 未载兜底
+    // 卡头由 rc-stickynote 的透明 handle 独占蓄力拖动；展开正文才负责整卡长按选中。
+    // 真正的按钮/链接由 pinBind 自身排除，正面 reveal 则保留“短点翻面、长按选中”。
+    bindCardSelection(cardEl || box.querySelector('.fc-wrap') || box, function () {
+      return (stateBody && stateBody.__fc && stateBody.__fc.cards) || card.cards;
+    }, card.gid, 'pwa-page-placement');
   }
   function renderNoteHtml(ctl) {
     var h = ctl.note.html, box = ctl.html; if (!box) return;
     if (!h || !h.content) { if (ctl.root.classList.contains('rc-note-hashtml')) { ctl.root.classList.remove('rc-note-hashtml'); try { ctl.cv.style.display = ''; } catch (e) {} } box.innerHTML = ''; box.__sig = ''; return; }
+    if (!h.cid) { h.cid = (window.RC && RC.voiceCard && RC.voiceCard.mkCid) ? RC.voiceCard.mkCid() : ('c' + Date.now().toString(36)); ctl.note.html = h; patchNote(ctl.note, { html: h }); }   // 存量 HTML 卡补号后立即持久化
     ctl.root.classList.add('rc-note-hashtml');
     try { ctl.cv.style.display = 'none'; ctl.body.style.background = 'transparent'; ctl.body.style.backdropFilter = ''; ctl.body.style.webkitBackdropFilter = ''; ctl.handle.style.background = 'transparent'; } catch (e) {}   // 便签壳透明(卡自己有玻璃)
     var sig = JSON.stringify(h, function (k, v) { return k === 'form' ? undefined : v; });   // form 变不重建
     try { ctl.body.style.height = 'auto'; ctl.body.style.width = _formW(ctl, h.form); } catch (e) {}   // 壳跟卡形态收缩
-    if (box.__sig === sig) return;
+    if (box.__sig === sig) {
+      bindHtmlCardSelection(
+        box.querySelector('.vc-card') || box,
+        function () { return ctl.note.html || h; },
+        h.cid,
+        'pwa-page-placement'
+      );
+      return;
+    }
     box.__sig = sig; box.innerHTML = '';
     // 直接复用字幕浮层卡渲染代码(用户拍板):同一 _cardDom → 卡头/排版/样式与浮层卡永远一致;
     //   content 自带 vc-if-hd 标题条时 renderInto 会剥掉(否则双标题)
     var done = false, el2 = null;
     try {
       if (window.RC && RC.voiceCard && RC.voiceCard.renderInto)
-        el2 = RC.voiceCard.renderInto(box, { text: h.content, label: h.label || '卡片', isHtml: !!h.isHtml, type: h.type, icon: h.icon, form: h.form,
+        el2 = RC.voiceCard.renderInto(box, { text: h.content, label: h.label || '卡片', isHtml: !!h.isHtml, type: h.type, icon: h.icon, form: h.form, cid: h.cid,
+          onSize: function (size) {
+            ctl._cardPresentationSize = size || null;
+            try {
+              ctl.body.style.width = _formW(ctl, h.form);
+              ctl.html.style.maxHeight = size ? (Math.max(100, Math.min(720, Math.round(size.h))) + 'px') : '';
+            } catch (_) {}
+          },
           onClose: function () { try { ctl.del.click(); } catch (e) {} },
           onForm: function (f) { try { h.form = f; ctl.note.html = h; ctl.body.style.width = _formW(ctl, f); patchNote(ctl.note, { html: h }); } catch (e) {} } });
       done = !!el2;
     } catch (e) {}
     if (!done) { var fb = document.createElement('div'); if (h.isHtml) fb.innerHTML = h.content; else fb.textContent = h.content; box.appendChild(fb); }
+    bindHtmlCardSelection(
+      el2 || box.querySelector('.vc-card') || box,
+      function () { return ctl.note.html || h; },
+      h.cid,
+      'pwa-page-placement'
+    );
     try { window.RC && RC.typeset && RC.typeset(box); } catch (e) {}
   }
   function setNoteVideo(ctl, id) {   // 供拖放/入口共用:给便签设视频(保留已有起止等设置)
@@ -534,15 +954,13 @@
     ctl.del.addEventListener('click', function (e) {
       e.stopPropagation(); e.preventDefault();
       if (!window.confirm('删除这张便签？')) return;
-      fetch(API + '?file=' + encodeURIComponent(O.file) + '&id=' + encodeURIComponent(ctl.note.id), { method: 'DELETE' }).catch(function () {});
-      exitEdit();
-      try { ctl.root.remove(); } catch (e2) {}
-      delete ctls[ctl.note.id];
-      for (var i = notes.length - 1; i >= 0; i--) if (notes[i].id === ctl.note.id) notes.splice(i, 1);
-      toastMsg('🗑 便签已删除');
+      deleteNote(ctl.note, '🗑 便签已删除');
     });
     // handle:长按 lpMs() 进 EDIT(与 body 长按同一入口);EDIT 模式下按下即拖(移动便签)
     ctl.handle.addEventListener('pointerdown', function (e) { onHandleDown(ctl, e); });
+    ctl.handle.addEventListener('lostpointercapture', function (e) {
+      if (_hd && _hd.ctl === ctl) onHandleCancel(e);
+    });
     // body:pen 后备直写/手指双击切橡皮/长按 lpMs() 进 EDIT(capture:抢在 textarea 前看一眼;
     //   手指单击不拦截 → 穿透给 textarea 聚焦输入)
     ctl.body.addEventListener('pointerdown', function (e) { onBodyDown(ctl, e); }, true);
@@ -623,6 +1041,7 @@
     } catch (e) {}
   }
   function portalIn(ctl) {
+    if (O && O.disablePortal) return;   // 浏览器扩展 shadow 根本身就是全视口浮层；禁止搬到宿主页滚动层
     if (!ctl || ctl.portaled || ctl.note.collapsed || !ctl.root.isConnected) return;
     var home = ctl.root.parentElement;
     var scrollEl = scrollAncestor(home);
@@ -652,6 +1071,7 @@
     for (var id in ctls) {
       var ctl = ctls[id];
       if (!ctl || !ctl.portaled || !ctl._scrollEl) continue;
+      if (_hd && _hd.dragging && _hd.ctl === ctl) continue;   // #51 S1:拖动中的便签不被异步重渲重定位(消除"拖动期间 root.left 被 mountAll 改写"→松手落点偏移的竞态)
       if (!ctl._ph || !ctl._ph.isConnected) { attachPlaceholder(ctl); }   // 页重渲冲掉占位 → 在新容器补挂
       if (!ctl._ph || !ctl._ph.isConnected) continue;   // 锚页未挂载(滚出) → 保持原坐标,展开浮层不消失
       var pr = ctl._ph.getBoundingClientRect();
@@ -704,6 +1124,11 @@
     var n = ctl.note;
     applyColor(ctl);
     applySize(ctl);
+    // applySize 只有 canvas 尺寸变化时会重画；跨标签 CHANGE 可能只更新
+    // strokes 而尺寸不变，需按内容签名补画，否则本地数据已更新但画面仍旧。
+    var strokeSig = '';
+    try { strokeSig = JSON.stringify(n.strokes || []); } catch (_) {}
+    if (ctl._strokeSig !== strokeSig) redrawInk(ctl);
     ctl.root.classList.toggle('rc-note-collapsed', !!n.collapsed);
     renderNoteVideo(ctl);   // 视频便签:有 video 则渲染播放器+控件(签名去重,无变化不重建)
     renderNoteCard(ctl);    // 卡片便签:有 card 则 mount rc-flashcard(同 gid → 与侧栏/浮层原卡联动)
@@ -752,19 +1177,20 @@
     var d0 = ctl._downPt; ctl._downPt = null;
     if (!d0 || Math.hypot(e.clientX - d0.x, e.clientY - d0.y) > TAP_TOL) return;
     if (e.target && e.target.closest && (e.target.closest('.rc-note-del') || e.target.closest('.rc-note-tools') || e.target.closest('.rc-note-rs') || e.target.closest('.rc-note-rs-tl'))) return;
+    // 卡片正文的双击/短点属于 flashcard / 工具卡自己的交互；不能落进旧便签
+    // EDIT。否则卡片一旦误进 EDIT，卡头会走“编辑态立即拖动”，绕过 420ms
+    // 蓄力，而且短点切换形态也会失效。
+    if (_isCardNote(ctl)) { ctl._tapCount = 0; return; }
     var now = Date.now();
     var near = ctl._tapPt && Math.hypot(e.clientX - ctl._tapPt.x, e.clientY - ctl._tapPt.y) < 32;
     ctl._tapCount = (now - ctl._tapT < TAP_WIN && near) ? ctl._tapCount + 1 : 1;
     ctl._tapT = now; ctl._tapPt = { x: e.clientX, y: e.clientY };
     if (ctl._tapCount >= 2) {
-      // 双击:撤掉第一击排队的折叠 toggle,交给 AI hook(阶段3)。
-      // 注:body 上聚焦文字的 tap 照常进计数(聚焦不吃事件);橡皮双击在 onBodyDown 已 stopPropagation,到不了这里。
+      // 双击 = 进 EDIT 编辑模式(用户方案 2026-07-21:双击=编辑;长按原地松手=加入上下文/注入AI,长按+拖动=移动便签)。
+      // 注:body 上聚焦文字的 tap 照常进计数;橡皮双击(有笔画时)在 onBodyDown 已 stopPropagation,到不了这里。
       ctl._tapCount = 0;
       if (ctl._toggleT) { clearTimeout(ctl._toggleT); ctl._toggleT = null; }
-      try { saveText(ctl); } catch (err0) {}   // 先冲掉未失焦的文字改动(hook 拿到最新 text;服务端合成图也要最新 sidecar)
-      var handled = false;
-      try { handled = !!(O && O.onDoubleTap && O.onDoubleTap(ctl.note)); } catch (err) {}
-      if (!handled) { try { console.log('[rc-stickynote] 双击便签(host 未处理:助手未开着或未接线)', ctl.note.id); } catch (err2) {} }
+      try { enterEdit(ctl); } catch (err) {}
       return;
     }
     // 单击 handle → 延迟 380ms toggle(双击窗口内被第二击撤销;EDIT 模式下 handle=移动把手,不折叠)
@@ -788,28 +1214,58 @@
   function _formW(ctl, f) {   // 便签壳宽跟卡形态(dot 标记 40/长条 300/方块 note.w);方块按页宽**等比缩放**(用户:页面缩放时定死像素会挡内容)
     if (f === 'dot') return '40px';
     if (f === 'min') return '300px';
+    if (ctl._cardPresentationSize && ctl._cardPresentationSize.w) {
+      return Math.max(180, Math.min(720, Math.round(ctl._cardPresentationSize.w))) + 'px';
+    }
     var w0 = ctl.note.w || 300;
     var bw = ((ctl.note.card || {}).base_w) || ((ctl.note.html || {}).base_w) || 0;
     try { var cw = ctl.root.parentElement ? ctl.root.parentElement.clientWidth : 0; if (bw > 0 && cw > 0) return Math.max(140, Math.round(w0 * cw / bw)) + 'px'; } catch (e) {}
     return w0 + 'px';
   }
   function _hardDelete(ctl) {   // 拖到左上角删除(无 confirm,浮层拖删同手感)
-    fetch(API + '?file=' + encodeURIComponent(O.file) + '&id=' + encodeURIComponent(ctl.note.id), { method: 'DELETE' }).catch(function () {});
-    try { exitEdit(); } catch (e) {}
-    try { ctl.root.remove(); } catch (e) {}
-    delete ctls[ctl.note.id];
-    for (var i = notes.length - 1; i >= 0; i--) if (notes[i].id === ctl.note.id) notes.splice(i, 1);
-    toastMsg('已删除');
+    deleteNote(ctl.note, '已删除');
+  }
+  function _favoriteCard(ctl) {
+    try {
+      if (!(window.RC && RC.voiceCard && RC.voiceCard.favorite)) return false;
+      var n = ctl.note || {}, rec;
+      if (n.html) rec = { label: n.html.label || '工具卡片', raw: n.html.content || '', isHtml: !!n.html.isHtml, text: n.html.content || '', kind: 'tool', cid: n.html.cid || '' };
+      else {
+        var cards = (n.card && n.card.cards) || [];
+        rec = { label: '学习卡片', raw: JSON.stringify(cards), isHtml: false, text: cardContextText(cards), kind: 'cards', cid: (n.card && (n.card.cid || n.card.gid)) || '', gid: (n.card && n.card.gid) || '' };
+      }
+      return RC.voiceCard.favorite.save(rec);
+    } catch (e) { return false; }
   }
   function onHandleDown(ctl, e) {
     if (e.pointerType === 'mouse' && e.button !== 0) return;
-    if (_hd) cancelHandleGesture(true);
+    // 一次手势严格只归最先按下的 pointer；第二根手指/笔尖不得抢占或结束它。
+    if (_hd) return;
     e.preventDefault();   // handle touch-action:none;再挡 iOS 文本选择/callout
     if (!ctl.note.collapsed) portalIn(ctl);   // 展开态一碰即置顶(单击/长按/拖动统一,idempotent;折叠态由 toggleCollapsed 展开后再置顶)
-    _hd = { ctl: ctl, sx: e.clientX, sy: e.clientY, lp: null, dragging: false, moved: false, rect0: null };
-    if (EDIT && EDIT.ctl === ctl) startDrag(ctl);   // 已在 EDIT → 按下即拖
-    else if (_isCardNote(ctl)) startDrag(ctl);   // 卡片便签:按住卡头即拖(浮层卡同手感,不等长按)
-    else _hd.lp = setTimeout(function () { if (_hd && _hd.ctl === ctl) { enterEdit(ctl); startDrag(ctl); } }, lpMs());
+    _hd = {
+      ctl: ctl, sx: e.clientX, sy: e.clientY, lp: null,
+      pointerId: e.pointerId, captureEl: ctl.handle,
+      dragging: false, moved: false, rect0: null,
+      cardArmed: false, slopCancelled: false
+    };
+    // 普通便签的既有“EDIT 内立即拖动”语义保持不变；卡片即使来自热更新前
+    // 遗留的 EDIT 状态，也被显式排除在这条捷径外，始终进入下面的蓄力链。
+    if (EDIT && EDIT.ctl === ctl && !_isCardNote(ctl)) startDrag(ctl);
+    else if (_isCardNote(ctl)) {
+      ctl.root.classList.add('rc-card-drag-charging');
+      _hd.lp = setTimeout(function () {
+        if (!_hd || _hd.ctl !== ctl || _hd.slopCancelled) return;
+        _hd.lp = null;
+        _hd.longFired = true;
+        _hd.cardArmed = true;
+        ctl.root.classList.remove('rc-card-drag-charging');
+        ctl.root.classList.add('rc-card-drag-ready');
+        try { if (navigator.vibrate) navigator.vibrate(8); } catch (_) {}
+        startDrag(ctl);
+      }, CARD_DRAG_HOLD_MS);
+    }
+    else _hd.lp = setTimeout(function () { if (_hd && _hd.ctl === ctl) { _hd.longFired = true; startDrag(ctl); } }, lpMs());   // 长按=可拖候选(不进EDIT):拖了→移动便签,原地松手→注入AI(用户方案,见 onHandleUp 的 !moved 分支)
     document.addEventListener('pointermove', onHandleMove, true);
     document.addEventListener('pointerup', onHandleUp, true);
     document.addEventListener('pointercancel', onHandleCancel, true);
@@ -818,6 +1274,7 @@
   function startDrag(ctl) {
     if (!_hd) return;
     _hd.dragging = true;
+    ctl.root.classList.remove('rc-card-drag-charging');
     ctl.root.style.transformOrigin = '0 0';   // #51:scale 以左上角为原点——拖动中视觉左上=translate 位置=松手最终位置(中心放大会外扩≈1.5%,松手跳位根因之一)
     _hd.rect0 = ctl.root.getBoundingClientRect();
     // #51 用户真机实锤'拖动时渲染位置出错':页面缩放(zoom/适应)下便签在被缩放坐标系里,translate(手指px)被
@@ -826,52 +1283,98 @@
     ctl.root.classList.add('rc-note-lift');   // 浮起效果:只在拖拽进行时(松手/取消即撤)
   }
   function onHandleMove(e) {
-    if (!_hd) return;
+    if (!_hd || !sameHandlePointer(_hd, e)) return;
     var dx = e.clientX - _hd.sx, dy = e.clientY - _hd.sy;
     if (!_hd.dragging) {
-      if (Math.hypot(dx, dy) > LP_TOL) { clearTimeout(_hd.lp); _hd.lp = null; }   // 动了 → 不算长按
+      var tolerance = _isCardNote(_hd.ctl) ? CARD_DRAG_TOL : LP_TOL;
+      if (Math.hypot(dx, dy) > tolerance) {
+        clearTimeout(_hd.lp); _hd.lp = null; _hd.slopCancelled = true;
+        _hd.ctl.root.classList.remove('rc-card-drag-charging', 'rc-card-drag-ready');
+      }   // 蓄力前快划=取消，不会突然追上手指，也不会误切形态
       return;
     }
+    if (!_hd.moved && Math.hypot(dx, dy) <= 4) return;
     e.preventDefault();
     _hd.moved = true;
     var _s9 = _hd.scale || 1;
     _hd.ctl.root.style.transform = 'translate(' + (dx / _s9) + 'px,' + (dy / _s9) + 'px) scale(1.03)';
-    if (_isCardNote(_hd.ctl) && window.RC && RC.voiceCard && RC.voiceCard.trash) { RC.voiceCard.trash.show(true); RC.voiceCard.trash.hot(RC.voiceCard.trash.inZone(e.clientX, e.clientY)); }   // 卡便签:拖起亮左上角删除区(浮层同区)
+    if (_isCardNote(_hd.ctl) && window.RC && RC.voiceCard) {
+      if (RC.voiceCard.trash) { RC.voiceCard.trash.show(true); RC.voiceCard.trash.hot(RC.voiceCard.trash.inZone(e.clientX, e.clientY)); }
+      if (RC.voiceCard.favorite) RC.voiceCard.favorite.hint(RC.voiceCard.favorite.inZone(e.clientX, e.clientY));
+    }   // 6A：卡便签拖起同时启用左上删除区与底边收藏区
     try { var _rr9 = _hd.ctl.root.getBoundingClientRect(); anchorFxShow(_rr9.left + 1, _rr9.top + 1, _hd.ctl.root); } catch (e2) {}   // #51:探测点=**卡左上角**(=钉入点,用户拍板);隐自身穿透(拖已钉便签恒横线的根因)
   }
   function onHandleUp(e) {
-    var g = _hd; if (!g) return;
+    var g = _hd; if (!g || !sameHandlePointer(g, e)) return;
     cleanupHandleListeners();
     clearTimeout(g.lp);
     _hd = null;
-    try { anchorFxHide(); } catch (e2) {}
+    clearHandleDropUi();
+    releaseHandleCapture(g);
+    g.ctl.root.classList.remove('rc-card-drag-charging', 'rc-card-drag-ready');
+    if (!g.dragging) {
+      if (_isCardNote(g.ctl)) g.ctl._suppressTap = Date.now();
+      if (_isCardNote(g.ctl) && !g.slopCancelled) {
+        try {
+          var _tapEl = g.ctl.body.querySelector('.vc-card');
+          var _tapBtn = _tapEl && (_tapEl.classList.contains('vc-dot') ? _tapEl.querySelector('.vc-card-dot') : _tapEl.querySelector('.vc-card-hd'));
+          if (_tapBtn) _tapBtn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+        } catch (_) {}
+      }
+      return;
+    }
     if (g.dragging) {
       g.ctl.root.classList.remove('rc-note-lift');   // 浮起只随拖拽;EDIT 模式(🗑/色板/手柄)继续保持
       g.ctl._suppressTap = Date.now();
-      if (_isCardNote(g.ctl) && window.RC && RC.voiceCard && RC.voiceCard.trash) {
-        RC.voiceCard.trash.show(false);
-        if (g.moved && RC.voiceCard.trash.inZone(e.clientX, e.clientY)) { _hardDelete(g.ctl); return; }   // 拖到左上角松手=删除(浮层同交互,无叉叉按钮)
+      if (_isCardNote(g.ctl) && window.RC && RC.voiceCard) {
+        var _trashDrop = !!(g.moved && RC.voiceCard.trash && RC.voiceCard.trash.inZone(e.clientX, e.clientY));
+        var _favDrop = !!(g.moved && RC.voiceCard.favorite && RC.voiceCard.favorite.inZone(e.clientX, e.clientY));
+        if (RC.voiceCard.trash) RC.voiceCard.trash.show(false);
+        if (RC.voiceCard.favorite) RC.voiceCard.favorite.hint(false);
+        if (_trashDrop) { _hardDelete(g.ctl); return; }   // 拖到左上角松手=删除(浮层同交互,无叉叉按钮)
+        if (_favDrop) { _favoriteCard(g.ctl); g.ctl.root.style.transform = ''; return; }   // 收藏是复制，原页卡回原位
       }
       if (g.moved) dropNote(g.ctl, g.rect0, e.clientX - g.sx, e.clientY - g.sy);
       else {
         g.ctl.root.style.transform = '';   // 长按未拖:清暂态
-        if (_isCardNote(g.ctl)) {   // 卡便签短按=形态循环(透明把手盖住卡头,点击到不了 vc-card-hd —— 真机'点条形不折叠'根因)
-          try {
-            var _vcEl = g.ctl.body.querySelector('.vc-card');
-            var _btn = _vcEl && (_vcEl.classList.contains('vc-dot') ? _vcEl.querySelector('.vc-card-dot') : _vcEl.querySelector('.vc-card-hd'));
-            if (_btn) _btn.dispatchEvent(new MouseEvent('click', { bubbles: true }));
-          } catch (e2) {}
+        if (g.longFired && !_isCardNote(g.ctl)) {   // 长按原地松手(位移未超阈值)= 加入上下文/注入AI(用户方案:松手位移分辨长按vs拖动)
+          try { saveText(g.ctl); } catch (e0) {}   // 冲掉未失焦文字改动(hook 拿最新 text + 合成图最新 sidecar)
+          try { O && O.onDoubleTap && O.onDoubleTap(g.ctl.note); } catch (e1) {}
         }
       }
     }
   }
-  function onHandleCancel() {
-    var g = _hd; if (!g) return;
+  function onHandleCancel(e) {
+    var g = _hd; if (!g || !sameHandlePointer(g, e)) return;
     cleanupHandleListeners();
-    try { anchorFxHide(); } catch (e2) {}
     clearTimeout(g.lp);
     _hd = null;
+    clearHandleDropUi();
+    releaseHandleCapture(g);
+    g.ctl.root.classList.remove('rc-card-drag-charging', 'rc-card-drag-ready');
     if (g.dragging) { g.ctl.root.classList.remove('rc-note-lift'); g.ctl.root.style.transform = ''; g.ctl._suppressTap = Date.now(); }
+  }
+  function sameHandlePointer(g, e) {
+    return !!(g && (!e || e.pointerId == null || g.pointerId == null || e.pointerId === g.pointerId));
+  }
+  function releaseHandleCapture(g) {
+    if (!g || !g.captureEl || g.pointerId == null || !g.captureEl.releasePointerCapture) return;
+    try {
+      if (!g.captureEl.hasPointerCapture || g.captureEl.hasPointerCapture(g.pointerId))
+        g.captureEl.releasePointerCapture(g.pointerId);
+    } catch (e) {}
+  }
+  function clearHandleDropUi() {
+    try { anchorFxHide(); } catch (e) {}
+    try {
+      if (window.RC && RC.voiceCard) {
+        if (RC.voiceCard.trash) {
+          RC.voiceCard.trash.hot(false);
+          RC.voiceCard.trash.show(false);
+        }
+        if (RC.voiceCard.favorite) RC.voiceCard.favorite.hint(false);
+      }
+    } catch (e2) {}
   }
   function cleanupHandleListeners() {
     document.removeEventListener('pointermove', onHandleMove, true);
@@ -880,10 +1383,18 @@
   }
   function cancelHandleGesture() {
     if (!_hd) return;
+    var g = _hd;
     cleanupHandleListeners();
-    clearTimeout(_hd.lp);
-    if (_hd.dragging) { _hd.ctl.root.classList.remove('rc-note-lift'); _hd.ctl.root.style.transform = ''; }
+    clearTimeout(g.lp);
     _hd = null;
+    clearHandleDropUi();
+    releaseHandleCapture(g);
+    g.ctl.root.classList.remove('rc-card-drag-charging', 'rc-card-drag-ready');
+    if (g.dragging) {
+      g.ctl.root.classList.remove('rc-note-lift');
+      g.ctl.root.style.transform = '';
+      g.ctl._suppressTap = Date.now();
+    }
   }
   // 「松手算锚」统一入口(v4):视口点 → host anchorFromPoint(EPUB 返回内容锚 off/dx/dy,PDF 返回页比例 x/y;
   // 机制在 host)。期间便签自身 pointer-events:none,让 elementFromPoint/caretFromPoint 穿过它命中下方内容。
@@ -896,10 +1407,13 @@
     return anchor;
   }
   function dropNote(ctl, rect0, dx, dy) {
-    // 松手:便签左上角(+4px 进容器内)→ anchorFromPoint 重解析目标容器(支持拖过页/章边界)→ PATCH。
-    // rect0=拖动起点屏幕矩形(fixed 也适用),reanchorAt 用屏幕坐标 elementFromPoint → portaled(fixed)照样正确。
+    // 松手:便签左上角 → anchorFromPoint 重解析目标容器(支持拖过页/章边界)→ PATCH。
+    // #51 S1:探测点用**松手瞬间实时 BCR**(transform 未清,transform-origin '0 0' 下左上角=视觉落点),
+    //   不再用 rect0+指针位移——后者在"拖动中异步页渲染/滚动改了 root.left"时与实际视觉位置分叉
+    //   (拖动反馈 anchorFxShow 一直用实时 BCR,两链对齐=拖动显示与松手落点一致)。
     var wasPortaled = ctl.portaled;
-    var anchor = _probeHidden(ctl.root, function () { return reanchorAt(ctl, rect0.left + dx + 1, rect0.top + dy + 1); });   // #51:穿透自身探测;偏移收敛 +1(旧 +4=松手右下跳 4px 的根因之一)
+    var _lr = ctl.root.getBoundingClientRect();
+    var anchor = _probeHidden(ctl.root, function () { return reanchorAt(ctl, _lr.left + 1, _lr.top + 1); });   // #51:穿透自身探测;实时 BCR 左上 +1
     ctl.root.style.transform = '';
     if (!anchor) { toastMsg('放不到这里(不在内容页上),已弹回'); return; }   // 清 transform→回原位(portaled 回 fixed 原点)
     ctl.note.anchor = anchor;
@@ -939,6 +1453,11 @@
   function onBodyDown(ctl, e) {
     if (!ctl.note.collapsed) portalIn(ctl);   // 单击正文即置顶(展开态一碰就浮到最上层;idempotent,已 portaled 则 no-op)
     if (e.target && e.target.closest && (e.target.closest('.rc-note-tools') || e.target.closest('.rc-note-rs') || e.target.closest('.rc-note-rs-tl') || e.target.closest('.rc-note-del'))) return;
+    // 学习卡自己的正文长按统一交给 RC.voiceCard.pinBind。若继续武装便签 body
+    // 长按，同一次手势会同时触发旧 onDoubleTap 和 ContextSelectionRegistry，造成双注入。
+    // 卡头不在此分支（透明 handle 独占拖动），翻面/评分等控件仍由卡片自身处理。
+    if (_isCardNote(ctl) && e.target && e.target.closest &&
+        e.target.closest('.rc-note-card,.rc-note-html')) return;
     // 手指快速双击 → 临时橡皮(照搬 _epInk 350ms/32px;gate=已有笔画或已是橡皮 → 没写过字的便签双击留给 AI hook)。
     // 第一击不拦截(照常穿透聚焦文字/进 root 双击计数);第二击才吃掉(stopPropagation → 不聚焦、不进 AI 计数)。
     if (e.pointerType === 'touch' && !draw && ((ctl.note.strokes && ctl.note.strokes.length) || NINK.tool === 'eraser')) {
@@ -971,7 +1490,7 @@
     if (_bd) cancelBodyLP();
     _bd = {
       ctl: ctl, sx: e.clientX, sy: e.clientY,
-      lp: setTimeout(function () { var b = _bd; cancelBodyLP(); if (b) enterEdit(b.ctl); }, lpMs())
+      lp: setTimeout(function () { var b = _bd; cancelBodyLP(); if (b) { try { saveText(b.ctl); } catch (_e) {} try { O && O.onDoubleTap && O.onDoubleTap(b.ctl.note); } catch (_e2) {} } }, lpMs())   // body 长按原地=加入上下文/注入AI(用户方案;body 不含拖动,拖动走 handle 把手)
     };
     document.addEventListener('pointermove', onBodyLPMove, true);
     document.addEventListener('pointerup', cancelBodyLP, true);
@@ -1215,20 +1734,15 @@
     patchNote(ctl.note, { strokes: ctl.note.strokes || [] });
   }
   // ⚠ 800ms 防抖窗口内关页/切后台会丢最后一批笔画 → 卸载期对所有 pending 便签立即 PATCH
-  //   (PATCH 走不了 sendBeacon,用 keepalive fetch;hidden 时页面还活着,普通发送也大多来得及)
+  //   repository 模式直接写扩展本地库；legacy PWA 仍由同一 patch helper 发送。
   function flushAllStrokes() {
-    if (!O || !O.file) return;
+    if (!O || (!repoMode() && !O.file)) return;
     for (var id in ctls) {
       var ctl = ctls[id];
       if (!ctl || !ctl._strokeDirty) continue;
       ctl._strokeDirty = false;
       clearTimeout(ctl._strokeT);
-      try {
-        fetch(API, {
-          method: 'PATCH', headers: { 'Content-Type': 'application/json' }, keepalive: true,
-          body: JSON.stringify({ file: O.file, id: ctl.note.id, strokes: ctl.note.strokes || [] }),
-        });
-      } catch (e) {}
+      patchNote(ctl.note, { strokes: ctl.note.strokes || [] });
     }
   }
   window.addEventListener('pagehide', flushAllStrokes);
@@ -1279,15 +1793,32 @@
   }
 
   // ─────────────────────────── 创建 ───────────────────────────
+  function createRecord(anchor, fields, pendingMessage, mountedMessage) {
+    var generation = _generation;
+    fields = fields || {};
+    fields.anchor = anchor;
+    ioCreate(fields, generation).then(function (note) {
+      if (generation !== _generation) return;
+      // legacy vbook 响应锚可能使用成员局部页；当前视图应继续使用请求时锚。
+      if (note && note.anchor && anchor) note.anchor = anchor;
+      var mounted = !!upsertRecord(note, generation);
+      if (!mounted || !ctls[noteIdOf(note)] || !ctls[noteIdOf(note)].root.isConnected) {
+        if (pendingMessage) toastMsg(pendingMessage);
+      } else if (mountedMessage) {
+        toastMsg(mountedMessage);
+      }
+    }).catch(function (error) {
+      ioError(error, '便签创建失败');
+    });
+  }
   function createAt(anchor) {
     if (!O) return;
     if (!anchor) { toastMsg('这里放不了便签(不在内容上)'); return; }
-    req('POST', { file: O.file, anchor: anchor, color: DEFAULT_COLOR, w: 260, h: 180 }, function (d) {
-      if (!d || !d.ok || !d.note) { toastMsg('✗ 便签创建失败'); return; }
-      if (d.note.anchor && anchor) d.note.anchor = anchor;   // vbook:响应锚=真成员局部页,与 DOM 页码空间(视图页)错位→挂错页(用户实锤钉入跳位);本地挂载用请求时的视图页锚,GET 时服务端才回转
-      notes.push(d.note);
-      if (!ensureMounted(d.note)) toastMsg('便签已创建(所在页尚未渲染,渲染后出现)');
-    });
+    createRecord(
+      anchor,
+      { color: DEFAULT_COLOR, w: 260, h: 180 },
+      '便签已创建(所在页尚未渲染,渲染后出现)'
+    );
   }
   function createAtCenter() {
     if (!O || !O.anchorFromPoint) return;
@@ -1312,14 +1843,12 @@
     var _vid = { id: videoId, start: 0, end: 0, rate: 1, loop: false, cc: true };
     if (meta.thumb) _vid.thumb = meta.thumb;
     if (meta.src) _vid.src = meta.src;
-    req('POST', { file: O.file, anchor: anchor, color: DEFAULT_COLOR, w: 300, h: 210, collapsed: false,
-                  video: _vid }, function (d) {
-      if (!d || !d.ok || !d.note) { toastMsg('✗ 便签创建失败'); return; }
-      if (d.note.anchor && anchor) d.note.anchor = anchor;   // vbook:响应锚=真成员局部页,与 DOM 页码空间(视图页)错位→挂错页(用户实锤钉入跳位);本地挂载用请求时的视图页锚,GET 时服务端才回转
-      notes.push(d.note);
-      if (!ensureMounted(d.note)) toastMsg('视频便签已建(所在页尚未渲染,渲染后出现)');
-      else toastMsg('✅ 视频已放进书页便签');
-    });
+    createRecord(
+      anchor,
+      { color: DEFAULT_COLOR, w: 300, h: 210, collapsed: false, video: _vid },
+      '视频便签已建(所在页尚未渲染,渲染后出现)',
+      '✅ 视频已放进书页便签'
+    );
     return true;
   }
 
@@ -1330,14 +1859,16 @@
     var anchor = null;
     for (var i = 0; i < cands.length && !anchor; i++) { try { anchor = O.anchorFromPoint(cands[i][0], cands[i][1]); } catch (e) {} }
     if (!anchor) { toastMsg('这里放不了(把卡片放到正文上再松手)'); return false; }
+    var cid0 = gid || ((window.RC && RC.voiceCard && RC.voiceCard.mkCid) ? ('fcg_' + RC.voiceCard.mkCid()) : ('fcg_' + Date.now().toString(36)));
+    gid = gid || cid0;
     var w0 = 300, bw0 = 0; try { var mm = O.mount(anchor); if (mm && mm.el && mm.el.clientWidth) { bw0 = mm.el.clientWidth; w0 = Math.max(240, Math.min(480, Math.round(bw0 * 0.44))); } } catch (e) {}   // 卡宽按页面宽自适应+记创建时页宽(缩放等比跟随,用户拍板)
-    req('POST', { file: O.file, anchor: anchor, color: '#0d1322', w: w0, h: 210, collapsed: false, card: { cards: cards, gid: gid || '', base_w: bw0 } }, function (d) {   // 暗色玻璃=卡片观感(用户:钉住的是卡,不是白便签)
-      if (!d || !d.ok || !d.note) { toastMsg('✗ 便签创建失败'); return; }
-      if (d.note.anchor && anchor) d.note.anchor = anchor;   // vbook:响应锚=真成员局部页,与 DOM 页码空间(视图页)错位→挂错页(用户实锤钉入跳位);本地挂载用请求时的视图页锚,GET 时服务端才回转
-      notes.push(d.note);
-      if (!ensureMounted(d.note)) toastMsg('卡片便签已建(所在页尚未渲染,渲染后出现)');
-      else toastMsg('✅ 卡片已钉到书页');
-    });
+    // gid/cid 原样携带，同一学习卡组跨宿主共享；repository 不重编号业务卡。
+    createRecord(
+      anchor,
+      { color: '#0d1322', w: w0, h: 210, collapsed: false, card: { cards: cards, gid: gid, cid: cid0, base_w: bw0 } },
+      '卡片便签已建(所在页尚未渲染,渲染后出现)',
+      '✅ 卡片已钉到书页'
+    );
     return true;
   }
 
@@ -1348,14 +1879,15 @@
     var anchor = null;
     for (var i = 0; i < cands.length && !anchor; i++) { try { anchor = O.anchorFromPoint(cands[i][0], cands[i][1]); } catch (e) {} }
     if (!anchor) { toastMsg('这里放不了(把卡片放到正文上再松手)'); return false; }
+    var cid1 = htmlObj.cid || ((window.RC && RC.voiceCard && RC.voiceCard.mkCid) ? RC.voiceCard.mkCid() : ('c' + Date.now().toString(36)));
     var w1 = 300, bw1 = 0; try { var mh = O.mount(anchor); if (mh && mh.el && mh.el.clientWidth) { bw1 = mh.el.clientWidth; w1 = Math.max(240, Math.min(480, Math.round(bw1 * 0.44))); } } catch (e) {}   // 卡宽按页面宽自适应+记创建时页宽
-    req('POST', { file: O.file, anchor: anchor, color: '#0d1322', w: w1, h: 210, collapsed: false, html: { content: htmlObj.content, isHtml: !!htmlObj.isHtml, label: htmlObj.label || '', type: htmlObj.type || '', icon: htmlObj.icon || '', base_w: bw1 } }, function (d) {   // 暗色玻璃=卡片观感
-      if (!d || !d.ok || !d.note) { toastMsg('✗ 便签创建失败'); return; }
-      if (d.note.anchor && anchor) d.note.anchor = anchor;   // vbook:响应锚=真成员局部页,与 DOM 页码空间(视图页)错位→挂错页(用户实锤钉入跳位);本地挂载用请求时的视图页锚,GET 时服务端才回转
-      notes.push(d.note);
-      if (!ensureMounted(d.note)) toastMsg('卡片便签已建(所在页尚未渲染,渲染后出现)');
-      else toastMsg('✅ 卡片已钉到书页');
-    });
+    // cid 原样持久化，重开不换号。
+    createRecord(
+      anchor,
+      { color: '#0d1322', w: w1, h: 210, collapsed: false, html: { content: htmlObj.content, isHtml: !!htmlObj.isHtml, label: htmlObj.label || '', type: htmlObj.type || '', icon: htmlObj.icon || '', cid: cid1, base_w: bw1 } },
+      '卡片便签已建(所在页尚未渲染,渲染后出现)',
+      '✅ 卡片已钉到书页'
+    );
     return true;
   }
 
@@ -1402,26 +1934,131 @@
   }
   function anchorFxHide() { if (_afx) _afx.style.display = 'none'; }
 
+  function teardownStorage(clearOptions) {
+    var priorOptions = O;
+    _generation += 1;
+    if (_unsubscribe) {
+      try { _unsubscribe(); } catch (error) { ioError(error, '便签订阅关闭失败'); }
+      _unsubscribe = null;
+    }
+    _writeQueues = Object.create(null);
+    _seenRevs = Object.create(null);
+    // teardown 只撤销当前交互，不允许 resize/pen 的收尾 PATCH 在 O 被下一页替换后
+    // 错写到新 document；正常 pagehide/visibilitychange 已有独立 flush。
+    O = null;
+    exitEdit();
+    cancelHandleGesture();
+    cancelBodyLP();
+    if (_rz) onResizeUp();
+    if (_rzTL) onResizeTLUp();
+    if (draw) penEnd();
+    removeAllEls();
+    notes = [];
+    O = clearOptions ? null : priorOptions;
+  }
+
   // ─────────────────────────── 公开 API ───────────────────────────
   RC.stickynote = {
-    // opts: {file, mount(anchor)->{el,w,h}|null, anchorFromPoint(x,y)->anchor|null, onDoubleTap(note)->bool, toast?}
+    // opts:
+    // legacy PWA: {file,...} → /pdf/api/notes；
+    // 扩展/已迁移宿主: {documentId,repository,...}，repository 是 identity-scoped
+    // {newId,list,get,create,patch,remove,subscribe}，此模式绝不访问 notes HTTP。
     init: function (opts) {
+      teardownStorage(false);
       O = opts || {};
+      var generation = _generation;
       injectCss();
       if (!_docBound) { _docBound = true; document.addEventListener('pointerdown', onDocDown, true); }
+      if (repoMode()) {
+        if (!repoReady()) {
+          ioError(new Error('缺少 documentId 或 repository 方法'), '便签初始化失败');
+          return;
+        }
+        try {
+          var subscribed = O.repository.subscribe(function (event) {
+            onRepositoryChange(event, generation);
+          });
+          Promise.resolve(subscribed).then(function (unsubscribe) {
+            if (generation !== _generation) {
+              if (typeof unsubscribe === 'function') try { unsubscribe(); } catch (_) {}
+              return;
+            }
+            if (typeof unsubscribe !== 'function') {
+              ioError(new Error('subscribe 没有返回 unsubscribe'), '便签初始化失败');
+              return;
+            }
+            _unsubscribe = unsubscribe;
+          }).catch(function (error) {
+            if (generation === _generation) ioError(error, '便签订阅失败');
+          });
+        } catch (error) {
+          ioError(error, '便签订阅失败');
+        }
+      }
       this.loadAll();
     },
-    // GET 全部便签 → 重挂(容器没就绪的留给 mountPending)
+    // LIST 全部便签。repository 模式增量合并（CHANGE 可先于 LIST）；
+    // legacy PWA 保持旧的全量替换语义。
     loadAll: function () {
-      if (!O || !O.file) return;
-      fetch(API + '?file=' + encodeURIComponent(O.file))
-        .then(function (r) { return r.json(); })
-        .then(function (d) {
-          if (!d || !d.ok) return;
+      if (!O || (!repoMode() && !O.file)) return;
+      var generation = _generation;
+      // 只允许清理“加载开始时已经存在、且整个 LIST 期间 revision 没变”的
+      // absent note。CHANGE 在分页途中创建/更新的记录不在快照或 rev 已提高，
+      // 不会被旧 LIST 误删。
+      var before = Object.create(null);
+      if (repoMode()) {
+        for (var n = 0; n < notes.length; n++) {
+          before[noteIdOf(notes[n])] = Number(notes[n].rev) || 0;
+        }
+      }
+      ioList(generation).then(function (items) {
+        if (generation !== _generation) return;
+        if (repoMode()) {
+          var returned = Object.create(null);
+          for (var i = 0; i < items.length; i++) {
+            returned[noteIdOf(items[i])] = true;
+            upsertRecord(items[i], generation);
+          }
+          var reconcile = [];
+          Object.keys(before).forEach(function (id) {
+            if (returned[id]) return;
+            var current = currentNote(id);
+            if (current && (Number(current.rev) || 0) === before[id]) {
+              // 分页过程中插入/删除会移动 offset，单凭“本轮 LIST 缺失”
+              // 不能判定已删除；对少量 absent 候选做一次点查，避免误删仍存在
+              // 的便签，同时补回错位分页漏项。
+              reconcile.push(Promise.resolve(O.repository.get(id, {
+                includeDeleted: true
+              })).then(function (latest) {
+                if (generation !== _generation) return;
+                var now = currentNote(id);
+                if (!now || (Number(now.rev) || 0) !== before[id]) return;
+                if (!latest || latest.deleted === true) {
+                  if (latest) upsertRecord(latest, generation);
+                  else {
+                    _seenRevs[id] = Math.max(Number(_seenRevs[id]) || 0, before[id]);
+                    removeLocal(id);
+                  }
+                } else {
+                  upsertRecord(latest, generation);
+                }
+              }).catch(function (error) {
+                // 点查失败时宁可保留旧 UI，也绝不能把存在的便签误删。
+                ioError(error, '便签列表核对失败');
+              }));
+            }
+          });
+          return Promise.all(reconcile).then(function () {
+            if (generation === _generation) mountAll();
+          });
+        } else {
           removeAllEls();
-          notes = d.notes || [];
+          notes = items || [];
           mountAll();
-        }).catch(function () {});
+        }
+      }).catch(function (error) {
+        ioError(error, '便签加载失败');
+      });
     },
     // 容器就绪(EPUB 章节加载完 / PDF 页渲染完)时由 reader 调:幂等重挂未挂/被重渲清掉的便签
     mountPending: mountAll,
@@ -1436,6 +2073,9 @@
     createVideoAt: createVideoAt,
     createCardAt: createCardAt,   // 卡片便签(制卡卡 📌 钉页 / 真机拖出复用)
     createHtmlAt: createHtmlAt,   // 通用卡便签(天气/搜索/图等 vc-card 钉页)
+    cardContextText: cardContextText,   // 收藏/上下文共用正面+背面可读投影；raw/meta 仍保留完整卡记录
+    bindCardSelection: bindCardSelection,   // 固定学习卡整卡长按：PWA/普通网页共用同一语义与完整快照
+    bindHtmlCardSelection: bindHtmlCardSelection,   // 固定工具/HTML 卡正文长按：同 cid 处处同步，不占用卡头拖拽
     anchorFx: { show: anchorFxShow, hide: anchorFxHide },   // 拖动锚定反馈(#51:光带=绑定内容/横线=插入位置)
     // ── 笔路由接口(页面 ink 层用,跨界三段切割;见上「编程式笔路由 API」注释)──
     penRoute: penRoute,     // (x,y|event) -> noteId|null  笔尖是否在某展开便签 body 上
@@ -1446,8 +2086,8 @@
     // 外观设置(rc-note-opacity / rc-note-autocontrast)变更后即时应用:对每个已挂载 ctl 重跑 applyColor
     // (rc-settings「便签」tab 保存时调;已有笔画是数据不改色,只影响底色/前景/新笔画)
     refreshStyle: function () { for (var id in ctls) { try { applyColor(ctls[id]); } catch (e) {} } },
-    // 卸载全部便签 DOM + 清状态(teardown)
-    removeAll: function () { exitEdit(); cancelHandleGesture(); cancelBodyLP(); if (_rz) onResizeUp(); if (_rzTL) onResizeTLUp(); if (draw) penEnd(); removeAllEls(); notes = []; },
+    // 卸载全部便签 DOM + 清状态(teardown，包括 repository subscribe)
+    removeAll: function () { teardownStorage(true); },
     notes: function () { return notes; }
   };
 })();

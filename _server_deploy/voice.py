@@ -472,7 +472,15 @@ def _entities_block(context: dict) -> str:
             lines.append(f"  {b.get('name')} → {b.get('rel')}")
     nodes = (context or {}).get("visible_kg_nodes") or []
     if nodes:
-        lines.append("当前页知识点:" + "、".join(n.get("name", "") for n in nodes[:30] if n.get("name")))
+        _kg = []   # 接线 KG summary(数据早在 ctx,原来只用 name)
+        for n in nodes[:30]:
+            _nm = (n.get("name") or "").strip()
+            if not _nm:
+                continue
+            _sm = (n.get("summary") or "").strip()
+            _kg.append(_nm + (f"——{_sm[:120]}" if _sm else ""))
+        if _kg:
+            lines.append("当前页知识点:" + "；".join(_kg))
     vocab = (context or {}).get("visible_vocab") or []
     if vocab:
         lines.append("当前页生词:" + "、".join(str(v) for v in vocab[:40]))
@@ -629,9 +637,21 @@ def _llm_intent(transcript: str, context: dict) -> dict:
     # 内容类提问且在 PDF 页 → 取当前页正文喂给大脑(翻页/缩放等命令不触发,省 PDF 开销)
     page_block = ""
     if pt == "pdf" and _CONTENT_Q.search(transcript or ""):
-        pgtxt = _page_text(ctx.get("file_rel", ""), ctx.get("page", 0))
-        if pgtxt:
-            page_block = f"\n\n【当前页正文(第{ctx.get('page', '?')}页,回答本页内容问题用)】\n{pgtxt}"
+        # Phase2:本页简述在手 → 注要点替整页(几十字够这条轻链路的 ≤2 句作答,省 token);缺失才降级注整页正文
+        _brief_ln = ""
+        try:
+            _rel = (ctx.get("file_rel") or "").strip()
+            if _rel and ".." not in _rel:
+                _ap = (VAULT_ROOT / _rel).resolve(); _ap.relative_to(VAULT_ROOT.resolve())
+                _brief_ln = _pdf_mod()._brief_inject_text(_ap, ctx.get("page", 0))
+        except Exception:
+            _brief_ln = ""
+        if _brief_ln:
+            page_block = f"\n\n【当前页要点(第{ctx.get('page', '?')}页,回答本页内容问题用)】\n{_brief_ln}"
+        else:
+            pgtxt = _page_text(ctx.get("file_rel", ""), ctx.get("page", 0))
+            if pgtxt:
+                page_block = f"\n\n【当前页正文(第{ctx.get('page', '?')}页,回答本页内容问题用)】\n{pgtxt}"
     prompt = (f"{_LLM_SYS}\n\n【可用动作清单】\n{_action_catalog(pt)}\n\n"
               f"【当前可见实体(谐音映射用)】\n{_entities_block(ctx)}\n\n"
               f"【当前页面】{meta_txt}{page_block}\n【用户说(语音,可能有错字)】{transcript}\n\n只输出 JSON:")
@@ -799,15 +819,18 @@ def _undo_do(uid=None, owner=None):
             ids = set(handle.get("ids") or [])
             if fr and ids:
                 import pdf_reader
-                db = pdf_reader._hl_load(fr)
-                db["highlights"] = [h for h in db.get("highlights", []) if h.get("id") not in ids]
-                pdf_reader._hl_save(fr, db)
+                with pdf_reader._hl_edit(fr) as db:
+                    db["highlights"] = [
+                        h for h in db.get("highlights", [])
+                        if h.get("id") not in ids
+                    ]
         elif kind == "sticky":   # AI 建的便签:撤销=删掉(notes sidecar,PDF/EPUB 同一套)
             fr = (handle.get("file_rel") or "").strip()
             ids = set(handle.get("ids") or [])
             if fr and ids:
                 import pdf_reader
-                pdf_reader._notes_save(fr, [n for n in pdf_reader._notes_load(fr) if n.get("id") not in ids])
+                with pdf_reader._notes_edit(fr) as items:
+                    items[:] = [n for n in items if n.get("id") not in ids]
         elif kind == "dict_fix":   # 词典修正撤销:恢复 prev(首次修正 prev=None → 删条目)
             w2 = (handle.get("word") or "").strip()
             if w2:
@@ -824,14 +847,13 @@ def _undo_do(uid=None, owner=None):
             old = handle.get("old") or {}
             if fr and nid:
                 import pdf_reader
-                items = pdf_reader._notes_load(fr)
-                n = next((x for x in items if x.get("id") == nid), None)
-                if n:
-                    for k in ("text", "color"):
-                        if k in old:
-                            n[k] = old[k]
-                    n["updated"] = int(time.time())
-                    pdf_reader._notes_save(fr, items)
+                with pdf_reader._notes_edit(fr) as items:
+                    n = next((x for x in items if x.get("id") == nid), None)
+                    if n:
+                        for k in ("text", "color"):
+                            if k in old:
+                                n[k] = old[k]
+                        n["updated"] = int(time.time())
         return {"ok": True, "label": label, "kind": kind}   # kind 给前端:highlight/sticky 撤销后要重渲页面才能视觉清掉
     except Exception as e:
         with _undo_lock:
@@ -851,7 +873,7 @@ def _vtask_persist(tid):
             if not v:
                 return
             snap = {k: v.get(k) for k in ("id", "kind", "status", "step", "speak", "client_actions",
-                                          "result", "error", "ts", "steps", "instruction", "pid", "recipe")}
+                                          "result", "error", "ts", "steps", "instruction", "pid", "recipe", "orch")}
         _CLI_TASK_DIR.mkdir(parents=True, exist_ok=True)
         tmp = _CLI_TASK_DIR / (tid + ".json.tmp")
         tmp.write_text(json.dumps(snap, ensure_ascii=False, default=str), "utf-8")
@@ -1180,7 +1202,17 @@ def _agent_catalog() -> str:
 _AGENT_BACKEND = os.environ.get("AGENT_TASK_BACKEND", "claude").strip().lower()   # claude | codex
 
 
-def _agent_codex_cmd(prompt: str, model: str = "", effort: str = "") -> list:
+def _agent_codex_fast_ok(model: str) -> bool:
+    """Secondary Fast capability fence for the standalone voice worker."""
+    try:
+        import assistant
+        return assistant._codex_fast_ok(model) is True
+    except Exception:
+        return False
+
+
+def _agent_codex_cmd(
+        prompt: str, model: str = "", effort: str = "", fast: bool = False) -> list:
     """148:codex exec 当 MCP worker —— **走 ChatGPT 订阅额度,与 Claude 额度完全独立**(白捡一路)。
 
     ⚠ **唯一的关键是 `default_tools_approval_mode="approve"`**(2026-07-14 单变量隔离实测):
@@ -1200,17 +1232,20 @@ def _agent_codex_cmd(prompt: str, model: str = "", effort: str = "") -> list:
            'default_tools_approval_mode="approve",'
            'disabled_tools=["assistant_log_chat","assistant_history"],'
            'startup_timeout_sec=20,tool_timeout_sec=60}' % url)
-    return [os.environ.get("APP_CODEX", "codex"), "exec", "--json",
-            "--skip-git-repo-check", "--color", "never", "-s", "read-only",
-            "-c", 'model="%s"' % (model or os.environ.get("AGENT_CODEX_MODEL", "gpt-5.6-luna")),
-            "-c", 'model_reasoning_effort="%s"' % (effort or os.environ.get("AGENT_CODEX_EFFORT", "low")),
-            # fast 档:service_tier=priority = 官方的 "Fast"(1.5x speed, increased usage)。
-            #   codex 必须**显式**开(实测 12.3s→11.0s);claude 那边 fast 是**默认开着**的
-            #   (反证:CLAUDE_CODE_DISABLE_FAST_MODE=1 会从 7.7s 慢到 9.1s),所以 claude 侧不用配。
-            "-c", 'service_tier="%s"' % os.environ.get("AGENT_CODEX_TIER", "priority"),
-            "-c", mcp,
+    cmd = [os.environ.get("APP_CODEX", "codex"), "exec", "--json",
+           "--skip-git-repo-check", "--color", "never", "-s", "read-only",
+           "-c", 'model="%s"' % (model or os.environ.get("AGENT_CODEX_MODEL", "gpt-5.6-luna")),
+           "-c", 'model_reasoning_effort="%s"' % (effort or os.environ.get("AGENT_CODEX_EFFORT", "low"))]
+    # Fast 是每个动作的显式选择,不能再用环境变量把全部 Codex worker 隐式升到 priority。
+    # 上游 action-pref 已按模型能力校验 fast；这里仍严格只认 JSON bool true,避免
+    # "false"/1 之类的宽松真值意外提高用量。Claude 路径从不消费该配置。
+    selected_model = model or os.environ.get("AGENT_CODEX_MODEL", "gpt-5.6-luna")
+    if fast is True and _agent_codex_fast_ok(selected_model):
+        cmd += ["-c", 'service_tier="priority"']
+    cmd += ["-c", mcp,
             "-c", "features.shell_tool=false",   # 安全底线:只能调 MCP
             prompt]
+    return cmd
 
 
 class _AgentTimeout(Exception):
@@ -1277,10 +1312,10 @@ def _unwrap_call(nm, inp):
 
 
 def _agent_run_cli(backend: str, prompt: str, sysp: str, tid, steps: list,
-                   model: str = "", effort: str = "") -> str:
+                   model: str = "", effort: str = "", fast: bool = False) -> str:
     """跑一个无头 CLI(claude | codex),流式解析事件驱动工具卡进度条。返回最终答案('' = 没给结果)。
 
-    backend/model/effort 由 assistant.py 的 **per-action 预设**(设置面板「agent」行)传进来;
+    backend/model/effort/fast 由 assistant.py 的 **per-action 预设**(设置面板「agent」行)传进来;
     传空则回落 env → 出厂默认。两边的事件格式不同,但语义一一对应:
       claude  `--output-format stream-json`:{type:assistant, message.content[].type=tool_use} / {type:result}
       codex   `--json`:{type:item.started, item.type=mcp_tool_call} / {type:item.completed, item.type=agent_message}
@@ -1288,7 +1323,12 @@ def _agent_run_cli(backend: str, prompt: str, sysp: str, tid, steps: list,
     codex = backend == "codex"
     if codex:
         # codex exec 没有 --append-system-prompt,并进 prompt
-        cmd = _agent_codex_cmd(prompt + "\n\n" + sysp, model=model, effort=effort)
+        cmd = _agent_codex_cmd(
+            prompt + "\n\n" + sysp,
+            model=model,
+            effort=effort,
+            fast=(fast is True),
+        )
     else:
         cmd = [os.environ.get("APP_CLAUDE", "claude"), "-p", prompt,
                "--append-system-prompt", sysp,
@@ -1452,6 +1492,43 @@ def _flow_summary(steps):
     return ("；".join(p for p in parts if p)), lookups
 
 
+def _agent_registry_prompt() -> str:
+    """Describe the one production registry to the CLI worker.
+
+    The import stays lazy because ``app.py`` registers ``voice`` before
+    ``assistant``.  Full schemas are still discovered through the MCP
+    ``assistant_tools`` bridge and every call goes through
+    ``assistant_call_tool`` into the registry-backed executor gate.
+    """
+
+    try:
+        import assistant as A
+
+        surface = A.SURFACE_MCP_WORKER
+        groups = []
+        for namespace in A.TOOL_REGISTRY.namespaces:
+            count = len(
+                A.TOOL_REGISTRY.tools_in(namespace.name, surface=surface)
+            )
+            if count:
+                groups.append(f"{namespace.name}({count})")
+        return (
+            "【阅读器生产工具目录】"
+            f"版本 {A.TOOL_REGISTRY.catalog_version}；"
+            "工具域：" + "、".join(groups) + "。"
+            "需要阅读器能力时先调用 assistant_tools 取得本版本的完整 schema，"
+            "再用 assistant_call_tool 执行；不要根据旧记忆猜工具名或参数。"
+        )
+    except Exception:
+        # 目录预读失败不能阻断已有 CLI 兜底，但必须强制重新发现，
+        # 而不是相信 prompt 中可能过期的手写清单。
+        return (
+            "【阅读器生产工具目录暂不可预读】"
+            "需要阅读器能力时必须先调用 assistant_tools，再用 "
+            "assistant_call_tool 执行；不要猜工具名或参数。"
+        )
+
+
 def _task_agent(tid, params, ctx, base):
     instr = (params.get("instruction") or "").strip()
     if len(instr) < 3:
@@ -1513,18 +1590,29 @@ def _task_agent(tid, params, ctx, base):
     #   实测同一任务:默认 4 轮/12.2s(还调了 2 次 ToolSearch) → **2 轮/6.0s,零 ToolSearch**,
     #   且 system.init 里 MCP 从 0 个变成 **20 个直接可见**。
     #   ⇒ 目录预注入(_agent_catalog)因此**不再需要**,留着只是白塞 token。
-    sysp = "做完只输出一句话(40 字内)告诉用户结果,不要罗列过程、不要 markdown。做不到就直说做不到和原因。"
+    sysp = (
+        _agent_registry_prompt()
+        + "\n做完只输出一句话(40 字内)告诉用户结果,不要罗列过程、不要 markdown。"
+        "做不到就直说做不到和原因。"
+    )
     # 148:后端/型号/深度来自 assistant.py 的 per-action 预设(设置面板「agent」行);没传就回落 env/默认
     backend = (params.get("backend") or _AGENT_BACKEND).strip().lower()
     model = (params.get("model") or "").strip()
     effort = (params.get("effort") or "").strip()
+    # 服务端 action-pref 会先按 Codex 型号能力裁决；worker 再 fail-closed
+    # 只消费真正的 bool,不把字符串/数字宽松转换成 Fast。
+    fast = params.get("fast") is True
     steps, answer = [], ""
     # 148:双向兜底 —— 主后端挂了(限流/进程起不来/没给结果)就换另一个 CLI 再跑一遍。
     #   用户排序:**成功率 > 速度**。默认主 = claude/opus(Max 5x 额度够用),兜底 = codex(白嫖池,
     #   跟 Claude 额度完全独立 → Claude 真限流时它照样能干活)。
     alt = "codex" if backend == "claude" else "claude"
     try:
-        answer = _agent_run_cli(backend, prompt, sysp, tid, steps, model=model, effort=effort)
+        answer = _agent_run_cli(
+            backend, prompt, sysp, tid, steps,
+            model=model, effort=effort,
+            fast=(fast if backend == "codex" else False),
+        )
     except _AgentTimeout:
         _vtask_set(tid, status="error", error="任务超时")   # 超时不降级:再来一轮又是 240s
         return
@@ -1544,7 +1632,12 @@ def _task_agent(tid, params, ctx, base):
             steps.clear()
             _vtask_set(tid, step="换个助手重试…")
             try:
-                answer = _agent_run_cli(alt, prompt, sysp, tid, steps)   # 兜底后端用它自己的默认档
+                # Claude→Codex 兜底仍可继承该动作经服务端校验的 Fast；
+                # Codex→Claude 则在调用边界就显式归零。
+                answer = _agent_run_cli(
+                    alt, prompt, sysp, tid, steps,
+                    fast=(fast if alt == "codex" else False),
+                )   # 兜底后端用它自己的默认型号/深度
             except _AgentTimeout:
                 _vtask_set(tid, status="error", error="任务超时")
                 return
@@ -1588,6 +1681,12 @@ def _task_agent(tid, params, ctx, base):
 
 
 def _run_task(tid, kind, params, context, base):
+    # This function always runs in a detached thread.  Restore the exact
+    # request owner captured by assistant._bg_task before touching reader
+    # sidecars (card entities, highlights or sticky notes).
+    _pdf_mod()._reader_storage_identity_bind_for_thread(
+        (context or {}).get("_reader_storage_identity")
+    )
     _vtask_set(tid, step="排队中…")
     with _task_sema:   # 阻塞排队:同时最多 2 个综合任务跑(daemon 线程阻塞无碍)
         try:

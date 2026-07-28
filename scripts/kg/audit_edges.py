@@ -11,24 +11,259 @@
 CLI:默认 dry-run;--run 应用。
 """
 import json
+import hashlib
+import os
 import re
 import sys
 import time
 import sqlite3
+import uuid
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config  # noqa: E402
 import attention_profile as AP  # noqa: E402
+_CODE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import promote_concepts as PC  # noqa: E402
+from concept_node_service import (  # noqa: E402
+    ConceptNodeError,
+    ConceptNodeService,
+    _exclusive_file_lock,
+)
 
 STATE = config.PROJECT_DIR / "state"
 EMERGENT = STATE / "attention" / "emergent-graph.json"
 CONF = STATE / "attention" / "emergent-confirmations.json"
 LOG = STATE / "attention" / "edge-audit-log.jsonl"
+AUDIT_OUTBOX = STATE / "attention" / "edge-audit-outbox"
 SEARCH_DB = STATE / "pdf-search.db"
 MAX_PER_RUN = 20
+
+
+def _audit_service():
+    return ConceptNodeService(
+        graph_path=EMERGENT,
+        journal_path=EMERGENT.parent / "kg-node-mutations.jsonl",
+        aliases_path=PC.ALIASES_FILE,
+        confirmations_path=CONF,
+        kg_dir=PC.KG_DIR,
+        concept_root=Path(AP.VAULT_ROOT) / "资源" / "概念",
+    )
+
+
+def _fsync_directory(path):
+    """Durably publish/remove outbox directory entries on POSIX."""
+    if os.name == "nt":
+        return
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    descriptor = os.open(str(path), flags)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _ensure_durable_directory(path):
+    path = Path(path)
+    missing = []
+    cursor = path
+    while not cursor.exists():
+        missing.append(cursor)
+        if cursor.parent == cursor:
+            break
+        cursor = cursor.parent
+    for directory in reversed(missing):
+        directory.mkdir()
+        _fsync_directory(directory.parent)
+
+
+def _write_json_atomic(path, value):
+    _ensure_durable_directory(path.parent)
+    temporary = path.with_name(
+        "." + path.name + "." + uuid.uuid4().hex + ".tmp"
+    )
+    try:
+        with temporary.open("w", encoding="utf-8") as handle:
+            json.dump(value, handle, ensure_ascii=False, sort_keys=True)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(temporary, path)
+        _fsync_directory(path.parent)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _audit_outbox_path(mutation_id):
+    name = hashlib.sha256(str(mutation_id).encode("utf-8")).hexdigest()
+    return AUDIT_OUTBOX / (name + ".json")
+
+
+def _audit_outbox_semantic_payload(payload):
+    value = json.loads(json.dumps(payload, ensure_ascii=False))
+    value.pop("payloadDigest", None)
+    for entry in value.get("entries") or []:
+        if isinstance(entry, dict):
+            entry.pop("ts", None)
+    return value
+
+
+def _audit_outbox_digest(payload):
+    value = {
+        key: item
+        for key, item in payload.items()
+        if key != "payloadDigest"
+    }
+    encoded = json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _validate_audit_outbox(path, payload):
+    if (
+        not isinstance(payload, dict)
+        or payload.get("contract") != "kg-edge-audit-outbox/1"
+        or not isinstance(payload.get("entries"), list)
+    ):
+        raise RuntimeError("edge audit outbox 结构无效")
+    mutation_id = str(payload.get("mutationId") or "")
+    if (
+        not mutation_id
+        or len(mutation_id) > 300
+        or Path(path).name != _audit_outbox_path(mutation_id).name
+        or payload.get("payloadDigest") != _audit_outbox_digest(payload)
+    ):
+        raise RuntimeError("edge audit outbox 身份或摘要无效")
+    entry_ids = set()
+    for entry in payload["entries"]:
+        if not isinstance(entry, dict):
+            raise RuntimeError("edge audit outbox entry 无效")
+        edge_identity = str(entry.get("edge_id") or entry.get("edge") or "")
+        expected_id = mutation_id + ":" + edge_identity
+        entry_id = str(entry.get("entry_id") or "")
+        if (
+            not edge_identity
+            or str(entry.get("mutation_id") or "") != mutation_id
+            or entry_id != expected_id
+            or entry_id in entry_ids
+        ):
+            raise RuntimeError("edge audit outbox entry 身份无效或重复")
+        entry_ids.add(entry_id)
+    return mutation_id
+
+
+def _stage_audit_logs(mutation_id, logs):
+    mutation_id = str(mutation_id or "")
+    if not mutation_id or len(mutation_id) > 300:
+        raise RuntimeError("edge audit mutationId 无效")
+    entries = []
+    for log in logs:
+        entry = dict(log)
+        entry["mutation_id"] = mutation_id
+        entry["entry_id"] = mutation_id + ":" + str(
+            entry.get("edge_id") or entry.get("edge") or ""
+        )
+        entries.append(entry)
+    payload = {
+        "contract": "kg-edge-audit-outbox/1",
+        "mutationId": mutation_id,
+        "entries": entries,
+    }
+    payload["payloadDigest"] = _audit_outbox_digest(payload)
+    path = _audit_outbox_path(mutation_id)
+    _validate_audit_outbox(path, payload)
+    with _exclusive_file_lock(
+        AUDIT_OUTBOX.with_suffix(".lock")
+    ):
+        if path.exists():
+            try:
+                existing = json.loads(path.read_text("utf-8"))
+            except (OSError, ValueError, TypeError) as exc:
+                raise RuntimeError("edge audit outbox 损坏") from exc
+            _validate_audit_outbox(path, existing)
+            if (
+                _audit_outbox_semantic_payload(existing)
+                != _audit_outbox_semantic_payload(payload)
+            ):
+                raise RuntimeError("edge audit mutationId 对应不同日志 payload")
+            return path
+        _write_json_atomic(path, payload)
+    return path
+
+
+def _append_audit_logs(entries):
+    _ensure_durable_directory(LOG.parent)
+    with _exclusive_file_lock(LOG.with_suffix(LOG.suffix + ".lock")):
+        existing_entries = {}
+        if LOG.exists():
+            # 与 KG journal 一样只按物理 ASCII LF 切 JSONL；AI reason
+            # 可能合法包含 U+0085/U+2028/U+2029。
+            for raw_line in LOG.read_text("utf-8").split("\n"):
+                if raw_line.endswith("\r"):
+                    raw_line = raw_line[:-1]
+                if not raw_line.strip():
+                    continue
+                try:
+                    old_log = json.loads(raw_line)
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError(
+                        "edge audit log 损坏，拒绝继续追加"
+                    ) from exc
+                if not isinstance(old_log, dict):
+                    raise RuntimeError(
+                        "edge audit log 结构无效，拒绝继续追加"
+                    )
+                if old_log.get("entry_id"):
+                    entry_id = str(old_log["entry_id"])
+                    existing = existing_entries.get(entry_id)
+                    if existing is not None and existing != old_log:
+                        raise RuntimeError(
+                            "edge audit log entry_id 对应冲突内容"
+                        )
+                    existing_entries[entry_id] = old_log
+        with LOG.open("a", encoding="utf-8") as handle:
+            for entry in entries:
+                entry_id = str((entry or {}).get("entry_id") or "")
+                if not entry_id:
+                    raise RuntimeError("edge audit log entry_id 无效")
+                existing = existing_entries.get(entry_id)
+                if existing is not None:
+                    if existing != entry:
+                        raise RuntimeError(
+                            "edge audit log entry_id 对应冲突内容"
+                        )
+                    continue
+                handle.write(json.dumps(entry, ensure_ascii=False) + "\n")
+                existing_entries[entry_id] = entry
+            handle.flush()
+            os.fsync(handle.fileno())
+        _fsync_directory(LOG.parent)
+
+
+def _flush_audit_outbox(service):
+    if not AUDIT_OUTBOX.exists():
+        return
+    with _exclusive_file_lock(
+        AUDIT_OUTBOX.with_suffix(".lock")
+    ):
+        for path in sorted(AUDIT_OUTBOX.glob("*.json")):
+            try:
+                payload = json.loads(path.read_text("utf-8"))
+            except (OSError, ValueError, TypeError) as exc:
+                raise RuntimeError("edge audit outbox 损坏") from exc
+            mutation_id = _validate_audit_outbox(path, payload)
+            status = service.mutation_status(mutation_id).get("status")
+            if status == "ambiguous":
+                raise RuntimeError("edge audit mutation 状态不明确")
+            if status != "applied":
+                continue
+            _append_audit_logs(payload["entries"])
+            path.unlink()
+            _fsync_directory(path.parent)
 
 
 def _ek(e):
@@ -67,12 +302,13 @@ def _context_for(e):
     return text[max(0, j - 200): j + len(quote) + 200]
 
 
-def pick_audit_set(g):
+def pick_audit_set(g, *, confirmation_edges=None):
     """审计集:未审过的 auto 边 + 散文边 + unconfirmed,跳过用户改过的。"""
-    try:
-        conf_edges = (json.loads(CONF.read_text("utf-8")) or {}).get("edges", {})
-    except Exception:
-        conf_edges = {}
+    conf_edges = (
+        PC._load_conf_edges()
+        if confirmation_edges is None
+        else dict(confirmation_edges)
+    )
     out = []
     for e in g.get("edges", []):
         k2 = "%s|%s" % (e["from"], e["to"])
@@ -85,8 +321,12 @@ def pick_audit_set(g):
 
 
 def audit(run=False, model="sonnet", effort="low"):
+    service = _audit_service() if run else None
+    if service is not None:
+        _flush_audit_outbox(service)
     g = json.loads(EMERGENT.read_text("utf-8"))
-    todo = pick_audit_set(g)
+    confirmation_edges = PC._load_conf_edges(strict=True)
+    todo = pick_audit_set(g, confirmation_edges=confirmation_edges)
     if not todo:
         print("无待审计边")
         return {"audited": 0}
@@ -101,7 +341,7 @@ def audit(run=False, model="sonnet", effort="low"):
               "- demote: 存在关系但**不是前置**(例子/推广/顺带提及)→ 应降为相关\n"
               "- remove: 证据撑不住这条关系\n\n" + "\n\n".join(lines)
               + '\n\n只输出严格 JSON 数组:[{"i":0,"verdict":"keep|demote|remove","reason":"≤15字"},...]')
-    sys.path.insert(0, str(config.PROJECT_DIR / "_client" / "core"))
+    sys.path.insert(0, str(_CODE_ROOT / "_client" / "core"))
     from ai_backends import make_backend
     be = make_backend("claude_cli", {"command": "/usr/bin/claude",
                                      "model": model, "effort": effort, "timeout": 240})
@@ -116,6 +356,7 @@ def audit(run=False, model="sonnet", effort="low"):
     got = {int(x["i"]): x for x in arr if isinstance(x, dict) and "i" in x}
     stats = {"keep": 0, "demote": 0, "remove": 0, "noans": 0}
     logs = []
+    audit_updates = {}
     audits = g.setdefault("edge_audits", {})   # R4:审计=持久 overlay(第 3 层),重建先应用,墓碑不复活
     for i, e in enumerate(todo):
         x = got.get(i) or {}
@@ -129,13 +370,76 @@ def audit(run=False, model="sonnet", effort="low"):
         if not run:
             continue
         eid = e.get("id") or PC._edge_id(e["from"], e["to"])
-        audits[eid] = {"verdict": v, "reason": (x.get("reason") or "")[:40], "ts": int(time.time())}
+        audit_updates[eid] = {
+            "verdict": v,
+            "reason": (x.get("reason") or "")[:40],
+            "ts": int(time.time()),
+        }
+        audits[eid] = audit_updates[eid]
     if run:
-        g["edges"] = PC.derive_edges(g)        # 派生视图统一出口
-        EMERGENT.write_text(json.dumps(g, ensure_ascii=False, indent=1), "utf-8")
-        with LOG.open("a", encoding="utf-8") as f:
-            for L in logs:
-                f.write(json.dumps(L, ensure_ascii=False) + "\n")
+        audit_identity = {
+            edge_id: {
+                "verdict": value.get("verdict"),
+                "reason": value.get("reason"),
+            }
+            for edge_id, value in sorted(audit_updates.items())
+        }
+        operation_payload = {
+            "updates": audit_identity,
+            "confirmationEdges": confirmation_edges,
+            "edgeClaimsSha256": PC._semantic_digest(
+                g.get("edge_claims") or {}
+            ),
+            "edgeAuditsSha256": PC._semantic_digest(
+                g.get("edge_audits") or {}
+            ),
+            "edgeVersion": PC.EDGE_VER,
+        }
+        basis = json.dumps(
+            operation_payload,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        )
+        mutation_id = "audit-edges:" + __import__("hashlib").sha256(
+            basis.encode("utf-8")
+        ).hexdigest()[:24]
+
+        def apply_audits(current):
+            if PC._load_conf_edges(strict=True) != confirmation_edges:
+                raise ConceptNodeError(
+                    "用户边确认在 KG 审计事务前发生变化",
+                    "BW_KG_NODE_STALE_EXTERNAL",
+                )
+            if (
+                PC._semantic_digest(current.get("edge_claims") or {})
+                != operation_payload["edgeClaimsSha256"]
+                or PC._semantic_digest(current.get("edge_audits") or {})
+                != operation_payload["edgeAuditsSha256"]
+            ):
+                raise ConceptNodeError(
+                    "KG 审计所依据的边投影已变化",
+                    "BW_KG_NODE_STALE_GRAPH",
+                )
+            current.setdefault("edge_audits", {}).update(audit_updates)
+            current["edges"] = PC.derive_edges(
+                current,
+                confirmation_edges=confirmation_edges,
+            )
+            return {
+                "audited": len(audit_updates),
+                "nEdges": len(current["edges"]),
+            }
+
+        _stage_audit_logs(mutation_id, logs)
+        service.mutate_graph(
+            mutation_id=mutation_id,
+            source="audit-edges",
+            mutator=apply_audits,
+            operation_contract="kg-op/audit-edges/1",
+            operation_payload=operation_payload,
+        )
+        _flush_audit_outbox(service)
     for L in logs:
         print("  %s %s — %s" % ({"keep": "✓", "demote": "↓", "remove": "✗"}[L["verdict"]], L["edge"], L["reason"]))
     print("审计 %d 条:keep %d / demote %d / remove %d%s"

@@ -248,6 +248,13 @@ function _selectSpanRange(span, start, end) {
 function _updateSelPreview(text) {
   const el = document.getElementById('sel-preview');
   text = (text || '').trim();
+  // 出向选区/焦点同步(2026-07-28 修):PDF 的真实选中走 char-layer(画在 sel-overlay,
+  // **不产生原生 selection**),而 `checkSelection` 只挂在 mouseup/touchend/selectionchange 上
+  // → char-layer 选中完成后没有任何事件通知出向漏斗,结果 UI 有选中、journal 无 focus,
+  //   甚至因 `_charSel` 被滚动/翻页判定清空而误发 cancel(用户实测:p23 选中后 selection='')。
+  // 这里是**选中变更的唯一全覆盖通知点**(提交与清空两条路径都经过它),所以挂在此处一处即可,
+  // 不新建第二套选择机制。_ctxSelReport 内部已做:空串=显式取消、非空=focus('text')。
+  try { if (typeof _ctxSelReport === 'function') _ctxSelReport(text); } catch (_) {}
   // 选中元数据(所在页 + 时戳),给语音/侧栏助手 __voiceContext 做「跨页陈旧选中」校验:
   // 翻到别页后旧选中不再当成"现在在问的内容"。每次选中变化都先清空所在句(char-layer 路径随后会补)。
   try {

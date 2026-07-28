@@ -787,10 +787,24 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 ### 23. Service Worker + Cache API：页图持久缓存(抗 iOS 清 + 离线)（2026-06-03）
 - 动机:HTTP `immutable` 缓存能存页图,但 iOS Safari 定期清(7天 ITP/存储紧张)→"过几天又重下"。用 PWA 标准做法(Google Docs/Books 同款)持久化。
 - `/pdf/sw.js`(Flask 路由,内联脚本):**必须从 `/pdf/` 下提供**——SW 作用域=其所在目录,要覆盖 `/pdf/api/page-image`;响应带 `Service-Worker-Allowed: /pdf/` + `Cache-Control: no-cache`(SW 更新及时拉取,改 `CACHE` 版本号即生效)。
-- SW 策略:**只接管 `GET /pdf/api/page-image`**(cache-first:命中 Cache Storage 零网络/离线;未命中 fetch+put)。**其余请求一律 `return`(不 respondWith)→ 浏览器默认处理**,绝不拦截 SSE/POST/查词(否则会断流/出错)。`activate` 删非当前版本缓存。
+- SW 策略:页图/文字层与版本化静态资产继续 cache-first，其它明确列出的只读数据按
+  network-fallback/SWR 处理。`/pdf/` 书架和五个正式 reader 导航是例外：它们含
+  `window.__USER__`，永远以 `cache:'no-store'` 网络直取，离线不回退 HTML。
+- 私有响应不再共用 URL cache：页图、字符层、书元数据、overlay、高亮等进入
+  `pdf-private-v4-<acct-v1 namespace>-<auth-v1 epoch>`。首次 client 绑定只信正式导航的服务器
+  响应头；SW 进程重启时先从带 `{namespace,authEpoch,verifiedAt}` 的 server-verified
+  `pdf-private-identity-v1` 恢复仍存活 Client.id，无记录才请求 no-store 身份端点。彻底冷启动
+  得到新 Client.id 时不承诺离线恢复。页面消息不携带 namespace，proxy/RBI client 不能绑定。
+- `activate` 删除未分区 `pdf-cache-v3`，并遍历全部 Cache Storage 删除历史版本曾写入的
+  reader/书架 HTML；v4 账户页数据继续保留。日常导航只清 shell 的已知 HTML key，不扫描页图。
+- 根 PWA 与 PDF 两个 scope 注入 `_server_deploy/reader_sw_auth.py` 的同一 auth epoch/pending
+  协议。登录、退出、POST 注册和同源 Bearer 会话均联动清理 v4/identity 及根 `bw-nav`/`bw-data`
+  私有 cache，`pdf-shell-v1` 与静态 cache 保留；pending 和 epoch 会在 hit/网络/put 前后复核，
+  阻止并发晚到写。未登记 client 只走 no-store 网络，不读写任何账户数据 cache。
 - 注册:boot `navigator.serviceWorker.register('/pdf/sw.js',{scope:'/pdf/'})` + `navigator.storage.persist()`(配合 Cache Storage,系统几乎不清)。
 - 三层缓存叠加:① page-image immutable HTTP 缓存(同会话快) ② Cache Storage(SW,跨会话/抗清/离线) ③ read-ahead 预取(`_prefetchAround` 前后±3页 → 经 SW 进 Cache Storage)。看过+预取的页持久存住,翻页瞬开、离线可读。
-- 注:Cache Storage 会随阅读增长;`pdf-pages-v1` 版本号 bump 会清旧缓存。需要时可加按页数/容量的 LRU 修剪(暂未做,靠 iOS 配额兜底)。
+- 注:Cache Storage 会随阅读增长；认证 epoch 旋转会删除旧私有代际，当前代际的书页仍未做按
+  容量 LRU（靠浏览器配额兜底）。身份映射会清 dead client 并封顶 128 条。
 
 ### 24. 跨端偏好同步：PWA ↔ Safari ↔ 多设备（2026-06-03）
 - 动机:用户反馈「装到主屏的 PWA 里的 PDF 设置、阅读进度(当前页)、旋转排版都跟 Safari 不同步」。**根因:iOS 把"安装的 PWA(standalone)"和"Safari 标签"当成两个独立存储沙箱**——localStorage 不互通。阅读器所有偏好(设置面板项、`pdf-last-positions` 阅读进度、`pdf-layout:*`/`pdf-auto-orient` 旋转排版)都存 localStorage → 两边各存各的,旋转不切排版/进度不还原全是因为目标沙箱里这些键是空的。
@@ -1277,25 +1291,48 @@ CDP `Network.requestWillBeSent` 的 initiator 调用栈(type=Document);注意阅
 
 **「📥 预热」是服务器侧缓存;「⬇ 本机」(顶栏新按钮)才是客户端整本落盘。**
 
-- `reader.src/31-localbook.js`:把全书页图+字符层预灌进 SW 的 `pdf-cache-v3`(Cache Storage)。
+- `reader.src/31-localbook.js`:逐页 fetch 全书页图+字符层，由 SW 放入服务器核验账户的
+  `pdf-private-v4-<acct-v1>-<auth-v1 epoch>`；页面本身不读取 namespace/epoch、不拼 cache 名，
+  也不直接 `cache.put` 私有响应。
   **缓存键靠直接调用渲染路径的同一批模块级函数构造**(`_bucketReqW/_ratchetReqW/FILE_REL/CHARS_VER`,
   拼装后同 module 作用域)→ 逐字节一致零漂移。字符层两步:先灌 localStorage 猜测 cv 的键,再经
-  page-overlay 拿真 cv 灌正主+回写 localStorage。3 路并发;可暂停续传(cache.match 跳已存);
+  page-overlay 拿真 cv 灌正主+回写 localStorage。3 路并发；重复 fetch 由 SW cache-first 秒回；
   完成记 `lb-done:<rel>`(含 mtime,书更新→按钮变 ⟳)。开机即 `navigator.storage.persist()`。
-- `_SW_JS` 升级:`pdf-shell-v1` 缓存壳(`/static/*` cache-first;`/pdf/view` 导航 network-first
-  + **按 file 归一键**回退,丢 page= 参数防换页 miss);`/pdf/api/book-meta` SWR(离线开书的前提)。
-- **首访坑**:安装 SW 的那次导航不受 SW 控制 → HTML/壳资产没进缓存。解法=下载完成后 `_lbPrimeShell()`
-  重 fetch 开书 HTML + performance entries 里全部 `/static/` 资产(此时 SW 已控 → 落 SHELL)。
-- E2E:`scratchpad/localbook_e2e.py` 铸 cookie → 下载 → `set_offline(True)` → 重开断言页图+字符层。
+- `_SW_JS` 的 `pdf-shell-v1` **只缓存版本化 `/static/*` 资产**；页图/字符层/`book-meta`
+  按 `acct-v1 + auth epoch` 分区。根/PDF 两个 SW 的 epoch/pending 协议只有
+  `_server_deploy/reader_sw_auth.py` 一份实现；登录、退出、POST 注册和同源 Bearer 会话均先
+  阻塞私有读写、旋转 epoch，再清理并 no-store 请求，网络结束后二次清理。删除本机副本由可信
+  消息让 SW 只扫描当前账户 cache，页面不能选择别人的分区。
+- `_lbPrimeShell()` 与书架下载器只在线解析 HTML 以发现静态资产，使用 `cache:'no-store'`
+  且不 `cache.put` HTML。断网后当前已打开的 PWA 仍可用本地页图/字符层；安全起见，
+  彻底关闭后离线重开 reader 导航会失败，而不会用另一个账户的旧壳启动 provider。
+- 可执行契约：`tests/reader_contract/reader-service-worker.contract.test.mjs` 覆盖 A/B 同 URL
+  在线/离线隔离、未登记与 proxy/RBI 拒绝、仍存活 Client.id 的全断网 SW 进程重启恢复、
+  冷启动失败关闭、身份 restore/数据 put/logout 竞态、identity 请求中途转入代理、dead-client
+  清理和 128 条上限、register/Bearer、根/PDF 独立 pending 并发、根 nav/data 晚到写、
+  导航 no-store、静态壳离线命中，以及手动预热不直写私有 cache/HTML。
+- `pdf-private-identity-v1` 记录 `{namespace,authEpoch,verifiedAt}`，只用于仍存活 Client.id 的
+  SW 进程恢复；浏览器彻底关闭后的新 Client.id 不承诺离线开壳。Cache Storage 防账户误混和
+  晚到写，不防可信同源 XSS；第三方内容继续依赖 opaque sandbox。
 - iOS 注意:Safari 标签页与主屏 PWA 存储**不互通**,固定从主屏入口用;能力依据见
   `references/ios-webext-capabilities.md`(主屏 PWA 豁免七天清除 + persist 豁免逐出)。
 
 ## §18 outbox 写队列(local-first 写路径,2026-07-20 四批)
 
-**架构**:`rc-outbox.js`(共享层,PDF 模板已载;EPUB 待接)。localStorage 队列 `rc-outbox-v1`,
-同 kind+key 合并留最新;重放=开页/online/15s 心跳,按插入序;网络错/5xx 保队,4xx 丢弃留痕;
-条目带 method(缺省 POST)。**服务端配套**:highlights/notes 的 POST 接受 `c_[a-f0-9]{8,32}`
-客户端 id 并同 id upsert(补投重放不重复建)。
+**现行架构**:`rc-outbox.js` 使用 `command-outbox/2`，只在 `account-context/1` 当前 lease
+下工作。每个 mutation 都是独立的 namespaced localStorage 记录，storage key 含稳定且唯一的
+`mutationId`，记录内保留 `queueKey`；flush 的账户快照按同 `queueKey` 只发送最新 mutation，
+2xx 后也只按精确 key + 原始值删除扫描到的记录，因此发送期间另一窗口写入的新 mutation 不会
+被整包覆盖或误删。网络错、5xx、429 保留；其它 4xx 进入当前账户独立且不自动截断的
+dead-letter 逐记录区，旧的合并记录若随“最新 mutation 被拒绝”终止，也以
+`superseded-by-rejected-latest` 原因进入 dead-letter，不静默丢弃或倒退重放。若浏览器
+存储空间不足，dead-letter 写入失败时原 pending 保留；认领、导出和清理必须走后续显式流程。
+
+跨窗口与 Beacon 的投递语义是 **at-least-once（至少一次）**，不是 exactly-once；稳定
+`mutationId` 必须由服务端幂等逻辑识别重复投递。`rc-outbox-v1` 永久留在未归属隔离区：
+现行模块只显示数量，绝不自动读取其命令给外部、导入、重放或删除。**服务端配套**:
+`sync-batch` 重新核对已认证 session/Bearer 的真实 owner namespace；highlights/notes 的 POST
+接受 `c_[a-f0-9]{8,32}` 客户端 id 并同 id upsert。
 
 **两种接线手法**:
 1. 调用点 catch(err.name==='TypeError' 判网络错):单词掌握(rc-wordpop)/词组掌握(rc-phrasepop)/

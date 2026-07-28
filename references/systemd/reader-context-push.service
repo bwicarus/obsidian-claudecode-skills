@@ -1,0 +1,21 @@
+[Unit]
+Description=Push reader context snapshot (Markdown + assets) to Windows PC over SSH
+Documentation=file:///home/bwicarus/claude/references/reader-collaboration-status.md
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+# 常驻:inotify 监听 state/ 下 sidecar,1s trailing debounce 后生成完整快照并 SSH 原子同步。
+# 不是 oneshot——需要长期持有 inotify 与复用的 SSH 连接(ControlMaster)。
+Type=simple
+User=bwicarus
+EnvironmentFile=/home/bwicarus/claude/.env
+WorkingDirectory=/home/bwicarus/claude
+ExecStart=/usr/bin/python3 /home/bwicarus/claude/scripts/push_reader_context_to_pc.py
+StandardOutput=journal
+StandardError=journal
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

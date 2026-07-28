@@ -205,6 +205,7 @@
     foot.className = 'nav-foot';
     var footHtml = '';
     if (u.role === 'admin') footHtml += '<a href="/admin/">管理后台</a>';
+    footHtml += '<a href="/pdf/shared-note">共享便签</a>';
     footHtml += '<a href="/logout">登出</a>';
     foot.innerHTML = footHtml;
 

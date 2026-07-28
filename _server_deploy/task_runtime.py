@@ -449,20 +449,24 @@ def _schedule(rid, event, secs):
 
 
 def _call_tool(run, tool, arg):
-    """按钮触发**任意工具**(去壳:进程内直接调 A.TOOLS[tool],不走 MCP)。
+    """按钮触发**任意工具**(去壳:进程内走 ToolRegistry 执行出口,不走 MCP)。
     #38「CLI 自己设计等待程序」的通用出口:CLI 造纸时给按钮绑 event='call:工具名',
     按下就在当前书/页 ctx 下跑那个工具,产出的 client_action 推给前端应用。"""
     try:
         import assistant as A
     except Exception:
         return
-    fn = (A.TOOLS.get(tool) or (None, None))[1]
-    if not fn:
+    if not A._tool_available(tool, A.SURFACE_INTERNAL):
         run["hint"] = f"没有叫「{tool}」的工具"
         return
     ctx = {"file_rel": run.get("file"), "page": run.get("page"), "_uid": run.get("uid")}
     try:
-        res = fn({}, ctx) or {}
+        res = A._run_tool(
+            tool,
+            {},
+            ctx,
+            surface=A.SURFACE_INTERNAL,
+        ) or {}
     except Exception as ex:
         run["hint"] = f"{tool} 出错:{str(ex)[:60]}"
         return
@@ -935,15 +939,18 @@ def _recipe_tick(run, event):
             run["hint"] = ins.get("hint") or run.get("hint") or ""
             return True                        # ★ 挂起:存 pc,等下次事件
         elif op == "call":
-            # ★★ 去壳:MCP 只是 TOOLS 的薄门面(mcp_server 全线 HTTP 转发到 /api/assistant/tool →
-            #   TOOLS[name][1])。所以"进程内直接调 TOOLS[name][1]" = MCP 转发到的同一个函数,
-            #   零拷贝、零标注、改一个工具所有配方自动跟着变(ADR §5.5.3)。
+            # ★★ 去壳但不绕 registry：MCP 与进程内配方都经过 assistant._run_tool，
+            # 共用 surface/mode/host gate；仍是零 HTTP 拷贝。
             try:
                 import assistant as A
-                fn = (A.TOOLS.get(ins["tool"]) or (None, None))[1]
-                if fn:
+                if A._tool_available(ins["tool"], A.SURFACE_INTERNAL):
                     ctx = {"file_rel": run["file"], "page": run.get("page"), "_uid": run.get("uid")}
-                    res = fn(ins["args"] or {}, ctx) or {}
+                    res = A._run_tool(
+                        ins["tool"],
+                        ins["args"] or {},
+                        ctx,
+                        surface=A.SURFACE_INTERNAL,
+                    ) or {}
                     val = res
                     ex = ins.get("into")
                     # 简单 extract:结果里挑一个 list/str 字段(配方里可指定 res 的键,默认整体)
@@ -1009,7 +1016,7 @@ def _flatten(flow, params):
                 out.append({"op": "check", "hint": _tpl((body or {}).get("hint"), scope)})
             elif key == "call":
                 out.append({"op": "call", "tool": body.get("tool"), "args": _tpl(body.get("args") or {}, scope),
-                            "into": body.get("into")})   # ★ 去壳:进程内调 TOOLS[tool],结果 extract 后存进 params[into]
+                            "into": body.get("into")})   # ★ 去壳:进程内经 registry 调工具,结果 extract 后存进 params[into]
             elif key in ("reveal", "hide"):
                 out.append({"op": key, "id": _tpl(body, scope)})
             elif key == "set_enabled":
@@ -1322,9 +1329,9 @@ def _abstract_route(calls):
     return "\n".join(lines)[:1500]
 
 
-def save_trace_recipe(name, desc, steps, uid, source_label="", source_spec=None, instruction="", anchor_page=None, partial=False):
+def save_trace_recipe(name, desc, steps, uid, source_label="", source_spec=None, instruction="", anchor_page=None, partial=False, synth_instruction=False):
     """把一次 **CLI 多步任务的执行轨迹** 冻成可复用工具(用户拍板:所有走 CLI 的多步任务都能保存)。
-    steps = [{name, args}, ...](CLI 调过的工具序列)。回放 = 按序进程内调 TOOLS[name](去壳)。
+    steps = [{name, args}, ...](CLI 调过的工具序列)。回放 = 按序经 registry 进程内去壳调用。
     同"工具序列"已存在 → 合并加数据源;否则新建。"""
     import re as _re
     safe = _re.sub(r"[^\w\u4e00-\u9fff-]", "", str(name or ""))[:60]
@@ -1339,7 +1346,28 @@ def save_trace_recipe(name, desc, steps, uid, source_label="", source_spec=None,
     #   运行=重新起 CLI 按「原意图+本次调整+当前上下文」重新生成(15题/换页出新题都成立);
     #   纯机械序列 → 轨迹配方(kind:'trace',按序进程内回放,零 token 秒回,原语义)。
     _gen = any(c["tool"] in ("page_new", "page_add", "page_add_many", "page_show") for c in calls)
-    if _gen and str(instruction or "").strip():
+    _instr = str(instruction or "").strip()
+    # 阶段2:主编排(orch)轮次存的 instruction 是「用户原话占位」——只对**真要保存的这条**,用工具序列(去内容的路线)
+    #   + 原话让 AI 合成一句干净、命令式的「任务意图」覆盖它(命令式、去掉一次性页码/选区参数);合成失败退回原话。
+    if synth_instruction and _instr:
+        try:
+            import assistant as A
+            _syn = (A._deep_ask(
+                "下面是一次**已成功执行**的多步工具流程,以及用户当时的原话。请据此改写出一句"
+                "**干净、命令式的任务意图**(≤50字),供以后一键重跑这类任务:\n"
+                "- 去掉一次性的具体页码/选区/坐标等参数(运行时会按当前上下文重新决定);\n"
+                "- 保留要做的**动作类型与产物**(例:『把本页要点做成高亮』『把选中内容整理成卡片』);\n"
+                "- 只输出这一句意图本身,不要解释、不要加引号。\n\n"
+                "【用户原话】" + _instr[:400] + "\n\n【执行路线】\n" + _abstract_route(calls),
+                depth="none", timeout=30) or "").strip()
+            _syn = (_syn.splitlines()[0].strip() if _syn else "")[:200]
+            if _syn:
+                _instr = _syn
+        except Exception:
+            pass
+    # 判型:造纸(_gen)**或** 多步且有意图(orch 的 see_ink→read_page→highlight 这类内容依赖流程,steps>=2)→
+    #   意图配方(kind:'intent',可重生成);否则(纯机械/单短序列)→ 轨迹配方(kind:'trace',进程内回放)。
+    if (_gen or (synth_instruction and len(calls) >= 2)) and _instr:   # 造纸(_gen)照旧→intent;多步→intent **仅限 orch 轮次**(synth_instruction=有 orch 标记),CLI 机械序列(非造纸)保持 kind:trace 零 token 进程内回放,不误伤
         RECIPES_DIR.mkdir(parents=True, exist_ok=True)
         # ★用户设计:节选保存时,「决定起点那一步的 AI 思路」= 这段子流程的真实局部意图(调用开端)。
         #   CLI 执行时已随步存 rationale(工具调用前的散文);起点步没有 → 轻 AI 按路线总结一句;再无 → 留空(运行侧退回警示)。
@@ -1361,14 +1389,14 @@ def save_trace_recipe(name, desc, steps, uid, source_label="", source_spec=None,
         _recipe_snapshot(safe)
         rec = {"name": safe, "desc": desc or ("一键" + safe), "kind": "intent",
                "origin": origin,
-               "instruction": str(instruction)[:2000], "anchor_page": anchor_page,
+               "instruction": _instr[:2000], "anchor_page": anchor_page,
                "partial": bool(partial),   # 框选子集:原始意图是全量任务的,执行范围要以路线为准(否则会把用户框掉的步骤也做了)
                "route": _route,   # 指挥棒:成功路线的结构化抽象(用户设计)
                "inputs": {},   # 参数槽后台补写(_extract_inputs_async,~9s 不阻塞保存)
                "owner": str(uid or ""), "created": int(time.time()), "updated": int(time.time()),
                "calls": calls[:30]}   # calls 留档备查,不用于回放
         (RECIPES_DIR / (safe + ".json")).write_text(json.dumps(rec, ensure_ascii=False), "utf-8")
-        _extract_inputs_async(safe, (origin or str(instruction)[:400]) + "\n" + _route)
+        _extract_inputs_async(safe, (origin or _instr[:400]) + "\n" + _route)
         return {"ok": True, "name": safe, "merged": False, "kind": "intent",
                 "hint": "已保存为**重新生成型**工具「%s」(运行时按原意图+当次调整,在当前页重新出内容)" % safe}
     import hashlib
@@ -1407,7 +1435,7 @@ def save_trace_recipe(name, desc, steps, uid, source_label="", source_spec=None,
 
 
 def run_trace(rec, ctx):
-    """回放一个 trace 配方:按序**进程内**调 TOOLS[tool](args)(去壳,不走 MCP)。
+    """回放一个 trace 配方:按序经 registry 执行出口去壳调用(不走 MCP)。
     工具产生的 client_action(如建纸)收集起来返回给前端应用。返回 {ok, client_actions, last}。"""
     import assistant as A
     cas, last, failed = [], None, []
@@ -1415,8 +1443,10 @@ def run_trace(rec, ctx):
             "_uid": (ctx or {}).get("_uid")}
     _cur = int((ctx or {}).get("page") or 0)
     for c in (rec.get("calls") or []):
-        fn = (A.TOOLS.get(c.get("tool")) or (None, None))[1]
-        if not fn:
+        if not A._tool_available(
+            c.get("tool"),
+            A.SURFACE_INTERNAL,
+        ):
             failed.append({"tool": c.get("tool"), "error": "工具不存在"})
             continue
         try:
@@ -1426,7 +1456,12 @@ def run_trace(rec, ctx):
                     _args["page"] = _cur + int(_args.pop("_page_off") or 0)
                 else:
                     _args.pop("_page_off", None)
-            res = fn(_args, tctx) or {}
+            res = A._run_tool(
+                c.get("tool"),
+                _args,
+                tctx,
+                surface=A.SURFACE_INTERNAL,
+            ) or {}
             last = res
             if isinstance(res, dict) and res.get("error"):
                 failed.append({"tool": c.get("tool"), "error": str(res["error"])[:120]})
@@ -1448,8 +1483,7 @@ def run_trace(rec, ctx):
 
 
 def _run_sources(run, sources):
-    """★ 去壳预取:进程内直接调 TOOLS[工具],结果填进 params[input名]。
-    MCP 只是 TOOLS 的薄门面 → 进程内调 = MCP 转发到的同一个函数,零拷贝零标注(ADR §5.5.3)。"""
+    """★ 去壳预取:进程内经 registry 执行出口调用，结果填进 params[input名]。"""
     if not sources:
         return
     import assistant as A
@@ -1457,12 +1491,19 @@ def _run_sources(run, sources):
     for into, spec in sources.items():
         if not isinstance(spec, dict) or not spec.get("call"):
             continue
-        fn = (A.TOOLS.get(spec["call"]) or (None, None))[1]
-        if not fn:
+        if not A._tool_available(
+            spec["call"],
+            A.SURFACE_INTERNAL,
+        ):
             sys.stderr.write("[recipe] 数据源工具不存在:%s\n" % spec.get("call"))
             continue
         try:
-            res = fn(spec.get("args") or {}, ctx) or {}
+            res = A._run_tool(
+                spec["call"],
+                spec.get("args") or {},
+                ctx,
+                surface=A.SURFACE_INTERNAL,
+            ) or {}
             val = res.get(spec["extract"]) if (isinstance(res, dict) and spec.get("extract")) else res
             run.setdefault("params", {})[into] = val
             if not val:   # 空结果 fail-fast:别拿着空 words 铺一张 0 题的纸(审查实锤)
@@ -1506,7 +1547,7 @@ def start(kind: str, params: dict, ctx: dict) -> dict:
         if not ok:
             return {"ok": False, "error": "配方无效:" + err}
         # ★ sources(去壳预取):配方里 sources={input名:{call:工具, extract:字段, args}} →
-        #   在跑 flow 前进程内直接调 TOOLS[工具],把结果填进 params[input名]。
+        #   在跑 flow 前进程内经 registry 调工具,把结果填进 params[input名]。
         #   这就是"高亮听写/未掌握词听写"共用一个配方、只换数据源的实现(ADR §5.5)。
         _run_sources(run, rdef.get("sources") or (params or {}).get("sources") or {})
         if run.pop("_source_empty", None):

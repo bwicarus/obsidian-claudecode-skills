@@ -5,6 +5,8 @@
     color:#cfe6ff;border-radius:17px;height:32px;padding:0 13px;font-size:13px;outline:none;font-family:inherit}
 ype html>
 <html lang="zh"><head>
+<meta name="bw-reader-app" content="{{ reader_app|default('pdf', true) }}">
+<meta name="bw-reader-route" content="{{ reader_route|default('pdf', true) }}">
 <meta charset="utf-8">
 <link rel="apple-touch-icon" href="/static/icons/reader.png">
 <link rel="icon" type="image/png" href="/static/icons/reader-32.png">
@@ -69,7 +71,7 @@ try { if (localStorage.getItem('pdf-fullscreen') === '1') document.documentEleme
       <button id="pdf-loading-switch" onclick="_switchToCompressed()" style="display:none;background:#244470;border:1px solid #3b6db5;color:#cfe6ff;border-radius:6px;padding:8px 16px;font-size:13px;cursor:pointer;margin-top:6px">⚡ 加载慢？切换到压缩版（更小更快，下次记住）</button>
     </div>
     <div id="page-scrub-pop"><div class="psp-num">1 / 1</div><div class="psp-track"><div class="psp-fill"></div></div></div>
-    <div id="page-container">{% if web_url %}<iframe id="wl-frame" src="/pdf/web/{% if web_rbi %}rbi{% else %}frame{% endif %}?url={{ web_url|urlencode }}" allow="autoplay; fullscreen; encrypted-media; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:0;display:block;background:#fff"></iframe>{% endif %}</div>
+    <div id="page-container">{% if web_url %}<iframe id="wl-frame" name="bw-web-bridge:{{ web_bridge_nonce|default('')|e }}" src="/pdf/web/{% if web_rbi %}rbi{% else %}frame{% endif %}?url={{ web_url|urlencode }}&amp;__bwnav={{ web_navigation_ticket|default('')|urlencode }}" sandbox="allow-scripts allow-forms allow-popups allow-popups-to-escape-sandbox allow-downloads allow-modals allow-presentation" allow="autoplay; fullscreen; encrypted-media; picture-in-picture" allowfullscreen style="width:100%;height:100%;border:0;display:block;background:#fff"></iframe>{% endif %}</div>
     <div id="search-panel">
       <div class="sp-bar">
         <input id="search-input" type="search" placeholder="全文搜索（全书）…" autocomplete="off"
@@ -426,7 +428,7 @@ try { if (localStorage.getItem('pdf-fullscreen') === '1') document.documentEleme
   });
   dlog('页面加载完成，准备 import PDF.js…');
 </script>
-<script>window.__PDF_CFG = {pdf_url: {{ pdf_url|tojson }}, file_rel: {{ file_rel|tojson }}, page: {{ page }}, page_ts: {{ page_ts|default(0) }}, chars_ver: {{ chars_ver|default(0) }}, size: {{ pdf_size|default(0) }}, compressed: {{ compressed|default(0) }}, comp_avail: {{ comp_avail|default(0) }}, ui_shared: {{ ui_shared|default(0) }}, group: {{ group|tojson }}, web_url: {{ web_url|default(None)|tojson }}, web_rbi: {{ web_rbi|default("")|tojson }}};</script>
+<script>window.__PDF_CFG = {pdf_url: {{ pdf_url|tojson }}, file_rel: {{ file_rel|tojson }}, page: {{ page }}, page_ts: {{ page_ts|default(0) }}, chars_ver: {{ chars_ver|default(0) }}, size: {{ pdf_size|default(0) }}, compressed: {{ compressed|default(0) }}, comp_avail: {{ comp_avail|default(0) }}, ui_shared: {{ ui_shared|default(0) }}, group: {{ group|tojson }}, web_url: {{ web_url|default(None)|tojson }}, web_rbi: {{ web_rbi|default("")|tojson }}, web_bridge_nonce: {{ web_bridge_nonce|default("")|tojson }}, web_navigation_ticket: {{ web_navigation_ticket|default("")|tojson }}};</script>
 <script>
 // 📍 续读位置服务端上报(2026-07-03,ui=shared/legacy 通用,不动 reader.src):每 5s 检测当前页
 //   (与视口交叠最多的 .page-wrap[data-page-num],同 _favCurTarget 口径;翻页按钮/横滑/滚动通吃),
@@ -518,6 +520,33 @@ window.toggleGrammarPanel = function () {
 })();
 </script>
 <script src="/static/pdf/rc-core.js?v={{ shared_js_v }}"></script>
+<script src="/static/reader-runtime/account-context.js?v={{ shared_js_v }}"></script>
+<script src="/static/reader-runtime/interaction-policy.js?v={{ shared_js_v }}"></script>
+<script src="/static/reader-runtime/card-improvement-actions.js?v={{ shared_js_v }}"></script>
+<script src="/static/reader-runtime/document-host.js?v={{ shared_js_v }}"></script>
+<script src="/static/reader-runtime/context-selection-registry.js?v={{ shared_js_v }}"></script>
+<script src="/static/reader-runtime/data-store.js?v={{ shared_js_v }}"></script>
+<script src="/static/reader-runtime/indexeddb-store.js?v={{ shared_js_v }}"></script>
+<script src="/static/reader-runtime/data-registry.js?v={{ shared_js_v }}"></script>
+<script src="/static/reader-runtime/sync-owner-lease.js?v={{ shared_js_v }}"></script>
+<script src="/static/reader-runtime/sync-gateway.js?v={{ shared_js_v }}"></script>
+<script src="/static/reader-runtime/server-sync-transport.js?v={{ shared_js_v }}"></script>
+<script src="/static/reader-runtime/direct-sync-protocol.js?v={{ shared_js_v }}"></script>
+<script src="/static/reader-runtime/direct-sync-signal-transport.js?v={{ shared_js_v }}"></script>
+<script src="/static/reader-runtime/sync-coordinator.js?v={{ shared_js_v }}"></script>
+<script src="/static/reader-runtime/sync-runtime.js?v={{ shared_js_v }}"></script>
+<script src="/static/reader-runtime/sync-conflict-control.js?v={{ shared_js_v }}"></script>
+<script src="/static/reader-runtime/direct-sync-host.js?v={{ shared_js_v }}"></script>
+<script src="/static/reader-runtime/direct-sync-leader.js?v={{ shared_js_v }}"></script>
+<script src="/static/reader-runtime/vocabulary-state.js?v={{ shared_js_v }}"></script>
+<script src="/static/reader-runtime/computer-voice-webrtc.js?v={{ shared_js_v }}"></script>
+<script src="/static/reader-runtime/preference-store.js?v={{ shared_js_v }}"></script>
+<script src="/static/reader-runtime/storage-router.js?v={{ shared_js_v }}"></script>
+<script src="/static/reader-runtime/runtime-selector.js?v={{ shared_js_v }}"></script>
+<script src="/static/reader-runtime/legacy-rc-bridge.js?v={{ shared_js_v }}"></script>
+<script src="/static/reader-runtime/pwa-service-bridge.js?v={{ shared_js_v }}"></script>
+<script src="/static/reader-runtime/pwa-runtime.js?v={{ shared_js_v }}"></script>
+<script src="/static/pdf/rc-ui.js?v={{ shared_js_v }}"></script>
 <script src="/static/pdf/rc-outbox.js?v={{ shared_js_v }}"></script>
 <script src="/static/pdf/rc-flashcard.js?v={{ shared_js_v }}"></script>
 <script src="/static/pdf/rc-snippets.js?v={{ shared_js_v }}"></script>
@@ -542,16 +571,21 @@ window.toggleGrammarPanel = function () {
 <script src="/static/pdf/rc-toolchip.js?v={{ shared_js_v }}"></script><!-- 工具指示器 v2(圆/长条/方块;选中全局广播)——须在 rc-voicecall 之前 -->
 <script src="/static/pdf/rc-turncard.js?v={{ shared_js_v }}"></script><!-- 141:轮次容器(卡片=容器+多次注入,实时与历史回放同一渲染器);设计见 references/adr-turn-container.md -->
 <script src="/static/pdf/rc-voicectx.js?v={{ shared_js_v }}"></script><!-- 统一注入端口(先于消费方加载) -->
+<script src="/static/pdf/rc-computer-voice.js?v={{ shared_js_v }}"></script><!-- 电脑客户端桥接器 -->
 <script src="/static/pdf/rc-voicecall.js?v={{ shared_js_v }}"></script><!-- 豆包实时语音通话浮层(顶栏 🎙;带书页上下文+意图控页) -->
 <script src="/static/pdf/rc-userpages.js?v={{ shared_js_v }}"></script>
 <script src="/static/pdf/pdf-uishared.js?v={{ shared_js_v }}"></script><!-- 原内联(ui_shared 区:收藏 picker 胶水+插入页 host 等)抽出为静态文件:immutable+字节码缓存,开书 HTML 瘦身(2026-07-06 架构优化) -->
 <script src="/static/pdf/pdf-adapter.js?v={{ shared_js_v }}"></script>
 {% endif %}
+<!-- 书籍宿主白名单先于 reader.js 注册；普通网页模式会由 reader.js 明确跳过。 -->
+<script src="/static/reader-runtime/book-host.js?v={{ shared_js_v }}"></script>
 <script type="module" src="/static/pdf/reader.js?v={{ reader_js_v }}"></script>
+<!-- 两阶段扩展交接：严格排在 reader.js 后；TAKEOVER 前不隐藏 PWA，失联自动恢复。 -->
+<script type="module" src="/static/pdf/pwa-extension-bridge.js?v={{ shared_js_v }}"></script>
 <script src="/static/pdf/mfx.js?v=mfx-5" defer></script>   <!-- mfx 交互/特效脚本(Toast/手势/特效),defer 等 DOM -->
 
 <script src="/static/pdf/pdf-tail.js?v={{ shared_js_v }}"></script>
-<script src="/static/pdf/web-adapter.js?v={{ js_v }}"></script><!-- 实况网页:仅 __PDF_CFG.web_url 时生效(把书页容器换成代理 iframe;顶栏/侧栏/rc-* 全用 PDF 原样) --><!-- 原尾部内联抽出为静态文件 -->
+{% if web_url %}<script src="/static/pdf/web-adapter.js?v={{ js_v }}"></script>{% endif %}<!-- 实况网页:仅 __PDF_CFG.web_url 时加载(把书页容器换成代理 iframe;顶栏/侧栏/rc-* 全用 PDF 原样) --><!-- 原尾部内联抽出为静态文件 -->
 <script>
 // 🌱 概念网按书开关(用户定:按书选择放阅读器不放控制面板)。回填:页面加载后拉一次;保存:即改即存。
 (function(){

@@ -17,6 +17,7 @@ import argparse
 
 BASE = "https://bwicarus.taile44d0c.ts.net"
 BOOK = "%E8%B5%84%E6%BA%90%2Fbooks%2F%E5%BF%9C%E7%94%A8%E6%83%85%E5%A0%B1%E6%8A%80%E8%A1%93%E8%80%85.pdf"
+DEPLOYMENT_PROBE_HEADER = "X-BW-Reader-Deployment-Probe"
 
 def die(msg):
     print(f"❌ E2E FAIL: {msg}")
@@ -42,7 +43,13 @@ def main():
     errs = []
     with sync_playwright() as p:
         b = p.chromium.launch(args=["--no-sandbox"])
-        ctx = b.new_context(viewport={"width": 1180, "height": 820})
+        # 部署事务会在此 E2E 前后逐摘要核对 KG/派生状态。页面加载仍需
+        # 真正走完插图路由，但缺失 badge 的懒补不能把一次只读健康探测
+        # 变成生产写入，否则会触发 fail-closed 回滚。
+        ctx = b.new_context(
+            viewport={"width": 1180, "height": 820},
+            extra_http_headers={DEPLOYMENT_PROBE_HEADER: "1"},
+        )
         ctx.add_cookies([{"name": "session", "value": cookie, "url": a.url_base}])
         pg = ctx.new_page()
         pg.on("pageerror", lambda e: errs.append(str(e)[:120]))
@@ -99,7 +106,23 @@ def main():
             if pop:
                 break
         if not pop:
-            die("点词 12s 无词典弹框(dict-quick/自动弹出回归)")
+            diag = pg.evaluate("""async () => {
+              let quick = null;
+              try { quick = await (await fetch('/pdf/api/dict-quick?word=' + encodeURIComponent('議事') + '&ctx=')).json(); }
+              catch (e) { quick = {error: String(e)}; }
+              const p = document.getElementById('word-pop');
+              return {
+                rootMarker: document.documentElement.dataset.bwReaderExtension || '',
+                handoff: !!window.__BW_EXTENSION_HANDOFF__,
+                uiShared: !!window.__uiShared,
+                adapter: !!window.PdfAdapter,
+                wordpop: !!(window.RC && RC.wordpop),
+                popDisplay: p ? getComputedStyle(p).display : 'missing',
+                popText: p ? p.textContent.slice(0, 100) : '',
+                quick: quick,
+              };
+            }""")
+            die("点词 12s 无词典弹框(dict-quick/自动弹出回归); diag=%s" % str(diag)[:500])
         print(f"✓ 词典弹出: {pop[:24]}…")
 
         # 4) 返回书架入口(2026-06-18 阅读器内浮层书单退役 → goPdfList 改 location.href='/pdf/';

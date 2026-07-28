@@ -1,0 +1,385 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>共享便签 · BW</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      --bg: #0d1324;
+      --panel: rgba(30, 41, 78, .86);
+      --panel-2: rgba(19, 27, 54, .9);
+      --line: rgba(165, 180, 252, .25);
+      --text: #f3f5ff;
+      --muted: #aab5d2;
+      --accent: #8fa8ff;
+      --accent-2: #6ee7d8;
+      --warn: #f4bf69;
+      --danger: #fb7185;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      background:
+        radial-gradient(circle at 12% 8%, rgba(91, 106, 222, .25), transparent 30rem),
+        radial-gradient(circle at 88% 80%, rgba(45, 212, 191, .12), transparent 28rem),
+        var(--bg);
+      font: 15px/1.55 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    main { width: min(1040px, calc(100% - 28px)); margin: 0 auto; padding: 32px 0 80px; }
+    header { display: flex; gap: 18px; align-items: flex-end; justify-content: space-between; }
+    h1 { margin: 0; font-size: clamp(28px, 5vw, 42px); letter-spacing: -.035em; }
+    .lead { margin: 7px 0 0; color: var(--muted); }
+    .live {
+      display: inline-flex; align-items: center; gap: 7px; padding: 7px 11px;
+      border: 1px solid var(--line); border-radius: 999px; color: var(--muted);
+      background: rgba(12, 19, 38, .6); white-space: nowrap;
+    }
+    .live::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--warn); }
+    .live.online::before { background: var(--accent-2); box-shadow: 0 0 0 5px rgba(110, 231, 216, .1); }
+    .card {
+      margin-top: 24px; border: 1px solid var(--line); border-radius: 22px;
+      background: linear-gradient(145deg, rgba(255,255,255,.05), transparent), var(--panel);
+      box-shadow: 0 24px 70px rgba(0, 0, 0, .35); overflow: hidden;
+      backdrop-filter: blur(18px); -webkit-backdrop-filter: blur(18px);
+    }
+    .meta {
+      display: flex; flex-wrap: wrap; gap: 8px 18px; padding: 15px 18px;
+      border-bottom: 1px solid var(--line); color: var(--muted); font-size: 13px;
+    }
+    .meta strong { color: var(--text); font-weight: 650; }
+    textarea {
+      display: block; width: 100%; min-height: min(58vh, 650px); resize: vertical;
+      border: 0; outline: 0; padding: 22px; color: var(--text); background: var(--panel-2);
+      font: 15px/1.65 ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      scrollbar-width: thin; scrollbar-color: rgba(165,180,252,.38) transparent;
+    }
+    textarea::placeholder { color: #7884a5; }
+    .actions {
+      display: flex; flex-wrap: wrap; align-items: center; gap: 10px; padding: 14px 18px;
+      border-top: 1px solid var(--line);
+    }
+    button {
+      appearance: none; border: 1px solid var(--line); border-radius: 11px;
+      padding: 9px 14px; color: var(--text); background: rgba(255,255,255,.06);
+      font: inherit; font-weight: 650; cursor: pointer;
+    }
+    button:hover { background: rgba(255,255,255,.11); }
+    button:disabled { opacity: .45; cursor: not-allowed; }
+    button.primary { border-color: rgba(143,168,255,.55); background: rgba(92,116,230,.35); }
+    .status { margin-left: auto; color: var(--muted); font-size: 13px; }
+    .status.error { color: var(--danger); }
+    .conflict {
+      display: none; margin: 18px 18px 0; padding: 15px; border: 1px solid rgba(244,191,105,.5);
+      border-radius: 14px; background: rgba(118,76,16,.25); color: #ffe8bd;
+    }
+    .conflict.show { display: block; }
+    .conflict p { margin: 0 0 11px; }
+    .conflict-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+    .compare {
+      display: none; grid-template-columns: 1fr 1fr; gap: 12px; margin-top: 13px;
+    }
+    .compare.show { display: grid; }
+    .compare label { min-width: 0; color: var(--muted); font-size: 12px; }
+    .compare pre {
+      max-height: 280px; overflow: auto; margin: 5px 0 0; padding: 11px;
+      border-radius: 10px; background: rgba(6,11,25,.65); color: var(--text);
+      white-space: pre-wrap; overflow-wrap: anywhere; font: 12px/1.5 ui-monospace, monospace;
+    }
+    details.help {
+      margin-top: 16px; padding: 14px 16px; border: 1px solid var(--line);
+      border-radius: 14px; background: rgba(12,19,38,.55); color: var(--muted);
+    }
+    details.help summary { color: var(--text); cursor: pointer; font-weight: 650; }
+    code { color: #cbd5ff; }
+    @media (max-width: 720px) {
+      main { width: min(100% - 18px, 1040px); padding-top: 22px; }
+      header { align-items: flex-start; flex-direction: column; }
+      .compare { grid-template-columns: 1fr; }
+      .status { width: 100%; margin-left: 0; }
+      textarea { min-height: 54vh; padding: 16px; }
+    }
+  </style>
+</head>
+<body>
+<main>
+  <header>
+    <div>
+      <h1>实时共享便签</h1>
+      <p class="lead">浏览器、Codex 与 Claude 共用的 Markdown 草稿；保存后的服务器版本是权威状态。</p>
+    </div>
+    <div class="live" id="liveState">正在连接实时通道</div>
+  </header>
+
+  <section class="card" aria-labelledby="noteLabel">
+    <div class="meta">
+      <span id="noteLabel"><strong>共享正文</strong> · 支持 Markdown</span>
+      <span>revision <strong id="revision">—</strong></span>
+      <span>来源 <strong id="source">—</strong></span>
+      <span>更新 <strong id="updatedAt">—</strong></span>
+    </div>
+
+    <div class="conflict" id="conflict" role="alert">
+      <p id="conflictMessage">远端有更新；你的未保存内容没有被覆盖。</p>
+      <div class="conflict-actions">
+        <button type="button" id="compareButton">比较本地与远端</button>
+        <button type="button" id="loadRemoteButton">载入远端（放弃本地草稿）</button>
+        <button type="button" id="keepLocalButton">保留本地并基于远端继续</button>
+      </div>
+      <div class="compare" id="compare">
+        <label>本地草稿<pre id="localPreview"></pre></label>
+        <label>远端权威正文<pre id="remotePreview"></pre></label>
+      </div>
+    </div>
+
+    <textarea id="editor" spellcheck="true" aria-label="共享便签正文"
+      placeholder="正在载入共享便签……" disabled></textarea>
+    <div class="actions">
+      <button type="button" class="primary" id="saveButton" disabled>保存</button>
+      <button type="button" id="reloadButton">重新载入</button>
+      <span class="status" id="status">尚未载入</span>
+    </div>
+  </section>
+
+  <details class="help">
+    <summary>外部 AI 写入合同</summary>
+    <p>先以相同 Bearer token 读取 <code>GET /pdf/api/shared-note</code>，再向
+      <code>POST /pdf/api/shared-note</code> 发送
+      <code>contract</code>、<code>baseRevision</code>、<code>source</code> 和可选
+      <code>updateId</code>。操作支持全文 <code>replace</code>、尾部
+      <code>append</code>，以及只替换唯一逐字片段的 <code>replace-text</code>。
+      版本冲突或 updateId 冲突会明确返回 HTTP 409。</p>
+  </details>
+</main>
+
+<script>
+(function () {
+  'use strict';
+  var CONTRACT = 'reader-shared-note/1';
+  var API = '/pdf/api/shared-note';
+  var editor = document.getElementById('editor');
+  var saveButton = document.getElementById('saveButton');
+  var reloadButton = document.getElementById('reloadButton');
+  var statusEl = document.getElementById('status');
+  var revisionEl = document.getElementById('revision');
+  var sourceEl = document.getElementById('source');
+  var updatedAtEl = document.getElementById('updatedAt');
+  var liveState = document.getElementById('liveState');
+  var conflict = document.getElementById('conflict');
+  var conflictMessage = document.getElementById('conflictMessage');
+  var compare = document.getElementById('compare');
+  var localPreview = document.getElementById('localPreview');
+  var remotePreview = document.getElementById('remotePreview');
+
+  var current = null;
+  var pendingRemote = null;
+  var loading = false;
+  var saving = false;
+  var queuedFetch = false;
+
+  function dirty() {
+    return !!current && editor.value !== current.content;
+  }
+  function setStatus(text, isError) {
+    statusEl.textContent = text;
+    statusEl.classList.toggle('error', !!isError);
+  }
+  function formatTime(value) {
+    if (!value) return '—';
+    try { return new Date(value).toLocaleString(); } catch (_) { return value; }
+  }
+  function updateButtons() {
+    editor.disabled = !current || loading || saving;
+    saveButton.disabled = !current || loading || saving || !dirty() || !!pendingRemote;
+  }
+  function updateMeta(note) {
+    revisionEl.textContent = String(note.revision);
+    sourceEl.textContent = note.source || '—';
+    updatedAtEl.textContent = formatTime(note.updatedAt);
+  }
+  function applyNote(note, message) {
+    current = note;
+    pendingRemote = null;
+    editor.value = note.content;
+    updateMeta(note);
+    conflict.classList.remove('show');
+    compare.classList.remove('show');
+    setStatus(message || '已载入权威版本', false);
+    updateButtons();
+  }
+  function showRemoteConflict(note, message) {
+    pendingRemote = note;
+    conflictMessage.textContent = message || (
+      '远端已更新到 revision ' + note.revision + '；你的未保存内容没有被覆盖。'
+    );
+    localPreview.textContent = editor.value;
+    remotePreview.textContent = note.content;
+    conflict.classList.add('show');
+    updateMeta(note);
+    setStatus('等待你明确选择合并方式', true);
+    updateButtons();
+  }
+  async function fetchNote(options) {
+    options = options || {};
+    if (loading) {
+      queuedFetch = true;
+      return;
+    }
+    loading = true;
+    updateButtons();
+    try {
+      var response = await fetch(API, {
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: { 'Accept': 'application/json' }
+      });
+      var body = await response.json();
+      if (!response.ok || !body.ok || !body.note) {
+        throw new Error((body.error && body.error.message) || '读取失败');
+      }
+      var note = body.note;
+      if (!current || options.force) {
+        applyNote(note, options.force ? '已重新载入' : '已载入');
+      } else if (note.revision === current.revision) {
+        setStatus(dirty() ? '有未保存修改' : '已是最新版本', false);
+      } else if (dirty()) {
+        showRemoteConflict(note);
+      } else {
+        applyNote(note, '已自动同步远端更新');
+      }
+    } catch (error) {
+      setStatus(error.message || '读取失败', true);
+    } finally {
+      loading = false;
+      updateButtons();
+      if (queuedFetch) {
+        queuedFetch = false;
+        fetchNote();
+      }
+    }
+  }
+  function newUpdateId() {
+    if (window.crypto && typeof window.crypto.randomUUID === 'function') {
+      return 'browser:' + window.crypto.randomUUID();
+    }
+    return 'browser:' + Date.now() + ':' + Math.random().toString(16).slice(2);
+  }
+  async function save() {
+    if (!current || saving || pendingRemote || !dirty()) return;
+    saving = true;
+    setStatus('正在保存…', false);
+    updateButtons();
+    try {
+      var response = await fetch(API, {
+        method: 'POST',
+        credentials: 'same-origin',
+        cache: 'no-store',
+        headers: { 'Content-Type': 'application/json', 'Accept': 'application/json' },
+        body: JSON.stringify({
+          contract: CONTRACT,
+          operation: 'replace',
+          baseRevision: current.revision,
+          source: 'browser',
+          updateId: newUpdateId(),
+          content: editor.value
+        })
+      });
+      var body = await response.json();
+      if (response.status === 409 && body.note) {
+        showRemoteConflict(body.note, body.error && body.error.message);
+        return;
+      }
+      if (!response.ok || !body.ok) {
+        throw new Error((body.error && body.error.message) || '保存失败');
+      }
+      current = {
+        contract: CONTRACT,
+        revision: body.revision,
+        updatedAt: body.updatedAt,
+        source: body.source,
+        updateId: body.updateId,
+        content: editor.value
+      };
+      pendingRemote = null;
+      conflict.classList.remove('show');
+      compare.classList.remove('show');
+      updateMeta(current);
+      setStatus(body.liveNotified ? '已保存并通知在线页面' : '已保存', false);
+    } catch (error) {
+      setStatus(error.message || '保存失败', true);
+    } finally {
+      saving = false;
+      updateButtons();
+    }
+  }
+
+  editor.addEventListener('input', function () {
+    if (!pendingRemote) setStatus(dirty() ? '有未保存修改' : '已保存', false);
+    updateButtons();
+  });
+  saveButton.addEventListener('click', save);
+  reloadButton.addEventListener('click', function () {
+    if (dirty() && !window.confirm('放弃当前未保存修改并载入服务器版本？')) return;
+    fetchNote({ force: true });
+  });
+  document.getElementById('compareButton').addEventListener('click', function () {
+    localPreview.textContent = editor.value;
+    remotePreview.textContent = pendingRemote ? pendingRemote.content : '';
+    compare.classList.toggle('show');
+  });
+  document.getElementById('loadRemoteButton').addEventListener('click', function () {
+    if (!pendingRemote) return;
+    if (!window.confirm('确定放弃本地未保存草稿并载入远端版本？')) return;
+    applyNote(pendingRemote, '已载入远端版本');
+  });
+  document.getElementById('keepLocalButton').addEventListener('click', function () {
+    if (!pendingRemote) return;
+    if (!window.confirm('保留本地草稿，并把远端 revision 作为下次保存基线？下次保存会明确覆盖远端正文。')) return;
+    current = {
+      contract: CONTRACT,
+      revision: pendingRemote.revision,
+      updatedAt: pendingRemote.updatedAt,
+      source: pendingRemote.source,
+      updateId: pendingRemote.updateId,
+      content: pendingRemote.content
+    };
+    pendingRemote = null;
+    conflict.classList.remove('show');
+    compare.classList.remove('show');
+    updateMeta(current);
+    setStatus('本地草稿已保留；保存时将覆盖当前远端版本', true);
+    updateButtons();
+  });
+  window.addEventListener('beforeunload', function (event) {
+    if (!dirty()) return;
+    event.preventDefault();
+    event.returnValue = '';
+  });
+
+  if (window.EventSource) {
+    var events = new EventSource('/pdf/api/reader-events');
+    events.onopen = function () {
+      liveState.textContent = '实时同步已连接';
+      liveState.classList.add('online');
+    };
+    events.onerror = function () {
+      liveState.textContent = '实时通道重连中';
+      liveState.classList.remove('online');
+    };
+    events.addEventListener('change', function (event) {
+      try {
+        var payload = JSON.parse(event.data);
+        if (payload.kind === 'shared-note') fetchNote();
+      } catch (_) {}
+    });
+  } else {
+    liveState.textContent = '浏览器不支持实时通道';
+  }
+  fetchNote();
+}());
+</script>
+</body>
+</html>

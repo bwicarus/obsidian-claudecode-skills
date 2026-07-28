@@ -30,6 +30,7 @@ import config  # noqa
 from lib.claude_quota import time_to_safe_cutoff, can_run_aggressive  # noqa
 
 
+CODE_ROOT = Path(__file__).resolve().parents[2]
 PROJECT_DIR = config.PROJECT_DIR
 STATE_DIR = config.STATE_DIR
 PROGRESS_FILE = STATE_DIR / "rescan_progress.json"
@@ -227,7 +228,7 @@ def run_build_nodes_shadow_ranges(kg: dict, kg_path: Path, ranges: list[tuple[in
     for i, (s, e) in enumerate(ranges):
         out = tmpdir / f"{book}.shadow.{i}.json"
         cmd = [
-            sys.executable, str(PROJECT_DIR / "scripts" / "kg" / "build_nodes.py"),
+            sys.executable, str(CODE_ROOT / "scripts" / "kg" / "build_nodes.py"),
             "--pdf", pdf, "--book", book, "--book-full", book_full,
             "--out", str(out),
             "--pages", f"{s}-{e}",

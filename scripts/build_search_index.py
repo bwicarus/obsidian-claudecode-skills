@@ -17,7 +17,6 @@ import argparse
 import hashlib
 import json
 import os
-import os
 import sqlite3
 import sys
 import time
@@ -27,6 +26,8 @@ CLAUDE_DIR = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"))
 OBSIDIAN_ROOT = Path(os.environ.get("OBSIDIAN_VAULT", "/home/bwicarus/obsidian"))
 DB_PATH = CLAUDE_DIR / "state" / "pdf-search.db"
 TEXT_INDEX_DIR = CLAUDE_DIR / "state" / "pdf-text-index"
+sys.path.insert(0, str(CLAUDE_DIR / "_server_deploy"))
+from web_cache_store import iter_account_web_cache, normalize_user_id  # noqa: E402
 
 
 def _connect():
@@ -139,22 +140,49 @@ def _list_pdfs():
     return out
 
 
+def _private_web_index_owner() -> str:
+    """Return the sole account allowed in the legacy shared search database.
+
+    ``pdf-search.db`` predates accounts and its readers do not yet carry a uid.
+    Feeding every account's private web cache into that shared database would
+    silently bridge accounts.  Preserve the single-account deployment, and
+    require an explicit owner once more than one account cache exists.
+    """
+    selected = normalize_user_id(os.environ.get("READER_SEARCH_OWNER_UID"))
+    if selected:
+        return selected
+    base = CLAUDE_DIR / "state" / "web-cache" / "by-user"
+    try:
+        users = sorted(
+            path.name
+            for path in base.iterdir()
+            if path.is_dir() and normalize_user_id(path.name)
+        )
+    except OSError:
+        users = []
+    return users[0] if len(users) == 1 else ""
+
+
 def _list_webs():
-    """浏览过的网页(state/web-cache/*.json)→ 与书同构的条目(审计 #16:全局搜索/概念网
-    向前搜索都靠 pdf-search.db,不收网页 = 网页材料在这两处永远查不到)。单文档,page 恒 1。"""
+    """浏览过的网页→ 与书同构的条目，且绝不跨账户汇入共享索引。
+
+    当前搜索数据库仍是单 owner。单账户部署自动沿用；多账户部署必须设置
+    ``READER_SEARCH_OWNER_UID``。未选择 owner 时网页条目会从共享索引移除，
+    PDF/EPUB 搜索不受影响。
+    """
     out = []
-    d = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude")) / "state" / "web-cache"
-    if not d.is_dir():
+    owner = _private_web_index_owner()
+    if not owner:
         return out
-    for f in d.glob("*.json"):
+    root = CLAUDE_DIR / "state" / "web-cache"
+    for uid, f, j in iter_account_web_cache(root, user_id=owner):
         try:
-            j = json.loads(f.read_text("utf-8"))
             url, txt = j.get("url"), (j.get("text") or "").strip()
             if not url or len(txt) < 80:
                 continue
             out.append({"rel": "web:" + url, "name": (j.get("title") or url)[:120],
-                        "dir": "web", "mtime": int(f.stat().st_mtime), "abs": None,
-                        "_web_text": txt})
+                        "dir": "web", "mtime": int(f.stat().st_mtime_ns // 1000) ^ int(uid),
+                        "abs": None, "_web_text": txt, "_web_owner_uid": uid})
         except Exception:
             continue
     return out

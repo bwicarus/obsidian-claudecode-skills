@@ -154,6 +154,15 @@ async function _renderPageImg(num, wrap, viewport) {
   const _inkDpr = window.devicePixelRatio || 1;
   inkCanvas.width = Math.floor(cw * _inkDpr); inkCanvas.height = Math.floor(ch * _inkDpr);
   wrap.appendChild(inkCanvas); wrap.__inkCanvas = inkCanvas;
+  // 绘图区焦点(A5):手指长按 = 设为当前焦点(再长按取消)。
+  // 只监听非笔指针且全程 passive → 画笔/擦除/滚动手势零影响。
+  try {
+    window.RC?.outgoing?.bindDrawingFocus(inkCanvas, () => ({
+      file: FILE_REL, page: num,
+      hasInk: !!(wrap.__inkStrokes && wrap.__inkStrokes.length)
+    }));
+  } catch (_) {}
+
   if (!wrap.__inkBound) {
     wrap.addEventListener('pointerdown', (e) => { if (window._inkPointerDown) window._inkPointerDown(e); }, true);
     const _blk = (e) => { for (const t of e.touches) { if (t.touchType === 'stylus') { e.preventDefault(); break; } } };
@@ -255,6 +264,15 @@ async function _renderPageInto(num, wrap) {
   inkCanvas.height = Math.floor(ch * _inkDpr);
   wrap.appendChild(inkCanvas);
   wrap.__inkCanvas = inkCanvas;
+  // 绘图区焦点(A5):手指长按 = 设为当前焦点(再长按取消)。
+  // 只监听非笔指针且全程 passive → 画笔/擦除/滚动手势零影响。
+  try {
+    window.RC?.outgoing?.bindDrawingFocus(inkCanvas, () => ({
+      file: FILE_REL, page: num,
+      hasInk: !!(wrap.__inkStrokes && wrap.__inkStrokes.length)
+    }));
+  } catch (_) {}
+
   // wrap 级监听只绑一次(卸载→重渲染同一 wrap 时不重复绑定,否则累积成内存泄漏 + 多次触发)
   if (!wrap.__inkBound) {
     wrap.addEventListener('pointerdown', (e) => { if (window._inkPointerDown) window._inkPointerDown(e); }, true);

@@ -7,5 +7,5 @@ Type=oneshot
 User=bwicarus
 WorkingDirectory=/home/bwicarus/claude
 EnvironmentFile=/home/bwicarus/claude/.env
-ExecStart=/usr/bin/python3 /home/bwicarus/claude/scripts/concept_graph_daily.py
+ExecStart=/usr/bin/python3 /home/bwicarus/reader-runtime/kg/current/scripts/concept_graph_daily.py
 Nice=15

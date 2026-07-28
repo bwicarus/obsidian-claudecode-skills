@@ -275,6 +275,7 @@ async def _fetch_book_ctx(file_rel: str, page: int) -> dict:
                         out["vocab"] = d.get("vocab") or []
                 except Exception:
                     pass
+                out.update(await _fetch_brief(file_rel, page))   # Phase2:本页简述(有则上层注要点替整页)
             r = await hc.get("/api/assistant/history")
             d = r.json()
             if d.get("ok"):
@@ -282,6 +283,39 @@ async def _fetch_book_ctx(file_rel: str, page: int) -> dict:
     except Exception as ex:
         sys.stderr.write(f"[voice-rt ctx] {ex}\n")
     return out
+
+
+async def _fetch_brief(file_rel: str, page: int) -> dict:
+    """Phase2:拉本页 page-brief(HTTP;relay 是独立进程,不能直接读 sidecar)。
+    有简述才返回 {brief,brief_tags,page_type};pending/skip无brief/失败 → {}(上层降级注整页)。短超时静默降级。"""
+    if not (file_rel and page):
+        return {}
+    try:
+        async with httpx.AsyncClient(base_url=WEBAPP, headers=_webapp_headers(), timeout=6) as hc:
+            r = await hc.get("/pdf/api/page-brief", params={"file": file_rel, "page": page})
+            d = r.json()
+            if d.get("ok") and (d.get("brief") or "").strip():
+                return {"brief": d.get("brief") or "", "brief_tags": d.get("tags") or [],
+                        "page_type": d.get("page_type") or ""}
+    except Exception:
+        pass
+    return {}
+
+
+def _brief_line(book: dict) -> str:
+    """book 里已缓存的简述 → 一行要点『本页要点:…(知识点:a、b)[页型:knowledge]』;无简述→""。
+    简述优先注入的统一文案源(_role_text / _oa_instructions / grok 每轮 / 翻页增量 / rtc _inject_state 共用)。"""
+    br = (book.get("brief") or "").strip()
+    if not br:
+        return ""
+    s = "本页要点:" + br
+    tags = book.get("brief_tags") or []
+    if tags:
+        s += "(知识点:" + "、".join(str(t) for t in tags[:6]) + ")"
+    pt = (book.get("page_type") or "").strip()
+    if pt:
+        s += "[页型:" + pt + "]"
+    return s
 
 
 def _qa_pairs(msgs: list, max_pairs: int = 3) -> list:
@@ -354,6 +388,28 @@ def _creds() -> dict:
         return {}
 
 
+# 语音模式工具白名单(治 OpenAI Realtime TPM 40000/min:全量目录 54 工具≈2675 token/轮,三四轮撞满连续失败)。
+# 只保留陪读/答题真正用得到的高频工具,门控在 _role_text 里过滤 tools_lines→少 join 几十行。
+# 砍掉的:KG/图谱/mastery 掌握度/diagnostic/situation 近况/material 素材/save_intent/run_saved_task/造纸多步原语等
+# (语音里 AI 用不到、或不需要理解的系统内部机制)。⚠ 拿不准=留着(砍错=功能缺失),宁可多留几个。
+VOICE_TOOLS_WHITELIST = {
+    # 读页 / 内容
+    "read_page", "read_selection", "toc", "summarize_section",
+    # 查词 / 翻译
+    "lookup_word", "translate",
+    # 搜索(本书 + 跨书 + 联网三件套)
+    "search_book", "search_all_books", "web_search", "search_image", "search_video",
+    # 翻页
+    "goto_page",
+    # 看图 / 看笔迹(文字层读不到的)
+    "see_page", "see_figure", "see_ink",
+    # 高亮 / 做卡 / 记笔记
+    "highlight", "make_anki", "make_note",
+    # 语音专属虚拟工具(relay 拦截)
+    "deep_think", "recall_study",
+}
+
+
 def _role_text(cfg: dict, book: dict | None, file_rel: str, page: int) -> str:
     """system_role 构造(StartSession 和翻页 UpdateConfig 共用一份逻辑)。
     直塞优先:页文本/圈画文字/插图描述这些现成纯文本直接进 prompt(直接答,零等待);
@@ -368,36 +424,38 @@ def _role_text(cfg: dict, book: dict | None, file_rel: str, page: int) -> str:
     # ── ① 稳定前缀 ──
     role = cfg.get("system_role",
                    "你是用户的学习伙伴,他在用自己搭的系统自学日语、英语和大学数学物理。回答口语化、简洁自然。")
-    role += ("\n你直接接着这本阅读器的工具层(目录在最后)。规则(与系统里另一个编排助手完全同一套):"
-             "\n- **下面直接给你的内容(本页文字/生词/选中/插图描述等)能答的直接答,别调工具**。"
-             "\n- 需要工具时(找视频/翻页/查别页/看图细节/高亮/做卡片笔记/查词等):"
-             "**整条回复只输出一条 JSON**:{\"tool\":\"工具名\",\"args\":{...}}——**一个字都别多说,不要任何开场白**。"
-             "系统会把这条静音、替你向用户播一句确认语,再执行;字符串值里**别用双引号、别换行**(要引号用「」)。"
-             "系统执行后会把真实结果发给你,那时再口语化讲给用户;自己编的结果都是假的,会害用户。每轮最多调一个工具。"
-             "\n例:用户说『翻到第8页』→ 你的完整回复就是:{\"tool\":\"goto_page\",\"args\":{\"page\":8}}"
-             "\n**没输出 JSON 页面是不会动的**;之前『先说一句再输出JSON』『直接说翻到第N页』的老办法都已作废。"
-             "\n- 联网能力=三个真工具:web_search(查网上实时信息,额度有限省着用)/search_image(搜真实图片)/"
-             "search_video(搜教学视频);search_all_books 搜的是**用户自己的书库**,不是互联网。"
-             "web_search 失败时如实说明暂时查不了;可以凭自己训练时的知识回答,"
-             "但必须先声明『这是我记忆里的数据,可能过时』——绝不能把记忆包装成刚查到的结果。"
-             "\n- 语音场景:回答**默认两三句话说清**,别铺开长篇;用户说『详细讲讲/展开』才展开。")
+    role += ("\n你接在这本阅读器的工具层后面(目录在最后)。规则:"
+             "\n- 下面直接给你的内容(本页文字/生词/选中/插图描述)能答就直接答,别调工具。"
+             "\n- 要调工具时**整条回复只输出一条 JSON**:{\"tool\":\"工具名\",\"args\":{...}}——别加任何开场白;"
+             "字符串值别用双引号、别换行(要引号用「」);每轮最多调一个工具。"
+             "系统执行后会把真实结果发给你,那时再口语化讲给用户;**别自己编结果**。"
+             "\n例:『翻到第8页』→ 完整回复就是 {\"tool\":\"goto_page\",\"args\":{\"page\":8}}。"
+             "\n- 联网:web_search 查网上实时信息(额度有限省着用)、search_image 搜真实图片、search_video 搜教学视频;"
+             "web_search 失败就如实说查不了,可凭记忆答但要先声明『可能过时』,别把记忆当成刚查到的结果。"
+             "\n- 语音场景回答默认两三句说清,用户说『详细/展开』才展开。")
     lines = book.get("tools_lines") or {}
+    # 工具精简暂缓(用户 2026-07-21:「工具精简这部分之后讨论或我手动去清理」)——恢复全量工具目录。
+    # 要手动砍:改上面 VOICE_TOOLS_WHITELIST set,并在下面 if lines 块首行加回:
+    #   lines = {k: v for k, v in lines.items() if k in VOICE_TOOLS_WHITELIST}
     if lines:
-        role += ("\n可用工具目录(冒号后是用途,{}是 args 字段;**最下方的实时状态说某工具当前无效时以状态为准**):\n"
+        role += ("\n可用工具目录(冒号后是用途,{}是 args 字段;下方实时状态说某工具当前无效时以状态为准):\n"
                  + "\n".join(lines.values()))
     # ── ② 中层:跟页走的内容(翻页才变) ──
     # ⚠ 总页数**不写进 SP**(用户拍板):SP 是开话快照、整场不改(改前缀=prompt cache 全废),
     #   一旦跨书就会拿着上一本的页数自信报错数。改由**工具结果**实时携带『全书总页数』。
-    role += ("\n- 页码类问题:『最后一页/一共多少页/还剩几页』——**别猜也别说算不出来**:"
-             "goto_page 的 page 支持 last(最后一页)/first/+1/-1,直接 {\"tool\":\"goto_page\",\"args\":{\"page\":\"last\"}};"
-             "书内工具(read_page/toc/search_book/goto_page…)的结果里都带**『全书总页数』**字段,以它为准。"
-             "换书之后这个数字会自动跟着变。"
-             "\n- 用户问『第N页/下一页/上一页写的是什么』=要**内容**:调 read_page(args{page:N});"
-             "光 goto_page 只翻页不给内容,答不了他的问题。**本页**内容下面已直接给你,不用调工具。")
+    role += ("\n- 页码类(最后一页/一共多少页/还剩几页):别猜,goto_page 的 page 支持 last/first/+1/-1;"
+             "书内工具(read_page/toc/search_book/goto_page)结果里带『全书总页数』,以它为准。"
+             "\n- 问『第N页写了什么』=要内容,调 read_page(args{page:N});本页内容下面已直接给你,不用调工具。")
     page_text = book.get("page_text") or ""
-    if page_text:
-        name = (file_rel.rsplit("/", 1)[-1] or "这本书")
-        role += f"\n用户此刻正在读《{name}》第 {page} 页" + (f"(全书 {_pc} 页)" if _pc else "") + f",本页文字内容(直接可用):\n{page_text}"
+    _brief_ln = _brief_line(book)   # Phase2:本页简述在手→注要点替整页(省 token);缺失才降级注整页
+    _name = (file_rel.rsplit("/", 1)[-1] or "这本书")
+    # (原此处有 `(全书 {_pc} 页)` 片段:_pc 从未定义=NameError,且与上文"总页数不写进 SP"的设计相悖 →
+    #  借本次改写就地移除死代码,让简述/整页两条分支都不再崩)
+    if _brief_ln:
+        role += (f"\n用户此刻正在读《{_name}》第 {page} 页。{_brief_ln}"
+                 "(以上是本页要点摘要;能答就直接答,需要本页完整原文/更细内容再调 read_page(page:N),别默认整页读)")
+    elif page_text:
+        role += f"\n用户此刻正在读《{_name}》第 {page} 页,本页文字内容(直接可用):\n{page_text}"
     figs = book.get("figures") or []
     if figs:
         fx = ";".join(f"「{(f.get('caption') or '插图')}」:{(f.get('desc') or '')}" for f in figs[:4] if isinstance(f, dict))
@@ -436,7 +494,8 @@ def _state_event_text(book: dict) -> str:
         elif sv:
             parts.append("本页有手写笔迹,自你上次查看后没有新变化(但他说刚画了就以他为准,重新 see_ink)")
         else:
-            parts.append("本页有手写笔迹(问『我圈的/画的』→ 调 see_ink 看合成图再答,别猜)")
+            parts.append("本页有手写笔迹——他只要用『这个/这里/这段/这是什么/我圈的/什么意思』等**代词或指代不清**的说法,"
+                         "或没说具体指什么 → 默认就在问他圈画的那块,**必须先 see_ink** 看合成图再答;别猜、别要求他明说『圈出/画出』")
     else:
         parts.append("本页没有任何手写笔迹(问『我画了什么』直接说没画,see_ink 此刻无效)")
     return "(系统状态更新:" + ";".join(parts) + "。以本条为准,更早的状态描述一律作废。)"
@@ -520,12 +579,8 @@ _ACK_TEXT = {   # v3-⑩:确认语按输出音频计费(300元/M,最贵的一类
     "summarize_section": "我读下这章。", "auto_highlight": "好,标重点。",
     "deep_think": "我想想,稍等。", "recall_study": "我翻翻记录。",
 }
-# 深度思考虚拟工具(v3-⑥):不在 TOOLS 注册表(它是语音专属体验)——relay 拦截,调助手 chat 流式,
-# answer 增量按句经 ChatTTSText(500) 分片**边生成边播**(不等全文;官方流式协议 start/content/end)。
-DEEP_TOOL_LINE = "- deep_think: 复杂专业问题/数学推导/逻辑推理,交给深度思考模型详细解答并念给用户(慢,简单问题别用) {question:完整问题}"
-RECALL_TOOL_LINE = ("- recall_study: 回顾学习内容(『今天学了什么/之前讲过没/这段时间学了哪些/复盘』)。"
-                    "⚠你的对话记忆只有最近20轮,更早的已被系统裁掉、**你感知不到自己丢了什么**——"
-                    "回顾类问题一律用本工具查完整学习记录,凭印象答=编造 {span:today或week, question:用户原话}")
+# 深度思考/学习回顾是语音专属虚拟工具，由 assistant.ToolRegistry 声明并由 relay
+# 拦截执行；这里不再保存第二份名称、说明或 schema。
 _SENT_SPLIT = re.compile(r"[^。！？!?;；\n]+[。！？!?;；\n]+")
 
 
@@ -701,6 +756,31 @@ _RAG_LIMIT = {
 }
 
 
+def _prep_tool_result(res, tool_name):
+    """工具结果统一预处理——三条引擎路径(豆包 _run_voice_tool / OpenAI-WS handle_openai._tool /
+    RTC handle_rtc_ctl._tool)**共用一份**,根治"改一处漏两处"(制卡预览不显示反复复发的元凶:
+    各路径手抄这段各自漏字段/漏 result → tool_status 少 cards 完整体,前端 parse 残 rag 炸掉)。
+    → (slim, slim_full, rag):
+      slim      = 喂回模型的精简版:剔 _ 前缀控制字段(_fed_images 等 b64)与 client_action;
+                  cards/images 有对应 brief 时剔全文(省 token,cards_brief/found_brief 顶上播报)
+      slim_full = 完整版(含 cards/images 全文)→ 供 tool_status.result 让前端渲预览卡(见 _tool_preview_result)
+      rag       = slim 按 _RAG_LIMIT[tool] 分级限长的 JSON 串(空则统一兜底文案;进历史每个字后续轮轮计费)"""
+    slim = {k: v for k, v in res.items() if not str(k).startswith("_") and k != "client_action"}
+    slim_full = dict(slim)
+    if slim.get("cards") and slim.get("cards_brief"):
+        slim = {k: v for k, v in slim.items() if k != "cards"}      # cards_brief 顶上;全文截断成残 JSON=「AI 不知道做过什么卡」
+    if slim.get("images") and slim.get("found_brief"):
+        slim = {k: v for k, v in slim.items() if k != "images"}     # found_brief/missed 顶上;图 URL 挤爆预算
+    lim = _RAG_LIMIT.get(tool_name, 1400)
+    rag = json.dumps(slim, ensure_ascii=False)[:lim] if slim else "(无文本结果,界面元素已显示在用户屏幕上)"
+    return slim, slim_full, rag
+
+
+def _tool_preview_result(slim_full):
+    """tool_status.result:前端渲预览卡的完整体(目前=制卡 cards 全文;喂回模型的 slim 已剔它,故单独送)。"""
+    return slim_full if (slim_full or {}).get("cards") else None
+
+
 def _is_cmd_sent(t: str) -> bool:
     """350 TTSSentenceStart 的句文本是否属于工具 JSON(命令句;TTS 可能把一条 JSON 拆成多句)→ 静音。"""
     t = (t or "").strip()
@@ -839,16 +919,7 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
             _vision = _vision[:3]
         except Exception:
             _vision = []
-        slim = {k: v for k, v in res.items() if not str(k).startswith("_") and k != "client_action"}
-        slim_full = dict(slim)   # 完整版(含 cards 全文)→ tool_status 帧给前端渲预览卡
-        if slim.get("cards") and slim.get("cards_brief"):
-            slim = {k: v for k, v in slim.items() if k != "cards"}   # 喂豆包吃大意(cards_brief);全文截断残 JSON=「AI 不知道做过什么卡」根因
-        if slim.get("images") and slim.get("found_brief"):
-            slim = {k: v for k, v in slim.items() if k != "images"}   # 图 URL 挤爆预算;found_brief/missed 顶上
-        # v3-⑩:RAG 回填按工具分级限长(进历史的每个字后续轮轮计费)——列表类给短(模型只需播报要点),
-        # 视觉/阅读类给足(信息密度高);统一 3000 的旧上限只留给未知工具兜底
-        lim = _RAG_LIMIT.get(tool, 1400)
-        content = (json.dumps(slim, ensure_ascii=False)[:lim] if slim else "(无文本结果,界面元素已显示在屏幕上)")
+        slim, slim_full, content = _prep_tool_result(res, tool)   # 三引擎共用:剔控制字段/cards·images 精简/限长(见 _prep_tool_result)
         rag = json.dumps([{"title": f"工具 {tool} 的真实执行结果(涉及的界面元素已显示在用户屏幕上)",
                            "content": content + "\n(请把要点口语化讲给用户;你此前口头猜测的内容一律作废)"}],
                          ensure_ascii=False)
@@ -865,7 +936,7 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
                           "sel": len(ctx.get("selection") or "")},       # 随调用携带的页面上下文概要
             "rag": content[:1600],                                       # 喂回豆包播报的真实结果
             "vision": _vision,                                           # #8 实际发给 AI 的图 → 前端「AI 请求」节点展示
-            "result": (slim_full if slim_full.get("cards") else None),   # 制卡完整体(前端渲预览卡;rag 截断残 JSON=预览不弹的根因)
+            "result": _tool_preview_result(slim_full),   # 制卡完整体(前端渲预览卡)
             "result_brief": _rb}}, ensure_ascii=False))   # slim=已剔 b64,不再裸露
         if d.get("ok") and d.get("cacheable"):   # 只读工具 → 按「工具+参数+页+墨迹版本」缓存,重复询问直接复用
             cache[_ckey(d.get("tool"), d.get("args"))] = {
@@ -893,23 +964,67 @@ async def _run_voice_tool(bws, dws, sid, cmd: str, file_rel: str, page: int,
             pass
 
 
-async def _fetch_tools_lines() -> dict:
-    """拉工具目录(与编排 agent 同一注册表)→ {name: 压缩行}。O2.0 上下文 12K,desc 只留第一句。
+async def _fetch_tools_catalog(surface: str) -> list[dict]:
+    """Fetch one trusted production projection from assistant.ToolRegistry."""
+
+    try:
+        async with httpx.AsyncClient(
+            base_url=WEBAPP,
+            headers=_webapp_headers(),
+            timeout=10,
+        ) as hc:
+            r = await hc.get(
+                "/api/assistant/tools",
+                params={"surface": surface},
+            )
+            r.raise_for_status()
+            d = r.json()
+        return [
+            row
+            for row in (d.get("tools") or [])
+            if isinstance(row, dict) and row.get("name")
+        ]
+    except Exception as ex:
+        sys.stderr.write(f"[voice-rt tools] {ex}\n")
+        return []
+
+
+def _catalog_to_realtime_tools(catalog: list[dict]) -> list[dict]:
+    """Convert registry API rows without inventing a second local schema."""
+
+    tools = []
+    for row in catalog:
+        schema = row.get("parameters")
+        if not isinstance(schema, dict) or schema.get("type") != "object":
+            schema = {
+                "type": "object",
+                "properties": {},
+                "additionalProperties": True,
+            }
+        tools.append({
+            "type": "function",
+            "name": row["name"],
+            "description": str(
+                row.get("description") or row.get("desc") or ""
+            )[:1024],
+            "parameters": schema,
+        })
+    return tools
+
+
+async def _fetch_tools_lines(surface: str = "doubao_s2s") -> dict:
+    """拉 registry surface 目录 → {name: 压缩行}。O2.0 上下文 12K,desc 只留第一句。
     v3-⑩ 起目录**全量注入且恒定**(进 SP 稳定前缀保前缀缓存);"无笔迹 see_ink 无效"的
     状态语义由 _role_text 尾部的实时状态声明承接(原门控=按状态增删行,一画笔目录就变,
     排在它后面的页文本/生词整层缓存连坐失效)。"""
-    try:
-        async with httpx.AsyncClient(base_url=WEBAPP, headers=_webapp_headers(), timeout=10) as hc:
-            r = await hc.get("/api/assistant/tools")
-            d = r.json()
-        out = {}
-        for t in (d.get("tools") or []):
-            desc = re.split(r"[。;;]", (t.get("desc") or "").replace("*", ""))[0][:52]
-            out[t["name"]] = f"- {t['name']}: {desc}"
-        return out
-    except Exception as ex:
-        sys.stderr.write(f"[voice-rt tools] {ex}\n")
-        return {}
+    out = {}
+    for row in await _fetch_tools_catalog(surface):
+        desc = re.split(
+            r"[。;;]",
+            (row.get("description") or row.get("desc") or "").replace("*", ""),
+        )[0][:52]
+        out[row["name"]] = f"- {row['name']}: {desc}"
+    return out
 
 
 # ═══════════ agent 模式:豆包只当耳朵(sauc 流式 ASR)+ 嘴(流式 TTS),大脑 = 侧栏助手 ═══════════
@@ -1221,53 +1336,7 @@ async def handle_tts_only(bws):
 OPENAI_RT_CRED = Path("~/.config/openai-realtime.json").expanduser()
 OPENAI_RT_URL = "wss://api.openai.com/v1/realtime?model="
 
-# 高频/易错传参的语音工具补真实 parameters schema(其余保持空宽松 schema)。
-# required 只标**无选中兜底**的必填项(高亮/制卡/查词等会回落 ctx.selection,不设 required 免逼模型幻觉参数);
-# additionalProperties=True 保留容错(已知参数强类型 + 未知参数照收)。
-def _p(props, required=None):
-    d = {"type": "object", "properties": props, "additionalProperties": True}
-    if required:
-        d["required"] = required
-    return d
-
-
-_TOOL_SCHEMAS = {
-    "read_page": _p({"page": {"type": "integer", "description": "印刷页码;不给=当前页"}}),
-    "goto_page": _p({"page": {"type": "integer", "description": "要翻到的印刷页码"}}, ["page"]),
-    "see_page": _p({"page": {"type": "integer", "description": "要看图的页;不给=当前页"}}),
-    "highlight": _p({"text": {"type": "string", "description": "要高亮的原文;不给=用当前选中"},
-                     "texts": {"type": "array", "items": {"type": "string"}, "description": "批量高亮多段"},
-                     "color": {"type": "string", "description": "颜色 hex,如 #fff59d"},
-                     "page": {"type": "integer", "description": "在哪页高亮(印刷页);不给=当前页"}}),
-    "make_anki": _p({"text": {"type": "string", "description": "制卡内容;不给=用当前选中/最近讲解"}}),
-    "make_note": _p({"text": {"type": "string", "description": "要记的内容;不给=用当前选中"}}),
-    "add_vocab": _p({"word": {"type": "string", "description": "生词;不给=用当前选中"}}),
-    "translate": _p({"text": {"type": "string", "description": "要翻译的文本;不给=用当前选中"},
-                     "target": {"type": "string", "description": "目标语言,默认 zh"}}),
-    "lookup_word": _p({"word": {"type": "string", "description": "要查的词;不给=用当前选中"}}),
-    "search_book": _p({"query": {"type": "string", "description": "在本书内搜的关键词"}}, ["query"]),
-    "search_image": _p({"query": {"type": "string", "description": "要配图的概念/实物名"}}, ["query"]),
-    "search_video": _p({"query": {"type": "string", "description": "核心主题(内部会自动拟搜索词)"}}),
-    "summarize_section": _p({"page": {"type": "integer", "description": "章节所在页;不给=当前页所在章节"}}),
-    "make_diagnostic": _p({"concept": {"type": "string", "description": "要诊断的知识点名或 kg 节点 id"}}, ["concept"]),
-    "situation_feedback": _p({"concept": {"type": "string", "description": "学习近况里的知识点名"},
-                              "kind": {"type": "string", "enum": ["understood", "still_stuck", "mute"],
-                                       "description": "understood=懂了 / still_stuck=还是不会 / mute=别再提"}},
-                             ["concept", "kind"]),
-    "apply_mastery": _p({"node": {"type": "string", "description": "kg 节点 id,如 kg:LADR#..."},
-                         "mastery": {"type": "number", "description": "0~1,标已掌握用 0.9"}}, ["node", "mastery"]),
-    "relate_material": _p({"term": {"type": "string", "description": "知识点/概念名"},
-                           "order": {"type": "string", "enum": ["relevance", "recent"]},
-                           "when": {"type": "string", "description": "时间窗,如 本周/上个月"},
-                           "top": {"type": "integer"}}, ["term"]),
-    "read_material": _p({"ref": {"type": "string", "description": "材料地址:anki:123 / note:x.md / book:..#p9 / kg:书#节点"}}, ["ref"]),
-    "material_graph": _p({"ref": {"type": "string", "description": "材料地址"},
-                          "direction": {"type": "string", "enum": ["up", "down", "both"]},
-                          "depth": {"type": "integer"}}, ["ref"]),
-    "learning_focus": _p({"when": {"type": "string", "description": "今天/本周/上个月/最近三个月/全部"},
-                          "scope": {"type": "string", "enum": ["book", "convo"]},
-                          "top": {"type": "integer"}}),
-}
+# 高频参数 schema 已迁到 assistant.ToolRegistry；relay 只消费 API 投影，不再保留副本。
 XAI_RT_CRED = Path("~/.config/xai-grok.json").expanduser()          # 94:Grok Voice 第三引擎(协议兼容 OpenAI Realtime)
 XAI_RT_URL = "wss://api.x.ai/v1/realtime?model="
 
@@ -1456,11 +1525,15 @@ def _oa_instructions(book: dict, file_rel: str, page: int) -> str:
              "search_image(搜真实图片)/search_video(搜教学视频)——查网/看图/看视频就调它们,图和视频自动显示在界面上;"
              "工具失败就如实说暂时查不了。search_all_books 只搜他的书库。**绝不要自己输出 markdown 图片/链接占位符假装贴图**。"
              "只读查询(查词/看图/搜索/读页)意图清楚就直接调;写操作(高亮/做卡片/写笔记/插入页)先用一句话说清你要做什么再做。"
-             "工具成功返回后才能说『已完成』;同样参数失败别重复调超过一次。音频含糊/有噪声时别猜,简短请他重说一遍。"]
+             "工具成功返回后才能说『已完成』;同样参数失败别重复调超过一次。音频含糊/有噪声时别猜,简短请他重说一遍。"
+             "**本页正文已在上文(下面直接给你 / 系统状态消息 / 工具结果里)时,回答·高亮·做卡直接用它,别再对当前页调 read_page;只有需要**其它页**的内容才 read_page(page:N)。**"]
+    _brief_ln = _brief_line(book)   # Phase2:简述优先替整页
     pt = (book.get("page_text") or "").strip()
-    if pt:
-        name = (file_rel.rsplit("/", 1)[-1] or "这本书")
-        parts.append(f"用户此刻正在读《{name}》第 {page} 页,本页文字内容(直接可用):\n{pt[:1500]}")
+    _name = (file_rel.rsplit("/", 1)[-1] or "这本书")
+    if _brief_ln:
+        parts.append(f"用户此刻正在读《{_name}》第 {page} 页。{_brief_ln}(本页要点摘要;能答就直接答,需要完整原文再 read_page(page:N))")
+    elif pt:
+        parts.append(f"用户此刻正在读《{_name}》第 {page} 页,本页文字内容(直接可用):\n{pt[:1500]}")
     figs = book.get("figures") or []
     fx = ";".join(f"「{(f.get('caption') or '插图')}」:{(f.get('desc') or '')}" for f in figs[:4] if isinstance(f, dict))
     if fx:
@@ -1540,29 +1613,17 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
     model = "grok-voice-think-fast-1.0" if engine == "grok" else (cred.get("rt_model") or "gpt-realtime-2.1-mini")   # 114:固定型号(latest 指向会漂移)
     vc = await _fetch_book_ctx(file_rel, page)
     book = {"page": page, "page_text": vc.get("page_text") or "", "vocab": vc.get("vocab") or [],
-            "figures": vc.get("figures") or [], "sel": "", "ink_strokes": None}
-    lines = await _fetch_tools_lines()
-    if len(lines) < 10:   # 工具目录拉取失败(webapp 重启窗口等)→ 重试一次;仍失败=跛脚会话(没 see_ink/看图),宁可报错别哑巴开场
+            "figures": vc.get("figures") or [], "sel": "", "ink_strokes": None,
+            "brief": vc.get("brief") or "", "brief_tags": vc.get("brief_tags") or [], "page_type": vc.get("page_type") or ""}
+    catalog = await _fetch_tools_catalog("realtime_ws")
+    if len(catalog) < 10:   # 工具目录拉取失败(webapp 重启窗口等)→ 重试一次;仍失败=跛脚会话(没 see_ink/看图),宁可报错别哑巴开场
         await asyncio.sleep(1.5)
-        lines = await _fetch_tools_lines()
-        if len(lines) < 10:
+        catalog = await _fetch_tools_catalog("realtime_ws")
+        if len(catalog) < 10:
             await bws.send(json.dumps({"event": -1, "payload": {"error": "工具目录拉取失败(服务可能在重启),几秒后重拨"}}, ensure_ascii=False))
             await bws.close()
             return
-    tools = [{"type": "function", "name": n, "description": str(line)[:1024],
-              "parameters": _TOOL_SCHEMAS.get(n) or {"type": "object", "properties": {}, "additionalProperties": True}}
-             for n, line in lines.items()]
-    tools.append({"type": "function", "name": "deep_think",
-                  "description": "深度思考:复杂推理/长解答/需要更强模型时转交 Claude 深度回答,结果拿回来讲给用户。args {question:完整问题}",
-                  "parameters": {"type": "object", "properties": {"question": {"type": "string"}},
-                                 "required": ["question"], "additionalProperties": True}})
-    tools.append({"type": "function", "name": "recall_study",
-                  "description": "回顾学习记录:『今天学了什么/之前讲过没/复盘』一类问题,取回用户学习时间线摘要(页码/查词/问答);span 可选 today/week。",
-                  "parameters": {"type": "object", "properties": {"span": {"type": "string"}}, "additionalProperties": True}})
-    # 静音 no-op(官方提示指南):背景噪声/等待音乐/没在对助手说话时调它,结束本轮不出声 → 不触发寒暄、省音频费
-    tools.append({"type": "function", "name": "wait_for_user",
-                  "description": "当最新音频是静音、背景噪声、等待音乐、电视声或明显不是在对你说话时调用:安静结束本轮、不要说任何话。不确定但像是在对你说话时,别调它,简短请对方重说一遍。",
-                  "parameters": {"type": "object", "properties": {}, "additionalProperties": False}})
+    tools = _catalog_to_realtime_tools(catalog)
     sess = {"type": "realtime", "output_modalities": ["audio"],
             "reasoning": {"effort": cred.get("rt_effort") or "low"},   # 官方:普通语音代理从 low 起,别默认 high(延迟/成本)
             "max_output_tokens": 2048,                                  # 护栏(1–4096/inf);朗读答案本就该短,分段更好
@@ -1663,6 +1724,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
             except Exception:
                 pass
         out, ok, label, took = "", True, name, None
+        slim_full = None   # #img/anki(2026-07-21 用户实锤"制卡预览不显示"):制卡等 cards 完整体,给 tool_status 前端渲预览卡用
         _silent = [False]   # 113:展示型工具静默入库(卡片已显示,本轮不让模型发言)
         try:
             if name == "recall_study":
@@ -1699,9 +1761,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                 vis = res.pop("_vision", None) if isinstance(res, dict) else None   # 原图(b64)绝不进文本 output(会被截成烂 JSON)
                 if isinstance(res, dict) and not vis and res.get("_fed_images"):
                     vis = res.get("_fed_images")   # 前端截图路径的图在 _fed_images(同样直喂 GPT 看)
-                slim = {k: v for k, v in res.items() if not str(k).startswith("_") and k != "client_action"}  # 剔 _fed_images 等 b64
-                lim = _RAG_LIMIT.get(d.get("tool") or name, 1400)
-                out = (json.dumps(slim, ensure_ascii=False)[:lim] if slim else "(无文本结果,界面元素已显示在用户屏幕上)")
+                slim, slim_full, out = _prep_tool_result(res, d.get("tool") or name)   # 三引擎共用(见 _prep_tool_result)
                 # ㉕ 图像直喂(凭证 rt_image 开关,⚪格式按 GA conversation item 推定待实测):看图类工具返回的渲染图
                 # 直接给 GPT 自己看(2.1 原生视觉),不再经 Claude 文字转述;失败(模型不支持/格式不对)由 error 事件暴露,关掉开关即回文字链路
                 if vis and _creds().get("rt_image") and engine != "grok":
@@ -1752,7 +1812,8 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
             pass
         await bws.send(json.dumps({"event": "tool_status", "payload": {
             "status": "done" if ok else "error", "tool": name, "label": label, "took_s": took,
-            "args": args, "rag": out[:1600]}}, ensure_ascii=False))
+            "args": args, "rag": out[:1600],
+            "result": _tool_preview_result(slim_full)}}, ensure_ascii=False))   # 制卡完整体(前端渲预览卡)
         if engine == "grok":
             _gk["tools"] = _gk.get("tools", 0) + 1   # 114:账本补工具计数(出飞已在回填处前移,119b)
         _ledger_tool(engine, _span, call_id, name, ok, took or 0)   # 284
@@ -1788,8 +1849,11 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                 # instructions for this response only")——必须带**完整 SP**,否则 see_ink 铁律/工具规则等每轮失效
                 # (行为怪异根源之一);xAI 计价无 token 维度=全文注入免费。附加本轮实时状态。
                 _bits = [f"当前第 {book.get('page') or page} 页"]
+                _brief0 = _brief_line(book)   # Phase2:简述优先替整页
                 _pt0 = (book.get("page_text") or "")[:1800]
-                if _pt0:
+                if _brief0:
+                    _bits.append(f"{_brief0}(要点摘要;需要完整原文再 read_page(page:N))")
+                elif _pt0:
                     _bits.append(f"本页正文(直接参考,不用 read_page 读当前页):「{_pt0}」")
                 if book.get("sel"):
                     _bits.append(f"用户选中:「{str(book['sel'])[:400]}」")
@@ -2038,10 +2102,16 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                 if np and np != book.get("page"):
                     vc2 = await _fetch_book_ctx(f2, np)
                     book.update({"page": np, "page_text": vc2.get("page_text") or "",
-                                 "vocab": vc2.get("vocab") or [], "figures": vc2.get("figures") or []})
+                                 "vocab": vc2.get("vocab") or [], "figures": vc2.get("figures") or [],
+                                 "brief": vc2.get("brief") or "", "brief_tags": vc2.get("brief_tags") or [],
+                                 "page_type": vc2.get("page_type") or ""})
                     # ⚠ 不改 instructions(改稳定前缀=整个 prompt cache 作废,cached $0.06/M vs 全价 $0.6——
                     # 官方成本指南明确反对;豆包⑭同款教训):新页内容走**对话内 system 增量消息**,前缀整场稳定
-                    note = f"(用户翻到第 {np} 页,本页文字内容:{(book['page_text'] or '(本页无文字层)')[:1200]}"
+                    _brief2 = _brief_line(book)   # Phase2:翻页增量也简述优先替整页
+                    if _brief2:
+                        note = f"(用户翻到第 {np} 页。{_brief2}(要点摘要;需要完整原文再 read_page(page:N))"
+                    else:
+                        note = f"(用户翻到第 {np} 页,本页文字内容:{(book['page_text'] or '(本页无文字层)')[:1200]}"
                     if book.get("vocab"):
                         note += ";本页未掌握生词:" + "、".join(book["vocab"][:20])
                     note += "。之前页面的内容已翻过去了,回答以本条为准)"
@@ -2554,6 +2624,8 @@ _ASR_PROMPT_MIRROR = ("关键词:Anki、笔迹、振假名、生词、假名"
                       "|学习伴读通话。常说:这一页/这页讲了什么/上一页/下一页/翻到第N页/读一下/"
                       "做卡片/记笔记/生词/翻译/解释/公式/我画的/笔迹")   # 含旧版,防旧会话残留
 _GHOST_LCS_MIN = 10   # 与 prompt 的最长公共子串阈值:「翻到第N页」才5字、「下一页」3字 → 10 字才不会误杀真人
+_GHOST_COV_MIN_LEN = 10   # 复读变体判据:假转写去标点后至少这么长才启用(短句不判,防误杀)
+_GHOST_COV_RATIO = 0.8    # 累计匹配块占假转写比例≥此=复读变体(同音错字/漏字把连续子串打断→LCS 判不出;用户实测「笔记」vs「笔迹」占比 0.94、真人 0.50)
 
 
 def _strip_punct(s: str) -> str:
@@ -2570,9 +2642,13 @@ def _is_asr_ghost(tx: str):
             return True, f"含 prompt 锚点「{a}」"
     a1, a2 = _strip_punct(s), _strip_punct(_ASR_PROMPT_MIRROR)
     if a1 and a2:
-        m = difflib.SequenceMatcher(None, a1, a2, autojunk=False).find_longest_match(0, len(a1), 0, len(a2))
+        sm = difflib.SequenceMatcher(None, a1, a2, autojunk=False)
+        m = sm.find_longest_match(0, len(a1), 0, len(a2))
         if m.size >= _GHOST_LCS_MIN:
             return True, f"与 ASR prompt 最长公共子串 {m.size} 字(≥{_GHOST_LCS_MIN})"
+        matched = sum(b.size for b in sm.get_matching_blocks())   # 复读变体:同音错字/漏字打断连续子串→LCS 漏,但整体仍高度重合(用户实测「笔记」vs mirror「笔迹」一字之差)
+        if len(a1) >= _GHOST_COV_MIN_LEN and matched >= _GHOST_COV_RATIO * len(a1):
+            return True, f"与 ASR prompt 整体重合 {matched}/{len(a1)} 字(复读变体·同音错字)"
     return False, ""
 
 
@@ -2799,6 +2875,21 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
 
     _tfail_r = {"key": "", "n": 0}   # 100:RTC 版工具熔断(同 WS 版)
     _img_items = []   # 104:(epoch, item_id) 直喂图记账——新话轮焚旧
+    _state_evt = {"fp": "", "iid": None, "n": 0}   # 142(TPM 去重):上条状态的指纹/item_id/计数——照豆包路 _state_evt,另加覆盖式删旧
+    _read_pages = set()   # 142:本轮已把整页正文灌进上下文的页号(当前页 state 注入 + read_page 拉过的页)→ 重复 read 回指针不再灌整页
+    # Item3(TPM 感知覆盖):1 分钟滑动窗口累计 input_tokens(response.done 时挂钩喂入)。
+    #   纯成本看删旧状态几乎总更亏(破坏后面前缀缓存 $0.06→$0.60,损失 > 删掉省的);
+    #   只有逼近 OpenAI Realtime 40000 tok/min 硬限时才删旧状态 item 保命(少读一段字)。
+    _OA_TPM_LIMIT = 40000     # OpenAI Realtime input TPM 硬限
+    TPM_DANGER = 10000        # 剩余额度(headroom)低于此值=快撞墙→删旧状态保命;否则保住 10× 便宜的前缀缓存
+    _tpm_win = []             # [(t, input_tokens)] —— 60 秒滑动窗口
+
+    def _tpm_used_1min() -> int:
+        """窗口内(近 60 秒)已读 input_tokens 之和;顺手剔除过期条目。"""
+        _cut = time.time() - 60.0
+        while _tpm_win and _tpm_win[0][0] < _cut:
+            _tpm_win.pop(0)
+        return sum(_n for _t, _n in _tpm_win)
 
     async def _tool(name: str, args: dict, call_id2: str, ep0: int):
         _subs = []   # 137:工具内部子步骤 —— 它们是**外层卡的步骤**,不另起一张卡
@@ -2806,8 +2897,16 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
         await bws.send(json.dumps({"event": "tool_status", "payload": {"status": "running", "tool": name, "label": _lbl0}}, ensure_ascii=False))
         out, ok, label, took, cached = "", True, name, None, False
         vis, readonly, no_create = None, True, False
+        slim_full = None   # #img/anki(2026-07-21 用户实锤"制卡预览不显示"):制卡等 cards 完整体,给 tool_status 前端渲预览卡用
         try:
             _ink_fp = book.get("_ink_fp") or ""
+            # 142(read_page 当前页短路,治 TPM):安全解析目标页(非法参数不抛,交给正常链路)
+            try:
+                _rp_arg = int(str(args.get("page") or "").strip() or 0)
+            except Exception:
+                _rp_arg = 0
+            _rp_cur = book.get("page") or page
+            _rp_tgt = _rp_arg or _rp_cur
             # 缓存键:sel 全文哈希(58b 的前 80 字有前缀碰撞)+ink 全笔画哈希(_up 里算)——审核 P1
             ck = (f"{name}|{json.dumps(args, ensure_ascii=False, sort_keys=True)}|"
                   f"{book.get('page') or page}|{_ink_fp}|{hashlib.md5((book.get('sel') or '').encode()).hexdigest()[:8]}")
@@ -2843,6 +2942,18 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
             elif name == "deep_think":
                 out = await _oa_deep(str(args.get("question") or ""), file_rel, book.get("page") or page)
                 label = "深度思考"
+            elif name == "read_page" and _rp_tgt == _rp_cur and _rp_cur in _read_pages:
+                # 142(最痛:那次同页 read 两次各灌整页 ~500-600×2 token):当前页整页正文已随页面状态注入上文 → 回指针,别再灌整页。
+                # Phase2 共存:短路门槛从"vtext/page_text 非空"改为"_rp_cur 已在 _read_pages"(=整页正文确已进上文)——
+                #   本页只注了**简述**时 _rp_cur 不在名单 → 不短路,read_page 正常执行把整页原文按需拉给深问(简述替整页的逃生路)。
+                out = (f"(第 {_rp_cur} 页正文已经在上文的页面状态消息里,直接据此回答/高亮/做卡,"
+                       "无需重复读取整页;要**其它页**内容才用 read_page(page:N)。)")
+                label = "读取本页(免调用)"
+                _read_pages.add(_rp_cur)
+            elif name == "read_page" and _rp_tgt in _read_pages:
+                # 142:本轮通话已经读过这一页,整页正文就在上文 → 回指针,别重复灌整页
+                out = f"(第 {_rp_tgt} 页正文本轮通话已经读过、就在上文里,直接使用,别重复读取整页。)"
+                label = "读取页面(免调用)"
             elif ck in tool_cache and name not in _NO_CACHE:
                 hit = tool_cache[ck]
                 out, cached = hit["out"], True
@@ -2878,9 +2989,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                     await bws.send(json.dumps({"event": "client_action", "payload": ca}, ensure_ascii=False))
                 vis = res.pop("_vision", None)   # 直喂 Realtime 的图(GPT 自己看);b64 绝不进文本 output(会被截成烂 JSON)
                 card_vis = res.get("_fed_images") or vis   # 工具卡展示的图(落盘发 URL)——see_ink 走文字描述路时图在 _fed_images
-                slim = {k: v for k, v in res.items() if not str(k).startswith("_") and k != "client_action"}  # 剔 _fed_images 等 b64,别进 out/rag
-                lim = _RAG_LIMIT.get(d.get("tool") or name, 1400)
-                out = (json.dumps(slim, ensure_ascii=False)[:lim] if slim else "(无文本结果,界面元素已显示在用户屏幕上)")
+                slim, slim_full, out = _prep_tool_result(res, d.get("tool") or name)   # 三引擎共用(见 _prep_tool_result)
                 _imgs = []
                 try:
                     for _im in (res.get("images") or []):
@@ -2891,6 +3000,8 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                     pass
                 recent_tools.append({"tool": name, "label": label, "rag": out[:600], "images": _imgs[:3]})
                 del recent_tools[:-6]
+                if name == "read_page" and ok:
+                    _read_pages.add(_rp_tgt)   # 142:整页正文已进上下文 → 登记,后续同页 read 短路回指针
                 # 66b(日志分析:route 档 read_page 后模型口头念整页 60s,instructions 远端规则命中率 0)——
                 # 提醒放到**离决策最近的地方**:长工具结果尾部就地一行(just-in-time,非硬兜底)
                 if (ok and readonly and len(out) > 800
@@ -2973,7 +3084,8 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
             _vshot = []
         await bws.send(json.dumps({"event": "tool_status", "payload": {
             "status": "done" if ok else "error", "tool": name, "label": label + ("(已过期)" if stale else ""), "took_s": took,
-            "args": args, "rag": out[:1600], "sub_steps": _subs, "vision": _vshot}}, ensure_ascii=False))
+            "args": args, "rag": out[:1600], "sub_steps": _subs, "vision": _vshot,
+            "result": _tool_preview_result(slim_full)}}, ensure_ascii=False))   # 制卡完整体(前端渲预览卡)
         _ledger_tool("openai_rtc", _span, call_id2, name, ok, took or 0, cached=bool(cached))   # 284
         _vlog("tool", tool=name, label=label, page=book.get("page") or page, book=file_rel, ok=ok,
               args=args, brief=("[cache] " if cached else "") + ("[stale] " if stale else "") + out[:300])
@@ -3030,11 +3142,32 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
 
     async def _inject_state():
         """把当前 页/选中/笔迹 状态注入对话。**只在 ACCEPT 后调**(133:确认是真轮才消费 _dirty3/_ink_fresh,
-        否则一个噪声假轮就会把"刚画过"这个一次性边沿吃掉,真问题来时反而没有笔迹提示)。"""
+        否则一个噪声假轮就会把"刚画过"这个一次性边沿吃掉,真问题来时反而没有笔迹提示)。
+        142(TPM 去重,治 Realtime 每 response 全额重算):① 照豆包路 _state_evt fp 模式——内容+笔迹指纹没变
+        就不重注(重注一份 ≤1500 字 vtext 直接抬高每轮基线);② 覆盖式——注新的前先删上一条自己发的状态 item
+        (item.delete 基建同 _burn_old_images/_reject_turn),只留最新一条,别让旧状态在上下文里堆积重复计费。"""
         if not (fe >= 3 and book.pop("_dirty3", None)):
             return
+        _pg3 = book.get("page") or page
+        # Phase2:本页简述在手→注要点替整页(省 token,深问再 read_page);缺失才降级注整页视口文本。
+        #   rtc 不走 _fetch_book_ctx,简述按页懒拉一次(换页先清旧简述,再 HTTP 拉;pending/失败→"" 自动降级)。
+        if book.get("_brief_pg") != _pg3:
+            book["_brief_pg"] = _pg3
+            book["brief"] = ""; book["brief_tags"] = []; book["page_type"] = ""
+            try:
+                book.update(await _fetch_brief(file_rel, _pg3))
+            except Exception:
+                pass
+        _brief3 = _brief_line(book)
         _vt3 = (book.get("vtext") or book.get("page_text") or "")[:1500]
-        _b3 = [f"用户此刻在第 {book.get('page') or page} 页" + (f",当前可见内容:{_vt3}" if _vt3 else ",需要页面内容就调 read_page")]
+        if _brief3:
+            _b3 = [f"用户此刻在第 {_pg3} 页。{_brief3}(要点摘要,能答就直接答;需要本页完整原文/更细内容才调 read_page(page:N))"]
+            _full3 = False   # 只注了简述,整页正文**没**进上文 → 不登记短路名单,read_page 深问可正常拉全文
+        else:
+            _b3 = [f"用户此刻在第 {_pg3} 页" + (
+                f",当前可见内容:{_vt3}(本页正文已给你,回答/高亮/做卡直接用它,别对当前页调 read_page;要**其它页**内容才调 read_page)"
+                if _vt3 else ",需要页面内容就调 read_page")]
+            _full3 = bool(_vt3)
         if book.get("sel"):
             _b3.append(f"选中了「{str(book['sel'])[:200]}」(他说『这段/我选的』就指它)")
         if book.get("ink_strokes"):
@@ -3045,11 +3178,37 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                            "他若点到具体的词/概念或要求翻页等,就按他说的来,别硬套笔迹")
             else:
                 _b3.append("本页有他的手写笔迹(问到手写内容先调 see_ink,别用 see_page 看整页)")
+        _txt3 = "(" + ";".join(_b3) + "。状态记录,不要回应本条。)"
+        _fp3 = _txt3 + f"|ink{book.get('_ink_fp') or ''}"   # 掺笔迹指纹:字面相同但又画了新笔迹也要重注(照豆包 _state_evt)
+        if _fp3 == _state_evt["fp"]:
+            sys.stderr.write(f"[rtc-ctl] P3 状态未变,跳过重注 p{book.get('page')}\n")
+            return   # 状态没变 → 不注(省 token + 防上下文灌水)
+        _state_evt["fp"] = _fp3
         try:
+            # Item3(TPM 感知覆盖,142→本批):旧代码无条件删上一条状态 item——但删会让它之后一大段前缀
+            # 缓存失效($0.06→$0.60,10× 贵),纯成本看几乎总更亏。改成:只有这一分钟已读 input_tokens
+            # 逼近 40000/min 硬墙(headroom<TPM_DANGER)时才删旧状态保命(少读一段字);还宽裕就保留旧的
+            # (靠 truncation retention 0.8 慢裁),保住便宜的前缀缓存。不删也照常 create 新状态 + 更新 iid。
+            _old3 = _state_evt.get("iid")
+            if _old3:
+                _headroom = _OA_TPM_LIMIT - _tpm_used_1min()
+                if _headroom < TPM_DANGER:
+                    try:
+                        await ows.send(json.dumps({"type": "conversation.item.delete", "item_id": _old3}))
+                    except Exception:
+                        pass
+                    sys.stderr.write(f"[rtc-ctl] Item3 删旧状态(TPM 紧张 headroom={_headroom})\n")
+                else:
+                    sys.stderr.write(f"[rtc-ctl] Item3 保留旧状态(TPM 宽裕 headroom={_headroom},省缓存)\n")
+            _state_evt["n"] += 1
+            _iid3 = f"st{_state_evt['n']}"
+            _state_evt["iid"] = _iid3
+            if _full3:   # 只有**整页正文**随本条注入才登记短路名单(简述替整页时不登记 → read_page 深问正常拉全文)
+                _read_pages.add(_pg3)
             await ows.send(json.dumps({"type": "conversation.item.create", "item": {
-                "type": "message", "role": "system",
-                "content": [{"type": "input_text", "text": "(" + ";".join(_b3) + "。状态记录,不要回应本条。)"}]}}, ensure_ascii=False))
-            sys.stderr.write(f"[rtc-ctl] P3 注入 p{book.get('page')}(vt={len(_vt3)}字 ink={bool(book.get('ink_strokes'))})\n")
+                "id": _iid3, "type": "message", "role": "system",
+                "content": [{"type": "input_text", "text": _txt3}]}}, ensure_ascii=False))
+            sys.stderr.write(f"[rtc-ctl] P3 注入 p{book.get('page')}(vt={len(_vt3)}字 ink={bool(book.get('ink_strokes'))} iid={_iid3})\n")
         except Exception:
             pass
 
@@ -3208,6 +3367,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                 u = r0.get("usage") or {}
                 otd = u.get("output_token_details") or {}
                 _oa_log_usage(u, engine="openai_rtc", span=_span, resp_id=(ev.get("response") or {}).get("id") or "")   # 284/P3:usage 记账归 relay(sideband 自读,不再依赖前端上报)
+                _tpm_win.append((time.time(), int(u.get("input_tokens") or 0)))   # Item3:喂进 1 分钟滑动窗口,供 TPM 感知覆盖决策
                 sys.stderr.write(f"[rtc-ctl] done call={call_id[:12]} in={u.get('input_tokens')} out={u.get('output_tokens')} "
                                  f"[audio={otd.get('audio_tokens', 0)} text={otd.get('text_tokens', 0)}] "
                                  f"status={r0.get('status')}\n")
@@ -3431,9 +3591,7 @@ async def handle_browser(bws):
         return
     sid = str(uuid.uuid4())
     book = await _fetch_book_ctx(file_rel, page)   # 书页文本 + 助手历史(没有也照常通话)
-    book["tools_lines"] = await _fetch_tools_lines()   # 工具目录(与编排 agent 同一注册表,开话拉一次;SP 组装时按状态门控)
-    book["tools_lines"]["deep_think"] = DEEP_TOOL_LINE   # 深度思考虚拟工具(语音专属,relay 拦截流式代播)
-    book["tools_lines"]["recall_study"] = RECALL_TOOL_LINE   # 学习回顾(v3-⑰:12K 之外的长记忆由大上下文模型代答)
+    book["tools_lines"] = await _fetch_tools_lines("doubao_s2s")   # registry 的豆包投影；虚拟工具也由同一目录给出
     try:
         async with websockets.connect(DOUBAO_WSS, additional_headers=headers,
                                       max_size=10 * 1024 * 1024, open_timeout=15) as dws:
@@ -3546,6 +3704,7 @@ async def handle_browser(bws):
                             if np and _vtext and file_rel:
                                 page = np
                                 book["page_text"] = _vtext[:2000]
+                                book["brief"] = ""; book["brief_tags"] = []; book["page_type"] = ""   # 前端直供视口文本,无简述→降级用整页文本
                                 await _push_sp()
                                 _vlog("page", page=np, book=file_rel)
                                 sys.stderr.write(f"[voice-rt] 视口同步 → p{np}({len(book['page_text'])}字,前端直供)\n")
@@ -3553,6 +3712,8 @@ async def handle_browser(bws):
                                 page = np
                                 ctx2 = await _fetch_book_ctx(file_rel, np)
                                 book.update({k: ctx2.get(k) for k in ("page_text", "inked", "has_ink", "figures", "vocab")})   # 直塞内容整体换页
+                                book.update({"brief": ctx2.get("brief") or "", "brief_tags": ctx2.get("brief_tags") or [],
+                                             "page_type": ctx2.get("page_type") or ""})   # Phase2:换页简述同步
                                 book["ink_strokes"] = []          # 换页:上页实时墨迹作废(新页的由 syncInk 再推)
                                 book["view_shot"] = None          # 上页笔迹合成图也作废(防 see_ink 用到陈旧图)
                                 book["ink_seen_ver"] = 0          # "看过"记录跨页无效(新页的笔迹没看过)

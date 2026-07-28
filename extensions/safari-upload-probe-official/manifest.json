@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "BW网页伴读",
+  "description": "Safari Web Extension Packager official-format upload probe.",
+  "version": "1.0",
+  "icons": {
+    "512": "images/icon.svg"
+  },
+  "action": {
+    "default_popup": "popup.html"
+  }
+}

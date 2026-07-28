@@ -6,6 +6,52 @@
  */
 (function () {
   if (!window.RC) window.RC = {};
+  window.RC.safeHtml = function (html) {
+    try {
+      var root = document.createElement('div');
+      root.innerHTML = String(html == null ? '' : html);
+      root.querySelectorAll(
+        'script,style,link,template,iframe,object,embed,base,meta,form'
+      ).forEach(function (node) {
+        node.remove();
+      });
+      root.querySelectorAll('*').forEach(function (node) {
+        Array.prototype.slice.call(node.attributes || []).forEach(function (attr) {
+          var name = String(attr.name || '').toLowerCase();
+          var value = String(attr.value || '');
+          if (/^on/.test(name) || name === 'srcdoc' || name === 'srcset' ||
+              name === 'style' || name === 'action' ||
+              name === 'formaction') {
+            node.removeAttribute(attr.name);
+            return;
+          }
+          if (name === 'href' || name === 'src' ||
+              name === 'xlink:href' || name === 'poster') {
+            var compact = value
+              .replace(/[\u0000-\u0020\u007f]+/g, '')
+              .toLowerCase();
+            var safeDataImage = name === 'src' &&
+              /^data:image\/(?:png|jpe?g|gif|webp|avif);base64,/i
+                .test(value.trim());
+            if (
+              /^(?:javascript|vbscript|file|filesystem|chrome|resource):/
+                .test(compact) ||
+              (compact.indexOf('data:') === 0 && !safeDataImage)
+            ) {
+              node.removeAttribute(attr.name);
+            }
+          }
+        });
+        if (String(node.tagName || '').toLowerCase() === 'a' &&
+            node.getAttribute('target') === '_blank') {
+          node.setAttribute('rel', 'noopener noreferrer');
+        }
+      });
+      return root.innerHTML;
+    } catch (_) {
+      return '';
+    }
+  };
   window.RC.md = function (s) {
     s = String(s == null ? '' : s);
     if (window.marked && marked.parse) {

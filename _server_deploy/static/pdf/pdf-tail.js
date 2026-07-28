@@ -195,7 +195,7 @@ function _inkPointerDown(e) {
     e.preventDefault(); e.stopPropagation();
     try { pw.setPointerCapture(e.pointerId); } catch (_) {}
     RS0.penBegin(e, { eraser: _ink.tool === 'eraser' });
-    _ink.drawing = { pw, num: parseInt(pw.dataset.pageNum) || (typeof currentPage !== 'undefined' ? currentPage : 0), noteRoute: true, eraser: _ink.tool === 'eraser' };
+    _ink.drawing = { pw, captureEl: pw, pid: e.pointerId, num: parseInt(pw.dataset.pageNum) || (typeof currentPage !== 'undefined' ? currentPage : 0), noteRoute: true, eraser: _ink.tool === 'eraser' };
     document.addEventListener('pointermove', _inkPointerMove, true);
     document.addEventListener('pointerup', _inkPointerUp, true);
     document.addEventListener('pointercancel', _inkPointerUp, true);
@@ -209,7 +209,7 @@ function _inkPointerDown(e) {
   if (_ink.tool === 'eraser') {
     if (_ink.quickErase) clearTimeout(_ink._revertT);    // 正在擦 → 暂停自动回笔计时(抬笔再重启)
     _inkPushUndo(pw); _inkEraseAt(pw, pt);
-    _ink.drawing = { pw, num, eraser: true, pageTouched: true };
+    _ink.drawing = { pw, captureEl: pw, pid: e.pointerId, num, eraser: true, pageTouched: true };
   } else {
     _inkPushUndo(pw);
     const cv = pw.__inkCanvas, ctx = cv.getContext('2d');
@@ -218,7 +218,7 @@ function _inkPointerDown(e) {
     try { snap = ctx.getImageData(0, 0, cv.width, cv.height); } catch (_) {}   // 拍快照
     const stroke = { t: _ink.tool, c: _ink.color, w: parseFloat(_ink.width) || 2.5, p: [pt] };
     _inkStrokesOf(pw).push(stroke);
-    _ink.drawing = { pw, num, stroke, snap, raf: null, pageTouched: true };
+    _ink.drawing = { pw, captureEl: pw, pid: e.pointerId, num, stroke, snap, raf: null, pageTouched: true };
     _inkDrawCurrentOnSnap(_ink.drawing);                  // 画当前起点
   }
   document.addEventListener('pointermove', _inkPointerMove, true);
@@ -227,6 +227,9 @@ function _inkPointerDown(e) {
 }
 function _inkPointerMove(e) {
   const d = _ink.drawing; if (!d) return;
+  // 多指针共存时只有发起这笔的主动笔能接管事件。否则抬笔后的首个
+  // touchmove 会被残留绘制状态 preventDefault，表现为手指暂时不能滚动。
+  if (e.pointerId !== d.pid) return;
   try { window.__inkGuardUntil = Date.now() + 1000; } catch (_) {}   // 手写守卫:活动时刷到 +1s → 绘制中+抬笔后 1s 内屏蔽内容层查词/选中(界面操作不受影响)
   e.preventDefault();
   // ── 便签跨界路由(规格:笔尖实时位置决定写哪层;pen/橡皮参与切割,line/arrow/rect 形状不切)──
@@ -268,11 +271,17 @@ function _inkPointerMove(e) {
 }
 function _inkPointerUp(e) {
   const d = _ink.drawing; if (!d) return;
+  if (e.pointerId !== d.pid) return;
   try { window.__inkGuardUntil = Date.now() + 1000; } catch (_) {}   // 抬笔:守卫再延 1s(手掌残留触摸不误触内容层)
   if (d.raf) { cancelAnimationFrame(d.raf); d.raf = null; }
   document.removeEventListener('pointermove', _inkPointerMove, true);
   document.removeEventListener('pointerup', _inkPointerUp, true);
   document.removeEventListener('pointercancel', _inkPointerUp, true);
+  try {
+    if (d.captureEl && d.captureEl.hasPointerCapture && d.captureEl.hasPointerCapture(d.pid)) {
+      d.captureEl.releasePointerCapture(d.pid);
+    }
+  } catch (_) {}
   const RS = window.RC && RC.stickynote;
   if (d.noteRoute) { if (RS && RS.penEnd) RS.penEnd(); }   // 便签内抬笔:便签段收尾(单点=有意的点,保留)
   else if (!d.eraser && d.stroke) {
@@ -318,6 +327,8 @@ function _inkScheduleSave(pw, num) {
 }
 async function _inkSave(num, strokes) {
   if (!FILE_REL) return;
+  // 绘图有改动 → 共享层合并(停手约 1s 才去取 drawingRevision)。每笔都调是安全的。
+  try { window.RC?.outgoing?.drawingTouched(FILE_REL, num); } catch (_) {}
   try {
     const r = await fetch('/pdf/api/ink', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -390,6 +401,12 @@ window._inkLoadAll = _inkLoadAll;
         }
         // ★ 任务运行时:纸内容变了(检查结果写回 / 块显隐)→ 重画那张用户页。
         //   之前这里只认 ink,text/run 事件被下面那行 return 掉 → 「让 AI 检查」结果写进了 sidecar 却不显示(用户实测卡住)。
+        // 外部(SSH bridge / MCP)写进助手历史 → 侧栏当场追加,用户不用刷新。
+        // 复用既有事件总线,不新增任何对外服务。
+        if (ev && ev.kind === 'assistant-history') {
+          try { if (window.RC && RC.assistant && RC.assistant.onHistoryEvent) RC.assistant.onHistoryEvent(ev); } catch (_) {}
+          return;
+        }
         if (ev && ev.kind === 'text' && ev.file === FILE_REL) {
           try { if (window.__upRerender) window.__upRerender(ev.uid); } catch (_) {}
           return;
@@ -470,4 +487,3 @@ window.inkClearPage = () => {
   _inkPushUndo(pw); pw.__inkStrokes = []; _ink.lastPw = pw;
   _inkRedraw(pw); _inkScheduleSave(pw, parseInt(pw.dataset.pageNum));
 };
-

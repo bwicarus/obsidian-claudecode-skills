@@ -14,6 +14,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import tempfile
 import urllib.error
 import urllib.request
@@ -136,6 +137,47 @@ def _strip_cwd() -> str:
 
 
 _STRIP_CWD = _strip_cwd()
+
+
+def _verified_codex_capability(model: str) -> dict:
+    """Resolve one model against the reader's verified live Codex catalog.
+
+    A persisted ``fast`` bit is not a capability proof.  The execution adapter
+    rechecks the canonical assistant catalog immediately before constructing
+    CLI flags; a standalone client without that catalog therefore fails closed.
+    """
+    try:
+        import assistant as reader_assistant  # type: ignore
+    except ImportError:
+        server_dir = Path(__file__).resolve().parents[2] / "_server_deploy"
+        if server_dir.is_dir() and str(server_dir) not in sys.path:
+            sys.path.insert(0, str(server_dir))
+        try:
+            import assistant as reader_assistant  # type: ignore
+        except ImportError as error:
+            raise RuntimeError(
+                "无法读取 Codex 实时模型目录，普通截图问答已停止调用"
+            ) from error
+    try:
+        capability = dict(reader_assistant._codex_capability(model) or {})
+    except Exception as error:
+        raise RuntimeError(
+            "无法验证 Codex 型号能力，普通截图问答已停止调用"
+        ) from error
+    selectable = (
+        capability.get("selectable") is True
+        or (
+            "selectable" not in capability
+            and capability.get("available") is True
+        )
+    )
+    if not selectable:
+        reason = str(
+            capability.get("reason")
+            or "当前 Codex 运行环境没有验证这个型号"
+        )
+        raise RuntimeError(f"Codex 型号不可用：{model}（{reason}）")
+    return capability
 
 
 # ── Gemini 兜底 ────────────────────────────────────────────────────
@@ -355,6 +397,30 @@ class CodexCli(CliBackend):
     name = "codex_cli"
     default_command = "codex"
 
+    def _model_runtime_flags(self) -> list[str]:
+        """Build only live-catalog-verified model/depth/priority flags."""
+        model = str(self.settings.get("model") or "").strip()
+        effort = str(self.settings.get("effort") or "").strip().lower()
+        fast = self.settings.get("fast") is True
+        if not model:
+            raise RuntimeError(
+                "未选择经过实时目录验证的 Codex 型号，已停止普通截图问答调用"
+            )
+        capability = _verified_codex_capability(model)
+        if effort not in (capability.get("depths") or []):
+            raise RuntimeError(
+                f"Codex 型号 {model} 不支持思考深度：{effort or '(空)'}"
+            )
+        flags = [
+            "-m", model,
+            "-c", f'model_reasoning_effort="{effort}"',
+        ]
+        if fast:
+            if capability.get("priority") is not True:
+                raise RuntimeError(f"Codex 型号 {model} 不支持 priority/Fast")
+            flags += ["-c", 'service_tier="priority"']
+        return flags
+
     def chat(self, messages: list[dict], image: bytes | None = None) -> str:
         cmd = self._command()
         image_path = _spool_image(image) if image else None
@@ -363,9 +429,10 @@ class CodexCli(CliBackend):
         try:
             prompt = _flatten_messages(messages)  # codex 用 --image 单独传图，不写进 prompt
             base = ["cmd.exe", "/d", "/c", cmd] if cmd.lower().endswith((".cmd", ".bat")) else [cmd]
-            full = base + ["exec", "--sandbox", "read-only",
-                           "--skip-git-repo-check", "--color", "never",
-                           "--output-last-message", str(out_file)]
+            full = base + ["exec", "--skip-git-repo-check", "--color", "never",
+                           "-c", 'sandbox_mode="read-only"',
+                           "--output-last-message", str(out_file),
+                           *self._model_runtime_flags()]
             if image_path:
                 full += ["--image", image_path]
             full += ["-"]   # 从 stdin 读 prompt

@@ -1,6 +1,8 @@
 <!DOCTYPE html>
 <html lang="zh">
 <head>
+<meta name="bw-reader-app" content="{{ reader_app|default('epub', true) }}">
+<meta name="bw-reader-route" content="{{ reader_route|default('epub', true) }}">
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
 <title>{% if is_fav %}{{ file_name }}{% else %}{{ file_name }} · EPUB{% endif %}</title>
@@ -173,8 +175,35 @@
 <!-- 统一控制层(window.RC):PDF/EPUB 共用。本次只接 rc-core + rc-md(零底座耦合),PDF 阅读器不受影响 -->
 <script src="/static/pdf/rc-ink.js?v={{ reader_js_v }}"></script><!-- 墨迹共享核心(epub-html/rc-stickynote 依赖) -->
 <script src="/static/pdf/rc-core.js?v={{ reader_js_v }}"></script>
+<script src="/static/reader-runtime/account-context.js?v={{ reader_js_v }}"></script>
+<script src="/static/reader-runtime/interaction-policy.js?v={{ reader_js_v }}"></script>
+<script src="/static/reader-runtime/document-host.js?v={{ reader_js_v }}"></script>
+<script src="/static/reader-runtime/context-selection-registry.js?v={{ reader_js_v }}"></script>
+<script src="/static/reader-runtime/data-store.js?v={{ reader_js_v }}"></script>
+<script src="/static/reader-runtime/indexeddb-store.js?v={{ reader_js_v }}"></script>
+<script src="/static/reader-runtime/data-registry.js?v={{ reader_js_v }}"></script>
+<script src="/static/reader-runtime/sync-owner-lease.js?v={{ reader_js_v }}"></script>
+<script src="/static/reader-runtime/sync-gateway.js?v={{ reader_js_v }}"></script>
+<script src="/static/reader-runtime/server-sync-transport.js?v={{ reader_js_v }}"></script>
+<script src="/static/reader-runtime/direct-sync-protocol.js?v={{ reader_js_v }}"></script>
+<script src="/static/reader-runtime/direct-sync-signal-transport.js?v={{ reader_js_v }}"></script>
+<script src="/static/reader-runtime/sync-coordinator.js?v={{ reader_js_v }}"></script>
+<script src="/static/reader-runtime/sync-runtime.js?v={{ reader_js_v }}"></script>
+<script src="/static/reader-runtime/sync-conflict-control.js?v={{ reader_js_v }}"></script>
+<script src="/static/reader-runtime/direct-sync-host.js?v={{ reader_js_v }}"></script>
+<script src="/static/reader-runtime/direct-sync-leader.js?v={{ reader_js_v }}"></script>
+<script src="/static/reader-runtime/vocabulary-state.js?v={{ reader_js_v }}"></script>
+<script src="/static/reader-runtime/computer-voice-webrtc.js?v={{ reader_js_v }}"></script>
+<script src="/static/reader-runtime/preference-store.js?v={{ reader_js_v }}"></script>
+<script src="/static/reader-runtime/storage-router.js?v={{ reader_js_v }}"></script>
+<script src="/static/reader-runtime/runtime-selector.js?v={{ reader_js_v }}"></script>
+<script src="/static/reader-runtime/legacy-rc-bridge.js?v={{ reader_js_v }}"></script>
+<script src="/static/reader-runtime/pwa-service-bridge.js?v={{ reader_js_v }}"></script>
+<script src="/static/reader-runtime/pwa-runtime.js?v={{ reader_js_v }}"></script>
+<script src="/static/pdf/rc-ui.js?v={{ reader_js_v }}"></script>
 <script src="/static/pdf/rc-outbox.js?v={{ reader_js_v }}"></script>
 <script src="/static/pdf/rc-flashcard.js?v={{ reader_js_v }}"></script>
+<script src="/static/pdf/rc-review.js?v={{ reader_js_v }}"></script>
 <script src="/static/pdf/rc-md.js?v={{ reader_js_v }}"></script>
 <script src="/static/pdf/rc-figures.js?v={{ reader_js_v }}"></script>
 <script src="/static/pdf/rc-highlight.js?v={{ reader_js_v }}"></script>
@@ -189,6 +218,7 @@
 <script src="/static/pdf/rc-toolchip.js?v={{ reader_js_v }}"></script><!-- 工具指示器 v2(圆/长条/方块;选中全局广播)——须在 rc-voicecall 之前 -->
 <script src="/static/pdf/rc-turncard.js?v={{ reader_js_v }}"></script><!-- 141:轮次容器(卡片=容器+多次注入,实时与历史回放同一渲染器);设计见 references/adr-turn-container.md -->
 <script src="/static/pdf/rc-voicectx.js?v={{ reader_js_v }}"></script><!-- 统一注入端口 -->
+<script src="/static/pdf/rc-computer-voice.js?v={{ reader_js_v }}"></script><!-- 电脑客户端桥接器 -->
 <script src="/static/pdf/rc-voicecall.js?v={{ reader_js_v }}"></script><!-- ㉟ 语音通话(唯一侧栏:与 PDF 同一份,上下文经 RC.adapter) -->
 <script src="/static/pdf/rc-grammar.js?v={{ reader_js_v }}"></script>
 <script src="/static/pdf/rc-stickynote.js?v={{ reader_js_v }}"></script>
@@ -196,6 +226,8 @@
 <script src="/static/pdf/rc-video.js?v={{ reader_js_v }}"></script><!-- 助手搜视频结果卡 -->
 <script src="/static/pdf/rc-videoplayer.js?v={{ reader_js_v }}"></script><!-- 统一浮动视频播放器浮层(字幕/控制/拖动缩放) -->
 <script src="/static/pdf/rc-userpages.js?v={{ reader_js_v }}"></script>
+<script src="/static/reader-runtime/book-host.js?v={{ reader_js_v }}"></script>
 <script src="/static/pdf/epub-html.js?v={{ reader_js_v }}"></script>
+<script type="module" src="/static/pdf/pwa-extension-bridge.js?v={{ reader_js_v }}"></script>
 </body>
 </html>

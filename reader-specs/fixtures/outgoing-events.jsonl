@@ -1,0 +1,9 @@
+{"v": 1, "seq": 1, "type": "page.context", "event": "page.context", "ts": 1750000000, "id": "<12hex>", "stable": true, "book_id": "资源/books/示例.pdf", "file": "资源/books/示例.pdf", "page": 12, "title": "示例书", "kind": "pdf", "text_available": true, "page_context": {"text": "这一页的完整文字层……", "text_available": true, "text_source": "pdf:字符层(已剔噪)", "fallback_reason": null, "truncated": false, "reason": "dwell", "visual": {"page_image": "/pdf/api/page-image?file=%E8%B5%84%E6%BA%90/books/%E7%A4%BA%E4%BE%8B.pdf&page=12", "has_ink": false}}}
+{"v":1,"type":"focus","action":"set","kind":"text","ref":{"file":"资源/books/示例.pdf","page":12,"text":"被选中的一段"},"seq":1}
+{"v":1,"type":"focus","action":"replace","kind":"card","ref":{"id":"card:c1","cid":"c1","label":"天气·东京","brief":"12-18°C 小雨"},"seq":2}
+{"v":1,"type":"focus","action":"cancel","cancelledObject":{"kind":"card","ref":{"id":"card:c1","cid":"c1","label":"天气·东京","brief":"12-18°C 小雨"}},"seq":3}
+{"v":1,"type":"drawing","state":"pending","file":"资源/books/示例.pdf","page":12,"drawingRevision":null,"ref":null}
+{"v":1,"type":"drawing","state":"stable","file":"资源/books/示例.pdf","page":12,"drawingRevision":"dr_<16hex>","ref":{"kind":"drawing","file":"资源/books/示例.pdf","page":"12","revision":"dr_<16hex>"}}
+{"v":1,"type":"focus","action":"set","kind":"drawing","ref":{"file":"资源/books/示例.pdf","page":12,"drawingRevision":"dr_<16hex>","region":null},"seq":4}
+{"v":1,"type":"command","mode":"independent","correlation":"c-ok-1","ok":true,"emitsEvent":false}
+{"v":1,"type":"command-failed","correlation":"c-fail-1","commandId":"cmd_<12hex>","taskId":"vt-1","step":0,"retryable":true,"error":"RuntimeError: 底层不可用"}

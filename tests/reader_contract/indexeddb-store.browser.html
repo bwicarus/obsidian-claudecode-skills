@@ -1,0 +1,1145 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>BW Reader IndexedDB DataStore browser contract</title>
+  <style>
+    body { font: 16px/1.5 system-ui, sans-serif; margin: 2rem; color: #172033; }
+    #result[data-state="passed"] { color: #087f5b; }
+    #result[data-state="failed"] { color: #c92a2a; }
+    pre { padding: 1rem; background: #f4f6f8; white-space: pre-wrap; }
+  </style>
+</head>
+<body>
+  <h1>IndexedDB DataStore 浏览器契约测试</h1>
+  <p id="result">运行中……</p>
+  <pre id="log"></pre>
+  <script src="../../_server_deploy/static/reader-runtime/data-store.js"></script>
+  <script src="../../_server_deploy/static/reader-runtime/data-registry.js"></script>
+  <script src="../../_server_deploy/static/reader-runtime/indexeddb-store.js"></script>
+  <script src="../../_server_deploy/static/reader-runtime/document-note-repository.js"></script>
+  <script>
+    (async function () {
+      "use strict";
+      const output = document.querySelector("#log");
+      const result = document.querySelector("#result");
+      const dataApi = window.BWReaderRuntime.dataStore;
+      const api = window.BWReaderRuntime.indexedDBStore;
+      const registryApi = window.BWReaderRuntime.dataRegistry;
+      const documentNoteApi = window.BWReaderRuntime.documentNoteRepository;
+      const databaseName = "bw-reader-idb-contract-" + Date.now() + "-" + Math.random();
+      const lines = [];
+      const log = (line) => {
+        lines.push(line);
+        output.textContent = lines.join("\n");
+      };
+      const assert = (condition, message) => {
+        if (!condition) throw new Error(message);
+        log("✓ " + message);
+      };
+      const deleteDatabase = () => new Promise((resolve, reject) => {
+        const request = indexedDB.deleteDatabase(databaseName);
+        request.onsuccess = () => resolve();
+        request.onerror = () => reject(request.error);
+        request.onblocked = () => reject(new Error("测试数据库删除被阻塞"));
+      });
+      let storeA;
+      let storeB;
+      let legacyMigrationStore;
+      let migrationStore;
+      try {
+        storeA = api.createIndexedDBDataStore({
+          name: databaseName,
+          deviceId: "browser-a",
+          maxJournal: 100,
+          broadcast: false,
+          causalCollections: ["user-settings"],
+        });
+        storeB = api.createIndexedDBDataStore({
+          name: databaseName,
+          deviceId: "browser-b",
+          maxJournal: 100,
+          broadcast: false,
+          causalCollections: ["user-settings"],
+        });
+        assert(api.DataStoreError === dataApi.DataStoreError &&
+          api.ConflictError === dataApi.ConflictError &&
+          api.assertJSON === dataApi.assertDataValue,
+          "IndexedDB 复用 data-store/1 的唯一值与错误规范");
+        const originalInstanceEpoch = await storeA.instanceEpoch();
+        assert(
+          /^data-store-instance-v1-[a-f0-9]{32}$/.test(originalInstanceEpoch) &&
+          await storeB.instanceEpoch() === originalInstanceEpoch,
+          "同一 IndexedDB 的并发 store 共享稳定实例代次",
+        );
+
+        const race = await Promise.allSettled([
+          storeA.put("cards", { id: "race", value: "A" }, { ifRev: 0, mutationId: "race-a" }),
+          storeB.put("cards", { id: "race", value: "B" }, { ifRev: 0, mutationId: "race-b" }),
+        ]);
+        assert(race.filter((entry) => entry.status === "fulfilled").length === 1,
+          "两个实例并发 ifRev 写入时只有一个提交");
+        const rejected = race.find((entry) => entry.status === "rejected");
+        assert(rejected && rejected.reason.code === "BW_DATA_CONFLICT",
+          "并发失败方返回明确版本冲突");
+
+        const original = await storeA.put(
+          "cards",
+          { id: "idem", value: 1 },
+          { mutationId: "same-mutation" },
+        );
+        const replay = await storeB.put(
+          "cards",
+          { id: "idem", value: 999 },
+          { mutationId: "same-mutation" },
+        );
+        assert(JSON.stringify(original) === JSON.stringify(replay),
+          "跨实例 mutationId 重放返回首次结果");
+        assert((await storeA.get("cards", "idem")).value.value === 1,
+          "幂等重放没有覆盖首次业务内容");
+
+        const causalBase = await storeA.put(
+          "user-settings",
+          { id: "causal-shared", value: "base" },
+          { mutationId: "idb-causal-base" },
+        );
+        assert(causalBase.causal.contract === "record-parent-state/1" &&
+          causalBase.causal.parent === null,
+          "IndexedDB 同步 collection 的首次本地写入生成 absent 父状态");
+        const causalChild = {
+          ...causalBase,
+          rev: 1,
+          updatedAt: causalBase.updatedAt + 1,
+          updatedBy: "remote-a",
+          value: { id: "causal-shared", value: "child" },
+          causal: dataApi.causalProofForParent(causalBase),
+        };
+        const causalGrandchild = {
+          ...causalChild,
+          rev: 1,
+          updatedAt: causalChild.updatedAt + 1,
+          value: { id: "causal-shared", value: "grandchild" },
+          causal: dataApi.causalProofForParent(causalChild),
+        };
+        const orderedCausal = await storeB.applyChanges([
+          {
+            collection: "user-settings",
+            mutationId: "idb-causal-child",
+            record: causalChild,
+          },
+          {
+            collection: "user-settings",
+            mutationId: "idb-causal-grandchild",
+            record: causalGrandchild,
+          },
+        ]);
+        assert(orderedCausal.applied.length === 2 &&
+          orderedCausal.applied[0].rev === 2 &&
+          orderedCausal.applied[1].rev === 3,
+          "IndexedDB 同批顺序子项按父业务状态应用并单调化 rev");
+
+        const offlineBranch = {
+          ...causalChild,
+          rev: 999,
+          updatedBy: "remote-b",
+          value: { id: "causal-shared", value: "branch" },
+        };
+        const missingProof = { ...offlineBranch };
+        delete missingProof.causal;
+        const causalConflicts = await storeA.applyChanges([
+          {
+            collection: "user-settings",
+            mutationId: "idb-causal-branch",
+            record: offlineBranch,
+          },
+          {
+            collection: "user-settings",
+            mutationId: "idb-causal-missing",
+            record: missingProof,
+          },
+        ]);
+        assert(causalConflicts.conflicts.length === 2 &&
+          causalConflicts.conflicts[0].mutationId === "idb-causal-branch" &&
+          causalConflicts.conflicts[0].reason === "causal-parent-mismatch" &&
+          causalConflicts.conflicts[1].reason === "causal-proof-missing",
+          "IndexedDB 更高 rev 分支与缺失 proof 均显式冲突");
+
+        const convergedHead = await storeA.get("user-settings", "causal-shared");
+        const higherSame = {
+          ...convergedHead,
+          rev: 10,
+          updatedAt: convergedHead.updatedAt + 1,
+          updatedBy: "remote-converged",
+        };
+        delete higherSame.causal;
+        const converged = await storeB.applyChanges([{
+          collection: "user-settings",
+          mutationId: "idb-causal-same-higher",
+          record: higherSame,
+        }]);
+        assert(converged.applied[0].rev === 10,
+          "IndexedDB 同业务更高 rev 成为共同元数据基线");
+        const causalNext = await storeA.put(
+          "user-settings",
+          { id: "causal-shared", value: "next" },
+          { mutationId: "idb-causal-next" },
+        );
+        assert(causalNext.rev === 11 &&
+          causalNext.causal.parent.deleted === false &&
+          causalNext.causal.parent.value.value === "grandchild",
+          "同业务 rev 收敛后下一次本地编辑使用正确父业务状态");
+
+        const causalTombstoneLive = await storeA.put(
+          "user-settings",
+          { id: "causal-tombstone", value: "live" },
+          { mutationId: "idb-causal-tombstone-live" },
+        );
+        const causalTombstone = await storeB.remove(
+          "user-settings",
+          causalTombstoneLive.id,
+          {
+            ifRev: causalTombstoneLive.rev,
+            mutationId: "idb-causal-tombstone-remove",
+          },
+        );
+        const causalLinearChild = {
+          ...causalTombstone,
+          rev: causalTombstone.rev + 1,
+          updatedAt: causalTombstone.updatedAt + 1,
+          updatedBy: "remote-linear",
+          deleted: false,
+          value: {
+            id: causalTombstoneLive.id,
+            value: "returned-linearly",
+          },
+          causal: dataApi.causalProofForParent(causalTombstone),
+        };
+        const causalMissingParent = { ...causalLinearChild };
+        delete causalMissingParent.causal;
+        const causalWrongParent = {
+          ...causalLinearChild,
+          causal: dataApi.causalProofForParent(causalTombstoneLive),
+        };
+        const causalTombstoneResult = await storeA.applyChanges([
+          {
+            collection: "user-settings",
+            mutationId: "idb-causal-tombstone-missing-parent",
+            record: causalMissingParent,
+          },
+          {
+            collection: "user-settings",
+            mutationId: "idb-causal-tombstone-wrong-parent",
+            record: causalWrongParent,
+          },
+          {
+            collection: "user-settings",
+            mutationId: "idb-causal-tombstone-linear-child",
+            record: causalLinearChild,
+          },
+        ], { tombstoneDominates: true });
+        assert(causalTombstoneResult.conflicts.length === 2 &&
+          causalTombstoneResult.conflicts[0].mutationId ===
+            "idb-causal-tombstone-missing-parent" &&
+          causalTombstoneResult.conflicts[0].reason === "tombstone-dominates" &&
+          causalTombstoneResult.conflicts[1].mutationId ===
+            "idb-causal-tombstone-wrong-parent" &&
+          causalTombstoneResult.conflicts[1].reason === "tombstone-dominates",
+          "IndexedDB 墓碑后的无父与错误父 put 仍由墓碑支配");
+        assert(causalTombstoneResult.applied.length === 1 &&
+          causalTombstoneResult.applied[0].id === causalTombstoneLive.id,
+          "IndexedDB 接受精确以当前墓碑为父的线性 put");
+        assert((await storeB.get(
+          "user-settings",
+          causalTombstoneLive.id,
+        )).value.value === "returned-linearly",
+          "IndexedDB 墓碑线性续写对并发 store 可见");
+
+        const migrationStartCursor = (await storeA.status()).cursor;
+        legacyMigrationStore = api.createIndexedDBDataStore({
+          name: databaseName,
+          deviceId: "browser-v2-legacy",
+          maxJournal: 100,
+          broadcast: false,
+          causalCollections: [],
+        });
+        const legacyMigrationBase = await legacyMigrationStore.put(
+          "user-settings",
+          { id: "legacy-causal-backfill", mode: "system" },
+          { mutationId: "idb-legacy-causal-base" },
+        );
+        await legacyMigrationStore.put(
+          "user-settings",
+          { id: "legacy-causal-backfill", mode: "dark" },
+          { mutationId: "idb-legacy-causal-child" },
+        );
+        const legacyLocalCursor = migrationStartCursor + 1;
+        assert(!("causal" in legacyMigrationBase) &&
+          !("causal" in (await legacyMigrationStore.changes({
+            after: legacyLocalCursor,
+            limit: 10,
+          })).changes[0].record),
+          "IndexedDB 可识别 v2 时代 proofless journal/head");
+        legacyMigrationStore.close();
+        legacyMigrationStore = null;
+        migrationStore = api.createIndexedDBDataStore({
+          name: databaseName,
+          deviceId: "browser-v3-migration",
+          maxJournal: 100,
+          broadcast: false,
+          causalCollections: ["user-settings"],
+        });
+        const idbMigrationInspection = await migrationStore.migrateLegacyCausal({
+          contract: dataApi.CAUSAL_MIGRATION_CONTRACT,
+          mode: "inspect",
+          after: legacyLocalCursor,
+        });
+        assert(idbMigrationInspection.needsBaseline &&
+          idbMigrationInspection.migrated === 0,
+          "IndexedDB 补铸前只检查、不改 proofless 记录");
+        const idbMigration = await migrationStore.migrateLegacyCausal({
+          contract: dataApi.CAUSAL_MIGRATION_CONTRACT,
+          mode: "apply",
+          after: legacyLocalCursor,
+          baselineComplete: true,
+          baselines: [{
+            collection: "user-settings",
+            record: legacyMigrationBase,
+          }],
+        });
+        assert(idbMigration.migrated === 1 &&
+          idbMigration.throughCursor === migrationStartCursor + 2,
+          "IndexedDB 在单事务内完成一次 legacy causal 补铸");
+        const migrationCursorAfterApply = (await migrationStore.status()).cursor;
+        migrationStore.close();
+        migrationStore = null;
+        migrationStore = api.createIndexedDBDataStore({
+          name: databaseName,
+          deviceId: "browser-v3-migration-reopened",
+          maxJournal: 100,
+          broadcast: false,
+          causalCollections: ["user-settings"],
+        });
+        const persistedMigration = await migrationStore.changes({
+          after: legacyLocalCursor,
+          limit: 10,
+        });
+        assert(persistedMigration.changes[0].record.causal.contract ===
+          "record-parent-state/1" &&
+          persistedMigration.changes[0].record.causal.parent.value.mode ===
+            "system" &&
+          (await migrationStore.get(
+            "user-settings",
+            "legacy-causal-backfill",
+          )).causal.parent.value.mode === "system",
+          "IndexedDB 重开后 journal 与当前 head 保留同一补铸证明");
+        const replayedMigration = await migrationStore.put(
+          "user-settings",
+          { id: "legacy-causal-backfill", mode: "ignored-replay" },
+          { mutationId: "idb-legacy-causal-child" },
+        );
+        const retriedMigration = await migrationStore.migrateLegacyCausal({
+          contract: dataApi.CAUSAL_MIGRATION_CONTRACT,
+          mode: "apply",
+          after: legacyLocalCursor,
+        });
+        assert(replayedMigration.causal.parent.value.mode === "system" &&
+          retriedMigration.migrated === 0 &&
+          (await migrationStore.status()).cursor === migrationCursorAfterApply,
+          "IndexedDB mutation receipt 同步补铸且二次迁移不新增 journal");
+        migrationStore.close();
+        migrationStore = null;
+
+        const prooflessLegacy = {
+          schema: 1,
+          collection: "user-settings",
+          id: "legacy-baseline",
+          rev: 8,
+          updatedAt: 8,
+          updatedBy: "legacy-server",
+          deleted: false,
+          value: { id: "legacy-baseline", value: "remote" },
+        };
+        const legacyBaseline = await storeA.applyChanges([{
+          collection: "user-settings",
+          mutationId: "idb-legacy-baseline",
+          record: prooflessLegacy,
+        }], { snapshotBaseline: true });
+        assert(legacyBaseline.applied.length === 1 &&
+          (await storeB.get("user-settings", "legacy-baseline")).rev === 8,
+          "认证快照可为空 key 安装 proofless 旧 baseline");
+
+        const localLegacyDivergence = await storeA.put(
+          "user-settings",
+          { id: "legacy-divergent", value: "local" },
+          { mutationId: "idb-legacy-divergent-local" },
+        );
+        const divergentLegacySnapshot = {
+          schema: 1,
+          collection: "user-settings",
+          id: "legacy-divergent",
+          rev: 500,
+          updatedAt: 500,
+          updatedBy: "legacy-server",
+          deleted: false,
+          value: { id: "legacy-divergent", value: "remote" },
+        };
+        const legacyDivergence = await storeB.applyChanges([{
+          collection: "user-settings",
+          mutationId: "idb-legacy-divergent-remote",
+          record: divergentLegacySnapshot,
+        }], { snapshotBaseline: true });
+        assert(legacyDivergence.applied.length === 0 &&
+          legacyDivergence.conflicts[0].reason === "causal-proof-missing" &&
+          (await storeA.get("user-settings", "legacy-divergent")).rev ===
+            localLegacyDivergence.rev &&
+          (await storeA.get("user-settings", "legacy-divergent")).value.value === "local",
+          "proofless 快照不能覆盖已有的本地分歧状态");
+
+        const maximumRevision = {
+          schema: 1,
+          collection: "user-settings",
+          id: "maximum-revision",
+          rev: Number.MAX_SAFE_INTEGER,
+          updatedAt: Number.MAX_SAFE_INTEGER,
+          updatedBy: "legacy-server",
+          deleted: false,
+          value: { id: "maximum-revision", value: "maximum" },
+        };
+        await storeA.applyChanges([{
+          collection: "user-settings",
+          mutationId: "idb-maximum-revision-seed",
+          record: maximumRevision,
+        }], { snapshotBaseline: true });
+        const overflowError = await storeB.put(
+          "user-settings",
+          { id: "maximum-revision", value: "overflow" },
+          { mutationId: "idb-maximum-revision-local" },
+        ).then(
+          () => null,
+          (error) => error,
+        );
+        assert(overflowError && overflowError.code === "BW_DATA_REV_OVERFLOW" &&
+          (await storeA.get("user-settings", "maximum-revision")).rev ===
+            Number.MAX_SAFE_INTEGER,
+          "IndexedDB 本地写在 revision 安全整数上限处失败关闭且不改记录");
+        const remoteOverflow = {
+          ...maximumRevision,
+          value: { id: "maximum-revision", value: "remote-overflow" },
+          causal: dataApi.causalProofForParent(maximumRevision),
+        };
+        const remoteOverflowResult = await storeA.applyChanges([{
+          collection: "user-settings",
+          mutationId: "idb-maximum-revision-remote",
+          record: remoteOverflow,
+        }]);
+        assert(remoteOverflowResult.applied.length === 0 &&
+          remoteOverflowResult.conflicts[0].reason === "causal-revision-overflow" &&
+          (await storeB.get("user-settings", "maximum-revision")).value.value === "maximum",
+          "IndexedDB 远端因果更新在 revision 上限处返回显式冲突");
+
+        const live = await storeA.put(
+          "cards",
+          { id: "tombstone", value: "live" },
+          { mutationId: "tombstone-create" },
+        );
+        const tombstone = await storeB.remove(
+          "cards",
+          "tombstone",
+          { ifRev: live.rev, mutationId: "tombstone-remove" },
+        );
+        assert(tombstone.deleted && (await storeA.get("cards", "tombstone")) === null,
+          "删除保存墓碑并从普通 get 隐藏");
+        const stale = await storeA.applyChanges([{
+          collection: "cards",
+          mutationId: "stale-remote",
+          record: live,
+        }]);
+        assert(stale.applied.length === 0 && stale.conflicts[0].reason === "stale-incoming",
+          "旧远端记录不能复活墓碑");
+        assert((await storeA.get("cards", "tombstone", { includeDeleted: true })).deleted,
+          "includeDeleted 可以读取墓碑");
+
+        const semanticLive = {
+          schema: 1,
+          collection: "cards",
+          id: "semantic-live",
+          rev: 5,
+          updatedAt: 100,
+          updatedBy: "browser-a",
+          deleted: false,
+          value: {
+            id: "semantic-live",
+            nested: { alpha: 1, beta: 2 },
+            tags: ["one", "two"],
+          },
+        };
+        await storeA.applyChanges([{
+          collection: "cards",
+          mutationId: "semantic-live-seed",
+          record: semanticLive,
+        }]);
+        const semanticEquivalent = await storeB.applyChanges([{
+          collection: "cards",
+          mutationId: "semantic-live-equivalent",
+          record: {
+            updatedBy: "browser-b",
+            deleted: false,
+            id: "semantic-live",
+            collection: "cards",
+            updatedAt: 999,
+            rev: 5,
+            schema: 1,
+            value: {
+              tags: ["one", "two"],
+              nested: { beta: 2, alpha: 1 },
+              id: "semantic-live",
+            },
+          },
+        }]);
+        assert(semanticEquivalent.applied.length === 0 &&
+          semanticEquivalent.conflicts.length === 0,
+          "IndexedDB 忽略记录传输元数据与对象键顺序");
+        const semanticConflict = await storeA.applyChanges([{
+          collection: "cards",
+          mutationId: "semantic-live-different",
+          record: {
+            ...semanticLive,
+            value: {
+              id: "semantic-live",
+              nested: { alpha: 1, beta: 3 },
+              tags: ["one", "two"],
+            },
+          },
+        }]);
+        assert(semanticConflict.applied.length === 0 &&
+          semanticConflict.conflicts[0].reason === "same-rev-different-value",
+          "IndexedDB 仍保留真实业务值冲突");
+        const semanticHigher = await storeB.applyChanges([{
+          collection: "cards",
+          mutationId: "semantic-live-higher",
+          record: {
+            ...semanticLive,
+            rev: 6,
+            updatedAt: 1000,
+            updatedBy: "browser-b",
+          },
+        }]);
+        assert(semanticHigher.applied.length === 1 &&
+          (await storeA.get("cards", "semantic-live", { includeDeleted: true })).rev === 6,
+          "IndexedDB 对相同业务值的更高 revision 仍推进版本");
+
+        const semanticTombstone = {
+          ...semanticLive,
+          id: "semantic-deleted",
+          rev: 4,
+          deleted: true,
+          value: { id: "semantic-deleted", retained: "browser-a" },
+        };
+        await storeA.applyChanges([{
+          collection: "cards",
+          mutationId: "semantic-tombstone-seed",
+          record: semanticTombstone,
+        }]);
+        const equivalentTombstone = await storeB.applyChanges([{
+          collection: "cards",
+          mutationId: "semantic-tombstone-equivalent",
+          record: {
+            ...semanticTombstone,
+            updatedAt: 5000,
+            updatedBy: "browser-b",
+            value: { id: "semantic-deleted", retained: "other-copy" },
+          },
+        }]);
+        assert(equivalentTombstone.applied.length === 0 &&
+          equivalentTombstone.conflicts.length === 0,
+          "IndexedDB 将同一编号的两个墓碑视为相同业务状态");
+
+        const defaultLive = await storeA.put(
+          "cards",
+          { id: "default-revive", value: "live" },
+          { mutationId: "default-revive-create" },
+        );
+        const defaultRemoved = await storeB.remove(
+          "cards",
+          defaultLive.id,
+          { ifRev: defaultLive.rev, mutationId: "default-revive-remove" },
+        );
+        const defaultRevive = {
+          ...defaultRemoved,
+          rev: defaultRemoved.rev + 10,
+          updatedAt: defaultRemoved.updatedAt + 10,
+          updatedBy: "remote",
+          deleted: false,
+          value: { id: defaultLive.id, value: "remote-active" },
+        };
+        const defaultReviveResult = await storeA.applyChanges([{
+          collection: "cards",
+          mutationId: "default-revive-remote",
+          record: defaultRevive,
+        }]);
+        assert(defaultReviveResult.applied.length === 1 &&
+          (await storeB.get("cards", defaultLive.id)).value.value === "remote-active",
+          "未启用策略时 IndexedDB 保持更高 revision 胜出的兼容行为");
+
+        const guardedLive = await storeA.put(
+          "cards",
+          { id: "guarded-revive", value: "live" },
+          { mutationId: "guarded-revive-create" },
+        );
+        const guardedRemoved = await storeB.remove(
+          "cards",
+          guardedLive.id,
+          { ifRev: guardedLive.rev, mutationId: "guarded-revive-remove" },
+        );
+        const guardedRevive = {
+          ...guardedRemoved,
+          rev: guardedRemoved.rev + 10,
+          updatedAt: guardedRemoved.updatedAt + 10,
+          updatedBy: "remote",
+          deleted: false,
+          value: { id: guardedLive.id, value: "must-not-revive" },
+        };
+        const guardedResult = await storeA.applyChanges([{
+          collection: "cards",
+          mutationId: "guarded-revive-remote",
+          record: guardedRevive,
+        }], { tombstoneDominates: true });
+        assert(guardedResult.applied.length === 0 &&
+          guardedResult.conflicts.length === 1 &&
+          guardedResult.conflicts[0].reason === "tombstone-dominates" &&
+          (await storeB.get("cards", guardedLive.id, { includeDeleted: true })).deleted,
+          "跨 IndexedDB 实例在同一原子事务中拒绝 tombstone 后的活动记录");
+
+        const batchLive = await storeA.put(
+          "cards",
+          { id: "same-batch", value: "live" },
+          { mutationId: "same-batch-create" },
+        );
+        const batchTombstone = {
+          ...batchLive,
+          rev: batchLive.rev + 1,
+          updatedAt: batchLive.updatedAt + 1,
+          updatedBy: "remote",
+          deleted: true,
+        };
+        const batchRevive = {
+          ...batchLive,
+          rev: batchLive.rev + 2,
+          updatedAt: batchLive.updatedAt + 2,
+          updatedBy: "remote",
+          deleted: false,
+          value: { id: batchLive.id, value: "same-batch-revive" },
+        };
+        const guardedBatch = await storeA.applyChanges([
+          {
+            collection: "cards",
+            mutationId: "same-batch-remove",
+            record: batchTombstone,
+          },
+          {
+            collection: "cards",
+            mutationId: "same-batch-revive",
+            record: batchRevive,
+          },
+        ], { tombstoneDominates: true });
+        const batchFinal = await storeB.get(
+          "cards",
+          batchLive.id,
+          { includeDeleted: true },
+        );
+        assert(guardedBatch.applied.length === 1 &&
+          guardedBatch.conflicts.length === 1 &&
+          guardedBatch.conflicts[0].reason === "tombstone-dominates" &&
+          batchFinal.deleted && batchFinal.rev === batchTombstone.rev,
+          "同一 IndexedDB applyChanges 事务中的 delete→active 不能复活");
+
+        await storeA.batch([
+          { collection: "notes", value: { id: "page-1", n: 1 }, mutationId: "page-1" },
+          { collection: "notes", value: { id: "page-2", n: 2 }, mutationId: "page-2" },
+          { collection: "notes", value: { id: "page-3", n: 3 }, mutationId: "page-3" },
+          { collection: "notes", value: { id: "page-4", n: 4 }, mutationId: "page-4" },
+          { collection: "notes", value: { id: "page-5", n: 5 }, mutationId: "page-5" },
+        ]);
+        const firstPage = await storeB.list("notes", { offset: 0, limit: 2 });
+        const secondPage = await storeB.list("notes", { offset: 2, limit: 2 });
+        assert(firstPage.length === 2 && secondPage.length === 2 &&
+          firstPage[1].id !== secondPage[0].id, "记录 list 支持稳定分页");
+        const idPage1 = await storeB.list("notes", {
+          orderBy: "id", afterId: "", limit: 2
+        });
+        await storeA.put(
+          "notes",
+          { id: "page-3", n: 33 },
+          { mutationId: "page-3-updated" }
+        );
+        const idPage2 = await storeB.list("notes", {
+          orderBy: "id", afterId: idPage1[idPage1.length - 1].id, limit: 3
+        });
+        assert(
+          idPage1.concat(idPage2).map((record) => record.id).join(",") ===
+            "page-1,page-2,page-3,page-4,page-5" &&
+          idPage2[0].value.n === 33,
+          "记录 list 的 id keyset 分页不受 updatedAt 更新影响"
+        );
+        const changePage = await storeA.changes({ after: 0, limit: 2 });
+        assert(changePage.changes.length === 2 && changePage.hasMore &&
+          changePage.nextCursor === changePage.changes[1].cursor &&
+          changePage.oldestCursor === 1 && changePage.resetRequired === false,
+          "journal changes 支持 cursor 分页");
+        const nextChanges = await storeA.changes({
+          after: changePage.nextCursor,
+          limit: 2,
+        });
+        assert(nextChanges.changes[0].cursor > changePage.changes[1].cursor,
+          "下一页从上一页 cursor 之后开始");
+        const futureChanges = await storeA.changes({ after: changePage.cursor + 100 });
+        assert(futureChanges.resetRequired && !futureChanges.hasMore,
+          "超前 cursor 显式要求调用方重置");
+
+        const imported = await storeA.applyChanges([{
+          collection: "notes",
+          mutationId: "journal-import",
+          record: {
+            schema: 1,
+            collection: "notes",
+            id: "imported",
+            rev: 1,
+            updatedAt: Date.now(),
+            updatedBy: "import-source",
+            deleted: false,
+            value: { id: "imported", n: 6 },
+          },
+        }], { journal: true });
+        assert(imported.applied[0].cursor > 0,
+          "applyChanges({ journal: true }) 为真正导入项分配本地 cursor");
+        const importedJournal = await storeA.changes({ after: imported.applied[0].cursor - 1 });
+        assert(importedJournal.changes.some((change) =>
+          change.record.id === "imported" && change.imported === true && change.remote === false),
+          "需再同步的本地导入被写入 journal");
+
+        await storeA.put("atomic", { id: "existing", n: 1 }, { mutationId: "atomic-seed" });
+        const before = await storeA.list("atomic");
+        let atomicConflict = null;
+        try {
+          await storeA.batch([
+            { collection: "atomic", value: { id: "would-rollback", n: 2 }, mutationId: "atomic-first" },
+            {
+              collection: "atomic",
+              value: { id: "existing", n: 3 },
+              ifRev: 0,
+              mutationId: "atomic-conflict",
+            },
+          ]);
+        } catch (error) {
+          atomicConflict = error;
+        }
+        assert(atomicConflict && atomicConflict.code === "BW_DATA_CONFLICT",
+          "batch 中的冲突会使 transaction 失败");
+        assert(atomicConflict.details.expectedRev === 0 &&
+          atomicConflict.details.actualRev === 1,
+          "IndexedDB 冲突返回与共享规范一致的 revision 详情");
+        assert((await storeA.list("atomic")).length === before.length,
+          "失败的 batch 原子回滚此前写入");
+
+        const beforeInvalidBatch = await storeA.changes({ after: 0 });
+        const invalidBatchError = await storeA.batch([
+          {
+            collection: "atomic",
+            value: { id: "invalid-would-rollback", n: 4 },
+            mutationId: "invalid-batch-first",
+          },
+          {
+            collection: "atomic",
+            value: { id: "invalid-value", payload: undefined },
+            mutationId: "invalid-batch-second",
+          },
+        ]).then(() => null, (error) => error);
+        assert(invalidBatchError && invalidBatchError.code === "BW_DATA_INVALID",
+          "batch 在写入前使用共享规范校验全部值");
+        assert((await storeA.get("atomic", "invalid-would-rollback")) === null &&
+          (await storeA.changes({ after: 0 })).cursor === beforeInvalidBatch.cursor,
+          "含非法值的 batch 不留下记录或 journal");
+        const unknownOperation = await storeA.batch([
+          {
+            collection: "atomic",
+            value: { id: "unknown-op-would-rollback", n: 5 },
+            mutationId: "unknown-op-first",
+          },
+          {
+            operation: "erase-everything",
+            collection: "atomic",
+            id: "existing",
+            mutationId: "unknown-op-second",
+          },
+        ]).then(() => null, (error) => error);
+        assert(unknownOperation && unknownOperation.code === "BW_DATA_INVALID" &&
+          unknownOperation.details.operation === "erase-everything" &&
+          (await storeA.get("atomic", "unknown-op-would-rollback")) === null,
+          "IndexedDB 不把未知 batch operation 静默当作 put");
+
+        const circular = { id: "circular" };
+        circular.self = circular;
+        const invalidValues = [
+          ["undefined", { id: "undefined", payload: undefined }, "BW_DATA_INVALID"],
+          ["NaN", { id: "nan", payload: Number.NaN }, "BW_DATA_INVALID"],
+          ["function", { id: "function", payload() {} }, "BW_DATA_INVALID"],
+          ["Date", { id: "date", payload: new Date(0) }, "BW_DATA_INVALID"],
+          ["循环引用", circular, "BW_DATA_INVALID"],
+          ["Blob", { id: "blob", payload: new Blob(["x"]) }, "BW_DATA_BINARY"],
+          ["ArrayBuffer", { id: "buffer", payload: new ArrayBuffer(4) }, "BW_DATA_BINARY"],
+        ];
+        for (const [label, value, code] of invalidValues) {
+          const error = await storeA.put(
+            "invalid",
+            value,
+            { mutationId: "invalid-" + label },
+          ).then(() => null, (caught) => caught);
+          assert(error && error.code === code,
+            "IndexedDB 以 " + code + " 拒绝 " + label);
+        }
+        assert((await storeA.list("invalid")).length === 0,
+          "IndexedDB 不把非法值交给 structured clone 静默保存");
+        const invalidRemote = await storeA.applyChanges([{
+          collection: "invalid",
+          mutationId: "invalid-remote-undefined",
+          record: {
+            schema: 1,
+            collection: "invalid",
+            id: "remote-undefined",
+            rev: 1,
+            updatedAt: 1,
+            updatedBy: "remote",
+            deleted: false,
+            value: { id: "remote-undefined", payload: undefined },
+          },
+        }]).then(() => null, (error) => error);
+        assert(invalidRemote && invalidRemote.code === "BW_DATA_INVALID" &&
+          (await storeA.get("invalid", "remote-undefined")) === null,
+          "IndexedDB applyChanges 不能绕过共享值规范");
+
+        const validIncomingChange = (suffix) => ({
+          collection: "incoming-contract",
+          mutationId: "incoming-" + suffix,
+          operation: "put",
+          record: {
+            schema: 1,
+            collection: "incoming-contract",
+            id: "record-" + suffix,
+            rev: 1,
+            updatedAt: 1700000000000,
+            updatedBy: "remote-device",
+            deleted: false,
+            value: { id: "record-" + suffix, payload: "valid" },
+          },
+        });
+        const invalidIncomingCases = [
+          ["缺少 schema", (change) => delete change.record.schema, "BW_DATA_SCHEMA"],
+          ["错误 schema", (change) => { change.record.schema = 2; }, "BW_DATA_SCHEMA"],
+          ["缺少 deleted", (change) => delete change.record.deleted, "BW_DATA_INVALID"],
+          ["非布尔 deleted", (change) => { change.record.deleted = 0; }, "BW_DATA_INVALID"],
+          ["collection 不匹配", (change) => {
+            change.record.collection = "other-collection";
+          }, "BW_DATA_INVALID"],
+          ["rev 小于 1", (change) => { change.record.rev = 0; }, "BW_DATA_INVALID"],
+          ["rev 非整数", (change) => { change.record.rev = 1.5; }, "BW_DATA_INVALID"],
+          ["rev 数字字符串", (change) => { change.record.rev = "1"; }, "BW_DATA_INVALID"],
+          ["缺少 value", (change) => delete change.record.value, "BW_DATA_INVALID"],
+          ["非法 JSON value", (change) => {
+            change.record.value = { id: change.record.id, payload: undefined };
+          }, "BW_DATA_INVALID"],
+          ["缺少 updatedAt", (change) => delete change.record.updatedAt, "BW_DATA_INVALID"],
+          ["updatedAt 非数字", (change) => {
+            change.record.updatedAt = "1700000000000";
+          }, "BW_DATA_INVALID"],
+          ["updatedAt 为负数", (change) => { change.record.updatedAt = -1; }, "BW_DATA_INVALID"],
+          ["缺少 updatedBy", (change) => delete change.record.updatedBy, "BW_DATA_INVALID"],
+          ["updatedBy 为空", (change) => { change.record.updatedBy = ""; }, "BW_DATA_INVALID"],
+          ["updatedBy 非字符串", (change) => { change.record.updatedBy = 7; }, "BW_DATA_INVALID"],
+          ["put 与 tombstone 不匹配", (change) => {
+            change.record.deleted = true;
+          }, "BW_DATA_INVALID"],
+          ["remove 与活动记录不匹配", (change) => {
+            change.operation = "remove";
+          }, "BW_DATA_INVALID"],
+          ["未知 operation", (change) => {
+            change.operation = "merge";
+          }, "BW_DATA_INVALID"],
+        ];
+        for (const [index, [label, mutate, code]] of invalidIncomingCases.entries()) {
+          const change = validIncomingChange("invalid-" + index);
+          mutate(change);
+          const error = await storeA.applyChanges([change]).then(
+            () => null,
+            (caught) => caught,
+          );
+          assert(error && error.code === code,
+            "IndexedDB 以 " + code + " 拒绝入站 " + label);
+        }
+        assert((await storeA.list("incoming-contract", { includeDeleted: true })).length === 0,
+          "IndexedDB 入站 envelope 校验失败不留下部分记录");
+
+        const extendedIncoming = validIncomingChange("extended");
+        extendedIncoming.futureChangeField = { version: 2 };
+        extendedIncoming.record.futureRecordField = { retained: true };
+        const extendedIncomingResult = await storeA.applyChanges([extendedIncoming]);
+        assert(extendedIncomingResult.applied.length === 1 &&
+          (await storeB.get("incoming-contract", extendedIncoming.record.id))
+            .futureRecordField.retained === true,
+          "IndexedDB 保留合法 JSON 的未知 record 扩展字段");
+
+        const operationOmitted = validIncomingChange("operation-omitted");
+        delete operationOmitted.operation;
+        const operationOmittedResult = await storeA.applyChanges([operationOmitted]);
+        assert(operationOmittedResult.applied.length === 1,
+          "IndexedDB 保留 data-store/1 内部省略 operation 的兼容入口");
+
+        const revisionSeed = await storeA.put(
+          "revision",
+          { id: "checked", n: 1 },
+          { mutationId: "revision-seed" },
+        );
+        const invalidRevision = await storeA.put(
+          "revision",
+          { id: "checked", n: 2 },
+          { ifRev: Number.NaN, mutationId: "revision-nan" },
+        ).then(() => null, (error) => error);
+        assert(invalidRevision && invalidRevision.code === "BW_DATA_INVALID",
+          "IndexedDB 拒绝非有限 ifRev");
+        const revisionNext = await storeA.put(
+          "revision",
+          { id: "checked", n: 3 },
+          { ifRev: String(revisionSeed.rev), mutationId: "revision-numeric-string" },
+        );
+        assert(revisionNext.rev === revisionSeed.rev + 1,
+          "IndexedDB 保留数字字符串 ifRev 兼容");
+
+        await storeA.batch(Array.from({ length: 101 }, (_, index) => ({
+          collection: "pruning",
+          value: { id: "prune-" + index, index },
+          mutationId: "prune-" + index,
+        })));
+        const pruned = await storeA.changes({ after: 0, limit: 10 });
+        assert(pruned.oldestCursor > 1 && pruned.resetRequired && !pruned.hasMore,
+          "调用方 cursor 落后于已裁剪 journal 时显式要求重置");
+
+        const noteAnchor = (documentId, marker) => ({
+          documentId,
+          kind: "web-dom",
+          revision: 1,
+          data: {
+            selector: "#article-" + marker,
+            relative: { x: 0.25, y: 0.5 },
+          },
+        });
+        const makeNoteRepo = (store, noteId) =>
+          documentNoteApi.createDocumentNoteRepository({
+            store,
+            dataRegistry: registryApi,
+            idFactory: () => noteId,
+          });
+
+        const batchDocumentId = "doc:indexeddb-note-batch";
+        const batchNoteId = "c_" + "d".repeat(32);
+        const batchRepo = makeNoteRepo(storeA, batchNoteId);
+        await batchRepo.create({
+          documentId: batchDocumentId,
+          noteId: batchNoteId,
+          anchor: noteAnchor(batchDocumentId, "batch"),
+          text: "active-v1",
+        }, { mutationId: "idb-note-batch-create" });
+        const batchStorageId = batchRepo.storageIdFor(
+          batchDocumentId,
+          batchNoteId,
+        );
+        const batchOriginal = await storeA.get(
+          "document-notes",
+          batchStorageId,
+          { includeDeleted: true },
+        );
+        const noteBatchTombstone = structuredClone(batchOriginal);
+        noteBatchTombstone.rev = 2;
+        noteBatchTombstone.updatedAt += 1;
+        noteBatchTombstone.updatedBy = "idb-remote-delete";
+        noteBatchTombstone.deleted = true;
+        const noteBatchRevival = structuredClone(batchOriginal);
+        noteBatchRevival.rev = 3;
+        noteBatchRevival.updatedAt += 2;
+        noteBatchRevival.updatedBy = "idb-stale-active";
+        noteBatchRevival.value.fields.text = "不应复活";
+        const batchMerge = await batchRepo.applyChanges([
+          {
+            collection: "document-notes",
+            mutationId: "idb-note-batch-delete",
+            record: noteBatchTombstone,
+          },
+          {
+            collection: "document-notes",
+            mutationId: "idb-note-batch-revival",
+            record: noteBatchRevival,
+          },
+        ]);
+        const noteBatchFinal = await batchRepo.get(
+          batchDocumentId,
+          batchNoteId,
+          { includeDeleted: true },
+        );
+        assert(batchMerge.applied.length === 1 &&
+          batchMerge.conflicts.length === 1 &&
+          batchMerge.conflicts[0].reason === "tombstone-dominates" &&
+          noteBatchFinal.deleted &&
+          noteBatchFinal.rev === noteBatchTombstone.rev,
+          "document-note repository 在同一 IndexedDB 事务内阻止 delete→active 复活");
+
+        const raceDocumentId = "doc:indexeddb-note-race";
+        const raceNoteId = "c_" + "e".repeat(32);
+        const deletingRepo = makeNoteRepo(storeB, raceNoteId);
+        const raceCreated = await deletingRepo.create({
+          documentId: raceDocumentId,
+          noteId: raceNoteId,
+          anchor: noteAnchor(raceDocumentId, "race"),
+          text: "active",
+        }, { mutationId: "idb-note-race-create" });
+        const raceActive = await storeB.get(
+          "document-notes",
+          deletingRepo.storageIdFor(raceDocumentId, raceNoteId),
+          { includeDeleted: true },
+        );
+        raceActive.rev = 100;
+        raceActive.updatedAt += 100;
+        raceActive.updatedBy = "idb-stale-active";
+        raceActive.value.fields.text = "删除后不得复活";
+        let signalApplyReached;
+        let releaseApply;
+        const applyReached = new Promise((resolve) => {
+          signalApplyReached = resolve;
+        });
+        const applyGate = new Promise((resolve) => {
+          releaseApply = resolve;
+        });
+        const delayedStore = {
+          contract: storeA.contract,
+          get: (...args) => storeA.get(...args),
+          list: (...args) => storeA.list(...args),
+          put: (...args) => storeA.put(...args),
+          remove: (...args) => storeA.remove(...args),
+          subscribe: (...args) => storeA.subscribe(...args),
+          applyChanges: async (...args) => {
+            signalApplyReached();
+            await applyGate;
+            return storeA.applyChanges(...args);
+          },
+        };
+        const applyingRepo = makeNoteRepo(delayedStore, raceNoteId);
+        const pendingRaceMerge = applyingRepo.applyChanges([{
+          collection: "document-notes",
+          mutationId: "idb-note-race-revival",
+          record: raceActive,
+        }]);
+        await applyReached;
+        await deletingRepo.remove(
+          raceDocumentId,
+          raceNoteId,
+          {
+            ifRev: raceCreated.rev,
+            mutationId: "idb-note-race-delete",
+          },
+        );
+        releaseApply();
+        const raceMerge = await pendingRaceMerge;
+        const raceFinal = await deletingRepo.get(
+          raceDocumentId,
+          raceNoteId,
+          { includeDeleted: true },
+        );
+        assert(raceMerge.applied.length === 0 &&
+          raceMerge.conflicts.length === 1 &&
+          raceMerge.conflicts[0].reason === "tombstone-dominates" &&
+          raceFinal.deleted,
+          "两个 repository 的预检查/删除竞态仍由 IndexedDB 原子墓碑守卫拦截");
+
+        const persistedDocumentId = "doc:indexeddb-note-rebuild";
+        const persistedNoteId = "c_" + "f".repeat(32);
+        const beforeRebuildRepo = makeNoteRepo(storeB, persistedNoteId);
+        const persisted = await beforeRebuildRepo.create({
+          documentId: persistedDocumentId,
+          noteId: persistedNoteId,
+          anchor: noteAnchor(persistedDocumentId, "persisted"),
+          text: "重建后仍存在",
+          strokes: [{ color: "#ef4444", points: [[1, 2], [3, 4]] }],
+        }, { mutationId: "idb-note-rebuild-create" });
+        storeB.close();
+        storeB = null;
+        storeB = api.createIndexedDBDataStore({
+          name: databaseName,
+          deviceId: "browser-b-rebuilt",
+          maxJournal: 100,
+          broadcast: false,
+          causalCollections: ["user-settings"],
+        });
+        const rebuiltRepo = makeNoteRepo(storeB, persistedNoteId);
+        const restored = await rebuiltRepo.get(
+          persistedDocumentId,
+          persistedNoteId,
+        );
+        assert(restored.noteId === persisted.noteId &&
+          restored.documentId === persisted.documentId &&
+          restored.text === persisted.text &&
+          JSON.stringify(restored.anchor) === JSON.stringify(persisted.anchor) &&
+          JSON.stringify(restored.strokes) === JSON.stringify(persisted.strokes),
+          "重建 IndexedDB store/repository 后完整恢复便签身份、锚点与字段");
+        assert(
+          await storeB.instanceEpoch() === originalInstanceEpoch,
+          "重建 store 对象但保留数据库时实例代次不变化",
+        );
+
+        const status = await storeA.status();
+        assert(status.contract === "data-store/1" && status.backend === "indexeddb",
+          "status 声明 data-store/1 和 IndexedDB backend");
+        storeA.close();
+        storeA.close();
+        const closedError = await storeA.status().then(
+          () => null,
+          (error) => error,
+        );
+        assert(closedError && closedError.code === "BW_DATA_CLOSED",
+          "close 可重复调用并会关闭数据库、拒绝后续操作");
+        storeA = null;
+        storeB.close();
+        storeB = null;
+        await deleteDatabase();
+        storeB = api.createIndexedDBDataStore({
+          name: databaseName,
+          deviceId: "browser-after-db-reset",
+          maxJournal: 100,
+          broadcast: false,
+          causalCollections: ["user-settings"],
+        });
+        assert(
+          await storeB.instanceEpoch() !== originalInstanceEpoch,
+          "删除并重建 IndexedDB 后生成新实例代次",
+        );
+        result.textContent = "全部通过（" + lines.length + " 项）";
+        result.dataset.state = "passed";
+        document.title = "PASS: BW Reader IndexedDB DataStore";
+        window.__BW_IDB_TEST_RESULT__ = { passed: true, assertions: lines.length };
+      } catch (error) {
+        console.error(error);
+        log("✗ " + (error && error.stack || error));
+        result.textContent = "测试失败：" + (error && error.message || error);
+        result.dataset.state = "failed";
+        document.title = "FAIL: BW Reader IndexedDB DataStore";
+        window.__BW_IDB_TEST_RESULT__ = {
+          passed: false,
+          error: String(error && error.stack || error),
+        };
+      } finally {
+        if (legacyMigrationStore) legacyMigrationStore.close();
+        if (migrationStore) migrationStore.close();
+        if (storeA) storeA.close();
+        if (storeB) storeB.close();
+        try { await deleteDatabase(); } catch (error) { log("清理提示：" + error.message); }
+      }
+    })();
+  </script>
+</body>
+</html>

@@ -12,6 +12,10 @@
 """
 from __future__ import annotations
 
+import base64
+import binascii
+import hashlib
+import contextvars
 import threading
 import json
 import os
@@ -20,12 +24,16 @@ import statistics
 import sys
 import time
 import urllib.parse
+import uuid
+from contextlib import contextmanager
+from html.parser import HTMLParser
 from pathlib import Path
 
 from flask import (
-    Blueprint, Response, abort, jsonify, redirect, render_template, request,
-    send_file, session,
+    Blueprint, Response, abort, current_app, jsonify, redirect, render_template, request,
+    send_file, session, has_request_context,
 )
+from reader_sw_auth import READER_SW_AUTH_JS, READER_SW_AUTH_PLACEHOLDER
 
 # AI 后端复用 _client/core 的 ai_backends + scripts/ai_client
 # 同 skilltree.py 已经在 app.py 启动时把 sys.path 加好了
@@ -35,6 +43,138 @@ OBSIDIAN_ROOT = Path(os.environ.get("OBSIDIAN_VAULT", "/home/bwicarus/obsidian")
 # PDF_XACCEL=1:用 nginx X-Accel-Redirect 发大 PDF(原生 sendfile+Range,绕开 Werkzeug dev server
 # 服务几百 MB 时的卡顿)。需 nginx internal location `/_vault_pdf/`(alias 到 vault)+ www-data 有读权限。
 _PDF_XACCEL = os.environ.get("PDF_XACCEL", "").strip() == "1"
+
+# Account identity is resolved once from the authenticated Flask request and can
+# then be explicitly restored inside detached workers.  A worker without this
+# binding fails closed instead of guessing "the only/first user".
+_READER_STORAGE_IDENTITY = contextvars.ContextVar(
+    "reader_storage_identity",
+    default=None,
+)
+_READER_SIDECAR_ROOT = None
+_READER_SIDECAR_STORE = None
+
+
+def _reader_storage_identity_coerce(value):
+    from reader_sidecar_store import ReaderStorageIdentity
+
+    if isinstance(value, ReaderStorageIdentity):
+        return value
+    if isinstance(value, dict):
+        return ReaderStorageIdentity(
+            user_id=value.get("user_id"),
+            storage_namespace=value.get("storage_namespace"),
+        )
+    return None
+
+
+def _reader_storage_identity_current():
+    """Return only a server-verified or explicitly propagated owner."""
+    # A module-owned ContextVar is not reset automatically with Flask's request
+    # context.  Therefore an HTTP request must always re-resolve its authenticated
+    # owner instead of consulting a value left by an earlier request on the same
+    # worker thread.  Detached workers have no request context and may only use
+    # the explicit immutable snapshot bound at thread start.
+    if has_request_context():
+        resolver = current_app.extensions.get(
+            "reader_storage_identity_resolver"
+        )
+        raw = resolver() if callable(resolver) else None
+        return _reader_storage_identity_coerce(raw)
+    return _READER_STORAGE_IDENTITY.get()
+
+
+def _reader_storage_identity_snapshot() -> dict:
+    """Capture a serializable verified owner before starting detached work."""
+    identity = _reader_storage_identity_current()
+    if identity is None:
+        raise PermissionError("authenticated reader storage owner required")
+    # Ensuring the account root here makes the legacy claim complete while the
+    # authorizing request/database context is still alive.
+    _reader_sidecar_store().account_path(identity)
+    return {
+        "user_id": int(identity.user_id),
+        "storage_namespace": identity.storage_namespace,
+    }
+
+
+def _reader_storage_identity_bind_for_thread(value):
+    """Bind a previously captured owner to this detached worker thread."""
+    identity = _reader_storage_identity_coerce(value)
+    if identity is None:
+        raise PermissionError("verified reader storage owner snapshot required")
+    _READER_STORAGE_IDENTITY.set(identity)
+    return identity
+
+
+def _reader_legacy_claim_authorized(identity) -> bool:
+    if not has_request_context():
+        return False
+    callback = current_app.extensions.get(
+        "reader_legacy_sidecar_claim_authorizer"
+    )
+    return bool(callback(identity)) if callable(callback) else False
+
+
+def _reader_sidecar_store():
+    global _READER_SIDECAR_STORE
+    if _READER_SIDECAR_STORE is None:
+        from reader_sidecar_store import SidecarStore, default_sidecar_root
+
+        root = _READER_SIDECAR_ROOT or default_sidecar_root(CLAUDE_DIR)
+        _READER_SIDECAR_STORE = SidecarStore(
+            root,
+            CLAUDE_DIR / "state",
+            _reader_legacy_claim_authorized,
+        )
+    return _READER_SIDECAR_STORE
+
+
+def _reader_sidecar_path(*parts, identity=None) -> Path:
+    owner = (
+        _reader_storage_identity_coerce(identity)
+        if identity is not None
+        else _reader_storage_identity_current()
+    )
+    if owner is None:
+        raise PermissionError("authenticated reader storage owner required")
+    return _reader_sidecar_store().account_path(owner, *parts)
+
+
+def _reader_sidecar_json(path: Path, default, expected_type):
+    """Read private JSON without turning corruption/permission errors into loss.
+
+    A missing account file means the collection is empty.  Any other failure
+    must propagate so a later read-modify-write cannot silently replace
+    damaged or inaccessible user data with an empty collection.
+    """
+    try:
+        value = json.loads(path.read_text("utf-8"))
+    except FileNotFoundError:
+        return default
+    if not isinstance(value, expected_type):
+        raise ValueError(f"invalid reader sidecar JSON shape: {path.name}")
+    return value
+
+
+@contextmanager
+def _reader_sidecar_edit_lock(dataset: str, key: str, identity=None):
+    """Serialize one account-scoped sidecar read-modify-write cycle.
+
+    Atomic replacement prevents torn JSON, but it cannot prevent two workers
+    from loading the same old value and overwriting each other's changes.  This
+    lease is deliberately keyed by verified owner + dataset + document so
+    unrelated books and accounts remain independent.
+    """
+    owner = (
+        _reader_storage_identity_coerce(identity)
+        if identity is not None
+        else _reader_storage_identity_current()
+    )
+    if owner is None:
+        raise PermissionError("authenticated reader storage owner required")
+    with _reader_sidecar_store().lock(owner, dataset, str(key or "")):
+        yield owner
 
 # spaCy 本地句法分析（独立 venv，subprocess 调用；装上则语法分析走它、零 AI）
 SPACY_PY     = Path(os.environ.get("SPACY_PYTHON", "/home/bwicarus/spacy-venv/bin/python"))
@@ -110,6 +250,9 @@ except Exception:
 
 # ══════════ 转换层v2·服务端咽喉(第3步):vbook: 引用在此被翻译/直通/拒绝,handler 零感知 ══════════
 _VB_VIEW_OK = {"pdf_reader.pdf_api_reading_pos", "pdf_reader.pdf_reader_events",
+               # 活动文档上报:记的就是「用户眼里在读哪本第几页」,合并书的身份本身
+               # 就是答案,不能拆成某一卷(拆了快照会说在读 part3 而不是这本书)
+               "pdf_reader.pdf_api_active_reading",
                # job/run/流式类:按 job id 路由,handler 不用 file 开磁盘(2026-07-19 逐个验证过,
                # 唯一开文件的 sandbox 不在此列)——file 只是上下文,直通即可,501 反而把
                # 「AI 断线重连 / 后台任务轮询 / 工具库配方」在合并视图里全打死
@@ -380,8 +523,9 @@ def _unified_graph():
         return c["g"]
     g = None
     try:
-        sys.path.insert(0, str(CLAUDE_DIR / "scripts" / "kg"))
-        import build_unified_graph as _BUG
+        from kg_runtime import import_module as _import_kg_module
+
+        _BUG = _import_kg_module("build_unified_graph")
         g = _BUG.build(write=False)
     except Exception:
         try:
@@ -423,15 +567,13 @@ def _augment_with_relations(out, file_rel, page):
         if uid:
             o["prereqs"] = _rel(pre.get(uid, []))
             o["unlocks"] = _rel(unl.get(uid, []))
-    # emergent:任一端连到本页 uid、另一端是 em:: 的
+    # emergent:任一端连到本页 uid、另一端是 origin=emergent 的稳定 ID 节点
     extra, seen = [], set()
     for e in edges:
         a, b = e.get("from"), e.get("to")
         for x, y in ((a, b), (b, a)):
-            if x in onpage_uids and isinstance(y, str) and y.startswith("em::") and y not in seen:
-                em = id2.get(y)
-                if not em:
-                    continue
+            em = id2.get(y) if isinstance(y, str) else None
+            if x in onpage_uids and em and em.get("origin") == "emergent" and y not in seen:
                 seen.add(y)
                 extra.append({"id": y, "name": em.get("name", ""), "numeric_label": "",
                               "state": em.get("state", "unlockable"), "mastery_level": 0,
@@ -774,36 +916,187 @@ def pdf_index():
     return render_template("pdf_index.html", pdfs=pdfs, chars_ver=_CHAR_CACHE_VER)
 
 
+_STATIC_ASSET_ROOTS = (
+    Path("/var/www/html/static"),
+    Path(__file__).resolve().parent / "static",
+)
+
+_PDF_READER_CACHE_ASSETS = (
+    "pdf/reader.js",
+)
+
+_EPUB_CACHE_ASSETS = (
+    "pdf/epub-html.js",
+    "pdf/epub-styles.css",
+    "pdf/rc-ink.js",
+    "pdf/rc-core.js",
+    "reader-runtime/book-host.js",
+    "reader-runtime/account-context.js",
+    "reader-runtime/interaction-policy.js",
+    "reader-runtime/document-host.js",
+    "reader-runtime/context-selection-registry.js",
+    "reader-runtime/data-store.js",
+    "reader-runtime/indexeddb-store.js",
+    "reader-runtime/data-registry.js",
+    "reader-runtime/sync-owner-lease.js",
+    "reader-runtime/sync-gateway.js",
+    "reader-runtime/server-sync-transport.js",
+    "reader-runtime/direct-sync-protocol.js",
+    "reader-runtime/direct-sync-signal-transport.js",
+    "reader-runtime/sync-coordinator.js",
+    "reader-runtime/sync-runtime.js",
+    "reader-runtime/sync-conflict-control.js",
+    "reader-runtime/direct-sync-host.js",
+    "reader-runtime/direct-sync-leader.js",
+    "reader-runtime/vocabulary-state.js",
+    "reader-runtime/computer-voice-webrtc.js",
+    "reader-runtime/preference-store.js",
+    "reader-runtime/storage-router.js",
+    "reader-runtime/runtime-selector.js",
+    "reader-runtime/legacy-rc-bridge.js",
+    "reader-runtime/pwa-service-bridge.js",
+    "reader-runtime/pwa-runtime.js",
+    "pdf/rc-ui.js",
+    "pdf/rc-outbox.js",
+    "pdf/rc-flashcard.js",
+    "pdf/rc-review.js",
+    "pdf/rc-md.js",
+    "pdf/rc-figures.js",
+    "pdf/rc-highlight.js",
+    "pdf/rc-snippets.js",
+    "pdf/rc-result.js",
+    "pdf/rc-wordpop.js",
+    "pdf/rc-phrasepop.js",
+    "pdf/rc-settings.js",
+    "pdf/rc-knowledge.js",
+    "pdf/rc-sidedrawer.js",
+    "pdf/rc-assistant.js",
+    "pdf/rc-toolchip.js",
+    "pdf/rc-turncard.js",
+    "pdf/rc-voicectx.js",
+    "pdf/rc-computer-voice.js",
+    "pdf/rc-voicecall.js",
+    "pdf/rc-grammar.js",
+    "pdf/rc-stickynote.js",
+    "pdf/rc-favorites.js",
+    "pdf/rc-video.js",
+    "pdf/rc-videoplayer.js",
+    "pdf/rc-userpages.js",
+    "pdf/pwa-extension-bridge.js",
+)
+
+_PDF_SHARED_CACHE_ASSETS = (
+    "pdf/pdf-styles.css",
+    "pdf/pdf-uishared.js",
+    "pdf/rc-ink.js",
+    "pdf/pdf-tail.js",
+    "pdf/rc-core.js",
+    "reader-runtime/book-host.js",
+    "reader-runtime/account-context.js",
+    "reader-runtime/interaction-policy.js",
+    "reader-runtime/document-host.js",
+    "reader-runtime/context-selection-registry.js",
+    "reader-runtime/data-store.js",
+    "reader-runtime/indexeddb-store.js",
+    "reader-runtime/data-registry.js",
+    "reader-runtime/sync-owner-lease.js",
+    "reader-runtime/sync-gateway.js",
+    "reader-runtime/server-sync-transport.js",
+    "reader-runtime/direct-sync-protocol.js",
+    "reader-runtime/direct-sync-signal-transport.js",
+    "reader-runtime/sync-coordinator.js",
+    "reader-runtime/sync-runtime.js",
+    "reader-runtime/sync-conflict-control.js",
+    "reader-runtime/direct-sync-host.js",
+    "reader-runtime/direct-sync-leader.js",
+    "reader-runtime/vocabulary-state.js",
+    "reader-runtime/computer-voice-webrtc.js",
+    "reader-runtime/preference-store.js",
+    "reader-runtime/storage-router.js",
+    "reader-runtime/runtime-selector.js",
+    "reader-runtime/legacy-rc-bridge.js",
+    "reader-runtime/pwa-service-bridge.js",
+    "reader-runtime/pwa-runtime.js",
+    "pdf/rc-ui.js",
+    "pdf/rc-outbox.js",
+    "pdf/rc-flashcard.js",
+    "pdf/rc-snippets.js",
+    "reader-runtime/card-improvement-actions.js",
+    "pdf/rc-review.js",
+    "pdf/rc-md.js",
+    "pdf/rc-result.js",
+    "pdf/rc-wordpop.js",
+    "pdf/rc-phrasepop.js",
+    "pdf/rc-figures.js",
+    "pdf/rc-highlight.js",
+    "pdf/rc-knowledge.js",
+    "pdf/rc-sidedrawer.js",
+    "pdf/rc-assistant.js",
+    "pdf/rc-grammar.js",
+    "pdf/rc-settings.js",
+    "pdf/rc-stickynote.js",
+    "pdf/rc-favorites.js",
+    "pdf/rc-video.js",
+    "pdf/rc-videoplayer.js",
+    "pdf/rc-toolchip.js",
+    "pdf/rc-turncard.js",
+    "pdf/rc-voicectx.js",
+    "pdf/rc-computer-voice.js",
+    "pdf/rc-voicecall.js",
+    "pdf/rc-userpages.js",
+    "pdf/pdf-adapter.js",
+    "pdf/pwa-extension-bridge.js",
+)
+
+
+def _static_asset_version(asset_names) -> str:
+    """按逻辑路径 + mtime_ns + size 生成静态资源指纹。
+
+    旧实现只取 ``int(max(mtime))``，同一秒内连续部署、保留旧时间戳或只改非最大
+    文件时都可能不跳版本。这里逐文件纳入纳秒时间与大小；缺失项也进入摘要，文件
+    后续补齐时同样会变更。优先读取 nginx 的正式目录，本地开发回落到仓库静态目录。
+    """
+    digest = hashlib.sha256()
+    for raw_name in asset_names:
+        name = str(raw_name).lstrip("/")
+        digest.update(name.encode("utf-8"))
+        digest.update(b"\0")
+        found = None
+        found_path = None
+        for root in _STATIC_ASSET_ROOTS:
+            candidate = root / name
+            try:
+                stat = candidate.stat()
+            except OSError:
+                continue
+            if candidate.is_file():
+                found = stat
+                found_path = candidate
+                break
+        if found is None:
+            digest.update(b"missing\0")
+        else:
+            digest.update(str(found_path).encode("utf-8"))
+            digest.update(b"\0")
+            digest.update(str(found.st_mtime_ns).encode("ascii"))
+            digest.update(b":")
+            digest.update(str(found.st_size).encode("ascii"))
+            digest.update(b"\0")
+    return digest.hexdigest()[:20]
+
+
 def _reader_js_v():
-    """reader.js 的 cache-bust 版本 = 已部署静态文件 mtime（每次部署自动变，免手动 bump）。
-    Pi:nginx 服务 /var/www/...;本地实例(Windows,无 nginx):Flask 从 _server_deploy/static 服务 → 读那份。"""
-    for _p in ("/var/www/html/static/pdf/reader.js",
-               str(Path(__file__).resolve().parent / "static" / "pdf" / "reader.js")):
-        try:
-            return str(int(os.path.getmtime(_p)))
-        except Exception:
-            continue
-    return "1"
+    """PDF 主驱动的可靠 cache-bust 指纹。"""
+    return _static_asset_version(_PDF_READER_CACHE_ASSETS)
 
 
 def _epub_js_v():
-    """EPUB 阅读器静态(epub-reader.js + epub-ai.js)的 cache-bust 版本 = 两者 mtime 最大值。
-    跟 reader.js 解耦:改了 epub 的 JS 也能 bust(否则 reader.js 没动 → ?v 不变 → 浏览器用旧缓存)。"""
-    mt = 0
-    for name in ("epub-html.js", "epub-styles.css", "rc-ink.js", "rc-core.js", "rc-md.js",
-                 "rc-outbox.js", "rc-flashcard.js", "rc-review.js", "rc-figures.js", "rc-highlight.js", "rc-snippets.js", "rc-result.js", "rc-wordpop.js", "rc-phrasepop.js", "rc-settings.js", "rc-knowledge.js", "rc-assistant.js", "rc-sidedrawer.js", "rc-grammar.js", "rc-stickynote.js", "rc-favorites.js", "rc-userpages.js", "rc-video.js",
-                 "rc-voicecall.js", "rc-voicectx.js", "rc-turncard.js", "rc-toolchip.js"):   # 2026-07-13:此前缺席——只改语音层时 EPUB ?v 不跳变,immutable 缓存让 EPUB 一直跑旧语音代码(「EPUB 设置没有语音项」的根因)
-        for base in ("/var/www/html/static/pdf",
-                     str(Path(__file__).resolve().parent / "static" / "pdf")):
-            try:
-                mt = max(mt, int(os.path.getmtime(os.path.join(base, name)))); break
-            except Exception:
-                continue
-    return str(mt or 1)
+    """EPUB 模板所加载的全部版本化资源指纹。"""
+    return _static_asset_version(_EPUB_CACHE_ASSETS)
 
 
 def _pdf_shared_js_v():
-    """ui=shared 下条件加载的共享层 cache-bust = 各文件 mtime 最大值。
+    """ui=shared 下条件加载的共享层 cache-bust = 全部模板资源的可靠摘要。
     不能用 _reader_js_v()(只看 reader.js mtime,改 rc-*/adapter 不 bust)。
     阶段2:加 rc-md/rc-result/rc-wordpop/rc-phrasepop(解释/翻译/对话→rc-result、全词典→rc-wordpop、词组→rc-phrasepop)。
     阶段3:加 rc-figures/rc-highlight(图描述浮层→rc-figures、高亮编辑→rc-highlight)。
@@ -814,19 +1107,7 @@ def _pdf_shared_js_v():
            四个入口分流到 RC.grammar,跟 EPUB 共用同一套渲染核心,见 18-grammar.js 里的 __uiShared 分支)。
     阶段7:加 rc-settings(⚙ 总设置面板→统一面板,跟 EPUB 同一份内容/行为;openSettings 按 __uiShared 分流,
            原生回填/保存函数经 PdfAdapter.openSettings 的 onFill/onSave 复用,见 21-misc-ai.js)。"""
-    mt = 0
-    for name in ("rc-ink.js", "rc-core.js", "rc-md.js", "rc-result.js", "rc-wordpop.js", "rc-phrasepop.js",
-                 "rc-sidedrawer.js",   # 2026-07-21 实锤补漏:抽屉迁 rc-sidedrawer 后清单没跟上→v不跳+immutable=真机永远旧文件(测试环境无HTTP缓存看不出)
-                 "rc-outbox.js", "rc-flashcard.js", "rc-review.js", "rc-figures.js", "rc-highlight.js", "rc-snippets.js", "rc-knowledge.js", "rc-assistant.js", "rc-grammar.js",
-                 "rc-settings.js", "rc-stickynote.js", "rc-favorites.js", "rc-userpages.js", "rc-video.js", "rc-voicecall.js", "rc-voicectx.js", "rc-turncard.js", "rc-toolchip.js", "pdf-adapter.js",
-                 "pdf-uishared.js", "pdf-tail.js", "pdf-styles.css"):   # 2026-07-06 架构优化:pdf_reader.html 抽出的内联 JS/CSS(改它们 → ?v 跳变)
-        for base in ("/var/www/html/static/pdf",
-                     str(Path(__file__).resolve().parent / "static" / "pdf")):
-            try:
-                mt = max(mt, int(os.path.getmtime(os.path.join(base, name)))); break
-            except Exception:
-                continue
-    return str(mt or 1)
+    return _static_asset_version(_PDF_SHARED_CACHE_ASSETS)
 
 
 # ── 图片模式(大型文档网站成熟方案:服务端按页出图,客户端只按需取看到的页,不下载整本 PDF)──
@@ -860,6 +1141,187 @@ def pdf_api_ping():
     return r
 
 
+_PUBLIC_IMAGE_MAX_BYTES = 16 * 1024 * 1024
+_PUBLIC_IMAGE_TOTAL_TIMEOUT = 15.0
+_PUBLIC_IMAGE_CONTENT_TYPES = frozenset({
+    "image/avif",
+    "image/bmp",
+    "image/gif",
+    "image/jpeg",
+    "image/png",
+    "image/svg+xml",
+    "image/webp",
+})
+
+
+class _PublicImageFetchError(ValueError):
+    """Bounded public-image transport failure safe to map to an HTTP status."""
+
+    def __init__(self, message, *, http_status=502, upstream_status=None):
+        super().__init__(str(message))
+        self.http_status = int(http_status)
+        self.upstream_status = (
+            int(upstream_status) if upstream_status is not None else None
+        )
+
+
+def _public_image_content_type(value):
+    return str(value or "").split(";", 1)[0].strip().lower()
+
+
+def _fetch_public_image(
+    url,
+    *,
+    max_bytes=_PUBLIC_IMAGE_MAX_BYTES,
+    total_timeout=_PUBLIC_IMAGE_TOTAL_TIMEOUT,
+):
+    """Fetch one public image with an SSRF check on every redirect hop.
+
+    The target is always taken from a server-owned asset registry (or the
+    Wikimedia-only image proxy), never from an extension-supplied arbitrary
+    fetch request.  ``requests`` redirects stay disabled so a public URL cannot
+    bounce to loopback/private metadata services after the first check.
+    """
+    import requests as _rq
+    from rbi_access import public_network_url_error
+
+    current = str(url or "").strip()
+    deadline = time.monotonic() + max(1.0, float(total_timeout))
+    session = _rq.Session()
+    response = None
+    try:
+        for hop in range(6):
+            blocked = public_network_url_error(current)
+            if blocked:
+                raise _PublicImageFetchError(
+                    "blocked public image URL: " + blocked,
+                    http_status=403,
+                )
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise _PublicImageFetchError(
+                    "public image request timed out",
+                    http_status=504,
+                )
+            try:
+                response = session.get(
+                    current,
+                    timeout=(
+                        min(3.05, remaining),
+                        min(5.0, max(0.1, remaining)),
+                    ),
+                    stream=True,
+                    allow_redirects=False,
+                    headers={
+                        "User-Agent": "Mozilla/5.0 (BW reader image proxy)",
+                        "Accept": "image/avif,image/webp,image/png,image/jpeg,"
+                                  "image/gif,image/svg+xml;q=0.8,*/*;q=0.1",
+                    },
+                )
+            except _rq.Timeout as error:
+                raise _PublicImageFetchError(
+                    "public image request timed out",
+                    http_status=504,
+                ) from error
+            except _rq.RequestException as error:
+                raise _PublicImageFetchError(
+                    "public image request failed",
+                    http_status=502,
+                ) from error
+
+            location = str(response.headers.get("Location") or "").strip()
+            if (
+                response.status_code in (301, 302, 303, 307, 308)
+                and location
+            ):
+                if hop >= 5:
+                    raise _PublicImageFetchError(
+                        "too many public image redirects",
+                        http_status=502,
+                    )
+                next_url = urllib.parse.urljoin(
+                    str(getattr(response, "url", "") or current),
+                    location,
+                )
+                blocked = public_network_url_error(next_url)
+                if blocked:
+                    raise _PublicImageFetchError(
+                        "blocked public image redirect: " + blocked,
+                        http_status=403,
+                    )
+                response.close()
+                response = None
+                current = next_url
+                continue
+
+            if response.status_code != 200:
+                raise _PublicImageFetchError(
+                    "public image upstream HTTP "
+                    + str(response.status_code),
+                    http_status=502,
+                    upstream_status=response.status_code,
+                )
+            content_type = _public_image_content_type(
+                response.headers.get("Content-Type")
+            )
+            if content_type not in _PUBLIC_IMAGE_CONTENT_TYPES:
+                raise _PublicImageFetchError(
+                    "public asset is not a supported image",
+                    http_status=415,
+                )
+            try:
+                declared = int(response.headers.get("Content-Length") or 0)
+            except (TypeError, ValueError):
+                declared = 0
+            if declared > max_bytes:
+                raise _PublicImageFetchError(
+                    "public image exceeds size limit",
+                    http_status=413,
+                )
+            chunks = []
+            total = 0
+            try:
+                for chunk in response.iter_content(64 * 1024):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise _PublicImageFetchError(
+                            "public image exceeds size limit",
+                            http_status=413,
+                        )
+                    chunks.append(chunk)
+                    if time.monotonic() > deadline:
+                        raise _PublicImageFetchError(
+                            "public image request timed out",
+                            http_status=504,
+                        )
+            except _rq.Timeout as error:
+                raise _PublicImageFetchError(
+                    "public image request timed out",
+                    http_status=504,
+                ) from error
+            except _rq.RequestException as error:
+                raise _PublicImageFetchError(
+                    "public image response failed",
+                    http_status=502,
+                ) from error
+            if not chunks:
+                raise _PublicImageFetchError(
+                    "public image is empty",
+                    http_status=502,
+                )
+            return b"".join(chunks), content_type, current
+        raise _PublicImageFetchError(
+            "too many public image redirects",
+            http_status=502,
+        )
+    finally:
+        if response is not None:
+            response.close()
+        session.close()
+
+
 @bp.route("/api/img-proxy")
 def pdf_api_img_proxy():
     """图片代理:服务器下载维基图转发给 iPad(经 Tailscale 稳定)。限 wikimedia 域(防 SSRF)。
@@ -884,9 +1346,17 @@ def pdf_api_img_proxy():
 
     def _serve_cache():
         try:
-            if _fbin.exists() and _fbin.stat().st_size:
-                _ct = _fct.read_text("utf-8").strip() if _fct.exists() else "image/png"
+            size = _fbin.stat().st_size if _fbin.exists() else 0
+            _ct = _public_image_content_type(
+                _fct.read_text("utf-8").strip()
+                if _fct.exists() else "image/png"
+            )
+            if (
+                0 < size <= _PUBLIC_IMAGE_MAX_BYTES
+                and _ct in _PUBLIC_IMAGE_CONTENT_TYPES
+            ):
                 _r = Response(_fbin.read_bytes(), mimetype=_ct)
+                _r.headers["X-Content-Type-Options"] = "nosniff"
                 _r.headers["Cache-Control"] = "public, max-age=604800, immutable"
                 return _r
         except Exception:
@@ -904,16 +1374,19 @@ def pdf_api_img_proxy():
 
     def _fetch(u):
         try:
-            return _rq.get(u, timeout=12, headers=UA)
-        except Exception:
-            return None
+            return _fetch_public_image(u)
+        except _PublicImageFetchError as error:
+            return error
 
     with lk:
         hit = _serve_cache()   # 排队醒来:多半已被第一个请求填好
         if hit is not None:
             return hit
         rr = _fetch(url)
-        if rr is None or rr.status_code == 404:
+        if (
+            isinstance(rr, _PublicImageFetchError)
+            and rr.upstream_status == 404
+        ):
             # hash 目录修复:thumb URL(带 px 宽)和**原图 URL**都要管——上次只修了 thumb,
             # AI 这次编的是原图路径的错 hash(写 1/1f 真实 0/0b)→ 404 直穿 502。
             fname = w = None
@@ -929,7 +1402,12 @@ def pdf_api_img_proxy():
                     api = ("https://commons.wikimedia.org/w/api.php?action=query&titles=File:"
                            + _up.quote(fname) + "&prop=imageinfo&iiprop=url"
                            + ("&iiurlwidth=" + w if w else "") + "&format=json")
-                    j = _rq.get(api, timeout=10, headers=UA).json()
+                    j = _rq.get(
+                        api,
+                        timeout=(3.05, 8),
+                        headers=UA,
+                        allow_redirects=False,
+                    ).json()
                     for _p in ((j.get("query") or {}).get("pages") or {}).values():
                         _ii = (_p.get("imageinfo") or [{}])[0]
                         tu = _ii.get("thumburl") or _ii.get("url")
@@ -938,18 +1416,17 @@ def pdf_api_img_proxy():
                             break
                 except Exception:
                     pass
-        if rr is None or rr.status_code != 200 or not rr.content:
-            abort(502)
-        ct = rr.headers.get("Content-Type", "image/png")
-        if not ct.startswith("image/"):
-            abort(415)
+        if isinstance(rr, _PublicImageFetchError):
+            abort(rr.http_status)
+        content, ct, _final_url = rr
         try:
             _cdir.mkdir(parents=True, exist_ok=True)
-            _fbin.write_bytes(rr.content)
+            _fbin.write_bytes(content)
             _fct.write_text(ct, "utf-8")
         except Exception:
             pass
-        resp = Response(rr.content, mimetype=ct)
+        resp = Response(content, mimetype=ct)
+        resp.headers["X-Content-Type-Options"] = "nosniff"
         resp.headers["Cache-Control"] = "public, max-age=604800, immutable"
         return resp
 
@@ -1065,7 +1542,7 @@ def pdf_api_sandbox():
                 n = src.page_count
                 pos = 1
                 try:
-                    _rp = json.loads((CLAUDE_DIR / "state" / "reader-positions.json").read_text("utf-8"))
+                    _rp = _reading_pos_load()
                     pos = int((_rp.get(rel) or {}).get("pos") or 1)
                 except Exception:
                     pass
@@ -1111,11 +1588,12 @@ def pdf_api_sandbox():
                     pass
             try:
                 with _READER_POS_LOCK:   # 清沙盒自己的续读记录(否则 iframe 会被旧位置带走,不落锚页)
-                    _pp = CLAUDE_DIR / "state" / "reader-positions.json"
-                    _m = json.loads(_pp.read_text("utf-8"))
+                    _pp = _reading_pos_path()
+                    _m = _reading_pos_load()
                     if sb_rel in _m:
                         del _m[sb_rel]
-                        _pp.write_text(json.dumps(_m, ensure_ascii=False), "utf-8")
+                        from reader_sidecar_store import atomic_write_json
+                        atomic_write_json(_pp, _m, indent=None)
             except Exception:
                 pass
     try:
@@ -1157,6 +1635,17 @@ def pdf_api_read_dwell():
                     pass
     except Exception:
         pass
+    # 页面知识点简述:读页命中 → 后台生成本页(+预取邻页)简述(书级开关 + in-flight 去重,省额度)。
+    # detached 到 daemon 线程内跑 gen_page_brief 子进程,读页请求即时返回、不阻塞。仅 PDF、非沙盒。
+    try:
+        if rel.lower().endswith(".pdf") and "/.sandbox/" not in rel and _book_brief_enabled(rel):
+            ap = _safe_vault_path(rel)
+            if ap:
+                cur = max((int(it.get("page") or 0) for it in items if not it.get("upage")), default=0)
+                if cur > 0:
+                    _threading.Thread(target=_brief_generate_bg, args=(ap, cur), daemon=True).start()
+    except Exception:
+        pass
     return jsonify({"ok": True})
 
 
@@ -1186,21 +1675,616 @@ def pdf_api_publish_actions():
 _SW_JS = r"""// PDF 阅读器 Service Worker(作用域 /pdf/,只拦 /pdf/*):
 //   页图 + 文字层 → cache-first(命中零网络,秒开/离线、抗 iOS 清缓存);
 //   徽标 page-figures + EPUB manifest/section → stale-while-revalidate(秒回缓存 + 后台刷;
-//     v3 新增 EPUB 两端点——正文 section 静态且 ETag 版本化,SWR 让重开书/翻章零等待;
+//     v4 把全部私有数据按服务端 acct-v1 namespace 分 cache,同账户仍可整书离线;
 //     收藏夹物化 EPUB(资源/收藏夹/)会整本重建,内容会变 → 排除,始终走网络)。
 //   静态 JS(reader.js / pdf.mjs 在 /static/,超出本 SW 作用域)→ 靠浏览器 HTTP 缓存(nginx immutable)。
-const CACHE = 'pdf-cache-v3';
-const SHELL = 'pdf-shell-v1';   // 阅读器壳(静态 JS/CSS/字体/图标 + 开书页 HTML 回退)——离线也能打开阅读器
+const SHELL = 'pdf-shell-v1';   // 只存静态 JS/CSS/字体/图标；严禁放含 window.__USER__ 的 HTML
+const PRIVATE_CACHE_PREFIX = 'pdf-private-v4-';
+const IDENTITY_CACHE = 'pdf-private-identity-v1';  // 仅存 server-verified clientId→namespace，不存 HTML
+const IDENTITY_RECORD_LIMIT = 128;
+const PRIVATE_NAMESPACE_HEADER = 'X-BW-Reader-Cache-Namespace';
+const PRIVATE_NAMESPACE_RE = /^acct-v1-[a-f0-9]{64}$/;
+__BW_READER_SW_AUTH__
+const IDENTITY_REQUEST = 'BW_PDF_CACHE_IDENTITY_REQUEST';
+const IDENTITY_REBIND = 'BW_PDF_CACHE_REBIND';
+const IDENTITY_ENDPOINT = '/pdf/api/cache-identity';
+const CLEAR_PRIVATE = 'BW_PDF_CACHE_CLEAR_PRIVATE';
+const DELETE_PRIVATE_BOOK = 'BW_PDF_CACHE_DELETE_BOOK';
+const CLIENT_BINDINGS = new Map();       // clientId → {namespace, authEpoch}
+const CLIENT_REVISIONS = new Map();      // 单 client 失信时令在途 identity promise 失效
+const IDENTITY_WAITERS = new Map();
+const IDENTITY_PROMPTED_AT = new Map();
+let IDENTITY_GENERATION = 0;             // login/logout 后阻止旧异步核验重新写回
+let KNOWN_AUTH_EPOCH = '';
+const PRIVATE_HTML_PATHS = new Set([
+  '/pdf/',
+  '/pdf/view',
+  '/pdf/epub/view',
+  '/pdf/html/view',
+  '/pdf/fav/open'
+]);
+const TRUSTED_IDENTITY_PATHS = new Set([
+  '/pdf/',
+  '/pdf/view',
+  '/pdf/epub/view',
+  '/pdf/html/view',
+  '/pdf/fav/open'
+]);
+const AUTH_CLEAR_PATHS = new Set(['/login', '/logout']);
+function _validNamespace(value) {
+  return PRIVATE_NAMESPACE_RE.test(String(value || '').trim());
+}
+function _privateCacheName(namespace, authEpoch) {
+  return _validNamespace(namespace) && _validAuthEpoch(authEpoch)
+    ? PRIVATE_CACHE_PREFIX + namespace + '-' + authEpoch
+    : '';
+}
+function _privateCacheBelongsTo(name, namespace) {
+  return _validNamespace(namespace) &&
+    String(name || '').startsWith(PRIVATE_CACHE_PREFIX + namespace + '-');
+}
+function _identityKey(clientId) {
+  return self.location.origin + '/_bw/pdf-cache-client/' +
+    encodeURIComponent(String(clientId || ''));
+}
+function _identityPrefix() {
+  return self.location.origin + '/_bw/pdf-cache-client/';
+}
+function _identityClientId(request) {
+  const value = String(request && request.url || '');
+  if (!value.startsWith(_identityPrefix())) return '';
+  try { return decodeURIComponent(value.slice(_identityPrefix().length)); }
+  catch (_) { return ''; }
+}
+function _sourcePath(source) {
+  try {
+    const url = new URL(source && source.url || '');
+    return url.origin === self.location.origin ? url.pathname : '';
+  } catch (_) {
+    return '';
+  }
+}
+function _trustedIdentitySource(source) {
+  return !!(source && source.id && TRUSTED_IDENTITY_PATHS.has(_sourcePath(source)));
+}
+function _clientRevision(clientId) {
+  return Number(CLIENT_REVISIONS.get(String(clientId || '')) || 0);
+}
+function _bumpClientRevision(clientId) {
+  clientId = String(clientId || '');
+  const next = _clientRevision(clientId) + 1;
+  CLIENT_REVISIONS.set(clientId, next);
+  return next;
+}
+function _invalidateLocalBindings(nextEpoch) {
+  IDENTITY_GENERATION++;
+  CLIENT_BINDINGS.clear();
+  CLIENT_REVISIONS.clear();
+  IDENTITY_PROMPTED_AT.clear();
+  IDENTITY_WAITERS.clear();
+  KNOWN_AUTH_EPOCH = _validAuthEpoch(nextEpoch) ? String(nextEpoch) : '';
+}
+function _identityPayload(namespace, authEpoch) {
+  return JSON.stringify({
+    schema: 1,
+    namespace: namespace,
+    authEpoch: authEpoch,
+    verifiedAt: Date.now()
+  });
+}
+function _parseIdentityPayload(value) {
+  try {
+    const data = JSON.parse(String(value || ''));
+    if (!data || Number(data.schema) !== 1 ||
+        !_validNamespace(data.namespace) || !_validAuthEpoch(data.authEpoch)) {
+      return null;
+    }
+    return {
+      namespace: String(data.namespace),
+      authEpoch: String(data.authEpoch),
+      verifiedAt: Number(data.verifiedAt || 0)
+    };
+  } catch (_) {
+    return null;
+  }
+}
+function _validBinding(binding) {
+  return !!(binding && _validNamespace(binding.namespace) &&
+    _validAuthEpoch(binding.authEpoch));
+}
+function _bindingEquals(left, right) {
+  return _validBinding(left) && _validBinding(right) &&
+    left.namespace === right.namespace && left.authEpoch === right.authEpoch;
+}
+function _adoptAuthState(state) {
+  if (!state || state.pending || !_validAuthEpoch(state.epoch)) {
+    if (KNOWN_AUTH_EPOCH || CLIENT_BINDINGS.size || IDENTITY_WAITERS.size) {
+      _invalidateLocalBindings('');
+    }
+    return null;
+  }
+  if (KNOWN_AUTH_EPOCH && KNOWN_AUTH_EPOCH !== state.epoch) {
+    _invalidateLocalBindings(state.epoch);
+  } else {
+    KNOWN_AUTH_EPOCH = state.epoch;
+  }
+  return { epoch: state.epoch, generation: IDENTITY_GENERATION };
+}
+async function _readyAuthContext() {
+  try {
+    const adopted = _adoptAuthState(await _readAuthState());
+    return adopted || { blocked: true };
+  } catch (_) {
+    _invalidateLocalBindings('');
+    return { blocked: true };
+  }
+}
+async function _authContextStill(context) {
+  if (!context || context.blocked ||
+      context.generation !== IDENTITY_GENERATION ||
+      !_validAuthEpoch(context.epoch)) return false;
+  let adopted;
+  try { adopted = _adoptAuthState(await _readAuthState()); }
+  catch (_) { _invalidateLocalBindings(''); return false; }
+  return !!(adopted && adopted.epoch === context.epoch &&
+    adopted.generation === context.generation &&
+    context.generation === IDENTITY_GENERATION);
+}
+function _bindClientMemory(clientId, namespace, authEpoch) {
+  clientId = String(clientId || '');
+  namespace = String(namespace || '').trim();
+  authEpoch = String(authEpoch || '').trim();
+  if (!clientId || !_validNamespace(namespace) || !_validAuthEpoch(authEpoch)) return null;
+  // 同一 client 看到新账户证明时直接替换旧绑定；后续永远不会再打开旧 namespace cache。
+  const binding = { namespace: namespace, authEpoch: authEpoch };
+  CLIENT_BINDINGS.delete(clientId);
+  CLIENT_BINDINGS.set(clientId, binding);
+  IDENTITY_PROMPTED_AT.delete(clientId);
+  return binding;
+}
+async function _clientStillTrusted(clientId, revision, authContext) {
+  clientId = String(clientId || '');
+  if (!clientId || revision !== _clientRevision(clientId) ||
+      !await _authContextStill(authContext)) return false;
+  const client = await self.clients.get(clientId);
+  if (revision !== _clientRevision(clientId) ||
+      !_trustedIdentitySource(client) ||
+      !await _authContextStill(authContext)) {
+    if (!_trustedIdentitySource(client)) await _forgetClient(clientId);
+    return false;
+  }
+  return revision === _clientRevision(clientId);
+}
+function _bindingContext(clientId, binding, authContext, revision) {
+  return {
+    clientId: String(clientId || ''),
+    namespace: String(binding && binding.namespace || ''),
+    authEpoch: String(binding && binding.authEpoch || ''),
+    epoch: String(authContext && authContext.epoch || ''),
+    generation: Number(authContext && authContext.generation),
+    revision: Number(revision)
+  };
+}
+async function _bindingStill(context, requireTrustedClient) {
+  if (!context || context.blocked ||
+      context.generation !== IDENTITY_GENERATION ||
+      context.revision !== _clientRevision(context.clientId) ||
+      context.authEpoch !== context.epoch ||
+      !_bindingEquals(CLIENT_BINDINGS.get(context.clientId), context)) {
+    return false;
+  }
+  if (!await _authContextStill(context)) return false;
+  if (requireTrustedClient !== false &&
+      !await _clientStillTrusted(context.clientId, context.revision, context)) {
+    return false;
+  }
+  return context.generation === IDENTITY_GENERATION &&
+    context.revision === _clientRevision(context.clientId) &&
+    _bindingEquals(CLIENT_BINDINGS.get(context.clientId), context);
+}
+async function _pruneIdentityCache(preserveClientId) {
+  try {
+    const cache = await caches.open(IDENTITY_CACHE);
+    const keys = await cache.keys();
+    const active = new Set();
+    const clients = await self.clients.matchAll({
+      type: 'window',
+      includeUncontrolled: true
+    });
+    for (const client of clients || []) {
+      if (client && client.id) active.add(String(client.id));
+    }
+    if (preserveClientId) active.add(String(preserveClientId));
+    const retained = [];
+    for (const key of keys) {
+      const clientId = _identityClientId(key);
+      const response = clientId ? await cache.match(key) : null;
+      const record = response ? _parseIdentityPayload(await response.text()) : null;
+      if (!clientId || !record || !active.has(clientId)) {
+        await cache.delete(key);
+      } else {
+        retained.push({
+          key: key,
+          clientId: clientId,
+          verifiedAt: record.verifiedAt
+        });
+      }
+    }
+    if (retained.length > IDENTITY_RECORD_LIMIT) {
+      retained.sort((a, b) => b.verifiedAt - a.verifiedAt);
+      const preserved = String(preserveClientId || '');
+      const keep = new Set();
+      if (preserved && retained.some((item) => item.clientId === preserved)) {
+        keep.add(preserved);
+      }
+      for (const item of retained) {
+        if (keep.size >= IDENTITY_RECORD_LIMIT) break;
+        keep.add(item.clientId);
+      }
+      await Promise.all(retained.map((item) =>
+        keep.has(item.clientId) ? null : cache.delete(item.key)
+      ));
+    }
+  } catch (_) {}
+}
+async function _revokeIdentityWrite(clientId, binding) {
+  try {
+    const cache = await caches.open(IDENTITY_CACHE);
+    const stored = await cache.match(_identityKey(clientId));
+    const record = stored ? _parseIdentityPayload(await stored.text()) : null;
+    if (_bindingEquals(record, binding)) {
+      await cache.delete(_identityKey(clientId));
+    }
+  } catch (_) {}
+  if (_bindingEquals(CLIENT_BINDINGS.get(String(clientId || '')), binding)) {
+    CLIENT_BINDINGS.delete(String(clientId || ''));
+  }
+}
+async function _bindClient(
+  clientId,
+  namespace,
+  authContext,
+  revision,
+  requireTrustedClient
+) {
+  clientId = String(clientId || '');
+  revision = Number(revision);
+  if (!clientId || !_validNamespace(namespace) ||
+      !authContext || authContext.blocked ||
+      revision !== _clientRevision(clientId) ||
+      !await _authContextStill(authContext)) return null;
+  if (requireTrustedClient &&
+      !await _clientStillTrusted(clientId, revision, authContext)) return null;
+  const binding = _bindClientMemory(clientId, namespace, authContext.epoch);
+  if (!binding) return null;
+  const context = _bindingContext(clientId, binding, authContext, revision);
+  try {
+    const identityCache = await caches.open(IDENTITY_CACHE);
+    if (!await _bindingStill(context, requireTrustedClient)) {
+      await _revokeIdentityWrite(clientId, binding);
+      return null;
+    }
+    await identityCache.put(_identityKey(clientId), new Response(
+      _identityPayload(binding.namespace, binding.authEpoch),
+      {
+        headers: {
+          'Content-Type': 'application/json',
+          'Cache-Control': 'no-store'
+        }
+      }
+    ));
+    // put 也可能与 auth transition/导航交错；完成后再验 epoch、generation 与路径。
+    if (!await _bindingStill(context, requireTrustedClient)) {
+      await _revokeIdentityWrite(clientId, binding);
+      return null;
+    }
+    await _pruneIdentityCache(clientId);
+    return context;
+  } catch (_) {
+    // 存储配额/私密模式失败时只保留本进程绑定，且仍需最后一次 fence 复核。
+    return await _bindingStill(context, requireTrustedClient) ? context : null;
+  }
+}
+async function _forgetClient(clientId) {
+  clientId = String(clientId || '');
+  _bumpClientRevision(clientId);
+  CLIENT_BINDINGS.delete(clientId);
+  IDENTITY_PROMPTED_AT.delete(clientId);
+  IDENTITY_WAITERS.delete(clientId);
+  try {
+    const identityCache = await caches.open(IDENTITY_CACHE);
+    await identityCache.delete(_identityKey(clientId));
+  } catch (_) {}
+}
+async function _restoreClient(clientId, authContext, revision) {
+  clientId = String(clientId || '');
+  revision = Number(revision);
+  if (!clientId ||
+      !await _clientStillTrusted(clientId, revision, authContext)) return null;
+  try {
+    const identityCache = await caches.open(IDENTITY_CACHE);
+    if (!await _clientStillTrusted(clientId, revision, authContext)) return null;
+    const stored = await identityCache.match(_identityKey(clientId));
+    if (!stored ||
+        !await _clientStillTrusted(clientId, revision, authContext)) return null;
+    const record = _parseIdentityPayload(await stored.text());
+    if (!record || record.authEpoch !== authContext.epoch ||
+        !await _clientStillTrusted(clientId, revision, authContext)) return null;
+    const binding = _bindClientMemory(
+      clientId,
+      record.namespace,
+      record.authEpoch
+    );
+    const context = _bindingContext(
+      clientId,
+      binding,
+      authContext,
+      revision
+    );
+    return await _bindingStill(context, true) ? context : null;
+  } catch (_) {
+    return null;
+  }
+}
+async function _askClientIdentity(clientId, suppliedAuthContext) {
+  clientId = String(clientId || '');
+  if (!clientId) return null;
+  const authContext = suppliedAuthContext || await _readyAuthContext();
+  if (!authContext || authContext.blocked) return { blocked: true };
+  const revision = _clientRevision(clientId);
+  if (!await _clientStillTrusted(clientId, revision, authContext)) return null;
+  const current = CLIENT_BINDINGS.get(clientId);
+  if (_validBinding(current) && current.authEpoch === authContext.epoch) {
+    const context = _bindingContext(
+      clientId,
+      current,
+      authContext,
+      revision
+    );
+    if (await _bindingStill(context, true)) return context;
+  }
+  const restored = await _restoreClient(clientId, authContext, revision);
+  if (restored) return restored;
+  const prior = IDENTITY_WAITERS.get(clientId);
+  if (prior && prior.generation === authContext.generation &&
+      prior.authEpoch === authContext.epoch &&
+      prior.revision === revision) return prior.promise;
+  const lastPrompt = Number(IDENTITY_PROMPTED_AT.get(clientId) || 0);
+  if (Date.now() - lastPrompt < 5000) return null;
+  IDENTITY_PROMPTED_AT.set(clientId, Date.now());
+  // 页面只能请求“重新核验”，不能提供 namespace。真正身份由 SW 自己带当前
+  // credentials 请求 no-store 端点并读取私有响应头，旧壳/同源脚本无法自报他人账户。
+  const client = await self.clients.get(clientId);
+  if (!_trustedIdentitySource(client) ||
+      !await _clientStillTrusted(clientId, revision, authContext)) return null;
+  try { client.postMessage({ type: IDENTITY_REQUEST }); } catch (_) {}
+  const waiter = {
+    generation: authContext.generation,
+    authEpoch: authContext.epoch,
+    revision: revision,
+    promise: null
+  };
+  waiter.promise = (async () => {
+    try {
+      if (!await _clientStillTrusted(clientId, revision, authContext)) return null;
+      const response = await fetch(IDENTITY_ENDPOINT, {
+        method: 'GET',
+        credentials: 'include',
+        cache: 'no-store',
+        headers: { 'X-BW-Reader-Cache-Identity': '1' }
+      });
+      // 网络完成后必须重新读 Client.url 和共享 epoch，防核验途中转入 proxy/RBI。
+      if (!await _clientStillTrusted(clientId, revision, authContext)) return null;
+      const namespace = response && response.ok
+        ? _responseNamespace(response)
+        : '';
+      return namespace
+        ? _bindClient(
+            clientId,
+            namespace,
+            authContext,
+            revision,
+            true
+          )
+        : null;
+    } catch (_) {
+      return null;
+    } finally {
+      if (IDENTITY_WAITERS.get(clientId) === waiter) {
+        IDENTITY_WAITERS.delete(clientId);
+      }
+    }
+  })();
+  IDENTITY_WAITERS.set(clientId, waiter);
+  return waiter.promise;
+}
+async function _bindingForEvent(event) {
+  const clientId = String(event && event.clientId || '');
+  if (!clientId) return null;
+  const authContext = await _readyAuthContext();
+  if (!authContext || authContext.blocked) return { blocked: true };
+  const revision = _clientRevision(clientId);
+  const client = await self.clients.get(clientId);
+  if (!_trustedIdentitySource(client)) {
+    await _forgetClient(clientId);
+    return null;
+  }
+  if (!await _clientStillTrusted(clientId, revision, authContext)) return null;
+  return _askClientIdentity(clientId, authContext);
+}
+function _responseNamespace(response) {
+  try {
+    const value = response && response.headers &&
+      response.headers.get(PRIVATE_NAMESPACE_HEADER);
+    return _validNamespace(value) ? String(value).trim() : '';
+  } catch (_) {
+    return '';
+  }
+}
+async function _clearPrivateCaches(namespace, keepKnownAuthEpoch) {
+  namespace = String(namespace || '').trim();
+  const rememberedEpoch = keepKnownAuthEpoch ? KNOWN_AUTH_EPOCH : '';
+  // 第一个 await 之前立即令内存 binding 与全部在途 waiter 失效。
+  _invalidateLocalBindings(rememberedEpoch);
+  const names = await caches.keys();
+  const targets = _validNamespace(namespace)
+    ? new Set(names.filter((name) =>
+        _privateCacheBelongsTo(name, namespace)
+      ))
+    : new Set(names.filter((name) =>
+        name.startsWith(PRIVATE_CACHE_PREFIX) ||
+        name.startsWith('bw-data-') ||
+        name.startsWith('bw-nav-') ||
+        name === IDENTITY_CACHE ||
+        name === 'pdf-cache-v3' ||
+        name.startsWith('pdf-pages-')
+      ));
+  await Promise.all(Array.from(targets).map((name) => caches.delete(name)));
+  if (_validNamespace(namespace) && names.includes(IDENTITY_CACHE)) {
+    const identityCache = await caches.open(IDENTITY_CACHE);
+    const keys = await identityCache.keys();
+    await Promise.all(keys.map(async (key) => {
+      try {
+        const stored = await identityCache.match(key);
+        const record = stored
+          ? _parseIdentityPayload(await stored.text())
+          : null;
+        if (record && record.namespace === namespace) {
+          await identityCache.delete(key);
+        }
+      } catch (_) {}
+    }));
+  }
+}
+async function _purgePrivateHtmlCaches() {
+  const names = await caches.keys();
+  await Promise.all(names.map(async (name) => {
+    const cache = await caches.open(name);
+    const requests = await cache.keys();
+    await Promise.all(requests.map((request) => {
+      let path = '';
+      try { path = new URL(request.url).pathname; } catch (_) {}
+      return PRIVATE_HTML_PATHS.has(path) ? cache.delete(request) : null;
+    }));
+  }));
+}
+async function _purgePrivateHtmlShell(requestUrl) {
+  // 日常导航只处理体量很小的 shell cache。ignoreSearch 会一次删除同一路径的
+  // 所有旧 query 变体，无需遍历可能包含数千页图/文字层的 pdf-cache-v3。
+  let origin = '';
+  try { origin = new URL(requestUrl).origin; } catch (_) { return; }
+  const shell = await caches.open(SHELL);
+  await Promise.all(Array.from(PRIVATE_HTML_PATHS).map((path) =>
+    shell.delete(origin + path, { ignoreSearch: true })
+  ));
+}
 self.addEventListener('install', (e) => self.skipWaiting());
 self.addEventListener('activate', (e) => {
   e.waitUntil((async () => {
     const keys = await caches.keys();
-    await Promise.all(keys.filter(k => (k.startsWith('pdf-pages-') || k.startsWith('pdf-cache-')) && k !== CACHE).map(k => caches.delete(k)));
+    const authState = await _readAuthState();
+    // v3/无 epoch 的早期 v4 没有完整 fence。只保留当前 ready epoch 的 v4，
+    // 同账户 active client 的 SW 进程重启仍可离线恢复。
+    await Promise.all(keys.filter((k) =>
+      k === 'pdf-cache-v3' ||
+      k.startsWith('pdf-pages-') ||
+      (k.startsWith('pdf-cache-') && !k.startsWith(PRIVATE_CACHE_PREFIX)) ||
+      (k.startsWith(PRIVATE_CACHE_PREFIX) && (
+        authState.pending || !_validAuthEpoch(authState.epoch) ||
+        !k.endsWith('-' + authState.epoch)
+      ))
+    ).map((k) => caches.delete(k)));
+    // 旧 pdf-shell-v1 曾保存带账户 namespace/ticket 的 reader HTML；升级时跨所有
+    // Cache Storage 清掉，避免切换账户或离线启动时复活旧 window.__USER__。
+    await _purgePrivateHtmlCaches();
     await self.clients.claim();
+    await _pruneIdentityCache('');
   })());
 });
+self.addEventListener('message', (event) => {
+  const data = event.data || {};
+  const source = event.source;
+  const reply = (payload) => {
+    try {
+      if (event.ports && event.ports[0]) event.ports[0].postMessage(payload);
+    } catch (_) {}
+  };
+  if (data.type === IDENTITY_REBIND) {
+    if (!_trustedIdentitySource(source)) {
+      reply({ ok: false });
+      return;
+    }
+    const work = _askClientIdentity(source.id);
+    event.waitUntil(work.then((binding) => {
+      reply({ ok: !!(binding && !binding.blocked) });
+    }));
+    return;
+  }
+  if (data.type === CLEAR_PRIVATE) {
+    const sourcePath = _sourcePath(source);
+    if (!TRUSTED_IDENTITY_PATHS.has(sourcePath) && !AUTH_CLEAR_PATHS.has(sourcePath)) {
+      reply({ ok: false });
+      return;
+    }
+    const scope = data.scope === 'current' ? 'current' : 'all';
+    const work = (async () => {
+      const binding = scope === 'current'
+        ? await _askClientIdentity(String(source && source.id || ''))
+        : null;
+      if (scope === 'current') {
+        if (!binding || binding.blocked ||
+            !_validNamespace(binding.namespace)) return false;
+        await _clearPrivateCaches(binding.namespace, true);
+        return true;
+      }
+      const token = await _beginAuthTransition();
+      try {
+        await _clearPrivateCaches('', false);
+      } finally {
+        try {
+          await _clearPrivateCaches('', false);
+        } finally {
+          await _finishAuthTransition(token);
+        }
+      }
+      return true;
+    })();
+    event.waitUntil(work.then((ok) => reply({ ok: ok })));
+    return;
+  }
+  if (data.type === DELETE_PRIVATE_BOOK) {
+    const file = String(data.file || '').trim();
+    if (!_trustedIdentitySource(source) || !file || file.length > 2048) {
+      reply({ ok: false });
+      return;
+    }
+    const work = _askClientIdentity(source.id).then(async (binding) => {
+      if (!binding || binding.blocked ||
+          !await _bindingStill(binding, true)) return -1;
+      const cache = await caches.open(
+        _privateCacheName(binding.namespace, binding.authEpoch)
+      );
+      if (!await _bindingStill(binding, true)) return -1;
+      const requests = await cache.keys();
+      if (!await _bindingStill(binding, true)) return -1;
+      let deleted = 0;
+      await Promise.all(requests.map(async (cachedRequest) => {
+        if (!await _bindingStill(binding, true)) return;
+        try {
+          const cachedUrl = new URL(cachedRequest.url);
+          if (cachedUrl.searchParams.get('file') !== file) return;
+          if (await cache.delete(cachedRequest)) deleted++;
+        } catch (_) {}
+      }));
+      return deleted;
+    });
+    event.waitUntil(work.then((deleted) => {
+      reply({ ok: deleted >= 0, deleted: Math.max(0, deleted) });
+    }));
+  }
+});
 async function _cacheFirst(req, cname) {
-  const cache = await caches.open(cname || CACHE);
+  const cache = await caches.open(cname);
   const hit = await cache.match(req);
   if (hit) return hit;
   try {
@@ -1213,81 +2297,236 @@ async function _cacheFirst(req, cname) {
     throw err;
   }
 }
-// 网络优先+离线回落:在线行为零变化(服务端副作用如查词日志照常发生),断网回最后一次副本。
-// keyUrl 可归一缓存键(如 dict-quick 按词归一,丢 context/page 等易变参 → 离线命中率高)。
-async function _netFallback(req, keyUrl) {
-  const cache = await caches.open(CACHE);
-  const key = keyUrl || req;
+async function _readPrivateHit(binding, key) {
+  if (!binding || binding.blocked ||
+      !await _bindingStill(binding, true)) return null;
+  const cacheName = _privateCacheName(
+    binding.namespace,
+    binding.authEpoch
+  );
+  if (!cacheName) return null;
+  const cache = await caches.open(cacheName);
+  if (!await _bindingStill(binding, true)) return null;
+  const hit = await cache.match(key);
+  // match 可能与 auth transition 并发；旧响应在返回页面前必须再过一次 fence。
+  if (!hit || !await _bindingStill(binding, true)) return null;
+  return hit;
+}
+async function _putPrivate(binding, key, response) {
+  if (!binding || binding.blocked || !response ||
+      !await _bindingStill(binding, true)) return false;
+  const cacheName = _privateCacheName(
+    binding.namespace,
+    binding.authEpoch
+  );
+  if (!cacheName) return false;
+  const cache = await caches.open(cacheName);
+  if (!await _bindingStill(binding, true)) return false;
+  await cache.put(key, response.clone());
+  // put 已开始后发生清理时，删除这个晚到的 key。即使删除失败，旧 epoch cache
+  // 也不会被新代际重新打开。
+  if (!await _bindingStill(binding, true)) {
+    try { await cache.delete(key); } catch (_) {}
+    return false;
+  }
+  return true;
+}
+async function _fetchVerified(event, binding) {
+  if (!binding) {
+    // 未核验 client 可继续在线请求，但绝不打开、读取或写入任何私有 cache。
+    const authContext = await _readyAuthContext();
+    if (!authContext || authContext.blocked) {
+      return { response: Response.error(), binding: null, blocked: true };
+    }
+    const response = await fetch(event.request, { cache: 'no-store' });
+    return await _authContextStill(authContext)
+      ? { response: response, binding: null }
+      : { response: Response.error(), binding: null, blocked: true };
+  }
+  if (binding.blocked || !await _bindingStill(binding, true)) {
+    return { response: Response.error(), binding: null, blocked: true };
+  }
+  const response = await fetch(event.request, { cache: 'no-store' });
+  // 网络等待期间若发生登录/登出/注册/Bearer 身份切换，旧响应不能交给新页面。
+  if (!await _bindingStill(binding, true)) {
+    return { response: Response.error(), binding: null, blocked: true };
+  }
+  const headerNamespace = _responseNamespace(response);
+  // 普通 API/资源响应绝不能建立身份；只有正式导航或 identity endpoint 可以。
+  // 若服务器头与现有绑定不一致，立即撤销该 client，当前响应也不落任何 cache。
+  if (headerNamespace !== binding.namespace) {
+    await _forgetClient(binding.clientId);
+    return { response: Response.error(), binding: null, blocked: true };
+  }
+  return { response: response, binding: binding };
+}
+async function _privateCacheFirst(event, keyUrl) {
+  const binding = await _bindingForEvent(event);
+  if (binding && binding.blocked) return Response.error();
+  const key = keyUrl || event.request;
+  const hit = await _readPrivateHit(binding, key);
+  if (hit) return hit;
   try {
-    const resp = await fetch(req);
-    if (resp && resp.ok) cache.put(key, resp.clone());
-    return resp;
+    const result = await _fetchVerified(event, binding);
+    if (result.response && result.response.ok && result.binding) {
+      if (!await _putPrivate(result.binding, key, result.response)) {
+        return Response.error();
+      }
+    }
+    return result.response;
   } catch (err) {
-    const hit = await cache.match(key);
+    const fallback = await _readPrivateHit(binding, key);
+    if (fallback) return fallback;
+    throw err;
+  }
+}
+// 网络优先+同账户离线回落。未绑定 client 不会打开/写入任何私有 cache。
+async function _privateNetFallback(event, keyUrl) {
+  const binding = await _bindingForEvent(event);
+  if (binding && binding.blocked) return Response.error();
+  const key = keyUrl || event.request;
+  try {
+    const result = await _fetchVerified(event, binding);
+    if (result.response && result.response.ok && result.binding) {
+      if (!await _putPrivate(result.binding, key, result.response)) {
+        return Response.error();
+      }
+    }
+    return result.response;
+  } catch (err) {
+    const hit = await _readPrivateHit(binding, key);
     if (hit) return hit;
     throw err;
   }
 }
-async function _swr(req, keyUrl) {
-  const cache = await caches.open(CACHE);
-  const key = keyUrl || req;
-  const hit = await cache.match(key);
-  const net = fetch(req).then(resp => { if (resp && resp.ok) cache.put(key, resp.clone()); return resp; }).catch(() => null);
-  return hit || (await net) || Response.error();
+async function _privateSWR(event, keyUrl) {
+  const binding = await _bindingForEvent(event);
+  if (binding && binding.blocked) return Response.error();
+  const key = keyUrl || event.request;
+  const hit = await _readPrivateHit(binding, key);
+  const net = _fetchVerified(event, binding).then(async (result) => {
+    if (result.response && result.response.ok && result.binding) {
+      if (!await _putPrivate(result.binding, key, result.response)) {
+        return Response.error();
+      }
+    }
+    return result.response;
+  }).catch(() => null);
+  if (hit) {
+    // 建立后台任务后再做一次最后校验，避免期间刚好开始身份切换。
+    if (!await _bindingStill(binding, true)) {
+      return (await net) || Response.error();
+    }
+    if (event.waitUntil) event.waitUntil(net.then(() => undefined));
+    return hit;
+  }
+  return (await net) || Response.error();
+}
+async function _runAuthTransitionRequest(request) {
+  // pending 必须先于任何删除发布；两个 SW 与所有在途读写会立即 fail closed。
+  const token = await _beginAuthTransition();
+  try {
+    await _clearPrivateCaches('', false);
+    return await fetch(request, { cache: 'no-store' });
+  } finally {
+    try {
+      // 身份 cookie/token 已可能改变；fetch 抛错或与另一切换交错时也再次
+      // 清理。distinct pending key
+      // 保证当前任务只能解除自己的阻塞标记。
+      await _clearPrivateCaches('', false);
+    } finally {
+      await _finishAuthTransition(token);
+    }
+  }
 }
 self.addEventListener('fetch', (e) => {
   let url;
   try { url = new URL(e.request.url); } catch (_) { return; }
-  if (e.request.method !== 'GET') return;
   const p = url.pathname;
-  if (p === '/pdf/api/page-image' || p === '/pdf/api/page-chars') { e.respondWith(_cacheFirst(e.request)); return; }
+  // 登录/登出、POST 注册以及 browser Bearer 会话切换统一走共享 auth epoch。
+  // 仅同源请求进入此分支；静态 shell 不动。
+  if (url.origin === self.location.origin &&
+      _isAuthTransitionRequest(url, e.request)) {
+    e.respondWith(_runAuthTransitionRequest(e.request));
+    return;
+  }
+  if (e.request.method !== 'GET') return;
+  if (p === '/pdf/api/page-image' || p === '/pdf/api/page-chars') {
+    e.respondWith(_privateCacheFirst(e));
+    return;
+  }
   // 壳资产(/static/*,URL 带 ?v= 版本戳 → immutable 语义)cache-first:弱网秒开、离线能启动阅读器。
   // SW 作用域只限定它控制哪些**页面**,被控页面发出的任意 URL 请求都会经过这里(含 /static/)。
   if (p.startsWith('/static/')) { e.respondWith(_cacheFirst(e.request, SHELL)); return; }
-  // 开书页/书架导航:network-first,离线回退最后一次成功的 HTML 副本(配合 31-localbook 整本落盘=离线可读)
-  if (e.request.mode === 'navigate' && (p === '/pdf/' || p === '/pdf/view')) {
+  // 含账户身份的正式 reader/书架 HTML 永远 network-only + no-store。
+  // 离线时宁可导航失败并保留当前 PWA fallback，也绝不能用旧账户壳启动 extension provider。
+  if (e.request.mode === 'navigate' && PRIVATE_HTML_PATHS.has(p)) {
     e.respondWith((async () => {
-      const cache = await caches.open(SHELL);
-      // 键按 file 归一(丢 page= 等易变参):换页开同一本书也能命中离线副本
-      const key = (p === '/pdf/view') ? ('/pdf/view?file=' + encodeURIComponent(url.searchParams.get('file') || '')) : '/pdf/';
-      try {
-        const resp = await fetch(e.request);
-        if (resp && resp.ok) cache.put(key, resp.clone());
-        return resp;
-      } catch (err) {
-        const hit = await cache.match(key);
-        if (hit) return hit;
-        throw err;
+      const authContext = await _readyAuthContext();
+      if (!authContext || authContext.blocked) return Response.error();
+      // 激活时已经跨 Cache Storage 清理遗留；日常只按已知路径清 shell，
+      // 避免为了导航扫描 pdf-cache-v3 中成千上万张页图。
+      await _purgePrivateHtmlShell(e.request.url);
+      if (!await _authContextStill(authContext)) return Response.error();
+      const response = await fetch(e.request, { cache: 'no-store' });
+      if (!await _authContextStill(authContext)) return Response.error();
+      const namespace = _responseNamespace(response);
+      const targetClientId = String(e.resultingClientId || e.clientId || '');
+      // 只有 SW 亲自 network fetch 到的书架或四个正式书籍入口响应头能建立首次绑定；
+      // 已退役的 /pdf/web/live 永远不能成为账户/扩展 provider 身份来源。
+      if (TRUSTED_IDENTITY_PATHS.has(p) && namespace && targetClientId) {
+        const revision = _clientRevision(targetClientId);
+        const binding = await _bindClient(
+          targetClientId,
+          namespace,
+          authContext,
+          revision,
+          false
+        );
+        if (!binding) return Response.error();
       }
+      if (!await _authContextStill(authContext)) return Response.error();
+      return response;
     })());
     return;
   }
-  if (p === '/pdf/api/page-figures') { e.respondWith(_swr(e.request)); return; }   // 徽标:秒回缓存 + 后台更新
-  if (p === '/pdf/api/book-meta') { e.respondWith(_swr(e.request)); return; }   // 书元数据:开机必经,离线回缓存(31-localbook 整本落盘的前提)
+  if (p === '/pdf/api/page-figures') { e.respondWith(_privateSWR(e)); return; }   // 徽标:秒回缓存 + 后台更新
+  if (p === '/pdf/api/book-meta') { e.respondWith(_privateSWR(e)); return; }   // 书元数据:开机必经,离线回缓存(31-localbook 整本落盘的前提)
   // 浮层回滚为网络优先(2026-07-20 用户实锤"标记掌握后下划线不消失/横跳"):overlay 是**动态**数据
   // (服务端已按掌握态过滤),SWR 秒回旧缓存=写后读旧。真·local-first 方案(服务端回全候选+客户端本地
   // 掌握集过滤,overlay 变静态)排期实施,见 references/pdf-reader.md §18。
-  if (p === '/pdf/api/page-overlay') { e.respondWith(_netFallback(e.request)); return; }
+  if (p === '/pdf/api/page-overlay') { e.respondWith(_privateNetFallback(e)); return; }
   if (p === '/pdf/api/dict-quick') {   // 查词 local-first:查过的词本地**秒答**;后台请求照发→学习回写(日志/暴露)不断,新数据落缓存
     const w = url.searchParams.get('word') || '', lg = url.searchParams.get('langs') || '';
-    e.respondWith(_swr(e.request, '/pdf/api/dict-quick?word=' + encodeURIComponent(w) + '&langs=' + encodeURIComponent(lg)));
+    e.respondWith(_privateSWR(e, '/pdf/api/dict-quick?word=' + encodeURIComponent(w) + '&langs=' + encodeURIComponent(lg)));
     return;
   }
   // 侧数据(高亮/便签/生词映射/词组):在线永远走网络(写后读必新,零失效难题),断网回最后副本可读
-  if (p === '/pdf/api/review-queue') { e.respondWith(_netFallback(e.request)); return; }   // 复习队列:离线回最后快照
+  if (p === '/pdf/api/review-queue') { e.respondWith(_privateNetFallback(e)); return; }   // 复习队列:离线回最后快照
   if (p === '/pdf/api/highlights' || p === '/pdf/api/notes' || p === '/pdf/api/vocab-mastery-map'
-      || p === '/pdf/api/phrases' || p === '/pdf/api/phrase-mark') { e.respondWith(_netFallback(e.request)); return; }
+      || p === '/pdf/api/phrases' || p === '/pdf/api/phrase-mark') { e.respondWith(_privateNetFallback(e)); return; }
   if (p === '/pdf/api/epub-manifest' || p === '/pdf/api/epub-section') {
     const f = url.searchParams.get('file') || '';
-    if (f.indexOf('收藏夹') === -1) { e.respondWith(_swr(e.request)); return; }   // 收藏夹物化 EPUB 会重建 → 不缓存
+    if (f.indexOf('收藏夹') === -1) { e.respondWith(_privateSWR(e)); return; }   // 收藏夹物化 EPUB 会重建 → 不缓存
   }
 });
 """
+
+_SW_JS = _SW_JS.replace(READER_SW_AUTH_PLACEHOLDER, READER_SW_AUTH_JS)
+if READER_SW_AUTH_PLACEHOLDER in _SW_JS:
+    raise RuntimeError("reader SW auth placeholder was not replaced")
 
 # ── 跨设备/跨上下文同步阅读器设置+进度+排版(Kindle/Google Books 做法)──
 # iOS 把"装到主屏的 PWA"和 Safari 当成独立存储沙箱 → localStorage 不互通。把这些 pdf-* 偏好
 # 存服务端(按登录用户),前端进页面先灌入 localStorage、改动防抖回传 → 设置/进度/旋转排版跨端同步。
 _PDF_PREFS_DIR = CLAUDE_DIR / "state" / "pdf-prefs"
+
+
+def _reader_deployment_probe() -> bool:
+    """部署浏览器探测只读标记；只能收缩副作用，不能授予任何权限。"""
+    return request.headers.get("X-BW-Reader-Deployment-Probe") == "1"
+
+
 def _prefs_path():
     import re as _re
     user = (session.get("username") or "anon")
@@ -1321,32 +2560,43 @@ def _lastopen_touch(rel: str):
         pass
 
 # ── 续读位置(服务端记录,2026-07-03):前端"随时上传现在正在看的页/章"→ 开书跨设备接续 ──
-# 全局单文件 sidecar(键=vault 相对路径,值={kind:'pdf'|'epub', pos:int, ts};跟 highlights/favorites
-# 等阅读器 sidecar 一样不分用户)。读取不设 GET 轮询:/pdf/view 把记录折进模板 page(__PDF_CFG.page)、
+# 旧全局单文件由 reader_sidecar_store 一次性只读认领；正式路径按认证账户分区。
+# 键=vault 相对路径,值={kind:'pdf'|'epub', pos:int, ts}。读取不设 GET 轮询:
+# /pdf/view 把记录折进模板 page(__PDF_CFG.page)、
 # /pdf/epub/view 注入 EPUB_CFG.serverPos+serverPosTs,前端零异步等待。收藏夹书(/pdf/fav/open)零进度是既定设计,不接此系统。
 _READER_POS_FILE = CLAUDE_DIR / "state" / "reader-positions.json"
 _READER_POS_LOCK = __import__("threading").Lock()
 
-def _reading_pos_load() -> dict:
-    try:
-        d = json.loads(_READER_POS_FILE.read_text("utf-8"))
-        return d if isinstance(d, dict) else {}
-    except Exception:
-        return {}
 
-def _reading_pos_get(rel: str):
+def _reading_pos_path(identity=None) -> Path:
+    return _reader_sidecar_path("reader-positions.json", identity=identity)
+
+
+def _reading_pos_load(identity=None) -> dict:
+    return _reader_sidecar_json(
+        _reading_pos_path(identity),
+        {},
+        dict,
+    )
+
+
+def _reading_pos_get(rel: str, identity=None):
     """rel(vault 相对路径)的服务端续读位置(int:PDF=页码 1-based / EPUB=节 idx 0-based);无记录/不合法 → None。"""
-    rec = _reading_pos_load().get(rel)
+    rec = _reading_pos_load(identity).get(rel)
     try:
         pos = int(rec.get("pos"))
         return pos if pos >= 0 else None
     except (AttributeError, TypeError, ValueError):
         return None
 
-@bp.route("/api/reading-pos", methods=["POST"])
+@bp.route("/api/reading-pos", methods=["GET", "POST"])
 def pdf_api_reading_pos():
-    """前端节流上报当前阅读位置 {file, kind:'pdf'|'epub', pos:int}。原子写(tmp+os.replace)+ 进程内锁。
+    """GET returns this account's positions; POST records one current position.
+
+    前端节流上报 {file, kind:'pdf'|'epub', pos:int}。写入走账户/数据组锁与原子 replace。
     写入端已各自过校验(EPUB=_jumping+loaded 校验后的 topIdx / PDF=视口交叠最多页),服务端只做基本合法性。"""
+    if request.method == "GET":
+        return jsonify({"ok": True, "positions": _reading_pos_load()})
     body = request.get_json(silent=True) or {}
     _rel_in = (body.get("file") or "").strip()
     if _rel_in.lstrip("/").startswith(_FAV_BOOK_PREFIX):
@@ -1366,15 +2616,306 @@ def pdf_api_reading_pos():
         return jsonify({"ok": True, "skipped": "fav"})   # 收藏夹物化书不记续读位置(规格 D:零进度,服务端拒收更稳)
     try:
         with _READER_POS_LOCK:
-            m = _reading_pos_load()
-            m[rel_clean] = {"kind": kind, "pos": pos, "ts": int(time.time())}
-            _READER_POS_FILE.parent.mkdir(parents=True, exist_ok=True)
-            tmp = _READER_POS_FILE.with_suffix(".json.tmp")
-            tmp.write_text(json.dumps(m, ensure_ascii=False), "utf-8")
-            tmp.replace(_READER_POS_FILE)
+            identity = _reader_storage_identity_current()
+            with _reader_sidecar_store().lock(
+                identity, "reader-positions"
+            ):
+                m = _reading_pos_load(identity)
+                m[rel_clean] = {
+                    "kind": kind,
+                    "pos": pos,
+                    "ts": int(time.time()),
+                }
+                from reader_sidecar_store import atomic_write_json
+                atomic_write_json(
+                    _reading_pos_path(identity),
+                    m,
+                    indent=None,
+                )
     except Exception as ex:
         return jsonify({"ok": False, "error": str(ex)}), 500
     return jsonify({"ok": True, "pos": pos})
+
+
+# ════ 双向上下文同步(2026-07-26)════════════════════════════════════════════════
+# 一个总开关管两个方向:①网页/PWA/扩展把「当前活动文档」上报到 Pi;②Pi 生成 context.md
+# 经 SSH 更新 Windows。默认关。关闭时前端一个字节都不发(localStorage 镜像 gate),服务端
+# 这里再 fail-closed 兜一道——旧标签页/别的设备即使还在发也不写盘。真值只此一份文件,
+# Pi 侧推送守护进程读同一个,不存在「前端以为关了、后台还在推」的错位。
+# 注:Windows→Pi 的 assistant_turn 回写属**被动显示**(桥接命令到达即写库、侧栏自然显示),
+# 不受此开关约束,也不需要前端为它轮询。
+_CTX_SYNC_LOCK = __import__("threading").Lock()
+# 活动状态新鲜度阈值:前端可见时每 60s 一次心跳,3 次不到就判定「不新鲜」。
+# 快照宁可说「未知」也不许拿历史记录里的旧书冒充当前(本次修复的核心约束)。
+_CTX_ACTIVE_FRESH_SEC = 180
+_CTX_HOSTS = {"pdf", "epub", "html", "web"}
+
+
+def _ctx_sync_path(identity=None) -> Path:
+    return _reader_sidecar_path("reader-context-sync.json", identity=identity)
+
+
+def _ctx_sync_enabled(identity=None) -> bool:
+    return bool(_reader_sidecar_json(_ctx_sync_path(identity), {}, dict).get("enabled"))
+
+
+def _reader_active_path(identity=None) -> Path:
+    return _reader_sidecar_path("reader-active.json", identity=identity)
+
+
+def _reader_active_load(identity=None) -> dict:
+    return _reader_sidecar_json(_reader_active_path(identity), {}, dict)
+
+
+def _ctx_write_json(path: Path, data: dict) -> None:
+    from reader_sidecar_store import atomic_write_json
+    atomic_write_json(path, data, indent=None)
+
+
+@bp.route("/api/context-sync", methods=["GET", "POST"])
+def pdf_api_context_sync():
+    """双向上下文同步总开关(默认关)。GET → {ok, enabled, ts}; POST {enabled:bool} → 落盘。
+
+    开启后同时允许两个方向;关闭时两个方向都停,并**立即清空活动状态**——否则关掉之后
+    快照还捧着最后一条 active 当「当前在读」,又变成本次要修的那种冒充。"""
+    if request.method == "GET":
+        cfg = _reader_sidecar_json(_ctx_sync_path(), {}, dict)
+        return jsonify({
+            "ok": True,
+            "enabled": bool(cfg.get("enabled")),
+            "ts": cfg.get("ts") or 0,
+        })
+    body = request.get_json(silent=True) or {}
+    if "enabled" not in body:
+        return jsonify({"ok": False, "error": "missing enabled"}), 400
+    enabled = bool(body.get("enabled"))
+    try:
+        with _CTX_SYNC_LOCK:
+            identity = _reader_storage_identity_current()
+            with _reader_sidecar_store().lock(identity, "reader-context-sync"):
+                _ctx_write_json(_ctx_sync_path(identity), {
+                    "enabled": enabled,
+                    "ts": int(time.time()),
+                })
+            if not enabled:
+                with _reader_sidecar_store().lock(identity, "reader-active"):
+                    _ctx_write_json(_reader_active_path(identity), {})
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
+    return jsonify({"ok": True, "enabled": enabled})
+
+
+# ── 出向上下文:绘图版本 + 焦点(任务书 A5)。同样纯增量,只读墨迹 sidecar,不改写路径 ──
+try:
+    import reader_outgoing_context as _ROC
+    _OUTGOING = _ROC.register_outgoing_context(
+        bp, pdf=__import__("sys").modules[__name__],
+        jsonify=jsonify, request=request, session=session)
+except Exception as _e:
+    _OUTGOING = {"error": str(_e)}
+
+
+# ── 无 AI 直接命令服务(任务书 A4):**纯增量**挂两条新 endpoint,不触碰任何既有路由 ──
+# 解析不到确定性底座的动作不会被接线,调用时明确报"未接线",而不是给假成功。
+try:
+    import reader_direct_wire as _RDW
+    _DIRECT_CMD = _RDW.register_direct_commands(
+        bp, pdf=__import__("sys").modules[__name__],
+        jsonify=jsonify, request=request, session=session)
+except Exception as _e:   # 接线失败绝不能拖垮阅读器主路径
+    _DIRECT_CMD = {"wired": [], "unwired": ["<接线异常>"], "error": str(_e)}
+
+
+_TURN_ACK_PATH = CLAUDE_DIR / "state" / "reader-bridge" / "acks.json"
+_TURN_ACK_KEEP = 200          # 只留最近 N 条:回执是瞬时信号,不是历史
+_TURN_ACK_LOCK = __import__("threading").Lock()
+
+
+@bp.route("/api/turn-ack", methods=["POST"])
+def pdf_api_turn_ack():
+    """前端渲染完某一轮后回执 {turn_id}。桥接器据此把「已写库」和「前端已渲染」分开报。
+
+    没有它,外部只能知道"写进去了",无法区分侧栏是没开、还是开着但渲染失败 ——
+    用户明确要求回执要分清这两层。"""
+    if not session.get("user_id"):
+        return jsonify({"ok": False, "error": "未登录"}), 401
+    tid = re.sub(r"[^A-Za-z0-9_.:-]", "", str((request.get_json(silent=True) or {}).get("turn_id") or ""))[:64]
+    if not tid:
+        return jsonify({"ok": False, "error": "turn_id 必填"}), 400
+    try:
+        with _TURN_ACK_LOCK:
+            _TURN_ACK_PATH.parent.mkdir(parents=True, exist_ok=True)
+            try:
+                m = json.loads(_TURN_ACK_PATH.read_text("utf-8"))
+                if not isinstance(m, dict):
+                    m = {}
+            except Exception:
+                m = {}
+            m[tid] = {"ts": time.time(), "n": int(m.get(tid, {}).get("n", 0)) + 1}
+            if len(m) > _TURN_ACK_KEEP:
+                for k in sorted(m, key=lambda x: m[x].get("ts", 0))[:len(m) - _TURN_ACK_KEEP]:
+                    m.pop(k, None)
+            from reader_sidecar_store import atomic_write_json
+            atomic_write_json(_TURN_ACK_PATH, m, indent=None)
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
+    return jsonify({"ok": True, "turn_id": tid})
+
+
+@bp.route("/api/active-reading", methods=["GET", "POST"])
+def pdf_api_active_reading():
+    """当前活动文档(唯一权威源)。POST {kind, file|url, pos, title?, total?, selection?} → 单条记录。
+
+    ⚠ 与 /api/reading-pos 的区别就是这次 bug 的根因:那张表是「每本书各自的续读位置」,
+    按 ts 取最大只等于「最后一次翻过页的书」——一本两天前读完的书会一直霸榜,而此刻正开着
+    却没翻页的书根本不在榜首。快照据此把《応用情報技術者》当成当前在读。这里只存**一条**:
+    此刻屏幕上是哪本、第几页,带 ts 供新鲜度判定。"""
+    if request.method == "GET":
+        rec = _reader_active_load()
+        ts = int(rec.get("ts") or 0)
+        age = max(0, int(time.time()) - ts) if ts else None
+        return jsonify({
+            "ok": True,
+            "enabled": _ctx_sync_enabled(),
+            "active": rec or None,
+            "fresh": bool(ts and age is not None and age <= _CTX_ACTIVE_FRESH_SEC),
+            "age_sec": age,
+            "fresh_window_sec": _CTX_ACTIVE_FRESH_SEC,
+        })
+    if not _ctx_sync_enabled():
+        # fail-closed:开关是关的就不落盘(前端本该不发,这里防旧标签页/别的设备漏网)
+        return jsonify({"ok": False, "error": "context sync disabled"}), 409
+    body = request.get_json(silent=True) or {}
+    kind = (body.get("kind") or "").strip().lower()
+    if kind not in _CTX_HOSTS:
+        return jsonify({"ok": False, "error": "bad kind"}), 400
+    rec = {"kind": kind, "ts": int(time.time())}
+    if kind == "web":
+        url = (body.get("url") or "").strip()[:500]
+        if not url.startswith(("http://", "https://")):
+            return jsonify({"ok": False, "error": "bad url"}), 400
+        rec["url"] = url
+    else:
+        _rel_in = (body.get("file") or "").strip()
+        if VB is not None and VB.is_view_ref(_rel_in):
+            # 合并书(vbook):用户看到的是「这本合并书的第 N 页」,快照就该这么说。
+            # 记录视图身份 + 全局页;同时解析出真实卷/卷内页,供页要点、插图、标注等按卷取数据。
+            try:
+                VB.get(_rel_in)                      # 校验存在/不过期(未知或 stale 会抛)
+                rec["file"] = _rel_in
+                rec["vbook"] = True
+                _gp = body.get("pos")
+                if _gp not in (None, "", 0):
+                    _mrel, _lp = VB.resolve_view(_rel_in, _gp, revision=body.get("vrev"))
+                    rec["member"], rec["member_pos"] = _mrel, int(_lp)
+            except VB.VbookError as e:
+                return _vb_err(e)
+        else:
+            ap = _safe_vault_path(_rel_in)
+            if not ap:
+                return jsonify({"ok": False, "error": "bad file"}), 404
+            rec["file"] = ap.relative_to(OBSIDIAN_ROOT.resolve()).as_posix()
+    if body.get("pos") is not None:
+        try:
+            pos = int(body.get("pos"))
+        except (TypeError, ValueError):
+            return jsonify({"ok": False, "error": "bad pos"}), 400
+        if pos < 0 or pos > 10_000_000:
+            return jsonify({"ok": False, "error": "bad pos"}), 400
+        rec["pos"] = pos
+    for key, limit in (("title", 200), ("reason", 40)):
+        val = body.get(key)
+        if isinstance(val, str) and val.strip():
+            rec[key] = val.strip()[:limit]
+    # 选区:**清空也要显式落库**。只要请求带了 selection 键就记录,空串=「当前无选区」。
+    # 若这里像 title 那样"空就跳过",快照读到的会是上一次的旧选区(或字段静默消失),
+    # 外部助手就会拿着早已取消的选中内容做判断 —— 用户明确要求禁止这种静默退化。
+    if "selection" in body:
+        _sel = body.get("selection")
+        _sel = _sel.strip()[:400] if isinstance(_sel, str) else ""
+        rec["selection"] = _sel
+        rec["has_selection"] = bool(_sel)
+        for _k, _lim in (("sel_page", None), ("sel_anchor", 200)):
+            _v = body.get(_k)
+            if _k == "sel_page":
+                try:
+                    rec["sel_page"] = int(_v)
+                except (TypeError, ValueError):
+                    pass
+            elif isinstance(_v, str) and _v.strip():
+                rec[_k] = _v.strip()[:_lim]
+    try:
+        total = int(body.get("total"))
+        if 0 < total <= 10_000_000:
+            rec["total"] = total
+    except (TypeError, ValueError):
+        pass
+    try:
+        with _CTX_SYNC_LOCK:
+            identity = _reader_storage_identity_current()
+            with _reader_sidecar_store().lock(identity, "reader-active"):
+                _ctx_write_json(_reader_active_path(identity), rec)
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)}), 500
+    _maybe_emit_page_context(rec, body)
+    return jsonify({"ok": True, "ts": rec["ts"]})
+
+
+# 已发过 page.context 的 (file,page):同一次停留不重复发;换页即失效。
+_PAGE_CTX_SENT: dict = {}
+
+
+def _maybe_emit_page_context(rec: dict, body: dict) -> None:
+    """翻页稳定(dwell)或页上即时操作(选区)时,发一条整页上下文到出向 journal。
+
+    合同(共享便签 rev18 / 任务书 A5):
+      · 连续翻页/滚动**不逐页注入** —— 前端只在停留约 2-3 秒后才发 reason='dwell',
+        翻页途中那些中间页根本不会到这里(客户端 1s 合并 + dwell 计时器换页即重置)。
+      · 用户在页上有即时操作(尤其选区)时,必须**补齐该页完整背景上下文**,
+        而不是只给一个孤立选区 —— 所以带 selection 的上报也会触发一次(每次停留仅一次)。
+    """
+    try:
+        og = globals().get("_OUTGOING") or {}
+        jr = og.get("journal")
+        if not jr:
+            return
+        rel = rec.get("member") or rec.get("file")
+        page = rec.get("member_pos") if rec.get("member_pos") is not None else rec.get("pos")
+        if not rel or page in (None, ""):
+            return
+        reason = str(body.get("reason") or "")
+        sel = str(rec.get("selection") or "")
+        has_sel = bool(sel)
+        if reason != "dwell" and not has_sel:
+            return                      # 纯翻页(未停稳、无操作)→ 不注入
+        # 去重键含选区指纹:同一页上**选区一变(含清空)就重发整页背景**,
+        # 但同一状态重复上报(心跳、同一选区重绘)只发一次。
+        try:
+            _who = _reader_storage_identity_current().user_id
+        except Exception:
+            _who = "?"
+        key = f"{_who}|{rel}#{page}|{hashlib.sha1(sel.encode()).hexdigest()[:12] if sel else '-'}"
+        if _PAGE_CTX_SENT.get("key") == key:
+            return                      # 同一状态已发过;换页/改选区时下面会重置
+        import reader_outgoing_context as _OC
+        ctx = _OC.build_page_context(__import__("sys").modules[__name__], rel, page,
+                                     reason=("selection" if has_sel else "dwell"))
+        if has_sel:
+            ctx["selection"] = sel[:400]
+        jr.append("page.context", {
+            # journal 行本身带 type=page.context;再显式带一个 event 同名字段,
+            # 是因为 Windows 注入器的归一化只认 event/event_type 的点分名,
+            # 只认 type 的分支仅覆盖 focus/drawing/command-failed —— 少这一个字段
+            # 整条事件会在消费端被 fail-closed 丢掉(下游不改也能消费的兼容点)。
+            "event": "page.context",
+            "stable": True, "book_id": rel, "file": rel, "page": page,
+            "title": rec.get("title") or "", "kind": rec.get("kind") or "",
+            "page_context": ctx, "text_available": ctx["text_available"],
+        })
+        _PAGE_CTX_SENT.clear()
+        _PAGE_CTX_SENT["key"] = key
+    except Exception:
+        pass                            # 出向通道故障绝不影响续读位置写入
 
 
 @bp.route("/api/prefs", methods=["GET", "POST"])
@@ -1398,6 +2939,8 @@ def pdf_api_prefs():
             cur.pop(k, None)
         else:
             cur[str(k)] = v
+    if _reader_deployment_probe():
+        return jsonify({"ok": True, "deploymentProbe": True})
     try:
         _PDF_PREFS_DIR.mkdir(parents=True, exist_ok=True)
         tmp = p.with_suffix(".json.tmp")
@@ -1564,6 +3107,7 @@ def pdf_api_run_save():
                                                 source_label=b.get("source_label") or "",
                                                 source_spec=b.get("source_spec"),
                                                 instruction=(t.get("instruction") or ""),   # 生成型判型用:含造纸步骤+有原意图 → 存意图配方
+                                                synth_instruction=bool(t.get("orch")),   # 阶段2:主编排轮次的 instruction 是原话占位 → 保存时 AI 合成干净意图覆盖
                                                 anchor_page=b.get("page"), partial=_partial))
     # 否则保存造纸 run(page/flow 型)
     rid = str(b.get("rid") or "")
@@ -1618,11 +3162,6 @@ def pdf_api_recipe_delete():
         return jsonify({"ok": False, "error": "缺 name"}), 400
     if not TR.recipe_trash(name):   # 删除=移入回收站(_trash,30 天),不再直接 unlink(审查:误删无回滚)
         return jsonify({"ok": False, "error": "没有这个工具"}), 404
-    try:
-        import assistant as A
-        A._sys_cache_reset()
-    except Exception:
-        pass
     return jsonify({"ok": True})
 
 
@@ -1645,11 +3184,6 @@ def pdf_api_recipe_edit():
             d["instruction"] = b["instruction"][:2000]
         d["updated"] = int(__import__("time").time())
         p.write_text(json.dumps(d, ensure_ascii=False), "utf-8")
-        try:
-            import assistant as A
-            A._sys_cache_reset()
-        except Exception:
-            pass
         return jsonify({"ok": True})
     except Exception as e:
         return jsonify({"ok": False, "error": str(e)[:120]}), 500
@@ -1676,7 +3210,7 @@ def pdf_tools_page():
     """工具库页面(用户设计):查看所有已保存工具(route 渲成流程条,与阅读器同一份 rc-toolchip)+
     聊天区可视化实测(测试=让编排 AI 真跑 run_saved_task → CLI 卡在聊天流里长出来)。
     登录墙由 app.PROTECTED_PREFIXES(/pdf)兜;nav 注入同理。"""
-    return render_template("tools.html", js_v=_reader_js_v())
+    return render_template("tools.html", js_v=_pdf_shared_js_v())
 
 
 @bp.route("/api/run-start", methods=["POST"])
@@ -1858,8 +3392,7 @@ def pdf_view():
             _pts = int(time.time())
         else:
             try:
-                _rp = (json.loads((CLAUDE_DIR / "state" / "reader-positions.json").read_text("utf-8"))
-                       or {}).get(rel) or {}
+                _rp = (_reading_pos_load().get(rel) or {})
                 if int(_rp.get("pos") or 0) >= 1:
                     page = int(_rp["pos"]); _pts = int(_rp.get("ts") or 0)
             except Exception:
@@ -1874,6 +3407,7 @@ def pdf_view():
             reader_js_v=_reader_js_v(), chars_ver=_CHAR_CACHE_VER,
             ui_shared=(0 if request.args.get("ui", "") == "legacy" else 1),
             shared_js_v=_pdf_shared_js_v(), group=None,
+            reader_app="pdf", reader_route="pdf",
         ))
         _resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         return _resp
@@ -1932,6 +3466,8 @@ def pdf_view():
         chars_ver=_CHAR_CACHE_VER,   # 并进前端 page-chars 缓存键:改分词逻辑(bump 它)→ 客户端也重取
         ui_shared=ui_shared,         # 默认 1(共享 rc-* 层,已上线);?ui=legacy → 回落老 reader.src(逃生口)
         shared_js_v=_pdf_shared_js_v(),
+        reader_app="pdf",
+        reader_route="pdf",
     ))
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     resp.headers["Pragma"] = "no-cache"
@@ -2341,77 +3877,1087 @@ def _migrate_book_sidecars(old_rel: str, new_rel: str, old_abs: Path, new_abs: P
     """重命名 PDF 时迁移所有按 rel/绝对路径哈希命名的 sidecar 到新 key。
     用户数据(高亮/墨迹/翻译/隐藏句/语法跟踪)+贵产物(预处理 OCR)迁移;字符/振假名缓存按 mtime
     命名(rename 保留 mtime)也顺手迁;langs/crop 共享 json 改 key。漏迁的纯缓存会自动重建。"""
-    import hashlib, shutil
+    import hashlib
     def _h(s):   return hashlib.sha1(s.encode("utf-8")).hexdigest()
     def _h16(s): return hashlib.sha1(s.encode("utf-8")).hexdigest()[:16]
     o_full, n_full = _h(old_rel), _h(new_rel)
     o16, n16 = _h16(old_rel), _h16(new_rel)
     o_bsha, n_bsha = _book_sha(old_abs), _book_sha(new_abs)
 
-    def _mv(src: Path, dst: Path):
-        try:
-            if src.exists() and src.resolve() != dst.resolve():
-                dst.parent.mkdir(parents=True, exist_ok=True)
-                if dst.exists():
-                    shutil.rmtree(dst, ignore_errors=True) if dst.is_dir() else dst.unlink()
-                src.replace(dst)
-        except Exception:
-            pass
+    # PDF 高亮已按认证账户分区；重命名时必须和正常高亮 CRUD 使用同一
+    # owner/document lease，不能再从旧的全局 _HL_DIR 搬文件。
+    identity = _reader_storage_identity_current()
+    from contextlib import ExitStack
+    with ExitStack() as stack:
+        for lock_rel in sorted({old_rel, new_rel}):
+            stack.enter_context(
+                _reader_sidecar_edit_lock(
+                    "pdf-highlights",
+                    lock_rel,
+                    identity,
+                )
+            )
+        _pdf_rename_move_sidecar(
+            _hl_path(old_rel, identity),
+            _hl_path(new_rel, identity),
+        )
+    # 便签同样以 rel 的哈希命名；和高亮一样在两个文档 lease 内搬迁。
+    with ExitStack() as stack:
+        for lock_rel in sorted({old_rel, new_rel}):
+            stack.enter_context(
+                _reader_sidecar_edit_lock(
+                    "reader-notes",
+                    lock_rel,
+                    identity,
+                )
+            )
+        _pdf_rename_move_sidecar(
+            _notes_path(old_rel, identity),
+            _notes_path(new_rel, identity),
+        )
+    # 续读位置的所有书共享一个 JSON，跨进程必须锁整份文件而不是按书锁。
+    with _READER_POS_LOCK, _reader_sidecar_store().lock(
+        identity,
+        "reader-positions",
+    ):
+        positions = _reading_pos_load(identity)
+        if old_rel in positions:
+            if (
+                new_rel in positions
+                and positions[new_rel] != positions[old_rel]
+            ):
+                raise _PdfRenameError(
+                    "目标书籍已有不同的续读位置",
+                    "BW_PDF_RENAME_SIDECAR_CONFLICT",
+                    status=409,
+                    details={"oldRel": old_rel, "newRel": new_rel},
+                )
+            if new_rel not in positions:
+                positions[new_rel] = positions[old_rel]
+            positions.pop(old_rel)
+            from reader_sidecar_store import atomic_write_json
 
-    # 用户数据(整 sha1(rel) 命名)
-    for d in (_HL_DIR, _INK_DIR, _TR_DIR, _DISMISS_DIR):
-        _mv(d / f"{o_full}.json", d / f"{n_full}.json")
+            atomic_write_json(
+                _reading_pos_path(identity),
+                positions,
+                indent=None,
+            )
+    # 其余尚未纳入账户 sidecar 的用户数据仍沿原目录迁移。
+    for d in (_INK_DIR, _TR_DIR, _DISMISS_DIR):
+        _pdf_rename_move_sidecar(
+            d / f"{o_full}.json",
+            d / f"{n_full}.json",
+        )
     # 语法跟踪(sha1(rel)[:16])
-    _mv(_GRAMMAR_TRACKED_DIR / f"{o16}.json", _GRAMMAR_TRACKED_DIR / f"{n16}.json")
+    _pdf_rename_move_sidecar(
+        _GRAMMAR_TRACKED_DIR / f"{o16}.json",
+        _GRAMMAR_TRACKED_DIR / f"{n16}.json",
+    )
     # 贵产物:预处理(绝对路径 sha)+ 备份/嵌入 pdf + OCR 目录
     for suffix in (".json", ".orig.pdf", ".embedded.pdf"):
-        _mv(_BOOK_PREPROCESS_DIR / f"{o_bsha}{suffix}", _BOOK_PREPROCESS_DIR / f"{n_bsha}{suffix}")
+        _pdf_rename_move_sidecar(
+            _BOOK_PREPROCESS_DIR / f"{o_bsha}{suffix}",
+            _BOOK_PREPROCESS_DIR / f"{n_bsha}{suffix}",
+        )
     for base in (CLAUDE_DIR / "state" / "google-vision-ocr", CLAUDE_DIR / "state" / "mokuro-ocr"):
-        _mv(base / o_bsha, base / n_bsha)
+        _pdf_rename_move_sidecar(base / o_bsha, base / n_bsha)
     # 按页缓存(sha16-p{page}-{mtime}.json):字符层 + 振假名验证(rename 保留 mtime → key 仍有效)
     for cdir in (CLAUDE_DIR / "state" / "pdf-char-cache", _FURIFIX_DIR):
-        try:
-            for f in cdir.glob(f"{o16}-p*"):
-                _mv(f, cdir / (n16 + f.name[len(o16):]))
-        except Exception:
-            pass
+        for f in cdir.glob(f"{o16}-p*"):
+            _pdf_rename_move_sidecar(
+                f,
+                cdir / (n16 + f.name[len(o16):]),
+            )
     # 共享 json:langs + crop + 插图开关 改 key
     for path in (_BOOK_LANGS_PATH, _BOOK_CROP_PATH, _BOOK_FIG_PATH):
+        if not path.exists():
+            continue
+        values = _pdf_rename_read_json_strict(
+            path,
+            label="PDF 书籍 sidecar",
+        )
+        if old_rel not in values:
+            continue
+        if new_rel in values and values[new_rel] != values[old_rel]:
+            raise _PdfRenameError(
+                "目标书籍已有不同的共享 sidecar 设置",
+                "BW_PDF_RENAME_SIDECAR_CONFLICT",
+                status=409,
+                details={"path": str(path), "oldRel": old_rel, "newRel": new_rel},
+            )
+        updated = dict(values)
+        if new_rel not in updated:
+            updated[new_rel] = updated[old_rel]
+        updated.pop(old_rel)
+        _pdf_rename_write_json(path, updated, indent=2)
+
+
+_PDF_RENAME_CONTRACT = "pdf-page-brief-rename/1"
+_PDF_RENAME_TERMINAL_PHASES = {"committed", "aborted"}
+
+
+class _PdfRenameError(RuntimeError):
+    def __init__(
+        self,
+        message: str,
+        code: str = "BW_PDF_RENAME",
+        *,
+        status: int = 500,
+        details: dict | None = None,
+    ):
+        super().__init__(message)
+        self.code = code
+        self.status = int(status)
+        self.details = details or {}
+
+
+def _pdf_rename_move_sidecar(src: Path, dst: Path) -> bool:
+    """Move one legacy sidecar without ever replacing unrelated target data."""
+    if not src.exists():
+        return False
+    if src.resolve() == dst.resolve():
+        return False
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    if dst.exists():
         try:
-            if path.exists():
-                m = json.loads(path.read_text("utf-8"))
-                if old_rel in m:
-                    m[new_rel] = m.pop(old_rel)
-                    path.write_text(json.dumps(m, ensure_ascii=False, indent=2), "utf-8")
+            same_entry = os.path.samefile(src, dst)
+        except OSError:
+            same_entry = False
+        if same_entry and not src.is_dir():
+            # A crash after link-before-unlink is safe to finish on replay.
+            src.unlink()
+            return True
+        raise _PdfRenameError(
+            "目标 sidecar 已存在，拒绝覆盖",
+            "BW_PDF_RENAME_SIDECAR_CONFLICT",
+            status=409,
+            details={"source": str(src), "destination": str(dst)},
+        )
+    try:
+        if src.is_dir():
+            src.rename(dst)
+        else:
+            # A hard link gives regular files an atomic no-clobber destination.
+            # Both paths may briefly name the same complete inode; replay then
+            # safely finishes a failed source unlink via samefile() above.
+            os.link(src, dst, follow_symlinks=False)
+            src.unlink()
+    except FileExistsError as exc:
+        raise _PdfRenameError(
+            "目标 sidecar 在迁移时出现，拒绝覆盖",
+            "BW_PDF_RENAME_SIDECAR_CONFLICT",
+            status=409,
+            details={"source": str(src), "destination": str(dst)},
+        ) from exc
+    except OSError as exc:
+        raise _PdfRenameError(
+            "sidecar 无法安全迁移",
+            "BW_PDF_RENAME_SIDECAR_MOVE",
+            details={
+                "source": str(src),
+                "destination": str(dst),
+                "error": str(exc),
+            },
+        ) from exc
+    return True
+
+
+def _pdf_rename_dir() -> Path:
+    return CLAUDE_DIR / "state" / "pdf-rename-journal"
+
+
+def _pdf_rename_lock_path() -> Path:
+    return _pdf_rename_dir() / ".lock"
+
+
+def _pdf_rename_json_bytes(value, *, indent: int) -> bytes:
+    return (
+        json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=indent,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _pdf_rename_sha(payload: bytes) -> str:
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _pdf_rename_write_bytes(path: Path, payload: bytes) -> None:
+    from reader_sidecar_store import atomic_write_bytes
+
+    atomic_write_bytes(path, payload)
+
+
+def _pdf_rename_write_json(path: Path, value, *, indent: int = 2) -> None:
+    _pdf_rename_write_bytes(
+        path,
+        _pdf_rename_json_bytes(value, indent=indent),
+    )
+
+
+def _pdf_rename_read_json_strict(
+    path: Path,
+    *,
+    label: str,
+    missing=None,
+) -> dict | None:
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return missing
+    except OSError as exc:
+        raise _PdfRenameError(
+            f"{label}无法读取",
+            "BW_PDF_RENAME_READ",
+            details={"path": str(path), "error": str(exc)},
+        ) from exc
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, ValueError, TypeError) as exc:
+        raise _PdfRenameError(
+            f"{label}已损坏，拒绝按空数据覆盖",
+            "BW_PDF_RENAME_CORRUPT",
+            status=409,
+            details={"path": str(path), "error": str(exc)},
+        ) from exc
+    if not isinstance(value, dict):
+        raise _PdfRenameError(
+            f"{label}格式无效",
+            "BW_PDF_RENAME_CORRUPT",
+            status=409,
+            details={"path": str(path)},
+        )
+    return value
+
+
+def _pdf_rename_abs_from_rel(rel: str) -> Path:
+    rel = str(rel or "").strip()
+    if (
+        not rel
+        or len(rel) > 900
+        or rel.startswith("/")
+        or "\\" in rel
+        or any(part in {"", ".", ".."} for part in rel.split("/"))
+        or any(ord(character) < 32 or ord(character) == 127 for character in rel)
+    ):
+        raise _PdfRenameError(
+            "PDF 路径无效",
+            "BW_PDF_RENAME_PATH",
+            status=400,
+            details={"file": rel},
+        )
+    vault = OBSIDIAN_ROOT.resolve()
+    absolute = (vault / rel).resolve()
+    try:
+        absolute.relative_to(vault)
+    except ValueError as exc:
+        raise _PdfRenameError(
+            "PDF 路径超出 vault",
+            "BW_PDF_RENAME_PATH",
+            status=400,
+            details={"file": rel},
+        ) from exc
+    return absolute
+
+
+def _pdf_rename_stat_identity(path: Path) -> dict:
+    try:
+        stat = path.stat()
+    except OSError as exc:
+        raise _PdfRenameError(
+            "PDF 状态无法读取",
+            "BW_PDF_RENAME_PDF",
+            details={"path": str(path), "error": str(exc)},
+        ) from exc
+    if not path.is_file():
+        raise _PdfRenameError(
+            "PDF 来源不是普通文件",
+            "BW_PDF_RENAME_PDF",
+            status=409,
+            details={"path": str(path)},
+        )
+    return {
+        "size": int(stat.st_size),
+        "mtimeNs": int(
+            getattr(stat, "st_mtime_ns", int(stat.st_mtime * 1_000_000_000))
+        ),
+    }
+
+
+def _pdf_rename_assert_pdf_identity(path: Path, expected: dict) -> None:
+    current = _pdf_rename_stat_identity(path)
+    if current != expected:
+        raise _PdfRenameError(
+            "PDF 在重命名事务中发生变化",
+            "BW_PDF_RENAME_PDF_CHANGED",
+            status=409,
+            details={
+                "path": str(path),
+                "expected": expected,
+                "current": current,
+            },
+        )
+
+
+def _pdf_rename_intent_path(tx_id: str) -> Path:
+    return _pdf_rename_dir() / f"{tx_id}.json"
+
+
+def _pdf_rename_save_intent(intent: dict) -> None:
+    intent["updatedAt"] = int(time.time())
+    _pdf_rename_write_json(
+        _pdf_rename_intent_path(str(intent.get("txId") or "")),
+        intent,
+        indent=2,
+    )
+
+
+def _pdf_rename_set_phase(intent: dict, phase: str, **updates) -> None:
+    intent["phase"] = phase
+    intent.update(updates)
+    _pdf_rename_save_intent(intent)
+
+
+def _pdf_rename_validate_brief(value: dict, path: Path) -> None:
+    if not isinstance(value.get("briefs", {}), dict) or not isinstance(
+        value.get("_none_pages", []),
+        list,
+    ):
+        raise _PdfRenameError(
+            "PageBrief sidecar 格式无效",
+            "BW_PDF_RENAME_BRIEF_CORRUPT",
+            status=409,
+            details={"path": str(path)},
+        )
+
+
+def _pdf_rename_check_inflight(old_abs: Path, new_abs: Path) -> None:
+    book_keys = {_book_sha(old_abs), _book_sha(new_abs)}
+    active = sorted(
+        (str(book), int(page))
+        for book, page in _brief_inflight
+        if str(book) in book_keys
+    )
+    if active:
+        raise _PdfRenameError(
+            "PageBrief 正在生成，请稍后再重命名",
+            "BW_PDF_RENAME_BRIEF_INFLIGHT",
+            status=409,
+            details={"active": active},
+        )
+
+
+def _pdf_rename_prepare_intent(
+    old_rel: str,
+    new_rel: str,
+    old_abs: Path,
+    new_abs: Path,
+) -> dict:
+    if not old_abs.exists():
+        raise _PdfRenameError(
+            "文件不存在",
+            "BW_PDF_RENAME_NOT_FOUND",
+            status=400,
+            details={"file": old_rel},
+        )
+    if new_abs.exists():
+        raise _PdfRenameError(
+            "同名文件已存在",
+            "BW_PDF_RENAME_DESTINATION",
+            status=409,
+            details={"file": new_rel},
+        )
+    pdf_identity = _pdf_rename_stat_identity(old_abs)
+    old_brief_path = _brief_path_abs(old_abs)
+    new_brief_path = _brief_path_abs(new_abs)
+    if old_brief_path == new_brief_path:
+        raise _PdfRenameError(
+            "PageBrief 路径摘要发生碰撞",
+            "BW_PDF_RENAME_BRIEF_HASH_COLLISION",
+            status=409,
+        )
+    if new_brief_path.exists():
+        raise _PdfRenameError(
+            "目标 PageBrief sidecar 已存在",
+            "BW_PDF_RENAME_BRIEF_DESTINATION",
+            status=409,
+            details={"path": str(new_brief_path)},
+        )
+
+    old_brief_raw = None
+    brief_payload = None
+    old_brief_sha = ""
+    if old_brief_path.exists():
+        old_brief_raw = old_brief_path.read_bytes()
+        old_brief = _pdf_rename_read_json_strict(
+            old_brief_path,
+            label="PageBrief sidecar",
+        )
+        _pdf_rename_validate_brief(old_brief, old_brief_path)
+        recorded_pdf = str(old_brief.get("pdf") or "")
+        if recorded_pdf and Path(recorded_pdf).resolve() != old_abs.resolve():
+            raise _PdfRenameError(
+                "PageBrief sidecar 的 PDF 身份与来源不一致",
+                "BW_PDF_RENAME_BRIEF_IDENTITY",
+                status=409,
+                details={
+                    "path": str(old_brief_path),
+                    "recordedPdf": recorded_pdf,
+                    "expectedPdf": str(old_abs),
+                },
+            )
+        brief_payload = dict(old_brief)
+        brief_payload["pdf"] = str(new_abs)
+        old_brief_sha = _pdf_rename_sha(old_brief_raw)
+
+    book_config = _pdf_rename_read_json_strict(
+        _BOOK_BRIEF_PATH,
+        label="PageBrief 书级设置",
+        missing={},
+    )
+    if new_rel in book_config:
+        raise _PdfRenameError(
+            "目标书名已有 PageBrief 书级设置",
+            "BW_PDF_RENAME_BOOK_SETTING_DESTINATION",
+            status=409,
+            details={"file": new_rel},
+        )
+    setting_present = old_rel in book_config
+    setting_value = book_config.get(old_rel)
+    if setting_present and not isinstance(setting_value, bool):
+        raise _PdfRenameError(
+            "PageBrief 书级设置值无效",
+            "BW_PDF_RENAME_BOOK_SETTING_CORRUPT",
+            status=409,
+            details={"file": old_rel},
+        )
+
+    tx_id = uuid.uuid4().hex
+    brief_payload_sha = (
+        _pdf_rename_sha(_pdf_rename_json_bytes(brief_payload, indent=1))
+        if brief_payload is not None else ""
+    )
+    return {
+        "contract": _PDF_RENAME_CONTRACT,
+        "txId": tx_id,
+        "phase": "prepared",
+        "oldRel": old_rel,
+        "newRel": new_rel,
+        "oldPdf": str(old_abs),
+        "newPdf": str(new_abs),
+        "pdfIdentity": pdf_identity,
+        "kgMutationId": "pdf-rename:" + tx_id,
+        "brief": {
+            "present": brief_payload is not None,
+            "oldSha256": old_brief_sha,
+            "originalBytesB64": (
+                base64.b64encode(old_brief_raw).decode("ascii")
+                if old_brief_raw is not None else ""
+            ),
+            "payloadSha256": brief_payload_sha,
+            "payload": brief_payload,
+        },
+        "bookSetting": {
+            "present": setting_present,
+            "value": setting_value if setting_present else None,
+        },
+        "createdAt": int(time.time()),
+        "updatedAt": int(time.time()),
+    }
+
+
+def _pdf_rename_paths_from_intent(intent: dict) -> tuple[str, str, Path, Path]:
+    if intent.get("contract") != _PDF_RENAME_CONTRACT:
+        raise _PdfRenameError(
+            "PDF 重命名恢复记录合同无效",
+            "BW_PDF_RENAME_INTENT",
+            status=409,
+        )
+    old_rel = str(intent.get("oldRel") or "")
+    new_rel = str(intent.get("newRel") or "")
+    old_abs = _pdf_rename_abs_from_rel(old_rel)
+    new_abs = _pdf_rename_abs_from_rel(new_rel)
+    if str(intent.get("oldPdf") or "") != str(old_abs) or str(
+        intent.get("newPdf") or ""
+    ) != str(new_abs):
+        raise _PdfRenameError(
+            "PDF 重命名恢复记录路径不一致",
+            "BW_PDF_RENAME_INTENT",
+            status=409,
+            details={"txId": intent.get("txId")},
+        )
+    return old_rel, new_rel, old_abs, new_abs
+
+
+def _pdf_rename_stage_brief(intent: dict, old_abs: Path, new_abs: Path) -> None:
+    old_path = _brief_path_abs(old_abs)
+    new_path = _brief_path_abs(new_abs)
+    brief = intent.get("brief") if isinstance(intent.get("brief"), dict) else {}
+    present = brief.get("present") is True
+    if not present:
+        if old_path.exists() or new_path.exists():
+            raise _PdfRenameError(
+                "事务准备后出现了未登记的 PageBrief sidecar",
+                "BW_PDF_RENAME_BRIEF_CHANGED",
+                status=409,
+            )
+        return
+
+    payload = brief.get("payload")
+    if not isinstance(payload, dict):
+        raise _PdfRenameError(
+            "PDF 重命名恢复记录缺少 PageBrief payload",
+            "BW_PDF_RENAME_INTENT",
+            status=409,
+        )
+    expected_new = _pdf_rename_json_bytes(payload, indent=1)
+    if _pdf_rename_sha(expected_new) != str(brief.get("payloadSha256") or ""):
+        raise _PdfRenameError(
+            "PDF 重命名恢复记录的 PageBrief 摘要不一致",
+            "BW_PDF_RENAME_INTENT",
+            status=409,
+        )
+    if new_path.exists():
+        current_new = new_path.read_bytes()
+        if _pdf_rename_sha(current_new) != _pdf_rename_sha(expected_new):
+            raise _PdfRenameError(
+                "目标 PageBrief sidecar 与恢复记录冲突",
+                "BW_PDF_RENAME_BRIEF_DESTINATION",
+                status=409,
+            )
+        return
+    try:
+        current_old = old_path.read_bytes()
+    except FileNotFoundError as exc:
+        raise _PdfRenameError(
+            "来源 PageBrief sidecar 在事务中丢失",
+            "BW_PDF_RENAME_BRIEF_CHANGED",
+            status=409,
+        ) from exc
+    if _pdf_rename_sha(current_old) != str(brief.get("oldSha256") or ""):
+        raise _PdfRenameError(
+            "来源 PageBrief sidecar 在事务中发生变化",
+            "BW_PDF_RENAME_BRIEF_CHANGED",
+            status=409,
+        )
+    _pdf_rename_write_bytes(new_path, expected_new)
+
+
+def _pdf_rename_apply_book_setting(
+    intent: dict,
+    old_rel: str,
+    new_rel: str,
+) -> None:
+    setting = (
+        intent.get("bookSetting")
+        if isinstance(intent.get("bookSetting"), dict) else {}
+    )
+    current = _pdf_rename_read_json_strict(
+        _BOOK_BRIEF_PATH,
+        label="PageBrief 书级设置",
+        missing={},
+    )
+    present = setting.get("present") is True
+    if not present:
+        if old_rel in current or new_rel in current:
+            raise _PdfRenameError(
+                "PageBrief 书级设置在事务中发生冲突",
+                "BW_PDF_RENAME_BOOK_SETTING_CHANGED",
+                status=409,
+            )
+        return
+
+    value = setting.get("value")
+    if not isinstance(value, bool):
+        raise _PdfRenameError(
+            "PDF 重命名恢复记录的书级设置无效",
+            "BW_PDF_RENAME_INTENT",
+            status=409,
+        )
+    if old_rel in current and current.get(old_rel) == value and new_rel not in current:
+        updated = dict(current)
+        updated.pop(old_rel, None)
+        updated[new_rel] = value
+        _pdf_rename_write_json(_BOOK_BRIEF_PATH, updated, indent=2)
+        return
+    if old_rel not in current and current.get(new_rel) == value:
+        return
+    raise _PdfRenameError(
+        "PageBrief 书级设置与恢复记录冲突",
+        "BW_PDF_RENAME_BOOK_SETTING_CHANGED",
+        status=409,
+    )
+
+
+def _migrate_page_brief_kg_document(
+    old_rel: str,
+    new_rel: str,
+    mutation_id: str,
+) -> dict:
+    from kg_runtime import import_module as _import_kg_module
+
+    node_service = _import_kg_module("concept_node_service")
+    ConceptNodeService = node_service.ConceptNodeService
+    migrate_page_brief_document = (
+        node_service.migrate_page_brief_document
+    )
+
+    service = ConceptNodeService()
+    try:
+        return migrate_page_brief_document(
+            old_file_rel=old_rel,
+            new_file_rel=new_rel,
+            mutation_id=mutation_id,
+            service=service,
+        )
+    except Exception:
+        # The first call may have crossed graph replace but not commit append.
+        # Resolve that window under the KG lock, then replay the same mutation.
+        service.recover()
+        return migrate_page_brief_document(
+            old_file_rel=old_rel,
+            new_file_rel=new_rel,
+            mutation_id=mutation_id,
+            service=service,
+        )
+
+
+def _page_brief_kg_migration_state(mutation_id: str) -> str:
+    from kg_runtime import import_module as _import_kg_module
+
+    ConceptNodeService = _import_kg_module(
+        "concept_node_service"
+    ).ConceptNodeService
+
+    return str(ConceptNodeService().mutation_status(mutation_id).get("status") or "")
+
+
+def _pdf_rename_cleanup_old_brief(
+    intent: dict,
+    old_abs: Path,
+    new_abs: Path,
+) -> None:
+    brief = intent.get("brief") if isinstance(intent.get("brief"), dict) else {}
+    old_path = _brief_path_abs(old_abs)
+    new_path = _brief_path_abs(new_abs)
+    if brief.get("present") is not True:
+        if old_path.exists() or new_path.exists():
+            raise _PdfRenameError(
+                "事务结束前出现未登记的 PageBrief sidecar",
+                "BW_PDF_RENAME_BRIEF_CHANGED",
+                status=409,
+            )
+        return
+    if not new_path.exists():
+        raise _PdfRenameError(
+            "目标 PageBrief sidecar 未落盘",
+            "BW_PDF_RENAME_BRIEF_CHANGED",
+        )
+    expected_new = str(brief.get("payloadSha256") or "")
+    if _pdf_rename_sha(new_path.read_bytes()) != expected_new:
+        raise _PdfRenameError(
+            "目标 PageBrief sidecar 在事务中发生变化",
+            "BW_PDF_RENAME_BRIEF_CHANGED",
+            status=409,
+        )
+    if old_path.exists():
+        if _pdf_rename_sha(old_path.read_bytes()) != str(
+            brief.get("oldSha256") or ""
+        ):
+            raise _PdfRenameError(
+                "来源 PageBrief sidecar 在清理前发生变化",
+                "BW_PDF_RENAME_BRIEF_CHANGED",
+                status=409,
+            )
+        old_path.unlink()
+
+
+def _pdf_rename_original_brief_bytes(brief: dict) -> bytes:
+    encoded = brief.get("originalBytesB64")
+    if not isinstance(encoded, str) or not encoded:
+        raise _PdfRenameError(
+            "PDF 重命名恢复记录缺少来源 PageBrief 原始副本",
+            "BW_PDF_RENAME_INTENT",
+            status=409,
+        )
+    try:
+        original = base64.b64decode(encoded.encode("ascii"), validate=True)
+    except (UnicodeError, ValueError, binascii.Error) as exc:
+        raise _PdfRenameError(
+            "PDF 重命名恢复记录的来源 PageBrief 副本无效",
+            "BW_PDF_RENAME_INTENT",
+            status=409,
+        ) from exc
+    if _pdf_rename_sha(original) != str(brief.get("oldSha256") or ""):
+        raise _PdfRenameError(
+            "PDF 重命名恢复记录的来源 PageBrief 摘要不一致",
+            "BW_PDF_RENAME_INTENT",
+            status=409,
+        )
+    return original
+
+
+def _pdf_rename_rollback_locked(intent: dict, *, reason: str) -> None:
+    old_rel, new_rel, old_abs, new_abs = _pdf_rename_paths_from_intent(intent)
+    brief = intent.get("brief") if isinstance(intent.get("brief"), dict) else {}
+    old_brief = _brief_path_abs(old_abs)
+    new_brief = _brief_path_abs(new_abs)
+    if brief.get("present") is True:
+        original_brief = _pdf_rename_original_brief_bytes(brief)
+        if old_brief.exists():
+            if old_brief.read_bytes() != original_brief:
+                raise _PdfRenameError(
+                    "回滚时来源 PageBrief sidecar 已变化",
+                    "BW_PDF_RENAME_RECOVERY_REQUIRED",
+                    status=409,
+                )
+        else:
+            # Restore the exact original bytes before changing the PDF path or
+            # deleting a staged destination.  If this write fails, both the
+            # renamed PDF and the staged copy remain intact for recovery.
+            _pdf_rename_write_bytes(old_brief, original_brief)
+        if old_brief.read_bytes() != original_brief:
+            raise _PdfRenameError(
+                "回滚时来源 PageBrief sidecar 无法安全恢复",
+                "BW_PDF_RENAME_RECOVERY_REQUIRED",
+                status=409,
+            )
+        if new_brief.exists():
+            if _pdf_rename_sha(new_brief.read_bytes()) != str(
+                brief.get("payloadSha256") or ""
+            ):
+                raise _PdfRenameError(
+                    "回滚时目标 PageBrief sidecar 已变化",
+                    "BW_PDF_RENAME_RECOVERY_REQUIRED",
+                    status=409,
+                )
+    elif old_brief.exists() or new_brief.exists():
+        raise _PdfRenameError(
+            "回滚时出现未登记的 PageBrief sidecar",
+            "BW_PDF_RENAME_RECOVERY_REQUIRED",
+            status=409,
+        )
+
+    old_exists = old_abs.exists()
+    new_exists = new_abs.exists()
+    if new_exists and not old_exists:
+        _pdf_rename_assert_pdf_identity(new_abs, intent.get("pdfIdentity") or {})
+        new_abs.replace(old_abs)
+    elif not old_exists or new_exists:
+        raise _PdfRenameError(
+            "PDF 路径状态无法安全回滚",
+            "BW_PDF_RENAME_RECOVERY_REQUIRED",
+            status=409,
+            details={
+                "oldExists": old_exists,
+                "newExists": new_exists,
+                "oldRel": old_rel,
+                "newRel": new_rel,
+            },
+        )
+    _pdf_rename_assert_pdf_identity(old_abs, intent.get("pdfIdentity") or {})
+    if brief.get("present") is True and new_brief.exists():
+        new_brief.unlink()
+    _pdf_rename_set_phase(
+        intent,
+        "aborted",
+        error=reason[:500],
+        rolledBack=True,
+    )
+
+
+def _pdf_rename_resume_locked(intent: dict) -> dict:
+    old_rel, new_rel, old_abs, new_abs = _pdf_rename_paths_from_intent(intent)
+    _pdf_rename_check_inflight(old_abs, new_abs)
+    if intent.get("phase") == "rolling-back":
+        _pdf_rename_rollback_locked(
+            intent,
+            reason=str(intent.get("error") or "恢复未完成回滚"),
+        )
+        return intent
+
+    old_exists = old_abs.exists()
+    new_exists = new_abs.exists()
+    if old_exists and not new_exists:
+        _pdf_rename_assert_pdf_identity(old_abs, intent.get("pdfIdentity") or {})
+        old_abs.replace(new_abs)
+        _pdf_rename_set_phase(intent, "pdf-renamed")
+    elif new_exists and not old_exists:
+        _pdf_rename_assert_pdf_identity(new_abs, intent.get("pdfIdentity") or {})
+    else:
+        raise _PdfRenameError(
+            "PDF 路径状态无法继续重命名事务",
+            "BW_PDF_RENAME_RECOVERY_REQUIRED",
+            status=409,
+            details={
+                "oldExists": old_exists,
+                "newExists": new_exists,
+                "txId": intent.get("txId"),
+            },
+        )
+
+    try:
+        _pdf_rename_stage_brief(intent, old_abs, new_abs)
+        _pdf_rename_set_phase(intent, "brief-staged")
+    except Exception as exc:
+        _pdf_rename_set_phase(
+            intent,
+            "rolling-back",
+            error=str(exc)[:500],
+        )
+        _pdf_rename_rollback_locked(intent, reason=str(exc))
+        if isinstance(exc, _PdfRenameError):
+            raise
+        raise _PdfRenameError(
+            "PageBrief sidecar 迁移失败，PDF 重命名已回滚",
+            "BW_PDF_RENAME_BRIEF",
+            details={"error": str(exc)},
+        ) from exc
+
+    mutation_id = str(intent.get("kgMutationId") or "")
+    _pdf_rename_set_phase(intent, "kg-started")
+    try:
+        kg_result = _migrate_page_brief_kg_document(
+            old_rel,
+            new_rel,
+            mutation_id,
+        )
+    except Exception as exc:
+        try:
+            kg_state = _page_brief_kg_migration_state(mutation_id)
         except Exception:
-            pass
+            kg_state = "ambiguous"
+        if kg_state == "applied":
+            kg_result = {
+                "recovered": True,
+                "status": "applied-after-error",
+                "error": str(exc)[:500],
+            }
+        elif kg_state == "absent":
+            _pdf_rename_set_phase(
+                intent,
+                "rolling-back",
+                error=str(exc)[:500],
+            )
+            _pdf_rename_rollback_locked(intent, reason=str(exc))
+            raise _PdfRenameError(
+                "KG 路径迁移失败，PDF 重命名已回滚",
+                "BW_PDF_RENAME_KG",
+                details={"error": str(exc)},
+            ) from exc
+        else:
+            _pdf_rename_set_phase(
+                intent,
+                "kg-started",
+                error=str(exc)[:500],
+                recoveryRequired=True,
+            )
+            raise _PdfRenameError(
+                "KG 路径迁移结果不明确，已保留恢复记录",
+                "BW_PDF_RENAME_RECOVERY_REQUIRED",
+                status=409,
+                details={"error": str(exc), "txId": intent.get("txId")},
+            ) from exc
+    _pdf_rename_set_phase(
+        intent,
+        "kg-migrated",
+        kgResult=kg_result if isinstance(kg_result, dict) else {},
+        error="",
+        recoveryRequired=False,
+    )
+
+    _pdf_rename_apply_book_setting(intent, old_rel, new_rel)
+    _pdf_rename_set_phase(intent, "config-migrated")
+    _pdf_rename_cleanup_old_brief(intent, old_abs, new_abs)
+    _pdf_rename_set_phase(intent, "source-cleaned")
+    _pdf_rename_set_phase(intent, "committed")
+    return intent
+
+
+def _pdf_rename_load_intent(path: Path) -> dict:
+    intent = _pdf_rename_read_json_strict(
+        path,
+        label="PDF 重命名恢复记录",
+    )
+    if (
+        intent.get("contract") != _PDF_RENAME_CONTRACT
+        or str(intent.get("txId") or "") != path.stem
+    ):
+        raise _PdfRenameError(
+            "PDF 重命名恢复记录身份无效",
+            "BW_PDF_RENAME_INTENT",
+            status=409,
+            details={"path": str(path)},
+        )
+    return intent
+
+
+def _pdf_rename_recover_locked() -> list[dict]:
+    directory = _pdf_rename_dir()
+    if not directory.exists():
+        return []
+    recovered = []
+    for path in sorted(directory.glob("*.json")):
+        intent = _pdf_rename_load_intent(path)
+        if intent.get("phase") in _PDF_RENAME_TERMINAL_PHASES:
+            continue
+        recovered.append(_pdf_rename_resume_locked(intent))
+    return recovered
+
+
+def _pdf_rename_find_committed(old_rel: str, new_rel: str) -> dict | None:
+    directory = _pdf_rename_dir()
+    if not directory.exists():
+        return None
+    for path in sorted(directory.glob("*.json"), reverse=True):
+        intent = _pdf_rename_load_intent(path)
+        if (
+            intent.get("phase") == "committed"
+            and intent.get("oldRel") == old_rel
+            and intent.get("newRel") == new_rel
+        ):
+            return intent
+    return None
+
+
+def _pdf_rename_verify_committed(intent: dict) -> None:
+    old_rel, new_rel, old_abs, new_abs = _pdf_rename_paths_from_intent(intent)
+    if old_abs.exists() or not new_abs.exists():
+        raise _PdfRenameError(
+            "已完成的 PDF 重命名记录与当前路径状态不一致",
+            "BW_PDF_RENAME_COMMITTED_CHANGED",
+            status=409,
+        )
+    _pdf_rename_assert_pdf_identity(new_abs, intent.get("pdfIdentity") or {})
+    brief = intent.get("brief") if isinstance(intent.get("brief"), dict) else {}
+    old_brief = _brief_path_abs(old_abs)
+    new_brief = _brief_path_abs(new_abs)
+    if old_brief.exists():
+        raise _PdfRenameError(
+            "已完成的重命名重新出现旧 PageBrief 路径",
+            "BW_PDF_RENAME_COMMITTED_CHANGED",
+            status=409,
+        )
+    if new_brief.exists():
+        current_brief = _pdf_rename_read_json_strict(
+            new_brief,
+            label="已重命名 PageBrief sidecar",
+        )
+        _pdf_rename_validate_brief(current_brief, new_brief)
+        recorded_pdf = str(current_brief.get("pdf") or "")
+        if not recorded_pdf or Path(recorded_pdf).resolve() != new_abs.resolve():
+            raise _PdfRenameError(
+                "已完成的 PageBrief 路径投影发生变化",
+                "BW_PDF_RENAME_COMMITTED_CHANGED",
+                status=409,
+            )
+
+    current = _pdf_rename_read_json_strict(
+        _BOOK_BRIEF_PATH,
+        label="PageBrief 书级设置",
+        missing={},
+    )
+    if old_rel in current or (
+        new_rel in current and not isinstance(current[new_rel], bool)
+    ):
+        raise _PdfRenameError(
+            "已完成的 PageBrief 书级设置路径无效",
+            "BW_PDF_RENAME_COMMITTED_CHANGED",
+            status=409,
+        )
+
+
+@contextmanager
+def _pdf_rename_guard():
+    from reader_sidecar_store import exclusive_lock
+
+    with exclusive_lock(_pdf_rename_lock_path()):
+        # Keep PageBrief generators from entering their short sidecar critical
+        # sections between the inflight check and the final path switch.
+        with _brief_lock:
+            yield
 
 
 @bp.route("/api/rename-pdf", methods=["POST"])
 def pdf_api_rename_pdf():
-    """重命名一本书：改文件名(保留所在目录)+ 迁移所有 sidecar。路径必须在 vault 内。"""
+    """重命名一本书，并以可恢复事务迁移 PageBrief/KG 的路径投影。"""
     body = request.get_json(silent=True) or {}
     old_rel = (body.get("file") or "").strip()
-    old_ap = _safe_vault_path(old_rel)
-    if not old_ap or not old_ap.exists():
-        return jsonify({"ok": False, "error": "文件不存在"}), 400
     new_name = (body.get("new_name") or "").strip().replace("/", "").replace("\\", "").strip()
     if not new_name:
         return jsonify({"ok": False, "error": "新名称非法"}), 400
     if not new_name.lower().endswith(".pdf"):
         new_name += ".pdf"
-    new_ap = old_ap.parent / new_name
-    new_rel = new_ap.relative_to(OBSIDIAN_ROOT).as_posix()
-    if new_ap.resolve() == old_ap.resolve():
-        return jsonify({"ok": True, "rel": old_rel, "name": new_name})
-    if new_ap.exists():
-        return jsonify({"ok": False, "error": "同名文件已存在"}), 400
     try:
-        old_ap.rename(new_ap)
-    except Exception as ex:
-        return jsonify({"ok": False, "error": f"重命名失败：{ex}"}), 500
-    _migrate_book_sidecars(old_rel, new_rel, old_ap, new_ap)
-    return jsonify({"ok": True, "rel": new_rel, "name": new_name})
+        old_ap = _pdf_rename_abs_from_rel(old_rel)
+        new_ap = old_ap.parent / new_name
+        vault = OBSIDIAN_ROOT.resolve()
+        try:
+            new_rel = new_ap.resolve().relative_to(vault).as_posix()
+        except ValueError as exc:
+            raise _PdfRenameError(
+                "目标路径超出 vault",
+                "BW_PDF_RENAME_PATH",
+                status=400,
+            ) from exc
+        new_ap = _pdf_rename_abs_from_rel(new_rel)
+        if new_ap == old_ap:
+            if old_ap.exists():
+                return jsonify({"ok": True, "rel": old_rel, "name": new_name})
+            raise _PdfRenameError(
+                "文件不存在",
+                "BW_PDF_RENAME_NOT_FOUND",
+                status=400,
+            )
+
+        with _pdf_rename_guard():
+            recovered = _pdf_rename_recover_locked()
+            completed = _pdf_rename_find_committed(old_rel, new_rel)
+            if not old_ap.exists() and new_ap.exists() and completed is not None:
+                _pdf_rename_verify_committed(completed)
+                critical = completed
+                recovered_exact = True
+            else:
+                _pdf_rename_check_inflight(old_ap, new_ap)
+                critical = _pdf_rename_prepare_intent(
+                    old_rel,
+                    new_rel,
+                    old_ap,
+                    new_ap,
+                )
+                _pdf_rename_save_intent(critical)
+                critical = _pdf_rename_resume_locked(critical)
+                recovered_exact = False
+
+            if critical.get("legacySidecarsMigrated") is not True:
+                _migrate_book_sidecars(old_rel, new_rel, old_ap, new_ap)
+                critical["legacySidecarsMigrated"] = True
+                _pdf_rename_save_intent(critical)
+        payload = {
+            "ok": True,
+            "rel": new_rel,
+            "name": new_name,
+            "txId": critical.get("txId"),
+            "recovered": bool(recovered or recovered_exact),
+        }
+        return jsonify(payload)
+    except _PdfRenameError as exc:
+        return jsonify({
+            "ok": False,
+            "error": str(exc),
+            "code": exc.code,
+            "details": exc.details,
+        }), exc.status
+    except Exception as exc:
+        return jsonify({
+            "ok": False,
+            "error": f"重命名失败：{exc}",
+            "code": "BW_PDF_RENAME_INTERNAL",
+        }), 500
 
 
 @bp.route("/api/preprocess-active")
@@ -3248,8 +5794,9 @@ def pdf_api_ocr_selection():
 
 
 def _page_content_version(abs_path, rel: str, page: int) -> str:
-    """该页内容版本签名:PDF mtime + 分词版本 + 偏移 + 单页重扫覆盖。任一变 → cv 变 → 前端换缓存 key。"""
+    """Account-bound page signature for phrase-derived HTTP/SW caches."""
     import hashlib
+    identity = _reader_storage_identity_current()
     try:
         mt = int(os.path.getmtime(str(abs_path)))
     except Exception:
@@ -3257,11 +5804,11 @@ def _page_content_version(abs_path, rel: str, page: int) -> str:
     ofs = _char_offset_for(rel, page)
     ovr = _page_ocr_override_sig(rel, page)   # 单页重扫覆盖签名(无则空)
     try:
-        ph = int(os.path.getmtime(str(_PHRASES_PATH)))   # 收藏词组改 → 合并 w 变 → cv 必须变
+        ph = int(os.path.getmtime(str(_phrases_path(identity))))   # 收藏词组改 → 合并 w 变 → cv 必须变
     except Exception:
         ph = 0
     try:
-        pm = int(os.path.getmtime(str(_PHRASE_MARK_PATH)))   # 词组掌握态改 → chars 的 favm 变 → cv 也得变
+        pm = int(os.path.getmtime(str(_phrase_mark_path(identity))))   # 词组掌握态改 → chars 的 favm 变 → cv 也得变
     except Exception:
         pm = 0
     try:
@@ -3276,7 +5823,8 @@ def _page_content_version(abs_path, rel: str, page: int) -> str:
         lm = int(os.path.getmtime(str(_BOOK_LANGS_PATH)))   # 书语言改(中文↔日语)→ 分词粒度变 → cv 必须变
     except Exception:
         lm = 0
-    sig = f"{_CHAR_CACHE_VER}|{mt}|{ofs['dx']},{ofs['dy']},{ofs['scale']}|{ovr}|{ph}|{pm}|f{_FORMULA_INJECT_VER}:{fm}|o{_OCRFIX_INJECT_VER}:{om}|l{lm}"
+    owner = identity.storage_namespace if identity is not None else "no-owner"
+    sig = f"{_CHAR_CACHE_VER}|{owner}|{mt}|{ofs['dx']},{ofs['dy']},{ofs['scale']}|{ovr}|{ph}|{pm}|f{_FORMULA_INJECT_VER}:{fm}|o{_OCRFIX_INJECT_VER}:{om}|l{lm}"
     return hashlib.md5(sig.encode("utf-8")).hexdigest()[:12]
 
 
@@ -3669,29 +6217,35 @@ def vocab_mastery_for(words) -> list[dict]:
 
 # ── 收藏词组（state/pdf-phrases.json）：作为之后分词依据，合并成单个 w（单击选中整词组）──
 _PHRASES_PATH = CLAUDE_DIR / "state" / "pdf-phrases.json"
+_PHRASES_LOCK = __import__("threading").RLock()
 
 
-def _phrases_load() -> list:
-    try:
-        d = json.loads(_PHRASES_PATH.read_text("utf-8"))
-        return [p for p in (d.get("phrases") or []) if isinstance(p, str) and p.strip()]
-    except Exception:
-        return []
+def _phrases_path(identity=None) -> Path:
+    return _reader_sidecar_path("pdf-phrases.json", identity=identity)
 
 
-def _phrases_save(lst: list):
-    try:
-        _PHRASES_PATH.parent.mkdir(parents=True, exist_ok=True)
-        tmp = _PHRASES_PATH.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps({"phrases": lst}, ensure_ascii=False, indent=2), "utf-8")
-        tmp.replace(_PHRASES_PATH)
-    except Exception:
-        pass
+def _phrases_load(identity=None) -> list:
+    d = _reader_sidecar_json(_phrases_path(identity), {}, dict)
+    return [
+        p
+        for p in (d.get("phrases") or [])
+        if isinstance(p, str) and p.strip()
+    ]
+
+
+def _phrases_save(lst: list, identity=None):
+    from reader_sidecar_store import atomic_write_json
+    atomic_write_json(
+        _phrases_path(identity),
+        {"phrases": lst},
+        indent=2,
+    )
 
 
 # ── 词组「已掌握」store（state/pdf-phrase-mark.json）：标记掌握的词组不再画生词下划线 ──
 # 跟单词掌握分开:单词走 vocab 笔记 frontmatter,词组没有笔记(强行建会生成 "web browser.md" 幽灵笔记)。
 _PHRASE_MARK_PATH = CLAUDE_DIR / "state" / "pdf-phrase-mark.json"
+_PHRASE_MARK_LOCK = __import__("threading").RLock()
 
 
 def _phrase_norm(t: str) -> str:
@@ -3699,22 +6253,26 @@ def _phrase_norm(t: str) -> str:
     return re.sub(r"\s+", " ", (t or "")).strip().lower()
 
 
-def _phrase_marks_load() -> set:
-    try:
-        d = json.loads(_PHRASE_MARK_PATH.read_text("utf-8"))
-        return {_phrase_norm(p) for p in (d.get("mastered") or []) if isinstance(p, str) and p.strip()}
-    except Exception:
-        return set()
+def _phrase_mark_path(identity=None) -> Path:
+    return _reader_sidecar_path("pdf-phrase-mark.json", identity=identity)
 
 
-def _phrase_marks_save(s: set):
-    try:
-        _PHRASE_MARK_PATH.parent.mkdir(parents=True, exist_ok=True)
-        tmp = _PHRASE_MARK_PATH.with_suffix(".json.tmp")
-        tmp.write_text(json.dumps({"mastered": sorted(s)}, ensure_ascii=False, indent=2), "utf-8")
-        tmp.replace(_PHRASE_MARK_PATH)
-    except Exception:
-        pass
+def _phrase_marks_load(identity=None) -> set:
+    d = _reader_sidecar_json(_phrase_mark_path(identity), {}, dict)
+    return {
+        _phrase_norm(p)
+        for p in (d.get("mastered") or [])
+        if isinstance(p, str) and p.strip()
+    }
+
+
+def _phrase_marks_save(s: set, identity=None):
+    from reader_sidecar_store import atomic_write_json
+    atomic_write_json(
+        _phrase_mark_path(identity),
+        {"mastered": sorted(s)},
+        indent=2,
+    )
 
 
 def _merge_favorite_phrases(chars: list[dict]) -> None:
@@ -5317,22 +7875,31 @@ def pdf_api_phrases():
     """收藏词组（全局，作为分词依据）。
     GET → {ok, phrases:[...]}
     POST {text} → 添加；DELETE {text} → 删除。"""
-    if request.method == "GET":
-        return jsonify({"ok": True, "phrases": _phrases_load()})
-    data = request.get_json(silent=True) or {}
-    text = (data.get("text") or "").strip()
-    if not text or len(text) > 60:
-        return jsonify({"ok": False, "error": "invalid text"}), 400
-    lst = _phrases_load()
-    if request.method == "POST":
-        if text not in lst:
-            lst.append(text)
-            _phrases_save(lst)
-        return jsonify({"ok": True, "phrases": lst, "added": text})
-    # DELETE
-    lst = [p for p in lst if p != text]
-    _phrases_save(lst)
-    return jsonify({"ok": True, "phrases": lst, "removed": text})
+    identity = _reader_storage_identity_current()
+    with _PHRASES_LOCK, _reader_sidecar_store().lock(
+        identity, "pdf-phrases"
+    ):
+        if request.method == "GET":
+            return jsonify({
+                "ok": True,
+                "phrases": _phrases_load(identity),
+            })
+        data = request.get_json(silent=True) or {}
+        import re as _re_ph
+        # #55:归一化去空白(跨行选中带 \n/空格)→存干净词组,与前端本地匹配一致
+        text = _re_ph.sub(r"[\s　]+", "", (data.get("text") or ""))
+        if not text or len(text) > 60:
+            return jsonify({"ok": False, "error": "invalid text"}), 400
+        lst = _phrases_load(identity)
+        if request.method == "POST":
+            if text not in lst:
+                lst.append(text)
+                _phrases_save(lst, identity)
+            return jsonify({"ok": True, "phrases": lst, "added": text})
+        # DELETE
+        lst = [p for p in lst if p != text]
+        _phrases_save(lst, identity)
+        return jsonify({"ok": True, "phrases": lst, "removed": text})
 
 
 @bp.route("/api/phrase-mark", methods=["GET", "POST"])
@@ -5341,22 +7908,34 @@ def pdf_api_phrase_mark():
     GET → {ok, mastered:[归一化键...]}
     POST {text, mark} → mark∈{mastered,known,1,true} 标掌握;否则取消。
     标掌握的词组也会作为分词单元参与合并(单击整词组),且不再画生词下划线。"""
-    if request.method == "GET":
-        return jsonify({"ok": True, "mastered": sorted(_phrase_marks_load())})
-    data = request.get_json(silent=True) or {}
-    text = (data.get("text") or "").strip()
-    if not text or len(text) > 60:
-        return jsonify({"ok": False, "error": "invalid text"}), 400
-    mark = str(data.get("mark") or "").strip().lower()
-    on = mark in ("mastered", "known", "1", "true", "yes")
-    key = _phrase_norm(text)
-    s = _phrase_marks_load()
-    if on:
-        s.add(key)
-    else:
-        s.discard(key)
-    _phrase_marks_save(s)
-    return jsonify({"ok": True, "mastered": sorted(s), "marked": on, "key": key})
+    identity = _reader_storage_identity_current()
+    with _PHRASE_MARK_LOCK, _reader_sidecar_store().lock(
+        identity, "pdf-phrase-mark"
+    ):
+        if request.method == "GET":
+            return jsonify({
+                "ok": True,
+                "mastered": sorted(_phrase_marks_load(identity)),
+            })
+        data = request.get_json(silent=True) or {}
+        text = (data.get("text") or "").strip()
+        if not text or len(text) > 60:
+            return jsonify({"ok": False, "error": "invalid text"}), 400
+        mark = str(data.get("mark") or "").strip().lower()
+        on = mark in ("mastered", "known", "1", "true", "yes")
+        key = _phrase_norm(text)
+        s = _phrase_marks_load(identity)
+        if on:
+            s.add(key)
+        else:
+            s.discard(key)
+        _phrase_marks_save(s, identity)
+        return jsonify({
+            "ok": True,
+            "mastered": sorted(s),
+            "marked": on,
+            "key": key,
+        })
 
 
 def _en_word_mastered(lemma: str) -> bool:
@@ -5382,7 +7961,10 @@ def pdf_api_dict_quick():
     pdf_rel = request.args.get("file", "")
     page = int(request.args.get("page", "0") or "0")
     context = request.args.get("context", "")
-    prewarm = request.args.get("prewarm") == "1"   # 预热:纯读(不写查询日志/不 bump 暴露计数/不触发建笔记),供翻页后台预填前端缓存,不污染掌握度
+    prewarm = (
+        request.args.get("prewarm") == "1"
+        or _reader_deployment_probe()
+    )   # 预热/部署探测:纯读(不写查询日志/不 bump 暴露计数/不触发建笔记),供翻页后台预填前端缓存,不污染掌握度
     if not word:
         return jsonify({"ok": False, "error": "no word"})
     ds, _ = _vocab_modules()
@@ -6122,6 +8704,7 @@ def epub_view():
         resp = make_response(render_template(
             "epub_html_reader.html", file_rel=rel_clean, file_name=Path(rel_clean).name,
             sha=sha, reader_js_v=_epub_js_v(),
+            reader_app="epub", reader_route="epub",
             server_pos=_reading_pos_get(rel_clean),      # 服务端续读位置(节 idx;无记录=None→null),epub-html.js onBuilt 消费
             server_pos_ts=int(_rp2.get("ts") or 0)))     # 记录时间戳(秒):前端跟 LS v3 按新者胜仲裁(同 PDF 模型;审计 BUG#5)
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
@@ -6632,21 +9215,44 @@ def epub_file(sha, subpath):
 _EPUB_HL_DIR = CLAUDE_DIR / "state" / "epub-highlights"
 
 
-def _epub_hl_path(rel: str) -> Path:
+def _epub_hl_path(rel: str, identity=None) -> Path:
     import hashlib
-    return _EPUB_HL_DIR / (hashlib.sha1((rel or "").encode("utf-8")).hexdigest()[:16] + ".json")
+    name = hashlib.sha1((rel or "").encode("utf-8")).hexdigest()[:16] + ".json"
+    return _reader_sidecar_path(
+        "epub-highlights",
+        name,
+        identity=identity,
+    )
 
 
-def _epub_hl_load(rel: str) -> list:
-    try:
-        return json.loads(_epub_hl_path(rel).read_text("utf-8"))
-    except Exception:
-        return []
+def _epub_hl_load(rel: str, identity=None) -> list:
+    return _reader_sidecar_json(
+        _epub_hl_path(rel, identity),
+        [],
+        list,
+    )
 
 
-def _epub_hl_save(rel: str, items: list):
-    _EPUB_HL_DIR.mkdir(parents=True, exist_ok=True)
-    _epub_hl_path(rel).write_text(json.dumps(items, ensure_ascii=False), "utf-8")
+def _epub_hl_save(rel: str, items: list, identity=None):
+    from reader_sidecar_store import atomic_write_json
+    atomic_write_json(
+        _epub_hl_path(rel, identity),
+        items,
+        indent=None,
+    )
+
+
+@contextmanager
+def _epub_hl_edit(rel: str, identity=None):
+    """Yield the latest EPUB highlight list under its document lease."""
+    with _reader_sidecar_edit_lock(
+        "epub-highlights",
+        rel,
+        identity,
+    ) as owner:
+        items = _epub_hl_load(rel, owner)
+        yield items
+        _epub_hl_save(rel, items, owner)
 
 
 @bp.route("/api/epub-highlights", methods=["GET", "POST", "PATCH", "DELETE"])
@@ -6660,14 +9266,13 @@ def pdf_api_epub_highlights():
     if request.method == "DELETE":
         rel = (request.args.get("file") or "").strip()
         hid = (request.args.get("id") or "").strip()
-        items = [h for h in _epub_hl_load(rel) if h.get("id") != hid]
-        _epub_hl_save(rel, items)
+        with _epub_hl_edit(rel) as items:
+            items[:] = [h for h in items if h.get("id") != hid]
         return jsonify({"ok": True})
     body = request.get_json(silent=True) or {}
     rel = (body.get("file") or "").strip()
     if not rel:
         return jsonify({"ok": False, "error": "缺少 file"}), 400
-    items = _epub_hl_load(rel)
     if request.method == "POST":
         cfi = (body.get("cfi") or "").strip()
         anchor = body.get("anchor")   # 新 HTML 阅读器用偏移锚 {section,start,end};老 epub.js 版用 cfi
@@ -6681,25 +9286,26 @@ def pdf_api_epub_highlights():
              "body": (body.get("body") or "")[:8000],   # AI 译文/解释正文(高亮带的整段内容;preview 渲)
              "kind": (body.get("kind") or "")[:32],     # 类型标签:译文/解释/笔记
              "time": int(__import__("time").time())}
-        items.append(h); _epub_hl_save(rel, items)
+        with _epub_hl_edit(rel) as items:
+            items.append(h)
         return jsonify({"ok": True, "id": h["id"], "highlight": h})
     # PATCH
     hid = (body.get("id") or "").strip()
-    h = next((x for x in items if x.get("id") == hid), None)
-    if not h:
-        return jsonify({"ok": False, "error": "未找到"}), 404
-    if "color" in body:
-        # 允许置空("" → no-color 虚框模式:保留备注/原文但不上色,前端渲成虚线框)
-        h["color"] = (body.get("color") or "")
-    if "note" in body:
-        h["note"] = (body.get("note") or "")[:2000]
-    if "sentence" in body:
-        h["sentence"] = (body.get("sentence") or "")[:2000]
-    if "body" in body:
-        h["body"] = (body.get("body") or "")[:8000]
-    if "kind" in body:
-        h["kind"] = (body.get("kind") or "")[:32]
-    _epub_hl_save(rel, items)
+    with _epub_hl_edit(rel) as items:
+        h = next((x for x in items if x.get("id") == hid), None)
+        if not h:
+            return jsonify({"ok": False, "error": "未找到"}), 404
+        if "color" in body:
+            # 允许置空("" → no-color 虚框模式:保留备注/原文但不上色,前端渲成虚线框)
+            h["color"] = (body.get("color") or "")
+        if "note" in body:
+            h["note"] = (body.get("note") or "")[:2000]
+        if "sentence" in body:
+            h["sentence"] = (body.get("sentence") or "")[:2000]
+        if "body" in body:
+            h["body"] = (body.get("body") or "")[:8000]
+        if "kind" in body:
+            h["kind"] = (body.get("kind") or "")[:32]
     return jsonify({"ok": True, "highlight": h})
 
 
@@ -6709,21 +9315,44 @@ def pdf_api_epub_highlights():
 _NOTES_DIR = CLAUDE_DIR / "state" / "reader-notes"
 
 
-def _notes_path(rel: str) -> Path:
+def _notes_path(rel: str, identity=None) -> Path:
     import hashlib
-    return _NOTES_DIR / (hashlib.sha1((rel or "").encode("utf-8")).hexdigest()[:16] + ".json")
+    name = hashlib.sha1((rel or "").encode("utf-8")).hexdigest()[:16] + ".json"
+    return _reader_sidecar_path(
+        "reader-notes",
+        name,
+        identity=identity,
+    )
 
 
-def _notes_load(rel: str) -> list:
-    try:
-        return json.loads(_notes_path(rel).read_text("utf-8"))
-    except Exception:
-        return []
+def _notes_load(rel: str, identity=None) -> list:
+    return _reader_sidecar_json(
+        _notes_path(rel, identity),
+        [],
+        list,
+    )
 
 
-def _notes_save(rel: str, items: list):
-    _NOTES_DIR.mkdir(parents=True, exist_ok=True)
-    _notes_path(rel).write_text(json.dumps(items, ensure_ascii=False), "utf-8")
+def _notes_save(rel: str, items: list, identity=None):
+    from reader_sidecar_store import atomic_write_json
+    atomic_write_json(
+        _notes_path(rel, identity),
+        items,
+        indent=None,
+    )
+
+
+@contextmanager
+def _notes_edit(rel: str, identity=None):
+    """Yield the latest sticky-note list under its document lease."""
+    with _reader_sidecar_edit_lock(
+        "reader-notes",
+        rel,
+        identity,
+    ) as owner:
+        items = _notes_load(rel, owner)
+        yield items
+        _notes_save(rel, items, owner)
 
 
 @bp.route("/api/notes", methods=["GET", "POST", "PATCH", "DELETE"])
@@ -6757,7 +9386,8 @@ def pdf_api_notes():
         _nid = (request.args.get("id") or "").strip()
         _home, _ = _vb_owner_of(_ref, lambda m: any(x.get("id") == _nid for x in _notes_load(m)))
         if _home:
-            _notes_save(_home, [x for x in _notes_load(_home) if x.get("id") != _nid])
+            with _notes_edit(_home) as items:
+                items[:] = [x for x in items if x.get("id") != _nid]
         return jsonify({"ok": True})
     _b = request.get_json(silent=True) or {}
     _a = _b.get("anchor") if isinstance(_b.get("anchor"), dict) else None
@@ -6787,7 +9417,6 @@ def pdf_api_notes():
     rel = (body.get("file") or "").strip()
     if not rel:
         return jsonify({"ok": False, "error": "缺少 file"}), 400
-    items = _notes_load(rel)
     now = int(__import__("time").time())
     if request.method == "POST":
         anchor = body.get("anchor")
@@ -6809,9 +9438,10 @@ def pdf_api_notes():
              "html": body.get("html") if isinstance(body.get("html"), dict) else None,   # 通用卡便签(天气/搜索/图等 vc-card 钉页):{content,isHtml,label}
              "iar": (float(body["iar"]) if isinstance(body.get("iar"), (int, float)) and body.get("iar") else None),   # 手写锚定宽高比:笔画 letterbox 到此比例,便签任意 resize 不变形
              "created": now, "updated": now}
-        if _cid:   # upsert:补投重放不重复建
-            items = [x for x in items if x.get("id") != _cid]
-        items.append(n); _notes_save(rel, items)
+        with _notes_edit(rel) as items:
+            if _cid:   # upsert:补投重放不重复建
+                items[:] = [x for x in items if x.get("id") != _cid]
+            items.append(n)
         try:   # 贴页=资产本地化时机(用户拍板):便签里引用的 #asset 后台下载,之后打开走本地不拉外链
             _asset_localize_async(_asset_ids_in(json.dumps(n.get("html") or {}, ensure_ascii=False)))
         except Exception:
@@ -6819,40 +9449,43 @@ def pdf_api_notes():
         return jsonify({"ok": True, "id": n["id"], "note": n})
     # PATCH:字段级合并(anchor 移动/text 编辑/颜色/尺寸/折叠态/笔画 各自独立更新)
     nid = (body.get("id") or "").strip()
-    n = next((x for x in items if x.get("id") == nid), None)
-    if not n:
-        return jsonify({"ok": False, "error": "未找到"}), 404
-    if isinstance(body.get("anchor"), dict) and body["anchor"].get("kind") in ("pdf", "epub"):
-        n["anchor"] = body["anchor"]
-    if "text" in body:
-        n["text"] = (body.get("text") or "")[:8000]
-    if "color" in body:
-        n["color"] = (body.get("color") or "#fff8c5")
-    if "w" in body:
-        n["w"] = int(body.get("w") or 260)
-    if "h" in body:
-        n["h"] = int(body.get("h") or 180)
-    if "collapsed" in body:
-        n["collapsed"] = bool(body.get("collapsed"))
-    if isinstance(body.get("strokes"), list):
-        n["strokes"] = body["strokes"]
-    if "video" in body:
-        n["video"] = body["video"] if isinstance(body.get("video"), dict) else None   # 传 null → 移除视频
-    if "card" in body:
-        n["card"] = body["card"] if isinstance(body.get("card"), dict) else None   # 卡片便签内容更新(传 null → 移除)
-    if "html" in body:
-        n["html"] = body["html"] if isinstance(body.get("html"), dict) else None   # 通用卡便签内容更新
+    localize_ids = []
+    with _notes_edit(rel) as items:
+        n = next((x for x in items if x.get("id") == nid), None)
+        if not n:
+            return jsonify({"ok": False, "error": "未找到"}), 404
+        if isinstance(body.get("anchor"), dict) and body["anchor"].get("kind") in ("pdf", "epub"):
+            n["anchor"] = body["anchor"]
+        if "text" in body:
+            n["text"] = (body.get("text") or "")[:8000]
+        if "color" in body:
+            n["color"] = (body.get("color") or "#fff8c5")
+        if "w" in body:
+            n["w"] = int(body.get("w") or 260)
+        if "h" in body:
+            n["h"] = int(body.get("h") or 180)
+        if "collapsed" in body:
+            n["collapsed"] = bool(body.get("collapsed"))
+        if isinstance(body.get("strokes"), list):
+            n["strokes"] = body["strokes"]
+        if "video" in body:
+            n["video"] = body["video"] if isinstance(body.get("video"), dict) else None   # 传 null → 移除视频
+        if "card" in body:
+            n["card"] = body["card"] if isinstance(body.get("card"), dict) else None   # 卡片便签内容更新(传 null → 移除)
+        if "html" in body:
+            n["html"] = body["html"] if isinstance(body.get("html"), dict) else None   # 通用卡便签内容更新
+            localize_ids = _asset_ids_in(json.dumps(n.get("html") or {}, ensure_ascii=False))
+        if "iar" in body:
+            try:
+                n["iar"] = float(body["iar"]) if body.get("iar") else None   # 手写锚定宽高比(letterbox 防变形)
+            except Exception:
+                pass
+        n["updated"] = now
+    if localize_ids:
         try:
-            _asset_localize_async(_asset_ids_in(json.dumps(n.get("html") or {}, ensure_ascii=False)))
+            _asset_localize_async(localize_ids)
         except Exception:
             pass
-    if "iar" in body:
-        try:
-            n["iar"] = float(body["iar"]) if body.get("iar") else None   # 手写锚定宽高比(letterbox 防变形)
-        except Exception:
-            pass
-    n["updated"] = now
-    _notes_save(rel, items)
     return jsonify({"ok": True, "note": n})
 
 
@@ -6865,25 +9498,42 @@ _ASSET_REG_PATH = _ASSET_DIR / "registry.json"
 _ASSET_LOCK = __import__("threading").Lock()
 
 
-def _asset_load() -> dict:
-    try:
-        return json.loads(_ASSET_REG_PATH.read_text("utf-8"))
-    except Exception:
-        return {}
+def _asset_dir(identity=None) -> Path:
+    return _reader_sidecar_path("assets", identity=identity)
 
 
-def _asset_save(d: dict):
-    try:
-        _ASSET_DIR.mkdir(parents=True, exist_ok=True)
-        _ASSET_REG_PATH.write_text(json.dumps(d, ensure_ascii=False, indent=1), "utf-8")
-    except Exception:
-        pass
+def _asset_reg_path(identity=None) -> Path:
+    return _reader_sidecar_path(
+        "assets",
+        "registry.json",
+        identity=identity,
+    )
+
+
+def _asset_load(identity=None) -> dict:
+    return _reader_sidecar_json(
+        _asset_reg_path(identity),
+        {},
+        dict,
+    )
+
+
+def _asset_save(d: dict, identity=None):
+    from reader_sidecar_store import atomic_write_json
+    atomic_write_json(
+        _asset_reg_path(identity),
+        d,
+        indent=1,
+    )
 
 
 def _asset_reg(kind: str, url: str, meta: dict | None = None) -> str:
     """登记资产 → 编号(服务端发放,AI 永远不自编;同 URL 复用同编号)。"""
-    with _ASSET_LOCK:
-        d = _asset_load()
+    identity = _reader_storage_identity_current()
+    with _ASSET_LOCK, _reader_sidecar_store().lock(
+        identity, "assets-registry"
+    ):
+        d = _asset_load(identity)
         for aid, e in d.items():
             if e.get("url") == url:
                 return aid
@@ -6894,7 +9544,7 @@ def _asset_reg(kind: str, url: str, meta: dict | None = None) -> str:
             if v:
                 e[k] = v
         d[aid] = e
-        _asset_save(d)
+        _asset_save(d, identity)
         return aid
 
 
@@ -6903,29 +9553,45 @@ def _asset_localize_async(aids: list):
     aids = [a for a in dict.fromkeys(aids) if a]
     if not aids:
         return
+    identity_snapshot = _reader_storage_identity_snapshot()
 
     def _work():
-        import requests as _rq
+        identity = _reader_storage_identity_bind_for_thread(
+            identity_snapshot
+        )
         for aid in aids:
             try:
-                with _ASSET_LOCK:
-                    e = _asset_load().get(aid)
+                with _ASSET_LOCK, _reader_sidecar_store().lock(
+                    identity, "assets-registry"
+                ):
+                    e = _asset_load(identity).get(aid)
                 if not e or e.get("local") or not e.get("url"):
                     continue
-                r = _rq.get(e["url"], timeout=15, headers={"User-Agent": "Mozilla/5.0 (asset-localize)"})
-                if r.status_code != 200 or len(r.content) < 100:
+                content, content_type, _final_url = _fetch_public_image(e["url"])
+                if len(content) < 100:
                     continue
-                ext = {"image/png": ".png", "image/gif": ".gif", "image/webp": ".webp", "image/svg+xml": ".svg"}.get(
-                    (r.headers.get("Content-Type") or "").split(";")[0].strip(), ".jpg")
-                fdir = _ASSET_DIR / "files"
+                ext = {
+                    "image/avif": ".avif",
+                    "image/bmp": ".bmp",
+                    "image/gif": ".gif",
+                    "image/jpeg": ".jpg",
+                    "image/png": ".png",
+                    "image/svg+xml": ".svg",
+                    "image/webp": ".webp",
+                }[content_type]
+                fdir = _asset_dir(identity) / "files"
                 fdir.mkdir(parents=True, exist_ok=True)
                 fp = fdir / (aid + ext)
-                fp.write_bytes(r.content)
-                with _ASSET_LOCK:
-                    d = _asset_load()
+                from reader_sidecar_store import atomic_write_bytes
+                atomic_write_bytes(fp, content)
+                with _ASSET_LOCK, _reader_sidecar_store().lock(
+                    identity, "assets-registry"
+                ):
+                    d = _asset_load(identity)
                     if aid in d:
                         d[aid]["local"] = fp.name
-                        _asset_save(d)
+                        d[aid]["content_type"] = content_type
+                        _asset_save(d, identity)
             except Exception:
                 pass
     __import__("threading").Thread(target=_work, daemon=True).start()
@@ -6933,21 +9599,60 @@ def _asset_localize_async(aids: list):
 
 @bp.route("/api/asset/<aid>")
 def pdf_api_asset(aid):
-    """资产编号解析:local 有→本地文件(immutable);无→302 外链(未贴页/下载失败的兜底)。"""
+    """Resolve an account-owned asset id.
+
+    ``?proxy=1`` is the extension path: the server fetches only the URL already
+    stored under this authenticated account and applies the bounded public-image
+    transport above.  The client cannot supply or override the upstream URL.
+    """
     import re as _re_a
     if not _re_a.fullmatch(r"[a-z]{2,4}_[a-f0-9]{4,12}", aid or ""):
         return jsonify({"ok": False}), 404
     e = _asset_load().get(aid)
     if not e:
         return jsonify({"ok": False, "error": "无此编号"}), 404
+
+    def _asset_response_headers(response):
+        # Asset ids are account-scoped.  A public/shared cache keyed only by
+        # /asset/<id> could return account A's bytes after switching to B.
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["Vary"] = "Authorization, Cookie"
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        # SVG is a supported image type; sandbox it as well so direct navigation
+        # cannot turn an external SVG into same-origin active content.
+        response.headers["Content-Security-Policy"] = "default-src 'none'; sandbox"
+        return response
+
     if e.get("local"):
-        fp = _ASSET_DIR / "files" / e["local"]
+        fp = _asset_dir() / "files" / e["local"]
         if fp.exists():
-            resp = send_file(str(fp))
-            resp.headers["Cache-Control"] = "public, max-age=31536000, immutable"
-            return resp
+            content_type = _public_image_content_type(e.get("content_type"))
+            if not content_type:
+                content_type = {
+                    ".avif": "image/avif",
+                    ".bmp": "image/bmp",
+                    ".gif": "image/gif",
+                    ".jpeg": "image/jpeg",
+                    ".jpg": "image/jpeg",
+                    ".png": "image/png",
+                    ".svg": "image/svg+xml",
+                    ".webp": "image/webp",
+                }.get(fp.suffix.lower(), "")
+            if content_type not in _PUBLIC_IMAGE_CONTENT_TYPES:
+                abort(415)
+            return _asset_response_headers(
+                send_file(str(fp), mimetype=content_type)
+            )
     if e.get("url"):
-        return redirect(e["url"], code=302)
+        if request.args.get("proxy") == "1":
+            try:
+                content, content_type, _final_url = _fetch_public_image(e["url"])
+            except _PublicImageFetchError as error:
+                abort(error.http_status)
+            return _asset_response_headers(
+                Response(content, mimetype=content_type)
+            )
+        return _asset_response_headers(redirect(e["url"], code=302))
     return jsonify({"ok": False}), 404
 
 
@@ -6955,8 +9660,11 @@ def _entity_reg_cards(cards: list, meta: dict | None = None) -> str:
     """卡片批 → 全局编号 card_xxxxxx(用户设计 2026-07-21 统一编号协议:一张卡永远一个编号,
     浮层/侧栏/便签/收藏夹/#id 引用全按编号取同一状态对象——"一张卡两种状态"从根上消失)。
     存进同一 registry(kind='cards',data=卡数组,states=各卡 {_st,_nid,_next} 由前端回写)。"""
-    with _ASSET_LOCK:
-        d = _asset_load()
+    identity = _reader_storage_identity_current()
+    with _ASSET_LOCK, _reader_sidecar_store().lock(
+        identity, "assets-registry"
+    ):
+        d = _asset_load(identity)
         import uuid as _u3
         aid = "card_" + _u3.uuid4().hex[:6]
         e = {"kind": "cards", "url": "", "ts": int(__import__("time").time()), "local": "",
@@ -6966,23 +9674,28 @@ def _entity_reg_cards(cards: list, meta: dict | None = None) -> str:
             if v:
                 e[k] = v
         d[aid] = e
-        _asset_save(d)
+        _asset_save(d, identity)
         return aid
 
 
 def _entity_reg_data(kind: str, data: dict, meta: dict | None = None) -> str:
     """结构卡(天气/新闻/事实/视频等工具结果)→ 全局编号(统一编号协议 P2):
     {kind3}_{hex6},data=渲染所需完整卡对象;#编号 引用时前端经 entity resolve 用 __vcInfoCardEl 重现。"""
-    with _ASSET_LOCK:
-        d = _asset_load()
+    identity = _reader_storage_identity_current()
+    with _ASSET_LOCK, _reader_sidecar_store().lock(
+        identity, "assets-registry"
+    ):
+        d = _asset_load(identity)
         import uuid as _u4
         aid = (kind or "inf")[:3] + "_" + _u4.uuid4().hex[:6]
+        if isinstance(data, dict):
+            data.setdefault("cid", aid)   # 全局实体号就是实时卡/回放/引用的 cid，不再让前端另发临时号
         e = {"kind": kind, "url": "", "ts": int(__import__("time").time()), "local": "", "data": data}
         for k, v in (meta or {}).items():
             if v:
                 e[k] = v
         d[aid] = e
-        _asset_save(d)
+        _asset_save(d, identity)
         return aid
 
 
@@ -6990,7 +9703,8 @@ def _entity_reg_data(kind: str, data: dict, meta: dict | None = None) -> str:
 def pdf_api_entity(aid):
     """统一编号 resolve(用户设计:所有工具结果一套 保存/引用/渲染 规则)。
     GET → {ok,id,kind,...}:cards→卡数组+states(前端 mountState 渲**活卡**);img/vid→url/meta。
-    PATCH {idx,state:{_st,_nid,_next}} → 卡状态回写(入库/评分后调;跨会话/跨宿主同一状态)。"""
+    PATCH {idx,state:{_st,_nid,_next,card_id,...}} → 卡状态回写
+    (入库/评分后调;跨会话/跨宿主同一状态)。"""
     import re as _re_e
     if not _re_e.fullmatch(r"[a-z]{2,4}_[a-f0-9]{4,12}", aid or ""):
         return jsonify({"ok": False}), 404
@@ -7003,13 +9717,37 @@ def pdf_api_entity(aid):
         stv = b.get("state") if isinstance(b.get("state"), dict) else None
         if stv is None:
             return jsonify({"ok": False, "error": "缺 state"}), 400
-        with _ASSET_LOCK:
-            d = _asset_load()
+        identity = _reader_storage_identity_current()
+        with _ASSET_LOCK, _reader_sidecar_store().lock(
+            identity, "assets-registry"
+        ):
+            d = _asset_load(identity)
             e = d.get(aid)
             if not e or e.get("kind") != "cards":
                 return jsonify({"ok": False, "error": "无此卡片编号"}), 404
-            e.setdefault("states", {})[str(idx)] = {k: stv.get(k) for k in ("_st", "_nid", "_next", "_showBack") if k in stv}
-            _asset_save(d)
+            e.setdefault("states", {})[str(idx)] = {
+                key: stv.get(key)
+                for key in (
+                    "_st",
+                    "_nid",
+                    "_next",
+                    "_showBack",
+                    "id",
+                    "card_id",
+                    "_ratingUnavailable",
+                    "_ratingUnavailableReason",
+                    "_ratingPending",
+                    "_syncPending",
+                    "_addPending",
+                    "_addQueued",
+                    "_addAid",
+                    "_ratingAid",
+                    "_ratingEase",
+                    "_ratingCardId",
+                )
+                if key in stv
+            }
+            _asset_save(d, identity)
         return jsonify({"ok": True})
     e = _asset_load().get(aid)
     if not e:
@@ -7018,6 +9756,11 @@ def pdf_api_entity(aid):
     if e.get("kind") == "cards":
         out["cards"] = e.get("data") or []
         out["states"] = e.get("states") or {}
+        out["source_ref"] = _anki_source_ref(
+            e.get("source_ref") or e.get("src")
+        )
+        if e.get("req"):
+            out["requirement"] = e.get("req")
     elif isinstance(e.get("data"), dict):   # 结构卡(天气/新闻/事实):完整卡对象→前端 __vcInfoCardEl 重现
         out["card"] = e["data"]
     else:
@@ -7638,7 +10381,10 @@ def _pam_reading_pos(ctx):
             return False
         rec["pos"] = np
         return True
-    plan, warn = _up_json_plan(_READER_POS_FILE, mut)
+    plan, warn = _up_json_plan(
+        _reading_pos_path(ctx.get("reader_identity")),
+        mut,
+    )
     return ([plan] if plan else []), ([warn] if warn else [])
 
 
@@ -8221,6 +10967,9 @@ def _up_prune_backups(sha: str, keep: int = 2):
 
 def _inspage_job(jid: str, mode: str, rel: str, ap: Path, payload: dict):
     """后台 job:insert/edit/delete 三种操作同一套安全流程。"""
+    _reader_storage_identity_bind_for_thread(
+        payload.get("_reader_storage_identity")
+    )
     import fitz, shutil
     sha = _book_sha(ap)
     tmp = None
@@ -8284,8 +11033,18 @@ def _inspage_job(jid: str, mode: str, rel: str, ap: Path, payload: dict):
         _job_set(jid, step="迁移页锚(高亮/便签/墨迹/图注等)…")
         new_mtime = int(os.path.getmtime(str(ap)))
         try:
-            ctx = {"rel": rel, "ap": ap, "sha": sha, "mv": mv, "mvd": mvd, "mode": mode, "pivot": pivot,
-                   "new_mtime": new_mtime, "record_op": payload["record_op"]}
+            ctx = {
+                "rel": rel,
+                "ap": ap,
+                "sha": sha,
+                "mv": mv,
+                "mvd": mvd,
+                "mode": mode,
+                "pivot": pivot,
+                "new_mtime": new_mtime,
+                "record_op": payload["record_op"],
+                "reader_identity": payload.get("_reader_storage_identity"),
+            }
             # 🔴 BLOCKER③:持 per-rel userpages 锁跨「phase1 读所有 sidecar → phase2 落盘」整个事务,
             #   期间前端 PATCH(/api/userpages)阻塞 → 迁移读到的 userpages 快照与落盘之间不会被 PATCH 插入 →
             #   phase2 不会覆盖 PATCH 刚写的新编辑。doc.save(慢,几秒)在此之前,锁只压这段几毫秒的迁移。
@@ -8422,6 +11181,9 @@ def pdf_api_pdf_insert_page():
         _INSPAGE_ACTIVE.add(rel)
     jid = _uuid.uuid4().hex[:12]
     _job_set(jid, status="running", kind="pdf-inspage", step="排队中…", ts=_time.time())
+    payload["_reader_storage_identity"] = (
+        _reader_storage_identity_snapshot()
+    )
     _upthr.Thread(target=_inspage_job, args=(jid, mode, rel, ap, payload), daemon=True).start()
     return jsonify({"ok": True, "job_id": jid})
 
@@ -8555,7 +11317,12 @@ register_reader_events(bp)
 # ── 统一 HTML 阅读器:拆到 html_reader.py(2026-07-06 结构拆分第 2 刀;_safe_vault_path 等依赖经参数注入)──
 from html_reader import register_html_reader
 register_html_reader(bp, safe_vault_path=_safe_vault_path,
-                     obsidian_root=OBSIDIAN_ROOT, claude_dir=CLAUDE_DIR)
+                     obsidian_root=OBSIDIAN_ROOT, claude_dir=CLAUDE_DIR,
+                     asset_cache_version=_static_asset_version,
+                     pdf_reader_js_v=_reader_js_v,
+                     pdf_shared_js_v=_pdf_shared_js_v,
+                     reader_sidecar_path=_reader_sidecar_path,
+                     reader_sidecar_lock=_reader_sidecar_edit_lock)
 
 
 @bp.route("/api/epub-to-full", methods=["POST"])
@@ -9080,126 +11847,1205 @@ def pdf_api_epub_translate_section():
 
 
 _ANKI_ADD_SEEN = CLAUDE_DIR / "state" / "anki-add-seen.json"
+_ANKI_ADD_RECEIPTS = CLAUDE_DIR / "state" / "anki-add-receipts.json"
+_ANKI_ADD_LOCK_FILE = CLAUDE_DIR / "state" / "anki-add-idempotency.lock"
+_ANKI_ADD_AID_LOCK_DIR = CLAUDE_DIR / "state" / "anki-add-aid-locks"
+_ANKI_ADD_RECEIPT_CONTRACT = "anki-add-idempotency/1"
+_ANKI_ADD_RECEIPT_LIMIT = 2000
+_ANKI_ADD_COMPLETED_MEMORY = {}
+
+
+def _anki_add_aid(value) -> str:
+    if not isinstance(value, str):
+        return ""
+    aid = value.strip()
+    if (
+        not aid
+        or len(aid) > 64
+        or not re.fullmatch(r"[A-Za-z0-9._:-]+", aid)
+    ):
+        return ""
+    return aid
+
+
+def _anki_add_lock_path(aid: str) -> Path:
+    digest = hashlib.sha256(aid.encode("utf-8")).hexdigest()
+    return _ANKI_ADD_AID_LOCK_DIR / (digest[:2] + ".lock")
+
+
+def _anki_add_fingerprint(
+    cards: list,
+    entity_id: str,
+    card_index: int,
+) -> str:
+    canonical = json.dumps(
+        {
+            "cards": cards,
+            "entity_id": entity_id,
+            "card_index": card_index,
+        },
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
+def _anki_add_result(value) -> dict:
+    """Normalize both the legacy aid→[note] ledger and rich v1 results."""
+    if isinstance(value, list):
+        note_ids = value
+        card_ids = []
+        by_note = {}
+    elif isinstance(value, dict):
+        note_ids = value.get("note_ids") or []
+        card_ids = value.get("card_ids") or []
+        by_note = value.get("card_ids_by_note") or {}
+    else:
+        raise RuntimeError("Anki add seen entry is invalid")
+    if (
+        not isinstance(note_ids, list)
+        or not isinstance(card_ids, list)
+        or not isinstance(by_note, dict)
+        or any(
+            isinstance(item, bool) or not isinstance(item, int) or item <= 0
+            for item in note_ids + card_ids
+        )
+    ):
+        raise RuntimeError("Anki add seen entry is invalid")
+    clean_by_note = {}
+    for key, values in by_note.items():
+        if (
+            not isinstance(key, str)
+            or not isinstance(values, list)
+            or any(
+                isinstance(item, bool)
+                or not isinstance(item, int)
+                or item <= 0
+                for item in values
+            )
+        ):
+            raise RuntimeError("Anki add seen entry is invalid")
+        clean_by_note[key] = list(values)
+    return {
+        "note_ids": list(note_ids),
+        "card_ids": list(card_ids),
+        "card_ids_by_note": clean_by_note,
+    }
+
+
+def _anki_add_seen_load() -> dict:
+    try:
+        value = json.loads(_ANKI_ADD_SEEN.read_text("utf-8"))
+    except FileNotFoundError:
+        return {}
+    except Exception as ex:
+        raise RuntimeError("Anki add seen ledger is unreadable") from ex
+    if not isinstance(value, dict):
+        raise RuntimeError("Anki add seen ledger is invalid")
+    for aid, result in value.items():
+        if not _anki_add_aid(aid):
+            raise RuntimeError("Anki add seen aid is invalid")
+        _anki_add_result(result)
+    return value
+
+
+def _anki_add_seen_store(value: dict) -> None:
+    from reader_sidecar_store import atomic_write_json
+
+    items = list(value.items())[-_ANKI_ADD_RECEIPT_LIMIT:]
+    atomic_write_json(_ANKI_ADD_SEEN, dict(items), indent=None)
+
+
+def _anki_add_receipts_load() -> dict:
+    try:
+        value = json.loads(_ANKI_ADD_RECEIPTS.read_text("utf-8"))
+    except FileNotFoundError:
+        return {
+            "contract": _ANKI_ADD_RECEIPT_CONTRACT,
+            "entries": {},
+        }
+    except Exception as ex:
+        raise RuntimeError("Anki add receipt ledger is unreadable") from ex
+    if (
+        not isinstance(value, dict)
+        or value.get("contract") != _ANKI_ADD_RECEIPT_CONTRACT
+        or not isinstance(value.get("entries"), dict)
+    ):
+        raise RuntimeError("Anki add receipt ledger is invalid")
+    for aid, entry in value["entries"].items():
+        if (
+            not _anki_add_aid(aid)
+            or not isinstance(entry, dict)
+            or entry.get("state") not in ("pending", "done")
+            or not re.fullmatch(
+                r"[a-f0-9]{64}",
+                str(entry.get("fingerprint") or ""),
+            )
+        ):
+            raise RuntimeError("Anki add receipt entry is invalid")
+        if entry["state"] == "done":
+            _anki_add_result(entry.get("result"))
+    return value
+
+
+def _anki_add_receipts_store(
+    value: dict,
+    protect: tuple[str, ...] = (),
+) -> None:
+    from reader_sidecar_store import atomic_write_json
+
+    entries = value.get("entries") or {}
+    if len(entries) > _ANKI_ADD_RECEIPT_LIMIT:
+        pending = {
+            aid: entry
+            for aid, entry in entries.items()
+            if (entry or {}).get("state") == "pending"
+        }
+        protected = {
+            aid: entries[aid]
+            for aid in protect
+            if aid in entries
+        }
+        if len(pending) + len(protected) > _ANKI_ADD_RECEIPT_LIMIT:
+            raise RuntimeError("too many unresolved Anki add receipts")
+        done = sorted(
+            (
+                (aid, entry)
+                for aid, entry in entries.items()
+                if (entry or {}).get("state") == "done"
+                and aid not in protected
+            ),
+            key=lambda pair: (
+                float((pair[1] or {}).get("updated_at") or 0),
+                pair[0],
+            ),
+        )
+        budget = (
+            _ANKI_ADD_RECEIPT_LIMIT
+            - len(pending)
+            - len(protected)
+        )
+        entries = {
+            **(dict(done[-budget:]) if budget > 0 else {}),
+            **protected,
+            **pending,
+        }
+        value = {
+            "contract": _ANKI_ADD_RECEIPT_CONTRACT,
+            "entries": entries,
+        }
+    atomic_write_json(_ANKI_ADD_RECEIPTS, value, indent=None)
+
+
+def _anki_add_claim(
+    aid: str,
+    fingerprint: str,
+) -> tuple[str, dict | None]:
+    """Claim before addNote; caller holds the per-aid lock."""
+    from reader_sidecar_store import exclusive_lock
+
+    with exclusive_lock(_ANKI_ADD_LOCK_FILE):
+        seen = _anki_add_seen_load()
+        receipts = _anki_add_receipts_load()
+        entry = receipts["entries"].get(aid)
+        if (
+            entry is not None
+            and entry.get("fingerprint") != fingerprint
+        ):
+            return "reuse", None
+        if entry is not None and entry.get("state") == "done":
+            return "done", _anki_add_result(entry.get("result"))
+        if entry is not None:
+            memory = _ANKI_ADD_COMPLETED_MEMORY.get(aid)
+            if (
+                isinstance(memory, dict)
+                and memory.get("fingerprint") == fingerprint
+            ):
+                return "done-memory", _anki_add_result(
+                    memory.get("result")
+                )
+            return "pending", None
+        # A legacy ledger has no payload hash.  Preserve rollback
+        # compatibility only when no v1 receipt can prove a mismatch.
+        if aid in seen:
+            return "done", _anki_add_result(seen[aid])
+        now = time.time()
+        receipts["entries"][aid] = {
+            "state": "pending",
+            "fingerprint": fingerprint,
+            "created_at": now,
+            "updated_at": now,
+        }
+        _anki_add_receipts_store(receipts)
+        return "claimed", None
+
+
+def _anki_add_release_claim(aid: str, fingerprint: str) -> bool:
+    """Release only after Anki explicitly proved that no addNote happened."""
+    from reader_sidecar_store import exclusive_lock
+
+    try:
+        with exclusive_lock(_ANKI_ADD_LOCK_FILE):
+            receipts = _anki_add_receipts_load()
+            entry = receipts["entries"].get(aid)
+            if entry is None:
+                return True
+            if (
+                entry.get("state") != "pending"
+                or entry.get("fingerprint") != fingerprint
+            ):
+                return False
+            del receipts["entries"][aid]
+            _anki_add_receipts_store(receipts)
+            return True
+    except Exception:
+        return False
+
+
+def _anki_add_commit(
+    aid: str,
+    fingerprint: str,
+    result: dict,
+) -> bool:
+    """Publish a durable result; pending remains if terminal fsync fails."""
+    from reader_sidecar_store import exclusive_lock
+
+    normalized = _anki_add_result(result)
+    with exclusive_lock(_ANKI_ADD_LOCK_FILE):
+        receipts = _anki_add_receipts_load()
+        entry = receipts["entries"].get(aid)
+        if (
+            entry is None
+            or entry.get("state") != "pending"
+            or entry.get("fingerprint") != fingerprint
+        ):
+            raise RuntimeError("Anki add claim changed before commit")
+        done = dict(entry)
+        done.update(
+            state="done",
+            result=normalized,
+            updated_at=time.time(),
+        )
+        receipts["entries"][aid] = done
+        try:
+            _anki_add_receipts_store(receipts, (aid,))
+        except Exception:
+            _ANKI_ADD_COMPLETED_MEMORY[aid] = {
+                "fingerprint": fingerprint,
+                "result": normalized,
+            }
+            while (
+                len(_ANKI_ADD_COMPLETED_MEMORY)
+                > _ANKI_ADD_RECEIPT_LIMIT
+            ):
+                _ANKI_ADD_COMPLETED_MEMORY.pop(
+                    next(iter(_ANKI_ADD_COMPLETED_MEMORY))
+                )
+            return False
+        _ANKI_ADD_COMPLETED_MEMORY.pop(aid, None)
+        try:
+            seen = _anki_add_seen_load()
+            seen[aid] = normalized
+            _anki_add_seen_store(seen)
+        except Exception:
+            current_app.logger.exception(
+                "Anki add legacy seen ledger update failed"
+            )
+        return True
+
+
+def _anki_relative_source_path(value) -> str:
+    """Return a decoded vault-relative path or fail closed.
+
+    Obsidian runs on Windows as well as POSIX hosts, so validation must reject
+    both path dialects.  Repeated decoding is intentional: ``parse_qs`` has
+    already decoded one layer, while copied legacy links can contain one more.
+    """
+    import unicodedata
+
+    candidate = unicodedata.normalize(
+        "NFKC",
+        str(value or "").strip(),
+    )
+    if not candidate:
+        return ""
+    for _ in range(5):
+        candidate = unicodedata.normalize("NFKC", candidate).strip()
+        if (
+            not candidate
+            or any(unicodedata.category(ch) == "Cc" for ch in candidate)
+            or candidate.startswith(("/", "\\"))
+            or re.match(r"^[A-Za-z]:", candidate)
+        ):
+            return ""
+        parts = candidate.replace("\\", "/").split("/")
+        if any(part.strip() in (".", "..") for part in parts):
+            return ""
+        try:
+            decoded = urllib.parse.unquote(
+                candidate,
+                encoding="utf-8",
+                errors="strict",
+            )
+        except (UnicodeDecodeError, ValueError):
+            return ""
+        decoded = unicodedata.normalize("NFKC", decoded).strip()
+        if decoded == candidate:
+            return candidate
+        candidate = decoded
+    # Excessively nested encoding is ambiguous and must not become a source.
+    return ""
+
+
+def _anki_source_ref(value) -> str:
+    """Normalize a trusted card-entity source to the material-ref protocol.
+
+    Entity metadata predates the material graph and commonly stores
+    ``资源/books/x.pdf#p12``.  New Anki notes carry the canonical form in a
+    hidden ``@src`` marker so another device can resolve the same material
+    without depending on the local qa-browser record file.
+    """
+    raw = str(value or "").strip()[:2000]
+    if not raw or re.search(r"[\x00-\x1f\x7f-\x9f]", raw):
+        return ""
+    typed = re.match(r"^(book|note|web|kg|anki):(.*)$", raw, re.I | re.S)
+    if typed:
+        kind = typed.group(1).lower()
+        payload = typed.group(2)
+        if kind == "web":
+            safe_url = _anki_source_url(payload)
+            return "web:" + safe_url if safe_url else ""
+        if kind == "note":
+            path, marker, fragment = payload.partition("#")
+            path = _anki_relative_source_path(path)
+            if not path:
+                return ""
+            if not path.lower().endswith(".md"):
+                path += ".md"
+            fragment = fragment.strip()
+            return "note:" + path + (
+                marker + fragment if marker and fragment else ""
+            )
+        return raw
+    wiki = re.fullmatch(r"!?\[\[([^\]]+)\]\]", raw)
+    if wiki:
+        target = wiki.group(1).split("|", 1)[0].strip()
+        if not target:
+            return ""
+        path, marker, fragment = target.partition("#")
+        path = _anki_relative_source_path(path)
+        if not path:
+            return ""
+        if not path.lower().endswith(".md"):
+            path += ".md"
+        return "note:" + path + (
+            marker + fragment.strip() if marker and fragment.strip() else ""
+        )
+    if raw.lower().startswith(("http://", "https://")):
+        safe_url = _anki_source_url(raw)
+        return "web:" + safe_url if safe_url else ""
+    match = re.match(r"^(.+?)#p(\d+)$", raw, re.I)
+    if match:
+        return "book:%s#p%d" % (match.group(1), int(match.group(2)))
+    match = re.match(r"^(.+?)#page=(\d+)$", raw, re.I)
+    if match:
+        return "book:%s#p%d" % (match.group(1), int(match.group(2)))
+    if raw.lower().endswith((".pdf", ".epub", ".html", ".htm")):
+        return "book:" + raw
+    if raw.lower().endswith(".md"):
+        path = _anki_relative_source_path(raw)
+        return "note:" + path if path else ""
+    return raw
+
+
+def _anki_valid_http_hostname(parsed) -> bool:
+    """Validate the authority instead of trusting a non-empty netloc."""
+    import ipaddress
+
+    try:
+        hostname = parsed.hostname
+        port = parsed.port
+    except ValueError:
+        return False
+    if not hostname or "%" in hostname or "\\" in parsed.netloc:
+        return False
+    if port is not None and not (1 <= port <= 65535):
+        return False
+    try:
+        ipaddress.ip_address(hostname)
+        return True
+    except ValueError:
+        pass
+    try:
+        ascii_host = hostname.encode("idna").decode("ascii")
+    except (UnicodeError, ValueError):
+        return False
+    if ascii_host.endswith("."):
+        ascii_host = ascii_host[:-1]
+    if not ascii_host or len(ascii_host) > 253:
+        return False
+    labels = ascii_host.split(".")
+    return all(
+        1 <= len(label) <= 63
+        and re.fullmatch(
+            r"[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?",
+            label,
+        )
+        for label in labels
+    )
+
+
+def _anki_source_url(value) -> str:
+    """Return only an explicitly supported source URL.
+
+    Anki card HTML is user content and may contain arbitrary anchors.  The
+    review UI therefore receives only normal web links or the single Obsidian
+    deep-link shape that opens a concrete vault-relative file.
+    """
+    import html as _html
+
+    raw = _html.unescape(str(value or "")).strip()[:4000]
+    if not raw or re.search(r"[\x00-\x1f\x7f]", raw):
+        return ""
+    try:
+        parsed = urllib.parse.urlsplit(raw)
+    except (TypeError, ValueError):
+        return ""
+    scheme = parsed.scheme.lower()
+    if scheme in ("http", "https"):
+        if (
+            not parsed.netloc
+            or parsed.username is not None
+            or parsed.password is not None
+            or not _anki_valid_http_hostname(parsed)
+        ):
+            return ""
+        return raw
+    if scheme != "obsidian":
+        return ""
+    if (
+        parsed.netloc.lower() != "open"
+        or parsed.path not in ("", "/")
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        return ""
+    try:
+        query = urllib.parse.parse_qs(
+            parsed.query,
+            keep_blank_values=True,
+            strict_parsing=False,
+        )
+    except ValueError:
+        return ""
+    files = query.get("file") or []
+    if len(files) != 1:
+        return ""
+    if not _anki_relative_source_path(files[0]):
+        return ""
+    return raw
+
+
+def _anki_source_ref_from_url(value) -> str:
+    url = _anki_source_url(value)
+    if not url:
+        return ""
+    parsed = urllib.parse.urlsplit(url)
+    if parsed.scheme.lower() in ("http", "https"):
+        return "web:" + url
+    query = urllib.parse.parse_qs(parsed.query, keep_blank_values=True)
+    file_value = _anki_relative_source_path(
+        (query.get("file") or [""])[0]
+    )
+    if not file_value:
+        return ""
+    if file_value.lower().endswith((".pdf", ".epub", ".html", ".htm")):
+        return "book:" + file_value
+    if not file_value.lower().endswith(".md"):
+        file_value += ".md"
+    return "note:" + file_value
+
+
+def _anki_source_url_from_ref(value) -> str:
+    ref = _anki_source_ref(value)
+    if ref.startswith("web:"):
+        return _anki_source_url(ref[4:])
+    if not ref.startswith("note:"):
+        return ""
+    note = ref[5:].split("#", 1)[0].strip()
+    note = _anki_relative_source_path(note)
+    if not note:
+        return ""
+    if note.lower().endswith(".md"):
+        note = note[:-3]
+    vault = os.environ.get("OBSIDIAN_VAULT_NAME", "Obsidian Vault")
+    return _anki_source_url(
+        "obsidian://open?"
+        + urllib.parse.urlencode({"vault": vault, "file": note})
+    )
+
+
+class _AnkiSourceAnchorParser(HTMLParser):
+    """Extract visible source anchors and real hidden source comments."""
+
+    def __init__(self):
+        super().__init__(convert_charrefs=True)
+        self._line = ""
+        self._skip_depth = 0
+        self.hrefs = []
+        self.source_markers = []
+
+    def handle_data(self, data):
+        if not self._skip_depth:
+            self._line += str(data or "")
+
+    def handle_starttag(self, tag, attrs):
+        tag = str(tag or "").lower()
+        if tag in ("script", "style", "template"):
+            self._skip_depth += 1
+            return
+        if self._skip_depth:
+            return
+        if tag in ("br", "hr", "div", "p", "li", "tr", "td", "section"):
+            self._line = ""
+            return
+        if tag != "a" or not re.fullmatch(
+            r"\s*来源\s*[：:]\s*",
+            self._line,
+        ):
+            return
+        href = dict(attrs or []).get("href")
+        if href:
+            self.hrefs.append(str(href))
+        self._line = ""
+
+    def handle_endtag(self, tag):
+        tag = str(tag or "").lower()
+        if tag in ("script", "style", "template") and self._skip_depth:
+            self._skip_depth -= 1
+            return
+        if not self._skip_depth and tag in (
+            "br", "hr", "div", "p", "li", "tr", "td", "section"
+        ):
+            self._line = ""
+
+    def handle_comment(self, data):
+        if self._skip_depth:
+            return
+        marker = re.fullmatch(
+            r"\s*@src:(.*?)\s*",
+            str(data or ""),
+            re.S,
+        )
+        if marker and marker.group(1).strip():
+            self.source_markers.append(marker.group(1).strip())
+
+
+def _anki_visible_source_urls(raw_html) -> list[str]:
+    parser = _AnkiSourceAnchorParser()
+    try:
+        parser.feed(str(raw_html or ""))
+        parser.close()
+    except Exception:
+        return []
+    out = []
+    for href in parser.hrefs:
+        safe = _anki_source_url(href)
+        if safe and safe not in out:
+            out.append(safe)
+    return out
+
+
+def _anki_source_comment_markers(raw_html) -> list[str]:
+    """Return ``@src`` values from actual HTML comments only."""
+    parser = _AnkiSourceAnchorParser()
+    try:
+        parser.feed(str(raw_html or ""))
+        parser.close()
+    except Exception:
+        return []
+    return list(parser.source_markers)
+
+
+def _anki_provenance_footer(entity_id: str, card_index: int, source_ref: str) -> str:
+    """Visible cross-device action plus hidden machine-readable provenance."""
+    import html as _html
+
+    entity_id = str(entity_id or "").strip()
+    try:
+        card_index = max(0, int(card_index))
+    except (TypeError, ValueError):
+        card_index = 0
+    source_ref = _anki_source_ref(source_ref).replace("--", "")[:2000]
+    lines = []
+    if source_ref:
+        lines.append("来源：" + _html.escape(source_ref))
+    if entity_id:
+        lines.append("卡片编号：" + _html.escape(entity_id))
+    qa = os.environ.get("QA_PUBLIC_URL", "").rstrip("/")
+    if qa and entity_id:
+        query = urllib.parse.urlencode({"card": entity_id, "index": card_index})
+        lines.append(
+            '<a href="%s/?%s">问 AI / 改进这张卡</a>'
+            % (_html.escape(qa, quote=True), _html.escape(query, quote=True))
+        )
+    visible = (
+        '<hr><div style="font-size:0.85em;color:#666;">'
+        + "<br>".join(lines)
+        + "</div>"
+        if lines
+        else ""
+    )
+    markers = ""
+    if source_ref:
+        markers += "<!--@src:%s-->" % source_ref
+    if entity_id:
+        markers += "<!--@entity:%s:%d-->" % (entity_id, card_index)
+    return visible + markers
+
+
+_CARD_IMPROVEMENT_ACTION_CONTRACT = "card-improvement-action/1"
+
+
+def _card_improvement_action(
+    workspace_url: str,
+    *,
+    entity_id: str = "",
+    entity_index=None,
+    source_ref: str = "",
+) -> dict | None:
+    """Build the transport-only contract shared by review UIs and the QA page.
+
+    The contract intentionally contains no prompt and no mutation endpoint.
+    Selecting useful answers and producing/confirming a draft remains the job
+    of the single card-improvement workspace/backend.
+    """
+    workspace_url = str(workspace_url or "").strip()
+    try:
+        parsed = urllib.parse.urlsplit(workspace_url)
+    except (TypeError, ValueError):
+        return None
+    if parsed.scheme not in ("http", "https") or not parsed.netloc:
+        return None
+    out = {
+        "contract": _CARD_IMPROVEMENT_ACTION_CONTRACT,
+        "delivery": "workspace",
+        "workspace_url": workspace_url,
+        "modes": ["verbose", "concise"],
+        "default_mode": "verbose",
+        "selection": "workspace",
+    }
+    entity_id = str(entity_id or "").strip().lower()
+    if re.fullmatch(r"card_[a-f0-9]{4,12}", entity_id):
+        out["entity_id"] = entity_id
+    try:
+        if entity_index is not None:
+            out["entity_index"] = max(0, int(entity_index))
+    except (TypeError, ValueError):
+        pass
+    source_ref = _anki_source_ref(source_ref)
+    if source_ref:
+        out["source_ref"] = source_ref
+    return out
+
+
+def _anki_review_card_meta(card: dict) -> dict:
+    """Extract stable provenance/actions from AnkiConnect ``cardsInfo``.
+
+    New notes use hidden markers.  Legacy notes only have the visible QA link,
+    which remains a supported fallback so the old page keeps working.
+    """
+    import html as _html
+
+    chunks = [
+        str(card.get("question") or ""),
+        str(card.get("answer") or ""),
+    ]
+    fields = card.get("fields")
+    if isinstance(fields, dict):
+        for value in fields.values():
+            if isinstance(value, dict):
+                chunks.append(str(value.get("value") or ""))
+            else:
+                chunks.append(str(value or ""))
+    raw = "\n".join(chunks)
+    out = {}
+    entity = re.search(
+        r"@entity:(card_[a-f0-9]{4,12}):(\d+)-->",
+        raw,
+        re.I,
+    )
+    if entity:
+        out["entity_id"] = entity.group(1).lower()
+        out["entity_index"] = int(entity.group(2))
+    source_markers = []
+    for chunk in chunks:
+        source_markers.extend(_anki_source_comment_markers(chunk))
+    normalized_sources = []
+    for marker in source_markers:
+        source_ref = _anki_source_ref(_html.unescape(marker))
+        if source_ref and source_ref not in normalized_sources:
+            normalized_sources.append(source_ref)
+    canonical_source_valid = (
+        bool(source_markers)
+        and len(normalized_sources) == 1
+        and all(
+            _anki_source_ref(_html.unescape(marker))
+            == normalized_sources[0]
+            for marker in source_markers
+        )
+    )
+    if canonical_source_valid:
+        out["source_ref"] = normalized_sources[0]
+    visible_source_urls = []
+    for chunk in chunks:
+        for candidate in _anki_visible_source_urls(chunk):
+            if candidate not in visible_source_urls:
+                visible_source_urls.append(candidate)
+    if out.get("source_ref"):
+        canonical_url = _anki_source_url_from_ref(out["source_ref"])
+        if canonical_url:
+            out["source_url"] = canonical_url
+        else:
+            # A visible link may accompany an older canonical marker.  Accept
+            # it only when both independently resolve to the same material.
+            for candidate in visible_source_urls:
+                if _anki_source_ref_from_url(candidate) == out["source_ref"]:
+                    out["source_url"] = candidate
+                    break
+    elif visible_source_urls and not source_markers:
+        out["source_url"] = visible_source_urls[0]
+        out["source_ref"] = _anki_source_ref_from_url(
+            visible_source_urls[0]
+        )
+
+    improve_url = ""
+    qa = os.environ.get("QA_PUBLIC_URL", "").rstrip("/")
+    if qa and out.get("entity_id"):
+        improve_url = qa + "/?" + urllib.parse.urlencode({
+            "card": out["entity_id"],
+            "index": out.get("entity_index", 0),
+        })
+    if not improve_url:
+        legacy = re.search(
+            r"""href=["'](https?://[^"']+[?&]card=[^"']+)["']""",
+            raw,
+            re.I,
+        )
+        if legacy:
+            improve_url = _html.unescape(legacy.group(1))
+    if improve_url:
+        out["improve_url"] = improve_url
+        action = _card_improvement_action(
+            improve_url,
+            entity_id=out.get("entity_id", ""),
+            entity_index=out.get("entity_index"),
+            source_ref=out.get("source_ref", ""),
+        )
+        if action:
+            out["improvement_action"] = action
+    return out
+
 
 @bp.route("/api/anki-add-cards", methods=["POST"])
-def pdf_api_anki_add_cards():
-    """B1 融合复习卡:确认后的草稿卡入库。POST {aid, cards:[{type,front,back,cloze|text}]}。
+def pdf_api_anki_add_cards(body_override=None):
+    """B1 融合复习卡:确认后的草稿卡入库。
+
+    POST ``{aid,cards:[...],entity_id?,card_index?}``.  ``entity_id`` 存在时
+    来源只从当前账户的 entity registry 回查，不接受客户端伪造来源。
     幂等:aid→note_ids 落 state(补投重放返回同一批 id,不重复建卡)。
     逻辑与 _run_snippets_to 的 add 段同源:中文模型名动态探测 + createDeck + addNote + changeDeck 归位
     (AnkiConnect×Anki25 deckName 不生效坑,见 memory ankiconnect-deckname-ignored)。"""
     import urllib.request
-    body = request.get_json(silent=True) or {}
-    aid = (body.get("aid") or "").strip()[:64]
+    body = body_override if isinstance(body_override, dict) else (request.get_json(silent=True) or {})
+    aid = _anki_add_aid(body.get("aid"))
+    if not aid:
+        return jsonify({"ok": False, "error": "bad aid"}), 400
     cards = body.get("cards") or []
     if not isinstance(cards, list) or not cards or len(cards) > 20:
         return jsonify({"ok": False, "error": "bad cards"}), 400
+    entity_id = str(body.get("entity_id") or "").strip()
     try:
-        seen = json.loads(_ANKI_ADD_SEEN.read_text("utf-8"))
-        assert isinstance(seen, dict)
-    except Exception:
-        seen = {}
-    if aid and aid in seen:
-        return jsonify({"ok": True, "dedup": True, "added": len(seen[aid]), "note_ids": seen[aid]})
-    ANKI_URL = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
-    def _ank(action, params=None):
-        rq = json.dumps({"action": action, "version": 6, "params": params or {}}).encode()
-        with urllib.request.urlopen(urllib.request.Request(
-                ANKI_URL, data=rq, headers={"Content-Type": "application/json"}), timeout=10) as rr:
-            return json.loads(rr.read())
+        card_index = max(0, int(body.get("card_index") or 0))
+    except (TypeError, ValueError):
+        return jsonify({"ok": False, "error": "bad card_index"}), 400
+    source_ref = ""
+    if entity_id:
+        if not re.fullmatch(r"card_[a-f0-9]{4,12}", entity_id):
+            return jsonify({"ok": False, "error": "bad entity_id"}), 400
+        identity = _reader_storage_identity_current()
+        with _ASSET_LOCK, _reader_sidecar_store().lock(
+            identity, "assets-registry"
+        ):
+            entity = _asset_load(identity).get(entity_id)
+        if not entity or entity.get("kind") != "cards":
+            return jsonify({"ok": False, "error": "card entity not found"}), 404
+        entity_cards = entity.get("data") or []
+        if card_index >= len(entity_cards):
+            return jsonify({"ok": False, "error": "card index out of range"}), 400
+        source_ref = _anki_source_ref(
+            entity.get("source_ref") or entity.get("src")
+        )
+    fingerprint = _anki_add_fingerprint(
+        cards,
+        entity_id,
+        card_index,
+    )
+    from reader_sidecar_store import exclusive_lock
+
     try:
-        _mn = _ank("modelNames").get("result") or []
-    except Exception:
-        return jsonify({"ok": False, "error": "AnkiConnect 不可达"}), 502
-    def _pickm(cands, dflt):
-        for cc in cands:
-            if cc in _mn:
-                return cc
-        return dflt
-    basic_m = _pickm(["Basic", "基础的", "基本"], "Basic")
-    cloze_m = _pickm(["Cloze", "填空题", "挖空题"], "Cloze")
-    def _mf(m):
-        try:
-            return _ank("modelFieldNames", {"modelName": m}).get("result") or []
-        except Exception:
-            return []
-    _bf, _cf = _mf(basic_m), _mf(cloze_m)
-    b_front = _bf[0] if _bf else "Front"
-    b_back = _bf[1] if len(_bf) > 1 else (_bf[0] if _bf else "Back")
-    c_text = _cf[0] if _cf else "Text"
+        with exclusive_lock(_anki_add_lock_path(aid)):
+            claim, previous = _anki_add_claim(aid, fingerprint)
+            if claim in ("done", "done-memory"):
+                previous = previous or {
+                    "note_ids": [],
+                    "card_ids": [],
+                    "card_ids_by_note": {},
+                }
+                return jsonify({
+                    "ok": True,
+                    "dedup": True,
+                    "durable": claim == "done",
+                    "added": len(previous["note_ids"]),
+                    **previous,
+                    "entity_id": entity_id,
+                    "source_ref": source_ref,
+                })
+            if claim == "reuse":
+                return jsonify({
+                    "ok": False,
+                    "error": "aid reused with different Anki payload",
+                    "code": "anki_add_aid_reuse",
+                }), 409
+            if claim == "pending":
+                return jsonify({
+                    "ok": False,
+                    "error": "previous Anki add outcome is unknown",
+                    "code": "anki_add_outcome_unknown",
+                }), 409
+
+            ANKI_URL = os.environ.get(
+                "ANKI_CONNECT_URL",
+                "http://127.0.0.1:8765",
+            )
+
+            def _ank(action, params=None):
+                rq = json.dumps({
+                    "action": action,
+                    "version": 6,
+                    "params": params or {},
+                }).encode()
+                with urllib.request.urlopen(
+                    urllib.request.Request(
+                        ANKI_URL,
+                        data=rq,
+                        headers={"Content-Type": "application/json"},
+                    ),
+                    timeout=10,
+                ) as rr:
+                    return json.loads(rr.read())
+
+            try:
+                _mn = _ank("modelNames").get("result") or []
+            except Exception:
+                if not _anki_add_release_claim(aid, fingerprint):
+                    return jsonify({
+                        "ok": False,
+                        "error": "failed to release Anki add claim",
+                        "code": "anki_add_claim_persist",
+                    }), 503
+                return jsonify({
+                    "ok": False,
+                    "error": "AnkiConnect 不可达",
+                }), 502
+
+            def _pickm(cands, dflt):
+                for cc in cands:
+                    if cc in _mn:
+                        return cc
+                return dflt
+
+            basic_m = _pickm(
+                ["Basic", "基础的", "基本"],
+                "Basic",
+            )
+            cloze_m = _pickm(
+                ["Cloze", "填空题", "挖空题"],
+                "Cloze",
+            )
+
+            def _mf(model):
+                try:
+                    return (
+                        _ank(
+                            "modelFieldNames",
+                            {"modelName": model},
+                        ).get("result")
+                        or []
+                    )
+                except Exception:
+                    return []
+
+            _bf, _cf = _mf(basic_m), _mf(cloze_m)
+            b_front = _bf[0] if _bf else "Front"
+            b_back = (
+                _bf[1]
+                if len(_bf) > 1
+                else (_bf[0] if _bf else "Back")
+            )
+            c_text = _cf[0] if _cf else "Text"
+            c_extra = _cf[1] if len(_cf) > 1 else ""
+            try:
+                _ank("createDeck", {"deck": "QA"})
+            except Exception:
+                pass
+
+            added, note_ids = 0, []
+            for offset, card in enumerate(cards):
+                if not isinstance(card, dict):
+                    continue
+                ctype = (card.get("type") or "basic").lower()
+                footer = _anki_provenance_footer(
+                    entity_id,
+                    card_index + offset,
+                    source_ref,
+                )
+                if ctype == "cloze":
+                    cloze_text = _anki_md_links(
+                        (
+                            card.get("cloze")
+                            or card.get("text")
+                            or ""
+                        )[:8000]
+                    )
+                    fields = {c_text: cloze_text}
+                    if c_extra:
+                        fields[c_extra] = footer
+                    else:
+                        fields[c_text] += footer
+                    model_name = cloze_m
+                else:
+                    fields = {
+                        b_front: _anki_md_links(
+                            (card.get("front") or "")[:8000]
+                        ),
+                        b_back: _anki_md_links(
+                            (card.get("back") or "")[:8000]
+                        ) + footer,
+                    }
+                    model_name = basic_m
+                try:
+                    response = _ank(
+                        "addNote",
+                        {
+                            "note": {
+                                "deckName": "QA",
+                                "modelName": model_name,
+                                "fields": fields,
+                                "tags": [
+                                    "pdf-snippets",
+                                    "card-lab",
+                                ],
+                            },
+                        },
+                    )
+                except Exception as ex:
+                    # addNote may have committed before the response was lost.
+                    # Keep the durable pending receipt; a retry must not create
+                    # the same note under a fresh server execution.
+                    return jsonify({
+                        "ok": False,
+                        "error": str(ex)[:140],
+                        "code": "anki_add_outcome_unknown",
+                    }), 503
+                if (
+                    not response.get("error")
+                    and response.get("result")
+                ):
+                    added += 1
+                    note_ids.append(int(response["result"]))
+
+            card_ids = []
+            card_ids_by_note = {}
+            if note_ids:
+                try:
+                    for note_id in note_ids:
+                        found = (
+                            _ank(
+                                "findCards",
+                                {"query": f"nid:{note_id}"},
+                            )
+                            or {}
+                        ).get("result") or []
+                        clean = sorted({
+                            int(card_id)
+                            for card_id in found
+                            if (
+                                isinstance(card_id, int)
+                                and not isinstance(card_id, bool)
+                                and card_id > 0
+                            )
+                        })
+                        card_ids_by_note[str(note_id)] = clean
+                        card_ids.extend(clean)
+                    if card_ids:
+                        _ank(
+                            "changeDeck",
+                            {"cards": card_ids, "deck": "QA"},
+                        )
+                except Exception:
+                    # Notes already exist, so record their known identities and
+                    # never repeat addNote merely because enrichment failed.
+                    card_ids = []
+                    card_ids_by_note = {}
+            if not note_ids:
+                if not _anki_add_release_claim(aid, fingerprint):
+                    return jsonify({
+                        "ok": False,
+                        "error": "failed to release Anki add claim",
+                        "code": "anki_add_claim_persist",
+                    }), 503
+                return jsonify({
+                    "ok": False,
+                    "error": "addNote 全部失败",
+                }), 502
+
+            result = {
+                "note_ids": note_ids,
+                "card_ids": card_ids,
+                "card_ids_by_note": card_ids_by_note,
+            }
+            durable = _anki_add_commit(
+                aid,
+                fingerprint,
+                result,
+            )
+    except Exception as ex:
+        current_app.logger.exception(
+            "Anki add idempotency ledger failure"
+        )
+        return jsonify({
+            "ok": False,
+            "error": str(ex)[:140],
+            "code": "anki_add_idempotency_unavailable",
+        }), 503
+
+    response = {
+        "ok": True,
+        "added": added,
+        **result,
+        "entity_id": entity_id,
+        "source_ref": source_ref,
+    }
+    if not durable:
+        response["durable"] = False
+    return jsonify(response)
+
+
+_COMMAND_OUTBOX_CONTRACT = "command-outbox/2"
+_SYNC_BATCH_EXACT_ENDPOINTS = {
+    "/pdf/api/lookup-event": {"POST"},
+    "/pdf/api/vocab-mark": {"POST"},
+    "/pdf/api/jp-vocab-mark": {"POST"},
+    "/pdf/api/phrases": {"POST", "DELETE"},
+    "/pdf/api/phrase-mark": {"POST"},
+    "/pdf/api/highlights": {"POST", "PATCH", "DELETE"},
+    "/pdf/api/notes": {"POST", "PATCH", "DELETE"},
+    "/pdf/api/anki-add-cards": {"POST"},
+    "/pdf/api/review-answer": {"POST"},
+    "/pdf/api/reading-pos": {"POST"},
+}
+_SYNC_BATCH_ENTITY_PATH = re.compile(r"^/pdf/api/entity/[A-Za-z0-9_-]{1,160}$")
+_SYNC_BATCH_MUTATION_ID = re.compile(r"^mut-v2-[a-f0-9]{32}$")
+
+
+def _sync_batch_target(url, method):
+    """Return a safe local target or None for anything outside real outbox use."""
+    method = str(method or "POST").upper()
+    raw = str(url or "")
     try:
-        _ank("createDeck", {"deck": "QA"})
-    except Exception:
-        pass
-    added, note_ids = 0, []
-    for c in cards:
-        if not isinstance(c, dict):
-            continue
-        ctype = (c.get("type") or "basic").lower()
-        if ctype == "cloze":
-            fields = {c_text: _anki_md_links((c.get("cloze") or c.get("text") or "")[:8000])}
-            model_name = cloze_m
-        else:
-            fields = {b_front: _anki_md_links((c.get("front") or "")[:8000]),
-                      b_back: _anki_md_links((c.get("back") or "")[:8000])}
-            model_name = basic_m
-        try:
-            resp = _ank("addNote", {"note": {"deckName": "QA", "modelName": model_name,
-                                             "fields": fields, "tags": ["pdf-snippets", "card-lab"]}})
-            if not resp.get("error") and resp.get("result"):
-                added += 1
-                note_ids.append(resp["result"])
-        except Exception:
-            pass
-    if note_ids:
-        try:
-            cids = (_ank("findCards", {"query": " or ".join(f"nid:{n}" for n in note_ids)}) or {}).get("result") or []
-            if cids:
-                _ank("changeDeck", {"cards": cids, "deck": "QA"})
-        except Exception:
-            pass
-    if not note_ids:
-        return jsonify({"ok": False, "error": "addNote 全部失败"}), 502
-    if aid:
-        seen[aid] = note_ids
-        try:
-            _ANKI_ADD_SEEN.write_text(json.dumps(dict(list(seen.items())[-500:])), "utf-8")
-        except Exception:
-            pass
-    return jsonify({"ok": True, "added": added, "note_ids": note_ids})
+        parsed = urllib.parse.urlsplit(raw)
+    except (TypeError, ValueError):
+        return None
+    if (
+        parsed.scheme
+        or parsed.netloc
+        or parsed.fragment
+        or not parsed.path.startswith("/")
+    ):
+        return None
+    allowed = method in _SYNC_BATCH_EXACT_ENDPOINTS.get(parsed.path, set())
+    if not allowed:
+        allowed = method == "PATCH" and bool(
+            _SYNC_BATCH_ENTITY_PATH.fullmatch(parsed.path)
+        )
+    if not allowed:
+        return None
+    return parsed.path + (("?" + parsed.query) if parsed.query else "")
 
 
 @bp.route("/api/sync-batch", methods=["POST"])
 def pdf_api_sync_batch():
-    """outbox 攒批传输(2026-07-21 用户提案;成熟形=write coalescing+batched writes)。
-    每 op 在服务端以子请求完整分发(带原 Cookie → before_request 鉴权/各端点幂等逻辑原样生效),
-    一次连接跑 N 个写;返回逐 op status,客户端 2xx/4xx 出队、5xx/网络错留队。sendBeacon 场景
-    读不到响应 → 队列保留下次重投,端点全幂等所以安全。"""
-    from flask import current_app
+    """Dispatch an owner-bound command-outbox/2 batch through normal routes."""
     from werkzeug.test import EnvironBuilder
-    body = request.get_json(silent=True) or {}
-    ops = body.get("ops") or []
+
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or body.get("contract") != _COMMAND_OUTBOX_CONTRACT:
+        return jsonify({"ok": False, "error": "invalid outbox contract"}), 400
+    claimed_owner = str(body.get("ownerNamespace") or "").strip()
+    if not claimed_owner:
+        return jsonify({"ok": False, "error": "ownerNamespace required"}), 400
+    resolver = current_app.extensions.get("reader_storage_namespace_resolver")
+    actual_owner = resolver() if callable(resolver) else None
+    if not actual_owner:
+        return jsonify({"ok": False, "error": "authenticated owner required"}), 401
+    if claimed_owner != actual_owner:
+        return jsonify({"ok": False, "error": "outbox owner mismatch"}), 403
+
+    ops = body.get("ops")
     if not isinstance(ops, list) or len(ops) > 100:
         return jsonify({"ok": False, "error": "bad ops"}), 400
     cookie = request.headers.get("Cookie", "")
+    authorization = request.headers.get("Authorization", "")
     out = []
     for op in ops:
         try:
-            url = str((op or {}).get("url") or "")
-            if not (url.startswith("/pdf/") or url.startswith("/api/")):
-                out.append({"status": 400}); continue
+            if not isinstance(op, dict):
+                out.append({"status": 400})
+                continue
+            mutation_id = str(op.get("mutationId") or "")
+            target = _sync_batch_target(op.get("url"), op.get("method"))
+            if not _SYNC_BATCH_MUTATION_ID.fullmatch(mutation_id) or not target:
+                out.append({"status": 400})
+                continue
             method = str(op.get("method") or "POST").upper()
-            if method not in ("POST", "PATCH", "DELETE", "PUT"):
-                out.append({"status": 400}); continue
-            b = EnvironBuilder(path=url, method=method,
-                               json=(op.get("body") if op.get("body") is not None else None),
-                               headers={"Cookie": cookie})
-            env = b.get_environ()
-            with current_app.request_context(env):
-                rv = current_app.full_dispatch_request()
-                out.append({"status": rv.status_code})
+            headers = {
+                "X-BW-Command-Outbox": _COMMAND_OUTBOX_CONTRACT,
+                "X-BW-Mutation-Id": mutation_id,
+            }
+            if cookie:
+                headers["Cookie"] = cookie
+            if authorization:
+                headers["Authorization"] = authorization
+            builder = EnvironBuilder(
+                path=target,
+                method=method,
+                json=(op.get("body") if op.get("body") is not None else None),
+                headers=headers,
+            )
+            with current_app.request_context(builder.get_environ()):
+                response = current_app.full_dispatch_request()
+                out.append({"status": response.status_code})
         except Exception as ex:
             out.append({"status": 500, "error": str(ex)[:80]})
-    return jsonify({"ok": True, "results": out})
+    return jsonify({
+        "ok": True,
+        "contract": _COMMAND_OUTBOX_CONTRACT,
+        "ownerNamespace": actual_owner,
+        "results": out,
+    })
 
 
 _LOOKUP_EVT_SEEN = CLAUDE_DIR / "state" / "lookup-events-seen.json"
@@ -9253,40 +13099,640 @@ def pdf_api_ui_version():
     return jsonify({"ok": True, "v": _pdf_shared_js_v()})
 
 
-@bp.route("/api/review-queue")
-def pdf_api_review_queue():
-    """本地复习 v1:到期卡队列(AnkiConnect is:due → cardsInfo)。前端缓存本地+SW 离线回落。"""
+_REVIEW_CANDIDATE_SERVICE = None
+_REVIEW_CANDIDATE_LOCK = threading.Lock()
+_REVIEW_ATTENTION_PROFILE = None
+
+
+def _review_anki_call(action, **params):
+    """Small injectable AnkiConnect seam used by both review queue modes."""
     import requests as _rq
-    try:
-        limit = min(int(request.args.get("limit", "30") or 30), 60)
-    except ValueError:
-        limit = 30
+
     aurl = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
-    def _ac(action, **params):
-        r = _rq.post(aurl, json={"action": action, "version": 6, "params": params}, timeout=12)
-        d = r.json()
-        if d.get("error"):
-            raise RuntimeError(str(d["error"]))
-        return d.get("result")
+    response = _rq.post(
+        aurl,
+        json={"action": action, "version": 6, "params": params},
+        timeout=12,
+    )
+    data = response.json()
+    if data.get("error"):
+        raise RuntimeError(str(data["error"]))
+    return data.get("result")
+
+
+def _review_candidate_service():
+    global _REVIEW_CANDIDATE_SERVICE
+
+    if _REVIEW_CANDIDATE_SERVICE is None:
+        with _REVIEW_CANDIDATE_LOCK:
+            if _REVIEW_CANDIDATE_SERVICE is None:
+                from card_candidate_service import (
+                    CardCandidateIndex,
+                    CardCandidateService,
+                )
+
+                _REVIEW_CANDIDATE_SERVICE = CardCandidateService(
+                    CardCandidateIndex(
+                        CLAUDE_DIR / "anki" / "records",
+                        CLAUDE_DIR / "knowledge_graph",
+                        OBSIDIAN_ROOT,
+                    )
+                )
+    return _REVIEW_CANDIDATE_SERVICE
+
+
+def _review_attention_profile():
+    global _REVIEW_ATTENTION_PROFILE
+
+    if _REVIEW_ATTENTION_PROFILE is None:
+        scripts_dir = str(CLAUDE_DIR / "scripts")
+        if scripts_dir not in sys.path:
+            sys.path.insert(0, scripts_dir)
+        import attention_profile
+
+        _REVIEW_ATTENTION_PROFILE = attention_profile
+    return _REVIEW_ATTENTION_PROFILE
+
+
+def _review_anki_db():
+    configured = os.environ.get("ANKI_COLLECTION_PATH", "").strip()
+    if configured:
+        return Path(configured)
     try:
-        ids_all = _ac("findCards", query="is:due") or []
-        info = _ac("cardsInfo", cards=ids_all[:limit]) or []
+        return Path(_review_attention_profile().ANKI_DB)
+    except Exception:
+        return Path("/home/bwicarus/.local/share/Anki2/User 1/collection.anki2")
+
+
+def _review_resolve_note_cards(note_ids):
+    """Resolve every card of a note (including multiple cloze ordinals)."""
+    import sqlite3
+
+    clean = []
+    for value in note_ids or ():
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            continue
+        if value > 0 and value not in clean:
+            clean.append(value)
+    out = {note_id: [] for note_id in clean}
+    if not clean:
+        return out
+    try:
+        db = _review_anki_db()
+        con = sqlite3.connect("file:%s?mode=ro" % db, uri=True)
+        for start in range(0, len(clean), 400):
+            chunk = clean[start : start + 400]
+            placeholders = ",".join("?" for _ in chunk)
+            for note_id, card_id in con.execute(
+                "SELECT nid,id FROM cards WHERE nid IN (%s)" % placeholders,
+                chunk,
+            ):
+                out.setdefault(int(note_id), []).append(int(card_id))
+        con.close()
+        return out
+    except Exception:
+        pass
+
+    # AnkiConnect fallback keeps the queue usable on a machine whose collection
+    # path differs from the Pi default.
+    for start in range(0, len(clean), 50):
+        chunk = clean[start : start + 50]
+        try:
+            card_ids = _review_anki_call(
+                "findCards",
+                query=" or ".join("nid:%d" % note_id for note_id in chunk),
+            ) or []
+            info = _review_anki_call("cardsInfo", cards=card_ids) or []
+        except Exception:
+            continue
+        for card in info:
+            try:
+                note_id = int(card.get("note") or card.get("noteId") or 0)
+                card_id = int(card.get("cardId") or 0)
+            except (TypeError, ValueError):
+                continue
+            if note_id in out and card_id > 0:
+                out[note_id].append(card_id)
+    return out
+
+
+def _review_find_source_cards(refs):
+    """Find hidden ``@src`` markers without sending raw material to Anki search."""
+    import sqlite3
+
+    refs = [
+        str(ref or "").replace("--", "")[:2000]
+        for ref in dict.fromkeys(refs or ())
+        if str(ref or "").strip()
+    ][:50]
+    out = {ref: [] for ref in refs}
+    if not refs:
+        return out
+    try:
+        con = sqlite3.connect(
+            "file:%s?mode=ro" % _review_anki_db(),
+            uri=True,
+        )
+        for ref in refs:
+            marker = "<!--@src:%s-->" % ref
+            rows = con.execute(
+                "SELECT ca.id FROM cards ca JOIN notes n ON n.id=ca.nid"
+                " WHERE instr(n.flds, ?) > 0 LIMIT 300",
+                (marker,),
+            ).fetchall()
+            out[ref] = [int(row[0]) for row in rows]
+        con.close()
+    except Exception:
+        pass
+    return out
+
+
+def _review_search_term_cards(terms):
+    """Bounded legacy-card fallback; record metadata remains the primary index."""
+    out = {}
+    for term in list(dict.fromkeys(terms or ()))[:6]:
+        term = str(term or "").strip()[:80]
+        if len(term) < 2:
+            continue
+        escaped = term.replace("\\", "\\\\").replace('"', '\\"')
+        try:
+            out[term] = (
+                _review_anki_call("findCards", query='"%s"' % escaped) or []
+            )[:80]
+        except Exception:
+            out[term] = []
+    return out
+
+
+def _review_focus_terms(text):
+    return _review_attention_profile().focus_of_text(
+        str(text or "")[:2400],
+        top=6,
+    )
+
+
+def _review_relate_material(term):
+    return _review_attention_profile().relate_material(
+        str(term or "")[:80],
+        top=5,
+    )
+
+
+def _review_material_graph(ref):
+    return _review_attention_profile().material_graph(
+        str(ref or "")[:2000],
+        direction="both",
+        depth=2,
+        limit=24,
+    )
+
+
+def _review_candidate_request(body):
+    body = body if isinstance(body, dict) else {}
+    raw_context = body.get("context")
+    raw_context = raw_context if isinstance(raw_context, dict) else {}
+    context = {}
+    for key, cap in (
+        ("file", 2000),
+        ("url", 2000),
+        ("source_ref", 2000),
+        ("selection", 800),
+        ("visible_text", 2400),
+    ):
+        value = str(raw_context.get(key) or "")
+        if value:
+            context[key] = value[:cap]
+    try:
+        context["page"] = min(
+            1_000_000,
+            max(0, int(raw_context.get("page") or 0)),
+        )
+    except (TypeError, ValueError):
+        context["page"] = 0
+    nodes = raw_context.get("kg_nodes") or ()
+    if isinstance(nodes, str):
+        nodes = [nodes]
+    if isinstance(nodes, (list, tuple)):
+        context["kg_nodes"] = [
+            str(node or "")[:240]
+            for node in nodes[:20]
+            if str(node or "").strip()
+        ]
+    try:
+        limit = min(60, max(1, int(body.get("limit") or 30)))
+    except (TypeError, ValueError):
+        limit = 30
+    exclude = []
+    raw_exclude = body.get("exclude_card_ids") or ()
+    if not isinstance(raw_exclude, (list, tuple)):
+        raw_exclude = ()
+    for value in raw_exclude[:100]:
+        try:
+            value = int(value)
+        except (TypeError, ValueError):
+            continue
+        if value > 0 and value not in exclude:
+            exclude.append(value)
+    return context, limit, exclude
+
+
+def _review_card_payload(card, candidate=None):
+    meta = _anki_review_card_meta(card)
+    candidate = candidate if isinstance(candidate, dict) else {}
+    return {
+        "id": card.get("cardId"),
+        "note_id": card.get("note") or card.get("noteId"),
+        "question": card.get("question") or "",
+        "answer": card.get("answer") or "",
+        "deck": card.get("deckName") or "",
+        "review_kind": "related" if candidate.get("related") else "due",
+        "candidate_score": candidate.get("score", 0),
+        "candidate_evidence": candidate.get("evidence") or [],
+        "candidate_reasons": candidate.get("reason_labels") or [],
+        "was_due": bool(candidate.get("due", True)),
+        **meta,
+    }
+
+
+@bp.route("/api/review-queue", methods=["GET", "POST"])
+def pdf_api_review_queue():
+    """GET keeps the offline due snapshot; POST privately ranks current context."""
+    try:
+        ids_all = _review_anki_call("findCards", query="is:due") or []
     except Exception as ex:
         return jsonify({"ok": False, "error": str(ex)[:140]}), 502
-    cards = [{"id": c.get("cardId"), "question": c.get("question") or "", "answer": c.get("answer") or "",
-              "deck": c.get("deckName") or ""} for c in info]
-    return jsonify({"ok": True, "due_total": len(ids_all), "cards": cards})
+
+    if request.method == "GET":
+        try:
+            limit = min(
+                60,
+                max(1, int(request.args.get("limit", "30") or 30)),
+            )
+        except (TypeError, ValueError):
+            limit = 30
+        selected = ids_all[:limit]
+        plan = None
+    else:
+        context, limit, excluded = _review_candidate_request(
+            request.get_json(silent=True) or {}
+        )
+        try:
+            plan = _review_candidate_service().build(
+                context,
+                ids_all,
+                resolve_note_cards=_review_resolve_note_cards,
+                find_source_cards=_review_find_source_cards,
+                search_term_cards=_review_search_term_cards,
+                focus_terms=_review_focus_terms,
+                relate_material=_review_relate_material,
+                material_graph=_review_material_graph,
+                exclude_card_ids=excluded,
+                limit=limit,
+            )
+            selected = plan.get("selected_card_ids") or []
+        except Exception as ex:
+            current_app.logger.warning(
+                "CardCandidateService degraded to due queue: %s",
+                str(ex)[:160],
+            )
+            plan = {
+                "contract": "card-candidate-service/1",
+                "context_key": "",
+                "source_ref": "",
+                "focus_terms": [],
+                "selected_card_ids": [
+                    card_id for card_id in ids_all if card_id not in excluded
+                ][:limit],
+                "related_total": 0,
+                "evidence_counts": {"due": len(ids_all)},
+                "metadata": {},
+                "degraded": True,
+            }
+            selected = plan["selected_card_ids"]
+
+    try:
+        info = _review_anki_call("cardsInfo", cards=selected) or []
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)[:140]}), 502
+    by_id = {}
+    for card in info:
+        try:
+            by_id[int(card.get("cardId"))] = card
+        except (TypeError, ValueError):
+            continue
+    candidate_meta = (plan or {}).get("metadata") or {}
+    cards = [
+        _review_card_payload(
+            by_id[card_id],
+            candidate_meta.get(str(card_id)),
+        )
+        for card_id in selected
+        if card_id in by_id
+    ]
+    response = {
+        "ok": True,
+        "due_total": len(ids_all),
+        "cards": cards,
+    }
+    if plan is not None:
+        response.update(
+            {
+                "contract": plan.get("contract"),
+                "context_key": plan.get("context_key"),
+                "source_ref": plan.get("source_ref"),
+                "focus_terms": plan.get("focus_terms") or [],
+                "related_total": plan.get("related_total", 0),
+                "evidence_counts": plan.get("evidence_counts") or {},
+                "degraded": bool(plan.get("degraded")),
+            }
+        )
+    return jsonify(response)
 
 
 _REVIEW_SEEN_FILE = CLAUDE_DIR / "state" / "review-answers-seen.json"
+_REVIEW_RECEIPTS_FILE = (
+    CLAUDE_DIR / "state" / "review-answer-receipts.json"
+)
+_REVIEW_ANSWER_LOCK_FILE = (
+    CLAUDE_DIR / "state" / "review-answer-idempotency.lock"
+)
+_REVIEW_ANSWER_AID_LOCK_DIR = (
+    CLAUDE_DIR / "state" / "review-answer-aid-locks"
+)
+_REVIEW_RECEIPT_CONTRACT = "review-answer-idempotency/1"
+_REVIEW_RECEIPT_LIMIT = 2000
+_REVIEW_COMPLETED_MEMORY = {}
+
+
+def _review_answer_aid(value) -> str:
+    """Return the bounded mutation id used to make one rating at-most-once."""
+    if not isinstance(value, str):
+        return ""
+    aid = value.strip()
+    if (
+        not aid
+        or len(aid) > 64
+        or not re.fullmatch(r"[A-Za-z0-9._:-]+", aid)
+    ):
+        return ""
+    return aid
+
+
+def _review_answer_lock_path(aid: str) -> Path:
+    digest = hashlib.sha256(aid.encode("utf-8")).hexdigest()
+    # A bounded shard set avoids leaking one lock inode per review forever
+    # while still allowing unrelated ratings to proceed concurrently.
+    return _REVIEW_ANSWER_AID_LOCK_DIR / (digest[:2] + ".lock")
+
+
+def _review_seen_load() -> list[str]:
+    """Load the rollback-compatible legacy success list without data loss."""
+    try:
+        value = json.loads(_REVIEW_SEEN_FILE.read_text("utf-8"))
+    except FileNotFoundError:
+        return []
+    except Exception as ex:
+        raise RuntimeError("review answer seen ledger is unreadable") from ex
+    if not isinstance(value, list) or any(
+        not isinstance(item, str) or not _review_answer_aid(item)
+        for item in value
+    ):
+        raise RuntimeError("review answer seen ledger is invalid")
+    return list(dict.fromkeys(value))[-_REVIEW_RECEIPT_LIMIT:]
+
+
+def _review_receipts_load() -> dict:
+    """Load durable pending/done receipts; corruption always fails closed."""
+    try:
+        value = json.loads(_REVIEW_RECEIPTS_FILE.read_text("utf-8"))
+    except FileNotFoundError:
+        return {
+            "contract": _REVIEW_RECEIPT_CONTRACT,
+            "entries": {},
+        }
+    except Exception as ex:
+        raise RuntimeError("review answer receipt ledger is unreadable") from ex
+    if (
+        not isinstance(value, dict)
+        or value.get("contract") != _REVIEW_RECEIPT_CONTRACT
+        or not isinstance(value.get("entries"), dict)
+    ):
+        raise RuntimeError("review answer receipt ledger is invalid")
+    entries = value["entries"]
+    for aid, entry in entries.items():
+        if (
+            not _review_answer_aid(aid)
+            or not isinstance(entry, dict)
+            or entry.get("state") not in ("pending", "done")
+            or isinstance(entry.get("card_id"), bool)
+            or not isinstance(entry.get("card_id"), int)
+            or entry["card_id"] <= 0
+            or isinstance(entry.get("ease"), bool)
+            or not isinstance(entry.get("ease"), int)
+            or not 1 <= entry["ease"] <= 4
+        ):
+            raise RuntimeError("review answer receipt entry is invalid")
+    return value
+
+
+def _review_receipts_store(
+    value: dict,
+    protect: tuple[str, ...] = (),
+) -> None:
+    """Atomically publish a bounded, fsynced receipt ledger."""
+    from reader_sidecar_store import atomic_write_json
+
+    entries = value.get("entries") or {}
+    if len(entries) > _REVIEW_RECEIPT_LIMIT:
+        pending = {
+            aid: entry
+            for aid, entry in entries.items()
+            if (entry or {}).get("state") == "pending"
+        }
+        if len(pending) > _REVIEW_RECEIPT_LIMIT:
+            raise RuntimeError("too many unresolved review answer receipts")
+        protected_done = {
+            aid: entries[aid]
+            for aid in protect
+            if aid in entries
+            and (entries[aid] or {}).get("state") == "done"
+        }
+        if len(pending) + len(protected_done) > _REVIEW_RECEIPT_LIMIT:
+            raise RuntimeError("review answer receipt protection overflow")
+        done = sorted(
+            (
+                (aid, entry)
+                for aid, entry in entries.items()
+                if (entry or {}).get("state") == "done"
+                and aid not in protected_done
+            ),
+            key=lambda pair: (
+                float((pair[1] or {}).get("updated_at") or 0),
+                pair[0],
+            ),
+        )
+        done_budget = (
+            _REVIEW_RECEIPT_LIMIT
+            - len(pending)
+            - len(protected_done)
+        )
+        keep_done = (
+            dict(done[-done_budget:])
+            if done_budget > 0
+            else {}
+        )
+        value = {
+            "contract": _REVIEW_RECEIPT_CONTRACT,
+            "entries": {
+                **keep_done,
+                **protected_done,
+                **pending,
+            },
+        }
+    atomic_write_json(_REVIEW_RECEIPTS_FILE, value, indent=None)
+
+
+def _review_seen_store(seen: list[str]) -> None:
+    """Keep the legacy aid list atomic so rollback cannot reopen a success."""
+    from reader_sidecar_store import atomic_write_json
+
+    atomic_write_json(
+        _REVIEW_SEEN_FILE,
+        list(dict.fromkeys(seen))[-_REVIEW_RECEIPT_LIMIT:],
+        indent=None,
+    )
+
+
+def _review_receipt_matches(entry: dict, cid: int, ease: int) -> bool:
+    return (
+        int(entry.get("card_id") or 0) == cid
+        and int(entry.get("ease") or 0) == ease
+    )
+
+
+def _review_answer_claim(aid: str, cid: int, ease: int) -> str:
+    """Claim one aid before the irreversible Anki side effect.
+
+    Caller holds the per-aid lock.  The global ledger lock serializes
+    read-modify-write across different aids and Gunicorn workers.
+    """
+    from reader_sidecar_store import exclusive_lock
+
+    with exclusive_lock(_REVIEW_ANSWER_LOCK_FILE):
+        seen = _review_seen_load()
+        receipts = _review_receipts_load()
+        entry = receipts["entries"].get(aid)
+        if entry is not None and not _review_receipt_matches(
+            entry, cid, ease
+        ):
+            return "reuse"
+        if aid in seen or (
+            entry is not None and entry.get("state") == "done"
+        ):
+            return "done"
+        if entry is not None:
+            if _REVIEW_COMPLETED_MEMORY.get(aid) == (cid, ease):
+                return "done-memory"
+            return "pending"
+        receipts["entries"][aid] = {
+            "state": "pending",
+            "card_id": cid,
+            "ease": ease,
+            "created_at": time.time(),
+            "updated_at": time.time(),
+        }
+        _review_receipts_store(receipts)
+        return "claimed"
+
+
+def _review_answer_release_claim(
+    aid: str,
+    cid: int,
+    ease: int,
+) -> bool:
+    """Remove a claim only after Anki returned an explicit non-effect."""
+    from reader_sidecar_store import exclusive_lock
+
+    try:
+        with exclusive_lock(_REVIEW_ANSWER_LOCK_FILE):
+            receipts = _review_receipts_load()
+            entry = receipts["entries"].get(aid)
+            if entry is None:
+                return True
+            if (
+                entry.get("state") != "pending"
+                or not _review_receipt_matches(entry, cid, ease)
+            ):
+                return False
+            del receipts["entries"][aid]
+            _review_receipts_store(receipts)
+            return True
+    except Exception:
+        return False
+
+
+def _review_answer_commit(aid: str, cid: int, ease: int) -> bool:
+    """Durably record a successful side effect before releasing the aid lock.
+
+    The receipt is the primary truth.  The legacy list is written afterwards
+    for rollback compatibility.  If the primary atomic replace fails, the
+    already-durable ``pending`` claim remains and future workers refuse to
+    repeat an outcome-unknown rating.
+    """
+    from reader_sidecar_store import exclusive_lock
+
+    with exclusive_lock(_REVIEW_ANSWER_LOCK_FILE):
+        receipts = _review_receipts_load()
+        entry = receipts["entries"].get(aid)
+        if (
+            entry is None
+            or entry.get("state") != "pending"
+            or not _review_receipt_matches(entry, cid, ease)
+        ):
+            raise RuntimeError("review answer claim changed before commit")
+        done = dict(entry)
+        done["state"] = "done"
+        done["updated_at"] = time.time()
+        receipts["entries"][aid] = done
+        try:
+            _review_receipts_store(receipts, (aid,))
+        except Exception:
+            _REVIEW_COMPLETED_MEMORY[aid] = (cid, ease)
+            while len(_REVIEW_COMPLETED_MEMORY) > _REVIEW_RECEIPT_LIMIT:
+                _REVIEW_COMPLETED_MEMORY.pop(
+                    next(iter(_REVIEW_COMPLETED_MEMORY))
+                )
+            return False
+        _REVIEW_COMPLETED_MEMORY.pop(aid, None)
+        try:
+            seen = _review_seen_load()
+            if aid not in seen:
+                seen.append(aid)
+                _review_seen_store(seen)
+        except Exception:
+            # The primary receipt is already durable.  Do not turn a completed
+            # Anki review into a retryable response merely because the legacy
+            # rollback compatibility list could not be refreshed.
+            current_app.logger.exception(
+                "review answer legacy seen list update failed"
+            )
+        return True
+
 
 @bp.route("/api/review-answer", methods=["POST"])
 def pdf_api_review_answer():
     """答题回流真 Anki(answerCards→scheduler.answerCard,FSRS 真调度)。
-    aid 幂等:outbox 补投重复不双答(seen 存 state,保 2000 条)。404=卡不存在(outbox 4xx 丢弃)。"""
+    aid 幂等:per-aid 跨进程锁 + 原子 pending/done receipt；补投不双答。
+    404=卡不存在(outbox 4xx 丢弃)。"""
     import requests as _rq
+    from reader_sidecar_store import exclusive_lock
+
     body = request.get_json(silent=True) or {}
-    aid = (body.get("aid") or "").strip()[:64]
+    aid = _review_answer_aid(body.get("aid"))
+    if not aid:
+        return jsonify({"ok": False, "error": "bad aid"}), 400
     try:
         ease = int(body.get("ease") or 0)
     except (TypeError, ValueError):
@@ -9302,43 +13748,123 @@ def pdf_api_review_answer():
             _fc = _rq.post(aurl0, json={"action": "findCards", "version": 6,
                                         "params": {"query": "nid:%d" % int(body["note_id"])}}, timeout=12).json()
             _cids = _fc.get("result") or []
-            if _cids:
+            if len(_cids) > 1:
+                return jsonify({
+                    "ok": False,
+                    "error": "note resolves to multiple cards; exact card_id required",
+                }), 409
+            if len(_cids) == 1:
                 cid = int(_cids[0])
     except (TypeError, ValueError, Exception):
         cid = None
     if not cid:
         return jsonify({"ok": False, "error": "card not found"}), 404
-    try:
-        seen = json.loads(_REVIEW_SEEN_FILE.read_text("utf-8"))
-        assert isinstance(seen, list)
-    except Exception:
-        seen = []
-    if aid and aid in seen:
-        return jsonify({"ok": True, "dedup": True})
     aurl = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
+
     try:
-        r = _rq.post(aurl, json={"action": "answerCards", "version": 6,
-                                 "params": {"answers": [{"cardId": cid, "ease": ease}]}}, timeout=12)
-        d = r.json()
-        if d.get("error"):
-            return jsonify({"ok": False, "error": str(d["error"])[:140]}), 502
-        if not (d.get("result") or [False])[0]:
-            return jsonify({"ok": False, "error": "card not found"}), 404
+        with exclusive_lock(_review_answer_lock_path(aid)):
+            claim = _review_answer_claim(aid, cid, ease)
+            if claim in ("done", "done-memory"):
+                return jsonify({
+                    "ok": True,
+                    "dedup": True,
+                    "durable": claim == "done",
+                })
+            if claim == "reuse":
+                return jsonify({
+                    "ok": False,
+                    "error": "aid reused with different review payload",
+                    "code": "review_answer_aid_reuse",
+                }), 409
+            if claim == "pending":
+                return jsonify({
+                    "ok": False,
+                    "error": "previous review outcome is unknown",
+                    "code": "review_answer_outcome_unknown",
+                }), 409
+            try:
+                r = _rq.post(
+                    aurl,
+                    json={
+                        "action": "answerCards",
+                        "version": 6,
+                        "params": {
+                            "answers": [{
+                                "cardId": cid,
+                                "ease": ease,
+                            }],
+                        },
+                    },
+                    timeout=12,
+                )
+                d = r.json()
+            except Exception as ex:
+                # A timeout or broken response may happen after Anki committed
+                # the review.  Keep the durable pending claim so retries cannot
+                # accidentally answer the same card twice.
+                return jsonify({
+                    "ok": False,
+                    "error": str(ex)[:140],
+                    "code": "review_answer_outcome_unknown",
+                }), 503
+            if d.get("error"):
+                released = _review_answer_release_claim(
+                    aid, cid, ease
+                )
+                if not released:
+                    return jsonify({
+                        "ok": False,
+                        "error": "failed to release review claim",
+                        "code": "review_answer_claim_persist",
+                    }), 503
+                return jsonify({
+                    "ok": False,
+                    "error": str(d["error"])[:140],
+                }), 502
+            if not (d.get("result") or [False])[0]:
+                released = _review_answer_release_claim(
+                    aid, cid, ease
+                )
+                if not released:
+                    return jsonify({
+                        "ok": False,
+                        "error": "failed to release review claim",
+                        "code": "review_answer_claim_persist",
+                    }), 503
+                return jsonify({
+                    "ok": False,
+                    "error": "card not found",
+                }), 404
+            durable = _review_answer_commit(aid, cid, ease)
     except Exception as ex:
-        return jsonify({"ok": False, "error": str(ex)[:140]}), 502
-    if aid:
-        seen.append(aid)
-        try:
-            _REVIEW_SEEN_FILE.write_text(json.dumps(seen[-2000:]), "utf-8")
-        except Exception:
-            pass
+        current_app.logger.exception(
+            "review answer idempotency ledger failure"
+        )
+        return jsonify({
+            "ok": False,
+            "error": str(ex)[:140],
+            "code": "review_answer_idempotency_unavailable",
+        }), 503
+
     nxt = {}   # 评分后拿这张卡的下次到期(供前端收起态倒计时)
     try:
         ci = (_rq.post(aurl, json={"action": "cardsInfo", "version": 6, "params": {"cards": [cid]}}, timeout=12).json().get("result") or [{}])[0]
         nxt = {"interval": ci.get("interval"), "due": ci.get("due"), "queue": ci.get("queue"), "type": ci.get("type")}
     except Exception:
         pass
-    return jsonify({"ok": True, "next": nxt})
+    response = {"ok": True, "next": nxt}
+    if not durable:
+        # The Anki side effect succeeded and the durable pending claim prevents
+        # repetition, but the terminal receipt could not be published.  Surface
+        # this diagnostic without asking the client to repeat the rating.
+        response["durable"] = False
+        try:
+            current_app.logger.error(
+                "review answer completed with pending durability receipt"
+            )
+        except Exception:
+            pass
+    return jsonify(response)
 
 
 @bp.route("/api/vocab-mastery-map")
@@ -10156,30 +14682,49 @@ def pdf_api_ink_save():
 _HL_DIR = CLAUDE_DIR / "state" / "pdf-highlights"
 _HL_LOCK_TIMEOUT = 5  # 秒，简单文件锁
 
-def _hl_path(rel: str) -> Path:
+
+def _hl_path(rel: str, identity=None) -> Path:
     import hashlib
     sha = hashlib.sha1(rel.encode("utf-8")).hexdigest()
-    _HL_DIR.mkdir(parents=True, exist_ok=True)
-    return _HL_DIR / f"{sha}.json"
+    return _reader_sidecar_path(
+        "pdf-highlights",
+        f"{sha}.json",
+        identity=identity,
+    )
 
-def _hl_load(rel: str) -> dict:
-    p = _hl_path(rel)
-    if not p.exists():
-        return {"pdf_rel": rel, "highlights": []}
-    try:
-        data = json.loads(p.read_text("utf-8"))
-        if not isinstance(data.get("highlights"), list):
-            data["highlights"] = []
-        data["pdf_rel"] = rel
-        return data
-    except Exception:
-        return {"pdf_rel": rel, "highlights": []}
 
-def _hl_save(rel: str, data: dict):
-    p = _hl_path(rel)
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False, indent=2), "utf-8")
-    tmp.replace(p)
+def _hl_load(rel: str, identity=None) -> dict:
+    p = _hl_path(rel, identity)
+    data = _reader_sidecar_json(
+        p,
+        {"pdf_rel": rel, "highlights": []},
+        dict,
+    )
+    if not isinstance(data.get("highlights"), list):
+        raise ValueError(f"invalid PDF highlight sidecar JSON shape: {p.name}")
+    data["pdf_rel"] = rel
+    return data
+
+def _hl_save(rel: str, data: dict, identity=None):
+    from reader_sidecar_store import atomic_write_json
+    atomic_write_json(
+        _hl_path(rel, identity),
+        data,
+        indent=2,
+    )
+
+
+@contextmanager
+def _hl_edit(rel: str, identity=None):
+    """Yield the latest PDF highlight document under its document lease."""
+    with _reader_sidecar_edit_lock(
+        "pdf-highlights",
+        rel,
+        identity,
+    ) as owner:
+        data = _hl_load(rel, owner)
+        yield data
+        _hl_save(rel, data, owner)
 
 
 # ── 页级图注(state/pdf-figures/<book-sha>.json):视觉模型(Claude)描述扫描书插图 ──
@@ -10900,7 +15445,12 @@ def pdf_api_page_figures():
                 if not f.get("fbox"):
                     f["fbox"] = f["bbox"]
                 f["badge"] = _fig_badge_topright(f["fbox"])
-            _fig_save_abs(abs_path, data)
+            # 部署 E2E 要实际走完整页面和本路由，但部署事务同时要求
+            # 健康检查阶段 KG/派生状态零写入。探测请求只抑制这项确定性
+            # badge 懒缓存的持久化；响应仍返回相同计算结果，普通访问
+            # 保持原先的懒补写回行为。
+            if not _reader_deployment_probe():
+                _fig_save_abs(abs_path, data)
         except Exception:
             pass
     # 只回**已描述**的图(desc 非空):YOLO 框好但夜间还没描述的 standalone 框先不显示(避免空徽标),
@@ -10914,6 +15464,392 @@ def pdf_api_page_figures():
     resp = jsonify({"ok": True, "figures": figs, "pending": False})
     resp.headers["Cache-Control"] = "no-store"
     return resp
+
+
+# ══════════ 页级知识点简述(state/pdf-page-brief/<book-sha>.json):轻模型逐页现算 1-3 句要点 + 3-5 标签 ══════════
+# 读页后台生成(仿 _fig_describe_bg 的 in-flight 去重 + 预取邻页;生成委托 scripts/kg/gen_page_brief.py 轻模型子进程),
+# 供语音注入替整页省 token；带逐字证据的 concepts 会经唯一 ConceptNodeService 幂等回填 KG。
+# ⚠ sidecar key 用 _book_sha(abspath)(跟图注 sidecar 同键规则);book_mtime 或 _BRIEF_VER 变则失效重生(照 _fig_load_abs)。
+_BRIEF_DIR = CLAUDE_DIR / "state" / "pdf-page-brief"
+_BRIEF_VER = 2   # 生成配方/提示词版本(跟 gen_page_brief.py 的 BRIEF_PROMPT_VER 对齐);v2 加入可逐字复核的 KG concept evidence
+_brief_lock = _threading.Lock()
+_brief_inflight = set()   # 正在后台生成的 (sha,page),去重
+
+
+def _brief_path_abs(abs_path) -> Path:
+    _BRIEF_DIR.mkdir(parents=True, exist_ok=True)
+    return _BRIEF_DIR / f"{_book_sha(abs_path)}.json"
+
+
+def _brief_load_abs(abs_path) -> dict:
+    p = _brief_path_abs(abs_path)
+    try:
+        cur_mt = int(os.path.getmtime(str(abs_path)))
+    except Exception:
+        cur_mt = 0
+    empty = {"pdf": str(abs_path), "ver": _BRIEF_VER, "book_mtime": cur_mt, "briefs": {}, "_none_pages": []}
+    if not p.exists():
+        return empty
+    try:
+        d = json.loads(p.read_text("utf-8"))
+        d.setdefault("briefs", {}); d.setdefault("_none_pages", [])
+        # 书变了(重 OCR/重嵌/替换 → mtime 变)或配方升级(_BRIEF_VER bump)→ 旧简述过期 → 清空,懒重生
+        if (cur_mt and d.get("book_mtime") and d["book_mtime"] != cur_mt) or d.get("ver") != _BRIEF_VER:
+            d["briefs"] = {}; d["_none_pages"] = []
+        d["ver"] = _BRIEF_VER; d["book_mtime"] = cur_mt
+        return d
+    except Exception:
+        return empty
+
+
+def _brief_save_abs(abs_path, data: dict):
+    p = _brief_path_abs(abs_path)
+    from reader_sidecar_store import atomic_write_json
+
+    atomic_write_json(p, data, indent=1)
+
+
+def _brief_done_page(data: dict, page: int) -> bool:
+    # 已有结论（含 page_type=skip 的“这页无关”结论，存在 briefs 里）算处理过。
+    # _none_pages 只兼容既有 sidecar；新的临时生成失败绝不能写入这里，
+    # 否则会把一次 AI 故障永久误判成“本页没有内容”。
+    return str(page) in (data.get("briefs") or {}) or page in set(data.get("_none_pages", []))
+
+
+# 书级开关(仿 state/pdf-book-figures.json):整本没开就不生成简述,省额度。默认 False。
+_BOOK_BRIEF_PATH = CLAUDE_DIR / "state" / "pdf-book-brief.json"
+
+
+def _load_book_brief() -> dict:
+    try:
+        return json.loads(_BOOK_BRIEF_PATH.read_text("utf-8"))
+    except Exception:
+        return {}
+
+
+def _book_brief_enabled(rel: str) -> bool:
+    return bool(_load_book_brief().get(rel, True))   # 默认 True(用户拍板 2026-07-22:默认开,读页自动后台生成;显式关才存 False)
+
+
+def _brief_semantic(obj: dict) -> dict:
+    """KG 来源身份只取内容字段，绝不混入重试状态/模型/时间。"""
+    obj = obj if isinstance(obj, dict) else {}
+    return {
+        "brief": str(obj.get("brief") or "").strip(),
+        "tags": list(obj.get("tags") or []),
+        "concepts": list(obj.get("concepts") or []),
+        "page_type": str(obj.get("page_type") or "").strip(),
+        "subtype": str(obj.get("subtype") or "").strip(),
+    }
+
+
+def _brief_semantic_digest(obj: dict) -> str:
+    return hashlib.sha256(json.dumps(
+        _brief_semantic(obj),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")).hexdigest()
+
+
+def _brief_promote_kg(rel: str, page: int, obj: dict, py: str) -> dict:
+    """后台子进程回填 KG；失败只留下 pending，绝不阻断简述本身。"""
+    concepts = obj.get("concepts") or []
+    if obj.get("page_type") != "knowledge" or not isinstance(concepts, list) or not concepts:
+        return {"status": "not_applicable", "result": None, "error": ""}
+    from kg_runtime import runtime_file as _kg_runtime_file
+
+    cmd = [
+        py,
+        str(_kg_runtime_file("scripts/kg/concept_node_service.py")),
+        "promote-page-brief",
+        "--file", rel,
+        "--page", str(page),
+    ]
+    if sys.platform != "win32":
+        cmd = ["nice", "-n", "15"] + cmd
+    env = dict(os.environ)
+    env.setdefault("CLAUDE_PROJECT", str(CLAUDE_DIR))
+    env.setdefault("OBSIDIAN_VAULT", str(OBSIDIAN_ROOT))
+    try:
+        run = __import__("subprocess").run(
+            cmd,
+            cwd=str(CLAUDE_DIR),
+            input=json.dumps(obj, ensure_ascii=False),
+            capture_output=True,
+            text=True,
+            timeout=60,
+            env=env,
+        )
+        raw = (run.stdout or "").strip()
+        result = json.loads(raw.splitlines()[-1]) if raw else {}
+        if run.returncode != 0 or result.get("ok") is not True:
+            return {
+                "status": "pending",
+                "result": None,
+                "error": str(
+                    result.get("error")
+                    or (run.stderr or "").strip()
+                    or f"concept service exited {run.returncode}"
+                )[:500],
+            }
+        compact = {
+            "mutationId": result.get("mutationId"),
+            "txId": result.get("txId"),
+            "created": result.get("created") or [],
+            "anchored": result.get("anchored") or [],
+            "updated": result.get("updated") or [],
+            "deduplicated": result.get("deduplicated") or [],
+            "rejected": result.get("rejected") or [],
+            "replay": bool(result.get("replay")),
+        }
+        return {"status": "synced", "result": compact, "error": ""}
+    except Exception as exc:
+        return {"status": "pending", "result": None, "error": str(exc)[:500]}
+
+
+def _brief_generate_bg(abs_path, page: int, prefetch: int = 2):
+    """后台:生成本页(+预取后 prefetch 页)知识点简述,写 sidecar。in-flight 去重,失败不记(下次重试)。
+    照搬 _fig_describe_bg 结构;实际生成**委托 scripts/kg/gen_page_brief.py 子进程**(轻模型 + 依赖隔离,
+    它只 print JSON,本函数捕获后落 sidecar)。本书未开简述 → 直接返回不生成。"""
+    import subprocess
+    try:
+        rel = abs_path.relative_to(OBSIDIAN_ROOT.resolve()).as_posix()
+    except Exception:
+        return
+    # A process crash may leave a durable PDF rename intent between the PDF,
+    # PageBrief and KG steps.  Resolve it before starting another generation;
+    # failure remains fail-closed and the next read/rename can retry recovery.
+    try:
+        with _pdf_rename_guard():
+            _pdf_rename_recover_locked()
+    except Exception:
+        return
+    if not _book_brief_enabled(rel):   # 本书未开简述 → 不生成(省额度)
+        return
+    try:
+        import fitz
+        npages = fitz.open(str(abs_path)).page_count
+    except Exception:
+        return
+    sha = _book_sha(abs_path)
+    py = os.environ.get("APP_PYTHON") or sys.executable
+    from kg_runtime import runtime_file as _kg_runtime_file
+
+    gp = str(_kg_runtime_file("scripts/kg/gen_page_brief.py"))
+    for pg in range(page, min(npages, page + prefetch) + 1):
+        if pg < 1:
+            continue
+        key = (sha, pg)
+        obj = None
+        generate = True
+        with _brief_lock:
+            data = _brief_load_abs(abs_path)
+            existing = (data.get("briefs") or {}).get(str(pg))
+            if key in _brief_inflight:
+                continue
+            if existing:
+                if existing.get("kg_status") not in (None, "", "pending"):
+                    continue
+                obj = dict(existing)
+                generate = False
+            elif _brief_done_page(data, pg):
+                continue
+            _brief_inflight.add(key)
+        try:
+            if generate:
+                cmd = [py, gp, "--file", rel, "--page", str(pg)]
+                if sys.platform != "win32":
+                    cmd = ["nice", "-n", "15"] + cmd   # 低优先级,别影响 webapp(照图描述管线 nice)
+                env = dict(os.environ)
+                env.setdefault("CLAUDE_PROJECT", str(CLAUDE_DIR))
+                env.setdefault("OBSIDIAN_VAULT", str(OBSIDIAN_ROOT))
+                r = subprocess.run(cmd, cwd=str(CLAUDE_DIR), capture_output=True, text=True,
+                                   timeout=200, env=env)
+                out = (r.stdout or "").strip()
+                if out:
+                    obj = json.loads(out.splitlines()[-1])
+            if obj is None:
+                continue   # AI 失败才重跑 AI；KG 失败只重试下面的持久 pending
+
+            semantic = _brief_semantic(obj)
+            pt = semantic["page_type"]
+            if not (pt or semantic["brief"] or semantic["tags"]):
+                # 正常的“无需建点”必须由生成器显式返回 page_type=skip。
+                # 全空语义表示两个 AI 后端均失败或输出不可解析；不持久化，
+                # 释放 in-flight 后让下次读页重新生成。
+                continue
+
+            # 先持久化 semantic brief + pending，再写 KG。即使 KG commit 后进程退出，
+            # 下一轮也只重放同一 mutation，不会重跑 AI 或重复加 signal。
+            semantic["page_type"] = pt or "knowledge"
+            semantic_digest = _brief_semantic_digest(semantic)
+            if generate:
+                pending_record = {
+                    **semantic,
+                    "model": obj.get("model") or "",
+                    "kg_status": "pending",
+                    "kg_result": None,
+                    "kg_error": "",
+                    "ts": int(time.time()),
+                }
+                with _brief_lock:
+                    data = _brief_load_abs(abs_path)
+                    data["briefs"][str(pg)] = pending_record
+                    if pg in data["_none_pages"]:
+                        data["_none_pages"] = [
+                            value for value in data["_none_pages"] if value != pg
+                        ]
+                    _brief_save_abs(abs_path, data)
+                obj = pending_record
+
+            kg = _brief_promote_kg(rel, pg, semantic, py)
+            with _brief_lock:
+                data = _brief_load_abs(abs_path)
+                current = (data.get("briefs") or {}).get(str(pg))
+                # 另一线程/新配方若已替换语义，旧结果不得覆盖新 sidecar。
+                if current and _brief_semantic_digest(current) == semantic_digest:
+                    current["kg_status"] = kg.get("status") or "pending"
+                    current["kg_result"] = kg.get("result")
+                    current["kg_error"] = kg.get("error") or ""
+                    current["kg_updated"] = int(time.time())
+                    data["briefs"][str(pg)] = current
+                    _brief_save_abs(abs_path, data)
+        except Exception:
+            # sidecar/磁盘等异常必须允许下一次读页重试；后台任务不把异常
+            # 扩散到请求线程，但 finally 永远释放页级 in-flight 门闩。
+            continue
+        finally:
+            with _brief_lock:
+                _brief_inflight.discard(key)
+
+
+@bp.route("/api/page-brief")
+def pdf_api_page_brief():
+    """GET ?file=&page= → 单页知识点简述元数据。
+    {ok, brief, tags, page_type, subtype} 已生成(含 page_type=skip 的无关页);
+    {ok, none:true} 生成失败兜底记录;{ok, pending:true} 还没生成(读页后台会补);
+    {ok, disabled:true} 本书未开简述。"""
+    rel = request.args.get("file", "")
+    page = int(request.args.get("page", "0") or "0")
+    abs_path = _safe_vault_path(rel)
+    if not abs_path or page < 1:
+        return jsonify({"ok": False, "error": "invalid"}), 400
+    if not _book_brief_enabled(rel):
+        resp = jsonify({"ok": True, "disabled": True, "brief": "", "tags": [], "concepts": [],
+                        "page_type": "", "subtype": "", "kg_status": "disabled"})
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+    data = _brief_load_abs(abs_path)
+    b = (data.get("briefs") or {}).get(str(page))
+    if b:
+        resp = jsonify({"ok": True, "brief": b.get("brief", ""), "tags": b.get("tags") or [],
+                        "concepts": b.get("concepts") or [],
+                        "page_type": b.get("page_type", ""), "subtype": b.get("subtype", ""),
+                        "model": b.get("model", ""), "kg_status": b.get("kg_status", "")})
+    elif page in set(data.get("_none_pages", [])):
+        resp = jsonify({"ok": True, "none": True, "brief": "", "tags": [], "concepts": [],
+                        "page_type": "", "subtype": "", "kg_status": "not_applicable"})
+    else:
+        resp = jsonify({"ok": True, "pending": True, "brief": "", "tags": [], "concepts": [],
+                        "page_type": "", "subtype": "", "kg_status": "pending"})
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@bp.route("/api/page-briefs-all")
+def pdf_api_page_briefs_all():
+    """GET ?file= → {ok, byPage:{"<page>":{brief,tags,page_type,subtype}}, none_pages:[..]}
+    (开书一次性拉全书,仿 highlights bulk;供前端 Phase 后续开书判定用)。"""
+    rel = request.args.get("file", "")
+    abs_path = _safe_vault_path(rel)
+    if not abs_path:
+        return jsonify({"ok": False, "error": "invalid"}), 400
+    if not _book_brief_enabled(rel):
+        resp = jsonify({"ok": True, "disabled": True, "byPage": {}, "none_pages": []})
+        resp.headers["Cache-Control"] = "no-store"
+        return resp
+    data = _brief_load_abs(abs_path)
+    by = {}
+    for pg, b in (data.get("briefs") or {}).items():
+        by[str(pg)] = {"brief": b.get("brief", ""), "tags": b.get("tags") or [],
+                       "concepts": b.get("concepts") or [],
+                       "page_type": b.get("page_type", ""), "subtype": b.get("subtype", ""),
+                       "kg_status": b.get("kg_status", "")}
+    resp = jsonify({"ok": True, "byPage": by, "none_pages": sorted(data.get("_none_pages", []))})
+    resp.headers["Cache-Control"] = "no-store"
+    return resp
+
+
+@bp.route("/api/book-briefs")
+def pdf_api_book_briefs_get():
+    return jsonify({"ok": True, "enabled": _book_brief_enabled(request.args.get("file", ""))})
+
+
+@bp.route("/api/book-briefs", methods=["POST"])
+def pdf_api_book_briefs_set():
+    """书级开关:开启本书才在读页时后台生成简述(省额度)。仿 /api/book-figures。"""
+    data = request.get_json(silent=True) or {}
+    rel = data.get("file", "")
+    if not rel:
+        return jsonify({"ok": False, "error": "no file"}), 400
+    enabled = bool(data.get("enabled"))
+    try:
+        with _pdf_rename_guard():
+            _pdf_rename_recover_locked()
+            allm = _pdf_rename_read_json_strict(
+                _BOOK_BRIEF_PATH,
+                label="PageBrief 书级设置",
+                missing={},
+            )
+            allm[rel] = enabled
+            _pdf_rename_write_json(_BOOK_BRIEF_PATH, allm, indent=2)
+    except _PdfRenameError as e:
+        return jsonify({
+            "ok": False,
+            "error": str(e),
+            "code": e.code,
+            "details": e.details,
+        }), e.status
+    except Exception as e:
+        return jsonify({"ok": False, "error": str(e)}), 500
+    return jsonify({"ok": True, "enabled": enabled})
+
+
+# ── 简述消费端(Phase2):只读 sidecar 的 load 接口,把本页简述拼成可注入 AI 的一行要点(替整页省 token）──
+#   语音/助手在同进程(voice.py / assistant.py)直接调这两个;relay 是独立进程走 HTTP /api/page-brief。
+def _brief_inject_text(abs_path, page, with_type: bool = True) -> str:
+    """本页已生成 page-brief → 拼成『本页要点:…(知识点:a、b)[页型:knowledge/mixed]』;
+    无简述 / pending / skip 无 brief → 返回 ""(上层降级注整页)。只读,不触发生成。"""
+    try:
+        data = _brief_load_abs(abs_path)
+        b = (data.get("briefs") or {}).get(str(int(page)))
+        if not b:
+            return ""
+        brief = (b.get("brief") or "").strip()
+        if not brief:
+            return ""
+        s = "本页要点:" + brief
+        tags = b.get("tags") or []
+        if tags:
+            s += "(知识点:" + "、".join(str(t) for t in tags[:6]) + ")"
+        pt = (b.get("page_type") or "").strip()
+        if with_type and pt:
+            st = (b.get("subtype") or "").strip()
+            s += "[页型:" + pt + (("/" + st) if st else "") + "]"
+        return s
+    except Exception:
+        return ""
+
+
+def _brief_page_type(abs_path, page) -> str:
+    """本页 page_type(knowledge/skip/userpage);无结论→""。供工具软 gate 用。只读。"""
+    try:
+        data = _brief_load_abs(abs_path)
+        b = (data.get("briefs") or {}).get(str(int(page)))
+        return (b.get("page_type") or "").strip() if b else ""
+    except Exception:
+        return ""
 
 
 def _formula_ocr_url():
@@ -11077,20 +16013,19 @@ def pdf_api_highlights_create():
     rel = (data.get("file") or "").strip()
     if rel.startswith("web:"):   # 网页:字符偏移锚存进 html-highlights(审计 #2)
         import html_reader as _HR, uuid as _u2
-        _items = _HR._html_hl_load(rel) or []
         _h = {"id": "h" + _u2.uuid4().hex[:10], "start": int(data.get("start") or 0),
               "end": int(data.get("end") or 0), "text": (data.get("text") or "")[:2000],
-              "color": (data.get("color") or "#fff59d").strip(),
+              "color": hl_norm_color(data.get("color")),
               "note": (data.get("note") or "")[:2000],
               "sentence": (data.get("sentence") or "")[:2000], "time": int(_t.time())}
-        _items.append(_h)
-        _HR._html_hl_save(rel, _items)
+        with _HR._html_hl_edit(rel) as _items:
+            _items.append(_h)
         return jsonify({"ok": True, "id": _h["id"], "highlight": _h})
     if not rel or _safe_vault_path(rel) is None:
         return jsonify({"ok": False, "error": "invalid file"}), 400
     page = int(data.get("page") or 0)
     rects = data.get("rects") or []
-    color = (data.get("color") or "#fff59d").strip()
+    color = hl_norm_color(data.get("color"))
     text = (data.get("text") or "").strip()
     note = (data.get("note") or "").strip()
     kind = (data.get("kind") or "note").strip()
@@ -11134,11 +16069,10 @@ def pdf_api_highlights_create():
         try:
             obj["page_w"] = float(pw); obj["page_h"] = float(ph)
         except (TypeError, ValueError): pass
-    db = _hl_load(rel)
-    if cid:   # upsert:同 id 已在(上次重放已成功但客户端没收到确认)→ 覆盖而非重复追加
-        db["highlights"] = [h for h in db["highlights"] if h.get("id") != cid]
-    db["highlights"].append(obj)
-    _hl_save(rel, db)
+    with _hl_edit(rel) as db:
+        if cid:   # upsert:同 id 已在(上次重放已成功但客户端没收到确认)→ 覆盖而非重复追加
+            db["highlights"] = [h for h in db["highlights"] if h.get("id") != cid]
+        db["highlights"].append(obj)
     return jsonify({"ok": True, "id": obj["id"], "highlight": obj})
 
 
@@ -11155,7 +16089,7 @@ def pdf_api_highlight_text():
         return jsonify({"ok": False, "error": "invalid file"}), 400
     page = int(data.get("page") or 0)
     text = (data.get("text") or "").strip()
-    color = (data.get("color") or "#fff59d").strip()
+    color = hl_norm_color(data.get("color"))
     note = (data.get("note") or "").strip()
     if page < 1 or not text:
         return jsonify({"ok": False, "error": "missing page/text"}), 400
@@ -11173,9 +16107,8 @@ def pdf_api_highlight_text():
     obj = {"id": "h_" + os.urandom(6).hex(), "page": page, "rects": rects, "color": color,
            "text": text[:2000], "note": note[:2000], "kind": "note", "sentence": "", "body": "",
            "time": int(_t.time()), "page_w": pw, "page_h": ph}
-    db = _hl_load(rel)
-    db["highlights"].append(obj)
-    _hl_save(rel, db)
+    with _hl_edit(rel) as db:
+        db["highlights"].append(obj)
     return jsonify({"ok": True, "id": obj["id"], "found": len(rects)})
 
 
@@ -11187,18 +16120,14 @@ def pdf_api_highlights_update():
     hid = (data.get("id") or "").strip()
     if rel.startswith("web:"):   # 网页高亮(审计 #2):改/删都在 html-highlights sidecar 里做
         import html_reader as _HR
-        _items = _HR._html_hl_load(rel) or []
-        _hit = next((x for x in _items if x.get("id") == hid), None)
-        if not _hit:
-            return jsonify({"ok": False, "error": "not_found"}), 404
-        if request.method == "DELETE":
-            _HR._html_hl_save(rel, [x for x in _items if x.get("id") != hid])
-            return jsonify({"ok": True})
-        _d = request.get_json(silent=True) or {}
-        for _k in ("color", "note", "sentence", "text"):
-            if _k in _d:
-                _hit[_k] = (_d.get(_k) or "") if _k != "color" else ((_d.get(_k) or "").strip())
-        _HR._html_hl_save(rel, _items)
+        with _HR._html_hl_edit(rel) as _items:
+            _hit = next((x for x in _items if x.get("id") == hid), None)
+            if not _hit:
+                return jsonify({"ok": False, "error": "not_found"}), 404
+            _d = request.get_json(silent=True) or {}
+            for _k in ("color", "note", "sentence", "text"):
+                if _k in _d:
+                    _hit[_k] = (_d.get(_k) or "") if _k != "color" else ((_d.get(_k) or "").strip())
         return jsonify({"ok": True, "highlight": _hit})
     try:   # 这条高亮落在哪一卷(单本书=它自己;合并书=跨卷按 id 定位)
         rel = _vb_owner_of(rel, lambda m: any(h.get("id") == hid
@@ -11209,25 +16138,24 @@ def pdf_api_highlights_update():
         return jsonify({"ok": False, "error": "not_found"}), 404
     if _safe_vault_path(rel) is None or not hid:
         return jsonify({"ok": False, "error": "invalid"}), 400
-    db = _hl_load(rel)
-    found = None
-    for h in db["highlights"]:
-        if h.get("id") == hid:
-            found = h
-            break
-    if not found:
-        return jsonify({"ok": False, "error": "not found"}), 404
-    if "color" in data:
-        # 允许空字符串：表示"取消颜色但保留备注"
-        v = data.get("color")
-        found["color"] = (v.strip() if isinstance(v, str) else "")
-    if "note" in data:
-        found["note"] = (data.get("note") or "").strip()[:2000]
-    if "sentence" in data:
-        found["sentence"] = (data.get("sentence") or "").strip()[:2000]
-    if "body" in data:
-        found["body"] = (data.get("body") or "").strip()[:8000]
-    _hl_save(rel, db)
+    with _hl_edit(rel) as db:
+        found = None
+        for h in db["highlights"]:
+            if h.get("id") == hid:
+                found = h
+                break
+        if not found:
+            return jsonify({"ok": False, "error": "not found"}), 404
+        if "color" in data:
+            # 允许空字符串：表示"取消颜色但保留备注"
+            v = data.get("color")
+            found["color"] = (v.strip() if isinstance(v, str) else "")
+        if "note" in data:
+            found["note"] = (data.get("note") or "").strip()[:2000]
+        if "sentence" in data:
+            found["sentence"] = (data.get("sentence") or "").strip()[:2000]
+        if "body" in data:
+            found["body"] = (data.get("body") or "").strip()[:8000]
     return jsonify({"ok": True, "highlight": found})
 
 
@@ -11242,19 +16170,12 @@ def pdf_api_highlights_delete():
     hid = (data.get("id") or "").strip()
     if rel.startswith("web:"):   # 网页高亮(审计 #2):改/删都在 html-highlights sidecar 里做
         import html_reader as _HR
-        _items = _HR._html_hl_load(rel) or []
-        _hit = next((x for x in _items if x.get("id") == hid), None)
-        if not _hit:
-            return jsonify({"ok": False, "error": "not_found"}), 404
-        if request.method == "DELETE":
-            _HR._html_hl_save(rel, [x for x in _items if x.get("id") != hid])
-            return jsonify({"ok": True})
-        _d = request.get_json(silent=True) or {}
-        for _k in ("color", "note", "sentence", "text"):
-            if _k in _d:
-                _hit[_k] = (_d.get(_k) or "") if _k != "color" else ((_d.get(_k) or "").strip())
-        _HR._html_hl_save(rel, _items)
-        return jsonify({"ok": True, "highlight": _hit})
+        with _HR._html_hl_edit(rel) as _items:
+            _hit = next((x for x in _items if x.get("id") == hid), None)
+            if not _hit:
+                return jsonify({"ok": False, "error": "not_found"}), 404
+            _items[:] = [x for x in _items if x.get("id") != hid]
+        return jsonify({"ok": True})
     try:   # 这条高亮落在哪一卷(单本书=它自己;合并书=跨卷按 id 定位)
         rel = _vb_owner_of(rel, lambda m: any(h.get("id") == hid
                                               for h in _hl_load(m).get("highlights", [])))[0] or ""
@@ -11264,12 +16185,11 @@ def pdf_api_highlights_delete():
         return jsonify({"ok": False, "error": "not_found"}), 404
     if _safe_vault_path(rel) is None or not hid:
         return jsonify({"ok": False, "error": "invalid"}), 400
-    db = _hl_load(rel)
-    before = len(db["highlights"])
-    db["highlights"] = [h for h in db["highlights"] if h.get("id") != hid]
-    if len(db["highlights"]) == before:
-        return jsonify({"ok": False, "error": "not found"}), 404
-    _hl_save(rel, db)
+    with _hl_edit(rel) as db:
+        before = len(db["highlights"])
+        db["highlights"] = [h for h in db["highlights"] if h.get("id") != hid]
+        if len(db["highlights"]) == before:
+            return jsonify({"ok": False, "error": "not found"}), 404
     return jsonify({"ok": True})
 
 
@@ -11662,7 +16582,36 @@ def pdf_api_vocab_audio():
 
 
 
+# ── 高亮颜色唯一规范(全入口共用:手动 / 助手 / MCP / EPUB / HTML)──
+# 渲染端只对 #rrggbb 加 alpha(reader.src/17-highlight.js `_hlRgba`);命名色("yellow")会原样
+# 透传成**不透明实色**盖住正文(用户实测助手高亮遮字的真凶)。故服务端在写入前统一归一化:
+# 只接受前端色板同款 #rrggbb,常见命名色映射到色板,其余一律回默认——不透明色永远进不了 sidecar。
+HL_PALETTE = ('#fff59d', '#a7f3d0', '#a3d4ff', '#fda4af')   # = reader.src/17-highlight.js DEFAULT_HL_COLORS
+_HL_NAME2HEX = {
+    'yellow': '#fff59d', 'gold': '#fff59d', '黄': '#fff59d', '黄色': '#fff59d',
+    'green': '#a7f3d0', '绿': '#a7f3d0', '绿色': '#a7f3d0',
+    'blue': '#a3d4ff', 'cyan': '#a3d4ff', '蓝': '#a3d4ff', '蓝色': '#a3d4ff',
+    'red': '#fda4af', 'pink': '#fda4af', 'orange': '#fda4af',
+    '红': '#fda4af', '红色': '#fda4af', '粉': '#fda4af',
+}
+
+
+def hl_norm_color(c) -> str:
+    """把任意来源的高亮色收敛为 #rrggbb;空/命名色/非法值 → 色板色。"""
+    s = str(c or '').strip().lower()
+    if re.fullmatch(r'#[0-9a-f]{6}', s):
+        return s
+    if re.fullmatch(r'[0-9a-f]{6}', s):
+        return '#' + s
+    return _HL_NAME2HEX.get(s.lstrip('#'), HL_PALETTE[0])
+
+
 def register_pdf_reader(app):
+    global _READER_SIDECAR_ROOT, _READER_SIDECAR_STORE
+    configured_sidecar_root = app.extensions.get("reader_sidecar_root")
+    if configured_sidecar_root is not None:
+        _READER_SIDECAR_ROOT = Path(configured_sidecar_root)
+        _READER_SIDECAR_STORE = None
     try:
         from epub_assistant import register_epub_assistant
         register_epub_assistant(bp)   # Phase H:EPUB section 级 agentic 助手 + 对话历史(挂到 /pdf bp)

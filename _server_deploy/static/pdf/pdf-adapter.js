@@ -51,6 +51,7 @@
   }
 
   var PdfAdapter = window.PdfAdapter = {
+    kind: 'pdf',
     _host: null,
     __shotEl: null,
 
@@ -184,9 +185,10 @@
       PdfAdapter._ensureResultCfg();
       RC.result.aiCall('/pdf/api/translate', { text: opts.text || '', target_lang: '中文' }, '🌐 翻译', {});
     },
-    // 对话:预填原文/上下文 + 底部追问(rc-result.openChat)。
+    // 对话:选区钉入统一助手；旧结果窗口只作共享助手未挂载时的兜底。
     chat: function (opts) {
       opts = opts || {};
+      if (window.RC && RC.ui && RC.ui.openSelectionChat && RC.ui.openSelectionChat(opts.text || '', opts.context || '')) return;
       if (!(window.RC && RC.result && RC.result.openChat)) { if (opts.fallback) opts.fallback(); return; }
       PdfAdapter._ensureResultCfg();
       RC.result.openChat(opts.text || '', opts.context || '', { kind: 'chat' });
@@ -216,8 +218,20 @@
           text: text, rect: rect, result: result || null, file: file, langs: langs, ignoreSelector: '#sel-toolbar',
           // 收藏时无需再删高亮:点击模式弹框前已 _removePhraseHighlight(a),快返回模式根本没建高亮 → 只刷新分词。
           //   (旧 removePhraseHighlight(phl||t) 里 phl 恒 null → 按文本删会误删并存的同文本高亮。)
-          onFav: function (t, nowFav) { if (!h) return; try { if (h.phraseRefresh) h.phraseRefresh(); } catch (e) {} },
-          onMastered: function () { if (h && h.phraseRefresh) { try { h.phraseRefresh(); } catch (e) {} } },
+          onFav: function (t, nowFav) {
+            if (!h) return;
+            try {
+              if (h.phraseFavoriteUpdate) h.phraseFavoriteUpdate(t, nowFav);
+              else if (h.phraseRefresh) h.phraseRefresh();
+            } catch (e) {}
+          },
+          onMastered: function (t, mastered) {
+            if (!h) return;
+            try {
+              if (h.phraseMasteryUpdate) h.phraseMasteryUpdate(t, mastered);
+              else if (h.phraseRefresh) h.phraseRefresh();
+            } catch (e) {}
+          },
           onExplain: function () { if (h && h.onExplain) { try { h.onExplain(); } catch (e) {} } }
         };
       };
@@ -319,14 +333,30 @@
       var cs = h.charSel && h.charSel();
       var text = (h.lastSelText && h.lastSelText()) || '';
       if (!cs || !text) return null;
-      return {
+      return RC.contract.selection({
         text: text,
         sentence: (h.sentence && h.sentence(cs)) || '',
-        anchor: { file: (h.fileRel && h.fileRel()) || '', page: (h.selPageNum && h.selPageNum()) || 0, startIdx: cs.startIdx, endIdx: cs.endIdx },
+        anchor: { kind: 'pdf-char', file: (h.fileRel && h.fileRel()) || '', page: (h.selPageNum && h.selPageNum()) || 0, startIdx: cs.startIdx, endIdx: cs.endIdx },
         rect: { client: _rectFromSel(cs) }
-      };
+      });
     },
     clearSelection: function () { var h = PdfAdapter._host; if (h && h.clear) h.clear(); },
+    // 只补统一契约的只读位置描述；页码与总页数仍由 PDF 底座计算和拥有。
+    currentLocation: function () {
+      var h = PdfAdapter._host;
+      return {
+        unit: 'page',
+        index: (h && h.currentPage && h.currentPage()) || 0,
+        total: (h && h.pageCount && h.pageCount()) || 0
+      };
+    },
+    // DocumentHost 迁移入口：只把“去哪里”交给 PDF 原生导航，不解释 EPUB/Web 锚点。
+    navigate: function (target) {
+      var h = PdfAdapter._host, a = target && target.data ? target.data : (target || {});
+      var page = a.page != null ? a.page : (a.index != null ? a.index : target);
+      if (h && h.asst && h.asst.goTo && page != null) { h.asst.goTo(page); return true; }
+      return false;
+    },
 
     // ════════════════ 阶段5:助手薄增量 → rc-assistant ════════════════
     // 助手主体(SSE 流式 / rid 重连 / agentic 工具循环 / 撤销重做卡 / 历史 / mic / 上下文采集 /

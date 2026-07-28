@@ -13,6 +13,12 @@ from PIL import Image, ImageGrab
 
 # 客户端版：用 BackendAdapter 替代原 launchers/截图问答.py 里的 ai_client
 from ai_backends import make_backend  # type: ignore
+from card_improvement_service import (  # type: ignore
+    CardImprovementError,
+    CardReference,
+    JsonEntityRegistryResolver,
+    pairs_text as _shared_pairs_text,
+)
 
 
 # ── 由 launch() 入口设置的全局 cfg getter，HTTP server 子线程通过它拿当前 backend ──
@@ -472,17 +478,59 @@ def compute_proximity(match: str, candidate: str, index_notes: dict) -> float:
     return jacc
 
 
-def _find_card_context(local_id: str):
-    """QA 页 ?card=<local_id> 反查：从 anki records 取卡片两面 + 来源。"""
-    if not local_id or not (ANKI_RECORDS_DIR and ANKI_RECORDS_DIR.exists()):
+def _entity_registry_path() -> "Path | None":
+    """Legacy QA daemon's explicitly configured card-entity registry.
+
+    The account-scoped reader must inject its authorized registry path when it
+    calls the shared resolver.  This old standalone daemon has no authenticated
+    reader account context, so it only uses an explicit config path or the
+    historical single-user ``state/assets/registry.json`` fallback.
+    """
+    cfg = _GET_CFG() or {}
+    explicit = str(cfg.get("reader_entity_registry") or "").strip()
+    if explicit:
+        return Path(explicit)
+    project = str(os.environ.get("CLAUDE_PROJECT") or "").strip()
+    return (Path(project) / "state" / "assets" / "registry.json") if project else None
+
+
+def _entity_card_context(local_id: str, index=None):
+    try:
+        ref = CardReference.parse(local_id, index)
+    except CardImprovementError:
         return None
+    if not ref.is_entity:
+        return None
+    path = _entity_registry_path()
+    if not path:
+        return None
+    try:
+        return JsonEntityRegistryResolver(path).resolve(ref)
+    except (FileNotFoundError, PermissionError, ValueError, json.JSONDecodeError):
+        return None
+
+
+def _find_card_context(local_id: str, index=None):
+    """QA ``?card=...&index=N`` lookup with lossless legacy fallbacks."""
+    entity_ctx = _entity_card_context(local_id, index)
+    if entity_ctx:
+        return entity_ctx
+    if not local_id or not (ANKI_RECORDS_DIR and ANKI_RECORDS_DIR.exists()):
+        return _card_context_from_anki(local_id, index)
+    try:
+        ref = CardReference.parse(local_id, index)
+    except CardImprovementError:
+        ref = CardReference(str(local_id or "").strip(), None)
+    record_ids = [local_id]
+    if ref.is_entity and ref.index is not None:
+        record_ids.extend((f"{ref.card_id}:{ref.index}", f"{ref.card_id}/{ref.index}"))
     for fn in ANKI_RECORDS_DIR.glob("*.json"):
         try:
             rec = json.loads(fn.read_text(encoding="utf-8"))
         except Exception:
             continue
         for c in rec.get("cards") or []:
-            if c.get("local_id") == local_id:
+            if c.get("local_id") in record_ids:
                 source_note = rec.get("source_note", "")
                 source_url  = rec.get("source_url", "")
                 # source_url 为空时用 source_note 重建 obsidian:// 链接（同卡片 footer 那个）
@@ -498,21 +546,32 @@ def _find_card_context(local_id: str):
                     "local_id": local_id, "type": c.get("type"),
                     "front": c.get("front", ""), "back": c.get("back", ""),
                     "text": c.get("text", ""),
+                    "deck": c.get("deck", "Obsidian::未分类"),
                     "anki_note_id": c.get("anki_note_id"),
                     "source_note": source_note,
                     "source_link": rec.get("source_link", ""),
                     "source_url": source_url,
+                    "entity_id": ref.card_id if ref.is_entity else "",
+                    "entity_index": ref.index,
                 }
     # records 没有 → 直接查 Anki（覆盖未被 records 跟踪的游离卡），否则 QA 页空白
-    return _card_context_from_anki(local_id)
+    return _card_context_from_anki(local_id, index)
 
 
-def _card_context_from_anki(local_id: str):
+def _card_context_from_anki(local_id: str, index=None):
     """records 查不到时，按 footer 里的 Local ID 从 Anki 直接取卡两面 + 来源。"""
     import html as _html
     _FOOTER = '<hr><div style="font-size:0.85em;color:#666;">'
     try:
-        nids = _anki_request("findNotes", {"query": f'"{local_id}"'})
+        ref = CardReference.parse(local_id, index)
+        query_ids = [str(local_id or "").strip()]
+        if ref.is_entity and ref.index is not None:
+            query_ids = [f"{ref.card_id}:{ref.index}", f"{ref.card_id}/{ref.index}", ref.card_id]
+        nids = []
+        for query_id in dict.fromkeys(q for q in query_ids if q):
+            nids = _anki_request("findNotes", {"query": f'"{query_id}"'}) or []
+            if nids:
+                break
         if not nids:
             return None
         info = (_anki_request("notesInfo", {"notes": nids[:1]}) or [None])[0]
@@ -543,8 +602,11 @@ def _card_context_from_anki(local_id: str):
         return {
             "local_id": local_id, "type": "cloze" if is_cloze else "basic",
             "front": front, "back": back, "text": text,
+            "deck": "QA",
             "anki_note_id": nids[0], "source_note": src_note,
             "source_link": src_link, "source_url": src_url,
+            "entity_id": ref.card_id if ref.is_entity else "",
+            "entity_index": ref.index,
         }
     except Exception:
         return None
@@ -565,7 +627,7 @@ def _anki_request(action: str, params: dict | None = None, timeout: int = 10):
 
 
 def _qa_setting(dotted: str, default=None):
-    """读 state/server-config.json 里的点分键（如 card_qa.delete_original）。"""
+    """读 state/server-config.json 里的点分键。"""
     proj = os.environ.get("CLAUDE_PROJECT", "")
     cfg_file = Path(proj) / "state" / "server-config.json" if proj else None
     if not cfg_file or not cfg_file.exists():
@@ -587,17 +649,160 @@ def _server_config_path() -> "Path | None":
     return (Path(proj) / "state" / "server-config.json") if proj else None
 
 
+def _reader_assistant_module():
+    """Load the reader's canonical live model catalog.
+
+    The legacy QA page must not grow a second Codex model registry.  Source
+    checkouts can resolve ``_server_deploy/assistant.py`` directly; packaged
+    clients that do not ship it fail closed and keep only the required Spark
+    compatibility label visible as unavailable.
+    """
+    try:
+        import assistant as reader_assistant  # type: ignore
+        return reader_assistant
+    except ImportError:
+        server_dir = Path(__file__).resolve().parents[2] / "_server_deploy"
+        if server_dir.is_dir() and str(server_dir) not in sys.path:
+            sys.path.insert(0, str(server_dir))
+        import assistant as reader_assistant  # type: ignore
+        return reader_assistant
+
+
+def _normal_codex_catalog(saved_model: str = "") -> dict:
+    """Project the assistant's verified Codex catalog for screenshot chat."""
+    compatibility_depths = ["low", "medium", "high", "xhigh"]
+    try:
+        reader_assistant = _reader_assistant_module()
+        payload = dict(reader_assistant._codex_catalog_payload())
+        declared_compatibility = getattr(
+            reader_assistant,
+            "_CODEX_COMPAT_DEPTHS",
+            {},
+        ) or {}
+        declared_depths = list(
+            declared_compatibility.get(
+                "gpt-5.3-codex-spark",
+                (),
+            )
+        )
+        if declared_depths:
+            compatibility_depths = declared_depths
+    except Exception as error:
+        payload = {
+            "variants": ["gpt-5.3-codex-spark"],
+            "capabilities": {
+                "gpt-5.3-codex-spark": {
+                    "available": False,
+                    "catalog_advertised": False,
+                    "selectable": False,
+                    "depths": [],
+                    "service_tiers": [],
+                    "priority": False,
+                    "fast": False,
+                    "reason": "暂时无法读取 Codex 实时模型目录",
+                },
+            },
+            "fast_models": [],
+            "depths_by_model": {},
+            "verified": False,
+            "error": str(error)[:160],
+        }
+    variants = list(payload.get("variants") or [])
+    raw_capabilities = dict(payload.get("capabilities") or {})
+    capabilities = {}
+    for model, raw in raw_capabilities.items():
+        capability = dict(raw or {})
+        capability["available"] = capability.get("available") is True
+        capability["catalog_advertised"] = (
+            capability.get("catalog_advertised") is True
+            or (
+                "catalog_advertised" not in capability
+                and capability["available"]
+            )
+        )
+        capability["selectable"] = capability.get("selectable") is True
+        capability["depths"] = list(capability.get("depths") or [])
+        capability["service_tiers"] = list(
+            capability.get("service_tiers") or []
+        )
+        capability["priority"] = capability.get("priority") is True
+        capability["fast"] = capability.get("fast") is True
+        capability["reason"] = str(capability.get("reason") or "")
+        capabilities[str(model)] = capability
+    if "gpt-5.3-codex-spark" not in variants:
+        variants.append("gpt-5.3-codex-spark")
+    capabilities.setdefault("gpt-5.3-codex-spark", {
+        "available": False,
+        "catalog_advertised": False,
+        "selectable": True,
+        "depths": compatibility_depths,
+        "service_tiers": [],
+        "priority": False,
+        "fast": False,
+        "reason": "Spark 兼容型号；实时目录未声明 priority/Fast",
+    })
+    saved_model = str(saved_model or "").strip()
+    if saved_model and saved_model not in variants:
+        variants.append(saved_model)
+        capabilities[saved_model] = {
+            "available": False,
+            "catalog_advertised": False,
+            "selectable": False,
+            "depths": [],
+            "service_tiers": [],
+            "priority": False,
+            "fast": False,
+            "reason": "没有取得这个已保存型号的能力声明",
+        }
+    return {
+        "variants": variants,
+        "capabilities": capabilities,
+        "fast_models": [
+            model for model in variants
+            if (capabilities.get(model) or {}).get("selectable") is True
+            and (
+                (capabilities.get(model) or {}).get("priority") is True
+                or (capabilities.get(model) or {}).get("fast") is True
+            )
+        ],
+        "depths_by_model": {
+            model: list((capabilities.get(model) or {}).get("depths") or [])
+            for model in variants
+        },
+        "verified": payload.get("verified") is True,
+        "error": str(payload.get("error") or ""),
+    }
+
+
 def _load_ai_settings_for_ui() -> dict:
     """给 ⚙ 弹窗回显：当前 backend + 各 CLI 后端的 model/effort/command。"""
     cfg = _GET_CFG() or {}
     ai = cfg.get("ai") or {}
     claude = ai.get("claude_cli") or {}
     codex  = ai.get("codex_cli") or {}
+    model = str(codex.get("model") or "").strip()
+    catalog = _normal_codex_catalog(model)
+    capability = (catalog.get("capabilities") or {}).get(model) or {}
+    effort = str(codex.get("effort") or "").strip().lower()
+    selectable = capability.get("selectable") is True
+    effort_ok = selectable and effort in (capability.get("depths") or [])
+    fast_ok = selectable and (
+        capability.get("priority") is True
+        or capability.get("fast") is True
+    )
     return {
         "backend": cfg.get("ai_backend", "claude_cli"),
         "claude": {"model": claude.get("model", ""), "effort": claude.get("effort", "")},
-        "codex":  {"model": codex.get("model", "")},
-        "delete_original": bool((cfg.get("card_qa") or {}).get("delete_original", False)),
+        "codex": {
+            "model": model,
+            "effort": effort if effort_ok else "",
+            "fast": (
+                cfg.get("ai_backend") == "codex_cli"
+                and codex.get("fast") is True
+                and fast_ok
+            ),
+        },
+        "codex_catalog": catalog,
     }
 
 
@@ -611,8 +816,8 @@ def _save_ai_settings_from_ui(body: dict) -> dict:
     except Exception:
         cfg = {}
     backend = (body.get("backend") or "").strip()
-    if backend in ("claude_cli", "codex_cli", "claude_api", "openai_api", "ollama"):
-        cfg["ai_backend"] = backend
+    if backend not in ("claude_cli", "codex_cli", "claude_api", "openai_api", "ollama"):
+        return {"ok": False, "error": "普通截图问答后端无效，未保存"}
     ai = cfg.setdefault("ai", {})
     cl = body.get("claude") or {}
     if isinstance(cl, dict):
@@ -620,18 +825,164 @@ def _save_ai_settings_from_ui(body: dict) -> dict:
         c["model"]  = (cl.get("model") or "").strip()
         eff = (cl.get("effort") or "").strip().lower()
         c["effort"] = eff if eff in ("low", "medium", "high", "xhigh", "max") else ""
-    cx = body.get("codex") or {}
-    if isinstance(cx, dict):
+    cx = body.get("codex")
+    if backend == "codex_cli":
+        if not isinstance(cx, dict):
+            return {"ok": False, "error": "Codex 设置缺失，未保存"}
+        model = str(cx.get("model") or "").strip()
+        effort = str(cx.get("effort") or "").strip().lower()
+        requested_fast = cx.get("fast") is True
+        if not model:
+            return {"ok": False, "error": "请选择可用的 Codex 型号，未保存"}
+        catalog = _normal_codex_catalog(model)
+        capability = (catalog.get("capabilities") or {}).get(model) or {}
+        if capability.get("selectable") is not True:
+            reason = str(
+                capability.get("reason")
+                or "这个 Codex 型号当前不可选择"
+            )
+            return {"ok": False, "error": reason + "，未保存"}
+        if effort not in (capability.get("depths") or []):
+            return {"ok": False, "error": "所选 Codex 型号不支持这个思考深度，未保存"}
+        if requested_fast and not (
+            capability.get("priority") is True
+            or capability.get("fast") is True
+        ):
+            return {"ok": False, "error": "所选 Codex 型号不支持 priority/Fast，未保存"}
         c = ai.setdefault("codex_cli", {})
-        c["model"] = (cx.get("model") or "").strip()
-    if "delete_original" in body:
-        cfg.setdefault("card_qa", {})["delete_original"] = bool(body.get("delete_original"))
+        c["model"] = model
+        c["effort"] = effort
+        c["fast"] = requested_fast
+    cfg["ai_backend"] = backend
+    # Fast belongs only to this normal screenshot Codex profile.  Selecting a
+    # different backend never turns a truthy legacy/string value into priority.
+    if backend != "codex_cli":
+        ai.setdefault("codex_cli", {})["fast"] = False
     try:
         cfg_path.parent.mkdir(parents=True, exist_ok=True)
         cfg_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2), encoding="utf-8")
     except Exception as e:
         return {"ok": False, "error": str(e)}
     return {"ok": True, **_load_ai_settings_for_ui()}
+
+
+def _load_card_improvement_settings_for_ui() -> dict:
+    """Return the reader's canonical ``card_improve`` model preference.
+
+    Screenshot chat may keep its legacy settings, but card improvement consumes
+    assistant action-prefs.  Read the catalog and capabilities from
+    ``assistant.py`` so this old page cannot become a second model registry.
+    """
+    _runtime, reader_assistant = _card_improvement_runtime_modules()
+    uid = _legacy_card_user_id()
+    pref = reader_assistant._ap_get(uid, "card_improve")
+    effective = reader_assistant._resolve("card_improve", uid)
+    default = dict(reader_assistant._AP_DEFAULTS["card_improve"])
+    default["fast"] = (
+        default.get("fast") is True
+        and default.get("backend") == "codex"
+        and reader_assistant._codex_fast_ok(default.get("variant"))
+    )
+    codex = reader_assistant._codex_catalog_payload()
+    variants = {
+        "claude": list(reader_assistant._CLAUDE_VARIANTS),
+        "gemini": list(reader_assistant._gemini_models()),
+        "codex": list(codex.get("variants") or []),
+    }
+    # Keep a saved dynamic model visible when a live catalog refresh is
+    # temporarily incomplete.
+    for profile in (pref, effective, default):
+        backend = str((profile or {}).get("backend") or "")
+        variant = str((profile or {}).get("variant") or "")
+        if backend in variants and variant and variant not in variants[backend]:
+            variants[backend].append(variant)
+    codex_capabilities = dict(codex.get("capabilities") or {})
+    for model in variants["codex"]:
+        codex_capabilities.setdefault(model, {
+            "available": False,
+            "catalog_advertised": False,
+            "selectable": False,
+            "depths": [],
+            "service_tiers": [],
+            "priority": False,
+            "fast": False,
+            "reason": "没有取得此型号的能力声明",
+        })
+    depth_candidates = tuple(dict.fromkeys(
+        ("auto", "none", "think")
+        + tuple(reader_assistant._EFFORTS)
+        + tuple(reader_assistant._CODEX_DEPTHS)
+    ))
+    depths = {
+        backend: [
+            depth
+            for depth in depth_candidates
+            if reader_assistant._depth_ok(backend, depth)
+        ]
+        for backend in reader_assistant._BACKENDS
+        if backend != "codex"
+    }
+    depths["codex"] = list(reader_assistant._CODEX_DEPTHS)
+    return {
+        "ok": True,
+        "action": "card_improve",
+        "label": reader_assistant._AP_LABELS.get(
+            "card_improve", "复习卡改进"
+        ),
+        "pref": pref,
+        "effective": effective,
+        "default": default,
+        "catalog": {
+            "backends": list(reader_assistant._BACKENDS),
+            "variants": variants,
+            "depths": depths,
+            "codex_capabilities": codex_capabilities,
+            "fast_models": list(codex.get("fast_models") or []),
+            "codex_catalog_verified": codex.get("verified") is True,
+            "codex_catalog_error": str(codex.get("error") or ""),
+        },
+    }
+
+
+def _save_card_improvement_settings_from_ui(body: dict) -> dict:
+    """Persist and verify the canonical ``card_improve`` action-pref."""
+    _runtime, reader_assistant = _card_improvement_runtime_modules()
+    uid = _legacy_card_user_id()
+    candidate = {
+        "backend": body.get("backend"),
+        "variant": body.get("variant"),
+        "depth": body.get("depth"),
+        "fast": body.get("fast") is True,
+    }
+    normalized = reader_assistant._ap_norm(candidate)
+    if not normalized:
+        return {
+            "ok": False,
+            "error": "卡片改进模型、型号或思考深度无效，未保存",
+        }
+    reader_assistant._ap_set(
+        uid,
+        "card_improve",
+        normalized["backend"],
+        normalized["variant"],
+        normalized["depth"],
+        fast=normalized["fast"],
+    )
+    # _ap_set deliberately absorbs disk errors for the main reader.  This old
+    # page must not turn that into a false "saved" message, so read it back.
+    persisted = reader_assistant._ap_get(uid, "card_improve")
+    if persisted != normalized:
+        return {
+            "ok": False,
+            "error": "卡片改进设置未能写入共享 action-pref，旧设置仍保持不变",
+        }
+    return {
+        "ok": True,
+        "action": "card_improve",
+        "pref": persisted,
+        "saved": persisted,
+        "effective": reader_assistant._resolve("card_improve", uid),
+    }
 
 
 def _footer_html(local_id: str, source_link: str, source_url: str, reason: str) -> str:
@@ -701,93 +1052,162 @@ def _find_record_for_card(local_id: str):
 
 
 def _pairs_text(pairs: list) -> str:
-    return "\n\n".join(
-        f"问：{p.get('question','').strip()}\n答：{p.get('answer','').strip()}"
-        for p in pairs if p.get("answer")
-    )
+    return _shared_pairs_text(pairs)
 
 
-# ── _card_update_note 的两套 prompt（详细 / 精炼）────────────────────────
-# 共享前置：处理方式、连贯化、改写自由度（两种模式都遵循）
-_NOTE_PROMPT_HEAD = (
-    "背景逻辑：我在复习一张由这篇笔记生成的 Anki 卡片(②)、对照笔记(①)时，"
-    "有个地方没看懂，于是问了问题(③)；AI 回答里我**主动勾选为有用**的部分(④)"
-    "就是我认为应该补到笔记里的内容。\n\n"
-    "任务：把 ④ 的实质内容补到笔记 ① 的对应位置（与 ③ 困惑最相关处）。\n\n"
-    "**处理方式（两种模式共同遵循）**\n"
-    "1. **不必照搬每句话**：④ 是参考素材，允许改写措辞、调整顺序、合并相似表达。"
-    "目标是让笔记自然顺畅、信息密度合适——不是文字级 paste。\n"
-    "2. **改写原段 或 追加新段** 都可以，选让笔记更连贯的方式：\n"
-    "   - 笔记 ① 已经简略提到 ④ 的概念 → 通常**改写原段**更顺\n"
-    "   - ④ 是新主题/新角度 → 追加新段（位置合适即可，可用 `### 子标题`）\n"
-    "3. **连贯化（关键）**：④ 可能是**间断选中**的（跨标题、跳过中间、多轮问答）。"
-    "写入时必须把片段重新组织成前后通顺的文字：\n"
-    "   - 必要时补**过渡词**（『此外』『另一方面』『相应地』），但不引入 ④ 没有的新事实\n"
-    "   - 同一概念的不同侧面可以用 `### 子标题` 分组\n"
-    "   - 间断处不要留 markdown 空标题、孤立 list 项、半句话\n"
-    "4. **不得添加 ④ 没有的事实**：自创类比、自创例子、自创引申、自创对比——一律不要。\n"
-    "5. ②③ 仅用于定位（判断 ④ 补到哪一节、怎么衔接），**不作为内容来源**。\n"
-    "6. 保留 frontmatter（开头 --- 之间）和「相关笔记」节原样不动；"
-    "保持 Obsidian Markdown，数学公式用 $...$ 或 $$...$$。\n"
-    "7. 直接输出修改后的完整笔记内容，**第一行就是笔记原本的开头（--- 或正文）**，"
-    "不要写任何说明、前言或代码围栏。\n\n"
-    "**两种模式的差异（详细/精炼）见下**：\n"
-)
+def _card_improvement_runtime_modules():
+    """Load the reader's one shared runtime without making it a client hard dependency.
 
-# 详细模式：保留更多实质细节
-_NOTE_PROMPT_VERBOSE = _NOTE_PROMPT_HEAD + (
-    "**当前模式：详细（verbose）**\n"
-    "- 保留 ④ 里的**关键例子、关键推导步骤、对照表的主要行**（不必每个都搬，但要让读者能看清\n"
-    "  概念的『展开层次』，而不只是结论）\n"
-    "- 公式 / 定义 / 结论：保留原貌\n"
-    "- 措辞可改写、相似句可合并，但**不要为了短而砍掉独立的知识点或例子**\n"
-    "- 一般情况下，新增长度应接近或略小于 ④ 的长度（不应剧烈压缩）\n\n"
-)
-
-# 精炼模式：核心信息不丢的前提下浓缩
-_NOTE_PROMPT_CONCISE = _NOTE_PROMPT_HEAD + (
-    "**当前模式：精炼（concise）**\n"
-    "- 在**核心信息不丢**的前提下大胆浓缩：多个相似例子合到 1 个最有代表性的；推导提炼为关键\n"
-    "  几步；对照表压成行内表述\n"
-    "- 公式 / 定义 / 结论：保留原貌\n"
-    "- 适合 ④ 内容较长但你只想抓住要点时\n"
-    "- 新增长度通常会明显短于 ④（这是预期）\n\n"
-)
-
-
-def _card_update_anki(local_id: str, pairs: list) -> dict:
-    """据有效问答让 AI 生成一或多张新卡代替原卡。删/留原卡由 server-config 决定（默认保留）。"""
-    rec_file, rec, orig = _find_record_for_card(local_id)
-    if not orig:
-        return {"ok": False, "error": "卡片不在 records 中"}
-    note_id = orig.get("anki_note_id")
-    is_cloze = orig.get("type") == "cloze"
-    if is_cloze:
-        cur = f"类型：cloze\n挖空文本：{orig.get('text','')}\n补充：{orig.get('back','')}"
-    else:
-        cur = f"类型：{orig.get('type','basic')}\n正面（问）：{orig.get('front','')}\n背面（答）：{orig.get('back','')}"
-    prompt = (
-        "背景逻辑：我在复习这张 Anki 卡片时有个地方没看懂，于是问了问题；"
-        "下面【有效问答】里的回答是我**勾选为有用**的，它恰好讲清了我的困惑——"
-        "也就是说原卡片在这一点上不够清楚或不够到位，导致我卡住了。\n\n"
-        "任务：在原卡基础上生成一张或多张改进后的新卡来代替它，"
-        "重点是把『让我卡住、而有效回答讲清了的那个点』在新卡里讲明白（更准确/清晰/易记）。\n"
-        "约束：改进所依据的新信息只来自【有效问答】，不要自行添加问答里没有的"
-        "类比/例子/引申；保持卡片简洁聚焦，别堆砌。数学公式用 LaTeX（行内 \\( \\)，行间 \\[ \\]）。\n\n"
-        f"=== 原卡片（我卡住的那张）===\n{cur}\n\n"
-        f"=== 有效问答（我的困惑 + 讲清它的回答，改进依据）===\n{_pairs_text(pairs)}\n\n"
-        "只输出 JSON 数组，不要其它文字，每个元素：\n"
-        '[{"type":"basic|cloze|reverse","front":"非cloze的问题","back":"答案",'
-        '"text":"cloze专用，含{{c1::...}}","reason":"制卡理由"}]'
-    )
+    The persistent QA daemon is started by ``_server_deploy/qa_server.py``, so
+    the shared runtime and assistant model registry are present.  A packaged
+    client that does not ship that runtime must fail closed instead of silently
+    resurrecting the old one-shot/direct-write workflow.
+    """
     try:
-        raw = ai_client.ask(prompt)
-        s, e = raw.find('['), raw.rfind(']')
-        new_cards = json.loads(raw[s:e+1]) if (s != -1 and e > s) else []
-    except Exception as ex:
-        return {"ok": False, "error": f"AI 生成失败：{ex}"}
-    if not new_cards:
-        return {"ok": False, "error": "AI 未生成有效卡片"}
+        import card_improvement_runtime as runtime  # type: ignore
+        import assistant as reader_assistant  # type: ignore
+        return runtime, reader_assistant
+    except ImportError:
+        server_dir = Path(__file__).resolve().parents[2] / "_server_deploy"
+        if server_dir.is_dir() and str(server_dir) not in sys.path:
+            sys.path.insert(0, str(server_dir))
+        try:
+            import card_improvement_runtime as runtime  # type: ignore
+            import assistant as reader_assistant  # type: ignore
+            return runtime, reader_assistant
+        except ImportError as error:
+            raise CardImprovementError(
+                "当前 QA 客户端缺少统一 card-improvement runtime；"
+                "已停止旧的一次性直写流程，请升级客户端或使用阅读器复习模式。"
+            ) from error
+
+
+def _legacy_card_user_id() -> str:
+    """Account whose reader ``card_improve`` action preset the old page follows."""
+    value = _qa_setting("qa_user_id", "1")
+    return str(value or "1").strip()[:80] or "1"
+
+
+def _legacy_card_owner(client_token: str = "", client_fingerprint: str = "") -> str:
+    """Create a non-secret owner key for the runtime's signed draft handle."""
+    token = str(client_token or "").strip().lower()
+    if not re.fullmatch(r"[a-f0-9]{32,128}", token):
+        token = str(client_fingerprint or "legacy-client")
+    digest = hashlib.sha256(token.encode("utf-8")).hexdigest()[:32]
+    return f"legacy-qa:{_legacy_card_user_id()}:{digest}"
+
+
+def _safe_vault_note_path(source_note: str) -> Path:
+    """Resolve a source note inside the configured Vault, never outside it."""
+    if not (source_note and VAULT):
+        raise CardImprovementError("无源笔记路径")
+    root = Path(VAULT).resolve()
+    raw = Path(str(source_note))
+    path = (raw if raw.is_absolute() else root / raw).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as error:
+        raise CardImprovementError("源笔记不在当前 Vault 中") from error
+    if not path.exists() and not path.suffix:
+        path = path.with_suffix(".md")
+    try:
+        path.relative_to(root)
+    except ValueError as error:
+        raise CardImprovementError("源笔记不在当前 Vault 中") from error
+    if not path.is_file():
+        raise CardImprovementError(f"笔记不存在：{source_note}")
+    return path
+
+
+def _prepare_legacy_card_draft(
+    local_id: str,
+    pairs: list,
+    target: str,
+    *,
+    index=None,
+    verbosity: str = "verbose",
+    owner: str,
+) -> dict:
+    """Prepare only.  Uses the reader's exact model preset/runtime and writes nothing."""
+    runtime, reader_assistant = _card_improvement_runtime_modules()
+    card = _find_card_context(local_id, index)
+    if not card:
+        raise CardImprovementError("找不到卡片上下文")
+    rec_file, rec, rec_card = _find_record_for_card(local_id)
+    if rec_card:
+        card.setdefault("deck", rec_card.get("deck") or "Obsidian::未分类")
+    if rec:
+        card.setdefault("source_note", rec.get("source_note") or "")
+        card.setdefault("source_link", rec.get("source_link") or "")
+        card.setdefault("source_url", rec.get("source_url") or "")
+    original_note = None
+    if target in ("note", "all"):
+        original_note = _safe_vault_note_path(
+            str(card.get("source_note") or "")
+        ).read_text(encoding="utf-8")
+
+    uid = _legacy_card_user_id()
+    profile = reader_assistant._resolve("card_improve", uid)
+    backend = profile.get("backend")
+    variant = profile.get("variant")
+    depth = profile.get("depth")
+    service_tier = (
+        "priority"
+        if profile.get("fast") is True
+        and reader_assistant._codex_fast_ok(variant)
+        else ""
+    )
+    if backend == "codex":
+        def one_shot(prompt):
+            return reader_assistant._codex_exec_text(
+                prompt,
+                model=variant,
+                effort=depth,
+                timeout=240,
+                service_tier=service_tier,
+            )
+
+        codex_app = reader_assistant._codex_app
+    else:
+        def one_shot(prompt):
+            return reader_assistant._deep_ask(
+                prompt,
+                backend=backend,
+                variant=variant,
+                depth=depth,
+                timeout=240,
+            )
+
+        codex_app = None
+
+    return runtime.prepare_card_improvement_draft(
+        owner=owner,
+        card=card,
+        pairs=pairs,
+        target=target,
+        original_note=original_note,
+        verbosity=verbosity,
+        codex_app=codex_app,
+        one_shot=one_shot,
+        model=variant if backend == "codex" else "gpt-5.6-luna",
+        effort=depth if backend == "codex" else "low",
+        timeout=240,
+        service_tier=service_tier if backend == "codex" else "",
+    )
+
+
+def _commit_legacy_anki_draft(
+    *,
+    draft_id: str,
+    identity: dict,
+    new_cards: list,
+) -> dict:
+    """Commit server-frozen cards.  The original card is never deleted."""
+    runtime, _reader_assistant = _card_improvement_runtime_modules()
+    local_id = str(identity.get("local_id") or "").strip()
+    rec_file, rec, orig = _find_record_for_card(local_id)
+    if not (rec_file and rec is not None and orig):
+        return {"ok": False, "error": "卡片不在 records 中，不能安全登记新卡"}
 
     source_link = rec.get("source_link", "")
     source_url  = rec.get("source_url", "")
@@ -800,7 +1220,9 @@ def _card_update_anki(local_id: str, pairs: list) -> dict:
     deck = orig.get("deck", "Obsidian::未分类")
     MODELS = {"basic": "Obsidian-basic", "reverse": "Obsidian-basic-reversed",
               "cloze": "Obsidian-cloze"}
-    id_prefix = datetime.now().strftime("%Y%m%d%H%M%S")
+    id_prefix = "qa-" + hashlib.sha256(
+        (draft_id + "\0anki").encode("utf-8")
+    ).hexdigest()[:12]
     created = []
     try:
         _anki_request("createDeck", {"deck": deck})
@@ -819,7 +1241,19 @@ def _card_update_anki(local_id: str, pairs: list) -> dict:
             note = {"deckName": deck, "modelName": MODELS.get(ctype, "Obsidian-basic"),
                     "fields": fields, "options": {"allowDuplicate": True},
                     "tags": ["obsidian", "ai_generated", "qa_improved"]}
-            nid = _anki_request("addNote", {"note": note}, timeout=30)
+            # Crash-safe retry: the deterministic local id is embedded in the
+            # footer, so a replay can recover a note created before bookkeeping
+            # completed instead of creating another copy.
+            existing = _anki_request(
+                "findNotes",
+                {"query": f'"Local ID：{new_lid}"'},
+                timeout=20,
+            ) or []
+            nid = existing[0] if existing else _anki_request(
+                "addNote", {"note": note}, timeout=30
+            )
+            if not nid:
+                raise RuntimeError(f"addNote 未返回 note id（{new_lid}）")
             # AnkiConnect × Anki 25:addNote 的 deckName 不生效(notetype 缓存被 requireReset 清掉)
             # → 卡落「系统默认」。显式归位。
             if nid:
@@ -829,32 +1263,30 @@ def _card_update_anki(local_id: str, pairs: list) -> dict:
                         _anki_request("changeDeck", {"cards": _cids, "deck": deck}, timeout=20)
                 except Exception:
                     pass
-            rec.setdefault("cards", []).append({
-                "local_id": new_lid, "type": ctype, "deck": deck,
-                "front": card.get("front", ""), "back": card.get("back", ""),
-                "text": card.get("text", ""), "reason": card.get("reason", "QA 改进"),
-                "tags": ["qa_improved"], "anki_note_id": nid, "status": "synced",
-                "_qa_from": local_id, "_qa_created": datetime.now().isoformat(),
-            })
+            if not any(
+                str(row.get("local_id") or "") == new_lid
+                for row in (rec.get("cards") or [])
+                if isinstance(row, dict)
+            ):
+                rec.setdefault("cards", []).append({
+                    "local_id": new_lid, "type": ctype, "deck": deck,
+                    "front": card.get("front", ""), "back": card.get("back", ""),
+                    "text": card.get("text", ""), "reason": card.get("reason", "QA 改进"),
+                    "tags": ["qa_improved"], "anki_note_id": nid, "status": "synced",
+                    "_qa_from": local_id, "_qa_created": datetime.now().isoformat(),
+                })
             created.append({"local_id": new_lid, "type": ctype,
                             "front": card.get("front", ""), "back": card.get("back", ""),
                             "text": card.get("text", ""), "anki_note_id": nid})
     except Exception as ex:
         return {"ok": False, "error": f"创建卡片失败：{ex}"}
 
-    deleted = False
-    if bool(_qa_setting("card_qa.delete_original", False)) and note_id:
-        try:
-            _anki_request("deleteNotes", {"notes": [note_id]})
-            orig["status"] = "deleted_by_qa"
-            orig["_qa_deleted"] = datetime.now().isoformat()
-            deleted = True
-        except Exception:
-            pass
-
     _override_section_hashes(rec)
     try:
-        rec_file.write_text(json.dumps(rec, ensure_ascii=False, indent=2), encoding="utf-8")
+        runtime.atomic_replace_text(
+            rec_file,
+            json.dumps(rec, ensure_ascii=False, indent=2),
+        )
     except Exception as ex:
         return {"ok": False, "error": f"写 records 失败：{ex}"}
     # 改完触发一次 AnkiWeb 同步，让新卡/删除即时推到其它设备（失败不阻断）
@@ -864,61 +1296,23 @@ def _card_update_anki(local_id: str, pairs: list) -> dict:
         synced = True
     except Exception:
         pass
-    summary = (f"生成 {len(created)} 张新卡，" + ("已删除原卡" if deleted else "保留原卡")
-               + ("，已同步 AnkiWeb" if synced else "，AnkiWeb 同步失败（稍后凌晨会同步）"))
+    deleted = False
+    summary = (
+        f"生成 {len(created)} 张新卡，保留原卡"
+        + ("，已同步 AnkiWeb" if synced else "，AnkiWeb 同步失败（稍后凌晨会同步）")
+    )
     return {"ok": True, "summary": summary, "created": created,
             "deleted": deleted, "synced": synced}
 
 
-def _card_update_note(local_id: str, pairs: list, verbosity: str = "verbose") -> dict:
-    """让 AI 据有效问答丰富/修改源笔记 → 写回 → 哈希覆盖（summarize/connect/anki + records）。
-    verbosity: "verbose"（默认，全保留 ④）/ "concise"（允许提炼合并，核心信息不丢）。"""
-    ctx = _find_card_context(local_id)
-    if not ctx:
-        return {"ok": False, "error": "卡片不在 records 中"}
-    source_note = ctx.get("source_note", "")
-    if not (source_note and VAULT):
-        return {"ok": False, "error": "无源笔记路径"}
-    note_path = (VAULT / source_note if not Path(source_note).is_absolute()
-                 else Path(source_note))
-    if not note_path.exists():
-        return {"ok": False, "error": f"笔记不存在：{source_note}"}
-    try:
-        original = note_path.read_text(encoding="utf-8")
-    except Exception as ex:
-        return {"ok": False, "error": str(ex)}
-    is_cloze = ctx.get("type") == "cloze"
-    if is_cloze:
-        card_desc = f"挖空文本：{ctx.get('text','')}\n补充：{ctx.get('back','')}"
-    else:
-        card_desc = f"正面（问）：{ctx.get('front','')}\n背面（答）：{ctx.get('back','')}"
-    head_prompt = _NOTE_PROMPT_CONCISE if verbosity == "concise" else _NOTE_PROMPT_VERBOSE
-    pairs_label = "应完整保留" if verbosity != "concise" else "可适度提炼合并，核心信息不丢"
-    prompt = (
-        head_prompt
-        + f"=== ① 当前笔记 ===\n{original}\n\n"
-        + f"=== ② 正在复习的 Anki 卡片（仅用于定位，不作内容来源）===\n{card_desc}\n\n"
-        + f"=== ③ 我问的问题 + ④ 我勾选的有用回答（**{pairs_label}**）===\n{_pairs_text(pairs)}"
-    )
-    try:
-        new_content = ai_client.ask(prompt).strip()
-    except Exception as ex:
-        return {"ok": False, "error": f"AI 生成失败：{ex}"}
-    if new_content.startswith("```"):
-        new_content = re.sub(r'^```[a-zA-Z]*\n', '', new_content)
-        new_content = re.sub(r'\n```\s*$', '', new_content)
-    # AI 有时无视指令在正文前加一段说明（"…以下为修改后的完整笔记："）。
-    # 若原文以 frontmatter 开头，截掉第一个 '---' 之前的任何前言，保证笔记结构正确。
-    if original.lstrip().startswith("---"):
-        idx = new_content.find("---")
-        if idx > 0:
-            new_content = new_content[idx:]
-    if not new_content or len(new_content) < len(original) * 0.5:
-        return {"ok": False, "error": "AI 返回内容异常（过短），已放弃写入"}
-    try:
-        note_path.write_text(new_content, encoding="utf-8")
-    except Exception as ex:
-        return {"ok": False, "error": f"写笔记失败：{ex}"}
+def _after_legacy_note_commit(
+    identity: dict,
+    note_path: Path,
+    _original: str,
+    _content: str,
+    _note: dict,
+) -> None:
+    """Refresh legacy bookkeeping after the shared coordinator wrote the note."""
     # 哈希覆盖：让「登记新笔记」忽略此次更新。
     # 只标记 note_state 真实跟踪的 skill（pending_notes 闸门是 summarize；
     # register 还跟踪 connect/anki）。不存在 img/pdf skill，别写脏条目。
@@ -932,26 +1326,72 @@ def _card_update_note(local_id: str, pairs: list, verbosity: str = "verbose") ->
     except Exception:
         pass
     # records section_hashes 也覆盖
+    local_id = str(identity.get("local_id") or "")
     rec_file, rec, _ = _find_record_for_card(local_id)
     if rec_file and rec is not None:
         _override_section_hashes(rec)
         try:
-            rec_file.write_text(json.dumps(rec, ensure_ascii=False, indent=2),
-                                encoding="utf-8")
+            runtime, _reader_assistant = _card_improvement_runtime_modules()
+            runtime.atomic_replace_text(
+                rec_file,
+                json.dumps(rec, ensure_ascii=False, indent=2),
+            )
         except Exception:
             pass
-    # 显示新增字数 + 相对于 ④ 选中内容的保留率（仅详细模式给警告，精炼模式预期会短）
-    pairs_text_len = len(_pairs_text(pairs))
-    delta_chars = len(new_content) - len(original)
-    retention = (delta_chars / pairs_text_len) if pairs_text_len > 0 else 0
-    retention_pct = max(0, min(int(retention * 100), 999))
-    warn = ""
-    if verbosity == "verbose" and pairs_text_len > 200 and retention < 0.5:
-        warn = "（⚠️ 详细模式但保留率偏低，AI 可能压缩过多，建议检查或重跑）"
-    mode_label = "精炼" if verbosity == "concise" else "详细"
-    summary = (f"笔记已更新（{note_path.name}）【{mode_label}】，新增约 {delta_chars} 字 / "
-               f"选中内容 {pairs_text_len} 字 → 保留率 ~{retention_pct}% {warn}".strip())
-    return {"ok": True, "summary": summary}
+
+
+def _commit_legacy_card_draft(
+    *,
+    draft_id: str,
+    target: str,
+    owner: str,
+) -> dict:
+    """Commit one target from a signed immutable draft; never accepts draft text."""
+    runtime, _reader_assistant = _card_improvement_runtime_modules()
+    try:
+        result = runtime.commit_card_improvement_draft(
+            draft_id=draft_id,
+            target=target,
+            owner=owner,
+            commit_anki=lambda frozen_id, identity, cards: (
+                _commit_legacy_anki_draft(
+                    draft_id=frozen_id,
+                    identity=identity,
+                    new_cards=cards,
+                )
+            ),
+            resolve_note_path=lambda identity: _safe_vault_note_path(
+                str(identity.get("source_note") or "")
+            ),
+            after_note_commit=_after_legacy_note_commit,
+        )
+    except runtime.CardImprovementCommitConflict as error:
+        return {"ok": False, "conflict": True, "error": str(error)}
+    except Exception as error:
+        return {"ok": False, "error": str(error)}
+
+    # Keep the retained page's compact, reader-friendly success wording while
+    # all validation, locking, idempotency and primary writes stay centralized.
+    if result.get("ok") and target == "note" and not result.get("dedup"):
+        metadata = (
+            result.get("result")
+            if isinstance(result.get("result"), dict)
+            else {}
+        )
+        path = Path(str(metadata.get("path") or "笔记.md"))
+        verbosity = (
+            "concise"
+            if metadata.get("verbosity") == "concise"
+            else "verbose"
+        )
+        mode_label = "精炼" if verbosity == "concise" else "详细"
+        before_chars = int(metadata.get("before_chars") or 0)
+        after_chars = int(metadata.get("after_chars") or 0)
+        result["summary"] = (
+            f"笔记已更新（{path.name}）【{mode_label}】，"
+            f"净变化 {after_chars - before_chars:+d} 字"
+        )
+    return result
 
 
 def _sanitize_note_name(name: str) -> str:
@@ -1471,20 +1911,38 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f2f5;height:100dv
 .newcard-del:hover{background:#f9d0d0}
 .newcard-del:disabled{opacity:.5}
 .newcard-body{padding:0 10px 9px;font-size:13px;line-height:1.6;border-top:1px solid #f0f0f0}
+.draft-note-preview{max-height:240px;overflow:auto;white-space:pre-wrap;word-break:break-word;background:#fff;border:1px solid #e2e8f0;border-radius:6px;padding:9px;margin:7px 0;font:12px/1.55 ui-monospace,SFMono-Regular,Consolas,monospace}
+.draft-actions{display:flex;flex-wrap:wrap;gap:7px;margin-top:9px;padding-top:8px;border-top:1px solid #ead9a8}
+.draft-actions button{border:1px solid #107c41;border-radius:6px;padding:5px 11px;background:#eefbf3;color:#0b5a2f;cursor:pointer;font-size:12px}
+.draft-actions button:disabled{opacity:.55;cursor:default}
+#draft-commit-status{margin-top:7px}
 #sett-overlay{display:none;position:fixed;inset:0;background:rgba(0,0,0,.3);z-index:200}
 #sett-overlay.open{display:block}
-#sett-modal{display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,.18);z-index:201;min-width:300px;max-width:380px;width:90%}
+#sett-modal{display:none;position:fixed;top:50%;left:50%;transform:translate(-50%,-50%);background:#fff;border-radius:12px;box-shadow:0 8px 32px rgba(0,0,0,.18);z-index:201;min-width:300px;max-width:440px;width:92%;max-height:90vh;overflow:hidden}
 #sett-modal.open{display:block}
 #sett-head{padding:14px 16px 10px;display:flex;align-items:center;justify-content:space-between;border-bottom:1px solid #eee}
 #sett-head span{font-weight:600;font-size:14px}
 #sett-close{background:none;border:none;font-size:16px;cursor:pointer;color:#bbb;padding:2px 4px;line-height:1}
 #sett-close:hover{color:#555}
-#sett-body{padding:14px 16px;display:flex;flex-direction:column;gap:7px}
+#sett-body{padding:14px 16px;display:flex;flex-direction:column;gap:7px;max-height:68vh;overflow:auto}
 #sett-body label{font-size:12px;color:#666;font-weight:500;margin-top:4px}
 #sett-body label:first-child{margin-top:0}
 #sett-body select,#sett-body input[type=text]{border:1px solid #ddd;border-radius:7px;padding:7px 10px;font-size:13px;font-family:inherit;outline:none;transition:border-color .15s;width:100%}
 #sett-body select:focus,#sett-body input:focus{border-color:#0078d4}
 #sett-hint{font-size:11px;color:#aaa;margin-top:-2px}
+.sett-section{display:flex;flex-direction:column;gap:7px;padding:10px 0 2px;border-top:1px solid #e8edf4}
+.sett-section:first-child{padding-top:0;border-top:0}
+.sett-section-title{font-size:13px;font-weight:700;color:#26364c}
+.sett-section-note{font-size:11px;color:#77849a;line-height:1.45;margin:0}
+.sett-normal-row{display:grid;grid-template-columns:1.45fr 1fr;gap:6px}
+.sett-card-row{display:grid;grid-template-columns:1fr 1.35fr 1fr;gap:6px}
+.sett-card-fast{display:flex;align-items:center;gap:7px;font-size:12px;color:#44546a!important;cursor:pointer}
+.sett-card-fast input{width:auto}
+.sett-card-fast.is-disabled{opacity:.55;cursor:not-allowed}
+#s-codex-state{min-height:16px;font-size:11px;color:#68778b}
+#s-codex-state.error{color:#b42318}
+#s-card-state{min-height:16px;font-size:11px;color:#68778b}
+#s-card-state.error{color:#b42318}
 #sett-foot{padding:10px 16px 14px;display:flex;justify-content:flex-end;gap:8px;border-top:1px solid #eee}
 #sett-foot button{border:none;border-radius:7px;padding:7px 16px;font-size:13px;font-weight:500;cursor:pointer;transition:opacity .15s}
 #sett-save{background:#0078d4;color:#fff}
@@ -1555,46 +2013,60 @@ body{font-family:'Segoe UI',system-ui,sans-serif;background:#f0f2f5;height:100dv
     <button id="sett-close" onclick="closeSettings()">✕</button>
   </div>
   <div id="sett-body">
-    <label for="s-backend">AI 后端</label>
-    <select id="s-backend" onchange="updateSettFields()">
-      <option value="claude_cli">Claude CLI</option>
-      <option value="codex_cli">Codex CLI（OpenAI）</option>
-    </select>
-    <div id="s-claude-fields">
-      <label for="s-claude-model">Claude 模型（留空＝默认）</label>
-      <input type="text" id="s-claude-model" list="s-claude-models" placeholder="opus / sonnet / claude-opus-4-7">
-      <datalist id="s-claude-models">
-        <option value="opus"></option>
-        <option value="sonnet"></option>
-        <option value="haiku"></option>
-      </datalist>
-      <label for="s-claude-effort">思考深度 effort（留空＝默认）</label>
-      <select id="s-claude-effort">
-        <option value="">默认</option>
-        <option value="low">low</option>
-        <option value="medium">medium</option>
-        <option value="high">high</option>
-        <option value="xhigh">xhigh</option>
-        <option value="max">max</option>
+    <div class="sett-section">
+      <div class="sett-section-title">普通截图问答（旧设置）</div>
+      <label for="s-backend">AI 后端</label>
+      <select id="s-backend" onchange="updateSettFields()">
+        <option value="claude_cli">Claude CLI</option>
+        <option value="codex_cli">Codex CLI（OpenAI）</option>
       </select>
+      <div id="s-claude-fields">
+        <label for="s-claude-model">Claude 模型（留空＝默认）</label>
+        <input type="text" id="s-claude-model" list="s-claude-models" placeholder="opus / sonnet / claude-opus-4-7">
+        <datalist id="s-claude-models">
+          <option value="opus"></option>
+          <option value="sonnet"></option>
+          <option value="haiku"></option>
+        </datalist>
+        <label for="s-claude-effort">思考深度 effort（留空＝默认）</label>
+        <select id="s-claude-effort">
+          <option value="">默认</option>
+          <option value="low">low</option>
+          <option value="medium">medium</option>
+          <option value="high">high</option>
+          <option value="xhigh">xhigh</option>
+          <option value="max">max</option>
+        </select>
+      </div>
+      <div id="s-codex-fields">
+        <label>Codex 型号与思考深度（实时目录）</label>
+        <div class="sett-normal-row">
+          <select id="s-codex-model" aria-label="普通截图 Codex 型号"></select>
+          <select id="s-codex-effort" aria-label="普通截图 Codex 思考深度"></select>
+        </div>
+        <label class="sett-card-fast is-disabled" id="s-codex-fast-wrap">
+          <input type="checkbox" id="s-codex-fast" disabled>
+          <span>⚡ Fast（只影响普通截图问答）</span>
+        </label>
+        <div id="s-codex-state">正在读取 Codex 实时目录…</div>
+      </div>
+      <p class="sett-section-note">只影响这个旧页面的普通截图问答。</p>
     </div>
-    <div id="s-codex-fields">
-      <label for="s-codex-model">Codex 模型（留空＝默认）</label>
-      <input type="text" id="s-codex-model" list="s-codex-models" placeholder="留空使用默认模型">
-      <datalist id="s-codex-models">
-        <option value="gpt-5.5"></option>
-        <option value="gpt-5.4"></option>
-        <option value="gpt-5.4-mini"></option>
-        <option value="gpt-5.3-codex"></option>
-      </datalist>
+    <div class="sett-section" id="s-card-section">
+      <div class="sett-section-title">复习卡改进（与阅读器共用）</div>
+      <div class="sett-card-row">
+        <select id="s-card-backend" aria-label="卡片改进后端"></select>
+        <select id="s-card-model" aria-label="卡片改进模型"></select>
+        <select id="s-card-depth" aria-label="卡片改进思考深度"></select>
+      </div>
+      <label class="sett-card-fast is-disabled" id="s-card-fast-wrap">
+        <input type="checkbox" id="s-card-fast" disabled>
+        <span>⚡ Fast（仅当前模型确实支持 priority 时可用）</span>
+      </label>
+      <div id="s-card-state">正在读取共享 card_improve 设置…</div>
+      <p class="sett-section-note">这里直接读写助手的 card_improve action-pref；旧独立页和阅读器复习模式实际使用同一份设置。</p>
     </div>
-    <p id="sett-hint">设置即时生效（保存后下条消息起用新模型/思考深度）</p>
-    <hr style="border:none;border-top:1px solid #eee;margin:6px 0">
-    <label style="display:flex;align-items:center;gap:8px;font-weight:500;cursor:pointer;margin-top:0">
-      <input type="checkbox" id="s-delete-original" style="width:auto;margin:0">
-      「根据此修改 Anki」时删除原卡片
-    </label>
-    <p id="sett-hint">不勾＝保留原卡（默认，不丢 FSRS 复习历史）；勾选＝生成新卡后删除原卡</p>
+    <p class="sett-section-note">卡片改进始终保留原卡，避免丢失 FSRS 复习历史。</p>
   </div>
   <div id="sett-foot">
     <button id="sett-cancel" onclick="closeSettings()">取消</button>
@@ -1628,7 +2100,7 @@ if (window.marked && marked.use) {
 }
 
 function escapeHtml(s) {
-  return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  return String(s == null ? '' : s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
 }
 
 function renderMd(text) {
@@ -1688,6 +2160,23 @@ let currentShotSrc  = '';     // 当前会话截图 base64
 let pastedImgB64    = null;   // 粘贴的图片 base64（不含 data URL 前缀）
 let searchMode      = false;  // 关联知识搜索模式
 let currentAbort    = null;   // SSE 流式 AbortController；sending 时点 send 按钮中止
+const cardDraftOwnerToken = (() => {
+  const key = 'bw-card-improvement-owner-v1';
+  try {
+    let token = localStorage.getItem(key) || '';
+    if (!/^[a-f0-9]{64}$/.test(token)) {
+      const bytes = new Uint8Array(32);
+      crypto.getRandomValues(bytes);
+      token = Array.from(bytes, b => b.toString(16).padStart(2, '0')).join('');
+      localStorage.setItem(key, token);
+    }
+    return token;
+  } catch (_) {
+    // Runtime still binds the signed draft to the remote fingerprint if
+    // persistent browser storage is unavailable.
+    return '';
+  }
+})();
 
 function pollScreenshot() {
   fetch('api/screenshot').then(r => r.json()).then(d => {
@@ -1790,8 +2279,53 @@ function refreshUpdateButtons() {
 
 const UPD_LABELS = {note: '更新到笔记', anki: '根据此修改 Anki', all: '全部更新'};
 let _newCards = [];   // 暂存本次生成的新卡，供预览渲染
+let _activeDraft = null;
+
+function renderDraftPreview(res) {
+  _activeDraft = res;
+  _newCards = ((res.drafts || {}).cards || []).slice();
+  let html = '<div><b>草稿预览（尚未写入）</b></div>';
+  const runner = res.runner || {};
+  const runnerLabel = runner.native_multiturn_used
+    ? ('Codex app-server 连续 ' + (runner.native_turns || 0) + ' 轮')
+    : (runner.mode === 'codex_app_thread'
+        ? 'Codex app-server 单轮'
+        : ('独立调用兜底' + (runner.fallback_reason ? '：' + escapeHtml(runner.fallback_reason) : '')));
+  html += '<div style="font-size:11px;color:#777;margin-top:2px">生成方式：' + escapeHtml(runnerLabel) + '</div>';
+  if (_newCards.length) {
+    html += '<div style="margin-top:7px;color:#555">Anki 新卡草稿（原卡会保留）：</div>';
+    _newCards.forEach((c, i) => {
+      const body = c.type === 'cloze'
+        ? '<b>挖空</b><br>' + escapeHtml(c.text || c.cloze || '')
+          + (c.back ? '<hr><b>补充</b><br>' + escapeHtml(c.back) : '')
+        : '<b>问</b><br>' + escapeHtml(c.front || '')
+          + '<hr><b>答</b><br>' + escapeHtml(c.back || '');
+      html += '<div class="newcard"><div class="newcard-head">'
+        + '<span class="newcard-toggle" onclick="toggleNewcard(this)">▸ 新卡 '
+        + (i + 1) + '（' + escapeHtml(c.type || 'basic') + '）</span>'
+        + '</div><div class="newcard-body" data-preview="1" style="display:none">'
+        + body + '</div></div>';
+    });
+  }
+  const note = (res.drafts || {}).note;
+  if (note && typeof note.content === 'string') {
+    html += '<div style="margin-top:8px;color:#555">原笔记完整替换草稿：</div>'
+      + '<pre class="draft-note-preview">' + escapeHtml(note.content) + '</pre>';
+  }
+  html += '<div class="draft-actions">';
+  if (_newCards.length) {
+    html += '<button id="draft-commit-anki" onclick="commitCardDraft(\'anki\',this)">确认写入 Anki 新卡</button>';
+  }
+  if (note && typeof note.content === 'string') {
+    html += '<button id="draft-commit-note" onclick="commitCardDraft(\'note\',this)">确认更新原笔记</button>';
+  }
+  html += '</div><div id="draft-commit-status">确认前不会修改 Anki 或笔记。</div>';
+  showCardResult(html);
+}
+
 function renderUpdResult(res) {
   if (!res || res.ok === false) { showCardResult('✗ ' + ((res && res.error) || '失败')); return; }
+  if (res.draft_id && res.drafts) { renderDraftPreview(res); return; }
   let html = '';
   _newCards = [];
   if (res.anki) {
@@ -1824,7 +2358,7 @@ function toggleNewcard(span) {
   const card = span.closest('.newcard');
   const body = card.querySelector('.newcard-body');
   const opening = body.style.display === 'none';
-  if (opening && !body.dataset.filled) {
+  if (opening && !body.dataset.filled && !body.dataset.preview) {
     const c = _newCards[+card.dataset.idx] || {};
     let h;
     if (c.type === 'cloze') {
@@ -1836,6 +2370,69 @@ function toggleNewcard(span) {
   }
   body.style.display = opening ? 'block' : 'none';
   span.textContent = (opening ? '▾' : '▸') + span.textContent.slice(1);
+}
+
+function renderCardCommitResult(res, target, btn) {
+  const statusEl = document.getElementById('draft-commit-status');
+  if (!res || res.ok === false) {
+    if (btn) { btn.disabled = false; btn.textContent = target === 'anki' ? '确认写入 Anki 新卡' : '确认更新原笔记'; }
+    if (statusEl) {
+      statusEl.innerHTML = '<span style="color:#b91c1c">✗ '
+        + escapeHtml((res && res.error) || '提交失败') + '</span>';
+    }
+    return;
+  }
+  if (btn) {
+    btn.disabled = true;
+    btn.textContent = target === 'anki' ? '✓ 已写入 Anki' : '✓ 已更新笔记';
+  }
+  if (statusEl) {
+    statusEl.innerHTML = '<span style="color:#0b5a2f">✓ '
+      + escapeHtml(res.summary || '提交完成') + '</span>';
+  }
+}
+
+function pollCardCommitJob(jobId, target, btn, tries) {
+  tries = tries || 0;
+  fetch('api/card-update-status?job=' + encodeURIComponent(jobId))
+    .then(r => r.ok ? r.json() : Promise.reject())
+    .then(j => {
+      if (j.status === 'running') {
+        setTimeout(() => pollCardCommitJob(jobId, target, btn, 0), 2000);
+        return;
+      }
+      renderCardCommitResult(j.result, target, btn);
+    })
+    .catch(() => {
+      if (tries < 40) {
+        setTimeout(() => pollCardCommitJob(jobId, target, btn, tries + 1), 3000);
+      } else {
+        renderCardCommitResult({ok:false,error:'暂时取不到提交结果；可稍后重试同一草稿，服务端会幂等去重。'}, target, btn);
+      }
+    });
+}
+
+function commitCardDraft(target, btn) {
+  if (!_activeDraft || !_activeDraft.draft_id) {
+    renderCardCommitResult({ok:false,error:'草稿已失效，请重新生成。'}, target, btn);
+    return;
+  }
+  const promptText = target === 'anki'
+    ? '确认把预览中的新卡写入 Anki？原卡会保留。'
+    : '确认用预览中的完整草稿更新原笔记？';
+  if (!window.confirm(promptText)) return;
+  btn.disabled = true; btn.textContent = '提交中…';
+  fetch('api/card-update-commit', {
+    method: 'POST', headers: {'Content-Type': 'application/json'},
+    body: JSON.stringify({
+      draft_id: _activeDraft.draft_id,
+      target: target,
+      owner_token: cardDraftOwnerToken,
+    }),
+  }).then(r => r.json()).then(j => {
+    if (j.job_id) pollCardCommitJob(j.job_id, target, btn, 0);
+    else renderCardCommitResult(j, target, btn);
+  }).catch(e => renderCardCommitResult({ok:false,error:e.message}, target, btn));
 }
 function deleteNewcard(btn) {
   const card = btn.closest('.newcard');
@@ -1874,19 +2471,24 @@ function pollCardJob(jobId, allBtns, tries) {
       else { allBtns.forEach(b => b.disabled = false); showCardResult('⚠️ 暂时取不到结果，但任务已在后台执行，请稍后刷新页面 / 查看 Anki'); }
     });
 }
-let noteVerbosity = 'verbose';   // 笔记改写模式：'verbose'（详细，默认）/ 'concise'（精炼）
+// 复习侧栏和旧页面共用同一工作区；入口只传模式/实体元数据，不复制 prompt。
+// 非法或缺省值仍回落为详细模式。
+let noteVerbosity = new URLSearchParams(location.search).get('verbosity') === 'concise'
+  ? 'concise' : 'verbose';
 function runCardUpdate(target, btn) {
   const pairs = collectUsefulPairs();
   if (!pairs.length) { showCardResult('请先在 AI 回复下方勾选「有用」的回答。'); return; }
   const allBtns = document.querySelectorAll('#card-actions .upd-group button');
   allBtns.forEach(b => b.disabled = true);
   const verbLabel = (target === 'anki') ? '' : (noteVerbosity === 'verbose' ? '【详细】' : '【精炼】');
-  showCardResult('正在后台执行「' + UPD_LABELS[target] + verbLabel + '」，纳入 ' + pairs.length + ' 条有用回答…（可耐心等待，锁屏也不影响）');
+  showCardResult('正在后台生成「' + UPD_LABELS[target] + verbLabel + '」草稿，纳入 ' + pairs.length + ' 条有用回答…（确认前不会写入）');
   fetch('api/card-update', {
     method: 'POST', headers: {'Content-Type': 'application/json'},
     body: JSON.stringify({
       local_id: cardCtx.local_id, target: target, pairs: pairs,
+      index: cardCtx.entity_index,
       verbosity: noteVerbosity,
+      owner_token: cardDraftOwnerToken,
     }),
   }).then(r => r.json()).then(j => {
     if (j.job_id) { pollCardJob(j.job_id, allBtns, 0); }
@@ -1897,10 +2499,15 @@ function runCardUpdate(target, btn) {
   });
 }
 
-function loadCardContext(cid) {
-  fetch('api/card-context?card=' + encodeURIComponent(cid))
+function loadCardContext(cid, index) {
+  const iq = (index === null || index === undefined || index === '') ? '' : '&index=' + encodeURIComponent(index);
+  fetch('api/card-context?card=' + encodeURIComponent(cid) + iq)
     .then(r => r.ok ? r.json() : Promise.reject())
     .then(c => {
+      // source 仅作为入口上下文保留；真正写入时仍由服务端按 entity_id/index
+      // 回查可信来源，不接受客户端 source 参数覆盖。
+      const entrySource = new URLSearchParams(location.search).get('source') || '';
+      if (entrySource && !c.source_ref) c.entry_source_ref = entrySource;
       cardCtx = c;
       const face = document.getElementById('card-face');
       const parts = [];
@@ -1959,8 +2566,10 @@ function loadCardContext(cid) {
     })
     .catch(() => pollScreenshot());
 }
-const _cardId = new URLSearchParams(location.search).get('card');
-if (_cardId) loadCardContext(_cardId); else { pollScreenshot(); setupCreateNoteButton(); }
+const _cardParams = new URLSearchParams(location.search);
+const _cardId = _cardParams.get('card');
+const _cardIndex = _cardParams.get('index');
+if (_cardId) loadCardContext(_cardId, _cardIndex); else { pollScreenshot(); setupCreateNoteButton(); }
 
 // 非 cardCtx 模式：在 header #card-actions 加「📝 创建新笔记」按钮，用户勾选内容后显示
 function setupCreateNoteButton() {
@@ -2696,20 +3305,252 @@ function updateSettFields() {
   const b = document.getElementById('s-backend').value;
   document.getElementById('s-claude-fields').style.display = (b === 'claude_cli') ? '' : 'none';
   document.getElementById('s-codex-fields').style.display  = (b === 'codex_cli')  ? '' : 'none';
+  if (normalCodexCatalog) syncNormalCodexFast();
+}
+
+let normalCodexCatalog = null;
+let cardImprovementCatalog = null;
+
+function replaceSelectOptions(el, values, selected, disabledValues, labels) {
+  el.innerHTML = '';
+  const disabled = disabledValues || [];
+  (values || []).forEach(value => {
+    const op = document.createElement('option');
+    op.value = value;
+    op.textContent = (labels && labels[value]) || value;
+    op.disabled = disabled.includes(value);
+    if (labels && labels[value]) op.title = labels[value];
+    if (value === selected) op.selected = true;
+    el.appendChild(op);
+  });
+}
+
+function normalCodexFastSupported() {
+  if (!normalCodexCatalog ||
+      document.getElementById('s-backend').value !== 'codex_cli') return false;
+  const model = document.getElementById('s-codex-model').value;
+  const caps = normalCodexCatalog.capabilities || {};
+  return !!(caps[model] && caps[model].selectable === true &&
+            (caps[model].priority === true || caps[model].fast === true));
+}
+
+function syncNormalCodexFast(resetUnsupported) {
+  const fast = document.getElementById('s-codex-fast');
+  const wrap = document.getElementById('s-codex-fast-wrap');
+  const supported = normalCodexFastSupported();
+  if (!supported && resetUnsupported !== false) fast.checked = false;
+  fast.disabled = !supported;
+  wrap.classList.toggle('is-disabled', !supported);
+  fast.title = supported
+    ? '只为普通截图问答启用 Codex priority 服务层'
+    : '只有实时目录明确支持 priority 的当前 Codex 型号可启用';
+}
+
+function rebindNormalCodexDepth(keepCurrent, depth) {
+  const model = document.getElementById('s-codex-model').value;
+  const caps = (normalCodexCatalog && normalCodexCatalog.capabilities) || {};
+  const depths = (caps[model] && caps[model].selectable === true)
+    ? (caps[model].depths || [])
+    : [];
+  const depthEl = document.getElementById('s-codex-effort');
+  replaceSelectOptions(
+    depthEl,
+    depths.length ? depths : [''],
+    keepCurrent && depths.includes(depth) ? depth : (depths[0] || '')
+  );
+  depthEl.disabled = depths.length === 0;
+  syncNormalCodexFast();
+}
+
+function renderNormalCodexSettings(data) {
+  const stateEl = document.getElementById('s-codex-state');
+  const current = (data && data.codex) || {};
+  normalCodexCatalog = (data && data.codex_catalog) || {
+    variants: ['gpt-5.3-codex-spark'],
+    capabilities: {
+      'gpt-5.3-codex-spark': {
+        available: false,
+        catalog_advertised: false,
+        selectable: false,
+        reason: 'Codex 实时目录不可用',
+      },
+    },
+    verified: false,
+    error: 'Codex 实时目录不可用',
+  };
+  const variants = normalCodexCatalog.variants || [];
+  const caps = normalCodexCatalog.capabilities || {};
+  const modelEl = document.getElementById('s-codex-model');
+  modelEl.innerHTML = '';
+  const defaultOption = document.createElement('option');
+  defaultOption.value = '';
+  defaultOption.textContent = '请选择可用型号';
+  defaultOption.disabled = true;
+  modelEl.appendChild(defaultOption);
+  variants.forEach(model => {
+    const cap = caps[model] || {};
+    const op = document.createElement('option');
+    op.value = model;
+    op.disabled = cap.selectable !== true;
+    const reason = String(cap.reason || '');
+    op.textContent = model + (reason ? ' · ' + reason : '');
+    op.title = reason;
+    modelEl.appendChild(op);
+  });
+  const firstSelectable = variants.find(model =>
+    caps[model] && caps[model].selectable === true);
+  modelEl.value = variants.includes(current.model)
+    ? current.model
+    : (firstSelectable || '');
+  rebindNormalCodexDepth(true, current.effort || '');
+  document.getElementById('s-codex-fast').checked =
+    current.fast === true && normalCodexFastSupported();
+  syncNormalCodexFast(false);
+  stateEl.className = normalCodexCatalog.verified === true ? '' : 'error';
+  if (normalCodexCatalog.verified === true) {
+    const cap = caps[modelEl.value] || {};
+    stateEl.textContent = modelEl.value
+      ? (cap.reason ||
+        (cap.catalog_advertised === true || cap.available === true
+          ? '此型号能力来自 Codex 实时目录'
+          : '此型号使用兼容能力声明'))
+      : '没有可选择的 Codex 型号，普通截图 Codex 调用保持禁用';
+  } else {
+    stateEl.textContent = firstSelectable
+      ? 'Codex 实时目录暂不可用；兼容型号仍可普通调用，Fast 保持禁用'
+      : 'Codex 能力目录暂不可用，型号、深度与 Fast 保持安全禁用';
+  }
+}
+
+function cardFastSupported() {
+  if (!cardImprovementCatalog) return false;
+  const backend = document.getElementById('s-card-backend').value;
+  const model = document.getElementById('s-card-model').value;
+  if (backend !== 'codex') return false;
+  const caps = cardImprovementCatalog.codex_capabilities || {};
+  return !!(caps[model] && caps[model].selectable === true &&
+            (caps[model].fast === true || caps[model].priority === true));
+}
+
+function syncCardFast(resetUnsupported) {
+  const fast = document.getElementById('s-card-fast');
+  const wrap = document.getElementById('s-card-fast-wrap');
+  const supported = cardFastSupported();
+  if (!supported && resetUnsupported !== false) fast.checked = false;
+  fast.disabled = !supported;
+  wrap.classList.toggle('is-disabled', !supported);
+  fast.title = supported
+    ? '只为卡片改进启用 Codex priority 服务层'
+    : (document.getElementById('s-card-backend').value === 'codex'
+      ? '当前 Codex 型号不支持 priority/Fast'
+      : '只有支持 priority 的 Codex 型号可启用');
+}
+
+function cardDepthOptions(backend, model) {
+  if (!cardImprovementCatalog) return [];
+  if (backend === 'codex') {
+    const caps = cardImprovementCatalog.codex_capabilities || {};
+    return (caps[model] && caps[model].depths) || [];
+  }
+  return cardImprovementCatalog.depths[backend] || [];
+}
+
+function rebindCardDepth(keepCurrent, depth) {
+  if (!cardImprovementCatalog) return;
+  const backend = document.getElementById('s-card-backend').value;
+  const model = document.getElementById('s-card-model').value;
+  const depths = cardDepthOptions(backend, model);
+  replaceSelectOptions(
+    document.getElementById('s-card-depth'),
+    depths,
+    keepCurrent && depths.includes(depth) ? depth : depths[0]
+  );
+}
+
+function rebindCardModelDepth(keepCurrent, model, depth) {
+  if (!cardImprovementCatalog) return;
+  const backend = document.getElementById('s-card-backend').value;
+  const variants = cardImprovementCatalog.variants[backend] || [];
+  const caps = cardImprovementCatalog.codex_capabilities || {};
+  const unselectable = backend === 'codex'
+    ? variants.filter(value => !caps[value] || caps[value].selectable !== true)
+    : [];
+  const firstSelectable = variants.find(value => !unselectable.includes(value));
+  const labels = {};
+  if (backend === 'codex') {
+    variants.forEach(value => {
+      const reason = String((caps[value] && caps[value].reason) || '');
+      labels[value] = value + (reason ? ' · ' + reason : '');
+    });
+  }
+  replaceSelectOptions(
+    document.getElementById('s-card-model'),
+    variants,
+    keepCurrent && variants.includes(model)
+      ? model
+      : (firstSelectable || variants[0]),
+    unselectable,
+    labels
+  );
+  rebindCardDepth(keepCurrent, depth);
+  syncCardFast();
+}
+
+function renderCardImprovementSettings(data) {
+  const stateEl = document.getElementById('s-card-state');
+  if (!data || !data.ok || !data.catalog) {
+    cardImprovementCatalog = null;
+    stateEl.className = 'error';
+    stateEl.textContent = (data && data.error) ||
+      '共享 card_improve 设置加载失败';
+    return;
+  }
+  cardImprovementCatalog = data.catalog;
+  const current = data.effective || data.default || {};
+  replaceSelectOptions(
+    document.getElementById('s-card-backend'),
+    cardImprovementCatalog.backends || [],
+    current.backend
+  );
+  rebindCardModelDepth(true, current.variant, current.depth);
+  document.getElementById('s-card-fast').checked =
+    current.fast === true && cardFastSupported();
+  syncCardFast(false);
+  stateEl.className = '';
+  stateEl.textContent = '当前生效：' + current.backend + ' · ' +
+    current.variant + ' · ' + current.depth +
+    (current.fast === true ? ' · Fast' : '') +
+    (cardImprovementCatalog.codex_catalog_verified === false
+      ? '（Codex 实时目录暂不可用；可选性以型号能力说明为准，Fast 保持严格校验）'
+      : '');
 }
 
 async function openSettings() {
+  const cardState = document.getElementById('s-card-state');
+  cardState.className = '';
+  cardState.textContent = '正在读取共享 card_improve 设置…';
+  cardImprovementCatalog = null;
+  updateSettFields();
+  document.getElementById('sett-overlay').classList.add('open');
+  document.getElementById('sett-modal').classList.add('open');
   try {
     const s = await fetch('api/settings').then(r => r.json());
     document.getElementById('s-backend').value      = s.backend || 'claude_cli';
     document.getElementById('s-claude-model').value  = (s.claude && s.claude.model)  || '';
     document.getElementById('s-claude-effort').value = (s.claude && s.claude.effort) || '';
-    document.getElementById('s-codex-model').value   = (s.codex  && s.codex.model)   || '';
-    document.getElementById('s-delete-original').checked = !!s.delete_original;
-  } catch(_) {}
+    renderNormalCodexSettings(s);
+  } catch(_) {
+    renderNormalCodexSettings(null);
+  }
+  try {
+    const r = await fetch('api/card-improvement-settings');
+    renderCardImprovementSettings(await r.json());
+  } catch(_) {
+    renderCardImprovementSettings({
+      ok: false, error: '共享 card_improve 设置加载失败',
+    });
+  }
   updateSettFields();
-  document.getElementById('sett-overlay').classList.add('open');
-  document.getElementById('sett-modal').classList.add('open');
 }
 
 function closeSettings() {
@@ -2719,6 +3560,7 @@ function closeSettings() {
 }
 
 async function saveSettings() {
+  const cardSettingsReady = !!cardImprovementCatalog;
   const backend = document.getElementById('s-backend').value;
   const payload = {
     backend,
@@ -2728,24 +3570,80 @@ async function saveSettings() {
     },
     codex: {
       model: document.getElementById('s-codex-model').value.trim(),
+      effort: document.getElementById('s-codex-effort').value,
+      fast: document.getElementById('s-codex-fast').checked === true &&
+        normalCodexFastSupported(),
     },
-    delete_original: document.getElementById('s-delete-original').checked,
   };
+  const cardPayload = cardSettingsReady ? {
+    backend: document.getElementById('s-card-backend').value,
+    variant: document.getElementById('s-card-model').value,
+    depth: document.getElementById('s-card-depth').value,
+    fast: document.getElementById('s-card-fast').checked === true &&
+      cardFastSupported(),
+  } : null;
   try {
-    const r = await fetch('api/settings', {
-      method: 'POST',
-      headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify(payload),
-    });
-    const j = await r.json();
-    if (j.ok === false) { status.textContent = '保存失败：' + (j.error || ''); return; }
+    const [legacyResponse, cardResponse] = await Promise.all([
+      fetch('api/settings', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(payload),
+      }),
+      cardSettingsReady ? fetch('api/card-improvement-settings', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify(cardPayload),
+      }) : Promise.resolve(null),
+    ]);
+    const [j, card] = await Promise.all([
+      legacyResponse.json(),
+      cardResponse ? cardResponse.json() : Promise.resolve(null),
+    ]);
+    if (!legacyResponse.ok || j.ok === false) {
+      status.textContent = '普通截图问答设置保存失败：' + (j.error || '');
+      return;
+    }
     const cl = backend === 'claude_cli'
       ? `${payload.claude.model || '默认模型'}${payload.claude.effort ? ' / ' + payload.claude.effort : ''}`
-      : (payload.codex.model || '默认模型');
-    status.textContent = `AI 设置已保存：${backend} · ${cl}`;
-  } catch(_) { status.textContent = '保存失败'; }
+      : `${payload.codex.model || '默认模型'}` +
+        `${payload.codex.effort ? ' / ' + payload.codex.effort : ''}` +
+        `${payload.codex.fast === true ? ' / Fast' : ''}`;
+    if (!cardResponse) {
+      status.textContent = `普通截图问答设置已保存：${backend} · ${cl}；` +
+        '共享 card_improve 未加载，卡片改进设置保持不变';
+      closeSettings();
+      return;
+    }
+    if (!cardResponse.ok || !card.ok) {
+      status.textContent = '普通截图设置已保存，但卡片改进未保存：' +
+        (card.error || '共享 action-pref 写入失败');
+      document.getElementById('s-card-state').className = 'error';
+      document.getElementById('s-card-state').textContent =
+        card.error || '共享 action-pref 写入失败';
+      return;
+    }
+    card.catalog = card.catalog || cardImprovementCatalog;
+    renderCardImprovementSettings(card);
+    const effective = card.effective || card.saved || cardPayload;
+    status.textContent = `设置已保存：截图问答 ${backend} · ${cl}；卡片改进 ` +
+      `${effective.variant} · ${effective.depth}${effective.fast === true ? ' · Fast' : ''}`;
+  } catch(_) {
+    status.textContent = '保存失败：设置服务不可用';
+    return;
+  }
   closeSettings();
 }
+
+document.getElementById('s-card-backend').addEventListener('change', () => {
+  rebindCardModelDepth(false);
+});
+document.getElementById('s-card-model').addEventListener('change', () => {
+  rebindCardDepth(false);
+  syncCardFast();
+});
+document.getElementById('s-codex-model').addEventListener('change', () => {
+  rebindNormalCodexDepth(false);
+});
 
 // ─── 知识关联芯片（长按删除）───────────────────────────────────────────────────
 
@@ -2820,6 +3718,12 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.send_json(ai_client.load_settings())
 
+        elif self.path == "/api/card-improvement-settings":
+            try:
+                self.send_json(_load_card_improvement_settings_for_ui())
+            except (CardImprovementError, RuntimeError) as error:
+                self.send_json({"ok": False, "error": str(error)}, 503)
+
         elif self.path == "/api/qbtns":
             self.send_json({"btns": load_qbtns()})
 
@@ -2885,8 +3789,10 @@ class Handler(BaseHTTPRequestHandler):
 
         elif self.path.startswith("/api/card-context"):
             from urllib.parse import urlparse, parse_qs
-            cid = (parse_qs(urlparse(self.path).query).get("card") or [""])[0]
-            ctx = _find_card_context(cid)
+            query = parse_qs(urlparse(self.path).query)
+            cid = (query.get("card") or [""])[0]
+            index = (query.get("index") or [None])[0]
+            ctx = _find_card_context(cid, index)
             self.send_json(ctx or {"error": "not found"}, 200 if ctx else 404)
 
         elif self.path.startswith("/api/card-update-status"):
@@ -3040,12 +3946,22 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json({"ok": False, "error": "no image_b64"})
 
         elif self.path == "/api/card-update":
-            # target: note | anki | all。pairs: [{question, answer}, ...]（标记有用的问答）
-            # verbosity: "verbose"（默认）/ "concise"，影响笔记改写的详细程度
+            # Prepare only: target note | anki | all.  The returned signed
+            # draft must be previewed and explicitly committed separately.
             local_id  = (body.get("local_id") or "").strip()
             target    = (body.get("target") or "").strip()
             pairs     = body.get("pairs") or []
+            index     = body.get("index")
             verbosity = (body.get("verbosity") or "verbose").strip()
+            fingerprint = (
+                str((self.client_address or ("",))[0])
+                + "\0"
+                + str(self.headers.get("User-Agent") or "")
+            )
+            owner = _legacy_card_owner(
+                body.get("owner_token") or "",
+                fingerprint,
+            )
             if verbosity not in ("verbose", "concise"):
                 verbosity = "verbose"
             if not local_id or target not in ("note", "anki", "all"):
@@ -3057,17 +3973,65 @@ class Handler(BaseHTTPRequestHandler):
                 import uuid
                 job_id = uuid.uuid4().hex[:12]
                 _card_jobs[job_id] = {"status": "running"}
-                def _run(job_id=job_id, local_id=local_id, target=target, pairs=pairs, verbosity=verbosity):
-                    out = {"ok": True}
+                def _run(job_id=job_id, local_id=local_id, target=target, pairs=pairs,
+                         index=index, verbosity=verbosity, owner=owner):
                     try:
-                        if target in ("anki", "all"):
-                            out["anki"] = _card_update_anki(local_id, pairs)
-                        if target in ("note", "all"):
-                            out["note"] = _card_update_note(local_id, pairs, verbosity)
+                        out = _prepare_legacy_card_draft(
+                            local_id,
+                            pairs,
+                            target,
+                            index=index,
+                            verbosity=verbosity,
+                            owner=owner,
+                        )
                     except Exception as e:
                         out = {"ok": False, "error": str(e)}
                     _card_jobs[job_id] = {"status": "done", "result": out, "_t": time.time()}
                 threading.Thread(target=_run, daemon=True).start()
+                self.send_json({"ok": True, "job_id": job_id})
+
+        elif self.path == "/api/card-update-commit":
+            # Commit accepts only an opaque signed draft id + target.  Draft
+            # card/note content is never accepted from the browser.
+            draft_id = str(body.get("draft_id") or "").strip()
+            target = str(body.get("target") or "").strip().lower()
+            fingerprint = (
+                str((self.client_address or ("",))[0])
+                + "\0"
+                + str(self.headers.get("User-Agent") or "")
+            )
+            owner = _legacy_card_owner(
+                body.get("owner_token") or "",
+                fingerprint,
+            )
+            if not draft_id or target not in ("anki", "note"):
+                self.send_json({"ok": False, "error": "invalid params"}, 400)
+            else:
+                import uuid
+                job_id = uuid.uuid4().hex[:12]
+                _card_jobs[job_id] = {"status": "running"}
+
+                def _run_commit(
+                    job_id=job_id,
+                    draft_id=draft_id,
+                    target=target,
+                    owner=owner,
+                ):
+                    try:
+                        out = _commit_legacy_card_draft(
+                            draft_id=draft_id,
+                            target=target,
+                            owner=owner,
+                        )
+                    except Exception as error:
+                        out = {"ok": False, "error": str(error)}
+                    _card_jobs[job_id] = {
+                        "status": "done",
+                        "result": out,
+                        "_t": time.time(),
+                    }
+
+                threading.Thread(target=_run_commit, daemon=True).start()
                 self.send_json({"ok": True, "job_id": job_id})
 
         elif self.path == "/api/create-note":
@@ -3160,6 +4124,13 @@ class Handler(BaseHTTPRequestHandler):
                 self.send_json(_save_ai_settings_from_ui(body))
             else:
                 self.send_json(ai_client.save_settings(body))
+
+        elif self.path == "/api/card-improvement-settings":
+            try:
+                result = _save_card_improvement_settings_from_ui(body)
+                self.send_json(result, 200 if result.get("ok") else 400)
+            except (CardImprovementError, RuntimeError) as error:
+                self.send_json({"ok": False, "error": str(error)}, 503)
 
         elif self.path == "/api/qbtns":
             btns = body.get("btns", [])

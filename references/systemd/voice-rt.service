@@ -5,7 +5,8 @@ After=network.target
 [Service]
 Type=simple
 User=bwicarus
-ExecStart=/home/bwicarus/mcp-venv/bin/python /home/bwicarus/claude/_server_deploy/voice_realtime_relay.py
+WorkingDirectory=/home/bwicarus/webapp
+ExecStart=/home/bwicarus/mcp-venv/bin/python /home/bwicarus/webapp/voice_realtime_relay.py
 Restart=on-failure
 RestartSec=5
 

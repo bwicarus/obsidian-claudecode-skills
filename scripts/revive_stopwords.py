@@ -87,6 +87,24 @@ def find_demote_candidates(limit=12):
     因此可证明不会震荡(用户还在碰它,它就永远降不下去)。
     """
     import sqlite3 as _sq
+    # 先检查整个书库规模。focus 为空往往正是因为书库/索引还没准备好，
+    # 这时最重要的裁决仍是“样本不足，禁止降级”，不能让较次要的缺文件
+    # 错误掩盖这个 fail-safe。
+    try:
+        with _sq.connect(f"file:{SEARCH_DB}?mode=ro", uri=True) as _books_db:
+            n_books = int(
+                _books_db.execute(
+                    "SELECT COUNT(DISTINCT file) FROM pages_data"
+                ).fetchone()[0]
+                or 0
+            )
+    except Exception:
+        n_books = 0
+    if n_books < MIN_BOOKS_FOR_DEMOTE:
+        return [], (
+            f"书库规模不足({n_books} < {MIN_BOOKS_FOR_DEMOTE}),"
+            "降级判据不可靠,本轮不降级"
+        )
     prof = (_load(FOCUS, {}).get("top") or [])[:60]
     if not prof:
         return [], "focus.json 为空"
@@ -108,12 +126,6 @@ def find_demote_candidates(limit=12):
         c.close()
     except Exception:
         return [], "读不到 events.db"
-    n_books = max(1, max((int(r.get("books") or 0) for r in prof), default=1))
-    if n_books < MIN_BOOKS_FOR_DEMOTE:
-        # ★书库规模不够时"跨书普遍"没有意义(实测总书数=3 时,跨 2 本就被判普遍,
-        #   衛生/議事/調理師 这些核心术语全中枪)。数据不足 → **不降级**,这是
-        #   刻意的不对称:误滤是静默且不可恢复的,误放行只是噪声(会被 1/√N 和 IDF 压住)。
-        return [], f"书库规模不足({n_books} < {MIN_BOOKS_FOR_DEMOTE}),降级判据不可靠,本轮不降级"
     out = []
     for r in prof:
         k = r.get("key") or ""

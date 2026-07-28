@@ -1,122 +1,2653 @@
-/* rc-review.js — 侧栏「复习」tab v1(2026-07-20,"尽可能脱离服务器"批):
- * 到期卡队列拉到本地(localStorage 快照,SW netFallback → 离线可复习);答题乐观推进,
- * POST /pdf/api/review-answer 回流真 Anki(服务端 answerCards=真 FSRS 调度;aid 幂等防补投双答);
- * 离线/网络错 → RC.outbox 入队。Again(1)卡片回到本地队尾。
- * 自挂载:等 #ep-side-tabs 出现(rc-sidedrawer 建好)→ 注入 tab+pane(class 同抽屉体系)。
- * v2(产品化):ts-fsrs 端上真调度 + 卡片库 IndexedDB。 */
+/* rc-review.js — 助手内的复习模式工作区。
+ *
+ * 复习不是第五个侧栏 tab。它复用唯一的助手 pane：卡片工作区位于
+ * #asst-thread 上方，原助手对话、输入框和工具流仍在下方。卡片改进只走
+ * prepare -> preview -> explicit commit；本文件不直接改旧卡。正常 Anki
+ * 学习流程仍是正面 -> 显示答案 -> 四档评分，并经 review-answer 回流真实调度。
+ */
 (function () {
   'use strict';
+
   var RC = (window.RC = window.RC || {});
   if (RC.review) return;
-  var LSQ = 'review-queue-v1';
-  var _queue = [], _idx = 0, _showingAns = false, _dueTotal = 0;
 
-  function _esc(s) { return (RC.esc ? RC.esc(s) : String(s || '')); }
-  function _sanitize(html) {   // Anki 卡自家内容,但进侧栏前仍剥 <script>(防旧模板脚本在阅读器里乱跑)
-    try { var d = document.createElement('div'); d.innerHTML = String(html || '');
-          d.querySelectorAll('script').forEach(function (x) { x.remove(); }); return d.innerHTML; }
-    catch (e) { return ''; }
+  var LSQ = 'review-queue-v1';
+  var EXTQ = 'reviewQueueV2';
+  var _queue = [];
+  var _idx = 0;
+  var _dueTotal = 0;
+  var _relatedTotal = 0;
+  var _contextCacheKey = '';
+  var _completed = [];
+  var _improveMode = 'verbose';
+  var _mode = false;
+  var _mounted = false;
+  var _observer = null;
+  var _decorateTimer = 0;
+  var _selectionUnsubscribe = null;
+  var _selectionSuppress = false;
+  var _selectionState = Object.create(null);
+  var _selectionRecords = Object.create(null);
+  var _draftState = null;
+  var _commitState = Object.create(null);
+  var _queueRequestEpoch = 0;
+  var _draftRequestEpoch = 0;
+  var _commitRequestEpoch = 0;
+  var _queueBusy = false;
+  var _cacheWriteChain = Promise.resolve();
+  var _showingAnswer = false;
+  var _cardExpanded = true;
+  var _improveExpanded = false;
+  var _ratingPending = Object.create(null);
+  var _rejectedAnswers = Object.create(null);
+  var _externalAnswerAids = Object.create(null);
+  var _pager = null;
+
+  function _esc(value) {
+    return RC.esc ? RC.esc(value) : String(value == null ? '' : value);
   }
-  function _saveLocal() { try { localStorage.setItem(LSQ, JSON.stringify({ ts: Date.now(), due_total: _dueTotal, cards: _queue.slice(_idx) })); } catch (e) {} }
+
+  function _toast(message) {
+    try {
+      if (RC.toast) RC.toast(message);
+    } catch (_) {}
+  }
+
+  function _sanitize(html) {
+    try {
+      if (RC.safeHtml) return RC.safeHtml(String(html || ''));
+    } catch (_) {}
+    try {
+      var root = document.createElement('div');
+      root.innerHTML = String(html || '');
+      root.querySelectorAll(
+        'script,style,link,template,iframe,object,embed,base,meta,form'
+      ).forEach(function (node) {
+        node.remove();
+      });
+      root.querySelectorAll('*').forEach(function (node) {
+        Array.prototype.slice.call(node.attributes || []).forEach(function (attr) {
+          if (/^on/i.test(attr.name)) node.removeAttribute(attr.name);
+          if (attr.name === 'srcdoc') node.removeAttribute(attr.name);
+          if ((attr.name === 'href' || attr.name === 'src') &&
+              /^\s*javascript:/i.test(attr.value || '')) {
+            node.removeAttribute(attr.name);
+          }
+        });
+      });
+      return root.innerHTML;
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function _textNodesWithin(node) {
+    var out = [];
+    function visit(current) {
+      Array.prototype.forEach.call(current && current.childNodes || [],
+        function (child) {
+          if (child.nodeType === 3) out.push(child);
+          else if (child.nodeType === 1) visit(child);
+        });
+    }
+    visit(node);
+    return out;
+  }
+
+  function _htmlRoot(html) {
+    var root = document.createElement('div');
+    root.innerHTML = _sanitize(html);
+    return root;
+  }
+
+  function _plainFaceText(node) {
+    return _textNodesWithin(node).map(function (textNode) {
+      return String(textNode.nodeValue || '');
+    }).join(' ').replace(/\s+/g, ' ').trim();
+  }
+
+  function _meaningfulNode(node) {
+    if (!node) return false;
+    if (node.nodeType === 8) return false;
+    if (node.nodeType === 3) {
+      return !!String(node.nodeValue || '').trim();
+    }
+    if (node.nodeType !== 1) return false;
+    if (/^(?:br)$/i.test(String(node.tagName || ''))) return false;
+    return true;
+  }
+
+  function _trimProvenanceTail(node) {
+    var tail = node && node.lastChild;
+    while (tail) {
+      if (tail.nodeType === 3 && !String(tail.nodeValue || '').trim()) {
+        var previousText = tail.previousSibling;
+        tail.remove();
+        tail = previousText;
+        continue;
+      }
+      if (tail.nodeType === 8) {
+        var previousComment = tail.previousSibling;
+        tail.remove();
+        tail = previousComment;
+        continue;
+      }
+      if (tail.nodeType === 1 &&
+          /^(?:br|hr)$/i.test(String(tail.tagName || ''))) {
+        var previousBreak = tail.previousSibling;
+        tail.remove();
+        tail = previousBreak;
+        continue;
+      }
+      break;
+    }
+  }
+
+  function _isTrailingWithin(node, root) {
+    var cursor = node;
+    while (cursor && cursor !== root) {
+      var sibling = cursor.nextSibling;
+      while (sibling) {
+        if (_meaningfulNode(sibling)) return false;
+        sibling = sibling.nextSibling;
+      }
+      cursor = cursor.parentNode;
+    }
+    return cursor === root;
+  }
+
+  function _tailMarkerProof(root, node) {
+    if (!root || !node || node.parentNode !== root) return '';
+    var cursor = node.nextSibling;
+    var proof = '';
+    while (cursor) {
+      if (cursor.nodeType === 3 && !String(cursor.nodeValue || '').trim()) {
+        cursor = cursor.nextSibling;
+        continue;
+      }
+      if (cursor.nodeType !== 8) return '';
+      var marker = String(cursor.nodeValue || '').trim();
+      if (/^@src:[\s\S]{1,2000}$/i.test(marker)) proof += ' src';
+      else if (/^@entity:[A-Za-z0-9_-]{1,160}:\d{1,7}$/i.test(marker)) {
+        proof += ' entity';
+      } else {
+        return '';
+      }
+      cursor = cursor.nextSibling;
+    }
+    return proof.trim();
+  }
+
+  function _strictProvenanceContainer(root, node) {
+    if (!node || node.parentNode !== root ||
+        !_isTrailingWithin(node, root)) {
+      return false;
+    }
+    var text = _plainFaceText(node);
+    if (!text || !/^(?:来源|原因|卡片编号|Local\s*ID)\s*[：:]/i.test(
+      text
+    )) {
+      return false;
+    }
+    var hasSource = /(?:^|\s)来源\s*[：:]/.test(text);
+    var hasReason = /(?:^|\s)原因\s*[：:]/.test(text);
+    var hasLocal = /(?:^|\s)Local\s*ID\s*[：:]\s*[A-Za-z0-9_-]{4,160}/i
+      .test(text);
+    var hasCardId = /(?:^|\s)卡片编号\s*[：:]\s*[A-Za-z0-9_-]{4,160}/i
+      .test(text);
+    var hasAction = /问\s*AI|改进这张卡/i.test(text);
+    var proof = _tailMarkerProof(root, node);
+    if (proof) {
+      return (proof.indexOf('src') >= 0 && hasSource) ||
+        (proof.indexOf('entity') >= 0 && hasCardId);
+    }
+    // 老卡没有机器注释时只承认同时含稳定本地编号和专用操作链接的
+    // 独立尾部容器；“来源/原因”自然语言本身永远不构成删除证明。
+    return hasLocal && hasAction && (hasSource || hasReason);
+  }
+
+  function _stripProvenance(root) {
+    var candidates = Array.prototype.slice.call(root.children || []);
+    var removed = false;
+    for (var index = candidates.length - 1; index >= 0; index--) {
+      var node = candidates[index];
+      if (!_strictProvenanceContainer(root, node)) continue;
+      node.remove();
+      removed = true;
+      break;
+    }
+    if (removed) _trimProvenanceTail(root);
+  }
+
+  function _sourceFromMaterialNode(node) {
+    var anchors = node && node.querySelectorAll
+      ? Array.prototype.slice.call(node.querySelectorAll('a[href]'))
+      : [];
+    if (!anchors.length && node && node.querySelector) {
+      var fallbackAnchor = node.querySelector('a[href]');
+      if (fallbackAnchor) anchors.push(fallbackAnchor);
+    }
+    if (anchors.length !== 1) return null;
+    var anchor = anchors[0];
+    var raw = String(anchor.getAttribute('href') || '').trim();
+    if (!raw || /[\u0000-\u001f\u007f]/.test(raw)) return null;
+    try {
+      var url = new URL(raw, window.location && window.location.href);
+      if (url.protocol !== 'http:' && url.protocol !== 'https:') return null;
+      if (!/\/pdf\/view\/?$/.test(url.pathname) ||
+          url.username || url.password || url.hash) {
+        return null;
+      }
+      var files = url.searchParams.getAll('file');
+      var pages = url.searchParams.getAll('page');
+      var keys = [];
+      url.searchParams.forEach(function (_, key) { keys.push(key); });
+      if (files.length !== 1 || pages.length !== 1 ||
+          keys.length !== 2 ||
+          !/^\d{1,7}$/.test(String(pages[0] || ''))) {
+        return null;
+      }
+      var file = String(files[0] || '').trim().replace(/\\/g, '/');
+      if (!file || file.charAt(0) === '/' || /^[a-z]:\//i.test(file) ||
+          /[\u0000-\u001f\u007f]/.test(file) ||
+          file.split('/').some(function (part) {
+            return !part || part === '.' || part === '..';
+          })) {
+        return null;
+      }
+      var safetyFile = file;
+      for (var decodePass = 0; decodePass < 3; decodePass++) {
+        if (safetyFile.indexOf('%') < 0) break;
+        try {
+          var decoded = decodeURIComponent(safetyFile);
+          if (decoded === safetyFile) break;
+          safetyFile = decoded;
+        } catch (_) {
+          return null;
+        }
+      }
+      try {
+        safetyFile = safetyFile.normalize('NFKC').replace(/\\/g, '/');
+      } catch (_) {
+        return null;
+      }
+      if (!safetyFile || safetyFile.charAt(0) === '/' ||
+          /^[a-z]:\//i.test(safetyFile) ||
+          /[\u0000-\u001f\u007f]/.test(safetyFile) ||
+          safetyFile.split('/').some(function (part) {
+            return !part || part === '.' || part === '..';
+          })) {
+        return null;
+      }
+      var page = Math.max(1, parseInt(pages[0], 10) || 1);
+      return {
+        source_ref: 'book:' + file + '#p' + page,
+        source_url: url.toString(),
+        file: file,
+        page: page
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function _legacyMaterialSource(card) {
+    card = card || {};
+    var html = [
+      card.question || card.front || '',
+      card.answer || card.back || ''
+    ];
+    var unique = Object.create(null);
+    var first = null;
+    for (var htmlIndex = 0; htmlIndex < html.length; htmlIndex++) {
+      var root = _htmlRoot(html[htmlIndex]);
+      var nodes = root.querySelectorAll('.url,.src');
+      for (var nodeIndex = 0; nodeIndex < nodes.length; nodeIndex++) {
+        var source = _sourceFromMaterialNode(nodes[nodeIndex]);
+        if (!source) continue;
+        unique[source.source_ref] = true;
+        if (!first) first = source;
+      }
+    }
+    return Object.keys(unique).length === 1 ? first : null;
+  }
+
+  function _bookSourceRef(value) {
+    var match = /^book:(.+)#p(\d{1,7})$/.exec(String(value || '').trim());
+    if (!match) return null;
+    var file = String(match[1] || '').trim().replace(/\\/g, '/');
+    if (!file || file.charAt(0) === '/' || /^[a-z]:\//i.test(file) ||
+        /[\u0000-\u001f\u007f]/.test(file) ||
+        file.split('/').some(function (part) {
+          return !part || part === '.' || part === '..';
+        })) {
+      return null;
+    }
+    var safetyFile = file;
+    for (var decodePass = 0; decodePass < 3; decodePass++) {
+      if (safetyFile.indexOf('%') < 0) break;
+      try {
+        var decoded = decodeURIComponent(safetyFile);
+        if (decoded === safetyFile) break;
+        safetyFile = decoded;
+      } catch (_) {
+        return null;
+      }
+    }
+    try {
+      safetyFile = safetyFile.normalize('NFKC').replace(/\\/g, '/');
+    } catch (_) {
+      return null;
+    }
+    if (!safetyFile || safetyFile.charAt(0) === '/' ||
+        /^[a-z]:\//i.test(safetyFile) ||
+        /[\u0000-\u001f\u007f]/.test(safetyFile) ||
+        safetyFile.split('/').some(function (part) {
+          return !part || part === '.' || part === '..';
+        })) {
+      return null;
+    }
+    return {
+      file: file,
+      page: Math.max(1, parseInt(match[2], 10) || 1)
+    };
+  }
+
+  function _removeDisplayMetadata(root) {
+    root.querySelectorAll('.tags').forEach(function (node) {
+      if (_isTrailingWithin(node, root)) node.remove();
+    });
+    root.querySelectorAll('.audio-line').forEach(function (node) {
+      if (/^\s*\[anki:play:[^\]]+\]\s*$/i.test(
+        String(node.textContent || '')
+      )) {
+        node.remove();
+      }
+    });
+    root.querySelectorAll('.url,.src').forEach(function (node) {
+      if (_sourceFromMaterialNode(node)) node.remove();
+    });
+    _stripProvenance(root);
+  }
+
+  function _foldSupplementary(root) {
+    Array.prototype.slice.call(root.querySelectorAll('.more')).forEach(
+      function (node) {
+        if (!node.parentNode || node.closest('details.rv-card-extra')) return;
+        var details = document.createElement('details');
+        details.className = 'rv-card-extra';
+        var summary = document.createElement('summary');
+        summary.textContent = '补充信息';
+        node.parentNode.insertBefore(details, node);
+        details.appendChild(summary);
+        details.appendChild(node);
+      }
+    );
+  }
+
+  function _comparisonHtml(node) {
+    var clone = node.cloneNode(true);
+    Array.prototype.slice.call(clone.querySelectorAll('rt')).forEach(
+      function (item) { item.remove(); }
+    );
+    function normalize(current) {
+      Array.prototype.slice.call(current.childNodes || []).forEach(
+        function (child) {
+          if (child.nodeType === 8 ||
+              (child.nodeType === 3 &&
+                !String(child.nodeValue || '').trim())) {
+            child.remove();
+            return;
+          }
+          if (child.nodeType === 3) {
+            child.nodeValue = String(child.nodeValue || '')
+              .replace(/\s+/g, ' ');
+          } else if (child.nodeType === 1) {
+            normalize(child);
+          }
+        }
+      );
+    }
+    normalize(clone);
+    return clone.innerHTML.trim();
+  }
+
+  function _sameRenderedFront(prefix, front) {
+    var prefixHtml = _comparisonHtml(prefix);
+    var frontHtml = _comparisonHtml(front);
+    return !!(prefixHtml && prefixHtml === frontHtml);
+  }
+
+  function _topLevelBefore(root, divider) {
+    if (!divider || divider.parentNode !== root) return null;
+    var prefix = document.createElement('div');
+    var cursor = root.firstChild;
+    while (cursor && cursor !== divider) {
+      prefix.appendChild(cursor.cloneNode(true));
+      cursor = cursor.nextSibling;
+    }
+    return cursor === divider ? prefix : null;
+  }
+
+  function _afterDivider(divider) {
+    var back = document.createElement('div');
+    var cursor = divider && divider.nextSibling;
+    while (cursor) {
+      back.appendChild(cursor.cloneNode(true));
+      cursor = cursor.nextSibling;
+    }
+    return back;
+  }
+
+  function _templateNeedsReplacementReveal(front, answer) {
+    return !!(
+      (front.querySelector('.cloze') && answer.querySelector('.cloze')) ||
+      (front.querySelector('.jp-sent') && answer.querySelector('.jp-sent'))
+    );
+  }
+
+  function _answerRepeatsFront(front, answer) {
+    var frontText = _plainFaceText(front);
+    var answerText = _plainFaceText(answer);
+    return frontText.length >= 6 &&
+      answerText.length >= frontText.length &&
+      answerText.slice(0, frontText.length) === frontText;
+  }
+
+  function _projectReviewFaces(frontHtml, answerHtml) {
+    var front = _htmlRoot(frontHtml);
+    var answer = _htmlRoot(answerHtml);
+    var back = answer;
+    var revealMode = 'append';
+    var divider = Array.prototype.slice.call(answer.children || []).find(
+      function (candidate) {
+        if (String(candidate.tagName || '').toLowerCase() !== 'hr') {
+          return false;
+        }
+        return String(candidate.id || '').toLowerCase() === 'answer' ||
+          candidate.hasAttribute('data-answer');
+      }
+    );
+    if (divider) {
+      back = _afterDivider(divider);
+    } else if (_templateNeedsReplacementReveal(front, answer)) {
+      revealMode = 'replace';
+    } else {
+      var anonymous = Array.prototype.slice.call(
+        answer.querySelectorAll('hr:not([id]):not([data-answer])')
+      ).find(function (candidate) {
+        var prefix = _topLevelBefore(answer, candidate);
+        return prefix && _sameRenderedFront(prefix, front);
+      });
+      if (anonymous) {
+        back = _afterDivider(anonymous);
+      } else if (_answerRepeatsFront(front, answer)) {
+        revealMode = 'replace';
+      }
+    }
+    _removeDisplayMetadata(front);
+    _removeDisplayMetadata(back);
+    _foldSupplementary(back);
+    return {
+      front: front.innerHTML,
+      back: back.innerHTML,
+      revealMode: revealMode
+    };
+  }
+
+  function _safeSourceUrl(value) {
+    var raw = String(value || '').trim();
+    if (!raw || /[\u0000-\u001f\u007f]/.test(raw)) return '';
+    try {
+      var url = new URL(raw);
+      if (url.protocol === 'http:' || url.protocol === 'https:') {
+        if (!url.hostname || url.username || url.password) return '';
+        return url.toString();
+      }
+      if (url.protocol !== 'obsidian:' ||
+          String(url.hostname || '').toLowerCase() !== 'open' ||
+          (url.pathname !== '' && url.pathname !== '/') ||
+          url.username || url.password || url.hash) {
+        return '';
+      }
+      var files = url.searchParams.getAll('file');
+      if (files.length !== 1) return '';
+      var file = String(files[0] || '').trim();
+      for (var decodePass = 0; decodePass < 3; decodePass++) {
+        if (!file || /[\u0000-\u001f\u007f]/.test(file) ||
+            file.charAt(0) === '/' || file.charAt(0) === '\\' ||
+            /^[a-z]:[\\/]/i.test(file) ||
+            file.replace(/\\/g, '/').split('/').indexOf('..') >= 0) {
+          return '';
+        }
+        if (file.indexOf('%') < 0) break;
+        try {
+          var decoded = decodeURIComponent(file);
+          if (decoded === file) break;
+          file = decoded;
+        } catch (_) {
+          return '';
+        }
+      }
+      return url.toString();
+    } catch (_) {
+      return '';
+    }
+  }
+
+  function _hash(value) {
+    var text = String(value == null ? '' : value);
+    var hash = 2166136261;
+    for (var i = 0; i < text.length; i++) {
+      hash ^= text.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16);
+  }
+
+  function _registry() {
+    try {
+      return window.BWReaderRuntime &&
+        window.BWReaderRuntime.contextSelections;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function _cacheGet() {
+    try {
+      if (window.__bwExtensionStore && window.__bwExtensionStore.get) {
+        return Promise.resolve(window.__bwExtensionStore.get(EXTQ));
+      }
+      return Promise.resolve(JSON.parse(localStorage.getItem(LSQ) || 'null'));
+    } catch (_) {
+      return Promise.resolve(null);
+    }
+  }
+
+  function _cacheSet(value) {
+    try {
+      if (window.__bwExtensionStore && window.__bwExtensionStore.set) {
+        return Promise.resolve(window.__bwExtensionStore.set(EXTQ, value));
+      }
+      localStorage.setItem(LSQ, JSON.stringify(value));
+    } catch (_) {}
+    return Promise.resolve();
+  }
+
+  function _currentContext() {
+    var raw = null;
+    try {
+      var adapter = RC.adapter && RC.adapter();
+      raw = adapter && adapter.getContext && adapter.getContext();
+    } catch (_) {}
+    if (!raw || typeof raw !== 'object' || typeof raw.then === 'function') {
+      return {};
+    }
+    var out = {};
+    ['file', 'url', 'source_ref'].forEach(function (key) {
+      if (raw[key]) out[key] = String(raw[key]).slice(0, 2000);
+    });
+    if (raw.page != null) out.page = Math.max(0, Number(raw.page) || 0);
+    if (raw.selection) out.selection = String(raw.selection).slice(0, 800);
+    if (raw.visible_text) {
+      out.visible_text = String(raw.visible_text).slice(0, 2400);
+    }
+    if (Array.isArray(raw.kg_nodes)) {
+      out.kg_nodes = raw.kg_nodes.slice(0, 20);
+    }
+    return out;
+  }
+
+  function _clientContextKey(context) {
+    return 'ctx-' + _hash(JSON.stringify({
+      file: context.file || context.url || context.source_ref || '',
+      page: context.page || 0,
+      selection: context.selection || '',
+      visible_text: context.visible_text || ''
+    }));
+  }
+
+  function _queueSnapshot(contextKey, cards, index, dueTotal, relatedTotal,
+      completed) {
+    return {
+      ts: Date.now(),
+      client_context_key: String(contextKey || ''),
+      due_total: Number(dueTotal || 0),
+      related_total: Number(relatedTotal || 0),
+      completed_ids: Array.isArray(completed)
+        ? completed.slice(-100)
+        : [],
+      index: Math.max(0, Number(index || 0)),
+      cards: Array.isArray(cards) ? cards.slice() : []
+    };
+  }
+
+  function _currentQueueSnapshot() {
+    return _queueSnapshot(
+      _contextCacheKey,
+      _queue,
+      _idx,
+      _dueTotal,
+      _relatedTotal,
+      _completed
+    );
+  }
+
+  function _rejectedForContext(contextKey) {
+    var items = _rejectedAnswers[String(contextKey || '')];
+    return Array.isArray(items) ? items : [];
+  }
+
+  function _repairRejectedSnapshot(snapshot, rejected) {
+    var repaired = _queueSnapshot(
+      snapshot.client_context_key,
+      snapshot.cards,
+      snapshot.index,
+      snapshot.due_total,
+      snapshot.related_total,
+      snapshot.completed_ids
+    );
+    (rejected || []).forEach(function (item) {
+      var card = item.card || {};
+      var cardId = String(card.id == null ? '' : card.id);
+      repaired.completed_ids = repaired.completed_ids.filter(function (id) {
+        return String(id) !== cardId;
+      });
+      repaired.cards = repaired.cards.filter(function (queued) {
+        return String(queued && queued.id) !== cardId;
+      });
+      var insertAt = Math.max(
+        0,
+        Math.min(Number(item.original_index || 0), repaired.cards.length)
+      );
+      repaired.cards.splice(insertAt, 0, card);
+      repaired.index = insertAt;
+    });
+    repaired.ts = Date.now();
+    return repaired;
+  }
+
+  function _consumeRejectedSnapshot(contextKey, snapshot) {
+    var rejected = _rejectedForContext(contextKey);
+    if (!rejected.length) return snapshot;
+    var repaired = _repairRejectedSnapshot(snapshot, rejected);
+    delete _rejectedAnswers[String(contextKey || '')];
+    return repaired;
+  }
+
+  function _rememberRejectedAnswer(contextKey, card, originalIndex, ease) {
+    var key = String(contextKey || '');
+    var rejected = _rejectedForContext(key).slice();
+    var cardKey = _cardKey(card);
+    rejected = rejected.filter(function (item) {
+      return _cardKey(item.card) !== cardKey;
+    });
+    rejected.push({
+      card: card,
+      original_index: Number(originalIndex || 0),
+      ease: Number(ease || 0)
+    });
+    _rejectedAnswers[key] = rejected;
+
+    // The extension cache stores the most recently viewed context. Repair it
+    // only when it still belongs to the rejected page; never overwrite the
+    // currently active page with an old-context snapshot.
+    _cacheWriteChain = _cacheWriteChain.catch(function () {
+      return false;
+    }).then(function () {
+      return _cacheGet().then(function (cached) {
+        if (!cached || cached.client_context_key !== key) return false;
+        return _cacheSet(_repairRejectedSnapshot(cached, rejected))
+          .then(function () { return true; });
+      });
+    });
+  }
+
+  function _saveLocal(snapshot, stillCurrent) {
+    var frozen = snapshot || _currentQueueSnapshot();
+    _cacheWriteChain = _cacheWriteChain.catch(function () {
+      return false;
+    }).then(function () {
+      if (typeof stillCurrent === 'function' && !stillCurrent()) {
+        return false;
+      }
+      return _cacheSet(frozen).then(function () {
+        return true;
+      });
+    });
+    return _cacheWriteChain;
+  }
+
+  function _queueRequestCurrent(epoch, contextKey) {
+    return epoch === _queueRequestEpoch &&
+      contextKey === _contextCacheKey;
+  }
+
+  function _cardRequestCurrent(epoch, cardKey, kind) {
+    var expected = kind === 'commit'
+      ? _commitRequestEpoch
+      : _draftRequestEpoch;
+    return _mode && epoch === expected &&
+      cardKey === _cardKey(_current());
+  }
+
+  function _invalidateCardRequests(clearPreview) {
+    _draftRequestEpoch += 1;
+    _commitRequestEpoch += 1;
+    if (clearPreview !== false) {
+      _draftState = null;
+      _commitState = Object.create(null);
+    }
+  }
+
+  function _anyCommitBusy() {
+    return Object.keys(_commitState).some(function (target) {
+      return _commitState[target] && _commitState[target].busy;
+    });
+  }
+
+  function _current() {
+    return _queue[_idx] || null;
+  }
+
+  function _cardKey(card) {
+    return _stableCardId(card);
+  }
+
+  function _stableCardId(card) {
+    // entity_id 描述一次制卡实体，批内 sibling 会共享它；复习卡必须以真实
+    // Anki cardId 为第一身份，才能做到每张卡唯一且跨重渲/收藏/placement 不变。
+    card = card || {};
+    function part(value) {
+      var text = String(value == null ? '' : value);
+      return /^[A-Za-z0-9_-]{1,72}$/.test(text) ? text : _hash(text);
+    }
+    if (card.id != null && String(card.id) !== '') {
+      return 'anki_card_' + part(card.id);
+    }
+    if (card.note_id != null && String(card.note_id) !== '') {
+      return 'anki_note_' + part(card.note_id);
+    }
+    if (card.entity_id) {
+      return String(card.entity_id) +
+        (card.entity_index == null ? '' : '_i' + part(card.entity_index));
+    }
+    if (card.local_id) return 'anki_local_' + part(card.local_id);
+    return 'anki_legacy_' + _hash(JSON.stringify(_cardIdentity(card)));
+  }
+
+  function _patchSharedCard(card, patch, reason) {
+    try {
+      return !!(
+        RC.flashcard &&
+        typeof RC.flashcard.patchGroup === 'function' &&
+        RC.flashcard.patchGroup(
+          _stableCardId(card),
+          0,
+          patch,
+          reason || ''
+        )
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function _cardIdentity(card) {
+    card = card || {};
+    var legacySource = _legacyMaterialSource(card);
+    return {
+      card_id: card.id == null ? '' : String(card.id),
+      note_id: card.note_id == null ? '' : String(card.note_id),
+      local_id: String(card.local_id || ''),
+      entity_id: String(card.entity_id || ''),
+      entity_index: card.entity_index == null ? null : card.entity_index,
+      source_ref: String(
+        card.source_ref || (legacySource && legacySource.source_ref) || ''
+      ),
+      source_url: String(card.source_url || ''),
+      deck: String(card.deck || '')
+    };
+  }
+
+  function _cardForAssistant(card) {
+    card = card || {};
+    var identity = _cardIdentity(card);
+    var projected = _projectReviewFaces(
+      card.question || card.front || '',
+      card.answer || card.back || ''
+    );
+    identity.front = projected.front;
+    identity.back = projected.back;
+    identity.question = projected.front;
+    identity.answer = projected.back;
+    identity.reveal_mode = projected.revealMode;
+    identity.anki_note_id = card.note_id == null ? null : card.note_id;
+    identity.review_kind = String(card.review_kind || '');
+    identity.candidate_reasons = Array.isArray(card.candidate_reasons)
+      ? card.candidate_reasons.slice(0, 6)
+      : [];
+    return identity;
+  }
+
+  function _notifyAssistant(reason) {
+    var card = _mode ? _cardForAssistant(_current()) : null;
+    var options = { card: card, reason: reason || 'mode' };
+    try {
+      if (RC.assistant && typeof RC.assistant.setMode === 'function') {
+        RC.assistant.setMode(_mode ? 'review' : 'normal', options);
+        return;
+      }
+    } catch (_) {}
+    try {
+      window.dispatchEvent(new CustomEvent('rc:assistant-mode-request', {
+        detail: {
+          mode: _mode ? 'review' : 'normal',
+          card: card,
+          reason: reason || 'mode'
+        }
+      }));
+    } catch (_) {}
+  }
+
+  function _body() {
+    return document.getElementById('rc-review-body');
+  }
+
+  function _workspace() {
+    return document.getElementById('asst-review-workspace');
+  }
+
+  function _button(action, label, className, title) {
+    var button = document.createElement('button');
+    button.type = 'button';
+    button.setAttribute('data-action', action);
+    button.className = className || 'rv-btn';
+    button.textContent = label;
+    if (title) button.title = title;
+    return button;
+  }
+
+  function _setBusy(message) {
+    var body = _body();
+    if (!body) return;
+    body.innerHTML = '';
+    var status = document.createElement('div');
+    status.className = 'rv-dim';
+    status.textContent = message;
+    body.appendChild(status);
+  }
+
+  function _applyQueueSnapshot(snapshot) {
+    _queue = snapshot.cards.slice();
+    _idx = Math.max(
+      0,
+      Math.min(
+        Math.max(0, _queue.length - 1),
+        Number(snapshot.index || 0)
+      )
+    );
+    _dueTotal = Number(snapshot.due_total || _queue.length);
+    _relatedTotal = Number(snapshot.related_total || 0);
+    _completed = Array.isArray(snapshot.completed_ids)
+      ? snapshot.completed_ids.slice(-100)
+      : [];
+    _showingAnswer = false;
+    _improveExpanded = false;
+    _invalidateCardRequests(true);
+  }
 
   async function loadQueue(force) {
-    var pane = document.getElementById('rc-review-body'); if (!pane) return;
-    if (!force) {
-      try { var c = JSON.parse(localStorage.getItem(LSQ) || 'null');
-            if (c && c.cards && c.cards.length && Date.now() - c.ts < 30 * 60000) { _queue = c.cards; _idx = 0; _dueTotal = c.due_total || c.cards.length; render(); return; } } catch (e) {}
+    if (!_mounted && !mount()) return;
+    var body = _body();
+    if (!body) return;
+    var context = _currentContext();
+    var contextKey = _clientContextKey(context);
+    var requestEpoch = ++_queueRequestEpoch;
+    _contextCacheKey = contextKey;
+    _queueBusy = true;
+    var cached = await _cacheGet();
+    if (!_queueRequestCurrent(requestEpoch, contextKey)) return;
+    var exactCache = cached &&
+      cached.client_context_key === contextKey;
+    var completed = [];
+    if (exactCache && Date.now() - Number(cached.ts || 0) < 12 * 60 * 60000) {
+      completed = Array.isArray(cached.completed_ids)
+        ? cached.completed_ids.slice(-100)
+        : [];
     }
-    pane.innerHTML = '<div class="rv-dim">⏳ 拉取到期卡…</div>';
+    var rejectedIds = _rejectedForContext(contextKey).map(function (item) {
+      return String(item.card && item.card.id);
+    });
+    if (rejectedIds.length) {
+      completed = completed.filter(function (cardId) {
+        return rejectedIds.indexOf(String(cardId)) < 0;
+      });
+    }
+    if (!force && exactCache && Array.isArray(cached.cards) &&
+        cached.cards.length && Date.now() - Number(cached.ts || 0) < 30 * 60000) {
+      var cachedSnapshot = _consumeRejectedSnapshot(
+        contextKey,
+        _queueSnapshot(
+        contextKey,
+        cached.cards,
+        cached.index,
+        cached.due_total,
+        cached.related_total,
+        completed
+        )
+      );
+      _applyQueueSnapshot(cachedSnapshot);
+      _saveLocal(cachedSnapshot, function () {
+        return contextKey === _contextCacheKey;
+      });
+      _queueBusy = false;
+      render();
+      _notifyAssistant('queue-cache');
+      return;
+    }
+
+    _setBusy('⏳ 查找当前内容的相关卡…');
+    var hasContext = Boolean(
+      context.file || context.url || context.source_ref ||
+      context.selection || context.visible_text
+    );
     try {
-      var d = await (await fetch('/pdf/api/review-queue?limit=30')).json();
-      if (!d.ok) throw new Error(d.error || 'fail');
-      _queue = d.cards || []; _idx = 0; _dueTotal = d.due_total || _queue.length;
-      _saveLocal(); render();
-    } catch (e) {
-      try { var c2 = JSON.parse(localStorage.getItem(LSQ) || 'null');
-            if (c2 && c2.cards && c2.cards.length) { _queue = c2.cards; _idx = 0; _dueTotal = c2.due_total || 0; render(); RC.toast && RC.toast('离线:用本机复习快照'); return; } } catch (e2) {}
-      pane.innerHTML = '<div class="rv-dim">拉取失败:' + _esc(e.message) + '<br><button class="rv-btn" onclick="RC.review.reload()">重试</button></div>';
+      var response;
+      if (hasContext) {
+        // @interaction review.candidates.read
+        response = await fetch('/pdf/api/review-queue', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            limit: 30,
+            context: context,
+            exclude_card_ids: completed
+          })
+        });
+      } else {
+        // @interaction review.queue.read
+        response = await fetch('/pdf/api/review-queue?limit=30');
+      }
+      if (!_queueRequestCurrent(requestEpoch, contextKey)) return;
+      var data = await response.json();
+      if (!_queueRequestCurrent(requestEpoch, contextKey)) return;
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || ('HTTP ' + response.status));
+      }
+      var snapshot = _consumeRejectedSnapshot(
+        contextKey,
+        _queueSnapshot(
+          contextKey,
+          Array.isArray(data.cards) ? data.cards : [],
+          0,
+          data.due_total,
+          data.related_total,
+          completed
+        )
+      );
+      if (!_queueRequestCurrent(requestEpoch, contextKey)) return;
+      _applyQueueSnapshot(snapshot);
+      await _saveLocal(snapshot, function () {
+        return _queueRequestCurrent(requestEpoch, contextKey);
+      });
+      if (!_queueRequestCurrent(requestEpoch, contextKey)) return;
+      _queueBusy = false;
+      render();
+      _activateCurrentSelections();
+      _notifyAssistant('queue-load');
+      return;
+    } catch (error) {
+      if (!_queueRequestCurrent(requestEpoch, contextKey)) return;
+      if (hasContext) {
+        try {
+          // @interaction review.queue.read
+          var fallbackResponse = await fetch('/pdf/api/review-queue?limit=30');
+          if (!_queueRequestCurrent(requestEpoch, contextKey)) return;
+          var fallback = await fallbackResponse.json();
+          if (!_queueRequestCurrent(requestEpoch, contextKey)) return;
+          if (fallbackResponse.ok && fallback.ok) {
+            var fallbackSnapshot = _consumeRejectedSnapshot(
+              contextKey,
+              _queueSnapshot(
+                contextKey,
+                Array.isArray(fallback.cards) ? fallback.cards : [],
+                0,
+                fallback.due_total,
+                0,
+                completed
+              )
+            );
+            _applyQueueSnapshot(fallbackSnapshot);
+            await _saveLocal(fallbackSnapshot, function () {
+              return _queueRequestCurrent(requestEpoch, contextKey);
+            });
+            if (!_queueRequestCurrent(requestEpoch, contextKey)) return;
+            _queueBusy = false;
+            render();
+            _activateCurrentSelections();
+            _notifyAssistant('queue-fallback');
+            _toast('相关卡暂不可用，已退回到期卡');
+            return;
+          }
+        } catch (_) {}
+      }
+      if (!_queueRequestCurrent(requestEpoch, contextKey)) return;
+      if (exactCache && Array.isArray(cached.cards) && cached.cards.length) {
+        _applyQueueSnapshot(_consumeRejectedSnapshot(
+          contextKey,
+          _queueSnapshot(
+            contextKey,
+            cached.cards,
+            cached.index,
+            cached.due_total,
+            cached.related_total,
+            completed
+          )
+        ));
+        _queueBusy = false;
+        render();
+        _activateCurrentSelections();
+        _notifyAssistant('queue-offline');
+        _toast('离线：使用当前内容的本机复习快照');
+        return;
+      }
+      _queueBusy = false;
+      body.innerHTML = '';
+      var fail = document.createElement('div');
+      fail.className = 'rv-dim';
+      fail.appendChild(document.createTextNode(
+        '拉取失败：' + String(error && error.message || '未知错误')
+      ));
+      fail.appendChild(document.createElement('br'));
+      fail.appendChild(_button('reload', '重试', 'rv-btn'));
+      body.appendChild(fail);
     }
+  }
+
+  function _appendTrace(parent, data) {
+    var trace = data && data.trace;
+    var runner = data && data.runner;
+    if (!trace && !runner) return;
+    var details = document.createElement('details');
+    details.className = 'rv-trace';
+    var summary = document.createElement('summary');
+    summary.textContent = '模型流程 / trace';
+    var pre = document.createElement('pre');
+    try {
+      pre.textContent = JSON.stringify({
+        runner: runner || null,
+        trace: trace || null
+      }, null, 2);
+    } catch (_) {
+      pre.textContent = String(trace || runner || '');
+    }
+    details.appendChild(summary);
+    details.appendChild(pre);
+    parent.appendChild(details);
+  }
+
+  function _appendDraftResult(parent) {
+    if (!_draftState) return;
+    var box = document.createElement('section');
+    box.className = 'rv-draft';
+    var head = document.createElement('div');
+    head.className = 'rv-draft-head';
+    head.textContent = _draftState.busy
+      ? '正在生成草稿…'
+      : (_draftState.ok
+        ? '草稿预览（尚未写入）'
+        : '草稿生成失败');
+    box.appendChild(head);
+
+    if (!_draftState.ok) {
+      var error = document.createElement('div');
+      error.className = 'rv-error';
+      error.textContent = String(_draftState.error || '未知错误');
+      box.appendChild(error);
+      parent.appendChild(box);
+      return;
+    }
+
+    var drafts = _draftState.drafts || {};
+    if (Array.isArray(drafts.cards) && drafts.cards.length) {
+      var cardsTitle = document.createElement('div');
+      cardsTitle.className = 'rv-draft-title';
+      cardsTitle.textContent = 'Anki 新草稿 · ' + drafts.cards.length + ' 张';
+      box.appendChild(cardsTitle);
+      var cardHost = document.createElement('div');
+      cardHost.className = 'rv-draft-cards';
+      box.appendChild(cardHost);
+      var draftGid = 'draft_card_' + _hash(
+        String(_draftState.draft_id || _draftState._card_key || '') +
+        JSON.stringify(drafts.cards)
+      );
+      try {
+        if (RC.flashcard && RC.flashcard.renderEntity) {
+          RC.flashcard.renderEntity(cardHost, {
+            label: '🎴 Anki 新草稿' +
+              (drafts.cards.length > 1 ? ' × ' + drafts.cards.length : ''),
+            cards: drafts.cards,
+            gid: draftGid,
+            mode: 'preview',
+            className: 'rv-draft-learning-card'
+          });
+        } else if (RC.flashcard && RC.flashcard.mountPreview) {
+          RC.flashcard.mountPreview(cardHost, drafts.cards, {
+            gid: draftGid,
+            bare: true,
+            nopin: true
+          });
+        }
+      } catch (_) {
+        cardHost.textContent = 'Anki 草稿卡片渲染失败';
+      }
+    }
+    if (drafts.note) {
+      var noteTitle = document.createElement('div');
+      noteTitle.className = 'rv-draft-title';
+      noteTitle.textContent = '笔记草稿 · ' +
+        String(drafts.note.verbosity || _improveMode);
+      var note = document.createElement('pre');
+      note.className = 'rv-note-preview';
+      note.textContent = String(drafts.note.content || '');
+      box.appendChild(noteTitle);
+      box.appendChild(note);
+    }
+
+    _appendTrace(box, _draftState);
+
+    var targets = Array.isArray(_draftState.targets)
+      ? _draftState.targets
+      : [];
+    var commits = document.createElement('div');
+    commits.className = 'rv-commit-actions';
+    var anyCommitBusy = _anyCommitBusy();
+    targets.forEach(function (target) {
+      if (target !== 'anki' && target !== 'note') return;
+      var state = _commitState[target];
+      var label = target === 'anki'
+        ? '确认写入 Anki 新卡'
+        : '确认更新原笔记';
+      var button = _button('commit', label, 'rv-commit');
+      button.setAttribute('data-target', target);
+      if (state && state.busy) {
+        button.disabled = true;
+        button.textContent = '正在提交…';
+      } else if (state && state.ok) {
+        button.disabled = true;
+        button.textContent = '✓ 已确认执行';
+      } else if (anyCommitBusy) {
+        button.disabled = true;
+        button.textContent = '等待当前提交…';
+      }
+      commits.appendChild(button);
+      if (state && state.message) {
+        var result = document.createElement('div');
+        result.className = state.ok ? 'rv-success' : 'rv-error';
+        result.textContent = state.message;
+        commits.appendChild(result);
+      }
+    });
+    box.appendChild(commits);
+    parent.appendChild(box);
+  }
+
+  function _appendImprovePanel(parent, card) {
+    var panel = document.createElement('section');
+    panel.className = 'rv-improve-panel';
+    panel.hidden = !_improveExpanded;
+    panel.setAttribute('aria-hidden', String(!_improveExpanded));
+    var selection = document.createElement('div');
+    selection.className = 'rv-selection-count';
+    selection.id = 'rv-selection-count';
+    panel.appendChild(selection);
+
+    var modeRow = document.createElement('div');
+    modeRow.className = 'rv-improve-modes';
+    modeRow.setAttribute('role', 'radiogroup');
+    modeRow.setAttribute('aria-label', '笔记草稿详细程度');
+    var verbose = _button('verbosity', '📝 详细', 'rv-mode');
+    verbose.setAttribute('data-mode', 'verbose');
+    verbose.setAttribute('aria-pressed', String(_improveMode === 'verbose'));
+    if (_improveMode === 'verbose') verbose.classList.add('on');
+    var concise = _button('verbosity', '✂️ 精炼', 'rv-mode');
+    concise.setAttribute('data-mode', 'concise');
+    concise.setAttribute('aria-pressed', String(_improveMode === 'concise'));
+    if (_improveMode === 'concise') concise.classList.add('on');
+    modeRow.appendChild(verbose);
+    modeRow.appendChild(concise);
+    panel.appendChild(modeRow);
+
+    var actions = document.createElement('div');
+    actions.className = 'rv-actions';
+    actions.appendChild(_button(
+      'open-source',
+      '打开原笔记',
+      'rv-action'
+    ));
+    var noteDraft = _button(
+      'prepare-draft',
+      '更新到笔记',
+      'rv-action rv-note'
+    );
+    noteDraft.setAttribute('data-target', 'note');
+    var ankiDraft = _button(
+      'prepare-draft',
+      '根据此改进 Anki',
+      'rv-action rv-anki'
+    );
+    ankiDraft.setAttribute('data-target', 'anki');
+    var allDraft = _button(
+      'prepare-draft',
+      '全部更新',
+      'rv-action rv-all'
+    );
+    allDraft.setAttribute('data-target', 'all');
+    actions.appendChild(noteDraft);
+    actions.appendChild(ankiDraft);
+    actions.appendChild(allDraft);
+    var actionBusy = Boolean(_draftState && _draftState.busy) ||
+      _anyCommitBusy();
+    [noteDraft, ankiDraft, allDraft].forEach(function (button) {
+      button.disabled = actionBusy;
+      if (_draftState && _draftState.busy) {
+        button.title = '当前草稿生成完成前不能重复提交';
+      } else if (_anyCommitBusy()) {
+        button.title = '当前写入完成前不能生成新草稿';
+      }
+    });
+    panel.appendChild(actions);
+
+    var note = document.createElement('div');
+    note.className = 'rv-action-note';
+    note.textContent =
+      '先从下方复习对话选用回答或段落；上述更新只生成草稿，预览后须按目标逐项确认。';
+    panel.appendChild(note);
+    _appendDraftResult(panel);
+    parent.appendChild(panel);
+    _refreshSelectionUi();
+  }
+
+  function _renderReviewSlide(host, card, index) {
+    var rendered = null;
+    var stableId = _stableCardId(card);
+    var current = index === _idx;
+    var projected = _projectReviewFaces(
+      card.question || card.front || '',
+      card.answer || card.back || ''
+    );
+    var viewCard = Object.assign({}, card, {
+      front: card.question || card.front || '',
+      back: card.answer || card.back || '',
+      _displayFrontHtml: projected.front,
+      _displayBackHtml: projected.back,
+      _revealMode: projected.revealMode,
+      _st: 'learn',
+      _showBack: current && _showingAnswer,
+      _nid: card.note_id != null ? card.note_id : card._nid
+    });
+    try {
+      if (RC.flashcard && RC.flashcard.renderEntity) {
+        rendered = RC.flashcard.renderEntity(host, {
+          label: '🎴 复习卡',
+          card: viewCard,
+          gid: stableId,
+          mode: 'review',
+          showBack: current && _showingAnswer,
+          pager: false,
+          className: 'rv-review-card',
+          projectFaceHtml: function (projected, side) {
+            return side === 'back'
+              ? projected._displayBackHtml
+              : projected._displayFrontHtml;
+          },
+          onReveal: function () {
+            if (index !== _idx) {
+              _selectCard(index, 'card-reveal');
+              return;
+            }
+            _showAnswer();
+          },
+          onRate: function (ease) {
+            if (index === _idx) _answerCurrent(ease);
+          },
+          selection: {
+            id: 'card:' + stableId,
+            kind: 'card',
+            source: {
+              cid: stableId,
+              gid: stableId,
+              card_id: card.id,
+              note_id: card.note_id,
+              entity_id: card.entity_id || '',
+              entity_index: card.entity_index
+            }
+          }
+        });
+      }
+    } catch (_) {
+      rendered = null;
+    }
+
+    if (rendered && rendered.bd) {
+      rendered.bd.classList.add('rv-review-layout');
+      // vc-card intentionally stops bubbling at the card boundary so page-wide
+      // selection/lookup handlers cannot steal card gestures. Handle review
+      // actions on that same boundary; the workspace delegate remains for the
+      // toolbar outside the card.
+      if (rendered.el) {
+        rendered.el.addEventListener('click', _workspaceClick);
+      }
+      var meta = document.createElement('div');
+      meta.className = 'rv-meta';
+      var deck = document.createElement('span');
+      deck.textContent = String(card.deck || '未命名牌组');
+      var position = document.createElement('span');
+      position.textContent = (index + 1) + ' / ' + _queue.length;
+      meta.appendChild(deck);
+      meta.appendChild(position);
+      rendered.bd.insertBefore(meta, rendered.bd.firstChild);
+      return rendered;
+    }
+
+    // 不维护第二套卡面。共享组件若未装载就明确失败，避免悄悄退回
+    // 与 PWA/扩展行为不同的旧 DOM。
+    var unavailable = document.createElement('div');
+    unavailable.className = 'rv-dim';
+    unavailable.textContent = '学习卡组件尚未就绪，请刷新后重试';
+    host.appendChild(unavailable);
+    return null;
   }
 
   function render() {
-    var pane = document.getElementById('rc-review-body'); if (!pane) return;
-    var head = '<div class="rv-head">到期 ' + _dueTotal + ' · 本批剩 ' + Math.max(0, _queue.length - _idx) +
-      ' <button class="rv-x" title="重新拉取" onclick="RC.review.reload()">⟳</button></div>';
-    if (_idx >= _queue.length) {
-      pane.innerHTML = head + '<div class="rv-done">🎉 本批完成!' + (_dueTotal > _queue.length ? '(还有到期卡,⟳ 拉下一批)' : '') + '</div>';
-      _saveLocal(); return;
+    var body = _body();
+    if (!body) return;
+    var workspace = _workspace();
+    if (workspace) {
+      workspace.classList.toggle('rv-card-collapsed', !_cardExpanded);
+      workspace.classList.remove('rv-card-empty');
     }
-    var c = _queue[_idx];
-    var body = '<div class="rv-card">' + _sanitize(_showingAns ? c.answer : c.question) + '</div>';
-    var btns = _showingAns
-      ? '<div class="rv-eases">' +
-        '<button class="rv-e rv-e1" onclick="RC.review.answer(1)">再来</button>' +
-        '<button class="rv-e rv-e2" onclick="RC.review.answer(2)">困难</button>' +
-        '<button class="rv-e rv-e3" onclick="RC.review.answer(3)">良好</button>' +
-        '<button class="rv-e rv-e4" onclick="RC.review.answer(4)">简单</button></div>'
-      : '<button class="rv-show" onclick="RC.review.show()">显示答案</button>';
-    pane.innerHTML = head + '<div class="rv-deck">' + _esc(c.deck) + '</div>' + body + btns;
-    try { RC.typeset && RC.typeset(pane.querySelector('.rv-card')); } catch (e) {}
+    if (_pager && typeof _pager.destroy === 'function') _pager.destroy();
+    _pager = null;
+    body.innerHTML = '';
+
+    var toolbar = document.createElement('div');
+    toolbar.className = 'rv-head';
+    var stats = document.createElement('span');
+    stats.className = 'rv-stats';
+    stats.textContent = '相关 ' + _relatedTotal + ' · 到期 ' + _dueTotal +
+      ' · 本批 ' + _queue.length;
+    var reload = _button('reload', '⟳', 'rv-nav', '重新查找相关卡');
+    var cardToggle = _button(
+      'toggle-card',
+      _cardExpanded ? '收起' : '展开卡片',
+      'rv-card-toggle'
+    );
+    cardToggle.setAttribute('aria-expanded', String(_cardExpanded));
+    toolbar.appendChild(stats);
+    toolbar.appendChild(reload);
+    toolbar.appendChild(cardToggle);
+    body.appendChild(toolbar);
+
+    var card = _current();
+    if (!card) {
+      if (workspace) workspace.classList.add('rv-card-empty');
+      cardToggle.disabled = true;
+      var empty = document.createElement('div');
+      empty.className = 'rv-done';
+      empty.textContent = _queueBusy
+        ? '正在加载复习卡…'
+        : '🎉 当前这一批已经完成。';
+      body.appendChild(empty);
+      return;
+    }
+
+    var panel = document.createElement('section');
+    panel.className = 'rv-card-panel';
+    panel.classList.toggle('rv-improve-open', _improveExpanded);
+    panel.hidden = !_cardExpanded;
+    // flashcard.register() prunes detached containers. Attach the review panel
+    // before mounting so side/page/favorite copies remain in the same live
+    // group and a pending score immediately disables every projection.
+    body.appendChild(panel);
+    var track = document.createElement('div');
+    track.className = 'fc-track rv-card-track';
+    panel.appendChild(track);
+    var slides = [];
+    _queue.forEach(function (queuedCard, index) {
+      var slide = document.createElement('div');
+      slide.className = 'fc-slide rv-card-slide' +
+        (index === _idx ? ' on' : '');
+      slide.setAttribute('data-review-index', String(index));
+      slide.setAttribute('aria-hidden', String(index !== _idx));
+      if (index !== _idx) slide.setAttribute('inert', '');
+      track.appendChild(slide);
+      slides.push(slide);
+      _renderReviewSlide(slide, queuedCard, index);
+    });
+    var dots = [];
+    if (_queue.length > 1) {
+      var dotBox = document.createElement('div');
+      dotBox.className = 'fc-dots rv-card-dots';
+      _queue.forEach(function (_, index) {
+        var dot = document.createElement('span');
+        dot.className = 'fc-dot' + (index === _idx ? ' on' : '');
+        dot.setAttribute('data-goto', String(index));
+        dot.setAttribute('title', '第 ' + (index + 1) + ' 张');
+        dotBox.appendChild(dot);
+        dots.push(dot);
+      });
+      panel.appendChild(dotBox);
+    }
+    if (RC.flashcard && typeof RC.flashcard.bindPager === 'function') {
+      _pager = RC.flashcard.bindPager(panel, {
+        track: track,
+        slides: slides,
+        dots: dots,
+        index: _idx,
+        onChange: function (next) {
+          _selectCard(next, 'pager');
+        }
+      });
+    }
+    var reviewControls = document.createElement('div');
+    reviewControls.className = 'rv-review-controls';
+    var improveToggle = _button(
+      'toggle-improve',
+      _improveExpanded ? '改进 ▴' : '改进 ▾',
+      'rv-improve-toggle'
+    );
+    improveToggle.setAttribute('aria-expanded', String(_improveExpanded));
+    reviewControls.appendChild(improveToggle);
+    _appendImprovePanel(reviewControls, card);
+    panel.appendChild(reviewControls);
   }
 
-  function show() { _showingAns = true; render(); }
+  function _selectCard(index, reason) {
+    if (!_queue.length) return false;
+    var next = Math.max(
+      0,
+      Math.min(_queue.length - 1, Number(index || 0))
+    );
+    if (!Number.isFinite(next)) next = 0;
+    next = Math.round(next);
+    if (next === _idx) return false;
+    _rememberAndDeactivateSelections();
+    _invalidateCardRequests(true);
+    _idx = next;
+    _showingAnswer = false;
+    _improveExpanded = false;
+    var snapshot = _currentQueueSnapshot();
+    _saveLocal(snapshot, function () {
+      return snapshot.client_context_key === _contextCacheKey;
+    });
+    render();
+    _activateCurrentSelections();
+    _scheduleDecorate();
+    _notifyAssistant(reason === 'pager' ? 'card-swipe' : 'card-change');
+    return true;
+  }
 
-  function answer(ease) {
-    var c = _queue[_idx]; if (!c) return;
-    _showingAns = false;
-    if (ease === 1) _queue.push(c);   // Again:本地回队尾(真间隔由 Anki 调度,此处只管本批)
-    _idx++;
-    render(); _saveLocal();
-    var aid = 'a_' + Array.from(crypto.getRandomValues(new Uint8Array(8))).map(function (b) { return b.toString(16).padStart(2, '0'); }).join('');
-    var body = { aid: aid, card_id: c.id, ease: ease };
-    fetch('/pdf/api/review-answer', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-      .then(function (r) { return r.json(); })
-      .then(function (d) { if (!d || d.ok === false) { RC.toast && RC.toast('答题同步失败:' + ((d && d.error) || '?')); } })
-      .catch(function (e) {
-        if (RC.outbox && e && e.name === 'TypeError') { RC.outbox.send('rev', aid, '/pdf/api/review-answer', body); RC.toast && RC.toast('离线:答题已入队,恢复后同步'); }
-        else { RC.toast && RC.toast('答题同步失败'); }
+  function _changeCard(delta) {
+    if (!_queue.length) return;
+    _selectCard(_idx + delta, 'api');
+  }
+
+  function _showAnswer() {
+    if (!_current() || _showingAnswer) return;
+    _showingAnswer = true;
+    render();
+  }
+
+  function _answerAid() {
+    try {
+      return 'a_' + Array.prototype.map.call(
+        crypto.getRandomValues(new Uint8Array(8)),
+        function (byte) {
+          return byte.toString(16).padStart(2, '0');
+        }
+      ).join('');
+    } catch (_) {
+      return 'a_' + _hash(
+        String(Date.now()) + ':' + String(Math.random())
+      );
+    }
+  }
+
+  function _restoreRejectedAnswer(card, originalIndex, ease, pendingKey,
+      answerContextKey) {
+    _patchSharedCard(card, {
+      _st: 'learn',
+      _showBack: false,
+      _next: card && card._next || null,
+      _ratingPending: false,
+      _syncPending: false
+    }, 'review-reverted');
+    if (answerContextKey !== _contextCacheKey) {
+      _rememberRejectedAnswer(
+        answerContextKey,
+        card,
+        originalIndex,
+        ease
+      );
+      delete _ratingPending[pendingKey];
+      return true;
+    }
+    // Rejection can arrive after the user has already moved on, revealed the
+    // next card, selected one of its answers, or started an improvement draft.
+    // Treat the restoration as the same card transition as a pager move:
+    // deactivate the outgoing card and fence its async work before changing
+    // the queue cursor. Otherwise the restored card inherits the next card's
+    // answer/improvement UI and a fenced draft can leave the workspace busy
+    // forever.
+    _rememberAndDeactivateSelections();
+    _invalidateCardRequests(true);
+    _completed = _completed.filter(function (cardId) {
+      return String(cardId) !== String(card.id);
+    });
+    _queue = _queue.filter(function (queued) {
+      return String(queued && queued.id) !== String(card.id);
+    });
+    var insertAt = Math.max(
+      0,
+      Math.min(Number(originalIndex || 0), _queue.length)
+    );
+    _queue.splice(insertAt, 0, card);
+    _idx = insertAt;
+    _showingAnswer = false;
+    _improveExpanded = false;
+    delete _ratingPending[pendingKey];
+    _saveLocal(_currentQueueSnapshot());
+    render();
+    _activateCurrentSelections();
+    _scheduleDecorate();
+    _notifyAssistant('rating-restored');
+    return true;
+  }
+
+  function _answerCurrent(ease) {
+    ease = Number(ease || 0);
+    var card = _current();
+    if (!card || !_showingAnswer || ease < 1 || ease > 4) return;
+    var originalIndex = _idx;
+    var answerContextKey = _contextCacheKey;
+    var pendingKey = answerContextKey + ':' + _cardKey(card) + ':' +
+      originalIndex;
+    if (_ratingPending[pendingKey]) return;
+    _ratingPending[pendingKey] = true;
+    _patchSharedCard(card, {
+      _st: 'done',
+      _showBack: true,
+      _ratingPending: true,
+      _syncPending: false
+    }, 'review-pending');
+
+    _rememberAndDeactivateSelections();
+    _invalidateCardRequests(true);
+    _queue.splice(originalIndex, 1);
+    if (ease !== 1 &&
+        _completed.map(String).indexOf(String(card.id)) < 0) {
+      _completed.push(card.id);
+    }
+    _idx = Math.max(0, Math.min(originalIndex, _queue.length - 1));
+    _showingAnswer = false;
+    _improveExpanded = false;
+    var snapshot = _currentQueueSnapshot();
+    _saveLocal(snapshot, function () {
+      return snapshot.client_context_key === _contextCacheKey;
+    });
+    render();
+    _activateCurrentSelections();
+    _scheduleDecorate();
+    _notifyAssistant('card-rated');
+
+    var aid = _answerAid();
+    var payload = {
+      aid: aid,
+      card_id: card.id,
+      ease: ease
+    };
+    // @interaction review.answer.submit
+    fetch('/pdf/api/review-answer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }).then(function (response) {
+      return response.json().catch(function () {
+        return {};
+      }).then(function (data) {
+        if (!response.ok || !data || data.ok === false) {
+          var error = new Error(
+            String(data && data.error || ('HTTP ' + response.status))
+          );
+          error.reviewRejected = true;
+          throw error;
+        }
+        if (ease === 1) {
+          _patchSharedCard(card, {
+            _st: 'learn',
+            _showBack: false,
+            _next: data.next || {},
+            _ratingPending: false,
+            _syncPending: false
+          }, 'review-accepted');
+          if (answerContextKey === _contextCacheKey) {
+            if (!_queue.some(function (queued) {
+              return String(queued && queued.id) === String(card.id);
+            })) {
+              _queue.push(card);
+            }
+            _idx = Math.max(0, Math.min(_idx, _queue.length - 1));
+            var acceptedSnapshot = _currentQueueSnapshot();
+            _saveLocal(acceptedSnapshot, function () {
+              return acceptedSnapshot.client_context_key ===
+                _contextCacheKey;
+            });
+            render();
+            _activateCurrentSelections();
+            _scheduleDecorate();
+            _notifyAssistant('card-again-accepted');
+          } else {
+            var oldSnapshot = _queueSnapshot(
+              answerContextKey,
+              snapshot.cards.concat([card]),
+              snapshot.index,
+              snapshot.due_total,
+              snapshot.related_total,
+              snapshot.completed_ids
+            );
+            _saveLocal(oldSnapshot);
+          }
+        } else {
+          _patchSharedCard(card, {
+            _st: 'done',
+            _showBack: true,
+            _next: data.next || {},
+            _ratingPending: false,
+            _syncPending: false
+          }, 'review-accepted');
+        }
+        delete _ratingPending[pendingKey];
       });
+    }).catch(function (error) {
+      if (
+        error && error.name === 'TypeError' &&
+        RC.outbox && typeof RC.outbox.send === 'function'
+      ) {
+        try {
+          RC.outbox.send(
+            'rev',
+            aid,
+            '/pdf/api/review-answer',
+            payload
+          );
+          _patchSharedCard(card, {
+            _st: 'done',
+            _showBack: true,
+            _next: null,
+            _ratingPending: true,
+            _syncPending: true
+          }, 'review-queued');
+          _toast('离线：答题已入队，恢复后同步');
+          return;
+        } catch (_) {}
+      }
+      var restored = _restoreRejectedAnswer(
+        card,
+        originalIndex,
+        ease,
+        pendingKey,
+        answerContextKey
+      );
+      _toast(
+        '答题同步失败' + (restored ? '，卡片已放回复习队列' : '') + '：' +
+        String(error && error.message || '未知错误')
+      );
+    });
+  }
+
+  function _acceptExternalAnswer(event) {
+    var detail = event && event.detail || {};
+    var aid = String(detail.aid || '');
+    var cardId = Number(detail.cardId || 0);
+    var ease = Number(detail.ease || 0);
+    if (!aid || _externalAnswerAids[aid] ||
+        !Number.isInteger(cardId) || cardId <= 0 ||
+        ease < 1 || ease > 4) {
+      return;
+    }
+    _externalAnswerAids[aid] = true;
+    var aidKeys = Object.keys(_externalAnswerAids);
+    if (aidKeys.length > 200) delete _externalAnswerAids[aidKeys[0]];
+    var originalIndex = _queue.findIndex(function (card) {
+      return Number(card && card.id || 0) === cardId;
+    });
+    if (originalIndex < 0) return;
+    var card = _queue[originalIndex];
+    var wasCurrent = originalIndex === _idx;
+    if (wasCurrent) {
+      _rememberAndDeactivateSelections();
+      _invalidateCardRequests(true);
+    }
+    _queue.splice(originalIndex, 1);
+    if (ease === 1 && !detail.queued) {
+      _queue.push(card);
+      _patchSharedCard(card, {
+        _st: 'learn',
+        _showBack: false,
+        _next: detail.next || {},
+        _ratingPending: false,
+        _syncPending: false
+      }, 'review-accepted');
+    } else if (ease !== 1 &&
+        _completed.map(String).indexOf(String(card.id)) < 0) {
+      _completed.push(card.id);
+    }
+    if (originalIndex < _idx) _idx -= 1;
+    _idx = Math.max(0, Math.min(_idx, _queue.length - 1));
+    if (wasCurrent) {
+      _showingAnswer = false;
+      _improveExpanded = false;
+    }
+    var snapshot = _currentQueueSnapshot();
+    _saveLocal(snapshot, function () {
+      return snapshot.client_context_key === _contextCacheKey;
+    });
+    render();
+    _activateCurrentSelections();
+    _scheduleDecorate();
+    _notifyAssistant(detail.queued
+      ? 'card-rated-offline-copy'
+      : 'card-rated-copy');
+  }
+
+  function _messageText(element) {
+    if (!element) return '';
+    var clone = element.cloneNode(true);
+    clone.querySelectorAll(
+      '.rv-answer-picker,.rv-segment-picker,.asst-btm,.asst-fb-bar,' +
+      '.asst-followups,.rc-fu-box,.asst-clip,.asst-tool,.mfx-caret,' +
+      '.mfx-typing,.vc-bub-hd,.vc-inf-b,.vc-inf-pop'
+    ).forEach(function (node) {
+      node.remove();
+    });
+    return String(clone.innerText || clone.textContent || '')
+      .replace(/\s+\n/g, '\n')
+      .replace(/\n{3,}/g, '\n\n')
+      .trim();
+  }
+
+  function _questionFor(answer) {
+    var cursor = answer && answer.previousElementSibling;
+    while (cursor) {
+      if (cursor.classList && cursor.classList.contains('asst-u')) {
+        return _messageText(cursor);
+      }
+      cursor = cursor.previousElementSibling;
+    }
+    return '';
+  }
+
+  function _isEligibleAnswer(answer) {
+    if (!_mode || !answer || !answer.classList ||
+        !answer.classList.contains('asst-a')) {
+      return false;
+    }
+    if (answer.classList.contains('mfx-streaming') ||
+        answer.classList.contains('rc-turn') ||
+        answer.getAttribute('aria-busy') === 'true' ||
+        answer.querySelector('.mfx-typing,.mfx-caret,.asst-tool,.asst-undo,' +
+          '.asst-edit-card,.asst-hl-row,.vc-card,.vc-if')) {
+      return false;
+    }
+    if (!_questionFor(answer)) return false;
+    return _messageText(answer).length > 1;
+  }
+
+  function _recordSelection(element, record) {
+    var registry = _registry();
+    _selectionRecords[record.id] = {
+      id: record.id,
+      cardKey: record.meta.card_key,
+      element: element
+    };
+    if (!registry || typeof registry.upsert !== 'function') return;
+    try {
+      registry.upsert(record);
+      if (_mode && record.meta.card_key === _cardKey(_current()) &&
+          _selectionState[record.id]) {
+        _selectionSuppress = true;
+        registry.select(record.id, true);
+        _selectionSuppress = false;
+      }
+    } catch (_) {
+      _selectionSuppress = false;
+    }
+  }
+
+  function _decorateAnswer(answer) {
+    if (!_isEligibleAnswer(answer) || answer.dataset.reviewPickReady === '1') {
+      return;
+    }
+    var card = _current();
+    if (!card) return;
+    var question = _questionFor(answer);
+    var answerText = _messageText(answer);
+    var identity = _cardIdentity(card);
+    var cardKey = _cardKey(card);
+    var answerId = 'review-answer:' + _hash(
+      cardKey + '\n' + question + '\n' + answerText
+    );
+    answer.dataset.reviewPickReady = '1';
+    answer.dataset.reviewAnswerId = answerId;
+    answer.dataset.reviewCardKey = cardKey;
+
+    var picker = document.createElement('button');
+    picker.type = 'button';
+    picker.className = 'rv-answer-picker';
+    picker.setAttribute('data-action', 'select-answer');
+    picker.setAttribute('data-selection-id', answerId);
+    picker.textContent = '＋ 选用整条回答';
+    answer.insertBefore(picker, answer.firstChild);
+
+    var segments = Array.prototype.slice.call(
+      answer.querySelectorAll('p,li,h1,h2,h3,h4')
+    ).filter(function (segment) {
+      if (segment.closest('.rv-answer-picker,.rv-segment-picker')) return false;
+      if (segment.tagName === 'P' && segment.closest('li')) return false;
+      return _messageText(segment).length > 0;
+    });
+    var childIds = [];
+    segments.forEach(function (segment, index) {
+      var text = _messageText(segment);
+      var childId = answerId + ':part:' + index + ':' +
+        _hash(segment.tagName + '\n' + text);
+      childIds.push(childId);
+      segment.classList.add('rv-selectable-segment');
+      segment.dataset.reviewSelectionId = childId;
+      var button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'rv-segment-picker';
+      button.setAttribute('data-action', 'select-segment');
+      button.setAttribute('data-selection-id', childId);
+      button.textContent = '＋';
+      button.title = '选用这一段';
+      segment.appendChild(button);
+      _recordSelection(segment, {
+        id: childId,
+        kind: 'review-answer-segment',
+        label: '复习回答段落 ' + (index + 1),
+        text: text,
+        parentId: answerId,
+        source: {
+          surface: 'assistant-review',
+          card_id: identity.card_id,
+          entity_id: identity.entity_id
+        },
+        meta: {
+          review_mode: true,
+          answer_id: answerId,
+          segment_index: index,
+          question: question,
+          card_key: cardKey,
+          card: identity
+        }
+      });
+    });
+    _recordSelection(answer, {
+      id: answerId,
+      kind: 'review-answer',
+      label: '复习整条回答',
+      text: answerText,
+      covers: childIds,
+      source: {
+        surface: 'assistant-review',
+        card_id: identity.card_id,
+        entity_id: identity.entity_id
+      },
+      meta: {
+        review_mode: true,
+        answer_id: answerId,
+        segment_index: -1,
+        question: question,
+        card_key: cardKey,
+        card: identity
+      }
+    });
+    _refreshSelectionUi();
+  }
+
+  function _cleanupDetachedSelections() {
+    var registry = _registry();
+    Object.keys(_selectionRecords).forEach(function (id) {
+      var record = _selectionRecords[id];
+      if (record.element && record.element.isConnected) return;
+      if (registry && typeof registry.isSelected === 'function') {
+        try {
+          if (!_selectionSuppress && registry.isSelected(id)) {
+            _selectionState[id] = true;
+          }
+          _selectionSuppress = true;
+          if (typeof registry.remove === 'function') registry.remove(id);
+          _selectionSuppress = false;
+        } catch (_) {
+          _selectionSuppress = false;
+        }
+      }
+      delete _selectionRecords[id];
+    });
+  }
+
+  function _decorateAnswers() {
+    _decorateTimer = 0;
+    if (!_mode) return;
+    var thread = document.getElementById('asst-thread');
+    if (!thread) return;
+    _cleanupDetachedSelections();
+    Array.prototype.forEach.call(
+      thread.querySelectorAll('.asst-a'),
+      _decorateAnswer
+    );
+  }
+
+  function _scheduleDecorate() {
+    clearTimeout(_decorateTimer);
+    _decorateTimer = setTimeout(_decorateAnswers, 140);
+  }
+
+  function _setSelection(id, on) {
+    var registry = _registry();
+    if (!id) return;
+    _selectionState[id] = !!on;
+    if (registry) {
+      try {
+        if (on) registry.select(id, true);
+        else registry.deselect(id);
+      } catch (_) {}
+    }
+    _refreshSelectionUi();
+  }
+
+  function _toggleSelection(id) {
+    var registry = _registry();
+    var selected = !!_selectionState[id];
+    if (registry && typeof registry.isSelected === 'function') {
+      try {
+        selected = registry.isSelected(id);
+      } catch (_) {}
+    }
+    _setSelection(id, !selected);
+  }
+
+  function _rememberAndDeactivateSelections() {
+    var registry = _registry();
+    if (!registry) return;
+    _selectionSuppress = true;
+    try {
+      Object.keys(_selectionRecords).forEach(function (id) {
+        if (registry.isSelected(id)) _selectionState[id] = true;
+        registry.deselect(id);
+      });
+    } catch (_) {}
+    _selectionSuppress = false;
+    _refreshSelectionUi();
+  }
+
+  function _activateCurrentSelections() {
+    var registry = _registry();
+    if (!registry || !_mode) return;
+    var cardKey = _cardKey(_current());
+    _selectionSuppress = true;
+    try {
+      Object.keys(_selectionRecords).forEach(function (id) {
+        var record = _selectionRecords[id];
+        if (record.cardKey === cardKey && _selectionState[id]) {
+          registry.select(id, true);
+        } else {
+          registry.deselect(id);
+        }
+      });
+    } catch (_) {}
+    _selectionSuppress = false;
+    _refreshSelectionUi();
+  }
+
+  function selectedPairs() {
+    if (!_mode) return [];
+    var registry = _registry();
+    var items = [];
+    if (registry && typeof registry.snapshot === 'function') {
+      try {
+        items = registry.snapshot({ maxText: 20000, limit: 120 }).items || [];
+      } catch (_) {}
+    }
+    var cardKey = _cardKey(_current());
+    items = items.filter(function (item) {
+      return item && item.meta && item.meta.review_mode === true &&
+        item.meta.card_key === cardKey &&
+        (item.kind === 'review-answer' ||
+          item.kind === 'review-answer-segment');
+    });
+    var grouped = Object.create(null);
+    items.forEach(function (item) {
+      var answerId = String(item.meta.answer_id || item.id);
+      if (!grouped[answerId]) {
+        grouped[answerId] = {
+          question: String(item.meta.question || ''),
+          parts: [],
+          selection_ids: [],
+          card: item.meta.card || _cardIdentity(_current())
+        };
+      }
+      grouped[answerId].parts.push({
+        index: Number(item.meta.segment_index),
+        text: String(item.text || '')
+      });
+      grouped[answerId].selection_ids.push(item.id);
+    });
+    return Object.keys(grouped).sort().map(function (key) {
+      var group = grouped[key];
+      group.parts.sort(function (a, b) {
+        return a.index - b.index;
+      });
+      return {
+        question: group.question,
+        answer: group.parts.map(function (part) {
+          return part.text;
+        }).filter(Boolean).join('\n\n'),
+        selection_ids: group.selection_ids.slice(),
+        card: group.card
+      };
+    }).filter(function (pair) {
+      return pair.answer.trim().length > 0;
+    });
+  }
+
+  function _refreshSelectionUi() {
+    var registry = _registry();
+    Object.keys(_selectionRecords).forEach(function (id) {
+      var record = _selectionRecords[id];
+      if (!record.element || !record.element.isConnected) return;
+      var selected = !!_selectionState[id];
+      var effective = selected;
+      if (registry) {
+        try {
+          selected = registry.isSelected(id);
+          effective = registry.isEffective(id);
+          if (!_selectionSuppress && selected) _selectionState[id] = true;
+        } catch (_) {}
+      }
+      record.element.classList.toggle('rv-picked', selected);
+      record.element.classList.toggle('rv-covered', selected && !effective);
+      var control = record.element.querySelector(
+        ':scope > [data-selection-id="' +
+        (window.CSS && CSS.escape ? CSS.escape(id) : id.replace(/"/g, '\\"')) +
+        '"]'
+      );
+      if (control) {
+        control.classList.toggle('on', selected);
+        control.setAttribute('aria-pressed', String(selected));
+        if (control.classList.contains('rv-answer-picker')) {
+          control.textContent = selected
+            ? '✓ 已选整条回答'
+            : '＋ 选用整条回答';
+        } else {
+          control.textContent = selected ? '✓' : '＋';
+        }
+      }
+    });
+    var count = document.getElementById('rv-selection-count');
+    if (count) {
+      var pairs = selectedPairs();
+      count.textContent = pairs.length
+        ? '已选 ' + pairs.length + ' 组问答，可生成新草稿。'
+        : '尚未选用回答：请在下方回答中选整条或具体段落。';
+      count.classList.toggle('ready', pairs.length > 0);
+    }
+  }
+
+  function _draftPayload(target, sourceCard, sourcePairs, verbosity) {
+    var card = sourceCard || {};
+    var identity = _cardIdentity(card);
+    return {
+      entity_id: identity.entity_id,
+      entity_index: identity.entity_index,
+      card: {
+        id: card.id,
+        local_id: identity.local_id,
+        entity_id: identity.entity_id,
+        entity_index: identity.entity_index,
+        anki_note_id: card.note_id,
+        front: String(card.question || card.front || ''),
+        back: String(card.answer || card.back || ''),
+        source_ref: identity.source_ref,
+        source_url: identity.source_url,
+        deck: identity.deck
+      },
+      target: target,
+      pairs: (sourcePairs || []).map(function (pair) {
+        return {
+          question: pair.question,
+          answer: pair.answer
+        };
+      }),
+      verbosity: verbosity === 'concise' ? 'concise' : 'verbose'
+    };
+  }
+
+  async function _prepareDraft(target) {
+    if ((_draftState && _draftState.busy) || _anyCommitBusy()) return;
+    var pairs = selectedPairs();
+    if (!pairs.length) {
+      _toast('请先在下方复习对话中选用一条回答或具体段落');
+      return;
+    }
+    var card = _current();
+    if (!card || !card.entity_id) {
+      _toast('这张卡缺少稳定实体编号，不能安全生成改进草稿');
+      return;
+    }
+    var cardKey = _cardKey(card);
+    var requestEpoch = ++_draftRequestEpoch;
+    _commitRequestEpoch += 1;
+    _improveExpanded = true;
+    var payload = _draftPayload(
+      target,
+      Object.assign({}, card),
+      pairs.slice(),
+      _improveMode
+    );
+    _draftState = {
+      ok: false,
+      error: '正在生成草稿…',
+      busy: true,
+      _card_key: cardKey,
+      _request_epoch: requestEpoch
+    };
+    _commitState = Object.create(null);
+    render();
+    try {
+      var response = await fetch('/api/assistant/card-improvement-draft', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!_cardRequestCurrent(requestEpoch, cardKey, 'draft')) return;
+      var data = await response.json();
+      if (!_cardRequestCurrent(requestEpoch, cardKey, 'draft')) return;
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || ('HTTP ' + response.status));
+      }
+      _draftState = Object.assign({}, data, {
+        busy: false,
+        _card_key: cardKey,
+        _request_epoch: requestEpoch
+      });
+    } catch (error) {
+      if (!_cardRequestCurrent(requestEpoch, cardKey, 'draft')) return;
+      _draftState = {
+        ok: false,
+        busy: false,
+        error: String(error && error.message || '草稿生成失败'),
+        _card_key: cardKey,
+        _request_epoch: requestEpoch
+      };
+    }
+    if (!_cardRequestCurrent(requestEpoch, cardKey, 'draft')) return;
+    render();
+  }
+
+  async function _commitDraft(target) {
+    if (!_draftState || !_draftState.ok || !_draftState.draft_id) return;
+    if (_anyCommitBusy() ||
+        (_commitState[target] && _commitState[target].ok)) return;
+    var draft = _draftState;
+    var draftId = String(draft.draft_id);
+    var cardKey = String(draft._card_key || _cardKey(_current()));
+    if (cardKey !== _cardKey(_current())) return;
+    var label = target === 'anki' ? 'Anki 新卡' : '原笔记';
+    if (!window.confirm('确认把当前预览写入' + label + '？')) return;
+    var requestEpoch = ++_commitRequestEpoch;
+    _commitState[target] = { busy: true, ok: false, message: '' };
+    render();
+    try {
+      var response = await fetch('/api/assistant/card-improvement-commit', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          draft_id: draftId,
+          target: target
+        })
+      });
+      if (!_cardRequestCurrent(requestEpoch, cardKey, 'commit') ||
+          !_draftState || String(_draftState.draft_id || '') !== draftId) {
+        return;
+      }
+      var data = await response.json();
+      if (!_cardRequestCurrent(requestEpoch, cardKey, 'commit') ||
+          !_draftState || String(_draftState.draft_id || '') !== draftId) {
+        return;
+      }
+      if (!response.ok || !data.ok) {
+        throw new Error(data.error || ('HTTP ' + response.status));
+      }
+      var summary = data.summary || data.message || '';
+      if (!summary) {
+        try {
+          summary = JSON.stringify(data.result || data);
+        } catch (_) {
+          summary = '执行完成';
+        }
+      }
+      _commitState[target] = {
+        busy: false,
+        ok: true,
+        message: String(summary || '执行完成')
+      };
+    } catch (error) {
+      if (!_cardRequestCurrent(requestEpoch, cardKey, 'commit') ||
+          !_draftState || String(_draftState.draft_id || '') !== draftId) {
+        return;
+      }
+      _commitState[target] = {
+        busy: false,
+        ok: false,
+        message: String(error && error.message || '提交失败')
+      };
+    }
+    if (!_cardRequestCurrent(requestEpoch, cardKey, 'commit') ||
+        !_draftState || String(_draftState.draft_id || '') !== draftId) {
+      return;
+    }
+    render();
+  }
+
+  function _openSource() {
+    var card = _current() || {};
+    var legacySource = _legacyMaterialSource(card);
+    var sourceRef = String(
+      card.source_ref || (legacySource && legacySource.source_ref) || ''
+    );
+    var bookSource = _bookSourceRef(sourceRef);
+    if (bookSource) {
+      try {
+        var adapter = RC.adapter && RC.adapter();
+        var host = adapter && adapter._host && adapter._host.asst;
+        if (host && typeof host.goToInBook === 'function') {
+          host.goToInBook(bookSource.file, bookSource.page);
+          return true;
+        }
+      } catch (_) {}
+    }
+    var candidates = [String(card.source_url || '')];
+    if (/^(?:https?|obsidian):\/\//i.test(sourceRef)) {
+      candidates.push(sourceRef);
+    } else if (/^web:https?:\/\//i.test(sourceRef)) {
+      candidates.push(sourceRef.slice(4));
+    }
+    var safe = '';
+    for (var index = 0; index < candidates.length && !safe; index++) {
+      safe = _safeSourceUrl(candidates[index]);
+    }
+    if (safe) {
+      var url = new URL(safe);
+      if (url.protocol === 'obsidian:') {
+        try {
+          if (window.location && typeof window.location.assign === 'function') {
+            window.location.assign(safe);
+          } else {
+            window.location.href = safe;
+          }
+          return true;
+        } catch (_) {}
+      } else {
+        try {
+          if (typeof window.open !== 'function') throw new Error('open unavailable');
+          // With `noopener`, Chromium/Safari are allowed to return null even
+          // after successfully opening the new tab. A non-throwing call is the
+          // success signal; using the return value would navigate twice.
+          window.open(safe, '_blank', 'noopener,noreferrer');
+          return true;
+        } catch (_) {}
+      }
+    }
+    var detail = {
+      handled: false,
+      source_ref: sourceRef,
+      source_url: '',
+      card: _cardForAssistant(card)
+    };
+    try {
+      window.dispatchEvent(new CustomEvent('rc:open-card-source', {
+        detail: detail
+      }));
+    } catch (_) {}
+    if (!detail.handled) {
+      _toast('这张卡尚未记录可直接打开的原笔记链接');
+    }
+    return !!detail.handled;
+  }
+
+  function _workspaceClick(event) {
+    if (event && event.__rcReviewHandled) return;
+    var root = _workspace();
+    var button = event.target && event.target.closest
+      ? event.target.closest('button[data-action]')
+      : null;
+    if (!button || !root || !root.contains(button)) return;
+    if (button.disabled) return;
+    try { event.__rcReviewHandled = true; } catch (_) {}
+    var action = button.getAttribute('data-action');
+    if (action === 'previous') _changeCard(-1);
+    else if (action === 'next') _changeCard(1);
+    else if (action === 'reload') loadQueue(true);
+    else if (action === 'toggle-card') {
+      _cardExpanded = !_cardExpanded;
+      render();
+    } else if (action === 'toggle-improve') {
+      _cardExpanded = true;
+      _improveExpanded = !_improveExpanded;
+      render();
+    } else if (action === 'show-answer') {
+      _showAnswer();
+    } else if (action === 'rate') {
+      _answerCurrent(button.getAttribute('data-ease'));
+    }
+    else if (action === 'open-source') _openSource();
+    else if (action === 'verbosity') {
+      var nextMode = button.getAttribute('data-mode') === 'concise'
+        ? 'concise'
+        : 'verbose';
+      if (nextMode !== _improveMode) {
+        _invalidateCardRequests(true);
+        _improveMode = nextMode;
+      }
+      render();
+    } else if (action === 'prepare-draft') {
+      _prepareDraft(button.getAttribute('data-target') || 'anki');
+    } else if (action === 'commit') {
+      _commitDraft(button.getAttribute('data-target') || '');
+    }
+  }
+
+  function _threadClick(event) {
+    if (!_mode) return;
+    var button = event.target && event.target.closest
+      ? event.target.closest(
+        'button[data-action="select-answer"],' +
+        'button[data-action="select-segment"]'
+      )
+      : null;
+    if (!button) return;
+    _toggleSelection(button.getAttribute('data-selection-id') || '');
+  }
+
+  function setMode(on) {
+    on = on === true || on === 'review';
+    if (!_mounted && !mount()) {
+      _mode = on;
+      return _mode ? 'review' : 'normal';
+    }
+    if (_mode === on) {
+      if (_mode) {
+        _scheduleDecorate();
+        if (!_queue.length) loadQueue(false);
+      }
+      return _mode ? 'review' : 'normal';
+    }
+    _rememberAndDeactivateSelections();
+    _mode = on;
+    if (!_mode) {
+      _queueRequestEpoch += 1;
+      _queueBusy = false;
+      _showingAnswer = false;
+      _cardExpanded = true;
+      _improveExpanded = false;
+      _invalidateCardRequests(true);
+      render();
+    }
+    var workspace = _workspace();
+    var pane = document.getElementById('side-pane-asst');
+    var toggle = document.getElementById('asst-review-toggle');
+    if (workspace) workspace.hidden = !_mode;
+    if (pane) pane.classList.toggle('review-mode', _mode);
+    if (toggle) {
+      toggle.classList.toggle('on', _mode);
+      toggle.setAttribute('aria-pressed', String(_mode));
+      toggle.textContent = _mode ? '✓ 复习模式' : '复习模式';
+    }
+    _notifyAssistant('mode-toggle');
+    if (_mode) {
+      _activateCurrentSelections();
+      _scheduleDecorate();
+      var activeContextKey = _clientContextKey(_currentContext());
+      if (!_queue.length || activeContextKey !== _contextCacheKey) {
+        loadQueue(false);
+      }
+    }
+    return _mode ? 'review' : 'normal';
   }
 
   function injectCss() {
     if (document.getElementById('rc-review-css')) return;
-    var st = document.createElement('style'); st.id = 'rc-review-css';
-    st.textContent = '#rc-review-body{padding:12px;display:flex;flex-direction:column;gap:10px;min-height:0}' +
-      '.rv-head{font-size:12px;color:#8a9bb4;display:flex;align-items:center;gap:8px}' +
-      '.rv-x{margin-left:auto;background:transparent;border:1px solid #2a3550;color:#7a8497;border-radius:6px;padding:2px 9px;cursor:pointer}' +
-      '.rv-deck{font-size:10px;color:#5a6680}' +
-      '.rv-card{background:#0d1322;border:1px solid #1f2740;border-radius:10px;padding:14px;font-size:15px;line-height:1.6;color:#e6e6f0;overflow:auto;max-height:46vh}' +
-      '.rv-card img{max-width:100%}' +
-      '.rv-show{background:#244470;border:1px solid #3b6db5;color:#cfe6ff;border-radius:9px;padding:10px;font-size:14px;cursor:pointer;-webkit-tap-highlight-color:transparent}' +
-      '.rv-eases{display:flex;gap:7px}' +
-      '.rv-e{flex:1;border:1px solid #2a3550;border-radius:9px;padding:10px 0;font-size:13px;cursor:pointer;background:#1a2540;color:#cfe6ff;-webkit-tap-highlight-color:transparent}' +
-      '.rv-e1{border-color:#7f1d1d;color:#fca5a5}.rv-e2{border-color:#78350f;color:#fcd34d}' +
-      '.rv-e3{border-color:#14532d;color:#86efac}.rv-e4{border-color:#1e3a8a;color:#93c5fd}' +
-      '.rv-dim,.rv-done{color:#8a9bb4;font-size:13px;padding:16px;text-align:center}' +
-      '.rv-btn{margin-top:8px;background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:7px;padding:6px 14px;cursor:pointer}';
-    document.head.appendChild(st);
+    var style = document.createElement('style');
+    style.id = 'rc-review-css';
+    style.textContent =
+      '#asst-review-toggle.on{background:#2c2652!important;border-color:#8b7bd1!important;color:#eee8ff!important}' +
+      '#asst-review-workspace{flex:0 1 min(54vh,520px);height:min(54vh,520px);max-height:54%;min-height:0;overflow:hidden;padding:10px 10px 6px;border:0;background:transparent;color:var(--rc-text,#e6e6f0);font-family:var(--rc-font-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif);overscroll-behavior:contain;touch-action:auto;scrollbar-width:none}' +
+      '#asst-review-workspace[hidden]{display:none!important}' +
+      '#asst-review-workspace.rv-card-collapsed,#asst-review-workspace.rv-card-empty{flex-basis:auto;height:auto}' +
+      '#asst-review-workspace::-webkit-scrollbar{display:none}' +
+      '#rc-review-body{display:flex;flex-direction:column;gap:10px;height:100%;min-height:0;overflow:hidden}' +
+      '.rv-head{display:flex;align-items:center;gap:6px;min-height:28px;padding:2px 3px;font-size:12px;color:var(--rc-text-muted,#8a9bb4)}' +
+      '.rv-stats{flex:1;min-width:0;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
+      '.rv-nav,.rv-btn{border:1px solid var(--rc-border,#2a3550);border-radius:var(--rc-radius-md,8px);padding:5px 9px;background:rgba(22,32,58,.72);color:var(--rc-text-strong,#cfe6ff);cursor:pointer;font:inherit;-webkit-tap-highlight-color:transparent;backdrop-filter:blur(10px);-webkit-backdrop-filter:blur(10px)}' +
+      '.rv-nav:disabled,.rv-btn:disabled{opacity:.35;cursor:default}' +
+      '.rv-card-toggle,.rv-improve-toggle{border:1px solid var(--rc-border-control,#35446b);border-radius:var(--rc-radius-md,8px);padding:5px 8px;background:rgba(22,32,58,.72);color:var(--rc-text-strong,#cbd9f5);cursor:pointer;font:inherit;white-space:nowrap}' +
+      '.rv-improve-toggle{border-color:rgba(185,168,255,.46);background:rgba(70,55,112,.34);color:#eee8ff}' +
+      '.rv-card-toggle:disabled,.rv-improve-toggle:disabled{opacity:.4;cursor:default}' +
+      '.rv-card-panel{display:flex;flex:1 1 auto;flex-direction:column;min-height:0;overflow:hidden}' +
+      '.rv-card-panel[hidden],.rv-improve-panel[hidden]{display:none!important}' +
+      '.rv-card-track{width:100%;flex:1 1 auto;min-height:0;overflow-y:hidden;touch-action:auto}' +
+      '.rv-card-dots{flex:0 0 auto}' +
+      '.rv-card-slide{height:100%;min-height:0;overflow:hidden;padding:0 1px}' +
+      '.rv-review-card.vc-inflow{display:flex;flex-direction:column;width:100%!important;height:100%;max-width:none!important;max-height:100%!important;overflow:hidden;margin:0!important}' +
+      '.rv-review-card .vc-card-bd.rv-review-layout{display:flex;flex:1 1 auto;flex-direction:column;min-height:0;overflow:hidden!important}' +
+      '.rv-review-card .fc-wrap{display:flex;flex:1 1 auto;flex-direction:column;min-height:0;overflow:hidden;margin:0}' +
+      '.rv-review-card .fc-wrap>.fc-track{flex:1 1 auto;min-height:0}' +
+      '.rv-review-card .fc-wrap>.fc-slide,.rv-review-card .fc-wrap>.fc-track>.fc-slide{height:100%;min-height:0;overflow:hidden}' +
+      '.rv-review-card .fc-bare .fc-card{box-sizing:border-box;height:100%;max-height:none;overflow:hidden;background:transparent;border:0;padding:5px 0;box-shadow:none}' +
+      '.rv-meta{display:flex;flex:0 0 auto;justify-content:space-between;gap:10px;margin:0 0 8px;padding-bottom:7px;border-bottom:1px solid rgba(255,255,255,.08);font-size:12px;color:var(--rc-text-muted,#8a9bb4)}' +
+      '.rv-reason{display:none!important}' +
+      '.rv-card-provenance[hidden]{display:none!important}' +
+      '.rv-card-extra{margin:10px 0 0;border:1px solid rgba(255,255,255,.10);border-radius:8px;padding:0 9px;background:rgba(14,21,37,.32);color:var(--rc-text-muted,#8a9bb4);font-size:12px}' +
+      '.rv-card-extra>summary{padding:7px 0;cursor:pointer;color:var(--rc-text-strong,#cbd9f5);list-style-position:inside}' +
+      '.rv-card-extra[open]{padding-bottom:8px}.rv-card-extra[open]>summary{border-bottom:1px solid rgba(255,255,255,.08);margin-bottom:7px}' +
+      '.rv-review-controls{display:flex;flex:0 1 45%;flex-direction:column;min-height:0;max-height:45%;overflow:hidden;padding-top:7px}' +
+      '.rv-review-controls>.rv-improve-toggle{flex:0 0 auto;width:100%}' +
+      '.rv-improve-panel{display:flex;flex:1 1 auto;flex-direction:column;gap:9px;max-height:none;min-height:0;overflow-y:auto;-webkit-overflow-scrolling:touch;overscroll-behavior:contain;scrollbar-width:none;margin-top:7px;padding:11px 0 1px;border:0;border-top:1px solid rgba(255,255,255,.10);border-radius:0;background:transparent}' +
+      '.rv-improve-panel::-webkit-scrollbar{width:0;height:0;display:none}' +
+      '.rv-selection-count{font-size:12px;color:var(--rc-text-muted,#75839e);line-height:1.45}' +
+      '.rv-selection-count.ready{color:#78d6ae}' +
+      '.rv-improve-modes{display:grid;grid-template-columns:1fr 1fr;padding:3px;background:rgba(14,21,37,.54);border:1px solid var(--rc-border,#2a3550);border-radius:9px;gap:3px}' +
+      '.rv-mode{border:0;border-radius:6px;padding:7px 8px;background:transparent;color:var(--rc-text-muted,#8a9bb4);font-size:12px;cursor:pointer}' +
+      '.rv-mode.on{background:#2c2652;color:#e5ddff;box-shadow:inset 0 0 0 1px #6d5fb3}' +
+      '.rv-actions{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:6px}' +
+      '.rv-action{border:1px solid var(--rc-border-control,#35446b);border-radius:8px;padding:8px;background:rgba(22,32,58,.70);color:var(--rc-text-strong,#cbd9f5);font-size:12px;cursor:pointer;white-space:normal;line-height:1.35}' +
+      '.rv-action:disabled{opacity:.45;cursor:default}' +
+      '.rv-action:first-child{grid-column:1/-1}' +
+      '.rv-action.rv-all{border-color:#3d775c;background:#173025;color:#bce8d2}' +
+      '.rv-action-note{font-size:12px;line-height:1.45;color:var(--rc-text-muted,#687792)}' +
+      '.rv-dim,.rv-done{color:#8a9bb4;font-size:12px;padding:14px;text-align:center}' +
+      '.rv-draft{border:0;border-top:1px solid rgba(185,168,255,.20);padding:10px 0 0;background:transparent;display:flex;flex-direction:column;gap:8px}' +
+      '.rv-draft-head{font-size:13px;color:#ded6ff;font-weight:700}' +
+      '.rv-draft-title{font-size:12px;color:#b9a8ff;font-weight:700;margin-top:2px}' +
+      '.rv-draft-cards{min-width:0}.rv-draft-learning-card.vc-inflow{margin:0!important;width:100%!important}' +
+      '.rv-note-preview,.rv-trace pre{margin:0;max-height:180px;overflow:auto;white-space:pre-wrap;word-break:break-word;border:1px solid #2d3654;border-radius:7px;padding:7px;background:#0a1020;color:#cbd7ee;font:11px/1.5 ui-monospace,SFMono-Regular,Menlo,monospace}' +
+      '.rv-trace{font-size:10px;color:#8090ae}.rv-trace summary{cursor:pointer}' +
+      '.rv-commit-actions{display:grid;grid-template-columns:1fr;gap:5px}' +
+      '.rv-commit{border:1px solid #4a8065;border-radius:8px;padding:7px;background:#183226;color:#c6f2d8;font-size:11px;cursor:pointer}' +
+      '.rv-commit:disabled{opacity:.6;cursor:default}' +
+      '.rv-error,.rv-success{font-size:10px;line-height:1.45;padding:5px 7px;border-radius:6px;word-break:break-word}' +
+      '.rv-error{color:#fecaca;background:#3b171c}.rv-success{color:#bbf7d0;background:#123523}' +
+      '.rv-answer-picker{display:block;margin:0 0 7px auto;border:1px dashed #536481;border-radius:12px;padding:3px 9px;background:#111a2d;color:#91a3c4;font-size:10px;cursor:pointer}' +
+      '.rv-answer-picker.on{border-style:solid;border-color:#60a5fa;background:#15345f;color:#dcecff}' +
+      '.rv-selectable-segment{position:relative;padding-right:27px!important;transition:background .12s,box-shadow .12s}' +
+      '.rv-segment-picker{position:absolute;right:2px;top:2px;width:21px;height:21px;border:1px solid #536481;border-radius:50%;padding:0;background:#111a2d;color:#91a3c4;font-size:12px;line-height:19px;text-align:center;cursor:pointer}' +
+      '.rv-segment-picker.on{border-color:#60a5fa;background:#2563a8;color:#fff}' +
+      '.rv-selectable-segment.rv-picked{background:rgba(59,130,246,.12);box-shadow:-3px 0 0 rgba(96,165,250,.75)}' +
+      '.rv-selectable-segment.rv-covered{opacity:.62}' +
+      '.asst-a.rv-picked{box-shadow:0 0 0 2px rgba(96,165,250,.7) inset}' +
+      '#side-pane-asst:not(.review-mode) .rv-answer-picker,#side-pane-asst:not(.review-mode) .rv-segment-picker{display:none!important}' +
+      '@media(max-height:620px){#asst-review-workspace{flex-basis:min(48vh,360px);height:min(48vh,360px);max-height:48%;min-height:0}}';
+    document.head.appendChild(style);
+  }
+
+  function _removeLegacySurface() {
+    Array.prototype.forEach.call(document.querySelectorAll(
+      '#ep-side-tabs > [data-pane="review"],' +
+      '#ep-side > .ep-side-pane[data-pane="review"],' +
+      '#grammar-tabs > [data-pane="review"],' +
+      '#grammar-panel > .side-pane[data-pane="review"],' +
+      '#rc-review-pane'
+    ), function (node) {
+      if (node.id !== 'asst-review-workspace') node.remove();
+    });
   }
 
   function mount() {
-    var tabs = document.getElementById('ep-side-tabs');
-    var side = document.getElementById('ep-side');
-    if (!tabs || !side) return false;
-    if (document.querySelector('#ep-side-tabs [data-pane="review"]')) return true;
+    if (_mounted) return true;
+    var pane = document.getElementById('side-pane-asst');
+    var quick = document.getElementById('asst-quick');
+    var thread = document.getElementById('asst-thread');
+    if (!pane || !quick || !thread) return false;
+
+    _removeLegacySurface();
     injectCss();
-    var b = document.createElement('button');
-    b.className = 'ep-side-tab'; b.dataset.pane = 'review'; b.title = '复习';
-    b.innerHTML = '<svg class="si" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="5" width="16" height="14" rx="2"/><path d="M8 3v4M16 3v4M4 11h16"/></svg><span class="ep-side-tab-lb">复习</span>';
-    b.addEventListener('click', function () { try { RC.sidedrawer.setTab('review'); } catch (e) {} loadQueue(false); });
-    var sp = tabs.querySelector('.ep-side-tab-sp');
-    tabs.insertBefore(b, sp || null);
-    var pane = document.createElement('div');
-    pane.className = 'ep-side-pane'; pane.dataset.pane = 'review';
-    pane.innerHTML = '<div id="rc-review-body"><div class="rv-dim">点开即拉当日到期卡</div></div>';
-    side.appendChild(pane);
+
+    var toggle = document.getElementById('asst-review-toggle');
+    if (!toggle) {
+      toggle = _button('toggle-review', '复习模式', '');
+      toggle.id = 'asst-review-toggle';
+      toggle.setAttribute('aria-pressed', 'false');
+      quick.insertBefore(toggle, quick.firstChild);
+    }
+
+    var workspace = _workspace();
+    if (!workspace) {
+      workspace = document.createElement('section');
+      workspace.id = 'asst-review-workspace';
+      workspace.hidden = true;
+      workspace.setAttribute('aria-label', '复习卡片工作区');
+      var body = document.createElement('div');
+      body.id = 'rc-review-body';
+      var initial = document.createElement('div');
+      initial.className = 'rv-dim';
+      initial.textContent = '开启复习模式后查找当前内容的相关卡';
+      body.appendChild(initial);
+      workspace.appendChild(body);
+      pane.insertBefore(workspace, thread);
+    }
+
+    quick.addEventListener('click', function (event) {
+      var button = event.target && event.target.closest
+        ? event.target.closest('button[data-action="toggle-review"]')
+        : null;
+      if (button && quick.contains(button)) setMode(!_mode);
+    });
+    workspace.addEventListener('click', _workspaceClick);
+    thread.addEventListener('click', _threadClick);
+
+    _observer = new MutationObserver(function () {
+      _scheduleDecorate();
+    });
+    _observer.observe(thread, {
+      childList: true,
+      subtree: true,
+      attributes: true,
+      attributeFilter: ['class', 'aria-busy']
+    });
+
+    var registry = _registry();
+    if (registry && typeof registry.subscribe === 'function') {
+      try {
+        _selectionUnsubscribe = registry.subscribe(function (event) {
+          if (_selectionSuppress || !event ||
+              !_selectionRecords[event.id]) return;
+          try {
+            _selectionState[event.id] = registry.isSelected(event.id);
+          } catch (_) {}
+          _refreshSelectionUi();
+        });
+      } catch (_) {}
+    }
+
+    _mounted = true;
     return true;
   }
-  var _mt = setInterval(function () { if (mount()) clearInterval(_mt); }, 600);
-  setTimeout(function () { clearInterval(_mt); }, 25000);
 
-  RC.review = { reload: function () { loadQueue(true); }, show: show, answer: answer, _mount: mount };
+  RC.review = {
+    mode: function () {
+      return _mode ? 'review' : 'normal';
+    },
+    currentCard: function () {
+      var card = _current();
+      return card ? Object.assign({}, card) : null;
+    },
+    selectedPairs: selectedPairs,
+    setMode: setMode,
+    reload: function () {
+      return loadQueue(true);
+    },
+    load: function () {
+      return loadQueue(false);
+    },
+    previous: function () {
+      _changeCard(-1);
+    },
+    next: function () {
+      _changeCard(1);
+    },
+    show: _showAnswer,
+    answer: _answerCurrent,
+    setCardExpanded: function (expanded) {
+      _cardExpanded = expanded !== false;
+      render();
+      return _cardExpanded;
+    },
+    setImproveExpanded: function (expanded) {
+      _cardExpanded = true;
+      _improveExpanded = expanded === true;
+      render();
+      return _improveExpanded;
+    },
+    setImproveMode: function (mode) {
+      var nextMode = mode === 'concise' ? 'concise' : 'verbose';
+      if (nextMode !== _improveMode) {
+        _invalidateCardRequests(true);
+        _improveMode = nextMode;
+      }
+      render();
+      return _improveMode;
+    },
+    _mount: mount
+  };
+
+  var mountTimer = setInterval(function () {
+    if (mount()) clearInterval(mountTimer);
+  }, 300);
+  if (window.addEventListener) {
+    window.addEventListener('rc:assistant-mode-changed', function (event) {
+      var mode = event && event.detail && event.detail.mode;
+      if (mode === 'normal' || mode === 'review') {
+        setMode(mode === 'review');
+      }
+    });
+    window.addEventListener('rc:flashcard-reviewed', _acceptExternalAnswer);
+  }
+  setTimeout(function () {
+    clearInterval(mountTimer);
+  }, 25000);
 })();

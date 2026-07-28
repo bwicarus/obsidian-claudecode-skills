@@ -1,0 +1,8 @@
+{
+  "contract": "reader-computer-voice-local-config/1",
+  "localOptIn": false,
+  "voiceStartShortcut": "Ctrl+Shift+C",
+  "appKind": "chatgpt-desktop",
+  "outputScope": "process-only",
+  "companionLauncher": "C:\\Users\\bwica\\bw-reader-context\\reader-bridge\\voice-typist-launcher.ps1"
+}

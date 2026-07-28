@@ -526,8 +526,11 @@ def _build_note_for_node(kg, node, pdf_abs_path: Path):
 
 def _trigger_mastery_recompute(kg_path: Path):
     """后台跑 link_and_mastery 重新计算掌握度/解锁态。"""
-    script = CLAUDE_DIR / "scripts" / "kg" / "link_and_mastery.py"
-    if not script.exists():
+    try:
+        from kg_runtime import runtime_file as _kg_runtime_file
+
+        script = _kg_runtime_file("scripts/kg/link_and_mastery.py")
+    except Exception:
         return
     env = os.environ.copy()
     env.setdefault("CLAUDE_PROJECT", str(CLAUDE_DIR))
@@ -822,8 +825,9 @@ def register_skilltree(app):
     @app.route("/skilltree/unified/data.json")
     def skilltree_unified_data():
         try:
-            sys.path.insert(0, "/home/bwicarus/claude/scripts/kg")
-            import build_unified_graph as _BUG
+            from kg_runtime import import_module as _import_kg_module
+
+            _BUG = _import_kg_module("build_unified_graph")
             return jsonify(_BUG.build(write=False))
         except Exception as e:
             p2 = CLAUDE_DIR / "state" / "attention" / "unified-graph.json"
@@ -1262,8 +1266,9 @@ def register_skilltree(app):
         if not _kgv or not any(x.get("id") == nid for x in _kgv.get("nodes", [])):
             return jsonify({"ok": False, "error": "节点不存在:%s" % node}), 404
         try:
-            sys.path.insert(0, "/home/bwicarus/claude/scripts/kg")
-            import mastery_overrides as MO
+            from kg_runtime import import_module as _import_kg_module
+
+            MO = _import_kg_module("mastery_overrides")
             MO.set_override(bk, nid, mastery, source=prop.get("source") or "skilltree-quiz",
                             reason="技能树测验确认")
         except Exception as e:

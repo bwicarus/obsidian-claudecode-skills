@@ -17,6 +17,7 @@
 ## P2 已上线(2026-07-21)
 
 - **结构卡入编号空间**:`_entity_reg_data(kind, card)` → `wea_/new_/fac_` 等({kind3}_{hex6});
+  发号时同步写回 `card.cid=aid`，实时卡、轮次回放、收藏/钉页与 `#编号` 引用全部沿用这一号；
   web_search 结构卡分支发编号(返回体 id);entity GET 结构卡→{card:完整卡对象}
 - **#编号 渲染通用化**:_assetInline 正则通配任意前缀——img/vid/ast→<img> 快路;其余 entity resolve
   按 kind 分发:cards→活卡(states 还原)/card→`__vcInfoCardEl`(实时与回放同一渲染器)/url→图
@@ -72,3 +73,9 @@
 - recall 统一入口按前缀分流(img_→注册表元数据,cre_→创造物库)
 - make_anki image_url 支持传 #id;视频纳入(vid_)
 - 未使用条目 TTL 清理;豆包路 found_brief 同款(relay 已精简 images,brief 已带 #id ✓)
+
+## 图卡交互修复(2026-07-21,用户实测)
+
+**① ✕删除的图会"复活"**:`_igWire` 的 ✕ 只 `cell.remove()` DOM + 标 `card.data.items[i]._gone=1`,**不真删数组**;而 `_infoHtml`/`_infoText`/拖整框 payload 都从 `card.data` 重渲——`_infoHtml` 的 images/videos 分支没过滤 `_gone` → 三态重渲/回放/拖整框把删掉的图带回来。修:①`_infoHtml` images/videos map 开头 `if (it._gone) return ''`(data-i 保原索引供 ✕ 定位);②`_infoText` images 分支 `.filter(!_gone)`;③`_dragToDock` 的 `raw` 从**构建时静态快照**改为**调用时动态生成** `_infoHtml(card)`(反映当前删除态)。
+
+**② 拖图入卡只改 DOM 不落数据**:「单图拖到另一张卡=插入」(rc-voicecall `pointerup` ① 分支)原来只 `insertAdjacentHTML`,`card.data.items` 没加 → 三态重渲/回放/上下文注入全丢,元数据没真进卡。修:建卡时 `el.__vcCard = card`(侧栏 `_infoCardEl` + 浮层 `renderInfo`,同 cid 实例共享同一对象);拖入图卡 → `push` 到目标 `card.data.items`(带 url/aid/title 元数据 + `_added:1`)+ 各实例 append 标准 `.vc-ig-cell`(`_igWire` 委托自动接管 ✕/单选)+ 收藏夹 rec 重存 `_infoHtml`。非图卡兜底 DOM 塞入。手势:图卡横滑防冲突的 300ms 静止阈值改为**只拦明显横向快滑**(`adx>ady*1.3`),纵向拖(拖出/拖到另一卡)立即起拖。E2E:✕删图重建卡不带回、拖图入卡 data.items+1 且重建卡持久、元数据跟进,全过。

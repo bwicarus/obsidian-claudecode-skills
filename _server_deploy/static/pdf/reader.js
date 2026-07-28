@@ -284,6 +284,7 @@ function _loadLastPositions() {
   try { return JSON.parse(localStorage.getItem(LAST_POS_KEY) || '{}'); }
   catch { return {}; }
 }
+let _ogLastPage = null;
 function _saveLastPosition(patch) {
   const all = _loadLastPositions();
   all[FILE_REL] = {...(all[FILE_REL] || {}), ...patch, ts: Date.now()};
@@ -296,6 +297,19 @@ function _saveLastPosition(patch) {
   } else {
     try { localStorage.setItem(LAST_POS_KEY, JSON.stringify(all)); } catch {}
   }
+  // 双向上下文同步:借用这个已有的翻页漏斗上报「当前活动文档」,不新增任何监听器。
+  // 开关关着时 RC.ctxSync.report 立即返回 false(零网络);开着时由共享层合并 + 1s trailing。
+  // 切页 → 丢弃绘图焦点(上一页的绘图区不再是"当前")。只在当前焦点确实是绘图时才发。
+  try { if ((patch && patch.page) && patch.page !== _ogLastPage) { _ogLastPage = patch.page;
+        window.RC?.outgoing?.dropDrawingFocus(); } } catch (_) {}
+  try {
+    window.RC?.ctxSync?.report({
+      kind: 'pdf', file: FILE_REL,
+      pos: (patch && patch.page) || currentPage,
+      total: (window.__GRP ? window.__GRP.total : (window.pdfDoc && pdfDoc.numPages)) || undefined,
+      title: document.title.replace(/ ·.*$/, '')
+    });
+  } catch (_) {}
 }
 function _getLastPosition() {
   return _loadLastPositions()[FILE_REL] || null;
@@ -811,6 +825,15 @@ async function _renderPageImg(num, wrap, viewport) {
   const _inkDpr = window.devicePixelRatio || 1;
   inkCanvas.width = Math.floor(cw * _inkDpr); inkCanvas.height = Math.floor(ch * _inkDpr);
   wrap.appendChild(inkCanvas); wrap.__inkCanvas = inkCanvas;
+  // 绘图区焦点(A5):手指长按 = 设为当前焦点(再长按取消)。
+  // 只监听非笔指针且全程 passive → 画笔/擦除/滚动手势零影响。
+  try {
+    window.RC?.outgoing?.bindDrawingFocus(inkCanvas, () => ({
+      file: FILE_REL, page: num,
+      hasInk: !!(wrap.__inkStrokes && wrap.__inkStrokes.length)
+    }));
+  } catch (_) {}
+
   if (!wrap.__inkBound) {
     wrap.addEventListener('pointerdown', (e) => { if (window._inkPointerDown) window._inkPointerDown(e); }, true);
     const _blk = (e) => { for (const t of e.touches) { if (t.touchType === 'stylus') { e.preventDefault(); break; } } };
@@ -912,6 +935,15 @@ async function _renderPageInto(num, wrap) {
   inkCanvas.height = Math.floor(ch * _inkDpr);
   wrap.appendChild(inkCanvas);
   wrap.__inkCanvas = inkCanvas;
+  // 绘图区焦点(A5):手指长按 = 设为当前焦点(再长按取消)。
+  // 只监听非笔指针且全程 passive → 画笔/擦除/滚动手势零影响。
+  try {
+    window.RC?.outgoing?.bindDrawingFocus(inkCanvas, () => ({
+      file: FILE_REL, page: num,
+      hasInk: !!(wrap.__inkStrokes && wrap.__inkStrokes.length)
+    }));
+  } catch (_) {}
+
   // wrap 级监听只绑一次(卸载→重渲染同一 wrap 时不重复绑定,否则累积成内存泄漏 + 多次触发)
   if (!wrap.__inkBound) {
     wrap.addEventListener('pointerdown', (e) => { if (window._inkPointerDown) window._inkPointerDown(e); }, true);
@@ -2448,7 +2480,7 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
     wrap.appendChild(dbgLayer);
   }
   wrap.__charBoxes = charBoxes;
-  wrap.__charsBaseW = wrap.clientWidth || 0;   // #51:建层时页宽基准——页重渲(缩放/适应)后 charBoxes 坐标按 clientWidth/baseW 换算(词框错位根因)
+  wrap.__charsBaseW = wrap.classList.contains('crop-on') ? (parseFloat(wrap.style.getPropertyValue('--full-w')) || wrap.clientWidth || 0) : (wrap.clientWidth || 0);   // #51:建层整页布局宽基准(去边=整页 --full-w,charBox 是整页坐标;非去边=clientWidth);重渲后按 char-layer 实时 BCR/baseW 换算
   try { window.__applyPhraseMergesLocal && window.__applyPhraseMergesLocal(wrap); } catch (_) {}   // 本地词组合并(收藏集驱动,教义:本地算)
   window.dlog?.('chars: ' + charBoxes.length + ' on page ' + num);
   // 创建 char-layer（透明覆盖整个 page-wrap）→ 绑定后**选词此刻即可用**(不等 overlay)
@@ -2482,7 +2514,7 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
           const d2 = await (await fetch(charsUrl(ov.cv))).json();
           if (d2 && d2.ok && wrap.isConnected) {
             wrap.__charBoxes = _mapCharBoxes(d2.chars, viewport.scale);
-            wrap.__charsBaseW = wrap.clientWidth || 0;   // #51:cv 校正重建同步基准宽
+            wrap.__charsBaseW = wrap.classList.contains('crop-on') ? (parseFloat(wrap.style.getPropertyValue('--full-w')) || wrap.clientWidth || 0) : (wrap.clientWidth || 0);   // #51:cv 校正重建同步基准宽(整页布局宽)
             wrap.__pageWPt = d2.page_w; wrap.__pageHPt = d2.page_h;
             wrap.__furigana = d2.furigana || [];
             try { renderRubyLayer(wrap); } catch (_) {}
@@ -2518,25 +2550,51 @@ function _clickTranslateEnabled() {
   return v === null ? true : (v === '1');
 }
 
+// 共享 vocabulary-state 只参与可见投影；业务写入仍由 rc-wordpop/phrasepop 负责。
+// 仓库缺失、尚未 hydrate 或没有该词记录时返回 false，后面的本地镜像/服务端 label
+// 继续作为兼容 fallback。
+function _vocabularyStateRepo() {
+  try {
+    const repo = window.BWReaderRuntime && window.BWReaderRuntime.vocabularyState;
+    return repo &&
+      repo.CONTRACT === 'vocabulary-state/1' &&
+      typeof repo.isMastered === 'function'
+      ? repo
+      : null;
+  } catch (_) { return null; }
+}
+function _vocabularyStateMarkMastered(mark) {
+  const repo = _vocabularyStateRepo();
+  if (!repo || !mark) return false;
+  const word = String(mark.word || mark.surface || '').trim();
+  const lemma = String(mark.lemma || word).trim();
+  if (!lemma && !word) return false;
+  try {
+    return repo.isMastered({
+      kind: 'word',
+      language: mark.language || mark.lang || (mark.jp ? 'ja' : 'en'),
+      lemma: lemma || word,
+      word: word || lemma,
+      surface: word || lemma,
+      forms: Array.isArray(mark.forms) ? mark.forms : []
+    });
+  } catch (_) { return false; }
+}
+
 function renderVocabUnderlines(pw, marks) {
   if (!_vocabUnderlineEnabled()) return;
-  // §18.5 local-first:服务端回**全候选**(含已掌握,label_slug='mastered'),渲染时本地过滤;
-  // __vocabOverride = 掌握 toggle 的本地覆盖(0ms 消隐/复现,掌握变更不再重拉 overlay)
+  // §18.5 local-first:服务端回**全候选**(含已掌握,label_slug='mastered'),渲染时本地过滤。
+  // 共享仓库优先补充已掌握事实；旧 __masteredLocal/__vocabOverride 与服务端 label
+  // 继续兜底，且 dirty 标记只能在真正收到服务器 mastery snapshot 时收敛。
   try {
     const _ovr = window.__vocabOverride;
-    let _dirty = false;
     marks = (marks || []).filter((m) => {
       const k = String(m.lemma || m.word || '').toLowerCase();
-      let srv = (m.label_slug === 'mastered');
-      if (window.__masteredLocal) srv = window.__masteredLocal.has(k);   // §18.7 本地库=事实源(缓存 overlay 的 flag 可能陈旧)
-      if (_ovr && _ovr.has(k)) {
-        const loc = _ovr.get(k);
-        if (loc === srv) { _ovr.delete(k); _dirty = true; return !srv; }   // 服务端已追上 → 收敛,清覆盖
-        return !loc;
-      }
-      return !srv;
+      if (_vocabularyStateMarkMastered(m)) return false;
+      if (_ovr && _ovr.has(k)) return !_ovr.get(k);
+      if (window.__masteredLocal) return !window.__masteredLocal.has(k);
+      return m.label_slug !== 'mastered';
     });
-    if (_dirty && window.__vocabOverridePersist) window.__vocabOverridePersist();
   } catch (_) {}
   // 确保有 layer（即使 marks 空也要清旧残留）
   let layer = pw.querySelector('.vocab-layer');
@@ -2574,7 +2632,6 @@ function _vocabUnderlineEnabled() {
   const v = localStorage.getItem('pdf-vocab-underline');
   return v === null ? true : (v === '1');
 }
-
 // ──────── 振假名 / 音标叠加（ruby） ────────
 function _rubyEnabled() { return localStorage.getItem('pdf-ruby') === '1'; }   // 默认关
 function renderRubyLayer(pw) {
@@ -3415,12 +3472,18 @@ window.refreshVocabUnderlinesForAllPages = refreshVocabUnderlinesForAllPages;
 // §18.6(用户指出"应先存本地"):覆盖表**持久化** localStorage(离线标记后刷新不丢),48h TTL
 // (防多设备冲突:别处改了掌握态,本机陈旧覆盖最多赢 48h);服务端数据追上后由渲染层自动收敛清理。
 const _VOVR_KEY = 'vocab-override-v1';
+window.__vocabOverrideTs = new Map();
 window.__vocabOverride = (() => {
   const m = new Map();
   try {
     const raw = JSON.parse(localStorage.getItem(_VOVR_KEY) || '{}');
     const now = Date.now();
-    for (const k in raw) { if (raw[k] && (now - (raw[k].ts || 0)) < 48 * 3600 * 1000) m.set(k, !!raw[k].v); }
+    for (const k in raw) {
+      if (raw[k] && (now - (raw[k].ts || 0)) < 48 * 3600 * 1000) {
+        m.set(k, !!raw[k].v);
+        window.__vocabOverrideTs.set(k, Number(raw[k].ts) || now);
+      }
+    }
   } catch (_) {}
   return m;
 })();
@@ -3433,31 +3496,104 @@ window.__vocabOverridePersist = function () {
 };
 // §18.7 本地掌握库:开书拉全量 mastered 清单落 localStorage(SW netFallback → 离线用缓存快照);
 // toggle 本地增删 → 掌握判定的**事实源在本地**(下划线过滤/wordpop 初始态都优先用它,脱离服务器)。
-window.__masteredLocal = (() => { try { const r0 = JSON.parse(localStorage.getItem('vocab-mastered-v1') || 'null'); return r0 && r0.set ? new Set(r0.set) : null; } catch (_) { return null; } })();
+window.__masteredLocal = (() => { try { const r0 = JSON.parse(localStorage.getItem('vocab-mastered-v1') || 'null'); return new Set(r0 && Array.isArray(r0.set) ? r0.set : []); } catch (_) { return new Set(); } })();
 window.__masteredLocalSave = function () { try { localStorage.setItem('vocab-mastered-v1', JSON.stringify({ ts: Date.now(), set: [...(window.__masteredLocal || [])] })); } catch (_) {} };
 (async () => {
   try {
     const d = await (await fetch('/pdf/api/vocab-mastery-map?all=1&file=' + encodeURIComponent(typeof FILE_REL !== 'undefined' ? FILE_REL : ''))).json();
     if (d && d.ok && Array.isArray(d.mastered)) {
-      window.__masteredLocal = new Set(d.mastered.map((x) => String(x).toLowerCase()));
+      const server = new Set(d.mastered.map((x) => String(x).toLowerCase()));
+      let dirty = false;
+      // 服务端 snapshot 只确认已经追上的 mutation；仍未追上的本地变更继续盖在 snapshot 上，
+      // 避免启动时较慢的 GET 把用户刚点下去的状态覆盖回去。
+      window.__vocabOverride.forEach((value, key) => {
+        if (server.has(key) === value) {
+          window.__vocabOverride.delete(key);
+          window.__vocabOverrideTs.delete(key);
+          dirty = true;
+        } else if (value) server.add(key);
+        else server.delete(key);
+      });
+      if (dirty) window.__vocabOverridePersist();
+      window.__masteredLocal = server;
       window.__masteredLocalSave();
-      document.querySelectorAll('.page-wrap[data-page-num]').forEach((pw) => { if (pw.__vocabMarks) { try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {} } });
+      document.querySelectorAll('[data-loaded="1"][data-page-num]').forEach((pw) => { if (pw.__vocabMarks) { try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {} } });
     }
   } catch (_) {}
 })();
-window.applyVocabLocalOverride = function (lemma, mastered) {
+window.applyVocabLocalOverride = function (lemma, mastered, meta) {
   try {
     const k = String(lemma || '').toLowerCase();
-    if (window.__masteredLocal) { if (mastered) __masteredLocal.add(k); else __masteredLocal.delete(k); window.__masteredLocalSave(); }
-    window.__vocabOverrideTs = window.__vocabOverrideTs || new Map();
+    if (!k) return function () {};
+    const hadMastered = window.__masteredLocal.has(k);
+    const hadOverride = window.__vocabOverride.has(k);
+    const oldOverride = window.__vocabOverride.get(k);
+    const oldTs = window.__vocabOverrideTs.get(k);
+    if (mastered) __masteredLocal.add(k); else __masteredLocal.delete(k);
+    window.__masteredLocalSave();
     __vocabOverrideTs.set(k, Date.now());
     window.__vocabOverride.set(k, !!mastered);
     window.__vocabOverridePersist();
-    document.querySelectorAll('.page-wrap[data-page-num]').forEach((pw) => {
-      if (pw.__vocabMarks) { try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {} }
+    const keys = new Set([k, meta && meta.word, ...((meta && meta.forms) || [])]
+      .filter(Boolean).map((value) => String(value).toLowerCase()));
+    const paint = () => document.querySelectorAll('[data-loaded="1"][data-page-num]').forEach((pw) => {
+      if (!pw.__vocabMarks) return;
+      const hit = pw.__vocabMarks.some((mark) =>
+        keys.has(String(mark.lemma || '').toLowerCase()) ||
+        keys.has(String(mark.word || '').toLowerCase()));
+      if (hit) { try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {} }
     });
-  } catch (_) {}
+    paint();
+    return function restoreVocabLocalOverride() {
+      if (hadMastered) window.__masteredLocal.add(k); else window.__masteredLocal.delete(k);
+      if (hadOverride) {
+        window.__vocabOverride.set(k, oldOverride);
+        window.__vocabOverrideTs.set(k, oldTs);
+      } else {
+        window.__vocabOverride.delete(k);
+        window.__vocabOverrideTs.delete(k);
+      }
+      window.__masteredLocalSave();
+      window.__vocabOverridePersist();
+      paint();
+    };
+  } catch (_) { return function () {}; }
 };
+
+// vocabulary-state hydrate/provider 更新后只用现有 __vocabMarks 重画，不触发 mastery GET。
+// 这让刷新页面后从 IndexedDB/Vault 晚到的掌握状态也能在当前帧附近消掉下划线。
+(function _bindVocabularyStateUnderlineProjection() {
+  const repo = typeof _vocabularyStateRepo === 'function'
+    ? _vocabularyStateRepo()
+    : null;
+  if (!repo) return;
+  let queued = false;
+  const paint = () => {
+    queued = false;
+    document.querySelectorAll('[data-loaded="1"][data-page-num]').forEach((pw) => {
+      if (!pw.__vocabMarks) return;
+      try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {}
+    });
+  };
+  const schedule = () => {
+    if (queued) return;
+    queued = true;
+    if (window.requestAnimationFrame) window.requestAnimationFrame(paint);
+    else setTimeout(paint, 0);
+  };
+  try {
+    if (typeof repo.subscribe === 'function') {
+      repo.subscribe((event) => {
+        const record = event && event.record;
+        if (!record || record.property === 'mastered') schedule();
+      });
+    }
+  } catch (_) {}
+  try {
+    if (typeof repo.ready === 'function') Promise.resolve(repo.ready()).then(schedule, () => {});
+  } catch (_) {}
+  try { document.addEventListener('bw:vocabulary-state-ready', schedule); } catch (_) {}
+})();
 
 // 找点击位置最近的非空格 char index
 // 拖选期间要临时禁点的呼吸高亮 .hl（查词/词组/解释）——防拖选经过它们被截获(丢 move/up + 误弹)
@@ -4500,6 +4636,13 @@ function _selectSpanRange(span, start, end) {
 function _updateSelPreview(text) {
   const el = document.getElementById('sel-preview');
   text = (text || '').trim();
+  // 出向选区/焦点同步(2026-07-28 修):PDF 的真实选中走 char-layer(画在 sel-overlay,
+  // **不产生原生 selection**),而 `checkSelection` 只挂在 mouseup/touchend/selectionchange 上
+  // → char-layer 选中完成后没有任何事件通知出向漏斗,结果 UI 有选中、journal 无 focus,
+  //   甚至因 `_charSel` 被滚动/翻页判定清空而误发 cancel(用户实测:p23 选中后 selection='')。
+  // 这里是**选中变更的唯一全覆盖通知点**(提交与清空两条路径都经过它),所以挂在此处一处即可,
+  // 不新建第二套选择机制。_ctxSelReport 内部已做:空串=显式取消、非空=focus('text')。
+  try { if (typeof _ctxSelReport === 'function') _ctxSelReport(text); } catch (_) {}
   // 选中元数据(所在页 + 时戳),给语音/侧栏助手 __voiceContext 做「跨页陈旧选中」校验:
   // 翻到别页后旧选中不再当成"现在在问的内容"。每次选中变化都先清空所在句(char-layer 路径随后会补)。
   try {
@@ -4564,17 +4707,52 @@ window._updateToolbarMode = _updateToolbarMode;   // 实况网页(web-adapter)�
 let _phraseFavSet = new Set();
 let _phraseMarkSet = new Set();   // 已掌握词组(归一化键):标掌握后不再画生词下划线
 const _phraseNorm = s => String(s || '').trim().replace(/\s+/g, ' ').toLowerCase();
+function _applyVocabularyPhraseProjection(records) {
+  for (const record of (Array.isArray(records) ? records : [])) {
+    if (!record || record.kind !== 'phrase') continue;
+    if (record.property === 'favorite') {
+      // PDF 字符盒匹配历史上忽略排版空白；仓库仍保留规范词组，几何投影只转成自身需要的 key。
+      const key = String(record.key || '').replace(/[\s\u3000]+/g, '');
+      if (!key) continue;
+      if (record.enabled) _phraseFavSet.add(key); else _phraseFavSet.delete(key);
+    } else if (record.property === 'mastered') {
+      const key = _phraseNorm(record.key);
+      if (!key) continue;
+      if (record.enabled) _phraseMarkSet.add(key); else _phraseMarkSet.delete(key);
+    }
+  }
+  try { _applyPhraseMergesAll(); } catch (_) {}
+  try {
+    document.querySelectorAll('[data-loaded="1"][data-page-num]').forEach((pw) => {
+      try { renderVocabUnderlines(pw, pw.__vocabMarks || []); } catch (_) {}
+    });
+  } catch (_) {}
+}
+try { window.__syncPhraseStateProjection = _applyVocabularyPhraseProjection; } catch (_) {}
 async function _loadPhraseFavs() {
+  // 共享模式由 rc-phrasepop 负责服务器兼容导入；PDF 字符层只消费统一仓库投影，
+  // 避免同一页面启动时再重复拉两份相同数据。
+  try {
+    const repo = window.__uiShared && window.BWReaderRuntime && window.BWReaderRuntime.vocabularyState;
+    if (repo && repo.CONTRACT === 'vocabulary-state/1' && typeof repo.snapshot === 'function') {
+      _applyVocabularyPhraseProjection(repo.snapshot());
+      return;
+    }
+  } catch (_) {}
   try { const d = await (await fetch('/pdf/api/phrases')).json(); if (d.ok) _phraseFavSet = new Set(d.phrases || []); } catch (_) {}
   try { const d = await (await fetch('/pdf/api/phrase-mark')).json(); if (d.ok) _phraseMarkSet = new Set(d.mastered || []); } catch (_) {}
 }
 window.onPhrase = () => {
-  const t = (lastSelText || '').trim();
+  const controller = window.__bwSelectionController;
+  const selected = (controller && controller.current && controller.current()) || {
+    text: lastSelText || '', rect: null
+  };
+  const t = String(selected && selected.text || '').trim();
   if (!t) return;
   // 词组查询前清掉残留的查词呼吸/常亮高亮:它们(.rc-wp-breathe z:190)会盖住词组高亮(z:6)截获点击 →
   //   「点词组高亮没反应」(尤其"某词先查过、其查词高亮被打断残留"时)。切到词组模式旧查词高亮已陈旧。
   try { if (window.RC && RC.wordpop && RC.wordpop.clearHls) RC.wordpop.clearHls(); } catch (_) {}
-  showPhrasePopover(t);
+  showPhrasePopover(t, { rect: selected && selected.rect || null });
 };
 // 词组查询期间的呼吸高亮：**只在点「词组」按钮、查询进行中**出现（showPhrasePopover 开始时建、
 // 结果出来即移除）。状态驱动(存 pt 坐标到 _activePhraseHl)→ 查询那 1-2s 内即便发生重渲染也不丢、
@@ -4757,9 +4935,16 @@ function _reopenExplain() {
   _activeExplainHl = null;
 }
 window.showPhrasePopover = async (text, opts) => {
-  if (window.__uiShared && window.PdfAdapter) {   // 阶段2:词组 → rc-phrasepop(共享模式;else 走 _showPhrasePopoverNative 原逻辑,逐字不变)
+  const adapter = (window.RC && RC.adapter) ? RC.adapter() : null;
+  if (window.__uiShared && adapter && typeof adapter.lookupPhrase === 'function') {   // 共享模式按当前宿主分流；PDF 字符层路径不变
     toolbar.classList.remove('open');
-    PdfAdapter.lookupPhrase({ text, noHighlight: opts && opts.noHighlight, anchorRect: opts && opts.rect, result: opts && opts.result, fallback: () => _showPhrasePopoverNative(text, opts) });
+    adapter.lookupPhrase({
+      text,
+      noHighlight: opts && opts.noHighlight,
+      anchorRect: opts && opts.rect,
+      result: opts && opts.result,
+      fallback: () => _showPhrasePopoverNative(text, opts)
+    });
     return;
   }
   return _showPhrasePopoverNative(text, opts);
@@ -4819,12 +5004,13 @@ async function _showPhrasePopoverNative(text, opts) {
 //    这里用手头 charBoxes 客户端搜词组出现位置**即时**画线(几 ms);真渲染到位后 vocab-layer
 //    整层重画,临时件自然被清,无缝接管。取消收藏即时摘除同款临时件。──
 function _pfavPaint(t) {
-  const needle = String(t || ''); if (!needle) return 0;
+  const needle = String(t || '').replace(/[\s\u3000]/g, ''); if (!needle) return 0;   // #55:去空白与页面无空白 str 对齐
   let n = 0;
   document.querySelectorAll('.page-wrap[data-page-num]').forEach((pw) => {
     const chars = pw.__charBoxes; if (!chars || !chars.length) return;
     let str = ''; const pos = [];
     for (let i = 0; i < chars.length; i++) {
+      if (chars[i].sp) continue;   // #55:跳空格 char → str 无空白,与归一化词组对齐
       const cc = chars[i].c != null ? String(chars[i].c) : '';
       for (let j = 0; j < cc.length; j++) { str += cc[j]; pos.push(i); }
     }
@@ -4863,10 +5049,12 @@ function _applyPhraseMergesLocal(pw) {
   if (!favs.length) return;
   let str = ''; const pos = [];
   for (let i = 0; i < chars.length; i++) {
+    if (chars[i].sp) continue;   // #55:跳空格 char → str 无空白,与归一化词组对齐
     const cc = chars[i].c != null ? String(chars[i].c) : '';
     for (let j = 0; j < cc.length; j++) { str += cc[j]; pos.push(i); }
   }
-  for (const t of favs) {
+  for (const t0 of favs) {
+    const t = String(t0 || '').replace(/[\s\u3000]/g, '');   // #55:去空白与页面无空白 str 对齐(跨行/夹空格词组本地也合并)
     if (!t) continue;
     let from = 0, idx;
     while ((idx = str.indexOf(t, from)) >= 0) {
@@ -4885,7 +5073,7 @@ try { window.__applyPhraseMergesLocal = _applyPhraseMergesLocal; } catch (_) {}
 
 window._phraseFav = (btn) => {
   const s = _wordPopState; if (!s || !s.word) return;
-  const t = s.word;
+  const t = String(s.word).replace(/[\s\u3000]+/g, '');   // #55:收藏归一化去空白(跨行选中带 \n)→存干净词组;本地匹配也归一化,已存脏词组一并救回
   const has = _phraseFavSet.has(t);
   const nowFav = !has;
   // ① local-first(2026-07-20 用户实锤"点收藏要等 Pi"):本地先翻集合+画面,零等待
@@ -5319,25 +5507,16 @@ window._speakCurWord = () => {
 // 乐观更新:标掌握瞬间先把该词下划线从所有已加载页移掉(不等服务器写库+重算),服务器响应后 refresh 再校正。
 // 大厂标配(optimistic UI):本地实例下尤其明显——画面立刻响应,不用等任何往返。
 function _dropVocabUnderlineOptimistic(s) {
-  const keys = new Set();
-  for (const k of [s && s.lemma, s && s.word]) if (k) keys.add(String(k).toLowerCase());
-  if (!keys.size) return function () {};
-  const snaps = [];   // 记录被改的页(before/after)→ 返回 restore 回滚(失败恢复,契约对齐 EPUB __epubDeco.optimisticMaster)
-  document.querySelectorAll('[data-loaded="1"][data-page-num]').forEach(pw => {
-    if (!pw.__vocabMarks || !pw.__vocabMarks.length) return;
-    const before = pw.__vocabMarks;
-    const after = before.filter(m =>
-      !(keys.has(String(m.lemma || '').toLowerCase()) || keys.has(String(m.word || '').toLowerCase())));
-    if (after.length !== before.length) {
-      pw.__vocabMarks = after; snaps.push({ pw, before, after });
-      try { renderVocabUnderlines(pw, after); } catch (_) {}
-    }
-  });
-  return function restore() {   // 只回滚仍是本次乐观结果的页(防覆盖期间别的刷新写入的新 marks)
-    snaps.forEach(({ pw, before, after }) => {
-      if (pw.__vocabMarks === after) { pw.__vocabMarks = before; try { renderVocabUnderlines(pw, before); } catch (_) {} }
-    });
-  };
+  // __vocabMarks 是“全候选目录”，取消掌握时要靠它立刻恢复 was→be 等变形。
+  // 旧实现把候选数组过滤改写，掌握虽快，却永久丢掉了本地恢复所需的数据。
+  if (typeof window.applyVocabLocalOverride === 'function') {
+    return window.applyVocabLocalOverride(
+      (s && (s.lemma || s.word)) || '',
+      true,
+      s || null
+    );
+  }
+  return function () {};
 }
 // 共享版 rc-wordpop 的「☆ 标记掌握」乐观去下划线经此调用(PDF 字符层专属;EPUB 走 __epubDeco.optimisticMaster)。
 try { window.__pdfDropVocabUnderline = _dropVocabUnderlineOptimistic; } catch (_) {}
@@ -5414,17 +5593,35 @@ window._wordPopGrammar = () => {
 }
 // 工具栏「🔍 查词」：弹单词小框
 window.onLookupWord = () => {
-  if (!lastSelText) return;
-  let ctx = '';
-  if (_charSel && _charSel.pw && _charSel.pw.__charBoxes) {
+  const controller = window.__bwSelectionController;
+  const selected = (controller && controller.current && controller.current()) || {
+    text: lastSelText || '', context: '', rect: null
+  };
+  const text = String(selected && selected.text || '').trim();
+  if (!text) return;
+  let ctx = String(selected.context || selected.ctx || selected.sentence || '');
+  const adapter = (window.RC && RC.adapter) ? RC.adapter() : null;
+  if (!ctx && _charSel && _charSel.pw && _charSel.pw.__charBoxes) {
     const chars = _charSel.pw.__charBoxes;
     const cr = _expandSentenceFromRange(chars, _charSel.startIdx, _charSel.endIdx);
     if (cr) ctx = _charsRangeToText(chars, cr.start, cr.end).slice(0, 400);
   }
-  if (window.__uiShared && window.PdfAdapter) {
-    PdfAdapter.lookupWord({ word: lastSelText, context: ctx, page: (typeof _selPageNum === 'function' ? _selPageNum() : currentPage), file: FILE_REL, langs: BOOK_LANGS, anchorRect: _charSel, fallback: (w, c) => showWordPopover(w, c) });
+  if (window.__uiShared && adapter && typeof adapter.lookupWord === 'function') {
+    let file = FILE_REL, langs = BOOK_LANGS, page = (typeof _selPageNum === 'function' ? _selPageNum() : currentPage);
+    try {
+      const info = adapter.fileInfo && adapter.fileInfo();
+      if (info && info.file) file = info.file;
+      const hostContext = adapter.getContext && adapter.getContext();
+      if (hostContext && Array.isArray(hostContext.langs)) langs = hostContext.langs;
+      if (selected.anchor && selected.anchor.page != null) page = selected.anchor.page;
+    } catch (_) {}
+    adapter.lookupWord({
+      word: text, context: ctx, page, file, langs,
+      anchorRect: adapter.kind === 'pdf' ? _charSel : selected.rect,
+      fallback: (w, c) => showWordPopover(w, c)
+    });
   } else {
-    showWordPopover(lastSelText, ctx);
+    showWordPopover(text, ctx);
   }
 };
 
@@ -5650,16 +5847,33 @@ function paintSelectionOverlay() {
   }
 }
 
+function _ctxSelReport(txt) {
+  // 选区即时同步(用户拍板 2026-07-27):建立/改动/**清空**都立刻推,不走导航防抖。
+  // 传空串而不是省略字段 —— 省略会让快照留着上一次的旧选区(静默退化)。
+  try {
+    window.RC?.ctxSync?.report(
+      { kind: 'pdf', file: FILE_REL, selection: txt || '', sel_page: currentPage },
+      { immediate: true });
+    // 焦点通道(与选区并行,语义不同:选区是"选了什么文字",焦点是"当前对象是谁")。
+    // 取消必须显式发,否则上游会拿着已取消的对象当现状。
+    if (txt) window.RC?.outgoing?.focus('text', { file: FILE_REL, page: currentPage, text: txt.slice(0, 200) });
+    else window.RC?.outgoing?.cancel();
+  } catch (_) {}
+}
 function checkSelection() {
   const sel = window.getSelection();
   const txt = (sel.toString() || '').trim();
   if (!txt || txt.length < 2) {
     // 无原生 selection：char-layer 自定义选中(画在 sel-overlay、不走原生 selection)还在的话别清掉它
-    if (!(_charSel && lastSelText)) paintSelectionOverlay();
+    if (!(_charSel && lastSelText)) { paintSelectionOverlay(); _ctxSelReport(''); }
+    // char-layer 自定义选中仍在 → 屏幕上**确实还有选区**,要上报它而不是空;
+    // 原来这里整个跳过上报,导致"取消原生选中"后快照永远停在旧值(真机实测清空 0 次上报)。
+    else _ctxSelReport(lastSelText || '');
     return;
   }
   paintSelectionOverlay();
   lastSelText = txt;
+  _ctxSelReport(txt);
     _updateSelPreview(lastSelText);
   try {
     const rng = sel.getRangeAt(0);
@@ -5730,6 +5944,39 @@ function saveHlColors(arr) {
   localStorage.setItem('pdf-hl-colors', JSON.stringify(arr));
 }
 let _lastHlColor = localStorage.getItem('pdf-hl-last-color') || DEFAULT_HL_COLORS[0];
+// ── 高亮触摸手势:全阅读器**唯一实例**(照 EPUB epub-html.js 的 document 委托做法)。
+//    key = 高亮 id,故同一条高亮的多个重叠 rect 上的两次点会正确配对成双击。
+let _hlOpenedAt = 0;
+function _openHlEditorById(id) {
+  const now = Date.now(); if (now - _hlOpenedAt < 520) return;   // 去重:iOS 的 pointerup 与原生 dblclick 可能双触发
+  const h = _allHighlights.find((x) => x.id === id); if (!h) return;
+  const div = document.querySelector('.hl-saved[data-id="' + (window.CSS && CSS.escape ? CSS.escape(id) : id) + '"]');
+  const pw = div && div.closest ? div.closest('.page-wrap') : null;
+  if (!div || !pw) return;
+  _hlOpenedAt = now; openHlPopover(h, div, pw);
+}
+let _hlGestureSingleton = null;
+function _hlGesture() {
+  if (_hlGestureSingleton) return _hlGestureSingleton;
+  if (!(window.RC && RC.highlight && RC.highlight.gesture)) return null;
+  _hlGestureSingleton = RC.highlight.gesture({
+    onLongPress: (id) => {
+      const h = _allHighlights.find((x) => x.id === id);
+      if (h && window.__asstOpen && window.__asstOpen()) _pdfHlToAsst(h);
+    },
+    doubleTapMs: 420, moveTol: 12,
+    onDoubleTap: (id) => _openHlEditorById(id)
+  });
+  // 原生 dblclick 兜底:两次点落在不同 rect 时 dblclick 派发到公共祖先,故委托在 document 上按落点反查。
+  document.addEventListener('dblclick', (e) => {
+    const el = document.elementFromPoint(e.clientX, e.clientY);
+    const hit = el && el.closest ? el.closest('.hl-saved') : null;
+    if (!hit || !hit.dataset.id) return;
+    e.preventDefault(); e.stopPropagation();
+    _openHlEditorById(hit.dataset.id);
+  }, true);
+  return _hlGestureSingleton;
+}
 let _allHighlights = [];
 let _hlByPage = {};
 let _resultContext = null;   // {charSel, text, sentence, kind} 由 onTranslate/onExplain 入口存
@@ -5812,12 +6059,12 @@ function renderHighlightsOnPage(pw, pageNum) {
       div.addEventListener('mouseup',    stop, true);
       div.addEventListener('touchstart', stop, {passive:true, capture:true});
       div.addEventListener('touchend',   stop, {passive:true, capture:true});
-      // 交互(2026-07-05,用户要求):长按 → 高亮弹框;助手开着时双击 → 高亮内容加入对话上下文。单击不再开框。
-      // 走共享 RC.highlight.gesture(与 EPUB 一致);RC 未加载(legacy)则兜底回原单击开框。
-      const _hg = (window.RC && RC.highlight && RC.highlight.gesture) ? RC.highlight.gesture({
-        onLongPress: () => openHlPopover(h, div, pw),
-        onDoubleTap: () => { if (window.__asstOpen && window.__asstOpen()) _pdfHlToAsst(h); }
-      }) : null;
+      // 交互(2026-07-05;2026-07-21 用户要求长按↔双击对调):长按 → 高亮内容加入对话上下文(助手开着时);双击 → 高亮弹框。单击不再开框。
+      // 走共享 RC.highlight.gesture 的**唯一实例**(与 EPUB 的 document 委托同构)。
+      // ⚠ 手势状态必须按 h.id 跨 rect 共享:一条高亮有多个**互相重叠**的 rect div,若每个 div 各持
+      //   一个 gesture 实例,两次点落在不同 rect 上就各自算「第一击」,原生 dblclick 又因 target
+      //   不同而派发到公共祖先 → iPad 上必须点三次才弹框(用户实测)。
+      const _hg = _hlGesture();
       if (_hg) {
         div.addEventListener('pointerdown',   (e) => { e.stopPropagation(); _hg.down(h.id, e.clientX, e.clientY); }, true);
         div.addEventListener('pointermove',   (e) => { _hg.move(e.clientX, e.clientY); }, true);
@@ -5854,15 +6101,16 @@ function _charsRangeToRects(chars, sIdx, eIdx) {
     }
     const x0 = c._x0, y0 = c._y0, x1 = c._x1, y1 = c._y1;
     const lineH = y1 - y0;
+    const _sameBk = cur && c.bk != null && cur.bk != null && c.bk >= 0 && c.bk === cur.bk;   // #56:同排版块=同视觉行(OCR justified),水平相邻即合并,不受块内字符 top 抖动分段(治句子/下划线在括号处断)
     if (cur &&
-        Math.abs(y0 - cur.y0) <= Math.max(2, (cur.y1 - cur.y0) * 0.5) &&
+        (_sameBk || Math.abs(y0 - cur.y0) <= Math.max(2, Math.max(cur.y1 - cur.y0, y1 - y0) * 0.6)) &&   // 跨块才按 y0 判行(跨行 y0 差>字高分段)
         x0 <= cur.x1 + Math.max(2, lineH * 0.6)) {
       cur.x1 = Math.max(cur.x1, x1);
       cur.y0 = Math.min(cur.y0, y0);
       cur.y1 = Math.max(cur.y1, y1);
     } else {
       if (cur) rects.push([cur.x0, cur.y0, cur.x1, cur.y1]);
-      cur = {x0, y0, x1, y1};
+      cur = {x0, y0, x1, y1, bk: c.bk};
     }
   }
   if (cur) rects.push([cur.x0, cur.y0, cur.x1, cur.y1]);
@@ -6049,7 +6297,6 @@ window._followupAsk = async () => {
   contentEl.scrollTop = contentEl.scrollHeight;
   try { addResultPickers(); } catch (_) {}   // 追问回答也加「+ 选段」，制 Anki(ankiFromResult)含全框选中
 };
-
 // ─── 语法分析（per-PDF 启用语法 KG，节点跟踪在技能树页面切换）────────────
 let _grammarEnabledBooks = [];   // 本 PDF 启用的 grammar KG list（books）
 let _grammarHasTracked = false;  // 是否至少有一个启用书中含 tracked 节点
@@ -8461,27 +8708,51 @@ function _buildSentenceFromSel(pw, sIdx, eIdx) {
           count: 0, lemmas: [], total_words: 0, manual: true};
 }
 
+// 工具条动作统一从当前 RC adapter/SelectionController 读取。PDF adapter 仍返回原来的
+// char-layer snapshot；WebAdapter 返回外部 iframe 通过唯一 bridge 写入的真实模块选区。
+function _selectionForToolbarAction() {
+  try {
+    const controller = window.__bwSelectionController;
+    const selection = controller && controller.current && controller.current();
+    if (selection && selection.text) return selection;
+  } catch (_) {}
+  return { text: lastSelText || '', context: '', rect: null, anchor: null };
+}
+function _adapterForToolbarAction() {
+  try { return window.RC && RC.adapter ? RC.adapter() : null; }
+  catch (_) { return null; }
+}
+
 window.onTranslate = async () => {
-  if (!lastSelText) return;
-  if (window.__uiShared && window.PdfAdapter) {   // 阶段2:翻译 → rc-result 大框(共享模式;else 为原就地浮层逻辑,逐字不变)
+  const selection = _selectionForToolbarAction();
+  const selectedText = String(selection.text || '').trim();
+  const adapter = _adapterForToolbarAction();
+  if (!selectedText) return;
+  if (window.__uiShared && adapter && typeof adapter.translate === 'function') {   // 共享模式按当前宿主分流；PDF 行为不变
     toolbar.classList.remove('open');
-    _resultContext = _charSel ? { charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx}, text: lastSelText, sentence: lastSelText, kind: 'translate' } : null;
-    PdfAdapter.translate({ text: lastSelText, fallback: () => aiCall('/pdf/api/translate', {text: lastSelText, target_lang: '中文'}, '🌐 翻译') });
+    _resultContext = adapter.kind === 'pdf' && _charSel
+      ? { charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx}, text: selectedText, sentence: selectedText, kind: 'translate' }
+      : null;
+    adapter.translate({
+      text: selectedText,
+      context: String(selection.context || ''),
+      fallback: () => aiCall('/pdf/api/translate', {text: selectedText, target_lang: '中文'}, '🌐 翻译')
+    });
     return;
   }
   toolbar.classList.remove('open');
   const pw = _charSel && _charSel.pw;
   // 无 char 信息(罕见) → 退回大框 AI 翻译
   if (!pw || !pw.__charBoxes) {
-    aiCall('/pdf/api/translate', {text: lastSelText, target_lang: '中文'}, '🌐 翻译');
+    aiCall('/pdf/api/translate', {text: selectedText, target_lang: '中文'}, '🌐 翻译');
     return;
   }
   // 选中句 → 生成句子标记(L框/box)，box 呼吸表示翻译中；译完存 sidecar + 自动弹译文浮层
   const sent = _buildSentenceFromSel(pw, _charSel.startIdx, _charSel.endIdx);
-  if (!sent) { aiCall('/pdf/api/translate', {text: lastSelText, target_lang: '中文'}, '🌐 翻译'); return; }
+  if (!sent) { aiCall('/pdf/api/translate', {text: selectedText, target_lang: '中文'}, '🌐 翻译'); return; }
   // **所译严格 = 预览(所选)文本**：sent.rects 只用作译文覆盖位置(geometry),要翻译的文字一律
   // 用工具栏预览那串 lastSelText，杜绝「翻译内容跟预览不一致」(_buildSentenceFromSel 重拼可能分歧)。
-  { const _pv = (lastSelText || '').replace(/\s+/g, ' ').trim(); if (_pv) sent.text = _pv; }
+  { const _pv = selectedText.replace(/\s+/g, ' ').trim(); if (_pv) sent.text = _pv; }
   sent.__translating = true;
   pw.__vocabSentences = (pw.__vocabSentences || []).filter(s => s.text !== sent.text);
   pw.__vocabSentences.push(sent);
@@ -8523,13 +8794,16 @@ window.onTranslate = async () => {
   }
 };
 window.onExplain = () => {
-  if (!lastSelText) return;
+  const selection = _selectionForToolbarAction();
+  const selectedText = String(selection.text || '').trim();
+  const adapter = _adapterForToolbarAction();
+  if (!selectedText) return;
   toolbar.classList.remove('open');
-  let context = '';
-  let explainText = lastSelText;   // 给 AI 解释的主体；短选区时换成所在整句
+  let context = adapter && adapter.kind !== 'pdf' ? String(selection.context || '') : '';
+  let explainText = selectedText;   // 给 AI 解释的主体；短选区时换成所在整句
   if (_charSel && _charSel.pw && _charSel.pw.__charBoxes) {
     const chars = _charSel.pw.__charBoxes;
-    const sLen = lastSelText.length;
+    const sLen = selectedText.length;
     if (sLen < 50) {
       // 短选区(词/碎片，如跨行的 "at"+"or") → 以所在整句为解释主体，段落作上下文，
       // 避免 AI 纠结孤立碎词"内容不完整"
@@ -8557,14 +8831,14 @@ window.onExplain = () => {
   }
   _resultContext = _charSel ? {
     charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx},
-    text: lastSelText, sentence: explainText, kind: 'explain',
+    text: selectedText, sentence: explainText, kind: 'explain',
   } : null;
-  if (window.__uiShared && window.PdfAdapter) {   // 阶段2:解释 → rc-result 大框(共享模式;else 为原琥珀高亮+后台流式逻辑,逐字不变)
-    PdfAdapter.explain({ text: explainText, context, fallback: () => aiCall('/pdf/api/explain', {text: explainText, context}, '💡 AI 解释') });
+  if (window.__uiShared && adapter && typeof adapter.explain === 'function') {   // 共享模式按当前宿主分流；PDF 行为不变
+    adapter.explain({ text: explainText, context, fallback: () => aiCall('/pdf/api/explain', {text: explainText, context}, '💡 AI 解释') });
     return;
   }
   // 解释**不开面板**:选区建一个一直闪烁的琥珀高亮,AI 后台跑;点高亮才开解释页 + 移除高亮(一次点击)。
-  const _ehl = (typeof _showExplainHighlight === 'function') ? _showExplainHighlight(_charSel && _charSel.pw, lastSelText) : null;
+  const _ehl = (typeof _showExplainHighlight === 'function') ? _showExplainHighlight(_charSel && _charSel.pw, selectedText) : null;
   if (!_ehl) { aiCall('/pdf/api/explain', {text: explainText, context}, '💡 AI 解释'); return; }   // 建不了高亮(罕见)→退回旧式直接开面板
   _ehl.title = '💡 AI 解释'; _ehl.src = explainText; _ehl.resultContext = _resultContext;
   _runExplainBg(_ehl, explainText, context);
@@ -8603,9 +8877,12 @@ async function _runExplainBg(hl, text, context) {
 }
 // 多词选中「💬 对话」：开对话框，预填原文 + 句子/段落上下文(也作 AI 上下文)，底部追问框多轮问
 window.onChat = () => {
-  if (!lastSelText) return;
+  const selection = _selectionForToolbarAction();
+  const selectedText = String(selection.text || '').trim();
+  const adapter = _adapterForToolbarAction();
+  if (!selectedText) return;
   toolbar.classList.remove('open');
-  let context = '';
+  let context = adapter && adapter.kind !== 'pdf' ? String(selection.context || '') : '';
   if (_charSel && _charSel.pw && _charSel.pw.__charBoxes) {
     const chars = _charSel.pw.__charBoxes;
     const cr = _expandSentenceFromRange(chars, _charSel.startIdx, _charSel.endIdx);
@@ -8618,13 +8895,13 @@ window.onChat = () => {
   }
   _resultContext = _charSel ? {
     charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx},
-    text: lastSelText, sentence: context || lastSelText, kind: 'chat',
+    text: selectedText, sentence: context || selectedText, kind: 'chat',
   } : null;
-  if (window.__uiShared && window.PdfAdapter) {   // 阶段2:对话 → rc-result.openChat(共享模式;else 为下方 _openChat 原逻辑,逐字不变)
-    PdfAdapter.chat({ text: lastSelText, context, fallback: () => _openChat(lastSelText, context) });
+  if (window.__uiShared && adapter && typeof adapter.chat === 'function') {   // 共享模式按当前宿主分流；PDF 行为不变
+    adapter.chat({ text: selectedText, context, fallback: () => _openChat(selectedText, context) });
     return;
   }
-  _openChat(lastSelText, context);
+  _openChat(selectedText, context);
 };
 // 对话面板打开(原 onChat 尾段逐字搬入;参数名沿用 lastSelText/context 保持函数体不变)
 function _openChat(lastSelText, context) {
@@ -10348,6 +10625,9 @@ async function _connProbe() {
     'background:rgba(10,132,255,.10);border-radius:7px;box-shadow:0 0 0 2px rgba(10,132,255,.18);' +
     'animation:figHlIn .22s ease-out}' +
     '@keyframes figHlIn{from{opacity:0;transform:scale(1.03)}to{opacity:1;transform:scale(1)}}' +
+    // 持续「已选中」高亮(跟 __figAttached 同步,与临时 .fig-hl 分开;绿色区分选中态)
+    '.fig-hl-sel{position:absolute;z-index:5;pointer-events:none;border:2.5px solid rgba(48,209,88,.95);' +
+    'background:rgba(48,209,88,.12);border-radius:7px;box-shadow:0 0 0 2px rgba(48,209,88,.22);animation:figHlIn .22s ease-out}' +
     // 图区命中层(透明可点;touch-action:auto 不挡阅读滚动,拖拽改用徽标当把手)
     '.fig-hit{position:absolute;z-index:5;cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:pan-y}' +   // pan-y:竖向照常滚;长按才发起拖动(拖动时 preventDefault 抑制滚)
     '.fig-hit.dragging{touch-action:none}' +
@@ -10532,6 +10812,7 @@ async function _connProbe() {
       _bindBadge(b, f, num);    // 轻点=描述浮层;长按=拖进助手对话(徽标当拖拽把手,小不挡滚动)
       layer.appendChild(b);
     });
+    _paintSelHls();   // 翻页/重绘后重画本页(及所有已加载页)的持续选中高亮,否则翻回来选中框丢
   }
 
   // ── 焦点图:点/长按图区 → 设 window.__figFocus + 高亮;长按拖动 → ghost 拖进右侧助手栏入上下文 ──
@@ -10579,6 +10860,49 @@ async function _connProbe() {
       });
     }
     _renderChips();
+  }
+  // 持续选中高亮(跟 __figAttached 同步,与临时 _hlEl 分开;**绝不被 clearHl 清**)。
+  // 遍历已加载页,对每张已带入的图在其 .fig-layer 画一个持久 .fig-hl-sel(data-figid);先清旧的再重画,防重复。
+  function _paintSelHls() {
+    try {
+      document.querySelectorAll('.fig-layer .fig-hl-sel').forEach(function (e) { e.remove(); });
+      var list = window.__figAttached || [];
+      if (!list.length) return;
+      list.forEach(function (a) {
+        var pw = document.querySelector('.page-wrap[data-page-num="' + a.page + '"]');
+        if (!pw) return;
+        var layer = pw.querySelector('.fig-layer'); if (!layer) return;
+        if (layer.querySelector('.fig-hl-sel[data-figid="' + a.id + '"]')) return;
+        var bb = a.box; if (!bb || bb.length !== 4) return;
+        var canvas = pw.querySelector('canvas');
+        var cssW = (canvas && canvas.clientWidth) || pw.clientWidth, cssH = (canvas && canvas.clientHeight) || pw.clientHeight;
+        if (pw.classList.contains('crop-on')) {   // 去边:层被撑成整图 → 用整图尺寸换算(同 showHl/draw)
+          var fw = parseFloat(pw.style.getPropertyValue('--full-w')), fh = parseFloat(pw.style.getPropertyValue('--full-h'));
+          if (fw > 0 && fh > 0) { cssW = fw; cssH = fh; }
+        }
+        if (!cssW || !cssH) return;
+        var el = document.createElement('div'); el.className = 'fig-hl-sel'; el.setAttribute('data-figid', a.id);
+        el.style.left = (bb[0] * cssW) + 'px'; el.style.top = (bb[1] * cssH) + 'px';
+        el.style.width = Math.max(2, (bb[2] - bb[0]) * cssW) + 'px';
+        el.style.height = Math.max(2, (bb[3] - bb[1]) * cssH) + 'px';
+        layer.appendChild(el);
+      });
+    } catch (_) {}
+  }
+  window.__paintFigSelHls = _paintSelHls;
+  // 长按 toggle(**专给长按用**):已选中 → 移除(去高亮 + 去带入);未选中 → 加入带入 + 画持久高亮。
+  function _toggleFig(fig, num) {
+    var id = _figId(fig, num);
+    var has = (window.__figAttached || []).some(function (a) { return a.id === id; });
+    if (has) {
+      window.__figAttached = (window.__figAttached || []).filter(function (a) { return a.id !== id; });
+      _renderChips(); _paintSelHls();
+      if (typeof _toast === 'function') _toast('已取消选中');
+    } else {
+      _attachFig(fig, num);   // 已 push + renderChips
+      _paintSelHls();
+      if (typeof _toast === 'function') _toast(fig.group ? '已带入这个图组' : '已带入这张图');
+    }
   }
   function setFigFocus(fig, anchorEl, num) {
     closePop();
@@ -10632,13 +10956,13 @@ async function _connProbe() {
         img.addEventListener('click', function () { _openFigLightbox(a); });   // 点缩略图 → 看大图
         var cap = document.createElement('span'); cap.className = 'afc-cap'; cap.textContent = (a.group ? '图组 · ' : '') + (a.caption || '图') + ' · p' + (window._dispPage ? window._dispPage(a.page) : a.page);
         var x = document.createElement('button'); x.className = 'afc-x'; x.textContent = '✕';
-        x.addEventListener('click', function () { window.__figAttached = (window.__figAttached || []).filter(function (z) { return z.id !== a.id; }); _renderChips(); });
+        x.addEventListener('click', function () { window.__figAttached = (window.__figAttached || []).filter(function (z) { return z.id !== a.id; }); _renderChips(); _paintSelHls(); });
         chip.appendChild(img); chip.appendChild(cap); chip.appendChild(x); wrap.appendChild(chip);
       });
     } catch (_) {}
   }
   window.__renderFigChips = _renderChips;       // 助手打开时可调一次,补渲(点图在开助手前发生的情况)
-  window.__clearFigFocus = function () { window.__figAttached = []; _renderChips(); clearHl(); };
+  window.__clearFigFocus = function () { window.__figAttached = []; _renderChips(); clearHl(); _paintSelHls(); };
   // 给「历史/上下文卡片」渲缩略图:a={file_rel,page,box,has_ink};live(刚发的那条) 有笔迹走 POST 实时合成,
   // 历史回看走 GET &ink=1(服务端读已保存的 sidecar 笔迹),都拿到带笔迹的合成图
   window.__figThumb = function (a, imgEl, live) {
@@ -10750,10 +11074,12 @@ async function _connProbe() {
     var over = _overAsst(e.clientX, e.clientY);
     _dragCancel();
     if (over) {
-      _attachFig(fig, num);     // 加入带入列表(支持多张)
+      _attachFig(fig, num);     // 拖到助手面板上松手 = 加入带入列表(支持多张)
       try { if (window.switchSideTab) window.switchSideTab('asst'); } catch (_) {}
       _renderChips();           // 切到助手 tab 后补渲一次(确保附件条出现)
       if (typeof _toast === 'function') _toast('📷 已带进助手对话');
+    } else {   // 长按原地松手(位移未超阈值、没拖到助手)= toggle 选中(再长按同图 → 取消;只有拖到助手才是纯加入)
+      try { _toggleFig(fig, num); } catch (_) {}
     }
   }
   function _dragCancel() {
@@ -10763,6 +11089,26 @@ async function _connProbe() {
     if (dp) { dp.classList.remove('fig-drop-ready'); dp.classList.remove('fig-drop-over'); var p = document.getElementById('fig-drop-plus'); if (p) p.remove(); }
   }
 
+  // fig-hit(pointer-events:auto)盖在图上会挡住下层文字高亮 mark → 双击想进编辑被图吃掉。
+  // 解法:fig-hit **只吃长按**(选中图 toggle);快速单击/双击 → 找出正下方的 .hl-saved,把这次 tap
+  // 合成 PointerEvent down+up 转发给它,由它自己的 RC.highlight.gesture 累积成双击=进高亮编辑(见 17-highlight.js)。不动长按拖动路径。
+  function _markBelow(x, y) {     // 暂时关掉所有 fig 层的命中,elementFromPoint 才看得到底下的高亮 mark
+    var toggled = [];
+    try {
+      document.querySelectorAll('.fig-hit, .fig-badge').forEach(function (el) { toggled.push([el, el.style.pointerEvents]); el.style.pointerEvents = 'none'; });
+      var el = document.elementFromPoint(x, y);
+      return (el && el.closest) ? el.closest('.hl-saved') : null;
+    } catch (_) { return null; }
+    finally { toggled.forEach(function (p) { p[0].style.pointerEvents = p[1] || ''; }); }
+  }
+  function _forwardTap(mark, e) {   // 把这次轻点合成 down+up 转发给下层高亮 mark(驱动它自己的双击/编辑,不再被图挡)
+    try {
+      var opt = { bubbles: true, cancelable: true, composed: true, clientX: e.clientX, clientY: e.clientY,
+                  pointerId: e.pointerId || 1, pointerType: e.pointerType || 'touch', isPrimary: true };
+      mark.dispatchEvent(new PointerEvent('pointerdown', opt));
+      mark.dispatchEvent(new PointerEvent('pointerup', opt));
+    } catch (_) {}
+  }
   // 图区命中层:只管轻点 → 设焦点(放开滚动,不拦拖拽)。拖拽统一走徽标(_bindBadge)
   // 整张图:轻点 → 设焦点;长按(380ms 不动)→ 拖进助手对话(整图当拖拽范围,不再只靠徽标)。
   // touch-action:pan-y 让竖滑照常滚;长按门控 = 没长按就移动当滚动放掉,长按后 setPointerCapture+切 .dragging(touch-action:none)+preventDefault 稳拖。
@@ -10783,7 +11129,10 @@ async function _connProbe() {
     hit.addEventListener('pointerup', function (e) {
       if (lp) { clearTimeout(lp); lp = null; }
       if (dragging) { dragging = false; hit.classList.remove('dragging'); try { hit.releasePointerCapture(pid); } catch (_) {} _dragEnd(fig, num, e); return; }
-      if (!moved && Date.now() - st < 600) setFigFocus(fig, hit, num);   // 轻点 → 设焦点
+      if (!moved && Date.now() - st < 600) {   // 轻点:下面若叠着文字高亮 mark → 转发给它(累积成双击=进编辑,图不拦);否则**不做任何事**(用户 2026-07-22:单击不留蓝框视觉反馈)。带入统一走长按(见 _dragEnd)
+        var _mk = null; try { _mk = _markBelow(e.clientX, e.clientY); } catch (_) {}
+        if (_mk) { _forwardTap(_mk, e); }
+      }
     });
     hit.addEventListener('pointercancel', function () { if (lp) { clearTimeout(lp); lp = null; } if (dragging) { dragging = false; hit.classList.remove('dragging'); _dragCancel(); } });
   }
@@ -10842,13 +11191,62 @@ async function _connProbe() {
 // 仅 ui=shared 加载了 pdf-adapter.js → window.PdfAdapter 存在时执行;默认无 flag 时整段跳过。
 // 阶段1 的 lookupWord 由门控点直接传 opts,不依赖此 bind;此段只为 captureSelection/clearSelection(阶段2)就位。
 if (window.PdfAdapter && PdfAdapter.bind) {
+  // vocabulary-state 可能在 reader.js 之前或之后完成 IndexedDB/扩展 Vault hydrate。
+  // 两种顺序都只把 phrase 记录投影进现有 PDF 字符盒，不触发任何确认 GET。
+  const _syncSharedPhraseState = (record) => {
+    try {
+      if (typeof window.__syncPhraseStateProjection !== 'function') return;
+      if (record) {
+        if (record.kind === 'phrase') window.__syncPhraseStateProjection([record]);
+        return;
+      }
+      const repo = window.BWReaderRuntime && window.BWReaderRuntime.vocabularyState;
+      if (repo && repo.CONTRACT === 'vocabulary-state/1' && typeof repo.snapshot === 'function') {
+        window.__syncPhraseStateProjection(repo.snapshot());
+      }
+    } catch (_) {}
+  };
+  try {
+    document.addEventListener('bw:vocabulary-state-change', (event) => {
+      _syncSharedPhraseState(event && event.detail && event.detail.record);
+    });
+    document.addEventListener('bw:vocabulary-state-ready', () => _syncSharedPhraseState());
+  } catch (_) {}
+  _syncSharedPhraseState();
   // PDF 也接进统一中间层 RC._adapter(设计见 /reader-middlelayer-design.md);助手经 RC.adapter().getContext() 取上下文,
-  // 与 EPUB 用完全一样的方式。仅 ui=shared(window.PdfAdapter 存在)时执行;legacy 模式整段跳过 → RC._adapter 保持空、ctx() 回退直连 __voiceContext。
-  try { if (window.RC && RC.use) RC.use(PdfAdapter); } catch (e) {}
+  // 与 EPUB 用完全一样的方式。实况网页已经由 parser 阶段的 WebAdapter 独立登记；这里仍 bind
+  // PDF 私有 host 供共享 UI 组合，但绝不能用 PdfAdapter 把当前 kind=web 的 DocumentHost 覆盖掉。
+  const _readerIsWebHost = !!(window.__PDF_CFG && window.__PDF_CFG.web_url);
+  try { if (!_readerIsWebHost && window.RC && RC.use) RC.use(PdfAdapter); } catch (e) {}
+  function _pdfNoteGeom(pw) {
+    // #51 去边(crop)坐标统一:便签/反馈层都挂进 .crop-on 的 page-wrap→吃 CSS translate(-cropL,-cropT)。
+    // 以 char-layer(撑满整页 --full-w、与便签同吃 translate)的实时屏幕 BCR 为基准 → crop/zoom/祖先缩放
+    // 全自动含在 BCR 里,三条链(拖动反馈 noteWordRect/mount、松手 anchorFromPoint→noteMount)同一坐标系。
+    // char-layer 未就绪时回退 pw BCR + crop 变量手算整页屏幕投影。
+    var cl = pw.__charLayer;
+    var isCrop = pw.classList && pw.classList.contains('crop-on');
+    var cropL = isCrop ? (parseFloat(pw.style.getPropertyValue('--crop-l')) || 0) : 0;
+    var cropT = isCrop ? (parseFloat(pw.style.getPropertyValue('--crop-t')) || 0) : 0;
+    var fullW = isCrop ? (parseFloat(pw.style.getPropertyValue('--full-w')) || pw.clientWidth) : pw.clientWidth;
+    var fullH = isCrop ? (parseFloat(pw.style.getPropertyValue('--full-h')) || pw.clientHeight) : pw.clientHeight;
+    if (cl) {
+      var clr = cl.getBoundingClientRect();
+      if (clr.width && clr.height) {
+        return { left: clr.left, top: clr.top, sw: clr.width, sh: clr.height,
+                 layW: cl.clientWidth || fullW, layH: cl.clientHeight || fullH, fullW: fullW, fullH: fullH };
+      }
+    }
+    var pr = pw.getBoundingClientRect();
+    var S = pr.width / (pw.clientWidth || 1) || 1;
+    return { left: pr.left - cropL * S, top: pr.top - cropT * S,
+             sw: fullW * S, sh: fullH * S, layW: fullW, layH: fullH, fullW: fullW, fullH: fullH };
+  }
   PdfAdapter.bind({
     charSel: () => _charSel,
     lastSelText: () => lastSelText,
     selPageNum: () => (typeof _selPageNum === 'function' ? _selPageNum() : currentPage),
+    currentPage: () => (typeof currentPage !== 'undefined' ? currentPage : 0),
+    pageCount: () => { try { return pdfDoc ? pdfDoc.numPages : 0; } catch (_) { return 0; } },
     fileRel: () => FILE_REL,
     bookLangs: () => BOOK_LANGS,
     sentence: (cs) => {
@@ -10909,23 +11307,25 @@ if (window.PdfAdapter && PdfAdapter.bind) {
       const pw = document.querySelector('.page-wrap[data-page-num="' + anchor.page + '"]');
       if (!pw || pw.dataset.loaded !== '1') return null;
       const x = Math.max(0, Math.min(1, anchor.x || 0)), y = Math.max(0, Math.min(1, anchor.y || 0));
-      return { el: pw, left: x * pw.clientWidth, top: y * pw.clientHeight };
+      const g = _pdfNoteGeom(pw);   // #51 crop:anchor=整页比例;便签 append 进 .crop-on 吃 translate → left 用整页布局坐标即对齐
+      return { el: pw, left: x * g.fullW, top: y * g.fullH };
     },
     noteWordRect: (x, y) => {
-      // #51 粒度=单词(用户设计):最近字符→同 w 词聚合精确框;dist 给调用方判"超范围→横线"
+      // #51 粒度=单词(用户设计):最近字符→同 w 词聚合精确框;dist(屏幕像素)给调用方判"超范围→横线"
       const t = document.elementFromPoint(x, y);
       const pw = t && t.closest ? t.closest('.page-wrap') : null;
       const cbs = pw && pw.__charBoxes;
       if (!cbs || !cbs.length) return null;
-      const r = pw.getBoundingClientRect();
-      // #51 词框错位根因:charBoxes 坐标=建层时页尺寸;页重渲(缩放/适应)后尺寸变了坐标没跟 →
-      // 探测选错字+词框画错位(松手锚定用比例不受影响=「拖动显示与松手不一致」)。按 k 实时换算。
-      const k = (pw.__charsBaseW && pw.clientWidth) ? (pw.clientWidth / pw.__charsBaseW) : 1;
-      const px = x - r.left, py = y - r.top;
+      // #51 charBox=建层整页布局坐标(__charsBaseW=建层整页布局宽);去边/缩放全含在 g(char-layer 实时 BCR)。
+      // 屏幕点→建层布局坐标(dispK=屏幕/建层布局)与 charBox 同系匹配;返回当前布局坐标(Klay)供 _afx 挂进吃 translate 的 pw。
+      const g = _pdfNoteGeom(pw);
+      const baseW = pw.__charsBaseW || g.layW || 1;
+      const dispK = (g.sw / baseW) || 1;      // 建层布局 → 当前屏幕像素
+      const Klay = (g.layW / baseW) || 1;     // 建层布局 → 当前布局
+      const px = (x - g.left) / dispK, py = (y - g.top) / dispK;   // 屏幕 → 建层布局坐标
       let best = null, bd = 1e18, bestRow = null, brd = 1e18;
-      for (const cb0 of cbs) {
-        if (cb0.sp || !cb0.width) continue;
-        const cb = { left: cb0.left * k, top: cb0.top * k, width: cb0.width * k, height: cb0.height * k, w: cb0.w, sp: cb0.sp };
+      for (const cb of cbs) {
+        if (cb.sp || !cb.width) continue;
         const cx = cb.left + cb.width / 2, cy = cb.top + cb.height / 2;
         // 行优先(用户拍板 2026-07-21:锁**左上角左侧同行**文字,非斜上方——锚语义"插在这段文字之后"):
         // 字符行高带内(±0.75字高)且在探测点左侧 → 按水平距离取最近;同行没有才退全局欧氏最近
@@ -10940,12 +11340,12 @@ if (window.PdfAdapter && PdfAdapter.bind) {
       if (bestRow) { best = bestRow; bd = brd * brd; }
       if (!best) return null;
       let L = best.left, T = best.top, R2 = best.left + best.width, B = best.top + best.height;
-      if (best.w !== -1) for (const cb0 of cbs) {
-        if (cb0.w !== best.w || cb0.sp) continue;
-        L = Math.min(L, cb0.left * k); T = Math.min(T, cb0.top * k);
-        R2 = Math.max(R2, (cb0.left + cb0.width) * k); B = Math.max(B, (cb0.top + cb0.height) * k);
+      if (best.w !== -1) for (const cb of cbs) {
+        if (cb.w !== best.w || cb.sp) continue;
+        L = Math.min(L, cb.left); T = Math.min(T, cb.top);
+        R2 = Math.max(R2, cb.left + cb.width); B = Math.max(B, cb.top + cb.height);
       }
-      return { el: pw, left: L, top: T, width: R2 - L, height: B - T, dist: Math.sqrt(bd) };
+      return { el: pw, left: L * Klay, top: T * Klay, width: (R2 - L) * Klay, height: (B - T) * Klay, dist: Math.sqrt(bd) * dispK };
     },
     noteAnchorFromPoint: (x, y) => {
       const t = document.elementFromPoint(x, y);
@@ -10964,18 +11364,40 @@ if (window.PdfAdapter && PdfAdapter.bind) {
         });
         if (!pw) return null;
       }
-      const r = pw.getBoundingClientRect();
-      if (!r.width || !r.height) return null;
+      const g = _pdfNoteGeom(pw);   // #51 crop:整页比例(char-layer 屏幕投影,含 translate)
+      if (!g.sw || !g.sh) return null;
       const _cl = !(t && t.closest && t.closest('.page-wrap') === pw);   // 走了最近页 fallback=clamped(反馈层画插入横线)
       const a0 = { kind: 'pdf', page: parseInt(pw.dataset.pageNum || '0', 10) || 0,
-               x: Math.max(0, Math.min(1, (x - r.left) / r.width)),
-               y: Math.max(0, Math.min(1, (y - r.top) / r.height)) };
+               x: Math.max(0, Math.min(1, (x - g.left) / g.sw)),
+               y: Math.max(0, Math.min(1, (y - g.top) / g.sh)) };
       if (_cl) a0.clamped = 1;
       return a0;
     },
     // 阶段2 词组(rc-phrasepop):呼吸高亮层是 PDF 字符层几何 → 留底座,adapter 只接管查询+小框渲染。
     phraseHighlight: () => { try { return _showPhraseHighlight(_charSel && _charSel.pw); } catch (_) { return null; } },   // 返回本高亮 → onSolid 精确标它(并发多查询各标各的)
     phraseSolid: (hl) => { try { if (!hl) return; hl.solid = true; const _l = document.querySelector('.phrase-hl-layer[data-phid="' + hl.id + '"]'); if (_l) { _l.classList.remove('breathe'); _l.querySelectorAll('.hl').forEach(el => el.style.pointerEvents = 'auto'); } } catch (_) {} },   // 不回退标"最后一个"(并发查询会误标最新那个)
+    // 共享词组 UI 已把 vocabulary-state 作为事实源；宿主只负责本页几何投影。
+    // 收藏分词和掌握下划线都能用现有字符盒在本地重算，不能再为了“确认”拉整页 chars。
+    phraseFavoriteUpdate: (text, enabled) => {
+      try {
+        const key = String(text || '').replace(/[\s\u3000]+/g, '');
+        if (!key) return;
+        if (enabled) _phraseFavSet.add(key); else _phraseFavSet.delete(key);
+        _applyPhraseMergesAll();
+        if (enabled) _pfavPaint(key); else _pfavUnpaint(key);
+      } catch (_) {}
+    },
+    phraseMasteryUpdate: (text, enabled) => {
+      try {
+        const key = _phraseNorm(text);
+        if (!key) return;
+        if (enabled) _phraseMarkSet.add(key); else _phraseMarkSet.delete(key);
+        document.querySelectorAll('[data-loaded="1"][data-page-num]').forEach((pw) => {
+          try { renderVocabUnderlines(pw, pw.__vocabMarks || []); } catch (_) {}
+        });
+      } catch (_) {}
+    },
+    // 仅供旧 adapter 降级；新共享路径不得调用这个联网重扫。
     phraseRefresh: () => { try { refreshCharsWForAllPages(); } catch (_) {} },
     removePhraseHighlight: (arg) => { try { _removePhraseHighlight(arg); } catch (_) {} },
     // 词组框「💡 解释」→ 复用 PDF onExplain(它自身也被门控,共享模式下转 rc-result)。
@@ -11063,7 +11485,9 @@ if (window.PdfAdapter && PdfAdapter.bind) {
   });
   // 便签初始化(共享组件;opts 经上面 host-bind 的 noteMount/noteAnchorFromPoint;🗒 按钮在模板 ui_shared 块内)
   try {
-    if (window.RC && RC.stickynote) {
+    // Web 的 DOM/quote anchor 尚未完成，不能把 PDF noteMount/anchorFromPoint 偷渡进共享组件。
+    // PDF 分支完全保持原初始化；网页便签/固定卡片继续列为独立 Web host pending。
+    if (!_readerIsWebHost && window.RC && RC.stickynote) {
       RC.stickynote.init({
         file: FILE_REL,
         mount: (a) => PdfAdapter._host.noteMount(a),
@@ -11191,6 +11615,7 @@ if (window.PdfAdapter && PdfAdapter.bind) {
     mirrorFloatingClass: 'grammar-floating',
     appearanceKeys: (name) => 'pdf-gp-' + name + '-' + _gpMode(),   // 按排版分档(18-grammar._gpMode,同模块作用域)
     onReflow: () => { try { if (!document.body.classList.contains('grammar-floating') && typeof _scheduleRefit === 'function') _scheduleRefit(true); } catch (_) {} },   // 悬浮不重排防闪(照搬 18-grammar)
+    onWidthChange: () => { try { if (!document.body.classList.contains('grammar-floating') && typeof _scheduleRefit === 'function') _scheduleRefit(true); } catch (_) {} },
     tabButtons: [{
       id: 'side-clear', title: '清空全部分析', tabs: ['grammar'],
       icon: _si('<path d="M4 7h16M10 4h4a1 1 0 0 1 1 1v2H9V5a1 1 0 0 1 1-1zM6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/>'),
@@ -11392,13 +11817,12 @@ window.__upReconcileDelete = function (newMeta) {
 })();
 // ── 31-localbook.js:整本下载到本机(客户端 Cache Storage 预灌)──
 // 「📥 预热」是**服务器侧**缓存(Pi 先渲好,请求变快);本模块是**客户端**整本落盘:
-// 把全书页图+字符层灌进 SW 的 'pdf-cache-v3',之后 SW cache-first 每页零网络(秒开/离线可读)。
+// 逐页 fetch,由 SW 按服务器核验账户写入 pdf-private-v4-*;页面永远不知道/拼接 cache namespace。
 // 读路径零改动——缓存键靠直接调用渲染路径的同一批模块级函数/常量(_bucketReqW/_ratchetReqW/
 // FILE_REL/CHARS_VER/__imgMeta,拼装后同一 module 作用域)构造,逐字节一致,永不漂移。
 // 另:navigator.storage.persist()(主屏 PWA 更易授予 → 豁免 LRU 逐出;见 references/ios-webext-capabilities.md)。
 // ⚠ iOS 上 Safari 标签页与主屏 PWA 存储不互通:固定从主屏入口用,别两头下载。
 
-const _LB_CACHE = 'pdf-cache-v3';   // 必须与 pdf_reader.py _SW_JS 的 CACHE 同名
 let _lbAbort = false, _lbRunning = false;
 
 // 开机即申请持久存储(幂等;拒绝也无害,只是可被逐出)
@@ -11414,11 +11838,10 @@ function _lbCharsUrl(p, cv) {
   return `/pdf/api/page-chars?file=${encodeURIComponent(FILE_REL)}&page=${p}&v=${CHARS_VER}&cv=${encodeURIComponent(cv)}`;
 }
 
-async function _lbFetchInto(cache, url) {
-  if (await cache.match(url)) return 'hit';
+async function _lbFetchInto(url) {
+  // 已缓存时 SW cache-first 会直接返回；未缓存时只有已由服务器核验的 client 才会落 v4。
   const r = await fetch(url);
   if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + url.slice(0, 80));
-  await cache.put(url, r.clone());
   return r;
 }
 
@@ -11427,24 +11850,24 @@ async function _lbDownload(btn) {
   if (!meta || !meta.page_count) { window.RC && RC.toast('书还没加载好,稍候再试'); return; }
   if (!_imgMode) { window.RC && RC.toast('此书当前为矢量模式,本机化暂只支持页图模式'); return; }
   if (!('caches' in window)) { window.RC && RC.toast('此浏览器不支持本机存储'); return; }
+  try { if (window.BWReaderPrivateCache) await BWReaderPrivateCache.rebind(); } catch (_) {}
   _lbRunning = true; _lbAbort = false;
   const total = meta.page_count;
   const baseW = _bucketReqW(Math.floor(meta.page_w * scale));   // 与 _prefetchAround 同公式
-  const cache = await caches.open(_LB_CACHE);
   let done = 0, errs = 0;
   const worker = async (pages) => {
     for (const p of pages) {
       if (_lbAbort) return;
       try {
-        await _lbFetchInto(cache, _lbImgUrl(p, baseW));
+        await _lbFetchInto(_lbImgUrl(p, baseW));
         // 字符层:先按本地猜测 cv 灌一份(读路径首拉这个键);再经 overlay 拿真 cv 灌正主 + 记 localStorage
         const cvKey = 'pdf-cv:' + FILE_REL + ':' + p;
         let cvGuess; try { cvGuess = localStorage.getItem(cvKey) || ('v' + CHARS_VER); } catch (_) { cvGuess = 'v' + CHARS_VER; }
-        await _lbFetchInto(cache, _lbCharsUrl(p, cvGuess));
+        await _lbFetchInto(_lbCharsUrl(p, cvGuess));
         try {
           const ov = await (await fetch(`/pdf/api/page-overlay?file=${encodeURIComponent(FILE_REL)}&page=${p}`)).json();
           if (ov && ov.cv && ov.cv !== cvGuess) {
-            await _lbFetchInto(cache, _lbCharsUrl(p, ov.cv));
+            await _lbFetchInto(_lbCharsUrl(p, ov.cv));
             try { localStorage.setItem(cvKey, ov.cv); } catch (_) {}
           }
         } catch (_) {}
@@ -11457,7 +11880,7 @@ async function _lbDownload(btn) {
   const lanes = [[], [], []];
   for (let p = 1; p <= total; p++) lanes[p % 3].push(p);
   await Promise.all(lanes.map(worker));
-  if (!_lbAbort) await _lbPrimeShell();   // 灌壳:HTML+已加载 /static/ 资产(治首访 SW 未控时壳没进缓存)
+  if (!_lbAbort) await _lbPrimeShell();   // 只预热 /static/ 资产；含账户身份的 HTML 永不落 Cache Storage
   _lbRunning = false;
   if (_lbAbort) { _lbSyncBtn(btn); window.RC && RC.toast('已暂停(已存部分保留,重按继续)'); return; }
   if (errs === 0) {
@@ -11471,13 +11894,10 @@ async function _lbDownload(btn) {
   _lbSyncBtn(btn);
 }
 
-// 把「打开这本书所需的壳」也存进本机:开书 HTML(SW 侧按 file 归一键)+ 本页已加载的全部 /static/ 资产
-// (首访时 SW 尚未控制页面,壳资产没进缓存;这里重 fetch 一遍 → 经 SW 的 /static/ cache-first 落 SHELL)
+// 把「打开这本书所需的静态壳」存进本机：只预热本页已加载的 /static/ 资产。
+// 开书 HTML 含 window.__USER__/provider ticket，禁止进入 Cache Storage；离线由当前已加载 PWA fallback 承接。
 async function _lbPrimeShell() {
   try {
-    const navUrl = '/pdf/view?file=' + encodeURIComponent(FILE_REL);
-    const shell = await caches.open('pdf-shell-v1');
-    try { const r = await fetch(navUrl); if (r.ok) await shell.put(navUrl, r); } catch (_) {}
     const urls = new Set();
     try { performance.getEntriesByType('resource').forEach((en) => { try { const u = new URL(en.name); if (u.origin === location.origin && u.pathname.startsWith('/static/')) urls.add(u.pathname + u.search); } catch (_) {} }); } catch (_) {}
     document.querySelectorAll('script[src],link[href]').forEach((el) => {
@@ -11490,13 +11910,11 @@ async function _lbPrimeShell() {
 
 async function _lbDelete(btn) {
   try {
-    const cache = await caches.open(_LB_CACHE);
-    const keys = await cache.keys();
-    const tag = 'file=' + encodeURIComponent(FILE_REL);
-    let n = 0;
-    for (const req of keys) { if (req.url.indexOf(tag) >= 0) { await cache.delete(req); n++; } }
+    if (!window.BWReaderPrivateCache) throw new Error('私有缓存控制器未就绪');
+    const ok = await BWReaderPrivateCache.deleteBook(FILE_REL);
+    if (!ok) throw new Error('当前账户尚未核验');
     try { localStorage.removeItem(_lbDoneKey()); } catch (_) {}
-    window.RC && RC.toast('已删除本机副本(' + n + ' 项)');
+    window.RC && RC.toast('已删除当前账户的本机副本');
   } catch (e) { window.RC && RC.toast('删除失败:' + e); }
   _lbSyncBtn(btn);
 }
@@ -11540,4 +11958,394 @@ window._lbClick = _lbClick;
     setTimeout(() => _lbSyncBtn(b), 1500);
     _lbSyncBtn(b);
   } catch (_) {}
+})();
+// ═══════════ 32-extension-host.js — PDF 书籍宿主能力白名单 ═══════════
+// 仍在 reader.js 模块作用域内，因此只做薄适配，复用现有 PDF 几何、sidecar、墨迹、
+// 便签和导航函数。旧 PWA 网页壳明确不登记为书籍宿主；普通网页由扩展直接处理。
+(() => {
+  if (window.__PDF_CFG && window.__PDF_CFG.web_url) return;
+  if (!window.BWReaderBookHost || window.__bwReaderLocalApi) return;
+
+  function selection() {
+    try {
+      const adapter = window.PdfAdapter;
+      const s = adapter && adapter.captureSelection ? adapter.captureSelection() : null;
+      if (!s || !s.text) return null;
+      const text = String(s.text || '').trim();
+      const sentence = String(s.context || s.ctx || s.sentence || window.__lastSelSentence || '').trim();
+      return {
+        text,
+        sentence,
+        context: sentence || text,
+        rect: s.rect && (s.rect.client || s.rect),
+        anchor: s.anchor || null,
+        file: typeof FILE_REL !== 'undefined' ? FILE_REL : '',
+        book: document.title || '',
+        langs: (typeof BOOK_LANGS !== 'undefined' && Array.isArray(BOOK_LANGS)) ? BOOK_LANGS.slice() : [],
+        page: (s.anchor && Number(s.anchor.page))
+          || (typeof _selPageNum === 'function' ? _selPageNum() : currentPage) || 0,
+      };
+    } catch (_) { return null; }
+  }
+
+  function context() {
+    try {
+      const adapter = window.PdfAdapter;
+      const value = adapter && adapter.getContext ? adapter.getContext() : null;
+      return value ? JSON.parse(JSON.stringify(value)) : null;
+    } catch (_) { return null; }
+  }
+
+  function currentLocation() {
+    let total = 0;
+    try { total = Number(pdfDoc && pdfDoc.numPages) || 0; } catch (_) {}
+    return { unit: 'page', index: Math.max(0, (Number(currentPage) || 1) - 1), total };
+  }
+
+  async function action(name, payload) {
+    payload = payload || {};
+    switch (name) {
+      case 'ocr':
+        if (window.onOcrSel) await window.onOcrSel();
+        return { selection: selection() };
+      case 'highlight': {
+        if (!_charSel || !_charSel.pw) throw new Error('没有可标记的 PDF 选区');
+        const colors = getHlColors();
+        const color = String(payload.color || _activeHlColor || _lastHlColor || colors[0] || '#fff59d');
+        const h = await saveHighlight({
+          pw: _charSel.pw,
+          sIdx: _charSel.startIdx,
+          eIdx: _charSel.endIdx,
+          color,
+          kind: String(payload.kind || 'note'),
+          sentence: String(payload.sentence || ''),
+          body: String(payload.body || ''),
+          note: String(payload.note || ''),
+        });
+        if (h) {
+          _charSel.pw.querySelector('.sel-overlay')?.replaceChildren();
+          _charSel = null;
+          lastSelText = '';
+          _updateSelPreview('');
+          toolbar.classList.remove('open');
+          _toast('已标记 🖌');
+        }
+        return {
+          ok: !!h,
+          highlight: h ? { id: h.id, page: h.page, color: h.color, text: h.text } : null,
+        };
+      }
+      case 'open_search':
+        if (window.openSearch) window.openSearch();
+        return { ok: true };
+      case 'toggle_ruby':
+        if (window.toggleRuby) window.toggleRuby();
+        return {
+          ok: true,
+          ruby: typeof _rubyEnabled === 'function' ? !!_rubyEnabled() : false,
+          translate: typeof _pageTrOn !== 'undefined' ? !!_pageTrOn : false,
+        };
+      case 'toggle_page_translate':
+        if (window.togglePageTranslate) window.togglePageTranslate();
+        return {
+          ok: true,
+          ruby: typeof _rubyEnabled === 'function' ? !!_rubyEnabled() : false,
+          translate: typeof _pageTrOn !== 'undefined' ? !!_pageTrOn : false,
+        };
+      case 'create_sticky':
+        if (!window._noteCreateAtCenter) throw new Error('PDF 便签层尚未就绪');
+        window._noteCreateAtCenter();
+        return { ok: true };
+      case 'toggle_ink':
+        if (!window.inkToggle) throw new Error('PDF 绘图层尚未就绪');
+        window.inkToggle();
+        return { ok: true, active: document.body.classList.contains('ink-mode') };
+      case 'anchor_fx':
+        if (window.RC && RC.stickynote && RC.stickynote.anchorFx) {
+          if (payload.show) RC.stickynote.anchorFx.show(Number(payload.x) || 0, Number(payload.y) || 0);
+          else RC.stickynote.anchorFx.hide();
+        }
+        return { ok: true };
+      case 'jump_page':
+      case 'jump_location': {
+        const locationPayload = payload.location || payload;
+        const page = Math.max(1, Number(locationPayload.page)
+          || (Number.isFinite(Number(locationPayload.index)) ? Number(locationPayload.index) + 1 : 1));
+        if (window.jumpWithBack) window.jumpWithBack(page);
+        else if (window.goToPage) window.goToPage(page);
+        return { ok: true, page };
+      }
+      case 'change_page':
+        if (window.changePage) window.changePage(Number(payload.delta) || 0);
+        return { ok: true };
+      case 'fit_width':
+        if (window.fitWidth) window.fitWidth();
+        return { ok: true };
+      case 'zoom_by':
+        if (window.zoomChange) window.zoomChange(Number(payload.delta) || 0);
+        return { ok: true };
+      case 'jump_context': {
+        const target = payload.context || payload || {};
+        const page = Math.max(1, Number(target.page || target.pdf_page || 1));
+        const file = String(target.file || target.file_rel || '');
+        if (file && typeof FILE_REL !== 'undefined' && file !== FILE_REL && window.openBookAt) {
+          window.openBookAt(file, page);
+        } else if (window.jumpWithBack) {
+          window.jumpWithBack(page);
+        }
+        return { ok: true };
+      }
+      case 'flash_selection':
+        if (typeof _flashSelOnPage === 'function') {
+          _flashSelOnPage(Number(payload.page) || currentPage, String(payload.text || ''));
+        }
+        return { ok: true };
+      case 'pin_card': {
+        const cards = Array.isArray(payload.cards) ? payload.cards.slice(0, 50) : [];
+        if (!cards.length) throw new Error('没有可钉住的卡片');
+        if (!(window.RC && RC.stickynote && RC.stickynote.createCardAt)) {
+          throw new Error('PDF 卡片便签尚未就绪');
+        }
+        const x = Number(payload.x) || (window.innerWidth || 1024) / 2;
+        const y = Number(payload.y) || (window.innerHeight || 768) / 2;
+        RC.stickynote.createCardAt(x, y, cards, String(payload.gid || ''));
+        _toast('📌 已钉到书页');
+        return { ok: true };
+      }
+      case 'pin_html': {
+        const html = payload.html || {};
+        const content = String(html.content || '');
+        if (!content) throw new Error('没有可粘贴的工具卡内容');
+        if (!(window.RC && RC.stickynote && RC.stickynote.createHtmlAt)) {
+          throw new Error('PDF 工具卡便签尚未就绪');
+        }
+        const x = Number(payload.x) || (window.innerWidth || 1024) / 2;
+        const y = Number(payload.y) || (window.innerHeight || 768) / 2;
+        const ok = RC.stickynote.createHtmlAt(x, y, {
+          content,
+          isHtml: !!html.isHtml,
+          label: String(html.label || '卡片'),
+          type: String(html.type || ''),
+          icon: String(html.icon || ''),
+          form: String(html.form || 'full'),
+          cid: String(html.cid || payload.cid || ''),
+        });
+        if (!ok) throw new Error('请把工具卡放到 PDF 正文上再松手');
+        return { ok: true };
+      }
+      case 'toggle_fullscreen':
+        if (window.toggleFullscreen) window.toggleFullscreen();
+        return { ok: true };
+      case 'open_settings':
+        if (window.openSettings) window.openSettings();
+        return { ok: true };
+      case 'open_favorite':
+        if (!window._favOpenPicker) throw new Error('收藏组件尚未就绪');
+        window._favOpenPicker();
+        return { ok: true };
+      case 'create_user_page':
+        if (!window._upCreate) throw new Error('插入页组件尚未就绪');
+        window._upCreate();
+        return { ok: true };
+      case 'toggle_layout':
+        if (window.toggleSpread) window.toggleSpread();
+        return { ok: true };
+      case 'toggle_crop':
+        if (window.toggleCrop) window.toggleCrop();
+        return { ok: true };
+      case 'clear_selection':
+        if (window.PdfAdapter && PdfAdapter.clearSelection) PdfAdapter.clearSelection();
+        return { ok: true };
+      default:
+        throw new Error('不允许的 PDF 本地命令：' + name);
+    }
+  }
+
+  const names = [
+    'ocr', 'highlight', 'open_search', 'toggle_ruby', 'toggle_page_translate',
+    'create_sticky', 'toggle_ink', 'anchor_fx', 'jump_page', 'jump_location',
+    'change_page', 'fit_width', 'zoom_by', 'jump_context', 'flash_selection',
+    'pin_card', 'pin_html', 'toggle_fullscreen', 'open_settings', 'open_favorite',
+    'create_user_page', 'toggle_layout', 'toggle_crop', 'clear_selection',
+  ];
+  const actions = {};
+  names.forEach((name) => { actions[name] = (payload) => action(name, payload); });
+
+  const localApi = BWReaderBookHost.register({
+    mode: 'pdf',
+    file: typeof FILE_REL !== 'undefined' ? FILE_REL : '',
+    title: document.title || '',
+    langs: (typeof BOOK_LANGS !== 'undefined' && Array.isArray(BOOK_LANGS)) ? BOOK_LANGS.slice() : [],
+    selection,
+    context,
+    currentLocation,
+    actions,
+    capabilities: {
+      selection: true,
+      context: true,
+      highlight: true,
+      pdfHighlight: true,
+      selectionOcr: true,
+      bookSearch: true,
+      ruby: true,
+      pageTranslate: true,
+      stickyNote: true,
+      ink: true,
+      anchorFx: true,
+      pinCard: true,
+      pinHtmlCard: true,
+      jumpPage: true,
+      navigation: true,
+      zoom: true,
+      layout: true,
+      crop: true,
+      fullscreen: true,
+      bookSettings: true,
+      favorite: true,
+      userPage: true,
+    },
+  });
+
+  // 无扩展时 PWA 也经同一动作名调用真实宿主；扩展接管后同名动作由桥转发回来。
+  try {
+    if (window.RC && RC.actions && window.PdfAdapter && RC.adapter && RC.adapter() === PdfAdapter) {
+      const meta = (storage) => ({ owner: 'pwa', runtime: 'native', storage });
+      RC.actions.bind('highlight.save', (payload) => localApi.localAction('highlight', payload), meta('book-sidecar'));
+      RC.actions.bind('ink.toggle', () => localApi.localAction('toggle_ink', {}), meta('book-sidecar'));
+      RC.actions.bind('note.create', () => localApi.localAction('create_sticky', {}), meta('book-sidecar'));
+      RC.actions.bind('reading.ruby.toggle', () => localApi.localAction('toggle_ruby', {}), meta('device-local'));
+      RC.actions.bind('translation.page.toggle', () => localApi.localAction('toggle_page_translate', {}), meta('device-local'));
+      RC.actions.bind('pin.card', (payload) => localApi.localAction('pin_card', payload), meta('book-sidecar'));
+      RC.actions.bind('pin.html', (payload) => localApi.localAction('pin_html', payload), meta('book-sidecar'));
+      RC.actions.bind('pin.anchorFx', (payload) => localApi.localAction('anchor_fx', payload), meta('none'));
+    }
+  } catch (_) {}
+})();
+// ═══════════ 33-selection-controller.js — 统一当前选区 + 外部内容宿主入口 ═══════════
+//
+// reader.js 是一个 ES module，lastSelText / _charSel / toolbar 都是模块词法状态。iframe 或
+// 扩展脚本不能靠写 window 上的同名属性假装改变它们；所有外部选区必须进入这里，再由这里同步
+// 词法状态、上下文、预览和工具条。PDF 原生选区仍由 13/14/16 的既有路径写入，本桥只提供统一
+// 读取和外部宿主写入口，不改变 PDF 字符层几何。
+(() => {
+  let externalSelection = null;
+
+  function _normalized(input) {
+    if (!input) return null;
+    const raw = {
+      text: String(input.text == null ? '' : input.text).slice(0, 20000),
+      context: String(input.context != null ? input.context
+        : (input.ctx != null ? input.ctx : (input.sentence || ''))).slice(0, 50000),
+      rect: input.rect || null,
+      anchor: input.anchor || null,
+      data: Object.assign({}, input.data || {}, {
+        source: String(input.source || (input.data && input.data.source) || 'external')
+      })
+    };
+    if (window.RC && RC.contract && RC.contract.selection) return RC.contract.selection(raw);
+    if (!raw.text.trim()) return null;
+    raw.ctx = raw.context;
+    raw.sentence = raw.context;
+    return raw;
+  }
+
+  function _adapter() {
+    try { return window.RC && RC.adapter ? RC.adapter() : null; }
+    catch (_) { return null; }
+  }
+
+  function current() {
+    const adapter = _adapter();
+    if (adapter && typeof adapter.captureSelection === 'function') {
+      try {
+        const captured = _normalized(adapter.captureSelection());
+        if (captured) return captured;
+      } catch (_) {}
+    }
+    // legacy / 非 shared PDF 仍可从真实模块词法值读取；不为它杜撰 anchor。
+    return _normalized({
+      text: lastSelText || '',
+      context: (typeof window.__lastSelSentence === 'string' ? window.__lastSelSentence : ''),
+      rect: externalSelection && externalSelection.rect,
+      data: externalSelection && externalSelection.data
+    });
+  }
+
+  function _positionToolbar(rect) {
+    if (!toolbar || !rect) return;
+    const left = Number(rect.left);
+    const bottom = Number(rect.bottom);
+    if (!Number.isFinite(left) || !Number.isFinite(bottom)) return;
+    const width = toolbar.offsetWidth || 320;
+    const height = toolbar.offsetHeight || 52;
+    toolbar.style.position = 'fixed';
+    toolbar.style.left = Math.max(
+      8,
+      Math.min((window.innerWidth || 1024) - width - 8, left)
+    ) + 'px';
+    toolbar.style.top = Math.max(
+      8,
+      Math.min((window.innerHeight || 768) - height - 8, bottom + 8)
+    ) + 'px';
+    toolbar.style.zIndex = '900';
+  }
+
+  function acceptExternal(input) {
+    const selection = _normalized(input);
+    const source = String(input && input.source || 'external');
+    const adapter = _adapter();
+    // 外部 web frame 不能在当前 PDF/EPUB adapter 上写入词法选区。
+    if (adapter && adapter.kind && source !== 'external' && adapter.kind !== source) return null;
+
+    if (!selection) {
+      clearExternal(source);
+      return null;
+    }
+    externalSelection = selection;
+    _charSel = null;                         // 明确不伪造 PDF char geometry
+    lastSelText = selection.text;            // 真正更新 reader.js 模块词法状态
+    _updateSelPreview(lastSelText);
+    try {
+      window.__lastSelSentence = selection.context || '';
+      window.__lastSelMeta = {
+        kind: source,
+        url: selection.data && selection.data.url || '',
+        t: Date.now()
+      };
+    } catch (_) {}
+    try { if (typeof _updateGrammarBtnVisibility === 'function') _updateGrammarBtnVisibility(); } catch (_) {}
+    _positionToolbar(selection.rect);
+    if (toolbar) toolbar.classList.add('open');
+    try {
+      document.dispatchEvent(new CustomEvent('bw:selection-changed', {
+        detail: { source, text: selection.text, context: selection.context }
+      }));
+    } catch (_) {}
+    return selection;
+  }
+
+  function clearExternal(source) {
+    source = String(source || 'external');
+    const activeSource = externalSelection && externalSelection.data
+      ? String(externalSelection.data.source || 'external') : '';
+    if (activeSource && source !== 'external' && source !== activeSource) return false;
+    externalSelection = null;
+    _charSel = null;
+    lastSelText = '';
+    _updateSelPreview('');
+    try { window.__lastSelSentence = ''; window.__lastSelMeta = null; } catch (_) {}
+    if (toolbar) toolbar.classList.remove('open');
+    return true;
+  }
+
+  const controller = Object.freeze({
+    contract: 'selection-controller/1',
+    current,
+    acceptExternal,
+    clearExternal,
+    adapter: _adapter
+  });
+  window.__bwSelectionController = controller;
+  // 稳定的外部入口名：WebAdapter / 后续 EPUB iframe adapter 只依赖它，不接触模块词法变量。
+  window.__setExternalSelection = (selection) => controller.acceptExternal(selection);
 })();

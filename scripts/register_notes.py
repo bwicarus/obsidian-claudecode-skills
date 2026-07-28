@@ -31,6 +31,7 @@ import config
 import connect_note
 import note_state
 import summarize_note
+import kg_runtime_client
 
 from platform_utils import WINDOWS, NO_WINDOW_KW  # noqa: E402
 
@@ -822,6 +823,10 @@ def update_kg_for_processed(processed_notes: list[Path]) -> None:
         print("[update_kg] 无笔记对应任何已登记书本，跳过", flush=True)
         return
     py = sys.executable
+    # Pin once so a multi-book register batch cannot cross a current switch.
+    # Linux fails closed if the deployed runtime is unavailable; Windows is an
+    # explicitly supported development checkout in kg_runtime_client.
+    kg_runtime = kg_runtime_client.pin(project_root=config.PROJECT_DIR)
     pending_failures: list[str] = []   # 没成功关联的笔记，写到 pending_kg_sync.json
     for kg_f, notes in affected.items():
         print(f"\n=== 同步 KG：{kg_f.name}（{len(notes)} 篇笔记触发）===", flush=True)
@@ -830,7 +835,7 @@ def update_kg_for_processed(processed_notes: list[Path]) -> None:
         # 1) AI 重判这些笔记包含哪些节点（-u 强制 unbuffered 输出）
         r1 = subprocess.run([
             py, "-u",
-            str(config.PROJECT_DIR / "scripts" / "kg" / "link_with_ai.py"),
+            str(kg_runtime.runtime_file("scripts/kg/link_with_ai.py")),
             "--kg", str(kg_f),
             "--since-days", "1",
             "--in-place",
@@ -842,7 +847,7 @@ def update_kg_for_processed(processed_notes: list[Path]) -> None:
         # 2) 重算 mastery / state / level
         r2 = subprocess.run([
             py, "-u",
-            str(config.PROJECT_DIR / "scripts" / "kg" / "link_and_mastery.py"),
+            str(kg_runtime.runtime_file("scripts/kg/link_and_mastery.py")),
             "--kg", str(kg_f), "--in-place",
         ], cwd=str(config.PROJECT_DIR))
         if r2.returncode != 0:

@@ -16,7 +16,13 @@ ALLOWED = {"PAGE", "BOOK_REP", "BOOK_FANIN", "ID_ROUTED", "MEMBER_REQUIRED", "JO
 
 class RoutePolicyComplete(unittest.TestCase):
     def test_every_pdf_route_declared(self):
-        os.environ.setdefault("SECRET_KEY", "t")
+        # app.py now also derives the computer-voice pairing pepper from the
+        # Flask secret.  Keep this integration fixture representative of a
+        # deployable app instead of bypassing that fail-closed boundary.
+        os.environ.setdefault(
+            "SECRET_KEY",
+            "vbook-route-policy-integration-secret",
+        )
         os.environ.setdefault("WEBAPP_DATA", tempfile.mkdtemp())
         os.environ.setdefault("CLAUDE_PROJECT", str(ROOT))
         import app as A  # noqa: E402

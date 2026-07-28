@@ -1258,6 +1258,7 @@ def _fav_serve_reader(fid: str, folder: dict):
     resp = make_response(render_template(
         "epub_html_reader.html", file_rel=rel, file_name=(folder.get("name") or "收藏夹"),
         sha=_epub_sha(rel), reader_js_v=_epub_js_v(), server_pos=None,
+        reader_app="epub", reader_route="favorite",
         is_fav=True, fav_id=fid))   # is_fav → 模板注入收藏夹专属 PWA manifest/apple 标签(独立 app 入口)
     resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
     return resp

@@ -39,3 +39,10 @@ state/kg/
 # 大体积词典/语料二进制(可由脚本重建,不入库)
 data/
 state/mcp-headless.json
+
+# 浏览器扩展测试渠道发布生成物（源码在 extensions/bw-reader-webext/）
+extensions/bw-reader-webext-*-windows-test.zip
+extensions/bw-reader-webext-*-safari-ios.zip
+extensions/bw-reader-webext-test-channel*.zip
+extensions/bw-reader-webext-test-channel.json
+extensions/bw-reader-extension-test.ps1

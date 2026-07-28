@@ -67,6 +67,8 @@
   var _opts = {};       // 当前 open() 传入的回调
   var _built = false;   // DOM 是否已建
   var mask = null, modal = null;
+  var _syncPollTimer = 0;
+  var _syncRequestGeneration = 0;
   var _host = '';                                                   // '' = EPUB/HTML(内部实现);'pdf' = host-bind 原生
   var _ids = { mask: 'ep-settings-mask', langChecks: 'eph-lang-checks' };
   var _tabKey = LS.tab;
@@ -76,6 +78,150 @@
   function lsSet(k, v) { try { localStorage.setItem(k, v); } catch (_) {} }
   function toast(m) { if (window.RC && RC.toast) RC.toast(m); }
   function call(name, arg) { try { if (typeof _opts[name] === 'function') _opts[name](arg); } catch (e) { toast('操作失败：' + (e && e.message)); } }
+
+  // ── 同步冲突：只显示经过合同白名单收敛的状态。完整裁决器上线前不提供“假重试”。──
+  function _pwaSyncControl() {
+    try {
+      var runtimeRoot = window.BWReaderRuntime;
+      var pwa = runtimeRoot && runtimeRoot.pwaRuntime;
+      var control = pwa && typeof pwa.syncControl === 'function'
+        ? pwa.syncControl()
+        : null;
+      if (
+        control &&
+        control.contract === 'sync-conflict-control/1' &&
+        typeof control.status === 'function'
+      ) return control;
+    } catch (_) {}
+    return null;
+  }
+  function _safeSyncText(value, maximum) {
+    value = String(value == null ? '' : value)
+      .replace(/[\u0000-\u001f\u007f]/g, '')
+      .trim();
+    return value.slice(0, maximum);
+  }
+  function _renderSyncPane(value, errorCode) {
+    var section = $('rcset-sync-section');
+    var status = $('rcset-sync-status');
+    var list = $('rcset-sync-conflicts');
+    if (!section || !status || !list) return;
+    var sync = value && value.contract === 'sync-conflict-control/1'
+      ? value
+      : null;
+    list.innerHTML = '';
+    if (!sync) {
+      status.textContent = errorCode
+        ? '同步状态读取失败（' + _safeSyncText(errorCode, 80) + '）'
+        : '同步状态暂不可用';
+      return;
+    }
+    var labels = {
+      ready: '未发现阻断冲突',
+      syncing: '正在同步',
+      blocked: '发现需要人工确认的冲突',
+      'conflict-observed': '已观察到非阻断冲突',
+      error: '同步失败',
+      paused: '同步已暂停',
+      resolving: '正在重新检查',
+      destroyed: '同步服务已停止'
+    };
+    var count = Math.max(0, Number(sync.conflictCount) || 0);
+    var lines = [];
+    if (errorCode) {
+      lines.push('同步状态读取失败（' + _safeSyncText(errorCode, 80) + '）');
+    }
+    lines.push(labels[sync.state] || '同步状态未知');
+    var syncErrorCode = /^[A-Z][A-Z0-9_]{0,79}$/.test(
+      String(sync.errorCode || '')
+    ) ? String(sync.errorCode) : '';
+    if (sync.state === 'error' && syncErrorCode) {
+      lines.push(
+        '错误码：' + syncErrorCode +
+        (sync.retryable === true
+          ? '（将自动重试）'
+          : '（需要检查账户或配置）')
+      );
+    }
+    if (count) {
+      lines.push(
+        '冲突 ' + count + ' 项' +
+        (sync.truncated ? '（仅显示前 50 项）' : '')
+      );
+    }
+    if (sync.state === 'blocked') {
+      lines.push('同步已安全暂停，完整裁决器尚未启用，不自动选择本地/服务器版本。');
+    }
+    status.textContent = lines.join('\n');
+    var conflicts = Array.isArray(sync.conflicts)
+      ? sync.conflicts.slice(0, 50)
+      : [];
+    conflicts.forEach(function (conflict) {
+      var item = document.createElement('li');
+      var identity = [
+        _safeSyncText(conflict && conflict.collection, 80),
+        _safeSyncText(conflict && conflict.id, 256)
+      ].filter(Boolean).join(' · ');
+      item.textContent = [
+        _safeSyncText(conflict && conflict.lane, 16),
+        identity,
+        _safeSyncText(conflict && conflict.reason, 48) || 'conflict',
+        'r' + Math.max(0, Number(conflict && conflict.incomingRev) || 0) +
+          ' → r' + Math.max(0, Number(conflict && conflict.currentRev) || 0)
+      ].filter(Boolean).join(' · ');
+      list.appendChild(item);
+    });
+    list.style.display = conflicts.length ? '' : 'none';
+  }
+  function _clearSyncPollTimer() {
+    if (_syncPollTimer) clearTimeout(_syncPollTimer);
+    _syncPollTimer = 0;
+  }
+  function _stopSyncPolling() {
+    _syncRequestGeneration += 1;
+    _clearSyncPollTimer();
+  }
+  function _fillSyncPane(errorCode) {
+    var requestGeneration = ++_syncRequestGeneration;
+    var control = _pwaSyncControl();
+    var section = $('rcset-sync-section');
+    if (!section) return Promise.resolve(null);
+    section.style.display = control ? '' : 'none';
+    _clearSyncPollTimer();
+    if (!control) {
+      _renderSyncPane(null);
+      return Promise.resolve(null);
+    }
+    return Promise.resolve().then(function () {
+      return control.status();
+    }).then(function (value) {
+      if (requestGeneration !== _syncRequestGeneration) return null;
+      _renderSyncPane(value, errorCode);
+      return value;
+    }).catch(function (error) {
+      if (requestGeneration !== _syncRequestGeneration) return null;
+      _renderSyncPane(
+        null,
+        error && /^[A-Z0-9_]{1,80}$/.test(String(error.code || ''))
+          ? error.code
+          : 'BW_SYNC_CONFLICT_STATUS'
+      );
+      return null;
+    }).then(function (value) {
+      if (
+        requestGeneration === _syncRequestGeneration &&
+        mask &&
+        mask.style.display === 'flex'
+      ) {
+        _syncPollTimer = setTimeout(function () {
+          if (requestGeneration !== _syncRequestGeneration) return;
+          _syncPollTimer = 0;
+          _fillSyncPane();
+        }, 5000);
+      }
+      return value;
+    });
+  }
 
   // ── 公开纯函数(高亮色;PDF 用自己的 getHlColors,不经这里)──
   // aiParams:旧 per-request model/effort 覆盖已废弃(2026-07 收口)——模型选择唯一真源 = 服务端按功能
@@ -147,6 +293,70 @@
     }
     // 即时应用到所有已挂载便签(rc-stickynote 未加载的页面(如 HTML 阅读器)只落盘,下次进书生效)
     try { if (window.RC && RC.stickynote && RC.stickynote.refreshStyle) RC.stickynote.refreshStyle(); } catch (_) {}
+  }
+
+  // ── 网页翻译 tab 回填/保存(host 无关;非 web host 时 web-* 控件不存在自动跳过。键均与 web-immersive 同源)──
+  function _toggleWebAiModeRows() {
+    var be = $('web-tr-backend'), mode = $('web-tr-mode');
+    var modeRow = $('web-tr-mode-row'), thresholdRow = $('web-tr-threshold-row');
+    var ai = !!(be && be.value === 'ai');
+    if (modeRow) modeRow.style.display = ai ? '' : 'none';
+    if (thresholdRow) thresholdRow.style.display =
+      ai && mode && mode.value === 'auto' ? '' : 'none';
+  }
+  function _fillWebPane() {
+    var langs; try { langs = JSON.parse(lsGet('bw-set-target-langs') || '["en","ja"]') || []; } catch (e) { langs = ['en', 'ja']; }
+    var lc = $('web-lang-checks'); if (lc) lc.querySelectorAll('input').forEach(function (c) { c.checked = langs.indexOf(c.value) >= 0; });
+    var be = $('web-tr-backend'); if (be) be.value = lsGet('eph-web-tr-backend') === 'ai' ? 'ai' : 'google';
+    var md = $('web-tr-mode');
+    if (md) {
+      var mode = lsGet('eph-web-tr-mode') || 'auto';
+      md.value = mode === 'session' || mode === 'stateless' ? mode : 'auto';
+    }
+    var mt = $('web-tr-threshold');
+    if (mt) {
+      var threshold = parseInt(lsGet('eph-web-tr-threshold') || '50', 10);
+      mt.value = String(isNaN(threshold) ? 50 : Math.max(10, Math.min(500, threshold)));
+    }
+    var ts = $('web-tr-style'); if (ts) ts.value = lsGet('rcWebTrStyle') || 'para';
+    var pt = $('web-pretr'); if (pt) pt.checked = (lsGet('eph-web-pretr') !== '0');
+    var ct = $('web-click-translate'); if (ct) ct.checked = (lsGet('eph-click-translate') !== '0');
+    var vu = $('web-vocab-underline'); if (vu) vu.checked = (lsGet('eph-vocab-underline') !== '0');
+    // 语法(逻辑复用 rc-grammar:显示方式统一键 eph-grammar-view;KG 列表用统一 renderTrackList,file=网页全局语法身份)
+    var gv = $('web-grammar-view'); if (gv && window.RC && RC.grammar && RC.grammar.getViewMode) gv.value = RC.grammar.getViewMode('eph-grammar-view');
+    var gl = $('web-grammar-list'); if (gl && window.RC && RC.grammar && RC.grammar.renderTrackList && _opts.grammarFile) { try { RC.grammar.renderTrackList('web-grammar-list', { file: _opts.grammarFile }); } catch (e) {} }
+    _toggleWebAiModeRows();
+  }
+  function _saveWebPane() {
+    var lc = $('web-lang-checks');
+    if (lc) { var arr = []; lc.querySelectorAll('input').forEach(function (c) { if (c.checked) arr.push(c.value); }); lsSet('bw-set-target-langs', JSON.stringify(arr)); }
+    var be = $('web-tr-backend');
+    if (be) {
+      var oldBe = lsGet('eph-web-tr-backend') === 'ai' ? 'ai' : 'google';
+      var newBe = be.value === 'ai' ? 'ai' : 'google';
+      lsSet('eph-web-tr-backend', newBe);
+      if (newBe !== oldBe) { try { window.postMessage({ __rcweb: 'translate', backend: newBe }, '*'); } catch (e) {} }
+    }
+    var md = $('web-tr-mode'), mt = $('web-tr-threshold');
+    if (md) {
+      var oldMode = lsGet('eph-web-tr-mode') || 'auto';
+      var newMode = md.value === 'session' || md.value === 'stateless' ? md.value : 'auto';
+      var oldThreshold = parseInt(lsGet('eph-web-tr-threshold') || '50', 10);
+      var newThreshold = mt ? parseInt(mt.value || '50', 10) : 50;
+      if (isNaN(oldThreshold)) oldThreshold = 50;
+      if (isNaN(newThreshold)) newThreshold = 50;
+      newThreshold = Math.max(10, Math.min(500, newThreshold));
+      lsSet('eph-web-tr-mode', newMode);
+      lsSet('eph-web-tr-threshold', String(newThreshold));
+      if (newMode !== oldMode || newThreshold !== oldThreshold) {
+        try { window.postMessage({ __rcweb: 'translate', mode: newMode, threshold: newThreshold }, '*'); } catch (e) {}
+      }
+    }
+    var ts = $('web-tr-style');
+    if (ts) { var old = lsGet('rcWebTrStyle') || 'para'; lsSet('rcWebTrStyle', ts.value); if (ts.value !== old) { try { window.postMessage({ __rcweb: 'translate', style: ts.value }, '*'); } catch (e) {} } }   // 开着译则即时重渲(web-immersive message handler 收)
+    var pt = $('web-pretr'); if (pt) lsSet('eph-web-pretr', pt.checked ? '1' : '0');
+    var ct = $('web-click-translate'); if (ct) lsSet('eph-click-translate', ct.checked ? '1' : '0');
+    var vu = $('web-vocab-underline'); if (vu) lsSet('eph-vocab-underline', vu.checked ? '1' : '0');
   }
 
   // ── 句子翻译源(逐字对照 PDF 21-misc-ai.js:_toggleAiModelRow + open GET / 保存 POST /pdf/api/translate-config)──
@@ -305,6 +515,23 @@
             '<input id="set-filler-th" type="number" step="0.5" min="0.5" max="30" style="width:100%;background:#0d1322;border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;padding:7px 10px;font-size:13px">' +
           '</div>' +
         '</div>' +
+        '<div id="rcset-sync-section" data-sec="pwa-sync" style="display:none;background:#11203a;border:1px solid #2a3550;border-radius:8px;padding:12px;margin:16px 0">' +
+          '<div style="font-size:13px;color:#cfe0ff;font-weight:600;margin-bottom:4px">🔄 跨设备同步</div>' +
+          '<div id="rcset-sync-status" style="font-size:12px;color:#aebbd0;line-height:1.55;white-space:pre-wrap">正在读取同步状态……</div>' +
+          '<ul id="rcset-sync-conflicts" style="display:none;margin:8px 0 0;padding-left:18px;color:#8fa0ba;font-size:11px;line-height:1.5"></ul>' +
+        '</div>' +
+        '<div style="background:#11203a;border:1px solid #2a3550;border-radius:8px;padding:12px;margin:16px 0">' +
+          '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe0ff;font-weight:600;cursor:pointer">' +
+            '<input type="checkbox" id="set-ctx-sync" style="width:16px;height:16px"> 🔁 双向上下文同步（默认关闭）' +
+          '</label>' +
+          '<div style="font-size:11px;color:#8a9bb4;line-height:1.6;margin-top:8px">' +
+            '开启后同时允许两个方向：① 本页把<b>当前在读的书/页</b>上报给 Pi；② Pi 生成 <code>context.md</code> 并经 SSH 更新电脑上的那份上下文快照。<br>' +
+            '关闭时两个方向都停：本页不发任何请求、不轮询、不挂监听，Pi 也不再生成或推送快照。<br>' +
+            '连续翻页只在停手约 1 秒后发一次完整状态，不会因为滚动而刷请求。<br>' +
+            '<b>不受此开关影响</b>：电脑那边发回来的助手回复和卡片属于被动显示，到达即写入、侧栏自然出现，不需要本页为它轮询。' +
+          '</div>' +
+          '<div id="set-ctx-sync-msg" style="font-size:11px;color:#e0b080;margin-top:6px;display:none"></div>' +
+        '</div>' +
         '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:6px;cursor:pointer">' +
           '<input type="checkbox" id="set-debug" style="width:16px;height:16px"> 显示调试日志（左下角浮窗）' +
         '</label>' +
@@ -370,12 +597,15 @@
           HR +
         '</div>' +
         // [共有] 生词下划线 / 点词翻译(逐字照搬 PDF;保存时落盘)
+        // host:'web' 时这两项挪到「网页翻译」tab(web-* id 一站式);EPUB/HTML 仍留此。共有键 eph-*(同键同源)
+        '<div data-sec="read-vocab">' +
         '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:14px;cursor:pointer">' +
           '<input type="checkbox" id="set-vocab-underline" style="width:16px;height:16px"> 生词下划线（按掌握度着色：橙=新 / 黄=见过 / 淡绿=熟）' +
         '</label>' +
         '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:14px;cursor:pointer">' +
           '<input type="checkbox" id="set-click-translate" style="width:16px;height:16px"> 点击未掌握单词直接显示翻译（不弹工具栏）' +
         '</label>' +
+        '</div>' +
         // [EPUB] 插图徽标显隐(纯 UI,即改即生效,window.toggleFigBadge)
         '<div data-sec="epub-figbadge">' +
           '<label class="ep-set-chk" style="margin-bottom:14px"><input type="checkbox" id="eph2-fig-badge"> 📷 显示插图说明徽标（关闭只隐藏徽标 UI，不影响 AI 描述功能本身）</label>' +
@@ -444,7 +674,7 @@
     // ════ pane: 语法(逐字照搬 PDF:显示模式下拉 + KG 启用列表;列表 PDF 由原生 renderGrammarTrackList →
     //      RC.grammar.renderTrackList 填,EPUB 由 open() 按 opts.grammarFile 填同一容器)════
     var paneGrammar =
-      '<div class="set-pane" data-pane="grammar" style="display:none">' +
+      '<div class="set-pane" data-pane="grammar" data-sec="grammar-tab" style="display:none">' +
         '<label style="' + LBL + '">📐 长句结构显示</label>' +
         '<select id="set-grammar-view" style="' + SEL + '">' +
           '<option value="tree">成分树（成分名+颜色+层次缩进+折叠，融合）</option>' +
@@ -492,6 +722,67 @@
         '<div class="ep-set-note" style="margin:-2px 0 0">按住便签（任意部分）多久进入编辑模式（移动 / 缩放 / 换色 / 删除）。越短越灵敏，太短容易误触。保存后下次长按生效。</div>' +
       '</div>';
 
+    // 网页翻译 tab（仅 host:'web' 显示，gateSections 门控 data-sec="web-tab"）。收纳纯网页翻译设置，
+    // 消费端=web-immersive；语言=全局 bw-set-target-langs（settings-sync 桥全站一致）；显示方式=rcWebTrStyle。
+    var paneWeb =
+      '<div class="set-pane" data-pane="web" data-sec="web-tab" style="display:none">' +
+        '<label style="' + LBL + '">🌐 网页翻译（浏览器扩展 / 网页阅读专用）</label>' +
+        '<div style="font-size:12px;color:#8fa5c8;margin:-4px 0 10px">我在学的语言：只对这些语言的网页做翻译和生词标注，纯中文母语页自动跳过（全不勾＝任何语言都翻）。</div>' +
+        '<div id="web-lang-checks" style="display:flex;gap:18px;margin-bottom:14px">' +
+          '<label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#cfe6ff;cursor:pointer"><input type="checkbox" value="en" style="width:16px;height:16px"> 英语</label>' +
+          '<label style="display:flex;align-items:center;gap:6px;font-size:13px;color:#cfe6ff;cursor:pointer"><input type="checkbox" value="ja" style="width:16px;height:16px"> 日语</label>' +
+        '</div>' +
+        '<hr class="ep-set-hr">' +
+        '<label style="display:block;font-size:13px;color:#cfe6ff;margin-bottom:6px">翻译引擎</label>' +
+        '<select id="web-tr-backend" style="width:100%;margin-bottom:7px;background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 10px;font-size:13px">' +
+          '<option value="google">Google（默认，快速稳定）</option>' +
+          '<option value="ai">AI（可自动选择调用方式）</option>' +
+        '</select>' +
+        '<div id="web-tr-mode-row" style="margin:8px 0 7px">' +
+          '<label style="display:block;font-size:13px;color:#cfe6ff;margin-bottom:6px">AI 调用方式</label>' +
+          '<select id="web-tr-mode" style="width:100%;background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 10px;font-size:13px">' +
+            '<option value="auto">自动（短网页无状态，内容较多时使用短时会话）</option>' +
+            '<option value="stateless">无状态批翻（简单、省配额）</option>' +
+            '<option value="session">页面短时会话（上下文最完整）</option>' +
+          '</select>' +
+        '</div>' +
+        '<div id="web-tr-threshold-row" style="display:flex;align-items:center;gap:8px;margin:8px 0 7px">' +
+          '<label for="web-tr-threshold" style="font-size:12px;color:#a9bddb;white-space:nowrap">自动阈值</label>' +
+          '<input id="web-tr-threshold" type="number" min="10" max="500" step="1" value="50" style="width:82px;background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:6px 8px;font-size:13px">' +
+          '<span style="font-size:11px;color:#8fa5c8">预计阅读句数（总句数 × 70%）&gt; 此值时使用会话</span>' +
+        '</div>' +
+        '<div style="font-size:11px;color:#8fa5c8;line-height:1.55;margin:0 0 14px">AI 的后端、型号和深度统一在「AI·翻译」页的“网页整页翻译（无工具）”中设置。短时会话只在支持无工具、无磁盘持久化的模型上启用；否则会明确退回无状态批翻。后台生词预翻译始终走 Google，避免静默消耗 AI 配额。</div>' +
+        '<hr class="ep-set-hr">' +
+        '<label style="display:block;font-size:13px;color:#cfe6ff;margin-bottom:6px">沉浸式翻译 · 显示方式</label>' +
+        '<select id="web-tr-style" style="width:100%;margin-bottom:14px;background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 10px;font-size:13px">' +
+          '<option value="para">独立段落（译文另起一行，字号同原文）</option>' +
+          '<option value="small">下方小字（紧随原文，小一号淡一点）</option>' +
+          '<option value="replace">替换原文（只显示译文，点一下临时看回原文）</option>' +
+        '</select>' +
+        '<hr class="ep-set-hr">' +
+        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:14px;cursor:pointer">' +
+          '<input type="checkbox" id="web-vocab-underline" style="width:16px;height:16px"> 生词下划线（按掌握度着色：橙=新 / 黄=见过 / 淡绿=熟）' +
+        '</label>' +
+        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:14px;cursor:pointer">' +
+          '<input type="checkbox" id="web-click-translate" style="width:16px;height:16px"> 点击未掌握单词直接显示翻译（不弹工具栏）' +
+        '</label>' +
+        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:14px;cursor:pointer">' +
+          '<input type="checkbox" id="web-pretr" style="width:16px;height:16px"> 未掌握句自动预翻译（含多个未掌握词的句子后台预热译文，点「译 N」立即显示）' +
+        '</label>' +
+        // 语法分析(web host 时独立「语法」tab 隐藏,内容并到这里;逻辑复用 rc-grammar，容器实例 web-* id)
+        '<hr class="ep-set-hr">' +
+        '<label style="' + LBL + '">📐 语法分析</label>' +
+        '<label style="display:block;font-size:13px;color:#cfe6ff;margin:4px 0 4px">长句结构显示方式</label>' +
+        '<select id="web-grammar-view" style="' + SEL + '">' +
+          '<option value="tree">成分树</option>' +
+          '<option value="components">成分分块</option>' +
+          '<option value="skeleton">主干＋修饰折叠</option>' +
+          '<option value="deps">依存关系图</option>' +
+        '</select>' +
+        '<div style="font-size:12px;color:#8a9bb4;margin:8px 0 6px">启用语法 KG（勾选后，网页里选中长句可分析这些语法点；这是跨站的「我在学哪些语法」集合，不分网站）</div>' +
+        '<div id="web-grammar-list" style="max-height:240px;overflow-y:auto;background:#0d1322;border:1px solid #2a3550;border-radius:6px;padding:8px;font-size:12px">加载中…</div>' +
+      '</div>';
+
     mask = document.createElement('div');
     mask.id = _ids.mask;
     mask.className = 'rc-set-mask';
@@ -502,11 +793,12 @@
         '<div class="set-tabs">' +
           '<button type="button" class="set-tab active" data-pane="ai">AI·翻译</button>' +
           '<button type="button" class="set-tab" data-pane="read">阅读</button>' +
-          '<button type="button" class="set-tab" data-pane="grammar">语法</button>' +
+          '<button type="button" class="set-tab" data-sec="grammar-tab" data-pane="grammar">语法</button>' +
           '<button type="button" class="set-tab" data-pane="hl">高亮</button>' +
           '<button type="button" class="set-tab" data-pane="note">便签</button>' +
+          '<button type="button" class="set-tab" data-sec="web-tab" data-pane="web">网页翻译</button>' +
         '</div>' +
-        '<div class="ep-set-body">' + paneAi + paneRead + paneGrammar + paneHl + paneNote + '</div>' +
+        '<div class="ep-set-body">' + paneAi + paneRead + paneGrammar + paneHl + paneNote + paneWeb + '</div>' +
         '<div style="display:flex;gap:8px;justify-content:flex-end;padding-top:12px;border-top:1px solid #2a3550;margin-top:2px">' +
           '<button id="rcset-cancel" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 16px;cursor:pointer;font-size:13px">取消</button>' +
           '<button id="rcset-save" style="background:#244470;border:1px solid #3b6db5;color:#fff;border-radius:6px;padding:7px 16px;cursor:pointer;font-size:13px">保存</button>' +
@@ -520,10 +812,10 @@
     $('rcset-cancel').addEventListener('click', cancel);
     $('rcset-save').addEventListener('click', function () {
       _saveNotePane();   // 便签设置:共享设备级 rc-note-* 键,两 host 都在「保存」时落盘(PDF 的 onSave 不认识这些控件)
+      _saveWebPane();    // 网页翻译 tab:同上,host 无关落盘(非 web host 时 web-* 控件不存在,自动跳过)
       if (typeof _opts.onSave === 'function') { try { _opts.onSave(); } catch (e) { toast('保存失败：' + (e && e.message)); } hide(); return; }   // PDF:原生 saveSettings(自带 closeSettings)
       saveInternal();
     });
-
     // tab 切换
     modal.querySelectorAll('.set-tab').forEach(function (t) {
       t.addEventListener('click', function () { setTab(t.dataset.pane); });
@@ -531,6 +823,10 @@
 
     // 句子翻译源:backend 改 → 切 model/effort 行可见(等价 PDF _toggleAiModelRow;POST 在「保存」时统一发)
     $('set-sent-backend').addEventListener('change', _toggleSentAiRow);
+    // 网页 AI:引擎与策略只控制面板里的相关行；真正落盘仍统一等“保存”。
+    var _webBackend = $('web-tr-backend'), _webMode = $('web-tr-mode');
+    if (_webBackend) _webBackend.addEventListener('change', _toggleWebAiModeRows);
+    if (_webMode) _webMode.addEventListener('change', _toggleWebAiModeRows);
 
     // 语法:长句结构显示切换即时生效(等价 PDF 原生 onchange="setGrammarView(this.value)")
     $('set-grammar-view').addEventListener('change', function () {
@@ -538,6 +834,13 @@
       if (typeof _opts.onGrammarView === 'function') { call('onGrammarView', v); return; }
       lsSet(LS.grammarView, v);
       try { if (window.setGrammarView) window.setGrammarView(v); } catch (e) {}
+    });
+    // 网页 tab 的语法显示方式(web-grammar-view):同 set-grammar-view，驱动经 onGrammarView 重渲网页语法块 + 落盘
+    var _wgv = $('web-grammar-view');
+    if (_wgv) _wgv.addEventListener('change', function () {
+      var v = this.value;
+      if (typeof _opts.onGrammarView === 'function') { call('onGrammarView', v); return; }
+      lsSet(LS.grammarView, v);
     });
 
     // [EPUB] 阅读:控件渲染在这,apply 逻辑回调给驱动,回调后重读 getReadState 刷新显示
@@ -619,6 +922,11 @@
     _show('epub-convert', !pdf && typeof _opts.onConvertFull === 'function');
     ['pdf-pageoffset', 'pdf-figures', 'pdf-toc', 'pdf-orient', 'pdf-crop', 'pdf-charofs'].forEach(function (s) { _show(s, pdf); });
     _show('langs', pdf || typeof _opts.getBookLangs === 'function');
+    var web = (_host === 'web');
+    _show('web-tab', web);       // 「网页翻译」tab 按钮 + pane(都带 data-sec="web-tab")仅 host:'web' 显示
+    _show('read-vocab', !web);   // 生词下划线/点词翻译:web host 挪到网页 tab,EPUB/HTML 留阅读 tab
+    _show('grammar-tab', !web);  // web host:语法(显示方式+KG 列表)并入网页 tab,隐藏独立语法 tab;PDF/EPUB/HTML 保留
+    _show('pwa-sync', !!_pwaSyncControl());
   }
 
   // ── tab 切换 + 记忆 ──
@@ -677,8 +985,10 @@
     var curLangs = (typeof _opts.getBookLangs === 'function' ? (_opts.getBookLangs() || []) : []);
     var lc = document.getElementById(_ids.langChecks);
     if (lc) lc.querySelectorAll('input').forEach(function (c) { c.checked = curLangs.indexOf(c.value) >= 0; });
-    var ct = $('set-click-translate'); if (ct) ct.checked = (lsGet('eph-click-translate') !== '0');   // 默认开
-    var vu = $('set-vocab-underline'); if (vu) vu.checked = (lsGet('eph-vocab-underline') !== '0');   // 默认开
+    if (_host !== 'web') {   // web host 时下划线/点词翻译在「网页翻译」tab(web-* id),此处不碰免争同键;预翻译已整体迁走
+      var ct = $('set-click-translate'); if (ct) ct.checked = (lsGet('eph-click-translate') !== '0');   // 默认开
+      var vu = $('set-vocab-underline'); if (vu) vu.checked = (lsGet('eph-vocab-underline') !== '0');   // 默认开
+    }
     var fb = $('eph2-fig-badge'); if (fb) fb.checked = (lsGet('eph-fig-badge') !== '0');   // 默认开
     // 侧边栏外观回填(优先读 RC.sidedrawer 的 getter,回退 localStorage;默认 不悬浮 / 20px)
     var _sd = (window.RC && RC.sidedrawer) ? RC.sidedrawer : null;
@@ -698,22 +1008,27 @@
     try {
       var dbg = $('set-debug');
       if (dbg) { lsSet(LS.debug, dbg.checked ? '1' : '0'); _applyDebugVisibility(); }
-      var vu = $('set-vocab-underline');
-      if (vu) {
-        if (typeof _opts.onVocabUnderline === 'function') call('onVocabUnderline', vu.checked);   // 驱动自行持久化 eph-vocab-underline + 重画
-        else lsSet('eph-vocab-underline', vu.checked ? '1' : '0');
-      }
-      var ct = $('set-click-translate');
-      if (ct) {
-        if (typeof _opts.onClickTranslate === 'function') call('onClickTranslate', ct.checked);   // 驱动自行持久化 eph-click-translate
-        else lsSet('eph-click-translate', ct.checked ? '1' : '0');
+      if (_host !== 'web') {   // web host 时下面两项交给「网页翻译」tab 的 web-* 控件(_saveWebPane);预翻译已整体迁走
+        var vu = $('set-vocab-underline');
+        if (vu) {
+          if (typeof _opts.onVocabUnderline === 'function') call('onVocabUnderline', vu.checked);   // 驱动自行持久化 eph-vocab-underline + 重画
+          else lsSet('eph-vocab-underline', vu.checked ? '1' : '0');
+        }
+        var ct = $('set-click-translate');
+        if (ct) {
+          if (typeof _opts.onClickTranslate === 'function') call('onClickTranslate', ct.checked);   // 驱动自行持久化 eph-click-translate
+          else lsSet('eph-click-translate', ct.checked ? '1' : '0');
+        }
       }
       _saveSentConfig();
     } catch (ex) { toast('设置保存出错：' + (ex && ex.message)); }
     hide();
   }
 
-  function hide() { if (mask) mask.style.display = 'none'; }
+  function hide() {
+    _stopSyncPolling();
+    if (mask) mask.style.display = 'none';
+  }
   function cancel() {   // 取消/点遮罩:不保存(对齐 PDF 原生:只有「保存」才落盘)
     if (typeof _opts.onCancel === 'function') { try { _opts.onCancel(); } catch (e) {} }
     hide();
@@ -745,6 +1060,44 @@
     th.addEventListener('change', save);
   }
 
+  // ── 双向上下文同步总开关:自闭环(自己回填、自己在 change 时落盘)。
+  //    PDF 宿主的保存走 opts.onSave 原生函数、根本不进 saveInternal,挂在「保存」里三宿主行为会不一致。
+  function _fillCtxSync() {
+    var cb = $('set-ctx-sync'), msg = $('set-ctx-sync-msg');
+    if (!cb || !window.RC || !RC.ctxSync) return;
+    cb.checked = RC.ctxSync.enabled();
+    if (cb._ctxBound) return;
+    cb._ctxBound = true;
+    cb.addEventListener('change', function () {
+      var on = cb.checked;
+      if (msg) { msg.style.display = 'none'; msg.textContent = ''; }
+      RC.ctxSync.setEnabled(on).then(function (r) {
+        if (!r || !r.ok) throw new Error((r && r.error) || 'server refused');
+        if (!on) { toast('已关闭双向上下文同步'); return; }
+        // 开启后立刻上报一次当前状态:否则要等到下次翻页,快照会先空窗一段时间
+        try {
+          if (_host === 'web' && !(RC.ctxSync._state && RC.ctxSync._state().base)) {
+            toast('已开启双向上下文同步（本页为普通网页，仅阅读器内上报）'); return;
+          }
+          var ad = (RC.adapter && RC.adapter()) || {};
+          var fi = (ad.fileInfo && ad.fileInfo()) || {};
+          var kind = _host === 'web' ? 'web' : (_host === 'pdf' ? 'pdf' : (fi.file && /\.epub$/i.test(fi.file) ? 'epub' : 'html'));
+          var patch = { kind: kind, title: document.title.replace(/ ·.*$/, ''), reason: 'toggle-on' };
+          if (kind === 'web') patch.url = location.href; else patch.file = fi.file || '';
+          var pg = (typeof window.currentPage === 'number') ? window.currentPage : null;
+          if (pg != null) patch.pos = pg;
+          RC.ctxSync.report(patch);
+        } catch (e) {}
+        toast('已开启双向上下文同步');
+      }).catch(function (e) {
+        // 服务端没写成 → 前端和 Pi 会各说各话(前端以为关了、后台还在推),必须回滚 + 明说
+        cb.checked = !on;
+        try { localStorage.setItem(RC.ctxSync.LS_KEY, !on ? '1' : '0'); } catch (_) {}
+        if (msg) { msg.textContent = '没能同步到服务器，开关已回滚：' + (e && e.message ? e.message : '网络错误'); msg.style.display = ''; }
+      });
+    });
+  }
+
   function open(opts) {
     _opts = opts || {};
     if (_opts.host) _host = _opts.host;
@@ -755,18 +1108,37 @@
     _renderAiInline();   // AI tab 内嵌模型配置表(host 无关,数据在服务端;PDF 的 onFill 不管这块)
     _fillFiller();       // 143:语音垫话总策略(同上——服务端数据,PDF 的 onFill 也不管)
     _fillNotePane();     // 便签 tab 回填(host 无关,设备级 rc-note-* 键;PDF 的 onFill 同样不管这块)
+    _fillWebPane();      // 网页翻译 tab 回填(host 无关;非 web host 时 web-* 控件不存在,自动跳过)
+    _fillSyncPane();     // 纯 PWA 本地冲突；扩展 owner 只读并引导到 trusted popup
+    _fillCtxSync();      // 双向上下文同步总开关(自闭环:change 即落盘,不依赖各宿主的保存路径)
     if (typeof _opts.onFill === 'function') {
       try { _opts.onFill(); } catch (e) { toast('设置回填失败：' + (e && e.message)); }   // PDF:原生 _fillSettings(同名 id 全量回填)
     } else {
       fillInternal();
     }
-    setTab(_opts.tab || lsGet(_tabKey) || 'ai');
+    var _t = _opts.tab || lsGet(_tabKey) || 'ai';
+    if (_t === 'web' && _host !== 'web') _t = 'ai';   // 记忆键停在 web 但当前非 web host → 回落 ai(不显隐藏 pane)
+    if (_t === 'grammar' && _host === 'web') _t = 'web';   // web host:语法并入网页 tab,记忆停在 grammar 时改指 web
+    setTab(_t);
     mask.style.display = 'flex';
   }
   function close() { cancel(); }   // 对外 close 保留;语义=取消(不保存,对齐 PDF closeSettings)
 
   // 启动即按持久化的 debug 开关显隐左下角浮窗(等价 PDF setTimeout(_applyDebugVisibility, 0);PDF 页内部自动跳过)
   try { setTimeout(_applyDebugVisibility, 0); } catch (_) {}
+  document.addEventListener('bw:reader-sync-status', function () {
+    if (!mask || mask.style.display !== 'flex') return;
+    _fillSyncPane();
+  });
+  document.addEventListener('bw:reader-sync-error', function (event) {
+    if (!mask || mask.style.display !== 'flex') return;
+    var code = event && event.detail && event.detail.code;
+    _fillSyncPane(
+      /^[A-Z0-9_]{1,80}$/.test(String(code || ''))
+        ? code
+        : 'BW_SYNC_CONFLICT_STATUS'
+    );
+  });
 
   window.RC.settings = {
     open: open, close: close,

@@ -1,0 +1,10 @@
+{
+  "contract": "reader-computer-voice-native-host-config/1",
+  "localOptIn": false,
+  "microphoneEndpointId": "",
+  "allowedExtensionId": "",
+  "typistHelper": "",
+  "voiceStartShortcut": "Ctrl+Shift+C",
+  "outputScope": "process-only",
+  "appKind": "codex-desktop"
+}

@@ -1,0 +1,331 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""把无 AI 直接命令服务接到现有阅读器路由(任务书 A4 接线)。**纯增量**。
+
+不改写任何既有路由:只在同一个 blueprint 上 `add_url_rule` 两条新路径。
+旧网页 / 旧 MCP / 旧 AI / 旧卡片路径一律不动。
+
+设计要点:
+- **handler 在接线时解析,不在运行时猜**。解析不到的动作直接从活白名单移除,
+  调用时明确报"未接线",而不是留一个假 handler 让调用方以为成功了。
+- 白名单里**不允许出现会调 AI 的能力**(见 `reader-agent-capability-audit.md` §1.1)。
+  这里再做一次机器校验:动作名尾段命中审计里的 AI 工具名就拒绝注册。
+- 视觉类只提供**元数据**(页图是否存在/尺寸/墨迹版本),判断仍归上游助手。
+"""
+from __future__ import annotations
+
+import time
+
+import reader_direct_commands as DC
+
+# 审计 §1.1 里会再次调用 AI 的能力名。接线时用它做机器校验,防止有人日后往白名单里加。
+_AI_TOOL_NAMES = {
+    "web_search", "search_image", "search_video", "make_paper", "summarize_section",
+    "do_task", "run_saved_task", "see_page", "see_figure", "see_ink", "correct_dict",
+    "material_graph", "read_material", "relate_material", "learning_focus",
+    "situation_feedback", "make_diagnostic", "mastery_proposal", "apply_mastery",
+    "error_patterns", "read_check_report", "add_vocab", "auto_highlight",
+}
+
+
+class WiringError(RuntimeError):
+    pass
+
+
+def _assert_no_ai(actions) -> None:
+    for a in actions:
+        tail = a.split(".", 1)[-1]
+        if tail in _AI_TOOL_NAMES or a in _AI_TOOL_NAMES:
+            raise WiringError(f"拒绝注册:{a} 指向会调用 AI 的能力,不得进入直接命令白名单")
+
+
+def build_handlers(pdf, *, toc_get=None, search_book=None, search_all=None,
+                   dict_lookup=None, nav_publish=None) -> tuple[dict, list[str]]:
+    """从既有确定性底座组装 handler。返回 (handlers, 未接线的动作列表)。
+
+    `pdf` = pdf_reader 模块。可选参数用于注入跨模块能力(目录/检索/词典/前端动作),
+    没注入的就不接线——**宁可少一个动作,也不给假成功**。
+    """
+    H: dict = {}
+
+    def _rel(anchor):
+        rel = str(anchor.get("file") or "").strip()
+        ap = pdf._safe_vault_path(rel)
+        if not ap:
+            raise ValueError(f"anchor.file 不是 vault 内的有效文件:{rel}")
+        return rel, ap
+
+    # ── 读取 ──────────────────────────────────────────────────────────────
+    def read_page(anchor, params, prev):
+        rel, ap = _rel(anchor)
+        page = int(anchor.get("page"))
+        if rel.lower().endswith(".epub"):
+            paras = pdf._epub_section_paragraphs(rel, max(0, page)) or []
+            text = "\n\n".join(str(x) for x in paras if str(x).strip())
+            src = "epub:章节段落"
+        else:
+            text = pdf._page_text_clean(str(ap), rel, page, limit=8001) or ""
+            src = "pdf:字符层(已剔噪)"
+        return {"text": text[:8000], "text_available": bool(text.strip()),
+                "text_source": src if text.strip() else None,
+                "truncated": len(text) > 8000, "anchor": {"file": rel, "page": page}}
+    H["read.page"] = read_page
+
+    def read_selection(anchor, params, prev):
+        # 选区三态照现状语义:空串=明确无选区,字段缺失=未上报。不沿用旧值。
+        rec = pdf._reader_active_load() if hasattr(pdf, "_reader_active_load") else {}
+        if "selection" not in (rec or {}):
+            return {"reported": False, "selection": None}
+        return {"reported": True, "selection": rec.get("selection") or "",
+                "has_selection": bool(rec.get("selection")),
+                "anchor": {"file": rec.get("member") or rec.get("file"),
+                           "page": rec.get("member_pos", rec.get("pos"))}}
+    H["read.selection"] = read_selection
+
+    def read_pageimage(anchor, params, prev):
+        # 只给元数据:是否有页图、墨迹版本。**不做视觉判断**(那是 AI 的事)。
+        rel, ap = _rel(anchor)
+        page = int(anchor.get("page"))
+        ink = {}
+        try:
+            ink = (pdf._ink_load(rel) or {}).get("pages", {}) if hasattr(pdf, "_ink_load") else {}
+        except Exception:
+            ink = {}
+        return {"anchor": {"file": rel, "page": page},
+                "has_ink": str(page) in (ink or {}),
+                "note": "仅元数据;需要看图请由上游助手走既有视觉能力"}
+    H["read.pageimage"] = read_pageimage
+
+    # ── 标注 ──────────────────────────────────────────────────────────────
+    def hl_list(anchor, params, prev):
+        rel, _ = _rel(anchor)
+        items = (pdf._hl_load(rel) or {}).get("highlights") or []
+        page = anchor.get("page")
+        if page not in (None, ""):
+            items = [h for h in items if str(h.get("page")) == str(page)]
+        return {"count": len(items), "highlights": items[:200]}
+    H["highlight.list"] = hl_list
+
+    def hl_create(anchor, params, prev):
+        rel, _ = _rel(anchor)
+        text = str(params.get("text") or "").strip()
+        if not text:
+            raise ValueError("params.text 必填(要高亮的正文片段)")
+        doc = pdf._hl_load(rel) or {}
+        items = doc.get("highlights") or []
+        idem = params.get("_idem")
+        if idem and any(h.get("idem") == idem for h in items):
+            return {"created": False, "reason": "幂等键已存在", "id": idem}
+        hid = f"dc_{int(time.time()*1000):x}"
+        one = {"id": hid, "page": anchor.get("page"), "text": text[:2000],
+               "color": pdf.hl_norm_color(params.get("color") or ""),
+               "note": str(params.get("note") or "")[:1000] or None}
+        if idem:
+            one["idem"] = idem
+        items.append(one)
+        doc["highlights"] = items
+        pdf._hl_save(rel, doc)
+        return {"created": True, "id": hid}
+    H["highlight.create"] = hl_create
+
+    # ── 便签 ──────────────────────────────────────────────────────────────
+    def note_list(anchor, params, prev):
+        rel, _ = _rel(anchor)
+        items = pdf._notes_load(rel) or []
+        return {"count": len(items), "notes": items[:200]}
+    H["note.list"] = note_list
+
+    def note_create(anchor, params, prev):
+        rel, _ = _rel(anchor)
+        body = str(params.get("text") or "").strip()
+        if not body:
+            raise ValueError("params.text 必填(便签正文)")
+        items = pdf._notes_load(rel) or []
+        nid = f"dc_{int(time.time()*1000):x}"
+        items.append({"id": nid, "page": anchor.get("page"), "text": body[:4000]})
+        pdf._notes_save(rel, items)
+        return {"created": True, "id": nid}
+    H["note.create"] = note_create
+
+    # ── 插入页 ────────────────────────────────────────────────────────────
+    def page_new(anchor, params, prev):
+        rel, _ = _rel(anchor)
+        pages = pdf._upages_load(rel) or []
+        after = params.get("after")
+        pid = f"dc_{int(time.time()*1000):x}"
+        pages.append({"id": pid, "after": after, "els": []})
+        pdf._upages_save(rel, pages)
+        return {"created": True, "anchor": {"file": rel, "userpage": pid}}
+    H["page.new"] = page_new
+
+    def page_add(anchor, params, prev):
+        rel, _ = _rel(anchor)
+        pid = (params.get("userpage")
+               or ((prev or {}).get("anchor") or {}).get("userpage"))
+        if not pid:
+            raise ValueError("缺 params.userpage(或依赖模式下上一步的 anchor.userpage)")
+        pages = pdf._upages_load(rel) or []
+        for pg in pages:
+            if pg.get("id") == pid:
+                pg.setdefault("els", []).append(
+                    {"kind": str(params.get("kind") or "text"),
+                     "text": str(params.get("text") or "")[:4000]})
+                pdf._upages_save(rel, pages)
+                return {"added": True, "userpage": pid, "n": len(pg["els"])}
+        raise ValueError(f"找不到插入页 {pid}")
+    H["page.add"] = page_add
+
+    # ── 制卡草稿(仅落编号,不调 AI 生成内容)────────────────────────────
+    def anki_draft(anchor, params, prev):
+        cards = params.get("cards")
+        if not isinstance(cards, list) or not cards:
+            raise ValueError("params.cards 必填(上游助手已想好的卡片数组)")
+        gid = pdf._entity_reg_cards(cards[:24], {})
+        return {"gid": gid, "n": len(cards[:24]), "draft": True}
+    H["anki.draft"] = anki_draft
+
+    # ── 自动解析剩余确定性底座(解析不到就不接线,不给假 handler)────────────
+    if toc_get is None:
+        # ⚠ 惰性解析:`_effective_toc` 是 pdf_reader **更后面**才 from book_toc 导入的,
+        # 接线发生在文件前半段 → 那时 hasattr 还是 False。所以在调用时才取,而不是接线时。
+        def toc_get(rel):                                       # noqa: F811
+            fn = getattr(pdf, "_effective_toc", None)
+            if not callable(fn):
+                raise ValueError("目录能力未就绪(pdf._effective_toc 不可用)")
+            return fn(rel)
+    if dict_lookup is None:
+        def dict_lookup(word):                                  # noqa: F811
+            """离线 ECDICT,纯本地查表,不耗 AI。同样惰性导入:它在 scripts/vocab/ 下,
+            接线时 sys.path 未必已包含该目录。"""
+            import sys as _sys
+            from pathlib import Path as _P
+            vroot = str(_P(__file__).resolve().parents[1] / "scripts" / "vocab")
+            if vroot not in _sys.path:
+                _sys.path.append(vroot)
+            from dict_sources import lookup_ecdict
+            w = (word or "").strip()
+            if not w:
+                raise ValueError("params.word 必填")
+            return lookup_ecdict(w)
+    if search_book is None or search_all is None:
+        import sqlite3
+        _idx = getattr(pdf, "CLAUDE_DIR", None)
+        _db = (_idx / "state" / "pdf-search.db") if _idx else None
+
+        def _fts(q: str, rel: str | None = None, limit: int = 20):
+            """FTS5 子串检索。纯 SQL,确定性,不调 AI。"""
+            q = (q or "").strip()
+            if len(q) < 2:
+                raise ValueError("params.q 至少 2 个字符")
+            # ⚠ 用户输入不能直接当 FTS5 查询语法:`AND/OR/NOT/NEAR/*/"/:`(以及连字符里的
+            # not 这种)会被当作操作符,轻则 OperationalError(实测 `no such column: not`),
+            # 重则成为查询注入面。整串包成**单个短语**,只做子串匹配 —— 与 trigram 分词器
+            # 的设计意图一致(见 build_search_index.py)。
+            phrase = chr(34) + q.replace(chr(34), chr(34) * 2) + chr(34)
+            if not (_db and _db.exists()):
+                raise ValueError("全文索引尚未构建(state/pdf-search.db 不存在)")
+            con = sqlite3.connect(f"file:{_db}?mode=ro", uri=True)
+            try:
+                sql = ("SELECT file, page, snippet(pages_fts, -1, '[', ']', '…', 12) "
+                       "FROM pages_fts JOIN pages_data ON pages_data.rowid = pages_fts.rowid "
+                       "WHERE pages_fts MATCH ?")
+                args: list = [phrase]
+                if rel:
+                    sql += " AND pages_data.file = ?"
+                    args.append(rel)
+                rows = con.execute(sql + " LIMIT ?", (*args, limit)).fetchall()
+            finally:
+                con.close()
+            return [{"file": r[0], "page": r[1], "snippet": r[2]} for r in rows]
+
+        if search_book is None:
+            search_book = lambda rel, q: _fts(q, rel)          # noqa: E731
+        if search_all is None:
+            search_all = lambda q: _fts(q)                     # noqa: E731
+    if nav_publish is None:
+        try:
+            import reader_events as _RE
+
+            def nav_publish(kind, rel, page):
+                """前端动作经既有 SSE 总线下发。确定性:只发事件,不做判断。"""
+                fn = "goToPage" if kind == "goto" else "openBookAt"
+                args = [page] if kind == "goto" else [rel, page]
+                return _RE.publish("client-action", rel, None,
+                                   {"action": {"fn": fn, "args": args}})
+        except Exception:
+            nav_publish = None
+
+    # ── 可选注入项:注入了才接线 ──────────────────────────────────────────
+    if callable(toc_get):
+        H["toc.get"] = lambda a, p, prev: {"toc": toc_get(_rel(a)[0])}
+    if callable(search_book):
+        H["search.book"] = lambda a, p, prev: {"hits": search_book(_rel(a)[0], str(p.get("q") or ""))}
+    if callable(search_all):
+        H["search.all"] = lambda a, p, prev: {"hits": search_all(str(p.get("q") or ""))}
+    if callable(dict_lookup):
+        H["dict.lookup"] = lambda a, p, prev: {"entry": dict_lookup(str(p.get("word") or ""))}
+    if callable(nav_publish):
+        H["nav.goto"] = lambda a, p, prev: {"sent": nav_publish("goto", _rel(a)[0], a.get("page"))}
+        H["nav.open"] = lambda a, p, prev: {"sent": nav_publish("open", _rel(a)[0], a.get("page"))}
+
+    _assert_no_ai(H.keys())
+    missing = sorted(set(DC.ACTIONS) - set(H))
+    return H, missing
+
+
+def register_direct_commands(bp, *, pdf, jsonify, request, session, **inject):
+    """在既有 blueprint 上挂两条新路由。不触碰任何已注册的 endpoint。"""
+    handlers, missing = build_handlers(pdf, **inject)
+    svc = DC.DirectCommandService(handlers)
+
+    def submit():
+        if not session.get("user_id"):
+            return jsonify({"ok": False, "error": "未登录"}), 401
+        body = request.get_json(silent=True) or {}
+        act = [s.get("action") for s in (body.get("steps") or [{"action": body.get("action")}])]
+        blocked = [a for a in act if a in missing]
+        if blocked:
+            return jsonify({"contract": DC.CONTRACT, "ok": False,
+                            "error": f"动作未接线(本机未注入其确定性底座):{blocked}",
+                            "retryable": False, "unwired": missing}), 400
+        try:
+            _r = svc.submit(body)
+            _mirror_failures()          # 失败已入 bus → 镜像进出向日志(Windows 单一订阅源)
+            return jsonify(_r)
+        except DC.CommandError as e:
+            return jsonify({"contract": DC.CONTRACT, "ok": False, "error": str(e),
+                            "retryable": False}), 400
+
+    def _mirror_failures():
+        """把命令失败事件镜像进出向日志 —— Windows 只需订阅一个源。"""
+        try:
+            import reader_outgoing_context as _OC  # noqa: F401
+            og = getattr(pdf, "_OUTGOING", None) or {}
+            jr = og.get("journal")
+            if not jr:
+                return
+            last = getattr(svc, "_mirrored", 0)
+            for ev in svc.bus.since(last):
+                jr.append("command-failed", {
+                    "correlation": ev.get("correlation"), "commandId": ev.get("commandId"),
+                    "taskId": ev.get("voiceTask"), "step": ev.get("step"),
+                    "retryable": ev.get("retryable"), "error": ev.get("error")})
+                svc._mirrored = ev["seq"]
+        except Exception:
+            pass
+
+    def events():
+        if not session.get("user_id"):
+            return jsonify({"ok": False, "error": "未登录"}), 401
+        try:
+            since = int(request.args.get("since") or 0)
+        except (TypeError, ValueError):
+            since = 0
+        vt = str(request.args.get("voiceTask") or "")
+        return jsonify({"contract": DC.CONTRACT, "ok": True,
+                        "cursor": svc.bus.cursor(),
+                        "events": svc.bus.since(since, vt)})
+
+    bp.add_url_rule("/api/direct-command", "pdf_api_direct_command", submit, methods=["POST"])
+    bp.add_url_rule("/api/direct-events", "pdf_api_direct_events", events, methods=["GET"])
+    return {"wired": sorted(handlers), "unwired": missing, "service": svc}

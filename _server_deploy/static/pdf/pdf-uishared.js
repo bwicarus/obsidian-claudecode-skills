@@ -470,8 +470,8 @@ window._favOpenPicker = function () {
   function _ovHlById(rec, id) { var a = _ovHlCache[rec.id] || []; for (var i = 0; i < a.length; i++) if (a[i].id === id) return a[i]; return null; }
   function _ovDictGate() { var now = Date.now(); if (now - _ovLastDictTs < 500) return false; _ovLastDictTs = now; return true; }
   function _ovPointFromEvent(e) {
-    if (e && e.changedTouches && e.changedTouches[0]) { var t = e.changedTouches[0]; return { x: t.clientX, y: t.clientY }; }
-    if (e && typeof e.clientX === 'number') return { x: e.clientX, y: e.clientY };
+    if (e && e.changedTouches && e.changedTouches[0]) { var t = e.changedTouches[0]; return { x: t.clientX, y: t.clientY, pointerType: 'touch' }; }
+    if (e && typeof e.clientX === 'number') return { x: e.clientX, y: e.clientY, pointerType: e.pointerType || 'mouse' };
     return null;
   }
   function _ovCloseWordPop() { try { var wp = document.getElementById('word-pop'); if (wp && wp.style.display !== 'none') wp.style.display = 'none'; } catch (_) {} }
@@ -524,9 +524,8 @@ window._favOpenPicker = function () {
     while (hi < s.length && isW(s[hi])) hi++;
     return { node: node, start: lo, end: hi, text: s.slice(lo, hi) };
   }
-  function _ovClickWord(x, y, rec) {
+  function _ovClickWord(x, y, rec, pointerType) {
     if (!(window.RC && RC.wordpop)) { _ovCloseWordPop(); return; }
-    if (!_ovDictGate()) return;
     var pos = _ovCaretFromPoint(x, y);
     if (!pos || !pos.node || pos.node.nodeType !== 3) { _ovCloseWordPop(); return; }
     var w = _ovWordAt(pos.node, pos.offset);
@@ -535,6 +534,10 @@ window._favOpenPicker = function () {
     if (!isEn && !isJa) { _ovCloseWordPop(); return; }   // 纯中文等 → 不弹词典(同 html-reader)
     var rng = document.createRange();
     try { rng.setStart(w.node, w.start); rng.setEnd(w.node, w.end); } catch (_) { return; }
+    if (!(RC.ui && RC.ui.rangeHitTest && RC.ui.rangeHitTest(rng, x, y, { pointerType: pointerType || 'mouse' }))) {
+      _ovCloseWordPop(); return;   // 覆盖层大片空白不能被 caret 最近点吸附到正文末词
+    }
+    if (!_ovDictGate()) return;
     var rr = rng.getBoundingClientRect();
     var rect = { left: rr.left, top: rr.top, right: rr.right, bottom: rr.bottom };
     var pblk = w.node.parentElement && w.node.parentElement.closest ? w.node.parentElement.closest('p,li,td,blockquote,h1,h2,h3,h4,div') : null;
@@ -1187,7 +1190,7 @@ window._favOpenPicker = function () {
             if (pt) {
               var tgt = document.elementFromPoint(pt.x, pt.y);
               if (tgt && tgt.closest && tgt.closest('mark.rc-html-hl')) return;   // 点高亮 → 交给 mark click 开编辑,不查词
-              _ovClickWord(pt.x, pt.y, _ovRecOf(pw));                             // 单击词 → 弹字典;非词 → 内部关框
+              _ovClickWord(pt.x, pt.y, _ovRecOf(pw), pt.pointerType);             // 单击词 → 弹字典;非词/空白 → 内部关框
             } else { _ovCloseWordPop(); }
             return;
           }
@@ -1564,4 +1567,3 @@ window._favOpenPicker = function () {
     }).catch(function () { _upMiniEnd(mini, '网络错误', true); _upTempFail(tempId); alert('网络错误,没创建上'); });
   };
 })();
-

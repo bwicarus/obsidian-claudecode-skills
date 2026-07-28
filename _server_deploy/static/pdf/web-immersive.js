@@ -1,12 +1,12 @@
-/* web-immersive.js — 网页沉浸式翻译引擎(双语对照)。
+/* web-immersive.js — 网页句级沉浸式翻译引擎(双语对照)。
  *
- * 跑在**被代理的网页内部**(由 html_reader 的 _PROXY_INJECT 注入),不是外壳里。
- * 理由:段落识别要走真实 DOM,而代理页是同源文档;引擎住在页内,页内跳转也自动跟着走,
- * 外壳只管发指令(postMessage)——与选区/正文上报同一条桥。
+ * 当前主路径跑在浏览器扩展的 ordinary-web isolated world，直接读取用户正在看的真实 DOM；
+ * 生成版由扩展 build.py 从本文件逐字包装。退役代理页仍可兼容加载本源，但不再是产品入口。
+ * 翻译 API 经扩展 background 的固定路由桥调用；页面拿不到账户 token，页面 URL 只进本地缓存。
  *
- * 段落粒度采用 FluentRead(开源沉浸式翻译)验证过的那套规则,核心是一条:
- *   **节点若含非空子元素 → 不翻它,下沉到子元素**。
- * 这条是"整页翻成一坨"和"逐词翻碎"之间的分界线,自己拍脑袋写必然踩坑。
+ * 先用 FluentRead 的 DOM 规则找正文段落,再用 Intl.Segmenter 切成句子；翻译、预翻译、
+ * 生词计数和「译 N」都以句子为最小单位。未掌握词用 CSS Highlight 画真实词下划线，
+ * 不修改宿主页文字，也不会像绝对定位覆盖层那样滚动慢半拍。
  *
  * 三种样式(用户拍板:默认独立段落):
  *   para    独立段落 —— 译文另起一段,与原文同字号(默认)
@@ -17,12 +17,113 @@
  * 滚到哪译到哪(IntersectionObserver),不预译整站——省钱也省等待。
  */
 (function () {
+  if (window.__bwPwaBridge) return;   // 浏览器扩展加载在 PDF PWA 时，翻译所有权留给阅读器本体
   if (window.__rcImmersive) return;
   window.__rcImmersive = true;
 
-  var ST = { on: false, style: 'para', busy: false, seq: 0 };
+  var GOOGLE_NS = 'web-google-v1-gtranslate-v2';
+  function storedBackend() {
+    try { return localStorage.getItem('eph-web-tr-backend') === 'ai' ? 'ai' : 'google'; }
+    catch (e) { return 'google'; }
+  }
+  function storedMode() {
+    try {
+      var mode = localStorage.getItem('eph-web-tr-mode') || 'auto';
+      return mode === 'session' || mode === 'stateless' ? mode : 'auto';
+    } catch (e) { return 'auto'; }
+  }
+  function storedThreshold() {
+    try {
+      var n = parseInt(localStorage.getItem('eph-web-tr-threshold') || '50', 10);
+      return isFinite(n) ? Math.max(10, Math.min(500, n)) : 50;
+    } catch (e) { return 50; }
+  }
+  function validAiNamespace(value) {
+    return /^web-ai-v(?:1|2)-[a-z0-9._-]+$/.test(String(value || ''));
+  }
+  var ST = {
+    on: false, style: 'para', busy: false, seq: 0,
+    backend: storedBackend(), cacheNamespace: GOOGLE_NS,
+    cacheNamespaces: {}, sessionSupported: false,
+    modeRequested: storedMode(), modeResolved: 'stateless',
+    estimatedUnits: 0, glossary: {}, profileReady: false, degradeNotice: ''
+  };
+  var CACHES = {}, CACHE_READY = {}, PRELOADS = {}, _profilePromise = null;
   var DONE = '__rcTrDone';          // 已处理标记(挂在节点上,避免重复翻)
   var MARK = 'rc-tr-block';
+
+  function cacheFor(ns) {
+    ns = String(ns || GOOGLE_NS);
+    if (!CACHES[ns]) CACHES[ns] = {};
+    return CACHES[ns];
+  }
+  function toastOnce(key, message) {
+    if (!message || ST.degradeNotice === key) return;
+    ST.degradeNotice = key;
+    try {
+      if (window.RC && RC.toast) RC.toast(message);
+      else console.warn('[BW translate]', message);
+    } catch (e) {}
+  }
+  function degradationText(reason) {
+    if (reason === 'codex_tools_off_unavailable') return 'Codex 暂无可证明的无工具模式，网页翻译已安全降级到无工具 AI。';
+    if (reason === 'ai_partial_google_fallback') return '部分 AI 译文未通过对齐校验，已安全降级为 Google。';
+    if (reason === 'ai_unavailable_google_fallback') return 'AI 当前不可用，已安全降级为 Google。';
+    if (reason === 'ai_unavailable') return 'AI 当前不可用，未生成的句子已留空。';
+    if (reason === 'session_backend_unsupported') return '当前网页翻译模型不支持安全的短时会话，已改用无状态批翻。';
+    if (reason === 'session_context_unavailable') return '页面短时会话身份不可用，已改用无状态批翻。';
+    if (reason === 'session_unavailable_stateless_fallback') return '页面短时会话已中断，本批已改用无状态 AI 翻译。';
+    return reason ? ('网页翻译已安全降级：' + reason) : '';
+  }
+  function applyProfile(d) {
+    var namespaces = (d && d.cacheNamespaces) || {};
+    var statelessNs = String(namespaces.stateless || (d && d.cacheNamespace) || '');
+    var sessionNs = String(namespaces.session || '');
+    if (!d || d.ok !== true || !validAiNamespace(statelessNs)) {
+      throw new Error('网页 AI 配置无效');
+    }
+    ST.cacheNamespaces = {
+      stateless: statelessNs,
+      session: validAiNamespace(sessionNs) ? sessionNs : statelessNs
+    };
+    ST.sessionSupported = d.sessionSupported === true;
+    ST.cacheNamespace = ST.cacheNamespaces.stateless;
+    ST.profileReady = true;
+    if (d.degraded) toastOnce('profile:' + (d.reason || ''), degradationText(d.reason));
+    return d;
+  }
+  function ensureBackendProfile() {
+    ST.backend = storedBackend();
+    if (ST.backend !== 'ai') {
+      ST.cacheNamespace = GOOGLE_NS;
+      ST.cacheNamespaces = {};
+      ST.sessionSupported = false;
+      ST.modeResolved = 'stateless';
+      ST.profileReady = true;
+      return Promise.resolve({ ok: true, cacheNamespace: GOOGLE_NS });
+    }
+    if (ST.profileReady && ST.cacheNamespace !== GOOGLE_NS) {
+      return Promise.resolve({
+        ok: true,
+        cacheNamespace: ST.cacheNamespace,
+        cacheNamespaces: ST.cacheNamespaces,
+        sessionSupported: ST.sessionSupported
+      });
+    }
+    if (_profilePromise) return _profilePromise;
+    var F = window.__rcRawFetch || window.fetch;
+    _profilePromise = F('/pdf/api/web-translate-config', { method: 'GET' })
+      .then(function (r) { return r.json(); })
+      .then(applyProfile)
+      .catch(function () {
+        ST.backend = 'google';
+        ST.cacheNamespace = GOOGLE_NS;
+        ST.profileReady = true;
+        toastOnce('profile-load', 'AI 配置加载失败，已安全降级为 Google。');
+        return { ok: true, cacheNamespace: GOOGLE_NS, degraded: true };
+      }).then(function (d) { _profilePromise = null; return d; }, function (e) { _profilePromise = null; throw e; });
+    return _profilePromise;
+  }
 
   // ── 段落识别(照搬 FluentRead 的三类集合)──
   var DIRECT = { H1:1, H2:1, H3:1, H4:1, H5:1, H6:1, P:1, LI:1, DD:1, DT:1,
@@ -58,13 +159,15 @@
     // 译文和「译 N」按钮塞进了链接文字里。
     if (INLINE[el.tagName]) return false;
     try { if (el.closest(CHROME)) return false; } catch (e) {}
-    var t = (el.innerText || el.textContent || '').trim();
+    // textContent 不强制 layout:innerText 每个候选都触发同步重排,collect 全文档时是滚动掉帧主因之一
+    var t = (el.textContent || '').trim();
     if (t.length < 4) return false;                    // 太短(图标/序号)不值得翻
-    if (!/[A-Za-z぀-ヿ一-鿿]/.test(t)) return false;   // 纯数字/符号跳过
+    if (!langWanted(t)) return false;                  // 语言筛选:非目标语言(默认只 en/ja → 纯中文母语段)跳过,含纯符号
     if (t.length > 3000) return false;
     // innerText 里出现换行 = 渲染上就是多块内容。DIRECT(<p>/<li>…)里可能只是 <br>,放行;
     // 非 DIRECT 的容器出现换行,基本都是"一堆并列链接/按钮"被当成一段(维基菜单就是这么混进来的)。
-    if (!DIRECT[el.tagName] && /\n/.test(t)) return false;
+    // 渲染换行语义必须用 innerText,但只让非 DIRECT 容器付强制 layout 的代价(DIRECT 多数,直接放行)。
+    if (!DIRECT[el.tagName] && /\n/.test(el.innerText || '')) return false;
     return true;
   }
 
@@ -87,6 +190,142 @@
     return out;
   }
 
+  // ── 段落 → 句子 DOM 单元。Range.extractContents 会保留句内 a/sup/em 等原结构。──
+  function textMap(root) {
+    var nodes = [], text = '', w = document.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+      acceptNode: function (n) {
+        var p = n.parentElement;
+        if (!p || p.closest('.rc-vocab-btn,.' + MARK + ',.rc-tr-src')) return NodeFilter.FILTER_REJECT;
+        if (!n.nodeValue) return NodeFilter.FILTER_REJECT;
+        nodes.push({ n: n, start: text.length, end: text.length + n.nodeValue.length });
+        text += n.nodeValue;
+        return NodeFilter.FILTER_ACCEPT;
+      }
+    });
+    while (w.nextNode()) {}
+    return { text: text, nodes: nodes };
+  }
+  function sentenceSpans(text) {
+    var out = [];
+    try {
+      if (Intl && Intl.Segmenter) {
+        var sg = new Intl.Segmenter(undefined, { granularity: 'sentence' });
+        Array.from(sg.segment(text)).forEach(function (x) { out.push({ start: x.index, end: x.index + x.segment.length }); });
+      }
+    } catch (e) {}
+    if (!out.length) {
+      var re = /[^.!?。！？]+(?:[.!?。！？]+["'”’）)\]]*|$)/g, m;
+      while ((m = re.exec(text))) out.push({ start: m.index, end: m.index + m[0].length });
+    }
+    return out.map(function (s) {
+      while (s.start < s.end && /\s/.test(text[s.start])) s.start++;
+      while (s.end > s.start && /\s/.test(text[s.end - 1])) s.end--;
+      s.text = text.slice(s.start, s.end).trim(); return s;
+    }).filter(function (s) { return s.text.length >= 4 && /[A-Za-z぀-ヿ一-鿿]/.test(s.text); });
+  }
+  function mappedRange(map, start, end) {
+    var a = null, b = null, ao = 0, bo = 0;
+    for (var i = 0; i < map.nodes.length; i++) {
+      var x = map.nodes[i];
+      if (!a && start >= x.start && start <= x.end) { a = x.n; ao = Math.max(0, start - x.start); }
+      if (end >= x.start && end <= x.end) { b = x.n; bo = Math.max(0, end - x.start); break; }
+    }
+    if (!a || !b) return null;
+    try { var r = document.createRange(); r.setStart(a, Math.min(ao, a.nodeValue.length)); r.setEnd(b, Math.min(bo, b.nodeValue.length)); return r; }
+    catch (e) { return null; }
+  }
+  function sentenceUnits(list) {
+    var out = [];
+    (list || []).forEach(function (el) {
+      if (el.__rcSentUnits) { out = out.concat(el.__rcSentUnits.filter(function (u) { return u.isConnected; })); return; }
+      var map = textMap(el), spans = sentenceSpans(map.text), prepared = [];
+      spans.forEach(function (s) { var r = mappedRange(map, s.start, s.end); if (r) prepared.push({ s: s, r: r }); });
+      for (var i = prepared.length - 1; i >= 0; i--) {
+        try {
+          var u = document.createElement('span'); u.className = 'rc-vocab-unit'; u.__rcText = prepared[i].s.text;
+          u.appendChild(prepared[i].r.extractContents()); prepared[i].r.insertNode(u); prepared[i].u = u;
+        } catch (e) {}
+      }
+      el.__rcSentUnits = prepared.map(function (x) { return x.u; }).filter(Boolean);
+      out = out.concat(el.__rcSentUnits);
+    });
+    return out;
+  }
+
+  // ── AI 调用策略：短页面走无状态批翻，内容足够多时才建立短时会话。──
+  // 旧设计的 70% 不是网络抽样：它表示用户通常只会读完页面约 70%，因此用
+  // round(句数 × .7) 与阈值比较。统计借用下面的 idle discovery，绝不为了计数
+  // 调 sentenceUnits() 改写 DOM，也不在 scroll 回调里重新遍历页面。
+  var PAGE_LENGTH = {
+    total: 0, initialDone: false, frozen: false, resolved: 'stateless',
+    waiters: []
+  };
+  function countTranslationBlock(el) {
+    if (!el || el.__rcTranslationCounted) return;
+    el.__rcTranslationCounted = 1;
+    try {
+      PAGE_LENGTH.total += sentenceSpans(textMap(el).text).length;
+    } catch (e) {}
+  }
+  function finishInitialDiscovery() {
+    if (PAGE_LENGTH.initialDone) return;
+    PAGE_LENGTH.initialDone = true;
+    var waiters = PAGE_LENGTH.waiters.splice(0);
+    waiters.forEach(function (fn) { try { fn(true); } catch (e) {} });
+  }
+  function freezeTranslationMode(mode) {
+    if (!PAGE_LENGTH.frozen) {
+      PAGE_LENGTH.frozen = true;
+      PAGE_LENGTH.resolved = mode === 'session' ? 'session' : 'stateless';
+    }
+    ST.modeResolved = PAGE_LENGTH.resolved;
+    ST.estimatedUnits = Math.round(PAGE_LENGTH.total * 0.7);
+    ST.cacheNamespace = ST.backend === 'ai'
+      ? String(ST.cacheNamespaces[ST.modeResolved] || ST.cacheNamespaces.stateless || GOOGLE_NS)
+      : GOOGLE_NS;
+    return ST.modeResolved;
+  }
+  function resetTranslationModeDecision() {
+    PAGE_LENGTH.frozen = false;
+    PAGE_LENGTH.resolved = 'stateless';
+    ST.modeRequested = storedMode();
+    ST.modeResolved = 'stateless';
+    ST.estimatedUnits = Math.round(PAGE_LENGTH.total * 0.7);
+  }
+  function resolveTranslationMode() {
+    ST.modeRequested = storedMode();
+    if (ST.backend !== 'ai' || ST.modeRequested === 'stateless') {
+      return Promise.resolve(freezeTranslationMode('stateless'));
+    }
+    if (ST.modeRequested === 'session') {
+      if (!ST.sessionSupported) {
+        toastOnce('session-unsupported', degradationText('session_backend_unsupported'));
+        return Promise.resolve(freezeTranslationMode('stateless'));
+      }
+      return Promise.resolve(freezeTranslationMode('session'));
+    }
+    // 自动模式必须等初始文档的 idle discovery 给出完整句数；1.8 秒仍未完成时
+    // 选择无状态，避免巨大/持续生长页面为了“精算”阻塞翻译。决策在本次导航内冻结。
+    function choose(complete) {
+      if (!complete) return freezeTranslationMode('stateless');
+      var estimated = Math.round(PAGE_LENGTH.total * 0.7);
+      ST.estimatedUnits = estimated;
+      return freezeTranslationMode(ST.sessionSupported && estimated > storedThreshold()
+        ? 'session' : 'stateless');
+    }
+    if (PAGE_LENGTH.initialDone) return Promise.resolve(choose(true));
+    return new Promise(function (resolve) {
+      var settled = false;
+      function done(complete) {
+        if (settled) return;
+        settled = true;
+        resolve(choose(complete));
+      }
+      PAGE_LENGTH.waiters.push(done);
+      setTimeout(function () { done(false); }, 1800);
+    });
+  }
+
   // ── 样式 ──
   function css() {
     if (document.getElementById('rc-tr-css')) return;
@@ -98,14 +337,23 @@
         'font-family:inherit;text-align:left;white-space:normal}' +
       '.rc-tr-small{font-size:.86em;opacity:.78;border-left-color:rgba(90,150,240,.3);margin:.2em 0}' +
       '.rc-tr-load{opacity:.45;font-style:italic}' +
+      '.rc-tr-slot{min-block-size:1.4em}' +
       '.rc-tr-src-hidden{display:none !important}' +
       // 替换模式**不加任何框**(用户明确不喜欢那圈虚线):只保留"可点开看原文"这个能力,
       // 不给视觉噪音。指针样式也不改——省得一片文字全变成手型。
       '.rc-tr-peek{}' +
-      // 未掌握词多的段落:呼吸框 + 单段「译」按钮(镜像 PDF 阅读器 12-vocab-sentences 的形态,
-      // 那边是句级几何框,这边是段级 —— 段落就是网页的天然语义块)
+      '.rc-vocab-unit{display:inline}' +
+      // 未掌握词下划线：与 PDF 同一 mastery 色阶；CSS Highlight 不改 DOM、滚动天然同步。
+      '::highlight(rc-vocab-new){text-decoration:underline 2px #f59e0b;text-underline-offset:.16em}' +
+      '::highlight(rc-vocab-seen){text-decoration:underline 2px #eab308;text-underline-offset:.16em}' +
+      '::highlight(rc-vocab-known){text-decoration:underline 2px #86b98a;text-underline-offset:.16em}' +
+      '.rc-vocab-word{ text-decoration-line:underline;text-decoration-thickness:2px;text-underline-offset:.16em}' +
+      '.rc-vocab-word[data-rc-vocab-hidden="1"]{text-decoration:none !important}' +
+      '.rc-vocab-word.m-new,.rc-vocab-word.m-learning{ text-decoration-color:#f59e0b}.rc-vocab-word.m-seen{ text-decoration-color:#eab308}.rc-vocab-word.m-known{ text-decoration-color:#86b98a}' +
+      // 未掌握词多的句子:呼吸框 + 句级「译」按钮(镜像 PDF 的双条件句子标记)
       '.rc-vocab-hot{outline:1.5px solid rgba(255,176,80,.5);outline-offset:2px;border-radius:3px;' +
         'animation:rcVocabBreath 2.6s ease-in-out infinite}' +
+      'html.rc-vocab-scrolling .rc-vocab-hot{animation-play-state:paused}' +
       '@keyframes rcVocabBreath{0%,100%{outline-color:rgba(255,176,80,.22)}50%{outline-color:rgba(255,176,80,.62)}}' +
       '.rc-vocab-btn{display:inline-block;margin-left:.4em;padding:0 .45em;font-size:.75em;line-height:1.6;' +
         'border-radius:9px;background:rgba(255,176,80,.18);color:#c8801e;border:1px solid rgba(255,176,80,.45);' +
@@ -128,18 +376,26 @@
     } catch (e) {}
   }
 
-  function attach(el, zh) {
+  function attach(el, zh, slot) {
     if (!zh) return;
     unclamp(el);
     try {   // 整段已译 → 未掌握词提示完成使命,撤掉(免得框和按钮跟译文并存)
       el.classList.remove('rc-vocab-hot');
       var vb = el.querySelector(':scope > .rc-vocab-btn'); if (vb) vb.remove();
     } catch (e) {}
-    var box = document.createElement(el.tagName === 'LI' || el.tagName === 'TD' ? 'div' : 'span');
+    var box = slot && slot.isConnected ? slot :
+      document.createElement(el.tagName === 'LI' || el.tagName === 'TD' ? 'div' : 'span');
     box.className = MARK + (ST.style === 'small' ? ' rc-tr-small' : '');
     box.textContent = zh;
     box.setAttribute('data-rc-tr', '1');
-    if (ST.style === 'replace') {
+    box.removeAttribute('data-rc-ph');
+    if (el.classList && el.classList.contains('rc-vocab-unit')) {
+      if (ST.style === 'replace') el.classList.add('rc-tr-src-hidden');
+      if (!(slot && slot.isConnected)) el.insertAdjacentElement('afterend', box);
+      if (ST.style === 'replace') box.addEventListener('click', function () {
+        el.classList.toggle('rc-tr-src-hidden'); box.style.display = el.classList.contains('rc-tr-src-hidden') ? '' : 'none';
+      });
+    } else if (ST.style === 'replace') {
       // 原文收起(不删):点译文可临时看回去 —— 查词/高亮仍指向原文,不能真丢
       el.classList.add('rc-tr-peek');
       var kids = [];
@@ -155,21 +411,40 @@
         box.style.display = wrap.classList.contains('rc-tr-src-hidden') ? '' : 'none';
       });
     } else {
-      el.appendChild(box);
+      if (!(slot && slot.isConnected)) el.appendChild(box);
     }
     el[DONE] = 1;
   }
 
+  function loadingSlot(el) {
+    if (el.__rcPh && el.__rcPh.isConnected) return el.__rcPh;
+    var ph = document.createElement(el.tagName === 'LI' || el.tagName === 'TD' ? 'div' : 'span');
+    ph.className = MARK + ' rc-tr-load rc-tr-slot' + (ST.style === 'small' ? ' rc-tr-small' : '');
+    ph.textContent = '翻译中…';
+    ph.setAttribute('data-rc-ph', '1');
+    if (el.classList && el.classList.contains('rc-vocab-unit')) el.insertAdjacentElement('afterend', ph);
+    else el.appendChild(ph);
+    el.__rcPh = ph;
+    return ph;
+  }
+
   // ── 批量翻译(可见优先)──
   var PEND = [], PENDT = null;
+  function sourceText(el) { return String((el && el.__rcText) || (el && (el.innerText || el.textContent)) || '').trim(); }
 
   function enqueue(el, force) {
     if (el[DONE] || el.__rcQ) return;
     el.__rcQ = 1;
-    if (force) el.__rcForce = 1;   // 单段按需翻译:与全局开关无关(生词按钮的意义就在这)
+    if (force) {
+      el.__rcForce = 1;   // 单段按需翻译:与全局开关无关,且固定读 Google 预热桶
+      PEND.unshift(el);   // 用户点击永远插到自动整页翻译之前
+      if (PENDT) { clearTimeout(PENDT); PENDT = null; }
+      flush();            // 点击路径零 60/220ms 人为等待
+      return;
+    }
     PEND.push(el);
     if (PENDT) return;
-    PENDT = setTimeout(flush, 220);      // 攒一批再发,别一段一个请求
+    PENDT = setTimeout(flush, 80);       // 提前 2.5 屏入队，短暂合批即可
   }
 
   function flush() {
@@ -177,84 +452,481 @@
     // ⚠ 这里**不能**要求 ST.on:生词段落的「译 N」按钮就是给"没开全局翻译"时用的
     //   (实测漏了这条 → 点按钮框消失但译文不出来)。是否采纳结果在下面逐条判。
     if (!PEND.length) return;
-    var batch = PEND.splice(0, 40);
-    var texts = batch.map(function (e) { return (e.innerText || e.textContent || '').trim(); });
-    var seq = ST.seq;
-    if (CACHE) {                       // 缓存命中的当场画出来,不进请求
-      for (var k = batch.length - 1; k >= 0; k--) {
-        var hitZh = CACHE[texts[k]];
-        if (hitZh) { attach(batch[k], hitZh); batch[k].__rcQ = 0; batch.splice(k, 1); texts.splice(k, 1); }
-      }
-      if (!batch.length) { report(); if (PEND.length && !PENDT) PENDT = setTimeout(flush, 60); return; }
+    var forceGoogle = !!PEND[0].__rcForce;
+    if (!forceGoogle && storedBackend() === 'ai' && !ST.profileReady) {
+      ensureBackendProfile().then(function () { if (PEND.length && !PENDT) PENDT = setTimeout(flush, 0); });
+      return;
     }
-    batch.forEach(function (e) {
-      var ph = document.createElement('span');
-      ph.className = MARK + ' rc-tr-load' + (ST.style === 'small' ? ' rc-tr-small' : '');
-      ph.textContent = '翻译中…';
-      ph.setAttribute('data-rc-ph', '1');
-      e.appendChild(ph);
-    });
+    ST.backend = storedBackend() === 'ai' && ST.cacheNamespace !== GOOGLE_NS ? 'ai' : 'google';
+    var requestBackend = forceGoogle ? 'google' : ST.backend;
+    var requestNs = requestBackend === 'ai' ? ST.cacheNamespace : GOOGLE_NS;
+    var requestCache = cacheFor(requestNs);
+    var limit = requestBackend === 'ai' ? 20 : 40, batch = [];
+    for (var pi = 0; pi < PEND.length && batch.length < limit;) {
+      if (!!PEND[pi].__rcForce === forceGoogle) batch.push(PEND.splice(pi, 1)[0]);
+      else pi++;
+    }
+    var texts = batch.map(sourceText);   // 句子按钮「译 N」绝不能混进翻译原文
+    var seq = ST.seq;
+    // 缓存命中的当场画出来,不进请求；AI 与 Google/型号桶严格隔离。
+    for (var k = batch.length - 1; k >= 0; k--) {
+      // 「译 N」是显式展示后台 Google 预热结果；整页 AI 模式不能让它
+      // 为同一句再烧一次 AI，也不能把该结果写进 AI cache bucket。
+      var hitZh = requestCache[texts[k]];
+      if (hitZh) {
+        var hitSlot = batch[k].__rcPh;
+        attach(batch[k], hitZh, hitSlot);
+        batch[k].__rcPh = null; batch[k].__rcQ = 0; batch[k].__rcForce = 0;
+        batch.splice(k, 1); texts.splice(k, 1);
+      }
+    }
+    if (!batch.length) { report(); if (PEND.length && !PENDT) PENDT = setTimeout(flush, 40); return; }
+    batch.forEach(loadingSlot);
     // ⚠ 必须走 shim 留出的原始 fetch:页面里的 window.fetch 已被代理层 patch,
     //   它会把 /pdf/api/… 当成原站的相对路径翻走(实测 405)。
     var F = window.__rcRawFetch || window.fetch;
+    var payload = { texts: texts, backend: requestBackend };
+    if (requestBackend === 'ai') {
+      payload.glossary = ST.glossary;
+      payload.mode = ST.modeResolved;
+      // background 会用扩展权威设置重新验算 auto；这个数字不是 session 身份，
+      // 也不会被转发为页面 URL 或缓存 namespace。
+      payload.estimatedUnits = Math.max(0, Math.min(100000, ST.estimatedUnits | 0));
+    }
     F('/pdf/api/web-translate', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ texts: texts, url: location.__realBase || location.href })
+      body: JSON.stringify(payload)
     }).then(function (r) { return r.json(); }).then(function (d) {
-      if (CACHE && d && d.zh) texts.forEach(function (t, i) { if (t && d.zh[i]) CACHE[t] = d.zh[i]; });
-      batch.forEach(function (e, i) {
-        var ph = e.querySelector(':scope > [data-rc-ph]');
-        if (ph) ph.remove();
-        // 期间被关掉/换样式 → 丢弃;但**用户手点的单段**不受全局开关影响
-        if (seq !== ST.seq || (!ST.on && !e.__rcForce)) { e.__rcQ = 0; return; }
-        attach(e, (d && d.zh && d.zh[i]) || '');
-        e.__rcQ = 0;
+      if (!d || d.ok !== true || !Array.isArray(d.zh)) throw new Error((d && d.error) || '翻译返回无效');
+      if (requestBackend === 'ai' && d.glossary && typeof d.glossary === 'object') {
+        var merged = Object.assign({}, ST.glossary, d.glossary), keys = Object.keys(merged);
+        if (keys.length > 40) keys.slice(0, keys.length - 40).forEach(function (key) { delete merged[key]; });
+        ST.glossary = merged;
+      }
+      var responseMode = d.modeResolved === 'session' ? 'session'
+        : (d.modeResolved === 'stateless' ? 'stateless' : ST.modeResolved);
+      var responseNamespaces = d.cacheNamespaces && typeof d.cacheNamespaces === 'object'
+        ? d.cacheNamespaces : {};
+      var responseModeNs = responseNamespaces[responseMode];
+      var aiNs = validAiNamespace(responseModeNs) ? String(responseModeNs)
+        : (validAiNamespace(d.cacheNamespace) ? String(d.cacheNamespace) : requestNs);
+      var googleNs = /^web-google-v1-[a-z0-9._-]+$/.test(String(d.googleCacheNamespace || '')) ? String(d.googleCacheNamespace) : GOOGLE_NS;
+      if (requestBackend === 'ai' && (d.modeResolved === 'session' || d.modeResolved === 'stateless')) {
+        ST.modeResolved = d.modeResolved;
+        ST.cacheNamespace = aiNs;
+      }
+      texts.forEach(function (t, i) {
+        if (!t || !d.zh[i]) return;
+        var source = Array.isArray(d.sources) ? d.sources[i] : (requestBackend === 'google' ? 'google' : '');
+        if (source === 'ai') cacheFor(aiNs)[t] = d.zh[i];
+        else if (source === 'google') cacheFor(googleNs)[t] = d.zh[i];
       });
-      if (PEND.length && !PENDT) PENDT = setTimeout(flush, 120);
-      report();
+      if (d.degraded) toastOnce('response:' + (d.reason || ''), degradationText(d.reason));
+      commitTranslationBatch(batch, d, seq, function () {
+        if (PEND.length && !PENDT) PENDT = setTimeout(flush, 40);
+        report();
+      });
     }).catch(function () {
       batch.forEach(function (e) {
-        var ph = e.querySelector(':scope > [data-rc-ph]');
+        var ph = e.__rcPh;
         if (ph) ph.remove();
-        e.__rcQ = 0;
+        e.__rcPh = null;
+        e.__rcQ = 0; e.__rcForce = 0;
       });
     });
   }
 
-  // ── 未掌握词多的段落:自动标出来,一键单段翻译(不必开全局译)──
-  function scanVocab(list) {
-    var els = list.filter(function (e) { return !e.__rcVocab; });
-    if (!els.length) return;
-    els.forEach(function (e) { e.__rcVocab = 1; });
-    var F = window.__rcRawFetch || window.fetch;
-    F('/pdf/api/web-vocab', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ texts: els.map(function (e) { return (e.innerText || '').trim(); }) })
-    }).then(function (r) { return r.json(); }).then(function (d) {
-      (d.marks || []).forEach(function (m) {
-        var el = els[m.i];
-        if (!el || el[DONE] || el.querySelector('.rc-vocab-btn')) return;
+  // ── 未掌握词：逐词下划线；满足 PDF 同款双条件的句子才预翻译并出现「译 N」。──
+  var VHL = null;
+  function ensureHighlights() {
+    if (VHL || !window.Highlight || !window.CSS || !window.CSS.highlights) return VHL;
+    VHL = { 'new': new Highlight(), seen: new Highlight(), known: new Highlight() };
+    Object.keys(VHL).forEach(function (k) { CSS.highlights.set('rc-vocab-' + k, VHL[k]); });
+    return VHL;
+  }
+  // 普通网页没有 PDF 的本地掌握表，仍需挡住「掌握 POST 已成功、旧扫描请求稍后才返回」
+  // 这一竞态。只存本会话的 lemma；重载后以服务端词库为准。
+  var VMASTER = Object.create(null);
+  function vocabWordKey(w) { return String(w || '').trim().toLowerCase(); }
+  function vocabularyStateRepo() {
+    try {
+      var repo = window.BWReaderRuntime && window.BWReaderRuntime.vocabularyState;
+      return repo &&
+        repo.CONTRACT === 'vocabulary-state/1' &&
+        typeof repo.isMastered === 'function'
+        ? repo
+        : null;
+    } catch (e) { return null; }
+  }
+  function vocabularyStateOccurrenceMastered(o) {
+    var repo = vocabularyStateRepo();
+    if (!repo || !o) return false;
+    var surface = vocabWordKey(o.surface);
+    var lemma = vocabWordKey(o.lemma || surface);
+    if (!surface && !lemma) return false;
+    var sample = surface || lemma;
+    try {
+      return repo.isMastered({
+        kind: 'word',
+        language: o.language || o.lang || (/[぀-ヿ㐀-鿿一-鿿]/.test(sample) ? 'ja' : 'en'),
+        lemma: lemma || surface,
+        word: surface || lemma,
+        surface: surface || lemma,
+        forms: Array.isArray(o.forms) ? o.forms : []
+      });
+    } catch (e) { return false; }
+  }
+  function vocabOccurrenceHidden(o) {
+    return !!(
+      VMASTER[vocabWordKey(o && (o.lemma || o.surface))] ||
+      vocabularyStateOccurrenceMastered(o)
+    );
+  }
+  function clearFallbackUnderlines(el) {
+    var old = (el && el.__rcVocabSpans) || [];
+    old.forEach(function (sp) {
+      try {
+        if (!sp || !sp.parentNode) return;
+        var p = sp.parentNode;
+        while (sp.firstChild) p.insertBefore(sp.firstChild, sp);
+        p.removeChild(sp);
+        p.normalize();
+      } catch (e) {}
+    });
+    if (el) el.__rcVocabSpans = [];
+  }
+  function underlineWords(el, occ) {
+    // 保留完整候选目录；掌握只改变本地可见投影。若这里先 filter 掉候选，
+    // MutationObserver 重扫后“取消掌握”就只能再问服务器才能找回 Range。
+    occ = Array.isArray(occ) ? occ : [];
+    var hi = ensureHighlights();
+    if (hi) {
+      var map = textMap(el), next = [];
+      occ.forEach(function (o) {
+        var r = mappedRange(map, o.start, o.end);
+        var k = (o.label === 'new' || o.label === 'learning') ? 'new' : (o.label === 'seen' ? 'seen' : 'known');
+        if (r) next.push({
+          hl: hi[k], range: r,
+          surface: vocabWordKey(o.surface || r.toString()),
+          lemma: vocabWordKey(o.lemma || o.surface || r.toString()),
+          hidden: vocabOccurrenceHidden(o)
+        });
+      });
+      // 先挂新 Range，再同步撤旧 Range；同一任务内不存在「整页先清空、等网络回来再画」的空窗。
+      next.forEach(function (p) { if (!p.hidden) try { p.hl.add(p.range); } catch (e) {} });
+      (el.__rcVocabRanges || []).forEach(function (p) { try { p.hl.delete(p.range); } catch (e) {} });
+      el.__rcVocabRanges = next;
+      clearFallbackUnderlines(el);
+      return;
+    }
+    // Firefox/Safari 旧版兜底：从后往前包 span，避免前一次 split 改掉后续 offset。
+    clearFallbackUnderlines(el);
+    var made = [];
+    occ.slice().sort(function (a, b) { return b.start - a.start; }).forEach(function (o) {
+      var r = mappedRange(textMap(el), o.start, o.end); if (!r) return;
+      try {
+        var w = document.createElement('span');
+        w.className = 'rc-vocab-word m-' + (o.label || 'new');
+        w.setAttribute('data-rc-vocab-surface', vocabWordKey(o.surface || r.toString()));
+        w.setAttribute('data-rc-vocab-lemma', vocabWordKey(o.lemma || o.surface || r.toString()));
+        if (vocabOccurrenceHidden(o)) w.setAttribute('data-rc-vocab-hidden', '1');
+        r.surroundContents(w); made.push(w);
+      } catch (e) {}
+    });
+    el.__rcVocabSpans = made;
+  }
+  // ── 标记掌握 → 去下划线(网页宿主 adapter 实现;统一契约=rc-wordpop 掌握成功后调的这些 window 钩子,
+  //    PDF 字符层/EPUB/网页各挂各的。VHL 是闭包私有,rc-wordpop 拿不到,故删除逻辑必须住这里)──
+  function _dropVocabUnderline() {
+    var ws = [].slice.call(arguments).map(vocabWordKey).filter(Boolean);
+    if (!ws.length) return null;
+    var removed = [], hiddenSpans = [];
+    [].forEach.call(document.querySelectorAll('.rc-vocab-unit'), function (u) {
+      (u.__rcVocabRanges || []).forEach(function (p) {
+        var hit = ws.indexOf(p.lemma) >= 0 || ws.indexOf(p.surface) >= 0;
+        if (!hit) { try { hit = ws.indexOf(vocabWordKey(p.range && p.range.toString())) >= 0; } catch (e) {} }
+        if (!hit) return;
+        try { p.hl.delete(p.range); removed.push(p); } catch (e) {}
+      });
+      [].forEach.call(u.querySelectorAll('.rc-vocab-word'), function (sp) {
+        var hit = ws.indexOf(vocabWordKey(sp.getAttribute('data-rc-vocab-lemma'))) >= 0 ||
+                  ws.indexOf(vocabWordKey(sp.getAttribute('data-rc-vocab-surface'))) >= 0 ||
+                  ws.indexOf(vocabWordKey(sp.textContent)) >= 0;
+        if (!hit || sp.getAttribute('data-rc-vocab-hidden') === '1') return;
+        sp.setAttribute('data-rc-vocab-hidden', '1'); hiddenSpans.push(sp);
+      });
+    });
+    return (removed.length || hiddenSpans.length) ? function () {
+      removed.forEach(function (p) { try { p.hl.add(p.range); } catch (e) {} });
+      hiddenSpans.forEach(function (sp) { try { sp.removeAttribute('data-rc-vocab-hidden'); } catch (e) {} });
+    } : null;
+  }
+  // 乐观分支(rc-wordpop _wordPopMaster:立即去 + 返回回滚闭包,POST 失败它会调回滚)。s.word=点击表层, s.lemma=原形
+  window.__pdfDropVocabUnderline = function (s) {
+    var k = vocabWordKey(s && (s.lemma || s.word)), had = !!VMASTER[k];
+    if (k) VMASTER[k] = true;
+    var restore = _dropVocabUnderline(s && s.word, s && s.lemma);
+    return function () {
+      if (k && !had) delete VMASTER[k];
+      if (restore) restore();
+    };
+  };
+  function _setVocabUnderlineLocal(words, mastered) {
+    var ws = (words || []).map(vocabWordKey).filter(Boolean);
+    [].forEach.call(document.querySelectorAll('.rc-vocab-unit'), function (u) {
+      (u.__rcVocabRanges || []).forEach(function (p) {
+        var hit = ws.indexOf(p.lemma) >= 0 || ws.indexOf(p.surface) >= 0;
+        if (!hit) { try { hit = ws.indexOf(vocabWordKey(p.range && p.range.toString())) >= 0; } catch (e) {} }
+        if (!hit) return;
+        p.hidden = !!mastered;
+        try { if (mastered) p.hl.delete(p.range); else p.hl.add(p.range); } catch (e) {}
+      });
+      [].forEach.call(u.querySelectorAll('.rc-vocab-word'), function (sp) {
+        var hit = ws.indexOf(vocabWordKey(sp.getAttribute('data-rc-vocab-lemma'))) >= 0 ||
+                  ws.indexOf(vocabWordKey(sp.getAttribute('data-rc-vocab-surface'))) >= 0 ||
+                  ws.indexOf(vocabWordKey(sp.textContent)) >= 0;
+        if (!hit) return;
+        if (mastered) sp.setAttribute('data-rc-vocab-hidden', '1');
+        else sp.removeAttribute('data-rc-vocab-hidden');
+      });
+    });
+  }
+  function rerenderVocabularyStateProjection() {
+    [].forEach.call(document.querySelectorAll('.rc-vocab-unit'), function (u) {
+      (u.__rcVocabRanges || []).forEach(function (p) {
+        var hidden = vocabOccurrenceHidden(p);
+        p.hidden = hidden;
+        try { if (hidden) p.hl.delete(p.range); else p.hl.add(p.range); } catch (e) {}
+      });
+      [].forEach.call(u.querySelectorAll('.rc-vocab-word'), function (sp) {
+        var hidden = vocabOccurrenceHidden({
+          lemma: sp.getAttribute('data-rc-vocab-lemma'),
+          surface: sp.getAttribute('data-rc-vocab-surface') || sp.textContent
+        });
+        if (hidden) sp.setAttribute('data-rc-vocab-hidden', '1');
+        else sp.removeAttribute('data-rc-vocab-hidden');
+      });
+    });
+  }
+  // 扩展 Vault hydrate/provider 变化只重算已保存 Range/span 的可见性，不重扫网页、
+  // 不访问 /web-vocab；仓库不存在时保留 VMASTER 与服务端候选行为。
+  (function bindVocabularyStateProjection() {
+    var repo = vocabularyStateRepo();
+    if (!repo) return;
+    var queued = false;
+    function schedule() {
+      if (queued) return;
+      queued = true;
+      var frame = window.requestAnimationFrame
+        ? window.requestAnimationFrame.bind(window)
+        : function (callback) { return setTimeout(callback, 16); };
+      frame(function () {
+        queued = false;
+        rerenderVocabularyStateProjection();
+      });
+    }
+    try {
+      if (typeof repo.subscribe === 'function') {
+        repo.subscribe(function (event) {
+          var record = event && event.record;
+          if (!record || record.property === 'mastered') schedule();
+        });
+      }
+    } catch (e) {}
+    try {
+      if (typeof repo.ready === 'function') Promise.resolve(repo.ready()).then(schedule, function () {});
+    } catch (e) {}
+    try { document.addEventListener('bw:vocabulary-state-ready', schedule); } catch (e) {}
+  })();
+  // mastery 是纯本地投影：取消掌握直接把保留的 Range 加回来，绝不触发 /web-vocab 重扫。
+  window.applyVocabLocalOverride = function (lemma, mastered, meta) {
+    var k = vocabWordKey(lemma);
+    var words = [lemma, meta && meta.word].concat((meta && meta.forms) || []);
+    var had = !!VMASTER[k];
+    if (mastered) { if (k) VMASTER[k] = true; }
+    else if (k) delete VMASTER[k];
+    _setVocabUnderlineLocal(words, !!mastered);
+    return function restoreWebVocabOverride() {
+      if (had) VMASTER[k] = true; else delete VMASTER[k];
+      _setVocabUnderlineLocal(words, had);
+    };
+  };
+  // 无参刷新只把可见句标为待重扫；旧 Range 在各句的新结果原子替换前继续显示，避免整页闪烁。
+  window.refreshVocabUnderlinesForAllPages = function () {
+    try { [].forEach.call(document.querySelectorAll('.rc-vocab-unit'), function (u) { u.__rcVocab = 0; }); } catch (e) {}
+    vocabPass();
+  };
+  // ── 语言筛选(统一=全局「我在学的语言」集合;网页宿主存 bw-set-target-langs,经 settings-sync 桥全站一致)。
+  //    默认 ['en','ja']=用户学习方向,此时行为与旧版一致;去掉某语言即全站不再翻它,纯中文母语页自动跳过。──
+  function targets() { try { var v = JSON.parse(localStorage.getItem('bw-set-target-langs') || '["en","ja"]'); return (v && v.length) ? v : ['en', 'ja']; } catch (e) { return ['en', 'ja']; } }
+  function langOf(t) {   // 段落主语言:假名→ja;拉丁字母→en(拉丁优先于纯汉字);纯汉字无假名→zh(母语)
+    if (/[぀-ヿ]/.test(t)) return 'ja';
+    if (/[A-Za-z]/.test(t)) return 'en';
+    if (/[一-鿿]/.test(t)) return 'zh';
+    return '';
+  }
+  function langWanted(t) { return targets().indexOf(langOf(t)) >= 0; }   // 纯符号 langOf='' → 不在 targets → false
+  // 设置开关读取:rc-settings 写 localStorage('0'=关,默认开)。扩展环境经 settings-sync 桥全站一致;
+  // HTML 阅读器代理页无该桥,per-origin 生效。读失败(隐私模式等)按默认开。
+  function cfgOn(k) { try { return localStorage.getItem(k) !== '0'; } catch (e) { return true; } }
+  var _ric = window.requestIdleCallback ? function (f) { requestIdleCallback(f, { timeout: 800 }); } : function (f) { setTimeout(f, 1); };
+  var _raf = window.requestAnimationFrame ? function (f) { requestAnimationFrame(f); } : function (f) { setTimeout(f, 16); };
+  var HOT_PENDING = Object.create(null);
+
+  function prefetchHot(items, els) {
+    if (!cfgOn('eph-web-pretr')) return;   // 设置开关:未掌握句自动预翻译(默认开;⚙「阅读」tab 可关)
+    // 后台预热永远固定 Google：用户选择 AI 不等于授权每个新网页自动烧 AI 配额。
+    preload(GOOGLE_NS).then(function (googleCache) {
+      var todo = [];
+      (items || []).forEach(function (m) {
+        var t = sourceText(els[m.i]);
+        if (m.hot && t && !googleCache[t] && !HOT_PENDING[t] && todo.indexOf(t) < 0) todo.push(t);
+      });
+      if (!todo.length) return;
+      var F = window.__rcRawFetch || window.fetch;
+      var req = F('/pdf/api/web-translate', {
+        method:'POST', headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({texts:todo,backend:'google'})
+      }).then(function (r) { return r.json(); });
+      todo.forEach(function (t, i) {
+        var one = req.then(function (d) {
+          var zh = d && d.zh && d.zh[i] || '';
+          if (zh) googleCache[t] = zh;
+          return zh;
+        }, function () { return ''; });
+        HOT_PENDING[t] = one;
+        var clean = function () { if (HOT_PENDING[t] === one) delete HOT_PENDING[t]; };
+        one.then(clean, clean);
+      });
+    });
+  }
+
+  function showHotTranslation(el, button) {
+    var text = sourceText(el);
+    var hit = cacheFor(GOOGLE_NS)[text];
+    if (hit) {
+      attach(el, hit);                 // 预热命中：同一点击任务内直接显示，不再等 flush
+      el.__rcQ = 0; el.__rcForce = 0;
+      return;
+    }
+    loadingSlot(el);                   // 插槽与按钮撤下在同一写阶段，只发生一次结构变化
+    if (button && button.isConnected) button.remove();
+    el.classList.remove('rc-vocab-hot');
+    var queuedAt = PEND.indexOf(el);
+    if (queuedAt >= 0) {                // 自动翻译还没发出：提升为用户优先的 Google 请求
+      PEND.splice(queuedAt, 1);
+      el.__rcQ = 0;
+    } else if (el.__rcQ) {              // 自动翻译已经在途：复用它的唯一 slot，禁止再开第二请求
+      el.__rcForce = 1;
+      return;
+    }
+    var pending = HOT_PENDING[text];
+    if (pending) {
+      el.__rcQ = 1; el.__rcForce = 1;
+      pending.then(function (zh) {
+        if (!el.isConnected) return;
+        if (zh) {
+          attach(el, zh, el.__rcPh);
+          el.__rcPh = null; el.__rcQ = 0; el.__rcForce = 0; report();
+          return;
+        }
+        el.__rcQ = 0;                  // 预热失败：复用同一 slot 走一次 Google 显式请求
+        enqueue(el, true);
+      });
+      return;
+    }
+    el.__rcQ = 0; el[DONE] = 0;
+    enqueue(el, true);
+  }
+
+  function commitTranslationBatch(batch, response, seq, done) {
+    var at = 0;
+    function frame() {
+      var end = Math.min(at + 6, batch.length);   // 译文也是 DOM 块；分帧写，避免整批同时重排
+      for (; at < end; at++) {
+        var e = batch[at], ph = e.__rcPh;
+        // 期间被关掉/换样式 → 丢弃;但**用户手点的单段**不受全局开关影响
+        if (seq !== ST.seq || (!ST.on && !e.__rcForce)) {
+          if (ph) ph.remove();
+          e.__rcPh = null; e.__rcQ = 0; e.__rcForce = 0; continue;
+        }
+        var zh = (response && response.zh && response.zh[at]) || '';
+        if (zh) attach(e, zh, ph);
+        else if (ph) ph.remove();
+        e.__rcPh = null; e.__rcQ = 0; e.__rcForce = 0;
+      }
+      if (at < batch.length) { _raf(frame); return; }
+      if (done) done();
+    }
+    _raf(frame);
+  }
+
+  function commitVocabItems(items, els, reqs, done) {
+    var at = 0;
+    function frame() {
+      var end = Math.min(at + 12, items.length);   // 每帧最多 12 句，避免一次回包形成长任务
+      for (; at < end; at++) {
+        var m = items[at], el = els[m.i];
+        if (!el || !el.isConnected || el.__rcVocabReq !== reqs[m.i]) continue;
+        underlineWords(el, m.occurrences || []);
+        var oldBtn = el.querySelector('.rc-vocab-btn');
+        if (!m.hot) {
+          if (oldBtn) oldBtn.remove();
+          el.classList.remove('rc-vocab-hot');
+          continue;
+        }
+        if (el[DONE]) continue;
         el.classList.add('rc-vocab-hot');
-        var b = document.createElement('span');
+        if (oldBtn) {
+          oldBtn.textContent = '译 ' + m.count;
+          oldBtn.title = '这句有 ' + m.count + ' 个未掌握词:' + (m.words || []).join('、') + '\n点一下显示已预翻译的句子';
+          continue;
+        }
+        var b = document.createElement('button'); b.type = 'button';
         b.className = 'rc-vocab-btn';
         b.textContent = '译 ' + m.count;
-        b.title = '这段有 ' + m.count + ' 个未掌握词:' + (m.words || []).join('、') + '\n点一下翻译这一段';
+        b.title = '这句有 ' + m.count + ' 个未掌握词:' + (m.words || []).join('、') + '\n点一下显示已预翻译的句子';
         b.onclick = function (ev) {
-          ev.stopPropagation(); ev.preventDefault();
-          b.remove(); el.classList.remove('rc-vocab-hot');
-          el.__rcQ = 0; el[DONE] = 0;
-          enqueue(el, true);
-          clearTimeout(PENDT); PENDT = setTimeout(flush, 60);   // 手点要即时,别等攒批
+          ev.stopImmediatePropagation(); ev.stopPropagation(); ev.preventDefault();
+          showHotTranslation(this.parentElement, this);
         };
         el.appendChild(b);
-      });
-    }).catch(function () {});
+      }
+      if (at < items.length) { _raf(frame); return; }
+      prefetchHot(items, els);
+      if (done) done();
+    }
+    _raf(frame);
+  }
+
+  function scanVocab(list) {
+    var els = list.filter(function (e) { return !e.__rcVocab; });
+    if (!els.length) return Promise.resolve();
+    var reqs = els.map(function (e) {
+      e.__rcVocab = 1;
+      e.__rcVocabReq = (e.__rcVocabReq || 0) + 1;
+      return e.__rcVocabReq;
+    });
+    var F = window.__rcRawFetch || window.fetch;
+    return F('/pdf/api/web-vocab', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ texts: els.map(sourceText), threshold: 3, min_words: 10 })
+    }).then(function (r) { return r.json(); }).then(function (d) {
+      var items = d.items || (d.marks || []).map(function (m) { m.hot = true; return m; });
+      return new Promise(function (resolve) { commitVocabItems(items, els, reqs, resolve); });
+    }).catch(function () {
+      els.forEach(function (el, i) { if (el.__rcVocabReq === reqs[i]) el.__rcVocab = 0; });
+      setTimeout(function () { observeVocabUnits(els); }, 1500);
+    });
   }
 
   function report() {
     try {
       var n = document.querySelectorAll('.' + MARK + ':not(.rc-tr-load)').length;
-      parent.postMessage({ __rcweb: 'trstat', n: n, on: ST.on, style: ST.style }, '*');
+      parent.postMessage({
+        __rcweb: 'trstat', n: n, on: ST.on, style: ST.style, backend: ST.backend,
+        mode: ST.modeResolved, estimatedUnits: ST.estimatedUnits
+      }, '*');
     } catch (e) {}
   }
 
@@ -268,60 +940,227 @@
           IO.unobserve(en.target);
           if (ST.on) enqueue(en.target);
         });
-      }, { rootMargin: '80px 0px', threshold: 0.01 });
+      }, { rootMargin: '2400px 0px', threshold: 0.01 });
     }
     list.forEach(function (el) { try { IO.observe(el); } catch (e) {} });
   }
 
-  /** 生词提示独立于翻译开关:进页面就扫(它不花翻译额度,只查本地词库)。 */
+  // ── 正文 discovery → 提前视口切句 → 生词 FIFO。滚动只由浏览器 IO 唤醒，
+  // 不再 700ms 后反过来全文 collect/getBoundingClientRect/改 DOM。──
+  var VOCAB_ROOT_MARGIN = '3200px 0px';
+  var VBLOCK_IO = null, VUNIT_IO = null;
+  var VBLOCK_Q = [], VBLOCK_IDLE = false;
+  var VSCAN_Q = [], VSCAN_TIMER = null, VSCAN_BUSY = false;
+  var _vric = window.requestIdleCallback ?
+    function (f) { requestIdleCallback(f, { timeout: 280 }); } :
+    function (f) { setTimeout(function () { f(null); }, 1); };
+
+  function ensureVocabBlockObserver() {
+    if (VBLOCK_IO) return VBLOCK_IO;
+    VBLOCK_IO = new IntersectionObserver(function (entries) {
+      entries.forEach(function (entry) {
+        if (!entry.isIntersecting) return;
+        VBLOCK_IO.unobserve(entry.target);
+        VBLOCK_Q.push(entry.target);
+      });
+      scheduleVocabBlockPrepare();
+    }, { rootMargin: '3200px 0px', threshold: 0.01 });
+    return VBLOCK_IO;
+  }
+
+  function ensureVocabUnitObserver() {
+    if (VUNIT_IO) return VUNIT_IO;
+    VUNIT_IO = new IntersectionObserver(function (entries) {
+      var ready = [];
+      entries.forEach(function (entry) {
+        if (!entry.isIntersecting) return;
+        VUNIT_IO.unobserve(entry.target);
+        ready.push(entry.target);
+      });
+      queueVocabUnits(ready);
+    }, { rootMargin: '3200px 0px', threshold: 0.01 });
+    return VUNIT_IO;
+  }
+
+  function observeVocabUnits(list) {
+    if (!cfgOn('eph-vocab-underline')) return;
+    var pending = (list || []).filter(function (el) {
+      return el && el.isConnected && !el.__rcVocab && !el.__rcVocabQueued;
+    });
+    if (!pending.length) return;
+    var io = ensureVocabUnitObserver();
+    pending.forEach(function (el) { try { io.observe(el); } catch (e) {} });
+  }
+
+  function scheduleVocabBlockPrepare() {
+    if (VBLOCK_IDLE || !VBLOCK_Q.length) return;
+    VBLOCK_IDLE = true;
+    _vric(function (deadline) {
+      VBLOCK_IDLE = false;
+      var made = 0, started = Date.now();
+      while (VBLOCK_Q.length && made < 4) {
+        if (made && deadline && !deadline.didTimeout && deadline.timeRemaining() <= 3) break;
+        if (made && !deadline && Date.now() - started >= 7) break;
+        var block = VBLOCK_Q.shift();
+        if (!block || !block.isConnected) continue;
+        var units = sentenceUnits([block]);
+        observeVocabUnits(units);
+        if (ST.on) observe(units);
+        made++;
+      }
+      if (VBLOCK_Q.length) scheduleVocabBlockPrepare();
+    });
+  }
+
+  function queueVocabUnits(list) {
+    var pending = (list || []).filter(function (el) {
+      return el && el.isConnected && !el.__rcVocab && !el.__rcVocabQueued;
+    });
+    pending.forEach(function (el) { el.__rcVocabQueued = 1; VSCAN_Q.push(el); });
+    scheduleVocabDrain();
+  }
+
+  function scheduleVocabDrain() {
+    if (VSCAN_TIMER || VSCAN_BUSY || !VSCAN_Q.length) return;
+    VSCAN_TIMER = setTimeout(function () { VSCAN_TIMER = null; drainVocabQueue(); }, 24);
+  }
+
+  function drainVocabQueue() {
+    if (VSCAN_BUSY) return;
+    // 先剔除已经处理/失联项，再切批；不能让已扫过的前 80 句永久挤占 slice。
+    var pending = VSCAN_Q.filter(function (el) {
+      return el && el.isConnected && !el.__rcVocab;
+    });
+    VSCAN_Q.length = 0;
+    pending.forEach(function (el) { el.__rcVocabQueued = 0; });
+    var batch = pending.slice(0, 48), rest = pending.slice(48);
+    rest.forEach(function (el) { el.__rcVocabQueued = 1; VSCAN_Q.push(el); });
+    if (!batch.length) { scheduleVocabDrain(); return; }
+    VSCAN_BUSY = true;
+    scanVocab(batch).then(function () {
+      VSCAN_BUSY = false; scheduleVocabDrain();
+    }, function () {
+      VSCAN_BUSY = false; scheduleVocabDrain();
+    });
+  }
+
+  function _discoveryKind(el) {
+    if (!el || el.nodeType !== 1) return -1;
+    if (SKIP[el.tagName] || (el.classList && (
+      el.classList.contains(MARK) || el.classList.contains('rc-vocab-unit') ||
+      el.classList.contains('rc-vocab-btn') || el.classList.contains('rc-vocab-word')
+    ))) return -1;
+    try { if (el.matches(CHROME)) return -1; } catch (e) {}
+    if (DIRECT[el.tagName] && !hasBlockChild(el)) return 1;
+    if (!DIRECT[el.tagName] && !INLINE[el.tagName] && !hasBlockChild(el) && el.children.length < 12) return 1;
+    return 0;
+  }
+
+  function scheduleBlockDiscovery(root) {
+    if (!root || !root.isConnected) return;
+    if (root.__rcVocabDiscovery) {
+      if (root === document.body && root.__rcVocabDiscoveryDone) finishInitialDiscovery();
+      return;
+    }
+    root.__rcVocabDiscovery = 1;
+    var stack = [root];
+    function slice(deadline) {
+      var seen = 0, accepted = 0, started = Date.now();
+      var maxSeen = deadline && deadline.didTimeout ? 12 : 240;
+      while (stack.length && seen < maxSeen && accepted < 12) {
+        if (seen && deadline && !deadline.didTimeout && deadline.timeRemaining() <= 3) break;
+        if (seen && !deadline && Date.now() - started >= 7) break;
+        var el = stack.pop(), kind = _discoveryKind(el);
+        seen++;
+        if (kind < 0) continue;
+        for (var ci = el.children.length - 1; ci >= 0; ci--) stack.push(el.children[ci]);
+        if (kind !== 1 || !usable(el) || el.__rcVocabBlockObserved) continue;
+        countTranslationBlock(el);
+        el.__rcVocabBlockObserved = 1;
+        try { ensureVocabBlockObserver().observe(el); accepted++; } catch (e) {}
+      }
+      if (stack.length) {
+        _vric(slice);
+      } else {
+        root.__rcVocabDiscoveryDone = 1;
+        if (root === document.body) finishInitialDiscovery();
+      }
+    }
+    _vric(slice);
+  }
+
+  /** 生词提示独立于翻译开关:进页面只建空闲 discovery，不做同步全文布局。 */
   function vocabPass() {
     css();
-    preload();          // 顺手预热整页译文缓存:等下点「译 N」就能零请求直出
-    var all = collect(document.body);
-    var vis = all.filter(function (e) {
-      var r = e.getBoundingClientRect();
-      return r.top < innerHeight * 2.5 && r.bottom > -200;
-    });
-    scanVocab(vis.slice(0, 80));
+    preload(GOOGLE_NS); // 生词后台预热固定 Google；等下点「译 N」可零请求直出
+    watchDynamic();
+    observeVocabUnits([].slice.call(document.querySelectorAll('.rc-vocab-unit')));
+    scheduleBlockDiscovery(document.body);
   }
   window.__rcVocabPass = vocabPass;
 
   var MO = null;
   function watchDynamic() {
     if (MO) return;
+    // ⚠ 曾在 MO 回调里同步 collect+切句重写 DOM = "阻塞页面自然加载"主嫌:流式插入(无限滚/懒加载)的
+    // 页面每批插入都被打断做重活,重写又触发新 mutation。改为回调只入队,防抖后空闲期批处理。
+    var q = [], qt = null;
     MO = new MutationObserver(function (ms) {
-      if (!ST.on) return;
-      var add = [];
+      if (!ST.on && !cfgOn('eph-vocab-underline')) return;
       ms.forEach(function (m) {
         [].forEach.call(m.addedNodes || [], function (n) {
           if (!n || n.nodeType !== 1) return;
-          if (n.classList && n.classList.contains(MARK)) return;   // 别把自己的译文当新内容
-          add = add.concat(collect(n));
+          if (n.classList && (n.classList.contains(MARK) || n.classList.contains('rc-vocab-unit') ||
+              n.classList.contains('rc-vocab-btn') || n.classList.contains('rc-vocab-word'))) return;
+          q.push(n);
         });
       });
-      if (add.length) observe(add);
+      if (!q.length || qt) return;
+      qt = setTimeout(function () {
+        qt = null;
+        var batch = q.splice(0);
+        batch.forEach(function (n) { if (n.isConnected) scheduleBlockDiscovery(n); });
+      }, 120);
     });
     MO.observe(document.body, { childList: true, subtree: true });
   }
 
-  // 整页译文缓存(服务端 30 天)。开译先把这页译过的一次性取回来,命中的段落**不再发请求**,
-  // 重访这页几乎瞬时出双语。miss 的才走批量翻译,翻完服务端顺手并进这份映射。
-  var CACHE = null, _pre = null;
-  function preload() {
-    if (CACHE) return Promise.resolve(CACHE);
-    if (_pre) return _pre;      // 去重:start 和三次 vocabPass 会并发调它(实测发了 3 次)
-    var F = window.__rcRawFetch || window.fetch;
-    return (_pre = F('/pdf/api/web-trcache?url=' + encodeURIComponent(location.__realBase || location.href))
-      .then(function (r) { return r.json(); })
-      .then(function (d) { CACHE = (d && d.items) || {}; return CACHE; })
-      .catch(function () { CACHE = {}; return CACHE; }));
+  // 整页译文缓存只存在扩展的账户分区 IndexedDB。页面 URL 由 background 从
+  // sender.tab 取得，不进入消息参数、更不会发到服务端；无扩展宿主直接视为冷缓存。
+  function preload(cacheNamespace) {
+    cacheNamespace = String(cacheNamespace || GOOGLE_NS);
+    if (CACHE_READY[cacheNamespace]) return Promise.resolve(cacheFor(cacheNamespace));
+    if (PRELOADS[cacheNamespace]) return PRELOADS[cacheNamespace];
+    if (typeof window.__bwTranslationCacheGet !== 'function') {
+      CACHE_READY[cacheNamespace] = true;
+      return Promise.resolve(cacheFor(cacheNamespace));
+    }
+    PRELOADS[cacheNamespace] = window.__bwTranslationCacheGet(cacheNamespace)
+      .then(function (d) {
+        CACHES[cacheNamespace] = Object.assign({}, (d && d.items) || {}, cacheFor(cacheNamespace));
+        CACHE_READY[cacheNamespace] = true;
+        return CACHES[cacheNamespace];
+      })
+      .catch(function () { CACHE_READY[cacheNamespace] = true; return cacheFor(cacheNamespace); })
+      .then(function (cache) { delete PRELOADS[cacheNamespace]; return cache; });
+    return PRELOADS[cacheNamespace];
   }
 
   function start() {
     css();
+    // 显示方式:统一存 rcWebTrStyle(web-adapter 代理外壳同键;设置面板改后经 postMessage 即时重渲,此处兜首次)
+    try { var _s = localStorage.getItem('rcWebTrStyle'); if (_s === 'para' || _s === 'small' || _s === 'replace') ST.style = _s; } catch (e) {}
     ST.on = true;
-    preload().then(function () {
-      observe(collect(document.body));
+    ST.profileReady = false;
+    ensureBackendProfile().then(function () {
+      // 自动选模与生词扫描共用同一个有预算的初始 discovery。
+      scheduleBlockDiscovery(document.body);
+      return resolveTranslationMode();
+    }).then(function () { return preload(ST.cacheNamespace); }).then(function () {
+      // 已切好的句子直接提前观察；尚未切的正文交给同一个有预算 discovery。
+      // 因而开翻译不会再同步 collect 全文，也不会在用户滚动中临时重写整屏 DOM。
+      observe([].slice.call(document.querySelectorAll('.rc-vocab-unit')));
+      scheduleBlockDiscovery(document.body);
       watchDynamic();
       report();
     });
@@ -338,10 +1177,8 @@
       w.remove();
       p.classList.remove('rc-tr-peek');
     });
-    [].forEach.call(document.querySelectorAll('.rc-vocab-btn'), function (b) { b.remove(); });
-    [].forEach.call(document.querySelectorAll('.rc-vocab-hot'), function (b) {
-      b.classList.remove('rc-vocab-hot'); b.__rcVocab = 0;
-    });
+    [].forEach.call(document.querySelectorAll('.rc-vocab-unit.rc-tr-src-hidden'), function (u) { u.classList.remove('rc-tr-src-hidden'); });
+    // 生词下划线/句子预翻译提示独立于「译页」开关，关闭整页翻译时必须保留。
     [].forEach.call(document.querySelectorAll('*'), function (e) {
       if (e[DONE]) { e[DONE] = 0; e.__rcQ = 0; }
     });
@@ -350,8 +1187,33 @@
   }
 
   window.addEventListener('message', function (e) {
+    if (e.source !== parent) return;
     var d = e.data || {};
     if (d.__rcweb !== 'translate') return;
+    if (d.backend && (d.backend === 'google' || d.backend === 'ai') && d.backend !== ST.backend) {
+      var wasBackendOn = ST.on;
+      if (wasBackendOn) stop();
+      ST.backend = d.backend;
+      ST.cacheNamespace = d.backend === 'ai' ? '' : GOOGLE_NS;
+      ST.cacheNamespaces = {};
+      ST.sessionSupported = false;
+      ST.profileReady = false;
+      ST.glossary = {};
+      ST.degradeNotice = '';
+      resetTranslationModeDecision();
+      if (wasBackendOn) start();
+      return;
+    }
+    if ((d.mode === 'auto' || d.mode === 'stateless' || d.mode === 'session') ||
+        (d.threshold != null && isFinite(Number(d.threshold)))) {
+      var wasModeOn = ST.on;
+      if (wasModeOn) stop();
+      resetTranslationModeDecision();
+      ST.glossary = {};
+      ST.degradeNotice = '';
+      if (wasModeOn) start();
+      return;
+    }
     if (d.style && d.style !== ST.style) {
       var was = ST.on;
       if (was) stop();
@@ -367,16 +1229,21 @@
   // 生词提示不等用户点「译」——页面稳定后自动跑一遍(纯本地词库查询,不烧翻译额度)。
   // 这与 PDF 阅读器一致:那边打开一页就把"未掌握词多的句子"框出来,不需要先开译页。
   function autoVocab() {
-    try { vocabPass(); } catch (e) {}
+    if (!cfgOn('eph-vocab-underline')) return;   // 设置开关:生词下划线(默认开)——关掉即整条扫描链(下划线+译N+预翻译)不跑
+    try { vocabPass(); } catch (e) {}             // 这里只启动有预算 discovery，本身不再做全文工作
   }
   // ⚠ 别挂在 load 上:代理下重站的子资源要排队(还有舱壁限流),load 可能很久不来甚至不来
   //   —— 实测维基页 8 秒内一次都没扫(手动调 vocabPass() 立刻出 4 段)。
   //   改成定时多跑几次:__rcVocab 标记天然幂等,重复调用零副作用。
   [1200, 3000, 6000].forEach(function (ms) { setTimeout(autoVocab, ms); });
   window.addEventListener('load', function () { setTimeout(autoVocab, 500); });
-  addEventListener('scroll', (function () {   // 滚动到新内容时补扫(节流)
+  addEventListener('scroll', (function () {   // 滚动期间暂停呼吸动画，停止后恢复；扫描由提前 IO 独立驱动
     var t = null;
-    return function () { if (t) return; t = setTimeout(function () { t = null; autoVocab(); }, 700); };
+    return function () {
+      document.documentElement.classList.add('rc-vocab-scrolling');
+      clearTimeout(t);
+      t = setTimeout(function () { document.documentElement.classList.remove('rc-vocab-scrolling'); }, 140);
+    };
   })(), { passive: true });
 
   window.__rcTr = { start: start, stop: stop, state: ST, vocab: vocabPass };

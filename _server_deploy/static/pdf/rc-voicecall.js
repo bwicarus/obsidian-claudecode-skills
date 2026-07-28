@@ -13,10 +13,83 @@
 
   var ws = null, ac = null, capNode = null, micStream = null, playT = 0, playing = [];
   var box = null, f32buf = new Float32Array(0), curAText = '';
+  var _computerVoiceUnsub = null;
+  // 宿主只负责解析服务地址；语音状态机/侧栏/工具循环仍只有本文件一份。
+  // PWA 是同源所以走 fallback，扩展在任意站点由 WebAdapter 宿主把 /voice-rt 指回阅读器服务。
+  function _wsUrl(path) {
+    try {
+      if (typeof window.__bwReaderWsUrl === 'function') return window.__bwReaderWsUrl(path);
+    } catch (e) {}
+    return (location.protocol === 'https:' ? 'wss://' : 'ws://') + location.host + path;
+  }
+  // 状态机只依赖浏览器 WebSocket 接口，不关心连接由谁建立：
+  // · PWA 没有 hook，继续原生同源 WebSocket；
+  // · 扩展普通网页受宿主页 CSP 限制，由 facade 提供同接口、后台代建连接。
+  // 这样语音/侧栏仍只有本文件一份，扩展没有第二套通话实现。
+  function _openWs(path) {
+    // hook 存在就让错误显式冒泡；不能静默降级成宿主页直连，否则既重新撞 CSP，
+    // 也会绕过扩展后台的账户/路由围栏。
+    if (typeof window.__bwReaderOpenWebSocket === 'function') {
+      return window.__bwReaderOpenWebSocket(path);
+    }
+    return new WebSocket(_wsUrl(path));
+  }
   // mode:'agent'(默认,耳=豆包ASR/嘴=豆包TTS/大脑=侧栏助手完整管线) | 's2s'(豆包端到端,旧路保留)
   var mode = 'agent';
   var vt = { sent: 0, tail: '', sid: 0, pref: '' };   // 语音 tap 状态:已消费长度 / 未成句尾巴 / 句序号 / 上次 full(前缀判定轮次替换)
   var pendingUtter = null;                   // 助手忙时到达的新话(覆盖式排队,回答完自动发)
+  var _reviewVoiceHint = '复习模式暂不启动实时语音通话；普通听写和朗读仍可使用';
+  function _assistantInReview() {
+    try {
+      return !!(window.RC && RC.assistant && RC.assistant.getMode &&
+        RC.assistant.getMode() === 'review');
+    } catch (e) { return false; }
+  }
+  function _voiceReviewNotice() {
+    try {
+      if (window.RC && RC.toast) RC.toast(_reviewVoiceHint);
+    } catch (e) {}
+  }
+  function _rememberVoiceTitle(el) {
+    if (!el || !el.dataset || el.dataset.vcNormalTitle != null) return;
+    el.dataset.vcNormalTitle = el.title || '';
+    el.dataset.vcNormalAriaLabel = el.getAttribute('aria-label') || '';
+  }
+  // 电话按钮是软禁用：保留键盘焦点和点击反馈，但绝不进入拨号逻辑。
+  // 麦克风仍可单击走系统听写，只把长按连续 ASR 标成不可用。
+  function _syncReviewVoiceUi() {
+    var blocked = _assistantInReview();
+    ['asst-call', 'vc-top-call'].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (!el) return;
+      _rememberVoiceTitle(el);
+      el.classList.toggle('vc-review-disabled', blocked);
+      el.setAttribute('aria-disabled', blocked ? 'true' : 'false');
+      el.title = blocked ? _reviewVoiceHint : (el.dataset.vcNormalTitle || '');
+      var normalLabel = el.dataset.vcNormalAriaLabel || el.dataset.vcNormalTitle || '实时语音通话';
+      el.setAttribute('aria-label', blocked ? _reviewVoiceHint : normalLabel);
+    });
+    ['asst-mic', 'vc-top-mic'].forEach(function (id) {
+      var el = document.getElementById(id);
+      if (!el) return;
+      _rememberVoiceTitle(el);
+      el.dataset.vcLongpress = blocked ? 'disabled-in-review' : 'enabled';
+      el.title = blocked
+        ? '语音输入：单击仍为系统听写；复习模式不启用长按连续语音'
+        : (el.dataset.vcNormalTitle || '');
+      el.setAttribute(
+        'aria-description',
+        blocked ? '单击系统听写可用；长按连续语音在复习模式不可用' : ''
+      );
+    });
+    return blocked;
+  }
+  function _reviewVoiceGate(notify) {
+    if (!_assistantInReview()) return false;
+    _syncReviewVoiceUi();
+    if (notify !== false) _voiceReviewNotice();
+    return true;
+  }
 
   // ── ⑧ 通话生命周期独立于侧栏/网络波动 ──
   // 侧栏关闭(rc-sidedrawer.close)只是 CSS 滑出、DOM 不销毁,本就不碰通话;真正断话的是网络波动/
@@ -37,6 +110,10 @@
   }
   function _releaseWL() { try { if (_wakeLock) { _wakeLock.release(); _wakeLock = null; } } catch (e) {} }
   function _tryStart() {
+    if (_reviewVoiceGate(false)) {
+      _userHung = true; _reconnPend = false;
+      return;
+    }
     // 一次重连尝试 = start + watchdog:start 可能整个卡死(iOS 非手势 resume 永远 pending 等)
     // → .then 永不触发,没有 watchdog 就永远停在"重连中…"。12s 没建成 ws 视为卡死,推进下一轮
     // (_scheduleReconnect→teardown 会 ++_gen,把挂着的旧 start 判死,不会复活)。
@@ -50,6 +127,10 @@
     }, 12000);
   }
   function _scheduleReconnect() {
+    if (_reviewVoiceGate(false)) {
+      _userHung = true; _reconnPend = false;
+      return;
+    }
     if (_reconnT || _reconnPend) return;
     teardown(false); _userHung = false;      // teardown 置回 true → 恢复"通话意外中断"态
     _reconnN++;
@@ -169,6 +250,27 @@
       '@keyframes vcClipBreath2{0%,100%{box-shadow:0 0 0 0 rgba(123,108,255,.45)}50%{box-shadow:0 0 0 6px rgba(123,108,255,0)}}' +
       '.vc-card-hd .vc-card-x{margin-left:6px}' +
       '.vc-card-bd{overflow-y:auto;white-space:pre-wrap;word-break:break-word;-webkit-overflow-scrolling:touch;min-height:0}' +
+      // 双击/触屏双点进入页面 placement 尺寸调整：只改变 full 方块态；
+      // dot/min 保留固定语义尺寸。manipulation 保留滚动/缩放，但避免浏览器
+      // 把触屏双点优先解释为页面缩放。
+      // 尺寸按 cid 保存，但只投影到页面上的副本；侧栏/收藏/复习永远不跟随。
+      '.vc-card.vc-user-sized:not(.vc-dot):not(.vc-min){box-sizing:border-box;width:var(--vc-user-w)!important;height:var(--vc-user-h)!important;max-height:min(calc(100vh - 24px),var(--vc-user-h))!important;min-width:180px;min-height:100px}' +
+      '.vc-card.vc-user-sized:not(.vc-dot):not(.vc-min)>.vc-card-bd{flex:1 1 auto;min-height:0}' +
+      '.vc-card.vc-page-placement:not(.vc-dot):not(.vc-min)>.vc-card-bd{touch-action:manipulation}' +
+      // 横向 flex track 的 cross-size 未确定时，子项 height:100% 会退回内容高度，评分栏
+      // 因而落到页面卡裁剪区外。页面 placement 用可收缩 grid row 明确分配卡面和圆点高度，
+      // slide 再沿交叉轴伸展；只有 fc-review-scroll 承担正文纵向滚动。
+      '.vc-card.vc-page-placement:not(.vc-dot):not(.vc-min)>.vc-card-bd.fc-bare{display:flex;flex-direction:column;overflow:hidden}' +
+      '.vc-card.vc-page-placement:not(.vc-dot):not(.vc-min)>.vc-card-bd.fc-bare>.fc-wrap{display:grid;grid-template-rows:minmax(0,1fr) auto;flex:1 1 auto;min-height:0}' +
+      '.vc-card.vc-page-placement:not(.vc-dot):not(.vc-min)>.vc-card-bd.fc-bare>.fc-wrap>.fc-track{grid-row:1;min-height:0;height:auto;align-items:stretch;overflow-y:hidden}' +
+      '.vc-card.vc-page-placement:not(.vc-dot):not(.vc-min)>.vc-card-bd.fc-bare>.fc-wrap>.fc-track>.fc-slide{height:auto;min-height:0;max-height:100%;align-self:stretch;overflow:hidden}' +
+      '.vc-card.vc-page-placement:not(.vc-dot):not(.vc-min)>.vc-card-bd.fc-bare>.fc-wrap>.fc-track>.fc-slide>.fc-card{box-sizing:border-box;height:100%;max-height:100%;overflow:hidden}' +
+      '.vc-card.vc-page-placement:not(.vc-dot):not(.vc-min)>.vc-card-bd.fc-bare>.fc-wrap>.fc-dots{grid-row:2}' +
+      '.vc-card-rs{position:absolute;right:5px;bottom:5px;width:25px;height:25px;display:none;z-index:24;cursor:nwse-resize;touch-action:none;padding:0;border-radius:9px;border:1px solid rgba(157,140,255,.66);background:rgba(24,28,42,.78);-webkit-backdrop-filter:blur(12px);backdrop-filter:blur(12px);box-shadow:0 5px 16px rgba(0,0,0,.34);color:#d8d1ff;-webkit-tap-highlight-color:transparent}' +
+      '.vc-card-rs::after{content:"";position:absolute;right:6px;bottom:6px;width:8px;height:8px;border-right:2px solid currentColor;border-bottom:2px solid currentColor;border-radius:1px}' +
+      '.vc-card.vc-resize-armed:not(.vc-dot):not(.vc-min)>.vc-card-rs{display:block;animation:vcRsIn .18s cubic-bezier(.2,.85,.3,1)}' +
+      '.vc-card.vc-resizing{transition:none!important;will-change:width,height;box-shadow:0 18px 46px rgba(0,0,0,.52),0 0 0 1px rgba(157,140,255,.68)!important}' +
+      '@keyframes vcRsIn{from{opacity:0;transform:scale(.65)}to{opacity:1;transform:none}}' +
       '.vc-card.vc-lift{box-shadow:0 22px 60px rgba(0,0,0,.55),0 0 0 0.5px rgba(255,255,255,.2);cursor:grabbing}' +
       '.vc-card-sum{display:none;font-size:12.5px;color:#aab8d4;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
       '.vc-card.vc-min .vc-card-bd{display:none}.vc-card.vc-min .vc-card-sum{display:block}' +
@@ -283,6 +385,8 @@
       '.vc-md-t em{font-style:normal;color:#7f92b8;font-weight:400}' +
       '.vc-md-r{display:flex;gap:6px}' +
       '.vc-md-r select{flex:1;min-width:0;padding:7px 8px;font-size:12px;font-weight:600;cursor:pointer;\n        border-radius:10px;border:0.5px solid rgba(255,255,255,.14);background:rgba(255,255,255,.05);\n        color:#c6d2e8;-webkit-appearance:none;appearance:none;text-overflow:ellipsis}' +
+      '.vc-md-fast{flex:none;border-radius:10px;border:.5px solid rgba(255,255,255,.14);background:rgba(255,255,255,.05);color:#8fa1c4;padding:7px 9px;font-size:11px;font-weight:650;cursor:pointer}' +
+      '.vc-md-fast.on{background:rgba(39,165,104,.20);border-color:rgba(70,220,143,.55);color:#9af0c7}.vc-md-fast:disabled{opacity:.38;cursor:not-allowed}' +
       '.vc-md-st{font-size:10.5px;color:#7f92b8;margin-top:5px}' +
       '.vc-fl{margin-bottom:12px;padding-bottom:11px;border-bottom:0.5px solid rgba(255,255,255,.1)}' +
       '.vc-fl-t{font-size:11.5px;color:#9db0d4;font-weight:600;margin-bottom:7px}' +
@@ -348,8 +452,15 @@
       '.vc-card.vc-inflow .vc-card-hd{padding-left:12px}' +
       '.vc-card.vc-inflow.vc-min{padding:0 10px 0 0}' +
       '.vc-card.vc-inflow:not(.vc-min) .vc-card-bd{padding-left:12px}' +
+      '.vc-card.vc-inflow.vc-dot{width:40px!important;height:40px;padding:0;margin:8px 0}' +   // 侧栏圆点态:40×40 小圆(压过 vc-inflow 的 width:100%)
       '@keyframes vcPinPop{0%{filter:brightness(1)}40%{filter:brightness(1.4)}100%{filter:brightness(1)}}' +   // ⚠不用 transform:会覆盖拖动后的内联 translate 导致瞬移
       '.vc-pin-pop{animation:vcPinPop .4s ease}' +
+      '@keyframes vcDragCharge{0%{outline-color:rgba(125,211,252,0);outline-offset:6px}100%{outline-color:rgba(125,211,252,.82);outline-offset:2px}}' +
+      '.vc-drag-charging{outline:1.5px solid transparent;animation:vcDragCharge .42s linear both}' +
+      '.vc-drag-ready{outline:2px solid rgba(125,211,252,.92);outline-offset:2px}' +
+      '.vc-drag-charging .vc-card-hd,.vc-drag-charging.vc-card-hd,.vc-drag-charging .vc-card-dot,.vc-drag-charging.vc-card-dot{cursor:wait!important}' +
+      '.vc-drag-ready .vc-card-hd,.vc-drag-ready.vc-card-hd,.vc-drag-ready .vc-card-dot,.vc-drag-ready.vc-card-dot{cursor:grabbing!important}' +
+      '@media (prefers-reduced-motion:reduce){.vc-drag-charging{animation:none;outline-color:rgba(125,211,252,.62);outline-offset:3px}}' +
       '#vc-dock-btn{position:fixed;right:14px;bottom:calc(96px + env(safe-area-inset-bottom,0px));z-index:2147481420;width:40px;height:40px;border-radius:50%;' +
       'border:0.5px solid rgba(255,255,255,.16);background:rgba(40,36,64,.72);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);' +
       'color:#b9a8ff;display:none;align-items:center;justify-content:center;cursor:pointer;box-shadow:0 8px 26px rgba(0,0,0,.4);padding:0}' +
@@ -401,9 +512,10 @@
       '.vc-dk-card.del-mark::after{content:"✕";position:absolute;top:-6px;right:-6px;width:16px;height:16px;border-radius:50%;background:#e0463c;color:#fff;font-size:10px;display:flex;align-items:center;justify-content:center}' +
       '.vc-dkp-txt{color:#aab6cf;font-size:11.5px;line-height:1.45;margin-top:2px;display:-webkit-box;-webkit-line-clamp:2;-webkit-box-orient:vertical;overflow:hidden}' +
       '.vc-dk-empty{color:#7f8aa6;font-size:12px;text-align:center;padding:12px 4px}' +
-      '.vc-drag-ghost{position:fixed;z-index:2147481460;pointer-events:none;opacity:.88;transform:scale(.92);border-radius:14px;overflow:hidden;color:#dde6f5;font-size:12.5px;line-height:1.5;' +
-      'background:rgba(30,32,42,.9);-webkit-backdrop-filter:blur(20px);backdrop-filter:blur(20px);border:0.5px solid rgba(255,255,255,.18);' +
-      'box-shadow:0 18px 50px rgba(0,0,0,.55);padding:10px 12px;max-height:120px}' +
+      '.vc-drag-ghost{position:fixed;left:0;top:0;z-index:2147481460;pointer-events:none;opacity:.92;border-radius:14px;overflow:hidden;color:#dde6f5;font-size:13px;line-height:1.5;' +
+      'background:rgba(30,32,42,.94);border:1px solid rgba(126,171,255,.48);box-shadow:0 18px 50px rgba(0,0,0,.55),0 0 0 2px rgba(126,171,255,.15);' +
+      'padding:10px 12px;max-height:min(280px,60vh);contain:layout paint;will-change:transform;transition:none!important}' +
+      '.vc-drag-ghost *{animation:none!important;transition:none!important}' +
       '.vc-dk-m{font-size:10.5px;color:#6f7d9e;margin-top:3px}' +
       '.vc-fav-b{position:absolute;right:28px;bottom:5px;width:18px;height:18px;border-radius:50%;border:none;cursor:pointer;' +
       'background:rgba(255,255,255,.1);color:#8fa0c2;display:flex;align-items:center;justify-content:center;padding:0}' +
@@ -499,6 +611,7 @@
       // 播报中:蓝色快脉冲(盖过 .on 绿;user 开口打断后自动回绿)
       '#asst-call.speaking{background:#0a84ff;border-color:#0a84ff;color:#fff;animation:vcCallPulse 1s ease-in-out infinite}' +
       '#asst-call.connecting{background:#8a5a00;border-color:#ff9f0a;color:#ffd60a;animation:vcCallPulse .7s ease-in-out infinite}' +
+      '#asst-call.vc-review-disabled,#vc-top-call.vc-review-disabled{opacity:.48;cursor:not-allowed;animation:none!important}' +
       // ASR 连续听(mic 长按开):紫色呼吸,与系统听写的蓝 .on 区分
       '#asst-mic.asr{background:#bf5af2 !important;border-color:#bf5af2 !important;color:#fff !important;animation:vcCallPulse 1.6s ease-in-out infinite}' +
       // 朗读开关播报中:淡蓝呼吸
@@ -668,6 +781,11 @@
     try { if (RC.turnCard && window.__asstVoiceTid) RC.turnCard.idle(window.__asstVoiceTid()); } catch (e) {}
     var c = _chipTake(p);
     if (!c) c = RC.toolChip.create({ tool: p.tool || '', label: p.label || '工具' });   // 没见过 running(缓存命中/补发)→ 现造一个直接收尾
+    // 阶段1(语音工具卡聚合):本轮有 turnCard 容器时,收尾拿到的 chip 也要 silence——_chipStart 已 silence 了
+    //   running 期那张;但 _chipTake 未命中(缓存命中/补发/key 变了)时上面**新建**的这张是非 silence 的,
+    //   若不 silence,下面 done/progress 会画出独立散卡(与容器里的 tool part 重复=用户实测三张散卡)。
+    //   已 silence 的 chip(absorbed=[])跳过。工具**统一** addPart 进 turnCard(下方各分支已接线),对齐文字模式。
+    try { if (RC.turnCard && window.__asstVoiceTid && !c.absorbed) RC.toolChip.silence(c); } catch (e) {}
     if (p.tool) { try { RC.toolChip.retype(c, p.tool); } catch (e) {} }   // 136:done 才拿到真实工具名 → 重判类型(执行类=完成即消失)
     if (p.sub_steps && p.sub_steps.length) { try { RC.toolChip.addSteps(c, p.sub_steps); } catch (e) {} }   // 137:工具内部子步骤 → 并进这张卡的步骤(不另起卡)
     if (p.vision && p.vision.length) { try { RC.toolChip.setVision(c, p.vision); } catch (e) {} }   // 141:真正喂给 AI 的图(see_ink 的笔迹合成图等)
@@ -687,10 +805,19 @@
       var _gid = (_sr.id && /^card_/.test(_sr.id)) ? _sr.id : ('fcg_' + RC.voiceCard.mkCid());   // 统一编号协议:优先服务端全局卡编号(所有宿主/跨会话同一状态);无则本地 gid
       var _stid = window.__asstVoiceTid && window.__asstVoiceTid();
       if (_stid && RC.turnCard) { RC.turnCard.idle(_stid); RC.turnCard.addPart(_stid, { kind: 'cards', cards: _sc, draft: _sdrf, gid: _gid }); }   // 侧栏
-      if (RC.voiceCard && RC.flashcard) {   // 字幕浮层镜像(天气卡壳)+ 长按选中
-        var _fc2 = RC.voiceCard.push(null, '🎴 制卡', false, true, RC.voiceCard.mkCid(), { tool: 'make_anki', type: '#b9a8ff', dot: true, form: 'full', icon: '🎴',
-          mount: function (bd) { if (_sdrf) RC.flashcard.mountDrafts(bd, _sc, { bare: true, gid: _gid }); else RC.flashcard.mountPreview(bd, _sc, { bare: true, gid: _gid }); } });
-        if (_fc2 && _fc2.el) RC.voiceCard.pinBind(_fc2.el, '卡片', function () { return _sc.map(function (x) { return (x.front || x.cloze || '') + (x.back ? ' / ' + x.back : ''); }).join('\n'); });
+      if (RC.flashcard && typeof RC.flashcard.renderEntity === 'function') {   // 字幕镜像也走学习卡唯一组合入口
+        RC.flashcard.renderEntity(null, {
+          surface: 'float',
+          mode: _sdrf ? 'draft' : 'preview',
+          cards: _sc,
+          gid: _gid,
+          label: '🎴 制卡',
+          tool: 'make_anki',
+          type: '#b9a8ff',
+          icon: '🎴',
+          form: 'full',
+          selectionLabel: '卡片'
+        });
       }
       return;
     }
@@ -714,12 +841,19 @@
             var _gid2 = (d.result.id && /^card_/.test(d.result.id)) ? d.result.id : ('fcg_' + RC.voiceCard.mkCid());   // 统一编号协议
             if (_turnTid && RC.turnCard) RC.turnCard.addPart(_turnTid, { kind: 'cards', cards: _cds, draft: _drf, gid: _gid2 });   // 侧栏:工具卡内
             // ④ 字幕模式浮层镜像(天气卡双宿主:侧栏开→容器隐藏、关侧栏=字幕模式浮现)+ 长按独立选中
-            if (RC.voiceCard && RC.flashcard) {
-              var _fcc = RC.voiceCard.push(null, '🎴 制卡', false, true, RC.voiceCard.mkCid(), {
-                tool: 'make_anki', type: '#b9a8ff', dot: true, form: 'full', icon: '🎴',
-                mount: function (bd) { if (_drf) RC.flashcard.mountDrafts(bd, _cds, { bare: true, gid: _gid2 }); else RC.flashcard.mountPreview(bd, _cds, { bare: true, gid: _gid2 }); }
+            if (RC.flashcard && typeof RC.flashcard.renderEntity === 'function') {
+              RC.flashcard.renderEntity(null, {
+                surface: 'float',
+                mode: _drf ? 'draft' : 'preview',
+                cards: _cds,
+                gid: _gid2,
+                label: '🎴 制卡',
+                tool: 'make_anki',
+                type: '#b9a8ff',
+                icon: '🎴',
+                form: 'full',
+                selectionLabel: '卡片'
               });
-              if (_fcc && _fcc.el) RC.voiceCard.pinBind(_fcc.el, '卡片', function () { return _cds.map(function (x) { return (x.front || x.cloze || '') + (x.back ? ' / ' + x.back : ''); }).join('\n'); });
             }
           } else if (stt === 'error') {
             if (_turnTid && RC.turnCard) RC.turnCard.addPart(_turnTid, { kind: 'text', text: '✗ 制卡没成:' + ((d && d.error) || '内容可能不适合制卡') });
@@ -1078,6 +1212,7 @@
       }).join('') + '</div>';
     } else if (k === 'images') {
       h = '<div class="vc-ig">' + (d.items || []).map(function (it, i) {
+        if (it._gone) return '';   // ✕删除的图不再渲染(拖整框/回放/三态重渲都不带回;data-i 保原索引供 ✕ 定位)
         return '<div class="vc-ig-cell" data-i="' + i + '">' +
           '<button type="button" class="vc-ig-x" data-i="' + i + '" aria-label="移除">✕</button>' +
           '<img class="vc-ig-img" data-i="' + i + '"' + (it.aid ? ' data-aid="' + esc(it.aid) + '"' : '') + ' src="' + esc(it.url || '') + '" alt="' + esc(it.title || '') + '">' +
@@ -1085,6 +1220,7 @@
       }).join('') + '</div>';
     } else if (k === 'videos') {
       h = '<div class="vc-ig">' + (d.items || []).map(function (it, i) {
+        if (it._gone) return '';   // ✕删除的视频不再渲染(同图卡)
         return '<div class="vc-ig-cell" data-i="' + i + '">' +
           '<button type="button" class="vc-ig-x" data-i="' + i + '" aria-label="移除">✕</button>' +
           '<span class="vc-vg-tag' + (it.src === 'bili' ? ' bili' : '') + '">' + (it.src === 'bili' ? 'B站' : 'YouTube') + '</span>' +
@@ -1110,28 +1246,607 @@
     if (k === 'weather') return (card.title || '天气') + ':' + [d.loc, d.date, d.cond, (d.lo != null ? d.lo + '-' + d.hi + '°C' : ''), (d.precip != null ? '降水' + d.precip + '%' : ''), d.tip].filter(Boolean).join(',');
     if (k === 'news') return (card.title || '新闻') + ':' + (d.items || []).map(function (it) { return (it.t || '') + '(' + (it.s || '') + ')'; }).join(';');
     if (k === 'fact') return (card.title || '') + ':' + (d.answer || '') + ' ' + (d.detail || '');
-    if (k === 'images') return (card.title || '配图') + ':' + (d.items || []).map(function (it) { return (it.title || '图') + (it.src ? '[源:' + it.src + ']' : ''); }).join(';') + '(图片本身在用户屏幕上;上下文只带元数据,不含图片/URL)';   // 用户拍板:带图卡入上下文=每张图的元数据,不是图本身
+    if (k === 'images') return (card.title || '配图') + ':' + (d.items || []).filter(function (it) { return !it._gone; }).map(function (it) { return (it.title || '图') + (it.src ? '[源:' + it.src + ']' : ''); }).join(';') + '(图片本身在用户屏幕上;上下文只带元数据,不含图片/URL)';   // 用户拍板:带图卡入上下文=每张图的元数据,不是图本身;✕删除的不带
     if (k === 'videos') return (card.title || '视频') + ':' + (d.items || []).map(function (it) { return (it.title || '') + '(' + (it.channel || '') + ')' + (it.url || ''); }).join(';');
     return d.text || card.brief || card.title || '';
   }
   // 77 pin 状态中心:选中集合为唯一真相(卡片紫框只是视图)。注入改**覆盖式快照**(防抖 1.2s+指纹):
   // 反复选中/取消若最终状态没变=零注入;变了=一条"当前带入清单(以本条为准,旧声明作废)"——历史不膨胀、语义无歧义
-  var _pins = { map: {}, fp: null, t: null, els: {}, cids: {} };   // 95:cids={卡片稳定编号:label}——同卡多实例(浮层/侧栏/收藏夹拖出)去重
+  var _pins = { map: {}, fp: null, t: null, els: {}, cids: {}, ids: {} };   // 95:cids={卡片稳定编号:label}；ids={label:语义上下文编号}
   var _cidSeq = 0;
   function _mkCid() { return 'c' + Date.now().toString(36) + '-' + (++_cidSeq); }   // 95:卡片出生编号,跟随卡片所有形态流转
+  function _ctxSelectionRegistry() {
+    try { return window.BWReaderRuntime && window.BWReaderRuntime.contextSelections; } catch (e) { return null; }
+  }
+  function _pinContextId(el, cid, spec) {
+    spec = spec || {};
+    var id = String(spec.id || (el && el.dataset && el.dataset.vcContextId) || '');
+    if (!id && el && el.dataset && el.dataset.turn) id = 'turn:' + el.dataset.turn;
+    if (!id) id = cid ? ('card:' + cid) : ('context:' + _mkCid());
+    try { if (el && el.dataset) el.dataset.vcContextId = id; } catch (e) {}
+    return id;
+  }
+  function _outgoingKindOf(spec, el) {
+    // 把既有的选中对象类型映射成 outgoing 的稳定 kind。未识别的一律 'card'
+    // (它们都是卡片系统里的对象),不新增类型、不猜。
+    var k = String((spec && spec.kind) || '');
+    if (k === 'image-item') return 'image';
+    if (k === 'video-item') return 'image';       // 视频封面按图片语义(服务端 kind 表无 video)
+    if (k === 'ink' || k === 'drawing') return 'drawing';
+    if (k === 'region') return 'region';
+    try { if (el && el.closest && el.closest('.vc-ink, [data-ink-region]')) return 'drawing'; } catch (e) {}
+    return 'card';
+  }
+
+  function _pinRemember(el, label, text, cid, spec) {
+    spec = spec || {};
+    var id = _pinContextId(el, cid, spec);
+    // ── 出向焦点(A5):选中/替换当前对象。**统一挂在这里** —— 卡片、图片、视频封面、
+    //    绘图区都走 _pinRemember,接一处即可,不必在每种交互里各写一套(也就不会漏)。
+    //    只带稳定 kind + 最小语义 + 引用,不塞正文/图本身(payload 要小)。
+    try {
+      if (window.RC && RC.outgoing) {
+        RC.outgoing.focus(_outgoingKindOf(spec, el), {
+          id: String(id || cid || label || '').slice(0, 120),
+          cid: String(cid || '').slice(0, 80),
+          label: String(label || '').slice(0, 80),
+          brief: String(text || '').slice(0, 160)
+        });
+      }
+    } catch (e) {}
+    _pins.map[label] = String(text || '').slice(0, 2500);
+    _pins.els[label] = el;
+    _pins.ids[label] = id;
+    if (cid) _pins.cids[cid] = label;
+    try {
+      var registry = _ctxSelectionRegistry();
+      if (registry) {
+        var record = {
+          id: id,
+          kind: spec.kind || (cid ? 'card' : 'context'),
+          label: label,
+          text: _pins.map[label],
+          source: spec.source || (cid ? { cid: cid } : {}),
+          meta: spec.meta || {}
+        };
+        if (Object.prototype.hasOwnProperty.call(spec, 'parentId')) record.parentId = spec.parentId || '';
+        if (Object.prototype.hasOwnProperty.call(spec, 'covers')) record.covers = spec.covers || [];
+        registry.select(record);
+      }
+    } catch (e) {}
+    return id;
+  }
+  function _pinForget(label, cid, el) {
+    label = String(label || '');
+    // 取消选中 → 焦点必须**显式取消**;否则上游会拿着已取消的对象当现状(A5 硬规则)。
+    try { if (window.RC && RC.outgoing) RC.outgoing.cancel(); } catch (e) {}
+    var id = _pins.ids[label] || (el && el.dataset && el.dataset.vcContextId) || '';
+    try { var registry = _ctxSelectionRegistry(); if (registry && id) registry.deselect(id); } catch (e) {}
+    delete _pins.map[label]; delete _pins.els[label]; delete _pins.ids[label];
+    if (cid && _pins.cids[cid] === label) delete _pins.cids[cid];
+    Object.keys(_pins.cids).forEach(function (key) {
+      if (_pins.cids[key] === label) delete _pins.cids[key];
+    });
+    return id;
+  }
+  function _effectivePins(options) {
+    options = options || {};
+    try {
+      var registry = _ctxSelectionRegistry();
+      if (registry) return registry.toLegacy({
+        limit: options.limit == null ? 8 : options.limit,
+        maxText: options.maxText == null ? 2500 : options.maxText
+      });
+    } catch (e) {}
+    var labels = Object.keys(_pins.map).sort();
+    if (options.limit != null) labels = labels.slice(0, options.limit);
+    var map = {}, items = [];
+    labels.forEach(function (label) {
+      var text = String(_pins.map[label] || '').slice(0, options.maxText == null ? 2500 : options.maxText);
+      map[label] = text;
+      items.push({ id: _pins.ids[label] || ('legacy:' + label), kind: 'context', label: label, text: text, parentId: '', covers: [], source: {}, meta: {} });
+    });
+    return { labels: labels, map: map, items: items, serialized: JSON.stringify({ contract: 'context-selection/legacy', items: items }) };
+  }
   function _pinSync() {
     if (_pins.t) clearTimeout(_pins.t);
     _pins.t = setTimeout(function () {
       _pins.t = null;
       // 统一端口迁移(references/voice-context-injection.md #1):fp/通道判定归 voiceCtx(投递成功才前移,
       //   根治"通话外改 pin 推进 fp → 下通电话漏快照");文案在模块尾 register('pins') 的 text()
-      var ks = Object.keys(_pins.map).sort();
-      try { RC.voiceCtx && RC.voiceCtx.state('pins', { labels: ks, map: _pins.map }); } catch (e) {}
+      var effective = _effectivePins({ limit: 8, maxText: 2500 });
+      try { RC.voiceCtx && RC.voiceCtx.state('pins', { labels: effective.labels, map: effective.map, serialized: effective.serialized }); } catch (e) {}
     }, 1200);
   }
+  try {
+    var _contextRegistry0 = _ctxSelectionRegistry();
+    if (_contextRegistry0 && _contextRegistry0.subscribe) {
+      _contextRegistry0.subscribe(function () {
+        _pinSync();
+        try { _chipRender(); } catch (e) {}
+      });
+    }
+  } catch (e) {}
   // 用户强调:同一编号(cid)的卡无论出现在字幕浮层 / 侧栏 / 收藏夹,选中一处则**处处高亮**,
   //   取消一处则**处处取消**。每个渲染实例出生时来登记,选中态按 cid 广播到全部实例。
   _pins.byCid = {};
+  // 卡片尺寸是页面 placement 的设备级 presentation，不是卡实体本身的属性。
+  // 同 cid 的页面副本可以共享，但侧栏/收藏/复习不读取也不应用；不进入服务器或跨设备同步。
+  var _CARD_PRESENTATION_ID = 'page-card-presentation-v1:';
+  var _cardSizes = Object.create(null);
+  var _pageSizeByCid = Object.create(null);
+  var _cardSizeDirty = Object.create(null);
+  var _cardSizeLoads = Object.create(null);
+  var _cardSizeWrite = Promise.resolve();
+  var _cardResizeArmed = null;
+  var _cardResizeActive = null;
+  var _cardResizeOutsideBound = false;
+  var _cardSizeMutationSeq = 0;
+  var _cardSizeRuntimeReadyBound = false;
+  function _cardSizeCid(value) {
+    var cid = String(value == null ? '' : value);
+    if (!cid || cid.length > 200 ||
+        cid === '__proto__' || cid === 'prototype' || cid === 'constructor' ||
+        /[\u0000-\u001f\u007f]/.test(cid)) return '';
+    return cid;
+  }
+  function _cardSizeRecord(value) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+    var w = Number(value.w), h = Number(value.h), updatedAt = Number(value.updatedAt);
+    if (!Number.isFinite(w) || !Number.isFinite(h) || !Number.isFinite(updatedAt)) return null;
+    w = Math.round(w); h = Math.round(h); updatedAt = Math.max(0, Math.round(updatedAt));
+    if (w < 180 || w > 720 || h < 100 || h > 720) return null;
+    return { w: w, h: h, updatedAt: updatedAt };
+  }
+  function _cardSizeExtensionStore() {
+    var store = window.__bwPageCardPresentation;
+    return store && typeof store.get === 'function' &&
+      typeof store.set === 'function'
+      ? store : null;
+  }
+  function _cardSizePwaStore() {
+    try {
+      var pwa = window.BWReaderRuntime && BWReaderRuntime.pwaRuntime;
+      var stores = pwa && typeof pwa.localStores === 'function' && pwa.localStores();
+      var store = stores && stores.device;
+      return store && typeof store.get === 'function' && typeof store.put === 'function'
+        ? store : null;
+    } catch (_) { return null; }
+  }
+  function _cardSizeApplyOne(el, record) {
+    if (!el) return;
+    if (!record) {
+      el.classList.remove('vc-user-sized');
+      el.style.removeProperty('--vc-user-w');
+      el.style.removeProperty('--vc-user-h');
+    } else {
+      el.style.setProperty('--vc-user-w', record.w + 'px');
+      el.style.setProperty('--vc-user-h', record.h + 'px');
+      el.classList.add('vc-user-sized');
+    }
+    try {
+      if (typeof el.__bwCardSizeApply === 'function') {
+        el.__bwCardSizeApply(record ? {
+          cid: (el.dataset && el.dataset.vcCid) || '',
+          w: record.w, h: record.h, updatedAt: record.updatedAt
+        } : null);
+      }
+    } catch (_) {}
+  }
+  function _cardSizePaint(cid, record) {
+    var live = (_pageSizeByCid[cid] || []).filter(function (el) {
+      return el && el.isConnected && el.__bwCardPageSizing === true;
+    });
+    _pageSizeByCid[cid] = live;
+    live.forEach(function (el) { _cardSizeApplyOne(el, record); });
+  }
+  function _cardSizeAccept(cid, value, fromStorage) {
+    cid = _cardSizeCid(cid);
+    var record = _cardSizeRecord(value);
+    if (!cid || !record || (fromStorage && _cardSizeDirty[cid])) return null;
+    var current = _cardSizes[cid];
+    if (!current || record.updatedAt >= current.updatedAt) {
+      _cardSizes[cid] = record;
+      _cardSizePaint(cid, record);
+    }
+    return _cardSizes[cid] || null;
+  }
+  function _cardSizeLoadExtension(cid) {
+    var store = _cardSizeExtensionStore();
+    if (!store) return Promise.resolve(null);
+    return Promise.resolve(store.get(cid)).then(function (value) {
+      return _cardSizeAccept(cid, value, true);
+    }).catch(function () { return null; });
+  }
+  function _cardSizeLoadPwa(cid) {
+    var store = _cardSizePwaStore();
+    if (!store) {
+      if (!_cardSizeRuntimeReadyBound && !_cardSizeExtensionStore()) {
+        _cardSizeRuntimeReadyBound = true;
+        document.addEventListener('bw:reader-runtime-ready', function () {
+          _cardSizeRuntimeReadyBound = false;
+          Object.keys(_pageSizeByCid || {}).forEach(function (key) {
+            delete _cardSizeLoads[key];
+            _cardSizeLoad(key);
+          });
+        }, { once: true });
+      }
+      return Promise.resolve(null);
+    }
+    return Promise.resolve(
+      store.get('ui-session', _CARD_PRESENTATION_ID + cid, { includeDeleted: true })
+    ).then(function (record) {
+      if (!record || record.deleted) return null;
+      return _cardSizeAccept(cid, record, true);
+    }).catch(function () { return null; });
+  }
+  function _cardSizeLoad(cid) {
+    cid = _cardSizeCid(cid);
+    if (!cid) return Promise.resolve(null);
+    if (_cardSizes[cid]) return Promise.resolve(_cardSizes[cid]);
+    if (_cardSizeLoads[cid]) return _cardSizeLoads[cid];
+    _cardSizeLoads[cid] = (_cardSizeExtensionStore()
+      ? _cardSizeLoadExtension(cid)
+      : _cardSizeLoadPwa(cid)).then(function (record) {
+        delete _cardSizeLoads[cid];
+        return record;
+      }, function () {
+        delete _cardSizeLoads[cid];
+        return null;
+      });
+    return _cardSizeLoads[cid];
+  }
+  function _cardSizePageReg(el, cid) {
+    cid = _cardSizeCid(cid);
+    if (!el || !cid) return;
+    el.__bwCardPageSizing = true;
+    el.classList.add('vc-page-placement');
+    var live = (_pageSizeByCid[cid] || []).filter(function (item) {
+      return item && item.isConnected && item.__bwCardPageSizing === true;
+    });
+    if (live.indexOf(el) < 0) live.push(el);
+    _pageSizeByCid[cid] = live;
+    if (_cardSizes[cid]) _cardSizeApplyOne(el, _cardSizes[cid]);
+    _cardSizeLoad(cid).then(function (record) {
+      if (record && el.isConnected && el.__bwCardPageSizing === true) {
+        _cardSizeApplyOne(el, record);
+      }
+    });
+  }
+  function _cardSizePersist(cid, record) {
+    cid = _cardSizeCid(cid);
+    record = _cardSizeRecord(record);
+    if (!cid || !record) return Promise.reject(new Error('卡片尺寸无效'));
+    _cardSizeDirty[cid] = true;
+    var operation = _cardSizeWrite.catch(function () {}).then(function () {
+      var extensionStore = _cardSizeExtensionStore();
+      if (extensionStore) {
+        return extensionStore.set(cid, {
+          w: record.w, h: record.h, updatedAt: record.updatedAt
+        });
+      }
+      var pwaStore = _cardSizePwaStore();
+      if (!pwaStore) throw new Error('卡片尺寸本地仓库尚未就绪');
+      var id = _CARD_PRESENTATION_ID + cid;
+      return Promise.resolve(pwaStore.get('ui-session', id, { includeDeleted: true })).then(function (old) {
+        return pwaStore.put('ui-session', {
+          id: id, schema: 1, cid: cid, w: record.w, h: record.h, updatedAt: record.updatedAt
+        }, {
+          id: id,
+          ifRev: Number(old && old.rev) || 0,
+          mutationId: ['card-presentation-v1', Date.now(), ++_cardSizeMutationSeq].join(':')
+        });
+      });
+    });
+    _cardSizeWrite = operation;
+    return operation.then(function () {
+      delete _cardSizeDirty[cid];
+      return record;
+    }, function (error) {
+      delete _cardSizeDirty[cid];
+      throw error;
+    });
+  }
+  function _cardPressEligible(target) {
+    if (!target || !target.closest) return false;
+    return !target.closest(
+      '.vc-card-rs,.vc-card-x,button,a,input,textarea,select,' +
+      '[contenteditable="true"],[role="button"],.fc-dot'
+    );
+  }
+  function _cardResizeEventInside(event, el) {
+    if (!event || !el) return false;
+    try {
+      var path = typeof event.composedPath === 'function'
+        ? event.composedPath() : null;
+      if (path && path.indexOf(el) >= 0) return true;
+    } catch (_) {}
+    var node = event.target;
+    while (node) {
+      if (node === el) return true;
+      node = node.parentNode || node.host || null;
+    }
+    return false;
+  }
+  function _cardResizeDismissOutside(event) {
+    var el = _cardResizeArmed;
+    if (!el || _cardResizeActive) return;
+    if (el.isConnected && _cardResizeEventInside(event, el)) return;
+    el.classList.remove('vc-resize-armed');
+    if (_cardResizeArmed === el) _cardResizeArmed = null;
+  }
+  function _cardResizeBindOutsideDismiss() {
+    if (_cardResizeOutsideBound) return;
+    _cardResizeOutsideBound = true;
+    // pointerdown 让鼠标/触屏在落到卡外的第一时间收起；click 覆盖键盘等
+    // 非 pointer 激活。监听器只清视觉状态，不截断宿主页原有事件。
+    document.addEventListener('pointerdown', _cardResizeDismissOutside, true);
+    document.addEventListener('click', _cardResizeDismissOutside, true);
+  }
+  function _cardResizeArm(el, cid) {
+    if (!el || !cid) return;
+    if (_cardResizeArmed && _cardResizeArmed !== el) {
+      _cardResizeArmed.classList.remove('vc-resize-armed');
+    }
+    var already = el.classList.contains('vc-resize-armed');
+    if (already) {
+      el.classList.remove('vc-resize-armed');
+      _cardResizeArmed = null;
+      return;
+    }
+    if (_cardForm(el) !== 'full') {
+      _cardForm(el, 'full');
+      try { if (typeof el.__bwCardFormApply === 'function') el.__bwCardFormApply('full'); } catch (_) {}
+    }
+    el.classList.add('vc-resize-armed');
+    _cardResizeArmed = el;
+  }
+  function _cardResizeBind(el, cid, pressTarget) {
+    cid = _cardSizeCid(cid);
+    if (!el || !cid || !pressTarget ||
+        el.__bwCardPageSizing !== true) return null;
+    _cardResizeBindOutsideDismiss();
+    var previousBinding = el.__bwCardResizeBinding;
+    if (previousBinding && previousBinding.pressTarget === pressTarget &&
+        previousBinding.cid === cid) return previousBinding;
+    if (previousBinding) {
+      try { previousBinding.destroy(); } catch (_) {}
+    }
+    var handle = el.querySelector && el.querySelector('.vc-card-rs');
+    if (!handle) {
+      handle = document.createElement('button');
+      handle.type = 'button';
+      handle.className = 'vc-card-rs';
+      handle.title = '拖动调整卡片大小';
+      handle.setAttribute('aria-label', '调整卡片大小');
+      el.appendChild(handle);
+    }
+    var taps = {
+      count: 0, at: 0, x: 0, y: 0, pointerType: '', down: null,
+      ignoreClickUntil: 0, suppressClickUntil: 0
+    };
+    function resetTapSequence() {
+      taps.count = 0; taps.at = 0; taps.pointerType = ''; taps.down = null;
+    }
+    function countTap(x, y, pointerType) {
+      var now = Date.now();
+      pointerType = String(pointerType || 'legacy-click');
+      var near = Math.hypot(x - taps.x, y - taps.y) <= 28;
+      var samePointerType = !taps.pointerType ||
+        taps.pointerType === pointerType;
+      taps.count = now - taps.at <= 430 && near && samePointerType
+        ? taps.count + 1 : 1;
+      taps.at = now; taps.x = x; taps.y = y;
+      taps.pointerType = pointerType;
+      if (taps.count < 2) return false;
+      taps.count = 0;
+      taps.pointerType = '';
+      _cardResizeArm(el, cid);
+      // Chromium 会在 touch pointerup 后合成 click；只吞掉完成双点的第二个
+      // click，第一点仍保持卡面原有点击语义。
+      taps.suppressClickUntil = now + 650;
+      return true;
+    }
+    function pointerCanTap(event) {
+      if (!event || event.isPrimary === false) return false;
+      var pointerType = String(event.pointerType || 'mouse');
+      return pointerType !== 'mouse' ||
+        event.button === undefined || event.button === 0;
+    }
+    function onPointerDown(event) {
+      if (!_cardPressEligible(event.target) ||
+          !pointerCanTap(event)) {
+        resetTapSequence(); return;
+      }
+      // 上一次完成双点后的兼容 click 若已不可能先于这次新按下到达，就不能
+      // 再误吞新手势自己的单击。
+      taps.suppressClickUntil = 0;
+      taps.down = {
+        id: event.pointerId, x: event.clientX, y: event.clientY,
+        at: Date.now(), moved: false,
+        pointerType: String(event.pointerType || 'mouse')
+      };
+    }
+    function onPointerMove(event) {
+      var down = taps.down;
+      if (!down || (down.id != null && event.pointerId !== down.id)) return;
+      if (Math.hypot(event.clientX - down.x, event.clientY - down.y) > 12) {
+        down.moved = true;
+      }
+    }
+    function onPointerUp(event) {
+      var down = taps.down;
+      taps.down = null;
+      if (!down || down.moved ||
+          (down.id != null && event.pointerId !== down.id) ||
+          event.isPrimary === false ||
+          Date.now() - down.at > 260 ||
+          !_cardPressEligible(event.target)) return;
+      // 覆盖触摸/鼠标兼容 click 的最长常见延迟，避免一击被 pointerup +
+      // synthetic click 重复计数。
+      taps.ignoreClickUntil = Date.now() + 650;
+      if (countTap(event.clientX, event.clientY, down.pointerType)) {
+        event.preventDefault();
+        event.stopPropagation();
+      }
+    }
+    function onPointerCancel() {
+      resetTapSequence();
+    }
+    function onPointerLeave(event) {
+      var down = taps.down;
+      if (!down ||
+          (down.id != null && event.pointerId !== down.id)) return;
+      // 仅中止尚未完成的这一点。触摸指针在 pointerup 后会自然派发
+      // pointerleave；此时 down 已清空，必须保留第一点，第二点才能成立。
+      resetTapSequence();
+    }
+    function onClick(event) {
+      var now = Date.now();
+      if (now < taps.suppressClickUntil) {
+        taps.suppressClickUntil = 0;
+        event.preventDefault();
+        event.stopImmediatePropagation();
+        return;
+      }
+      if (now < taps.ignoreClickUntil || !_cardPressEligible(event.target)) {
+        return;
+      }
+      if (countTap(
+        Number(event.clientX) || 0,
+        Number(event.clientY) || 0,
+        'legacy-click'
+      )) {
+        event.preventDefault();
+        event.stopImmediatePropagation();
+      }
+    }
+    function onHandleDown(event) {
+      if (_cardResizeActive ||
+          !pointerCanTap(event)) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      try {
+        if (typeof el.__bwCancelPinHold === 'function') {
+          el.__bwCancelPinHold();
+        }
+      } catch (_) {}
+      var rect = el.getBoundingClientRect();
+      var before = _cardSizes[cid]
+        ? Object.assign({}, _cardSizes[cid])
+        : null;
+      var session = {
+        el: el, cid: cid, handle: handle, pointerId: event.pointerId,
+        sx: event.clientX, sy: event.clientY,
+        w0: Math.max(180, Math.min(720, Math.round(rect.width))),
+        h0: Math.max(100, Math.min(720, Math.round(rect.height))),
+        before: before, next: before, raf: 0
+      };
+      _cardResizeActive = session;
+      el.classList.add('vc-resizing');
+      try { handle.setPointerCapture(event.pointerId); } catch (_) {}
+      function paint() {
+        session.raf = 0;
+        if (_cardResizeActive !== session || !session.next) return;
+        _cardSizes[cid] = session.next;
+        _cardSizePaint(cid, session.next);
+      }
+      function move(ev) {
+        if (_cardResizeActive !== session ||
+            (session.pointerId != null &&
+             ev.pointerId !== session.pointerId)) return;
+        ev.preventDefault();
+        session.next = {
+          w: Math.max(180, Math.min(
+            720,
+            Math.round(session.w0 + ev.clientX - session.sx)
+          )),
+          h: Math.max(100, Math.min(
+            720,
+            Math.round(session.h0 + ev.clientY - session.sy)
+          )),
+          updatedAt: Date.now()
+        };
+        if (!session.raf) session.raf = requestAnimationFrame(paint);
+      }
+      function finish(ev, cancelled) {
+        if (_cardResizeActive !== session ||
+            (session.pointerId != null &&
+             ev.pointerId !== session.pointerId)) return;
+        _cardResizeActive = null;
+        if (session.raf) {
+          cancelAnimationFrame(session.raf);
+          session.raf = 0;
+        }
+        handle.removeEventListener('pointermove', move);
+        handle.removeEventListener('pointerup', up);
+        handle.removeEventListener('pointercancel', cancel);
+        el.classList.remove('vc-resizing');
+        try { handle.releasePointerCapture(session.pointerId); } catch (_) {}
+        if (cancelled) {
+          if (session.before) _cardSizes[cid] = session.before;
+          else delete _cardSizes[cid];
+          _cardSizePaint(cid, session.before);
+          return;
+        }
+        var record = _cardSizeRecord(session.next || {
+          w: session.w0, h: session.h0, updatedAt: Date.now()
+        });
+        if (!record) return;
+        _cardSizes[cid] = record;
+        _cardSizePaint(cid, record);
+        _cardSizePersist(cid, record).catch(function () {
+          try {
+            RC.toast && RC.toast('卡片大小已调整，但本地保存失败');
+          } catch (_) {}
+        });
+      }
+      function up(ev) { finish(ev, false); }
+      function cancel(ev) { finish(ev, true); }
+      handle.addEventListener('pointermove', move);
+      handle.addEventListener('pointerup', up);
+      handle.addEventListener('pointercancel', cancel);
+    }
+    pressTarget.addEventListener('pointerdown', onPointerDown, true);
+    pressTarget.addEventListener('pointermove', onPointerMove, true);
+    pressTarget.addEventListener('pointerup', onPointerUp, true);
+    pressTarget.addEventListener('pointercancel', onPointerCancel, true);
+    pressTarget.addEventListener('pointerleave', onPointerLeave, true);
+    pressTarget.addEventListener('click', onClick, true);
+    handle.addEventListener('pointerdown', onHandleDown);
+    var binding = {
+      cid: cid,
+      handle: handle,
+      pressTarget: pressTarget,
+      destroy: function () {
+        resetTapSequence();
+        if (_cardResizeArmed === el) {
+          el.classList.remove('vc-resize-armed');
+          _cardResizeArmed = null;
+        }
+        pressTarget.removeEventListener('pointerdown', onPointerDown, true);
+        pressTarget.removeEventListener('pointermove', onPointerMove, true);
+        pressTarget.removeEventListener('pointerup', onPointerUp, true);
+        pressTarget.removeEventListener(
+          'pointercancel',
+          onPointerCancel,
+          true
+        );
+        pressTarget.removeEventListener(
+          'pointerleave',
+          onPointerLeave,
+          true
+        );
+        pressTarget.removeEventListener('click', onClick, true);
+        handle.removeEventListener('pointerdown', onHandleDown);
+        if (el.__bwCardResizeBinding === binding) {
+          el.__bwCardResizeBinding = null;
+        }
+      }
+    };
+    el.__bwCardResizeBinding = binding;
+    return binding;
+  }
   function _pinReg(el, cid) {
     if (!el || !cid) return;
     el.dataset.vcCid = cid;
@@ -1145,7 +1860,8 @@
       x.classList.add('vc-pin-pop'); setTimeout(function () { x.classList.remove('vc-pin-pop'); }, 420);
     });
   }
-  function _pinToggle(el, label, textFn) {
+  function _pinToggle(el, label, textFn, spec) {
+    spec = spec || {};
     var on = !el.classList.contains('vc-picked');
     var cid = (el.dataset && el.dataset.vcCid) || '';
     if (on) {
@@ -1157,40 +1873,140 @@
       var lb = label, i = 2;
       while (_pins.map[lb]) lb = label + '·' + (i++);   // label 唯一化(**不同**编号的同名卡,如两次天气卡,不互相顶掉)
       el.dataset.pinLabel = lb;
-      _pins.map[lb] = String(textFn()).slice(0, 2500);   // 79:长按=全文入脑(路由长文也放得下)
-      _pins.els[lb] = el;
-      if (cid) _pins.cids[cid] = lb;
+      _pinRemember(el, lb, String(textFn()).slice(0, 2500), cid, spec);   // 79:长按=全文入脑；Registry 负责父子包含去重
     } else {
-      var lb0 = el.dataset.pinLabel || label;
-      delete _pins.map[lb0]; delete _pins.els[lb0];
-      if (cid && _pins.cids[cid] === lb0) delete _pins.cids[cid];
+      var lb0 = (cid && _pins.cids[cid]) || el.dataset.pinLabel || label;
+      _pinForget(lb0, cid, el);
     }
     el.classList.toggle('vc-picked', on);
     el.classList.add('vc-pin-pop'); setTimeout(function () { el.classList.remove('vc-pin-pop'); }, 420);
     if (cid) _pinPaint(cid, on);   // 同号卡:处处高亮 / 处处取消(用户强调)
     _pinSync(); _chipRender();
   }
-  function _pinBind(el, label, textFn) {   // 72:长按 600ms=选中带入 2.1 上下文(紫边框+pop 特效),再长按=移出;选中的浮层卡不自动消失
+  function _pinBind(el, label, textFn, spec, pressTarget) {   // 72:正文长按 600ms=选中；owner 仍是整卡，pressTarget 只负责手势
+    if (!el) return null;
+    pressTarget = pressTarget || el;
     el.classList.add('vc-pinnable');
-    var lpT = null, lpX = 0, lpY = 0;
+    var _bindCid = (el.dataset && el.dataset.vcCid) || '';
+    spec = spec || {};
+    // turn 整体与内部工具/结果卡的 DOM 已有稳定 data-turn；在调用方未显式声明时自动补 parentId。
+    // 这里只补结构元数据，不改变手势，也不把选择状态写入 system prompt / 工具定义。
+    try {
+      var _turnHost = el.closest && el.closest('[data-turn]');
+      if (_turnHost && _turnHost !== el && !spec.parentId) {
+        var _tid0 = _turnHost.getAttribute('data-turn');
+        if (_tid0) {
+          var _specCopy = {};
+          Object.keys(spec).forEach(function (key) { _specCopy[key] = spec[key]; });
+          _specCopy.parentId = 'turn:' + _tid0;
+          spec = _specCopy;
+        }
+      }
+    } catch (e) {}
+    _pinContextId(el, _bindCid, spec || {});   // DOM 实例出生即绑定稳定语义 id；选择时不临时重编号
+    // mountAll / 状态重绘会对同一个 owner+正文重复登记。只更新最新 payload，
+    // 绝不能叠加 pointer/click 监听，否则一次长按会切换两次又回到原状态。
+    var pinBindings = el.__bwPinHoldBindings;
+    if (!pinBindings) {
+      pinBindings = [];
+      try { Object.defineProperty(el, '__bwPinHoldBindings', { value: pinBindings, configurable: true }); }
+      catch (e) { el.__bwPinHoldBindings = pinBindings; }
+    }
+    for (var pbi = 0; pbi < pinBindings.length; pbi++) {
+      if (pinBindings[pbi].pressTarget === pressTarget) {
+        pinBindings[pbi].label = label;
+        pinBindings[pbi].textFn = textFn;
+        pinBindings[pbi].spec = spec;
+        // 页面尺寸手势与长按必须使用同一块正文命中面；重绘复用 binding
+        // 时也补齐，避免先 mount、后注册 placement 的调用顺序留下漏绑。
+        if (el.__bwCardPageSizing === true) {
+          _cardResizeBind(el, _bindCid, pressTarget);
+        }
+        return pinBindings[pbi];
+      }
+    }
+    // 一个 owner 只能有一个实际长按面。调用方从旧的“整卡”迁到第 5 参数
+    // “正文”时，若留下整卡监听，正文 pointerdown 会同时冒泡到两套 600ms
+    // timer，最终选中后立刻又取消。先完整拆掉旧 target 再绑定新 target。
+    pinBindings.slice().forEach(function (oldBinding) {
+      try { oldBinding.destroy(); } catch (e) {}
+    });
+    var binding = { owner: el, pressTarget: pressTarget, label: label, textFn: textFn, spec: spec };
+    pinBindings.push(binding);
+    var lpT = null, lpX = 0, lpY = 0, lpId = null;
+    var suppressClickUntil = 0;
+    var destroyed = false;
+    function _cancelOnePinHold() {
+      if (lpT) { clearTimeout(lpT); lpT = null; }
+      lpId = null;
+    }
+    function _cancelPinHold() {
+      (el.__bwPinHoldBindings || []).forEach(function (x) {
+        try { x.cancel(); } catch (e) {}
+      });
+    }
+    binding.cancel = _cancelOnePinHold;
+    // charged drag 在 420ms 进入 ready 时显式取消正文长按；公开 owner 级取消器，
+    // 即使未来一个 owner 有多个独立 pressTarget，也会一次清完。
+    el.__bwCancelPinHold = _cancelPinHold;
     function _fire() {
       lpT = null;
+      suppressClickUntil = Date.now() + 650;
       // 97(用户设计):不再限通话中——文字模式同样可长按带入(chips 照常出输入框上方,send 时随 ctx.pinned 走文字管线)
-      _pinToggle(el, label, textFn);   // 77:状态中心统一管(通话=覆盖式注入;文字=send 注入;chip 同步)
+      _pinToggle(el, binding.label, binding.textFn, binding.spec);   // owner 决定视觉/身份；重复 mount 只更新最新文本与 spec
     }
-    el.addEventListener('pointerdown', function (ev) {
-      if (ev.target.closest('.vc-card-x')) return;
+    function _pointerDown(ev) {
+      // 按钮/链接/编辑控件拥有自己的长按与点击语义；不能因为用户按住
+      // “显示答案/评分/改进”而把整张卡误加入上下文。
+      // 双击/触屏双点调整大小复用同一个 predicate，所以两种手势的可用范围
+      // 完全一致；Anki 正反面正文可用，评分键和分页圆点不可用。
+      if (!_cardPressEligible(ev.target)) return;
+      if ((ev.button !== undefined && ev.button !== 0) || lpId !== null) return;
+      lpId = ev.pointerId;
       lpX = ev.clientX; lpY = ev.clientY;
-      if (lpT) clearTimeout(lpT);
+      if (lpT) { clearTimeout(lpT); lpT = null; }
       lpT = setTimeout(_fire, 600);
-    });
-    el.addEventListener('pointermove', function (ev) {
-      if (lpT && (Math.abs(ev.clientX - lpX) + Math.abs(ev.clientY - lpY)) > 14) { clearTimeout(lpT); lpT = null; }   // 拖动=取消长按(75:8px 手指按住必抖过=长按永远触发不了的根因,放宽)
-    });
-    el.addEventListener('contextmenu', function (ev) { ev.preventDefault(); });   // 75:iOS 长按系统菜单会抢手势
+    }
+    function _pointerMove(ev) {
+      if (lpId !== null && ev.pointerId !== lpId) return;
+      if (lpT && (Math.abs(ev.clientX - lpX) + Math.abs(ev.clientY - lpY)) > 14) _cancelOnePinHold();   // 拖动=取消长按(75:8px 手指按住必抖过=长按永远触发不了的根因,放宽)
+    }
+    function _click(ev) {
+      if (Date.now() >= suppressClickUntil) return;
+      suppressClickUntil = 0;
+      ev.preventDefault();
+      ev.stopImmediatePropagation();
+    }   // 成功长按后的浏览器合成 click 只吞一次；短点不受影响
+    function _contextMenu(ev) { ev.preventDefault(); }   // 75:iOS 长按系统菜单会抢手势
+    function _pointerEnd(ev) {
+      if (lpId !== null && ev.pointerId != null && ev.pointerId !== lpId) return;
+      _cancelOnePinHold();
+    }
+    binding.destroy = function () {
+      if (destroyed) return;
+      destroyed = true;
+      _cancelOnePinHold();
+      pressTarget.removeEventListener('pointerdown', _pointerDown);
+      pressTarget.removeEventListener('pointermove', _pointerMove);
+      pressTarget.removeEventListener('click', _click, true);
+      pressTarget.removeEventListener('contextmenu', _contextMenu);
+      ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (evn) {
+        pressTarget.removeEventListener(evn, _pointerEnd);
+      });
+      var at = pinBindings.indexOf(binding);
+      if (at >= 0) pinBindings.splice(at, 1);
+    };
+    pressTarget.addEventListener('pointerdown', _pointerDown);
+    pressTarget.addEventListener('pointermove', _pointerMove);
+    pressTarget.addEventListener('click', _click, true);
+    pressTarget.addEventListener('contextmenu', _contextMenu);
     ['pointerup', 'pointercancel', 'pointerleave'].forEach(function (evn) {
-      el.addEventListener(evn, function () { if (lpT) { clearTimeout(lpT); lpT = null; } });
+      pressTarget.addEventListener(evn, _pointerEnd);
     });
+    if (el.__bwCardPageSizing === true) {
+      _cardResizeBind(el, _bindCid, pressTarget);
+    }
+    return binding;
   }
   function _imgGoneNote(it) {   // ✕删除通告 → 统一端口 event(append-only 不改历史保缓存;800ms 合并;
     //   无通话=pending 环留底,通话建立/文字 send 补投——根治"dc 没开时删图信息永久丢失+死环零消费")
@@ -1231,8 +2047,8 @@
         var on = !cell1.classList.contains('vc-picked');
         root.querySelectorAll('.vc-ig-cell.vc-picked').forEach(function (c2) {   // 单选:先清其它
           c2.classList.remove('vc-picked');
-          var lb2 = c2.dataset.pinLabel; if (lb2 && _pins.map[lb2]) { delete _pins.map[lb2]; delete _pins.els[lb2]; }
-          var gc2 = c2.dataset.vcCid; if (gc2 && _pins.cids[gc2]) delete _pins.cids[gc2];
+          var lb2 = c2.dataset.pinLabel, gc2 = c2.dataset.vcCid;
+          if (lb2) _pinForget(lb2, gc2, c2);
         });
         if (on) {
           var gcid = (card.cid || '') + '#' + i1;   // 95:图编号=卡号#序号(浮层/侧栏两实例互斥)
@@ -1241,11 +2057,17 @@
             return;
           }
           cell1.classList.add('vc-picked');
-          var lb = (it.title || (card.kind === 'videos' ? '视频' : '配图')) + (card.kind === 'videos' ? '·视频' : '·图') + (i1 + 1);
+          var lb0 = (it.title || (card.kind === 'videos' ? '视频' : '配图')) + (card.kind === 'videos' ? '·视频' : '·图') + (i1 + 1);
+          var lb = lb0, lbn = 2; while (_pins.map[lb]) lb = lb0 + '·' + (lbn++);
           cell1.dataset.pinLabel = lb; cell1.dataset.vcCid = gcid;
-          _pins.map[lb] = ((it.title || '') + (it.channel ? '(' + it.channel + ')' : '') + ' ' + (it.url || '')).slice(0, 500);
-          _pins.els[lb] = cell1;
-          _pins.cids[gcid] = lb;
+          _pinRemember(cell1, lb,
+            ((it.title || '') + (it.channel ? '(' + it.channel + ')' : '') + ' ' + (it.url || '')).slice(0, 500),
+            gcid, {
+              id: 'card:' + (card.cid || '') + '/item:' + i1,
+              kind: card.kind === 'videos' ? 'video-item' : 'image-item',
+              parentId: 'card:' + (card.cid || ''),
+              source: { cid: card.cid || '', item: i1 }
+            });
         }
         _pinSync(); _chipRender();
       }
@@ -1255,37 +2077,15 @@
     injectCss();   // 131:历史回放/侧栏先出卡时通话 UI 可能还没建过 → 样式没注入,标题栏按钮就成了裸 <button>(白块)
     if (!card.cid) card.cid = _mkCid();   // 95:历史旧卡(落库时还没 cid 字段)补发——本次会话内该实例稳定
     var label = card.title || '搜索结果';
-    var html = '<div class="vc-if-hd"><span>' + esc(label) + '</span></div>' + _infoHtml(card);
-    var d = document.createElement('div'); d.className = 'asst-msg asst-a vc-if';
-    d.innerHTML = html;
+    // 统一壳(用户拍板 2026-07-21):侧栏结果卡也走 _renderInflow=同一 _cardDom → 与浮层/钉入卡同长相+三态圆点
+    //   (原手建 .vc-if + vc-if-min 两态折叠退役)。_infoHtml 进 bd;主题色/图标按 kind 取(与浮层 1330 同源)。
+    var _ck = { images: 'image', videos: 'video', weather: 'weather', news: 'news' }[card.kind] || 'text';
+    var _cst = {}; try { _cst = (window.RC && RC.toolChip && RC.toolChip.styleOf) ? RC.toolChip.styleOf(_ck) : {}; } catch (e) {}
+    var d = _renderInflow(null, { text: _infoHtml(card), label: label, isHtml: true, type: _cst.color, icon: _cst.icon, form: 'full', cid: card.cid }).el;
     _pinBind(d, label, function () { return _infoText(card); });
-    var _srcs = '';
-    if (card.kind === 'videos') _srcs = ((card.data || {}).q || '') || '未记录(旧卡片)';   // 98:视频溯源=两源搜索词
-    if (card.kind === 'images') {   // 88/90:溯源——每张图哪个源哪个词命中;源名映射可读,绝不显示问号
-      var SRC_NAME = { commons: '维基共享(Commons)', google: 'Google 图搜', openai: 'OpenAI 搜索', gemini: 'Gemini' };
-      var seenS = {};
-      _srcs = ((card.data || {}).items || []).map(function (it) {
-        var nm = SRC_NAME[it.src] || it.src || '';
-        var k2 = nm ? (nm + (it.q ? '「' + it.q + '」' : '')) : '';
-        if (!k2 || seenS[k2]) return ''; seenS[k2] = 1; return k2;
-      }).filter(Boolean).join(' · ') || '未记录(旧卡片)';
-    }
-    // 139(用户):「!」按钮由标题栏的【数据流】按钮替代(absorb→mountFlow 已挂上),这里不再另挂
-    if (false) try { window.__asstInfoBtn && window.__asstInfoBtn(d, { kind: '搜索卡 · ' + card.kind, mode: '静默入库(联网搜索)', srcs: _srcs || undefined,
-      actions: (card.kind === 'images' ? ['img_norm'] : card.kind === 'videos' ? ['pick_video'] : ['web_search']) }); } catch (e) {}
-    try { _dragToDock(d, function () { return { label: label, kind: card.kind, raw: html, isHtml: true, text: _infoText(card) }; }); } catch (e) {}
+    try { _dragToDock(d, function () { return { label: label, kind: card.kind, raw: '<div class="vc-if-hd"><span>' + esc(label) + '</span></div>' + _infoHtml(card), isHtml: true, text: _infoText(card), cid: card.cid }; }); } catch (e) {}   // cid 跟随副本；#img:raw 调用时动态生成
     try { _igWire(d, card); } catch (e) {}   // 88:图卡交互(✕/单选)
-    try {   // 132:侧栏结果卡也能折叠——长条 ↔ 方块(侧栏不要标记,与工具卡侧栏视图同规矩)
-      var _hd = d.querySelector('.vc-if-hd');
-      if (_hd) {
-        _hd.style.cursor = 'pointer';
-        _hd.addEventListener('click', function (ev) {
-          if (ev.target.closest('button,a')) return;
-          d.classList.toggle('vc-if-min');
-        });
-      }
-    } catch (e) {}
-    try { d.dataset.vcCid = card.cid; } catch (e) {}   // 95:同卡编号(与浮层镜像实例共享)
+    try { d.__vcCard = card; } catch (e) {}   // #img:挂 card 数据对象——拖图入卡时反查,插入落 data.items(持久,非 DOM-only)
     return d;
   }
   window.__vcInfoCardEl = function (card) { try { return (card && card.kind) ? _infoCardEl(card) : null; } catch (e) { return null; } };
@@ -1329,6 +2129,7 @@
                         { dot: true, form: 'full', type: _cst.color, icon: _cst.icon });
       if (c) {
         c.el.classList.add('vc-typed');   // 有色磨砂(与工具卡同一套观感)
+        try { c.el.__vcCard = card; } catch (e) {}   // #img:浮层实例同挂 card(与侧栏实例共享同一对象 → 拖图入卡 push 一次两处同现)
         // 结果卡不是"文字回复" → 标题栏只留【数据流】按钮(▶/✕ 去掉,与侧栏一致)
         ['.vc-card-p', '.vc-card-x'].forEach(function (q) { var b = c.el.querySelector(q); if (b) b.remove(); });
         _pinBind(c.el, label, function () { return _infoText(card); });
@@ -1447,7 +2248,9 @@
   var VC_ASR_MIRROR = '关键词:Anki、笔迹、振假名、生词、假名'
                     + '|学习伴读通话。常说:这一页/这页讲了什么/上一页/下一页/翻到第N页/读一下/'
                     + '做卡片/记笔记/生词/翻译/解释/公式/我画的/笔迹';
-  var VC_GHOST_LCS_MIN = 10;   // 「翻到第N页」才5字、「下一页」3字 → 10 字才不会误杀真人说的话
+  var VC_GHOST_LCS_MIN = 10;   // 「翻到第N页」才5字、「下一页」3字 → 10 字才不会误杀真人
+  var VC_GHOST_COV_MIN_LEN = 10;   // 复读变体判据:去标点后至少这么长才启用(短句不判,防误杀)
+  var VC_GHOST_COV_RATIO = 0.8;    // 累计匹配块占比≥此=复读变体(同音错字/漏字打断连续子串→LCS 判不出;与 relay _GHOST_COV_* 同步)说的话
   function _stripPunct(x) { return (x || '').replace(/[\s,，。、:：;；/·!！?？…\-]+/g, ''); }
   function _lcsLen(a, b) {   // 最长公共**子串**(连续),与 Python difflib find_longest_match 同义
     if (!a || !b) return 0;
@@ -1461,11 +2264,38 @@
     }
     return best;
   }
+  function _cumMatch(a, b) {   // 累计匹配块字符数,对应 Python difflib get_matching_blocks(Ratcliff-Obershelp 递归);判'复读变体'
+    if (!a || !b) return 0;
+    function lm(alo, ahi, blo, bhi) {
+      var best = { a: alo, b: blo, size: 0 }, j2 = {};
+      for (var i = alo; i < ahi; i++) {
+        var nj = {};
+        for (var j = blo; j < bhi; j++) {
+          if (a[i] === b[j]) { var k = (j > blo ? (j2[j - 1] || 0) : 0) + 1; nj[j] = k; if (k > best.size) best = { a: i - k + 1, b: j - k + 1, size: k }; }
+        }
+        j2 = nj;
+      }
+      return best;
+    }
+    var total = 0, st = [[0, a.length, 0, b.length]];
+    while (st.length) {
+      var g = st.pop(), m = lm(g[0], g[1], g[2], g[3]);
+      if (m.size > 0) {
+        total += m.size;
+        if (g[0] < m.a && g[2] < m.b) st.push([g[0], m.a, g[2], m.b]);
+        if (m.a + m.size < g[1] && m.b + m.size < g[3]) st.push([m.a + m.size, g[1], m.b + m.size, g[3]]);
+      }
+    }
+    return total;
+  }
   function _isAsrGhost(tx) {
     var s = (tx || '').trim();
     if (!s) return true;
     for (var i = 0; i < VC_ASR_ANCHORS.length; i++) if (s.indexOf(VC_ASR_ANCHORS[i]) >= 0) return true;
-    return _lcsLen(_stripPunct(s), _stripPunct(VC_ASR_MIRROR)) >= VC_GHOST_LCS_MIN;
+    var a1 = _stripPunct(s), a2 = _stripPunct(VC_ASR_MIRROR);
+    if (_lcsLen(a1, a2) >= VC_GHOST_LCS_MIN) return true;
+    if (a1.length >= VC_GHOST_COV_MIN_LEN && _cumMatch(a1, a2) >= VC_GHOST_COV_RATIO * a1.length) return true;   // 复读变体:同音错字/漏字打断LCS但整体重合(实测'笔记'版 0.94)
+    return false;
   }
   try { window.__vcIsAsrGhost = _isAsrGhost; } catch (e) {}   // 供测试/调试
 
@@ -1614,8 +2444,7 @@
     } catch (e) {}
     if (_tts.ws && _tts.ws.readyState <= 1) return;
     try {
-      var proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-      var w = new WebSocket(proto + location.host + '/voice-rt?mode=tts');
+      var w = _openWs('/voice-rt?mode=tts');
       w.binaryType = 'arraybuffer';
       w.onmessage = function (ev) {
         if (ev.data instanceof ArrayBuffer) { _ttsPlay(ev.data); return; }
@@ -1937,6 +2766,87 @@
   function _cardSecs() { var v = 20; try { v = parseInt(localStorage.getItem('rc-voice-card-secs') || '20', 10) || 20; } catch (e) {} return Math.max(5, Math.min(60, v)); }
   function _sideOpen() { var sd = document.getElementById('ep-side'); return !!(sd && sd.classList.contains('open')); }
   var _dock = { list: [], open: false, loaded: false };
+  var _FAV_CARDS_PAYLOAD_VERSION = 1;
+  var _FAV_CARDS_MAX_COUNT = 64;
+  var _FAV_CARDS_MAX_BYTES = 256 * 1024;
+  var _FAV_CARDS_MAX_DEPTH = 16;
+  var _FAV_CARDS_MAX_NODES = 8192;
+  function _favUtf8Bytes(text) {
+    try { return new TextEncoder().encode(text).length; } catch (e) {}
+    try { return unescape(encodeURIComponent(text)).length; } catch (e2) { return Infinity; }
+  }
+  function _favJsonTreeOk(root) {
+    var stack = [{ value: root, depth: 0 }], seen = [], nodes = 0;
+    while (stack.length) {
+      var entry = stack.pop(), value = entry.value;
+      nodes += 1;
+      if (nodes > _FAV_CARDS_MAX_NODES || entry.depth > _FAV_CARDS_MAX_DEPTH) return false;
+      if (value == null || typeof value === 'string' || typeof value === 'boolean') continue;
+      if (typeof value === 'number') { if (!Number.isFinite(value)) return false; continue; }
+      if (typeof value !== 'object') return false;
+      if (seen.indexOf(value) >= 0) return false;
+      seen.push(value);
+      if (Array.isArray(value)) {
+        for (var ai = 0; ai < value.length; ai++) stack.push({ value: value[ai], depth: entry.depth + 1 });
+      } else {
+        var proto = Object.getPrototypeOf(value);
+        if (proto !== Object.prototype && proto !== null) return false;
+        var keys = Object.keys(value);
+        for (var ki = 0; ki < keys.length; ki++) stack.push({ value: value[keys[ki]], depth: entry.depth + 1 });
+      }
+    }
+    return true;
+  }
+  function _favPrepare(rec) {
+    rec = rec || {};
+    var isCards = rec.kind === 'cards' || !!rec.gid ||
+      (rec.payload && rec.payload.kind === 'cards');
+    if (!isCards) return { ok: true, record: rec };   // 普通 HTML/text 卡维持旧协议
+    var payload = rec.payload, cards = null;
+    try {
+      if (payload == null) {
+        cards = (typeof rec.raw === 'string') ? JSON.parse(rec.raw) : rec.raw;
+        payload = { version: _FAV_CARDS_PAYLOAD_VERSION, kind: 'cards', cards: cards };
+      }
+      if (!payload || Object.getPrototypeOf(payload) !== Object.prototype ||
+          Object.keys(payload).sort().join(',') !== 'cards,kind,version' ||
+          payload.version !== _FAV_CARDS_PAYLOAD_VERSION || payload.kind !== 'cards') {
+        throw new Error('payload-contract');
+      }
+      cards = payload.cards;
+      if (!Array.isArray(cards) || !cards.length || cards.length > _FAV_CARDS_MAX_COUNT ||
+          cards.some(function (card) {
+            return !card || typeof card !== 'object' || Array.isArray(card);
+          }) || !_favJsonTreeOk(payload)) {
+        throw new Error('payload-shape');
+      }
+      var serialized = JSON.stringify(payload);
+      if (!serialized || _favUtf8Bytes(serialized) > _FAV_CARDS_MAX_BYTES) {
+        throw new Error('payload-size');
+      }
+      var out = {};
+      Object.keys(rec).forEach(function (key) {
+        if (key !== 'raw' && key !== 'payload') out[key] = rec[key];
+      });
+      out.kind = 'cards';
+      out.payload = JSON.parse(serialized);
+      out.cid = String(out.cid || out.gid || _mkCid());
+      out.gid = String(out.gid || out.cid);
+      if (!/^[A-Za-z0-9_-]{1,80}$/.test(out.cid) || !/^[A-Za-z0-9_-]{1,80}$/.test(out.gid)) {
+        throw new Error('payload-identity');
+      }
+      out.id = String(out.id || out.gid);
+      if (!/^[A-Za-z0-9_-]{1,80}$/.test(out.id)) throw new Error('payload-id');
+      return { ok: true, record: out };
+    } catch (e) {
+      return {
+        ok: false,
+        error: e && e.message === 'payload-size'
+          ? '学习卡过大，未加入收藏夹'
+          : '学习卡数据不完整，未加入收藏夹'
+      };
+    }
+  }
   function _dockLoad(cb) {   // 78:收藏夹服务端持久化(独立于会话,清空对话不清它)
     if (_dock.loaded) { cb && cb(); return; }
     fetch('/api/assistant/voice-cards').then(function (r) { return r.json(); }).then(function (d) {
@@ -1945,32 +2855,102 @@
     }).catch(function () { cb && cb(); });
   }
   function _favSave(rec) {
-    rec.id = rec.id || ('v' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6));
-    fetch('/api/assistant/voice-cards', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ op: 'add', card: rec }) }).catch(function () {});
-    var i = -1;
-    _dock.list.forEach(function (x, k) { if (x.id === rec.id) i = k; });
+    rec.cid = rec.cid || rec.gid || _mkCid();   // 学习卡 cid=gid；收藏只增加宿主，不另发编号
+    rec.id = rec.id || ((rec.kind === 'cards' || rec.gid) ? (rec.gid || rec.cid) :
+      ('v' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6)));
+    var current = null;
+    _dock.list.forEach(function (item) {
+      if (item.id === rec.id) current = item;
+    });
+    if (rec.kind === 'cards' || rec.gid) {
+      var revision = Math.max(
+        Number(rec.revision) || 0,
+        Number(current && current.revision) || 0
+      ) + 1;
+      rec.revision = revision;
+    }
+    var prepared = _favPrepare(rec);
+    if (!prepared.ok) {
+      try { if (typeof _toast === 'function') _toast(prepared.error); } catch (e0) {}
+      return '';
+    }
+    rec = prepared.record;
+    var i = -1, previous = null;
+    _dock.list.forEach(function (x, k) {
+      if (x.id === rec.id) { i = k; previous = x; }
+    });
     if (i < 0) _dock.list.push(rec); else _dock.list[i] = rec;
     _dockBtn(); if (_dock.open) _dockPanel(true);
+    fetch('/api/assistant/voice-cards', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ op: 'add', card: rec }) }).then(function (response) {
+        if (!response.ok) {
+          var error = new Error('favorite-save-' + response.status);
+          error.rejectPayload = response.status === 400 || response.status === 413;
+          error.staleRevision = response.status === 409;
+          throw error;
+        }
+      }).catch(function (error) {
+        // 客户端已经按同一合同完整校验；断网/服务暂不可用时保留本地会话里的
+        // 完整卡，符合 local-first。只有服务端明确 400/413 拒绝 payload 才回滚，
+        // 绝不能显示一张刷新后必坏的“已收藏”卡。
+        if (error && error.staleRevision) return;   // 较新的同卡状态已先落库
+        if (!error || !error.rejectPayload) {
+          try { if (typeof _toast === 'function') _toast('已本地收藏，跨设备同步暂不可用'); } catch (e0) {}
+          return;
+        }
+        var at = -1;
+        _dock.list.forEach(function (x, k) { if (x.id === rec.id) at = k; });
+        if (previous) {
+          if (at < 0) _dock.list.push(previous); else _dock.list[at] = previous;
+        } else if (at >= 0) {
+          _dock.list.splice(at, 1);
+        }
+        _dockBtn(); if (_dock.open) _dockPanel(true);
+        try { if (typeof _toast === 'function') _toast('收藏失败，卡片未保存'); } catch (e1) {}
+      });
     return rec.id;
   }
   function _favMeta() {   // 元数据:书/页/触发这轮的问题——长回答离开会话也能自释
     return { file: (_rtc.ctxFile || '').split('/').pop() || '', page: String(_rtc.ctxPage || ''), q: (_lastU || '').slice(0, 120) };
   }
-  window.__vcPinBind = function (el, label, textFn) { try { _pinBind(el, label, textFn); } catch (e) {} };   // 79:气泡长按带入(rc-assistant 消费)
+  window.__vcPinBind = function (el, label, textFn, spec, pressTarget) { try { return _pinBind(el, label, textFn, spec, pressTarget); } catch (e) { return null; } };   // 79:owner 保持整卡；pressTarget 可收窄到正文
   // 工具指示器 v2:把**这张卡**(.vc-card)整套能力暴露出去,rc-toolchip 只当状态机、不另造 DOM——
   //   用户拍板:「我很喜欢这个方块的样式,在这个基础上进行修改就好」。
   RC.voiceCard = {
     css: function () { try { injectCss(); } catch (e) {} },   // 131:任何时候建卡/挂按钮前先确保样式在
     renderInto: function (host, spec) { try { return _renderInto(host, spec); } catch (e) { return null; } },   // 钉入书页:与浮层卡同一 _cardDom 渲染
+    renderInflow: function (host, spec) { try { return _renderInflow(host, spec); } catch (e) { return null; } },   // 侧栏对话流:同一 _cardDom(壳+三态);专属交互调用方自挂
     trash: { show: function (on) { try { _trashShow(on); } catch (e) {} }, hot: function (on) { try { _trashHot(on); } catch (e) {} }, inZone: function (x, y) { try { return _inTrashZone(x, y); } catch (e) { return false; } } },   // 钉入卡拖到左上角删除(浮层同一删除区)
+    favorite: {
+      hint: function (on) { try { _dockHint(on); } catch (e) {} },
+      inZone: function (x, y) { try { return _inDockZone(x, y); } catch (e) { return false; } },
+      save: function (rec) { try { rec = rec || {}; rec.meta = rec.meta || _favMeta(); _dockLoad(function () { _favSave(rec); }); if (typeof _toast === 'function') _toast('已收入收藏夹'); return true; } catch (e) { return false; } },
+      prepare: function (rec) { try { return _favPrepare(rec || {}); } catch (e) { return { ok: false, error: '学习卡数据不完整，未加入收藏夹' }; } }   // 合同/宿主可预检；真正保存仍唯一走 save
+    },
     push: function (text, label, isHtml, force, cid, opts) { try { return _cardPush(text, label, isHtml, force, cid, opts); } catch (e) { return null; } },
     close: function (c) { try { _cardClose(c); } catch (e) {} },
     form: function (el, f) { try { return _cardForm(el, f); } catch (e) { return 'full'; } },
     layout: function () { try { _cardLayout(); } catch (e) {} },
     mkCid: _mkCid,
     pinReg: function (el, cid) { try { _pinReg(el, cid); } catch (e) {} },       // 登记实例 → 选中按 cid 处处同步
-    pinBind: function (el, label, fn) { try { _pinBind(el, label, fn); } catch (e) {} },   // 长按=选中/取消(紫边)
+    pinBind: function (el, label, fn, spec, pressTarget) { try { return _pinBind(el, label, fn, spec, pressTarget); } catch (e) { return null; } },   // 长按=选中/取消；第 5 参数只收窄手势面
+    cardSize: {
+      get: function (cid) {
+        cid = _cardSizeCid(cid);
+        return cid && _cardSizes[cid] ? Object.assign({}, _cardSizes[cid]) : null;
+      },
+      set: function (cid, value) {
+        cid = _cardSizeCid(cid);
+        var record = _cardSizeRecord(value);
+        if (!cid || !record) return Promise.reject(new Error('卡片尺寸无效'));
+        record.updatedAt = Math.max(record.updatedAt, Date.now());
+        _cardSizes[cid] = record;
+        _cardSizePaint(cid, record);
+        return _cardSizePersist(cid, record);
+      },
+      load: function (cid) { return _cardSizeLoad(cid); }
+    },
+    bindChargedDrag: _bindChargedDrag,   // 卡头/dot 共用 420ms charged drag；正文不挂 touch-action:none
     dragToDock: function (el, fn) { try { _dragToDock(el, fn); } catch (e) {} },  // 侧栏卡长按拖出=生成副本/收藏
     sideOpen: _sideOpen
   };
@@ -1996,26 +2976,350 @@
       return (pg && pg.__upRec) ? pg : null;
     } catch (err) { return null; }
   }
-  function _dragToDock(el, payloadFn) {   // 83(用户设计):**头部当拖动把手**(仿浮层卡)——即时拖,和对话流滚动零冲突
+  function _payloadCards(rec) {   // 学习卡必须还原为活状态机，不能降级成 HTML 快照
+    if (!rec || (rec.kind !== 'cards' && !rec.gid)) return null;   // 兼容旧收藏：当时有 gid 但未写 kind
+    try {
+      var a = rec.payload && rec.payload.version === _FAV_CARDS_PAYLOAD_VERSION &&
+        rec.payload.kind === 'cards' ? rec.payload.cards :
+        ((typeof rec.raw === 'string') ? JSON.parse(rec.raw) : rec.raw);
+      return (Array.isArray(a) && a.length && typeof a[0] === 'object') ? a : null;
+    } catch (e) { return null; }
+  }
+  function _payloadPinAt(rec, x, y, srcEl) {
+    if (!rec) return false;
+    var cards = _payloadCards(rec);
+    try {
+      if (cards && window.RC && RC.stickynote && RC.stickynote.createCardAt)
+        return RC.stickynote.createCardAt(x, y, cards, rec.gid || rec.cid || '');
+      var _k = { images: 'image', videos: 'video', weather: 'weather', news: 'news' }[rec.kind] || 'text';
+      var _st = {}; try { _st = (window.RC && RC.toolChip && RC.toolChip.styleOf) ? RC.toolChip.styleOf(_k) : {}; } catch (e2) {}
+      if (window.RC && RC.stickynote && RC.stickynote.createHtmlAt)
+        return RC.stickynote.createHtmlAt(x, y, { content: rec.isHtml ? rec.raw : String(rec.raw || rec.text || ''), isHtml: !!rec.isHtml, label: rec.label || '卡片', type: _st.color || '', icon: _st.icon || '', cid: rec.cid || (srcEl && srcEl.dataset && srcEl.dataset.vcCid) || '' });
+    } catch (e) {}
+    return false;
+  }
+  function _payloadFloat(rec, srcEl) {
+    var cid = (rec && (rec.cid || rec.gid)) || (srcEl && srcEl.dataset && srcEl.dataset.vcCid) || _mkCid();
+    var cards = _payloadCards(rec), c = null;
+    if (cards && window.RC && RC.flashcard &&
+        typeof RC.flashcard.renderEntity === 'function') {
+      var gid = rec.gid || cid;
+      var entity = RC.flashcard.renderEntity(null, {
+        surface: 'float',
+        mode: 'state',
+        cards: cards,
+        gid: gid,
+        label: rec.label || '🎴 学习卡片',
+        type: '#b9a8ff',
+        icon: '🎴',
+        form: 'full',
+        selectionLabel: rec.label || '学习卡片',
+        // 收藏夹不是 HTML 快照：活卡状态变化后把完整快照回写同一
+        // 结构化记录。评分/翻面字段与 Anki/source/投影身份一起保存。
+        onStateChange: function (nextCards) {
+          if (!Array.isArray(nextCards) || !nextCards.length) return;
+          var next = {};
+          Object.keys(rec).forEach(function (key) {
+            if (key !== 'raw' && key !== 'payload') next[key] = rec[key];
+          });
+          next.kind = 'cards';
+          next.cid = rec.cid || gid;
+          next.gid = gid;
+          next.payload = {
+            version: _FAV_CARDS_PAYLOAD_VERSION,
+            kind: 'cards',
+            cards: nextCards
+          };
+          _favSave(next);   // _favPrepare 再做同一 256KiB/结构/身份/修订号围栏
+        }
+      });
+      c = entity && entity.voiceCard;
+    } else if (rec) c = _cardPush(rec.isHtml ? rec.raw : (rec.raw || rec.text), rec.label, !!rec.isHtml, true, cid);
+    return c;
+  }
+  // ── 卡片统一「蓄力 → ready → 拖动」状态机 ──
+  // touch-action 必须在 pointerdown 前声明，故只挂专用卡头/dot；正文仍保留滚动、选择和 pinBind 长按。
+  // pointercancel / capture 丢失 / 窗口失焦都是系统中断，只走 onCancel 回滚，永远不提交 drop。
+  var _activeChargedDrag = null;
+  function _chargedDragSessionStale(session, nextDownEvent) {
+    if (!session) return false;
+    // isConnected 只在浏览器真实 Node 上可靠；测试替身/旧宿主未提供时保持
+    // fail-closed，不凭“未知”抢占仍可能活跃的手势。
+    if (session.captureEl && session.captureEl.isConnected === false) return true;
+    if (session.feedbackEl && session.feedbackEl.isConnected === false) return true;
+    if (session.runtimeAttached === false) return true;
+    if (!session.doc || !session.win || session.win.closed === true) return true;
+    if (session.captureEl && session.captureEl.ownerDocument &&
+        session.captureEl.ownerDocument !== session.doc) return true;
+    if (session.doc.defaultView && session.doc.defaultView !== session.win) return true;
+    // Pointer Events 保证同一个 pointerId 在一次 active-pointer 生命周期内
+    // 不会再次产生新的 pointerdown。若下一次 pointerdown 已使用同一 id，
+    // 且不是同一事件正在经过另一层 listener，旧 session 的 pointerup/cancel
+    // 必然已被宿主漏掉；这是可验证的 stale 证明，可安全回收。
+    if (nextDownEvent && session.pointerId != null &&
+        nextDownEvent.pointerId === session.pointerId &&
+        session.downEvent !== nextDownEvent) return true;
+    return false;
+  }
+  function _reapStaleChargedDrag(nextDownEvent) {
+    var stale = _activeChargedDrag;
+    if (!stale || !_chargedDragSessionStale(stale, nextDownEvent)) return false;
+    // 只让原 binding 用自己的 cleanup 回收 timer、pointer capture 和监听器；
+    // 不能直接覆盖仍连接的全局 owner，也不能把失效手势误当 drop 提交。
+    try {
+      if (typeof stale.cancelActive === 'function') {
+        stale.cancelActive('stale-active');
+      }
+    } catch (e) {}
+    // 已有明确 stale 证明但旧 binding 本身也损坏时，至少释放全局闩锁；
+    // 活跃且连接正常的 session 永远不会走到这里。
+    if (_activeChargedDrag === stale) _activeChargedDrag = null;
+    return true;
+  }
+  function _bindChargedDrag(handles, opts) {
+    opts = opts || {};
+    var list;
+    if (Array.isArray(handles)) list = handles.slice();
+    else if (handles && typeof handles.length === 'number' && !handles.addEventListener) list = Array.prototype.slice.call(handles);
+    else list = [handles];
+    list = list.filter(function (h) { return !!(h && h.addEventListener); });
+    var holdMs = opts.holdMs == null ? 420 : Math.max(0, Number(opts.holdMs) || 0);
+    var slop = opts.slop == null ? 8 : Math.max(0, Number(opts.slop) || 0);
+    var dragSlop = opts.dragSlop == null ? 1 : Math.max(0, Number(opts.dragSlop) || 0);
+    var touchAction = opts.touchAction == null ? 'none' : String(opts.touchAction);
+    var state = null, suppressClickUntil = 0, destroyed = false;
+    var oldTouchActions = [];
+
+    function _call(name, args) {
+      try { if (typeof opts[name] === 'function') return opts[name].apply(null, args || []); } catch (e) {}
+    }
+    function _feedback(s, charging, ready) {
+      var f = (s && s.feedbackEl) || opts.feedbackEl;
+      if (!f || !f.classList) return;
+      f.classList.toggle('vc-drag-charging', !!charging);
+      f.classList.toggle('vc-drag-ready', !!ready);
+    }
+    function _samePointer(e, s) {
+      return !!(s && (!e || e.pointerId == null || s.pointerId == null || e.pointerId === s.pointerId));
+    }
+    function _removeRuntimeListeners(s) {
+      if (!s) return;
+      var doc = s.doc, win = s.win;
+      if (doc && doc.removeEventListener) {
+        doc.removeEventListener('pointermove', _move, true);
+        doc.removeEventListener('pointerup', _up, true);
+        doc.removeEventListener('pointercancel', _pointerCancel, true);
+        doc.removeEventListener('visibilitychange', _visibility, true);
+      }
+      if (win && win.removeEventListener) win.removeEventListener('blur', _blur, true);
+      if (s.captureEl) s.captureEl.removeEventListener('lostpointercapture', _lostCapture, true);
+      s.runtimeAttached = false;
+    }
+    function _cleanup(s) {
+      if (!s) return;
+      if (s.timer) { clearTimeout(s.timer); s.timer = null; }
+      _removeRuntimeListeners(s);
+      _feedback(s, false, false);
+      if (state === s) state = null;
+      if (_activeChargedDrag === s) _activeChargedDrag = null;
+      try {
+        if (s.captureEl && s.pointerId != null && s.captureEl.hasPointerCapture &&
+            s.captureEl.hasPointerCapture(s.pointerId)) s.captureEl.releasePointerCapture(s.pointerId);
+      } catch (e) {}
+    }
+    function _cancel(reason, e) {
+      var s = state;
+      if (!s || !_samePointer(e, s)) return;
+      s.lastEvent = e || s.lastEvent;
+      _cleanup(s);
+      _call('onCancel', [s, e || s.lastEvent, reason || 'cancel']);
+    }
+    function _ready() {
+      var s = state;
+      if (!s || s.ready) return;
+      s.timer = null;
+      s.ready = true;
+      s.readyX = s.lastX;
+      s.readyY = s.lastY;
+      s.dx = 0; s.dy = 0;
+      suppressClickUntil = Date.now() + 650;
+      _feedback(s, false, true);
+      try {
+        var nav = s.win && s.win.navigator;
+        if (nav && typeof nav.vibrate === 'function') nav.vibrate(8);
+      } catch (e) {}
+      _call('onReady', [s, s.lastEvent]);
+    }
+    function _move(e) {
+      var s = state;
+      if (!s || !_samePointer(e, s)) return;
+      s.lastEvent = e;
+      s.lastX = e.clientX; s.lastY = e.clientY;
+      if (!s.ready) {
+        var drift = Math.hypot(e.clientX - s.startX, e.clientY - s.startY);
+        if (drift > slop) {
+          if (s.timer) { clearTimeout(s.timer); s.timer = null; }
+          // 这不是短点：用户已经试图移动，只是尚未完成蓄力。浏览器（尤其
+          // mouse / touch-action:none）仍可能在 pointerup 后合成 click；
+          // 只吞紧随其后的那一次，不能让卡片形态误切换。
+          suppressClickUntil = Date.now() + 650;
+          _cancel('slop', e);
+        }
+        return;
+      }
+      if (e.cancelable !== false && e.preventDefault) e.preventDefault();
+      s.dx = e.clientX - s.readyX;
+      s.dy = e.clientY - s.readyY;
+      if (!s.moved && Math.hypot(s.dx, s.dy) > dragSlop) s.moved = true;
+      _call('onMove', [s, e]);
+    }
+    function _up(e) {
+      var s = state;
+      if (!s || !_samePointer(e, s)) return;
+      s.lastEvent = e;
+      if (!s.ready) { _cleanup(s); return; }   // 真短点：不吞 click，也不进入 drag 回调
+      suppressClickUntil = Date.now() + 650;
+      _cleanup(s);
+      _call('onEnd', [s, e]);
+    }
+    function _pointerCancel(e) { _cancel('pointercancel', e); }
+    function _lostCapture(e) { _cancel('lostpointercapture', e); }
+    function _blur(e) { _cancel('blur', e); }
+    function _visibility(e) {
+      var s = state;
+      if (s && s.doc && s.doc.hidden) _cancel('hidden', e);
+    }
+    function _down(e) {
+      if (destroyed) return;
+      // 同一 binding 也可能在宿主漏掉 pointerup/cancel 后残留 local state；
+      // 必须先用同一套 stale 证明回收，不能在 state 早退处把全局锁永久卡死。
+      if (state && _activeChargedDrag === state) {
+        _reapStaleChargedDrag(e);
+      }
+      if (state) return;
+      if (_activeChargedDrag) {
+        _reapStaleChargedDrag(e);
+      }
+      if (_activeChargedDrag) return;
+      if (e.button !== undefined && e.button !== 0) return;
+      if (_call('canStart', [e]) === false) return;
+      var captureEl = e.currentTarget || this;
+      var doc = (captureEl && captureEl.ownerDocument) || document;
+      var win = (doc && doc.defaultView) || window;
+      var s = {
+        id: e.pointerId,
+        pointerId: e.pointerId,
+        pointerType: e.pointerType || '',
+        startX: e.clientX, startY: e.clientY,
+        readyX: e.clientX, readyY: e.clientY,
+        lastX: e.clientX, lastY: e.clientY,
+        dx: 0, dy: 0, moved: false, ready: false,
+        captureEl: captureEl,
+        feedbackEl: opts.feedbackEl || captureEl,
+        doc: doc, win: win, downEvent: e, lastEvent: e, timer: null,
+        runtimeAttached: false, cancelActive: null
+      };
+      s.cancelActive = function (reason) {
+        if (state === s) _cancel(reason || 'stale-active', s.lastEvent);
+      };
+      state = s; _activeChargedDrag = s;
+      _feedback(s, true, false);
+      doc.addEventListener('pointermove', _move, true);
+      doc.addEventListener('pointerup', _up, true);
+      doc.addEventListener('pointercancel', _pointerCancel, true);
+      doc.addEventListener('visibilitychange', _visibility, true);
+      if (win && win.addEventListener) win.addEventListener('blur', _blur, true);
+      captureEl.addEventListener('lostpointercapture', _lostCapture, true);
+      s.runtimeAttached = true;
+      try { if (captureEl.setPointerCapture && e.pointerId != null) captureEl.setPointerCapture(e.pointerId); } catch (err) {}
+      s.timer = setTimeout(_ready, holdMs);
+    }
+    function _click(e) {
+      if (Date.now() >= suppressClickUntil) return;
+      suppressClickUntil = 0;
+      e.preventDefault();
+      e.stopImmediatePropagation();
+      _call('onClickSuppressed', [e]);
+    }
+    function _contextmenu(e) {
+      if (state || Date.now() < suppressClickUntil) e.preventDefault();
+    }
+
+    list.forEach(function (h) {
+      oldTouchActions.push({ el: h, value: h.style.touchAction });
+      h.style.touchAction = touchAction;
+      h.addEventListener('pointerdown', _down);
+      h.addEventListener('click', _click, true);
+      h.addEventListener('contextmenu', _contextmenu);
+    });
+    var controller = {
+      cancel: function (reason) { _cancel(reason || 'external', state && state.lastEvent); },
+      destroy: function () {
+        if (destroyed) return;
+        destroyed = true;
+        _cancel('destroy', state && state.lastEvent);
+        list.forEach(function (h) {
+          h.removeEventListener('pointerdown', _down);
+          h.removeEventListener('click', _click, true);
+          h.removeEventListener('contextmenu', _contextmenu);
+        });
+        oldTouchActions.forEach(function (x) { x.el.style.touchAction = x.value; });
+      },
+      isActive: function () { return !!state; }
+    };
+    return controller;
+  }
+  function _dragToDock(el, payloadFn) {   // 83(用户设计):卡头蓄力 420ms 后拖出副本；短按仍只切形态
     try { injectCss(); } catch (e) {}   // 92:ghost 样式保险——通话 UI 没初始化过时侧栏拖动 ghost 曾无样式(看不见"卡片")
-    var hd = el.querySelector('.vc-if-hd') || el.firstElementChild || el;
+    var hd = el.querySelector('.vc-card-hd') || el.querySelector('.vc-if-hd') || el.firstElementChild || el;   // 统一壳=vc-card-hd(旧 vc-if-hd 兼容兜底)
     hd.style.touchAction = 'none'; hd.style.cursor = 'grab';
-    var ghost = null, moved = false, sx = 0, sy = 0;
-    function _pos(x, y) { if (ghost) { ghost.style.left = (x - ghost.offsetWidth / 2) + 'px'; ghost.style.top = (y - 26) + 'px'; } }
-    hd.addEventListener('pointerdown', function (ev) {
-      if (ev.target.closest('button,a')) return;
-      ev.preventDefault();
-      sx = ev.clientX; sy = ev.clientY; moved = false;
-      try { hd.setPointerCapture(ev.pointerId); } catch (e) {}
-      function mv(e2) {
-        if (!moved && (Math.abs(e2.clientX - sx) + Math.abs(e2.clientY - sy)) > 8) {
+    // 同一共享卡可能被不同装载路径再次注册。只保留一套监听器，并更新其 payload，
+    // 否则一次 pointerup 会创建多个相同页面卡。
+    var binding = hd.__bwDragToDockBinding;
+    if (binding) { binding.payloadFn = payloadFn; return binding.drag; }
+    binding = { payloadFn: payloadFn };
+    try { Object.defineProperty(hd, '__bwDragToDockBinding', { value: binding, configurable: true }); }
+    catch (e) { hd.__bwDragToDockBinding = binding; }
+    var ghost = null, moved = false, grabX = 28, grabY = 18;
+    function _pos(x, y) {
+      if (!ghost) return;
+      var l = x - Math.min(Math.max(18, grabX), Math.max(18, ghost.offsetWidth - 18));
+      var t = y - Math.min(Math.max(12, grabY), 34);
+      ghost.style.transform = 'translate3d(' + Math.round(l) + 'px,' + Math.round(t) + 'px,0)';
+    }
+    function _cleanDrag() {
+      _dragFxEnd();   // #51:反馈层清场
+      if (ghost) { ghost.remove(); ghost = null; }
+      el.style.opacity = '';
+      _dockHint(false); _trashShow(false);
+    }
+    binding.drag = _bindChargedDrag(hd, {
+      holdMs: 420,
+      slop: 8,
+      dragSlop: 1,
+      feedbackEl: el,
+      canStart: function (ev) {
+        if (ev.target && ev.target.closest && ev.target.closest('button,a')) return false;
+        moved = false;
+        el.dataset.downT = String(Date.now());
+        try { var _sr0 = el.getBoundingClientRect(); grabX = ev.clientX - _sr0.left; grabY = ev.clientY - _sr0.top; } catch (e) {}
+        return true;
+      },
+      onReady: function (session) {
+        try { if (typeof el.__bwCancelPinHold === 'function') el.__bwCancelPinHold(); } catch (e0) {}
+        ghost = el.cloneNode(true); ghost.className = 'vc-drag-ghost';
+        var _gsd = document.getElementById('ep-side');   // 卡宽按左侧页面区自适应(用户拍板;与钉入宽同式)
+        var _gsl = _gsd ? _gsd.getBoundingClientRect().left : window.innerWidth;
+        ghost.style.width = Math.max(240, Math.min(480, Math.round(_gsl * 0.44))) + 'px';
+        document.body.appendChild(ghost);
+        el.style.opacity = '.22';
+        _pos(session.lastX, session.lastY);
+      },
+      onMove: function (session, e2) {
+        if (!moved && session.moved) {
           moved = true;
-          ghost = el.cloneNode(true); ghost.className = 'vc-drag-ghost';
-          var _gsd = document.getElementById('ep-side');   // 卡宽按左侧页面区自适应(用户拍板;与钉入宽同式)
-          var _gsl = _gsd ? _gsd.getBoundingClientRect().left : window.innerWidth;
-          ghost.style.width = Math.max(240, Math.min(480, Math.round(_gsl * 0.44))) + 'px';
-          document.body.appendChild(ghost);
-          el.style.opacity = '.35';
+          el.dataset.touched = '1';
+          try { if (typeof el.__bwCancelPinHold === 'function') el.__bwCancelPinHold(); } catch (e0) {}
         }
         if (moved) {
           _pos(e2.clientX, e2.clientY);
@@ -2023,62 +3327,57 @@
           _trashShow(true); _trashHot(_inTrashZone(e2.clientX, e2.clientY));   // 134:侧栏卡也能往左上角拖删
           try { var _sd9 = document.getElementById('ep-side'); var _sl9 = _sd9 ? _sd9.getBoundingClientRect().left : window.innerWidth; if (e2.clientX < _sl9 - 30) { var _gr9 = ghost ? ghost.getBoundingClientRect() : null; _dragFx(_gr9 ? _gr9.left : e2.clientX, _gr9 ? _gr9.top : e2.clientY, el, null); } else _dragFxEnd(); } catch (e9) {}   // #51:探测点=ghost 左上角(=钉入点,用户拍板)
         }
-      }
-      function up(e3) {
-        hd.removeEventListener('pointermove', mv); hd.removeEventListener('pointerup', up); hd.removeEventListener('pointercancel', up);
+      },
+      onEnd: function (session, e3) {
+        var wasMoved = moved && session.moved;
+        moved = false;
         var gr = null; try { if (ghost) gr = ghost.getBoundingClientRect(); } catch (e) {}   // ghost 左上角=松手时卡的位置=钉入点(用户拍板)
-        _dragFxEnd();   // #51:反馈层清场
-        if (ghost) { ghost.remove(); ghost = null; }
-        el.style.opacity = '';
-        _dockHint(false); _trashShow(false);
-        if (moved && e3 && _inTrashZone(e3.clientX, e3.clientY)) {   // 134:侧栏卡拖到左上角=从对话流移除
-          try {
-            el.style.transition = 'transform .24s ease,opacity .24s ease,max-height .24s ease';
-            el.style.transformOrigin = '0 0'; el.style.transform = 'scale(.6)'; el.style.opacity = '0'; el.style.maxHeight = '0';
-          } catch (e) {}
-          setTimeout(function () { try { el.remove(); } catch (e) {} }, 240);
-          try { if (typeof _toast === 'function') _toast('已删除'); } catch (e) {}
+        _cleanDrag();
+        if (wasMoved && e3 && _inTrashZone(e3.clientX, e3.clientY)) {   // 侧栏拖出的始终是副本：删除区只丢弃副本，绝不删对话原卡
+          try { if (typeof _toast === 'function') _toast('已丢弃拖出的副本'); } catch (e) {}
           return;
         }
-        if (moved && e3 && _inDockZone(e3.clientX, e3.clientY)) {
-          var rec = payloadFn();
+        if (wasMoved && e3 && _inDockZone(e3.clientX, e3.clientY)) {
+          var rec = binding.payloadFn();
           rec.meta = rec.meta || _favMeta();
           rec.cid = rec.cid || (el.dataset && el.dataset.vcCid) || _mkCid();   // 95:收藏保留卡片编号
           _dockLoad(function () { _favSave(rec); });
           try { if (typeof _toast === 'function') _toast('已收入收藏夹'); } catch (e) {}
-        } else if (moved && e3 && _dropOnUpage(e3) && window.__upPasteCard) {
+        } else if (wasMoved && e3 && _dropOnUpage(e3) && window.__upPasteCard) {
           // #50(用户设计):把卡从侧栏/收藏拖到**自建页**上=粘贴。落点吸附到最近行列交叉点,
           //   持久化,内容作为**独立副本**(删除不影响收藏夹/侧栏原件)。
           var _pg = _dropOnUpage(e3);
-          window.__upPasteCard(_pg, e3.clientX, e3.clientY, payloadFn());
+          window.__upPasteCard(_pg, e3.clientX, e3.clientY, binding.payloadFn());
           _placeFx(e3.clientX, e3.clientY);
           try { if (typeof _toast === 'function') _toast('已贴到页面'); } catch (e) {}
-        } else if (moved && e3 && _sideOpen()) {
+        } else if (wasMoved && e3 && _sideOpen()) {
           // 92→改(用户 2026-07-20):侧栏拖出=**默认钉子模式**,松手点直接**钉入页面**(ghost 左上角=卡左上角=钉入点)。
           //   旧"放入字幕浮层"已按用户要求去掉(跟钉子模式矛盾:拖出后变普通浮动卡)。钉不上(松手不在正文)才回退浮层钉子卡。
           var sd2 = document.getElementById('ep-side');
           var sl = sd2 ? sd2.getBoundingClientRect().left : window.innerWidth;
           if (e3.clientX < sl - 30) {
-            var rec2 = payloadFn();
+            var rec2 = binding.payloadFn();
             var px = gr ? gr.left : e3.clientX, py = gr ? gr.top : e3.clientY;
             var pinned = false;
-            try {
-              var _k2 = { images: 'image', videos: 'video', weather: 'weather', news: 'news' }[rec2 && rec2.kind] || 'text';   // 浮层结果卡同映射(1320)
-              var _st2 = {}; try { _st2 = (window.RC && RC.toolChip && RC.toolChip.styleOf) ? RC.toolChip.styleOf(_k2) : {}; } catch (e2) {}
-              if (window.RC && RC.stickynote && RC.stickynote.createHtmlAt && rec2)
-                pinned = RC.stickynote.createHtmlAt(px, py, { content: rec2.isHtml ? rec2.raw : String(rec2.raw || rec2.text || ''), isHtml: !!rec2.isHtml, label: rec2.label || '卡片', type: _st2.color || '', icon: _st2.icon || '' });
-            } catch (e) {}
+            try { pinned = _payloadPinAt(rec2, px, py, el); } catch (e) {}
             if (pinned) { _placeFx(e3.clientX, e3.clientY); }
             else {   // 松手不在正文(anchorFromPoint 落空)→ 回退:浮层钉子卡(不自动消失,可继续拖去钉)
-              var c2 = _cardPush(rec2.isHtml ? rec2.raw : (rec2.raw || rec2.text), rec2.label, !!rec2.isHtml, true,
-                (el.dataset && el.dataset.vcCid) || '');
+              var c2 = _payloadFloat(rec2, el);
               if (c2) { c2.pinned = true; c2.pinMode = true; _placeFx(e3.clientX, e3.clientY); try { if (typeof _toast === 'function') _toast('没落在正文上——卡片已浮出,拖到正文可钉住'); } catch (e) {} }
             }
           }
         }
+      },
+      onCancel: function () {
+        moved = false;
+        _cleanDrag();   // 系统取消只回滚视觉；绝不删除/收藏/钉页
+      },
+      onClickSuppressed: function () {
+        el.dataset.downT = '';
+        el.dataset.dragged = '';
       }
-      hd.addEventListener('pointermove', mv); hd.addEventListener('pointerup', up); hd.addEventListener('pointercancel', up);
     });
+    return binding.drag;
   }
   // ── 拖动反馈统一 helper(#51):落在卡上=目标卡高亮环;否则=锚定反馈(光带/插入线);清=两者都清 ──
   var _dropHotEl = null;
@@ -2110,7 +3409,9 @@
       if (!g || ev.pointerId !== g.id) return;
       var dist = Math.hypot(ev.clientX - g.sx, ev.clientY - g.sy);
       if (!g.moved) {
-        if (dist > 10 && Date.now() - g.t0 < 300) { g = null; return; }   // 快滑=滚动/横滑,交还
+        var _adx = Math.abs(ev.clientX - g.sx), _ady = Math.abs(ev.clientY - g.sy);
+        // 只有**明显横向**快滑才交还给图库横滑(横 > 纵);纵向拖(拖出正文/拖到另一张卡)立即起拖,不必先静止 300ms
+        if (_adx > 10 && _adx > _ady * 1.3 && Date.now() - g.t0 < 300) { g = null; return; }
         if (dist > 10) {
           g.moved = true;
           g.ghost = document.createElement('img'); g.ghost.src = g.img.src;
@@ -2131,7 +3432,7 @@
       try { var _cell = was.img.closest('.vc-ig-cell'); var _t = _cell && _cell.querySelector('.vc-ig-t'); if (_t && _t.textContent.trim()) _cap = _t.textContent.trim(); } catch (e) {}
       var _asrc = (was.img.dataset && was.img.dataset.aid) ? ('/pdf/api/asset/' + was.img.dataset.aid) : String(was.img.src).replace(/"/g, '&quot;');   // 编号内链:贴页即触发后端本地化,重开不拉外链
       var _ih = '<div class="vc-imgdrop"><img src="' + _asrc + '">' + (_cap ? '<div class="vc-imgdrop-t">' + esc(_cap) + '</div>' : '') + '</div>';
-      // ① 落在另一张卡上 → 图放进那张卡;**同编号(cid)所有实例同步加**(用户拍板);收藏夹条目持久化
+      // ① 落在另一张卡上 → 图进那张卡的**数据层**(元数据跟进,非 DOM-only:三态重渲/回放/上下文/拖整框都带);同编号(cid)所有实例同步;收藏夹持久
       try {
         var _tgt = document.elementFromPoint(ev.clientX, ev.clientY);
         var _tc = _tgt && _tgt.closest && _tgt.closest('.vc-card, .vc-if, .vc-dk-card');
@@ -2140,9 +3441,25 @@
           var _els = [];
           try { _els = (_cid2 && _pins.byCid[_cid2] || []).filter(function (x) { return x.isConnected; }); } catch (e) {}
           if (!_els.length) _els = [_tc];
-          _els.forEach(function (el2) { var bd2 = el2.querySelector('.vc-card-bd') || el2; bd2.insertAdjacentHTML('beforeend', _ih); });
-          try {   // 收藏夹同 cid 条目:raw append + 服务端保存(重开不丢)
-            (_dock.list || []).forEach(function (rec) { if (rec.cid && rec.cid === _cid2) { rec.raw = String(rec.raw || rec.text || '') + _ih; rec.isHtml = true; _favSave(rec); } });
+          var _tcard = _tc.__vcCard || null;   // #img:目标卡数据对象(建卡时挂;同 cid 浮层/侧栏共享同一对象)
+          var _dImg = { url: was.img.src, aid: (was.img.dataset && was.img.dataset.aid) || '', title: _cap, src: 'dragged', _added: 1 };   // 元数据跟进(用户拍板)
+          if (_tcard && _tcard.kind === 'images' && _tcard.data) {   // 图卡 → push data.items(持久) + 各实例 append 标准 vc-ig-cell(即时;_igWire 委托自动接管 ✕/单选)
+            _tcard.data.items = _tcard.data.items || [];
+            _tcard.data.items.push(_dImg);
+            var _ni = _tcard.data.items.length - 1;
+            var _cellH = '<div class="vc-ig-cell" data-i="' + _ni + '">' +
+              '<button type="button" class="vc-ig-x" data-i="' + _ni + '" aria-label="移除">✕</button>' +
+              '<img class="vc-ig-img" data-i="' + _ni + '"' + (_dImg.aid ? ' data-aid="' + esc(_dImg.aid) + '"' : '') + ' src="' + _asrc + '" alt="' + esc(_cap) + '">' +
+              (_cap ? '<div class="vc-ig-t">' + esc(_cap) + '</div>' : '') + '</div>';
+            _els.forEach(function (el2) { var ig = el2.querySelector('.vc-ig'); if (ig) ig.insertAdjacentHTML('beforeend', _cellH); else { var bd0 = el2.querySelector('.vc-card-bd') || el2; bd0.insertAdjacentHTML('beforeend', _ih); } });
+          } else {   // 非图卡/无 card 对象 → DOM 塞入兜底(视觉即时,不落 data)
+            _els.forEach(function (el2) { var bd2 = el2.querySelector('.vc-card-bd') || el2; bd2.insertAdjacentHTML('beforeend', _ih); });
+          }
+          try {   // 收藏夹同 cid 条目:图卡重存 _infoHtml(含新图)、其它 append;服务端保存(重开不丢)
+            (_dock.list || []).forEach(function (rec) { if (rec.cid && rec.cid === _cid2) {
+              rec.raw = (_tcard && _tcard.kind === 'images') ? ('<div class="vc-if-hd"><span>' + esc(_tcard.title || '配图') + '</span></div>' + _infoHtml(_tcard)) : (String(rec.raw || rec.text || '') + _ih);
+              rec.isHtml = true; _favSave(rec);
+            } });
           } catch (e) {}
           try { if (typeof _toast === 'function') _toast('已放入卡片' + (_els.length > 1 ? '(同编号 ' + _els.length + ' 处已同步)' : '')); } catch (e) {}
           return;
@@ -2166,7 +3483,10 @@
     return function () { try { bargeIn(); } catch (e) {} };
   };
   window.__vcPins = function () {   // 97:文字助手 send 时取当前带入的卡片(非通话模式的上下文注入)
-    try { return Object.keys(_pins.map).map(function (k) { return { label: k, text: _pins.map[k] }; }); } catch (e) { return []; }
+    try {
+      // 动态选择快照只在本次请求尾部变化；稳定 id 排序保证同集合字节一致，不触碰 system prompt / 工具表。
+      return _effectivePins({ limit: 8, maxText: 2500 }).items;
+    } catch (e) { return []; }
   };
   window.__vcTtsStop = function () { try { bargeIn(); } catch (e) {} };   // 97:TTS 生成/播放随时可停(历史▶钮 busy 再点=停)
   window.__vcMicHold = function (on) {   // 82:历史 clip 经 <audio> 播放不在 WebRTC AEC 参考里——播放期禁麦防 AI 听到自己
@@ -2185,6 +3505,7 @@
         ev.stopPropagation();
         if (b.classList.contains('on')) return;
         var rec = payloadFn();
+        rec.cid = rec.cid || (el.dataset && el.dataset.vcCid) || '';
         rec.meta = rec.meta || _favMeta();
         _dockLoad(function () { _favSave(rec); });
         b.classList.add('on');
@@ -2231,9 +3552,42 @@
   function _inTrashZone(x, y) { return x < 126 && y < 92; }
   function _dockAdd(c) {   // 收入:持久化到服务端(78,清空对话不丢),浮层 DOM 撤
     try { clearTimeout(c.t); } catch (e) {}
-    var rec = { label: c.label || '卡片', raw: c.raw || '', isHtml: !!c.isHtml,
-                text: (c.el.querySelector('.vc-card-bd') || {}).textContent || '',
-                meta: _favMeta() };
+    var body = c.bd || c.el.querySelector('.vc-card-bd');
+    var cid = c.cid || (c.el.dataset && c.el.dataset.vcCid) || '';
+    var rec = null;
+    if ((c.kind === 'cards' || (body && body.__fc)) && RC.flashcard &&
+        typeof RC.flashcard.snapshot === 'function') {
+      var cards = RC.flashcard.snapshot(body);
+      var gid = c.gid || (body && body.__fc && body.__fc.gid) || cid;
+      if (cards.length && gid) {
+        rec = {
+          id: gid,
+          label: c.label || '学习卡片',
+          kind: 'cards',
+          payload: {
+            version: _FAV_CARDS_PAYLOAD_VERSION,
+            kind: 'cards',
+            cards: cards
+          },
+          isHtml: false,
+          text: (RC.flashcard.cardsText && RC.flashcard.cardsText(cards)) ||
+            ((body || {}).textContent || ''),
+          meta: _favMeta(),
+          cid: cid || gid,
+          gid: gid
+        };
+      }
+    }
+    if (!rec) {
+      rec = {
+        label: c.label || '卡片',
+        raw: c.raw || '',
+        isHtml: !!c.isHtml,
+        text: (body || {}).textContent || '',
+        meta: _favMeta(),
+        cid: cid
+      };
+    }
     _dockLoad(function () { _favSave(rec); });
     var i = _cards.list.indexOf(c); if (i >= 0) _cards.list.splice(i, 1);
     try { c.el.remove(); } catch (e) {}
@@ -2320,20 +3674,51 @@
           cardEl.classList.toggle('del-mark', !!_dock.sel[it.id]);
         });
       } else {
+        if (!it.cid) { it.cid = it.gid || _mkCid(); _favSave(it); }   // 旧学习卡沿用 gid，普通卡才补新 cid
+        _pinReg(cardEl, it.cid);
         _pinBind(cardEl, it.label, function () { return it.text || ''; });   // 长按=带入上下文
-        (function () {   // 83:向上拖出=复制浮层卡。touch-action:pan-x=横滑归滚动、竖滑归拖出(旧版被滚动手势吃掉=拖不出的根因)
-          var sy0 = 0, drag = false;
+        (function () {   // 83:向上拖出后**同一手势**直接贴页；无有效正文落点才回退成浮动钉子卡。
+          // touch-action:pan-x=横滑归时间线、竖滑归拖出(旧版被滚动手势吃掉=拖不出的根因)。
+          var sx0 = 0, sy0 = 0, drag = false, moved = false, ghost = null;
           cardEl.style.touchAction = 'pan-x';
-          cardEl.addEventListener('pointerdown', function (ev) { sy0 = ev.clientY; drag = true; try { cardEl.setPointerCapture(ev.pointerId); } catch (e) {} });
+          cardEl.addEventListener('pointerdown', function (ev) {
+            sx0 = ev.clientX; sy0 = ev.clientY; drag = true; moved = false;
+            try { cardEl.setPointerCapture(ev.pointerId); } catch (e) {}
+          });
           cardEl.addEventListener('pointermove', function (ev) {
-            if (drag && (sy0 - ev.clientY) > 50) {
-              drag = false;
-              var _oc = _cardPush(it.isHtml ? it.raw : (it.raw || it.text), it.label, it.isHtml, false, it.cid || '');   // 95:拖出复制=同一张卡(同编号)
-              if (_oc) { _oc.pinned = true; _oc.pinMode = true; }   // 收藏夹拖出=默认钉子模式:不自动消失,拖动松手在正文=钉入(左上角为钉点)
-              _dockPanel(false); _dockBtn();
+            if (!drag) return;
+            if (!moved && (sy0 - ev.clientY) > 50) {
+              moved = true;
+              ghost = cardEl.cloneNode(true); ghost.className = 'vc-drag-ghost';
+              ghost.style.width = Math.max(240, Math.min(480, Math.round(window.innerWidth * 0.44))) + 'px';
+              document.body.appendChild(ghost);
+            }
+            if (moved && ghost) {
+              ev.preventDefault();
+              ghost.style.left = (ev.clientX - ghost.offsetWidth / 2) + 'px'; ghost.style.top = (ev.clientY - 26) + 'px';
+              var gr0 = ghost.getBoundingClientRect(); _dragFx(gr0.left, gr0.top, cardEl, ghost);
             }
           });
-          ['pointerup', 'pointercancel'].forEach(function (evn) { cardEl.addEventListener(evn, function () { drag = false; }); });
+          cardEl.addEventListener('pointerup', function (ev) {
+            if (!drag) return; drag = false;
+            var gr = null; try { if (ghost) gr = ghost.getBoundingClientRect(); } catch (e) {}
+            if (ghost) { ghost.remove(); ghost = null; }
+            _dragFxEnd();
+            if (!moved) return;
+            _dockPanel(false); _dockBtn();
+            var px = gr ? gr.left : ev.clientX, py = gr ? gr.top : ev.clientY;
+            var pinned = false;
+            try { pinned = _payloadPinAt(it, px, py, cardEl); } catch (e) {}
+            if (pinned) {
+              _placeFx(ev.clientX, ev.clientY);
+              try { if (typeof _toast === 'function') _toast('已从收藏夹贴到页面'); } catch (e) {}
+            } else {
+              var _oc = _payloadFloat(it, cardEl);   // 回退浮层仍是同编号、同状态机实例
+              if (_oc) { _oc.pinned = true; _oc.pinMode = true; }
+              try { if (typeof _toast === 'function') _toast('没落在正文上——卡片已浮出，可继续拖去钉住'); } catch (e) {}
+            }
+          });
+          cardEl.addEventListener('pointercancel', function () { drag = false; moved = false; if (ghost) { ghost.remove(); ghost = null; } _dragFxEnd(); });
         })();
       }
       sc.appendChild(w);
@@ -2357,8 +3742,9 @@
   }
   function _chipRender() {   // 77:侧栏开着时,选中内容=输入框上方竖排 chip(与旧上下文 chip 同风格,×=取消带入)
     var wrap = document.getElementById('vc-pin-chips');
-    var ks = Object.keys(_pins.map);
-    if (!_sideOpen() || !ks.length) { if (wrap) wrap.remove(); return; }
+    var effective = _effectivePins({ limit: 8, maxText: 2500 });
+    var items = effective.items || [];
+    if (!_sideOpen() || !items.length) { if (wrap) wrap.remove(); return; }
     var input = document.getElementById('asst-input');
     if (!input) return;
     if (!wrap) {
@@ -2367,14 +3753,18 @@
       input.parentNode.insertBefore(wrap, document.getElementById('asst-note-chips') || input);
     }
     wrap.innerHTML = '';
-    ks.forEach(function (k) {
+    items.forEach(function (item) {
+      var k = item.label || item.id;
       var chip = document.createElement('div'); chip.className = 'asst-fig-chip vc-pin-chip';
-      chip.innerHTML = '<span class="vc-pc-l">' + esc(k) + '</span><span class="vc-pc-s">' + esc((_pins.map[k] || '').slice(0, 30)) + '</span>' +
+      chip.innerHTML = '<span class="vc-pc-l">' + esc(k) + '</span><span class="vc-pc-s">' + esc((item.text || '').slice(0, 30)) + '</span>' +
         '<button type="button" class="vc-pc-x" aria-label="移除">✕</button>';
       chip.querySelector('.vc-pc-x').addEventListener('click', function () {
         var el0 = _pins.els[k];
         if (el0 && el0.classList) { el0.classList.remove('vc-picked'); delete el0.dataset.pinLabel; }
-        delete _pins.map[k]; delete _pins.els[k];
+        var cid0 = el0 && el0.dataset && el0.dataset.vcCid;
+        try { var registry0 = _ctxSelectionRegistry(); if (registry0 && item.id) registry0.deselect(item.id); } catch (e) {}
+        _pinForget(k, cid0, el0);
+        if (cid0) _pinPaint(cid0, false);
         _pinSync(); _chipRender();
       });
       wrap.appendChild(chip);
@@ -2438,7 +3828,7 @@
     if (i < 0) return;
     try {   // 77:选中的卡被×关闭=同时解除带入(卡都没了,别留幽灵参考)
       var lb = c.el.dataset && c.el.dataset.pinLabel;
-      if (lb && _pins.map[lb]) { delete _pins.map[lb]; delete _pins.els[lb]; _pinSync(); _chipRender(); }
+      if (lb && _pins.map[lb]) { _pinForget(lb, c.el.dataset && c.el.dataset.vcCid, c.el); _pinSync(); _chipRender(); }
     } catch (e) {}
     _cards.list.splice(i, 1);
     try { clearTimeout(c.t); } catch (e) {}
@@ -2450,7 +3840,7 @@
   //   钉页入口:卡头 📌 按钮(当前卡位)/ 拖到正文松手(该点)。钉成功=浮层卡转页面便签(_cardClose)。所有 vc-card 通用。
   function pinCardToPage(c, x, y) {
     if (!c || !c.el || !(window.RC && RC.stickynote)) return false;
-    var el = c.el, bd = el.querySelector('.vc-card-bd');
+    var el = c.el, bd = c.bd || el.querySelector('.vc-card-bd');
     var pts = [];
     if (x != null && y != null) { pts.push([x, y]); }   // 拖出松手:只认该点(非正文=不钉,落定)
     else { var r = el.getBoundingClientRect(); pts.push([r.left + Math.min(60, r.width / 2), r.top + Math.min(40, r.height / 2)]); pts.push([(window.innerWidth || 1024) / 2, (window.innerHeight || 768) / 2]); }   // 📌 按钮:卡位置 + 视野中央回退(卡落页边/空白时)
@@ -2458,10 +3848,15 @@
       try {
         if (bd && bd.__fc && RC.stickynote.createCardAt) {   // 制卡卡:rc-flashcard 状态机 → card 便签
           var st = bd.__fc;
-          var snap = st.cards.map(function (cc) { return { type: cc.type, front: cc.front, back: cc.back, cloze: cc.cloze, _st: cc._st, _showBack: cc._showBack, _nid: cc._nid, _next: cc._next }; });
+          // 唯一快照出口会保留 Anki/card/note/entity/source id、来源字段和
+          // _display* 投影。禁止在这里再次手抄字段，否则钉页就变成失忆副本。
+          var snap = (RC.flashcard && typeof RC.flashcard.snapshot === 'function')
+            ? RC.flashcard.snapshot(bd)
+            : [];
+          if (!snap.length) return false;
           return RC.stickynote.createCardAt(px, py, snap, st.gid);
-        } else if (bd && RC.stickynote.createHtmlAt) {   // 通用卡:HTML 快照 → html 便签(带主题色,钉入卡头同色)
-          return RC.stickynote.createHtmlAt(px, py, { content: bd.innerHTML, isHtml: true, label: c.label || '卡片', type: (el.style && el.style.getPropertyValue('--vc-tc')) || '', icon: (function () { try { var dd = el.querySelector('.vc-card-dot'); return dd ? dd.innerHTML : ''; } catch (e) { return ''; } })() });
+        } else if (bd && RC.stickynote.createHtmlAt) {   // 通用卡:HTML 快照 → html 便签；保留浮层卡 cid
+          return RC.stickynote.createHtmlAt(px, py, { content: bd.innerHTML, isHtml: true, label: c.label || '卡片', type: (el.style && el.style.getPropertyValue('--vc-tc')) || '', icon: (function () { try { var dd = el.querySelector('.vc-card-dot'); return dd ? dd.innerHTML : ''; } catch (e) { return ''; } })(), cid: c.cid || (el.dataset && el.dataset.vcCid) || '' });
         }
       } catch (e) {}
       return false;
@@ -2525,17 +3920,48 @@
     // 三态与浮层结果卡同参数(1318:dot:true+form+type+icon)→ 钉入卡同样 标记/长条/方块 单击循环(用户:收缩逻辑要一样)
     var d = _cardDom(spec.text, spec.label, !!spec.isHtml, { type: spec.type, mount: spec.mount, dot: true, form: (spec.form || 'full'), icon: spec.icon || '🗂' });
     var el = d.el;
+    var _cid0 = spec.cid || _mkCid();
+    var _emitForm = function () { try { spec.onForm && spec.onForm(_cardForm(el)); } catch (e) {} };
+    el.__bwCardSizeApply = typeof spec.onSize === 'function' ? spec.onSize : null;
+    el.__bwCardFormApply = function () { _emitForm(); };
+    _pinReg(el, _cid0);   // 钉页只是同一卡的另一个实例，不得因换宿主重发编号
     el.classList.add('vc-pinned');
     if (spec.type) el.classList.add('vc-typed');   // 有色磨砂(浮层同规矩 1326:type 色卡 = --vc-tc + vc-typed,卡头/边框/辉光同色)
     try { ['.vc-card-pin', '.vc-card-p', '.vc-card-x'].forEach(function (q) { var b0 = el.querySelector(q); if (b0) b0.remove(); }); } catch (e) {}   // 浮层结果卡同规矩(1328):▶/✕ 去掉;删除=拖到左上角删除区(用户拍板,无叉叉)
     try { var dup = d.bd.querySelector('.vc-if-hd'); if (dup) dup.remove(); } catch (e) {}
-    var _emitForm = function () { try { spec.onForm && spec.onForm(_cardForm(el)); } catch (e) {} };
     var hd0 = el.querySelector('.vc-card-hd');
     if (hd0) hd0.addEventListener('click', function (ev) { if (ev.target.closest('button')) return; _cycleForm(el); _emitForm(); });   // 展开态标记隐藏→头部就是形态按钮(浮层 2420 同规矩)
     var db0 = el.querySelector('.vc-card-dot');
     if (db0) db0.addEventListener('click', _emitForm);   // 标记 click 已绑 _cycleForm(先注册先执行)→ 这里读新形态回调持久化
     host.appendChild(el);
+    // 只有真正钉在页面上的 placement 才拥有尺寸状态。侧栏/收藏/复习虽与
+    // 它共享 cid 和选中态，但不会读写或投影这个设备级页面布局。
+    _cardSizePageReg(el, _cid0);
     return el;
+  }
+  // 侧栏对话流渲染(统一壳第三支:rc-toolchip 工具卡 / turnCard 结果卡·制卡卡都调它)——
+  //   与浮层 _cardPush、钉入 _renderInto **同一个 _cardDom**,长相/磨砂/三态(圆点·长条·方块)永远一致。
+  //   内联进对话流(vc-inflow:relative+100%宽,不 fixed);去 📌▶✕(对话记录不钉页/不念/不删,拖出=dragToDock 副本)。
+  //   壳这层只统一"长相+三态";专属交互(pinBind 选中 / dragToDock 拖出 / igWire 图 / mount 状态机)由**调用方拿 el 后自挂**。
+  function _renderInflow(host, spec) {
+    spec = spec || {};
+    var d = _cardDom(spec.text, spec.label, !!spec.isHtml, { type: spec.type, mount: spec.mount, dot: true, form: spec.form || 'full', icon: spec.icon || '🗂' });
+    var el = d.el;
+    el.classList.add('vc-inflow');
+    if (spec.type) el.classList.add('vc-typed');   // 有色磨砂(与浮层/钉入同规矩)
+    var _cid1 = spec.cid || _mkCid();
+    el.__bwCardSizeApply = typeof spec.onSize === 'function' ? spec.onSize : null;
+    _pinReg(el, _cid1);   // 侧栏/历史回放实例出生即登记，和浮层/收藏/页面处处同步
+    try { ['.vc-card-pin', '.vc-card-p', '.vc-card-x'].forEach(function (q) { var b0 = el.querySelector(q); if (b0) b0.remove(); }); } catch (e) {}
+    try { var dup = d.bd.querySelector('.vc-if-hd'); if (dup) dup.remove(); } catch (e) {}   // 内容自带标题条 → 剥(卡头已有 label,防双标题)
+    var hd0 = el.querySelector('.vc-card-hd');
+    if (hd0) hd0.addEventListener('click', function (ev) { if (ev.target.closest('button')) return; _cycleForm(el); });   // 展开态头部=形态循环(dot click 已在 _cardDom 绑)
+    // 事件不透传(与浮层 _cardPush 同规矩):侧栏卡点击/拖动不冒泡到 document 级监听(点词/选中工具栏/单图拖出),否则"拖动变钉子/误触"
+    ['pointerdown', 'pointerup', 'click', 'touchstart', 'touchend', 'dblclick'].forEach(function (evn) {
+      el.addEventListener(evn, function (ev) { ev.stopPropagation(); });
+    });
+    if (host) host.appendChild(el);
+    return { el: el, bd: d.bd };
   }
   function _cardPush(text, kindLabel, isHtml, force, cid, opts) {
     opts = opts || {};
@@ -2549,6 +3975,7 @@
     var d0 = _cardDom(text, kindLabel, isHtml, opts);
     var el = d0.el, _f0 = d0.f0, _bd = d0.bd;
     var _cid = cid || _mkCid();   // 95:卡片编号(浮层/侧栏/收藏夹同号 → 选中处处同步)
+    el.__bwCardSizeApply = typeof opts.onSize === 'function' ? opts.onSize : null;
     el.dataset.vcCid = _cid;
     var c = { el: el, t: null, free: false, dx: 0, dy: 0, label: kindLabel || '文字回复', raw: text, isHtml: !!isHtml };
     // 85:卡片不可透过——事件在卡内消化,不冒泡到 document 级监听(点词/选中工具栏等都挂 document)
@@ -2593,54 +4020,86 @@
       });
     }
     function _bindCardDrag(hd) {
-    if (!hd) return;
-    hd.style.cursor = 'grab'; hd.style.touchAction = 'none';
-    hd.addEventListener('pointerdown', function (ev) {
-      if (ev.target.closest('.vc-card-x')) return;
-      ev.preventDefault();
-      el.dataset.downT = String(Date.now());   // 131:按下时刻 → 抬手时判"短按才切形态"(长按=选中,不改形态)
-      var sx = ev.clientX - c.dx, sy = ev.clientY - c.dy, moved = false;
-      try { hd.setPointerCapture(ev.pointerId); } catch (e) {}
-      function mv(e2) {
-        var nx = e2.clientX - sx, ny = e2.clientY - sy;
-        if (!moved && (Math.abs(nx - c.dx) + Math.abs(ny - c.dy)) > 6) {   // 粘滞阈值:拽过才起
-          moved = true; c.free = true;
-          el.style.transition = 'none';                     // 跟手期零动画(粘滞/闪烁的根治)
-          if (c.pinMode) el.style.transformOrigin = '0 0';   // #51:钉子卡 scale 左上原点——拖动中左上=钉入位置(中心放大外扩≈5px=松手跳位根因)
-          el.classList.add('vc-lift');                      // 弹起态:scale 1.03+深阴影(见 CSS)
-          _cardLayout();
-        }
-        if (moved) {
-          c.dx = nx; c.dy = ny; el.style.transform = 'translate(' + c.dx + 'px,' + c.dy + 'px) scale(1.03)';
-          el.dataset.dragged = '1'; el.dataset.touched = '1';   // 动过 → 出结果不自动展开;松手后的 click 不算形态切换
-          _dockHint(_inDockZone(e2.clientX, e2.clientY));   // 77b:接近底部=收藏区光晕提示
-          _trashShow(true);                                 // 134:拖起来就亮出左上角删除区
+      if (!hd) return;
+      hd.style.cursor = 'grab'; hd.style.touchAction = 'none';
+      var moved = false, baseDx = 0, baseDy = 0, baseFree = false, baseTransition = '', baseOrigin = '';
+      return _bindChargedDrag(hd, {
+        holdMs: 420,
+        slop: 8,
+        dragSlop: 1,
+        feedbackEl: el,
+        canStart: function (ev) {
+          var control = ev.target && ev.target.closest &&
+            ev.target.closest('.vc-card-x,.vc-card-pin,.vc-card-p,button,a,input,textarea,select,[contenteditable="true"]');
+          if (control && !(control === hd && hd.classList.contains('vc-card-dot'))) return false;
+          el.dataset.downT = String(Date.now());   // 真短点才由既有 click 切形态；ready 后 helper 会吞合成 click
+          moved = false;
+          baseDx = c.dx || 0; baseDy = c.dy || 0; baseFree = !!c.free;
+          baseTransition = el.style.transition; baseOrigin = el.style.transformOrigin;
+          return true;
+        },
+        onReady: function () {
+          try { if (typeof el.__bwCancelPinHold === 'function') el.__bwCancelPinHold(); } catch (e0) {}
+        },
+        onMove: function (session, e2) {
+          if (!moved && session.moved) {
+            moved = true;
+            try { if (typeof el.__bwCancelPinHold === 'function') el.__bwCancelPinHold(); } catch (e0) {}
+            c.free = true;
+            el.style.transition = 'none';                     // 跟手期零动画(粘滞/闪烁的根治)
+            if (c.pinMode) el.style.transformOrigin = '0 0';   // #51:钉子卡 scale 左上原点——拖动中左上=钉入位置
+            el.classList.add('vc-lift');                       // 弹起态:scale 1.03+深阴影
+            _cardLayout();
+          }
+          if (!moved) return;
+          c.dx = baseDx + session.dx; c.dy = baseDy + session.dy;
+          el.style.transform = 'translate(' + c.dx + 'px,' + c.dy + 'px) scale(1.03)';
+          el.dataset.touched = '1';                           // 动过 → 出结果不自动展开
+          _dockHint(_inDockZone(e2.clientX, e2.clientY));      // 77b:接近底部=收藏区光晕提示
+          _trashShow(true);                                    // 134:拖起来就亮出左上角删除区
           _trashHot(_inTrashZone(e2.clientX, e2.clientY));
           if (c.pinMode) { try { var _er9 = el.getBoundingClientRect(); _dragFx(_er9.left + 1, _er9.top + 1, el, el); } catch (e9) {} }   // #51:探测点=卡左上角+1(=钉入点);隐自身穿透
-        }
-      }
-      function up(e3) {
-        hd.removeEventListener('pointermove', mv); hd.removeEventListener('pointerup', up); hd.removeEventListener('pointercancel', up);
-        _dockHint(false); _trashShow(false); _dragFxEnd();
-        if (moved && e3 && _inTrashZone(e3.clientX, e3.clientY)) {   // 134:往上拖到左上角=删除(手动消失通道)
-          try { el.style.transition = 'transform .26s ease,opacity .26s ease'; el.style.transform = 'translate(' + c.dx + 'px,' + c.dy + 'px) scale(.5)'; el.style.opacity = '0'; } catch (e) {}
-          setTimeout(function () { _cardClose(c); }, 200);
-          try { if (typeof _toast === 'function') _toast('已删除'); } catch (e) {}
-          return;
-        }
-        if (moved && e3 && _inDockZone(e3.clientX, e3.clientY)) { _dockAdd(c); return; }   // 77b:松手在区内=收入收藏夹
-        if (moved && c.pinMode && e3 && window.RC && RC.stickynote) {   // 钉子模式卡(侧栏/收藏夹拖出源):松手=钉入,**方块左上角位置**就是钉入点(用户拍板)
-          var _pr = el.getBoundingClientRect();
-          if (pinCardToPage(c, _pr.left + 1, _pr.top + 1)) return;   // 落正文=钉住(偏移 +1 与拖动视觉对齐;旧 +8=8px 跳位);非正文=落定卡保持显示
-        }
-        if (moved) {   // 落定:带一点弹性回落(overshoot 曲线),像重新"粘"回桌面
+        },
+        onEnd: function (session, e3) {
+          var wasMoved = moved && session.moved;
+          moved = false;
+          el.dataset.downT = '';
+          _dockHint(false); _trashShow(false); _dragFxEnd();
+          if (!wasMoved) { el.classList.remove('vc-lift'); return; }
+          if (e3 && _inTrashZone(e3.clientX, e3.clientY)) {   // 134:往上拖到左上角=删除(手动消失通道)
+            try { el.style.transition = 'transform .26s ease,opacity .26s ease'; el.style.transform = 'translate(' + c.dx + 'px,' + c.dy + 'px) scale(.5)'; el.style.opacity = '0'; } catch (e) {}
+            setTimeout(function () { _cardClose(c); }, 200);
+            try { if (typeof _toast === 'function') _toast('已删除'); } catch (e) {}
+            return;
+          }
+          if (e3 && _inDockZone(e3.clientX, e3.clientY)) { _dockAdd(c); return; }   // 77b:松手在区内=收入收藏夹
+          if (c.pinMode && e3 && window.RC && RC.stickynote) {   // 钉子模式卡(侧栏/收藏夹拖出源):松手=钉入,**方块左上角位置**就是钉入点(用户拍板)
+            var _pr = el.getBoundingClientRect();
+            if (pinCardToPage(c, _pr.left + 1, _pr.top + 1)) return;   // 落正文=钉住(偏移 +1 与拖动视觉对齐);非正文=落定卡保持显示
+          }
+          // 落定:带一点弹性回落(overshoot 曲线),像重新"粘"回桌面
           el.style.transition = 'transform .38s cubic-bezier(.34,1.56,.64,1),box-shadow .3s,opacity .32s';
           el.classList.remove('vc-lift');
           el.style.transform = 'translate(' + c.dx + 'px,' + c.dy + 'px)';
+        },
+        onCancel: function () {
+          var hadMoved = moved;
+          moved = false;
+          el.dataset.downT = '';
+          _dockHint(false); _trashShow(false); _dragFxEnd();
+          el.classList.remove('vc-lift');
+          if (!hadMoved) return;
+          c.dx = baseDx; c.dy = baseDy; c.free = baseFree;
+          el.style.transition = baseTransition;
+          el.style.transformOrigin = baseOrigin;
+          el.style.transform = 'translate(' + c.dx + 'px,' + c.dy + 'px)';
+          try { _cardLayout(); } catch (e) {}
+        },
+        onClickSuppressed: function () {
+          el.dataset.downT = '';
+          el.dataset.dragged = '';
         }
-      }
-      hd.addEventListener('pointermove', mv); hd.addEventListener('pointerup', up); hd.addEventListener('pointercancel', up);
-    });
+      });
     }
     if (opts.dot) {   // 工具卡:左上角锚定 + 交错重叠落点(不进右下堆叠,免得展开时往左上长、标记乱跑)
       c.free = true;
@@ -2692,10 +4151,12 @@
     var f = _cardForm(el);
     _cardForm(el, f === 'dot' ? 'min' : (f === 'min' ? 'full' : 'dot'));
   }
-  // 形态读写:'dot'(圆) / 'min'(长条) / 'full'(方块)。侧栏内联卡只有 min/full 两态(用户要求:不要圆)。
+  // 形态读写:'dot'(圆) / 'min'(长条) / 'full'(方块)。浮层/钉入卡三态;**侧栏内联卡(vc-inflow)只 min/full 两态**——
+  //   实测(2026-07-21):对话流里圆点态缩成孤立 40×40 小圆(像钉子按钮)且与拖动手势冲突(用户实锤"拖动变钉子"),
+  //   对话记录不需要"缩圆点省空间"(那是浮层飘屏的需求),故内联卡不进圆点。壳/磨砂/正文仍与字幕卡完全统一。
   function _cardForm(el, f) {
     if (f === undefined) return el.classList.contains('vc-dot') ? 'dot' : (el.classList.contains('vc-min') ? 'min' : 'full');
-    if (f === 'dot' && el.classList.contains('vc-inflow')) f = 'min';
+    if (f === 'dot' && el.classList.contains('vc-inflow')) f = 'min';   // 内联卡圆点→长条(对话流不缩圆点,消除"拖动变钉子")
     el.classList.toggle('vc-dot', f === 'dot');
     el.classList.toggle('vc-min', f === 'min');
     if (f === 'min') {   // 长条:没摘要就从正文摘一行
@@ -2888,8 +4349,94 @@
     });
     return _h2cP;
   }
+  // 可选 DocumentHost 视觉表面。PDF/EPUB 没实现时原路径完全不变；普通网页只在 adapter
+  // 提供真实正文元素、布局尺寸和 canonical strokes，不复制截图/绘制算法。
+  function _visualSurface() {
+    try {
+      var ad = window.RC && RC.adapter ? RC.adapter() : null;
+      var s = ad && ad.getVisualSurface ? ad.getVisualSurface() : null;
+      if (!s || !s.element || !(s.width > 0) || !(s.height > 0)) return null;
+      s.strokes = Array.isArray(s.strokes) ? s.strokes : [];
+      return s;
+    } catch (e) { return null; }
+  }
+  function _surfaceInkCrop(s) {
+    var x0 = 1, y0 = 1, x1 = 0, y1 = 0;
+    s.strokes.forEach(function (st) {
+      (st.p || []).forEach(function (pt) {
+        x0 = Math.min(x0, Number(pt[0])); y0 = Math.min(y0, Number(pt[1]));
+        x1 = Math.max(x1, Number(pt[0])); y1 = Math.max(y1, Number(pt[1]));
+      });
+    });
+    if (!(x1 >= x0 && y1 >= y0)) return null;
+    var bx0 = x0 * s.width, by0 = y0 * s.height, bx1 = x1 * s.width, by1 = y1 * s.height;
+    var bw = Math.max(1, bx1 - bx0), bh = Math.max(1, by1 - by0);
+    var pad = Math.max(36, Math.min(180, Math.max(bw, bh) * 0.16));
+    var vp = s.viewport || {};
+    var wantW = Math.max(bw + pad * 2, Math.min(Number(vp.width) || 420, 420));
+    var wantH = Math.max(bh + pad * 2, Math.min(Number(vp.height) || 280, 280));
+    var cx = (bx0 + bx1) / 2, cy = (by0 + by1) / 2;
+    var left = Math.max(0, Math.min(s.width - Math.min(wantW, s.width), cx - wantW / 2));
+    var top = Math.max(0, Math.min(s.height - Math.min(wantH, s.height), cy - wantH / 2));
+    return {
+      x: left, y: top,
+      width: Math.min(wantW, s.width),
+      height: Math.min(wantH, s.height)
+    };
+  }
+  function _drawSurfaceInk(canvas, s, crop) {
+    if (!canvas || !s.strokes.length || !window.RCInk || !RCInk.drawStroke) return;
+    var ctx2 = canvas.getContext('2d');
+    var sx = canvas.width / Math.max(1, crop.width), sy = canvas.height / Math.max(1, crop.height);
+    s.strokes.forEach(function (st) {
+      var clone = {
+        t: st.t || 'pen', c: st.c || '#e74c3c', w: Number(st.w) || 2.5,
+        p: (st.p || []).map(function (pt) {
+          return [
+            ((Number(pt[0]) * s.width) - crop.x) / crop.width,
+            ((Number(pt[1]) * s.height) - crop.y) / crop.height
+          ];
+        })
+      };
+      if (clone.p.length) RCInk.drawStroke(ctx2, clone, canvas.width, canvas.height, Math.min(sx, sy));
+    });
+  }
+  async function _captureSurface(s, crop) {
+    if (!s || !crop || !(crop.width > 0) || !(crop.height > 0)) return null;
+    await _loadH2C();
+    var longEdge = Math.max(crop.width, crop.height, 1);
+    var canvas = await window.html2canvas(s.element, {
+      x: Math.round(crop.x), y: Math.round(crop.y),
+      width: Math.round(crop.width), height: Math.round(crop.height),
+      scale: Math.min(2, window.devicePixelRatio || 1, 1600 / longEdge),
+      useCORS: true, logging: false, backgroundColor: '#ffffff',
+      ignoreElements: function (el) {
+        var id = el.id || '';
+        return id === 'bw-reader-host' || id === 'bw-reader-pins' ||
+               id === 'ep-side' || id === 'rc-vc' || id === 'vc-cap' ||
+               id === 'word-pop' || id === 'sel-toolbar';
+      }
+    });
+    _drawSurfaceInk(canvas, s, crop);
+    var b64 = '', qs = [0.85, 0.7, 0.5];
+    for (var qi = 0; qi < qs.length; qi++) {
+      b64 = (canvas.toDataURL('image/jpeg', qs[qi]).split(',')[1]) || '';
+      if (b64.length <= 900000) break;
+    }
+    return b64.length > 3000 ? { media_type: 'image/jpeg', b64: b64 } : null;
+  }
   async function _captureView() {
     try {
+      var surface = _visualSurface();
+      if (surface) {
+        var vp = surface.viewport || {};
+        return await _captureSurface(surface, {
+          x: Math.max(0, Number(vp.x) || 0),
+          y: Math.max(0, Number(vp.y) || 0),
+          width: Math.min(surface.width, Number(vp.width) || window.innerWidth),
+          height: Math.min(surface.height, Number(vp.height) || window.innerHeight)
+        });
+      }
       await _loadH2C();
       // 60 尺寸上限(审核P1):长边≤1600px——2×DPR 整视口无上限时复杂页 base64 可超服务端消息上限,断的是整条控制 WS
       var longEdge = Math.max(window.innerWidth, window.innerHeight);
@@ -2942,6 +4489,8 @@
   // 用户点子:前端截图但**灵活截局部**——按笔迹外接框(+留白上下文)只截那一小块,而非整屏。所见即所得 + 聚焦。
   async function _captureInkRegion() {
     try {
+      var surface = _visualSurface();
+      if (surface && surface.strokes.length) return await _captureSurface(surface, _surfaceInkCrop(surface));
       var el = _curInkPageEl();
       var strokes = el && el.__inkStrokes;
       if (!el || !strokes || !strokes.length) return null;
@@ -3220,7 +4769,7 @@
       _rtcCapReset(); capClear();   // 用户插话=打断:字幕清掉回"正在听"(对齐 WS 版 450 语义)
       if (_ttsOn()) { try { bargeIn(); } catch (_) {} }   // 61:抢话同时打断 TTS 代念残播
       _rtc.aEnd = 0; _rtc.aStart = 0;   // 67:打断=2.1 音频已被截,代念不用再等它
-      try { window.__vcSyncNow && window.__vcSyncNow(); } catch (_) {}
+      _requestSyncNow();
     } else if (t === 'output_audio_buffer.started') {   // WebRTC 专属:模型音频**真正开始播** → 此刻开录
       _rec.oab = true;
       if (!_rec.mr) _recStart();
@@ -3395,10 +4944,9 @@
   }
   function _ctlOpen() {   // ㊺P1/122(#290):控制 WS 连接(可恢复重连,见 references/rtc-controller-design.md)
     try {
-      var proto0 = location.protocol === 'https:' ? 'wss://' : 'ws://';
       // fe=2 版本握手(59):声明"本前端有 P2 分工逻辑",relay 才接管工具;旧页面 JS 不带此参数
       // → relay 退回 P1 观察,防新旧换代窗口双执行(同一工具前端+relay 各跑一遍+create 撞车)
-      var cw = new WebSocket(proto0 + location.host + '/voice-rt?mode=rtc&fe=4&call_id=' + encodeURIComponent(_rtc.callId) +
+      var cw = _openWs('/voice-rt?mode=rtc&fe=4&call_id=' + encodeURIComponent(_rtc.callId) +
                              '&file=' + encodeURIComponent(_rtc.ctxFile) + '&page=' + (_rtc.ctxPage || 0) +
                              '&uid=' + encodeURIComponent(_rtc.uid || '') + '&tk=' + encodeURIComponent(_rtc.tk || ''));
       cw.onmessage = function (ev) {
@@ -3412,7 +4960,7 @@
               // relay 重启后 book 是全新的却永远拿不回墨迹/选中(see_ink 因此没素材)。清指纹才推得动。
               // 安全性:_rtc._inkFp/_rtc.sel 不动 → 同一份墨迹重推只喂 relay,不会再朝模型注一遍"笔迹变了"。
               _stateFp = null; _inkFp = '';
-              try { window.__vcSyncNow && window.__vcSyncNow(); } catch (e2) {}
+              _requestSyncNow();
       try { _ttsIrqSync(); } catch (e2) {}   // 131:接通后按当前档位/代念开关,自动进入「可打断代念」
             }
           }
@@ -3511,6 +5059,7 @@
   }
 
   async function rtcStart(opts) {
+    if (_reviewVoiceGate(false)) return;
     // 93(用户实测双回答根因):单飞锁——通话已在/舞步进行中,任何来路的第二次拨号直接吞。
     // 没有这把锁时,清空重拨与迟到的自动重连可各建一个 call,两个模型同时听同一句各答一条。
     if (_rtc.on || _connecting) { try { console.warn('[vc] rtcStart 被单飞锁拦下(on=' + _rtc.on + ' connecting=' + _connecting + ')'); } catch (e) {} return; }
@@ -3532,18 +5081,30 @@
       // 挂断/朗读会把 iOS 音频会话切回 'playback'(该类别**静音麦克风**)——开麦前必须先撂下朗读通道
       // 再显式声明 play-and-record,否则第一次通话能成、之后每次都"启动失败"
       try { await _ttsShutdown(); } catch (e) {}
+      if (g !== _gen || _reviewVoiceGate(false)) {
+        if (g === _gen) { _connecting = false; callBtnConnecting(false); }
+        return;
+      }
       _audioSession('play-and-record');
       // ㊶ 指南§8.1:instructions 恒定(不含书页动态内容)→ 跨会话缓存可命中;开话视口进拉模式池,首次开口才注入
       try { _rtc.pendText = String(((window.RC && RC.adapter && RC.adapter().getContext()) || {}).visible_text || '').slice(0, 2000); } catch (e) {}
       var sres = await (await fetch('/api/assistant/rtc-session', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ file: _rtc.ctxFile, page: _rtc.ctxPage }) })).json();
       if (!sres || !sres.ok) throw new Error((sres && sres.error) || 'rtc-session 失败');
+      if (g !== _gen || _reviewVoiceGate(false)) {
+        if (g === _gen) { _connecting = false; callBtnConnecting(false); }
+        return;
+      }
       _rtc.imgOn = !!sres.rt_image;
       _rtc.model = sres.model || '';   // ㊶ 账本按模型分价表(mini vs 标准版差 6-8 倍)
       _rtc.compactTh = sres.compact_tokens || 0;   // ㊳ 会话内压缩阈值(0=关)
       _rtc.items = []; _rtc.inTok = 0; _rtc.lastCompact = 0;
       var mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
-      if (g !== _gen) { mic.getTracks().forEach(function (t) { t.stop(); }); return; }
+      if (g !== _gen || _reviewVoiceGate(false)) {
+        mic.getTracks().forEach(function (t) { t.stop(); });
+        if (g === _gen) { _connecting = false; callBtnConnecting(false); }
+        return;
+      }
       var pc = new RTCPeerConnection();
       mic.getTracks().forEach(function (t) {
         pc.addTrack(t, mic);
@@ -3578,6 +5139,11 @@
       };
       var offer = await pc.createOffer();
       await pc.setLocalDescription(offer);
+      if (g !== _gen || _reviewVoiceGate(false)) {
+        _rtcAbandon(pc, mic, '');
+        if (g === _gen) { _connecting = false; callBtnConnecting(false); }
+        return;
+      }
       // 133(配置错位,外部评审揪出):/rtc-call 的后端**忽略** body["session"](安全加固:防篡改型号/token 上限),
       // 一律用 body 的 file/page **重建**会话——可这里以前根本没发 file/page → 真正建起来的 OpenAI 会话
       // 书名为空、page=0(日志实证:ASR prompt 里只有通用"学习伴读通话",没有书名)。
@@ -3585,7 +5151,11 @@
       var cres = await (await fetch('/api/assistant/rtc-call', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ sdp: offer.sdp, file: _rtc.ctxFile, page: _rtc.ctxPage }) })).json();
       if (!cres || !cres.ok) throw new Error((cres && cres.error) || 'SDP 代理失败');
-      if (g !== _gen) { _rtcAbandon(pc, mic, cres.call_id); return; }
+      if (g !== _gen || _reviewVoiceGate(false)) {
+        _rtcAbandon(pc, mic, cres.call_id);
+        if (g === _gen) { _connecting = false; callBtnConnecting(false); }
+        return;
+      }
       _rtc.callId = cres.call_id || '';   // sideband 注入(后端发大图)要用
       _rtc.uid = cres.uid || ''; _rtc.tk = cres.ticket || '';   // 133:单通话唯一性票据(relay 验签后才敢接管旧通话)
       await pc.setRemoteDescription({ type: 'answer', sdp: cres.sdp });
@@ -3594,7 +5164,11 @@
       // 把自己的 pc 覆盖写进 _rtc**,新通话的 pc 就此失去引用:关不掉、却还活着、还在喂麦克风
       //  → 同一浏览器两路通话都听同一句话、各答一次(实测 17:48 那次 4 秒内两次拨号即此)。
       // 每个 await 之后都必须重新验世代;过期就把**自己建的**资源全收掉(含服务端已建的 call)。
-      if (g !== _gen) { _rtcAbandon(pc, mic, _rtc.callId); return; }
+      if (g !== _gen || _reviewVoiceGate(false)) {
+        _rtcAbandon(pc, mic, _rtc.callId);
+        if (g === _gen) { _connecting = false; callBtnConnecting(false); }
+        return;
+      }
       _rtc.pc = pc; _rtc.dc = dc; _rtc.mic = mic; _rtc.on = true;
       _rtc.t0 = Date.now(); _rtc.toolN = 0; _rtc.warned = 0;   // ㊷ §12/§13:会话时长与工具调用护栏计数
       _connecting = false;
@@ -3658,6 +5232,7 @@
   }
   async function start(opts) {
     opts = opts || {};
+    if (_reviewVoiceGate(false)) return;
     // 108(用户实测 Grok 多连接并存):单飞锁——93 只锁了 rtcStart,WS 引擎这条路漏配。
     // ws 活着/舞步进行中,任何来路的第二次拨号直接吞(teardown/断线都会把 ws 置 null,合法重拨不受影响)。
     if (ws || _connecting) { try { console.warn('[vc] start 被单飞锁拦下(ws=' + !!ws + ' connecting=' + _connecting + ')'); } catch (e) {} return; }
@@ -3669,10 +5244,14 @@
     // 自己建的资源退出(否则 iOS 卡死的旧回合会在用户触屏后"复活",跟新回合抢出双连接+泄漏 AudioContext)
     var g = ++_gen, myAc = null, myMic = null;
     _upRate = 16000; _halfDuplex = false; _lastPlayEnd = 0;   // 每次连接复位;GPT 由 relay 的 up_rate 事件设置
-    function _dead() { return g !== _gen; }
+    function _dead() { return g !== _gen || _assistantInReview(); }
     function _cleanLocal() {
       try { if (myMic) myMic.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
       try { if (myAc) myAc.close(); } catch (e) {}
+      if (g === _gen && _assistantInReview()) {
+        _connecting = false;
+        callBtnConnecting(false);
+      }
     }
     _connecting = true;   // 建立窗口(到 ws 赋值前):挡住 _ttsEnsure 把类别改回 playback(那会让开出来的麦静音)
     try {
@@ -3701,8 +5280,7 @@
         ? '?mode=agent' + _agentCtxQs()
         : '?file=' + encodeURIComponent(opts.file || '') + '&page=' + (opts.page || 0) + (toggle._fresh ? '&fresh=1' : '');
       toggle._fresh = false;
-      var proto = location.protocol === 'https:' ? 'wss://' : 'ws://';
-      ws = new WebSocket(proto + location.host + '/voice-rt' + qs);
+      ws = _openWs('/voice-rt' + qs);
       if (_dead()) { try { ws.close(); } catch (e) {} ws = null; _cleanLocal(); return; }   // 108:过期回合不许留活连接
       _connecting = false;   // ws 已赋值:_ttsEnsure 的 !ws gate 接棒
       ws.binaryType = 'arraybuffer';
@@ -3739,6 +5317,7 @@
         else if (m.event === 359) {   // 一轮播完
           _playStat = { t0: 0, queued: 0 };   // 整轮播完=无需 truncate,统计清零
           try { if (window.__asstVoiceLog) { var _cw = _wsRecFinish(false); window.__asstVoiceLog(_lastU, curAText, (toggle._opts || {}).file, (toggle._opts || {}).page, _cw ? { clip: _cw } : null); _lastU = ''; } } catch (e) {}   // ㉛:轮次落库(与文字对话同历史)+66b 原声 clip
+          curAText = ''; curAEl = null;   // #53②:一轮播完清累加器 → 下一轮(非打断式提问)从空开始,不再 A1A2 合并(event 450 打断路 3774 早有此清,359 漏了=既有 bug)。不加 reset:顺序由 rc-assistant 的 _vAnswered 门管,避免双重换轮
           if (p.status_code === '20000002') { setSt('👋 好,下次再聊'); setTimeout(function () { teardown(true); }, 2500); }   // 说"挂了吧/再见"→播完告别语自动挂断
           else _capMaybeHide(2500);   // 字幕停留几秒 → 回"正在听"等待态
         }
@@ -3748,7 +5327,7 @@
           try { if (window.__asstVoiceLog && (curAText || _lastU)) { var _cw2 = _wsRecFinish(true); window.__asstVoiceLog(_lastU, curAText, (toggle._opts || {}).file, (toggle._opts || {}).page, _cw2 ? { clip: _cw2 } : null); _lastU = ''; } else { _wsRecAbort(); } } catch (e) {}   // ㉛:被打断的半截轮也落库(下一轮覆盖前)+66b 原声(无文本轮=丢录音)
           stopPlayback(); curAText = ''; curAEl = null;
           try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (e) {}   // ㉛:断 AI 轮气泡(下一轮开新气泡,别覆盖旧的)
-          try { window.__vcSyncNow && window.__vcSyncNow(); } catch (e) {}
+          _requestSyncNow();
         }
         else if (m.event === 'bridge_answer') {   // 99:回声桥 answer
           try { if (_abridge.pc) _abridge.pc.setRemoteDescription({ type: 'answer', sdp: (p || {}).sdp || '' }); } catch (e2) {}
@@ -3769,6 +5348,16 @@
   }
 
   function teardown(closeBox) {
+    if (_computerVoiceUnsub) {
+      try { _computerVoiceUnsub(); } catch (e) {}
+      _computerVoiceUnsub = null;
+    }
+    try {
+      if (window.RC && RC.computerVoice && RC.computerVoice.isActive &&
+          RC.computerVoice.isActive()) {
+        RC.computerVoice.stop('reader-hangup').catch(function () {});
+      }
+    } catch (e) {}
     try { _wsRecAbort(); } catch (e) {}   // 66b:挂断=丢弃未定稿录音(已定稿的由闭包照常上传)
     _gen++;   // 杀死在飞的 start(卡在 iOS resume/getUserMedia 上的旧回合过期自毁,不会复活抢连接)
     _connecting = false;
@@ -3804,20 +5393,72 @@
 
   // 通话引擎分流(㉚):s2s 通话按设置选 WebRTC 直连(外放无回声+全双工)或 WS relay(豆包 S2S / GPT-WS);
   // agent 模式(mic 长按 ASR)恒走豆包 relay,不受 rt_engine 影响(与 WS 版 relay 按 mode 分发同语义)
+  function _computerVoiceStart(opts, generation) {
+    if (!window.RC || !RC.computerVoice ||
+        typeof RC.computerVoice.startFromUserGesture !== 'function') {
+      callBtnConnecting(false);
+      setSt('电脑客户端组件未加载');
+      try { RC.toast('电脑客户端组件未加载'); } catch (e) {}
+      return;
+    }
+    if (_computerVoiceUnsub) {
+      try { _computerVoiceUnsub(); } catch (e) {}
+      _computerVoiceUnsub = null;
+    }
+    // 电脑桥不自动重连；断线必须由用户再次点电话按钮，避免重复快捷键。
+    _userHung = true;
+    _computerVoiceUnsub = RC.computerVoice.onStatus(function (status) {
+      if (generation !== _gen) return;
+      var state = status && status.state || '';
+      setSt(status && status.message || ('电脑客户端:' + state));
+      if (state === 'connected') {
+        callBtnConnecting(false);
+        callBtnOn(true);
+        taPlaceholder('电脑客户端通话中…');
+      } else if (state === 'failed' || state === 'stopped') {
+        callBtnConnecting(false);
+        callBtnOn(false);
+        taPlaceholder(null);
+      }
+    });
+    setSt('正在确认电脑客户端…');
+    callBtnConnecting(true);
+    RC.computerVoice.startFromUserGesture(opts || {}).then(function () {
+      if (generation !== _gen) {
+        RC.computerVoice.stop('stale-reader-start').catch(function () {});
+      }
+    }).catch(function (error) {
+      if (generation !== _gen) return;
+      _userHung = true;
+      callBtnConnecting(false);
+      callBtnOn(false);
+      setSt((error && error.message) || '电脑客户端启动失败');
+      taPlaceholder(null);
+      try {
+        if (window.RC && RC.toast) {
+          RC.toast((error && error.message) || '电脑客户端启动失败');
+        }
+      } catch (e) {}
+    });
+  }
   toggle._connect = function (opts) {
+    if (_reviewVoiceGate(false)) return;
     if (mode !== 's2s') { start(opts); return; }
     // 133:这个 fetch 以前不受世代管辖 —— 用户在它在途时挂断,迟到的 .then 照样把拨号**复活**,
     // 建出一路没人管的通话。拨号前记世代,回调里过期就直接丢弃。
     var g0 = _gen;
     fetch('/api/assistant/voice-config').then(function (r) { return r.json(); }).then(function (d) {
-      if (g0 !== _gen) { try { console.warn('[vc] voice-config 迟到,拨号已取消'); } catch (e) {} return; }
-      if ((((d || {}).cfg) || {}).rt_engine === 'openai_rtc') rtcStart(opts);
+      if (g0 !== _gen || _reviewVoiceGate(false)) { try { console.warn('[vc] voice-config 迟到或已进入复习模式,拨号已取消'); } catch (e) {} return; }
+      var engine = (((d || {}).cfg) || {}).rt_engine;
+      if (engine === 'computer_client') _computerVoiceStart(opts, g0);
+      else if (engine === 'openai_rtc') rtcStart(opts);
       else start(opts);
-    }).catch(function () { if (g0 === _gen) start(opts); });
+    }).catch(function () { if (g0 === _gen && !_reviewVoiceGate(false)) start(opts); });
   };
   function toggle(opts) {
     injectCss();
     opts = opts || {};
+    if (_reviewVoiceGate(true)) return false;
     // ㉟ 唯一侧栏原则:调用方没带 file/page(EPUB 的通话按钮直接点、无 21-misc-ai 接线)→ 经中间层
     //    RC.adapter().getContext() 补齐;EPUB 的"page"=当前 section idx+1(1-based 章号,后端按 .epub 分流取章文本)
     if (!opts.file) {
@@ -3828,12 +5469,20 @@
       } catch (e) {}
     }
     mode = (opts && opts.mode) || 'agent';
+    try {
+      if (window.RC && RC.computerVoice && RC.computerVoice.isActive &&
+          RC.computerVoice.isActive()) {
+        teardown(false);
+        setSt('已挂断(再点 📞 重新通话)');
+        return true;
+      }
+    } catch (e) {}
     if (ws) { teardown(false); setSt('已挂断(再点 📞 重新通话)'); return; }
     if (mode === 'agent') {   // agent 模式无浮层:状态全靠按钮特效(绿=在听/蓝=在念)+ 输入框(转写/placeholder)
       toggle._opts = opts || {};
       taPlaceholder('连接语音…');
       start(toggle._opts);
-      return;
+      return true;
     }
     if (!box) {
       box = document.createElement('div'); box.id = 'rc-vc';
@@ -3892,6 +5541,7 @@
     setSt('连接中…');
     callBtnConnecting(true);   // 96:豆包/GPT-WS 路径同样点亮等待态
     toggle._connect(toggle._opts);
+    return true;
   }
 
   // 翻页同步:仅 s2s 模式需要(agent 模式每次发送时侧栏 ctx() 自带当前页,天然跟页走)
@@ -3916,7 +5566,10 @@
   // 指纹去重:变化(含变空=取消选中/点掉 chip)才发;relay 端再比对,真变了才 UpdateConfig。
   var _stateFp = null;
   function syncState(state) {
-    if (mode !== 's2s' || !ws || ws.readyState !== 1) return;
+    // #54(用户实锤"语音模式选中 AI 不知道"):去掉 mode!=='s2s' 限制——RTC 路(openai_rtc)全局 ws 是 shim,
+    //   ws.send 会镜像给控制 WS(1856)让 relay 拿到选中(page/ink 一直这么上报所以正常);只 s2s 发=RTC 路选中
+    //   从不上报 → relay book.sel 空 → 开口时注入空 → AI 不知道选中。shim readyState 恒 1,下面 ws.send 照发。
+    if (!ws || ws.readyState !== 1) return;
     state = state || {};
     var fp; try { fp = JSON.stringify(state); } catch (e) { fp = String(state.sel || '') + '|' + (state.figs || 0); }
     if (fp === _stateFp) return;
@@ -3932,6 +5585,10 @@
     try {
       var b = e.target && e.target.closest ? e.target.closest('[data-q="clear"]') : null;
       if (!b) return;
+      // 复习助手有独立历史/摘要/清空域；清复习对话不能顺手移动普通
+      // 助手的长期学习记忆起点。
+      if (RC.assistant && RC.assistant.getMode &&
+          RC.assistant.getMode() === 'review') return;
       setTimeout(function () {   // 等 clear 本体先跑完,再问(不阻塞清空)
         if (confirm('把「回顾学习」的记忆起点也设为现在吗?\n(之前的学习记录将不再被回顾提起;学习档案本身保留)')) {
           _setCutoff(Math.floor(Date.now() / 1000), function (ok) { if (typeof _toast === 'function') _toast(ok ? '记忆起点=现在' : '设置失败'); });
@@ -3944,6 +5601,8 @@
     try {
       var b = e.target && e.target.closest ? e.target.closest('[data-q="clear"]') : null;
       if (!b || mode !== 's2s' || !ws) return;
+      if (RC.assistant && RC.assistant.getMode &&
+          RC.assistant.getMode() === 'review') return;
       teardown(false);
       toggle._fresh = true;
       taPlaceholder('对话已清空,语音记忆重置中…');
@@ -3967,8 +5626,11 @@
     // 靠 see_ink 让视觉模型描述那张合成图)。PDF 走服务端裁图不需要;空笔迹不带 shot(relay view_shot=None 自动清陈旧)。
     try {
       var _isPdf = !!(window.RC && RC.adapter && RC.adapter().config && RC.adapter().config.isPDF);
-      if (!_isPdf && strokes.length && window.RC && RC.captureView) {
-        RC.captureView().then(function (shot) {
+      if (!_isPdf && strokes.length && window.RC && (RC.captureInkRegion || RC.captureView)) {
+        var _shotP = RC.captureInkRegion
+          ? RC.captureInkRegion().then(function (shot0) { return shot0 || (RC.captureView ? RC.captureView() : null); })
+          : RC.captureView();
+        _shotP.then(function (shot) {
           try { ws.send(JSON.stringify({ type: 'ink', page: page, strokes: strokes.slice(0, 60), shot: (shot && shot.b64) ? { media_type: shot.media_type, b64: shot.b64 } : null })); setSt('通话中 · 已同步你的圈画'); } catch (e) {}
         }).catch(function () { try { ws.send(JSON.stringify({ type: 'ink', page: page, strokes: strokes.slice(0, 60) })); } catch (e) {} });
         return;
@@ -3993,6 +5655,7 @@
     // 单击 = S2S 通话开关(用户裁定:不要"先开小窗再按开始"的两步;语音输入归旁边的系统听写 #asst-mic)。
     // 旧 agent 模式(豆包 ASR 转写进输入框)入口撤掉,代码保留(window._voiceCall 仍可调)。
     b.addEventListener('click', function () {
+      if (_reviewVoiceGate(true)) return;
       if (ws || _reconnT || _reconnPend) {   // 通话中/重连排队中 → 挂断(开关 off)
         teardown(true);
         taPlaceholder(null);
@@ -4010,6 +5673,7 @@
       tb.innerHTML = '<span class="vc-spin" style="opacity:.4"></span>'; tb.title = '正在中止…';
       try { if (ws && ws.readyState === 1) ws.send(JSON.stringify({ type: 'tool_abort' })); } catch (e) {}
     });
+    _syncReviewVoiceUi();
     return true;
   }
   // #asst-mic 长按 600ms = 豆包 ASR 连续听(agent 模式:说话→转写→自动问助手,文字答;朗读亮则也念)。
@@ -4023,6 +5687,7 @@
     } catch (e) {}
   }
   function _micLongAction() {   // mic 长按到点的动作(侧栏 #asst-mic 与顶栏镜像按钮共用)
+    if (_reviewVoiceGate(true)) return;
     if (ws && mode === 'agent') { teardown(false); taPlaceholder(null); return; }   // 再长按=挂断 ASR
     if (ws) teardown(false);   // S2S 开着 → 先挂再开 ASR
     if (window._voiceCall) window._voiceCall(); else toggle({});
@@ -4079,6 +5744,7 @@
     }
     _mirror(srcMic, tm, ['on', 'asr']);
     _mirror(srcCall, tc, ['on', 'speaking', 'connecting']);
+    _syncReviewVoiceUi();
     function _vis() {   // 侧栏开=隐藏(功能在侧栏里);收起才显示
       var open = false;
       try { open = !!(window.RC && RC.sidedrawer && RC.sidedrawer.isOpen()); } catch (e) {}
@@ -4233,11 +5899,20 @@
   if (!(injectBtn() && injectSpeakToggle() && injectMicLongPress() && injectRecallChip() && injectTopbarBtns())) {
     var _tries = 0, _t = setInterval(function () { if ((injectBtn() && injectSpeakToggle() && injectMicLongPress() && injectRecallChip() && injectTopbarBtns()) || ++_tries > 40) clearInterval(_t); }, 750);
   }
+  try {
+    window.addEventListener('rc:assistant-mode-changed', function () {
+      var blocked = _syncReviewVoiceUi();
+      var computerOn = false;
+      try { computerOn = !!(RC.computerVoice && RC.computerVoice.isActive && RC.computerVoice.isActive()); } catch (e) {}
+      if (blocked && (ws || computerOn || _rtc.on || _connecting || _reconnT || _reconnPend)) teardown(true);
+    });
+  } catch (e) {}
+  _syncReviewVoiceUi();
 
-  // ㉟ 共享位置/选中同步:宿主没提供 __vcSyncNow(PDF reader 的 21-misc-ai 有自己的 2s 轮询)时,
-  //    共享层自建——经 RC.adapter().getContext() 拿位置(EPUB=section idx+1 当 page)与选中,变化才推。
-  setInterval(function () {
-    if (window.__vcSyncNow || !ws || ws.readyState !== 1) return;
+  // ㉟ 共享位置/选中/笔迹同步:宿主没提供 __vcSyncNow(PDF reader 的 21-misc-ai 有自己的
+  // 2s 轮询)时,共享层经 adapter 同一接口同步。WebAdapter 只给状态，不另建语音逻辑。
+  function _syncAdapterNow() {
+    if (!ws || ws.readyState !== 1) return;
     try {
       var c = (window.RC && RC.adapter && RC.adapter().getContext()) || {};
       var pg = c.page || (c.current_section_idx != null ? (c.current_section_idx + 1) : 0);
@@ -4245,10 +5920,25 @@
       // 豆包(真 WS,SP 前缀架构)只在翻页时推、不带视口流(滚动流会打它的 dialog 缓存)
       if (pg) setPage(pg, _rtc.on ? String(c.visible_text || '').slice(0, 2000) : undefined);
       syncState({ sel: String(c.selection || '').slice(0, 500), focus: '', figs: 0 });
+      if (pg && Object.prototype.hasOwnProperty.call(c, 'ink')) syncInk(pg, c.ink || []);
     } catch (e) {}
+  }
+  function _requestSyncNow() {
+    try {
+      if (window.__vcSyncNow) window.__vcSyncNow();
+      else _syncAdapterNow();
+    } catch (e) {}
+  }
+  try { window.addEventListener('rc:inkchange', _requestSyncNow); } catch (e) {}
+  setInterval(function () {
+    if (window.__vcSyncNow || !ws || ws.readyState !== 1) return;
+    _syncAdapterNow();
   }, 2000);
 
-  RC.voicecall = { toggle: toggle, isOpen: function () { return !!ws; }, setPage: setPage, syncInk: syncInk, syncState: syncState,
+  RC.voicecall = { toggle: toggle, isOpen: function () {
+    try { return !!ws || !!(RC.computerVoice && RC.computerVoice.isActive && RC.computerVoice.isActive()); }
+    catch (e) { return !!ws; }
+  }, setPage: setPage, syncInk: syncInk, syncState: syncState,
     // 设置面板改了语音配置 → 通知 relay 热更(S2S 通话中才有意义;relay 指纹含 tts,变了才真发 UpdateConfig)
     pushCfg: function () { try { if (ws && ws.readyState === 1 && mode === 's2s') ws.send(JSON.stringify({ type: 'cfg' })); } catch (e) {} } };
   // ── 统一注入端口接线(references/voice-context-injection.md):通道 bind + kind 注册 ──
@@ -4264,7 +5954,8 @@
         send: function (t) { try { ws.send(JSON.stringify({ type: 'note', text: t })); return true; } catch (e) { return false; } }
       });
       RC.voiceCtx.register('pins', { cls: 'state', budget: 2500,
-        fp: function (p) { return (p.labels || []).join('¦'); },
+        // Registry 的稳定序列化包含 id/父子关系/正文；同一有效集合字节不变，内容真变才失效。
+        fp: function (p) { return p.serialized || (p.labels || []).join('¦'); },
         text: function (p) {
           var ks = p.labels || [];
           if (!ks.length) return '参考内容更新:用户已移除全部带入内容,之前的带入声明作废';

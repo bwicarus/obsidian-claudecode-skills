@@ -1,6 +1,5 @@
 [Unit]
 Description=Daily Anki/Vault automation at 01:00 (用户 1-9 点不用 AI 的空闲时段)
-Requires=bwicarus-daily.service
 
 [Timer]
 OnCalendar=*-*-* 01:00:00

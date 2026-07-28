@@ -487,27 +487,51 @@ function _buildSentenceFromSel(pw, sIdx, eIdx) {
           count: 0, lemmas: [], total_words: 0, manual: true};
 }
 
+// 工具条动作统一从当前 RC adapter/SelectionController 读取。PDF adapter 仍返回原来的
+// char-layer snapshot；WebAdapter 返回外部 iframe 通过唯一 bridge 写入的真实模块选区。
+function _selectionForToolbarAction() {
+  try {
+    const controller = window.__bwSelectionController;
+    const selection = controller && controller.current && controller.current();
+    if (selection && selection.text) return selection;
+  } catch (_) {}
+  return { text: lastSelText || '', context: '', rect: null, anchor: null };
+}
+function _adapterForToolbarAction() {
+  try { return window.RC && RC.adapter ? RC.adapter() : null; }
+  catch (_) { return null; }
+}
+
 window.onTranslate = async () => {
-  if (!lastSelText) return;
-  if (window.__uiShared && window.PdfAdapter) {   // 阶段2:翻译 → rc-result 大框(共享模式;else 为原就地浮层逻辑,逐字不变)
+  const selection = _selectionForToolbarAction();
+  const selectedText = String(selection.text || '').trim();
+  const adapter = _adapterForToolbarAction();
+  if (!selectedText) return;
+  if (window.__uiShared && adapter && typeof adapter.translate === 'function') {   // 共享模式按当前宿主分流；PDF 行为不变
     toolbar.classList.remove('open');
-    _resultContext = _charSel ? { charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx}, text: lastSelText, sentence: lastSelText, kind: 'translate' } : null;
-    PdfAdapter.translate({ text: lastSelText, fallback: () => aiCall('/pdf/api/translate', {text: lastSelText, target_lang: '中文'}, '🌐 翻译') });
+    _resultContext = adapter.kind === 'pdf' && _charSel
+      ? { charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx}, text: selectedText, sentence: selectedText, kind: 'translate' }
+      : null;
+    adapter.translate({
+      text: selectedText,
+      context: String(selection.context || ''),
+      fallback: () => aiCall('/pdf/api/translate', {text: selectedText, target_lang: '中文'}, '🌐 翻译')
+    });
     return;
   }
   toolbar.classList.remove('open');
   const pw = _charSel && _charSel.pw;
   // 无 char 信息(罕见) → 退回大框 AI 翻译
   if (!pw || !pw.__charBoxes) {
-    aiCall('/pdf/api/translate', {text: lastSelText, target_lang: '中文'}, '🌐 翻译');
+    aiCall('/pdf/api/translate', {text: selectedText, target_lang: '中文'}, '🌐 翻译');
     return;
   }
   // 选中句 → 生成句子标记(L框/box)，box 呼吸表示翻译中；译完存 sidecar + 自动弹译文浮层
   const sent = _buildSentenceFromSel(pw, _charSel.startIdx, _charSel.endIdx);
-  if (!sent) { aiCall('/pdf/api/translate', {text: lastSelText, target_lang: '中文'}, '🌐 翻译'); return; }
+  if (!sent) { aiCall('/pdf/api/translate', {text: selectedText, target_lang: '中文'}, '🌐 翻译'); return; }
   // **所译严格 = 预览(所选)文本**：sent.rects 只用作译文覆盖位置(geometry),要翻译的文字一律
   // 用工具栏预览那串 lastSelText，杜绝「翻译内容跟预览不一致」(_buildSentenceFromSel 重拼可能分歧)。
-  { const _pv = (lastSelText || '').replace(/\s+/g, ' ').trim(); if (_pv) sent.text = _pv; }
+  { const _pv = selectedText.replace(/\s+/g, ' ').trim(); if (_pv) sent.text = _pv; }
   sent.__translating = true;
   pw.__vocabSentences = (pw.__vocabSentences || []).filter(s => s.text !== sent.text);
   pw.__vocabSentences.push(sent);
@@ -549,13 +573,16 @@ window.onTranslate = async () => {
   }
 };
 window.onExplain = () => {
-  if (!lastSelText) return;
+  const selection = _selectionForToolbarAction();
+  const selectedText = String(selection.text || '').trim();
+  const adapter = _adapterForToolbarAction();
+  if (!selectedText) return;
   toolbar.classList.remove('open');
-  let context = '';
-  let explainText = lastSelText;   // 给 AI 解释的主体；短选区时换成所在整句
+  let context = adapter && adapter.kind !== 'pdf' ? String(selection.context || '') : '';
+  let explainText = selectedText;   // 给 AI 解释的主体；短选区时换成所在整句
   if (_charSel && _charSel.pw && _charSel.pw.__charBoxes) {
     const chars = _charSel.pw.__charBoxes;
-    const sLen = lastSelText.length;
+    const sLen = selectedText.length;
     if (sLen < 50) {
       // 短选区(词/碎片，如跨行的 "at"+"or") → 以所在整句为解释主体，段落作上下文，
       // 避免 AI 纠结孤立碎词"内容不完整"
@@ -583,14 +610,14 @@ window.onExplain = () => {
   }
   _resultContext = _charSel ? {
     charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx},
-    text: lastSelText, sentence: explainText, kind: 'explain',
+    text: selectedText, sentence: explainText, kind: 'explain',
   } : null;
-  if (window.__uiShared && window.PdfAdapter) {   // 阶段2:解释 → rc-result 大框(共享模式;else 为原琥珀高亮+后台流式逻辑,逐字不变)
-    PdfAdapter.explain({ text: explainText, context, fallback: () => aiCall('/pdf/api/explain', {text: explainText, context}, '💡 AI 解释') });
+  if (window.__uiShared && adapter && typeof adapter.explain === 'function') {   // 共享模式按当前宿主分流；PDF 行为不变
+    adapter.explain({ text: explainText, context, fallback: () => aiCall('/pdf/api/explain', {text: explainText, context}, '💡 AI 解释') });
     return;
   }
   // 解释**不开面板**:选区建一个一直闪烁的琥珀高亮,AI 后台跑;点高亮才开解释页 + 移除高亮(一次点击)。
-  const _ehl = (typeof _showExplainHighlight === 'function') ? _showExplainHighlight(_charSel && _charSel.pw, lastSelText) : null;
+  const _ehl = (typeof _showExplainHighlight === 'function') ? _showExplainHighlight(_charSel && _charSel.pw, selectedText) : null;
   if (!_ehl) { aiCall('/pdf/api/explain', {text: explainText, context}, '💡 AI 解释'); return; }   // 建不了高亮(罕见)→退回旧式直接开面板
   _ehl.title = '💡 AI 解释'; _ehl.src = explainText; _ehl.resultContext = _resultContext;
   _runExplainBg(_ehl, explainText, context);
@@ -629,9 +656,12 @@ async function _runExplainBg(hl, text, context) {
 }
 // 多词选中「💬 对话」：开对话框，预填原文 + 句子/段落上下文(也作 AI 上下文)，底部追问框多轮问
 window.onChat = () => {
-  if (!lastSelText) return;
+  const selection = _selectionForToolbarAction();
+  const selectedText = String(selection.text || '').trim();
+  const adapter = _adapterForToolbarAction();
+  if (!selectedText) return;
   toolbar.classList.remove('open');
-  let context = '';
+  let context = adapter && adapter.kind !== 'pdf' ? String(selection.context || '') : '';
   if (_charSel && _charSel.pw && _charSel.pw.__charBoxes) {
     const chars = _charSel.pw.__charBoxes;
     const cr = _expandSentenceFromRange(chars, _charSel.startIdx, _charSel.endIdx);
@@ -644,13 +674,13 @@ window.onChat = () => {
   }
   _resultContext = _charSel ? {
     charSel: {pw: _charSel.pw, startIdx: _charSel.startIdx, endIdx: _charSel.endIdx},
-    text: lastSelText, sentence: context || lastSelText, kind: 'chat',
+    text: selectedText, sentence: context || selectedText, kind: 'chat',
   } : null;
-  if (window.__uiShared && window.PdfAdapter) {   // 阶段2:对话 → rc-result.openChat(共享模式;else 为下方 _openChat 原逻辑,逐字不变)
-    PdfAdapter.chat({ text: lastSelText, context, fallback: () => _openChat(lastSelText, context) });
+  if (window.__uiShared && adapter && typeof adapter.chat === 'function') {   // 共享模式按当前宿主分流；PDF 行为不变
+    adapter.chat({ text: selectedText, context, fallback: () => _openChat(selectedText, context) });
     return;
   }
-  _openChat(lastSelText, context);
+  _openChat(selectedText, context);
 };
 // 对话面板打开(原 onChat 尾段逐字搬入;参数名沿用 lastSelText/context 保持函数体不变)
 function _openChat(lastSelText, context) {

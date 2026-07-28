@@ -28,6 +28,9 @@
     'background:rgba(10,132,255,.10);border-radius:7px;box-shadow:0 0 0 2px rgba(10,132,255,.18);' +
     'animation:figHlIn .22s ease-out}' +
     '@keyframes figHlIn{from{opacity:0;transform:scale(1.03)}to{opacity:1;transform:scale(1)}}' +
+    // 持续「已选中」高亮(跟 __figAttached 同步,与临时 .fig-hl 分开;绿色区分选中态)
+    '.fig-hl-sel{position:absolute;z-index:5;pointer-events:none;border:2.5px solid rgba(48,209,88,.95);' +
+    'background:rgba(48,209,88,.12);border-radius:7px;box-shadow:0 0 0 2px rgba(48,209,88,.22);animation:figHlIn .22s ease-out}' +
     // 图区命中层(透明可点;touch-action:auto 不挡阅读滚动,拖拽改用徽标当把手)
     '.fig-hit{position:absolute;z-index:5;cursor:pointer;-webkit-tap-highlight-color:transparent;touch-action:pan-y}' +   // pan-y:竖向照常滚;长按才发起拖动(拖动时 preventDefault 抑制滚)
     '.fig-hit.dragging{touch-action:none}' +
@@ -212,6 +215,7 @@
       _bindBadge(b, f, num);    // 轻点=描述浮层;长按=拖进助手对话(徽标当拖拽把手,小不挡滚动)
       layer.appendChild(b);
     });
+    _paintSelHls();   // 翻页/重绘后重画本页(及所有已加载页)的持续选中高亮,否则翻回来选中框丢
   }
 
   // ── 焦点图:点/长按图区 → 设 window.__figFocus + 高亮;长按拖动 → ghost 拖进右侧助手栏入上下文 ──
@@ -259,6 +263,49 @@
       });
     }
     _renderChips();
+  }
+  // 持续选中高亮(跟 __figAttached 同步,与临时 _hlEl 分开;**绝不被 clearHl 清**)。
+  // 遍历已加载页,对每张已带入的图在其 .fig-layer 画一个持久 .fig-hl-sel(data-figid);先清旧的再重画,防重复。
+  function _paintSelHls() {
+    try {
+      document.querySelectorAll('.fig-layer .fig-hl-sel').forEach(function (e) { e.remove(); });
+      var list = window.__figAttached || [];
+      if (!list.length) return;
+      list.forEach(function (a) {
+        var pw = document.querySelector('.page-wrap[data-page-num="' + a.page + '"]');
+        if (!pw) return;
+        var layer = pw.querySelector('.fig-layer'); if (!layer) return;
+        if (layer.querySelector('.fig-hl-sel[data-figid="' + a.id + '"]')) return;
+        var bb = a.box; if (!bb || bb.length !== 4) return;
+        var canvas = pw.querySelector('canvas');
+        var cssW = (canvas && canvas.clientWidth) || pw.clientWidth, cssH = (canvas && canvas.clientHeight) || pw.clientHeight;
+        if (pw.classList.contains('crop-on')) {   // 去边:层被撑成整图 → 用整图尺寸换算(同 showHl/draw)
+          var fw = parseFloat(pw.style.getPropertyValue('--full-w')), fh = parseFloat(pw.style.getPropertyValue('--full-h'));
+          if (fw > 0 && fh > 0) { cssW = fw; cssH = fh; }
+        }
+        if (!cssW || !cssH) return;
+        var el = document.createElement('div'); el.className = 'fig-hl-sel'; el.setAttribute('data-figid', a.id);
+        el.style.left = (bb[0] * cssW) + 'px'; el.style.top = (bb[1] * cssH) + 'px';
+        el.style.width = Math.max(2, (bb[2] - bb[0]) * cssW) + 'px';
+        el.style.height = Math.max(2, (bb[3] - bb[1]) * cssH) + 'px';
+        layer.appendChild(el);
+      });
+    } catch (_) {}
+  }
+  window.__paintFigSelHls = _paintSelHls;
+  // 长按 toggle(**专给长按用**):已选中 → 移除(去高亮 + 去带入);未选中 → 加入带入 + 画持久高亮。
+  function _toggleFig(fig, num) {
+    var id = _figId(fig, num);
+    var has = (window.__figAttached || []).some(function (a) { return a.id === id; });
+    if (has) {
+      window.__figAttached = (window.__figAttached || []).filter(function (a) { return a.id !== id; });
+      _renderChips(); _paintSelHls();
+      if (typeof _toast === 'function') _toast('已取消选中');
+    } else {
+      _attachFig(fig, num);   // 已 push + renderChips
+      _paintSelHls();
+      if (typeof _toast === 'function') _toast(fig.group ? '已带入这个图组' : '已带入这张图');
+    }
   }
   function setFigFocus(fig, anchorEl, num) {
     closePop();
@@ -312,13 +359,13 @@
         img.addEventListener('click', function () { _openFigLightbox(a); });   // 点缩略图 → 看大图
         var cap = document.createElement('span'); cap.className = 'afc-cap'; cap.textContent = (a.group ? '图组 · ' : '') + (a.caption || '图') + ' · p' + (window._dispPage ? window._dispPage(a.page) : a.page);
         var x = document.createElement('button'); x.className = 'afc-x'; x.textContent = '✕';
-        x.addEventListener('click', function () { window.__figAttached = (window.__figAttached || []).filter(function (z) { return z.id !== a.id; }); _renderChips(); });
+        x.addEventListener('click', function () { window.__figAttached = (window.__figAttached || []).filter(function (z) { return z.id !== a.id; }); _renderChips(); _paintSelHls(); });
         chip.appendChild(img); chip.appendChild(cap); chip.appendChild(x); wrap.appendChild(chip);
       });
     } catch (_) {}
   }
   window.__renderFigChips = _renderChips;       // 助手打开时可调一次,补渲(点图在开助手前发生的情况)
-  window.__clearFigFocus = function () { window.__figAttached = []; _renderChips(); clearHl(); };
+  window.__clearFigFocus = function () { window.__figAttached = []; _renderChips(); clearHl(); _paintSelHls(); };
   // 给「历史/上下文卡片」渲缩略图:a={file_rel,page,box,has_ink};live(刚发的那条) 有笔迹走 POST 实时合成,
   // 历史回看走 GET &ink=1(服务端读已保存的 sidecar 笔迹),都拿到带笔迹的合成图
   window.__figThumb = function (a, imgEl, live) {
@@ -430,10 +477,12 @@
     var over = _overAsst(e.clientX, e.clientY);
     _dragCancel();
     if (over) {
-      _attachFig(fig, num);     // 加入带入列表(支持多张)
+      _attachFig(fig, num);     // 拖到助手面板上松手 = 加入带入列表(支持多张)
       try { if (window.switchSideTab) window.switchSideTab('asst'); } catch (_) {}
       _renderChips();           // 切到助手 tab 后补渲一次(确保附件条出现)
       if (typeof _toast === 'function') _toast('📷 已带进助手对话');
+    } else {   // 长按原地松手(位移未超阈值、没拖到助手)= toggle 选中(再长按同图 → 取消;只有拖到助手才是纯加入)
+      try { _toggleFig(fig, num); } catch (_) {}
     }
   }
   function _dragCancel() {
@@ -443,6 +492,26 @@
     if (dp) { dp.classList.remove('fig-drop-ready'); dp.classList.remove('fig-drop-over'); var p = document.getElementById('fig-drop-plus'); if (p) p.remove(); }
   }
 
+  // fig-hit(pointer-events:auto)盖在图上会挡住下层文字高亮 mark → 双击想进编辑被图吃掉。
+  // 解法:fig-hit **只吃长按**(选中图 toggle);快速单击/双击 → 找出正下方的 .hl-saved,把这次 tap
+  // 合成 PointerEvent down+up 转发给它,由它自己的 RC.highlight.gesture 累积成双击=进高亮编辑(见 17-highlight.js)。不动长按拖动路径。
+  function _markBelow(x, y) {     // 暂时关掉所有 fig 层的命中,elementFromPoint 才看得到底下的高亮 mark
+    var toggled = [];
+    try {
+      document.querySelectorAll('.fig-hit, .fig-badge').forEach(function (el) { toggled.push([el, el.style.pointerEvents]); el.style.pointerEvents = 'none'; });
+      var el = document.elementFromPoint(x, y);
+      return (el && el.closest) ? el.closest('.hl-saved') : null;
+    } catch (_) { return null; }
+    finally { toggled.forEach(function (p) { p[0].style.pointerEvents = p[1] || ''; }); }
+  }
+  function _forwardTap(mark, e) {   // 把这次轻点合成 down+up 转发给下层高亮 mark(驱动它自己的双击/编辑,不再被图挡)
+    try {
+      var opt = { bubbles: true, cancelable: true, composed: true, clientX: e.clientX, clientY: e.clientY,
+                  pointerId: e.pointerId || 1, pointerType: e.pointerType || 'touch', isPrimary: true };
+      mark.dispatchEvent(new PointerEvent('pointerdown', opt));
+      mark.dispatchEvent(new PointerEvent('pointerup', opt));
+    } catch (_) {}
+  }
   // 图区命中层:只管轻点 → 设焦点(放开滚动,不拦拖拽)。拖拽统一走徽标(_bindBadge)
   // 整张图:轻点 → 设焦点;长按(380ms 不动)→ 拖进助手对话(整图当拖拽范围,不再只靠徽标)。
   // touch-action:pan-y 让竖滑照常滚;长按门控 = 没长按就移动当滚动放掉,长按后 setPointerCapture+切 .dragging(touch-action:none)+preventDefault 稳拖。
@@ -463,7 +532,10 @@
     hit.addEventListener('pointerup', function (e) {
       if (lp) { clearTimeout(lp); lp = null; }
       if (dragging) { dragging = false; hit.classList.remove('dragging'); try { hit.releasePointerCapture(pid); } catch (_) {} _dragEnd(fig, num, e); return; }
-      if (!moved && Date.now() - st < 600) setFigFocus(fig, hit, num);   // 轻点 → 设焦点
+      if (!moved && Date.now() - st < 600) {   // 轻点:下面若叠着文字高亮 mark → 转发给它(累积成双击=进编辑,图不拦);否则**不做任何事**(用户 2026-07-22:单击不留蓝框视觉反馈)。带入统一走长按(见 _dragEnd)
+        var _mk = null; try { _mk = _markBelow(e.clientX, e.clientY); } catch (_) {}
+        if (_mk) { _forwardTap(_mk, e); }
+      }
     });
     hit.addEventListener('pointercancel', function () { if (lp) { clearTimeout(lp); lp = null; } if (dragging) { dragging = false; hit.classList.remove('dragging'); _dragCancel(); } });
   }

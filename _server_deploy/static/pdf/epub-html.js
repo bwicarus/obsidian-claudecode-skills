@@ -309,8 +309,19 @@
   // 切后台/关页 sendBeacon 兜底立即送最后位置(卸载中 fetch 会被浏览器砍)。sent 初值=开局注入的 serverPos:
   // 打开后不动就不上报,不会用旧值盖掉别的设备刚写的新进度。
   var _srvPos = { val: -1, sent: (function () { var v = parseInt(CFG.serverPos, 10); return isNaN(v) ? -1 : v; })(), t: 0, timer: null };
+  var _ogLastIdx = null;
   function _reportPos(idx) {
     _srvPos.val = idx;
+    // 换节 → 丢弃绘图焦点(上一节的绘图区不再是当前)
+    try { if (idx !== _ogLastIdx) { _ogLastIdx = idx;
+          window.RC && RC.outgoing && RC.outgoing.dropDrawingFocus(); } } catch (e) {}
+    // 双向上下文同步:复用这个已有漏斗,不新增监听(关时 report 立即返回,零网络)
+    try {
+      window.RC && RC.ctxSync && RC.ctxSync.report({
+        kind: 'epub', file: FREL, pos: idx,
+        title: document.title.replace(/ ·.*$/, '')
+      });
+    } catch (e) {}
     if (_srvPos.timer) return;   // 已排队:trailing 自带最新值
     _srvPos.timer = setTimeout(_posFlush, Math.max(0, 5000 - (Date.now() - _srvPos.t)));
   }
@@ -395,13 +406,25 @@
   // 目录已并入统一抽屉「目录」tab(由 buildToc 填 #ep-toc-list);开关走 RC.sidedrawer
 
   // ── 原生选区 → 工具栏(内容在主文档,直接 getSelection)──
+  function _ctxSelReport(txt) {
+    // 选区即时同步:建立/改动/清空都立刻推(空串=显式无选区,不是省略字段)
+    try {
+      window.RC && RC.ctxSync && RC.ctxSync.report(
+        { kind: 'epub', file: FREL, selection: txt || '' }, { immediate: true });
+      if (window.RC && RC.outgoing) {
+        if (txt) RC.outgoing.focus('text', { file: FREL, text: String(txt).slice(0, 200) });
+        else RC.outgoing.cancel();
+      }
+    } catch (e) {}
+  }
   function captureSel(opts) {
     try {
       // 精确 Range(词/行/段三级点击已经算好边界)传 {snapWords:false} 跳过对齐,只有原生自由拖选才需要
       var doSnap = !opts || opts.snapWords !== false;
       var s = window.getSelection();
-      if (!s || !s.rangeCount || s.isCollapsed) { hideSel(); return; }
+      if (!s || !s.rangeCount || s.isCollapsed) { hideSel(); _ctxSelReport(''); return; }
       var txt = (s.toString() || '').trim();
+      _ctxSelReport(txt);
       if (!txt) { hideSel(); return; }
       var rng = s.getRangeAt(0);
       if (!col.contains(rng.commonAncestorContainer)) { dbg('cap: 选区不在正文 col 内'); hideSel(); return; }
@@ -435,6 +458,12 @@
       cur = { text: txt, ctx: _countableText(blk).trim().slice(0, 1200), anchor: anchor, rect: rng.getBoundingClientRect(), _selT: Date.now() };
       dbg('cap text="' + txt.slice(0, 8) + '" anchor=' + JSON.stringify(anchor));
       if (_phraseSnap) _unwrapPhrase();   // 重新选词 → 清掉上一处词组呼吸高亮(照搬 PDF onStart 语义)
+      // 扩展接管后仍保留 cur/anchor 供 book-host 读取，但不要再弹出 PWA 自己的选区工具栏。
+      // 这样同一份书籍锚点逻辑只运行一次，界面和网络动作统一交给扩展。
+      if (document.documentElement.dataset.bwReaderExtensionActive === '1') {
+        hideSel();
+        return;
+      }
       showSel();
       try { window.__setFocusSel && window.__setFocusSel(txt, /\$/.test(txt) ? 'formula' : 'text'); } catch (e) {}   // 助手开着时钉焦点(照搬 PDF 13-selection.js:586/599/656)→ 输入框上方可视 chip,可 ✕ 取消
     } catch (e) { dbg('cap ERR: ' + (e && e.message)); }
@@ -528,10 +557,9 @@
   content.addEventListener('touchend', function () { setTimeout(captureSel, 10); }, true);
   var _polLast = '';
   setInterval(function () { try { var s = window.getSelection(); var t = s && !s.isCollapsed ? (s.toString() || '').trim() : ''; if (t && t !== _polLast) { _polLast = t; captureSel(); } else if (!t) { _polLast = ''; } } catch (e) {} }, 450);
-  function isWordSel(t) { t = t || ''; return t.length <= 30 && !/\s/.test(t) && (/^[A-Za-z][A-Za-z'’\-]*$/.test(t) || /[぀-ヿ]/.test(t)); }
   function showSel() {
     // 按词/多词分流(照搬 PDF 14-textlayer-legacy):单个英/日词 → 查词组;多词/中文 → 翻译/解释/对话组;复制/高亮/笔记/制卡 两者都有
-    var word = isWordSel(cur.text);
+    var word = RC.ui.isDictionaryWord(cur.text);
     // F6 短词组(照搬 PDF):非单词 + 命中短词组阈值 → 露「📘词组」按钮(呼吸提示)
     var phrase = !word && _isShortPhrase(cur.text);
     selBar.querySelectorAll('[data-grp]').forEach(function (b) {
@@ -549,7 +577,9 @@
     // 色板激活态:标出上次用的色(照搬 PDF onPickColor 的 .active)
     var last = localStorage.getItem('eph-hl-color') || hlColors()[0];
     selBar.querySelectorAll('#ep-hl-pick .swatch').forEach(function (i) { i.classList.toggle('active', i.dataset.c === last); });
-    selBar.classList.add('open');   // 定位由 CSS(left/transform/bottom)管,底部居中
+    selBar.classList.add('open');
+    // 2A：与 PDF / HTML / 扩展共用紧贴选区的横向浮条；本宿主只提供 EPUB offset 算出的 client rect。
+    if (window.RC && RC.ui && RC.ui.placeSelectionToolbar) RC.ui.placeSelectionToolbar(selBar, cur.rect, { gap: 8 });
   }
   function hideSel() { selBar.classList.remove('open'); try { if (typeof _cselClear === 'function') _cselClear(); } catch (e) {} }
 
@@ -699,12 +729,12 @@
   function _execCopy(s) { try { var ta = document.createElement('textarea'); ta.value = s; ta.style.cssText = 'position:fixed;left:-9999px;top:0'; document.body.appendChild(ta); ta.select(); var ok = document.execCommand('copy'); document.body.removeChild(ta); return ok; } catch (e) { return false; } }
   // 点高亮 mark → 编辑浮层(RC.highlight)。iOS 上点可选文本里的 <mark> 时 click 不稳(被当选词/置光标),
   // 改用 pointerdown+pointerup 的「无移动 tap」检测;同时避免 click 与「再点关」double-trigger。
-  // 点高亮 mark 改交互(2026-07-05,用户要求):长按 → 编辑浮层;助手开着时双击 → 高亮内容加入对话上下文。
+  // 点高亮 mark 改交互(2026-07-05;2026-07-21 长按↔双击对调):长按 → 高亮内容加入对话上下文(助手开着时);双击 → 编辑浮层。
   // 单击不再开框。走共享 RC.highlight.gesture(PDF/EPUB 一致);RC 未加载则兜底回原单击开框。
   (function () {
     var G = (window.RC && RC.highlight && RC.highlight.gesture) ? RC.highlight.gesture({
-      onLongPress: function (id) { var h = _hls[id]; if (!h) return; try { var s = window.getSelection(); if (s && s.removeAllRanges) s.removeAllRanges(); } catch (_) {} openHlEditor(h, col.querySelector('mark.ep-hl[data-id="' + id + '"]')); },
-      onDoubleTap: function (id) { var h = _hls[id]; if (h && window.__asstOpen && window.__asstOpen()) _epubHlToAsst(h); }
+      onLongPress: function (id) { var h = _hls[id]; if (h && window.__asstOpen && window.__asstOpen()) _epubHlToAsst(h); },
+      onDoubleTap: function (id) { var h = _hls[id]; if (!h) return; try { var s = window.getSelection(); if (s && s.removeAllRanges) s.removeAllRanges(); } catch (_) {} openHlEditor(h, col.querySelector('mark.ep-hl[data-id="' + id + '"]')); }
     }) : null;
     if (G) {
       document.addEventListener('pointerdown', function (e) { var mk = e.target.closest && e.target.closest('mark.ep-hl'); if (mk && mk.dataset.id) G.down(mk.dataset.id, e.clientX, e.clientY); else G.cancel(); }, true);
@@ -801,14 +831,25 @@
     if (e.pointerType === 'mouse' && e.button !== 0) return;
     if (!down) return;   // 本次 pointerdown 没被记录到(例如手写双击切工具在 col 捕获阶段吞掉了它)→ 保守放弃,交给别的模块处理,不抢手写手势
     if (Math.hypot(e.clientX - down.x, e.clientY - down.y) > TAP_MOVE_TOL) return;   // 有明显位移(拖选/滑动)→ 交给原生拖选,不当 tap
+    if (document.documentElement.dataset.bwReaderExtensionActive === '1') {
+      _tapCount = 0; _tapWord = null;
+      return;   // 扩展接管点词/多击语义；PWA 只继续提供书籍 DOM、选区和锚点。
+    }
     if (e.target.closest('img, mark.ep-hl, mark.ep-phrase-hl, mark.ep-word-breathe, .rc-note, .rc-fig-badge, a, #ep-side, #ep-sel, #rc-dict-pop, #rc-fig-pop, .rc-up-bar, .rc-up-edit, .ep-up-editbtn')) { _tapCount = 0; _tapWord = null; return; }   // 词组/高亮/呼吸高亮/便签/图/用户页 Aa 按钮与编辑器 tap 由各自专属逻辑接管;顺手清计数,防止跟下次文字 tap 串成假的连击(用户页**正文 .rc-up-body**不排除→单击查词照常)
     _epClearClickMark();   // 新的一次点触(非点在已有 mark/UI 上)→ 先清掉上一个点词的"选中指示"
     try { if (typeof _cselClear === 'function') _cselClear(); } catch (e) {}   // 顺手清掉上一次拖选的自绘高亮残留(直翻开点词不走 _cselApply,靠这里清)
     var sel = window.getSelection();
     if (sel && !sel.isCollapsed && (sel.toString() || '').trim()) return;   // 已有拖选 → 不抢
     var pos = caretFromPoint(e.clientX, e.clientY);
-    if (!pos || pos.node.nodeType !== 3 || !col.contains(pos.node)) return;
-    var w = wordAt(pos.node, pos.offset); if (!w || !w.text) return;
+    if (!pos || pos.node.nodeType !== 3 || !col.contains(pos.node)) { _tapCount = 0; _tapWord = null; _tapTime = 0; return; }
+    var w = wordAt(pos.node, pos.offset);
+    if (!w || !w.text) { _tapCount = 0; _tapWord = null; _tapTime = 0; return; }
+    var hitRange;
+    try { hitRange = document.createRange(); hitRange.setStart(w.node, w.start); hitRange.setEnd(w.node, w.end); } catch (er) { return; }
+    if (!(RC.ui && RC.ui.rangeHitTest && RC.ui.rangeHitTest(hitRange, e.clientX, e.clientY, { pointerType: e.pointerType || 'mouse' }))) {
+      _tapCount = 0; _tapWord = null; _tapTime = 0;
+      return;   // caret API 只给最近插入点；点章/段落空白不能被记成最近词的一击
+    }
     var now = Date.now();
     var sameSpot = _tapWord && _tapWord.node === w.node && _tapWord.start === w.start && _tapWord.end === w.end;
     _tapCount = (sameSpot && now - _tapTime < TAP_WIN_MS) ? (_tapCount % 3) + 1 : 1;
@@ -850,7 +891,7 @@
       _epSetClickMark(w.node, r);   // 点词即时"选中指示"(自绘浮层,不拆文本 → 不扰生词下划线)
       hideSel();
       RC.wordpop.show({ word: t, rect: rect, ctx: pctx, file: FREL, langs: bookLangsArr(),
-        markHighlight: function () {}, onMastered: function () { if (window.refreshVocabUnderlinesForAllPages) window.refreshVocabUnderlinesForAllPages(); },
+        markHighlight: function () {}, onMastered: function () {},
         onGrammar: function (w) { _grammarAnalyzeFrom(pctx, w || t); },
         onFallback: function (word) { RC.result.aiCall('/pdf/api/translate', { text: word, target_lang: '中文' }, '🌐 翻译', { aiParams: function () { return (window.RC && RC.settings) ? RC.settings.aiParams() : {}; } }); },
         // 呼吸高亮 host-bind:真实 <mark> 包文字节点(同生词下划线/词组呼吸高亮的技术),随内容自然滚动,
@@ -976,6 +1017,16 @@
     for (i = 0; i < words.length; i++) { c = words[i]; var cx = (c.left + c.right) / 2, cy = (c.top + c.bottom) / 2; var d = Math.abs(x - cx) + Math.abs(y - cy) * 3; if (d < bd) { bd = d; best = i; } }
     return best;
   }
+  // 拖选起点必须真的碰到词框；_favHit 的同行/全页 nearest 只允许在已经从有效词起手后，
+  // 用于手指拖出文字区域时继续延伸选区，绝不能拿来把页边空白变成最近词。
+  function _favHitStrict(words, x, y, isMouse) {
+    var sx = isMouse ? 1 : 3, sy = isMouse ? 2 : 5;
+    for (var i = 0; i < words.length; i++) {
+      var c = words[i];
+      if (x >= c.left - sx && x <= c.right + sx && y >= c.top - sy && y <= c.bottom + sy) return i;
+    }
+    return -1;
+  }
   // 自绘选中高亮(char-layer 的 .sel-overlay 等价):按选中词 [a..b] 的 page-local bbox 画 .hl(同行合并成连续矩形,视觉贴合)
   function _favPaintWords(page, words, a, b) {
     var ov = page.querySelector('.fav-pdf-sel'); if (!ov) return;
@@ -998,7 +1049,7 @@
     _favClearOverlays();                                     // 起新选:清掉上一处 fav 自绘高亮(照 PDF onStart 清 sel-overlay)
     var words = _favWords(page); if (!words.length) return;
     var pr = page.getBoundingClientRect();
-    var a = _favHit(words, clientX - pr.left, clientY - pr.top);
+    var a = _favHitStrict(words, clientX - pr.left, clientY - pr.top, isMouse);
     if (a < 0) return;
     _favDrag = { page: page, words: words, a: a, b: a, x0: clientX, y0: clientY, moved: false, dir: isMouse ? 'select' : null, isMouse: isMouse };
   }
@@ -1226,7 +1277,7 @@
     else if (act === 'dict') RC.wordpop.show({
       word: txt, rect: cur.rect, ctx: selCtx, file: FREL, langs: bookLangsArr(),
       markHighlight: function () { saveHl(txt, selAnchor, localStorage.getItem('eph-hl-color') || hlColors()[0]); },
-      onMastered: function () { if (window.refreshVocabUnderlinesForAllPages) window.refreshVocabUnderlinesForAllPages(); },
+      onMastered: function () {},
       onGrammar: function (w) { _grammarAnalyzeFrom(selCtx, w || txt); },
       // 非英日(纯中文等)→ 保留转译走结果模态
       onFallback: function (word) { RC.result.aiCall('/pdf/api/translate', { text: word, target_lang: '中文' }, '🌐 翻译', resultOpts('note')); }
@@ -1234,7 +1285,7 @@
     else if (act === 'translate') RC.result.aiCall('/pdf/api/translate', { text: txt, target_lang: '中文' }, '🌐 翻译', resultOpts('note'));
     else if (act === 'explain') RC.result.aiCall('/pdf/api/explain', { text: txt, context: selCtx }, '💡 AI 解释', resultOpts('explain'));
     else if (act === 'grammar') _grammarAnalyzeFrom(selCtx, selTxt);   // 选区多词/句 →「📊 语法」直接分析整句(RC.grammar.extractSentence 从 selCtx 里抠出含 selTxt 的那句)
-    else if (act === 'chat') RC.result.openChat(txt, selCtx, resultOpts('note'));   // 「对话」= 结果浮层聚焦对话(照搬 PDF 21-misc-ai openResult kind:chat);右侧助手靠 curSelection 持久兜底自动带选中
+    else if (act === 'chat') { if (!(RC.ui && RC.ui.openSelectionChat && RC.ui.openSelectionChat(txt, selCtx))) RC.result.openChat(txt, selCtx, resultOpts('note')); }
     else if (act === 'note') RC.snippets.toNote(snipOpts(txt));
     else if (act === 'anki') RC.snippets.toAnki(snipOpts(txt));
   });
@@ -1532,20 +1583,27 @@
       if (im.dataset.epFigBound === '1') return;
       if ((im.getBoundingClientRect().width || im.naturalWidth || 0) < figMin) return;   // 行内公式/小图不绑
       im.dataset.epFigBound = '1';
-      // 不禁 iOS 原生长按 callout（保留复制/粘贴图像）；取消长按拖拽。**双击图** = 带进助手对话。
-      var _lastTap = 0, _tx = 0, _ty = 0;
-      im.addEventListener('pointerup', function (e) {
+      // 用户方案 2026-07-21:图长按原地=带进助手(选中);移动超阈值=当滚动放弃(松手位移分辨)。抑制 iOS 原生长按菜单。
+      var _lp = null, _sx = 0, _sy = 0, _moved = false;
+      try { im.style.webkitTouchCallout = 'none'; } catch (_) {}
+      im.addEventListener('pointerdown', function (e) {
         if (e.pointerType === 'mouse' && e.button !== 0) return;
-        var now = Date.now();
-        if (now - _lastTap < 350 && Math.abs(e.clientX - _tx) < 28 && Math.abs(e.clientY - _ty) < 28) {
-          _lastTap = 0;   // 双击 → 带图进助手 + 开助手抽屉
-          try { e.preventDefault(); } catch (_) {}
+        _sx = e.clientX; _sy = e.clientY; _moved = false;
+        _lp = setTimeout(function () {
+          if (_moved) return;
+          _lp = null;
           attachFig(im);
           try { if (window.RC && RC.sidedrawer) RC.sidedrawer.open('asst'); } catch (_) {}
           renderFigChips();
           toast('📷 已带进助手对话');
-        } else { _lastTap = now; _tx = e.clientX; _ty = e.clientY; }
+          if (navigator.vibrate) { try { navigator.vibrate(14); } catch (_) {} }
+        }, 380);
       });
+      im.addEventListener('pointermove', function (e) {
+        if (!_moved && (Math.abs(e.clientX - _sx) > 10 || Math.abs(e.clientY - _sy) > 10)) { _moved = true; if (_lp) { clearTimeout(_lp); _lp = null; } }
+      });
+      im.addEventListener('pointerup', function () { if (_lp) { clearTimeout(_lp); _lp = null; } });
+      im.addEventListener('pointercancel', function () { if (_lp) { clearTimeout(_lp); _lp = null; } });
     };
     if (im.complete) fix(); else im.addEventListener('load', fix);
     setTimeout(fix, 1300);
@@ -1617,7 +1675,14 @@
   // ── AI 侧栏 ──
   function openAi(t) { if (window.RC && RC.sidedrawer) RC.sidedrawer.open('asst'); }
   function closeAi() { if (window.RC && RC.sidedrawer) RC.sidedrawer.close(); }
-  function addCard(head, sub) { var card = document.createElement('div'); card.className = 'ep-card'; card.innerHTML = '<div class="h">' + head + (sub ? '<span class="ep-sel-chip">' + esc(sub.slice(0, 40)) + (sub.length > 40 ? '…' : '') + '</span>' : '') + '</div><div class="c"><span class="ep-spin"></span></div>'; _asstBody().appendChild(card); _asstBody().scrollTop = _asstBody().scrollHeight; return card.querySelector('.c'); }
+  function addCard(head, sub) {
+    // 5V：工具输出统一走语音对话已有的三态工具卡；普通 AI 文本仍由共享助手渲染成气泡。
+    var label = String(head || '工具结果').replace(/<[^>]+>/g, '');
+    if (sub) label += ' · ' + String(sub).slice(0, 40) + (String(sub).length > 40 ? '…' : '');
+    var body = (window.RC && RC.ui && RC.ui.appendToolCard) ? RC.ui.appendToolCard(_asstBody(), { label: label, type: '#b9a8ff', form: 'full' }) : null;
+    if (!body) { var card = document.createElement('div'); card.className = 'ep-card'; card.innerHTML = '<div class="h">' + head + (sub ? '<span class="ep-sel-chip">' + esc(sub.slice(0, 40)) + (sub.length > 40 ? '…' : '') + '</span>' : '') + '</div><div class="c"><span class="ep-spin"></span></div>'; _asstBody().appendChild(card); body = card.querySelector('.c'); }
+    _asstBody().scrollTop = _asstBody().scrollHeight; return body;
+  }
   function curChapText() { var topIdx = 0; for (var i = 0; i < secEls.length; i++) { if (secEls[i].getBoundingClientRect().bottom > 60) { topIdx = i; break; } } var el = secEls[topIdx]; return el ? (el.innerText || '').slice(0, 4000) : ''; }
   function chapLabelOf(idx) { var lab = ''; for (var i = 0; i < TOC.length; i++) { if (TOC[i].idx <= idx) lab = TOC[i].label; else break; } return lab; }
   // ============================================================================
@@ -2238,13 +2303,19 @@
   function hlRgba(hex, a) { var m = /^#?([0-9a-fA-F]{6})$/.exec((hex || '').trim()); if (!m) return hex || 'transparent'; var n = parseInt(m[1], 16); return 'rgba(' + ((n >> 16) & 255) + ',' + ((n >> 8) & 255) + ',' + (n & 255) + ',' + a + ')'; }
   function unapplyHl(h) { col.querySelectorAll('mark.ep-hl[data-id="' + h.id + '"]').forEach(function (mk) { var p = mk.parentNode; while (mk.firstChild) p.insertBefore(mk.firstChild, mk); p.removeChild(mk); p.normalize(); }); }
   function saveHl(text, anchor, color) {
-    if (!anchor) { toast('无法定位选区'); return; }
+    if (!anchor) { toast('无法定位选区'); return Promise.resolve(null); }
     color = color || localStorage.getItem('eph-hl-color') || hlColors()[0];   // 记住上次用的色(照搬 PDF)
     try { localStorage.setItem('eph-hl-color', color); } catch (e) {}
-    reqJson('POST', '/pdf/api/epub-highlights', { file: FREL, anchor: anchor, text: text, color: color }, function (d) {
-      _hls[d.highlight.id] = d.highlight; var el = _secElOf(anchor.section);
-      if (el) applyHl(el, d.highlight); toast('已高亮'); window.getSelection().removeAllRanges(); hideSel();
-    }, function (er) { toast('高亮失败:' + er); });
+    return new Promise(function (resolve) {
+      reqJson('POST', '/pdf/api/epub-highlights', { file: FREL, anchor: anchor, text: text, color: color }, function (d) {
+        _hls[d.highlight.id] = d.highlight; var el = _secElOf(anchor.section);
+        if (el) applyHl(el, d.highlight); toast('已高亮'); window.getSelection().removeAllRanges(); hideSel();
+        resolve(d.highlight);
+      }, function (er) {
+        toast('高亮失败:' + er);
+        resolve(null);
+      });
+    });
   }
   function delHl(h) { reqJson('DELETE', '/pdf/api/epub-highlights?file=' + encodeURIComponent(FREL) + '&id=' + encodeURIComponent(h.id), null, function () { unapplyHl(h); delete _hls[h.id]; toast('已删除'); }, function () {}); }
   function patchHl(h, f) { reqJson('PATCH', '/pdf/api/epub-highlights', Object.assign({ file: FREL, id: h.id }, f), function (d) { if (f.color && f.color !== h.color) { unapplyHl(h); h.color = d.highlight.color; var el = _secElOf(h.anchor.section); if (el) applyHl(el, h); } h.note = d.highlight.note; if ('sentence' in f) h.sentence = d.highlight.sentence; if ('kind' in f) h.kind = d.highlight.kind; if ('body' in f) h.body = d.highlight.body; }, function () {}); }
@@ -2661,11 +2732,56 @@
     secEls.forEach(function (el) { el.dataset.epTr = ''; });
   }
   var _vocabMap = null;
+  var _vocabLocalCandidates = Object.create(null);
+  function _epVocabularyStateRepo() {
+    try {
+      var repo = window.BWReaderRuntime && window.BWReaderRuntime.vocabularyState;
+      return repo &&
+        repo.CONTRACT === 'vocabulary-state/1' &&
+        typeof repo.isMastered === 'function'
+        ? repo
+        : null;
+    } catch (e) { return null; }
+  }
+  function _epVocabularyStateMastered(kind, language, surface, lemma, forms) {
+    var repo = _epVocabularyStateRepo();
+    if (!repo) return false;
+    surface = String(surface || '').trim();
+    lemma = String(lemma || surface).trim();
+    if (!surface && !lemma) return false;
+    try {
+      return repo.isMastered({
+        kind: kind || 'word',
+        language: language || 'und',
+        lemma: lemma || surface,
+        word: surface || lemma,
+        surface: surface || lemma,
+        text: surface || lemma,
+        forms: Array.isArray(forms) ? forms : []
+      });
+    } catch (e) { return false; }
+  }
+  var _vocabMasteredLocal = (function () {
+    try {
+      var raw = JSON.parse(localStorage.getItem('vocab-mastered-v1') || 'null');
+      return new Set(raw && Array.isArray(raw.set) ? raw.set.map(function (v) { return String(v).toLowerCase(); }) : []);
+    } catch (e) { return new Set(); }
+  })();
+  function _saveVocabMasteredLocal() {
+    try {
+      localStorage.setItem('vocab-mastered-v1', JSON.stringify({
+        ts: Date.now(), set: Array.from(_vocabMasteredLocal)
+      }));
+    } catch (e) {}
+  }
   function _vocabOn() { var v = localStorage.getItem('eph-vocab-underline'); return v === null ? true : v === '1'; }
   function _loadVocabMap() {
     if (_vocabMap || !_vocabOn()) return;
     fetch('/pdf/api/vocab-mastery-map?file=' + encodeURIComponent(FREL)).then(function (r) { return r.json(); }).then(function (d) {
-      if (d && d.ok) { _vocabMap = d.map || {}; _decorateVisible(); }
+      if (d && d.ok) {
+        _vocabMap = Object.assign({}, d.map || {}, _vocabLocalCandidates);
+        _decorateVisible();
+      }
     }).catch(function () {});
   }
   // 从位置 i 起在收藏词组里找最长匹配(拉丁大小写不敏感)。reflow 适配 PDF 后端 _merge_favorite_phrases:
@@ -2691,13 +2807,42 @@
     while (i < L) {
       if (favs.length) {
         var fh = _favPhraseAt(s, i, favs);
-        if (fh) { var key = s.slice(fh.start, fh.end); var info0 = _vocabMap[key] || _vocabMap[key.toLowerCase()]; if (info0 && info0.label) out.push({ start: fh.start, end: fh.end, label: info0.label }); i = fh.end; continue; }   // 整段消费(收藏词组=一个分词单元)
+        if (fh) {
+          var key = s.slice(fh.start, fh.end);
+          var info0 = _vocabMap[key] || _vocabMap[key.toLowerCase()];
+          var k0 = key.toLowerCase(), l0 = String((info0 && info0.lemma) || k0).toLowerCase();
+          var lang0 = /[぀-ヿ㐀-鿿一-鿿]/.test(key) ? 'ja' : 'en';
+          if (info0 && info0.label &&
+              !_epVocabularyStateMastered('phrase', lang0, key, l0) &&
+              !_vocabMasteredLocal.has(k0) && !_vocabMasteredLocal.has(l0)) {
+            out.push({ start: fh.start, end: fh.end, label: info0.label });
+          }
+          i = fh.end; continue;
+        }   // 整段消费(收藏词组=一个分词单元)
       }
       var c = s[i];
-      if (wantEn && en(c)) { var j = i + 1; while (j < L && /[A-Za-z'’\-]/.test(s[j])) j++; var info = _vocabMap[s.slice(i, j).toLowerCase()]; if (info && info.label) out.push({ start: i, end: j, label: info.label }); i = j; continue; }
+      if (wantEn && en(c)) {
+        var j = i + 1; while (j < L && /[A-Za-z'’\-]/.test(s[j])) j++;
+        var surface = s.slice(i, j).toLowerCase(), info = _vocabMap[surface];
+        var infoLemma = String((info && info.lemma) || surface).toLowerCase();
+        if (info && info.label &&
+            !_epVocabularyStateMastered('word', 'en', surface, infoLemma) &&
+            !_vocabMasteredLocal.has(surface) && !_vocabMasteredLocal.has(infoLemma)) {
+          out.push({ start: i, end: j, label: info.label });
+        }
+        i = j; continue;
+      }
       if (wantJa && ja(c)) {
         var hit = null, maxL = Math.min(12, L - i);
-        for (var len = maxL; len >= 1; len--) { var inf = _vocabMap[s.slice(i, i + len)]; if (inf && inf.label) { hit = { start: i, end: i + len, label: inf.label }; break; } }
+        for (var len = maxL; len >= 1; len--) {
+          var surfaceJa = s.slice(i, i + len), inf = _vocabMap[surfaceJa];
+          var lemmaJa = String((inf && inf.lemma) || surfaceJa).toLowerCase();
+          if (inf && inf.label &&
+              !_epVocabularyStateMastered('word', 'ja', surfaceJa, lemmaJa) &&
+              !_vocabMasteredLocal.has(surfaceJa.toLowerCase()) && !_vocabMasteredLocal.has(lemmaJa)) {
+            hit = { start: i, end: i + len, label: inf.label }; break;
+          }
+        }
         if (hit) { out.push(hit); i = hit.end; continue; }
         i++; continue;
       }
@@ -2740,6 +2885,84 @@
     if (_deco.ruby) _rubyClearAll();
     _loadVocabMap();
     if (_deco.ruby) _decorateVisible();   // vocab 因 map=null 暂跳过(等 _loadVocabMap 回调);ruby 因 epRuby 已清会重拉
+  };
+  function _rerenderVisibleVocab() {
+    _visibleLoadedSecs().forEach(function (secEl) {
+      secEl.querySelectorAll('span.ep-vocab-und').forEach(_unwrap(true));
+      secEl.dataset.epVocab = '';
+      _vocabApplySection(secEl);
+    });
+  }
+  // IndexedDB/Vault hydrate 可能晚于章节首绘；仓库变化只重用手头 mastery map 重画，
+  // 不清 map、不访问服务器。仓库缺失时旧 localStorage/server 路径保持原样。
+  (function _bindEpVocabularyStateProjection() {
+    var repo = _epVocabularyStateRepo();
+    if (!repo) return;
+    var queued = false;
+    function paint() {
+      queued = false;
+      if (_vocabMap && _vocabOn()) _rerenderVisibleVocab();
+    }
+    function schedule() {
+      if (queued) return;
+      queued = true;
+      if (window.requestAnimationFrame) window.requestAnimationFrame(paint);
+      else setTimeout(paint, 0);
+    }
+    try {
+      if (typeof repo.subscribe === 'function') {
+        repo.subscribe(function (event) {
+          var record = event && event.record;
+          if (!record || record.property === 'mastered') schedule();
+        });
+      }
+    } catch (e) {}
+    try {
+      if (typeof repo.ready === 'function') Promise.resolve(repo.ready()).then(schedule, function () {});
+    } catch (e) {}
+    try { document.addEventListener('bw:vocabulary-state-ready', schedule); } catch (e) {}
+  })();
+  // rc-wordpop 的统一 mastery 本地投影。已有 span 与新补候选都在当前帧重画，
+  // 不清空 _vocabMap、不 GET mastery-map；服务端响应只负责后台同步。
+  window.applyVocabLocalOverride = function (lemma, mastered, meta) {
+    var values = [lemma, meta && meta.word].concat((meta && meta.forms) || [])
+      .filter(Boolean).map(function (value) { return String(value).trim().toLowerCase(); });
+    var keys = Array.from(new Set(values));
+    if (!keys.length) return function () {};
+    var oldMastered = keys.map(function (key) { return [key, _vocabMasteredLocal.has(key)]; });
+    var oldMap = keys.map(function (key) {
+      return [key, Object.prototype.hasOwnProperty.call(_vocabMap || {}, key), _vocabMap && _vocabMap[key]];
+    });
+    var oldCandidates = keys.map(function (key) {
+      return [key, Object.prototype.hasOwnProperty.call(_vocabLocalCandidates, key), _vocabLocalCandidates[key]];
+    });
+    keys.forEach(function (key) {
+      if (mastered) _vocabMasteredLocal.add(key);
+      else {
+        _vocabMasteredLocal.delete(key);
+        _vocabMap = _vocabMap || {};
+        if (!_vocabMap[key]) {
+          _vocabLocalCandidates[key] = { label: 'known', mastery: 0.8, lemma: String(lemma || key).toLowerCase() };
+          _vocabMap[key] = _vocabLocalCandidates[key];
+        }
+      }
+    });
+    _saveVocabMasteredLocal();
+    _rerenderVisibleVocab();
+    return function restoreEpubVocabOverride() {
+      oldMastered.forEach(function (entry) {
+        if (entry[1]) _vocabMasteredLocal.add(entry[0]); else _vocabMasteredLocal.delete(entry[0]);
+      });
+      oldMap.forEach(function (entry) {
+        if (entry[1]) _vocabMap[entry[0]] = entry[2]; else if (_vocabMap) delete _vocabMap[entry[0]];
+      });
+      oldCandidates.forEach(function (entry) {
+        if (entry[1]) _vocabLocalCandidates[entry[0]] = entry[2];
+        else delete _vocabLocalCandidates[entry[0]];
+      });
+      _saveVocabMasteredLocal();
+      _rerenderVisibleVocab();
+    };
   };
   // 乐观去下划线(rc-wordpop.js「☆ 标记掌握」调 __epubDeco.optimisticMaster):点掌握后立刻把该词的
   // 生词下划线隐掉(加 class,不动 DOM 结构),不等服务端 vocab-mark + map 刷新;失败调返回的 restore() 撤销。
@@ -2983,6 +3206,13 @@
     var cv = document.createElement('canvas');
     cv.className = 'ep-ink-canvas';
     el.appendChild(cv);
+    // 绘图区焦点(A5):手指长按 = 设为当前焦点(再长按取消)。笔/橡皮不经过这条路径。
+    try {
+      window.RC && RC.outgoing && RC.outgoing.bindDrawingFocus(cv, function () {
+        return { file: FREL, page: idx,
+                 hasInk: !!(el.__inkStrokes && el.__inkStrokes.length) };
+      });
+    } catch (e) {}
     el.__inkCv = cv; el.__inkIdx = idx; (_epInk.elOf = _epInk.elOf || {})[idx] = el;   // key→el:beacon 读 live el.__inkStrokes(防 _epInk.data 被跨书/同步 clobber 后送陈旧笔画)
     if (el.__inkStrokes == null) el.__inkStrokes = (_epInk.data[idx] ? JSON.parse(JSON.stringify(_epInk.data[idx])) : []);
     _inkSizeCanvas(el);
@@ -3160,7 +3390,7 @@
       try { el.setPointerCapture(e.pointerId); } catch (_) {}
       hideSel();
       RS0.penBegin(e, { eraser: _epInk.tool === 'eraser' });
-      _epInk.drawing = { el: el, idx: idx, noteRoute: true, eraser: _epInk.tool === 'eraser' };
+      _epInk.drawing = { el: el, captureEl: el, pid: e.pointerId, idx: idx, noteRoute: true, eraser: _epInk.tool === 'eraser' };
       document.addEventListener('pointermove', _inkPointerMove, true);
       document.addEventListener('pointerup', _inkPointerUp, true);
       document.addEventListener('pointercancel', _inkPointerUp, true);
@@ -3174,14 +3404,14 @@
     if (_epInk.tool === 'eraser') {
       if (_epInk.quickErase) clearTimeout(_epInk._revertT);   // 正在擦 → 暂停自动回笔计时(抬笔再重启)
       _inkPushUndo(el); _inkEraseAt(el, pt);
-      _epInk.drawing = { el: el, idx: idx, eraser: true, pageTouched: true };
+      _epInk.drawing = { el: el, captureEl: el, pid: e.pointerId, idx: idx, eraser: true, pageTouched: true };
     } else {
       _inkPushUndo(el);
       var stroke = { t: _epInk.tool, c: _epInk.color, w: parseFloat(_epInk.width) || 2.5, p: [pt] };
       _inkStrokesOf(el).push(stroke);                          // 先入册;绘制期间只画视口叠加层,松手 _inkRedraw 一次性落到主 canvas
       var iw0 = window.innerWidth || 1, ih0 = window.innerHeight || 1;
       _inkLiveShow();
-      _epInk.drawing = { el: el, idx: idx, stroke: stroke, live: [[e.clientX / iw0, e.clientY / ih0]], raf: null, pageTouched: true };
+      _epInk.drawing = { el: el, captureEl: el, pid: e.pointerId, idx: idx, stroke: stroke, live: [[e.clientX / iw0, e.clientY / ih0]], raf: null, pageTouched: true };
       _inkDrawLive(_epInk.drawing);                            // 画当前起点(视口叠加层)
     }
     document.addEventListener('pointermove', _inkPointerMove, true);
@@ -3190,6 +3420,9 @@
   }
   function _inkPointerMove(e) {
     var d = _epInk.drawing; if (!d) return;
+    // 手写笔、手指可能同时存在；只有发起当前笔画的 pointerId 才能阻止
+    // 默认动作，手指不能因残留的 pen 状态而丢掉第一轮原生滚动。
+    if (e.pointerId !== d.pid) return;
     e.preventDefault();
     // ── 便签跨界路由(规格:笔尖实时位置决定写哪层;pen/橡皮参与切割,line/arrow/rect 形状不切)──
     var RS = window.RC && RC.stickynote;
@@ -3230,10 +3463,16 @@
   }
   function _inkPointerUp(e) {
     var d = _epInk.drawing; if (!d) return;
+    if (e.pointerId !== d.pid) return;
     if (d.raf) { cancelAnimationFrame(d.raf); d.raf = null; }
     document.removeEventListener('pointermove', _inkPointerMove, true);
     document.removeEventListener('pointerup', _inkPointerUp, true);
     document.removeEventListener('pointercancel', _inkPointerUp, true);
+    try {
+      if (d.captureEl && d.captureEl.hasPointerCapture && d.captureEl.hasPointerCapture(d.pid)) {
+        d.captureEl.releasePointerCapture(d.pid);
+      }
+    } catch (_) {}
     var RS = window.RC && RC.stickynote;
     if (d.noteRoute) { if (RS && RS.penEnd) RS.penEnd(); }   // 便签内抬笔:便签段收尾(单点=有意的点,保留)
     else if (!d.eraser && d.stroke) {
@@ -3265,6 +3504,8 @@
     _epInk.saveTimers[idx] = setTimeout(function () { if (_epInk.pend) delete _epInk.pend[idx]; _inkSave(idx, strokes); }, 900);
   }
   function _inkSave(idx, strokes) {
+    // 绘图有改动 → 交给共享层合并(停手约 1s 才去取版本)。这里每笔都调是安全的。
+    try { window.RC && RC.outgoing && RC.outgoing.drawingTouched(FREL, idx); } catch (e) {}
     if (!FREL) return;
     // POST **落地后**才清 dirty(审查:在途窗口清了会被对侧同步用 pre-POST 旧值覆盖本地);期间又画了(pend)→ 保持
     var done = function () { if (_epInk.dirty && !(_epInk.pend && _epInk.pend[idx])) delete _epInk.dirty[idx]; };
@@ -3568,6 +3809,11 @@
       _readerES = new EventSource('/pdf/api/reader-events');
       _readerES.addEventListener('open', function () { _resRetry = 0; });
       _readerES.addEventListener('change', function (e) {
+        var _ev0; try { _ev0 = JSON.parse(e.data); } catch (_) { _ev0 = null; }
+        if (_ev0 && _ev0.kind === 'assistant-history') {   // 外部写入 → 侧栏当场追加(同 PDF 宿主)
+          try { if (window.RC && RC.assistant && RC.assistant.onHistoryEvent) RC.assistant.onHistoryEvent(_ev0); } catch (_) {}
+          return;
+        }
         if (document.visibilityState !== 'visible') return;   // 不活跃 → 忽略(后端已更新,回来 visibility 同步)
         var ev; try { ev = JSON.parse(e.data); } catch (x) { return; }
         if (ev && ev.kind === 'client-action' && ev.action && (!ev.file || ev.file === FREL)) {   // MCP 遥控:统一走 RC.execRemote(EPUB 的 jumpWithBack→HOST.goTo 章跳)
@@ -4108,7 +4354,37 @@
     },
     // 图 + 用户手写圈点采集(reader-agnostic 目标;当前返回 epub-html 现有形状,后续增量再归一化成统一 Figure DTO)
     collectFigures: function () { return _epCollectFigures(); },
+    // DocumentHost 迁移入口：复用现有 cur/offset 锚，不另建第二套选区。
+    captureSelection: function () {
+      var s = curSelection();
+      if (!s || !s.sel) return null;
+      var same = cur.text && String(cur.text).trim() === String(s.sel).trim();
+      var r = same && cur.rect ? cur.rect : null;
+      return RC.contract.selection({
+        text: s.sel,
+        context: s.sent || '',
+        anchor: same && cur.anchor ? {
+          kind: 'epub-offset',
+          section: cur.anchor.section,
+          start: cur.anchor.start,
+          end: cur.anchor.end
+        } : null,
+        rect: r ? { left: r.left, top: r.top, right: r.right, bottom: r.bottom, width: r.width, height: r.height } : null
+      });
+    },
+    clearSelection: function () {
+      try { var s = window.getSelection(); if (s && s.removeAllRanges) s.removeAllRanges(); } catch (_) {}
+      hideSel();
+    },
     currentLocation: function () { return { unit: 'section', index: _curTopIdx, total: COUNT }; },
+    navigate: function (target) {
+      var a = target && target.data ? target.data : (target || {});
+      var idx = a.section != null ? a.section : (a.index != null ? a.index : (a.page != null ? a.page : target));
+      idx = parseInt(idx, 10);
+      if (isNaN(idx)) return false;
+      jumpTo(Math.max(0, Math.min(COUNT - 1, idx)), false);
+      return true;
+    },
     // ③-4a:EPUB 的共享侧栏 host(asst 契约,对齐 PdfAdapter._host.asst)。RC.adapter()._host.asst 取到。
     //   纯新增,不动现有内联助手;③-4b EPUB 挂 RC.assistant.mountPdfSidebar() 时才生效(flag 门控 + 浏览器验证)。
     //   页↔章语义:章 idx=显示(dispPage/pdfFromDisp 恒等);PDF 字符层/词组高亮专属方法→no-op(EPUB 用 _jumpFlashSel 替 flashSelOnPage)。
@@ -4187,6 +4463,186 @@
     }
   };
   try { if (window.RC && RC.use) { RC.use(EpubHtmlAdapter); window.__epubHtmlAdapter = EpubHtmlAdapter; } } catch (e) {}
+
+  // ════════ PWA 书籍宿主白名单：扩展只调动作，章节 DOM/锚/sidecar 仍由本页拥有 ════════
+  try {
+    if (window.BWReaderBookHost && !window.__bwReaderLocalApi) {
+      var _bookRoute = '';
+      try { _bookRoute = String(document.querySelector('meta[name="bw-reader-route"]').getAttribute('content') || ''); } catch (_) {}
+      var _bookMode = _bookRoute === 'favorite' ? 'favorite' : 'epub';
+      function _bookSelection() {
+        var value = EpubHtmlAdapter.captureSelection();
+        if (!value) return null;
+        value.file = FREL;
+        value.book = (CFG && CFG.fileName) || document.title || '';
+        value.langs = bookLangsArr();
+        value.page = (_curTopIdx | 0) + 1;
+        value.location = { unit: 'section', index: _curTopIdx | 0, total: COUNT };
+        return value;
+      }
+      function _bookAction(name, payload) {
+        payload = payload || {};
+        if (name === 'clear_selection') {
+          EpubHtmlAdapter.clearSelection();
+          return { ok: true };
+        }
+        if (name === 'highlight') {
+          var selected = _bookSelection();
+          if (!selected || !selected.anchor) return Promise.reject(new Error('没有可标记的 EPUB 选区'));
+          return saveHl(selected.text, selected.anchor, String(payload.color || '')).then(function (record) {
+            if (!record) throw new Error('EPUB 高亮保存失败');
+            return { ok: true, highlight: record };
+          });
+        }
+        if (name === 'open_search') {
+          sp.classList.add('open');
+          var input = $('ep-search-in'); if (input) input.focus();
+          return { ok: true };
+        }
+        if (name === 'toggle_ruby') {
+          $('ep-ruby').click();
+          return { ok: true, ruby: !!_deco.ruby, translate: !!_deco.pagetr };
+        }
+        if (name === 'toggle_page_translate') {
+          $('ep-pagetr').click();
+          return { ok: true, ruby: !!_deco.ruby, translate: !!_deco.pagetr };
+        }
+        if (name === 'create_sticky') {
+          if (!(window.RC && RC.stickynote && RC.stickynote.createAtCenter)) throw new Error('EPUB 便签层尚未就绪');
+          RC.stickynote.createAtCenter();
+          return { ok: true };
+        }
+        if (name === 'toggle_ink') {
+          _inkToggleMode();
+          return { ok: true, active: !!_epInk.mode };
+        }
+        if (name === 'anchor_fx') {
+          if (window.RC && RC.stickynote && RC.stickynote.anchorFx) {
+            if (payload.show) RC.stickynote.anchorFx.show(Number(payload.x) || 0, Number(payload.y) || 0);
+            else RC.stickynote.anchorFx.hide();
+          }
+          return { ok: true };
+        }
+        if (name === 'jump_page' || name === 'jump_location') {
+          var loc = payload.location || payload;
+          var idx = loc.section != null ? loc.section
+            : (loc.index != null ? loc.index : Math.max(0, (Number(loc.page) || 1) - 1));
+          idx = Math.max(0, Math.min(COUNT - 1, parseInt(idx, 10) || 0));
+          jumpTo(idx, false);
+          return { ok: true, section: idx };
+        }
+        if (name === 'change_page') {
+          jumpTo(Math.max(0, Math.min(COUNT - 1, (_curTopIdx | 0) + (Number(payload.delta) || 0))), false);
+          return { ok: true };
+        }
+        if (name === 'jump_context') {
+          var target = payload.context || payload || {};
+          var file = String(target.file || target.file_rel || '');
+          var section = target.section != null ? target.section : Math.max(0, (Number(target.page) || 1) - 1);
+          if (file && file !== FREL && window.openBookAt) window.openBookAt(file, Number(section) + 1);
+          else jumpTo(Math.max(0, Math.min(COUNT - 1, parseInt(section, 10) || 0)), false);
+          return { ok: true };
+        }
+        if (name === 'flash_selection') {
+          if (typeof _jumpFlashSel === 'function') {
+            _jumpFlashSel(Math.max(0, (Number(payload.page) || 1) - 1), null, String(payload.text || ''));
+          }
+          return { ok: true };
+        }
+        if (name === 'pin_card') {
+          var cards = Array.isArray(payload.cards) ? payload.cards.slice(0, 50) : [];
+          if (!cards.length) throw new Error('没有可钉住的卡片');
+          if (!(window.RC && RC.stickynote && RC.stickynote.createCardAt)) throw new Error('EPUB 卡片便签尚未就绪');
+          RC.stickynote.createCardAt(
+            Number(payload.x) || (window.innerWidth || 1024) / 2,
+            Number(payload.y) || (window.innerHeight || 768) / 2,
+            cards,
+            String(payload.gid || '')
+          );
+          return { ok: true };
+        }
+        if (name === 'pin_html') {
+          var html = payload.html || {};
+          if (!html.content) throw new Error('没有可粘贴的工具卡内容');
+          if (!(window.RC && RC.stickynote && RC.stickynote.createHtmlAt)) throw new Error('EPUB 工具卡便签尚未就绪');
+          var ok = RC.stickynote.createHtmlAt(
+            Number(payload.x) || (window.innerWidth || 1024) / 2,
+            Number(payload.y) || (window.innerHeight || 768) / 2,
+            {
+              content: String(html.content || ''),
+              isHtml: !!html.isHtml,
+              label: String(html.label || '卡片'),
+              type: String(html.type || ''),
+              icon: String(html.icon || ''),
+              form: String(html.form || 'full'),
+              cid: String(html.cid || payload.cid || '')
+            }
+          );
+          if (!ok) throw new Error('请把工具卡放到书页正文上再松手');
+          return { ok: true };
+        }
+        if (name === 'toggle_fullscreen') {
+          $('fs-toggle').click();
+          return { ok: true };
+        }
+        if (name === 'open_settings') {
+          openSettings();
+          return { ok: true };
+        }
+        if (name === 'open_favorite') {
+          var fav = $('ep-fav-btn'); if (!fav) throw new Error('收藏组件尚未就绪');
+          fav.click();
+          return { ok: true };
+        }
+        if (name === 'create_user_page') {
+          if (!(window.RC && RC.userpages && RC.userpages.create)) throw new Error('插入页组件尚未就绪');
+          RC.userpages.create();
+          return { ok: true };
+        }
+        throw new Error('不允许的 EPUB 本地命令：' + name);
+      }
+      var _bookActionNames = [
+        'clear_selection', 'highlight', 'open_search', 'toggle_ruby', 'toggle_page_translate',
+        'create_sticky', 'toggle_ink', 'anchor_fx', 'jump_page', 'jump_location',
+        'change_page', 'jump_context', 'flash_selection', 'pin_card', 'pin_html',
+        'toggle_fullscreen', 'open_settings', 'open_favorite', 'create_user_page'
+      ];
+      var _bookActions = {};
+      _bookActionNames.forEach(function (name) {
+        _bookActions[name] = function (payload) { return _bookAction(name, payload); };
+      });
+      var _bookLocalApi = BWReaderBookHost.register({
+        mode: _bookMode,
+        file: FREL,
+        title: (CFG && CFG.fileName) || document.title || '',
+        langs: bookLangsArr(),
+        selection: _bookSelection,
+        context: function () { return EpubHtmlAdapter.getContext(); },
+        currentLocation: function () { return EpubHtmlAdapter.currentLocation(); },
+        actions: _bookActions,
+        capabilities: {
+          selection: true, context: true, highlight: true,
+          bookSearch: true, ruby: true, pageTranslate: true,
+          stickyNote: true, ink: true, anchorFx: true,
+          pinCard: true, pinHtmlCard: true, jumpPage: true, navigation: true,
+          fullscreen: true, bookSettings: true, favorite: true, userPage: true
+        }
+      });
+      if (window.RC && RC.actions) {
+        var _bookMeta = function (storage) { return { owner: 'pwa', runtime: 'native', storage: storage }; };
+        RC.actions.bind('highlight.save', function (p) { return _bookLocalApi.localAction('highlight', p); }, _bookMeta('book-sidecar'));
+        RC.actions.bind('ink.toggle', function () { return _bookLocalApi.localAction('toggle_ink', {}); }, _bookMeta('book-sidecar'));
+        RC.actions.bind('note.create', function () { return _bookLocalApi.localAction('create_sticky', {}); }, _bookMeta('book-sidecar'));
+        RC.actions.bind('reading.ruby.toggle', function () { return _bookLocalApi.localAction('toggle_ruby', {}); }, _bookMeta('device-local'));
+        RC.actions.bind('translation.page.toggle', function () { return _bookLocalApi.localAction('toggle_page_translate', {}); }, _bookMeta('device-local'));
+        RC.actions.bind('pin.card', function (p) { return _bookLocalApi.localAction('pin_card', p); }, _bookMeta('book-sidecar'));
+        RC.actions.bind('pin.html', function (p) { return _bookLocalApi.localAction('pin_html', p); }, _bookMeta('book-sidecar'));
+        RC.actions.bind('pin.anchorFx', function (p) { return _bookLocalApi.localAction('anchor_fx', p); }, _bookMeta('none'));
+      }
+    }
+  } catch (e) {
+    try { console.warn('[BW] EPUB 书籍宿主登记失败', e); } catch (_) {}
+  }
 
   // ════════ ③-4b:?asst=shared → EPUB 退役内联助手,改挂共享侧栏(rc-assistant.js mountPdfSidebar)════════
   //   默认(无 flag)完全走内联助手,零影响 → 浏览器验证 ?asst=shared 通过后再翻默认。

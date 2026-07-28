@@ -40,6 +40,14 @@ class VbookGateSlice(unittest.TestCase):
         import book_groups as BG
         cls.A, cls.VB, cls.BG = A, VB, BG
         cls.PR = sys.modules.get("pdf_reader")
+        cls._old_pdf_obsidian_root = cls.PR.OBSIDIAN_ROOT
+        cls.PR.OBSIDIAN_ROOT = BG.VAULT
+        cls._old_claim_authorizer = A.app.extensions.get(
+            "reader_legacy_sidecar_claim_authorizer"
+        )
+        A.app.extensions["reader_legacy_sidecar_claim_authorizer"] = (
+            lambda _identity: False
+        )
         cls.dir = BG.VAULT / "资源" / "uploads" / ".sandbox"
         cls.dir.mkdir(parents=True, exist_ok=True)
         cls.r1 = "资源/uploads/.sandbox/门测part1.pdf"
@@ -51,18 +59,42 @@ class VbookGateSlice(unittest.TestCase):
         cls.g = g
         cls.ref = VB.VIEW_PREFIX + g["group_id"]
         cls.c = A.app.test_client()
+        with A.app.app_context():
+            db = A.get_db()
+            db.execute(
+                "INSERT OR IGNORE INTO users(username,password_hash,role) "
+                "VALUES(?,?,?)",
+                ("vbook-gate-test", "x", "user"),
+            )
+            db.commit()
+            row = db.execute(
+                "SELECT id FROM users WHERE username=?",
+                ("vbook-gate-test",),
+            ).fetchone()
+            cls.user_id = int(row["id"])
+            cls.storage_namespace = A._reader_storage_namespace(cls.user_id)
+        from reader_sidecar_store import ReaderStorageIdentity
+        cls.identity = ReaderStorageIdentity(
+            cls.user_id,
+            cls.storage_namespace,
+        )
         with cls.c.session_transaction() as s:
-            s["user_id"] = "1"; s["username"] = "bwicarus"
+            s["user_id"] = cls.user_id
+            s["username"] = "vbook-gate-test"
 
     @classmethod
     def tearDownClass(cls):
+        cls.PR.OBSIDIAN_ROOT = cls._old_pdf_obsidian_root
+        cls.A.app.extensions["reader_legacy_sidecar_claim_authorizer"] = (
+            cls._old_claim_authorizer
+        )
         for r in (cls.r1, cls.r2):
             try:
                 (cls.BG.VAULT / r).unlink()
             except OSError:
                 pass
             try:
-                cls.PR._hl_path(r).unlink()
+                cls.PR._hl_path(r, cls.identity).unlink()
             except Exception:
                 pass
         try:
@@ -95,12 +127,12 @@ class VbookGateSlice(unittest.TestCase):
             "rects": [[10, 10, 60, 30]], "color": "#fff59d", "text": marker})
         self.assertTrue(r.get_json().get("ok"), r.get_json())
         # 磁盘断言:只允许落在 part2 sidecar,且 page 记的是局部 2
-        hl2 = self.PR._hl_path(self.r2)
+        hl2 = self.PR._hl_path(self.r2, self.identity)
         self.assertTrue(hl2.exists(), "高亮必须落 part2 的 sidecar")
         raw2 = hl2.read_text("utf-8")
         self.assertIn(marker, raw2)
         self.assertIn('"page": 2', raw2.replace('"page":2', '"page": 2'))
-        hl1 = self.PR._hl_path(self.r1)
+        hl1 = self.PR._hl_path(self.r1, self.identity)
         self.assertFalse(hl1.exists() and marker in hl1.read_text("utf-8"),
                          "part1 sidecar 绝不能被污染")
         # 读回:同一条高亮——vbook 视角页码=全局4,直连成员=局部2(v2 语义:视图全局/真相局部)
@@ -137,11 +169,17 @@ class VbookGateSlice(unittest.TestCase):
         # PATCH 按 id 跨卷定位
         r = self.c.patch("/pdf/api/highlights", json={"file": self.ref, "id": hid, "note": "vb改"})
         self.assertTrue(r.get_json().get("ok"), r.get_json())
-        self.assertIn("vb改", self.PR._hl_path(self.r2).read_text("utf-8"))
+        self.assertIn(
+            "vb改",
+            self.PR._hl_path(self.r2, self.identity).read_text("utf-8"),
+        )
         # DELETE 按 id 跨卷定位 → part2 sidecar 清空
         r = self.c.delete("/pdf/api/highlights", json={"file": self.ref, "id": hid})
         self.assertTrue(r.get_json().get("ok"))
-        self.assertNotIn("vbslice标记高亮", self.PR._hl_path(self.r2).read_text("utf-8"))
+        self.assertNotIn(
+            "vbslice标记高亮",
+            self.PR._hl_path(self.r2, self.identity).read_text("utf-8"),
+        )
 
     def test_46_notes_full_cycle(self):
         # 建在全局5(=part2 局部3):anchor.page 由 handler 翻译
@@ -150,13 +188,22 @@ class VbookGateSlice(unittest.TestCase):
         d = r.get_json()
         self.assertTrue(d.get("ok"), d)
         nid = d["id"]
-        raw2 = self.PR._notes_path(self.r2).read_text("utf-8") if hasattr(self.PR, "_notes_path") else None
+        raw2 = (
+            self.PR._notes_path(self.r2, self.identity).read_text("utf-8")
+            if hasattr(self.PR, "_notes_path")
+            else None
+        )
         # 便签 sidecar 路径按 _notes_load 读回验证(不依赖内部路径函数名)
         import json as _j
-        notes2 = self.PR._notes_load(self.r2)
+        notes2 = self.PR._notes_load(self.r2, self.identity)
         self.assertTrue(any(n["id"] == nid and n["anchor"]["page"] == 3 for n in notes2),
                         "便签必须落 part2、anchor.page=局部3")
-        self.assertFalse(any(n.get("id") == nid for n in self.PR._notes_load(self.r1)))
+        self.assertFalse(
+            any(
+                n.get("id") == nid
+                for n in self.PR._notes_load(self.r1, self.identity)
+            )
+        )
         # GET 扇入:anchor.page 反译回全局 5
         d = self.c.get(self._q("/pdf/api/notes", file=self.ref)).get_json()
         self.assertTrue(any(n["id"] == nid and n["anchor"]["page"] == 5 for n in d["notes"]))
@@ -170,7 +217,12 @@ class VbookGateSlice(unittest.TestCase):
         # DELETE
         r = self.c.delete(self._q("/pdf/api/notes", file=self.ref, id=nid))
         self.assertTrue(r.get_json().get("ok"))
-        self.assertFalse(any(n.get("id") == nid for n in self.PR._notes_load(self.r2)))
+        self.assertFalse(
+            any(
+                n.get("id") == nid
+                for n in self.PR._notes_load(self.r2, self.identity)
+            )
+        )
 
     def test_47_userpages_adapted(self):
         """2026-07-19 语义反转:合并书 userpages 从"禁用"改为完整适配(用户实锤:

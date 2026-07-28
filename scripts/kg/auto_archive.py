@@ -20,6 +20,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config  # noqa
+_CODE_ROOT = Path(__file__).resolve().parents[2]
 
 
 def is_trivial_contextual(node: dict, kg: dict) -> tuple[bool, str]:
@@ -171,7 +172,7 @@ def main() -> int:
     book = kg.get("book", kg_path.stem)
     base = f"http://127.0.0.1:5000/skilltree/{book}/api/archive-node"
     # 但本地 webapp 监听端口未知；改用直接 import 服务端函数
-    sys.path.insert(0, str(config.PROJECT_DIR / "_server_deploy"))
+    sys.path.insert(0, str(_CODE_ROOT / "_server_deploy"))
     from skilltree import _archive_node_to_trash
     pdf_path = Path(kg.get("pdf",""))
     if not pdf_path.exists():

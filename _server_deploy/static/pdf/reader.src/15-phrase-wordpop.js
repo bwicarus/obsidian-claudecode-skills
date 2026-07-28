@@ -2,17 +2,52 @@
 let _phraseFavSet = new Set();
 let _phraseMarkSet = new Set();   // 已掌握词组(归一化键):标掌握后不再画生词下划线
 const _phraseNorm = s => String(s || '').trim().replace(/\s+/g, ' ').toLowerCase();
+function _applyVocabularyPhraseProjection(records) {
+  for (const record of (Array.isArray(records) ? records : [])) {
+    if (!record || record.kind !== 'phrase') continue;
+    if (record.property === 'favorite') {
+      // PDF 字符盒匹配历史上忽略排版空白；仓库仍保留规范词组，几何投影只转成自身需要的 key。
+      const key = String(record.key || '').replace(/[\s\u3000]+/g, '');
+      if (!key) continue;
+      if (record.enabled) _phraseFavSet.add(key); else _phraseFavSet.delete(key);
+    } else if (record.property === 'mastered') {
+      const key = _phraseNorm(record.key);
+      if (!key) continue;
+      if (record.enabled) _phraseMarkSet.add(key); else _phraseMarkSet.delete(key);
+    }
+  }
+  try { _applyPhraseMergesAll(); } catch (_) {}
+  try {
+    document.querySelectorAll('[data-loaded="1"][data-page-num]').forEach((pw) => {
+      try { renderVocabUnderlines(pw, pw.__vocabMarks || []); } catch (_) {}
+    });
+  } catch (_) {}
+}
+try { window.__syncPhraseStateProjection = _applyVocabularyPhraseProjection; } catch (_) {}
 async function _loadPhraseFavs() {
+  // 共享模式由 rc-phrasepop 负责服务器兼容导入；PDF 字符层只消费统一仓库投影，
+  // 避免同一页面启动时再重复拉两份相同数据。
+  try {
+    const repo = window.__uiShared && window.BWReaderRuntime && window.BWReaderRuntime.vocabularyState;
+    if (repo && repo.CONTRACT === 'vocabulary-state/1' && typeof repo.snapshot === 'function') {
+      _applyVocabularyPhraseProjection(repo.snapshot());
+      return;
+    }
+  } catch (_) {}
   try { const d = await (await fetch('/pdf/api/phrases')).json(); if (d.ok) _phraseFavSet = new Set(d.phrases || []); } catch (_) {}
   try { const d = await (await fetch('/pdf/api/phrase-mark')).json(); if (d.ok) _phraseMarkSet = new Set(d.mastered || []); } catch (_) {}
 }
 window.onPhrase = () => {
-  const t = (lastSelText || '').trim();
+  const controller = window.__bwSelectionController;
+  const selected = (controller && controller.current && controller.current()) || {
+    text: lastSelText || '', rect: null
+  };
+  const t = String(selected && selected.text || '').trim();
   if (!t) return;
   // 词组查询前清掉残留的查词呼吸/常亮高亮:它们(.rc-wp-breathe z:190)会盖住词组高亮(z:6)截获点击 →
   //   「点词组高亮没反应」(尤其"某词先查过、其查词高亮被打断残留"时)。切到词组模式旧查词高亮已陈旧。
   try { if (window.RC && RC.wordpop && RC.wordpop.clearHls) RC.wordpop.clearHls(); } catch (_) {}
-  showPhrasePopover(t);
+  showPhrasePopover(t, { rect: selected && selected.rect || null });
 };
 // 词组查询期间的呼吸高亮：**只在点「词组」按钮、查询进行中**出现（showPhrasePopover 开始时建、
 // 结果出来即移除）。状态驱动(存 pt 坐标到 _activePhraseHl)→ 查询那 1-2s 内即便发生重渲染也不丢、
@@ -195,9 +230,16 @@ function _reopenExplain() {
   _activeExplainHl = null;
 }
 window.showPhrasePopover = async (text, opts) => {
-  if (window.__uiShared && window.PdfAdapter) {   // 阶段2:词组 → rc-phrasepop(共享模式;else 走 _showPhrasePopoverNative 原逻辑,逐字不变)
+  const adapter = (window.RC && RC.adapter) ? RC.adapter() : null;
+  if (window.__uiShared && adapter && typeof adapter.lookupPhrase === 'function') {   // 共享模式按当前宿主分流；PDF 字符层路径不变
     toolbar.classList.remove('open');
-    PdfAdapter.lookupPhrase({ text, noHighlight: opts && opts.noHighlight, anchorRect: opts && opts.rect, result: opts && opts.result, fallback: () => _showPhrasePopoverNative(text, opts) });
+    adapter.lookupPhrase({
+      text,
+      noHighlight: opts && opts.noHighlight,
+      anchorRect: opts && opts.rect,
+      result: opts && opts.result,
+      fallback: () => _showPhrasePopoverNative(text, opts)
+    });
     return;
   }
   return _showPhrasePopoverNative(text, opts);
@@ -257,12 +299,13 @@ async function _showPhrasePopoverNative(text, opts) {
 //    这里用手头 charBoxes 客户端搜词组出现位置**即时**画线(几 ms);真渲染到位后 vocab-layer
 //    整层重画,临时件自然被清,无缝接管。取消收藏即时摘除同款临时件。──
 function _pfavPaint(t) {
-  const needle = String(t || ''); if (!needle) return 0;
+  const needle = String(t || '').replace(/[\s\u3000]/g, ''); if (!needle) return 0;   // #55:去空白与页面无空白 str 对齐
   let n = 0;
   document.querySelectorAll('.page-wrap[data-page-num]').forEach((pw) => {
     const chars = pw.__charBoxes; if (!chars || !chars.length) return;
     let str = ''; const pos = [];
     for (let i = 0; i < chars.length; i++) {
+      if (chars[i].sp) continue;   // #55:跳空格 char → str 无空白,与归一化词组对齐
       const cc = chars[i].c != null ? String(chars[i].c) : '';
       for (let j = 0; j < cc.length; j++) { str += cc[j]; pos.push(i); }
     }
@@ -301,10 +344,12 @@ function _applyPhraseMergesLocal(pw) {
   if (!favs.length) return;
   let str = ''; const pos = [];
   for (let i = 0; i < chars.length; i++) {
+    if (chars[i].sp) continue;   // #55:跳空格 char → str 无空白,与归一化词组对齐
     const cc = chars[i].c != null ? String(chars[i].c) : '';
     for (let j = 0; j < cc.length; j++) { str += cc[j]; pos.push(i); }
   }
-  for (const t of favs) {
+  for (const t0 of favs) {
+    const t = String(t0 || '').replace(/[\s\u3000]/g, '');   // #55:去空白与页面无空白 str 对齐(跨行/夹空格词组本地也合并)
     if (!t) continue;
     let from = 0, idx;
     while ((idx = str.indexOf(t, from)) >= 0) {
@@ -323,7 +368,7 @@ try { window.__applyPhraseMergesLocal = _applyPhraseMergesLocal; } catch (_) {}
 
 window._phraseFav = (btn) => {
   const s = _wordPopState; if (!s || !s.word) return;
-  const t = s.word;
+  const t = String(s.word).replace(/[\s\u3000]+/g, '');   // #55:收藏归一化去空白(跨行选中带 \n)→存干净词组;本地匹配也归一化,已存脏词组一并救回
   const has = _phraseFavSet.has(t);
   const nowFav = !has;
   // ① local-first(2026-07-20 用户实锤"点收藏要等 Pi"):本地先翻集合+画面,零等待
@@ -757,25 +802,16 @@ window._speakCurWord = () => {
 // 乐观更新:标掌握瞬间先把该词下划线从所有已加载页移掉(不等服务器写库+重算),服务器响应后 refresh 再校正。
 // 大厂标配(optimistic UI):本地实例下尤其明显——画面立刻响应,不用等任何往返。
 function _dropVocabUnderlineOptimistic(s) {
-  const keys = new Set();
-  for (const k of [s && s.lemma, s && s.word]) if (k) keys.add(String(k).toLowerCase());
-  if (!keys.size) return function () {};
-  const snaps = [];   // 记录被改的页(before/after)→ 返回 restore 回滚(失败恢复,契约对齐 EPUB __epubDeco.optimisticMaster)
-  document.querySelectorAll('[data-loaded="1"][data-page-num]').forEach(pw => {
-    if (!pw.__vocabMarks || !pw.__vocabMarks.length) return;
-    const before = pw.__vocabMarks;
-    const after = before.filter(m =>
-      !(keys.has(String(m.lemma || '').toLowerCase()) || keys.has(String(m.word || '').toLowerCase())));
-    if (after.length !== before.length) {
-      pw.__vocabMarks = after; snaps.push({ pw, before, after });
-      try { renderVocabUnderlines(pw, after); } catch (_) {}
-    }
-  });
-  return function restore() {   // 只回滚仍是本次乐观结果的页(防覆盖期间别的刷新写入的新 marks)
-    snaps.forEach(({ pw, before, after }) => {
-      if (pw.__vocabMarks === after) { pw.__vocabMarks = before; try { renderVocabUnderlines(pw, before); } catch (_) {} }
-    });
-  };
+  // __vocabMarks 是“全候选目录”，取消掌握时要靠它立刻恢复 was→be 等变形。
+  // 旧实现把候选数组过滤改写，掌握虽快，却永久丢掉了本地恢复所需的数据。
+  if (typeof window.applyVocabLocalOverride === 'function') {
+    return window.applyVocabLocalOverride(
+      (s && (s.lemma || s.word)) || '',
+      true,
+      s || null
+    );
+  }
+  return function () {};
 }
 // 共享版 rc-wordpop 的「☆ 标记掌握」乐观去下划线经此调用(PDF 字符层专属;EPUB 走 __epubDeco.optimisticMaster)。
 try { window.__pdfDropVocabUnderline = _dropVocabUnderlineOptimistic; } catch (_) {}
@@ -852,17 +888,35 @@ window._wordPopGrammar = () => {
 }
 // 工具栏「🔍 查词」：弹单词小框
 window.onLookupWord = () => {
-  if (!lastSelText) return;
-  let ctx = '';
-  if (_charSel && _charSel.pw && _charSel.pw.__charBoxes) {
+  const controller = window.__bwSelectionController;
+  const selected = (controller && controller.current && controller.current()) || {
+    text: lastSelText || '', context: '', rect: null
+  };
+  const text = String(selected && selected.text || '').trim();
+  if (!text) return;
+  let ctx = String(selected.context || selected.ctx || selected.sentence || '');
+  const adapter = (window.RC && RC.adapter) ? RC.adapter() : null;
+  if (!ctx && _charSel && _charSel.pw && _charSel.pw.__charBoxes) {
     const chars = _charSel.pw.__charBoxes;
     const cr = _expandSentenceFromRange(chars, _charSel.startIdx, _charSel.endIdx);
     if (cr) ctx = _charsRangeToText(chars, cr.start, cr.end).slice(0, 400);
   }
-  if (window.__uiShared && window.PdfAdapter) {
-    PdfAdapter.lookupWord({ word: lastSelText, context: ctx, page: (typeof _selPageNum === 'function' ? _selPageNum() : currentPage), file: FILE_REL, langs: BOOK_LANGS, anchorRect: _charSel, fallback: (w, c) => showWordPopover(w, c) });
+  if (window.__uiShared && adapter && typeof adapter.lookupWord === 'function') {
+    let file = FILE_REL, langs = BOOK_LANGS, page = (typeof _selPageNum === 'function' ? _selPageNum() : currentPage);
+    try {
+      const info = adapter.fileInfo && adapter.fileInfo();
+      if (info && info.file) file = info.file;
+      const hostContext = adapter.getContext && adapter.getContext();
+      if (hostContext && Array.isArray(hostContext.langs)) langs = hostContext.langs;
+      if (selected.anchor && selected.anchor.page != null) page = selected.anchor.page;
+    } catch (_) {}
+    adapter.lookupWord({
+      word: text, context: ctx, page, file, langs,
+      anchorRect: adapter.kind === 'pdf' ? _charSel : selected.rect,
+      fallback: (w, c) => showWordPopover(w, c)
+    });
   } else {
-    showWordPopover(lastSelText, ctx);
+    showWordPopover(text, ctx);
   }
 };
 

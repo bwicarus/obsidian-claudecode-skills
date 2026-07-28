@@ -544,12 +544,18 @@ window.refreshVocabUnderlinesForAllPages = refreshVocabUnderlinesForAllPages;
 // §18.6(用户指出"应先存本地"):覆盖表**持久化** localStorage(离线标记后刷新不丢),48h TTL
 // (防多设备冲突:别处改了掌握态,本机陈旧覆盖最多赢 48h);服务端数据追上后由渲染层自动收敛清理。
 const _VOVR_KEY = 'vocab-override-v1';
+window.__vocabOverrideTs = new Map();
 window.__vocabOverride = (() => {
   const m = new Map();
   try {
     const raw = JSON.parse(localStorage.getItem(_VOVR_KEY) || '{}');
     const now = Date.now();
-    for (const k in raw) { if (raw[k] && (now - (raw[k].ts || 0)) < 48 * 3600 * 1000) m.set(k, !!raw[k].v); }
+    for (const k in raw) {
+      if (raw[k] && (now - (raw[k].ts || 0)) < 48 * 3600 * 1000) {
+        m.set(k, !!raw[k].v);
+        window.__vocabOverrideTs.set(k, Number(raw[k].ts) || now);
+      }
+    }
   } catch (_) {}
   return m;
 })();
@@ -562,30 +568,103 @@ window.__vocabOverridePersist = function () {
 };
 // §18.7 本地掌握库:开书拉全量 mastered 清单落 localStorage(SW netFallback → 离线用缓存快照);
 // toggle 本地增删 → 掌握判定的**事实源在本地**(下划线过滤/wordpop 初始态都优先用它,脱离服务器)。
-window.__masteredLocal = (() => { try { const r0 = JSON.parse(localStorage.getItem('vocab-mastered-v1') || 'null'); return r0 && r0.set ? new Set(r0.set) : null; } catch (_) { return null; } })();
+window.__masteredLocal = (() => { try { const r0 = JSON.parse(localStorage.getItem('vocab-mastered-v1') || 'null'); return new Set(r0 && Array.isArray(r0.set) ? r0.set : []); } catch (_) { return new Set(); } })();
 window.__masteredLocalSave = function () { try { localStorage.setItem('vocab-mastered-v1', JSON.stringify({ ts: Date.now(), set: [...(window.__masteredLocal || [])] })); } catch (_) {} };
 (async () => {
   try {
     const d = await (await fetch('/pdf/api/vocab-mastery-map?all=1&file=' + encodeURIComponent(typeof FILE_REL !== 'undefined' ? FILE_REL : ''))).json();
     if (d && d.ok && Array.isArray(d.mastered)) {
-      window.__masteredLocal = new Set(d.mastered.map((x) => String(x).toLowerCase()));
+      const server = new Set(d.mastered.map((x) => String(x).toLowerCase()));
+      let dirty = false;
+      // 服务端 snapshot 只确认已经追上的 mutation；仍未追上的本地变更继续盖在 snapshot 上，
+      // 避免启动时较慢的 GET 把用户刚点下去的状态覆盖回去。
+      window.__vocabOverride.forEach((value, key) => {
+        if (server.has(key) === value) {
+          window.__vocabOverride.delete(key);
+          window.__vocabOverrideTs.delete(key);
+          dirty = true;
+        } else if (value) server.add(key);
+        else server.delete(key);
+      });
+      if (dirty) window.__vocabOverridePersist();
+      window.__masteredLocal = server;
       window.__masteredLocalSave();
-      document.querySelectorAll('.page-wrap[data-page-num]').forEach((pw) => { if (pw.__vocabMarks) { try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {} } });
+      document.querySelectorAll('[data-loaded="1"][data-page-num]').forEach((pw) => { if (pw.__vocabMarks) { try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {} } });
     }
   } catch (_) {}
 })();
-window.applyVocabLocalOverride = function (lemma, mastered) {
+window.applyVocabLocalOverride = function (lemma, mastered, meta) {
   try {
     const k = String(lemma || '').toLowerCase();
-    if (window.__masteredLocal) { if (mastered) __masteredLocal.add(k); else __masteredLocal.delete(k); window.__masteredLocalSave(); }
-    window.__vocabOverrideTs = window.__vocabOverrideTs || new Map();
+    if (!k) return function () {};
+    const hadMastered = window.__masteredLocal.has(k);
+    const hadOverride = window.__vocabOverride.has(k);
+    const oldOverride = window.__vocabOverride.get(k);
+    const oldTs = window.__vocabOverrideTs.get(k);
+    if (mastered) __masteredLocal.add(k); else __masteredLocal.delete(k);
+    window.__masteredLocalSave();
     __vocabOverrideTs.set(k, Date.now());
     window.__vocabOverride.set(k, !!mastered);
     window.__vocabOverridePersist();
-    document.querySelectorAll('.page-wrap[data-page-num]').forEach((pw) => {
-      if (pw.__vocabMarks) { try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {} }
+    const keys = new Set([k, meta && meta.word, ...((meta && meta.forms) || [])]
+      .filter(Boolean).map((value) => String(value).toLowerCase()));
+    const paint = () => document.querySelectorAll('[data-loaded="1"][data-page-num]').forEach((pw) => {
+      if (!pw.__vocabMarks) return;
+      const hit = pw.__vocabMarks.some((mark) =>
+        keys.has(String(mark.lemma || '').toLowerCase()) ||
+        keys.has(String(mark.word || '').toLowerCase()));
+      if (hit) { try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {} }
     });
-  } catch (_) {}
+    paint();
+    return function restoreVocabLocalOverride() {
+      if (hadMastered) window.__masteredLocal.add(k); else window.__masteredLocal.delete(k);
+      if (hadOverride) {
+        window.__vocabOverride.set(k, oldOverride);
+        window.__vocabOverrideTs.set(k, oldTs);
+      } else {
+        window.__vocabOverride.delete(k);
+        window.__vocabOverrideTs.delete(k);
+      }
+      window.__masteredLocalSave();
+      window.__vocabOverridePersist();
+      paint();
+    };
+  } catch (_) { return function () {}; }
 };
+
+// vocabulary-state hydrate/provider 更新后只用现有 __vocabMarks 重画，不触发 mastery GET。
+// 这让刷新页面后从 IndexedDB/Vault 晚到的掌握状态也能在当前帧附近消掉下划线。
+(function _bindVocabularyStateUnderlineProjection() {
+  const repo = typeof _vocabularyStateRepo === 'function'
+    ? _vocabularyStateRepo()
+    : null;
+  if (!repo) return;
+  let queued = false;
+  const paint = () => {
+    queued = false;
+    document.querySelectorAll('[data-loaded="1"][data-page-num]').forEach((pw) => {
+      if (!pw.__vocabMarks) return;
+      try { renderVocabUnderlines(pw, pw.__vocabMarks); } catch (_) {}
+    });
+  };
+  const schedule = () => {
+    if (queued) return;
+    queued = true;
+    if (window.requestAnimationFrame) window.requestAnimationFrame(paint);
+    else setTimeout(paint, 0);
+  };
+  try {
+    if (typeof repo.subscribe === 'function') {
+      repo.subscribe((event) => {
+        const record = event && event.record;
+        if (!record || record.property === 'mastered') schedule();
+      });
+    }
+  } catch (_) {}
+  try {
+    if (typeof repo.ready === 'function') Promise.resolve(repo.ready()).then(schedule, () => {});
+  } catch (_) {}
+  try { document.addEventListener('bw:vocabulary-state-ready', schedule); } catch (_) {}
+})();
 
 // 找点击位置最近的非空格 char index

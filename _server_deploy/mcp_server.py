@@ -134,8 +134,10 @@ def reading_positions() -> dict:
     """用户各书的当前阅读位置,**按最后阅读时间从新到旧排好序**(第一条 = 最近在读的那本)。
     判断"用户最近在读什么/读到哪"用这个 —— 直接取 most_recent 或 books[0],不用自己比时间。"""
     try:
-        p = Path("/home/bwicarus/claude/state/reader-positions.json")
-        raw = json.loads(p.read_text("utf-8")) if p.exists() else {}
+        response = _get("/pdf/api/reading-pos")
+        if not response.get("ok"):
+            return response
+        raw = response.get("positions") or {}
         # 148:原先直接把无序 dict 原样吐出去 → 模型得自己逐个比 ts 找最大值,**实测真的挑错过书**
         #   (codex 挑了第二近的那本)。按 Anthropic「writing tools for agents」的 high-signal 原则:
         #   排好序 + 给人类可读时间 + 把结论(most_recent)直接摆出来,别让模型做本该我们做的事。

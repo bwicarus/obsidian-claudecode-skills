@@ -230,3 +230,19 @@ class TestCardChannel(unittest.TestCase):
                         "WHERE e.channel='card' AND m.surface IN ('dots','ldots','mathbb','frac')").fetchone()[0]
         c.close()
         self.assertEqual(bad, 0)
+
+    def test_reader_source_link_metadata_never_becomes_card_terms(self):
+        """来源按钮的 href/可见“原文”都只是导航，不得借 card 强信号进入 KG。"""
+        raw = (
+            "<div><b>Vector space</b> is closed under addition.</div>"
+            '<div class="source"><a href="/pdf/view?file=vbook%3A3e5d696e85'
+            '&page=7">原文</a></div>'
+        )
+        visible = self.AP._anki_card_visible_text(raw)
+        self.assertIn("Vector space", visible)
+        for leaked in ("vbook", "3e5d696e85", "file", "view", "page", "原文"):
+            self.assertNotIn(leaked, visible)
+        terms = {str(term).lower() for term in self.AP.extract_terms(visible, lang=[])}
+        self.assertIn("vector space", terms)
+        for leaked in ("vbook", "3e5d696e85", "file", "view", "page", "原文"):
+            self.assertNotIn(leaked.lower(), terms)

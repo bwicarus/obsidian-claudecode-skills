@@ -17,9 +17,11 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import config
 
+CODE_ROOT = Path(__file__).resolve().parent.parent
 PROJECT_DIR = config.PROJECT_DIR
 VAULT_ROOT  = config.VAULT_ROOT
 PYTHON      = sys.executable
+KG_SCRIPT_DIR = CODE_ROOT / "scripts" / "kg"
 
 
 def run(name: str, cmd: list[str]) -> int:
@@ -100,7 +102,7 @@ def main() -> int:
         for kg_f in sorted(kg_dir.glob("*.json")):
             if kg_f.name.endswith(".bak.json"): continue
             rc |= run(f"link_and_mastery {kg_f.name}", [
-                PYTHON, str(PROJECT_DIR / "scripts" / "kg" / "link_and_mastery.py"),
+                PYTHON, str(KG_SCRIPT_DIR / "link_and_mastery.py"),
                 "--kg", str(kg_f), "--in-place",
             ])
     # 4. PDF 全文搜索索引增量更新（新书/改动的书入 FTS；无变动几乎零成本，只比对 mtime）
@@ -109,11 +111,14 @@ def main() -> int:
     ])
     # 5. 注意力画像（查词/高亮/问答/检查 → 事件层 → 学习焦点；幂等增量,全量重算 ~2s）
     rc |= run("attention_profile", [
-        PYTHON, str(PROJECT_DIR / "scripts" / "attention_profile.py"),
+        # Executable code is part of the pinned immutable KG release.
+        # PROJECT_DIR is deliberately only the mutable data/configuration
+        # root; reaching through it here would silently escape the release.
+        PYTHON, str(CODE_ROOT / "scripts" / "attention_profile.py"),
     ])
     # 4. v3-D:autonote 候选检测(零 AI):评估注意力榜哪些词过门,落 autonote-candidates.json 供观察
     rc |= run("autonote 候选检测", [
-        PYTHON, str(PROJECT_DIR / "scripts" / "kg" / "propose_concept_notes.py"), "--detect-only",
+        PYTHON, str(KG_SCRIPT_DIR / "propose_concept_notes.py"), "--detect-only",
     ])
 
     return rc

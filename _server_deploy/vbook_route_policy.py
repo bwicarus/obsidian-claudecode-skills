@@ -15,7 +15,12 @@ ROUTE_POLICY = {
     'pdf_reader.epub_file': 'EPUB',   # /pdf/epub/file/<sha>/<path:subpath>
     'pdf_reader.epub_view': 'EPUB',   # /pdf/epub/view
     'pdf_reader.html_view': 'EPUB',   # /pdf/html/view
+    'pdf_reader.pdf_api_active_reading': 'GLOBAL',   # /pdf/api/active-reading(设备状态,与合并无关;同 reading-pos)
     'pdf_reader.pdf_api_ai_stream_result': 'JOB_OR_RANGE',   # /pdf/api/ai-stream-result
+    'pdf_reader.pdf_api_anki_add_cards': 'GLOBAL',   # /pdf/api/anki-add-cards
+    'pdf_reader.pdf_api_asset': 'GLOBAL',   # /pdf/api/asset/<aid>
+    'pdf_reader.pdf_api_book_briefs_get': 'BOOK_REP',   # /pdf/api/book-briefs
+    'pdf_reader.pdf_api_book_briefs_set': 'BOOK_REP',   # /pdf/api/book-briefs
     'pdf_reader.pdf_api_book_crop_get': 'BOOK_REP',   # /pdf/api/book-crop
     'pdf_reader.pdf_api_book_crop_set': 'MEMBER_REQUIRED',   # /pdf/api/book-crop
     'pdf_reader.pdf_api_book_figures_get': 'MEMBER_REQUIRED',   # /pdf/api/book-figures
@@ -27,6 +32,7 @@ ROUTE_POLICY = {
     'pdf_reader.pdf_api_build_toc_status': 'MEMBER_REQUIRED',   # /pdf/api/build-toc-status
     'pdf_reader.pdf_api_builtin_tools': 'JOB_OR_RANGE',   # /pdf/api/builtin-tools
     'pdf_reader.pdf_api_cache_stats': 'GLOBAL',   # /pdf/api/cache-stats
+    'pdf_reader.pdf_api_context_sync': 'GLOBAL',   # /pdf/api/context-sync(全局开关,不涉及具体书)
     'pdf_reader.pdf_api_char_offset_get': 'PAGE',   # /pdf/api/char-offset
     'pdf_reader.pdf_api_char_offset_set': 'PAGE',   # /pdf/api/char-offset
     'pdf_reader.pdf_api_compress_async': 'MEMBER_REQUIRED',   # /pdf/api/compress-async
@@ -86,10 +92,13 @@ ROUTE_POLICY = {
     'pdf_reader.pdf_api_job_status': 'JOB_OR_RANGE',   # /pdf/api/job-status
     'pdf_reader.pdf_api_jp_vocab_mark': 'PAGE',   # /pdf/api/jp-vocab-mark
     'pdf_reader.pdf_api_list_pdfs': 'GLOBAL',   # /pdf/api/list-pdfs
+    'pdf_reader.pdf_api_lookup_event': 'PAGE',   # /pdf/api/lookup-event
     'pdf_reader.pdf_api_note_composite': 'PAGE',   # /pdf/api/note-composite
     'pdf_reader.pdf_api_notes': 'PAGE',   # /pdf/api/notes
     'pdf_reader.pdf_api_ocr_selection': 'PAGE',   # /pdf/api/ocr-selection
     'pdf_reader.pdf_api_page_chars': 'PAGE',   # /pdf/api/page-chars
+    'pdf_reader.pdf_api_page_brief': 'PAGE',   # /pdf/api/page-brief
+    'pdf_reader.pdf_api_page_briefs_all': 'MEMBER_REQUIRED',   # /pdf/api/page-briefs-all
     'pdf_reader.pdf_api_page_figures': 'PAGE',   # /pdf/api/page-figures
     'pdf_reader.pdf_api_page_image': 'PAGE',   # /pdf/api/page-image
     'pdf_reader.pdf_api_page_nodes': 'PAGE',   # /pdf/api/page-nodes
@@ -130,28 +139,38 @@ ROUTE_POLICY = {
     'pdf_reader.pdf_api_snippets_to': 'PAGE',   # /pdf/api/snippets-to
     'pdf_reader.pdf_api_snippets_to_async': 'PAGE',   # /pdf/api/snippets-to-async
     'pdf_reader.pdf_api_to_note': 'PAGE',   # /pdf/api/to-note
+    'pdf_reader.pdf_api_direct_command': 'GLOBAL',   # 无 AI 直接命令(anchor 自带 file,不经合并层重写)
+    'pdf_reader.pdf_api_direct_events': 'GLOBAL',    # 失败事件订阅(与具体书无关)
+    'pdf_reader.pdf_api_outgoing_drawing': 'GLOBAL', # 绘图版本(按 file+page 查,自己校验)
+    'pdf_reader.pdf_api_outgoing_focus': 'GLOBAL',   # 焦点上报(引用自带定位)
+    'pdf_reader.pdf_api_outgoing_state': 'GLOBAL',   # 合并视图
+    'pdf_reader.pdf_api_outgoing_journal': 'GLOBAL', # 出向事件日志(Windows 拉取源)
+    'pdf_reader.pdf_api_turn_ack': 'GLOBAL',   # /pdf/api/turn-ack(前端渲染回执,与具体书无关)
     'pdf_reader.pdf_api_toc_get': 'BOOK_FANIN',   # /pdf/api/toc
     'pdf_reader.pdf_api_toolshot': 'JOB_OR_RANGE',   # /pdf/api/toolshot/<name>
     'pdf_reader.pdf_api_translate': 'PAGE',   # /pdf/api/translate
     'pdf_reader.pdf_api_translate_config': 'GLOBAL',   # /pdf/api/translate-config
     'pdf_reader.pdf_api_translate_sentence': 'BOOK_FANIN',   # /pdf/api/translate-sentence
+    'pdf_reader.pdf_api_sync_batch': 'GLOBAL',   # /pdf/api/sync-batch
+    'pdf_reader.pdf_api_ui_version': 'GLOBAL',   # /pdf/api/ui-version
     'pdf_reader.pdf_api_upload': 'MEMBER_REQUIRED',
-    'pdf_reader.pdf_api_web_fetch': 'GLOBAL',   # /pdf/api/web-fetch(抓网页,与合并书无关)
-    'pdf_reader.pdf_web_portal': 'GLOBAL',   # /pdf/web(网页阅读门户)
-    'pdf_reader.pdf_web_proxy': 'GLOBAL',   # /pdf/web/proxy(实况网页代理)
-    'pdf_reader.pdf_web_live': 'GLOBAL',    # /pdf/web/live(实况网页外壳)   # /pdf/api/upload
-    # 拦截式代理三件套:全都只认外部 URL、完全不碰 vault 里的书 → GLOBAL 名副其实
-    # (⚠ 教训记在册:标 GLOBAL 前必须核对 handler 真的没读 `file` 参数)
-    'pdf_reader.pdf_web_frame': 'GLOBAL',        # /pdf/web/frame(裁决 embed/代理)
-    'pdf_reader.pdf_web_page_mirror': 'GLOBAL',  # /pdf/web/p/<...>(路径镜像主文档)
-    'pdf_reader.pdf_web_res': 'GLOBAL',          # /pdf/web/res?url=(子资源,兼容旧形态)
-    'pdf_reader.pdf_web_res_mirror': 'GLOBAL',   # /pdf/web/r/<...>(路径镜像子资源)
+    # PWA 网页阅读器/RBI 已退役；端点暂留作 410/书架/原站兼容跳转。
+    # 仍登记为 GLOBAL，避免 vbook 路由审计把兼容端点误判成漏登记。
+    'pdf_reader.pdf_api_web_fetch': 'GLOBAL',   # RETIRED /pdf/api/web-fetch → 410
+    'pdf_reader.pdf_web_portal': 'GLOBAL',   # RETIRED /pdf/web → /pdf/
+    'pdf_reader.pdf_web_proxy': 'GLOBAL',   # RETIRED /pdf/web/proxy → 410
+    'pdf_reader.pdf_web_live': 'GLOBAL',    # COMPAT /pdf/web/live → 经校验的原 http(s) URL
+    'pdf_reader.pdf_web_frame': 'GLOBAL',        # RETIRED → 410
+    'pdf_reader.pdf_web_page_mirror': 'GLOBAL',  # RETIRED → 410
+    'pdf_reader.pdf_web_res': 'GLOBAL',          # RETIRED → 410
+    'pdf_reader.pdf_web_res_mirror': 'GLOBAL',   # RETIRED → 410
     'pdf_reader.pdf_api_web_translate': 'GLOBAL',  # /pdf/api/web-translate(网页沉浸式翻译:纯文本进出)
+    'pdf_reader.pdf_api_web_translate_config': 'GLOBAL',  # /pdf/api/web-translate-config(当前账户的无状态翻译后端能力)
     'pdf_reader.pdf_api_web_vocab': 'GLOBAL',      # /pdf/api/web-vocab(未掌握词判定:只查词库)
-    'pdf_reader.pdf_api_web_cookie': 'GLOBAL',     # /pdf/api/web-cookie(登录 cookie 导入:per-user 存储)
+    'pdf_reader.pdf_api_web_cookie': 'GLOBAL',     # RETIRED;旧 Cookie 文件只备份保留
     'pdf_reader.pdf_api_web_trcache': 'GLOBAL',    # /pdf/api/web-trcache(网页整页译文预取)
-    'pdf_reader.pdf_web_rbi': 'GLOBAL',            # /pdf/web/rbi(RBI:Pi 真 Chrome 渲染,只认外部 URL)
-    'pdf_reader.pdf_web_rbi_live': 'GLOBAL',       # /pdf/web/rbi-live(RBI 实况:rrweb DOM 流)
+    'pdf_reader.pdf_web_rbi': 'GLOBAL',            # RETIRED → 410
+    'pdf_reader.pdf_web_rbi_live': 'GLOBAL',       # RETIRED → 410
     'pdf_reader.pdf_api_userpages': 'PAGE',   # /pdf/api/userpages
     'pdf_reader.pdf_api_video_player_prefs': 'GLOBAL',   # /pdf/api/video-player-prefs
     'pdf_reader.pdf_api_video_subtitles': 'GLOBAL',   # /pdf/api/video-subtitles/<vid>
@@ -160,6 +179,10 @@ ROUTE_POLICY = {
     'pdf_reader.pdf_api_vocab_list': 'PAGE',   # /pdf/api/vocab-list
     'pdf_reader.pdf_api_vocab_mark': 'PAGE',   # /pdf/api/vocab-mark
     'pdf_reader.pdf_api_vocab_mastery_map': 'BOOK_FANIN',   # /pdf/api/vocab-mastery-map
+    'pdf_reader.pdf_api_entity': 'GLOBAL',   # /pdf/api/entity/<aid>
+    'pdf_reader.pdf_api_rbi_ticket': 'GLOBAL',   # RETIRED → 410
+    'pdf_reader.pdf_api_review_answer': 'GLOBAL',   # /pdf/api/review-answer
+    'pdf_reader.pdf_api_review_queue': 'GLOBAL',   # /pdf/api/review-queue
     'pdf_reader.pdf_fav_icon': 'GLOBAL',   # /pdf/fav/icon
     'pdf_reader.pdf_fav_manifest': 'GLOBAL',   # /pdf/fav/manifest
     'pdf_reader.pdf_fav_open': 'GLOBAL',   # /pdf/fav/open
@@ -171,4 +194,8 @@ ROUTE_POLICY = {
     'pdf_reader.pdf_sw_js': 'GLOBAL',   # /pdf/sw.js
     'pdf_reader.pdf_tools_page': 'NONE',   # /pdf/tools
     'pdf_reader.pdf_view': 'GLOBAL',   # /pdf/view
+    'reader_shared_note.shared_note_get': 'GLOBAL',   # 账户级共享便签,不属于任何书
+    'reader_shared_note.shared_note_page': 'GLOBAL',  # 账户级共享便签页面
+    'reader_shared_note.shared_note_post': 'GLOBAL',  # 账户级共享便签写入
+    'reader_cache_identity': 'GLOBAL',   # /pdf/api/cache-identity
 }

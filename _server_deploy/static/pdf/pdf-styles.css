@@ -99,7 +99,7 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
 /* 右侧语法分析抽屉：流式堆叠的依存句法图（displaCy 风格） */
 /* 侧栏从顶部贯通用全高度（top:0），盖住 header 右侧空白区 */
 /* 右侧抽屉：仿仪表盘磨砂玻璃滑出(内容不变:语法分析/知识点/单词本)。默认挤压→PDF 留左侧可读 */
-#grammar-panel{position:fixed;top:0;right:0;bottom:0;width:min(38vw,560px);display:flex;flex-direction:column;z-index:120;
+#grammar-panel{position:fixed;top:0;right:0;bottom:0;width:var(--ep-side-width,min(38vw,560px));display:flex;flex-direction:column;z-index:120;
   background:linear-gradient(135deg,rgba(255,255,255,0.08),rgba(255,255,255,0.03)),rgba(14,20,40,0.62);
   backdrop-filter:blur(var(--gp-blur,20px)) saturate(150%) brightness(1.05);-webkit-backdrop-filter:blur(var(--gp-blur,20px)) saturate(150%) brightness(1.05);
   border-left:1px solid rgba(255,255,255,0.20);
@@ -119,10 +119,10 @@ html,body{margin:0;padding:0;height:100%;background:#1a1d24;color:#e6e6f0;font-f
   box-shadow:inset 1px 0 0 rgba(255,255,255,0.16),-2px 0 12px rgba(0,0,0,.35);user-select:none;
   transition:right 0.4s cubic-bezier(.4,0,.2,1),background .15s,color .15s}
 #side-handle:hover{color:#fff;background:linear-gradient(135deg,rgba(255,255,255,0.15),rgba(255,255,255,0.06)),rgba(99,102,241,0.28)}
-body.grammar-open #side-handle{right:min(38vw,560px)}
+body.grammar-open #side-handle{right:var(--ep-side-width,min(38vw,560px))}
 /* 侧栏展开时 header + main 让出右侧空间(挤压；PDF 留左侧可读，把手始终可见可关) */
-body.grammar-open #main,body.grammar-open #header{padding-right:calc(min(38vw,560px) + 12px)}
-body.grammar-open #result-mask{padding-right:min(38vw,560px)}   /* result 弹框居中到侧栏左侧可视区 */
+body.grammar-open #main,body.grammar-open #header{padding-right:calc(var(--ep-side-width,min(38vw,560px)) + 12px)}
+body.grammar-open #result-mask{padding-right:var(--ep-side-width,min(38vw,560px))}   /* result 弹框居中到侧栏左侧可视区 */
 /* 悬浮显示模式：抽屉盖在正文上，不挤压(磨砂能透出背后) */
 body.grammar-open.grammar-floating #main,body.grammar-open.grammar-floating #header{padding-right:0}
 /* 右栏设置弹层 */
@@ -273,9 +273,9 @@ body.grammar-open.grammar-floating #main,body.grammar-open.grammar-floating #hea
 
 @media (max-width:900px){
   /* 窄屏也挤压 PDF（不再全屏盖住），让左侧 PDF 缩小后完整显示 */
-  #grammar-panel{width:58vw;max-width:none}
-  body.grammar-open #main,body.grammar-open #header{padding-right:calc(58vw + 10px)}
-  body.grammar-open #side-handle{right:58vw}
+  #grammar-panel{width:var(--ep-side-width,58vw);max-width:none}
+  body.grammar-open #main,body.grammar-open #header{padding-right:calc(var(--ep-side-width,58vw) + 10px)}
+  body.grammar-open #side-handle{right:var(--ep-side-width,58vw)}
 }
 
 /* 知识点节点卡（在统一面板的「知识点」pane 内）*/
@@ -419,7 +419,7 @@ body.grammar-open.grammar-floating #main,body.grammar-open.grammar-floating #hea
    黄×黑字=黑(字像素不被遮/不掉对比度)、黄×白底=黄。**关键:不用 opacity 属性**——opacity<1 会让本元素
    isolate,multiply 就叠不到底下的页图上,退化成"半透明色盖在字上=发灰发糊"(正是之前的毛病)。
    想要的"半透明感"靠 multiply 本身 + 颜色本身偏浅就够了;hover 用 box-shadow 描边,别再动 opacity。 */
-.hl-layer .hl-saved{position:absolute;border-radius:2px;pointer-events:auto;cursor:pointer;mix-blend-mode:multiply;transition:box-shadow .12s}
+.hl-layer .hl-saved{position:absolute;border-radius:2px;pointer-events:auto;cursor:pointer;mix-blend-mode:multiply;transition:box-shadow .12s;touch-action:manipulation;-webkit-tap-highlight-color:transparent}
 .hl-layer .hl-saved:hover{box-shadow:0 0 0 1.5px rgba(0,0,0,.22)}
 .hl-layer .hl-saved.has-note{box-shadow:inset 0 -2px 0 rgba(0,0,0,.35)}
 /* 仅备注（无色）：透明背景 + 虚线边框提示"这里有备注但无颜色高亮" */

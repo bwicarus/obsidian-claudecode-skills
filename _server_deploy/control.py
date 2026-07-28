@@ -297,9 +297,13 @@ def register_control(app):
                         continue
                 if rel not in reg.get("books", {}) and body.get("register"):
                     # 阅读器里首次对未登记书开火 → 自动分配编码(同 propose 的分配规则)
-                    sys.path.insert(0, str(CLAUDE_DIR / "scripts" / "kg"))
                     try:
-                        import propose_concept_notes as _PCN
+                        from kg_runtime import (
+                            import_module as _import_kg_module,
+                        )
+                        _PCN = _import_kg_module(
+                            "propose_concept_notes"
+                        )
                         reg.setdefault("books", {})
                         reg.setdefault("codes", {})
                         _PCN._book_entry(reg, rel, create=True)
@@ -514,6 +518,16 @@ def register_control(app):
             return jsonify({"ok": False, "error": "PDF 路径越界"}), 400
         if not pdf_abs.exists():
             return jsonify({"ok": False, "error": "PDF 不存在"}), 400
+        try:
+            from kg_runtime import runtime_file as _kg_runtime_file
+
+            build_nodes_script = _kg_runtime_file("scripts/kg/build_nodes.py")
+            extract_edges_script = _kg_runtime_file("scripts/kg/extract_edges.py")
+        except Exception as exc:
+            return jsonify({
+                "ok": False,
+                "error": f"KG runtime 不可用: {str(exc)[:160]}",
+            }), 503
         import uuid, time
         job_id = uuid.uuid4().hex[:8]
         log_dir = CLAUDE_DIR / "state" / "logs"
@@ -525,7 +539,7 @@ def register_control(app):
             with log_file.open("w", encoding="utf-8") as f:
                 f.write(f"[{time.strftime('%H:%M:%S')}] === build {book_id} ===\n"); f.flush()
                 # Step 1: build_nodes
-                args = [PYTHON, "-u", str(CLAUDE_DIR / "scripts" / "kg" / "build_nodes.py"),
+                args = [PYTHON, "-u", str(build_nodes_script),
                         "--pdf", str(pdf_abs), "--book", book_id,
                         "--model", model, "--effort", effort]
                 if pages: args += ["--pages", pages]
@@ -544,7 +558,7 @@ def register_control(app):
                     except Exception as e:
                         f.write(f"[{time.strftime('%H:%M:%S')}] ⚠ meta 写入失败: {e}\n"); f.flush()
                     # Step 3: extract_edges
-                    args2 = [PYTHON, "-u", str(CLAUDE_DIR / "scripts" / "kg" / "extract_edges.py"),
+                    args2 = [PYTHON, "-u", str(extract_edges_script),
                              "--kg", str(kg_path), "--in-place"]
                     f.write(f"\n[{time.strftime('%H:%M:%S')}] ▶ extract_edges\n"); f.flush()
                     rc2 = subprocess.run(args2, cwd=str(CLAUDE_DIR), env=env,

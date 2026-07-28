@@ -2,13 +2,62 @@
 // 仅 ui=shared 加载了 pdf-adapter.js → window.PdfAdapter 存在时执行;默认无 flag 时整段跳过。
 // 阶段1 的 lookupWord 由门控点直接传 opts,不依赖此 bind;此段只为 captureSelection/clearSelection(阶段2)就位。
 if (window.PdfAdapter && PdfAdapter.bind) {
+  // vocabulary-state 可能在 reader.js 之前或之后完成 IndexedDB/扩展 Vault hydrate。
+  // 两种顺序都只把 phrase 记录投影进现有 PDF 字符盒，不触发任何确认 GET。
+  const _syncSharedPhraseState = (record) => {
+    try {
+      if (typeof window.__syncPhraseStateProjection !== 'function') return;
+      if (record) {
+        if (record.kind === 'phrase') window.__syncPhraseStateProjection([record]);
+        return;
+      }
+      const repo = window.BWReaderRuntime && window.BWReaderRuntime.vocabularyState;
+      if (repo && repo.CONTRACT === 'vocabulary-state/1' && typeof repo.snapshot === 'function') {
+        window.__syncPhraseStateProjection(repo.snapshot());
+      }
+    } catch (_) {}
+  };
+  try {
+    document.addEventListener('bw:vocabulary-state-change', (event) => {
+      _syncSharedPhraseState(event && event.detail && event.detail.record);
+    });
+    document.addEventListener('bw:vocabulary-state-ready', () => _syncSharedPhraseState());
+  } catch (_) {}
+  _syncSharedPhraseState();
   // PDF 也接进统一中间层 RC._adapter(设计见 /reader-middlelayer-design.md);助手经 RC.adapter().getContext() 取上下文,
-  // 与 EPUB 用完全一样的方式。仅 ui=shared(window.PdfAdapter 存在)时执行;legacy 模式整段跳过 → RC._adapter 保持空、ctx() 回退直连 __voiceContext。
-  try { if (window.RC && RC.use) RC.use(PdfAdapter); } catch (e) {}
+  // 与 EPUB 用完全一样的方式。实况网页已经由 parser 阶段的 WebAdapter 独立登记；这里仍 bind
+  // PDF 私有 host 供共享 UI 组合，但绝不能用 PdfAdapter 把当前 kind=web 的 DocumentHost 覆盖掉。
+  const _readerIsWebHost = !!(window.__PDF_CFG && window.__PDF_CFG.web_url);
+  try { if (!_readerIsWebHost && window.RC && RC.use) RC.use(PdfAdapter); } catch (e) {}
+  function _pdfNoteGeom(pw) {
+    // #51 去边(crop)坐标统一:便签/反馈层都挂进 .crop-on 的 page-wrap→吃 CSS translate(-cropL,-cropT)。
+    // 以 char-layer(撑满整页 --full-w、与便签同吃 translate)的实时屏幕 BCR 为基准 → crop/zoom/祖先缩放
+    // 全自动含在 BCR 里,三条链(拖动反馈 noteWordRect/mount、松手 anchorFromPoint→noteMount)同一坐标系。
+    // char-layer 未就绪时回退 pw BCR + crop 变量手算整页屏幕投影。
+    var cl = pw.__charLayer;
+    var isCrop = pw.classList && pw.classList.contains('crop-on');
+    var cropL = isCrop ? (parseFloat(pw.style.getPropertyValue('--crop-l')) || 0) : 0;
+    var cropT = isCrop ? (parseFloat(pw.style.getPropertyValue('--crop-t')) || 0) : 0;
+    var fullW = isCrop ? (parseFloat(pw.style.getPropertyValue('--full-w')) || pw.clientWidth) : pw.clientWidth;
+    var fullH = isCrop ? (parseFloat(pw.style.getPropertyValue('--full-h')) || pw.clientHeight) : pw.clientHeight;
+    if (cl) {
+      var clr = cl.getBoundingClientRect();
+      if (clr.width && clr.height) {
+        return { left: clr.left, top: clr.top, sw: clr.width, sh: clr.height,
+                 layW: cl.clientWidth || fullW, layH: cl.clientHeight || fullH, fullW: fullW, fullH: fullH };
+      }
+    }
+    var pr = pw.getBoundingClientRect();
+    var S = pr.width / (pw.clientWidth || 1) || 1;
+    return { left: pr.left - cropL * S, top: pr.top - cropT * S,
+             sw: fullW * S, sh: fullH * S, layW: fullW, layH: fullH, fullW: fullW, fullH: fullH };
+  }
   PdfAdapter.bind({
     charSel: () => _charSel,
     lastSelText: () => lastSelText,
     selPageNum: () => (typeof _selPageNum === 'function' ? _selPageNum() : currentPage),
+    currentPage: () => (typeof currentPage !== 'undefined' ? currentPage : 0),
+    pageCount: () => { try { return pdfDoc ? pdfDoc.numPages : 0; } catch (_) { return 0; } },
     fileRel: () => FILE_REL,
     bookLangs: () => BOOK_LANGS,
     sentence: (cs) => {
@@ -69,23 +118,25 @@ if (window.PdfAdapter && PdfAdapter.bind) {
       const pw = document.querySelector('.page-wrap[data-page-num="' + anchor.page + '"]');
       if (!pw || pw.dataset.loaded !== '1') return null;
       const x = Math.max(0, Math.min(1, anchor.x || 0)), y = Math.max(0, Math.min(1, anchor.y || 0));
-      return { el: pw, left: x * pw.clientWidth, top: y * pw.clientHeight };
+      const g = _pdfNoteGeom(pw);   // #51 crop:anchor=整页比例;便签 append 进 .crop-on 吃 translate → left 用整页布局坐标即对齐
+      return { el: pw, left: x * g.fullW, top: y * g.fullH };
     },
     noteWordRect: (x, y) => {
-      // #51 粒度=单词(用户设计):最近字符→同 w 词聚合精确框;dist 给调用方判"超范围→横线"
+      // #51 粒度=单词(用户设计):最近字符→同 w 词聚合精确框;dist(屏幕像素)给调用方判"超范围→横线"
       const t = document.elementFromPoint(x, y);
       const pw = t && t.closest ? t.closest('.page-wrap') : null;
       const cbs = pw && pw.__charBoxes;
       if (!cbs || !cbs.length) return null;
-      const r = pw.getBoundingClientRect();
-      // #51 词框错位根因:charBoxes 坐标=建层时页尺寸;页重渲(缩放/适应)后尺寸变了坐标没跟 →
-      // 探测选错字+词框画错位(松手锚定用比例不受影响=「拖动显示与松手不一致」)。按 k 实时换算。
-      const k = (pw.__charsBaseW && pw.clientWidth) ? (pw.clientWidth / pw.__charsBaseW) : 1;
-      const px = x - r.left, py = y - r.top;
+      // #51 charBox=建层整页布局坐标(__charsBaseW=建层整页布局宽);去边/缩放全含在 g(char-layer 实时 BCR)。
+      // 屏幕点→建层布局坐标(dispK=屏幕/建层布局)与 charBox 同系匹配;返回当前布局坐标(Klay)供 _afx 挂进吃 translate 的 pw。
+      const g = _pdfNoteGeom(pw);
+      const baseW = pw.__charsBaseW || g.layW || 1;
+      const dispK = (g.sw / baseW) || 1;      // 建层布局 → 当前屏幕像素
+      const Klay = (g.layW / baseW) || 1;     // 建层布局 → 当前布局
+      const px = (x - g.left) / dispK, py = (y - g.top) / dispK;   // 屏幕 → 建层布局坐标
       let best = null, bd = 1e18, bestRow = null, brd = 1e18;
-      for (const cb0 of cbs) {
-        if (cb0.sp || !cb0.width) continue;
-        const cb = { left: cb0.left * k, top: cb0.top * k, width: cb0.width * k, height: cb0.height * k, w: cb0.w, sp: cb0.sp };
+      for (const cb of cbs) {
+        if (cb.sp || !cb.width) continue;
         const cx = cb.left + cb.width / 2, cy = cb.top + cb.height / 2;
         // 行优先(用户拍板 2026-07-21:锁**左上角左侧同行**文字,非斜上方——锚语义"插在这段文字之后"):
         // 字符行高带内(±0.75字高)且在探测点左侧 → 按水平距离取最近;同行没有才退全局欧氏最近
@@ -100,12 +151,12 @@ if (window.PdfAdapter && PdfAdapter.bind) {
       if (bestRow) { best = bestRow; bd = brd * brd; }
       if (!best) return null;
       let L = best.left, T = best.top, R2 = best.left + best.width, B = best.top + best.height;
-      if (best.w !== -1) for (const cb0 of cbs) {
-        if (cb0.w !== best.w || cb0.sp) continue;
-        L = Math.min(L, cb0.left * k); T = Math.min(T, cb0.top * k);
-        R2 = Math.max(R2, (cb0.left + cb0.width) * k); B = Math.max(B, (cb0.top + cb0.height) * k);
+      if (best.w !== -1) for (const cb of cbs) {
+        if (cb.w !== best.w || cb.sp) continue;
+        L = Math.min(L, cb.left); T = Math.min(T, cb.top);
+        R2 = Math.max(R2, cb.left + cb.width); B = Math.max(B, cb.top + cb.height);
       }
-      return { el: pw, left: L, top: T, width: R2 - L, height: B - T, dist: Math.sqrt(bd) };
+      return { el: pw, left: L * Klay, top: T * Klay, width: (R2 - L) * Klay, height: (B - T) * Klay, dist: Math.sqrt(bd) * dispK };
     },
     noteAnchorFromPoint: (x, y) => {
       const t = document.elementFromPoint(x, y);
@@ -124,18 +175,40 @@ if (window.PdfAdapter && PdfAdapter.bind) {
         });
         if (!pw) return null;
       }
-      const r = pw.getBoundingClientRect();
-      if (!r.width || !r.height) return null;
+      const g = _pdfNoteGeom(pw);   // #51 crop:整页比例(char-layer 屏幕投影,含 translate)
+      if (!g.sw || !g.sh) return null;
       const _cl = !(t && t.closest && t.closest('.page-wrap') === pw);   // 走了最近页 fallback=clamped(反馈层画插入横线)
       const a0 = { kind: 'pdf', page: parseInt(pw.dataset.pageNum || '0', 10) || 0,
-               x: Math.max(0, Math.min(1, (x - r.left) / r.width)),
-               y: Math.max(0, Math.min(1, (y - r.top) / r.height)) };
+               x: Math.max(0, Math.min(1, (x - g.left) / g.sw)),
+               y: Math.max(0, Math.min(1, (y - g.top) / g.sh)) };
       if (_cl) a0.clamped = 1;
       return a0;
     },
     // 阶段2 词组(rc-phrasepop):呼吸高亮层是 PDF 字符层几何 → 留底座,adapter 只接管查询+小框渲染。
     phraseHighlight: () => { try { return _showPhraseHighlight(_charSel && _charSel.pw); } catch (_) { return null; } },   // 返回本高亮 → onSolid 精确标它(并发多查询各标各的)
     phraseSolid: (hl) => { try { if (!hl) return; hl.solid = true; const _l = document.querySelector('.phrase-hl-layer[data-phid="' + hl.id + '"]'); if (_l) { _l.classList.remove('breathe'); _l.querySelectorAll('.hl').forEach(el => el.style.pointerEvents = 'auto'); } } catch (_) {} },   // 不回退标"最后一个"(并发查询会误标最新那个)
+    // 共享词组 UI 已把 vocabulary-state 作为事实源；宿主只负责本页几何投影。
+    // 收藏分词和掌握下划线都能用现有字符盒在本地重算，不能再为了“确认”拉整页 chars。
+    phraseFavoriteUpdate: (text, enabled) => {
+      try {
+        const key = String(text || '').replace(/[\s\u3000]+/g, '');
+        if (!key) return;
+        if (enabled) _phraseFavSet.add(key); else _phraseFavSet.delete(key);
+        _applyPhraseMergesAll();
+        if (enabled) _pfavPaint(key); else _pfavUnpaint(key);
+      } catch (_) {}
+    },
+    phraseMasteryUpdate: (text, enabled) => {
+      try {
+        const key = _phraseNorm(text);
+        if (!key) return;
+        if (enabled) _phraseMarkSet.add(key); else _phraseMarkSet.delete(key);
+        document.querySelectorAll('[data-loaded="1"][data-page-num]').forEach((pw) => {
+          try { renderVocabUnderlines(pw, pw.__vocabMarks || []); } catch (_) {}
+        });
+      } catch (_) {}
+    },
+    // 仅供旧 adapter 降级；新共享路径不得调用这个联网重扫。
     phraseRefresh: () => { try { refreshCharsWForAllPages(); } catch (_) {} },
     removePhraseHighlight: (arg) => { try { _removePhraseHighlight(arg); } catch (_) {} },
     // 词组框「💡 解释」→ 复用 PDF onExplain(它自身也被门控,共享模式下转 rc-result)。
@@ -223,7 +296,9 @@ if (window.PdfAdapter && PdfAdapter.bind) {
   });
   // 便签初始化(共享组件;opts 经上面 host-bind 的 noteMount/noteAnchorFromPoint;🗒 按钮在模板 ui_shared 块内)
   try {
-    if (window.RC && RC.stickynote) {
+    // Web 的 DOM/quote anchor 尚未完成，不能把 PDF noteMount/anchorFromPoint 偷渡进共享组件。
+    // PDF 分支完全保持原初始化；网页便签/固定卡片继续列为独立 Web host pending。
+    if (!_readerIsWebHost && window.RC && RC.stickynote) {
       RC.stickynote.init({
         file: FILE_REL,
         mount: (a) => PdfAdapter._host.noteMount(a),

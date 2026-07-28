@@ -22,6 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 import config  # noqa: E402
 import attention_profile as AP  # noqa: E402
+_CODE_ROOT = Path(__file__).resolve().parents[2]
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import promote_concepts as PC  # noqa: E402
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "lib"))
@@ -47,6 +48,44 @@ DEEP_CHANNELS = {"highlight", "qa", "check", "read", "card"}
 NON_CONCEPT_CHANNELS = {"qa_ai"}
 TOPK_RELATED = 4      # 相关词上限
 STOP = PC.STOP | {"内容", "问题", "方法", "情况", "部分", "时候", "东西"}
+
+
+def _positions_path() -> Path:
+    """Use the immutable claimed owner's account store after migration.
+
+    This CLI is an owner-only background job, not a multi-account request.  It
+    may follow an already committed claim, but it never creates or guesses one.
+    """
+    sidecar_root = None
+    try:
+        deploy = _CODE_ROOT / "_server_deploy"
+        if str(deploy) not in sys.path:
+            sys.path.insert(0, str(deploy))
+        from reader_sidecar_store import (
+            ReaderStorageIdentity,
+            SidecarStore,
+            default_sidecar_root,
+        )
+        sidecar_root = default_sidecar_root(config.PROJECT_DIR)
+        store = SidecarStore(
+            sidecar_root,
+            STATE,
+            lambda _identity: False,
+        )
+        claim = store.read_claim()
+        if claim:
+            owner = claim["owner"]
+            identity = ReaderStorageIdentity(
+                user_id=owner["user_id"],
+                storage_namespace=owner["storage_namespace"],
+            )
+            return store.account_path(identity, "reader-positions.json")
+    except Exception:
+        if sidecar_root is not None and (
+            Path(sidecar_root) / "legacy-claim.json"
+        ).exists():
+            raise
+    return POSITIONS
 
 
 # ── 注册表(编码/科目/书开火) ──────────────────────────────────────────────────
@@ -167,7 +206,7 @@ def _identity_resolve(term, use_ai=True):
     if use_ai and re.fullmatch(r"[A-Za-z][A-Za-z0-9 \-]+", term) and nodes:
         cands = [n.get("surface") or kk for kk, n in list(nodes.items())[:40]]
         try:
-            sys.path.insert(0, str(config.PROJECT_DIR / "_client" / "core"))
+            sys.path.insert(0, str(_CODE_ROOT / "_client" / "core"))
             from ai_backends import make_backend
             be = make_backend("claude_cli", {"command": "/usr/bin/claude",
                                              "model": "sonnet", "effort": "low", "timeout": 120})
@@ -261,7 +300,7 @@ def _related_terms(term, occurrences, book_rel, vocab):
 
 # ── AI ①关系分类 / ②定义提取 ─────────────────────────────────────────────────
 def _backend(model="sonnet", effort="low"):
-    sys.path.insert(0, str(config.PROJECT_DIR / "_client" / "core"))
+    sys.path.insert(0, str(_CODE_ROOT / "_client" / "core"))
     from ai_backends import make_backend
     return make_backend("claude_cli", {"command": "/usr/bin/claude",
                                        "model": model, "effort": effort, "timeout": 180})
@@ -420,7 +459,7 @@ def run(dry=True, force_term=None, force_book=None, force_page=None):
     except Exception:
         focus = []
     try:
-        pos = json.loads(POSITIONS.read_text("utf-8"))
+        pos = json.loads(_positions_path().read_text("utf-8"))
     except Exception:
         pos = {}
 
@@ -522,36 +561,88 @@ def run(dry=True, force_term=None, force_book=None, force_page=None):
                 print("⏭ 已存在不覆盖:%s" % m["path"])
                 continue
             fp.write_text(m["md"], "utf-8")
-        # R4:原子 upsert——node + edge claims + derive,单次写文件;绝不 append 裸边/整表替换
+        # 节点身份与边 overlay 都经唯一事务服务，避免和 page-brief 后台互相覆盖。
         try:
-            g = json.loads(EMERGENT.read_text("utf-8"))
-            g.setdefault("nodes", {})
+            service = PC.ConceptNodeService(
+                graph_path=EMERGENT,
+                journal_path=EMERGENT.parent / "kg-node-mutations.jsonl",
+                aliases_path=PC.ALIASES_FILE,
+                confirmations_path=PC.CONF_FILE,
+                kg_dir=PC.KG_DIR,
+                concept_root=Path(AP.VAULT_ROOT) / "资源" / "概念",
+            )
+            node_candidates = []
+            all_edges = []
             for m in made:
                 me_term = m["path"].rsplit("/", 1)[-1].split("-", 1)[-1][:-3]   # 编码-名.md → 名
-                me = AP.norm_key(me_term) or me_term
-                import hashlib as _h
-                node = g["nodes"].get(me) or {"id": "em:" + _h.sha1(me.encode()).hexdigest()[:12],
-                                              "surface": me_term, "key": me, "sources": [], "signal": 0,
-                                              "provenance": [], "in_authored_kg": False, "authored_ref": "",
-                                              "books": [], "subject": "", "kind": "concept",
-                                              "origin": "emergent", "confirmed": None}
-                if "autonote" not in node["sources"]:
-                    node["sources"] = sorted(set(node["sources"]) | {"autonote"})
-                node["signal"] += 1
                 ref = m["path"].rsplit("/", 1)[-1]
-                if not any(pv.get("ref") == ref for pv in node["provenance"]):
-                    node["provenance"] = (node["provenance"] + [{"type": "autonote", "ref": ref}])[:8]
-                for e in m["edges"]:
-                    if e["to"] == me or e["from"] == me:
-                        bk = e.get("quote_src", "")
-                        node["books"] = sorted(set(node["books"]) | ({bk.split("#")[0][5:]} if bk.startswith("book:") else set()))
-                g["nodes"][me] = node
-                for e in m["edges"]:
-                    PC.upsert_claim(g, e["from"], e["to"], kind=e["kind"], rel_detail=e.get("rel_detail", ""),
-                                    quote=e.get("quote", ""), quote_src=e.get("quote_src", ""),
-                                    src_tier=e.get("src_tier", "book"), method=e.get("method", "forwardsearch"))
-            g["edges"] = PC.derive_edges(g)
-            EMERGENT.write_text(json.dumps(g, ensure_ascii=False, indent=1), "utf-8")
+                book_refs = sorted({
+                    edge.get("quote_src", "")[5:].split("#", 1)[0]
+                    for edge in m["edges"]
+                    if str(edge.get("quote_src") or "").startswith("book:")
+                })
+                node_candidates.append({
+                    "surface": me_term,
+                    "sourceKind": "autonote",
+                    "sourceId": "autonote:" + ref,
+                    "documentRef": "vault:" + m["path"],
+                    "book": book_refs[0] if book_refs else "",
+                })
+                all_edges.extend(m["edges"])
+            node_basis = json.dumps(
+                node_candidates,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            node_digest = hashlib.sha256(node_basis.encode("utf-8")).hexdigest()[:24]
+            service.upsert_candidates(
+                node_candidates,
+                mutation_id="propose-concept-notes:" + node_digest,
+                source="propose-concept-notes",
+                operation_contract="kg-op/propose-concept-notes-nodes/1",
+                operation_payload={"candidates": node_candidates},
+            )
+            confirmation_edges = PC._load_conf_edges(strict=True)
+            edge_payload = {
+                "edges": all_edges,
+                "confirmationEdges": confirmation_edges,
+                "edgeVersion": PC.EDGE_VER,
+            }
+            edge_basis = json.dumps(
+                edge_payload,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            edge_digest = hashlib.sha256(edge_basis.encode("utf-8")).hexdigest()[:24]
+
+            def apply_edges(graph):
+                for edge in all_edges:
+                    PC.upsert_claim(
+                        graph,
+                        edge["from"],
+                        edge["to"],
+                        kind=edge["kind"],
+                        rel_detail=edge.get("rel_detail", ""),
+                        quote=edge.get("quote", ""),
+                        quote_src=edge.get("quote_src", ""),
+                        src_tier=edge.get("src_tier", "book"),
+                        method=edge.get("method", "forwardsearch"),
+                    )
+                graph["edges"] = PC.derive_edges(
+                    graph,
+                    confirmation_edges=confirmation_edges,
+                )
+                return {"claims": len(all_edges), "nEdges": len(graph["edges"])}
+
+            service.mutate_graph(
+                mutation_id="propose-concept-edges:" + edge_digest,
+                source="propose-concept-notes",
+                mutator=apply_edges,
+                operation_contract="kg-op/propose-concept-notes-edges/1",
+                operation_payload=edge_payload,
+            )
         except Exception as ex:
             print("⚠ 写图失败:%s" % ex, file=sys.stderr)
         try:
@@ -575,7 +666,7 @@ def detect_only():
     except Exception:
         focus = []
     try:
-        pos = json.loads(POSITIONS.read_text("utf-8"))
+        pos = json.loads(_positions_path().read_text("utf-8"))
     except Exception:
         pos = {}
     out = []

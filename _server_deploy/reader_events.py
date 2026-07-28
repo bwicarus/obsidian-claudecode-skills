@@ -55,11 +55,14 @@ def publish(kind: str, file: str, uid, extra: dict | None = None):
         ev.update(extra)
     with _LOCK:
         subs = list(_SUBS)
+    n = 0
     for q in subs:
         try:
             q.put_nowait(ev)
+            n += 1
         except Exception:
             pass
+    return n            # 投递到的订阅数:桥接回执用它区分「写了但没人在听」和「已送达前端」
 
 
 def register_reader_events(bp):

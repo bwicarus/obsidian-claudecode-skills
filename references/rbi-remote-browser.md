@@ -1,4 +1,32 @@
-# 实况网页 RBI(远程浏览器隔离)方案 — rrweb 选型 + 分阶段实施
+# 实况网页 RBI（已退役，保留恢复资料）
+
+> 状态：2026-07-25 按用户选择 4A 退役。PWA 不再抓取、代理或远程渲染第三方网页；
+> 普通网页阅读能力由浏览器扩展直接注入原网页。本文余下内容是历史实现与恢复资料，
+> 不是当前部署指引。
+
+退役边界：
+
+- `/pdf/web` 与旧 `/pdf/html/view?file=__web__` 返回书架；
+- `/pdf/web/live?url=` 只在 URL 是无凭据、无控制字符的 `http(s)` 地址时，短期兼容跳转到原站；
+- `/pdf/web/proxy`、`/pdf/web/frame`、`/pdf/web/p/*`、`/pdf/web/r/*`、`/pdf/web/res`、
+  `/pdf/api/web-fetch`、`/pdf/api/web-cookie`、`/pdf/web/rbi`、`/pdf/web/rbi-live` 和
+  `/pdf/api/rbi-ticket` 不再执行，返回 `410 pwa_web_reader_retired`（代理传输端点也可能先被旧
+  capability 门禁以 `403` 拒绝）；
+- 本地 HTML/Markdown 阅读器、`html-highlights`、网页翻译/生词/词典/助手/图片代理等通用服务保留；
+- `web:<URL>` 资料身份和已有网页缓存保留为只读迁移来源，不再由 PWA 产生新抓取缓存。
+
+退役前已做非破坏性备份：
+
+- 位置：`state/retired-web-backups/20260724T155933Z/`
+- 归档：`pwa-web-rbi-state.tar.gz`（约 72 MB）
+- 清单：`inventory.tsv`（4,326 个文件）与 `original-files.sha256`
+- 校验：`archive.sha256` 已通过
+
+原始 `state/rbi-profile*`、`state/web-cookies`、`state/web-cache`、`state/web-rescache`、
+`state/web-trcache` 和 `state/web-last*` 均未删除或清空。恢复前应先核对清单与哈希，不要直接
+覆盖当前状态。
+
+## 历史方案：rrweb 选型与分阶段实施
 
 > 2026-07-19 定案。用户诉求:iframe 代理"服务端假装浏览器"打不过认证/每站打补丁,要换成
 > **Pi 跑真 Chrome 执行页面 → DOM 流式桥接到 iPad**。经调研选型 + Pi 实测,定 **rrweb live mode**。
@@ -106,6 +134,74 @@ Pi 端 `_server_deploy/rbi_server.py`(独立 asyncio 进程,systemd `rbi-server`
 - MB 级事件不能当 `page.evaluate` 参数(aarch64 CDP 序列化卡死);`expose_binding` + `JSON.stringify` 字符串回传 OK。
 - context 崩溃/被杀要自愈(`_ctx_alive` + open 重试重建);⚠ 清理测试残留别 `pkill -9 headless_shell`(会杀服务的浏览器)。
 - rrweb 重建元素 `innerText` 为空(不在渲染树),取文本/选区用 `textContent`/Range。
+
+## 账号与网络隔离护栏(2026-07-24 已实施)
+
+RBI 不能把普通 App session 直接等同于浏览器 profile 身份，更不能信前端传来的 `uid`。当前唯一
+身份链如下：
+
+1. 已登录页面向 `POST /pdf/api/rbi-ticket` 请求票据；请求必须带 `X-BW-RBI: 1`，接口**不接收 uid**，
+   只按当前服务端 session 签发，并在签发当下查询该 uid 仍存在；删除账户留下的旧 session 不能
+   续签。响应为 `Cache-Control: no-store`。
+2. HTML 不嵌入 bearer 票据。页面每次连接/重连前都从上述接口取得新的 `rbit-v1` 短期票。
+3. WebSocket 首帧必须是 `{"cmd":"auth","ticket":"rbit-v1..."}`。服务端验证成功后才返回
+   `{"t":"ready"}`；后续 `open`/交互消息不再包含、也不再读取客户端 uid。
+4. 票据 HMAC 绑定一个正整数用户 id、独立 nonce 与独占式过期时间；默认有效 300 秒，验证端拒绝
+   已过期票和超过 900 秒未来窗口的票。共享密钥优先读 `READER_RBI_SECRET`，未配置时由两个进程
+   原子创建/共用 `state/rbi-ticket-secret`（0600），并处理 Flask 与 RBI 同时首次启动的竞争。
+   nonce 在首帧认证时原子消费且只能使用一次；连接保留完整 claims，达到独占式过期点会主动关闭，
+   不是只在握手时检查一次。
+5. 验证结果生成不可变 `RbiIdentity`；`state/rbi-profiles/<uid>` 和
+   `state/web-cookies/<uid>.json` 只能由这个身份构造。目录为 0700，并拒绝路径穿越及指向其它
+   账户文件/目录的符号链接。由此不同登录账户不会误用彼此的 Chrome profile 或导入 cookie。
+   `state/rbi-profile/<uid>` 旧目录只读复制到统一的复数目录，不回写旧目录。live 在 Chromium
+   context 全生命周期持有 `.locks/<uid>.lock` 跨进程锁；demo 若锁空闲直接复用主 profile，若
+   live 正占用则复制同 uid 的 0700 临时 profile（跳过 symlink、特殊文件及 Chromium 锁文件），
+   结束清理且不回写主 profile。
+
+WebSocket 还必须满足来源边界：
+
+- 默认只接受 `Origin` 为 HTTPS，且规范化后与握手的 `Host`（优先 `X-Forwarded-Host`）完全一致；
+  缺失、重复/异常 header、跨站 Origin 均 fail-closed。
+- 测试或本地 HTTP 环境必须显式设置 `READER_RBI_ALLOWED_ORIGINS`；生产也可把它设为正式 origin
+  （多个值以逗号分隔），不能用通配符。
+- 入站 WS 帧限制为 64KB；rrweb 大快照是服务端下行，不需要放大未认证入站上限。
+
+`_server_deploy/rbi_access.py` 是常驻 RBI、阶段 0 `scripts/rbi_render.py` 与 HTML 入口共用的唯一
+公网判断实现：
+
+- 顶层 `open`/`nav` 只接受公网 `http(s)`，拒绝 `file:`、localhost、内网/链路本地/保留地址、
+  内嵌账号、控制字符、反斜杠解析歧义和异常端口。
+- DNS 的**所有**返回地址都必须是 global；公共地址与私网地址混合也整体拒绝。
+- Playwright context 启动时先 `offline=True`，安装 HTTP 请求、重定向、子资源和 WebSocket
+  守卫、禁用 service worker、关闭恢复出来的旧 tab 后才联网，避免 profile 恢复窗口绕过守卫。
+- Chromium 保持正常 sandbox 与 site isolation；不得恢复 `--no-sandbox`、
+  `--disable-setuid-sandbox` 或禁用站点隔离的启动参数。
+- 每一次跳转、重定向和子请求都重新经过共享守卫；`ws/wss` 单独由
+  `route_web_socket` 检查。`data:`/`blob:`/`about:` 只作为不出网的浏览器本地资源放行。
+
+### 部署要求
+
+- `html_reader.py`、`rbi_server.py` 部署时必须同步 `_server_deploy/rbi_access.py` 和
+  `_server_deploy/web_cookie_store.py` 到同一 Python import 路径；漏掉任一文件应视为部署失败，
+  不能退回信任 uid 或父域 Cookie 扩展的旧协议。
+- Flask 与 `rbi-server` 必须使用同一个 `CLAUDE_PROJECT`/共享密钥来源。更新后同时重启 webapp 与
+  `rbi-server`，旧页面会自动刷新短票并按新协议重连。
+- nginx 的 `/rbi-ws` 反代必须保留当前站点 Host，至少设置
+  `proxy_set_header Host $host`（建议同时设置 `X-Forwarded-Host $host`）；否则为 systemd 服务显式
+  配置 `READER_RBI_ALLOWED_ORIGINS=https://正式域名`。正式环境不允许加入 HTTP 或第三方 origin。
+
+### 离线验证
+
+- `tests/test_rbi_access.py` 覆盖票据签名/过期/跨 uid、nonce 并发单次消费、到期主动断线、并发首次
+  密钥创建、profile/cookie 路径穿越与符号链接、跨进程 profile 锁与 demo 临时回退、
+  `file`/localhost/私网/混合 DNS、重定向与 WebSocket 请求守卫、Origin/Host、当前安装的
+  websockets 握手 API、Flask session 票据刷新/删除用户拒签及页面不发送 uid；当前共 22 项。
+- 联合回归：
+  `python3 -m unittest -v tests.test_rbi_access tests.test_web_proxy_capability
+  tests.test_reader_private_storage tests.test_reader_provider_identity`；另以 `py_compile` 检查
+  `rbi_access.py`、`rbi_server.py`、`html_reader.py`、`web_cookie_store.py` 与
+  `scripts/rbi_render.py`。
 
 **下一步**:阶段 1b 查词/翻译接到重建 DOM(选区不回传 Pi,客户端直连 API——不变量 2);真机继续打磨延迟/手感。
 

@@ -1,6 +1,8 @@
 import os
 import json
 import base64
+import hashlib
+import hmac
 import mimetypes
 # .mjs/.js 显式注册为 JS MIME:有 nginx 时它管;**无 nginx 的本地实例(Windows/standalone)** Flask 直接服务
 # 静态时,werkzeug 默认可能把 .mjs 猜成 text/plain → 浏览器拒绝当 ES module(PDF.js import 失败,整个阅读器挂)。
@@ -10,6 +12,7 @@ import shutil
 import secrets
 import sqlite3
 import datetime
+import time
 import urllib.request
 import urllib.error
 from pathlib import Path
@@ -20,6 +23,8 @@ from flask import (
 )
 from werkzeug.middleware.proxy_fix import ProxyFix
 from werkzeug.security import check_password_hash, generate_password_hash
+from reader_sw_auth import READER_SW_AUTH_JS, READER_SW_AUTH_PLACEHOLDER
+from web_proxy_cap import verify_web_proxy_cap_details
 
 app = Flask(__name__)
 app.secret_key = os.environ["SECRET_KEY"]
@@ -40,6 +45,142 @@ USERS_DIR = DATA_DIR / "users"
 DB_PATH   = DATA_DIR / "app.db"
 QA_FILE   = DATA_DIR / "qa.json"
 ALLOWED_DATASETS = {"dashboard", "history", "private"}
+READER_PROVIDER_ENTRY_PATHS = frozenset({
+    "/pdf/view",
+    "/pdf/epub/view",
+    "/pdf/html/view",
+    "/pdf/fav/open",
+})
+
+
+def _legacy_reader_storage_namespace(user_id: int) -> str:
+    """只用于首次数据库迁移：保留已经发给测试客户端的 HMAC namespace。"""
+    secret = app.secret_key
+    if isinstance(secret, str):
+        secret = secret.encode("utf-8")
+    digest = hmac.new(
+        bytes(secret),
+        f"bw-reader-storage:v1:{int(user_id)}".encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+    return "acct-v1-" + digest
+
+
+def _valid_reader_namespace(value: str) -> bool:
+    value = str(value or "")
+    return (
+        value.startswith("acct-v1-")
+        and len(value) == 72
+        and all(ch in "0123456789abcdef" for ch in value[8:])
+    )
+
+
+def _reader_storage_namespace(user_id: int) -> str:
+    """读取长期持久的随机 Vault 租户编号；不再跟会话 SECRET_KEY 共生命周期。"""
+    db = get_db()
+    row = db.execute(
+        "SELECT storage_namespace FROM users WHERE id = ?",
+        (int(user_id),),
+    ).fetchone()
+    current = str(row["storage_namespace"] or "") if row else ""
+    if _valid_reader_namespace(current):
+        return current
+    candidate = "acct-v1-" + secrets.token_hex(32)
+    db.execute(
+        "UPDATE users SET storage_namespace = ? "
+        "WHERE id = ? AND (storage_namespace IS NULL OR storage_namespace = '')",
+        (candidate, int(user_id)),
+    )
+    db.commit()
+    row = db.execute(
+        "SELECT storage_namespace FROM users WHERE id = ?",
+        (int(user_id),),
+    ).fetchone()
+    current = str(row["storage_namespace"] or "") if row else ""
+    if not _valid_reader_namespace(current):
+        raise RuntimeError("failed to allocate reader storage namespace")
+    return current
+
+
+def _reader_provider_ticket_ttl_seconds() -> int:
+    """provider ticket 默认只活 15 分钟，并限制部署配置不能意外退化成永久票据。"""
+    try:
+        configured = int(os.environ.get("READER_PROVIDER_TICKET_TTL_SECONDS", "900"))
+    except (TypeError, ValueError):
+        configured = 900
+    return max(60, min(configured, 3600))
+
+
+def _reader_provider_ticket_signature(
+    namespace: str,
+    expires_at: int,
+    nonce: str,
+) -> str:
+    if not _valid_reader_namespace(namespace):
+        raise ValueError("invalid reader namespace")
+    secret = os.environ.get("READER_PROVIDER_SECRET") or app.secret_key
+    if isinstance(secret, str):
+        secret = secret.encode("utf-8")
+    return hmac.new(
+        bytes(secret),
+        (
+            f"bw-reader-provider:v2:{namespace}:{int(expires_at)}:{nonce}"
+        ).encode("ascii"),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _reader_provider_ticket(
+    namespace: str,
+    *,
+    expires_at: int | None = None,
+    nonce: str | None = None,
+) -> str:
+    """签发短期 provider 证明；随机 nonce 让每次页面注入得到不同票据。"""
+    if not _valid_reader_namespace(namespace):
+        raise ValueError("invalid reader namespace")
+    expires_at = int(expires_at or (
+        int(time.time()) + _reader_provider_ticket_ttl_seconds()
+    ))
+    nonce = str(nonce or secrets.token_hex(16)).lower()
+    if (
+        len(nonce) != 32
+        or any(ch not in "0123456789abcdef" for ch in nonce)
+    ):
+        raise ValueError("invalid reader provider ticket nonce")
+    signature = _reader_provider_ticket_signature(namespace, expires_at, nonce)
+    return f"pvt-v2-{expires_at}-{nonce}-{signature}"
+
+
+def _verify_reader_provider_ticket(
+    namespace: str,
+    ticket: str,
+    *,
+    now: int | None = None,
+) -> int | None:
+    """验证票据签名与期限，成功时返回 Unix expires_at。"""
+    if not _valid_reader_namespace(namespace):
+        return None
+    parts = str(ticket or "").strip().split("-")
+    if (
+        len(parts) != 5
+        or parts[0:2] != ["pvt", "v2"]
+        or not parts[2].isdigit()
+        or not 10 <= len(parts[2]) <= 12
+        or len(parts[3]) != 32
+        or any(ch not in "0123456789abcdef" for ch in parts[3])
+        or len(parts[4]) != 64
+        or any(ch not in "0123456789abcdef" for ch in parts[4])
+    ):
+        return None
+    expires_at = int(parts[2])
+    now = int(time.time() if now is None else now)
+    if expires_at <= now or expires_at > now + 3600:
+        return None
+    expected = _reader_provider_ticket_signature(namespace, expires_at, parts[3])
+    if not secrets.compare_digest(parts[4], expected):
+        return None
+    return expires_at
 
 # ─────────────────────────── DB ───────────────────────────
 
@@ -89,6 +230,7 @@ def init_db():
             username TEXT NOT NULL UNIQUE,
             password_hash TEXT NOT NULL,
             role TEXT NOT NULL DEFAULT 'user',
+            storage_namespace TEXT,
             created_at TEXT NOT NULL DEFAULT (datetime('now'))
         );
         CREATE TABLE IF NOT EXISTS invites (
@@ -118,6 +260,24 @@ def init_db():
                 "INSERT INTO users (username, password_hash, role) VALUES (?, ?, 'admin')",
                 ("bwicarus", boot_hash),
             )
+    columns = {
+        row["name"] for row in conn.execute("PRAGMA table_info(users)").fetchall()
+    }
+    if "storage_namespace" not in columns:
+        conn.execute("ALTER TABLE users ADD COLUMN storage_namespace TEXT")
+    # 现有测试客户端已经见过基于旧 SECRET_KEY 的值；首次迁移把那个值固化进 DB，
+    # 之后即使会话密钥轮换也不会让本地 Vault 看起来“消失”。
+    for row in conn.execute(
+        "SELECT id FROM users WHERE storage_namespace IS NULL OR storage_namespace = ''"
+    ).fetchall():
+        conn.execute(
+            "UPDATE users SET storage_namespace = ? WHERE id = ?",
+            (_legacy_reader_storage_namespace(row["id"]), row["id"]),
+        )
+    conn.execute(
+        "CREATE UNIQUE INDEX IF NOT EXISTS idx_users_storage_namespace "
+        "ON users(storage_namespace)"
+    )
     conn.commit()
     conn.close()
 
@@ -193,13 +353,84 @@ def pwa_manifest():
 # 更新:改 VERSION → activate 时清旧缓存;/sw.js 以 no-cache 提供,浏览器每次校验→改了即生效。
 _SITE_SW_TEMPLATE = """
 const VERSION='%s';
-const STATIC_C='bw-static-'+VERSION, DATA_C='bw-data-'+VERSION, NAV_C='bw-nav-'+VERSION;
+const STATIC_C='bw-static-'+VERSION;
+const DATA_PREFIX='bw-data-'+VERSION+'-';
+const NAV_PREFIX='bw-nav-'+VERSION+'-';
+__BW_READER_SW_AUTH__
+function privateCacheName(prefix, epoch){
+  return _validAuthEpoch(epoch) ? prefix+epoch : '';
+}
+async function stableAuthState(){
+  try{
+    const state=await _readAuthState();
+    return state&&!state.pending&&_validAuthEpoch(state.epoch) ? state : null;
+  }catch(err){
+    return null;
+  }
+}
+async function sameAuthEpoch(epoch){
+  const state=await stableAuthState();
+  return !!(state&&state.epoch===epoch);
+}
+async function clearReaderPrivateCaches(){
+  const keys=await caches.keys();
+  await Promise.all(keys.map(function(k){
+    if(k.indexOf('bw-data-')===0||
+       k.indexOf('bw-nav-')===0||
+       k.indexOf('pdf-private-')===0||
+       k==='pdf-private-identity-v1'||
+       k==='pdf-cache-v3'||
+       k.indexOf('pdf-pages-')===0){
+      return caches.delete(k);
+    }
+  }));
+}
+async function authTransitionFetch(req){
+  const token=await _beginAuthTransition();
+  try{
+    await clearReaderPrivateCaches();
+    return await fetch(req,{cache:'no-store'});
+  }finally{
+    // fetch 期间可能还有旧 epoch 的异步 put 落地；认证响应后必须再清一次。
+    try{
+      await clearReaderPrivateCaches();
+    }finally{
+      await _finishAuthTransition(token);
+    }
+  }
+}
+async function manualClear(includeStatic){
+  const token=await _beginAuthTransition();
+  try{
+    await clearReaderPrivateCaches();
+    if(includeStatic){
+      const keys=await caches.keys();
+      await Promise.all(keys.map(function(k){
+        if(k.indexOf('bw-static-')===0) return caches.delete(k);
+      }));
+    }
+  }finally{
+    // 删除本身也可能和旧写入交错；第二遍让手动清理具有确定的完成边界。
+    try{
+      await clearReaderPrivateCaches();
+    }finally{
+      await _finishAuthTransition(token);
+    }
+  }
+}
 self.addEventListener('install', function(){ self.skipWaiting(); });
 self.addEventListener('activate', function(e){
   e.waitUntil((async function(){
+    const auth=await stableAuthState();
+    const expectedData=auth ? privateCacheName(DATA_PREFIX,auth.epoch) : '';
+    const expectedNav=auth ? privateCacheName(NAV_PREFIX,auth.epoch) : '';
     const keys=await caches.keys();
     await Promise.all(keys.map(function(k){
-      if((k.indexOf('bw-static-')===0&&k!==STATIC_C)||(k.indexOf('bw-data-')===0&&k!==DATA_C)||(k.indexOf('bw-nav-')===0&&k!==NAV_C)) return caches.delete(k);
+      if((k.indexOf('bw-static-')===0&&k!==STATIC_C)||
+         (k.indexOf('bw-data-')===0&&k!==expectedData)||
+         (k.indexOf('bw-nav-')===0&&k!==expectedNav)){
+        return caches.delete(k);
+      }
     }));
     await self.clients.claim();
   })());
@@ -209,20 +440,21 @@ function isStatic(u){ return u.pathname.indexOf('/static/')===0 || /\\.(?:css|js
 function isData(u){ return u.pathname.indexOf('/api/')===0 || /\\.json$/i.test(u.pathname) || u.pathname.indexOf('/dashboard/')===0 || u.pathname.indexOf('/history/')===0 || u.pathname.indexOf('/insights')===0; }
 self.addEventListener('fetch', function(e){
   const req=e.request;
-  if(req.method!=='GET') return;
-  if(req.headers.has('range')) return;            // 媒体拖动(206 partial)放行,别缓存半段坏播放
   var u; try{ u=new URL(req.url); }catch(err){ return; }
   if(u.origin!==location.origin) return;
-  if(u.pathname.indexOf('/pdf/')===0) return;     // /pdf/ 有自己的 SW(页图)
-  if(/\\.(?:mp3|m4a|wav|ogg|opus|aac|flac|mp4|webm|mov|m3u8)$/i.test(u.pathname)) return;  // 音视频不缓存(防整段大对象/206)
-  if(u.pathname.indexOf('/logout')===0){          // 登出:清掉全部本地私有缓存(防共享设备/登出后残留),再放行
-    caches.keys().then(function(ks){ ks.forEach(function(k){ if(k.indexOf('bw-')===0) caches.delete(k); }); });
+  if(_isAuthTransitionRequest(u,req)){
+    // 注册、登录、退出和受控 Bearer 会话都共用同一个跨 scope 认证围栏。
+    e.respondWith(authTransitionFetch(req));
     return;
   }
+  if(req.method!=='GET') return;
+  if(req.headers.has('range')) return;            // 媒体拖动(206 partial)放行,别缓存半段坏播放
+  if(u.pathname.indexOf('/pdf/')===0) return;     // /pdf/ 有自己的 SW(页图)
+  if(/\\.(?:mp3|m4a|wav|ogg|opus|aac|flac|mp4|webm|mov|m3u8)$/i.test(u.pathname)) return;  // 音视频不缓存(防整段大对象/206)
   if(noCache(u.pathname)) return;                 // 鉴权相关绝不缓存
-  if(req.mode==='navigate'){ e.respondWith(networkFirst(req,NAV_C)); return; }
+  if(req.mode==='navigate'){ e.respondWith(privateNetworkFirst(req,NAV_PREFIX)); return; }
   if(isStatic(u)){ e.respondWith(swr(req,STATIC_C)); return; }
-  if(isData(u)){ e.respondWith(swr(req,DATA_C)); return; }
+  if(isData(u)){ e.respondWith(privateSWR(e,DATA_PREFIX)); return; }
 });
 async function swr(req,cn){
   const c=await caches.open(cn);
@@ -231,20 +463,64 @@ async function swr(req,cn){
   if(hit){ net.catch(function(){}); return hit; }
   return (await net) || Response.error();
 }
-async function networkFirst(req,cn){
+async function privateSWR(event,prefix){
+  const req=event.request;
+  const auth=await stableAuthState();
+  if(!auth) return Response.error();
+  const cn=privateCacheName(prefix,auth.epoch);
+  const c=await caches.open(cn);
+  let hit=await c.match(req);
+  if(hit&&!await sameAuthEpoch(auth.epoch)) hit=null;
+  const net=fetch(req,{cache:'no-store'}).then(async function(res){
+    if(!await sameAuthEpoch(auth.epoch)) return Response.error();
+    if(res&&res.status===200&&res.type==='basic'){
+      await c.put(req,res.clone());
+      if(!await sameAuthEpoch(auth.epoch)){
+        await caches.delete(cn);
+        return Response.error();
+      }
+    }
+    return res;
+  }).catch(function(){ return null; });
+  if(hit){
+    if(!await sameAuthEpoch(auth.epoch)) return (await net)||Response.error();
+    if(event.waitUntil) event.waitUntil(net.then(function(){}));
+    return hit;
+  }
+  const response=await net;
+  if(response) return response;
+  if(!await sameAuthEpoch(auth.epoch)) return Response.error();
+  const fallback=await c.match(req);
+  return fallback&&await sameAuthEpoch(auth.epoch) ? fallback : Response.error();
+}
+async function privateNetworkFirst(req,prefix){
+  const auth=await stableAuthState();
+  if(!auth) return Response.error();
+  const cn=privateCacheName(prefix,auth.epoch);
   const c=await caches.open(cn);
   try{
-    const res=await fetch(req);
-    if(res&&res.status===200&&res.type==='basic') c.put(req,res.clone());
+    const res=await fetch(req,{cache:'no-store'});
+    if(!await sameAuthEpoch(auth.epoch)) return Response.error();
+    if(res&&res.status===200&&res.type==='basic'){
+      await c.put(req,res.clone());
+      if(!await sameAuthEpoch(auth.epoch)){
+        await caches.delete(cn);
+        return Response.error();
+      }
+    }
     return res;
   }catch(err){
+    if(!await sameAuthEpoch(auth.epoch)) return Response.error();
     const hit=await c.match(req);
-    return hit || Response.error();
+    return hit&&await sameAuthEpoch(auth.epoch) ? hit : Response.error();
   }
 }
 self.addEventListener('message', function(e){
   if(e.data==='skipWaiting'){ self.skipWaiting(); }
-  if(e.data==='clearCache'){ caches.keys().then(function(ks){ ks.forEach(function(k){ if(k.indexOf('bw-')===0) caches.delete(k); }); }); }
+  if(e.data==='clearCache'){ e.waitUntil(manualClear(true)); }
+  if(e.data&&e.data.type==='BW_PDF_CACHE_CLEAR_PRIVATE'){
+    e.waitUntil(manualClear(false));
+  }
 });
 self.addEventListener('notificationclick', function(e){  // 点语音任务完成通知 → 聚焦/打开 app
   e.notification.close();
@@ -256,6 +532,12 @@ self.addEventListener('notificationclick', function(e){  // 点语音任务完�
 });
 """
 import hashlib as _sw_hl
+_SITE_SW_TEMPLATE = _SITE_SW_TEMPLATE.replace(
+    READER_SW_AUTH_PLACEHOLDER,
+    READER_SW_AUTH_JS,
+)
+if READER_SW_AUTH_PLACEHOLDER in _SITE_SW_TEMPLATE:
+    raise RuntimeError("reader SW auth placeholder was not replaced")
 # VERSION = SW 代码哈希 → 改了缓存逻辑(noCache/isData/swr 等)version 自动变 → activate 清旧缓存,
 # 不靠手动 bump(复审 update-staleness 项)。代码没变则 version 稳定 → 缓存持久 → 仍秒开。
 _SITE_SW_VERSION = "h" + _sw_hl.md5(_SITE_SW_TEMPLATE.encode("utf-8")).hexdigest()[:10]
@@ -274,17 +556,26 @@ def site_sw():
 def inject_nav(response):
     if response.status_code != 200:
         return response
+    uid = session.get("user_id")
+    p = request.path
+    # PDF 私有 CacheStorage 只信服务器响应头，不信页面自报 namespace。
+    # 头仅进入四个正式书籍壳与 /pdf/api/*；退役网页/RBI 响应不能建立 SW client 绑定。
+    if uid and (p in READER_PROVIDER_ENTRY_PATHS or p.startswith("/pdf/api/")):
+        response.headers["X-BW-Reader-Cache-Namespace"] = (
+            _reader_storage_namespace(uid)
+        )
+        response.vary.add("Cookie")
     if (response.mimetype or "") != "text/html":
         return response
-    if not session.get("user_id"):
+    if not uid:
         return response
-    p = request.path
     if not any(p.startswith(x) for x in NAV_INJECT_PREFIXES):
         return response
     # 实况网页的代理输出是**别人的页面**,注全站导航进去纯属污染(实测被打成
     # ja.wikipedia.org/static/nav.js 这种跨站死链)。外壳 /pdf/web/live 才该有导航。
     if p.startswith("/pdf/web/proxy") or p.startswith("/pdf/web/res") \
-            or p.startswith("/pdf/web/p/") or p.startswith("/pdf/web/r/"):
+            or p.startswith("/pdf/web/p/") or p.startswith("/pdf/web/r/") \
+            or p == "/pdf/web/rbi":
         return response
     try:
         body = response.get_data(as_text=True)
@@ -292,13 +583,24 @@ def inject_nav(response):
         return response
     if "</body>" not in body or "__NAV_LOADED__" in body:
         return response
-    uid = session["user_id"]
     row = get_db().execute(
         "SELECT username, role FROM users WHERE id = ?", (uid,)
     ).fetchone()
     if not row:
         return response
-    user_blob = json.dumps({"username": row["username"], "role": row["role"]})
+    user_data = {
+        "username": row["username"],
+        "role": row["role"],
+    }
+    # Vault 身份与短期授权证明只进入四个正式书籍入口；dashboard、管理页、
+    # API/代理输出即使同属 /pdf 前缀也拿不到 ticket。
+    if p in READER_PROVIDER_ENTRY_PATHS:
+        storage_namespace = _reader_storage_namespace(uid)
+        user_data.update({
+            "storage_namespace": storage_namespace,
+            "storage_provider_ticket": _reader_provider_ticket(storage_namespace),
+        })
+    user_blob = json.dumps(user_data)
     try:                                  # mtime 做 cache-bust:nav.js 一更新客户端就重取(免 iOS 缓存旧版)
         nav_v = int(os.path.getmtime("/var/www/html/static/nav.js"))
     except Exception:
@@ -307,8 +609,15 @@ def inject_nav(response):
         voice_v = int(os.path.getmtime("/var/www/html/static/voice.js"))
     except Exception:
         voice_v = 1
+    try:
+        cache_identity_v = int(os.path.getmtime(
+            "/var/www/html/static/reader-runtime/pwa-cache-identity.js"
+        ))
+    except Exception:
+        cache_identity_v = 1
     inject = (
         f'<script>window.__USER__={user_blob};</script>'
+        f'<script src="/static/reader-runtime/pwa-cache-identity.js?v={cache_identity_v}"></script>'
         f'<script src="/static/nav.js?v={nav_v}" defer></script>'
         f'<script src="/static/voice.js?v={voice_v}" defer></script>'   # 全站语音助手浮窗
     )
@@ -354,6 +663,33 @@ def user_dir(username, dataset=""):
 PROTECTED_PREFIXES = ("/dashboard", "/private", "/history", "/qa", "/profile", "/admin", "/auth", "/control", "/pdf", "/insights",
                       "/api/assistant", "/api/fitness")   # 后两个:让 Bearer 桥也覆盖(MCP 外部 agent 冷启动直调健身/助手,此前靠先调 /pdf 拿 session cookie 的隐式顺序)
 PUBLIC_PREFIXES    = ("/login", "/logout", "/register", "/static")
+WEB_PROXY_CAP_EXACT_PATHS = {
+    "/pdf/web/frame",
+    "/pdf/web/res",
+}
+WEB_PROXY_CAP_REQUIRED_EXACT_PATHS = {
+    "/pdf/web/res",
+}
+
+
+def _reader_web_proxy_secret():
+    return os.environ.get("READER_WEB_PROXY_SECRET") or app.secret_key
+
+
+def _reader_web_proxy_cap_path(path: str) -> bool:
+    return (
+        path in WEB_PROXY_CAP_EXACT_PATHS
+        or path.startswith("/pdf/web/p/")
+        or path.startswith("/pdf/web/r/")
+    )
+
+
+def _reader_web_proxy_cap_required(path: str) -> bool:
+    return (
+        path in WEB_PROXY_CAP_REQUIRED_EXACT_PATHS
+        or path.startswith("/pdf/web/p/")
+        or path.startswith("/pdf/web/r/")
+    )
 
 @app.before_request
 def require_login_global():
@@ -370,10 +706,50 @@ def require_login_global():
     # 受保护路径
     for prefix in PROTECTED_PREFIXES:
         if p.startswith(prefix):
-            if not session.get("user_id"):
-                bu = _bearer_user()   # 外部 agent(Claude Code skill)带 API token → 认证为该用户,放行(无需浏览器 session)
-                if bu:
-                    session["user_id"], session["username"] = bu
+            session_uid = session.get("user_id")
+            authorization = request.headers.get("Authorization", "")
+            # Any explicit Authorization header is authoritative.  A bad token
+            # must never borrow an ambient browser session, and a token for B
+            # must never execute inside A's session.
+            if authorization:
+                bearer_owner = _bearer_user()
+                if not bearer_owner:
+                    abort(401)
+                if (
+                    session_uid is not None
+                    and str(session_uid) != str(bearer_owner[0])
+                ):
+                    abort(401)
+                session["user_id"], session["username"] = bearer_owner
+                session_uid = bearer_owner[0]
+            cap_details = None
+            if _reader_web_proxy_cap_path(p):
+                candidate = verify_web_proxy_cap_details(
+                    _reader_web_proxy_secret(),
+                    request.args.get("__bwcap", ""),
+                )
+                if candidate:
+                    active = get_db().execute(
+                        "SELECT 1 FROM users WHERE id = ?",
+                        (candidate.user_id,),
+                    ).fetchone()
+                    if active:
+                        # 已有登录态时也必须解析 scope，供代理 cookie 舱壁使用；
+                        # 但绝不能让另一个用户的 capability 覆盖当前会话身份。
+                        if session_uid and str(candidate.user_id) != str(session_uid):
+                            abort(403)
+                        cap_details = candidate
+                        g.web_proxy_user_id = int(candidate.user_id)
+                        g.web_proxy_scope_host = candidate.scope_host
+                        g.web_proxy_scope_scheme = candidate.scope_scheme
+                        g.web_proxy_scope_port = int(candidate.scope_port)
+                        g.web_proxy_cap_expires_at = int(candidate.expires_at)
+                # Proxy transport never falls back to an ambient App session:
+                # opaque sandbox requests may carry that cookie unexpectedly.
+                if _reader_web_proxy_cap_required(p) and not cap_details:
+                    abort(403)
+            if not session_uid:
+                if cap_details:
                     return
                 return redirect(url_for("login", next=p))
             return
@@ -915,6 +1291,199 @@ def _bearer_user():
     return row["user_id"], row["username"]
 
 
+def _reader_authenticated_storage_identity():
+    """Resolve the current request owner without trusting any client identity.
+
+    An explicit Authorization header is authoritative and fail-closed: an invalid
+    Bearer token never falls back to an ambient browser session.  If both a valid
+    Bearer and session are present, they must identify the same account.
+    """
+    authorization = request.headers.get("Authorization", "")
+    session_uid = session.get("user_id")
+    if authorization:
+        bearer = _bearer_user()
+        if not bearer:
+            return None
+        try:
+            bearer_uid = int(bearer[0])
+            session_owner = (
+                int(session_uid) if session_uid is not None else None
+            )
+        except (TypeError, ValueError):
+            return None
+        if session_owner is not None and session_owner != bearer_uid:
+            return None
+        uid = bearer_uid
+    else:
+        if session_uid is None:
+            return None
+        try:
+            uid = int(session_uid)
+        except (TypeError, ValueError):
+            return None
+    owner = get_db().execute(
+        "SELECT 1 FROM users WHERE id = ?",
+        (uid,),
+    ).fetchone()
+    if not owner:
+        return None
+    return {
+        "user_id": uid,
+        "storage_namespace": _reader_storage_namespace(uid),
+    }
+
+
+def _reader_authenticated_storage_namespace():
+    """Compatibility wrapper for callers that only need the public namespace."""
+    identity = _reader_authenticated_storage_identity()
+    return identity["storage_namespace"] if identity else None
+
+
+def _reader_legacy_sidecar_claim_authorized(identity) -> bool:
+    """Authorize the one-time development-data claim, never infer it thereafter.
+
+    The user explicitly confirmed that the current development system has one
+    account and that all existing unpartitioned reader sidecars belong to it.
+    This callback is only consulted while no immutable claim manifest exists.
+    Once a manifest has been committed, the sidecar store compares its recorded
+    uid and namespace instead of repeating the ``one row`` inference.
+    """
+    if isinstance(identity, dict):
+        raw_uid = identity.get("user_id")
+        raw_namespace = identity.get("storage_namespace")
+    else:
+        raw_uid = getattr(identity, "user_id", None)
+        raw_namespace = getattr(identity, "storage_namespace", None)
+    try:
+        uid = int(raw_uid)
+    except (TypeError, ValueError):
+        return False
+    namespace = str(raw_namespace or "")
+    if uid <= 0 or not _valid_reader_namespace(namespace):
+        return False
+    rows = get_db().execute(
+        "SELECT id, storage_namespace FROM users ORDER BY id"
+    ).fetchall()
+    return (
+        len(rows) == 1
+        and int(rows[0]["id"]) == uid
+        and str(rows[0]["storage_namespace"] or "") == namespace
+    )
+
+
+@app.route("/api/reader/token-owner", methods=["POST"])
+def reader_token_owner():
+    """Return only the Vault namespace proven by an explicit Bearer token."""
+    bearer = _bearer_user()
+    if not bearer:
+        response = jsonify({"ok": False, "error": "invalid bearer token"})
+        response.status_code = 401
+    else:
+        response = jsonify({
+            "ok": True,
+            "storage_namespace": _reader_storage_namespace(int(bearer[0])),
+        })
+    response.headers["Cache-Control"] = "no-store, private, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return response
+
+
+@app.route("/api/reader/provider-authorize", methods=["POST"])
+def reader_provider_authorize():
+    """核验 PWA 发给扩展的 Vault namespace 证明；不返回用户资料或任何凭据。"""
+    body = request.get_json(silent=True) or {}
+    if not isinstance(body, dict):
+        body = {}
+    namespace = str(body.get("namespace") or "").strip()
+    ticket = str(body.get("ticket") or "").strip()
+    if not _valid_reader_namespace(namespace):
+        return jsonify({"ok": False, "error": "invalid provider authorization"}), 400
+    now = int(time.time())
+    expires_at = _verify_reader_provider_ticket(namespace, ticket, now=now)
+    if expires_at is None:
+        return jsonify({"ok": False, "error": "provider authorization denied"}), 403
+    owner = get_db().execute(
+        "SELECT 1 FROM users WHERE storage_namespace = ?",
+        (namespace,),
+    ).fetchone()
+    if not owner:
+        return jsonify({"ok": False, "error": "provider authorization denied"}), 403
+    return jsonify({
+        "ok": True,
+        "storage_namespace": namespace,
+        "expires_at": expires_at,
+        "expires_in": max(0, expires_at - now),
+    })
+
+
+@app.route("/api/reader/provider-ticket", methods=["POST"])
+def reader_provider_ticket():
+    """登录中的正式 PWA 刷新短票；响应不得进入站点 SW 或 HTTP 缓存。"""
+    uid = session.get("user_id")
+    if not uid:
+        response = jsonify({"ok": False, "error": "authentication required"})
+        response.status_code = 401
+    elif request.headers.get("X-BW-Reader-Provider") != "1":
+        response = jsonify({"ok": False, "error": "same-origin PWA request required"})
+        response.status_code = 403
+    else:
+        body = request.get_json(silent=True) or {}
+        if not isinstance(body, dict):
+            body = {}
+        page = str(body.get("page") or "").strip()
+        if page not in READER_PROVIDER_ENTRY_PATHS:
+            response = jsonify({"ok": False, "error": "invalid reader entry"})
+            response.status_code = 400
+        else:
+            owner = get_db().execute(
+                "SELECT 1 FROM users WHERE id = ?",
+                (int(uid),),
+            ).fetchone()
+            if not owner:
+                response = jsonify({"ok": False, "error": "authentication required"})
+                response.status_code = 401
+            else:
+                namespace = _reader_storage_namespace(uid)
+                ticket = _reader_provider_ticket(namespace)
+                expires_at = int(ticket.split("-", 4)[2])
+                now = int(time.time())
+                response = jsonify({
+                    "ok": True,
+                    "storage_namespace": namespace,
+                    "ticket": ticket,
+                    "expires_at": expires_at,
+                    "expires_in": max(0, expires_at - now),
+                })
+    response.headers["Cache-Control"] = "no-store, private, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return response
+
+
+@app.route("/pdf/api/cache-identity")
+def reader_cache_identity():
+    """只供 /pdf Service Worker 重新核验当前 session；namespace 仅在私有响应头返回。"""
+    uid = session.get("user_id")
+    if not uid:
+        response = jsonify({"ok": False, "error": "authentication required"})
+        response.status_code = 401
+    elif request.headers.get("X-BW-Reader-Cache-Identity") != "1":
+        response = jsonify({"ok": False, "error": "service worker identity required"})
+        response.status_code = 403
+    else:
+        owner = get_db().execute(
+            "SELECT 1 FROM users WHERE id = ?",
+            (int(uid),),
+        ).fetchone()
+        if not owner:
+            response = jsonify({"ok": False, "error": "authentication required"})
+            response.status_code = 401
+        else:
+            response = jsonify({"ok": True})
+    response.headers["Cache-Control"] = "no-store, private, max-age=0"
+    response.headers["Pragma"] = "no-cache"
+    return response
+
+
 @app.route("/api/upload/<dataset>", methods=["POST"])
 def api_upload(dataset):
     if dataset not in ALLOWED_DATASETS:
@@ -1004,6 +1573,49 @@ from skilltree import register_skilltree
 register_skilltree(app)
 
 # 网页 PDF 阅读器
+def _reader_active_user(user_id):
+    """Cheap endpoint-level liveness check for short-lived reader tickets."""
+    try:
+        uid = int(user_id)
+    except (TypeError, ValueError):
+        return False
+    if uid <= 0:
+        return False
+    return get_db().execute(
+        "SELECT 1 FROM users WHERE id = ?",
+        (uid,),
+    ).fetchone() is not None
+
+
+app.config["READER_ACTIVE_USER_CHECK"] = _reader_active_user
+# pdf_reader 的 blueprint 不能反向 import app.py。通过 Flask extensions 注入当前请求的
+# 真实 owner resolver，让所有 sidecar 与 sync-batch 都以 session/Bearer 身份重新计算
+# uid + storage namespace；旧数据认领授权仅在持久 claim 尚不存在时调用一次。
+app.extensions["reader_storage_identity_resolver"] = (
+    _reader_authenticated_storage_identity
+)
+app.extensions["reader_storage_namespace_resolver"] = (
+    _reader_authenticated_storage_namespace
+)
+app.extensions["reader_legacy_sidecar_claim_authorizer"] = (
+    _reader_legacy_sidecar_claim_authorized
+)
+# HTTP and owner-bound CLI jobs must resolve the same account root.  Tests set
+# WEBAPP_DATA, so they still stay inside a disposable directory.
+from reader_sidecar_store import default_sidecar_root
+app.extensions["reader_sidecar_root"] = default_sidecar_root(
+    Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"))
+)
+
+from reader_sync_relay import register_reader_sync_relay
+register_reader_sync_relay(app)
+
+from shared_note import register_shared_note
+register_shared_note(app)
+
+from computer_voice_routes import register_computer_voice
+register_computer_voice(app, root=DATA_DIR)
+
 from pdf_reader import register_pdf_reader
 register_pdf_reader(app)
 

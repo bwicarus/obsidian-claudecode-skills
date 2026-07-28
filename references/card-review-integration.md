@@ -15,6 +15,27 @@ done 已复习:bd 显示正反面+「距下次复习 X」;**形态收纳(圆vc-d
 卡片版面后续直接复用到 rc-review 复习页(用户说之后再讨论)。已上线:rc-flashcard 三态 +
 review-answer 支持 note_id→card_id + 返回 cardsInfo.interval 倒计时。
 
+### ⚠ 状态持久化:入库/评分后刷新变回草稿(2026-07-21 用户实锤,已修)
+
+**症状**:两张卡都点了「✓ 入库到 Anki」,刷新后又变回预览/草稿态。
+
+**根因(两层)**:入库时 `addToAnki` 已调 `_stateSync` 把 `{_st:'learn',_nid}` PATCH 到
+`/api/entity/<gid>` 服务端注册表(states),**服务端状态一直存着**(实测 registry 里 card_ 编号的
+states 就是 `{0:learn,1:learn}`)。但**回放这条路读不到它**:turnCard 的 cards part 落库的是
+**制卡时的草稿快照**(全 draft),刷新走 `RC.flashcard.mountDrafts` → 而 `mountDrafts` **无条件**
+把每张卡设成 `_st:'draft'`,从不去 entity 拉已入库状态 → 服务端的 learn 被本地 draft 盖掉。
+
+**修法**:rc-flashcard.js 加 `_restoreStates(container)`——凡 gid 是 `card_` 编号,mount 后异步
+`fetch /api/entity/<gid>`,用 states 覆盖各卡 `_st/_nid/_next/_showBack` 并重渲 + broadcast 同 gid
+其它宿主。三处 mount(mountDrafts/mountPreview/mountState)末尾都调它。entity states 为空(新制卡)=
+保持草稿;有 learn/done=恢复。**后端零改动**(GET/PATCH `/api/entity` 早就对,只是前端从不 GET 恢复)。
+这正是 #52 统一编号协议"编号卡处处同状态、跨会话不丢"该有的闭环,之前只做了写(_stateSync)没做读(恢复)。
+
+**验证**:E2E 造真 card_ 编号→PATCH states=learn→mountDrafts(草稿)→挂载瞬间是 draft(有入库按钮)→
+600ms 后 _restoreStates 拉回 learn(入库按钮消失、_nid 恢复、变可复习翻面卡)。用户那两张(card_22613b)
+的 learn 状态服务端一直在,部署后刷新即恢复。⚠ 前提:gid 必须是稳定 card_(靠 tool_status.result 带
+`id`,即上面 relay 三引擎合并修的那条)——fcg_ 本地随机编号的旧卡无服务端状态,无法追溯恢复。
+
 ## 待修:语音制卡消息重复(审计 wj62f99wj,scratchpad/card-audit.json)
 根因(P0):turnTool 守卫在每个 response.created 复位,但一次制卡横跨两 response(工具在R1、AI汇报在R2)
 → ㊸b 承诺核查在 R2.done 误判"没调工具"→ 幻影补交第二个 make_anki → 双任务/双占位/一成一败并存。
@@ -31,6 +52,12 @@ rc-flashcard 的**可操作状态机**(草稿编辑/入库/四档评分的 DOM+�
 2. 制卡结果走 renderInfo 式**双宿主**:侧边栏 turnCard(kind='cards',工具卡内,_pinBind 可选中)+ 字幕浮层 _cardPush(force + mount=挂 rc-flashcard)。现只进 turnCard,缺浮层镜像=字幕不出卡的根因。
 3. rc-flashcard 审美:fc-card 观感换 vc-card/vc-if(主题色 --vc-tc、圆角、字号统一);或内容直塞 vc-card-bd(外壳已是天气卡审美)。
 4. 可选中:vc-card 自带 _pinBind(长按选中,浮层/侧栏/收藏夹同 cid 同步),制卡卡进 vc-card 即得。
+
+### 卡片身份不变式
+
+- 普通/工具/信息卡的 `cid` 是卡片主键；从侧栏、字幕浮层、收藏夹或页面钉住处重新渲染，只能增加同 `cid` 的实例，不得重新编号。
+- 学习卡组的 `gid` 是状态共享主键；其外壳 `cid` 必须与 `gid` 相同。翻面、编辑、入库、评分和选中态在各宿主间是同一份状态。
+- 收藏和钉页是“同卡的新宿主”，不是新卡；只有用户明确创建新卡时才允许产生新编号。
 **⚠ 风险**:改 rc-voicecall 浮层(通话核心)+ rc-turncard + rc-flashcard;这块历史反复返工(memory:
 reuse-existing-cards-not-new / cli-paper-card-design / verify-innermost-child)。宜用新鲜上下文单独批次做。
 制卡结果 kind='cards' 现只进侧栏 turnCard,缺 renderInfo 式浮层镜像 → 字幕模式不出卡。
@@ -101,6 +128,21 @@ __vcInfoCardEl(rc-voicecall:1256)是静态渲染器无编辑态;renderInfo(1270)
   - **⭐⭐⭐ 第三轮定稿(2026-07-20,'直接复用字幕模式的卡片代码')**:钉入渲染不再手工拼——`_cardPush` 的卡 DOM 构建段**机械抽出**为 `_cardDom`(形态class/--vc-tc/卡头+按钮/TTS/bd填充),浮层卡与钉入卡跑**同一段代码**;公开 `RC.voiceCard.renderInto(host,spec)`(spec={text,label,isHtml,type,icon,form,mount,onClose,onForm}):vc-pinned+vc-typed(有色磨砂)+钉子钮移除+bd里 vc-if-hd 剥掉(双标题)+✕=onClose(触发便签del)。rc-stickynote renderNoteCard/Html 只调它;便签壳全透明+resize白圆钮/外✕隐藏。**三态收纳同浮层**(dot:true→标记/长条/方块 `_cycleForm` 单击循环,头部点击=循环 2420 同规矩),`onForm`→html.form/card.form 落 sidecar 持久化(sig 排除 form 防重建丢状态),重挂按 form 恢复=**钉在页上的圆球闭环**。**卡宽按页面自适应**:createCardAt/HtmlAt 量 O.mount 容器宽×0.44(240-480),ghost 同式,body 高 auto。修过的坑:.rc-note-ink 手写canvas白块盖卡(内联样式,CSS !important+JS双保险)、卡头色需 vc-typed 消费 --vc-tc(215)。E2E:同源(hd▶/单标题/主题绿)+三态循环+storedForm/loadAll恢复+宽自适应+回归(浮层push/dot cycle)。
   - ⏳ 真机剩:拖出手感(pinMode 松手钉页逻辑已写、headless 测不了 touch)、侧栏 turnCard 制卡卡把手(拖出走 _dragToDock 的卡都通了;turnCard cards part 无把手)
 - ✅ **双实例状态同步**:侧栏 turnCard + 浮层 vc-card 两份 rc-flashcard 按 **gid 卡组**联动——两处 push 生成同 `_gid`(rc-voicecall 680/706),侧栏 addPart 与浮层 mount 都带 gid,turncard renderPart 串 `p.gid`;rc-flashcard `_groups[gid]={cards,conts}`:同 gid 实例**共享同一批卡对象** + 状态变化(编辑/入库/评分/删除)`broadcast` 重渲其它实例(edit/单卡 updateSlide、del renderTrack;except self 防光标跳)。E2E:shared/editSync/A入库→B learn+B拿note_id/A评分→B done
+
+## 卡片壳统一(2026-07-21 用户拍板"侧栏统一成字幕卡样子,含三态圆点")
+
+**背景**:工具卡片在三种形态下壳分叉——浮层(`_cardPush`)+钉入(`_renderInto`)已共用 `_cardDom`,但**侧栏**是三套独立壳:工具卡 `mkInflow` 手抄 innerHTML、结果卡 `_infoCardEl` 用 `.vc-if`、制卡卡裸挂 turnCard `.rc-part`。壳分叉=每加一个行为(带 result、状态恢复、拖动…)都得在每条路各接一次,漏一条就是"单形态 bug"(制卡预览不弹、入库状态不恢复都栽在这)。
+
+**方案**:`_cardDom` 已是纯内容壳,新增第三支适配层 **`_renderInflow(host, spec)`**(rc-voicecall,对标钉入的 `_renderInto`):`_cardDom` 建壳 + `vc-inflow`(relative/100%宽内联对话流)+ 去 📌▶✕ + 三态圆点头部循环 + append host;返回 `{el,bd}`,专属交互(pinBind/dragToDock/igWire/mount)由调用方拿 el 自挂。暴露 `RC.voiceCard.renderInflow`。
+
+**三条侧栏路改造**(功能全平移保留):
+- **结果卡** `_infoCardEl`:`.vc-if`+两态折叠 → `_renderInflow`(vc-card+三态)。保留 `_infoHtml` 正文、pinBind 选中、dragToDock 拖出、igWire 图✕/单选、`__vcCard` 拖图入卡;主题色按 kind 取(与浮层同源)。`__vcInfoCardEl` 所有调用者(turnCard `kind:card` + `_assetInline` #card)自动统一。
+- **工具卡** `mkInflow`(rc-toolchip):手抄 innerHTML → `renderInflow`。保留 hdSplit(标题 `vc-hd-l`+数据流按钮 `vc-flowb`)、pinReg/pinBind、dragToDock;起手长条(form:'min')。
+- **制卡卡** turnCard `kind:'cards'`:裸挂 `.rc-part` → `renderInflow`(🎴 制卡 label + 紫 `#b9a8ff` + 三态) + mount 回调塞 `mountDrafts`/`mountPreview`(gid 联动 + entity 状态恢复不变)。
+
+**三态圆点解禁**:原 `_cardForm` 有 `if (f==='dot' && vc-inflow) f='min'`(旧"侧栏不要圆")已删;新增 CSS `.vc-card.vc-inflow.vc-dot{width:40px!important;height:40px}`(压过 `vc-inflow` 的 `width:100%`,圆点态在对话流里是 40×40 小圆)。
+
+**验证**(headless E2E,4 个):结果卡 `__vcInfoCardEl`→vc-card+inflow+三态(full→dot→min)+图✕/单选/__vcCard;工具卡 `toolChip.create`→vc-card+hdSplit+选中+拖出+三态(min→full→dot);turnCard 真实回放路径 addPart(card/cards)→两类 part 全 vc-card,制卡卡入库按钮/多卡/三态不回归。**改动文件**:rc-voicecall.js(新增 `_renderInflow`+暴露+改 `_infoCardEl`+`_cardForm` 解禁+CSS)、rc-toolchip.js(`mkInflow`)、rc-turncard.js(`kind:cards`)。**未反向补**:分析发现侧栏无浮层缺的独占能力(选中/拖出/图/流程浮层都有),故只做壳统一,不新增行为。
 
 ## 分批实施计划(原始)
 

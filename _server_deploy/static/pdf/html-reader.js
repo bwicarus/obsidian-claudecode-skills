@@ -39,17 +39,12 @@
     var _hls = [];   // 高亮列表 [{id,start,end,text,color,note,sentence}]
 
     // ════════════ 端点(AI 端点内容无关,直接复用 PDF/EPUB 那套;highlights 用新建的 html sidecar)════════════
-    var EP = {
-      dict: '/pdf/api/dict', dictJp: '/pdf/api/dict-jp', dictJpAi: '/pdf/api/dict-jp-ai',
-      translate: '/pdf/api/translate', explain: '/pdf/api/explain',
-      highlights: '/pdf/api/html-highlights', vocabMap: '/pdf/api/vocab-mastery-map', vocabAnki: '/pdf/api/vocab-anki',
-      toNote: '/pdf/api/to-note', snippetsTo: '/pdf/api/snippets-to-async', jobStatus: '/pdf/api/job-status'
-    };
+    var EP = RC.contract.endpoints({ highlights: '/pdf/api/html-highlights' });
 
     // ════════════ HtmlAdapter:把 HTML 主文档底座收敛成统一 RC.adapter 契约(架构 P2)════════════
     var HtmlAdapter = {
       kind: 'html',
-      config: { isPDF: false, reflow: true, hasFigures: false, hasFormula: true, dictMode: 'sse', popupMode: 'fixed', clickWordDetect: true, anchorKind: 'offset' },
+      config: RC.contract.adapterConfig('web'),
       getEndpoints: function () { return EP; },
       fileInfo: function () { return { file: FREL, langs: [] }; },
       captureSelection: function () { return captureFromSelection(); },
@@ -61,6 +56,11 @@
             if (r) { var el = r.startContainer.nodeType === 3 ? r.startContainer.parentElement : r.startContainer; if (el && el.scrollIntoView) el.scrollIntoView({ block: 'center' }); }
           }
         } catch (e) {}
+      },
+      navigate: function (target) {
+        var a = target && target.data ? target.data : (target || {});
+        if (a && typeof a.start === 'number') { HtmlAdapter.jumpToAnchor(a); return true; }
+        return false;
       },
       currentChapterText: function () { try { return (elContent.innerText || '').slice(0, 8000); } catch (e) { return ''; } },
       // ════ 2026-07-19 用户实锤"什么功能都没有":demo 级 adapter 缺 getContext/_host.asst,
@@ -123,7 +123,9 @@
           getPaidNoted: function () { return !!window.__paidNoted; }, setPaidNoted: function (v) { window.__paidNoted = v; },
           hlUrl: function () { return '/pdf/api/html-highlights'; },
           showAction: function () { return null; }, queueAction: function () {}, taskAction: function () {},
-          voiceLog: function () {}
+          voiceLog: function () {},
+          mountPanel: function () { return document.getElementById('ep-side'); },
+          mountTabs: function () { return document.getElementById('ep-side-tabs') || document.getElementById('ep-side'); }
         }
       }
     };
@@ -156,6 +158,120 @@
       } catch (e) { return ''; }
     }
     try { if (window.RC && RC.use) RC.use(HtmlAdapter); window.__htmlAdapter = HtmlAdapter; } catch (e) {}
+    // 双向上下文同步:HTML 宿主没有 PDF/EPUB 那样的翻页漏斗可蹭,所以只在开关**已开**时
+    // 开机上报一次(整篇单文档,页码无意义);之后 ts 由共享层的可见性心跳刷新。
+    // 开关关着就连这一次都不发,更不挂监听——符合「关闭=零开销」。
+    try {
+      if (window.RC && RC.ctxSync && RC.ctxSync.enabled()) {
+        RC.ctxSync.report({ kind: 'html', file: FREL, title: document.title.replace(/ ·.*$/, '') });
+      }
+      // HTML 宿主没有墨迹层,不调 drawingTouched —— 能力缺失即自然降级,不写宿主分支。
+      // 文字焦点复用共享层同一入口。
+      document.addEventListener('selectionchange', function () {
+        if (!(window.RC && RC.outgoing)) return;
+        var t = '';
+        try { t = (window.getSelection() || {}).toString().trim(); } catch (e) {}
+        if (t && t.length >= 2) RC.outgoing.focus('text', { file: FREL, text: t.slice(0, 200) });
+        else RC.outgoing.cancel();
+      });
+    } catch (e) {}
+
+    // PWA 书籍宿主白名单。HTML/Markdown 是本地书籍，不是“抓取网页”的 Web 宿主；
+    // 扩展只得到本页实际具备的 offset 锚、高亮和阅读设置能力。
+    try {
+      if (window.BWReaderBookHost && !window.__bwReaderLocalApi) {
+        function _bookSelection() {
+          var value = HtmlAdapter.captureSelection();
+          if (!value && cur && cur.text && cur.anchor) {
+            value = {
+              text: cur.text,
+              context: cur.ctx || '',
+              anchor: cur.anchor,
+              rect: cur.rect || null
+            };
+          }
+          if (!value) return null;
+          value.file = FREL;
+          value.book = (CFG && CFG.fileName) || document.title || '';
+          value.langs = _docLangs();
+          value.location = { unit: 'document', index: 0, total: 1 };
+          return value;
+        }
+        function _bookAction(name, payload) {
+          payload = payload || {};
+          if (name === 'clear_selection') {
+            HtmlAdapter.clearSelection();
+            return { ok: true };
+          }
+          if (name === 'highlight') {
+            var selected = _bookSelection();
+            if (!selected || !selected.anchor) return Promise.reject(new Error('没有可标记的 HTML 书籍选区'));
+            return createHighlight(
+              selected.anchor,
+              selected.text,
+              selected.context || selected.sentence || '',
+              String(payload.note || '')
+            ).then(function (record) {
+              if (!record) throw new Error('HTML 书籍高亮保存失败');
+              return { ok: true, highlight: record };
+            });
+          }
+          if (name === 'jump_location') {
+            var target = payload.location || payload || {};
+            var anchor = target.anchor || target.data || target;
+            if (!HtmlAdapter.navigate(anchor)) throw new Error('HTML 书籍位置无效');
+            return { ok: true };
+          }
+          if (name === 'jump_context') {
+            var ctx = payload.context || payload || {};
+            if (ctx.anchor) HtmlAdapter.jumpToAnchor(ctx.anchor.data || ctx.anchor);
+            else if (ctx.start != null) HtmlAdapter.jumpToAnchor(ctx);
+            else {
+              var text = String(ctx.text || '');
+              var raw = elContent.textContent || '';
+              var start = text ? raw.indexOf(text.slice(0, 80)) : -1;
+              if (start >= 0) HtmlAdapter.jumpToAnchor({ start: start, end: start + Math.min(text.length, 80) });
+            }
+            return { ok: true };
+          }
+          if (name === 'flash_selection') {
+            HtmlAdapter._host.asst.flashSelOnPage(0, String(payload.text || ''));
+            return { ok: true };
+          }
+          if (name === 'open_settings') {
+            openSettings();
+            return { ok: true };
+          }
+          throw new Error('不允许的 HTML 书籍本地命令：' + name);
+        }
+        var _bookActions = {};
+        ['clear_selection', 'highlight', 'jump_location', 'jump_context', 'flash_selection', 'open_settings']
+          .forEach(function (name) {
+            _bookActions[name] = function (payload) { return _bookAction(name, payload); };
+          });
+        var _bookLocalApi = BWReaderBookHost.register({
+          mode: 'html',
+          file: FREL,
+          title: (CFG && CFG.fileName) || document.title || '',
+          langs: _docLangs(),
+          selection: _bookSelection,
+          context: function () { return HtmlAdapter.getContext(); },
+          currentLocation: function () { return HtmlAdapter.currentLocation(); },
+          actions: _bookActions,
+          capabilities: {
+            selection: true, context: true, highlight: true,
+            navigation: true, bookSettings: true
+          }
+        });
+        if (window.RC && RC.actions) {
+          RC.actions.bind('highlight.save', function (p) {
+            return _bookLocalApi.localAction('highlight', p);
+          }, { owner: 'pwa', runtime: 'native', storage: 'book-sidecar' });
+        }
+      }
+    } catch (e) {
+      try { console.warn('[BW] HTML 书籍宿主登记失败', e); } catch (_) {}
+    }
 
     // ════════════ 字符偏移工具(相对 #html-content)════════════
     // 偏移 = 从容器起点到边界的文本字符数(Range.toString().length,= 包含文本节点的 textContent);
@@ -226,23 +342,30 @@
         if (end < start) { var t = start; start = end; end = t; }
         var blk = rng.startContainer.nodeType === 3 ? rng.startContainer.parentElement : rng.startContainer;
         blk = blk && blk.closest ? blk.closest('p,li,td,blockquote,div,section,h1,h2,h3,h4') : null;
-        return {
+        return RC.contract.selection({
           text: txt, context: (blk ? (blk.textContent || '') : '').trim().slice(0, 1200), ctx: (blk ? (blk.textContent || '') : '').trim().slice(0, 1200),
           anchor: { start: start, end: end },
           rect: { left: rect.left, top: rect.top, right: rect.right, bottom: rect.bottom }
-        };
+        });
       } catch (e) { return null; }
     }
     function clearNativeSel() { try { var s = window.getSelection(); if (s) s.removeAllRanges(); } catch (e) {} hideSel(); }
 
-    function captureAndShow() { var c = captureFromSelection(); if (!c) { hideSel(); return; } cur = c; _lastSel = c; showSel(); }
+    function captureAndShow() {
+      var c = captureFromSelection();
+      if (!c) { hideSel(); return; }
+      cur = c; _lastSel = c;
+      // 扩展接管时保留稳定 selection/anchor 快照给 book-host，但停用重复的 PWA 工具栏。
+      if (document.documentElement.dataset.bwReaderExtensionActive === '1') { hideSel(); return; }
+      showSel();
+    }
 
     var _lastDictTs = 0;
     function _dictGate() { var now = Date.now(); if (now - _lastDictTs < 500) return false; _lastDictTs = now; return true; }
 
     function pointFromEvent(e) {
-      if (e.changedTouches && e.changedTouches[0]) { var t = e.changedTouches[0]; return { x: t.clientX, y: t.clientY }; }
-      if (typeof e.clientX === 'number') return { x: e.clientX, y: e.clientY };
+      if (e.changedTouches && e.changedTouches[0]) { var t = e.changedTouches[0]; return { x: t.clientX, y: t.clientY, pointerType: 'touch' }; }
+      if (typeof e.clientX === 'number') return { x: e.clientX, y: e.clientY, pointerType: e.pointerType || 'mouse' };
       return null;
     }
     function onPointerUp(e) { var pt = pointFromEvent(e); setTimeout(function () { handleUp(pt); }, 10); }
@@ -251,10 +374,11 @@
       var txt = (sel && !sel.isCollapsed) ? (sel.toString() || '').trim() : '';
       if (txt) { captureAndShow(); return; }            // 拖选多词/句 → 工具栏
       hideSel();
+      if (document.documentElement.dataset.bwReaderExtensionActive === '1') return;   // 点词交给扩展；PWA 不再重复开字典/发网络请求
       if (!pt) return;
       var tgt = document.elementFromPoint(pt.x, pt.y);
       if (tgt && tgt.closest && tgt.closest('mark.rc-html-hl')) return;   // 点高亮 → 由 mark click 开编辑浮层
-      clickWord(pt.x, pt.y);                            // 单击词 → 直弹字典
+      clickWord(pt.x, pt.y, pt.pointerType);             // 单击词 → 直弹字典
     }
     elContent.addEventListener('mouseup', onPointerUp);
     elContent.addEventListener('touchend', onPointerUp);
@@ -275,9 +399,8 @@
       while (hi < s.length && isW(s[hi])) hi++;
       return { node: node, start: lo, end: hi, text: s.slice(lo, hi) };
     }
-    function clickWord(x, y) {
+    function clickWord(x, y, pointerType) {
       if (!(window.RC && RC.wordpop)) return;
-      if (!_dictGate()) return;
       var pos = caretFromPoint(x, y);
       if (!pos || !pos.node || pos.node.nodeType !== 3) { _closeWordPop(); return; }
       var w = wordAt(pos.node, pos.offset);
@@ -286,6 +409,10 @@
       if (!isEn && !isJa) { _closeWordPop(); return; }   // 纯中文等 → 不查
       var rng = document.createRange();
       try { rng.setStart(w.node, w.start); rng.setEnd(w.node, w.end); } catch (e) { return; }
+      if (!(RC.ui && RC.ui.rangeHitTest && RC.ui.rangeHitTest(rng, x, y, { pointerType: pointerType || 'mouse' }))) {
+        _closeWordPop(); return;   // caret API 会吸到最近文字；空白落点不能消费查词门槛或打开最近词
+      }
+      if (!_dictGate()) return;
       var rr = rng.getBoundingClientRect();
       var rect = { left: rr.left, top: rr.top, right: rr.right, bottom: rr.bottom };
       var pblk = w.node.parentElement && w.node.parentElement.closest ? w.node.parentElement.closest('p,li,td,blockquote,h1,h2,h3,h4,div') : null;
@@ -299,9 +426,8 @@
     function _closeWordPop() { try { var wp = document.getElementById('word-pop'); if (wp && wp.style.display !== 'none') wp.style.display = 'none'; } catch (e) {} }
 
     // ════════════ 选区工具栏分流(照搬 epub2.js 的 selBar handler)════════════
-    function isWordSel(t) { t = t || ''; return t.length <= 30 && !/\s/.test(t) && (/^[A-Za-z][A-Za-z'’\-]*$/.test(t) || /[぀-ヿ]/.test(t)); }
     function showSel() {
-      var word = isWordSel(cur.text);
+      var word = RC.ui.isDictionaryWord(cur.text);
       selBar.querySelectorAll('[data-grp]').forEach(function (b) {
         var g = b.dataset.grp, show = (g === 'both') || (word ? g === 'word' : g === 'multi');
         b.style.display = show ? '' : 'none';
@@ -313,8 +439,8 @@
         pv.innerHTML = esc(disp) + '<span class="len">' + cnt + '</span>';
       }
       selBar.classList.add('open');
-      selBar.style.left = '50%'; selBar.style.right = 'auto'; selBar.style.top = 'auto';
-      selBar.style.bottom = 'calc(env(safe-area-inset-bottom, 0px) + 20px)'; selBar.style.transform = 'translateX(-50%)';
+      // 2A：与 PDF / EPUB / 扩展共用紧贴选区的横向浮条；HTML 只负责提供 DOM Range rect。
+      if (window.RC && RC.ui && RC.ui.placeSelectionToolbar) RC.ui.placeSelectionToolbar(selBar, cur.rect, { gap: 8 });
     }
     function hideSel() { selBar.classList.remove('open'); }
 
@@ -334,11 +460,13 @@
       };
     }
     function addCard(head, sub) {
-      var body = $('ep-ai-body'); if (!body) return null;
-      var card = document.createElement('div'); card.className = 'ep-card';
-      card.innerHTML = '<div class="h">' + head + (sub ? '<span class="ep-sel-chip">' + esc(sub.slice(0, 40)) + (sub.length > 40 ? '…' : '') + '</span>' : '') + '</div><div class="c"><span class="ep-spin"></span></div>';
-      body.appendChild(card); body.scrollTop = body.scrollHeight;
-      return card.querySelector('.c');
+      var body = $('asst-thread') || $('ep-ai-body'); if (!body) return null;
+      // 5V：工具输出统一走语音对话已有的三态工具卡；普通 AI 文本仍保持气泡。
+      var label = String(head || '工具结果').replace(/<[^>]+>/g, '');
+      if (sub) label += ' · ' + String(sub).slice(0, 40) + (String(sub).length > 40 ? '…' : '');
+      var out = (window.RC && RC.ui && RC.ui.appendToolCard) ? RC.ui.appendToolCard(body, { label: label, type: '#b9a8ff', form: 'full' }) : null;
+      if (!out) { var card = document.createElement('div'); card.className = 'ep-card'; card.innerHTML = '<div class="h">' + head + (sub ? '<span class="ep-sel-chip">' + esc(sub.slice(0, 40)) + (sub.length > 40 ? '…' : '') + '</span>' : '') + '</div><div class="c"><span class="ep-spin"></span></div>'; body.appendChild(card); out = card.querySelector('.c'); }
+      body.scrollTop = body.scrollHeight; return out;
     }
     function _execCopy(s) { try { var ta = document.createElement('textarea'); ta.value = s; ta.style.cssText = 'position:fixed;left:-9999px;top:0'; document.body.appendChild(ta); ta.select(); var ok = document.execCommand('copy'); document.body.removeChild(ta); return ok; } catch (e) { return false; } }
     function doCopy(txt) { var done = function (ok) { toast(ok ? '已复制' : '复制失败'); }; if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(txt).then(function () { done(true); }, function () { done(_execCopy(txt)); }); else done(_execCopy(txt)); }
@@ -352,7 +480,7 @@
       else if (act === 'dict') RC.wordpop.show({ word: selTxt, rect: selRect, ctx: selCtx, file: FREL, langs: [], onFallback: function (w) { RC.result.aiCall(EP.translate, { text: w, target_lang: '中文' }, '🌐 翻译', mkResultOpts('note', selCtx)); } });
       else if (act === 'translate') RC.result.aiCall(EP.translate, { text: selTxt, target_lang: '中文' }, '🌐 翻译', mkResultOpts('note', selCtx));
       else if (act === 'explain') RC.result.aiCall(EP.explain, { text: selTxt, context: selCtx }, '💡 AI 解释', mkResultOpts('explain', selCtx));
-      else if (act === 'chat') RC.result.openChat(selTxt, selCtx, mkResultOpts('note', selCtx));
+      else if (act === 'chat') { if (!(RC.ui && RC.ui.openSelectionChat && RC.ui.openSelectionChat(selTxt, selCtx))) RC.result.openChat(selTxt, selCtx, mkResultOpts('note', selCtx)); }
       else if (act === 'note') RC.snippets.toNote(snipOpts(selTxt));
       else if (act === 'anki') RC.snippets.toAnki(snipOpts(selTxt));
       else if (act === 'highlight') createHighlight(selAnchor, selTxt, selCtx, '');
@@ -360,14 +488,18 @@
 
     // ════════════ 高亮 CRUD(offset sidecar)════════════
     function createHighlight(anchor, text, sentence, note) {
-      if (!anchor || typeof anchor.start !== 'number') { toast('无法定位选区'); return; }
+      if (!anchor || typeof anchor.start !== 'number') { toast('无法定位选区'); return Promise.resolve(null); }
       var color = localStorage.getItem('html-hl-color') || hlColors()[0];
       try { localStorage.setItem('html-hl-color', color); } catch (e) {}
-      RC.reqJson('POST', EP.highlights, { file: FREL, start: anchor.start, end: anchor.end, text: text || '', color: color, sentence: sentence || '', note: note || '' })
+      return RC.reqJson('POST', EP.highlights, { file: FREL, start: anchor.start, end: anchor.end, text: text || '', color: color, sentence: sentence || '', note: note || '' })
         .then(function (d) {
-          if (d && d.ok && d.highlight) { _hls.push(d.highlight); _markRange(d.highlight.start, d.highlight.end, d.highlight); toast('已高亮'); clearNativeSel(); }
-          else toast('高亮失败:' + ((d && d.error) || '?'));
-        }).catch(function () { toast('高亮失败'); });
+          if (d && d.ok && d.highlight) {
+            _hls.push(d.highlight); _markRange(d.highlight.start, d.highlight.end, d.highlight); toast('已高亮'); clearNativeSel();
+            return d.highlight;
+          }
+          toast('高亮失败:' + ((d && d.error) || '?'));
+          return null;
+        }).catch(function () { toast('高亮失败'); return null; });
     }
     function patchHl(h, f) {
       RC.reqJson('PATCH', EP.highlights, Object.assign({ file: FREL, id: h.id }, f)).then(function (d) {
@@ -454,6 +586,20 @@
         onTab: function (name) { if (name === 'hl') loadHlPane(); }
       });
     }
+    // 与 PDF / EPUB / 扩展使用同一个助手实现；先摘掉 HTML 的旧占位 pane/tab，避免两套 asst 冲突。
+    try {
+      if (window.RC && RC.assistant && RC.assistant.mountPdfSidebar) {
+        var _op = document.getElementById('ep-side-asst');
+        if (_op && _op.parentNode) _op.parentNode.removeChild(_op);
+        var _ot = document.querySelector('#ep-side-tabs .ep-side-tab[data-pane="asst"]');
+        if (_ot && _ot.parentNode) _ot.parentNode.removeChild(_ot);
+        RC.assistant.mountPdfSidebar();
+        var _nt = document.querySelector('#ep-side-tabs .side-tab[data-pane="asst"]');
+        if (_nt) { _nt.classList.remove('side-tab'); _nt.classList.add('ep-side-tab'); }
+        var _np = document.getElementById('side-pane-asst');
+        if (_np) _np.classList.add('ep-side-pane');
+      }
+    } catch (e) {}
     // 助手 pane 的「🗑 清空」按钮
     var _quick = $('html-asst-quick');
     if (_quick) _quick.addEventListener('click', function (e) { var b = e.target.closest('button'); if (b && b.dataset.q === 'clear') { var body = $('ep-ai-body'); if (body) body.innerHTML = ''; } });

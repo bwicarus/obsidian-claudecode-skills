@@ -1,12 +1,11 @@
 // ── 31-localbook.js:整本下载到本机(客户端 Cache Storage 预灌)──
 // 「📥 预热」是**服务器侧**缓存(Pi 先渲好,请求变快);本模块是**客户端**整本落盘:
-// 把全书页图+字符层灌进 SW 的 'pdf-cache-v3',之后 SW cache-first 每页零网络(秒开/离线可读)。
+// 逐页 fetch,由 SW 按服务器核验账户写入 pdf-private-v4-*;页面永远不知道/拼接 cache namespace。
 // 读路径零改动——缓存键靠直接调用渲染路径的同一批模块级函数/常量(_bucketReqW/_ratchetReqW/
 // FILE_REL/CHARS_VER/__imgMeta,拼装后同一 module 作用域)构造,逐字节一致,永不漂移。
 // 另:navigator.storage.persist()(主屏 PWA 更易授予 → 豁免 LRU 逐出;见 references/ios-webext-capabilities.md)。
 // ⚠ iOS 上 Safari 标签页与主屏 PWA 存储不互通:固定从主屏入口用,别两头下载。
 
-const _LB_CACHE = 'pdf-cache-v3';   // 必须与 pdf_reader.py _SW_JS 的 CACHE 同名
 let _lbAbort = false, _lbRunning = false;
 
 // 开机即申请持久存储(幂等;拒绝也无害,只是可被逐出)
@@ -22,11 +21,10 @@ function _lbCharsUrl(p, cv) {
   return `/pdf/api/page-chars?file=${encodeURIComponent(FILE_REL)}&page=${p}&v=${CHARS_VER}&cv=${encodeURIComponent(cv)}`;
 }
 
-async function _lbFetchInto(cache, url) {
-  if (await cache.match(url)) return 'hit';
+async function _lbFetchInto(url) {
+  // 已缓存时 SW cache-first 会直接返回；未缓存时只有已由服务器核验的 client 才会落 v4。
   const r = await fetch(url);
   if (!r.ok) throw new Error('HTTP ' + r.status + ' ' + url.slice(0, 80));
-  await cache.put(url, r.clone());
   return r;
 }
 
@@ -35,24 +33,24 @@ async function _lbDownload(btn) {
   if (!meta || !meta.page_count) { window.RC && RC.toast('书还没加载好,稍候再试'); return; }
   if (!_imgMode) { window.RC && RC.toast('此书当前为矢量模式,本机化暂只支持页图模式'); return; }
   if (!('caches' in window)) { window.RC && RC.toast('此浏览器不支持本机存储'); return; }
+  try { if (window.BWReaderPrivateCache) await BWReaderPrivateCache.rebind(); } catch (_) {}
   _lbRunning = true; _lbAbort = false;
   const total = meta.page_count;
   const baseW = _bucketReqW(Math.floor(meta.page_w * scale));   // 与 _prefetchAround 同公式
-  const cache = await caches.open(_LB_CACHE);
   let done = 0, errs = 0;
   const worker = async (pages) => {
     for (const p of pages) {
       if (_lbAbort) return;
       try {
-        await _lbFetchInto(cache, _lbImgUrl(p, baseW));
+        await _lbFetchInto(_lbImgUrl(p, baseW));
         // 字符层:先按本地猜测 cv 灌一份(读路径首拉这个键);再经 overlay 拿真 cv 灌正主 + 记 localStorage
         const cvKey = 'pdf-cv:' + FILE_REL + ':' + p;
         let cvGuess; try { cvGuess = localStorage.getItem(cvKey) || ('v' + CHARS_VER); } catch (_) { cvGuess = 'v' + CHARS_VER; }
-        await _lbFetchInto(cache, _lbCharsUrl(p, cvGuess));
+        await _lbFetchInto(_lbCharsUrl(p, cvGuess));
         try {
           const ov = await (await fetch(`/pdf/api/page-overlay?file=${encodeURIComponent(FILE_REL)}&page=${p}`)).json();
           if (ov && ov.cv && ov.cv !== cvGuess) {
-            await _lbFetchInto(cache, _lbCharsUrl(p, ov.cv));
+            await _lbFetchInto(_lbCharsUrl(p, ov.cv));
             try { localStorage.setItem(cvKey, ov.cv); } catch (_) {}
           }
         } catch (_) {}
@@ -65,7 +63,7 @@ async function _lbDownload(btn) {
   const lanes = [[], [], []];
   for (let p = 1; p <= total; p++) lanes[p % 3].push(p);
   await Promise.all(lanes.map(worker));
-  if (!_lbAbort) await _lbPrimeShell();   // 灌壳:HTML+已加载 /static/ 资产(治首访 SW 未控时壳没进缓存)
+  if (!_lbAbort) await _lbPrimeShell();   // 只预热 /static/ 资产；含账户身份的 HTML 永不落 Cache Storage
   _lbRunning = false;
   if (_lbAbort) { _lbSyncBtn(btn); window.RC && RC.toast('已暂停(已存部分保留,重按继续)'); return; }
   if (errs === 0) {
@@ -79,13 +77,10 @@ async function _lbDownload(btn) {
   _lbSyncBtn(btn);
 }
 
-// 把「打开这本书所需的壳」也存进本机:开书 HTML(SW 侧按 file 归一键)+ 本页已加载的全部 /static/ 资产
-// (首访时 SW 尚未控制页面,壳资产没进缓存;这里重 fetch 一遍 → 经 SW 的 /static/ cache-first 落 SHELL)
+// 把「打开这本书所需的静态壳」存进本机：只预热本页已加载的 /static/ 资产。
+// 开书 HTML 含 window.__USER__/provider ticket，禁止进入 Cache Storage；离线由当前已加载 PWA fallback 承接。
 async function _lbPrimeShell() {
   try {
-    const navUrl = '/pdf/view?file=' + encodeURIComponent(FILE_REL);
-    const shell = await caches.open('pdf-shell-v1');
-    try { const r = await fetch(navUrl); if (r.ok) await shell.put(navUrl, r); } catch (_) {}
     const urls = new Set();
     try { performance.getEntriesByType('resource').forEach((en) => { try { const u = new URL(en.name); if (u.origin === location.origin && u.pathname.startsWith('/static/')) urls.add(u.pathname + u.search); } catch (_) {} }); } catch (_) {}
     document.querySelectorAll('script[src],link[href]').forEach((el) => {
@@ -98,13 +93,11 @@ async function _lbPrimeShell() {
 
 async function _lbDelete(btn) {
   try {
-    const cache = await caches.open(_LB_CACHE);
-    const keys = await cache.keys();
-    const tag = 'file=' + encodeURIComponent(FILE_REL);
-    let n = 0;
-    for (const req of keys) { if (req.url.indexOf(tag) >= 0) { await cache.delete(req); n++; } }
+    if (!window.BWReaderPrivateCache) throw new Error('私有缓存控制器未就绪');
+    const ok = await BWReaderPrivateCache.deleteBook(FILE_REL);
+    if (!ok) throw new Error('当前账户尚未核验');
     try { localStorage.removeItem(_lbDoneKey()); } catch (_) {}
-    window.RC && RC.toast('已删除本机副本(' + n + ' 项)');
+    window.RC && RC.toast('已删除当前账户的本机副本');
   } catch (e) { window.RC && RC.toast('删除失败:' + e); }
   _lbSyncBtn(btn);
 }

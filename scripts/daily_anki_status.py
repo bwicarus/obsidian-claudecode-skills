@@ -27,6 +27,8 @@ import time
 import urllib.request
 from pathlib import Path
 
+import kg_runtime_client
+
 PROJECT_DIR = Path(os.environ.get("CLAUDE_PROJECT", "/root/claude"))
 PYTHON = os.environ.get("APP_PYTHON", "/usr/bin/python3")
 ANKI_URL = os.environ.get("ANKI_CONNECT_URL", "http://127.0.0.1:8765")
@@ -201,6 +203,17 @@ def run_py(script: str, args: list[str] | None = None) -> int:
     return r.returncode
 
 
+def run_kg_py(pinned, script: str, args: list[str] | None = None) -> int:
+    """Run one script from the release pinned for this whole KG batch."""
+    args = args or []
+    target = pinned.runtime_file("scripts/kg/" + script)
+    r = subprocess.run(
+        [PYTHON, str(target)] + args,
+        cwd=str(PROJECT_DIR),
+    )
+    return r.returncode
+
+
 def run_kg_link_mastery() -> int:
     """对 knowledge_graph/*.json 每个 KG：
     1. AI 关联（增量，只跑最近 7 天动过的笔记）
@@ -214,6 +227,10 @@ def run_kg_link_mastery() -> int:
     kg_files = [f for f in sorted(kg_dir.glob("*.json")) if not f.name.endswith(".bak.json")]
     if not kg_files:
         print("  无 KG 文件，跳过"); return 0
+    # One immutable release for link → mastery → audit → rescan.  If current
+    # is missing/tampered, pin() raises and the daily step fails closed before
+    # any KG subprocess is started.
+    pinned = kg_runtime_client.pin(project_root=PROJECT_DIR)
     # 兜底：消化 register 留下的 pending_kg_sync.json（没成功关联或被 bug 跳过的笔记）
     pending_file = PROJECT_DIR / "state" / "pending_kg_sync.json"
     pending_paths: list = []
@@ -238,14 +255,18 @@ def run_kg_link_mastery() -> int:
     for kg in kg_files:
         print(f"  KG: {kg.name}")
         # 1) AI 关联增量（--since-days 7：只跑近 7 天动过的笔记）
-        r1 = run_py("kg/link_with_ai.py", [
+        r1 = run_kg_py(pinned, "link_with_ai.py", [
             "--kg", str(kg), "--model", "sonnet", "--effort", "medium",
             "--workers", "4", "--since-days", "7", "--in-place",
         ])
         if r1 != 0:
             print(f"    AI 关联失败 (rc={r1})，仍跑后续")
         # 2) mastery + state
-        r2 = run_py("kg/link_and_mastery.py", ["--kg", str(kg), "--in-place"])
+        r2 = run_kg_py(
+            pinned,
+            "link_and_mastery.py",
+            ["--kg", str(kg), "--in-place"],
+        )
         if r2 != 0:
             print(f"    link_and_mastery 失败 (rc={r2})"); rc = r2
         # 3) KG 准确性审计（深度模式：含 PDF 内容验证 + safe ops 自动 apply）
@@ -274,11 +295,11 @@ def run_kg_link_mastery() -> int:
             ]
             if kac.get("incremental", True):
                 audit_args.append("--incremental")   # 只审变动/新增节点
-            r3 = run_py("kg/audit_kg.py", audit_args)
+            r3 = run_kg_py(pinned, "audit_kg.py", audit_args)
             if r3 != 0:
                 print(f"    audit_kg 失败 (rc={r3})")
         # 4) 滚动重扫 PDF（夜间深度扫描书本，每晚 30 页轮转）
-        r4 = run_py("kg/rescan_rolling.py", [
+        r4 = run_kg_py(pinned, "rescan_rolling.py", [
             "--kg", str(kg),
             "--pages-per-night", "30",
             "--workers", "4", "--model", "sonnet", "--effort", "medium",

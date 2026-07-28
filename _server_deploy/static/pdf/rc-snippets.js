@@ -32,6 +32,41 @@
     };
   }
 
+  function renderLearningCards(body, cards, gid) {
+    if (!body || !cards || !cards.length || !(window.RC && RC.flashcard)) {
+      return false;
+    }
+    var shell = body.closest ? body.closest('.vc-card') : null;
+    var host = shell && shell.parentNode
+      ? shell.parentNode
+      : body.parentNode;
+    if (host && RC.flashcard.renderEntity) {
+      var rendered = RC.flashcard.renderEntity(host, {
+        label: '🎴 制卡' + (cards.length > 1 ? ' × ' + cards.length : ''),
+        cards: cards,
+        gid: gid,
+        mode: 'draft',
+        className: 'fc-snippet-result'
+      });
+      if (rendered && rendered.el) {
+        if (shell && shell.parentNode === host) {
+          host.insertBefore(rendered.el, shell);
+          shell.remove();
+        } else if (body.parentNode && body !== rendered.bd) {
+          body.remove();
+        }
+        return true;
+      }
+    }
+    body.innerHTML = '';
+    RC.flashcard.mountDrafts(body, cards, {
+      gid: gid,
+      bare: true,
+      nopin: true
+    });
+    return true;
+  }
+
   // 轮询后台 job:running 继续;done→渲染;error→报错;unknown 连续 3 次→任务丢失;
   // 网络瞬断(切后台/网抖)不立即失败,继续轮询,超 ~5 分钟才放弃(对照 20-result-draft.js::_pollJob)。
   function pollJob(card, jobStatusUrl, jobId) {
@@ -45,8 +80,10 @@
           clearInterval(iv);
           var r = j.result || {};
           if (r.ok && r.anki_deferred && r.anki_cards && r.anki_cards.length && window.RC && RC.flashcard) {
-            card.innerHTML = '';   // B1:草稿卡进状态机(编辑→完成→学习→掌握确认入库)
-            RC.flashcard.mountDrafts(card, r.anki_cards, {});
+            var gid = (r.id && /^card_/.test(r.id)) ? r.id : ('fcg_snip_' + String(jobId));
+            // 异步占位工具壳只负责等待。完成后整壳升级为唯一学习卡实体，
+            // 不能继续保留随机 tool cid 或把拖放降级成 HTML 快照。
+            renderLearningCards(card, r.anki_cards, gid);
           } else {
             card.innerHTML = r.ok
               ? ('✓ 已制卡' + (r.anki_added ? ' ×' + esc(r.anki_added) : ''))

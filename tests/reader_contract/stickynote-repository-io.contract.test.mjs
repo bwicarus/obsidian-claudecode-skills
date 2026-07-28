@@ -1,0 +1,488 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
+
+const ROOT = new URL("../../", import.meta.url);
+const SOURCE = readFileSync(
+  new URL("_server_deploy/static/pdf/rc-stickynote.js", ROOT),
+  "utf8",
+);
+const WEB_NOTES_SOURCE = readFileSync(
+  new URL("extensions/bw-reader-webext/src/web-notes.js", ROOT),
+  "utf8",
+);
+
+const tick = () => new Promise((resolve) => setTimeout(resolve, 0));
+const deferred = () => {
+  let resolve;
+  let reject;
+  const promise = new Promise((yes, no) => {
+    resolve = yes;
+    reject = no;
+  });
+  return { promise, resolve, reject };
+};
+
+class FakeClassList {
+  constructor() {
+    this.values = new Set();
+  }
+  add(...values) {
+    values.forEach((value) => this.values.add(value));
+  }
+  remove(...values) {
+    values.forEach((value) => this.values.delete(value));
+  }
+  contains(value) {
+    return this.values.has(value);
+  }
+  toggle(value, force) {
+    const enabled = force === undefined ? !this.values.has(value) : !!force;
+    if (enabled) this.values.add(value);
+    else this.values.delete(value);
+    return enabled;
+  }
+}
+
+class FakeElement {
+  constructor(tagName = "div") {
+    this.tagName = tagName.toUpperCase();
+    this.style = {};
+    this.dataset = {};
+    this.classList = new FakeClassList();
+    this.children = [];
+    this.parentElement = null;
+    this.listeners = new Map();
+    this.queries = new Map();
+    this.value = "";
+    this.innerHTML = "";
+    this.textContent = "";
+    this.width = 0;
+    this.height = 0;
+    this.clientWidth = 1000;
+    this.clientHeight = 800;
+    this.scrollLeft = 0;
+    this.scrollTop = 0;
+    this.clientLeft = 0;
+    this.clientTop = 0;
+    this._connected = false;
+  }
+  get isConnected() {
+    if (this._connected) return true;
+    return !!this.parentElement?.isConnected;
+  }
+  appendChild(child) {
+    if (child.parentElement) {
+      const index = child.parentElement.children.indexOf(child);
+      if (index >= 0) child.parentElement.children.splice(index, 1);
+    }
+    child.parentElement = this;
+    this.children.push(child);
+    return child;
+  }
+  remove() {
+    if (!this.parentElement) return;
+    const index = this.parentElement.children.indexOf(this);
+    if (index >= 0) this.parentElement.children.splice(index, 1);
+    this.parentElement = null;
+  }
+  addEventListener(type, listener) {
+    const listeners = this.listeners.get(type) || [];
+    listeners.push(listener);
+    this.listeners.set(type, listeners);
+  }
+  dispatch(type, extra = {}) {
+    const event = {
+      target: this,
+      currentTarget: this,
+      stopPropagation() {},
+      stopImmediatePropagation() {},
+      preventDefault() {},
+      ...extra,
+    };
+    for (const listener of this.listeners.get(type) || []) listener(event);
+  }
+  click() {
+    this.dispatch("click");
+  }
+  querySelector(selector) {
+    if (this.queries.has(selector)) return this.queries.get(selector);
+    const tag = selector.includes("textarea") || selector === ".rc-note-text"
+      ? "textarea"
+      : selector.includes("canvas") || selector === ".rc-note-ink"
+        ? "canvas"
+        : selector.includes("button") || selector === ".rc-note-del"
+          ? "button"
+          : "div";
+    const child = new FakeElement(tag);
+    this.queries.set(selector, child);
+    this.appendChild(child);
+    return child;
+  }
+  querySelectorAll() {
+    return [];
+  }
+  closest() {
+    return null;
+  }
+  getBoundingClientRect() {
+    return {
+      left: 0,
+      top: 0,
+      right: this.clientWidth,
+      bottom: this.clientHeight,
+      width: this.clientWidth,
+      height: this.clientHeight,
+    };
+  }
+  getContext() {
+    return {
+      setTransform() {},
+      clearRect() {},
+      save() {},
+      translate() {},
+      restore() {},
+    };
+  }
+}
+
+function anchor(documentId, selector = "#article") {
+  return {
+    documentId,
+    kind: "web-dom",
+    revision: 1,
+    data: { kind: "web", selector, rx: 0.2, ry: 0.3 },
+  };
+}
+
+function note(documentId, id, rev, text, extra = {}) {
+  return {
+    id,
+    noteId: id,
+    documentId,
+    rev,
+    deleted: false,
+    anchor: anchor(documentId),
+    text,
+    color: "#ffffff",
+    w: 260,
+    h: 180,
+    collapsed: false,
+    strokes: [],
+    ...structuredClone(extra),
+  };
+}
+
+function loadStickynote({ repository, mount = null, fetchCalls = [] }) {
+  const head = new FakeElement("head");
+  head._connected = true;
+  const body = new FakeElement("body");
+  body._connected = true;
+  const documentElement = new FakeElement("html");
+  documentElement._connected = true;
+  const document = {
+    head,
+    body,
+    documentElement,
+    scrollingElement: documentElement,
+    activeElement: null,
+    visibilityState: "visible",
+    createElement(tag) {
+      return new FakeElement(tag);
+    },
+    addEventListener() {},
+    removeEventListener() {},
+  };
+  const sandbox = {
+    console,
+    document,
+    localStorage: { getItem() { return null; } },
+    Promise,
+    setTimeout,
+    clearTimeout,
+    requestAnimationFrame(callback) {
+      return setTimeout(callback, 0);
+    },
+    cancelAnimationFrame: clearTimeout,
+    innerWidth: 1200,
+    innerHeight: 800,
+    devicePixelRatio: 1,
+    crypto: globalThis.crypto,
+    confirm: () => true,
+    alert() {},
+    addEventListener() {},
+    removeEventListener() {},
+    getComputedStyle() {
+      return { position: "relative", overflow: "visible", overflowY: "visible" };
+    },
+    fetch(url, init) {
+      fetchCalls.push({ url: String(url), init });
+      return Promise.reject(new Error("repository 模式不应 fetch"));
+    },
+    RC: {},
+    RCInk: {
+      drawStroke() {},
+      hit() { return false; },
+    },
+  };
+  sandbox.window = sandbox;
+  vm.runInContext(SOURCE, vm.createContext(sandbox), {
+    filename: "rc-stickynote.js",
+  });
+  const documentId = "web:https://example.test/article";
+  const container = new FakeElement("section");
+  container._connected = true;
+  sandbox.RC.stickynote.init({
+    documentId,
+    repository,
+    disablePortal: true,
+    mount: mount || (() => ({ el: container, left: 20, top: 30 })),
+    anchorFromPoint: () => anchor(documentId),
+    toast() {},
+  });
+  return { sandbox, documentId, container, fetchCalls };
+}
+
+test("repository LIST/CHANGE/RESULT 按 noteId+rev 合并，旧 LIST 不覆盖先到 CHANGE", async () => {
+  const list = deferred();
+  let subscriber = null;
+  const repository = {
+    newId: () => `c_${"b".repeat(32)}`,
+    list: () => list.promise,
+    get: async () => null,
+    create: async () => null,
+    patch: async () => null,
+    remove: async () => null,
+    subscribe(callback) {
+      subscriber = callback;
+      return () => { subscriber = null; };
+    },
+  };
+  const { sandbox, documentId, container, fetchCalls } = loadStickynote({
+    repository,
+  });
+  const id = `c_${"a".repeat(32)}`;
+  subscriber({
+    data: {
+      operation: "put",
+      note: note(documentId, id, 2, "CHANGE 先到"),
+    },
+  });
+  const root = container.children.find((child) => child.dataset.noteId === id);
+  list.resolve([note(documentId, id, 1, "旧 LIST")]);
+  await tick();
+  await tick();
+
+  assert.equal(sandbox.RC.stickynote.notes().length, 1);
+  assert.equal(sandbox.RC.stickynote.notes()[0].text, "CHANGE 先到");
+  assert.equal(
+    container.children.find((child) => child.dataset.noteId === id),
+    root,
+    "相同/旧 revision 不重建便签 DOM",
+  );
+  assert.equal(fetchCalls.length, 0);
+});
+
+test("repository patch 逐 note 串行并带最新 ifRev，CHANGE 先于 RESULT 不重复重建；删除也只走 repository", async () => {
+  const id = `c_${"a".repeat(32)}`;
+  let subscriber = null;
+  const patchCalls = [];
+  const removeCalls = [];
+  const patchDeferred = [deferred(), deferred()];
+  const repository = {
+    newId: () => `c_${"b".repeat(32)}`,
+    list: async () => [note("web:https://example.test/article", id, 1, "v1")],
+    get: async () => null,
+    create: async () => null,
+    patch(noteId, fields, options) {
+      const index = patchCalls.length;
+      patchCalls.push({ noteId, fields: structuredClone(fields), ...options });
+      return patchDeferred[index].promise;
+    },
+    remove(noteId, options) {
+      removeCalls.push({ noteId, ...options });
+      const tombstone = {
+        ...note("web:https://example.test/article", id, 4, "v3"),
+        deleted: true,
+      };
+      subscriber({ operation: "remove", note: tombstone });
+      return Promise.resolve(tombstone);
+    },
+    subscribe(callback) {
+      subscriber = callback;
+      return () => { subscriber = null; };
+    },
+  };
+  const { sandbox, container, documentId, fetchCalls } = loadStickynote({
+    repository,
+  });
+  await tick();
+  await tick();
+
+  const root = container.children.find((child) => child.dataset.noteId === id);
+  const textarea = root.querySelector(".rc-note-text");
+  textarea.value = "v2";
+  textarea.dispatch("blur");
+  textarea.value = "v3";
+  textarea.dispatch("blur");
+  await tick();
+  assert.equal(patchCalls.length, 1, "第二个 patch 必须等待第一个完成");
+  assert.equal(patchCalls[0].ifRev, 1);
+  assert.match(patchCalls[0].mutationId, /^rc-note:patch:/);
+
+  const changed = note(documentId, id, 2, "v2", {
+    strokes: [{ c: "#f00", w: 2, pts: [[0, 0], [1, 1]] }],
+  });
+  subscriber({ operation: "put", note: changed });
+  patchDeferred[0].resolve(structuredClone(changed));
+  await tick();
+  await tick();
+  assert.equal(patchCalls.length, 2);
+  assert.equal(patchCalls[1].ifRev, 2, "队列后项使用 CHANGE/RESULT 后的当前 rev");
+  assert.notEqual(patchCalls[1].mutationId, patchCalls[0].mutationId);
+  assert.equal(
+    container.children.find((child) => child.dataset.noteId === id),
+    root,
+    "CHANGE 与同 revision RESULT 不能重复插入/重建",
+  );
+
+  const final = note(documentId, id, 3, "v3");
+  patchDeferred[1].resolve(final);
+  await tick();
+  await tick();
+  root.querySelector(".rc-note-del").dispatch("click");
+  await tick();
+  await tick();
+  assert.equal(removeCalls.length, 1);
+  assert.equal(removeCalls[0].ifRev, 3);
+  assert.match(removeCalls[0].mutationId, /^rc-note:remove:/);
+  assert.equal(sandbox.RC.stickynote.notes().length, 0);
+  assert.equal(fetchCalls.length, 0);
+});
+
+test("四种 create 都先取 repository ID；card 的 cid/gid 原样保存且 CHANGE/RESULT 不重复", async () => {
+  const ids = ["b", "c", "d", "e"].map((value) => `c_${value.repeat(32)}`);
+  let subscriber = null;
+  const creates = [];
+  const repository = {
+    newId: () => ids[creates.length],
+    list: async () => [],
+    get: async () => null,
+    create(input, options) {
+      creates.push({ input: structuredClone(input), options });
+      const created = {
+        ...structuredClone(input),
+        id: input.noteId,
+        noteId: input.noteId,
+        rev: 1,
+        deleted: false,
+      };
+      subscriber({ operation: "put", mutationId: options.mutationId, note: created });
+      return Promise.resolve(structuredClone(created));
+    },
+    patch: async () => null,
+    remove: async () => null,
+    subscribe(callback) {
+      subscriber = callback;
+      return () => { subscriber = null; };
+    },
+  };
+  const { sandbox, documentId, fetchCalls } = loadStickynote({ repository });
+  await tick();
+
+  const rc = sandbox.RC.stickynote;
+  rc.createAt(anchor(documentId, "#plain"));
+  await tick();
+  rc.createVideoAt(10, 10, "abcdefghijk", { src: "yt" });
+  await tick();
+  rc.createCardAt(10, 10, [{ q: "Q", a: "A" }], "card_keep_42");
+  await tick();
+  rc.createHtmlAt(10, 10, {
+    content: "<b>tool</b>",
+    isHtml: true,
+    cid: "html_keep_42",
+  });
+  await tick();
+  await tick();
+
+  assert.equal(creates.length, 4);
+  assert.deepEqual(
+    creates.map(({ input }) => input.noteId),
+    ["b", "c", "d", "e"].map((value) => `c_${value.repeat(32)}`),
+  );
+  assert.ok(creates.every(({ input }) => input.documentId === documentId));
+  assert.ok(creates.every(({ input }) => input.anchor.documentId === documentId));
+  assert.ok(creates.every(({ options }) => /^rc-note:create:/.test(options.mutationId)));
+  assert.equal(creates[2].input.card.gid, "card_keep_42");
+  assert.equal(creates[2].input.card.cid, "card_keep_42");
+  assert.equal(creates[3].input.html.cid, "html_keep_42");
+  assert.equal(rc.notes().length, 4, "CHANGE+RESULT 对每个 create 只保留一张");
+  assert.equal(fetchCalls.length, 0);
+});
+
+test("repository LIST 完整分页，并安全 reconcile 缺失项而保留分页途中 CHANGE", async () => {
+  const documentId = "web:https://example.test/article";
+  const all = Array.from({ length: 201 }, (_, index) => {
+    const suffix = index.toString(16).padStart(32, "0");
+    return note(documentId, `c_${suffix}`, 1, `note-${index}`);
+  });
+  let subscriber = null;
+  const calls = [];
+  let mode = "pages";
+  let pending = null;
+  const repository = {
+    newId: () => `c_${"f".repeat(32)}`,
+    list(query) {
+      calls.push({ ...query });
+      if (mode === "pending") return pending.promise;
+      return Promise.resolve(all.slice(query.offset, query.offset + query.limit));
+    },
+    get: async () => null,
+    create: async () => null,
+    patch: async () => null,
+    remove: async () => null,
+    subscribe(callback) {
+      subscriber = callback;
+      return () => { subscriber = null; };
+    },
+  };
+  const { sandbox, fetchCalls } = loadStickynote({
+    repository,
+    mount: () => null,
+  });
+  await tick();
+  await tick();
+  assert.deepEqual(calls.slice(0, 2).map((call) => call.offset), [0, 200]);
+  assert.ok(calls.slice(0, 2).every((call) => call.limit === 200));
+  assert.equal(sandbox.RC.stickynote.notes().length, 201);
+
+  mode = "pending";
+  pending = deferred();
+  sandbox.RC.stickynote.loadAll();
+  const duringId = `c_${"f".repeat(32)}`;
+  subscriber({ operation: "put", note: note(documentId, duringId, 1, "during") });
+  pending.resolve([]);
+  await tick();
+  await tick();
+  assert.equal(
+    sandbox.RC.stickynote.notes().length,
+    1,
+    "加载前快照中的 absent 项被清理，分页途中新 CHANGE 被保留",
+  );
+  assert.equal(sandbox.RC.stickynote.notes()[0].noteId, duringId);
+  assert.equal(fetchCalls.length, 0);
+});
+
+test("web-notes 先 identity，再用完整 web-dom envelope 对称 mount/create，并接失效与 SPA teardown", () => {
+  assert.match(WEB_NOTES_SOURCE, /await repository\.identity\(\)/);
+  assert.match(WEB_NOTES_SOURCE, /kind:\s*'web-dom'/);
+  assert.match(WEB_NOTES_SOURCE, /revision:\s*1/);
+  assert.match(WEB_NOTES_SOURCE, /data:\s*rawAnchor/);
+  assert.match(WEB_NOTES_SOURCE, /pins\.resolveAnchor\(rawAnchor\)/);
+  assert.match(WEB_NOTES_SOURCE, /repository\.onInvalidate/);
+  assert.match(WEB_NOTES_SOURCE, /RC\.stickynote\.removeAll\(\)/);
+  assert.match(WEB_NOTES_SOURCE, /invalidateAndRefresh\(\)/);
+  assert.match(WEB_NOTES_SOURCE, /if \(!currentIdentity && !\(await boundedRefresh\(\)\)\)/);
+});
+

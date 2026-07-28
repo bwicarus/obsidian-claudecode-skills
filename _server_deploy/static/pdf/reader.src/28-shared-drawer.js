@@ -107,6 +107,7 @@
     mirrorFloatingClass: 'grammar-floating',
     appearanceKeys: (name) => 'pdf-gp-' + name + '-' + _gpMode(),   // 按排版分档(18-grammar._gpMode,同模块作用域)
     onReflow: () => { try { if (!document.body.classList.contains('grammar-floating') && typeof _scheduleRefit === 'function') _scheduleRefit(true); } catch (_) {} },   // 悬浮不重排防闪(照搬 18-grammar)
+    onWidthChange: () => { try { if (!document.body.classList.contains('grammar-floating') && typeof _scheduleRefit === 'function') _scheduleRefit(true); } catch (_) {} },
     tabButtons: [{
       id: 'side-clear', title: '清空全部分析', tabs: ['grammar'],
       icon: _si('<path d="M4 7h16M10 4h4a1 1 0 0 1 1 1v2H9V5a1 1 0 0 1 1-1zM6 7l1 13a1 1 0 0 0 1 1h8a1 1 0 0 0 1-1l1-13"/>'),
