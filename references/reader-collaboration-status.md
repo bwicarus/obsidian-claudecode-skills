@@ -3159,3 +3159,38 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
   `ENABLE`；之后在 Reader/扩展选择“电脑客户端”，按电话按钮进行首次配对和真实验收。
   当前无 TURN；WebRTC 直连失败必须明确失败，禁止退化为系统全局输出。用户完成本机授权前，
   桥接继续保持 fail-closed。
+
+## Cloud:开发环境迁到 Windows(Pi 仍为唯一部署源,2026-07-29 03:30 JST)
+
+- **范围**:只动开发侧与协作规则,**未碰生产、未部署**。Pi 依旧是部署真源与全部门禁所在。
+- **做了什么**:①Pi 分支 `learning-loop-review-fixes`(领先 origin/main 497 提交)首次推送;
+  ②`C:\claude` 从 `main`(7-12) 切到同一分支,切换前 stash 为
+  `pre-windows-migration-20260729`(那 28 个脏文件已逐字节验证**全部被 Pi 历史吸收、零独有改动**);
+  ③加 `.gitattributes` 钉死换行(`.sh`/systemd=LF、`.ps1`/`.cmd`=CRLF、vendor `-text`),
+  实测 renormalize 影响面为零;④`.gitignore` 补 `webapp-data/`(含账号库 `app.db`,此前一直裸奔)
+  与 `_server_deploy/static/pdfjs/`;⑤Windows 写了机器特定 `.env`(仅路径/URL,无密钥,已验
+  `config.VAULT_ROOT=C:\obsidian`);⑥Claude Code 项目记忆 83 个文件从
+  `-home-bwicarus-claude` 复制到 Windows 的 `C--claude`,旧的 15 条(5 月格式)备份为
+  `memory-backup-20260729-pre-pi-sync`。
+- **能力分层(实测 86 个测试模块,非估计)**:Windows 可跑 **44**;因 `fcntl` 结构性跑不了 **24**
+  ——账户分区 sidecar 的并发锁是 POSIX-only,**用户已决定不改**(动生产并发锁风险不对等);
+  只在 Pi 成立的部署/KG 门禁 **17**(在 Windows 失败是正确行为,不要去"修")。
+  完整清单与理由见 `references/cross-machine-dev-setup.md`。
+- **协作规则**:`AGENTS.md` 原"同一 checkout"那条假设只有一份工作副本,已补 4 条跨机硬边界
+  (部署真源只有 Pi / 远程只 `merge --ff-only` **绝不远程切分支** / 跨机双写同文件要各开分支 /
+  别把别人 WIP 收进自己的提交)。
+- **共享检出安全闸** `scripts/deploy_remote_guard.sh`:Pi 工作树天生是脏的(daily 每晚重写
+  `anki/records`+`dashboard.json`,加上另一 agent 的在制品),所以"脏就拒绝"不可用。闸门只拦
+  **"本次要拉的提交恰好会改到别人正在改的文件"**,退出码 0/2/3/4 分流,自身只做一次 fetch
+  不碰工作树(隔离仓库三场景实测)。
+- **踩坑留档**:封装第一版用裸 IP,会退回 Windows 默认密钥而 Pi 授权表里没有它 →
+  **整条链静默挂死在密码提示上,Pi 的 sshd 日志里连一条连接记录都没有**。正确做法是用
+  Windows `~/.ssh/config` 既有的 `pi` 别名(专用密钥),**无需在 Pi 上新增任何授权密钥**。
+  改用别名后 sshd 日志确认 publickey 已接受。
+- **未完成/下一步**:`deploy_from_windows.ps1` 的**最后一段**(远程跑
+  `deploy_reader.sh --preflight-only`)尚未走通一次完整输出 —— 前三段(SSH/闸门/ff 合并)已由
+  sshd 日志与 Pi HEAD 佐证。因本轮 Codex 正在 Pi 上活动(tmux `codex-restore`,已跑 1h45m,
+  并已发布 `kg-0.2.68`),不宜并发跑重型预检,留待空窗期补验。
+- **给下一位**:Windows 侧现已可编辑 + 跑那 44 个模块;改到 sidecar/部署/KG 相关代码时,
+  仍必须 ssh 回 Pi 验证。
+
