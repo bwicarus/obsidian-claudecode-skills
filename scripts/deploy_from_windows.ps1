@@ -21,7 +21,10 @@
 #>
 param(
     [switch]$PreflightOnly,
-    [string]$PiHost = 'bwicarus@100.101.15.57',
+    # 走 Windows ~/.ssh/config 里既有的 `pi` 别名(专用密钥 + IdentitiesOnly),
+    # 不要写裸 IP —— 裸 IP 会用默认密钥,而 Pi 的 authorized_keys 里没有它,直接卡在
+    # 密码提示上(实测:整条链静默挂死,Pi 的 sshd 日志里连一条连接记录都没有)。
+    [string]$PiHost = 'pi',
     [string]$PiRoot = '/home/bwicarus/claude'
 )
 

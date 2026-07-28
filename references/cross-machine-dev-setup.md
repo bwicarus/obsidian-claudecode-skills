@@ -97,6 +97,15 @@ test_vbook_resolver             test_codex_auth_lifecycle
 
 **绝不要**在 Windows 上直接改 Pi 的生产文件,也不要用共享文件系统绕开 git。
 
+### 前置:Windows→Pi 的 SSH 别名
+
+封装脚本走 Windows `~/.ssh/config` 里的 **`pi` 别名**(专用密钥
+`C:/ssh/bwicarus-pi-ed25519-20260721` + `IdentitiesOnly yes`)。
+
+⚠ **不要用裸 IP**。裸 IP 会退回默认密钥 `id_ed25519`,而 Pi 的 `authorized_keys` 里没有它 ——
+表现是整条链**静默挂死在密码提示上**,Pi 的 sshd 日志里连一条连接记录都不会有
+(2026-07-29 第一版封装就是这么卡了十几分钟才被发现)。
+
 ### 共享检出安全闸 `scripts/deploy_remote_guard.sh`
 
 Pi 的工作树**天生是脏的** —— 每晚 daily 会重写 `anki/records/*.json` 与 `dashboard.json`,
