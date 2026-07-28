@@ -3187,10 +3187,18 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
   **整条链静默挂死在密码提示上,Pi 的 sshd 日志里连一条连接记录都没有**。正确做法是用
   Windows `~/.ssh/config` 既有的 `pi` 别名(专用密钥),**无需在 Pi 上新增任何授权密钥**。
   改用别名后 sshd 日志确认 publickey 已接受。
-- **未完成/下一步**:`deploy_from_windows.ps1` 的**最后一段**(远程跑
-  `deploy_reader.sh --preflight-only`)尚未走通一次完整输出 —— 前三段(SSH/闸门/ff 合并)已由
-  sshd 日志与 Pi HEAD 佐证。因本轮 Codex 正在 Pi 上活动(tmux `codex-restore`,已跑 1h45m,
-  并已发布 `kg-0.2.68`),不宜并发跑重型预检,留待空窗期补验。
+- **部署链已端到端验证(2026-07-29 03:5x,用户在 Windows 本机终端执行)**:
+  `.\scripts\deploy_from_windows.ps1 -PreflightOnly` 四段全通 —— SSH(`pi` 别名)→ 安全闸
+  → `merge --ff-only` → Pi 上 `deploy_reader.sh --preflight-only`,末尾
+  `✅ 无副作用预检通过` + 封装的 `✅ 完成`。当时清单 150 项、KG `kg-0.2.68-0c46b32b64c447887694`。
+- **⚠ 这条链不要由远程 agent 代跑**:从 Pi 经 `ssh → cmd → powershell` 嵌套驱动会因引号解析
+  报 `The system cannot find the path specified.`,并在闸门之后失败;而**同样的命令在 Windows
+  本机终端一次就过**。远程驱动还会留下孤儿进程(见下)。验证/部署请在 Windows 本机跑。
+- **踩坑(排查方法论,值得记):`pgrep -f <模式>` 会匹配到发起它的那条 shell 命令行本身**。
+  本轮因此①把"进程已启动"误判为真(实际从未启动),②`pkill -f` 只杀掉本地那半条,
+  Windows 上累积了**三代孤儿** PowerShell+ssh(02:59/03:18/03:31,共 10 个 PID,已清理)。
+  正确写法:把模式拆成变量拼接(`P='deploy_'"reader"`),或用不会出现在自身命令行里的模式。
+  判据要看**副作用**(stage 目录、日志字节数),不要只看进程表。
 - **给下一位**:Windows 侧现已可编辑 + 跑那 44 个模块;改到 sidecar/部署/KG 相关代码时,
   仍必须 ssh 回 Pi 验证。
 
