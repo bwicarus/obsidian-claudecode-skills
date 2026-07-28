@@ -46,3 +46,10 @@ extensions/bw-reader-webext-*-safari-ios.zip
 extensions/bw-reader-webext-test-channel*.zip
 extensions/bw-reader-webext-test-channel.json
 extensions/bw-reader-extension-test.ps1
+
+# Windows 本地实例(run_local.ps1)的运行时数据:账号库 app.db、各类 .log/.err/.out
+webapp-data/
+
+# PDF.js vendor(第三方库,不入库):生产上同样在 git 之外,直接放 /var/www/html/static/pdfjs
+_server_deploy/static/pdfjs/
+
