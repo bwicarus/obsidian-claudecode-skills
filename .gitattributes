@@ -1,0 +1,44 @@
+# 跨机开发(Windows 编辑 + Pi 部署)的换行契约。
+#
+# 背景:Pi 是唯一部署源,`.sh` / systemd 单元一旦带上 CRLF,shebang 和 unit 解析
+# 会直接失败;而 Windows 原生脚本(.ps1/.cmd/.bat)反过来需要 CRLF。
+# 所以这里显式钉死每一类,不依赖各机器的 core.autocrlf 设置。
+# 注意:换行归换行,**BOM 不归 git 管** —— `daily_anki_status.ps1` 这类含中文的
+# PowerShell 5.1 脚本必须保持 UTF-8 with BOM,编辑后要自己补回(见 CLAUDE.md)。
+
+# 默认:仓库内一律 LF,检出也是 LF
+* text=auto eol=lf
+
+# Windows 原生脚本:检出为 CRLF
+*.ps1 text eol=crlf
+*.cmd text eol=crlf
+*.bat text eol=crlf
+
+# 必须 LF(shebang / systemd 单元 / nginx 配置)
+*.sh   text eol=lf
+*.service text eol=lf
+*.timer   text eol=lf
+*.conf    text eol=lf
+
+# 第三方 vendor:保持字节原样,绝不做换行归一化
+vendor/** -text
+extensions/bw-reader-webext/vendor/** -text
+
+# 二进制:不做任何文本处理
+*.png binary
+*.jpg binary
+*.jpeg binary
+*.gif binary
+*.webp binary
+*.ico binary
+*.pdf binary
+*.zip binary
+*.tar binary
+*.gz  binary
+*.db  binary
+*.sqlite binary
+*.ttf binary
+*.woff binary
+*.woff2 binary
+*.exe binary
+*.dll binary
