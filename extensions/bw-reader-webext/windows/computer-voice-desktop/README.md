@@ -130,11 +130,11 @@ GUI 不再提供会被 supervisor 立即抵消的单独“停止”按钮。“�
 
 ## direct config 合同
 
-合同为 `reader-computer-voice-direct-config/3`，字段集合必须恰好为：
+合同为 `reader-computer-voice-direct-config/4`，字段集合必须恰好为：
 
 ```json
 {
-  "contract": "reader-computer-voice-direct-config/3",
+  "contract": "reader-computer-voice-direct-config/4",
   "localOptIn": true,
   "experimentalSingleUserMode": true,
   "virtualMicrophoneRenderEndpointId": "{explicit-virtual-microphone-render-endpoint-id}",
@@ -147,7 +147,8 @@ GUI 不再提供会被 supervisor 立即抵消的单独“停止”按钮。“�
   "allowedTailscaleUserLogin": "bwicarus@gmail.com",
   "outputScope": "process-only",
   "appKind": "codex-desktop",
-  "runtimeStatusPath": "C:\\Users\\bwica\\bw-computer-voice-bridge\\runtime\\computer-voice-direct.status.json"
+  "runtimeStatusPath": "C:\\Users\\bwica\\bw-computer-voice-bridge\\runtime\\computer-voice-direct.status.json",
+  "contextDeliveryMode": "snapshot-mcp"
 }
 ```
 
@@ -161,6 +162,12 @@ GUI 不再提供会被 supervisor 立即抵消的单独“停止”按钮。“�
   页面 Origin 都可到达握手，权限边界改由固定 WSS + Tailscale 注入的唯一
   用户身份 + Windows 本地 opt-in 共同承担。
 - `outputScope` 固定 `process-only`，没有系统输出回退。
+- `contextDeliveryMode` 只接受 `legacy-inject` 或 `snapshot-mcp`。前者保留
+  named-pipe → voice-typist 的旧文字注入末端；后者把 PWA 直连事件原子折叠到
+  Windows `runtime/reader-context-snapshot.json`，START 明确跳过 typist，并由同一个
+  原生 EXE 的只读 MCP 模式按需返回快照。两条路径互斥。
+- 旧 `/3` 配置仍按 `legacy-inject` 解释，作为明确回滚入口；不会因为升级程序而静默
+  切换。当前实验候选在安装/替换时另行显式写入 `snapshot-mcp`。
 - `virtualMicrophoneRenderEndpointId` 与
   `virtualSpeakerRenderEndpointId` 必须是两个不同的 Active eRender
   endpoint；空值、同值、失活或默认设备推断全部拒绝。
@@ -190,8 +197,8 @@ Reader 域名。任何知道固定 WSS 的已访问页面都可能尝试 START�
 本地 opt-in、明确双虚拟端点、Codex 进程树输出、START-only 激活及
 heartbeat/close fail-closed。
 
-direct v3 的浏览器麦克风帧只写入 A。direct 媒体 adapter 还把本次 START
-新建的 voice-typist 绑定到同一通话生命周期：
+direct v3 的浏览器麦克风帧只写入 A。在 `legacy-inject` 模式下，direct 媒体
+adapter 还把本次 START 新建的 voice-typist 绑定到同一通话生命周期：
 正常挂断、浏览器断开、心跳超时、START 失败、媒体异常和服务退出都会通过固定 launcher
 执行 `Stop`。只有 helper 返回 `started` 且结束时 PID 与 process-start FILETIME
 都仍精确匹配才拥有停止权；
@@ -199,6 +206,30 @@ direct v3 的浏览器麦克风帧只写入 A。direct 媒体 adapter 还把本�
 bridge-owned typist 也持续核对 bridge owner 的 PID + process-start FILETIME；即使
 C# 进程整体崩溃、无法执行 Stop，它也会自行退出。managed 启动不再受 10 分钟 idle
 误杀；无 owner 的手工启动仍保留 600 秒孤儿兜底。
+
+在 `snapshot-mcp` 模式下，音频 START 顺序和已验收的 PCM/快捷键路径不变，但
+`StartTypist=false`；Reader 的 `context` / `active-reading` 只更新 Windows 本地
+JSON，绝不进入客户端输入框或 typist 管道。MCP 进程由客户端通过以下固定只读入口
+常驻启动：
+
+```powershell
+bw-computer-voice-audio.exe --reader-context-mcp --state `
+  C:\Users\bwica\bw-computer-voice-bridge\runtime\reader-context-snapshot.json
+```
+
+工具面只有 `reader_context_snapshot`。快照超过三分钟未收到 PWA
+`active-reading` 心跳时，工具返回 `contextStatus=stale`，并清空可供回答的正文与选区；
+活动心跳还会明确区分有选区、已清空和未上报，不能沿用旧选择。关闭同步或切回旧注入时，
+PWA 会先用无音频副作用的 `context-clear` 清空快照，再停止实验末端。
+
+安装后的 Codex CLI 注册形式如下（这是安装/配置动作，候选验收前不执行）：
+
+```powershell
+codex mcp add reader_snapshot -- `
+  C:\Users\bwica\bw-computer-voice-bridge\native-host\bw-computer-voice-audio.exe `
+  --reader-context-mcp --state `
+  C:\Users\bwica\bw-computer-voice-bridge\runtime\reader-context-snapshot.json
+```
 
 v3 strict config 不包含任何 pairing 字段。旧 `/1`、
 `microphoneEndpointId` 与四个 pairing 字段只用于识别
@@ -330,7 +361,7 @@ BW-Computer-Voice-Bridge.exe --self-test
 - 旧 `microphoneEndpointId` 只触发显式迁移提示，不能静默启动；
 - runtime status v2 严格校验 `lastError`，UI 不泄露 endpoint；
 - offline/stale/PID 不匹配不能显示 online 或 Reader connected；
-- direct config 严格字段、实验单用户 v3、固定 Tailscale 登录身份且无
+- direct config v4 严格字段、双模式互斥、实验单用户 v3、固定 Tailscale 登录身份且无
   浏览器长期 token；
 - 无 Chrome/CDP/WebSocket 运行依赖；
 - START/STOP 只经过注入 runner 且使用严格路径；

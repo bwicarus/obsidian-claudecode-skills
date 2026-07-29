@@ -153,8 +153,9 @@ class DirectDesktopCoreTests(unittest.TestCase):
         self.assertEqual(value["contract"], DIRECT_CONFIG_CONTRACT)
         self.assertEqual(
             value["contract"],
-            "reader-computer-voice-direct-config/3",
+            "reader-computer-voice-direct-config/4",
         )
+        self.assertEqual(value["contextDeliveryMode"], "legacy-inject")
         self.assertEqual(value["listenHost"], FIXED_LISTEN_HOST)
         self.assertEqual(value["listenPort"], FIXED_LISTEN_PORT)
         self.assertIs(value["experimentalSingleUserMode"], True)
@@ -231,6 +232,7 @@ class DirectDesktopCoreTests(unittest.TestCase):
             "virtualMicrophoneRenderEndpointId"
         )
         legacy.pop("virtualSpeakerRenderEndpointId")
+        legacy.pop("contextDeliveryMode")
         legacy["contract"] = "reader-computer-voice-direct-config/1"
         legacy.update(
             {
@@ -275,7 +277,11 @@ class DirectDesktopCoreTests(unittest.TestCase):
         self.assertNotIn("pairingCodeHash", migrated)
         self.assertEqual(
             migrated["contract"],
-            "reader-computer-voice-direct-config/3",
+            "reader-computer-voice-direct-config/4",
+        )
+        self.assertEqual(
+            migrated["contextDeliveryMode"],
+            "legacy-inject",
         )
         self.assertEqual(
             migrated["virtualSpeakerRenderEndpointId"],

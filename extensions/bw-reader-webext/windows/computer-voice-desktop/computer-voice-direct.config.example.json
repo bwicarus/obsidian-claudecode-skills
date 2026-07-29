@@ -1,5 +1,5 @@
 {
-  "contract": "reader-computer-voice-direct-config/3",
+  "contract": "reader-computer-voice-direct-config/4",
   "localOptIn": true,
   "experimentalSingleUserMode": true,
   "virtualMicrophoneRenderEndpointId": "{explicit-virtual-microphone-render-endpoint-id}",
@@ -12,5 +12,6 @@
   "allowedTailscaleUserLogin": "bwicarus@gmail.com",
   "outputScope": "process-only",
   "appKind": "codex-desktop",
-  "runtimeStatusPath": "C:\\Users\\bwica\\bw-computer-voice-bridge\\runtime\\computer-voice-direct.status.json"
+  "runtimeStatusPath": "C:\\Users\\bwica\\bw-computer-voice-bridge\\runtime\\computer-voice-direct.status.json",
+  "contextDeliveryMode": "legacy-inject"
 }

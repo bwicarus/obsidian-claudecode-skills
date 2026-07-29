@@ -3,6 +3,12 @@
 > 源码 `_server_deploy/mcp_server.py`,运行环境 `/home/bwicarus/mcp-venv`(mcp SDK + httpx)。
 > 让任何 MCP 客户端(Claude Code、claude.ai、其他 agent)像操作一个 App 一样控制整个自学系统。
 
+> 另有一个边界完全不同的 Windows 实验 MCP：电脑语音原生 EXE 以
+> `--reader-context-mcp --state <path>` 常驻在客户端会话内，只读 PWA 直连更新的本地
+> `reader-context-snapshot.json`，工具仅 `reader_context_snapshot`。它不经过本页的
+> Pi HTTP MCP、不持有 webapp token，也不提供写操作；见
+> [电脑直连音频桥](reader-computer-audio-bridge.md#实验上下文末端2026-07-30)。
+
 ## 架构(薄门面,零业务逻辑)
 
 ```

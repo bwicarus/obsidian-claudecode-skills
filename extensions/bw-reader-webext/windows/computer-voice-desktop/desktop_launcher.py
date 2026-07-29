@@ -12,6 +12,9 @@ from typing import Any, Callable, ContextManager
 from bridge_core import (
     BridgeError,
     BridgePaths,
+    CONTEXT_DELIVERY_LEGACY,
+    CONTEXT_DELIVERY_MODES,
+    CONTEXT_DELIVERY_SNAPSHOT,
     DIRECT_WSS_URL,
     DirectStatus,
     FIXED_APP_KIND,
@@ -49,7 +52,7 @@ from control_plane import (
 
 
 APP_TITLE = "电脑客户端桥接器"
-APP_VERSION = "0.6.0-direct-v3-source"
+APP_VERSION = "0.7.0-snapshot-mcp-source"
 
 
 class BridgeWindow:
@@ -101,8 +104,8 @@ class BridgeWindow:
         self.busy = False
 
         root.title(APP_TITLE)
-        root.geometry("700x960")
-        root.minsize(640, 850)
+        root.geometry("700x1040")
+        root.minsize(640, 900)
         root.configure(bg="#eef2f7")
 
         style = ttk.Style(root)
@@ -264,6 +267,37 @@ class BridgeWindow:
             wraplength=590,
         )
         self.migration_status.pack(anchor="w", pady=(7, 0))
+
+        context_mode_frame = ttk.LabelFrame(
+            config_frame,
+            text="Reader 上下文交付模式",
+            padding=(10, 7),
+        )
+        context_mode_frame.pack(fill="x", pady=(10, 0))
+        self.context_delivery_mode = tk.StringVar(
+            value=CONTEXT_DELIVERY_SNAPSHOT
+        )
+        ttk.Radiobutton(
+            context_mode_frame,
+            text="旧注入（回滚备用，保持 Voice Typist 行为）",
+            variable=self.context_delivery_mode,
+            value=CONTEXT_DELIVERY_LEGACY,
+        ).pack(anchor="w")
+        ttk.Radiobutton(
+            context_mode_frame,
+            text="实验（本次候选）：Windows 本地快照 + 常驻 MCP（不注入正文）",
+            variable=self.context_delivery_mode,
+            value=CONTEXT_DELIVERY_SNAPSHOT,
+        ).pack(anchor="w", pady=(4, 0))
+        ttk.Label(
+            context_mode_frame,
+            text=(
+                "两条路径互斥。切换只在“保存”或“启动”时写入配置；"
+                "旧配置升级后固定落在旧注入模式，不会静默开启实验。"
+            ),
+            foreground="#44546a",
+            wraplength=560,
+        ).pack(anchor="w", pady=(5, 0))
 
         ttk.Label(
             config_frame,
@@ -435,6 +469,15 @@ class BridgeWindow:
             raise BridgeError("虚拟麦克风 A 与虚拟扬声器 B 不能相同。")
         return virtual_microphone, virtual_speaker
 
+    def selected_context_delivery_mode(self) -> str:
+        selector = getattr(self, "context_delivery_mode", None)
+        if selector is None:
+            return CONTEXT_DELIVERY_LEGACY
+        mode = str(selector.get())
+        if mode not in CONTEXT_DELIVERY_MODES:
+            raise BridgeError("请选择有效的 Reader 上下文交付模式。")
+        return mode
+
     @staticmethod
     def _restore_combo_selection(
         combo: ttk.Combobox,
@@ -542,6 +585,10 @@ class BridgeWindow:
             str(config.get("virtualSpeakerRenderEndpointId", ""))
             if config else ""
         )
+        if config:
+            self.context_delivery_mode.set(
+                str(config["contextDeliveryMode"])
+            )
         previous_microphone = ""
         microphone_index = self.virtual_microphone_combo.current()
         if 0 <= microphone_index < len(self.render_endpoints):
@@ -614,6 +661,9 @@ class BridgeWindow:
             virtual_microphone, virtual_speaker = (
                 self.selected_virtual_endpoints()
             )
+            context_delivery_mode = (
+                self.selected_context_delivery_mode()
+            )
         except BridgeError as error:
             messagebox.showerror(APP_TITLE, str(error), parent=self.root)
             return
@@ -627,6 +677,7 @@ class BridgeWindow:
                 "固定 Reader HTTPS 来源、"
                 "127.0.0.1:43128 和 process-only 边界；"
                 "单用户实验模式会固定启用且无需配对；"
+                f"上下文交付模式将设为 {context_delivery_mode}；"
                 + (
                     "旧 microphoneEndpointId 将被明确替换且不会回退；"
                     if legacy_migration else ""
@@ -644,6 +695,7 @@ class BridgeWindow:
                 virtual_speaker,
                 active_render_endpoints=active,
                 allow_legacy_migration=legacy_migration,
+                context_delivery_mode=context_delivery_mode,
             )
 
         def success(_: dict[str, Any]) -> None:
@@ -693,6 +745,9 @@ class BridgeWindow:
             virtual_microphone, virtual_speaker = (
                 self.selected_virtual_endpoints()
             )
+            context_delivery_mode = (
+                self.selected_context_delivery_mode()
+            )
         except BridgeError as error:
             messagebox.showerror(APP_TITLE, str(error), parent=self.root)
             return
@@ -703,6 +758,7 @@ class BridgeWindow:
             "启用并启动空闲直连服务",
             (
                 "先原子保存两个虚拟播放端点并写入 localOptIn=true；"
+                f"上下文交付模式为 {context_delivery_mode}；"
                 + (
                     "旧 microphoneEndpointId 将被明确替换；"
                     if legacy_migration else ""
@@ -732,6 +788,7 @@ class BridgeWindow:
                 virtual_speaker,
                 active_render_endpoints=active,
                 allow_legacy_migration=legacy_migration,
+                context_delivery_mode=context_delivery_mode,
             )
             if run_bootstrap_task_if_owned(
                 self.paths,

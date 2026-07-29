@@ -118,6 +118,18 @@ def _ctx_sync_enabled() -> bool:
     return bool((jload(sc("reader-context-sync.json"), {}) or {}).get("enabled"))
 
 
+def _legacy_push_enabled() -> bool:
+    """只有旧注入模式允许 Pi→Windows context.md 推送。
+
+    老配置没有 deliveryMode，必须继续按 legacy-inject 解释；实验模式只
+    复用 Pi 的事件接口，最终快照由 PWA 直送 Windows。
+    """
+    cfg = jload(sc("reader-context-sync.json"), {}) or {}
+    return bool(cfg.get("enabled")) and (
+        cfg.get("deliveryMode") or "legacy-inject"
+    ) == "legacy-inject"
+
+
 def _current_html() -> dict | None:
     """HTML 宿主不写 reading-pos，只有「上次打开的文件」。"""
     d = jload(sc("web-last.json"), None)

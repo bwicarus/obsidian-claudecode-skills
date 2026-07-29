@@ -47,7 +47,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         DirectBridgeConfigStore configStore,
         IDirectAppLauncher appLauncher,
         IDirectMediaAdapter mediaAdapter,
-        IDirectContextAdapter? contextAdapter = null)
+        IDirectContextAdapter? contextAdapter = null,
+        IDirectSnapshotContextAdapter? snapshotContextAdapter = null)
     {
         _configStore = configStore;
         DirectBridgeConfig config = configStore.Load();
@@ -55,7 +56,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             configStore,
             appLauncher,
             mediaAdapter,
-            contextAdapter: contextAdapter);
+            contextAdapter: contextAdapter,
+            snapshotContextAdapter: snapshotContextAdapter);
         _serviceInstanceId = Guid.NewGuid().ToString("N");
         _statusWriter = new DirectRuntimeStatusWriter(
             config.RuntimeStatusPath,

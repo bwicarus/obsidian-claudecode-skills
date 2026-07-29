@@ -207,6 +207,10 @@ class VbookActiveTest(unittest.TestCase):
 class ContextSyncApiTest(unittest.TestCase):
     """后端:总开关 + active-reading 端点的 fail-closed 与校验。"""
 
+    @unittest.skipIf(
+        os.name == "nt",
+        "Pi Flask integration imports fcntl; run this endpoint test on Pi",
+    )
     def test_switch_gates_writes_and_clears_on_disable(self) -> None:
         script = textwrap.dedent(
             f"""
@@ -242,6 +246,7 @@ class ContextSyncApiTest(unittest.TestCase):
             # 1) 默认关
             r = c.get("/pdf/api/context-sync").get_json()
             assert r["ok"] and r["enabled"] is False, r
+            assert r["deliveryMode"] == "legacy-inject", r
 
             # 2) 关着时上报 → fail-closed 409,且读不到任何 active
             r = c.post("/pdf/api/active-reading",
@@ -249,8 +254,20 @@ class ContextSyncApiTest(unittest.TestCase):
             assert r.status_code == 409, (r.status_code, r.get_json())
             assert c.get("/pdf/api/active-reading").get_json()["active"] is None
 
-            # 3) 开 → 上报 → 立刻新鲜可读
-            assert c.post("/pdf/api/context-sync", json={{"enabled": True}}).get_json()["ok"]
+            # 3) 显式选 snapshot；旧客户端只传 enabled 时必须保留，不可静默切回旧注入
+            mode = c.post("/pdf/api/context-sync", json={{
+                "enabled": True, "deliveryMode": "snapshot-mcp"
+            }}).get_json()
+            assert mode["ok"] and mode["deliveryMode"] == "snapshot-mcp", mode
+            mode = c.post("/pdf/api/context-sync", json={{"enabled": True}}).get_json()
+            assert mode["deliveryMode"] == "snapshot-mcp", mode
+            bad_mode = c.post("/pdf/api/context-sync", json={{
+                "enabled": True, "deliveryMode": "both"
+            }})
+            assert bad_mode.status_code == 400, (bad_mode.status_code, bad_mode.get_json())
+            assert c.get("/pdf/api/context-sync").get_json()["deliveryMode"] == "snapshot-mcp"
+
+            # 4) 上报 → 立刻新鲜可读
             r = c.post("/pdf/api/active-reading",
                        json={{"kind": "pdf", "file": book, "pos": 57,
                              "title": "T", "selection": "S"}})
@@ -260,7 +277,7 @@ class ContextSyncApiTest(unittest.TestCase):
             assert g["active"]["file"] == book and g["active"]["pos"] == 57, g
             assert g["active"]["title"] == "T" and g["active"]["selection"] == "S", g
 
-            # 4) 输入校验
+            # 5) 输入校验
             assert c.post("/pdf/api/active-reading",
                           json={{"kind": "bogus", "file": book}}).status_code == 400
             assert c.post("/pdf/api/active-reading",
@@ -272,7 +289,7 @@ class ContextSyncApiTest(unittest.TestCase):
             assert c.post("/pdf/api/active-reading",
                           json={{"kind": "web", "url": "https://ex.com/a"}}).status_code == 200
 
-            # 5) 关 → 活动状态被清空(否则快照会继续拿最后一条当「当前」)
+            # 6) 关 → 活动状态被清空(否则快照会继续拿最后一条当「当前」)
             assert c.post("/pdf/api/context-sync", json={{"enabled": False}}).get_json()["ok"]
             g = c.get("/pdf/api/active-reading").get_json()
             assert g["enabled"] is False and g["active"] is None, g
@@ -281,7 +298,11 @@ class ContextSyncApiTest(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory(prefix="bw-ctx-api-test-") as data:
             env = os.environ.copy()
-            env.update(SECRET_KEY="ctx-test", WEBAPP_DATA=data, SESSION_COOKIE_SECURE="0")
+            env.update(
+                SECRET_KEY="ctx-test-secret-32-bytes-minimum",
+                WEBAPP_DATA=data,
+                SESSION_COOKIE_SECURE="0",
+            )
             r = subprocess.run([sys.executable, "-c", script], cwd=ROOT, env=env,
                                text=True, capture_output=True, check=False)
         self.assertEqual(r.returncode, 0, msg=(r.stdout + "\n" + r.stderr).strip())
@@ -303,9 +324,44 @@ class PushDaemonGateTest(unittest.TestCase):
 
     def test_push_daemon_reads_same_switch(self) -> None:
         src = (ROOT / "scripts" / "push_reader_context_to_pc.py").read_text(encoding="utf-8")
-        self.assertIn("SNAP._ctx_sync_enabled()", src)
+        self.assertIn("SNAP._legacy_push_enabled()", src)
         self.assertIn("reader-active.json", src, "活动状态变化必须能触发推送")
         self.assertIn("reader-context-sync.json", src, "开关变化本身也要反映到快照")
+
+    def test_snapshot_mode_disables_only_the_legacy_pi_push(self) -> None:
+        snap = _load_snapshot_module()
+        with tempfile.TemporaryDirectory(prefix="bw-ctx-mode-") as tmp:
+            st = Path(tmp)
+            snap.ST = st
+            snap.SIDECAR_ACCT = None
+            switch = st / "reader-context-sync.json"
+            switch.write_text(
+                json.dumps({"enabled": True}),
+                encoding="utf-8",
+            )
+            self.assertTrue(
+                snap._legacy_push_enabled(),
+                "旧开关文件没有模式字段时必须保持原行为",
+            )
+            switch.write_text(
+                json.dumps({
+                    "enabled": True,
+                    "deliveryMode": "legacy-inject",
+                }),
+                encoding="utf-8",
+            )
+            self.assertTrue(snap._legacy_push_enabled())
+            switch.write_text(
+                json.dumps({
+                    "enabled": True,
+                    "deliveryMode": "snapshot-mcp",
+                }),
+                encoding="utf-8",
+            )
+            self.assertFalse(
+                snap._legacy_push_enabled(),
+                "MCP 模式必须停止 Pi→Windows 的旧文字注入末端",
+            )
 
 
 if __name__ == "__main__":

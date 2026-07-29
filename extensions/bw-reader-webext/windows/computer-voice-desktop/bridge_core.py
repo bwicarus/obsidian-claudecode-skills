@@ -16,7 +16,8 @@ from urllib.parse import urlsplit
 import uuid
 
 
-DIRECT_CONFIG_CONTRACT = "reader-computer-voice-direct-config/3"
+DIRECT_CONFIG_CONTRACT = "reader-computer-voice-direct-config/4"
+LEGACY_V3_DIRECT_CONFIG_CONTRACT = "reader-computer-voice-direct-config/3"
 LEGACY_DIRECT_CONFIG_CONTRACT = "reader-computer-voice-direct-config/1"
 DIRECT_STATUS_CONTRACT = (
     "reader-computer-voice-direct-runtime-status/2"
@@ -35,6 +36,11 @@ FIXED_ALLOWED_TAILSCALE_USER_LOGIN = "bwicarus@gmail.com"
 FIXED_OUTPUT_SCOPE = "process-only"
 FIXED_APP_KIND = "codex-desktop"
 FIXED_SHORTCUT = "Ctrl+Shift+C"
+CONTEXT_DELIVERY_LEGACY = "legacy-inject"
+CONTEXT_DELIVERY_SNAPSHOT = "snapshot-mcp"
+CONTEXT_DELIVERY_MODES = frozenset(
+    {CONTEXT_DELIVERY_LEGACY, CONTEXT_DELIVERY_SNAPSHOT}
+)
 DEFAULT_ALLOWED_ORIGINS = ("https://bwicarus.taile44d0c.ts.net",)
 ONLINE_STATES = frozenset(
     {
@@ -78,11 +84,19 @@ DIRECT_CONFIG_KEYS = frozenset(
         "outputScope",
         "appKind",
         "runtimeStatusPath",
+        "contextDeliveryMode",
     }
+)
+LEGACY_V3_DIRECT_CONFIG_KEYS = (
+    DIRECT_CONFIG_KEYS - {"contextDeliveryMode"}
 )
 LEGACY_V1_DIRECT_CONFIG_KEYS = (
     DIRECT_CONFIG_KEYS
-    - {"virtualMicrophoneRenderEndpointId", "virtualSpeakerRenderEndpointId"}
+    - {
+        "virtualMicrophoneRenderEndpointId",
+        "virtualSpeakerRenderEndpointId",
+        "contextDeliveryMode",
+    }
     | {
         "microphoneEndpointId",
         "pairingCodeHash",
@@ -351,6 +365,15 @@ def validate_direct_config(
     *,
     expected_runtime_status: Path | None = None,
 ) -> dict[str, Any]:
+    if (
+        value.get("contract") == LEGACY_V3_DIRECT_CONFIG_CONTRACT
+        and set(value) == LEGACY_V3_DIRECT_CONFIG_KEYS
+    ):
+        value = {
+            **value,
+            "contract": DIRECT_CONFIG_CONTRACT,
+            "contextDeliveryMode": CONTEXT_DELIVERY_LEGACY,
+        }
     keys = set(value)
     if keys != DIRECT_CONFIG_KEYS:
         raise BridgeError("直连配置字段不完整或包含未知字段。")
@@ -391,6 +414,9 @@ def validate_direct_config(
         raise BridgeError("禁止使用全系统输出回退。")
     if value.get("appKind") != FIXED_APP_KIND:
         raise BridgeError("目标应用类型不在本机允许列表中。")
+    context_delivery_mode = value.get("contextDeliveryMode")
+    if context_delivery_mode not in CONTEXT_DELIVERY_MODES:
+        raise BridgeError("上下文交付模式无效。")
     runtime_path = _validate_runtime_path(value.get("runtimeStatusPath"))
     if (
         expected_runtime_status is not None
@@ -405,6 +431,7 @@ def validate_direct_config(
         "virtualSpeakerRenderEndpointId": virtual_speaker,
         "allowedOrigins": list(origins),
         "runtimeStatusPath": runtime_path,
+        "contextDeliveryMode": context_delivery_mode,
     }
 
 
@@ -445,6 +472,7 @@ def build_direct_config(
     allowed_origins: Sequence[str] = DEFAULT_ALLOWED_ORIGINS,
     local_opt_in: bool = True,
     experimental_single_user_mode: bool = True,
+    context_delivery_mode: str = CONTEXT_DELIVERY_LEGACY,
 ) -> dict[str, Any]:
     virtual_microphone, virtual_speaker = (
         _validate_virtual_render_endpoints(
@@ -454,6 +482,8 @@ def build_direct_config(
     )
     if experimental_single_user_mode is not True:
         raise BridgeError("单用户实验模式状态无效。")
+    if context_delivery_mode not in CONTEXT_DELIVERY_MODES:
+        raise BridgeError("上下文交付模式无效。")
     origins = list(allowed_origins)
     if not origins or not all(_is_valid_origin(origin) for origin in origins):
         raise BridgeError("Reader HTTPS 来源白名单无效。")
@@ -472,6 +502,7 @@ def build_direct_config(
         "outputScope": FIXED_OUTPUT_SCOPE,
         "appKind": FIXED_APP_KIND,
         "runtimeStatusPath": str(runtime_status_path.resolve()),
+        "contextDeliveryMode": context_delivery_mode,
     }
     return validate_direct_config(value)
 
@@ -484,6 +515,7 @@ def save_enabled_config(
     allowed_origins: Sequence[str] = DEFAULT_ALLOWED_ORIGINS,
     active_render_endpoints: Sequence[RenderEndpoint] | None = None,
     allow_legacy_migration: bool = False,
+    context_delivery_mode: str | None = None,
 ) -> dict[str, Any]:
     if not paths.native_host.is_file():
         raise BridgeError(f"直连代理不存在：{paths.native_host}")
@@ -517,12 +549,22 @@ def save_enabled_config(
             raise BridgeError(
                 "现有直连配置无效；拒绝静默覆盖。"
             )
+    selected_context_delivery_mode = (
+        context_delivery_mode
+        if context_delivery_mode is not None
+        else (
+            str(previous["contextDeliveryMode"])
+            if previous is not None
+            else CONTEXT_DELIVERY_LEGACY
+        )
+    )
     value = build_direct_config(
         virtual_microphone.endpoint_id,
         virtual_speaker.endpoint_id,
         paths.runtime_status,
         allowed_origins=allowed_origins,
         local_opt_in=True,
+        context_delivery_mode=selected_context_delivery_mode,
     )
     _atomic_write_json(paths.direct_config, value)
     return value

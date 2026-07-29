@@ -109,6 +109,10 @@ PDF `reader.js` 也是生成物，唯一源码在 `_server_deploy/static/pdf/rea
   目录明确声明相应服务层时出现。
 - `_server_deploy/mcp_server.py` 是薄门面，业务逻辑仍在应用 API/领域服务。MCP 客户端门禁与
   MCP→webapp 身份 token 职责不同，任何凭据都不得写进本文、页面或日志。
+- Windows `snapshot-mcp` 是独立实验末端，不是 Pi `mcp_server.py` 的缓存：Pi 继续提供
+  active/journal，PWA 经电脑语音的固定 WSS 直连更新 Windows 本地快照，客户端只通过
+  `reader_context_snapshot` 按需读取；与旧 voice-typist 注入互斥。入口与回滚合同见
+  [电脑直连音频桥](reader-computer-audio-bridge.md#实验上下文末端2026-07-30)。
 - 内容脚本和页面只能调用固定 operation/schema 的桥；不得退化成任意
   URL/method/body fetch proxy。
 - `reader_bridge.py` 的 `open_page` 当前只写续读位置，不会驱动已经打开的页面实时跳转；
@@ -124,35 +128,18 @@ MCP/OAuth/端口与 smoke 见 [MCP 服务](mcp-server.md)。
 
 ## 6. 当前验证证据与可靠性边界
 
-当前 0.2.58 不可变候选的本地证据：
+不要在本文抄写候选版本、测试计数或固定哈希；它们会过期。现场证据用：
 
-- Node reader contracts：512/512。
-- Python 全量：667/667，skip 14。
-- Chromium：`test_review_candidates.py`、`test_card_favorite_payload.py`、
-  `test_pinned_anki_selection.py`、`test_card_drag.py` 均通过。
-- `handoff_check.py`：errors 0；唯一 warning 是长期脏工作区。
-- release pipeline：18/18；preflight 为 READY。
+```bash
+python3 extensions/bw-reader-webext/handoff_check.py
+node --test tests/reader_contract/*.test.mjs
+python3 -m unittest discover -s tests -p 'test_*.py'
+```
 
-当前 Windows 固定测试机 Tailscale ping 与 SSH 22 超时，故尚未把 0.2.58 装入固定
-unpacked 目录，也未完成用户人工视觉验收；这些本地自动证据不能替代该门禁。
-
-Windows 固定独立环境证实：
-
-- service worker 与 unpacked manifest 都是 0.2.57；
-- 统一卡先正面、翻面后四级评分，稳定 ID 为 `anki_card_9257`；
-- 拖到网页后保留 Anki/source 元数据，长按使侧栏和页面副本同步选中；
-- 收藏结构化 payload 可接受，页面卡随文档原生滚动；
-- 普通网页点击不被遮挡，复习 workspace 与下方普通聊天同时存在；
-- 测试后数据已清理，计划任务 `Ready`，专用 Chrome 进程与 9222 均为 0。
-
-尚未由本候选证实：
-
-- 0.2.58 同版本 PWA 四书接管与 fallback 人工验收；
-- Surface Pen 物理笔；
-- 两台真实设备直连/服务端 fallback；
-- registry digest 跨版本迁移；
-- AnkiConnect 已执行但 receipt 未完成时的自动对账；
-- 多用户场景下全局 Anki receipt 的账户分区。
+当前候选、人工验收、发布、回滚及真实设备边界只看
+[当前协作状态](reader-collaboration-status.md) 的最新登记和
+[扩展交接](reader-extension-handoff.md) 的现场命令。自动测试不能替代 Surface Pen、
+双真实设备、registry 跨代迁移或需验收档的用户视觉与交互门禁。
 
 这些边界不得写成“已完成”。
 

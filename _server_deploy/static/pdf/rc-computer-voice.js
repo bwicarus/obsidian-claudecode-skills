@@ -27,6 +27,12 @@
   var HEARTBEAT_TIMEOUT_MS = 15000;
   var START_GESTURE_LEASE_TTL_MS = 5000;
   var OUTGOING_CONTEXT_CONTRACT = "reader-outgoing-context/1";
+  var ACTIVE_READING_CONTRACT = "reader-active-reading/1";
+  var CONTEXT_DELIVERY_LEGACY = "legacy-inject";
+  var CONTEXT_DELIVERY_SNAPSHOT = "snapshot-mcp";
+  var ACTIVE_READING_POLL_MS = 250;
+  var ACTIVE_READING_HEARTBEAT_MS = 60000;
+  var SNAPSHOT_RECONNECT_MS = 1000;
   var CONTEXT_BOOTSTRAP_LIMIT = 500;
   var CONTEXT_LIVE_LIMIT = 32;
   var CONTEXT_LIVE_WAIT_S = 20;
@@ -78,6 +84,10 @@
   // It is never presented as an ACK and is not persisted to page storage.
   var lastContextResumeCursor = null;
   var contextPumpGeneration = 0;
+  var contextDeliveryMode = null;
+  var snapshotLink = null;
+  var snapshotLinkGeneration = 0;
+  var snapshotReconnectTimer = null;
   var MICROPHONE_WORKLET =
     'class BWMicCapture extends AudioWorkletProcessor{' +
     'process(i){var c=i[0]&&i[0][0];if(c)this.port.postMessage(c.slice(0));' +
@@ -1285,6 +1295,87 @@
     }).then(normalizeHello);
   }
 
+  function normalizeContextMode(value) {
+    exactObject(value, ["mode"], [], "CONTEXT-MODE 响应");
+    if (
+      value.mode !== CONTEXT_DELIVERY_LEGACY &&
+      value.mode !== CONTEXT_DELIVERY_SNAPSHOT
+    ) {
+      throw directError(
+        "Windows 上下文交付模式无效",
+        "BW_READER_CONTEXT_DELIVERY_MODE_INVALID",
+        false
+      );
+    }
+    contextDeliveryMode = value.mode;
+    return value.mode;
+  }
+
+  function queryContextMode(channel) {
+    return channel.request("context-mode", {}).then(normalizeContextMode);
+  }
+
+  function contextSyncEnabled() {
+    try {
+      return !!(
+        RC.ctxSync &&
+        typeof RC.ctxSync.enabled === "function" &&
+        RC.ctxSync.enabled()
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function setServerContextDeliveryMode(mode) {
+    if (!contextSyncEnabled()) return Promise.resolve(null);
+    var fetcher = window.__bwReaderFetch;
+    if (typeof fetcher !== "function" && typeof window.fetch === "function") {
+      fetcher = window.fetch.bind(window);
+    }
+    if (typeof fetcher !== "function") {
+      return Promise.reject(directError(
+        "Reader 缺少上下文模式同步能力",
+        "BW_READER_CONTEXT_MODE_FETCH_UNAVAILABLE",
+        true
+      ));
+    }
+    return Promise.resolve(fetcher("/pdf/api/context-sync", {
+      method: "POST",
+      credentials: "same-origin",
+      cache: "no-store",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        enabled: true,
+        deliveryMode: mode,
+      }),
+    })).then(function (response) {
+      if (!response || response.ok !== true ||
+          typeof response.json !== "function") {
+        throw directError(
+          "Reader 上下文交付模式写入失败",
+          "BW_READER_CONTEXT_MODE_FETCH",
+          true
+        );
+      }
+      return response.json();
+    }).then(function (value) {
+      if (
+        !plainObject(value) ||
+        value.ok !== true ||
+        value.enabled !== true ||
+        value.deliveryMode !== mode
+      ) {
+        throw directError(
+          "Reader 上下文交付模式回执无效",
+          "BW_READER_CONTEXT_MODE_ACK",
+          false
+        );
+      }
+      return value;
+    });
+  }
+
   function openDirect(options, onCreate) {
     var channel = new DirectSocket(DIRECT_ENDPOINT, options);
     if (typeof onCreate === "function") onCreate(channel);
@@ -1352,8 +1443,11 @@
       promise: null,
     };
     availabilityAttempt = attempt;
-    attempt.promise = openDirect(null, function (channel) {
+    var yieldedSnapshot = !!snapshotLink;
+    attempt.promise = stopSnapshotLink().then(function () {
+      return openDirect(null, function (channel) {
       attempt.channel = channel;
+      });
     }).then(function (channel) {
       if (attempt.cancelled) {
         channel.close();
@@ -1380,7 +1474,9 @@
         : Promise.resolve();
       attempt.channel = null;
       if (availabilityAttempt === attempt) availabilityAttempt = null;
-      return closePromise;
+      return closePromise.then(function () {
+        if (yieldedSnapshot) scheduleSnapshotReconnect(0);
+      });
     });
     return attempt.promise;
   }
@@ -2123,14 +2219,16 @@
   }
 
   function contextPumpAlive(state, pump) {
+    var ownsLink = state && state.contextOnly === true
+      ? snapshotLink === state
+      : active === state && state.started;
     return !!(
       state &&
       pump &&
       !pump.stopped &&
       state.contextPump === pump &&
-      state.started &&
       !state.stopped &&
-      active === state &&
+      ownsLink &&
       pump.generation === contextPumpGeneration
     );
   }
@@ -2149,16 +2247,26 @@
     }
     pump.queue.length = 0;
     pump.pendingEvent = null;
+    stopActiveReadingPump(state);
   }
 
   function warnAndStopContextPump(state, pump, error) {
     if (!contextPumpAlive(state, pump)) return;
     stopContextPump(state);
+    if (state.contextOnly === true) {
+      contextDeliveryMode = null;
+      if (snapshotLink === state) snapshotLink = null;
+      if (state.channel) state.channel.close();
+      scheduleSnapshotReconnect(SNAPSHOT_RECONNECT_MS);
+    }
     emitStatus({
       state: "warning",
       sessionId: state.sessionId,
-      message: error && error.message ||
-        "Reader 上下文桥接已停止；音频通话继续",
+      message: error && error.message || (
+        state.contextOnly === true
+          ? "Windows 本地 Reader 快照连接已停止"
+          : "Reader 上下文桥接已停止；音频通话继续"
+      ),
       code: error && error.code ||
         "BW_COMPUTER_VOICE_CONTEXT_FAILED",
     });
@@ -2415,6 +2523,487 @@
     runContextPump(state, pump);
   }
 
+  function localActiveReadingExpectation() {
+    var source;
+    try {
+      source = RC.ctxSync && typeof RC.ctxSync._state === "function"
+        ? RC.ctxSync._state().pend
+        : null;
+    } catch (_) {
+      source = null;
+    }
+    if (!plainObject(source) || typeof source.kind !== "string") return null;
+    var file = source.file || source.url;
+    if (typeof file !== "string" || !file || file.length > 4096) return null;
+    var page = source.member_pos;
+    if (page === undefined || page === null) page = source.pos;
+    if (
+      page !== null &&
+      page !== undefined &&
+      typeof page !== "number" &&
+      typeof page !== "string"
+    ) {
+      page = null;
+    }
+    return {
+      kind: source.kind,
+      file: file,
+      page: page === undefined ? null : page,
+      selectionPresent:
+        Object.prototype.hasOwnProperty.call(source, "selection"),
+      selection: typeof source.selection === "string"
+        ? source.selection.trim().slice(0, 400)
+        : "",
+    };
+  }
+
+  function sameActiveScalar(left, right) {
+    if (left === null || left === undefined) {
+      return right === null || right === undefined;
+    }
+    if (right === null || right === undefined) return false;
+    return String(left) === String(right);
+  }
+
+  function normalizeServerActiveReading(value, expected) {
+    if (
+      !plainObject(value) ||
+      value.ok !== true ||
+      value.enabled !== true ||
+      value.fresh !== true ||
+      !plainObject(value.active)
+    ) {
+      return null;
+    }
+    var source = value.active;
+    if (
+      source.kind !== expected.kind ||
+      !sameActiveScalar(
+        source.kind === "web" ? source.url : source.file,
+        expected.file
+      ) ||
+      !sameActiveScalar(source.pos, expected.page)
+    ) {
+      return null;
+    }
+    if (expected.selectionPresent) {
+      if (
+        !Object.prototype.hasOwnProperty.call(source, "selection") ||
+        typeof source.selection !== "string" ||
+        source.selection.trim().slice(0, 400) !== expected.selection
+      ) {
+        return null;
+      }
+    }
+
+    var file = source.member || (
+      source.kind === "web" ? source.url : source.file
+    );
+    var page = source.member_pos;
+    if (page === undefined || page === null) page = source.pos;
+    if (
+      typeof file !== "string" ||
+      !file ||
+      file.length > 4096 ||
+      (
+        page !== null &&
+        page !== undefined &&
+        typeof page !== "number" &&
+        typeof page !== "string"
+      )
+    ) {
+      throw contextSchemaError(
+        "Reader 当前页面回执无效",
+        "BW_READER_ACTIVE_READING_SOURCE_INVALID"
+      );
+    }
+
+    var selectionState = "unknown";
+    var selection = null;
+    if (Object.prototype.hasOwnProperty.call(source, "selection")) {
+      var selectedText = typeof source.selection === "string"
+        ? source.selection.trim().slice(0, 400)
+        : "";
+      var anchoredToCurrentPage = true;
+      if (
+        source.sel_page !== undefined &&
+        source.sel_page !== null &&
+        source.pos !== undefined &&
+        source.pos !== null
+      ) {
+        anchoredToCurrentPage = sameActiveScalar(
+          source.sel_page,
+          source.pos
+        );
+      }
+      if (selectedText && anchoredToCurrentPage) {
+        selectionState = "active";
+        selection = selectedText;
+      } else {
+        selectionState = "cleared";
+      }
+    }
+    return {
+      kind: source.kind,
+      file: file,
+      title: typeof source.title === "string"
+        ? source.title.slice(0, 1024)
+        : null,
+      page: page === undefined ? null : page,
+      selectionState: selectionState,
+      selection: selection,
+    };
+  }
+
+  function fetchCurrentActiveReading(expected) {
+    var fetcher = window.__bwReaderFetch;
+    if (typeof fetcher !== "function" && typeof window.fetch === "function") {
+      fetcher = window.fetch.bind(window);
+    }
+    if (typeof fetcher !== "function") {
+      return Promise.reject(directError(
+        "Reader 缺少当前页面读取能力",
+        "BW_READER_ACTIVE_READING_FETCH_UNAVAILABLE",
+        true
+      ));
+    }
+    // @interaction context.active.read
+    return Promise.resolve(fetcher("/pdf/api/active-reading", {
+      method: "GET",
+      credentials: "same-origin",
+      cache: "no-store",
+    })).then(function (response) {
+      if (!response || response.ok !== true ||
+          typeof response.json !== "function") {
+        throw directError(
+          "Reader 当前页面读取失败",
+          "BW_READER_ACTIVE_READING_FETCH",
+          true
+        );
+      }
+      return response.json();
+    }).then(function (value) {
+      return normalizeServerActiveReading(value, expected);
+    });
+  }
+
+  function activeReadingPumpAlive(state) {
+    return !!(
+      state &&
+      state.activeReadingPump &&
+      !state.activeReadingPump.stopped &&
+      contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT &&
+      (
+        state.contextOnly === true
+          ? snapshotLink === state
+          : active === state && state.started
+      )
+    );
+  }
+
+  function stopActiveReadingPump(state) {
+    var pump = state && state.activeReadingPump;
+    if (!pump || pump.stopped) return;
+    pump.stopped = true;
+    if (pump.timer) {
+      clearTimeout(pump.timer);
+      pump.timer = null;
+    }
+    pump.inFlight = false;
+  }
+
+  function scheduleActiveReadingPump(state, delay) {
+    var pump = state && state.activeReadingPump;
+    if (!activeReadingPumpAlive(state) || pump.timer) return;
+    pump.timer = setTimeout(function () {
+      pump.timer = null;
+      runActiveReadingPump(state);
+    }, delay);
+  }
+
+  function normalizeActiveReadingAck(value, state) {
+    exactObject(
+      value,
+      ["sessionId", "revision", "outcome"],
+      [],
+      "ACTIVE-READING 响应"
+    );
+    if (
+      safeId(value.sessionId, "sessionId") !== state.sessionId ||
+      !Number.isSafeInteger(value.revision) ||
+      value.revision < 1 ||
+      (value.outcome !== "accepted" && value.outcome !== "duplicate")
+    ) {
+      throw contextSchemaError(
+        "Windows ACTIVE-READING 回执无效",
+        "BW_READER_ACTIVE_READING_ACK"
+      );
+    }
+    return value;
+  }
+
+  function runActiveReadingPump(state) {
+    var pump = state && state.activeReadingPump;
+    if (!activeReadingPumpAlive(state) || pump.inFlight) return;
+    var expected = localActiveReadingExpectation();
+    if (!expected) {
+      scheduleActiveReadingPump(state, ACTIVE_READING_POLL_MS);
+      return;
+    }
+    var signature = JSON.stringify(expected);
+    var now = Date.now();
+    if (
+      signature === pump.lastSignature &&
+      now - pump.lastSentAt < ACTIVE_READING_HEARTBEAT_MS
+    ) {
+      scheduleActiveReadingPump(state, ACTIVE_READING_POLL_MS);
+      return;
+    }
+    pump.inFlight = true;
+    fetchCurrentActiveReading(expected).then(function (current) {
+      if (!activeReadingPumpAlive(state)) return null;
+      var latest = localActiveReadingExpectation();
+      if (!latest || JSON.stringify(latest) !== signature) {
+        return null;
+      }
+      if (!current) return null;
+      var activeReading = Object.assign({}, current, {
+        observedAtEpochMs: Date.now(),
+      });
+      return state.channel.request("active-reading", {
+        sessionId: state.sessionId,
+        activeContract: ACTIVE_READING_CONTRACT,
+        active: activeReading,
+      });
+    }).then(function (value) {
+      if (value === null) {
+        pump.inFlight = false;
+        scheduleActiveReadingPump(state, ACTIVE_READING_POLL_MS);
+        return;
+      }
+      normalizeActiveReadingAck(value, state);
+      if (!activeReadingPumpAlive(state)) return;
+      pump.lastSignature = signature;
+      pump.lastSentAt = Date.now();
+      pump.inFlight = false;
+      scheduleActiveReadingPump(state, ACTIVE_READING_POLL_MS);
+    }).catch(function (error) {
+      pump.inFlight = false;
+      if (!activeReadingPumpAlive(state)) return;
+      if (error && error.retryable === true) {
+        scheduleActiveReadingPump(state, CONTEXT_RETRY_MS);
+        return;
+      }
+      warnAndStopContextPump(state, state.contextPump, error);
+    });
+  }
+
+  function startActiveReadingPump(state) {
+    stopActiveReadingPump(state);
+    state.activeReadingPump = {
+      stopped: false,
+      timer: null,
+      inFlight: false,
+      lastSignature: null,
+      lastSentAt: 0,
+    };
+    runActiveReadingPump(state);
+  }
+
+  function snapshotLinkWanted() {
+    return !!(
+      selectedEngineKnown &&
+      computerVoiceSelected &&
+      contextSyncEnabled() &&
+      !active &&
+      !dialPending
+    );
+  }
+
+  function stopSnapshotLink() {
+    if (snapshotReconnectTimer) {
+      clearTimeout(snapshotReconnectTimer);
+      snapshotReconnectTimer = null;
+    }
+    var state = snapshotLink;
+    snapshotLink = null;
+    snapshotLinkGeneration += 1;
+    if (!state) return Promise.resolve();
+    state.stopped = true;
+    stopContextPump(state);
+    var closePromise = state.channel
+      ? state.channel.close()
+      : Promise.resolve();
+    return Promise.all([
+      closePromise,
+      Promise.resolve(state.promise).catch(function () {}),
+    ]).then(function () {});
+  }
+
+  function clearSnapshotState(state) {
+    if (
+      !state ||
+      !state.channel ||
+      typeof state.sessionId !== "string"
+    ) {
+      return Promise.resolve(null);
+    }
+    return state.channel.request("context-clear", {
+      sessionId: state.sessionId,
+    }).then(function (value) {
+      return normalizeActiveReadingAck(value, state);
+    });
+  }
+
+  function clearSnapshotLink() {
+    var state = snapshotLink;
+    if (!state) return stopSnapshotLink();
+    stopContextPump(state);
+    return clearSnapshotState(state).catch(function (error) {
+      emitStatus({
+        state: "warning",
+        message: error && error.message ||
+          "Windows 本地 Reader 快照未能立即清空",
+        code: error && error.code ||
+          "BW_READER_CONTEXT_SNAPSHOT_CLEAR_FAILED",
+      });
+      return null;
+    }).then(function () {
+      return stopSnapshotLink();
+    });
+  }
+
+  function clearActiveSnapshotState(state) {
+    if (
+      !state ||
+      !state.started ||
+      state.contextDeliveryMode !== CONTEXT_DELIVERY_SNAPSHOT
+    ) {
+      return Promise.resolve(null);
+    }
+    stopContextPump(state);
+    return clearSnapshotState(state).catch(function (error) {
+      emitStatus({
+        state: "warning",
+        sessionId: state.sessionId,
+        message: error && error.message ||
+          "Windows 本地 Reader 快照未能立即清空",
+        code: error && error.code ||
+          "BW_READER_CONTEXT_SNAPSHOT_CLEAR_FAILED",
+      });
+      return null;
+    });
+  }
+
+  function scheduleSnapshotReconnect(delay) {
+    if (snapshotReconnectTimer || !snapshotLinkWanted()) return;
+    snapshotReconnectTimer = setTimeout(function () {
+      snapshotReconnectTimer = null;
+      reconcileSnapshotLink();
+    }, delay);
+  }
+
+  function reconcileSnapshotLink() {
+    if (!snapshotLinkWanted()) {
+      return stopSnapshotLink();
+    }
+    if (snapshotLink) return Promise.resolve(snapshotLink);
+    var generation = ++snapshotLinkGeneration;
+    var state = {
+      channel: null,
+      sessionId: randomSession().id,
+      contextOnly: true,
+      stopped: false,
+      contextPump: null,
+      activeReadingPump: null,
+      generation: generation,
+    };
+    snapshotLink = state;
+    var work = openDirect({
+      onFatal: function (error) {
+        if (snapshotLink !== state || state.stopped) return;
+        contextDeliveryMode = null;
+        state.stopped = true;
+        snapshotLink = null;
+        stopContextPump(state);
+        emitStatus({
+          state: "warning",
+          message: error && error.message ||
+            "Windows 本地 Reader 快照连接已断开",
+          code: error && error.code ||
+            "BW_READER_CONTEXT_SNAPSHOT_DISCONNECTED",
+        });
+        scheduleSnapshotReconnect(SNAPSHOT_RECONNECT_MS);
+      },
+    }, function (channel) {
+      state.channel = channel;
+    }).then(function (channel) {
+      if (
+        state.stopped ||
+        snapshotLink !== state ||
+        generation !== snapshotLinkGeneration
+      ) {
+        channel.close();
+        return null;
+      }
+      state.channel = channel;
+      return queryContextMode(channel).then(function (mode) {
+        var clearBeforeLegacy = mode === CONTEXT_DELIVERY_LEGACY
+          ? clearSnapshotState(state)
+          : Promise.resolve(null);
+        return clearBeforeLegacy.then(function () {
+          return setServerContextDeliveryMode(mode);
+        }).then(function () { return mode; });
+      });
+    }).then(function (mode) {
+      if (mode === null) return null;
+      if (mode === CONTEXT_DELIVERY_LEGACY) {
+        state.stopped = true;
+        if (snapshotLink === state) snapshotLink = null;
+        return state.channel.close().then(function () { return null; });
+      }
+      return state.channel.request("context-open", {
+        sessionId: state.sessionId,
+      }).then(function (value) {
+        exactObject(
+          value,
+          ["sessionId", "state", "mode"],
+          [],
+          "CONTEXT-OPEN 响应"
+        );
+        if (
+          value.sessionId !== state.sessionId ||
+          value.state !== "context-only" ||
+          value.mode !== CONTEXT_DELIVERY_SNAPSHOT
+        ) {
+          throw contextSchemaError(
+            "Windows CONTEXT-OPEN 回执无效",
+            "BW_READER_CONTEXT_OPEN_ACK"
+          );
+        }
+        if (snapshotLink !== state || state.stopped) return null;
+        startContextPump(state);
+        startActiveReadingPump(state);
+        emitStatus({
+          state: "context-ready",
+          message: "Windows 本地 Reader 快照已连接",
+        });
+        return state;
+      });
+    }).catch(function (error) {
+      if (snapshotLink === state) snapshotLink = null;
+      state.stopped = true;
+      stopContextPump(state);
+      if (state.channel) state.channel.close();
+      if (snapshotLinkWanted()) {
+        scheduleSnapshotReconnect(SNAPSHOT_RECONNECT_MS);
+      }
+      return null;
+    });
+    state.promise = work;
+    return work;
+  }
+
   function clearHeartbeat(state) {
     if (!state) return;
     if (state.heartbeatTimer) {
@@ -2510,6 +3099,7 @@
         code: error && error.code || "BW_COMPUTER_VOICE_DIRECT_START_FAILED",
       });
     }
+    scheduleSnapshotReconnect(SNAPSHOT_RECONNECT_MS);
   }
 
   function handlePcmFrame(state, buffer) {
@@ -2636,13 +3226,18 @@
       uplinkSequence: 0,
       uplinkTimestampBase: Math.floor(Date.now() * 1000),
       contextPump: null,
+      activeReadingPump: null,
+      contextDeliveryMode: null,
       pcm: {
         1: { nextSequence: 0, seen: false, timestampLow: 0, timestampHigh: 0 },
       },
     };
     surface.ownerState = state;
     active = state;
-    var availabilityClosed = cancelAvailabilityForStart();
+    var availabilityClosed = Promise.all([
+      cancelAvailabilityForStart(),
+      stopSnapshotLink(),
+    ]);
     emitStatus({
       state: "checking",
       sessionId: state.sessionId,
@@ -2699,6 +3294,14 @@
         );
       }
       state.channel = channel;
+      return queryContextMode(channel).then(function (mode) {
+        state.contextDeliveryMode = mode;
+        if (!contextSyncEnabled()) return null;
+        return setServerContextDeliveryMode(mode);
+      }).then(function () {
+        return channel;
+      });
+    }).then(function (channel) {
       // Windows capture pump may enqueue its first frame before the START
       // result task is delivered. This gate opens immediately before the one
       // authorized START send, never during HELLO/STATUS.
@@ -2752,7 +3355,18 @@
           false
         );
       }
-      startContextPump(state);
+      if (
+        state.contextDeliveryMode === CONTEXT_DELIVERY_LEGACY ||
+        contextSyncEnabled()
+      ) {
+        startContextPump(state);
+        if (
+          state.contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT &&
+          contextSyncEnabled()
+        ) {
+          startActiveReadingPump(state);
+        }
+      }
       if (state.surface.context.state !== "running") {
         state.audioBlocked = true;
         emitStatus({
@@ -2784,6 +3398,7 @@
     dialPending = false;
     if (!state) {
       emitStatus({ state: "stopped", message: "电脑客户端已停止" });
+      scheduleSnapshotReconnect(0);
       return Promise.resolve({ ok: true, state: "stopped" });
     }
     state.cancelled = true;
@@ -2802,6 +3417,7 @@
         state: "stopped",
         message: "电脑桥接启动已取消；若 Codex Voice 已亮起，请在 Windows 退出",
       });
+      scheduleSnapshotReconnect(SNAPSHOT_RECONNECT_MS);
       return Promise.resolve({ ok: true, state: "stopped" });
     }
     return Promise.resolve().then(function () {
@@ -2832,6 +3448,7 @@
         state: "stopped",
         message: "电脑桥接已停止；请确认 Windows 的 Codex Voice 已退出",
       });
+      scheduleSnapshotReconnect(SNAPSHOT_RECONNECT_MS);
       return { ok: true, state: "stopped" };
     });
   }
@@ -2909,6 +3526,7 @@
     selectedEngineKnown = false;
     computerVoiceSelected = false;
     clearPreparedSurface(true);
+    stopSnapshotLink();
     return revision;
   }
 
@@ -2932,7 +3550,13 @@
     selectedEngineRevision = revision;
     selectedEngineKnown = true;
     computerVoiceSelected = engine === "computer_client";
-    if (!computerVoiceSelected) clearPreparedSurface(true);
+    if (!computerVoiceSelected) {
+      clearPreparedSurface(true);
+      clearActiveSnapshotState(active);
+      clearSnapshotLink();
+    } else {
+      reconcileSnapshotLink();
+    }
     return computerVoiceSelected;
   }
 
@@ -2941,6 +3565,7 @@
     if (!dialPending && !active && !computerVoiceSelected) {
       clearPreparedSurface(true);
     }
+    reconcileSnapshotLink();
     return dialPending;
   }
 
@@ -2948,8 +3573,26 @@
     clearPreparedSurface(true);
   }
 
+  function contextSyncChanged() {
+    if (
+      active &&
+      active.started &&
+      active.contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT
+    ) {
+      if (contextSyncEnabled()) {
+        startContextPump(active);
+        startActiveReadingPump(active);
+        return Promise.resolve(active);
+      }
+      return clearActiveSnapshotState(active);
+    }
+    if (!contextSyncEnabled()) return clearSnapshotLink();
+    return reconcileSnapshotLink();
+  }
+
   function abortForPageExit() {
     clearPreparedSurface(true);
+    clearSnapshotLink();
     var state = active;
     active = null;
     dialPending = false;
@@ -3050,6 +3693,7 @@
     isSelectedEngineRevisionCurrent: isSelectedEngineRevisionCurrent,
     setSelectedEngine: setSelectedEngine,
     setDialPending: setDialPending,
+    contextSyncChanged: contextSyncChanged,
     cancelPreparedGesture: cancelPreparedGesture,
     registerPhoneButton: registerPhoneButton,
     startFromUserGesture: startFromUserGesture,

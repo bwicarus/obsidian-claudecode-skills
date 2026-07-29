@@ -1076,6 +1076,9 @@ if (window.__bwPwaProviderOnly) return;
       if (msg) { msg.style.display = 'none'; msg.textContent = ''; }
       RC.ctxSync.setEnabled(on).then(function (r) {
         if (!r || !r.ok) throw new Error((r && r.error) || 'server refused');
+        if (RC.computerVoice && typeof RC.computerVoice.contextSyncChanged === 'function') {
+          RC.computerVoice.contextSyncChanged();
+        }
         if (!on) { toast('已关闭双向上下文同步'); return; }
         // 开启后立刻上报一次当前状态:否则要等到下次翻页,快照会先空窗一段时间
         try {
@@ -1096,6 +1099,9 @@ if (window.__bwPwaProviderOnly) return;
         // 服务端没写成 → 前端和 Pi 会各说各话(前端以为关了、后台还在推),必须回滚 + 明说
         cb.checked = !on;
         try { localStorage.setItem(RC.ctxSync.LS_KEY, !on ? '1' : '0'); } catch (_) {}
+        if (RC.computerVoice && typeof RC.computerVoice.contextSyncChanged === 'function') {
+          RC.computerVoice.contextSyncChanged();
+        }
         if (msg) { msg.textContent = '没能同步到服务器，开关已回滚：' + (e && e.message ? e.message : '网络错误'); msg.style.display = ''; }
       });
     });

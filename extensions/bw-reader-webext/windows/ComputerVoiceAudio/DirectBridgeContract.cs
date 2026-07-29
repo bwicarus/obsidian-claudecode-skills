@@ -6,6 +6,8 @@ internal static class DirectBridgeContract
 {
     internal const string Contract = "reader-computer-voice-direct/1";
     internal const string ConfigContract =
+        "reader-computer-voice-direct-config/4";
+    internal const string LegacyConfigContract =
         "reader-computer-voice-direct-config/3";
     internal const string RuntimeStatusContract =
         "reader-computer-voice-direct-runtime-status/2";
@@ -48,6 +50,15 @@ internal static class DirectBridgeContract
         && value.All(character =>
             character is >= '0' and <= '9'
             or >= 'a' and <= 'f');
+}
+
+internal static class DirectContextDeliveryMode
+{
+    internal const string LegacyInject = "legacy-inject";
+    internal const string SnapshotMcp = "snapshot-mcp";
+
+    internal static bool IsSupported(string value) =>
+        value is LegacyInject or SnapshotMcp;
 }
 
 internal sealed class DirectProtocolException : Exception

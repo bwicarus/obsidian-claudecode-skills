@@ -7,7 +7,8 @@ Reader/PWA 与扩展路径：
   `eRender` endpoint；
 - Codex 进程树输出继续使用 Windows application process-loopback，经同一 WSS
   下行到 Reader；
-- Reader outgoing context 经 `CurrentUserOnly` named pipe 交给 voice-typist；
+- Reader outgoing context 按 strict config 二选一：经 `CurrentUserOnly` named
+  pipe 交给 voice-typist，或只写 Windows 本地快照供只读 MCP 按需读取；
 - 服务启动、HELLO、STATUS、endpoint 枚举和自检均无启动副作用；只有通过全部本地
   门禁的 START 才能启动 Codex、typist、媒体与一次语音快捷键。
 
@@ -27,7 +28,7 @@ direct v3 媒体路径。
 TLS/WSS 并反代固定路径 `/reader-computer-voice/v1`。C# 不修改 Tailscale、防火墙、
 默认音频设备、系统代理或应用音量路由。
 
-strict config contract 为 `reader-computer-voice-direct-config/3`，字段必须恰好为：
+strict config contract 为 `reader-computer-voice-direct-config/4`，字段必须恰好为：
 
 ```text
 contract
@@ -42,6 +43,7 @@ experimentalSingleUserMode
 outputScope
 appKind
 runtimeStatusPath
+contextDeliveryMode
 ```
 
 硬约束：
@@ -49,13 +51,15 @@ runtimeStatusPath
 - `listenHost` 必须逐字等于 `127.0.0.1`；
 - `experimentalSingleUserMode` 当前必须为 `true`；`false` 直接 fail closed；
 - `outputScope` 只能为 `process-only`，`appKind` 只能为 `codex-desktop`；
+- `contextDeliveryMode` 只能为 `legacy-inject` 或 `snapshot-mcp`；旧 `/3`
+  配置只兼容解释为前者，两条末端不同时运行；
 - A/B endpoint ID 必须非空、无控制字符、互不相同，并逐字传给
   `IMMDeviceEnumerator.GetDevice`；
 - 不存在 first/default endpoint、物理/RDP 麦克风或全系统输出 fallback；
 - config 不含 pairing code、客户端公钥、旧 `microphoneEndpointId` 或认证兼容字段。
 
 旧 `/1` 配置不由原生服务迁移。桌面控制面只能把它识别为
-`legacy-migration-required`，经本地显式确认后生成严格 `/3`。
+`legacy-migration-required`，经本地显式确认后生成严格 `/4`。
 
 ## 来源与身份边界
 
@@ -75,19 +79,27 @@ background 的固定 relay，不能把 URL、设备 ID、AUMID、进程、路径
 所有文本消息使用 `reader-computer-voice-direct/1`：
 
 ```json
-{"contract":"reader-computer-voice-direct/1","type":"hello|status|start|heartbeat|context|stop","requestId":"..."}
+{"contract":"reader-computer-voice-direct/1","type":"hello|status|context-mode|context-open|start|heartbeat|context|active-reading|context-clear|stop","requestId":"..."}
 ```
 
 - 新连接先发严格 `hello`，`protocolVersion` 必须为 `3`；成功后进入等待 START。
+- `context-mode` 只读返回该连接在 HELLO 时锁定的模式。`snapshot-mcp` 可用
+  `context-open` 建立无 START、无应用/采音/快捷键副作用的纯上下文连接；此阶段没有
+  30 秒 START deadline。
 - `status`、模型选择和刷新无副作用。
 - START 的 `sessionId` 为 `session-` 加 16 随机字节的 22 位无 padding base64url。
-- START 顺序为：
+- `legacy-inject` 的 START 顺序为：
   `localOptIn → A/B endpoint probe → ensure app → wait unique ready →
   attach B route observer → validate local realtimeVoice binding → start typist →
   start A render → start process-loopback → revalidate endpoint/media/binding →
   global shortcut → commit/pump`。
   每个副作用前都有取消围栏；B route observer 只观察公开 Core Audio session，
   不修改默认设备或应用路由，且“尚未观察到”不会阻止首次 START。
+- `snapshot-mcp` 使用同一条已验收音频顺序，但明确跳过 `start typist`；
+  `context` 与 `active-reading` 原子写
+  `runtime/reader-context-snapshot.json`，不调用 named pipe。
+- 关闭同步或切回 `legacy-inject` 时先发 `context-clear`；它只清掉本地页面/选区，
+  不启动或停止应用、音频、快捷键和 typist。
 - 当前 Codex 把 `realtimeVoice` 注册为 `os-global`；桥只接受当前用户
   `~/.codex/keybindings.json` 中唯一的 `Ctrl+Shift+C` 绑定，且不切换、置顶或校验
   Codex 前台窗口。动态 Electron 子进程增减不改变固定 packaged-app root 的身份；
@@ -106,6 +118,21 @@ background 的固定 relay，不能把 URL、设备 ID、AUMID、进程、路径
   运行时持续核对 owner 代次；C# 整体崩溃、PID 消失或复用时 typist 自退。managed
   模式不使用 10 分钟 idle 误杀，手工无 owner 启动仍保留 600 秒孤儿兜底。
 - 服务不猜测 Codex Voice UI 的 toggle 状态，不发送第二次快捷键冒充“退出 Voice”。
+
+## Windows 本地快照 MCP
+
+同一自包含 EXE 提供零额外运行时依赖的 stdio MCP：
+
+```powershell
+.\bw-computer-voice-audio.exe --reader-context-mcp --state `
+  C:\Users\bwica\bw-computer-voice-bridge\runtime\reader-context-snapshot.json
+```
+
+它只注册 `reader_context_snapshot`，不接受 mutation。服务进程在同一 MCP
+连接中保持 instance/call sequence，逐次读取原子快照；最新文件损坏时保留上一次有效
+revision。`active-reading` 超过三分钟则返回 `contextStatus=stale`，正文与选区不会作为
+当前内容返回。选区状态严格区分 `active`、`cleared`、`unknown`，取消选择或换页时不会
+沿用旧文本；新鲜度使用 Windows 收到心跳的时间，不信任 iPad 的墙上时钟。
 
 START 期间始终只有一个并发 `ReceiveAsync`。peer 在 START 回执前关闭会取消应用等待和
 媒体链；若预取到一条非 close 消息，只做单条有界缓存，START 结算后按原顺序处理。

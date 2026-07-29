@@ -101,7 +101,36 @@ internal static class Program
                     new WindowsDirectAppLauncher(),
                     new WindowsDirectMediaAdapter(
                         configStore.InstallationRoot),
-                    new NamedPipeDirectContextAdapter());
+                    new NamedPipeDirectContextAdapter(),
+                    new FileDirectSnapshotContextAdapter(
+                        Path.Combine(
+                            configStore.InstallationRoot,
+                            "runtime",
+                            FileDirectSnapshotContextAdapter
+                                .SnapshotFileName)));
+                return await server.RunAsync(CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            if (
+                args.Length == 3
+                && args[0] == "--reader-context-mcp"
+                && args[1] == "--state"
+            )
+            {
+                if (!Path.IsPathFullyQualified(args[2]))
+                {
+                    throw new DirectProtocolException(
+                        "BW_READER_CONTEXT_SNAPSHOT_PATH_INVALID",
+                        "Reader 本地快照必须使用绝对路径");
+                }
+                Console.InputEncoding = new System.Text.UTF8Encoding(
+                    encoderShouldEmitUTF8Identifier: false);
+                Console.OutputEncoding = new System.Text.UTF8Encoding(
+                    encoderShouldEmitUTF8Identifier: false);
+                ReaderContextMcpServer server = new(
+                    Path.GetFullPath(args[2]),
+                    Console.In,
+                    Console.Out);
                 return await server.RunAsync(CancellationToken.None)
                     .ConfigureAwait(false);
             }
@@ -176,6 +205,7 @@ internal static class Program
                 "--probe-direct-output-route --config <absolute-path>",
                 "--diagnose-direct-audio-no-start --config <absolute-path>",
                 "--direct-serve --config <absolute-path>",
+                "--reader-context-mcp --state <absolute-path>",
                 "Chrome Native Messaging origin (registered host only)",
             },
         }, JsonOptions));

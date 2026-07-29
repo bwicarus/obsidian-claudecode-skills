@@ -2649,6 +2649,8 @@ _CTX_SYNC_LOCK = __import__("threading").Lock()
 # 快照宁可说「未知」也不许拿历史记录里的旧书冒充当前(本次修复的核心约束)。
 _CTX_ACTIVE_FRESH_SEC = 180
 _CTX_HOSTS = {"pdf", "epub", "html", "web"}
+_CTX_DELIVERY_MODES = {"legacy-inject", "snapshot-mcp"}
+_CTX_DELIVERY_DEFAULT = "legacy-inject"
 
 
 def _ctx_sync_path(identity=None) -> Path:
@@ -2674,15 +2676,21 @@ def _ctx_write_json(path: Path, data: dict) -> None:
 
 @bp.route("/api/context-sync", methods=["GET", "POST"])
 def pdf_api_context_sync():
-    """双向上下文同步总开关(默认关)。GET → {ok, enabled, ts}; POST {enabled:bool} → 落盘。
+    """上下文同步总开关。deliveryMode 只选择末端，默认保持旧注入。
 
-    开启后同时允许两个方向;关闭时两个方向都停,并**立即清空活动状态**——否则关掉之后
-    快照还捧着最后一条 active 当「当前在读」,又变成本次要修的那种冒充。"""
+    legacy-inject:保留 Pi→Windows context.md 推送。
+    snapshot-mcp:Pi 仍接收 active/journal，但旧推送守护不再投递，最终走 PWA→Windows。
+    关闭时两个方向都停,并**立即清空活动状态**。"""
     if request.method == "GET":
         cfg = _reader_sidecar_json(_ctx_sync_path(), {}, dict)
         return jsonify({
             "ok": True,
             "enabled": bool(cfg.get("enabled")),
+            "deliveryMode": (
+                cfg.get("deliveryMode")
+                if cfg.get("deliveryMode") in _CTX_DELIVERY_MODES
+                else _CTX_DELIVERY_DEFAULT
+            ),
             "ts": cfg.get("ts") or 0,
         })
     body = request.get_json(silent=True) or {}
@@ -2693,8 +2701,21 @@ def pdf_api_context_sync():
         with _CTX_SYNC_LOCK:
             identity = _reader_storage_identity_current()
             with _reader_sidecar_store().lock(identity, "reader-context-sync"):
+                previous = _reader_sidecar_json(
+                    _ctx_sync_path(identity), {}, dict)
+                delivery_mode = body.get(
+                    "deliveryMode",
+                    previous.get(
+                        "deliveryMode",
+                        _CTX_DELIVERY_DEFAULT))
+                if delivery_mode not in _CTX_DELIVERY_MODES:
+                    return jsonify({
+                        "ok": False,
+                        "error": "invalid deliveryMode",
+                    }), 400
                 _ctx_write_json(_ctx_sync_path(identity), {
                     "enabled": enabled,
+                    "deliveryMode": delivery_mode,
                     "ts": int(time.time()),
                 })
             if not enabled:
@@ -2702,7 +2723,11 @@ def pdf_api_context_sync():
                     _ctx_write_json(_reader_active_path(identity), {})
     except Exception as ex:
         return jsonify({"ok": False, "error": str(ex)}), 500
-    return jsonify({"ok": True, "enabled": enabled})
+    return jsonify({
+        "ok": True,
+        "enabled": enabled,
+        "deliveryMode": delivery_mode,
+    })
 
 
 # ── 出向上下文:绘图版本 + 焦点(任务书 A5)。同样纯增量,只读墨迹 sidecar,不改写路径 ──

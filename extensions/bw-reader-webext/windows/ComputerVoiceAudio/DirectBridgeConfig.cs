@@ -15,7 +15,8 @@ internal sealed record DirectBridgeConfig(
     bool ExperimentalSingleUserMode,
     string OutputScope,
     string AppKind,
-    string RuntimeStatusPath);
+    string RuntimeStatusPath,
+    string ContextDeliveryMode);
 
 internal sealed class DirectBridgeConfigStore
 {
@@ -68,25 +69,50 @@ internal sealed class DirectBridgeConfigStore
                     MaxDepth = 8,
                 });
             JsonElement root = document.RootElement;
-            RequireExactKeys(
-                root,
-                "contract",
-                "localOptIn",
-                "virtualMicrophoneRenderEndpointId",
-                "virtualSpeakerRenderEndpointId",
-                "listenHost",
-                "listenPort",
-                "allowedOrigins",
-                "allowedTailscaleUserLogin",
-                "experimentalSingleUserMode",
-                "outputScope",
-                "appKind",
-                "runtimeStatusPath");
-
-            if (RequireString(root, "contract", 128)
-                    != DirectBridgeContract.ConfigContract)
+            string contract = RequireString(root, "contract", 128);
+            bool legacyV3 =
+                contract == DirectBridgeContract.LegacyConfigContract;
+            if (
+                !legacyV3
+                && contract != DirectBridgeContract.ConfigContract
+            )
             {
                 throw ConfigInvalid();
+            }
+            if (legacyV3)
+            {
+                RequireExactKeys(
+                    root,
+                    "contract",
+                    "localOptIn",
+                    "virtualMicrophoneRenderEndpointId",
+                    "virtualSpeakerRenderEndpointId",
+                    "listenHost",
+                    "listenPort",
+                    "allowedOrigins",
+                    "allowedTailscaleUserLogin",
+                    "experimentalSingleUserMode",
+                    "outputScope",
+                    "appKind",
+                    "runtimeStatusPath");
+            }
+            else
+            {
+                RequireExactKeys(
+                    root,
+                    "contract",
+                    "localOptIn",
+                    "virtualMicrophoneRenderEndpointId",
+                    "virtualSpeakerRenderEndpointId",
+                    "listenHost",
+                    "listenPort",
+                    "allowedOrigins",
+                    "allowedTailscaleUserLogin",
+                    "experimentalSingleUserMode",
+                    "outputScope",
+                    "appKind",
+                    "runtimeStatusPath",
+                    "contextDeliveryMode");
             }
             bool localOptIn = RequireBoolean(root, "localOptIn");
             string virtualMicrophoneRenderEndpointId = RequireString(
@@ -154,6 +180,14 @@ internal sealed class DirectBridgeConfigStore
             {
                 throw ConfigInvalid();
             }
+            string contextDeliveryMode = legacyV3
+                ? DirectContextDeliveryMode.LegacyInject
+                : RequireString(root, "contextDeliveryMode", 32);
+            if (!DirectContextDeliveryMode.IsSupported(
+                contextDeliveryMode))
+            {
+                throw ConfigInvalid();
+            }
 
             string runtimeStatusPath = RequireString(
                 root,
@@ -195,7 +229,8 @@ internal sealed class DirectBridgeConfigStore
                 experimentalSingleUserMode,
                 outputScope,
                 appKind,
-                System.IO.Path.GetFullPath(runtimeStatusPath));
+                System.IO.Path.GetFullPath(runtimeStatusPath),
+                contextDeliveryMode);
         }
         catch (DirectProtocolException)
         {

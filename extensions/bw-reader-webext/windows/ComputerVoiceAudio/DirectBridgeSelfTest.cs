@@ -80,8 +80,10 @@ internal static class DirectBridgeSelfTest
                 == "explicit-test-render-microphone"
             && initial.VirtualSpeakerRenderEndpointId
                 == "explicit-test-render-speaker"
-            && initial.ExperimentalSingleUserMode,
-            "direct-config-v3-localhost-single-user-two-render-endpoints",
+            && initial.ExperimentalSingleUserMode
+            && initial.ContextDeliveryMode
+                == DirectContextDeliveryMode.LegacyInject,
+            "direct-config-v4-localhost-single-user-two-render-endpoints",
             checks);
         Require(
             DirectBridgeServer.TailscaleLoginMatches(
@@ -664,6 +666,13 @@ internal static class DirectBridgeSelfTest
             statusPath,
             checks).ConfigureAwait(false);
         await CheckContextIpcContractAsync(
+            checks).ConfigureAwait(false);
+        await CheckSnapshotMcpModeAsync(
+            root,
+            origin,
+            checks).ConfigureAwait(false);
+        await CheckReaderContextMcpProtocolAsync(
+            root,
             checks).ConfigureAwait(false);
     }
 
@@ -3569,12 +3578,606 @@ internal static class DirectBridgeSelfTest
         return response.GetProperty("payload");
     }
 
+    private static async Task CheckSnapshotMcpModeAsync(
+        string root,
+        string origin,
+        ICollection<string> checks)
+    {
+        string installationRoot = System.IO.Path.Combine(
+            root,
+            "snapshot-mode");
+        string configPath = System.IO.Path.Combine(
+            installationRoot,
+            "native-host",
+            "direct.json");
+        string statusPath = System.IO.Path.Combine(
+            installationRoot,
+            "runtime",
+            "computer-voice-direct.status.json");
+        string snapshotPath = System.IO.Path.Combine(
+            installationRoot,
+            "runtime",
+            FileDirectSnapshotContextAdapter.SnapshotFileName);
+        await WriteConfigAsync(
+            configPath,
+            statusPath,
+            origin,
+            localOptIn: true,
+            contextDeliveryMode:
+                DirectContextDeliveryMode.SnapshotMcp)
+            .ConfigureAwait(false);
+
+        DirectBridgeConfigStore store = new(configPath);
+        FakeDirectAppLauncher launcher = new();
+        FakeDirectMediaAdapter media = new();
+        FakeDirectContextAdapter legacy = new();
+        FileDirectSnapshotContextAdapter snapshot = new(
+            snapshotPath,
+            () => DateTimeOffset.FromUnixTimeMilliseconds(
+                1_750_000_005_000));
+        await using DirectBridgeCoordinator coordinator = new(
+            store,
+            launcher,
+            media,
+            renderEndpointProbe: _ => null,
+            contextAdapter: legacy,
+            snapshotContextAdapter: snapshot);
+        List<object> events = [];
+        List<byte[]> frames = [];
+        DirectBridgeProtocolSession contextSession = new(
+            "connection-snapshot-context",
+            origin,
+            store,
+            coordinator,
+            () => DateTimeOffset.UtcNow);
+        _ = RequireSuccess(
+            await SendAsync(
+                contextSession,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "hello",
+                    requestId = "request-snapshot-hello",
+                    protocolVersion = 3,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "hello");
+        JsonElement mode = RequireSuccess(
+            await SendAsync(
+                contextSession,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "context-mode",
+                    requestId = "request-snapshot-mode",
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "context-mode");
+        string contextSessionId =
+            "session-" + DirectBase64Url.Encode(
+                Enumerable.Range(64, 16)
+                    .Select(value => (byte)value)
+                    .ToArray());
+        JsonElement opened = RequireSuccess(
+            await SendAsync(
+                contextSession,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "context-open",
+                    requestId = "request-snapshot-open",
+                    sessionId = contextSessionId,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "context-open");
+        Require(
+            mode.GetProperty("mode").GetString()
+                == DirectContextDeliveryMode.SnapshotMcp
+            && opened.GetProperty("state").GetString()
+                == "context-only"
+            && contextSession.Phase == DirectProtocolPhase.ContextOnly
+            && launcher.EnsureRunningCount == 0
+            && launcher.WaitReadyCount == 0
+            && media.StartCount == 0
+            && legacy.ForwardCount == 0,
+            "direct-snapshot-context-open-has-no-app-audio-or-typist-side-effect",
+            checks);
+
+        string wrongContextSessionId =
+            "session-" + DirectBase64Url.Encode(
+                Enumerable.Range(65, 16)
+                    .Select(value => (byte)value)
+                    .ToArray());
+        JsonElement mismatchedSession = await SendAsync(
+            contextSession,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "active-reading",
+                requestId = "request-active-reading-wrong-session",
+                sessionId = wrongContextSessionId,
+                activeContract =
+                    FileDirectSnapshotContextAdapter
+                        .ActiveReadingContract,
+                active = new
+                {
+                    kind = "pdf",
+                    file = "book.pdf",
+                    title = "Test Book",
+                    page = 5,
+                    selectionState = "unknown",
+                    selection = (string?)null,
+                    observedAtEpochMs = 1_750_000_000_000,
+                },
+            },
+            events,
+            frames).ConfigureAwait(false);
+        Require(
+            !mismatchedSession.GetProperty("ok").GetBoolean()
+            && mismatchedSession.GetProperty("error")
+                .GetProperty("code").GetString()
+                == "BW_READER_CONTEXT_SNAPSHOT_SESSION_MISMATCH",
+            "direct-snapshot-context-only-session-is-bound",
+            checks);
+
+        JsonElement activeAck = RequireSuccess(
+            await SendAsync(
+                contextSession,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "active-reading",
+                    requestId = "request-active-reading-5",
+                    sessionId = contextSessionId,
+                    activeContract =
+                        FileDirectSnapshotContextAdapter
+                            .ActiveReadingContract,
+                    active = new
+                    {
+                        kind = "pdf",
+                        file = "book.pdf",
+                        title = "Test Book",
+                        page = 5,
+                        selectionState = "active",
+                        selection = "selected words",
+                        observedAtEpochMs = 1_750_000_000_000,
+                    },
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "active-reading");
+        JsonElement contextAck = RequireSuccess(
+            await SendAsync(
+                contextSession,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "context",
+                    requestId = "request-snapshot-page-5",
+                    sessionId = contextSessionId,
+                    contextContract =
+                        NamedPipeDirectContextAdapter.ContextContract,
+                    @event = new
+                    {
+                        v = 1,
+                        seq = 5,
+                        type = "page.context",
+                        ts = 1_750_000_001,
+                        id = "0000000000000005",
+                        kind = "pdf",
+                        file = "book.pdf",
+                        title = "Test Book",
+                        page = 5,
+                        stable = true,
+                        page_context = new
+                        {
+                            reason = "stable",
+                            text = "Windows local snapshot text",
+                            text_available = true,
+                            text_source = "pdf-text",
+                            truncated = false,
+                        },
+                    },
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "context");
+        JsonElement duplicateAck = RequireSuccess(
+            await SendAsync(
+                contextSession,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "context",
+                    requestId = "request-snapshot-page-5-retry",
+                    sessionId = contextSessionId,
+                    contextContract =
+                        NamedPipeDirectContextAdapter.ContextContract,
+                    @event = new
+                    {
+                        v = 1,
+                        seq = 5,
+                        type = "page.context",
+                        ts = 1_750_000_001,
+                        id = "0000000000000005",
+                        kind = "pdf",
+                        file = "book.pdf",
+                        title = "Test Book",
+                        page = 5,
+                        stable = true,
+                        page_context = new
+                        {
+                            reason = "stable",
+                            text = "Windows local snapshot text",
+                            text_available = true,
+                            text_source = "pdf-text",
+                            truncated = false,
+                        },
+                    },
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "context");
+        using JsonDocument snapshotDocument = JsonDocument.Parse(
+            await File.ReadAllTextAsync(snapshotPath)
+                .ConfigureAwait(false));
+        JsonElement snapshotRoot = snapshotDocument.RootElement;
+        Require(
+            activeAck.GetProperty("revision").GetInt64() == 1
+            && contextAck.GetProperty("outcome").GetString()
+                == "accepted"
+            && duplicateAck.GetProperty("outcome").GetString()
+                == "duplicate"
+            && snapshotRoot.GetProperty("schema").GetString()
+                == FileDirectSnapshotContextAdapter.SnapshotContract
+            && snapshotRoot.GetProperty("revision").GetInt64() == 2
+            && snapshotRoot.GetProperty("contextStatus").GetString()
+                == "ready"
+            && snapshotRoot.GetProperty("activeReading")
+                .GetProperty("receivedAtEpochMs").GetInt64()
+                == 1_750_000_005_000
+            && snapshotRoot.GetProperty("currentPage")
+                .GetProperty("text").GetString()
+                == "Windows local snapshot text"
+            && snapshotRoot.GetProperty("selection")
+                .GetProperty("state").GetString() == "active"
+            && snapshotRoot.GetProperty("selection")
+                .GetProperty("text").GetString() == "selected words"
+            && legacy.ForwardCount == 0,
+            "direct-snapshot-events-atomically-fold-latest-without-legacy-injection",
+            checks);
+
+        JsonElement clearedAck = RequireSuccess(
+            await SendAsync(
+                contextSession,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "active-reading",
+                    requestId = "request-active-reading-5-cleared",
+                    sessionId = contextSessionId,
+                    activeContract =
+                        FileDirectSnapshotContextAdapter
+                            .ActiveReadingContract,
+                    active = new
+                    {
+                        kind = "pdf",
+                        file = "book.pdf",
+                        title = "Test Book",
+                        page = 5,
+                        selectionState = "cleared",
+                        selection = (string?)null,
+                        observedAtEpochMs = 1_750_000_002_000,
+                    },
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "active-reading");
+        using JsonDocument clearedDocument = JsonDocument.Parse(
+            await File.ReadAllTextAsync(snapshotPath)
+                .ConfigureAwait(false));
+        Require(
+            clearedAck.GetProperty("revision").GetInt64() == 3
+            && clearedDocument.RootElement.GetProperty("selection")
+                .GetProperty("state").GetString() == "cleared"
+            && clearedDocument.RootElement.GetProperty("selection")
+                .GetProperty("text").ValueKind == JsonValueKind.Null,
+            "direct-snapshot-active-reading-clears-stale-selection",
+            checks);
+
+        DirectBridgeProtocolSession voiceSession = new(
+            "connection-snapshot-voice",
+            origin,
+            store,
+            coordinator,
+            () => DateTimeOffset.UtcNow);
+        _ = RequireSuccess(
+            await SendAsync(
+                voiceSession,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "hello",
+                    requestId = "request-snapshot-voice-hello",
+                    protocolVersion = 3,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "hello");
+        string voiceSessionId =
+            "session-" + DirectBase64Url.Encode(
+                Enumerable.Range(80, 16)
+                    .Select(value => (byte)value)
+                    .ToArray());
+        _ = RequireSuccess(
+            await SendAsync(
+                voiceSession,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "start",
+                    requestId = "request-snapshot-voice-start",
+                    sessionId = voiceSessionId,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "start");
+        Require(
+            media.StartCount == 1
+            && media.LastStartRequest?.StartTypist == false
+            && legacy.ForwardCount == 0,
+            "direct-snapshot-audio-start-explicitly-skips-voice-typist",
+            checks);
+        _ = RequireSuccess(
+            await SendAsync(
+                voiceSession,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "stop",
+                    requestId = "request-snapshot-voice-stop",
+                    sessionId = voiceSessionId,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "stop");
+
+        JsonElement clearAck = RequireSuccess(
+            await SendAsync(
+                contextSession,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "context-clear",
+                    requestId = "request-snapshot-clear",
+                    sessionId = contextSessionId,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "context-clear");
+        using JsonDocument clearedSnapshot = JsonDocument.Parse(
+            await File.ReadAllTextAsync(snapshotPath)
+                .ConfigureAwait(false));
+        Require(
+            clearAck.GetProperty("outcome").GetString() == "accepted"
+            && clearedSnapshot.RootElement
+                .GetProperty("contextStatus").GetString() == "pending"
+            && clearedSnapshot.RootElement
+                .GetProperty("currentPage").ValueKind
+                == JsonValueKind.Null
+            && clearedSnapshot.RootElement
+                .GetProperty("selection")
+                .GetProperty("state").GetString() == "unknown",
+            "direct-snapshot-clear-removes-page-and-selection",
+            checks);
+    }
+
+    private static async Task CheckReaderContextMcpProtocolAsync(
+        string root,
+        ICollection<string> checks)
+    {
+        string snapshotPath = System.IO.Path.Combine(
+            root,
+            "mcp-protocol",
+            FileDirectSnapshotContextAdapter.SnapshotFileName);
+        FileDirectSnapshotContextAdapter adapter = new(
+            snapshotPath,
+            () => DateTimeOffset.FromUnixTimeMilliseconds(
+                1_750_000_000_500));
+        JsonElement activeValue = JsonSerializer.SerializeToElement(new
+        {
+            kind = "pdf",
+            file = "mcp-book.pdf",
+            title = "MCP Book",
+            page = 12,
+            selectionState = "unknown",
+            selection = (string?)null,
+            observedAtEpochMs = 1_750_000_000_000,
+        });
+        _ = await adapter.ForwardActiveReadingAsync(
+            "request-mcp-active",
+            "session-" + DirectBase64Url.Encode(
+                Enumerable.Range(96, 16)
+                    .Select(value => (byte)value)
+                    .ToArray()),
+            FileDirectSnapshotContextAdapter.ValidateActiveReading(
+                activeValue),
+            CancellationToken.None).ConfigureAwait(false);
+
+        string input = string.Join(
+            "\n",
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 1,
+                method = "initialize",
+                @params = new
+                {
+                    protocolVersion = "2025-06-18",
+                    capabilities = new { },
+                    clientInfo = new
+                    {
+                        name = "self-test",
+                        version = "1",
+                    },
+                },
+            }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                method = "notifications/initialized",
+            }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 2,
+                method = "tools/list",
+                @params = new { },
+            }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 3,
+                method = "tools/call",
+                @params = new
+                {
+                    name = ReaderContextMcpServer.ToolName,
+                    arguments = new { },
+                },
+            }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 4,
+                method = "tools/call",
+                @params = new
+                {
+                    name = ReaderContextMcpServer.ToolName,
+                    arguments = new { },
+                },
+            }),
+            "");
+        StringWriter output = new();
+        ReaderContextMcpServer server = new(
+            snapshotPath,
+            new StringReader(input),
+            output,
+            utcNow: () => DateTimeOffset.FromUnixTimeMilliseconds(
+                1_750_000_010_000),
+            instanceId: "mcp-self-test-instance");
+        int exit = await server.RunAsync(CancellationToken.None)
+            .ConfigureAwait(false);
+        JsonDocument[] responses = output.ToString()
+            .Split(
+                new[] { "\r\n", "\n" },
+                StringSplitOptions.RemoveEmptyEntries)
+            .Select(value => JsonDocument.Parse(value))
+            .ToArray();
+        try
+        {
+            JsonElement tools = responses[1].RootElement
+                .GetProperty("result")
+                .GetProperty("tools");
+            string firstText = responses[2].RootElement
+                .GetProperty("result")
+                .GetProperty("content")[0]
+                .GetProperty("text")
+                .GetString()!;
+            string secondText = responses[3].RootElement
+                .GetProperty("result")
+                .GetProperty("content")[0]
+                .GetProperty("text")
+                .GetString()!;
+            using JsonDocument first = JsonDocument.Parse(firstText);
+            using JsonDocument second = JsonDocument.Parse(secondText);
+            Require(
+                exit == 0
+                && responses.Length == 4
+                && responses[0].RootElement.GetProperty("result")
+                    .GetProperty("serverInfo")
+                    .GetProperty("name").GetString()
+                    == ReaderContextMcpServer.ServerName
+                && tools.GetArrayLength() == 1
+                && tools[0].GetProperty("name").GetString()
+                    == ReaderContextMcpServer.ToolName
+                && first.RootElement.GetProperty("schema").GetString()
+                    == FileDirectSnapshotContextAdapter.SnapshotContract
+                && first.RootElement.GetProperty("contextStatus")
+                    .GetString() == "pending"
+                && first.RootElement.GetProperty("mcp")
+                    .GetProperty("instanceId").GetString()
+                    == "mcp-self-test-instance"
+                && second.RootElement.GetProperty("mcp")
+                    .GetProperty("instanceId").GetString()
+                    == "mcp-self-test-instance"
+                && first.RootElement.GetProperty("mcp")
+                    .GetProperty("callSequence").GetInt64() == 1
+                && second.RootElement.GetProperty("mcp")
+                    .GetProperty("callSequence").GetInt64() == 2,
+                "direct-reader-context-mcp-is-persistent-read-only-single-tool",
+                checks);
+        }
+        finally
+        {
+            foreach (JsonDocument response in responses)
+            {
+                response.Dispose();
+            }
+        }
+
+        JsonObject stale = new()
+        {
+            ["activeReading"] = new JsonObject
+            {
+                ["file"] = "old.pdf",
+                ["title"] = "Old",
+                ["page"] = 3,
+                ["observedAtEpochMs"] = long.MaxValue,
+                ["receivedAtEpochMs"] = 1_000L,
+                ["fresh"] = true,
+            },
+            ["contextStatus"] = "ready",
+            ["currentPage"] = new JsonObject
+            {
+                ["file"] = "old.pdf",
+                ["page"] = 3,
+                ["stable"] = true,
+                ["text"] = "must not leak",
+                ["textAvailable"] = true,
+            },
+            ["selection"] = new JsonObject
+            {
+                ["state"] = "active",
+                ["text"] = "stale selection",
+            },
+        };
+        ReaderContextMcpServer.ApplyFreshness(
+            stale,
+            DateTimeOffset.FromUnixTimeMilliseconds(
+                1_000
+                + (long)ReaderContextMcpServer
+                    .FreshnessWindow.TotalMilliseconds
+                + 1));
+        Require(
+            stale["contextStatus"]?.GetValue<string>() == "stale"
+            && stale["currentPage"]?["text"]?.GetValue<string>() == ""
+            && stale["selection"]?["state"]?.GetValue<string>()
+                == "unknown",
+            "direct-reader-context-mcp-never-returns-stale-page-or-selection-text",
+            checks);
+    }
+
     private static async Task WriteConfigAsync(
         string configPath,
         string statusPath,
         string origin,
         bool localOptIn,
-        bool experimentalSingleUserMode = true)
+        bool experimentalSingleUserMode = true,
+        string contextDeliveryMode =
+            DirectContextDeliveryMode.LegacyInject)
     {
         string? directory = System.IO.Path.GetDirectoryName(configPath);
         if (string.IsNullOrEmpty(directory))
@@ -3599,6 +4202,7 @@ internal static class DirectBridgeSelfTest
             outputScope = "process-only",
             appKind = "codex-desktop",
             runtimeStatusPath = statusPath,
+            contextDeliveryMode,
         }, new JsonSerializerOptions(DirectBridgeContract.JsonOptions)
         {
             WriteIndented = true,
@@ -4007,6 +4611,11 @@ internal static class DirectBridgeSelfTest
 
         internal int StartCount { get; private set; }
 
+        internal DirectMediaStartRequest? LastStartRequest {
+            get;
+            private set;
+        }
+
         internal int StopCount { get; private set; }
 
         internal bool EmitDuringStart { get; init; }
@@ -4043,6 +4652,7 @@ internal static class DirectBridgeSelfTest
             CancellationToken cancellationToken)
         {
             StartCount++;
+            LastStartRequest = request;
             if (
                 request.RootProcessId != 4242
                 || request.VirtualMicrophoneRenderEndpointId

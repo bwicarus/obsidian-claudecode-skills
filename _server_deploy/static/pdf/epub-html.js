@@ -431,7 +431,13 @@
     // 选区即时同步:建立/改动/清空都立刻推(空串=显式无选区,不是省略字段)
     try {
       window.RC && RC.ctxSync && RC.ctxSync.report(
-        { kind: 'epub', file: FREL, selection: txt || '' }, { immediate: true });
+        {
+          kind: 'epub',
+          file: FREL,
+          selection: txt || '',
+          sel_page: _curTopIdx
+        },
+        { immediate: true });
       if (window.RC && RC.outgoing) {
         if (txt) RC.outgoing.focus('text', { file: FREL, text: String(txt).slice(0, 200) });
         else RC.outgoing.cancel();

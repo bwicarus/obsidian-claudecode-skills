@@ -41,7 +41,8 @@ internal sealed class DirectConnectionPhaseDeadline
                 ?? throw new InvalidOperationException(
                     "authenticated phase was not observed"),
             DirectProtocolPhase.Starting
-                or DirectProtocolPhase.Active => null,
+                or DirectProtocolPhase.Active
+                or DirectProtocolPhase.ContextOnly => null,
             _ => throw new InvalidOperationException(
                 "unknown direct protocol phase"),
         };

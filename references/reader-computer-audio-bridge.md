@@ -157,10 +157,29 @@ Windows WSS、固定文本合同和固定长度 PCM，不读取配对记录，�
   不是合法 round-trip 会二次反转义。
 - runtime status：`reader-computer-voice-direct-status/2`，`lastError` 为 `null` 或严格的
   `failureId/code/stage/hresult/atUtc`；只有后续 START 真正成功才清除最近错误。
-- strict config：`reader-computer-voice-direct-config/3`，只接受固定 12 个键。当前
+- strict config：`reader-computer-voice-direct-config/4`，在原字段上增加
+  `contextDeliveryMode`。当前
   `experimentalSingleUserMode` 必须为 `true`；不存在配对码、公钥或旧 pairing 字段。
   旧 `/1` + `microphoneEndpointId` 配置只能进入 `legacy-migration-required`，经本地显式
-  迁移后清除，绝不作为运行时 fallback。
+  迁移后清除，绝不作为运行时 fallback；旧 `/3` 只按 `legacy-inject` 解释。
+
+## 实验上下文末端（2026-07-30）
+
+音频 direct v3 保持不变；上下文末端由 strict config 明确二选一：
+
+- `legacy-inject`：沿用 journal → Windows named pipe → voice-typist；
+- `snapshot-mcp`：PWA 仍从 Pi 的 active/journal 接口取事件，但经现有固定 WSS 直接送到
+  Windows，原子更新 `runtime/reader-context-snapshot.json`。active GET 负责把 vbook
+  全局页解析回真实卷/卷内页，journal 再提供稳定正文；Pi 的旧 context.md 推送停止，
+  START 不启动 typist，正文不进入客户端输入框。
+
+`snapshot-mcp` 在没有通话时用 `context-open` 保持一条纯上下文连接，不启动 Codex、采音或
+快捷键；通话前先释放它，再由同一条 Active WSS 继续更新。Windows EXE 的
+`--reader-context-mcp --state <absolute-path>` 模式常驻提供唯一只读工具
+`reader_context_snapshot`。活动心跳同时携带选区三态（有选区 / 已清空 / 未上报），
+换页、取消选择或超过三分钟时都不会把旧正文、旧选区继续当作当前内容；新鲜度按 Windows
+实际收到心跳的时间计算。关闭同步或切回旧注入时，`context-clear` 先清本地页与选区，
+再停止实验末端或恢复 Pi 旧推送。旧代码与 `/3` 回滚入口保留，但两条路径不得并跑。
 
 ## 单用户安全边界
 

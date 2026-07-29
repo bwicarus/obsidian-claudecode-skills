@@ -3524,3 +3524,17 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：隔离 Reader 的真实 START 已到 `active / readerConnected=true / captureActive=true`；Pi 无副作用预检与正式 `deploy_from_windows.ps1` 均 exit 0，内置 Linux 门禁、服务稳定性与 E2E 全过。
 - **生产事实**：Reader `0.2.73`、KG `kg-0.2.73-923da8bd8a20f51b8e56`；回滚/取证目录 `/home/bwicarus/deploy-backups/reader/20260729T171607Z-91676`，部署后 webapp/voice-rt active、Reader HTTP 可达、voice TCP open。
 - **已知项/下一步**：此前隔离会话约两分钟后记录过一次 `UPLINK_QUEUE_OVERFLOW`；按用户决定先用 iPad 生产真机测试再修。未发布扩展正式 channel，iPad PWA 不依赖该 channel。
+
+## Codex：Reader 0.2.74 / Windows direct 0.1.16 快照 MCP 实验候选（2026-07-30 JST，未安装部署）
+- **改了什么**：新增显式互斥的 `legacy-inject` / `snapshot-mcp`；实验模式由 PWA 经既有直连 WSS 把 Pi 活动阅读与增量事件折叠为 Windows 原子快照，常驻只读 MCP `reader_context_snapshot` 按需读取，旧文本注入代码与回滚入口完整保留。
+- **安全边界**：快照后台连接不发 START、不启应用/音频/快捷键/typist；切换或关闭先清快照，超时正文 fail closed；既有语音链以用户真实验收为冻结基线，本轮没有重测真实音频。
+- **怎么验的**：全量 Node、桌面/打包合同、C# 候选自测、官方 MCP SDK 持久进程/原子更新/损坏保留/过期清空测试及发布流水线通过；`git diff --check` 通过。
+- **门禁事实**：0.2.74 Windows/Safari 与 0.1.16 不可变候选已生成；release preflight 的版本、摘要、白名单均通过，最终仅被既有 Windows `fcntl` 平台门禁及脏工作树拦住，生产未变化。
+- **没做/下一步**：未安装、注册 MCP、提交、推送、部署或改日常 Chrome；下一步先交付完整 iPad 人工验收清单，通过后再按官方入口安装、注册并部署。
+
+## Codex：Windows direct 0.1.16 与 reader_snapshot 已安装（2026-07-30 JST，Reader 未部署）
+- **安装事实**：候选逐文件摘要校验后原子替换，配置迁移为 `/4 + snapshot-mcp`；永久回滚目录为 `C:\Users\bwica\bw-computer-voice-bridge-backups\install-20260729T232653Z-f8a5f75c`。
+- **MCP**：全局注册唯一 stdio 服务 `reader_snapshot`，命令固定指向安装路径 native EXE 与 `runtime\reader-context-snapshot.json`，仅暴露只读 `reader_context_snapshot`。
+- **怎么验的**：安装路径双 self-test 通过；native/desktop 摘要与 0.1.16 manifest 一致，任务 Running、唯一 localhost listener 与状态 PID 一致，持续为 `idle / readerConnected=false / captureActive=false / lastError=null`，typist=0。
+- **故障与恢复**：前三次热重启因尚未挂断的 PWA 自动重连为 `active`，安装器均 fail closed 并按摘要恢复 0.1.14；用户挂断后采用停机安装，最终启动验收通过，失败取证目录保留。
+- **没做/下一步**：未发送 START、快捷键或采音，未改日常 Chrome，未提交、推送或部署 Reader 0.2.74；当前快照文件尚不存在，需新会话加载 MCP，并在 Reader 候选可用后做隔离人工验收。

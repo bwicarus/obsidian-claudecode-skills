@@ -50,7 +50,8 @@ DEBOUNCE_S = NAV_DEBOUNCE_S   # 兼容旧引用
 UNREACHABLE_BACKOFF_S = 60.0   # PC 不可达时的退避（避免每轮硬撞 ConnectTimeout）
 # ControlMaster 复用连接：实测把一轮同步从 ~930ms 压到 ~540ms（省 42%）。
 # socket 放 /run/user 下（tmpfs，重启自清）；ControlPersist 让连接在空闲期保活。
-_CM = f"/run/user/{os.getuid()}/bw-ctx-ssh-%r@%h:%p" if os.path.isdir(f"/run/user/{os.getuid()}") \
+_PROCESS_UID = os.getuid() if hasattr(os, "getuid") else 0
+_CM = f"/run/user/{_PROCESS_UID}/bw-ctx-ssh-%r@%h:%p" if os.path.isdir(f"/run/user/{_PROCESS_UID}") \
       else str(Path(tempfile.gettempdir()) / "bw-ctx-ssh-%r@%h:%p")
 _MUX = ["-o", "ControlMaster=auto", "-o", f"ControlPath={_CM}", "-o", "ControlPersist=300",
         "-o", "ServerAliveInterval=30", "-o", "ServerAliveCountMax=3"]
@@ -224,13 +225,13 @@ class Pusher:
             return
         # 总开关关闭 → 这一方向也停:不生成快照、不连 SSH。跟前端读同一个文件,
         # 不会出现「前端以为关了、后台还在往 Windows 推」的错位。
-        if not SNAP._ctx_sync_enabled():
+        if not SNAP._legacy_push_enabled():
             if not getattr(self, "_off_logged", False):
-                log("双向上下文同步已关闭：暂停生成与推送（开关一开即恢复）")
+                log("旧上下文注入未启用：暂停生成与 Pi→Windows 推送")
                 self._off_logged = True
             return
         if getattr(self, "_off_logged", False):
-            log("双向上下文同步已开启：恢复生成与推送")
+            log("旧上下文注入已启用：恢复生成与 Pi→Windows 推送")
             self._off_logged = False
         t0 = time.time()
         SNAP.build(self.workdir)

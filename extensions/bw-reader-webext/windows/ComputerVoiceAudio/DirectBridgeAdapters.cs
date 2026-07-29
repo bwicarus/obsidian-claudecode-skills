@@ -51,7 +51,8 @@ internal sealed record DirectMediaStartRequest(
     string AppKind,
     string AppUserModelId,
     string VirtualMicrophoneRenderEndpointId,
-    string VirtualSpeakerRenderEndpointId);
+    string VirtualSpeakerRenderEndpointId,
+    bool StartTypist = true);
 
 internal sealed record DirectMediaStartResult(
     bool HostReady,
@@ -120,6 +121,7 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
     private readonly IDirectAppLauncher _appLauncher;
     private readonly IDirectMediaAdapter _mediaAdapter;
     private readonly IDirectContextAdapter _contextAdapter;
+    private readonly IDirectSnapshotContextAdapter _snapshotContextAdapter;
     private readonly Func<long> _monotonicMilliseconds;
     private readonly Func<DirectBridgeConfig, DirectProtocolException?>
         _renderEndpointProbe;
@@ -141,13 +143,17 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
         Func<long>? monotonicMilliseconds = null,
         Func<DirectBridgeConfig, DirectProtocolException?>?
             renderEndpointProbe = null,
-        IDirectContextAdapter? contextAdapter = null)
+        IDirectContextAdapter? contextAdapter = null,
+        IDirectSnapshotContextAdapter? snapshotContextAdapter = null)
     {
         _configStore = configStore;
         _appLauncher = appLauncher;
         _mediaAdapter = mediaAdapter;
         _contextAdapter =
             contextAdapter ?? new UnwiredDirectContextAdapter();
+        _snapshotContextAdapter =
+            snapshotContextAdapter
+            ?? new UnwiredDirectSnapshotContextAdapter();
         _monotonicMilliseconds =
             monotonicMilliseconds ?? (() => Environment.TickCount64);
         _renderEndpointProbe =
@@ -259,9 +265,24 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
         }
     }
 
+    internal Task<DirectMediaStartResult> StartAsync(
+        string connectionId,
+        string sessionId,
+        Func<string, string, Task> reportStatusAsync,
+        Func<DirectPcmFrame, CancellationToken, Task> sendFrameAsync,
+        CancellationToken cancellationToken) =>
+        StartAsync(
+            connectionId,
+            sessionId,
+            DirectContextDeliveryMode.LegacyInject,
+            reportStatusAsync,
+            sendFrameAsync,
+            cancellationToken);
+
     internal async Task<DirectMediaStartResult> StartAsync(
         string connectionId,
         string sessionId,
+        string contextDeliveryMode,
         Func<string, string, Task> reportStatusAsync,
         Func<DirectPcmFrame, CancellationToken, Task> sendFrameAsync,
         CancellationToken cancellationToken)
@@ -290,6 +311,17 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
             }
 
             DirectBridgeConfig config = _configStore.Load();
+            if (
+                !DirectContextDeliveryMode.IsSupported(
+                    contextDeliveryMode)
+                || config.ContextDeliveryMode != contextDeliveryMode
+            )
+            {
+                throw new DirectProtocolException(
+                    "BW_READER_CONTEXT_DELIVERY_MODE_CHANGED",
+                    "上下文交付模式已变化，请重新连接",
+                    retryable: true);
+            }
             if (!config.LocalOptIn)
             {
                 throw new DirectProtocolException(
@@ -352,7 +384,10 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
                         config.AppKind,
                         DirectBridgeContract.CodexAppUserModelId,
                         config.VirtualMicrophoneRenderEndpointId,
-                        config.VirtualSpeakerRenderEndpointId),
+                        config.VirtualSpeakerRenderEndpointId,
+                        StartTypist:
+                            contextDeliveryMode
+                            == DirectContextDeliveryMode.LegacyInject),
                     sendFrameAsync,
                     cancellationToken).ConfigureAwait(false);
             if (!started.HostReady
@@ -468,7 +503,8 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
         }
     }
 
-    internal async Task<DirectContextForwardResult> ForwardContextAsync(
+    internal async Task<DirectContextForwardResult>
+        ForwardLegacyContextAsync(
         string connectionId,
         string requestId,
         string sessionId,
@@ -502,6 +538,102 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
             contextContract,
             contextEvent,
             cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async Task<DirectSnapshotForwardResult>
+        ForwardSnapshotContextAsync(
+            string connectionId,
+            string requestId,
+            string sessionId,
+            DirectContextEvent contextEvent,
+            bool requireActiveOwner,
+            CancellationToken cancellationToken)
+    {
+        await ValidateSnapshotOwnerAsync(
+            connectionId,
+            sessionId,
+            requireActiveOwner,
+            cancellationToken).ConfigureAwait(false);
+        return await _snapshotContextAdapter.ForwardJournalAsync(
+            requestId,
+            sessionId,
+            contextEvent,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async Task<DirectSnapshotForwardResult>
+        ForwardActiveReadingAsync(
+            string connectionId,
+            string requestId,
+            string sessionId,
+            DirectActiveReading activeReading,
+            bool requireActiveOwner,
+            CancellationToken cancellationToken)
+    {
+        await ValidateSnapshotOwnerAsync(
+            connectionId,
+            sessionId,
+            requireActiveOwner,
+            cancellationToken).ConfigureAwait(false);
+        return await _snapshotContextAdapter.ForwardActiveReadingAsync(
+            requestId,
+            sessionId,
+            activeReading,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async Task<DirectSnapshotForwardResult>
+        ClearSnapshotContextAsync(
+            string connectionId,
+            string requestId,
+            string sessionId,
+            bool requireActiveOwner,
+            CancellationToken cancellationToken)
+    {
+        await ValidateSnapshotOwnerAsync(
+            connectionId,
+            sessionId,
+            requireActiveOwner,
+            cancellationToken).ConfigureAwait(false);
+        return await _snapshotContextAdapter.ClearAsync(
+            requestId,
+            sessionId,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task ValidateSnapshotOwnerAsync(
+        string connectionId,
+        string sessionId,
+        bool requireActiveOwner,
+        CancellationToken cancellationToken)
+    {
+        await _stateGate.WaitAsync(cancellationToken)
+            .ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            if (requireActiveOwner)
+            {
+                RequireActiveOwner(connectionId, sessionId);
+                if (!_mediaAdapter.CaptureActive)
+                {
+                    throw new DirectProtocolException(
+                        "BW_READER_CONTEXT_SNAPSHOT_NOT_ACTIVE",
+                        "活动通话的本地快照租约已失效");
+                }
+            }
+            else if (_activeSessionId is not null)
+            {
+                throw new DirectProtocolException(
+                    "BW_COMPUTER_VOICE_DIRECT_BUSY",
+                    "活动通话已占用 Windows 桥接器",
+                    retryable: true);
+            }
+        }
+        finally
+        {
+            _stateGate.Release();
+        }
     }
 
     internal async Task StopForConnectionAsync(string connectionId)

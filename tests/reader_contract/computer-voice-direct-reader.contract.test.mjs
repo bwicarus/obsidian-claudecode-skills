@@ -261,6 +261,40 @@ function createServer(scenario) {
         });
         return;
       }
+      if (request.type === "context-mode") {
+        result(this, request, {
+          mode: scenario.contextDeliveryMode || "legacy-inject",
+        });
+        return;
+      }
+      if (request.type === "context-open") {
+        result(this, request, {
+          sessionId: request.sessionId,
+          state: "context-only",
+          mode: scenario.contextDeliveryMode || "legacy-inject",
+        });
+        return;
+      }
+      if (request.type === "active-reading") {
+        scenario.activeReadingRequests.push(structuredClone(request));
+        result(this, request, {
+          sessionId: request.sessionId,
+          revision: scenario.activeReadingRequests.length,
+          outcome: "accepted",
+        });
+        return;
+      }
+      if (request.type === "context-clear") {
+        scenario.contextClearRequests.push(structuredClone(request));
+        result(this, request, {
+          sessionId: request.sessionId,
+          revision:
+            scenario.activeReadingRequests.length
+            + scenario.contextClearRequests.length,
+          outcome: "accepted",
+        });
+        return;
+      }
       if (request.type === "start") {
         server.activeSocket = this;
         queueMicrotask(() => this.onmessage?.({
@@ -621,6 +655,30 @@ function jsonResponse(body, ok = true) {
 function createJournalFetch(scenario) {
   return (url, options) => {
     const parsed = new URL(url, READER_ORIGIN);
+    if (parsed.pathname === "/pdf/api/context-sync") {
+      assert.equal(options.method, "POST");
+      const body = JSON.parse(options.body);
+      scenario.contextModePosts.push(structuredClone(body));
+      return Promise.resolve(jsonResponse({
+        ok: true,
+        enabled: body.enabled === true,
+        deliveryMode: body.deliveryMode,
+      }));
+    }
+    if (parsed.pathname === "/pdf/api/active-reading") {
+      assert.equal(options.method, "GET");
+      scenario.activeReadingFetches += 1;
+      const active = scenario.serverActiveReading
+        || scenario.activeReading;
+      return Promise.resolve(jsonResponse({
+        ok: true,
+        enabled: scenario.contextSyncEnabled === true,
+        active: active ? structuredClone(active) : null,
+        fresh: !!active,
+        age_sec: active ? 0 : null,
+        fresh_window_sec: 180,
+      }));
+    }
     const call = {
       url,
       since: Number(parsed.searchParams.get("since")),
@@ -679,6 +737,14 @@ function createHarness(overrides = {}) {
     pendingJournalFetches: [],
     abortedJournalFetches: 0,
     contextResponder: null,
+    contextDeliveryMode: "legacy-inject",
+    activeReadingRequests: [],
+    contextClearRequests: [],
+    activeReadingFetches: 0,
+    contextSyncEnabled: false,
+    activeReading: null,
+    serverActiveReading: null,
+    contextModePosts: [],
     realtimeVoiceAllowed: true,
     ...overrides,
   };
@@ -728,6 +794,14 @@ function createHarness(overrides = {}) {
       voicecall: {
         canCaptureComputerVoiceGesture() {
           return scenario.realtimeVoiceAllowed === true;
+        },
+      },
+      ctxSync: {
+        enabled() {
+          return scenario.contextSyncEnabled === true;
+        },
+        _state() {
+          return { pend: scenario.activeReading };
         },
       },
     },
@@ -949,6 +1023,178 @@ test("START 只消费受控电话按钮的真实点击，直接调用、伪同 I
     (error) => error?.code === "BW_COMPUTER_VOICE_GESTURE_REQUIRED",
   );
   assert.equal(forwarded.scenario.microphoneRequests.length, 1);
+});
+
+test("snapshot-mcp 模式在未通话时直连 Windows 更新本地快照，通话时复用同一路径且不并跑旧注入", async () => {
+  const harness = createHarness({
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncEnabled: true,
+    activeReading: {
+      kind: "pdf",
+      file: "book.pdf",
+      title: "Snapshot Book",
+      pos: 24,
+      selection: "selected words",
+    },
+  });
+  harness.api.setSelectedEngine("computer_client");
+  await waitForRequest(harness, "context-open");
+  await waitForCondition(
+    () => harness.scenario.activeReadingRequests.length >= 1,
+    "background active-reading",
+  );
+  assert.equal(
+    harness.server.requests.some((request) => request.type === "start"),
+    false,
+  );
+  assert.equal(
+    harness.scenario.activeReadingRequests[0].active.selectionState,
+    "active",
+  );
+  assert.equal(
+    harness.scenario.activeReadingRequests[0].active.selection,
+    "selected words",
+  );
+  assert.equal(harness.scenario.microphoneRequests.length, 0);
+  assert.deepEqual(harness.scenario.contextModePosts[0], {
+    enabled: true,
+    deliveryMode: "snapshot-mcp",
+  });
+  const backgroundSocket = harness.server.sockets[0];
+
+  phoneClick(harness, { trusted: true });
+  const started = await harness.api.startFromUserGesture();
+  assert.equal(started.ok, true);
+  assert.equal(backgroundSocket.readyState, 3);
+  assert.equal(harness.server.sockets.length, 2);
+  const starts = harness.server.requests.filter(
+    (request) => request.type === "start",
+  );
+  const opens = harness.server.requests.filter(
+    (request) => request.type === "context-open",
+  );
+  assert.equal(starts.length, 1);
+  assert.equal(opens.length, 1);
+  assert.equal(harness.scenario.microphoneRequests.length, 1);
+
+  harness.scenario.activeReading = {
+    ...harness.scenario.activeReading,
+    selection: "",
+  };
+  await waitForCondition(
+    () => harness.scenario.activeReadingRequests.some(
+      (request) => request.active.selectionState === "cleared",
+    ),
+    "selection clear heartbeat",
+  );
+
+  harness.api.setSelectedEngine("codex");
+  await harness.api.stop("test");
+  assert.equal(harness.api.isActive(), false);
+});
+
+test("snapshot-mcp 从 Pi 权威 active-reading 解析 vbook 真实卷页并拒绝跨页旧选区", async () => {
+  const harness = createHarness({
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncEnabled: true,
+    activeReading: {
+      kind: "pdf",
+      file: "vbook:g_3e5d696e85",
+      title: "Merged Book",
+      pos: 31,
+      selection: "old page selection",
+      sel_page: 30,
+    },
+    serverActiveReading: {
+      kind: "pdf",
+      file: "vbook:g_3e5d696e85",
+      title: "Merged Book",
+      pos: 31,
+      vbook: true,
+      member: "books/part-2.pdf",
+      member_pos: 7,
+      selection: "old page selection",
+      has_selection: true,
+      sel_page: 30,
+      ts: 1_750_000_000,
+    },
+  });
+  harness.api.setSelectedEngine("computer_client");
+  await waitForRequest(harness, "context-open");
+  await waitForCondition(
+    () => harness.scenario.activeReadingRequests.length >= 1,
+    "vbook active-reading",
+  );
+  const forwarded = harness.scenario.activeReadingRequests[0].active;
+  assert.equal(harness.scenario.activeReadingFetches >= 1, true);
+  assert.equal(forwarded.file, "books/part-2.pdf");
+  assert.equal(forwarded.page, 7);
+  assert.equal(forwarded.selectionState, "cleared");
+  assert.equal(forwarded.selection, null);
+  harness.api.setSelectedEngine("codex");
+  await harness.api.stop("test");
+});
+
+test("切回 legacy-inject 前先清空 Windows 快照，再恢复 Pi 旧注入", async () => {
+  const harness = createHarness({
+    contextDeliveryMode: "legacy-inject",
+    contextSyncEnabled: true,
+    activeReading: {
+      kind: "pdf",
+      file: "book.pdf",
+      pos: 9,
+    },
+  });
+  harness.api.setSelectedEngine("computer_client");
+  await waitForRequest(harness, "context-clear");
+  await waitForCondition(
+    () => harness.scenario.contextModePosts.length >= 1,
+    "legacy context mode post",
+  );
+  assert.equal(harness.scenario.contextClearRequests.length, 1);
+  assert.deepEqual(harness.scenario.contextModePosts[0], {
+    enabled: true,
+    deliveryMode: "legacy-inject",
+  });
+  assert.equal(
+    harness.server.requests.some(
+      (request) => request.type === "context-open",
+    ),
+    false,
+  );
+  assert.equal(
+    harness.server.requests.some((request) => request.type === "start"),
+    false,
+  );
+  harness.api.setSelectedEngine("codex");
+});
+
+test("关闭上下文同步会先清空 Windows 快照且不触发音频 START", async () => {
+  const harness = createHarness({
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncEnabled: true,
+    activeReading: {
+      kind: "pdf",
+      file: "book.pdf",
+      pos: 10,
+    },
+  });
+  harness.api.setSelectedEngine("computer_client");
+  await waitForRequest(harness, "context-open");
+  await waitForCondition(
+    () => harness.scenario.activeReadingRequests.length >= 1,
+    "snapshot before disable",
+  );
+  const socket = harness.server.sockets[0];
+  harness.scenario.contextSyncEnabled = false;
+  await harness.api.contextSyncChanged();
+  assert.equal(harness.scenario.contextClearRequests.length, 1);
+  assert.equal(socket.readyState, 3);
+  assert.equal(
+    harness.server.requests.some((request) => request.type === "start"),
+    false,
+  );
+  harness.api.setSelectedEngine("codex");
 });
 
 test("选择模型、STATUS 与非 computer_client 的真实电话点击都不申请麦克风", async () => {

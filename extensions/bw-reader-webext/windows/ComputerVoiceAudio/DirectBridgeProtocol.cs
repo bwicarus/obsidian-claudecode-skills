@@ -7,6 +7,7 @@ internal enum DirectProtocolPhase
 {
     AwaitingAuthentication,
     AwaitingStart,
+    ContextOnly,
     Starting,
     Active,
 }
@@ -18,6 +19,8 @@ internal sealed class DirectBridgeProtocolSession
     private readonly DirectBridgeCoordinator _coordinator;
     private bool _helloSeen;
     private bool _authenticated;
+    private string? _contextDeliveryMode;
+    private string? _contextOnlySessionId;
     private DirectProtocolPhase _phase =
         DirectProtocolPhase.AwaitingAuthentication;
 
@@ -95,6 +98,12 @@ internal sealed class DirectBridgeProtocolSession
                 case "status":
                     payload = HandleStatus(message);
                     break;
+                case "context-mode":
+                    payload = HandleContextMode(message);
+                    break;
+                case "context-open":
+                    payload = HandleContextOpen(message);
+                    break;
                 case "start":
                     DirectStartActionResult start =
                         await HandleStartAsync(
@@ -112,6 +121,16 @@ internal sealed class DirectBridgeProtocolSession
                     break;
                 case "context":
                     payload = await HandleContextAsync(
+                        message,
+                        cancellationToken).ConfigureAwait(false);
+                    break;
+                case "active-reading":
+                    payload = await HandleActiveReadingAsync(
+                        message,
+                        cancellationToken).ConfigureAwait(false);
+                    break;
+                case "context-clear":
+                    payload = await HandleContextClearAsync(
                         message,
                         cancellationToken).ConfigureAwait(false);
                     break;
@@ -187,7 +206,8 @@ internal sealed class DirectBridgeProtocolSession
                 "BW_COMPUTER_VOICE_DIRECT_PROTOCOL_VERSION_INVALID",
                 "直连协议版本不受支持");
         }
-        if (!_configStore.Load().ExperimentalSingleUserMode)
+        DirectBridgeConfig config = _configStore.Load();
+        if (!config.ExperimentalSingleUserMode)
         {
             throw new DirectProtocolException(
                 "BW_COMPUTER_VOICE_DIRECT_CONFIG_INVALID",
@@ -195,6 +215,7 @@ internal sealed class DirectBridgeProtocolSession
         }
 
         _authenticated = true;
+        _contextDeliveryMode = config.ContextDeliveryMode;
         _phase = DirectProtocolPhase.AwaitingStart;
         return new
         {
@@ -218,6 +239,56 @@ internal sealed class DirectBridgeProtocolSession
                     DirectBridgeContract
                         .ClientHeartbeatTimeoutMilliseconds,
             },
+        };
+    }
+
+    private object HandleContextMode(JsonElement message)
+    {
+        RequireExactKeys(
+            message,
+            "contract",
+            "type",
+            "requestId");
+        RequireAuthenticated();
+        return new
+        {
+            mode = RequireContextDeliveryMode(),
+        };
+    }
+
+    private object HandleContextOpen(JsonElement message)
+    {
+        RequireExactKeys(
+            message,
+            "contract",
+            "type",
+            "requestId",
+            "sessionId");
+        RequireAuthenticated();
+        if (
+            RequireContextDeliveryMode()
+                != DirectContextDeliveryMode.SnapshotMcp
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_READER_CONTEXT_SNAPSHOT_MODE_REQUIRED",
+                "Windows 未启用 Reader 快照 MCP 实验模式");
+        }
+        if (_phase != DirectProtocolPhase.AwaitingStart)
+        {
+            throw new DirectProtocolException(
+                "BW_READER_CONTEXT_SNAPSHOT_PHASE_INVALID",
+                "当前连接不能切换为纯上下文连接");
+        }
+        string sessionId = RequireSafeId(message, "sessionId");
+        _ = DirectPcmFrameCodec.ParseSessionId(sessionId);
+        _contextOnlySessionId = sessionId;
+        _phase = DirectProtocolPhase.ContextOnly;
+        return new
+        {
+            sessionId,
+            state = "context-only",
+            mode = DirectContextDeliveryMode.SnapshotMcp,
         };
     }
 
@@ -325,6 +396,7 @@ internal sealed class DirectBridgeProtocolSession
                 await _coordinator.StartAsync(
                     _connectionId,
                     sessionId,
+                    RequireContextDeliveryMode(),
                     reportStatusAsync,
                     pcmGate.SendAsync,
                     cancellationToken).ConfigureAwait(false);
@@ -422,14 +494,35 @@ internal sealed class DirectBridgeProtocolSession
             "contextContract",
             "event");
         RequireAuthenticated();
-        if (_phase != DirectProtocolPhase.Active)
+        string mode = RequireContextDeliveryMode();
+        bool activeSession = _phase == DirectProtocolPhase.Active;
+        bool contextOnly =
+            _phase == DirectProtocolPhase.ContextOnly;
+        if (
+            mode == DirectContextDeliveryMode.LegacyInject
+            && !activeSession
+        )
         {
             throw new DirectProtocolException(
                 "BW_COMPUTER_VOICE_CONTEXT_NOT_ACTIVE",
                 "Reader context 只允许发送到当前活动通话");
         }
+        if (
+            mode == DirectContextDeliveryMode.SnapshotMcp
+            && !activeSession
+            && !contextOnly
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_READER_CONTEXT_SNAPSHOT_NOT_OPEN",
+                "Reader 本地快照连接尚未打开");
+        }
         string sessionId = RequireSafeId(message, "sessionId");
         _ = DirectPcmFrameCodec.ParseSessionId(sessionId);
+        if (contextOnly)
+        {
+            RequireContextOnlySession(sessionId);
+        }
         string contextContract = RequireString(
             message,
             "contextContract",
@@ -446,19 +539,151 @@ internal sealed class DirectBridgeProtocolSession
         DirectContextEvent contextEvent =
             NamedPipeDirectContextAdapter.ValidateEvent(
                 message.GetProperty("event"));
-        DirectContextForwardResult forwarded =
-            await _coordinator.ForwardContextAsync(
-                _connectionId,
-                RequireSafeId(message, "requestId"),
-                sessionId,
-                contextContract,
-                contextEvent,
-                cancellationToken).ConfigureAwait(false);
+        string requestId = RequireSafeId(message, "requestId");
+        string outcome;
+        if (mode == DirectContextDeliveryMode.LegacyInject)
+        {
+            DirectContextForwardResult forwarded =
+                await _coordinator.ForwardLegacyContextAsync(
+                    _connectionId,
+                    requestId,
+                    sessionId,
+                    contextContract,
+                    contextEvent,
+                    cancellationToken).ConfigureAwait(false);
+            outcome = forwarded.Outcome;
+        }
+        else
+        {
+            DirectSnapshotForwardResult forwarded =
+                await _coordinator.ForwardSnapshotContextAsync(
+                    _connectionId,
+                    requestId,
+                    sessionId,
+                    contextEvent,
+                    requireActiveOwner: activeSession,
+                    cancellationToken).ConfigureAwait(false);
+            outcome = forwarded.Outcome;
+        }
         return new
         {
             sessionId,
             eventId = contextEvent.EventId,
             seq = contextEvent.Sequence,
+            outcome,
+        };
+    }
+
+    private async Task<object> HandleActiveReadingAsync(
+        JsonElement message,
+        CancellationToken cancellationToken)
+    {
+        RequireExactKeys(
+            message,
+            "contract",
+            "type",
+            "requestId",
+            "sessionId",
+            "activeContract",
+            "active");
+        RequireAuthenticated();
+        if (
+            RequireContextDeliveryMode()
+                != DirectContextDeliveryMode.SnapshotMcp
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_READER_CONTEXT_SNAPSHOT_MODE_REQUIRED",
+                "Windows 未启用 Reader 快照 MCP 实验模式");
+        }
+        bool activeSession = _phase == DirectProtocolPhase.Active;
+        if (
+            !activeSession
+            && _phase != DirectProtocolPhase.ContextOnly
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_READER_CONTEXT_SNAPSHOT_NOT_OPEN",
+                "Reader 本地快照连接尚未打开");
+        }
+        if (
+            RequireString(message, "activeContract", 128)
+                != FileDirectSnapshotContextAdapter
+                    .ActiveReadingContract
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_READER_ACTIVE_READING_SCHEMA_INVALID",
+                "Reader active-reading 合同无效");
+        }
+        string requestId = RequireSafeId(message, "requestId");
+        string sessionId = RequireSafeId(message, "sessionId");
+        _ = DirectPcmFrameCodec.ParseSessionId(sessionId);
+        if (!activeSession)
+        {
+            RequireContextOnlySession(sessionId);
+        }
+        DirectActiveReading activeReading =
+            FileDirectSnapshotContextAdapter.ValidateActiveReading(
+                message.GetProperty("active"));
+        DirectSnapshotForwardResult forwarded =
+            await _coordinator.ForwardActiveReadingAsync(
+                _connectionId,
+                requestId,
+                sessionId,
+                activeReading,
+                requireActiveOwner: activeSession,
+                cancellationToken).ConfigureAwait(false);
+        return new
+        {
+            sessionId,
+            revision = forwarded.Revision,
+            outcome = forwarded.Outcome,
+        };
+    }
+
+    private async Task<object> HandleContextClearAsync(
+        JsonElement message,
+        CancellationToken cancellationToken)
+    {
+        RequireExactKeys(
+            message,
+            "contract",
+            "type",
+            "requestId",
+            "sessionId");
+        RequireAuthenticated();
+        string mode = RequireContextDeliveryMode();
+        bool activeSession = _phase == DirectProtocolPhase.Active;
+        bool contextOnly =
+            _phase == DirectProtocolPhase.ContextOnly;
+        bool legacyTransition =
+            mode == DirectContextDeliveryMode.LegacyInject
+            && _phase == DirectProtocolPhase.AwaitingStart;
+        if (!activeSession && !contextOnly && !legacyTransition)
+        {
+            throw new DirectProtocolException(
+                "BW_READER_CONTEXT_SNAPSHOT_CLEAR_PHASE_INVALID",
+                "当前连接不能清空 Reader 本地快照");
+        }
+        string requestId = RequireSafeId(message, "requestId");
+        string sessionId = RequireSafeId(message, "sessionId");
+        _ = DirectPcmFrameCodec.ParseSessionId(sessionId);
+        if (contextOnly)
+        {
+            RequireContextOnlySession(sessionId);
+        }
+        DirectSnapshotForwardResult forwarded =
+            await _coordinator.ClearSnapshotContextAsync(
+                _connectionId,
+                requestId,
+                sessionId,
+                requireActiveOwner: activeSession,
+                cancellationToken).ConfigureAwait(false);
+        return new
+        {
+            sessionId,
+            revision = forwarded.Revision,
             outcome = forwarded.Outcome,
         };
     }
@@ -483,6 +708,28 @@ internal sealed class DirectBridgeProtocolSession
             throw new DirectProtocolException(
                 "BW_COMPUTER_VOICE_DIRECT_AUTH_REQUIRED",
                 "当前连接尚未认证");
+        }
+    }
+
+    private string RequireContextDeliveryMode() =>
+        _contextDeliveryMode
+        ?? throw new DirectProtocolException(
+            "BW_COMPUTER_VOICE_DIRECT_AUTH_REQUIRED",
+            "当前连接尚未认证");
+
+    private void RequireContextOnlySession(string sessionId)
+    {
+        if (
+            _contextOnlySessionId is null
+            || !string.Equals(
+                _contextOnlySessionId,
+                sessionId,
+                StringComparison.Ordinal)
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_READER_CONTEXT_SNAPSHOT_SESSION_MISMATCH",
+                "Reader 本地快照 sessionId 与当前连接不匹配");
         }
     }
 

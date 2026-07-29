@@ -596,13 +596,27 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                 // the atomic shortcut commit below. Start the already-approved
                 // typist first so its launcher checks cannot fill that queue
                 // with silent engine packets before the pump is owned.
-                await EnsureTypistThenStartPreparedMediaAsync(
-                        _typist.EnsureRunningAsync,
-                        lease => pendingTypistLease = lease,
-                        renderSession.StartAsync,
-                        outputSession.StartAsync,
-                        lifetime.Token)
-                    .ConfigureAwait(false);
+                if (request.StartTypist)
+                {
+                    await EnsureTypistThenStartPreparedMediaAsync(
+                            _typist.EnsureRunningAsync,
+                            lease => pendingTypistLease = lease,
+                            renderSession.StartAsync,
+                            outputSession.StartAsync,
+                            lifetime.Token)
+                        .ConfigureAwait(false);
+                }
+                else
+                {
+                    // Snapshot-MCP mode keeps the already-validated media and
+                    // shortcut path, but must never acquire a Voice Typist
+                    // lease: proactive client text injection and MCP snapshot
+                    // delivery are mutually exclusive.
+                    await renderSession.StartAsync(lifetime.Token)
+                        .ConfigureAwait(false);
+                    await outputSession.StartAsync(lifetime.Token)
+                        .ConfigureAwait(false);
+                }
                 Pcm48kMonoFramer outputFramer = new(
                     outputSession.Format
                     ?? throw new DirectProtocolException(

@@ -1,8 +1,14 @@
 # Reader ↔ Windows 电脑语音直连
 
-状态：2026-07-29 Windows 0.1.0 已安装，Reader/PWA 0.2.69 已部署。Windows 服务由用户
-手动启动后保持 `idle`，**尚未创建登录 bootstrap 或启用 Tailscale Serve，当前
-`readerConnected=false`、`captureActive=false`，没有启动真实采音。**
+状态以 `references/reader-collaboration-status.md` 的最新登记和现场命令为准。本文件
+前半段保留了最初配对设计的历史推演；当前生产直连已经改为固定 Tailnet
+identity、无需配对码，权威媒体合同见 `reader-computer-audio-bridge.md`。
+
+2026-07-30 的上下文实验只替换最终文字末端：PWA 复用已验收的 Windows WSS 直连，
+把 Pi active/journal 事件写成 Windows 本地快照，再由常驻 MCP 的
+`reader_context_snapshot` 按需读取。旧 voice-typist 注入代码保留为
+`legacy-inject` 回滚模式；当前实验为 `snapshot-mcp`，两条互斥。该实验不改已经通过
+用户实测的麦克风、虚拟扬声器、快捷键或 PCM 链路。
 
 ## 目标
 
