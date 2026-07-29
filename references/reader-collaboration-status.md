@@ -3538,3 +3538,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：安装路径双 self-test 通过；native/desktop 摘要与 0.1.16 manifest 一致，任务 Running、唯一 localhost listener 与状态 PID 一致，持续为 `idle / readerConnected=false / captureActive=false / lastError=null`，typist=0。
 - **故障与恢复**：前三次热重启因尚未挂断的 PWA 自动重连为 `active`，安装器均 fail closed 并按摘要恢复 0.1.14；用户挂断后采用停机安装，最终启动验收通过，失败取证目录保留。
 - **没做/下一步**：未发送 START、快捷键或采音，未改日常 Chrome，未提交、推送或部署 Reader 0.2.74；当前快照文件尚不存在，需新会话加载 MCP，并在 Reader 候选可用后做隔离人工验收。
+
+## Codex：Reader 0.2.74 / Windows 快照 MCP 已正式部署（2026-07-30 JST）
+- **发布事实**：快照 MCP 双模式源码精确提交并推送为 `f8bda39`；Windows 官方无副作用预检与正式部署均 exit 0，Reader `0.2.74`、KG `kg-0.2.74-91aaf94f2a8167582ec2`。
+- **回滚**：普通文件备份与 KG 状态取证目录为 `/home/bwicarus/deploy-backups/reader/20260729T233604Z-115972`；部署脚本内置 E2E 全过且未触发回滚。
+- **部署后验证**：Pi HEAD 与提交一致，webapp/voice-rt active；公网 Reader 与新版 `snapshot-mcp`、`context-open`、`context-clear` 静态资源均 HTTP 200。
+- **Windows 状态**：0.1.16 仍为 `idle / readerConnected=false / captureActive=false / lastError=null`，配置 `snapshot-mcp`、`reader_snapshot` MCP 已注册，未自动发送 START、快捷键或采音。
+- **下一步**：用户刷新 iPad PWA 并保持上下文同步开启，再新开 Codex 会话加载 MCP；首次页面快照出现后验证“当前页/当前选区”按需读取且输入框无注入。
