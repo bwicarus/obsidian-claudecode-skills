@@ -3318,7 +3318,12 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
   6 assertions 均通过。Windows 完整 `handoff_check.py` 最终仍为 `errors=2`，仅来自项目已
   明确保留为 Pi-only 的三条 `fcntl` 导入链；不得在 Windows 改写这些生产并发锁，须由推送后
   的 Pi 无副作用预检清除。
+- **提交与首次远程预检**：直连、发布门禁和文档三笔提交
+  `c7f30c8 / 68f7e3d / 2162772` 已精确推送到 `origin/learning-loop-review-fixes`。
+  Windows 受控封装的首次 `-PreflightOnly` 证明：来袭 44 个文件与 Pi 的 15 个脏文件无交集，
+  Pi `ff-only` 到 `2162772`；完整门禁生成 150 项清单与
+  `kg-0.2.69-d1e3f7a2a02bccfa1393`，并明确输出“未创建生产备份、release 或 current”。
+  后续若再追加证据类提交，正式部署前必须在新 HEAD 重跑同一预检。
 - **尚未完成**：固定 `BW Codex Chrome Test` 独立环境仍是 0.2.68，尚未离线替换为 0.2.69
-  并执行用户人工清单；尚未提交、推送、运行 `deploy_from_windows.ps1 -PreflightOnly` 或正式
-  部署。真实 WSS 配对、自动打开 Codex、麦克风、应用输出听感和停止行为只能在部署并由用户
-  明确启用 bootstrap/Serve 后做 iPad 真机 E2E。
+  并执行用户人工清单；尚未正式部署。真实 WSS 配对、自动打开 Codex、麦克风、应用输出听感和
+  停止行为只能在部署并由用户明确启用 bootstrap/Serve 后做 iPad 真机 E2E。

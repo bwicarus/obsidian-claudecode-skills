@@ -46,6 +46,7 @@ extensions/bw-reader-webext-*-safari-ios.zip
 extensions/bw-reader-webext-test-channel*.zip
 extensions/bw-reader-webext-test-channel.json
 extensions/bw-reader-extension-test.ps1
+extensions/bw-reader-extension-test-v*.ps1
 
 # Windows 电脑语音直连桥接器：仅本机候选打包输出，绝不包含运行时配置或配对状态
 extensions/bw-reader-webext/windows/candidates/
