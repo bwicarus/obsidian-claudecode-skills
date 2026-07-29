@@ -94,16 +94,47 @@ class DirectPackageTests(unittest.TestCase):
             source_paths = {
                 item["path"] for item in manifest["buildInputs"]["sourceFiles"]
             }
+            source_hashes = {
+                item["path"]: item["sha256"]
+                for item in manifest["buildInputs"]["sourceFiles"]
+            }
             self.assertNotIn("input/ComputerVoiceAudio/obj/Generated.cs", source_paths)
             self.assertNotIn(
                 "input/computer-voice-desktop/tests/test_desktop.py",
                 source_paths,
             )
             self.assertIn("package_computer_voice_direct.py", source_paths)
+            self.assertIn("bw_computer_voice_typist_helper.py", source_paths)
+            self.assertIn("bw_computer_voice_supervisor.py", source_paths)
+            self.assertEqual(
+                source_hashes["bw_computer_voice_typist_helper.py"],
+                package._sha256(
+                    package.TYPIST_HELPER_SOURCE.read_bytes()
+                ),
+            )
+            self.assertEqual(
+                source_hashes["bw_computer_voice_supervisor.py"],
+                package._sha256(
+                    package.SUPERVISOR_SOURCE.read_bytes()
+                ),
+            )
             with zipfile.ZipFile(archive) as zip_file:
                 self.assertEqual(zip_file.namelist(), sorted(zip_file.namelist()))
                 for info in zip_file.infolist():
                     self.assertEqual(info.date_time, package.ARCHIVE_STAMP)
+                prefix = package.bundle_name("0.4.1")
+                self.assertEqual(
+                    zip_file.read(
+                        f"{prefix}/{package.TYPIST_HELPER_REL}"
+                    ),
+                    package.TYPIST_HELPER_SOURCE.read_bytes(),
+                )
+                self.assertEqual(
+                    zip_file.read(
+                        f"{prefix}/{package.SUPERVISOR_REL}"
+                    ),
+                    package.SUPERVISOR_SOURCE.read_bytes(),
+                )
             self.assertTrue(any("publish" in call for call in runner.calls))
             self.assertTrue(any("--onefile" in call for call in runner.calls))
             publish_call = next(call for call in runner.calls if "publish" in call)
@@ -145,6 +176,9 @@ class DirectPackageTests(unittest.TestCase):
             self.assertEqual(read_archive.call_count, 1)
             self.assertEqual(len(runner.calls), 2)
             self.assertTrue(all(call[-1:] == ("--self-test",) for call in runner.calls))
+            self.assertTrue(
+                all(Path(call[0]).suffix.casefold() == ".exe" for call in runner.calls)
+            )
             self.assertEqual(len(set(runner.cwds)), 1)
             temporary_root = runner.cwds[0]
             prefix = package.bundle_name("0.4.1")
@@ -195,6 +229,44 @@ class DirectPackageTests(unittest.TestCase):
                 package.run_packaged_self_tests(archive, runner=runner)
             self.assertEqual(archive_reads, 1)
             self.assertEqual(len(runner.calls), 2)
+
+    def test_packaged_self_test_compiles_python_runtime_without_running_it(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            audio, desktop = self._sources(root)
+            candidates = root / "candidates"
+            dotnet = root / "dotnet.exe"
+            pyinstaller = root / "pyinstaller.exe"
+            helper = root / "bw_computer_voice_typist_helper.py"
+            supervisor = root / "bw_computer_voice_supervisor.py"
+            dotnet.write_bytes(b"tool")
+            pyinstaller.write_bytes(b"tool")
+            helper.write_text("def invalid(:\\n", encoding="utf-8")
+            supervisor.write_text("VALUE = 1\\n", encoding="utf-8")
+            archive = package.build_candidate(
+                "0.4.1",
+                runner=FakeRunner(),
+                candidates=candidates,
+                dotnet=dotnet,
+                pyinstaller=pyinstaller,
+                audio_source=audio,
+                desktop_source=desktop,
+                typist_helper_source=helper,
+                supervisor_source=supervisor,
+            )
+            runner = FakeRunner()
+            with self.assertRaisesRegex(
+                package.PackageError,
+                "Python runtime 语法无效",
+            ):
+                package.run_packaged_self_tests(
+                    archive,
+                    runner=runner,
+                )
+            self.assertEqual(len(runner.calls), 2)
+            self.assertTrue(
+                all(call[-1:] == ("--self-test",) for call in runner.calls)
+            )
 
     def test_existing_candidate_is_never_overwritten(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -316,26 +388,43 @@ class DirectPackageTests(unittest.TestCase):
         payload = {
             package.NATIVE_REL: b"native",
             package.DESKTOP_REL: b"desktop",
+            package.TYPIST_HELPER_REL: b"helper",
+            package.SUPERVISOR_REL: b"supervisor",
         }
+        build_inputs = [
+            {
+                "path": "ComputerVoiceAudio/Program.cs",
+                "sha256": "1" * 64,
+            },
+            {
+                "path": "bw_computer_voice_supervisor.py",
+                "sha256": "2" * 64,
+            },
+            {
+                "path": "bw_computer_voice_typist_helper.py",
+                "sha256": "3" * 64,
+            },
+            {
+                "path": "computer-voice-desktop/desktop_launcher.py",
+                "sha256": "4" * 64,
+            },
+            {
+                "path": "package_computer_voice_direct.py",
+                "sha256": "5" * 64,
+            },
+        ]
+        build_inputs.sort(key=lambda item: item["path"])
         manifest = package.build_manifest(
             version="0.4.1",
             payload=payload,
-            build_inputs=[
-                {
-                    "path": "ComputerVoiceAudio/Program.cs",
-                    "sha256": "1" * 64,
-                },
-                {
-                    "path": "computer-voice-desktop/desktop_launcher.py",
-                    "sha256": "2" * 64,
-                },
-                {
-                    "path": "package_computer_voice_direct.py",
-                    "sha256": "3" * 64,
-                },
-            ],
+            build_inputs=build_inputs,
             dotnet_version="8.0.423",
             pyinstaller_version="6.20.0",
+        )
+        package._validate_manifest(
+            manifest,
+            version="0.4.1",
+            payload=payload,
         )
 
         invalid_manifests = []

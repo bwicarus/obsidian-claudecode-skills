@@ -13,6 +13,7 @@ internal sealed record DirectBridgeConfig(
     int ListenPort,
     IReadOnlySet<string> AllowedOrigins,
     string AllowedTailscaleUserLogin,
+    bool ExperimentalSingleUserMode,
     string PairingCodeHash,
     DateTimeOffset? PairingExpiresAtUtc,
     string PairedClientPublicKeySpki,
@@ -81,22 +82,49 @@ internal sealed class DirectBridgeConfigStore
                     MaxDepth = 8,
                 });
             JsonElement root = document.RootElement;
-            RequireExactKeys(
-                root,
-                "contract",
-                "localOptIn",
-                "microphoneEndpointId",
-                "listenHost",
-                "listenPort",
-                "allowedOrigins",
-                "allowedTailscaleUserLogin",
-                "pairingCodeHash",
-                "pairingExpiresAtUtc",
-                "pairedClientPublicKeySpki",
-                "pairedClientFingerprintSha256",
-                "outputScope",
-                "appKind",
-                "runtimeStatusPath");
+            bool hasExperimentalSingleUserMode =
+                root.TryGetProperty(
+                    "experimentalSingleUserMode",
+                    out _);
+            if (hasExperimentalSingleUserMode)
+            {
+                RequireExactKeys(
+                    root,
+                    "contract",
+                    "localOptIn",
+                    "microphoneEndpointId",
+                    "listenHost",
+                    "listenPort",
+                    "allowedOrigins",
+                    "allowedTailscaleUserLogin",
+                    "experimentalSingleUserMode",
+                    "pairingCodeHash",
+                    "pairingExpiresAtUtc",
+                    "pairedClientPublicKeySpki",
+                    "pairedClientFingerprintSha256",
+                    "outputScope",
+                    "appKind",
+                    "runtimeStatusPath");
+            }
+            else
+            {
+                RequireExactKeys(
+                    root,
+                    "contract",
+                    "localOptIn",
+                    "microphoneEndpointId",
+                    "listenHost",
+                    "listenPort",
+                    "allowedOrigins",
+                    "allowedTailscaleUserLogin",
+                    "pairingCodeHash",
+                    "pairingExpiresAtUtc",
+                    "pairedClientPublicKeySpki",
+                    "pairedClientFingerprintSha256",
+                    "outputScope",
+                    "appKind",
+                    "runtimeStatusPath");
+            }
 
             if (RequireString(root, "contract", 128)
                     != DirectBridgeContract.ConfigContract)
@@ -134,6 +162,12 @@ internal sealed class DirectBridgeConfigStore
                 root,
                 "allowedTailscaleUserLogin",
                 320);
+            bool experimentalSingleUserMode =
+                hasExperimentalSingleUserMode
+                    ? RequireBoolean(
+                        root,
+                        "experimentalSingleUserMode")
+                    : true;
             if (
                 !string.Equals(
                     allowedTailscaleUserLogin,
@@ -212,6 +246,7 @@ internal sealed class DirectBridgeConfigStore
                 listenPort,
                 allowedOrigins,
                 allowedTailscaleUserLogin,
+                experimentalSingleUserMode,
                 pairingCodeHash,
                 pairingExpiresAtUtc,
                 clientSpki,
@@ -341,6 +376,8 @@ internal sealed class DirectBridgeConfigStore
                 .ToArray(),
             allowedTailscaleUserLogin =
                 config.AllowedTailscaleUserLogin,
+            experimentalSingleUserMode =
+                config.ExperimentalSingleUserMode,
             pairingCodeHash = config.PairingCodeHash,
             pairingExpiresAtUtc = config.PairingExpiresAtUtc,
             pairedClientPublicKeySpki =

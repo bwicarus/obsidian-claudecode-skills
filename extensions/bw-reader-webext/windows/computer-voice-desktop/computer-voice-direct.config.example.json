@@ -1,6 +1,7 @@
 {
   "contract": "reader-computer-voice-direct-config/1",
   "localOptIn": true,
+  "experimentalSingleUserMode": true,
   "microphoneEndpointId": "{explicit-endpoint-id}",
   "listenHost": "127.0.0.1",
   "listenPort": 43128,

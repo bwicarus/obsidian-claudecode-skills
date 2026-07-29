@@ -461,6 +461,11 @@ internal sealed class NativeProcessLoopbackCaptureRuntimeFactory :
 internal sealed class NativeProcessLoopbackCaptureRuntime :
     IProcessLoopbackCaptureRuntime
 {
+    private static readonly AudioClientStreamFlags ProcessLoopbackStreamFlags =
+        AudioClientStreamFlags.Loopback
+        | AudioClientStreamFlags.EventCallback
+        | AudioClientStreamFlags.AutoConvertPcm;
+
     private readonly SharedEventDrivenPcmRuntime _inner;
 
     internal NativeProcessLoopbackCaptureRuntime(
@@ -468,9 +473,29 @@ internal sealed class NativeProcessLoopbackCaptureRuntime :
     {
         _inner = new SharedEventDrivenPcmRuntime(
             activated,
-            AudioClientStreamFlags.Loopback
-                | AudioClientStreamFlags.EventCallback);
+            ProcessLoopbackStreamFlags,
+            "app-output",
+            CreateProcessLoopbackCaptureFormat());
     }
+
+    internal static AudioClientStreamFlags StreamFlagsForTest =>
+        ProcessLoopbackStreamFlags;
+
+    internal static WaveFormatEx CaptureFormatForTest =>
+        CreateProcessLoopbackCaptureFormat();
+
+    private static WaveFormatEx CreateProcessLoopbackCaptureFormat() =>
+        new()
+        {
+            FormatTag = PcmAudioFormat.WaveFormatPcm,
+            Channels = 2,
+            SamplesPerSecond = Pcm48kMonoFramer.SampleRate,
+            AverageBytesPerSecond =
+                Pcm48kMonoFramer.SampleRate * 2u * sizeof(short),
+            BlockAlign = 2 * sizeof(short),
+            BitsPerSample = sizeof(short) * 8,
+            ExtraSize = 0,
+        };
 
     public PcmAudioFormat Initialize(EventWaitHandle audioReadyEvent)
         => _inner.Initialize(audioReadyEvent);

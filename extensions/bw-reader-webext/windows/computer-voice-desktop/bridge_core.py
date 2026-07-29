@@ -76,6 +76,7 @@ DIRECT_CONFIG_KEYS = frozenset(
     {
         "contract",
         "localOptIn",
+        "experimentalSingleUserMode",
         "microphoneEndpointId",
         "listenHost",
         "listenPort",
@@ -90,6 +91,9 @@ DIRECT_CONFIG_KEYS = frozenset(
         "runtimeStatusPath",
     }
 )
+LEGACY_DIRECT_CONFIG_KEYS = DIRECT_CONFIG_KEYS - {
+    "experimentalSingleUserMode"
+}
 DIRECT_STATUS_KEYS = frozenset(
     {
         "contract",
@@ -354,12 +358,19 @@ def validate_direct_config(
     *,
     expected_runtime_status: Path | None = None,
 ) -> dict[str, Any]:
-    if set(value) != DIRECT_CONFIG_KEYS:
+    keys = set(value)
+    if keys not in (DIRECT_CONFIG_KEYS, LEGACY_DIRECT_CONFIG_KEYS):
         raise BridgeError("直连配置字段不完整或包含未知字段。")
     if value.get("contract") != DIRECT_CONFIG_CONTRACT:
         raise BridgeError("直连配置合同版本不匹配。")
     if not isinstance(value.get("localOptIn"), bool):
         raise BridgeError("直连配置授权状态无效。")
+    experimental_single_user_mode = value.get(
+        "experimentalSingleUserMode",
+        True,
+    )
+    if not isinstance(experimental_single_user_mode, bool):
+        raise BridgeError("单用户实验模式状态无效。")
     microphone = _validate_microphone_id(
         str(value.get("microphoneEndpointId", ""))
     )
@@ -409,6 +420,7 @@ def validate_direct_config(
         raise BridgeError("直连状态文件偏离固定安装目录。")
     return {
         **value,
+        "experimentalSingleUserMode": experimental_single_user_mode,
         "microphoneEndpointId": microphone,
         "allowedOrigins": list(origins),
         "pairedClientPublicKeySpki": public_key,
@@ -476,11 +488,14 @@ def build_direct_config(
     *,
     allowed_origins: Sequence[str] = DEFAULT_ALLOWED_ORIGINS,
     local_opt_in: bool = True,
+    experimental_single_user_mode: bool = True,
     pairing: PairingMaterial | None = None,
     previous: dict[str, Any] | None = None,
     replace_paired_client: bool = False,
 ) -> dict[str, Any]:
     microphone = _validate_microphone_id(microphone_endpoint_id)
+    if not isinstance(experimental_single_user_mode, bool):
+        raise BridgeError("单用户实验模式状态无效。")
     origins = list(allowed_origins)
     if not origins or not all(_is_valid_origin(origin) for origin in origins):
         raise BridgeError("Reader HTTPS 来源白名单无效。")
@@ -507,6 +522,7 @@ def build_direct_config(
     value = {
         "contract": DIRECT_CONFIG_CONTRACT,
         "localOptIn": bool(local_opt_in),
+        "experimentalSingleUserMode": experimental_single_user_mode,
         "microphoneEndpointId": microphone,
         "listenHost": FIXED_LISTEN_HOST,
         "listenPort": FIXED_LISTEN_PORT,
@@ -596,6 +612,9 @@ def prepare_pairing(
         paths.runtime_status,
         allowed_origins=previous["allowedOrigins"],
         local_opt_in=True,
+        experimental_single_user_mode=previous[
+            "experimentalSingleUserMode"
+        ],
         pairing=pairing,
         previous=previous,
         replace_paired_client=replace_existing,
@@ -954,64 +973,91 @@ def disable_and_stop_direct_service(
     return True, False
 
 
-def enumerate_microphones() -> list[Microphone]:
-    # winreg is imported lazily so pure contract tests remain portable.  This
-    # function only reads Active capture endpoints and never writes registry.
-    try:
-        import winreg
-    except ImportError:
-        return []
-    capture_path = (
-        r"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture"
+def enumerate_microphones(
+    native_host: Path | None = None,
+) -> list[Microphone]:
+    # The old prototype enumerated MMDevices registry subkeys.  Those GUIDs
+    # are not IMMDevice endpoint IDs and are especially wrong inside RDP,
+    # where Core Audio exposes a session-specific RemoteCapture endpoint.
+    # Ask the bundled native host for the exact active IMMDevice::GetId values.
+    native_host = (
+        native_host.resolve()
+        if native_host is not None
+        else BridgePaths.discover().native_host
     )
-    microphones: list[Microphone] = []
-    try:
-        with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, capture_path) as root:
-            index = 0
-            while True:
-                try:
-                    endpoint_id = winreg.EnumKey(root, index)
-                except OSError:
-                    break
-                index += 1
-                try:
-                    with winreg.OpenKey(root, endpoint_id) as endpoint:
-                        state = int(
-                            winreg.QueryValueEx(endpoint, "DeviceState")[0]
-                        )
-                    if state != 1:
-                        continue
-                    labels: dict[str, str] = {}
-                    with winreg.OpenKey(
-                        root,
-                        endpoint_id + r"\Properties",
-                    ) as properties:
-                        value_index = 0
-                        while True:
-                            try:
-                                name, item, _ = winreg.EnumValue(
-                                    properties,
-                                    value_index,
-                                )
-                            except OSError:
-                                break
-                            value_index += 1
-                            if isinstance(item, str) and item:
-                                labels[name.rsplit(",", 1)[-1]] = item
-                    microphones.append(
-                        Microphone(
-                            endpoint_id=endpoint_id,
-                            friendly_name=(
-                                labels.get("26")
-                                or labels.get("6")
-                                or endpoint_id
-                            ),
-                        )
-                    )
-                except OSError:
-                    continue
-    except OSError:
+    if not native_host.is_file():
         return []
+    try:
+        flags = (
+            subprocess.CREATE_NO_WINDOW
+            if os.name == "nt"
+            else 0
+        )
+        result = subprocess.run(
+            (str(native_host), "--list-direct-microphones"),
+            cwd=str(native_host.parent),
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="strict",
+            timeout=5,
+            check=False,
+            shell=False,
+            creationflags=flags,
+        )
+    except (OSError, UnicodeError, subprocess.SubprocessError):
+        return []
+    if result.returncode != 0:
+        return []
+    try:
+        value = json.loads(result.stdout)
+    except (TypeError, json.JSONDecodeError):
+        return []
+    if (
+        not isinstance(value, dict)
+        or set(value) != {
+            "contract",
+            "ok",
+            "captureStarted",
+            "devices",
+        }
+        or value.get("contract")
+            != "reader-computer-voice-microphones/1"
+        or value.get("ok") is not True
+        or value.get("captureStarted") is not False
+        or not isinstance(value.get("devices"), list)
+        or len(value["devices"]) > 64
+    ):
+        return []
+    microphones: list[Microphone] = []
+    seen: set[str] = set()
+    for item in value["devices"]:
+        if (
+            not isinstance(item, dict)
+            or set(item) != {"endpointId", "friendlyName"}
+            or not isinstance(item.get("endpointId"), str)
+            or not isinstance(item.get("friendlyName"), str)
+        ):
+            return []
+        try:
+            endpoint_id = _validate_microphone_id(item["endpointId"])
+        except BridgeError:
+            return []
+        friendly_name = item["friendlyName"]
+        if (
+            len(friendly_name) > 512
+            or any(ord(character) < 32 for character in friendly_name)
+            or endpoint_id in seen
+        ):
+            return []
+        seen.add(endpoint_id)
+        microphones.append(
+            Microphone(
+                endpoint_id=endpoint_id,
+                friendly_name=friendly_name or endpoint_id,
+            )
+        )
     microphones.sort(key=lambda item: item.display_name.casefold())
     return microphones
 
@@ -1347,11 +1393,11 @@ def build_self_test_report(paths: BridgePaths) -> dict[str, Any]:
         ),
     )
     check(
-        "pairing-hash-contract",
-        lambda: pairing_material_from_code(
-            "ABCDEFGHJK",
-            now=datetime(2026, 1, 1, tzinfo=timezone.utc),
-        ),
+        "single-user-mode-contract",
+        lambda: build_direct_config(
+            "{self-test-endpoint}",
+            paths.runtime_status,
+        )["experimentalSingleUserMode"] is True,
     )
     report = {
         "contract": SELF_TEST_CONTRACT,

@@ -42,7 +42,7 @@ internal static class DirectBridgeSelfTest
         string root,
         ICollection<string> checks)
     {
-        const string origin = "https://reader.example";
+        const string origin = "https://bwicarus.taile44d0c.ts.net";
         const string pairingCode = "ABCDEFGH23";
         DateTimeOffset now = new(
             2026,
@@ -84,9 +84,10 @@ internal static class DirectBridgeSelfTest
             && initial.AllowedOrigins.SetEquals(new[] { origin })
             && initial.AllowedTailscaleUserLogin
                 == "bwicarus@gmail.com"
+            && initial.ExperimentalSingleUserMode
             && initial.HasPairingCode
             && !initial.HasPairedClient,
-            "direct-config-localhost-origin-and-pair-hash",
+            "direct-config-localhost-single-user-and-pair-hash",
             checks);
         Require(
             DirectBridgeServer.TailscaleLoginMatches(
@@ -164,6 +165,42 @@ internal static class DirectBridgeSelfTest
             store,
             appLauncher,
             mediaAdapter);
+        DirectBridgeProtocolSession directSession = new(
+            "connection-v2-self-test",
+            "https://extension-page.example",
+            store,
+            coordinator,
+            () => now);
+        List<object> directEvents = [];
+        List<byte[]> directPcmFrames = [];
+        JsonElement directHello = await SendAsync(
+            directSession,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "hello",
+                requestId = "request-v2-hello",
+                protocolVersion = 2,
+            },
+            directEvents,
+            directPcmFrames).ConfigureAwait(false);
+        JsonElement directHelloPayload = RequireSuccess(
+            directHello,
+            "hello");
+        Require(
+            directHelloPayload.GetProperty("protocolVersion")
+                .GetInt32() == 2
+            && directHelloPayload.GetProperty("limits")
+                .GetProperty("pcmFrameBytes").GetInt32() == 1956
+            && directSession.IsAuthenticated
+            && directSession.Phase == DirectProtocolPhase.AwaitingStart
+            && appLauncher.EnsureRunningCount == 0
+            && mediaAdapter.StartCount == 0
+            && directEvents.Count == 0
+            && directPcmFrames.Count == 0,
+            "direct-v2-hello-authenticates-without-side-effects",
+            checks);
+
         DirectBridgeProtocolSession session = new(
             "connection-self-test",
             origin,
@@ -485,11 +522,16 @@ internal static class DirectBridgeSelfTest
             },
             events,
             pcmFrames).ConfigureAwait(false);
-        _ = RequireSuccess(stop, "stop");
         Require(
-            mediaAdapter.StopCount == 1
-            && !mediaAdapter.CaptureActive,
-            "direct-stop-closes-capture",
+            !stop.GetProperty("ok").GetBoolean()
+            && stop.GetProperty("error").GetProperty("code")
+                .GetString()
+                == "BW_COMPUTER_VOICE_DIRECT_FAKE_PUMP_FAILED"
+            && mediaAdapter.StopCount == 1
+            && !mediaAdapter.CaptureActive
+            && coordinator.ActiveSessionId is null
+            && session.Phase == DirectProtocolPhase.AwaitingStart,
+            "direct-stop-closes-capture-and-surfaces-media-failure",
             checks);
 
         await CheckLocalOptInGateAsync(
@@ -510,10 +552,602 @@ internal static class DirectBridgeSelfTest
         await CheckHeartbeatDeadlineAsync(
             configPath,
             checks).ConfigureAwait(false);
+        await CheckTypistLeaseLifecycleAsync(checks)
+            .ConfigureAwait(false);
+        await CheckAtomicShortcutAndBestEffortCleanupAsync(checks)
+            .ConfigureAwait(false);
+        await CheckPeerAbortDuringStopAsync(
+            configPath,
+            checks).ConfigureAwait(false);
+        await CheckOuterDisposeRetryAsync(
+            configPath,
+            checks).ConfigureAwait(false);
+        await CheckExplicitStopFailureAsync(
+            configPath,
+            checks).ConfigureAwait(false);
         CheckConnectionPhaseDeadlines(checks);
         CheckPcmSequenceGate(checks);
         CheckProductionAdapterBoundaries(root, checks);
         CheckStrictOriginConfig(root, checks);
+    }
+
+    private static async Task CheckExplicitStopFailureAsync(
+        string configPath,
+        ICollection<string> checks)
+    {
+        FakeDirectMediaAdapter media = new()
+        {
+            StopFailure = new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_TYPIST_STOP_FAILED",
+                "typist stop failed"),
+        };
+        await using DirectBridgeCoordinator coordinator = new(
+            new DirectBridgeConfigStore(configPath),
+            new FakeDirectAppLauncher(),
+            media);
+        DirectBridgeProtocolSession session = new(
+            "connection-stop-failure",
+            "https://extension-page.example",
+            new DirectBridgeConfigStore(configPath),
+            coordinator,
+            () => DateTimeOffset.UtcNow);
+        List<object> events = [];
+        List<byte[]> frames = [];
+        _ = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "hello",
+                    requestId = "request-stop-failure-hello",
+                    protocolVersion = 2,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "hello");
+        string sessionId = "session-" + DirectBase64Url.Encode(
+            Enumerable.Range(32, 16)
+                .Select(value => (byte)value)
+                .ToArray());
+        _ = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "start",
+                    requestId = "request-stop-failure-start",
+                    sessionId,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "start");
+        JsonElement stop = await SendAsync(
+            session,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "stop",
+                requestId = "request-stop-failure-stop",
+                sessionId,
+            },
+            events,
+            frames).ConfigureAwait(false);
+        Require(
+            !stop.GetProperty("ok").GetBoolean()
+            && stop.GetProperty("error").GetProperty("code")
+                .GetString()
+                == "BW_COMPUTER_VOICE_DIRECT_TYPIST_STOP_FAILED"
+            && coordinator.ActiveSessionId is null
+            && session.Phase == DirectProtocolPhase.AwaitingStart,
+            "direct-explicit-stop-surfaces-release-failure-and-clears-session",
+            checks);
+    }
+
+    private static async Task CheckPeerAbortDuringStopAsync(
+        string configPath,
+        ICollection<string> checks)
+    {
+        FakeDirectMediaAdapter media = new()
+        {
+            BlockStopUntilReleased = true,
+        };
+        await using DirectBridgeCoordinator coordinator = new(
+            new DirectBridgeConfigStore(configPath),
+            new FakeDirectAppLauncher(),
+            media);
+        const string connectionId = "connection-peer-abort-stop";
+        string sessionId = "session-" + DirectBase64Url.Encode(
+            Enumerable.Range(96, 16)
+                .Select(value => (byte)value)
+                .ToArray());
+        _ = await coordinator.StartAsync(
+            connectionId,
+            sessionId,
+            (_, _) => Task.CompletedTask,
+            (_, _) => Task.CompletedTask,
+            CancellationToken.None).ConfigureAwait(false);
+
+        using CancellationTokenSource peerAbort = new();
+        Task stopTask = coordinator.StopAsync(
+            connectionId,
+            sessionId,
+            peerAbort.Token);
+        bool stillCleaningAfterPeerAbort;
+        try
+        {
+            await media.StopEntered.WaitAsync(TimeSpan.FromSeconds(2))
+                .ConfigureAwait(false);
+            peerAbort.Cancel();
+            await Task.Yield();
+            stillCleaningAfterPeerAbort = !stopTask.IsCompleted;
+        }
+        finally
+        {
+            media.ReleaseBlockedStop();
+        }
+        await stopTask.WaitAsync(TimeSpan.FromSeconds(2))
+            .ConfigureAwait(false);
+        Require(
+            stillCleaningAfterPeerAbort
+            && media.StopCancellationCanBeCanceled == false
+            && media.StopCount == 1
+            && !media.CaptureActive
+            && coordinator.ActiveSessionId is null,
+            "direct-peer-abort-during-stop-cannot-cancel-owned-teardown",
+            checks);
+    }
+
+    private static async Task CheckOuterDisposeRetryAsync(
+        string configPath,
+        ICollection<string> checks)
+    {
+        FakeDirectMediaAdapter coordinatorMedia = new()
+        {
+            DisposeFailuresRemaining = 1,
+        };
+        DirectBridgeCoordinator coordinator = new(
+            new DirectBridgeConfigStore(configPath),
+            new FakeDirectAppLauncher(),
+            coordinatorMedia);
+        const string connectionId = "connection-dispose-retry";
+        string sessionId = "session-" + DirectBase64Url.Encode(
+            Enumerable.Range(112, 16)
+                .Select(value => (byte)value)
+                .ToArray());
+        _ = await coordinator.StartAsync(
+            connectionId,
+            sessionId,
+            (_, _) => Task.CompletedTask,
+            (_, _) => Task.CompletedTask,
+            CancellationToken.None).ConfigureAwait(false);
+        bool firstCoordinatorDisposeFailed = false;
+        try
+        {
+            await coordinator.DisposeAsync().ConfigureAwait(false);
+        }
+        catch (DirectProtocolException exception)
+        {
+            firstCoordinatorDisposeFailed = exception.Code
+                == "BW_COMPUTER_VOICE_DIRECT_FAKE_DISPOSE_FAILED";
+        }
+        bool coordinatorOwnershipRetained =
+            coordinatorMedia.CleanupOwnership;
+        await coordinator.DisposeAsync().ConfigureAwait(false);
+        await coordinator.DisposeAsync().ConfigureAwait(false);
+        Require(
+            firstCoordinatorDisposeFailed
+            && coordinatorOwnershipRetained
+            && !coordinatorMedia.CleanupOwnership
+            && coordinatorMedia.DisposeCount == 2
+            && coordinator.ActiveSessionId is null,
+            "direct-coordinator-dispose-retries-retained-media-owner",
+            checks);
+
+        FakeDirectMediaAdapter serverMedia = new()
+        {
+            CleanupOwnership = true,
+            DisposeFailuresRemaining = 1,
+        };
+        DirectBridgeServer server = new(
+            new DirectBridgeConfigStore(configPath),
+            new FakeDirectAppLauncher(),
+            serverMedia);
+        await server.DisposeAsync().ConfigureAwait(false);
+        await server.DisposeAsync().ConfigureAwait(false);
+        Require(
+            !serverMedia.CleanupOwnership
+            && serverMedia.DisposeCount == 2,
+            "direct-single-outer-dispose-consumes-owner-retry-budget",
+            checks);
+
+        FakeDirectMediaAdapter exhaustedMedia = new()
+        {
+            CleanupOwnership = true,
+            DisposeFailuresRemaining = 2,
+        };
+        DirectBridgeServer exhaustedServer = new(
+            new DirectBridgeConfigStore(configPath),
+            new FakeDirectAppLauncher(),
+            exhaustedMedia);
+        bool boundedFailureObserved = false;
+        try
+        {
+            await exhaustedServer.DisposeAsync().ConfigureAwait(false);
+        }
+        catch (DirectProtocolException exception)
+        {
+            boundedFailureObserved =
+                exception.Code
+                    == "BW_COMPUTER_VOICE_DIRECT_FAKE_DISPOSE_FAILED"
+                && exception.InnerException is AggregateException;
+        }
+        bool retainedAfterBudget =
+            exhaustedMedia.CleanupOwnership
+            && exhaustedMedia.DisposeCount == 2;
+        await exhaustedServer.DisposeAsync().ConfigureAwait(false);
+        await exhaustedServer.DisposeAsync().ConfigureAwait(false);
+        Require(
+            boundedFailureObserved
+            && retainedAfterBudget
+            && !exhaustedMedia.CleanupOwnership
+            && exhaustedMedia.DisposeCount == 3,
+            "direct-outer-dispose-budget-is-bounded-and-remains-retryable",
+            checks);
+    }
+
+    private static async Task CheckTypistLeaseLifecycleAsync(
+        ICollection<string> checks)
+    {
+        List<string[]> calls = [];
+        WindowsDirectTypistLeaseController ownedController = new(
+            (arguments, _) =>
+            {
+                calls.Add(arguments.ToArray());
+                DirectTypistHelperResult result =
+                    arguments[0] == "--ensure-running"
+                        ? new DirectTypistHelperResult(
+                            0,
+                            """
+                            {"ok":true,"running":true,"pid":4512,"result":"started"}
+                            """,
+                            "")
+                        : new DirectTypistHelperResult(
+                            0,
+                            """
+                            {"ok":true,"running":false,"stopped":true,"result":"stopped","expectedPid":4512}
+                            """,
+                            "");
+                return Task.FromResult(result);
+            });
+        DirectTypistLease? owned =
+            await ownedController.EnsureRunningAsync(
+                CancellationToken.None).ConfigureAwait(false);
+        Require(
+            owned?.ProcessId == 4512
+            && calls.Count == 1
+            && calls[0].SequenceEqual(
+                new[] { "--ensure-running" }),
+            "direct-typist-started-result-creates-owned-lease",
+            checks);
+        await ownedController.ReleaseAsync(
+            owned!,
+            CancellationToken.None).ConfigureAwait(false);
+        Require(
+            calls.Count == 2
+            && calls[1].SequenceEqual(
+                new[] { "--stop-if-owned", "4512" }),
+            "direct-typist-owned-lease-releases-with-exact-pid",
+            checks);
+        DirectProtocolException original = new(
+            "BW_COMPUTER_VOICE_DIRECT_SHORTCUT_FAILED",
+            "shortcut failed");
+        DirectProtocolException combined =
+            WindowsDirectMediaAdapter
+                .CombineStartAndTypistReleaseFailures(
+                    original,
+                    new InvalidOperationException("stop failed"));
+        Require(
+            combined.Code == original.Code
+            && combined.InnerException is AggregateException aggregate
+            && aggregate.InnerExceptions.Count == 2
+            && ReferenceEquals(
+                aggregate.InnerExceptions[0],
+                original),
+            "direct-typist-start-cleanup-preserves-and-aggregates-failure",
+            checks);
+
+        WindowsDirectTypistLeaseController failingRelease = new(
+            (arguments, _) => Task.FromResult(
+                new DirectTypistHelperResult(
+                    arguments[0] == "--stop-if-owned" ? 1 : 0,
+                    "",
+                    "")));
+        bool releaseRejected = false;
+        try
+        {
+            await failingRelease.ReleaseAsync(
+                new DirectTypistLease(4512),
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (DirectProtocolException exception)
+        {
+            releaseRejected =
+                exception.Code
+                    == "BW_COMPUTER_VOICE_DIRECT_TYPIST_STOP_FAILED";
+        }
+        Require(
+            releaseRejected,
+            "direct-typist-release-failure-is-not-silent",
+            checks);
+
+        List<string[]> retryCalls = [];
+        int releaseAttempts = 0;
+        WindowsDirectTypistLeaseController retryController = new(
+            (arguments, _) =>
+            {
+                retryCalls.Add(arguments.ToArray());
+                releaseAttempts++;
+                return Task.FromResult(
+                    releaseAttempts == 1
+                        ? new DirectTypistHelperResult(1, "", "")
+                        : new DirectTypistHelperResult(
+                            0,
+                            """
+                            {"ok":true,"running":false,"stopped":true,"result":"stopped","expectedPid":4512}
+                            """,
+                            ""));
+            });
+        WindowsDirectMediaAdapter retryAdapter = new(retryController);
+        bool startFailurePreserved = false;
+        try
+        {
+            await retryAdapter
+                .ReleasePendingTypistAfterStartFailureAsync(
+                    new DirectTypistLease(4512),
+                    original)
+                .ConfigureAwait(false);
+        }
+        catch (DirectProtocolException exception)
+        {
+            startFailurePreserved =
+                exception.Code == original.Code
+                && exception.InnerException is AggregateException;
+        }
+        await retryAdapter.DisposeAsync().ConfigureAwait(false);
+        await retryAdapter.DisposeAsync().ConfigureAwait(false);
+        Require(
+            startFailurePreserved
+            && retryCalls.Count == 2
+            && retryCalls.All(arguments =>
+                arguments.SequenceEqual(
+                    new[] { "--stop-if-owned", "4512" })),
+            "direct-start-failed-typist-release-retains-and-retries-exact-pid",
+            checks);
+
+        foreach (string result in new[]
+        {
+            "already-running",
+            "raced-running",
+        })
+        {
+            int invocationCount = 0;
+            WindowsDirectTypistLeaseController reusedController = new(
+                (arguments, _) =>
+                {
+                    invocationCount++;
+                    return Task.FromResult(
+                        new DirectTypistHelperResult(
+                            0,
+                            $$"""
+                            {"ok":true,"running":true,"pid":9002,"result":"{{result}}"}
+                            """,
+                            ""));
+                });
+            DirectTypistLease? reused =
+                await reusedController.EnsureRunningAsync(
+                    CancellationToken.None).ConfigureAwait(false);
+            Require(
+                reused is null && invocationCount == 1,
+                "direct-typist-" + result
+                    + "-does-not-create-stop-lease",
+                checks);
+        }
+    }
+
+    private static async Task
+        CheckAtomicShortcutAndBestEffortCleanupAsync(
+            ICollection<string> checks)
+    {
+        using CancellationTokenSource peerClose = new();
+        int shortcutCount = 0;
+        int commitCount = 0;
+        WindowsDirectMediaAdapter.SendShortcutAtAtomicCommitBoundary(
+            () =>
+            {
+                shortcutCount++;
+                peerClose.Cancel();
+                return true;
+            },
+            () => commitCount++,
+            peerClose.Token);
+        Require(
+            peerClose.IsCancellationRequested
+            && shortcutCount == 1
+            && commitCount == 1,
+            "direct-shortcut-peer-close-still-commits-cleanup-ownership",
+            checks);
+
+        using CancellationTokenSource canceledBeforeShortcut = new();
+        canceledBeforeShortcut.Cancel();
+        bool preCanceled = false;
+        try
+        {
+            WindowsDirectMediaAdapter.SendShortcutAtAtomicCommitBoundary(
+                () =>
+                {
+                    shortcutCount++;
+                    return true;
+                },
+                () => commitCount++,
+                canceledBeforeShortcut.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            preCanceled = true;
+        }
+        Require(
+            preCanceled
+            && shortcutCount == 1
+            && commitCount == 1,
+            "direct-shortcut-pre-cancel-has-no-side-effect",
+            checks);
+
+        List<int> cleanupOrder = [];
+        bool completionSettled = false;
+        Exception? cleanupFailure =
+            await WindowsDirectMediaAdapter.RunBestEffortCleanupAsync(
+                () =>
+                {
+                    cleanupOrder.Add(1);
+                    throw new InvalidOperationException("mic stop failed");
+                },
+                () =>
+                {
+                    cleanupOrder.Add(2);
+                    return Task.CompletedTask;
+                },
+                () =>
+                {
+                    cleanupOrder.Add(3);
+                    return Task.CompletedTask;
+                },
+                () =>
+                {
+                    cleanupOrder.Add(4);
+                    throw new InvalidOperationException(
+                        "output dispose failed");
+                },
+                () =>
+                {
+                    cleanupOrder.Add(5);
+                    return Task.CompletedTask;
+                },
+                () =>
+                {
+                    cleanupOrder.Add(6);
+                    return Task.CompletedTask;
+                },
+                () =>
+                {
+                    cleanupOrder.Add(7);
+                    return Task.CompletedTask;
+                }).ConfigureAwait(false);
+        completionSettled = true;
+        Require(
+            cleanupOrder.SequenceEqual(
+                new[] { 1, 2, 3, 4, 5, 6, 7 })
+            && cleanupFailure is AggregateException aggregate
+            && aggregate.InnerExceptions.Count == 2
+            && completionSettled,
+            "direct-stop-best-effort-runs-all-cleanup-and-aggregates",
+            checks);
+
+        bool leaseOwned = true;
+        bool firstReleaseFailed = false;
+        try
+        {
+            await WindowsDirectMediaAdapter
+                .ReleaseOwnershipAfterSuccessAsync(
+                    () => Task.FromException(
+                        new InvalidOperationException(
+                            "transient typist stop failure")),
+                    () => leaseOwned = false).ConfigureAwait(false);
+        }
+        catch (InvalidOperationException)
+        {
+            firstReleaseFailed = true;
+        }
+        bool retainedAfterFailure = leaseOwned;
+        await WindowsDirectMediaAdapter
+            .ReleaseOwnershipAfterSuccessAsync(
+                () => Task.CompletedTask,
+                () => leaseOwned = false).ConfigureAwait(false);
+        Require(
+            firstReleaseFailed
+            && retainedAfterFailure
+            && !leaseOwned,
+            "direct-typist-ownership-clears-only-after-successful-retry",
+            checks);
+
+        VoiceShortcutKeyEvent[] activationEvents =
+            WindowsCodexAppProbe.VoiceShortcutEvents(
+                VoiceShortcutInputBatch.Activation);
+        VoiceShortcutKeyEvent[] releaseEvents =
+            WindowsCodexAppProbe.VoiceShortcutEvents(
+                VoiceShortcutInputBatch.ReleasePressedKeys);
+        bool everyPartialReleased = true;
+        for (uint inserted = 0; inserted <= 6; inserted++)
+        {
+            List<VoiceShortcutInputBatch> batches = [];
+            bool accepted =
+                WindowsCodexAppProbe.SendVoiceShortcutInputSequence(
+                    batch =>
+                    {
+                        batches.Add(batch);
+                        return batch
+                            == VoiceShortcutInputBatch.Activation
+                            ? inserted
+                            : 3;
+                    });
+            bool expectedCleanup = inserted is >= 1 and <= 5;
+            everyPartialReleased &= accepted == (inserted == 6)
+                && batches.SequenceEqual(
+                    expectedCleanup
+                        ? new[]
+                        {
+                            VoiceShortcutInputBatch.Activation,
+                            VoiceShortcutInputBatch.ReleasePressedKeys,
+                        }
+                        : new[]
+                        {
+                            VoiceShortcutInputBatch.Activation,
+                        });
+        }
+        bool cleanupThrowRemainsFailed =
+            !WindowsCodexAppProbe.SendVoiceShortcutInputSequence(
+                batch => batch
+                    == VoiceShortcutInputBatch.Activation
+                    ? 3u
+                    : throw new InvalidOperationException(
+                        "release input failed"));
+        Require(
+            activationEvents.SequenceEqual(
+                new[]
+                {
+                    new VoiceShortcutKeyEvent(0x11, KeyUp: false),
+                    new VoiceShortcutKeyEvent(0x10, KeyUp: false),
+                    new VoiceShortcutKeyEvent(0x43, KeyUp: false),
+                    new VoiceShortcutKeyEvent(0x43, KeyUp: true),
+                    new VoiceShortcutKeyEvent(0x10, KeyUp: true),
+                    new VoiceShortcutKeyEvent(0x11, KeyUp: true),
+                })
+            && releaseEvents.SequenceEqual(
+                new[]
+                {
+                    new VoiceShortcutKeyEvent(0x43, KeyUp: true),
+                    new VoiceShortcutKeyEvent(0x10, KeyUp: true),
+                    new VoiceShortcutKeyEvent(0x11, KeyUp: true),
+                })
+            && everyPartialReleased
+            && cleanupThrowRemainsFailed,
+            "direct-shortcut-partial-send-releases-keys-best-effort",
+            checks);
+        Require(
+            !WindowsCodexAppProbe.SupportsOwnedVoiceStop,
+            "direct-stop-does-not-claim-unverified-app-voice-toggle",
+            checks);
     }
 
     private static async Task CheckHeartbeatDeadlineAsync(
@@ -1043,24 +1677,108 @@ internal static class DirectBridgeSelfTest
         }
         Require(
             rejected
-            && !DirectBridgeServer.OriginMatchesAllowlist(
-                new DirectBridgeConfigStore(
-                    System.IO.Path.Combine(
-                        root,
-                        "optout",
-                        "native-host",
-                        "direct.json")).Load(),
-                "https://reader.example.evil")
-            && !DirectBridgeServer.OriginMatchesAllowlist(
-                new DirectBridgeConfigStore(
-                    System.IO.Path.Combine(
-                        root,
-                        "optout",
-                        "native-host",
-                        "direct.json")).Load(),
-                "https://READER.example"),
-            "direct-origin-allowlist-requires-exact-https-origin",
+            && CheckExperimentalAndStrictOrigins(root),
+            "direct-origin-policy-is-explicit-and-canonical",
             checks);
+    }
+
+    private static bool CheckExperimentalAndStrictOrigins(string root)
+    {
+        string experimentalRoot = System.IO.Path.Combine(
+            root,
+            "experimental-origin");
+        string experimentalPath = System.IO.Path.Combine(
+            experimentalRoot,
+            "native-host",
+            "direct.json");
+        WriteConfigAsync(
+            experimentalPath,
+            System.IO.Path.Combine(
+                experimentalRoot,
+                "runtime",
+                "computer-voice-direct.status.json"),
+            "https://extension-page.example",
+            localOptIn: false,
+            pairingCodeHash: "",
+            pairingExpiresAtUtc: null,
+            clientSpki: "",
+            clientFingerprint: "",
+            experimentalSingleUserMode: true).GetAwaiter().GetResult();
+        DirectBridgeConfig experimental =
+            new DirectBridgeConfigStore(experimentalPath).Load();
+        string strictRoot = System.IO.Path.Combine(root, "strict-origin");
+        string strictPath = System.IO.Path.Combine(
+            strictRoot,
+            "native-host",
+            "direct.json");
+        WriteConfigAsync(
+            strictPath,
+            System.IO.Path.Combine(
+                strictRoot,
+                "runtime",
+                "computer-voice-direct.status.json"),
+            "https://reader.example",
+            localOptIn: false,
+            pairingCodeHash: "",
+            pairingExpiresAtUtc: null,
+            clientSpki: "",
+            clientFingerprint: "",
+            experimentalSingleUserMode: false).GetAwaiter().GetResult();
+        DirectBridgeConfig strict =
+            new DirectBridgeConfigStore(strictPath).Load();
+
+        const string chromeOrigin =
+            "chrome-extension://jddhhakcblmihidgdobfkcejjinpigak";
+        const string safariOrigin =
+            "safari-web-extension://E8BEA491-9B80-45DB-8B20-3E586473BD47";
+        return DirectBridgeServer.OriginMatchesAllowlist(
+                experimental,
+                "https://bwicarus.taile44d0c.ts.net")
+            && DirectBridgeServer.OriginMatchesAllowlist(
+                experimental,
+                chromeOrigin)
+            && DirectBridgeServer.OriginMatchesAllowlist(
+                experimental,
+                safariOrigin)
+            && !DirectBridgeServer.OriginMatchesAllowlist(
+                experimental,
+                "https://extension-page.example")
+            && !DirectBridgeServer.OriginMatchesAllowlist(
+                experimental,
+                "http://bwicarus.taile44d0c.ts.net")
+            && !DirectBridgeServer.OriginMatchesAllowlist(
+                experimental,
+                "https://bwicarus.taile44d0c.ts.net/")
+            && !DirectBridgeServer.OriginMatchesAllowlist(
+                experimental,
+                chromeOrigin + "/")
+            && !DirectBridgeServer.OriginMatchesAllowlist(
+                experimental,
+                "chrome-extension://abcdefghijklmnopabcdefghijklmnop")
+            && !DirectBridgeServer.OriginMatchesAllowlist(
+                experimental,
+                "chrome-extension://abcdefghijklmnopabcdefghijklmnop:443")
+            && !DirectBridgeServer.OriginMatchesAllowlist(
+                experimental,
+                "chrome-extension://user@abcdefghijklmnopabcdefghijklmnop")
+            && !DirectBridgeServer.OriginMatchesAllowlist(
+                experimental,
+                safariOrigin + "?forged=1")
+            && !DirectBridgeServer.OriginMatchesAllowlist(
+                experimental,
+                "safari-web-extension://E8BEA491-9B80-45DB-8B20-3E586473BD4Z")
+            && !DirectBridgeServer.OriginMatchesAllowlist(
+                experimental,
+                "file://extension-page.example")
+            && !DirectBridgeServer.OriginMatchesAllowlist(
+                experimental,
+                "null")
+            && DirectBridgeServer.OriginMatchesAllowlist(
+                strict,
+                "https://reader.example")
+            && !DirectBridgeServer.OriginMatchesAllowlist(
+                strict,
+                "https://extension-page.example");
     }
 
     private static async Task CheckServiceLeaseAsync(
@@ -1185,7 +1903,8 @@ internal static class DirectBridgeSelfTest
         string pairingCodeHash,
         DateTimeOffset? pairingExpiresAtUtc,
         string clientSpki,
-        string clientFingerprint)
+        string clientFingerprint,
+        bool experimentalSingleUserMode = true)
     {
         string? directory = System.IO.Path.GetDirectoryName(configPath);
         if (string.IsNullOrEmpty(directory))
@@ -1205,6 +1924,7 @@ internal static class DirectBridgeSelfTest
             listenPort = DirectBridgeContract.DefaultListenPort,
             allowedOrigins = new[] { origin },
             allowedTailscaleUserLogin = "bwicarus@gmail.com",
+            experimentalSingleUserMode,
             pairingCodeHash,
             pairingExpiresAtUtc,
             pairedClientPublicKeySpki = clientSpki,
@@ -1472,12 +2192,30 @@ internal static class DirectBridgeSelfTest
             _completionSource;
         private Task<DirectProtocolException?> _completion =
             Task.FromResult<DirectProtocolException?>(null);
+        private readonly TaskCompletionSource<bool> _stopEntered =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        private readonly TaskCompletionSource<bool> _releaseStop =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
 
         internal int StartCount { get; private set; }
 
         internal int StopCount { get; private set; }
 
         internal bool EmitDuringStart { get; init; }
+
+        internal DirectProtocolException? StopFailure { get; init; }
+
+        internal bool BlockStopUntilReleased { get; init; }
+
+        internal int DisposeFailuresRemaining { get; set; }
+
+        internal int DisposeCount { get; private set; }
+
+        internal bool CleanupOwnership { get; set; }
+
+        internal Task StopEntered => _stopEntered.Task;
+
+        internal bool? StopCancellationCanBeCanceled { get; private set; }
 
         public bool IsWired => true;
 
@@ -1505,6 +2243,7 @@ internal static class DirectBridgeSelfTest
                 TaskCreationOptions.RunContinuationsAsynchronously);
             _completion = _completionSource.Task;
             CaptureActive = true;
+            CleanupOwnership = true;
             if (EmitDuringStart)
             {
                 await sendFrameAsync(
@@ -1533,19 +2272,41 @@ internal static class DirectBridgeSelfTest
             _completionSource?.TrySetResult(exception);
         }
 
-        public Task StopAsync(CancellationToken cancellationToken)
+        internal void ReleaseBlockedStop() =>
+            _releaseStop.TrySetResult(true);
+
+        public async Task StopAsync(CancellationToken cancellationToken)
         {
             if (CaptureActive || _sender is not null)
             {
                 StopCount++;
+                StopCancellationCanBeCanceled =
+                    cancellationToken.CanBeCanceled;
+                _stopEntered.TrySetResult(true);
+                if (BlockStopUntilReleased)
+                {
+                    await _releaseStop.Task.WaitAsync(cancellationToken)
+                        .ConfigureAwait(false);
+                }
             }
             CaptureActive = false;
             _sender = null;
-            _completionSource?.TrySetResult(null);
+            _completionSource?.TrySetResult(StopFailure);
             _completionSource = null;
-            return Task.CompletedTask;
         }
 
-        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public ValueTask DisposeAsync()
+        {
+            DisposeCount++;
+            if (DisposeFailuresRemaining > 0)
+            {
+                DisposeFailuresRemaining--;
+                throw new DirectProtocolException(
+                    "BW_COMPUTER_VOICE_DIRECT_FAKE_DISPOSE_FAILED",
+                    "fake media dispose failed");
+            }
+            CleanupOwnership = false;
+            return ValueTask.CompletedTask;
+        }
     }
 }

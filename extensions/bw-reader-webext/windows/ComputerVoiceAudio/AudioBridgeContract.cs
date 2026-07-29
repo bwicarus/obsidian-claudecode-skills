@@ -27,7 +27,11 @@ internal static class AudioBridgeContract
         automaticCapture = false,
         sinkPolicy = "bounded-fail-closed",
         requiresExplicitStart = true,
-        safeCommands = new[] { "--describe", "--self-test" },
+        safeCommands = new[] {
+            "--describe",
+            "--self-test",
+            "--list-direct-microphones",
+        },
         nativeMessagingOriginAllowlist = true,
         localOptInRequired = true,
         directServer = new

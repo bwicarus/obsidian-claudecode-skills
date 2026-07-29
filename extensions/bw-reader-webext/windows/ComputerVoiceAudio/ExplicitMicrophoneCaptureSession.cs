@@ -79,7 +79,7 @@ internal sealed class NativeExplicitMicrophoneAudioClientLeaseFactory :
 
             RequireSucceeded(
                 enumerator.GetDevice(request.EndpointId, out endpoint),
-                "MIC_GET_EXPLICIT_DEVICE");
+                "microphone.get-explicit-device");
             if (endpoint is null)
             {
                 throw new InvalidOperationException(
@@ -93,7 +93,7 @@ internal sealed class NativeExplicitMicrophoneAudioClientLeaseFactory :
                     ComClassContext.All,
                     activationParameters: 0,
                     out audioClientObject),
-                "MIC_ACTIVATE_AUDIO_CLIENT");
+                "microphone.activate-audio-client");
             if (audioClientObject is not IAudioClient audioClient)
             {
                 throw new InvalidOperationException(
@@ -121,15 +121,14 @@ internal sealed class NativeExplicitMicrophoneAudioClientLeaseFactory :
 
     private static void RequireSucceeded(int result, string operation)
     {
-        if (result < 0)
-        {
-            Marshal.ThrowExceptionForHR(result);
-        }
-
         if (result != ProcessLoopbackInterop.Succeeded)
         {
-            throw new InvalidOperationException(
-                $"BW_COMPUTER_VOICE_AUDIO_{operation}_RESULT_UNEXPECTED");
+            throw new AudioCaptureStageException(
+                operation,
+                result,
+                result < 0
+                    ? Marshal.GetExceptionForHR(result)
+                    : null);
         }
     }
 
@@ -241,7 +240,8 @@ internal sealed class ExplicitMicrophoneCaptureRuntime :
     {
         _inner = new SharedEventDrivenPcmRuntime(
             lease,
-            AudioClientStreamFlags.EventCallback);
+            AudioClientStreamFlags.EventCallback,
+            "microphone");
     }
 
     public PcmAudioFormat Initialize(EventWaitHandle audioReadyEvent) =>

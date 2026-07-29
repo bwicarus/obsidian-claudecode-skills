@@ -59,12 +59,6 @@ function harness({
     "test",
     "sync-status",
     "sync-conflicts",
-    "computer-voice-status",
-    "computer-voice-pair-id",
-    "computer-voice-code",
-    "computer-voice-pair",
-    "computer-voice-refresh",
-    "computer-voice-extension-id",
   ]) {
     elements.set(`#${id}`, element(id));
   }
@@ -127,6 +121,19 @@ test("popup 不直接接触 chrome.storage，只调用后台账户 status/save/t
   assert.equal(SOURCE.includes("BW_SYNC_RETRY_AFTER_RESOLUTION"), false);
   assert.equal(SOURCE.includes("conflictSetId"), false);
   assert.equal(HTML.includes("sync-retry"), false);
+});
+
+test("popup 不再展示或发送旧电脑语音配对入口", () => {
+  for (const obsolete of [
+    "BW_COMPUTER_VOICE_PAIR",
+    "computer-voice-pair-id",
+    "computer-voice-code",
+    "一次性配对码",
+    "Reader 配对 ID",
+  ]) {
+    assert.equal(SOURCE.includes(obsolete), false);
+    assert.equal(HTML.includes(obsolete), false);
+  }
 });
 
 test("popup 始终把操作绑定当前活动 tab，保存后清空输入且不显示明文", async () => {

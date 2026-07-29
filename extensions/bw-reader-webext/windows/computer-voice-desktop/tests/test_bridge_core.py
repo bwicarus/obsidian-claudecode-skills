@@ -39,6 +39,7 @@ from bridge_core import (  # noqa: E402
     build_tailscale_command_plan,
     disable_and_stop_direct_service,
     disable_config,
+    enumerate_microphones,
     load_direct_config,
     pairing_material_from_code,
     prepare_pairing,
@@ -142,6 +143,7 @@ class DirectDesktopCoreTests(unittest.TestCase):
         self.assertEqual(value["contract"], DIRECT_CONFIG_CONTRACT)
         self.assertEqual(value["listenHost"], FIXED_LISTEN_HOST)
         self.assertEqual(value["listenPort"], FIXED_LISTEN_PORT)
+        self.assertIs(value["experimentalSingleUserMode"], True)
         self.assertEqual(
             value["allowedTailscaleUserLogin"],
             FIXED_ALLOWED_TAILSCALE_USER_LOGIN,
@@ -166,6 +168,68 @@ class DirectDesktopCoreTests(unittest.TestCase):
                 allowed_origins=["https://user@example.test"],
             )
 
+    def test_legacy_config_loads_as_single_user_and_next_save_persists_it(
+        self,
+    ) -> None:
+        legacy = build_direct_config(
+            MICROPHONE.endpoint_id,
+            self.paths.runtime_status,
+        )
+        legacy.pop("experimentalSingleUserMode")
+        legacy["pairedClientPublicKeySpki"] = "A" * 120
+        legacy["pairedClientFingerprintSha256"] = "B" * 43
+        self.paths.direct_config.parent.mkdir(parents=True, exist_ok=True)
+        self.paths.direct_config.write_text(
+            json.dumps(legacy),
+            encoding="utf-8",
+        )
+
+        loaded = load_direct_config(self.paths)
+        self.assertIsNotNone(loaded)
+        self.assertIs(loaded["experimentalSingleUserMode"], True)
+        self.assertEqual(
+            loaded["pairedClientPublicKeySpki"],
+            legacy["pairedClientPublicKeySpki"],
+        )
+
+        saved = save_enabled_config(
+            self.paths,
+            MICROPHONE,
+            active_microphones=[MICROPHONE],
+        )
+        self.assertIs(saved["experimentalSingleUserMode"], True)
+        on_disk = json.loads(
+            self.paths.direct_config.read_text(encoding="utf-8")
+        )
+        self.assertIs(on_disk["experimentalSingleUserMode"], True)
+        self.assertEqual(
+            on_disk["pairedClientPublicKeySpki"],
+            legacy["pairedClientPublicKeySpki"],
+        )
+
+    def test_explicit_strict_mode_false_remains_valid_for_compatibility(
+        self,
+    ) -> None:
+        value = build_direct_config(
+            MICROPHONE.endpoint_id,
+            self.paths.runtime_status,
+            experimental_single_user_mode=False,
+        )
+        self.assertIs(
+            validate_direct_config(value)["experimentalSingleUserMode"],
+            False,
+        )
+        with self.assertRaises(BridgeError):
+            validate_direct_config(
+                {**value, "experimentalSingleUserMode": "yes"}
+            )
+        with self.assertRaises(BridgeError):
+            build_direct_config(
+                MICROPHONE.endpoint_id,
+                self.paths.runtime_status,
+                experimental_single_user_mode="yes",
+            )
+
     def test_microphone_endpoint_id_is_preserved_exactly(self) -> None:
         endpoint = " {0.0.1.00000000}.{exact-endpoint} "
         value = build_direct_config(
@@ -173,6 +237,79 @@ class DirectDesktopCoreTests(unittest.TestCase):
             self.paths.runtime_status,
         )
         self.assertEqual(value["microphoneEndpointId"], endpoint)
+
+    def test_microphone_discovery_uses_native_core_audio_ids(self) -> None:
+        payload = json.dumps(
+            {
+                "contract": "reader-computer-voice-microphones/1",
+                "ok": True,
+                "captureStarted": False,
+                "devices": [
+                    {
+                        "endpointId": (
+                            "{3.0.1.00000001}."
+                            "{A3ED9185-1E02-411C-B11B-05D92F25CEF4}"
+                        ),
+                        "friendlyName": "远程音频",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        with patch(
+            "bridge_core.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=payload,
+                stderr="",
+            ),
+        ) as run:
+            devices = enumerate_microphones(self.paths.native_host)
+        self.assertEqual(
+            devices,
+            [
+                Microphone(
+                    (
+                        "{3.0.1.00000001}."
+                        "{A3ED9185-1E02-411C-B11B-05D92F25CEF4}"
+                    ),
+                    "远程音频",
+                )
+            ],
+        )
+        command = run.call_args.args[0]
+        self.assertEqual(
+            command,
+            (
+                str(self.paths.native_host.resolve()),
+                "--list-direct-microphones",
+            ),
+        )
+        self.assertIs(run.call_args.kwargs["shell"], False)
+
+    def test_microphone_discovery_rejects_non_read_only_contract(self) -> None:
+        payload = json.dumps(
+            {
+                "contract": "unexpected",
+                "ok": True,
+                "captureStarted": False,
+                "devices": [],
+            }
+        )
+        with patch(
+            "bridge_core.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=payload,
+                stderr="",
+            ),
+        ):
+            self.assertEqual(
+                enumerate_microphones(self.paths.native_host),
+                [],
+            )
 
     def test_invalid_existing_config_is_not_silently_overwritten(self) -> None:
         self.paths.direct_config.write_text(
@@ -190,7 +327,7 @@ class DirectDesktopCoreTests(unittest.TestCase):
             self.paths.direct_config.read_text(encoding="utf-8"),
         )
 
-    def test_pair_code_is_ten_chars_and_plaintext_never_persisted(self) -> None:
+    def test_legacy_pair_code_data_remains_backward_compatible(self) -> None:
         self.enable_config()
         material = prepare_pairing(
             self.paths,

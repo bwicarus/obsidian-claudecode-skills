@@ -32,7 +32,6 @@ class DesktopLauncherTests(unittest.TestCase):
         window.start_button = FakeWidget()
         window.refresh_button = FakeWidget()
         window.footer = FakeWidget()
-        # Deliberately no pair_button and no generate_pair_button.
         window.set_busy(True, "working")
         self.assertTrue(window.busy)
         self.assertEqual(
@@ -143,11 +142,6 @@ class DesktopLauncherTests(unittest.TestCase):
         window.on_enable_config()
         window.on_start()
         with patch(
-            "desktop_launcher.load_direct_config",
-            return_value=None,
-        ):
-            window.on_generate_pairing()
-        with patch(
             "desktop_launcher.messagebox.askyesno",
             return_value=False,
         ):
@@ -159,7 +153,6 @@ class DesktopLauncherTests(unittest.TestCase):
         window.root = object()
         window.paths = object()
         window.process_runner = object()
-        window.pair_code = FakeWidget()
         window.footer = FakeWidget()
         window.refresh_static = lambda: None
         calls: list[str] = []
@@ -185,6 +178,17 @@ class DesktopLauncherTests(unittest.TestCase):
             window.paths,
             window.process_runner,
         )
+
+    def test_desktop_ui_has_no_pairing_action_or_pairing_copy(self) -> None:
+        source = (SOURCE_ROOT / "desktop_launcher.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("on_generate_pairing", source)
+        self.assertNotIn("generate_pair_button", source)
+        self.assertNotIn("一次性配对码", source)
+        self.assertIn("experimentalSingleUserMode", (
+            SOURCE_ROOT / "bridge_core.py"
+        ).read_text(encoding="utf-8"))
 
     def test_start_prefers_owned_task_after_atomic_opt_in(self) -> None:
         window = BridgeWindow.__new__(BridgeWindow)

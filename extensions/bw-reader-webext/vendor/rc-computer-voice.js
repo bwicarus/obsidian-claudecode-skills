@@ -3,10 +3,10 @@
 if (window.__bwPwaProviderOnly) return;
 /* rc-computer-voice.js — Reader/PWA ↔ Windows 电脑语音直连入口。
  *
- * 控制与固定帧 PCM 音频只走用户配置的 tailnet WSS，不经过 Pi。选择模型和
- * STATUS 都不会启动 Windows 应用或采音；只有电话按钮的一次真实用户操作
- * 会发送 START。长期身份是 IndexedDB 中不可导出的 ECDSA P-256 私钥，
- * 页面不保存 bearer token，配对码只由 Windows EXE 生成。
+ * 控制与固定帧 PCM 音频只走固定的 tailnet WSS，不经过 Pi。Tailnet 身份和
+ * 固定 Origin 由 Windows 端校验；Reader 不保存身份或凭据。选择模型、加载
+ * 设置和 STATUS 都不会启动 Windows 应用或采音；只有电话按钮的一次真实
+ * 用户操作会发送 START。
  */
 (function () {
   "use strict";
@@ -14,28 +14,23 @@ if (window.__bwPwaProviderOnly) return;
   var RC = window.RC = window.RC || {};
   var BRIDGE_CONTRACT = "reader-computer-voice-bridge/1";
   var DIRECT_CONTRACT = "reader-computer-voice-direct/1";
-  var AUTH_CONTRACT = "reader-computer-voice-auth/1";
-  var DB_NAME = "bw-reader-computer-voice";
-  var DB_STORE = "identity";
-  var DB_KEY = "primary";
-  var DB_VERSION = 1;
   var MAX_MESSAGE_BYTES = 65536;
   var PCM_FRAME_BYTES = 1956;
   var PCM_HEADER_BYTES = 36;
   var PCM_SAMPLES = 960;
   var PCM_SAMPLE_RATE = 48000;
   var PCM_QUEUE_LIMIT_MS = 400;
-  var PCM_QUEUE_LIMIT_FRAMES = PCM_QUEUE_LIMIT_MS / 20;
   var MAX_PENDING = 16;
   var OPEN_TIMEOUT_MS = 6000;
   var REQUEST_TIMEOUT_MS = 7000;
   var START_TIMEOUT_MS = 45000;
   var HEARTBEAT_INTERVAL_MS = 5000;
   var HEARTBEAT_TIMEOUT_MS = 15000;
-  var PREPARED_SURFACE_TTL_MS = 15000;
+  var START_GESTURE_LEASE_TTL_MS = 5000;
+  var READER_ORIGIN = "https://bwicarus.taile44d0c.ts.net";
+  var EXTENSION_RELAY_PORT = "BW_COMPUTER_VOICE_DIRECT_V2";
   var DIRECT_ENDPOINT =
     "wss://bwicarus-2.taile44d0c.ts.net/reader-computer-voice/v1";
-  var PAIR_CODE_RE = /^[ABCDEFGHJKLMNPQRSTUVWXYZ23456789]{10}$/;
   var STATUS_STATES = Object.freeze({
     idle: true,
     ready: true,
@@ -56,7 +51,8 @@ if (window.__bwPwaProviderOnly) return;
   var preparedTimer = null;
   var requestSequence = 0;
   var statusListeners = [];
-  var dbPromise = null;
+  var availabilityAttempt = null;
+  var registeredPhoneButtons = new WeakSet();
 
   function directError(message, code, retryable) {
     var error = new Error(String(message || "Windows 桥接器直连失败"));
@@ -134,22 +130,6 @@ if (window.__bwPwaProviderOnly) return;
     return text;
   }
 
-  function safeBase64Url(value, label, minimum, maximum) {
-    var text = safeText(value, label, maximum, false);
-    if (
-      text.length < minimum ||
-      !/^[A-Za-z0-9_-]+$/.test(text) ||
-      text.indexOf("=") >= 0
-    ) {
-      throw directError(
-        label + " 格式无效",
-        "BW_COMPUTER_VOICE_DIRECT_SCHEMA",
-        false
-      );
-    }
-    return text;
-  }
-
   function normalizeEndpoint(value) {
     var text = safeText(
       String(value || "").trim(),
@@ -177,19 +157,6 @@ if (window.__bwPwaProviderOnly) return;
       );
     }
     return DIRECT_ENDPOINT;
-  }
-
-  function normalizePairingCode(value) {
-    var code = String(value || "").trim().toUpperCase()
-      .replace(/[\s-]+/g, "");
-    if (!PAIR_CODE_RE.test(code)) {
-      throw directError(
-        "请输入 Windows EXE 显示的 10 位一次性配对码",
-        "BW_COMPUTER_VOICE_DIRECT_PAIR_CODE",
-        false
-      );
-    }
-    return code;
   }
 
   function messageBytes(text) {
@@ -262,234 +229,6 @@ if (window.__bwPwaProviderOnly) return;
       ));
     } catch (_) {}
     return snapshot;
-  }
-
-  function openIdentityDb() {
-    if (dbPromise) return dbPromise;
-    if (!window.indexedDB || typeof window.indexedDB.open !== "function") {
-      return Promise.reject(directError(
-        "浏览器不支持安全身份存储（IndexedDB）",
-        "BW_COMPUTER_VOICE_DIRECT_STORAGE",
-        false
-      ));
-    }
-    dbPromise = new Promise(function (resolve, reject) {
-      var request;
-      try {
-        request = window.indexedDB.open(DB_NAME, DB_VERSION);
-      } catch (error) {
-        reject(directError(
-          "无法打开安全身份存储",
-          "BW_COMPUTER_VOICE_DIRECT_STORAGE",
-          false
-        ));
-        return;
-      }
-      request.onupgradeneeded = function () {
-        var db = request.result;
-        if (!db.objectStoreNames.contains(DB_STORE)) {
-          db.createObjectStore(DB_STORE);
-        }
-      };
-      request.onsuccess = function () { resolve(request.result); };
-      request.onerror = function () {
-        dbPromise = null;
-        reject(directError(
-          "无法打开安全身份存储",
-          "BW_COMPUTER_VOICE_DIRECT_STORAGE",
-          false
-        ));
-      };
-      request.onblocked = request.onerror;
-    });
-    return dbPromise;
-  }
-
-  function idbGet() {
-    return openIdentityDb().then(function (db) {
-      return new Promise(function (resolve, reject) {
-        var request;
-        try {
-          request = db.transaction(DB_STORE, "readonly")
-            .objectStore(DB_STORE).get(DB_KEY);
-        } catch (_) {
-          reject(directError(
-            "读取安全身份失败",
-            "BW_COMPUTER_VOICE_DIRECT_STORAGE",
-            false
-          ));
-          return;
-        }
-        request.onsuccess = function () { resolve(request.result || null); };
-        request.onerror = function () {
-          reject(directError(
-            "读取安全身份失败",
-            "BW_COMPUTER_VOICE_DIRECT_STORAGE",
-            false
-          ));
-        };
-      });
-    });
-  }
-
-  function idbPut(record) {
-    return openIdentityDb().then(function (db) {
-      return new Promise(function (resolve, reject) {
-        var request;
-        try {
-          request = db.transaction(DB_STORE, "readwrite")
-            .objectStore(DB_STORE).put(record, DB_KEY);
-        } catch (_) {
-          reject(directError(
-            "保存不可导出身份密钥失败",
-            "BW_COMPUTER_VOICE_DIRECT_STORAGE",
-            false
-          ));
-          return;
-        }
-        request.onsuccess = function () { resolve(record); };
-        request.onerror = function () {
-          reject(directError(
-            "保存不可导出身份密钥失败",
-            "BW_COMPUTER_VOICE_DIRECT_STORAGE",
-            false
-          ));
-        };
-      });
-    });
-  }
-
-  function idbDelete() {
-    return openIdentityDb().then(function (db) {
-      return new Promise(function (resolve, reject) {
-        var request;
-        try {
-          request = db.transaction(DB_STORE, "readwrite")
-            .objectStore(DB_STORE).delete(DB_KEY);
-        } catch (_) {
-          reject(directError(
-            "删除本页桥接身份失败",
-            "BW_COMPUTER_VOICE_DIRECT_STORAGE",
-            false
-          ));
-          return;
-        }
-        request.onsuccess = function () { resolve(); };
-        request.onerror = function () {
-          reject(directError(
-            "删除本页桥接身份失败",
-            "BW_COMPUTER_VOICE_DIRECT_STORAGE",
-            false
-          ));
-        };
-      });
-    });
-  }
-
-  function validatePrivateKey(key) {
-    if (
-      !key ||
-      key.type !== "private" ||
-      key.extractable !== false ||
-      !key.algorithm ||
-      key.algorithm.name !== "ECDSA" ||
-      key.algorithm.namedCurve !== "P-256" ||
-      !Array.isArray(key.usages) ||
-      key.usages.length !== 1 ||
-      key.usages[0] !== "sign"
-    ) {
-      throw directError(
-        "浏览器中的 Windows 桥接身份密钥无效",
-        "BW_COMPUTER_VOICE_DIRECT_IDENTITY",
-        false
-      );
-    }
-    return key;
-  }
-
-  function normalizeIdentity(record) {
-    if (!record) return null;
-    exactObject(
-      record,
-      ["version", "endpoint", "paired", "privateKey", "publicKeySpki"],
-      ["fingerprint"],
-      "身份记录"
-    );
-    if (record.version !== 1 || typeof record.paired !== "boolean") {
-      throw directError(
-        "Windows 桥接身份记录版本无效",
-        "BW_COMPUTER_VOICE_DIRECT_IDENTITY",
-        false
-      );
-    }
-    return {
-      version: 1,
-      endpoint: normalizeEndpoint(record.endpoint),
-      paired: record.paired,
-      privateKey: validatePrivateKey(record.privateKey),
-      publicKeySpki: safeBase64Url(
-        record.publicKeySpki,
-        "SPKI 公钥",
-        80,
-        256
-      ),
-      fingerprint: record.fingerprint
-        ? safeBase64Url(record.fingerprint, "身份指纹", 32, 128)
-        : "",
-    };
-  }
-
-  function readIdentity() {
-    return idbGet().then(normalizeIdentity);
-  }
-
-  function createIdentity(endpoint) {
-    if (
-      !window.crypto ||
-      !window.crypto.subtle ||
-      typeof window.crypto.subtle.generateKey !== "function" ||
-      typeof window.crypto.subtle.exportKey !== "function"
-    ) {
-      return Promise.reject(directError(
-        "浏览器不支持不可导出的 ECDSA 身份密钥",
-        "BW_COMPUTER_VOICE_DIRECT_CRYPTO",
-        false
-      ));
-    }
-    return window.crypto.subtle.generateKey(
-      { name: "ECDSA", namedCurve: "P-256" },
-      false,
-      ["sign", "verify"]
-    ).then(function (pair) {
-      validatePrivateKey(pair.privateKey);
-      return window.crypto.subtle.exportKey("spki", pair.publicKey)
-        .then(function (spki) {
-          var record = {
-            version: 1,
-            endpoint: endpoint,
-            paired: false,
-            privateKey: pair.privateKey,
-            publicKeySpki: bytesToBase64Url(spki),
-          };
-          return idbPut(record).then(function () {
-            return normalizeIdentity(record);
-          });
-        });
-    }).catch(function (error) {
-      if (error && error.code) throw error;
-      throw directError(
-        "无法生成或保存不可导出的 ECDSA 身份密钥",
-        "BW_COMPUTER_VOICE_DIRECT_CRYPTO",
-        false
-      );
-    });
-  }
-
-  function ensureIdentity(endpoint) {
-    return readIdentity().then(function (identity) {
-      if (identity && identity.endpoint === endpoint) return identity;
-      return createIdentity(endpoint);
-    });
   }
 
   function normalizeRemoteError(value) {
@@ -565,6 +304,350 @@ if (window.__bwPwaProviderOnly) return;
     return value;
   }
 
+  function currentOrigin() {
+    return String(window.location && window.location.origin || "");
+  }
+
+  function exactRelayMessage(value, type, fields, label) {
+    exactObject(value, ["type"].concat(fields || []), [], label);
+    if (value.type !== type) {
+      throw directError(
+        label + " type 无效",
+        "BW_COMPUTER_VOICE_DIRECT_RELAY_SCHEMA",
+        false
+      );
+    }
+    return value;
+  }
+
+  function decodeRelayBinary(value) {
+    exactRelayMessage(
+      value,
+      "binary-base64",
+      ["data", "bytes"],
+      "扩展中继二进制消息"
+    );
+    if (
+      typeof value.data !== "string" ||
+      value.data.length !== 4 * Math.ceil(value.bytes / 3) ||
+      !Number.isSafeInteger(value.bytes) ||
+      value.bytes !== PCM_FRAME_BYTES ||
+      !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/
+        .test(value.data)
+    ) {
+      throw directError(
+        "扩展中继 PCM 编码无效",
+        "BW_COMPUTER_VOICE_DIRECT_RELAY_BINARY",
+        false
+      );
+    }
+    var raw;
+    try {
+      raw = atob(value.data);
+    } catch (_) {
+      throw directError(
+        "扩展中继 PCM 无法解码",
+        "BW_COMPUTER_VOICE_DIRECT_RELAY_BINARY",
+        false
+      );
+    }
+    if (raw.length !== value.bytes) {
+      throw directError(
+        "扩展中继 PCM 长度不匹配",
+        "BW_COMPUTER_VOICE_DIRECT_RELAY_BINARY",
+        false
+      );
+    }
+    var buffer = new ArrayBuffer(raw.length);
+    var bytes = new Uint8Array(buffer);
+    for (var index = 0; index < raw.length; index += 1) {
+      bytes[index] = raw.charCodeAt(index);
+    }
+    return buffer;
+  }
+
+  function ExtensionRelaySocket(runtime) {
+    this.readyState = 0;
+    this.binaryType = "arraybuffer";
+    this.onopen = null;
+    this.onmessage = null;
+    this.onerror = null;
+    this.onclose = null;
+    this.port = null;
+    this.terminal = false;
+    this.closedPromise = null;
+    this.closedResolve = null;
+    var self = this;
+    this.closedPromise = new Promise(function (resolve) {
+      self.closedResolve = resolve;
+    });
+
+    var port;
+    try {
+      port = runtime.connect({ name: EXTENSION_RELAY_PORT });
+    } catch (_) {
+      throw directError(
+        "扩展后台直连中继不可用",
+        "BW_COMPUTER_VOICE_DIRECT_RELAY_UNAVAILABLE",
+        true
+      );
+    }
+    if (
+      !port ||
+      typeof port.postMessage !== "function" ||
+      !port.onMessage ||
+      typeof port.onMessage.addListener !== "function" ||
+      !port.onDisconnect ||
+      typeof port.onDisconnect.addListener !== "function"
+    ) {
+      try { if (port && typeof port.disconnect === "function") port.disconnect(); }
+      catch (_) {}
+      throw directError(
+        "扩展后台直连中继合同无效",
+        "BW_COMPUTER_VOICE_DIRECT_RELAY_UNAVAILABLE",
+        false
+      );
+    }
+    this.port = port;
+    port.onMessage.addListener(function (message) {
+      self._onRelayMessage(message);
+    });
+    port.onDisconnect.addListener(function () {
+      if (self.terminal) return;
+      self.terminal = true;
+      self.readyState = 3;
+      try {
+        if (typeof self.onclose === "function") {
+          self.onclose({
+            code: 1006,
+            reason: "extension-relay-disconnected",
+            wasClean: false,
+          });
+        }
+      } finally {
+        self._finishClosed();
+      }
+    });
+    try {
+      port.postMessage({ type: "open" });
+    } catch (_) {
+      this.terminal = true;
+      this.readyState = 3;
+      try { if (typeof port.disconnect === "function") port.disconnect(); }
+      catch (_) {}
+      this._finishClosed();
+      throw directError(
+        "扩展后台直连中继启动失败",
+        "BW_COMPUTER_VOICE_DIRECT_RELAY_UNAVAILABLE",
+        true
+      );
+    }
+  }
+
+  ExtensionRelaySocket.prototype._finishClosed = function () {
+    var resolve = this.closedResolve;
+    this.closedResolve = null;
+    if (typeof resolve === "function") resolve();
+  };
+
+  ExtensionRelaySocket.prototype.whenClosed = function () {
+    return this.closedPromise || Promise.resolve();
+  };
+
+  ExtensionRelaySocket.prototype._protocolFailure = function (error) {
+    if (this.terminal) return;
+    this.terminal = true;
+    this.readyState = 3;
+    try { this.port.postMessage({ type: "close" }); } catch (_) {}
+    try {
+      if (this.port && typeof this.port.disconnect === "function") {
+        this.port.disconnect();
+      }
+    } catch (_) {}
+    if (typeof this.onerror === "function") this.onerror(error);
+    this._finishClosed();
+  };
+
+  ExtensionRelaySocket.prototype._onRelayMessage = function (message) {
+    if (this.terminal) return;
+    try {
+      if (!plainObject(message) || typeof message.type !== "string") {
+        throw directError(
+          "扩展后台直连中继消息无效",
+          "BW_COMPUTER_VOICE_DIRECT_RELAY_SCHEMA",
+          false
+        );
+      }
+      if (message.type === "open") {
+        exactRelayMessage(message, "open", [], "扩展中继 open");
+        if (this.readyState !== 0) {
+          throw directError(
+            "扩展后台重复打开直连中继",
+            "BW_COMPUTER_VOICE_DIRECT_RELAY_SCHEMA",
+            false
+          );
+        }
+        this.readyState = 1;
+        if (typeof this.onopen === "function") this.onopen();
+        return;
+      }
+      if (message.type === "text") {
+        exactRelayMessage(message, "text", ["data"], "扩展中继 text");
+        if (this.readyState !== 1 || typeof message.data !== "string") {
+          throw directError(
+            "扩展后台直连文本状态无效",
+            "BW_COMPUTER_VOICE_DIRECT_RELAY_SCHEMA",
+            false
+          );
+        }
+        if (typeof this.onmessage === "function") {
+          this.onmessage({ data: message.data });
+        }
+        return;
+      }
+      if (message.type === "binary-base64") {
+        if (this.readyState !== 1) {
+          throw directError(
+            "扩展后台直连二进制状态无效",
+            "BW_COMPUTER_VOICE_DIRECT_RELAY_SCHEMA",
+            false
+          );
+        }
+        var buffer = decodeRelayBinary(message);
+        if (typeof this.onmessage === "function") {
+          this.onmessage({ data: buffer });
+        }
+        return;
+      }
+      if (message.type === "error") {
+        exactRelayMessage(
+          message,
+          "error",
+          ["code", "error"],
+          "扩展中继 error"
+        );
+        safeId(message.code, "扩展中继错误码");
+        safeText(message.error, "扩展中继错误消息", 300, false);
+        this._protocolFailure(directError(
+          message.error,
+          message.code,
+          true
+        ));
+        return;
+      }
+      if (message.type === "close") {
+        exactRelayMessage(
+          message,
+          "close",
+          ["code", "reason", "wasClean"],
+          "扩展中继 close"
+        );
+        if (
+          !Number.isSafeInteger(message.code) ||
+          message.code < 1000 ||
+          message.code > 4999 ||
+          typeof message.wasClean !== "boolean"
+        ) {
+          throw directError(
+            "扩展后台直连 close 字段无效",
+            "BW_COMPUTER_VOICE_DIRECT_RELAY_SCHEMA",
+            false
+          );
+        }
+        safeText(message.reason, "扩展中继关闭原因", 123, true);
+        this.terminal = true;
+        this.readyState = 3;
+        try {
+          if (typeof this.onclose === "function") {
+            this.onclose({
+              code: message.code,
+              reason: message.reason,
+              wasClean: message.wasClean,
+            });
+          }
+        } finally {
+          try {
+            if (this.port && typeof this.port.disconnect === "function") {
+              this.port.disconnect();
+            }
+          } catch (_) {}
+          this._finishClosed();
+        }
+        return;
+      }
+      throw directError(
+        "扩展后台直连中继消息类型不受支持",
+        "BW_COMPUTER_VOICE_DIRECT_RELAY_SCHEMA",
+        false
+      );
+    } catch (error) {
+      this._protocolFailure(error && error.code ? error : directError(
+        "扩展后台直连中继消息无法解析",
+        "BW_COMPUTER_VOICE_DIRECT_RELAY_SCHEMA",
+        false
+      ));
+    }
+  };
+
+  ExtensionRelaySocket.prototype.send = function (text) {
+    if (
+      this.terminal ||
+      this.readyState !== 1 ||
+      typeof text !== "string"
+    ) {
+      throw directError(
+        "扩展后台直连中继不可发送",
+        "BW_COMPUTER_VOICE_DIRECT_RELAY_DISCONNECTED",
+        true
+      );
+    }
+    this.port.postMessage({ type: "send-text", data: text });
+  };
+
+  ExtensionRelaySocket.prototype.close = function () {
+    if (this.terminal || this.readyState >= 2) return;
+    this.readyState = 2;
+    try {
+      this.port.postMessage({ type: "close" });
+    } catch (_) {
+      this.terminal = true;
+      this.readyState = 3;
+      try {
+        if (this.port && typeof this.port.disconnect === "function") {
+          this.port.disconnect();
+        }
+      } catch (_) {}
+      this._finishClosed();
+    }
+  };
+
+  function createDirectTransport(endpoint) {
+    if (currentOrigin() === READER_ORIGIN) {
+      if (typeof window.WebSocket !== "function") {
+        throw directError(
+          "Reader 缺少 WebSocket 能力",
+          "BW_COMPUTER_VOICE_DIRECT_OFFLINE",
+          true
+        );
+      }
+      return new window.WebSocket(endpoint);
+    }
+    var runtime = window.chrome && window.chrome.runtime;
+    if (
+      runtime &&
+      typeof runtime.id === "string" &&
+      runtime.id &&
+      typeof runtime.connect === "function"
+    ) {
+      return new ExtensionRelaySocket(runtime);
+    }
+    throw directError(
+      "普通网页必须通过受信扩展后台连接 Windows 桥接器",
+      "BW_COMPUTER_VOICE_DIRECT_RELAY_REQUIRED",
+      false
+    );
+  }
+
   function DirectSocket(endpoint, options) {
     this.endpoint = normalizeEndpoint(endpoint);
     this.options = options || {};
@@ -575,6 +658,7 @@ if (window.__bwPwaProviderOnly) return;
     this.intentional = false;
     this.openReject = null;
     this.openTimer = null;
+    this.closingPromise = null;
   }
 
   DirectSocket.prototype._fail = function (error) {
@@ -616,9 +700,9 @@ if (window.__bwPwaProviderOnly) return;
       var socket;
       try {
         // @interaction computer-voice.bridge.request
-        socket = new window.WebSocket(self.endpoint);
-      } catch (_) {
-        reject(directError(
+        socket = createDirectTransport(self.endpoint);
+      } catch (error) {
+        reject(error && error.code ? error : directError(
           "Windows 桥接器离线或 WSS 地址不可达",
           "BW_COMPUTER_VOICE_DIRECT_OFFLINE",
           true
@@ -891,7 +975,9 @@ if (window.__bwPwaProviderOnly) return;
   };
 
   DirectSocket.prototype.close = function () {
-    if (this.intentional) return;
+    if (this.intentional) {
+      return this.closingPromise || Promise.resolve();
+    }
     this.intentional = true;
     this.closed = true;
     if (this.openTimer) {
@@ -903,73 +989,41 @@ if (window.__bwPwaProviderOnly) return;
       "BW_COMPUTER_VOICE_DIRECT_CANCELLED",
       false
     );
+    if (this.openReject) {
+      this.openReject(cancelled);
+      this.openReject = null;
+    }
     this.pending.forEach(function (entry) {
       clearTimeout(entry.timer);
       entry.reject(cancelled);
     });
     this.pending.clear();
+    var socket = this.socket;
+    var transportClosed =
+      socket && typeof socket.whenClosed === "function"
+        ? socket.whenClosed()
+        : Promise.resolve();
+    this.closingPromise = Promise.resolve(transportClosed).catch(function () {});
     try {
-      if (this.socket && this.socket.readyState < 2) {
-        this.socket.close(1000, "client-stop");
+      if (socket && socket.readyState < 2) {
+        socket.close(1000, "client-stop");
       }
     } catch (_) {}
     this.socket = null;
+    return this.closingPromise;
   };
 
-  function normalizeChallenge(value) {
+  function normalizeHello(value) {
     exactObject(
       value,
-      [
-        "protocolVersion",
-        "paired",
-        "authentication",
-        "signatureFormat",
-        "challenge",
-        "limits",
-      ],
+      ["protocolVersion", "limits"],
       [],
       "HELLO 响应"
     );
-    if (
-      value.protocolVersion !== 1 ||
-      typeof value.paired !== "boolean" ||
-      value.authentication !== "ecdsa-p256-sha256" ||
-      value.signatureFormat !== "ieee-p1363-fixed-64"
-    ) {
+    if (value.protocolVersion !== 2) {
       throw directError(
-        "Windows 桥接器认证能力不匹配",
+        "Windows 桥接器直连协议版本不匹配",
         "BW_COMPUTER_VOICE_DIRECT_CONTRACT",
-        false
-      );
-    }
-    exactObject(
-      value.challenge,
-      [
-        "challengeId",
-        "nonce",
-        "expiresAtUtc",
-        "signingContract",
-      ],
-      [],
-      "challenge"
-    );
-    var challengeId = safeId(value.challenge.challengeId, "challengeId");
-    var nonce = safeBase64Url(value.challenge.nonce, "challenge nonce", 22, 256);
-    var expiresAt = Date.parse(safeText(
-      value.challenge.expiresAtUtc,
-      "challenge expiresAtUtc",
-      64,
-      false
-    ));
-    if (
-      !Number.isFinite(expiresAt) ||
-      expiresAt <= Date.now() ||
-      expiresAt > Date.now() + 5 * 60 * 1000 ||
-      value.challenge.signingContract !== AUTH_CONTRACT
-    ) {
-      throw directError(
-        "Windows 桥接器 challenge 无效或已过期",
-        "BW_COMPUTER_VOICE_DIRECT_CHALLENGE",
         false
       );
     }
@@ -998,86 +1052,20 @@ if (window.__bwPwaProviderOnly) return;
         false
       );
     }
-    return {
-      challengeId: challengeId,
-      nonce: nonce,
-    };
-  }
-
-  function originForSignature() {
-    var origin = String(window.location && window.location.origin || "");
-    if (!/^https:\/\/[^/\s]{1,240}$/.test(origin)) {
-      throw directError(
-        "当前 Reader Origin 不可用于 Windows 认证",
-        "BW_COMPUTER_VOICE_DIRECT_ORIGIN",
-        false
-      );
-    }
-    return origin;
-  }
-
-  function signChallenge(identity, challenge) {
-    validatePrivateKey(identity.privateKey);
-    var canonical = AUTH_CONTRACT + "\n" +
-      challenge.challengeId + "\n" +
-      challenge.nonce + "\n" +
-      originForSignature();
-    return window.crypto.subtle.sign(
-      { name: "ECDSA", hash: "SHA-256" },
-      identity.privateKey,
-      new TextEncoder().encode(canonical)
-    ).then(function (signature) {
-      if (signature.byteLength !== 64) {
-        throw directError(
-          "浏览器 ECDSA 签名格式不是固定 64 字节 P1363",
-          "BW_COMPUTER_VOICE_DIRECT_SIGNATURE",
-          false
-        );
-      }
-      return bytesToBase64Url(signature);
-    });
+    return value;
   }
 
   function hello(channel) {
-    return channel.request("hello", {}).then(normalizeChallenge);
+    return channel.request("hello", {
+      protocolVersion: 2,
+    }).then(normalizeHello);
   }
 
-  function authenticate(channel, identity, challenge) {
-    return signChallenge(identity, challenge).then(function (signature) {
-      return channel.request("auth", {
-        challengeId: challenge.challengeId,
-        signature: signature,
-      });
-    }).then(function (value) {
-      exactObject(
-        value,
-        ["authenticated", "clientFingerprintSha256"],
-        [],
-        "AUTH 响应"
-      );
-      if (value.authenticated !== true) {
-        throw directError(
-          "Windows 桥接器未确认身份",
-          "BW_COMPUTER_VOICE_DIRECT_AUTH",
-          false
-        );
-      }
-      safeBase64Url(
-        value.clientFingerprintSha256,
-        "身份指纹",
-        32,
-        128
-      );
-      return value;
-    });
-  }
-
-  function openAuthenticated(identity, options) {
-    var channel = new DirectSocket(identity.endpoint, options);
+  function openDirect(options, onCreate) {
+    var channel = new DirectSocket(DIRECT_ENDPOINT, options);
+    if (typeof onCreate === "function") onCreate(channel);
     return channel.open().then(function () {
       return hello(channel);
-    }).then(function (challenge) {
-      return authenticate(channel, identity, challenge);
     }).then(function () {
       return channel;
     }).catch(function (error) {
@@ -1086,138 +1074,90 @@ if (window.__bwPwaProviderOnly) return;
     });
   }
 
-  function beginPairing(options) {
-    options = options || {};
-    var endpoint;
-    var pairingCode;
-    var identity;
-    var channel = null;
-    return Promise.resolve().then(function () {
-      endpoint = normalizeEndpoint(options.endpoint || options.url || "");
-      pairingCode = normalizePairingCode(options.pairingCode || options.code);
-      return ensureIdentity(endpoint);
-    }).then(function (value) {
-      identity = value;
-      channel = new DirectSocket(endpoint);
-      return channel.open();
-    }).then(function () {
-      return hello(channel);
-    }).then(function (challenge) {
-      return channel.request("pair", {
-        pairingCode: pairingCode,
-        clientPublicKeySpki: identity.publicKeySpki,
-      }).then(function (value) {
-        exactObject(
-          value,
-          ["paired", "clientFingerprintSha256"],
-          [],
-          "PAIR 响应"
-        );
-        if (value.paired !== true) {
-          throw directError(
-            "Windows 桥接器未确认配对",
-            "BW_COMPUTER_VOICE_DIRECT_PAIR",
-            false
-          );
-        }
-        var fingerprint = safeBase64Url(
-          value.clientFingerprintSha256,
-          "身份指纹",
-          32,
-          128
-        );
-        return authenticate(channel, identity, challenge).then(function (auth) {
-          if (auth.clientFingerprintSha256 !== fingerprint) {
-            throw directError(
-              "PAIR 与 AUTH 身份指纹不一致",
-              "BW_COMPUTER_VOICE_DIRECT_AUTH",
-              false
-            );
-          }
-          var record = {
-            version: 1,
-            endpoint: endpoint,
-            paired: true,
-            privateKey: identity.privateKey,
-            publicKeySpki: identity.publicKeySpki,
-            fingerprint: fingerprint,
-          };
-          return idbPut(record).then(function () {
-            return {
-              ok: true,
-              paired: true,
-              endpoint: endpoint,
-              fingerprint: fingerprint,
-            };
-          });
-        });
-      });
-    }).finally(function () {
-      if (channel) channel.close();
-    });
-  }
-
-  function offlineAvailability(identity, error) {
+  function offlineAvailability(error) {
     var code = error && error.code || "BW_COMPUTER_VOICE_DIRECT_OFFLINE";
-    var authFailure = /AUTH|IDENTITY|CHALLENGE|CONTRACT|SCHEMA/.test(code);
     return {
-      paired: true,
-      state: authFailure ? "auth-failed" : "offline",
+      state: "offline",
       reason: error && error.message || "Windows 桥接器离线",
       code: code,
-      endpoint: identity.endpoint,
+      endpoint: DIRECT_ENDPOINT,
       status: null,
     };
   }
 
-  function availability() {
-    var identity;
-    var channel = null;
-    return readIdentity().then(function (value) {
-      identity = value;
-      if (!identity || !identity.paired) {
-        return {
-          paired: false,
-          state: "unpaired",
-          reason: "pairing-required",
-          endpoint: identity && identity.endpoint || "",
-          status: null,
-        };
-      }
-      return openAuthenticated(identity).then(function (opened) {
-        channel = opened;
-        return channel.request("status", {}).then(normalizeStatusPayload);
-      }).then(function (status) {
-        return {
-          paired: true,
-          state: status.state,
-          reason: status.reason,
-          endpoint: identity.endpoint,
-          status: status,
-        };
-      }).catch(function (error) {
-        return offlineAvailability(identity, error);
-      }).finally(function () {
-        if (channel) channel.close();
-      });
-    });
+  function activeAvailability(state) {
+    var started = !!(state && state.started);
+    var currentState = started ? "active" : "busy";
+    var reason = started ? "电脑客户端通话中" : "电脑客户端正在启动";
+    return {
+      state: currentState,
+      reason: reason,
+      endpoint: DIRECT_ENDPOINT,
+      status: {
+        ready: started,
+        state: currentState,
+        reason: reason,
+        localOptIn: true,
+        media: {
+          hostReady: started,
+          captureActive: started,
+        },
+      },
+    };
   }
 
-  function forgetIdentity() {
-    if (active) {
-      return Promise.reject(directError(
-        "请先挂断电脑客户端通话",
-        "BW_COMPUTER_VOICE_ALREADY_ACTIVE",
-        false
-      ));
-    }
-    return idbDelete().then(function () {
-      emitStatus({
-        state: "unpaired",
-        message: "已忘记本页中的 Windows 桥接身份",
-      });
-      return { ok: true, state: "unpaired" };
+  function cancelAvailabilityForStart() {
+    var attempt = availabilityAttempt;
+    if (!attempt) return Promise.resolve();
+    attempt.cancelled = true;
+    if (attempt.channel) attempt.channel.close();
+    return Promise.resolve(attempt.promise).then(
+      function () {},
+      function () {}
+    );
+  }
+
+  function availability() {
+    if (active) return Promise.resolve(activeAvailability(active));
+    if (availabilityAttempt) return availabilityAttempt.promise;
+
+    var attempt = {
+      cancelled: false,
+      channel: null,
+      promise: null,
+    };
+    availabilityAttempt = attempt;
+    attempt.promise = openDirect(null, function (channel) {
+      attempt.channel = channel;
+    }).then(function (channel) {
+      if (attempt.cancelled) {
+        channel.close();
+        throw directError(
+          "状态刷新已让位给电话按钮启动",
+          "BW_COMPUTER_VOICE_DIRECT_CANCELLED",
+          false
+        );
+      }
+      return channel.request("status", {}).then(normalizeStatusPayload);
+    }).then(function (status) {
+      return {
+        state: status.state,
+        reason: status.reason,
+        endpoint: DIRECT_ENDPOINT,
+        status: status,
+      };
+    }).catch(function (error) {
+      if (attempt.cancelled && active) return activeAvailability(active);
+      return offlineAvailability(error);
+    }).finally(function () {
+      var closePromise = attempt.channel
+        ? attempt.channel.close()
+        : Promise.resolve();
+      attempt.channel = null;
+      if (availabilityAttempt === attempt) availabilityAttempt = null;
+      return closePromise;
     });
+    return attempt.promise;
   }
 
   function makeAudioSurface() {
@@ -1250,6 +1190,16 @@ if (window.__bwPwaProviderOnly) return;
     try { surface.context.close(); } catch (_) {}
   }
 
+  function discardScheduledPcm(surface) {
+    if (!surface || surface.released) return;
+    surface.sources.forEach(function (source) {
+      try { source.stop(); } catch (_) {}
+      try { source.disconnect(); } catch (_) {}
+    });
+    surface.sources.clear();
+    surface.nextAt = 0;
+  }
+
   function primeSurface(surface) {
     if (!surface || surface.released) return;
     try {
@@ -1279,14 +1229,18 @@ if (window.__bwPwaProviderOnly) return;
     primeSurface(preparedSurface);
     preparedTimer = setTimeout(function () {
       clearPreparedSurface(true);
-    }, PREPARED_SURFACE_TTL_MS);
+    }, START_GESTURE_LEASE_TTL_MS);
   }
 
   function claimPreparedSurface() {
     var surface = clearPreparedSurface(false);
-    if (surface) return surface;
-    surface = makeAudioSurface();
-    primeSurface(surface);
+    if (!surface || surface.released) {
+      throw directError(
+        "必须由一次真实电话按钮点击启动 Windows 桥接器",
+        "BW_COMPUTER_VOICE_GESTURE_REQUIRED",
+        false
+      );
+    }
     return surface;
   }
 
@@ -1308,11 +1262,11 @@ if (window.__bwPwaProviderOnly) return;
     var now = Number(context.currentTime) || 0;
     var startAt = Math.max(now + 0.025, surface.nextAt || 0);
     if (startAt - now > (PCM_QUEUE_LIMIT_MS / 1000) + 0.025) {
-      throw directError(
-        "Windows 音频队列超过 400 ms，已停止以避免伪连续播放",
-        "BW_COMPUTER_VOICE_DIRECT_PCM_OVERFLOW",
-        false
-      );
+      // 浏览器主线程卡顿后可能同步交付一批仍然合法且连续的 WSS 帧。
+      // 不把旧排程伪装成实时语音，也不因此挂断：丢掉尚未播放的旧 source，
+      // 从当前这一帧重新锚定播放时钟，队列始终保持在 400 ms 内。
+      discardScheduledPcm(surface);
+      startAt = now + 0.025;
     }
     var buffer = context.createBuffer(1, PCM_SAMPLES, PCM_SAMPLE_RATE);
     var channel = buffer.getChannelData(0);
@@ -1341,21 +1295,25 @@ if (window.__bwPwaProviderOnly) return;
   function queueAppOutput(state, samples) {
     var surface = state.surface;
     if (surface.context.state !== "running" || state.audioBlocked) {
+      var newlyBlocked = !state.audioBlocked;
       state.audioBlocked = true;
-      if (surface.pending.length >= PCM_QUEUE_LIMIT_FRAMES) {
-        throw directError(
-          "浏览器阻止播放超过 400 ms，PCM 队列已关闭",
-          "BW_COMPUTER_VOICE_DIRECT_PCM_OVERFLOW",
-          false
-        );
+      if (newlyBlocked) {
+        // AudioContext 可能在通话中被系统挂起。停止已经排程但尚未播放的
+        // source，并丢弃时间轴，恢复时不能把中断期间的旧音频伪装成连续流。
+        discardScheduledPcm(surface);
       }
+      // 阻塞期间只保留最新 20 ms；持续 PCM 不得撑爆内存或自行挂断。
+      // 用户再次真实点击后，从最新帧接回实时流，不回放失联期间的语音。
+      surface.pending.length = 0;
       surface.pending.push(samples);
-      emitStatus({
-        state: "audio-blocked",
-        sessionId: state.sessionId,
-        message: "浏览器阻止了声音；请再次点击电话按钮允许播放",
-        code: "BW_COMPUTER_VOICE_AUDIO_BLOCKED",
-      });
+      if (newlyBlocked) {
+        emitStatus({
+          state: "audio-blocked",
+          sessionId: state.sessionId,
+          message: "浏览器阻止了声音；请再次点击电话按钮允许播放",
+          code: "BW_COMPUTER_VOICE_AUDIO_BLOCKED",
+        });
+      }
       return;
     }
     schedulePcm(surface, samples);
@@ -1396,13 +1354,6 @@ if (window.__bwPwaProviderOnly) return;
         sessionId: state.sessionId,
       };
     }).catch(function (error) {
-      if (
-        error &&
-        error.code === "BW_COMPUTER_VOICE_DIRECT_PCM_OVERFLOW"
-      ) {
-        failActive(state, error, true);
-        throw error;
-      }
       state.audioBlocked = true;
       emitStatus({
         state: "audio-blocked",
@@ -1613,7 +1564,6 @@ if (window.__bwPwaProviderOnly) return;
 
   function startFromUserGesture(options) {
     options = options || {};
-    if (active && active.audioBlocked) return retryPlayback(active);
     if (active) {
       return Promise.reject(directError(
         "电脑客户端通话已经启动",
@@ -1649,21 +1599,22 @@ if (window.__bwPwaProviderOnly) return;
       },
     };
     active = state;
+    var availabilityClosed = cancelAvailabilityForStart();
     emitStatus({
       state: "checking",
       sessionId: state.sessionId,
       message: "正在直连 Windows 桥接器…",
     });
 
-    return readIdentity().then(function (identity) {
-      if (!identity || !identity.paired) {
+    return availabilityClosed.then(function () {
+      if (state.stopped || active !== state) {
         throw directError(
-          "尚未连接 Windows 桥接器；配对码请在 Windows EXE 中生成",
-          "BW_COMPUTER_VOICE_PAIRING_REQUIRED",
+          "Windows 桥接启动已取消",
+          "BW_COMPUTER_VOICE_DIRECT_CANCELLED",
           false
         );
       }
-      return openAuthenticated(identity, {
+      return openDirect({
         onStatus: function (status) {
           if (active !== state || state.stopped) return;
           emitStatus({
@@ -1678,6 +1629,8 @@ if (window.__bwPwaProviderOnly) return;
         onBinary: function (buffer) {
           handlePcmFrame(state, buffer);
         },
+      }, function (channel) {
+        state.channel = channel;
       });
     }).then(function (channel) {
       if (state.stopped || active !== state) {
@@ -1691,7 +1644,7 @@ if (window.__bwPwaProviderOnly) return;
       state.channel = channel;
       // Windows capture pump may enqueue its first frame before the START
       // result task is delivered. This gate opens immediately before the one
-      // authorized START send, never during HELLO/AUTH/STATUS.
+      // authorized START send, never during HELLO/STATUS.
       state.acceptPcm = true;
       emitStatus({
         state: "starting",
@@ -1779,7 +1732,10 @@ if (window.__bwPwaProviderOnly) return;
       // 启动。立即关闭连接会取消所有在途请求，并让远端会话租约 fail closed。
       if (state.channel) state.channel.close();
       releaseSurface(state.surface);
-      emitStatus({ state: "stopped", message: "电脑客户端启动已取消" });
+      emitStatus({
+        state: "stopped",
+        message: "电脑桥接启动已取消；若 Codex Voice 已亮起，请在 Windows 退出",
+      });
       return Promise.resolve({ ok: true, state: "stopped" });
     }
     return Promise.resolve().then(function () {
@@ -1806,7 +1762,10 @@ if (window.__bwPwaProviderOnly) return;
     }).then(function () {
       if (state.channel) state.channel.close();
       releaseSurface(state.surface);
-      emitStatus({ state: "stopped", message: "电脑客户端已挂断" });
+      emitStatus({
+        state: "stopped",
+        message: "电脑桥接已停止；请确认 Windows 的 Codex Voice 已退出",
+      });
       return { ok: true, state: "stopped" };
     });
   }
@@ -1814,16 +1773,35 @@ if (window.__bwPwaProviderOnly) return;
   function phoneButtonFromEvent(event) {
     var target = event && event.target;
     while (target) {
-      if (target.id === "asst-call") return target;
+      if (target.id === "asst-call" || target.id === "vc-top-call") {
+        return registeredPhoneButtons.has(target) ? target : null;
+      }
       target = target.parentNode;
     }
     return null;
+  }
+
+  function registerPhoneButton(button) {
+    if (
+      !button ||
+      button.nodeType !== 1 ||
+      String(button.tagName || "").toUpperCase() !== "BUTTON" ||
+      (button.id !== "asst-call" && button.id !== "vc-top-call") ||
+      button.type !== "button" ||
+      button.ownerDocument !== window.document ||
+      button.isConnected !== true
+    ) {
+      return false;
+    }
+    registeredPhoneButtons.add(button);
+    return true;
   }
 
   function installGestureCapture() {
     if (!document || typeof document.addEventListener !== "function") return;
     document.addEventListener("click", function (event) {
       if (!phoneButtonFromEvent(event)) return;
+      if (event.isTrusted !== true) return;
       if (active && active.audioBlocked) {
         // 此次点击只恢复被浏览器拦截的同一条音频，不让上层把它当挂断。
         try { event.preventDefault(); } catch (_) {}
@@ -1840,52 +1818,16 @@ if (window.__bwPwaProviderOnly) return;
     var root = document.createElement("div");
     root.className = "rc-computer-voice-settings";
     root.innerHTML =
-      '<div class="ams-tdef" data-role="status">正在读取 Windows 直连配置…</div>' +
-      '<div data-role="setup" style="display:none;margin-top:7px">' +
-      '<label class="ams-tdef">Windows EXE 显示的受信任 WSS 地址</label>' +
-      '<input class="ams-inp" data-role="endpoint" inputmode="url" ' +
-      'autocomplete="off" spellcheck="false" placeholder="wss://电脑名.tailnet.ts.net/…">' +
-      '<label class="ams-tdef" style="display:block;margin-top:6px">' +
-      '一次性配对码（在 Windows 电脑客户端桥接器 EXE 中获取）</label>' +
-      '<input class="ams-inp" data-role="code" autocomplete="one-time-code" ' +
-      'autocapitalize="characters" maxlength="12" placeholder="10 位配对码">' +
-      '<div class="ams-row" style="margin-top:7px">' +
-      '<button type="button" class="ams-btn" data-role="pair">连接 Windows 桥接器</button>' +
-      '</div></div>' +
+      '<div class="ams-tdef" data-role="status">正在读取 Windows 直连状态…</div>' +
       '<div class="ams-row" style="margin-top:7px">' +
       '<button type="button" class="ams-btn" data-role="refresh">刷新直连状态</button>' +
-      '<button type="button" class="ams-btn" data-role="forget" style="display:none">' +
-      '忘记此桥接器</button>' +
       '</div>' +
       '<div class="ams-tdef" data-role="detail" style="margin-top:6px"></div>';
     container.appendChild(root);
     var status = root.querySelector('[data-role="status"]');
-    var setup = root.querySelector('[data-role="setup"]');
-    var endpoint = root.querySelector('[data-role="endpoint"]');
-    var code = root.querySelector('[data-role="code"]');
-    var pair = root.querySelector('[data-role="pair"]');
-    var forget = root.querySelector('[data-role="forget"]');
     var detail = root.querySelector('[data-role="detail"]');
 
     function render(value) {
-      if (!value.paired || value.state === "auth-failed") {
-        setup.style.display = "";
-        forget.style.display = value.paired ? "" : "none";
-        if (value.endpoint) endpoint.value = value.endpoint;
-        if (value.state === "auth-failed") {
-          status.textContent = "○ Windows 桥接身份已失效，请用 EXE 的新配对码重新连接。";
-          detail.textContent =
-            "将复用本浏览器中不可导出的私钥；也可先“忘记此桥接器”再建立新身份。";
-        } else {
-          status.textContent = "尚未连接 Windows 桥接器。";
-          detail.textContent =
-            "请先在 Windows EXE 中启用服务并取得 WSS 地址和一次性配对码；" +
-            "选择模型或刷新状态不会启动应用或采音。";
-        }
-        return;
-      }
-      setup.style.display = "none";
-      forget.style.display = "";
       if (
         value.state === "ready" ||
         (value.state === "idle" && value.status && value.status.ready === true)
@@ -1899,61 +1841,21 @@ if (window.__bwPwaProviderOnly) return;
           (value.reason || value.state || "未就绪");
       }
       detail.textContent =
-        "直连 " + value.endpoint +
-        "；身份私钥仅存于本浏览器 IndexedDB，且不可导出。";
+        "固定 Tailnet 直连，无需配对或填写地址；" +
+        "选择模型或刷新状态不会启动应用或采音。" +
+        "挂断只保证停止桥接，Codex Voice 需在 Windows 确认退出。";
     }
 
     function refresh() {
       status.textContent = "正在直连 Windows 桥接器读取状态…";
       return availability().then(render).catch(function (error) {
-        setup.style.display = "";
-        status.textContent = "直连配置读取失败：" +
+        status.textContent = "直连状态读取失败：" +
           (error.message || "未知错误");
         detail.textContent = "未发送 START。";
       });
     }
 
     root.querySelector('[data-role="refresh"]').addEventListener("click", refresh);
-    forget.addEventListener("click", function () {
-      if (
-        typeof window.confirm === "function" &&
-        !window.confirm("只删除此浏览器中的 Windows 桥接身份？")
-      ) return;
-      forget.disabled = true;
-      forgetIdentity().then(function () {
-        endpoint.value = "";
-        code.value = "";
-        render({
-          paired: false,
-          state: "unpaired",
-          endpoint: "",
-        });
-      }).catch(function (error) {
-        status.textContent = "删除失败：" + (error.message || "未知错误");
-      }).finally(function () {
-        forget.disabled = false;
-      });
-    });
-    pair.addEventListener("click", function () {
-      pair.disabled = true;
-      status.textContent = "正在与 Windows 桥接器安全配对…";
-      beginPairing({
-        endpoint: endpoint.value,
-        pairingCode: code.value,
-      }).then(function () {
-        code.value = "";
-        setup.style.display = "none";
-        status.textContent = "● Windows 桥接器已安全配对。";
-        detail.textContent =
-          "长期身份使用本浏览器不可导出的 P-256 私钥；未保存 bearer token。";
-        return refresh();
-      }).catch(function (error) {
-        setup.style.display = "";
-        status.textContent = "连接失败：" + (error.message || "未知错误");
-      }).finally(function () {
-        pair.disabled = false;
-      });
-    });
     refresh();
   }
 
@@ -1962,10 +1864,8 @@ if (window.__bwPwaProviderOnly) return;
   RC.computerVoice = Object.freeze({
     contract: BRIDGE_CONTRACT,
     directContract: DIRECT_CONTRACT,
-    authContract: AUTH_CONTRACT,
     availability: availability,
-    beginPairing: beginPairing,
-    forgetIdentity: forgetIdentity,
+    registerPhoneButton: registerPhoneButton,
     startFromUserGesture: startFromUserGesture,
     stop: stop,
     isActive: function () { return !!active; },

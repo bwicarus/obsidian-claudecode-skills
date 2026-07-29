@@ -13,8 +13,24 @@ internal sealed record CodexAppProbeState(
     int WindowCount,
     CodexAppTarget? ReadyTarget);
 
+internal enum VoiceShortcutInputBatch
+{
+    Activation,
+    ReleasePressedKeys,
+}
+
+internal readonly record struct VoiceShortcutKeyEvent(
+    ushort VirtualKey,
+    bool KeyUp);
+
 internal static class WindowsCodexAppProbe
 {
+    // The packaged app currently exposes only the observed START shortcut to
+    // this bridge.  There is no locally verified, ownership-safe application
+    // voice stop primitive.  Bridge STOP must not guess that sending the same
+    // shortcut a second time is a safe toggle.
+    internal static bool SupportsOwnedVoiceStop => false;
+
     private const uint SnapshotProcesses = 0x00000002;
     private const uint KeyEventKeyUp = 0x0002;
     private const ushort VirtualKeyControl = 0x11;
@@ -168,20 +184,71 @@ internal static class WindowsCodexAppProbe
             return false;
         }
 
-        INPUT[] inputs =
-        [
-            Key(VirtualKeyControl, keyUp: false),
-            Key(VirtualKeyShift, keyUp: false),
-            Key(VirtualKeyC, keyUp: false),
-            Key(VirtualKeyC, keyUp: true),
-            Key(VirtualKeyShift, keyUp: true),
-            Key(VirtualKeyControl, keyUp: true),
-        ];
-        return SendInput(
-            checked((uint)inputs.Length),
-            inputs,
-            Marshal.SizeOf<INPUT>()) == checked((uint)inputs.Length);
+        return SendVoiceShortcutInputSequence(batch =>
+        {
+            VoiceShortcutKeyEvent[] events =
+                VoiceShortcutEvents(batch);
+            INPUT[] inputs = new INPUT[events.Length];
+            for (int index = 0; index < events.Length; index++)
+            {
+                inputs[index] = Key(
+                    events[index].VirtualKey,
+                    events[index].KeyUp);
+            }
+            return SendInput(
+                checked((uint)inputs.Length),
+                inputs,
+                Marshal.SizeOf<INPUT>());
+        });
     }
+
+    internal static bool SendVoiceShortcutInputSequence(
+        Func<VoiceShortcutInputBatch, uint> sendBatch)
+    {
+        uint inserted = sendBatch(VoiceShortcutInputBatch.Activation);
+        if (inserted == 6)
+        {
+            return true;
+        }
+        if (inserted is >= 1 and <= 5)
+        {
+            // SendInput may have left Ctrl, Shift, or C down.  Release all
+            // three in reverse order.  This cleanup is intentionally
+            // best-effort and the activation remains failed regardless of
+            // how many release events Windows accepts.
+            try
+            {
+                _ = sendBatch(
+                    VoiceShortcutInputBatch.ReleasePressedKeys);
+            }
+            catch
+            {
+            }
+        }
+        return false;
+    }
+
+    internal static VoiceShortcutKeyEvent[] VoiceShortcutEvents(
+        VoiceShortcutInputBatch batch) =>
+        batch switch
+        {
+            VoiceShortcutInputBatch.Activation =>
+            [
+                new(VirtualKeyControl, KeyUp: false),
+                new(VirtualKeyShift, KeyUp: false),
+                new(VirtualKeyC, KeyUp: false),
+                new(VirtualKeyC, KeyUp: true),
+                new(VirtualKeyShift, KeyUp: true),
+                new(VirtualKeyControl, KeyUp: true),
+            ],
+            VoiceShortcutInputBatch.ReleasePressedKeys =>
+            [
+                new(VirtualKeyC, KeyUp: true),
+                new(VirtualKeyShift, KeyUp: true),
+                new(VirtualKeyControl, KeyUp: true),
+            ],
+            _ => throw new ArgumentOutOfRangeException(nameof(batch)),
+        };
 
     private static Dictionary<uint, uint> SnapshotParents()
     {

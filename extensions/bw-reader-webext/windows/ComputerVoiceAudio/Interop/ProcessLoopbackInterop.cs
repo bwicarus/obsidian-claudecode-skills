@@ -133,6 +133,7 @@ internal enum AudioClientStreamFlags : uint
 {
     Loopback = 0x0002_0000,
     EventCallback = 0x0004_0000,
+    AutoConvertPcm = 0x8000_0000,
 }
 
 [Flags]

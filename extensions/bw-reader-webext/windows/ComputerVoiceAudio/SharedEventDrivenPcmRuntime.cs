@@ -3,19 +3,67 @@ using BwReader.ComputerVoiceAudio.Interop;
 
 namespace BwReader.ComputerVoiceAudio;
 
+internal sealed class AudioCaptureStageException : Exception
+{
+    internal AudioCaptureStageException(
+        string stage,
+        int result,
+        Exception? innerException = null)
+        : base(
+            $"BW_COMPUTER_VOICE_AUDIO_STAGE_FAILED:{stage}:"
+                + $"0x{unchecked((uint)result):X8}",
+            innerException)
+    {
+        if (
+            string.IsNullOrWhiteSpace(stage)
+            || stage.Length > 80
+            || stage.Any(character =>
+                !(character is >= 'a' and <= 'z')
+                && character is not '-' and not '.')
+        )
+        {
+            throw new ArgumentException(
+                "audio diagnostic stage is invalid",
+                nameof(stage));
+        }
+        Stage = stage;
+        Result = result;
+        HResult = result;
+    }
+
+    internal string Stage { get; }
+
+    internal int Result { get; }
+
+    internal string PublicDetail =>
+        $"{Stage} / HRESULT 0x{unchecked((uint)Result):X8}";
+
+    internal static AudioCaptureStageException From(
+        string stage,
+        Exception exception) =>
+        exception as AudioCaptureStageException
+        ?? new AudioCaptureStageException(
+            stage,
+            exception.HResult,
+            exception);
+}
+
 internal interface INativeAudioClientLease : IDisposable
 {
     IAudioClient AudioClient { get; }
 }
 
 // Both the target-process output path and the explicitly selected microphone
-// path use this one native stream implementation. The caller supplies the
-// stream flags; every other format, packet, backpressure and rollback rule is
-// deliberately shared.
+// path use this one native stream implementation. The virtual process-loopback
+// client receives a caller-supplied PCM format because GetMixFormat is not
+// implemented there; the microphone keeps its exact device mix format. Packet,
+// backpressure and rollback rules remain deliberately shared.
 internal sealed class SharedEventDrivenPcmRuntime : IDisposable
 {
     private readonly CaptureThreadAffinity _threadAffinity = new();
     private readonly AudioClientStreamFlags _streamFlags;
+    private readonly string _stagePrefix;
+    private readonly WaveFormatEx? _fixedCaptureFormat;
     private INativeAudioClientLease? _lease;
     private NativeCapturePacketSource? _packetSource;
     private bool _initialized;
@@ -24,21 +72,48 @@ internal sealed class SharedEventDrivenPcmRuntime : IDisposable
 
     internal SharedEventDrivenPcmRuntime(
         INativeAudioClientLease lease,
-        AudioClientStreamFlags streamFlags)
+        AudioClientStreamFlags streamFlags,
+        string stagePrefix,
+        WaveFormatEx? fixedCaptureFormat = null)
     {
         ArgumentNullException.ThrowIfNull(lease);
+        if (
+            stagePrefix is not ("app-output" or "microphone")
+        )
+        {
+            throw new ArgumentOutOfRangeException(nameof(stagePrefix));
+        }
         if ((streamFlags & AudioClientStreamFlags.EventCallback) == 0
             || (streamFlags & ~(
                 AudioClientStreamFlags.EventCallback
-                | AudioClientStreamFlags.Loopback)) != 0)
+                | AudioClientStreamFlags.Loopback
+                | AudioClientStreamFlags.AutoConvertPcm)) != 0)
         {
             throw new ArgumentOutOfRangeException(
                 nameof(streamFlags),
                 "BW_COMPUTER_VOICE_AUDIO_STREAM_FLAGS_INVALID");
         }
 
+        bool processLoopback =
+            (streamFlags & AudioClientStreamFlags.Loopback) != 0;
+        bool autoConvertPcm =
+            (streamFlags & AudioClientStreamFlags.AutoConvertPcm) != 0;
+        if (
+            processLoopback != fixedCaptureFormat.HasValue
+            || processLoopback != autoConvertPcm
+            || (processLoopback && stagePrefix != "app-output")
+            || (!processLoopback && stagePrefix != "microphone")
+        )
+        {
+            throw new ArgumentException(
+                "BW_COMPUTER_VOICE_AUDIO_FORMAT_SOURCE_INVALID",
+                nameof(fixedCaptureFormat));
+        }
+
         _lease = lease;
         _streamFlags = streamFlags;
+        _stagePrefix = stagePrefix;
+        _fixedCaptureFormat = fixedCaptureFormat;
     }
 
     private IAudioClient AudioClient =>
@@ -66,10 +141,49 @@ internal sealed class SharedEventDrivenPcmRuntime : IDisposable
         object? captureObject = null;
         try
         {
-            RequireSucceeded(
-                AudioClient.GetMixFormat(out formatPointer),
-                "GET_MIX_FORMAT");
-            PcmAudioFormat format = PcmAudioFormat.FromNative(formatPointer);
+            if (_fixedCaptureFormat is WaveFormatEx fixedCaptureFormat)
+            {
+                try
+                {
+                    formatPointer =
+                        Marshal.AllocCoTaskMem(Marshal.SizeOf<WaveFormatEx>());
+                    Marshal.StructureToPtr(
+                        fixedCaptureFormat,
+                        formatPointer,
+                        false);
+                }
+                catch (Exception exception)
+                {
+                    if (formatPointer != 0)
+                    {
+                        Marshal.FreeCoTaskMem(formatPointer);
+                        formatPointer = 0;
+                    }
+                    throw AudioCaptureStageException.From(
+                        Stage("marshal-fixed-format"),
+                        exception);
+                }
+            }
+            else
+            {
+                RequireSucceeded(
+                    AudioClient.GetMixFormat(out formatPointer),
+                    "get-mix-format");
+            }
+            PcmAudioFormat format;
+            try
+            {
+                format = PcmAudioFormat.FromNative(formatPointer);
+            }
+            catch (Exception exception)
+            {
+                throw AudioCaptureStageException.From(
+                    Stage(
+                        _fixedCaptureFormat.HasValue
+                            ? "parse-fixed-format"
+                            : "parse-mix-format"),
+                    exception);
+            }
 
             RequireSucceeded(
                 AudioClient.Initialize(
@@ -79,12 +193,12 @@ internal sealed class SharedEventDrivenPcmRuntime : IDisposable
                     periodicity: 0,
                     format: formatPointer,
                     audioSessionGuid: 0),
-                "INITIALIZE");
+                "initialize");
             _initialized = true;
 
             RequireSucceeded(
                 AudioClient.GetBufferSize(out uint maximumFrameCount),
-                "GET_BUFFER_SIZE");
+                "get-buffer-size");
             if (maximumFrameCount == 0)
             {
                 throw new InvalidOperationException(
@@ -94,7 +208,7 @@ internal sealed class SharedEventDrivenPcmRuntime : IDisposable
             RequireSucceeded(
                 AudioClient.SetEventHandle(
                     audioReadyEvent.SafeWaitHandle.DangerousGetHandle()),
-                "SET_EVENT_HANDLE");
+                "set-event-handle");
 
             Guid captureClientId =
                 ProcessLoopbackInterop.IidIAudioCaptureClient;
@@ -104,8 +218,18 @@ internal sealed class SharedEventDrivenPcmRuntime : IDisposable
                 int serviceResult = AudioClient.GetService(
                     ref captureClientId,
                     out servicePointer);
-                RequireSucceeded(serviceResult, "GET_CAPTURE_SERVICE");
-                captureObject = Marshal.GetObjectForIUnknown(servicePointer);
+                RequireSucceeded(serviceResult, "get-capture-service");
+                try
+                {
+                    captureObject =
+                        Marshal.GetObjectForIUnknown(servicePointer);
+                }
+                catch (Exception exception)
+                {
+                    throw AudioCaptureStageException.From(
+                        Stage("marshal-capture-service"),
+                        exception);
+                }
             }
             finally
             {
@@ -117,8 +241,9 @@ internal sealed class SharedEventDrivenPcmRuntime : IDisposable
 
             if (captureObject is not IAudioCaptureClient captureClient)
             {
-                throw new InvalidOperationException(
-                    "BW_COMPUTER_VOICE_AUDIO_CAPTURE_CLIENT_INVALID");
+                throw new AudioCaptureStageException(
+                    Stage("validate-capture-service"),
+                    unchecked((int)0x80004002));
             }
 
             _packetSource = new NativeCapturePacketSource(
@@ -166,7 +291,7 @@ internal sealed class SharedEventDrivenPcmRuntime : IDisposable
                 "BW_COMPUTER_VOICE_AUDIO_RUNTIME_ALREADY_STARTED");
         }
 
-        RequireSucceeded(AudioClient.Start(), "START");
+        RequireSucceeded(AudioClient.Start(), "start");
         _startSucceeded = true;
     }
 
@@ -280,17 +405,19 @@ internal sealed class SharedEventDrivenPcmRuntime : IDisposable
         }
     }
 
-    private static void RequireSucceeded(int result, string operation)
-    {
-        if (result < 0)
-        {
-            Marshal.ThrowExceptionForHR(result);
-        }
+    private string Stage(string operation) =>
+        $"{_stagePrefix}.{operation}";
 
+    private void RequireSucceeded(int result, string operation)
+    {
         if (result != ProcessLoopbackInterop.Succeeded)
         {
-            throw new InvalidOperationException(
-                $"BW_COMPUTER_VOICE_AUDIO_{operation}_RESULT_UNEXPECTED");
+            throw new AudioCaptureStageException(
+                Stage(operation),
+                result,
+                result < 0
+                    ? Marshal.GetExceptionForHR(result)
+                    : null);
         }
     }
 

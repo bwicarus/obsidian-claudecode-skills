@@ -171,11 +171,6 @@ internal sealed class DirectBridgeProtocolSession
 
     private object HandleHello(JsonElement message)
     {
-        RequireExactKeys(
-            message,
-            "contract",
-            "type",
-            "requestId");
         if (_helloSeen || _authenticated)
         {
             throw new DirectProtocolException(
@@ -183,6 +178,61 @@ internal sealed class DirectBridgeProtocolSession
                 "每条连接只能发送一次 hello");
         }
         _helloSeen = true;
+
+        if (message.TryGetProperty(
+            "protocolVersion",
+            out JsonElement protocolVersion))
+        {
+            RequireExactKeys(
+                message,
+                "contract",
+                "type",
+                "requestId",
+                "protocolVersion");
+            if (
+                protocolVersion.ValueKind != JsonValueKind.Number
+                || !protocolVersion.TryGetInt32(out int version)
+                || version != 2
+            )
+            {
+                throw new DirectProtocolException(
+                    "BW_COMPUTER_VOICE_DIRECT_PROTOCOL_VERSION_INVALID",
+                    "直连协议版本不受支持");
+            }
+            if (!_configStore.Load().ExperimentalSingleUserMode)
+            {
+                throw new DirectProtocolException(
+                    "BW_COMPUTER_VOICE_DIRECT_AUTH_REQUIRED",
+                    "当前配置要求显式浏览器认证");
+            }
+
+            _authenticated = true;
+            _phase = DirectProtocolPhase.AwaitingStart;
+            return new
+            {
+                protocolVersion = 2,
+                limits = new
+                {
+                    maxMessageBytes =
+                        DirectBridgeContract.MaximumMessageBytes,
+                    pcmFrameBytes = DirectBridgeContract.PcmFrameBytes,
+                    pcmQueueLimitMs =
+                        DirectBridgeContract.PcmQueueLimitMilliseconds,
+                    heartbeatIntervalMs =
+                        DirectBridgeContract
+                            .ClientHeartbeatIntervalMilliseconds,
+                    heartbeatTimeoutMs =
+                        DirectBridgeContract
+                            .ClientHeartbeatTimeoutMilliseconds,
+                },
+            };
+        }
+
+        RequireExactKeys(
+            message,
+            "contract",
+            "type",
+            "requestId");
         _challenge = DirectAuthenticationChallenge.Create(
             _origin,
             _utcNow());
@@ -476,11 +526,17 @@ internal sealed class DirectBridgeProtocolSession
             "sessionId");
         RequireAuthenticated();
         string sessionId = RequireSafeId(message, "sessionId");
-        await _coordinator.StopAsync(
-            _connectionId,
-            sessionId,
-            cancellationToken).ConfigureAwait(false);
-        _phase = DirectProtocolPhase.AwaitingStart;
+        try
+        {
+            await _coordinator.StopAsync(
+                _connectionId,
+                sessionId,
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _phase = DirectProtocolPhase.AwaitingStart;
+        }
         return new
         {
             sessionId,

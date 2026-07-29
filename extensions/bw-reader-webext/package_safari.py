@@ -83,8 +83,8 @@ def add_tree(
 def safari_manifest(*, compat: bool = False) -> dict:
     manifest = json.loads((HERE / "manifest.json").read_text(encoding="utf-8"))
     manifest["name"] = APP_NAME
-    # Native Messaging/offscreen are Windows Chrome-only.  The iPad Reader is
-    # the WebRTC receiver and must not claim or package the Windows sender.
+    # Native Messaging/offscreen are legacy Windows-Chrome-only surfaces.
+    # Safari receives the shared direct-v2 content runtime, not a native sender.
     manifest["permissions"] = (
         ["storage", "alarms"]
         if compat

@@ -5393,6 +5393,26 @@
 
   // 通话引擎分流(㉚):s2s 通话按设置选 WebRTC 直连(外放无回声+全双工)或 WS relay(豆包 S2S / GPT-WS);
   // agent 模式(mic 长按 ASR)恒走豆包 relay,不受 rt_engine 影响(与 WS 版 relay 按 mode 分发同语义)
+  var _computerVoiceOwnedButtons = new WeakSet();
+  function _publishComputerVoiceButton(button) {
+    if (!_computerVoiceOwnedButtons.has(button)) return false;
+    try {
+      return !!(
+        window.RC &&
+        RC.computerVoice &&
+        typeof RC.computerVoice.registerPhoneButton === 'function' &&
+        RC.computerVoice.registerPhoneButton(button) === true
+      );
+    } catch (e) {
+      return false;
+    }
+  }
+  function _ownComputerVoiceButton(button) {
+    if (!button) return false;
+    _computerVoiceOwnedButtons.add(button);
+    return _publishComputerVoiceButton(button);
+  }
+
   function _computerVoiceStart(opts, generation) {
     if (!window.RC || !RC.computerVoice ||
         typeof RC.computerVoice.startFromUserGesture !== 'function') {
@@ -5643,7 +5663,11 @@
   function injectBtn() {
     var input = document.getElementById('asst-input');
     if (!input) return false;
-    if (document.getElementById('asst-call')) return true;
+    var existingCall = document.getElementById('asst-call');
+    if (existingCall) {
+      _publishComputerVoiceButton(existingCall);
+      return true;
+    }
     injectCss();
     var b = document.createElement('button');
     b.id = 'asst-call'; b.type = 'button';
@@ -5652,6 +5676,7 @@
     var mic = document.getElementById('asst-mic');
     if (mic && mic.parentNode === input) input.insertBefore(b, mic.nextSibling);
     else input.insertBefore(b, input.firstChild);
+    _ownComputerVoiceButton(b);
     // 单击 = S2S 通话开关(用户裁定:不要"先开小窗再按开始"的两步;语音输入归旁边的系统听写 #asst-mic)。
     // 旧 agent 模式(豆包 ASR 转写进输入框)入口撤掉,代码保留(window._voiceCall 仍可调)。
     b.addEventListener('click', function () {
@@ -5719,7 +5744,10 @@
   //    mic 单击=Apple 听写(转发给 #asst-mic 原 handler,说完自动发送)/长按=豆包 ASR;电话=S2S 开关。
   //    状态镜像:观察侧栏按钮 class(on/asr/speaking)同步变色呼吸;侧栏打开时这俩隐藏(那边有同款)。──
   function injectTopbarBtns() {
-    if (document.getElementById('vc-top-mic')) return true;
+    if (document.getElementById('vc-top-mic')) {
+      _publishComputerVoiceButton(document.getElementById('vc-top-call'));
+      return true;
+    }
     var anchor = document.getElementById('fs-toggle');
     var srcMic = document.getElementById('asst-mic'), srcCall = document.getElementById('asst-call');
     if (!anchor || !anchor.parentNode || !srcMic || !srcCall) return false;
@@ -5734,6 +5762,7 @@
     tc.innerHTML = srcCall.innerHTML;   // 复用侧栏电话的 SF 线条 SVG
     anchor.parentNode.insertBefore(tm, anchor);
     anchor.parentNode.insertBefore(tc, anchor);
+    _ownComputerVoiceButton(tc);
     tm.addEventListener('click', function () { try { srcMic.click(); } catch (e) {} });   // 单击=听写开/停(原 handler;长按后的 click 已被 _bindLongPress 吞)
     _bindLongPress(tm, _micLongAction);
     tc.addEventListener('click', function () { try { srcCall.click(); } catch (e) {} });

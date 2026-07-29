@@ -4,7 +4,8 @@
 This is deliberately a *candidate* builder, not an installer.  It never
 starts ``--direct-serve``, touches Scheduled Tasks or Tailscale Serve, opens
 audio devices, or writes outside ``windows/candidates/<version>``.  The ZIP is
-also intentionally tiny: two self-contained executables plus a manifest.
+also intentionally tiny: two self-contained executables, their two fixed local
+Python runtime modules, and a manifest.
 """
 from __future__ import annotations
 
@@ -29,6 +30,8 @@ HERE = Path(__file__).resolve().parent
 PACKAGER_SOURCE = Path(__file__).resolve()
 DESKTOP_SOURCE = HERE / "computer-voice-desktop"
 AUDIO_SOURCE = HERE / "ComputerVoiceAudio"
+TYPIST_HELPER_SOURCE = HERE / "bw_computer_voice_typist_helper.py"
+SUPERVISOR_SOURCE = HERE / "bw_computer_voice_supervisor.py"
 CANDIDATES = HERE / "candidates"
 
 PACKAGE_CONTRACT = "reader-computer-voice-direct-package/1"
@@ -47,8 +50,20 @@ DETERMINISTIC_BUILD_ENV = {
 
 NATIVE_REL = "native-host/bw-computer-voice-audio.exe"
 DESKTOP_REL = "desktop-launcher/BW-Computer-Voice-Bridge.exe"
+TYPIST_HELPER_REL = "bw_computer_voice_typist_helper.py"
+SUPERVISOR_REL = "bw_computer_voice_supervisor.py"
 MANIFEST_REL = "manifest.json"
-PAYLOAD_RELATIVE_PATHS = (NATIVE_REL, DESKTOP_REL)
+PAYLOAD_RELATIVE_PATHS = (
+    NATIVE_REL,
+    DESKTOP_REL,
+    TYPIST_HELPER_REL,
+    SUPERVISOR_REL,
+)
+EXECUTABLE_RELATIVE_PATHS = (NATIVE_REL, DESKTOP_REL)
+PYTHON_RUNTIME_RELATIVE_PATHS = (
+    TYPIST_HELPER_REL,
+    SUPERVISOR_REL,
+)
 DOTNET_DEFAULT = Path(
     r"C:\Users\bwica\bw-computer-voice-bridge\dotnet8\dotnet.exe"
 )
@@ -274,6 +289,8 @@ def source_inputs(
     *,
     audio_source: Path = AUDIO_SOURCE,
     desktop_source: Path = DESKTOP_SOURCE,
+    typist_helper_source: Path = TYPIST_HELPER_SOURCE,
+    supervisor_source: Path = SUPERVISOR_SOURCE,
 ) -> list[dict[str, str]]:
     """Return content-addressed inputs that determine the signed candidate."""
 
@@ -291,6 +308,15 @@ def source_inputs(
         "path": PACKAGER_SOURCE.relative_to(HERE).as_posix(),
         "sha256": _sha256(_read_regular(PACKAGER_SOURCE)),
     })
+    for source in (typist_helper_source, supervisor_source):
+        try:
+            relative = source.relative_to(HERE).as_posix()
+        except ValueError:
+            relative = f"input/{source.name}"
+        output.append({
+            "path": relative,
+            "sha256": _sha256(_read_regular(source)),
+        })
     paths = [entry["path"] for entry in output]
     if not output or len(paths) != len(set(paths)):
         _fail("编译输入为空或存在重复的相对路径")
@@ -406,6 +432,8 @@ def build_candidate(
     pyinstaller: Path = PYINSTALLER_DEFAULT,
     audio_source: Path = AUDIO_SOURCE,
     desktop_source: Path = DESKTOP_SOURCE,
+    typist_helper_source: Path = TYPIST_HELPER_SOURCE,
+    supervisor_source: Path = SUPERVISOR_SOURCE,
 ) -> Path:
     """Build a new candidate. Existing version directories are never replaced."""
 
@@ -418,6 +446,8 @@ def build_candidate(
         _fail("C# 项目文件不存在")
     if not (desktop_source / "desktop_launcher.py").is_file():
         _fail("桌面启动器入口不存在")
+    if not typist_helper_source.is_file() or not supervisor_source.is_file():
+        _fail("voice-typist 固定本地 runtime 源码不存在")
     if not dotnet.is_file() or not pyinstaller.is_file():
         _fail("未找到固定的 dotnet 或 PyInstaller；拒绝改用 PATH 中的未知工具")
 
@@ -434,6 +464,8 @@ def build_candidate(
     build_inputs = source_inputs(
         audio_source=audio_source,
         desktop_source=desktop_source,
+        typist_helper_source=typist_helper_source,
+        supervisor_source=supervisor_source,
     )
 
     destination.mkdir(exist_ok=False)
@@ -493,6 +525,8 @@ def build_candidate(
         final_build_inputs = source_inputs(
             audio_source=audio_source,
             desktop_source=desktop_source,
+            typist_helper_source=typist_helper_source,
+            supervisor_source=supervisor_source,
         )
         if final_build_inputs != build_inputs:
             _fail("源码在构建期间发生变化，拒绝签发候选")
@@ -500,6 +534,8 @@ def build_candidate(
         payload_paths = {
             NATIVE_REL: publish_dir / "bw-computer-voice-audio.exe",
             DESKTOP_REL: desktop_dist / "BW-Computer-Voice-Bridge.exe",
+            TYPIST_HELPER_REL: typist_helper_source,
+            SUPERVISOR_REL: supervisor_source,
         }
         payload = {relative: _read_regular(path) for relative, path in payload_paths.items()}
         stage_payload = {stage_root / relative: content for relative, content in payload.items()}
@@ -641,7 +677,13 @@ def _validate_manifest(manifest: dict[str, Any], *, version: str, payload: dict[
                     "ComputerVoiceAudio/",
                     "computer-voice-desktop/",
                 ))
-                and value != PACKAGER_SOURCE.name
+                and value not in {
+                    PACKAGER_SOURCE.name,
+                    TYPIST_HELPER_SOURCE.name,
+                    SUPERVISOR_SOURCE.name,
+                    f"input/{TYPIST_HELPER_SOURCE.name}",
+                    f"input/{SUPERVISOR_SOURCE.name}",
+                }
             )
         ):
             _fail("manifest 泄露或包含非法源路径")
@@ -656,6 +698,20 @@ def _validate_manifest(manifest: dict[str, Any], *, version: str, payload: dict[
         _fail("manifest sourceFiles 必须唯一且按路径排序")
     if (
         PACKAGER_SOURCE.name not in source_paths
+        or not any(
+            value in {
+                TYPIST_HELPER_SOURCE.name,
+                f"input/{TYPIST_HELPER_SOURCE.name}",
+            }
+            for value in source_paths
+        )
+        or not any(
+            value in {
+                SUPERVISOR_SOURCE.name,
+                f"input/{SUPERVISOR_SOURCE.name}",
+            }
+            for value in source_paths
+        )
         or not any(
             value.startswith(("ComputerVoiceAudio/", "input/ComputerVoiceAudio/"))
             for value in source_paths
@@ -740,19 +796,30 @@ def run_packaged_self_tests(path: Path, *, runner: CommandRunner | None = None) 
                 _fail(f"包内自检解压路径越界: {name}")
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_bytes(payload[name])
-        for relative in PAYLOAD_RELATIVE_PATHS:
+        for relative in EXECUTABLE_RELATIVE_PATHS:
             executable = root / prefix / relative
             if not executable.is_relative_to(root) or not executable.is_file():
                 _fail(f"包内自检执行路径不在临时根: {relative}")
             result = runner.run((str(executable), "--self-test"), cwd=root)
             _require_success(result, label=f"包内自检 {relative}")
+        for relative in PYTHON_RUNTIME_RELATIVE_PATHS:
+            source = payload[f"{prefix}/{relative}"]
+            try:
+                compile(source.decode("utf-8"), relative, "exec")
+            except (UnicodeDecodeError, SyntaxError) as exc:
+                _fail(f"包内 Python runtime 语法无效: {relative}: {exc}")
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build", metavar="VERSION", help="构建新的版本化候选 ZIP")
     parser.add_argument("--verify", type=Path, metavar="ZIP", help="只读校验现有候选 ZIP")
-    parser.add_argument("--self-test", type=Path, metavar="ZIP", help="校验后只运行两个 --self-test")
+    parser.add_argument(
+        "--self-test",
+        type=Path,
+        metavar="ZIP",
+        help="校验后只运行两个 EXE --self-test，并静态编译 Python runtime",
+    )
     args = parser.parse_args(argv)
     actions = [args.build is not None, args.verify is not None, args.self_test is not None]
     if sum(actions) != 1:

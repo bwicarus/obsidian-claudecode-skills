@@ -16,6 +16,14 @@ namespace BwReader.ComputerVoiceAudio;
 
 internal sealed class DirectBridgeServer : IAsyncDisposable
 {
+    private const int CoordinatorDisposeAttemptLimit = 2;
+    private const string SingleUserReaderOrigin =
+        "https://bwicarus.taile44d0c.ts.net";
+    private const string SingleUserChromeExtensionOrigin =
+        "chrome-extension://jddhhakcblmihidgdobfkcejjinpigak";
+    private const string SafariExtensionOriginPrefix =
+        "safari-web-extension://";
+
     private static readonly UTF8Encoding StrictUtf8 = new(
         encoderShouldEmitUTF8Identifier: false,
         throwOnInvalidBytes: true);
@@ -23,6 +31,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     private readonly DirectBridgeConfigStore _configStore;
     private readonly DirectBridgeCoordinator _coordinator;
     private readonly SemaphoreSlim _connectionGate = new(1, 1);
+    private readonly SemaphoreSlim _disposeGate = new(1, 1);
     private readonly string _serviceInstanceId;
     private readonly DirectRuntimeStatusWriter _statusWriter;
     private readonly DirectServiceLease _serviceLease;
@@ -32,6 +41,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     private bool _runtimeCaptureActive;
     private bool _connectionActive;
     private bool _disposed;
+    private bool _disposeCompleted;
 
     internal DirectBridgeServer(
         DirectBridgeConfigStore configStore,
@@ -809,8 +819,100 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
 
     internal static bool OriginMatchesAllowlist(
         DirectBridgeConfig config,
-        string origin) =>
-        config.AllowedOrigins.Contains(origin);
+        string origin)
+    {
+        if (!config.ExperimentalSingleUserMode)
+        {
+            return config.AllowedOrigins.Contains(origin);
+        }
+
+        // Direct v2 has no browser-held client key.  Its browser boundary is
+        // therefore deliberately smaller than the configurable v1 allowlist:
+        // the exact Reader PWA or a controlled extension background origin.
+        // Content scripts must relay through that background origin instead of
+        // making a request whose Origin is an arbitrary visited web page.
+        return string.Equals(
+                origin,
+                SingleUserReaderOrigin,
+                StringComparison.Ordinal)
+            || IsCanonicalChromeExtensionOrigin(origin)
+            || IsCanonicalSafariExtensionOrigin(origin);
+    }
+
+    private static bool IsCanonicalChromeExtensionOrigin(string origin) =>
+        string.Equals(
+            origin,
+            SingleUserChromeExtensionOrigin,
+            StringComparison.Ordinal);
+
+    private static bool IsCanonicalSafariExtensionOrigin(string origin)
+    {
+        if (!TryGetExtensionOriginIdentifier(
+            origin,
+            SafariExtensionOriginPrefix,
+            out string identifier)
+            || identifier.Length != 36
+            || identifier[8] != '-'
+            || identifier[13] != '-'
+            || identifier[18] != '-'
+            || identifier[23] != '-')
+        {
+            return false;
+        }
+        for (int index = 0; index < identifier.Length; index++)
+        {
+            if (index is 8 or 13 or 18 or 23)
+            {
+                continue;
+            }
+            char value = identifier[index];
+            if (!(
+                value is >= '0' and <= '9'
+                || value is >= 'a' and <= 'f'
+                || value is >= 'A' and <= 'F'
+            ))
+            {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    private static bool TryGetExtensionOriginIdentifier(
+        string origin,
+        string prefix,
+        out string identifier)
+    {
+        identifier = "";
+        if (!origin.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+        identifier = origin[prefix.Length..];
+        if (
+            identifier.Length == 0
+            || identifier.IndexOfAny(
+                ['/', '\\', ':', '@', '?', '#']) >= 0
+            || !Uri.TryCreate(origin, UriKind.Absolute, out Uri? uri)
+            || uri.UserInfo.Length != 0
+            || uri.Port != -1
+            // System.Uri represents an authority-only custom-scheme URL with
+            // a synthetic "/" AbsolutePath.  The raw identifier check above
+            // still rejects any literal slash supplied by the caller.
+            || uri.AbsolutePath != "/"
+            || uri.Query.Length != 0
+            || uri.Fragment.Length != 0
+            || !string.Equals(
+                uri.Scheme + "://",
+                prefix,
+                StringComparison.Ordinal)
+        )
+        {
+            identifier = "";
+            return false;
+        }
+        return true;
+    }
 
     internal static bool TailscaleLoginMatches(
         DirectBridgeConfig config,
@@ -989,13 +1091,60 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (_disposed)
+        await _disposeGate.WaitAsync().ConfigureAwait(false);
+        try
         {
-            return;
+            if (_disposeCompleted)
+            {
+                return;
+            }
+            // Keep the server terminal after the first disposal attempt, but
+            // keep ownership reachable until a bounded owner-aware retry has
+            // had a chance to release transient cleanup failures.  Program
+            // uses one await-using disposal call in production, so that one
+            // call must consume the retry budget itself.
+            _disposed = true;
+            await DisposeCoordinatorWithBoundedRetryAsync()
+                .ConfigureAwait(false);
+            _connectionGate.Dispose();
+            _disposeCompleted = true;
         }
-        _disposed = true;
-        await _coordinator.DisposeAsync().ConfigureAwait(false);
-        _connectionGate.Dispose();
+        finally
+        {
+            _disposeGate.Release();
+        }
+    }
+
+    private async Task DisposeCoordinatorWithBoundedRetryAsync()
+    {
+        List<Exception>? failures = null;
+        for (
+            int attempt = 0;
+            attempt < CoordinatorDisposeAttemptLimit;
+            attempt++)
+        {
+            try
+            {
+                await _coordinator.DisposeAsync().ConfigureAwait(false);
+                return;
+            }
+            catch (Exception exception)
+            {
+                failures ??= [];
+                failures.Add(exception);
+            }
+        }
+
+        Exception finalFailure = failures![^1];
+        if (finalFailure is DirectProtocolException protocol)
+        {
+            throw new DirectProtocolException(
+                protocol.Code,
+                protocol.Message,
+                protocol.Retryable,
+                new AggregateException(failures));
+        }
+        throw new AggregateException(failures);
     }
 }
 

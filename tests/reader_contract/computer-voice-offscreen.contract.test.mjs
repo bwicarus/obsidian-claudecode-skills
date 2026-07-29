@@ -1,164 +1,62 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
-import vm from "node:vm";
 
-const nativeSource = fs.readFileSync(
-  "extensions/bw-reader-webext/src/computer-voice-native-protocol.js",
+const backgroundSource = fs.readFileSync(
+  "extensions/bw-reader-webext/background.js",
   "utf8",
 );
 const offscreenSource = fs.readFileSync(
   "extensions/bw-reader-webext/offscreen.js",
   "utf8",
 );
+const popupSource = fs.readFileSync(
+  "extensions/bw-reader-webext/popup.js",
+  "utf8",
+);
+const popupHtml = fs.readFileSync(
+  "extensions/bw-reader-webext/popup.html",
+  "utf8",
+);
 
-function harness() {
-  let listener = null;
-  const nativeMessages = [];
-  const requests = [];
-  const stored = {};
-  const nativePort = {
-    onMessage: { addListener() {} },
-    onDisconnect: { addListener() {} },
-    postMessage(value) { nativeMessages.push(structuredClone(value)); },
-  };
-  const context = vm.createContext({
-    URL,
-    Uint8Array,
-    ArrayBuffer,
-    Map,
-    Set,
-    Promise,
-    Error,
-    Object,
-    JSON,
-    Math,
-    Date,
-    RegExp,
-    String,
-    Number,
-    Boolean,
-    TextEncoder,
-    structuredClone,
-    btoa,
-    atob,
-    crypto: globalThis.crypto,
-    setTimeout: () => 1,
-    clearTimeout() {},
-    setInterval: () => 1,
-    RTCPeerConnection: function RTCPeerConnection() {},
-    MediaStreamTrackGenerator: function MediaStreamTrackGenerator() {},
-    AudioData: function AudioData() {},
-    fetch: async (url, init) => {
-      requests.push({ url, init: structuredClone(init) });
-      return {
-        ok: true,
-        status: 200,
-        async json() {
-          return {
-            ok: true,
-            contract: "reader-computer-voice-pairing/1",
-            state: "active",
-          };
-        },
-      };
-    },
-    chrome: {
-      runtime: {
-        id: "abcdefghijklmnopabcdefghijklmnop",
-        connectNative(name) {
-          assert.equal(name, "space.bwicarus.computer_voice");
-          return nativePort;
-        },
-        onMessage: {
-          addListener(value) { listener = value; },
-        },
-      },
-      storage: {
-        local: {
-          async get(key) { return { [key]: stored[key] }; },
-          async set(value) { Object.assign(stored, structuredClone(value)); },
-        },
-      },
-    },
-    BWComputerVoiceWebRtc: {},
-  });
-  context.globalThis = context;
-  vm.runInContext(nativeSource, context, {
-    filename: "computer-voice-native-protocol.js",
-  });
-  vm.runInContext(offscreenSource, context, {
-    filename: "offscreen.js",
-  });
-
-  async function send(operation, payload = {}) {
-    assert.equal(typeof listener, "function");
-    return new Promise((resolve) => {
-      const keptOpen = listener(
-        {
-          type: "BW_COMPUTER_VOICE_OFFSCREEN_REQUEST",
-          operation,
-          payload,
-        },
-        { id: context.chrome.runtime.id },
-        resolve,
-      );
-      assert.equal(keptOpen, true);
-    });
+test("扩展不再暴露或转发旧 Pi 电脑语音配对入口", () => {
+  for (const source of [backgroundSource, popupSource, popupHtml]) {
+    assert.doesNotMatch(source, /BW_COMPUTER_VOICE_PAIR/);
+    assert.doesNotMatch(source, /pairId|pairingCode/);
   }
-  return { send, nativeMessages, requests, stored };
-}
-
-test("状态读取和首次配对不会启动采集或发送快捷键", async () => {
-  const value = harness();
-  const initial = await value.send("STATUS");
-  assert.equal(initial.ok, true);
-  assert.equal(initial.data.paired, false);
-  assert.deepEqual(
-    value.nativeMessages.map((message) => message.type),
-    ["hello"],
-  );
-
-  const paired = await value.send("PAIR", {
-    pairId: "pair-reader-1",
-    pairingCode: "ABCDEFGH",
-  });
-  assert.equal(paired.ok, true);
-  assert.equal(paired.data.paired, true);
-  assert.equal(paired.data.extensionId, "abcdefghijklmnopabcdefghijklmnop");
-  assert.equal("deviceToken" in paired.data, false);
-  const consume = value.requests.find(({ url }) =>
-    /\/pairings\/consume$/.test(url)
-  );
-  assert.ok(consume);
-  assert.ok(value.requests.every(({ url }) =>
-    /\/pairings\/consume$|\/device\/heartbeat$/.test(url)
-  ));
-  assert.equal(
-    Object.hasOwn(consume.init.headers, "Authorization"),
-    false,
-  );
-  assert.equal(
-    JSON.parse(consume.init.body).contract,
-    "reader-computer-voice-pairing/1",
-  );
-  assert.equal(
-    value.nativeMessages.some((message) => message.type === "start"),
-    false,
-  );
-  const saved = value.stored.bwComputerVoiceDeviceV1;
-  assert.match(saved.deviceId, /^windows-[A-Za-z0-9._:-]+$/);
-  assert.match(saved.deviceToken, /^[A-Za-z0-9._~-]{32,512}$/);
+  assert.doesNotMatch(popupHtml, /一次性配对码|Reader 配对 ID|配对这台电脑/);
 });
 
-test("网页或不同扩展来源不能调用 offscreen 私有控制入口", () => {
-  const value = harness();
-  // The listener is exercised indirectly above; this source assertion keeps
-  // the sender-id fence visible and non-optional.
+test("旧设备记录保持原样，但后台不读取它恢复 offscreen", () => {
+  assert.doesNotMatch(backgroundSource, /bwComputerVoiceDeviceV1/);
+  assert.doesNotMatch(backgroundSource, /restoreComputerVoiceOffscreen/);
+  assert.doesNotMatch(backgroundSource, /chrome\.offscreen\.createDocument/);
+});
+
+test("扩展后台只保留固定 Windows WSS relay，不再允许旧 Pi 电脑语音控制路由", () => {
+  assert.doesNotMatch(backgroundSource, /\/api\/reader\/computer-voice/);
   assert.match(
-    offscreenSource,
-    /sender\?\.id !== chrome\.runtime\.id/,
+    backgroundSource,
+    /BW_COMPUTER_VOICE_DIRECT_V2/,
   );
-  assert.doesNotMatch(offscreenSource, /window\.postMessage|externally_connectable/);
-  assert.ok(value);
+  assert.match(
+    backgroundSource,
+    /wss:\/\/bwicarus-2\.taile44d0c\.ts\.net\/reader-computer-voice\/v1/,
+  );
+  assert.doesNotMatch(
+    backgroundSource,
+    /COMPUTER_VOICE_DIRECT_ENDPOINT\s*=[\s\S]{0,120}(?:message|port)\./,
+  );
+});
+
+test("保留的 offscreen 文件完全惰性，不访问旧存储、Pi 或原生媒体", () => {
+  assert.doesNotMatch(offscreenSource, /chrome\.storage|connectNative|fetch\s*\(/);
+  assert.doesNotMatch(
+    offscreenSource,
+    /MediaStreamTrackGenerator|RTCPeerConnection|AudioData/,
+  );
+  assert.doesNotMatch(
+    offscreenSource,
+    /pairings\/consume|commands\/claim|device\/heartbeat/,
+  );
 });

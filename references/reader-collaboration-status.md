@@ -3372,3 +3372,97 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
   HELLO/PAIR/AUTH/STATUS，没有发送 START，没有启动通话、采音、typist、快捷键或应用输出。
   真实电话按钮的自动打开 Codex、麦克风/process-only output 和声音听感仍留给用户醒后生产
   实测；该真实音频 E2E 尚未冒充通过。
+
+## Codex：0.2.70 / Windows 0.1.7 免配对直连已安装（2026-07-29 13:55 JST，待提交部署）
+
+- **产品与协议变化**：Reader/PWA/扩展改用 direct v2，固定直连
+  `wss://bwicarus-2.taile44d0c.ts.net/reader-computer-voice/v1`；浏览器不再生成/输入配对码，
+  不再保存设备私钥，也不显示 endpoint 配置。单用户实验模式仍要求 Tailscale 唯一登录
+  `bwicarus@gmail.com`、本机 opt-in、单连接、显式已选麦克风与 Codex 进程树输出。旧 v1
+  pairing 字段仅保留作缓存/回滚兼容，当前客户端不进入旧认证流程。Pi 只承载 Reader，
+  不转发音频或电脑语音控制。
+- **自动启动与 typist 生命周期**：登录 bootstrap 仅保持无采音 listener。只有 Reader 的
+  START 才会打开/定位 Codex、启动本次任务所需 typist、初始化指定麦克风和 process-only
+  output、发送一次语音快捷键。只有 helper 明确返回 `started` 时才登记精确 PID ownership；
+  正常 STOP、断连、心跳/媒体异常、START 失败和 Dispose 都会经固定 launcher
+  `Stop` 释放该 lease；`already-running`、竞态已运行或 PID 不匹配一律不停止别人的 typist。
+  外部 `voice_typist.py` 未被本轮修改。
+- **无声根因与修复**：旧 config 保存的是 registry 子项 GUID，不是
+  `IMMDevice::GetId` endpoint；RDP 当前唯一 Active 麦克风实际为“远程音频”
+  `{3.0.1.00000001}.{A3ED9185-1E02-411C-B11B-05D92F25CEF4}`。进程 loopback 虚拟设备又错误
+  调用了不支持的 `GetMixFormat`，managed callback 也未满足 async activation 的 COM 生命周期。
+  现改为 Core Audio 精确枚举、48 kHz stereo s16 固定 output format，以及实现
+  `IUnknown + IActivateAudioInterfaceCompletionHandler + IAgileObject` 的 native vtable。
+- **Windows 不可变候选与安装**：0.1.7 ZIP 为 53,806,365 bytes，SHA-256
+  `526ccd38f8417c31e9fb6df2180260b03894d353822d94231780c6d6b3079e29`；四个 payload 已从
+  manifest 校验后原子替换：native
+  `1a339d7f7fa8b9c60b2cda8032884eb1cd06f015962df9dae2ddbf23439481f4`、desktop
+  `0e974ed64e1fb8adfbfeec2f5ba190f64535f1225cdebb23e5c11ae138d57076`、typist helper
+  `de030f73492c842e2ad12ce20f9cb5d7666eeb95d11f81ebda1bad21d5cf9fac`、supervisor
+  `6b9a8e6724d50442618db8cc3322062b1d3ec4264c974bb68818c3c5e9f1e7d8`。永久安装备份与报告在
+  `C:\Users\bwica\bw-computer-voice-bridge-backups\install-20260729T045416Z-8a362a1d`。
+- **安装过程证据**：第一次操作脚本在首个 replace 前因 Windows 只读句柄 `fsync` 返回
+  `EBADF`；四 payload 哈希确认未变后，从永久备份恢复 enabled config 并重启旧 listener，
+  基线重新达到 online/Running/Serve ours，再修正为可写句柄重跑成功。旧孤儿 typist
+  PID 19540 已经固定 launcher `Stop`，没有自动重启。最终任务 Running、Serve ours、
+  listener PID 15184 online，`readerConnected=false`、`captureActive=false`。
+- **无副作用实机音频证据**：安装路径双 self-test 通过；五轮
+  `--diagnose-direct-audio-no-start` 全部 `ok=true`、`captureStarted=false`、
+  `shortcutSent=false`。在当前 RDP Session 1 中，process output 初始化为
+  48 kHz / 2ch / 16-bit、麦克风初始化为 44.1 kHz / 2ch / 32-bit，二者 HRESULT 均为 0。
+  这证明 RDP 没有占死接口，但 RDP 会改变 endpoint 与最终听放路由；真实 START、双向可听、
+  应用重启、断线/挂断仍必须由用户在生产页面点击电话后验收。
+- **代码候选/发布边界**：共享 Reader/扩展候选为 0.2.70；合同 581/581、桌面 70/70、
+  supervisor 17/17、helper 5/5、直连包 11/11、发布管线 24/24（另 1 项 Windows symlink
+  权限 skip）均通过。Windows test ZIP SHA-256
+  `4d2e0bab851f4d9fba10ce16ab394a69998d3fa70324a74e6af7c137b4acf149`，Safari/iOS ZIP
+  SHA-256 `63a79101bfef3266b1d56aff2d6e35c9892116f4d64ffe7d9624f9351805e4ba`。
+  本节登记时尚未提交、推送或部署；下一步只提交本轮精确文件，推送后从 Windows 运行一次正式
+  `scripts\deploy_from_windows.ps1`，再由 Pi 官方测试 channel 发布器原子切换 0.2.70。
+
+## Codex：0.2.71 / Windows 0.1.8 最终直连候选已安装（2026-07-29 15:10 JST，待提交部署）
+
+- **候选顺延**：0.2.70 与 0.1.7 已在后续安全审查中退役；没有覆盖其既有不可变 ZIP。最终
+  Reader/扩展版本顺延为 **0.2.71**，Windows 直连包顺延为 **0.1.8**。Pi 仍只承载
+  Reader/PWA 与书籍，电脑语音控制和 PCM 始终为浏览器直连 Windows。
+- **Reader/扩展收口**：PWA 只允许精确生产 Origin 直连；普通网页只能经 isolated content
+  runtime → extension background → 固定 Windows WSS relay。电话按钮由 `rc-voicecall`
+  闭包按 DOM 对象身份登记，伪造同 ID、clone、替换节点或 synthetic click 都不能取得 START
+  lease。状态短连接会在真实 START 前完整让位；AudioContext blocked 时只保留最新 20 ms，
+  正常播放中的合法 PCM 突发超过 400 ms 时丢弃旧 source 并重建排程，两者都不再自动关 WSS。
+- **Windows 生命周期收口**：Origin 只接受生产 PWA、固定 Chrome 扩展 ID 和 canonical Safari
+  Web Extension UUID。START 成功后才原子提交 capture、pump 与 typist 所有权；START 失败且
+  第一次 typist 清理失败时保存 exact PID lease，下一次 START/Dispose 重试同一 PID。peer
+  abort 不能取消已经确认 owner 的 STOP；服务单次 Dispose 内有界重试。`SendInput` 只要部分
+  成功 1–5 项，就 best-effort 补发 `C↑/Shift↑/Ctrl↑` 并保持 START 失败，避免 modifier 残留。
+- **最终不可变生成物**：Windows 0.1.8 ZIP 为 53,809,880 bytes，SHA-256
+  `96f0fd6719c42f1f620537f72d655af4b696cc27f91976e7b3c40204479d7f2e`；payload 为 native
+  `6ed8d45d1dc3e2bae5473f6ec0edb1b36533fadd7aa6dc58701e331d9bf35e04`、desktop
+  `0e974ed64e1fb8adfbfeec2f5ba190f64535f1225cdebb23e5c11ae138d57076`、typist helper
+  `de030f73492c842e2ad12ce20f9cb5d7666eeb95d11f81ebda1bad21d5cf9fac`、supervisor
+  `6b9a8e6724d50442618db8cc3322062b1d3ec4264c974bb68818c3c5e9f1e7d8`。0.2.71 Windows
+  测试 ZIP 为 1,238,467 bytes，SHA-256
+  `132b516c7b0ef1d7c4a989544ec8b28fafac9829e372f61a5b5ae6598723ff4d`；Safari/iOS ZIP 为
+  1,225,870 bytes，SHA-256
+  `12ea7186fa982d8ce142f6a6a7b3e303e41e11b303ab3200c8322a8135727363`。
+- **验证**：Reader 合同 **593/593**；C# Release 0 warning / 0 error、无启动 self-test
+  **134/134**、`audioActivated=false`；桌面 **70/70**、supervisor **17/17**、typist helper
+  **5/5**、直连包 **11/11**；发布流水线 **24/24**（其中 Windows symlink 权限 1 项预期
+  skip）。两轮独立 C# 审查均未发现剩余 P0/P1；`git diff --check` 通过。
+- **Windows 安装事实**：0.1.8 四 payload 已经 manifest 校验后原子替换；永久备份和安装报告
+  在
+  `C:\Users\bwica\bw-computer-voice-bridge-backups\install-20260729T060742Z-687291f3`。
+  安装后 config `localOptIn=true`，任务 ownership 通过且 `Running`，Serve 仍为唯一 owned
+  映射，listener PID 11548 仅绑定 `127.0.0.1:43128`，healthz=200、状态 idle、
+  `readerConnected=false`、`captureActive=false`、typist 进程 0。安装与验收未发送 START、
+  未采音、未发快捷键。
+- **RDP 与剩余真实验收**：13:54 Session 1 Active 时，无启动诊断曾证明“远程音频”麦克风和
+  process output 均可初始化；13:58 RDP 断开后，当前 Session 1 为 `Disc`，活动麦克风枚举为
+  0。RDP 不是独占 WASAPI，但其会话虚拟 endpoint 会随断开失效；因此真实通话必须先重新连接
+  同一 RDP 音频会话，或在活动本地会话改选物理麦克风。当前协议没有 Reader/iPad 麦克风上行。
+  真实可听双向 E2E 尚未验证。
+- **STOP 边界/下一步**：STOP 已可验证地停止两路 capture、pump、本次 owned typist 和 WSS；
+  Codex 桌面尚无已验证的 ownership-safe Voice 退出 primitive，因此不会猜测第二次
+  `Ctrl+Shift+C`，Voice UI 是否退出需在 Windows 人工确认。本节登记时 0.2.71 尚未提交、推送
+  或部署；下一步为精确提交本轮文件、推送后只运行一次正式
+  `scripts\deploy_from_windows.ps1`，再用 Pi 官方发布器切换 0.2.71 测试 channel。

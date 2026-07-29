@@ -4,14 +4,6 @@ const saveButton = document.querySelector("#save");
 const testButton = document.querySelector("#test");
 const syncStatus = document.querySelector("#sync-status");
 const syncConflicts = document.querySelector("#sync-conflicts");
-const computerVoiceStatus = document.querySelector("#computer-voice-status");
-const computerVoicePairId = document.querySelector("#computer-voice-pair-id");
-const computerVoiceCode = document.querySelector("#computer-voice-code");
-const computerVoicePairButton = document.querySelector("#computer-voice-pair");
-const computerVoiceRefresh = document.querySelector("#computer-voice-refresh");
-const computerVoiceExtensionId = document.querySelector(
-  "#computer-voice-extension-id"
-);
 
 async function activeTarget() {
   const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -29,49 +21,6 @@ async function accountMessage(type, payload = null) {
     throw error;
   }
   return response.data || {};
-}
-
-async function computerVoiceMessage(type, payload = null) {
-  const response = await chrome.runtime.sendMessage({ type, payload });
-  if (!response?.ok) {
-    const error = new Error(response?.error || "电脑客户端桥接器不可用");
-    error.code = response?.code || "BW_COMPUTER_VOICE_POPUP";
-    throw error;
-  }
-  return response.data || {};
-}
-
-function renderComputerVoice(value) {
-  const labels = {
-    active: "● 通话中",
-    starting: "◐ 正在建立媒体链路",
-    ready: "● 已就绪；只会在 Reader 点击电话按钮后启动",
-    "not-ready": "○ 已连接扩展，但本机桥接器尚未全部就绪"
-  };
-  computerVoiceStatus.textContent = value?.paired
-    ? (labels[value.state] || "○ 电脑客户端状态未知")
-    : "尚未配对；请先在 Reader 设置中生成一次性配对信息。";
-  if (value?.paired && !value?.localOptIn) {
-    computerVoiceStatus.textContent += "\nWindows 本机明确启用尚未完成。";
-  }
-  if (value?.paired && !value?.appReady) {
-    computerVoiceStatus.textContent += "\nCodex 桌面应用尚未通过就绪检测。";
-  }
-  computerVoiceExtensionId.textContent =
-    `本扩展 ID：${value?.extensionId || chrome.runtime.id}`;
-  computerVoicePairButton.disabled = !!value?.paired;
-  computerVoicePairId.disabled = !!value?.paired;
-  computerVoiceCode.disabled = !!value?.paired;
-}
-
-async function loadComputerVoiceStatus() {
-  computerVoiceStatus.textContent = "正在读取桥接状态……";
-  try {
-    renderComputerVoice(await computerVoiceMessage("BW_COMPUTER_VOICE_STATUS"));
-  } catch (error) {
-    computerVoiceStatus.textContent = "✗ " + (error?.message || String(error));
-    computerVoiceExtensionId.textContent = `本扩展 ID：${chrome.runtime.id}`;
-  }
 }
 
 function renderStatus(data, prefix = "") {
@@ -202,29 +151,4 @@ testButton.addEventListener("click", async () => {
   }
 });
 
-computerVoicePairButton.addEventListener("click", async () => {
-  computerVoicePairButton.disabled = true;
-  computerVoiceRefresh.disabled = true;
-  computerVoiceStatus.textContent = "正在完成一次性配对……";
-  try {
-    const value = await computerVoiceMessage("BW_COMPUTER_VOICE_PAIR", {
-      pairId: computerVoicePairId.value.trim(),
-      pairingCode: computerVoiceCode.value.trim()
-    });
-    computerVoicePairId.value = "";
-    computerVoiceCode.value = "";
-    renderComputerVoice(value);
-  } catch (error) {
-    computerVoiceStatus.textContent = "✗ " + (error?.message || String(error));
-    computerVoicePairButton.disabled = false;
-  } finally {
-    computerVoiceRefresh.disabled = false;
-  }
-});
-
-computerVoiceRefresh.addEventListener("click", () => {
-  void loadComputerVoiceStatus();
-});
-
 loadStatus();
-loadComputerVoiceStatus();

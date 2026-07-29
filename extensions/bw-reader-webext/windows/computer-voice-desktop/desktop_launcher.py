@@ -25,7 +25,6 @@ from bridge_core import (
     disable_and_stop_direct_service,
     enumerate_microphones,
     load_direct_config,
-    prepare_pairing,
     read_direct_status,
     run_idle_bootstrap,
     save_enabled_config,
@@ -48,7 +47,7 @@ from control_plane import (
 
 
 APP_TITLE = "电脑客户端桥接器"
-APP_VERSION = "0.4.0-direct-supervisor-source"
+APP_VERSION = "0.5.0-single-user-source"
 
 
 class BridgeWindow:
@@ -57,7 +56,6 @@ class BridgeWindow:
         "start_button",
         "disable_button",
         "refresh_button",
-        "generate_pair_button",
         "control_refresh_button",
         "bootstrap_install_button",
         "bootstrap_remove_button",
@@ -76,9 +74,7 @@ class BridgeWindow:
         temporary_directory_factory: (
             Callable[[], ContextManager[str]] | None
         ) = None,
-        microphone_provider: Callable[[], list[Microphone]] = (
-            enumerate_microphones
-        ),
+        microphone_provider: Callable[[], list[Microphone]] | None = None,
     ) -> None:
         self.root = root
         self.paths = paths or BridgePaths.discover()
@@ -90,14 +86,16 @@ class BridgeWindow:
         self.temporary_directory_factory = (
             temporary_directory_factory
         )
-        self.microphone_provider = microphone_provider
+        self.microphone_provider = microphone_provider or (
+            lambda: enumerate_microphones(self.paths.native_host)
+        )
         self.microphones: list[Microphone] = []
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.busy = False
 
         root.title(APP_TITLE)
-        root.geometry("700x980")
-        root.minsize(640, 880)
+        root.geometry("700x850")
+        root.minsize(640, 760)
         root.configure(bg="#eef2f7")
 
         style = ttk.Style(root)
@@ -189,6 +187,7 @@ class BridgeWindow:
             text=(
                 f"只监听 {FIXED_LISTEN_HOST}:{FIXED_LISTEN_PORT}；"
                 f"输出范围固定为 {FIXED_OUTPUT_SCOPE}，无全系统回退。"
+                "单用户实验模式固定启用，Reader/PWA/扩展无需配对。"
             ),
             foreground="#245c3b",
             wraplength=590,
@@ -224,29 +223,6 @@ class BridgeWindow:
             command=self.on_refresh,
         )
         self.refresh_button.pack(side="right")
-
-        pair_frame = self._section(outer, "Reader 一次性配对")
-        ttk.Label(
-            pair_frame,
-            text=(
-                "配对码在 Windows 生成，只把 SHA-256 摘要写入配置；"
-                "明文不落盘。消费后只保留 Reader 的 ECDSA P-256 公钥和指纹。"
-            ),
-            foreground="#44546a",
-            wraplength=590,
-        ).pack(anchor="w")
-        self.pair_code = ttk.Label(
-            pair_frame,
-            text="一次性配对码：尚未生成",
-            style="Status.TLabel",
-        )
-        self.pair_code.pack(anchor="w", pady=(9, 0))
-        self.generate_pair_button = ttk.Button(
-            pair_frame,
-            text="在 Windows 生成一次性配对码",
-            command=self.on_generate_pairing,
-        )
-        self.generate_pair_button.pack(anchor="w", pady=(10, 0))
 
         bootstrap_frame = self._section(
             outer,
@@ -346,9 +322,8 @@ class BridgeWindow:
     ) -> None:
         self.busy = busy
         state = "disabled" if busy else "normal"
-        # The old prototype referenced self.pair_button, which was never
-        # created.  Every action therefore crashed in set_busy before reaching
-        # its real operation.  Missing/optional controls are now ignored.
+        # Missing/optional controls are ignored so headless tests and older
+        # packaged layouts cannot prevent the requested action from running.
         for name in self._ACTION_BUTTON_NAMES:
             button = getattr(self, name, None)
             if button is not None:
@@ -419,36 +394,6 @@ class BridgeWindow:
         )
         self.reader_status.configure(text=text, foreground=color)
 
-    def render_pairing_config(
-        self,
-        config: dict[str, Any] | None,
-    ) -> None:
-        if config and config.get("pairedClientPublicKeySpki"):
-            fingerprint = str(
-                config.get("pairedClientFingerprintSha256", "")
-            )
-            self.pair_code.configure(
-                text=(
-                    "Reader 公钥已登记；指纹 "
-                    + fingerprint[:12]
-                    + "…"
-                ),
-                foreground="#167347",
-            )
-        elif config and config.get("pairingCodeHash"):
-            self.pair_code.configure(
-                text=(
-                    "一次性配对摘要已登记；"
-                    "明文只在生成后的当前显示周期可见"
-                ),
-                foreground="#9a6700",
-            )
-        else:
-            self.pair_code.configure(
-                text="一次性配对码：尚未生成",
-                foreground="#6b7280",
-            )
-
     def refresh_static(self) -> DirectStatus:
         config = load_direct_config(self.paths)
         selected_id = (
@@ -463,7 +408,6 @@ class BridgeWindow:
         self._refresh_microphones(selected_id or previous_selection)
         status = read_direct_status(self.paths, self.process_runner)
         self.render_status(status)
-        self.render_pairing_config(config)
         return status
 
     def run_task(
@@ -513,6 +457,7 @@ class BridgeWindow:
             (
                 "将写入所选麦克风、固定 Reader HTTPS 来源、"
                 "127.0.0.1:43128 和 process-only 边界；"
+                "单用户实验模式会固定启用且无需配对；"
                 "不会启动服务或音频。"
             ),
         ):
@@ -540,8 +485,7 @@ class BridgeWindow:
         if not messagebox.askyesno(
             APP_TITLE,
             "将先原子写入 localOptIn=false，再只停止 PID 与 EXE "
-            "路径均匹配的直连代理；尚未消费的配对码会清除，"
-            "已登记公钥保留。继续吗？",
+            "路径均匹配的直连代理。继续吗？",
             parent=self.root,
         ):
             return
@@ -555,7 +499,6 @@ class BridgeWindow:
         def success(result: tuple[bool, bool]) -> None:
             _, stopped = result
             self.refresh_static()
-            self.pair_code.configure(text="一次性配对码：尚未生成")
             self.footer.configure(
                 text=(
                     "本机直连已先停用并安全停止服务。"
@@ -638,59 +581,6 @@ class BridgeWindow:
         self.run_task(
             "正在启用配置并选择受监督启动路径…",
             action,
-            success,
-        )
-
-    def on_generate_pairing(self) -> None:
-        config = load_direct_config(self.paths)
-        replace = bool(
-            config and config.get("pairedClientPublicKeySpki")
-        )
-        if replace:
-            if not self._confirm_mutation(
-                "重新配对 Reader",
-                (
-                    "会显式撤销旧 Reader 公钥和指纹，"
-                    "再生成新的短期一次性配对码。"
-                ),
-            ):
-                return
-        elif not self._confirm_mutation(
-            "生成一次性配对码",
-            (
-                "只把配对码 SHA-256 摘要和五分钟过期时间"
-                "写入本机 direct config；明文不落盘。"
-            ),
-        ):
-            return
-
-        def success(material: Any) -> None:
-            self.refresh_static()
-            grouped = "-".join(
-                (
-                    material.display_code[:5],
-                    material.display_code[5:],
-                )
-            )
-            self.pair_code.configure(
-                text=(
-                    f"一次性配对码：{grouped}；"
-                    f"有效至 {material.expires_at_utc}"
-                ),
-                foreground="#9a6700",
-            )
-            self.footer.configure(
-                text=(
-                    "明文配对码仅显示在本窗口；配置只保存 43 字符摘要。"
-                )
-            )
-
-        self.run_task(
-            "正在生成短期一次性配对码…",
-            lambda: prepare_pairing(
-                self.paths,
-                replace_existing=replace,
-            ),
             success,
         )
 

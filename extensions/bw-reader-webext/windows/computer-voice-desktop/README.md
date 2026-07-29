@@ -77,8 +77,8 @@ schtasks.exe /Run /TN "BW Computer Voice Direct Bootstrap"
 
 所有命令不用 shell。直接启动和停止均走可注入 `ProcessRunner`；Windows
 停止会在同一个 `QUERY_LIMITED_INFORMATION | TERMINATE` 进程句柄上先复核
-完整 EXE 路径、再终止，避免两次打开之间的 PID reuse。偏离时 fail closed。状态刷新、麦克风选择和
-配对码生成不会调用 `ProcessRunner.start()` 或 `schtasks /Run`。
+完整 EXE 路径、再终止，避免两次打开之间的 PID reuse。偏离时 fail closed。
+状态刷新和麦克风选择不会调用 `ProcessRunner.start()` 或 `schtasks /Run`。
 
 计划任务的固定动作不是任意命令，而是无控制台桌面启动器：
 
@@ -111,6 +111,7 @@ GUI 不再提供会被 supervisor 立即抵消的单独“停止”按钮。“�
 {
   "contract": "reader-computer-voice-direct-config/1",
   "localOptIn": true,
+  "experimentalSingleUserMode": true,
   "microphoneEndpointId": "{explicit-endpoint-id}",
   "listenHost": "127.0.0.1",
   "listenPort": 43128,
@@ -129,9 +130,14 @@ GUI 不再提供会被 supervisor 立即抵消的单独“停止”按钮。“�
 ```
 
 - `listenHost` 必须逐字为 `127.0.0.1`，端口固定为 `43128`。
-- `allowedOrigins` 只接受无路径、查询或 fragment 的 HTTPS origin。
+- `allowedOrigins` 中的显式条目只接受无路径、查询或 fragment 的 HTTPS
+  origin；实验模式另允许规范的 HTTP(S) 当前页面 Origin。
 - `allowedTailscaleUserLogin` 必须逐字为已确认的
   `bwicarus@gmail.com`，GUI 和 Reader 都不能提供替代值。
+- `experimentalSingleUserMode=true` 是当前单用户实验模式：浏览器使用
+  direct v2，不需要配对码、设备密钥或 endpoint 输入。任意规范的 HTTP(S)
+  页面 Origin 都可到达握手，权限边界改由固定 WSS + Tailscale 注入的唯一
+  用户身份 + Windows 本地 opt-in 共同承担。
 - `outputScope` 固定 `process-only`，没有系统输出回退。
 - `appKind` 固定 `codex-desktop`。Reader 不能提交路径、命令或 AUMID。
 - 本机应用 allowlist 只在代码内维护：
@@ -141,19 +147,28 @@ GUI 不再提供会被 supervisor 立即抵消的单独“停止”按钮。“�
 当前 strict config 只选择 Codex；Classic ID 仅作为本机枚举预留，不能由
 Reader 选择。
 
-## 一次性配对安全
+## 浏览器免配对模式
 
-- Windows 用 `ABCDEFGHJKLMNPQRSTUVWXYZ23456789` 生成恰好 10 字符的码。
-- 明文只在当前 GUI 内存和标签中显示，不写文件。
-- 配置只写
-  `base64url-no-padding(SHA-256(UTF-8(code)))`，固定 43 字符，并带
-  最长 5 分钟的 UTC 过期时间。
-- PWA 生成 ECDSA P-256 密钥对，PAIR 请求提交一次性码与 SPKI 公钥。
-- C# 服务消费成功后原子清空码摘要/过期时间，只长期保存客户端
-  `pairedClientPublicKeySpki` 与 SHA-256 指纹；没有可导出的长期 bearer
-  token。
-- 已配对时服务拒绝新的 PAIR。GUI 生成新码不会暗中清旧公钥；只有用户
-  确认“重新配对”后才同时清公钥与指纹。
+GUI 不提供配对码、重新配对、浏览器 endpoint 或设备身份配置。Reader/PWA
+和扩展页面都连接代码内固定的
+`wss://bwicarus-2.taile44d0c.ts.net/reader-computer-voice/v1`，先发送
+`protocolVersion: 2` 的 HELLO，再由电话按钮发送 START。浏览器不生成、
+保存或提交 ECDSA 密钥、设备 token 或 bearer token。
+
+为支持扩展运行在任意网页，实验模式允许规范的 HTTP(S) Origin，而不只允许
+Reader 域名。任何知道固定 WSS 的已访问页面都可能尝试 START，这是单用户
+实验模式的明确取舍；C# 仍在 upgrade 前要求 Tailscale Serve 注入的单值
+`Tailscale-User-Login` 精确匹配，并保留唯一连接、固定 localhost、Windows
+本地 opt-in、明确麦克风、Codex 进程树输出、START-only 激活及
+heartbeat/close fail-closed。
+
+direct 媒体 adapter 还把本次 START 新建的 voice-typist 绑定到同一通话生命周期：
+正常挂断、浏览器断开、心跳超时、START 失败、媒体异常和服务退出都会通过固定 launcher
+执行 `Stop`。只有 helper 返回 `started` 且结束时 PID 仍匹配才拥有停止权；
+`already-running` / `raced-running` 不会被桥接器停止。
+
+strict config 中四个旧 pairing 字段暂时保留为 v1 向后兼容字段，当前 GUI
+始终保持为空，direct v2 不读取它们作认证。
 
 ## runtime status 合同
 
@@ -178,7 +193,8 @@ active
 ```
 
 空闲 `idle` 只监听；不得采音、启动 GPT、启动 typist 或发送快捷键。
-只有经认证的 Reader 电话 `START` 才能请求这些后续动作。C# 已接入当前
+只有通过固定 WSS/Tailnet 身份门禁的 Reader 电话 `START` 才能请求这些
+后续动作。C# 已接入当前
 生产 capture 适配器，但 Windows ↔ Reader/PWA 的真实设备 E2E 尚未验收；
 在验收完成前不能把 listener 在线或 mock 通过冒充通话可用。
 
@@ -268,11 +284,10 @@ BW-Computer-Voice-Bridge.exe --self-test
 
 覆盖：
 
-- 旧原型缺失 `self.pair_button` 时所有按钮提前崩溃的回归；
+- GUI 不出现配对码、重配对或浏览器 endpoint 控件；
 - offline/stale/PID 不匹配不能显示 online 或 Reader connected；
-- direct config 严格字段、固定 Tailscale 登录身份、无长期 token、明文
-  pair code 不落盘；
-- 已配对设备必须显式撤销才能重新配对；
+- direct config 严格字段、实验单用户 v2、固定 Tailscale 登录身份且无
+  浏览器长期 token；
 - 无 Chrome/CDP/WebSocket 运行依赖；
 - START/STOP 只经过注入 runner 且使用严格路径；
 - supervisor 在 opt-out 时零启动，正常/异常退出都封顶退避重启，已在线

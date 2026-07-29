@@ -22,6 +22,36 @@ internal static class Program
             {
                 return WriteJson(ContractSelfTest.Run());
             }
+            if (args is ["--list-direct-microphones"])
+            {
+                return WriteJson(new
+                {
+                    contract =
+                        "reader-computer-voice-microphones/1",
+                    ok = true,
+                    captureStarted = false,
+                    devices =
+                        DirectMicrophoneDiscovery.EnumerateActive(),
+                });
+            }
+            if (
+                args.Length == 3
+                && args[0] == "--diagnose-direct-audio-no-start"
+                && args[1] == "--config"
+            )
+            {
+                if (!Path.IsPathFullyQualified(args[2]))
+                {
+                    throw new DirectProtocolException(
+                        "BW_COMPUTER_VOICE_DIRECT_CONFIG_PATH_INVALID",
+                        "直连配置必须使用绝对路径");
+                }
+                DirectBridgeConfigStore configStore = new(
+                    Path.GetFullPath(args[2]));
+                return WriteJson(await DirectAudioDiagnostics.RunAsync(
+                    configStore.Load(),
+                    CancellationToken.None).ConfigureAwait(false));
+            }
             if (
                 args.Length == 3
                 && args[0] == "--direct-serve"
@@ -111,6 +141,8 @@ internal static class Program
             allowed = new[] {
                 "--describe",
                 "--self-test",
+                "--list-direct-microphones",
+                "--diagnose-direct-audio-no-start --config <absolute-path>",
                 "--direct-serve --config <absolute-path>",
                 "Chrome Native Messaging origin (registered host only)",
             },

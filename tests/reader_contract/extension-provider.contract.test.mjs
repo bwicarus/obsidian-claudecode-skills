@@ -554,6 +554,12 @@ function makeWsPort(sender) {
   };
 }
 
+function makeComputerVoiceDirectPort(sender) {
+  const port = makeWsPort(sender);
+  port.name = "BW_COMPUTER_VOICE_DIRECT_V2";
+  return port;
+}
+
 function makeVocabularyPort(sender) {
   const port = makeFetchPort(sender);
   port.name = "bw-vocabulary-state";
@@ -585,6 +591,16 @@ function ordinaryContentSender(
     tab: { id: 8000 + sequence, url },
     ...overrides,
   };
+}
+
+function computerVoiceDirectSender(
+  url = "https://example.com/article",
+  overrides = {},
+) {
+  return ordinaryContentSender(url, {
+    url: new URL(url).href,
+    ...overrides,
+  });
 }
 
 function harness({
@@ -1207,6 +1223,7 @@ test("正式 manifest 在所有 http(s) 页面载入完整扩展，并只在四�
   );
   assert.equal(MANIFEST.optional_permissions, undefined);
   assert.equal(MANIFEST.optional_host_permissions, undefined);
+  assert.equal(MANIFEST.externally_connectable, undefined);
   assert.equal(MANIFEST.content_scripts.length, 2);
   const [marker, full] = MANIFEST.content_scripts;
   assert.deepEqual(
@@ -5448,6 +5465,245 @@ test("可信 PWA 切换持久账户时，普通网页晚到 bw-fetch 被 generat
       .includes(fetchPort.messages.at(-1).code),
     fetchPort.messages.at(-1).code,
   );
+});
+
+test("电脑语音 relay 只接受扩展顶层 canonical HTTP(S) sender，并固定 Windows WSS", async () => {
+  const h = harness();
+  await settleBackground();
+  const storageReads = h.state.storageReads.length;
+
+  for (const sender of [
+    computerVoiceDirectSender("https://example.com/rejected", {
+      id: "other-extension",
+    }),
+    computerVoiceDirectSender("https://example.com/rejected", {
+      frameId: 1,
+    }),
+    computerVoiceDirectSender("https://example.com/rejected", {
+      tab: null,
+    }),
+    computerVoiceDirectSender("https://example.com/rejected", {
+      url: "data:text/plain,rejected",
+    }),
+    computerVoiceDirectSender("https://example.com/rejected", {
+      url: "https://EXAMPLE.com/rejected",
+    }),
+    computerVoiceDirectSender("https://example.com/rejected", {
+      url: undefined,
+    }),
+  ]) {
+    const rejected = makeComputerVoiceDirectPort(sender);
+    h.connect(rejected);
+    assert.equal(rejected.disconnected, true);
+  }
+  assert.equal(h.state.webSockets.length, 0);
+
+  const port = makeComputerVoiceDirectPort(computerVoiceDirectSender());
+  h.connect(port);
+  await port.receive({ type: "open" });
+  assert.equal(h.state.webSockets.length, 1);
+  const socket = h.state.webSockets[0];
+  assert.equal(
+    socket.url,
+    "wss://bwicarus-2.taile44d0c.ts.net/reader-computer-voice/v1",
+  );
+  assert.equal(socket.binaryType, "arraybuffer");
+  assert.deepEqual(socket.sent, [], "relay 自身不得生成 START 或其它控制帧");
+  assert.equal(
+    h.state.storageReads.length,
+    storageReads,
+    "Windows relay 不得读取配对或账户 storage",
+  );
+
+  socket.open();
+  assert.deepEqual(port.messages, [{ type: "open" }]);
+  await port.receive({ type: "send-text", data: "client-control-frame" });
+  assert.deepEqual(socket.sent, ["client-control-frame"]);
+
+  const pcmFrame = Uint8Array.from(
+    { length: 1956 },
+    (_, index) => index & 0xff,
+  );
+  socket.receive("server-control-frame");
+  socket.receive(pcmFrame.buffer);
+  await settleBackground();
+  assert.deepEqual(port.messages.slice(1), [
+    { type: "text", data: "server-control-frame" },
+    {
+      type: "binary-base64",
+      data: Buffer.from(pcmFrame).toString("base64"),
+      bytes: 1956,
+    },
+  ]);
+});
+
+test("电脑语音 relay 严格限制操作、字段、文本大小与固定 PCM 帧长", async () => {
+  const rejectedMessages = [
+    { type: "open", url: "wss://attacker.invalid/" },
+    { type: "send-text", data: "not-open" },
+    { type: "send-text", data: 1 },
+    { type: "send-text", data: "x", extra: true },
+    { type: "close", code: 1000 },
+    { type: "send-binary", data: "AA==" },
+    { type: "unknown" },
+    null,
+  ];
+  for (const message of rejectedMessages) {
+    const h = harness();
+    const port = makeComputerVoiceDirectPort(computerVoiceDirectSender());
+    h.connect(port);
+    await port.receive(message);
+    const error = port.messages.find((entry) => entry.type === "error");
+    assert.deepEqual(
+      Object.keys(error || {}).sort(),
+      ["code", "error", "type"],
+      JSON.stringify(message),
+    );
+    assert.match(error.code, /^BW_COMPUTER_VOICE_DIRECT_/);
+    const close = port.messages.find((entry) => entry.type === "close");
+    assert.deepEqual(
+      Object.keys(close || {}).sort(),
+      ["code", "reason", "type", "wasClean"],
+      JSON.stringify(message),
+    );
+    assert.equal(close.wasClean, false, JSON.stringify(message));
+  }
+
+  const outbound = harness();
+  const outboundPort = makeComputerVoiceDirectPort(
+    computerVoiceDirectSender(),
+  );
+  outbound.connect(outboundPort);
+  await outboundPort.receive({ type: "open" });
+  const outboundSocket = outbound.state.webSockets[0];
+  outboundSocket.open();
+  await outboundPort.receive({
+    type: "send-text",
+    data: "界".repeat(21846),
+  });
+  assert.equal(
+    outboundPort.messages.some((entry) =>
+      entry.type === "error" &&
+      entry.code === "BW_COMPUTER_VOICE_DIRECT_CAPACITY"
+    ),
+    true,
+  );
+  assert.deepEqual(outboundSocket.sent, []);
+  assert.equal(outboundSocket.readyState, 2);
+
+  const inbound = harness();
+  const inboundPort = makeComputerVoiceDirectPort(computerVoiceDirectSender());
+  inbound.connect(inboundPort);
+  await inboundPort.receive({ type: "open" });
+  const inboundSocket = inbound.state.webSockets[0];
+  inboundSocket.open();
+  inboundSocket.receive(new Uint8Array(64 * 1024 + 1).buffer);
+  await settleBackground();
+  assert.equal(
+    inboundPort.messages.some((entry) =>
+      entry.type === "error" &&
+      entry.code === "BW_COMPUTER_VOICE_DIRECT_FRAME"
+    ),
+    true,
+  );
+  assert.equal(
+    inboundPort.messages.some((entry) =>
+      entry.type === "binary-base64"
+    ),
+    false,
+  );
+  assert.equal(inboundSocket.readyState, 2);
+});
+
+test("电脑语音 relay 每个标签页只保留一个连接，所有终态清理且不自动重连", async () => {
+  const h = harness();
+  const sender = computerVoiceDirectSender(
+    "https://example.com/same-tab",
+  );
+  const first = makeComputerVoiceDirectPort(sender);
+  h.connect(first);
+
+  const duplicate = makeComputerVoiceDirectPort(sender);
+  h.connect(duplicate);
+  assert.equal(duplicate.disconnected, true);
+  assert.deepEqual(duplicate.messages, [{
+    type: "error",
+    code: "BW_COMPUTER_VOICE_DIRECT_TAB",
+    error: "当前标签页已有 Windows 语音直连",
+  }]);
+
+  await first.receive({ type: "open" });
+  const firstSocket = h.state.webSockets[0];
+  firstSocket.open();
+  await first.receive({ type: "open" });
+  assert.equal(
+    first.messages.some((entry) =>
+      entry.type === "error" &&
+      entry.code === "BW_COMPUTER_VOICE_DIRECT_STATE"
+    ),
+    true,
+  );
+  assert.equal(firstSocket.readyState, 2);
+
+  const afterProtocolError = makeComputerVoiceDirectPort(sender);
+  h.connect(afterProtocolError);
+  await afterProtocolError.receive({ type: "open" });
+  const secondSocket = h.state.webSockets[1];
+  secondSocket.open();
+  secondSocket.networkError();
+  assert.equal(
+    afterProtocolError.messages.some((entry) =>
+      entry.type === "error" &&
+      entry.code === "BW_COMPUTER_VOICE_DIRECT_NETWORK"
+    ),
+    true,
+  );
+  await settleBackground();
+  assert.equal(h.state.webSockets.length, 2, "网络错误后不得自动重连");
+
+  const afterNetworkError = makeComputerVoiceDirectPort(sender);
+  h.connect(afterNetworkError);
+  await afterNetworkError.receive({ type: "open" });
+  const thirdSocket = h.state.webSockets[2];
+  thirdSocket.open();
+  thirdSocket.serverClose(1001, "s".repeat(200), true);
+  assert.deepEqual(afterNetworkError.messages.at(-1), {
+    type: "close",
+    code: 1001,
+    reason: "s".repeat(123),
+    wasClean: true,
+  });
+
+  const afterServerClose = makeComputerVoiceDirectPort(sender);
+  h.connect(afterServerClose);
+  await afterServerClose.receive({ type: "open" });
+  const fourthSocket = h.state.webSockets[3];
+  fourthSocket.open();
+  await afterServerClose.receive({ type: "close" });
+  assert.deepEqual(fourthSocket.closeCalls, [{
+    code: 1000,
+    reason: "",
+  }]);
+  assert.deepEqual(afterServerClose.messages.at(-1), {
+    type: "close",
+    code: 1000,
+    reason: "",
+    wasClean: true,
+  });
+
+  const disconnected = makeComputerVoiceDirectPort(sender);
+  h.connect(disconnected);
+  await disconnected.receive({ type: "open" });
+  const fifthSocket = h.state.webSockets[4];
+  disconnected.disconnect();
+  assert.deepEqual(fifthSocket.closeCalls, [{
+    code: 1000,
+    reason: "content-disconnected",
+  }]);
+
+  const afterDisconnect = makeComputerVoiceDirectPort(sender);
+  h.connect(afterDisconnect);
+  assert.equal(afterDisconnect.disconnected, false);
 });
 
 test("bw-ws 只接受扩展顶层网页脚本，并要求已验证账户和设备令牌", async () => {

@@ -1,7 +1,7 @@
 // 扩展后台:唯一接触 token 和 Pi API 的地方。网页脚本永远拿不到 token,也不能传任意 URL(只认固定操作名)。
 // ⚠ ORIGIN 指向**当前主力的 Pi**(Tailscale,iPad 走 Tailscale 访问,和现有 QA browser 一样);
 //   不是暂停的 VPS bwicarus.space(代码停在 2026-05-28)。要换服务器只改这一行 + manifest host_permissions。
-globalThis.__BW_READER_BACKGROUND_BUILD_VERSION = "0.2.69";
+globalThis.__BW_READER_BACKGROUND_BUILD_VERSION = "0.2.71";
 if (typeof importScripts === "function") {
   importScripts(
     "vendor/reader-runtime-account-context.js",
@@ -60,82 +60,6 @@ const ACCOUNT_MESSAGES = new Set([
   "BW_ACCOUNT_TOKEN_TEST",
   "BW_SYNC_STATUS"
 ]);
-const COMPUTER_VOICE_MESSAGES = new Set([
-  "BW_COMPUTER_VOICE_PAIR",
-  "BW_COMPUTER_VOICE_STATUS",
-  "BW_COMPUTER_VOICE_STOP"
-]);
-const COMPUTER_VOICE_OFFSCREEN_PATH = "offscreen.html";
-const COMPUTER_VOICE_OFFSCREEN_REQUEST =
-  "BW_COMPUTER_VOICE_OFFSCREEN_REQUEST";
-const COMPUTER_VOICE_DEVICE_STORE_KEY = "bwComputerVoiceDeviceV1";
-
-async function ensureComputerVoiceOffscreen() {
-  if (!chrome.offscreen || typeof chrome.offscreen.createDocument !== "function") {
-    throw Object.assign(new Error("当前浏览器不支持电脑客户端媒体桥"), {
-      code: "BW_COMPUTER_VOICE_OFFSCREEN_UNAVAILABLE"
-    });
-  }
-  if (typeof chrome.runtime.getContexts === "function") {
-    const contexts = await chrome.runtime.getContexts({
-      contextTypes: ["OFFSCREEN_DOCUMENT"],
-      documentUrls: [chrome.runtime.getURL(COMPUTER_VOICE_OFFSCREEN_PATH)]
-    });
-    if (Array.isArray(contexts) && contexts.length) return;
-  }
-  try {
-    await chrome.offscreen.createDocument({
-      url: COMPUTER_VOICE_OFFSCREEN_PATH,
-      reasons: ["WEB_RTC"],
-      justification: "仅在用户配对并点击电话按钮后桥接显式麦克风和 Codex 目标进程音频"
-    });
-  } catch (error) {
-    if (!/single offscreen|already exists/i.test(String(error?.message || ""))) {
-      throw error;
-    }
-  }
-}
-
-async function handleComputerVoiceMessage(message) {
-  await ensureComputerVoiceOffscreen();
-  const operation = {
-    BW_COMPUTER_VOICE_PAIR: "PAIR",
-    BW_COMPUTER_VOICE_STATUS: "STATUS",
-    BW_COMPUTER_VOICE_STOP: "STOP"
-  }[message.type];
-  if (!operation) {
-    throw Object.assign(new Error("电脑客户端操作不受支持"), {
-      code: "BW_COMPUTER_VOICE_OPERATION"
-    });
-  }
-  const response = await chrome.runtime.sendMessage({
-    type: COMPUTER_VOICE_OFFSCREEN_REQUEST,
-    operation,
-    payload: message.payload || {}
-  });
-  if (!response?.ok) {
-    throw Object.assign(new Error(
-      String(response?.error || "电脑客户端媒体桥不可用")
-    ), {
-      code: String(response?.code || "BW_COMPUTER_VOICE_OFFSCREEN")
-    });
-  }
-  return response.data || {};
-}
-
-async function restoreComputerVoiceOffscreen() {
-  try {
-    const stored = await chrome.storage.local.get(
-      COMPUTER_VOICE_DEVICE_STORE_KEY
-    );
-    if (stored?.[COMPUTER_VOICE_DEVICE_STORE_KEY]) {
-      await ensureComputerVoiceOffscreen();
-    }
-  } catch (_) {
-    // No offscreen document means no heartbeat and the Reader reports
-    // offline; never guess readiness or start anything as a fallback.
-  }
-}
 const PUBLIC_ACCOUNT_ERROR_CODES = new Set([
   "BW_ACCOUNT_ACTIVE_TAB",
   "BW_ACCOUNT_CONTEXT_UNAVAILABLE",
@@ -230,8 +154,7 @@ const BW_FETCH_ROUTE_METHODS = (() => {
     "/api/assistant/rtc-usage",
     "/api/assistant/undo",
     "/api/assistant/voice-clip",
-    "/api/assistant/voice-tool",
-    "/api/reader/computer-voice/pairings"
+    "/api/assistant/voice-tool"
   ], ["POST"]);
   add([
     "/pdf/api/favorites",
@@ -249,8 +172,7 @@ const BW_FETCH_ROUTE_METHODS = (() => {
     "/api/assistant/pref-profiles",
     "/api/assistant/tool-prompt",
     "/api/assistant/voice-cards",
-    "/api/assistant/voice-config",
-    "/api/reader/computer-voice/devices"
+    "/api/assistant/voice-config"
   ], ["GET", "POST", "PATCH", "DELETE"]);
   add(["/pdf/api/review-queue"], ["GET", "POST"]);
   return routes;
@@ -261,11 +183,6 @@ const BW_FETCH_DYNAMIC_ROUTES = Object.freeze([
   { pattern: /^\/pdf\/api\/toolshot\/[^/]+$/, methods: new Set(["GET"]) },
   { pattern: /^\/pdf\/api\/video-subtitles\/[^/]+$/, methods: new Set(["GET"]) },
   { pattern: /^\/api\/assistant\/voice-clip\/[^/]+$/, methods: new Set(["GET"]) },
-  { pattern: /^\/api\/reader\/computer-voice\/devices\/[A-Za-z0-9._:-]+\/status$/, methods: new Set(["GET"]) },
-  { pattern: /^\/api\/reader\/computer-voice\/devices\/[A-Za-z0-9._:-]+\/start$/, methods: new Set(["POST"]) },
-  { pattern: /^\/api\/reader\/computer-voice\/devices\/[A-Za-z0-9._:-]+$/, methods: new Set(["DELETE"]) },
-  { pattern: /^\/api\/reader\/computer-voice\/devices\/[A-Za-z0-9._:-]+\/record$/, methods: new Set(["DELETE"]) },
-  { pattern: /^\/api\/reader\/computer-voice\/sessions\/[A-Za-z0-9._:-]+\/signals$/, methods: new Set(["POST"]) },
   { pattern: /^\/skilltree\/[^/]+\/api\/toggle-tracked$/, methods: new Set(["POST"]) }
 ]);
 function checkedBwFetchRequest(value, init) {
@@ -367,6 +284,11 @@ const BW_WS_QUERY_KEYS = new Set([
 const MAX_BW_WS_FRAME_BYTES = 8 * 1024 * 1024;
 const MAX_BW_WS_FRAME_B64_CHARS =
   4 * Math.ceil(MAX_BW_WS_FRAME_BYTES / 3);
+const COMPUTER_VOICE_DIRECT_PORT = "BW_COMPUTER_VOICE_DIRECT_V2";
+const COMPUTER_VOICE_DIRECT_ENDPOINT =
+  "wss://bwicarus-2.taile44d0c.ts.net/reader-computer-voice/v1";
+const MAX_COMPUTER_VOICE_DIRECT_TEXT_BYTES = 64 * 1024;
+const COMPUTER_VOICE_DIRECT_PCM_FRAME_BYTES = 1956;
 function checkedBwWebSocketPath(value) {
   if (
     typeof value !== "string" ||
@@ -3295,19 +3217,16 @@ if (chrome.runtime.onInstalled) {
   chrome.runtime.onInstalled.addListener(() => {
     ensureProviderSyncAlarm();
     void startActiveProviderSync("extension-installed", { runNow: true });
-    void restoreComputerVoiceOffscreen();
   });
 }
 if (chrome.runtime.onStartup) {
   chrome.runtime.onStartup.addListener(() => {
     ensureProviderSyncAlarm();
     void startActiveProviderSync("browser-startup", { runNow: true });
-    void restoreComputerVoiceOffscreen();
   });
 }
 ensureProviderSyncAlarm();
 void startActiveProviderSync("worker-start", { runNow: true });
-void restoreComputerVoiceOffscreen();
 
 // ── 账户分区缓存：旧 dictCache/webTrCacheV1 只留在隔离区，不读取、不迁移、不删除。──
 const cacheWriteQueues = new Map();
@@ -4603,8 +4522,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     !ACCOUNT_MESSAGES.has(message?.type) &&
     !LOCAL_STORAGE_MESSAGES.has(message?.type) &&
     !PAGE_CARD_PRESENTATION_MESSAGES.has(message?.type) &&
-    !TRANSLATION_CACHE_MESSAGES.has(message?.type) &&
-    !COMPUTER_VOICE_MESSAGES.has(message?.type)
+    !TRANSLATION_CACHE_MESSAGES.has(message?.type)
   ) {
     return false;
   }
@@ -4614,8 +4532,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       ? handlePageCardPresentationMessage(message, sender)
     : TRANSLATION_CACHE_MESSAGES.has(message.type)
       ? handleTranslationCacheMessage(message, sender)
-    : COMPUTER_VOICE_MESSAGES.has(message.type)
-      ? handleComputerVoiceMessage(message)
     : ACCOUNT_MESSAGES.has(message.type)
       ? handleAccountMessage(message, sender)
       : Promise.resolve().then(async () => {
@@ -5418,5 +5334,272 @@ chrome.runtime.onConnect.addListener((port) => {
       unsubscribeAccount = null;
     }
     closeNative(1000, "content disconnected");
+  });
+});
+
+// ── Windows 电脑语音固定直连 ──
+// 普通网页的 content script 继承页面网络语境，不能自行承担这条跨源 WSS。
+// relay 只接受扩展自身的顶层 content script，并把 endpoint 固定在后台；网页不能
+// 选择 URL、直接取得 runtime Port，或借字段扩展恢复配对/任意网络能力。
+const computerVoiceDirectTabs = new Map();
+
+function computerVoiceDirectSenderTabId(sender) {
+  if (
+    !sender ||
+    sender.id !== chrome.runtime.id ||
+    !Number.isInteger(sender?.tab?.id) ||
+    sender.frameId !== 0 ||
+    typeof sender.url !== "string"
+  ) {
+    return null;
+  }
+  let url;
+  try { url = new URL(sender.url); }
+  catch (_) { url = null; }
+  if (
+    !url ||
+    !["http:", "https:"].includes(url.protocol) ||
+    url.username ||
+    url.password ||
+    url.href !== sender.url
+  ) {
+    return null;
+  }
+  return sender.tab.id;
+}
+
+function computerVoiceDirectExactMessage(message, fields) {
+  return !!(
+    message &&
+    typeof message === "object" &&
+    !Array.isArray(message) &&
+    Object.keys(message).length === fields.length &&
+    fields.every((field) =>
+      Object.prototype.hasOwnProperty.call(message, field)
+    )
+  );
+}
+
+function computerVoiceDirectFrameBytes(value) {
+  if (Object.prototype.toString.call(value) === "[object ArrayBuffer]") {
+    return new Uint8Array(value);
+  }
+  if (ArrayBuffer.isView(value)) {
+    return new Uint8Array(
+      value.buffer,
+      value.byteOffset,
+      value.byteLength
+    );
+  }
+  throw Object.assign(new Error("Windows 返回了不支持的二进制帧"), {
+    code: "BW_COMPUTER_VOICE_DIRECT_FRAME"
+  });
+}
+
+function computerVoiceDirectBase64(bytes) {
+  if (bytes.byteLength !== COMPUTER_VOICE_DIRECT_PCM_FRAME_BYTES) {
+    throw Object.assign(new Error("Windows PCM 帧长度必须是 1956 bytes"), {
+      code: "BW_COMPUTER_VOICE_DIRECT_FRAME"
+    });
+  }
+  let binary = "";
+  for (let offset = 0; offset < bytes.byteLength; offset += 1) {
+    binary += String.fromCharCode(bytes[offset]);
+  }
+  return btoa(binary);
+}
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== COMPUTER_VOICE_DIRECT_PORT) return;
+  const tabId = computerVoiceDirectSenderTabId(port.sender);
+  if (tabId == null) {
+    try { port.disconnect(); } catch (_) {}
+    return;
+  }
+  if (computerVoiceDirectTabs.has(tabId)) {
+    try {
+      port.postMessage({
+        type: "error",
+        code: "BW_COMPUTER_VOICE_DIRECT_TAB",
+        error: "当前标签页已有 Windows 语音直连"
+      });
+    } catch (_) {}
+    try { port.disconnect(); } catch (_) {}
+    return;
+  }
+
+  const entry = {
+    port,
+    tabId,
+    socket: null,
+    terminal: false,
+    inboundQueue: Promise.resolve()
+  };
+  computerVoiceDirectTabs.set(tabId, entry);
+
+  const post = (message) => {
+    if (entry.terminal) return false;
+    try {
+      port.postMessage(message);
+      return true;
+    } catch (_) {
+      return false;
+    }
+  };
+  const releaseTab = () => {
+    if (computerVoiceDirectTabs.get(tabId) === entry) {
+      computerVoiceDirectTabs.delete(tabId);
+    }
+  };
+  const detachSocket = (code, reason) => {
+    const current = entry.socket;
+    entry.socket = null;
+    if (!current) return;
+    current.onopen = current.onmessage =
+      current.onerror = current.onclose = null;
+    if (current.readyState < 2) {
+      try { current.close(code, String(reason || "").slice(0, 120)); }
+      catch (_) {}
+    }
+  };
+  const finishClose = (code, reason, wasClean, nativeCode = null) => {
+    if (entry.terminal) return;
+    post({
+      type: "close",
+      code: Number(code || 0),
+      reason: String(reason || "").slice(0, 123),
+      wasClean: !!wasClean
+    });
+    entry.terminal = true;
+    detachSocket(nativeCode, reason);
+    releaseTab();
+  };
+  const fail = (error, nativeCode = 4000) => {
+    if (entry.terminal) return;
+    const code = String(
+      error?.code || "BW_COMPUTER_VOICE_DIRECT_RELAY"
+    );
+    const message = String(
+      error?.message || error || "Windows 语音直连失败"
+    ).slice(0, 300);
+    post({ type: "error", code, error: message });
+    post({
+      type: "close",
+      code: nativeCode,
+      reason: message.slice(0, 120),
+      wasClean: false
+    });
+    entry.terminal = true;
+    detachSocket(nativeCode, "computer-voice-relay-error");
+    releaseTab();
+  };
+  const open = () => {
+    if (entry.socket || entry.terminal) {
+      throw Object.assign(new Error("Windows 语音直连已经打开"), {
+        code: "BW_COMPUTER_VOICE_DIRECT_STATE"
+      });
+    }
+    const socket = new WebSocket(COMPUTER_VOICE_DIRECT_ENDPOINT);
+    entry.socket = socket;
+    socket.binaryType = "arraybuffer";
+    socket.onopen = () => {
+      if (entry.socket !== socket || entry.terminal) return;
+      post({ type: "open" });
+    };
+    socket.onmessage = (event) => {
+      entry.inboundQueue = entry.inboundQueue.then(async () => {
+        if (entry.socket !== socket || entry.terminal) return;
+        let data = event.data;
+        if (typeof Blob !== "undefined" && data instanceof Blob) {
+          data = await data.arrayBuffer();
+          if (entry.socket !== socket || entry.terminal) return;
+        }
+        if (typeof data === "string") {
+          if (
+            new TextEncoder().encode(data).byteLength >
+              MAX_COMPUTER_VOICE_DIRECT_TEXT_BYTES
+          ) {
+            throw Object.assign(new Error("Windows 文本帧超过 64 KiB"), {
+              code: "BW_COMPUTER_VOICE_DIRECT_CAPACITY"
+            });
+          }
+          post({ type: "text", data });
+          return;
+        }
+        const bytes = computerVoiceDirectFrameBytes(data);
+        post({
+          type: "binary-base64",
+          data: computerVoiceDirectBase64(bytes),
+          bytes: bytes.byteLength
+        });
+      }).catch((error) => fail(error, 4002));
+    };
+    socket.onerror = () => {
+      if (entry.socket !== socket || entry.terminal) return;
+      fail(Object.assign(new Error("Windows 语音 WSS 网络错误"), {
+        code: "BW_COMPUTER_VOICE_DIRECT_NETWORK"
+      }), 4001);
+    };
+    socket.onclose = (event) => {
+      if (entry.socket !== socket || entry.terminal) return;
+      entry.socket = null;
+      finishClose(event.code, event.reason, event.wasClean);
+    };
+  };
+
+  port.onMessage.addListener((message) => {
+    if (entry.terminal) return;
+    try {
+      if (
+        computerVoiceDirectExactMessage(message, ["type"]) &&
+        message.type === "open"
+      ) {
+        open();
+        return;
+      }
+      if (
+        computerVoiceDirectExactMessage(message, ["type", "data"]) &&
+        message.type === "send-text"
+      ) {
+        if (typeof message.data !== "string") {
+          throw Object.assign(new Error("Windows 语音文本帧格式无效"), {
+            code: "BW_COMPUTER_VOICE_DIRECT_FRAME"
+          });
+        }
+        if (
+          new TextEncoder().encode(message.data).byteLength >
+            MAX_COMPUTER_VOICE_DIRECT_TEXT_BYTES
+        ) {
+          throw Object.assign(new Error("Windows 语音文本帧超过 64 KiB"), {
+            code: "BW_COMPUTER_VOICE_DIRECT_CAPACITY"
+          });
+        }
+        if (!entry.socket || entry.socket.readyState !== 1) {
+          throw Object.assign(new Error("Windows 语音 WSS 尚未打开"), {
+            code: "BW_COMPUTER_VOICE_DIRECT_STATE"
+          });
+        }
+        entry.socket.send(message.data);
+        return;
+      }
+      if (
+        computerVoiceDirectExactMessage(message, ["type"]) &&
+        message.type === "close"
+      ) {
+        finishClose(1000, "", true, 1000);
+        return;
+      }
+      throw Object.assign(new Error("Windows 语音 relay 操作或字段无效"), {
+        code: "BW_COMPUTER_VOICE_DIRECT_OPERATION"
+      });
+    } catch (error) {
+      fail(error);
+    }
+  });
+  port.onDisconnect.addListener(() => {
+    if (entry.terminal) return;
+    entry.terminal = true;
+    detachSocket(1000, "content-disconnected");
+    releaseTab();
   });
 });

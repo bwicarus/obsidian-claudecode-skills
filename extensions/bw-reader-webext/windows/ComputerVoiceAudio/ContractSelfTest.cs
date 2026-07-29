@@ -113,8 +113,29 @@ internal static class ContractSelfTest
             checks);
         Require(
             (uint)AudioClientStreamFlags.Loopback == 0x0002_0000
-            && (uint)AudioClientStreamFlags.EventCallback == 0x0004_0000,
+            && (uint)AudioClientStreamFlags.EventCallback == 0x0004_0000
+            && (uint)AudioClientStreamFlags.AutoConvertPcm == 0x8000_0000,
             "shared-event-loopback-flags",
+            checks);
+        AudioClientStreamFlags processFlags =
+            NativeProcessLoopbackCaptureRuntime.StreamFlagsForTest;
+        WaveFormatEx processFormat =
+            NativeProcessLoopbackCaptureRuntime.CaptureFormatForTest;
+        Require(
+            processFlags
+                == (
+                    AudioClientStreamFlags.Loopback
+                    | AudioClientStreamFlags.EventCallback
+                    | AudioClientStreamFlags.AutoConvertPcm)
+            && processFormat.FormatTag == PcmAudioFormat.WaveFormatPcm
+            && processFormat.Channels == 2
+            && processFormat.SamplesPerSecond
+                == Pcm48kMonoFramer.SampleRate
+            && processFormat.AverageBytesPerSecond == 192_000
+            && processFormat.BlockAlign == 4
+            && processFormat.BitsPerSample == 16
+            && processFormat.ExtraSize == 0,
+            "process-loopback-fixed-pcm48-autoconvert",
             checks);
         Require(
             (uint)AudioClientBufferFlags.Silent == 0x2,
@@ -136,6 +157,11 @@ internal static class ContractSelfTest
             parameters.ProcessLoopbackParams.ProcessLoopbackMode
                 == ProcessLoopbackMode.IncludeTargetProcessTree,
             "builder-includes-target-tree",
+            checks);
+        Require(
+            ProcessLoopbackActivation
+                .NativeCompletionHandlerIsAgileForTest(),
+            "native-completion-handler-is-agile",
             checks);
 
         bool zeroPidRejected = false;
@@ -223,6 +249,26 @@ internal static class ContractSelfTest
             sharedRuntime?.FieldType
                 == typeof(SharedEventDrivenPcmRuntime),
             "mic-reuses-shared-event-pcm-runtime",
+            checks);
+
+        FakeNativeAudioClientLease microphoneLease = new();
+        bool microphoneUsesDeviceMixFormat;
+        using (ExplicitMicrophoneCaptureRuntime microphoneRuntime =
+            new(microphoneLease))
+        {
+            object? inner = sharedRuntime?.GetValue(microphoneRuntime);
+            FieldInfo? fixedCaptureFormat =
+                typeof(SharedEventDrivenPcmRuntime).GetField(
+                    "_fixedCaptureFormat",
+                    BindingFlags.Instance | BindingFlags.NonPublic);
+            microphoneUsesDeviceMixFormat =
+                inner is not null
+                && fixedCaptureFormat?.GetValue(inner) is null;
+        }
+        Require(
+            microphoneUsesDeviceMixFormat
+            && microphoneLease.DisposeCount == 1,
+            "mic-shared-runtime-keeps-device-mix-format",
             checks);
     }
 
@@ -849,6 +895,12 @@ internal static class ContractSelfTest
         {
             // Dispose preserves the already-observed terminal failure.
         }
+        startFailure.Dispose();
+        Require(
+            startFailure.State == CaptureSessionState.Disposed
+            && startFailureFactory.Runtime.DisposeCount == 1,
+            "failed-process-dispose-still-finalizes-owned-runtime",
+            checks);
 
         ThrowingCompleteSink throwingCompleteSink = new();
         ProcessLoopbackCaptureSession completionFailure =
@@ -881,6 +933,11 @@ internal static class ContractSelfTest
         {
             // Dispose keeps the terminal sink failure observable.
         }
+        completionFailure.Dispose();
+        Require(
+            completionFailure.State == CaptureSessionState.Disposed,
+            "failed-process-completion-dispose-still-finalizes-session",
+            checks);
 
         int callbackFirstCleanupCount = 0;
         ActivationCleanupGate callbackFirstGate =
@@ -1015,6 +1072,12 @@ internal static class ContractSelfTest
         {
             // Dispose keeps the already-observed initialization failure.
         }
+        initializeFailure.Dispose();
+        Require(
+            initializeFailure.State == CaptureSessionState.Disposed
+            && initializeFailureFactory.Runtime.DisposeCount == 1,
+            "failed-mic-dispose-still-finalizes-owned-runtime",
+            checks);
 
         CaptureSessionOptions pumpOptions = new()
         {
@@ -1159,6 +1222,35 @@ internal static class ContractSelfTest
             "immdeviceenumerator-vtable-explicit-getdevice-slot",
             checks);
 
+        string[] selectionEnumeratorMethods =
+            typeof(IMMDeviceEnumeratorForSelection)
+                .GetMethods()
+                .Select(method => method.Name)
+                .ToArray();
+        Require(
+            selectionEnumeratorMethods.SequenceEqual(new[]
+            {
+                "EnumAudioEndpoints",
+                "GetDefaultAudioEndpoint",
+                "GetDevice",
+                "RegisterEndpointNotificationCallback",
+                "UnregisterEndpointNotificationCallback",
+            })
+            && typeof(IMMDeviceEnumeratorForSelection)
+                .GetMethod("GetDefaultAudioEndpoint")!
+                .GetCustomAttribute<ObsoleteAttribute>()?.IsError
+                == true,
+            "mic-discovery-vtable-enumerates-with-default-slot-forbidden",
+            checks);
+
+        Require(
+            typeof(IMMDeviceCollectionForSelection)
+                .GetMethods()
+                .Select(method => method.Name)
+                .SequenceEqual(new[] { "GetCount", "Item" }),
+            "mic-discovery-collection-vtable-is-exact",
+            checks);
+
         string[] deviceMethods =
             typeof(IMMDevice)
                 .GetMethods()
@@ -1297,6 +1389,21 @@ internal static class ContractSelfTest
 
         public void Dispose()
         {
+        }
+    }
+
+    private sealed class FakeNativeAudioClientLease :
+        INativeAudioClientLease
+    {
+        public IAudioClient AudioClient =>
+            throw new InvalidOperationException(
+                "BW_COMPUTER_VOICE_AUDIO_FAKE_CLIENT_NOT_AVAILABLE");
+
+        internal int DisposeCount { get; private set; }
+
+        public void Dispose()
+        {
+            DisposeCount++;
         }
     }
 

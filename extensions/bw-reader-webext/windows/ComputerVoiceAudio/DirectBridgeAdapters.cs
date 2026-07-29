@@ -104,12 +104,14 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
     private readonly IDirectMediaAdapter _mediaAdapter;
     private readonly Func<long> _monotonicMilliseconds;
     private readonly SemaphoreSlim _stateGate = new(1, 1);
+    private readonly SemaphoreSlim _disposeGate = new(1, 1);
     private readonly object _heartbeatGate = new();
     private string? _activeConnectionId;
     private string? _activeSessionId;
     private long? _heartbeatDeadlineMilliseconds;
     private uint _heartbeatSequence;
     private bool _disposed;
+    private bool _disposeCompleted;
 
     internal DirectBridgeCoordinator(
         DirectBridgeConfigStore configStore,
@@ -291,9 +293,27 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
                 return;
             }
             RequireActiveOwner(connectionId, sessionId);
-            await _mediaAdapter.StopAsync(cancellationToken)
+            // Once ownership is confirmed, teardown belongs to the bridge.
+            // A peer abort may cancel its request token, but must not cancel
+            // capture/typist cleanup or erase the only active-session lease
+            // before the media adapter has settled Completion.
+            await _mediaAdapter.StopAsync(CancellationToken.None)
                 .ConfigureAwait(false);
+            Task<DirectProtocolException?> completion =
+                _mediaAdapter.Completion;
+            if (!completion.IsCompleted)
+            {
+                throw new DirectProtocolException(
+                    "BW_COMPUTER_VOICE_DIRECT_MEDIA_STOP_UNCONFIRMED",
+                    "媒体适配器没有确认停止完成");
+            }
+            DirectProtocolException? failure =
+                await completion.ConfigureAwait(false);
             ClearActiveSession();
+            if (failure is not null)
+            {
+                throw failure;
+            }
         }
         finally
         {
@@ -313,9 +333,21 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
             {
                 return;
             }
-            await _mediaAdapter.StopAsync(CancellationToken.None)
-                .ConfigureAwait(false);
-            ClearActiveSession();
+            try
+            {
+                await _mediaAdapter.StopAsync(CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch
+            {
+                // There is no peer left to receive a teardown error.  The
+                // media adapter preserves its terminal failure in Completion;
+                // connection cleanup must still release the session lease.
+            }
+            finally
+            {
+                ClearActiveSession();
+            }
         }
         finally
         {
@@ -420,23 +452,69 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
 
     public async ValueTask DisposeAsync()
     {
-        if (_disposed)
-        {
-            return;
-        }
-        _disposed = true;
-        await _stateGate.WaitAsync().ConfigureAwait(false);
+        await _disposeGate.WaitAsync().ConfigureAwait(false);
         try
         {
-            await _mediaAdapter.StopAsync(CancellationToken.None)
-                .ConfigureAwait(false);
-            ClearActiveSession();
+            if (_disposeCompleted)
+            {
+                return;
+            }
+            // Enter the terminal service state immediately so failed teardown
+            // attempts cannot reopen normal operations.  Dispose itself stays
+            // retryable until the owned media adapter confirms full release.
+            _disposed = true;
+            bool stopSettled = false;
+            await _stateGate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                try
+                {
+                    await _mediaAdapter.StopAsync(CancellationToken.None)
+                        .ConfigureAwait(false);
+                    Task<DirectProtocolException?> completion =
+                        _mediaAdapter.Completion;
+                    if (completion.IsCompleted)
+                    {
+                        _ = await completion.ConfigureAwait(false);
+                        stopSettled = true;
+                    }
+                }
+                catch
+                {
+                    // DisposeAsync below is the final owner-aware retry.  Do
+                    // not discard the active-session lease unless either Stop
+                    // settled or media disposal ultimately succeeds.
+                }
+                if (stopSettled)
+                {
+                    ClearActiveSession();
+                }
+            }
+            finally
+            {
+                _stateGate.Release();
+            }
+
+            await _mediaAdapter.DisposeAsync().ConfigureAwait(false);
+
+            if (!stopSettled)
+            {
+                await _stateGate.WaitAsync().ConfigureAwait(false);
+                try
+                {
+                    ClearActiveSession();
+                }
+                finally
+                {
+                    _stateGate.Release();
+                }
+            }
+            _stateGate.Dispose();
+            _disposeCompleted = true;
         }
         finally
         {
-            _stateGate.Release();
-            _stateGate.Dispose();
+            _disposeGate.Release();
         }
-        await _mediaAdapter.DisposeAsync().ConfigureAwait(false);
     }
 }
