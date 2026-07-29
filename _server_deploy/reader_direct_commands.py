@@ -44,6 +44,7 @@ ACTIONS: dict[str, dict] = {
     #   联网类(搜图/搜视频/天气/新闻)一律不接线 —— 上游自查更直接。
     "section.read":     {"target": ("file", "page"), "desc": "取该页所在整章正文(summarize_section 的确定性那一半;总结归上游)"},
     "vocab.add":        {"target": (),               "desc": "加生词(ECDICT/unidic 确定性词典 + 写 vault)"},
+    "recall.creation":  {"target": (),               "desc": "召回本地创造物注册表(纸/报告/搜索/翻译等的句柄与内容;引用型只回 ref 不解引用)"},
 }
 MODES = ("independent", "dependent")
 _MAX_STEPS = 20

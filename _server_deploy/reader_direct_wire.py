@@ -346,6 +346,39 @@ def build_handlers(pdf, *, toc_get=None, search_book=None, search_all=None,
         H["vocab.add"] = lambda a, p, prev: {
             "vocab": vocab_add(str(p.get("word") or "").strip()[:60])}
 
+    # ── 召回创造物(本地注册表;上游联网也拿不到)──────────────────────────
+    # 直读 state/assistant-creations/<uid>.json,不 import assistant —— 那个模块带
+    # 整套 AI 编排,为读一个 JSON 把它拉进来既重又容易越界。
+    # 引用型条目(纸/报告,ref 指向别的 sidecar)只回 ref 本身**不解引用**:本体要用
+    # page/note 相关命令去取,让上游明确知道自己在读哪一份,而不是这里悄悄替它拼。
+    def recall_creation(anchor, params, prev):
+        import json as _json
+        try:
+            uid = pdf._reader_storage_identity_current().user_id
+        except Exception as ex:
+            raise ValueError(f"取不到当前身份:{ex}")
+        p = pdf.CLAUDE_DIR / "state" / "assistant-creations" / f"{uid}.json"
+        try:
+            lst = _json.loads(p.read_text("utf-8")) if p.exists() else []
+        except (OSError, ValueError):
+            lst = []                       # 注册表损坏当空,不阻断上游
+        if not isinstance(lst, list):
+            lst = []
+        cid = str(params.get("id") or "").strip()
+        kind = str(params.get("kind") or "").strip()
+        q = str(params.get("query") or "").strip()
+        hits = [c for c in lst if isinstance(c, dict)]
+        if cid:
+            hits = [c for c in hits if str(c.get("id") or "") == cid]
+        if kind:
+            hits = [c for c in hits if str(c.get("kind") or "") == kind]
+        if q:
+            hits = [c for c in hits if q in str(c.get("brief") or "")]
+        hits.sort(key=lambda c: -(c.get("ts") or 0))
+        limit = max(1, min(int(params.get("limit") or 1), 10))
+        return {"creations": hits[:limit], "total": len(lst)}
+    H["recall.creation"] = recall_creation
+
     _assert_no_ai(H.keys())
     missing = sorted(set(DC.ACTIONS) - set(H))
     return H, missing
