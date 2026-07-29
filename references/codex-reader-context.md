@@ -7,24 +7,28 @@
 
 ## 1. 当前快照
 
-- 工作区 manifest：`0.2.58`。
-- 生产 PWA/服务端共享 runtime：`0.2.57`；扩展测试 channel：`0.2.55`。
-- 0.2.58 已生成本地不可变候选，74 files / 1,191,389 bytes，SHA-256
-  `ff5bd67991bf622fd364c4a32fca7bde26edcc6f30900839d9b7f49583b24581`；
-  自动发布门禁通过，Windows 固定环境和用户人工验收尚未完成，未部署或发布。
-- 0.2.57 Windows 不可变候选：
-  `extensions/bw-reader-webext-0.2.57-windows-test.zip`
-  （74 files，SHA-256
-  `45c9362ec8ffb9760f8a5a0eb376cb9e747c5f50df9d6a5afb92c1824cb90c9a`）。
-- 本地 channel 元数据可以指向较新候选；它不等于生产 channel 已激活。
-- 0.2.56 是未发布、已废弃的中间候选，不能覆盖或激活。
-- 0.2.57 已通过本地全量合同与 Windows 固定独立 Chrome 实体卡烟测；其 PWA/服务端
-  payload 已部署，但扩展 channel 未发布，不能把 0.2.55 扩展与 0.2.57 PWA 混合判定为
-  同版本接管。
-- 最新 owner、冻结范围、发布事实和下一项必须以
-  [共享状态](reader-collaboration-status.md) 为准。
-- 当前工作区长期脏且含未跟踪文件；上述候选由文件摘要和测试证明，但还不是一个可由 Git commit
-  单独重建的发布点。
+> ⚠ **版本号不写死在本文里**——写死必然过期（此处曾长期停在 `0.2.58`，而工作区已到
+> `0.2.69`，误导了后续接手者）。**每次开工现场查真值**：
+
+```bash
+python3 extensions/bw-reader-webext/handoff_check.py               # 工作区版本 + 能力归属 + errors
+python3 extensions/bw-reader-webext/handoff_check.py --production  # 再比对 Pi 生产与测试渠道
+tail -n 160 references/reader-collaboration-status.md              # 最新 owner / 冻结范围 / 发布事实
+git -C . log --oneline -5
+```
+
+结构性事实（这些不随版本变）：
+
+- 工作区 manifest 版本、生产 PWA/服务端 runtime 版本、扩展测试 channel 版本**是三个独立的数**，
+  可以互不相同。**不能把不同版本的扩展与 PWA 混合后判定"接管通过"。**
+- 本地 channel 元数据可以指向较新候选；**它不等于生产 channel 已激活**。
+- 未发布的中间候选不得覆盖或激活；判断哪些属于此类看共享状态的发布登记。
+- 最新 owner、冻结范围、发布事实和下一项**一律以**
+  [共享状态](reader-collaboration-status.md) 为准，不以本文、聊天记录或记忆为准。
+- 工作区长期脏且含未跟踪文件（多 agent 共享检出 + 每晚 daily 重写 `anki/records`、
+  `dashboard.json`）。候选由文件摘要和测试证明，**不等于一个可由 Git commit 单独重建的发布点**。
+- 2026-07-29 起 Windows 是第二份工作副本，Pi 仍是唯一部署源；跨机规则见
+  [跨机开发](cross-machine-dev-setup.md)。
 
 ## 2. 产品与所有权
 
@@ -172,10 +176,15 @@ python3 extensions/bw-reader-webext/release_preflight.py \
 没有 `--deploy` 也会改本地不可变包/channel，不能当只读预检。
 
 部署不是普通验证命令。只有可复现候选、用户整套人工视觉验收、agent 后台证据、回滚点和单一
-发布 owner 全部明确后，才能按 [扩展交接](reader-extension-handoff.md#11-部署门禁) 运行项目
-原子流程；独立浏览器自动化只能作为工程回归，不能替代用户人工部署验收。生产清单以
-`scripts/reader_deploy_manifest.py` 为唯一事实源，实际写入只走
-`scripts/deploy_reader.sh`，禁止照旧文档手工覆盖文件。
+发布 owner 全部明确后，才能运行项目原子流程；独立浏览器自动化只能作为工程回归，不能替代
+用户人工部署验收。
+
+**怎么部署看 [部署流程](deployment-workflow.md)（唯一权威）**，一句话：先用
+`python3 scripts/reader_deploy_manifest.py | cut -f1 | grep -F '<文件>'` 判断在不在清单里，
+在清单内走 `scripts/deploy_reader.sh`（先 `--preflight-only`），清单外才 `cp` + restart。
+**脚本内建摘要校验、原子安装、失败自动回滚和健康检查——不要手工再核一遍**；
+[扩展交接 §11](reader-extension-handoff.md#11-部署门禁) 的文件列表只是重点提示，
+漏没漏以 manifest 为准。
 
 ## 8. 原始资料索引
 

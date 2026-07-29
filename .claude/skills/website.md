@@ -11,9 +11,15 @@
 
 ## 服务器信息
 
+> 🚀 **部署怎么做，看 [`references/deployment-workflow.md`](../../references/deployment-workflow.md)（唯一权威）。**
+> 一句话：唯一部署机是 **Pi**；改动先用
+> `python3 scripts/reader_deploy_manifest.py | cut -f1 | grep -F '<文件>'` 判断在不在部署清单里，
+> 在清单内走 `scripts/deploy_reader.sh`（Windows 上是 `scripts\deploy_from_windows.ps1`），
+> 清单外才手工 `cp` + `systemctl restart webapp`。**不要再往 VPS scp。**
+
 | 项目 | 值 |
 |------|-----|
-| 地址 | `root@31.220.31.30`（VPS） |
+| 地址 | ⏸ `root@31.220.31.30`（VPS，**已暂停**）／ 当前主力：Pi，SSH 别名 `pi` |
 | 域名 | `bwicarus.space`（HTTPS，Let's Encrypt） |
 | Web 服务器 | nginx（静态+反代）+ webapp `127.0.0.1:5000`（Linux 上是 gunicorn）+ Flask 5002（stocks-webapp，独占） |
 | Python | 3.10.12（`python3`） |

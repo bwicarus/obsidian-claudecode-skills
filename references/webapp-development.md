@@ -166,49 +166,30 @@ Admin 用户上传的 HTML/CSS/JS 自动同步到 `dashboard_template/` / `histo
 
 ## 部署流程
 
-### 改 control.py 或 control.html
+> ⚠ **完整流程见 [`deployment-workflow.md`](deployment-workflow.md)（唯一权威）。**
+> 本节此前写的 `scp root@bwicarus.space` 已废弃：目标 VPS 自 2026-06-10 暂停，
+> 且 `app.py` / `control.py` / `skilltree.py` 等已进部署清单，改由原子脚本发布。
+
+先判断改动属于哪一类（判据是清单，不是目录）：
 
 ```bash
-# 本机编辑
-nvim _server_deploy/control.py
-nvim _server_deploy/templates/control.html
-
-# scp 部署（不通过 git pull）
-scp _server_deploy/control.py root@bwicarus.space:/root/webapp/control.py
-scp _server_deploy/templates/control.html root@bwicarus.space:/root/webapp/templates/control.html
-
-# 重启 webapp
-ssh root@bwicarus.space 'systemctl restart webapp'
-
-# 验证
-curl -sI https://bwicarus.space/control/ -o /dev/null -w "HTTP %{http_code}\n"
-# 期望 302 → /login（未登录）或 200（已登录）
-
-# commit + push（让 _server_deploy/ 里的副本跟服务器同步）
-git add _server_deploy/
-git commit -m "control: ..."
-git push origin main
+python3 scripts/reader_deploy_manifest.py | cut -f1 | grep -F '<你改的文件>'
 ```
 
-### 改 app.py（罕见 + 慎重）
+- **命中**（`app.py`、`control.py`、`skilltree.py`、`pdf_reader.py` …）→ 走
+  `scripts/deploy_reader.sh`；从 Windows 用 `scripts\deploy_from_windows.ps1 -PreflightOnly`。
+  脚本自带摘要校验、原子安装、失败回滚与健康检查，**不要手工再核一遍**。
+- **未命中**（`insights.py`、`fitness*.py`、`qa_server.py`、`templates/control.html` …）→
+  Pi 上先备份再 `cp` + `systemctl restart webapp`，没有事务保护。
 
-`app.py` 在 git（`_server_deploy/app.py`），流程跟 control.py 一致：本机改 → scp → restart → commit：
+⚠ `control.py` 在清单内、`control.html` 在清单外，改控制面板两条链都要走。
+
+验证（Pi）：
 
 ```bash
-# 本机编辑
-nvim _server_deploy/app.py
-
-# scp 部署
-scp _server_deploy/app.py root@bwicarus.space:/root/webapp/app.py
-
-# 重启 + 验证
-ssh root@bwicarus.space 'systemctl restart webapp && sleep 2 && systemctl is-active webapp || echo "FAILED, rollback!"'
-ssh root@bwicarus.space 'journalctl -u webapp -n 20 --no-pager | tail'
-
-# commit + push
-git add _server_deploy/app.py
-git commit -m "app: ..."
-git push origin main
+curl -sI https://bwicarus.taile44d0c.ts.net/control/ -o /dev/null -w "HTTP %{http_code}\n"
+# 期望 302 → /login（未登录）或 200（已登录）
+journalctl -u webapp -n 20 --no-pager
 ```
 
 ### 加新 location 到 nginx（少做）

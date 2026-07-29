@@ -19,6 +19,20 @@
   git -C "$CLAUDE_PROJECT" status -sb
   ```
 - 🧭 **接续工作/部署细节**:服务器侧 Claude Code 工作流 → `references/server-side-claude-code.md`;Pi 部署 → `references/raspberry-pi-deployment.md`;VPS 迁移 → `references/linux-server-migration.md`;本地实例(Windows Flask) → `references/webapp-development.md`「本地实例」章。
+- 🚀 **要部署任何改动,先读 `references/deployment-workflow.md`(唯一权威,2026-07-29 收敛)**。
+  一句话:唯一部署机是 Pi;先跑 `python3 scripts/reader_deploy_manifest.py | cut -f1 | grep -F '<你改的文件>'`
+  判断在不在部署清单(150 项)里 —— **在清单内**走 `scripts/deploy_reader.sh`(Windows 上是
+  `scripts\deploy_from_windows.ps1 -PreflightOnly`,脚本自带摘要校验/原子安装/失败回滚/健康检查,
+  **不要手工重做**);**清单外**(insights/fitness/qa_server/`control.html` 等)才手工 `cp` + restart。
+  各处旧文档里的 `scp root@bwicarus.space` 与手工回滚清单**已废弃**。
+- 📬 **与 Codex 协作走本机邮箱,不靠人工转述**:`python scripts/agent_collaboration.py inbox --agent claude`。
+  **开工前、完工后、需要对方配合时各查一次**;回复用四段式(改了什么/验证了什么/没做什么/下一步谁做)。
+  用法见 `.claude/skills/协作邮箱.md`,规则见 `references/agent-collaboration.md`。
+  ⚠ v1 不会自动注入对方正在进行的会话,对方要自己查——急事仍需用户转达。
+- 🌐 **Windows 浏览器测试**:只用项目专用 `BW Codex Chrome Test` +
+  `%LOCALAPPDATA%\BWReaderExtensionTest\browser-profile-v2`,或 Claude Code 内置 Browser pane
+  (独立 profile、无扩展无 cookie,**做不了扩展链测试**)。**不动日常 Chrome、常用账号和已装扩展**;
+  真机验收先经用户确认。
 
 ## 🚨 浏览器扩展 / 阅读器统一层交接入口（2026-07-22）
 
