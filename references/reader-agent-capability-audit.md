@@ -7,17 +7,24 @@
 
 `_server_deploy/assistant.py` 内的沙盒工具共 **52 个**(`_t_*`)。按"执行时是否会再次调用 AI"分两类:
 
-### 1.1 会再次调用 AI —— 新通道**不得依赖**(23 个)
+### 1.1 会再次调用 AI —— 新通道**不得依赖**(21 个)
 
 | 分组 | 工具 |
 |---|---|
-| 研究/生成 | `web_search` `search_image` `search_video` `make_paper` `summarize_section` `do_task` `run_saved_task` |
+| 研究/生成 | `web_search` `search_video` `make_paper` `summarize_section` `do_task` `run_saved_task` |
 | 视觉(图像送模型) | `see_page` `see_figure` `see_ink` `correct_dict` |
 | 学习闭环判断 | `material_graph` `read_material` `relate_material` `learning_focus` `situation_feedback` `make_diagnostic` `mastery_proposal` `apply_mastery` `error_patterns` |
-| 其它 | `read_check_report` `add_vocab` `auto_highlight` |
+| 条件性 | `read_check_report`(默认同步返回报告内容不调 AI;**仅 `verify:true`** 起查书子 agent → 保守归此类,直接命令若要用必须强制 `verify=false`) |
+| 其它 | `auto_highlight` |
 
 这些是**认知/规划**能力:它们接收上下文后要做研究、判断或规划,再决定触发什么动作。
 按任务书九节,这些路径不能出现在无 AI 命令通道的执行依赖里。
+
+> **2026-07-29 复核更正**:`add_vocab` 与 `search_image` 原列在本表,经逐行核对属误判,
+> 已移入 1.2。`add_vocab` 走 `_bg_task("vocab")` → `scripts/vocab/dict_sources.py`
+> (ECDICT / unidic 确定性词典源);`search_image` 全函数无 AI 调用(`image_search.py`
+> 亦零 AI 引用),其描述明写"搜**真实**图片(非 AI 生成)"。误判的代价是把两个本可直连的
+> 底座挡在通道外,所以这里记下核对方式:**看实现,不看它挂在哪个分组**。
 
 ### 1.2 确定性(执行期不调 AI)—— 可作为直接命令的底层能力(29 个)
 
@@ -31,6 +38,7 @@
 | 词典/翻译 | `lookup_word` `translate` | ECDICT / unidic / Google 翻译(非生成式 LLM) |
 | 制卡/笔记落盘 | `make_anki` `make_note` | AnkiConnect / vault 写入 |
 | 其它 | `recall_creation` `recall_notes` `undo_last` `save_intent_tool` `list_saved_tasks` `start_dictation` `remove_mastery` | 实体注册表 / 撤销栈 / 意图库 |
+| 生词/配图(07-29 复核移入) | `add_vocab` `search_image` | `scripts/vocab/dict_sources.py`(ECDICT/unidic) / Wikimedia Commons + Google 图搜 |
 
 > 注:`translate` 默认走 Google 翻译链,**不是**生成式 LLM;若配置切到 AI 后端则退出本类,
 > 直接命令通道调用它时必须显式指定确定性后端。
@@ -46,6 +54,32 @@
 卡片类型不是写死的,由 `_server_deploy/reader_card_contract.py` 从前端渲染器解析:
 - 卡片 kind ← `static/pdf/rc-voicecall.js::_infoHtml`(weather/news/images/videos/fact + general 兜底)
 - 轮次 part ← `static/pdf/rc-turncard.js::renderPart`(text/card/cards/hlcard/tool/meta)
+
+## 3.5 第八节的迁移目标(2026-07-29 补)
+
+上面 1.1/1.2 回答的是"能不能调";第八节还要回答"**哪些委托必须消除**"。逐条读工具描述
+后,真正把**决策权**交给下游 AI 的只有两个:
+
+| 工具 | 描述原文 | 为什么必须迁移 |
+|---|---|---|
+| `do_task` | 「后台 agent(**自己规划、自己连着调工具**、干完回报一句话)」,一件事要 2 个以上工具就交给它 | 上游把规划整体外包,且**拿不到中间结果**;任务书目标链路要求规划留在上游 |
+| `make_paper` | 「你没有别的造纸工具……**它会交给后台 CLI 造**」 | 出题=认知(归上游),写纸=确定性(应走 `page.new`/`page.add`) |
+
+这两条迁移后,助手侧不再有"AI 调 AI"。
+
+`summarize_section` 是认知/确定性的天然分界样本:描述原文「取当前页所在整章正文**交给你**
+总结」—— 取整章正文是确定性的(但**直接命令缺这个**,`read.page` 只逐页),总结归上游。
+
+### 直接命令 vs 助手工具的差集(截至 07-29)
+
+`reader_direct_commands.py` 现有 16 个动作。与助手工具对比:
+
+- **助手有、直接命令没有**(召回类读操作,补齐成本最低、且是上游"先取数据再判断"的前提):
+  `recall_creation` `recall_notes` `add_vocab` `search_image`,以及待拆的 `section.read`。
+  (`read_check_report` 要等 `verify=false` 的强制形式确定后再说。)
+- **直接命令有、助手没有**:`read.pageimage` `toc.get` `dict.lookup` `highlight.create`
+  `highlight.list` `note.list` `page.new` `page.add` —— 说明通道在**写与定位**上已比助手
+  完整,缺的只是召回类读操作。
 
 ## 4. 缺口与兼容边界
 
