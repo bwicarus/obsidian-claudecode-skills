@@ -42,16 +42,18 @@
 
 ## 2. 当前版本和已经完成的主线
 
-当前扩展版本：**0.2.68**。
+当前扩展版本：**0.2.69**。
 
-当前 PWA/服务端共享 runtime 与 Windows 扩展测试渠道目标版本均为 **0.2.68**，产品名精确为
-**“BW网页伴读”**。0.2.68 新增显式 opt-in 的“电脑客户端”语音桥：一次性配对、受认证设备
-状态与命令、短期 WebRTC 信令、扩展 offscreen/Native Messaging，以及 Windows 仅目标
-Codex/ChatGPT 进程输出 + 明确麦克风的双音轨捕获。选择模型不会启动任何本机动作；真实启动
-仍必须由用户点击电话按钮，并在 Windows 明确选择麦克风、输入 `ENABLE` 后才可能成立。
-0.2.67 的发布安全门禁继续保留：Windows launcher v10 在专用 profile 更新后通过 loopback
+当前 PWA/服务端共享 runtime 与 Windows 扩展候选目标版本均为 **0.2.69**，产品名精确为
+**“BW网页伴读”**。0.2.69 把“电脑客户端”通话改为 Reader/PWA 与 Windows EXE 的认证 WSS
+直连：Pi 不再中继配对、状态、启动、心跳、信令或音频；Windows 只捕获明确选择的麦克风与
+Codex 目标进程树输出。配对码只在 Windows EXE 生成，Reader 未配对时显示 WSS 地址与 10 位码
+输入区；选择模型或刷新状态不会启动本机动作，只有用户点击电话按钮才会发送 START。
+0.2.67 的发布安全门禁继续保留：Windows launcher 在专用 profile 更新后通过 loopback
 DevTools 执行 `chrome.runtime.reload()`、核对实际 worker 构建版本，阻止新版内容脚本与旧
-后台混合运行。0.2.68 的实际发布、回滚与健康证据见当前协作状态。
+后台混合运行。0.2.69 候选把 launcher 提升为 v11；功能逻辑沿用已验收的 v10，版本提升用于
+承认跨机换行契约使公开 PowerShell/双文件 ZIP 字节发生变化，避免覆盖不可变的 v10 资产。
+0.2.68 的实际发布、回滚与健康证据见当前协作状态。
 上一版 0.2.60 已完成页面 placement 尺寸修复的人工验收；其不可变 Windows ZIP 含 74 个
 文件、1,198,019 bytes，SHA-256：
 `fb988e4aa0e25c1096568ad167416abab2b3658c880373e179862a0f7db457a7`。
@@ -473,6 +475,11 @@ Windows 真机必须验证：
 
 ## 11. 部署门禁
 
+> ⚠ **怎么部署看 [`deployment-workflow.md`](deployment-workflow.md)（唯一权威）。**
+> 生产文件清单的唯一事实源是 `scripts/reader_deploy_manifest.py`（当前 150 项），
+> 唯一写入口是 `scripts/deploy_reader.sh`。下面这份文件列表是**给人看的重点提示**，
+> 不能代替清单；漏没漏以 `python3 scripts/reader_deploy_manifest.py` 为准。
+
 部署必须包含而不只包含旧 PDF 文件：
 
 - `book-host.js`
@@ -488,9 +495,12 @@ Windows 真机必须验证：
 - `vbook_route_policy.py`
 - `reader_sw_auth.py`
 
-同时更新 cache-bust 资产清单和 Service Worker 的四入口私有页面清单。上线前先在生产路径制作时间戳
-回滚副本，Python compile、JS syntax、合同测试通过后再 restart；上线后检查 `/login`、四书入口、
-旧网页端点 410/跳转和扩展 handoff。
+同时更新 cache-bust 资产清单和 Service Worker 的四入口私有页面清单。
+
+**时间戳回滚副本、Python compile、JS syntax、restart 顺序、健康检查全部由
+`deploy_reader.sh` 内建（含失败自动 `rollback_deploy`），不要手工重做一遍。**
+脚本不覆盖、仍需人做的只有上线后的人工验收：`/login`、四书入口、旧网页端点 410/跳转、
+扩展 handoff。
 
 ## 12. 禁止的“简化”
 

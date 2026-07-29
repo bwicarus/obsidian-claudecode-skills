@@ -3202,3 +3202,123 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **给下一位**:Windows 侧现已可编辑 + 跑那 44 个模块;改到 sidecar/部署/KG 相关代码时,
   仍必须 ssh 回 Pi 验证。
 
+## Codex：Reader ↔ Windows 电脑语音直连源码候选完成（2026-07-29 06:05 JST，未安装/未部署）
+
+- **结论与拓扑**：电脑语音已改为
+  `Reader/PWA ↔ wss://bwicarus-2.taile44d0c.ts.net/reader-computer-voice/v1 ↔
+  Tailscale Serve ↔ 127.0.0.1:43128 ↔ Windows C#`。Pi 仍只提供 Reader/书籍，不再参与
+  新链路的配对、状态、启动、心跳、信令或音频。Reader 不再显示“生成一次性配对码”按钮；
+  配对码只由 Windows EXE 在用户明确操作后生成。
+- **旧故障根因**：外部旧 GUI 的 busy 路径引用了不存在的 `self.pair_button`，noconsole EXE
+  把异常藏掉；旧扩展 offscreen/native host 实际不在线；Reader 的异步启动失败会遗留 active
+  状态，延迟 `audio.play()` 也可能被浏览器拒绝。这解释了“打开 EXE 仍显示
+  bridge-offline”“点通话自行停止且无声”，不是 Pi 音频中继本身能修好的问题。
+- **Reader 与协议**：长期私钥为 IndexedDB 中不可导出的 ECDSA P-256；认证规范字节串固定为
+  `reader-computer-voice-auth/1\nchallengeId\nnonce\norigin`。连接后 10 秒未认证、
+  认证后 30 秒未 START 都释放唯一槽；active 后 5 秒 heartbeat、15 秒超时。PCM 固定
+  48 kHz mono s16le、20 ms、1,956-byte frame，Reader 只播放 app-output。START 期间再次
+  点击会立即 close；Windows 用唯一预取 ReceiveAsync 观察 close 并取消应用等待、capture 与
+  快捷键链，非 close 消息只缓存一条并保持顺序。
+- **Windows 服务与自动启动边界**：strict config 固定 loopback、Origin
+  `https://bwicarus.taile44d0c.ts.net`、Tailscale identity `bwicarus@gmail.com`、
+  `appKind=codex-desktop` 与 AUMID `OpenAI.Codex_2p2nqsd0c76g0!App`。只有认证 START 能打开
+  Codex、启动 typist、显式麦克风与 process-only output、发送一次快捷键。登录 bootstrap
+  空闲常驻但零采音；崩溃封顶退避重启。浏览器无法从零唤醒完全不存在的 listener，因此必须先
+  一次显式安装/启用 bootstrap。
+- **桌面控制安全收口**：任务仅在当前 SID、marker、唯一 trigger/action、exact EXE +
+  `--bootstrap` 全部匹配时可 `/Run`；Serve 只接受固定 443 HTTPS host/path/backend，
+  Funnel、TCP 转发、额外 handler 或混合配置全部 fail closed。进程终止在同一个
+  QUERY+TERMINATE handle 上复核路径；停用与 bootstrap 启动竞态由 PID record 后置 config
+  复核和 GUI 有界重查共同封闭。
+- **本地候选**：
+  `extensions/bw-reader-webext/windows/candidates/0.1.0/
+  bw-computer-voice-direct-0.1.0-windows-x64.zip`，53,772,804 bytes，SHA-256
+  `f05f50c663d0f0e459ef6c2de68006fa13d2cefbe9c4a0e672d3034d47f024ae`。ZIP 只含规范
+  manifest、self-contained C# EXE、PyInstaller onefile/noconsole 桌面 EXE；包内双自检通过。
+  固定 `PYTHONHASHSEED=0` / `SOURCE_DATE_EPOCH=315532800` 后，第二次独立构建的两个 payload
+  哈希与 0.1.0 逐字一致；复现探针已删，只保留 0.1.0。候选 manifest 的 30 项源码哈希与当前
+  工作树一致。
+- **验证**：Reader 合同 **578/578**；C# Release 0 warning / 0 error、无音频 self-test
+  **107/107**、`audioActivated=false`、format clean；桌面控制 **63/63**；打包安全
+  **10/10**；旧电脑语音 Python **48/48**；release pipeline **21/21**（Windows 符号链接权限
+  1 项 skip）；网络审计 `0 new debt`；`git diff --check` 通过。隔离浏览器已验证新设置文字、
+  旧按钮缺失、无 audio 元素与零 console error。`handoff_check.py` 的 manifest/vendor/JS/
+  browser/Reader contracts/网络/发布管线均通过，最终 `errors=2` 只来自 Windows 缺少项目明确
+  保留为 POSIX-only 的 `fcntl` 三个导入链，未把它伪报为 READY。
+- **当前机器后置事实**：`tailscale serve status --json` 仍为 `{}`；任务
+  `BW Computer Voice Direct Bootstrap` 不存在；43128 无监听。外部旧安装目录仍有两个旧 GUI
+  进程（PID 14396、23924），未结束或改动；它们不是新服务。
+- **没有执行/下一步**：没有复制或覆盖外部安装、没有写 config/任务/Serve/注册表，没有启动
+  C# direct server、Codex、typist、麦克风、进程音频或快捷键；没有提交、推送、部署，也没有
+  改 Pi。真实 iPad/PWA 音频 E2E 仍未验收。下一步需用户醒后显式批准：备份并替换旧外部候选 →
+  选择麦克风/启用 config → 安装 bootstrap → 应用 path-level Serve → 配对与电话人工验收；
+  视觉与后台证据均通过后，才进入提交、推送、Windows 无副作用远程预检和正式部署。
+- **保留 P2**：Task Scheduler CLI 的 query→按名 mutation、Tailscale Serve 的 query→CLI
+  mutation 都没有 ETag/内核对象原子身份；当前以精确前后检查和混合状态 fail closed 缓解，
+  同权限进程刻意并发替换仍需人工协调。
+
+## Codex：Windows 0.1.0 直连桥接已替换安装（2026-07-29 09:40 JST，未启用/未部署）
+
+- **授权与安装范围**：用户明确要求“安装替换”。本轮只替换固定安装根
+  `C:\Users\bwica\bw-computer-voice-bridge` 下的
+  `desktop-launcher\BW-Computer-Voice-Bridge.exe` 与
+  `native-host\bw-computer-voice-audio.exe`；没有改快捷方式、旧配置、helper、注册表、计划
+  任务或 Tailscale Serve。安装前精确目标进程已为 0，因此实际关闭进程数为 0。
+- **安装前门禁**：0.1.0 ZIP 再次 `--verify` 与 `--self-test`，两者 exit 0；ZIP 为
+  53,772,804 bytes，SHA-256
+  `f05f50c663d0f0e459ef6c2de68006fa13d2cefbe9c4a0e672d3034d47f024ae`。安装根、目标目录、
+  目标 EXE 与候选 payload 均为普通非 reparse 对象；43128 无监听、bootstrap 任务不存在、
+  `tailscale serve status --json` 为 `{}`。桌面唯一相关快捷方式已经精确指向固定目标 EXE，
+  无需重写。
+- **备份与原子替换**：旧双 EXE 已备份到
+  `C:\Users\bwica\bw-computer-voice-bridge-backups\install-20260729T003728326Z`；其中旧桌面/
+  音频哈希分别为
+  `4b15e58f5a0eeb0be250275de1f918d0954d6fce8779f48756cc698a30700436` /
+  `8671ac8815e19a32e25f8bc515a0ccce6dff313c50762d6917db0596c84db4dc`，另保存候选
+  `candidate-manifest.json`（SHA-256
+  `7c766ffd409c6705a19062fe2a489aa3ff61647a150396c9ef8a707434864dad`）。首次
+  `File.Replace` 使用空交换备份参数被 Windows 在写入前拒绝；复核旧哈希不变、零临时残留后，
+  改用同目录明确交换备份路径完成原子替换，并在新哈希与独立备份均验证后只删除安装专用交换
+  文件。
+- **安装后证据**：已安装桌面 EXE SHA-256 为
+  `c20ee9752cca1f22031bcd9e1c2d06d660379880cdb886a1f7c60b42f059292a`，音频 EXE 为
+  `91fa7977d0481981eb64006bd0db19c5bb9585ed6be8714be6426040b865383a`，逐字匹配候选
+  manifest。直接从固定安装路径运行两个 `--self-test` 均 exit 0；音频报告
+  `ok=true`、`audioActivated=false`。既有 typist helper 哈希仍为
+  `52ac819eae2b643bc828fd2d9785928554fc6b00115ed785a0b0497aadfc25d3`，与当前项目源一致。
+- **最终安全状态/下一步**：direct config 与 runtime 目录仍不存在；目标进程 0、43128
+  listener 0、bootstrap 任务不存在、Serve 仍为 `{}`、安装临时文件 0。也就是说候选已经安装，
+  但尚未选择麦克风、启用 config、安装 bootstrap、应用 Serve、配对或通话；没有启动 Codex、
+  typist、麦克风、应用音频或快捷键。Reader/PWA 新直连源码仍未提交、推送或部署，当前生产页
+  不会因仅替换 Windows EXE 而切换到新协议。本轮未改 Pi、未提交、未推送、未部署。
+
+## Codex：0.2.69 直连发布候选收口（2026-07-29 10:10 JST，待人工验收/未部署）
+
+- **发布范围**：用户确认生产 Reader/PWA 不部署就无法使用新直连，因此进入提交、推送和受控
+  远程预检准备；正式部署仍受“专用浏览器人工视觉/交互验收 + 后台证据”双门禁约束。Pi 只作为
+  生产部署目标，未直接编辑其工作树或生产文件。
+- **不可变候选**：扩展/共享 PWA runtime 版本为 `0.2.69`；Windows 测试包
+  `bw-reader-webext-0.2.69-windows-test.zip` SHA-256 为
+  `04a61ce051ec5b24e5c68bac07feb6b5a13a60610691a6ee5381f9e7046f8caf`。候选 channel
+  精确指向该包。
+- **launcher 版本围栏**：生产基线仍为 `0.2.68 / launcher v10`。跨机 `.gitattributes`
+  契约使 Windows 原生 `.ps1/.cmd` 候选从生产 v10 的 LF 字节改为 CRLF；内容归一化后逐字相同，
+  但不可变公开资产的原始字节已变化，因此未覆盖 v10，而是把 launcher 提升到 **v11**。
+  `bw-reader-extension-test-v11.ps1` SHA-256 为
+  `1c6a8b7bde4617fab271082e5cf23e183007a33cf6b2e59937050976f1527c91`；v11 双文件 ZIP
+  SHA-256 为 `638b0f68fb94601c2460224042f3bdbeadb87f930c322a8a10c338865282f6a7`。
+- **Windows 发布器兼容**：`publish_test_channel.py` 的临时发布进程锁在 Windows 精确使用
+  `msvcrt` byte-0 kernel lock；只对 `EACCES/EAGAIN/EDEADLK` 每 50 ms 重试，其它 I/O
+  错误 fail closed，非 Windows 保留原 `fcntl.flock`。真实双进程竞争、持锁进程被终止后的
+  内核释放、空锁文件保持 0 bytes 均已覆盖；发布流水线 **24/24**，另有 1 项 Windows
+  符号链接权限预期 skip。
+- **候选门禁**：生产四件套基线已从官方 HTTPS 临时下载并逐项校验。候选版本单调递增、
+  主包/channel/v11 脚本/双文件 ZIP 的白名单和 SHA-256 均通过；manifest、vendor、JS 语法、
+  59 个 runtime 契约、网络审计 `0 new debt`、IndexedDB 87 assertions 与 text-range
+  6 assertions 均通过。Windows 完整 `handoff_check.py` 最终仍为 `errors=2`，仅来自项目已
+  明确保留为 Pi-only 的三条 `fcntl` 导入链；不得在 Windows 改写这些生产并发锁，须由推送后
+  的 Pi 无副作用预检清除。
+- **尚未完成**：固定 `BW Codex Chrome Test` 独立环境仍是 0.2.68，尚未离线替换为 0.2.69
+  并执行用户人工清单；尚未提交、推送、运行 `deploy_from_windows.ps1 -PreflightOnly` 或正式
+  部署。真实 WSS 配对、自动打开 Codex、麦克风、应用输出听感和停止行为只能在部署并由用户
+  明确启用 bootstrap/Serve 后做 iPad 真机 E2E。
