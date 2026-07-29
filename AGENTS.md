@@ -39,16 +39,19 @@ context 中的索引回看原始长文档。聊天记录、旧版本注释和历
 开始前：
 
 ```bash
-python scripts/agent_collaboration.py inbox --agent <codex|claude>   # 📬 对方可能已认领你要动的文件
 git status --short
 tail -n 160 references/reader-collaboration-status.md
 python3 extensions/bw-reader-webext/handoff_check.py
 ```
 
-📬 **协作邮箱**：`scripts/agent_collaboration.py`，**开工前、完工后、需要对方配合时各查一次**。
-回复用四段式：**改了什么 / 验证了什么 / 没做什么 / 下一步谁做**。发出的消息要说清想要的结果、
-涉及范围、是否只读。规则见 [`references/agent-collaboration.md`](references/agent-collaboration.md)。
-⚠ v1 不自动注入对方正在进行的会话，对方要自己查——急事仍需用户转达。
+📬 **Claude / Codex 协作统一走 BW AgentBridge Lite（BWAB）**。正式入口是桌面
+“多AI协作终端-正式版”，它会给受管会话附加协作能力，不覆盖本文件或其他项目指令。
+Codex 用 `$env:BWAB_CLI` 的 `send / inbox / wait / notify`；Claude 用 Channel 提供的
+`reply / get_messages / notify_assistant / bridge_status`。**开工前、完工后、需要对方配合时各查一次**。
+回复仍用四段式：**改了什么 / 验证了什么 / 没做什么 / 下一步谁做**；消息必须写清目标、范围和
+是否只读。若当前会话没有 `BWAB_CLI` 或上述 Channel 工具，说明它不是由 BWAB 启动：
+不要回退旧 SQLite 邮箱，改由正式入口重新打开。完整规则见
+[`references/agent-collaboration.md`](references/agent-collaboration.md)。
 
 共享源码变化后：
 

@@ -25,10 +25,13 @@
   `scripts\deploy_from_windows.ps1 -PreflightOnly`,脚本自带摘要校验/原子安装/失败回滚/健康检查,
   **不要手工重做**);**清单外**(insights/fitness/qa_server/`control.html` 等)才手工 `cp` + restart。
   各处旧文档里的 `scp root@bwicarus.space` 与手工回滚清单**已废弃**。
-- 📬 **与 Codex 协作走本机邮箱,不靠人工转述**:`python scripts/agent_collaboration.py inbox --agent claude`。
-  **开工前、完工后、需要对方配合时各查一次**;回复用四段式(改了什么/验证了什么/没做什么/下一步谁做)。
-  用法见 `.claude/skills/协作邮箱.md`,规则见 `references/agent-collaboration.md`。
-  ⚠ v1 不会自动注入对方正在进行的会话,对方要自己查——急事仍需用户转达。
+- 📬 **与 Codex 协作统一走 BW AgentBridge Lite（BWAB）,不再使用旧 SQLite 邮箱**。
+  从桌面“多AI协作终端-正式版”进入后,使用 Channel 的 `get_messages` / `reply` /
+  `notify_assistant` / `bridge_status`;开工前、完工后、需要对方配合时各查一次。
+  回复用四段式(改了什么/验证了什么/没做什么/下一步谁做),并保留收到消息的 `messageId`
+  作为 `reply_to`。用法见 `.claude/skills/协作邮箱.md`,规则见
+  `references/agent-collaboration.md`。如果这些工具不存在,说明当前会话未接入 BWAB;
+  不要回退 `scripts/agent_collaboration.py`,改由正式入口重新打开。
 - 🌐 **Windows 浏览器测试**:只用项目专用 `BW Codex Chrome Test` +
   `%LOCALAPPDATA%\BWReaderExtensionTest\browser-profile-v2`,或 Claude Code 内置 Browser pane
   (独立 profile、无扩展无 cookie,**做不了扩展链测试**)。**不动日常 Chrome、常用账号和已装扩展**;
