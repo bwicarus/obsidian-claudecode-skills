@@ -414,8 +414,13 @@ def build_handlers(pdf, *, toc_get=None, search_book=None, search_all=None,
             status["index"] = f"error: {type(ex).__name__}"
             _ = n0  # noqa: F841 - 单源失败不影响其它源,继续
 
-        # ② 已学 KG 节点:只回 mastered/unlockable,**没学的不返回** —— 否则上游会
-        #    以为用户学过。
+        # ② 已学 KG 节点:**只回有真实学习证据的**。
+        #    ⚠ 不能用 state in (mastered, unlockable) 判定 —— `unlockable` 混了两种来源
+        #    (link_and_mastery.py:34「前置链通 + 自己已开始学」;skill-tree-system.md:338
+        #    「level ≥ 1 **或** 前置全 mastered」)。纯因前置通而 unlockable 的节点,
+        #    用户一次都没学过。误当已学会让上游拿它去"结合你学过的知识"讲,凭空造出
+        #    用户并不具备的基础。判据改为:mastered,或 unlockable 且 mastery_level/
+        #    mastery 有正值。
         try:
             kg = pdf.CLAUDE_DIR / "state" / "kg"
             hit = 0
@@ -431,12 +436,19 @@ def build_handlers(pdf, *, toc_get=None, search_book=None, search_all=None,
                     for node in (data.get("nodes") or []) if isinstance(data, dict) else []:
                         if len(results) >= limit:
                             break
-                        if str(node.get("state") or "") not in ("mastered", "unlockable"):
+                        st = str(node.get("state") or "")
+                        if st not in ("mastered", "unlockable"):
                             continue
+                        lvl, mst = node.get("mastery_level"), node.get("mastery")
+                        started = ((isinstance(lvl, (int, float)) and not isinstance(lvl, bool) and lvl >= 1)
+                                   or (isinstance(mst, (int, float)) and not isinstance(mst, bool) and mst > 0))
+                        if st == "unlockable" and not started:
+                            continue        # 只是"可以开始学",不是学过
                         if q in str(node.get("title") or "") or q in str(node.get("name") or ""):
                             results.append({"source": "kg", "book": f.stem,
                                             "title": str(node.get("title") or node.get("name") or "")[:200],
-                                            "state": node.get("state")})
+                                            "state": st,
+                                            "evidence": ("mastered" if st == "mastered" else "started")})
                             hit += 1
             status["kg"] = "ok"
         except Exception as ex:
