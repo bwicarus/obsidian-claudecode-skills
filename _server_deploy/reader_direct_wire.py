@@ -20,17 +20,21 @@ import reader_direct_commands as DC
 
 # 审计 §1.1 里会再次调用 AI 的能力名。接线时用它做机器校验,防止有人日后往白名单里加。
 _AI_TOOL_NAMES = {
-    "web_search", "search_video", "make_paper", "summarize_section",
+    "web_search", "search_image", "search_video", "make_paper", "summarize_section",
     "do_task", "run_saved_task", "see_page", "see_figure", "see_ink", "correct_dict",
     "material_graph", "read_material", "relate_material", "learning_focus",
     "situation_feedback", "make_diagnostic", "mastery_proposal", "apply_mastery",
-    "error_patterns", "read_check_report", "auto_highlight",
+    "error_patterns", "read_check_report", "add_vocab", "auto_highlight",
 }
-# 2026-07-29 复核移出:`add_vocab` 走 scripts/vocab/dict_sources.py(ECDICT/unidic
-# 确定性词典)、`search_image` 全函数无 AI 调用 —— 详见
-# references/reader-agent-capability-audit.md §1.1 的更正说明。
-# 注:`search_image` 移出黑名单不等于要接线 —— 上游助手自带联网能力,配图这类它自己
-# 查更直接;直接命令只补**上游拿不到的本地数据**。
+# ⚠ 2026-07-29:此表拦的是**旧助手工具名**,不是新动作名 —— `_assert_no_ai` 比的是
+# `action.split(".",1)[-1]`,所以 `vocab.add` 的 tail 是 `add`,本就不会被 `add_vocab`
+# 拦。曾因误以为会被拦而把 add_vocab / search_image 移出本表,那既不必要、判断也错:
+#   · search_image:常规搜索落空时会调 Gemini 规范化检索词(`_gemini_text`),
+#     确实会调 AI。(初次核对漏搜 gemini 关键词才判成零 AI。)
+#   · add_vocab:旧助手链会经在线例句翻译落到 AI 后端。
+# **安全的只是新拆出的 `vocab.add` 底座**(build_vocab_note + online=False),不是旧工具。
+# 结论:旧工具名一律留在表内;要用某项能力就像 vocab.add 这样**另拆一条确定性路径**,
+# 而不是给旧工具开口子。
 
 
 class WiringError(RuntimeError):
@@ -378,6 +382,95 @@ def build_handlers(pdf, *, toc_get=None, search_book=None, search_all=None,
         limit = max(1, min(int(params.get("limit") or 1), 10))
         return {"creations": hits[:limit], "total": len(lst)}
     H["recall.creation"] = recall_creation
+
+    # ── 召回已学内容(合同由 Codex 2026-07-29 12:20 定)──────────────────────
+    # 硬约束:query 必填(≤80)、limit ≤8、**不隐式继承 selection/focus**(上游必须自己
+    # 说要查什么,否则召回结果与它的意图无从对齐);只查知识索引 / 已学 KG 节点 / Anki,
+    # 不扫 raw vault、不联网、不调 AI。空命中是**成功**,单源异常回 partial。
+    def recall_notes(anchor, params, prev):
+        q = str(params.get("query") or "").strip()
+        if not q:
+            raise ValueError("params.query 必填(不隐式继承 selection/focus)")
+        if len(q) > 80:
+            raise ValueError(f"params.query 最多 80 字,当前 {len(q)}")
+        limit = max(1, min(int(params.get("limit") or 8), 8))
+        results: list = []
+        status: dict = {}
+
+        # ① 知识索引:index/*.md 的条目标题 + 摘要,纯文件读。
+        try:
+            n0 = len(results)
+            for f in sorted((pdf.CLAUDE_DIR / "index").glob("*.md")):
+                if len(results) >= limit:
+                    break
+                for ln in f.read_text("utf-8", errors="replace").splitlines():
+                    if q in ln and ln.strip().startswith(("-", "*", "|")):
+                        results.append({"source": "index", "file": f.name,
+                                        "text": ln.strip()[:300]})
+                        if len(results) >= limit:
+                            break
+            status["index"] = "ok"
+        except Exception as ex:
+            status["index"] = f"error: {type(ex).__name__}"
+            _ = n0  # noqa: F841 - 单源失败不影响其它源,继续
+
+        # ② 已学 KG 节点:只回 mastered/unlockable,**没学的不返回** —— 否则上游会
+        #    以为用户学过。
+        try:
+            kg = pdf.CLAUDE_DIR / "state" / "kg"
+            hit = 0
+            if kg.exists() and len(results) < limit:
+                import json as _j
+                for f in sorted(kg.glob("*.json")):
+                    if len(results) >= limit:
+                        break
+                    try:
+                        data = _j.loads(f.read_text("utf-8"))
+                    except (OSError, ValueError):
+                        continue
+                    for node in (data.get("nodes") or []) if isinstance(data, dict) else []:
+                        if len(results) >= limit:
+                            break
+                        if str(node.get("state") or "") not in ("mastered", "unlockable"):
+                            continue
+                        if q in str(node.get("title") or "") or q in str(node.get("name") or ""):
+                            results.append({"source": "kg", "book": f.stem,
+                                            "title": str(node.get("title") or node.get("name") or "")[:200],
+                                            "state": node.get("state")})
+                            hit += 1
+            status["kg"] = "ok"
+        except Exception as ex:
+            status["kg"] = f"error: {type(ex).__name__}"
+
+        # ③ Anki:本地 record,不连 AnkiConnect(直接命令要可预期,不吊在外部进程上)。
+        try:
+            rec = pdf.CLAUDE_DIR / "anki" / "records"
+            if rec.exists() and len(results) < limit:
+                import json as _j
+                for f in sorted(rec.glob("*.json")):
+                    if len(results) >= limit:
+                        break
+                    try:
+                        data = _j.loads(f.read_text("utf-8"))
+                    except (OSError, ValueError):
+                        continue
+                    for c in (data.get("cards") or []) if isinstance(data, dict) else []:
+                        if len(results) >= limit:
+                            break
+                        blob = f"{c.get('front', '')} {c.get('back', '')}"
+                        if q in blob:
+                            results.append({"source": "anki", "note": f.stem,
+                                            "front": str(c.get("front") or "")[:200]})
+            status["anki"] = "ok"
+        except Exception as ex:
+            status["anki"] = f"error: {type(ex).__name__}"
+
+        complete = all(v == "ok" for v in status.values())
+        return {"query": q, "results": results, "count": len(results),
+                "total": len(results), "truncated": len(results) >= limit,
+                "complete": complete,
+                "sourceStatus": ("ok" if complete else "partial") if status else "partial"}
+    H["recall.notes"] = recall_notes
 
     _assert_no_ai(H.keys())
     missing = sorted(set(DC.ACTIONS) - set(H))

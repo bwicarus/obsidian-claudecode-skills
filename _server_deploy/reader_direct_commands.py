@@ -45,6 +45,7 @@ ACTIONS: dict[str, dict] = {
     "section.read":     {"target": ("file", "page"), "desc": "取该页所在整章正文(summarize_section 的确定性那一半;总结归上游)"},
     "vocab.add":        {"target": (),               "desc": "加生词(ECDICT/unidic 确定性词典 + 写 vault)"},
     "recall.creation":  {"target": (),               "desc": "召回本地创造物注册表(纸/报告/搜索/翻译等的句柄与内容;引用型只回 ref 不解引用)"},
+    "recall.notes":     {"target": (),               "desc": "召回已学内容(知识索引/已学 KG 节点/Anki);query 必填,不扫 raw vault、不联网、不调 AI"},
 }
 MODES = ("independent", "dependent")
 _MAX_STEPS = 20

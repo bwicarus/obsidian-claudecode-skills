@@ -7,24 +7,36 @@
 
 `_server_deploy/assistant.py` 内的沙盒工具共 **52 个**(`_t_*`)。按"执行时是否会再次调用 AI"分两类:
 
-### 1.1 会再次调用 AI —— 新通道**不得依赖**(21 个)
+### 1.1 会再次调用 AI —— 新通道**不得依赖**(23 个)
 
 | 分组 | 工具 |
 |---|---|
-| 研究/生成 | `web_search` `search_video` `make_paper` `summarize_section` `do_task` `run_saved_task` |
+| 研究/生成 | `web_search` `search_image` `search_video` `make_paper` `summarize_section` `do_task` `run_saved_task` |
 | 视觉(图像送模型) | `see_page` `see_figure` `see_ink` `correct_dict` |
 | 学习闭环判断 | `material_graph` `read_material` `relate_material` `learning_focus` `situation_feedback` `make_diagnostic` `mastery_proposal` `apply_mastery` `error_patterns` |
 | 条件性 | `read_check_report`(默认同步返回报告内容不调 AI;**仅 `verify:true`** 起查书子 agent → 保守归此类,直接命令若要用必须强制 `verify=false`) |
-| 其它 | `auto_highlight` |
+| 其它 | `add_vocab` `auto_highlight` |
 
 这些是**认知/规划**能力:它们接收上下文后要做研究、判断或规划,再决定触发什么动作。
 按任务书九节,这些路径不能出现在无 AI 命令通道的执行依赖里。
 
-> **2026-07-29 复核更正**:`add_vocab` 与 `search_image` 原列在本表,经逐行核对属误判,
-> 已移入 1.2。`add_vocab` 走 `_bg_task("vocab")` → `scripts/vocab/dict_sources.py`
-> (ECDICT / unidic 确定性词典源);`search_image` 全函数无 AI 调用(`image_search.py`
-> 亦零 AI 引用),其描述明写"搜**真实**图片(非 AI 生成)"。误判的代价是把两个本可直连的
-> 底座挡在通道外,所以这里记下核对方式:**看实现,不看它挂在哪个分组**。
+> **2026-07-29 一次误判与更正(留档,因为教训比结论重要)**
+>
+> 我曾把 `add_vocab` 与 `search_image` 从本表移出,理由是"逐行核对无 AI 调用"。**这是错的**,
+> 已恢复。真实情况:
+> · `search_image` 在常规搜索**落空时**会调 `_gemini_text` 把词规范化成 Commons 检索名;
+> · `add_vocab` 的旧助手链会经在线例句翻译落到 AI 后端。
+>
+> 出错的原因很具体:核对时 grep 的模式是 `ask|_ai|claude|codex|prompt`,**漏了 `gemini`**,
+> 于是"没搜到"被当成了"没有"。**排除 AI 调用不能靠一组关键词** —— 后端可能是任何供应商,
+> 兜底分支也可能藏在正常路径之后。可靠做法是读完整条函数体,特别是 fallback 分支。
+>
+> 另一半教训:那次移除**本身就是多余的**。`_assert_no_ai` 比的是
+> `action.split(".",1)[-1]`,新动作 `vocab.add` 的 tail 是 `add`,从来不会被 `add_vocab`
+> 拦住。改黑名单前没验证过它到底拦不拦。
+>
+> **正确姿势**:旧工具名一律留在本表;要用某项能力,就像 `vocab.add` 那样**另拆一条
+> 确定性路径**(`build_vocab_note` + `online=False`),而不是给旧工具开口子。
 
 ### 1.2 确定性(执行期不调 AI)—— 可作为直接命令的底层能力(29 个)
 
