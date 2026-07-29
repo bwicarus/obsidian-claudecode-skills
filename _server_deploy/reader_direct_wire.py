@@ -314,6 +314,34 @@ def build_handlers(pdf, *, toc_get=None, search_book=None, search_all=None,
     H["section.read"] = section_read
 
     # ── 生词(确定性词典 + 写 vault;不调 AI)────────────────────────────────
+    # ⚠ 不要图省事整包用 scripts/vocab/dict_sources —— 它里面的 translate_sentences()
+    #    是**调 AI** 的(默认 model="sonnet")。这里只走 build_vocab_note 的两个写入口,
+    #    已逐行确认它们链上不碰 translate_sentences / ai_client。
+    if vocab_add is None:
+        try:
+            import sys as _sys
+            _vp = str(pdf.CLAUDE_DIR / "scripts" / "vocab")
+            if _vp not in _sys.path:
+                _sys.path.insert(0, _vp)
+            import build_vocab_note as _BVN
+
+            def vocab_add(word):                                # noqa: F811
+                w = str(word or "").strip()[:60]
+                if not w:
+                    raise ValueError("params.word 不能为空")
+                # 日文(含假名/汉字且非纯 ASCII)走日语笔记,其余走英语笔记。
+                is_ja = (not w.isascii()) and any(
+                    ("぀" <= c <= "ヿ") or ("一" <= c <= "鿿") for c in w)
+                if is_ja:
+                    p = _BVN.update_jp_word_note(w)
+                    return {"word": w, "lang": "ja", "note": str(p[0] if isinstance(p, tuple) else p)}
+                # online=False:直接命令要可预期、不吊在外部词典站上;ECDICT 是离线的。
+                path, fm = _BVN.update_word_note(w, online=False, download_audio=False)
+                return {"word": w, "lang": "en", "note": str(path),
+                        "lemma": (fm or {}).get("lemma") or w}
+        except Exception:
+            vocab_add = None            # 底座缺失就不接线,不给假成功
+
     if callable(vocab_add):
         H["vocab.add"] = lambda a, p, prev: {
             "vocab": vocab_add(str(p.get("word") or "").strip()[:60])}
