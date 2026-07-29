@@ -388,73 +388,112 @@ def build_handlers(pdf, *, toc_get=None, search_book=None, search_all=None,
     # 说要查什么,否则召回结果与它的意图无从对齐);只查知识索引 / 已学 KG 节点 / Anki,
     # 不扫 raw vault、不联网、不调 AI。空命中是**成功**,单源异常回 partial。
     def recall_notes(anchor, params, prev):
+        import re as _re
+        import json as _j
         q = str(params.get("query") or "").strip()
         if not q:
             raise ValueError("params.query 必填(不隐式继承 selection/focus)")
         if len(q) > 80:
             raise ValueError(f"params.query 最多 80 字,当前 {len(q)}")
         limit = max(1, min(int(params.get("limit") or 8), 8))
-        # 先全量收集再排序截断:total 必须是**命中总数**而非返回数,否则上游无从判断
-        # "是不是还有更多"。截断只发生在最后一步。
+
+        # 查询词处理:与旧 _t_recall_notes 同口径。整串子串匹配不行 —— 编排器常把
+        # 「向量空间的定义」传成「向量空间定义」,而索引里写的是「向量空间」,
+        # 整串必然 0 命中。① 实词(再按虚词拆一层)权重 2;② CJK 连续段 2-gram 权重 1。
+        words: list = []
+        grams: set = set()
+        for t in _re.split(r"[\s,，、；;。.()（）/\\]+", q):
+            if len(t) < 2:
+                continue
+            for part in [t] + _re.split(r"[的是了与和及在之地得着把被让对从向到]", t):
+                if len(part) >= 2 and part not in words:
+                    words.append(part)
+            for run in _re.findall(r"[一-鿿぀-ヿ]{2,}", t):
+                for i in range(len(run) - 1):
+                    grams.add(run[i:i + 2])
+        words = words[:12]
+
+        def _score(blob) -> int:
+            b = str(blob or "")
+            bl = b.lower()
+            s = sum(2 for w in words if w.lower() in bl)
+            s += sum(1 for g in grams if g in b)
+            # 阈值:单个 bigram 命中是噪声,除非有 >=3 字实词直接命中。
+            return s if (s >= 2 or any(len(w) >= 3 and w.lower() in bl for w in words)) else 0
+
         found: list = []
+        # per-source **结构化**状态:压成一个字符串会让上游分不清"没这个源"和"查失败"。
         status: dict = {}
 
-        def _src_ready(path, label):
-            """源目录可用性。**不存在=正常无数据(ok)**;存在但不是目录=坏(partial)。
+        def _mark(label, state, **extra):
+            status[label] = dict({"state": state}, **extra)
 
-            不能只靠 try/except:Path.glob() 对非目录不抛异常、直接返回空,
-            于是"源坏了"会被静默当成"没命中",sourceStatus 仍报 ok —— 上游据此
-            以为用户没学过,而真相是根本没查成。
-            """
+        def _dir_ready(path, label):
             if not path.exists():
-                status[label] = "ok"
+                _mark(label, "absent")      # 没有该源 != 查成功
                 return False
             if not path.is_dir():
-                status[label] = "error: not_a_directory"
+                _mark(label, "error", reason="not_a_directory")
                 return False
             return True
 
         def _kg_files(root):
-            """只取正式图,排除备份/中间产物。
-
-            生产上 knowledge_graph/ 里确实有 *.bak.json / *.pre.json / *.scan.json,
-            裸 glob("*.json") 会把陈旧快照当现状召回,并与正式图重复。
-            """
+            """只取正式图。生产上有 *.bak/*.pre/*.scan.json,裸 glob 会把陈旧快照当现状。"""
             skip = (".bak", ".pre", ".scan", ".tmp", ".old")
             for f in sorted(root.glob("*.json")):
                 if any(f.stem.endswith(s) for s in skip) or f.stem.startswith("_"):
                     continue
                 yield f
 
-        # ① 知识索引:index/*.md 的条目行(纯文件读)。
-        try:
-            _d = pdf.CLAUDE_DIR / "index"
-            for f in (sorted(_d.glob("*.md")) if _src_ready(_d, "index") else []):
-                for ln in f.read_text("utf-8", errors="replace").splitlines():
-                    if q in ln and ln.strip().startswith(("-", "*", "|")):
-                        found.append({"source": "index", "rank": 2, "file": f.name,
-                                      "text": ln.strip()[:300]})
-            status.setdefault("index", "ok")
-        except Exception as ex:
-            status["index"] = f"error: {type(ex).__name__}"
+        # -- (1) 知识索引 --------------------------------------------------
+        # 条目格式见 references/index-format.md:`- [[名]] `kw1, kw2` — 摘要`。
+        # 规范明写"不要读写 knowledge-index.md 的条目内容"——它只有科目汇总行,
+        # 当知识条目返回会污染结果。分支拆分文件在 index/{科目}/{分支}.md,故用 rglob。
+        idx = pdf.CLAUDE_DIR / "index"
+        if _dir_ready(idx, "index"):
+            bad = 0
+            try:
+                for f in sorted(idx.rglob("*.md")):
+                    if f.name == "knowledge-index.md":
+                        continue
+                    subject = f.parent.name if f.parent != idx else f.stem
+                    branch = ""
+                    try:
+                        lines = f.read_text("utf-8", errors="replace").splitlines()
+                    except OSError:
+                        bad += 1
+                        continue
+                    for ln in lines:
+                        if ln.startswith("###"):
+                            branch = ln.lstrip("#").strip()
+                            continue
+                        m = _re.match(r"^\s*-\s*\[\[([^\]]+)\]\]\s*`([^`]*)`\s*[—–-]\s*(.*)$", ln)
+                        if not m:
+                            continue
+                        note, kw, summ = (m.group(1).strip(), m.group(2).strip(),
+                                          m.group(3).strip())
+                        sc = _score(note + " " + kw + " " + summ)
+                        if sc:
+                            found.append({
+                                "note": note, "subject": subject,
+                                "keywords": [k.strip() for k in kw.split(",") if k.strip()],
+                                "summary": summ[:200], "src": "index",
+                                "branch": branch or None,
+                                "_sc": sc, "_rank": 2})
+                _mark("index", "ok", **({"unreadable": bad} if bad else {}))
+            except Exception as ex:
+                _mark("index", "error", reason=type(ex).__name__)
 
-        # ② KG 节点:**只回有真实学习证据的**。
-        #    证据是**并集**,不是单一字段:
-        #      · progress ∈ {mastered, in_progress}(link_and_mastery.py:240 的
-        #        PROG_ORDER 才是学习进度权威;state 是 UI 状态,其中 unlockable 混了
-        #        "已开始学"与"前置通了可以开始学"两种来源)
-        #      · containing_notes 非空 —— 用户为它记过笔记,是硬证据
-        #      · mastery / mastery_level 有正值
-        #    Pi 上真实存在 progress=unseen 但 containing_notes 非空、mastery>0 的节点;
-        #    只看 progress 会把这些真学过的漏掉。四者任一成立即算学过。
-        try:
-            kg = pdf.CLAUDE_DIR / "knowledge_graph"
-            if _src_ready(kg, "kg"):
-                import json as _j
+        # -- (2) KG:只回有真实学习证据的 -----------------------------------
+        kg = pdf.CLAUDE_DIR / "knowledge_graph"
+        if _dir_ready(kg, "kg"):
+            bad = 0
+            try:
                 for f in _kg_files(kg):
                     try:
                         data = _j.loads(f.read_text("utf-8"))
                     except (OSError, ValueError):
+                        bad += 1        # 坏 JSON 必须计数,不能静默跳过
                         continue
                     for node in (data.get("nodes") or []) if isinstance(data, dict) else []:
                         prog = str(node.get("progress") or "")
@@ -468,55 +507,78 @@ def build_handlers(pdf, *, toc_get=None, search_book=None, search_all=None,
                         elif prog == "in_progress" or has_notes or ok_l or ok_m:
                             evidence, rank = "started", 1
                         else:
-                            continue          # unseen 且无笔记无掌握度 = 真没学过
+                            continue
                         title = str(node.get("title") or node.get("name") or "")
-                        if q in title:
-                            found.append({"source": "kg", "rank": rank, "book": f.stem,
-                                          "title": title[:200],
-                                          "state": str(node.get("state") or ""),
-                                          "progress": prog, "evidence": evidence,
-                                          "note_count": (len(notes) if has_notes else 0)})
-            status.setdefault("kg", "ok")
-        except Exception as ex:
-            status["kg"] = f"error: {type(ex).__name__}"
+                        sc = _score(title)
+                        if not sc:
+                            continue
+                        found.append({
+                            "note": (str(list(notes)[0]) if has_notes else None),
+                            "subject": str(node.get("subject") or f.stem),
+                            "keywords": ([title] if title else []),
+                            "summary": title[:200], "src": "kg",
+                            "evidence": evidence, "state": str(node.get("state") or ""),
+                            "progress": prog,
+                            "note_count": (len(notes) if has_notes else 0),
+                            "_sc": sc, "_rank": rank})
+                _mark("kg", "ok", **({"unreadable": bad} if bad else {}))
+            except Exception as ex:
+                _mark("kg", "error", reason=type(ex).__name__)
 
-        # ③ Anki:本地 record,不连 AnkiConnect(直接命令要可预期,不吊在外部进程上)。
-        #    ⚠ 必须搜 `text` —— cloze 卡的正文在 text 而非 front/back;只搜 front/back
-        #    会让"卡片明明在本地却返回空结果"(实测漏了 25 张 cloze)。
-        try:
-            rec = pdf.CLAUDE_DIR / "anki" / "records"
-            if _src_ready(rec, "anki"):
-                import json as _j
+        # -- (3) Anki 本地 record(不连 AnkiConnect)--------------------------
+        # 必须搜 tags 与 cloze 的 text:tags 里 qa_improved 这类标记是常用检索入口,
+        # cloze 正文不在 front/back。嵌套卡归属用 record 的真实 source_note,
+        # 不拿文件 stem 顶替。
+        rec = pdf.CLAUDE_DIR / "anki" / "records"
+        if _dir_ready(rec, "anki"):
+            bad = 0
+            try:
                 for f in sorted(rec.glob("*.json")):
                     try:
                         data = _j.loads(f.read_text("utf-8"))
                     except (OSError, ValueError):
+                        bad += 1
                         continue
-                    for c in (data.get("cards") or []) if isinstance(data, dict) else []:
+                    if not isinstance(data, dict):
+                        continue
+                    src_note = (data.get("source_note") or data.get("note")
+                                or data.get("source") or f.stem)
+                    for c in (data.get("cards") or []):
                         if not isinstance(c, dict):
                             continue
-                        blob = " ".join(str(c.get(k) or "") for k in
+                        tags = c.get("tags") or data.get("tags") or []
+                        tag_list = [str(t) for t in tags] if isinstance(tags, (list, tuple)) else [str(tags)]
+                        body = " ".join(str(c.get(k) or "") for k in
                                         ("front", "back", "text", "cloze", "extra"))
-                        if q in blob:
-                            shown = (str(c.get("front") or "") or str(c.get("text") or ""))
-                            found.append({"source": "anki", "rank": 1, "note": f.stem,
-                                          "type": ("cloze" if c.get("text") or c.get("cloze") else "basic"),
-                                          "front": shown[:200]})
-            status.setdefault("anki", "ok")
-        except Exception as ex:
-            status["anki"] = f"error: {type(ex).__name__}"
+                        sc = _score(body + " " + " ".join(tag_list))
+                        if not sc:
+                            continue
+                        shown = str(c.get("front") or "") or str(c.get("text") or "")
+                        found.append({
+                            "note": str(c.get("source_note") or src_note),
+                            "subject": str(data.get("subject") or ""),
+                            "keywords": tag_list,
+                            "summary": shown[:200], "src": "anki",
+                            "type": ("cloze" if (c.get("text") or c.get("cloze")) else "basic"),
+                            "_sc": sc, "_rank": 1})
+                _mark("anki", "ok", **({"unreadable": bad} if bad else {}))
+            except Exception as ex:
+                _mark("anki", "error", reason=type(ex).__name__)
 
-        # 跨源确定性排序:证据强度(mastered→started→索引条目)优先,同级按源名+文本,
-        # 保证同一 query 每次返回同一批,不受文件系统枚举顺序影响。
+        # 排序:相关度 -> 证据强度 -> 源 -> 文本。确定性,不受文件枚举顺序影响。
         _SRC = {"kg": 0, "anki": 1, "index": 2}
-        found.sort(key=lambda x: (x.get("rank", 9), _SRC.get(x["source"], 9),
-                                  str(x.get("title") or x.get("front") or x.get("text") or "")))
-        results = [{k: v for k, v in x.items() if k != "rank"} for x in found[:limit]]
-        complete = all(v == "ok" for v in status.values()) and bool(status)
+        found.sort(key=lambda x: (-x["_sc"], x["_rank"], _SRC.get(x["src"], 9),
+                                  str(x.get("note") or ""), str(x.get("summary") or "")))
+        results = [{k: v for k, v in x.items() if not k.startswith("_")}
+                   for x in found[:limit]]
+        states = [v["state"] for v in status.values()]
+        # complete 只在**每个源都真正查成了**时为真:全部 absent 也不算完整,
+        # 否则"什么都没查到"会被上游读成"用户确实没学过"。
+        complete = bool(states) and all(s == "ok" for s in states)
         return {"query": q, "results": results, "count": len(results),
                 "total": len(found), "truncated": len(found) > len(results),
                 "complete": complete,
-                "sourceStatus": ("ok" if complete else "partial")}
+                "sourceStatus": status}
 
     H["recall.notes"] = recall_notes
 

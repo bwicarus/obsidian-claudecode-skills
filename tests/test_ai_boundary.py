@@ -39,9 +39,26 @@ class BlacklistRegressionTest(unittest.TestCase):
         self.assertIn("add_vocab", W._AI_TOOL_NAMES,
                       "旧助手链经在线例句翻译可落到 AI 后端")
 
-    def test_known_ai_tools_are_not_silently_shrunk(self) -> None:
-        """整表只允许增不允许悄悄缩水。数量变小时必须有人显式改这个断言。"""
-        self.assertGreaterEqual(len(W._AI_TOOL_NAMES), 23)
+    # 审计 §1.1 当前认定会再次调用 AI 的全部工具。**逐个钉住**,不是只数个数 ——
+    # 只断言 len>=23 的话,删掉一个危险项再补一个无害名字仍会全绿(Codex 12:39 指出)。
+    KNOWN_AI_TOOLS = frozenset({
+        "web_search", "search_image", "search_video", "make_paper", "summarize_section",
+        "do_task", "run_saved_task", "see_page", "see_figure", "see_ink", "correct_dict",
+        "material_graph", "read_material", "relate_material", "learning_focus",
+        "situation_feedback", "make_diagnostic", "mastery_proposal", "apply_mastery",
+        "error_patterns", "read_check_report", "add_vocab", "auto_highlight",
+    })
+
+    def test_no_known_ai_tool_is_ever_removed(self) -> None:
+        """按名字比对集合。移除任何一项都必须先改这里,改这里就会被 review 看见。"""
+        missing = self.KNOWN_AI_TOOLS - set(W._AI_TOOL_NAMES)
+        self.assertEqual(missing, set(), f"这些会调 AI 的工具被移出了黑名单:{sorted(missing)}")
+
+    def test_additions_are_allowed_but_visible(self) -> None:
+        """允许新增(发现新的 AI 路径就该加),但新增项必须能被这里看见。"""
+        extra = set(W._AI_TOOL_NAMES) - self.KNOWN_AI_TOOLS
+        self.assertEqual(extra, set(),
+                         f"黑名单新增了 {sorted(extra)};确认无误后把它们加进 KNOWN_AI_TOOLS")
 
 
 class AssertNoAiSemanticsTest(unittest.TestCase):
