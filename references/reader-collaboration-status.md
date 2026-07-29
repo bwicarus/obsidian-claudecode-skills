@@ -3420,10 +3420,12 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
   本节登记时尚未提交、推送或部署；下一步只提交本轮精确文件，推送后从 Windows 运行一次正式
   `scripts\deploy_from_windows.ps1`，再由 Pi 官方测试 channel 发布器原子切换 0.2.70。
 
-## Codex：0.2.71 / Windows 0.1.8 最终直连候选已安装（2026-07-29 15:10 JST，待提交部署）
+## Codex：0.2.72 / Windows 0.1.8 最终直连候选已安装（2026-07-29 15:16 JST，待再次部署）
 
-- **候选顺延**：0.2.70 与 0.1.7 已在后续安全审查中退役；没有覆盖其既有不可变 ZIP。最终
-  Reader/扩展版本顺延为 **0.2.71**，Windows 直连包顺延为 **0.1.8**。Pi 仍只承载
+- **候选顺延**：0.2.70、0.2.71 与 0.1.7 已在后续安全/发布审查中退役；没有覆盖其既有
+  不可变 ZIP。第一次正式部署在写生产前被网络审计拦住，原因只是两个固定 WSS 调用缺少
+  `@interaction computer-voice.bridge.request` 声明；补齐并确认 `0 new debt` 后，最终
+  Reader/扩展版本顺延为 **0.2.72**，Windows 直连包仍为 **0.1.8**。Pi 仍只承载
   Reader/PWA 与书籍，电脑语音控制和 PCM 始终为浏览器直连 Windows。
 - **Reader/扩展收口**：PWA 只允许精确生产 Origin 直连；普通网页只能经 isolated content
   runtime → extension background → 固定 Windows WSS relay。电话按钮由 `rc-voicecall`
@@ -3440,15 +3442,16 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
   `6ed8d45d1dc3e2bae5473f6ec0edb1b36533fadd7aa6dc58701e331d9bf35e04`、desktop
   `0e974ed64e1fb8adfbfeec2f5ba190f64535f1225cdebb23e5c11ae138d57076`、typist helper
   `de030f73492c842e2ad12ce20f9cb5d7666eeb95d11f81ebda1bad21d5cf9fac`、supervisor
-  `6b9a8e6724d50442618db8cc3322062b1d3ec4264c974bb68818c3c5e9f1e7d8`。0.2.71 Windows
-  测试 ZIP 为 1,238,467 bytes，SHA-256
-  `132b516c7b0ef1d7c4a989544ec8b28fafac9829e372f61a5b5ae6598723ff4d`；Safari/iOS ZIP 为
-  1,225,870 bytes，SHA-256
-  `12ea7186fa982d8ce142f6a6a7b3e303e41e11b303ab3200c8322a8135727363`。
+  `6b9a8e6724d50442618db8cc3322062b1d3ec4264c974bb68818c3c5e9f1e7d8`。0.2.72 Windows
+  测试 ZIP 为 1,238,489 bytes，SHA-256
+  `b365fb2d8ba9d64dc622fd0dca66f4e67e999c168eaec715dba30cbd627b2960`；Safari/iOS ZIP 为
+  1,225,895 bytes，SHA-256
+  `71b0242c35d7de4ac0ecfea7bbc971c7551285a1b966f43f3040998273ed80d0`。
 - **验证**：Reader 合同 **593/593**；C# Release 0 warning / 0 error、无启动 self-test
   **134/134**、`audioActivated=false`；桌面 **70/70**、supervisor **17/17**、typist helper
   **5/5**、直连包 **11/11**；发布流水线 **24/24**（其中 Windows symlink 权限 1 项预期
-  skip）。两轮独立 C# 审查均未发现剩余 P0/P1；`git diff --check` 通过。
+  skip）。两轮独立 C# 审查均未发现剩余 P0/P1；Reader network audit 为 **0 new debt**，
+  `git diff --check` 通过。
 - **Windows 安装事实**：0.1.8 四 payload 已经 manifest 校验后原子替换；永久备份和安装报告
   在
   `C:\Users\bwica\bw-computer-voice-bridge-backups\install-20260729T060742Z-687291f3`。
@@ -3463,6 +3466,6 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
   真实可听双向 E2E 尚未验证。
 - **STOP 边界/下一步**：STOP 已可验证地停止两路 capture、pump、本次 owned typist 和 WSS；
   Codex 桌面尚无已验证的 ownership-safe Voice 退出 primitive，因此不会猜测第二次
-  `Ctrl+Shift+C`，Voice UI 是否退出需在 Windows 人工确认。本节登记时 0.2.71 尚未提交、推送
-  或部署；下一步为精确提交本轮文件、推送后只运行一次正式
-  `scripts\deploy_from_windows.ps1`，再用 Pi 官方发布器切换 0.2.71 测试 channel。
+  `Ctrl+Shift+C`，Voice UI 是否退出需在 Windows 人工确认。本节登记时 0.2.72 的发布修订尚未
+  提交、推送或部署；下一步为精确提交这四处注释/版本生成物与本状态，推送后重新运行正式
+  `scripts\deploy_from_windows.ps1`，再用 Pi 官方发布器切换 0.2.72 测试 channel。

@@ -627,6 +627,7 @@
           true
         );
       }
+      // @interaction computer-voice.bridge.request
       return new window.WebSocket(endpoint);
     }
     var runtime = window.chrome && window.chrome.runtime;

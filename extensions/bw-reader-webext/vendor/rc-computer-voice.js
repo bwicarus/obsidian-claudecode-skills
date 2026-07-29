@@ -630,6 +630,7 @@ if (window.__bwPwaProviderOnly) return;
           true
         );
       }
+      // @interaction computer-voice.bridge.request
       return new window.WebSocket(endpoint);
     }
     var runtime = window.chrome && window.chrome.runtime;
