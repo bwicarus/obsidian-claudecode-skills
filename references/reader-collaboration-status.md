@@ -3518,3 +3518,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：本机修复前后实测 `32 → 40`；Release build、无启动 self-test（新增 ABI layout 合同）、直连包 15 项、0.1.14 manifest verify/包内与安装路径 self-test 均通过。
 - **安装/安全状态**：installed SHA-256 `ef4f09b332167ed2e96205b766c457d90efc988a67b33d79a81a4ef1bab17dcd`，备份为 `C:\Users\bwica\bw-computer-voice-bridge-backups\install-20260729T165720Z-e2ea7b7a`；服务 PID 25268 唯一监听 localhost，`idle / readerConnected=false / captureActive=false`，typist=0。
 - **明确没做/下一步**：安装与诊断均 `captureStarted=false / shortcutSent=false`；未改日常 Chrome、未提交推送或部署，下一步由用户再次点击电话按钮验证真实快捷键与双向声音。
+
+## Codex：Reader 0.2.73 / Windows 直连语音已正式部署（2026-07-30 02:18 JST）
+- **改了什么**：BWAB、Claude 已完成的直接命令与 Reader/PWA/扩展/Windows 双向语音候选分两次精确提交，分支推送到 `b438a66`；Windows 原生仍为已安装的 0.1.14。
+- **怎么验的**：隔离 Reader 的真实 START 已到 `active / readerConnected=true / captureActive=true`；Pi 无副作用预检与正式 `deploy_from_windows.ps1` 均 exit 0，内置 Linux 门禁、服务稳定性与 E2E 全过。
+- **生产事实**：Reader `0.2.73`、KG `kg-0.2.73-923da8bd8a20f51b8e56`；回滚/取证目录 `/home/bwicarus/deploy-backups/reader/20260729T171607Z-91676`，部署后 webapp/voice-rt active、Reader HTTP 可达、voice TCP open。
+- **已知项/下一步**：此前隔离会话约两分钟后记录过一次 `UPLINK_QUEUE_OVERFLOW`；按用户决定先用 iPad 生产真机测试再修。未发布扩展正式 channel，iPad PWA 不依赖该 channel。
