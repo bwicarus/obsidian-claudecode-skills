@@ -8,6 +8,11 @@ internal sealed record CodexAppTarget(
     IReadOnlySet<uint> ProcessTree,
     nint WindowHandle);
 
+internal sealed record CodexAppProbeState(
+    int RootCount,
+    int WindowCount,
+    CodexAppTarget? ReadyTarget);
+
 internal static class WindowsCodexAppProbe
 {
     private const uint SnapshotProcesses = 0x00000002;
@@ -19,6 +24,22 @@ internal static class WindowsCodexAppProbe
     private const int ShowRestore = 9;
 
     internal static CodexAppTarget RequireReady()
+    {
+        CodexAppProbeState state = Probe();
+        if (state.RootCount != 1)
+        {
+            throw new InvalidOperationException(
+                "BW_COMPUTER_VOICE_APP_TREE_AMBIGUOUS");
+        }
+        if (state.WindowCount != 1 || state.ReadyTarget is null)
+        {
+            throw new InvalidOperationException(
+                "BW_COMPUTER_VOICE_APP_WINDOW_AMBIGUOUS");
+        }
+        return state.ReadyTarget;
+    }
+
+    internal static CodexAppProbeState Probe()
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -66,8 +87,10 @@ internal static class WindowsCodexAppProbe
                 || !eligible.ContainsKey(parentId)).ToArray();
             if (roots.Length != 1)
             {
-                throw new InvalidOperationException(
-                    "BW_COMPUTER_VOICE_APP_TREE_AMBIGUOUS");
+                return new CodexAppProbeState(
+                    roots.Length,
+                    WindowCount: 0,
+                    ReadyTarget: null);
             }
             uint root = roots[0];
             HashSet<uint> tree = [];
@@ -106,10 +129,15 @@ internal static class WindowsCodexAppProbe
                 .ToArray();
             if (windows.Length != 1)
             {
-                throw new InvalidOperationException(
-                    "BW_COMPUTER_VOICE_APP_WINDOW_AMBIGUOUS");
+                return new CodexAppProbeState(
+                    RootCount: 1,
+                    windows.Length,
+                    ReadyTarget: null);
             }
-            return new CodexAppTarget(root, tree, windows[0]);
+            return new CodexAppProbeState(
+                RootCount: 1,
+                WindowCount: 1,
+                new CodexAppTarget(root, tree, windows[0]));
         }
         finally
         {

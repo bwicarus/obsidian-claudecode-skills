@@ -11,7 +11,6 @@ const runtime = read("_server_deploy/static/pdf/rc-computer-voice.js");
 const background = read("extensions/bw-reader-webext/background.js");
 const offscreen = read("extensions/bw-reader-webext/offscreen.js");
 const offscreenHtml = read("extensions/bw-reader-webext/offscreen.html");
-const popup = read("extensions/bw-reader-webext/popup.js");
 const installer = read(
   "extensions/bw-reader-webext/windows/install-computer-voice-native-host.ps1",
 );
@@ -33,24 +32,32 @@ test("电脑客户端选项复用共享设置和电话按钮，选择本身不�
   );
 });
 
-test("Reader 端只接收双轨，应用输出播放而麦克风不回放", () => {
-  assert.match(runtime, /ROLE_READER_RECEIVER/);
-  assert.match(runtime, /TRACK_APP_OUTPUT/);
-  assert.match(runtime, /TRACK_USER_MIC/);
-  assert.match(runtime, /surface\.outputStream\.addTrack\(event\.track\)/);
-  assert.match(runtime, /surface\.micStream\.addTrack\(event\.track\)/);
-  assert.doesNotMatch(runtime, /audio\.srcObject\s*=\s*surface\.micStream/);
-  assert.doesNotMatch(runtime, /getUserMedia|mediaDevices/);
+test("Reader 端严格解析固定 PCM 双轨，只播放 app-output", () => {
+  assert.match(runtime, /var PCM_FRAME_BYTES = 1956/);
+  assert.match(runtime, /var PCM_HEADER_BYTES = 36/);
+  assert.match(runtime, /view\.getUint8\(5\)/);
+  assert.match(runtime, /track === 1[\s\S]*queueAppOutput\(state, samples\)/);
+  assert.doesNotMatch(
+    runtime,
+    /RTCPeerConnection|createComputerVoiceWebRtcController|signalTransport/,
+  );
+  assert.doesNotMatch(runtime, /getUserMedia|mediaDevices|new MediaStream/);
 });
 
-test("内容脚本仅可访问 Reader 侧路由，设备凭据路由不暴露给页面", () => {
+test("Reader 直连不再调用 Pi computer-voice API，旧扩展私有路由仍不向页面暴露凭据", () => {
   assert.match(background, /computer-voice\\\/devices\\\/\[A-Za-z0-9/);
   assert.match(background, /computer-voice\\\/sessions\\\//);
   assert.doesNotMatch(
     background,
     /BW_FETCH_DYNAMIC_ROUTES[\s\S]*computer-voice\\\/device\\\//,
   );
-  assert.doesNotMatch(runtime, /deviceToken|Authorization|commands\/claim/);
+  assert.match(runtime, /reader-computer-voice-direct\/1/);
+  assert.match(runtime, /new window\.WebSocket\(self\.endpoint\)/);
+  assert.doesNotMatch(runtime, /\/api\/reader\/computer-voice/);
+  assert.doesNotMatch(
+    runtime,
+    /deviceToken|Authorization|commands\/claim|localStorage|Bearer /,
+  );
 });
 
 test("扩展按唯一共享顺序加载 WebRTC、Reader 入口和 voicecall", () => {
@@ -86,12 +93,21 @@ test("Windows 发送端先建立 WebRTC，再启动原生采集和一次性快�
   assert.match(offscreen, /companion:[\s\S]*kind: "voice-typist"/);
 });
 
-test("首次配对凭据只保存在扩展 storage，页面只显示一次性 pairId/code", () => {
-  assert.match(popup, /BW_COMPUTER_VOICE_PAIR/);
-  assert.match(offscreen, /chrome\.storage\.local\.set/);
-  assert.match(offscreen, /deviceToken: randomToken\(48\)/);
-  assert.doesNotMatch(runtime, /deviceToken|chrome\.storage/);
-  assert.match(runtime, /"配对 ID " \+ value\.pairId/);
+test("Reader 配对只上传 SPKI，长期私钥不可导出并只进 IndexedDB", () => {
+  assert.match(runtime, /indexedDB\.open\(DB_NAME, DB_VERSION\)/);
+  assert.match(
+    runtime,
+    /generateKey\([\s\S]*?\{ name: "ECDSA", namedCurve: "P-256" \},[\s\S]*?false,[\s\S]*?\["sign", "verify"\]/,
+  );
+  assert.match(runtime, /exportKey\("spki", pair\.publicKey\)/);
+  assert.match(runtime, /clientPublicKeySpki: identity\.publicKeySpki/);
+  assert.match(runtime, /key\.extractable !== false/);
+  assert.doesNotMatch(
+    runtime,
+    /deviceToken|chrome\.storage|localStorage|Authorization|Bearer /,
+  );
+  assert.match(runtime, />连接 Windows 桥接器<\/button>/);
+  assert.doesNotMatch(runtime, /生成一次性配对码/);
 });
 
 test("Windows 安装器要求交互桌面、显式麦克风与 ENABLE，并可撤销", () => {

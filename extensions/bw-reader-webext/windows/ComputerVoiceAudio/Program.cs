@@ -22,6 +22,29 @@ internal static class Program
             {
                 return WriteJson(ContractSelfTest.Run());
             }
+            if (
+                args.Length == 3
+                && args[0] == "--direct-serve"
+                && args[1] == "--config"
+            )
+            {
+                if (!Path.IsPathFullyQualified(args[2]))
+                {
+                    throw new DirectProtocolException(
+                        "BW_COMPUTER_VOICE_DIRECT_CONFIG_PATH_INVALID",
+                        "直连配置必须使用绝对路径");
+                }
+                string configPath = Path.GetFullPath(args[2]);
+                DirectBridgeConfigStore configStore = new(configPath);
+                _ = configStore.Load();
+                await using DirectBridgeServer server = new(
+                    configStore,
+                    new WindowsDirectAppLauncher(),
+                    new WindowsDirectMediaAdapter(
+                        configStore.InstallationRoot));
+                return await server.RunAsync(CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
             if (IsNativeMessagingInvocation(args))
             {
                 NativeHostConfig config = NativeHostConfig.Load(
@@ -88,6 +111,7 @@ internal static class Program
             allowed = new[] {
                 "--describe",
                 "--self-test",
+                "--direct-serve --config <absolute-path>",
                 "Chrome Native Messaging origin (registered host only)",
             },
         }, JsonOptions));

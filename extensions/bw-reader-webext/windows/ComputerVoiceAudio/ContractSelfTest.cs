@@ -19,6 +19,7 @@ internal static class ContractSelfTest
         CheckSessionLifecycle(checks);
         CheckExplicitMicrophoneLifecycle(checks);
         CheckInteropVtables(checks);
+        DirectBridgeSelfTest.Run(checks);
 
         return new
         {

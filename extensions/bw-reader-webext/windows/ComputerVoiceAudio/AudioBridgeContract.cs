@@ -20,7 +20,8 @@ internal static class AudioBridgeContract
         automaticMicrophoneCapture = false,
         minimumWindowsBuild = MinimumWindowsBuild,
         systemOutputFallback = false,
-        captureState = "native-messaging-gated-not-cli-exposed",
+        captureState =
+            "native-messaging-gated;direct-authenticated-start-gated",
         captureThreadModel = "dedicated-mta-single-thread",
         captureCliExposed = false,
         automaticCapture = false,
@@ -29,5 +30,20 @@ internal static class AudioBridgeContract
         safeCommands = new[] { "--describe", "--self-test" },
         nativeMessagingOriginAllowlist = true,
         localOptInRequired = true,
+        directServer = new
+        {
+            command = "--direct-serve --config <absolute-path>",
+            bind = "127.0.0.1-only",
+            defaultPort = DirectBridgeContract.DefaultListenPort,
+            transport = "authenticated-websocket-fixed-pcm",
+            automaticCapture = false,
+            appLaunch = new
+            {
+                selectionOrStatus = false,
+                authenticatedStart = true,
+                target = DirectBridgeContract.CodexAppUserModelId,
+            },
+            productionAdapterState = "wired-authenticated-start-gated",
+        },
     };
 }
