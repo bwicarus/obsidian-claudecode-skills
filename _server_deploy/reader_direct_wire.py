@@ -415,14 +415,15 @@ def build_handlers(pdf, *, toc_get=None, search_book=None, search_all=None,
             _ = n0  # noqa: F841 - 单源失败不影响其它源,继续
 
         # ② 已学 KG 节点:**只回有真实学习证据的**。
-        #    ⚠ 不能用 state in (mastered, unlockable) 判定 —— `unlockable` 混了两种来源
-        #    (link_and_mastery.py:34「前置链通 + 自己已开始学」;skill-tree-system.md:338
-        #    「level ≥ 1 **或** 前置全 mastered」)。纯因前置通而 unlockable 的节点,
-        #    用户一次都没学过。误当已学会让上游拿它去"结合你学过的知识"讲,凭空造出
-        #    用户并不具备的基础。判据改为:mastered,或 unlockable 且 mastery_level/
-        #    mastery 有正值。
+        #    判据看 `progress` 而不是 `state` —— link_and_mastery.py:240 的
+        #    PROG_ORDER = {unseen:0, in_progress:1, mastered:2} 才是学习进度的权威;
+        #    `state`(locked/unlockable/in_progress/mastered)是 UI 状态,其中
+        #    `unlockable` 混了"自己已开始学"和"前置通了可以开始学"两种来源
+        #    (link_and_mastery.py:34 / skill-tree-system.md:338),单看它会把没学过的
+        #    误报成用户记忆 —— 上游会据此"结合你学过的知识"讲,凭空造出他不具备的基础。
+        #    progress 缺失时退回 mastery_level/mastery 正值(旧图兼容),仍取不到就不返回。
         try:
-            kg = pdf.CLAUDE_DIR / "state" / "kg"
+            kg = pdf.CLAUDE_DIR / "knowledge_graph"
             hit = 0
             if kg.exists() and len(results) < limit:
                 import json as _j
@@ -436,19 +437,26 @@ def build_handlers(pdf, *, toc_get=None, search_book=None, search_all=None,
                     for node in (data.get("nodes") or []) if isinstance(data, dict) else []:
                         if len(results) >= limit:
                             break
-                        st = str(node.get("state") or "")
-                        if st not in ("mastered", "unlockable"):
-                            continue
-                        lvl, mst = node.get("mastery_level"), node.get("mastery")
-                        started = ((isinstance(lvl, (int, float)) and not isinstance(lvl, bool) and lvl >= 1)
-                                   or (isinstance(mst, (int, float)) and not isinstance(mst, bool) and mst > 0))
-                        if st == "unlockable" and not started:
-                            continue        # 只是"可以开始学",不是学过
+                        prog = str(node.get("progress") or "")
+                        if prog == "mastered":
+                            evidence = "mastered"
+                        elif prog == "in_progress":
+                            evidence = "started"
+                        elif prog == "unseen":
+                            continue            # 明确没学过
+                        else:
+                            # 旧图没有 progress 字段:退回掌握度正值,取不到就不算学过。
+                            lvl, mst = node.get("mastery_level"), node.get("mastery")
+                            ok_l = isinstance(lvl, (int, float)) and not isinstance(lvl, bool) and lvl >= 1
+                            ok_m = isinstance(mst, (int, float)) and not isinstance(mst, bool) and mst > 0
+                            if not (ok_l or ok_m):
+                                continue
+                            evidence = "started"
                         if q in str(node.get("title") or "") or q in str(node.get("name") or ""):
                             results.append({"source": "kg", "book": f.stem,
                                             "title": str(node.get("title") or node.get("name") or "")[:200],
-                                            "state": st,
-                                            "evidence": ("mastered" if st == "mastered" else "started")})
+                                            "state": str(node.get("state") or ""),
+                                            "evidence": evidence})
                             hit += 1
             status["kg"] = "ok"
         except Exception as ex:
