@@ -20,12 +20,17 @@ import reader_direct_commands as DC
 
 # 审计 §1.1 里会再次调用 AI 的能力名。接线时用它做机器校验,防止有人日后往白名单里加。
 _AI_TOOL_NAMES = {
-    "web_search", "search_image", "search_video", "make_paper", "summarize_section",
+    "web_search", "search_video", "make_paper", "summarize_section",
     "do_task", "run_saved_task", "see_page", "see_figure", "see_ink", "correct_dict",
     "material_graph", "read_material", "relate_material", "learning_focus",
     "situation_feedback", "make_diagnostic", "mastery_proposal", "apply_mastery",
-    "error_patterns", "read_check_report", "add_vocab", "auto_highlight",
+    "error_patterns", "read_check_report", "auto_highlight",
 }
+# 2026-07-29 复核移出:`add_vocab` 走 scripts/vocab/dict_sources.py(ECDICT/unidic
+# 确定性词典)、`search_image` 全函数无 AI 调用 —— 详见
+# references/reader-agent-capability-audit.md §1.1 的更正说明。
+# 注:`search_image` 移出黑名单不等于要接线 —— 上游助手自带联网能力,配图这类它自己
+# 查更直接;直接命令只补**上游拿不到的本地数据**。
 
 
 class WiringError(RuntimeError):
@@ -40,7 +45,8 @@ def _assert_no_ai(actions) -> None:
 
 
 def build_handlers(pdf, *, toc_get=None, search_book=None, search_all=None,
-                   dict_lookup=None, nav_publish=None) -> tuple[dict, list[str]]:
+                   dict_lookup=None, nav_publish=None,
+                   vocab_add=None) -> tuple[dict, list[str]]:
     """从既有确定性底座组装 handler。返回 (handlers, 未接线的动作列表)。
 
     `pdf` = pdf_reader 模块。可选参数用于注入跨模块能力(目录/检索/词典/前端动作),
@@ -267,6 +273,50 @@ def build_handlers(pdf, *, toc_get=None, search_book=None, search_all=None,
     if callable(nav_publish):
         H["nav.goto"] = lambda a, p, prev: {"sent": nav_publish("goto", _rel(a)[0], a.get("page"))}
         H["nav.open"] = lambda a, p, prev: {"sent": nav_publish("open", _rel(a)[0], a.get("page"))}
+
+    # ── 整章正文(第八节:拆开 summarize_section)────────────────────────────
+    # 取正文是确定性的,总结归上游。PDF 按 TOC 切章;EPUB 的 section 本身即章。
+    def section_read(anchor, params, prev):
+        rel, ap = _rel(anchor)
+        page = anchor.get("page")
+        limit = min(int(params.get("limit") or 9000), 20000)
+        if str(rel).lower().endswith(".epub"):
+            paras = pdf._epub_section_paragraphs(rel, int(page or 0)) or []
+            text = "\n\n".join(str(x) for x in paras if str(x).strip())
+            return {"section_title": "", "page_range": str(page),
+                    "text": text[:limit], "truncated": len(text) > limit}
+        if not callable(toc_get):
+            raise ValueError("PDF 取整章需要 toc_get 底座,本机未注入")
+        page = int(page or 1)
+        toc = toc_get(rel) or []
+        # 找 page 落在哪个条目区间:条目按页升序,取最后一个 <= page 的作为章首,
+        # 下一个条目的页作为章尾(开区间)。TOC 缺失就退回单页,并在标题里说明。
+        starts = sorted({int(t.get("page") or 0) for t in toc if int(t.get("page") or 0) > 0})
+        if not starts:
+            body = pdf._page_text_clean(str(ap), rel, page, limit=limit) or ""
+            return {"section_title": "(无目录,退回单页)", "page_range": str(page),
+                    "text": body[:limit], "truncated": False}
+        lo = max([s for s in starts if s <= page], default=starts[0])
+        after = [s for s in starts if s > lo]
+        hi = (after[0] - 1) if after else lo + 60      # 末章兜底,不无限读下去
+        title = next((str(t.get("title") or "") for t in toc
+                      if int(t.get("page") or 0) == lo), "")
+        parts, total = [], 0
+        for p in range(lo, hi + 1):
+            if total >= limit:
+                break
+            t = pdf._page_text_clean(str(ap), rel, p, limit=limit - total) or ""
+            if t.strip():
+                parts.append(t)
+                total += len(t)
+        return {"section_title": title, "page_range": f"{lo}-{hi}",
+                "text": "\n\n".join(parts)[:limit], "truncated": total >= limit}
+    H["section.read"] = section_read
+
+    # ── 生词(确定性词典 + 写 vault;不调 AI)────────────────────────────────
+    if callable(vocab_add):
+        H["vocab.add"] = lambda a, p, prev: {
+            "vocab": vocab_add(str(p.get("word") or "").strip()[:60])}
 
     _assert_no_ai(H.keys())
     missing = sorted(set(DC.ACTIONS) - set(H))

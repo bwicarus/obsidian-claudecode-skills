@@ -40,6 +40,10 @@ ACTIONS: dict[str, dict] = {
     "page.new":         {"target": ("file",),        "desc": "新建插入页,返回锚点"},
     "page.add":         {"target": ("file",),        "desc": "向插入页写元素"},
     "anki.draft":       {"target": (),               "desc": "提交制卡草稿批"},
+    # ↓ 2026-07-29 第八节迁移:上游自带联网与推理,只补它**拿不到的本地数据**。
+    #   联网类(搜图/搜视频/天气/新闻)一律不接线 —— 上游自查更直接。
+    "section.read":     {"target": ("file", "page"), "desc": "取该页所在整章正文(summarize_section 的确定性那一半;总结归上游)"},
+    "vocab.add":        {"target": (),               "desc": "加生词(ECDICT/unidic 确定性词典 + 写 vault)"},
 }
 MODES = ("independent", "dependent")
 _MAX_STEPS = 20
