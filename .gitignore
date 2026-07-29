@@ -47,9 +47,11 @@ extensions/bw-reader-webext-test-channel*.zip
 extensions/bw-reader-webext-test-channel.json
 extensions/bw-reader-extension-test.ps1
 
+# Windows 电脑语音直连桥接器：仅本机候选打包输出，绝不包含运行时配置或配对状态
+extensions/bw-reader-webext/windows/candidates/
+
 # Windows 本地实例(run_local.ps1)的运行时数据:账号库 app.db、各类 .log/.err/.out
 webapp-data/
 
 # PDF.js vendor(第三方库,不入库):生产上同样在 git 之外,直接放 /var/www/html/static/pdfjs
 _server_deploy/static/pdfjs/
-

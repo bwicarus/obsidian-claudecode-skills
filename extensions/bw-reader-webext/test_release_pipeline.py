@@ -11,6 +11,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 import zipfile
@@ -26,6 +27,179 @@ import package_safari as safari
 
 
 class ReleasePipelineTests(unittest.TestCase):
+    def test_windows_process_lock_retries_only_contention_at_byte_zero(
+        self,
+    ) -> None:
+        calls: list[tuple[int, int, int]] = []
+        sleeps: list[float] = []
+
+        class FakeMsvcrt:
+            LK_NBLCK = 1
+            LK_UNLCK = 2
+            attempts = 0
+            stream = None
+
+            @classmethod
+            def locking(
+                cls,
+                _descriptor: int,
+                mode: int,
+                size: int,
+            ) -> None:
+                calls.append((mode, size, cls.stream.tell()))
+                if mode == cls.LK_NBLCK and cls.attempts == 0:
+                    cls.attempts += 1
+                    raise OSError(publish.errno.EACCES, "busy")
+
+        with tempfile.TemporaryDirectory() as raw:
+            lock_path = Path(raw) / "publisher.lock"
+            with lock_path.open("a+b") as handle:
+                FakeMsvcrt.stream = handle
+                with (
+                    mock.patch.object(publish, "msvcrt", FakeMsvcrt),
+                    publish.windows_process_lock(
+                        handle,
+                        sleeper=sleeps.append,
+                    ),
+                ):
+                    self.assertEqual(lock_path.stat().st_size, 0)
+            self.assertEqual(
+                calls,
+                [
+                    (FakeMsvcrt.LK_NBLCK, 1, 0),
+                    (FakeMsvcrt.LK_NBLCK, 1, 0),
+                    (FakeMsvcrt.LK_UNLCK, 1, 0),
+                ],
+            )
+            self.assertEqual(
+                sleeps,
+                [publish.WINDOWS_LOCK_RETRY_SECONDS],
+            )
+
+    def test_windows_process_lock_does_not_retry_foreign_error(self) -> None:
+        calls: list[int] = []
+        sleeps: list[float] = []
+
+        class FailingMsvcrt:
+            LK_NBLCK = 1
+            LK_UNLCK = 2
+
+            @staticmethod
+            def locking(
+                _descriptor: int,
+                mode: int,
+                _size: int,
+            ) -> None:
+                calls.append(mode)
+                raise OSError(publish.errno.EIO, "foreign failure")
+
+        with tempfile.TemporaryDirectory() as raw:
+            lock_path = Path(raw) / "publisher.lock"
+            with (
+                lock_path.open("a+b") as handle,
+                mock.patch.object(publish, "msvcrt", FailingMsvcrt),
+                self.assertRaises(OSError),
+                publish.windows_process_lock(
+                    handle,
+                    sleeper=sleeps.append,
+                ),
+            ):
+                self.fail("non-contention error unexpectedly acquired lock")
+        self.assertEqual(calls, [FailingMsvcrt.LK_NBLCK])
+        self.assertEqual(sleeps, [])
+
+    @unittest.skipUnless(
+        os.name == "nt",
+        "Windows kernel byte-range lock contract",
+    )
+    def test_windows_process_lock_contends_and_releases_on_process_exit(
+        self,
+    ) -> None:
+        holder_code = "\n".join([
+            "import pathlib, sys, time",
+            f"sys.path.insert(0, {str(HERE)!r})",
+            "import publish_test_channel as publish",
+            "lock = pathlib.Path(sys.argv[1])",
+            "ready = pathlib.Path(sys.argv[2])",
+            "with publish.process_lock(lock):",
+            "    ready.write_text('ready', encoding='utf-8')",
+            "    time.sleep(60)",
+        ])
+        waiter_code = "\n".join([
+            "import pathlib, sys",
+            f"sys.path.insert(0, {str(HERE)!r})",
+            "import publish_test_channel as publish",
+            "lock = pathlib.Path(sys.argv[1])",
+            "attempted = pathlib.Path(sys.argv[2])",
+            "entered = pathlib.Path(sys.argv[3])",
+            "attempted.write_text('attempted', encoding='utf-8')",
+            "with publish.process_lock(lock):",
+            "    entered.write_text('entered', encoding='utf-8')",
+        ])
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            lock_path = root / "publisher.lock"
+            ready = root / "holder-ready"
+            attempted = root / "waiter-attempted"
+            entered = root / "waiter-entered"
+            holder = subprocess.Popen(
+                [sys.executable, "-c", holder_code, str(lock_path), str(ready)],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            waiter = None
+            try:
+                deadline = time.monotonic() + 10
+                while not ready.is_file() and time.monotonic() < deadline:
+                    time.sleep(0.02)
+                self.assertTrue(ready.is_file(), "holder did not acquire lock")
+                waiter = subprocess.Popen(
+                    [
+                        sys.executable,
+                        "-c",
+                        waiter_code,
+                        str(lock_path),
+                        str(attempted),
+                        str(entered),
+                    ],
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                )
+                deadline = time.monotonic() + 10
+                while (
+                    not attempted.is_file()
+                    and time.monotonic() < deadline
+                ):
+                    time.sleep(0.02)
+                self.assertTrue(
+                    attempted.is_file(),
+                    "waiter did not reach lock attempt",
+                )
+                time.sleep(0.2)
+                self.assertFalse(
+                    entered.exists(),
+                    "waiter entered while holder still owned byte zero",
+                )
+                holder.kill()
+                holder.communicate(timeout=10)
+                waiter_stdout, waiter_stderr = waiter.communicate(timeout=10)
+                self.assertEqual(
+                    waiter.returncode,
+                    0,
+                    msg=waiter_stdout + waiter_stderr,
+                )
+                self.assertTrue(entered.is_file())
+                self.assertEqual(lock_path.stat().st_size, 0)
+            finally:
+                if holder.poll() is None:
+                    holder.kill()
+                    holder.communicate(timeout=10)
+                if waiter is not None and waiter.poll() is None:
+                    waiter.kill()
+                    waiter.communicate(timeout=10)
+
     def make_bundle(self, root: Path) -> dict[str, Path | dict]:
         root.mkdir(parents=True, exist_ok=True)
         manifest = release.read_json(HERE / "manifest.json")
@@ -107,11 +281,18 @@ class ReleasePipelineTests(unittest.TestCase):
             )
             secret = Path(raw) / "secret.txt"
             secret.write_text("release-secret", encoding="utf-8")
-            os.symlink(secret, fixture / "src" / "review-secret.js")
+            try:
+                os.symlink(secret, fixture / "src" / "review-secret.js")
+            except OSError as error:
+                if os.name == "nt" and getattr(error, "winerror", None) == 1314:
+                    self.skipTest(
+                        "Windows 未启用创建符号链接权限；生产门禁逻辑仍由其它平台覆盖"
+                    )
+                raise
             with self.assertRaises(SystemExit):
                 release.validate_source_layout(fixture)
 
-    def test_source_layout_ignores_only_windows_python_cache(self) -> None:
+    def test_source_layout_ignores_only_exact_windows_build_caches(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             fixture = Path(raw) / "bw-reader-webext"
             shutil.copytree(
@@ -122,9 +303,28 @@ class ReleasePipelineTests(unittest.TestCase):
             cache = fixture / "windows" / "__pycache__"
             cache.mkdir()
             (cache / "native_host.cpython-313.pyc").write_bytes(b"cache")
+            for generated in ("bin", "obj"):
+                generated_root = (
+                    fixture
+                    / "windows"
+                    / "ComputerVoiceAudio"
+                    / generated
+                    / "Release"
+                )
+                generated_root.mkdir(parents=True, exist_ok=True)
+                (generated_root / "generated.bin").write_bytes(b"generated")
+            candidate_root = fixture / "windows" / "candidates" / "0.4.1"
+            candidate_root.mkdir(parents=True, exist_ok=True)
+            (candidate_root / "candidate.zip").write_bytes(b"generated")
             release.validate_source_layout(fixture)
 
             (fixture / "windows" / "unexpected").mkdir()
+            with self.assertRaises(SystemExit):
+                release.validate_source_layout(fixture)
+
+            (fixture / "windows" / "unexpected").rmdir()
+            foreign_cache = fixture / "windows" / "OtherProject" / "bin"
+            foreign_cache.mkdir(parents=True)
             with self.assertRaises(SystemExit):
                 release.validate_source_layout(fixture)
 

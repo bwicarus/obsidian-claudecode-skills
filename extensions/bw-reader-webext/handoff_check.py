@@ -623,10 +623,46 @@ def audit_vendor(audit: Audit) -> None:
         return
     drift: list[str] = []
     unavailable: list[str] = []
+    preserved_pi_assets: list[str] = []
+
+    def is_tracked_unchanged(path: Path) -> bool:
+        try:
+            relative = path.relative_to(ROOT).as_posix()
+        except ValueError:
+            return False
+        tracked = subprocess.run(
+            ["git", "ls-files", "--error-unmatch", "--", relative],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        unchanged = subprocess.run(
+            ["git", "diff", "--quiet", "HEAD", "--", relative],
+            cwd=ROOT,
+            capture_output=True,
+            text=True,
+            check=False,
+        )
+        return (
+            tracked.returncode == 0
+            and unchanged.returncode == 0
+            and path.is_file()
+            and not path.is_symlink()
+        )
+
     for rel, name in build.LIBS.items():
-        source = Path(rel) if Path(rel).is_absolute() else build.SRC / rel
+        pi_absolute = rel.startswith("/")
+        source = (
+            Path(rel)
+            if Path(rel).is_absolute() or pi_absolute
+            else build.SRC / rel
+        )
         target = build.DST / name
         if not source.is_file():
+            if pi_absolute and is_tracked_unchanged(target):
+                preserved_pi_assets.append(name)
+                continue
             unavailable.append(str(source))
             continue
         if not target.is_file() or target.read_bytes() != source.read_bytes():
@@ -658,7 +694,13 @@ def audit_vendor(audit: Audit) -> None:
     if drift:
         audit.error("vendor 与唯一源码漂移；运行 build.py: " + ", ".join(drift))
     if not unavailable and not drift:
-        audit.ok("vendor 与共享源码逐字一致")
+        suffix = (
+            "；Windows 保留且确认未改的 Pi-only vendor: "
+            + ", ".join(preserved_pi_assets)
+            if preserved_pi_assets
+            else ""
+        )
+        audit.ok("vendor 与共享源码逐字一致" + suffix)
 
 
 def audit_syntax(audit: Audit) -> None:

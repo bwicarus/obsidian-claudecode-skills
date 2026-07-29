@@ -6,6 +6,7 @@ import argparse
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
+import errno
 import hashlib
 import json
 import os
@@ -14,6 +15,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Iterator
 import zipfile
 
@@ -21,6 +23,11 @@ try:
     import fcntl
 except ImportError:  # pragma: no cover - deployment runs on Linux
     fcntl = None
+
+try:
+    import msvcrt
+except ImportError:  # pragma: no cover - Windows-only release tooling
+    msvcrt = None
 
 import release_preflight as contract
 
@@ -32,6 +39,12 @@ DEPLOY_BACKUP_ROOT = pathlib.Path("/home/bwicarus/deploy-backups/reader")
 LAUNCHER_VERSION = contract.LAUNCHER_VERSION
 WEB_TEST_URL = contract.WEB_TEST_URL
 CHANNEL_BACKUP_SCHEMA = 1
+WINDOWS_LOCK_RETRY_SECONDS = 0.05
+WINDOWS_LOCK_BUSY_ERRNOS = frozenset({
+    errno.EACCES,
+    errno.EAGAIN,
+    errno.EDEADLK,
+})
 
 
 @dataclass(frozen=True)
@@ -59,18 +72,49 @@ def report_status(message: str) -> None:
 
 
 @contextmanager
+def windows_process_lock(
+    handle: object,
+    *,
+    sleeper: object = time.sleep,
+) -> Iterator[None]:
+    """Lock byte zero with Windows kernel ownership and retry contention."""
+
+    if msvcrt is None:
+        fail("Windows 平台缺少 msvcrt 发布进程锁")
+    while True:
+        handle.seek(0)
+        try:
+            msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+            break
+        except OSError as error:
+            if error.errno not in WINDOWS_LOCK_BUSY_ERRNOS:
+                raise
+            sleeper(WINDOWS_LOCK_RETRY_SECONDS)
+    try:
+        yield
+    finally:
+        handle.seek(0)
+        msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+
+
+@contextmanager
 def process_lock(path: pathlib.Path) -> Iterator[None]:
     """Serialize publishers without leaving lock artifacts in the workspace."""
 
-    if fcntl is None:
-        fail("当前平台不支持发布所需的进程锁")
     path.parent.mkdir(parents=True, exist_ok=True)
     with path.open("a+b") as handle:
-        fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        if os.name == "nt":
+            with windows_process_lock(handle):
+                yield
+            return
+        if fcntl is not None:
+            fcntl.flock(handle.fileno(), fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+            return
+        fail("当前平台不支持发布所需的进程锁")
 
 
 def lock_path(kind: str, target: pathlib.Path) -> pathlib.Path:
@@ -131,6 +175,11 @@ def write_regular(path: pathlib.Path, content: bytes) -> None:
 
 
 def fsync_directory(path: pathlib.Path) -> None:
+    if os.name == "nt":
+        # Windows does not allow os.open() on a directory.  File payloads are
+        # still flushed before ReplaceFile/rename; directory-handle durability
+        # is a POSIX-only strengthening used by the Pi publisher.
+        return
     descriptor = os.open(path, os.O_RDONLY)
     try:
         os.fsync(descriptor)
@@ -419,11 +468,7 @@ def immutable_copy(source: pathlib.Path, target: pathlib.Path) -> None:
             os.link(temp_path, target)
         except FileExistsError:
             assert_immutable_compatible(source, target, label="版本化生成物")
-        directory_fd = os.open(target.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        fsync_directory(target.parent)
     finally:
         if temp_path.exists():
             temp_path.unlink()
@@ -453,11 +498,7 @@ def atomic_copy(source: pathlib.Path, target: pathlib.Path) -> None:
         temp_path.chmod(0o644)
         os.replace(temp_path, target)
         target.chmod(0o644)
-        directory_fd = os.open(target.parent, os.O_RDONLY)
-        try:
-            os.fsync(directory_fd)
-        finally:
-            os.close(directory_fd)
+        fsync_directory(target.parent)
     finally:
         if temp_path.exists():
             temp_path.unlink()

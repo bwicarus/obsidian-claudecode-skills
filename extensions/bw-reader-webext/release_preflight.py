@@ -34,7 +34,7 @@ OFFICIAL_STATIC_PATH = "/static/pdf"
 OFFICIAL_STATIC_URL = OFFICIAL_ORIGIN + OFFICIAL_STATIC_PATH
 CHANNEL_SCHEMA = 1
 WEB_TEST_URL = "https://en.wikipedia.org/wiki/Reading"
-LAUNCHER_VERSION = 10
+LAUNCHER_VERSION = 11
 
 ROOT_FILES = (
     "manifest.json",
@@ -84,6 +84,16 @@ WINDOWS_SOURCE_FILES = (
     "ComputerVoiceAudio/AudioBridgeContract.cs",
     "ComputerVoiceAudio/ComputerVoiceAudio.csproj",
     "ComputerVoiceAudio/ContractSelfTest.cs",
+    "ComputerVoiceAudio/DirectBridgeAdapters.cs",
+    "ComputerVoiceAudio/DirectBridgeConfig.cs",
+    "ComputerVoiceAudio/DirectBridgeContract.cs",
+    "ComputerVoiceAudio/DirectBridgeProtocol.cs",
+    "ComputerVoiceAudio/DirectBridgeSelfTest.cs",
+    "ComputerVoiceAudio/DirectBridgeServer.cs",
+    "ComputerVoiceAudio/DirectConnectionPhaseDeadline.cs",
+    "ComputerVoiceAudio/DirectPcmFrame.cs",
+    "ComputerVoiceAudio/DirectRuntimeStatus.cs",
+    "ComputerVoiceAudio/DirectServiceLease.cs",
     "ComputerVoiceAudio/ExplicitMicrophoneCaptureSession.cs",
     "ComputerVoiceAudio/Interop/ExplicitMicrophoneInterop.cs",
     "ComputerVoiceAudio/Interop/ProcessLoopbackInterop.cs",
@@ -97,7 +107,19 @@ WINDOWS_SOURCE_FILES = (
     "ComputerVoiceAudio/README.md",
     "ComputerVoiceAudio/SharedEventDrivenPcmRuntime.cs",
     "ComputerVoiceAudio/WindowsCodexAppProbe.cs",
+    "ComputerVoiceAudio/WindowsDirectAdapters.cs",
+    "ComputerVoiceAudio/computer-voice-direct.config.example.json",
     "ComputerVoiceAudio/computer-voice-native.config.example.json",
+    "computer-voice-desktop/README.md",
+    "computer-voice-desktop/bridge_core.py",
+    "computer-voice-desktop/computer-voice-direct.config.example.json",
+    "computer-voice-desktop/control_plane.py",
+    "computer-voice-desktop/desktop_launcher.py",
+    "computer-voice-desktop/tests/test_bridge_core.py",
+    "computer-voice-desktop/tests/test_control_plane.py",
+    "computer-voice-desktop/tests/test_desktop_launcher.py",
+    "package_computer_voice_direct.py",
+    "test_computer_voice_direct_package.py",
 )
 LAUNCHER_PS1 = "BW扩展测试.ps1"
 LAUNCHER_CHANNEL_BASENAME = "bw-reader-extension-test"
@@ -305,6 +327,7 @@ def _audit_exact_directory(
     *,
     label: str,
     ignored_directory_names: frozenset[str] = frozenset(),
+    ignored_relative_directories: frozenset[str] = frozenset(),
 ) -> None:
     if root.is_symlink() or not root.is_dir():
         fail(f"{label} 目录不存在或是符号链接: {root}")
@@ -316,6 +339,12 @@ def _audit_exact_directory(
         relative = path.relative_to(root).as_posix()
         if path.is_symlink():
             fail(f"{label} 不允许符号链接: {relative}")
+        if any(
+            relative == ignored
+            or relative.startswith(ignored + "/")
+            for ignored in ignored_relative_directories
+        ):
+            continue
         if any(part in ignored_directory_names for part in path.relative_to(root).parts):
             continue
         if path.is_dir():
@@ -357,6 +386,17 @@ def validate_source_layout(source_root: Path = HERE) -> None:
         # cache before the release audit.  It is never packaged and must not
         # turn a successful validation run into a false source-layout failure.
         ignored_directory_names=frozenset({"__pycache__"}),
+        # The direct C# self-test is required before release auditing and
+        # creates only these two project-local build trees.  The standalone
+        # direct-bridge packager likewise writes only beneath the fixed
+        # candidates root.  Keep every exemption path-exact so an unrelated
+        # build or candidate directory still fails closed and no generated
+        # file can enter the source snapshot.
+        ignored_relative_directories=frozenset({
+            "ComputerVoiceAudio/bin",
+            "ComputerVoiceAudio/obj",
+            "candidates",
+        }),
     )
     if any(not name.endswith(".js") for name in (*SRC_FILES, *expected_vendor_files(source_root))):
         fail("src/vendor 白名单只能包含 .js")
