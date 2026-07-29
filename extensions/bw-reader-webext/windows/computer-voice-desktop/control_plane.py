@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 from dataclasses import dataclass
 import json
+import locale
 import os
 from pathlib import Path
 import re
@@ -102,6 +103,27 @@ class ExactCommandRunner(Protocol):
         ...
 
 
+def _decode_command_output(
+    value: bytes | str,
+    *,
+    fallback_encoding: str | None = None,
+) -> str:
+    if isinstance(value, str):
+        return value
+    encodings = ("utf-8", fallback_encoding or locale.getencoding())
+    tried: set[str] = set()
+    for encoding in encodings:
+        normalized = encoding.casefold()
+        if normalized in tried:
+            continue
+        tried.add(normalized)
+        try:
+            return value.decode(encoding)
+        except (LookupError, UnicodeDecodeError):
+            continue
+    raise BridgeError("控制命令输出编码无效。")
+
+
 class SubprocessExactCommandRunner:
     def run_exact(
         self,
@@ -111,15 +133,26 @@ class SubprocessExactCommandRunner:
     ) -> subprocess.CompletedProcess[str]:
         if not command:
             raise BridgeError("控制命令为空。")
-        return subprocess.run(
+        completed = subprocess.run(
             list(command),
             check=False,
             stdin=subprocess.DEVNULL,
             capture_output=True,
-            text=True,
+            text=False,
             timeout=timeout_seconds,
             shell=False,
             creationflags=CREATE_NO_WINDOW if os.name == "nt" else 0,
+        )
+        if isinstance(completed.stdout, str) and isinstance(
+            completed.stderr,
+            str,
+        ):
+            return completed
+        return subprocess.CompletedProcess(
+            completed.args,
+            completed.returncode,
+            _decode_command_output(completed.stdout),
+            _decode_command_output(completed.stderr),
         )
 
 
@@ -154,6 +187,17 @@ def _validate_user_sid(value: str) -> str:
     value = value.strip()
     if len(value) > 184 or not SID_RE.fullmatch(value):
         raise BridgeError("当前 Windows 用户 SID 无效。")
+    return value
+
+
+def _validate_user_name(value: str) -> str:
+    value = value.strip()
+    if (
+        not value
+        or len(value) > 256
+        or any(ord(character) < 32 for character in value)
+    ):
+        raise BridgeError("当前 Windows 用户名无效。")
     return value
 
 
@@ -235,7 +279,7 @@ def build_task_xml(paths: BridgePaths, user_sid: str) -> bytes:
     )
     return ET.tostring(
         task,
-        encoding="utf-8",
+        encoding="utf-16",
         xml_declaration=True,
     )
 
@@ -257,6 +301,8 @@ def task_xml_is_owned(
     xml: str | bytes,
     paths: BridgePaths,
     user_sid: str,
+    *,
+    user_name: str | None = None,
 ) -> bool:
     try:
         root = ET.fromstring(xml)
@@ -292,16 +338,44 @@ def task_xml_is_owned(
     principal = principals[0]
     if principal.attrib != {"id": "Author"}:
         return False
+    trigger_user = _single_text(
+        root,
+        "./t:Triggers/t:LogonTrigger/t:UserId",
+    )
+    allowed_trigger_users = {sid.casefold()}
+    if user_name is not None:
+        allowed_trigger_users.add(
+            _validate_user_name(user_name).casefold()
+        )
+    if (
+        trigger_user is None
+        or trigger_user.casefold() not in allowed_trigger_users
+    ):
+        return False
+    trigger_enabled = root.findall(
+        "./t:Triggers/t:LogonTrigger/t:Enabled",
+        ns,
+    )
+    if len(trigger_enabled) > 1 or (
+        trigger_enabled
+        and (trigger_enabled[0].text or "") != "true"
+    ):
+        return False
+    run_level = root.findall(
+        "./t:Principals/t:Principal/t:RunLevel",
+        ns,
+    )
+    if len(run_level) > 1 or (
+        run_level
+        and (run_level[0].text or "") != "LeastPrivilege"
+    ):
+        return False
     expected = {
         "./t:RegistrationInfo/t:Description":
             TASK_DESCRIPTION_MARKER,
-        "./t:Triggers/t:LogonTrigger/t:UserId": sid,
-        "./t:Triggers/t:LogonTrigger/t:Enabled": "true",
         "./t:Principals/t:Principal/t:UserId": sid,
         "./t:Principals/t:Principal/t:LogonType":
             "InteractiveToken",
-        "./t:Principals/t:Principal/t:RunLevel":
-            "LeastPrivilege",
         "./t:Settings/t:MultipleInstancesPolicy": "IgnoreNew",
         "./t:Settings/t:StartWhenAvailable": "true",
         "./t:Settings/t:RunOnlyIfNetworkAvailable": "true",
@@ -386,10 +460,10 @@ def _run(
     )
 
 
-def current_user_sid(
+def current_user_identity(
     control_paths: ControlPaths,
     runner: ExactCommandRunner,
-) -> str:
+) -> tuple[str, str]:
     placeholder = (
         Path(tempfile.gettempdir())
         / TASK_TEMP_PREFIX
@@ -405,7 +479,17 @@ def current_user_sid(
         raise BridgeError("当前 Windows 用户 SID 输出无效。") from error
     if len(row) != 2:
         raise BridgeError("当前 Windows 用户 SID 输出无效。")
-    return _validate_user_sid(row[1])
+    return (
+        _validate_user_name(row[0]),
+        _validate_user_sid(row[1]),
+    )
+
+
+def current_user_sid(
+    control_paths: ControlPaths,
+    runner: ExactCommandRunner,
+) -> str:
+    return current_user_identity(control_paths, runner)[1]
 
 
 def inspect_bootstrap_task(
@@ -414,8 +498,20 @@ def inspect_bootstrap_task(
     runner: ExactCommandRunner,
     *,
     user_sid: str | None = None,
+    user_name: str | None = None,
 ) -> TaskInspection:
-    sid = user_sid or current_user_sid(control_paths, runner)
+    if user_sid is None:
+        account_name, sid = current_user_identity(
+            control_paths,
+            runner,
+        )
+    else:
+        sid = _validate_user_sid(user_sid)
+        account_name = (
+            _validate_user_name(user_name)
+            if user_name is not None
+            else None
+        )
     placeholder = (
         Path(tempfile.gettempdir())
         / TASK_TEMP_PREFIX
@@ -433,7 +529,12 @@ def inspect_bootstrap_task(
         raise BridgeError("计划任务只读查询失败。")
     return TaskInspection(
         True,
-        task_xml_is_owned(result.stdout, paths, sid),
+        task_xml_is_owned(
+            result.stdout,
+            paths,
+            sid,
+            user_name=account_name,
+        ),
         sid,
     )
 
@@ -451,12 +552,16 @@ def install_bootstrap_task(
         [], ContextManager[str]
     ] = _temporary_directory,
 ) -> bool:
-    sid = current_user_sid(control_paths, runner)
+    account_name, sid = current_user_identity(
+        control_paths,
+        runner,
+    )
     existing = inspect_bootstrap_task(
         paths,
         control_paths,
         runner,
         user_sid=sid,
+        user_name=account_name,
     )
     if existing.exists:
         raise BridgeError(
@@ -484,6 +589,7 @@ def install_bootstrap_task(
         control_paths,
         runner,
         user_sid=sid,
+        user_name=account_name,
     )
     if verified.exists and verified.owned:
         return True

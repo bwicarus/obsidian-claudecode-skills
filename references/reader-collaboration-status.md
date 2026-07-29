@@ -3338,3 +3338,37 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
   8767 监听、事务 complete；生产直连 UI 已生效且旧“生成一次性配对码”按钮不存在。
 - Windows 服务当前仅本机 idle：43128 监听但 Serve `{}`、无 bootstrap、未连接 Reader、
   `captureActive=false`；下一步由用户直接在生产 PWA 反馈配对/通话结果。
+
+## Codex：Windows 直连首次配对与登录守护完成（2026-07-29 11:18 JST）
+
+- **生产配对已完成**：固定 Tailscale Serve 从空配置变为唯一 owned 映射
+  `/reader-computer-voice/v1 → 127.0.0.1:43128/reader-computer-voice/v1`；一次性码明文仅在
+  内存与生产 PWA 输入框中短暂存在，Windows 只落 SHA-256 摘要。配对后摘要与期限已清空，
+  Windows 只保存 Reader 公钥/指纹；同一 PWA 刷新后及后台守护接管后都仅凭 IndexedDB 中
+  不可导出 P-256 私钥自动认证，稳定显示“Windows 桥接器已就绪”，不再需要配对码。
+- **真实超时根因与 C# 修复**：0.1.0 运行进程的 `/healthz`、直连路径和未知路径全为 404。
+  `DirectBridgeServer` 把 fallback 404 注册成 terminal middleware，先于 endpoint 执行；改为
+  `MapFallback` 后 healthz=200。直连 handler 又把 endpoint 路由保留的当前 Path 当成后缀而
+  主动 404；删除重复判断后，精确路径普通 GET=426、额外后缀=404，Tailscale HTTPS 同路径
+  也为 426，证明 WSS 请求已经到达固定 listener。
+- **Windows 任务兼容修复**：Python UTF-8 mode 会把中文 Windows 的 `schtasks.exe` CP936
+  输出误按 UTF-8 解码；runner 现先严格 UTF-8、失败再严格使用 `locale.getencoding()`。
+  Task Scheduler 对无 BOM 的 UTF-8 XML 报“无法切换编码”，生成物已改为 UTF-16。Windows
+  导入后会把 logon-trigger SID 规范化为当前账户名，并省略默认的 `Enabled=true` 与
+  `RunLevel=LeastPrivilege`；ownership 现在只接受由同一次 `whoami` 验证的账户名或当前 SID，
+  仍要求 principal SID、marker、唯一 trigger/action、固定 EXE/参数/工作目录及关键设置精确。
+  桌面控制隔离测试 **65/65** 通过。
+- **最终安装与守护**：不可变最终候选为本机忽略目录中的 `0.1.5`，包内双 self-test 通过。
+  已安装 native SHA-256
+  `d643ce7903ba0f06e36e6e52e14d8561c1fc15339190ea61e269cc1343828c87`，desktop SHA-256
+  `d4b01b2060e8237ebc7ec318c633a4ce1a7a1216164f53f8368604d23f41d8ab`；最终桌面备份在
+  `C:\Users\bwica\bw-computer-voice-bridge-backups\desktop-0.1.5-20260729T021513892Z`，
+  此前每次 native/双 EXE 热修也均各有时间戳备份。任务
+  `BW Computer Voice Direct Bootstrap` 已创建、ownership 通过且 Running；listener PID
+  连续复核稳定、healthz=200、Serve 路径=426。
+- **安全后验与剩余边界**：最终 `localOptIn=true`、paired client 存在、pending code 为空、
+  service online、`readerConnected=false`（状态短连接已正常关闭）、`captureActive=false`。
+  安装路径两个 self-test 均 exit 0，音频报告 `audioActivated=false`。本轮只做
+  HELLO/PAIR/AUTH/STATUS，没有发送 START，没有启动通话、采音、typist、快捷键或应用输出。
+  真实电话按钮的自动打开 Codex、麦克风/process-only output 和声音听感仍留给用户醒后生产
+  实测；该真实音频 E2E 尚未冒充通过。

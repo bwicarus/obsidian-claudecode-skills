@@ -28,6 +28,7 @@ from control_plane import (  # noqa: E402
     TASK_DESCRIPTION_MARKER,
     TASK_NAME,
     TASK_TEMP_PREFIX,
+    _decode_command_output,
     apply_tailscale_serve,
     build_task_command_plan,
     build_task_xml,
@@ -72,6 +73,32 @@ class ScriptedRunner:
 
 
 class ControlPlaneTests(unittest.TestCase):
+    def test_command_output_decoder_prefers_utf8_then_system_encoding(
+        self,
+    ) -> None:
+        self.assertEqual(
+            _decode_command_output(
+                "直连正常".encode("utf-8"),
+                fallback_encoding="cp936",
+            ),
+            "直连正常",
+        )
+        self.assertEqual(
+            _decode_command_output(
+                "错误".encode("cp936"),
+                fallback_encoding="cp936",
+            ),
+            "错误",
+        )
+        with self.assertRaisesRegex(
+            BridgeError,
+            "控制命令输出编码无效",
+        ):
+            _decode_command_output(
+                b"\xff",
+                fallback_encoding="ascii",
+            )
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)
@@ -98,7 +125,7 @@ class ControlPlaneTests(unittest.TestCase):
         self.owned_xml = build_task_xml(
             self.paths,
             USER_SID,
-        ).decode("utf-8")
+        ).decode("utf-16")
         self.serve_json = json.dumps(
             {
                 "TCP": {
@@ -150,7 +177,7 @@ class ControlPlaneTests(unittest.TestCase):
             check=False,
             stdin=subprocess.DEVNULL,
             capture_output=True,
-            text=True,
+            text=False,
             timeout=7.0,
             shell=False,
             creationflags=mock.ANY,
@@ -167,6 +194,45 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertIn("<Arguments>--bootstrap</Arguments>", xml)
         self.assertNotIn("--direct-serve", xml)
         self.assertTrue(task_xml_is_owned(xml, self.paths, USER_SID))
+
+    def test_task_ownership_accepts_only_windows_canonical_user_defaults(
+        self,
+    ) -> None:
+        namespace = (
+            "http://schemas.microsoft.com/windows/2004/02/mit/task"
+        )
+        root = ET.fromstring(self.owned_xml)
+        trigger = root.find(
+            f"./{{{namespace}}}Triggers/"
+            f"{{{namespace}}}LogonTrigger"
+        )
+        principal = root.find(
+            f"./{{{namespace}}}Principals/"
+            f"{{{namespace}}}Principal"
+        )
+        self.assertIsNotNone(trigger)
+        self.assertIsNotNone(principal)
+        trigger.find(f"{{{namespace}}}UserId").text = "DESKTOP\\reader"
+        trigger.remove(trigger.find(f"{{{namespace}}}Enabled"))
+        principal.remove(principal.find(f"{{{namespace}}}RunLevel"))
+        canonical = ET.tostring(root, encoding="unicode")
+
+        self.assertTrue(
+            task_xml_is_owned(
+                canonical,
+                self.paths,
+                USER_SID,
+                user_name="desktop\\READER",
+            )
+        )
+        self.assertFalse(
+            task_xml_is_owned(
+                canonical,
+                self.paths,
+                USER_SID,
+                user_name="DESKTOP\\another-user",
+            )
+        )
 
     def test_task_ownership_rejects_any_extra_trigger_or_action(self) -> None:
         namespace = (

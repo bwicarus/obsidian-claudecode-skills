@@ -94,7 +94,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         app.Map(
             "/reader-computer-voice/v1",
             context => HandleBridgeAsync(context, cancellationToken));
-        app.Run(context =>
+        app.MapFallback(context =>
         {
             context.Response.StatusCode = StatusCodes.Status404NotFound;
             return Task.CompletedTask;
@@ -204,11 +204,6 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         HttpContext context,
         CancellationToken serviceCancellationToken)
     {
-        if (context.Request.Path.HasValue)
-        {
-            context.Response.StatusCode = StatusCodes.Status404NotFound;
-            return;
-        }
         if (
             !HttpMethods.IsGet(context.Request.Method)
             || !context.WebSockets.IsWebSocketRequest
