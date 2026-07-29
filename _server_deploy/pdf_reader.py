@@ -2898,8 +2898,12 @@ def _maybe_emit_page_context(rec: dict, body: dict) -> None:
         if _PAGE_CTX_SENT.get("key") == key:
             return                      # 同一状态已发过;换页/改选区时下面会重置
         import reader_outgoing_context as _OC
+        # viewport 由客户端在上报里带(EPUB 用:{para:N} 或 {ratio:0~1});
+        # 不带就退回整章,并在 text_source 里注明,不假装那是"用户正在看的一屏"。
+        _vp = body.get("viewport") if isinstance(body.get("viewport"), dict) else None
         ctx = _OC.build_page_context(__import__("sys").modules[__name__], rel, page,
-                                     reason=("selection" if has_sel else "dwell"))
+                                     reason=("selection" if has_sel else "dwell"),
+                                     viewport=_vp)
         if has_sel:
             ctx["selection"] = sel[:400]
         jr.append("page.context", {

@@ -21,6 +21,8 @@ import time
 CONTRACT = "reader-outgoing-context/1"
 
 DRAW_STABLE_S = 1.0      # 停笔多久算稳定(任务书:约 1 秒)
+INK_FRESH_S = 120.0      # 笔迹"近期"窗口(任务书首版建议 120 秒);超过即 stale
+EPUB_VIEWPORT_PAD = 6    # EPUB 以视口为中心向上下各扩展几段(任务书一:不按章节整段灌入)
 FOCUS_FRESH_S = 300.0    # 焦点新鲜窗口:超过就不再当"当前"
 FOCUS_KINDS = ("text", "image", "card", "drawing", "region")
 
@@ -38,8 +40,9 @@ class DrawingRevisions:
     这里用**内容摘要 + 静默计时**:摘要变了就重新计时,静默满 DRAW_STABLE_S 才升版本。
     """
 
-    def __init__(self, stable_s: float = DRAW_STABLE_S):
+    def __init__(self, stable_s: float = DRAW_STABLE_S, fresh_s: float = INK_FRESH_S):
         self.stable_s = stable_s
+        self.fresh_s = fresh_s
         self._st: dict[str, dict] = {}
         self._lock = threading.Lock()
 
@@ -67,9 +70,28 @@ class DrawingRevisions:
     def _snapshot(self, k: str, st: dict, now: float) -> dict:
         file, _, page = k.rpartition("#")
         empty = st["digest"] == _digest({}) or st["digest"] == _digest([])
+        # 三态(任务书二):正文问答默认只看正文,靠这个字段决定要不要去读综合图。
+        #   none   = 无笔迹,永远不用读图
+        #   recent = 刚画过(或正在画),问题涉及圈画/算式/箭头时应直接读最新图,
+        #            不要求用户再说一遍"我刚画了"
+        #   stale  = 有旧笔迹,除非用户明确提到圈画/标注,否则不读
+        # lastEditedAt 取"最后一次内容变化"而非升版本时刻:正在画时也要能报新鲜。
+        # ⚠ 字段名是 freshness 不是 state:journal 的 drawing 事件里 `state` 已经表示
+        # pending/stable(稳定性),同名会让消费方看到两套值域。
+        last_edited = st["changed_at"]
+        if empty:
+            freshness = "none"
+        elif (now - last_edited) <= self.fresh_s:
+            freshness = "recent"
+        else:
+            freshness = "stale"
         return {
             "contract": CONTRACT,
             "file": file, "page": page,
+            "freshness": freshness,
+            "lastEditedAt": None if empty else round(last_edited, 3),
+            "freshWindowS": self.fresh_s,
+            "inProgress": st["revision"] is None and not empty,   # 落笔中,尚无稳定版本
             "stable": st["revision"] is not None,
             "drawingRevision": st["revision"],          # 未稳定时为 None,**不给引用**
             "pendingSince": None if st["revision"] else round(now - st["changed_at"], 3),
@@ -242,7 +264,204 @@ class OutgoingJournal:
 PAGE_TEXT_LIMIT = 4000   # 单页正文进 journal 的上限;注入侧还会再截一次
 
 
-def build_page_context(pdf, rel: str, page, *, reason: str = "dwell") -> dict:
+# 绘图状态的进程内共享单例。build_page_context 与 /api/drawing-state 路由必须看同一份:
+# 稳定期计时和 revision 都是有状态的,两份实例会互相看不见对方的观察。
+_DRAWINGS = DrawingRevisions()
+
+
+# ── 正文锚定嵌入内容(任务书四)────────────────────────────────────────────
+# 高亮、卡片、便签等都绑定到正文中的具体范围,复用同一套锚定/排序/插入机制。
+# 铁律:高亮**不复制到页尾列表**,而是在原文范围内用边界标记包住 —— 正文只出现一次。
+MARK_L, MARK_R = "⟦", "⟧"      # ⟦ ⟧
+
+
+def _escape_marks(s: str) -> str:
+    """正文原本含保留符号时必须转义,否则消费方会把它误当成我们的边界。
+
+    规则:反斜杠自身先转义,再给 ⟦ ⟧ 各加一个反斜杠。消费方见 `\\⟦` 一律当普通字符。
+    """
+    return (str(s).replace("\\", "\\\\")
+            .replace(MARK_L, "\\" + MARK_L)
+            .replace(MARK_R, "\\" + MARK_R))
+
+
+class MarkEscapeError(ValueError):
+    """转义序列不合法。消费端必须 fail closed,不许猜。"""
+
+
+def unescape_marks(s: str) -> str:
+    """`_escape_marks` 的逆运算 —— **消费端硬合同**(Codex 07:37 冻结)。
+
+    规则:**单次从左到右扫描**,只反转 `\\\\`→`\\`、`\\⟦`→`⟦`、`\\⟧`→`⟧`;
+    未知反斜杠序列(如 `\\n`)**原样保留两个字符**;末尾悬空的 `\\` **fail closed**。
+
+    ⚠ 禁止用连续 `replace` 实现:`replace("\\\\⟦","⟦").replace("\\\\\\\\","\\\\")` 会把
+    `\\\\⟦`(正文里的反斜杠 + 我们的标记)错误地二次反转义成 `⟦`,标记边界就此错乱。
+    """
+    src = str(s or "")
+    out: list[str] = []
+    i, n = 0, len(src)
+    while i < n:
+        c = src[i]
+        if c != "\\":
+            out.append(c)
+            i += 1
+            continue
+        if i + 1 >= n:
+            raise MarkEscapeError("末尾悬空的反斜杠:无法判定是转义还是正文")
+        nxt = src[i + 1]
+        if nxt in ("\\", MARK_L, MARK_R):
+            out.append(nxt)          # 已知转义:吃掉反斜杠,只留被转义的那个字符
+        else:
+            out.append(c)            # 未知序列:两个字符原样保留,不猜语义
+            out.append(nxt)
+        i += 2
+    return "".join(out)
+
+
+def _attr(s: str, limit: int = 120) -> str:
+    """标记属性值:压成单行、去引号,避免把边界标记本身弄坏。"""
+    v = " ".join(str(s or "").split())[:limit]
+    return v.replace('"', "'").replace(MARK_L, "").replace(MARK_R, "")
+
+
+def annotate_page_text(text: str, highlights=(), blocks=()) -> tuple[str, list]:
+    """把高亮包进正文原位,块状附属内容按锚定顺序插入。
+
+    返回 `(annotated, unanchored)`。**定位不到的高亮不塞进正文** —— 塞了正文就会出现
+    两次,违背"正文只出现一次";改为回报 unanchored,由上游决定要不要单独提。
+
+    重叠的高亮只保留先命中的那条:边界标记不能交叉,否则消费方无法解析。
+    """
+    src = str(text or "")
+    if not src:
+        return "", [dict(h, _reason="empty_text") for h in (highlights or [])]
+
+    esc = _escape_marks(src)
+    spans: list[tuple[int, int, dict]] = []
+    unanchored: list = []
+    taken: list[tuple[int, int]] = []
+
+    for h in (highlights or []):
+        needle = _escape_marks(" ".join(str(h.get("text") or "").split()))
+        if not needle:
+            unanchored.append(dict(h, _reason="no_text"))
+            continue
+        # 正文换行与高亮里的空白往往不一致,先按原样找,找不到再退回压缩空白后找。
+        pos = esc.find(needle)
+        if pos < 0:
+            flat = " ".join(esc.split())
+            p2 = flat.find(needle)
+            if p2 < 0:
+                unanchored.append(dict(h, _reason="not_found_in_page_text"))
+                continue
+            # 压缩空白后能找到,说明是换行差异:此时不做近似定位(会错位),照实回报。
+            unanchored.append(dict(h, _reason="whitespace_mismatch"))
+            continue
+        end = pos + len(needle)
+        if any(pos < b and a < end for a, b in taken):
+            unanchored.append(dict(h, _reason="overlaps_earlier_highlight"))
+            continue
+        taken.append((pos, end))
+        spans.append((pos, end, h))
+
+    # 从后往前插入,否则先插入的标记会让后面的偏移全部失效。
+    out = esc
+    for pos, end, h in sorted(spans, key=lambda x: x[0], reverse=True):
+        attrs = ""
+        if h.get("color"):
+            attrs += f' color="{_attr(h["color"], 24)}"'
+        if h.get("note"):
+            attrs += f' note="{_attr(h["note"])}"'
+        out = (out[:pos] + f"{MARK_L}HIGHLIGHT{attrs}{MARK_R}" + out[pos:end]
+               + f"{MARK_L}/HIGHLIGHT{MARK_R}" + out[end:])
+
+    # 块状附属内容:卡片/便签没有正文字符锚,只有页面坐标锚,因此紧随正文之后按序给出,
+    # 并带上它绑定的是什么。它们是补充绑定元素的内容,不是对整段的解释。
+    for b in (blocks or []):
+        kind = _attr(b.get("kind") or "note", 32)
+        body = _escape_marks(b.get("text") or "")
+        head = f'{MARK_L}CARD_START type="{kind}"'
+        if b.get("label"):
+            head += f' label="{_attr(b["label"])}"'
+        out += f"\n\n{head}{MARK_R}{body}{MARK_L}CARD_END{MARK_R}"
+
+    return out, unanchored
+
+
+def _viewport_center(viewport, total: int):
+    """把客户端上报的视口折算成"以第几段为中心"。拿不到就返回 None(退回整章)。
+
+    接受两种上报,哪种客户端方便就用哪种:
+      {"para": 12}      —— 可见区中心的段序号
+      {"ratio": 0.35}   —— 可见区中心在本章的相对位置(0~1),epub.js 的百分比进度直接可用
+    不接受猜测:没有可用字段时不瞎估位置,错位的"视口"比整章更有害。
+    """
+    if not isinstance(viewport, dict) or total <= 0:
+        return None
+    p = viewport.get("para", viewport.get("index"))
+    if isinstance(p, bool) is False and isinstance(p, int) and 0 <= p < total:
+        return p
+    r = viewport.get("ratio", viewport.get("progress"))
+    if isinstance(r, bool) is False and isinstance(r, (int, float)) and 0.0 <= float(r) <= 1.0:
+        return min(total - 1, max(0, int(round(float(r) * (total - 1)))))
+    return None
+
+
+def _page_embeds(pdf, rel: str, page) -> tuple[list, list]:
+    """取该页的高亮与块状附属内容。任一 sidecar 缺失/损坏都只让那一类为空,不影响正文。
+
+    PDF 高亮按 `page` 过滤;EPUB 高亮的锚是 `anchor.section`(page 参数在 EPUB 语义下即 section)。
+    便签只有页面坐标锚、没有正文字符锚,所以归到块状内容;其中 card/html/video 便签
+    是任务书说的"绑定在页面元素上的工具卡",纯文本便签同样走这条管线。
+    """
+    is_epub = str(rel).lower().endswith(".epub")
+    pg = str(page)
+    hls: list = []
+    try:
+        if is_epub:
+            for h in (pdf._epub_hl_load(rel) or []):
+                a = h.get("anchor") if isinstance(h.get("anchor"), dict) else {}
+                if str(a.get("section", "")) == pg:
+                    hls.append(h)
+        else:
+            for h in ((pdf._hl_load(rel) or {}).get("highlights") or []):
+                if str(h.get("page", "")) == pg:
+                    hls.append(h)
+    except Exception:
+        hls = []
+
+    blocks: list = []
+    try:
+        for n in (pdf._notes_load(rel) or []):
+            a = n.get("anchor") if isinstance(n.get("anchor"), dict) else {}
+            # anchor 的页字段在两种阅读器下命名不同;取不到页就不猜,宁可漏也不错挂到别页。
+            npg = a.get("page", a.get("section", a.get("p")))
+            if npg is None or str(npg) != pg:
+                continue
+            if isinstance(n.get("card"), dict):
+                cards = n["card"].get("cards") or []
+                text = "\n".join(
+                    " / ".join(str(c.get(k) or "") for k in ("front", "back", "cloze")
+                               if c.get(k)) for c in cards if isinstance(c, dict))
+                blocks.append({"kind": "anki", "text": text, "label": n.get("id")})
+            elif isinstance(n.get("html"), dict):
+                blocks.append({"kind": "card",
+                               "text": str(n["html"].get("content") or ""),
+                               "label": n["html"].get("label") or n.get("id")})
+            elif isinstance(n.get("video"), dict):
+                blocks.append({"kind": "video",
+                               "text": str(n["video"].get("title") or ""),
+                               "label": n.get("id")})
+            elif str(n.get("text") or "").strip():
+                blocks.append({"kind": "note", "text": n["text"], "label": n.get("id")})
+    except Exception:
+        blocks = []
+    return hls, blocks
+
+
+def build_page_context(pdf, rel: str, page, *, reason: str = "dwell",
+                       viewport: dict | None = None) -> dict:
     """构造「翻页稳定」的整页上下文(纯确定性,零 AI)。
 
     正文源与 read.page / 快照**同一套**:PDF=剔噪字符层,EPUB=章节段落。
@@ -255,8 +474,21 @@ def build_page_context(pdf, rel: str, page, *, reason: str = "dwell") -> dict:
     try:
         if str(rel).lower().endswith(".epub"):
             paras = pdf._epub_section_paragraphs(rel, int(page or 0)) or []
-            txt = "\n\n".join(str(x) for x in paras if str(x).strip())
-            src = "epub:章节段落"
+            paras = [str(x) for x in paras if str(x).strip()]
+            # 任务书一:**不按章节整段灌入**,以当前阅读视口为中心向上下扩展。
+            # viewport 由客户端上报(段序号或 0~1 相对位置);拿不到就只能给整章,
+            # 但要在 text_source 里说清 —— 否则上游会把"整章"误当成"用户正在看的一屏"。
+            center = _viewport_center(viewport, len(paras))
+            if center is None:
+                src = "epub:整章段落(无视口上报)"
+            else:
+                lo = max(0, center - EPUB_VIEWPORT_PAD)
+                hi = min(len(paras), center + EPUB_VIEWPORT_PAD + 1)
+                out["viewport"] = {"center": center, "from": lo, "to": hi,
+                                   "total": len(paras), "pad": EPUB_VIEWPORT_PAD}
+                paras = paras[lo:hi]
+                src = f"epub:视口段落[{lo},{hi})/{out['viewport']['total']}"
+            txt = "\n\n".join(paras)
         else:
             ap = pdf._safe_vault_path(rel)
             if not ap:
@@ -265,28 +497,45 @@ def build_page_context(pdf, rel: str, page, *, reason: str = "dwell") -> dict:
             txt = pdf._page_text_clean(str(ap), rel, int(page), limit=PAGE_TEXT_LIMIT + 1) or ""
             src = "pdf:字符层(已剔噪)"
         if txt.strip():
-            out.update(text=txt[:PAGE_TEXT_LIMIT], text_available=True, text_source=src,
-                       truncated=len(txt) > PAGE_TEXT_LIMIT)
+            body = txt[:PAGE_TEXT_LIMIT]
+            # 正文锚定嵌入内容:高亮包回原位,卡片/便签紧随其后(任务书四)。
+            # 失败不能影响正文本身 —— 正文是主线,标注是增强。
+            embeds = {"highlights": 0, "blocks": 0, "unanchored": []}
+            try:
+                hls, blocks = _page_embeds(pdf, rel, page)
+                body, unanchored = annotate_page_text(body, hls, blocks)
+                embeds = {"highlights": len(hls) - len(unanchored),
+                          "blocks": len(blocks), "unanchored": unanchored}
+            except Exception as ex:
+                embeds["error"] = f"{type(ex).__name__}: {str(ex)[:120]}"
+            out.update(text=body, text_available=True, text_source=src,
+                       truncated=len(txt) > PAGE_TEXT_LIMIT, embeds=embeds)
         else:
             out["fallback_reason"] = "该页无可用文字层(疑似扫描页);请改用页图/OCR"
     except Exception as ex:
         out["fallback_reason"] = f"提取异常:{type(ex).__name__}: {str(ex)[:120]}"
-    # 视觉资源引用(本地综合):页图 URL + 是否有墨迹。消费方要看图时自己取。
+    # 视觉资源引用(本地综合):页图 URL + 绘图三态。消费方要看图时自己取。
+    # 绘图**不默认进视觉上下文**(任务书二):这里只给状态和引用,由上游按问题内容决定读不读。
     try:
         import urllib.parse as _up
+        ink = (pdf._ink_load(rel) or {}).get("pages", {}).get(str(page))
+        # 走共享单例,与 /api/drawing-state 路由同一份状态:否则两边各判各的稳定期,
+        # 上游会看到同一页忽 recent 忽 stale。
+        drawing = _DRAWINGS.observe(str(rel), page, ink)
         out["visual"] = {
             "page_image": f"/pdf/api/page-image?file={_up.quote(str(rel))}&page={page}",
-            "has_ink": bool((pdf._ink_load(rel) or {}).get("pages", {}).get(str(page))),
+            "has_ink": bool(ink),                 # 保留:旧消费方仍在读这个字段
+            "drawing": drawing,                   # freshness: none/recent/stale + lastEditedAt + ref
         }
     except Exception:
-        out["visual"] = {"page_image": None, "has_ink": False}
+        out["visual"] = {"page_image": None, "has_ink": False, "drawing": None}
     return out
 
 
 def register_outgoing_context(bp, *, pdf, jsonify, request, session,
                               drawings=None, focus=None):
     """挂三条只读/上报路由。不触碰既有 endpoint,不写任何旧数据文件。"""
-    dr = drawings or DrawingRevisions()
+    dr = drawings or _DRAWINGS
     fs = focus or FocusState()
     jr = OutgoingJournal(lambda: pdf._reader_sidecar_path("reader-outgoing-journal.jsonl"))
 

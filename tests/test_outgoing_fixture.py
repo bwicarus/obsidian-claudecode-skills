@@ -158,9 +158,20 @@ class PageContextReplayTest(unittest.TestCase):
 
     def test_visual_carries_no_bytes(self) -> None:
         v = _by("page.context")["page_context"]["visual"]
-        self.assertEqual(set(v), {"page_image", "has_ink"})
+        self.assertEqual(set(v), {"page_image", "has_ink", "drawing"})
         self.assertTrue(str(v["page_image"]).startswith("/pdf/api/page-image"),
                         "视觉资源只能是引用 URL,不许内联字节")
+        # 绘图同理:页正文事件只带**三态 + 引用**,图本身由消费方按需去取。
+        # 绘图不默认进视觉上下文,靠 freshness 让上游决定读不读综合图。
+        d = v["drawing"]
+        self.assertIn(d["freshness"], ("none", "recent", "stale"))
+        self.assertEqual(d["freshness"] == "none", bool(d["empty"]),
+                         "无笔迹与 freshness=none 必须一致")
+        if d["stable"]:
+            self.assertIsNotNone(d["ref"], "稳定版本必须给引用")
+        else:
+            self.assertIsNone(d["ref"], "未稳定不得给引用,消费方不能沿用旧版本")
+            self.assertIsNone(d["drawingRevision"])
 
 
 class FixtureIsPublishedTest(unittest.TestCase):

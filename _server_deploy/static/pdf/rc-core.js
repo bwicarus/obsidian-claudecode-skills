@@ -140,12 +140,21 @@
       _ctxS.bound = false;
     }
   }
+  // viewport 是"用户此刻看到第几段"的补充信息(EPUB 用),滚动期间一直在变。
+  // 它**不参与**下面两个判等:否则每次滚动都被当成状态变化而即时推,把导航合并整个
+  // 打穿——跟选区漏斗那个坑同类。它的更新走 report() 里的专门分支。
+  // 注:即使不显式跳过,String({para:1}) 和 String({para:2}) 都是 "[object Object]"
+  // 也会碰巧判等;但那是巧合,不能作为依据。
+  function _ctxViewportEq(a, b) {
+    try { return JSON.stringify(a || null) === JSON.stringify(b || null); } catch (e) { return a === b; }
+  }
+
   function _ctxSameState(prev, next) {
     var keys = {}, k;
     for (k in prev) keys[k] = 1;
     for (k in next) keys[k] = 1;
     for (k in keys) {
-      if (k === 'ts') continue;
+      if (k === 'ts' || k === 'viewport') continue;
       if (String(prev[k] === undefined ? '' : prev[k]) !== String(next[k] === undefined ? '' : next[k])) return false;
     }
     return true;
@@ -157,7 +166,7 @@
     for (k in prev) keys[k] = 1;
     for (k in next) keys[k] = 1;
     for (k in keys) {
-      if (k === 'pos' || k === 'ts') continue;
+      if (k === 'pos' || k === 'ts' || k === 'viewport') continue;
       if (String(prev[k] === undefined ? '' : prev[k]) !== String(next[k] === undefined ? '' : next[k])) return false;
     }
     return true;
@@ -349,7 +358,12 @@
       // 无变化就别发:宿主的选区漏斗每次 selectionchange 都会调一次,翻页会清选区 →
       // 一路发"selection 仍是空"的即时上报,把导航合并整个打穿(真机实测:连翻 6 页发了 4 次)。
       // 判等放共享层,三个宿主一次受益,也省得每个宿主各记一份 last 值。
-      if (same && _ctxSameState(cur, next)) return false;
+      if (same && _ctxSameState(cur, next)) {
+        // 只有视口动了:必须更新 pend(否则 dwell 那一发带的是旧视口,服务端按错误
+        // 位置截取段落),但**不因此排定发送** —— 滚动本身不是要上报的事件。
+        if (!_ctxViewportEq(cur.viewport, next.viewport)) _ctxS.pend = next;
+        return false;
+      }
       _ctxS.pend = next;
       _ctxBind(true);
       _ctxSchedule(navOnly ? _CTX_NAV_MS : _CTX_NOW_MS);

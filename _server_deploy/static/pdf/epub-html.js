@@ -310,6 +310,23 @@
   // 打开后不动就不上报,不会用旧值盖掉别的设备刚写的新进度。
   var _srvPos = { val: -1, sent: (function () { var v = parseInt(CFG.serverPos, 10); return isNaN(v) ? -1 : v; })(), t: 0, timer: null };
   var _ogLastIdx = null;
+  // 视口中心落在本节的相对位置(0~1)。服务端据此以视口为中心取 ±N 段,不再整章灌入
+  // (任务书一)。用 ratio 而不是段序号:服务端的"段"是按文本行切的,前端是 DOM 块级
+  // 元素,两边序号对不齐;比例不依赖切分方式,错一点也只是上下文窗口偏移一点。
+  // 拿不到可信值就返回 null —— 服务端会退回整章并注明,好过用错位的视口截出错误段落。
+  function _viewportRatio(idx) {
+    try {
+      if (loaded[idx] !== true) return null;   // 未加载的节是矮占位,高度不可信
+      var el = secEls[idx];
+      if (!el || !content) return null;
+      var cr = content.getBoundingClientRect(), r = el.getBoundingClientRect();
+      if (!(r.height > 0)) return null;
+      var v = ((cr.top + cr.height / 2) - r.top) / r.height;
+      if (!isFinite(v)) return null;
+      return Math.max(0, Math.min(1, Math.round(v * 1000) / 1000));
+    } catch (e) { return null; }
+  }
+
   function _reportPos(idx) {
     _srvPos.val = idx;
     // 换节 → 丢弃绘图焦点(上一节的绘图区不再是当前)
@@ -317,9 +334,13 @@
           window.RC && RC.outgoing && RC.outgoing.dropDrawingFocus(); } } catch (e) {}
     // 双向上下文同步:复用这个已有漏斗,不新增监听(关时 report 立即返回,零网络)
     try {
+      var _vr = _viewportRatio(idx);
       window.RC && RC.ctxSync && RC.ctxSync.report({
         kind: 'epub', file: FREL, pos: idx,
-        title: document.title.replace(/ ·.*$/, '')
+        title: document.title.replace(/ ·.*$/, ''),
+        // 同一节内滚动时 pos 不变、只有 viewport 变:共享层会更新 pend 但不排定发送,
+        // 等 dwell 那一发带上最新视口(见 rc-core._ctxViewportEq 分支)。
+        viewport: (_vr === null ? null : { ratio: _vr })
       });
     } catch (e) {}
     if (_srvPos.timer) return;   // 已排队:trailing 自带最新值
