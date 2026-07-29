@@ -5351,6 +5351,8 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   function teardown(closeBox) {
+    _setComputerVoiceDialPending(false);
+    _cancelComputerVoiceGesture();
     if (_computerVoiceUnsub) {
       try { _computerVoiceUnsub(); } catch (e) {}
       _computerVoiceUnsub = null;
@@ -5397,9 +5399,76 @@ if (window.__bwPwaProviderOnly) return;
   // 通话引擎分流(㉚):s2s 通话按设置选 WebRTC 直连(外放无回声+全双工)或 WS relay(豆包 S2S / GPT-WS);
   // agent 模式(mic 长按 ASR)恒走豆包 relay,不受 rt_engine 影响(与 WS 版 relay 按 mode 分发同语义)
   var _computerVoiceOwnedButtons = new WeakSet();
+  var _computerVoiceEngine = null;
+  var _computerVoiceEngineRevision = null;
+  function _setComputerVoiceDialPending(value) {
+    try {
+      if (window.RC && RC.computerVoice &&
+          typeof RC.computerVoice.setDialPending === 'function') {
+        RC.computerVoice.setDialPending(value === true);
+      }
+    } catch (e) {}
+  }
+  function _cancelComputerVoiceGesture() {
+    try {
+      if (window.RC && RC.computerVoice &&
+          typeof RC.computerVoice.cancelPreparedGesture === 'function') {
+        RC.computerVoice.cancelPreparedGesture();
+      }
+    } catch (e) {}
+  }
+  function _reserveComputerVoiceEngineUpdate() {
+    try {
+      if (window.RC && RC.computerVoice &&
+          typeof RC.computerVoice.reserveSelectedEngineUpdate === 'function') {
+        return RC.computerVoice.reserveSelectedEngineUpdate();
+      }
+    } catch (e) {}
+    return null;
+  }
+  function _setComputerVoiceEngine(engine, revision) {
+    var nextEngine = String(engine || '');
+    var accepted = true;
+    try {
+      if (window.RC && RC.computerVoice &&
+          typeof RC.computerVoice.setSelectedEngine === 'function') {
+        RC.computerVoice.setSelectedEngine(
+          nextEngine,
+          revision
+        );
+        if (typeof RC.computerVoice.isSelectedEngineRevisionCurrent === 'function') {
+          accepted = RC.computerVoice.isSelectedEngineRevisionCurrent(revision);
+        }
+      }
+    } catch (e) { accepted = false; }
+    if (!accepted) return false;
+    _computerVoiceEngine = nextEngine;
+    _computerVoiceEngineRevision = revision;
+    return true;
+  }
+  function _refreshComputerVoiceEngine() {
+    var revision = _reserveComputerVoiceEngineUpdate();
+    fetch('/api/assistant/voice-config').then(function (r) {
+      return r.json();
+    }).then(function (d) {
+      _setComputerVoiceEngine(
+        (((d || {}).cfg) || {}).rt_engine,
+        revision
+      );
+    }).catch(function () {
+      _setComputerVoiceEngine('', revision);
+    });
+  }
   function _publishComputerVoiceButton(button) {
     if (!_computerVoiceOwnedButtons.has(button)) return false;
     try {
+      if (_computerVoiceEngine !== null &&
+          typeof RC.computerVoice.setSelectedEngine === 'function') {
+        RC.computerVoice.setSelectedEngine(
+          _computerVoiceEngine,
+          _computerVoiceEngineRevision
+        );
+      }
       return !!(
         window.RC &&
         RC.computerVoice &&
@@ -5447,19 +5516,27 @@ if (window.__bwPwaProviderOnly) return;
     setSt('正在确认电脑客户端…');
     callBtnConnecting(true);
     RC.computerVoice.startFromUserGesture(opts || {}).then(function () {
+      _connecting = false;
+      _setComputerVoiceDialPending(false);
       if (generation !== _gen) {
         RC.computerVoice.stop('stale-reader-start').catch(function () {});
       }
     }).catch(function (error) {
+      _connecting = false;
+      _setComputerVoiceDialPending(false);
       if (generation !== _gen) return;
       _userHung = true;
       callBtnConnecting(false);
       callBtnOn(false);
-      setSt((error && error.message) || '电脑客户端启动失败');
+      var startMessage = (error && error.code ===
+        'BW_COMPUTER_VOICE_GESTURE_REQUIRED')
+        ? '电脑语音模型刚载入，请再点一次电话按钮'
+        : ((error && error.message) || '电脑客户端启动失败');
+      setSt(startMessage);
       taPlaceholder(null);
       try {
         if (window.RC && RC.toast) {
-          RC.toast((error && error.message) || '电脑客户端启动失败');
+          RC.toast(startMessage);
         }
       } catch (e) {}
     });
@@ -5470,14 +5547,49 @@ if (window.__bwPwaProviderOnly) return;
     // 133:这个 fetch 以前不受世代管辖 —— 用户在它在途时挂断,迟到的 .then 照样把拨号**复活**,
     // 建出一路没人管的通话。拨号前记世代,回调里过期就直接丢弃。
     var g0 = _gen;
+    _connecting = true;
+    _setComputerVoiceDialPending(true);
+    var engineRevision = _reserveComputerVoiceEngineUpdate();
     fetch('/api/assistant/voice-config').then(function (r) { return r.json(); }).then(function (d) {
       if (g0 !== _gen || _reviewVoiceGate(false)) { try { console.warn('[vc] voice-config 迟到或已进入复习模式,拨号已取消'); } catch (e) {} return; }
       var engine = (((d || {}).cfg) || {}).rt_engine;
+      if (!_setComputerVoiceEngine(engine, engineRevision)) {
+        _connecting = false;
+        _setComputerVoiceDialPending(false);
+        _cancelComputerVoiceGesture();
+        callBtnConnecting(false);
+        setSt('语音模型设置已变化，请再点一次电话按钮');
+        return;
+      }
       if (engine === 'computer_client') _computerVoiceStart(opts, g0);
-      else if (engine === 'openai_rtc') rtcStart(opts);
-      else start(opts);
-    }).catch(function () { if (g0 === _gen && !_reviewVoiceGate(false)) start(opts); });
+      else {
+        _connecting = false;
+        _setComputerVoiceDialPending(false);
+        _cancelComputerVoiceGesture();
+        if (engine === 'openai_rtc') rtcStart(opts);
+        else start(opts);
+      }
+    }).catch(function () {
+      // A rejected GET from an older dial generation must not tear down the
+      // pending gesture prepared by a newer trusted click.
+      if (g0 !== _gen) return;
+      var configRevisionCurrent =
+        _setComputerVoiceEngine('', engineRevision);
+      _connecting = false;
+      _setComputerVoiceDialPending(false);
+      _cancelComputerVoiceGesture();
+      callBtnConnecting(false);
+      if (_reviewVoiceGate(false)) return;
+      setSt(configRevisionCurrent
+        ? '读取语音模型失败，请重试'
+        : '语音模型设置已变化，请再点一次电话按钮');
+      // The authoritative engine is unknown. In particular, a previously
+      // confirmed computer_client must never silently fall back to Pi
+      // /voice-rt, and a stale failed GET must not bypass a newer settings
+      // revision. A later trusted click performs a fresh configuration read.
+    });
   };
+  _refreshComputerVoiceEngine();
   function toggle(opts) {
     injectCss();
     opts = opts || {};
@@ -5500,6 +5612,15 @@ if (window.__bwPwaProviderOnly) return;
         return true;
       }
     } catch (e) {}
+    if (_connecting) {
+      _gen++;
+      _connecting = false;
+      _setComputerVoiceDialPending(false);
+      _cancelComputerVoiceGesture();
+      callBtnConnecting(false);
+      setSt('电脑桥接启动已取消');
+      return true;
+    }
     if (ws) { teardown(false); setSt('已挂断(再点 📞 重新通话)'); return; }
     if (mode === 'agent') {   // agent 模式无浮层:状态全靠按钮特效(绿=在听/蓝=在念)+ 输入框(转写/placeholder)
       toggle._opts = opts || {};
@@ -5967,7 +6088,9 @@ if (window.__bwPwaProviderOnly) return;
     _syncAdapterNow();
   }, 2000);
 
-  RC.voicecall = { toggle: toggle, isOpen: function () {
+  RC.voicecall = { toggle: toggle,
+    canCaptureComputerVoiceGesture: function () { return !_assistantInReview(); },
+    isOpen: function () {
     try { return !!ws || !!(RC.computerVoice && RC.computerVoice.isActive && RC.computerVoice.isActive()); }
     catch (e) { return !!ws; }
   }, setPage: setPage, syncInk: syncInk, syncState: syncState,

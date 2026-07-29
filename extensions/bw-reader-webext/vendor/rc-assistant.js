@@ -373,9 +373,26 @@ if (window.__bwPwaProviderOnly) return;
     var card = document.createElement('div'); card.className = 'ams-task ams-voice-part';
     card.innerHTML = '<div class="ams-tdef">加载中…</div>';
     container.appendChild(card);
+    var _voiceEngineRevision = null;
+    try {
+      if (window.RC && RC.computerVoice &&
+          typeof RC.computerVoice.beginSelectedEngineUpdate === 'function') {
+        _voiceEngineRevision =
+          RC.computerVoice.beginSelectedEngineUpdate();
+      }
+    } catch (_) {}
     fetch('/api/assistant/voice-config').then(function (r) { return r.json(); }).then(function (d) {
       if (!d || !d.ok) { card.innerHTML = '<div class="ams-tdef">拉取语音设置失败</div>'; return; }
       var c = d.cfg || {};
+      try {
+        if (window.RC && RC.computerVoice &&
+            typeof RC.computerVoice.setSelectedEngine === 'function') {
+          RC.computerVoice.setSelectedEngine(
+            c.rt_engine || '',
+            _voiceEngineRevision
+          );
+        }
+      } catch (_) {}
       function esc2(x) { var e = document.createElement('div'); e.textContent = String(x == null ? '' : x); return e.innerHTML; }
       // ㉖b:按通话引擎分组渲染——选 GPT 就藏豆包 S2S 专属项、显示 GPT 专属项;朗读/ASR 与引擎无关恒显。
       var isOA = (c.rt_engine === 'openai' || c.rt_engine === 'openai_rtc');
@@ -435,7 +452,7 @@ if (window.__bwPwaProviderOnly) return;
         '<input type="checkbox" data-k="rt_tool_reply"' + (c.rt_tool_reply ? ' checked' : '') + '>工具完成后口头回报(搜索/配图等展示型工具:关=静默入库只显示卡片[推荐];开=AI 拿到结果后自由回答)</label>' +
           '<div class="ams-tdef" style="margin:2px 0 6px">语言选「自动」它跟着你切换;读日语书建议选「日本語」或「自动」(原文按原生发音念)。以上都是下次开话生效;接话灵敏度=semantic VAD 的 eagerness(按语义判断你说完没)。</div>';
       } else if (isComputer) {
-        H += '<div class="ams-tdef">只捕获已配置的 Codex/ChatGPT 进程输出与明确选择的麦克风；不提供全系统输出回退。选择本项不会控制电脑，只有点击侧栏电话按钮才会发送一次性启动请求。</div>';
+        H += '<div class="ams-tdef">电话按钮会把当前网页麦克风送入 Windows 虚拟麦克风，并只回传 Codex/ChatGPT 进程树在独立虚拟扬声器上的输出；不使用物理/RDP 麦克风，也不提供全系统输出回退。选择本项不会控制电脑，只有点击电话按钮才会发送一次启动请求并按需打开本机服务与 Codex。</div>';
       } else {      // ── 豆包 S2S 专属 ──
         H += '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="speaker" style="flex:1 1 100%">' +
           _VC_SPK.map(function (o) { return '<option value="' + o[0] + '"' + ((c.speaker || _VC_SPK[0][0]) === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') +
@@ -487,15 +504,50 @@ if (window.__bwPwaProviderOnly) return;
       }
       function _save(k, v, el) {
         var body = {}; body[k] = v;
+        var engineRevision = null;
+        function _recoverFailedEngineSave() {
+          if (k !== 'rt_engine') return;
+          // beginSelectedEngineUpdate deliberately fenced both the old and
+          // proposed values. Re-fetch and redraw the authoritative server
+          // value after a failed POST so the visible select and capture gate
+          // cannot remain divergent.
+          _renderVoiceCfg(container);
+        }
+        if (k === 'rt_engine') {
+          try {
+            if (window.RC && RC.computerVoice &&
+                typeof RC.computerVoice.beginSelectedEngineUpdate === 'function') {
+              engineRevision =
+                RC.computerVoice.beginSelectedEngineUpdate();
+            }
+          } catch (_) {}
+        }
         fetch('/api/assistant/voice-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
           .then(function (r) { return r.json(); })
           .then(function (x) {
             if (x && x.ok) {
               if (typeof _toast === 'function') _toast('已保存');
               try { if (window.RC && RC.voicecall && RC.voicecall.pushCfg) RC.voicecall.pushCfg(); } catch (_) {}
+              if (k === 'rt_engine') {
+                try {
+                  if (window.RC && RC.computerVoice &&
+                      typeof RC.computerVoice.setSelectedEngine === 'function') {
+                    RC.computerVoice.setSelectedEngine(
+                      v || '',
+                      engineRevision
+                    );
+                  }
+                } catch (_) {}
+              }
               if (k === 'rt_engine') _renderVoiceCfg(container);   // 切引擎:整卡重绘,只显示该引擎相关项(89:container=tab2 pane)
-            } else if (typeof _toast === 'function') _toast('保存失败');
-          }).catch(function () {});
+            } else {
+              if (typeof _toast === 'function') _toast('保存失败');
+              _recoverFailedEngineSave();
+            }
+          }).catch(function () {
+            if (typeof _toast === 'function') _toast('保存失败');
+            _recoverFailedEngineSave();
+          });
       }
       var _brSel = card.querySelector('#vcv-bridge');   // 99:回声桥三态(设备级)
       if (_brSel) {

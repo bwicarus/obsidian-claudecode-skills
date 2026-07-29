@@ -60,6 +60,10 @@ loopback 目标。关闭桌面控制窗不等于关闭 bootstrap；bootstrap 空
   `OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0!ChatGPT` 仅作为桌面控制器里的保留本机常量，
   尚未开放到当前服务合同。启动后必须重新归并进程树并等待唯一根目标就绪，超时、多根或
   身份不符均失败。
+- Codex 的 `realtimeVoice` 是本机 OS-global hotkey。Windows 每次 START 都从当前用户
+  `~/.codex/keybindings.json` 验证它唯一绑定为固定 `Ctrl+Shift+C`，不从 Reader 接收
+  组合键，也不切换或抢占 Windows 前台；发送前只允许同一个唯一 packaged-app root，
+  不因无关 Electron 子进程增减误拒绝。
 - Windows 随后依次证明：本机 opt-in、PWA 已认证、目标进程树唯一、显式麦克风仍存在、输出范围
   仍是 `process-only`、voice-typist 可用。任一步失败都返回精确错误码并保持 `idle`。
 - 只有 Windows 回 `active` 后 Reader 才显示通话中。失败或断线必须释放 Reader 的 audio surface

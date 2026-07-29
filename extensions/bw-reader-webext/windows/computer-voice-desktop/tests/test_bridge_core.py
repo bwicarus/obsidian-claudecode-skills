@@ -1,8 +1,6 @@
 from __future__ import annotations
 
-import base64
 from datetime import datetime, timedelta, timezone
-import hashlib
 import json
 import os
 from pathlib import Path
@@ -17,7 +15,6 @@ SOURCE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE_ROOT))
 
 from bridge_core import (  # noqa: E402
-    BASE64URL_SHA256_RE,
     BridgeError,
     BridgePaths,
     DIRECT_CONFIG_CONTRACT,
@@ -29,7 +26,7 @@ from bridge_core import (  # noqa: E402
     FIXED_OUTPUT_SCOPE,
     LOCAL_PACKAGED_APP_IDS,
     LocalOptOutDuringStart,
-    Microphone,
+    RenderEndpoint,
     SERVICE_RECORD_CONTRACT,
     WindowsProcessRunner,
     build_direct_config,
@@ -39,10 +36,9 @@ from bridge_core import (  # noqa: E402
     build_tailscale_command_plan,
     disable_and_stop_direct_service,
     disable_config,
-    enumerate_microphones,
+    enumerate_active_render_endpoints,
+    legacy_microphone_config_requires_migration,
     load_direct_config,
-    pairing_material_from_code,
-    prepare_pairing,
     read_direct_status,
     run_idle_bootstrap,
     run_tailscale_read_only_preflight,
@@ -54,7 +50,14 @@ from bridge_core import (  # noqa: E402
 
 
 NOW = datetime(2026, 7, 29, 4, 30, tzinfo=timezone.utc)
-MICROPHONE = Microphone("{explicit-endpoint}", "Test microphone")
+VIRTUAL_MICROPHONE = RenderEndpoint(
+    "{explicit-virtual-microphone-render-endpoint}",
+    "Virtual microphone A",
+)
+VIRTUAL_SPEAKER = RenderEndpoint(
+    "{explicit-virtual-speaker-render-endpoint}",
+    "Virtual speaker B",
+)
 
 
 class FakeProcessRunner:
@@ -104,8 +107,12 @@ class DirectDesktopCoreTests(unittest.TestCase):
     def enable_config(self) -> dict:
         return save_enabled_config(
             self.paths,
-            MICROPHONE,
-            active_microphones=[MICROPHONE],
+            VIRTUAL_MICROPHONE,
+            VIRTUAL_SPEAKER,
+            active_render_endpoints=[
+                VIRTUAL_MICROPHONE,
+                VIRTUAL_SPEAKER,
+            ],
         )
 
     def write_runtime(
@@ -115,6 +122,7 @@ class DirectDesktopCoreTests(unittest.TestCase):
         state: str = "idle",
         reader_connected: bool = False,
         updated: datetime = NOW,
+        last_error: dict | None = None,
     ) -> None:
         self.paths.runtime_status.parent.mkdir(parents=True, exist_ok=True)
         self.paths.runtime_status.write_text(
@@ -126,6 +134,7 @@ class DirectDesktopCoreTests(unittest.TestCase):
                     "state": state,
                     "readerConnected": reader_connected,
                     "captureActive": state == "active",
+                    "lastError": last_error,
                     "updatedAtUtc": (
                         updated.isoformat(timespec="seconds")
                         .replace("+00:00", "Z")
@@ -137,10 +146,15 @@ class DirectDesktopCoreTests(unittest.TestCase):
 
     def test_direct_config_is_exact_and_has_no_long_term_token(self) -> None:
         value = build_direct_config(
-            MICROPHONE.endpoint_id,
+            VIRTUAL_MICROPHONE.endpoint_id,
+            VIRTUAL_SPEAKER.endpoint_id,
             self.paths.runtime_status,
         )
         self.assertEqual(value["contract"], DIRECT_CONFIG_CONTRACT)
+        self.assertEqual(
+            value["contract"],
+            "reader-computer-voice-direct-config/3",
+        )
         self.assertEqual(value["listenHost"], FIXED_LISTEN_HOST)
         self.assertEqual(value["listenPort"], FIXED_LISTEN_PORT)
         self.assertIs(value["experimentalSingleUserMode"], True)
@@ -152,6 +166,7 @@ class DirectDesktopCoreTests(unittest.TestCase):
         self.assertEqual(value["appKind"], FIXED_APP_KIND)
         flattened_keys = " ".join(value).casefold()
         self.assertNotIn("token", flattened_keys)
+        self.assertNotIn("pair", flattened_keys)
         with self.assertRaises(BridgeError):
             validate_direct_config({**value, "deviceToken": "secret"})
         with self.assertRaises(BridgeError):
@@ -163,85 +178,124 @@ class DirectDesktopCoreTests(unittest.TestCase):
             )
         with self.assertRaises(BridgeError):
             build_direct_config(
-                MICROPHONE.endpoint_id,
+                VIRTUAL_MICROPHONE.endpoint_id,
+                VIRTUAL_SPEAKER.endpoint_id,
                 self.paths.runtime_status,
                 allowed_origins=["https://user@example.test"],
             )
 
-    def test_legacy_config_loads_as_single_user_and_next_save_persists_it(
-        self,
-    ) -> None:
-        legacy = build_direct_config(
-            MICROPHONE.endpoint_id,
+    def test_v3_config_requires_explicit_single_user_true(self) -> None:
+        invalid = build_direct_config(
+            VIRTUAL_MICROPHONE.endpoint_id,
+            VIRTUAL_SPEAKER.endpoint_id,
             self.paths.runtime_status,
         )
-        legacy.pop("experimentalSingleUserMode")
-        legacy["pairedClientPublicKeySpki"] = "A" * 120
-        legacy["pairedClientFingerprintSha256"] = "B" * 43
-        self.paths.direct_config.parent.mkdir(parents=True, exist_ok=True)
-        self.paths.direct_config.write_text(
-            json.dumps(legacy),
-            encoding="utf-8",
-        )
-
-        loaded = load_direct_config(self.paths)
-        self.assertIsNotNone(loaded)
-        self.assertIs(loaded["experimentalSingleUserMode"], True)
-        self.assertEqual(
-            loaded["pairedClientPublicKeySpki"],
-            legacy["pairedClientPublicKeySpki"],
-        )
-
-        saved = save_enabled_config(
-            self.paths,
-            MICROPHONE,
-            active_microphones=[MICROPHONE],
-        )
-        self.assertIs(saved["experimentalSingleUserMode"], True)
-        on_disk = json.loads(
-            self.paths.direct_config.read_text(encoding="utf-8")
-        )
-        self.assertIs(on_disk["experimentalSingleUserMode"], True)
-        self.assertEqual(
-            on_disk["pairedClientPublicKeySpki"],
-            legacy["pairedClientPublicKeySpki"],
-        )
-
-    def test_explicit_strict_mode_false_remains_valid_for_compatibility(
-        self,
-    ) -> None:
-        value = build_direct_config(
-            MICROPHONE.endpoint_id,
-            self.paths.runtime_status,
-            experimental_single_user_mode=False,
-        )
-        self.assertIs(
-            validate_direct_config(value)["experimentalSingleUserMode"],
-            False,
-        )
+        invalid.pop("experimentalSingleUserMode")
         with self.assertRaises(BridgeError):
-            validate_direct_config(
-                {**value, "experimentalSingleUserMode": "yes"}
-            )
+            validate_direct_config(invalid)
         with self.assertRaises(BridgeError):
             build_direct_config(
-                MICROPHONE.endpoint_id,
+                VIRTUAL_MICROPHONE.endpoint_id,
+                VIRTUAL_SPEAKER.endpoint_id,
                 self.paths.runtime_status,
-                experimental_single_user_mode="yes",
+                experimental_single_user_mode=False,
             )
 
     def test_microphone_endpoint_id_is_preserved_exactly(self) -> None:
         endpoint = " {0.0.1.00000000}.{exact-endpoint} "
         value = build_direct_config(
             endpoint,
+            VIRTUAL_SPEAKER.endpoint_id,
             self.paths.runtime_status,
         )
-        self.assertEqual(value["microphoneEndpointId"], endpoint)
+        self.assertEqual(
+            value["virtualMicrophoneRenderEndpointId"],
+            endpoint,
+        )
 
-    def test_microphone_discovery_uses_native_core_audio_ids(self) -> None:
+    def test_virtual_endpoints_must_be_distinct(self) -> None:
+        with self.assertRaisesRegex(BridgeError, "必须选择不同端点"):
+            build_direct_config(
+                VIRTUAL_MICROPHONE.endpoint_id,
+                VIRTUAL_MICROPHONE.endpoint_id,
+                self.paths.runtime_status,
+            )
+
+    def test_v1_microphone_config_requires_explicit_migration(self) -> None:
+        legacy = build_direct_config(
+            VIRTUAL_MICROPHONE.endpoint_id,
+            VIRTUAL_SPEAKER.endpoint_id,
+            self.paths.runtime_status,
+        )
+        legacy["microphoneEndpointId"] = legacy.pop(
+            "virtualMicrophoneRenderEndpointId"
+        )
+        legacy.pop("virtualSpeakerRenderEndpointId")
+        legacy["contract"] = "reader-computer-voice-direct-config/1"
+        legacy.update(
+            {
+                "pairingCodeHash": "A" * 43,
+                "pairingExpiresAtUtc": "2026-07-29T04:35:00Z",
+                "pairedClientPublicKeySpki": "B" * 120,
+                "pairedClientFingerprintSha256": "C" * 43,
+            }
+        )
+        self.paths.direct_config.write_text(
+            json.dumps(legacy),
+            encoding="utf-8",
+        )
+        self.assertIsNone(load_direct_config(self.paths))
+        self.assertTrue(
+            legacy_microphone_config_requires_migration(self.paths)
+        )
+        with self.assertRaisesRegex(
+            BridgeError,
+            "必须在桌面窗口中明确确认迁移",
+        ):
+            save_enabled_config(
+                self.paths,
+                VIRTUAL_MICROPHONE,
+                VIRTUAL_SPEAKER,
+                active_render_endpoints=[
+                    VIRTUAL_MICROPHONE,
+                    VIRTUAL_SPEAKER,
+                ],
+            )
+        migrated = save_enabled_config(
+            self.paths,
+            VIRTUAL_MICROPHONE,
+            VIRTUAL_SPEAKER,
+            active_render_endpoints=[
+                VIRTUAL_MICROPHONE,
+                VIRTUAL_SPEAKER,
+            ],
+            allow_legacy_migration=True,
+        )
+        self.assertNotIn("microphoneEndpointId", migrated)
+        self.assertNotIn("pairingCodeHash", migrated)
+        self.assertEqual(
+            migrated["contract"],
+            "reader-computer-voice-direct-config/3",
+        )
+        self.assertEqual(
+            migrated["virtualSpeakerRenderEndpointId"],
+            VIRTUAL_SPEAKER.endpoint_id,
+        )
+
+    def test_both_endpoints_must_still_be_active_when_saved(self) -> None:
+        with self.assertRaisesRegex(BridgeError, "虚拟扬声器 B"):
+            save_enabled_config(
+                self.paths,
+                VIRTUAL_MICROPHONE,
+                VIRTUAL_SPEAKER,
+                active_render_endpoints=[VIRTUAL_MICROPHONE],
+            )
+
+    def test_render_discovery_uses_native_core_audio_ids(self) -> None:
         payload = json.dumps(
             {
-                "contract": "reader-computer-voice-microphones/1",
+                "contract":
+                    "reader-computer-voice-render-endpoints/1",
                 "ok": True,
                 "captureStarted": False,
                 "devices": [
@@ -265,11 +319,13 @@ class DirectDesktopCoreTests(unittest.TestCase):
                 stderr="",
             ),
         ) as run:
-            devices = enumerate_microphones(self.paths.native_host)
+            devices = enumerate_active_render_endpoints(
+                self.paths.native_host
+            )
         self.assertEqual(
             devices,
             [
-                Microphone(
+                RenderEndpoint(
                     (
                         "{3.0.1.00000001}."
                         "{A3ED9185-1E02-411C-B11B-05D92F25CEF4}"
@@ -283,12 +339,12 @@ class DirectDesktopCoreTests(unittest.TestCase):
             command,
             (
                 str(self.paths.native_host.resolve()),
-                "--list-direct-microphones",
+                "--list-direct-render-endpoints",
             ),
         )
         self.assertIs(run.call_args.kwargs["shell"], False)
 
-    def test_microphone_discovery_rejects_non_read_only_contract(self) -> None:
+    def test_render_discovery_rejects_non_read_only_contract(self) -> None:
         payload = json.dumps(
             {
                 "contract": "unexpected",
@@ -307,7 +363,9 @@ class DirectDesktopCoreTests(unittest.TestCase):
             ),
         ):
             self.assertEqual(
-                enumerate_microphones(self.paths.native_host),
+                enumerate_active_render_endpoints(
+                    self.paths.native_host
+                ),
                 [],
             )
 
@@ -319,68 +377,29 @@ class DirectDesktopCoreTests(unittest.TestCase):
         with self.assertRaises(BridgeError):
             save_enabled_config(
                 self.paths,
-                MICROPHONE,
-                active_microphones=[MICROPHONE],
+                VIRTUAL_MICROPHONE,
+                VIRTUAL_SPEAKER,
+                active_render_endpoints=[
+                    VIRTUAL_MICROPHONE,
+                    VIRTUAL_SPEAKER,
+                ],
             )
         self.assertIn(
             '"contract":"unknown"',
             self.paths.direct_config.read_text(encoding="utf-8"),
         )
 
-    def test_legacy_pair_code_data_remains_backward_compatible(self) -> None:
-        self.enable_config()
-        material = prepare_pairing(
-            self.paths,
-            now=NOW,
-            choice=lambda _: "A",
-        )
-        self.assertEqual(material.display_code, "A" * 10)
-        expected = (
-            base64.urlsafe_b64encode(
-                hashlib.sha256(b"A" * 10).digest()
-            )
-            .decode("ascii")
-            .rstrip("=")
-        )
-        self.assertEqual(material.code_hash, expected)
-        self.assertRegex(material.code_hash, BASE64URL_SHA256_RE)
-        on_disk = self.paths.direct_config.read_text(encoding="utf-8")
-        self.assertNotIn(material.display_code, on_disk)
-        self.assertNotIn("token", on_disk.casefold())
-        self.assertEqual(
-            load_direct_config(self.paths)["pairingCodeHash"],
-            expected,
-        )
-        with self.assertRaises(BridgeError):
-            pairing_material_from_code("TOO-SHORT", now=NOW)
-
-    def test_existing_public_key_requires_explicit_repair(self) -> None:
+    def test_v3_config_rejects_all_pairing_fields(self) -> None:
         value = self.enable_config()
-        value["pairedClientPublicKeySpki"] = "A" * 120
-        value["pairedClientFingerprintSha256"] = "B" * 43
-        validate_direct_config(value)
-        self.paths.direct_config.write_text(
-            json.dumps(value),
-            encoding="utf-8",
-        )
-        with self.assertRaises(BridgeError):
-            prepare_pairing(
-                self.paths,
-                now=NOW,
-                choice=lambda _: "C",
-            )
-        prepare_pairing(
-            self.paths,
-            replace_existing=True,
-            now=NOW,
-            choice=lambda _: "C",
-        )
-        repaired = load_direct_config(self.paths)
-        self.assertEqual(repaired["pairedClientPublicKeySpki"], "")
-        self.assertEqual(
-            repaired["pairedClientFingerprintSha256"],
-            "",
-        )
+        for key in (
+            "pairingCodeHash",
+            "pairingExpiresAtUtc",
+            "pairedClientPublicKeySpki",
+            "pairedClientFingerprintSha256",
+        ):
+            with self.subTest(key=key):
+                with self.assertRaises(BridgeError):
+                    validate_direct_config({**value, key: ""})
 
     def test_offline_or_stale_never_pretends_to_be_online(self) -> None:
         self.enable_config()
@@ -414,6 +433,35 @@ class DirectDesktopCoreTests(unittest.TestCase):
         connected = read_direct_status(self.paths, runner, now=NOW)
         self.assertTrue(connected.service_online)
         self.assertTrue(connected.reader_connected)
+
+    def test_runtime_status_v2_preserves_only_valid_last_error(self) -> None:
+        self.enable_config()
+        runner = FakeProcessRunner()
+        pid = start_direct_service(self.paths, runner, now=NOW)
+        failure = {
+            "failureId": "failure-AAAAAAAAAAAAAAAA",
+            "code": "BW_COMPUTER_VOICE_AUDIO_FAILURE",
+            "stage": "virtual-microphone.render",
+            "hresult": "0x80070490",
+            "atUtc": "2026-07-29T04:29:00Z",
+        }
+        self.write_runtime(pid=pid, last_error=failure)
+        status = read_direct_status(self.paths, runner, now=NOW)
+        self.assertTrue(status.service_online)
+        self.assertEqual(status.last_error, failure)
+        runner.executables.pop(pid)
+        offline = read_direct_status(self.paths, runner, now=NOW)
+        self.assertFalse(offline.service_online)
+        self.assertEqual(offline.last_error, failure)
+        runner.executables[pid] = self.paths.native_host
+
+        self.write_runtime(
+            pid=pid,
+            last_error={**failure, "hresult": "0xnot-safe"},
+        )
+        invalid = read_direct_status(self.paths, runner, now=NOW)
+        self.assertFalse(invalid.service_online)
+        self.assertIsNone(invalid.last_error)
 
     def test_three_states_are_independent(self) -> None:
         value = self.enable_config()

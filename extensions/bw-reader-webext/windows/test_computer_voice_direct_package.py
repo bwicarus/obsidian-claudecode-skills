@@ -63,10 +63,46 @@ class DirectPackageTests(unittest.TestCase):
         (desktop / "tests" / "test_desktop.py").write_text("generated", encoding="utf-8")
         return audio, desktop
 
+    def _runtime_sources(self, root: Path) -> tuple[Path, Path, Path]:
+        runtime = root / "typist-runtime"
+        runtime.mkdir()
+        script = runtime / "voice_typist.py"
+        ipc = runtime / "typist_ipc.py"
+        launcher = runtime / "voice-typist-launcher.ps1"
+        script.write_text(
+            "import typist_ipc as typist_ipc_runtime\n"
+            "typist_ipc_runtime.connect_pipe\n"
+            "typist_ipc_runtime.serve\n"
+            "def process_generation_alive(): pass\n"
+            "COMMAND = 'queue-resolve'\n",
+            encoding="utf-8",
+        )
+        ipc.write_text(
+            "import ctypes\n"
+            "ctypes.WinDLL\n"
+            "BW_TYPIST_IPC_HANDOFF_FAILED = 'x'\n",
+            encoding="utf-8",
+        )
+        launcher.write_text(
+            "param([ValidateSet('Status','Start','Stop','ResolveUncertain')]$Action,\n"
+            "      [int]$ExpectedPid = 0,\n"
+            "      [long]$ExpectedStartFileTimeUtc = 0,\n"
+            "      [int]$OwnerPid = 0,\n"
+            "      [long]$OwnerStartFileTimeUtc = 0)\n"
+            "$install = $PSScriptRoot\n"
+            "$arguments = @('run', '--idle-exit-seconds', '600', "
+            "'--owner-process-id')\n"
+            "$resolve = @('queue-resolve', '--launcher-confirmed-stopped')\n"
+            "Get-TypistProcess -Strict\n",
+            encoding="utf-8",
+        )
+        return script, ipc, launcher
+
     def test_build_is_versioned_deterministic_and_exact(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             audio, desktop = self._sources(root)
+            typist_script, typist_ipc, typist_launcher = self._runtime_sources(root)
             candidates = root / "candidates"
             dotnet = root / "dotnet.exe"
             pyinstaller = root / "pyinstaller.exe"
@@ -81,6 +117,9 @@ class DirectPackageTests(unittest.TestCase):
                 pyinstaller=pyinstaller,
                 audio_source=audio,
                 desktop_source=desktop,
+                typist_script_source=typist_script,
+                typist_ipc_source=typist_ipc,
+                typist_launcher_source=typist_launcher,
             )
             self.assertEqual(archive.name, "bw-computer-voice-direct-0.4.1-windows-x64.zip")
             manifest = package.verify_archive(archive, expected_version="0.4.1")
@@ -103,9 +142,25 @@ class DirectPackageTests(unittest.TestCase):
                 "input/computer-voice-desktop/tests/test_desktop.py",
                 source_paths,
             )
+            self.assertIn(
+                "input/ComputerVoiceAudio/ComputerVoiceAudio.csproj",
+                source_paths,
+            )
+            self.assertIn("input/ComputerVoiceAudio/Program.cs", source_paths)
+            self.assertIn(
+                "input/computer-voice-desktop/desktop_launcher.py",
+                source_paths,
+            )
+            self.assertIn(
+                "input/computer-voice-desktop/bridge_core.py",
+                source_paths,
+            )
             self.assertIn("package_computer_voice_direct.py", source_paths)
             self.assertIn("bw_computer_voice_typist_helper.py", source_paths)
             self.assertIn("bw_computer_voice_supervisor.py", source_paths)
+            self.assertIn("input/voice_typist.py", source_paths)
+            self.assertIn("input/typist_ipc.py", source_paths)
+            self.assertIn("input/voice-typist-launcher.ps1", source_paths)
             self.assertEqual(
                 source_hashes["bw_computer_voice_typist_helper.py"],
                 package._sha256(
@@ -117,6 +172,18 @@ class DirectPackageTests(unittest.TestCase):
                 package._sha256(
                     package.SUPERVISOR_SOURCE.read_bytes()
                 ),
+            )
+            self.assertEqual(
+                source_hashes["input/voice_typist.py"],
+                package._sha256(typist_script.read_bytes()),
+            )
+            self.assertEqual(
+                source_hashes["input/typist_ipc.py"],
+                package._sha256(typist_ipc.read_bytes()),
+            )
+            self.assertEqual(
+                source_hashes["input/voice-typist-launcher.ps1"],
+                package._sha256(typist_launcher.read_bytes()),
             )
             with zipfile.ZipFile(archive) as zip_file:
                 self.assertEqual(zip_file.namelist(), sorted(zip_file.namelist()))
@@ -135,9 +202,36 @@ class DirectPackageTests(unittest.TestCase):
                     ),
                     package.SUPERVISOR_SOURCE.read_bytes(),
                 )
+                self.assertEqual(
+                    zip_file.read(f"{prefix}/{package.TYPIST_SCRIPT_REL}"),
+                    typist_script.read_bytes(),
+                )
+                self.assertEqual(
+                    zip_file.read(f"{prefix}/{package.TYPIST_IPC_REL}"),
+                    typist_ipc.read_bytes(),
+                )
+                self.assertEqual(
+                    zip_file.read(f"{prefix}/{package.TYPIST_LAUNCHER_REL}"),
+                    typist_launcher.read_bytes(),
+                )
             self.assertTrue(any("publish" in call for call in runner.calls))
             self.assertTrue(any("--onefile" in call for call in runner.calls))
             publish_call = next(call for call in runner.calls if "publish" in call)
+            pyinstaller_call = next(
+                call for call in runner.calls if "--onefile" in call
+            )
+            self.assertEqual(
+                Path(publish_call[publish_call.index("publish") + 1]),
+                audio / "ComputerVoiceAudio.csproj",
+            )
+            self.assertEqual(
+                Path(pyinstaller_call[-1]),
+                desktop / "desktop_launcher.py",
+            )
+            self.assertEqual(
+                Path(pyinstaller_call[pyinstaller_call.index("--paths") + 1]),
+                desktop,
+            )
             self.assertIn("--artifacts-path", publish_call)
             self.assertFalse(any("--direct-serve" in call for call in runner.calls))
 
@@ -155,6 +249,7 @@ class DirectPackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             audio, desktop = self._sources(root)
+            typist_script, typist_ipc, typist_launcher = self._runtime_sources(root)
             candidates = root / "candidates"
             dotnet = root / "dotnet.exe"
             pyinstaller = root / "pyinstaller.exe"
@@ -164,6 +259,9 @@ class DirectPackageTests(unittest.TestCase):
             archive = package.build_candidate(
                 "0.4.1", runner=runner, candidates=candidates, dotnet=dotnet,
                 pyinstaller=pyinstaller, audio_source=audio, desktop_source=desktop,
+                typist_script_source=typist_script,
+                typist_ipc_source=typist_ipc,
+                typist_launcher_source=typist_launcher,
             )
             runner.calls.clear()
             runner.cwds.clear()
@@ -195,6 +293,7 @@ class DirectPackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             audio, desktop = self._sources(root)
+            typist_script, typist_ipc, typist_launcher = self._runtime_sources(root)
             candidates = root / "candidates"
             dotnet = root / "dotnet.exe"
             pyinstaller = root / "pyinstaller.exe"
@@ -208,6 +307,9 @@ class DirectPackageTests(unittest.TestCase):
                 pyinstaller=pyinstaller,
                 audio_source=audio,
                 desktop_source=desktop,
+                typist_script_source=typist_script,
+                typist_ipc_source=typist_ipc,
+                typist_launcher_source=typist_launcher,
             )
             original_read = package._read_regular
             archive_reads = 0
@@ -234,6 +336,7 @@ class DirectPackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             audio, desktop = self._sources(root)
+            typist_script, typist_ipc, typist_launcher = self._runtime_sources(root)
             candidates = root / "candidates"
             dotnet = root / "dotnet.exe"
             pyinstaller = root / "pyinstaller.exe"
@@ -253,6 +356,9 @@ class DirectPackageTests(unittest.TestCase):
                 desktop_source=desktop,
                 typist_helper_source=helper,
                 supervisor_source=supervisor,
+                typist_script_source=typist_script,
+                typist_ipc_source=typist_ipc,
+                typist_launcher_source=typist_launcher,
             )
             runner = FakeRunner()
             with self.assertRaisesRegex(
@@ -270,10 +376,18 @@ class DirectPackageTests(unittest.TestCase):
 
     def test_existing_candidate_is_never_overwritten(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
-            candidates = Path(raw) / "candidates"
+            root = Path(raw)
+            typist_script, typist_ipc, typist_launcher = self._runtime_sources(root)
+            candidates = root / "candidates"
             package.candidate_directory("0.4.1", candidates=candidates).mkdir(parents=True)
             with self.assertRaisesRegex(package.PackageError, "拒绝覆盖"):
-                package.build_candidate("0.4.1", candidates=candidates)
+                package.build_candidate(
+                    "0.4.1",
+                    candidates=candidates,
+                    typist_script_source=typist_script,
+                    typist_ipc_source=typist_ipc,
+                    typist_launcher_source=typist_launcher,
+                )
 
     def test_real_runner_converts_timeout_to_bounded_failure(self) -> None:
         runner = package.SubprocessRunner(
@@ -299,6 +413,7 @@ class DirectPackageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             audio, desktop = self._sources(root)
+            typist_script, typist_ipc, typist_launcher = self._runtime_sources(root)
             candidates = root / "candidates"
             candidates.mkdir()
             dotnet = root / "dotnet.exe"
@@ -327,6 +442,165 @@ class DirectPackageTests(unittest.TestCase):
                         pyinstaller=pyinstaller,
                         audio_source=audio,
                         desktop_source=desktop,
+                        typist_script_source=typist_script,
+                        typist_ipc_source=typist_ipc,
+                        typist_launcher_source=typist_launcher,
+                    )
+            self.assertEqual(runner.calls, [])
+
+    def test_reparse_source_root_ancestor_fails_before_tools_run(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            audio, desktop = self._sources(root)
+            typist_script, typist_ipc, typist_launcher = self._runtime_sources(root)
+            dotnet = root / "dotnet.exe"
+            pyinstaller = root / "pyinstaller.exe"
+            dotnet.write_bytes(b"tool")
+            pyinstaller.write_bytes(b"tool")
+            runner = FakeRunner()
+            original = package._is_reparse_path
+
+            def mark_source_ancestor(path, status=None):
+                if Path(path) == audio.parent:
+                    return True
+                return original(Path(path), status)
+
+            with patch.object(
+                package,
+                "_is_reparse_path",
+                side_effect=mark_source_ancestor,
+            ):
+                with self.assertRaisesRegex(
+                    package.PackageError,
+                    "祖先必须是非 reparse 普通目录",
+                ):
+                    package.build_candidate(
+                        "0.4.1",
+                        runner=runner,
+                        candidates=root / "candidates",
+                        dotnet=dotnet,
+                        pyinstaller=pyinstaller,
+                        audio_source=audio,
+                        desktop_source=desktop,
+                        typist_script_source=typist_script,
+                        typist_ipc_source=typist_ipc,
+                        typist_launcher_source=typist_launcher,
+                    )
+            self.assertEqual(runner.calls, [])
+
+    def test_nested_reparse_source_is_rejected_instead_of_skipped(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            audio, desktop = self._sources(root)
+            typist_script, typist_ipc, typist_launcher = self._runtime_sources(root)
+            linked_source = desktop / "linked-production-source"
+            linked_source.mkdir()
+            (linked_source / "hidden.py").write_text(
+                "VALUE = 'must-not-be-skipped'\n",
+                encoding="utf-8",
+            )
+            dotnet = root / "dotnet.exe"
+            pyinstaller = root / "pyinstaller.exe"
+            dotnet.write_bytes(b"tool")
+            pyinstaller.write_bytes(b"tool")
+            runner = FakeRunner()
+            original = package._is_reparse_path
+
+            def mark_nested_source(path, status=None):
+                if Path(path) == linked_source:
+                    return True
+                return original(Path(path), status)
+
+            with patch.object(
+                package,
+                "_is_reparse_path",
+                side_effect=mark_nested_source,
+            ):
+                with self.assertRaisesRegex(
+                    package.PackageError,
+                    "拒绝静默跳过",
+                ):
+                    package.build_candidate(
+                        "0.4.1",
+                        runner=runner,
+                        candidates=root / "candidates",
+                        dotnet=dotnet,
+                        pyinstaller=pyinstaller,
+                        audio_source=audio,
+                        desktop_source=desktop,
+                        typist_script_source=typist_script,
+                        typist_ipc_source=typist_ipc,
+                        typist_launcher_source=typist_launcher,
+                    )
+            self.assertEqual(runner.calls, [])
+
+    def test_missing_canonical_runtime_fails_before_tools_run(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            audio, desktop = self._sources(root)
+            dotnet = root / "dotnet.exe"
+            pyinstaller = root / "pyinstaller.exe"
+            dotnet.write_bytes(b"tool")
+            pyinstaller.write_bytes(b"tool")
+            runner = FakeRunner()
+
+            with self.assertRaisesRegex(
+                package.PackageError,
+                "canonical voice-typist runtime",
+            ):
+                package.build_candidate(
+                    "0.4.1",
+                    runner=runner,
+                    candidates=root / "candidates",
+                    dotnet=dotnet,
+                    pyinstaller=pyinstaller,
+                    audio_source=audio,
+                    desktop_source=desktop,
+                    typist_script_source=root / "missing" / "voice_typist.py",
+                    typist_ipc_source=root / "missing" / "typist_ipc.py",
+                    typist_launcher_source=(
+                        root / "missing" / "voice-typist-launcher.ps1"
+                    ),
+                )
+            self.assertEqual(runner.calls, [])
+
+    def test_reparse_canonical_runtime_source_fails_before_tools_run(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            audio, desktop = self._sources(root)
+            typist_script, typist_ipc, typist_launcher = self._runtime_sources(root)
+            dotnet = root / "dotnet.exe"
+            pyinstaller = root / "pyinstaller.exe"
+            dotnet.write_bytes(b"tool")
+            pyinstaller.write_bytes(b"tool")
+            runner = FakeRunner()
+            original = package._is_reparse_path
+
+            def mark_runtime_script(path, status=None):
+                if Path(path) == typist_script:
+                    return True
+                return original(Path(path), status)
+
+            with patch.object(
+                package,
+                "_is_reparse_path",
+                side_effect=mark_runtime_script,
+            ):
+                with self.assertRaisesRegex(
+                    package.PackageError,
+                    "拒绝链接或目录",
+                ):
+                    package.build_candidate(
+                        "0.4.1",
+                        runner=runner,
+                        candidates=root / "candidates",
+                        dotnet=dotnet,
+                        pyinstaller=pyinstaller,
+                        audio_source=audio,
+                        desktop_source=desktop,
+                        typist_script_source=typist_script,
+                        typist_ipc_source=typist_ipc,
+                        typist_launcher_source=typist_launcher,
                     )
             self.assertEqual(runner.calls, [])
 
@@ -347,10 +621,11 @@ class DirectPackageTests(unittest.TestCase):
                 )
             self.assertEqual(marker.read_text(encoding="utf-8"), "keep")
 
-    def test_source_change_during_build_fails_and_removes_exact_candidate(self) -> None:
+    def test_canonical_runtime_change_during_build_fails_and_removes_candidate(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             audio, desktop = self._sources(root)
+            typist_script, typist_ipc, typist_launcher = self._runtime_sources(root)
             candidates = root / "candidates"
             dotnet = root / "dotnet.exe"
             pyinstaller = root / "pyinstaller.exe"
@@ -361,8 +636,8 @@ class DirectPackageTests(unittest.TestCase):
                 def run(self, args, *, cwd):
                     result = super().run(args, cwd=cwd)
                     if "publish" in tuple(args):
-                        (audio / "Program.cs").write_text(
-                            "class Program { static int Changed = 1; }",
+                        typist_script.write_text(
+                            "VALUE = 'changed-during-build'\n",
                             encoding="utf-8",
                         )
                     return result
@@ -376,6 +651,9 @@ class DirectPackageTests(unittest.TestCase):
                     pyinstaller=pyinstaller,
                     audio_source=audio,
                     desktop_source=desktop,
+                    typist_script_source=typist_script,
+                    typist_ipc_source=typist_ipc,
+                    typist_launcher_source=typist_launcher,
                 )
             self.assertFalse(
                 package.candidate_directory(
@@ -390,6 +668,9 @@ class DirectPackageTests(unittest.TestCase):
             package.DESKTOP_REL: b"desktop",
             package.TYPIST_HELPER_REL: b"helper",
             package.SUPERVISOR_REL: b"supervisor",
+            package.TYPIST_SCRIPT_REL: b"typist",
+            package.TYPIST_IPC_REL: b"ipc",
+            package.TYPIST_LAUNCHER_REL: b"launcher",
         }
         build_inputs = [
             {
@@ -398,11 +679,11 @@ class DirectPackageTests(unittest.TestCase):
             },
             {
                 "path": "bw_computer_voice_supervisor.py",
-                "sha256": "2" * 64,
+                "sha256": package._sha256(b"supervisor"),
             },
             {
                 "path": "bw_computer_voice_typist_helper.py",
-                "sha256": "3" * 64,
+                "sha256": package._sha256(b"helper"),
             },
             {
                 "path": "computer-voice-desktop/desktop_launcher.py",
@@ -411,6 +692,18 @@ class DirectPackageTests(unittest.TestCase):
             {
                 "path": "package_computer_voice_direct.py",
                 "sha256": "5" * 64,
+            },
+            {
+                "path": "typist-runtime/voice_typist.py",
+                "sha256": package._sha256(b"typist"),
+            },
+            {
+                "path": "typist-runtime/typist_ipc.py",
+                "sha256": package._sha256(b"ipc"),
+            },
+            {
+                "path": "typist-runtime/voice-typist-launcher.ps1",
+                "sha256": package._sha256(b"launcher"),
             },
         ]
         build_inputs.sort(key=lambda item: item["path"])
@@ -463,6 +756,14 @@ class DirectPackageTests(unittest.TestCase):
             if item["path"] != "package_computer_voice_direct.py"
         ]
         invalid_manifests.append(missing_packager)
+        mismatched_runtime_digest = copy.deepcopy(manifest)
+        runtime_source = next(
+            item
+            for item in mismatched_runtime_digest["buildInputs"]["sourceFiles"]
+            if item["path"] == package.TYPIST_SCRIPT_REL
+        )
+        runtime_source["sha256"] = "f" * 64
+        invalid_manifests.append(mismatched_runtime_digest)
 
         for invalid in invalid_manifests:
             with self.subTest(invalid=invalid):

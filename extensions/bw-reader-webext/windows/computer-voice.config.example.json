@@ -4,5 +4,5 @@
   "voiceStartShortcut": "Ctrl+Shift+C",
   "appKind": "chatgpt-desktop",
   "outputScope": "process-only",
-  "companionLauncher": "C:\\Users\\bwica\\bw-reader-context\\reader-bridge\\voice-typist-launcher.ps1"
+  "companionLauncher": "typist-runtime\\voice-typist-launcher.ps1"
 }

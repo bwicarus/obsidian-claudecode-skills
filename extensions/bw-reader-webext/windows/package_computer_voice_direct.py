@@ -4,8 +4,8 @@
 This is deliberately a *candidate* builder, not an installer.  It never
 starts ``--direct-serve``, touches Scheduled Tasks or Tailscale Serve, opens
 audio devices, or writes outside ``windows/candidates/<version>``.  The ZIP is
-also intentionally tiny: two self-contained executables, their two fixed local
-Python runtime modules, and a manifest.
+also intentionally tiny: two self-contained executables, their fixed local
+bridge modules, the canonical voice-typist runtime, and a manifest.
 """
 from __future__ import annotations
 
@@ -32,6 +32,10 @@ DESKTOP_SOURCE = HERE / "computer-voice-desktop"
 AUDIO_SOURCE = HERE / "ComputerVoiceAudio"
 TYPIST_HELPER_SOURCE = HERE / "bw_computer_voice_typist_helper.py"
 SUPERVISOR_SOURCE = HERE / "bw_computer_voice_supervisor.py"
+TYPIST_RUNTIME_SOURCE = HERE / "typist-runtime"
+TYPIST_SCRIPT_SOURCE = TYPIST_RUNTIME_SOURCE / "voice_typist.py"
+TYPIST_IPC_SOURCE = TYPIST_RUNTIME_SOURCE / "typist_ipc.py"
+TYPIST_LAUNCHER_SOURCE = TYPIST_RUNTIME_SOURCE / "voice-typist-launcher.ps1"
 CANDIDATES = HERE / "candidates"
 
 PACKAGE_CONTRACT = "reader-computer-voice-direct-package/1"
@@ -41,6 +45,7 @@ RID = "win-x64"
 VERSION_RE = re.compile(r"(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*)){0,3}\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 SOURCE_EXCLUDED_PARTS = frozenset({"bin", "obj", "tests", "__pycache__"})
+SOURCE_INPUT_SUFFIXES = frozenset({".cs", ".csproj", ".py"})
 BUILD_COMMAND_TIMEOUT_SECONDS = 600
 SELF_TEST_TIMEOUT_SECONDS = 30
 DETERMINISTIC_BUILD_ENV = {
@@ -52,17 +57,25 @@ NATIVE_REL = "native-host/bw-computer-voice-audio.exe"
 DESKTOP_REL = "desktop-launcher/BW-Computer-Voice-Bridge.exe"
 TYPIST_HELPER_REL = "bw_computer_voice_typist_helper.py"
 SUPERVISOR_REL = "bw_computer_voice_supervisor.py"
+TYPIST_SCRIPT_REL = "typist-runtime/voice_typist.py"
+TYPIST_IPC_REL = "typist-runtime/typist_ipc.py"
+TYPIST_LAUNCHER_REL = "typist-runtime/voice-typist-launcher.ps1"
 MANIFEST_REL = "manifest.json"
 PAYLOAD_RELATIVE_PATHS = (
     NATIVE_REL,
     DESKTOP_REL,
     TYPIST_HELPER_REL,
     SUPERVISOR_REL,
+    TYPIST_SCRIPT_REL,
+    TYPIST_IPC_REL,
+    TYPIST_LAUNCHER_REL,
 )
 EXECUTABLE_RELATIVE_PATHS = (NATIVE_REL, DESKTOP_REL)
 PYTHON_RUNTIME_RELATIVE_PATHS = (
     TYPIST_HELPER_REL,
     SUPERVISOR_REL,
+    TYPIST_SCRIPT_REL,
+    TYPIST_IPC_REL,
 )
 DOTNET_DEFAULT = Path(
     r"C:\Users\bwica\bw-computer-voice-bridge\dotnet8\dotnet.exe"
@@ -206,6 +219,20 @@ def _require_plain_directory(path: Path, *, label: str) -> Path:
     return resolved
 
 
+def _require_plain_source_root(path: Path, *, label: str) -> Path:
+    """Prove that a compiler source root and every ancestor are plain dirs."""
+
+    lexical = _lexical_absolute(path)
+    for directory in reversed((lexical, *lexical.parents)):
+        try:
+            status = directory.lstat()
+        except OSError as exc:
+            _fail(f"{label} 或其祖先不存在或不可读取: {directory}: {exc}")
+        if _is_reparse_path(directory, status) or not stat.S_ISDIR(status.st_mode):
+            _fail(f"{label} 及其祖先必须是非 reparse 普通目录: {directory}")
+    return _require_plain_directory(lexical, label=label)
+
+
 def _prepare_candidates_root(candidates: Path) -> Path:
     lexical = _lexical_absolute(candidates)
     parent = _require_plain_directory(lexical.parent, label="候选根父目录")
@@ -274,14 +301,35 @@ def _remove_failed_candidate(
 
 
 def _relative_source_files(root: Path) -> list[Path]:
-    files = [
-        path
-        for path in root.rglob("*")
-        if path.is_file()
-        and not path.is_symlink()
-        and not SOURCE_EXCLUDED_PARTS.intersection(path.relative_to(root).parts)
-        and path.suffix in {".cs", ".csproj", ".py"}
-    ]
+    root = _require_plain_source_root(root, label="编译源码根")
+    files: list[Path] = []
+    pending = [root]
+    while pending:
+        directory = pending.pop()
+        try:
+            with os.scandir(directory) as iterator:
+                entries = sorted(iterator, key=lambda item: item.name.casefold())
+        except OSError as exc:
+            _fail(f"无法枚举编译源码目录 {directory}: {exc}")
+        for entry in entries:
+            path = directory / entry.name
+            try:
+                status = path.lstat()
+            except OSError as exc:
+                _fail(f"无法检查编译源码 {path}: {exc}")
+            if _is_reparse_path(path, status):
+                _fail(f"编译源码树包含 symlink/reparse，拒绝静默跳过: {path}")
+            if stat.S_ISDIR(status.st_mode):
+                pending.append(path)
+                continue
+            if not stat.S_ISREG(status.st_mode):
+                _fail(f"编译源码树包含非普通文件: {path}")
+            relative = path.relative_to(root)
+            if (
+                not SOURCE_EXCLUDED_PARTS.intersection(relative.parts)
+                and path.suffix.casefold() in SOURCE_INPUT_SUFFIXES
+            ):
+                files.append(path)
     return sorted(files, key=lambda item: item.relative_to(root).as_posix())
 
 
@@ -291,6 +339,9 @@ def source_inputs(
     desktop_source: Path = DESKTOP_SOURCE,
     typist_helper_source: Path = TYPIST_HELPER_SOURCE,
     supervisor_source: Path = SUPERVISOR_SOURCE,
+    typist_script_source: Path = TYPIST_SCRIPT_SOURCE,
+    typist_ipc_source: Path = TYPIST_IPC_SOURCE,
+    typist_launcher_source: Path = TYPIST_LAUNCHER_SOURCE,
 ) -> list[dict[str, str]]:
     """Return content-addressed inputs that determine the signed candidate."""
 
@@ -308,7 +359,13 @@ def source_inputs(
         "path": PACKAGER_SOURCE.relative_to(HERE).as_posix(),
         "sha256": _sha256(_read_regular(PACKAGER_SOURCE)),
     })
-    for source in (typist_helper_source, supervisor_source):
+    for source in (
+        typist_helper_source,
+        supervisor_source,
+        typist_script_source,
+        typist_ipc_source,
+        typist_launcher_source,
+    ):
         try:
             relative = source.relative_to(HERE).as_posix()
         except ValueError:
@@ -318,9 +375,90 @@ def source_inputs(
             "sha256": _sha256(_read_regular(source)),
         })
     paths = [entry["path"] for entry in output]
-    if not output or len(paths) != len(set(paths)):
+    if (
+        not output
+        or len(paths) != len(set(paths))
+        or len(paths) != len({path.casefold() for path in paths})
+    ):
         _fail("编译输入为空或存在重复的相对路径")
     return sorted(output, key=lambda item: item["path"])
+
+
+def _require_canonical_runtime_sources(
+    *,
+    typist_script_source: Path,
+    typist_ipc_source: Path,
+    typist_launcher_source: Path,
+) -> None:
+    parents = {
+        _lexical_absolute(typist_script_source).parent,
+        _lexical_absolute(typist_ipc_source).parent,
+        _lexical_absolute(typist_launcher_source).parent,
+    }
+    if len(parents) != 1:
+        _fail("canonical voice-typist runtime 必须来自同一普通目录")
+    runtime_root = _require_plain_directory(
+        parents.pop(),
+        label="canonical voice-typist runtime 目录",
+    )
+    for label, source in (
+        ("voice_typist.py", typist_script_source),
+        ("typist_ipc.py", typist_ipc_source),
+        ("voice-typist-launcher.ps1", typist_launcher_source),
+    ):
+        lexical = _lexical_absolute(source)
+        if lexical.parent != runtime_root:
+            _fail(f"canonical runtime {label} 越出固定目录")
+        _read_regular(lexical)
+    try:
+        typist_source = _read_regular(
+            _lexical_absolute(typist_script_source)
+        ).decode("utf-8")
+        ipc_source = _read_regular(
+            _lexical_absolute(typist_ipc_source)
+        ).decode("utf-8")
+        launcher_source = _read_regular(
+            _lexical_absolute(typist_launcher_source)
+        ).decode("utf-8-sig")
+    except UnicodeDecodeError as exc:
+        _fail(f"canonical voice-typist runtime 不是 UTF-8: {exc}")
+    if (
+        "import typist_ipc as typist_ipc_runtime" not in typist_source
+        or "typist_ipc_runtime.connect_pipe" not in typist_source
+        or "typist_ipc_runtime.serve" not in typist_source
+        or "process_generation_alive" not in typist_source
+        or "queue-resolve" not in typist_source
+        or "reader-context-injector" in typist_source
+        or "ProductionJournal" in typist_source
+        or "--journal-url" in typist_source
+        or "bw-reader-context" in typist_source
+    ):
+        _fail("canonical voice_typist.py 未固定到包内 direct-v3 IPC")
+    if (
+        "ctypes.WinDLL" not in ipc_source
+        or "win32file" in ipc_source
+        or "pywintypes" in ipc_source
+        or "BW_TYPIST_IPC_HANDOFF_FAILED" not in ipc_source
+    ):
+        _fail("canonical typist_ipc.py 仍有外部依赖或缺 durable ACK")
+    if (
+        "$install = $PSScriptRoot" not in launcher_source
+        or "[int]$ExpectedPid = 0" not in launcher_source
+        or "[long]$ExpectedStartFileTimeUtc = 0" not in launcher_source
+        or "[int]$OwnerPid = 0" not in launcher_source
+        or "[long]$OwnerStartFileTimeUtc = 0" not in launcher_source
+        or "'--owner-process-id'" not in launcher_source
+        or "ResolveUncertain" not in launcher_source
+        or "'queue-resolve'" not in launcher_source
+        or "'--launcher-confirmed-stopped'" not in launcher_source
+        or "Get-TypistProcess -Strict" not in launcher_source
+        or ".IndexOf($script" in launcher_source
+        or "JournalUrl" in launcher_source
+        or "--journal-url" in launcher_source
+        or "'--clear-stop'" in launcher_source
+        or "bw-reader-context" in launcher_source
+    ):
+        _fail("canonical voice-typist launcher 未固定到 direct-v3 生命周期")
 
 
 def _tool_version(runner: CommandRunner, executable: Path, *, cwd: Path) -> str:
@@ -434,6 +572,9 @@ def build_candidate(
     desktop_source: Path = DESKTOP_SOURCE,
     typist_helper_source: Path = TYPIST_HELPER_SOURCE,
     supervisor_source: Path = SUPERVISOR_SOURCE,
+    typist_script_source: Path = TYPIST_SCRIPT_SOURCE,
+    typist_ipc_source: Path = TYPIST_IPC_SOURCE,
+    typist_launcher_source: Path = TYPIST_LAUNCHER_SOURCE,
 ) -> Path:
     """Build a new candidate. Existing version directories are never replaced."""
 
@@ -442,15 +583,35 @@ def build_candidate(
         timeout_seconds=BUILD_COMMAND_TIMEOUT_SECONDS,
         environment_overrides=DETERMINISTIC_BUILD_ENV,
     )
-    if not (audio_source / "ComputerVoiceAudio.csproj").is_file():
-        _fail("C# 项目文件不存在")
-    if not (desktop_source / "desktop_launcher.py").is_file():
-        _fail("桌面启动器入口不存在")
+    audio_source = _require_plain_source_root(
+        audio_source,
+        label="C# 编译源码根",
+    )
+    desktop_source = _require_plain_source_root(
+        desktop_source,
+        label="PyInstaller 编译源码根",
+    )
+    _read_regular(audio_source / "ComputerVoiceAudio.csproj")
+    _read_regular(desktop_source / "desktop_launcher.py")
     if not typist_helper_source.is_file() or not supervisor_source.is_file():
-        _fail("voice-typist 固定本地 runtime 源码不存在")
+        _fail("电脑语音桥固定本地 Python 模块不存在")
+    _require_canonical_runtime_sources(
+        typist_script_source=typist_script_source,
+        typist_ipc_source=typist_ipc_source,
+        typist_launcher_source=typist_launcher_source,
+    )
     if not dotnet.is_file() or not pyinstaller.is_file():
         _fail("未找到固定的 dotnet 或 PyInstaller；拒绝改用 PATH 中的未知工具")
 
+    build_inputs = source_inputs(
+        audio_source=audio_source,
+        desktop_source=desktop_source,
+        typist_helper_source=typist_helper_source,
+        supervisor_source=supervisor_source,
+        typist_script_source=typist_script_source,
+        typist_ipc_source=typist_ipc_source,
+        typist_launcher_source=typist_launcher_source,
+    )
     candidates_root = _prepare_candidates_root(candidates)
     destination = candidate_directory(version, candidates=candidates_root)
     if _candidate_status(destination) is not None:
@@ -461,12 +622,6 @@ def build_candidate(
     stage_root = destination / "staging" / bundle_name(version)
     dotnet_version = _tool_version(runner, dotnet, cwd=HERE)
     pyinstaller_version = _tool_version(runner, pyinstaller, cwd=HERE)
-    build_inputs = source_inputs(
-        audio_source=audio_source,
-        desktop_source=desktop_source,
-        typist_helper_source=typist_helper_source,
-        supervisor_source=supervisor_source,
-    )
 
     destination.mkdir(exist_ok=False)
     _require_exact_candidate_directory(
@@ -527,6 +682,9 @@ def build_candidate(
             desktop_source=desktop_source,
             typist_helper_source=typist_helper_source,
             supervisor_source=supervisor_source,
+            typist_script_source=typist_script_source,
+            typist_ipc_source=typist_ipc_source,
+            typist_launcher_source=typist_launcher_source,
         )
         if final_build_inputs != build_inputs:
             _fail("源码在构建期间发生变化，拒绝签发候选")
@@ -536,8 +694,22 @@ def build_candidate(
             DESKTOP_REL: desktop_dist / "BW-Computer-Voice-Bridge.exe",
             TYPIST_HELPER_REL: typist_helper_source,
             SUPERVISOR_REL: supervisor_source,
+            TYPIST_SCRIPT_REL: typist_script_source,
+            TYPIST_IPC_REL: typist_ipc_source,
+            TYPIST_LAUNCHER_REL: typist_launcher_source,
         }
         payload = {relative: _read_regular(path) for relative, path in payload_paths.items()}
+        post_payload_build_inputs = source_inputs(
+            audio_source=audio_source,
+            desktop_source=desktop_source,
+            typist_helper_source=typist_helper_source,
+            supervisor_source=supervisor_source,
+            typist_script_source=typist_script_source,
+            typist_ipc_source=typist_ipc_source,
+            typist_launcher_source=typist_launcher_source,
+        )
+        if post_payload_build_inputs != build_inputs:
+            _fail("源码在候选取样期间发生变化，拒绝签发候选")
         stage_payload = {stage_root / relative: content for relative, content in payload.items()}
         for path, content in stage_payload.items():
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -681,8 +853,14 @@ def _validate_manifest(manifest: dict[str, Any], *, version: str, payload: dict[
                     PACKAGER_SOURCE.name,
                     TYPIST_HELPER_SOURCE.name,
                     SUPERVISOR_SOURCE.name,
+                    TYPIST_SCRIPT_REL,
+                    TYPIST_IPC_REL,
+                    TYPIST_LAUNCHER_REL,
                     f"input/{TYPIST_HELPER_SOURCE.name}",
                     f"input/{SUPERVISOR_SOURCE.name}",
+                    f"input/{TYPIST_SCRIPT_SOURCE.name}",
+                    f"input/{TYPIST_IPC_SOURCE.name}",
+                    f"input/{TYPIST_LAUNCHER_SOURCE.name}",
                 }
             )
         ):
@@ -713,6 +891,27 @@ def _validate_manifest(manifest: dict[str, Any], *, version: str, payload: dict[
             for value in source_paths
         )
         or not any(
+            value in {
+                TYPIST_SCRIPT_REL,
+                f"input/{TYPIST_SCRIPT_SOURCE.name}",
+            }
+            for value in source_paths
+        )
+        or not any(
+            value in {
+                TYPIST_IPC_REL,
+                f"input/{TYPIST_IPC_SOURCE.name}",
+            }
+            for value in source_paths
+        )
+        or not any(
+            value in {
+                TYPIST_LAUNCHER_REL,
+                f"input/{TYPIST_LAUNCHER_SOURCE.name}",
+            }
+            for value in source_paths
+        )
+        or not any(
             value.startswith(("ComputerVoiceAudio/", "input/ComputerVoiceAudio/"))
             for value in source_paths
         )
@@ -725,6 +924,39 @@ def _validate_manifest(manifest: dict[str, Any], *, version: str, payload: dict[
         )
     ):
         _fail("manifest sourceFiles 缺少打包器或任一生产源码根")
+    source_hashes = {
+        item["path"]: item["sha256"]
+        for item in source_files
+    }
+    for payload_path, source_candidates in (
+        (
+            TYPIST_HELPER_REL,
+            (TYPIST_HELPER_SOURCE.name, f"input/{TYPIST_HELPER_SOURCE.name}"),
+        ),
+        (
+            SUPERVISOR_REL,
+            (SUPERVISOR_SOURCE.name, f"input/{SUPERVISOR_SOURCE.name}"),
+        ),
+        (
+            TYPIST_SCRIPT_REL,
+            (TYPIST_SCRIPT_REL, f"input/{TYPIST_SCRIPT_SOURCE.name}"),
+        ),
+        (
+            TYPIST_IPC_REL,
+            (TYPIST_IPC_REL, f"input/{TYPIST_IPC_SOURCE.name}"),
+        ),
+        (
+            TYPIST_LAUNCHER_REL,
+            (TYPIST_LAUNCHER_REL, f"input/{TYPIST_LAUNCHER_SOURCE.name}"),
+        ),
+    ):
+        matches = [
+            source_hashes[value]
+            for value in source_candidates
+            if value in source_hashes
+        ]
+        if len(matches) != 1 or matches[0] != entries[payload_path]["sha256"]:
+            _fail(f"manifest 源摘要与 payload 不一致: {payload_path}")
 
 
 def _valid_tool_version(value: object) -> bool:

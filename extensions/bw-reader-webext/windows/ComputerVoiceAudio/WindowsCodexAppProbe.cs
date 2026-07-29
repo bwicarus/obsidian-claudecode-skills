@@ -1,5 +1,8 @@
+using System.ComponentModel;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
+using System.Text;
+using System.Text.Json;
 
 namespace BwReader.ComputerVoiceAudio;
 
@@ -23,6 +26,22 @@ internal readonly record struct VoiceShortcutKeyEvent(
     ushort VirtualKey,
     bool KeyUp);
 
+internal sealed record VoiceShortcutSendResult(
+    bool Sent,
+    string? FailureCode,
+    string? FailureDetail,
+    uint InsertedInputCount,
+    int Win32Error);
+
+internal readonly record struct VoiceShortcutInteropLayout(
+    int PointerSize,
+    int InputSize,
+    int UnionSize,
+    int KeyboardSize,
+    int MouseSize,
+    int HardwareSize,
+    int UnionOffset);
+
 internal static class WindowsCodexAppProbe
 {
     // The packaged app currently exposes only the observed START shortcut to
@@ -36,8 +55,10 @@ internal static class WindowsCodexAppProbe
     private const ushort VirtualKeyControl = 0x11;
     private const ushort VirtualKeyShift = 0x10;
     private const ushort VirtualKeyC = 0x43;
-    private const int InputKeyboard = 1;
-    private const int ShowRestore = 9;
+    private const uint InputKeyboard = 1;
+    private const string RealtimeVoiceCommand = "realtimeVoice";
+    private const string RealtimeVoiceShortcut = "Ctrl+Shift+C";
+    private const int MaximumKeybindingsBytes = 64 * 1024;
 
     internal static CodexAppTarget RequireReady()
     {
@@ -166,41 +187,248 @@ internal static class WindowsCodexAppProbe
 
     internal static bool SendVoiceShortcut(CodexAppTarget expected)
     {
-        CodexAppTarget current = RequireReady();
-        if (current.RootProcessId != expected.RootProcessId
-            || !current.ProcessTree.SetEquals(expected.ProcessTree))
+        return SendVoiceShortcutDetailed(expected).Sent;
+    }
+
+    internal static void RequireExpectedGlobalVoiceShortcut()
+    {
+        if (!TryReadExpectedGlobalVoiceShortcut())
         {
-            return false;
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_SHORTCUT_CONFIG_INVALID",
+                "Codex 全局语音快捷键必须唯一配置为 Ctrl+Shift+C");
         }
-        _ = ShowWindow(current.WindowHandle, ShowRestore);
-        if (!SetForegroundWindow(current.WindowHandle))
+    }
+
+    internal static void SendVoiceShortcutOrThrow(
+        CodexAppTarget expected)
+    {
+        VoiceShortcutSendResult result =
+            SendVoiceShortcutDetailed(expected);
+        if (result.Sent)
         {
-            return false;
+            return;
         }
-        nint foreground = GetForegroundWindow();
-        _ = GetWindowThreadProcessId(foreground, out uint foregroundPid);
-        if (!current.ProcessTree.Contains(foregroundPid))
+        Exception? innerException = result.Win32Error == 0
+            ? null
+            : new Win32Exception(result.Win32Error);
+        throw new DirectProtocolException(
+            result.FailureCode
+                ?? "BW_COMPUTER_VOICE_DIRECT_SHORTCUT_FAILED",
+            result.FailureDetail
+                ?? "Codex 全局语音快捷键发送失败",
+            retryable:
+                result.FailureCode
+                    != "BW_COMPUTER_VOICE_DIRECT_SHORTCUT_CONFIG_INVALID",
+            innerException);
+    }
+
+    internal static VoiceShortcutSendResult
+        SendVoiceShortcutDetailed(CodexAppTarget expected)
+    {
+        CodexAppTarget current;
+        try
         {
-            return false;
+            current = RequireReady();
+        }
+        catch
+        {
+            return ShortcutFailure(
+                "BW_COMPUTER_VOICE_DIRECT_SHORTCUT_TARGET_UNAVAILABLE",
+                "发送快捷键前无法确认唯一 Codex 目标");
+        }
+        bool shortcutConfigured =
+            TryReadExpectedGlobalVoiceShortcut();
+        return SendValidatedGlobalVoiceShortcut(
+            expected,
+            current,
+            shortcutConfigured,
+            batch =>
+            {
+                VoiceShortcutKeyEvent[] events =
+                    VoiceShortcutEvents(batch);
+                INPUT[] inputs = new INPUT[events.Length];
+                for (int index = 0; index < events.Length; index++)
+                {
+                    inputs[index] = Key(
+                        events[index].VirtualKey,
+                        events[index].KeyUp);
+                }
+                return SendInput(
+                    checked((uint)inputs.Length),
+                    inputs,
+                    Marshal.SizeOf<INPUT>());
+            },
+            Marshal.GetLastPInvokeError);
+    }
+
+    internal static VoiceShortcutSendResult
+        SendValidatedGlobalVoiceShortcut(
+            CodexAppTarget expected,
+            CodexAppTarget current,
+            bool shortcutConfigured,
+            Func<VoiceShortcutInputBatch, uint> sendBatch,
+            Func<int> getLastError)
+    {
+        ArgumentNullException.ThrowIfNull(expected);
+        ArgumentNullException.ThrowIfNull(current);
+        ArgumentNullException.ThrowIfNull(sendBatch);
+        ArgumentNullException.ThrowIfNull(getLastError);
+
+        // Electron child processes are dynamic.  The process-loopback target
+        // and the global-hotkey owner are both anchored to the stable packaged
+        // app root, so unrelated child churn must not reject START.
+        if (current.RootProcessId != expected.RootProcessId)
+        {
+            return ShortcutFailure(
+                "BW_COMPUTER_VOICE_DIRECT_SHORTCUT_TARGET_CHANGED",
+                "Codex 目标进程在发送快捷键前发生变化");
+        }
+        if (!shortcutConfigured)
+        {
+            return ShortcutFailure(
+                "BW_COMPUTER_VOICE_DIRECT_SHORTCUT_CONFIG_INVALID",
+                "Codex 全局语音快捷键必须唯一配置为 Ctrl+Shift+C");
         }
 
-        return SendVoiceShortcutInputSequence(batch =>
+        uint insertedInputCount = 0;
+        int win32Error = 0;
+        bool sent = SendVoiceShortcutInputSequence(batch =>
         {
-            VoiceShortcutKeyEvent[] events =
-                VoiceShortcutEvents(batch);
-            INPUT[] inputs = new INPUT[events.Length];
-            for (int index = 0; index < events.Length; index++)
+            uint inserted = sendBatch(batch);
+            if (batch == VoiceShortcutInputBatch.Activation)
             {
-                inputs[index] = Key(
-                    events[index].VirtualKey,
-                    events[index].KeyUp);
+                insertedInputCount = inserted;
+                win32Error = getLastError();
             }
-            return SendInput(
-                checked((uint)inputs.Length),
-                inputs,
-                Marshal.SizeOf<INPUT>());
+            return inserted;
         });
+        return sent
+            ? new VoiceShortcutSendResult(
+                Sent: true,
+                FailureCode: null,
+                FailureDetail: null,
+                InsertedInputCount: insertedInputCount,
+                Win32Error: 0)
+            : ShortcutFailure(
+                "BW_COMPUTER_VOICE_DIRECT_SHORTCUT_INPUT_FAILED",
+                "Windows 未完整发送 Codex 全局语音快捷键",
+                insertedInputCount,
+                win32Error);
     }
+
+    internal static bool IsExpectedGlobalVoiceShortcutConfig(
+        string json)
+    {
+        try
+        {
+            if (
+                string.IsNullOrWhiteSpace(json)
+                || Encoding.UTF8.GetByteCount(json)
+                    > MaximumKeybindingsBytes
+            )
+            {
+                return false;
+            }
+            using JsonDocument document = JsonDocument.Parse(
+                json,
+                new JsonDocumentOptions
+                {
+                    AllowTrailingCommas = true,
+                    CommentHandling = JsonCommentHandling.Skip,
+                });
+            if (document.RootElement.ValueKind
+                != JsonValueKind.Array)
+            {
+                return false;
+            }
+            int commandCount = 0;
+            int shortcutCount = 0;
+            bool exactBinding = false;
+            foreach (JsonElement item in
+                document.RootElement.EnumerateArray())
+            {
+                if (
+                    item.ValueKind != JsonValueKind.Object
+                )
+                {
+                    continue;
+                }
+                string command =
+                    item.TryGetProperty(
+                        "command",
+                        out JsonElement commandElement)
+                    && commandElement.ValueKind
+                        == JsonValueKind.String
+                        ? commandElement.GetString() ?? ""
+                        : "";
+                string key =
+                    item.TryGetProperty(
+                        "key",
+                        out JsonElement keyElement)
+                    && keyElement.ValueKind == JsonValueKind.String
+                        ? keyElement.GetString() ?? ""
+                        : "";
+                if (command == RealtimeVoiceCommand)
+                {
+                    commandCount++;
+                    exactBinding |= key == RealtimeVoiceShortcut;
+                }
+                if (key == RealtimeVoiceShortcut)
+                {
+                    shortcutCount++;
+                }
+            }
+            return commandCount == 1
+                && shortcutCount == 1
+                && exactBinding;
+        }
+        catch (JsonException)
+        {
+            return false;
+        }
+    }
+
+    private static bool TryReadExpectedGlobalVoiceShortcut()
+    {
+        try
+        {
+            string userProfile = Environment.GetFolderPath(
+                Environment.SpecialFolder.UserProfile);
+            if (string.IsNullOrWhiteSpace(userProfile))
+            {
+                return false;
+            }
+            string path = Path.Combine(
+                userProfile,
+                ".codex",
+                "keybindings.json");
+            if (!File.Exists(path))
+            {
+                return false;
+            }
+            FileInfo info = new(path);
+            return info.Length is > 0 and <= MaximumKeybindingsBytes
+                && IsExpectedGlobalVoiceShortcutConfig(
+                    File.ReadAllText(path));
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static VoiceShortcutSendResult ShortcutFailure(
+        string code,
+        string detail,
+        uint insertedInputCount = 0,
+        int win32Error = 0) =>
+        new(
+            Sent: false,
+            FailureCode: code,
+            FailureDetail: detail,
+            InsertedInputCount: insertedInputCount,
+            Win32Error: win32Error);
 
     internal static bool SendVoiceShortcutInputSequence(
         Func<VoiceShortcutInputBatch, uint> sendBatch)
@@ -249,6 +477,18 @@ internal static class WindowsCodexAppProbe
             ],
             _ => throw new ArgumentOutOfRangeException(nameof(batch)),
         };
+
+    internal static VoiceShortcutInteropLayout
+        GetVoiceShortcutInteropLayout() =>
+        new(
+            PointerSize: IntPtr.Size,
+            InputSize: Marshal.SizeOf<INPUT>(),
+            UnionSize: Marshal.SizeOf<INPUTUNION>(),
+            KeyboardSize: Marshal.SizeOf<KEYBDINPUT>(),
+            MouseSize: Marshal.SizeOf<MOUSEINPUT>(),
+            HardwareSize: Marshal.SizeOf<HARDWAREINPUT>(),
+            UnionOffset: Marshal.OffsetOf<INPUT>(nameof(INPUT.Union))
+                .ToInt32());
 
     private static Dictionary<uint, uint> SnapshotParents()
     {
@@ -318,7 +558,7 @@ internal static class WindowsCodexAppProbe
     [StructLayout(LayoutKind.Sequential)]
     private struct INPUT
     {
-        internal int Type;
+        internal uint Type;
         internal INPUTUNION Union;
     }
 
@@ -326,7 +566,24 @@ internal static class WindowsCodexAppProbe
     private struct INPUTUNION
     {
         [FieldOffset(0)]
+        internal MOUSEINPUT Mouse;
+
+        [FieldOffset(0)]
         internal KEYBDINPUT Keyboard;
+
+        [FieldOffset(0)]
+        internal HARDWAREINPUT Hardware;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct MOUSEINPUT
+    {
+        internal int X;
+        internal int Y;
+        internal uint MouseData;
+        internal uint Flags;
+        internal uint Time;
+        internal nuint ExtraInfo;
     }
 
     [StructLayout(LayoutKind.Sequential)]
@@ -336,7 +593,15 @@ internal static class WindowsCodexAppProbe
         internal ushort Scan;
         internal uint Flags;
         internal uint Time;
-        internal nint ExtraInfo;
+        internal nuint ExtraInfo;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct HARDWAREINPUT
+    {
+        internal uint Message;
+        internal ushort ParameterLow;
+        internal ushort ParameterHigh;
     }
 
     [DllImport("kernel32.dll", SetLastError = true)]
@@ -356,20 +621,6 @@ internal static class WindowsCodexAppProbe
 
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(nint handle);
-
-    [DllImport("user32.dll")]
-    private static extern bool SetForegroundWindow(nint window);
-
-    [DllImport("user32.dll")]
-    private static extern bool ShowWindow(nint window, int command);
-
-    [DllImport("user32.dll")]
-    private static extern nint GetForegroundWindow();
-
-    [DllImport("user32.dll")]
-    private static extern uint GetWindowThreadProcessId(
-        nint window,
-        out uint processId);
 
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(

@@ -15,6 +15,9 @@ from bw_computer_voice_supervisor import (  # noqa: E402
     BRIDGE_COMMAND_CONTRACT,
     CommandReceiptStore,
     CombinedVoiceStartCoordinator,
+    DEFAULT_TYPING_LAUNCHER,
+    DEFAULT_TYPING_LAUNCHER_TOKEN,
+    DEFAULT_TYPING_SCRIPT,
     LocalBridgeConfig,
     START_ACTION,
     SupervisorError,
@@ -23,25 +26,35 @@ from bw_computer_voice_supervisor import (  # noqa: E402
 )
 
 
-LAUNCHER = Path(
-    r"C:\Users\bwica\bw-reader-context\reader-bridge\voice-typist-launcher.ps1"
-)
-SCRIPT = Path(
-    r"C:\Users\bwica\bw-reader-context\reader-bridge\voice_typist.py"
-)
+LAUNCHER = DEFAULT_TYPING_LAUNCHER
+SCRIPT = DEFAULT_TYPING_SCRIPT
 
 
 def completed(argv, returncode=0, stdout="", stderr=""):
     return subprocess.CompletedProcess(argv, returncode, stdout, stderr)
 
 
-def status_json(*, running=False, pid=None, paused=False, emergency=False):
+def status_json(
+    *,
+    running=False,
+    pid=None,
+    start_time=None,
+    paused=False,
+    emergency=False,
+    owner_pid=None,
+    owner_start_time=None,
+):
+    if running and start_time is None:
+        start_time = 133700000000000000
     return json.dumps(
         {
             "running": running,
             "pid": pid,
+            "processStartFileTimeUtc": start_time,
             "paused": paused,
             "emergencyStop": emergency,
+            "ownerPid": owner_pid,
+            "ownerStartFileTimeUtc": owner_start_time,
         }
     )
 
@@ -81,6 +94,10 @@ class VoiceTypistLauncherTest(unittest.TestCase):
         result = launcher.ensure_running()
         self.assertEqual(result["result"], "already-running")
         self.assertEqual(result["pid"], 41)
+        self.assertEqual(
+            result["processStartFileTimeUtc"],
+            133700000000000000,
+        )
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0][0][-1], "Status")
         self.assertNotIn("Stop", calls[0][0])
@@ -99,6 +116,61 @@ class VoiceTypistLauncherTest(unittest.TestCase):
         self.assertEqual([call[0][-1] for call in calls], ["Status", "Start", "Status"])
         self.assertTrue(all("-ExecutionPolicy" in call[0] for call in calls))
         self.assertTrue(all(str(LAUNCHER) in call[0] for call in calls))
+
+    def test_bridge_owner_generation_is_passed_to_launcher_and_verified(self):
+        owner_start = 133600000000000000
+        launcher, calls = self.make_launcher(
+            [
+                completed([], stdout=status_json()),
+                completed([], stdout='{"running":true,"pid":52}'),
+                completed(
+                    [],
+                    stdout=status_json(
+                        running=True,
+                        pid=52,
+                        owner_pid=7001,
+                        owner_start_time=owner_start,
+                    ),
+                ),
+            ],
+            [[], [typist_process(pid=52)]],
+        )
+        result = launcher.ensure_running(7001, owner_start)
+        self.assertEqual(result["result"], "started")
+        start_argv = calls[1][0]
+        self.assertEqual(
+            start_argv[start_argv.index("-OwnerPid") + 1],
+            "7001",
+        )
+        self.assertEqual(
+            start_argv[
+                start_argv.index("-OwnerStartFileTimeUtc") + 1
+            ],
+            str(owner_start),
+        )
+
+    def test_running_typist_owned_by_another_generation_fails_closed(self):
+        launcher, calls = self.make_launcher(
+            [
+                completed(
+                    [],
+                    stdout=status_json(
+                        running=True,
+                        pid=41,
+                        owner_pid=7002,
+                        owner_start_time=133600000000000001,
+                    ),
+                )
+            ],
+            [[typist_process()]],
+        )
+        with self.assertRaises(SupervisorError) as caught:
+            launcher.ensure_running(7001, 133600000000000000)
+        self.assertEqual(
+            caught.exception.code,
+            "BW_COMPUTER_VOICE_TYPIST_OWNER_BUSY",
+        )
+        self.assertEqual(len(calls), 1)
 
     def test_already_running_race_needs_postcondition_not_error_text(self):
         launcher, _ = self.make_launcher(
@@ -405,7 +477,7 @@ class LocalBridgeConfigTest(unittest.TestCase):
             "voiceStartShortcut": "Ctrl+Shift+C",
             "appKind": "chatgpt-desktop",
             "outputScope": "process-only",
-            "companionLauncher": str(LAUNCHER),
+            "companionLauncher": str(DEFAULT_TYPING_LAUNCHER_TOKEN),
         }
         value.update(overrides)
         self.path.write_text(json.dumps(value), encoding="utf-8")

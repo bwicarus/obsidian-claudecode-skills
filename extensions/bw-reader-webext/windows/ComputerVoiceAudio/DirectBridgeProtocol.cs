@@ -1,4 +1,3 @@
-using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 
@@ -15,11 +14,8 @@ internal enum DirectProtocolPhase
 internal sealed class DirectBridgeProtocolSession
 {
     private readonly string _connectionId;
-    private readonly string _origin;
     private readonly DirectBridgeConfigStore _configStore;
     private readonly DirectBridgeCoordinator _coordinator;
-    private readonly Func<DateTimeOffset> _utcNow;
-    private DirectAuthenticationChallenge? _challenge;
     private bool _helloSeen;
     private bool _authenticated;
     private DirectProtocolPhase _phase =
@@ -39,10 +35,8 @@ internal sealed class DirectBridgeProtocolSession
                 nameof(connectionId));
         }
         _connectionId = connectionId;
-        _origin = origin;
         _configStore = configStore;
         _coordinator = coordinator;
-        _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
     }
 
     internal bool Authenticated => _authenticated;
@@ -81,6 +75,7 @@ internal sealed class DirectBridgeProtocolSession
                 });
             JsonElement message = document.RootElement;
             RequireObject(message);
+            DirectJsonValidation.RequireNoDuplicateKeys(message);
             requestId = RequireSafeId(message, "requestId");
             if (RequireString(message, "contract", 128)
                 != DirectBridgeContract.Contract)
@@ -97,14 +92,6 @@ internal sealed class DirectBridgeProtocolSession
                 case "hello":
                     payload = HandleHello(message);
                     break;
-                case "pair":
-                    payload = await HandlePairAsync(
-                        message,
-                        cancellationToken).ConfigureAwait(false);
-                    break;
-                case "auth":
-                    payload = HandleAuthentication(message);
-                    break;
                 case "status":
                     payload = HandleStatus(message);
                     break;
@@ -120,6 +107,11 @@ internal sealed class DirectBridgeProtocolSession
                     break;
                 case "heartbeat":
                     payload = await HandleHeartbeatAsync(
+                        message,
+                        cancellationToken).ConfigureAwait(false);
+                    break;
+                case "context":
+                    payload = await HandleContextAsync(
                         message,
                         cancellationToken).ConfigureAwait(false);
                     break;
@@ -154,7 +146,6 @@ internal sealed class DirectBridgeProtocolSession
             exception is JsonException
             or FormatException
             or InvalidOperationException
-            or CryptographicException
             or ArgumentException
         )
         {
@@ -178,79 +169,36 @@ internal sealed class DirectBridgeProtocolSession
                 "每条连接只能发送一次 hello");
         }
         _helloSeen = true;
-
-        if (message.TryGetProperty(
-            "protocolVersion",
-            out JsonElement protocolVersion))
-        {
-            RequireExactKeys(
-                message,
-                "contract",
-                "type",
-                "requestId",
-                "protocolVersion");
-            if (
-                protocolVersion.ValueKind != JsonValueKind.Number
-                || !protocolVersion.TryGetInt32(out int version)
-                || version != 2
-            )
-            {
-                throw new DirectProtocolException(
-                    "BW_COMPUTER_VOICE_DIRECT_PROTOCOL_VERSION_INVALID",
-                    "直连协议版本不受支持");
-            }
-            if (!_configStore.Load().ExperimentalSingleUserMode)
-            {
-                throw new DirectProtocolException(
-                    "BW_COMPUTER_VOICE_DIRECT_AUTH_REQUIRED",
-                    "当前配置要求显式浏览器认证");
-            }
-
-            _authenticated = true;
-            _phase = DirectProtocolPhase.AwaitingStart;
-            return new
-            {
-                protocolVersion = 2,
-                limits = new
-                {
-                    maxMessageBytes =
-                        DirectBridgeContract.MaximumMessageBytes,
-                    pcmFrameBytes = DirectBridgeContract.PcmFrameBytes,
-                    pcmQueueLimitMs =
-                        DirectBridgeContract.PcmQueueLimitMilliseconds,
-                    heartbeatIntervalMs =
-                        DirectBridgeContract
-                            .ClientHeartbeatIntervalMilliseconds,
-                    heartbeatTimeoutMs =
-                        DirectBridgeContract
-                            .ClientHeartbeatTimeoutMilliseconds,
-                },
-            };
-        }
-
         RequireExactKeys(
             message,
             "contract",
             "type",
-            "requestId");
-        _challenge = DirectAuthenticationChallenge.Create(
-            _origin,
-            _utcNow());
-        DirectBridgeConfig config = _configStore.Load();
+            "requestId",
+            "protocolVersion");
+        JsonElement protocolVersion = message.GetProperty(
+            "protocolVersion");
+        if (
+            protocolVersion.ValueKind != JsonValueKind.Number
+            || !protocolVersion.TryGetInt32(out int version)
+            || version != 3
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_PROTOCOL_VERSION_INVALID",
+                "直连协议版本不受支持");
+        }
+        if (!_configStore.Load().ExperimentalSingleUserMode)
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_CONFIG_INVALID",
+                "v3 仅支持固定单用户实验模式");
+        }
+
+        _authenticated = true;
+        _phase = DirectProtocolPhase.AwaitingStart;
         return new
         {
-            protocolVersion = 1,
-            paired = config.HasPairedClient,
-            authentication = "ecdsa-p256-sha256",
-            signatureFormat = "ieee-p1363-fixed-64",
-            challenge = new
-            {
-                challengeId = _challenge.ChallengeId,
-                nonce = _challenge.Nonce,
-                expiresAtUtc = _challenge.ExpiresAtUtc,
-                signingContract =
-                    DirectBridgeContract.AuthenticationContract,
-            },
+            protocolVersion = 3,
             limits = new
             {
                 maxMessageBytes =
@@ -258,6 +206,11 @@ internal sealed class DirectBridgeProtocolSession
                 pcmFrameBytes = DirectBridgeContract.PcmFrameBytes,
                 pcmQueueLimitMs =
                     DirectBridgeContract.PcmQueueLimitMilliseconds,
+                uplinkTrack =
+                    (byte)DirectPcmTrack.BrowserMicrophone,
+                uplinkQueueLimitMs =
+                    DirectBridgeContract
+                        .UplinkPcmQueueLimitMilliseconds,
                 heartbeatIntervalMs =
                     DirectBridgeContract
                         .ClientHeartbeatIntervalMilliseconds,
@@ -265,138 +218,6 @@ internal sealed class DirectBridgeProtocolSession
                     DirectBridgeContract
                         .ClientHeartbeatTimeoutMilliseconds,
             },
-        };
-    }
-
-    private async Task<object> HandlePairAsync(
-        JsonElement message,
-        CancellationToken cancellationToken)
-    {
-        RequireExactKeys(
-            message,
-            "contract",
-            "type",
-            "requestId",
-            "pairingCode",
-            "clientPublicKeySpki");
-        RequireHello();
-        if (_authenticated)
-        {
-            throw new DirectProtocolException(
-                "BW_COMPUTER_VOICE_DIRECT_ALREADY_AUTHENTICATED",
-                "当前连接已经认证");
-        }
-        string pairingCode = RequireString(
-            message,
-            "pairingCode",
-            DirectBridgeContract.PairingCodeLength);
-        string clientSpki = RequireString(
-            message,
-            "clientPublicKeySpki",
-            512);
-        DirectBridgeConfig paired = await _configStore.PairClientAsync(
-            pairingCode,
-            clientSpki,
-            _utcNow(),
-            cancellationToken).ConfigureAwait(false);
-        return new
-        {
-            paired = true,
-            clientFingerprintSha256 =
-                paired.PairedClientFingerprintSha256,
-        };
-    }
-
-    private object HandleAuthentication(JsonElement message)
-    {
-        RequireExactKeys(
-            message,
-            "contract",
-            "type",
-            "requestId",
-            "challengeId",
-            "signature");
-        RequireHello();
-        if (_authenticated)
-        {
-            throw new DirectProtocolException(
-                "BW_COMPUTER_VOICE_DIRECT_ALREADY_AUTHENTICATED",
-                "当前连接已经认证");
-        }
-        DirectAuthenticationChallenge challenge = _challenge
-            ?? throw new DirectProtocolException(
-                "BW_COMPUTER_VOICE_DIRECT_CHALLENGE_REQUIRED",
-                "认证 challenge 不存在");
-        _challenge = null;
-        if (
-            challenge.ExpiresAtUtc < _utcNow()
-            || RequireString(message, "challengeId", 64)
-                != challenge.ChallengeId
-        )
-        {
-            throw new DirectProtocolException(
-                "BW_COMPUTER_VOICE_DIRECT_CHALLENGE_INVALID",
-                "认证 challenge 无效或已过期");
-        }
-
-        DirectBridgeConfig config = _configStore.Load();
-        if (!config.HasPairedClient)
-        {
-            throw new DirectProtocolException(
-                "BW_COMPUTER_VOICE_DIRECT_PAIRING_REQUIRED",
-                "电脑客户端尚未配对");
-        }
-        byte[] signature = DirectBase64Url.Decode(
-            RequireString(message, "signature", 128),
-            64,
-            "BW_COMPUTER_VOICE_DIRECT_SIGNATURE_INVALID");
-        byte[] spki = DirectBase64Url.Decode(
-            config.PairedClientPublicKeySpki,
-            256,
-            "BW_COMPUTER_VOICE_DIRECT_CONFIG_INVALID");
-        try
-        {
-            if (signature.Length != 64)
-            {
-                throw new DirectProtocolException(
-                    "BW_COMPUTER_VOICE_DIRECT_SIGNATURE_INVALID",
-                    "认证签名必须是 64 字节 P1363");
-            }
-            using ECDsa key = ECDsa.Create();
-            key.ImportSubjectPublicKeyInfo(spki, out int bytesRead);
-            byte[] payload = DirectBridgeContract
-                .BuildAuthenticationPayload(
-                    challenge.ChallengeId,
-                    challenge.Nonce,
-                    _origin);
-            bool verified = bytesRead == spki.Length
-                && key.KeySize == 256
-                && key.VerifyData(
-                    payload,
-                    signature,
-                    HashAlgorithmName.SHA256,
-                    DSASignatureFormat
-                        .IeeeP1363FixedFieldConcatenation);
-            CryptographicOperations.ZeroMemory(payload);
-            if (!verified)
-            {
-                throw new DirectProtocolException(
-                    "BW_COMPUTER_VOICE_DIRECT_AUTH_DENIED",
-                    "客户端签名验证失败");
-            }
-        }
-        finally
-        {
-            CryptographicOperations.ZeroMemory(signature);
-            CryptographicOperations.ZeroMemory(spki);
-        }
-        _authenticated = true;
-        _phase = DirectProtocolPhase.AwaitingStart;
-        return new
-        {
-            authenticated = true,
-            clientFingerprintSha256 =
-                config.PairedClientFingerprintSha256,
         };
     }
 
@@ -410,14 +231,18 @@ internal sealed class DirectBridgeProtocolSession
         RequireAuthenticated();
         DirectBridgeConfig config = _configStore.Load();
         bool captureActive = _coordinator.CaptureActive;
+        bool outputRouteVerified =
+            _coordinator.OutputRouteVerified(config);
         string state;
         string? reason;
         bool ready;
         if (captureActive)
         {
             state = "active";
-            reason = null;
-            ready = true;
+            reason = outputRouteVerified
+                ? null
+                : DirectOutputRouteProbe.UnverifiedReason;
+            ready = outputRouteVerified;
         }
         else if (!config.LocalOptIn)
         {
@@ -439,11 +264,22 @@ internal sealed class DirectBridgeProtocolSession
             reason = "BW_COMPUTER_VOICE_DIRECT_MEDIA_NOT_WIRED";
             ready = false;
         }
+        else if (
+            !_coordinator.ConfiguredRenderEndpointsReady(
+                config,
+                out reason)
+        )
+        {
+            state = "unavailable";
+            ready = false;
+        }
         else
         {
             state = "idle";
-            reason = null;
-            ready = true;
+            reason = outputRouteVerified
+                ? null
+                : DirectOutputRouteProbe.UnverifiedReason;
+            ready = outputRouteVerified;
         }
         return new
         {
@@ -451,6 +287,7 @@ internal sealed class DirectBridgeProtocolSession
             state,
             reason,
             localOptIn = config.LocalOptIn,
+            lastError = _coordinator.LastError,
             media = new
             {
                 hostReady = _coordinator.MediaHostReady,
@@ -526,17 +363,11 @@ internal sealed class DirectBridgeProtocolSession
             "sessionId");
         RequireAuthenticated();
         string sessionId = RequireSafeId(message, "sessionId");
-        try
-        {
-            await _coordinator.StopAsync(
-                _connectionId,
-                sessionId,
-                cancellationToken).ConfigureAwait(false);
-        }
-        finally
-        {
-            _phase = DirectProtocolPhase.AwaitingStart;
-        }
+        await _coordinator.StopAsync(
+            _connectionId,
+            sessionId,
+            cancellationToken).ConfigureAwait(false);
+        _phase = DirectProtocolPhase.AwaitingStart;
         return new
         {
             sessionId,
@@ -578,6 +409,60 @@ internal sealed class DirectBridgeProtocolSession
         };
     }
 
+    private async Task<object> HandleContextAsync(
+        JsonElement message,
+        CancellationToken cancellationToken)
+    {
+        RequireExactKeys(
+            message,
+            "contract",
+            "type",
+            "requestId",
+            "sessionId",
+            "contextContract",
+            "event");
+        RequireAuthenticated();
+        if (_phase != DirectProtocolPhase.Active)
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_CONTEXT_NOT_ACTIVE",
+                "Reader context 只允许发送到当前活动通话");
+        }
+        string sessionId = RequireSafeId(message, "sessionId");
+        _ = DirectPcmFrameCodec.ParseSessionId(sessionId);
+        string contextContract = RequireString(
+            message,
+            "contextContract",
+            128);
+        if (
+            contextContract
+                != NamedPipeDirectContextAdapter.ContextContract
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_CONTEXT_SCHEMA_INVALID",
+                "Reader outgoing context 合同无效");
+        }
+        DirectContextEvent contextEvent =
+            NamedPipeDirectContextAdapter.ValidateEvent(
+                message.GetProperty("event"));
+        DirectContextForwardResult forwarded =
+            await _coordinator.ForwardContextAsync(
+                _connectionId,
+                RequireSafeId(message, "requestId"),
+                sessionId,
+                contextContract,
+                contextEvent,
+                cancellationToken).ConfigureAwait(false);
+        return new
+        {
+            sessionId,
+            eventId = contextEvent.EventId,
+            seq = contextEvent.Sequence,
+            outcome = forwarded.Outcome,
+        };
+    }
+
     internal static object StatusEvent(string state, string reason) =>
         new
         {
@@ -590,16 +475,6 @@ internal sealed class DirectBridgeProtocolSession
                 reason,
             },
         };
-
-    private void RequireHello()
-    {
-        if (!_helloSeen)
-        {
-            throw new DirectProtocolException(
-                "BW_COMPUTER_VOICE_DIRECT_HELLO_REQUIRED",
-                "必须先完成 hello");
-        }
-    }
 
     private void RequireAuthenticated()
     {
@@ -731,24 +606,3 @@ internal sealed record DirectProtocolReply(
 internal sealed record DirectStartActionResult(
     object Payload,
     Func<CancellationToken, Task> AfterSendAsync);
-
-internal sealed record DirectAuthenticationChallenge(
-    string ChallengeId,
-    string Nonce,
-    string Origin,
-    DateTimeOffset ExpiresAtUtc)
-{
-    internal static DirectAuthenticationChallenge Create(
-        string origin,
-        DateTimeOffset nowUtc) =>
-        new(
-            DirectBase64Url.Encode(
-                RandomNumberGenerator.GetBytes(
-                    DirectBridgeContract.ChallengeIdBytes)),
-            DirectBase64Url.Encode(
-                RandomNumberGenerator.GetBytes(
-                    DirectBridgeContract.ChallengeBytes)),
-            origin,
-            nowUtc.AddSeconds(
-                DirectBridgeContract.ChallengeLifetimeSeconds));
-}

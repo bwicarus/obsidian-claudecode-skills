@@ -423,6 +423,13 @@ internal sealed class NativeMessagingHost : IAsyncDisposable
         };
         start.ArgumentList.Add(_config.TypistHelper);
         start.ArgumentList.Add("--ensure-running");
+        using Process owner = Process.GetCurrentProcess();
+        start.ArgumentList.Add(
+            owner.Id.ToString(
+                System.Globalization.CultureInfo.InvariantCulture));
+        start.ArgumentList.Add(
+            owner.StartTime.ToUniversalTime().ToFileTimeUtc().ToString(
+                System.Globalization.CultureInfo.InvariantCulture));
         using Process process = Process.Start(start)
             ?? throw new InvalidOperationException(
                 "BW_COMPUTER_VOICE_TYPIST_HELPER_UNAVAILABLE");

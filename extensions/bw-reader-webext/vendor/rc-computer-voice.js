@@ -20,6 +20,8 @@ if (window.__bwPwaProviderOnly) return;
   var PCM_SAMPLES = 960;
   var PCM_SAMPLE_RATE = 48000;
   var PCM_QUEUE_LIMIT_MS = 400;
+  var PCM_UPLINK_TRACK = 3;
+  var PCM_UPLINK_BUFFER_LIMIT_BYTES = PCM_FRAME_BYTES * 10;
   var MAX_PENDING = 16;
   var OPEN_TIMEOUT_MS = 6000;
   var REQUEST_TIMEOUT_MS = 7000;
@@ -27,8 +29,21 @@ if (window.__bwPwaProviderOnly) return;
   var HEARTBEAT_INTERVAL_MS = 5000;
   var HEARTBEAT_TIMEOUT_MS = 15000;
   var START_GESTURE_LEASE_TTL_MS = 5000;
+  var OUTGOING_CONTEXT_CONTRACT = "reader-outgoing-context/1";
+  var CONTEXT_BOOTSTRAP_LIMIT = 500;
+  var CONTEXT_LIVE_LIMIT = 32;
+  var CONTEXT_LIVE_WAIT_S = 20;
+  var CONTEXT_RETRY_MS = 500;
+  var CONTEXT_WAIT_DENIED_RETRY_MS = 1000;
+  var CONTEXT_EVENT_TYPES = Object.freeze({
+    "page.context": true,
+    focus: true,
+    drawing: true,
+    command: true,
+    "command-failed": true,
+  });
   var READER_ORIGIN = "https://bwicarus.taile44d0c.ts.net";
-  var EXTENSION_RELAY_PORT = "BW_COMPUTER_VOICE_DIRECT_V2";
+  var EXTENSION_RELAY_PORT = "BW_COMPUTER_VOICE_DIRECT_V3";
   var DIRECT_ENDPOINT =
     "wss://bwicarus-2.taile44d0c.ts.net/reader-computer-voice/v1";
   var STATUS_STATES = Object.freeze({
@@ -52,7 +67,24 @@ if (window.__bwPwaProviderOnly) return;
   var requestSequence = 0;
   var statusListeners = [];
   var availabilityAttempt = null;
+  var lastClientFailure = null;
   var registeredPhoneButtons = new WeakSet();
+  var selectedEngineKnown = false;
+  var computerVoiceSelected = false;
+  var selectedEngineRevision = 0;
+  var dialPending = false;
+  // These cursors live only for this module instance. `lastContextAckCursor`
+  // is advanced exclusively by an exact Windows per-event ACK.
+  var lastContextAckCursor = null;
+  // `lastContextResumeCursor` may additionally hold the one explicit initial
+  // baseline chosen after a bounded bootstrap scan finds no page.context.
+  // It is never presented as an ACK and is not persisted to page storage.
+  var lastContextResumeCursor = null;
+  var contextPumpGeneration = 0;
+  var MICROPHONE_WORKLET =
+    'class BWMicCapture extends AudioWorkletProcessor{' +
+    'process(i){var c=i[0]&&i[0][0];if(c)this.port.postMessage(c.slice(0));' +
+    'return true}}registerProcessor("bw-computer-voice-mic",BWMicCapture);';
 
   function directError(message, code, retryable) {
     var error = new Error(String(message || "Windows 桥接器直连失败"));
@@ -248,7 +280,14 @@ if (window.__bwPwaProviderOnly) return;
   function normalizeStatusPayload(value) {
     exactObject(
       value,
-      ["ready", "state", "reason", "localOptIn", "media"],
+      [
+        "ready",
+        "state",
+        "reason",
+        "localOptIn",
+        "media",
+        "lastError",
+      ],
       [],
       "STATUS 响应"
     );
@@ -286,6 +325,43 @@ if (window.__bwPwaProviderOnly) return;
         "BW_COMPUTER_VOICE_DIRECT_SCHEMA",
         false
       );
+    }
+    if (value.lastError !== null) {
+      exactObject(
+        value.lastError,
+        ["failureId", "code", "stage", "hresult", "atUtc"],
+        [],
+        "STATUS lastError"
+      );
+      safeId(value.lastError.failureId, "failureId");
+      safeId(value.lastError.code, "lastError code");
+      safeId(value.lastError.stage, "lastError stage");
+      if (
+        value.lastError.hresult !== null &&
+        (
+          typeof value.lastError.hresult !== "string" ||
+          !/^0x[0-9A-F]{8}$/.test(value.lastError.hresult)
+        )
+      ) {
+        throw directError(
+          "STATUS lastError HRESULT 无效",
+          "BW_COMPUTER_VOICE_DIRECT_SCHEMA",
+          false
+        );
+      }
+      var atUtc = safeText(
+        value.lastError.atUtc,
+        "lastError atUtc",
+        64,
+        false
+      );
+      if (!Number.isFinite(Date.parse(atUtc))) {
+        throw directError(
+          "STATUS lastError 时间无效",
+          "BW_COMPUTER_VOICE_DIRECT_SCHEMA",
+          false
+        );
+      }
     }
     return value;
   }
@@ -366,6 +442,58 @@ if (window.__bwPwaProviderOnly) return;
     return buffer;
   }
 
+  function encodeRelayBinary(value) {
+    var bytes;
+    if (
+      Object.prototype.toString.call(value) === "[object ArrayBuffer]"
+    ) {
+      bytes = new Uint8Array(value);
+    } else if (ArrayBuffer.isView(value)) {
+      bytes = new Uint8Array(
+        value.buffer,
+        value.byteOffset,
+        value.byteLength
+      );
+    } else {
+      throw directError(
+        "扩展中继只允许固定 PCM 二进制帧",
+        "BW_COMPUTER_VOICE_DIRECT_RELAY_BINARY",
+        false
+      );
+    }
+    if (
+      bytes.byteLength !== PCM_FRAME_BYTES ||
+      bytes[0] !== 0x42 ||
+      bytes[1] !== 0x57 ||
+      bytes[2] !== 0x43 ||
+      bytes[3] !== 0x56 ||
+      bytes[4] !== 1 ||
+      bytes[5] !== PCM_UPLINK_TRACK ||
+      bytes[6] !== 0 ||
+      bytes[7] !== 0
+    ) {
+      throw directError(
+        "扩展中继只允许 Reader 麦克风 PCM 帧",
+        "BW_COMPUTER_VOICE_DIRECT_RELAY_BINARY",
+        false
+      );
+    }
+    var binary = "";
+    for (var index = 0; index < bytes.byteLength; index += 1) {
+      binary += String.fromCharCode(bytes[index]);
+    }
+    return {
+      type: "send-binary-base64",
+      data: btoa(binary),
+      bytes: bytes.byteLength,
+      sequence: new DataView(
+        bytes.buffer,
+        bytes.byteOffset,
+        bytes.byteLength
+      ).getUint32(24, true),
+    };
+  }
+
   function ExtensionRelaySocket(runtime) {
     this.readyState = 0;
     this.binaryType = "arraybuffer";
@@ -377,6 +505,8 @@ if (window.__bwPwaProviderOnly) return;
     this.terminal = false;
     this.closedPromise = null;
     this.closedResolve = null;
+    this.binaryInFlight = null;
+    this.binaryAckTimer = null;
     var self = this;
     this.closedPromise = new Promise(function (resolve) {
       self.closedResolve = resolve;
@@ -445,6 +575,11 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   ExtensionRelaySocket.prototype._finishClosed = function () {
+    if (this.binaryAckTimer) {
+      clearTimeout(this.binaryAckTimer);
+      this.binaryAckTimer = null;
+    }
+    this.binaryInFlight = null;
     var resolve = this.closedResolve;
     this.closedResolve = null;
     if (typeof resolve === "function") resolve();
@@ -519,6 +654,34 @@ if (window.__bwPwaProviderOnly) return;
         }
         return;
       }
+      if (message.type === "binary-accepted") {
+        exactRelayMessage(
+          message,
+          "binary-accepted",
+          ["sequence", "bytes"],
+          "扩展中继上行确认"
+        );
+        if (
+          this.readyState !== 1 ||
+          !Number.isSafeInteger(message.sequence) ||
+          message.sequence < 0 ||
+          message.sequence > 0xffffffff ||
+          message.bytes !== PCM_FRAME_BYTES ||
+          message.sequence !== this.binaryInFlight
+        ) {
+          throw directError(
+            "扩展后台上行确认错配",
+            "BW_COMPUTER_VOICE_DIRECT_RELAY_BINARY_ACK",
+            false
+          );
+        }
+        if (this.binaryAckTimer) {
+          clearTimeout(this.binaryAckTimer);
+          this.binaryAckTimer = null;
+        }
+        this.binaryInFlight = null;
+        return;
+      }
       if (message.type === "error") {
         exactRelayMessage(
           message,
@@ -589,11 +752,10 @@ if (window.__bwPwaProviderOnly) return;
     }
   };
 
-  ExtensionRelaySocket.prototype.send = function (text) {
+  ExtensionRelaySocket.prototype.send = function (value) {
     if (
       this.terminal ||
-      this.readyState !== 1 ||
-      typeof text !== "string"
+      this.readyState !== 1
     ) {
       throw directError(
         "扩展后台直连中继不可发送",
@@ -601,7 +763,31 @@ if (window.__bwPwaProviderOnly) return;
         true
       );
     }
-    this.port.postMessage({ type: "send-text", data: text });
+    if (typeof value === "string") {
+      this.port.postMessage({ type: "send-text", data: value });
+      return true;
+    }
+    if (this.binaryInFlight !== null) return false;
+    var message = encodeRelayBinary(value);
+    this.binaryInFlight = message.sequence;
+    var self = this;
+    this.binaryAckTimer = setTimeout(function () {
+      self.binaryAckTimer = null;
+      self._protocolFailure(directError(
+        "扩展后台未确认 Reader 麦克风帧",
+        "BW_COMPUTER_VOICE_DIRECT_RELAY_BINARY_ACK",
+        true
+      ));
+    }, 2000);
+    try {
+      this.port.postMessage(message);
+    } catch (error) {
+      clearTimeout(this.binaryAckTimer);
+      this.binaryAckTimer = null;
+      this.binaryInFlight = null;
+      throw error;
+    }
+    return true;
   };
 
   ExtensionRelaySocket.prototype.close = function () {
@@ -975,6 +1161,42 @@ if (window.__bwPwaProviderOnly) return;
     });
   };
 
+  DirectSocket.prototype.sendBinary = function (buffer) {
+    if (
+      this.closed ||
+      !this.socket ||
+      this.socket.readyState !== 1 ||
+      Object.prototype.toString.call(buffer) !== "[object ArrayBuffer]" ||
+      buffer.byteLength !== PCM_FRAME_BYTES
+    ) {
+      throw directError(
+        "Reader 麦克风 PCM 连接不可用",
+        "BW_COMPUTER_VOICE_DIRECT_UPLINK_DISCONNECTED",
+        true
+      );
+    }
+    if (
+      typeof this.socket.bufferedAmount === "number" &&
+      this.socket.bufferedAmount + PCM_FRAME_BYTES >
+        PCM_UPLINK_BUFFER_LIMIT_BYTES
+    ) {
+      throw directError(
+        "Reader 麦克风上行已落后，已停止而不发送过期语音",
+        "BW_COMPUTER_VOICE_DIRECT_UPLINK_BACKPRESSURE",
+        true
+      );
+    }
+    try {
+      return this.socket.send(buffer) !== false;
+    } catch (error) {
+      throw directError(
+        "Reader 麦克风 PCM 发送失败",
+        "BW_COMPUTER_VOICE_DIRECT_UPLINK_DISCONNECTED",
+        true
+      );
+    }
+  };
+
   DirectSocket.prototype.close = function () {
     if (this.intentional) {
       return this.closingPromise || Promise.resolve();
@@ -1021,7 +1243,7 @@ if (window.__bwPwaProviderOnly) return;
       [],
       "HELLO 响应"
     );
-    if (value.protocolVersion !== 2) {
+    if (value.protocolVersion !== 3) {
       throw directError(
         "Windows 桥接器直连协议版本不匹配",
         "BW_COMPUTER_VOICE_DIRECT_CONTRACT",
@@ -1036,6 +1258,8 @@ if (window.__bwPwaProviderOnly) return;
         "pcmQueueLimitMs",
         "heartbeatIntervalMs",
         "heartbeatTimeoutMs",
+        "uplinkTrack",
+        "uplinkQueueLimitMs",
       ],
       [],
       "HELLO limits"
@@ -1045,7 +1269,9 @@ if (window.__bwPwaProviderOnly) return;
       value.limits.pcmFrameBytes !== PCM_FRAME_BYTES ||
       value.limits.pcmQueueLimitMs !== PCM_QUEUE_LIMIT_MS ||
       value.limits.heartbeatIntervalMs !== HEARTBEAT_INTERVAL_MS ||
-      value.limits.heartbeatTimeoutMs !== HEARTBEAT_TIMEOUT_MS
+      value.limits.heartbeatTimeoutMs !== HEARTBEAT_TIMEOUT_MS ||
+      value.limits.uplinkTrack !== PCM_UPLINK_TRACK ||
+      value.limits.uplinkQueueLimitMs !== 200
     ) {
       throw directError(
         "Windows 桥接器容量合同不匹配",
@@ -1058,7 +1284,7 @@ if (window.__bwPwaProviderOnly) return;
 
   function hello(channel) {
     return channel.request("hello", {
-      protocolVersion: 2,
+      protocolVersion: 3,
     }).then(normalizeHello);
   }
 
@@ -1103,6 +1329,7 @@ if (window.__bwPwaProviderOnly) return;
           hostReady: started,
           captureActive: started,
         },
+        lastError: null,
       },
     };
   }
@@ -1176,19 +1403,425 @@ if (window.__bwPwaProviderOnly) return;
       sources: new Set(),
       pending: [],
       nextAt: 0,
+      microphone: null,
+      microphonePromise: null,
+      microphoneError: null,
+      ownerState: null,
       released: false,
     };
+  }
+
+  function setComputerVoiceAudioSession(kind) {
+    try {
+      if (
+        navigator.audioSession &&
+        typeof navigator.audioSession.type === "string"
+      ) {
+        navigator.audioSession.type = kind;
+      }
+    } catch (_) {}
+  }
+
+  function stopSurfaceMicrophone(surface) {
+    if (!surface) return;
+    var microphone = surface.microphone;
+    if (!microphone) return;
+    surface.microphone = null;
+    microphone.active = false;
+    microphone.pending = new Float32Array(0);
+    if (microphone.muteTimer) {
+      clearTimeout(microphone.muteTimer);
+      microphone.muteTimer = null;
+    }
+    if (microphone.track) {
+      microphone.track.onended = null;
+      microphone.track.onmute = null;
+      microphone.track.onunmute = null;
+    }
+    try {
+      if (microphone.node && microphone.node.port) {
+        microphone.node.port.onmessage = null;
+      }
+      if (microphone.node && "onaudioprocess" in microphone.node) {
+        microphone.node.onaudioprocess = null;
+      }
+    } catch (_) {}
+    try { if (microphone.source) microphone.source.disconnect(); } catch (_) {}
+    try { if (microphone.node) microphone.node.disconnect(); } catch (_) {}
+    try { if (microphone.silent) microphone.silent.disconnect(); } catch (_) {}
+    try {
+      microphone.stream.getTracks().forEach(function (track) {
+        track.stop();
+      });
+    } catch (_) {}
   }
 
   function releaseSurface(surface) {
     if (!surface || surface.released) return;
     surface.released = true;
+    stopSurfaceMicrophone(surface);
     surface.pending.length = 0;
     surface.sources.forEach(function (source) {
       try { source.stop(); } catch (_) {}
     });
     surface.sources.clear();
     try { surface.context.close(); } catch (_) {}
+    setComputerVoiceAudioSession("playback");
+  }
+
+  function microphoneStartError(error) {
+    var name = String(error && error.name || "");
+    if (name === "NotAllowedError" || name === "SecurityError") {
+      return directError(
+        "浏览器没有获得麦克风权限；请允许后再次点击电话按钮",
+        "BW_COMPUTER_VOICE_MICROPHONE_PERMISSION",
+        false
+      );
+    }
+    if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+      return directError(
+        "当前设备没有可用的网页麦克风",
+        "BW_COMPUTER_VOICE_MICROPHONE_NOT_FOUND",
+        true
+      );
+    }
+    if (name === "OverconstrainedError") {
+      return directError(
+        "网页麦克风不支持所需音频格式",
+        "BW_COMPUTER_VOICE_MICROPHONE_CONSTRAINT",
+        false
+      );
+    }
+    if (
+      name === "NotReadableError" ||
+      name === "AbortError" ||
+      name === "TrackStartError"
+    ) {
+      return directError(
+        "网页麦克风当前被系统占用或不可读",
+        "BW_COMPUTER_VOICE_MICROPHONE_UNAVAILABLE",
+        true
+      );
+    }
+    return error && error.code ? error : directError(
+      "网页麦克风启动失败",
+      "BW_COMPUTER_VOICE_MICROPHONE_START_FAILED",
+      true
+    );
+  }
+
+  function failForMicrophoneState(surface, message, code) {
+    var state = surface && surface.ownerState;
+    if (!state || state.stopped || active !== state) return;
+    failActive(state, directError(message, code, true), true);
+  }
+
+  function installMicrophoneTrackGuards(surface, microphone) {
+    var track = microphone.track;
+    track.onended = function () {
+      failForMicrophoneState(
+        surface,
+        "网页麦克风已被系统停止；请重新点击电话按钮",
+        "BW_COMPUTER_VOICE_MICROPHONE_ENDED"
+      );
+    };
+    track.onmute = function () {
+      if (microphone.muteTimer) clearTimeout(microphone.muteTimer);
+      var state = surface.ownerState;
+      if (state && !state.stopped && active === state) {
+        emitStatus({
+          state: "microphone-muted",
+          sessionId: state.sessionId,
+          message: "网页麦克风被系统暂停；持续暂停将结束通话",
+          code: "BW_COMPUTER_VOICE_MICROPHONE_MUTED",
+        });
+      }
+      microphone.muteTimer = setTimeout(function () {
+        microphone.muteTimer = null;
+        if (track.muted === true) {
+          failForMicrophoneState(
+            surface,
+            "网页麦克风持续被系统暂停；请回到页面后重新点击电话按钮",
+            "BW_COMPUTER_VOICE_MICROPHONE_MUTED"
+          );
+        }
+      }, 2000);
+    };
+    track.onunmute = function () {
+      if (microphone.muteTimer) {
+        clearTimeout(microphone.muteTimer);
+        microphone.muteTimer = null;
+      }
+      var state = surface.ownerState;
+      if (state && state.started && !state.stopped && active === state) {
+        emitStatus({
+          state: "connected",
+          sessionId: state.sessionId,
+          message: "网页麦克风已恢复，电脑客户端通话中",
+        });
+      }
+    };
+  }
+
+  function appendMicrophoneChunk(surface, chunk, sampleRate) {
+    var microphone = surface && surface.microphone;
+    var state = surface && surface.ownerState;
+    if (
+      !microphone ||
+      !microphone.active ||
+      !state ||
+      !state.uplinkActive ||
+      state.stopped ||
+      active !== state
+    ) {
+      if (microphone) microphone.pending = new Float32Array(0);
+      return;
+    }
+    if (
+      !chunk ||
+      typeof chunk.length !== "number" ||
+      !Number.isFinite(sampleRate) ||
+      sampleRate < 8000 ||
+      sampleRate > 192000
+    ) {
+      failActive(state, directError(
+        "网页麦克风 PCM 格式无效",
+        "BW_COMPUTER_VOICE_MICROPHONE_PCM",
+        false
+      ), true);
+      return;
+    }
+    var combined = new Float32Array(
+      microphone.pending.length + chunk.length
+    );
+    combined.set(microphone.pending);
+    combined.set(chunk, microphone.pending.length);
+    microphone.pending = combined;
+    var inputSamples = Math.round(sampleRate * 0.02);
+    while (
+      microphone.pending.length >= inputSamples &&
+      !state.stopped &&
+      active === state
+    ) {
+      var input = microphone.pending.subarray(0, inputSamples);
+      microphone.pending = microphone.pending.slice(inputSamples);
+      var output = new Int16Array(PCM_SAMPLES);
+      for (var index = 0; index < PCM_SAMPLES; index += 1) {
+        var position = PCM_SAMPLES === 1
+          ? 0
+          : index * (inputSamples - 1) / (PCM_SAMPLES - 1);
+        var left = Math.floor(position);
+        var right = Math.min(inputSamples - 1, left + 1);
+        var fraction = position - left;
+        var value = input[left] +
+          (input[right] - input[left]) * fraction;
+        value = Math.max(-1, Math.min(1, Number(value) || 0));
+        output[index] = value < 0
+          ? Math.round(value * 32768)
+          : Math.round(value * 32767);
+      }
+      try {
+        var sent = state.channel.sendBinary(
+          encodeMicrophoneFrame(state, output)
+        );
+        if (sent) state.uplinkSequence += 1;
+      } catch (error) {
+        failActive(state, error, true);
+        return;
+      }
+    }
+  }
+
+  function encodeMicrophoneFrame(state, samples) {
+    if (
+      !state ||
+      !state.sessionBytes ||
+      samples.length !== PCM_SAMPLES ||
+      state.uplinkSequence < 0 ||
+      state.uplinkSequence > 0xffffffff
+    ) {
+      throw directError(
+        "Reader 麦克风 PCM 帧合同无效",
+        "BW_COMPUTER_VOICE_DIRECT_UPLINK_FRAME",
+        false
+      );
+    }
+    var buffer = new ArrayBuffer(PCM_FRAME_BYTES);
+    var view = new DataView(buffer);
+    view.setUint8(0, 0x42);
+    view.setUint8(1, 0x57);
+    view.setUint8(2, 0x43);
+    view.setUint8(3, 0x56);
+    view.setUint8(4, 1);
+    view.setUint8(5, PCM_UPLINK_TRACK);
+    view.setUint16(6, 0, true);
+    for (var byteIndex = 0; byteIndex < 16; byteIndex += 1) {
+      view.setUint8(8 + byteIndex, state.sessionBytes[byteIndex]);
+    }
+    view.setUint32(24, state.uplinkSequence, true);
+    var timestamp = state.uplinkTimestampBase +
+      state.uplinkSequence * 20000;
+    var timestampHigh = Math.floor(timestamp / 0x100000000);
+    var timestampLow = timestamp - timestampHigh * 0x100000000;
+    view.setUint32(28, timestampLow, true);
+    view.setUint32(32, timestampHigh, true);
+    for (var sampleIndex = 0; sampleIndex < PCM_SAMPLES; sampleIndex += 1) {
+      view.setInt16(
+        PCM_HEADER_BYTES + sampleIndex * 2,
+        samples[sampleIndex],
+        true
+      );
+    }
+    return buffer;
+  }
+
+  function attachMicrophoneCapture(surface, stream) {
+    if (surface.released) {
+      try {
+        stream.getTracks().forEach(function (track) { track.stop(); });
+      } catch (_) {}
+      throw directError(
+        "网页麦克风启动已取消",
+        "BW_COMPUTER_VOICE_DIRECT_CANCELLED",
+        false
+      );
+    }
+    var tracks = stream.getAudioTracks();
+    if (tracks.length !== 1 || tracks[0].readyState !== "live") {
+      try {
+        stream.getTracks().forEach(function (track) { track.stop(); });
+      } catch (_) {}
+      throw directError(
+        "网页麦克风轨道未就绪",
+        "BW_COMPUTER_VOICE_MICROPHONE_NOT_READY",
+        true
+      );
+    }
+    var microphone = {
+      stream: stream,
+      track: tracks[0],
+      source: null,
+      node: null,
+      silent: null,
+      pending: new Float32Array(0),
+      muteTimer: null,
+      active: false,
+    };
+    surface.microphone = microphone;
+    installMicrophoneTrackGuards(surface, microphone);
+
+    var context = surface.context;
+    var source = context.createMediaStreamSource(stream);
+    microphone.source = source;
+    var silent = context.createGain();
+    silent.gain.value = 0;
+    silent.connect(context.destination);
+    microphone.silent = silent;
+
+    function attachScriptProcessor() {
+      if (typeof context.createScriptProcessor !== "function") {
+        throw directError(
+          "浏览器缺少实时麦克风 PCM 能力",
+          "BW_COMPUTER_VOICE_MICROPHONE_PROCESSOR_UNAVAILABLE",
+          false
+        );
+      }
+      var processor = context.createScriptProcessor(1024, 1, 1);
+      processor.onaudioprocess = function (event) {
+        var input = event.inputBuffer &&
+          event.inputBuffer.getChannelData(0);
+        if (input) {
+          appendMicrophoneChunk(
+            surface,
+            new Float32Array(input),
+            context.sampleRate
+          );
+        }
+      };
+      microphone.node = processor;
+      source.connect(processor);
+      processor.connect(silent);
+      return microphone;
+    }
+
+    if (
+      !context.audioWorklet ||
+      typeof context.audioWorklet.addModule !== "function" ||
+      typeof window.AudioWorkletNode !== "function"
+    ) {
+      return Promise.resolve(attachScriptProcessor());
+    }
+    var moduleUrl = URL.createObjectURL(
+      new Blob([MICROPHONE_WORKLET], { type: "text/javascript" })
+    );
+    return context.audioWorklet.addModule(moduleUrl).then(function () {
+      URL.revokeObjectURL(moduleUrl);
+      if (surface.released) {
+        throw directError(
+          "网页麦克风启动已取消",
+          "BW_COMPUTER_VOICE_DIRECT_CANCELLED",
+          false
+        );
+      }
+      var node = new window.AudioWorkletNode(
+        context,
+        "bw-computer-voice-mic"
+      );
+      microphone.node = node;
+      node.port.onmessage = function (event) {
+        appendMicrophoneChunk(surface, event.data, context.sampleRate);
+      };
+      source.connect(node);
+      node.connect(silent);
+      return microphone;
+    }).catch(function (error) {
+      try { URL.revokeObjectURL(moduleUrl); } catch (_) {}
+      if (surface.released) throw error;
+      try { source.disconnect(); } catch (_) {}
+      try {
+        if (microphone.node) microphone.node.disconnect();
+      } catch (_) {}
+      microphone.node = null;
+      microphone.source = context.createMediaStreamSource(stream);
+      source = microphone.source;
+      return attachScriptProcessor();
+    });
+  }
+
+  function prepareMicrophoneFromGesture(surface) {
+    if (
+      !navigator.mediaDevices ||
+      typeof navigator.mediaDevices.getUserMedia !== "function"
+    ) {
+      surface.microphoneError = directError(
+        "浏览器不支持网页麦克风采集",
+        "BW_COMPUTER_VOICE_MICROPHONE_UNAVAILABLE",
+        false
+      );
+      return Promise.resolve(null);
+    }
+    var acquisition;
+    try {
+      acquisition = navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: { ideal: 1 },
+          sampleRate: { ideal: PCM_SAMPLE_RATE },
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+        video: false,
+      });
+    } catch (error) {
+      acquisition = Promise.reject(error);
+    }
+    return Promise.resolve(acquisition).then(function (stream) {
+      return attachMicrophoneCapture(surface, stream);
+    }).catch(function (error) {
+      surface.microphoneError = microphoneStartError(error);
+      stopSurfaceMicrophone(surface);
+      return null;
+    });
   }
 
   function discardScheduledPcm(surface) {
@@ -1226,8 +1859,11 @@ if (window.__bwPwaProviderOnly) return;
 
   function prepareSurfaceFromGesture() {
     clearPreparedSurface(true);
+    setComputerVoiceAudioSession("play-and-record");
     preparedSurface = makeAudioSurface();
     primeSurface(preparedSurface);
+    preparedSurface.microphonePromise =
+      prepareMicrophoneFromGesture(preparedSurface);
     preparedTimer = setTimeout(function () {
       clearPreparedSurface(true);
     }, START_GESTURE_LEASE_TTL_MS);
@@ -1370,6 +2006,22 @@ if (window.__bwPwaProviderOnly) return;
     });
   }
 
+  function statusReasonMessage(reason) {
+    var messages = {
+      BW_COMPUTER_VOICE_DIRECT_LOCAL_OPT_IN_REQUIRED:
+        "本机桥接服务尚未启用",
+      BW_COMPUTER_VOICE_DIRECT_APP_LAUNCHER_NOT_WIRED:
+        "Windows 应用启动器尚未就绪",
+      BW_COMPUTER_VOICE_DIRECT_MEDIA_NOT_WIRED:
+        "Windows 原生音频组件尚未就绪",
+      BW_COMPUTER_VOICE_DIRECT_RENDER_ENDPOINT_UNAVAILABLE:
+        "两根虚拟音频线缆尚未安装、失活或配置不匹配",
+      BW_COMPUTER_VOICE_DIRECT_OUTPUT_ROUTE_UNVERIFIED:
+        "尚未验证 Codex/ChatGPT 输出已固定到虚拟扬声器 B",
+    };
+    return reason ? (messages[reason] || reason) : "";
+  }
+
   function statusMessage(state, reason) {
     var messages = {
       "starting-service": "正在启动 Windows 桥接服务…",
@@ -1385,7 +2037,385 @@ if (window.__bwPwaProviderOnly) return;
       unavailable: "Windows 桥接器暂不可用",
       error: "Windows 桥接器报告错误",
     };
-    return messages[state] + (reason ? "：" + reason : "");
+    var prefix = messages[state] || "Windows 桥接器状态";
+    var detail = statusReasonMessage(reason);
+    return prefix + (detail ? "：" + detail : "");
+  }
+
+  function contextSchemaError(message, code) {
+    return directError(
+      message,
+      code || "BW_COMPUTER_VOICE_CONTEXT_SCHEMA",
+      false
+    );
+  }
+
+  function normalizeOutgoingContextEvent(value) {
+    if (!plainObject(value)) {
+      throw contextSchemaError("Reader outgoing event 必须是对象");
+    }
+    ["v", "seq", "type", "ts", "id"].forEach(function (key) {
+      if (!Object.prototype.hasOwnProperty.call(value, key)) {
+        throw contextSchemaError("Reader outgoing event 缺少字段 " + key);
+      }
+    });
+    if (
+      value.v !== 1 ||
+      !Number.isSafeInteger(value.seq) ||
+      value.seq <= 0 ||
+      !CONTEXT_EVENT_TYPES[value.type] ||
+      !Number.isFinite(value.ts) ||
+      Math.floor(value.ts) !== value.ts ||
+      typeof value.id !== "string" ||
+      !/^[0-9a-f]{16}$/.test(value.id)
+    ) {
+      throw contextSchemaError("Reader outgoing event 核心字段无效");
+    }
+    // Return the original object. Windows receives the journal payload exactly
+    // as authored; this layer validates the core but does not reshape it.
+    return value;
+  }
+
+  function normalizeOutgoingJournal(value) {
+    exactObject(
+      value,
+      [
+        "ok",
+        "contract",
+        "cursor",
+        "head",
+        "events",
+        "gap",
+        "note",
+        "waited",
+      ],
+      ["waitDenied"],
+      "Reader outgoing journal"
+    );
+    if (
+      value.ok !== true ||
+      value.contract !== OUTGOING_CONTEXT_CONTRACT ||
+      !Number.isSafeInteger(value.cursor) ||
+      value.cursor < 0 ||
+      !Number.isSafeInteger(value.head) ||
+      value.head < 0 ||
+      !Array.isArray(value.events) ||
+      typeof value.gap !== "boolean" ||
+      typeof value.note !== "string" ||
+      !Number.isFinite(value.waited) ||
+      value.waited < 0 ||
+      (
+        Object.prototype.hasOwnProperty.call(value, "waitDenied") &&
+        typeof value.waitDenied !== "boolean"
+      )
+    ) {
+      throw contextSchemaError("Reader outgoing journal 字段无效");
+    }
+    var previous = 0;
+    value.events.forEach(function (event) {
+      normalizeOutgoingContextEvent(event);
+      if (previous && event.seq !== previous + 1) {
+        throw contextSchemaError("Reader outgoing journal 事件序号不连续");
+      }
+      if (event.seq > value.cursor) {
+        throw contextSchemaError("Reader outgoing journal event 超过 tail");
+      }
+      previous = event.seq;
+    });
+    return value;
+  }
+
+  function contextPumpAlive(state, pump) {
+    return !!(
+      state &&
+      pump &&
+      !pump.stopped &&
+      state.contextPump === pump &&
+      state.started &&
+      !state.stopped &&
+      active === state &&
+      pump.generation === contextPumpGeneration
+    );
+  }
+
+  function stopContextPump(state) {
+    var pump = state && state.contextPump;
+    if (!pump || pump.stopped) return;
+    pump.stopped = true;
+    if (pump.timer) {
+      clearTimeout(pump.timer);
+      pump.timer = null;
+    }
+    if (pump.controller) {
+      try { pump.controller.abort(); } catch (_) {}
+      pump.controller = null;
+    }
+    pump.queue.length = 0;
+    pump.pendingEvent = null;
+  }
+
+  function warnAndStopContextPump(state, pump, error) {
+    if (!contextPumpAlive(state, pump)) return;
+    stopContextPump(state);
+    emitStatus({
+      state: "warning",
+      sessionId: state.sessionId,
+      message: error && error.message ||
+        "Reader 上下文桥接已停止；音频通话继续",
+      code: error && error.code ||
+        "BW_COMPUTER_VOICE_CONTEXT_FAILED",
+    });
+  }
+
+  function scheduleContextPump(state, pump, delay) {
+    if (!contextPumpAlive(state, pump) || pump.timer) return;
+    pump.timer = setTimeout(function () {
+      pump.timer = null;
+      runContextPump(state, pump);
+    }, delay);
+  }
+
+  function outgoingJournalFetch(state, pump, since, limit, wait) {
+    var fetcher = window.__bwReaderFetch;
+    if (typeof fetcher !== "function" && typeof window.fetch === "function") {
+      fetcher = window.fetch.bind(window);
+    }
+    if (typeof fetcher !== "function") {
+      return Promise.reject(contextSchemaError(
+        "Reader 页面缺少 journal fetch 能力",
+        "BW_COMPUTER_VOICE_CONTEXT_FETCH_UNAVAILABLE"
+      ));
+    }
+    var AbortControllerCtor = window.AbortController;
+    if (typeof AbortControllerCtor !== "function") {
+      return Promise.reject(contextSchemaError(
+        "Reader 页面缺少 AbortController",
+        "BW_COMPUTER_VOICE_CONTEXT_ABORT_UNAVAILABLE"
+      ));
+    }
+    var controller = new AbortControllerCtor();
+    pump.controller = controller;
+    var url = "/pdf/api/outgoing/journal?since=" +
+      encodeURIComponent(String(since)) +
+      "&limit=" + encodeURIComponent(String(limit)) +
+      "&wait=" + encodeURIComponent(String(wait));
+    var transport;
+    try {
+      transport = fetcher(url, {
+        method: "GET",
+        credentials: "same-origin",
+        cache: "no-store",
+        signal: controller.signal,
+      });
+    } catch (error) {
+      transport = Promise.reject(error);
+    }
+    return Promise.resolve(transport).catch(function (error) {
+      if (
+        controller.signal.aborted ||
+        (error && error.name === "AbortError")
+      ) {
+        throw directError(
+          "Reader context fetch 已取消",
+          "BW_COMPUTER_VOICE_CONTEXT_CANCELLED",
+          false
+        );
+      }
+      throw directError(
+        "Reader outgoing journal 网络请求失败",
+        "BW_COMPUTER_VOICE_CONTEXT_FETCH",
+        true
+      );
+    }).then(function (response) {
+      if (!contextPumpAlive(state, pump)) {
+        throw directError(
+          "Reader context pump 已停止",
+          "BW_COMPUTER_VOICE_CONTEXT_CANCELLED",
+          false
+        );
+      }
+      if (!response || response.ok !== true ||
+          typeof response.json !== "function") {
+        throw directError(
+          "Reader outgoing journal 暂不可用",
+          "BW_COMPUTER_VOICE_CONTEXT_FETCH",
+          true
+        );
+      }
+      return Promise.resolve(response.json()).catch(function () {
+        throw contextSchemaError("Reader outgoing journal JSON 无法解析");
+      });
+    }).then(normalizeOutgoingJournal).finally(function () {
+      if (pump.controller === controller) pump.controller = null;
+    });
+  }
+
+  function normalizeContextAck(value, state, event) {
+    exactObject(
+      value,
+      ["sessionId", "eventId", "seq", "outcome"],
+      [],
+      "CONTEXT 响应"
+    );
+    if (
+      safeId(value.sessionId, "sessionId") !== state.sessionId ||
+      value.eventId !== event.id ||
+      value.seq !== event.seq ||
+      (value.outcome !== "accepted" && value.outcome !== "duplicate")
+    ) {
+      throw contextSchemaError(
+        "Windows CONTEXT 回执无效",
+        "BW_COMPUTER_VOICE_CONTEXT_ACK"
+      );
+    }
+    return value;
+  }
+
+  function sendPendingContextEvent(state, pump) {
+    var event = pump.pendingEvent;
+    return state.channel.request("context", {
+      sessionId: state.sessionId,
+      contextContract: OUTGOING_CONTEXT_CONTRACT,
+      event: event,
+    }).then(function (value) {
+      normalizeContextAck(value, state, event);
+      if (!contextPumpAlive(state, pump) || pump.pendingEvent !== event) return;
+      lastContextAckCursor = event.seq;
+      lastContextResumeCursor = event.seq;
+      pump.cursor = event.seq;
+      pump.pendingEvent = null;
+    });
+  }
+
+  function validateSteadyEvents(events, cursor) {
+    var expected = cursor + 1;
+    events.forEach(function (event) {
+      if (event.seq !== expected) {
+        throw contextSchemaError(
+          "Reader outgoing journal 出现未声明的序号缺口",
+          "BW_COMPUTER_VOICE_CONTEXT_GAP"
+        );
+      }
+      expected += 1;
+    });
+  }
+
+  function finishContextBootstrap(state, pump, journal) {
+    // A bootstrap gap is expected when the retained journal already starts
+    // after seq=1. Start only at the most recent full page context so older
+    // focus/drawing state cannot be replayed as current.
+    // Freeze the scan at the tail observed by the first probe. The journal may
+    // append while the bounded second request is in flight; its outer cursor
+    // and returned rows are therefore not a safe bootstrap boundary.
+    var bootstrapEvents = journal.events.filter(function (event) {
+      return event.seq <= pump.bootstrapTail;
+    });
+    var startIndex = -1;
+    for (var index = bootstrapEvents.length - 1; index >= 0; index -= 1) {
+      if (bootstrapEvents[index].type === "page.context") {
+        startIndex = index;
+        break;
+      }
+    }
+    pump.bootstrapDone = true;
+    if (startIndex < 0) {
+      // All rows up to the frozen bootstrap tail were inspected and none could
+      // establish a current page. Old focus/drawing events are deliberately
+      // discarded. Events appended after that tail remain visible to the first
+      // live poll. This is a resume baseline, not a Windows ACK.
+      pump.cursor = pump.bootstrapTail;
+      lastContextResumeCursor = pump.bootstrapTail;
+      return;
+    }
+    pump.cursor = bootstrapEvents[startIndex].seq - 1;
+    pump.queue = bootstrapEvents.slice(startIndex);
+  }
+
+  function runContextPump(state, pump) {
+    if (!contextPumpAlive(state, pump) || pump.running) return;
+    pump.running = true;
+    var work;
+    if (pump.pendingEvent) {
+      work = sendPendingContextEvent(state, pump);
+    } else if (pump.queue.length) {
+      pump.pendingEvent = pump.queue.shift();
+      work = sendPendingContextEvent(state, pump);
+    } else if (!pump.bootstrapDone && pump.bootstrapTail === null) {
+      work = outgoingJournalFetch(state, pump, 0, 1, 0).then(function (journal) {
+        if (!contextPumpAlive(state, pump)) return;
+        pump.bootstrapTail = journal.cursor;
+      });
+    } else if (!pump.bootstrapDone) {
+      var since = Math.max(0, pump.bootstrapTail - CONTEXT_BOOTSTRAP_LIMIT);
+      work = outgoingJournalFetch(
+        state,
+        pump,
+        since,
+        CONTEXT_BOOTSTRAP_LIMIT,
+        0
+      ).then(function (journal) {
+        if (!contextPumpAlive(state, pump)) return;
+        finishContextBootstrap(state, pump, journal);
+      });
+    } else {
+      work = outgoingJournalFetch(
+        state,
+        pump,
+        pump.cursor,
+        CONTEXT_LIVE_LIMIT,
+        CONTEXT_LIVE_WAIT_S
+      ).then(function (journal) {
+        if (!contextPumpAlive(state, pump)) return;
+        if (journal.gap) {
+          throw contextSchemaError(
+            "Reader outgoing journal 已越过保留窗口；上下文桥接已停止",
+            "BW_COMPUTER_VOICE_CONTEXT_GAP"
+          );
+        }
+        validateSteadyEvents(journal.events, pump.cursor);
+        pump.queue = journal.events.slice();
+        if (!pump.queue.length && journal.waitDenied === true) {
+          pump.waitDenied = true;
+        }
+      });
+    }
+    Promise.resolve(work).then(function () {
+      if (!contextPumpAlive(state, pump)) return;
+      var delay = pump.waitDenied
+        ? CONTEXT_WAIT_DENIED_RETRY_MS
+        : 0;
+      pump.waitDenied = false;
+      scheduleContextPump(state, pump, delay);
+    }).catch(function (error) {
+      if (!contextPumpAlive(state, pump)) return;
+      if (error && error.retryable === true) {
+        scheduleContextPump(state, pump, CONTEXT_RETRY_MS);
+        return;
+      }
+      warnAndStopContextPump(state, pump, error);
+    }).finally(function () {
+      pump.running = false;
+    });
+  }
+
+  function startContextPump(state) {
+    stopContextPump(state);
+    contextPumpGeneration += 1;
+    var pump = {
+      generation: contextPumpGeneration,
+      stopped: false,
+      running: false,
+      timer: null,
+      controller: null,
+      bootstrapDone: lastContextResumeCursor !== null,
+      bootstrapTail: null,
+      cursor: lastContextResumeCursor === null ? 0 : lastContextResumeCursor,
+      queue: [],
+      pendingEvent: null,
+      waitDenied: false,
+    };
+    state.contextPump = pump;
+    runContextPump(state, pump);
   }
 
   function clearHeartbeat(state) {
@@ -1461,7 +2491,17 @@ if (window.__bwPwaProviderOnly) return;
     if (!state || state.failed || state.cancelled) return;
     state.failed = true;
     state.stopped = true;
+    dialPending = false;
+    state.uplinkActive = false;
+    lastClientFailure = {
+      code: error && error.code ||
+        "BW_COMPUTER_VOICE_DIRECT_START_FAILED",
+      message: error && error.message ||
+        "Windows 桥接器启动失败",
+      at: new Date().toISOString(),
+    };
     clearHeartbeat(state);
+    stopContextPump(state);
     if (active === state) active = null;
     if (state.channel) state.channel.close();
     releaseSurface(state.surface);
@@ -1505,7 +2545,7 @@ if (window.__bwPwaProviderOnly) return;
       );
     }
     var track = view.getUint8(5);
-    if ((track !== 1 && track !== 2) || view.getUint16(6, true) !== 0) {
+    if (track !== 1 || view.getUint16(6, true) !== 0) {
       throw directError(
         "Windows PCM track 或 flags 无效",
         "BW_COMPUTER_VOICE_DIRECT_PCM_TRACK",
@@ -1580,6 +2620,7 @@ if (window.__bwPwaProviderOnly) return;
     } catch (error) {
       return Promise.reject(error);
     }
+    dialPending = true;
     var state = {
       channel: null,
       surface: surface,
@@ -1594,11 +2635,15 @@ if (window.__bwPwaProviderOnly) return;
       heartbeatTimer: null,
       heartbeatInFlight: false,
       heartbeatSequence: 0,
+      uplinkActive: false,
+      uplinkSequence: 0,
+      uplinkTimestampBase: Math.floor(Date.now() * 1000),
+      contextPump: null,
       pcm: {
         1: { nextSequence: 0, seen: false, timestampLow: 0, timestampHigh: 0 },
-        2: { nextSequence: 0, seen: false, timestampLow: 0, timestampHigh: 0 },
       },
     };
+    surface.ownerState = state;
     active = state;
     var availabilityClosed = cancelAvailabilityForStart();
     emitStatus({
@@ -1608,11 +2653,25 @@ if (window.__bwPwaProviderOnly) return;
     });
 
     return availabilityClosed.then(function () {
+      return surface.microphonePromise;
+    }).then(function () {
       if (state.stopped || active !== state) {
         throw directError(
           "Windows 桥接启动已取消",
           "BW_COMPUTER_VOICE_DIRECT_CANCELLED",
           false
+        );
+      }
+      if (surface.microphoneError) throw surface.microphoneError;
+      if (
+        !surface.microphone ||
+        !surface.microphone.track ||
+        surface.microphone.track.readyState !== "live"
+      ) {
+        throw directError(
+          "网页麦克风没有就绪",
+          "BW_COMPUTER_VOICE_MICROPHONE_NOT_READY",
+          true
         );
       }
       return openDirect({
@@ -1684,6 +2743,10 @@ if (window.__bwPwaProviderOnly) return;
         );
       }
       state.started = true;
+      dialPending = false;
+      lastClientFailure = null;
+      state.uplinkActive = true;
+      state.surface.microphone.active = true;
       scheduleHeartbeat(state);
       if (state.stopped || active !== state) {
         throw directError(
@@ -1692,6 +2755,7 @@ if (window.__bwPwaProviderOnly) return;
           false
         );
       }
+      startContextPump(state);
       if (state.surface.context.state !== "running") {
         state.audioBlocked = true;
         emitStatus({
@@ -1720,12 +2784,16 @@ if (window.__bwPwaProviderOnly) return;
   function stop(reason) {
     var state = active;
     active = null;
+    dialPending = false;
     if (!state) {
       emitStatus({ state: "stopped", message: "电脑客户端已停止" });
       return Promise.resolve({ ok: true, state: "stopped" });
     }
     state.cancelled = true;
     state.stopped = true;
+    state.uplinkActive = false;
+    stopContextPump(state);
+    stopSurfaceMicrophone(state.surface);
     clearHeartbeat(state);
     if (!state.started) {
       // START 尚未确认时不能把 STOP 排在同一条 WSS 后面等待：Windows
@@ -1803,6 +2871,17 @@ if (window.__bwPwaProviderOnly) return;
     document.addEventListener("click", function (event) {
       if (!phoneButtonFromEvent(event)) return;
       if (event.isTrusted !== true) return;
+      try {
+        if (
+          !RC.voicecall ||
+          typeof RC.voicecall.canCaptureComputerVoiceGesture !== "function" ||
+          RC.voicecall.canCaptureComputerVoiceGesture() !== true
+        ) {
+          return;
+        }
+      } catch (_) {
+        return;
+      }
       if (active && active.audioBlocked) {
         // 此次点击只恢复被浏览器拦截的同一条音频，不让上层把它当挂断。
         try { event.preventDefault(); } catch (_) {}
@@ -1810,8 +2889,82 @@ if (window.__bwPwaProviderOnly) return;
         retryPlayback(active).catch(function () {});
         return;
       }
-      if (!active) prepareSurfaceFromGesture();
+      if (!active && dialPending) {
+        clearPreparedSurface(true);
+        return;
+      }
+      if (!active && selectedEngineKnown && computerVoiceSelected) {
+        prepareSurfaceFromGesture();
+      }
     }, true);
+  }
+
+  function reserveSelectedEngineUpdate() {
+    selectedEngineRevision += 1;
+    return selectedEngineRevision;
+  }
+
+  function beginSelectedEngineUpdate() {
+    var revision = reserveSelectedEngineUpdate();
+    // A settings write is not authoritative until the server ACKs it. Fence
+    // both the old and proposed values so a phone click during the POST cannot
+    // acquire a microphone lease for either one.
+    selectedEngineKnown = false;
+    computerVoiceSelected = false;
+    clearPreparedSurface(true);
+    return revision;
+  }
+
+  function isSelectedEngineRevisionCurrent(revision) {
+    return Number.isSafeInteger(revision) &&
+      revision >= 1 &&
+      revision === selectedEngineRevision;
+  }
+
+  function setSelectedEngine(engine, revision) {
+    if (revision == null) {
+      revision = reserveSelectedEngineUpdate();
+    }
+    if (
+      !Number.isSafeInteger(revision) ||
+      revision < 1 ||
+      revision < selectedEngineRevision
+    ) {
+      return computerVoiceSelected;
+    }
+    selectedEngineRevision = revision;
+    selectedEngineKnown = true;
+    computerVoiceSelected = engine === "computer_client";
+    if (!computerVoiceSelected) clearPreparedSurface(true);
+    return computerVoiceSelected;
+  }
+
+  function setDialPending(value) {
+    dialPending = value === true;
+    if (!dialPending && !active && !computerVoiceSelected) {
+      clearPreparedSurface(true);
+    }
+    return dialPending;
+  }
+
+  function cancelPreparedGesture() {
+    clearPreparedSurface(true);
+  }
+
+  function abortForPageExit() {
+    clearPreparedSurface(true);
+    var state = active;
+    active = null;
+    dialPending = false;
+    if (!state) return;
+    state.cancelled = true;
+    state.stopped = true;
+    state.uplinkActive = false;
+    stopContextPump(state);
+    clearHeartbeat(state);
+    stopSurfaceMicrophone(state.surface);
+    if (state.channel) state.channel.close();
+    releaseSurface(state.surface);
   }
 
   function mountSettings(container) {
@@ -1823,10 +2976,14 @@ if (window.__bwPwaProviderOnly) return;
       '<div class="ams-row" style="margin-top:7px">' +
       '<button type="button" class="ams-btn" data-role="refresh">刷新直连状态</button>' +
       '</div>' +
-      '<div class="ams-tdef" data-role="detail" style="margin-top:6px"></div>';
+      '<div class="ams-tdef" data-role="detail" style="margin-top:6px"></div>' +
+      '<div class="ams-tdef" data-role="error" ' +
+      'style="display:none;margin-top:7px;white-space:pre-wrap;' +
+      'user-select:text;color:#ffb4a8"></div>';
     container.appendChild(root);
     var status = root.querySelector('[data-role="status"]');
     var detail = root.querySelector('[data-role="detail"]');
+    var errorDetail = root.querySelector('[data-role="error"]');
 
     function render(value) {
       if (
@@ -1839,12 +2996,34 @@ if (window.__bwPwaProviderOnly) return;
         status.textContent = "○ Windows 桥接器离线或电脑正在睡眠。";
       } else {
         status.textContent = "○ Windows 桥接器：" +
-          (value.reason || value.state || "未就绪");
+          (statusReasonMessage(value.reason) || value.state || "未就绪");
       }
       detail.textContent =
         "固定 Tailnet 直连，无需配对或填写地址；" +
+        "桥接器不会创建或安装虚拟设备，A/B 必须是 Windows 已有的两根独立虚拟音频线；" +
+        "电话按钮才会申请当前网页麦克风并送入 Windows 虚拟麦克风；" +
+        "Codex 输出固定到独立虚拟扬声器后按进程树回传。" +
         "选择模型或刷新状态不会启动应用或采音。" +
         "挂断只保证停止桥接，Codex Voice 需在 Windows 确认退出。";
+      var remoteError = value.status && value.status.lastError;
+      if (remoteError) {
+        errorDetail.style.display = "";
+        errorDetail.textContent =
+          "最近 Windows 错误（可选择复制）\n" +
+          remoteError.code + " · " + remoteError.stage +
+          (remoteError.hresult ? " · " + remoteError.hresult : "") +
+          "\n" + remoteError.failureId + " · " + remoteError.atUtc;
+      } else if (lastClientFailure) {
+        errorDetail.style.display = "";
+        errorDetail.textContent =
+          "最近浏览器错误（可选择复制）\n" +
+          lastClientFailure.code + "\n" +
+          lastClientFailure.message + "\n" +
+          lastClientFailure.at;
+      } else {
+        errorDetail.style.display = "none";
+        errorDetail.textContent = "";
+      }
     }
 
     function refresh() {
@@ -1861,11 +3040,20 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   installGestureCapture();
+  if (window && typeof window.addEventListener === "function") {
+    window.addEventListener("pagehide", abortForPageExit);
+  }
 
   RC.computerVoice = Object.freeze({
     contract: BRIDGE_CONTRACT,
     directContract: DIRECT_CONTRACT,
     availability: availability,
+    reserveSelectedEngineUpdate: reserveSelectedEngineUpdate,
+    beginSelectedEngineUpdate: beginSelectedEngineUpdate,
+    isSelectedEngineRevisionCurrent: isSelectedEngineRevisionCurrent,
+    setSelectedEngine: setSelectedEngine,
+    setDialPending: setDialPending,
+    cancelPreparedGesture: cancelPreparedGesture,
     registerPhoneButton: registerPhoneButton,
     startFromUserGesture: startFromUserGesture,
     stop: stop,

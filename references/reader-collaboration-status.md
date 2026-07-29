@@ -3472,3 +3472,49 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
   `/home/bwicarus/deploy-backups/reader/20260729T061727Z-39246`。扩展 publisher 第一次也在
   写 channel 前 fail closed，因为 `reader-extension-handoff.md` 仍登记 0.2.69；本轮已把该
   唯一交接入口更新到 0.2.72，下一步仅需经正式脚本同步这份文档，再重试官方 channel 发布器。
+
+## Codex：Reader 0.2.73 / Windows direct 0.1.11 候选收口（2026-07-29 JST，未安装部署）
+- **改了什么**：Reader/PWA/扩展改为免配对固定 WSS 直连 Windows，双独立 Active eRender A/B、Reader 麦克风上行、Codex 进程树下行与 context→typist 生命周期接线完成；queue/3 receipts、owner 终止检测、per-user lifecycle Mutex 和停止态 durable queue status 关闭最终可靠性缺口。
+- **怎么验的**：全量 Reader Node contracts、typist runtime、supervisor/helper/package、桌面测试、C# 无启动 self-test 与不可变 direct 0.1.11 package verify/self-test 均通过；独立最终复审无 P1/P2，所有诊断保持 `audioActivated=false`。
+- **发布门禁**：0.2.73 本地 channel 候选与 launcher v12 生成通过；Windows release preflight 已通过版本单调、白名单、vendor、语法、合同和网络审计，随后只在文档已登记的 Windows `fcntl` 平台边界停止，生产 channel 未变化。
+- **明确没做**：本机目前没有两根可用的独立虚拟音频线缆；未安装驱动、未选择 A/B、未启动真实 typist/采音/快捷键，未改日常 Chrome，未提交、推送、部署或改 Pi 工作树。
+- **下一步**：用户通过驱动安装门后安装成熟已签名的两根虚拟线缆并明确选择 A/B，再按新功能清单做一次 Reader/PWA 人工通话验收；通过后才精确提交推送并走 Windows 官方部署入口。
+
+## Codex：Windows direct 0.1.11 已安装并配置 A/B（2026-07-30 00:19 JST，未做真实 START）
+- **改了什么**：重启后确认 VB-CABLE 与 VAC 均 Active；manifest 校验、永久备份、精确停启和失败回滚门禁通过后安装 0.1.11，并显式迁移 strict config `/1 → /3`；恢复点为 `C:\Users\bwica\bw-computer-voice-bridge-backups\install-20260729T151602Z-04bc4eba`。
+- **怎么验的**：安装路径双 self-test 通过；无启动诊断中 process output、A render、B endpoint 均 `ok=true`，且全程 `captureStarted=false`、未发快捷键；listener 已回到 `/2` 的 `idle / readerConnected=false / captureActive=false / lastError=null`。
+- **应用路由**：Windows 音量混合器已把 ChatGPT 应用输出固定到 B=`Line 1 (Virtual Audio Cable)`、输入固定到 A 的录音端=`CABLE Output (VB-Audio Virtual Cable)`；未修改系统默认输入/输出。静态路由已保存，但 probe 只认正在发声的 Active session，当前无声时仍为 `OUTPUT_ROUTE_UNVERIFIED`。
+- **明确没做**：没有启动真实通话、typist、采音或 `Ctrl+Shift+C`，未改日常 Chrome，未提交、推送、部署、发布 channel 或改 Pi；Reader/PWA 生产仍是 0.2.72，0.2.73 新链路尚未生产生效。
+- **下一步**：先在隔离候选/人工清单中由用户点击一次 Reader 电话按钮，监控 START→双向音频→STOP 与 typist 生命周期；验收通过后再精确提交推送并按正式入口部署 Reader 0.2.73。
+
+## Codex：隔离 Reader 0.2.73 已就绪待人工 START（2026-07-30 00:43 JST）
+- **改了什么**：仅在 `%LOCALAPPDATA%\BWReaderExtensionTest` 原子替换本地 0.2.73 候选并启动 `BW Codex Chrome Test`；旧目录保存在 `extension-backup-pre-0.2.73-20260729T152645Z-b89c3522`，未访问仍为 0.2.72 的在线测试 channel。
+- **怎么验的**：CDP 读取实际 extension service worker 为 0.2.73；生产 0.2.72 真书页显示 provider/extension=0.2.73、runtime=`pwa-extension-provider`、UI owner=`extension`，电脑客户端已选中且页面无配对码。
+- **当前状态**：页面直连面板为“无需配对或填写地址”，只因尚无 ChatGPT Active 输出会话而显示 B 路由未验证；Windows 服务仍 `idle / captureActive=false / lastError=null`，typist=0。
+- **明确没做**：未点击电话按钮、未申请麦克风权限、未发送 START/快捷键或启动 typist，未改日常 Chrome，未提交、推送、部署、发布或改 Pi。
+- **下一步**：由用户在当前前台专用 Chrome 亲手点击电话按钮并允许本页麦克风；Codex 同步监控 START→A/B 双向音频→STOP、B Active-session 路由与 typist 生命周期。
+
+## Codex：修复首次安装 typist 启动死锁（2026-07-30 01:08 JST，待重试）
+- **根因**：0.1.11 首次安装无 `voice-typist.config.json`；helper 先跑 `Status`，其 `queue-status` 又先读配置，因而在能自动 `init-config` 的 `Start` 前失败为 `BW_COMPUTER_VOICE_DIRECT_TYPIST_START_FAILED`。
+- **改了什么**：`queue-status` 仅在“配置、queue、ledger 全不存在”的全新状态下用默认 queue size 做只读空队列检查；已有 durable 状态却丢配置仍 fail closed；同一修复已同步到本机安装运行时。
+- **怎么验的**：typist direct runtime 29 项、helper 14 项、supervisor 19 项与全量 Reader Node contracts 均通过；安装路径 `queue-status`/launcher `Status` exit 0 且未创建 config/state/log/pid。
+- **安全状态**：失败后服务回到 `idle / captureActive=false`、typist=0、未发快捷键；未清除 lastError（只由下一次真实 START 成功清除），未改日常 Chrome、未提交、推送或部署。
+- **下一步**：用户在已重新打开的隔离 Reader 0.2.73 再点击一次电话按钮；监控首次 `init-config`、typist owner lease、双向音频与 STOP 清理。
+
+## Codex：修复快捷键前应用输出队列背压并安装 0.1.12（2026-07-30 01:26 JST，待人工重试）
+- **根因/改动**：旧顺序先启动 process loopback、约 3 秒后 typist 才完成，而 32 包 output queue 在原子提交前没有消费者，静音包填满后 fail closed；现改为 `typist → A render → output capture → 端点/状态复检 → shortcut → commit/pump`，所有门禁与 exact typist lease 清理均保留。
+- **验证**：C# Release 无启动 self-test（含新增“typist 完成前媒体不得 Start”合同）、直连包 15 项、0.1.12 manifest verify/包内 self-test 均通过；安装路径无启动诊断三路 `ok=true`，`captureStarted=false`、`shortcutSent=false`。
+- **安装事实**：0.1.12 native SHA-256 `fe696a20832c004857223b2637783522276ad0d401172c0112bc20ed434b197c`；原子替换与失败回滚门禁通过，备份为 `C:\Users\bwica\bw-computer-voice-bridge-backups\install-20260729T162547Z-63c54084`。
+- **安全状态/下一步**：新服务 PID 30268 仅监听 `127.0.0.1:43128`，状态 `idle / readerConnected=false / captureActive=false / lastError=null`；未自动 START、采音或发快捷键，下一步仍由用户点击电话按钮做真实双向验收。
+
+## Codex：改用 Codex OS-global 快捷键并安装 0.1.13（2026-07-30 01:49 JST，待人工重试）
+- **根因/改动**：本机 `realtimeVoice=Ctrl+Shift+C` 由 Codex 注册为 `os-global`，旧桥却先抢前台；游戏前台与超长 foreground lock 使其在真正 `SendInput` 前失败。现删除前台切换/PID 门禁，直接模拟全局键，并把 exact child-tree 比较收敛为稳定 packaged-app root。
+- **安全门禁**：typist/WASAPI 启动前与发送前均现读当前用户 keybindings，只接受唯一固定绑定；root 变化、配置缺失/重复/冲突、SendInput 非 6 项分别精确 fail closed，部分发送仍反向释放按键。
+- **验证/安装**：Release build 与无启动 self-test、直连包 15 项、0.1.13 manifest verify/包内 self-test、安装路径 self-test/三路无启动诊断均通过；备份为 `C:\Users\bwica\bw-computer-voice-bridge-backups\install-20260729T164824Z-85e8604e`。
+- **安全状态/下一步**：新服务 PID 29908 唯一监听 `127.0.0.1:43128`，`idle / captureActive=false / lastError=null`，typist=0；未自动发键或采音，下一步由用户再点击一次电话按钮验证真实全局快捷键与双向音频。
+
+## Codex：修复 SendInput ABI 并安装 0.1.14（2026-07-30 01:57 JST，待人工重试）
+- **根因/改动**：0.1.13 已到达 `SendInput`，但 C# `INPUT` union 只含 `KEYBDINPUT`，使 x64 `cbSize=32` 而 Win32 要求 40；现补齐 mouse/keyboard/hardware 三成员，并按 pointer size 固定验证 native layout。
+- **怎么验的**：本机修复前后实测 `32 → 40`；Release build、无启动 self-test（新增 ABI layout 合同）、直连包 15 项、0.1.14 manifest verify/包内与安装路径 self-test 均通过。
+- **安装/安全状态**：installed SHA-256 `ef4f09b332167ed2e96205b766c457d90efc988a67b33d79a81a4ef1bab17dcd`，备份为 `C:\Users\bwica\bw-computer-voice-bridge-backups\install-20260729T165720Z-e2ea7b7a`；服务 PID 25268 唯一监听 localhost，`idle / readerConnected=false / captureActive=false`，typist=0。
+- **明确没做/下一步**：安装与诊断均 `captureStarted=false / shortcutSent=false`；未改日常 Chrome、未提交推送或部署，下一步由用户再次点击电话按钮验证真实快捷键与双向声音。

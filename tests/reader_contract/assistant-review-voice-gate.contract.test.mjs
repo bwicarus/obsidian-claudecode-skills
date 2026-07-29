@@ -6,6 +6,10 @@ const SOURCE = fs.readFileSync(
   new URL("../../_server_deploy/static/pdf/rc-voicecall.js", import.meta.url),
   "utf8"
 );
+const COMPUTER_VOICE_SOURCE = fs.readFileSync(
+  new URL("../../_server_deploy/static/pdf/rc-computer-voice.js", import.meta.url),
+  "utf8"
+);
 
 function functionBody(name, nextName) {
   const start = SOURCE.indexOf(`function ${name}(`);
@@ -66,6 +70,14 @@ test("phone click and microphone long press are blocked but dictation click stay
     /tm\.addEventListener\('click', function \(\) \{ try \{ srcMic\.click\(\)/
   );
   assert.match(topbar, /_bindLongPress\(tm, _micLongAction\)/);
+  assert.match(
+    SOURCE,
+    /canCaptureComputerVoiceGesture:\s*function \(\) \{ return !_assistantInReview\(\); \}/
+  );
+  assert.match(
+    COMPUTER_VOICE_SOURCE,
+    /RC\.voicecall\.canCaptureComputerVoiceGesture\(\) !== true[\s\S]*return/
+  );
 });
 
 test("mode changes update accessibility state and tear down in-flight voice", () => {

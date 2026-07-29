@@ -19,7 +19,15 @@ internal static class DirectMicrophoneDiscovery
         2);
 
     internal static IReadOnlyList<DirectMicrophoneEndpoint>
-        EnumerateActive()
+        EnumerateActive() =>
+        EnumerateActive(AudioDataFlow.Capture);
+
+    internal static IReadOnlyList<DirectMicrophoneEndpoint>
+        EnumerateActiveRenderEndpoints() =>
+        EnumerateActive(AudioDataFlow.Render);
+
+    private static IReadOnlyList<DirectMicrophoneEndpoint>
+        EnumerateActive(AudioDataFlow dataFlow)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -47,7 +55,7 @@ internal static class DirectMicrophoneDiscovery
             }
 
             RequireSucceeded(enumerator.EnumAudioEndpoints(
-                AudioDataFlow.Capture,
+                dataFlow,
                 DeviceState.Active,
                 out collection));
             RequireSucceeded(collection.GetCount(out uint count));
@@ -70,7 +78,15 @@ internal static class DirectMicrophoneDiscovery
                         Marshal.PtrToStringUni(endpointIdPointer)
                         ?? throw new InvalidOperationException(
                             "BW_COMPUTER_VOICE_AUDIO_MIC_ID_MISSING");
-                    _ = MicCaptureRequest.Create(endpointId);
+                    if (dataFlow == AudioDataFlow.Render)
+                    {
+                        _ = VirtualMicrophoneRenderRequest.Create(
+                            endpointId);
+                    }
+                    else
+                    {
+                        _ = MicCaptureRequest.Create(endpointId);
+                    }
                     if (!seen.Add(endpointId))
                     {
                         throw new InvalidOperationException(

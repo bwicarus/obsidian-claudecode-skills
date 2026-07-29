@@ -17,14 +17,38 @@ Reader/PWA
 Windows Tailscale Serve
     ⇅ 127.0.0.1:43128
 Windows C# direct server（空闲时只监听）
+    ├─ Reader 网页麦克风 PCM → 虚拟麦克风 A 播放端
+    │                              └─ A 录音端 → Codex 输入
+    └─ Codex 输出 → 虚拟扬声器 B 播放端
+                    └─ 仅捕获 Codex 进程树 → Reader 扬声器
 ```
 
-Pi 继续提供 Reader/PWA 和书籍数据，但不进入电脑语音的信令或媒体链路。
+Pi 继续提供 Reader/PWA、书籍和 outgoing journal 数据，但不代理 Windows
+WSS、控制消息或 PCM 媒体。
 浏览器只能连接已经存在的 Windows listener，不能在完全无 listener、电脑
 睡眠或 bootstrap 未安装/未运行时凭空唤醒本机进程；这时 Reader 必须显示
 “Windows 桥接器离线”。一次显式安装登录后台引导器后，listener 才能在
 Windows 登录会话中被持续监督，而电话 `START` 只负责按合同启动 Codex、
 捕获与快捷键阶段。
+
+两个虚拟设备都从本机 **Active eRender** endpoint 枚举，必须逐一明确
+选择、非空且互不相同，没有 default fallback。A 由 bridge 写入；B 只作为
+Codex/ChatGPT 的应用输出目标，bridge 不向 B 写入。B 的录音侧不接物理
+扬声器，所以 RDP 重定向或真实扬声器不会承担这条通话输出链。
+
+枚举框显示的是 Windows 当前已有的全部 Active eRender endpoint；窗口中的
+“虚拟麦克风 A / 虚拟扬声器 B”是桥接角色名，不表示程序已经创建了设备。
+项目不安装驱动，也不能把 Realtek、Steam、Oculus 等现有端点冒充为两根独立线缆。
+没有两根已签名虚拟线缆时必须停在安装门，不能保存占位配置。
+
+端点存在不等于应用已路由。窗口提供“打开 Windows 音量混合器”，进入官方
+`ms-settings:apps-volume` 后需一次性把 Codex/ChatGPT 输出选择为 B。
+bridge 不调用未文档化的 `AudioPolicyConfigFactory`，也不修改系统全局
+默认设备。C# 在 B 上通过公开 Core Audio session API 观察当前 Codex 进程树；
+只有出现当前 Active session 才报告 route verified，Inactive/Expired 历史 session
+不算；未观察到时保持
+`BW_COMPUTER_VOICE_DIRECT_OUTPUT_ROUTE_UNVERIFIED`。这条正向证据仍不能代替
+最终有声 E2E。
 
 ## UI 的三个状态
 
@@ -78,7 +102,8 @@ schtasks.exe /Run /TN "BW Computer Voice Direct Bootstrap"
 所有命令不用 shell。直接启动和停止均走可注入 `ProcessRunner`；Windows
 停止会在同一个 `QUERY_LIMITED_INFORMATION | TERMINATE` 进程句柄上先复核
 完整 EXE 路径、再终止，避免两次打开之间的 PID reuse。偏离时 fail closed。
-状态刷新和麦克风选择不会调用 `ProcessRunner.start()` 或 `schtasks /Run`。
+状态刷新和两个播放端点选择不会调用 `ProcessRunner.start()` 或
+`schtasks /Run`。
 
 计划任务的固定动作不是任意命令，而是无控制台桌面启动器：
 
@@ -105,24 +130,21 @@ GUI 不再提供会被 supervisor 立即抵消的单独“停止”按钮。“�
 
 ## direct config 合同
 
-合同为 `reader-computer-voice-direct-config/1`，字段集合必须恰好为：
+合同为 `reader-computer-voice-direct-config/3`，字段集合必须恰好为：
 
 ```json
 {
-  "contract": "reader-computer-voice-direct-config/1",
+  "contract": "reader-computer-voice-direct-config/3",
   "localOptIn": true,
   "experimentalSingleUserMode": true,
-  "microphoneEndpointId": "{explicit-endpoint-id}",
+  "virtualMicrophoneRenderEndpointId": "{explicit-virtual-microphone-render-endpoint-id}",
+  "virtualSpeakerRenderEndpointId": "{explicit-virtual-speaker-render-endpoint-id}",
   "listenHost": "127.0.0.1",
   "listenPort": 43128,
   "allowedOrigins": [
     "https://bwicarus.taile44d0c.ts.net"
   ],
   "allowedTailscaleUserLogin": "bwicarus@gmail.com",
-  "pairingCodeHash": "",
-  "pairingExpiresAtUtc": null,
-  "pairedClientPublicKeySpki": "",
-  "pairedClientFingerprintSha256": "",
   "outputScope": "process-only",
   "appKind": "codex-desktop",
   "runtimeStatusPath": "C:\\Users\\bwica\\bw-computer-voice-bridge\\runtime\\computer-voice-direct.status.json"
@@ -135,10 +157,16 @@ GUI 不再提供会被 supervisor 立即抵消的单独“停止”按钮。“�
 - `allowedTailscaleUserLogin` 必须逐字为已确认的
   `bwicarus@gmail.com`，GUI 和 Reader 都不能提供替代值。
 - `experimentalSingleUserMode=true` 是当前单用户实验模式：浏览器使用
-  direct v2，不需要配对码、设备密钥或 endpoint 输入。任意规范的 HTTP(S)
+  direct v3，不需要配对码、设备密钥或 WSS endpoint 输入。任意规范的 HTTP(S)
   页面 Origin 都可到达握手，权限边界改由固定 WSS + Tailscale 注入的唯一
   用户身份 + Windows 本地 opt-in 共同承担。
 - `outputScope` 固定 `process-only`，没有系统输出回退。
+- `virtualMicrophoneRenderEndpointId` 与
+  `virtualSpeakerRenderEndpointId` 必须是两个不同的 Active eRender
+  endpoint；空值、同值、失活或默认设备推断全部拒绝。
+- 旧配置中的 `microphoneEndpointId` 只显示显式迁移提示。runtime、
+  supervisor 和启动路径绝不把它当作 v3 fallback；只有用户选好 A/B 并
+  再次确认保存时才迁移。
 - `appKind` 固定 `codex-desktop`。Reader 不能提交路径、命令或 AUMID。
 - 本机应用 allowlist 只在代码内维护：
   - Codex：`OpenAI.Codex_2p2nqsd0c76g0!App`
@@ -152,32 +180,38 @@ Reader 选择。
 GUI 不提供配对码、重新配对、浏览器 endpoint 或设备身份配置。Reader/PWA
 和扩展页面都连接代码内固定的
 `wss://bwicarus-2.taile44d0c.ts.net/reader-computer-voice/v1`，先发送
-`protocolVersion: 2` 的 HELLO，再由电话按钮发送 START。浏览器不生成、
+`protocolVersion: 3` 的 HELLO，再由电话按钮发送 START。浏览器不生成、
 保存或提交 ECDSA 密钥、设备 token 或 bearer token。
 
 为支持扩展运行在任意网页，实验模式允许规范的 HTTP(S) Origin，而不只允许
 Reader 域名。任何知道固定 WSS 的已访问页面都可能尝试 START，这是单用户
 实验模式的明确取舍；C# 仍在 upgrade 前要求 Tailscale Serve 注入的单值
 `Tailscale-User-Login` 精确匹配，并保留唯一连接、固定 localhost、Windows
-本地 opt-in、明确麦克风、Codex 进程树输出、START-only 激活及
+本地 opt-in、明确双虚拟端点、Codex 进程树输出、START-only 激活及
 heartbeat/close fail-closed。
 
-direct 媒体 adapter 还把本次 START 新建的 voice-typist 绑定到同一通话生命周期：
+direct v3 的浏览器麦克风帧只写入 A。direct 媒体 adapter 还把本次 START
+新建的 voice-typist 绑定到同一通话生命周期：
 正常挂断、浏览器断开、心跳超时、START 失败、媒体异常和服务退出都会通过固定 launcher
-执行 `Stop`。只有 helper 返回 `started` 且结束时 PID 仍匹配才拥有停止权；
+执行 `Stop`。只有 helper 返回 `started` 且结束时 PID 与 process-start FILETIME
+都仍精确匹配才拥有停止权；
 `already-running` / `raced-running` 不会被桥接器停止。
+bridge-owned typist 也持续核对 bridge owner 的 PID + process-start FILETIME；即使
+C# 进程整体崩溃、无法执行 Stop，它也会自行退出。managed 启动不再受 10 分钟 idle
+误杀；无 owner 的手工启动仍保留 600 秒孤儿兜底。
 
-strict config 中四个旧 pairing 字段暂时保留为 v1 向后兼容字段，当前 GUI
-始终保持为空，direct v2 不读取它们作认证。
+v3 strict config 不包含任何 pairing 字段。旧 `/1`、
+`microphoneEndpointId` 与四个 pairing 字段只用于识别
+`legacy-migration-required`；显式迁移后全部移除，不能进入 runtime。
 
 ## runtime status 合同
 
 C# 原子写
-`reader-computer-voice-direct-runtime-status/1`，字段必须恰好为：
+`reader-computer-voice-direct-runtime-status/2`，字段必须恰好为：
 
 ```text
 contract / serviceInstanceId / pid / state /
-readerConnected / captureActive / updatedAtUtc
+readerConnected / captureActive / lastError / updatedAtUtc
 ```
 
 `serviceInstanceId` 是 UUID N（32 个小写十六进制字符）。在线 state：
@@ -197,6 +231,12 @@ active
 后续动作。C# 已接入当前
 生产 capture 适配器，但 Windows ↔ Reader/PWA 的真实设备 E2E 尚未验收；
 在验收完成前不能把 listener 在线或 mock 通过冒充通话可用。
+
+`lastError` 为 `null` 或严格对象：
+`failureId / code / stage / hresult / atUtc`。桌面窗口只显示安全错误代码、
+阶段和可选 HRESULT，不显示 endpoint ID、origin 或 PCM。双端点配置不完整、
+相同、失活或仍为旧 `microphoneEndpointId` 时，配置不算 ready，listener
+不会启动。
 
 ## 登录后台引导器
 
@@ -285,8 +325,12 @@ BW-Computer-Voice-Bridge.exe --self-test
 覆盖：
 
 - GUI 不出现配对码、重配对或浏览器 endpoint 控件；
+- A/B 均来自 native `--list-direct-render-endpoints` 的 Active eRender
+  清单，必须明确选择且互不相同，无默认回退；
+- 旧 `microphoneEndpointId` 只触发显式迁移提示，不能静默启动；
+- runtime status v2 严格校验 `lastError`，UI 不泄露 endpoint；
 - offline/stale/PID 不匹配不能显示 online 或 Reader connected；
-- direct config 严格字段、实验单用户 v2、固定 Tailscale 登录身份且无
+- direct config 严格字段、实验单用户 v3、固定 Tailscale 登录身份且无
   浏览器长期 token；
 - 无 Chrome/CDP/WebSocket 运行依赖；
 - START/STOP 只经过注入 runner 且使用严格路径；

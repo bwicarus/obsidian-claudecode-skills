@@ -15,6 +15,9 @@ internal static class ProcessLoopbackInterop
     internal static readonly Guid IidIAudioCaptureClient =
         new("C8ADBD64-E71E-48A0-A4DE-185C395CD317");
 
+    internal static readonly Guid IidIAudioRenderClient =
+        new("F294ACFC-3146-4483-A7BF-ADDCA7C260E2");
+
     internal const ushort VariantTypeBlob = 65; // VT_BLOB
 
     internal const int Succeeded = 0;
@@ -133,6 +136,7 @@ internal enum AudioClientStreamFlags : uint
 {
     Loopback = 0x0002_0000,
     EventCallback = 0x0004_0000,
+    SrcDefaultQuality = 0x0800_0000,
     AutoConvertPcm = 0x8000_0000,
 }
 
@@ -239,4 +243,19 @@ internal interface IAudioCaptureClient
 
     [PreserveSig]
     int GetNextPacketSize(out uint nextPacketSize);
+}
+
+// GetBuffer and ReleaseBuffer are paired on the dedicated virtual-microphone
+// render thread.  Keeping this vtable here beside IAudioClient avoids a NuGet
+// audio wrapper and makes the exact endpoint/thread ownership auditable.
+[ComImport]
+[Guid("F294ACFC-3146-4483-A7BF-ADDCA7C260E2")]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface IAudioRenderClient
+{
+    [PreserveSig]
+    int GetBuffer(uint requestedFrames, out nint data);
+
+    [PreserveSig]
+    int ReleaseBuffer(uint writtenFrames, uint flags);
 }

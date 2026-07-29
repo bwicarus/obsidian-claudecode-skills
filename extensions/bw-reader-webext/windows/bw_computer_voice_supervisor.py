@@ -1,13 +1,15 @@
 """Fail-closed Windows control core for the BW computer-voice bridge.
 
-This module is deliberately not a daemon and opens no listening socket.  A
-future paired outbound transport may pass one authenticated command to
-``CombinedVoiceStartCoordinator``.  Server data can never choose a local path,
+This module is deliberately not a daemon and opens no listening socket.  The
+direct-v3 local host may pass one authenticated command to
+``CombinedVoiceStartCoordinator``.  Remote data can never choose a local path,
 PowerShell action, process, or shortcut.
 
-The existing voice-typist remains an independent component.  This supervisor
-only uses its public ``Status`` and ``Start`` launcher actions.  It never calls
-Stop/Pause/Resume/EStop/ClearStop and never edits the typist cursor or config.
+The packaged voice-typist remains an independently verified component.  This
+supervisor only uses its public ``Status`` and ``Start`` launcher actions.
+The sibling helper may call ``Stop`` solely for the exact PID lease that this
+bridge owns; neither module pauses, resumes, clears emergency stop, or edits
+the typist cursor or config.
 """
 from __future__ import annotations
 
@@ -27,11 +29,12 @@ CONTRACT = "reader-computer-voice-supervisor/1"
 LOCAL_CONFIG_CONTRACT = "reader-computer-voice-local-config/1"
 BRIDGE_COMMAND_CONTRACT = "reader-computer-voice-bridge/1"
 START_ACTION = "start-computer-voice"
-DEFAULT_TYPING_LAUNCHER = Path(
-    r"C:\Users\bwica\bw-reader-context\reader-bridge\voice-typist-launcher.ps1"
-)
-DEFAULT_TYPING_SCRIPT = Path(
-    r"C:\Users\bwica\bw-reader-context\reader-bridge\voice_typist.py"
+INSTALL_ROOT = Path(__file__).resolve().parent
+TYPIST_RUNTIME_ROOT = INSTALL_ROOT / "typist-runtime"
+DEFAULT_TYPING_LAUNCHER = TYPIST_RUNTIME_ROOT / "voice-typist-launcher.ps1"
+DEFAULT_TYPING_SCRIPT = TYPIST_RUNTIME_ROOT / "voice_typist.py"
+DEFAULT_TYPING_LAUNCHER_TOKEN = PureWindowsPath(
+    "typist-runtime/voice-typist-launcher.ps1"
 )
 _ALLOWED_LAUNCHER_ACTIONS = frozenset({"Status", "Start"})
 _SAFE_COMMAND_ID = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
@@ -56,8 +59,11 @@ class TypistProcess:
 class TypistState:
     running: bool
     pid: int | None
+    process_start_file_time_utc: int | None
     paused: bool
     emergency_stop: bool
+    owner_pid: int | None = None
+    owner_start_file_time_utc: int | None = None
 
 
 class CaptureAdapter(Protocol):
@@ -117,14 +123,17 @@ class LocalBridgeConfig:
                 "BW_COMPUTER_VOICE_CONFIG_INVALID",
                 "本地目标应用无效",
             )
-        launcher = Path(str(value.get("companionLauncher") or ""))
-        if str(PureWindowsPath(launcher)).casefold() != str(
-            PureWindowsPath(DEFAULT_TYPING_LAUNCHER)
+        launcher_token = PureWindowsPath(
+            str(value.get("companionLauncher") or "")
+        )
+        if str(launcher_token).casefold() != str(
+            DEFAULT_TYPING_LAUNCHER_TOKEN
         ).casefold():
             raise SupervisorError(
                 "BW_COMPUTER_VOICE_CONFIG_INVALID",
-                "voice-typist launcher 必须使用固定本地路径",
+                "voice-typist launcher 必须使用固定相对路径",
             )
+        launcher = DEFAULT_TYPING_LAUNCHER
         return cls(
             local_opt_in=value["localOptIn"],
             voice_start_shortcut=parse_shortcut(value.get("voiceStartShortcut")),
@@ -292,7 +301,27 @@ class VoiceTypistLauncher:
         self._process_probe = process_probe
         self._session_id_provider = session_id_provider
 
-    def ensure_running(self) -> dict[str, Any]:
+    def ensure_running(
+        self,
+        owner_pid: int | None = None,
+        owner_start_file_time_utc: int | None = None,
+    ) -> dict[str, Any]:
+        if (owner_pid is None) != (owner_start_file_time_utc is None):
+            raise SupervisorError(
+                "BW_COMPUTER_VOICE_TYPIST_OWNER_INVALID",
+                "voice-typist owner 代次不完整",
+            )
+        if owner_pid is not None and (
+            isinstance(owner_pid, bool)
+            or owner_pid <= 0
+            or isinstance(owner_start_file_time_utc, bool)
+            or owner_start_file_time_utc is None
+            or owner_start_file_time_utc <= 0
+        ):
+            raise SupervisorError(
+                "BW_COMPUTER_VOICE_TYPIST_OWNER_INVALID",
+                "voice-typist owner 代次无效",
+            )
         before = self.verified_status()
         if before.emergency_stop:
             raise SupervisorError(
@@ -305,14 +334,41 @@ class VoiceTypistLauncher:
                 "voice-typist 已暂停，拒绝自动恢复",
             )
         if before.running:
+            if owner_pid is not None and before.owner_pid is not None:
+                if (
+                    before.owner_pid != owner_pid
+                    or before.owner_start_file_time_utc
+                        != owner_start_file_time_utc
+                ):
+                    raise SupervisorError(
+                        "BW_COMPUTER_VOICE_TYPIST_OWNER_BUSY",
+                        "voice-typist 仍由另一桥接进程代次拥有",
+                    )
+                result = "started"
+            else:
+                result = "already-running"
             return {
                 "contract": CONTRACT,
                 "running": True,
                 "pid": before.pid,
-                "result": "already-running",
+                "processStartFileTimeUtc":
+                    before.process_start_file_time_utc,
+                "result": result,
             }
 
-        started = self._invoke("Start", timeout=20.0)
+        start_arguments: tuple[str, ...] = ()
+        if owner_pid is not None:
+            start_arguments = (
+                "-OwnerPid",
+                str(owner_pid),
+                "-OwnerStartFileTimeUtc",
+                str(owner_start_file_time_utc),
+            )
+        started = self._invoke(
+            "Start",
+            timeout=20.0,
+            arguments=start_arguments,
+        )
         # Even an "already running" launcher error is not trusted by text.  A
         # fresh Status + exact process postcondition is the only success proof.
         after = self.verified_status()
@@ -321,11 +377,26 @@ class VoiceTypistLauncher:
                 "BW_COMPUTER_VOICE_TYPIST_START_FAILED",
                 "voice-typist 启动后置条件未成立",
             )
+        if owner_pid is not None and (
+            after.owner_pid != owner_pid
+            or after.owner_start_file_time_utc
+                != owner_start_file_time_utc
+        ):
+            raise SupervisorError(
+                "BW_COMPUTER_VOICE_TYPIST_OWNER_MISMATCH",
+                "voice-typist 启动后的 owner 代次不匹配",
+            )
         return {
             "contract": CONTRACT,
             "running": True,
             "pid": after.pid,
-            "result": "started" if started.returncode == 0 else "raced-running",
+            "processStartFileTimeUtc":
+                after.process_start_file_time_utc,
+            "result": (
+                "started"
+                if owner_pid is not None or started.returncode == 0
+                else "raced-running"
+            ),
         }
 
     def verified_status(self) -> TypistState:
@@ -336,7 +407,15 @@ class VoiceTypistLauncher:
                 "无法读取 voice-typist 状态",
             )
         status = _last_json_object(completed.stdout, label="voice-typist Status")
-        required = {"running", "pid", "paused", "emergencyStop"}
+        required = {
+            "running",
+            "pid",
+            "processStartFileTimeUtc",
+            "paused",
+            "emergencyStop",
+            "ownerPid",
+            "ownerStartFileTimeUtc",
+        }
         if not required.issubset(status):
             raise SupervisorError(
                 "BW_COMPUTER_VOICE_TYPIST_STATUS_INVALID",
@@ -357,6 +436,35 @@ class VoiceTypistLauncher:
             raise SupervisorError(
                 "BW_COMPUTER_VOICE_TYPIST_STATUS_INVALID",
                 "voice-typist PID 无效",
+            )
+        process_start = status["processStartFileTimeUtc"]
+        if process_start is not None and (
+            isinstance(process_start, bool)
+            or not isinstance(process_start, int)
+            or process_start <= 0
+        ):
+            raise SupervisorError(
+                "BW_COMPUTER_VOICE_TYPIST_STATUS_INVALID",
+                "voice-typist 启动时间无效",
+            )
+        owner_pid = status["ownerPid"]
+        owner_start = status["ownerStartFileTimeUtc"]
+        if (owner_pid is None) != (owner_start is None):
+            raise SupervisorError(
+                "BW_COMPUTER_VOICE_TYPIST_STATUS_INVALID",
+                "voice-typist owner 代次不完整",
+            )
+        if owner_pid is not None and (
+            isinstance(owner_pid, bool)
+            or not isinstance(owner_pid, int)
+            or owner_pid <= 0
+            or isinstance(owner_start, bool)
+            or not isinstance(owner_start, int)
+            or owner_start <= 0
+        ):
+            raise SupervisorError(
+                "BW_COMPUTER_VOICE_TYPIST_STATUS_INVALID",
+                "voice-typist owner 代次无效",
             )
 
         session_id = int(self._session_id_provider())
@@ -386,6 +494,11 @@ class VoiceTypistLauncher:
                 "BW_COMPUTER_VOICE_TYPIST_PID_MISMATCH",
                 "voice-typist PID 文件与真实进程不一致",
             )
+        if running and process_start is None:
+            raise SupervisorError(
+                "BW_COMPUTER_VOICE_TYPIST_STATUS_INVALID",
+                "voice-typist 运行状态缺少启动时间",
+            )
         if not running and process_pid is not None:
             raise SupervisorError(
                 "BW_COMPUTER_VOICE_TYPIST_ORPHAN",
@@ -396,11 +509,28 @@ class VoiceTypistLauncher:
                 "BW_COMPUTER_VOICE_TYPIST_PID_MISMATCH",
                 "voice-typist 停止状态仍携带 PID",
             )
+        if not running and process_start is not None:
+            raise SupervisorError(
+                "BW_COMPUTER_VOICE_TYPIST_STATUS_INVALID",
+                "voice-typist 停止状态仍携带启动时间",
+            )
+        if not running and owner_pid is not None:
+            raise SupervisorError(
+                "BW_COMPUTER_VOICE_TYPIST_STATUS_INVALID",
+                "voice-typist 停止状态仍携带 owner 代次",
+            )
         return TypistState(
             running=running,
             pid=status_pid if running else None,
+            process_start_file_time_utc=(
+                process_start if running else None
+            ),
             paused=bool(status["paused"]),
             emergency_stop=bool(status["emergencyStop"]),
+            owner_pid=owner_pid if running else None,
+            owner_start_file_time_utc=(
+                owner_start if running else None
+            ),
         )
 
     def _invoke(
@@ -408,6 +538,7 @@ class VoiceTypistLauncher:
         action: str,
         *,
         timeout: float,
+        arguments: Sequence[str] = (),
     ) -> subprocess.CompletedProcess[str]:
         if action not in _ALLOWED_LAUNCHER_ACTIONS:
             raise SupervisorError(
@@ -425,6 +556,7 @@ class VoiceTypistLauncher:
                 str(self.launcher_path),
                 "-Action",
                 action,
+                *tuple(arguments),
             ),
             timeout,
         )

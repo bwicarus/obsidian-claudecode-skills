@@ -1,125 +1,220 @@
 # 电脑客户端语音桥接
 
-## 当前架构
+## direct v3 迁移计划（实施中，尚未安装/部署）
 
-电脑语音是单用户实验功能。Reader/PWA 与扩展页面都通过同一份
-`rc-computer-voice.js`；书籍 PWA 与普通网页使用不同的受信传输入口，最终都只连接同一固定
-Windows 地址：
+当前 direct v2 把 Windows 会话中的一个精确麦克风 endpoint 作为输入。RDP 的“远程音频”
+endpoint 会随远程会话建立、断开和重定向策略消失；配置仍引用旧 ID 时，START 会在
+`microphone.get-explicit-device / HRESULT 0x80070490` 失败。这不是进程输出捕获失败，也
+不是 Pi 中继问题。
+
+direct v3 改为固定的双向直连：
+
+```text
+Reader/PWA 或扩展页面的当前麦克风
+    → 固定 Tailnet WSS（48 kHz / mono / s16le / 20 ms）
+    → Windows 桥接器精确写入虚拟线缆 A 的 render endpoint
+    → 虚拟线缆 A 的 recording endpoint
+    → Codex/ChatGPT Voice 选择该固定虚拟麦克风
+
+Codex/ChatGPT 目标进程树输出
+    → Codex/ChatGPT Voice 选择虚拟线缆 B 的固定 render endpoint
+    → Windows process-loopback
+    → 同一 WSS
+    → Reader/PWA 或扩展页面播放
+```
+
+输入和输出必须使用两根彼此独立的虚拟线缆。复用同一根线缆会把网页麦克风与
+Codex/ChatGPT 自己的输出混进同一个 recording endpoint，产生自听或回声。线缆 B 的
+recording 端不参与桥接；它只保证 RDP 断开后目标应用仍有稳定 render stream。Windows
+process-loopback 本身仍按目标进程树捕获，不退回全系统混音。
+
+实现顺序与门禁：
+
+1. direct 协议升级为 v3；新增只允许当前已认证且已 START session 使用的浏览器麦克风二进制
+   上行。固定帧长、方向、session、sequence 和 timestamp 均严格校验，实时队列最多 200 ms，
+   欠载写静音，过载或协议错配 fail closed。
+2. Windows 保留目标进程输出捕获，移除本次会话对物理/RDP 麦克风 capture 的依赖；START
+   必须在发语音快捷键前确认显式虚拟 render endpoint 已打开，STOP、断线或故障统一释放
+   render、process capture、pump 和本次 owned typist。
+3. Reader 仅在真实电话按钮手势中请求当前页面麦克风权限；选择模型、刷新状态、脚本点击和
+   后台重连均不得采音。麦克风 track mute/ended、页面隐藏导致的系统中断和权限拒绝必须显示
+   真实失败并清理，不可偷偷重获权限。
+4. 普通网页仍只能通过扩展 isolated runtime → background 中继；中继只新增固定 1,956-byte
+   上行二进制帧，不开放任意 URL、设备 ID、命令或凭据。
+5. 设备层采用两根成熟的已签名虚拟音频线缆；项目不自研、不测试签名 Windows 驱动，也不把
+   第三方驱动打进安装包。驱动下载、管理员安装、重启、精确 endpoint 选择，以及 Codex 的
+   虚拟麦克风/虚拟扬声器选择属于单独的用户安装验收门；在该门之前只完成代码、无副作用测试
+   与候选构建。
+
+浏览器仍受操作系统/浏览器麦克风权限约束；“免配对、免地址配置”不等于绕过系统隐私授权。
+Pi 继续提供 Reader/PWA、书籍与 outgoing journal 数据；它不代理 Windows WSS、控制消息或
+PCM 媒体。
+
+## v3 固定拓扑
+
+电脑语音是单用户实验功能。书籍 PWA 与普通网页使用不同的受信入口，但最终都只连接代码内
+固定的 Windows 地址：
 
 ```text
 书籍 PWA（精确生产 Origin）
-    ⇅ wss://bwicarus-2.taile44d0c.ts.net/reader-computer-voice/v1
+    ├─ 同源 GET /pdf/api/outgoing/journal
+    └─ wss://bwicarus-2.taile44d0c.ts.net/reader-computer-voice/v1
 
 普通 HTTP(S) 页面
     ⇅ 扩展 isolated content runtime
     ⇅ 固定 chrome.runtime Port
     ⇅ 扩展 background
-    ⇅ wss://bwicarus-2.taile44d0c.ts.net/reader-computer-voice/v1
+    ⇅ 同一个固定 Windows WSS
 
 Windows Tailscale Serve
     ⇅ 127.0.0.1:43128
 Windows C# direct server
+    ├─ 浏览器麦克风 PCM → 虚拟线缆 A
+    ├─ Codex 进程树输出 → Reader 扬声器
+    └─ Reader context → CurrentUserOnly named pipe → voice-typist
 ```
 
-Pi 仍提供 Reader/PWA 和书籍数据，但不参与电脑语音的配对、控制、信令或音频传输。
-旧 Pi `/api/reader/computer-voice/*` 路由、扩展 popup 配对入口和
-offscreen/Native Messaging 媒体链已退出当前路径；保留的 `offscreen.js` 只是惰性
-tombstone，不能读取旧记录、访问 Pi、连接 native host 或启动采音。新的 background
-只做固定 WSS 字节中继，不读配对或账户 storage，也不自行生成 START。
+旧 Pi `/api/reader/computer-voice/*` 路由、popup 配对入口和 offscreen/Native Messaging
+媒体链不在 v3 路径。`offscreen.js` 只是惰性 tombstone；扩展 background 只允许固定
+Windows WSS、固定文本合同和固定长度 PCM，不读取配对记录，也不能由网页指定下游地址。
 
-## 用户流程
+## 两个虚拟音频端点
 
-1. 在 Reader/PWA 或任意已加载扩展的 HTTP(S) 页面选择“电脑客户端”。选择模型、打开设置、
-   刷新状态都不会启动 Windows 应用、采音或发送快捷键。
-2. 页面不生成或输入配对码，不要求填写 endpoint，也不生成、保存浏览器设备身份或长期凭据。
-   页面只使用代码内固定 WSS；扩展和 PWA 的行为相同。
-3. 只有一次 `event.isTrusted === true` 的电话按钮点击才签发五秒、一次性 start lease；
-   顶栏电话同步转发到隐藏电话按钮仍只消费同一 lease。脚本 `.click()`、直接调用
-   `startFromUserGesture()`、过期或重复消费都不能发送 START。通过门禁后，页面发送 direct
-   v2 `HELLO`，随后为该次随机 session 发送 `START`。Windows 可在 START 中按白名单自动
-   拉起 Codex；完全离线、睡眠或尚未安装登录 supervisor 的电脑不能被浏览器凭空唤醒。
-4. Windows 在 START 路径重新检查本机 `localOptIn`、明确选定的麦克风 endpoint、唯一 Codex
-   进程树和 `process-only` 输出范围，再启动两条 PCM 管线。禁止默认麦克风、默认输出和
-   全系统输出回退。
-5. 活跃通话必须持续发送递增 heartbeat；挂断、连接关闭、心跳超时或媒体错误都会停止本次
-   capture、停止本次 START 新建且 PID 仍匹配的 voice-typist，并释放唯一连接。START
-   中途失败和服务退出走同一清理；原本已运行或由别处竞态启动的 typist 不归桥接器停止。
-   状态刷新和重连不能续期 START。
-6. 浏览器若阻止或暂停 AudioContext，下行只保留最新 20 ms，旧帧丢弃且不回放，也不会因
-   原 400 ms 队列上限自动断开 WSS。播放已运行时若合法 PCM 突发令排程超过 400 ms，则丢弃
-   已排队 source 并从当前时刻重建排程，同样不关闭连接。用户再次真实点击电话按钮只恢复
-   当前通话的声音，不发送第二次 START。
+- `virtualMicrophoneRenderEndpointId` 是 A 的 Active `eRender` 端。桥接器把 Reader 网页
+  麦克风写入 A；Codex/ChatGPT Voice 一次性选择 A 的 recording 端作为麦克风。
+- `virtualSpeakerRenderEndpointId` 是 B 的 Active `eRender` 端。Codex/ChatGPT 在 Windows
+  音量混合器中一次性把应用输出选择为 B；桥接器仍按目标进程树做 process-loopback，不读取
+  B 的 recording 端。
+- A、B 必须非空、Active、精确匹配且互不相同。不存在 first/default fallback，不修改系统
+  默认输入或输出，也不退回全系统混音。
+- B 处于 Active 只能证明端点可打开，不能证明 Codex 已路由到 B。桥接器另在该精确端点上
+  用公开 Core Audio session API 观察当前 Codex 进程树的 Active session；
+  未出现该正向证据时 STATUS 返回
+  `BW_COMPUTER_VOICE_DIRECT_OUTPUT_ROUTE_UNVERIFIED`。桌面控制面仍只用官方
+  `ms-settings:apps-volume` 打开音量混合器，不修改系统或应用默认路由；最终有声链路仍由
+  人工 E2E 验收。
 
-浏览器侧免配置不等于 Windows 采音边界被取消。麦克风选择和 `localOptIn` 仍只在 Windows
-本地保存；网页不能下发设备 ID、路径、命令、AUMID、任意目标进程或快捷键。
+项目不自研或测试签名音频驱动，也不把第三方驱动打入候选包。驱动下载、管理员安装、可能的
+重启和 endpoint 选择是独立安装门。
 
-## 实验单用户认证边界
+## 用户与生命周期流程
 
-direct v2 不做浏览器配对、公钥签名或 bearer token 认证，但也不再接受任意 HTTP(S) Origin：
+1. 选择“电脑客户端”、打开设置或刷新状态只读配置，不启动应用、不申请麦克风、不发送
+   快捷键。
+2. 只有注册电话按钮的一次真实用户点击才能同步创建/恢复 AudioContext 并申请当前网页
+   麦克风。脚本点击、直接调用、过期 lease、迟到配置响应和第二次取消点击都不能启动。
+3. 浏览器先发送 v3 `HELLO`，再发送随机 session 的 `START`；收到 START 成功前不发送
+   上行 PCM，也不启动 outgoing journal 泵。
+4. 已安装且登录会话中的 supervisor 负责保持 Windows listener 在线。START 可按既有白名单
+   自动拉起 Codex、typist、媒体管线和一次语音快捷键；电脑关机、睡眠、listener 未安装或
+   已停止时，网页不能凭空唤醒 Windows，只能显示离线。
+5. START 在任何快捷键副作用前重新检查 `localOptIn`、A/B 两个精确 render endpoint、
+   `process-only` 输出范围、唯一 session ownership，以及当前用户本地唯一的
+   `realtimeVoice=Ctrl+Shift+C`。该命令由 Codex 注册为 OS-global hotkey，桥不抢占或
+   校验 Windows 前台窗口；只要唯一 packaged-app root 未变化，Electron 子进程增减不应
+   误拒绝 START。
+6. 活跃通话持续发送递增 heartbeat。STOP、断线、心跳超时、启动失败或媒体故障释放 A
+   render、process-loopback、PCM pump、named pipe 和当前 exact PID + process-start
+   FILETIME owned typist。
+   原本由别处运行的 typist 不归桥接器停止。
+   bridge-owned typist 还持续核对 bridge owner 的 PID + process-start FILETIME；
+   C# 整体崩溃或 PID 复用时自行退出。managed 模式禁用 idle 误杀，手工启动仍保留
+   600 秒无活动兜底。
+7. AudioContext 暂停时只保留最新 20 ms 下行帧；合法突发超过 400 ms 排程时丢弃旧排程并
+   从当前时刻恢复，不因播放阻塞自动关闭 WSS。再次真实点击只恢复当前播放，不重复 START。
 
-- 书籍 PWA 只允许精确 `https://bwicarus.taile44d0c.ts.net`；
-- Chrome 只允许本项目固定扩展 ID
-  `chrome-extension://jddhhakcblmihidgdobfkcejjinpigak`；
-- Safari Web Extension 的实际 Origin host 是安装期 UUID，当前只允许 canonical
-  `safari-web-extension://<UUID>`，且禁止端口、路径、userinfo、query 与 fragment。这比
-  任意网页 Origin 窄，但同一 Tailnet 设备上另一个 Safari 扩展仍是单用户实验阶段的剩余边界。
+浏览器麦克风 track mute/ended、权限拒绝和页面退出会清理采音；不会静默重新申请权限。
+桥接 STOP 可证明桥接资源已释放，但目前没有可验证的 Codex Voice“退出”原语，因此不把第二次
+快捷键当作 toggle，也不把桥接停止冒充成 Codex UI 已退出。
 
-普通网页不能直接使用 WSS；共享 DOM 上的脚本点击又不能取得 trusted start lease。扩展
-isolated content runtime 只把固定操作发给 background，background 还会复核扩展自身 sender、
-顶层 frame、canonical HTTP(S) 页面、每标签唯一连接、精确 wrapper schema、64 KiB 文本上限和
-1,956-byte PCM，下游 URL 不可由页面指定。
+## 协议与配置合同
 
-当前仍保留以下边界：
+- WebSocket root contract：`reader-computer-voice-direct/1`；`HELLO.protocolVersion=3`。
+- PCM：48 kHz、mono、s16le、20 ms。浏览器麦克风使用 BWCV track 3，完整帧固定 1,956
+  bytes；只在 Active/current session 接受，实时队列上限 200 ms，欠载写静音，溢出或
+  sequence/session/timestamp 错配 fail closed。
+- Reader context：浏览器从 `reader-outgoing-context/1` journal 读取，只在 START 后串行发送
+  `context`。每条 Windows exact ACK 后才推进 event `seq`；截断批次不能使用 outer cursor
+  跳过事件。context 的网络、schema、gap 或 typist IPC 故障只停止 context 泵，音频继续。
+- 本地 IPC：`\\.\pipe\bw-reader-voice-typist-v1`，C# 为 `CurrentUserOnly` server，typist
+  为 client；4-byte little-endian `uint32` 长度 + 严格 UTF-8 JSON，1..65,536 bytes，
+  单请求/单响应、单 in-flight。IPC contract 为 `reader-voice-typist-ipc/1`。
+- typist 先把事件 stage 为不可消费的 durable queue item，再提交 durable ledger，
+  最后发布为 committed；三步完成后才返回 `accepted|duplicate`，不等待 UI 打字完成。
+  queue/3 同时持久化 exact staging receipt；`duplicate` 只有在 item 仍在，或该
+  session/event/seq 的 receipt 能证明它确实曾进入队列时才可成功，不能只凭 ledger
+  把“从未 stage 的 missing item”误报为已接管。
+  committed item 在 UI submit 前先持久化 `delivery_started`；中途进程退出后标记
+  delivery-uncertain，禁止盲目重发。typist 停止后，launcher 的 `Status` 通过只读
+  `queue-status` 直接检查 durable queue，而不是相信可能过期的 `status.json`；只公开
+  exact session/event/seq，不公开正文或 receipts。停止 typist 并
+  人工核对 transcript 后，固定 launcher 的 `ResolveUncertain` 才能确认已送达并丢弃，
+  或确认未送达并解除重试围栏。session 切换与 UI submit 串行，新 session 激活时清掉
+  旧 session backlog。正常断管的 Win32
+  `BROKEN_PIPE/NO_DATA/PIPE_NOT_CONNECTED` 均按 EOF 收敛。正文反转义单次从左到右：
+  `\\→\`、`\⟦→⟦`、`\⟧→⟧`；未知 `\x`
+  原样保留；末尾孤立 `\` fail closed。不能用链式 replace 的理由是它无法拒绝这个坏输入，
+  不是合法 round-trip 会二次反转义。
+- runtime status：`reader-computer-voice-direct-status/2`，`lastError` 为 `null` 或严格的
+  `failureId/code/stage/hresult/atUtc`；只有后续 START 真正成功才清除最近错误。
+- strict config：`reader-computer-voice-direct-config/3`，只接受固定 12 个键。当前
+  `experimentalSingleUserMode` 必须为 `true`；不存在配对码、公钥或旧 pairing 字段。
+  旧 `/1` + `microphoneEndpointId` 配置只能进入 `legacy-migration-required`，经本地显式
+  迁移后清除，绝不作为运行时 fallback。
 
-- WSS host/path、localhost listener 和 Tailscale Serve 映射均固定，C# 只绑定
-  `127.0.0.1:43128`；
-- Tailscale Serve 注入的 `Tailscale-User-Login` 必须是单值，并与 Windows 配置中的唯一
-  Tailnet 用户精确匹配；缺失、多值或不匹配在 WebSocket upgrade 前拒绝；
-- 同一时刻只允许一条 Reader WebSocket 和一个活跃 session；
-- Windows 必须已经本地 opt-in，麦克风必须明确选定，输出固定为 Codex 进程树；
-- 只有真实电话按钮点击的一次性 lease 产生的 START 可以启动应用、capture 和一次快捷键；
-  HELLO、STATUS、刷新、选择模型以及 synthetic click 均不能；
-- 连接关闭、取消、心跳超时和媒体 pump 故障都 fail closed。
+## 单用户安全边界
 
-关闭 `experimentalSingleUserMode` 会回到严格 Origin/旧 v1 认证兼容路径；当前 Reader 和扩展
-只使用 v2。配置中的旧 pairing 字段仅为向后兼容保留，不是现行用户流程。
+免浏览器配对并不等于接受任意来源：
 
-桥接 STOP 能确定停止两路 capture、PCM pump、本次 owned typist 和 WSS session；截至当前
-Codex 桌面应用没有已接线且可验证的“退出 Voice”自动化 primitive，因此桥接器不会猜测第二次
-快捷键是 toggle。也就是说，桥接资源的停止可验证，但 Codex Voice UI 是否退出仍需用户观察；
-不能把前者冒充成后者。
+- PWA 只允许精确生产 Origin；
+- Chrome 只允许项目固定扩展 Origin；普通网页不能直接选择 WSS URL；
+- Tailscale Serve 注入的单值 `Tailscale-User-Login` 必须与本机配置精确匹配；
+- C# 只绑定 `127.0.0.1:43128`，同一时刻只允许一个 Reader 连接和一个 Active session；
+- 网页不能下发 endpoint ID、路径、命令、AUMID、目标进程或快捷键；
+- `HELLO`、`STATUS`、模型选择、刷新和 synthetic click 都不能产生启动副作用。
+
+`experimentalSingleUserMode=false` 在 v3 中 fail closed；不回落旧 v1 配对协议。
 
 ## 代码入口
 
-- 共享 Reader/扩展入口：`_server_deploy/static/pdf/rc-computer-voice.js`
-- 电话按钮集成：`_server_deploy/static/pdf/rc-voicecall.js`
-- 扩展固定 WSS relay 与旧路径 tombstone：
-  `extensions/bw-reader-webext/manifest.json`、`background.js`、`offscreen.js`
-- Windows direct 协议与媒体：
+- Reader 直连、麦克风上行与 context journal：
+  `_server_deploy/static/pdf/rc-computer-voice.js`
+- 电话按钮与引擎同步：
+  `_server_deploy/static/pdf/rc-voicecall.js`、`rc-assistant.js`
+- 扩展固定 WSS relay：
+  `extensions/bw-reader-webext/background.js`
+- Windows 协议、process-loopback、虚拟麦克风写入与 named pipe：
   `extensions/bw-reader-webext/windows/ComputerVoiceAudio/`
 - Windows 桌面控制面：
   `extensions/bw-reader-webext/windows/computer-voice-desktop/`
+- typist 候选真源：
+  `extensions/bw-reader-webext/windows/typist-runtime/`
+- 可复现候选打包：
+  `extensions/bw-reader-webext/windows/package_computer_voice_direct.py`
 
-## 验证与未完成边界
-
-合同回归直接运行：
+## 验证与尚未完成
 
 ```powershell
 node --test tests/reader_contract/*.test.mjs
+$env:PYTHONUTF8 = "1"
 C:\Users\bwica\AppData\Local\Programs\Python\Python313\python.exe `
   -m unittest discover -s tests -p "test_*.py"
 ```
 
-Windows C# 的 `--describe`、`--self-test` 和
-`--diagnose-direct-audio-no-start` 均不得启动 capture 或发送快捷键。服务在线、合同测试
-通过和无启动诊断通过，都不能单独证明真实双向声音已经可用；最终仍需在真实 Reader/PWA 或
-扩展页面点击电话按钮，分别验证麦克风上行与 Codex 进程输出下行。
+C# 的 `--describe`、`--self-test`、endpoint 枚举、`--probe-direct-output-route` 和无启动
+诊断不得启动 capture、Codex、typist 或快捷键。合同测试、服务在线、A/B Active、Core Audio
+路由证据和无启动诊断通过仍不能证明真实双向声音。
 
-RDP 会把“远程音频”作为只在该会话中存在的虚拟 endpoint，并不等于独占 Core Audio 接口。
-本机 13:54 的 Session 1 为 Active 时，无启动诊断对 process output 与“远程音频”麦克风均
-返回 HRESULT 0；13:58 断开后，同一会话的精确麦克风枚举已变为 0 个 Active。WTS disconnect
-会关闭或失效该会话既有 WASAPI stream：此时新麦克风初始化应失败，而 process-loopback 即使
-仍能初始化，在 Codex 没有活动 render stream 时也只会持续静音。因此实声验收必须在相同
-Session 1 已连接、状态为 Active、远程麦克风与声音重定向均已启用时进行。若目标是断开 RDP
-后只靠 iPad Reader 使用，就必须改选本地活动会话中真实存在的物理麦克风；当前协议不包含
-Reader/iPad 麦克风上行。
+安装、部署与发布事实以协作状态最新登记和现场命令为准。最后证据必须由用户在真实
+Reader/PWA 与扩展页面完成：
+
+1. Windows 控制面选择互不相同的 A/B endpoint 并启用服务；
+2. 音量混合器把 Codex 输出选到 B，Codex Voice 麦克风选到 A recording；
+3. 页面选择 Windows 桥接器并点击电话，确认能自动拉起所需应用；
+4. Reader 麦克风能进 Codex，Codex 输出只回 Reader，物理/RDP 扬声器不发噪音；
+5. Reader context 能经 typist 到达当前会话；挂断后所有 owned 资源停止；
+6. 分别在 PWA 与隔离扩展测试 profile 验证错误状态、再次拨号和 RDP 断开后的稳定性。
+
+由于这是新功能、UI 与交互变更，正式 Reader/PWA 部署前必须完成该人工验收。第三方驱动安装、
+登录 supervisor、替换现有 EXE、提交/推送和生产部署均是后续显式门；不能用旧 v2 的
+RDP endpoint 诊断或无声单元测试冒充 v3 实声验收。

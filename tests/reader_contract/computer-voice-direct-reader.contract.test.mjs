@@ -11,7 +11,7 @@ const SOURCE = fs.readFileSync(
 const ENDPOINT =
   "wss://bwicarus-2.taile44d0c.ts.net/reader-computer-voice/v1";
 const READER_ORIGIN = "https://bwicarus.taile44d0c.ts.net";
-const RELAY_PORT = "BW_COMPUTER_VOICE_DIRECT_V2";
+const RELAY_PORT = "BW_COMPUTER_VOICE_DIRECT_V3";
 const DIRECT_CONTRACT = "reader-computer-voice-direct/1";
 
 function createAudioContextClass(scenario) {
@@ -24,6 +24,9 @@ function createAudioContextClass(scenario) {
       this.destination = {};
       this.started = [];
       this.sourceRecords = [];
+      this.mediaSources = [];
+      this.processors = [];
+      this.gains = [];
       this.closed = false;
       scenario.audioContexts.push(this);
     }
@@ -82,14 +85,74 @@ function createAudioContextClass(scenario) {
         stop() { record.stopped = true; },
       };
     }
+
+    createMediaStreamSource(stream) {
+      const record = {
+        stream,
+        connectedTo: null,
+        disconnected: false,
+      };
+      this.mediaSources.push(record);
+      return {
+        connect(target) { record.connectedTo = target; },
+        disconnect() { record.disconnected = true; },
+      };
+    }
+
+    createGain() {
+      const record = {
+        connectedTo: null,
+        disconnected: false,
+        gain: { value: 1 },
+      };
+      this.gains.push(record);
+      return {
+        gain: record.gain,
+        connect(target) { record.connectedTo = target; },
+        disconnect() { record.disconnected = true; },
+      };
+    }
+
+    createScriptProcessor(bufferSize, inputChannels, outputChannels) {
+      assert.equal(bufferSize, 1024);
+      assert.equal(inputChannels, 1);
+      assert.equal(outputChannels, 1);
+      const record = {
+        onaudioprocess: null,
+        connectedTo: null,
+        disconnected: false,
+        emit(samples) {
+          assert.ok(samples instanceof Float32Array);
+          this.onaudioprocess?.({
+            inputBuffer: {
+              getChannelData(channel) {
+                assert.equal(channel, 0);
+                return samples;
+              },
+            },
+          });
+        },
+      };
+      this.processors.push(record);
+      scenario.scriptProcessors.push(record);
+      return {
+        get onaudioprocess() { return record.onaudioprocess; },
+        set onaudioprocess(value) { record.onaudioprocess = value; },
+        connect(target) { record.connectedTo = target; },
+        disconnect() { record.disconnected = true; },
+      };
+    }
   };
 }
 
 function createServer(scenario) {
   const server = {
     requests: [],
+    binaryFrames: [],
+    timeline: [],
     sockets: [],
     activeSocket: null,
+    deferredStart: null,
   };
 
   const result = (socket, request, payload) => {
@@ -105,6 +168,17 @@ function createServer(scenario) {
     }));
   };
 
+  server.resolveDeferredStart = () => {
+    assert.ok(server.deferredStart, "missing deferred START");
+    const { socket, request } = server.deferredStart;
+    server.deferredStart = null;
+    result(socket, request, {
+      sessionId: request.sessionId,
+      state: "active",
+      media: { hostReady: true, captureActive: true },
+    });
+  };
+
   const failure = (socket, request, error) => {
     queueMicrotask(() => socket.onmessage?.({
       data: JSON.stringify({
@@ -116,7 +190,7 @@ function createServer(scenario) {
         error: {
           code: error.code,
           message: error.message,
-          retryable: false,
+          retryable: error.retryable === true,
         },
       }),
     }));
@@ -128,6 +202,7 @@ function createServer(scenario) {
       this.url = url;
       this.readyState = 0;
       this.binaryType = "";
+      this.bufferedAmount = 0;
       server.sockets.push(this);
       queueMicrotask(() => {
         if (scenario.offline) {
@@ -140,17 +215,33 @@ function createServer(scenario) {
     }
 
     send(serialized) {
+      if (typeof serialized !== "string") {
+        const bytes = serialized instanceof ArrayBuffer
+          ? new Uint8Array(serialized.slice(0))
+          : new Uint8Array(
+            serialized.buffer.slice(
+              serialized.byteOffset,
+              serialized.byteOffset + serialized.byteLength,
+            ),
+          );
+        server.binaryFrames.push(bytes);
+        server.timeline.push({ type: "binary", bytes });
+        return;
+      }
       const request = JSON.parse(serialized);
       server.requests.push(request);
+      server.timeline.push({ type: "text", action: request.type });
       if (request.type === "hello") {
         result(this, request, scenario.helloPayload || {
-          protocolVersion: 2,
+          protocolVersion: 3,
           limits: {
             maxMessageBytes: 65536,
             pcmFrameBytes: 1956,
             pcmQueueLimitMs: 400,
             heartbeatIntervalMs: 5000,
             heartbeatTimeoutMs: 15000,
+            uplinkTrack: 3,
+            uplinkQueueLimitMs: 200,
           },
         });
         return;
@@ -166,6 +257,7 @@ function createServer(scenario) {
           reason: null,
           localOptIn: true,
           media: { hostReady: true, captureActive: false },
+          lastError: scenario.lastError ?? null,
         });
         return;
       }
@@ -187,6 +279,7 @@ function createServer(scenario) {
           return;
         }
         if (scenario.deferStartResult) {
+          server.deferredStart = { socket: this, request };
           return;
         }
         result(this, request, {
@@ -204,6 +297,25 @@ function createServer(scenario) {
           sessionId: request.sessionId,
           sequence: request.sequence,
           state: "active",
+        });
+        return;
+      }
+      if (request.type === "context") {
+        const responder = scenario.contextResponder;
+        if (typeof responder === "function") {
+          responder({
+            request,
+            socket: this,
+            result: (payload) => result(this, request, payload),
+            failure: (error) => failure(this, request, error),
+          });
+          return;
+        }
+        result(this, request, {
+          sessionId: request.sessionId,
+          eventId: request.event.id,
+          seq: request.event.seq,
+          outcome: "accepted",
         });
         return;
       }
@@ -299,6 +411,46 @@ function createRelayRuntime(server, scenario) {
             socket.send(message.data);
             return;
           }
+          if (message.type === "send-binary-base64") {
+            assert.deepEqual(
+              Object.keys(message).sort(),
+              ["bytes", "data", "sequence", "type"],
+            );
+            assert.equal(message.bytes, 1956);
+            assert.equal(Number.isSafeInteger(message.sequence), true);
+            const bytes = Buffer.from(message.data, "base64");
+            assert.equal(bytes.length, message.bytes);
+            assert.equal(
+              new DataView(
+                bytes.buffer,
+                bytes.byteOffset,
+                bytes.byteLength,
+              ).getUint32(24, true),
+              message.sequence,
+            );
+            socket.send(bytes.buffer.slice(
+              bytes.byteOffset,
+              bytes.byteOffset + bytes.byteLength,
+            ));
+            const pendingAck = {
+              emit,
+              sequence: message.sequence,
+              bytes: message.bytes,
+            };
+            scenario.pendingRelayAcks.push(pendingAck);
+            if (scenario.relayAutoAck !== false) {
+              queueMicrotask(() => {
+                const index = scenario.pendingRelayAcks.indexOf(pendingAck);
+                if (index >= 0) scenario.pendingRelayAcks.splice(index, 1);
+                emit({
+                  type: "binary-accepted",
+                  sequence: message.sequence,
+                  bytes: message.bytes,
+                });
+              });
+            }
+            return;
+          }
           if (message.type === "close") {
             assert.deepEqual(Object.keys(message), ["type"]);
             socket?.close();
@@ -379,6 +531,123 @@ function pcmFrame(sessionId, options = {}) {
   return buffer;
 }
 
+function createMicrophoneStream(scenario) {
+  const track = {
+    kind: "audio",
+    readyState: "live",
+    muted: false,
+    stopped: false,
+    onended: null,
+    onmute: null,
+    onunmute: null,
+    stop() {
+      this.stopped = true;
+      this.readyState = "ended";
+    },
+  };
+  const stream = {
+    track,
+    getAudioTracks() { return [track]; },
+    getTracks() { return [track]; },
+  };
+  scenario.microphoneTracks.push(track);
+  scenario.microphoneStreams.push(stream);
+  return stream;
+}
+
+function createNavigator(scenario) {
+  return {
+    audioSession: { type: "playback" },
+    mediaDevices: {
+      getUserMedia(constraints) {
+        scenario.microphoneRequests.push(structuredClone(constraints));
+        const outcome = scenario.microphonePlan.length
+          ? scenario.microphonePlan.shift()
+          : "resolve";
+        if (outcome === "permission-reject") {
+          const error = new Error("permission denied");
+          error.name = "NotAllowedError";
+          return Promise.reject(error);
+        }
+        if (outcome instanceof Error) return Promise.reject(outcome);
+        if (outcome && typeof outcome.then === "function") return outcome;
+        return Promise.resolve(createMicrophoneStream(scenario));
+      },
+    },
+  };
+}
+
+function journalEnvelope({
+  cursor = 0,
+  head = 0,
+  events = [],
+  gap = false,
+  note = "",
+  waited = 0,
+  waitDenied,
+} = {}) {
+  const value = {
+    ok: true,
+    contract: "reader-outgoing-context/1",
+    cursor,
+    head,
+    events,
+    gap,
+    note,
+    waited,
+  };
+  if (waitDenied !== undefined) value.waitDenied = waitDenied;
+  return value;
+}
+
+function journalEvent(seq, type = "focus", extra = {}) {
+  return {
+    v: 1,
+    seq,
+    type,
+    ts: 1750000000 + seq,
+    id: seq.toString(16).padStart(16, "0"),
+    ...extra,
+  };
+}
+
+function jsonResponse(body, ok = true) {
+  return {
+    ok,
+    json() { return Promise.resolve(structuredClone(body)); },
+  };
+}
+
+function createJournalFetch(scenario) {
+  return (url, options) => {
+    const parsed = new URL(url, READER_ORIGIN);
+    const call = {
+      url,
+      since: Number(parsed.searchParams.get("since")),
+      limit: Number(parsed.searchParams.get("limit")),
+      wait: Number(parsed.searchParams.get("wait")),
+      options,
+    };
+    scenario.journalCalls.push(call);
+    if (typeof scenario.journalResponder === "function") {
+      return scenario.journalResponder(call);
+    }
+    if (call.wait === 0) {
+      return Promise.resolve(jsonResponse(journalEnvelope()));
+    }
+    return new Promise((resolve, reject) => {
+      const pending = { call, resolve, reject };
+      scenario.pendingJournalFetches.push(pending);
+      options.signal.addEventListener("abort", () => {
+        scenario.abortedJournalFetches += 1;
+        const error = new Error("aborted");
+        error.name = "AbortError";
+        reject(error);
+      }, { once: true });
+    });
+  };
+}
+
 function createHarness(overrides = {}) {
   const scenario = {
     offline: false,
@@ -391,12 +660,26 @@ function createHarness(overrides = {}) {
     initialAudioState: "suspended",
     resumePlan: [],
     audioContexts: [],
+    microphonePlan: [],
+    microphoneRequests: [],
+    microphoneTracks: [],
+    microphoneStreams: [],
+    scriptProcessors: [],
     origin: READER_ORIGIN,
     extensionRelay: false,
     directWebSocketAttempts: 0,
     deferStatusResult: false,
+    lastError: null,
     relayLifecycle: [],
     relayOverlapAttempts: 0,
+    relayAutoAck: true,
+    pendingRelayAcks: [],
+    journalCalls: [],
+    journalResponder: null,
+    pendingJournalFetches: [],
+    abortedJournalFetches: 0,
+    contextResponder: null,
+    realtimeVoiceAllowed: true,
     ...overrides,
   };
   const server = createServer(scenario);
@@ -439,8 +722,15 @@ function createHarness(overrides = {}) {
   Object.values(phoneButtons).forEach((button) => {
     button.ownerDocument = document;
   });
+  const navigator = createNavigator(scenario);
   const window = {
-    RC: {},
+    RC: {
+      voicecall: {
+        canCaptureComputerVoiceGesture() {
+          return scenario.realtimeVoiceAllowed === true;
+        },
+      },
+    },
     WebSocket: scenario.extensionRelay
       ? class ForbiddenContentScriptWebSocket {
         constructor() {
@@ -450,14 +740,17 @@ function createHarness(overrides = {}) {
       }
       : server.WebSocket,
     AudioContext: createAudioContextClass(scenario),
+    navigator,
     crypto: webcrypto,
     isSecureContext: true,
     location: { origin: scenario.origin },
     setTimeout: scheduleTimeout,
     clearTimeout: cancelTimeout,
     dispatchEvent() {},
+    AbortController,
     document,
   };
+  window.__bwReaderFetch = createJournalFetch(scenario);
   if (scenario.extensionRelay) {
     window.chrome = {
       runtime: createRelayRuntime(server, scenario),
@@ -466,6 +759,7 @@ function createHarness(overrides = {}) {
   const context = vm.createContext({
     window,
     document,
+    navigator,
     URL,
     TextEncoder,
     Uint8Array,
@@ -537,6 +831,7 @@ function phoneClick(harness, {
 }
 
 function startWithTrustedGesture(harness, options) {
+  harness.api.setSelectedEngine("computer_client");
   phoneClick(harness, { trusted: true });
   return harness.api.startFromUserGesture(options);
 }
@@ -552,7 +847,20 @@ async function waitForRequest(harness, type) {
   assert.fail(`timed out waiting for ${type} request`);
 }
 
-test("v2 HELLO 后直接 STATUS，固定 WSS 且不读取浏览器身份", async () => {
+async function waitForCondition(predicate, label, timeoutMs = 2500) {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    if (predicate()) return;
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  assert.fail(`timed out waiting for ${label}`);
+}
+
+function contextRequests(harness) {
+  return harness.server.requests.filter((request) => request.type === "context");
+}
+
+test("v3 HELLO 后直接 STATUS，固定 WSS 且不读取浏览器身份或麦克风", async () => {
   const harness = createHarness();
   const availability = await harness.api.availability();
   assert.equal(availability.state, "idle");
@@ -570,7 +878,8 @@ test("v2 HELLO 后直接 STATUS，固定 WSS 且不读取浏览器身份", async
     Object.keys(harness.server.requests[0]).sort(),
     ["contract", "protocolVersion", "requestId", "type"],
   );
-  assert.equal(harness.server.requests[0].protocolVersion, 2);
+  assert.equal(harness.server.requests[0].protocolVersion, 3);
+  assert.equal(harness.scenario.microphoneRequests.length, 0);
   assert.equal(harness.api.beginPairing, undefined);
   assert.equal(harness.api.forgetIdentity, undefined);
   assert.doesNotMatch(
@@ -587,9 +896,11 @@ test("START 只消费受控电话按钮的真实点击，直接调用、伪同 I
     (error) => error?.code === "BW_COMPUTER_VOICE_GESTURE_REQUIRED",
   );
   assert.equal(direct.scenario.audioContexts.length, 0);
+  assert.equal(direct.scenario.microphoneRequests.length, 0);
   assert.equal(direct.server.sockets.length, 0);
 
   const synthetic = createHarness();
+  synthetic.api.setSelectedEngine("computer_client");
   const untrusted = phoneClick(synthetic, { trusted: false });
   assert.equal(untrusted.prevented, false);
   await assert.rejects(
@@ -597,9 +908,11 @@ test("START 只消费受控电话按钮的真实点击，直接调用、伪同 I
     (error) => error?.code === "BW_COMPUTER_VOICE_GESTURE_REQUIRED",
   );
   assert.equal(synthetic.scenario.audioContexts.length, 0);
+  assert.equal(synthetic.scenario.microphoneRequests.length, 0);
   assert.equal(synthetic.server.sockets.length, 0);
 
   const decoy = createHarness();
+  decoy.api.setSelectedEngine("computer_client");
   const original = decoy.phoneButtons["asst-call"];
   const replacement = {
     ...original,
@@ -620,23 +933,176 @@ test("START 只消费受控电话按钮的真实点击，直接调用、伪同 I
     (error) => error?.code === "BW_COMPUTER_VOICE_GESTURE_REQUIRED",
   );
   assert.equal(decoy.scenario.audioContexts.length, 0);
+  assert.equal(decoy.scenario.microphoneRequests.length, 0);
   assert.equal(decoy.server.sockets.length, 0);
 
   const forwarded = createHarness();
+  forwarded.api.setSelectedEngine("computer_client");
   phoneClick(forwarded, { id: "vc-top-call", trusted: true });
   phoneClick(forwarded, { id: "asst-call", trusted: false });
   const started = await forwarded.api.startFromUserGesture();
   assert.equal(started.ok, true);
+  assert.equal(forwarded.scenario.microphoneRequests.length, 1);
   await forwarded.api.stop("test");
   await assert.rejects(
     forwarded.api.startFromUserGesture(),
     (error) => error?.code === "BW_COMPUTER_VOICE_GESTURE_REQUIRED",
   );
+  assert.equal(forwarded.scenario.microphoneRequests.length, 1);
+});
+
+test("选择模型、STATUS 与非 computer_client 的真实电话点击都不申请麦克风", async () => {
+  const selected = createHarness();
+  assert.equal(selected.api.setSelectedEngine("computer_client"), true);
+  assert.equal(selected.scenario.audioContexts.length, 0);
+  assert.equal(selected.scenario.microphoneRequests.length, 0);
+  const availability = await selected.api.availability();
+  assert.equal(availability.state, "idle");
+  assert.equal(selected.scenario.microphoneRequests.length, 0);
+
+  const otherEngine = createHarness();
+  assert.equal(otherEngine.api.setSelectedEngine("native"), false);
+  phoneClick(otherEngine, { trusted: true });
+  await assert.rejects(
+    otherEngine.api.startFromUserGesture(),
+    (error) => error?.code === "BW_COMPUTER_VOICE_GESTURE_REQUIRED",
+  );
+  assert.equal(otherEngine.scenario.audioContexts.length, 0);
+  assert.equal(otherEngine.scenario.microphoneRequests.length, 0);
+  assert.equal(otherEngine.server.sockets.length, 0);
+});
+
+test("复习模式在捕获阶段阻止电脑桥接申请麦克风", async () => {
+  const harness = createHarness({ realtimeVoiceAllowed: false });
+  harness.api.setSelectedEngine("computer_client");
+  phoneClick(harness, { trusted: true });
+  await assert.rejects(
+    harness.api.startFromUserGesture(),
+    (error) => error?.code === "BW_COMPUTER_VOICE_GESTURE_REQUIRED",
+  );
+  assert.equal(harness.scenario.audioContexts.length, 0);
+  assert.equal(harness.scenario.microphoneRequests.length, 0);
+  assert.equal(harness.server.sockets.length, 0);
+});
+
+test("engine revision 阻止迟到配置把新选择覆写并误触发采音", async () => {
+  const harness = createHarness();
+  const staleRevision = harness.api.reserveSelectedEngineUpdate();
+  const currentRevision = harness.api.reserveSelectedEngineUpdate();
+  assert.ok(currentRevision > staleRevision);
+  assert.equal(
+    harness.api.setSelectedEngine("native", currentRevision),
+    false,
+  );
+  assert.equal(
+    harness.api.setSelectedEngine("computer_client", staleRevision),
+    false,
+    "迟到的旧配置不得恢复 computer_client",
+  );
+  phoneClick(harness, { trusted: true });
+  assert.equal(harness.scenario.microphoneRequests.length, 0);
+
+  const nextRevision = harness.api.reserveSelectedEngineUpdate();
+  assert.equal(
+    harness.api.setSelectedEngine("computer_client", nextRevision),
+    true,
+  );
+  phoneClick(harness, { trusted: true });
+  assert.equal(
+    harness.scenario.microphoneRequests.length,
+    1,
+    "只有当前 revision 的 computer_client 真实点击可申请一次麦克风",
+  );
+  harness.api.cancelPreparedGesture();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.scenario.microphoneTracks[0].stopped, true);
+});
+
+test("设置保存中的未知引擎围栏会立即撤销旧 computer_client 采音资格", async () => {
+  const harness = createHarness();
+  harness.api.setSelectedEngine("computer_client");
+  const revision = harness.api.beginSelectedEngineUpdate();
+  phoneClick(harness, { trusted: true });
+  assert.equal(harness.scenario.microphoneRequests.length, 0);
+
+  assert.equal(
+    harness.api.setSelectedEngine("computer_client", revision),
+    true,
+  );
+  assert.equal(
+    harness.api.isSelectedEngineRevisionCurrent(revision),
+    true,
+  );
+  phoneClick(harness, { trusted: true });
+  assert.equal(harness.scenario.microphoneRequests.length, 1);
+  harness.api.cancelPreparedGesture();
+});
+
+test("配置 fetch 在途时第二次真实电话点击撤销 gesture，迟到 START 不可采音", async () => {
+  const harness = createHarness();
+  harness.api.setSelectedEngine("computer_client");
+  phoneClick(harness, { trusted: true });
+  assert.equal(harness.scenario.microphoneRequests.length, 1);
+  harness.api.setDialPending(true);
+  phoneClick(harness, { trusted: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.scenario.microphoneRequests.length, 1);
+  assert.equal(harness.scenario.microphoneTracks[0].stopped, true);
+  await assert.rejects(
+    harness.api.startFromUserGesture(),
+    (error) => error?.code === "BW_COMPUTER_VOICE_GESTURE_REQUIRED",
+  );
+  assert.equal(harness.server.requests.length, 0);
+  assert.equal(harness.server.sockets.length, 0);
+  harness.api.setDialPending(false);
+});
+
+test("网页麦克风权限拒绝时不发送 HELLO/START，并完整释放播放表面", async () => {
+  const harness = createHarness({
+    microphonePlan: ["permission-reject"],
+  });
+  await assert.rejects(
+    startWithTrustedGesture(harness),
+    (error) => error?.code === "BW_COMPUTER_VOICE_MICROPHONE_PERMISSION",
+  );
+  assert.equal(harness.scenario.microphoneRequests.length, 1);
+  assert.equal(harness.server.sockets.length, 0);
+  assert.equal(harness.server.requests.length, 0);
+  assert.equal(harness.api.isActive(), false);
+  assert.equal(harness.scenario.audioContexts.at(-1).closed, true);
+});
+
+test("STATUS 保留结构化 lastError，非法 HRESULT 或时间 fail closed", async () => {
+  const lastError = {
+    failureId: "failure-123",
+    code: "BW_COMPUTER_VOICE_DIRECT_MEDIA_START_FAILED",
+    stage: "virtual-microphone.render",
+    hresult: "0x80070490",
+    atUtc: "2026-07-29T12:34:56.000Z",
+  };
+  const valid = createHarness({ lastError });
+  const availability = await valid.api.availability();
+  assert.equal(availability.state, "idle");
+  assert.deepEqual(availability.status.lastError, lastError);
+  assert.equal(valid.scenario.microphoneRequests.length, 0);
+
+  for (const invalidLastError of [
+    { ...lastError, hresult: "80070490" },
+    { ...lastError, atUtc: "not-a-time" },
+    { ...lastError, injected: true },
+  ]) {
+    const invalid = createHarness({ lastError: invalidLastError });
+    const result = await invalid.api.availability();
+    assert.equal(result.state, "offline");
+    assert.equal(result.code, "BW_COMPUTER_VOICE_DIRECT_SCHEMA");
+    assert.equal(invalid.scenario.microphoneRequests.length, 0);
+  }
 });
 
 test("真实点击 start lease 五秒过期后不能迟到启动", async () => {
   const timers = createManualTimers();
   const harness = createHarness({ timers });
+  harness.api.setSelectedEngine("computer_client");
   phoneClick(harness, { trusted: true });
   assert.equal(timers.count(5000), 1);
   timers.runOne(5000);
@@ -752,10 +1218,10 @@ test("Windows 离线明确返回 offline，且不回退 Pi 或发送 START", asy
   assert.doesNotMatch(SOURCE, /\/api\/reader\/computer-voice/);
 });
 
-test("旧 v1 或附加认证字段会 fail closed，且不会继续 STATUS", async () => {
+test("旧 v2 或附加认证字段会 fail closed，且不会继续 STATUS", async () => {
   const harness = createHarness({
     helloPayload: {
-      protocolVersion: 1,
+      protocolVersion: 2,
       paired: true,
       limits: {
         maxMessageBytes: 65536,
@@ -763,6 +1229,8 @@ test("旧 v1 或附加认证字段会 fail closed，且不会继续 STATUS", asy
         pcmQueueLimitMs: 400,
         heartbeatIntervalMs: 5000,
         heartbeatTimeoutMs: 15000,
+        uplinkTrack: 3,
+        uplinkQueueLimitMs: 200,
       },
     },
   });
@@ -788,6 +1256,8 @@ test("START 失败完整清 active/AudioContext/WSS，下一次拨号可重试",
   );
   assert.equal(harness.api.isActive(), false);
   assert.equal(harness.scenario.audioContexts.at(-1).closed, true);
+  assert.equal(harness.scenario.microphoneTracks.length, 1);
+  assert.equal(harness.scenario.microphoneTracks[0].stopped, true);
 
   harness.scenario.startError = null;
   const started = await startWithTrustedGesture(harness);
@@ -798,6 +1268,8 @@ test("START 失败完整清 active/AudioContext/WSS，下一次拨号可重试",
     2,
   );
   await harness.api.stop("test");
+  assert.equal(harness.scenario.microphoneTracks.length, 2);
+  assert.equal(harness.scenario.microphoneTracks[1].stopped, true);
 });
 
 test("启动中二次电话点击立即取消 WSS，不等待 START 或排队 STOP", async () => {
@@ -944,6 +1416,166 @@ test("AudioContext 持续 blocked 时只保留最新帧，不会在 400ms 后自
   await harness.api.stop("test");
 });
 
+test("START 确认前麦克风不发帧，确认后只发 1956B BWCV track 3 会话连续 PCM", async () => {
+  const harness = createHarness({ deferStartResult: true });
+  const starting = startWithTrustedGesture(harness);
+  const request = await waitForRequest(harness, "start");
+  assert.equal(harness.scenario.microphoneRequests.length, 1);
+  assert.equal(harness.scenario.scriptProcessors.length, 1);
+
+  const samples = new Float32Array(960);
+  const pattern = [-1, -0.5, 0, 0.5, 1];
+  for (let index = 0; index < samples.length; index += 1) {
+    samples[index] = pattern[index % pattern.length];
+  }
+  harness.scenario.scriptProcessors[0].emit(samples);
+  assert.equal(
+    harness.server.binaryFrames.length,
+    0,
+    "START result 前不得上行任何麦克风 PCM",
+  );
+
+  harness.server.resolveDeferredStart();
+  const started = await starting;
+  assert.equal(started.sessionId, request.sessionId);
+  harness.scenario.scriptProcessors[0].emit(samples);
+  assert.equal(harness.server.binaryFrames.length, 1);
+
+  const frame = harness.server.binaryFrames[0];
+  assert.equal(frame.byteLength, 1956);
+  const view = new DataView(
+    frame.buffer,
+    frame.byteOffset,
+    frame.byteLength,
+  );
+  assert.equal(Buffer.from(frame.subarray(0, 4)).toString("ascii"), "BWCV");
+  assert.equal(view.getUint8(4), 1);
+  assert.equal(view.getUint8(5), 3);
+  assert.equal(view.getUint16(6, true), 0);
+  assert.deepEqual(
+    [...frame.subarray(8, 24)],
+    [...decodeSessionBytes(started.sessionId)],
+  );
+  assert.equal(view.getUint32(24, true), 0);
+  const timestamp =
+    view.getUint32(28, true) +
+    view.getUint32(32, true) * 0x100000000;
+  assert.ok(timestamp > 0);
+  assert.deepEqual(
+    Array.from({ length: pattern.length }, (_, index) =>
+      view.getInt16(36 + index * 2, true)
+    ),
+    [-32768, -16384, 0, 16384, 32767],
+  );
+
+  await harness.api.stop("test");
+  assert.equal(harness.scenario.microphoneTracks.length, 1);
+  assert.equal(harness.scenario.microphoneTracks[0].stopped, true);
+  assert.equal(harness.scenario.scriptProcessors[0].disconnected, true);
+});
+
+test("扩展上行只有一个 credit，ACK 前丢实时帧且不递增 PCM sequence", async () => {
+  const harness = createHarness({
+    origin: "https://arbitrary.example",
+    extensionRelay: true,
+    relayAutoAck: false,
+  });
+  await startWithTrustedGesture(harness);
+  const samples = new Float32Array(960);
+  samples.fill(0.25);
+  const processor = harness.scenario.scriptProcessors[0];
+
+  processor.emit(samples);
+  assert.equal(harness.server.binaryFrames.length, 1);
+  assert.equal(harness.scenario.pendingRelayAcks.length, 1);
+  assert.equal(
+    new DataView(
+      harness.server.binaryFrames[0].buffer,
+      harness.server.binaryFrames[0].byteOffset,
+      harness.server.binaryFrames[0].byteLength,
+    ).getUint32(24, true),
+    0,
+  );
+
+  processor.emit(samples);
+  assert.equal(
+    harness.server.binaryFrames.length,
+    1,
+    "ACK 前后续实时帧不得堆积到 extension Port/WSS",
+  );
+  const binaryMessagesBeforeAck =
+    harness.scenario.relayClientMessages.filter(
+      (message) => message.type === "send-binary-base64",
+    );
+  assert.equal(binaryMessagesBeforeAck.length, 1);
+
+  const ack = harness.scenario.pendingRelayAcks.shift();
+  ack.emit({
+    type: "binary-accepted",
+    sequence: ack.sequence,
+    bytes: ack.bytes,
+  });
+  processor.emit(samples);
+  assert.equal(harness.server.binaryFrames.length, 2);
+  const secondFrame = harness.server.binaryFrames[1];
+  assert.equal(
+    new DataView(
+      secondFrame.buffer,
+      secondFrame.byteOffset,
+      secondFrame.byteLength,
+    ).getUint32(24, true),
+    1,
+    "被 credit 丢弃的帧不得消耗 header sequence",
+  );
+  assert.deepEqual(
+    harness.scenario.relayClientMessages
+      .filter((message) => message.type === "send-binary-base64")
+      .map((message) => message.sequence),
+    [0, 1],
+  );
+  await harness.api.stop("test");
+});
+
+test("扩展上行 ACK sequence 错配立即 fail closed 并释放麦克风", async () => {
+  const harness = createHarness({
+    origin: "https://arbitrary.example",
+    extensionRelay: true,
+    relayAutoAck: false,
+  });
+  await startWithTrustedGesture(harness);
+  harness.scenario.scriptProcessors[0].emit(new Float32Array(960));
+  const ack = harness.scenario.pendingRelayAcks.shift();
+  ack.emit({
+    type: "binary-accepted",
+    sequence: ack.sequence + 1,
+    bytes: ack.bytes,
+  });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(harness.api.isActive(), false);
+  assert.equal(harness.scenario.microphoneTracks[0].stopped, true);
+  assert.equal(
+    harness.scenario.relayLifecycle.includes("port-disconnect"),
+    true,
+  );
+});
+
+test("直连 WSS 缓冲恰好 10 帧可发送，第 11 帧 fail closed 并清麦克风", async () => {
+  const harness = createHarness();
+  await startWithTrustedGesture(harness);
+  const samples = new Float32Array(960);
+  const socket = harness.server.activeSocket;
+  socket.bufferedAmount = 9 * 1956;
+  harness.scenario.scriptProcessors[0].emit(samples);
+  assert.equal(harness.server.binaryFrames.length, 1);
+  assert.equal(harness.api.isActive(), true);
+
+  socket.bufferedAmount = 10 * 1956;
+  harness.scenario.scriptProcessors[0].emit(samples);
+  assert.equal(harness.server.binaryFrames.length, 1);
+  assert.equal(harness.api.isActive(), false);
+  assert.equal(harness.scenario.microphoneTracks[0].stopped, true);
+});
+
 test("START 的首个 PCM 可先于 result，STATUS 连接上的 PCM 仍被拒绝", async () => {
   const early = createHarness({
     framesBeforeStartResult: [
@@ -1022,4 +1654,426 @@ test("running AudioContext 批量收到合法 PCM 时有界重同步且不自动
     "a burst must drop stale scheduled sources during resync",
   );
   await harness.api.stop("test");
+});
+
+test("Reader outgoing journal 与 CONTEXT 在 START 成功前绝不启动", async (t) => {
+  const harness = createHarness({ deferStartResult: true });
+  t.after(() => harness.api.stop("cleanup"));
+  harness.api.setSelectedEngine("computer_client");
+  phoneClick(harness);
+  assert.equal(harness.scenario.journalCalls.length, 0);
+  assert.equal(contextRequests(harness).length, 0);
+
+  const pending = harness.api.startFromUserGesture();
+  await waitForRequest(harness, "start");
+  assert.equal(harness.scenario.journalCalls.length, 0);
+  assert.equal(contextRequests(harness).length, 0);
+  harness.server.resolveDeferredStart();
+  await pending;
+  await waitForCondition(
+    () => harness.scenario.journalCalls.length > 0,
+    "bootstrap journal probe",
+  );
+  await harness.api.stop("test");
+});
+
+test("context bootstrap 只从最新 page.context 回放且不把 outer tail 当 ACK", async (t) => {
+  const rows = Array.from({ length: 10 }, (_, index) => {
+    const seq = index + 1;
+    const type = seq === 4 || seq === 8 ? "page.context" : "focus";
+    return journalEvent(seq, type, {
+      payloadSentinel: { seq, untouched: true },
+    });
+  });
+  const harness = createHarness({
+    journalResponder(call) {
+      if (call.wait === 20) return new Promise(() => {});
+      if (call.limit === 1) {
+        return Promise.resolve(jsonResponse(journalEnvelope({
+          cursor: 10,
+          head: 1,
+          events: [rows[0]],
+        })));
+      }
+      return Promise.resolve(jsonResponse(journalEnvelope({
+        cursor: 10,
+        head: 1,
+        events: rows,
+      })));
+    },
+  });
+  t.after(() => harness.api.stop("cleanup"));
+  const started = await startWithTrustedGesture(harness);
+  await waitForCondition(
+    () => contextRequests(harness).length === 3,
+    "latest page context replay",
+  );
+  const sent = contextRequests(harness);
+  assert.deepEqual(sent.map((request) => request.event.seq), [8, 9, 10]);
+  assert.deepEqual(sent.map((request) => request.contextContract), [
+    "reader-outgoing-context/1",
+    "reader-outgoing-context/1",
+    "reader-outgoing-context/1",
+  ]);
+  assert.ok(sent.every((request) => request.sessionId === started.sessionId));
+  assert.deepEqual(sent[0].event, rows[7], "event payload must remain untouched");
+  assert.equal(
+    sent.some((request) => request.event === 10),
+    false,
+    "outer cursor/tail is never submitted as an event",
+  );
+  await waitForCondition(
+    () => harness.scenario.journalCalls.some(
+      (call) => call.wait === 20 && call.since === 10,
+    ),
+    "live poll at final per-event ACK",
+  );
+  await harness.api.stop("test");
+});
+
+test("bootstrap 扫描 bounded 500 条仍无 page.context 时只建立 resume baseline", async (t) => {
+  const rows = Array.from(
+    { length: 500 },
+    (_, index) => journalEvent(index + 1, index % 2 ? "focus" : "drawing"),
+  );
+  const harness = createHarness({
+    journalResponder(call) {
+      if (call.limit === 1) {
+        return Promise.resolve(jsonResponse(journalEnvelope({
+          cursor: 500,
+          head: 1,
+          events: [rows[0]],
+        })));
+      }
+      if (call.wait === 0) {
+        return Promise.resolve(jsonResponse(journalEnvelope({
+          cursor: 500,
+          head: 1,
+          events: rows,
+        })));
+      }
+      return new Promise(() => {});
+    },
+  });
+  t.after(() => harness.api.stop("cleanup"));
+  await startWithTrustedGesture(harness);
+  await waitForCondition(
+    () => harness.scenario.journalCalls.some(
+      (call) => call.wait === 20 && call.since === 500,
+    ),
+    "no-page resume baseline",
+  );
+  assert.equal(contextRequests(harness).length, 0);
+  assert.deepEqual(
+    harness.scenario.journalCalls.slice(0, 3).map(
+      ({ since, limit, wait }) => ({ since, limit, wait }),
+    ),
+    [
+      { since: 0, limit: 1, wait: 0 },
+      { since: 0, limit: 500, wait: 0 },
+      { since: 500, limit: 32, wait: 20 },
+    ],
+  );
+  await harness.api.stop("test");
+});
+
+test("bootstrap 使用冻结 tail，不能被并发追加的 outer cursor 跳过", async (t) => {
+  const oldRows = Array.from(
+    { length: 500 },
+    (_, index) => journalEvent(index + 1, index % 2 ? "focus" : "drawing"),
+  );
+  const appended = journalEvent(501, "page.context", {
+    payloadSentinel: { appended: true },
+  });
+  const harness = createHarness({
+    journalResponder(call) {
+      if (call.limit === 1) {
+        return Promise.resolve(jsonResponse(journalEnvelope({
+          cursor: 500,
+          head: 1,
+          events: [oldRows[0]],
+        })));
+      }
+      if (call.wait === 0) {
+        return Promise.resolve(jsonResponse(journalEnvelope({
+          cursor: 501,
+          head: 1,
+          events: oldRows,
+        })));
+      }
+      if (call.since === 500) {
+        return Promise.resolve(jsonResponse(journalEnvelope({
+          cursor: 501,
+          head: 1,
+          events: [appended],
+        })));
+      }
+      return new Promise(() => {});
+    },
+  });
+  t.after(() => harness.api.stop("cleanup"));
+  await startWithTrustedGesture(harness);
+  await waitForCondition(
+    () => contextRequests(harness).length === 1,
+    "appended page.context must remain visible after frozen bootstrap",
+  );
+  assert.equal(contextRequests(harness)[0].event.seq, 501);
+  assert.ok(
+    harness.scenario.journalCalls.some(
+      (call) => call.wait === 20 && call.since === 500,
+    ),
+  );
+  await harness.api.stop("test");
+});
+
+test("context ACK 每条推进，截断 live batch 不会跳到 outer cursor", async (t) => {
+  const first = Array.from(
+    { length: 32 },
+    (_, index) => journalEvent(index + 1),
+  );
+  const second = Array.from(
+    { length: 8 },
+    (_, index) => journalEvent(index + 33),
+  );
+  const harness = createHarness({
+    journalResponder(call) {
+      if (call.wait === 0) {
+        return Promise.resolve(jsonResponse(journalEnvelope()));
+      }
+      if (call.since === 0) {
+        return Promise.resolve(jsonResponse(journalEnvelope({
+          cursor: 40,
+          head: 1,
+          events: first,
+        })));
+      }
+      if (call.since === 32) {
+        return Promise.resolve(jsonResponse(journalEnvelope({
+          cursor: 40,
+          head: 1,
+          events: second,
+        })));
+      }
+      return new Promise(() => {});
+    },
+  });
+  t.after(() => harness.api.stop("cleanup"));
+  await startWithTrustedGesture(harness);
+  await waitForCondition(
+    () => contextRequests(harness).length === 40,
+    "all truncated batches",
+  );
+  assert.deepEqual(
+    contextRequests(harness).map((request) => request.event.seq),
+    Array.from({ length: 40 }, (_, index) => index + 1),
+  );
+  assert.ok(harness.scenario.journalCalls.some(
+    (call) => call.wait === 20 && call.since === 32,
+  ));
+  await waitForCondition(
+    () => harness.scenario.journalCalls.some(
+      (call) => call.wait === 20 && call.since === 40,
+    ),
+    "final per-event ACK cursor",
+  );
+  await harness.api.stop("test");
+});
+
+test("retryable CONTEXT 失败保留同一 event，成功 ACK 后才推进", async (t) => {
+  let attempts = 0;
+  const event = journalEvent(1, "command", { command: "nav.goto" });
+  const harness = createHarness({
+    journalResponder(call) {
+      if (call.wait === 0) {
+        return Promise.resolve(jsonResponse(journalEnvelope()));
+      }
+      if (call.since === 0) {
+        return Promise.resolve(jsonResponse(journalEnvelope({
+          cursor: 1,
+          head: 1,
+          events: [event],
+        })));
+      }
+      return new Promise(() => {});
+    },
+    contextResponder({ request, result, failure }) {
+      attempts += 1;
+      if (attempts === 1) {
+        failure({
+          code: "context_ipc_busy",
+          message: "busy",
+          retryable: true,
+        });
+        return;
+      }
+      result({
+        sessionId: request.sessionId,
+        eventId: request.event.id,
+        seq: request.event.seq,
+        outcome: "duplicate",
+      });
+    },
+  });
+  t.after(() => harness.api.stop("cleanup"));
+  await startWithTrustedGesture(harness);
+  await waitForCondition(
+    () => contextRequests(harness).length === 2,
+    "context retry",
+  );
+  assert.deepEqual(
+    contextRequests(harness).map((request) => request.event),
+    [event, event],
+  );
+  await waitForCondition(
+    () => harness.scenario.journalCalls.some(
+      (call) => call.wait === 20 && call.since === 1,
+    ),
+    "cursor after duplicate ACK",
+  );
+  await harness.api.stop("test");
+});
+
+test("STOP 立即 abort journal，迟到 response 不能复活旧 generation", async (t) => {
+  let lateResolve;
+  const statuses = [];
+  const harness = createHarness({
+    journalResponder(call) {
+      if (call.wait === 0) {
+        return Promise.resolve(jsonResponse(journalEnvelope()));
+      }
+      return new Promise((resolve) => {
+        lateResolve = resolve;
+        call.options.signal.addEventListener("abort", () => {
+          harness.scenario.abortedJournalFetches += 1;
+        }, { once: true });
+      });
+    },
+  });
+  t.after(() => harness.api.stop("cleanup"));
+  harness.api.onStatus((value) => statuses.push(value));
+  await startWithTrustedGesture(harness);
+  await waitForCondition(() => typeof lateResolve === "function", "live journal");
+  await harness.api.stop("test");
+  assert.equal(harness.scenario.abortedJournalFetches, 1);
+  lateResolve(jsonResponse(journalEnvelope({
+    cursor: 1,
+    head: 1,
+    events: [journalEvent(1, "page.context")],
+  })));
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(contextRequests(harness).length, 0);
+  assert.equal(harness.api.isActive(), false);
+  assert.equal(
+    statuses.some((value) => value.state === "warning"),
+    false,
+    "intentional abort is silent",
+  );
+});
+
+test("journal transport TypeError 可重试且不停止音频 generation", async (t) => {
+  let calls = 0;
+  const statuses = [];
+  const harness = createHarness({
+    journalResponder(call) {
+      calls += 1;
+      if (calls === 1) return Promise.reject(new TypeError("network down"));
+      if (call.wait === 0) {
+        return Promise.resolve(jsonResponse(journalEnvelope()));
+      }
+      return new Promise(() => {});
+    },
+  });
+  t.after(() => harness.api.stop("cleanup"));
+  harness.api.onStatus((value) => statuses.push(value));
+  await startWithTrustedGesture(harness);
+  await waitForCondition(() => calls >= 3, "journal transport retry");
+  assert.equal(harness.api.isActive(), true);
+  assert.equal(
+    statuses.some((value) => value.state === "warning"),
+    false,
+  );
+  await harness.api.stop("test");
+});
+
+test("context schema 故障只停上下文，PCM 音频仍继续", async (t) => {
+  const statuses = [];
+  const harness = createHarness({
+    journalResponder(call) {
+      if (call.wait === 0) {
+        return Promise.resolve(jsonResponse(journalEnvelope()));
+      }
+      const malformed = journalEnvelope({
+        cursor: 1,
+        head: 1,
+        events: [journalEvent(1)],
+      });
+      delete malformed.note;
+      return Promise.resolve(jsonResponse(malformed));
+    },
+  });
+  t.after(() => harness.api.stop("cleanup"));
+  harness.api.onStatus((value) => statuses.push(value));
+  const started = await startWithTrustedGesture(harness);
+  await waitForCondition(
+    () => statuses.some((value) => value.state === "warning"),
+    "context warning",
+  );
+  assert.equal(harness.api.isActive(), true);
+  assert.equal(
+    harness.server.requests.some((request) => request.type === "stop"),
+    false,
+  );
+  harness.server.activeSocket.emitBinary(pcmFrame(started.sessionId));
+  assert.equal(harness.scenario.audioContexts.at(-1).started.length, 1);
+  await harness.api.stop("test");
+});
+
+test("malformed event 与 steady-state gap 都 fail closed context，不挂音频", async (t) => {
+  const cases = [
+    {
+      name: "malformed event",
+      body: journalEnvelope({
+        cursor: 1,
+        head: 1,
+        events: [{ ...journalEvent(1), id: "NOT-LOWER-HEX" }],
+      }),
+      code: "BW_COMPUTER_VOICE_CONTEXT_SCHEMA",
+    },
+    {
+      name: "steady gap",
+      body: journalEnvelope({
+        cursor: 9,
+        head: 9,
+        events: [journalEvent(9)],
+        gap: true,
+        note: "truncated",
+      }),
+      code: "BW_COMPUTER_VOICE_CONTEXT_GAP",
+    },
+  ];
+  for (const item of cases) {
+    await t.test(item.name, async () => {
+      const statuses = [];
+      const harness = createHarness({
+        journalResponder(call) {
+          if (call.wait === 0) {
+            return Promise.resolve(jsonResponse(journalEnvelope()));
+          }
+          return Promise.resolve(jsonResponse(item.body));
+        },
+      });
+      t.after(() => harness.api.stop("cleanup"));
+      harness.api.onStatus((value) => statuses.push(value));
+      await startWithTrustedGesture(harness);
+      await waitForCondition(
+        () => statuses.some((value) => value.state === "warning"),
+        `${item.name} warning`,
+      );
+      assert.equal(harness.api.isActive(), true);
+      assert.equal(contextRequests(harness).length, 0);
+      const warning = statuses.find((value) => value.state === "warning");
+      assert.equal(warning.code, item.code);
+      await harness.api.stop("test");
+    });
+  }
 });

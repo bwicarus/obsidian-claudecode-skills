@@ -41,7 +41,7 @@ FILES = [
     "rc-toolchip.js",    # 工具流程条(turnCard 依赖)
     "rc-turncard.js",    # 轮次卡容器(text/card/hlcard/tool part)
     "rc-voicectx.js",    # 语音上下文统一注入端口
-    "rc-computer-voice.js", # 电脑客户端桥接器:固定 WSS / direct v2 / PCM 接收
+    "rc-computer-voice.js", # 电脑客户端桥接器:固定 WSS / direct v3 / 双向 PCM
     "rc-voicecall.js",   # 实时语音通话与卡片渲染
     "rc-stickynote.js",  # 原版便签(普通网页复用；PDF 经桥交回阅读器本体)
 ]

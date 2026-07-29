@@ -34,6 +34,35 @@ internal static class Program
                         DirectMicrophoneDiscovery.EnumerateActive(),
                 });
             }
+            if (args is ["--list-direct-render-endpoints"])
+            {
+                return WriteJson(new
+                {
+                    contract =
+                        "reader-computer-voice-render-endpoints/1",
+                    ok = true,
+                    captureStarted = false,
+                    devices = DirectMicrophoneDiscovery
+                        .EnumerateActiveRenderEndpoints(),
+                });
+            }
+            if (
+                args.Length == 3
+                && args[0] == "--probe-direct-output-route"
+                && args[1] == "--config"
+            )
+            {
+                if (!Path.IsPathFullyQualified(args[2]))
+                {
+                    throw new DirectProtocolException(
+                        "BW_COMPUTER_VOICE_DIRECT_CONFIG_PATH_INVALID",
+                        "直连配置必须使用绝对路径");
+                }
+                DirectBridgeConfigStore configStore = new(
+                    Path.GetFullPath(args[2]));
+                return WriteJson(DirectOutputRouteProbe.Run(
+                    configStore.Load()));
+            }
             if (
                 args.Length == 3
                 && args[0] == "--diagnose-direct-audio-no-start"
@@ -71,7 +100,8 @@ internal static class Program
                     configStore,
                     new WindowsDirectAppLauncher(),
                     new WindowsDirectMediaAdapter(
-                        configStore.InstallationRoot));
+                        configStore.InstallationRoot),
+                    new NamedPipeDirectContextAdapter());
                 return await server.RunAsync(CancellationToken.None)
                     .ConfigureAwait(false);
             }
@@ -142,6 +172,8 @@ internal static class Program
                 "--describe",
                 "--self-test",
                 "--list-direct-microphones",
+                "--list-direct-render-endpoints",
+                "--probe-direct-output-route --config <absolute-path>",
                 "--diagnose-direct-audio-no-start --config <absolute-path>",
                 "--direct-serve --config <absolute-path>",
                 "Chrome Native Messaging origin (registered host only)",

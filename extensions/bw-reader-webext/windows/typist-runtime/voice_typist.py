@@ -32,7 +32,6 @@ import argparse
 import ctypes
 import ctypes.wintypes as wt
 import hashlib
-import importlib.util
 import json
 import os
 import re
@@ -40,15 +39,19 @@ import sys
 import threading
 import time
 from collections import deque
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
+
+import typist_ipc as typist_ipc_runtime
 
 INSTALL_DIR = Path(__file__).resolve().parent
 DEFAULT_CONFIG = INSTALL_DIR / "voice-typist.config.json"
 DEFAULT_LOG = INSTALL_DIR / "logs" / "voice-typist.jsonl"
 DEFAULT_STATE_DIR = INSTALL_DIR / "state"
-INJECTOR_PATH = INSTALL_DIR / "reader-context-injector.py"
+QUEUE_CONTRACT = "reader-voice-typist-queue/3"
+QUEUE_RECEIPT_MIN_LIMIT = 1024
+QUEUE_STATUS_CONTRACT = "reader-voice-typist-queue-status/1"
 
 MARKER = "[[READER_SYNC]]"
 MARKER_END = "[[/READER_SYNC]]"
@@ -79,6 +82,7 @@ SW_RESTORE, GA_ROOT = 9, 2
 CF_UNICODETEXT = 13
 GMEM_MOVEABLE = 0x0002
 DWMWA_CLOAKED = 14
+STILL_ACTIVE = 259
 # Marks input this component synthesized, so a future reader of an input log can
 # tell our keystrokes from the user's.
 INPUT_SIGNATURE = 0x52435458  # 'RCTX'
@@ -156,6 +160,20 @@ kernel32.GlobalUnlock.restype = wt.BOOL
 kernel32.GlobalFree.argtypes = [wt.HGLOBAL]
 kernel32.GlobalFree.restype = wt.HGLOBAL
 kernel32.GetCurrentThreadId.restype = wt.DWORD
+kernel32.OpenProcess.argtypes = [wt.DWORD, wt.BOOL, wt.DWORD]
+kernel32.OpenProcess.restype = wt.HANDLE
+kernel32.GetProcessTimes.argtypes = [
+    wt.HANDLE,
+    ctypes.POINTER(wt.FILETIME),
+    ctypes.POINTER(wt.FILETIME),
+    ctypes.POINTER(wt.FILETIME),
+    ctypes.POINTER(wt.FILETIME),
+]
+kernel32.GetProcessTimes.restype = wt.BOOL
+kernel32.GetExitCodeProcess.argtypes = [wt.HANDLE, ctypes.POINTER(wt.DWORD)]
+kernel32.GetExitCodeProcess.restype = wt.BOOL
+kernel32.CloseHandle.argtypes = [wt.HANDLE]
+kernel32.CloseHandle.restype = wt.BOOL
 dwmapi.DwmGetWindowAttribute.argtypes = [wt.HWND, wt.DWORD, ctypes.c_void_p, wt.DWORD]
 
 
@@ -499,6 +517,82 @@ class WindowError(RuntimeError):
         self.reason = reason
 
 
+def process_start_file_time_utc(pid: int) -> Optional[int]:
+    if isinstance(pid, bool) or not isinstance(pid, int) or pid <= 0:
+        return None
+    handle = kernel32.OpenProcess(
+        0x1000,  # PROCESS_QUERY_LIMITED_INFORMATION
+        False,
+        pid,
+    )
+    if not handle:
+        return None
+    try:
+        created = wt.FILETIME()
+        exited = wt.FILETIME()
+        kernel = wt.FILETIME()
+        user = wt.FILETIME()
+        if not kernel32.GetProcessTimes(
+            handle,
+            ctypes.byref(created),
+            ctypes.byref(exited),
+            ctypes.byref(kernel),
+            ctypes.byref(user),
+        ):
+            return None
+        return (
+            int(created.dwHighDateTime) << 32
+        ) | int(created.dwLowDateTime)
+    finally:
+        kernel32.CloseHandle(handle)
+
+
+def process_generation_alive(
+    pid: int,
+    expected_start_file_time_utc: int,
+) -> bool:
+    if (
+        isinstance(pid, bool)
+        or not isinstance(pid, int)
+        or pid <= 0
+        or isinstance(expected_start_file_time_utc, bool)
+        or not isinstance(expected_start_file_time_utc, int)
+        or expected_start_file_time_utc <= 0
+    ):
+        return False
+    handle = kernel32.OpenProcess(
+        0x1000,  # PROCESS_QUERY_LIMITED_INFORMATION
+        False,
+        pid,
+    )
+    if not handle:
+        return False
+    try:
+        created = wt.FILETIME()
+        exited = wt.FILETIME()
+        kernel = wt.FILETIME()
+        user = wt.FILETIME()
+        if not kernel32.GetProcessTimes(
+            handle,
+            ctypes.byref(created),
+            ctypes.byref(exited),
+            ctypes.byref(kernel),
+            ctypes.byref(user),
+        ):
+            return False
+        exit_code = wt.DWORD()
+        if not kernel32.GetExitCodeProcess(handle, ctypes.byref(exit_code)):
+            return False
+        if exit_code.value != STILL_ACTIVE:
+            return False
+        actual_start = (
+            int(created.dwHighDateTime) << 32
+        ) | int(created.dwLowDateTime)
+        return actual_start == expected_start_file_time_utc
+    finally:
+        kernel32.CloseHandle(handle)
+
+
 def _process_name(pid: int) -> str:
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
@@ -834,6 +928,197 @@ def check_payload(text: str, max_chars: int) -> None:
                                   "payload matched a bulk-geometry pattern")
 
 
+def compact_utf8(text: str, max_bytes: int) -> str:
+    if max_bytes <= 0:
+        return ""
+    encoded = str(text).encode("utf-8")
+    if len(encoded) <= max_bytes:
+        return str(text)
+    return encoded[:max_bytes].decode("utf-8", errors="ignore")
+
+
+def _context_page_label(event: Dict[str, Any]) -> str:
+    page = event.get("page")
+    return f"p{page}" if page not in (None, "") else "p-"
+
+
+def format_context_event(event: Dict[str, Any]) -> str:
+    """Render a validated outgoing-context event without the old Pi injector.
+
+    The IPC payload is already the canonical ``reader-outgoing-context/1``
+    journal row.  Keep only model-useful state and preserve the silent
+    ``[[READER_SYNC]]`` envelope expected by the Reader assistant contract.
+    """
+    if not isinstance(event, dict):
+        raise PayloadRejected("context_schema", "context event must be an object")
+    event_type = event.get("type")
+    event_id = event.get("id")
+    if (
+        event.get("v") != 1
+        or event_type not in {
+            "page.context",
+            "focus",
+            "drawing",
+            "command",
+            "command-failed",
+        }
+        or not isinstance(event_id, str)
+        or not event_id
+    ):
+        raise PayloadRejected("context_schema", "context event shape is invalid")
+    version = compact_utf8(event_id, 12)
+    page_label = _context_page_label(event)
+
+    if event_type == "page.context":
+        if event.get("stable") is False:
+            raise PayloadRejected(
+                "context_unstable",
+                "unstable page.context cannot be handed to Voice",
+            )
+        context = event.get("page_context")
+        if not isinstance(context, dict):
+            raise PayloadRejected(
+                "context_schema",
+                "page.context is missing page_context",
+            )
+        reason = compact_utf8(str(context.get("reason") or "dwell"), 24)
+        title = compact_utf8(
+            str(event.get("title") or event.get("book_id") or event.get("file") or "-"),
+            160,
+        )
+        visual = context.get("visual")
+        visual = visual if isinstance(visual, dict) else {}
+        marks: list[str] = []
+        if visual.get("page_image"):
+            marks.append(
+                f"img={compact_utf8(str(visual['page_image']), 320)}")
+        if visual.get("has_ink"):
+            marks.append("ink=1")
+        head = (
+            f"PAGE | id={version} | {page_label} | "
+            f"why={reason} | book={title}"
+        )
+        if marks:
+            head += " | " + " ".join(marks)
+        lines = [head]
+        selection = str(context.get("selection") or "").strip()
+        if selection:
+            lines.append(f"SELECTED | {compact_utf8(selection, 800)}")
+        encoded_text = str(context.get("text") or "").strip()
+        if encoded_text:
+            text = typist_ipc_runtime.unescape_annotated_text(encoded_text)
+            lines.append("TEXT (truncated):" if context.get("truncated") else "TEXT:")
+            lines.append(compact_utf8(text, 6000))
+        else:
+            missing = compact_utf8(
+                str(context.get("fallback_reason") or "unknown"),
+                240,
+            )
+            lines.append(f"TEXT | none | why_missing={missing}")
+        body = "\n".join(lines)
+    elif event_type == "focus":
+        action = event.get("action")
+        if action == "cancel":
+            cancelled = event.get("cancelledObject")
+            cancelled = cancelled if isinstance(cancelled, dict) else {}
+            reference = cancelled.get("ref")
+            reference = reference if isinstance(reference, dict) else {}
+            selection_id = compact_utf8(
+                str(reference.get("id") or event_id),
+                12,
+            )
+            body = f"CLEAR | sid={selection_id} | {page_label} | v{version}"
+        elif action in {"set", "replace"}:
+            kind = str(event.get("kind") or "unknown").upper()
+            reference = event.get("ref")
+            reference = reference if isinstance(reference, dict) else {}
+            selection_id = compact_utf8(
+                str(reference.get("id") or reference.get("cid") or event_id),
+                12,
+            )
+            readable = (
+                reference.get("text")
+                or reference.get("brief")
+                or reference.get("summary")
+                or reference.get("label")
+                or reference.get("title")
+            )
+            if readable:
+                body = (
+                    f"{kind} | sid={selection_id} | {page_label} | "
+                    f"v{version} | {compact_utf8(str(readable), 1200)}"
+                )
+            else:
+                locator = (
+                    reference.get("id")
+                    or reference.get("cid")
+                    or reference.get("file")
+                    or "-"
+                )
+                body = (
+                    f"{kind} | sid={selection_id} | {page_label} | "
+                    f"v{version} | ref={compact_utf8(str(locator), 160)}"
+                )
+        else:
+            raise PayloadRejected(
+                "context_schema",
+                "focus action must be set, replace or cancel",
+            )
+    elif event_type == "drawing":
+        state = event.get("state")
+        if state == "pending":
+            body = (
+                f"DRAWING_PENDING | {page_label} | v{version} | "
+                "ref=-"
+            )
+        elif state == "stable":
+            reference = event.get("ref")
+            if not isinstance(reference, dict):
+                raise PayloadRejected(
+                    "context_schema",
+                    "stable drawing requires a reference",
+                )
+            revision = compact_utf8(
+                str(event.get("drawingRevision") or version),
+                40,
+            )
+            locator = (
+                reference.get("id")
+                or reference.get("cid")
+                or reference.get("label")
+                or reference.get("file")
+                or "-"
+            )
+            body = (
+                f"DRAWING | id={revision} | {page_label} | "
+                f"v{version} | ref={compact_utf8(str(locator), 160)}"
+            )
+        else:
+            raise PayloadRejected(
+                "context_schema",
+                "drawing state must be pending or stable",
+            )
+    elif event_type == "command-failed":
+        detail = compact_utf8(str(event.get("error") or ""), 320)
+        command_id = compact_utf8(
+            str(event.get("commandId") or event_id),
+            40,
+        )
+        body = (
+            f"COMMAND_FAILED | id={command_id} | {page_label} | "
+            f"{detail}"
+        )
+    else:
+        if event.get("emitsEvent") is not False or event.get("ok") is not True:
+            raise PayloadRejected(
+                "context_schema",
+                "command event must be an independent silent success",
+            )
+        return ""                              # 独立成功按 Reader 合同完全静默
+
+    return f"{MARKER}\n{body}\n{MARKER_END}"
+
+
 # --------------------------------------------------------------------------
 # The typist
 # --------------------------------------------------------------------------
@@ -919,11 +1204,18 @@ class PendingItem:
     event_id: str
     event_type: str
     source: str
+    session_id: str = ""
+    sequence: int = 0
     attempts: int = 0
     # Events describing the same thing (one selection, one page, one drawing)
     # share a key so only the settled last one is ever submitted.
     coalesce_key: Optional[str] = None
     queued_at: float = 0.0
+    # Direct IPC first stages an item, then marks it committed only after the
+    # event ledger is durable. delivery_started is persisted before any UI
+    # action so an interrupted submit is never retried blindly after restart.
+    committed: bool = True
+    delivery_started: bool = False
 
 
 class VoiceTypist:
@@ -1254,6 +1546,7 @@ class VoiceTypist:
         press("end", settle=0.05)
         if user32.GetForegroundWindow() != window.hwnd:
             raise WindowError("focus_lost", "focus left the target window before submit")
+        self._abort_if_halted()
         press(send_hotkey, settle=0.06)
         self._last_submit = time.time()
 
@@ -1353,13 +1646,41 @@ class VoiceTypist:
 # --------------------------------------------------------------------------
 
 class SubmitQueue:
-    def __init__(self, typist: VoiceTypist, log: AuditLog, cfg: Dict[str, Any]) -> None:
+    def __init__(
+        self,
+        typist: VoiceTypist,
+        log: AuditLog,
+        cfg: Dict[str, Any],
+        *,
+        state_path: Optional[Path] = None,
+    ) -> None:
         self.typist = typist
         self.log = log
         self.max_retries = int(cfg["limits"]["max_retries"])
         self.settle = float(cfg["limits"].get("coalesce_settle_seconds", 1.5))
-        self.items: deque[PendingItem] = deque(maxlen=int(cfg["limits"]["queue_size"]))
+        self.max_size = int(cfg["limits"]["queue_size"])
+        if self.max_size < 1:
+            raise ValueError("limits.queue_size must be positive")
+        self.state_path = Path(state_path) if state_path else None
+        self.items: deque[PendingItem] = deque()
+        # A receipt is durable evidence that the exact event identity reached
+        # this queue before the IPC ledger advanced.  It outlives successful
+        # delivery so a later duplicate may be acknowledged without inventing
+        # a staged item that never existed.
+        self.receipt_limit = max(
+            QUEUE_RECEIPT_MIN_LIMIT,
+            self.max_size * 2,
+        )
+        self.receipts: deque[Tuple[str, str, int]] = deque()
         self.last_result: Optional[SubmitResult] = None
+        self._lock = threading.RLock()
+        # UI submission cannot be cancelled after delivery_started is durable.
+        # Serialize session changes across the complete submit so an old
+        # session cannot keep typing after a new session becomes active.
+        self._delivery_gate = threading.Lock()
+        self._active_session_id: Optional[str] = None
+        self._uncertain_logged: set[Tuple[str, str, int]] = set()
+        self._load()
 
     # Failures that will not improve by trying the same thing again.
     TERMINAL = {"payload_empty", "payload_too_large", "payload_unmarked",
@@ -1373,115 +1694,715 @@ class SubmitQueue:
     HOLD = {"paused", "waiting_for_live_turn", "submit_rejected_by_app",
             "window_not_found", "window_not_foreground", "composer_not_focused"}
 
+    @staticmethod
+    def _record(item: PendingItem) -> Dict[str, Any]:
+        return {
+            "text": item.text,
+            "eventId": item.event_id,
+            "eventType": item.event_type,
+            "source": item.source,
+            "sessionId": item.session_id,
+            "seq": item.sequence,
+            "attempts": item.attempts,
+            "coalesceKey": item.coalesce_key,
+            "queuedAt": item.queued_at,
+            "committed": item.committed,
+            "deliveryStarted": item.delivery_started,
+        }
+
+    @classmethod
+    def _from_record(cls, value: Any) -> PendingItem:
+        if not isinstance(value, dict) or set(value) != {
+            "text",
+            "eventId",
+            "eventType",
+            "source",
+            "sessionId",
+            "seq",
+            "attempts",
+            "coalesceKey",
+            "queuedAt",
+            "committed",
+            "deliveryStarted",
+        }:
+            raise ValueError("durable queue item shape is invalid")
+        if (
+            not isinstance(value["text"], str)
+            or not isinstance(value["eventId"], str)
+            or not value["eventId"]
+            or not isinstance(value["eventType"], str)
+            or not isinstance(value["source"], str)
+            or not isinstance(value["sessionId"], str)
+            or not value["sessionId"]
+            or not isinstance(value["seq"], int)
+            or isinstance(value["seq"], bool)
+            or value["seq"] < 1
+            or not isinstance(value["attempts"], int)
+            or isinstance(value["attempts"], bool)
+            or value["attempts"] < 0
+            or (
+                value["coalesceKey"] is not None
+                and not isinstance(value["coalesceKey"], str)
+            )
+            or not isinstance(value["queuedAt"], (int, float))
+            or isinstance(value["queuedAt"], bool)
+            or not isinstance(value["committed"], bool)
+            or not isinstance(value["deliveryStarted"], bool)
+            or (value["deliveryStarted"] and not value["committed"])
+        ):
+            raise ValueError("durable queue item value is invalid")
+        return PendingItem(
+            text=value["text"],
+            event_id=value["eventId"],
+            event_type=value["eventType"],
+            source=value["source"],
+            session_id=value["sessionId"],
+            sequence=value["seq"],
+            attempts=value["attempts"],
+            coalesce_key=value["coalesceKey"],
+            queued_at=float(value["queuedAt"]),
+            committed=value["committed"],
+            delivery_started=value["deliveryStarted"],
+        )
+
+    @staticmethod
+    def _receipt_record(
+        identity: Tuple[str, str, int],
+    ) -> Dict[str, Any]:
+        session_id, event_id, sequence = identity
+        return {
+            "sessionId": session_id,
+            "eventId": event_id,
+            "seq": sequence,
+        }
+
+    @staticmethod
+    def _receipt_from_record(value: Any) -> Tuple[str, str, int]:
+        if (
+            not isinstance(value, dict)
+            or set(value) != {"sessionId", "eventId", "seq"}
+            or not isinstance(value["sessionId"], str)
+            or not value["sessionId"]
+            or not isinstance(value["eventId"], str)
+            or not value["eventId"]
+            or not isinstance(value["seq"], int)
+            or isinstance(value["seq"], bool)
+            or value["seq"] < 1
+        ):
+            raise ValueError("durable queue receipt is invalid")
+        return (
+            value["sessionId"],
+            value["eventId"],
+            value["seq"],
+        )
+
+    def _trim_receipts(
+        self,
+        receipts: List[Tuple[str, str, int]],
+        items: List[PendingItem],
+    ) -> List[Tuple[str, str, int]]:
+        """Bound old proof while never evicting a still-queued identity."""
+        protected = {
+            (item.session_id, item.event_id, item.sequence)
+            for item in items
+        }
+        candidate = list(receipts)
+        while len(candidate) > self.receipt_limit:
+            removable = next(
+                (
+                    index
+                    for index, identity in enumerate(candidate)
+                    if identity not in protected
+                ),
+                None,
+            )
+            if removable is None:
+                raise RuntimeError(
+                    "durable queue receipts cannot be bounded safely")
+            candidate.pop(removable)
+        return candidate
+
+    @classmethod
+    def _read_state(
+        cls,
+        state_path: Path,
+        *,
+        max_size: int,
+        receipt_limit: int,
+    ) -> Tuple[List[PendingItem], List[Tuple[str, str, int]]]:
+        if not state_path.exists():
+            return [], []
+        try:
+            payload = json.loads(state_path.read_text(encoding="utf-8"))
+            if (
+                not isinstance(payload, dict)
+                or set(payload) != {"contract", "items", "receipts"}
+                or payload.get("contract") != QUEUE_CONTRACT
+                or not isinstance(payload.get("items"), list)
+                or len(payload["items"]) > max_size
+                or not isinstance(payload.get("receipts"), list)
+                or len(payload["receipts"]) > receipt_limit
+            ):
+                raise ValueError("durable queue root is invalid")
+            loaded = [cls._from_record(item) for item in payload["items"]]
+            receipts = [
+                cls._receipt_from_record(receipt)
+                for receipt in payload["receipts"]
+            ]
+            identities: set[Tuple[str, str, int]] = set()
+            bindings: Dict[Tuple[str, str], int] = {}
+            delivery_started_count = 0
+            for index, item in enumerate(loaded):
+                identity = (
+                    item.session_id,
+                    item.event_id,
+                    item.sequence,
+                )
+                if identity in identities:
+                    raise ValueError(
+                        "durable queue contains duplicate identities")
+                identities.add(identity)
+                binding = (item.session_id, item.event_id)
+                known = bindings.get(binding)
+                if known is not None and known != item.sequence:
+                    raise ValueError(
+                        "durable queue event id is bound to another seq")
+                bindings[binding] = item.sequence
+                if item.delivery_started:
+                    delivery_started_count += 1
+                    if index != 0:
+                        raise ValueError(
+                            "durable queue delivery_started item is not head")
+            if delivery_started_count > 1:
+                raise ValueError(
+                    "durable queue has multiple delivery_started items")
+            receipt_identities: set[Tuple[str, str, int]] = set()
+            for identity in receipts:
+                if identity in receipt_identities:
+                    raise ValueError(
+                        "durable queue contains duplicate receipts")
+                receipt_identities.add(identity)
+                binding = (identity[0], identity[1])
+                known = bindings.get(binding)
+                if known is not None and known != identity[2]:
+                    raise ValueError(
+                        "durable queue receipt event id is bound to another seq")
+                bindings[binding] = identity[2]
+            if not identities.issubset(receipt_identities):
+                raise ValueError(
+                    "durable queue item is missing its staging receipt")
+        except (OSError, json.JSONDecodeError, ValueError, TypeError) as exc:
+            raise RuntimeError(f"voice-typist durable queue is corrupt: {exc}") from exc
+        return loaded, receipts
+
+    @staticmethod
+    def _status_for_items(items: List[PendingItem]) -> Dict[str, Any]:
+        value: Dict[str, Any] = {
+            "queue_depth": len(items),
+            "queue_blocked_reason": None,
+            "blocked_session_id": None,
+            "blocked_event_id": None,
+            "blocked_sequence": None,
+        }
+        if items and items[0].delivery_started:
+            head = items[0]
+            value.update({
+                "queue_blocked_reason": "delivery_uncertain",
+                "blocked_session_id": head.session_id,
+                "blocked_event_id": head.event_id,
+                "blocked_sequence": head.sequence,
+            })
+        return value
+
+    @classmethod
+    def inspect_status(
+        cls,
+        state_path: Path,
+        *,
+        max_size: int,
+    ) -> Dict[str, Any]:
+        if max_size < 1:
+            raise ValueError("limits.queue_size must be positive")
+        receipt_limit = max(
+            QUEUE_RECEIPT_MIN_LIMIT,
+            max_size * 2,
+        )
+        items, _receipts = cls._read_state(
+            Path(state_path),
+            max_size=max_size,
+            receipt_limit=receipt_limit,
+        )
+        return cls._status_for_items(items)
+
+    def _load(self) -> None:
+        if self.state_path is None:
+            return
+        loaded, receipts = self._read_state(
+            self.state_path,
+            max_size=self.max_size,
+            receipt_limit=self.receipt_limit,
+        )
+        self.items = deque(loaded)
+        self.receipts = deque(receipts)
+
+    def _persist(
+        self,
+        items: List[PendingItem],
+        receipts: Optional[List[Tuple[str, str, int]]] = None,
+    ) -> None:
+        if self.state_path is None:
+            return
+        persisted_receipts = (
+            list(self.receipts)
+            if receipts is None
+            else list(receipts)
+        )
+        self.state_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "contract": QUEUE_CONTRACT,
+            "items": [self._record(item) for item in items],
+            "receipts": [
+                self._receipt_record(identity)
+                for identity in persisted_receipts
+            ],
+        }
+        body = json.dumps(
+            payload,
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        tmp = self.state_path.with_suffix(self.state_path.suffix + ".tmp")
+        try:
+            with tmp.open("wb") as stream:
+                stream.write(body)
+                stream.flush()
+                os.fsync(stream.fileno())
+            os.replace(tmp, self.state_path)
+        except OSError as exc:
+            try:
+                tmp.unlink(missing_ok=True)
+            except OSError:
+                pass
+            raise RuntimeError(
+                f"voice-typist durable queue cannot persist: {exc}") from exc
+
+    def ensure_persisted(self) -> None:
+        """Create the empty queue witness before a silent event may advance."""
+        with self._lock:
+            if self.state_path is None or self.state_path.exists():
+                return
+            self._persist(list(self.items))
+
+    def activate_session(self, session_id: str) -> None:
+        if not session_id:
+            raise RuntimeError("voice-typist active session id is empty")
+        with self._lock:
+            if self._active_session_id == session_id:
+                return
+        with self._delivery_gate:
+            with self._lock:
+                if self._active_session_id == session_id:
+                    return
+                candidate = [
+                    item for item in self.items
+                    if item.session_id == session_id
+                ]
+                removed = len(self.items) - len(candidate)
+                self._persist(candidate)
+                self.items = deque(candidate)
+                previous = self._active_session_id
+                self._active_session_id = session_id
+                self._uncertain_logged.clear()
+                if removed:
+                    self.log.write({
+                        "event": "stale_session_queue_discarded",
+                        "previous_session": previous,
+                        "active_session": session_id,
+                        "discarded": removed,
+                    })
+
     def enqueue(self, item: PendingItem) -> bool:
-        item.queued_at = time.time()
-        # Dragging a selection emits an event per intermediate state.  Each one
-        # has its own event id, so id-based de-duplication cannot collapse them;
-        # only the last, settled state describes what the user actually selected.
-        if item.coalesce_key:
-            for index, queued in enumerate(self.items):
-                if queued.coalesce_key == item.coalesce_key:
-                    self.log.write({"event": "coalesced",
-                                    "superseded_event_id": queued.event_id,
-                                    "by_event_id": item.event_id,
-                                    "key": item.coalesce_key})
-                    self.items[index] = item
+        with self._lock:
+            if (
+                item.committed
+                and item.session_id
+                and self._active_session_id is None
+                and not self.items
+            ):
+                self._active_session_id = item.session_id
+            if (
+                item.session_id
+                and self._active_session_id is not None
+                and item.session_id != self._active_session_id
+            ):
+                raise RuntimeError(
+                    "durable queue item does not match active session")
+            item.queued_at = time.time()
+            for queued in self.items:
+                if (
+                    queued.session_id == item.session_id
+                    and queued.event_id == item.event_id
+                ):
+                    if queued.sequence != item.sequence:
+                        raise RuntimeError(
+                            "durable queue event id is bound to another seq")
+                    identity = (
+                        item.session_id,
+                        item.event_id,
+                        item.sequence,
+                    )
+                    if identity not in self.receipts:
+                        raise RuntimeError(
+                            "durable queue item is missing its staging receipt")
                     return True
-        if len(self.items) == self.items.maxlen:
-            dropped = self.items[0]
-            self.log.write({"event": "queue_overflow", "dropped_event_id": dropped.event_id,
-                            "dropped_type": dropped.event_type})
-        self.items.append(item)
-        return True
-
-    def pump(self) -> Optional[SubmitResult]:
-        if not self.items:
-            return None
-        item = self.items[0]
-        # Hold a coalescing item back until nothing newer has superseded it.
-        if item.coalesce_key:
-            waited = time.time() - item.queued_at
-            if waited < self.settle:
-                return None
-        result = self.typist.submit(item.text, item.event_id, item.event_type,
-                                    item.source)
-        self.last_result = result
-        if result.ok:
-            self.items.popleft()
-            return result
-        if result.outcome in self.HOLD:
-            return result  # keep it queued; the blocker is not ours to fix
-        item.attempts += 1
-        if result.outcome in self.TERMINAL or item.attempts > self.max_retries:
-            self.items.popleft()
-            self.log.write({"event": "dropped", "event_id": item.event_id,
-                            "event_type": item.event_type,
-                            "attempts": item.attempts, "outcome": result.outcome})
-        return result
-
-
-# --------------------------------------------------------------------------
-# Bridge integration: reuse the existing injector's fetch/dedupe/format
-# --------------------------------------------------------------------------
-
-def load_injector(path: Path):
-    spec = importlib.util.spec_from_file_location("reader_context_injector", path)
-    if spec is None or spec.loader is None:
-        raise SystemExit(f"cannot load the reader bridge from {path}")
-    module = importlib.util.module_from_spec(spec)
-    sys.modules["reader_context_injector"] = module
-    spec.loader.exec_module(module)
-    return module
-
-
-def build_bridge(injector, queue: SubmitQueue, log: AuditLog, args) -> Any:
-    """A SessionBridge whose transport is the typist instead of the App Server.
-
-    Subclassing keeps the journal contract, the de-duplication and the exact
-    injection text identical to the proven path -- only the last hop changes.
-    """
-
-    # A selection drag, a page turn and a pen stroke each emit a burst of
-    # events describing one thing.  Everything except a command failure is
-    # therefore collapsed to its latest state before submission; a failure is
-    # always its own message because each one needs its own follow-up.
-    def coalesce_key(event) -> Optional[str]:
-        if event.event_type == "COMMAND_RESULT":
-            return None
-        payload = event.payload
-        book = payload.get("book_id") or payload.get("file") or ""
-        page = payload.get("page")
-        return f"{event.event_type}:{book}:{page}"
-
-    class TypistBridge(injector.SessionBridge):
-        def _inject(self, event, state) -> bool:  # type: ignore[override]
-            key = event.payload.get("event_id")
-            if isinstance(key, str) and state.seen_event(key):
-                log.write({"event": "deduped", "event_id": key,
-                           "event_type": event.event_type})
-                return False
-            text = self._format_injection_text(event)
-            queue.enqueue(PendingItem(text=text, event_id=str(key or ""),
-                                      event_type=event.event_type,
-                                      source=str(event.payload.get("source") or ""),
-                                      coalesce_key=coalesce_key(event)))
-            log.write({"event": "queued", "event_id": key,
-                       "event_type": event.event_type,
-                       "queue_depth": len(queue.items)})
-            if isinstance(key, str):
-                state.remember(key)
+            # Dragging a selection emits an event per intermediate state.  Each
+            # one has its own id, so only the settled last state may coalesce.
+            candidate = list(self.items)
+            identity = (
+                item.session_id,
+                item.event_id,
+                item.sequence,
+            )
+            candidate_receipts = list(self.receipts)
+            for known in candidate_receipts:
+                if (
+                    known[0] == item.session_id
+                    and known[1] == item.event_id
+                    and known[2] != item.sequence
+                ):
+                    raise RuntimeError(
+                        "durable queue event id is bound to another seq")
+            if identity not in candidate_receipts:
+                candidate_receipts.append(identity)
+            if item.coalesce_key:
+                for index, queued in enumerate(candidate):
+                    if queued.coalesce_key == item.coalesce_key:
+                        candidate[index] = item
+                        candidate_receipts = self._trim_receipts(
+                            candidate_receipts,
+                            candidate,
+                        )
+                        self._persist(candidate, candidate_receipts)
+                        self.items = deque(candidate)
+                        self.receipts = deque(candidate_receipts)
+                        self.log.write({
+                            "event": "coalesced",
+                            "superseded_event_id": queued.event_id,
+                            "by_event_id": item.event_id,
+                            "key": item.coalesce_key,
+                        })
+                        return True
+            if len(candidate) >= self.max_size:
+                raise RuntimeError("voice-typist durable queue is full")
+            candidate.append(item)
+            candidate_receipts = self._trim_receipts(
+                candidate_receipts,
+                candidate,
+            )
+            self._persist(
+                candidate,
+                candidate_receipts,
+            )                                   # ACK 前的 durable handoff
+            self.items = deque(candidate)
+            self.receipts = deque(candidate_receipts)
             return True
 
-    return TypistBridge(
-        thread_id=args.thread_id,
-        watch_root=args.watch_root,
-        session_pattern=args.session_pattern,
-        rules_dir=args.rules_local,
-        appserver=None,
-        poll_seconds=args.poll,
-        debounce_seconds=args.page_debounce,
-        log_path=args.bridge_log,
+    def commit(
+        self,
+        session_id: str,
+        event_id: str,
+        sequence: int,
+        outcome: str,
+    ) -> bool:
+        if outcome not in {"accepted", "duplicate"}:
+            raise RuntimeError("durable queue commit outcome is invalid")
+        with self._lock:
+            candidate = list(self.items)
+            for index, item in enumerate(candidate):
+                if (
+                    item.session_id == session_id
+                    and item.event_id == event_id
+                ):
+                    if item.sequence != sequence:
+                        raise RuntimeError(
+                            "durable queue event id is bound to another seq")
+                    if item.committed:
+                        return True
+                    candidate[index] = replace(
+                        item,
+                        committed=True,
+                    )
+                    self._persist(candidate)
+                    self.items = deque(candidate)
+                    return True
+            # A duplicate ACK can arrive after this exact item was already
+            # submitted and durably removed.  The ledger alone is not enough:
+            # require queue-owned evidence that this identity was truly staged.
+            identity = (session_id, event_id, sequence)
+            for known in self.receipts:
+                if (
+                    known[0] == session_id
+                    and known[1] == event_id
+                    and known[2] != sequence
+                ):
+                    raise RuntimeError(
+                        "durable queue event id is bound to another seq")
+            return outcome == "duplicate" and identity in self.receipts
+
+    def pump(self) -> Optional[SubmitResult]:
+        with self._delivery_gate:
+            return self._pump_serialized()
+
+    def _pump_serialized(self) -> Optional[SubmitResult]:
+        with self._lock:
+            if not self.items:
+                return None
+            item = self.items[0]
+            if (
+                not item.committed
+                or (
+                    item.session_id
+                    and item.session_id != self._active_session_id
+                )
+            ):
+                return None
+            identity = (
+                item.session_id,
+                item.event_id,
+                item.sequence,
+            )
+            if item.delivery_started:
+                if identity not in self._uncertain_logged:
+                    self._uncertain_logged.add(identity)
+                    self.log.write({
+                        "event": "delivery_uncertain",
+                        "event_id": item.event_id,
+                        "event_type": item.event_type,
+                        "session": item.session_id,
+                        "seq": item.sequence,
+                        "action": "manual-review-no-auto-retry",
+                    })
+                return None
+            # Hold a coalescing item back until nothing newer superseded it.
+            if item.coalesce_key:
+                waited = time.time() - item.queued_at
+                if waited < self.settle:
+                    return None
+            marked = replace(item, delivery_started=True)
+            candidate = list(self.items)
+            candidate[0] = marked
+            self._persist(candidate)
+            self.items = deque(candidate)
+            item = marked
+        result = self.typist.submit(item.text, item.event_id, item.event_type,
+                                    item.source)
+        with self._lock:
+            self.last_result = result
+            if (
+                not self.items
+                or (
+                    self.items[0].session_id,
+                    self.items[0].event_id,
+                    self.items[0].sequence,
+                )
+                != (item.session_id, item.event_id, item.sequence)
+            ):
+                raise RuntimeError(
+                    "durable queue head changed during delivery")
+            if result.ok:
+                candidate = list(self.items)[1:]
+                self._persist(candidate)
+                self.items = deque(candidate)
+                return result
+            if result.outcome in self.HOLD:
+                candidate = list(self.items)
+                candidate[0] = replace(
+                    item,
+                    delivery_started=False,
+                )
+                self._persist(candidate)
+                self.items = deque(candidate)
+                return result  # keep it queued; the blocker is not ours to fix
+            candidate = list(self.items)
+            # Reconstruct explicitly: wire-record names intentionally differ
+            # from dataclass names and cannot be splatted into one another.
+            updated = replace(
+                item,
+                attempts=item.attempts + 1,
+                delivery_started=False,
+            )
+            candidate[0] = updated
+            if (
+                result.outcome in self.TERMINAL
+                or updated.attempts > self.max_retries
+            ):
+                candidate.pop(0)
+                self._persist(candidate)
+                self.items = deque(candidate)
+                self.log.write({
+                    "event": "dropped",
+                    "event_id": item.event_id,
+                    "event_type": item.event_type,
+                    "attempts": updated.attempts,
+                    "outcome": result.outcome,
+                })
+            else:
+                self._persist(candidate)
+                self.items = deque(candidate)
+            return result
+
+    def status_snapshot(self) -> Dict[str, Any]:
+        with self._lock:
+            return self._status_for_items(list(self.items))
+
+    def resolve_uncertain(
+        self,
+        session_id: str,
+        event_id: str,
+        sequence: int,
+        *,
+        delivered: bool,
+    ) -> None:
+        """Apply a human transcript decision to the exact uncertain head."""
+        with self._delivery_gate:
+            with self._lock:
+                if not self.items:
+                    raise RuntimeError(
+                        "voice-typist has no uncertain queue item")
+                item = self.items[0]
+                identity = (
+                    item.session_id,
+                    item.event_id,
+                    item.sequence,
+                )
+                if (
+                    not item.delivery_started
+                    or identity != (session_id, event_id, sequence)
+                ):
+                    raise RuntimeError(
+                        "voice-typist uncertain item identity mismatch")
+                candidate = list(self.items)
+                if delivered:
+                    candidate.pop(0)
+                else:
+                    candidate[0] = replace(
+                        item,
+                        delivery_started=False,
+                    )
+                self._persist(candidate)
+                self.items = deque(candidate)
+                self._uncertain_logged.discard(identity)
+                self.log.write({
+                    "event": "delivery_uncertain_resolved",
+                    "session": session_id,
+                    "event_id": event_id,
+                    "seq": sequence,
+                    "resolution": (
+                        "confirmed-delivered"
+                        if delivered
+                        else "confirmed-not-delivered"
+                    ),
+                })
+
+
+# --------------------------------------------------------------------------
+# Direct-v3 IPC integration
+# --------------------------------------------------------------------------
+
+def enqueue_ipc_event(
+    event: Dict[str, Any],
+    session_id: str,
+    sequence: int,
+    *,
+    queue: SubmitQueue,
+    log: AuditLog,
+    state: RunState,
+    cfg: Dict[str, Any],
+) -> bool:
+    """Durably take ownership of one event before the IPC layer may ACK it."""
+    if state.stopped:
+        raise RuntimeError("voice-typist emergency stop is engaged")
+    if state.paused:
+        raise RuntimeError("voice-typist is paused")
+    try:
+        text = format_context_event(event)
+        if text:
+            check_payload(text, int(cfg["limits"]["max_payload_chars"]))
+    except PayloadRejected as exc:
+        raise typist_ipc_runtime.ProtocolError(
+            f"{exc.reason}: {exc}") from exc
+    event_id = str(event.get("id") or "")
+    event_type = str(event.get("type") or "")
+    queue.activate_session(session_id)
+    if not text:
+        # Even a silent event advances the IPC ledger.  Persist an empty queue
+        # witness first so a later missing queue file is evidence of damage,
+        # rather than an ambiguous "perhaps this session was silent" state.
+        queue.ensure_persisted()
+        log.write({
+            "event": "context_silent",
+            "event_id": event_id,
+            "event_type": event_type,
+            "session": session_id,
+            "seq": sequence,
+        })
+        return True
+    queue.enqueue(PendingItem(
+        text=text,
+        event_id=event_id,
+        event_type=event_type,
+        source="direct-v3-ipc",
+        session_id=session_id,
+        sequence=sequence,
+        committed=False,
+    ))
+    log.write({
+        "event": "queued",
+        "event_id": event_id,
+        "event_type": event_type,
+        "session": session_id,
+        "seq": sequence,
+        "queue_depth": len(queue.items),
+    })
+    return True
+
+
+def commit_ipc_event(
+    event: Dict[str, Any],
+    session_id: str,
+    sequence: int,
+    _outcome: str,
+    *,
+    queue: SubmitQueue,
+    log: AuditLog,
+) -> bool:
+    """Publish a staged queue item only after the event ledger is durable."""
+    queue.activate_session(session_id)
+    text = format_context_event(event)
+    if not text:
+        log.write({
+            "event": "context_silent_committed",
+            "event_id": str(event.get("id") or ""),
+            "event_type": str(event.get("type") or ""),
+            "session": session_id,
+            "seq": sequence,
+        })
+        return True
+    committed = queue.commit(
+        session_id,
+        str(event.get("id") or ""),
+        sequence,
+        _outcome,
     )
+    if committed:
+        log.write({
+            "event": "queue_committed",
+            "event_id": str(event.get("id") or ""),
+            "event_type": str(event.get("type") or ""),
+            "session": session_id,
+            "seq": sequence,
+        })
+    return committed
 
 
 # --------------------------------------------------------------------------
@@ -1942,80 +2863,241 @@ def cmd_state(args) -> int:
     return 0
 
 
+def cmd_queue_resolve(args) -> int:
+    """Resolve only the exact delivery-uncertain head after transcript review."""
+    if not args.launcher_confirmed_stopped:
+        raise RuntimeError(
+            "queue resolution requires launcher-confirmed stopped state")
+    cfg = load_config(args.config)
+    log = AuditLog(args.log)
+    state = RunState(args.state_dir)
+    queue = SubmitQueue(
+        VoiceTypist(cfg, log, state, dry_run=True),
+        log,
+        cfg,
+        state_path=args.state_dir / "typist-ipc-queue.json",
+    )
+    queue.resolve_uncertain(
+        args.session_id,
+        args.event_id,
+        args.sequence,
+        delivered=args.resolution == "delivered",
+    )
+    snapshot = queue.status_snapshot()
+    state.write_status({
+        "running": False,
+        "reason": "delivery_uncertain_resolved",
+        **snapshot,
+    })
+    print(json.dumps({
+        "ok": True,
+        "resolution": args.resolution,
+        "sessionId": args.session_id,
+        "eventId": args.event_id,
+        "seq": args.sequence,
+        **snapshot,
+    }, ensure_ascii=False))
+    return 0
+
+
+def cmd_queue_status(args) -> int:
+    """Read the durable queue without constructing UI or mutable state."""
+    queue_path = args.state_dir / "typist-ipc-queue.json"
+    ledger_path = args.state_dir / "typist-ipc-ledger.json"
+    if args.config.exists():
+        cfg = load_config(args.config)
+        max_size = int(cfg["limits"]["queue_size"])
+    elif queue_path.exists() or ledger_path.exists():
+        # A brand-new packaged runtime has neither config nor durable state.
+        # It must be inspectable so the launcher can reach Start, whose
+        # existing bootstrap writes the default config.  Once durable state
+        # exists, however, losing the config is ambiguous and must fail closed
+        # instead of interpreting that state under guessed settings.
+        raise RuntimeError(
+            "voice-typist config is missing while durable state exists")
+    else:
+        max_size = int(DEFAULT_CONFIG_BODY["limits"]["queue_size"])
+    if not queue_path.exists() and ledger_path.exists():
+        raise RuntimeError(
+            "voice-typist ledger exists but durable queue witness is missing")
+    snapshot = SubmitQueue.inspect_status(
+        queue_path,
+        max_size=max_size,
+    )
+    print(json.dumps({
+        "contract": QUEUE_STATUS_CONTRACT,
+        "ok": True,
+        "queueContract": QUEUE_CONTRACT,
+        "payload": snapshot,
+    }, ensure_ascii=False, separators=(",", ":")))
+    return 0
+
+
 def cmd_run(args) -> int:
     cfg = load_config(args.config)
     set_dpi_awareness()
     log = AuditLog(args.log)
     state = RunState(args.state_dir)
+    owner_pid = int(getattr(args, "owner_process_id", 0) or 0)
+    owner_start = int(
+        getattr(
+            args,
+            "owner_process_start_file_time_utc",
+            0,
+        )
+        or 0
+    )
+    if (owner_pid > 0) != (owner_start > 0):
+        raise RuntimeError(
+            "owner PID and process start FILETIME must be supplied together")
     if args.clear_stop:
         state.clear_stop()
 
-    injector = load_injector(args.injector)
     typist = VoiceTypist(cfg, log, state, dry_run=args.dry_run)
-    queue = SubmitQueue(typist, log, cfg)
-    bridge = build_bridge(injector, queue, log, args)
+    queue = SubmitQueue(
+        typist,
+        log,
+        cfg,
+        state_path=args.state_dir / "typist-ipc-queue.json",
+    )
+    ledger = typist_ipc_runtime.EventLedger(
+        args.state_dir / "typist-ipc-ledger.json")
+    stop_ipc = threading.Event()
+    ipc_activity = threading.Event()
 
-    journal = None
-    if args.journal_url:
-        journal = injector.ProductionJournal(
-            args.journal_url, args.journal_credential_target,
-            args.journal_cursor, args.journal_limit)
+    def durable_handoff(
+        event: Dict[str, Any],
+        session_id: str,
+        sequence: int,
+    ) -> bool:
+        accepted = enqueue_ipc_event(
+            event,
+            session_id,
+            sequence,
+            queue=queue,
+            log=log,
+            state=state,
+            cfg=cfg,
+        )
+        return accepted
 
-    log.write({"event": "started", "dry_run": args.dry_run,
-               "journal": bool(journal), "watch_root": str(args.watch_root),
-               "config": str(args.config)})
+    def durable_commit(
+        event: Dict[str, Any],
+        session_id: str,
+        sequence: int,
+        outcome: str,
+    ) -> bool:
+        committed = commit_ipc_event(
+            event,
+            session_id,
+            sequence,
+            outcome,
+            queue=queue,
+            log=log,
+        )
+        ipc_activity.set()
+        return committed
+
+    def ipc_worker() -> None:
+        failures = 0
+        while not stop_ipc.is_set():
+            if state.stopped or state.paused:
+                stop_ipc.wait(0.2)
+                continue
+            try:
+                handle = typist_ipc_runtime.connect_pipe(
+                    timeout_s=max(0.05, args.ipc_connect_timeout))
+            except OSError:
+                # No waiting C# server is the normal idle state.  The server
+                # waits three seconds for this bounded reconnect loop.
+                continue
+            try:
+                typist_ipc_runtime.serve(
+                    handle,
+                    ledger,
+                    on_event=durable_handoff,
+                    after_record=durable_commit,
+                    validate_text=typist_ipc_runtime.unescape_annotated_text,
+                )
+                if failures:
+                    log.write({
+                        "event": "ipc_recovered",
+                        "after_failures": failures,
+                    })
+                failures = 0
+                ipc_activity.set()
+            except Exception as exc:  # noqa: BLE001 - pipe is untrusted
+                failures += 1
+                if failures <= 3 or failures % 20 == 0:
+                    log.write({
+                        "event": "ipc_failed",
+                        "err": str(exc)[:400],
+                        "consecutive": failures,
+                    })
+            finally:
+                try:
+                    handle.Close()
+                except Exception:
+                    pass
+
+    receiver = threading.Thread(
+        target=ipc_worker,
+        name="voice-typist-ipc",
+        daemon=True,
+    )
+    receiver.start()
+
+    log.write({
+        "event": "started",
+        "dry_run": args.dry_run,
+        "transport": typist_ipc_runtime.CONTRACT,
+        "pipe": typist_ipc_runtime.PIPE_NAME,
+        "config": str(args.config),
+    })
     print(f"voice-typist running (dry_run={args.dry_run}); "
           f"state dir {args.state_dir}")
 
-    last_journal = 0.0
     last_status = 0.0
     last_activity = time.time()
     idle_exit = max(0.0, float(getattr(args, "idle_exit_seconds", 0.0) or 0.0))
-    base_interval = max(0.2, args.journal_poll)
-    journal_interval = base_interval
-    journal_failures = 0
     try:
         while True:
             now = time.time()
+            if (
+                owner_pid > 0
+                and not process_generation_alive(
+                    owner_pid,
+                    owner_start,
+                )
+            ):
+                snapshot = queue.status_snapshot()
+                log.write({
+                    "event": "stopped",
+                    "reason": "owner_generation_exited",
+                    "owner_pid": owner_pid,
+                })
+                state.write_status({
+                    "running": False,
+                    "reason": "owner_generation_exited",
+                    "owner_pid": owner_pid,
+                    "owner_process_start_file_time_utc": owner_start,
+                    **snapshot,
+                })
+                return 0
             if state.stopped:
                 if now - last_status > 2.0:
-                    state.write_status({"running": True, "reason": "emergency_stop",
-                                        "queue_depth": len(queue.items)})
+                    state.write_status({
+                        "running": True,
+                        "reason": "emergency_stop",
+                        **queue.status_snapshot(),
+                    })
                     last_status = now
                 time.sleep(0.5)
                 continue
 
-            if journal and now - last_journal >= journal_interval:
-                try:
-                    batch = journal.fetch()
-                    rows = injector.journal_rows(batch) if batch.get("gap") is not True else []
-                    bridge.consume_journal_batch(batch, journal)
-                    if journal_failures:
-                        log.write({"event": "journal_recovered",
-                                   "after_failures": journal_failures})
-                    journal_failures = 0
-                    journal_interval = base_interval
-                    if rows:
-                        last_activity = now
-                    else:
-                        log.write({"event": "journal_empty"})
-                except Exception as exc:  # noqa: BLE001 - transport is untrusted
-                    journal_failures += 1
-                    # Back off instead of hammering a source that is already
-                    # failing, and log the first few plus milestones rather than
-                    # one line every poll.
-                    journal_interval = min(30.0, base_interval * (2 ** min(journal_failures, 6)))
-                    if journal_failures <= 3 or journal_failures % 20 == 0:
-                        log.write({"event": "journal_fetch_failed",
-                                   "err": str(exc)[:400],
-                                   "consecutive": journal_failures,
-                                   "next_retry_seconds": round(journal_interval, 1)})
-                last_journal = now
-
-            try:
-                bridge.scan_once()
-            except Exception as exc:  # noqa: BLE001
-                log.write({"event": "scan_failed", "err": str(exc)[:400]})
+            if ipc_activity.is_set():
+                ipc_activity.clear()
+                last_activity = now
 
             if queue.items or state.paused:
                 # Pending work, or a deliberate pause the user can still resume
@@ -2032,12 +3114,15 @@ def cmd_run(args) -> int:
                 last = queue.last_result
                 state.write_status({
                     "running": True,
-                    "queue_depth": len(queue.items),
+                    **queue.status_snapshot(),
                     "dry_run": args.dry_run,
                     "last_outcome": last.outcome if last else None,
                     "last_verified": last.verified_in_conversation if last else None,
-                    "journal_failures": journal_failures,
-                    "journal_retry_seconds": round(journal_interval, 1),
+                    "ipc_contract": typist_ipc_runtime.CONTRACT,
+                    "ipc_receiver_alive": receiver.is_alive(),
+                    "owner_pid": owner_pid or None,
+                    "owner_process_start_file_time_utc":
+                        owner_start or None,
                 })
                 last_status = now
 
@@ -2060,6 +3145,9 @@ def cmd_run(args) -> int:
         log.write({"event": "stopped", "reason": "keyboard_interrupt"})
         state.write_status({"running": False, "queue_depth": len(queue.items)})
         return 130
+    finally:
+        stop_ipc.set()
+        receiver.join(timeout=1.0)
 
 
 def cmd_panel(args) -> int:
@@ -2174,27 +3262,45 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("action", choices=["show", "pause", "resume", "stop", "clear-stop"])
     p.set_defaults(func=cmd_state)
 
+    p = sub.add_parser(
+        "queue-resolve",
+        help="resolve the exact delivery-uncertain head after transcript review",
+    )
+    p.add_argument("--session-id", required=True)
+    p.add_argument("--event-id", required=True)
+    p.add_argument("--sequence", type=int, required=True)
+    p.add_argument(
+        "--resolution",
+        choices=["delivered", "not-delivered"],
+        required=True,
+    )
+    p.add_argument(
+        "--launcher-confirmed-stopped",
+        action="store_true",
+        help=argparse.SUPPRESS,
+    )
+    p.set_defaults(func=cmd_queue_resolve)
+
+    p = sub.add_parser(
+        "queue-status",
+        help="inspect durable queue identity without touching Windows UI",
+    )
+    p.set_defaults(func=cmd_queue_status)
+
     p = sub.add_parser("panel", help="always-on-top status panel")
     p.set_defaults(func=cmd_panel)
 
-    p = sub.add_parser("run", help="consume the reader bridge and submit events")
-    p.add_argument("--injector", type=Path, default=INJECTOR_PATH)
-    p.add_argument("--thread-id", default="voice-typist")
-    p.add_argument("--watch-root", type=Path,
-                   default=Path(r"C:\Users\bwica\bw-reader-context\events"))
-    p.add_argument("--session-pattern", default="realtime-voice-chat-*")
-    p.add_argument("--rules-local", type=Path,
-                   default=Path(r"C:\Users\bwica\bw-reader-context\rules"))
-    p.add_argument("--bridge-log", type=Path,
-                   default=INSTALL_DIR / "logs" / "voice-typist-bridge.jsonl")
-    p.add_argument("--journal-url")
-    p.add_argument("--journal-credential-target", default="BWReaderJournal")
-    p.add_argument("--journal-cursor", type=Path,
-                   default=INSTALL_DIR / "voice-typist-journal-cursor.json")
-    p.add_argument("--journal-poll", type=float, default=0.5)
-    p.add_argument("--journal-limit", type=int, default=200)
+    p = sub.add_parser(
+        "run",
+        help="consume direct-v3 named-pipe context and submit events",
+    )
+    p.add_argument(
+        "--ipc-connect-timeout",
+        type=float,
+        default=0.25,
+        help="bounded wait for each fixed named-pipe reconnect attempt",
+    )
     p.add_argument("--poll", type=float, default=0.5)
-    p.add_argument("--page-debounce", type=float, default=2.0)
     p.add_argument("--dry-run", action="store_true")
     p.add_argument("--clear-stop", action="store_true",
                    help="clear a leftover emergency stop at startup")
@@ -2205,8 +3311,20 @@ def build_parser() -> argparse.ArgumentParser:
     # the backstop that does not depend on anyone else behaving correctly.
     # 0 disables it.
     p.add_argument("--idle-exit-seconds", type=float, default=600.0,
-                   help="exit after this many seconds with no journal rows, "
-                        "no queued work and no delivery attempt (0 = never)")
+                   help="exit after this many seconds with no IPC handoff, "
+                        "queued work or delivery attempt (0 = never)")
+    p.add_argument(
+        "--owner-process-id",
+        type=int,
+        default=0,
+        help="bridge owner PID; must be paired with its start FILETIME",
+    )
+    p.add_argument(
+        "--owner-process-start-file-time-utc",
+        type=int,
+        default=0,
+        help="exact bridge owner creation FILETIME for orphan detection",
+    )
     p.set_defaults(func=cmd_run)
     return parser
 

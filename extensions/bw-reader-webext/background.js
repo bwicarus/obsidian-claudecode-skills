@@ -1,7 +1,7 @@
 // 扩展后台:唯一接触 token 和 Pi API 的地方。网页脚本永远拿不到 token,也不能传任意 URL(只认固定操作名)。
 // ⚠ ORIGIN 指向**当前主力的 Pi**(Tailscale,iPad 走 Tailscale 访问,和现有 QA browser 一样);
 //   不是暂停的 VPS bwicarus.space(代码停在 2026-05-28)。要换服务器只改这一行 + manifest host_permissions。
-globalThis.__BW_READER_BACKGROUND_BUILD_VERSION = "0.2.72";
+globalThis.__BW_READER_BACKGROUND_BUILD_VERSION = "0.2.73";
 if (typeof importScripts === "function") {
   importScripts(
     "vendor/reader-runtime-account-context.js",
@@ -284,11 +284,13 @@ const BW_WS_QUERY_KEYS = new Set([
 const MAX_BW_WS_FRAME_BYTES = 8 * 1024 * 1024;
 const MAX_BW_WS_FRAME_B64_CHARS =
   4 * Math.ceil(MAX_BW_WS_FRAME_BYTES / 3);
-const COMPUTER_VOICE_DIRECT_PORT = "BW_COMPUTER_VOICE_DIRECT_V2";
+const COMPUTER_VOICE_DIRECT_PORT = "BW_COMPUTER_VOICE_DIRECT_V3";
 const COMPUTER_VOICE_DIRECT_ENDPOINT =
   "wss://bwicarus-2.taile44d0c.ts.net/reader-computer-voice/v1";
 const MAX_COMPUTER_VOICE_DIRECT_TEXT_BYTES = 64 * 1024;
 const COMPUTER_VOICE_DIRECT_PCM_FRAME_BYTES = 1956;
+const COMPUTER_VOICE_DIRECT_UPLINK_BUFFER_LIMIT_BYTES =
+  COMPUTER_VOICE_DIRECT_PCM_FRAME_BYTES * 10;
 function checkedBwWebSocketPath(value) {
   if (
     typeof value !== "string" ||
@@ -5409,6 +5411,63 @@ function computerVoiceDirectBase64(bytes) {
   return btoa(binary);
 }
 
+function computerVoiceDirectDecodeUplink(message) {
+  if (
+    !computerVoiceDirectExactMessage(
+      message,
+      ["type", "data", "bytes", "sequence"]
+    ) ||
+    message.type !== "send-binary-base64" ||
+    message.bytes !== COMPUTER_VOICE_DIRECT_PCM_FRAME_BYTES ||
+    !Number.isSafeInteger(message.sequence) ||
+    message.sequence < 0 ||
+    message.sequence > 0xffffffff ||
+    typeof message.data !== "string" ||
+    message.data.length !== 4 * Math.ceil(message.bytes / 3) ||
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/
+      .test(message.data)
+  ) {
+    throw Object.assign(new Error("Reader 麦克风 PCM 编码无效"), {
+      code: "BW_COMPUTER_VOICE_DIRECT_FRAME"
+    });
+  }
+  let raw;
+  try { raw = atob(message.data); }
+  catch (_) { raw = null; }
+  if (!raw || raw.length !== message.bytes) {
+    throw Object.assign(new Error("Reader 麦克风 PCM 长度不匹配"), {
+      code: "BW_COMPUTER_VOICE_DIRECT_FRAME"
+    });
+  }
+  const bytes = new Uint8Array(raw.length);
+  for (let index = 0; index < raw.length; index += 1) {
+    bytes[index] = raw.charCodeAt(index);
+  }
+  if (
+    bytes[0] !== 0x42 ||
+    bytes[1] !== 0x57 ||
+    bytes[2] !== 0x43 ||
+    bytes[3] !== 0x56 ||
+    bytes[4] !== 1 ||
+    bytes[5] !== 3 ||
+    bytes[6] !== 0 ||
+    bytes[7] !== 0 ||
+    new DataView(
+      bytes.buffer,
+      bytes.byteOffset,
+      bytes.byteLength
+    ).getUint32(24, true) !== message.sequence
+  ) {
+    throw Object.assign(new Error("Reader 麦克风 PCM 方向或版本无效"), {
+      code: "BW_COMPUTER_VOICE_DIRECT_FRAME"
+    });
+  }
+  return {
+    buffer: bytes.buffer,
+    sequence: message.sequence
+  };
+}
+
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== COMPUTER_VOICE_DIRECT_PORT) return;
   const tabId = computerVoiceDirectSenderTabId(port.sender);
@@ -5581,6 +5640,31 @@ chrome.runtime.onConnect.addListener((port) => {
           });
         }
         entry.socket.send(message.data);
+        return;
+      }
+      if (message?.type === "send-binary-base64") {
+        if (!entry.socket || entry.socket.readyState !== 1) {
+          throw Object.assign(new Error("Windows 语音 WSS 尚未打开"), {
+            code: "BW_COMPUTER_VOICE_DIRECT_STATE"
+          });
+        }
+        if (
+          entry.socket.bufferedAmount +
+            COMPUTER_VOICE_DIRECT_PCM_FRAME_BYTES >
+            COMPUTER_VOICE_DIRECT_UPLINK_BUFFER_LIMIT_BYTES
+        ) {
+          throw Object.assign(
+            new Error("Reader 麦克风上行已落后，拒绝发送过期语音"),
+            { code: "BW_COMPUTER_VOICE_DIRECT_UPLINK_BACKPRESSURE" }
+          );
+        }
+        const uplink = computerVoiceDirectDecodeUplink(message);
+        entry.socket.send(uplink.buffer);
+        post({
+          type: "binary-accepted",
+          sequence: uplink.sequence,
+          bytes: COMPUTER_VOICE_DIRECT_PCM_FRAME_BYTES
+        });
         return;
       }
       if (

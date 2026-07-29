@@ -15,13 +15,18 @@ internal static class AudioBridgeContract
         captureScope = CaptureScope,
         loopbackMode = LoopbackMode,
         activationDevice = VirtualAudioDevice,
-        microphoneSelection = "explicit-endpoint-id-only",
+        legacyNativeMicrophoneSelection =
+            "explicit-capture-endpoint-id-only",
+        directMicrophoneUplink =
+            "browser-pcm-to-explicit-virtual-render-endpoint",
+        directSpeakerReadiness =
+            "explicit-render-endpoint-plus-core-audio-session-evidence",
         defaultMicrophoneFallback = false,
         automaticMicrophoneCapture = false,
         minimumWindowsBuild = MinimumWindowsBuild,
         systemOutputFallback = false,
         captureState =
-            "native-messaging-gated;direct-authenticated-start-gated",
+            "direct-v3-start-gated;legacy-native-messaging-retained",
         captureThreadModel = "dedicated-mta-single-thread",
         captureCliExposed = false,
         automaticCapture = false,
@@ -31,6 +36,9 @@ internal static class AudioBridgeContract
             "--describe",
             "--self-test",
             "--list-direct-microphones",
+            "--list-direct-render-endpoints",
+            "--probe-direct-output-route --config <absolute-path>",
+            "--diagnose-direct-audio-no-start --config <absolute-path>",
         },
         nativeMessagingOriginAllowlist = true,
         localOptInRequired = true,
@@ -39,7 +47,7 @@ internal static class AudioBridgeContract
             command = "--direct-serve --config <absolute-path>",
             bind = "127.0.0.1-only",
             defaultPort = DirectBridgeContract.DefaultListenPort,
-            transport = "authenticated-websocket-fixed-pcm",
+            transport = "tailnet-wss-fixed-pcm-and-context",
             automaticCapture = false,
             appLaunch = new
             {

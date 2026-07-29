@@ -1,16 +1,13 @@
 from __future__ import annotations
 
-import base64
 import ctypes
 from ctypes import wintypes
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-import hashlib
 import json
 import os
 from pathlib import Path
 import re
-import secrets
 import subprocess
 import sys
 import time
@@ -19,9 +16,10 @@ from urllib.parse import urlsplit
 import uuid
 
 
-DIRECT_CONFIG_CONTRACT = "reader-computer-voice-direct-config/1"
+DIRECT_CONFIG_CONTRACT = "reader-computer-voice-direct-config/3"
+LEGACY_DIRECT_CONFIG_CONTRACT = "reader-computer-voice-direct-config/1"
 DIRECT_STATUS_CONTRACT = (
-    "reader-computer-voice-direct-runtime-status/1"
+    "reader-computer-voice-direct-runtime-status/2"
 )
 SERVICE_RECORD_CONTRACT = "reader-computer-voice-desktop-service/1"
 SELF_TEST_CONTRACT = "reader-computer-voice-desktop-self-test/1"
@@ -38,12 +36,6 @@ FIXED_OUTPUT_SCOPE = "process-only"
 FIXED_APP_KIND = "codex-desktop"
 FIXED_SHORTCUT = "Ctrl+Shift+C"
 DEFAULT_ALLOWED_ORIGINS = ("https://bwicarus.taile44d0c.ts.net",)
-PAIR_CODE_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
-PAIR_CODE_LENGTH = 10
-PAIR_CODE_TTL = timedelta(minutes=5)
-PAIR_CODE_RE = re.compile(r"^[A-HJ-NP-Z2-9]{10}$")
-BASE64URL_SHA256_RE = re.compile(r"^[A-Za-z0-9_-]{43}$")
-BASE64URL_RE = re.compile(r"^[A-Za-z0-9_-]+$")
 ONLINE_STATES = frozenset(
     {
         "starting",
@@ -77,21 +69,29 @@ DIRECT_CONFIG_KEYS = frozenset(
         "contract",
         "localOptIn",
         "experimentalSingleUserMode",
-        "microphoneEndpointId",
+        "virtualMicrophoneRenderEndpointId",
+        "virtualSpeakerRenderEndpointId",
         "listenHost",
         "listenPort",
         "allowedOrigins",
         "allowedTailscaleUserLogin",
-        "pairingCodeHash",
-        "pairingExpiresAtUtc",
-        "pairedClientPublicKeySpki",
-        "pairedClientFingerprintSha256",
         "outputScope",
         "appKind",
         "runtimeStatusPath",
     }
 )
-LEGACY_DIRECT_CONFIG_KEYS = DIRECT_CONFIG_KEYS - {
+LEGACY_V1_DIRECT_CONFIG_KEYS = (
+    DIRECT_CONFIG_KEYS
+    - {"virtualMicrophoneRenderEndpointId", "virtualSpeakerRenderEndpointId"}
+    | {
+        "microphoneEndpointId",
+        "pairingCodeHash",
+        "pairingExpiresAtUtc",
+        "pairedClientPublicKeySpki",
+        "pairedClientFingerprintSha256",
+    }
+)
+LEGACY_V1_CONFIG_KEYS_WITHOUT_MODE = LEGACY_V1_DIRECT_CONFIG_KEYS - {
     "experimentalSingleUserMode"
 }
 DIRECT_STATUS_KEYS = frozenset(
@@ -102,6 +102,7 @@ DIRECT_STATUS_KEYS = frozenset(
         "state",
         "readerConnected",
         "captureActive",
+        "lastError",
         "updatedAtUtc",
     }
 )
@@ -125,7 +126,7 @@ class LocalOptOutDuringStart(BridgeError):
 
 
 @dataclass(frozen=True)
-class Microphone:
+class RenderEndpoint:
     endpoint_id: str
     friendly_name: str
 
@@ -195,13 +196,6 @@ class BridgePaths:
 
 
 @dataclass(frozen=True)
-class PairingMaterial:
-    display_code: str
-    code_hash: str
-    expires_at_utc: str
-
-
-@dataclass(frozen=True)
 class DirectStatus:
     configuration_enabled: bool
     service_online: bool
@@ -210,7 +204,7 @@ class DirectStatus:
     pid: int | None = None
     service_instance_id: str = ""
     capture_active: bool = False
-    paired_client_fingerprint: str = ""
+    last_error: dict[str, Any] | None = None
 
 
 @dataclass(frozen=True)
@@ -315,15 +309,32 @@ def _is_valid_origin(value: object) -> bool:
     )
 
 
-def _validate_microphone_id(value: str) -> str:
+def _validate_render_endpoint_id(value: str, role: str) -> str:
     if (
         not value
         or value.isspace()
         or len(value) > 2048
         or any(ord(character) < 32 for character in value)
     ):
-        raise BridgeError("必须明确选择一个有效麦克风。")
+        raise BridgeError(f"必须明确选择一个有效的{role}播放端点。")
     return value
+
+
+def _validate_virtual_render_endpoints(
+    virtual_microphone_render_endpoint_id: str,
+    virtual_speaker_render_endpoint_id: str,
+) -> tuple[str, str]:
+    virtual_microphone = _validate_render_endpoint_id(
+        virtual_microphone_render_endpoint_id,
+        "虚拟麦克风 A",
+    )
+    virtual_speaker = _validate_render_endpoint_id(
+        virtual_speaker_render_endpoint_id,
+        "虚拟扬声器 B",
+    )
+    if virtual_microphone == virtual_speaker:
+        raise BridgeError("虚拟麦克风 A 与虚拟扬声器 B 必须选择不同端点。")
+    return virtual_microphone, virtual_speaker
 
 
 def _validate_runtime_path(value: object) -> str:
@@ -335,44 +346,28 @@ def _validate_runtime_path(value: object) -> str:
     return str(path.resolve())
 
 
-def _validated_paired_client(
-    public_key: object,
-    fingerprint: object,
-) -> tuple[str, str]:
-    if not isinstance(public_key, str) or not isinstance(fingerprint, str):
-        raise BridgeError("Reader 公钥记录结构无效。")
-    if not public_key and not fingerprint:
-        return "", ""
-    if (
-        not public_key
-        or len(public_key) > 4096
-        or not BASE64URL_RE.fullmatch(public_key)
-        or not BASE64URL_SHA256_RE.fullmatch(fingerprint)
-    ):
-        raise BridgeError("Reader 公钥或指纹无效。")
-    return public_key, fingerprint
-
-
 def validate_direct_config(
     value: dict[str, Any],
     *,
     expected_runtime_status: Path | None = None,
 ) -> dict[str, Any]:
     keys = set(value)
-    if keys not in (DIRECT_CONFIG_KEYS, LEGACY_DIRECT_CONFIG_KEYS):
+    if keys != DIRECT_CONFIG_KEYS:
         raise BridgeError("直连配置字段不完整或包含未知字段。")
     if value.get("contract") != DIRECT_CONFIG_CONTRACT:
         raise BridgeError("直连配置合同版本不匹配。")
     if not isinstance(value.get("localOptIn"), bool):
         raise BridgeError("直连配置授权状态无效。")
     experimental_single_user_mode = value.get(
-        "experimentalSingleUserMode",
-        True,
+        "experimentalSingleUserMode"
     )
-    if not isinstance(experimental_single_user_mode, bool):
+    if experimental_single_user_mode is not True:
         raise BridgeError("单用户实验模式状态无效。")
-    microphone = _validate_microphone_id(
-        str(value.get("microphoneEndpointId", ""))
+    virtual_microphone, virtual_speaker = (
+        _validate_virtual_render_endpoints(
+            str(value.get("virtualMicrophoneRenderEndpointId", "")),
+            str(value.get("virtualSpeakerRenderEndpointId", "")),
+        )
     )
     if value.get("listenHost") != FIXED_LISTEN_HOST:
         raise BridgeError("直连服务只允许绑定 127.0.0.1。")
@@ -392,21 +387,6 @@ def validate_direct_config(
         != FIXED_ALLOWED_TAILSCALE_USER_LOGIN
     ):
         raise BridgeError("Tailscale 登录身份不符合固定合同。")
-    pairing_hash = value.get("pairingCodeHash")
-    pairing_expiry = value.get("pairingExpiresAtUtc")
-    if pairing_hash == "":
-        if pairing_expiry is not None:
-            raise BridgeError("无配对码时不得保留过期时间。")
-    elif (
-        not isinstance(pairing_hash, str)
-        or not BASE64URL_SHA256_RE.fullmatch(pairing_hash)
-        or parse_utc(pairing_expiry) is None
-    ):
-        raise BridgeError("一次性配对摘要或过期时间无效。")
-    public_key, fingerprint = _validated_paired_client(
-        value.get("pairedClientPublicKeySpki"),
-        value.get("pairedClientFingerprintSha256"),
-    )
     if value.get("outputScope") != FIXED_OUTPUT_SCOPE:
         raise BridgeError("禁止使用全系统输出回退。")
     if value.get("appKind") != FIXED_APP_KIND:
@@ -421,10 +401,9 @@ def validate_direct_config(
     return {
         **value,
         "experimentalSingleUserMode": experimental_single_user_mode,
-        "microphoneEndpointId": microphone,
+        "virtualMicrophoneRenderEndpointId": virtual_microphone,
+        "virtualSpeakerRenderEndpointId": virtual_speaker,
         "allowedOrigins": list(origins),
-        "pairedClientPublicKeySpki": public_key,
-        "pairedClientFingerprintSha256": fingerprint,
         "runtimeStatusPath": runtime_path,
     }
 
@@ -442,97 +421,54 @@ def load_direct_config(paths: BridgePaths) -> dict[str, Any] | None:
         return None
 
 
-def _base64url_sha256(value: bytes) -> str:
-    return (
-        base64.urlsafe_b64encode(hashlib.sha256(value).digest())
-        .decode("ascii")
-        .rstrip("=")
+def legacy_microphone_config_requires_migration(
+    paths: BridgePaths,
+) -> bool:
+    value = read_json(paths.direct_config)
+    return bool(
+        value
+        and value.get("contract") == LEGACY_DIRECT_CONFIG_CONTRACT
+        and set(value) in (
+            LEGACY_V1_DIRECT_CONFIG_KEYS,
+            LEGACY_V1_CONFIG_KEYS_WITHOUT_MODE,
+        )
+        and isinstance(value.get("microphoneEndpointId"), str)
+        and value.get("microphoneEndpointId")
     )
-
-
-def normalize_pair_code(value: str) -> str:
-    return re.sub(r"[\s-]+", "", value).upper()
-
-
-def pairing_material_from_code(
-    code: str,
-    *,
-    now: datetime | None = None,
-    ttl: timedelta = PAIR_CODE_TTL,
-) -> PairingMaterial:
-    code = normalize_pair_code(code)
-    if not PAIR_CODE_RE.fullmatch(code):
-        raise BridgeError("一次性配对码格式无效。")
-    now = now or utc_now()
-    if now.tzinfo is None or ttl <= timedelta(0) or ttl > timedelta(minutes=10):
-        raise BridgeError("一次性配对码有效期无效。")
-    return PairingMaterial(
-        display_code=code,
-        code_hash=_base64url_sha256(code.encode("ascii")),
-        expires_at_utc=format_utc(now + ttl),
-    )
-
-
-def generate_pairing_material(
-    *,
-    now: datetime | None = None,
-    choice: Callable[[str], str] = secrets.choice,
-) -> PairingMaterial:
-    code = "".join(choice(PAIR_CODE_ALPHABET) for _ in range(PAIR_CODE_LENGTH))
-    return pairing_material_from_code(code, now=now)
 
 
 def build_direct_config(
-    microphone_endpoint_id: str,
+    virtual_microphone_render_endpoint_id: str,
+    virtual_speaker_render_endpoint_id: str,
     runtime_status_path: Path,
     *,
     allowed_origins: Sequence[str] = DEFAULT_ALLOWED_ORIGINS,
     local_opt_in: bool = True,
     experimental_single_user_mode: bool = True,
-    pairing: PairingMaterial | None = None,
-    previous: dict[str, Any] | None = None,
-    replace_paired_client: bool = False,
 ) -> dict[str, Any]:
-    microphone = _validate_microphone_id(microphone_endpoint_id)
-    if not isinstance(experimental_single_user_mode, bool):
+    virtual_microphone, virtual_speaker = (
+        _validate_virtual_render_endpoints(
+            virtual_microphone_render_endpoint_id,
+            virtual_speaker_render_endpoint_id,
+        )
+    )
+    if experimental_single_user_mode is not True:
         raise BridgeError("单用户实验模式状态无效。")
     origins = list(allowed_origins)
     if not origins or not all(_is_valid_origin(origin) for origin in origins):
         raise BridgeError("Reader HTTPS 来源白名单无效。")
 
-    public_key = ""
-    fingerprint = ""
-    previous_hash = ""
-    previous_expiry: str | None = None
-    if previous is not None:
-        previous = validate_direct_config(previous)
-        public_key, fingerprint = _validated_paired_client(
-            previous["pairedClientPublicKeySpki"],
-            previous["pairedClientFingerprintSha256"],
-        )
-        previous_hash = str(previous["pairingCodeHash"])
-        previous_expiry = previous["pairingExpiresAtUtc"]
-    if replace_paired_client:
-        public_key = ""
-        fingerprint = ""
-    pairing_hash = pairing.code_hash if pairing else previous_hash
-    pairing_expiry = (
-        pairing.expires_at_utc if pairing else previous_expiry
-    )
     value = {
         "contract": DIRECT_CONFIG_CONTRACT,
         "localOptIn": bool(local_opt_in),
         "experimentalSingleUserMode": experimental_single_user_mode,
-        "microphoneEndpointId": microphone,
+        "virtualMicrophoneRenderEndpointId": virtual_microphone,
+        "virtualSpeakerRenderEndpointId": virtual_speaker,
         "listenHost": FIXED_LISTEN_HOST,
         "listenPort": FIXED_LISTEN_PORT,
         "allowedOrigins": origins,
         "allowedTailscaleUserLogin":
             FIXED_ALLOWED_TAILSCALE_USER_LOGIN,
-        "pairingCodeHash": pairing_hash,
-        "pairingExpiresAtUtc": pairing_expiry,
-        "pairedClientPublicKeySpki": public_key,
-        "pairedClientFingerprintSha256": fingerprint,
         "outputScope": FIXED_OUTPUT_SCOPE,
         "appKind": FIXED_APP_KIND,
         "runtimeStatusPath": str(runtime_status_path.resolve()),
@@ -542,28 +478,51 @@ def build_direct_config(
 
 def save_enabled_config(
     paths: BridgePaths,
-    microphone: Microphone,
+    virtual_microphone: RenderEndpoint,
+    virtual_speaker: RenderEndpoint,
     *,
     allowed_origins: Sequence[str] = DEFAULT_ALLOWED_ORIGINS,
-    active_microphones: Sequence[Microphone] | None = None,
+    active_render_endpoints: Sequence[RenderEndpoint] | None = None,
+    allow_legacy_migration: bool = False,
 ) -> dict[str, Any]:
     if not paths.native_host.is_file():
         raise BridgeError(f"直连代理不存在：{paths.native_host}")
-    if active_microphones is not None and microphone.endpoint_id not in {
-        item.endpoint_id for item in active_microphones
-    }:
-        raise BridgeError("所选麦克风已不再是 Active 设备；拒绝保存。")
+    _validate_virtual_render_endpoints(
+        virtual_microphone.endpoint_id,
+        virtual_speaker.endpoint_id,
+    )
+    if active_render_endpoints is not None:
+        active_ids = {
+            item.endpoint_id for item in active_render_endpoints
+        }
+        if virtual_microphone.endpoint_id not in active_ids:
+            raise BridgeError(
+                "虚拟麦克风 A 已不再是 Active 播放端点；拒绝保存。"
+            )
+        if virtual_speaker.endpoint_id not in active_ids:
+            raise BridgeError(
+                "虚拟扬声器 B 已不再是 Active 播放端点；拒绝保存。"
+            )
     previous = load_direct_config(paths)
     if paths.direct_config.exists() and previous is None:
-        raise BridgeError(
-            "现有直连配置无效；拒绝覆盖可能包含的配对公钥。"
-        )
+        if not (
+            allow_legacy_migration
+            and legacy_microphone_config_requires_migration(paths)
+        ):
+            if legacy_microphone_config_requires_migration(paths):
+                raise BridgeError(
+                    "检测到旧 microphoneEndpointId 配置；"
+                    "必须在桌面窗口中明确确认迁移，不能静默使用。"
+                )
+            raise BridgeError(
+                "现有直连配置无效；拒绝静默覆盖。"
+            )
     value = build_direct_config(
-        microphone.endpoint_id,
+        virtual_microphone.endpoint_id,
+        virtual_speaker.endpoint_id,
         paths.runtime_status,
         allowed_origins=allowed_origins,
         local_opt_in=True,
-        previous=previous,
     )
     _atomic_write_json(paths.direct_config, value)
     return value
@@ -578,8 +537,6 @@ def disable_config(paths: BridgePaths) -> bool:
     value = {
         **previous,
         "localOptIn": False,
-        "pairingCodeHash": "",
-        "pairingExpiresAtUtc": None,
     }
     _atomic_write_json(
         paths.direct_config,
@@ -589,38 +546,6 @@ def disable_config(paths: BridgePaths) -> bool:
         ),
     )
     return True
-
-
-def prepare_pairing(
-    paths: BridgePaths,
-    *,
-    replace_existing: bool = False,
-    now: datetime | None = None,
-    choice: Callable[[str], str] = secrets.choice,
-) -> PairingMaterial:
-    previous = load_direct_config(paths)
-    if previous is None or previous.get("localOptIn") is not True:
-        raise BridgeError("请先保存并启用直连配置。")
-    paired = bool(previous["pairedClientPublicKeySpki"])
-    if paired and not replace_existing:
-        raise BridgeError(
-            "此电脑已有 Reader 公钥；重新配对必须显式撤销旧设备。"
-        )
-    pairing = generate_pairing_material(now=now, choice=choice)
-    value = build_direct_config(
-        previous["microphoneEndpointId"],
-        paths.runtime_status,
-        allowed_origins=previous["allowedOrigins"],
-        local_opt_in=True,
-        experimental_single_user_mode=previous[
-            "experimentalSingleUserMode"
-        ],
-        pairing=pairing,
-        previous=previous,
-        replace_paired_client=replace_existing,
-    )
-    _atomic_write_json(paths.direct_config, value)
-    return pairing
 
 
 def _require_exact_native_paths(paths: BridgePaths) -> tuple[Path, Path]:
@@ -761,6 +686,35 @@ def _runtime_status_is_fresh(
     return timedelta(seconds=-2) <= age <= maximum_age
 
 
+def _validated_runtime_error(value: object) -> dict[str, Any] | None:
+    if value is None:
+        return None
+    if (
+        not isinstance(value, dict)
+        or set(value)
+        != {"failureId", "code", "stage", "hresult", "atUtc"}
+        or not isinstance(value.get("failureId"), str)
+        or not re.fullmatch(
+            r"failure-[A-Za-z0-9_-]{16}",
+            value["failureId"],
+        )
+        or not isinstance(value.get("code"), str)
+        or not re.fullmatch(r"[A-Z][A-Z0-9_]{1,127}", value["code"])
+        or not isinstance(value.get("stage"), str)
+        or not re.fullmatch(r"[a-z][a-z.-]{0,79}", value["stage"])
+        or (
+            value.get("hresult") is not None
+            and (
+                not isinstance(value.get("hresult"), str)
+                or not re.fullmatch(r"0x[0-9A-F]{8}", value["hresult"])
+            )
+        )
+        or parse_utc(value.get("atUtc")) is None
+    ):
+        raise BridgeError("runtime lastError 合同无效。")
+    return dict(value)
+
+
 def read_direct_status(
     paths: BridgePaths,
     runner: ProcessRunner,
@@ -770,11 +724,18 @@ def read_direct_status(
 ) -> DirectStatus:
     config = load_direct_config(paths)
     configured = bool(config and config.get("localOptIn") is True)
-    fingerprint = (
-        str(config.get("pairedClientFingerprintSha256", ""))
-        if config
-        else ""
-    )
+    runtime = read_json(paths.runtime_status)
+    try:
+        last_error = (
+            _validated_runtime_error(runtime.get("lastError"))
+            if runtime is not None
+            and set(runtime) == DIRECT_STATUS_KEYS
+            and runtime.get("contract") == DIRECT_STATUS_CONTRACT
+            else None
+        )
+    except BridgeError:
+        last_error = None
+        runtime = None
     record = _load_service_record(paths)
     if record is None:
         return DirectStatus(
@@ -782,7 +743,7 @@ def read_direct_status(
             False,
             False,
             "service-record-missing",
-            paired_client_fingerprint=fingerprint,
+            last_error=last_error,
         )
     pid = record["pid"]
     executable = runner.executable_for_pid(pid)
@@ -793,9 +754,8 @@ def read_direct_status(
             False,
             "service-process-offline",
             pid=pid,
-            paired_client_fingerprint=fingerprint,
+            last_error=last_error,
         )
-    runtime = read_json(paths.runtime_status)
     if (
         runtime is None
         or set(runtime) != DIRECT_STATUS_KEYS
@@ -819,7 +779,7 @@ def read_direct_status(
             False,
             "runtime-status-offline-or-stale",
             pid=pid,
-            paired_client_fingerprint=fingerprint,
+            last_error=last_error,
         )
     reader_connected = runtime.get("readerConnected") is True
     return DirectStatus(
@@ -830,7 +790,7 @@ def read_direct_status(
         pid=pid,
         service_instance_id=runtime["serviceInstanceId"],
         capture_active=runtime.get("captureActive") is True,
-        paired_client_fingerprint=fingerprint,
+        last_error=last_error,
     )
 
 
@@ -973,13 +933,12 @@ def disable_and_stop_direct_service(
     return True, False
 
 
-def enumerate_microphones(
+def enumerate_active_render_endpoints(
     native_host: Path | None = None,
-) -> list[Microphone]:
-    # The old prototype enumerated MMDevices registry subkeys.  Those GUIDs
-    # are not IMMDevice endpoint IDs and are especially wrong inside RDP,
-    # where Core Audio exposes a session-specific RemoteCapture endpoint.
-    # Ask the bundled native host for the exact active IMMDevice::GetId values.
+) -> list[RenderEndpoint]:
+    # Ask the bundled native host for exact active eRender
+    # IMMDevice::GetId values.  Never infer a default endpoint here: both
+    # independent virtual cables must be selected explicitly.
     native_host = (
         native_host.resolve()
         if native_host is not None
@@ -994,7 +953,7 @@ def enumerate_microphones(
             else 0
         )
         result = subprocess.run(
-            (str(native_host), "--list-direct-microphones"),
+            (str(native_host), "--list-direct-render-endpoints"),
             cwd=str(native_host.parent),
             stdin=subprocess.DEVNULL,
             capture_output=True,
@@ -1023,14 +982,14 @@ def enumerate_microphones(
             "devices",
         }
         or value.get("contract")
-            != "reader-computer-voice-microphones/1"
+            != "reader-computer-voice-render-endpoints/1"
         or value.get("ok") is not True
         or value.get("captureStarted") is not False
         or not isinstance(value.get("devices"), list)
         or len(value["devices"]) > 64
     ):
         return []
-    microphones: list[Microphone] = []
+    endpoints: list[RenderEndpoint] = []
     seen: set[str] = set()
     for item in value["devices"]:
         if (
@@ -1041,7 +1000,10 @@ def enumerate_microphones(
         ):
             return []
         try:
-            endpoint_id = _validate_microphone_id(item["endpointId"])
+            endpoint_id = _validate_render_endpoint_id(
+                item["endpointId"],
+                "虚拟音频",
+            )
         except BridgeError:
             return []
         friendly_name = item["friendlyName"]
@@ -1052,14 +1014,14 @@ def enumerate_microphones(
         ):
             return []
         seen.add(endpoint_id)
-        microphones.append(
-            Microphone(
+        endpoints.append(
+            RenderEndpoint(
                 endpoint_id=endpoint_id,
                 friendly_name=friendly_name or endpoint_id,
             )
         )
-    microphones.sort(key=lambda item: item.display_name.casefold())
-    return microphones
+    endpoints.sort(key=lambda item: item.display_name.casefold())
+    return endpoints
 
 
 class PROCESSENTRY32W(ctypes.Structure):
@@ -1388,14 +1350,16 @@ def build_self_test_report(paths: BridgePaths) -> dict[str, Any]:
     check(
         "direct-config-contract",
         lambda: build_direct_config(
-            "{self-test-endpoint}",
+            "{self-test-virtual-microphone-render-endpoint}",
+            "{self-test-virtual-speaker-render-endpoint}",
             paths.runtime_status,
         ),
     )
     check(
         "single-user-mode-contract",
         lambda: build_direct_config(
-            "{self-test-endpoint}",
+            "{self-test-virtual-microphone-render-endpoint}",
+            "{self-test-virtual-speaker-render-endpoint}",
             paths.runtime_status,
         )["experimentalSingleUserMode"] is True,
     )

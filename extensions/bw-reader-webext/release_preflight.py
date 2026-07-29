@@ -34,7 +34,7 @@ OFFICIAL_STATIC_PATH = "/static/pdf"
 OFFICIAL_STATIC_URL = OFFICIAL_ORIGIN + OFFICIAL_STATIC_PATH
 CHANNEL_SCHEMA = 1
 WEB_TEST_URL = "https://en.wikipedia.org/wiki/Reading"
-LAUNCHER_VERSION = 11
+LAUNCHER_VERSION = 12
 
 ROOT_FILES = (
     "manifest.json",
@@ -93,7 +93,9 @@ WINDOWS_SOURCE_FILES = (
     "ComputerVoiceAudio/DirectBridgeSelfTest.cs",
     "ComputerVoiceAudio/DirectBridgeServer.cs",
     "ComputerVoiceAudio/DirectConnectionPhaseDeadline.cs",
+    "ComputerVoiceAudio/DirectContextBridge.cs",
     "ComputerVoiceAudio/DirectMicrophoneDiscovery.cs",
+    "ComputerVoiceAudio/DirectOutputRouteObserver.cs",
     "ComputerVoiceAudio/DirectPcmFrame.cs",
     "ComputerVoiceAudio/DirectRuntimeStatus.cs",
     "ComputerVoiceAudio/DirectServiceLease.cs",
@@ -109,6 +111,7 @@ WINDOWS_SOURCE_FILES = (
     "ComputerVoiceAudio/Program.cs",
     "ComputerVoiceAudio/README.md",
     "ComputerVoiceAudio/SharedEventDrivenPcmRuntime.cs",
+    "ComputerVoiceAudio/VirtualMicrophoneRenderSession.cs",
     "ComputerVoiceAudio/WindowsCodexAppProbe.cs",
     "ComputerVoiceAudio/WindowsDirectAdapters.cs",
     "ComputerVoiceAudio/computer-voice-direct.config.example.json",
@@ -123,6 +126,11 @@ WINDOWS_SOURCE_FILES = (
     "computer-voice-desktop/tests/test_desktop_launcher.py",
     "package_computer_voice_direct.py",
     "test_computer_voice_direct_package.py",
+    "typist-runtime/typist_ipc.py",
+    "typist-runtime/voice_typist.py",
+    "typist-runtime/voice-typist-launcher.ps1",
+    "typist-runtime/tests/test_typist_ipc.py",
+    "typist-runtime/tests/test_voice_typist_direct_runtime.py",
 )
 LAUNCHER_PS1 = "BW扩展测试.ps1"
 LAUNCHER_CHANNEL_BASENAME = "bw-reader-extension-test"

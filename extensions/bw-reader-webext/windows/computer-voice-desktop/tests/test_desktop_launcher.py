@@ -11,9 +11,13 @@ SOURCE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE_ROOT))
 
 from bridge_core import BridgeError, DirectStatus  # noqa: E402
-from bridge_core import Microphone  # noqa: E402
+from bridge_core import RenderEndpoint  # noqa: E402
 from control_plane import TaskInspection  # noqa: E402
 from desktop_launcher import BridgeWindow, main  # noqa: E402
+
+
+VIRTUAL_MICROPHONE = RenderEndpoint("id-a", "virtual mic A")
+VIRTUAL_SPEAKER = RenderEndpoint("id-b", "virtual speaker B")
 
 
 class FakeWidget:
@@ -22,6 +26,22 @@ class FakeWidget:
 
     def configure(self, **values) -> None:
         self.values.append(values)
+
+
+class FakeCombo(FakeWidget):
+    def __init__(self, current_index: int = -1) -> None:
+        super().__init__()
+        self.current_index = current_index
+        self.text = "stale"
+
+    def current(self, index: int | None = None) -> int:
+        if index is not None:
+            self.current_index = index
+        return self.current_index
+
+    def set(self, value: str) -> None:
+        self.text = value
+        self.current_index = -1
 
 
 class DesktopLauncherTests(unittest.TestCase):
@@ -48,6 +68,7 @@ class DesktopLauncherTests(unittest.TestCase):
         window.config_status = FakeWidget()
         window.service_status = FakeWidget()
         window.reader_status = FakeWidget()
+        window.error_status = FakeWidget()
         window.render_status(
             DirectStatus(
                 configuration_enabled=True,
@@ -63,6 +84,66 @@ class DesktopLauncherTests(unittest.TestCase):
         self.assertEqual(service["foreground"], "#6b7280")
         self.assertTrue(str(reader["text"]).startswith("○"))
         self.assertEqual(reader["foreground"], "#6b7280")
+
+    def test_runtime_failure_is_rendered_without_endpoint_details(self) -> None:
+        window = BridgeWindow.__new__(BridgeWindow)
+        window.config_status = FakeWidget()
+        window.service_status = FakeWidget()
+        window.reader_status = FakeWidget()
+        window.error_status = FakeWidget()
+        window.render_status(
+            DirectStatus(
+                True,
+                True,
+                False,
+                "reader-not-connected",
+                last_error={
+                    "failureId": "failure-AAAAAAAAAAAAAAAA",
+                    "code": "BW_COMPUTER_VOICE_AUDIO_FAILURE",
+                    "stage": "virtual-speaker.validate",
+                    "hresult": "0x80070490",
+                    "atUtc": "2026-07-29T04:29:00Z",
+                },
+            )
+        )
+        rendered = str(window.error_status.values[-1]["text"])
+        self.assertIn("BW_COMPUTER_VOICE_AUDIO_FAILURE", rendered)
+        self.assertIn("0x80070490", rendered)
+        self.assertNotIn("endpoint", rendered.casefold())
+
+    def test_render_endpoint_refresh_has_no_default_fallback(self) -> None:
+        window = BridgeWindow.__new__(BridgeWindow)
+        window.virtual_microphone_combo = FakeCombo()
+        window.virtual_speaker_combo = FakeCombo()
+        window.render_endpoint_provider = lambda: [
+            VIRTUAL_MICROPHONE,
+            VIRTUAL_SPEAKER,
+        ]
+        window._refresh_render_endpoints()
+        self.assertEqual(window.virtual_microphone_combo.current(), -1)
+        self.assertEqual(window.virtual_speaker_combo.current(), -1)
+        with self.assertRaises(BridgeError):
+            window.selected_virtual_endpoints()
+
+    def test_same_endpoint_is_rejected_by_ui_selection(self) -> None:
+        window = BridgeWindow.__new__(BridgeWindow)
+        window.render_endpoints = [VIRTUAL_MICROPHONE]
+        window.virtual_microphone_combo = FakeCombo(0)
+        window.virtual_speaker_combo = FakeCombo(0)
+        with self.assertRaisesRegex(BridgeError, "不能相同"):
+            window.selected_virtual_endpoints()
+
+    def test_audio_settings_button_opens_documented_settings_page(self) -> None:
+        window = BridgeWindow.__new__(BridgeWindow)
+        window.root = object()
+        window.footer = FakeWidget()
+        with patch("desktop_launcher.os.startfile") as startfile:
+            window.on_open_audio_settings()
+        startfile.assert_called_once_with("ms-settings:apps-volume")
+        self.assertIn(
+            "未修改全局默认设备",
+            str(window.footer.values[-1]["text"]),
+        )
 
     def test_refresh_callback_does_not_start_any_action(self) -> None:
         window = BridgeWindow.__new__(BridgeWindow)
@@ -104,6 +185,7 @@ class DesktopLauncherTests(unittest.TestCase):
                 elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
                     function_names.add(node.name)
             self.assertTrue(imports.isdisjoint(forbidden_imports))
+            self.assertNotIn("AudioPolicyConfigFactory", source)
             self.assertTrue(
                 function_names.isdisjoint(
                     {
@@ -135,12 +217,19 @@ class DesktopLauncherTests(unittest.TestCase):
         window = BridgeWindow.__new__(BridgeWindow)
         window.root = object()
         window.paths = object()
-        window.selected_microphone = lambda: Microphone("id", "mic")
+        window.selected_virtual_endpoints = lambda: (
+            VIRTUAL_MICROPHONE,
+            VIRTUAL_SPEAKER,
+        )
         window._confirm_mutation = lambda *_: False
         calls: list[str] = []
         window.run_task = lambda *_: calls.append("mutation")
-        window.on_enable_config()
-        window.on_start()
+        with patch(
+            "desktop_launcher.legacy_microphone_config_requires_migration",
+            return_value=False,
+        ):
+            window.on_enable_config()
+            window.on_start()
         with patch(
             "desktop_launcher.messagebox.askyesno",
             return_value=False,
@@ -190,6 +279,16 @@ class DesktopLauncherTests(unittest.TestCase):
             SOURCE_ROOT / "bridge_core.py"
         ).read_text(encoding="utf-8"))
 
+    def test_desktop_ui_warns_that_listed_endpoints_are_not_created_by_bridge(
+        self,
+    ) -> None:
+        source = (SOURCE_ROOT / "desktop_launcher.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertIn("桥接程序本身不会创建", source)
+        self.assertIn("不要把 Realtek、Steam、Oculus", source)
+        self.assertIn("两根彼此独立、已签名的虚拟音频线缆", source)
+
     def test_start_prefers_owned_task_after_atomic_opt_in(self) -> None:
         window = BridgeWindow.__new__(BridgeWindow)
         window.root = object()
@@ -197,8 +296,14 @@ class DesktopLauncherTests(unittest.TestCase):
         window.control_paths = object()
         window.control_runner = object()
         window.process_runner = object()
-        window.selected_microphone = lambda: Microphone("id", "mic")
-        window.microphone_provider = lambda: [Microphone("id", "mic")]
+        window.selected_virtual_endpoints = lambda: (
+            VIRTUAL_MICROPHONE,
+            VIRTUAL_SPEAKER,
+        )
+        window.render_endpoint_provider = lambda: [
+            VIRTUAL_MICROPHONE,
+            VIRTUAL_SPEAKER,
+        ]
         window._confirm_mutation = lambda *_: True
         window.footer = FakeWidget()
         window.refresh_static = lambda: None
@@ -209,6 +314,10 @@ class DesktopLauncherTests(unittest.TestCase):
 
         window.run_task = immediate
         with (
+            patch(
+                "desktop_launcher.legacy_microphone_config_requires_migration",
+                return_value=False,
+            ),
             patch(
                 "desktop_launcher.inspect_bootstrap_task",
                 return_value=TaskInspection(True, True, "S-1-5-21-1"),
@@ -241,8 +350,14 @@ class DesktopLauncherTests(unittest.TestCase):
         window.control_paths = object()
         window.control_runner = object()
         window.process_runner = object()
-        window.selected_microphone = lambda: Microphone("id", "mic")
-        window.microphone_provider = lambda: [Microphone("id", "mic")]
+        window.selected_virtual_endpoints = lambda: (
+            VIRTUAL_MICROPHONE,
+            VIRTUAL_SPEAKER,
+        )
+        window.render_endpoint_provider = lambda: [
+            VIRTUAL_MICROPHONE,
+            VIRTUAL_SPEAKER,
+        ]
         window._confirm_mutation = lambda *_: True
         window.footer = FakeWidget()
         window.refresh_static = lambda: None
@@ -253,6 +368,10 @@ class DesktopLauncherTests(unittest.TestCase):
 
         window.run_task = immediate
         with (
+            patch(
+                "desktop_launcher.legacy_microphone_config_requires_migration",
+                return_value=False,
+            ),
             patch(
                 "desktop_launcher.inspect_bootstrap_task",
                 return_value=TaskInspection(False, False, "S-1-5-21-1"),
@@ -288,8 +407,14 @@ class DesktopLauncherTests(unittest.TestCase):
         window.control_paths = object()
         window.control_runner = object()
         window.process_runner = object()
-        window.selected_microphone = lambda: Microphone("id", "mic")
-        window.microphone_provider = lambda: [Microphone("id", "mic")]
+        window.selected_virtual_endpoints = lambda: (
+            VIRTUAL_MICROPHONE,
+            VIRTUAL_SPEAKER,
+        )
+        window.render_endpoint_provider = lambda: [
+            VIRTUAL_MICROPHONE,
+            VIRTUAL_SPEAKER,
+        ]
         window._confirm_mutation = lambda *_: True
         errors: list[Exception] = []
 
@@ -301,6 +426,10 @@ class DesktopLauncherTests(unittest.TestCase):
 
         window.run_task = immediate
         with (
+            patch(
+                "desktop_launcher.legacy_microphone_config_requires_migration",
+                return_value=False,
+            ),
             patch(
                 "desktop_launcher.inspect_bootstrap_task",
                 return_value=TaskInspection(True, False, "S-1-5-21-1"),

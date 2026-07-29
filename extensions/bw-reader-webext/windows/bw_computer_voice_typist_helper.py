@@ -16,7 +16,6 @@ from typing import Callable
 
 from bw_computer_voice_supervisor import (
     CONTRACT,
-    DEFAULT_TYPING_LAUNCHER,
     SupervisorError,
     VoiceTypistLauncher,
 )
@@ -24,6 +23,8 @@ from bw_computer_voice_supervisor import (
 
 def _default_stop_runner(
     launcher_path: Path,
+    expected_pid: int,
+    expected_start_file_time_utc: int,
 ) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
         (
@@ -36,6 +37,10 @@ def _default_stop_runner(
             str(launcher_path),
             "-Action",
             "Stop",
+            "-ExpectedPid",
+            str(expected_pid),
+            "-ExpectedStartFileTimeUtc",
+            str(expected_start_file_time_utc),
         ),
         check=False,
         capture_output=True,
@@ -47,16 +52,25 @@ def _default_stop_runner(
 
 def stop_if_owned(
     expected_pid: int,
+    expected_start_file_time_utc: int,
     *,
     launcher: VoiceTypistLauncher | None = None,
     stop_runner: Callable[
-        [Path], subprocess.CompletedProcess[str]
+        [Path, int, int], subprocess.CompletedProcess[str]
     ] = _default_stop_runner,
 ) -> dict[str, object]:
     if isinstance(expected_pid, bool) or expected_pid <= 0:
         raise SupervisorError(
             "BW_COMPUTER_VOICE_TYPIST_LEASE_INVALID",
             "voice-typist lease PID 无效",
+        )
+    if (
+        isinstance(expected_start_file_time_utc, bool)
+        or expected_start_file_time_utc <= 0
+    ):
+        raise SupervisorError(
+            "BW_COMPUTER_VOICE_TYPIST_LEASE_INVALID",
+            "voice-typist lease 启动时间无效",
         )
     controller = launcher or VoiceTypistLauncher()
     before = controller.verified_status()
@@ -66,14 +80,23 @@ def stop_if_owned(
             "stopped": False,
             "result": "already-stopped",
             "expectedPid": expected_pid,
+            "expectedStartFileTimeUtc": expected_start_file_time_utc,
         }
-    if before.pid != expected_pid:
+    if (
+        before.pid != expected_pid
+        or before.process_start_file_time_utc
+            != expected_start_file_time_utc
+    ):
         raise SupervisorError(
             "BW_COMPUTER_VOICE_TYPIST_LEASE_MISMATCH",
-            "voice-typist 当前 PID 与桥接器 lease 不一致，拒绝停止",
+            "voice-typist 当前进程代次与桥接器 lease 不一致，拒绝停止",
         )
 
-    completed = stop_runner(DEFAULT_TYPING_LAUNCHER)
+    completed = stop_runner(
+        controller.launcher_path,
+        expected_pid,
+        expected_start_file_time_utc,
+    )
     if completed.returncode != 0:
         raise SupervisorError(
             "BW_COMPUTER_VOICE_TYPIST_STOP_FAILED",
@@ -90,20 +113,21 @@ def stop_if_owned(
         "stopped": True,
         "result": "stopped",
         "expectedPid": expected_pid,
+        "expectedStartFileTimeUtc": expected_start_file_time_utc,
     }
 
 
-def _parse_expected_pid(value: str) -> int:
+def _parse_positive_integer(value: str, label: str) -> int:
     if not value.isascii() or not value.isdecimal():
         raise SupervisorError(
             "BW_COMPUTER_VOICE_TYPIST_LEASE_INVALID",
-            "voice-typist lease PID 无效",
+            f"voice-typist lease {label} 无效",
         )
     pid = int(value, 10)
     if pid <= 0:
         raise SupervisorError(
             "BW_COMPUTER_VOICE_TYPIST_LEASE_INVALID",
-            "voice-typist lease PID 无效",
+            f"voice-typist lease {label} 无效",
         )
     return pid
 
@@ -118,10 +142,16 @@ def _write(payload: dict[str, object]) -> None:
 
 def main(argv: list[str]) -> int:
     try:
-        if argv == ["--ensure-running"]:
-            result = VoiceTypistLauncher().ensure_running()
-        elif len(argv) == 2 and argv[0] == "--stop-if-owned":
-            result = stop_if_owned(_parse_expected_pid(argv[1]))
+        if len(argv) == 3 and argv[0] == "--ensure-running":
+            result = VoiceTypistLauncher().ensure_running(
+                _parse_positive_integer(argv[1], "owner PID"),
+                _parse_positive_integer(argv[2], "owner 启动时间"),
+            )
+        elif len(argv) == 3 and argv[0] == "--stop-if-owned":
+            result = stop_if_owned(
+                _parse_positive_integer(argv[1], "PID"),
+                _parse_positive_integer(argv[2], "启动时间"),
+            )
         else:
             _write({
                 "contract": CONTRACT,

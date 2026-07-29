@@ -4,6 +4,72 @@ using System.Text.Json;
 
 namespace BwReader.ComputerVoiceAudio;
 
+internal sealed record DirectRuntimeError(
+    string FailureId,
+    string Code,
+    string Stage,
+    string? Hresult,
+    DateTimeOffset AtUtc)
+{
+    internal static DirectRuntimeError FromException(
+        Exception exception,
+        string fallbackStage,
+        DateTimeOffset? atUtc = null)
+    {
+        ArgumentNullException.ThrowIfNull(exception);
+        AudioCaptureStageException? audioStage =
+            FindAudioStageFailure(exception);
+        string code = exception is DirectProtocolException protocol
+            && DirectBridgeContract.IsSafeId(protocol.Code)
+                ? protocol.Code
+                : "BW_COMPUTER_VOICE_DIRECT_INTERNAL_FAILURE";
+        string stage = audioStage?.Stage ?? fallbackStage;
+        if (
+            string.IsNullOrWhiteSpace(stage)
+            || stage.Length > 80
+            || stage.Any(character =>
+                !(character is >= 'a' and <= 'z')
+                && character is not '-' and not '.')
+        )
+        {
+            stage = "unknown";
+        }
+        return new DirectRuntimeError(
+            "failure-" + DirectBase64Url.Encode(
+                RandomNumberGenerator.GetBytes(12)),
+            code,
+            stage,
+            audioStage is null
+                ? null
+                : $"0x{unchecked((uint)audioStage.Result):X8}",
+            (atUtc ?? DateTimeOffset.UtcNow).ToUniversalTime());
+    }
+
+    private static AudioCaptureStageException? FindAudioStageFailure(
+        Exception exception)
+    {
+        if (exception is AudioCaptureStageException stage)
+        {
+            return stage;
+        }
+        if (exception is AggregateException aggregate)
+        {
+            foreach (Exception inner in aggregate.Flatten().InnerExceptions)
+            {
+                AudioCaptureStageException? found =
+                    FindAudioStageFailure(inner);
+                if (found is not null)
+                {
+                    return found;
+                }
+            }
+        }
+        return exception.InnerException is null
+            ? null
+            : FindAudioStageFailure(exception.InnerException);
+    }
+}
+
 internal sealed class DirectRuntimeStatusWriter
 {
     private static readonly IReadOnlySet<string> AllowedStates =
@@ -48,6 +114,21 @@ internal sealed class DirectRuntimeStatusWriter
         bool captureActive,
         CancellationToken cancellationToken)
     {
+        await WriteAsync(
+            state,
+            readerConnected,
+            captureActive,
+            lastError: null,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    internal async Task WriteAsync(
+        string state,
+        bool readerConnected,
+        bool captureActive,
+        DirectRuntimeError? lastError,
+        CancellationToken cancellationToken)
+    {
         if (!AllowedStates.Contains(state))
         {
             throw new ArgumentOutOfRangeException(nameof(state));
@@ -76,6 +157,7 @@ internal sealed class DirectRuntimeStatusWriter
                 state,
                 readerConnected,
                 captureActive,
+                lastError,
                 updatedAtUtc = DateTimeOffset.UtcNow,
             }, new JsonSerializerOptions(
                 DirectBridgeContract.JsonOptions)

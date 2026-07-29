@@ -50,7 +50,8 @@ internal sealed record DirectMediaStartRequest(
     uint RootProcessId,
     string AppKind,
     string AppUserModelId,
-    string MicrophoneEndpointId);
+    string VirtualMicrophoneRenderEndpointId,
+    string VirtualSpeakerRenderEndpointId);
 
 internal sealed record DirectMediaStartResult(
     bool HostReady,
@@ -62,11 +63,17 @@ internal interface IDirectMediaAdapter : IAsyncDisposable
 
     bool CaptureActive { get; }
 
+    bool IsOutputRouteVerified(DirectBridgeConfig config);
+
     Task<DirectProtocolException?> Completion { get; }
 
     Task<DirectMediaStartResult> StartAsync(
         DirectMediaStartRequest request,
         Func<DirectPcmFrame, CancellationToken, Task> sendFrameAsync,
+        CancellationToken cancellationToken);
+
+    Task PushUplinkFrameAsync(
+        DirectPcmFrame frame,
         CancellationToken cancellationToken);
 
     Task StopAsync(CancellationToken cancellationToken);
@@ -78,6 +85,8 @@ internal sealed class UnwiredDirectMediaAdapter : IDirectMediaAdapter
 
     public bool CaptureActive => false;
 
+    public bool IsOutputRouteVerified(DirectBridgeConfig config) => false;
+
     public Task<DirectProtocolException?> Completion =>
         Task.FromResult<DirectProtocolException?>(null);
 
@@ -86,6 +95,14 @@ internal sealed class UnwiredDirectMediaAdapter : IDirectMediaAdapter
         Func<DirectPcmFrame, CancellationToken, Task> sendFrameAsync,
         CancellationToken cancellationToken) =>
         Task.FromException<DirectMediaStartResult>(
+            new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_MEDIA_NOT_WIRED",
+                "Windows 直连媒体适配器尚未接线"));
+
+    public Task PushUplinkFrameAsync(
+        DirectPcmFrame frame,
+        CancellationToken cancellationToken) =>
+        Task.FromException(
             new DirectProtocolException(
                 "BW_COMPUTER_VOICE_DIRECT_MEDIA_NOT_WIRED",
                 "Windows 直连媒体适配器尚未接线"));
@@ -102,10 +119,14 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
     private readonly DirectBridgeConfigStore _configStore;
     private readonly IDirectAppLauncher _appLauncher;
     private readonly IDirectMediaAdapter _mediaAdapter;
+    private readonly IDirectContextAdapter _contextAdapter;
     private readonly Func<long> _monotonicMilliseconds;
+    private readonly Func<DirectBridgeConfig, DirectProtocolException?>
+        _renderEndpointProbe;
     private readonly SemaphoreSlim _stateGate = new(1, 1);
     private readonly SemaphoreSlim _disposeGate = new(1, 1);
     private readonly object _heartbeatGate = new();
+    private readonly object _runtimeErrorGate = new();
     private string? _activeConnectionId;
     private string? _activeSessionId;
     private long? _heartbeatDeadlineMilliseconds;
@@ -117,13 +138,20 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
         DirectBridgeConfigStore configStore,
         IDirectAppLauncher appLauncher,
         IDirectMediaAdapter mediaAdapter,
-        Func<long>? monotonicMilliseconds = null)
+        Func<long>? monotonicMilliseconds = null,
+        Func<DirectBridgeConfig, DirectProtocolException?>?
+            renderEndpointProbe = null,
+        IDirectContextAdapter? contextAdapter = null)
     {
         _configStore = configStore;
         _appLauncher = appLauncher;
         _mediaAdapter = mediaAdapter;
+        _contextAdapter =
+            contextAdapter ?? new UnwiredDirectContextAdapter();
         _monotonicMilliseconds =
             monotonicMilliseconds ?? (() => Environment.TickCount64);
+        _renderEndpointProbe =
+            renderEndpointProbe ?? ProbeConfiguredRenderEndpoints;
     }
 
     internal bool CaptureActive => _mediaAdapter.CaptureActive;
@@ -131,6 +159,33 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
     internal bool AppLauncherReady => _appLauncher.IsWired;
 
     internal bool MediaHostReady => _mediaAdapter.IsWired;
+
+    internal bool OutputRouteVerified(DirectBridgeConfig config)
+    {
+        try
+        {
+            return _mediaAdapter.IsOutputRouteVerified(config);
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    internal bool ConfiguredRenderEndpointsReady(
+        DirectBridgeConfig config,
+        out string? reason)
+    {
+        DirectProtocolException? failure = _renderEndpointProbe(config);
+        if (failure is null)
+        {
+            reason = null;
+            return true;
+        }
+        _ = RecordFailure(failure, "render-endpoint-probe");
+        reason = failure.Code;
+        return false;
+    }
 
     internal Task<DirectProtocolException?> MediaCompletion =>
         _mediaAdapter.Completion;
@@ -143,6 +198,64 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
             {
                 return _activeSessionId;
             }
+        }
+    }
+
+    internal DirectRuntimeError? LastError
+    {
+        get
+        {
+            lock (_runtimeErrorGate)
+            {
+                return _lastError;
+            }
+        }
+    }
+
+    private DirectRuntimeError? _lastError;
+
+    internal DirectRuntimeError RecordFailure(
+        Exception exception,
+        string fallbackStage)
+    {
+        DirectRuntimeError failure = DirectRuntimeError.FromException(
+            exception,
+            fallbackStage);
+        lock (_runtimeErrorGate)
+        {
+            _lastError = failure;
+        }
+        return failure;
+    }
+
+    private void ClearLastError()
+    {
+        lock (_runtimeErrorGate)
+        {
+            _lastError = null;
+        }
+    }
+
+    private static DirectProtocolException?
+        ProbeConfiguredRenderEndpoints(DirectBridgeConfig config)
+    {
+        try
+        {
+            VirtualRenderEndpointProbe.ValidateExactActiveRender(
+                config.VirtualMicrophoneRenderEndpointId,
+                "virtual-microphone");
+            VirtualRenderEndpointProbe.ValidateExactActiveRender(
+                config.VirtualSpeakerRenderEndpointId,
+                "virtual-speaker");
+            return null;
+        }
+        catch (Exception exception)
+        {
+            return new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_RENDER_ENDPOINT_UNAVAILABLE",
+                "虚拟音频播放端点未就绪",
+                retryable: true,
+                innerException: exception);
         }
     }
 
@@ -165,6 +278,7 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
                     && _mediaAdapter.CaptureActive
                 )
                 {
+                    ClearLastError();
                     return new DirectMediaStartResult(
                         HostReady: true,
                         CaptureActive: true);
@@ -237,7 +351,8 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
                         target.RootProcessId,
                         config.AppKind,
                         DirectBridgeContract.CodexAppUserModelId,
-                        config.MicrophoneEndpointId),
+                        config.VirtualMicrophoneRenderEndpointId,
+                        config.VirtualSpeakerRenderEndpointId),
                     sendFrameAsync,
                     cancellationToken).ConfigureAwait(false);
             if (!started.HostReady
@@ -262,10 +377,12 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
                     + DirectBridgeContract
                         .ClientHeartbeatTimeoutMilliseconds);
             }
+            ClearLastError();
             return started;
         }
-        catch
+        catch (Exception exception)
         {
+            _ = RecordFailure(exception, "start");
             if (_activeSessionId is null && _mediaAdapter.CaptureActive)
             {
                 await _mediaAdapter.StopAsync(CancellationToken.None)
@@ -319,6 +436,72 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
         {
             _stateGate.Release();
         }
+    }
+
+    internal async Task PushUplinkFrameAsync(
+        string connectionId,
+        string sessionId,
+        DirectPcmFrame frame,
+        CancellationToken cancellationToken)
+    {
+        await _stateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            RequireActiveOwner(connectionId, sessionId);
+            if (
+                !_mediaAdapter.CaptureActive
+                || frame.Track != DirectPcmTrack.BrowserMicrophone
+            )
+            {
+                throw new DirectProtocolException(
+                    "BW_COMPUTER_VOICE_DIRECT_UPLINK_NOT_ACTIVE",
+                    "浏览器麦克风上行尚未启动");
+            }
+            await _mediaAdapter.PushUplinkFrameAsync(
+                frame,
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _stateGate.Release();
+        }
+    }
+
+    internal async Task<DirectContextForwardResult> ForwardContextAsync(
+        string connectionId,
+        string requestId,
+        string sessionId,
+        string contextContract,
+        DirectContextEvent contextEvent,
+        CancellationToken cancellationToken)
+    {
+        await _stateGate.WaitAsync(cancellationToken)
+            .ConfigureAwait(false);
+        try
+        {
+            ThrowIfDisposed();
+            RequireActiveOwner(connectionId, sessionId);
+            if (!_mediaAdapter.CaptureActive)
+            {
+                throw new DirectProtocolException(
+                    "BW_COMPUTER_VOICE_CONTEXT_NOT_ACTIVE",
+                    "Reader context 只允许发送到当前活动通话");
+            }
+        }
+        finally
+        {
+            _stateGate.Release();
+        }
+
+        // IPC is deliberately outside the media state lock. A 3 second typist
+        // timeout must not block microphone uplink, heartbeats, or STOP.
+        return await _contextAdapter.ForwardAsync(
+            requestId,
+            sessionId,
+            contextContract,
+            contextEvent,
+            cancellationToken).ConfigureAwait(false);
     }
 
     internal async Task StopForConnectionAsync(string connectionId)

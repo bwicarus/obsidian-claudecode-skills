@@ -5,7 +5,7 @@ namespace BwReader.ComputerVoiceAudio;
 internal static class DirectAudioDiagnostics
 {
     private const string Contract =
-        "reader-computer-voice-audio-diagnostic/1";
+        "reader-computer-voice-audio-diagnostic/2";
 
     internal static async Task<object> RunAsync(
         DirectBridgeConfig config,
@@ -32,22 +32,168 @@ internal static class DirectAudioDiagnostics
                 CaptureSessionOptions.Default.ActivationTimeout,
                 cancellationToken),
             cancellationToken).ConfigureAwait(false);
-        StreamDiagnostic microphone = await ProbeOnMtaAsync(
-            "microphone",
-            () => new NativeExplicitMicrophoneCaptureRuntimeFactory().Create(
-                MicCaptureRequest.Create(config.MicrophoneEndpointId),
-                cancellationToken),
-            cancellationToken).ConfigureAwait(false);
+        StreamDiagnostic virtualMicrophoneRender =
+            await ProbeRenderOnMtaAsync(
+                config.VirtualMicrophoneRenderEndpointId,
+                cancellationToken).ConfigureAwait(false);
+        StreamDiagnostic virtualSpeakerEndpoint =
+            await ProbeRenderEndpointOnMtaAsync(
+                config.VirtualSpeakerRenderEndpointId,
+                "virtual-speaker",
+                cancellationToken).ConfigureAwait(false);
 
         return new
         {
             contract = Contract,
-            ok = output.Ok && microphone.Ok,
+            ok = output.Ok
+                && virtualMicrophoneRender.Ok
+                && virtualSpeakerEndpoint.Ok,
             captureStarted = false,
             shortcutSent = false,
             output,
-            microphone,
+            virtualMicrophoneRender,
+            virtualSpeakerEndpoint,
         };
+    }
+
+    private static Task<StreamDiagnostic> ProbeRenderOnMtaAsync(
+        string endpointId,
+        CancellationToken cancellationToken)
+    {
+        TaskCompletionSource<StreamDiagnostic> completion =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        Thread thread = new(() =>
+        {
+            IVirtualMicrophoneRenderRuntime? runtime = null;
+            EventWaitHandle? audioReady = null;
+            ComMtaLease? apartment = null;
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                apartment = ComMtaLease.Enter();
+                audioReady = new EventWaitHandle(
+                    false,
+                    EventResetMode.AutoReset);
+                runtime =
+                    new NativeVirtualMicrophoneRenderRuntimeFactory()
+                        .Create(
+                            VirtualMicrophoneRenderRequest.Create(
+                                endpointId),
+                            cancellationToken);
+                runtime.Initialize(audioReady);
+                // Deliberately do not call Start().
+                runtime.Stop();
+                completion.TrySetResult(SuccessfulRenderDiagnostic());
+            }
+            catch (OperationCanceledException)
+                when (cancellationToken.IsCancellationRequested)
+            {
+                completion.TrySetCanceled(cancellationToken);
+            }
+            catch (Exception exception)
+            {
+                completion.TrySetResult(FailedDiagnostic(
+                    "virtual-microphone",
+                    exception));
+            }
+            finally
+            {
+                try
+                {
+                    runtime?.Dispose();
+                }
+                catch
+                {
+                }
+                audioReady?.Dispose();
+                apartment?.Dispose();
+            }
+        })
+        {
+            IsBackground = true,
+            Name = "BW audio diagnostic virtual-microphone",
+        };
+        if (OperatingSystem.IsWindows())
+        {
+            thread.SetApartmentState(ApartmentState.MTA);
+        }
+        thread.Start();
+        return completion.Task;
+    }
+
+    private static Task<StreamDiagnostic>
+        ProbeRenderEndpointOnMtaAsync(
+            string endpointId,
+            string stagePrefix,
+            CancellationToken cancellationToken)
+    {
+        TaskCompletionSource<StreamDiagnostic> completion =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        Thread thread = new(() =>
+        {
+            try
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                VirtualRenderEndpointProbe.ValidateExactActiveRender(
+                    endpointId,
+                    stagePrefix);
+                completion.TrySetResult(new StreamDiagnostic(
+                    Ok: true,
+                    Stage: "virtual-speaker-endpoint-ready",
+                    HResult: "0x00000000",
+                    SampleRate: 0,
+                    Channels: 0,
+                    BitsPerSample: 0));
+            }
+            catch (OperationCanceledException)
+                when (cancellationToken.IsCancellationRequested)
+            {
+                completion.TrySetCanceled(cancellationToken);
+            }
+            catch (Exception exception)
+            {
+                completion.TrySetResult(FailedDiagnostic(
+                    stagePrefix,
+                    exception));
+            }
+        })
+        {
+            IsBackground = true,
+            Name = $"BW audio diagnostic {stagePrefix}",
+        };
+        if (OperatingSystem.IsWindows())
+        {
+            thread.SetApartmentState(ApartmentState.MTA);
+        }
+        thread.Start();
+        return completion.Task;
+    }
+
+    private static StreamDiagnostic SuccessfulRenderDiagnostic() =>
+        new(
+            Ok: true,
+            Stage: "initialized-without-start",
+            HResult: "0x00000000",
+            SampleRate: Pcm48kMonoFramer.SampleRate,
+            Channels: 1,
+            BitsPerSample: 16);
+
+    private static StreamDiagnostic FailedDiagnostic(
+        string stream,
+        Exception exception)
+    {
+        AudioCaptureStageException failure =
+            FindAudioStageFailure(exception)
+            ?? AudioCaptureStageException.From(
+                $"{stream}.diagnostic",
+                exception);
+        return new StreamDiagnostic(
+            Ok: false,
+            Stage: failure.Stage,
+            HResult: $"0x{unchecked((uint)failure.Result):X8}",
+            SampleRate: 0,
+            Channels: 0,
+            BitsPerSample: 0);
     }
 
     private static Task<StreamDiagnostic> ProbeOnMtaAsync(

@@ -1,5 +1,3 @@
-using System.Security.Cryptography;
-using System.Text;
 using System.Text.Json;
 
 namespace BwReader.ComputerVoiceAudio;
@@ -8,11 +6,9 @@ internal static class DirectBridgeContract
 {
     internal const string Contract = "reader-computer-voice-direct/1";
     internal const string ConfigContract =
-        "reader-computer-voice-direct-config/1";
+        "reader-computer-voice-direct-config/3";
     internal const string RuntimeStatusContract =
-        "reader-computer-voice-direct-runtime-status/1";
-    internal const string AuthenticationContract =
-        "reader-computer-voice-auth/1";
+        "reader-computer-voice-direct-runtime-status/2";
     internal const string ListenHost = "127.0.0.1";
     internal const int DefaultListenPort = 43128;
     internal const int MaximumMessageBytes = 64 * 1024;
@@ -22,16 +18,12 @@ internal static class DirectBridgeContract
     internal const int PcmFrameBytes =
         PcmFrameHeaderBytes + PcmPayloadBytes;
     internal const int PcmQueueLimitMilliseconds = 400;
+    internal const int UplinkPcmQueueLimitMilliseconds =
+        BoundedUplinkPcmQueue.MaximumBufferedMilliseconds;
     internal const int AuthenticationTimeoutMilliseconds = 10_000;
     internal const int StartTimeoutMilliseconds = 30_000;
     internal const int ClientHeartbeatIntervalMilliseconds = 5_000;
     internal const int ClientHeartbeatTimeoutMilliseconds = 15_000;
-    internal const int ChallengeBytes = 32;
-    internal const int ChallengeIdBytes = 16;
-    internal const int ChallengeLifetimeSeconds = 30;
-    internal const int PairingCodeLength = 10;
-    internal const string PairingCodeAlphabet =
-        "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
     internal const string CodexAppUserModelId =
         "OpenAI.Codex_2p2nqsd0c76g0!App";
     internal static readonly TimeSpan RuntimeStatusHeartbeatInterval =
@@ -42,42 +34,6 @@ internal static class DirectBridgeContract
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         WriteIndented = false,
     };
-
-    internal static byte[] BuildAuthenticationPayload(
-        string challengeId,
-        string nonce,
-        string origin) =>
-        Encoding.UTF8.GetBytes(
-            $"{AuthenticationContract}\n{challengeId}\n{nonce}\n{origin}");
-
-    internal static bool IsValidPairingCode(string value)
-    {
-        if (value.Length != PairingCodeLength)
-        {
-            return false;
-        }
-        foreach (char character in value)
-        {
-            if (PairingCodeAlphabet.IndexOf(character) < 0)
-            {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    internal static string HashPairingCode(string value)
-    {
-        if (!IsValidPairingCode(value))
-        {
-            throw new DirectProtocolException(
-                "BW_COMPUTER_VOICE_DIRECT_PAIRING_CODE_INVALID",
-                "配对码格式无效",
-                retryable: false);
-        }
-        return DirectBase64Url.Encode(
-            SHA256.HashData(Encoding.UTF8.GetBytes(value)));
-    }
 
     internal static bool IsSafeId(string value) =>
         value.Length is >= 1 and <= 160

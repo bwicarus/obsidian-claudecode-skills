@@ -6,7 +6,8 @@ namespace BwReader.ComputerVoiceAudio;
 internal enum DirectPcmTrack : byte
 {
     AppOutput = 1,
-    UserMicrophone = 2,
+    LegacyWindowsMicrophone = 2,
+    BrowserMicrophone = 3,
 }
 
 internal sealed record DirectPcmFrame(
@@ -14,6 +15,10 @@ internal sealed record DirectPcmFrame(
     uint Sequence,
     ulong TimestampMicroseconds,
     ReadOnlyMemory<byte> PcmS16Le);
+
+internal sealed record DirectDecodedPcmFrame(
+    string SessionId,
+    DirectPcmFrame Frame);
 
 internal static class DirectPcmFrameCodec
 {
@@ -25,9 +30,7 @@ internal static class DirectPcmFrameCodec
     {
         byte[] sessionBytes = ParseSessionId(sessionId);
         if (
-            frame.Track is not (
-                DirectPcmTrack.AppOutput
-                or DirectPcmTrack.UserMicrophone)
+            frame.Track != DirectPcmTrack.AppOutput
             || frame.PcmS16Le.Length
                 != DirectBridgeContract.PcmPayloadBytes
         )
@@ -54,6 +57,38 @@ internal static class DirectPcmFrameCodec
         frame.PcmS16Le.Span.CopyTo(
             result.AsSpan(DirectBridgeContract.PcmFrameHeaderBytes));
         return result;
+    }
+
+    internal static DirectDecodedPcmFrame DecodeUplink(
+        ReadOnlySpan<byte> encoded)
+    {
+        if (
+            encoded.Length != DirectBridgeContract.PcmFrameBytes
+            || !encoded[..4].SequenceEqual(Magic)
+            || encoded[4] != 1
+            || encoded[5] != (byte)DirectPcmTrack.BrowserMicrophone
+            || BinaryPrimitives.ReadUInt16LittleEndian(
+                encoded.Slice(6, 2)) != 0
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_UPLINK_FRAME_INVALID",
+                "浏览器麦克风 binary 帧合同无效");
+        }
+
+        byte[] sessionBytes = encoded.Slice(8, 16).ToArray();
+        string sessionId =
+            "session-" + DirectBase64Url.Encode(sessionBytes);
+        _ = ParseSessionId(sessionId);
+        DirectPcmFrame frame = new(
+            DirectPcmTrack.BrowserMicrophone,
+            BinaryPrimitives.ReadUInt32LittleEndian(
+                encoded.Slice(24, 4)),
+            BinaryPrimitives.ReadUInt64LittleEndian(
+                encoded.Slice(28, 8)),
+            encoded[DirectBridgeContract.PcmFrameHeaderBytes..]
+                .ToArray());
+        return new DirectDecodedPcmFrame(sessionId, frame);
     }
 
     internal static byte[] ParseSessionId(string sessionId)
@@ -112,6 +147,12 @@ internal sealed class DirectPcmStartGate
             }
             if (_state < 2)
             {
+                if (frame.Track != DirectPcmTrack.AppOutput)
+                {
+                    throw new DirectProtocolException(
+                        "BW_COMPUTER_VOICE_DIRECT_PCM_FRAME_INVALID",
+                        "服务端下行只允许应用输出轨道");
+                }
                 int count = _trackCounts.GetValueOrDefault(frame.Track);
                 if (
                     count >= FramesPerTrack
@@ -147,21 +188,35 @@ internal sealed class DirectPcmStartGate
             _state = 1;
         }
 
-        while (true)
+        try
         {
-            DirectPcmFrame? frame;
-            lock (_gate)
+            while (true)
             {
-                if (_buffer.Count == 0)
+                DirectPcmFrame? frame;
+                lock (_gate)
                 {
-                    _state = 2;
-                    return;
+                    if (_state == 3)
+                    {
+                        throw new DirectProtocolException(
+                            "BW_COMPUTER_VOICE_DIRECT_PCM_START_ABORTED",
+                            "START 未完成，PCM 帧已拒绝");
+                    }
+                    if (_buffer.Count == 0)
+                    {
+                        _state = 2;
+                        return;
+                    }
+                    frame = _buffer.Dequeue();
+                    _trackCounts[frame.Track]--;
                 }
-                frame = _buffer.Dequeue();
-                _trackCounts[frame.Track]--;
+                await _sender(frame, cancellationToken)
+                    .ConfigureAwait(false);
             }
-            await _sender(frame, cancellationToken)
-                .ConfigureAwait(false);
+        }
+        catch
+        {
+            Abort();
+            throw;
         }
     }
 

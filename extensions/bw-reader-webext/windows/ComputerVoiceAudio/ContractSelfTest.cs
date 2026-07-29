@@ -18,6 +18,7 @@ internal static class ContractSelfTest
         CheckCaptureThreadAffinity(checks);
         CheckSessionLifecycle(checks);
         CheckExplicitMicrophoneLifecycle(checks);
+        CheckVirtualMicrophoneRenderContract(checks);
         CheckInteropVtables(checks);
         DirectBridgeSelfTest.Run(checks);
 
@@ -1279,6 +1280,143 @@ internal static class ContractSelfTest
             checks);
     }
 
+    private static void CheckVirtualMicrophoneRenderContract(
+        ICollection<string> checks)
+    {
+        WaveFormatEx format =
+            NativeVirtualMicrophoneRenderRuntime.RenderFormatForTest;
+        AudioClientStreamFlags flags =
+            NativeVirtualMicrophoneRenderRuntime.StreamFlagsForTest;
+        Require(
+            format.FormatTag == PcmAudioFormat.WaveFormatPcm
+            && format.Channels == 1
+            && format.SamplesPerSecond == 48_000
+            && format.AverageBytesPerSecond == 96_000
+            && format.BlockAlign == 2
+            && format.BitsPerSample == 16
+            && format.ExtraSize == 0
+            && flags
+                == (
+                    AudioClientStreamFlags.EventCallback
+                    | AudioClientStreamFlags.AutoConvertPcm
+                    | AudioClientStreamFlags.SrcDefaultQuality),
+            "virtual-mic-render-fixed-pcm48-native-flags",
+            checks);
+
+        Require(
+            typeof(IAudioRenderClient)
+                .GetMethods()
+                .Select(method => method.Name)
+                .SequenceEqual(new[] { "GetBuffer", "ReleaseBuffer" })
+            && ProcessLoopbackInterop.IidIAudioRenderClient
+                == new Guid("F294ACFC-3146-4483-A7BF-ADDCA7C260E2"),
+            "iaudiorenderclient-vtable-and-iid-are-exact",
+            checks);
+
+        BoundedUplinkPcmQueue queue = new();
+        byte[] ownedSource = Enumerable.Repeat(
+            (byte)0x31,
+            Pcm48kMonoFramer.BytesPerChunk).ToArray();
+        queue.Push(ownedSource);
+        Array.Fill(ownedSource, (byte)0x72);
+        byte[] read = new byte[Pcm48kMonoFramer.BytesPerChunk];
+        int copied = queue.Read(read);
+        int underflow = queue.Read(read);
+        Require(
+            copied == Pcm48kMonoFramer.BytesPerChunk
+            && read.All(value => value == 0x31)
+            && underflow == 0
+            && queue.BufferedFrames == 0,
+            "virtual-mic-uplink-queue-owns-copy-and-underflows-empty",
+            checks);
+
+        for (int index = 0;
+            index < BoundedUplinkPcmQueue.MaximumFrames;
+            index++)
+        {
+            queue.Push(new byte[Pcm48kMonoFramer.BytesPerChunk]);
+        }
+        bool overflowRejected = false;
+        try
+        {
+            queue.Push(new byte[Pcm48kMonoFramer.BytesPerChunk]);
+        }
+        catch (DirectProtocolException exception)
+        {
+            overflowRejected = exception.Code
+                == "BW_COMPUTER_VOICE_DIRECT_UPLINK_QUEUE_OVERFLOW";
+        }
+        queue.StopAndClear();
+        bool stoppedRejected = false;
+        try
+        {
+            queue.Push(new byte[Pcm48kMonoFramer.BytesPerChunk]);
+        }
+        catch (DirectProtocolException exception)
+        {
+            stoppedRejected = exception.Code
+                == "BW_COMPUTER_VOICE_DIRECT_UPLINK_NOT_ACTIVE";
+        }
+        Require(
+            BoundedUplinkPcmQueue.MaximumBufferedMilliseconds == 200
+            && BoundedUplinkPcmQueue.MaximumFrames == 10
+            && overflowRejected
+            && stoppedRejected
+            && queue.BufferedFrames == 0,
+            "virtual-mic-uplink-queue-is-bounded-to-200ms",
+            checks);
+
+        FakeVirtualRenderRuntimeFactory factory = new();
+        VirtualMicrophoneRenderSession session =
+            VirtualMicrophoneRenderSession.PrepareForTest(
+                VirtualMicrophoneRenderRequest.Create(
+                    "test-virtual-microphone-render"),
+                factory);
+        try
+        {
+            session.StartAsync().GetAwaiter().GetResult();
+            byte[] payload = Enumerable.Range(
+                0,
+                Pcm48kMonoFramer.BytesPerChunk)
+                .Select(value => (byte)value)
+                .ToArray();
+            session.Push(new DirectPcmFrame(
+                DirectPcmTrack.BrowserMicrophone,
+                Sequence: 0,
+                TimestampMicroseconds: 20_000,
+                PcmS16Le: payload));
+            Array.Clear(payload);
+            factory.Runtime.SignalAudioReady();
+            factory.Runtime.RenderObserved.Wait(
+                TimeSpan.FromSeconds(2));
+            session.StopAsync().GetAwaiter().GetResult();
+            Require(
+                factory.EndpointId
+                    == "test-virtual-microphone-render"
+                && factory.Runtime.InitializeThreadId != 0
+                && factory.Runtime.InitializeThreadId
+                    == factory.Runtime.StartThreadId
+                && factory.Runtime.InitializeThreadId
+                    == factory.Runtime.RenderThreadId
+                && factory.Runtime.InitializeThreadId
+                    == factory.Runtime.StopThreadId
+                && factory.Runtime.InitializeThreadId
+                    == factory.Runtime.DisposeThreadId
+                && factory.Runtime.RenderedPcm.Length
+                    == Pcm48kMonoFramer.BytesPerChunk
+                && factory.Runtime.RenderedPcm[1] == 1
+                && factory.Runtime.RenderedPcm[255] == 255
+                && session.State == CaptureSessionState.Stopped
+                && session.BufferedFrames == 0,
+                "virtual-mic-render-session-is-dedicated-owned-and-no-real-audio",
+                checks);
+        }
+        finally
+        {
+            session.Dispose();
+        }
+    }
+
     private static PcmAudioFormat TestFormat() =>
         new(
             PcmSampleEncoding.IntegerPcm,
@@ -1319,6 +1457,82 @@ internal static class ContractSelfTest
         }
 
         checks.Add(name);
+    }
+
+    private sealed class FakeVirtualRenderRuntimeFactory :
+        IVirtualMicrophoneRenderRuntimeFactory
+    {
+        internal FakeVirtualRenderRuntime Runtime { get; } = new();
+
+        internal string? EndpointId { get; private set; }
+
+        public IVirtualMicrophoneRenderRuntime Create(
+            VirtualMicrophoneRenderRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            EndpointId = request.EndpointId;
+            return Runtime;
+        }
+    }
+
+    private sealed class FakeVirtualRenderRuntime :
+        IVirtualMicrophoneRenderRuntime
+    {
+        private EventWaitHandle? _audioReady;
+
+        internal ManualResetEventSlim RenderObserved { get; } =
+            new(initialState: false);
+
+        internal int InitializeThreadId { get; private set; }
+
+        internal int StartThreadId { get; private set; }
+
+        internal int RenderThreadId { get; private set; }
+
+        internal int StopThreadId { get; private set; }
+
+        internal int DisposeThreadId { get; private set; }
+
+        internal byte[] RenderedPcm { get; private set; } = [];
+
+        public void Initialize(EventWaitHandle audioReadyEvent)
+        {
+            _audioReady = audioReadyEvent;
+            InitializeThreadId = Environment.CurrentManagedThreadId;
+        }
+
+        public void Start()
+        {
+            StartThreadId = Environment.CurrentManagedThreadId;
+        }
+
+        public void Render(BoundedUplinkPcmQueue source)
+        {
+            RenderThreadId = Environment.CurrentManagedThreadId;
+            byte[] destination =
+                new byte[Pcm48kMonoFramer.BytesPerChunk];
+            int read = source.Read(destination);
+            RenderedPcm = destination.AsSpan(0, read).ToArray();
+            RenderObserved.Set();
+        }
+
+        internal void SignalAudioReady()
+        {
+            (_audioReady
+                ?? throw new InvalidOperationException(
+                    "fake render runtime was not initialized")).Set();
+        }
+
+        public void Stop()
+        {
+            StopThreadId = Environment.CurrentManagedThreadId;
+        }
+
+        public void Dispose()
+        {
+            DisposeThreadId = Environment.CurrentManagedThreadId;
+        }
     }
 
     private sealed class FakePacketSource : ICapturePacketSource

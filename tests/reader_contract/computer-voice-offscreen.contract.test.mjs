@@ -37,8 +37,9 @@ test("扩展后台只保留固定 Windows WSS relay，不再允许旧 Pi 电脑�
   assert.doesNotMatch(backgroundSource, /\/api\/reader\/computer-voice/);
   assert.match(
     backgroundSource,
-    /BW_COMPUTER_VOICE_DIRECT_V2/,
+    /BW_COMPUTER_VOICE_DIRECT_V3/,
   );
+  assert.doesNotMatch(backgroundSource, /BW_COMPUTER_VOICE_DIRECT_V2/);
   assert.match(
     backgroundSource,
     /wss:\/\/bwicarus-2\.taile44d0c\.ts\.net\/reader-computer-voice\/v1/,

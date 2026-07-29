@@ -3,6 +3,7 @@ using System.Net.WebSockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace BwReader.ComputerVoiceAudio;
 
@@ -43,7 +44,6 @@ internal static class DirectBridgeSelfTest
         ICollection<string> checks)
     {
         const string origin = "https://bwicarus.taile44d0c.ts.net";
-        const string pairingCode = "ABCDEFGH23";
         DateTimeOffset now = new(
             2026,
             7,
@@ -61,20 +61,11 @@ internal static class DirectBridgeSelfTest
             installationRoot,
             "runtime",
             "computer-voice-direct.status.json");
-        using ECDsa clientKey = ECDsa.Create(
-            ECCurve.NamedCurves.nistP256);
-        string clientSpki = DirectBase64Url.Encode(
-            clientKey.ExportSubjectPublicKeyInfo());
         await WriteConfigAsync(
             configPath,
             statusPath,
             origin,
-            localOptIn: true,
-            pairingCodeHash:
-                DirectBridgeContract.HashPairingCode(pairingCode),
-            pairingExpiresAtUtc: now.AddMinutes(5),
-            clientSpki: "",
-            clientFingerprint: "").ConfigureAwait(false);
+            localOptIn: true).ConfigureAwait(false);
 
         DirectBridgeConfigStore store = new(configPath);
         DirectBridgeConfig initial = store.Load();
@@ -85,9 +76,12 @@ internal static class DirectBridgeSelfTest
             && initial.AllowedTailscaleUserLogin
                 == "bwicarus@gmail.com"
             && initial.ExperimentalSingleUserMode
-            && initial.HasPairingCode
-            && !initial.HasPairedClient,
-            "direct-config-localhost-single-user-and-pair-hash",
+            && initial.VirtualMicrophoneRenderEndpointId
+                == "explicit-test-render-microphone"
+            && initial.VirtualSpeakerRenderEndpointId
+                == "explicit-test-render-speaker"
+            && initial.ExperimentalSingleUserMode,
+            "direct-config-v3-localhost-single-user-two-render-endpoints",
             checks);
         Require(
             DirectBridgeServer.TailscaleLoginMatches(
@@ -135,10 +129,13 @@ internal static class DirectBridgeSelfTest
                     "state",
                     "readerConnected",
                     "captureActive",
+                    "lastError",
                     "updatedAtUtc",
                 })
                 && statusDocument.RootElement.GetProperty("state")
                     .GetString() == "idle"
+                && statusDocument.RootElement.GetProperty("lastError")
+                    .ValueKind == JsonValueKind.Null
                 && DirectBridgeContract.IsServiceInstanceId(
                     statusDocument.RootElement
                         .GetProperty("serviceInstanceId")
@@ -151,9 +148,13 @@ internal static class DirectBridgeSelfTest
                 == TimeSpan.FromSeconds(5),
             "direct-runtime-status-heartbeat-is-five-seconds",
             checks);
+        CheckDirectOutputRouteEvidence(initial, checks);
         await CheckServiceLeaseAsync(
             installationRoot,
             configPath,
+            checks).ConfigureAwait(false);
+        await CheckUnverifiedRouteStatusDoesNotGateStartAsync(
+            store,
             checks).ConfigureAwait(false);
 
         FakeDirectAppLauncher appLauncher = new();
@@ -161,12 +162,15 @@ internal static class DirectBridgeSelfTest
         {
             EmitDuringStart = true,
         };
+        FakeDirectContextAdapter contextAdapter = new();
         await using DirectBridgeCoordinator coordinator = new(
             store,
             appLauncher,
-            mediaAdapter);
+            mediaAdapter,
+            renderEndpointProbe: _ => null,
+            contextAdapter: contextAdapter);
         DirectBridgeProtocolSession directSession = new(
-            "connection-v2-self-test",
+            "connection-v3-self-test",
             "https://extension-page.example",
             store,
             coordinator,
@@ -179,8 +183,8 @@ internal static class DirectBridgeSelfTest
             {
                 contract = DirectBridgeContract.Contract,
                 type = "hello",
-                requestId = "request-v2-hello",
-                protocolVersion = 2,
+                requestId = "request-v3-hello",
+                protocolVersion = 3,
             },
             directEvents,
             directPcmFrames).ConfigureAwait(false);
@@ -189,16 +193,20 @@ internal static class DirectBridgeSelfTest
             "hello");
         Require(
             directHelloPayload.GetProperty("protocolVersion")
-                .GetInt32() == 2
+                .GetInt32() == 3
             && directHelloPayload.GetProperty("limits")
                 .GetProperty("pcmFrameBytes").GetInt32() == 1956
+            && directHelloPayload.GetProperty("limits")
+                .GetProperty("uplinkTrack").GetInt32() == 3
+            && directHelloPayload.GetProperty("limits")
+                .GetProperty("uplinkQueueLimitMs").GetInt32() == 200
             && directSession.IsAuthenticated
             && directSession.Phase == DirectProtocolPhase.AwaitingStart
             && appLauncher.EnsureRunningCount == 0
             && mediaAdapter.StartCount == 0
             && directEvents.Count == 0
             && directPcmFrames.Count == 0,
-            "direct-v2-hello-authenticates-without-side-effects",
+            "direct-v3-hello-authenticates-without-side-effects",
             checks);
 
         DirectBridgeProtocolSession session = new(
@@ -223,99 +231,62 @@ internal static class DirectBridgeSelfTest
                 contract = DirectBridgeContract.Contract,
                 type = "hello",
                 requestId = "request-hello",
+                protocolVersion = 3,
             },
             events,
             pcmFrames).ConfigureAwait(false);
         JsonElement helloPayload = RequireSuccess(
             hello,
             "hello");
-        JsonElement challenge = helloPayload.GetProperty("challenge");
-        string challengeId = challenge.GetProperty("challengeId")
-            .GetString()!;
-        string nonce = challenge.GetProperty("nonce").GetString()!;
         JsonElement limits = helloPayload.GetProperty("limits");
         Require(
-            limits.GetProperty("maxMessageBytes").GetInt32() == 65536
+            helloPayload.GetProperty("protocolVersion").GetInt32() == 3
+            && limits.GetProperty("maxMessageBytes").GetInt32() == 65536
             && limits.GetProperty("pcmFrameBytes").GetInt32() == 1956
             && limits.GetProperty("pcmQueueLimitMs").GetInt32() == 400
+            && limits.GetProperty("uplinkTrack").GetInt32() == 3
+            && limits.GetProperty("uplinkQueueLimitMs").GetInt32() == 200
             && limits.GetProperty("heartbeatIntervalMs").GetInt32()
                 == 5_000
             && limits.GetProperty("heartbeatTimeoutMs").GetInt32()
                 == 15_000
             && appLauncher.EnsureRunningCount == 0
-            && mediaAdapter.StartCount == 0,
-            "direct-hello-is-side-effect-free",
-            checks);
-        Require(
-            session.Phase
-                == DirectProtocolPhase.AwaitingAuthentication,
-            "direct-hello-does-not-complete-authentication",
-            checks);
-
-        JsonElement pair = await SendAsync(
-            session,
-            new
-            {
-                contract = DirectBridgeContract.Contract,
-                type = "pair",
-                requestId = "request-pair",
-                pairingCode,
-                clientPublicKeySpki = clientSpki,
-            },
-            events,
-            pcmFrames).ConfigureAwait(false);
-        JsonElement pairPayload = RequireSuccess(pair, "pair");
-        string fingerprint = pairPayload
-            .GetProperty("clientFingerprintSha256")
-            .GetString()!;
-        string persistedConfig = await File.ReadAllTextAsync(configPath)
-            .ConfigureAwait(false);
-        DirectBridgeConfig pairedConfig = store.Load();
-        Require(
-            fingerprint.Length == 43
-            && !persistedConfig.Contains(
-                pairingCode,
-                StringComparison.Ordinal)
-            && pairedConfig.PairingCodeHash.Length == 0
-            && pairedConfig.PairingExpiresAtUtc is null
-            && pairedConfig.HasPairedClient,
-            "direct-pair-consumes-code-and-persists-only-public-key",
-            checks);
-        Require(
-            session.Phase
-                == DirectProtocolPhase.AwaitingAuthentication,
-            "direct-pair-without-auth-stays-in-auth-deadline",
-            checks);
-
-        byte[] authPayload =
-            DirectBridgeContract.BuildAuthenticationPayload(
-                challengeId,
-                nonce,
-                origin);
-        byte[] signature = clientKey.SignData(
-            authPayload,
-            HashAlgorithmName.SHA256,
-            DSASignatureFormat.IeeeP1363FixedFieldConcatenation);
-        JsonElement auth = await SendAsync(
-            session,
-            new
-            {
-                contract = DirectBridgeContract.Contract,
-                type = "auth",
-                requestId = "request-auth",
-                challengeId,
-                signature = DirectBase64Url.Encode(signature),
-            },
-            events,
-            pcmFrames).ConfigureAwait(false);
-        _ = RequireSuccess(auth, "auth");
-        CryptographicOperations.ZeroMemory(authPayload);
-        CryptographicOperations.ZeroMemory(signature);
-        Require(
-            session.Authenticated
+            && mediaAdapter.StartCount == 0
+            && session.Authenticated
             && session.IsAuthenticated
             && session.Phase == DirectProtocolPhase.AwaitingStart,
-            "direct-auth-ecdsa-p256-p1363-origin-bound",
+            "direct-v3-hello-is-side-effect-free-and-authenticates",
+            checks);
+
+        JsonElement inactiveContext = await SendAsync(
+            session,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "context",
+                requestId = "request-context-inactive",
+                sessionId = "session-" + DirectBase64Url.Encode(
+                    Enumerable.Repeat((byte)0x11, 16).ToArray()),
+                contextContract =
+                    NamedPipeDirectContextAdapter.ContextContract,
+                @event = new
+                {
+                    v = 1,
+                    seq = 1,
+                    type = "focus",
+                    ts = 1_750_000_001,
+                    id = "0000000000000001",
+                },
+            },
+            events,
+            pcmFrames).ConfigureAwait(false);
+        Require(
+            !inactiveContext.GetProperty("ok").GetBoolean()
+            && inactiveContext.GetProperty("error")
+                .GetProperty("code").GetString()
+                == "BW_COMPUTER_VOICE_CONTEXT_NOT_ACTIVE"
+            && contextAdapter.ForwardCount == 0,
+            "direct-context-is-rejected-before-active-start",
             checks);
 
         JsonElement status = await SendAsync(
@@ -332,6 +303,7 @@ internal static class DirectBridgeSelfTest
         Require(
             statusPayload.GetProperty("ready").GetBoolean()
             && statusPayload.GetProperty("state").GetString() == "idle"
+            && HasExactStatusKeys(statusPayload)
             && appLauncher.EnsureRunningCount == 0
             && appLauncher.WaitReadyCount == 0
             && mediaAdapter.StartCount == 0
@@ -366,6 +338,116 @@ internal static class DirectBridgeSelfTest
             && events.Count == 3
             && session.Phase == DirectProtocolPhase.Active,
             "direct-start-is-only-app-and-capture-trigger",
+            checks);
+
+        JsonElement acceptedContext = await SendAsync(
+            session,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "context",
+                requestId = "request-context-accepted",
+                sessionId,
+                contextContract =
+                    NamedPipeDirectContextAdapter.ContextContract,
+                @event = new
+                {
+                    v = 1,
+                    seq = 1,
+                    type = "page.context",
+                    ts = 1_750_000_001,
+                    id = "0000000000000001",
+                    file = "book.pdf",
+                    page = 3,
+                },
+            },
+            events,
+            pcmFrames).ConfigureAwait(false);
+        JsonElement acceptedContextPayload = RequireSuccess(
+            acceptedContext,
+            "context");
+        Require(
+            acceptedContextPayload.GetProperty("sessionId")
+                .GetString() == sessionId
+            && acceptedContextPayload.GetProperty("eventId")
+                .GetString() == "0000000000000001"
+            && acceptedContextPayload.GetProperty("seq").GetInt64() == 1
+            && acceptedContextPayload.GetProperty("outcome")
+                .GetString() == "accepted"
+            && contextAdapter.ForwardCount == 1
+            && contextAdapter.LastEvent?.Type == "page.context"
+            && contextAdapter.LastEvent?.Payload
+                .GetProperty("file").GetString() == "book.pdf",
+            "direct-context-active-session-forwards-exact-event-after-ack",
+            checks);
+
+        contextAdapter.Failure = new DirectProtocolException(
+            "BW_COMPUTER_VOICE_CONTEXT_IPC_TIMEOUT",
+            "fake context timeout",
+            retryable: true);
+        JsonElement retryableContext = await SendAsync(
+            session,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "context",
+                requestId = "request-context-retryable",
+                sessionId,
+                contextContract =
+                    NamedPipeDirectContextAdapter.ContextContract,
+                @event = new
+                {
+                    v = 1,
+                    seq = 2,
+                    type = "command",
+                    ts = 1_750_000_002,
+                    id = "0000000000000002",
+                    command = "nav.goto",
+                },
+            },
+            events,
+            pcmFrames).ConfigureAwait(false);
+        Require(
+            !retryableContext.GetProperty("ok").GetBoolean()
+            && retryableContext.GetProperty("error")
+                .GetProperty("code").GetString()
+                == "BW_COMPUTER_VOICE_CONTEXT_IPC_TIMEOUT"
+            && retryableContext.GetProperty("error")
+                .GetProperty("retryable").GetBoolean()
+            && mediaAdapter.CaptureActive
+            && coordinator.ActiveSessionId == sessionId
+            && session.Phase == DirectProtocolPhase.Active,
+            "direct-context-ipc-error-is-retryable-without-stopping-audio",
+            checks);
+        contextAdapter.Failure = null;
+        contextAdapter.Outcome = "duplicate";
+        JsonElement duplicateContext = await SendAsync(
+            session,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "context",
+                requestId = "request-context-duplicate",
+                sessionId,
+                contextContract =
+                    NamedPipeDirectContextAdapter.ContextContract,
+                @event = new
+                {
+                    v = 1,
+                    seq = 2,
+                    type = "command",
+                    ts = 1_750_000_002,
+                    id = "0000000000000002",
+                    command = "nav.goto",
+                },
+            },
+            events,
+            pcmFrames).ConfigureAwait(false);
+        Require(
+            RequireSuccess(duplicateContext, "context")
+                .GetProperty("outcome").GetString() == "duplicate"
+            && mediaAdapter.CaptureActive,
+            "direct-context-duplicate-ack-is-success-with-audio-active",
             checks);
         Require(
             startWireOrder.SequenceEqual(new[] { "result", "pcm" }),
@@ -530,8 +612,8 @@ internal static class DirectBridgeSelfTest
             && mediaAdapter.StopCount == 1
             && !mediaAdapter.CaptureActive
             && coordinator.ActiveSessionId is null
-            && session.Phase == DirectProtocolPhase.AwaitingStart,
-            "direct-stop-closes-capture-and-surfaces-media-failure",
+            && session.Phase == DirectProtocolPhase.Active,
+            "direct-failed-stop-surfaces-media-failure-without-phase-change",
             checks);
 
         await CheckLocalOptInGateAsync(
@@ -549,6 +631,8 @@ internal static class DirectBridgeSelfTest
             checks).ConfigureAwait(false);
         await CheckServerPrefetchPreservesOrderAsync(
             checks).ConfigureAwait(false);
+        await CheckEarlyBinaryCancelsStartAsync(
+            checks).ConfigureAwait(false);
         await CheckHeartbeatDeadlineAsync(
             configPath,
             checks).ConfigureAwait(false);
@@ -565,10 +649,22 @@ internal static class DirectBridgeSelfTest
         await CheckExplicitStopFailureAsync(
             configPath,
             checks).ConfigureAwait(false);
+        await CheckStaleStopPreservesActiveSessionAsync(
+            configPath,
+            checks).ConfigureAwait(false);
         CheckConnectionPhaseDeadlines(checks);
         CheckPcmSequenceGate(checks);
+        CheckUplinkPcmContract(checks);
+        await CheckPcmStartGateAbortRaceAsync(
+            checks).ConfigureAwait(false);
         CheckProductionAdapterBoundaries(root, checks);
         CheckStrictOriginConfig(root, checks);
+        await CheckRuntimeErrorLifecycleAsync(
+            configPath,
+            statusPath,
+            checks).ConfigureAwait(false);
+        await CheckContextIpcContractAsync(
+            checks).ConfigureAwait(false);
     }
 
     private static async Task CheckExplicitStopFailureAsync(
@@ -601,7 +697,7 @@ internal static class DirectBridgeSelfTest
                     contract = DirectBridgeContract.Contract,
                     type = "hello",
                     requestId = "request-stop-failure-hello",
-                    protocolVersion = 2,
+                    protocolVersion = 3,
                 },
                 events,
                 frames).ConfigureAwait(false),
@@ -640,8 +736,189 @@ internal static class DirectBridgeSelfTest
                 .GetString()
                 == "BW_COMPUTER_VOICE_DIRECT_TYPIST_STOP_FAILED"
             && coordinator.ActiveSessionId is null
-            && session.Phase == DirectProtocolPhase.AwaitingStart,
-            "direct-explicit-stop-surfaces-release-failure-and-clears-session",
+            && session.Phase == DirectProtocolPhase.Active,
+            "direct-explicit-stop-failure-preserves-active-phase",
+            checks);
+    }
+
+    private static async Task CheckStaleStopPreservesActiveSessionAsync(
+        string configPath,
+        ICollection<string> checks)
+    {
+        FakeDirectMediaAdapter media = new();
+        FakeDirectContextAdapter context = new();
+        await using DirectBridgeCoordinator coordinator = new(
+            new DirectBridgeConfigStore(configPath),
+            new FakeDirectAppLauncher(),
+            media,
+            contextAdapter: context);
+        DirectBridgeProtocolSession session = new(
+            "connection-stale-stop",
+            "https://extension-page.example",
+            new DirectBridgeConfigStore(configPath),
+            coordinator,
+            () => DateTimeOffset.UtcNow);
+        List<object> events = [];
+        List<byte[]> frames = [];
+        _ = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "hello",
+                    requestId = "request-stale-stop-hello",
+                    protocolVersion = 3,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "hello");
+        string oldSessionId = "session-" + DirectBase64Url.Encode(
+            Enumerable.Repeat((byte)0x71, 16).ToArray());
+        string currentSessionId = "session-" + DirectBase64Url.Encode(
+            Enumerable.Repeat((byte)0x72, 16).ToArray());
+        _ = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "start",
+                    requestId = "request-stale-stop-old-start",
+                    sessionId = oldSessionId,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "start");
+        _ = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "stop",
+                    requestId = "request-stale-stop-old-stop",
+                    sessionId = oldSessionId,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "stop");
+        _ = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "start",
+                    requestId = "request-stale-stop-current-start",
+                    sessionId = currentSessionId,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "start");
+
+        JsonElement staleStop = await SendAsync(
+            session,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "stop",
+                requestId = "request-stale-stop-late-old-stop",
+                sessionId = oldSessionId,
+            },
+            events,
+            frames).ConfigureAwait(false);
+        bool staleStopPreservedCurrent =
+            !staleStop.GetProperty("ok").GetBoolean()
+            && staleStop.GetProperty("error").GetProperty("code")
+                .GetString()
+                == "BW_COMPUTER_VOICE_DIRECT_SESSION_MISMATCH"
+            && session.Phase == DirectProtocolPhase.Active
+            && coordinator.ActiveSessionId == currentSessionId
+            && media.CaptureActive
+            && media.StopCount == 1;
+        Require(
+            staleStopPreservedCurrent,
+            "direct-stale-stop-preserves-current-active-session",
+            checks);
+
+        await media.EmitAsync(
+            new DirectPcmFrame(
+                DirectPcmTrack.AppOutput,
+                Sequence: 7,
+                TimestampMicroseconds: 7_000,
+                PcmS16Le: new byte[
+                    DirectBridgeContract.PcmPayloadBytes]))
+            .ConfigureAwait(false);
+        JsonElement heartbeat = await SendAsync(
+            session,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "heartbeat",
+                requestId = "request-stale-stop-current-heartbeat",
+                sessionId = currentSessionId,
+                sequence = 1,
+            },
+            events,
+            frames).ConfigureAwait(false);
+        JsonElement contextResult = await SendAsync(
+            session,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "context",
+                requestId = "request-stale-stop-current-context",
+                sessionId = currentSessionId,
+                contextContract =
+                    NamedPipeDirectContextAdapter.ContextContract,
+                @event = new
+                {
+                    v = 1,
+                    seq = 1,
+                    type = "focus",
+                    ts = 1_750_000_010,
+                    id = "0000000000000010",
+                },
+            },
+            events,
+            frames).ConfigureAwait(false);
+        Require(
+            RequireSuccess(heartbeat, "heartbeat")
+                .GetProperty("sessionId").GetString()
+                == currentSessionId
+            && RequireSuccess(contextResult, "context")
+                .GetProperty("sessionId").GetString()
+                == currentSessionId
+            && context.ForwardCount == 1
+            && frames.Count == 1
+            && frames[0].AsSpan(8, 16).SequenceEqual(
+                DirectPcmFrameCodec.ParseSessionId(currentSessionId))
+            && media.CaptureActive
+            && coordinator.ActiveSessionId == currentSessionId
+            && session.Phase == DirectProtocolPhase.Active,
+            "direct-current-session-media-continues-after-stale-stop",
+            checks);
+
+        _ = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "stop",
+                    requestId = "request-stale-stop-current-stop",
+                    sessionId = currentSessionId,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "stop");
+        Require(
+            !media.CaptureActive
+            && coordinator.ActiveSessionId is null
+            && session.Phase == DirectProtocolPhase.AwaitingStart
+            && media.StopCount == 2,
+            "direct-confirmed-current-stop-transitions-to-awaiting-start",
             checks);
     }
 
@@ -810,7 +1087,7 @@ internal static class DirectBridgeSelfTest
                         ? new DirectTypistHelperResult(
                             0,
                             """
-                            {"ok":true,"running":true,"pid":4512,"result":"started"}
+                            {"ok":true,"running":true,"pid":4512,"processStartFileTimeUtc":133700000000000000,"result":"started"}
                             """,
                             "")
                         : new DirectTypistHelperResult(
@@ -820,15 +1097,23 @@ internal static class DirectBridgeSelfTest
                             """,
                             "");
                 return Task.FromResult(result);
-            });
+            },
+            () => (7001, 133600000000000000));
         DirectTypistLease? owned =
             await ownedController.EnsureRunningAsync(
                 CancellationToken.None).ConfigureAwait(false);
         Require(
             owned?.ProcessId == 4512
+            && owned.ProcessStartFileTimeUtc
+                == 133700000000000000
             && calls.Count == 1
             && calls[0].SequenceEqual(
-                new[] { "--ensure-running" }),
+                new[]
+                {
+                    "--ensure-running",
+                    "7001",
+                    "133600000000000000",
+                }),
             "direct-typist-started-result-creates-owned-lease",
             checks);
         await ownedController.ReleaseAsync(
@@ -837,8 +1122,13 @@ internal static class DirectBridgeSelfTest
         Require(
             calls.Count == 2
             && calls[1].SequenceEqual(
-                new[] { "--stop-if-owned", "4512" }),
-            "direct-typist-owned-lease-releases-with-exact-pid",
+                new[]
+                {
+                    "--stop-if-owned",
+                    "4512",
+                    "133700000000000000",
+                }),
+            "direct-typist-owned-lease-releases-with-exact-generation",
             checks);
         DirectProtocolException original = new(
             "BW_COMPUTER_VOICE_DIRECT_SHORTCUT_FAILED",
@@ -868,7 +1158,9 @@ internal static class DirectBridgeSelfTest
         try
         {
             await failingRelease.ReleaseAsync(
-                new DirectTypistLease(4512),
+                new DirectTypistLease(
+                    4512,
+                    133700000000000000),
                 CancellationToken.None).ConfigureAwait(false);
         }
         catch (DirectProtocolException exception)
@@ -905,7 +1197,9 @@ internal static class DirectBridgeSelfTest
         {
             await retryAdapter
                 .ReleasePendingTypistAfterStartFailureAsync(
-                    new DirectTypistLease(4512),
+                    new DirectTypistLease(
+                        4512,
+                        133700000000000000),
                     original)
                 .ConfigureAwait(false);
         }
@@ -922,8 +1216,13 @@ internal static class DirectBridgeSelfTest
             && retryCalls.Count == 2
             && retryCalls.All(arguments =>
                 arguments.SequenceEqual(
-                    new[] { "--stop-if-owned", "4512" })),
-            "direct-start-failed-typist-release-retains-and-retries-exact-pid",
+                    new[]
+                    {
+                        "--stop-if-owned",
+                        "4512",
+                        "133700000000000000",
+                    })),
+            "direct-start-failed-typist-release-retains-and-retries-exact-generation",
             checks);
 
         foreach (string result in new[]
@@ -941,7 +1240,7 @@ internal static class DirectBridgeSelfTest
                         new DirectTypistHelperResult(
                             0,
                             $$"""
-                            {"ok":true,"running":true,"pid":9002,"result":"{{result}}"}
+                            {"ok":true,"running":true,"pid":9002,"processStartFileTimeUtc":133700000000000000,"result":"{{result}}"}
                             """,
                             ""));
                 });
@@ -954,6 +1253,56 @@ internal static class DirectBridgeSelfTest
                     + "-does-not-create-stop-lease",
                 checks);
         }
+
+        List<string> startOrder = [];
+        TaskCompletionSource<DirectTypistLease?> typistReady = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        Task orderedStart =
+            WindowsDirectMediaAdapter
+                .EnsureTypistThenStartPreparedMediaAsync(
+                    async cancellationToken =>
+                    {
+                        startOrder.Add("typist");
+                        return await typistReady.Task
+                            .WaitAsync(cancellationToken)
+                            .ConfigureAwait(false);
+                    },
+                    lease =>
+                    {
+                        if (lease is not null)
+                        {
+                            startOrder.Add("typist-owned");
+                        }
+                    },
+                    _ =>
+                    {
+                        startOrder.Add("render");
+                        return Task.CompletedTask;
+                    },
+                    _ =>
+                    {
+                        startOrder.Add("output");
+                        return Task.CompletedTask;
+                    },
+                    CancellationToken.None);
+        bool mediaWaitedForTypist =
+            startOrder.SequenceEqual(new[] { "typist" })
+            && !orderedStart.IsCompleted;
+        typistReady.SetResult(new DirectTypistLease(
+            4512,
+            133700000000000000));
+        await orderedStart.ConfigureAwait(false);
+        Require(
+            mediaWaitedForTypist
+            && startOrder.SequenceEqual(new[]
+            {
+                "typist",
+                "typist-owned",
+                "render",
+                "output",
+            }),
+            "direct-typist-completes-before-prepared-media-start",
+            checks);
     }
 
     private static async Task
@@ -964,6 +1313,11 @@ internal static class DirectBridgeSelfTest
         int shortcutCount = 0;
         int commitCount = 0;
         WindowsDirectMediaAdapter.SendShortcutAtAtomicCommitBoundary(
+            () => WindowsDirectMediaAdapter.RequirePreparedMediaRunning(
+                CaptureSessionState.Running,
+                outputCompleted: false,
+                CaptureSessionState.Running,
+                renderCompleted: false),
             () =>
             {
                 shortcutCount++;
@@ -985,6 +1339,11 @@ internal static class DirectBridgeSelfTest
         try
         {
             WindowsDirectMediaAdapter.SendShortcutAtAtomicCommitBoundary(
+                () => WindowsDirectMediaAdapter.RequirePreparedMediaRunning(
+                    CaptureSessionState.Running,
+                    outputCompleted: false,
+                    CaptureSessionState.Running,
+                    renderCompleted: false),
                 () =>
                 {
                     shortcutCount++;
@@ -1002,6 +1361,62 @@ internal static class DirectBridgeSelfTest
             && shortcutCount == 1
             && commitCount == 1,
             "direct-shortcut-pre-cancel-has-no-side-effect",
+            checks);
+
+        int invalidEndpointShortcutCount = 0;
+        bool invalidPreparedMediaRejected = false;
+        try
+        {
+            WindowsDirectMediaAdapter.SendShortcutAtAtomicCommitBoundary(
+                () => WindowsDirectMediaAdapter
+                    .RequirePreparedMediaRunning(
+                        CaptureSessionState.Running,
+                        outputCompleted: false,
+                        CaptureSessionState.Faulted,
+                        renderCompleted: true),
+                () =>
+                {
+                    invalidEndpointShortcutCount++;
+                    return true;
+                },
+                () => commitCount++,
+                CancellationToken.None);
+        }
+        catch (DirectProtocolException exception)
+        {
+            invalidPreparedMediaRejected = exception.Code
+                == "BW_COMPUTER_VOICE_DIRECT_MEDIA_START_UNCONFIRMED";
+        }
+        Require(
+            invalidPreparedMediaRejected
+            && invalidEndpointShortcutCount == 0
+            && commitCount == 1,
+            "direct-shortcut-rechecks-prepared-audio-before-side-effect",
+            checks);
+
+        object oldGeneration = new();
+        object newGeneration = new();
+        int staleCleanupCount = 0;
+        await WindowsDirectMediaAdapter.StopIfCurrentGenerationAsync(
+            newGeneration,
+            oldGeneration,
+            () =>
+            {
+                staleCleanupCount++;
+                return Task.CompletedTask;
+            }).ConfigureAwait(false);
+        int currentCleanupCount = 0;
+        await WindowsDirectMediaAdapter.StopIfCurrentGenerationAsync(
+            oldGeneration,
+            oldGeneration,
+            () =>
+            {
+                currentCleanupCount++;
+                return Task.CompletedTask;
+            }).ConfigureAwait(false);
+        Require(
+            staleCleanupCount == 0 && currentCleanupCount == 1,
+            "direct-stale-media-fault-cannot-stop-new-generation",
             checks);
 
         List<int> cleanupOrder = [];
@@ -1081,6 +1496,32 @@ internal static class DirectBridgeSelfTest
             "direct-typist-ownership-clears-only-after-successful-retry",
             checks);
 
+        VoiceShortcutInteropLayout shortcutInteropLayout =
+            WindowsCodexAppProbe.GetVoiceShortcutInteropLayout();
+        bool shortcutInteropLayoutMatchesWin32 =
+            shortcutInteropLayout.PointerSize switch
+            {
+                8 =>
+                    shortcutInteropLayout.KeyboardSize == 24
+                    && shortcutInteropLayout.MouseSize == 32
+                    && shortcutInteropLayout.HardwareSize == 8
+                    && shortcutInteropLayout.UnionSize == 32
+                    && shortcutInteropLayout.InputSize == 40
+                    && shortcutInteropLayout.UnionOffset == 8,
+                4 =>
+                    shortcutInteropLayout.KeyboardSize == 16
+                    && shortcutInteropLayout.MouseSize == 24
+                    && shortcutInteropLayout.HardwareSize == 8
+                    && shortcutInteropLayout.UnionSize == 24
+                    && shortcutInteropLayout.InputSize == 28
+                    && shortcutInteropLayout.UnionOffset == 4,
+                _ => false,
+            };
+        Require(
+            shortcutInteropLayoutMatchesWin32,
+            "direct-sendinput-abi-layout-matches-win32-input",
+            checks);
+
         VoiceShortcutKeyEvent[] activationEvents =
             WindowsCodexAppProbe.VoiceShortcutEvents(
                 VoiceShortcutInputBatch.Activation);
@@ -1143,6 +1584,118 @@ internal static class DirectBridgeSelfTest
             && everyPartialReleased
             && cleanupThrowRemainsFailed,
             "direct-shortcut-partial-send-releases-keys-best-effort",
+            checks);
+
+        CodexAppTarget shortcutExpected = new(
+            RootProcessId: 7001,
+            ProcessTree: new HashSet<uint> { 7001, 7002 },
+            WindowHandle: (nint)71);
+        CodexAppTarget shortcutCurrentWithChildChurn = new(
+            RootProcessId: 7001,
+            ProcessTree: new HashSet<uint> { 7001, 7003, 7004 },
+            WindowHandle: (nint)72);
+        List<VoiceShortcutInputBatch> globalBatches = [];
+        VoiceShortcutSendResult globalShortcut =
+            WindowsCodexAppProbe.SendValidatedGlobalVoiceShortcut(
+                shortcutExpected,
+                shortcutCurrentWithChildChurn,
+                shortcutConfigured: true,
+                batch =>
+                {
+                    globalBatches.Add(batch);
+                    return batch == VoiceShortcutInputBatch.Activation
+                        ? 6u
+                        : 3u;
+                },
+                () => 0);
+        VoiceShortcutSendResult changedRoot =
+            WindowsCodexAppProbe.SendValidatedGlobalVoiceShortcut(
+                shortcutExpected,
+                shortcutCurrentWithChildChurn with
+                {
+                    RootProcessId = 8001,
+                },
+                shortcutConfigured: true,
+                _ => throw new InvalidOperationException(
+                    "changed target must not receive input"),
+                () => 0);
+        VoiceShortcutSendResult invalidBinding =
+            WindowsCodexAppProbe.SendValidatedGlobalVoiceShortcut(
+                shortcutExpected,
+                shortcutCurrentWithChildChurn,
+                shortcutConfigured: false,
+                _ => throw new InvalidOperationException(
+                    "invalid binding must not receive input"),
+                () => 0);
+        List<VoiceShortcutInputBatch> partialBatches = [];
+        VoiceShortcutSendResult partialGlobalShortcut =
+            WindowsCodexAppProbe.SendValidatedGlobalVoiceShortcut(
+                shortcutExpected,
+                shortcutCurrentWithChildChurn,
+                shortcutConfigured: true,
+                batch =>
+                {
+                    partialBatches.Add(batch);
+                    return batch == VoiceShortcutInputBatch.Activation
+                        ? 3u
+                        : 3u;
+                },
+                () => 5);
+        bool validGlobalShortcutConfig =
+            WindowsCodexAppProbe.IsExpectedGlobalVoiceShortcutConfig(
+                """
+                [
+                  {"command":"composer.submit","key":"Ctrl+Shift+L"},
+                  {"command":"realtimeVoice","key":"Ctrl+Shift+C"}
+                ]
+                """);
+        bool rejectsDuplicateCommand =
+            !WindowsCodexAppProbe.IsExpectedGlobalVoiceShortcutConfig(
+                """
+                [
+                  {"command":"realtimeVoice","key":"Ctrl+Shift+C"},
+                  {"command":"realtimeVoice","key":"Ctrl+Shift+V"}
+                ]
+                """);
+        bool rejectsShortcutCollision =
+            !WindowsCodexAppProbe.IsExpectedGlobalVoiceShortcutConfig(
+                """
+                [
+                  {"command":"realtimeVoice","key":"Ctrl+Shift+C"},
+                  {"command":"other","key":"Ctrl+Shift+C"}
+                ]
+                """);
+        bool rejectsMalformedBinding =
+            !WindowsCodexAppProbe.IsExpectedGlobalVoiceShortcutConfig(
+                """
+                [
+                  {"command":"realtimeVoice"},
+                  {"command":"other","key":"Ctrl+Shift+C"}
+                ]
+                """);
+        Require(
+            globalShortcut.Sent
+            && globalShortcut.InsertedInputCount == 6
+            && globalBatches.SequenceEqual(
+                new[] { VoiceShortcutInputBatch.Activation })
+            && changedRoot.FailureCode
+                == "BW_COMPUTER_VOICE_DIRECT_SHORTCUT_TARGET_CHANGED"
+            && invalidBinding.FailureCode
+                == "BW_COMPUTER_VOICE_DIRECT_SHORTCUT_CONFIG_INVALID"
+            && partialGlobalShortcut.FailureCode
+                == "BW_COMPUTER_VOICE_DIRECT_SHORTCUT_INPUT_FAILED"
+            && partialGlobalShortcut.InsertedInputCount == 3
+            && partialGlobalShortcut.Win32Error == 5
+            && partialBatches.SequenceEqual(new[]
+            {
+                VoiceShortcutInputBatch.Activation,
+                VoiceShortcutInputBatch.ReleasePressedKeys,
+            })
+            && validGlobalShortcutConfig
+            && rejectsDuplicateCommand
+            && rejectsShortcutCollision
+            && rejectsMalformedBinding,
+            "direct-os-global-shortcut-ignores-foreground-and-child-churn",
             checks);
         Require(
             !WindowsCodexAppProbe.SupportsOwnedVoiceStop,
@@ -1298,11 +1851,7 @@ internal static class DirectBridgeSelfTest
                 "runtime",
                 "computer-voice-direct.status.json"),
             origin,
-            localOptIn: false,
-            pairingCodeHash: "",
-            pairingExpiresAtUtc: null,
-            clientSpki: "",
-            clientFingerprint: "").ConfigureAwait(false);
+            localOptIn: false).ConfigureAwait(false);
         DirectBridgeConfigStore store = new(configPath);
         FakeDirectAppLauncher launcher = new();
         FakeDirectMediaAdapter media = new();
@@ -1494,9 +2043,11 @@ internal static class DirectBridgeSelfTest
         DirectPeerMonitorOutcome<DirectMediaStartResult> outcome =
             await monitored.WaitAsync(
                 TimeSpan.FromSeconds(2)).ConfigureAwait(false);
-        string? prefetched = outcome.PrefetchedReceiveTask is null
+        DirectClientMessage? prefetchedMessage =
+            outcome.PrefetchedReceiveTask is null
             ? null
             : await outcome.PrefetchedReceiveTask.ConfigureAwait(false);
+        string? prefetched = prefetchedMessage?.Text;
         Require(
             waitedForStart
             && !outcome.PeerClosed
@@ -1505,6 +2056,61 @@ internal static class DirectBridgeSelfTest
             && socket.ReceiveCallCount == 1
             && socket.MaximumConcurrentReceives == 1,
             "direct-server-start-prefetch-is-single-bounded-and-ordered",
+            checks);
+    }
+
+    private static async Task CheckEarlyBinaryCancelsStartAsync(
+        ICollection<string> checks)
+    {
+        using FakeDirectWebSocket socket = new();
+        TaskCompletionSource<bool> cancellationObserved = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        async Task<DirectMediaStartResult> BlockedStart(
+            CancellationToken cancellationToken)
+        {
+            try
+            {
+                await Task.Delay(
+                    Timeout.InfiniteTimeSpan,
+                    cancellationToken).ConfigureAwait(false);
+                throw new InvalidOperationException(
+                    "blocked start unexpectedly completed");
+            }
+            catch (OperationCanceledException)
+                when (cancellationToken.IsCancellationRequested)
+            {
+                cancellationObserved.TrySetResult(true);
+                throw;
+            }
+        }
+
+        Task<DirectPeerMonitorOutcome<DirectMediaStartResult>> monitored =
+            DirectBridgeServer.MonitorStartForPeerCloseAsync(
+                socket,
+                BlockedStart,
+                CancellationToken.None);
+        await socket.ReceiveEntered.Task.WaitAsync(
+            TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+        socket.QueueBinary(
+            new byte[DirectBridgeContract.PcmFrameBytes]);
+        DirectProtocolException? observed = null;
+        try
+        {
+            _ = await monitored.WaitAsync(
+                TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+        }
+        catch (DirectProtocolException exception)
+        {
+            observed = exception;
+        }
+        Require(
+            observed?.Code
+                == "BW_COMPUTER_VOICE_DIRECT_UPLINK_NOT_ACTIVE"
+            && await cancellationObserved.Task.WaitAsync(
+                TimeSpan.FromSeconds(2)).ConfigureAwait(false)
+            && socket.ReceiveCallCount == 1
+            && socket.MaximumConcurrentReceives == 1,
+            "direct-binary-before-start-cancels-start-and-fails-closed",
             checks);
     }
 
@@ -1534,7 +2140,7 @@ internal static class DirectBridgeSelfTest
                 concurrentGuard.Validate(
                     sessionId,
                     new DirectPcmFrame(
-                        DirectPcmTrack.UserMicrophone,
+                        DirectPcmTrack.BrowserMicrophone,
                         sequence,
                         (sequence + 1) * 20_000UL,
                         new byte[Pcm48kMonoFramer.BytesPerChunk]));
@@ -1549,7 +2155,7 @@ internal static class DirectBridgeSelfTest
 
         DirectPcmSequenceGuard guard = new();
         DirectPcmFrame first = new(
-            DirectPcmTrack.UserMicrophone,
+            DirectPcmTrack.BrowserMicrophone,
             0,
             10,
             new byte[Pcm48kMonoFramer.BytesPerChunk]);
@@ -1577,6 +2183,632 @@ internal static class DirectBridgeSelfTest
             rejected,
             "direct-pcm-sequence-gap-fails-closed",
             checks);
+    }
+
+    private static void CheckUplinkPcmContract(
+        ICollection<string> checks)
+    {
+        string sessionId = "session-" + DirectBase64Url.Encode(
+            Enumerable.Range(80, 16)
+                .Select(value => (byte)value)
+                .ToArray());
+        byte[] sessionBytes =
+            DirectPcmFrameCodec.ParseSessionId(sessionId);
+        byte[] encoded = new byte[DirectBridgeContract.PcmFrameBytes];
+        Encoding.ASCII.GetBytes("BWCV").CopyTo(encoded, 0);
+        encoded[4] = 1;
+        encoded[5] = (byte)DirectPcmTrack.BrowserMicrophone;
+        BinaryPrimitives.WriteUInt16LittleEndian(
+            encoded.AsSpan(6, 2),
+            0);
+        sessionBytes.CopyTo(encoded, 8);
+        BinaryPrimitives.WriteUInt32LittleEndian(
+            encoded.AsSpan(24, 4),
+            0);
+        BinaryPrimitives.WriteUInt64LittleEndian(
+            encoded.AsSpan(28, 8),
+            20_000);
+        for (int index = DirectBridgeContract.PcmFrameHeaderBytes;
+            index < encoded.Length;
+            index++)
+        {
+            encoded[index] = (byte)index;
+        }
+
+        DirectDecodedPcmFrame decoded =
+            DirectPcmFrameCodec.DecodeUplink(encoded);
+        byte firstOwned =
+            decoded.Frame.PcmS16Le.Span[0];
+        encoded[DirectBridgeContract.PcmFrameHeaderBytes] ^= 0xff;
+        bool ownsPayload =
+            decoded.Frame.PcmS16Le.Span[0] == firstOwned;
+        Require(
+            encoded.Length == 1956
+            && decoded.SessionId == sessionId
+            && decoded.Frame.Track
+                == DirectPcmTrack.BrowserMicrophone
+            && decoded.Frame.Sequence == 0
+            && decoded.Frame.TimestampMicroseconds == 20_000
+            && decoded.Frame.PcmS16Le.Length == 1920
+            && ownsPayload,
+            "direct-uplink-bwcv-v1-track3-frame-is-exact-and-owned",
+            checks);
+
+        int[] invalidOffsets = [0, 4, 5, 6];
+        bool allHeaderMutationsRejected = invalidOffsets.All(offset =>
+        {
+            byte[] invalid = encoded.ToArray();
+            invalid[offset] ^= 0x7f;
+            try
+            {
+                _ = DirectPcmFrameCodec.DecodeUplink(invalid);
+                return false;
+            }
+            catch (DirectProtocolException exception)
+            {
+                return exception.Code
+                    == "BW_COMPUTER_VOICE_DIRECT_UPLINK_FRAME_INVALID";
+            }
+        });
+        bool shortRejected;
+        try
+        {
+            _ = DirectPcmFrameCodec.DecodeUplink(
+                encoded.AsSpan(0, encoded.Length - 1));
+            shortRejected = false;
+        }
+        catch (DirectProtocolException exception)
+        {
+            shortRejected = exception.Code
+                == "BW_COMPUTER_VOICE_DIRECT_UPLINK_FRAME_INVALID";
+        }
+        Require(
+            allHeaderMutationsRejected && shortRejected,
+            "direct-uplink-rejects-length-magic-version-track-reserved",
+            checks);
+
+        DirectUplinkSequenceGuard guard = new();
+        guard.Begin(sessionId);
+        guard.Validate(sessionId, decoded);
+        DirectDecodedPcmFrame second = decoded with
+        {
+            Frame = decoded.Frame with
+            {
+                Sequence = 1,
+                TimestampMicroseconds = 40_000,
+            },
+        };
+        guard.Validate(sessionId, second);
+        bool gapRejected = false;
+        try
+        {
+            guard.Validate(sessionId, second with
+            {
+                Frame = second.Frame with
+                {
+                    Sequence = 3,
+                    TimestampMicroseconds = 60_000,
+                },
+            });
+        }
+        catch (DirectProtocolException exception)
+        {
+            gapRejected = exception.Code
+                == "BW_COMPUTER_VOICE_DIRECT_UPLINK_SEQUENCE_INVALID";
+        }
+        guard.End();
+        bool stoppedRejected = false;
+        try
+        {
+            guard.Validate(sessionId, decoded);
+        }
+        catch (DirectProtocolException exception)
+        {
+            stoppedRejected = exception.Code
+                == "BW_COMPUTER_VOICE_DIRECT_SESSION_MISMATCH";
+        }
+        string otherSessionId = "session-" + DirectBase64Url.Encode(
+            Enumerable.Repeat((byte)0xa5, 16).ToArray());
+        DirectUplinkSequenceGuard mismatchGuard = new();
+        mismatchGuard.Begin(sessionId);
+        bool mismatchRejected = false;
+        try
+        {
+            mismatchGuard.Validate(
+                sessionId,
+                decoded with { SessionId = otherSessionId });
+        }
+        catch (DirectProtocolException exception)
+        {
+            mismatchRejected = exception.Code
+                == "BW_COMPUTER_VOICE_DIRECT_SESSION_MISMATCH";
+        }
+        Require(
+            gapRejected && stoppedRejected && mismatchRejected,
+            "direct-uplink-guard-is-session-sequence-timestamp-gated",
+            checks);
+    }
+
+    private static async Task CheckPcmStartGateAbortRaceAsync(
+        ICollection<string> checks)
+    {
+        TaskCompletionSource<bool> senderEntered = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource<bool> releaseSender = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        int sends = 0;
+        DirectPcmStartGate gate = new(async (_, cancellationToken) =>
+        {
+            sends++;
+            senderEntered.TrySetResult(true);
+            await releaseSender.Task.WaitAsync(cancellationToken)
+                .ConfigureAwait(false);
+        });
+        DirectPcmFrame frame = new(
+            DirectPcmTrack.AppOutput,
+            Sequence: 0,
+            TimestampMicroseconds: 20_000,
+            PcmS16Le: new byte[Pcm48kMonoFramer.BytesPerChunk]);
+        await gate.SendAsync(frame, CancellationToken.None)
+            .ConfigureAwait(false);
+        Task release = gate.ReleaseAsync(CancellationToken.None);
+        await senderEntered.Task.WaitAsync(
+            TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+        gate.Abort();
+        releaseSender.TrySetResult(true);
+        bool releaseRejected = false;
+        try
+        {
+            await release.ConfigureAwait(false);
+        }
+        catch (DirectProtocolException exception)
+        {
+            releaseRejected = exception.Code
+                == "BW_COMPUTER_VOICE_DIRECT_PCM_START_ABORTED";
+        }
+        bool laterSendRejected = false;
+        try
+        {
+            await gate.SendAsync(
+                frame with { Sequence = 1 },
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (DirectProtocolException exception)
+        {
+            laterSendRejected = exception.Code
+                == "BW_COMPUTER_VOICE_DIRECT_PCM_START_ABORTED";
+        }
+
+        DirectPcmStartGate senderFailureGate = new(
+            (_, _) => Task.FromException(
+                new InvalidOperationException("fake sender failed")));
+        await senderFailureGate.SendAsync(
+            frame,
+            CancellationToken.None).ConfigureAwait(false);
+        bool senderFailureObserved = false;
+        try
+        {
+            await senderFailureGate.ReleaseAsync(
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (InvalidOperationException)
+        {
+            senderFailureObserved = true;
+        }
+        bool failedGateStayedClosed = false;
+        try
+        {
+            await senderFailureGate.SendAsync(
+                frame with { Sequence = 1 },
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (DirectProtocolException exception)
+        {
+            failedGateStayedClosed = exception.Code
+                == "BW_COMPUTER_VOICE_DIRECT_PCM_START_ABORTED";
+        }
+        Require(
+            sends == 1
+            && releaseRejected
+            && laterSendRejected
+            && senderFailureObserved
+            && failedGateStayedClosed,
+            "direct-pcm-start-gate-abort-and-sender-failure-stay-closed",
+            checks);
+    }
+
+    private static void CheckDirectOutputRouteEvidence(
+        DirectBridgeConfig config,
+        ICollection<string> checks)
+    {
+        string[] managerMethods =
+            typeof(IAudioSessionManager2ForRoute)
+                .GetMethods()
+                .Select(method => method.Name)
+                .ToArray();
+        string[] controlMethods =
+            typeof(IAudioSessionControl2ForRoute)
+                .GetMethods()
+                .Select(method => method.Name)
+                .ToArray();
+        Require(
+            typeof(IAudioSessionManager2ForRoute).GUID
+                == DirectOutputRouteInterop.IidIAudioSessionManager2
+            && managerMethods.SequenceEqual(new[]
+            {
+                "GetAudioSessionControl",
+                "GetSimpleAudioVolume",
+                "GetSessionEnumerator",
+                "RegisterSessionNotification",
+                "UnregisterSessionNotification",
+                "RegisterDuckNotification",
+                "UnregisterDuckNotification",
+            })
+            && controlMethods.SequenceEqual(new[]
+            {
+                "GetState",
+                "GetDisplayName",
+                "SetDisplayName",
+                "GetIconPath",
+                "SetIconPath",
+                "GetGroupingParam",
+                "SetGroupingParam",
+                "RegisterAudioSessionNotification",
+                "UnregisterAudioSessionNotification",
+                "GetSessionIdentifier",
+                "GetSessionInstanceIdentifier",
+                "GetProcessId",
+                "IsSystemSoundsSession",
+                "SetDuckingPreference",
+            })
+            && typeof(IAudioSessionNotificationForRoute)
+                .GetMethods()
+                .Select(method => method.Name)
+                .SequenceEqual(new[] { "OnSessionCreated" }),
+            "direct-output-route-public-core-audio-vtables-are-exact",
+            checks);
+
+        CodexAppTarget firstTarget = new(
+            RootProcessId: 4100,
+            ProcessTree: new HashSet<uint> { 4100, 4101 },
+            WindowHandle: 1);
+        DirectOutputRouteEvidenceTracker tracker = new(firstTarget);
+        long activeVersion = tracker.BeginEnumeration();
+        tracker.CompleteEnumeration(
+            activeVersion,
+            new[]
+            {
+                new DirectOutputRouteSession(
+                    4101,
+                    DirectAudioSessionState.Active),
+            });
+        Require(
+            tracker.Verified,
+            "direct-output-route-active-session-is-verified",
+            checks);
+
+        long inactiveVersion = tracker.BeginEnumeration();
+        tracker.CompleteEnumeration(
+            inactiveVersion,
+            new[]
+            {
+                new DirectOutputRouteSession(
+                    4100,
+                    DirectAudioSessionState.Inactive),
+            });
+        Require(
+            !tracker.Verified,
+            "direct-output-route-inactive-history-is-unverified",
+            checks);
+
+        long expiredVersion = tracker.BeginEnumeration();
+        tracker.CompleteEnumeration(
+            expiredVersion,
+            new[]
+            {
+                new DirectOutputRouteSession(
+                    4100,
+                    DirectAudioSessionState.Expired),
+            });
+        Require(
+            !tracker.Verified,
+            "direct-output-route-expired-session-is-unverified",
+            checks);
+
+        tracker.ObserveNotification(
+            new DirectOutputRouteSession(
+                9999,
+                DirectAudioSessionState.Active));
+        Require(
+            !tracker.Verified,
+            "direct-output-route-foreign-process-is-unverified",
+            checks);
+
+        CodexAppTarget nextTarget = new(
+            RootProcessId: 5100,
+            ProcessTree: new HashSet<uint> { 5100, 5101 },
+            WindowHandle: 2);
+        tracker.SetTarget(nextTarget);
+        tracker.ObserveNotification(
+            new DirectOutputRouteSession(
+                4101,
+                DirectAudioSessionState.Active));
+        Require(
+            !tracker.Verified,
+            "direct-output-route-old-process-tree-is-cleared",
+            checks);
+
+        long raceVersion = tracker.BeginEnumeration();
+        tracker.ObserveNotification(
+            new DirectOutputRouteSession(
+                5101,
+                DirectAudioSessionState.Active));
+        tracker.CompleteEnumeration(
+            raceVersion,
+            Array.Empty<DirectOutputRouteSession>());
+        Require(
+            tracker.Verified,
+            "direct-output-route-register-before-enumerate-race-is-closed",
+            checks);
+        tracker.Clear();
+        Require(
+            !tracker.Verified,
+            "direct-output-route-clear-removes-evidence",
+            checks);
+
+        int targetProbeCount = 0;
+        FakeDirectOutputRouteObserverFactory verifiedFactory = new(
+            verified: true);
+        object result = DirectOutputRouteProbe.Run(
+            config,
+            verifiedFactory,
+            () =>
+            {
+                targetProbeCount++;
+                return new CodexAppProbeState(
+                    RootCount: 1,
+                    WindowCount: 1,
+                    ReadyTarget: firstTarget);
+            });
+        using JsonDocument document = JsonDocument.Parse(
+            JsonSerializer.Serialize(
+                result,
+                DirectBridgeContract.JsonOptions));
+        JsonElement root = document.RootElement;
+        HashSet<string> keys = root.EnumerateObject()
+            .Select(property => property.Name)
+            .ToHashSet(StringComparer.Ordinal);
+        Require(
+            keys.SetEquals(new[]
+            {
+                "contract",
+                "ok",
+                "verified",
+                "reason",
+                "captureStarted",
+                "shortcutSent",
+                "appLaunched",
+            })
+            && root.GetProperty("contract").GetString()
+                == DirectOutputRouteProbe.Contract
+            && root.GetProperty("ok").GetBoolean()
+            && root.GetProperty("verified").GetBoolean()
+            && root.GetProperty("reason").ValueKind
+                == JsonValueKind.Null
+            && !root.GetProperty("captureStarted").GetBoolean()
+            && !root.GetProperty("shortcutSent").GetBoolean()
+            && !root.GetProperty("appLaunched").GetBoolean()
+            && targetProbeCount == 1
+            && verifiedFactory.CreateCount == 1
+            && verifiedFactory.DisposeCount == 1,
+            "direct-output-route-cli-probe-is-strict-and-side-effect-free",
+            checks);
+
+        FakeDirectOutputRouteObserverFactory idleFactory = new(
+            verified: true);
+        WindowsDirectMediaAdapter idleAdapter = new(
+            new WindowsDirectTypistLeaseController(
+                (_, _) => throw new InvalidOperationException(
+                    "idle STATUS must not invoke typist")),
+            idleFactory);
+        bool idleVerified = idleAdapter.IsOutputRouteVerified(config);
+        idleAdapter.DisposeAsync().AsTask().GetAwaiter().GetResult();
+        Require(
+            !idleVerified
+            && idleFactory.CreateCount == 0
+            && idleFactory.DisposeCount == 0,
+            "direct-output-route-idle-status-does-not-create-observer",
+            checks);
+
+        List<string> order = [];
+        using IDirectOutputRouteObserver unverified =
+            WindowsDirectMediaAdapter
+                .CreateOutputRouteObserverWithoutBlockingStart(
+                    new FakeDirectOutputRouteObserverFactory(
+                        verified: false,
+                        onCreate: () => order.Add("observer")),
+                    config.VirtualSpeakerRenderEndpointId,
+                    firstTarget);
+        WindowsDirectMediaAdapter.SendShortcutAtAtomicCommitBoundary(
+            validatePreparedMedia: () => order.Add("validate"),
+            sendShortcut: () =>
+            {
+                order.Add("shortcut");
+                return true;
+            },
+            commitOwnedResources: () => order.Add("commit"),
+            CancellationToken.None);
+        Require(
+            !unverified.Verified
+            && order.SequenceEqual(new[]
+            {
+                "observer",
+                "validate",
+                "shortcut",
+                "commit",
+            }),
+            "direct-output-route-observer-precedes-shortcut-without-gating-start",
+            checks);
+    }
+
+    private static async Task
+        CheckUnverifiedRouteStatusDoesNotGateStartAsync(
+            DirectBridgeConfigStore store,
+            ICollection<string> checks)
+    {
+        FakeDirectAppLauncher app = new();
+        FakeDirectMediaAdapter media = new()
+        {
+            OutputRouteVerified = false,
+        };
+        await using DirectBridgeCoordinator coordinator = new(
+            store,
+            app,
+            media,
+            renderEndpointProbe: _ => null);
+        DirectBridgeProtocolSession session = new(
+            "connection-route-unverified",
+            "https://bwicarus.taile44d0c.ts.net",
+            store,
+            coordinator);
+        List<object> events = [];
+        List<byte[]> frames = [];
+        _ = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "hello",
+                    requestId = "route-unverified-hello",
+                    protocolVersion = 3,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "hello");
+        JsonElement idle = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "status",
+                    requestId = "route-unverified-idle",
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "status");
+        Require(
+            HasExactStatusKeys(idle)
+            && !idle.GetProperty("ready").GetBoolean()
+            && idle.GetProperty("state").GetString() == "idle"
+            && idle.GetProperty("reason").GetString()
+                == DirectOutputRouteProbe.UnverifiedReason
+            && app.EnsureRunningCount == 0
+            && app.WaitReadyCount == 0
+            && media.StartCount == 0,
+            "direct-output-route-unverified-idle-status-is-exact",
+            checks);
+
+        string sessionId = "session-" + DirectBase64Url.Encode(
+            Enumerable.Repeat((byte)0x63, 16).ToArray());
+        JsonElement start = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "start",
+                    requestId = "route-unverified-start",
+                    sessionId,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "start");
+        JsonElement activeUnverified = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "status",
+                    requestId = "route-unverified-active",
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "status");
+        media.OutputRouteVerified = true;
+        JsonElement activeVerified = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "status",
+                    requestId = "route-verified-active",
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "status");
+        Require(
+            start.GetProperty("state").GetString() == "active"
+            && media.StartCount == 1
+            && HasExactStatusKeys(activeUnverified)
+            && activeUnverified.GetProperty("state").GetString()
+                == "active"
+            && !activeUnverified.GetProperty("ready").GetBoolean()
+            && activeUnverified.GetProperty("reason").GetString()
+                == DirectOutputRouteProbe.UnverifiedReason
+            && HasExactStatusKeys(activeVerified)
+            && activeVerified.GetProperty("state").GetString()
+                == "active"
+            && activeVerified.GetProperty("ready").GetBoolean()
+            && activeVerified.GetProperty("reason").ValueKind
+                == JsonValueKind.Null,
+            "direct-output-route-start-is-not-gated-and-can-later-verify",
+            checks);
+
+        _ = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "stop",
+                    requestId = "route-unverified-stop",
+                    sessionId,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "stop");
+    }
+
+    private static bool HasExactStatusKeys(JsonElement status)
+    {
+        HashSet<string> keys = status.EnumerateObject()
+            .Select(property => property.Name)
+            .ToHashSet(StringComparer.Ordinal);
+        if (!keys.SetEquals(new[]
+        {
+            "ready",
+            "state",
+            "reason",
+            "localOptIn",
+            "lastError",
+            "media",
+        }))
+        {
+            return false;
+        }
+        HashSet<string> mediaKeys = status.GetProperty("media")
+            .EnumerateObject()
+            .Select(property => property.Name)
+            .ToHashSet(StringComparer.Ordinal);
+        return mediaKeys.SetEquals(new[]
+        {
+            "hostReady",
+            "captureActive",
+        });
     }
 
     private static void CheckProductionAdapterBoundaries(
@@ -1607,7 +2839,8 @@ internal static class DirectBridgeSelfTest
                     123,
                     "codex-desktop",
                     DirectBridgeContract.CodexAppUserModelId,
-                    "mic"),
+                    "virtual-mic-render",
+                    "virtual-speaker-render"),
                 (_, _) => Task.CompletedTask,
                 CancellationToken.None).GetAwaiter().GetResult();
         }
@@ -1660,11 +2893,7 @@ internal static class DirectBridgeSelfTest
                 "runtime",
                 "computer-voice-direct.status.json"),
             "http://reader.example",
-            localOptIn: false,
-            pairingCodeHash: "",
-            pairingExpiresAtUtc: null,
-            clientSpki: "",
-            clientFingerprint: "").GetAwaiter().GetResult();
+            localOptIn: false).GetAwaiter().GetResult();
         bool rejected = false;
         try
         {
@@ -1677,9 +2906,73 @@ internal static class DirectBridgeSelfTest
         }
         Require(
             rejected
-            && CheckExperimentalAndStrictOrigins(root),
+            && CheckExperimentalAndStrictOrigins(root)
+            && CheckStrictV3ConfigSchema(root),
             "direct-origin-policy-is-explicit-and-canonical",
             checks);
+    }
+
+    private static bool CheckStrictV3ConfigSchema(string root)
+    {
+        string schemaRoot = System.IO.Path.Combine(
+            root,
+            "strict-v3-schema");
+        string configPath = System.IO.Path.Combine(
+            schemaRoot,
+            "native-host",
+            "direct.json");
+        WriteConfigAsync(
+            configPath,
+            System.IO.Path.Combine(
+                schemaRoot,
+                "runtime",
+                "computer-voice-direct.status.json"),
+            "https://bwicarus.taile44d0c.ts.net",
+            localOptIn: false).GetAwaiter().GetResult();
+        string validJson = File.ReadAllText(configPath);
+
+        List<Action<JsonObject>> mutations =
+        [
+            value => value["contract"] =
+                "reader-computer-voice-direct-config/1",
+            value => value["microphoneEndpointId"] = "legacy-mic",
+            value => value["pairingCodeHash"] = "legacy-pair",
+            value => value["pairingExpiresAtUtc"] =
+                "2026-07-29T00:00:00Z",
+            value => value["pairedClientPublicKeySpki"] = "legacy-key",
+            value => value["pairedClientFingerprintSha256"] =
+                "legacy-fingerprint",
+            value => value["virtualMicrophoneRenderEndpointId"] = "",
+            value => value["virtualSpeakerRenderEndpointId"] = "",
+            value => value["virtualSpeakerRenderEndpointId"] =
+                value["virtualMicrophoneRenderEndpointId"]!.GetValue<string>(),
+            value => value["experimentalSingleUserMode"] = false,
+        ];
+        foreach (Action<JsonObject> mutate in mutations)
+        {
+            JsonObject candidate =
+                JsonNode.Parse(validJson)?.AsObject()
+                ?? throw new InvalidOperationException(
+                    "self-test config JSON was not an object");
+            mutate(candidate);
+            File.WriteAllText(
+                configPath,
+                candidate.ToJsonString());
+            try
+            {
+                _ = new DirectBridgeConfigStore(configPath).Load();
+                return false;
+            }
+            catch (DirectProtocolException exception)
+            {
+                if (exception.Code
+                    != "BW_COMPUTER_VOICE_DIRECT_CONFIG_INVALID")
+                {
+                    return false;
+                }
+            }
+        }
+        return true;
     }
 
     private static bool CheckExperimentalAndStrictOrigins(string root)
@@ -1699,10 +2992,6 @@ internal static class DirectBridgeSelfTest
                 "computer-voice-direct.status.json"),
             "https://extension-page.example",
             localOptIn: false,
-            pairingCodeHash: "",
-            pairingExpiresAtUtc: null,
-            clientSpki: "",
-            clientFingerprint: "",
             experimentalSingleUserMode: true).GetAwaiter().GetResult();
         DirectBridgeConfig experimental =
             new DirectBridgeConfigStore(experimentalPath).Load();
@@ -1719,13 +3008,17 @@ internal static class DirectBridgeSelfTest
                 "computer-voice-direct.status.json"),
             "https://reader.example",
             localOptIn: false,
-            pairingCodeHash: "",
-            pairingExpiresAtUtc: null,
-            clientSpki: "",
-            clientFingerprint: "",
             experimentalSingleUserMode: false).GetAwaiter().GetResult();
-        DirectBridgeConfig strict =
-            new DirectBridgeConfigStore(strictPath).Load();
+        bool strictModeRejected = false;
+        try
+        {
+            _ = new DirectBridgeConfigStore(strictPath).Load();
+        }
+        catch (DirectProtocolException exception)
+        {
+            strictModeRejected = exception.Code
+                == "BW_COMPUTER_VOICE_DIRECT_CONFIG_INVALID";
+        }
 
         const string chromeOrigin =
             "chrome-extension://jddhhakcblmihidgdobfkcejjinpigak";
@@ -1773,12 +3066,7 @@ internal static class DirectBridgeSelfTest
             && !DirectBridgeServer.OriginMatchesAllowlist(
                 experimental,
                 "null")
-            && DirectBridgeServer.OriginMatchesAllowlist(
-                strict,
-                "https://reader.example")
-            && !DirectBridgeServer.OriginMatchesAllowlist(
-                strict,
-                "https://extension-page.example");
+            && strictModeRejected;
     }
 
     private static async Task CheckServiceLeaseAsync(
@@ -1836,6 +3124,392 @@ internal static class DirectBridgeSelfTest
         Require(
             !File.Exists(leasePath),
             "direct-service-lease-clears-only-owned-file",
+            checks);
+    }
+
+    private static async Task CheckRuntimeErrorLifecycleAsync(
+        string configPath,
+        string statusPath,
+        ICollection<string> checks)
+    {
+        const int endpointHresult = unchecked((int)0x88890004);
+        DirectProtocolException endpointFailure = new(
+            "BW_COMPUTER_VOICE_DIRECT_RENDER_ENDPOINT_UNAVAILABLE",
+            "secret-endpoint-id-must-never-be-serialized",
+            retryable: true,
+            innerException: new AudioCaptureStageException(
+                "virtual-microphone.get-render-device-state",
+                endpointHresult));
+        DirectBridgeConfigStore store = new(configPath);
+        FakeDirectMediaAdapter media = new();
+        await using DirectBridgeCoordinator coordinator = new(
+            store,
+            new FakeDirectAppLauncher(),
+            media,
+            renderEndpointProbe: _ => endpointFailure);
+        DirectBridgeProtocolSession protocol = new(
+            "connection-runtime-error",
+            "https://extension-page.example",
+            store,
+            coordinator);
+        List<object> events = [];
+        List<byte[]> frames = [];
+        _ = RequireSuccess(
+            await SendAsync(
+                protocol,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "hello",
+                    requestId = "request-runtime-error-hello",
+                    protocolVersion = 3,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "hello");
+        JsonElement status = RequireSuccess(
+            await SendAsync(
+                protocol,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "status",
+                    requestId = "request-runtime-error-status",
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "status");
+        JsonElement statusError = status.GetProperty("lastError");
+        Require(
+            !status.GetProperty("ready").GetBoolean()
+            && status.GetProperty("state").GetString()
+                == "unavailable"
+            && status.GetProperty("reason").GetString()
+                == endpointFailure.Code
+            && statusError.GetProperty("code").GetString()
+                == endpointFailure.Code
+            && statusError.GetProperty("stage").GetString()
+                == "virtual-microphone.get-render-device-state"
+            && statusError.GetProperty("hresult").GetString()
+                == "0x88890004"
+            && statusError.EnumerateObject()
+                .Select(property => property.Name)
+                .ToHashSet(StringComparer.Ordinal)
+                .SetEquals(new[]
+                {
+                    "failureId",
+                    "code",
+                    "stage",
+                    "hresult",
+                    "atUtc",
+                })
+            && !statusError.GetRawText().Contains(
+                "secret-endpoint",
+                StringComparison.Ordinal),
+            "direct-status-endpoint-failure-is-sanitized-and-not-ready",
+            checks);
+
+        string sessionId = "session-" + DirectBase64Url.Encode(
+            Enumerable.Repeat((byte)0xc3, 16).ToArray());
+        _ = await coordinator.StartAsync(
+            "connection-runtime-error",
+            sessionId,
+            (_, _) => Task.CompletedTask,
+            (_, _) => Task.CompletedTask,
+            CancellationToken.None).ConfigureAwait(false);
+        Require(
+            coordinator.LastError is null && media.CaptureActive,
+            "direct-successful-start-clears-retained-last-error",
+            checks);
+        await coordinator.StopAsync(
+            "connection-runtime-error",
+            sessionId,
+            CancellationToken.None).ConfigureAwait(false);
+
+        DirectRuntimeError persisted =
+            DirectRuntimeError.FromException(
+                endpointFailure,
+                "runtime-status",
+                new DateTimeOffset(
+                    2026,
+                    7,
+                    29,
+                    6,
+                    0,
+                    0,
+                    TimeSpan.Zero));
+        DirectRuntimeStatusWriter writer = new(
+            statusPath,
+            "fedcba9876543210fedcba9876543210");
+        await writer.WriteAsync(
+            "faulted",
+            readerConnected: true,
+            captureActive: false,
+            persisted,
+            CancellationToken.None).ConfigureAwait(false);
+        await writer.WriteAsync(
+            "idle",
+            readerConnected: false,
+            captureActive: false,
+            persisted,
+            CancellationToken.None).ConfigureAwait(false);
+        string persistedJson = await File.ReadAllTextAsync(statusPath)
+            .ConfigureAwait(false);
+        using JsonDocument document = JsonDocument.Parse(persistedJson);
+        JsonElement root = document.RootElement;
+        JsonElement retained = root.GetProperty("lastError");
+        Require(
+            root.GetProperty("contract").GetString()
+                == DirectBridgeContract.RuntimeStatusContract
+            && root.GetProperty("state").GetString() == "idle"
+            && retained.GetProperty("failureId").GetString()
+                == persisted.FailureId
+            && retained.GetProperty("code").GetString()
+                == endpointFailure.Code
+            && retained.GetProperty("stage").GetString()
+                == "virtual-microphone.get-render-device-state"
+            && retained.GetProperty("hresult").GetString()
+                == "0x88890004"
+            && !persistedJson.Contains(
+                "secret-endpoint",
+                StringComparison.Ordinal),
+            "direct-runtime-status-v2-retains-sanitized-error-across-idle",
+            checks);
+    }
+
+    private static async Task CheckContextIpcContractAsync(
+        ICollection<string> checks)
+    {
+        byte[] payload = Encoding.UTF8.GetBytes(
+            """{"contract":"reader-voice-typist-ipc/1"}""");
+        await using MemoryStream framed = new();
+        await DirectContextIpcFraming.WriteAsync(
+            framed,
+            payload,
+            CancellationToken.None).ConfigureAwait(false);
+        byte[] wire = framed.ToArray();
+        framed.Position = 0;
+        byte[] roundTrip = await DirectContextIpcFraming.ReadAsync(
+            framed,
+            CancellationToken.None).ConfigureAwait(false);
+        bool invalidUtf8Rejected = false;
+        await using (MemoryStream invalidUtf8 = new(
+            [1, 0, 0, 0, 0xff]))
+        {
+            try
+            {
+                _ = await DirectContextIpcFraming.ReadAsync(
+                    invalidUtf8,
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (DirectProtocolException exception)
+            {
+                invalidUtf8Rejected = exception.Code
+                    == "BW_COMPUTER_VOICE_CONTEXT_IPC_FRAME_INVALID"
+                    && exception.Retryable;
+            }
+        }
+        Require(
+            BinaryPrimitives.ReadInt32LittleEndian(
+                wire.AsSpan(0, sizeof(int))) == payload.Length
+            && wire.AsSpan(sizeof(int)).SequenceEqual(payload)
+            && roundTrip.SequenceEqual(payload)
+            && invalidUtf8Rejected
+            && NamedPipeDirectContextTransport.PipeName
+                == "bw-reader-voice-typist-v1"
+            && NamedPipeDirectContextTransport.PipePath
+                == "\\\\.\\pipe\\bw-reader-voice-typist-v1"
+            && NamedPipeDirectContextTransport.PipePath.Count(
+                character => character == '\\') == 4
+            && NamedPipeDirectContextTransport.MaximumServerInstances
+                == 1
+            && NamedPipeDirectContextTransport.RequiredPipeOptions
+                == (
+                    System.IO.Pipes.PipeOptions.Asynchronous
+                    | System.IO.Pipes.PipeOptions.CurrentUserOnly)
+            && NamedPipeDirectContextTransport.ExchangeTimeout
+                == TimeSpan.FromSeconds(3)
+            && NamedPipeDirectContextTransport.MaximumPayloadBytes
+                == 65_536,
+            "direct-context-pipe-is-current-user-single-framed-strict-utf8",
+            checks);
+
+        string sessionId = "session-" + DirectBase64Url.Encode(
+            Enumerable.Repeat((byte)0xd4, 16).ToArray());
+        const string ipcRequestId = "request-context-ipc-9";
+        JsonElement eventValue = JsonSerializer.SerializeToElement(new
+        {
+            v = 1,
+            seq = 9,
+            type = "drawing",
+            ts = 1_750_000_009,
+            id = "0000000000000009",
+            drawingRevision = "dr_abc",
+        });
+        DirectContextEvent contextEvent =
+            NamedPipeDirectContextAdapter.ValidateEvent(eventValue);
+        FakeDirectContextIpcTransport transport = new();
+        transport.ReplyFactory = request =>
+        {
+            using JsonDocument requestDocument =
+                JsonDocument.Parse(request);
+            JsonElement root = requestDocument.RootElement;
+            transport.RequestWasExact =
+                root.EnumerateObject()
+                    .Select(property => property.Name)
+                    .ToHashSet(StringComparer.Ordinal)
+                    .SetEquals(new[]
+                    {
+                        "contract",
+                        "requestId",
+                        "sessionId",
+                        "action",
+                        "event",
+                    })
+                && root.GetProperty("contract").GetString()
+                    == NamedPipeDirectContextAdapter.IpcContract
+                && root.GetProperty("requestId").GetString()
+                    == ipcRequestId
+                && root.GetProperty("action").GetString() == "context"
+                && root.GetProperty("sessionId").GetString()
+                    == sessionId
+                && root.GetProperty("event")
+                    .GetProperty("drawingRevision").GetString()
+                    == "dr_abc";
+            return JsonSerializer.SerializeToUtf8Bytes(new
+            {
+                contract = NamedPipeDirectContextAdapter.IpcContract,
+                requestId = ipcRequestId,
+                ok = true,
+                action = "context",
+                payload = new
+                {
+                    sessionId,
+                    eventId = contextEvent.EventId,
+                    seq = contextEvent.Sequence,
+                    outcome = transport.Outcome,
+                },
+            });
+        };
+        NamedPipeDirectContextAdapter adapter = new(transport);
+        DirectContextForwardResult accepted = await adapter.ForwardAsync(
+            ipcRequestId,
+            sessionId,
+            NamedPipeDirectContextAdapter.ContextContract,
+            contextEvent,
+            CancellationToken.None).ConfigureAwait(false);
+        transport.Outcome = "duplicate";
+        DirectContextForwardResult duplicate = await adapter.ForwardAsync(
+            ipcRequestId,
+            sessionId,
+            NamedPipeDirectContextAdapter.ContextContract,
+            contextEvent,
+            CancellationToken.None).ConfigureAwait(false);
+        Require(
+            accepted.Outcome == "accepted"
+            && duplicate.Outcome == "duplicate"
+            && transport.RequestWasExact
+            && transport.ExchangeCount == 2,
+            "direct-context-waits-for-exact-accepted-or-duplicate-ipc-ack",
+            checks);
+
+        transport.ReplyFactory = _ =>
+            Encoding.UTF8.GetBytes(
+                """
+                {"contract":"reader-voice-typist-ipc/1","requestId":"request-context-ipc-9","ok":true,"action":"context","payload":{"sessionId":"wrong","eventId":"0000000000000009","seq":9,"outcome":"accepted"}}
+                """);
+        bool badAckRetryable = false;
+        try
+        {
+            _ = await adapter.ForwardAsync(
+                ipcRequestId,
+                sessionId,
+                NamedPipeDirectContextAdapter.ContextContract,
+                contextEvent,
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (DirectProtocolException exception)
+        {
+            badAckRetryable = exception.Code
+                == "BW_COMPUTER_VOICE_CONTEXT_ACK_INVALID"
+                && exception.Retryable;
+        }
+        transport.ReplyFactory = _ =>
+            Encoding.UTF8.GetBytes(
+                """
+                {"contract":"reader-voice-typist-ipc/1","requestId":"request-context-ipc-9","ok":false,"error":{"code":"BW_TYPIST_IPC_PAYLOAD","message":"bad escaped context","retryable":false}}
+                """);
+        bool typistRejectionPreserved = false;
+        try
+        {
+            _ = await adapter.ForwardAsync(
+                ipcRequestId,
+                sessionId,
+                NamedPipeDirectContextAdapter.ContextContract,
+                contextEvent,
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (DirectProtocolException exception)
+        {
+            typistRejectionPreserved = exception.Code
+                == "BW_TYPIST_IPC_PAYLOAD"
+                && !exception.Retryable;
+        }
+        string[] allowedTypes =
+        [
+            "page.context",
+            "focus",
+            "drawing",
+            "command",
+            "command-failed",
+        ];
+        bool allowlistAccepted = allowedTypes.All(type =>
+        {
+            JsonElement candidate = JsonSerializer.SerializeToElement(
+                new
+                {
+                    v = 1,
+                    seq = 1,
+                    type,
+                    ts = 1,
+                    id = "0000000000000001",
+                });
+            try
+            {
+                _ = NamedPipeDirectContextAdapter.ValidateEvent(
+                    candidate);
+                return true;
+            }
+            catch
+            {
+                return false;
+            }
+        });
+        bool unknownRejected = false;
+        try
+        {
+            _ = NamedPipeDirectContextAdapter.ValidateEvent(
+                JsonSerializer.SerializeToElement(new
+                {
+                    v = 1,
+                    seq = 1,
+                    type = "unknown",
+                    ts = 1,
+                    id = "0000000000000001",
+                }));
+        }
+        catch (DirectProtocolException exception)
+        {
+            unknownRejected = exception.Code
+                == "BW_COMPUTER_VOICE_CONTEXT_SCHEMA_INVALID"
+                && !exception.Retryable;
+        }
+        Require(
+            badAckRetryable
+            && typistRejectionPreserved
+            && allowlistAccepted
+            && unknownRejected,
+            "direct-context-event-allowlist-and-ack-errors-fail-closed",
             checks);
     }
 
@@ -1900,10 +3574,6 @@ internal static class DirectBridgeSelfTest
         string statusPath,
         string origin,
         bool localOptIn,
-        string pairingCodeHash,
-        DateTimeOffset? pairingExpiresAtUtc,
-        string clientSpki,
-        string clientFingerprint,
         bool experimentalSingleUserMode = true)
     {
         string? directory = System.IO.Path.GetDirectoryName(configPath);
@@ -1917,18 +3587,15 @@ internal static class DirectBridgeSelfTest
         {
             contract = DirectBridgeContract.ConfigContract,
             localOptIn,
-            microphoneEndpointId = localOptIn
-                ? "explicit-test-microphone"
-                : "",
+            virtualMicrophoneRenderEndpointId =
+                "explicit-test-render-microphone",
+            virtualSpeakerRenderEndpointId =
+                "explicit-test-render-speaker",
             listenHost = DirectBridgeContract.ListenHost,
             listenPort = DirectBridgeContract.DefaultListenPort,
             allowedOrigins = new[] { origin },
             allowedTailscaleUserLogin = "bwicarus@gmail.com",
             experimentalSingleUserMode,
-            pairingCodeHash,
-            pairingExpiresAtUtc,
-            pairedClientPublicKeySpki = clientSpki,
-            pairedClientFingerprintSha256 = clientFingerprint,
             outputScope = "process-only",
             appKind = "codex-desktop",
             runtimeStatusPath = statusPath,
@@ -1997,6 +3664,14 @@ internal static class DirectBridgeSelfTest
                 new FakeReceiveFrame(
                     WebSocketMessageType.Text,
                     Encoding.UTF8.GetBytes(value)));
+        }
+
+        internal void QueueBinary(byte[] value)
+        {
+            _nextFrame.TrySetResult(
+                new FakeReceiveFrame(
+                    WebSocketMessageType.Binary,
+                    value.ToArray()));
         }
 
         public override void Abort()
@@ -2185,6 +3860,139 @@ internal static class DirectBridgeSelfTest
         }
     }
 
+    private sealed class FakeDirectContextAdapter :
+        IDirectContextAdapter
+    {
+        internal int ForwardCount { get; private set; }
+
+        internal string Outcome { get; set; } = "accepted";
+
+        internal DirectProtocolException? Failure { get; set; }
+
+        internal DirectContextEvent? LastEvent { get; private set; }
+
+        public Task<DirectContextForwardResult> ForwardAsync(
+            string requestId,
+            string sessionId,
+            string contextContract,
+            DirectContextEvent contextEvent,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ForwardCount++;
+            LastEvent = contextEvent;
+            if (Failure is not null)
+            {
+                return Task.FromException<DirectContextForwardResult>(
+                    Failure);
+            }
+            if (
+                !DirectBridgeContract.IsSafeId(requestId)
+                || DirectPcmFrameCodec.ParseSessionId(sessionId).Length
+                    != 16
+                || contextContract
+                    != NamedPipeDirectContextAdapter.ContextContract
+                || Outcome is not ("accepted" or "duplicate")
+            )
+            {
+                throw new InvalidOperationException(
+                    "fake received an invalid context request");
+            }
+            return Task.FromResult(
+                new DirectContextForwardResult(Outcome));
+        }
+    }
+
+    private sealed class FakeDirectContextIpcTransport :
+        IDirectContextIpcTransport
+    {
+        internal int ExchangeCount { get; private set; }
+
+        internal bool RequestWasExact { get; set; }
+
+        internal string Outcome { get; set; } = "accepted";
+
+        internal Func<byte[], byte[]>? ReplyFactory { get; set; }
+
+        public Task<byte[]> ExchangeAsync(
+            ReadOnlyMemory<byte> request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            ExchangeCount++;
+            return Task.FromResult(
+                (ReplyFactory
+                    ?? throw new InvalidOperationException(
+                        "fake IPC reply factory missing"))(
+                            request.ToArray()));
+        }
+    }
+
+    private sealed class FakeDirectOutputRouteObserverFactory :
+        IDirectOutputRouteObserverFactory
+    {
+        private readonly bool _verified;
+        private readonly Action? _onCreate;
+
+        internal FakeDirectOutputRouteObserverFactory(
+            bool verified,
+            Action? onCreate = null)
+        {
+            _verified = verified;
+            _onCreate = onCreate;
+        }
+
+        internal int CreateCount { get; private set; }
+
+        internal int DisposeCount { get; private set; }
+
+        public IDirectOutputRouteObserver Create(
+            string endpointId,
+            CodexAppTarget target)
+        {
+            CreateCount++;
+            _onCreate?.Invoke();
+            return new FakeDirectOutputRouteObserver(
+                endpointId,
+                target.RootProcessId,
+                _verified,
+                () => DisposeCount++);
+        }
+    }
+
+    private sealed class FakeDirectOutputRouteObserver :
+        IDirectOutputRouteObserver
+    {
+        private readonly Action _onDispose;
+        private int _disposed;
+
+        internal FakeDirectOutputRouteObserver(
+            string endpointId,
+            uint targetRootProcessId,
+            bool verified,
+            Action onDispose)
+        {
+            EndpointId = endpointId;
+            TargetRootProcessId = targetRootProcessId;
+            Verified = verified;
+            _onDispose = onDispose;
+        }
+
+        public string EndpointId { get; }
+
+        public uint TargetRootProcessId { get; }
+
+        public bool Verified { get; }
+
+        public void Dispose()
+        {
+            if (Interlocked.Exchange(ref _disposed, 1) == 0)
+            {
+                _onDispose();
+            }
+        }
+    }
+
     private sealed class FakeDirectMediaAdapter : IDirectMediaAdapter
     {
         private Func<DirectPcmFrame, CancellationToken, Task>? _sender;
@@ -2221,6 +4029,12 @@ internal static class DirectBridgeSelfTest
 
         public bool CaptureActive { get; private set; }
 
+        internal bool OutputRouteVerified { get; set; } = true;
+
+        public bool IsOutputRouteVerified(
+            DirectBridgeConfig config) =>
+            OutputRouteVerified;
+
         public Task<DirectProtocolException?> Completion => _completion;
 
         public async Task<DirectMediaStartResult> StartAsync(
@@ -2231,8 +4045,10 @@ internal static class DirectBridgeSelfTest
             StartCount++;
             if (
                 request.RootProcessId != 4242
-                || request.MicrophoneEndpointId
-                    != "explicit-test-microphone"
+                || request.VirtualMicrophoneRenderEndpointId
+                    != "explicit-test-render-microphone"
+                || request.VirtualSpeakerRenderEndpointId
+                    != "explicit-test-render-speaker"
             )
             {
                 throw new InvalidOperationException(
@@ -2274,6 +4090,23 @@ internal static class DirectBridgeSelfTest
 
         internal void ReleaseBlockedStop() =>
             _releaseStop.TrySetResult(true);
+
+        public Task PushUplinkFrameAsync(
+            DirectPcmFrame frame,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            if (
+                !CaptureActive
+                || frame.Track != DirectPcmTrack.BrowserMicrophone
+            )
+            {
+                throw new DirectProtocolException(
+                    "BW_COMPUTER_VOICE_DIRECT_UPLINK_NOT_ACTIVE",
+                    "fake uplink is not active");
+            }
+            return Task.CompletedTask;
+        }
 
         public async Task StopAsync(CancellationToken cancellationToken)
         {

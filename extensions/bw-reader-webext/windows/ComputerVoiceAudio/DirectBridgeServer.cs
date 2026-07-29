@@ -46,14 +46,16 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     internal DirectBridgeServer(
         DirectBridgeConfigStore configStore,
         IDirectAppLauncher appLauncher,
-        IDirectMediaAdapter mediaAdapter)
+        IDirectMediaAdapter mediaAdapter,
+        IDirectContextAdapter? contextAdapter = null)
     {
         _configStore = configStore;
         DirectBridgeConfig config = configStore.Load();
         _coordinator = new DirectBridgeCoordinator(
             configStore,
             appLauncher,
-            mediaAdapter);
+            mediaAdapter,
+            contextAdapter: contextAdapter);
         _serviceInstanceId = Guid.NewGuid().ToString("N");
         _statusWriter = new DirectRuntimeStatusWriter(
             config.RuntimeStatusPath,
@@ -326,22 +328,23 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         CancellationToken cancellationToken)
     {
         using SemaphoreSlim sendGate = new(1, 1);
-        DirectPcmSequenceGuard sequenceGuard = new();
+        DirectPcmSequenceGuard downlinkSequenceGuard = new();
+        DirectUplinkSequenceGuard uplinkSequenceGuard = new();
         DirectBridgeProtocolSession protocol = new(
             connectionId,
             origin,
             _configStore,
             _coordinator);
-        Task<string?>? prefetchedReceiveTask = null;
+        Task<DirectClientMessage?>? prefetchedReceiveTask = null;
 
         while (
             !cancellationToken.IsCancellationRequested
             && socket.State == WebSocketState.Open
         )
         {
-            Task<string?> receiveTask =
+            Task<DirectClientMessage?> receiveTask =
                 prefetchedReceiveTask
-                ?? ReceiveTextMessageAsync(
+                ?? ReceiveMessageAsync(
                     socket,
                     cancellationToken);
             prefetchedReceiveTask = null;
@@ -439,11 +442,55 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 break;
             }
 
-            string? message = await receiveTask.ConfigureAwait(false);
-            if (message is null)
+            DirectClientMessage? incoming =
+                await receiveTask.ConfigureAwait(false);
+            if (incoming is null)
             {
                 break;
             }
+            if (incoming.MessageType == WebSocketMessageType.Binary)
+            {
+                try
+                {
+                    if (protocol.Phase != DirectProtocolPhase.Active)
+                    {
+                        throw new DirectProtocolException(
+                            "BW_COMPUTER_VOICE_DIRECT_UPLINK_NOT_ACTIVE",
+                            "START 成功前不接受浏览器麦克风 binary");
+                    }
+                    DirectDecodedPcmFrame decoded =
+                        DirectPcmFrameCodec.DecodeUplink(
+                            incoming.BinaryPayload.Span);
+                    string activeSessionId =
+                        _coordinator.ActiveSessionId
+                        ?? throw new DirectProtocolException(
+                            "BW_COMPUTER_VOICE_DIRECT_UPLINK_NOT_ACTIVE",
+                            "浏览器麦克风上行尚未启动");
+                    uplinkSequenceGuard.Validate(
+                        activeSessionId,
+                        decoded);
+                    await _coordinator.PushUplinkFrameAsync(
+                        connectionId,
+                        decoded.SessionId,
+                        decoded.Frame,
+                        cancellationToken).ConfigureAwait(false);
+                }
+                catch (DirectProtocolException failure)
+                {
+                    await HandleConnectionFailureAsync(
+                        connectionId,
+                        socket,
+                        sendGate,
+                        failure,
+                        "uplink-rejected").ConfigureAwait(false);
+                    break;
+                }
+                continue;
+            }
+            string message = incoming.Text
+                ?? throw new DirectProtocolException(
+                    "BW_COMPUTER_VOICE_DIRECT_MESSAGE_INVALID",
+                    "直连文本消息无效");
 
             DirectProtocolPhase phaseBeforeMessage = protocol.Phase;
             Task<DirectProtocolReply> HandleMessageAsync(
@@ -467,7 +514,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                     },
                     async (sessionId, frame, token) =>
                     {
-                        sequenceGuard.Validate(sessionId, frame);
+                        downlinkSequenceGuard.Validate(sessionId, frame);
                         byte[] encoded = DirectPcmFrameCodec.Encode(
                             sessionId,
                             frame);
@@ -552,6 +599,24 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 {
                     await reply.AfterSendAsync(replyLifetime.Token)
                         .ConfigureAwait(false);
+                }
+                if (
+                    phaseBeforeMessage != DirectProtocolPhase.Active
+                    && protocol.Phase == DirectProtocolPhase.Active
+                )
+                {
+                    uplinkSequenceGuard.Begin(
+                        _coordinator.ActiveSessionId
+                        ?? throw new DirectProtocolException(
+                            "BW_COMPUTER_VOICE_DIRECT_UPLINK_NOT_ACTIVE",
+                            "浏览器麦克风上行尚未启动"));
+                }
+                else if (
+                    phaseBeforeMessage == DirectProtocolPhase.Active
+                    && protocol.Phase != DirectProtocolPhase.Active
+                )
+                {
+                    uplinkSequenceGuard.End();
                 }
             }
             catch (OperationCanceledException)
@@ -659,7 +724,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         using CancellationTokenSource startLifetime =
             CancellationTokenSource.CreateLinkedTokenSource(
                 cancellationToken);
-        Task<string?> receiveTask = ReceiveTextMessageAsync(
+        Task<DirectClientMessage?> receiveTask = ReceiveMessageAsync(
             socket,
             cancellationToken);
         Task<T> operationTask = startOperation(startLifetime.Token);
@@ -669,7 +734,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
 
         if (winner == receiveTask || receiveTask.IsCompleted)
         {
-            string? prefetched;
+            DirectClientMessage? prefetched;
             try
             {
                 prefetched = await receiveTask.ConfigureAwait(false);
@@ -693,11 +758,21 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                     PrefetchedReceiveTask: null,
                     PeerClosed: true);
             }
+            if (prefetched.MessageType == WebSocketMessageType.Binary)
+            {
+                startLifetime.Cancel();
+                await ObserveCanceledOperationAsync(
+                    operationTask,
+                    startLifetime.Token).ConfigureAwait(false);
+                throw new DirectProtocolException(
+                    "BW_COMPUTER_VOICE_DIRECT_UPLINK_NOT_ACTIVE",
+                    "START 成功前不接受浏览器麦克风 binary");
+            }
 
             T completed = await operationTask.ConfigureAwait(false);
             return new DirectPeerMonitorOutcome<T>(
                 completed,
-                Task.FromResult<string?>(prefetched),
+                Task.FromResult<DirectClientMessage?>(prefetched),
                 PeerClosed: false);
         }
 
@@ -728,6 +803,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         DirectProtocolException failure,
         string logEvent)
     {
+        _ = _coordinator.RecordFailure(failure, logEvent);
         await _coordinator.StopForConnectionAsync(connectionId)
             .ConfigureAwait(false);
         DirectSecurityLog.Write(
@@ -775,7 +851,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     }
 
     private static async Task ObserveReceiveAsync(
-        Task<string?> receiveTask)
+        Task<DirectClientMessage?> receiveTask)
     {
         try
         {
@@ -826,7 +902,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             return config.AllowedOrigins.Contains(origin);
         }
 
-        // Direct v2 has no browser-held client key.  Its browser boundary is
+        // Direct v3 has no browser-held client key.  Its browser boundary is
         // therefore deliberately smaller than the configurable v1 allowlist:
         // the exact Reader PWA or a controlled extension background origin.
         // Content scripts must relay through that background origin instead of
@@ -940,6 +1016,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             state,
             readerConnected,
             captureActive,
+            _coordinator.LastError,
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -964,11 +1041,12 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 state,
                 readerConnected,
                 captureActive,
+                _coordinator.LastError,
                 cancellationToken).ConfigureAwait(false);
         }
     }
 
-    private static async Task<string?> ReceiveTextMessageAsync(
+    private static async Task<DirectClientMessage?> ReceiveMessageAsync(
         WebSocket socket,
         CancellationToken cancellationToken)
     {
@@ -977,6 +1055,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         {
             using MemoryStream message = new(
                 DirectBridgeContract.MaximumMessageBytes);
+            WebSocketMessageType? messageType = null;
             while (true)
             {
                 ValueWebSocketReceiveResult result =
@@ -991,17 +1070,35 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                     // coordinator cleanup.
                     return null;
                 }
-                if (result.MessageType != WebSocketMessageType.Text)
+                if (result.MessageType is not (
+                    WebSocketMessageType.Text
+                    or WebSocketMessageType.Binary))
                 {
                     await socket.CloseAsync(
                         WebSocketCloseStatus.InvalidMessageType,
-                        "client binary messages are not allowed",
+                        "unsupported websocket message type",
                         CancellationToken.None).ConfigureAwait(false);
                     return null;
                 }
                 if (
+                    messageType.HasValue
+                    && messageType.Value != result.MessageType
+                )
+                {
+                    await socket.CloseAsync(
+                        WebSocketCloseStatus.InvalidMessageType,
+                        "websocket message type changed",
+                        CancellationToken.None).ConfigureAwait(false);
+                    return null;
+                }
+                messageType ??= result.MessageType;
+                int maximumBytes =
+                    messageType == WebSocketMessageType.Binary
+                        ? DirectBridgeContract.PcmFrameBytes
+                        : DirectBridgeContract.MaximumMessageBytes;
+                if (
                     message.Length + result.Count
-                        > DirectBridgeContract.MaximumMessageBytes
+                        > maximumBytes
                 )
                 {
                     await socket.CloseAsync(
@@ -1013,8 +1110,18 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 message.Write(rented, 0, result.Count);
                 if (result.EndOfMessage)
                 {
-                    return StrictUtf8.GetString(message.GetBuffer(), 0, checked(
-                        (int)message.Length));
+                    int length = checked((int)message.Length);
+                    if (messageType == WebSocketMessageType.Binary)
+                    {
+                        return DirectClientMessage.Binary(
+                            message.GetBuffer().AsMemory(0, length)
+                                .ToArray());
+                    }
+                    return DirectClientMessage.TextMessage(
+                        StrictUtf8.GetString(
+                            message.GetBuffer(),
+                            0,
+                            length));
                 }
             }
         }
@@ -1150,9 +1257,21 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
 
 internal sealed record DirectPeerMonitorOutcome<T>(
     T? Result,
-    Task<string?>? PrefetchedReceiveTask,
+    Task<DirectClientMessage?>? PrefetchedReceiveTask,
     bool PeerClosed)
     where T : class;
+
+internal sealed record DirectClientMessage(
+    WebSocketMessageType MessageType,
+    string? Text,
+    ReadOnlyMemory<byte> BinaryPayload)
+{
+    internal static DirectClientMessage TextMessage(string text) =>
+        new(WebSocketMessageType.Text, text, ReadOnlyMemory<byte>.Empty);
+
+    internal static DirectClientMessage Binary(byte[] payload) =>
+        new(WebSocketMessageType.Binary, null, payload);
+}
 
 internal sealed class DirectPcmSequenceGuard
 {
@@ -1200,4 +1319,88 @@ internal sealed class DirectPcmSequenceGuard
         new(
             "BW_COMPUTER_VOICE_DIRECT_PCM_SEQUENCE_INVALID",
             "PCM 帧序列或时间戳无效");
+}
+
+internal sealed class DirectUplinkSequenceGuard
+{
+    private readonly object _gate = new();
+    private string? _sessionId;
+    private uint _lastSequence;
+    private ulong _lastTimestamp;
+    private bool _hasFrame;
+
+    internal void Begin(string sessionId)
+    {
+        _ = DirectPcmFrameCodec.ParseSessionId(sessionId);
+        lock (_gate)
+        {
+            if (_sessionId is not null)
+            {
+                throw new InvalidOperationException(
+                    "BW_COMPUTER_VOICE_DIRECT_UPLINK_GUARD_ACTIVE");
+            }
+            _sessionId = sessionId;
+            _lastSequence = 0;
+            _lastTimestamp = 0;
+            _hasFrame = false;
+        }
+    }
+
+    internal void Validate(
+        string activeSessionId,
+        DirectDecodedPcmFrame decoded)
+    {
+        lock (_gate)
+        {
+            if (
+                _sessionId is null
+                || _sessionId != activeSessionId
+                || decoded.SessionId != activeSessionId
+                || decoded.Frame.Track
+                    != DirectPcmTrack.BrowserMicrophone
+            )
+            {
+                throw InvalidSession();
+            }
+            if (!_hasFrame)
+            {
+                if (decoded.Frame.Sequence != 0)
+                {
+                    throw InvalidSequence();
+                }
+            }
+            else if (
+                _lastSequence == uint.MaxValue
+                || decoded.Frame.Sequence != _lastSequence + 1
+                || decoded.Frame.TimestampMicroseconds <= _lastTimestamp
+            )
+            {
+                throw InvalidSequence();
+            }
+            _lastSequence = decoded.Frame.Sequence;
+            _lastTimestamp = decoded.Frame.TimestampMicroseconds;
+            _hasFrame = true;
+        }
+    }
+
+    internal void End()
+    {
+        lock (_gate)
+        {
+            _sessionId = null;
+            _lastSequence = 0;
+            _lastTimestamp = 0;
+            _hasFrame = false;
+        }
+    }
+
+    private static DirectProtocolException InvalidSession() =>
+        new(
+            "BW_COMPUTER_VOICE_DIRECT_SESSION_MISMATCH",
+            "浏览器麦克风 binary 会话不匹配");
+
+    private static DirectProtocolException InvalidSequence() =>
+        new(
+            "BW_COMPUTER_VOICE_DIRECT_UPLINK_SEQUENCE_INVALID",
+            "浏览器麦克风序列或时间戳无效");
 }

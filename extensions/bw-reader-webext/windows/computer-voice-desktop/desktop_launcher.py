@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import queue
 import sys
 import threading
@@ -18,12 +19,13 @@ from bridge_core import (
     FIXED_LISTEN_PORT,
     FIXED_OUTPUT_SCOPE,
     FIXED_SHORTCUT,
-    Microphone,
     ProcessRunner,
+    RenderEndpoint,
     WindowsProcessRunner,
     build_self_test_report,
     disable_and_stop_direct_service,
-    enumerate_microphones,
+    enumerate_active_render_endpoints,
+    legacy_microphone_config_requires_migration,
     load_direct_config,
     read_direct_status,
     run_idle_bootstrap,
@@ -47,7 +49,7 @@ from control_plane import (
 
 
 APP_TITLE = "电脑客户端桥接器"
-APP_VERSION = "0.5.0-single-user-source"
+APP_VERSION = "0.6.0-direct-v3-source"
 
 
 class BridgeWindow:
@@ -61,6 +63,7 @@ class BridgeWindow:
         "bootstrap_remove_button",
         "tailscale_apply_button",
         "tailscale_remove_button",
+        "audio_settings_button",
     )
 
     def __init__(
@@ -74,7 +77,9 @@ class BridgeWindow:
         temporary_directory_factory: (
             Callable[[], ContextManager[str]] | None
         ) = None,
-        microphone_provider: Callable[[], list[Microphone]] | None = None,
+        render_endpoint_provider: (
+            Callable[[], list[RenderEndpoint]] | None
+        ) = None,
     ) -> None:
         self.root = root
         self.paths = paths or BridgePaths.discover()
@@ -86,16 +91,18 @@ class BridgeWindow:
         self.temporary_directory_factory = (
             temporary_directory_factory
         )
-        self.microphone_provider = microphone_provider or (
-            lambda: enumerate_microphones(self.paths.native_host)
+        self.render_endpoint_provider = render_endpoint_provider or (
+            lambda: enumerate_active_render_endpoints(
+                self.paths.native_host
+            )
         )
-        self.microphones: list[Microphone] = []
+        self.render_endpoints: list[RenderEndpoint] = []
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.busy = False
 
         root.title(APP_TITLE)
-        root.geometry("700x850")
-        root.minsize(640, 760)
+        root.geometry("700x960")
+        root.minsize(640, 850)
         root.configure(bg="#eef2f7")
 
         style = ttk.Style(root)
@@ -168,19 +175,95 @@ class BridgeWindow:
             style="Status.TLabel",
         )
         self.reader_status.pack(anchor="w", pady=(5, 0))
+        self.error_status = ttk.Label(
+            status_frame,
+            text="○ 最近失败：无",
+            style="Status.TLabel",
+        )
+        self.error_status.pack(anchor="w", pady=(5, 0))
 
         config_frame = self._section(outer, "本机配置")
-        microphone_row = ttk.Frame(config_frame)
-        microphone_row.pack(fill="x")
-        ttk.Label(microphone_row, text="麦克风", width=10).pack(
+        ttk.Label(
+            config_frame,
+            text=(
+                "这里列出 Windows 当前已有的播放端点；桥接程序本身不会创建"
+                "虚拟设备。未安装两根彼此独立、已签名的虚拟音频线缆时，"
+                "不要把 Realtek、Steam、Oculus 等现有端点当作 A/B。"
+            ),
+            foreground="#9a6700",
+            wraplength=590,
+        ).pack(anchor="w", pady=(0, 8))
+        virtual_microphone_row = ttk.Frame(config_frame)
+        virtual_microphone_row.pack(fill="x")
+        ttk.Label(
+            virtual_microphone_row,
+            text="虚拟麦克风 A",
+            width=14,
+        ).pack(
             side="left"
         )
-        self.microphone_combo = ttk.Combobox(
-            microphone_row,
+        self.virtual_microphone_combo = ttk.Combobox(
+            virtual_microphone_row,
             state="readonly",
-            width=53,
+            width=49,
         )
-        self.microphone_combo.pack(side="left", fill="x", expand=True)
+        self.virtual_microphone_combo.pack(
+            side="left",
+            fill="x",
+            expand=True,
+        )
+        ttk.Label(
+            config_frame,
+            text=(
+                "A 的播放端接收 Reader 网页麦克风；"
+                "请在 Codex 中选择 A 的 recording side 作为输入。"
+            ),
+            foreground="#44546a",
+            wraplength=590,
+        ).pack(anchor="w", pady=(4, 0))
+
+        virtual_speaker_row = ttk.Frame(config_frame)
+        virtual_speaker_row.pack(fill="x", pady=(9, 0))
+        ttk.Label(
+            virtual_speaker_row,
+            text="虚拟扬声器 B",
+            width=14,
+        ).pack(side="left")
+        self.virtual_speaker_combo = ttk.Combobox(
+            virtual_speaker_row,
+            state="readonly",
+            width=49,
+        )
+        self.virtual_speaker_combo.pack(
+            side="left",
+            fill="x",
+            expand=True,
+        )
+        ttk.Label(
+            config_frame,
+            text=(
+                "B 是 Codex 应用的固定输出目标；bridge 不向 B 写入，"
+                "只捕获 Codex 进程树。B 的录音侧不接物理扬声器，"
+                "因此远端电脑不会从真实扬声器发声。端点存在并不代表"
+                " Codex 已路由到 B；需要在 Windows 音量混合器中"
+                "一次性把 Codex/ChatGPT 输出选为 B。"
+            ),
+            foreground="#44546a",
+            wraplength=590,
+        ).pack(anchor="w", pady=(4, 0))
+        self.audio_settings_button = ttk.Button(
+            config_frame,
+            text="打开 Windows 音量混合器",
+            command=self.on_open_audio_settings,
+        )
+        self.audio_settings_button.pack(anchor="w", pady=(7, 0))
+        self.migration_status = ttk.Label(
+            config_frame,
+            text="",
+            foreground="#9a6700",
+            wraplength=590,
+        )
+        self.migration_status.pack(anchor="w", pady=(7, 0))
 
         ttk.Label(
             config_frame,
@@ -331,31 +414,67 @@ class BridgeWindow:
         if footer and getattr(self, "footer", None) is not None:
             self.footer.configure(text=footer)
 
-    def selected_microphone(self) -> Microphone:
-        index = self.microphone_combo.current()
-        if index < 0 or index >= len(self.microphones):
-            raise BridgeError("请先明确选择一个麦克风。")
-        return self.microphones[index]
+    def selected_virtual_endpoints(
+        self,
+    ) -> tuple[RenderEndpoint, RenderEndpoint]:
+        microphone_index = self.virtual_microphone_combo.current()
+        speaker_index = self.virtual_speaker_combo.current()
+        if (
+            microphone_index < 0
+            or microphone_index >= len(self.render_endpoints)
+        ):
+            raise BridgeError("请明确选择虚拟麦克风 A 的播放端点。")
+        if (
+            speaker_index < 0
+            or speaker_index >= len(self.render_endpoints)
+        ):
+            raise BridgeError("请明确选择虚拟扬声器 B 的播放端点。")
+        virtual_microphone = self.render_endpoints[microphone_index]
+        virtual_speaker = self.render_endpoints[speaker_index]
+        if virtual_microphone.endpoint_id == virtual_speaker.endpoint_id:
+            raise BridgeError("虚拟麦克风 A 与虚拟扬声器 B 不能相同。")
+        return virtual_microphone, virtual_speaker
 
-    def _refresh_microphones(self, selected_id: str = "") -> None:
-        self.microphones = self.microphone_provider()
-        self.microphone_combo.configure(
-            values=[item.display_name for item in self.microphones]
+    @staticmethod
+    def _restore_combo_selection(
+        combo: ttk.Combobox,
+        endpoints: list[RenderEndpoint],
+        selected_id: str,
+    ) -> None:
+        combo.configure(
+            values=[item.display_name for item in endpoints]
         )
         index = next(
             (
                 item_index
-                for item_index, item in enumerate(self.microphones)
+                for item_index, item in enumerate(endpoints)
                 if item.endpoint_id == selected_id
             ),
             -1,
         )
         if index >= 0:
-            self.microphone_combo.current(index)
-        elif self.microphones:
-            self.microphone_combo.current(0)
+            combo.current(index)
         else:
-            self.microphone_combo.set("")
+            # Deliberately no first/default fallback.  A missing or stale
+            # endpoint must remain visibly unselected.
+            combo.set("")
+
+    def _refresh_render_endpoints(
+        self,
+        virtual_microphone_id: str = "",
+        virtual_speaker_id: str = "",
+    ) -> None:
+        self.render_endpoints = self.render_endpoint_provider()
+        self._restore_combo_selection(
+            self.virtual_microphone_combo,
+            self.render_endpoints,
+            virtual_microphone_id,
+        )
+        self._restore_combo_selection(
+            self.virtual_speaker_combo,
+            self.render_endpoints,
+            virtual_speaker_id,
+        )
 
     @staticmethod
     def _status_text(
@@ -393,19 +512,63 @@ class BridgeWindow:
             "是" if status.reader_connected else "否",
         )
         self.reader_status.configure(text=text, foreground=color)
+        if status.last_error is None:
+            self.error_status.configure(
+                text="○ 最近失败：无",
+                foreground="#6b7280",
+            )
+        else:
+            error = status.last_error
+            hresult = (
+                f"，HRESULT {error['hresult']}"
+                if error["hresult"] is not None
+                else ""
+            )
+            self.error_status.configure(
+                text=(
+                    "⚠ 最近失败："
+                    f"{error['code']} / {error['stage']}{hresult}"
+                ),
+                foreground="#9a6700",
+            )
 
     def refresh_static(self) -> DirectStatus:
         config = load_direct_config(self.paths)
-        selected_id = (
-            str(config.get("microphoneEndpointId", ""))
-            if config
-            else ""
+        selected_microphone_id = (
+            str(config.get("virtualMicrophoneRenderEndpointId", ""))
+            if config else ""
         )
-        previous_selection = ""
-        current_index = self.microphone_combo.current()
-        if 0 <= current_index < len(self.microphones):
-            previous_selection = self.microphones[current_index].endpoint_id
-        self._refresh_microphones(selected_id or previous_selection)
+        selected_speaker_id = (
+            str(config.get("virtualSpeakerRenderEndpointId", ""))
+            if config else ""
+        )
+        previous_microphone = ""
+        microphone_index = self.virtual_microphone_combo.current()
+        if 0 <= microphone_index < len(self.render_endpoints):
+            previous_microphone = self.render_endpoints[
+                microphone_index
+            ].endpoint_id
+        previous_speaker = ""
+        speaker_index = self.virtual_speaker_combo.current()
+        if 0 <= speaker_index < len(self.render_endpoints):
+            previous_speaker = self.render_endpoints[
+                speaker_index
+            ].endpoint_id
+        self._refresh_render_endpoints(
+            selected_microphone_id or previous_microphone,
+            selected_speaker_id or previous_speaker,
+        )
+        migration_required = legacy_microphone_config_requires_migration(
+            self.paths
+        )
+        self.migration_status.configure(
+            text=(
+                "⚠ legacy-migration-required："
+                "检测到旧 microphoneEndpointId；"
+                "该值不会作为 v3 回退。请选择 A/B 并明确保存以迁移。"
+                if migration_required else ""
+            )
+        )
         status = read_direct_status(self.paths, self.process_runner)
         self.render_status(status)
         return status
@@ -448,27 +611,39 @@ class BridgeWindow:
 
     def on_enable_config(self) -> None:
         try:
-            microphone = self.selected_microphone()
+            virtual_microphone, virtual_speaker = (
+                self.selected_virtual_endpoints()
+            )
         except BridgeError as error:
             messagebox.showerror(APP_TITLE, str(error), parent=self.root)
             return
+        legacy_migration = legacy_microphone_config_requires_migration(
+            self.paths
+        )
         if not self._confirm_mutation(
             "保存并启用本机配置",
             (
-                "将写入所选麦克风、固定 Reader HTTPS 来源、"
+                "将写入两个互不相同的 Active eRender 端点、"
+                "固定 Reader HTTPS 来源、"
                 "127.0.0.1:43128 和 process-only 边界；"
                 "单用户实验模式会固定启用且无需配对；"
-                "不会启动服务或音频。"
+                + (
+                    "旧 microphoneEndpointId 将被明确替换且不会回退；"
+                    if legacy_migration else ""
+                )
+                + "不会启动服务或音频。"
             ),
         ):
             return
 
         def action() -> dict[str, Any]:
-            active = self.microphone_provider()
+            active = self.render_endpoint_provider()
             return save_enabled_config(
                 self.paths,
-                microphone,
-                active_microphones=active,
+                virtual_microphone,
+                virtual_speaker,
+                active_render_endpoints=active,
+                allow_legacy_migration=legacy_migration,
             )
 
         def success(_: dict[str, Any]) -> None:
@@ -515,14 +690,24 @@ class BridgeWindow:
 
     def on_start(self) -> None:
         try:
-            microphone = self.selected_microphone()
+            virtual_microphone, virtual_speaker = (
+                self.selected_virtual_endpoints()
+            )
         except BridgeError as error:
             messagebox.showerror(APP_TITLE, str(error), parent=self.root)
             return
+        legacy_migration = legacy_microphone_config_requires_migration(
+            self.paths
+        )
         if not self._confirm_mutation(
             "启用并启动空闲直连服务",
             (
-                "先原子写入 localOptIn=true；若已安装且 ownership "
+                "先原子保存两个虚拟播放端点并写入 localOptIn=true；"
+                + (
+                    "旧 microphoneEndpointId 将被明确替换；"
+                    if legacy_migration else ""
+                )
+                + "若已安装且 ownership "
                 "通过则只运行后台 supervisor，否则直接启动固定 C# "
                 "监听器并明确标记本登录未受监督。"
             ),
@@ -540,11 +725,13 @@ class BridgeWindow:
                     "同名后台任务 ownership 未通过；"
                     "拒绝启用或旁路启动。"
                 )
-            active = self.microphone_provider()
+            active = self.render_endpoint_provider()
             save_enabled_config(
                 self.paths,
-                microphone,
-                active_microphones=active,
+                virtual_microphone,
+                virtual_speaker,
+                active_render_endpoints=active,
+                allow_legacy_migration=legacy_migration,
             )
             if run_bootstrap_task_if_owned(
                 self.paths,
@@ -608,6 +795,19 @@ class BridgeWindow:
             APP_TITLE,
             f"{heading}\n\n{detail}\n\n是否继续？",
             parent=self.root,
+        )
+
+    def on_open_audio_settings(self) -> None:
+        try:
+            os.startfile("ms-settings:apps-volume")
+        except OSError as error:
+            messagebox.showerror(APP_TITLE, str(error), parent=self.root)
+            return
+        self.footer.configure(
+            text=(
+                "已打开 Windows 音量混合器；请将 Codex/ChatGPT "
+                "输出明确选择为虚拟扬声器 B。未修改全局默认设备。"
+            )
         )
 
     def render_control_status(

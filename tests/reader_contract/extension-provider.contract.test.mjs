@@ -556,8 +556,33 @@ function makeWsPort(sender) {
 
 function makeComputerVoiceDirectPort(sender) {
   const port = makeWsPort(sender);
-  port.name = "BW_COMPUTER_VOICE_DIRECT_V2";
+  port.name = "BW_COMPUTER_VOICE_DIRECT_V3";
   return port;
+}
+
+function computerVoiceUplinkFrame({
+  track = 3,
+  length = 1956,
+  sessionByte = 0x5a,
+  sequence = 0,
+  extra = {},
+} = {}) {
+  const bytes = new Uint8Array(length);
+  if (length >= 36) {
+    bytes.set([0x42, 0x57, 0x43, 0x56, 1, track, 0, 0], 0);
+    bytes.fill(sessionByte, 8, 24);
+    const view = new DataView(bytes.buffer);
+    view.setUint32(24, sequence, true);
+    view.setUint32(28, 123456 + sequence * 20000, true);
+    view.setUint32(32, 0, true);
+  }
+  return {
+    type: "send-binary-base64",
+    data: Buffer.from(bytes).toString("base64"),
+    bytes: length,
+    sequence,
+    ...extra,
+  };
 }
 
 function makeVocabularyPort(sender) {
@@ -666,6 +691,7 @@ function harness({
       this.url = String(url);
       this.readyState = FakeWebSocket.CONNECTING;
       this.binaryType = "blob";
+      this.bufferedAmount = 0;
       this.sent = [];
       this.closeCalls = [];
       this.onopen = null;
@@ -5518,7 +5544,20 @@ test("电脑语音 relay 只接受扩展顶层 canonical HTTP(S) sender，并固
   socket.open();
   assert.deepEqual(port.messages, [{ type: "open" }]);
   await port.receive({ type: "send-text", data: "client-control-frame" });
-  assert.deepEqual(socket.sent, ["client-control-frame"]);
+  const uplink = computerVoiceUplinkFrame();
+  await port.receive(uplink);
+  assert.equal(socket.sent.length, 2);
+  assert.equal(socket.sent[0], "client-control-frame");
+  assert.ok(socket.sent[1] instanceof ArrayBuffer);
+  assert.deepEqual(
+    new Uint8Array(socket.sent[1]),
+    new Uint8Array(Buffer.from(uplink.data, "base64")),
+  );
+  assert.deepEqual(port.messages[1], {
+    type: "binary-accepted",
+    sequence: 0,
+    bytes: 1956,
+  });
 
   const pcmFrame = Uint8Array.from(
     { length: 1956 },
@@ -5527,7 +5566,7 @@ test("电脑语音 relay 只接受扩展顶层 canonical HTTP(S) sender，并固
   socket.receive("server-control-frame");
   socket.receive(pcmFrame.buffer);
   await settleBackground();
-  assert.deepEqual(port.messages.slice(1), [
+  assert.deepEqual(port.messages.slice(2), [
     { type: "text", data: "server-control-frame" },
     {
       type: "binary-base64",
@@ -5568,6 +5607,69 @@ test("电脑语音 relay 严格限制操作、字段、文本大小与固定 PCM
     );
     assert.equal(close.wasClean, false, JSON.stringify(message));
   }
+
+  for (const [name, message] of [
+    ["wrong-track", computerVoiceUplinkFrame({ track: 1 })],
+    ["wrong-length", computerVoiceUplinkFrame({ length: 1955 })],
+    [
+      "length-mismatch",
+      computerVoiceUplinkFrame({ extra: { bytes: 1955 } }),
+    ],
+    [
+      "sequence-mismatch",
+      computerVoiceUplinkFrame({ extra: { sequence: 1 } }),
+    ],
+    [
+      "extra-field",
+      computerVoiceUplinkFrame({ extra: { injected: true } }),
+    ],
+  ]) {
+    const h = harness();
+    const port = makeComputerVoiceDirectPort(computerVoiceDirectSender());
+    h.connect(port);
+    await port.receive({ type: "open" });
+    const socket = h.state.webSockets[0];
+    socket.open();
+    await port.receive(message);
+    assert.equal(
+      port.messages.some((entry) =>
+        entry.type === "error" &&
+        entry.code === "BW_COMPUTER_VOICE_DIRECT_FRAME"
+      ),
+      true,
+      name,
+    );
+    assert.deepEqual(socket.sent, [], name);
+    assert.equal(socket.readyState, 2, name);
+  }
+
+  const backlog = harness();
+  const backlogPort = makeComputerVoiceDirectPort(
+    computerVoiceDirectSender(),
+  );
+  backlog.connect(backlogPort);
+  await backlogPort.receive({ type: "open" });
+  const backlogSocket = backlog.state.webSockets[0];
+  backlogSocket.open();
+  backlogSocket.bufferedAmount = 9 * 1956;
+  await backlogPort.receive(computerVoiceUplinkFrame({ sequence: 0 }));
+  assert.equal(backlogSocket.sent.length, 1, "第 10 帧容量仍可发送");
+  assert.deepEqual(backlogPort.messages.at(-1), {
+    type: "binary-accepted",
+    sequence: 0,
+    bytes: 1956,
+  });
+  backlogSocket.bufferedAmount = 10 * 1956;
+  await backlogPort.receive(computerVoiceUplinkFrame({ sequence: 1 }));
+  assert.equal(backlogSocket.sent.length, 1, "第 11 帧必须 fail closed");
+  assert.equal(
+    backlogPort.messages.some((entry) =>
+      entry.type === "error" &&
+      entry.code === "BW_COMPUTER_VOICE_DIRECT_UPLINK_BACKPRESSURE"
+    ),
+    true,
+  );
+  assert.equal(backlogSocket.readyState, 2);
 
   const outbound = harness();
   const outboundPort = makeComputerVoiceDirectPort(
