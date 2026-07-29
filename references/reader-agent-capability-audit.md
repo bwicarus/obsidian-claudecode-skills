@@ -50,7 +50,6 @@
 | 词典/翻译 | `lookup_word` `translate` | ECDICT / unidic / Google 翻译(非生成式 LLM) |
 | 制卡/笔记落盘 | `make_anki` `make_note` | AnkiConnect / vault 写入 |
 | 其它 | `recall_creation` `recall_notes` `undo_last` `save_intent_tool` `list_saved_tasks` `start_dictation` `remove_mastery` | 实体注册表 / 撤销栈 / 意图库 |
-| 生词/配图(07-29 复核移入) | `add_vocab` `search_image` | `scripts/vocab/dict_sources.py`(ECDICT/unidic) / Wikimedia Commons + Google 图搜 |
 
 > 注:`translate` 默认走 Google 翻译链,**不是**生成式 LLM;若配置切到 AI 后端则退出本类,
 > 直接命令通道调用它时必须显式指定确定性后端。
@@ -84,11 +83,16 @@
 
 ### 直接命令 vs 助手工具的差集(截至 07-29)
 
-`reader_direct_commands.py` 现有 16 个动作。与助手工具对比:
+`reader_direct_commands.py` 现有 **20 个**动作。与助手工具对比:
 
-- **助手有、直接命令没有**(召回类读操作,补齐成本最低、且是上游"先取数据再判断"的前提):
-  `recall_creation` `recall_notes` `add_vocab` `search_image`,以及待拆的 `section.read`。
-  (`read_check_report` 要等 `verify=false` 的强制形式确定后再说。)
+- **已补齐**(07-29):`recall.creation` `recall.notes` `vocab.add` `section.read`。
+  注意 `vocab.add` 走的是**新拆的确定性路径**(`build_vocab_note` + `online=False`),
+  与 1.1 里那个会调 AI 的旧工具 `add_vocab` 是两回事 —— 补能力的正确姿势是另拆一条
+  确定性路径,不是给旧工具开黑名单口子。
+- **不补**:`search_image` 及一切联网类(搜图/搜视频/天气/新闻)。上游助手自带联网,
+  自己查更直接;直接命令只补**上游拿不到的本地数据**(任务书第七节亦有原话:
+  "天气由 AI 自查后按天气卡字段输出")。
+- **待定**:`read_check_report` 要等 `verify=false` 的强制形式确定后再说。
 - **直接命令有、助手没有**:`read.pageimage` `toc.get` `dict.lookup` `highlight.create`
   `highlight.list` `note.list` `page.new` `page.add` —— 说明通道在**写与定位**上已比助手
   完整,缺的只是召回类读操作。
