@@ -3420,7 +3420,7 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
   本节登记时尚未提交、推送或部署；下一步只提交本轮精确文件，推送后从 Windows 运行一次正式
   `scripts\deploy_from_windows.ps1`，再由 Pi 官方测试 channel 发布器原子切换 0.2.70。
 
-## Codex：0.2.72 / Windows 0.1.8 最终直连候选已安装（2026-07-29 15:16 JST，待再次部署）
+## Codex：0.2.72 / Windows 0.1.8 最终直连已安装部署（2026-07-29 15:21 JST，扩展 channel 待切换）
 
 - **候选顺延**：0.2.70、0.2.71 与 0.1.7 已在后续安全/发布审查中退役；没有覆盖其既有
   不可变 ZIP。第一次正式部署在写生产前被网络审计拦住，原因只是两个固定 WSS 调用缺少
@@ -3464,8 +3464,11 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
   0。RDP 不是独占 WASAPI，但其会话虚拟 endpoint 会随断开失效；因此真实通话必须先重新连接
   同一 RDP 音频会话，或在活动本地会话改选物理麦克风。当前协议没有 Reader/iPad 麦克风上行。
   真实可听双向 E2E 尚未验证。
-- **STOP 边界/下一步**：STOP 已可验证地停止两路 capture、pump、本次 owned typist 和 WSS；
+- **STOP 边界/发布事实**：STOP 已可验证地停止两路 capture、pump、本次 owned typist 和 WSS；
   Codex 桌面尚无已验证的 ownership-safe Voice 退出 primitive，因此不会猜测第二次
-  `Ctrl+Shift+C`，Voice UI 是否退出需在 Windows 人工确认。本节登记时 0.2.72 的发布修订尚未
-  提交、推送或部署；下一步为精确提交这四处注释/版本生成物与本状态，推送后重新运行正式
-  `scripts\deploy_from_windows.ps1`，再用 Pi 官方发布器切换 0.2.72 测试 channel。
+  `Ctrl+Shift+C`，Voice UI 是否退出需在 Windows 人工确认。主提交 `98996ac` 与网络审计修订
+  `72d8d35` 已推送；第一次正式部署在生产写入前被审计拦住，第二次正式部署 exit 0，Reader
+  `0.2.72`、KG `kg-0.2.72-0961f9dc27dc8c96eda6` 与内置 E2E 均通过，回滚备份为
+  `/home/bwicarus/deploy-backups/reader/20260729T061727Z-39246`。扩展 publisher 第一次也在
+  写 channel 前 fail closed，因为 `reader-extension-handoff.md` 仍登记 0.2.69；本轮已把该
+  唯一交接入口更新到 0.2.72，下一步仅需经正式脚本同步这份文档，再重试官方 channel 发布器。

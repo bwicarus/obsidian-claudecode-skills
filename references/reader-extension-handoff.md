@@ -42,18 +42,25 @@
 
 ## 2. 当前版本和已经完成的主线
 
-当前扩展版本：**0.2.69**。
+当前扩展版本：**0.2.72**。
 
-当前 PWA/服务端共享 runtime 与 Windows 扩展候选目标版本均为 **0.2.69**，产品名精确为
-**“BW网页伴读”**。0.2.69 把“电脑客户端”通话改为 Reader/PWA 与 Windows EXE 的认证 WSS
-直连：Pi 不再中继配对、状态、启动、心跳、信令或音频；Windows 只捕获明确选择的麦克风与
-Codex 目标进程树输出。配对码只在 Windows EXE 生成，Reader 未配对时显示 WSS 地址与 10 位码
-输入区；选择模型或刷新状态不会启动本机动作，只有用户点击电话按钮才会发送 START。
+当前 PWA/服务端共享 runtime 与 Windows 扩展候选版本均为 **0.2.72**，产品名精确为
+**“BW网页伴读”**。0.2.72 把“电脑客户端”通话收口为免配对 direct v2：书籍 PWA 只从精确
+生产 Origin 连接固定 Windows WSS；普通网页只能经 isolated content runtime 与扩展
+background 的固定 relay 连接同一地址。Pi 不再中继配对、状态、启动、心跳、信令或音频；
+Windows 只捕获明确选择的活动麦克风与 Codex 目标进程树输出。Reader/扩展不再生成或输入
+配对码、设备私钥或 endpoint；选择模型、打开设置和刷新状态都不会启动本机动作，只有闭包
+登记的真实电话按钮点击才签发五秒、一次性 START lease。AudioContext blocked 与合法 PCM
+突发均有界丢帧/重排，不再自动关 WSS。Windows 0.1.8 已安装；Reader/PWA 0.2.72 已经由正式
+部署事务发布，真实双向可听 E2E 仍需在活动 Windows 音频会话中人工验证。
 0.2.67 的发布安全门禁继续保留：Windows launcher 在专用 profile 更新后通过 loopback
 DevTools 执行 `chrome.runtime.reload()`、核对实际 worker 构建版本，阻止新版内容脚本与旧
-后台混合运行。0.2.69 把 launcher 提升为 v11；功能逻辑沿用已验收的 v10，版本提升用于
+后台混合运行。launcher 仍为 v11；功能逻辑沿用已验收的 v10，版本提升用于
 承认跨机换行契约使公开 PowerShell/双文件 ZIP 字节发生变化，避免覆盖不可变的 v10 资产。
-0.2.69 的 Reader/PWA 实际发布、回滚与健康证据见当前协作状态。
+0.2.72 Windows 测试 ZIP SHA-256 为
+`b365fb2d8ba9d64dc622fd0dca66f4e67e999c168eaec715dba30cbd627b2960`；Safari/iOS ZIP
+SHA-256 为 `71b0242c35d7de4ac0ecfea7bbc971c7551285a1b966f43f3040998273ed80d0`。
+Reader/PWA 实际发布、Windows 安装、回滚与健康证据见当前协作状态。
 上一版 0.2.60 已完成页面 placement 尺寸修复的人工验收；其不可变 Windows ZIP 含 74 个
 文件、1,198,019 bytes，SHA-256：
 `fb988e4aa0e25c1096568ad167416abab2b3658c880373e179862a0f7db457a7`。
