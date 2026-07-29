@@ -1,8 +1,8 @@
 # Reader ↔ Windows 电脑语音直连
 
-状态：2026-07-29 Windows 0.1.0 候选已替换安装但仍保持禁用。**尚未部署 Reader/PWA，
-尚未创建登录 bootstrap 或启用 Tailscale Serve，尚未启动真实麦克风、进程音频、
-voice-typist 或语音快捷键。**
+状态：2026-07-29 Windows 0.1.0 已安装，Reader/PWA 0.2.69 已部署。Windows 服务由用户
+手动启动后保持 `idle`，**尚未创建登录 bootstrap 或启用 Tailscale Serve，当前
+`readerConnected=false`、`captureActive=false`，没有启动真实采音。**
 
 ## 目标
 
@@ -119,8 +119,9 @@ PCM 只在 Tailscale 加密直连中出现，不写 Pi、磁盘、日志或浏�
 - 0.1.0 的两个 EXE 已原子替换到固定安装目录；替换前版本保存在
   `C:\Users\bwica\bw-computer-voice-bridge-backups\install-20260729T003728326Z`。安装后从
   固定路径运行双自检均通过，音频服务仍报告 `audioActivated=false`。
-- 安装后的禁用状态为：direct config/runtime 不存在、Tailscale Serve `{}`、登录 bootstrap
-  任务不存在、`127.0.0.1:43128` 无监听、目标进程为 0；替换安装不等于启用或配对。
+- 用户随后从桌面 EXE 手动启动服务；本机 `127.0.0.1:43128` 正常监听，runtime 状态为
+  `idle / readerConnected=false / captureActive=false`。登录 bootstrap 任务仍不存在，
+  Tailscale Serve 仍为 `{}`；启动本机 listener 不等于已建立远端配对或开始采音。
 - 浏览器无法唤醒一个完全不存在的 Windows listener。产品保证是：用户一次明确安装并启用
   登录 bootstrap 后，服务空闲常驻且不采音；认证的电话 `START` 才自动打开 Codex、启动
   明确麦克风与进程音频。真实麦克风、扬声器、快捷键和 iPad/PWA E2E 仍待用户可见验收。

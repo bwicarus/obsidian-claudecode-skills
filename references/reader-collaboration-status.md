@@ -3327,3 +3327,14 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **尚未完成**：固定 `BW Codex Chrome Test` 独立环境仍是 0.2.68，尚未离线替换为 0.2.69
   并执行用户人工清单；尚未正式部署。真实 WSS 配对、自动打开 Codex、麦克风、应用输出听感和
   停止行为只能在部署并由用户明确启用 bootstrap/Serve 后做 iPad 真机 E2E。
+
+## Codex：0.2.69 已直接部署；单用户阶段改为生产验收（2026-07-29 10:38 JST）
+
+- 用户决定取消强制实验浏览器验收和独立重复预检：今后默认提交/推送后直接运行一次正式
+  `deploy_from_windows.ps1`，保留脚本内置校验、原子备份、失败回滚，由用户在生产实际使用后反馈。
+- Reader/PWA `0.2.69` 与 KG `kg-0.2.69-d1e3f7a2a02bccfa1393` 已部署，事务 exit 0、内置
+  E2E 全过；回滚目录为 `/home/bwicarus/deploy-backups/reader/20260729T013506Z-20462`。
+- 后验确认 Pi HEAD 与 `108d15b` 一致，webapp/voice-rt active、`NRestarts=0`、login 200、
+  8767 监听、事务 complete；生产直连 UI 已生效且旧“生成一次性配对码”按钮不存在。
+- Windows 服务当前仅本机 idle：43128 监听但 Serve `{}`、无 bootstrap、未连接 Reader、
+  `captureActive=false`；下一步由用户直接在生产 PWA 反馈配对/通话结果。

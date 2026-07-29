@@ -51,9 +51,9 @@ Codex 目标进程树输出。配对码只在 Windows EXE 生成，Reader 未配
 输入区；选择模型或刷新状态不会启动本机动作，只有用户点击电话按钮才会发送 START。
 0.2.67 的发布安全门禁继续保留：Windows launcher 在专用 profile 更新后通过 loopback
 DevTools 执行 `chrome.runtime.reload()`、核对实际 worker 构建版本，阻止新版内容脚本与旧
-后台混合运行。0.2.69 候选把 launcher 提升为 v11；功能逻辑沿用已验收的 v10，版本提升用于
+后台混合运行。0.2.69 把 launcher 提升为 v11；功能逻辑沿用已验收的 v10，版本提升用于
 承认跨机换行契约使公开 PowerShell/双文件 ZIP 字节发生变化，避免覆盖不可变的 v10 资产。
-0.2.68 的实际发布、回滚与健康证据见当前协作状态。
+0.2.69 的 Reader/PWA 实际发布、回滚与健康证据见当前协作状态。
 上一版 0.2.60 已完成页面 placement 尺寸修复的人工验收；其不可变 Windows ZIP 含 74 个
 文件、1,198,019 bytes，SHA-256：
 `fb988e4aa0e25c1096568ad167416abab2b3658c880373e179862a0f7db457a7`。
