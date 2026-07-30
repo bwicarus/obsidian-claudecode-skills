@@ -524,9 +524,15 @@
           '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe0ff;font-weight:600;cursor:pointer">' +
             '<input type="checkbox" id="set-ctx-sync" style="width:16px;height:16px"> 🔁 双向上下文同步（默认关闭）' +
           '</label>' +
+          '<label style="display:flex;align-items:center;gap:8px;font-size:12px;color:#cfe0ff;cursor:pointer;margin-top:10px">' +
+            '<input type="checkbox" id="set-ctx-legacy" style="width:16px;height:16px"> 测试旧版文字注入' +
+          '</label>' +
+          '<div style="font-size:11px;color:#8a9bb4;line-height:1.6;margin-top:5px">' +
+            '关闭＝实时快照 MCP；开启＝旧版 Voice Typist 文字注入。切换时会先结束当前电脑语音并清理旧链路；下次通话按新模式启动。' +
+          '</div>' +
           '<div style="font-size:11px;color:#8a9bb4;line-height:1.6;margin-top:8px">' +
-            '开启后同时允许两个方向：① 本页把<b>当前在读的书/页</b>上报给 Pi；② Pi 生成 <code>context.md</code> 并经 SSH 更新电脑上的那份上下文快照。<br>' +
-            '关闭时两个方向都停：本页不发任何请求、不轮询、不挂监听，Pi 也不再生成或推送快照。<br>' +
+            '开启后允许本页上报当前书、页、选区和绘图；末端由上面的模式决定。<br>' +
+            '关闭时停止上下文上报与末端同步；电脑语音本身仍可单独使用。<br>' +
             '连续翻页只在停手约 1 秒后发一次完整状态，不会因为滚动而刷请求。<br>' +
             '<b>不受此开关影响</b>：电脑那边发回来的助手回复和卡片属于被动显示，到达即写入、侧栏自然出现，不需要本页为它轮询。' +
           '</div>' +
@@ -1063,9 +1069,57 @@
   // ── 双向上下文同步总开关:自闭环(自己回填、自己在 change 时落盘)。
   //    PDF 宿主的保存走 opts.onSave 原生函数、根本不进 saveInternal,挂在「保存」里三宿主行为会不一致。
   function _fillCtxSync() {
-    var cb = $('set-ctx-sync'), msg = $('set-ctx-sync-msg');
+    var cb = $('set-ctx-sync'), legacy = $('set-ctx-legacy');
+    var msg = $('set-ctx-sync-msg');
     if (!cb || !window.RC || !RC.ctxSync) return;
     cb.checked = RC.ctxSync.enabled();
+    if (legacy && typeof RC.ctxSync.getConfig === 'function') {
+      legacy.disabled = true;
+      RC.ctxSync.getConfig().then(function (cfg) {
+        legacy.checked = cfg.deliveryMode === 'legacy-inject';
+      }).catch(function (e) {
+        if (msg) {
+          msg.textContent = '无法读取当前上下文模式：' +
+            (e && e.message ? e.message : '网络错误');
+          msg.style.display = '';
+        }
+      }).then(function () {
+        legacy.disabled = false;
+      });
+      if (!legacy._ctxModeBound) {
+        legacy._ctxModeBound = true;
+        legacy.addEventListener('change', function () {
+          var requestedLegacy = legacy.checked;
+          var mode = requestedLegacy
+            ? 'legacy-inject'
+            : 'snapshot-mcp';
+          legacy.disabled = true;
+          if (msg) { msg.style.display = 'none'; msg.textContent = ''; }
+          RC.ctxSync.setDeliveryMode(mode).then(function (value) {
+            if (!value || value.ok !== true || value.mode !== mode) {
+              throw new Error('Windows 未确认模式切换');
+            }
+            toast(requestedLegacy
+              ? '已切换到旧版文字注入'
+              : '已切换到实时快照 MCP');
+          }).catch(function (e) {
+            if (msg) {
+              msg.textContent = '模式切换失败，正在读取实际状态：' +
+                (e && e.message ? e.message : 'Windows 桥接器离线');
+              msg.style.display = '';
+            }
+            return RC.ctxSync.getConfig().then(function (cfg) {
+              legacy.checked =
+                cfg.deliveryMode === 'legacy-inject';
+            }).catch(function () {
+              legacy.checked = !requestedLegacy;
+            });
+          }).then(function () {
+            legacy.disabled = false;
+          });
+        });
+      }
+    }
     if (cb._ctxBound) return;
     cb._ctxBound = true;
     cb.addEventListener('change', function () {

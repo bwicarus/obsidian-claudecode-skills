@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace BwReader.ComputerVoiceAudio;
 
@@ -24,6 +25,7 @@ internal sealed class DirectBridgeConfigStore
 {
     private const int MaximumConfigBytes = 64 * 1024;
     private readonly string _path;
+    private readonly object _writeGate = new();
 
     internal DirectBridgeConfigStore(string path)
     {
@@ -289,6 +291,107 @@ internal sealed class DirectBridgeConfigStore
         )
         {
             throw ConfigInvalid(exception);
+        }
+    }
+
+    internal DirectBridgeConfig UpdateContextDeliveryMode(string mode)
+    {
+        if (!DirectContextDeliveryMode.IsSupported(mode))
+        {
+            throw new DirectProtocolException(
+                "BW_READER_CONTEXT_DELIVERY_MODE_INVALID",
+                "Reader 上下文交付模式无效");
+        }
+
+        lock (_writeGate)
+        {
+            DirectBridgeConfig current = Load();
+            if (current.ContextDeliveryMode == mode)
+            {
+                return current;
+            }
+
+            string temporaryPath = _path
+                + "."
+                + Guid.NewGuid().ToString("N")
+                + ".tmp";
+            try
+            {
+                JsonObject root =
+                    JsonNode.Parse(File.ReadAllText(_path, Encoding.UTF8))
+                        as JsonObject
+                    ?? throw ConfigInvalid();
+                root["contextDeliveryMode"] = mode;
+                string serialized = root.ToJsonString(
+                    DirectBridgeContract.JsonOptions);
+                if (
+                    serialized.Length == 0
+                    || Encoding.UTF8.GetByteCount(serialized)
+                        > MaximumConfigBytes
+                )
+                {
+                    throw ConfigInvalid();
+                }
+
+                using (
+                    FileStream stream = new(
+                        temporaryPath,
+                        FileMode.CreateNew,
+                        FileAccess.Write,
+                        FileShare.None,
+                        bufferSize: 4096,
+                        FileOptions.WriteThrough)
+                )
+                using (
+                    StreamWriter writer = new(
+                        stream,
+                        new UTF8Encoding(
+                            encoderShouldEmitUTF8Identifier: false),
+                        bufferSize: 4096,
+                        leaveOpen: true)
+                )
+                {
+                    writer.Write(serialized);
+                    writer.Flush();
+                    stream.Flush(flushToDisk: true);
+                }
+                File.Move(temporaryPath, _path, overwrite: true);
+                DirectBridgeConfig updated = Load();
+                if (updated.ContextDeliveryMode != mode)
+                {
+                    throw ConfigInvalid();
+                }
+                return updated;
+            }
+            catch (DirectProtocolException)
+            {
+                throw;
+            }
+            catch (
+                Exception exception
+            ) when (
+                exception is IOException
+                or UnauthorizedAccessException
+                or JsonException
+                or ArgumentException
+                or InvalidOperationException
+            )
+            {
+                throw ConfigInvalid(exception);
+            }
+            finally
+            {
+                try
+                {
+                    if (File.Exists(temporaryPath))
+                    {
+                        File.Delete(temporaryPath);
+                    }
+                }
+                catch
+                {
+                }
+            }
         }
     }
 

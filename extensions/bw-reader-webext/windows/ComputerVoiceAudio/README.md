@@ -87,11 +87,13 @@ background 的固定 relay，不能把 URL、设备 ID、AUMID、进程、路径
 所有文本消息使用 `reader-computer-voice-direct/1`：
 
 ```json
-{"contract":"reader-computer-voice-direct/1","type":"hello|status|context-mode|context-open|start|heartbeat|context|active-reading|context-clear|stop","requestId":"..."}
+{"contract":"reader-computer-voice-direct/1","type":"hello|status|context-mode|context-mode-set|context-open|start|heartbeat|context|active-reading|context-clear|stop","requestId":"..."}
 ```
 
 - 新连接先发严格 `hello`，`protocolVersion` 必须为 `3`；成功后进入等待 START。
 - `context-mode` 只读返回该连接在 HELLO 时锁定的模式。`snapshot-mcp` 可用
+- `context-mode-set` 仅允许在未启动通话的已认证连接上切换两种模式；
+  从 `snapshot-mcp` 切回旧注入时，Windows 必须先清空本地快照，再原子写配置。
   `context-open` 建立无 START、无应用/采音/快捷键副作用的纯上下文连接；此阶段没有
   30 秒 START deadline。
 - `status`、模型选择和刷新无副作用。

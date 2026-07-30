@@ -89,6 +89,8 @@
   var lastContextResumeCursor = null;
   var contextPumpGeneration = 0;
   var contextDeliveryMode = null;
+  var contextModeChanging = false;
+  var contextModeChangePromise = null;
   var snapshotLink = null;
   var snapshotLinkGeneration = 0;
   var snapshotReconnectTimer = null;
@@ -1414,8 +1416,10 @@
     }
   }
 
-  function setServerContextDeliveryMode(mode) {
-    if (!contextSyncEnabled()) return Promise.resolve(null);
+  function setServerContextDeliveryMode(mode, enabled) {
+    var requestedEnabled = enabled == null
+      ? contextSyncEnabled()
+      : enabled === true;
     var fetcher = window.__bwReaderFetch;
     if (typeof fetcher !== "function" && typeof window.fetch === "function") {
       fetcher = window.fetch.bind(window);
@@ -1433,7 +1437,7 @@
       cache: "no-store",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
-        enabled: true,
+        enabled: requestedEnabled,
         deliveryMode: mode,
       }),
     })).then(function (response) {
@@ -1450,7 +1454,7 @@
       if (
         !plainObject(value) ||
         value.ok !== true ||
-        value.enabled !== true ||
+        value.enabled !== requestedEnabled ||
         value.deliveryMode !== mode
       ) {
         throw directError(
@@ -1461,6 +1465,143 @@
       }
       return value;
     });
+  }
+
+  function normalizeContextModeSet(value, expectedMode) {
+    exactObject(
+      value,
+      ["mode", "previousMode"],
+      [],
+      "CONTEXT-MODE-SET 响应"
+    );
+    if (
+      (value.mode !== CONTEXT_DELIVERY_LEGACY &&
+        value.mode !== CONTEXT_DELIVERY_SNAPSHOT) ||
+      (value.previousMode !== CONTEXT_DELIVERY_LEGACY &&
+        value.previousMode !== CONTEXT_DELIVERY_SNAPSHOT) ||
+      value.mode !== expectedMode
+    ) {
+      throw directError(
+        "Windows 上下文交付模式切换回执无效",
+        "BW_READER_CONTEXT_DELIVERY_MODE_ACK",
+        false
+      );
+    }
+    contextDeliveryMode = value.mode;
+    return value;
+  }
+
+  function setContextDeliveryMode(mode) {
+    if (
+      mode !== CONTEXT_DELIVERY_LEGACY &&
+      mode !== CONTEXT_DELIVERY_SNAPSHOT
+    ) {
+      return Promise.reject(directError(
+        "Reader 上下文交付模式无效",
+        "BW_READER_CONTEXT_DELIVERY_MODE_INVALID",
+        false
+      ));
+    }
+    if (contextModeChangePromise) {
+      return Promise.reject(directError(
+        "Reader 上下文交付模式正在切换",
+        "BW_READER_CONTEXT_DELIVERY_MODE_BUSY",
+        true
+      ));
+    }
+
+    contextModeChanging = true;
+    var channel = null;
+    var activeChannel = null;
+    var previousMode = null;
+    var modeSessionId = randomSession().id;
+    var changedOnWindows = false;
+    var work = Promise.resolve().then(function () {
+      return cancelAvailabilityForStart();
+    }).then(function () {
+      activeChannel = active && active.channel;
+      if (!(active || dialPending)) return null;
+      return stop("context-delivery-mode-change").then(function () {
+        return activeChannel
+          ? activeChannel.close()
+          : null;
+      });
+    }).then(function () {
+      return stopSnapshotLink();
+    }).then(function () {
+      return openDirect(null, function (opened) {
+        channel = opened;
+      });
+    }).then(function (opened) {
+      channel = opened;
+      return queryContextMode(channel);
+    }).then(function (currentMode) {
+      previousMode = currentMode;
+      if (currentMode === mode) {
+        return {
+          mode: mode,
+          previousMode: currentMode,
+        };
+      }
+      return channel.request("context-mode-set", {
+        mode: mode,
+        sessionId: modeSessionId,
+      }).then(function (value) {
+        changedOnWindows = true;
+        return normalizeContextModeSet(value, mode);
+      });
+    }).then(function () {
+      return setServerContextDeliveryMode(
+        mode,
+        contextSyncEnabled()
+      ).catch(function (error) {
+        if (!changedOnWindows || !previousMode || !channel) {
+          throw error;
+        }
+        return channel.request("context-mode-set", {
+          mode: previousMode,
+          sessionId: modeSessionId,
+        }).then(function (value) {
+          normalizeContextModeSet(value, previousMode);
+        }).catch(function () {
+          contextDeliveryMode = null;
+        }).then(function () {
+          throw error;
+        });
+      });
+    }).then(function () {
+      contextDeliveryMode = mode;
+      emitStatus({
+        state: mode === CONTEXT_DELIVERY_SNAPSHOT
+          ? "context-ready"
+          : "reader-connected",
+        message: mode === CONTEXT_DELIVERY_SNAPSHOT
+          ? "已切换到实时快照 MCP"
+          : "已切换到旧版文字注入",
+      });
+      return {
+        ok: true,
+        mode: mode,
+      };
+    });
+
+    contextModeChangePromise = work.finally(function () {
+      var closePromise = channel
+        ? channel.close()
+        : Promise.resolve();
+      channel = null;
+      return Promise.resolve(closePromise).catch(function () {
+      }).then(function () {
+        contextModeChanging = false;
+        var reconcilePromise = contextSyncEnabled()
+          ? reconcileSnapshotLink()
+          : null;
+        return Promise.resolve(reconcilePromise).finally(function () {
+          contextModeChangePromise = null;
+        });
+      });
+    });
+    return contextModeChangePromise;
   }
 
   function openDirect(options, onCreate) {
@@ -1564,6 +1705,15 @@
 
   function availability() {
     if (active) return Promise.resolve(activeAvailability(active));
+    if (contextModeChanging) {
+      return Promise.resolve({
+        state: "busy",
+        reason: "Reader 正在切换上下文模式",
+        code: "BW_READER_CONTEXT_DELIVERY_MODE_BUSY",
+        endpoint: DIRECT_ENDPOINT,
+        status: null,
+      });
+    }
     if (!ownsReaderUi()) {
       return Promise.resolve({
         state: "unavailable",
@@ -2956,6 +3106,8 @@
       selectedEngineKnown &&
       computerVoiceSelected &&
       contextSyncEnabled() &&
+      contextDeliveryMode !== CONTEXT_DELIVERY_LEGACY &&
+      !contextModeChanging &&
       !active &&
       !dialPending
     );
@@ -3510,6 +3662,13 @@
 
   function startFromUserGesture(options) {
     options = options || {};
+    if (contextModeChanging) {
+      return Promise.reject(directError(
+        "Reader 正在切换上下文模式，请稍后再拨号",
+        "BW_READER_CONTEXT_DELIVERY_MODE_BUSY",
+        true
+      ));
+    }
     if (active) {
       return Promise.reject(directError(
         "电脑客户端通话已经启动",
@@ -3827,6 +3986,7 @@
     document.addEventListener("click", function (event) {
       if (!phoneButtonFromEvent(event)) return;
       if (event.isTrusted !== true) return;
+      if (contextModeChanging) return;
       try {
         if (
           !RC.voicecall ||
@@ -4108,6 +4268,7 @@
     setSelectedEngine: setSelectedEngine,
     setDialPending: setDialPending,
     contextSyncChanged: contextSyncChanged,
+    setContextDeliveryMode: setContextDeliveryMode,
     cancelPreparedGesture: cancelPreparedGesture,
     registerPhoneButton: registerPhoneButton,
     startFromUserGesture: startFromUserGesture,

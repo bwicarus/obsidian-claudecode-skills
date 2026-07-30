@@ -101,6 +101,11 @@ internal sealed class DirectBridgeProtocolSession
                 case "context-mode":
                     payload = HandleContextMode(message);
                     break;
+                case "context-mode-set":
+                    payload = await HandleContextModeSetAsync(
+                        message,
+                        cancellationToken).ConfigureAwait(false);
+                    break;
                 case "context-open":
                     payload = HandleContextOpen(message);
                     break;
@@ -253,6 +258,61 @@ internal sealed class DirectBridgeProtocolSession
         return new
         {
             mode = RequireContextDeliveryMode(),
+        };
+    }
+
+    private async Task<object> HandleContextModeSetAsync(
+        JsonElement message,
+        CancellationToken cancellationToken)
+    {
+        RequireExactKeys(
+            message,
+            "contract",
+            "type",
+            "requestId",
+            "mode",
+            "sessionId");
+        RequireAuthenticated();
+        if (
+            _phase != DirectProtocolPhase.AwaitingStart
+            || _coordinator.CaptureActive
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_READER_CONTEXT_DELIVERY_MODE_BUSY",
+                "请先结束当前电脑语音，再切换上下文模式",
+                retryable: true);
+        }
+        string mode = RequireString(message, "mode", 32);
+        if (!DirectContextDeliveryMode.IsSupported(mode))
+        {
+            throw new DirectProtocolException(
+                "BW_READER_CONTEXT_DELIVERY_MODE_INVALID",
+                "Reader 上下文交付模式无效");
+        }
+        string previousMode = RequireContextDeliveryMode();
+        string sessionId = RequireSafeId(message, "sessionId");
+        _ = DirectPcmFrameCodec.ParseSessionId(sessionId);
+        if (
+            previousMode == DirectContextDeliveryMode.SnapshotMcp
+            && mode == DirectContextDeliveryMode.LegacyInject
+        )
+        {
+            await _coordinator.ClearSnapshotContextAsync(
+                _connectionId,
+                RequireSafeId(message, "requestId"),
+                sessionId,
+                requireActiveOwner: false,
+                cancellationToken).ConfigureAwait(false);
+        }
+        DirectBridgeConfig updated =
+            _configStore.UpdateContextDeliveryMode(mode);
+        _contextDeliveryMode = updated.ContextDeliveryMode;
+        _contextOnlySessionId = null;
+        return new
+        {
+            mode = updated.ContextDeliveryMode,
+            previousMode,
         };
     }
 

@@ -94,6 +94,28 @@ internal static class DirectBridgeSelfTest
                 == DirectContextDeliveryMode.LegacyInject,
             "direct-config-v5-localhost-single-user-explicit-a-b-routes",
             checks);
+        DirectBridgeConfig switched =
+            store.UpdateContextDeliveryMode(
+                DirectContextDeliveryMode.SnapshotMcp);
+        DirectBridgeConfig switchedReloaded = store.Load();
+        Require(
+            switched.ContextDeliveryMode
+                == DirectContextDeliveryMode.SnapshotMcp
+            && switchedReloaded.ContextDeliveryMode
+                == DirectContextDeliveryMode.SnapshotMcp
+            && switchedReloaded.VirtualMicrophoneRenderEndpointId
+                == initial.VirtualMicrophoneRenderEndpointId
+            && switchedReloaded.VirtualMicrophoneCaptureEndpointId
+                == initial.VirtualMicrophoneCaptureEndpointId
+            && switchedReloaded.VirtualSpeakerRenderEndpointId
+                == initial.VirtualSpeakerRenderEndpointId
+            && !Directory.EnumerateFiles(
+                System.IO.Path.GetDirectoryName(configPath)!,
+                "*.tmp").Any(),
+            "direct-context-mode-config-update-is-atomic-and-preserves-routes",
+            checks);
+        _ = store.UpdateContextDeliveryMode(
+            DirectContextDeliveryMode.LegacyInject);
         Require(
             DirectBridgeServer.TailscaleLoginMatches(
                 initial,
@@ -4377,6 +4399,36 @@ internal static class DirectBridgeSelfTest
                 events,
                 frames).ConfigureAwait(false),
             "stop");
+        string modeChangeSessionId =
+            "session-" + DirectBase64Url.Encode(
+                Enumerable.Range(96, 16)
+                    .Select(value => (byte)value)
+                    .ToArray());
+        JsonElement modeChanged = RequireSuccess(
+            await SendAsync(
+                contextSession,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "context-mode-set",
+                    requestId = "request-snapshot-mode-set-legacy",
+                    mode = DirectContextDeliveryMode.LegacyInject,
+                    sessionId = modeChangeSessionId,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "context-mode-set");
+        Require(
+            modeChanged.GetProperty("previousMode").GetString()
+                == DirectContextDeliveryMode.SnapshotMcp
+            && modeChanged.GetProperty("mode").GetString()
+                == DirectContextDeliveryMode.LegacyInject
+            && store.Load().ContextDeliveryMode
+                == DirectContextDeliveryMode.LegacyInject
+            && media.StartCount == 2
+            && legacy.ForwardCount == 0,
+            "direct-context-mode-set-clears-snapshot-before-legacy",
+            checks);
     }
 
     private static async Task CheckLocalPdfSnapshotResolutionAsync(

@@ -523,6 +523,30 @@
         body: JSON.stringify({ enabled: on }), credentials: 'include'
       }).then(function (r) { return r.json(); });
     },
+    getConfig: function () {
+      return fetch(_ctxU('/pdf/api/context-sync'), {
+        method: 'GET',
+        credentials: 'include',
+        cache: 'no-store'
+      }).then(function (r) { return r.json(); }).then(function (value) {
+        if (!value || value.ok !== true ||
+            (value.deliveryMode !== 'legacy-inject' &&
+             value.deliveryMode !== 'snapshot-mcp')) {
+          throw new Error('上下文同步配置无效');
+        }
+        return value;
+      });
+    },
+    setDeliveryMode: function (mode) {
+      if (mode !== 'legacy-inject' && mode !== 'snapshot-mcp') {
+        return Promise.reject(new Error('上下文交付模式无效'));
+      }
+      if (!RC.computerVoice ||
+          typeof RC.computerVoice.setContextDeliveryMode !== 'function') {
+        return Promise.reject(new Error('Windows 电脑桥接器未加载'));
+      }
+      return RC.computerVoice.setContextDeliveryMode(mode);
+    },
     _state: function () { return _ctxS; }   // 仅供自测/调试观察合并与在途状态
   };
 

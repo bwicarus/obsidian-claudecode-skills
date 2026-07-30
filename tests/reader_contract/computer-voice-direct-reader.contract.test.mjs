@@ -325,6 +325,24 @@ function createServer(scenario) {
         });
         return;
       }
+      if (request.type === "context-mode-set") {
+        const previousMode = scenario.contextDeliveryMode;
+        if (
+          previousMode === "snapshot-mcp" &&
+          request.mode === "legacy-inject"
+        ) {
+          scenario.contextClearRequests.push({
+            type: "context-clear-via-mode-set",
+            sessionId: request.sessionId,
+          });
+        }
+        scenario.contextDeliveryMode = request.mode;
+        result(this, request, {
+          mode: request.mode,
+          previousMode,
+        });
+        return;
+      }
       if (request.type === "context-open") {
         if (scenario.deferContextOpen) {
           server.deferredContextOpens.push({ socket: this, request });
@@ -1940,6 +1958,46 @@ test("切回 legacy-inject 前先清空 Windows 快照，再恢复 Pi 旧注入"
     harness.server.requests.some((request) => request.type === "start"),
     false,
   );
+  harness.api.setSelectedEngine("codex");
+});
+
+test("设置页模式开关先清快照并关闭旧 WSS，再原子切到 legacy 且不发送 START", async () => {
+  const harness = createHarness({
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncEnabled: true,
+    activeReading: {
+      kind: "pdf",
+      file: "book.pdf",
+      pos: 9,
+    },
+  });
+  harness.api.setSelectedEngine("computer_client");
+  await waitForRequest(harness, "context-open");
+  const snapshotSocket = harness.server.sockets[0];
+
+  const changed = await harness.api.setContextDeliveryMode(
+    "legacy-inject",
+  );
+
+  assert.equal(changed.ok, true);
+  assert.equal(changed.mode, "legacy-inject");
+  assert.equal(snapshotSocket.readyState, 3);
+  assert.equal(harness.scenario.contextClearRequests.length, 1);
+  assert.equal(
+    harness.server.requests.filter(
+      (request) => request.type === "context-mode-set",
+    ).length,
+    1,
+  );
+  assert.deepEqual(harness.scenario.contextModePosts.at(-1), {
+    enabled: true,
+    deliveryMode: "legacy-inject",
+  });
+  assert.equal(
+    harness.server.requests.some((request) => request.type === "start"),
+    false,
+  );
+  assert.equal(harness.server.sockets.at(-1).readyState, 3);
   harness.api.setSelectedEngine("codex");
 });
 
