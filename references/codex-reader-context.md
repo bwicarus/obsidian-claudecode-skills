@@ -111,7 +111,9 @@ PDF `reader.js` 也是生成物，唯一源码在 `_server_deploy/static/pdf/rea
   MCP→webapp 身份 token 职责不同，任何凭据都不得写进本文、页面或日志。
 - Windows `snapshot-mcp` 是独立实验末端，不是 Pi `mcp_server.py` 的缓存：Pi 继续提供
   active/journal，PWA 经电脑语音的固定 WSS 直连更新 Windows 本地快照，客户端只通过
-  `reader_context_snapshot` 按需读取；与旧 voice-typist 注入互斥。入口与回滚合同见
+  `reader_context_snapshot` 按需读取；该工具只回 assistant-context 与结构化 JSON 文本，
+  笔迹图另由快照明确指向无参只读 `reader_drawing_image`，普通正文/选区读取不取图。两者与
+  旧 voice-typist 注入互斥。入口与回滚合同见
   [电脑直连音频桥](reader-computer-audio-bridge.md#实验上下文末端2026-07-30)。
 - 内容脚本和页面只能调用固定 operation/schema 的桥；不得退化成任意
   URL/method/body fetch proxy。

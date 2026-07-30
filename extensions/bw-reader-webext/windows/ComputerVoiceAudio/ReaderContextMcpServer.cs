@@ -9,6 +9,8 @@ namespace BwReader.ComputerVoiceAudio;
 internal sealed class ReaderContextMcpServer
 {
     internal const string ToolName = "reader_context_snapshot";
+    internal const string DrawingImageToolName =
+        "reader_drawing_image";
     internal const string ResultToolName = "reader_result_present";
     internal const string ServerName = "bw-reader-context-snapshot";
     internal const string ServerVersion = "1.0.0";
@@ -314,12 +316,15 @@ internal sealed class ReaderContextMcpServer
                     ? "Use reader_context_snapshot only when the user asks "
                         + "about the current Reader page or selection. Respect "
                         + "contextStatus; pending or stale means the current "
-                        + "page text is unavailable. A matching stable drawing "
-                        + "may be returned as an image content item."
+                        + "page text is unavailable. The snapshot is text-only; "
+                        + "when it names reader_drawing_image, call that "
+                        + "separate read-only tool only if the user's request "
+                        + "requires the current drawing."
                     : "Use reader_context_snapshot when the user asks about "
-                        + "the current Reader page or selection. A matching "
-                        + "stable drawing may be returned as an image content "
-                        + "item. During a "
+                        + "the current Reader page or selection. The snapshot "
+                        + "is text-only; use reader_drawing_image separately "
+                        + "only when the user's request requires the current "
+                        + "drawing. During a "
                         + "Reader voice session, after obtaining weather, "
                         + "news, images or videos, or after preparing display "
                         + "cards, call reader_result_present exactly once so "
@@ -336,12 +341,13 @@ internal sealed class ReaderContextMcpServer
                 ["name"] = ToolName,
                 ["description"] =
                     "Read the newest Windows-local Reader page and "
-                    + "selection snapshot. The tool is read-only. "
+                    + "selection snapshot as text only. The tool never "
+                    + "captures or returns an image. "
                     + "Check contextStatus before using currentPage; "
                     + "never reuse text when it is pending or stale. "
-                    + "When the current stable drawing is still visible, "
-                    + "the result also includes its existing Reader-composited "
-                    + "ink-region image.",
+                    + "For a current drawing, lastEditedAgeSec is computed "
+                    + "from a Windows-local receive-time anchor and "
+                    + "drawingImageTool names the separate image tool.",
                 ["inputSchema"] = new JsonObject
                 {
                     ["type"] = "object",
@@ -357,6 +363,33 @@ internal sealed class ReaderContextMcpServer
                 },
             },
         ];
+        if (_fetchVisualAsync is not null)
+        {
+            tools.Add(new JsonObject
+            {
+                ["name"] = DrawingImageToolName,
+                ["description"] =
+                    "Return the current Reader drawing as the existing "
+                    + "Reader-composited JPEG. This parameterless read-only "
+                    + "tool captures only when the Windows snapshot is ready "
+                    + "and the current page has a stable, non-empty drawing. "
+                    + "File, page and drawing revision must still match after "
+                    + "capture; otherwise no image is returned.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["additionalProperties"] = false,
+                    ["properties"] = new JsonObject(),
+                },
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = true,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = true,
+                    ["openWorldHint"] = false,
+                },
+            });
+        }
         if (_deliverResultAsync is not null)
         {
             tools.Add(new JsonObject
@@ -464,13 +497,25 @@ internal sealed class ReaderContextMcpServer
         _callSequence = checked(_callSequence + 1);
         if (toolName == ToolName)
         {
-            if (
-                arguments.ValueKind != JsonValueKind.Undefined
-                && (
-                    arguments.ValueKind != JsonValueKind.Object
-                    || arguments.EnumerateObject().Any()
-                )
-            )
+            if (!HasNoArguments(arguments))
+            {
+                return BuildError(
+                    id,
+                    -32602,
+                    "Invalid tool call");
+            }
+            await TryLoadLatestAsync(cancellationToken)
+                .ConfigureAwait(false);
+            return BuildSnapshotToolResult(
+                id,
+                BuildToolPayload());
+        }
+        if (
+            toolName == DrawingImageToolName
+            && _fetchVisualAsync is not null
+        )
+        {
+            if (!HasNoArguments(arguments))
             {
                 return BuildError(
                     id,
@@ -482,49 +527,51 @@ internal sealed class ReaderContextMcpServer
             JsonObject payload = BuildToolPayload();
             ReaderVisualDeliveryRequest? visualRequest =
                 BuildVisualRequest(payload);
-            ReaderVisualCapture? visual = null;
-            string visualStatus = visualRequest is null
-                ? "not-needed"
-                : _fetchVisualAsync is null
-                    ? "unavailable"
-                    : "requested";
-            if (
-                visualRequest is not null
-                && _fetchVisualAsync is not null
-            )
+            if (visualRequest is null)
             {
-                try
-                {
-                    visual = await _fetchVisualAsync(
-                        visualRequest,
-                        cancellationToken).ConfigureAwait(false);
-                    visualStatus = visual is null
-                        ? "unavailable"
-                        : "received";
-                }
-                catch (ReaderVisualDeliveryException)
-                {
-                    visualStatus = "unavailable";
-                }
-                await TryLoadLatestAsync(cancellationToken)
-                    .ConfigureAwait(false);
-                payload = BuildToolPayload();
-                if (!VisualRequestStillCurrent(
-                    payload,
-                    visualRequest))
-                {
-                    visual = null;
-                    visualStatus = "superseded";
-                }
+                return BuildDrawingImageError(
+                    id,
+                    "no-current-stable-drawing");
+            }
+            ReaderVisualCapture? visual;
+            try
+            {
+                visual = await _fetchVisualAsync(
+                    visualRequest,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (ReaderVisualDeliveryException)
+            {
+                return BuildDrawingImageError(
+                    id,
+                    "drawing-image-unavailable");
+            }
+            await TryLoadLatestAsync(cancellationToken)
+                .ConfigureAwait(false);
+            payload = BuildToolPayload();
+            if (!VisualRequestStillCurrent(
+                payload,
+                visualRequest))
+            {
+                return BuildDrawingImageError(
+                    id,
+                    "drawing-revision-superseded");
             }
             if (
-                payload["mcp"] is JsonObject mcp
-                && visualRequest is not null
+                visual is null
+                || visual.MimeType
+                    != ReaderVisualDeliveryProtocol.MimeType
+                || visual.Data.Length == 0
             )
             {
-                mcp["drawingImageStatus"] = visualStatus;
+                return BuildDrawingImageError(
+                    id,
+                    "drawing-image-unavailable");
             }
-            return BuildToolResult(id, payload, visual);
+            return BuildDrawingImageResult(
+                id,
+                visualRequest,
+                visual);
         }
         if (
             toolName != ResultToolName
@@ -603,6 +650,30 @@ internal sealed class ReaderContextMcpServer
         bool isError = false) =>
         BuildToolResult(id, payload, visual: null, isError);
 
+    private static JsonObject BuildSnapshotToolResult(
+        JsonNode id,
+        JsonObject payload) =>
+        BuildResult(
+            id,
+            new JsonObject
+            {
+                ["content"] = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["type"] = "text",
+                        ["text"] =
+                            BuildAssistantContext(payload),
+                    },
+                    new JsonObject
+                    {
+                        ["type"] = "text",
+                        ["text"] = payload.ToJsonString(
+                            DirectBridgeContract.JsonOptions),
+                    },
+                },
+            });
+
     private static JsonObject BuildToolResult(
         JsonNode id,
         JsonObject payload,
@@ -640,6 +711,158 @@ internal sealed class ReaderContextMcpServer
             result["isError"] = true;
         }
         return BuildResult(id, result);
+    }
+
+    private static JsonObject BuildDrawingImageResult(
+        JsonNode id,
+        ReaderVisualDeliveryRequest request,
+        ReaderVisualCapture visual)
+    {
+        JsonObject identity = new()
+        {
+            ["file"] = request.File,
+            ["page"] = request.Page.DeepClone(),
+            ["drawingRevision"] = request.DrawingRevision,
+        };
+        return BuildToolResult(
+            id,
+            identity,
+            visual);
+    }
+
+    private static JsonObject BuildDrawingImageError(
+        JsonNode id,
+        string reason) =>
+        BuildToolResult(
+            id,
+            new JsonObject
+            {
+                ["imageAvailable"] = false,
+                ["reason"] = reason,
+            },
+            isError: true);
+
+    private static bool HasNoArguments(JsonElement arguments) =>
+        arguments.ValueKind == JsonValueKind.Undefined
+        || (
+            arguments.ValueKind == JsonValueKind.Object
+            && !arguments.EnumerateObject().Any()
+        );
+
+    internal static string BuildAssistantContext(JsonObject payload)
+    {
+        StringBuilder text = new();
+        text.AppendLine(
+            "Reader assistant context (silent state: do not reply merely "
+            + "because this context was read).");
+        JsonObject? page = payload["currentPage"] as JsonObject;
+        JsonObject? active = payload["activeReading"] as JsonObject;
+        string? file = page?["file"]?.GetValue<string>()
+            ?? active?["file"]?.GetValue<string>();
+        string? title = page?["title"]?.GetValue<string>()
+            ?? active?["title"]?.GetValue<string>();
+        JsonNode? pageNumber = page?["page"]
+            ?? active?["page"];
+        text.Append("Location: ");
+        if (string.IsNullOrWhiteSpace(file) && pageNumber is null)
+        {
+            text.AppendLine("no current Reader page.");
+        }
+        else
+        {
+            if (!string.IsNullOrWhiteSpace(title))
+            {
+                text.Append(title);
+                text.Append(" — ");
+            }
+            text.Append(file ?? "unknown file");
+            text.Append(", page ");
+            text.AppendLine(
+                pageNumber?.ToJsonString() ?? "unknown");
+        }
+
+        if (
+            payload["selection"] is JsonObject selection
+            && selection["state"]?.GetValue<string>() == "active"
+            && selection["text"]?.GetValue<string>()
+                is string selectionText
+            && !string.IsNullOrWhiteSpace(selectionText)
+        )
+        {
+            text.AppendLine("Active selection:");
+            text.AppendLine(selectionText);
+        }
+
+        bool pageReady =
+            payload["contextStatus"]?.GetValue<string>() == "ready"
+            && page?["stable"]?.GetValue<bool?>() == true;
+        string pageText = page?["text"]?.GetValue<string>() ?? "";
+        bool textAvailable =
+            pageReady
+            && page?["textAvailable"]?.GetValue<bool?>() == true
+            && !string.IsNullOrWhiteSpace(pageText);
+        text.AppendLine("Page text:");
+        text.AppendLine(
+            textAvailable
+                ? pageText
+                : $"unavailable (contextStatus="
+                    + (
+                        payload["contextStatus"]?.GetValue<string>()
+                        ?? "unknown"
+                    )
+                    + ").");
+
+        JsonObject? drawing = page?["visual"]?["drawing"]
+            as JsonObject;
+        text.Append("Drawing: ");
+        if (
+            drawing is null
+            || drawing["empty"]?.GetValue<bool?>() == true
+        )
+        {
+            text.AppendLine("none.");
+        }
+        else
+        {
+            bool stable =
+                drawing["stable"]?.GetValue<bool?>() == true;
+            bool inProgress =
+                drawing["inProgress"]?.GetValue<bool?>() == true;
+            if (!stable || inProgress)
+            {
+                text.Append("waiting/not yet available, ");
+            }
+            text.Append("stable=");
+            text.Append(
+                stable.ToString().ToLowerInvariant());
+            text.Append(", inProgress=");
+            text.Append(
+                inProgress.ToString().ToLowerInvariant());
+            text.Append(", lastEditedAgeSec=");
+            text.AppendLine(
+                drawing["lastEditedAgeSec"]?.ToJsonString()
+                ?? "unknown");
+        }
+        string? drawingTool =
+            payload["drawingImageTool"]?.GetValue<string>();
+        if (
+            !string.IsNullOrWhiteSpace(drawingTool)
+            && TryGetVisualIdentity(
+                payload,
+                out _,
+                out _,
+                out _)
+        )
+        {
+            text.Append(
+                "Drawing metadata does not reveal ink content. "
+                + "For a user question about the current drawing, call ");
+            text.Append(drawingTool);
+            text.AppendLine(
+                "; do not request an image for ordinary page or selection "
+                + "questions.");
+        }
+        return text.ToString().TrimEnd();
     }
 
     private ReaderResultDeliveryRequest BuildReaderResultRequest(
@@ -948,6 +1171,10 @@ internal sealed class ReaderContextMcpServer
         if (snapshot is not null)
         {
             ApplyFreshness(snapshot, _utcNow());
+            snapshot["drawingImageTool"] =
+                _fetchVisualAsync is null
+                    ? null
+                    : DrawingImageToolName;
             snapshot["mcp"] = new JsonObject
             {
                 ["pid"] = Environment.ProcessId,
@@ -976,6 +1203,10 @@ internal sealed class ReaderContextMcpServer
                 ["ref"] = null,
                 ["reason"] = "snapshot-not-received",
             },
+            ["drawingImageTool"] =
+                _fetchVisualAsync is null
+                    ? null
+                    : DrawingImageToolName,
             ["mcp"] = new JsonObject
             {
                 ["pid"] = Environment.ProcessId,
@@ -991,14 +1222,52 @@ internal sealed class ReaderContextMcpServer
     private static ReaderVisualDeliveryRequest? BuildVisualRequest(
         JsonObject payload)
     {
+        if (!TryGetVisualIdentity(
+            payload,
+            out string? file,
+            out JsonNode? page,
+            out string? revision))
+        {
+            return null;
+        }
+        return new ReaderVisualDeliveryRequest(
+            "visual-" + Guid.NewGuid().ToString("N"),
+            file!,
+            page!.DeepClone(),
+            revision!);
+    }
+
+    private static bool VisualRequestStillCurrent(
+        JsonObject payload,
+        ReaderVisualDeliveryRequest request)
+    {
+        return TryGetVisualIdentity(
+                payload,
+                out string? file,
+                out JsonNode? page,
+                out string? revision)
+            && file == request.File
+            && JsonNode.DeepEquals(page, request.Page)
+            && revision == request.DrawingRevision;
+    }
+
+    private static bool TryGetVisualIdentity(
+        JsonObject payload,
+        out string? file,
+        out JsonNode? page,
+        out string? revision)
+    {
+        file = null;
+        page = null;
+        revision = null;
         if (
             payload["contextStatus"]?.GetValue<string>() != "ready"
             || payload["currentPage"] is not JsonObject currentPage
             || currentPage["stable"]?.GetValue<bool?>() != true
             || currentPage["file"]?.GetValue<string>()
-                is not string file
-            || string.IsNullOrWhiteSpace(file)
-            || currentPage["page"] is not JsonNode page
+                is not string currentFile
+            || string.IsNullOrWhiteSpace(currentFile)
+            || currentPage["page"] is not JsonNode currentPageNumber
             || currentPage["visual"] is not JsonObject visual
             || visual["has_ink"]?.GetValue<bool?>() != true
             || visual["drawing"] is not JsonObject drawing
@@ -1006,44 +1275,27 @@ internal sealed class ReaderContextMcpServer
             || drawing["inProgress"]?.GetValue<bool?>() != false
             || drawing["empty"]?.GetValue<bool?>() != false
             || drawing["drawingRevision"]?.GetValue<string>()
-                is not string revision
-            || drawing["file"]?.GetValue<string>() != file
-            || !JsonNode.DeepEquals(drawing["page"], page)
-        )
-        {
-            return null;
-        }
-        return new ReaderVisualDeliveryRequest(
-            "visual-" + Guid.NewGuid().ToString("N"),
-            file,
-            page.DeepClone(),
-            revision);
-    }
-
-    private static bool VisualRequestStillCurrent(
-        JsonObject payload,
-        ReaderVisualDeliveryRequest request)
-    {
-        if (
-            payload["contextStatus"]?.GetValue<string>() != "ready"
-            || payload["currentPage"] is not JsonObject currentPage
-            || currentPage["file"]?.GetValue<string>() != request.File
-            || currentPage["page"] is not JsonNode page
-            || !JsonNode.DeepEquals(page, request.Page)
-            || currentPage["visual"] is not JsonObject visual
-            || visual["has_ink"]?.GetValue<bool?>() != true
-            || visual["drawing"] is not JsonObject drawing
+                is not string currentRevision
+            || drawing["file"]?.GetValue<string>() != currentFile
+            || !JsonNode.DeepEquals(
+                drawing["page"],
+                currentPageNumber)
+            || drawing["ref"] is not JsonObject reference
+            || reference["kind"]?.GetValue<string>() != "drawing"
+            || reference["file"]?.GetValue<string>() != currentFile
+            || !JsonNode.DeepEquals(
+                reference["page"],
+                currentPageNumber)
+            || reference["revision"]?.GetValue<string>()
+                != currentRevision
         )
         {
             return false;
         }
-        return drawing["stable"]?.GetValue<bool?>() == true
-            && drawing["inProgress"]?.GetValue<bool?>() == false
-            && drawing["empty"]?.GetValue<bool?>() == false
-            && drawing["drawingRevision"]?.GetValue<string>()
-                == request.DrawingRevision
-            && drawing["file"]?.GetValue<string>() == request.File
-            && JsonNode.DeepEquals(drawing["page"], request.Page);
+        file = currentFile;
+        page = currentPageNumber;
+        revision = currentRevision;
+        return true;
     }
 
     internal static void ApplyFreshness(
@@ -1086,29 +1338,81 @@ internal sealed class ReaderContextMcpServer
             snapshot["currentPage"] is not JsonObject page
             || page["visual"] is not JsonObject visual
             || visual["drawing"] is not JsonObject drawing
-            || drawing["empty"]?.GetValue<bool?>() == true
         )
         {
+            return;
+        }
+        if (drawing["empty"]?.GetValue<bool?>() == true)
+        {
+            drawing["lastEditedAgeSec"] = null;
+            drawing.Remove("lastEditedAgeAtReceiveSec");
+            drawing.Remove("lastEditedReceivedAtEpochMs");
             return;
         }
         double? lastEditedAt = DoubleValue(
             drawing["lastEditedAt"]);
         double? freshWindow = DoubleValue(
             drawing["freshWindowS"]);
+        double? ageAtReceive = DoubleValue(
+            drawing["lastEditedAgeAtReceiveSec"]);
+        long? ageAnchorAt = LongValue(
+            drawing["lastEditedReceivedAtEpochMs"]);
         if (
-            lastEditedAt is null
+            (
+                ageAtReceive is null
+                || ageAtReceive < 0
+                || ageAnchorAt is null
+                || ageAnchorAt < 1
+            )
+            && snapshot["activeReading"] is JsonObject active
+            && LongValue(active["observedAtEpochMs"])
+                is long observedAt
+            && LongValue(active["receivedAtEpochMs"])
+                is long receivedAt
+            && lastEditedAt is not null
+        )
+        {
+            ageAtReceive = Math.Max(
+                0,
+                (observedAt / 1000.0) - lastEditedAt.Value);
+            ageAnchorAt = receivedAt;
+        }
+        double? age = null;
+        if (
+            ageAtReceive is not null
+            && ageAtReceive >= 0
+            && ageAnchorAt is not null
+            && ageAnchorAt >= 1
+        )
+        {
+            age = ageAtReceive.Value
+                + Math.Max(
+                    0,
+                    (
+                        now.ToUnixTimeMilliseconds()
+                        - ageAnchorAt.Value
+                    ) / 1000.0);
+            drawing["lastEditedAgeSec"] = Math.Round(
+                age.Value,
+                3,
+                MidpointRounding.AwayFromZero);
+        }
+        else
+        {
+            drawing["lastEditedAgeSec"] = null;
+        }
+        drawing.Remove("lastEditedAgeAtReceiveSec");
+        drawing.Remove("lastEditedReceivedAtEpochMs");
+        if (
+            age is null
             || freshWindow is null
             || freshWindow <= 0
         )
         {
             return;
         }
-        double nowSeconds = now.ToUnixTimeMilliseconds() / 1000.0;
-        double age = Math.Max(
-            0,
-            nowSeconds - lastEditedAt.Value);
         drawing["freshness"] =
-            age <= freshWindow.Value
+            age.Value <= freshWindow.Value
                 ? "recent"
                 : "stale";
     }

@@ -5121,14 +5121,19 @@ internal static class DirectBridgeSelfTest
             JsonElement tools = responses[1].RootElement
                 .GetProperty("result")
                 .GetProperty("tools");
-            string firstText = responses[2].RootElement
+            JsonElement firstContent = responses[2].RootElement
                 .GetProperty("result")
-                .GetProperty("content")[0]
+                .GetProperty("content");
+            JsonElement secondContent = responses[3].RootElement
+                .GetProperty("result")
+                .GetProperty("content");
+            string firstAssistantContext = firstContent[0]
                 .GetProperty("text")
                 .GetString()!;
-            string secondText = responses[3].RootElement
-                .GetProperty("result")
-                .GetProperty("content")[0]
+            string firstText = firstContent[1]
+                .GetProperty("text")
+                .GetString()!;
+            string secondText = secondContent[1]
                 .GetProperty("text")
                 .GetString()!;
             using JsonDocument first = JsonDocument.Parse(firstText);
@@ -5143,6 +5148,27 @@ internal static class DirectBridgeSelfTest
                 && tools.GetArrayLength() == 1
                 && tools[0].GetProperty("name").GetString()
                     == ReaderContextMcpServer.ToolName
+                && firstContent.GetArrayLength() == 2
+                && firstContent.EnumerateArray().All(item =>
+                    item.GetProperty("type").GetString() == "text")
+                && firstAssistantContext.StartsWith(
+                    "Reader assistant context",
+                    StringComparison.Ordinal)
+                && firstAssistantContext.Contains(
+                    "silent state",
+                    StringComparison.Ordinal)
+                && firstAssistantContext.IndexOf(
+                    "Location:",
+                    StringComparison.Ordinal)
+                    < firstAssistantContext.IndexOf(
+                        "Page text:",
+                        StringComparison.Ordinal)
+                && firstAssistantContext.IndexOf(
+                    "Page text:",
+                    StringComparison.Ordinal)
+                    < firstAssistantContext.IndexOf(
+                        "Drawing:",
+                        StringComparison.Ordinal)
                 && first.RootElement.GetProperty("schema").GetString()
                     == FileDirectSnapshotContextAdapter.SnapshotContract
                 && first.RootElement.GetProperty("contextStatus")
@@ -5157,7 +5183,7 @@ internal static class DirectBridgeSelfTest
                     .GetProperty("callSequence").GetInt64() == 1
                 && second.RootElement.GetProperty("mcp")
                     .GetProperty("callSequence").GetInt64() == 2,
-                "direct-reader-context-mcp-is-persistent-read-only-single-tool",
+                "direct-reader-context-mcp-is-persistent-read-only-text-context",
                 checks);
         }
         finally
@@ -5258,13 +5284,13 @@ internal static class DirectBridgeSelfTest
         using JsonDocument httpFirstSnapshot = JsonDocument.Parse(
             httpFirstResponse.RootElement
                 .GetProperty("result")
-                .GetProperty("content")[0]
+                .GetProperty("content")[1]
                 .GetProperty("text")
                 .GetString()!);
         using JsonDocument httpSecondSnapshot = JsonDocument.Parse(
             httpSecondResponse.RootElement
                 .GetProperty("result")
-                .GetProperty("content")[0]
+                .GetProperty("content")[1]
                 .GetProperty("text")
                 .GetString()!);
         long[] httpCallSequences =
@@ -5442,6 +5468,7 @@ internal static class DirectBridgeSelfTest
             {
                 ["file"] = "drawing.pdf",
                 ["page"] = 1,
+                ["observedAtEpochMs"] = 1_000_000L,
                 ["receivedAtEpochMs"] = 1_000_000L,
                 ["fresh"] = true,
             },
@@ -5459,6 +5486,9 @@ internal static class DirectBridgeSelfTest
                     {
                         ["empty"] = false,
                         ["lastEditedAt"] = 1000.0,
+                        ["lastEditedAgeAtReceiveSec"] = 0.0,
+                        ["lastEditedReceivedAtEpochMs"] =
+                            1_000_000L,
                         ["freshWindowS"] = 120.0,
                         ["freshness"] = "recent",
                     },
@@ -5482,6 +5512,468 @@ internal static class DirectBridgeSelfTest
                 ?["visual"]?["drawing"]?["freshness"]
                 ?.GetValue<string>() == "stale",
             "direct-reader-context-mcp-recomputes-drawing-freshness",
+            checks);
+
+        string drawingSnapshotPath = System.IO.Path.Combine(
+            root,
+            "mcp-drawing-image",
+            FileDirectSnapshotContextAdapter.SnapshotFileName);
+        DateTimeOffset drawingReceivedAt =
+            DateTimeOffset.FromUnixTimeMilliseconds(
+                1_750_000_007_000);
+        FileDirectSnapshotContextAdapter drawingAdapter = new(
+            drawingSnapshotPath,
+            () => drawingReceivedAt);
+        string drawingSessionId =
+            "session-" + DirectBase64Url.Encode(
+                Enumerable.Range(160, 16)
+                    .Select(value => (byte)value)
+                    .ToArray());
+        JsonElement drawingPageEvent =
+            JsonSerializer.SerializeToElement(new
+            {
+                v = 1,
+                seq = 1,
+                type = "page.context",
+                ts = 1005L,
+                id = "0000000000000301",
+                kind = "pdf",
+                file = "drawing.pdf",
+                title = "Drawing Book",
+                page = 4,
+                stable = true,
+                page_context = new
+                {
+                    reason = "dwell",
+                    text = "Current page body",
+                    text_available = true,
+                    text_source = "pdf:text-layer",
+                    fallback_reason = (string?)null,
+                    truncated = false,
+                    visual = new
+                    {
+                        page_image = (string?)null,
+                        has_ink = true,
+                        drawing = new
+                        {
+                            contract = "reader-outgoing-context/1",
+                            file = "drawing.pdf",
+                            page = 4,
+                            freshness = "recent",
+                            lastEditedAt = 1000.0,
+                            freshWindowS = 120.0,
+                            inProgress = false,
+                            stable = true,
+                            drawingRevision =
+                                "dr_0123456789abcdef",
+                            pendingSince = (double?)null,
+                            @ref = new
+                            {
+                                kind = "drawing",
+                                file = "drawing.pdf",
+                                page = 4,
+                                revision =
+                                    "dr_0123456789abcdef",
+                            },
+                            empty = false,
+                        },
+                    },
+                },
+            });
+        _ = await drawingAdapter.ForwardJournalAsync(
+            "request-mcp-drawing-page",
+            drawingSessionId,
+            new DirectContextEvent(
+                1,
+                "page.context",
+                "0000000000000301",
+                drawingPageEvent),
+            CancellationToken.None).ConfigureAwait(false);
+
+        int visualFetches = 0;
+        ReaderVisualDeliveryRequest? capturedRequest = null;
+        ReaderContextMcpServer drawingServer = new(
+            drawingSnapshotPath,
+            TextReader.Null,
+            TextWriter.Null,
+            utcNow: () => DateTimeOffset.FromUnixTimeMilliseconds(
+                1_750_000_010_000),
+            instanceId: "mcp-drawing-self-test",
+            fetchVisualAsync: (request, _) =>
+            {
+                visualFetches++;
+                capturedRequest = request;
+                return Task.FromResult<ReaderVisualCapture?>(
+                    new ReaderVisualCapture(
+                        ReaderVisualDeliveryProtocol.MimeType,
+                        [0xff, 0xd8, 0xff, 0xd9]));
+            });
+        _ = await drawingServer.ProcessMessageAsync(
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 20,
+                method = "initialize",
+                @params = new
+                {
+                    protocolVersion = "2025-11-25",
+                },
+            }),
+            CancellationToken.None).ConfigureAwait(false);
+        JsonObject drawingToolsResponse =
+            await drawingServer.ProcessMessageAsync(
+                JsonSerializer.Serialize(new
+                {
+                    jsonrpc = "2.0",
+                    id = 21,
+                    method = "tools/list",
+                    @params = new { },
+                }),
+                CancellationToken.None).ConfigureAwait(false)
+            ?? throw new InvalidOperationException(
+                "drawing tools response missing");
+        JsonObject drawingSnapshotResponse =
+            await drawingServer.ProcessMessageAsync(
+                JsonSerializer.Serialize(new
+                {
+                    jsonrpc = "2.0",
+                    id = 22,
+                    method = "tools/call",
+                    @params = new
+                    {
+                        name = ReaderContextMcpServer.ToolName,
+                        arguments = new { },
+                    },
+                }),
+                CancellationToken.None).ConfigureAwait(false)
+            ?? throw new InvalidOperationException(
+                "drawing snapshot response missing");
+        JsonArray drawingTools =
+            drawingToolsResponse["result"]?["tools"] as JsonArray
+            ?? throw new InvalidOperationException(
+                "drawing tools payload missing");
+        JsonArray drawingSnapshotContent =
+            drawingSnapshotResponse["result"]?["content"] as JsonArray
+            ?? throw new InvalidOperationException(
+                "drawing snapshot content missing");
+        using JsonDocument drawingSnapshotPayload = JsonDocument.Parse(
+            drawingSnapshotContent[1]?["text"]?.GetValue<string>()
+            ?? throw new InvalidOperationException(
+                "drawing snapshot JSON missing"));
+        string drawingAssistantContext =
+            drawingSnapshotContent[0]?["text"]?.GetValue<string>()
+            ?? "";
+        JsonElement projectedDrawing = drawingSnapshotPayload.RootElement
+            .GetProperty("currentPage")
+            .GetProperty("visual")
+            .GetProperty("drawing");
+        Require(
+            drawingTools.Count == 2
+            && drawingTools[0]?["name"]?.GetValue<string>()
+                == ReaderContextMcpServer.ToolName
+            && drawingTools[1]?["name"]?.GetValue<string>()
+                == ReaderContextMcpServer.DrawingImageToolName
+            && drawingTools[1]?["annotations"]?["readOnlyHint"]
+                ?.GetValue<bool>() == true
+            && drawingSnapshotContent.Count == 2
+            && drawingSnapshotContent.All(item =>
+                item?["type"]?.GetValue<string>() == "text")
+            && visualFetches == 0
+            && drawingSnapshotPayload.RootElement
+                .GetProperty("drawingImageTool").GetString()
+                == ReaderContextMcpServer.DrawingImageToolName
+            && projectedDrawing.GetProperty(
+                "lastEditedAgeSec").GetDouble() == 8.0
+            && !projectedDrawing.TryGetProperty(
+                "lastEditedAgeAtReceiveSec",
+                out _)
+            && !projectedDrawing.TryGetProperty(
+                "lastEditedReceivedAtEpochMs",
+                out _)
+            && drawingAssistantContext.Contains(
+                "Location:",
+                StringComparison.Ordinal)
+            && drawingAssistantContext.Contains(
+                "lastEditedAgeSec=8",
+                StringComparison.Ordinal)
+            && drawingAssistantContext.Contains(
+                ReaderContextMcpServer.DrawingImageToolName,
+                StringComparison.Ordinal)
+            && drawingAssistantContext.Contains(
+                "do not request an image for ordinary page or selection",
+                StringComparison.Ordinal),
+            "direct-reader-context-snapshot-is-text-only-with-windows-drawing-age",
+            checks);
+        JsonObject activeSelectionPayload = JsonNode.Parse(
+            drawingSnapshotPayload.RootElement.GetRawText()) as JsonObject
+            ?? throw new InvalidOperationException(
+                "active selection payload missing");
+        activeSelectionPayload["selection"] = new JsonObject
+        {
+            ["state"] = "active",
+            ["text"] = "selected words",
+        };
+        string activeSelectionContext =
+            ReaderContextMcpServer.BuildAssistantContext(
+                activeSelectionPayload);
+        int locationIndex = activeSelectionContext.IndexOf(
+            "Location:",
+            StringComparison.Ordinal);
+        int selectionIndex = activeSelectionContext.IndexOf(
+            "Active selection:",
+            StringComparison.Ordinal);
+        int pageTextIndex = activeSelectionContext.IndexOf(
+            "Page text:",
+            StringComparison.Ordinal);
+        int drawingIndex = activeSelectionContext.IndexOf(
+            "Drawing:",
+            StringComparison.Ordinal);
+        Require(
+            locationIndex >= 0
+            && locationIndex < selectionIndex
+            && selectionIndex < pageTextIndex
+            && pageTextIndex < drawingIndex
+            && activeSelectionContext.Contains(
+                "silent state",
+                StringComparison.Ordinal)
+            && activeSelectionContext.Contains(
+                "Drawing metadata does not reveal ink content",
+                StringComparison.Ordinal),
+            "direct-reader-context-assistant-text-orders-location-selection-page-drawing",
+            checks);
+        JsonObject pendingContextPayload =
+            activeSelectionPayload.DeepClone() as JsonObject
+            ?? throw new InvalidOperationException(
+                "pending context payload missing");
+        JsonObject pendingContextDrawing =
+            pendingContextPayload["currentPage"]?["visual"]?["drawing"]
+                as JsonObject
+            ?? throw new InvalidOperationException(
+                "pending context drawing missing");
+        pendingContextDrawing["stable"] = false;
+        pendingContextDrawing["inProgress"] = true;
+        pendingContextDrawing["drawingRevision"] = null;
+        pendingContextDrawing["ref"] = null;
+        string pendingAssistantContext =
+            ReaderContextMcpServer.BuildAssistantContext(
+                pendingContextPayload);
+        Require(
+            pendingAssistantContext.Contains(
+                "waiting/not yet available",
+                StringComparison.Ordinal)
+            && !pendingAssistantContext.Contains(
+                "call "
+                    + ReaderContextMcpServer.DrawingImageToolName,
+                StringComparison.Ordinal),
+            "direct-reader-context-pending-drawing-does-not-suggest-image-tool",
+            checks);
+
+        JsonObject drawingImageResponse =
+            await drawingServer.ProcessMessageAsync(
+                JsonSerializer.Serialize(new
+                {
+                    jsonrpc = "2.0",
+                    id = 23,
+                    method = "tools/call",
+                    @params = new
+                    {
+                        name =
+                            ReaderContextMcpServer.DrawingImageToolName,
+                        arguments = new { },
+                    },
+                }),
+                CancellationToken.None).ConfigureAwait(false)
+            ?? throw new InvalidOperationException(
+                "drawing image response missing");
+        JsonArray drawingImageContent =
+            drawingImageResponse["result"]?["content"] as JsonArray
+            ?? throw new InvalidOperationException(
+                "drawing image content missing");
+        using JsonDocument drawingIdentity = JsonDocument.Parse(
+            drawingImageContent[0]?["text"]?.GetValue<string>()
+            ?? throw new InvalidOperationException(
+                "drawing identity missing"));
+        Require(
+            visualFetches == 1
+            && capturedRequest?.File == "drawing.pdf"
+            && capturedRequest.DrawingRevision
+                == "dr_0123456789abcdef"
+            && capturedRequest.Page.GetValue<int>() == 4
+            && drawingImageContent.Count == 2
+            && drawingImageContent[0]?["type"]?.GetValue<string>()
+                == "text"
+            && drawingImageContent[1]?["type"]?.GetValue<string>()
+                == "image"
+            && drawingImageContent[1]?["mimeType"]?.GetValue<string>()
+                == ReaderVisualDeliveryProtocol.MimeType
+            && drawingIdentity.RootElement.GetProperty(
+                "drawingRevision").GetString()
+                == "dr_0123456789abcdef",
+            "direct-reader-drawing-image-is-separate-read-only-jpeg-tool",
+            checks);
+
+        JsonElement pendingDrawingEvent =
+            JsonSerializer.SerializeToElement(new
+            {
+                v = 1,
+                seq = 2,
+                type = "drawing",
+                ts = 1006L,
+                id = "0000000000000302",
+                file = "drawing.pdf",
+                page = 4,
+                state = "pending",
+                drawingRevision = (string?)null,
+                @ref = (object?)null,
+            });
+        _ = await drawingAdapter.ForwardJournalAsync(
+            "request-mcp-drawing-pending",
+            drawingSessionId,
+            new DirectContextEvent(
+                2,
+                "drawing",
+                "0000000000000302",
+                pendingDrawingEvent),
+            CancellationToken.None).ConfigureAwait(false);
+        JsonObject pendingDrawingResponse =
+            await drawingServer.ProcessMessageAsync(
+                JsonSerializer.Serialize(new
+                {
+                    jsonrpc = "2.0",
+                    id = 24,
+                    method = "tools/call",
+                    @params = new
+                    {
+                        name =
+                            ReaderContextMcpServer.DrawingImageToolName,
+                        arguments = new { },
+                    },
+                }),
+                CancellationToken.None).ConfigureAwait(false)
+            ?? throw new InvalidOperationException(
+                "pending drawing response missing");
+        Require(
+            visualFetches == 1
+            && pendingDrawingResponse["result"]?["isError"]
+                ?.GetValue<bool>() == true
+            && (
+                pendingDrawingResponse["result"]?["content"]
+                    as JsonArray
+            )?.Count == 1,
+            "direct-reader-drawing-image-does-not-fetch-unstable-drawing",
+            checks);
+
+        JsonElement stableDrawingEvent =
+            JsonSerializer.SerializeToElement(new
+            {
+                v = 1,
+                seq = 3,
+                type = "drawing",
+                ts = 1007L,
+                id = "0000000000000303",
+                file = "drawing.pdf",
+                page = 4,
+                state = "stable",
+                drawingRevision = "dr_fedcba9876543210",
+                @ref = new
+                {
+                    kind = "drawing",
+                    file = "drawing.pdf",
+                    page = 4,
+                    revision = "dr_fedcba9876543210",
+                },
+            });
+        _ = await drawingAdapter.ForwardJournalAsync(
+            "request-mcp-drawing-stable",
+            drawingSessionId,
+            new DirectContextEvent(
+                3,
+                "drawing",
+                "0000000000000303",
+                stableDrawingEvent),
+            CancellationToken.None).ConfigureAwait(false);
+        int supersededFetches = 0;
+        ReaderContextMcpServer supersedingServer = new(
+            drawingSnapshotPath,
+            TextReader.Null,
+            TextWriter.Null,
+            utcNow: () => DateTimeOffset.FromUnixTimeMilliseconds(
+                1_750_000_010_000),
+            fetchVisualAsync: async (request, cancellationToken) =>
+            {
+                supersededFetches++;
+                JsonElement replacement = JsonSerializer.SerializeToElement(
+                    new
+                    {
+                        v = 1,
+                        seq = 4,
+                        type = "drawing",
+                        ts = 1008L,
+                        id = "0000000000000304",
+                        file = "drawing.pdf",
+                        page = 4,
+                        state = "pending",
+                        drawingRevision = (string?)null,
+                        @ref = (object?)null,
+                    });
+                _ = await drawingAdapter.ForwardJournalAsync(
+                    "request-mcp-drawing-supersede",
+                    drawingSessionId,
+                    new DirectContextEvent(
+                        4,
+                        "drawing",
+                        "0000000000000304",
+                        replacement),
+                    cancellationToken).ConfigureAwait(false);
+                return new ReaderVisualCapture(
+                    ReaderVisualDeliveryProtocol.MimeType,
+                    [0xff, 0xd8, 0xff, 0xd9]);
+            });
+        _ = await supersedingServer.ProcessMessageAsync(
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 25,
+                method = "initialize",
+                @params = new
+                {
+                    protocolVersion = "2025-11-25",
+                },
+            }),
+            CancellationToken.None).ConfigureAwait(false);
+        JsonObject supersededResponse =
+            await supersedingServer.ProcessMessageAsync(
+                JsonSerializer.Serialize(new
+                {
+                    jsonrpc = "2.0",
+                    id = 26,
+                    method = "tools/call",
+                    @params = new
+                    {
+                        name =
+                            ReaderContextMcpServer.DrawingImageToolName,
+                        arguments = new { },
+                    },
+                }),
+                CancellationToken.None).ConfigureAwait(false)
+            ?? throw new InvalidOperationException(
+                "superseded drawing response missing");
+        JsonArray supersededContent =
+            supersededResponse["result"]?["content"] as JsonArray
+            ?? throw new InvalidOperationException(
+                "superseded drawing content missing");
+        Require(
+            supersededFetches == 1
+            && supersededResponse["result"]?["isError"]
+                ?.GetValue<bool>() == true
+            && supersededContent.Count == 1
+            && supersededContent.All(item =>
+                item?["type"]?.GetValue<string>() == "text")
+            && supersededContent[0]?["text"]?.GetValue<string>()
+                .Contains(
+                    "drawing-revision-superseded",
+                    StringComparison.Ordinal) == true,
+            "direct-reader-drawing-image-rechecks-revision-after-capture",
             checks);
     }
 

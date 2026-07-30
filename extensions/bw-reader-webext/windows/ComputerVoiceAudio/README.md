@@ -173,11 +173,18 @@ HTTP 客户端连接，不再为每个会话拉起一个快照 MCP 子进程。`
   C:\Users\bwica\bw-computer-voice-bridge\runtime\reader-context-snapshot.json
 ```
 
-它只注册 `reader_context_snapshot`，不接受 mutation。服务进程在同一 MCP
-连接中保持 instance/call sequence，逐次读取原子快照；最新文件损坏时保留上一次有效
-revision。`active-reading` 超过三分钟则返回 `contextStatus=stale`，正文与选区不会作为
-当前内容返回。选区状态严格区分 `active`、`cleared`、`unknown`，取消选择或换页时不会
-沿用旧文本；新鲜度使用 Windows 收到心跳的时间，不信任 iPad 的墙上时钟。
+stdio 回滚入口只注册 `reader_context_snapshot`，不接受 mutation，也没有可复用的 WSS
+视觉 Broker。常驻 HTTP MCP 的快照工具返回“简短 assistant-context + 完整 JSON”两个纯文本
+content；普通页文/选区读取不会截图。若快照明确给出
+`drawingImageTool=reader_drawing_image`，只有当前页 ready、绘图 stable、非空且
+file/page/revision/ref 全部一致时，独立无参只读工具才复用现有 Reader 合成 JPEG；收图后再验
+同一身份，变化即只返回错误文本。绘图 `lastEditedAgeSec` 用同一 PWA 事件内部的相对时间建立
+接收时年龄，再叠加 Windows 本地接收时钟，不直接比较两台设备的墙上时钟。
+
+服务进程在同一 MCP 连接中保持 instance/call sequence，逐次读取原子快照；最新文件损坏时
+保留上一次有效 revision。`active-reading` 超过三分钟则返回 `contextStatus=stale`，正文与
+选区不会作为当前内容返回。选区状态严格区分 `active`、`cleared`、`unknown`，取消选择或换页
+时不会沿用旧文本；新鲜度使用 Windows 收到心跳的时间，不信任 iPad 的墙上时钟。
 
 `snapshot-mcp` 收到 PDF 的 `active-reading` 后，会按 Reader 的 1-based 页码从
 Windows 本地书库只读提取正文并在同一次原子快照更新中标为 ready；默认书库根为

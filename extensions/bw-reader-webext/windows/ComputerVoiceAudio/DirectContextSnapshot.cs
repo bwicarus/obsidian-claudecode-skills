@@ -504,6 +504,8 @@ internal sealed class FileDirectSnapshotContextAdapter :
         JsonObject value = JsonNode.Parse(
             contextEvent.Payload.GetRawText()) as JsonObject
             ?? throw JournalInvalid();
+        long windowsReceivedAtEpochMs =
+            _utcNow().ToUnixTimeMilliseconds();
         JsonObject latestEvent = new()
         {
             ["source"] = "outgoing-context",
@@ -516,7 +518,9 @@ internal sealed class FileDirectSnapshotContextAdapter :
         if (contextEvent.Type == "page.context")
         {
             (JsonObject stablePage, JsonObject activeReading) =
-                BuildPageContext(value);
+                BuildPageContext(
+                    value,
+                    windowsReceivedAtEpochMs);
             bool changedPage = _stablePage is not null
                 && !SamePage(_stablePage, stablePage);
             if (
@@ -554,7 +558,10 @@ internal sealed class FileDirectSnapshotContextAdapter :
         }
         else if (contextEvent.Type == "drawing")
         {
-            _stablePage = FoldDrawingEvent(value, _stablePage);
+            _stablePage = FoldDrawingEvent(
+                value,
+                _stablePage,
+                windowsReceivedAtEpochMs);
         }
         else if (contextEvent.Type == "command-failed")
         {
@@ -565,7 +572,9 @@ internal sealed class FileDirectSnapshotContextAdapter :
     }
 
     private (JsonObject StablePage, JsonObject ActiveReading)
-        BuildPageContext(JsonObject value)
+        BuildPageContext(
+            JsonObject value,
+            long windowsReceivedAtEpochMs)
     {
         string? file = StringValue(value["file"])
             ?? StringValue(value["book_id"]);
@@ -611,7 +620,9 @@ internal sealed class FileDirectSnapshotContextAdapter :
         JsonObject? visual = CopyVisual(
             pageContext["visual"],
             file,
-            safePage);
+            safePage,
+            NumericValue(value["ts"]),
+            windowsReceivedAtEpochMs);
         if (visual is not null)
         {
             next["visual"] = visual;
@@ -639,7 +650,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
             ["observedAtEpochMs"] =
                 EpochSecondsToMilliseconds(value["ts"]),
             ["receivedAtEpochMs"] =
-                _utcNow().ToUnixTimeMilliseconds(),
+                windowsReceivedAtEpochMs,
         };
         return (next, activeReading);
     }
@@ -970,7 +981,8 @@ internal sealed class FileDirectSnapshotContextAdapter :
 
     private static JsonObject? FoldDrawingEvent(
         JsonObject value,
-        JsonObject? stablePage)
+        JsonObject? stablePage,
+        long windowsReceivedAtEpochMs)
     {
         if (stablePage is null)
         {
@@ -1016,6 +1028,10 @@ internal sealed class FileDirectSnapshotContextAdapter :
         double freshWindow =
             NumericValue(existingDrawing["freshWindowS"])
             ?? 120.0;
+        double? ageAtReceive = NumericValue(
+            existingDrawing["lastEditedAgeAtReceiveSec"]);
+        long? ageAnchorAt = LongValue(
+            existingDrawing["lastEditedReceivedAtEpochMs"]);
         if (state == "pending")
         {
             visual["drawing"] = new JsonObject
@@ -1025,6 +1041,9 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 ["page"] = stablePage["page"]?.DeepClone(),
                 ["freshness"] = "recent",
                 ["lastEditedAt"] = eventSeconds,
+                ["lastEditedAgeAtReceiveSec"] = 0.0,
+                ["lastEditedReceivedAtEpochMs"] =
+                    windowsReceivedAtEpochMs,
                 ["freshWindowS"] = freshWindow,
                 ["inProgress"] = true,
                 ["stable"] = false,
@@ -1052,6 +1071,18 @@ internal sealed class FileDirectSnapshotContextAdapter :
             {
                 throw JournalInvalid();
             }
+            if (
+                ageAtReceive is null
+                || ageAtReceive < 0
+                || ageAnchorAt is null
+                || ageAnchorAt < 1
+            )
+            {
+                ageAtReceive = Math.Max(
+                    0,
+                    eventSeconds - lastEditedAt);
+                ageAnchorAt = windowsReceivedAtEpochMs;
+            }
             visual["drawing"] = new JsonObject
             {
                 ["contract"] = "reader-outgoing-context/1",
@@ -1060,6 +1091,8 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 ["freshness"] =
                     DrawingFreshness(existingDrawing["freshness"]),
                 ["lastEditedAt"] = lastEditedAt,
+                ["lastEditedAgeAtReceiveSec"] = ageAtReceive,
+                ["lastEditedReceivedAtEpochMs"] = ageAnchorAt,
                 ["freshWindowS"] = freshWindow,
                 ["inProgress"] = false,
                 ["stable"] = true,
@@ -1083,7 +1116,9 @@ internal sealed class FileDirectSnapshotContextAdapter :
     private static JsonObject? CopyVisual(
         JsonNode? node,
         string file,
-        JsonNode page)
+        JsonNode page,
+        double? sourceEventSeconds = null,
+        long? windowsReceivedAtEpochMs = null)
     {
         if (node is null)
         {
@@ -1117,7 +1152,9 @@ internal sealed class FileDirectSnapshotContextAdapter :
         JsonObject? drawing = CopyDrawing(
             value["drawing"],
             file,
-            page);
+            page,
+            sourceEventSeconds,
+            windowsReceivedAtEpochMs);
         if (
             (drawing is null && hasInk)
             || (
@@ -1140,7 +1177,9 @@ internal sealed class FileDirectSnapshotContextAdapter :
     private static JsonObject? CopyDrawing(
         JsonNode? node,
         string file,
-        JsonNode page)
+        JsonNode page,
+        double? sourceEventSeconds = null,
+        long? windowsReceivedAtEpochMs = null)
     {
         if (node is null || node.GetValueKind() == JsonValueKind.Null)
         {
@@ -1176,6 +1215,17 @@ internal sealed class FileDirectSnapshotContextAdapter :
         double? freshWindow = NumericValue(value["freshWindowS"]);
         double? pendingSince = NullableNumericValue(
             value["pendingSince"]);
+        bool restoringPersistedDrawing =
+            sourceEventSeconds is null
+            || windowsReceivedAtEpochMs is null;
+        double? ageAtReceive = restoringPersistedDrawing
+            ? NullableNumericValue(
+                value["lastEditedAgeAtReceiveSec"])
+            : null;
+        long? ageAnchorAt = restoringPersistedDrawing
+            ? NullableLongValue(
+                value["lastEditedReceivedAtEpochMs"])
+            : null;
         if (
             freshWindow is null
             || freshWindow is <= 0 or > 3600
@@ -1193,6 +1243,18 @@ internal sealed class FileDirectSnapshotContextAdapter :
                     || pendingSince < 0
                 )
             )
+            || (
+                ageAtReceive is not null
+                && (
+                    !double.IsFinite(ageAtReceive.Value)
+                    || ageAtReceive < 0
+                )
+            )
+            || (
+                ageAnchorAt is not null
+                && ageAnchorAt < 1
+            )
+            || (ageAtReceive is null) != (ageAnchorAt is null)
         )
         {
             throw JournalInvalid();
@@ -1258,7 +1320,18 @@ internal sealed class FileDirectSnapshotContextAdapter :
         {
             throw JournalInvalid();
         }
-        return new JsonObject
+        if (
+            !empty
+            && sourceEventSeconds is not null
+            && windowsReceivedAtEpochMs is not null
+        )
+        {
+            ageAtReceive = Math.Max(
+                0,
+                sourceEventSeconds.Value - lastEditedAt!.Value);
+            ageAnchorAt = windowsReceivedAtEpochMs;
+        }
+        JsonObject drawing = new()
         {
             ["contract"] = contract,
             ["file"] = file,
@@ -1273,6 +1346,12 @@ internal sealed class FileDirectSnapshotContextAdapter :
             ["ref"] = reference,
             ["empty"] = empty,
         };
+        if (!empty && ageAtReceive is not null && ageAnchorAt is not null)
+        {
+            drawing["lastEditedAgeAtReceiveSec"] = ageAtReceive;
+            drawing["lastEditedReceivedAtEpochMs"] = ageAnchorAt;
+        }
+        return drawing;
     }
 
     private static JsonObject? CopyEmbeds(JsonNode? node)
@@ -1480,6 +1559,27 @@ internal sealed class FileDirectSnapshotContextAdapter :
         }
         double? value = NumericValue(node);
         return value ?? throw JournalInvalid();
+    }
+
+    private static long? NullableLongValue(JsonNode? node)
+    {
+        if (node is null || node.GetValueKind() == JsonValueKind.Null)
+        {
+            return null;
+        }
+        return LongValue(node) ?? throw JournalInvalid();
+    }
+
+    private static long? LongValue(JsonNode? node)
+    {
+        if (
+            node is JsonValue value
+            && value.TryGetValue(out long number)
+        )
+        {
+            return number;
+        }
+        return null;
     }
 
     private static bool PageEquivalent(

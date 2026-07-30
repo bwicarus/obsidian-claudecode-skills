@@ -123,6 +123,7 @@ WINDOWS_SOURCE_FILES = (
     "ComputerVoiceAudio/ProcessLoopbackCaptureSession.cs",
     "ComputerVoiceAudio/Program.cs",
     "ComputerVoiceAudio/ReaderContextMcpServer.cs",
+    "ComputerVoiceAudio/ReaderVisualDelivery.cs",
     "ComputerVoiceAudio/README.md",
     "ComputerVoiceAudio/SharedEventDrivenPcmRuntime.cs",
     "ComputerVoiceAudio/VirtualMicrophoneRenderSession.cs",

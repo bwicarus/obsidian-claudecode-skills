@@ -3607,3 +3607,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：Reader Node 全量合同通过；0.1.28 包 verify/self-test、安装路径双 self-test、七文件摘要、新 PID/instance 与 `/healthz` 均通过。
 - **安装/发布**：Windows 回滚目录 `C:\Users\bwica\bw-computer-voice-bridge-backups\install-0.1.28-20260730T140929489Z-42d9ce75`；源码 `909205c` 已部署为 Reader 0.2.75，事务目录 `/home/bwicarus/deploy-backups/reader/20260730T141619Z-228416`。
 - **部署后/下一步**：Pi HEAD 一致、webapp/voice-rt active，公网脚本含目标页视觉代码；iPad 完整刷新并重开 Codex 后实测笔迹识别、天气卡回写与连续对话落库。
+
+## Codex：Windows MCP 正文与绘图按需拆分候选（2026-07-30 JST，未安装部署）
+- **改了什么**：`reader_context_snapshot` 改为 assistant-context + JSON 两个纯文本块；新增无参只读 `reader_drawing_image`，只对 ready/stable/非空当前绘图取既有 Reader JPEG。
+- **安全语义**：绘图年龄用 PWA 同事件相对间隔 + Windows 接收时钟，不做跨机墙钟相减；file/page/revision/ref 在取图前后都必须一致。
+- **怎么验的**：Windows C# Release build 0 warning/0 error；无音频 self-test 通过且 `audioActivated=false`，覆盖普通正文不取图、pending 前门禁和取图后 revision 门禁。
+- **没做/下一步**：未改 PWA 图像实现，未安装、部署或发布；下一位精确复审本提交后再决定候选打包与上线。
