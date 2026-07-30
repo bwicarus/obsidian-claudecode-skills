@@ -4686,7 +4686,8 @@ internal static class DirectBridgeSelfTest
             stale["contextStatus"]?.GetValue<string>() == "stale"
             && stale["currentPage"]?["text"]?.GetValue<string>() == ""
             && stale["selection"]?["state"]?.GetValue<string>()
-                == "unknown",
+                == "unknown"
+            && stale["presentationDiagnostic"] is null,
             "direct-reader-context-mcp-never-returns-stale-page-or-selection-text",
             checks);
 
@@ -5269,6 +5270,12 @@ internal static class DirectBridgeSelfTest
             && viewerHtml.Contains(
                 "function parseReaderText",
                 StringComparison.Ordinal)
+            && viewerHtml.Contains(
+                "AI 当前可用的页面正文",
+                StringComparison.Ordinal)
+            && viewerHtml.Contains(
+                "最近收到的缓存正文（仅诊断，AI 当前不会使用）",
+                StringComparison.Ordinal)
             && snapshotContext.Response.StatusCode
                 == StatusCodes.Status200OK
             && liveProjection.RootElement
@@ -5277,6 +5284,32 @@ internal static class DirectBridgeSelfTest
             && !liveProjection.RootElement
                 .GetProperty("currentPage")
                 .GetProperty("textAvailable").GetBoolean()
+            && liveProjection.RootElement
+                .GetProperty("currentPage")
+                .GetProperty("text").GetString() == ""
+            && !liveProjection.RootElement
+                .GetProperty("presentationDiagnostic")
+                .GetProperty("cachedPage")
+                .GetProperty("aiUsable").GetBoolean()
+            && liveProjection.RootElement
+                .GetProperty("presentationDiagnostic")
+                .GetProperty("cachedPage")
+                .GetProperty("page").GetInt32() == 3
+            && liveProjection.RootElement
+                .GetProperty("presentationDiagnostic")
+                .GetProperty("cachedPage")
+                .GetProperty("updatedAtUtc").GetString()
+                == folded.RootElement
+                    .GetProperty("updatedAtUtc").GetString()
+            && liveProjection.RootElement
+                .GetProperty("presentationDiagnostic")
+                .GetProperty("cachedPage")
+                .GetProperty("text").GetString()!.Contains(
+                    "图像引用必须同时可见",
+                    StringComparison.Ordinal)
+            && !folded.RootElement.TryGetProperty(
+                "presentationDiagnostic",
+                out _)
             && foreignContext.Response.StatusCode
                 == StatusCodes.Status403Forbidden
             && foreignBody.Length == 0
