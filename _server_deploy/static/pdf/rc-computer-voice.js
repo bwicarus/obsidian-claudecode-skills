@@ -4992,6 +4992,10 @@
     document.addEventListener("click", function (event) {
       if (!computerButtonFromEvent(event)) return;
       if (event.isTrusted !== true) return;
+      // In BWReader App, Swift owns microphone, playback and the voice WSS.
+      // Keep this page component context-only so one tap cannot start a second
+      // browser media/voice implementation beside the native bridge.
+      if (window.__BW_NATIVE_COMPUTER_VOICE__ === true) return;
       if (contextModeChanging) return;
       try {
         if (

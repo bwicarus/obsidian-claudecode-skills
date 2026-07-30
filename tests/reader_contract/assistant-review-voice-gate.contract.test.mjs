@@ -58,10 +58,28 @@ test("computer and phone clicks are blocked in review; hidden legacy mic stays i
   const longAction = functionBody("_micLongAction", "_bindLongPress");
   const topbar = functionBody("injectTopbarBtns", "_fmtCutoff");
 
-  const gateAt = button.indexOf("_reviewVoiceGate(true)");
-  const computerAt = button.indexOf("_computerVoiceStart(opts, generation)");
-  const callAt = button.indexOf("window._voiceCallS2S");
-  assert.ok(gateAt >= 0 && computerAt > gateAt && callAt > gateAt);
+  const computerStart = button.indexOf("c.addEventListener('click'");
+  const phoneStart = button.indexOf("b.addEventListener('click'", computerStart);
+  assert.ok(computerStart >= 0 && phoneStart > computerStart);
+  const computerClick = button.slice(computerStart, phoneStart);
+  const phoneClick = button.slice(phoneStart);
+
+  assert.ok(
+    computerClick.indexOf("_reviewVoiceGate(true)") >= 0 &&
+      computerClick.indexOf("_reviewVoiceGate(true)") <
+        computerClick.indexOf("_toggleNativeComputerVoiceApp()"),
+    "review gate must run before the App native computer-voice toggle",
+  );
+  assert.doesNotMatch(
+    computerClick,
+    /_computerVoiceStart|_setComputerVoiceDialPending|startFromUserGesture/,
+  );
+  assert.ok(
+    phoneClick.indexOf("_reviewVoiceGate(true)") >= 0 &&
+      phoneClick.indexOf("_reviewVoiceGate(true)") <
+        phoneClick.indexOf("window._voiceCallS2S"),
+    "review gate must run before ordinary phone voice",
+  );
   assert.match(longAction, /if \(_reviewVoiceGate\(true\)\) return/);
 
   assert.match(

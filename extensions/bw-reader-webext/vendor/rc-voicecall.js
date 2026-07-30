@@ -617,6 +617,7 @@ if (window.__bwPwaProviderOnly) return;
        '#asst-computer.on{background:#1a7f4b;border-color:#1a7f4b;color:#fff;animation:vcCallPulse 1.6s ease-in-out infinite}' +
        '#asst-computer.speaking{background:#0a84ff;border-color:#0a84ff;color:#fff;animation:vcCallPulse 1s ease-in-out infinite}' +
        '#asst-computer.connecting{background:#8a5a00;border-color:#ff9f0a;color:#ffd60a;animation:vcCallPulse .7s ease-in-out infinite}' +
+       '#asst-computer.native-app-required,#vc-top-computer.native-app-required{opacity:.38;cursor:not-allowed;animation:none!important}' +
        '#asst-call.vc-review-disabled,#vc-top-call.vc-review-disabled,#asst-computer.vc-review-disabled,#vc-top-computer.vc-review-disabled{opacity:.48;cursor:not-allowed;animation:none!important}' +
       // ASR 连续听(mic 长按开):紫色呼吸,与系统听写的蓝 .on 区分
       '#asst-mic.asr{background:#bf5af2 !important;border-color:#bf5af2 !important;color:#fff !important;animation:vcCallPulse 1.6s ease-in-out infinite}' +
@@ -5557,6 +5558,42 @@ if (window.__bwPwaProviderOnly) return;
   // 电脑按钮直接进入 Windows 桥，绝不再靠 computer_client 劫持电话按钮。
   var _computerVoiceOwnedButtons = new WeakSet();
   var _computerVoiceStarting = false;
+  function _nativeComputerVoiceAppAvailable() {
+    try {
+      return window.__BW_NATIVE_COMPUTER_VOICE__ === true &&
+        !!(
+          window.webkit &&
+          window.webkit.messageHandlers &&
+          window.webkit.messageHandlers.bwNativeComputerVoice &&
+          typeof window.webkit.messageHandlers.bwNativeComputerVoice.postMessage === 'function'
+        );
+    } catch (e) {
+      return false;
+    }
+  }
+  function _configureNativeComputerVoiceButton(button) {
+    if (!button) return false;
+    var available = _nativeComputerVoiceAppAvailable();
+    button.disabled = !available;
+    button.classList.toggle('native-app-required', !available);
+    button.setAttribute('aria-disabled', available ? 'false' : 'true');
+    if (!available) {
+      button.title = '电脑客户端语音仅在 BWReader App 中可用';
+      button.setAttribute('aria-label', button.title);
+    }
+    return available;
+  }
+  function _toggleNativeComputerVoiceApp() {
+    if (!_nativeComputerVoiceAppAvailable()) return false;
+    try {
+      window.webkit.messageHandlers.bwNativeComputerVoice.postMessage({
+        action: 'toggle'
+      });
+      return true;
+    } catch (e) {
+      return false;
+    }
+  }
   function _setComputerVoiceDialPending(value) {
     try {
       if (window.RC && RC.computerVoice &&
@@ -5905,6 +5942,7 @@ if (window.__bwPwaProviderOnly) return;
     var existingCall = document.getElementById('asst-call');
     if (existingComputer && existingCall) {
       _publishComputerVoiceButton(existingComputer);
+      _configureNativeComputerVoiceButton(existingComputer);
       return true;
     }
     injectCss();
@@ -5925,28 +5963,23 @@ if (window.__bwPwaProviderOnly) return;
       input.insertBefore(c, b);
     }
     _ownComputerVoiceButton(c);
+    _configureNativeComputerVoiceButton(c);
     c.addEventListener('click', function () {
       if (_reviewVoiceGate(true)) return;
-      if (_computerVoiceStarting || _computerVoiceActive()) {
-        _stopComputerVoiceOnly('reader-computer-button');
-        setSt('电脑桥接已停止');
+      if (!_nativeComputerVoiceAppAvailable()) {
+        setSt('电脑客户端语音仅在 BWReader App 中可用');
+        try { RC.toast('电脑客户端语音仅在 BWReader App 中可用'); } catch (e) {}
         return;
       }
       if (ws || _rtc.on || _connecting || _reconnT || _reconnPend) {
         teardown(false, true);
       }
-      var opts = {};
-      try {
-        var ctx = (window.RC && RC.adapter && RC.adapter().getContext()) || {};
-        opts.file = ctx.file_rel || ctx.file || '';
-        opts.page = ctx.page ||
-          (ctx.current_section_idx != null ? (ctx.current_section_idx + 1) : 0);
-      } catch (e) {}
-      var generation = ++_gen;
-      _connecting = true;
-      _setComputerVoiceDialPending(true);
       try { navigator.vibrate && navigator.vibrate(10); } catch (e) {}
-      _computerVoiceStart(opts, generation);
+      if (!_toggleNativeComputerVoiceApp()) {
+        computerBtnConnecting(false);
+        setSt('无法联系 BWReader App 原生语音');
+        try { RC.toast('无法联系 BWReader App 原生语音'); } catch (e) {}
+      }
     });
     b.addEventListener('click', function () {
       if (_reviewVoiceGate(true)) return;
@@ -6014,6 +6047,7 @@ if (window.__bwPwaProviderOnly) return;
   function injectTopbarBtns() {
     if (document.getElementById('vc-top-computer')) {
       _publishComputerVoiceButton(document.getElementById('vc-top-computer'));
+      _configureNativeComputerVoiceButton(document.getElementById('vc-top-computer'));
       return true;
     }
     var anchor = document.getElementById('fs-toggle');
@@ -6033,6 +6067,7 @@ if (window.__bwPwaProviderOnly) return;
     anchor.parentNode.insertBefore(tm, anchor);
     anchor.parentNode.insertBefore(tc, anchor);
     _ownComputerVoiceButton(tm);
+    _configureNativeComputerVoiceButton(tm);
     tm.addEventListener('click', function () { try { srcComputer.click(); } catch (e) {} });
     tc.addEventListener('click', function () { try { srcCall.click(); } catch (e) {} });
     function _mirror(src, dst, cls) {   // 状态镜像:侧栏按钮的状态类 → 顶栏同名类

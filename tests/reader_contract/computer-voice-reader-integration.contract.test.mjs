@@ -12,7 +12,7 @@ const settings = read("_server_deploy/static/pdf/rc-settings.js");
 const background = read("extensions/bw-reader-webext/background.js");
 const offscreen = read("extensions/bw-reader-webext/offscreen.js");
 
-test("电脑客户端使用独立按钮与设置标签，历史引擎值回落普通电话", () => {
+test("电脑客户端保留原按钮与设置标签，但 App 内只发送原生 toggle", () => {
   assert.doesNotMatch(assistant, /value="computer_client"/);
   assert.doesNotMatch(assistant, /RC\.computerVoice\.mountSettings\(card\)/);
   assert.doesNotMatch(
@@ -30,11 +30,15 @@ test("电脑客户端使用独立按钮与设置标签，历史引擎值回落�
   assert.match(voicecall, /b\.id = 'asst-call'; b\.type = 'button'/);
   assert.match(
     voicecall,
-    /RC\.computerVoice\.startFromUserGesture\(opts \|\| \{\}\)/,
+    /function _nativeComputerVoiceAppAvailable\(\)[\s\S]*window\.__BW_NATIVE_COMPUTER_VOICE__ === true[\s\S]*bwNativeComputerVoice\.postMessage/,
+  );
+  assert.match(
+    voicecall,
+    /function _toggleNativeComputerVoiceApp\(\)[\s\S]*bwNativeComputerVoice\.postMessage\(\{\s*action: 'toggle'\s*\}\)/,
   );
 });
 
-test("普通电话不再启动电脑桥，两个入口切换时互斥清理", () => {
+test("App 电脑按钮只切换原生桥，普通电话保持独立", () => {
   const connectStart = voicecall.indexOf("toggle._connect = function (opts)");
   const connectEnd = voicecall.indexOf("function toggle(opts)", connectStart);
   assert.ok(connectStart >= 0 && connectEnd > connectStart);
@@ -76,18 +80,42 @@ test("普通电话不再启动电脑桥，两个入口切换时互斥清理", ()
       computerClickEnd > computerClickStart,
   );
   const computerClick = voicecall.slice(computerClickStart, computerClickEnd);
+  assert.match(computerClick, /if \(_reviewVoiceGate\(true\)\) return/);
+  assert.match(
+    computerClick,
+    /if \(!_nativeComputerVoiceAppAvailable\(\)\)[\s\S]*return/,
+  );
   assert.match(computerClick, /if \(ws \|\| _rtc\.on \|\| _connecting \|\| _reconnT \|\| _reconnPend\)[\s\S]*teardown\(false, true\)/);
-  assert.match(computerClick, /_setComputerVoiceDialPending\(true\)[\s\S]*_computerVoiceStart\(opts, generation\)/);
+  assert.match(computerClick, /_toggleNativeComputerVoiceApp\(\)/);
+  assert.doesNotMatch(
+    computerClick,
+    /_computerVoiceStart|_setComputerVoiceDialPending|startFromUserGesture/,
+  );
   assert.ok(
-    computerClick.indexOf("teardown(false, true)") <
-      computerClick.indexOf("_setComputerVoiceDialPending(true)") &&
-      computerClick.indexOf("_setComputerVoiceDialPending(true)") <
-        computerClick.indexOf("_computerVoiceStart(opts, generation)"),
-    "ordinary voice must release while preserving the trusted surface before START",
+    computerClick.indexOf("_reviewVoiceGate(true)") <
+      computerClick.indexOf("_nativeComputerVoiceAppAvailable()") &&
+      computerClick.indexOf("_nativeComputerVoiceAppAvailable()") <
+        computerClick.indexOf("teardown(false, true)") &&
+      computerClick.indexOf("teardown(false, true)") <
+        computerClick.indexOf("_toggleNativeComputerVoiceApp()"),
+    "gate and native availability must be checked before releasing ordinary voice and toggling the App",
+  );
+
+  const phoneClickStart = computerClickEnd;
+  const phoneClickEnd = voicecall.indexOf(
+    "var tb = document.createElement('button')",
+    phoneClickStart,
+  );
+  assert.ok(phoneClickEnd > phoneClickStart);
+  const phoneClick = voicecall.slice(phoneClickStart, phoneClickEnd);
+  assert.match(phoneClick, /window\._voiceCallS2S/);
+  assert.doesNotMatch(
+    phoneClick,
+    /_toggleNativeComputerVoiceApp|_computerVoiceStart|_setComputerVoiceDialPending|startFromUserGesture/,
   );
 });
 
-test("只有 voicecall 闭包创建并登记的电脑按钮身份可以签发 START 租约", () => {
+test("电脑按钮身份仍由 voicecall 闭包登记，非 App 环境统一禁用", () => {
   assert.match(runtime, /var registeredComputerButtons = new WeakSet\(\)/);
   assert.match(
     runtime,
@@ -104,6 +132,12 @@ test("只有 voicecall 闭包创建并登记的电脑按钮身份可以签发 ST
   );
   assert.match(voicecall, /_ownComputerVoiceButton\(c\)/);
   assert.match(voicecall, /_ownComputerVoiceButton\(tm\)/);
+  assert.match(
+    voicecall,
+    /function _configureNativeComputerVoiceButton\(button\)[\s\S]*button\.disabled = !available[\s\S]*button\.classList\.toggle\('native-app-required', !available\)[\s\S]*button\.setAttribute\('aria-disabled', available \? 'false' : 'true'\)/,
+  );
+  assert.match(voicecall, /_configureNativeComputerVoiceButton\(c\)/);
+  assert.match(voicecall, /_configureNativeComputerVoiceButton\(tm\)/);
 });
 
 test("Reader v3 严格区分 app-output 下行与 browser-microphone track 3 上行", () => {
@@ -180,7 +214,7 @@ test("旧 offscreen 文件仅为惰性 tombstone，不能恢复 Native/WebRTC �
   );
 });
 
-test("v3 只在可信电脑按钮手势预备可撤销麦克风，START 走固定 WSS", () => {
+test("BWReader App 接管电脑按钮后，网页运行时不会预备麦克风或发送 START", () => {
   assert.match(
     runtime,
     /wss:\/\/bwicarus-2\.taile44d0c\.ts\.net\/reader-computer-voice\/v1/,
@@ -193,6 +227,16 @@ test("v3 只在可信电脑按钮手势预备可撤销麦克风，START 走固�
   assert.match(
     runtime,
     /RC\.voicecall\.canCaptureComputerVoiceGesture\(\) !== true[\s\S]*return/,
+  );
+  const gestureStart = runtime.indexOf("function installGestureCapture()");
+  const gestureEnd = runtime.indexOf("installGestureCapture();", gestureStart);
+  assert.ok(gestureStart >= 0 && gestureEnd > gestureStart);
+  const gestureCapture = runtime.slice(gestureStart, gestureEnd);
+  assert.ok(
+    gestureCapture.indexOf("window.__BW_NATIVE_COMPUTER_VOICE__ === true") >= 0 &&
+      gestureCapture.indexOf("window.__BW_NATIVE_COMPUTER_VOICE__ === true") <
+        gestureCapture.indexOf("prepareSurfaceFromGesture()"),
+    "App guard must return before browser microphone preparation",
   );
   assert.match(
     runtime,
