@@ -1521,6 +1521,10 @@ internal sealed class DirectSnapshotViewer : IDisposable
                 .body { min-height: 10rem; max-height: 54vh; overflow: auto;
                   padding: .85rem; border-radius: 10px; background: #080d19;
                   border: 1px solid #1f2a42; }
+                .diagnostic { border-color: #76591f;
+                  background: rgba(57, 42, 14, .92); }
+                .diagnostic .body { border-color: #76591f;
+                  background: #171107; }
                 .muted { color: #9aa9c2; }
                 .warning { color: #ffd37d; }
                 ul { margin: .4rem 0 0; padding-left: 1.4rem; }
@@ -1555,9 +1559,15 @@ internal sealed class DirectSnapshotViewer : IDisposable
                   <pre id="selection" class="muted">当前没有可用选区。</pre>
                 </section>
                 <section class="wide">
-                  <h2>当前页正文</h2>
+                  <h2>AI 当前可用的页面正文</h2>
                   <pre id="pageMeta" class="muted"></pre>
                   <pre id="pageBody" class="body">尚未收到稳定页正文。</pre>
+                </section>
+                <section id="cachedSection"
+                         class="wide diagnostic" hidden>
+                  <h2>最近收到的缓存正文（仅诊断，AI 当前不会使用）</h2>
+                  <pre id="cachedMeta" class="warning"></pre>
+                  <pre id="cachedBody" class="body"></pre>
                 </section>
                 <section>
                   <h2>高亮、卡片与未锚定内容</h2>
@@ -1591,6 +1601,9 @@ internal sealed class DirectSnapshotViewer : IDisposable
                 const selection = byId("selection");
                 const pageMeta = byId("pageMeta");
                 const pageBody = byId("pageBody");
+                const cachedSection = byId("cachedSection");
+                const cachedMeta = byId("cachedMeta");
+                const cachedBody = byId("cachedBody");
                 const embeds = byId("embeds");
                 const viewport = byId("viewport");
                 const drawing = byId("drawing");
@@ -1729,6 +1742,9 @@ internal sealed class DirectSnapshotViewer : IDisposable
                   selection.textContent = "当前没有可用选区。";
                   pageMeta.textContent = "";
                   pageBody.textContent = "没有可安全显示的正文。";
+                  cachedSection.hidden = true;
+                  cachedMeta.textContent = "";
+                  cachedBody.textContent = "";
                   embeds.replaceChildren();
                   viewport.textContent = "当前没有 EPUB 视口。";
                   drawing.textContent = "当前页没有视觉引用。";
@@ -1794,10 +1810,38 @@ internal sealed class DirectSnapshotViewer : IDisposable
                       `已截断：${valueText(page.truncated)}`
                     ].join("  |  ");
                     pageBody.textContent = projection.plain
-                      || "（当前页无文字层）";
+                      || (contextStatus === "stale"
+                        ? "AI 当前没有可用正文（快照已陈旧）。"
+                        : "（当前页无文字层）");
                   } else {
                     pageMeta.textContent = "";
                     pageBody.textContent = "尚未收到稳定页正文。";
+                  }
+
+                  const cached =
+                    snapshot.presentationDiagnostic?.cachedPage;
+                  cachedSection.hidden = true;
+                  cachedMeta.textContent = "";
+                  cachedBody.textContent = "";
+                  if (cached?.aiUsable === false
+                      && typeof cached.text === "string"
+                      && cached.text.length > 0) {
+                    cachedSection.hidden = false;
+                    cachedMeta.textContent = [
+                      "仅供排查传输与陈旧状态；"
+                        + "reader_context_snapshot 不会返回这段正文。",
+                      `原更新时间：${valueText(cached.updatedAtUtc)}`,
+                      `原页码：${valueText(cached.page)}`,
+                      `文件：${valueText(cached.file)}`,
+                      `来源：${valueText(cached.textSource)}`,
+                      `已截断：${valueText(cached.truncated)}`
+                    ].join("\n");
+                    try {
+                      cachedBody.textContent =
+                        parseReaderText(cached.text).plain;
+                    } catch {
+                      cachedBody.textContent = cached.text;
+                    }
                   }
 
                   embeds.replaceChildren();
@@ -2053,9 +2097,12 @@ internal sealed class DirectSnapshotViewer : IDisposable
             {
                 return null;
             }
+            JsonObject? persistedPage =
+                snapshot["currentPage"]?.DeepClone() as JsonObject;
             ReaderContextMcpServer.ApplyFreshness(
                 snapshot,
                 DateTimeOffset.UtcNow);
+            AddStalePageDiagnostic(snapshot, persistedPage);
             return snapshot;
         }
         catch (OperationCanceledException)
@@ -2070,6 +2117,55 @@ internal sealed class DirectSnapshotViewer : IDisposable
         {
             return null;
         }
+    }
+
+    private static void AddStalePageDiagnostic(
+        JsonObject snapshot,
+        JsonObject? persistedPage)
+    {
+        if (
+            snapshot["contextStatus"]?.GetValue<string>() != "stale"
+            || snapshot["currentPage"] is not JsonObject stalePage
+            || stalePage["text"]?.GetValue<string>() is not string staleText
+            || staleText.Length != 0
+            || persistedPage is null
+        )
+        {
+            return;
+        }
+
+        // ApplyFreshness has replaced currentPage in the projection. Preserve
+        // the pre-freshness page only in this localhost response; it is never
+        // persisted and never reaches reader_context_snapshot.
+        string? text = persistedPage["text"]?.GetValue<string>();
+        if (string.IsNullOrEmpty(text))
+        {
+            return;
+        }
+        JsonObject? active = snapshot["activeReading"] as JsonObject;
+        snapshot["presentationDiagnostic"] = new JsonObject
+        {
+            ["cachedPage"] = new JsonObject
+            {
+                ["aiUsable"] = false,
+                ["updatedAtUtc"] =
+                    snapshot["updatedAtUtc"]?.DeepClone(),
+                ["file"] =
+                    persistedPage["file"]?.DeepClone()
+                    ?? active?["file"]?.DeepClone(),
+                ["title"] =
+                    persistedPage["title"]?.DeepClone()
+                    ?? active?["title"]?.DeepClone(),
+                ["page"] =
+                    persistedPage["page"]?.DeepClone()
+                    ?? active?["page"]?.DeepClone(),
+                ["text"] = text,
+                ["textSource"] =
+                    persistedPage["textSource"]?.DeepClone(),
+                ["truncated"] =
+                    persistedPage["truncated"]?.DeepClone(),
+            },
+        };
     }
 
     internal void OpenIfSnapshotMode(string contextDeliveryMode)
