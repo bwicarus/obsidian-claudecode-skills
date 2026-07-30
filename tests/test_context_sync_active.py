@@ -272,12 +272,51 @@ class ContextSyncApiTest(unittest.TestCase):
                        json={{"kind": "pdf", "file": book, "pos": 57,
                              "title": "T", "selection": "S"}})
             assert r.status_code == 200, (r.status_code, r.get_json())
+            ack = r.get_json()
+            assert ack["canonical"] == {{
+                "kind": "pdf", "file": book, "page": 57,
+                "viewFile": None, "viewPage": None,
+            }}, ack
             g = c.get("/pdf/api/active-reading").get_json()
             assert g["fresh"] is True and g["age_sec"] <= 2, g
             assert g["active"]["file"] == book and g["active"]["pos"] == 57, g
             assert g["active"]["title"] == "T" and g["active"]["selection"] == "S", g
 
-            # 5) 输入校验
+            # 5) vbook ACK 必须同时给真实卷页和原视图坐标；客户端据此做精确绑定。
+            class FakeVB:
+                class VbookError(Exception):
+                    pass
+
+                @staticmethod
+                def is_view_ref(value):
+                    return value == "vbook:g_test"
+
+                @staticmethod
+                def get(value):
+                    assert value == "vbook:g_test"
+                    return {{}}
+
+                @staticmethod
+                def resolve_view(value, page, revision=None):
+                    assert value == "vbook:g_test" and int(page) == 31
+                    return book, 7
+
+            original_vb = reader.VB
+            reader.VB = FakeVB
+            try:
+                vb = c.post("/pdf/api/active-reading", json={{
+                    "kind": "pdf", "file": "vbook:g_test", "pos": 31,
+                    "selection": "V",
+                }})
+                assert vb.status_code == 200, (vb.status_code, vb.get_json())
+                assert vb.get_json()["canonical"] == {{
+                    "kind": "pdf", "file": book, "page": 7,
+                    "viewFile": "vbook:g_test", "viewPage": 31,
+                }}, vb.get_json()
+            finally:
+                reader.VB = original_vb
+
+            # 6) 输入校验
             assert c.post("/pdf/api/active-reading",
                           json={{"kind": "bogus", "file": book}}).status_code == 400
             assert c.post("/pdf/api/active-reading",
@@ -289,7 +328,7 @@ class ContextSyncApiTest(unittest.TestCase):
             assert c.post("/pdf/api/active-reading",
                           json={{"kind": "web", "url": "https://ex.com/a"}}).status_code == 200
 
-            # 6) 关 → 活动状态被清空(否则快照会继续拿最后一条当「当前」)
+            # 7) 关 → 活动状态被清空(否则快照会继续拿最后一条当「当前」)
             assert c.post("/pdf/api/context-sync", json={{"enabled": False}}).get_json()["ok"]
             g = c.get("/pdf/api/active-reading").get_json()
             assert g["enabled"] is False and g["active"] is None, g

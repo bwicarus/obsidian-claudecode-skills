@@ -2883,7 +2883,33 @@ def pdf_api_active_reading():
     except Exception as ex:
         return jsonify({"ok": False, "error": str(ex)}), 500
     _maybe_emit_page_context(rec, body)
-    return jsonify({"ok": True, "ts": rec["ts"]})
+    # Windows 不能把 vbook 视图标识当成本地文件路径。把本次已经由服务端
+    # 校验/解析过的真实卷页随 ACK 返回，并保留原视图坐标供焦点事件对齐。
+    # canonical 只绑定这一次 POST；客户端还必须核对 viewFile/viewPage 与
+    # 自己实际发送的状态一致，陈旧响应不得复用到后来翻到的页。
+    if rec.get("vbook"):
+        _canonical_file = rec.get("member")
+        _canonical_page = rec.get("member_pos")
+        _canonical = ({
+            "kind": kind,
+            "file": _canonical_file,
+            "page": _canonical_page,
+            "viewFile": rec.get("file"),
+            "viewPage": rec.get("pos"),
+        } if _canonical_file and _canonical_page is not None else None)
+    else:
+        _canonical = {
+            "kind": kind,
+            "file": rec.get("url") or rec.get("file"),
+            "page": rec.get("pos"),
+            "viewFile": None,
+            "viewPage": None,
+        }
+    return jsonify({
+        "ok": True,
+        "ts": rec["ts"],
+        "canonical": _canonical,
+    })
 
 
 # 已发过 page.context 的 (file,page):同一次停留不重复发;换页即失效。

@@ -18,6 +18,7 @@ function makeEnv() {
   const store = {};
   const listeners = [];        // 记录挂了哪些监听器 → 验证「关闭时不挂监听」
   const posts = [];            // 记录每一次真实网络调用 → 验证节流合并
+  const responses = [];
   let resolveNext = null;
   const g = {
     posts, listeners, store,
@@ -39,8 +40,17 @@ function makeEnv() {
     },
     fetch: (url, opt) => {
       posts.push({ url, body: JSON.parse((opt && opt.body) || '{}') });
-      return new Promise((res) => { resolveNext = () => res({ ok: true, json: () => Promise.resolve({ ok: true }) }); });
+      return new Promise((res) => {
+        resolveNext = () => {
+          const configured = responses.shift() || { httpOk: true, body: { ok: true } };
+          res({
+            ok: configured.httpOk !== false,
+            json: () => Promise.resolve(configured.body),
+          });
+        };
+      });
     },
+    queueResponse: (body, httpOk = true) => responses.push({ body, httpOk }),
     flushInflight: () => { if (resolveNext) { const r = resolveNext; resolveNext = null; r(); } },
   };
   // 定时器不是 ECMAScript 内置,vm context 里要显式注入(否则 debounce/心跳直接 ReferenceError)
@@ -179,6 +189,72 @@ function check(name, cond, extra) {
   check('关闭时通知服务端(同一开关管两个方向)',
     env.posts.some((p) => /context-sync/.test(p.url) && p.body.enabled === false));
   check('关闭后摘掉监听器', env.listeners.length === 0, JSON.stringify(env.listeners));
+
+  // ── 5.5) vbook 只接受与本次 POST 精确绑定的服务端真实卷页映射 ──────────
+  console.log('[5.5] vbook canonical ACK 绑定与陈旧响应隔离');
+  env = makeEnv(); RC = load(env);
+  env.store['eph-ctx-sync'] = '1';
+  env.queueResponse({
+    ok: true,
+    canonical: {
+      kind: 'pdf',
+      file: 'books/part-2.pdf',
+      page: 7,
+      viewFile: 'vbook:g_book',
+      viewPage: 31,
+    },
+  });
+  RC.ctxSync.report(
+    { kind: 'pdf', file: 'vbook:g_book', pos: 31, selection: '' },
+    { immediate: true },
+  );
+  await sleep(30); env.flushInflight(); await sleep(30);
+  check('精确绑定 ACK 保存真实卷页',
+    RC.ctxSync._state().canonical &&
+    RC.ctxSync._state().canonical.file === 'books/part-2.pdf' &&
+    RC.ctxSync._state().canonical.page === 7,
+    JSON.stringify(RC.ctxSync._state().canonical));
+  RC.ctxSync.report(
+    { kind: 'pdf', file: 'vbook:g_book', pos: 31, selection: '即时选区' },
+    { immediate: true },
+  );
+  check('同一视图页的选区变化不丢 canonical',
+    RC.ctxSync._state().canonical &&
+    RC.ctxSync._state().canonical.viewPage === 31,
+    JSON.stringify(RC.ctxSync._state().canonical));
+  env.flushInflight(); await sleep(30);
+
+  env = makeEnv(); RC = load(env);
+  env.store['eph-ctx-sync'] = '1';
+  env.queueResponse({
+    ok: true,
+    canonical: {
+      kind: 'pdf',
+      file: 'books/part-2.pdf',
+      page: 7,
+      viewFile: 'vbook:g_book',
+      viewPage: 31,
+    },
+  });
+  RC.ctxSync.report(
+    { kind: 'pdf', file: 'vbook:g_book', pos: 31 },
+    { immediate: true },
+  );
+  await sleep(30);
+  RC.ctxSync.report(
+    { kind: 'pdf', file: 'vbook:g_book', pos: 32 },
+    { immediate: true },
+  );
+  env.flushInflight(); await sleep(30);
+  check('翻页后旧 ACK 不会绑定到新页',
+    RC.ctxSync._state().canonical === null,
+    JSON.stringify(RC.ctxSync._state().canonical));
+  check('新页仍留在 pend 等自己的 ACK',
+    RC.ctxSync._state().pend.pos === 32,
+    JSON.stringify(RC.ctxSync._state().pend));
+  RC.ctxSync.setEnabled(false);
+  check('关闭同步会同步清掉 canonical',
+    RC.ctxSync._state().canonical === null);
 
   // ── 6) 出向上下文:焦点去重/取消不复活、绘图不逐笔发 ────────────────────
   console.log('[6] 出向上下文(焦点 + 绘图版本)');

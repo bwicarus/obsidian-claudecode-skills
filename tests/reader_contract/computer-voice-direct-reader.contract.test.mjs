@@ -829,7 +829,10 @@ function createHarness(overrides = {}) {
           return scenario.contextSyncEnabled === true;
         },
         _state() {
-          return { pend: scenario.activeReading };
+          return {
+            pend: scenario.activeReading,
+            canonical: scenario.activeReadingCanonical || null,
+          };
         },
       },
     },
@@ -1303,7 +1306,7 @@ test("snapshot-mcp 前台唤醒不为其他模型、关闭同步或活动通话�
   await activeCall.api.stop("test");
 });
 
-test("snapshot-mcp 从 PWA pend 实时解析 vbook 真实卷页并拒绝跨页旧选区", async () => {
+test("snapshot-mcp 仅转发 Pi ACK 绑定的 vbook 真实卷页并拒绝跨页旧选区", async () => {
   const harness = createHarness({
     contextDeliveryMode: "snapshot-mcp",
     contextSyncEnabled: true,
@@ -1312,11 +1315,10 @@ test("snapshot-mcp 从 PWA pend 实时解析 vbook 真实卷页并拒绝跨页�
       file: "vbook:g_3e5d696e85",
       title: "Merged Book",
       pos: 31,
-      member: "books/part-2.pdf",
-      member_pos: 7,
       selection: "old page selection",
       sel_page: 30,
     },
+    activeReadingCanonical: null,
     serverActiveReading: {
       kind: "pdf",
       file: "vbook:g_3e5d696e85",
@@ -1333,6 +1335,19 @@ test("snapshot-mcp 从 PWA pend 实时解析 vbook 真实卷页并拒绝跨页�
   });
   harness.api.setSelectedEngine("computer_client");
   await waitForRequest(harness, "context-open");
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(
+    harness.scenario.activeReadingRequests.length,
+    0,
+    "未拿到与当前 vbook 页绑定的服务端 ACK 前不得把视图标识当本地路径发送",
+  );
+  harness.scenario.activeReadingCanonical = {
+    kind: "pdf",
+    file: "books/part-2.pdf",
+    page: 7,
+    viewFile: "vbook:g_3e5d696e85",
+    viewPage: 31,
+  };
   await waitForCondition(
     () => harness.scenario.activeReadingRequests.length >= 1,
     "vbook active-reading",
@@ -1347,10 +1362,14 @@ test("snapshot-mcp 从 PWA pend 实时解析 vbook 真实卷页并拒绝跨页�
     "selection",
     "selectionState",
     "title",
+    "viewFile",
+    "viewPage",
   ]);
   assert.equal(forwarded.file, "books/part-2.pdf");
   assert.equal(forwarded.title, "Merged Book");
   assert.equal(forwarded.page, 7);
+  assert.equal(forwarded.viewFile, "vbook:g_3e5d696e85");
+  assert.equal(forwarded.viewPage, 31);
   assert.equal(forwarded.selectionState, "cleared");
   assert.equal(forwarded.selection, null);
 
@@ -1358,11 +1377,26 @@ test("snapshot-mcp 从 PWA pend 实时解析 vbook 真实卷页并拒绝跨页�
   delete withoutSelection.selection;
   delete withoutSelection.sel_page;
   harness.scenario.activeReading = withoutSelection;
+  harness.scenario.activeReadingCanonical = null;
+  await new Promise((resolve) => setTimeout(resolve, 300));
+  assert.equal(
+    harness.scenario.activeReadingRequests.length,
+    1,
+    "翻页后旧 canonical 必须立即失效",
+  );
+  harness.scenario.activeReadingCanonical = {
+    kind: "pdf",
+    file: "books/part-2.pdf",
+    page: 8,
+    viewFile: "vbook:g_3e5d696e85",
+    viewPage: 32,
+  };
   await waitForCondition(
     () => harness.scenario.activeReadingRequests.some(
       (request) =>
         request.active.selectionState === "unknown"
-        && request.active.page === 7,
+        && request.active.page === 8
+        && request.active.viewPage === 32,
     ),
     "selection unknown realtime update",
   );

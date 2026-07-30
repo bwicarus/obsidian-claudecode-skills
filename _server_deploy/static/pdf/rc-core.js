@@ -94,20 +94,101 @@
   var _dwellTimer = null, _dwellKey = '';
   var _CTX_NOW_MS = 0;            // 其余一切:下一个 tick 就发(仍受单次在途保护,不会打爆)
   var _CTX_HEARTBEAT_MS = 60000;  // 可见时心跳:久读同一页也不会被服务端判成「不新鲜」
-  var _ctxS = { base: '', pend: null, timer: null, inflight: false, dirty: false, hb: null, bound: false };
+  var _ctxS = {
+    base: '', pend: null, canonical: null,
+    timer: null, inflight: false, dirty: false, hb: null, bound: false
+  };
   function _ctxOn() { try { return localStorage.getItem(_CTX_LS) === '1'; } catch (e) { return false; } }
   function _ctxU(p) { return (_ctxS.base || '') + p; }
   function _ctxClear() { if (_ctxS.timer) { clearTimeout(_ctxS.timer); _ctxS.timer = null; } }
   function _ctxSchedule(ms) { _ctxClear(); _ctxS.timer = setTimeout(_ctxSend, ms); }
+  function _ctxScalarEq(a, b) {
+    if (a === undefined || a === null) return b === undefined || b === null;
+    if (b === undefined || b === null) return false;
+    return String(a) === String(b);
+  }
+  function _ctxValidScalar(value, allowNull) {
+    if (value === undefined || value === null) return !!allowNull;
+    if (typeof value === 'number') return Number.isSafeInteger(value) && value >= 0;
+    return typeof value === 'string' && value.length > 0 && value.length <= 256 &&
+      !/[\u0000-\u001f\u007f-\u009f]/.test(value);
+  }
+  function _ctxValidFile(value) {
+    return typeof value === 'string' && value.length > 0 && value.length <= 4096 &&
+      !/[\u0000-\u001f\u007f-\u009f]/.test(value);
+  }
+  function _ctxIdentityEq(left, right) {
+    if (!left || !right || left.kind !== right.kind) return false;
+    var leftFile = left.kind === 'web' ? left.url : left.file;
+    var rightFile = right.kind === 'web' ? right.url : right.file;
+    return leftFile === rightFile && _ctxScalarEq(left.pos, right.pos);
+  }
+  function _ctxCanonicalFor(source, body) {
+    var value = body && body.ok === true && body.canonical;
+    if (!source || !value || typeof value !== 'object' || value.kind !== source.kind ||
+        !_ctxValidFile(value.file) || !_ctxValidScalar(value.page, true)) return null;
+    var sourceFile = source.kind === 'web' ? source.url : source.file;
+    if (!_ctxValidFile(sourceFile)) return null;
+    var isView = source.kind !== 'web' && sourceFile.indexOf('vbook:') === 0;
+    if (isView) {
+      if (!_ctxValidScalar(source.pos, false) ||
+          value.viewFile !== sourceFile ||
+          !_ctxScalarEq(value.viewPage, source.pos) ||
+          !_ctxValidScalar(value.viewPage, false) ||
+          value.file.indexOf('vbook:') === 0 ||
+          !_ctxValidScalar(value.page, false)) return null;
+    } else if (
+      value.file !== sourceFile ||
+      !_ctxScalarEq(value.page, source.pos) ||
+      (value.viewFile !== undefined && value.viewFile !== null) ||
+      (value.viewPage !== undefined && value.viewPage !== null)
+    ) {
+      return null;
+    }
+    return {
+      kind: value.kind,
+      file: value.file,
+      page: value.page === undefined ? null : value.page,
+      viewFile: isView ? value.viewFile : null,
+      viewPage: isView ? value.viewPage : null
+    };
+  }
+  function _ctxCanonicalMatches(source, canonical) {
+    if (!source || !canonical || source.kind !== canonical.kind) return false;
+    var sourceFile = source.kind === 'web' ? source.url : source.file;
+    if (source.kind !== 'web' && typeof sourceFile === 'string' &&
+        sourceFile.indexOf('vbook:') === 0) {
+      return canonical.viewFile === sourceFile &&
+        _ctxScalarEq(canonical.viewPage, source.pos);
+    }
+    return canonical.viewFile === null && canonical.file === sourceFile &&
+      _ctxScalarEq(canonical.page, source.pos);
+  }
+  function _ctxAcceptCanonical(sent, body) {
+    var canonical = _ctxCanonicalFor(sent, body);
+    if (canonical && _ctxIdentityEq(sent, _ctxS.pend)) {
+      _ctxS.canonical = canonical;
+    }
+  }
+  function _ctxReadAck(response, sent) {
+    if (!response || response.ok !== true || typeof response.json !== 'function') return null;
+    return response.json().then(function (body) {
+      _ctxAcceptCanonical(sent, body);
+      return body;
+    }).catch(function () { return null; });
+  }
   function _ctxSend() {
     _ctxS.timer = null;
     if (!_ctxOn() || !_ctxS.pend) return;
     if (_ctxS.inflight) { _ctxS.dirty = true; return; }   // 单次在途:回来之后再补发最新的那份
     _ctxS.inflight = true;
+    var sent = Object.assign({}, _ctxS.pend);
     // @interaction context.active.report
     fetch(_ctxU('/pdf/api/active-reading'), {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(_ctxS.pend), keepalive: true, credentials: 'include'
+      body: JSON.stringify(sent), keepalive: true, credentials: 'include'
+    }).then(function (response) {
+      return _ctxReadAck(response, sent);
     }).catch(function () {}).then(function () {
       _ctxS.inflight = false;
       if (_ctxS.dirty) { _ctxS.dirty = false; _ctxSchedule(0); }
@@ -228,9 +309,12 @@
       // 一次性事件,不并进 _ctxS.pend:reason 一旦并进合并状态就会粘住,
       // 之后每次翻页都带 reason='dwell',服务端的"翻页不注入"闸门会被整个打穿。
       // @interaction context.active.report
+      var sent = Object.assign({}, cur, { reason: 'dwell' });
       fetch(_ctxU('/pdf/api/active-reading'), {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(Object.assign({}, cur, { reason: 'dwell' })), credentials: 'include'
+        body: JSON.stringify(sent), credentials: 'include'
+      }).then(function (response) {
+        return _ctxReadAck(response, sent);
       }).catch(function () {});
     }, _CTX_DWELL_MS);
   }
@@ -365,6 +449,7 @@
         return false;
       }
       _ctxS.pend = next;
+      if (!_ctxCanonicalMatches(next, _ctxS.canonical)) _ctxS.canonical = null;
       _ctxBind(true);
       _ctxSchedule(navOnly ? _CTX_NAV_MS : _CTX_NOW_MS);
       _ctxArmDwell(next);
@@ -374,7 +459,13 @@
     setEnabled: function (on) {
       on = !!on;
       try { localStorage.setItem(_CTX_LS, on ? '1' : '0'); } catch (e) {}
-      if (!on) { _ctxClear(); _ctxS.pend = null; _ctxS.dirty = false; _ctxBind(false); }
+      if (!on) {
+        _ctxClear();
+        _ctxS.pend = null;
+        _ctxS.canonical = null;
+        _ctxS.dirty = false;
+        _ctxBind(false);
+      }
       // @interaction context.sync.toggle
       return fetch(_ctxU('/pdf/api/context-sync'), {
         method: 'POST', headers: { 'Content-Type': 'application/json' },

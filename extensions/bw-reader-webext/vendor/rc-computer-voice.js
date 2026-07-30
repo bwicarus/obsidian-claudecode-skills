@@ -2528,12 +2528,16 @@ if (window.__bwPwaProviderOnly) return;
 
   function localActiveReadingSnapshot() {
     var source;
+    var canonical;
     try {
-      source = RC.ctxSync && typeof RC.ctxSync._state === "function"
-        ? RC.ctxSync._state().pend
+      var state = RC.ctxSync && typeof RC.ctxSync._state === "function"
+        ? RC.ctxSync._state()
         : null;
+      source = state && state.pend;
+      canonical = state && state.canonical;
     } catch (_) {
       source = null;
+      canonical = null;
     }
     if (
       !plainObject(source) ||
@@ -2546,9 +2550,21 @@ if (window.__bwPwaProviderOnly) return;
     ) {
       return null;
     }
-    var file = source.member || (
-      source.kind === "web" ? source.url : source.file
-    );
+    var sourceFile = source.kind === "web" ? source.url : source.file;
+    var isView = source.kind !== "web" &&
+      typeof sourceFile === "string" &&
+      sourceFile.indexOf("vbook:") === 0;
+    if (isView && (
+      !plainObject(canonical) ||
+      canonical.kind !== source.kind ||
+      canonical.viewFile !== sourceFile ||
+      !sameActiveScalar(canonical.viewPage, source.pos) ||
+      typeof canonical.file !== "string" ||
+      canonical.file.indexOf("vbook:") === 0
+    )) {
+      return null;
+    }
+    var file = isView ? canonical.file : sourceFile;
     if (
       typeof file !== "string" ||
       !file ||
@@ -2557,8 +2573,7 @@ if (window.__bwPwaProviderOnly) return;
     ) {
       return null;
     }
-    var page = source.member_pos;
-    if (page === undefined || page === null) page = source.pos;
+    var page = isView ? canonical.page : source.pos;
     if (page === undefined || page === null) {
       page = null;
     } else if (
@@ -2612,7 +2627,7 @@ if (window.__bwPwaProviderOnly) return;
         selectionState = "cleared";
       }
     }
-    return {
+    var activeReading = {
       kind: source.kind,
       file: file,
       title: title,
@@ -2620,6 +2635,11 @@ if (window.__bwPwaProviderOnly) return;
       selectionState: selectionState,
       selection: selection,
     };
+    if (isView) {
+      activeReading.viewFile = sourceFile;
+      activeReading.viewPage = source.pos;
+    }
+    return activeReading;
   }
 
   function sameActiveScalar(left, right) {
