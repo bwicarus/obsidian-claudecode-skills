@@ -14,7 +14,7 @@ internal sealed class ReaderContextMcpServer
         "reader_drawing_image";
     internal const string ResultToolName = "reader_result_present";
     internal const string ServerName = "bw-reader-context-snapshot";
-    internal const string ServerVersion = "1.1.0";
+    internal const string ServerVersion = "1.2.0";
     internal const string LatestProtocolVersion = "2025-11-25";
     internal static readonly TimeSpan FreshnessWindow =
         TimeSpan.FromMinutes(3);
@@ -378,12 +378,14 @@ internal sealed class ReaderContextMcpServer
             {
                 ["name"] = DrawingImageToolName,
                 ["description"] =
-                    "Return the PWA's existing current-page plus handwriting "
-                    + "composite JPEG. This parameterless read-only tool is "
+                    "Return the PWA-published current-page, handwriting and "
+                    + "page-overlay composite JPEG from the Windows cache. "
+                    + "This parameterless read-only tool is "
                     + "available only when the Windows snapshot is ready and "
                     + "the drawing is stable and non-empty. Internal identity "
                     + "checks prevent an old page or superseded drawing from "
-                    + "being returned.",
+                    + "being returned. Calling it does not ask the PWA to "
+                    + "capture a new image.",
                 ["inputSchema"] = new JsonObject
                 {
                     ["type"] = "object",
@@ -904,7 +906,26 @@ internal sealed class ReaderContextMcpServer
         }
         output.AppendLine(
             "- 指代优先级：用户明确命名的对象 → 当前显式焦点 → 当前选区 "
-            + "→ 尚未看过的新笔迹 → 当前页正文。清除或换页后不得沿用旧对象。");
+            + "→ 尚未看过的新笔迹 → 当前屏幕可见部分 → 当前页正文。"
+            + "清除或换页后不得沿用旧对象。");
+
+        output.AppendLine();
+        output.AppendLine("## 本轮处理规则");
+        output.AppendLine();
+        output.AppendLine(
+            "- 已经给出的选区、焦点、正文、高亮、卡片或描述可以直接"
+            + "用于回答；不要为了重复取得同一内容再次读取整页。");
+        output.AppendLine(
+            "- 涉及圈画、箭头、手写、位置关系或模糊的“这个/这里”且"
+            + "当前有新笔迹时，必须按笔迹段的说明取得合成图后再判断。"
+            + "元数据本身不能说明用户画了什么。");
+        output.AppendLine(
+            "- 用户要求天气、新闻、图片、视频或可展示卡片时，完成内容"
+            + "后调用 `reader_result_present` 一次，把结果送到 Reader"
+            + " 侧边栏；不要声称没有回写渠道。");
+        output.AppendLine(
+            "- 只有用户明确要求高亮、制卡、写页或导航时才执行对应"
+            + " Reader 操作；静默快照本身不授权写操作。");
 
         output.AppendLine();
         output.AppendLine("## 当前选区");
@@ -922,6 +943,10 @@ internal sealed class ReaderContextMcpServer
             output.AppendLine(
                 "用户说“这段”“选中的”“这个词”时，优先指下面的选区：");
             AppendQuote(output, selectionText!);
+            output.AppendLine();
+            output.AppendLine(
+                "这段原文已经可用：解释、制卡或高亮默认以它为范围；"
+                + "除非确有缺失，不要退回读取整页。");
             string? surrounding = SelectionSurroundingText(
                 readablePageText,
                 selectionText!);
@@ -971,6 +996,10 @@ internal sealed class ReaderContextMcpServer
             }
             output.AppendLine();
             AppendQuote(output, readablePageText);
+            output.AppendLine();
+            output.AppendLine(
+                "上面的正文已经传入本轮上下文，可直接使用；不要仅为"
+                + "取得同一页正文再次调用读取工具。");
         }
         else
         {
@@ -1271,7 +1300,8 @@ internal sealed class ReaderContextMcpServer
                 output.AppendLine(
                     "- **获取合成图**：若用户正在询问笔迹，仍可调用只读"
                     + "工具 `reader_drawing_image`（无参数）。工具会在一个"
-                    + "有界时间内等待 PWA 产出当前“原页＋笔迹”合成图，"
+                    + "有界时间内等待 PWA 发布当前“原页＋笔迹＋页面附属"
+                    + "内容”合成图，"
                     + "无需让用户重复提问或重复按按钮。");
             }
             return;
@@ -1299,7 +1329,8 @@ internal sealed class ReaderContextMcpServer
         }
         output.AppendLine(
             "- **获取合成图**：调用只读工具 `reader_drawing_image`"
-            + "（无参数）。它直接返回 PWA 已有的“当前原页＋笔迹”合成图；"
+            + "（无参数）。它直接返回 PWA 停笔稳定后发布的“当前原页＋"
+            + "笔迹＋页面附属内容”合成图；"
             + "笔迹的形状、位置、指向及其与正文的重叠关系只能以该图为准。");
         output.AppendLine(
             "- 普通正文、选区、导航或与笔迹明显无关的问题不要调用看图工具。");
@@ -1911,7 +1942,7 @@ internal sealed class ReaderContextMcpServer
         _lastDeliveredDrawingRevision = request.DrawingRevision;
     }
 
-    private static ReaderVisualDeliveryRequest? BuildVisualRequest(
+    internal static ReaderVisualDeliveryRequest? BuildVisualRequest(
         JsonObject payload)
     {
         if (!TryGetVisualIdentity(
@@ -1972,7 +2003,7 @@ internal sealed class ReaderContextMcpServer
             );
     }
 
-    private static bool VisualRequestStillCurrent(
+    internal static bool VisualRequestStillCurrent(
         JsonObject payload,
         ReaderVisualDeliveryRequest request)
     {

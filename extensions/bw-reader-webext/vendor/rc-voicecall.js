@@ -4480,6 +4480,112 @@ if (window.__bwPwaProviderOnly) return;
       return b64.length > 3000 ? { media_type: 'image/jpeg', b64: b64 } : null;
     } catch (e) { return null; }
   }
+  function _compositeTargetPage(target) {
+    if (target == null) return null;
+    var page = (typeof target === 'object') ? target.page : target;
+    return (page == null || page === '') ? null : String(page);
+  }
+  function _compositePageMatches(el, targetPage) {
+    if (targetPage == null) return true;
+    var page = null;
+    if (el && el.dataset) {
+      if (el.dataset.pageNum != null) page = el.dataset.pageNum;
+      else if (el.dataset.idx != null) page = el.dataset.idx;
+      else if (el.dataset.uid != null) page = el.dataset.uid;
+    }
+    if (page == null && el && el.__upRec && el.__upRec.page != null) {
+      page = el.__upRec.page;
+    }
+    return page != null && String(page) === targetPage;
+  }
+  async function _captureBodyPageRect(rect, surface, surfaceCrop) {
+    try {
+      if (!rect || !(rect.width > 0) || !(rect.height > 0)) return null;
+      await _loadH2C();
+      var longEdge = Math.max(rect.width, rect.height, 1);
+      var canvas = await window.html2canvas(document.body, {
+        x: Math.max(0, Math.round((window.scrollX || 0) + rect.left)),
+        y: Math.max(0, Math.round((window.scrollY || 0) + rect.top)),
+        width: Math.round(rect.width),
+        height: Math.round(rect.height),
+        scale: Math.min(2, window.devicePixelRatio || 1, 1600 / longEdge),
+        useCORS: true, logging: false, backgroundColor: '#ffffff',
+        // 卡片/便签可能是 page 元素之外的 portal 兄弟节点。这里以 body
+        // 为渲染源再裁页，不能排除 bw-reader-pins / vc-cards。
+        ignoreElements: function (el) {
+          var id = el.id || '';
+          return id === 'ep-side' || id === 'rc-vc' || id === 'vc-cap' ||
+                 id === 'word-pop' || id === 'sel-toolbar';
+        }
+      });
+      if (surface && surfaceCrop) {
+        _drawSurfaceInk(canvas, surface, surfaceCrop);
+      }
+      var b64 = '', qs = [0.85, 0.7, 0.5];
+      for (var qi = 0; qi < qs.length; qi++) {
+        b64 = (canvas.toDataURL('image/jpeg', qs[qi]).split(',')[1]) || '';
+        if (b64.length <= 900000) break;
+      }
+      return b64.length > 3000 ? { media_type: 'image/jpeg', b64: b64 } : null;
+    } catch (e) { return null; }
+  }
+  // 当前逻辑页的完整“正文 + 墨迹 + 页内卡片/便签/高亮”合成图。
+  // 只复用本文件已有 html2canvas/_captureSurface/_captureEl，不另造渲染器：
+  // - 普通网页以当前视口 body 合成并补画 canonical strokes；
+  // - PDF/EPUB/插入页以 body 为渲染源按精确页矩形裁切，保留外层 portal；
+  // - 宿主尚未装载目标元素时回退当前视口，保持旧语音链可用。
+  async function _capturePageComposite(target) {
+    try {
+      var targetPage = _compositeTargetPage(target);
+      var els = document.querySelectorAll(
+        '.page-wrap[data-page-num], .pdf-upage, ' +
+        '.ep-sec[data-idx], .ep-usec[data-uid]'
+      );
+      var fallback = null;
+      for (var i = 0; i < els.length; i++) {
+        var el = els[i];
+        if (!_compositePageMatches(el, targetPage)) continue;
+        var r = el.getBoundingClientRect();
+        if (!(r.width > 0) || !(r.height > 0)) continue;
+        if (!fallback) fallback = el;
+        if (r.bottom > 0 && r.top < (window.innerHeight || 0)) {
+          return await _captureBodyPageRect(r) || await _captureEl(el);
+        }
+      }
+      if (fallback) {
+        var fallbackRect = fallback.getBoundingClientRect();
+        return await _captureBodyPageRect(fallbackRect) ||
+          await _captureEl(fallback);
+      }
+      var surface = _visualSurface();
+      if (surface) {
+        var vp = surface.viewport || {};
+        var crop = {
+          x: Math.max(0, Number(vp.x) || 0),
+          y: Math.max(0, Number(vp.y) || 0),
+          width: Math.min(
+            surface.width,
+            Number(vp.width) || window.innerWidth
+          ),
+          height: Math.min(
+            surface.height,
+            Number(vp.height) || window.innerHeight
+          )
+        };
+        var composite = await _captureBodyPageRect({
+          left: 0,
+          top: 0,
+          width: window.innerWidth,
+          height: window.innerHeight
+        }, surface, crop);
+        if (composite) return composite;
+        if (surface.strokes.length) return await _captureSurface(surface, crop);
+      }
+      return await _captureView();
+    } catch (e) {
+      return _captureView();
+    }
+  }
   function _inkTargetPage(target) {
     if (target == null) return null;
     var page = (typeof target === 'object') ? target.page : target;
@@ -4531,7 +4637,13 @@ if (window.__bwPwaProviderOnly) return;
       return b64.length > 3000 ? { media_type: 'image/jpeg', b64: b64 } : null;
     } catch (e) { return null; }
   }
-  try { window.RC = window.RC || {}; RC.captureView = _captureView; RC.captureEl = _captureEl; RC.captureInkRegion = _captureInkRegion; } catch (e) {}   // 共享截图:视口/指定元素/**笔迹局部**。文字侧栏 EPUB 预拍;语音走 need_shot
+  try {
+    window.RC = window.RC || {};
+    RC.captureView = _captureView;
+    RC.captureEl = _captureEl;
+    RC.captureInkRegion = _captureInkRegion;
+    RC.capturePageComposite = _capturePageComposite;
+  } catch (e) {}   // 共享截图:视口/指定元素/笔迹局部/**整页叠加合成图**。文字侧栏 EPUB 预拍;语音走 need_shot
   async function _rtcTool(name, args, callId) {   // 工具循环(本地):与 relay WS 版同语义,tool_status 卡/client_action 全复用
     if (name === 'wait_for_user') {   // 静音 no-op:回空 output、不 response.create=安静
       _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: '{}' } });

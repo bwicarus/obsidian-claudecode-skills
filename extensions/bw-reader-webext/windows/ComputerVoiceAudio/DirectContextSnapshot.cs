@@ -521,6 +521,25 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 BuildPageContext(
                     value,
                     windowsReceivedAtEpochMs);
+            JsonObject pageContext =
+                value["page_context"] as JsonObject
+                ?? throw JournalInvalid();
+            string? pageSelection =
+                StringValue(pageContext["selection"]);
+            if (
+                pageContext.ContainsKey("selection")
+                && (
+                    StringValue(pageContext["reason"]) != "selection"
+                    || string.IsNullOrWhiteSpace(pageSelection)
+                    || pageSelection.Length > 400
+                    || pageSelection.Any(character =>
+                        char.IsControl(character)
+                        && character is not ('\r' or '\n' or '\t'))
+                )
+            )
+            {
+                throw JournalInvalid();
+            }
             bool changedPage = _stablePage is not null
                 && !SamePage(_stablePage, stablePage);
             if (
@@ -542,6 +561,12 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 _selection = ClearedSelection(
                     "stable-page-changed");
                 _focus = UnknownFocus("stable-page-changed");
+            }
+            if (!string.IsNullOrWhiteSpace(pageSelection))
+            {
+                _selection = ActiveSelection(
+                    pageSelection,
+                    activeReading);
             }
         }
         else if (contextEvent.Type == "focus")

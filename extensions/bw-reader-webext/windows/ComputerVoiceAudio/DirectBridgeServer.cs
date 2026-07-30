@@ -78,7 +78,9 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             FileDirectSnapshotContextAdapter.SnapshotFileName);
         _snapshotViewer = new DirectSnapshotViewer(
             snapshotPath,
-            config.ListenPort);
+            config.ListenPort,
+            fetchPublishedVisualAsync:
+                _readerVisualBroker.GetPublishedAsync);
         _readerContextMcpEndpoint =
             new ReaderContextMcpHttpEndpoint(
                 new ReaderContextMcpServer(
@@ -88,7 +90,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                     deliverResultAsync:
                         _readerResultBroker.DeliverAsync,
                     fetchVisualAsync:
-                        _readerVisualBroker.RequestAsync),
+                        _readerVisualBroker.GetPublishedAsync),
                 config.ListenPort);
     }
 
@@ -139,6 +141,9 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         app.MapGet(
             DirectSnapshotViewer.MarkdownPath,
             _snapshotViewer.HandleMarkdownAsync);
+        app.MapGet(
+            DirectSnapshotViewer.DrawingImagePath,
+            _snapshotViewer.HandleDrawingImageAsync);
         app.MapMethods(
             ReaderContextMcpHttpEndpoint.Path,
             [

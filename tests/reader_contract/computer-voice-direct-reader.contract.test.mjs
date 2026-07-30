@@ -904,6 +904,8 @@ function createHarness(overrides = {}) {
     readerVisualChunks: [],
     readerVisualCaptureCalls: 0,
     readerVisualCaptureTargets: [],
+    readerVisualCompositeCaptureCalls: 0,
+    readerVisualCompositeCaptureTargets: [],
     readerVisualCapture: null,
     readerVisualDrawing: null,
     readerVisualOutgoingState: {
@@ -998,6 +1000,13 @@ function createHarness(overrides = {}) {
       captureInkRegion(target) {
         scenario.readerVisualCaptureCalls += 1;
         scenario.readerVisualCaptureTargets.push(structuredClone(target));
+        return Promise.resolve(scenario.readerVisualCapture);
+      },
+      capturePageComposite(target) {
+        scenario.readerVisualCompositeCaptureCalls += 1;
+        scenario.readerVisualCompositeCaptureTargets.push(
+          structuredClone(target),
+        );
         return Promise.resolve(scenario.readerVisualCapture);
       },
       outgoing: {
@@ -1456,7 +1465,7 @@ test("snapshot-mcp 常驻 WSS 接收严格结果卡并回 rendered ACK，不发�
   await harness.api.contextSyncChanged();
 });
 
-test("snapshot-mcp MCP 视觉请求复用笔迹合成图并在 64KiB 内分块，不发送 START", async () => {
+test("snapshot-mcp 停笔后主动发布整页合成图，MCP 请求复用缓存且不发送 START", async () => {
   const b64 = Buffer.alloc(70000, 0x11).toString("base64");
   const drawingRevision = "dr_0123456789abcdef";
   const harness = createHarness({
@@ -1482,10 +1491,17 @@ test("snapshot-mcp MCP 视觉请求复用笔迹合成图并在 64KiB 内分块�
   });
   harness.api.setSelectedEngine("computer_client");
   await waitForRequest(harness, "context-open");
+  await waitForCondition(
+    () => harness.scenario.readerVisualChunks.filter(
+      (chunk) => chunk.correlation.startsWith("publish-"),
+    ).length === 2,
+    "proactive reader visual chunks",
+  );
 
+  const pullCorrelation = "visual-0123456789abcdef0123456789abcdef";
   harness.server.emitReaderVisual({
     contract: VISUAL_DELIVERY_CONTRACT,
-    correlation: "visual-0123456789abcdef0123456789abcdef",
+    correlation: pullCorrelation,
     file: "book.pdf",
     page: 24,
     drawingRevision,
@@ -1493,26 +1509,61 @@ test("snapshot-mcp MCP 视觉请求复用笔迹合成图并在 64KiB 内分块�
     chunkCharacters: 48000,
   });
   await waitForCondition(
-    () => harness.scenario.readerVisualChunks.length === 2,
-    "reader visual chunks",
+    () => harness.scenario.readerVisualChunks.filter(
+      (chunk) => chunk.correlation === pullCorrelation,
+    ).length === 2,
+    "reader visual pull chunks",
   );
 
-  assert.equal(harness.scenario.readerVisualCaptureCalls, 1);
+  assert.equal(harness.scenario.readerVisualCompositeCaptureCalls, 1);
+  assert.equal(harness.scenario.readerVisualCaptureCalls, 0);
   assert.deepEqual(
-    harness.scenario.readerVisualCaptureTargets,
+    harness.scenario.readerVisualCompositeCaptureTargets,
     [{ page: 24 }],
   );
+  const pullChunks = harness.scenario.readerVisualChunks.filter(
+    (chunk) => chunk.correlation === pullCorrelation,
+  );
   assert.equal(
-    harness.scenario.readerVisualChunks.map((chunk) => chunk.data).join(""),
+    pullChunks.map((chunk) => chunk.data).join(""),
     b64,
   );
-  harness.scenario.readerVisualChunks.forEach((chunk, index) => {
+  pullChunks.forEach((chunk, index) => {
     assert.equal(chunk.type, "reader-visual");
     assert.equal(chunk.status, "chunk");
     assert.equal(chunk.chunkIndex, index);
     assert.equal(chunk.chunkCount, 2);
     assert.ok(Buffer.byteLength(JSON.stringify(chunk), "utf8") < 65536);
   });
+  harness.dispatchDocumentEvent("bw-reader-drawing-state", {
+    state: "stable",
+    file: "book.pdf",
+    page: 24,
+    drawingRevision,
+  });
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(harness.scenario.readerVisualCompositeCaptureCalls, 1);
+  assert.equal(
+    harness.scenario.readerVisualChunks.filter(
+      (chunk) => chunk.correlation.startsWith("publish-") &&
+        chunk.status === "chunk",
+    ).length,
+    2,
+  );
+  harness.dispatchDocumentEvent("bw-reader-drawing-state", {
+    state: "changed",
+    file: "book.pdf",
+    page: 24,
+    drawingRevision: null,
+  });
+  await waitForCondition(
+    () => harness.scenario.readerVisualChunks.some(
+      (chunk) => chunk.correlation.startsWith("publish-") &&
+        chunk.status === "unavailable" &&
+        chunk.drawingRevision === drawingRevision,
+    ),
+    "reader visual invalidation",
+  );
   assert.equal(
     harness.server.requests.some((request) => request.type === "start"),
     false,
@@ -1522,7 +1573,7 @@ test("snapshot-mcp MCP 视觉请求复用笔迹合成图并在 64KiB 内分块�
   await harness.api.contextSyncChanged();
 });
 
-test("snapshot-mcp 笔迹版本不匹配时拒绝取图且不调用截图原语", async () => {
+test("snapshot-mcp 笔迹版本不匹配时拒绝错误版本且不为它重复截图", async () => {
   const harness = createHarness({
     contextDeliveryMode: "snapshot-mcp",
     contextSyncEnabled: true,
@@ -1547,9 +1598,10 @@ test("snapshot-mcp 笔迹版本不匹配时拒绝取图且不调用截图原语"
   harness.api.setSelectedEngine("computer_client");
   await waitForRequest(harness, "context-open");
 
+  const correlation = "visual-fedcba9876543210fedcba9876543210";
   harness.server.emitReaderVisual({
     contract: VISUAL_DELIVERY_CONTRACT,
-    correlation: "visual-fedcba9876543210fedcba9876543210",
+    correlation,
     file: "book.pdf",
     page: 24,
     drawingRevision: "dr_bbbbbbbbbbbbbbbb",
@@ -1557,13 +1609,19 @@ test("snapshot-mcp 笔迹版本不匹配时拒绝取图且不调用截图原语"
     chunkCharacters: 48000,
   });
   await waitForCondition(
-    () => harness.scenario.readerVisualChunks.length === 1,
+    () => harness.scenario.readerVisualChunks.some(
+      (chunk) => chunk.correlation === correlation,
+    ),
     "reader visual unavailable",
   );
 
+  const unavailable = harness.scenario.readerVisualChunks.find(
+    (chunk) => chunk.correlation === correlation,
+  );
+  assert.equal(unavailable.status, "unavailable");
+  assert.equal(unavailable.data, "");
+  assert.ok(harness.scenario.readerVisualCompositeCaptureCalls <= 1);
   assert.equal(harness.scenario.readerVisualCaptureCalls, 0);
-  assert.equal(harness.scenario.readerVisualChunks[0].status, "unavailable");
-  assert.equal(harness.scenario.readerVisualChunks[0].data, "");
   assert.equal(
     harness.server.requests.some((request) => request.type === "start"),
     false,

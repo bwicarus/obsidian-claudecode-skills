@@ -204,10 +204,16 @@ internal static class LocalSnapshotPageImageRendererSelfTest
             "Content-Security-Policy"].ToString();
         Require(
             document.Contains(
-                "url.searchParams.set(\"asset\", \"current-page\")",
+                DirectSnapshotViewer.DrawingImagePath,
                 StringComparison.Ordinal)
             && document.Contains(
-                "if (key === pageImageKey) return;",
+                DirectSnapshotViewer.MarkdownPath,
+                StringComparison.Ordinal)
+            && !document.Contains(
+                "JSON.stringify(snapshot",
+                StringComparison.Ordinal)
+            && !document.Contains(
+                "snapshot.latestEvent",
                 StringComparison.Ordinal)
             && !document.Contains(
                 DirectSnapshotMarkdown.ReaderOrigin,

@@ -18,10 +18,17 @@ function makeEnv() {
   const store = {};
   const listeners = [];        // 记录挂了哪些监听器 → 验证「关闭时不挂监听」
   const posts = [];            // 记录每一次真实网络调用 → 验证节流合并
+  const events = [];           // 模块间状态边沿:changed/stable/empty
   const responses = [];
   let resolveNext = null;
   const g = {
-    posts, listeners, store,
+    posts, listeners, events, store,
+    CustomEvent: class CustomEvent {
+      constructor(type, init) {
+        this.type = type;
+        this.detail = init && init.detail;
+      }
+    },
     localStorage: {
       getItem: (k) => (k in store ? store[k] : null),
       setItem: (k, v) => { store[k] = String(v); },
@@ -33,6 +40,7 @@ function makeEnv() {
       createElement: () => ({ style: {}, set textContent(v) { this._t = v; }, get innerHTML() { return this._t || ''; } }),
       documentElement: { insertBefore: () => {} },
       head: { insertBefore: () => {} },
+      dispatchEvent: (event) => { events.push(event); return true; },
       addEventListener: (t) => listeners.push('doc:' + t),
       removeEventListener: (t) => {
         const i = listeners.indexOf('doc:' + t); if (i >= 0) listeners.splice(i, 1);
@@ -308,6 +316,12 @@ function check(name, cond, extra) {
     ref: { kind: 'drawing', file: 'a.pdf', page: 4, revision: 'dr_0123456789abcdef' }
   });
   RC.outgoing.drawingTouched('a.pdf', 4);
+  check('新笔发生时立即广播旧图失效',
+    env.events.some(function (e) {
+      return e.type === 'bw-reader-drawing-state' &&
+        e.detail && e.detail.state === 'changed' &&
+        e.detail.file === 'a.pdf' && e.detail.page === 4;
+    }), JSON.stringify(env.events));
   await sleep(1100);
   check('停笔后的首次状态查询已发出',
     env.posts.filter(function (p) { return /outgoing\/drawing/.test(p.url); }).length === 1);
@@ -323,6 +337,13 @@ function check(name, cond, extra) {
     RC.outgoing.lastDrawing() &&
     RC.outgoing.lastDrawing().drawingRevision === 'dr_0123456789abcdef',
     JSON.stringify(RC.outgoing.lastDrawing()));
+  check('停笔稳定后广播一次可发布版本',
+    env.events.some(function (e) {
+      return e.type === 'bw-reader-drawing-state' &&
+        e.detail && e.detail.state === 'stable' &&
+        e.detail.file === 'a.pdf' && e.detail.page === 4 &&
+        e.detail.drawingRevision === 'dr_0123456789abcdef';
+    }), JSON.stringify(env.events));
 
   // ── 7) 绘图区长按焦点:不干扰笔/擦除/滚动,可取消,目标失效不设 ──────────
   console.log('[7] 绘图区长按焦点');

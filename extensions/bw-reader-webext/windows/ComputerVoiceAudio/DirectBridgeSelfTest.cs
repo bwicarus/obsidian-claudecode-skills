@@ -5586,6 +5586,45 @@ internal static class DirectBridgeSelfTest
                 drawingPageEvent),
             CancellationToken.None).ConfigureAwait(false);
 
+        ReaderVisualDeliveryBroker publishedVisualBroker = new();
+        publishedVisualBroker.Attach(
+            "connection-published-visual",
+            (_, _) => Task.CompletedTask);
+        byte[] publishedJpeg = [0xff, 0xd8, 0xff, 0xd9];
+        string publishedBase64 =
+            Convert.ToBase64String(publishedJpeg);
+        ReaderVisualDeliveryAck publishedAck =
+            publishedVisualBroker.Accept(
+                "connection-published-visual",
+                new ReaderVisualDeliveryChunk(
+                    "publish-self-test",
+                    "chunk",
+                    "drawing.pdf",
+                    JsonSerializer.SerializeToElement(4),
+                    "dr_0123456789abcdef",
+                    ReaderVisualDeliveryProtocol.MimeType,
+                    0,
+                    1,
+                    (uint)publishedJpeg.Length,
+                    publishedBase64));
+        ReaderVisualCapture? publishedCapture =
+            await publishedVisualBroker.GetPublishedAsync(
+                new ReaderVisualDeliveryRequest(
+                    "visual-reader",
+                    "drawing.pdf",
+                    JsonValue.Create(4)!,
+                    "dr_0123456789abcdef"),
+                CancellationToken.None).ConfigureAwait(false);
+        Require(
+            publishedAck.Accepted
+            && publishedAck.Complete
+            && publishedCapture is not null
+            && publishedCapture.MimeType
+                == ReaderVisualDeliveryProtocol.MimeType
+            && publishedCapture.Data.SequenceEqual(publishedJpeg),
+            "direct-reader-visual-proactive-publish-populates-cache",
+            checks);
+
         int visualFetches = 0;
         ReaderVisualDeliveryRequest? capturedRequest = null;
         ReaderContextMcpServer drawingServer = new(
@@ -5697,7 +5736,7 @@ internal static class DirectBridgeSelfTest
                 ReaderContextMcpServer.DrawingImageToolName,
                 StringComparison.Ordinal)
             && drawingAssistantContext.Contains(
-                "PWA 已有的“当前原页＋笔迹”合成图",
+                "PWA 停笔稳定后发布的“当前原页＋笔迹＋页面附属内容”合成图",
                 StringComparison.Ordinal)
             && !drawingAssistantContext.Contains(
                 "{\"schema\"",
@@ -6064,7 +6103,8 @@ internal static class DirectBridgeSelfTest
             stable = true,
             page_context = new
             {
-                reason = "dwell",
+                reason = "selection",
+                selection = "高亮内容",
                 text =
                     "日本の歴史と食文化 1 P\n"
                     + "A\nR\nT\n1\n食\n文\n化\n概\n論\n"
@@ -6160,6 +6200,8 @@ internal static class DirectBridgeSelfTest
         JsonElement drawing = visual.GetProperty("drawing");
         JsonElement embeds = page.GetProperty("embeds");
         JsonElement viewport = page.GetProperty("viewport");
+        JsonElement foldedSelection =
+            folded.RootElement.GetProperty("selection");
         string markdownPath = DirectSnapshotMarkdown.PathFor(
             snapshotPath);
         string markdown = await File.ReadAllTextAsync(markdownPath)
@@ -6265,10 +6307,7 @@ internal static class DirectBridgeSelfTest
             checks);
         Require(
             markdown.Contains(
-                "### 协议高亮正文",
-                StringComparison.Ordinal)
-            && markdown.Contains(
-                "### 协议卡片与便签",
+                "## 本页高亮、卡片与附属内容",
                 StringComparison.Ordinal)
             && markdown.Contains(
                 "高亮内容",
@@ -6298,10 +6337,7 @@ internal static class DirectBridgeSelfTest
                 "f] l l l / A",
                 StringComparison.Ordinal)
             && markdown.Contains(
-                "### 协议高亮正文",
-                StringComparison.Ordinal)
-            && markdown.Contains(
-                "### 协议卡片与便签",
+                "## 本页高亮、卡片与附属内容",
                 StringComparison.Ordinal)
             && markdown.Contains(
                 "高亮内容",
@@ -6340,6 +6376,10 @@ internal static class DirectBridgeSelfTest
             checks);
         Require(
             page.GetProperty("kind").GetString() == "epub"
+            && foldedSelection.GetProperty("state").GetString()
+                == "active"
+            && foldedSelection.GetProperty("text").GetString()
+                == "高亮内容"
             && page.GetProperty("fallbackReason").ValueKind
                 == JsonValueKind.Null
             && visual.GetProperty("has_ink").GetBoolean()
@@ -6387,22 +6427,10 @@ internal static class DirectBridgeSelfTest
                 "图像引用必须同时可见",
                 StringComparison.Ordinal)
             && markdown.Contains(
-                "### 协议高亮正文",
-                StringComparison.Ordinal)
-            && markdown.Contains(
-                "### 协议卡片与便签",
+                "## 本页高亮、卡片与附属内容",
                 StringComparison.Ordinal)
             && markdown.Contains(
                 "卡片内容",
-                StringComparison.Ordinal)
-            && markdown.Contains(
-                "在 Reader 中打开原图",
-                StringComparison.Ordinal)
-            && markdown.Contains(
-                "不会携带跨站登录 Cookie",
-                StringComparison.Ordinal)
-            && !markdown.Contains(
-                "![当前页图]",
                 StringComparison.Ordinal)
             && markdown.Contains(
                 "⟦HIGHLIGHT literal⟧",
@@ -6414,6 +6442,9 @@ internal static class DirectBridgeSelfTest
                 "⟦CARD_START",
                 StringComparison.Ordinal)
             && markdown.Contains(
+                "reader_drawing_image",
+                StringComparison.Ordinal)
+            && !markdown.Contains(
                 "dr_0123456789abcdef",
                 StringComparison.Ordinal)
             && terminal.Contains(
@@ -6538,19 +6569,22 @@ internal static class DirectBridgeSelfTest
             viewerContext.Response.StatusCode
                 == StatusCodes.Status200OK
             && viewerHtml.Contains(
-                DirectSnapshotViewer.SnapshotPath,
+                DirectSnapshotViewer.MarkdownPath,
                 StringComparison.Ordinal)
             && viewerHtml.Contains(
-                "本地查看器的跨站内嵌请求可能没有登录 Cookie",
+                DirectSnapshotViewer.DrawingImagePath,
                 StringComparison.Ordinal)
             && viewerHtml.Contains(
-                "function parseReaderText",
+                "Reader 上下文接力",
                 StringComparison.Ordinal)
             && viewerHtml.Contains(
-                "AI 当前可用的页面正文",
+                "AI 需要判断圈画、箭头或重叠关系时会读取同一张图",
                 StringComparison.Ordinal)
-            && viewerHtml.Contains(
-                "最近收到的缓存正文（仅诊断，AI 当前不会使用）",
+            && !viewerHtml.Contains(
+                "JSON.stringify(snapshot.latestEvent",
+                StringComparison.Ordinal)
+            && !viewerHtml.Contains(
+                "drawingRevision",
                 StringComparison.Ordinal)
             && snapshotContext.Response.StatusCode
                 == StatusCodes.Status200OK

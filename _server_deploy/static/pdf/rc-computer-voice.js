@@ -103,6 +103,12 @@
   var snapshotLink = null;
   var snapshotLinkGeneration = 0;
   var snapshotReconnectTimer = null;
+  var readerVisualCache = null;
+  var readerVisualCaptureKey = null;
+  var readerVisualCapturePromise = null;
+  var readerVisualGeneration = 0;
+  var readerVisualPageKey = null;
+  var READER_DRAWING_STATE_EVENT = "bw-reader-drawing-state";
   var MICROPHONE_WORKLET =
     'class BWMicCapture extends AudioWorkletProcessor{' +
     'process(i){var c=i[0]&&i[0][0];if(c)this.port.postMessage(c.slice(0));' +
@@ -1332,6 +1338,7 @@
     this.closingPromise = null;
     this.closeResolve = null;
     this.closeTimer = null;
+    this.readerVisualPublishedKey = null;
   }
 
   DirectSocket.prototype.setOptions = function (options) {
@@ -1636,6 +1643,338 @@
     );
   }
 
+  function readerVisualIdentityKey(file, page, drawingRevision) {
+    return String(file) + "\n" + String(page) + "\n" +
+      String(drawingRevision);
+  }
+
+  function readerVisualRequestKey(request) {
+    return readerVisualIdentityKey(
+      request.file,
+      request.page,
+      request.drawingRevision
+    );
+  }
+
+  function readerVisualCacheMatches(request) {
+    return !!(
+      readerVisualCache &&
+      readerVisualCache.key === readerVisualRequestKey(request)
+    );
+  }
+
+  function currentReaderVisualChannel() {
+    if (contextDeliveryMode !== CONTEXT_DELIVERY_SNAPSHOT) return null;
+    if (
+      snapshotLink &&
+      !snapshotLink.stopped &&
+      directChannelLive(snapshotLink.channel)
+    ) {
+      return snapshotLink.channel;
+    }
+    if (
+      active &&
+      active.started &&
+      active.contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT &&
+      directChannelLive(active.channel)
+    ) {
+      return active.channel;
+    }
+    return null;
+  }
+
+  function captureReaderVisual(request) {
+    function captureLegacy() {
+      if (
+        RC.captureInkRegion &&
+        typeof RC.captureInkRegion === "function"
+      ) {
+        return Promise.resolve(RC.captureInkRegion({
+          page: request.page,
+        })).then(function (shot) {
+          if (shot) return shot;
+          return RC.captureView && typeof RC.captureView === "function"
+            ? RC.captureView()
+            : null;
+        });
+      }
+      return RC.captureView && typeof RC.captureView === "function"
+        ? RC.captureView()
+        : null;
+    }
+    if (
+      RC.capturePageComposite &&
+      typeof RC.capturePageComposite === "function"
+    ) {
+      return Promise.resolve(RC.capturePageComposite({
+        page: request.page,
+      })).then(function (shot) {
+        return shot || captureLegacy();
+      }, function () {
+        return captureLegacy();
+      });
+    }
+    return Promise.resolve(captureLegacy());
+  }
+
+  function ensureReaderVisual(request) {
+    var key = readerVisualRequestKey(request);
+    if (readerVisualCacheMatches(request)) {
+      return Promise.resolve(readerVisualCache.shot);
+    }
+    if (
+      readerVisualCapturePromise &&
+      readerVisualCaptureKey === key
+    ) {
+      return readerVisualCapturePromise;
+    }
+    var generation = readerVisualGeneration;
+    var capturePromise = Promise.resolve().then(function () {
+      var current = localActiveReadingSnapshot();
+      if (
+        contextDeliveryMode !== CONTEXT_DELIVERY_SNAPSHOT ||
+        !current ||
+        current.file !== request.file ||
+        !sameActiveScalar(current.page, request.page) ||
+        !readerVisualDrawingMatches(request)
+      ) {
+        return null;
+      }
+      return captureReaderVisual(request);
+    }).then(function (shot) {
+      var latest = localActiveReadingSnapshot();
+      if (
+        generation !== readerVisualGeneration ||
+        !latest ||
+        latest.file !== request.file ||
+        !sameActiveScalar(latest.page, request.page) ||
+        !readerVisualDrawingMatches(request)
+      ) {
+        return null;
+      }
+      if (!shot) return null;
+      readerVisualCache = {
+        key: key,
+        file: request.file,
+        page: request.page,
+        drawingRevision: request.drawingRevision,
+        shot: shot,
+      };
+      return shot;
+    }).finally(function () {
+      if (readerVisualCapturePromise === capturePromise) {
+        readerVisualCapturePromise = null;
+        readerVisualCaptureKey = null;
+      }
+    });
+    readerVisualCaptureKey = key;
+    readerVisualCapturePromise = capturePromise;
+    return capturePromise;
+  }
+
+  DirectSocket.prototype._sendReaderVisualShot = function (
+    request,
+    shot
+  ) {
+    var self = this;
+    var b64 = shot && shot.media_type === "image/jpeg"
+      ? shot.b64
+      : "";
+    if (
+      typeof b64 !== "string" ||
+      !b64 ||
+      b64.length % 4 !== 0 ||
+      b64.length > (
+        READER_VISUAL_CHUNK_CHARS * READER_VISUAL_MAX_CHUNKS
+      ) ||
+      !/^[A-Za-z0-9+/]+={0,2}$/.test(b64)
+    ) {
+      return self._declineReaderVisual(request);
+    }
+    var padding = b64.endsWith("==")
+      ? 2
+      : b64.endsWith("=")
+        ? 1
+        : 0;
+    var totalBytes = (b64.length / 4) * 3 - padding;
+    var chunkCount = Math.ceil(
+      b64.length / READER_VISUAL_CHUNK_CHARS
+    );
+    if (
+      totalBytes < 1 ||
+      totalBytes > request.maxBytes ||
+      chunkCount < 1 ||
+      chunkCount > READER_VISUAL_MAX_CHUNKS
+    ) {
+      return self._declineReaderVisual(request);
+    }
+    var chain = Promise.resolve();
+    for (var index = 0; index < chunkCount; index += 1) {
+      (function (chunkIndex) {
+        var data = b64.slice(
+          chunkIndex * READER_VISUAL_CHUNK_CHARS,
+          (chunkIndex + 1) * READER_VISUAL_CHUNK_CHARS
+        );
+        chain = chain.then(function () {
+          return self._sendReaderVisualPart(request, {
+            status: "chunk",
+            mimeType: "image/jpeg",
+            chunkIndex: chunkIndex,
+            chunkCount: chunkCount,
+            totalBytes: totalBytes,
+            data: data,
+          });
+        });
+      })(index);
+    }
+    return chain;
+  };
+
+  function proactiveReaderVisualRequest(cache) {
+    return {
+      contract: READER_VISUAL_DELIVERY_CONTRACT,
+      correlation: randomId("publish"),
+      file: cache.file,
+      page: cache.page,
+      drawingRevision: cache.drawingRevision,
+      maxBytes: READER_VISUAL_MAX_BYTES,
+      chunkCharacters: READER_VISUAL_CHUNK_CHARS,
+    };
+  }
+
+  function publishCachedReaderVisual(channel) {
+    var cache = readerVisualCache;
+    if (
+      !cache ||
+      !channel ||
+      !directChannelLive(channel) ||
+      channel.readerVisualPublishedKey === cache.key
+    ) {
+      return Promise.resolve(null);
+    }
+    var request = proactiveReaderVisualRequest(cache);
+    return channel._sendReaderVisualShot(request, cache.shot).then(function () {
+      if (
+        readerVisualCache === cache &&
+        directChannelLive(channel)
+      ) {
+        channel.readerVisualPublishedKey = cache.key;
+      }
+      return cache;
+    }).catch(function () {
+      // 缓存仍保留；重连或 AI 随后的按需请求可以再次取用。
+      return null;
+    });
+  }
+
+  function invalidateReaderVisual(sendRemote) {
+    var cache = readerVisualCache;
+    var channel = currentReaderVisualChannel();
+    readerVisualGeneration += 1;
+    readerVisualCache = null;
+    readerVisualCaptureKey = null;
+    readerVisualCapturePromise = null;
+    if (
+      sendRemote !== true ||
+      !cache ||
+      !channel ||
+      !directChannelLive(channel)
+    ) {
+      return;
+    }
+    var request = proactiveReaderVisualRequest(cache);
+    channel._declineReaderVisual(request).catch(function () {});
+    if (channel.readerVisualPublishedKey === cache.key) {
+      channel.readerVisualPublishedKey = null;
+    }
+  }
+
+  function observeReaderVisualPage(current) {
+    if (!current) return;
+    var pageKey = String(current.file) + "\n" + String(current.page);
+    if (readerVisualPageKey === null) {
+      readerVisualPageKey = pageKey;
+      return;
+    }
+    if (readerVisualPageKey === pageKey) return;
+    readerVisualPageKey = pageKey;
+    invalidateReaderVisual(true);
+  }
+
+  function readerVisualStableRequest(detail) {
+    if (
+      !plainObject(detail) ||
+      typeof detail.file !== "string" ||
+      !detail.file ||
+      (
+        typeof detail.page !== "number" &&
+        typeof detail.page !== "string"
+      ) ||
+      typeof detail.drawingRevision !== "string"
+    ) {
+      return null;
+    }
+    try {
+      return normalizeReaderVisualRequest({
+        contract: READER_VISUAL_DELIVERY_CONTRACT,
+        correlation: randomId("publish"),
+        file: detail.file,
+        page: detail.page,
+        drawingRevision: detail.drawingRevision,
+        maxBytes: READER_VISUAL_MAX_BYTES,
+        chunkCharacters: READER_VISUAL_CHUNK_CHARS,
+      });
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function prepareStableReaderVisual(detail) {
+    var request = readerVisualStableRequest(detail);
+    if (!request) return;
+    // rc-core 在确认响应的 then 中发事件，its finally 才会清 inflight。
+    // 让出一个任务后再校验，避免把刚确认的稳定笔迹误判成仍在绘制。
+    setTimeout(function () {
+      ensureReaderVisual(request).then(function (shot) {
+        if (!shot || !readerVisualCacheMatches(request)) return;
+        return publishCachedReaderVisual(currentReaderVisualChannel());
+      }).catch(function () {});
+    }, 0);
+  }
+
+  function primeReaderVisualFromOutgoing() {
+    var drawing = null;
+    try {
+      drawing = RC.outgoing &&
+        typeof RC.outgoing.lastDrawing === "function"
+        ? RC.outgoing.lastDrawing()
+        : null;
+    } catch (_) {}
+    if (
+      plainObject(drawing) &&
+      drawing.stable === true &&
+      drawing.empty === false
+    ) {
+      prepareStableReaderVisual(drawing);
+    } else {
+      publishCachedReaderVisual(currentReaderVisualChannel());
+    }
+  }
+
+  if (document && typeof document.addEventListener === "function") {
+    document.addEventListener(READER_DRAWING_STATE_EVENT, function (event) {
+      var detail = event && event.detail;
+      if (!plainObject(detail)) return;
+      if (detail.state === "changed" || detail.state === "empty") {
+        invalidateReaderVisual(true);
+        return;
+      }
+      if (detail.state === "stable") {
+        prepareStableReaderVisual(detail);
+      }
+    });
+  }
+
   DirectSocket.prototype._handleReaderVisual = function (rawPayload) {
     var request = normalizeReaderVisualRequest(rawPayload);
     var self = this;
@@ -1644,85 +1983,10 @@
       return;
     }
     this.readerVisualBusy = true;
-    Promise.resolve().then(function () {
-      var current = localActiveReadingSnapshot();
-      if (
-        contextDeliveryMode !== CONTEXT_DELIVERY_SNAPSHOT ||
-        !current ||
-        current.file !== request.file ||
-        !sameActiveScalar(current.page, request.page) ||
-        !readerVisualDrawingMatches(request) ||
-        !RC.captureInkRegion ||
-        typeof RC.captureInkRegion !== "function"
-      ) {
-        return null;
-      }
-      return Promise.resolve(RC.captureInkRegion({
-        page: request.page,
-      })).then(function (shot) {
-        var latest = localActiveReadingSnapshot();
-        if (
-          !latest ||
-          latest.file !== request.file ||
-          !sameActiveScalar(latest.page, request.page) ||
-          !readerVisualDrawingMatches(request)
-        ) {
-          return null;
-        }
-        return shot;
-      });
-    }).then(function (shot) {
-      var b64 = shot && shot.media_type === "image/jpeg"
-        ? shot.b64
-        : "";
-      if (
-        typeof b64 !== "string" ||
-        !b64 ||
-        b64.length % 4 !== 0 ||
-        b64.length > (
-          READER_VISUAL_CHUNK_CHARS * READER_VISUAL_MAX_CHUNKS
-        ) ||
-        !/^[A-Za-z0-9+/]+={0,2}$/.test(b64)
-      ) {
-        return self._declineReaderVisual(request);
-      }
-      var padding = b64.endsWith("==")
-        ? 2
-        : b64.endsWith("=")
-          ? 1
-          : 0;
-      var totalBytes = (b64.length / 4) * 3 - padding;
-      var chunkCount = Math.ceil(
-        b64.length / READER_VISUAL_CHUNK_CHARS
-      );
-      if (
-        totalBytes < 1 ||
-        totalBytes > request.maxBytes ||
-        chunkCount < 1 ||
-        chunkCount > READER_VISUAL_MAX_CHUNKS
-      ) {
-        return self._declineReaderVisual(request);
-      }
-      var chain = Promise.resolve();
-      for (var index = 0; index < chunkCount; index += 1) {
-        (function (chunkIndex) {
-          var data = b64.slice(
-            chunkIndex * READER_VISUAL_CHUNK_CHARS,
-            (chunkIndex + 1) * READER_VISUAL_CHUNK_CHARS
-          );
-          chain = chain.then(function () {
-            return self._sendReaderVisualPart(request, {
-              status: "chunk",
-              mimeType: "image/jpeg",
-              chunkIndex: chunkIndex,
-              chunkCount: chunkCount,
-              totalBytes: totalBytes,
-              data: data,
-            });
-          });
-        })(index);
-      }
-      return chain;
+    ensureReaderVisual(request).then(function (shot) {
+      return shot
+        ? self._sendReaderVisualShot(request, shot)
+        : self._declineReaderVisual(request);
     }).catch(function () {
       // The MCP call is read-only and can still return the text snapshot.
       // Never retry capture or send a START from this side channel.
@@ -3746,6 +4010,7 @@
       scheduleActiveReadingPump(state, ACTIVE_READING_POLL_MS);
       return;
     }
+    observeReaderVisualPage(current);
     var signature = JSON.stringify(current);
     var now = Date.now();
     if (
@@ -3885,6 +4150,7 @@
     ) {
       return Promise.resolve(null);
     }
+    invalidateReaderVisual(true);
     return state.channel.request("context-clear", {
       sessionId: state.sessionId,
     }).then(function (value) {
@@ -4070,6 +4336,7 @@
         if (snapshotLink !== state || state.stopped) return null;
         startContextPump(state);
         startActiveReadingPump(state);
+        primeReaderVisualFromOutgoing();
         emitStatus({
           state: "context-ready",
           message: "Windows 本地 Reader 快照已连接",
@@ -4563,6 +4830,7 @@
           contextSyncEnabled()
         ) {
           startActiveReadingPump(state);
+          primeReaderVisualFromOutgoing();
         }
       }
       if (state.surface.context.state !== "running") {

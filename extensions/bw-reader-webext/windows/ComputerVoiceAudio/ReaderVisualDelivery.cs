@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -334,8 +335,11 @@ internal sealed class ReaderVisualDeliveryException : Exception
 internal sealed class ReaderVisualDeliveryBroker
 {
     private const int MaximumPendingDeliveries = 1;
+    private const string PublishedCorrelationPrefix = "publish-";
     private static readonly TimeSpan DeliveryTimeout =
         TimeSpan.FromSeconds(12);
+    private static readonly TimeSpan PublishedWaitTimeout =
+        TimeSpan.FromSeconds(4);
 
     private sealed class PendingDelivery
     {
@@ -358,9 +362,28 @@ internal sealed class ReaderVisualDeliveryBroker
         internal uint? TotalBytes { get; set; }
     }
 
+    private sealed class PublishedDelivery
+    {
+        internal PublishedDelivery(ReaderVisualDeliveryRequest request)
+        {
+            Request = request;
+        }
+
+        internal ReaderVisualDeliveryRequest Request { get; }
+        internal StringBuilder Base64 { get; } = new();
+        internal uint ExpectedChunkIndex { get; set; }
+        internal uint? ChunkCount { get; set; }
+        internal uint? TotalBytes { get; set; }
+    }
+
     private readonly object _gate = new();
     private readonly Dictionary<string, PendingDelivery> _pending =
         new(StringComparer.Ordinal);
+    private PublishedDelivery? _publishedPending;
+    private ReaderVisualDeliveryRequest? _publishedRequest;
+    private ReaderVisualCapture? _publishedCapture;
+    private TaskCompletionSource<bool> _publishedChanged =
+        NewPublishedSignal();
     private string? _connectionId;
     private Func<object, CancellationToken, Task>? _sendAsync;
 
@@ -409,99 +432,162 @@ internal sealed class ReaderVisualDeliveryBroker
     {
         PendingDelivery pending;
         ReaderVisualCapture? completed = null;
+        TaskCompletionSource<bool>? publishedChanged = null;
+        ReaderVisualDeliveryAck? publishedAck = null;
         lock (_gate)
         {
-            if (
-                !string.Equals(
-                    _connectionId,
-                    connectionId,
-                    StringComparison.Ordinal)
-                || !_pending.TryGetValue(
-                    chunk.Correlation,
-                    out pending!)
-            )
+            if (!string.Equals(
+                _connectionId,
+                connectionId,
+                StringComparison.Ordinal))
             {
                 throw ProtocolFailure(
                     "BW_READER_VISUAL_NOT_PENDING",
                     "Reader 视觉请求不存在或已过期");
             }
-            RequireIdentity(pending.Request, chunk);
-            if (chunk.Status == "unavailable")
+            if (!_pending.TryGetValue(
+                chunk.Correlation,
+                out pending!))
             {
-                _pending.Remove(chunk.Correlation);
-                pending.Completion.TrySetResult(null);
-                return new ReaderVisualDeliveryAck(
-                    chunk.Correlation,
-                    0,
-                    Accepted: true,
-                    Complete: true);
-            }
-            if (
-                chunk.ChunkIndex != pending.ExpectedChunkIndex
-                || (
-                    pending.ChunkCount is uint count
-                    && count != chunk.ChunkCount
-                )
-                || (
-                    pending.TotalBytes is uint expectedBytes
-                    && expectedBytes != chunk.TotalBytes
-                )
-            )
-            {
-                throw ProtocolFailure(
-                    "BW_READER_VISUAL_SEQUENCE_INVALID",
-                    "Reader 视觉分块顺序或元数据不一致");
-            }
-            pending.ChunkCount ??= chunk.ChunkCount;
-            pending.TotalBytes ??= chunk.TotalBytes;
-            pending.Base64.Append(chunk.Data);
-            pending.ExpectedChunkIndex += 1;
-            if (
-                pending.Base64.Length
-                    > ReaderVisualDeliveryProtocol
-                        .MaximumImageBytes * 4 / 3 + 4
-            )
-            {
-                throw ProtocolFailure(
-                    "BW_READER_VISUAL_CAPACITY",
-                    "Reader 视觉数据超过大小上限");
-            }
-            if (pending.ExpectedChunkIndex == chunk.ChunkCount)
-            {
-                byte[] bytes;
-                try
-                {
-                    bytes = Convert.FromBase64String(
-                        pending.Base64.ToString());
-                }
-                catch (FormatException exception)
+                if (!chunk.Correlation.StartsWith(
+                    PublishedCorrelationPrefix,
+                    StringComparison.Ordinal))
                 {
                     throw ProtocolFailure(
-                        "BW_READER_VISUAL_SCHEMA_INVALID",
-                        "Reader 视觉 base64 无效",
-                        exception);
+                        "BW_READER_VISUAL_NOT_PENDING",
+                        "Reader 视觉请求不存在或已过期");
                 }
-                if (
-                    bytes.Length != chunk.TotalBytes
-                    || !IsJpeg(bytes)
-                )
-                {
-                    throw ProtocolFailure(
-                        "BW_READER_VISUAL_IMAGE_INVALID",
-                        "Reader 视觉 JPEG 无效");
-                }
-                completed = new ReaderVisualCapture(
-                    ReaderVisualDeliveryProtocol.MimeType,
-                    bytes);
-                _pending.Remove(chunk.Correlation);
-                pending.Completion.TrySetResult(completed);
+                publishedAck = AcceptPublishedLocked(
+                    chunk,
+                    out publishedChanged);
             }
+            else
+            {
+                RequireIdentity(pending.Request, chunk);
+                if (chunk.Status == "unavailable")
+                {
+                    _pending.Remove(chunk.Correlation);
+                    pending.Completion.TrySetResult(null);
+                    completed = null;
+                }
+                else
+                {
+                    if (
+                        chunk.ChunkIndex != pending.ExpectedChunkIndex
+                        || (
+                            pending.ChunkCount is uint count
+                            && count != chunk.ChunkCount
+                        )
+                        || (
+                            pending.TotalBytes is uint expectedBytes
+                            && expectedBytes != chunk.TotalBytes
+                        )
+                    )
+                    {
+                        throw ProtocolFailure(
+                            "BW_READER_VISUAL_SEQUENCE_INVALID",
+                            "Reader 视觉分块顺序或元数据不一致");
+                    }
+                    pending.ChunkCount ??= chunk.ChunkCount;
+                    pending.TotalBytes ??= chunk.TotalBytes;
+                    pending.Base64.Append(chunk.Data);
+                    pending.ExpectedChunkIndex += 1;
+                    if (
+                        pending.Base64.Length
+                            > ReaderVisualDeliveryProtocol
+                                .MaximumImageBytes * 4 / 3 + 4
+                    )
+                    {
+                        throw ProtocolFailure(
+                            "BW_READER_VISUAL_CAPACITY",
+                            "Reader 视觉数据超过大小上限");
+                    }
+                    if (
+                        pending.ExpectedChunkIndex
+                        == chunk.ChunkCount
+                    )
+                    {
+                        byte[] bytes;
+                        try
+                        {
+                            bytes = Convert.FromBase64String(
+                                pending.Base64.ToString());
+                        }
+                        catch (FormatException exception)
+                        {
+                            throw ProtocolFailure(
+                                "BW_READER_VISUAL_SCHEMA_INVALID",
+                                "Reader 视觉 base64 无效",
+                                exception);
+                        }
+                        if (
+                            bytes.Length != chunk.TotalBytes
+                            || !IsJpeg(bytes)
+                        )
+                        {
+                            throw ProtocolFailure(
+                                "BW_READER_VISUAL_IMAGE_INVALID",
+                                "Reader 视觉 JPEG 无效");
+                        }
+                        completed = new ReaderVisualCapture(
+                            ReaderVisualDeliveryProtocol.MimeType,
+                            bytes);
+                        _pending.Remove(chunk.Correlation);
+                        pending.Completion.TrySetResult(completed);
+                    }
+                }
+            }
+        }
+        publishedChanged?.TrySetResult(true);
+        if (publishedAck is not null)
+        {
+            return publishedAck;
         }
         return new ReaderVisualDeliveryAck(
             chunk.Correlation,
             chunk.ChunkIndex,
             Accepted: true,
-            Complete: completed is not null);
+            Complete:
+                chunk.Status == "unavailable"
+                || completed is not null);
+    }
+
+    internal async Task<ReaderVisualCapture?> GetPublishedAsync(
+        ReaderVisualDeliveryRequest request,
+        CancellationToken cancellationToken)
+    {
+        Stopwatch elapsed = Stopwatch.StartNew();
+        while (elapsed.Elapsed < PublishedWaitTimeout)
+        {
+            Task changed;
+            lock (_gate)
+            {
+                ReaderVisualCapture? current =
+                    MatchingPublishedLocked(request);
+                if (current is not null)
+                {
+                    return current;
+                }
+                changed = _publishedChanged.Task;
+            }
+            TimeSpan remaining =
+                PublishedWaitTimeout - elapsed.Elapsed;
+            if (remaining <= TimeSpan.Zero)
+            {
+                break;
+            }
+            try
+            {
+                await changed.WaitAsync(
+                    remaining,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (TimeoutException)
+            {
+                return null;
+            }
+        }
+        return null;
     }
 
     internal async Task<ReaderVisualCapture?> RequestAsync(
@@ -623,6 +709,163 @@ internal sealed class ReaderVisualDeliveryBroker
                 "Reader 视觉页或笔迹版本与请求不一致");
         }
     }
+
+    private ReaderVisualDeliveryAck AcceptPublishedLocked(
+        ReaderVisualDeliveryChunk chunk,
+        out TaskCompletionSource<bool>? changed)
+    {
+        changed = null;
+        ReaderVisualDeliveryRequest incoming = new(
+            chunk.Correlation,
+            chunk.File,
+            JsonNode.Parse(chunk.Page.GetRawText())
+                ?? throw ProtocolFailure(
+                    "BW_READER_VISUAL_SCHEMA_INVALID",
+                    "Reader 视觉 page 无效"),
+            chunk.DrawingRevision);
+        if (chunk.Status == "unavailable")
+        {
+            _publishedPending = null;
+            if (
+                _publishedRequest is not null
+                && SameIdentity(_publishedRequest, incoming)
+            )
+            {
+                _publishedRequest = null;
+                _publishedCapture = null;
+                changed = RotatePublishedSignalLocked();
+            }
+            return new ReaderVisualDeliveryAck(
+                chunk.Correlation,
+                0,
+                Accepted: true,
+                Complete: true);
+        }
+
+        if (
+            _publishedPending is null
+            || !string.Equals(
+                _publishedPending.Request.Correlation,
+                chunk.Correlation,
+                StringComparison.Ordinal)
+        )
+        {
+            if (chunk.ChunkIndex != 0)
+            {
+                throw ProtocolFailure(
+                    "BW_READER_VISUAL_SEQUENCE_INVALID",
+                    "Reader 主动视觉发布必须从首块开始");
+            }
+            _publishedPending = new PublishedDelivery(incoming);
+        }
+        PublishedDelivery pending = _publishedPending;
+        RequireIdentity(pending.Request, chunk);
+        if (
+            chunk.ChunkIndex != pending.ExpectedChunkIndex
+            || (
+                pending.ChunkCount is uint count
+                && count != chunk.ChunkCount
+            )
+            || (
+                pending.TotalBytes is uint expectedBytes
+                && expectedBytes != chunk.TotalBytes
+            )
+        )
+        {
+            throw ProtocolFailure(
+                "BW_READER_VISUAL_SEQUENCE_INVALID",
+                "Reader 主动视觉分块顺序或元数据不一致");
+        }
+        pending.ChunkCount ??= chunk.ChunkCount;
+        pending.TotalBytes ??= chunk.TotalBytes;
+        pending.Base64.Append(chunk.Data);
+        pending.ExpectedChunkIndex += 1;
+        if (
+            pending.Base64.Length
+            > ReaderVisualDeliveryProtocol.MaximumImageBytes * 4 / 3 + 4
+        )
+        {
+            _publishedPending = null;
+            throw ProtocolFailure(
+                "BW_READER_VISUAL_CAPACITY",
+                "Reader 主动视觉数据超过大小上限");
+        }
+        if (pending.ExpectedChunkIndex != chunk.ChunkCount)
+        {
+            return new ReaderVisualDeliveryAck(
+                chunk.Correlation,
+                chunk.ChunkIndex,
+                Accepted: true,
+                Complete: false);
+        }
+
+        byte[] bytes;
+        try
+        {
+            bytes = Convert.FromBase64String(
+                pending.Base64.ToString());
+        }
+        catch (FormatException exception)
+        {
+            _publishedPending = null;
+            throw ProtocolFailure(
+                "BW_READER_VISUAL_SCHEMA_INVALID",
+                "Reader 主动视觉 base64 无效",
+                exception);
+        }
+        if (
+            bytes.Length != chunk.TotalBytes
+            || !IsJpeg(bytes)
+        )
+        {
+            _publishedPending = null;
+            throw ProtocolFailure(
+                "BW_READER_VISUAL_IMAGE_INVALID",
+                "Reader 主动视觉 JPEG 无效");
+        }
+        _publishedRequest = pending.Request;
+        _publishedCapture = new ReaderVisualCapture(
+            ReaderVisualDeliveryProtocol.MimeType,
+            bytes);
+        _publishedPending = null;
+        changed = RotatePublishedSignalLocked();
+        return new ReaderVisualDeliveryAck(
+            chunk.Correlation,
+            chunk.ChunkIndex,
+            Accepted: true,
+            Complete: true);
+    }
+
+    private ReaderVisualCapture? MatchingPublishedLocked(
+        ReaderVisualDeliveryRequest request) =>
+        _publishedRequest is not null
+        && _publishedCapture is not null
+        && SameIdentity(_publishedRequest, request)
+            ? _publishedCapture
+            : null;
+
+    private TaskCompletionSource<bool> RotatePublishedSignalLocked()
+    {
+        TaskCompletionSource<bool> previous = _publishedChanged;
+        _publishedChanged = NewPublishedSignal();
+        return previous;
+    }
+
+    private static TaskCompletionSource<bool> NewPublishedSignal() =>
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    private static bool SameIdentity(
+        ReaderVisualDeliveryRequest left,
+        ReaderVisualDeliveryRequest right) =>
+        string.Equals(
+            left.File,
+            right.File,
+            StringComparison.Ordinal)
+        && JsonNode.DeepEquals(left.Page, right.Page)
+        && string.Equals(
+            left.DrawingRevision,
+            right.DrawingRevision,
+            StringComparison.Ordinal);
 
     private static bool IsJpeg(byte[] bytes) =>
         bytes.Length >= 4

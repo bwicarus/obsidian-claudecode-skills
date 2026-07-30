@@ -259,8 +259,25 @@
   // 与 ctxSync 共用同一把总开关:关着时一个字节都不发(用户已拍板的零开销约定)。
   var _og = { focus: null, drawTimer: null, drawPend: null, inflight: false };
   var _OG_DRAW_MS = 1000;   // 绘图停手约 1s 才提交 —— 逐笔发送会把服务端和网络都打满
+  var _OG_DRAW_EVENT = 'bw-reader-drawing-state';
 
   function _ogSig(kind, ref) { return kind + '|' + JSON.stringify(ref); }
+  function _ogEmitDrawing(state, value) {
+    try {
+      if (!document || !document.dispatchEvent || !window.CustomEvent) return;
+      document.dispatchEvent(new CustomEvent(_OG_DRAW_EVENT, {
+        detail: {
+          state: state,
+          file: value && value.file,
+          page: value && value.page,
+          drawingRevision: (
+            value && typeof value.drawingRevision === 'string'
+              ? value.drawingRevision : null
+          )
+        }
+      }));
+    } catch (e) {}
+  }
 
   // ── 出向事件的身份归一(与 ctxSync 同源)────────────────────────────────
   // 问题:focus/drawing 用的是宿主直接给的 ref —— 合并书里那是 vbook 全局身份;
@@ -316,6 +333,13 @@
       .then(function (r) { return r.json(); })
       .then(function (d) {
         _og.lastDrawing = d ? Object.assign({ file: q.file }, d) : null;
+        if (d && d.empty === true) {
+          _ogEmitDrawing('empty', _og.lastDrawing);
+        } else if (d && d.stable === true && d.drawingRevision) {
+          // 第一次 pending + 一次有界稳定确认，总计约停笔 2s。稳定边沿只
+          // 发状态事件；PWA→Windows 的图像捕获/传输由电脑语音模块拥有。
+          _ogEmitDrawing('stable', _og.lastDrawing);
+        }
         // 这一请求可能是服务端第一次见到新墨迹,只会启动稳定计时并返回 pending。
         // 停笔后仅再确认一次即可取得 stable revision；不能无限轮询。
         confirmStable = !!(d && d.ok !== false && d.empty === false &&
@@ -397,6 +421,13 @@
       if (!_ctxOn() || !file) return false;
       var canon = _ogCanonicalRef({ file: file, page: page });
       if (!canon) return false;                              // fail closed
+      // 新笔/擦除一发生，上一张稳定合成图立即失效；真正截图仍等约 2s
+      // 稳定确认，绝不逐笔捕获或逐笔发送大图。
+      _ogEmitDrawing('changed', {
+        file: canon.file,
+        page: canon.page,
+        drawingRevision: null
+      });
       _og.drawPend = { file: canon.file, page: canon.page };
       _ogSchedDraw(_OG_DRAW_MS);
       return true;

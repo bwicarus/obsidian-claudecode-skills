@@ -62,7 +62,14 @@ internal static class DirectSnapshotMarkdown
         }
     }
 
-    internal static string Render(JsonObject snapshot)
+    internal static string Render(JsonObject snapshot) =>
+        ReaderContextMcpServer.BuildAssistantContext(
+            snapshot,
+            drawingToolAvailable: true);
+
+    // Kept only as a rollback reference while the local viewer and MCP use
+    // the same ordered context relay. It is never served.
+    private static string RenderLegacy(JsonObject snapshot)
     {
         StringBuilder output = new();
         output.AppendLine("# Reader 实时快照");
@@ -1467,6 +1474,8 @@ internal sealed class DirectSnapshotViewer : IDisposable
         "/reader-context-snapshot.json";
     internal const string MarkdownPath =
         "/reader-context-live.md";
+    internal const string DrawingImagePath =
+        "/reader-context-current-drawing.jpg";
     internal const string CurrentPageImageAsset =
         "current-page";
     internal const string CurrentPageImageUrl =
@@ -2028,12 +2037,256 @@ internal sealed class DirectSnapshotViewer : IDisposable
             </html>
             """);
 
+    private static readonly byte[] RelayViewerDocument =
+        Encoding.UTF8.GetBytes(
+            """
+            <!doctype html>
+            <html lang="zh-CN">
+            <head>
+              <meta charset="utf-8">
+              <meta name="viewport" content="width=device-width,initial-scale=1">
+              <title>Reader 上下文接力</title>
+              <style>
+                :root {
+                  color-scheme: dark;
+                  font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
+                  background: #0b1020;
+                  color: #e8edf8;
+                }
+                * { box-sizing: border-box; }
+                body { margin: 0; min-height: 100vh; background:
+                  radial-gradient(circle at top right, #173464 0, transparent 36rem),
+                  #0b1020; }
+                header {
+                  position: sticky; top: 0; z-index: 2;
+                  display: flex; gap: 1rem; align-items: center;
+                  justify-content: space-between;
+                  padding: .9rem 1.25rem;
+                  background: rgba(9, 14, 29, .94);
+                  border-bottom: 1px solid #263655;
+                  backdrop-filter: blur(12px);
+                }
+                header h1 { margin: 0; font-size: 1.1rem; }
+                a { color: #8ec5ff; }
+                .pill { border-radius: 999px; padding: .25rem .7rem;
+                  background: #293755; color: #dce8ff; font-size: .82rem; }
+                .pill.ready { background: #0e614c; }
+                .pill.error { background: #7b2431; }
+                main { width: min(1050px, 100%); margin: 0 auto;
+                  padding: 1rem; display: grid; gap: 1rem; }
+                section { border: 1px solid #263655; border-radius: 14px;
+                  padding: 1.1rem 1.25rem;
+                  background: rgba(18, 26, 47, .93);
+                  box-shadow: 0 12px 36px rgba(0,0,0,.24); }
+                #relay h1 { font-size: 1.35rem; margin: 0 0 1rem; }
+                #relay h2 { color: #bad6ff; font-size: 1.05rem;
+                  margin: 1.4rem 0 .65rem; }
+                #relay p { margin: .45rem 0; line-height: 1.7;
+                  white-space: pre-wrap; overflow-wrap: anywhere; }
+                #relay blockquote { margin: .6rem 0; padding: .65rem .9rem;
+                  border-left: 4px solid #6ba8ef; border-radius: 6px;
+                  color: #c7d9f5; background: #0b1427; }
+                #relay ul { margin: .4rem 0; padding-left: 1.35rem; }
+                #relay li { margin: .35rem 0; line-height: 1.6;
+                  white-space: pre-wrap; overflow-wrap: anywhere; }
+                .muted { color: #aebbd0; }
+                .warning { color: #ffd37d; }
+                #drawingImage { display: none; width: 100%; max-height: 72vh;
+                  object-fit: contain; margin-top: .8rem; border-radius: 10px;
+                  border: 1px solid #31456a; background: #050811; }
+              </style>
+            </head>
+            <body>
+              <header>
+                <h1>Reader 上下文接力</h1>
+                <div>
+                  <span id="status" class="pill">等待 Reader</span>
+                  <a href="/reader-context-live.md" target="_blank"
+                     rel="noreferrer">查看 Markdown 原文</a>
+                </div>
+              </header>
+              <main>
+                <section id="relay">
+                  <p class="muted">等待首个 Reader 上下文……</p>
+                </section>
+                <section>
+                  <h2>当前页、笔迹与页面附属内容合成图</h2>
+                  <p id="drawingStatus" class="muted">
+                    当前没有已经稳定并发布的合成图。
+                  </p>
+                  <a id="drawingLink"
+                     href="/reader-context-current-drawing.jpg"
+                     target="_blank" rel="noreferrer" hidden>
+                    在新窗口打开当前合成图
+                  </a>
+                  <img id="drawingImage"
+                       alt="PWA 渲染的当前页、笔迹与页面附属内容合成图">
+                </section>
+              </main>
+              <script>
+                "use strict";
+                const relay = document.getElementById("relay");
+                const status = document.getElementById("status");
+                const drawingStatus =
+                  document.getElementById("drawingStatus");
+                const drawingLink =
+                  document.getElementById("drawingLink");
+                const drawingImage =
+                  document.getElementById("drawingImage");
+                let lastMarkdown = "";
+                let drawingEtag = "";
+                let drawingObjectUrl = "";
+
+                function clearDrawingImage() {
+                  if (drawingObjectUrl) {
+                    URL.revokeObjectURL(drawingObjectUrl);
+                    drawingObjectUrl = "";
+                  }
+                  drawingEtag = "";
+                  drawingImage.removeAttribute("src");
+                  drawingImage.style.display = "none";
+                  drawingLink.hidden = true;
+                }
+
+                function appendTextElement(tag, text, className) {
+                  const node = document.createElement(tag);
+                  node.textContent = text;
+                  if (className) node.className = className;
+                  relay.append(node);
+                  return node;
+                }
+
+                function renderMarkdown(markdown) {
+                  if (markdown === lastMarkdown) return;
+                  lastMarkdown = markdown;
+                  relay.replaceChildren();
+                  let list = null;
+                  let quote = null;
+                  for (const raw of markdown.replace(/\r\n?/g, "\n").split("\n")) {
+                    const line = raw.trimEnd();
+                    if (line.startsWith("# ")) {
+                      list = null; quote = null;
+                      appendTextElement("h1", line.slice(2));
+                    } else if (line.startsWith("## ")) {
+                      list = null; quote = null;
+                      appendTextElement("h2", line.slice(3));
+                    } else if (line.startsWith("> ")) {
+                      list = null;
+                      if (!quote) {
+                        quote = document.createElement("blockquote");
+                        relay.append(quote);
+                      }
+                      const paragraph = document.createElement("p");
+                      paragraph.textContent = line.slice(2);
+                      quote.append(paragraph);
+                    } else if (line.startsWith("- ")) {
+                      quote = null;
+                      if (!list) {
+                        list = document.createElement("ul");
+                        relay.append(list);
+                      }
+                      const item = document.createElement("li");
+                      item.textContent = line.slice(2)
+                        .replace(/\*\*/g, "").replace(/`/g, "");
+                      list.append(item);
+                    } else if (line.length > 0) {
+                      list = null; quote = null;
+                      const italic = line.startsWith("_")
+                        && line.endsWith("_") && line.length > 2;
+                      appendTextElement(
+                        "p",
+                        italic ? line.slice(1, -1) : line,
+                        italic ? "muted" : "");
+                    } else {
+                      list = null; quote = null;
+                    }
+                  }
+                }
+
+                async function refreshRelay() {
+                  try {
+                    const response = await fetch(
+                      "/reader-context-live.md",
+                      { cache: "no-store", credentials: "same-origin" });
+                    const markdown = await response.text();
+                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
+                    renderMarkdown(markdown);
+                    status.textContent = "已连接";
+                    status.className = "pill ready";
+                  } catch (error) {
+                    status.textContent = "等待更新";
+                    status.className = "pill error";
+                    if (!lastMarkdown) {
+                      relay.replaceChildren();
+                      appendTextElement(
+                        "p",
+                        `上下文暂时不可读：${error.message}`,
+                        "warning");
+                    }
+                  }
+                }
+
+                async function refreshDrawing() {
+                  try {
+                    const headers = {};
+                    if (drawingEtag) headers["If-None-Match"] = drawingEtag;
+                    const response = await fetch(
+                      "/reader-context-current-drawing.jpg",
+                      {
+                        cache: "no-store",
+                        credentials: "same-origin",
+                        headers
+                      });
+                    if (response.status === 304) return;
+                    if (!response.ok) {
+                      clearDrawingImage();
+                      drawingStatus.textContent =
+                        response.status === 404
+                          ? "当前没有稳定笔迹；旧笔迹图不会被复用。"
+                          : "PWA 正在生成当前合成图，稍后会自动出现。";
+                      drawingLink.hidden = true;
+                      return;
+                    }
+                    const blob = await response.blob();
+                    if (blob.type !== "image/jpeg" || blob.size === 0) {
+                      throw new Error("invalid image");
+                    }
+                    const objectUrl = URL.createObjectURL(blob);
+                    if (drawingObjectUrl) URL.revokeObjectURL(drawingObjectUrl);
+                    drawingObjectUrl = objectUrl;
+                    drawingEtag = response.headers.get("ETag") || "";
+                    drawingImage.src = objectUrl;
+                    drawingImage.style.display = "block";
+                    drawingLink.hidden = false;
+                    drawingStatus.textContent =
+                      "已取得 PWA 渲染的最新当前页合成图。"
+                      + "AI 需要判断圈画、箭头或重叠关系时会读取同一张图。";
+                  } catch {
+                    clearDrawingImage();
+                    drawingStatus.textContent =
+                      "当前合成图暂不可用；不会展示旧页或旧笔迹图。";
+                  }
+                }
+
+                void refreshRelay();
+                void refreshDrawing();
+                setInterval(() => void refreshRelay(), 1000);
+                setInterval(() => void refreshDrawing(), 1500);
+              </script>
+            </body>
+            </html>
+            """);
+
     private readonly string _snapshotPath;
     private readonly int _listenPort;
     private readonly string _viewerUrl;
     private readonly string _profilePath;
     private readonly ILocalSnapshotPageImageRenderer
         _pageImageRenderer;
+    private readonly Func<
+        ReaderVisualDeliveryRequest,
+        CancellationToken,
+        Task<ReaderVisualCapture?>>? _fetchPublishedVisualAsync;
     private readonly object _gate = new();
     private Process? _viewerProcess;
     private bool _disposed;
@@ -2047,13 +2300,18 @@ internal sealed class DirectSnapshotViewer : IDisposable
     internal DirectSnapshotViewer(
         string snapshotPath,
         int listenPort,
-        ILocalSnapshotPageImageRenderer? pageImageRenderer = null)
+        ILocalSnapshotPageImageRenderer? pageImageRenderer = null,
+        Func<
+            ReaderVisualDeliveryRequest,
+            CancellationToken,
+            Task<ReaderVisualCapture?>>? fetchPublishedVisualAsync = null)
     {
         _snapshotPath = System.IO.Path.GetFullPath(snapshotPath);
         _listenPort = listenPort;
         _pageImageRenderer = pageImageRenderer
             ?? new LocalSnapshotPageImageRenderer(
                 LocalBookPageResolverOptions.FromEnvironment());
+        _fetchPublishedVisualAsync = fetchPublishedVisualAsync;
         _viewerUrl =
             $"http://{DirectBridgeContract.ListenHost}:{listenPort}"
             + ViewerPath;
@@ -2073,7 +2331,7 @@ internal sealed class DirectSnapshotViewer : IDisposable
         }
         return WriteBytesAsync(
             context,
-            ViewerDocument,
+            RelayViewerDocument,
             StatusCodes.Status200OK);
     }
 
@@ -2224,6 +2482,104 @@ internal sealed class DirectSnapshotViewer : IDisposable
         await WriteBytesAsync(
             context,
             png,
+            StatusCodes.Status200OK).ConfigureAwait(false);
+    }
+
+    internal async Task HandleDrawingImageAsync(HttpContext context)
+    {
+        if (!PrepareLocalResponse(context, "image/jpeg"))
+        {
+            return;
+        }
+        if (_fetchPublishedVisualAsync is null)
+        {
+            await WriteImageFailureAsync(
+                context,
+                StatusCodes.Status503ServiceUnavailable,
+                "reader-drawing-image-cache-unavailable")
+                .ConfigureAwait(false);
+            return;
+        }
+        JsonObject? snapshot = await ReadFreshSnapshotAsync(
+            context.RequestAborted).ConfigureAwait(false);
+        ReaderVisualDeliveryRequest? request = snapshot is null
+            ? null
+            : ReaderContextMcpServer.BuildVisualRequest(snapshot);
+        if (snapshot is null || request is null)
+        {
+            await WriteImageFailureAsync(
+                context,
+                StatusCodes.Status404NotFound,
+                "reader-drawing-image-not-ready")
+                .ConfigureAwait(false);
+            return;
+        }
+        ReaderVisualCapture? visual;
+        try
+        {
+            visual = await _fetchPublishedVisualAsync(
+                request,
+                context.RequestAborted).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch (ReaderVisualDeliveryException)
+        {
+            visual = null;
+        }
+        if (
+            visual is null
+            || visual.MimeType
+                != ReaderVisualDeliveryProtocol.MimeType
+            || visual.Data.Length == 0
+        )
+        {
+            await WriteImageFailureAsync(
+                context,
+                StatusCodes.Status503ServiceUnavailable,
+                "reader-drawing-image-waiting-for-pwa")
+                .ConfigureAwait(false);
+            return;
+        }
+        JsonObject? latest = await ReadFreshSnapshotAsync(
+            context.RequestAborted).ConfigureAwait(false);
+        if (
+            latest is null
+            || !ReaderContextMcpServer.VisualRequestStillCurrent(
+                latest,
+                request)
+        )
+        {
+            await WriteImageFailureAsync(
+                context,
+                StatusCodes.Status409Conflict,
+                "reader-drawing-image-superseded")
+                .ConfigureAwait(false);
+            return;
+        }
+        string etag = '"'
+            + Convert.ToHexString(
+                SHA256.HashData(visual.Data))
+                .ToLowerInvariant()
+            + '"';
+        context.Response.Headers.ETag = etag;
+        if (
+            context.Request.Headers.IfNoneMatch.Count == 1
+            && string.Equals(
+                context.Request.Headers.IfNoneMatch[0],
+                etag,
+                StringComparison.Ordinal)
+        )
+        {
+            context.Response.StatusCode =
+                StatusCodes.Status304NotModified;
+            return;
+        }
+        await WriteBytesAsync(
+            context,
+            visual.Data,
             StatusCodes.Status200OK).ConfigureAwait(false);
     }
 
