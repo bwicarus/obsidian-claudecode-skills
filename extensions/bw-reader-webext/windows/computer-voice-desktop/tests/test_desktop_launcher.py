@@ -10,6 +10,7 @@ from unittest.mock import patch
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE_ROOT))
 
+from bridge_core import CaptureEndpoint  # noqa: E402
 from bridge_core import BridgeError, DirectStatus  # noqa: E402
 from bridge_core import RenderEndpoint  # noqa: E402
 from control_plane import TaskInspection  # noqa: E402
@@ -18,6 +19,10 @@ from desktop_launcher import BridgeWindow, main  # noqa: E402
 
 VIRTUAL_MICROPHONE = RenderEndpoint("id-a", "virtual mic A")
 VIRTUAL_SPEAKER = RenderEndpoint("id-b", "virtual speaker B")
+VIRTUAL_MICROPHONE_CAPTURE = CaptureEndpoint(
+    "{0.0.1.00000000}.{22222222-2222-2222-2222-222222222222}",
+    "virtual mic A recording side",
+)
 
 
 class FakeWidget:
@@ -133,6 +138,64 @@ class DesktopLauncherTests(unittest.TestCase):
         with self.assertRaisesRegex(BridgeError, "不能相同"):
             window.selected_virtual_endpoints()
 
+    def test_capture_refresh_explicitly_offers_v4_and_restores_v5_id(
+        self,
+    ) -> None:
+        window = BridgeWindow.__new__(BridgeWindow)
+        window.virtual_microphone_capture_combo = FakeCombo()
+        window.capture_endpoint_provider = lambda: [
+            VIRTUAL_MICROPHONE_CAPTURE
+        ]
+        window._refresh_capture_endpoints()
+        self.assertEqual(
+            window.virtual_microphone_capture_combo.current(),
+            0,
+        )
+        self.assertIsNone(
+            window.selected_virtual_microphone_capture_endpoint()
+        )
+
+        window._refresh_capture_endpoints(
+            VIRTUAL_MICROPHONE_CAPTURE.endpoint_id
+        )
+        self.assertEqual(
+            window.virtual_microphone_capture_combo.current(),
+            1,
+        )
+        self.assertEqual(
+            window.selected_virtual_microphone_capture_endpoint(),
+            VIRTUAL_MICROPHONE_CAPTURE,
+        )
+        window._refresh_capture_endpoints(
+            "{0.0.1.00000000}.{99999999-9999-9999-9999-999999999999}"
+        )
+        self.assertEqual(
+            window.virtual_microphone_capture_combo.current(),
+            -1,
+        )
+        with self.assertRaisesRegex(BridgeError, "选择已失效"):
+            window.selected_virtual_microphone_capture_endpoint()
+
+    def test_route_status_distinguishes_v5_from_legacy_v4(self) -> None:
+        window = BridgeWindow.__new__(BridgeWindow)
+        window.audio_route_status = FakeWidget()
+        window.capture_endpoints = [VIRTUAL_MICROPHONE_CAPTURE]
+        window._render_audio_route_config_status(
+            {
+                "virtualMicrophoneCaptureEndpointId":
+                    VIRTUAL_MICROPHONE_CAPTURE.endpoint_id,
+            }
+        )
+        self.assertIn(
+            "已启用（/5",
+            str(window.audio_route_status.values[-1]["text"]),
+        )
+        window._render_audio_route_config_status({})
+        self.assertIn(
+            "未启用（/4",
+            str(window.audio_route_status.values[-1]["text"]),
+        )
+
     def test_audio_settings_button_opens_documented_settings_page(self) -> None:
         window = BridgeWindow.__new__(BridgeWindow)
         window.root = object()
@@ -221,6 +284,9 @@ class DesktopLauncherTests(unittest.TestCase):
             VIRTUAL_MICROPHONE,
             VIRTUAL_SPEAKER,
         )
+        window.selected_virtual_microphone_capture_endpoint = (
+            lambda: None
+        )
         window._confirm_mutation = lambda *_: False
         calls: list[str] = []
         window.run_task = lambda *_: calls.append("mutation")
@@ -288,6 +354,113 @@ class DesktopLauncherTests(unittest.TestCase):
         self.assertIn("桥接程序本身不会创建", source)
         self.assertIn("不要把 Realtek、Steam、Oculus", source)
         self.assertIn("两根彼此独立、已签名的虚拟音频线缆", source)
+        self.assertIn("不会从 A 的播放端 ID 推导", source)
+        self.assertIn("自动音频路由不会启用", source)
+
+    def test_enable_with_capture_saves_v5_inputs_explicitly(self) -> None:
+        window = BridgeWindow.__new__(BridgeWindow)
+        window.root = object()
+        window.paths = object()
+        window.selected_virtual_endpoints = lambda: (
+            VIRTUAL_MICROPHONE,
+            VIRTUAL_SPEAKER,
+        )
+        window.selected_virtual_microphone_capture_endpoint = (
+            lambda: VIRTUAL_MICROPHONE_CAPTURE
+        )
+        window.render_endpoint_provider = lambda: [
+            VIRTUAL_MICROPHONE,
+            VIRTUAL_SPEAKER,
+        ]
+        window.capture_endpoint_provider = lambda: [
+            VIRTUAL_MICROPHONE_CAPTURE
+        ]
+        confirmations: list[tuple[str, str]] = []
+        window._confirm_mutation = lambda title, detail: (
+            confirmations.append((title, detail)) or True
+        )
+        window.footer = FakeWidget()
+        window.refresh_static = lambda: None
+
+        def immediate(_label, action, success):
+            success(action())
+
+        window.run_task = immediate
+        with (
+            patch(
+                "desktop_launcher.legacy_microphone_config_requires_migration",
+                return_value=False,
+            ),
+            patch(
+                "desktop_launcher.save_enabled_config",
+                return_value={
+                    "virtualMicrophoneCaptureEndpointId":
+                        VIRTUAL_MICROPHONE_CAPTURE.endpoint_id,
+                },
+            ) as save,
+        ):
+            window.on_enable_config()
+        self.assertIn("strict /5", confirmations[0][1])
+        self.assertEqual(
+            save.call_args.kwargs[
+                "virtual_microphone_capture_endpoint_id"
+            ],
+            VIRTUAL_MICROPHONE_CAPTURE.endpoint_id,
+        )
+        self.assertEqual(
+            save.call_args.kwargs["active_capture_endpoints"],
+            [VIRTUAL_MICROPHONE_CAPTURE],
+        )
+
+    def test_enable_without_capture_requires_explicit_v4_confirmation(
+        self,
+    ) -> None:
+        window = BridgeWindow.__new__(BridgeWindow)
+        window.root = object()
+        window.paths = object()
+        window.selected_virtual_endpoints = lambda: (
+            VIRTUAL_MICROPHONE,
+            VIRTUAL_SPEAKER,
+        )
+        window.selected_virtual_microphone_capture_endpoint = (
+            lambda: None
+        )
+        window.render_endpoint_provider = lambda: [
+            VIRTUAL_MICROPHONE,
+            VIRTUAL_SPEAKER,
+        ]
+        confirmations: list[tuple[str, str]] = []
+        window._confirm_mutation = lambda title, detail: (
+            confirmations.append((title, detail)) or True
+        )
+        window.footer = FakeWidget()
+        window.refresh_static = lambda: None
+
+        def immediate(_label, action, success):
+            success(action())
+
+        window.run_task = immediate
+        with (
+            patch(
+                "desktop_launcher.legacy_microphone_config_requires_migration",
+                return_value=False,
+            ),
+            patch(
+                "desktop_launcher.save_enabled_config",
+                return_value={},
+            ) as save,
+        ):
+            window.on_enable_config()
+        self.assertIn("/4 兼容配置", confirmations[0][0])
+        self.assertIn("自动路由不会启用", confirmations[0][1])
+        self.assertIsNone(
+            save.call_args.kwargs[
+                "virtual_microphone_capture_endpoint_id"
+            ]
+        )
+        self.assertIsNone(
+            save.call_args.kwargs["active_capture_endpoints"]
+        )
 
     def test_start_prefers_owned_task_after_atomic_opt_in(self) -> None:
         window = BridgeWindow.__new__(BridgeWindow)
@@ -299,6 +472,9 @@ class DesktopLauncherTests(unittest.TestCase):
         window.selected_virtual_endpoints = lambda: (
             VIRTUAL_MICROPHONE,
             VIRTUAL_SPEAKER,
+        )
+        window.selected_virtual_microphone_capture_endpoint = (
+            lambda: None
         )
         window.render_endpoint_provider = lambda: [
             VIRTUAL_MICROPHONE,
@@ -353,6 +529,9 @@ class DesktopLauncherTests(unittest.TestCase):
         window.selected_virtual_endpoints = lambda: (
             VIRTUAL_MICROPHONE,
             VIRTUAL_SPEAKER,
+        )
+        window.selected_virtual_microphone_capture_endpoint = (
+            lambda: None
         )
         window.render_endpoint_provider = lambda: [
             VIRTUAL_MICROPHONE,
@@ -410,6 +589,9 @@ class DesktopLauncherTests(unittest.TestCase):
         window.selected_virtual_endpoints = lambda: (
             VIRTUAL_MICROPHONE,
             VIRTUAL_SPEAKER,
+        )
+        window.selected_virtual_microphone_capture_endpoint = (
+            lambda: None
         )
         window.render_endpoint_provider = lambda: [
             VIRTUAL_MICROPHONE,

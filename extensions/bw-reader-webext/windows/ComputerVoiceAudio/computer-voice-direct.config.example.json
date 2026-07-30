@@ -1,7 +1,8 @@
 {
-  "contract": "reader-computer-voice-direct-config/4",
+  "contract": "reader-computer-voice-direct-config/5",
   "localOptIn": false,
   "virtualMicrophoneRenderEndpointId": "PASTE_EXACT_VIRTUAL_MICROPHONE_RENDER_ENDPOINT_ID",
+  "virtualMicrophoneCaptureEndpointId": "PASTE_EXACT_VIRTUAL_MICROPHONE_CAPTURE_ENDPOINT_ID",
   "virtualSpeakerRenderEndpointId": "PASTE_EXACT_VIRTUAL_SPEAKER_RENDER_ENDPOINT_ID",
   "listenHost": "127.0.0.1",
   "listenPort": 43128,

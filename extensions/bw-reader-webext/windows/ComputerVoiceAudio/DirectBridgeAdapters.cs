@@ -51,8 +51,10 @@ internal sealed record DirectMediaStartRequest(
     string AppKind,
     string AppUserModelId,
     string VirtualMicrophoneRenderEndpointId,
+    string VirtualMicrophoneCaptureEndpointId,
     string VirtualSpeakerRenderEndpointId,
-    bool StartTypist = true);
+    bool StartTypist = true,
+    bool AutomatePerAppAudioRoute = false);
 
 internal sealed record DirectMediaStartResult(
     bool HostReady,
@@ -253,13 +255,18 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
             VirtualRenderEndpointProbe.ValidateExactActiveRender(
                 config.VirtualSpeakerRenderEndpointId,
                 "virtual-speaker");
+            if (config.PerAppAudioRouteAutomationEnabled)
+            {
+                VirtualCaptureEndpointProbe.ValidateExactActiveCapture(
+                    config.VirtualMicrophoneCaptureEndpointId);
+            }
             return null;
         }
         catch (Exception exception)
         {
             return new DirectProtocolException(
                 "BW_COMPUTER_VOICE_DIRECT_RENDER_ENDPOINT_UNAVAILABLE",
-                "虚拟音频播放端点未就绪",
+                "虚拟音频端点未就绪",
                 retryable: true,
                 innerException: exception);
         }
@@ -384,19 +391,49 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
                         config.AppKind,
                         DirectBridgeContract.CodexAppUserModelId,
                         config.VirtualMicrophoneRenderEndpointId,
+                        config.VirtualMicrophoneCaptureEndpointId,
                         config.VirtualSpeakerRenderEndpointId,
                         StartTypist:
                             contextDeliveryMode
-                            == DirectContextDeliveryMode.LegacyInject),
+                            == DirectContextDeliveryMode.LegacyInject,
+                        AutomatePerAppAudioRoute:
+                            config.PerAppAudioRouteAutomationEnabled),
                     sendFrameAsync,
                     cancellationToken).ConfigureAwait(false);
+            Task<DirectProtocolException?> mediaCompletion =
+                _mediaAdapter.Completion;
             if (!started.HostReady
                 || !started.CaptureActive
                 || !_mediaAdapter.CaptureActive
-                || _mediaAdapter.Completion.IsCompleted)
+                || mediaCompletion.IsCompleted)
             {
+                DirectProtocolException? terminalFailure = null;
+                if (mediaCompletion.IsCompleted)
+                {
+                    try
+                    {
+                        terminalFailure =
+                            await mediaCompletion.ConfigureAwait(false);
+                    }
+                    catch (DirectProtocolException exception)
+                    {
+                        terminalFailure = exception;
+                    }
+                    catch (Exception exception)
+                    {
+                        terminalFailure = new DirectProtocolException(
+                            "BW_COMPUTER_VOICE_DIRECT_MEDIA_START_FAILED",
+                            "媒体适配器在 START 确认前异常终止",
+                            retryable: true,
+                            innerException: exception);
+                    }
+                }
                 await _mediaAdapter.StopAsync(CancellationToken.None)
                     .ConfigureAwait(false);
+                if (terminalFailure is not null)
+                {
+                    throw terminalFailure;
+                }
                 throw new DirectProtocolException(
                     "BW_COMPUTER_VOICE_DIRECT_MEDIA_START_UNCONFIRMED",
                     "媒体适配器没有确认捕获已启动");

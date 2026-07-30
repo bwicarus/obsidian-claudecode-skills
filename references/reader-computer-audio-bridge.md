@@ -122,10 +122,16 @@ Windows WSS、固定文本合同和固定长度 PCM，不读取配对记录，�
    600 秒无活动兜底。
 7. AudioContext 暂停时只保留最新 20 ms 下行帧；合法突发超过 400 ms 排程时丢弃旧排程并
    从当前时刻恢复，不因播放阻塞自动关闭 WSS。再次真实点击只恢复当前播放，不重复 START。
+8. Codex Voice 的 capability-ledger 启动确认最长 5 秒，故 START 成功回执前使用独立、
+   有界的 6 秒 bootstrap PCM 缓冲；这不改变浏览器 400 ms 实时播放上限。START 窗口内
+   若媒体异步终止，Windows 先传播首个 pump/render/Voice terminal code，再完整恢复
+   六路应用音频、Voice generation、媒体与 typist 所有权，不能只显示泛化“未确认”。
 
 浏览器麦克风 track mute/ended、权限拒绝和页面退出会清理采音；不会静默重新申请权限。
-桥接 STOP 可证明桥接资源已释放，但目前没有可验证的 Codex Voice“退出”原语，因此不把第二次
-快捷键当作 toggle，也不把桥接停止冒充成 Codex UI 已退出。
+桥不读取蓝色 Voice 球或其他 UI 状态；它用 Codex 包在 Windows 麦克风 capability ledger
+中的 start/stop 时间戳作为代理信号。START 只在出现新 generation 后认领，STOP 只对仍属
+本桥且根进程代次未变的同一 generation 发送一次全局快捷键，并等待 stop 时间戳确认；
+预先存在、已本地关闭或已被新 generation 替换的 Voice 不会被桥切换。
 
 ## 协议与配置合同
 
@@ -157,11 +163,21 @@ Windows WSS、固定文本合同和固定长度 PCM，不读取配对记录，�
   不是合法 round-trip 会二次反转义。
 - runtime status：`reader-computer-voice-direct-status/2`，`lastError` 为 `null` 或严格的
   `failureId/code/stage/hresult/atUtc`；只有后续 START 真正成功才清除最近错误。
-- strict config：`reader-computer-voice-direct-config/4`，在原字段上增加
-  `contextDeliveryMode`。当前
+- strict config：`reader-computer-voice-direct-config/5`，在 `/4` 字段上增加独立的
+  `virtualMicrophoneCaptureEndpointId`。A 的 eRender、A 的 eCapture 与 B 的 eRender
+  必须分别明确选择且 flow 匹配；不得从 render ID 推导 capture ID。`/5` 才启用 Codex
+  六角色按应用音频路由；兼容 `/4` 不含 capture 字段并明确关闭自动路由。当前
   `experimentalSingleUserMode` 必须为 `true`；不存在配对码、公钥或旧 pairing 字段。
   旧 `/1` + `microphoneEndpointId` 配置只能进入 `legacy-migration-required`，经本地显式
-  迁移后清除，绝不作为运行时 fallback；旧 `/3` 只按 `legacy-inject` 解释。
+  迁移后清除，绝不作为运行时 fallback；`/3` 及更旧合同不进入运行时。
+- `/5` 的六角色真值按稳定 Codex AUMID 定位当前用户
+  `Multimedia\Audio\DefaultEndpoint` 应用键；每项 endpoint 主值与 `_p` property-set ID
+  必须成对匹配，目标 `_p` 只从对应 MMDevice 的只读属性解析。内部 AudioPolicyConfig
+  在无活动音频 session 时会按 PID 返回 `0x80070057`，不能拿它冒充“未配置”或恢复快照。
+  Windows 重置音量合成器后若整个 AUMID 应用键缺失，六路快照为 `unset`；首个已记入事务
+  日志的写操作按本机验证过的 Windows 身份键规则创建并读回 AUMID，停止时只恢复/删除六组
+  pair，保留空身份键。该键名规则是兼容实现而非公开 Windows 合同；身份重复、pair 不一致
+  或写后读回失败仍在快捷键前停止并按事务日志回滚。
 
 ## 实验上下文末端（2026-07-30）
 
@@ -179,7 +195,7 @@ Windows WSS、固定文本合同和固定长度 PCM，不读取配对记录，�
 `reader_context_snapshot`。活动心跳同时携带选区三态（有选区 / 已清空 / 未上报），
 换页、取消选择或超过三分钟时都不会把旧正文、旧选区继续当作当前内容；新鲜度按 Windows
 实际收到心跳的时间计算。关闭同步或切回旧注入时，`context-clear` 先清本地页与选区，
-再停止实验末端或恢复 Pi 旧推送。旧代码与 `/3` 回滚入口保留，但两条路径不得并跑。
+再停止实验末端或恢复 Pi 旧推送。旧代码与 `/4` 回滚入口保留，但两条路径不得并跑。
 
 ## 单用户安全边界
 
@@ -192,7 +208,7 @@ Windows WSS、固定文本合同和固定长度 PCM，不读取配对记录，�
 - 网页不能下发 endpoint ID、路径、命令、AUMID、目标进程或快捷键；
 - `HELLO`、`STATUS`、模型选择、刷新和 synthetic click 都不能产生启动副作用。
 
-`experimentalSingleUserMode=false` 在 v3 中 fail closed；不回落旧 v1 配对协议。
+`experimentalSingleUserMode=false` 在 `/4` 与 `/5` 中均 fail closed；不回落旧 v1 配对协议。
 
 ## 代码入口
 
@@ -220,18 +236,21 @@ C:\Users\bwica\AppData\Local\Programs\Python\Python313\python.exe `
   -m unittest discover -s tests -p "test_*.py"
 ```
 
-C# 的 `--describe`、`--self-test`、endpoint 枚举、`--probe-direct-output-route` 和无启动
-诊断不得启动 capture、Codex、typist 或快捷键。合同测试、服务在线、A/B Active、Core Audio
-路由证据和无启动诊断通过仍不能证明真实双向声音。
+C# 的 `--describe`、`--self-test`、endpoint 枚举、
+`--probe-codex-app-audio-route`、`--probe-direct-output-route` 和无启动诊断不得启动
+capture、Codex、typist 或快捷键。前者只读取当前唯一 Codex root PID 的六项持久应用路由，
+逐项返回 target/match/`Present|Unset|Error`，并固定报告
+`audioRouteMutated:false`；可在通话前后精确核对恢复，但仍不能证明真实双向声音。
 
 安装、部署与发布事实以协作状态最新登记和现场命令为准。最后证据必须由用户在真实
 Reader/PWA 与扩展页面完成：
 
-1. Windows 控制面选择互不相同的 A/B endpoint 并启用服务；
-2. 音量混合器把 Codex 输出选到 B，Codex Voice 麦克风选到 A recording；
+1. Windows 控制面分别选择 A eRender、A eCapture 与 B eRender，确认保存 `/5` 并启用服务；
+2. 通话前运行只读 app-route probe，记录 Codex 六项原路由；无需预先打开音量混合器；
 3. 页面选择 Windows 桥接器并点击电话，确认能自动拉起所需应用；
 4. Reader 麦克风能进 Codex，Codex 输出只回 Reader，物理/RDP 扬声器不发噪音；
-5. Reader context 能经 typist 到达当前会话；挂断后所有 owned 资源停止；
+5. Reader context 能按所选末端到达当前会话；挂断后所有 owned 资源停止，再运行只读
+   app-route probe，确认六项恢复原值或保留用户中途手工改动；
 6. 分别在 PWA 与隔离扩展测试 profile 验证错误状态、再次拨号和 RDP 断开后的稳定性。
 
 由于这是新功能、UI 与交互变更，正式 Reader/PWA 部署前必须完成该人工验收。第三方驱动安装、

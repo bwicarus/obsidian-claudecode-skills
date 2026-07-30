@@ -119,8 +119,15 @@ internal static class DirectPcmFrameCodec
 
 internal sealed class DirectPcmStartGate
 {
+    // START cannot release PCM until Codex Voice has been observed through
+    // the Windows capability ledger and the JSON success reply is on the
+    // wire.  That confirmation has a five-second timeout, so reusing the
+    // 400 ms live-playback horizon here can tear down an otherwise healthy
+    // start before its reply.  Keep this bootstrap buffer separately bounded;
+    // the Reader still enforces the advertised 400 ms playback horizon.
+    internal const int BootstrapBufferMilliseconds = 6000;
     private const int FramesPerTrack =
-        DirectBridgeContract.PcmQueueLimitMilliseconds / 20;
+        BootstrapBufferMilliseconds / 20;
     private readonly object _gate = new();
     private readonly Queue<DirectPcmFrame> _buffer = new();
     private readonly Dictionary<DirectPcmTrack, int> _trackCounts = [];

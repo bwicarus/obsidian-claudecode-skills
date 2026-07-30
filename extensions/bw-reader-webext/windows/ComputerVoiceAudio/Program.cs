@@ -46,6 +46,48 @@ internal static class Program
                         .EnumerateActiveRenderEndpoints(),
                 });
             }
+            if (args is ["--probe-codex-voice-state"])
+            {
+                CodexVoiceActivitySnapshot state =
+                    new WindowsRegistryCodexVoiceActivitySource()
+                        .Read();
+                return WriteJson(new
+                {
+                    contract =
+                        "reader-computer-voice-state/1",
+                    ok = state.Status
+                        == CodexVoiceActivityReadStatus.Available,
+                    status = state.Status.ToString()
+                        .ToLowerInvariant(),
+                    active = state.Active,
+                    lastUsedTimeStart =
+                        state.LastUsedTimeStart,
+                    lastUsedTimeStop =
+                        state.LastUsedTimeStop,
+                    source =
+                        "windows-microphone-capability-ledger",
+                    proxyFor = "codex-microphone-use",
+                    captureStarted = false,
+                    shortcutSent = false,
+                });
+            }
+            if (
+                args.Length == 3
+                && args[0] == "--probe-codex-app-audio-route"
+                && args[1] == "--config"
+            )
+            {
+                if (!Path.IsPathFullyQualified(args[2]))
+                {
+                    throw new DirectProtocolException(
+                        "BW_COMPUTER_VOICE_DIRECT_CONFIG_PATH_INVALID",
+                        "直连配置必须使用绝对路径");
+                }
+                DirectBridgeConfigStore configStore = new(
+                    Path.GetFullPath(args[2]));
+                return WriteJson(CodexAppAudioRouteProbe.Run(
+                    configStore.Load()));
+            }
             if (
                 args.Length == 3
                 && args[0] == "--probe-direct-output-route"
@@ -107,7 +149,11 @@ internal static class Program
                             configStore.InstallationRoot,
                             "runtime",
                             FileDirectSnapshotContextAdapter
-                                .SnapshotFileName)));
+                                .SnapshotFileName),
+                        localBookPageResolver:
+                            new LocalBookPageResolver(
+                                LocalBookPageResolverOptions
+                                    .FromEnvironment())));
                 return await server.RunAsync(CancellationToken.None)
                     .ConfigureAwait(false);
             }
@@ -202,6 +248,8 @@ internal static class Program
                 "--self-test",
                 "--list-direct-microphones",
                 "--list-direct-render-endpoints",
+                "--probe-codex-voice-state",
+                "--probe-codex-app-audio-route --config <absolute-path>",
                 "--probe-direct-output-route --config <absolute-path>",
                 "--diagnose-direct-audio-no-start --config <absolute-path>",
                 "--direct-serve --config <absolute-path>",

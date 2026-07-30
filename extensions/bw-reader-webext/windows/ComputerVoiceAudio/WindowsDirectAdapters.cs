@@ -440,6 +440,11 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
     private readonly WindowsDirectTypistLeaseController _typist;
     private readonly IDirectOutputRouteObserverFactory
         _outputRouteObserverFactory;
+    private readonly Func<IPerAppAudioPolicyBackend>
+        _audioPolicyBackendFactory;
+    private readonly string _audioRouteJournalPath;
+    private readonly CodexVoiceActivityController _voiceActivity;
+    private readonly ICodexVoiceShortcutSender _voiceShortcutSender;
     private readonly SemaphoreSlim _stateGate = new(1, 1);
     private ProcessLoopbackCaptureSession? _outputSession;
     private VirtualMicrophoneRenderSession? _renderSession;
@@ -447,11 +452,18 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
     private CancellationTokenSource? _captureLifetime;
     private Task? _outputPump;
     private Task? _renderMonitor;
+    private CancellationTokenSource? _voiceMonitorLifetime;
+    private Task? _voiceMonitor;
     private TaskCompletionSource<DirectProtocolException?>?
         _completionSource;
     private Task<DirectProtocolException?> _completion =
         Task.FromResult<DirectProtocolException?>(null);
     private DirectTypistLease? _ownedTypistLease;
+    private IPerAppAudioPolicyBackend? _audioPolicyBackend;
+    private PerAppAudioRouteLease? _audioRouteLease;
+    private CodexVoiceStartBaseline? _voiceStartBaseline;
+    private CodexVoiceStartConfirmation? _voiceConfirmation;
+    private CodexAppTarget? _voiceTarget;
     private DirectProtocolException? _terminalMediaFailure;
     private volatile bool _captureActive;
     private bool _disposed;
@@ -459,18 +471,51 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
     internal WindowsDirectMediaAdapter(string installationRoot)
         : this(
             new WindowsDirectTypistLeaseController(installationRoot),
-            new NativeDirectOutputRouteObserverFactory())
+            new NativeDirectOutputRouteObserverFactory(),
+            CreateNativeAudioPolicyBackend,
+            System.IO.Path.Combine(
+                installationRoot,
+                "runtime",
+                "computer-voice-audio-route.transaction.json"))
     {
     }
 
     internal WindowsDirectMediaAdapter(
         WindowsDirectTypistLeaseController typist,
-        IDirectOutputRouteObserverFactory? outputRouteObserverFactory = null)
+        IDirectOutputRouteObserverFactory? outputRouteObserverFactory = null,
+        Func<IPerAppAudioPolicyBackend>? audioPolicyBackendFactory = null,
+        string? audioRouteJournalPath = null,
+        CodexVoiceActivityController? voiceActivity = null,
+        ICodexVoiceShortcutSender? voiceShortcutSender = null)
     {
         _typist = typist;
         _outputRouteObserverFactory =
             outputRouteObserverFactory
             ?? new NativeDirectOutputRouteObserverFactory();
+        _audioPolicyBackendFactory =
+            audioPolicyBackendFactory
+            ?? (() => throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_AUDIO_POLICY_NOT_CONFIGURED",
+                "按应用音频路由仅由正式 Windows 适配器创建"));
+        _audioRouteJournalPath = audioRouteJournalPath
+            ?? System.IO.Path.Combine(
+                System.IO.Path.GetTempPath(),
+                "bw-computer-voice-audio-route.self-test-disabled.json");
+        _voiceActivity = voiceActivity
+            ?? new CodexVoiceActivityController();
+        _voiceShortcutSender = voiceShortcutSender
+            ?? new WindowsCodexVoiceShortcutSender();
+    }
+
+    private static IPerAppAudioPolicyBackend
+        CreateNativeAudioPolicyBackend()
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException(
+                "Per-app audio routing requires Windows");
+        }
+        return new NativePerAppAudioPolicyBackend();
     }
 
     public bool IsWired => true;
@@ -508,6 +553,11 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
     {
         DirectTypistLease? pendingTypistLease = null;
         IDirectOutputRouteObserver? pendingOutputRouteObserver = null;
+        IPerAppAudioPolicyBackend? pendingAudioPolicyBackend = null;
+        PerAppAudioRouteLease? pendingAudioRouteLease = null;
+        CodexVoiceStartBaseline? initialVoiceBaseline = null;
+        CodexVoiceStartBaseline? boundaryVoiceBaseline = null;
+        bool committedOwnedResources = false;
         Exception? startFailure = null;
         await _stateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -561,6 +611,11 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
             VirtualRenderEndpointProbe.ValidateExactActiveRender(
                 request.VirtualSpeakerRenderEndpointId,
                 "virtual-speaker");
+            if (request.AutomatePerAppAudioRoute)
+            {
+                VirtualCaptureEndpointProbe.ValidateExactActiveCapture(
+                    request.VirtualMicrophoneCaptureEndpointId);
+            }
             CodexAppTarget target = WindowsCodexAppProbe.RequireReady();
             if (target.RootProcessId != request.RootProcessId)
             {
@@ -572,6 +627,8 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
             // the single-user local binding before typist or either audio
             // session starts, then revalidate again at the shortcut boundary.
             WindowsCodexAppProbe.RequireExpectedGlobalVoiceShortcut();
+            initialVoiceBaseline =
+                _voiceActivity.CaptureStartBaseline();
             BoundedPcmPacketQueue outputQueue = new(
                 32,
                 2 * 1024 * 1024);
@@ -592,6 +649,41 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                     target);
             try
             {
+                if (request.AutomatePerAppAudioRoute)
+                {
+                    pendingAudioPolicyBackend =
+                        _audioPolicyBackendFactory();
+                    PerAppAudioRouteController routeController = new(
+                        pendingAudioPolicyBackend);
+                    PerAppAudioRouteRestoreResult recovered =
+                        routeController.RecoverPending(
+                            target.RootProcessId,
+                            _audioRouteJournalPath);
+                    if (!recovered.Succeeded)
+                    {
+                        throw new DirectProtocolException(
+                            "BW_COMPUTER_VOICE_DIRECT_AUDIO_ROUTE_RECOVERY_INCOMPLETE",
+                            "上一次 Codex 音频路由尚未恢复",
+                            retryable: true);
+                    }
+                    pendingAudioRouteLease = routeController.Acquire(
+                        new PerAppAudioRouteRequest(
+                            target.RootProcessId,
+                            request.VirtualSpeakerRenderEndpointId,
+                            request.VirtualMicrophoneCaptureEndpointId,
+                            _audioRouteJournalPath));
+                    if (
+                        initialVoiceBaseline.Snapshot.Active
+                        && !pendingAudioRouteLease
+                            .AlreadyTargetedBeforeAcquire
+                    )
+                    {
+                        throw new DirectProtocolException(
+                            "BW_COMPUTER_VOICE_DIRECT_VOICE_ALREADY_ACTIVE_WRONG_ROUTE",
+                            "Codex 语音已在使用其他音频路由；请先关闭后再由 Reader 开启",
+                            retryable: true);
+                    }
+                }
                 // The bounded process-loopback queue has no consumer until
                 // the atomic shortcut commit below. Start the already-approved
                 // typist first so its launcher checks cannot fill that queue
@@ -634,16 +726,38 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                         VirtualRenderEndpointProbe.ValidateExactActiveRender(
                             request.VirtualSpeakerRenderEndpointId,
                             "virtual-speaker");
+                        if (request.AutomatePerAppAudioRoute)
+                        {
+                            VirtualCaptureEndpointProbe
+                                .ValidateExactActiveCapture(
+                                    request
+                                        .VirtualMicrophoneCaptureEndpointId);
+                            (
+                                pendingAudioRouteLease
+                                ?? throw new DirectProtocolException(
+                                    "BW_COMPUTER_VOICE_DIRECT_AUDIO_ROUTE_LEASE_MISSING",
+                                    "Codex 按应用音频路由租约不存在")
+                            ).RequireStillApplied();
+                        }
                         RequirePreparedMediaRunning(
                             outputSession.State,
                             outputSession.Completion.IsCompleted,
                             renderSession.State,
                             renderSession.Completion.IsCompleted);
+                        boundaryVoiceBaseline =
+                            _voiceActivity.CaptureStartBaseline();
                     },
                     () =>
                     {
-                        WindowsCodexAppProbe.SendVoiceShortcutOrThrow(
-                            target);
+                        CodexVoiceStartBaseline baseline =
+                            boundaryVoiceBaseline
+                            ?? throw new DirectProtocolException(
+                                "BW_COMPUTER_VOICE_DIRECT_VOICE_BASELINE_MISSING",
+                                "Codex 语音状态基线不存在");
+                        if (baseline.ShortcutRequired)
+                        {
+                            _voiceShortcutSender.Send(target);
+                        }
                         return true;
                     },
                     () =>
@@ -665,6 +779,15 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                             null);
                         _ownedTypistLease = pendingTypistLease;
                         pendingTypistLease = null;
+                        _audioPolicyBackend =
+                            pendingAudioPolicyBackend;
+                        pendingAudioPolicyBackend = null;
+                        _audioRouteLease = pendingAudioRouteLease;
+                        pendingAudioRouteLease = null;
+                        _voiceStartBaseline =
+                            boundaryVoiceBaseline;
+                        _voiceConfirmation = null;
+                        _voiceTarget = target;
                         _outputPump = PumpAsync(
                             DirectPcmTrack.AppOutput,
                             outputQueue,
@@ -676,15 +799,101 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                             renderSession,
                             completion,
                             lifetime);
-                        _captureActive = true;
+                        committedOwnedResources = true;
                     },
                     cancellationToken);
+                CodexVoiceStartConfirmation voiceConfirmation =
+                    await _voiceActivity.ConfirmStartedAsync(
+                        boundaryVoiceBaseline
+                        ?? throw new DirectProtocolException(
+                            "BW_COMPUTER_VOICE_DIRECT_VOICE_BASELINE_MISSING",
+                            "Codex 语音状态基线不存在"),
+                        CodexVoiceActivityController.TransitionTimeout,
+                        CodexVoiceActivityController.MonitorInterval,
+                        CancellationToken.None).ConfigureAwait(false);
+                if (completion.Task.IsCompleted)
+                {
+                    DirectProtocolException? earlyFailure =
+                        await completion.Task.ConfigureAwait(false);
+                    throw earlyFailure
+                        ?? new DirectProtocolException(
+                            "BW_COMPUTER_VOICE_DIRECT_MEDIA_START_UNCONFIRMED",
+                            "媒体适配器在语音确认期间停止",
+                            retryable: true);
+                }
+                _voiceConfirmation = voiceConfirmation;
+                _voiceStartBaseline = null;
+                CancellationTokenSource voiceMonitorLifetime = new();
+                _voiceMonitorLifetime = voiceMonitorLifetime;
+                _voiceMonitor = MonitorVoiceAsync(
+                    voiceConfirmation,
+                    completion,
+                    lifetime,
+                    voiceMonitorLifetime);
+                if (
+                    completion.Task.IsCompleted
+                    || lifetime.IsCancellationRequested
+                    || outputSession.State
+                        != CaptureSessionState.Running
+                    || outputSession.Completion.IsCompleted
+                    || renderSession.State
+                        != CaptureSessionState.Running
+                    || renderSession.Completion.IsCompleted
+                )
+                {
+                    DirectProtocolException? earlyFailure =
+                        completion.Task.IsCompleted
+                            ? await completion.Task.ConfigureAwait(false)
+                            : Volatile.Read(
+                                ref _terminalMediaFailure);
+                    throw earlyFailure
+                        ?? new DirectProtocolException(
+                            "BW_COMPUTER_VOICE_DIRECT_MEDIA_START_UNCONFIRMED",
+                            "媒体适配器在语音确认后停止",
+                            retryable: true);
+                }
+                _captureActive = true;
+                if (completion.Task.IsCompleted)
+                {
+                    _captureActive = false;
+                    throw await completion.Task.ConfigureAwait(false)
+                        ?? new DirectProtocolException(
+                            "BW_COMPUTER_VOICE_DIRECT_MEDIA_START_UNCONFIRMED",
+                            "媒体适配器在 START 返回前停止",
+                            retryable: true);
+                }
                 return new DirectMediaStartResult(
                     HostReady: true,
                     CaptureActive: true);
             }
             catch (Exception startException)
             {
+                if (committedOwnedResources)
+                {
+                    DirectProtocolException failure =
+                        startException as DirectProtocolException
+                        ?? new DirectProtocolException(
+                            "BW_COMPUTER_VOICE_DIRECT_VOICE_START_NOT_CONFIRMED",
+                            "Codex 语音状态未确认",
+                            retryable: true,
+                            innerException: startException);
+                    _ = Interlocked.CompareExchange(
+                        ref _terminalMediaFailure,
+                        failure,
+                        null);
+                    _completionSource?.TrySetResult(failure);
+                    _captureActive = false;
+                    Exception? committedCleanupFailure =
+                        await StopOwnedResourcesUnderGateAsync()
+                            .ConfigureAwait(false);
+                    if (committedCleanupFailure is not null)
+                    {
+                        throw CombineStartAndCleanupFailures(
+                            startException,
+                            committedCleanupFailure);
+                    }
+                    throw;
+                }
                 Exception? cleanupFailure =
                     await RunBestEffortCleanupAsync(
                         () =>
@@ -699,6 +908,28 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                         {
                             pendingOutputRouteObserver?.Dispose();
                             pendingOutputRouteObserver = null;
+                            return Task.CompletedTask;
+                        },
+                        () =>
+                        {
+                            if (pendingAudioRouteLease is null)
+                            {
+                                return Task.CompletedTask;
+                            }
+                            PerAppAudioRouteRestoreResult result =
+                                pendingAudioRouteLease.Restore();
+                            if (!result.Succeeded)
+                            {
+                                throw AudioRouteRestoreFailure();
+                            }
+                            pendingAudioRouteLease = null;
+                            return Task.CompletedTask;
+                        },
+                        () =>
+                        {
+                            pendingAudioRouteLease = null;
+                            pendingAudioPolicyBackend?.Dispose();
+                            pendingAudioPolicyBackend = null;
                             return Task.CompletedTask;
                         },
                         () =>
@@ -792,6 +1023,10 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
     {
         cancellationToken.ThrowIfCancellationRequested();
         validatePreparedMedia();
+        // Validation can include native endpoint/route reads. Peer-close may
+        // arrive while those checks run, so fence the irreversible shortcut
+        // once more immediately before SendInput.
+        cancellationToken.ThrowIfCancellationRequested();
         if (!sendShortcut())
         {
             throw new DirectProtocolException(
@@ -804,6 +1039,22 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
         // peer-close cleanup is allowed to proceed.
         commitOwnedResources();
     }
+
+    internal static bool CanRestorePerAppAudioRoute(
+        bool voiceSettled,
+        bool captureLifetimeReleased,
+        bool outputSessionReleased,
+        bool renderSessionReleased,
+        bool outputRouteObserverReleased,
+        bool outputPumpReleased,
+        bool renderMonitorReleased) =>
+        voiceSettled
+        && captureLifetimeReleased
+        && outputSessionReleased
+        && renderSessionReleased
+        && outputRouteObserverReleased
+        && outputPumpReleased
+        && renderMonitorReleased;
 
     internal static async Task EnsureTypistThenStartPreparedMediaAsync(
         Func<CancellationToken, Task<DirectTypistLease?>>
@@ -917,7 +1168,113 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
         || _outputRouteObserver is not null
         || _outputPump is not null
         || _renderMonitor is not null
+        || _voiceMonitorLifetime is not null
+        || _voiceMonitor is not null
+        || _voiceStartBaseline is not null
+        || _voiceConfirmation is not null
+        || _voiceTarget is not null
+        || _audioRouteLease is not null
+        || _audioPolicyBackend is not null
         || _ownedTypistLease is not null;
+
+    private async Task StopOwnedVoiceAsync(
+        CodexVoiceStartBaseline? baseline,
+        CodexVoiceStartConfirmation? confirmation,
+        CodexAppTarget? target) =>
+        await StopOwnedVoiceAsync(
+            _voiceActivity,
+            _voiceShortcutSender,
+            WindowsCodexAppProbe.RequireReady,
+            baseline,
+            confirmation,
+            target).ConfigureAwait(false);
+
+    internal static async Task StopOwnedVoiceAsync(
+        CodexVoiceActivityController voiceActivity,
+        ICodexVoiceShortcutSender voiceShortcutSender,
+        Func<CodexAppTarget> currentTargetProvider,
+        CodexVoiceStartBaseline? baseline,
+        CodexVoiceStartConfirmation? confirmation,
+        CodexAppTarget? target)
+    {
+        ArgumentNullException.ThrowIfNull(voiceActivity);
+        ArgumentNullException.ThrowIfNull(voiceShortcutSender);
+        ArgumentNullException.ThrowIfNull(currentTargetProvider);
+        if (confirmation is null)
+        {
+            if (baseline is null)
+            {
+                return;
+            }
+            CodexVoiceActivitySnapshot current =
+                voiceActivity.ReadCurrent();
+            if (!current.Active)
+            {
+                // Either SendInput never activated Voice, or the exact
+                // provisional generation has already ended. In both cases a
+                // second toggle would be unsafe and unnecessary.
+                return;
+            }
+            if (
+                baseline.Snapshot.Active
+                || current.LastUsedTimeStart
+                    <= Math.Max(
+                        baseline.Snapshot.LastUsedTimeStart,
+                        baseline.Snapshot.LastUsedTimeStop)
+            )
+            {
+                throw new DirectProtocolException(
+                    "BW_COMPUTER_VOICE_DIRECT_VOICE_OWNERSHIP_UNCONFIRMED",
+                    "无法确认当前 Codex 语音是否由桥接器开启",
+                    retryable: true);
+            }
+            confirmation = new CodexVoiceStartConfirmation(
+                current,
+                StartedByBridge: true);
+        }
+
+        CodexVoiceStopPlan plan =
+            voiceActivity.PrepareStop(confirmation);
+        if (!plan.Snapshot.Active)
+        {
+            return;
+        }
+        if (!plan.VoiceGenerationMatches)
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_VOICE_REPLACED_CLEANUP_PENDING",
+                "桥接器拥有的语音已被另一代会话替换；不会误关新会话",
+                retryable: true);
+        }
+        if (!confirmation.OwnsVoice)
+        {
+            // A pre-existing session is observable but never bridge-owned.
+            return;
+        }
+        if (target is null)
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_VOICE_TARGET_MISSING",
+                "Codex 语音目标不存在，无法安全关闭",
+                retryable: true);
+        }
+        CodexAppTarget currentTarget =
+            currentTargetProvider();
+        if (currentTarget.RootProcessId != target.RootProcessId)
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_VOICE_TARGET_CHANGED",
+                "Codex 进程代际已变化；不会向新进程发送关闭快捷键",
+                retryable: true);
+        }
+
+        voiceShortcutSender.Send(currentTarget);
+        _ = await voiceActivity.ConfirmStoppedAsync(
+            plan.Snapshot,
+            CodexVoiceActivityController.TransitionTimeout,
+            CodexVoiceActivityController.MonitorInterval,
+            CancellationToken.None).ConfigureAwait(false);
+    }
 
     private async Task<DirectProtocolException?>
         StopOwnedResourcesUnderGateAsync()
@@ -929,6 +1286,21 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
             _outputRouteObserver;
         Task? outputPump = _outputPump;
         Task? renderMonitor = _renderMonitor;
+        CancellationTokenSource? voiceMonitorLifetime =
+            _voiceMonitorLifetime;
+        Task? voiceMonitor = _voiceMonitor;
+        CodexVoiceStartBaseline? voiceStartBaseline =
+            _voiceStartBaseline;
+        CodexVoiceStartConfirmation? voiceConfirmation =
+            _voiceConfirmation;
+        CodexAppTarget? voiceTarget = _voiceTarget;
+        PerAppAudioRouteLease? audioRouteLease = _audioRouteLease;
+        IPerAppAudioPolicyBackend? audioPolicyBackend =
+            _audioPolicyBackend;
+        bool audioRouteRestored = audioRouteLease is null;
+        bool voiceSettled =
+            voiceStartBaseline is null
+            && voiceConfirmation is null;
         DirectTypistLease? typistLease = _ownedTypistLease;
         bool hadOwnedResources = HasOwnedCleanupResources;
         _captureActive = false;
@@ -944,6 +1316,72 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
         _completion = completion.Task;
 
         Exception? cleanupFailure = await RunBestEffortCleanupAsync(
+            () =>
+            {
+                voiceMonitorLifetime?.Cancel();
+                return Task.CompletedTask;
+            },
+            async () =>
+            {
+                if (voiceMonitor is null)
+                {
+                    return;
+                }
+                await voiceMonitor.ConfigureAwait(false);
+                if (ReferenceEquals(_voiceMonitor, voiceMonitor))
+                {
+                    _voiceMonitor = null;
+                }
+            },
+            () =>
+            {
+                if (voiceMonitorLifetime is not null)
+                {
+                    voiceMonitorLifetime.Dispose();
+                    if (ReferenceEquals(
+                        _voiceMonitorLifetime,
+                        voiceMonitorLifetime))
+                    {
+                        _voiceMonitorLifetime = null;
+                    }
+                }
+                return Task.CompletedTask;
+            },
+            async () =>
+            {
+                if (voiceSettled)
+                {
+                    return;
+                }
+                await StopOwnedVoiceAsync(
+                    voiceStartBaseline,
+                    voiceConfirmation,
+                    voiceTarget).ConfigureAwait(false);
+                voiceSettled = true;
+                if (ReferenceEquals(
+                    _voiceStartBaseline,
+                    voiceStartBaseline))
+                {
+                    _voiceStartBaseline = null;
+                }
+                if (ReferenceEquals(
+                    _voiceConfirmation,
+                    voiceConfirmation))
+                {
+                    _voiceConfirmation = null;
+                }
+            },
+            () =>
+            {
+                if (
+                    voiceSettled
+                    && ReferenceEquals(_voiceTarget, voiceTarget)
+                )
+                {
+                    _voiceTarget = null;
+                }
+                return Task.CompletedTask;
+            },
             () =>
             {
                 lifetime?.Cancel();
@@ -1067,6 +1505,61 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                 }
                 return Task.CompletedTask;
             },
+            () =>
+            {
+                if (audioRouteLease is null)
+                {
+                    audioRouteRestored = true;
+                    return Task.CompletedTask;
+                }
+                bool mediaSettled = CanRestorePerAppAudioRoute(
+                    voiceSettled,
+                    _captureLifetime is null,
+                    _outputSession is null,
+                    _renderSession is null,
+                    _outputRouteObserver is null,
+                    _outputPump is null,
+                    _renderMonitor is null);
+                if (!mediaSettled)
+                {
+                    throw new DirectProtocolException(
+                        "BW_COMPUTER_VOICE_DIRECT_AUDIO_ROUTE_RESTORE_DEFERRED",
+                        "Codex 语音或媒体尚未安全收口，音频路由保留等待重试",
+                        retryable: true);
+                }
+                PerAppAudioRouteRestoreResult result =
+                    audioRouteLease.Restore();
+                if (!result.Succeeded)
+                {
+                    throw AudioRouteRestoreFailure();
+                }
+                audioRouteRestored = true;
+                if (ReferenceEquals(
+                    _audioRouteLease,
+                    audioRouteLease))
+                {
+                    _audioRouteLease = null;
+                }
+                return Task.CompletedTask;
+            },
+            () =>
+            {
+                if (
+                    audioPolicyBackend is null
+                    || !audioRouteRestored
+                )
+                {
+                    return Task.CompletedTask;
+                }
+                audioPolicyBackend.Dispose();
+                if (ReferenceEquals(
+                    _audioPolicyBackend,
+                    audioPolicyBackend))
+                {
+                    _audioPolicyBackend = null;
+                }
+                return Task.CompletedTask;
+            },
             async () =>
             {
                 if (typistLease is null)
@@ -1093,9 +1586,10 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                 }
             }).ConfigureAwait(false);
 
-        // This settles bridge-owned capture, pumps and typist only.  There is
-        // no verified application-side stop primitive, so STOP deliberately
-        // does not guess that Ctrl+Shift+C is an ownership-safe toggle.
+        // Cleanup first settles only the exact Voice generation confirmed as
+        // bridge-owned, then stops media, restores the leased per-app routes,
+        // and releases typist ownership. Pre-existing or replacement Voice
+        // generations are never toggled.
         DirectProtocolException? stopFailure = CombineStopFailures(
             Volatile.Read(ref _terminalMediaFailure),
             cleanupFailure);
@@ -1221,6 +1715,36 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                 innerException: exception);
         }
 
+        if (failure is null)
+        {
+            return;
+        }
+        _ = Interlocked.CompareExchange(
+            ref _terminalMediaFailure,
+            failure,
+            null);
+        completion.TrySetResult(failure);
+        if (ReferenceEquals(
+            Volatile.Read(ref _captureLifetime),
+            ownerLifetime))
+        {
+            _captureActive = false;
+            ownerLifetime.Cancel();
+        }
+        ScheduleOwnedFailureCleanup(ownerLifetime);
+    }
+
+    private async Task MonitorVoiceAsync(
+        CodexVoiceStartConfirmation confirmation,
+        TaskCompletionSource<DirectProtocolException?> completion,
+        CancellationTokenSource ownerLifetime,
+        CancellationTokenSource monitorLifetime)
+    {
+        DirectProtocolException? failure =
+            await _voiceActivity.MonitorForLocalCloseAsync(
+                confirmation,
+                CodexVoiceActivityController.MonitorInterval,
+                monitorLifetime.Token).ConfigureAwait(false);
         if (failure is null)
         {
             return;
@@ -1415,6 +1939,12 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
             "voice-typist owned lease 释放失败",
             retryable: false,
             innerException: exception);
+
+    private static DirectProtocolException AudioRouteRestoreFailure() =>
+        new(
+            "BW_COMPUTER_VOICE_DIRECT_AUDIO_ROUTE_RESTORE_INCOMPLETE",
+            "Codex 原应用音频路由尚未完整恢复",
+            retryable: true);
 
     private static async Task StopPreparedAsync(
         VirtualMicrophoneRenderSession? render,
