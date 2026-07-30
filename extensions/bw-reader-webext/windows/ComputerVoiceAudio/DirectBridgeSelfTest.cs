@@ -689,6 +689,9 @@ internal static class DirectBridgeSelfTest
         await CheckSnapshotFocusFoldAsync(
             root,
             checks).ConfigureAwait(false);
+        await CheckVbookCanonicalIdentityAsync(
+            root,
+            checks).ConfigureAwait(false);
         await CheckLocalPdfSnapshotResolutionAsync(
             root,
             checks).ConfigureAwait(false);
@@ -4186,6 +4189,8 @@ internal static class DirectBridgeSelfTest
                 ["truncated"] = false,
             }),
             LocalBookPageResolution.Failed(
+                "local-pdf-transient-failure"),
+            LocalBookPageResolution.Failed(
                 "local-pdf-file-missing"),
         ]);
         FileDirectSnapshotContextAdapter adapter = new(
@@ -4232,6 +4237,33 @@ internal static class DirectBridgeSelfTest
             checks);
 
         _ = await adapter.ForwardActiveReadingAsync(
+            "request-local-pdf-same-page-failed",
+            sessionId,
+            FileDirectSnapshotContextAdapter.ValidateActiveReading(
+                JsonSerializer.SerializeToElement(new
+                {
+                    kind = "pdf",
+                    file = "books/local.pdf",
+                    title = "Local",
+                    page = 3,
+                    selectionState = "unknown",
+                    selection = (string?)null,
+                    observedAtEpochMs = 1_750_000_000_800,
+                })),
+            CancellationToken.None).ConfigureAwait(false);
+        using JsonDocument samePageFailed = JsonDocument.Parse(
+            await File.ReadAllTextAsync(snapshotPath)
+                .ConfigureAwait(false));
+        Require(
+            samePageFailed.RootElement.GetProperty("contextStatus")
+                .GetString() == "ready"
+            && samePageFailed.RootElement.GetProperty("currentPage")
+                .GetProperty("text").GetString()
+                == "local page three",
+            "direct-snapshot-same-page-resolver-failure-keeps-last-valid-body",
+            checks);
+
+        _ = await adapter.ForwardActiveReadingAsync(
             "request-local-pdf-failed",
             sessionId,
             FileDirectSnapshotContextAdapter.ValidateActiveReading(
@@ -4262,6 +4294,226 @@ internal static class DirectBridgeSelfTest
             && failedPage.GetProperty("fallbackReason").GetString()
                 == "local-pdf-file-missing",
             "direct-snapshot-local-pdf-failure-never-reuses-old-page",
+            checks);
+    }
+
+    private static async Task CheckVbookCanonicalIdentityAsync(
+        string root,
+        ICollection<string> checks)
+    {
+        string snapshotPath = System.IO.Path.Combine(
+            root,
+            "snapshot-vbook-identity",
+            FileDirectSnapshotContextAdapter.SnapshotFileName);
+        FileDirectSnapshotContextAdapter adapter = new(
+            snapshotPath,
+            () => DateTimeOffset.FromUnixTimeMilliseconds(
+                1_750_000_010_000));
+        string sessionId =
+            "session-" + DirectBase64Url.Encode(
+                Enumerable.Range(176, 16)
+                    .Select(value => (byte)value)
+                    .ToArray());
+        static DirectContextEvent Event(
+            long sequence,
+            string type,
+            object value) =>
+            new(
+                sequence,
+                type,
+                sequence.ToString("x16"),
+                JsonSerializer.SerializeToElement(value));
+
+        _ = await adapter.ForwardActiveReadingAsync(
+            "request-vbook-active",
+            sessionId,
+            FileDirectSnapshotContextAdapter.ValidateActiveReading(
+                JsonSerializer.SerializeToElement(new
+                {
+                    kind = "pdf",
+                    file = "books/part-2.pdf",
+                    title = "Merged Book",
+                    page = 7,
+                    selectionState = "unknown",
+                    selection = (string?)null,
+                    observedAtEpochMs = 1_750_000_007_000,
+                    viewFile = "vbook:g_book",
+                    viewPage = 31,
+                })),
+            CancellationToken.None).ConfigureAwait(false);
+        _ = await adapter.ForwardJournalAsync(
+            "request-vbook-page",
+            sessionId,
+            Event(
+                1,
+                "page.context",
+                new
+                {
+                    v = 1,
+                    seq = 1,
+                    type = "page.context",
+                    ts = 1_750_000_008,
+                    id = "0000000000000001",
+                    kind = "pdf",
+                    file = "books/part-2.pdf",
+                    page = 7,
+                    stable = true,
+                    page_context = new
+                    {
+                        reason = "stable",
+                        text = "canonical member page body",
+                        text_available = true,
+                        text_source = "pdf-text",
+                        truncated = false,
+                    },
+                }),
+            CancellationToken.None).ConfigureAwait(false);
+        _ = await adapter.ForwardJournalAsync(
+            "request-vbook-focus",
+            sessionId,
+            Event(
+                2,
+                "focus",
+                new
+                {
+                    v = 1,
+                    seq = 2,
+                    type = "focus",
+                    ts = 1_750_000_009,
+                    id = "0000000000000002",
+                    action = "set",
+                    kind = "text",
+                    @ref = new
+                    {
+                        file = "vbook:g_book",
+                        page = 31,
+                        text = "vbook selected text",
+                    },
+                }),
+            CancellationToken.None).ConfigureAwait(false);
+        using (JsonDocument selected = JsonDocument.Parse(
+            await File.ReadAllTextAsync(snapshotPath)
+                .ConfigureAwait(false)))
+        {
+            Require(
+                selected.RootElement.GetProperty("contextStatus")
+                    .GetString() == "ready"
+                && selected.RootElement.GetProperty("currentPage")
+                    .GetProperty("text").GetString()
+                    == "canonical member page body"
+                && selected.RootElement.GetProperty("activeReading")
+                    .GetProperty("viewFile").GetString()
+                    == "vbook:g_book"
+                && selected.RootElement.GetProperty("activeReading")
+                    .GetProperty("viewPage").GetInt32() == 31
+                && selected.RootElement.GetProperty("selection")
+                    .GetProperty("state").GetString() == "active"
+                && selected.RootElement.GetProperty("selection")
+                    .GetProperty("text").GetString()
+                    == "vbook selected text",
+                "direct-snapshot-vbook-alias-matches-canonical-member-page",
+                checks);
+        }
+
+        _ = await adapter.ForwardJournalAsync(
+            "request-vbook-wrong-focus",
+            sessionId,
+            Event(
+                3,
+                "focus",
+                new
+                {
+                    v = 1,
+                    seq = 3,
+                    type = "focus",
+                    ts = 1_750_000_010,
+                    id = "0000000000000003",
+                    action = "replace",
+                    kind = "text",
+                    @ref = new
+                    {
+                        file = "vbook:g_other",
+                        page = 31,
+                        text = "must not leak",
+                    },
+                }),
+            CancellationToken.None).ConfigureAwait(false);
+        using (JsonDocument mismatched = JsonDocument.Parse(
+            await File.ReadAllTextAsync(snapshotPath)
+                .ConfigureAwait(false)))
+        {
+            Require(
+                mismatched.RootElement.GetProperty("selection")
+                    .GetProperty("state").GetString() == "unknown"
+                && mismatched.RootElement.GetProperty("selection")
+                    .GetProperty("reason").GetString()
+                    == "focus-page-mismatch",
+                "direct-snapshot-vbook-cross-book-focus-remains-fail-closed",
+                checks);
+        }
+
+        bool unresolvedRejected = false;
+        try
+        {
+            _ = FileDirectSnapshotContextAdapter.ValidateActiveReading(
+                JsonSerializer.SerializeToElement(new
+                {
+                    kind = "pdf",
+                    file = "vbook:g_book",
+                    title = "Unresolved",
+                    page = 31,
+                    selectionState = "unknown",
+                    selection = (string?)null,
+                    observedAtEpochMs = 1_750_000_011_000,
+                }));
+        }
+        catch (DirectProtocolException exception)
+        {
+            unresolvedRejected =
+                exception.Code == "BW_READER_ACTIVE_READING_SCHEMA_INVALID";
+        }
+        Require(
+            unresolvedRejected,
+            "direct-snapshot-unresolved-vbook-active-reading-is-rejected",
+            checks);
+
+        FileDirectSnapshotContextAdapter restored = new(
+            snapshotPath,
+            () => DateTimeOffset.FromUnixTimeMilliseconds(
+                1_750_000_012_000));
+        _ = await restored.ForwardJournalAsync(
+            "request-vbook-focus-restored",
+            sessionId,
+            Event(
+                4,
+                "focus",
+                new
+                {
+                    v = 1,
+                    seq = 4,
+                    type = "focus",
+                    ts = 1_750_000_012,
+                    id = "0000000000000004",
+                    action = "replace",
+                    kind = "text",
+                    @ref = new
+                    {
+                        file = "vbook:g_book",
+                        page = 31,
+                        text = "restored alias selected text",
+                    },
+                }),
+            CancellationToken.None).ConfigureAwait(false);
+        using JsonDocument restoredSelected = JsonDocument.Parse(
+            await File.ReadAllTextAsync(snapshotPath)
+                .ConfigureAwait(false));
+        Require(
+            restoredSelected.RootElement.GetProperty("selection")
+                .GetProperty("state").GetString() == "active"
+            && restoredSelected.RootElement.GetProperty("selection")
+                .GetProperty("text").GetString()
+                == "restored alias selected text",
+            "direct-snapshot-vbook-binding-survives-restart",
             checks);
     }
 
