@@ -404,7 +404,44 @@ internal sealed class ReaderContextMcpServer
         if (!fresh)
         {
             MarkStale(snapshot, active, ageSeconds);
+            return;
         }
+        ApplyDrawingFreshness(snapshot, now);
+    }
+
+    private static void ApplyDrawingFreshness(
+        JsonObject snapshot,
+        DateTimeOffset now)
+    {
+        if (
+            snapshot["currentPage"] is not JsonObject page
+            || page["visual"] is not JsonObject visual
+            || visual["drawing"] is not JsonObject drawing
+            || drawing["empty"]?.GetValue<bool?>() == true
+        )
+        {
+            return;
+        }
+        double? lastEditedAt = DoubleValue(
+            drawing["lastEditedAt"]);
+        double? freshWindow = DoubleValue(
+            drawing["freshWindowS"]);
+        if (
+            lastEditedAt is null
+            || freshWindow is null
+            || freshWindow <= 0
+        )
+        {
+            return;
+        }
+        double nowSeconds = now.ToUnixTimeMilliseconds() / 1000.0;
+        double age = Math.Max(
+            0,
+            nowSeconds - lastEditedAt.Value);
+        drawing["freshness"] =
+            age <= freshWindow.Value
+                ? "recent"
+                : "stale";
     }
 
     private static void MarkStale(
@@ -431,6 +468,26 @@ internal sealed class ReaderContextMcpServer
             ["ref"] = null,
             ["reason"] = "active-reading-stale",
         };
+    }
+
+    private static double? DoubleValue(JsonNode? value)
+    {
+        if (value is not JsonValue jsonValue)
+        {
+            return null;
+        }
+        if (
+            jsonValue.TryGetValue(out double number)
+            && double.IsFinite(number)
+        )
+        {
+            return number;
+        }
+        if (jsonValue.TryGetValue(out long integer))
+        {
+            return integer;
+        }
+        return null;
     }
 
     private async Task TryLoadLatestAsync(

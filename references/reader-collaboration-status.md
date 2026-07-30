@@ -3545,3 +3545,27 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **部署后验证**：Pi HEAD 与提交一致，webapp/voice-rt active；公网 Reader 与新版 `snapshot-mcp`、`context-open`、`context-clear` 静态资源均 HTTP 200。
 - **Windows 状态**：0.1.16 仍为 `idle / readerConnected=false / captureActive=false / lastError=null`，配置 `snapshot-mcp`、`reader_snapshot` MCP 已注册，未自动发送 START、快捷键或采音。
 - **下一步**：用户刷新 iPad PWA 并保持上下文同步开启，再新开 Codex 会话加载 MCP；首次页面快照出现后验证“当前页/当前选区”按需读取且输入框无注入。
+
+## Codex：Windows direct 0.1.18 已安装，语音代次与应用音频自动路由待真机验收（2026-07-30 JST）
+- **改了什么**：Voice 状态改读 Codex 包麦克风 capability ledger；桥只关闭自己开启的同一 generation；`/5` 以稳定 AUMID 成对切换/恢复六路应用 endpoint 与 `_p`，语音时自动打开实时快照查看器。
+- **怎么验的**：候选清单、包内双 self-test、安装路径哈希、唯一 localhost listener/MCP 注册均通过；无音频可逆烟测实际切换后 12 个路由值逐字恢复，事务日志清除。
+- **安装事实**：配置已迁移为 `/5 + snapshot-mcp`，计划任务 Running，服务为 `idle / readerConnected=false / captureActive=false`，Voice inactive、typist=0；永久回滚目录为 `C:\Users\bwica\bw-computer-voice-bridge-backups\install-0.1.18-20260730T032037985Z-f06aea0f`。
+- **没做/下一步**：未自动 START、采音或发快捷键，未改日常 Chrome，源码未提交/推送、Reader/Pi 未部署；下一步由用户在 iPad 点电话按钮验收自动开启、双向音频、查看器与 STOP 恢复。
+
+## Codex：Windows direct 0.1.19 修复音量合成器重置后的首用路由（2026-07-30 JST）
+- **根因/改动**：Windows 路由根为空时旧版把“应用键缺失”当读取失败并在快捷键前停止；新版将六路视为 `unset`，首个有事务日志的写入才创建并核验 Codex AUMID 身份键，停止后保留空身份键。
+- **怎么验的**：编译与完整 self-test、不可变候选校验及包内双 self-test通过；安装后只读探针六路均为 `Unset`、无 `Error`，且 `audioRouteMutated/captureStarted/shortcutSent/appLaunched` 全为 false。
+- **安装事实**：0.1.19 摘要匹配，任务 Running，唯一 listener 与新 PID `26016` 一致，状态 `idle / readerConnected=false / captureActive=false / lastError=null`；回滚目录 `C:\Users\bwica\bw-computer-voice-bridge-backups\install-0.1.19-20260730T040839492Z-a5ef52d7`。
+- **边界/下一步**：首次安装尝试因临时安装器整数溢出已完整回滚并保留取证目录；未自动 START、采音或发快捷键，未提交/推送或部署 Pi，下一步由用户从 iPad 点通话验收 GPT 合成器出现、双向音频及 STOP 恢复。
+
+## Codex：Windows direct 0.1.20 启动时序稳定候选（2026-07-30 JST，尚未安装）
+- **改了什么**：将 Voice 最长 5 秒确认期间的回执前 PCM 从误用 400 ms 实时窗口改为独立 6 秒有界缓冲；START 早期 terminal failure 优先保留真实码，并改走完整 owner-aware 清理。
+- **怎么验的**：Release build 0 warning/error，native self-test、不可变候选 verify 与 packaged self-test 均通过；新增真实错误保留和 bootstrap 窗口合同。
+- **现场证据**：未换版本前用户重试 0.1.19 已成功，状态现场为 `active / readerConnected=true / captureActive=true` 且 Voice ledger active，证明端点、六路路由和快捷键固定链可用，故障属于间歇启动竞态。
+- **没做/下一步**：为避免打断当前成功通话，0.1.20 只生成候选未安装；未提交、推送、部署 Pi，待通话停止后本机原子替换并由用户再点一次验收。
+
+## Codex：Windows direct 0.1.21 本地页正文与实时查看器已安装（2026-07-30 JST）
+- **改了什么**：快照按 PWA 的真实卷相对路径与 1-based 页码从 `C:\obsidian` 本地 PDF 解析正文；合并 focus/选区、绘图/嵌入白名单、语音历史只读展示，并保留 0.1.20 的 6 秒启动缓冲与 Voice activity 门。
+- **怎么验的**：Release build 0 warning/error，不可变候选 verify 与包内/安装路径 self-test 全过；安装未启动音频，服务恢复为 `idle / captureActive=false`。
+- **安装事实**：native 摘要为 `aa9e8ae2888ce6498276d4b2df657a3beac4a93628066e9df23c98cb5fba3ccc`，永久回滚目录为 `C:\Users\bwica\bw-computer-voice-bridge-backups\install-0.1.21-20260730T053248760Z-ac09a141`。
+- **未完成/下一步**：14:07 后 PWA/Pi/Windows 都没有新活动页事件，旧正文按三分钟规则被 MCP 清空；需 iPad PWA 前台产生一次真实页码/选区事件，再验收本地解析正文即时出现。

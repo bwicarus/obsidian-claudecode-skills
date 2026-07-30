@@ -20,6 +20,10 @@ internal static class ContractSelfTest
         CheckExplicitMicrophoneLifecycle(checks);
         CheckVirtualMicrophoneRenderContract(checks);
         CheckInteropVtables(checks);
+        PerAppAudioRouteSelfTest.Run(checks);
+        CodexVoiceActivitySelfTest.Run(checks);
+        CodexVoiceHistorySelfTest.Run(checks);
+        LocalBookPageResolverSelfTest.Run(checks);
         DirectBridgeSelfTest.Run(checks);
 
         return new

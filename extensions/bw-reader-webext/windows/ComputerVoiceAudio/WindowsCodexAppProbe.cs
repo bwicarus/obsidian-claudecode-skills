@@ -44,12 +44,6 @@ internal readonly record struct VoiceShortcutInteropLayout(
 
 internal static class WindowsCodexAppProbe
 {
-    // The packaged app currently exposes only the observed START shortcut to
-    // this bridge.  There is no locally verified, ownership-safe application
-    // voice stop primitive.  Bridge STOP must not guess that sending the same
-    // shortcut a second time is a safe toggle.
-    internal static bool SupportsOwnedVoiceStop => false;
-
     private const uint SnapshotProcesses = 0x00000002;
     private const uint KeyEventKeyUp = 0x0002;
     private const ushort VirtualKeyControl = 0x11;

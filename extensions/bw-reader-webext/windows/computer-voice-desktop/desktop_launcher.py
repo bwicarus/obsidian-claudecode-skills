@@ -12,6 +12,7 @@ from typing import Any, Callable, ContextManager
 from bridge_core import (
     BridgeError,
     BridgePaths,
+    CaptureEndpoint,
     CONTEXT_DELIVERY_LEGACY,
     CONTEXT_DELIVERY_MODES,
     CONTEXT_DELIVERY_SNAPSHOT,
@@ -27,6 +28,7 @@ from bridge_core import (
     WindowsProcessRunner,
     build_self_test_report,
     disable_and_stop_direct_service,
+    enumerate_active_capture_endpoints,
     enumerate_active_render_endpoints,
     legacy_microphone_config_requires_migration,
     load_direct_config,
@@ -53,6 +55,7 @@ from control_plane import (
 
 APP_TITLE = "电脑客户端桥接器"
 APP_VERSION = "0.7.0-snapshot-mcp-source"
+LEGACY_CAPTURE_OPTION = "不启用自动路由（兼容 /4）"
 
 
 class BridgeWindow:
@@ -83,6 +86,9 @@ class BridgeWindow:
         render_endpoint_provider: (
             Callable[[], list[RenderEndpoint]] | None
         ) = None,
+        capture_endpoint_provider: (
+            Callable[[], list[CaptureEndpoint]] | None
+        ) = None,
     ) -> None:
         self.root = root
         self.paths = paths or BridgePaths.discover()
@@ -99,13 +105,19 @@ class BridgeWindow:
                 self.paths.native_host
             )
         )
+        self.capture_endpoint_provider = capture_endpoint_provider or (
+            lambda: enumerate_active_capture_endpoints(
+                self.paths.native_host
+            )
+        )
         self.render_endpoints: list[RenderEndpoint] = []
+        self.capture_endpoints: list[CaptureEndpoint] = []
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.busy = False
 
         root.title(APP_TITLE)
-        root.geometry("700x1040")
-        root.minsize(640, 900)
+        root.geometry("700x1140")
+        root.minsize(640, 960)
         root.configure(bg="#eef2f7")
 
         style = ttk.Style(root)
@@ -219,7 +231,36 @@ class BridgeWindow:
             config_frame,
             text=(
                 "A 的播放端接收 Reader 网页麦克风；"
-                "请在 Codex 中选择 A 的 recording side 作为输入。"
+                "它与下面的 A 录音端是两个独立 MMDevice ID。"
+            ),
+            foreground="#44546a",
+            wraplength=590,
+        ).pack(anchor="w", pady=(4, 0))
+
+        virtual_microphone_capture_row = ttk.Frame(config_frame)
+        virtual_microphone_capture_row.pack(fill="x", pady=(9, 0))
+        ttk.Label(
+            virtual_microphone_capture_row,
+            text="Codex 麦克风输入",
+            width=14,
+        ).pack(side="left")
+        self.virtual_microphone_capture_combo = ttk.Combobox(
+            virtual_microphone_capture_row,
+            state="readonly",
+            width=49,
+        )
+        self.virtual_microphone_capture_combo.pack(
+            side="left",
+            fill="x",
+            expand=True,
+        )
+        ttk.Label(
+            config_frame,
+            text=(
+                "明确选择 A 的录音端（eCapture）。"
+                "桥接器不会从 A 的播放端 ID 推导它；"
+                "选中后保存 /5 并为 Codex 自动切换输入。"
+                "选择“兼容 /4”时，经确认保存且自动音频路由不会启用。"
             ),
             foreground="#44546a",
             wraplength=590,
@@ -248,12 +289,19 @@ class BridgeWindow:
                 "B 是 Codex 应用的固定输出目标；bridge 不向 B 写入，"
                 "只捕获 Codex 进程树。B 的录音侧不接物理扬声器，"
                 "因此远端电脑不会从真实扬声器发声。端点存在并不代表"
-                " Codex 已路由到 B；需要在 Windows 音量混合器中"
-                "一次性把 Codex/ChatGPT 输出选为 B。"
+                " Codex 已路由到 B；/5 会用按应用内部接口临时切换"
+                " Codex 输入/输出并在结束后恢复，/4 才需手工设置。"
             ),
             foreground="#44546a",
             wraplength=590,
         ).pack(anchor="w", pady=(4, 0))
+        self.audio_route_status = ttk.Label(
+            config_frame,
+            text="○ Codex 自动音频路由：读取中",
+            foreground="#6b7280",
+            wraplength=590,
+        )
+        self.audio_route_status.pack(anchor="w", pady=(7, 0))
         self.audio_settings_button = ttk.Button(
             config_frame,
             text="打开 Windows 音量混合器",
@@ -469,6 +517,21 @@ class BridgeWindow:
             raise BridgeError("虚拟麦克风 A 与虚拟扬声器 B 不能相同。")
         return virtual_microphone, virtual_speaker
 
+    def selected_virtual_microphone_capture_endpoint(
+        self,
+    ) -> CaptureEndpoint | None:
+        capture_index = self.virtual_microphone_capture_combo.current()
+        if capture_index == 0:
+            return None
+        if (
+            capture_index < 1
+            or capture_index > len(self.capture_endpoints)
+        ):
+            raise BridgeError(
+                "Codex 虚拟麦克风输入选择已失效，请刷新后重选。"
+            )
+        return self.capture_endpoints[capture_index - 1]
+
     def selected_context_delivery_mode(self) -> str:
         selector = getattr(self, "context_delivery_mode", None)
         if selector is None:
@@ -481,7 +544,7 @@ class BridgeWindow:
     @staticmethod
     def _restore_combo_selection(
         combo: ttk.Combobox,
-        endpoints: list[RenderEndpoint],
+        endpoints: list[RenderEndpoint] | list[CaptureEndpoint],
         selected_id: str,
     ) -> None:
         combo.configure(
@@ -518,6 +581,79 @@ class BridgeWindow:
             self.render_endpoints,
             virtual_speaker_id,
         )
+
+    def _refresh_capture_endpoints(
+        self,
+        virtual_microphone_capture_id: str = "",
+    ) -> None:
+        self.capture_endpoints = self.capture_endpoint_provider()
+        self.virtual_microphone_capture_combo.configure(
+            values=[
+                LEGACY_CAPTURE_OPTION,
+                *[
+                    item.display_name
+                    for item in self.capture_endpoints
+                ],
+            ]
+        )
+        if not virtual_microphone_capture_id:
+            self.virtual_microphone_capture_combo.current(0)
+            return
+        index = next(
+            (
+                item_index
+                for item_index, item in enumerate(
+                    self.capture_endpoints
+                )
+                if item.endpoint_id
+                    == virtual_microphone_capture_id
+            ),
+            -1,
+        )
+        if index >= 0:
+            self.virtual_microphone_capture_combo.current(index + 1)
+        else:
+            # A configured /5 capture endpoint that is currently inactive
+            # is not the same as an explicit legacy /4 choice.
+            self.virtual_microphone_capture_combo.set("")
+
+    def _render_audio_route_config_status(
+        self,
+        config: dict[str, Any] | None,
+    ) -> None:
+        if config and config.get(
+            "virtualMicrophoneCaptureEndpointId"
+        ):
+            capture_id = str(
+                config["virtualMicrophoneCaptureEndpointId"]
+            )
+            if any(
+                item.endpoint_id == capture_id
+                for item in self.capture_endpoints
+            ):
+                self.audio_route_status.configure(
+                    text=(
+                        "● Codex 自动音频路由：已启用（/5，"
+                        "显式 eCapture；通话结束恢复原选择）"
+                    ),
+                    foreground="#167347",
+                )
+            else:
+                self.audio_route_status.configure(
+                    text=(
+                        "⚠ Codex 自动音频路由：/5 已配置，但"
+                        " eCapture 当前不在 Active 列表；启动将拒绝"
+                    ),
+                    foreground="#9a6700",
+                )
+        else:
+            self.audio_route_status.configure(
+                text=(
+                    "○ Codex 自动音频路由：未启用（/4 兼容模式；"
+                    "请选择 Codex 麦克风输入后重新保存）"
+                ),
+                foreground="#9a6700",
+            )
 
     @staticmethod
     def _status_text(
@@ -585,6 +721,15 @@ class BridgeWindow:
             str(config.get("virtualSpeakerRenderEndpointId", ""))
             if config else ""
         )
+        selected_capture_id = (
+            str(
+                config.get(
+                    "virtualMicrophoneCaptureEndpointId",
+                    "",
+                )
+            )
+            if config else ""
+        )
         if config:
             self.context_delivery_mode.set(
                 str(config["contextDeliveryMode"])
@@ -601,10 +746,20 @@ class BridgeWindow:
             previous_speaker = self.render_endpoints[
                 speaker_index
             ].endpoint_id
+        previous_capture = ""
+        capture_index = self.virtual_microphone_capture_combo.current()
+        if 1 <= capture_index <= len(self.capture_endpoints):
+            previous_capture = self.capture_endpoints[
+                capture_index - 1
+            ].endpoint_id
         self._refresh_render_endpoints(
             selected_microphone_id or previous_microphone,
             selected_speaker_id or previous_speaker,
         )
+        self._refresh_capture_endpoints(
+            selected_capture_id or previous_capture,
+        )
+        self._render_audio_route_config_status(config)
         migration_required = legacy_microphone_config_requires_migration(
             self.paths
         )
@@ -661,6 +816,9 @@ class BridgeWindow:
             virtual_microphone, virtual_speaker = (
                 self.selected_virtual_endpoints()
             )
+            virtual_microphone_capture = (
+                self.selected_virtual_microphone_capture_endpoint()
+            )
             context_delivery_mode = (
                 self.selected_context_delivery_mode()
             )
@@ -671,10 +829,23 @@ class BridgeWindow:
             self.paths
         )
         if not self._confirm_mutation(
-            "保存并启用本机配置",
+            (
+                "保存并启用本机配置"
+                if virtual_microphone_capture is not None
+                else "保存 /4 兼容配置（自动路由未启用）"
+            ),
             (
                 "将写入两个互不相同的 Active eRender 端点、"
-                "固定 Reader HTTPS 来源、"
+                + (
+                    "一个另行明确选择的 Active eCapture 端点，"
+                    "并保存 strict /5；Codex 输入/输出将按应用"
+                    "自动切换且结束后恢复；"
+                    if virtual_microphone_capture is not None
+                    else
+                    "但未选择 Codex 虚拟麦克风输入；将明确保存"
+                    "兼容 /4，按应用自动路由不会启用；"
+                )
+                + "固定 Reader HTTPS 来源、"
                 "127.0.0.1:43128 和 process-only 边界；"
                 "单用户实验模式会固定启用且无需配对；"
                 f"上下文交付模式将设为 {context_delivery_mode}；"
@@ -689,20 +860,39 @@ class BridgeWindow:
 
         def action() -> dict[str, Any]:
             active = self.render_endpoint_provider()
+            active_capture = (
+                self.capture_endpoint_provider()
+                if virtual_microphone_capture is not None
+                else None
+            )
             return save_enabled_config(
                 self.paths,
                 virtual_microphone,
                 virtual_speaker,
                 active_render_endpoints=active,
+                active_capture_endpoints=active_capture,
                 allow_legacy_migration=legacy_migration,
                 context_delivery_mode=context_delivery_mode,
+                virtual_microphone_capture_endpoint_id=(
+                    virtual_microphone_capture.endpoint_id
+                    if virtual_microphone_capture is not None
+                    else None
+                ),
             )
 
-        def success(_: dict[str, Any]) -> None:
+        def success(saved: dict[str, Any]) -> None:
             self.refresh_static()
             self.footer.configure(
                 text=(
-                    "配置已启用；没有启动服务、采音、GPT 或快捷键。"
+                    "配置已启用；"
+                    + (
+                        "Codex 按应用自动音频路由已启用；"
+                        if saved.get(
+                            "virtualMicrophoneCaptureEndpointId"
+                        )
+                        else "当前为 /4 兼容模式，自动音频路由未启用；"
+                    )
+                    + "没有启动服务、采音、GPT 或快捷键。"
                 )
             )
 
@@ -745,6 +935,9 @@ class BridgeWindow:
             virtual_microphone, virtual_speaker = (
                 self.selected_virtual_endpoints()
             )
+            virtual_microphone_capture = (
+                self.selected_virtual_microphone_capture_endpoint()
+            )
             context_delivery_mode = (
                 self.selected_context_delivery_mode()
             )
@@ -755,10 +948,21 @@ class BridgeWindow:
             self.paths
         )
         if not self._confirm_mutation(
-            "启用并启动空闲直连服务",
+            (
+                "启用并启动空闲直连服务"
+                if virtual_microphone_capture is not None
+                else "以 /4 兼容模式启动（自动路由未启用）"
+            ),
             (
                 "先原子保存两个虚拟播放端点并写入 localOptIn=true；"
-                f"上下文交付模式为 {context_delivery_mode}；"
+                + (
+                    "另行选择的虚拟麦克风 eCapture 将启用 /5 "
+                    "按应用自动路由；"
+                    if virtual_microphone_capture is not None
+                    else "未选择虚拟麦克风 eCapture，将明确使用 /4，"
+                    "按应用自动路由不会启用；"
+                )
+                + f"上下文交付模式为 {context_delivery_mode}；"
                 + (
                     "旧 microphoneEndpointId 将被明确替换；"
                     if legacy_migration else ""
@@ -782,13 +986,24 @@ class BridgeWindow:
                     "拒绝启用或旁路启动。"
                 )
             active = self.render_endpoint_provider()
+            active_capture = (
+                self.capture_endpoint_provider()
+                if virtual_microphone_capture is not None
+                else None
+            )
             save_enabled_config(
                 self.paths,
                 virtual_microphone,
                 virtual_speaker,
                 active_render_endpoints=active,
+                active_capture_endpoints=active_capture,
                 allow_legacy_migration=legacy_migration,
                 context_delivery_mode=context_delivery_mode,
+                virtual_microphone_capture_endpoint_id=(
+                    virtual_microphone_capture.endpoint_id
+                    if virtual_microphone_capture is not None
+                    else None
+                ),
             )
             if run_bootstrap_task_if_owned(
                 self.paths,

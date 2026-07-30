@@ -17,6 +17,7 @@ sys.path.insert(0, str(SOURCE_ROOT))
 from bridge_core import (  # noqa: E402
     BridgeError,
     BridgePaths,
+    CaptureEndpoint,
     DIRECT_CONFIG_CONTRACT,
     FIXED_ALLOWED_TAILSCALE_USER_LOGIN,
     DIRECT_STATUS_CONTRACT,
@@ -36,6 +37,7 @@ from bridge_core import (  # noqa: E402
     build_tailscale_command_plan,
     disable_and_stop_direct_service,
     disable_config,
+    enumerate_active_capture_endpoints,
     enumerate_active_render_endpoints,
     legacy_microphone_config_requires_migration,
     load_direct_config,
@@ -51,12 +53,19 @@ from bridge_core import (  # noqa: E402
 
 NOW = datetime(2026, 7, 29, 4, 30, tzinfo=timezone.utc)
 VIRTUAL_MICROPHONE = RenderEndpoint(
-    "{explicit-virtual-microphone-render-endpoint}",
+    "{0.0.0.00000000}.{11111111-1111-1111-1111-111111111111}",
     "Virtual microphone A",
 )
 VIRTUAL_SPEAKER = RenderEndpoint(
-    "{explicit-virtual-speaker-render-endpoint}",
+    "{0.0.0.00000000}.{33333333-3333-3333-3333-333333333333}",
     "Virtual speaker B",
+)
+VIRTUAL_MICROPHONE_CAPTURE = (
+    "{0.0.1.00000000}.{22222222-2222-2222-2222-222222222222}"
+)
+VIRTUAL_MICROPHONE_CAPTURE_DEVICE = CaptureEndpoint(
+    VIRTUAL_MICROPHONE_CAPTURE,
+    "Virtual microphone A recording side",
 )
 
 
@@ -149,11 +158,18 @@ class DirectDesktopCoreTests(unittest.TestCase):
             VIRTUAL_MICROPHONE.endpoint_id,
             VIRTUAL_SPEAKER.endpoint_id,
             self.paths.runtime_status,
+            virtual_microphone_capture_endpoint_id=(
+                VIRTUAL_MICROPHONE_CAPTURE
+            ),
         )
         self.assertEqual(value["contract"], DIRECT_CONFIG_CONTRACT)
         self.assertEqual(
             value["contract"],
-            "reader-computer-voice-direct-config/4",
+            "reader-computer-voice-direct-config/5",
+        )
+        self.assertEqual(
+            value["virtualMicrophoneCaptureEndpointId"],
+            VIRTUAL_MICROPHONE_CAPTURE,
         )
         self.assertEqual(value["contextDeliveryMode"], "legacy-inject")
         self.assertEqual(value["listenHost"], FIXED_LISTEN_HOST)
@@ -185,11 +201,14 @@ class DirectDesktopCoreTests(unittest.TestCase):
                 allowed_origins=["https://user@example.test"],
             )
 
-    def test_v3_config_requires_explicit_single_user_true(self) -> None:
+    def test_v5_config_requires_explicit_single_user_true(self) -> None:
         invalid = build_direct_config(
             VIRTUAL_MICROPHONE.endpoint_id,
             VIRTUAL_SPEAKER.endpoint_id,
             self.paths.runtime_status,
+            virtual_microphone_capture_endpoint_id=(
+                VIRTUAL_MICROPHONE_CAPTURE
+            ),
         )
         invalid.pop("experimentalSingleUserMode")
         with self.assertRaises(BridgeError):
@@ -200,6 +219,184 @@ class DirectDesktopCoreTests(unittest.TestCase):
                 VIRTUAL_SPEAKER.endpoint_id,
                 self.paths.runtime_status,
                 experimental_single_user_mode=False,
+                virtual_microphone_capture_endpoint_id=(
+                    VIRTUAL_MICROPHONE_CAPTURE
+                ),
+            )
+
+    def test_v4_loads_without_enabling_or_inventing_capture(self) -> None:
+        legacy = build_direct_config(
+            VIRTUAL_MICROPHONE.endpoint_id,
+            VIRTUAL_SPEAKER.endpoint_id,
+            self.paths.runtime_status,
+        )
+        self.assertEqual(
+            legacy["contract"],
+            "reader-computer-voice-direct-config/4",
+        )
+        self.assertNotIn(
+            "virtualMicrophoneCaptureEndpointId",
+            legacy,
+        )
+        self.paths.direct_config.write_text(
+            json.dumps(legacy),
+            encoding="utf-8",
+        )
+        loaded = load_direct_config(self.paths)
+        self.assertIsNotNone(loaded)
+        self.assertEqual(
+            loaded["contract"],
+            "reader-computer-voice-direct-config/4",
+        )
+        self.assertNotIn(
+            "virtualMicrophoneCaptureEndpointId",
+            loaded,
+        )
+
+    def test_v5_rejects_cross_flow_or_missing_capture(self) -> None:
+        value = build_direct_config(
+            VIRTUAL_MICROPHONE.endpoint_id,
+            VIRTUAL_SPEAKER.endpoint_id,
+            self.paths.runtime_status,
+            virtual_microphone_capture_endpoint_id=(
+                VIRTUAL_MICROPHONE_CAPTURE
+            ),
+        )
+        with self.assertRaisesRegex(BridgeError, "eCapture"):
+            validate_direct_config(
+                {
+                    **value,
+                    "virtualMicrophoneCaptureEndpointId":
+                        VIRTUAL_MICROPHONE.endpoint_id,
+                }
+            )
+        with self.assertRaises(BridgeError):
+            validate_direct_config(
+                {
+                    key: item
+                    for key, item in value.items()
+                    if key != "virtualMicrophoneCaptureEndpointId"
+                }
+            )
+        with self.assertRaisesRegex(BridgeError, "eRender"):
+            validate_direct_config(
+                {
+                    **value,
+                    "virtualSpeakerRenderEndpointId":
+                        VIRTUAL_MICROPHONE_CAPTURE,
+                }
+            )
+
+    def test_saving_existing_v5_preserves_explicit_capture(self) -> None:
+        value = build_direct_config(
+            VIRTUAL_MICROPHONE.endpoint_id,
+            VIRTUAL_SPEAKER.endpoint_id,
+            self.paths.runtime_status,
+            virtual_microphone_capture_endpoint_id=(
+                VIRTUAL_MICROPHONE_CAPTURE
+            ),
+        )
+        self.paths.direct_config.write_text(
+            json.dumps(value),
+            encoding="utf-8",
+        )
+        saved = save_enabled_config(
+            self.paths,
+            VIRTUAL_MICROPHONE,
+            VIRTUAL_SPEAKER,
+            active_render_endpoints=[
+                VIRTUAL_MICROPHONE,
+                VIRTUAL_SPEAKER,
+            ],
+        )
+        self.assertEqual(saved["contract"], DIRECT_CONFIG_CONTRACT)
+        self.assertEqual(
+            saved["virtualMicrophoneCaptureEndpointId"],
+            VIRTUAL_MICROPHONE_CAPTURE,
+        )
+
+    def test_changing_render_a_does_not_reuse_old_capture(self) -> None:
+        value = build_direct_config(
+            VIRTUAL_MICROPHONE.endpoint_id,
+            VIRTUAL_SPEAKER.endpoint_id,
+            self.paths.runtime_status,
+            virtual_microphone_capture_endpoint_id=(
+                VIRTUAL_MICROPHONE_CAPTURE
+            ),
+        )
+        self.paths.direct_config.write_text(
+            json.dumps(value),
+            encoding="utf-8",
+        )
+        replacement = RenderEndpoint(
+            "{0.0.0.00000000}."
+            "{66666666-6666-6666-6666-666666666666}",
+            "Replacement virtual microphone A",
+        )
+        saved = save_enabled_config(
+            self.paths,
+            replacement,
+            VIRTUAL_SPEAKER,
+            active_render_endpoints=[
+                replacement,
+                VIRTUAL_SPEAKER,
+            ],
+        )
+        self.assertEqual(
+            saved["contract"],
+            "reader-computer-voice-direct-config/4",
+        )
+        self.assertNotIn(
+            "virtualMicrophoneCaptureEndpointId",
+            saved,
+        )
+
+    def test_explicit_legacy_choice_downgrades_existing_v5(self) -> None:
+        value = build_direct_config(
+            VIRTUAL_MICROPHONE.endpoint_id,
+            VIRTUAL_SPEAKER.endpoint_id,
+            self.paths.runtime_status,
+            virtual_microphone_capture_endpoint_id=(
+                VIRTUAL_MICROPHONE_CAPTURE
+            ),
+        )
+        self.paths.direct_config.write_text(
+            json.dumps(value),
+            encoding="utf-8",
+        )
+        saved = save_enabled_config(
+            self.paths,
+            VIRTUAL_MICROPHONE,
+            VIRTUAL_SPEAKER,
+            active_render_endpoints=[
+                VIRTUAL_MICROPHONE,
+                VIRTUAL_SPEAKER,
+            ],
+            virtual_microphone_capture_endpoint_id=None,
+        )
+        self.assertEqual(
+            saved["contract"],
+            "reader-computer-voice-direct-config/4",
+        )
+        self.assertNotIn(
+            "virtualMicrophoneCaptureEndpointId",
+            saved,
+        )
+
+    def test_explicit_capture_must_still_be_active_when_checked(self) -> None:
+        with self.assertRaisesRegex(BridgeError, "不再是 Active"):
+            save_enabled_config(
+                self.paths,
+                VIRTUAL_MICROPHONE,
+                VIRTUAL_SPEAKER,
+                active_render_endpoints=[
+                    VIRTUAL_MICROPHONE,
+                    VIRTUAL_SPEAKER,
+                ],
+                active_capture_endpoints=[],
+                virtual_microphone_capture_endpoint_id=(
+                    VIRTUAL_MICROPHONE_CAPTURE
+                ),
             )
 
     def test_microphone_endpoint_id_is_preserved_exactly(self) -> None:
@@ -370,6 +567,83 @@ class DirectDesktopCoreTests(unittest.TestCase):
         ):
             self.assertEqual(
                 enumerate_active_render_endpoints(
+                    self.paths.native_host
+                ),
+                [],
+            )
+
+    def test_capture_discovery_uses_native_core_audio_ids(self) -> None:
+        payload = json.dumps(
+            {
+                "contract":
+                    "reader-computer-voice-microphones/1",
+                "ok": True,
+                "captureStarted": False,
+                "devices": [
+                    {
+                        "endpointId": VIRTUAL_MICROPHONE_CAPTURE,
+                        "friendlyName": "Virtual Cable A",
+                    }
+                ],
+            },
+            ensure_ascii=False,
+        )
+        with patch(
+            "bridge_core.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=payload,
+                stderr="",
+            ),
+        ) as run:
+            devices = enumerate_active_capture_endpoints(
+                self.paths.native_host
+            )
+        self.assertEqual(
+            devices,
+            [
+                CaptureEndpoint(
+                    VIRTUAL_MICROPHONE_CAPTURE,
+                    "Virtual Cable A",
+                )
+            ],
+        )
+        self.assertEqual(
+            run.call_args.args[0],
+            (
+                str(self.paths.native_host.resolve()),
+                "--list-direct-microphones",
+            ),
+        )
+        self.assertIs(run.call_args.kwargs["shell"], False)
+
+    def test_capture_discovery_rejects_render_flow_id(self) -> None:
+        payload = json.dumps(
+            {
+                "contract":
+                    "reader-computer-voice-microphones/1",
+                "ok": True,
+                "captureStarted": False,
+                "devices": [
+                    {
+                        "endpointId": VIRTUAL_MICROPHONE.endpoint_id,
+                        "friendlyName": "Wrong flow",
+                    }
+                ],
+            }
+        )
+        with patch(
+            "bridge_core.subprocess.run",
+            return_value=subprocess.CompletedProcess(
+                args=[],
+                returncode=0,
+                stdout=payload,
+                stderr="",
+            ),
+        ):
+            self.assertEqual(
+                enumerate_active_capture_endpoints(
                     self.paths.native_host
                 ),
                 [],

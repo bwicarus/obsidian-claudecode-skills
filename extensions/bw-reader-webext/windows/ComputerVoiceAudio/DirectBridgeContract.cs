@@ -6,9 +6,9 @@ internal static class DirectBridgeContract
 {
     internal const string Contract = "reader-computer-voice-direct/1";
     internal const string ConfigContract =
-        "reader-computer-voice-direct-config/4";
+        "reader-computer-voice-direct-config/5";
     internal const string LegacyConfigContract =
-        "reader-computer-voice-direct-config/3";
+        "reader-computer-voice-direct-config/4";
     internal const string RuntimeStatusContract =
         "reader-computer-voice-direct-runtime-status/2";
     internal const string ListenHost = "127.0.0.1";

@@ -35,6 +35,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     private readonly string _serviceInstanceId;
     private readonly DirectRuntimeStatusWriter _statusWriter;
     private readonly DirectServiceLease _serviceLease;
+    private readonly DirectSnapshotViewer _snapshotViewer;
     private readonly object _runtimeStateGate = new();
     private string _runtimeState = "starting";
     private bool _runtimeReaderConnected;
@@ -65,6 +66,12 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         _serviceLease = new DirectServiceLease(
             configStore.InstallationRoot,
             configStore.Path);
+        _snapshotViewer = new DirectSnapshotViewer(
+            Path.Combine(
+                configStore.InstallationRoot,
+                "runtime",
+                FileDirectSnapshotContextAdapter.SnapshotFileName),
+            config.ListenPort);
     }
 
     internal async Task<int> RunAsync(CancellationToken cancellationToken)
@@ -105,6 +112,15 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         app.MapGet(
             "/healthz",
             context => HandleHealthAsync(context, cancellationToken));
+        app.MapGet(
+            DirectSnapshotViewer.ViewerPath,
+            _snapshotViewer.HandleViewerAsync);
+        app.MapGet(
+            DirectSnapshotViewer.SnapshotPath,
+            _snapshotViewer.HandleSnapshotAsync);
+        app.MapGet(
+            DirectSnapshotViewer.MarkdownPath,
+            _snapshotViewer.HandleMarkdownAsync);
         app.Map(
             "/reader-computer-voice/v1",
             context => HandleBridgeAsync(context, cancellationToken));
@@ -612,6 +628,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                         ?? throw new DirectProtocolException(
                             "BW_COMPUTER_VOICE_DIRECT_UPLINK_NOT_ACTIVE",
                             "浏览器麦克风上行尚未启动"));
+                    _snapshotViewer.OpenIfSnapshotMode(
+                        _configStore.Load().ContextDeliveryMode);
                 }
                 else if (
                     phaseBeforeMessage == DirectProtocolPhase.Active
@@ -1213,8 +1231,15 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             // uses one await-using disposal call in production, so that one
             // call must consume the retry budget itself.
             _disposed = true;
-            await DisposeCoordinatorWithBoundedRetryAsync()
-                .ConfigureAwait(false);
+            try
+            {
+                await DisposeCoordinatorWithBoundedRetryAsync()
+                    .ConfigureAwait(false);
+            }
+            finally
+            {
+                _snapshotViewer.Dispose();
+            }
             _connectionGate.Dispose();
             _disposeCompleted = true;
         }
