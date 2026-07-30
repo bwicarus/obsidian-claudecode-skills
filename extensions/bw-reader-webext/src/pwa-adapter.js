@@ -58,6 +58,7 @@
       ? Object.assign({}, st.capabilities) : {};
     PwaAdapter.kind = 'pwa-' + hostMode;
     PwaAdapter.config = adapterConfig();
+    configureVoiceLog();
   }
 
   function refreshContext() {
@@ -110,6 +111,38 @@
     if (kind === 'chat') return epub ? '/pdf/api/epub-assistant' : '/api/assistant/chat';
     if (kind === 'history') return epub ? '/pdf/api/epub-convo?file=' + file : '/api/assistant/history';
     return epub ? '/pdf/api/epub-convo/clear?file=' + file : '/api/assistant/clear';
+  }
+  function epubVoiceLog(q, a, page) {
+    var send = window.__bwReaderFetch || window.fetch;
+    if (typeof send !== 'function') return;
+    [['user', q], ['assistant', a]].forEach(function (part) {
+      if (!part[1]) return;
+      try {
+        Promise.resolve(send.call(window, '/pdf/api/epub-convo/append', {
+          method: 'POST',
+          headers: {'Content-Type':'application/json'},
+          keepalive: true,
+          body: JSON.stringify({
+            file: fileInfo().file || '',
+            role: part[0],
+            content: String(part[1]).slice(0, 4000),
+            section: (page || 1) - 1
+          })
+        })).catch(noop);
+      } catch (_) {}
+    });
+  }
+  function configureVoiceLog() {
+    var asst = PwaAdapter && PwaAdapter._host && PwaAdapter._host.asst;
+    if (!asst) return;
+    if (hostMode === 'epub' || hostMode === 'favorite') {
+      // EPUB/Favorite 的历史按书保存，复用原生阅读器既有 append 端点。
+      asst.voiceLog = epubVoiceLog;
+    } else {
+      // PDF/HTML 不提供自定义钩子：让 rc-assistant 的默认 /api/assistant/log
+      // 保存 user + assistant + turn_id + parts。truthy noop 会把这条完整路径吞掉。
+      delete asst.voiceLog;
+    }
   }
   var PwaAdapter = {
     kind: 'pwa-' + hostMode,
@@ -200,7 +233,7 @@
       },
       prewarm: function (off) { try { window.__bwReaderFetch('/api/assistant/prewarm', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify(off ? {off:1} : {}) }); } catch (_) {} },
       getPaidNoted: function () { return !!window.__paidNoted; }, setPaidNoted: function (v) { window.__paidNoted = v; },
-      showAction: function () { return null; }, queueAction: noop, taskAction: noop, voiceLog: noop,
+      showAction: function () { return null; }, queueAction: noop, taskAction: noop,
       mountPanel: function () { return shadow ? shadow.getElementById('ep-side') : null; },
       mountTabs: function () { return shadow ? shadow.getElementById('ep-side-tabs') : null; },
       hlUrl: highlightUrl,
@@ -211,6 +244,7 @@
       clearUrl: function () { return assistantUrl('clear'); }
     }}
   };
+  configureVoiceLog();
 
   function bindBridgeActions() {
     if (hasCapability('highlight') || hasCapability('pdfHighlight')) RC.actions.bind('highlight.save', function (p) { return bridge.local('highlight', p); }, { owner: 'pwa', runtime: 'extension', storage: 'book-sidecar' });
