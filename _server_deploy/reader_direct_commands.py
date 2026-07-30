@@ -46,6 +46,7 @@ ACTIONS: dict[str, dict] = {
     "vocab.add":        {"target": (),               "desc": "加生词(ECDICT/unidic 确定性词典 + 写 vault)"},
     "recall.creation":  {"target": (),               "desc": "召回本地创造物注册表(纸/报告/搜索/翻译等的句柄与内容;引用型只回 ref 不解引用)"},
     "recall.notes":     {"target": (),               "desc": "召回已学内容(知识索引/已学 KG 节点/Anki);query 必填,不扫 raw vault、不联网、不调 AI"},
+    "result.present":   {"target": ("file", "page"), "desc": "把上游已完成的 reader-result 展示卡写回阅读器;只渲染,不调 AI"},
 }
 MODES = ("independent", "dependent")
 _MAX_STEPS = 20
@@ -100,6 +101,30 @@ def validate(cmd: dict) -> dict:
                 raise CommandError(f"steps[{i}].precondition 必须是对象")
             one["precondition"] = st["precondition"]
         norm_steps.append(one)
+    result_steps = [
+        (i, step)
+        for i, step in enumerate(norm_steps)
+        if step["action"] == "result.present"
+    ]
+    if result_steps:
+        if len(norm_steps) != 1 or mode != "independent":
+            raise CommandError(
+                "result.present 必须是 independent 独立单步命令")
+        i, result_step = result_steps[0]
+        turn_id = str(result_step["params"].get("turnId") or "").strip()
+        if turn_id != corr:
+            raise CommandError(
+                f"steps[{i}](result.present).params.turnId "
+                "必须与 correlation 完全相同")
+        step_key = str(result_step.get("idempotency") or "")
+        if step_key and step_key != corr:
+            raise CommandError(
+                f"steps[{i}](result.present).idempotency "
+                "必须与 correlation 完全相同")
+        command_key = str(cmd.get("idempotency") or "")
+        if command_key and command_key != corr:
+            raise CommandError(
+                "result.present.idempotency 必须与 correlation 完全相同")
     out = {"contract": CONTRACT, "correlation": corr, "mode": mode, "steps": norm_steps}
     for k in ("voiceTask", "idempotency"):
         if cmd.get(k):

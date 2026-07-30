@@ -39,6 +39,8 @@ class ActionWhitelistTest(unittest.TestCase):
         # 视觉判断只能取元数据,不能是"让模型看"
         self.assertIn("read.pageimage", DC.ACTIONS)
         self.assertIn("元数据", DC.ACTIONS["read.pageimage"]["desc"])
+        self.assertIn("result.present", DC.ACTIONS)
+        self.assertIn("不调 AI", DC.ACTIONS["result.present"]["desc"])
 
     def test_unknown_action_rejected_with_list(self) -> None:
         with self.assertRaises(DC.CommandError) as e:
@@ -294,6 +296,144 @@ class WiringTest(unittest.TestCase):
         r = s.submit({"correlation": "x", "action": "toc.get", "anchor": {"file": "a.pdf"}})
         self.assertFalse(r["ok"])
         self.assertIn("未注册处理器", r["error"])
+
+
+class ResultPresentWiringTest(unittest.TestCase):
+    """结构化结果必须走 direct-command 的确定性展示动作。"""
+
+    def _mod(self):
+        import importlib
+        sys.path.insert(0, str(ROOT / "_server_deploy"))
+        return importlib.import_module("reader_direct_wire")
+
+    def test_result_present_calls_only_injected_display_bottom(self) -> None:
+        captured = {"calls": 0}
+
+        class FakePdf:
+            def _safe_vault_path(self, rel):
+                return ROOT / rel
+
+            def _reader_direct_present_result(self, uid, **kwargs):
+                captured["calls"] += 1
+                captured.update(uid=uid, **kwargs)
+                return {"written": True, "turn_id": kwargs["turn_id"]}
+
+        W = self._mod()
+        handlers, missing = W.build_handlers(
+            FakePdf(), current_user_id=lambda: 7)
+        self.assertNotIn("result.present", missing)
+        svc = DC.DirectCommandService(handlers)
+        command = {
+            "contract": DC.CONTRACT,
+            "correlation": "voice.abc-1:card",
+            "action": "result.present",
+            "anchor": {"file": "Physics/book.pdf", "page": 24},
+            "params": {
+                "turnId": "voice.abc-1:card",
+                "parts": [{
+                    "kind": "card",
+                    "card": {
+                        "kind": "fact",
+                        "data": {"answer": "42"},
+                    },
+                }],
+            },
+        }
+        result = svc.submit(command)
+        self.assertTrue(result["ok"])
+        self.assertEqual(captured["calls"], 1)
+        self.assertEqual(captured["uid"], 7)
+        self.assertEqual(captured["file"], "Physics/book.pdf")
+        self.assertEqual(captured["page"], 24)
+        self.assertEqual(captured["turn_id"], "voice.abc-1:card")
+        replay = svc.submit(command)
+        self.assertTrue(replay["ok"])
+        self.assertTrue(replay["replayed"])
+        self.assertEqual(captured["calls"], 1, "重复 correlation 不得重复写历史")
+
+    def test_result_present_rejects_extra_params_before_display(self) -> None:
+        called = []
+
+        class FakePdf:
+            def _safe_vault_path(self, rel):
+                return ROOT / rel
+
+            def _reader_direct_present_result(self, uid, **kwargs):
+                called.append((uid, kwargs))
+                return {"written": True}
+
+        W = self._mod()
+        handlers, _ = W.build_handlers(
+            FakePdf(), current_user_id=lambda: 7)
+        result = DC.DirectCommandService(handlers).submit({
+            "correlation": "result-extra",
+            "action": "result.present",
+            "anchor": {"file": "book.pdf", "page": 1},
+            "params": {
+                "turnId": "result-extra",
+                "parts": [{"kind": "text", "text": "x"}],
+                "tool": "execute-me",
+            },
+        })
+        self.assertFalse(result["ok"])
+        self.assertIn("不支持这些 params 字段", result["error"])
+        self.assertEqual(called, [])
+
+    def test_result_present_requires_one_consistent_idempotency_identity(self):
+        base = {
+            "contract": DC.CONTRACT,
+            "correlation": "result-one",
+            "mode": "independent",
+            "idempotency": "result-one",
+            "action": "result.present",
+            "anchor": {"file": "book.pdf", "page": 1},
+            "params": {
+                "turnId": "result-one",
+                "parts": [{"kind": "card", "card": {
+                    "kind": "fact", "data": {"answer": "42"}}}],
+            },
+        }
+        self.assertEqual(
+            DC.validate(base)["idempotency"],
+            "result-one",
+        )
+        for field, value in (
+            ("turnId", "different-turn"),
+            ("idempotency", "different-key"),
+        ):
+            with self.subTest(field=field):
+                command = json.loads(json.dumps(base))
+                if field == "turnId":
+                    command["params"]["turnId"] = value
+                else:
+                    command["idempotency"] = value
+                with self.assertRaisesRegex(
+                        DC.CommandError, "correlation 完全相同"):
+                    DC.validate(command)
+
+    def test_result_present_non_object_part_is_clean_validation_error(self):
+        class FakePdf:
+            def _safe_vault_path(self, rel):
+                return ROOT / rel
+
+            def _reader_direct_present_result(self, uid, **kwargs):
+                raise AssertionError("invalid part must not reach display")
+
+        W = self._mod()
+        handlers, _ = W.build_handlers(
+            FakePdf(), current_user_id=lambda: 7)
+        result = DC.DirectCommandService(handlers).submit({
+            "correlation": "result-list-part",
+            "action": "result.present",
+            "anchor": {"file": "book.pdf", "page": 1},
+            "params": {
+                "turnId": "result-list-part",
+                "parts": ["not-an-object"],
+            },
+        })
+        self.assertFalse(result["ok"])
+        self.assertFalse(result["retryable"])
+        self.assertIn("只接受 card/cards", result["error"])
 
 
 class FtsEscapingTest(unittest.TestCase):

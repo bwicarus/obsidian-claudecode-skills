@@ -2740,6 +2740,27 @@ except Exception as _e:
     _OUTGOING = {"error": str(_e)}
 
 
+def _reader_direct_present_result(
+    uid,
+    *,
+    text,
+    parts,
+    file,
+    page,
+    turn_id,
+):
+    """把 direct-command 的展示动作接到助手历史/卡片渲染的确定性底层。"""
+    import assistant as _ASST
+    return _ASST.reader_direct_present_result(
+        uid,
+        text=text,
+        parts=parts,
+        file=file,
+        page=page,
+        turn_id=turn_id,
+    )
+
+
 # ── 无 AI 直接命令服务(任务书 A4):**纯增量**挂两条新 endpoint,不触碰任何既有路由 ──
 # 解析不到确定性底座的动作不会被接线,调用时明确报"未接线",而不是给假成功。
 try:

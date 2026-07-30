@@ -13,7 +13,10 @@ Envelope（stdin JSON 或 --json）：
   {version, request_id, kind, payload, file?, page?, context_ref?}
   kind 白名单见 _KINDS。禁止任意路径、任意 JS/HTML/shell。
 
-`assistant_turn` 的写回语义（每轮一次、批量、事务性）：
+`direct_command` 把完整 `reader-direct-command/1` 原样送到阅读器确定性命令服务；
+结构化展示使用其中的 `result.present`，不再借 `assistant_turn` 冒充直接命令。
+
+`assistant_turn` 的旧写回语义仍保留给兼容调用方（每轮一次、批量、事务性）：
   payload = {user_utterance?, assistant_text, result?, cards?[], artifacts?[]}
   - cards **可选 0..N**：没有卡片时走纯文本路径，绝不生成空卡/占位卡，协议也不会因此失败。
   - 文本与卡片在**同一条**助手消息里落库（一次 HTTP、一个 parts 数组）→ 不存在
@@ -43,7 +46,14 @@ VERSION = 1
 # envelope 的 kind(动作类型)仍是有限集合——这是"外部只能做哪几件事"的权限边界。
 # 但**卡片内容**不再由本文件判定:合法卡型/字段的唯一来源是 reader_card_contract
 # (它又从前端统一渲染器解析)。以前桥接器自带一份卡片白名单,渲染器一升级它就落后。
-_KINDS = {"assistant_turn", "open_page", "highlight", "create_note", "ping"}
+_KINDS = {
+    "direct_command",
+    "assistant_turn",
+    "open_page",
+    "highlight",
+    "create_note",
+    "ping",
+}
 _ACK_WAIT_S = 1.5        # 等前端渲染回执的上限;等不到不代表失败,只是"没人开着侧栏"
 _ACK_PATH = ROOT / "state" / "reader-bridge" / "acks.json"
 _MAX_TEXT = 8000
@@ -233,7 +243,31 @@ def _do_create_note(env: dict) -> dict:
                  "text": str(p.get("text") or "")[:4000]})
 
 
+def _do_direct_command(env: dict) -> dict:
+    p = env.get("payload")
+    if not isinstance(p, dict):
+        return {"ok": False, "error": "direct_command.payload 必须是对象"}
+    if str(p.get("contract") or "") != "reader-direct-command/1":
+        return {
+            "ok": False,
+            "error": "direct_command.payload.contract 必须是 reader-direct-command/1",
+        }
+    if str(p.get("action") or "") == "result.present":
+        request_id = str(env.get("request_id") or "")
+        correlation = str(p.get("correlation") or "")
+        if not request_id or request_id != correlation:
+            return {
+                "ok": False,
+                "error": (
+                    "result.present 要求 envelope.request_id "
+                    "与 payload.correlation 完全相同"
+                ),
+            }
+    return _api("/pdf/api/direct-command", p)
+
+
 _HANDLERS = {
+    "direct_command": _do_direct_command,
     "assistant_turn": _do_assistant_turn,
     "open_page": _do_open_page,
     "highlight": _do_highlight,

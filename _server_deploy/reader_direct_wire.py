@@ -50,7 +50,7 @@ def _assert_no_ai(actions) -> None:
 
 def build_handlers(pdf, *, toc_get=None, search_book=None, search_all=None,
                    dict_lookup=None, nav_publish=None,
-                   vocab_add=None) -> tuple[dict, list[str]]:
+                   vocab_add=None, current_user_id=None) -> tuple[dict, list[str]]:
     """从既有确定性底座组装 handler。返回 (handlers, 未接线的动作列表)。
 
     `pdf` = pdf_reader 模块。可选参数用于注入跨模块能力(目录/检索/词典/前端动作),
@@ -193,6 +193,56 @@ def build_handlers(pdf, *, toc_get=None, search_book=None, search_all=None,
         gid = pdf._entity_reg_cards(cards[:24], {})
         return {"gid": gid, "n": len(cards[:24]), "draft": True}
     H["anki.draft"] = anki_draft
+
+    # ── 结构化结果回写(只展示,不调 AI)────────────────────────────────────
+    # 入口仍是 reader-direct-command/1；这里直接复用助手历史/卡片渲染的确定性
+    # 底层函数，不再绕 reader_bridge.py 的 assistant_turn 高层包装。
+    if current_user_id is None:
+        def current_user_id():                                # noqa: F811
+            from flask import session as _session
+            return _session.get("user_id")
+
+    def result_present(anchor, params, prev):
+        extra = set(params) - {"parts", "turnId"}
+        if extra:
+            raise ValueError(
+                f"result.present 不支持这些 params 字段:{sorted(extra)}")
+        parts = params.get("parts")
+        if not isinstance(parts, list) or not parts:
+            raise ValueError("params.parts 必须是非空展示 part 数组")
+        if len(parts) > 20:
+            raise ValueError("params.parts 超过上限 20")
+        bad_kinds = []
+        for part in parts:
+            if not isinstance(part, dict):
+                bad_kinds.append(type(part).__name__)
+                continue
+            kind = str(part.get("kind") or "")
+            if kind not in {"card", "cards"}:
+                bad_kinds.append(kind)
+        if bad_kinds:
+            raise ValueError(
+                "result.present 只接受 card/cards 展示 part；"
+                f"拒绝:{bad_kinds}")
+        turn_id = str(params.get("turnId") or "").strip()
+        if not turn_id:
+            raise ValueError("params.turnId 必填(与 correlation 相同)")
+        uid = current_user_id()
+        if not uid:
+            raise ValueError("当前请求没有已认证用户")
+        rel, _ = _rel(anchor)
+        present = getattr(pdf, "_reader_direct_present_result", None)
+        if not callable(present):
+            raise ValueError("结果展示底层未就绪")
+        return present(
+            uid,
+            text="",
+            parts=parts,
+            file=rel,
+            page=int(anchor.get("page")),
+            turn_id=turn_id,
+        )
+    H["result.present"] = result_present
 
     # ── 自动解析剩余确定性底座(解析不到就不接线,不给假 handler)────────────
     if toc_get is None:

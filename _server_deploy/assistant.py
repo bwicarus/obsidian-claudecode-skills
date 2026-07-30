@@ -22,7 +22,9 @@ import subprocess
 import sys
 import threading
 import time
+import unicodedata
 from pathlib import Path
+from urllib.parse import parse_qsl, urlsplit
 
 from flask import Blueprint, Response, jsonify, request, send_file, session
 from tool_registry import (
@@ -1111,6 +1113,61 @@ def _convo_append(uid, role, content, meta=None, mode="normal"):
             os.replace(tmp, p)
         except Exception:
             pass
+
+
+def _convo_put_direct_result(
+    uid,
+    turn_id: str,
+    content: str,
+    meta: dict,
+    mode="normal",
+) -> bool:
+    """Atomically create or replace one deterministic result turn.
+
+    Direct-command's in-memory replay cache is only the first idempotency
+    layer.  This durable turn-id upsert prevents a retry after process restart
+    or a lost HTTP response from appending the same card twice.
+    """
+    with _convo_lock:
+        msgs = _convo_load(uid, mode)
+        rec = None
+        for item in reversed(msgs):
+            if (
+                isinstance(item, dict)
+                and item.get("role") == "assistant"
+                and item.get("turn_id") == turn_id
+            ):
+                rec = item
+                break
+        created = rec is None
+        if created:
+            rec = {
+                "role": "assistant",
+                "content": content or "[卡片]",
+                "ts": int(time.time()),
+            }
+            msgs.append(rec)
+        else:
+            # A card-only replay must not erase useful text already stored for
+            # the same deterministic turn id.
+            if content and (content != "[卡片]" or not rec.get("content")):
+                rec["content"] = content
+            rec["ts"] = int(time.time())
+        for key in ("page", "file_rel", "via", "parts", "turn_id"):
+            value = (meta or {}).get(key)
+            if value not in (None, "", []):
+                rec[key] = value
+        if len(msgs) > 200:
+            dropped = msgs[:-200]
+            _convo_archive(uid, dropped, mode)
+            _convo_drop_media(uid, dropped, mode)
+            msgs = msgs[-200:]
+        _convo_dir(mode).mkdir(parents=True, exist_ok=True)
+        path = _convo_path(uid, mode)
+        temp = path.with_name(path.name + ".tmp")
+        temp.write_text(json.dumps(msgs, ensure_ascii=False), "utf-8")
+        os.replace(temp, path)
+        return created
 
 
 def _convo_clear(uid, mode="normal"):
@@ -10075,6 +10132,185 @@ def _sanitize_ext_parts(parts) -> list:
                 clean.pop("gid", None)
         clean["seq"] = i
     return out
+
+
+def _reader_result_url(value, *, allow_page_image: bool = False) -> str:
+    """Validate one display-only URL with the same rules as bridge_client."""
+    if not isinstance(value, str) or not value:
+        raise ValueError("result.present 的 URL 必须是非空字符串")
+    if (
+        value != value.strip()
+        or "\\" in value
+        or any(unicodedata.category(ch).startswith("C") for ch in value)
+    ):
+        raise ValueError("result.present 的 URL 含不安全字符")
+    try:
+        parsed = urlsplit(value)
+        _ = parsed.port
+    except ValueError as exc:
+        raise ValueError("result.present 的 URL 格式无效") from exc
+    if parsed.scheme.lower() == "https":
+        if (
+            not parsed.netloc
+            or parsed.hostname is None
+            or parsed.username is not None
+            or parsed.password is not None
+        ):
+            raise ValueError("result.present 只允许无凭据的 HTTPS URL")
+        return value
+    if (
+        allow_page_image
+        and not parsed.scheme
+        and not parsed.netloc
+        and parsed.path == "/pdf/api/page-image"
+        and not parsed.fragment
+    ):
+        try:
+            pairs = parse_qsl(
+                parsed.query,
+                keep_blank_values=True,
+                strict_parsing=True,
+            )
+        except ValueError as exc:
+            raise ValueError("result.present Reader 页图参数无效") from exc
+        params = {}
+        for key, item in pairs:
+            if key in params:
+                raise ValueError(
+                    f"result.present Reader 页图参数重复:{key}")
+            params[key] = item
+        if set(params) - {"file", "page", "w", "v", "sharp"}:
+            raise ValueError("result.present Reader 页图含未知参数")
+        file_rel = params.get("file", "")
+        page_value = params.get("page", "")
+        if (
+            not file_rel
+            or file_rel.startswith(("/", "\\"))
+            or "\x00" in file_rel
+            or ":" in file_rel
+            or ".." in re.split(r"[\\/]", file_rel)
+            or not page_value.isdecimal()
+            or int(page_value) < 1
+        ):
+            raise ValueError(
+                "result.present Reader 页图必须含安全 file 与正整数 page")
+        if any(
+            item and not item.isdecimal()
+            for key, item in params.items()
+            if key in {"w", "v", "sharp"}
+        ):
+            raise ValueError("result.present Reader 页图数值参数无效")
+        return value
+    raise ValueError(
+        "result.present 只允许 HTTPS"
+        + (" 或 Reader 相对页图 URL" if allow_page_image else "")
+    )
+
+
+def reader_direct_present_result(
+    uid,
+    *,
+    text: str,
+    parts: list,
+    file: str,
+    page: int,
+    turn_id: str,
+) -> dict:
+    """Direct-command 的确定性展示底层。
+
+    只把上游已经完成的文本/卡片写入既有助手历史并通知在线侧栏；不调用模型、
+    不解释正文，也不接受任意 tool/meta。`reader_direct_wire.result.present`
+    是唯一调用入口，幂等由 direct-command 与跨机 bridge 的 request_id 双层保证。
+    """
+    if isinstance(uid, bool) or isinstance(page, bool):
+        raise ValueError("uid/page 必须是整数")
+    try:
+        uid = int(uid)
+        page = int(page)
+    except (TypeError, ValueError):
+        raise ValueError("uid/page 必须是整数") from None
+    if uid <= 0 or page < 1:
+        raise ValueError("uid/page 超出范围")
+    file = str(file or "").strip()
+    if (
+        not file
+        or len(file) > 1000
+        or file.startswith(("/", "\\"))
+        or "\x00" in file
+        or ":" in file
+        or ".." in re.split(r"[\\/]", file)
+    ):
+        raise ValueError("file 必须是安全的 vault 相对路径")
+    turn_id = str(turn_id or "").strip()
+    if not re.fullmatch(r"[A-Za-z0-9._:-]{1,40}", turn_id):
+        raise ValueError("turn_id 必须匹配 [A-Za-z0-9._:-]{1,40}")
+    text = str(text or "").strip()[:8000]
+    clean_parts = _sanitize_ext_parts(parts)
+    for part in clean_parts:
+        if part.get("kind") != "card":
+            continue
+        card = part.get("card") or {}
+        for source in (card.get("sources") or []):
+            if isinstance(source, dict) and source.get("url"):
+                _reader_result_url(source["url"])
+        kind = card.get("kind")
+        if kind == "images":
+            for item in ((card.get("data") or {}).get("items") or []):
+                if not isinstance(item, dict):
+                    continue
+                if item.get("url"):
+                    _reader_result_url(
+                        item["url"], allow_page_image=True)
+        elif kind == "videos":
+            for item in ((card.get("data") or {}).get("items") or []):
+                if not isinstance(item, dict):
+                    continue
+                if item.get("url"):
+                    _reader_result_url(item["url"])
+                if item.get("thumb"):
+                    _reader_result_url(
+                        item["thumb"], allow_page_image=True)
+    packed = json.dumps(clean_parts, ensure_ascii=False)
+    if not clean_parts:
+        raise ValueError("parts 规范化后为空")
+    if len(packed) >= 24000:
+        raise ValueError(
+            f"parts 过大({len(packed)} 字符,上限 24000)——图必须走 URL,不能 base64")
+
+    meta = {
+        "via": "bridge",
+        "file_rel": file,
+        "page": page,
+        "turn_id": turn_id,
+        "parts": clean_parts,
+    }
+    created = _convo_put_direct_result(
+        uid,
+        turn_id,
+        text or "[卡片]",
+        meta,
+    )
+    delivered = 0
+    try:
+        import reader_events
+        delivered = reader_events.publish(
+            "assistant-history",
+            file,
+            uid,
+            {"turn_id": turn_id, "n": 1},
+        ) or 0
+    except Exception:
+        pass
+    return {
+        "written": True,
+        "created": created,
+        "turn_id": turn_id,
+        "parts": len(clean_parts),
+        "delivery": {
+            "published": delivered > 0,
+            "subscribers": int(delivered),
+        },
+    }
 
 
 @bp.route("/log", methods=["POST"])
