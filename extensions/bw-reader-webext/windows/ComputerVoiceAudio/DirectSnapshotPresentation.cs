@@ -1467,6 +1467,10 @@ internal sealed class DirectSnapshotViewer : IDisposable
         "/reader-context-snapshot.json";
     internal const string MarkdownPath =
         "/reader-context-live.md";
+    internal const string CurrentPageImageAsset =
+        "current-page";
+    internal const string CurrentPageImageUrl =
+        SnapshotPath + "?asset=" + CurrentPageImageAsset;
 
     private static readonly byte[] ViewerDocument =
         Encoding.UTF8.GetBytes(
@@ -1579,13 +1583,13 @@ internal sealed class DirectSnapshotViewer : IDisposable
                 </section>
                 <section class="wide">
                   <h2>绘图与页图</h2>
-                  <pre id="drawing" class="muted">当前页没有视觉引用。</pre>
-                  <p id="imageNote" class="warning" hidden></p>
-                  <a id="imageLink" target="_blank" rel="noreferrer" hidden>
-                    在 Reader 中打开原图（可能需要登录）
-                  </a>
-                  <img id="pageImage" alt="当前页图（加载失败时请使用上方链接）"
-                       referrerpolicy="no-referrer">
+                   <pre id="drawing" class="muted">当前页没有视觉引用。</pre>
+                   <p id="imageNote" class="warning" hidden></p>
+                   <a id="imageLink" target="_blank" rel="noreferrer" hidden>
+                     在新窗口打开 Windows 本地页图
+                   </a>
+                   <img id="pageImage" alt="Windows 本地渲染的当前 PDF 页"
+                        referrerpolicy="no-referrer">
                 </section>
                 <section class="wide">
                   <h2>最近阅读器事件</h2>
@@ -1611,6 +1615,9 @@ internal sealed class DirectSnapshotViewer : IDisposable
                 const imageLink = byId("imageLink");
                 const pageImage = byId("pageImage");
                 const latest = byId("latest");
+                let pageImageKey = null;
+                let pageImageObjectUrl = null;
+                let pageImageGeneration = 0;
 
                 const valueText = value =>
                   value === null || value === undefined
@@ -1725,13 +1732,127 @@ internal sealed class DirectSnapshotViewer : IDisposable
                   return { plain, highlights, cards };
                 }
 
-                function resetImage() {
+                function clearImageVisual() {
+                  if (pageImageObjectUrl !== null) {
+                    URL.revokeObjectURL(pageImageObjectUrl);
+                    pageImageObjectUrl = null;
+                  }
                   pageImage.removeAttribute("src");
                   pageImage.style.display = "none";
                   imageLink.hidden = true;
                   imageLink.removeAttribute("href");
                   imageNote.hidden = true;
                   imageNote.textContent = "";
+                }
+
+                function resetImage() {
+                  pageImageGeneration += 1;
+                  pageImageKey = null;
+                  clearImageVisual();
+                }
+
+                // 已删除旧行为：“本地查看器的跨站内嵌请求可能没有登录 Cookie”。
+                // 当前页图只从 Windows localhost 同源端点读取。
+                async function updatePageImage(snapshot, page) {
+                  const revisionValue = snapshot.revision;
+                  const file = typeof page?.file === "string"
+                    ? page.file
+                    : null;
+                  const pageNumber = Number.isInteger(page?.page)
+                    ? page.page
+                    : null;
+                  const kind = typeof page?.kind === "string"
+                    ? page.kind
+                    : snapshot.activeReading?.kind;
+                  const key = file !== null
+                    && pageNumber !== null
+                    && revisionValue !== null
+                    && revisionValue !== undefined
+                      ? `${file}\u0000${pageNumber}\u0000${revisionValue}`
+                      : null;
+                  if (key === pageImageKey) return;
+
+                  pageImageKey = key;
+                  pageImageGeneration += 1;
+                  const generation = pageImageGeneration;
+                  clearImageVisual();
+                  if (key === null) {
+                    imageNote.hidden = false;
+                    imageNote.textContent =
+                      "本地页图不可用：当前快照没有可解析的书页。";
+                    return;
+                  }
+                  if (kind !== "pdf") {
+                    imageNote.hidden = false;
+                    imageNote.textContent =
+                      "本地页图仅用于 PDF；当前内容不是 PDF。";
+                    return;
+                  }
+
+                  const url = new URL(
+                    "/reader-context-snapshot.json",
+                    window.location.origin);
+                  url.searchParams.set("asset", "current-page");
+                  url.searchParams.set(
+                    "revision",
+                    String(revisionValue));
+                  imageNote.hidden = false;
+                  imageNote.textContent =
+                    "正在从 Windows 本地书库生成当前页图……";
+                  try {
+                    const response = await fetch(url, {
+                      cache: "no-store",
+                      credentials: "same-origin"
+                    });
+                    if (generation !== pageImageGeneration) return;
+                    if (!response.ok) {
+                      imageNote.textContent =
+                        response.status === 409
+                          ? "快照已更新，等待下一轮本地页图。"
+                          : `Windows 本地页图不可用（HTTP ${response.status}）；`
+                            + "正文和选区仍可正常使用。";
+                      return;
+                    }
+                    const blob = await response.blob();
+                    if (generation !== pageImageGeneration) return;
+                    if (blob.type !== "image/png" || blob.size === 0) {
+                      imageNote.textContent =
+                        "Windows 本地页图格式无效；"
+                        + "正文和选区仍可正常使用。";
+                      return;
+                    }
+                    const objectUrl = URL.createObjectURL(blob);
+                    if (generation !== pageImageGeneration) {
+                      URL.revokeObjectURL(objectUrl);
+                      return;
+                    }
+                    pageImageObjectUrl = objectUrl;
+                    pageImage.onload = () => {
+                      if (generation !== pageImageGeneration) return;
+                      pageImage.style.display = "block";
+                      imageNote.hidden = false;
+                      imageNote.textContent =
+                        "页图由 Windows 本地 PDF 渲染；"
+                        + "未向 Pi 发送图片请求或登录凭据。";
+                    };
+                    pageImage.onerror = () => {
+                      if (generation !== pageImageGeneration) return;
+                      pageImage.style.display = "none";
+                      imageNote.hidden = false;
+                      imageNote.textContent =
+                        "Windows 本地页图无法显示；"
+                        + "正文和选区仍可正常使用。";
+                    };
+                    pageImage.src = objectUrl;
+                    imageLink.href = objectUrl;
+                    imageLink.hidden = false;
+                  } catch {
+                    if (generation !== pageImageGeneration) return;
+                    imageNote.hidden = false;
+                    imageNote.textContent =
+                      "Windows 本地页图生成失败；"
+                      + "正文和选区仍可正常使用。";
+                  }
                 }
 
                 function clearProjection(message) {
@@ -1880,37 +2001,7 @@ internal sealed class DirectSnapshotViewer : IDisposable
                     ? JSON.stringify(snapshot.latestEvent, null, 2)
                     : "暂无事件。";
 
-                  resetImage();
-                  const image = page?.visual?.page_image;
-                  if (typeof image === "string" && image.length > 0) {
-                    let url;
-                    try {
-                      url = new URL(
-                        image,
-                        "https://bwicarus.taile44d0c.ts.net");
-                    } catch {
-                      throw new Error("页图 URL 无效");
-                    }
-                    if (url.protocol !== "https:"
-                        || url.origin
-                          !== "https://bwicarus.taile44d0c.ts.net") {
-                      throw new Error("页图 URL 来源无效");
-                    }
-                    imageLink.href = url.href;
-                    imageLink.hidden = false;
-                    imageNote.hidden = false;
-                    imageNote.textContent =
-                      "页图接口受 Reader 登录保护。"
-                      + "本地查看器的跨站内嵌请求可能没有登录 Cookie；"
-                      + "失败时请使用原图链接，并在 Reader 中登录。";
-                    pageImage.onload = () => {
-                      pageImage.style.display = "block";
-                    };
-                    pageImage.onerror = () => {
-                      pageImage.style.display = "none";
-                    };
-                    pageImage.src = url.href;
-                  }
+                  void updatePageImage(snapshot, page);
                 }
 
                 async function refresh() {
@@ -1941,6 +2032,8 @@ internal sealed class DirectSnapshotViewer : IDisposable
     private readonly int _listenPort;
     private readonly string _viewerUrl;
     private readonly string _profilePath;
+    private readonly ILocalSnapshotPageImageRenderer
+        _pageImageRenderer;
     private readonly object _gate = new();
     private Process? _viewerProcess;
     private bool _disposed;
@@ -1953,10 +2046,14 @@ internal sealed class DirectSnapshotViewer : IDisposable
 
     internal DirectSnapshotViewer(
         string snapshotPath,
-        int listenPort)
+        int listenPort,
+        ILocalSnapshotPageImageRenderer? pageImageRenderer = null)
     {
         _snapshotPath = System.IO.Path.GetFullPath(snapshotPath);
         _listenPort = listenPort;
+        _pageImageRenderer = pageImageRenderer
+            ?? new LocalSnapshotPageImageRenderer(
+                LocalBookPageResolverOptions.FromEnvironment());
         _viewerUrl =
             $"http://{DirectBridgeContract.ListenHost}:{listenPort}"
             + ViewerPath;
@@ -1982,6 +2079,12 @@ internal sealed class DirectSnapshotViewer : IDisposable
 
     internal async Task HandleSnapshotAsync(HttpContext context)
     {
+        if (IsCurrentPageImageRequest(context))
+        {
+            await HandleCurrentPageImageAsync(context)
+                .ConfigureAwait(false);
+            return;
+        }
         if (!PrepareLocalResponse(
             context,
             "application/json; charset=utf-8"))
@@ -2005,6 +2108,122 @@ internal sealed class DirectSnapshotViewer : IDisposable
             JsonSerializer.SerializeToUtf8Bytes(
                 snapshot,
                 DirectBridgeContract.JsonOptions),
+            StatusCodes.Status200OK).ConfigureAwait(false);
+    }
+
+    internal async Task HandleCurrentPageImageAsync(
+        HttpContext context)
+    {
+        if (!PrepareLocalResponse(context, "image/png"))
+        {
+            return;
+        }
+        JsonObject? snapshot = await ReadFreshSnapshotAsync(
+            context.RequestAborted).ConfigureAwait(false);
+        if (snapshot is null)
+        {
+            await WriteImageFailureAsync(
+                context,
+                StatusCodes.Status503ServiceUnavailable,
+                "local-page-image-snapshot-unavailable")
+                .ConfigureAwait(false);
+            return;
+        }
+        if (
+            !TryNonNegativeRevision(
+                snapshot["revision"],
+                out long revision)
+        )
+        {
+            await WriteImageFailureAsync(
+                context,
+                StatusCodes.Status503ServiceUnavailable,
+                "local-page-image-revision-invalid")
+                .ConfigureAwait(false);
+            return;
+        }
+        if (
+            context.Request.Query.TryGetValue(
+                "revision",
+                out Microsoft.Extensions.Primitives.StringValues
+                    requestedRevision)
+            && (
+                requestedRevision.Count != 1
+                || !long.TryParse(
+                    requestedRevision[0],
+                    System.Globalization.NumberStyles.None,
+                    System.Globalization.CultureInfo.InvariantCulture,
+                    out long expectedRevision)
+                || expectedRevision < 0
+            )
+        )
+        {
+            await WriteImageFailureAsync(
+                context,
+                StatusCodes.Status400BadRequest,
+                "local-page-image-revision-invalid")
+                .ConfigureAwait(false);
+            return;
+        }
+        if (
+            requestedRevision.Count == 1
+            && long.Parse(
+                requestedRevision[0]!,
+                System.Globalization.CultureInfo.InvariantCulture)
+                != revision
+        )
+        {
+            await WriteImageFailureAsync(
+                context,
+                StatusCodes.Status409Conflict,
+                "local-page-image-revision-changed")
+                .ConfigureAwait(false);
+            return;
+        }
+
+        LocalSnapshotPageImageResult rendered;
+        try
+        {
+            rendered = await _pageImageRenderer.RenderAsync(
+                snapshot,
+                context.RequestAborted).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            throw;
+        }
+        catch
+        {
+            rendered = LocalSnapshotPageImageResult.Failed(
+                "local-page-image-render-failed");
+        }
+        if (
+            !rendered.Success
+            || rendered.PngBytes is not { Length: > 0 } png
+        )
+        {
+            string reason = rendered.FailureReason
+                ?? "local-page-image-render-failed";
+            int status = reason is
+                "local-page-image-page-unavailable"
+                or "local-page-image-not-pdf"
+                or "local-page-image-file-missing"
+                ? StatusCodes.Status404NotFound
+                : StatusCodes.Status503ServiceUnavailable;
+            await WriteImageFailureAsync(
+                context,
+                status,
+                reason).ConfigureAwait(false);
+            return;
+        }
+        if (!string.IsNullOrWhiteSpace(rendered.CacheTag))
+        {
+            context.Response.Headers.ETag =
+                '"' + rendered.CacheTag + '"';
+        }
+        await WriteBytesAsync(
+            context,
+            png,
             StatusCodes.Status200OK).ConfigureAwait(false);
     }
 
@@ -2294,9 +2513,7 @@ internal sealed class DirectSnapshotViewer : IDisposable
         context.Response.Headers.Pragma = "no-cache";
         context.Response.Headers["Content-Security-Policy"] =
             "default-src 'none'; connect-src 'self'; "
-            + "img-src 'self' "
-            + DirectSnapshotMarkdown.ReaderOrigin
-            + "; style-src 'unsafe-inline'; "
+            + "img-src 'self' blob:; style-src 'unsafe-inline'; "
             + "script-src 'unsafe-inline'; base-uri 'none'; "
             + "form-action 'none'; frame-ancestors 'none'";
         context.Response.Headers["Cross-Origin-Resource-Policy"] =
@@ -2327,6 +2544,29 @@ internal sealed class DirectSnapshotViewer : IDisposable
             value,
             context.RequestAborted).ConfigureAwait(false);
     }
+
+    private static Task WriteImageFailureAsync(
+        HttpContext context,
+        int statusCode,
+        string reason)
+    {
+        context.Response.ContentType = "text/plain; charset=utf-8";
+        return WriteBytesAsync(
+            context,
+            Encoding.UTF8.GetBytes(reason),
+            statusCode);
+    }
+
+    private static bool IsCurrentPageImageRequest(
+        HttpContext context) =>
+        context.Request.Query.TryGetValue(
+            "asset",
+            out Microsoft.Extensions.Primitives.StringValues asset)
+        && asset.Count == 1
+        && string.Equals(
+            asset[0],
+            CurrentPageImageAsset,
+            StringComparison.Ordinal);
 
     private static bool TryNonNegativeRevision(
         JsonNode? node,

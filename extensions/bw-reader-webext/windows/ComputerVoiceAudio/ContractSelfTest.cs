@@ -24,6 +24,7 @@ internal static class ContractSelfTest
         CodexVoiceActivitySelfTest.Run(checks);
         CodexVoiceHistorySelfTest.Run(checks);
         LocalBookPageResolverSelfTest.Run(checks);
+        LocalSnapshotPageImageRendererSelfTest.Run(checks);
         DirectBridgeSelfTest.Run(checks);
 
         return new
