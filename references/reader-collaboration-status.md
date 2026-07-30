@@ -3583,3 +3583,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **连带加固**：runtime status 单次 I/O 写失败不再永久杀死五秒心跳，避免健康 listener 后续被监督器按陈旧状态重启。
 - **验证/安装**：C# 无音频 self-test、桌面/打包定向测试及 Reader Node 合同全过；0.1.25 候选 verify/self-test 后原子安装，回滚目录 `C:\Users\bwica\bw-computer-voice-bridge-backups\install-0.1.25-20260730T104200692Z-a3662911`。
 - **当前状态/下一步**：任务 Running，唯一 listener/runtime/health 身份一致，双心跳周期同 PID/instance 且 `idle / captureActive=false`；未自动 START、采音或发键，下一步由用户在 iPad 真机确认通话持续与双向声音。
+
+## Codex：修正 iPad 电话按钮首次单击与 WSS 晋升竞态（2026-07-30 JST）
+- **根因更正**：真实点击顺序里 `setDialPending(true)` 与同值配置回执会先拆掉常驻快照 WSS，新连接撞 Windows 单连接门禁；初次配置尚未返回时还会丢失唯一用户手势，旧测试漏掉了这两步。
+- **改了什么**：拨号原位认领常驻链，START 前只读探测死链并最多重建一次；设置 POST 使用独立 mutation token，普通 GET 不能越权解围；替代 WSS 必须等旧传输真正关闭，START 已发送后结果未知绝不重发。
+- **怎么验的**：真实 `phoneClick → dialPending → config ACK → START`、迟到麦克风、静默 STATUS、stale-OPEN、慢关闭与 START-unknown 反例均通过；全量 Reader Node、生成物校验与发布流水线通过。
+- **既有基线**：全量 Python/handoff 仍只命中相同的 Windows `fcntl`、Pi 路径与既有测试数据差异；本轮未改 Python 生产逻辑。
+- **没做/下一步**：未主动 START、采音、发快捷键或部署；下一步精确提交、推送并走 Reader 原子部署，再由用户完整刷新 iPad 后单击一次电话按钮验收。

@@ -77,6 +77,8 @@
   var selectedEngineKnown = false;
   var computerVoiceSelected = false;
   var selectedEngineRevision = 0;
+  var selectedEngineAcceptedRevision = 0;
+  var selectedEngineMutationRevision = null;
   var dialPending = false;
   // These cursors live only for this module instance. `lastContextAckCursor`
   // is advanced exclusively by an exact Windows per-event ACK.
@@ -914,6 +916,32 @@
     }
   };
 
+  DirectSocket.prototype._beginCloseWait = function (socket) {
+    if (this.closingPromise) return this.closingPromise;
+    if (!socket || socket.readyState === 3) {
+      this.closingPromise = Promise.resolve();
+      this._finishClose();
+      return this.closingPromise;
+    }
+    var self = this;
+    this.closingPromise = new Promise(function (resolve) {
+      self.closeResolve = resolve;
+      self.closeTimer = setTimeout(function () {
+        try {
+          if (typeof socket.forceClose === "function") socket.forceClose();
+        } catch (_) {}
+        self._finishClose();
+      }, CLOSE_TIMEOUT_MS);
+    });
+    if (typeof socket.whenClosed === "function") {
+      Promise.resolve(socket.whenClosed()).then(
+        function () { self._finishClose(); },
+        function () { self._finishClose(); }
+      );
+    }
+    return this.closingPromise;
+  };
+
   DirectSocket.prototype._fail = function (error) {
     if (this.closed) return;
     this.closed = true;
@@ -932,10 +960,11 @@
       entry.reject(error);
     });
     this.pending.clear();
+    this._beginCloseWait(socket);
     try {
       if (socket && socket.readyState < 2) socket.close(1002, "protocol-error");
     } catch (_) {}
-    this._finishClose();
+    if (socket && socket.readyState === 3) this._finishClose();
     if (!this.intentional && typeof this.options.onFatal === "function") {
       try { this.options.onFatal(error); } catch (_) {}
     }
@@ -1290,26 +1319,7 @@
     });
     this.pending.clear();
     var socket = this.socket;
-    if (socket && socket.readyState < 3) {
-      var self = this;
-      this.closingPromise = new Promise(function (resolve) {
-        self.closeResolve = resolve;
-        self.closeTimer = setTimeout(function () {
-          try {
-            if (typeof socket.forceClose === "function") socket.forceClose();
-          } catch (_) {}
-          self._finishClose();
-        }, CLOSE_TIMEOUT_MS);
-      });
-      if (typeof socket.whenClosed === "function") {
-        Promise.resolve(socket.whenClosed()).then(
-          function () { self._finishClose(); },
-          function () { self._finishClose(); }
-        );
-      }
-    } else {
-      this.closingPromise = Promise.resolve();
-    }
+    this._beginCloseWait(socket);
     try {
       if (socket && socket.readyState < 2) {
         socket.close(1000, "client-stop");
@@ -1523,7 +1533,8 @@
   // 底层 readyState 由浏览器维护,比我们的被动标志可靠一档,所以在 closed 之外再硬校验
   // 一次。注意 _fail() 会把 this.socket 置空,因此 socket 缺失同样视为不可用。
   // ⚠ 这仍不是充分条件:iOS 上 readyState 也可能滞后于真实 TCP 状态,所以调用方必须
-  // 配合"首次请求有界超时 + 丢弃重建"的第二层兜底(见 availability())。
+  // 配合"首次只读请求有界超时 + 丢弃重建"的第二层兜底(见 availability() 与
+  // queryStartChannel())。
   function directChannelLive(channel) {
     if (!channel || channel.closed) return false;
     var socket = channel.socket;
@@ -1569,6 +1580,7 @@
       channel: null,
       borrowedSnapshot: false,
       retriedAfterStaleBorrow: false,
+      restoreSnapshotAfterRetry: false,
       promise: null,
     };
     availabilityAttempt = attempt;
@@ -1598,6 +1610,7 @@
             if (attempt.retriedAfterStaleBorrow) throw error;
             if (attempt.cancelled) throw error;
             attempt.retriedAfterStaleBorrow = true;
+            attempt.restoreSnapshotAfterRetry = true;
             return stopSnapshotLink().then(function () {
               attempt.borrowedSnapshot = false;
               attempt.channel = null;
@@ -1632,7 +1645,11 @@
         : Promise.resolve();
       attempt.channel = null;
       if (availabilityAttempt === attempt) availabilityAttempt = null;
-      return closePromise;
+      return closePromise.then(function () {
+        if (attempt.restoreSnapshotAfterRetry) {
+          scheduleSnapshotReconnect(0);
+        }
+      });
     });
     return attempt.promise;
   }
@@ -2415,8 +2432,13 @@
     if (state.contextOnly === true) {
       contextDeliveryMode = null;
       if (snapshotLink === state) snapshotLink = null;
-      if (state.channel) state.channel.close();
-      scheduleSnapshotReconnect(SNAPSHOT_RECONNECT_MS);
+      state.stopped = true;
+      var contextOnlyChannel = state.channel;
+      state.channel = null;
+      closeChannelThenScheduleSnapshotReconnect(
+        contextOnlyChannel,
+        SNAPSHOT_RECONNECT_MS
+      );
     }
     emitStatus({
       state: "warning",
@@ -3065,6 +3087,21 @@
     }, delay);
   }
 
+  function closeChannelThenScheduleSnapshotReconnect(channel, delay) {
+    var closing = Promise.resolve();
+    if (channel) {
+      try {
+        closing = Promise.resolve(channel.close());
+      } catch (_) {}
+    }
+    return closing.catch(function () {}).then(function () {
+      // Windows accepts exactly one Reader WSS. Never let a replacement race
+      // the old connection's server-side finally block: reconnect only after
+      // the browser/relay close has settled (or its bounded close timeout did).
+      scheduleSnapshotReconnect(delay);
+    });
+  }
+
   function resumeSnapshotLinkFromForeground(event) {
     if (
       event &&
@@ -3186,11 +3223,12 @@
       if (snapshotLink === state) snapshotLink = null;
       state.stopped = true;
       stopContextPump(state);
-      if (state.channel) state.channel.close();
-      if (snapshotLinkWanted()) {
-        scheduleSnapshotReconnect(SNAPSHOT_RECONNECT_MS);
-      }
-      return null;
+      var failedChannel = state.channel;
+      state.channel = null;
+      return closeChannelThenScheduleSnapshotReconnect(
+        failedChannel,
+        SNAPSHOT_RECONNECT_MS
+      ).then(function () { return null; });
     });
     state.promise = work;
     return work;
@@ -3281,7 +3319,8 @@
     clearHeartbeat(state);
     stopContextPump(state);
     if (active === state) active = null;
-    if (state.channel) state.channel.close();
+    var failedChannel = state.channel;
+    state.channel = null;
     releaseSurface(state.surface);
     if (emit !== false) {
       emitStatus({
@@ -3291,7 +3330,10 @@
         code: error && error.code || "BW_COMPUTER_VOICE_DIRECT_START_FAILED",
       });
     }
-    scheduleSnapshotReconnect(SNAPSHOT_RECONNECT_MS);
+    closeChannelThenScheduleSnapshotReconnect(
+      failedChannel,
+      SNAPSHOT_RECONNECT_MS
+    );
   }
 
   function handlePcmFrame(state, buffer) {
@@ -3403,6 +3445,69 @@
     };
   }
 
+  function startStateCurrent(state) {
+    return !!(
+      state &&
+      !state.stopped &&
+      !state.cancelled &&
+      active === state
+    );
+  }
+
+  function preStartChannelErrorRecoverable(error) {
+    var code = error && error.code;
+    return (
+      code === "BW_COMPUTER_VOICE_DIRECT_TIMEOUT" ||
+      code === "BW_COMPUTER_VOICE_DIRECT_DISCONNECTED" ||
+      code === "BW_COMPUTER_VOICE_DIRECT_OFFLINE"
+    );
+  }
+
+  function cancelledStartError() {
+    return directError(
+      "Windows 桥接启动已取消",
+      "BW_COMPUTER_VOICE_DIRECT_CANCELLED",
+      false
+    );
+  }
+
+  function queryStartChannel(state, channel) {
+    return queryContextMode(channel).then(function (mode) {
+      return { channel: channel, mode: mode };
+    }, function (error) {
+      // A context-only socket can still look OPEN after iOS resumes even
+      // though its TCP peer disappeared. CONTEXT-MODE is read-only and runs
+      // before START, so this is the one safe point to discard that claimed
+      // socket and retry a fresh connection exactly once. START itself is
+      // never retried because its result may be unknown.
+      if (
+        state.claimedSnapshot !== true ||
+        state.retriedAfterStaleClaim ||
+        !startStateCurrent(state) ||
+        !preStartChannelErrorRecoverable(error)
+      ) {
+        throw error;
+      }
+      state.retriedAfterStaleClaim = true;
+      state.claimedSnapshot = false;
+      if (state.channel === channel) state.channel = null;
+      return channel.close().then(function () {
+        if (!startStateCurrent(state)) throw cancelledStartError();
+        return openDirect(null, function (fresh) {
+          state.channel = fresh;
+        });
+      }).then(function (fresh) {
+        if (!startStateCurrent(state)) {
+          fresh.close();
+          throw cancelledStartError();
+        }
+        return queryContextMode(fresh).then(function (mode) {
+          return { channel: fresh, mode: mode };
+        });
+      });
+    });
+  }
+
   function startFromUserGesture(options) {
     options = options || {};
     if (active) {
@@ -3448,6 +3553,8 @@
       contextPump: null,
       activeReadingPump: null,
       contextDeliveryMode: null,
+      claimedSnapshot: false,
+      retriedAfterStaleClaim: false,
       pcm: {
         1: { nextSequence: 0, seen: false, timestampLow: 0, timestampHigh: 0 },
       },
@@ -3469,7 +3576,11 @@
       }
       state.sessionId = claimed.sessionId;
       state.sessionBytes = claimed.sessionBytes;
-      state.channel = claimed.channel.setOptions(activeDirectOptions(state));
+      state.claimedSnapshot = true;
+      // Keep fatal handling detached until a read-only CONTEXT-MODE probe has
+      // proved this possibly stale, context-only socket. The promise chain
+      // below owns all pre-START failures and may safely reconnect once.
+      state.channel = claimed.channel.setOptions({});
       return state.channel;
     });
     emitStatus({
@@ -3503,7 +3614,7 @@
       if (state.channel && !state.channel.closed) {
         return state.channel;
       }
-      return openDirect(activeDirectOptions(state), function (channel) {
+      return openDirect(null, function (channel) {
         state.channel = channel;
       });
     }).then(function (channel) {
@@ -3516,12 +3627,13 @@
         );
       }
       state.channel = channel;
-      return queryContextMode(channel).then(function (mode) {
-        state.contextDeliveryMode = mode;
+      return queryStartChannel(state, channel).then(function (prepared) {
+        state.channel = prepared.channel.setOptions(activeDirectOptions(state));
+        state.contextDeliveryMode = prepared.mode;
         if (!contextSyncEnabled()) return null;
-        return setServerContextDeliveryMode(mode);
+        return setServerContextDeliveryMode(prepared.mode);
       }).then(function () {
-        return channel;
+        return state.channel;
       });
     }).then(function (channel) {
       // Windows capture pump may enqueue its first frame before the START
@@ -3633,13 +3745,17 @@
       // START 尚未确认时不能把 STOP 排在同一条 WSS 后面等待：Windows
       // 服务端正在串行处理 START，排队 STOP 只会让应用、采音和快捷键继续
       // 启动。立即关闭连接会取消所有在途请求，并让远端会话租约 fail closed。
-      if (state.channel) state.channel.close();
+      var startingChannel = state.channel;
+      state.channel = null;
       releaseSurface(state.surface);
       emitStatus({
         state: "stopped",
         message: "电脑桥接启动已取消；若 Codex Voice 已亮起，请在 Windows 退出",
       });
-      scheduleSnapshotReconnect(SNAPSHOT_RECONNECT_MS);
+      closeChannelThenScheduleSnapshotReconnect(
+        startingChannel,
+        SNAPSHOT_RECONNECT_MS
+      );
       return Promise.resolve({ ok: true, state: "stopped" });
     }
     return Promise.resolve().then(function () {
@@ -3664,13 +3780,17 @@
         return null;
       });
     }).then(function () {
-      if (state.channel) state.channel.close();
+      var stoppedChannel = state.channel;
+      state.channel = null;
       releaseSurface(state.surface);
       emitStatus({
         state: "stopped",
         message: "电脑桥接已停止；请确认 Windows 的 Codex Voice 已退出",
       });
-      scheduleSnapshotReconnect(SNAPSHOT_RECONNECT_MS);
+      closeChannelThenScheduleSnapshotReconnect(
+        stoppedChannel,
+        SNAPSHOT_RECONNECT_MS
+      );
       return { ok: true, state: "stopped" };
     });
   }
@@ -3729,7 +3849,22 @@
         clearPreparedSurface(true);
         return;
       }
-      if (!active && selectedEngineKnown && computerVoiceSelected) {
+      if (
+        !active &&
+        (
+          (selectedEngineKnown && computerVoiceSelected) ||
+          (!selectedEngineKnown && selectedEngineMutationRevision === null)
+        )
+      ) {
+        // The first authoritative voice-config GET may still be in flight when
+        // the user performs the one trusted click that iOS grants us. Prepare
+        // only the reversible local surface now; the later authoritative
+        // engine result still decides whether any WSS/START is allowed.
+        //
+        // A settings mutation is different: beginSelectedEngineUpdate() keeps
+        // its own mutation token, so unrelated GET revisions cannot reopen a
+        // mic lease for either the old or proposed value while POST is in
+        // flight.
         prepareSurfaceFromGesture();
       }
     }, true);
@@ -3747,6 +3882,7 @@
     // acquire a microphone lease for either one.
     selectedEngineKnown = false;
     computerVoiceSelected = false;
+    selectedEngineMutationRevision = revision;
     clearPreparedSurface(true);
     stopSnapshotLink();
     return revision;
@@ -3755,28 +3891,44 @@
   function isSelectedEngineRevisionCurrent(revision) {
     return Number.isSafeInteger(revision) &&
       revision >= 1 &&
-      revision === selectedEngineRevision;
+      selectedEngineMutationRevision === null &&
+      revision === selectedEngineAcceptedRevision;
   }
 
   function setSelectedEngine(engine, revision) {
     if (revision == null) {
       revision = reserveSelectedEngineUpdate();
     }
-    if (
-      !Number.isSafeInteger(revision) ||
-      revision < 1 ||
-      revision < selectedEngineRevision
-    ) {
+    if (!Number.isSafeInteger(revision) || revision < 1) {
       return computerVoiceSelected;
     }
-    selectedEngineRevision = revision;
+    var completesMutation = selectedEngineMutationRevision !== null &&
+      revision === selectedEngineMutationRevision;
+    if (selectedEngineMutationRevision !== null && !completesMutation) {
+      // A polling/dial GET may reserve a newer ordinary revision while a
+      // settings POST is in flight, but it only reflects the pre-mutation
+      // server value. It cannot clear or supersede the mutation fence.
+      return computerVoiceSelected;
+    }
+    if (!completesMutation && revision < selectedEngineRevision) {
+      return computerVoiceSelected;
+    }
+    if (completesMutation) {
+      selectedEngineMutationRevision = null;
+      // Invalidate every ordinary GET reserved while the mutation was in
+      // flight, including one whose response has not arrived yet.
+      selectedEngineRevision += 1;
+    } else {
+      selectedEngineRevision = revision;
+    }
+    selectedEngineAcceptedRevision = revision;
     selectedEngineKnown = true;
     computerVoiceSelected = engine === "computer_client";
     if (!computerVoiceSelected) {
       clearPreparedSurface(true);
       clearActiveSnapshotState(active);
       clearSnapshotLink();
-    } else {
+    } else if (!dialPending) {
       reconcileSnapshotLink();
     }
     return computerVoiceSelected;
@@ -3784,6 +3936,18 @@
 
   function setDialPending(value) {
     dialPending = value === true;
+    if (dialPending) {
+      // Keep an already-open context-only WSS available for
+      // claimSnapshotLinkForStart(). Tearing it down here races the Windows
+      // server's single-connection gate: the fresh call socket can receive
+      // HTTP 409 before the old connection's finally block releases ownership.
+      // Prevent only a scheduled/new background connection while dialing.
+      if (snapshotReconnectTimer) {
+        clearTimeout(snapshotReconnectTimer);
+        snapshotReconnectTimer = null;
+      }
+      return true;
+    }
     if (!dialPending && !active && !computerVoiceSelected) {
       clearPreparedSurface(true);
     }

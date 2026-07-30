@@ -155,6 +155,7 @@ function createServer(scenario) {
     deferredStart: null,
     deferredContextClears: [],
     deferredContextOpens: [],
+    deferredSocketCloses: [],
   };
 
   const result = (socket, request, payload) => {
@@ -209,6 +210,16 @@ function createServer(scenario) {
     });
   };
 
+  server.resolveDeferredSocketClose = () => {
+    assert.ok(
+      server.deferredSocketCloses.length,
+      "missing deferred socket close",
+    );
+    const socket = server.deferredSocketCloses.shift();
+    socket.readyState = 3;
+    queueMicrotask(() => socket.onclose?.());
+  };
+
   const failure = (socket, request, error) => {
     queueMicrotask(() => socket.onmessage?.({
       data: JSON.stringify({
@@ -233,6 +244,7 @@ function createServer(scenario) {
       this.readyState = 0;
       this.binaryType = "";
       this.bufferedAmount = 0;
+      this.contextModeRequests = 0;
       server.sockets.push(this);
       queueMicrotask(() => {
         if (scenario.offline) {
@@ -277,6 +289,14 @@ function createServer(scenario) {
         return;
       }
       if (request.type === "status") {
+        if (
+          scenario.dropFirstBorrowedStatus === true &&
+          this === server.sockets[0] &&
+          scenario.droppedFirstBorrowedStatus !== true
+        ) {
+          scenario.droppedFirstBorrowedStatus = true;
+          return;
+        }
         if (scenario.binaryOnStatus) {
           queueMicrotask(() => this.onmessage?.({ data: new ArrayBuffer(1956) }));
         }
@@ -292,6 +312,14 @@ function createServer(scenario) {
         return;
       }
       if (request.type === "context-mode") {
+        this.contextModeRequests += 1;
+        if (
+          scenario.dropSecondContextModeOnFirstSocket === true &&
+          this === server.sockets[0] &&
+          this.contextModeRequests === 2
+        ) {
+          return;
+        }
         result(this, request, {
           mode: scenario.contextDeliveryMode || "legacy-inject",
         });
@@ -410,6 +438,11 @@ function createServer(scenario) {
     }
 
     close() {
+      if (scenario.deferSocketClose) {
+        this.readyState = 2;
+        server.deferredSocketCloses.push(this);
+        return;
+      }
       this.readyState = 3;
       queueMicrotask(() => this.onclose?.());
     }
@@ -774,6 +807,10 @@ function createHarness(overrides = {}) {
     extensionRelay: false,
     directWebSocketAttempts: 0,
     deferStatusResult: false,
+    dropFirstBorrowedStatus: false,
+    droppedFirstBorrowedStatus: false,
+    dropSecondContextModeOnFirstSocket: false,
+    deferSocketClose: false,
     lastError: null,
     relayLifecycle: [],
     relayOverlapAttempts: 0,
@@ -1119,7 +1156,56 @@ test("START 只消费受控电话按钮的真实点击，直接调用、伪同 I
   assert.equal(forwarded.scenario.microphoneRequests.length, 1);
 });
 
-test("snapshot-mcp 常驻 WSS 原地升级为通话且不并跑旧注入", async () => {
+test("首次配置仍在加载时一次可信点击可保留手势并完成 computer_client START", async () => {
+  const harness = createHarness();
+  phoneClick(harness, { trusted: true });
+  assert.equal(
+    harness.scenario.microphoneRequests.length,
+    1,
+    "初始 voice-config 尚未知时也只准备可撤销的本地麦克风表面",
+  );
+
+  // Reproduce rc-voicecall's real bubble-phase order after the capture handler:
+  // mark the dial pending, then apply the authoritative GET result.
+  harness.api.setDialPending(true);
+  assert.equal(harness.api.setSelectedEngine("computer_client"), true);
+  const started = await harness.api.startFromUserGesture();
+  harness.api.setDialPending(false);
+
+  assert.equal(started.ok, true);
+  assert.equal(
+    harness.server.requests.filter((request) => request.type === "start").length,
+    1,
+  );
+  assert.equal(harness.server.sockets.length, 1);
+  await harness.api.stop("test");
+});
+
+test("首次配置最终不是 computer_client 时会停止迟到的麦克风轨道", async () => {
+  let resolveMicrophone;
+  const microphone = new Promise((resolve) => {
+    resolveMicrophone = resolve;
+  });
+  const harness = createHarness({ microphonePlan: [microphone] });
+  phoneClick(harness, { trusted: true });
+  assert.equal(harness.scenario.microphoneRequests.length, 1);
+
+  harness.api.setDialPending(true);
+  assert.equal(harness.api.setSelectedEngine("native"), false);
+  const stream = createMicrophoneStream(harness.scenario);
+  resolveMicrophone(stream);
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(stream.track.stopped, true);
+  assert.equal(harness.server.sockets.length, 0);
+  await assert.rejects(
+    harness.api.startFromUserGesture(),
+    (error) => error?.code === "BW_COMPUTER_VOICE_GESTURE_REQUIRED",
+  );
+  harness.api.setDialPending(false);
+});
+
+test("snapshot-mcp 真实拨号顺序保留并原地升级常驻 WSS", async () => {
   const harness = createHarness({
     contextDeliveryMode: "snapshot-mcp",
     contextSyncEnabled: true,
@@ -1161,7 +1247,16 @@ test("snapshot-mcp 常驻 WSS 原地升级为通话且不并跑旧注入", async
   assert.equal(backgroundSocket.readyState, 1);
 
   phoneClick(harness, { trusted: true });
+  harness.api.setDialPending(true);
+  harness.api.setSelectedEngine("computer_client");
+  assert.equal(
+    backgroundSocket.readyState,
+    1,
+    "dialPending 与同值配置回执不得提前拆掉待晋升的常驻 WSS",
+  );
+  assert.equal(harness.server.sockets.length, 1);
   const started = await harness.api.startFromUserGesture();
+  harness.api.setDialPending(false);
   assert.equal(started.ok, true);
   assert.equal(backgroundSocket.readyState, 1);
   assert.equal(harness.server.sockets.length, 1);
@@ -1191,6 +1286,225 @@ test("snapshot-mcp 常驻 WSS 原地升级为通话且不并跑旧注入", async
   harness.api.setSelectedEngine("codex");
   await harness.api.stop("test");
   assert.equal(harness.api.isActive(), false);
+});
+
+test("snapshot-mcp 对未触发 onclose 的 CLOSED 常驻 WSS 主动验活后只重建一次", async () => {
+  const harness = createHarness({
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncEnabled: true,
+  });
+  harness.api.setSelectedEngine("computer_client");
+  await waitForRequest(harness, "context-open");
+  assert.equal((await harness.api.availability()).state, "idle");
+  assert.equal(harness.server.sockets.length, 1);
+  const staleSocket = harness.server.sockets[0];
+  staleSocket.readyState = 3;
+
+  phoneClick(harness, { trusted: true });
+  harness.api.setDialPending(true);
+  harness.api.setSelectedEngine("computer_client");
+  const started = await harness.api.startFromUserGesture();
+  harness.api.setDialPending(false);
+
+  assert.equal(started.ok, true);
+  assert.equal(harness.server.sockets.length, 2);
+  assert.equal(harness.server.activeSocket, harness.server.sockets[1]);
+  assert.equal(
+    harness.server.requests.filter((request) => request.type === "start").length,
+    1,
+  );
+  harness.api.setSelectedEngine("codex");
+  await harness.api.stop("test");
+});
+
+test("snapshot-mcp 借用 STATUS 静默超时后重建一次并恢复常驻快照", async () => {
+  const timers = createManualTimers();
+  const harness = createHarness({
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncEnabled: true,
+    dropFirstBorrowedStatus: true,
+    timers,
+  });
+  harness.api.setSelectedEngine("computer_client");
+  await waitForRequest(harness, "context-open");
+
+  const pending = harness.api.availability();
+  await waitForCondition(
+    () => harness.server.requests.filter(
+      (request) => request.type === "status",
+    ).length === 1,
+    "borrowed STATUS request",
+  );
+  assert.equal(timers.count(7000), 1);
+  timers.runOne(7000);
+
+  const available = await pending;
+  assert.equal(available.state, "idle");
+  assert.equal(harness.server.sockets.length, 2);
+  assert.equal(
+    harness.server.requests.filter((request) => request.type === "status").length,
+    2,
+  );
+  assert.equal(
+    harness.server.requests.some((request) => request.type === "start"),
+    false,
+  );
+  assert.equal(timers.count(0), 1);
+  timers.runOne(0);
+  await waitForCondition(
+    () => harness.server.requests.filter(
+      (request) => request.type === "context-open",
+    ).length === 2,
+    "restored context-only snapshot link",
+  );
+  assert.equal(harness.server.sockets.length, 3);
+  harness.api.setSelectedEngine("codex");
+});
+
+test("snapshot-mcp 晋升链 stale-OPEN 的首个只读探测超时后重连但绝不重发 START", async () => {
+  const timers = createManualTimers();
+  const harness = createHarness({
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncEnabled: true,
+    dropSecondContextModeOnFirstSocket: true,
+    timers,
+  });
+  harness.api.setSelectedEngine("computer_client");
+  await waitForRequest(harness, "context-open");
+
+  phoneClick(harness, { trusted: true });
+  harness.api.setDialPending(true);
+  harness.api.setSelectedEngine("computer_client");
+  const pending = harness.api.startFromUserGesture();
+  await waitForCondition(
+    () => harness.server.requests.filter(
+      (request) => request.type === "context-mode",
+    ).length === 2,
+    "claimed snapshot CONTEXT-MODE probe",
+  );
+  assert.equal(timers.count(7000), 1);
+  timers.runOne(7000);
+
+  const started = await pending;
+  harness.api.setDialPending(false);
+  assert.equal(started.ok, true);
+  assert.equal(harness.server.sockets.length, 2);
+  assert.equal(harness.server.activeSocket, harness.server.sockets[1]);
+  assert.equal(
+    harness.server.requests.filter((request) => request.type === "start").length,
+    1,
+    "only the fresh, proven channel may send the single authorized START",
+  );
+  harness.api.setSelectedEngine("codex");
+  await harness.api.stop("test");
+});
+
+test("START 已发送但结果超时时绝不重发，并完整释放本地资源", async () => {
+  const timers = createManualTimers();
+  const harness = createHarness({
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncEnabled: true,
+    deferStartResult: true,
+    deferSocketClose: true,
+    timers,
+  });
+  harness.api.setSelectedEngine("computer_client");
+  await waitForRequest(harness, "context-open");
+
+  phoneClick(harness, { trusted: true });
+  harness.api.setDialPending(true);
+  harness.api.setSelectedEngine("computer_client");
+  const pending = harness.api.startFromUserGesture();
+  await waitForRequest(harness, "start");
+  assert.equal(
+    harness.server.requests.filter((request) => request.type === "start").length,
+    1,
+  );
+  assert.equal(timers.count(45000), 1);
+  timers.runOne(45000);
+
+  await assert.rejects(
+    pending,
+    (error) => error?.code === "BW_COMPUTER_VOICE_DIRECT_START_UNKNOWN",
+  );
+  assert.equal(
+    harness.server.requests.filter((request) => request.type === "start").length,
+    1,
+    "START 结果未知时不得自动发送第二次切换请求",
+  );
+  assert.equal(harness.api.isActive(), false);
+  assert.equal(harness.scenario.microphoneTracks[0].stopped, true);
+  assert.equal(harness.scenario.audioContexts[0].closed, true);
+  assert.equal(harness.server.sockets.length, 1);
+  assert.equal(harness.server.sockets[0].readyState, 2);
+  assert.equal(harness.server.deferredSocketCloses.length, 1);
+  assert.equal(
+    timers.count(1000),
+    0,
+    "START timeout 后也必须先等旧 WSS 真正关闭",
+  );
+
+  harness.server.resolveDeferredSocketClose();
+  await waitForCondition(
+    () => timers.count(1000) === 1,
+    "snapshot reconnect timer after failed START close",
+  );
+  timers.runOne(1000);
+  await waitForCondition(
+    () => harness.server.requests.filter(
+      (request) => request.type === "context-open",
+    ).length === 2,
+    "snapshot reconnect after failed START",
+  );
+  assert.equal(
+    harness.server.requests.filter((request) => request.type === "start").length,
+    1,
+  );
+});
+
+test("STOP 后必须等旧 WSS 完全关闭才恢复 snapshot-mcp 常驻连接", async () => {
+  const timers = createManualTimers();
+  const harness = createHarness({
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncEnabled: true,
+    deferSocketClose: true,
+    timers,
+  });
+  harness.api.setSelectedEngine("computer_client");
+  await waitForRequest(harness, "context-open");
+
+  phoneClick(harness, { trusted: true });
+  harness.api.setDialPending(true);
+  harness.api.setSelectedEngine("computer_client");
+  await harness.api.startFromUserGesture();
+  harness.api.setDialPending(false);
+
+  const stopping = harness.api.stop("test");
+  await waitForCondition(
+    () => harness.server.deferredSocketCloses.length === 1,
+    "active WSS close",
+  );
+  assert.equal(harness.server.sockets.length, 1);
+  assert.equal(
+    timers.count(1000),
+    0,
+    "旧连接 close promise settle 前不得安排替代连接",
+  );
+
+  harness.server.resolveDeferredSocketClose();
+  await stopping;
+  await waitForCondition(
+    () => timers.count(1000) === 1,
+    "snapshot reconnect timer after close",
+  );
+  timers.runOne(1000);
+  await waitForCondition(
+    () => harness.server.requests.filter(
+      (request) => request.type === "context-open",
+    ).length === 2,
+    "snapshot reconnect after close",
+  );
+  assert.equal(harness.server.sockets.length, 2);
 });
 
 test("snapshot-mcp 晋升等待期间被停止会关闭认领到的旧 WSS", async () => {
@@ -1742,6 +2056,43 @@ test("设置保存中的未知引擎围栏会立即撤销旧 computer_client 采
   phoneClick(harness, { trusted: true });
   assert.equal(harness.scenario.microphoneRequests.length, 1);
   harness.api.cancelPreparedGesture();
+});
+
+test("设置 mutation token 不会被拨号 GET 的更高 revision 提前清除", async () => {
+  const harness = createHarness();
+  harness.api.setSelectedEngine("computer_client");
+  const mutationRevision = harness.api.beginSelectedEngineUpdate();
+  const dialRevision = harness.api.reserveSelectedEngineUpdate();
+  assert.ok(dialRevision > mutationRevision);
+
+  assert.equal(
+    harness.api.setSelectedEngine("computer_client", dialRevision),
+    false,
+    "POST 在途时拨号 GET 只能读到旧值，不能清除 mutation fence",
+  );
+  assert.equal(
+    harness.api.isSelectedEngineRevisionCurrent(dialRevision),
+    false,
+  );
+  phoneClick(harness, { trusted: true });
+  assert.equal(harness.scenario.microphoneRequests.length, 0);
+
+  assert.equal(
+    harness.api.setSelectedEngine("native", mutationRevision),
+    false,
+  );
+  assert.equal(
+    harness.api.isSelectedEngineRevisionCurrent(mutationRevision),
+    true,
+    "只有对应 mutation token 的 ACK 可以解除围栏",
+  );
+  assert.equal(
+    harness.api.setSelectedEngine("computer_client", dialRevision),
+    false,
+    "mutation ACK 后，先前在途的旧 GET 也必须保持失效",
+  );
+  phoneClick(harness, { trusted: true });
+  assert.equal(harness.scenario.microphoneRequests.length, 0);
 });
 
 test("配置 fetch 在途时第二次真实电话点击撤销 gesture，迟到 START 不可采音", async () => {

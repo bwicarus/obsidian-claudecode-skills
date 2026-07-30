@@ -182,7 +182,7 @@ test("旧 offscreen 文件仅为惰性 tombstone，不能恢复 Native/WebRTC �
   );
 });
 
-test("v3 只在 computer_client 电话按钮用户手势后申请麦克风并向固定 WSS 发送 START", () => {
+test("v3 只在可信电话手势预备可撤销麦克风，设置变更围栏且 START 走固定 WSS", () => {
   assert.match(
     runtime,
     /wss:\/\/bwicarus-2\.taile44d0c\.ts\.net\/reader-computer-voice\/v1/,
@@ -190,7 +190,7 @@ test("v3 只在 computer_client 电话按钮用户手势后申请麦克风并向
   assert.match(runtime, /channel\.request\("hello", \{\s*protocolVersion: 3/);
   assert.match(
     runtime,
-    /!active && selectedEngineKnown && computerVoiceSelected[\s\S]*prepareSurfaceFromGesture\(\)/,
+    /\(selectedEngineKnown && computerVoiceSelected\)[\s\S]*\(!selectedEngineKnown && selectedEngineMutationRevision === null\)[\s\S]*prepareSurfaceFromGesture\(\)/,
   );
   assert.match(
     runtime,
@@ -199,6 +199,22 @@ test("v3 只在 computer_client 电话按钮用户手势后申请麦克风并向
   assert.match(
     runtime,
     /function prepareSurfaceFromGesture\(\)[\s\S]*prepareMicrophoneFromGesture\(preparedSurface\)/,
+  );
+  assert.match(
+    runtime,
+    /function beginSelectedEngineUpdate\(\)[\s\S]*selectedEngineKnown = false[\s\S]*selectedEngineMutationRevision = revision[\s\S]*clearPreparedSurface\(true\)/,
+  );
+  assert.match(
+    runtime,
+    /function setSelectedEngine\(engine, revision\)[\s\S]*completesMutation[\s\S]*selectedEngineMutationRevision = null[\s\S]*selectedEngineAcceptedRevision = revision[\s\S]*computerVoiceSelected = engine === "computer_client"/,
+  );
+  assert.match(
+    runtime,
+    /function directChannelLive\(channel\)[\s\S]*channel\.socket[\s\S]*socket\.readyState === 1/,
+  );
+  assert.match(
+    runtime,
+    /function claimSnapshotLinkForStart\(\)[\s\S]*directChannelLive\(state\.channel\)/,
   );
   assert.match(
     runtime,
