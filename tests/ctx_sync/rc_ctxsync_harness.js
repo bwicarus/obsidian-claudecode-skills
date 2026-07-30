@@ -395,6 +395,93 @@ function check(name, cond, extra) {
     env.posts.filter(p => /active-reading/.test(p.url) && p.body.reason === 'dwell').length === 0,
     JSON.stringify(env.posts.map(p => p.body.reason)));
 
+  // ── 9) 出向事件身份归一:focus/drawing 必须与 ctxSync 用同一份 canonical ──
+  // 这组直接对应用户现场症状:journal 交替出现 focus(vbook 全局页) 与
+  // page.context(真实卷/卷内页),Windows 把同一逻辑页当成两页 → 正文瞬时清空、选区丢失。
+  console.log('[9] 出向事件身份归一(vbook → 真实卷)');
+
+  async function bindCanonical(RC, env, view, page, real, realPage) {
+    env.queueResponse({
+      ok: true,
+      canonical: { kind: 'pdf', file: real, page: realPage, viewFile: view, viewPage: page },
+    });
+    RC.ctxSync.report({ kind: 'pdf', file: view, pos: page, selection: '' }, { immediate: true });
+    await sleep(30); env.flushInflight(); await sleep(30);
+  }
+
+  env = makeEnv(); RC = load(env);
+  env.store['eph-ctx-sync'] = '1';
+  await bindCanonical(RC, env, 'vbook:g_book', 31, 'books/part-2.pdf', 7);
+  check('前置:canonical 已绑定',
+    RC.ctxSync._state().canonical && RC.ctxSync._state().canonical.file === 'books/part-2.pdf');
+
+  check('vbook 焦点发出为 true', RC.outgoing.focus('text', { file: 'vbook:g_book', page: 31, text: '选中' }) === true);
+  await sleep(60);
+  var f8 = env.posts.filter((p) => /outgoing\/focus/.test(p.url));
+  check('焦点身份已归一到真实卷', f8.length === 1 && f8[0].body.ref.file === 'books/part-2.pdf',
+    JSON.stringify(f8.map((p) => p.body.ref)));
+  check('焦点页归一到卷内页', f8[0] && f8[0].body.ref.page === 7, JSON.stringify(f8[0] && f8[0].body.ref));
+  check('保留视图身份供回指', f8[0] && f8[0].body.ref.viewFile === 'vbook:g_book' &&
+    f8[0].body.ref.viewPage === 31, JSON.stringify(f8[0] && f8[0].body.ref));
+  check('不丢原有字段', f8[0] && f8[0].body.ref.text === '选中');
+
+  // 归一后再报同一逻辑对象:签名用归一身份,不应重复发
+  check('归一后同对象仍去重',
+    RC.outgoing.focus('text', { file: 'vbook:g_book', page: 31, text: '选中' }) === false);
+
+  // fail closed:没有 canonical 时绝不拿 vbook 身份发
+  env = makeEnv(); RC = load(env);
+  env.store['eph-ctx-sync'] = '1';
+  check('无 canonical 时 vbook 焦点不发(fail closed)',
+    RC.outgoing.focus('text', { file: 'vbook:g_book', page: 31 }) === false);
+  check('无 canonical 时 vbook 绘图不排队',
+    RC.outgoing.drawingTouched('vbook:g_book', 31) === false);
+  await sleep(1200);
+  check('fail closed 时零请求', env.posts.length === 0, JSON.stringify(env.posts.map((p) => p.url)));
+
+  // 与本次事件身份不匹配(换页)也必须 fail closed,不能凭 vbook 猜真实卷
+  env = makeEnv(); RC = load(env);
+  env.store['eph-ctx-sync'] = '1';
+  await bindCanonical(RC, env, 'vbook:g_book', 31, 'books/part-2.pdf', 7);
+  check('别页焦点不套用当前映射',
+    RC.outgoing.focus('text', { file: 'vbook:g_book', page: 32 }) === false);
+  check('别的合并书不套用当前映射',
+    RC.outgoing.focus('text', { file: 'vbook:g_other', page: 31 }) === false);
+
+  // 普通书与无 file 焦点不受归一影响
+  env = makeEnv(); RC = load(env);
+  env.store['eph-ctx-sync'] = '1';
+  check('普通书焦点照常发', RC.outgoing.focus('text', { file: 'a.pdf', page: 3 }) === true);
+  check('无 file 的卡片焦点照常发', RC.outgoing.focus('card', { cid: 'c1' }) === true);
+  await sleep(60);
+  var f8b = env.posts.filter((p) => /outgoing\/focus/.test(p.url));
+  check('普通书身份原样不变', f8b[0] && f8b[0].body.ref.file === 'a.pdf' &&
+    f8b[0].body.ref.viewFile === undefined, JSON.stringify(f8b[0] && f8b[0].body.ref));
+
+  // 绘图:归一后按真实卷去问版本
+  env = makeEnv(); RC = load(env);
+  env.store['eph-ctx-sync'] = '1';
+  await bindCanonical(RC, env, 'vbook:g_book', 31, 'books/part-2.pdf', 7);
+  check('vbook 绘图排队返回 true', RC.outgoing.drawingTouched('vbook:g_book', 31) === true);
+  await sleep(1200); env.flushInflight(); await sleep(60);
+  var dg = env.posts.concat(env.gets || []).filter((p) => /outgoing\/drawing/.test(p.url));
+  if (dg.length) {
+    check('绘图查询用真实卷 rel', /books%2Fpart-2\.pdf|books\/part-2\.pdf/.test(dg[0].url), dg[0].url);
+    check('绘图查询用卷内页', /page=7(&|$)/.test(dg[0].url), dg[0].url);
+  } else {
+    check('绘图查询已发出', false, '未捕获 outgoing/drawing 请求');
+  }
+
+  // cancel 不携带身份,不应被归一拦住;取消后旧焦点不复活
+  env = makeEnv(); RC = load(env);
+  env.store['eph-ctx-sync'] = '1';
+  await bindCanonical(RC, env, 'vbook:g_book', 31, 'books/part-2.pdf', 7);
+  RC.outgoing.focus('text', { file: 'vbook:g_book', page: 31 });
+  check('取消照常发出', RC.outgoing.cancel() === true);
+  check('无焦点时不发空取消', RC.outgoing.cancel() === false);
+  check('取消后同一对象要重新 set',
+    RC.outgoing.focus('text', { file: 'vbook:g_book', page: 31 }) === true);
+
   console.log(failed === 0 ? '\nALL PASS' : `\n${failed} FAILED`);
   process.exit(failed === 0 ? 0 : 1);
 })();

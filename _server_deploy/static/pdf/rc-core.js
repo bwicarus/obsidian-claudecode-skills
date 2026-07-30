@@ -262,6 +262,38 @@
 
   function _ogSig(kind, ref) { return kind + '|' + JSON.stringify(ref); }
 
+  // ── 出向事件的身份归一(与 ctxSync 同源)────────────────────────────────
+  // 问题:focus/drawing 用的是宿主直接给的 ref —— 合并书里那是 vbook 全局身份;
+  // 而 page.context 经 active-reading 已归一到真实卷 rel + 卷内页。两种身份交替到达
+  // Windows,同一逻辑页被当成两页 → 正文瞬时清空、选区被忽略。
+  //
+  // 归一只用**同一份已验证映射** `_ctxS.canonical`(服务端 ack 回来、且当时上报身份与之
+  // 逐字段匹配才被接受;换书/翻页/关开关都会把它置空)。**绝不凭 vbook 前缀猜真实卷**。
+  //
+  // fail closed 的含义:映射缺失、过期或与本事件身份不匹配时**返回 null → 不发这条事件**,
+  // 而不是退回发 vbook 身份 —— 后者正是会清空新页正文的那种事件。宁可少一条焦点,
+  // 也不能让旧身份把新页正文/选区打掉。
+  // 非 vbook 的书本身就是 canonical,原样返回,不受影响。
+  function _ogCanonicalRef(ref) {
+    if (!ref || typeof ref !== 'object') return null;
+    var file = ref.file;
+    // 不带 file 的焦点(卡片 {cid}、纯文本片段等)与书页身份无关,归一规则不适用,
+    // **原样放行** —— 否则会静默吞掉这类焦点。
+    if (typeof file !== 'string' || !file) return ref;
+    if (file.indexOf('vbook:') !== 0) return ref;      // 普通书:本就是真实身份
+    var c = _ctxS.canonical;
+    if (!c || c.viewFile !== file || !_ctxScalarEq(c.viewPage, ref.page)) return null;
+    if (!_ctxValidFile(c.file)) return null;
+    var out = {}, k;
+    for (k in ref) if (Object.prototype.hasOwnProperty.call(ref, k)) out[k] = ref[k];
+    out.file = c.file;
+    out.page = c.page;
+    // 保留视图身份供消费方回指(例如要跳回合并书视图),但**不参与身份判定**
+    out.viewFile = file;
+    out.viewPage = ref.page === undefined ? null : ref.page;
+    return out;
+  }
+
   function _ogPost(path, body) {
     if (!_ctxOn()) return Promise.resolve(null);
     // @interaction context.focus.report
@@ -323,14 +355,18 @@
     drawDebounceMs: _OG_DRAW_MS,
     kinds: ['text', 'image', 'card', 'drawing', 'region'],
 
-    /** 焦点建立/替换。同一对象重复上报会被丢弃(选中态每次重绘都调也不会刷请求)。 */
+    /** 焦点建立/替换。同一对象重复上报会被丢弃(选中态每次重绘都调也不会刷请求)。
+     *  合并书(vbook)必须先归一到真实卷身份;归一不了就**不发**(见 _ogCanonicalRef)。 */
     focus: function (kind, ref) {
       if (!_ctxOn() || !kind || !ref) return false;
       if (_outgoing.kinds.indexOf(kind) < 0) return false;   // 宿主传了没登记的类型 → 静默不发
-      var sig = _ogSig(kind, ref);
+      var canon = _ogCanonicalRef(ref);
+      if (!canon) return false;                              // fail closed:宁可少一条焦点
+      // 去重签名用**归一后**的身份:同一逻辑对象在映射就绪前后不该被当成两次
+      var sig = _ogSig(kind, canon);
       if (_og.focus === sig) return false;                   // 去重:没变就不发
       _og.focus = sig;
-      _ogPost('/pdf/api/outgoing/focus', { kind: kind, ref: ref });
+      _ogPost('/pdf/api/outgoing/focus', { kind: kind, ref: canon });
       return true;
     },
 
@@ -343,10 +379,13 @@
       return true;
     },
 
-    /** 绘图有改动(每一笔都可以调,内部合并)。停手约 1s 才真正去取版本。 */
+    /** 绘图有改动(每一笔都可以调,内部合并)。停手约 1s 才真正去取版本。
+     *  与 focus 同一条身份规则:vbook 归一不了就不排队,避免拿全局页去问绘图版本。 */
     drawingTouched: function (file, page) {
       if (!_ctxOn() || !file) return false;
-      _og.drawPend = { file: file, page: page };
+      var canon = _ogCanonicalRef({ file: file, page: page });
+      if (!canon) return false;                              // fail closed
+      _og.drawPend = { file: canon.file, page: canon.page };
       _ogSchedDraw(_OG_DRAW_MS);
       return true;
     },
