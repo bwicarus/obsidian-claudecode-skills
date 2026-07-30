@@ -32,6 +32,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     private readonly DirectBridgeCoordinator _coordinator;
     private readonly ReaderResultDeliveryBroker _readerResultBroker =
         new();
+    private readonly ReaderVisualDeliveryBroker _readerVisualBroker =
+        new();
     private readonly SemaphoreSlim _connectionGate = new(1, 1);
     private readonly SemaphoreSlim _disposeGate = new(1, 1);
     private readonly string _serviceInstanceId;
@@ -84,7 +86,9 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                     TextReader.Null,
                     TextWriter.Null,
                     deliverResultAsync:
-                        _readerResultBroker.DeliverAsync),
+                        _readerResultBroker.DeliverAsync,
+                    fetchVisualAsync:
+                        _readerVisualBroker.RequestAsync),
                 config.ListenPort);
     }
 
@@ -351,6 +355,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         finally
         {
             _readerResultBroker.Detach(connectionId);
+            _readerVisualBroker.Detach(connectionId);
             await _coordinator.StopForConnectionAsync(connectionId)
                 .ConfigureAwait(false);
             await WriteRuntimeStatusAsync(
@@ -388,7 +393,11 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             acknowledgeReaderResult:
                 ack => _readerResultBroker.Acknowledge(
                     connectionId,
-                    ack));
+                    ack),
+            acceptReaderVisual:
+                chunk => _readerVisualBroker.Accept(
+                    connectionId,
+                    chunk));
         Task<DirectClientMessage?>? prefetchedReceiveTask = null;
 
         while (
@@ -656,6 +665,13 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 )
                 {
                     _readerResultBroker.Attach(
+                        connectionId,
+                        (envelope, token) => SendJsonAsync(
+                            socket,
+                            sendGate,
+                            envelope,
+                            token));
+                    _readerVisualBroker.Attach(
                         connectionId,
                         (envelope, token) => SendJsonAsync(
                             socket,

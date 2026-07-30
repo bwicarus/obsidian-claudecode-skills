@@ -35,6 +35,12 @@ if (window.__bwPwaProviderOnly) return;
   var READER_RESULT_DELIVERY_CONTRACT = "reader-result-delivery/1";
   var READER_RESULT_EVENT = "reader-result";
   var READER_RESULT_ACK = "reader-result-ack";
+  var READER_VISUAL_DELIVERY_CONTRACT = "reader-visual-delivery/1";
+  var READER_VISUAL_EVENT = "reader-visual-request";
+  var READER_VISUAL_CHUNK = "reader-visual";
+  var READER_VISUAL_MAX_BYTES = 768 * 1024;
+  var READER_VISUAL_CHUNK_CHARS = 48000;
+  var READER_VISUAL_MAX_CHUNKS = 20;
   var CONTEXT_DELIVERY_LEGACY = "legacy-inject";
   var CONTEXT_DELIVERY_SNAPSHOT = "snapshot-mcp";
   var ACTIVE_READING_POLL_MS = 250;
@@ -507,6 +513,101 @@ if (window.__bwPwaProviderOnly) return;
         page: value.anchor.page,
       },
       parts: [part],
+    };
+  }
+
+  function normalizeReaderVisualRequest(value) {
+    exactObject(
+      value,
+      [
+        "contract",
+        "correlation",
+        "file",
+        "page",
+        "drawingRevision",
+        "maxBytes",
+        "chunkCharacters",
+      ],
+      [],
+      "Reader 笔迹视觉请求"
+    );
+    if (value.contract !== READER_VISUAL_DELIVERY_CONTRACT) {
+      throw directError(
+        "Reader 笔迹视觉合同版本不匹配",
+        "BW_READER_VISUAL_SCHEMA_INVALID",
+        false
+      );
+    }
+    var correlation = safeId(
+      value.correlation,
+      "Reader 笔迹视觉 correlation"
+    );
+    var file = safeText(
+      value.file,
+      "Reader 笔迹视觉 file",
+      4096,
+      false
+    );
+    if (/[\u0000-\u001f\u007f-\u009f]/.test(file)) {
+      throw directError(
+        "Reader 笔迹视觉 file 无效",
+        "BW_READER_VISUAL_SCHEMA_INVALID",
+        false
+      );
+    }
+    var page = value.page;
+    if (
+      (
+        typeof page === "number" &&
+        (!Number.isSafeInteger(page) || page < 0)
+      ) ||
+      (
+        typeof page === "string" &&
+        (
+          !page ||
+          page.length > 256 ||
+          /[\u0000-\u001f\u007f-\u009f]/.test(page)
+        )
+      ) ||
+      (typeof page !== "number" && typeof page !== "string")
+    ) {
+      throw directError(
+        "Reader 笔迹视觉 page 无效",
+        "BW_READER_VISUAL_SCHEMA_INVALID",
+        false
+      );
+    }
+    var revision = safeText(
+      value.drawingRevision,
+      "Reader 笔迹视觉 drawingRevision",
+      19,
+      false
+    );
+    if (!/^dr_[0-9a-f]{16}$/.test(revision)) {
+      throw directError(
+        "Reader 笔迹视觉 drawingRevision 无效",
+        "BW_READER_VISUAL_SCHEMA_INVALID",
+        false
+      );
+    }
+    if (
+      value.maxBytes !== READER_VISUAL_MAX_BYTES ||
+      value.chunkCharacters !== READER_VISUAL_CHUNK_CHARS
+    ) {
+      throw directError(
+        "Reader 笔迹视觉大小合同不匹配",
+        "BW_READER_VISUAL_SCHEMA_INVALID",
+        false
+      );
+    }
+    return {
+      contract: READER_VISUAL_DELIVERY_CONTRACT,
+      correlation: correlation,
+      file: file,
+      page: page,
+      drawingRevision: revision,
+      maxBytes: value.maxBytes,
+      chunkCharacters: value.chunkCharacters,
     };
   }
 
@@ -1460,6 +1561,177 @@ if (window.__bwPwaProviderOnly) return;
     });
   };
 
+  DirectSocket.prototype._sendReaderVisualPart = function (
+    request,
+    fields
+  ) {
+    var payload = Object.assign({
+      correlation: request.correlation,
+      file: request.file,
+      page: request.page,
+      drawingRevision: request.drawingRevision,
+    }, fields);
+    return this.request(
+      READER_VISUAL_CHUNK,
+      payload,
+      REQUEST_TIMEOUT_MS
+    ).then(function (value) {
+      exactObject(
+        value,
+        ["correlation", "chunkIndex", "accepted", "complete"],
+        [],
+        "Reader 笔迹视觉回执"
+      );
+      if (
+        value.correlation !== request.correlation ||
+        value.chunkIndex !== payload.chunkIndex ||
+        value.accepted !== true ||
+        typeof value.complete !== "boolean"
+      ) {
+        throw directError(
+          "Reader 笔迹视觉回执错配",
+          "BW_READER_VISUAL_ACK_INVALID",
+          false
+        );
+      }
+      return value;
+    });
+  };
+
+  DirectSocket.prototype._declineReaderVisual = function (request) {
+    return this._sendReaderVisualPart(request, {
+      status: "unavailable",
+      mimeType: "",
+      chunkIndex: 0,
+      chunkCount: 0,
+      totalBytes: 0,
+      data: "",
+    });
+  };
+
+  function readerVisualDrawingMatches(request) {
+    var drawing;
+    var outgoingState;
+    try {
+      drawing = RC.outgoing &&
+        typeof RC.outgoing.lastDrawing === "function"
+        ? RC.outgoing.lastDrawing()
+        : null;
+      outgoingState = RC.outgoing &&
+        typeof RC.outgoing._state === "function"
+        ? RC.outgoing._state()
+        : null;
+    } catch (_) {
+      drawing = null;
+      outgoingState = null;
+    }
+    return !!(
+      plainObject(drawing) &&
+      plainObject(outgoingState) &&
+      !outgoingState.drawPend &&
+      !outgoingState.drawTimer &&
+      outgoingState.inflight !== true &&
+      drawing.file === request.file &&
+      sameActiveScalar(drawing.page, request.page) &&
+      drawing.stable === true &&
+      drawing.empty === false &&
+      drawing.drawingRevision === request.drawingRevision
+    );
+  }
+
+  DirectSocket.prototype._handleReaderVisual = function (rawPayload) {
+    var request = normalizeReaderVisualRequest(rawPayload);
+    var self = this;
+    if (this.readerVisualBusy) {
+      this._declineReaderVisual(request).catch(function () {});
+      return;
+    }
+    this.readerVisualBusy = true;
+    Promise.resolve().then(function () {
+      var current = localActiveReadingSnapshot();
+      if (
+        contextDeliveryMode !== CONTEXT_DELIVERY_SNAPSHOT ||
+        !current ||
+        current.file !== request.file ||
+        !sameActiveScalar(current.page, request.page) ||
+        !readerVisualDrawingMatches(request) ||
+        !RC.captureInkRegion ||
+        typeof RC.captureInkRegion !== "function"
+      ) {
+        return null;
+      }
+      return Promise.resolve(RC.captureInkRegion()).then(function (shot) {
+        var latest = localActiveReadingSnapshot();
+        if (
+          !latest ||
+          latest.file !== request.file ||
+          !sameActiveScalar(latest.page, request.page) ||
+          !readerVisualDrawingMatches(request)
+        ) {
+          return null;
+        }
+        return shot;
+      });
+    }).then(function (shot) {
+      var b64 = shot && shot.media_type === "image/jpeg"
+        ? shot.b64
+        : "";
+      if (
+        typeof b64 !== "string" ||
+        !b64 ||
+        b64.length % 4 !== 0 ||
+        b64.length > (
+          READER_VISUAL_CHUNK_CHARS * READER_VISUAL_MAX_CHUNKS
+        ) ||
+        !/^[A-Za-z0-9+/]+={0,2}$/.test(b64)
+      ) {
+        return self._declineReaderVisual(request);
+      }
+      var padding = b64.endsWith("==")
+        ? 2
+        : b64.endsWith("=")
+          ? 1
+          : 0;
+      var totalBytes = (b64.length / 4) * 3 - padding;
+      var chunkCount = Math.ceil(
+        b64.length / READER_VISUAL_CHUNK_CHARS
+      );
+      if (
+        totalBytes < 1 ||
+        totalBytes > request.maxBytes ||
+        chunkCount < 1 ||
+        chunkCount > READER_VISUAL_MAX_CHUNKS
+      ) {
+        return self._declineReaderVisual(request);
+      }
+      var chain = Promise.resolve();
+      for (var index = 0; index < chunkCount; index += 1) {
+        (function (chunkIndex) {
+          var data = b64.slice(
+            chunkIndex * READER_VISUAL_CHUNK_CHARS,
+            (chunkIndex + 1) * READER_VISUAL_CHUNK_CHARS
+          );
+          chain = chain.then(function () {
+            return self._sendReaderVisualPart(request, {
+              status: "chunk",
+              mimeType: "image/jpeg",
+              chunkIndex: chunkIndex,
+              chunkCount: chunkCount,
+              totalBytes: totalBytes,
+              data: data,
+            });
+          });
+        })(index);
+      }
+      return chain;
+    }).catch(function () {
+      // The MCP call is read-only and can still return the text snapshot.
+      // Never retry capture or send a START from this side channel.
+    }).finally(function () {
+      self.readerVisualBusy = false;
+    });
+  };
+
   DirectSocket.prototype._onMessage = function (event) {
     if (this.closed) return;
     if (
@@ -1534,6 +1806,10 @@ if (window.__bwPwaProviderOnly) return;
         );
         if (message.event === READER_RESULT_EVENT) {
           this._handleReaderResult(message.payload);
+          return;
+        }
+        if (message.event === READER_VISUAL_EVENT) {
+          this._handleReaderVisual(message.payload);
           return;
         }
         if (message.event !== "status") {

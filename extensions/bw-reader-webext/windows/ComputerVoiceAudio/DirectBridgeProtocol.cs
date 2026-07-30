@@ -21,6 +21,9 @@ internal sealed class DirectBridgeProtocolSession
     private readonly DirectBridgeCoordinator _coordinator;
     private readonly Func<ReaderResultDeliveryAck, bool>
         _acknowledgeReaderResult;
+    private readonly Func<
+        ReaderVisualDeliveryChunk,
+        ReaderVisualDeliveryAck> _acceptReaderVisual;
     private bool _helloSeen;
     private bool _authenticated;
     private string? _contextDeliveryMode;
@@ -34,7 +37,10 @@ internal sealed class DirectBridgeProtocolSession
         DirectBridgeConfigStore configStore,
         DirectBridgeCoordinator coordinator,
         Func<DateTimeOffset>? utcNow = null,
-        Func<ReaderResultDeliveryAck, bool>? acknowledgeReaderResult = null)
+        Func<ReaderResultDeliveryAck, bool>? acknowledgeReaderResult = null,
+        Func<
+            ReaderVisualDeliveryChunk,
+            ReaderVisualDeliveryAck>? acceptReaderVisual = null)
     {
         if (!DirectBridgeContract.IsSafeId(connectionId))
         {
@@ -47,6 +53,11 @@ internal sealed class DirectBridgeProtocolSession
         _coordinator = coordinator;
         _acknowledgeReaderResult =
             acknowledgeReaderResult ?? (_ => false);
+        _acceptReaderVisual = acceptReaderVisual
+            ?? (_ => throw new DirectProtocolException(
+                "BW_READER_VISUAL_UNAVAILABLE",
+                "Reader 视觉接收器尚未接线",
+                retryable: true));
     }
 
     internal bool Authenticated => _authenticated;
@@ -148,6 +159,9 @@ internal sealed class DirectBridgeProtocolSession
                     break;
                 case ReaderResultDeliveryProtocol.AckType:
                     payload = HandleReaderResultAck(message);
+                    break;
+                case ReaderVisualDeliveryProtocol.ChunkType:
+                    payload = HandleReaderVisual(message);
                     break;
                 case "stop":
                     payload = await HandleStopAsync(
@@ -842,6 +856,33 @@ internal sealed class DirectBridgeProtocolSession
             correlation,
             outcome,
             matched,
+        };
+    }
+
+    private object HandleReaderVisual(JsonElement message)
+    {
+        RequireAuthenticated();
+        if (
+            RequireContextDeliveryMode()
+                != DirectContextDeliveryMode.SnapshotMcp
+            || _phase is not (
+                DirectProtocolPhase.ContextOnly
+                or DirectProtocolPhase.Active)
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_READER_VISUAL_MODE_REQUIRED",
+                "Reader 视觉只允许在快照 MCP 连接中回传");
+        }
+        ReaderVisualDeliveryChunk chunk =
+            ReaderVisualDeliveryProtocol.ValidateChunk(message);
+        ReaderVisualDeliveryAck ack = _acceptReaderVisual(chunk);
+        return new
+        {
+            correlation = ack.Correlation,
+            chunkIndex = ack.ChunkIndex,
+            accepted = ack.Accepted,
+            complete = ack.Complete,
         };
     }
 

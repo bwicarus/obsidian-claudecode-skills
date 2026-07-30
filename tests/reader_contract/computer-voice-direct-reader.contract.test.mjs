@@ -14,6 +14,7 @@ const READER_ORIGIN = "https://bwicarus.taile44d0c.ts.net";
 const RELAY_PORT = "BW_COMPUTER_VOICE_DIRECT_V3";
 const DIRECT_CONTRACT = "reader-computer-voice-direct/1";
 const RESULT_DELIVERY_CONTRACT = "reader-result-delivery/1";
+const VISUAL_DELIVERY_CONTRACT = "reader-visual-delivery/1";
 
 function createAudioContextClass(scenario) {
   return class FakeAudioContext {
@@ -180,6 +181,19 @@ function createServer(scenario) {
         contract: DIRECT_CONTRACT,
         type: "event",
         event: "reader-result",
+        payload,
+      }),
+    }));
+  };
+
+  server.emitReaderVisual = (payload, socket = null) => {
+    const target = socket || server.sockets.at(-1);
+    assert.ok(target, "missing Reader visual socket");
+    queueMicrotask(() => target.onmessage?.({
+      data: JSON.stringify({
+        contract: DIRECT_CONTRACT,
+        type: "event",
+        event: "reader-visual-request",
         payload,
       }),
     }));
@@ -472,6 +486,17 @@ function createServer(scenario) {
           correlation: request.correlation,
           outcome: request.outcome,
           matched: true,
+        });
+        return;
+      }
+      if (request.type === "reader-visual") {
+        scenario.readerVisualChunks.push(structuredClone(request));
+        result(this, request, {
+          correlation: request.correlation,
+          chunkIndex: request.chunkIndex,
+          accepted: true,
+          complete: request.status === "unavailable"
+            || request.chunkIndex + 1 === request.chunkCount,
         });
         return;
       }
@@ -876,6 +901,15 @@ function createHarness(overrides = {}) {
     readerResultDeliveries: [],
     readerResultAcks: [],
     readerResultReceipt: { outcome: "rendered" },
+    readerVisualChunks: [],
+    readerVisualCaptureCalls: 0,
+    readerVisualCapture: null,
+    readerVisualDrawing: null,
+    readerVisualOutgoingState: {
+      drawPend: null,
+      drawTimer: null,
+      inflight: false,
+    },
     realtimeVoiceAllowed: true,
     uiOwner: "",
     extensionWorld: false,
@@ -958,6 +992,18 @@ function createHarness(overrides = {}) {
             structuredClone(delivery)
           );
           return structuredClone(scenario.readerResultReceipt);
+        },
+      },
+      captureInkRegion() {
+        scenario.readerVisualCaptureCalls += 1;
+        return Promise.resolve(scenario.readerVisualCapture);
+      },
+      outgoing: {
+        lastDrawing() {
+          return scenario.readerVisualDrawing;
+        },
+        _state() {
+          return scenario.readerVisualOutgoingState;
         },
       },
     },
@@ -1404,6 +1450,118 @@ test("snapshot-mcp 常驻 WSS 接收严格结果卡并回 rendered ACK，不发�
   );
   assert.equal(harness.scenario.microphoneRequests.length, 0);
   assert.equal(harness.api.isActive(), false);
+  harness.api.setSelectedEngine("codex");
+  await harness.api.contextSyncChanged();
+});
+
+test("snapshot-mcp MCP 视觉请求复用笔迹合成图并在 64KiB 内分块，不发送 START", async () => {
+  const b64 = Buffer.alloc(70000, 0x11).toString("base64");
+  const drawingRevision = "dr_0123456789abcdef";
+  const harness = createHarness({
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncEnabled: true,
+    activeReading: {
+      kind: "pdf",
+      file: "book.pdf",
+      title: "Snapshot Book",
+      pos: 24,
+    },
+    readerVisualDrawing: {
+      file: "book.pdf",
+      page: 24,
+      stable: true,
+      empty: false,
+      drawingRevision,
+    },
+    readerVisualCapture: {
+      media_type: "image/jpeg",
+      b64,
+    },
+  });
+  harness.api.setSelectedEngine("computer_client");
+  await waitForRequest(harness, "context-open");
+
+  harness.server.emitReaderVisual({
+    contract: VISUAL_DELIVERY_CONTRACT,
+    correlation: "visual-0123456789abcdef0123456789abcdef",
+    file: "book.pdf",
+    page: 24,
+    drawingRevision,
+    maxBytes: 768 * 1024,
+    chunkCharacters: 48000,
+  });
+  await waitForCondition(
+    () => harness.scenario.readerVisualChunks.length === 2,
+    "reader visual chunks",
+  );
+
+  assert.equal(harness.scenario.readerVisualCaptureCalls, 1);
+  assert.equal(
+    harness.scenario.readerVisualChunks.map((chunk) => chunk.data).join(""),
+    b64,
+  );
+  harness.scenario.readerVisualChunks.forEach((chunk, index) => {
+    assert.equal(chunk.type, "reader-visual");
+    assert.equal(chunk.status, "chunk");
+    assert.equal(chunk.chunkIndex, index);
+    assert.equal(chunk.chunkCount, 2);
+    assert.ok(Buffer.byteLength(JSON.stringify(chunk), "utf8") < 65536);
+  });
+  assert.equal(
+    harness.server.requests.some((request) => request.type === "start"),
+    false,
+  );
+  assert.equal(harness.scenario.microphoneRequests.length, 0);
+  harness.api.setSelectedEngine("codex");
+  await harness.api.contextSyncChanged();
+});
+
+test("snapshot-mcp 笔迹版本不匹配时拒绝取图且不调用截图原语", async () => {
+  const harness = createHarness({
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncEnabled: true,
+    activeReading: {
+      kind: "pdf",
+      file: "book.pdf",
+      title: "Snapshot Book",
+      pos: 24,
+    },
+    readerVisualDrawing: {
+      file: "book.pdf",
+      page: 24,
+      stable: true,
+      empty: false,
+      drawingRevision: "dr_aaaaaaaaaaaaaaaa",
+    },
+    readerVisualCapture: {
+      media_type: "image/jpeg",
+      b64: Buffer.alloc(4000, 0x11).toString("base64"),
+    },
+  });
+  harness.api.setSelectedEngine("computer_client");
+  await waitForRequest(harness, "context-open");
+
+  harness.server.emitReaderVisual({
+    contract: VISUAL_DELIVERY_CONTRACT,
+    correlation: "visual-fedcba9876543210fedcba9876543210",
+    file: "book.pdf",
+    page: 24,
+    drawingRevision: "dr_bbbbbbbbbbbbbbbb",
+    maxBytes: 768 * 1024,
+    chunkCharacters: 48000,
+  });
+  await waitForCondition(
+    () => harness.scenario.readerVisualChunks.length === 1,
+    "reader visual unavailable",
+  );
+
+  assert.equal(harness.scenario.readerVisualCaptureCalls, 0);
+  assert.equal(harness.scenario.readerVisualChunks[0].status, "unavailable");
+  assert.equal(harness.scenario.readerVisualChunks[0].data, "");
+  assert.equal(
+    harness.server.requests.some((request) => request.type === "start"),
+    false,
+  );
   harness.api.setSelectedEngine("codex");
   await harness.api.contextSyncChanged();
 });

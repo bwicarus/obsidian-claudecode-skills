@@ -56,6 +56,10 @@ internal sealed class ReaderContextMcpServer
         ReaderResultDeliveryRequest,
         CancellationToken,
         Task<ReaderResultDeliveryAck>>? _deliverResultAsync;
+    private readonly Func<
+        ReaderVisualDeliveryRequest,
+        CancellationToken,
+        Task<ReaderVisualCapture?>>? _fetchVisualAsync;
     private readonly SemaphoreSlim _messageGate = new(1, 1);
     private JsonObject? _latestSnapshot;
     private long _latestRevision = -1;
@@ -75,7 +79,11 @@ internal sealed class ReaderContextMcpServer
         Func<
             ReaderResultDeliveryRequest,
             CancellationToken,
-            Task<ReaderResultDeliveryAck>>? deliverResultAsync = null)
+            Task<ReaderResultDeliveryAck>>? deliverResultAsync = null,
+        Func<
+            ReaderVisualDeliveryRequest,
+            CancellationToken,
+            Task<ReaderVisualCapture?>>? fetchVisualAsync = null)
     {
         if (!Path.IsPathFullyQualified(statePath))
         {
@@ -90,6 +98,7 @@ internal sealed class ReaderContextMcpServer
         _instanceId = instanceId ?? Guid.NewGuid().ToString();
         _startedAt = _utcNow().ToString("O");
         _deliverResultAsync = deliverResultAsync;
+        _fetchVisualAsync = fetchVisualAsync;
     }
 
     internal async Task<int> RunAsync(
@@ -305,9 +314,12 @@ internal sealed class ReaderContextMcpServer
                     ? "Use reader_context_snapshot only when the user asks "
                         + "about the current Reader page or selection. Respect "
                         + "contextStatus; pending or stale means the current "
-                        + "page text is unavailable."
+                        + "page text is unavailable. A matching stable drawing "
+                        + "may be returned as an image content item."
                     : "Use reader_context_snapshot when the user asks about "
-                        + "the current Reader page or selection. During a "
+                        + "the current Reader page or selection. A matching "
+                        + "stable drawing may be returned as an image content "
+                        + "item. During a "
                         + "Reader voice session, after obtaining weather, "
                         + "news, images or videos, or after preparing display "
                         + "cards, call reader_result_present exactly once so "
@@ -326,7 +338,10 @@ internal sealed class ReaderContextMcpServer
                     "Read the newest Windows-local Reader page and "
                     + "selection snapshot. The tool is read-only. "
                     + "Check contextStatus before using currentPage; "
-                    + "never reuse text when it is pending or stale.",
+                    + "never reuse text when it is pending or stale. "
+                    + "When the current stable drawing is still visible, "
+                    + "the result also includes its existing Reader-composited "
+                    + "ink-region image.",
                 ["inputSchema"] = new JsonObject
                 {
                     ["type"] = "object",
@@ -464,7 +479,52 @@ internal sealed class ReaderContextMcpServer
             }
             await TryLoadLatestAsync(cancellationToken)
                 .ConfigureAwait(false);
-            return BuildToolResult(id, BuildToolPayload());
+            JsonObject payload = BuildToolPayload();
+            ReaderVisualDeliveryRequest? visualRequest =
+                BuildVisualRequest(payload);
+            ReaderVisualCapture? visual = null;
+            string visualStatus = visualRequest is null
+                ? "not-needed"
+                : _fetchVisualAsync is null
+                    ? "unavailable"
+                    : "requested";
+            if (
+                visualRequest is not null
+                && _fetchVisualAsync is not null
+            )
+            {
+                try
+                {
+                    visual = await _fetchVisualAsync(
+                        visualRequest,
+                        cancellationToken).ConfigureAwait(false);
+                    visualStatus = visual is null
+                        ? "unavailable"
+                        : "received";
+                }
+                catch (ReaderVisualDeliveryException)
+                {
+                    visualStatus = "unavailable";
+                }
+                await TryLoadLatestAsync(cancellationToken)
+                    .ConfigureAwait(false);
+                payload = BuildToolPayload();
+                if (!VisualRequestStillCurrent(
+                    payload,
+                    visualRequest))
+                {
+                    visual = null;
+                    visualStatus = "superseded";
+                }
+            }
+            if (
+                payload["mcp"] is JsonObject mcp
+                && visualRequest is not null
+            )
+            {
+                mcp["drawingImageStatus"] = visualStatus;
+            }
+            return BuildToolResult(id, payload, visual);
         }
         if (
             toolName != ResultToolName
@@ -540,19 +600,40 @@ internal sealed class ReaderContextMcpServer
     private static JsonObject BuildToolResult(
         JsonNode id,
         JsonObject payload,
+        bool isError = false) =>
+        BuildToolResult(id, payload, visual: null, isError);
+
+    private static JsonObject BuildToolResult(
+        JsonNode id,
+        JsonObject payload,
+        ReaderVisualCapture? visual,
         bool isError = false)
     {
+        JsonArray content =
+        [
+            new JsonObject
+            {
+                ["type"] = "text",
+                ["text"] = payload.ToJsonString(
+                    DirectBridgeContract.JsonOptions),
+            },
+        ];
+        if (visual is not null)
+        {
+            content.Add(new JsonObject
+            {
+                ["type"] = "image",
+                ["data"] = Convert.ToBase64String(visual.Data),
+                ["mimeType"] = visual.MimeType,
+                ["_meta"] = new JsonObject
+                {
+                    ["codex/imageDetail"] = "original",
+                },
+            });
+        }
         JsonObject result = new()
         {
-            ["content"] = new JsonArray
-            {
-                new JsonObject
-                {
-                    ["type"] = "text",
-                    ["text"] = payload.ToJsonString(
-                        DirectBridgeContract.JsonOptions),
-                },
-            },
+            ["content"] = content,
         };
         if (isError)
         {
@@ -905,6 +986,64 @@ internal sealed class ReaderContextMcpServer
                 ["loadErrors"] = _loadErrors,
             },
         };
+    }
+
+    private static ReaderVisualDeliveryRequest? BuildVisualRequest(
+        JsonObject payload)
+    {
+        if (
+            payload["contextStatus"]?.GetValue<string>() != "ready"
+            || payload["currentPage"] is not JsonObject currentPage
+            || currentPage["stable"]?.GetValue<bool?>() != true
+            || currentPage["file"]?.GetValue<string>()
+                is not string file
+            || string.IsNullOrWhiteSpace(file)
+            || currentPage["page"] is not JsonNode page
+            || currentPage["visual"] is not JsonObject visual
+            || visual["has_ink"]?.GetValue<bool?>() != true
+            || visual["drawing"] is not JsonObject drawing
+            || drawing["stable"]?.GetValue<bool?>() != true
+            || drawing["inProgress"]?.GetValue<bool?>() != false
+            || drawing["empty"]?.GetValue<bool?>() != false
+            || drawing["drawingRevision"]?.GetValue<string>()
+                is not string revision
+            || drawing["file"]?.GetValue<string>() != file
+            || !JsonNode.DeepEquals(drawing["page"], page)
+        )
+        {
+            return null;
+        }
+        return new ReaderVisualDeliveryRequest(
+            "visual-" + Guid.NewGuid().ToString("N"),
+            file,
+            page.DeepClone(),
+            revision);
+    }
+
+    private static bool VisualRequestStillCurrent(
+        JsonObject payload,
+        ReaderVisualDeliveryRequest request)
+    {
+        if (
+            payload["contextStatus"]?.GetValue<string>() != "ready"
+            || payload["currentPage"] is not JsonObject currentPage
+            || currentPage["file"]?.GetValue<string>() != request.File
+            || currentPage["page"] is not JsonNode page
+            || !JsonNode.DeepEquals(page, request.Page)
+            || currentPage["visual"] is not JsonObject visual
+            || visual["has_ink"]?.GetValue<bool?>() != true
+            || visual["drawing"] is not JsonObject drawing
+        )
+        {
+            return false;
+        }
+        return drawing["stable"]?.GetValue<bool?>() == true
+            && drawing["inProgress"]?.GetValue<bool?>() == false
+            && drawing["empty"]?.GetValue<bool?>() == false
+            && drawing["drawingRevision"]?.GetValue<string>()
+                == request.DrawingRevision
+            && drawing["file"]?.GetValue<string>() == request.File
+            && JsonNode.DeepEquals(drawing["page"], request.Page);
     }
 
     internal static void ApplyFreshness(
