@@ -3545,3 +3545,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **部署后验证**：Pi HEAD 与提交一致，webapp/voice-rt active；公网 Reader 与新版 `snapshot-mcp`、`context-open`、`context-clear` 静态资源均 HTTP 200。
 - **Windows 状态**：0.1.16 仍为 `idle / readerConnected=false / captureActive=false / lastError=null`，配置 `snapshot-mcp`、`reader_snapshot` MCP 已注册，未自动发送 START、快捷键或采音。
 - **下一步**：用户刷新 iPad PWA 并保持上下文同步开启，再新开 Codex 会话加载 MCP；首次页面快照出现后验证“当前页/当前选区”按需读取且输入框无注入。
+
+## Codex：空墨迹阻断实时快照已修复并部署（2026-07-30 JST）
+- **改了什么**：`None/{}/[]` 统一为确定性空墨迹，空态不再升出虚假绘图版本；新增跨字段一致性、清空旧引用和页类型合同测试。
+- **怎么验的**：定向 Python 合同、全量 Node 合同、发布流水线及 Pi 原子部署门禁通过；生产快照恢复为 `ready`，第 26 页正文已写入 Windows。
+- **发布事实**：提交 `86d1d68` 已推送并正式部署；webapp/voice-rt active，事务备份 `/home/bwicarus/deploy-backups/reader/20260730T050326Z-138413`。
+- **没做/下一步**：未改语音音频链；旧 PWA 内存游标需完整刷新后从最新合法 `page.context` 引导，后续拆分实时页码/选区增量与本地书页解析。
