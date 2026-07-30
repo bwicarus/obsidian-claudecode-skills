@@ -42,14 +42,14 @@
 
 ## 2. 当前版本和已经完成的主线
 
-当前生产 Reader/PWA 版本：**0.2.75**；当前已发布 Windows 扩展版本：**0.2.72**。
+当前生产 Reader/PWA 版本：**0.2.76**；当前已发布 Windows 扩展版本：**0.2.72**。
 
-当前 Windows 工作区正在准备 **0.2.76** 独立电脑客户端按钮候选：原麦克风位置改为电脑图标，
+**0.2.76** 已部署 Reader/PWA：原麦克风位置改为电脑图标，
 普通电话按钮继续只负责豆包、GPT 或 Grok；电脑桥状态、上下文同步与
-`legacy-inject` / `snapshot-mcp` 回退开关集中到新的“电脑客户端”设置标签。该候选尚未发布
-渠道或部署 Reader/PWA，不能把工作区版本当作当前生产事实。
+`legacy-inject` / `snapshot-mcp` 回退开关集中到新的“电脑客户端”设置标签。Windows
+扩展正式渠道仍停在 0.2.72，不能把 Reader/PWA 版本当作扩展渠道的发布事实。
 
-当前 PWA/服务端共享 runtime 为 **0.2.75**，已发布 Windows 扩展仍为 **0.2.72**，产品名精确为
+当前 PWA/服务端共享 runtime 为 **0.2.76**，已发布 Windows 扩展仍为 **0.2.72**，产品名精确为
 **“BW网页伴读”**。0.2.72 把“电脑客户端”通话收口为免配对 direct v2：书籍 PWA 只从精确
 生产 Origin 连接固定 Windows WSS；普通网页只能经 isolated content runtime 与扩展
 background 的固定 relay 连接同一地址。Pi 不再中继配对、状态、启动、心跳、信令或音频；
