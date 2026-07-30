@@ -60,6 +60,42 @@ class DrawingRevisionTest(unittest.TestCase):
         r2 = dr.observe("a.pdf", 2, {"s": [9]}, now=101.0)["drawingRevision"]
         self.assertNotEqual(r1, r2, "不同页的绘图版本不得混同")
 
+    def test_no_ink_is_permanently_empty_and_preserves_page_type(self) -> None:
+        dr = OC.DrawingRevisions(stable_s=1.0)
+        for empty in (None, {}, []):
+            first = dr.observe("a.pdf", 7, empty, now=100.0)
+            later = dr.observe("a.pdf", 7, empty, now=500.0)
+            for state in (first, later):
+                self.assertEqual(state["freshness"], "none")
+                self.assertTrue(state["empty"])
+                self.assertFalse(state["inProgress"])
+                self.assertFalse(state["stable"])
+                self.assertIsNone(state["drawingRevision"])
+                self.assertIsNone(state["pendingSince"])
+                self.assertIsNone(state["ref"])
+                self.assertEqual(state["page"], 7)
+
+    def test_latest_observation_controls_equivalent_page_type(self) -> None:
+        dr = OC.DrawingRevisions(stable_s=1.0)
+        dr.observe("a.pdf", "7", {"s": [1]}, now=100.0)
+        state = dr.observe("a.pdf", 7, {"s": [1]}, now=101.0)
+        self.assertEqual(state["page"], 7)
+        self.assertEqual(state["ref"]["page"], 7)
+
+    def test_empty_observation_immediately_clears_stable_drawing(self) -> None:
+        dr = OC.DrawingRevisions(stable_s=1.0)
+        dr.observe("a.pdf", 7, {"s": [1]}, now=100.0)
+        stable = dr.observe("a.pdf", 7, {"s": [1]}, now=101.0)
+        self.assertTrue(stable["stable"])
+        self.assertIsNotNone(stable["ref"])
+
+        cleared = dr.observe("a.pdf", 7, None, now=101.1)
+        self.assertEqual(cleared["freshness"], "none")
+        self.assertTrue(cleared["empty"])
+        self.assertFalse(cleared["stable"])
+        self.assertIsNone(cleared["drawingRevision"])
+        self.assertIsNone(cleared["ref"])
+
 
 class FocusStateTest(unittest.TestCase):
     """四类焦点 + 显式取消;取消与陈旧都不得被当作当前。"""
@@ -570,6 +606,7 @@ class PageContextBuildTest(unittest.TestCase):
         self.assertIn("page=7", v["page_image"])
         self.assertNotIn(" ", v["page_image"], "路径必须 URL 编码")
         self.assertTrue(v["has_ink"])
+        self.assertEqual(v["has_ink"], not v["drawing"]["empty"])
         blob = repr(ctx)
         self.assertNotIn("base64", blob)
         self.assertLess(len(blob), 6000, "单条事件必须保持紧凑")
@@ -577,6 +614,16 @@ class PageContextBuildTest(unittest.TestCase):
     def test_no_ink_page_reports_false(self) -> None:
         ctx = OC.build_page_context(self._Pdf(text="x", ink={"pages": {"9": [1]}}), "a.pdf", 7)
         self.assertFalse(ctx["visual"]["has_ink"])
+        drawing = ctx["visual"]["drawing"]
+        self.assertEqual(ctx["visual"]["has_ink"], not drawing["empty"])
+        self.assertEqual(drawing["freshness"], "none")
+        self.assertTrue(drawing["empty"])
+        self.assertFalse(drawing["inProgress"])
+        self.assertFalse(drawing["stable"])
+        self.assertIsNone(drawing["drawingRevision"])
+        self.assertIsNone(drawing["pendingSince"])
+        self.assertIsNone(drawing["ref"])
+        self.assertEqual(drawing["page"], 7)
 
 
 class PageContextGateTest(unittest.TestCase):

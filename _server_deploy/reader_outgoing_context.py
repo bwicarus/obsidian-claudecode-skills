@@ -54,22 +54,45 @@ class DrawingRevisions:
         """喂入当前墨迹内容,返回该页绘图状态。无副作用地反复调用是安全的。"""
         now = time.time() if now is None else now
         k = self._key(file, page)
-        dg = _digest(ink)
+        # Sidecar 中没有该页时调用方会传 None。None、空对象与空数组在
+        # 产品语义上都是「没有墨迹」，必须折叠为同一个确定性空状态；否则
+        # None 会被当成一幅新图，短暂误报 recent/inProgress，随后甚至升出
+        # 一个不存在的稳定绘图版本。
+        empty = ink is None or ink == {} or ink == []
+        canonical_ink = {} if empty else ink
+        dg = _digest(canonical_ink)
         with self._lock:
             st = self._st.get(k)
             if st is None or st["digest"] != dg:
                 # 内容变了 → 重新计时;此刻**没有**可用的稳定版本(旧版本立即失效)
-                st = {"digest": dg, "changed_at": now, "revision": None, "stable_at": None}
+                st = {
+                    "digest": dg,
+                    "changed_at": now,
+                    "revision": None,
+                    "stable_at": None,
+                    "file": file,
+                    "page": page,
+                    "empty": empty,
+                }
                 self._st[k] = st
-            elif st["revision"] is None and (now - st["changed_at"]) >= self.stable_s:
+            elif (
+                not st["empty"]
+                and st["revision"] is None
+                and (now - st["changed_at"]) >= self.stable_s
+            ):
                 # 静默够久 → 升版本。版本号由内容摘要派生:同一幅图不会来回换号
                 st["revision"] = f"dr_{dg}"
                 st["stable_at"] = now
-            return self._snapshot(k, st, now)
+            # `_key()` intentionally treats numeric 7 and string "7" as the
+            # same logical page. The emitted reference must nevertheless use
+            # the type supplied by the current outer event/page_context, not
+            # whichever representation happened to arrive first.
+            st["file"] = file
+            st["page"] = page
+            return self._snapshot(st, now)
 
-    def _snapshot(self, k: str, st: dict, now: float) -> dict:
-        file, _, page = k.rpartition("#")
-        empty = st["digest"] == _digest({}) or st["digest"] == _digest([])
+    def _snapshot(self, st: dict, now: float) -> dict:
+        file, page, empty = st["file"], st["page"], bool(st["empty"])
         # 三态(任务书二):正文问答默认只看正文,靠这个字段决定要不要去读综合图。
         #   none   = 无笔迹,永远不用读图
         #   recent = 刚画过(或正在画),问题涉及圈画/算式/箭头时应直接读最新图,
@@ -94,7 +117,11 @@ class DrawingRevisions:
             "inProgress": st["revision"] is None and not empty,   # 落笔中,尚无稳定版本
             "stable": st["revision"] is not None,
             "drawingRevision": st["revision"],          # 未稳定时为 None,**不给引用**
-            "pendingSince": None if st["revision"] else round(now - st["changed_at"], 3),
+            "pendingSince": (
+                round(now - st["changed_at"], 3)
+                if st["revision"] is None and not empty
+                else None
+            ),
             "ref": ({"kind": "drawing", "file": file, "page": page,
                      "revision": st["revision"]} if st["revision"] else None),
             "empty": empty,
@@ -103,7 +130,7 @@ class DrawingRevisions:
     def current(self, file: str, page) -> dict | None:
         with self._lock:
             st = self._st.get(self._key(file, page))
-            return None if st is None else self._snapshot(self._key(file, page), st, time.time())
+            return None if st is None else self._snapshot(st, time.time())
 
 
 class FocusState:
