@@ -2797,8 +2797,9 @@
   function clearSnapshotLink() {
     var state = snapshotLink;
     if (!state) return stopSnapshotLink();
+    if (state.clearPromise) return state.clearPromise;
     stopContextPump(state);
-    return clearSnapshotState(state).catch(function (error) {
+    state.clearPromise = clearSnapshotState(state).catch(function (error) {
       emitStatus({
         state: "warning",
         message: error && error.message ||
@@ -2809,7 +2810,10 @@
       return null;
     }).then(function () {
       return stopSnapshotLink();
+    }).finally(function () {
+      state.clearPromise = null;
     });
+    return state.clearPromise;
   }
 
   function clearActiveSnapshotState(state) {
@@ -2867,7 +2871,14 @@
     if (!snapshotLinkWanted()) {
       return stopSnapshotLink();
     }
-    if (snapshotLink) return Promise.resolve(snapshotLink);
+    if (snapshotLink) {
+      if (snapshotLink.clearPromise) {
+        return snapshotLink.clearPromise.then(function () {
+          return reconcileSnapshotLink();
+        });
+      }
+      return Promise.resolve(snapshotLink);
+    }
     var generation = ++snapshotLinkGeneration;
     var state = {
       channel: null,

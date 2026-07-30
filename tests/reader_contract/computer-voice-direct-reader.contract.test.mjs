@@ -153,6 +153,7 @@ function createServer(scenario) {
     sockets: [],
     activeSocket: null,
     deferredStart: null,
+    deferredContextClears: [],
   };
 
   const result = (socket, request, payload) => {
@@ -176,6 +177,21 @@ function createServer(scenario) {
       sessionId: request.sessionId,
       state: "active",
       media: { hostReady: true, captureActive: true },
+    });
+  };
+
+  server.resolveDeferredContextClear = () => {
+    assert.ok(
+      server.deferredContextClears.length,
+      "missing deferred CONTEXT-CLEAR",
+    );
+    const { socket, request } = server.deferredContextClears.shift();
+    result(socket, request, {
+      sessionId: request.sessionId,
+      revision:
+        scenario.activeReadingRequests.length
+        + scenario.contextClearRequests.length,
+      outcome: "accepted",
     });
   };
 
@@ -286,6 +302,10 @@ function createServer(scenario) {
       }
       if (request.type === "context-clear") {
         scenario.contextClearRequests.push(structuredClone(request));
+        if (scenario.deferContextClear) {
+          server.deferredContextClears.push({ socket: this, request });
+          return;
+        }
         result(this, request, {
           sessionId: request.sessionId,
           revision:
@@ -740,6 +760,7 @@ function createHarness(overrides = {}) {
     contextDeliveryMode: "legacy-inject",
     activeReadingRequests: [],
     contextClearRequests: [],
+    deferContextClear: false,
     activeReadingFetches: 0,
     contextSyncEnabled: false,
     activeReading: null,
@@ -1167,6 +1188,64 @@ test("snapshot-mcp 后台挂起的重连计时器在回到前台时立即恢复�
     false,
   );
   assert.equal(harness.scenario.microphoneRequests.length, 0);
+  harness.api.setSelectedEngine("codex");
+});
+
+test("snapshot-mcp pagehide 清空未完成时 pageshow 会在清空后恢复且不重复连接", async () => {
+  const harness = createHarness({
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncEnabled: true,
+    deferContextClear: true,
+    activeReading: {
+      kind: "pdf",
+      file: "book.pdf",
+      title: "Resume Race Book",
+      pos: 20,
+    },
+  });
+  harness.api.setSelectedEngine("computer_client");
+  await waitForRequest(harness, "context-open");
+  await waitForCondition(
+    () => harness.scenario.activeReadingRequests.length >= 1,
+    "snapshot before pagehide",
+  );
+  assert.equal(harness.server.sockets.length, 1);
+
+  harness.dispatchWindowEvent("pagehide");
+  await waitForCondition(
+    () => harness.server.deferredContextClears.length === 1,
+    "deferred pagehide context-clear",
+  );
+  harness.dispatchWindowEvent("pageshow");
+  harness.dispatchDocumentEvent("visibilitychange");
+  harness.dispatchWindowEvent("online");
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(harness.server.sockets.length, 1);
+
+  harness.server.resolveDeferredContextClear();
+  await waitForCondition(
+    () => harness.server.sockets.length === 2,
+    "snapshot reconnect after pagehide clear",
+    500,
+  );
+  await waitForCondition(
+    () => harness.server.requests.filter(
+      (request) => request.type === "context-open",
+    ).length === 2,
+    "context-open after pagehide clear",
+    500,
+  );
+  assert.equal(
+    harness.server.requests.some((request) => request.type === "start"),
+    false,
+  );
+  assert.equal(harness.scenario.microphoneRequests.length, 0);
+
+  harness.dispatchWindowEvent("pageshow");
+  harness.dispatchWindowEvent("online");
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(harness.server.sockets.length, 2);
+  harness.scenario.deferContextClear = false;
   harness.api.setSelectedEngine("codex");
 });
 
