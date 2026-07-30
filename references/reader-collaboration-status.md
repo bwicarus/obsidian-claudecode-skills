@@ -3600,3 +3600,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **改了什么**：设置页新增单一模式开关；切换先取消在途拨号、结束当前通话/上下文 WSS，再由 Windows 原子保存 `legacy-inject` 或 `snapshot-mcp`，两条链互斥。
 - **安全语义**：切回旧版前 Windows 必须清除快照；切换期间新的可信电话点击 fail closed，下一次通话才按新模式启动，桥接器常驻进程不退出。
 - **怎么验的/安装**：生成物校验、Reader 定向合同与 Windows build/无音频 self-test 通过；0.1.27 已原子安装，健康为 `idle / captureActive=false`，回滚目录 `C:\Users\bwica\bw-computer-voice-bridge-backups\install-0.1.27-20260730T131334217Z-552a090f`；Reader 部署后由 iPad 实测。
+
+## Codex：Reader 0.2.75 / Windows direct 0.1.28 复用旧笔迹视觉并补齐回写（2026-07-30 JST）
+- **改了什么**：快照 MCP 按需复用 `RC.captureInkRegion({page})` 返回正文与笔迹局部合成图；直接结果工具经既有认证 WSS 回写卡片，PWA 对话记录补回既有服务端备份。
+- **安全语义**：文件、页码与绘图 revision 在截图前后及 Windows 收图后均需一致；双页只截请求页，图片分块有界，视觉读取不发 START、快捷键或采音。
+- **怎么验的**：Reader Node 全量合同通过；0.1.28 包 verify/self-test、安装路径双 self-test、七文件摘要、新 PID/instance 与 `/healthz` 均通过。
+- **安装/发布**：Windows 回滚目录 `C:\Users\bwica\bw-computer-voice-bridge-backups\install-0.1.28-20260730T140929489Z-42d9ce75`；源码 `909205c` 已部署为 Reader 0.2.75，事务目录 `/home/bwicarus/deploy-backups/reader/20260730T141619Z-228416`。
+- **部署后/下一步**：Pi HEAD 一致、webapp/voice-rt active，公网脚本含目标页视觉代码；iPad 完整刷新并重开 Codex 后实测笔迹识别、天气卡回写与连续对话落库。
