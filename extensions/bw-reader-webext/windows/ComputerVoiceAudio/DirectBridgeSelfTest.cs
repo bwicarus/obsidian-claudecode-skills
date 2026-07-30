@@ -5019,6 +5019,232 @@ internal static class DirectBridgeSelfTest
             }
         }
 
+        ReaderContextMcpServer httpServer = new(
+            snapshotPath,
+            TextReader.Null,
+            TextWriter.Null,
+            utcNow: () => DateTimeOffset.FromUnixTimeMilliseconds(
+                1_750_000_010_000),
+            instanceId: "mcp-http-self-test-instance");
+        ReaderContextMcpHttpEndpoint httpEndpoint = new(
+            httpServer,
+            DirectBridgeContract.DefaultListenPort);
+        string initializeRequest = JsonSerializer.Serialize(new
+        {
+            jsonrpc = "2.0",
+            id = 10,
+            method = "initialize",
+            @params = new
+            {
+                protocolVersion = "2025-06-18",
+                capabilities = new { },
+                clientInfo = new
+                {
+                    name = "http-self-test",
+                    version = "1",
+                },
+            },
+        });
+        var httpInitialize = await SendReaderContextMcpHttpAsync(
+            httpEndpoint,
+            HttpMethods.Post,
+            initializeRequest).ConfigureAwait(false);
+        string futureInitializeRequest = JsonSerializer.Serialize(new
+        {
+            jsonrpc = "2.0",
+            id = 9,
+            method = "initialize",
+            @params = new
+            {
+                protocolVersion = "future-unknown-version",
+                capabilities = new { },
+                clientInfo = new
+                {
+                    name = "http-future-self-test",
+                    version = "1",
+                },
+            },
+        });
+        var httpFutureInitialize =
+            await SendReaderContextMcpHttpAsync(
+                httpEndpoint,
+                HttpMethods.Post,
+                futureInitializeRequest).ConfigureAwait(false);
+        var httpNotification = await SendReaderContextMcpHttpAsync(
+            httpEndpoint,
+            HttpMethods.Post,
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                method = "notifications/initialized",
+            })).ConfigureAwait(false);
+        string toolCall(int id) => JsonSerializer.Serialize(new
+        {
+            jsonrpc = "2.0",
+            id,
+            method = "tools/call",
+            @params = new
+            {
+                name = ReaderContextMcpServer.ToolName,
+                arguments = new { },
+            },
+        });
+        var httpCalls = await Task.WhenAll(
+            SendReaderContextMcpHttpAsync(
+                httpEndpoint,
+                HttpMethods.Post,
+                toolCall(11)),
+            SendReaderContextMcpHttpAsync(
+                httpEndpoint,
+                HttpMethods.Post,
+                toolCall(12))).ConfigureAwait(false);
+        using JsonDocument httpInitializeDocument =
+            JsonDocument.Parse(httpInitialize.Body);
+        using JsonDocument httpFutureInitializeDocument =
+            JsonDocument.Parse(httpFutureInitialize.Body);
+        using JsonDocument httpFirstResponse =
+            JsonDocument.Parse(httpCalls[0].Body);
+        using JsonDocument httpSecondResponse =
+            JsonDocument.Parse(httpCalls[1].Body);
+        using JsonDocument httpFirstSnapshot = JsonDocument.Parse(
+            httpFirstResponse.RootElement
+                .GetProperty("result")
+                .GetProperty("content")[0]
+                .GetProperty("text")
+                .GetString()!);
+        using JsonDocument httpSecondSnapshot = JsonDocument.Parse(
+            httpSecondResponse.RootElement
+                .GetProperty("result")
+                .GetProperty("content")[0]
+                .GetProperty("text")
+                .GetString()!);
+        long[] httpCallSequences =
+        [
+            httpFirstSnapshot.RootElement.GetProperty("mcp")
+                .GetProperty("callSequence").GetInt64(),
+            httpSecondSnapshot.RootElement.GetProperty("mcp")
+                .GetProperty("callSequence").GetInt64(),
+        ];
+        Array.Sort(httpCallSequences);
+        Require(
+            ReaderContextMcpHttpEndpoint.Path == "/mcp"
+            && httpInitialize.StatusCode == StatusCodes.Status200OK
+            && httpInitializeDocument.RootElement
+                .GetProperty("result")
+                .GetProperty("serverInfo")
+                .GetProperty("name").GetString()
+                == ReaderContextMcpServer.ServerName
+            && httpFutureInitialize.StatusCode
+                == StatusCodes.Status200OK
+            && httpFutureInitializeDocument.RootElement
+                .GetProperty("result")
+                .GetProperty("protocolVersion").GetString()
+                == ReaderContextMcpServer.LatestProtocolVersion
+            && httpCalls.All(
+                call => call.StatusCode
+                    == StatusCodes.Status200OK)
+            && httpFirstSnapshot.RootElement.GetProperty("mcp")
+                .GetProperty("instanceId").GetString()
+                == "mcp-http-self-test-instance"
+            && httpSecondSnapshot.RootElement.GetProperty("mcp")
+                .GetProperty("instanceId").GetString()
+                == "mcp-http-self-test-instance"
+            && httpCallSequences.SequenceEqual(new long[] { 1, 2 }),
+            "direct-reader-context-http-mcp-reuses-one-serialized-instance",
+            checks);
+        Require(
+            httpNotification.StatusCode
+                == StatusCodes.Status202Accepted
+            && httpNotification.Body.Length == 0,
+            "direct-reader-context-http-mcp-notification-is-accepted",
+            checks);
+
+        var httpGet = await SendReaderContextMcpHttpAsync(
+            httpEndpoint,
+            HttpMethods.Get,
+            body: null).ConfigureAwait(false);
+        var httpDelete = await SendReaderContextMcpHttpAsync(
+            httpEndpoint,
+            HttpMethods.Delete,
+            body: null).ConfigureAwait(false);
+        var httpForwarded = await SendReaderContextMcpHttpAsync(
+            httpEndpoint,
+            HttpMethods.Post,
+            initializeRequest,
+            context =>
+            {
+                context.Request.Headers["X-Forwarded-For"] =
+                    "127.0.0.1";
+            }).ConfigureAwait(false);
+        var httpRemote = await SendReaderContextMcpHttpAsync(
+            httpEndpoint,
+            HttpMethods.Post,
+            initializeRequest,
+            context =>
+            {
+                context.Connection.RemoteIpAddress =
+                    IPAddress.Parse("192.0.2.1");
+            }).ConfigureAwait(false);
+        var httpBadHost = await SendReaderContextMcpHttpAsync(
+            httpEndpoint,
+            HttpMethods.Post,
+            initializeRequest,
+            context =>
+            {
+                context.Request.Host = new HostString(
+                    "localhost",
+                    DirectBridgeContract.DefaultListenPort);
+            }).ConfigureAwait(false);
+        var httpBadOriginGet = await SendReaderContextMcpHttpAsync(
+            httpEndpoint,
+            HttpMethods.Get,
+            body: null,
+            context =>
+            {
+                context.Request.Headers.Origin =
+                    "https://example.invalid";
+            }).ConfigureAwait(false);
+        var httpBadProtocol = await SendReaderContextMcpHttpAsync(
+            httpEndpoint,
+            HttpMethods.Post,
+            toolCall(13),
+            context =>
+            {
+                context.Request.Headers["MCP-Protocol-Version"] =
+                    "future-unknown-version";
+            }).ConfigureAwait(false);
+        var httpSupportedProtocol =
+            await SendReaderContextMcpHttpAsync(
+                httpEndpoint,
+                HttpMethods.Post,
+                toolCall(14),
+                context =>
+                {
+                    context.Request.Headers["MCP-Protocol-Version"] =
+                        "2025-11-25";
+                }).ConfigureAwait(false);
+        Require(
+            httpGet.StatusCode
+                == StatusCodes.Status405MethodNotAllowed
+            && httpDelete.StatusCode
+                == StatusCodes.Status405MethodNotAllowed
+            && httpGet.Allow == HttpMethods.Post
+            && httpDelete.Allow == HttpMethods.Post
+            && httpForwarded.StatusCode
+                == StatusCodes.Status403Forbidden
+            && httpRemote.StatusCode
+                == StatusCodes.Status403Forbidden
+            && httpBadHost.StatusCode
+                == StatusCodes.Status403Forbidden
+            && httpBadOriginGet.StatusCode
+                == StatusCodes.Status403Forbidden
+            && httpBadProtocol.StatusCode
+                == StatusCodes.Status400BadRequest
+            && httpSupportedProtocol.StatusCode
+                == StatusCodes.Status200OK,
+            "direct-reader-context-http-mcp-is-loopback-post-only",
+            checks);
+
         JsonObject stale = new()
         {
             ["activeReading"] = new JsonObject
@@ -6208,6 +6434,47 @@ internal static class DirectBridgeSelfTest
         {
             return true;
         }
+    }
+
+    private static async Task<(
+        int StatusCode,
+        string Body,
+        string Allow)> SendReaderContextMcpHttpAsync(
+            ReaderContextMcpHttpEndpoint endpoint,
+            string method,
+            string? body,
+            Action<DefaultHttpContext>? configure = null)
+    {
+        DefaultHttpContext context = new();
+        context.Connection.RemoteIpAddress = IPAddress.Loopback;
+        context.Request.Host = new HostString(
+            DirectBridgeContract.ListenHost,
+            DirectBridgeContract.DefaultListenPort);
+        context.Request.Method = method;
+        context.Request.ContentType = "application/json";
+        byte[] requestBytes = body is null
+            ? []
+            : Encoding.UTF8.GetBytes(body);
+        context.Request.ContentLength = requestBytes.Length;
+        context.Request.Body = new MemoryStream(
+            requestBytes,
+            writable: false);
+        context.Response.Body = new MemoryStream();
+        configure?.Invoke(context);
+
+        await endpoint.HandleAsync(context).ConfigureAwait(false);
+        context.Response.Body.Position = 0;
+        using StreamReader reader = new(
+            context.Response.Body,
+            Encoding.UTF8,
+            detectEncodingFromByteOrderMarks: false,
+            leaveOpen: true);
+        string responseBody = await reader.ReadToEndAsync()
+            .ConfigureAwait(false);
+        return (
+            context.Response.StatusCode,
+            responseBody,
+            context.Response.Headers.Allow.ToString());
     }
 
     private static async Task WriteConfigAsync(

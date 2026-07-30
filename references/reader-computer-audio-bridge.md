@@ -190,12 +190,19 @@ Windows WSS、固定文本合同和固定长度 PCM，不读取配对记录，�
   START 不启动 typist，正文不进入客户端输入框。
 
 `snapshot-mcp` 在没有通话时用 `context-open` 保持一条纯上下文连接，不启动 Codex、采音或
-快捷键；通话前先释放它，再由同一条 Active WSS 继续更新。Windows EXE 的
-`--reader-context-mcp --state <absolute-path>` 模式常驻提供唯一只读工具
-`reader_context_snapshot`。活动心跳同时携带选区三态（有选区 / 已清空 / 未上报），
+快捷键；通话前先释放它，再由同一条 Active WSS 继续更新。Windows 的 `--direct-serve`
+常驻 EXE 在同一 `127.0.0.1:43128` 监听器提供 `/mcp`，只注册
+`reader_context_snapshot`；Codex 使用 Streamable HTTP 连接，因此不同会话不会各自拉起
+stdio MCP 子进程。`--reader-context-mcp --state <absolute-path>` 仅保留为回滚与隔离诊断
+入口。活动心跳同时携带选区三态（有选区 / 已清空 / 未上报），
 换页、取消选择或超过三分钟时都不会把旧正文、旧选区继续当作当前内容；新鲜度按 Windows
 实际收到心跳的时间计算。关闭同步或切回旧注入时，`context-clear` 先清本地页与选区，
 再停止实验末端或恢复 Pi 旧推送。旧代码与 `/4` 回滚入口保留，但两条路径不得并跑。
+
+Reader 语音任务必须直接调用该 MCP 工具，不能先用 PowerShell/Python 读取快照。后一种做法会
+在 Codex Desktop 中生成 `commandExecution`；当前 Windows 客户端的 Process Manager 会为
+历史命令持续启动进程快照查询。HTTP 单实例解决的是 Reader stdio 子进程膨胀，不等于修改
+Codex Desktop 自身的进程监控实现。
 
 ## 单用户安全边界
 

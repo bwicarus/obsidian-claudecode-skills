@@ -3564,3 +3564,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **安装事实**：Windows 0.1.23 双 EXE 摘要校验后原子替换，常驻 MCP PID 未变；服务 `healthz=200 / idle / captureActive=false`，回滚目录为 `C:\Users\bwica\bw-computer-voice-bridge-backups\install-0.1.23-20260730T081047473Z-717eaa82`。
 - **发布事实**：提交 `a7aff00` 已推送；正式部署 E2E 与部署后独立检查通过，webapp/voice-rt active 且 `NRestarts=0`，事务目录 `/home/bwicarus/deploy-backups/reader/20260730T081158Z-172576`。
 - **下一步**：iPad 完整刷新后实测单击语音，以及正文、选区、页图、侧栏是否随当前页更新；本轮未主动 START、采音或发送快捷键。
+
+## Codex：Reader 快照 MCP 收敛为 Windows bridge 单实例（2026-07-30 JST）
+- **改了什么**：把只读 `/mcp` 合入既有 `--direct-serve`，stdio 入口仅作回滚；本机 Reader skill 改为直接调 MCP，不再逐轮启动 Python shell。
+- **怎么验的**：C# build/self-test、Reader Node 合同、0.1.24 包 verify/self-test 通过；真实 Codex 两轮调用保持同一 bridge PID/instanceId，callSequence `1 → 2`。
+- **安装/配置**：0.1.24 native 已原子替换，回滚目录 `C:\Users\bwica\bw-computer-voice-bridge-backups\install-0.1.24-20260730T090722024Z-9c9fed26`；`reader_snapshot` 已改为 `http://127.0.0.1:43128/mcp`。
+- **边界/下一步**：全程 `captureActive=false`，未发快捷键、未部署 Pi；Python/handoff 仍只有既有 Windows `fcntl`/Linux 路径失败。重启 Codex 后旧 stdio 子进程才退出，再复测 Desktop Process Manager 上游闪窗。

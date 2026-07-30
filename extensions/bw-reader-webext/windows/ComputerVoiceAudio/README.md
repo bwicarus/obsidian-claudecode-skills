@@ -152,7 +152,19 @@ background 的固定 relay，不能把 URL、设备 ID、AUMID、进程、路径
 
 ## Windows 本地快照 MCP
 
-同一自包含 EXE 提供零额外运行时依赖的 stdio MCP：
+`--direct-serve` 在现有 `127.0.0.1:43128` 监听器内同时提供
+Streamable HTTP MCP：
+
+```toml
+[mcp_servers.reader_snapshot]
+url = "http://127.0.0.1:43128/mcp"
+```
+
+它与 WSS、快照查看器共用同一个常驻 EXE 和同一个 MCP instance；Codex 会话只作为
+HTTP 客户端连接，不再为每个会话拉起一个快照 MCP 子进程。`GET /healthz` 的
+`readerContextMcp` 只报告 path 与 instanceId，便于检查实例是否发生替换。
+
+为回滚和隔离诊断，EXE 仍保留零额外运行时依赖的 stdio 入口：
 
 ```powershell
 .\bw-computer-voice-audio.exe --reader-context-mcp --state `

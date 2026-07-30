@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Microsoft.AspNetCore.Http;
 
 namespace BwReader.ComputerVoiceAudio;
 
@@ -9,8 +10,18 @@ internal sealed class ReaderContextMcpServer
     internal const string ToolName = "reader_context_snapshot";
     internal const string ServerName = "bw-reader-context-snapshot";
     internal const string ServerVersion = "1.0.0";
+    internal const string LatestProtocolVersion = "2025-11-25";
     internal static readonly TimeSpan FreshnessWindow =
         TimeSpan.FromMinutes(3);
+    private static readonly HashSet<string> SupportedProtocolVersions =
+        new(StringComparer.Ordinal)
+        {
+            LatestProtocolVersion,
+            "2025-06-18",
+            "2025-03-26",
+            "2024-11-05",
+            "2024-10-07",
+        };
 
     private const int MaximumMessageCharacters = 1024 * 1024;
     private const int MaximumSnapshotBytes = 128 * 1024;
@@ -23,12 +34,15 @@ internal sealed class ReaderContextMcpServer
     private readonly Func<DateTimeOffset> _utcNow;
     private readonly string _instanceId;
     private readonly string _startedAt;
+    private readonly SemaphoreSlim _messageGate = new(1, 1);
     private JsonObject? _latestSnapshot;
     private long _latestRevision = -1;
     private long _loadSequence;
     private long _loadErrors;
     private long _callSequence;
     private bool _initialized;
+
+    internal string InstanceId => _instanceId;
 
     internal ReaderContextMcpServer(
         string statePath,
@@ -68,28 +82,63 @@ internal sealed class ReaderContextMcpServer
                 || line.Length > MaximumMessageCharacters
             )
             {
-                await WriteErrorAsync(
-                    id: null,
-                    code: -32700,
-                    message: "Invalid JSON-RPC message",
+                await WriteMessageAsync(
+                    BuildError(
+                        id: null,
+                        code: -32700,
+                        message: "Invalid JSON-RPC message"),
                     cancellationToken).ConfigureAwait(false);
                 continue;
             }
-            await HandleLineAsync(line, cancellationToken)
-                .ConfigureAwait(false);
+            JsonObject? response = await ProcessMessageAsync(
+                line,
+                cancellationToken).ConfigureAwait(false);
+            if (response is not null)
+            {
+                await WriteMessageAsync(response, cancellationToken)
+                    .ConfigureAwait(false);
+            }
         }
         return 0;
     }
 
-    private async Task HandleLineAsync(
-        string line,
+    internal async Task<JsonObject?> ProcessMessageAsync(
+        string message,
         CancellationToken cancellationToken)
     {
+        await _messageGate.WaitAsync(cancellationToken)
+            .ConfigureAwait(false);
+        try
+        {
+            return await ProcessMessageCoreAsync(
+                message,
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _messageGate.Release();
+        }
+    }
+
+    private async Task<JsonObject?> ProcessMessageCoreAsync(
+        string message,
+        CancellationToken cancellationToken)
+    {
+        if (
+            message.Length == 0
+            || message.Length > MaximumMessageCharacters
+        )
+        {
+            return BuildError(
+                id: null,
+                code: -32700,
+                message: "Invalid JSON-RPC message");
+        }
         JsonDocument document;
         try
         {
             document = JsonDocument.Parse(
-                line,
+                message,
                 new JsonDocumentOptions
                 {
                     AllowTrailingCommas = false,
@@ -99,12 +148,10 @@ internal sealed class ReaderContextMcpServer
         }
         catch (JsonException)
         {
-            await WriteErrorAsync(
+            return BuildError(
                 id: null,
                 code: -32700,
-                message: "Parse error",
-                cancellationToken).ConfigureAwait(false);
-            return;
+                message: "Parse error");
         }
 
         using (document)
@@ -123,12 +170,10 @@ internal sealed class ReaderContextMcpServer
                 || methodValue.ValueKind != JsonValueKind.String
             )
             {
-                await WriteErrorAsync(
+                return BuildError(
                     CloneId(root),
                     -32600,
-                    "Invalid Request",
-                    cancellationToken).ConfigureAwait(false);
-                return;
+                    "Invalid Request");
             }
 
             string method = methodValue.GetString()!;
@@ -137,7 +182,7 @@ internal sealed class ReaderContextMcpServer
             if (notification)
             {
                 HandleNotification(method);
-                return;
+                return null;
             }
             JsonNode requestId = id!;
 
@@ -149,62 +194,48 @@ internal sealed class ReaderContextMcpServer
             switch (method)
             {
                 case "initialize":
-                    await HandleInitializeAsync(
+                    return HandleInitialize(
                         requestId,
-                        parameters,
-                        cancellationToken).ConfigureAwait(false);
-                    return;
+                        parameters);
                 case "ping":
-                    await WriteResultAsync(
+                    return BuildResult(
                         requestId,
-                        new JsonObject(),
-                        cancellationToken).ConfigureAwait(false);
-                    return;
+                        new JsonObject());
                 case "tools/list":
                     if (!RequireInitialized())
                     {
-                        await WriteErrorAsync(
+                        return BuildError(
                             id,
                             -32002,
-                            "Server not initialized",
-                            cancellationToken).ConfigureAwait(false);
-                        return;
+                            "Server not initialized");
                     }
-                    await WriteResultAsync(
+                    return BuildResult(
                         requestId,
-                        BuildToolList(),
-                        cancellationToken).ConfigureAwait(false);
-                    return;
+                        BuildToolList());
                 case "tools/call":
                     if (!RequireInitialized())
                     {
-                        await WriteErrorAsync(
+                        return BuildError(
                             id,
                             -32002,
-                            "Server not initialized",
-                            cancellationToken).ConfigureAwait(false);
-                        return;
+                            "Server not initialized");
                     }
-                    await HandleToolCallAsync(
+                    return await HandleToolCallAsync(
                         requestId,
                         parameters,
                         cancellationToken).ConfigureAwait(false);
-                    return;
                 default:
-                    await WriteErrorAsync(
+                    return BuildError(
                         id,
                         -32601,
-                        "Method not found",
-                        cancellationToken).ConfigureAwait(false);
-                    return;
+                        "Method not found");
             }
         }
     }
 
-    private async Task HandleInitializeAsync(
+    private JsonObject HandleInitialize(
         JsonNode id,
-        JsonElement parameters,
-        CancellationToken cancellationToken)
+        JsonElement parameters)
     {
         if (
             parameters.ValueKind != JsonValueKind.Object
@@ -215,19 +246,22 @@ internal sealed class ReaderContextMcpServer
             || string.IsNullOrWhiteSpace(protocolValue.GetString())
         )
         {
-            await WriteErrorAsync(
+            return BuildError(
                 id,
                 -32602,
-                "Invalid initialize parameters",
-                cancellationToken).ConfigureAwait(false);
-            return;
+                "Invalid initialize parameters");
         }
         _initialized = true;
-        await WriteResultAsync(
+        string requestedProtocolVersion = protocolValue.GetString()!;
+        string negotiatedProtocolVersion =
+            IsSupportedProtocolVersion(requestedProtocolVersion)
+                ? requestedProtocolVersion
+                : LatestProtocolVersion;
+        return BuildResult(
             id,
             new JsonObject
             {
-                ["protocolVersion"] = protocolValue.GetString(),
+                ["protocolVersion"] = negotiatedProtocolVersion,
                 ["capabilities"] = new JsonObject
                 {
                     ["tools"] = new JsonObject
@@ -245,8 +279,7 @@ internal sealed class ReaderContextMcpServer
                     + "about the current Reader page or selection. Respect "
                     + "contextStatus; pending or stale means the current "
                     + "page text is unavailable.",
-            },
-            cancellationToken).ConfigureAwait(false);
+            });
     }
 
     private static JsonObject BuildToolList() =>
@@ -279,7 +312,7 @@ internal sealed class ReaderContextMcpServer
             },
         };
 
-    private async Task HandleToolCallAsync(
+    private async Task<JsonObject> HandleToolCallAsync(
         JsonNode id,
         JsonElement parameters,
         CancellationToken cancellationToken)
@@ -302,18 +335,16 @@ internal sealed class ReaderContextMcpServer
             )
         )
         {
-            await WriteErrorAsync(
+            return BuildError(
                 id,
                 -32602,
-                "Invalid tool call",
-                cancellationToken).ConfigureAwait(false);
-            return;
+                "Invalid tool call");
         }
 
         _callSequence = checked(_callSequence + 1);
         await TryLoadLatestAsync(cancellationToken).ConfigureAwait(false);
         JsonObject payload = BuildToolPayload();
-        await WriteResultAsync(
+        return BuildResult(
             id,
             new JsonObject
             {
@@ -326,8 +357,7 @@ internal sealed class ReaderContextMcpServer
                             DirectBridgeContract.JsonOptions),
                     },
                 },
-            },
-            cancellationToken).ConfigureAwait(false);
+            });
     }
 
     private JsonObject BuildToolPayload()
@@ -590,40 +620,33 @@ internal sealed class ReaderContextMcpServer
 
     private bool RequireInitialized() => _initialized;
 
-    private async Task WriteResultAsync(
-        JsonNode id,
-        JsonNode result,
-        CancellationToken cancellationToken)
-    {
-        await WriteMessageAsync(
-            new JsonObject
-            {
-                ["jsonrpc"] = "2.0",
-                ["id"] = id.DeepClone(),
-                ["result"] = result,
-            },
-            cancellationToken).ConfigureAwait(false);
-    }
+    internal static bool IsSupportedProtocolVersion(string value) =>
+        SupportedProtocolVersions.Contains(value);
 
-    private async Task WriteErrorAsync(
+    private static JsonObject BuildResult(
+        JsonNode id,
+        JsonNode result) =>
+        new()
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = id.DeepClone(),
+            ["result"] = result,
+        };
+
+    private static JsonObject BuildError(
         JsonNode? id,
         int code,
-        string message,
-        CancellationToken cancellationToken)
-    {
-        await WriteMessageAsync(
-            new JsonObject
+        string message) =>
+        new()
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = id?.DeepClone(),
+            ["error"] = new JsonObject
             {
-                ["jsonrpc"] = "2.0",
-                ["id"] = id?.DeepClone(),
-                ["error"] = new JsonObject
-                {
-                    ["code"] = code,
-                    ["message"] = message,
-                },
+                ["code"] = code,
+                ["message"] = message,
             },
-            cancellationToken).ConfigureAwait(false);
-    }
+        };
 
     private async Task WriteMessageAsync(
         JsonObject message,
@@ -656,5 +679,224 @@ internal sealed class ReaderContextMcpServer
             return null;
         }
         return JsonNode.Parse(id.GetRawText());
+    }
+}
+
+internal sealed class ReaderContextMcpHttpEndpoint
+{
+    internal const string Path = "/mcp";
+
+    private const string JsonContentType =
+        "application/json; charset=utf-8";
+    private readonly ReaderContextMcpServer _server;
+    private readonly int _listenPort;
+
+    internal string InstanceId => _server.InstanceId;
+
+    internal ReaderContextMcpHttpEndpoint(
+        ReaderContextMcpServer server,
+        int listenPort)
+    {
+        ArgumentNullException.ThrowIfNull(server);
+        if (listenPort is < 1 or > 65535)
+        {
+            throw new ArgumentOutOfRangeException(nameof(listenPort));
+        }
+        _server = server;
+        _listenPort = listenPort;
+    }
+
+    internal async Task HandleAsync(HttpContext context)
+    {
+        if (!IsLocalRequest(context))
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return;
+        }
+        if (!HttpMethods.IsPost(context.Request.Method))
+        {
+            context.Response.StatusCode =
+                StatusCodes.Status405MethodNotAllowed;
+            context.Response.Headers.Allow = HttpMethods.Post;
+            return;
+        }
+        if (!HasJsonContentType(context.Request.ContentType))
+        {
+            context.Response.StatusCode =
+                StatusCodes.Status415UnsupportedMediaType;
+            return;
+        }
+        Microsoft.Extensions.Primitives.StringValues protocolVersions =
+            context.Request.Headers["MCP-Protocol-Version"];
+        if (
+            protocolVersions.Count > 1
+            || (
+                protocolVersions.Count == 1
+                && !ReaderContextMcpServer.IsSupportedProtocolVersion(
+                    protocolVersions[0] ?? "")
+            )
+        )
+        {
+            await WriteJsonAsync(
+                context,
+                StatusCodes.Status400BadRequest,
+                ProtocolError(
+                    -32000,
+                    "Bad Request: Unsupported MCP protocol version"))
+                .ConfigureAwait(false);
+            return;
+        }
+        if (
+            context.Request.ContentLength is long contentLength
+            && (
+                contentLength < 0
+                || contentLength
+                    > DirectBridgeContract.MaximumMessageBytes
+            )
+        )
+        {
+            context.Response.StatusCode =
+                StatusCodes.Status413PayloadTooLarge;
+            return;
+        }
+
+        context.Response.Headers.CacheControl = "no-store, max-age=0";
+        context.Response.Headers.Pragma = "no-cache";
+        context.Response.Headers["Cross-Origin-Resource-Policy"] =
+            "same-origin";
+        context.Response.Headers["Referrer-Policy"] = "no-referrer";
+        context.Response.Headers["X-Content-Type-Options"] = "nosniff";
+
+        string message;
+        try
+        {
+            using StreamReader reader = new(
+                context.Request.Body,
+                new UTF8Encoding(
+                    encoderShouldEmitUTF8Identifier: false,
+                    throwOnInvalidBytes: true),
+                detectEncodingFromByteOrderMarks: false,
+                bufferSize: 4096,
+                leaveOpen: true);
+            message = await reader.ReadToEndAsync(
+                context.RequestAborted).ConfigureAwait(false);
+        }
+        catch (DecoderFallbackException)
+        {
+            await WriteJsonAsync(
+                context,
+                StatusCodes.Status400BadRequest,
+                ProtocolError(-32700, "Parse error"))
+                .ConfigureAwait(false);
+            return;
+        }
+        if (
+            Encoding.UTF8.GetByteCount(message)
+                > DirectBridgeContract.MaximumMessageBytes
+        )
+        {
+            context.Response.StatusCode =
+                StatusCodes.Status413PayloadTooLarge;
+            return;
+        }
+
+        JsonObject? response = await _server.ProcessMessageAsync(
+            message,
+            context.RequestAborted).ConfigureAwait(false);
+        if (response is null)
+        {
+            context.Response.StatusCode = StatusCodes.Status202Accepted;
+            context.Response.ContentLength = 0;
+            return;
+        }
+        await WriteJsonAsync(
+            context,
+            StatusCodes.Status200OK,
+            response).ConfigureAwait(false);
+    }
+
+    private bool IsLocalRequest(HttpContext context)
+    {
+        System.Net.IPAddress? remote =
+            context.Connection.RemoteIpAddress;
+        if (
+            remote is null
+            || !System.Net.IPAddress.IsLoopback(
+                remote.IsIPv4MappedToIPv6
+                    ? remote.MapToIPv4()
+                    : remote)
+            || !string.Equals(
+                context.Request.Host.Host,
+                DirectBridgeContract.ListenHost,
+                StringComparison.Ordinal)
+            || context.Request.Host.Port != _listenPort
+            || HasForwardingHeaders(context)
+        )
+        {
+            return false;
+        }
+        Microsoft.Extensions.Primitives.StringValues origins =
+            context.Request.Headers.Origin;
+        return origins.Count == 0
+            || (
+                origins.Count == 1
+                && string.Equals(
+                    origins[0],
+                    $"http://{DirectBridgeContract.ListenHost}:"
+                        + _listenPort,
+                    StringComparison.Ordinal)
+            );
+    }
+
+    private static bool HasJsonContentType(string? contentType)
+    {
+        if (string.IsNullOrWhiteSpace(contentType))
+        {
+            return false;
+        }
+        int delimiter = contentType.IndexOf(';');
+        string mediaType = delimiter < 0
+            ? contentType
+            : contentType[..delimiter];
+        return string.Equals(
+            mediaType.Trim(),
+            "application/json",
+            StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool HasForwardingHeaders(HttpContext context) =>
+        context.Request.Headers.ContainsKey("Forwarded")
+        || context.Request.Headers.ContainsKey("X-Forwarded-For")
+        || context.Request.Headers.ContainsKey("X-Forwarded-Host")
+        || context.Request.Headers.ContainsKey("X-Forwarded-Proto")
+        || context.Request.Headers.ContainsKey("X-Real-IP");
+
+    private static JsonObject ProtocolError(
+        int code,
+        string message) =>
+        new()
+        {
+            ["jsonrpc"] = "2.0",
+            ["id"] = null,
+            ["error"] = new JsonObject
+            {
+                ["code"] = code,
+                ["message"] = message,
+            },
+        };
+
+    private static async Task WriteJsonAsync(
+        HttpContext context,
+        int statusCode,
+        JsonObject payload)
+    {
+        byte[] encoded = Encoding.UTF8.GetBytes(
+            payload.ToJsonString(DirectBridgeContract.JsonOptions));
+        context.Response.StatusCode = statusCode;
+        context.Response.ContentType = JsonContentType;
+        context.Response.ContentLength = encoded.Length;
+        await context.Response.Body.WriteAsync(
+            encoded,
+            context.RequestAborted).ConfigureAwait(false);
     }
 }

@@ -36,6 +36,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     private readonly DirectRuntimeStatusWriter _statusWriter;
     private readonly DirectServiceLease _serviceLease;
     private readonly DirectSnapshotViewer _snapshotViewer;
+    private readonly ReaderContextMcpHttpEndpoint
+        _readerContextMcpEndpoint;
     private readonly object _runtimeStateGate = new();
     private string _runtimeState = "starting";
     private bool _runtimeReaderConnected;
@@ -66,12 +68,20 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         _serviceLease = new DirectServiceLease(
             configStore.InstallationRoot,
             configStore.Path);
+        string snapshotPath = Path.Combine(
+            configStore.InstallationRoot,
+            "runtime",
+            FileDirectSnapshotContextAdapter.SnapshotFileName);
         _snapshotViewer = new DirectSnapshotViewer(
-            Path.Combine(
-                configStore.InstallationRoot,
-                "runtime",
-                FileDirectSnapshotContextAdapter.SnapshotFileName),
+            snapshotPath,
             config.ListenPort);
+        _readerContextMcpEndpoint =
+            new ReaderContextMcpHttpEndpoint(
+                new ReaderContextMcpServer(
+                    snapshotPath,
+                    TextReader.Null,
+                    TextWriter.Null),
+                config.ListenPort);
     }
 
     internal async Task<int> RunAsync(CancellationToken cancellationToken)
@@ -121,6 +131,18 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         app.MapGet(
             DirectSnapshotViewer.MarkdownPath,
             _snapshotViewer.HandleMarkdownAsync);
+        app.MapMethods(
+            ReaderContextMcpHttpEndpoint.Path,
+            [
+                HttpMethods.Post,
+                HttpMethods.Get,
+                HttpMethods.Delete,
+                HttpMethods.Put,
+                HttpMethods.Patch,
+                HttpMethods.Options,
+                HttpMethods.Head,
+            ],
+            _readerContextMcpEndpoint.HandleAsync);
         app.Map(
             "/reader-computer-voice/v1",
             context => HandleBridgeAsync(context, cancellationToken));
@@ -226,6 +248,11 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             serviceInstanceId = _serviceInstanceId,
             state = _coordinator.CaptureActive ? "active" : "idle",
             captureActive = _coordinator.CaptureActive,
+            readerContextMcp = new
+            {
+                path = ReaderContextMcpHttpEndpoint.Path,
+                instanceId = _readerContextMcpEndpoint.InstanceId,
+            },
         }, DirectBridgeContract.JsonOptions, serviceCancellationToken)
             .ConfigureAwait(false);
     }
