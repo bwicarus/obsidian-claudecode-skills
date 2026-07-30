@@ -174,12 +174,13 @@ HTTP 客户端连接，不再为每个会话拉起一个快照 MCP 子进程。`
 ```
 
 stdio 回滚入口只注册 `reader_context_snapshot`，不接受 mutation，也没有可复用的 WSS
-视觉 Broker。常驻 HTTP MCP 的快照工具返回“简短 assistant-context + 完整 JSON”两个纯文本
-content；普通页文/选区读取不会截图。若快照明确给出
-`drawingImageTool=reader_drawing_image`，只有当前页 ready、绘图 stable、非空且
-file/page/revision/ref 全部一致时，独立无参只读工具才复用现有 Reader 合成 JPEG；收图后再验
-同一身份，变化即只返回错误文本。绘图 `lastEditedAgeSec` 用同一 PWA 事件内部的相对时间建立
-接收时年龄，再叠加 Windows 本地接收时钟，不直接比较两台设备的墙上时钟。
+视觉 Broker。常驻 HTTP MCP 的快照工具只返回一份模型可见 Markdown：按位置、选区、正文、
+显式焦点、附属内容和笔迹顺序预处理，不返回内部 JSON；诊断计数仅放结果 `_meta`。普通页文/
+选区读取不会截图。当前页有笔迹时，笔迹段直接写明无参只读
+`reader_drawing_image`；若稳定版本仍在约 1 秒确认窗口内，工具会有界等待后再复用现有 Reader
+合成 JPEG。收图前后仍校验 file/page/revision/ref，变化即丢弃；成功后常驻 MCP 记住已看过的
+当前笔迹，使未变化旧笔迹不再抢占模糊指代。绘图年龄用同一 PWA 事件内部的相对时间建立接收时
+年龄，再叠加 Windows 本地接收时钟，不直接比较两台设备的墙上时钟。
 
 服务进程在同一 MCP 连接中保持 instance/call sequence，逐次读取原子快照；最新文件损坏时
 保留上一次有效 revision。`active-reading` 超过三分钟则返回 `contextStatus=stale`，正文与

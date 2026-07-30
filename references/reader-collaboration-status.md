@@ -3613,3 +3613,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **安全语义**：绘图年龄用 PWA 同事件相对间隔 + Windows 接收时钟，不做跨机墙钟相减；file/page/revision/ref 在取图前后都必须一致。
 - **怎么验的**：Windows C# Release build 0 warning/0 error；无音频 self-test 通过且 `audioActivated=false`，覆盖普通正文不取图、pending 前门禁和取图后 revision 门禁。
 - **没做/下一步**：未改 PWA 图像实现，未安装、部署或发布；下一位精确复审本提交后再决定候选打包与上线。
+
+## Codex：快照 MCP 迁移旧语音上下文分流（2026-07-31 JST）
+- **改了什么**：模型输出收敛为单一有序 Markdown，补选区所在上下文、显式焦点、EPUB 视口、高亮/卡片与自然语言近况；原始 JSON 仅留 Windows 内部。
+- **笔迹语义**：笔迹段直接给无参看图入口，pending 时工具有界等待 PWA 稳定合成；成功看图后常驻进程记住当前笔迹，未变化旧图不再抢占模糊指代。
+- **怎么验的**：Windows C# Release build 与无音频 self-test 通过；0.1.30 包 verify/self-test 及安装后真实 HTTP MCP 调用确认仅一段 Markdown、无 raw schema/revision。
+- **安装/下一步**：已原子替换 Windows 七文件，回滚目录 `C:\Users\bwica\bw-computer-voice-bridge-backups\install-0.1.30-20260730T154723418Z`；未改 Pi/PWA、未启动语音或采音，重开 Codex 后做四种真机问法。

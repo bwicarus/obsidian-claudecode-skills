@@ -5130,14 +5130,14 @@ internal static class DirectBridgeSelfTest
             string firstAssistantContext = firstContent[0]
                 .GetProperty("text")
                 .GetString()!;
-            string firstText = firstContent[1]
-                .GetProperty("text")
-                .GetString()!;
-            string secondText = secondContent[1]
-                .GetProperty("text")
-                .GetString()!;
-            using JsonDocument first = JsonDocument.Parse(firstText);
-            using JsonDocument second = JsonDocument.Parse(secondText);
+            JsonElement firstDiagnostics = responses[2].RootElement
+                .GetProperty("result")
+                .GetProperty("_meta")
+                .GetProperty("bw.reader/mcp");
+            JsonElement secondDiagnostics = responses[3].RootElement
+                .GetProperty("result")
+                .GetProperty("_meta")
+                .GetProperty("bw.reader/mcp");
             Require(
                 exit == 0
                 && responses.Length == 4
@@ -5148,41 +5148,43 @@ internal static class DirectBridgeSelfTest
                 && tools.GetArrayLength() == 1
                 && tools[0].GetProperty("name").GetString()
                     == ReaderContextMcpServer.ToolName
-                && firstContent.GetArrayLength() == 2
+                && firstContent.GetArrayLength() == 1
                 && firstContent.EnumerateArray().All(item =>
                     item.GetProperty("type").GetString() == "text")
                 && firstAssistantContext.StartsWith(
-                    "Reader assistant context",
+                    "# Reader 当前上下文",
                     StringComparison.Ordinal)
                 && firstAssistantContext.Contains(
-                    "silent state",
+                    "静默背景",
                     StringComparison.Ordinal)
                 && firstAssistantContext.IndexOf(
-                    "Location:",
+                    "## 阅读近况",
                     StringComparison.Ordinal)
                     < firstAssistantContext.IndexOf(
-                        "Page text:",
+                        "## 当前页正文",
                         StringComparison.Ordinal)
                 && firstAssistantContext.IndexOf(
-                    "Page text:",
+                    "## 当前页正文",
                     StringComparison.Ordinal)
                     < firstAssistantContext.IndexOf(
-                        "Drawing:",
+                        "## 当前笔迹与页面视觉",
                         StringComparison.Ordinal)
-                && first.RootElement.GetProperty("schema").GetString()
-                    == FileDirectSnapshotContextAdapter.SnapshotContract
-                && first.RootElement.GetProperty("contextStatus")
-                    .GetString() == "pending"
-                && first.RootElement.GetProperty("mcp")
-                    .GetProperty("instanceId").GetString()
+                && !firstAssistantContext.Contains(
+                    "{\"schema\"",
+                    StringComparison.Ordinal)
+                && !firstAssistantContext.Contains(
+                    "\"revision\"",
+                    StringComparison.Ordinal)
+                && firstDiagnostics.GetProperty(
+                    "instanceId").GetString()
                     == "mcp-self-test-instance"
-                && second.RootElement.GetProperty("mcp")
-                    .GetProperty("instanceId").GetString()
+                && secondDiagnostics.GetProperty(
+                    "instanceId").GetString()
                     == "mcp-self-test-instance"
-                && first.RootElement.GetProperty("mcp")
-                    .GetProperty("callSequence").GetInt64() == 1
-                && second.RootElement.GetProperty("mcp")
-                    .GetProperty("callSequence").GetInt64() == 2,
+                && firstDiagnostics.GetProperty(
+                    "callSequence").GetInt64() == 1
+                && secondDiagnostics.GetProperty(
+                    "callSequence").GetInt64() == 2,
                 "direct-reader-context-mcp-is-persistent-read-only-text-context",
                 checks);
         }
@@ -5281,24 +5283,18 @@ internal static class DirectBridgeSelfTest
             JsonDocument.Parse(httpCalls[0].Body);
         using JsonDocument httpSecondResponse =
             JsonDocument.Parse(httpCalls[1].Body);
-        using JsonDocument httpFirstSnapshot = JsonDocument.Parse(
-            httpFirstResponse.RootElement
-                .GetProperty("result")
-                .GetProperty("content")[1]
-                .GetProperty("text")
-                .GetString()!);
-        using JsonDocument httpSecondSnapshot = JsonDocument.Parse(
-            httpSecondResponse.RootElement
-                .GetProperty("result")
-                .GetProperty("content")[1]
-                .GetProperty("text")
-                .GetString()!);
+        JsonElement httpFirstSnapshot = httpFirstResponse.RootElement
+            .GetProperty("result")
+            .GetProperty("_meta")
+            .GetProperty("bw.reader/mcp");
+        JsonElement httpSecondSnapshot = httpSecondResponse.RootElement
+            .GetProperty("result")
+            .GetProperty("_meta")
+            .GetProperty("bw.reader/mcp");
         long[] httpCallSequences =
         [
-            httpFirstSnapshot.RootElement.GetProperty("mcp")
-                .GetProperty("callSequence").GetInt64(),
-            httpSecondSnapshot.RootElement.GetProperty("mcp")
-                .GetProperty("callSequence").GetInt64(),
+            httpFirstSnapshot.GetProperty("callSequence").GetInt64(),
+            httpSecondSnapshot.GetProperty("callSequence").GetInt64(),
         ];
         Array.Sort(httpCallSequences);
         Require(
@@ -5318,11 +5314,11 @@ internal static class DirectBridgeSelfTest
             && httpCalls.All(
                 call => call.StatusCode
                     == StatusCodes.Status200OK)
-            && httpFirstSnapshot.RootElement.GetProperty("mcp")
-                .GetProperty("instanceId").GetString()
+            && httpFirstSnapshot.GetProperty(
+                "instanceId").GetString()
                 == "mcp-http-self-test-instance"
-            && httpSecondSnapshot.RootElement.GetProperty("mcp")
-                .GetProperty("instanceId").GetString()
+            && httpSecondSnapshot.GetProperty(
+                "instanceId").GetString()
                 == "mcp-http-self-test-instance"
             && httpCallSequences.SequenceEqual(new long[] { 1, 2 }),
             "direct-reader-context-http-mcp-reuses-one-serialized-instance",
@@ -5656,17 +5652,23 @@ internal static class DirectBridgeSelfTest
             drawingSnapshotResponse["result"]?["content"] as JsonArray
             ?? throw new InvalidOperationException(
                 "drawing snapshot content missing");
-        using JsonDocument drawingSnapshotPayload = JsonDocument.Parse(
-            drawingSnapshotContent[1]?["text"]?.GetValue<string>()
+        JsonObject drawingSnapshotPayload = JsonNode.Parse(
+            await File.ReadAllTextAsync(drawingSnapshotPath)
+                .ConfigureAwait(false)) as JsonObject
             ?? throw new InvalidOperationException(
-                "drawing snapshot JSON missing"));
+                "drawing snapshot JSON missing");
+        ReaderContextMcpServer.ApplyFreshness(
+            drawingSnapshotPayload,
+            DateTimeOffset.FromUnixTimeMilliseconds(
+                1_750_000_010_000));
         string drawingAssistantContext =
             drawingSnapshotContent[0]?["text"]?.GetValue<string>()
             ?? "";
-        JsonElement projectedDrawing = drawingSnapshotPayload.RootElement
-            .GetProperty("currentPage")
-            .GetProperty("visual")
-            .GetProperty("drawing");
+        JsonObject projectedDrawing =
+            drawingSnapshotPayload["currentPage"]?["visual"]?["drawing"]
+                as JsonObject
+            ?? throw new InvalidOperationException(
+                "projected drawing missing");
         Require(
             drawingTools.Count == 2
             && drawingTools[0]?["name"]?.GetValue<string>()
@@ -5675,37 +5677,38 @@ internal static class DirectBridgeSelfTest
                 == ReaderContextMcpServer.DrawingImageToolName
             && drawingTools[1]?["annotations"]?["readOnlyHint"]
                 ?.GetValue<bool>() == true
-            && drawingSnapshotContent.Count == 2
+            && drawingSnapshotContent.Count == 1
             && drawingSnapshotContent.All(item =>
                 item?["type"]?.GetValue<string>() == "text")
             && visualFetches == 0
-            && drawingSnapshotPayload.RootElement
-                .GetProperty("drawingImageTool").GetString()
-                == ReaderContextMcpServer.DrawingImageToolName
-            && projectedDrawing.GetProperty(
-                "lastEditedAgeSec").GetDouble() == 8.0
-            && !projectedDrawing.TryGetProperty(
-                "lastEditedAgeAtReceiveSec",
-                out _)
-            && !projectedDrawing.TryGetProperty(
-                "lastEditedReceivedAtEpochMs",
-                out _)
+            && projectedDrawing["lastEditedAgeSec"]
+                ?.GetValue<double>() == 8.0
+            && !projectedDrawing.ContainsKey(
+                "lastEditedAgeAtReceiveSec")
+            && !projectedDrawing.ContainsKey(
+                "lastEditedReceivedAtEpochMs")
             && drawingAssistantContext.Contains(
-                "Location:",
+                "## 阅读近况",
                 StringComparison.Ordinal)
             && drawingAssistantContext.Contains(
-                "lastEditedAgeSec=8",
+                "8.0 秒",
                 StringComparison.Ordinal)
             && drawingAssistantContext.Contains(
                 ReaderContextMcpServer.DrawingImageToolName,
                 StringComparison.Ordinal)
             && drawingAssistantContext.Contains(
-                "do not request an image for ordinary page or selection",
+                "PWA 已有的“当前原页＋笔迹”合成图",
+                StringComparison.Ordinal)
+            && !drawingAssistantContext.Contains(
+                "{\"schema\"",
+                StringComparison.Ordinal)
+            && !drawingAssistantContext.Contains(
+                "drawingRevision",
                 StringComparison.Ordinal),
             "direct-reader-context-snapshot-is-text-only-with-windows-drawing-age",
             checks);
-        JsonObject activeSelectionPayload = JsonNode.Parse(
-            drawingSnapshotPayload.RootElement.GetRawText()) as JsonObject
+        JsonObject activeSelectionPayload =
+            drawingSnapshotPayload.DeepClone() as JsonObject
             ?? throw new InvalidOperationException(
                 "active selection payload missing");
         activeSelectionPayload["selection"] = new JsonObject
@@ -5717,16 +5720,16 @@ internal static class DirectBridgeSelfTest
             ReaderContextMcpServer.BuildAssistantContext(
                 activeSelectionPayload);
         int locationIndex = activeSelectionContext.IndexOf(
-            "Location:",
+            "## 阅读近况",
             StringComparison.Ordinal);
         int selectionIndex = activeSelectionContext.IndexOf(
-            "Active selection:",
+            "## 当前选区",
             StringComparison.Ordinal);
         int pageTextIndex = activeSelectionContext.IndexOf(
-            "Page text:",
+            "## 当前页正文",
             StringComparison.Ordinal);
         int drawingIndex = activeSelectionContext.IndexOf(
-            "Drawing:",
+            "## 当前笔迹与页面视觉",
             StringComparison.Ordinal);
         Require(
             locationIndex >= 0
@@ -5734,10 +5737,10 @@ internal static class DirectBridgeSelfTest
             && selectionIndex < pageTextIndex
             && pageTextIndex < drawingIndex
             && activeSelectionContext.Contains(
-                "silent state",
+                "静默背景",
                 StringComparison.Ordinal)
             && activeSelectionContext.Contains(
-                "Drawing metadata does not reveal ink content",
+                "用户说“这段”“选中的”“这个词”时",
                 StringComparison.Ordinal),
             "direct-reader-context-assistant-text-orders-location-selection-page-drawing",
             checks);
@@ -5759,13 +5762,15 @@ internal static class DirectBridgeSelfTest
                 pendingContextPayload);
         Require(
             pendingAssistantContext.Contains(
-                "waiting/not yet available",
+                "当前绘制或合成图尚未稳定",
                 StringComparison.Ordinal)
-            && !pendingAssistantContext.Contains(
-                "call "
-                    + ReaderContextMcpServer.DrawingImageToolName,
+            && pendingAssistantContext.Contains(
+                ReaderContextMcpServer.DrawingImageToolName,
+                StringComparison.Ordinal)
+            && pendingAssistantContext.Contains(
+                "有界时间内等待",
                 StringComparison.Ordinal),
-            "direct-reader-context-pending-drawing-does-not-suggest-image-tool",
+            "direct-reader-context-pending-drawing-offers-bounded-image-tool-wait",
             checks);
 
         JsonObject drawingImageResponse =
@@ -5789,10 +5794,10 @@ internal static class DirectBridgeSelfTest
             drawingImageResponse["result"]?["content"] as JsonArray
             ?? throw new InvalidOperationException(
                 "drawing image content missing");
-        using JsonDocument drawingIdentity = JsonDocument.Parse(
+        string drawingImageText =
             drawingImageContent[0]?["text"]?.GetValue<string>()
             ?? throw new InvalidOperationException(
-                "drawing identity missing"));
+                "drawing image text missing");
         Require(
             visualFetches == 1
             && capturedRequest?.File == "drawing.pdf"
@@ -5806,10 +5811,41 @@ internal static class DirectBridgeSelfTest
                 == "image"
             && drawingImageContent[1]?["mimeType"]?.GetValue<string>()
                 == ReaderVisualDeliveryProtocol.MimeType
-            && drawingIdentity.RootElement.GetProperty(
-                "drawingRevision").GetString()
-                == "dr_0123456789abcdef",
+            && drawingImageText.Contains(
+                "原页面＋笔迹",
+                StringComparison.Ordinal)
+            && !drawingImageText.Contains(
+                "drawingRevision",
+                StringComparison.Ordinal)
+            && !drawingImageText.Contains(
+                "dr_0123456789abcdef",
+                StringComparison.Ordinal),
             "direct-reader-drawing-image-is-separate-read-only-jpeg-tool",
+            checks);
+        JsonObject drawingSeenResponse =
+            await drawingServer.ProcessMessageAsync(
+                JsonSerializer.Serialize(new
+                {
+                    jsonrpc = "2.0",
+                    id = 230,
+                    method = "tools/call",
+                    @params = new
+                    {
+                        name = ReaderContextMcpServer.ToolName,
+                        arguments = new { },
+                    },
+                }),
+                CancellationToken.None).ConfigureAwait(false)
+            ?? throw new InvalidOperationException(
+                "drawing seen snapshot missing");
+        string drawingSeenText =
+            drawingSeenResponse["result"]?["content"]?[0]?["text"]
+                ?.GetValue<string>() ?? "";
+        Require(
+            drawingSeenText.Contains(
+                "已经成功看过且此后未变化",
+                StringComparison.Ordinal),
+            "direct-reader-context-remembers-successfully-viewed-drawing",
             checks);
 
         JsonElement pendingDrawingEvent =
@@ -5971,8 +6007,11 @@ internal static class DirectBridgeSelfTest
                 item?["type"]?.GetValue<string>() == "text")
             && supersededContent[0]?["text"]?.GetValue<string>()
                 .Contains(
-                    "drawing-revision-superseded",
-                    StringComparison.Ordinal) == true,
+                    "当前页或笔迹已经变化",
+                    StringComparison.Ordinal) == true
+            && supersededResponse["result"]?["_meta"]?
+                    ["bw.reader/errorCode"]?.GetValue<string>()
+                == "drawing-revision-superseded",
             "direct-reader-drawing-image-rechecks-revision-after-capture",
             checks);
     }
