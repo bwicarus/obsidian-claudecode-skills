@@ -32,6 +32,9 @@ if (window.__bwPwaProviderOnly) return;
   var START_GESTURE_LEASE_TTL_MS = 5000;
   var OUTGOING_CONTEXT_CONTRACT = "reader-outgoing-context/1";
   var ACTIVE_READING_CONTRACT = "reader-active-reading/1";
+  var READER_RESULT_DELIVERY_CONTRACT = "reader-result-delivery/1";
+  var READER_RESULT_EVENT = "reader-result";
+  var READER_RESULT_ACK = "reader-result-ack";
   var CONTEXT_DELIVERY_LEGACY = "legacy-inject";
   var CONTEXT_DELIVERY_SNAPSHOT = "snapshot-mcp";
   var ACTIVE_READING_POLL_MS = 250;
@@ -176,6 +179,335 @@ if (window.__bwPwaProviderOnly) return;
       );
     }
     return text;
+  }
+
+  var RESULT_CARD_SPECS = Object.freeze({
+    weather: {
+      required: ["lo", "hi", "cond"],
+      optional: ["loc", "date", "precip", "tip"],
+    },
+    news: {
+      itemRequired: ["t"],
+      itemOptional: ["s", "src"],
+    },
+    images: {
+      itemRequired: ["url"],
+      itemOptional: ["title", "aid", "src"],
+    },
+    videos: {
+      itemRequired: ["title"],
+      itemOptional: ["thumb", "url", "channel", "src"],
+    },
+    fact: {
+      required: ["answer"],
+      optional: ["detail"],
+    },
+    general: {
+      required: [],
+      optional: ["text"],
+    },
+  });
+
+  function resultText(value, label, required) {
+    var text = safeText(value, label, 2000, !required);
+    if (required && !text.trim()) {
+      throw directError(label + " 不能为空", "BW_READER_RESULT_SCHEMA", false);
+    }
+    return text;
+  }
+
+  function resultValue(value, label, url) {
+    if (!url && typeof value === "number" && Number.isFinite(value)) {
+      return value;
+    }
+    var text = resultText(value, label, true);
+    if (url) {
+      var parsed;
+      try { parsed = new URL(text); } catch (_) {}
+      if (
+        !parsed ||
+        parsed.protocol !== "https:" ||
+        !parsed.hostname ||
+        parsed.username ||
+        parsed.password ||
+        text !== text.trim() ||
+        text.indexOf("\\") >= 0
+      ) {
+        throw directError(
+          label + " 不是安全 HTTPS URL",
+          "BW_READER_RESULT_SCHEMA",
+          false
+        );
+      }
+    }
+    return text;
+  }
+
+  function normalizeResultFields(value, required, optional, label) {
+    exactObject(value, required, optional, label);
+    var normalized = {};
+    required.concat(optional).forEach(function (field) {
+      if (!Object.prototype.hasOwnProperty.call(value, field)) return;
+      normalized[field] = resultValue(
+        value[field],
+        label + "." + field,
+        field === "url" || field === "thumb"
+      );
+    });
+    return normalized;
+  }
+
+  function normalizeResultCard(card) {
+    exactObject(
+      card,
+      ["kind", "data"],
+      ["title", "brief", "sources"],
+      "Reader 结果 card"
+    );
+    var kind = safeText(card.kind, "Reader 结果 card.kind", 16, false);
+    var spec = RESULT_CARD_SPECS[kind];
+    if (!spec || !plainObject(card.data)) {
+      throw directError(
+        "Reader 结果 card.kind/data 无效",
+        "BW_READER_RESULT_SCHEMA",
+        false
+      );
+    }
+    var data;
+    if (spec.itemRequired) {
+      exactObject(card.data, ["items"], [], "Reader 结果 " + kind + ".data");
+      if (
+        !Array.isArray(card.data.items) ||
+        card.data.items.length < 1 ||
+        card.data.items.length > 20
+      ) {
+        throw directError(
+          "Reader 结果 items 数量无效",
+          "BW_READER_RESULT_SCHEMA",
+          false
+        );
+      }
+      data = {
+        items: card.data.items.map(function (item, index) {
+          return normalizeResultFields(
+            item,
+            spec.itemRequired,
+            spec.itemOptional,
+            "Reader 结果 " + kind + ".items[" + index + "]"
+          );
+        }),
+      };
+    } else {
+      data = normalizeResultFields(
+        card.data,
+        spec.required,
+        spec.optional,
+        "Reader 结果 " + kind + ".data"
+      );
+      if (
+        (kind === "fact" && typeof data.detail !== "undefined" &&
+          typeof data.detail !== "string") ||
+        (kind === "general" && typeof data.text !== "undefined" &&
+          typeof data.text !== "string")
+      ) {
+        throw directError(
+          "Reader 结果文字字段无效",
+          "BW_READER_RESULT_SCHEMA",
+          false
+        );
+      }
+    }
+    var normalized = { kind: kind, data: data };
+    ["title", "brief"].forEach(function (field) {
+      if (Object.prototype.hasOwnProperty.call(card, field)) {
+        normalized[field] = resultText(
+          card[field],
+          "Reader 结果 card." + field,
+          false
+        );
+      }
+    });
+    if (Object.prototype.hasOwnProperty.call(card, "sources")) {
+      if (
+        !Array.isArray(card.sources) ||
+        card.sources.length < 1 ||
+        card.sources.length > 5
+      ) {
+        throw directError(
+          "Reader 结果 sources 数量无效",
+          "BW_READER_RESULT_SCHEMA",
+          false
+        );
+      }
+      normalized.sources = card.sources.map(function (source, index) {
+        exactObject(source, ["url", "title"], [], "Reader 结果 source");
+        return {
+          url: resultValue(source.url, "Reader 结果 source.url", true),
+          title: resultText(
+            source.title,
+            "Reader 结果 source[" + index + "].title",
+            true
+          ),
+        };
+      });
+    }
+    return normalized;
+  }
+
+  function normalizeResultFlashcards(cards) {
+    if (!Array.isArray(cards) || cards.length < 1 || cards.length > 20) {
+      throw directError(
+        "Reader 结果 cards 数量无效",
+        "BW_READER_RESULT_SCHEMA",
+        false
+      );
+    }
+    return cards.map(function (card, index) {
+      exactObject(
+        card,
+        ["type"],
+        ["front", "back", "cloze", "text"],
+        "Reader 结果 cards[" + index + "]"
+      );
+      var normalized = { type: card.type };
+      ["front", "back", "cloze", "text"].forEach(function (field) {
+        if (Object.prototype.hasOwnProperty.call(card, field)) {
+          normalized[field] = resultText(
+            card[field],
+            "Reader 结果 cards[" + index + "]." + field,
+            false
+          );
+        }
+      });
+      if (
+        (card.type !== "basic" && card.type !== "cloze") ||
+        (
+          card.type === "basic"
+            ? !String(normalized.front || "").trim()
+            : !String(normalized.cloze || normalized.text || "").trim()
+        )
+      ) {
+        throw directError(
+          "Reader 结果 cards[" + index + "] 无效",
+          "BW_READER_RESULT_SCHEMA",
+          false
+        );
+      }
+      return normalized;
+    });
+  }
+
+  function normalizeReaderResultDelivery(value) {
+    exactObject(
+      value,
+      ["contract", "correlation", "anchor", "parts"],
+      [],
+      "Reader 结果事件"
+    );
+    if (value.contract !== READER_RESULT_DELIVERY_CONTRACT) {
+      throw directError(
+        "Reader 结果事件合同版本不匹配",
+        "BW_READER_RESULT_SCHEMA",
+        false
+      );
+    }
+    var correlation = safeId(value.correlation, "Reader 结果 correlation");
+    if (correlation.length > 40) {
+      throw directError(
+        "Reader 结果 correlation 过长",
+        "BW_READER_RESULT_SCHEMA",
+        false
+      );
+    }
+    exactObject(
+      value.anchor,
+      ["file", "page"],
+      [],
+      "Reader 结果 anchor"
+    );
+    var file = resultText(
+      value.anchor.file,
+      "Reader 结果 anchor.file",
+      true
+    );
+    if (
+      file.indexOf("\0") >= 0 ||
+      file.indexOf(":") >= 0 ||
+      file.charAt(0) === "/" ||
+      file.charAt(0) === "\\" ||
+      file.split(/[\\/]/).indexOf("..") >= 0
+    ) {
+      throw directError(
+        "Reader 结果 anchor.file 无效",
+        "BW_READER_RESULT_SCHEMA",
+        false
+      );
+    }
+    if (
+      !Number.isSafeInteger(value.anchor.page) ||
+      value.anchor.page < 1
+    ) {
+      throw directError(
+        "Reader 结果 anchor.page 无效",
+        "BW_READER_RESULT_SCHEMA",
+        false
+      );
+    }
+    if (!Array.isArray(value.parts) || value.parts.length !== 1) {
+      throw directError(
+        "Reader 结果必须且只能包含一个展示 part",
+        "BW_READER_RESULT_SCHEMA",
+        false
+      );
+    }
+    var rawPart = value.parts[0];
+    var part;
+    if (rawPart && rawPart.kind === "card") {
+      exactObject(
+        rawPart,
+        ["kind", "card"],
+        [],
+        "Reader 结果 part(card)"
+      );
+      part = {
+        kind: "card",
+        card: normalizeResultCard(rawPart.card),
+      };
+    } else if (rawPart && rawPart.kind === "cards") {
+      exactObject(
+        rawPart,
+        ["kind", "cards", "draft"],
+        [],
+        "Reader 结果 part(cards)"
+      );
+      if (rawPart.draft !== true) {
+        throw directError(
+          "Reader 结果 cards 当前只能是草稿",
+          "BW_READER_RESULT_SCHEMA",
+          false
+        );
+      }
+      part = {
+        kind: "cards",
+        cards: normalizeResultFlashcards(rawPart.cards),
+        draft: true,
+      };
+    } else {
+      throw directError(
+        "Reader 结果 part.kind 不受支持",
+        "BW_READER_RESULT_SCHEMA",
+        false
+      );
+    }
+    return {
+      contract: READER_RESULT_DELIVERY_CONTRACT,
+      correlation: correlation,
+      anchor: {
+        file: file,
+        page: value.anchor.page,
+      },
+      parts: [part],
+    };
   }
 
   function normalizeEndpoint(value) {
@@ -1037,6 +1369,97 @@ if (window.__bwPwaProviderOnly) return;
     });
   };
 
+  DirectSocket.prototype._handleReaderResult = function (rawPayload) {
+    var delivery = normalizeReaderResultDelivery(rawPayload);
+    var receipt;
+    try {
+      if (
+        !RC.assistant ||
+        typeof RC.assistant.acceptDirectResult !== "function"
+      ) {
+        throw directError(
+          "Reader 结果接收器尚未挂载",
+          "BW_READER_RESULT_RECEIVER_UNAVAILABLE",
+          true
+        );
+      }
+      receipt = RC.assistant.acceptDirectResult(delivery);
+      exactObject(
+        receipt,
+        ["outcome"],
+        ["error"],
+        "Reader 结果接收回执"
+      );
+      if (
+        receipt.outcome !== "rendered" &&
+        receipt.outcome !== "replay" &&
+        receipt.outcome !== "rejected"
+      ) {
+        throw directError(
+          "Reader 结果接收回执 outcome 无效",
+          "BW_READER_RESULT_RECEIVER_INVALID",
+          false
+        );
+      }
+      if (
+        (receipt.outcome === "rejected") !==
+        Object.prototype.hasOwnProperty.call(receipt, "error")
+      ) {
+        throw directError(
+          "Reader 拒绝回执必须且只能携带 error",
+          "BW_READER_RESULT_RECEIVER_INVALID",
+          false
+        );
+      }
+    } catch (error) {
+      receipt = {
+        outcome: "rejected",
+        error: String(
+          (error && (error.code || error.message)) ||
+          "BW_READER_RESULT_RECEIVER_FAILED"
+        ).slice(0, 500),
+      };
+    }
+    var ackFields = {
+      correlation: delivery.correlation,
+      outcome: receipt.outcome,
+    };
+    if (receipt.outcome === "rejected") {
+      ackFields.error = resultText(
+        receipt.error,
+        "Reader 结果拒绝原因",
+        true
+      ).slice(0, 500);
+    }
+    this.request(
+      READER_RESULT_ACK,
+      ackFields,
+      REQUEST_TIMEOUT_MS
+    ).then(function (value) {
+      exactObject(
+        value,
+        ["correlation", "outcome", "matched"],
+        [],
+        "Reader 结果 ACK 响应"
+      );
+      if (
+        value.correlation !== delivery.correlation ||
+        value.outcome !== receipt.outcome ||
+        typeof value.matched !== "boolean"
+      ) {
+        throw directError(
+          "Reader 结果 ACK 响应错配",
+          "BW_READER_RESULT_ACK_INVALID",
+          false
+        );
+      }
+    }).catch(function () {
+      // Result delivery is an application-level side channel. The bounded
+      // request already reports failure to Windows; never synthesize a second
+      // card or a second START from here.
+    });
+  };
+
   DirectSocket.prototype._onMessage = function (event) {
     if (this.closed) return;
     if (
@@ -1109,6 +1532,10 @@ if (window.__bwPwaProviderOnly) return;
           [],
           "WSS 事件"
         );
+        if (message.event === READER_RESULT_EVENT) {
+          this._handleReaderResult(message.payload);
+          return;
+        }
         if (message.event !== "status") {
           throw directError(
             "Windows 桥接器事件类型不受支持",

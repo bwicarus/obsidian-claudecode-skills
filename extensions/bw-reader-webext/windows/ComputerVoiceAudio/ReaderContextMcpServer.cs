@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 using Microsoft.AspNetCore.Http;
 
 namespace BwReader.ComputerVoiceAudio;
@@ -8,6 +9,7 @@ namespace BwReader.ComputerVoiceAudio;
 internal sealed class ReaderContextMcpServer
 {
     internal const string ToolName = "reader_context_snapshot";
+    internal const string ResultToolName = "reader_result_present";
     internal const string ServerName = "bw-reader-context-snapshot";
     internal const string ServerVersion = "1.0.0";
     internal const string LatestProtocolVersion = "2025-11-25";
@@ -25,6 +27,22 @@ internal sealed class ReaderContextMcpServer
 
     private const int MaximumMessageCharacters = 1024 * 1024;
     private const int MaximumSnapshotBytes = 128 * 1024;
+    private const int MaximumResultItems = 20;
+    private const int MaximumResultTextCharacters = 2000;
+    private static readonly Regex CorrelationPattern = new(
+        "^[A-Za-z0-9._:-]{1,40}$",
+        RegexOptions.CultureInvariant);
+    private static readonly HashSet<string> ResultKinds =
+        new(StringComparer.Ordinal)
+        {
+            "weather",
+            "news",
+            "images",
+            "videos",
+            "fact",
+            "general",
+            "cards",
+        };
     private static readonly UTF8Encoding Utf8WithoutBom = new(
         encoderShouldEmitUTF8Identifier: false);
 
@@ -34,6 +52,10 @@ internal sealed class ReaderContextMcpServer
     private readonly Func<DateTimeOffset> _utcNow;
     private readonly string _instanceId;
     private readonly string _startedAt;
+    private readonly Func<
+        ReaderResultDeliveryRequest,
+        CancellationToken,
+        Task<ReaderResultDeliveryAck>>? _deliverResultAsync;
     private readonly SemaphoreSlim _messageGate = new(1, 1);
     private JsonObject? _latestSnapshot;
     private long _latestRevision = -1;
@@ -49,7 +71,11 @@ internal sealed class ReaderContextMcpServer
         TextReader input,
         TextWriter output,
         Func<DateTimeOffset>? utcNow = null,
-        string? instanceId = null)
+        string? instanceId = null,
+        Func<
+            ReaderResultDeliveryRequest,
+            CancellationToken,
+            Task<ReaderResultDeliveryAck>>? deliverResultAsync = null)
     {
         if (!Path.IsPathFullyQualified(statePath))
         {
@@ -63,6 +89,7 @@ internal sealed class ReaderContextMcpServer
         _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
         _instanceId = instanceId ?? Guid.NewGuid().ToString();
         _startedAt = _utcNow().ToString("O");
+        _deliverResultAsync = deliverResultAsync;
     }
 
     internal async Task<int> RunAsync(
@@ -274,43 +301,125 @@ internal sealed class ReaderContextMcpServer
                     ["name"] = ServerName,
                     ["version"] = ServerVersion,
                 },
-                ["instructions"] =
-                    "Use reader_context_snapshot only when the user asks "
-                    + "about the current Reader page or selection. Respect "
-                    + "contextStatus; pending or stale means the current "
-                    + "page text is unavailable.",
+                ["instructions"] = _deliverResultAsync is null
+                    ? "Use reader_context_snapshot only when the user asks "
+                        + "about the current Reader page or selection. Respect "
+                        + "contextStatus; pending or stale means the current "
+                        + "page text is unavailable."
+                    : "Use reader_context_snapshot when the user asks about "
+                        + "the current Reader page or selection. During a "
+                        + "Reader voice session, after obtaining weather, "
+                        + "news, images or videos, or after preparing display "
+                        + "cards, call reader_result_present exactly once so "
+                        + "the completed result appears in the Reader sidebar.",
             });
     }
 
-    private static JsonObject BuildToolList() =>
-        new()
-        {
-            ["tools"] = new JsonArray
+    private JsonObject BuildToolList()
+    {
+        JsonArray tools =
+        [
+            new JsonObject
             {
-                new JsonObject
+                ["name"] = ToolName,
+                ["description"] =
+                    "Read the newest Windows-local Reader page and "
+                    + "selection snapshot. The tool is read-only. "
+                    + "Check contextStatus before using currentPage; "
+                    + "never reuse text when it is pending or stale.",
+                ["inputSchema"] = new JsonObject
                 {
-                    ["name"] = ToolName,
-                    ["description"] =
-                        "Read the newest Windows-local Reader page and "
-                        + "selection snapshot. The tool is read-only. "
-                        + "Check contextStatus before using currentPage; "
-                        + "never reuse text when it is pending or stale.",
-                    ["inputSchema"] = new JsonObject
-                    {
-                        ["type"] = "object",
-                        ["additionalProperties"] = false,
-                        ["properties"] = new JsonObject(),
-                    },
-                    ["annotations"] = new JsonObject
-                    {
-                        ["readOnlyHint"] = true,
-                        ["destructiveHint"] = false,
-                        ["idempotentHint"] = true,
-                        ["openWorldHint"] = false,
-                    },
+                    ["type"] = "object",
+                    ["additionalProperties"] = false,
+                    ["properties"] = new JsonObject(),
+                },
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = true,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = true,
+                    ["openWorldHint"] = false,
                 },
             },
+        ];
+        if (_deliverResultAsync is not null)
+        {
+            tools.Add(new JsonObject
+            {
+                ["name"] = ResultToolName,
+                ["description"] =
+                    "Present one completed structured result in the current "
+                    + "Reader sidebar over the authenticated Windows-to-Reader "
+                    + "connection. Windows derives the current book/page "
+                    + "anchor; do not include an anchor. In Reader voice "
+                    + "sessions, use this after weather, news, image, video "
+                    + "or flashcard work so the result is visible as a card.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["additionalProperties"] = false,
+                    ["required"] = new JsonArray(
+                        "correlation",
+                        "kind",
+                        "payload"),
+                    ["properties"] = new JsonObject
+                    {
+                        ["correlation"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["pattern"] =
+                                "^[A-Za-z0-9._:-]{1,40}$",
+                        },
+                        ["kind"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["enum"] = new JsonArray(
+                                "weather",
+                                "news",
+                                "images",
+                                "videos",
+                                "fact",
+                                "general",
+                                "cards"),
+                        },
+                        ["payload"] = new JsonObject
+                        {
+                            ["type"] = "object",
+                        },
+                        ["title"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["maxLength"] =
+                                MaximumResultTextCharacters,
+                        },
+                        ["brief"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["maxLength"] =
+                                MaximumResultTextCharacters,
+                        },
+                        ["sources"] = new JsonObject
+                        {
+                            ["type"] = "array",
+                            ["minItems"] = 1,
+                            ["maxItems"] = 5,
+                        },
+                    },
+                },
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = false,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = true,
+                    ["openWorldHint"] = false,
+                },
+            });
+        }
+        return new JsonObject
+        {
+            ["tools"] = tools,
         };
+    }
 
     private async Task<JsonObject> HandleToolCallAsync(
         JsonNode id,
@@ -323,16 +432,6 @@ internal sealed class ReaderContextMcpServer
                 "name",
                 out JsonElement nameValue)
             || nameValue.ValueKind != JsonValueKind.String
-            || nameValue.GetString() != ToolName
-            || (
-                parameters.TryGetProperty(
-                    "arguments",
-                    out JsonElement arguments)
-                && (
-                    arguments.ValueKind != JsonValueKind.Object
-                    || arguments.EnumerateObject().Any()
-                )
-            )
         )
         {
             return BuildError(
@@ -341,24 +440,425 @@ internal sealed class ReaderContextMcpServer
                 "Invalid tool call");
         }
 
+        string toolName = nameValue.GetString()!;
+        JsonElement arguments = parameters.TryGetProperty(
+            "arguments",
+            out JsonElement argumentValue)
+            ? argumentValue
+            : default;
         _callSequence = checked(_callSequence + 1);
-        await TryLoadLatestAsync(cancellationToken).ConfigureAwait(false);
-        JsonObject payload = BuildToolPayload();
-        return BuildResult(
-            id,
+        if (toolName == ToolName)
+        {
+            if (
+                arguments.ValueKind != JsonValueKind.Undefined
+                && (
+                    arguments.ValueKind != JsonValueKind.Object
+                    || arguments.EnumerateObject().Any()
+                )
+            )
+            {
+                return BuildError(
+                    id,
+                    -32602,
+                    "Invalid tool call");
+            }
+            await TryLoadLatestAsync(cancellationToken)
+                .ConfigureAwait(false);
+            return BuildToolResult(id, BuildToolPayload());
+        }
+        if (
+            toolName != ResultToolName
+            || _deliverResultAsync is null
+            || arguments.ValueKind != JsonValueKind.Object
+        )
+        {
+            return BuildError(
+                id,
+                -32602,
+                "Invalid tool call");
+        }
+
+        try
+        {
+            await TryLoadLatestAsync(cancellationToken)
+                .ConfigureAwait(false);
+            ReaderResultDeliveryRequest request =
+                BuildReaderResultRequest(arguments);
+            ReaderResultDeliveryAck ack =
+                await _deliverResultAsync(
+                    request,
+                    cancellationToken).ConfigureAwait(false);
+            JsonObject payload = new()
+            {
+                ["ok"] = ack.Outcome
+                    != ReaderResultDeliveryProtocol.RejectedOutcome,
+                ["contract"] =
+                    ReaderResultDeliveryProtocol.DeliveryContract,
+                ["correlation"] = ack.Correlation,
+                ["outcome"] = ack.Outcome,
+                ["anchor"] = request.Anchor.DeepClone(),
+            };
+            if (ack.Error is not null)
+            {
+                payload["error"] = ack.Error;
+            }
+            return BuildToolResult(
+                id,
+                payload,
+                isError: ack.Outcome
+                    == ReaderResultDeliveryProtocol.RejectedOutcome);
+        }
+        catch (
+            Exception exception
+        ) when (
+            exception is ArgumentException
+            or InvalidOperationException
+        )
+        {
+            return BuildError(
+                id,
+                -32602,
+                exception.Message);
+        }
+        catch (ReaderResultDeliveryException exception)
+        {
+            return BuildToolResult(
+                id,
+                new JsonObject
+                {
+                    ["ok"] = false,
+                    ["contract"] =
+                        ReaderResultDeliveryProtocol.DeliveryContract,
+                    ["code"] = exception.Code,
+                    ["error"] = exception.Message,
+                    ["retryable"] = exception.Retryable,
+                },
+                isError: true);
+        }
+    }
+
+    private static JsonObject BuildToolResult(
+        JsonNode id,
+        JsonObject payload,
+        bool isError = false)
+    {
+        JsonObject result = new()
+        {
+            ["content"] = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["type"] = "text",
+                    ["text"] = payload.ToJsonString(
+                        DirectBridgeContract.JsonOptions),
+                },
+            },
+        };
+        if (isError)
+        {
+            result["isError"] = true;
+        }
+        return BuildResult(id, result);
+    }
+
+    private ReaderResultDeliveryRequest BuildReaderResultRequest(
+        JsonElement arguments)
+    {
+        RequireExactFields(
+            arguments,
+            ["correlation", "kind", "payload"],
+            ["title", "brief", "sources"],
+            "reader_result_present");
+        string correlation = RequireResultString(
+            arguments,
+            "correlation",
+            40,
+            required: true);
+        if (!CorrelationPattern.IsMatch(correlation))
+        {
+            throw new ArgumentException(
+                "correlation 必须匹配 [A-Za-z0-9._:-]{1,40}");
+        }
+        string kind = RequireResultString(
+            arguments,
+            "kind",
+            32,
+            required: true);
+        if (!ResultKinds.Contains(kind))
+        {
+            throw new ArgumentException(
+                "kind 不受支持");
+        }
+        JsonElement rawPayload = arguments.GetProperty("payload");
+        if (rawPayload.ValueKind != JsonValueKind.Object)
+        {
+            throw new ArgumentException("payload 必须是对象");
+        }
+        if (
+            Encoding.UTF8.GetByteCount(arguments.GetRawText())
+                > DirectBridgeContract.MaximumMessageBytes - 4096
+        )
+        {
+            throw new ArgumentException("Reader 结果超过直连大小上限");
+        }
+        JsonObject anchor = CurrentResultAnchor();
+        JsonArray parts = kind == "cards"
+            ? BuildCardsPart(arguments, rawPayload)
+            : BuildCardPart(arguments, rawPayload, kind);
+        return new ReaderResultDeliveryRequest(
+            correlation,
+            anchor,
+            parts);
+    }
+
+    private JsonObject CurrentResultAnchor()
+    {
+        JsonObject snapshot = _latestSnapshot?.DeepClone()
+            as JsonObject
+            ?? throw new InvalidOperationException(
+                "Reader 当前页快照尚未到达");
+        ApplyFreshness(snapshot, _utcNow());
+        if (
+            snapshot["contextStatus"]?.GetValue<string>() != "ready"
+            || snapshot["currentPage"] is not JsonObject currentPage
+            || currentPage["stable"]?.GetValue<bool?>() != true
+            || currentPage["file"]?.GetValue<string>()
+                is not string file
+            || string.IsNullOrWhiteSpace(file)
+            || LongValue(currentPage["page"]) is not long page
+            || page is < 1 or > int.MaxValue
+        )
+        {
+            throw new InvalidOperationException(
+                "Reader 当前页不是可锚定的 ready 稳定页");
+        }
+        RequireSafeRelativeFile(file);
+        return new JsonObject
+        {
+            ["file"] = file,
+            ["page"] = page,
+        };
+    }
+
+    private static JsonArray BuildCardPart(
+        JsonElement arguments,
+        JsonElement payload,
+        string kind)
+    {
+        JsonObject card = new()
+        {
+            ["kind"] = kind,
+            // The PWA validates the renderer-specific payload before touching
+            // the UI. Windows owns the narrow envelope/anchor mapping and the
+            // bounded ACK, so it need not duplicate that renderer contract.
+            ["data"] = CloneObject(payload, $"payload({kind})"),
+        };
+        foreach (string field in new[] { "title", "brief" })
+        {
+            if (arguments.TryGetProperty(field, out _))
+            {
+                card[field] = RequireResultString(
+                    arguments,
+                    field,
+                    MaximumResultTextCharacters,
+                    required: false);
+            }
+        }
+        if (
+            arguments.TryGetProperty(
+                "sources",
+                out JsonElement sources)
+        )
+        {
+            if (
+                sources.ValueKind != JsonValueKind.Array
+                || sources.GetArrayLength() is < 1 or > 5
+            )
+            {
+                throw new ArgumentException("sources 数量无效");
+            }
+            card["sources"] = JsonNode.Parse(
+                sources.GetRawText());
+        }
+        return new JsonArray
+        {
             new JsonObject
             {
-                ["content"] = new JsonArray
-                {
-                    new JsonObject
-                    {
-                        ["type"] = "text",
-                        ["text"] = payload.ToJsonString(
-                            DirectBridgeContract.JsonOptions),
-                    },
-                },
-            });
+                ["kind"] = "card",
+                ["card"] = card,
+            },
+        };
     }
+
+    private static JsonArray BuildCardsPart(
+        JsonElement arguments,
+        JsonElement payload)
+    {
+        if (
+            arguments.TryGetProperty("title", out _)
+            || arguments.TryGetProperty("brief", out _)
+            || arguments.TryGetProperty("sources", out _)
+        )
+        {
+            throw new ArgumentException(
+                "kind=cards 不支持 title/brief/sources");
+        }
+        RequireExactFields(
+            payload,
+            ["cards"],
+            ["draft"],
+            "payload(cards)");
+        if (
+            payload.TryGetProperty("draft", out JsonElement draft)
+            && (draft.ValueKind != JsonValueKind.True)
+        )
+        {
+            throw new ArgumentException(
+                "payload(cards).draft 当前只能省略或为 true");
+        }
+        JsonElement rawCards = payload.GetProperty("cards");
+        if (
+            rawCards.ValueKind != JsonValueKind.Array
+            || rawCards.GetArrayLength() is < 1
+                or > MaximumResultItems
+        )
+        {
+            throw new ArgumentException(
+                "payload(cards).cards 数量无效");
+        }
+        JsonArray cards = [];
+        int index = 0;
+        foreach (JsonElement rawCard in rawCards.EnumerateArray())
+        {
+            JsonObject card = CloneObject(
+                rawCard,
+                $"payload(cards).cards[{index}]");
+            string? cardType = card["type"]?.GetValue<string>();
+            string? front = card["front"]?.GetValue<string>();
+            string? cloze = card["cloze"]?.GetValue<string>()
+                ?? card["text"]?.GetValue<string>();
+            cardType ??= !string.IsNullOrWhiteSpace(front)
+                ? "basic"
+                : "cloze";
+            if (
+                cardType is not ("basic" or "cloze")
+                || (
+                    cardType == "basic"
+                    && string.IsNullOrWhiteSpace(front)
+                )
+                || (
+                    cardType == "cloze"
+                    && string.IsNullOrWhiteSpace(cloze)
+                )
+            )
+            {
+                throw new ArgumentException(
+                    $"payload(cards).cards[{index}] 无效");
+            }
+            foreach (
+                KeyValuePair<string, JsonNode?> field in card
+            )
+            {
+                if (
+                    field.Key
+                        is not (
+                            "type"
+                            or "front"
+                            or "back"
+                            or "cloze"
+                            or "text")
+                    || field.Value is not JsonValue jsonValue
+                    || !jsonValue.TryGetValue(out string? text)
+                    || text.Length > MaximumResultTextCharacters
+                )
+                {
+                    throw new ArgumentException(
+                        $"payload(cards).cards[{index}] 字段无效");
+                }
+            }
+            card["type"] = cardType;
+            cards.Add(card);
+            index += 1;
+        }
+        return new JsonArray
+        {
+            new JsonObject
+            {
+                ["kind"] = "cards",
+                ["cards"] = cards,
+                ["draft"] = true,
+            },
+        };
+    }
+
+    private static string RequireResultString(
+        JsonElement value,
+        string field,
+        int maximum,
+        bool required)
+    {
+        if (
+            !value.TryGetProperty(field, out JsonElement property)
+            || property.ValueKind != JsonValueKind.String
+            || property.GetString() is not string text
+            || text.Length > maximum
+            || (required && string.IsNullOrWhiteSpace(text))
+        )
+        {
+            throw new ArgumentException(
+                $"{field} 字段无效");
+        }
+        return text;
+    }
+
+    private static void RequireExactFields(
+        JsonElement value,
+        IEnumerable<string> required,
+        IEnumerable<string> optional,
+        string label)
+    {
+        if (value.ValueKind != JsonValueKind.Object)
+        {
+            throw new ArgumentException($"{label} 必须是对象");
+        }
+        HashSet<string> requiredSet = required.ToHashSet(
+            StringComparer.Ordinal);
+        HashSet<string> allowed = requiredSet.Concat(optional)
+            .ToHashSet(StringComparer.Ordinal);
+        HashSet<string> actual = value.EnumerateObject()
+            .Select(property => property.Name)
+            .ToHashSet(StringComparer.Ordinal);
+        if (!requiredSet.IsSubsetOf(actual) || !actual.IsSubsetOf(allowed))
+        {
+            throw new ArgumentException(
+                $"{label} 字段不匹配");
+        }
+    }
+
+    private static void RequireSafeRelativeFile(string file)
+    {
+        if (
+            file != file.Trim()
+            || Path.IsPathRooted(file)
+            || Path.IsPathFullyQualified(file)
+            || file.Contains('\0')
+            || file.Contains(':')
+            || file.Split(
+                ['/', '\\'],
+                StringSplitOptions.RemoveEmptyEntries)
+                .Any(part => part == "..")
+        )
+        {
+            throw new InvalidOperationException(
+                "Reader 当前页 file 不是安全相对路径");
+        }
+    }
+
+    private static JsonObject CloneObject(
+        JsonElement value,
+        string label) =>
+        JsonNode.Parse(value.GetRawText()) as JsonObject
+        ?? throw new ArgumentException($"{label} 必须是对象");
 
     private JsonObject BuildToolPayload()
     {

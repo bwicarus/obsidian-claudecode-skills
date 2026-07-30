@@ -2580,6 +2580,76 @@ if (window.__bwPwaProviderOnly) return;
     if (!_vTid) _vTid = 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
     return _vTid;
   };
+  // Windows snapshot MCP 的结构化结果沿现有实时轮次容器进入侧栏。这里不新建
+  // 第三套卡片 UI，也不声称已持久化：RC.turnCard.onChange 会照常安排既有
+  // voice-log/upsert 路径，WSS 回执只表达本页已渲染或本页已见过。
+  var _directResultSeen = {};
+  try {
+    RC.assistant = RC.assistant || {};
+    RC.assistant.acceptDirectResult = function (delivery) {
+      try {
+        if (
+          !delivery ||
+          delivery.contract !== 'reader-result-delivery/1' ||
+          typeof delivery.correlation !== 'string' ||
+          !delivery.correlation ||
+          !Array.isArray(delivery.parts) ||
+          delivery.parts.length !== 1 ||
+          !(RC.turnCard && RC.turnCard.addPart)
+        ) {
+          return {
+            outcome: 'rejected',
+            error: 'BW_READER_RESULT_RECEIVER_INVALID'
+          };
+        }
+        if (_directResultSeen[delivery.correlation]) {
+          return { outcome: 'replay' };
+        }
+        var part = delivery.parts[0];
+        if (
+          !part ||
+          (
+            part.kind === 'card' &&
+            typeof window.__vcInfoCardEl !== 'function'
+          ) ||
+          (
+            part.kind === 'cards' &&
+            !(RC.flashcard && (
+              RC.flashcard.renderEntity ||
+              RC.flashcard.mountDrafts ||
+              RC.flashcard.mountPreview
+            ))
+          ) ||
+          (part.kind !== 'card' && part.kind !== 'cards')
+        ) {
+          return {
+            outcome: 'rejected',
+            error: 'BW_READER_RESULT_RENDERER_UNAVAILABLE'
+          };
+        }
+        var tid = window.__asstVoiceTid();
+        _turnModes[tid] = _assistantMode;
+        var rendered = RC.turnCard.addPart(tid, part);
+        if (!rendered) {
+          return {
+            outcome: 'rejected',
+            error: 'BW_READER_RESULT_RENDER_FAILED'
+          };
+        }
+        _directResultSeen[delivery.correlation] = 1;
+        scrollDown();
+        return { outcome: 'rendered' };
+      } catch (e) {
+        return {
+          outcome: 'rejected',
+          error: String(
+            (e && (e.code || e.message)) ||
+            'BW_READER_RESULT_RECEIVER_FAILED'
+          ).slice(0, 500)
+        };
+      }
+    };
+  } catch (e) {}
   // 141:__asstVoiceCard(把气泡"升格"成卡)已**删除** —— 结构改由 RC.turnCard 容器承担。
   //   ADR 铁律:旧的实时拼接路径不许留着当 fallback,留着就等于允许实时/回放分叉。
   // 141:__asstVoiceMoveLead(把前置语搬进结果卡)已**删除** —— 结果卡现在是容器里的一个 card part,

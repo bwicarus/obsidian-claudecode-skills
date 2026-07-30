@@ -1,5 +1,7 @@
+using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace BwReader.ComputerVoiceAudio;
 
@@ -17,6 +19,8 @@ internal sealed class DirectBridgeProtocolSession
     private readonly string _connectionId;
     private readonly DirectBridgeConfigStore _configStore;
     private readonly DirectBridgeCoordinator _coordinator;
+    private readonly Func<ReaderResultDeliveryAck, bool>
+        _acknowledgeReaderResult;
     private bool _helloSeen;
     private bool _authenticated;
     private string? _contextDeliveryMode;
@@ -29,7 +33,8 @@ internal sealed class DirectBridgeProtocolSession
         string origin,
         DirectBridgeConfigStore configStore,
         DirectBridgeCoordinator coordinator,
-        Func<DateTimeOffset>? utcNow = null)
+        Func<DateTimeOffset>? utcNow = null,
+        Func<ReaderResultDeliveryAck, bool>? acknowledgeReaderResult = null)
     {
         if (!DirectBridgeContract.IsSafeId(connectionId))
         {
@@ -40,6 +45,8 @@ internal sealed class DirectBridgeProtocolSession
         _connectionId = connectionId;
         _configStore = configStore;
         _coordinator = coordinator;
+        _acknowledgeReaderResult =
+            acknowledgeReaderResult ?? (_ => false);
     }
 
     internal bool Authenticated => _authenticated;
@@ -138,6 +145,9 @@ internal sealed class DirectBridgeProtocolSession
                     payload = await HandleContextClearAsync(
                         message,
                         cancellationToken).ConfigureAwait(false);
+                    break;
+                case ReaderResultDeliveryProtocol.AckType:
+                    payload = HandleReaderResultAck(message);
                     break;
                 case "stop":
                     payload = await HandleStopAsync(
@@ -761,6 +771,80 @@ internal sealed class DirectBridgeProtocolSession
             },
         };
 
+    private object HandleReaderResultAck(JsonElement message)
+    {
+        RequireAuthenticated();
+        HashSet<string> actual = message.EnumerateObject()
+            .Select(property => property.Name)
+            .ToHashSet(StringComparer.Ordinal);
+        HashSet<string> expected = new(
+            [
+                "contract",
+                "type",
+                "requestId",
+                "correlation",
+                "outcome",
+            ],
+            StringComparer.Ordinal);
+        bool hasError = actual.Remove("error");
+        if (!actual.SetEquals(expected))
+        {
+            throw new DirectProtocolException(
+                "BW_READER_RESULT_ACK_INVALID",
+                "Reader 结果回执字段不匹配");
+        }
+        string correlation = RequireSafeId(
+            message,
+            "correlation");
+        if (correlation.Length > 40)
+        {
+            throw new DirectProtocolException(
+                "BW_READER_RESULT_ACK_INVALID",
+                "Reader 结果回执 correlation 过长");
+        }
+        string outcome = RequireString(
+            message,
+            "outcome",
+            16);
+        if (
+            outcome is not (
+                ReaderResultDeliveryProtocol.RenderedOutcome
+                or ReaderResultDeliveryProtocol.ReplayOutcome
+                or ReaderResultDeliveryProtocol.RejectedOutcome)
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_READER_RESULT_ACK_INVALID",
+                "Reader 结果回执 outcome 无效");
+        }
+        string? error = null;
+        if (hasError)
+        {
+            error = RequireString(message, "error", 500);
+        }
+        if (
+            (outcome
+                == ReaderResultDeliveryProtocol.RejectedOutcome)
+                != hasError
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_READER_RESULT_ACK_INVALID",
+                "Reader 拒绝回执必须且只能携带 error");
+        }
+        bool matched = _acknowledgeReaderResult(
+            new ReaderResultDeliveryAck(
+                correlation,
+                outcome,
+                error));
+        return new
+        {
+            correlation,
+            outcome,
+            matched,
+        };
+    }
+
     private void RequireAuthenticated()
     {
         if (!_authenticated)
@@ -913,3 +997,232 @@ internal sealed record DirectProtocolReply(
 internal sealed record DirectStartActionResult(
     object Payload,
     Func<CancellationToken, Task> AfterSendAsync);
+
+internal sealed record ReaderResultDeliveryRequest(
+    string Correlation,
+    JsonObject Anchor,
+    JsonArray Parts);
+
+internal sealed record ReaderResultDeliveryAck(
+    string Correlation,
+    string Outcome,
+    string? Error);
+
+internal static class ReaderResultDeliveryProtocol
+{
+    internal const string DeliveryContract =
+        "reader-result-delivery/1";
+    internal const string EventName = "reader-result";
+    internal const string AckType = "reader-result-ack";
+    internal const string RenderedOutcome = "rendered";
+    internal const string ReplayOutcome = "replay";
+    internal const string RejectedOutcome = "rejected";
+
+    internal static object Event(
+        ReaderResultDeliveryRequest request) =>
+        new
+        {
+            contract = DirectBridgeContract.Contract,
+            type = "event",
+            @event = EventName,
+            payload = new
+            {
+                contract = DeliveryContract,
+                correlation = request.Correlation,
+                anchor = request.Anchor,
+                parts = request.Parts,
+            },
+        };
+}
+
+internal sealed class ReaderResultDeliveryException : Exception
+{
+    internal string Code { get; }
+
+    internal bool Retryable { get; }
+
+    internal ReaderResultDeliveryException(
+        string code,
+        string message,
+        bool retryable,
+        Exception? innerException = null)
+        : base(message, innerException)
+    {
+        Code = code;
+        Retryable = retryable;
+    }
+}
+
+internal sealed class ReaderResultDeliveryBroker
+{
+    private const int MaximumPendingDeliveries = 4;
+    private static readonly TimeSpan AckTimeout =
+        TimeSpan.FromSeconds(5);
+
+    private readonly object _gate = new();
+    private readonly Dictionary<
+        string,
+        TaskCompletionSource<ReaderResultDeliveryAck>> _pending =
+            new(StringComparer.Ordinal);
+    private string? _connectionId;
+    private Func<object, CancellationToken, Task>? _sendAsync;
+
+    internal void Attach(
+        string connectionId,
+        Func<object, CancellationToken, Task> sendAsync)
+    {
+        ArgumentNullException.ThrowIfNull(sendAsync);
+        lock (_gate)
+        {
+            _connectionId = connectionId;
+            _sendAsync = sendAsync;
+        }
+    }
+
+    internal void Detach(string connectionId)
+    {
+        TaskCompletionSource<ReaderResultDeliveryAck>[] abandoned;
+        lock (_gate)
+        {
+            if (!string.Equals(
+                _connectionId,
+                connectionId,
+                StringComparison.Ordinal))
+            {
+                return;
+            }
+            _connectionId = null;
+            _sendAsync = null;
+            abandoned = _pending.Values.ToArray();
+            _pending.Clear();
+        }
+        ReaderResultDeliveryException failure = new(
+            "BW_READER_RESULT_READER_DISCONNECTED",
+            "Reader 结果送达前直连已断开",
+            retryable: true);
+        foreach (
+            TaskCompletionSource<ReaderResultDeliveryAck> completion
+                in abandoned
+        )
+        {
+            completion.TrySetException(failure);
+        }
+    }
+
+    internal bool Acknowledge(
+        string connectionId,
+        ReaderResultDeliveryAck ack)
+    {
+        TaskCompletionSource<ReaderResultDeliveryAck>? completion;
+        lock (_gate)
+        {
+            if (
+                !string.Equals(
+                    _connectionId,
+                    connectionId,
+                    StringComparison.Ordinal)
+                || !_pending.TryGetValue(
+                    ack.Correlation,
+                    out completion)
+            )
+            {
+                return false;
+            }
+        }
+        return completion.TrySetResult(ack);
+    }
+
+    internal async Task<ReaderResultDeliveryAck> DeliverAsync(
+        ReaderResultDeliveryRequest request,
+        CancellationToken cancellationToken)
+    {
+        Func<object, CancellationToken, Task> sendAsync;
+        TaskCompletionSource<ReaderResultDeliveryAck> completion = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        lock (_gate)
+        {
+            if (_sendAsync is null || _connectionId is null)
+            {
+                throw new ReaderResultDeliveryException(
+                    "BW_READER_RESULT_READER_OFFLINE",
+                    "当前没有已认证的 Reader 直连",
+                    retryable: true);
+            }
+            if (_pending.Count >= MaximumPendingDeliveries)
+            {
+                throw new ReaderResultDeliveryException(
+                    "BW_READER_RESULT_CAPACITY",
+                    "Reader 结果待回执队列已满",
+                    retryable: true);
+            }
+            if (!_pending.TryAdd(request.Correlation, completion))
+            {
+                throw new ReaderResultDeliveryException(
+                    "BW_READER_RESULT_DUPLICATE_PENDING",
+                    "相同 correlation 的 Reader 结果仍在等待回执",
+                    retryable: true);
+            }
+            sendAsync = _sendAsync;
+        }
+
+        try
+        {
+            await sendAsync(
+                ReaderResultDeliveryProtocol.Event(request),
+                cancellationToken).ConfigureAwait(false);
+            try
+            {
+                return await completion.Task.WaitAsync(
+                    AckTimeout,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (TimeoutException exception)
+            {
+                throw new ReaderResultDeliveryException(
+                    "BW_READER_RESULT_ACK_TIMEOUT",
+                    "Reader 结果送达后未在时限内收到渲染回执",
+                    retryable: true,
+                    exception);
+            }
+        }
+        catch (ReaderResultDeliveryException)
+        {
+            throw;
+        }
+        catch (OperationCanceledException)
+            when (cancellationToken.IsCancellationRequested)
+        {
+            throw;
+        }
+        catch (
+            Exception exception
+        ) when (
+            exception is WebSocketException
+            or ObjectDisposedException
+            or InvalidOperationException
+        )
+        {
+            throw new ReaderResultDeliveryException(
+                "BW_READER_RESULT_SEND_FAILED",
+                "Reader 结果无法写入当前直连",
+                retryable: true,
+                exception);
+        }
+        finally
+        {
+            lock (_gate)
+            {
+                if (
+                    _pending.TryGetValue(
+                        request.Correlation,
+                        out TaskCompletionSource<
+                            ReaderResultDeliveryAck>? current)
+                    && ReferenceEquals(current, completion)
+                )
+                {
+                    _pending.Remove(request.Correlation);
+                }
+            }
+        }
+    }
+}

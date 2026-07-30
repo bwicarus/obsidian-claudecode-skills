@@ -30,6 +30,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
 
     private readonly DirectBridgeConfigStore _configStore;
     private readonly DirectBridgeCoordinator _coordinator;
+    private readonly ReaderResultDeliveryBroker _readerResultBroker =
+        new();
     private readonly SemaphoreSlim _connectionGate = new(1, 1);
     private readonly SemaphoreSlim _disposeGate = new(1, 1);
     private readonly string _serviceInstanceId;
@@ -80,7 +82,9 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 new ReaderContextMcpServer(
                     snapshotPath,
                     TextReader.Null,
-                    TextWriter.Null),
+                    TextWriter.Null,
+                    deliverResultAsync:
+                        _readerResultBroker.DeliverAsync),
                 config.ListenPort);
     }
 
@@ -346,6 +350,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         }
         finally
         {
+            _readerResultBroker.Detach(connectionId);
             await _coordinator.StopForConnectionAsync(connectionId)
                 .ConfigureAwait(false);
             await WriteRuntimeStatusAsync(
@@ -379,7 +384,11 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             connectionId,
             origin,
             _configStore,
-            _coordinator);
+            _coordinator,
+            acknowledgeReaderResult:
+                ack => _readerResultBroker.Acknowledge(
+                    connectionId,
+                    ack));
         Task<DirectClientMessage?>? prefetchedReceiveTask = null;
 
         while (
@@ -640,6 +649,20 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                     sendGate,
                     reply.Envelope,
                     replyLifetime.Token).ConfigureAwait(false);
+                if (
+                    phaseBeforeMessage
+                        == DirectProtocolPhase.AwaitingAuthentication
+                    && protocol.IsAuthenticated
+                )
+                {
+                    _readerResultBroker.Attach(
+                        connectionId,
+                        (envelope, token) => SendJsonAsync(
+                            socket,
+                            sendGate,
+                            envelope,
+                            token));
+                }
                 if (reply.AfterSendAsync is not null)
                 {
                     await reply.AfterSendAsync(replyLifetime.Token)

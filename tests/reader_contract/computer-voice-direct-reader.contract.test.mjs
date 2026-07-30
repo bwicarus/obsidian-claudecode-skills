@@ -13,6 +13,7 @@ const ENDPOINT =
 const READER_ORIGIN = "https://bwicarus.taile44d0c.ts.net";
 const RELAY_PORT = "BW_COMPUTER_VOICE_DIRECT_V3";
 const DIRECT_CONTRACT = "reader-computer-voice-direct/1";
+const RESULT_DELIVERY_CONTRACT = "reader-result-delivery/1";
 
 function createAudioContextClass(scenario) {
   return class FakeAudioContext {
@@ -166,6 +167,19 @@ function createServer(scenario) {
         requestId: request.requestId,
         ok: true,
         action: request.type,
+        payload,
+      }),
+    }));
+  };
+
+  server.emitReaderResult = (payload, socket = null) => {
+    const target = socket || server.sockets.at(-1);
+    assert.ok(target, "missing Reader result socket");
+    queueMicrotask(() => target.onmessage?.({
+      data: JSON.stringify({
+        contract: DIRECT_CONTRACT,
+        type: "event",
+        event: "reader-result",
         payload,
       }),
     }));
@@ -449,6 +463,15 @@ function createServer(scenario) {
         result(this, request, {
           sessionId: request.sessionId,
           state: "idle",
+        });
+        return;
+      }
+      if (request.type === "reader-result-ack") {
+        scenario.readerResultAcks.push(structuredClone(request));
+        result(this, request, {
+          correlation: request.correlation,
+          outcome: request.outcome,
+          matched: true,
         });
         return;
       }
@@ -850,6 +873,9 @@ function createHarness(overrides = {}) {
     activeReading: null,
     serverActiveReading: null,
     contextModePosts: [],
+    readerResultDeliveries: [],
+    readerResultAcks: [],
+    readerResultReceipt: { outcome: "rendered" },
     realtimeVoiceAllowed: true,
     uiOwner: "",
     extensionWorld: false,
@@ -924,6 +950,14 @@ function createHarness(overrides = {}) {
             pend: scenario.activeReading,
             canonical: scenario.activeReadingCanonical || null,
           };
+        },
+      },
+      assistant: {
+        acceptDirectResult(delivery) {
+          scenario.readerResultDeliveries.push(
+            structuredClone(delivery)
+          );
+          return structuredClone(scenario.readerResultReceipt);
         },
       },
     },
@@ -1304,6 +1338,74 @@ test("snapshot-mcp 真实拨号顺序保留并原地升级常驻 WSS", async () 
   harness.api.setSelectedEngine("codex");
   await harness.api.stop("test");
   assert.equal(harness.api.isActive(), false);
+});
+
+test("snapshot-mcp 常驻 WSS 接收严格结果卡并回 rendered ACK，不发送 START", async () => {
+  const harness = createHarness({
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncEnabled: true,
+    activeReading: {
+      kind: "pdf",
+      file: "book.pdf",
+      title: "Snapshot Book",
+      pos: 24,
+    },
+  });
+  harness.api.setSelectedEngine("computer_client");
+  await waitForRequest(harness, "context-open");
+  const delivery = {
+    contract: RESULT_DELIVERY_CONTRACT,
+    correlation: "weather.tokyo.24",
+    anchor: {
+      file: "book.pdf",
+      page: 24,
+    },
+    parts: [{
+      kind: "card",
+      card: {
+        kind: "weather",
+        title: "东京天气",
+        brief: "明日天气",
+        data: {
+          lo: 24,
+          hi: 31,
+          cond: "多云",
+          precip: "20%",
+        },
+        sources: [{
+          url: "https://example.com/weather",
+          title: "天气来源",
+        }],
+      },
+    }],
+  };
+
+  harness.server.emitReaderResult(delivery, harness.server.sockets[0]);
+  await waitForCondition(
+    () => harness.scenario.readerResultAcks.length === 1,
+    "reader-result rendered ACK",
+  );
+
+  assert.deepEqual(harness.scenario.readerResultDeliveries, [delivery]);
+  const ack = harness.scenario.readerResultAcks[0];
+  assert.deepEqual(
+    Object.keys(ack).sort(),
+    ["contract", "type", "requestId", "correlation", "outcome"].sort(),
+  );
+  assert.equal(ack.contract, DIRECT_CONTRACT);
+  assert.equal(ack.type, "reader-result-ack");
+  assert.equal(ack.correlation, delivery.correlation);
+  assert.equal(ack.outcome, "rendered");
+  assert.equal(harness.server.sockets.length, 1);
+  assert.equal(harness.server.sockets[0].readyState, 1);
+  assert.equal(
+    harness.server.requests.some((request) => request.type === "start"),
+    false,
+  );
+  assert.equal(harness.scenario.microphoneRequests.length, 0);
+  assert.equal(harness.api.isActive(), false);
+  harness.api.setSelectedEngine("codex");
+  await harness.api.contextSyncChanged();
 });
 
 test("snapshot-mcp 对未触发 onclose 的 CLOSED 常驻 WSS 主动验活后只重建一次", async () => {
