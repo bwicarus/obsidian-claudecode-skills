@@ -243,6 +243,30 @@ codex mcp add reader_snapshot -- `
   C:\Users\bwica\bw-computer-voice-bridge\runtime\reader-context-snapshot.json
 ```
 
+## 语音聊天侧栏同步
+
+同步核心与桌面启动器一起进入 PyInstaller 单文件 EXE，不依赖开发仓库或
+系统 Python。已安装计划任务运行 `--bootstrap` 时，同步监视器与既有空闲
+supervisor 共用同一进程；没有计划任务而由 GUI 直启时，桌面 EXE 派生一个
+固定的无界面 `--history-sync-worker`。Windows 命名 mutex 保证同一安装根
+最多一个发布者。
+
+监视器只信严格 config 与 runtime status：必须同时满足
+`localOptIn=true`、`contextDeliveryMode=snapshot-mcp`、
+`serviceOnline=true` 和 `captureActive=true`。旧注入模式、未知/损坏配置或服务离线
+都立即停用并丢弃内存 lease，不做最终发布。每次捕获从 false 变为 true 的第一次轮询
+只归档当前水位并绑定这个 exact local thread，不发布此前历史，也不把激活前留下的
+`user` 与激活后出现的 `assistant` 拼成一轮；随后只发布该 lease 内、水位之后新增的
+相邻 `user`/`assistant`。捕获结束后有三次有界尾随，以接住稍晚落盘的最后一轮。
+
+稳定 requestId 与 durable published 表保证重试不重复；线程绑定在通话中变化时
+fail closed。任何包含 `[[READER_SYNC]]` / `[[/READER_SYNC]]` 的文本在归档输入与
+最终 transport 两层都会拒绝。快照 anchor 仅在 `contextStatus=ready`、三分钟内更新、
+`activeReading.fresh=true` 且 `currentPage.stable=true` 时贡献安全的 `file/page`；
+否则不带 anchor，由 Pi 按现有规则解析。同步始终只调用现有 `assistant_turn`，不会从
+回答文本猜测 weather/news/card，不调用 MCP，也不把 Reader 正文、选区或图像送回客户端。
+结构化结果仍只由独立 `reader-result/1 → result.present` 直接命令触发。
+
 v3 strict config 不包含任何 pairing 字段。旧 `/1`、
 `microphoneEndpointId` 与四个 pairing 字段只用于识别
 `legacy-migration-required`；显式迁移后全部移除，不能进入 runtime。

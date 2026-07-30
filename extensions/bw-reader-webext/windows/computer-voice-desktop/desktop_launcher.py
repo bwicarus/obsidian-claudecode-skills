@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import subprocess
 import sys
 import threading
 import tkinter as tk
@@ -51,11 +52,83 @@ from control_plane import (
     remove_tailscale_serve,
     run_bootstrap_task_if_owned,
 )
+from voice_history_sidebar_sync import (
+    CaptureBoundHistorySynchronizer,
+    history_worker_lease,
+    monitor_capture_history,
+    run_service_bound_history_worker,
+)
 
 
 APP_TITLE = "电脑客户端桥接器"
 APP_VERSION = "0.7.0-snapshot-mcp-source"
 LEGACY_CAPTURE_OPTION = "不启用自动路由（兼容 /4）"
+
+
+def history_sync_enabled(paths: BridgePaths) -> bool:
+    """Enable sidebar return only for a strict, opted-in snapshot config."""
+    config = load_direct_config(paths)
+    return bool(
+        config is not None
+        and config.get("localOptIn") is True
+        and config.get("contextDeliveryMode") == CONTEXT_DELIVERY_SNAPSHOT
+    )
+
+
+def start_history_sync_worker(paths: BridgePaths) -> int:
+    """Start the exact installed desktop binary in its headless worker mode."""
+    executable = paths.desktop_launcher.resolve()
+    root = paths.root.resolve()
+    if (
+        not executable.is_file()
+        or executable.parent.parent.resolve() != root
+    ):
+        raise BridgeError("历史同步 worker 不属于当前固定安装根。")
+    process = subprocess.Popen(
+        [str(executable), "--history-sync-worker"],
+        cwd=str(root),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        shell=False,
+        close_fds=True,
+        creationflags=(
+            subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        ),
+    )
+    return process.pid
+
+
+def run_bootstrap_with_history_sync(
+    paths: BridgePaths,
+    runner: ProcessRunner,
+) -> int:
+    """Keep history sync beside the existing persistent bootstrap supervisor."""
+    stop_event = threading.Event()
+    synchronizer = CaptureBoundHistorySynchronizer(root=paths.root)
+
+    def monitor() -> None:
+        with history_worker_lease(paths.root) as owned:
+            if not owned:
+                return
+            monitor_capture_history(
+                stop_event=stop_event,
+                status_provider=lambda: read_direct_status(paths, runner),
+                enabled_provider=lambda: history_sync_enabled(paths),
+                synchronizer=synchronizer,
+            )
+
+    thread = threading.Thread(
+        target=monitor,
+        name="reader-sidebar-history",
+        daemon=True,
+    )
+    thread.start()
+    try:
+        return run_idle_bootstrap(paths, runner)
+    finally:
+        stop_event.set()
+        thread.join(timeout=3)
 
 
 class BridgeWindow:
@@ -974,7 +1047,7 @@ class BridgeWindow:
         ):
             return
 
-        def action() -> tuple[str, int | None]:
+        def action() -> tuple[str, int | None, int | None]:
             task = inspect_bootstrap_task(
                 self.paths,
                 self.control_paths,
@@ -1010,15 +1083,18 @@ class BridgeWindow:
                 self.control_paths,
                 self.control_runner,
             ):
-                return "supervised", None
+                return "supervised", None, None
             pid = start_direct_service(
                 self.paths,
                 self.process_runner,
             )
-            return "direct", pid
+            history_pid = start_history_sync_worker(self.paths)
+            return "direct", pid, history_pid
 
-        def success(result: tuple[str, int | None]) -> None:
-            mode, pid = result
+        def success(
+            result: tuple[str, int | None, int | None]
+        ) -> None:
+            mode, pid, history_pid = result
             self.refresh_static()
             if mode == "supervised":
                 self.footer.configure(
@@ -1032,6 +1108,7 @@ class BridgeWindow:
                 self.footer.configure(
                     text=(
                         f"直连监听器已请求启动（PID {pid}）；"
+                        f"侧栏同步 worker PID {history_pid}；"
                         "本登录未受后台 supervisor 保护。"
                     ),
                     foreground="#9a6700",
@@ -1304,9 +1381,17 @@ def main() -> int:
             print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if report["ok"] else 1
     if sys.argv[1:] == ["--bootstrap"]:
-        return run_idle_bootstrap(
+        return run_bootstrap_with_history_sync(
             BridgePaths.discover(),
             WindowsProcessRunner(),
+        )
+    if sys.argv[1:] == ["--history-sync-worker"]:
+        paths = BridgePaths.discover()
+        runner = WindowsProcessRunner()
+        return run_service_bound_history_worker(
+            root=paths.root,
+            status_provider=lambda: read_direct_status(paths, runner),
+            enabled_provider=lambda: history_sync_enabled(paths),
         )
     if sys.argv[1:]:
         raise SystemExit("此源码入口不接受 Reader 提交的参数或命令。")
