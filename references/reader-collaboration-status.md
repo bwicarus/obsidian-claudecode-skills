@@ -3551,3 +3551,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：定向 Python 合同、全量 Node 合同、发布流水线及 Pi 原子部署门禁通过；生产快照恢复为 `ready`，第 26 页正文已写入 Windows。
 - **发布事实**：提交 `86d1d68` 已推送并正式部署；webapp/voice-rt active，事务备份 `/home/bwicarus/deploy-backups/reader/20260730T050326Z-138413`。
 - **没做/下一步**：未改语音音频链；旧 PWA 内存游标需完整刷新后从最新合法 `page.context` 引导，后续拆分实时页码/选区增量与本地书页解析。
+
+## Codex：Windows 0.1.22 与 PWA 快照前台恢复已落地（2026-07-30 15:00 JST）
+- **改了什么**：PWA 直传实时页码/选区，并在 `visibilitychange/pageshow/online` 后安全恢复 WSS；Windows 本地按书/页解析正文，查看器区分 AI 可用正文与仅诊断的陈旧缓存。
+- **怎么验的**：前台恢复含延迟 `context-clear` ACK 竞态合同，全量 Reader Node 合同通过；Windows 不可变候选 verify/self-test 通过且 `audioActivated=false`。
+- **发布事实**：Reader 提交到 `93a1f86`，预检与正式原子部署 exit 0，事务备份 `/home/bwicarus/deploy-backups/reader/20260730T055826Z-158334`；Windows 0.1.22 已安装并保留永久回滚目录。
+- **当前现场/下一步**：Windows 仍停在 revision 1122 的陈旧第 26 页，缓存正文 1307 字可诊断查看；Pi 近五分钟无 iPad 请求，需 iPad 完整重开一次加载新脚本后验收 revision、正文与选区更新。
