@@ -1093,7 +1093,7 @@ test("snapshot-mcp 模式在未通话时直连 Windows 更新本地快照，通�
   assert.equal(harness.api.isActive(), false);
 });
 
-test("snapshot-mcp 从 Pi 权威 active-reading 解析 vbook 真实卷页并拒绝跨页旧选区", async () => {
+test("snapshot-mcp 从 PWA pend 实时解析 vbook 真实卷页并拒绝跨页旧选区", async () => {
   const harness = createHarness({
     contextDeliveryMode: "snapshot-mcp",
     contextSyncEnabled: true,
@@ -1102,20 +1102,22 @@ test("snapshot-mcp 从 Pi 权威 active-reading 解析 vbook 真实卷页并拒�
       file: "vbook:g_3e5d696e85",
       title: "Merged Book",
       pos: 31,
+      member: "books/part-2.pdf",
+      member_pos: 7,
       selection: "old page selection",
       sel_page: 30,
     },
     serverActiveReading: {
       kind: "pdf",
       file: "vbook:g_3e5d696e85",
-      title: "Merged Book",
-      pos: 31,
+      title: "Stale Pi State",
+      pos: 29,
       vbook: true,
-      member: "books/part-2.pdf",
-      member_pos: 7,
-      selection: "old page selection",
+      member: "books/part-1.pdf",
+      member_pos: 29,
+      selection: "stale server selection",
       has_selection: true,
-      sel_page: 30,
+      sel_page: 29,
       ts: 1_750_000_000,
     },
   });
@@ -1126,11 +1128,97 @@ test("snapshot-mcp 从 Pi 权威 active-reading 解析 vbook 真实卷页并拒�
     "vbook active-reading",
   );
   const forwarded = harness.scenario.activeReadingRequests[0].active;
-  assert.equal(harness.scenario.activeReadingFetches >= 1, true);
+  assert.equal(harness.scenario.activeReadingFetches, 0);
+  assert.deepEqual(Object.keys(forwarded).sort(), [
+    "file",
+    "kind",
+    "observedAtEpochMs",
+    "page",
+    "selection",
+    "selectionState",
+    "title",
+  ]);
   assert.equal(forwarded.file, "books/part-2.pdf");
+  assert.equal(forwarded.title, "Merged Book");
   assert.equal(forwarded.page, 7);
   assert.equal(forwarded.selectionState, "cleared");
   assert.equal(forwarded.selection, null);
+
+  const withoutSelection = { ...harness.scenario.activeReading, pos: 32 };
+  delete withoutSelection.selection;
+  delete withoutSelection.sel_page;
+  harness.scenario.activeReading = withoutSelection;
+  await waitForCondition(
+    () => harness.scenario.activeReadingRequests.some(
+      (request) =>
+        request.active.selectionState === "unknown"
+        && request.active.page === 7,
+    ),
+    "selection unknown realtime update",
+  );
+  assert.match(SOURCE, /var ACTIVE_READING_POLL_MS = 250;/);
+  assert.match(SOURCE, /var ACTIVE_READING_HEARTBEAT_MS = 60000;/);
+  assert.match(
+    SOURCE,
+    /now - pump\.lastSentAt < ACTIVE_READING_HEARTBEAT_MS/,
+  );
+  harness.api.setSelectedEngine("codex");
+  await harness.api.stop("test");
+});
+
+test("snapshot-mcp 跳过畸形 PWA pend 且后续合法状态可恢复实时发送", async () => {
+  const base = {
+    kind: "pdf",
+    file: "book.pdf",
+    title: "Valid Book",
+    pos: 8,
+  };
+  const malformed = [
+    { ...base, kind: "video" },
+    { ...base, file: "" },
+    { ...base, file: `book${String.fromCharCode(0)}.pdf` },
+    { ...base, pos: -1 },
+    { ...base, pos: Number.MAX_SAFE_INTEGER + 1 },
+    { ...base, pos: "" },
+    { ...base, pos: "p".repeat(257) },
+    { ...base, pos: `page${String.fromCharCode(31)}` },
+    { ...base, title: "t".repeat(1025) },
+    { ...base, title: `bad${String.fromCharCode(127)}title` },
+  ];
+  const harness = createHarness({
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncEnabled: true,
+    activeReading: malformed[0],
+  });
+  harness.api.setSelectedEngine("computer_client");
+  await waitForRequest(harness, "context-open");
+  for (const candidate of malformed) {
+    harness.scenario.activeReading = candidate;
+    await new Promise((resolve) => setTimeout(resolve, 280));
+    assert.equal(harness.scenario.activeReadingRequests.length, 0);
+  }
+
+  harness.scenario.activeReading = {
+    ...base,
+    title: null,
+    selection: "recovered selection",
+    sel_page: 8,
+  };
+  await waitForCondition(
+    () => harness.scenario.activeReadingRequests.length === 1,
+    "valid active-reading after malformed local states",
+    1000,
+  );
+  assert.equal(harness.scenario.activeReadingFetches, 0);
+  assert.equal(
+    harness.scenario.activeReadingRequests[0].active.selectionState,
+    "active",
+  );
+  assert.equal(
+    harness.scenario.activeReadingRequests[0].active.selection,
+    "recovered selection",
+  );
+  assert.equal(harness.scenario.activeReadingRequests[0].active.title, null);
   harness.api.setSelectedEngine("codex");
   await harness.api.stop("test");
 });

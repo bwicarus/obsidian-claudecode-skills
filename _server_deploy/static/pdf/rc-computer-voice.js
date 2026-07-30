@@ -2523,7 +2523,7 @@
     runContextPump(state, pump);
   }
 
-  function localActiveReadingExpectation() {
+  function localActiveReadingSnapshot() {
     var source;
     try {
       source = RC.ctxSync && typeof RC.ctxSync._state === "function"
@@ -2532,92 +2532,59 @@
     } catch (_) {
       source = null;
     }
-    if (!plainObject(source) || typeof source.kind !== "string") return null;
-    var file = source.file || source.url;
-    if (typeof file !== "string" || !file || file.length > 4096) return null;
-    var page = source.member_pos;
-    if (page === undefined || page === null) page = source.pos;
     if (
-      page !== null &&
-      page !== undefined &&
-      typeof page !== "number" &&
-      typeof page !== "string"
-    ) {
-      page = null;
-    }
-    return {
-      kind: source.kind,
-      file: file,
-      page: page === undefined ? null : page,
-      selectionPresent:
-        Object.prototype.hasOwnProperty.call(source, "selection"),
-      selection: typeof source.selection === "string"
-        ? source.selection.trim().slice(0, 400)
-        : "",
-    };
-  }
-
-  function sameActiveScalar(left, right) {
-    if (left === null || left === undefined) {
-      return right === null || right === undefined;
-    }
-    if (right === null || right === undefined) return false;
-    return String(left) === String(right);
-  }
-
-  function normalizeServerActiveReading(value, expected) {
-    if (
-      !plainObject(value) ||
-      value.ok !== true ||
-      value.enabled !== true ||
-      value.fresh !== true ||
-      !plainObject(value.active)
+      !plainObject(source) ||
+      (
+        source.kind !== "pdf" &&
+        source.kind !== "epub" &&
+        source.kind !== "html" &&
+        source.kind !== "web"
+      )
     ) {
       return null;
     }
-    var source = value.active;
-    if (
-      source.kind !== expected.kind ||
-      !sameActiveScalar(
-        source.kind === "web" ? source.url : source.file,
-        expected.file
-      ) ||
-      !sameActiveScalar(source.pos, expected.page)
-    ) {
-      return null;
-    }
-    if (expected.selectionPresent) {
-      if (
-        !Object.prototype.hasOwnProperty.call(source, "selection") ||
-        typeof source.selection !== "string" ||
-        source.selection.trim().slice(0, 400) !== expected.selection
-      ) {
-        return null;
-      }
-    }
-
     var file = source.member || (
       source.kind === "web" ? source.url : source.file
     );
-    var page = source.member_pos;
-    if (page === undefined || page === null) page = source.pos;
     if (
       typeof file !== "string" ||
       !file ||
       file.length > 4096 ||
-      (
-        page !== null &&
-        page !== undefined &&
-        typeof page !== "number" &&
-        typeof page !== "string"
-      )
+      /[\u0000-\u001f\u007f-\u009f]/.test(file)
     ) {
-      throw contextSchemaError(
-        "Reader 当前页面回执无效",
-        "BW_READER_ACTIVE_READING_SOURCE_INVALID"
-      );
+      return null;
     }
-
+    var page = source.member_pos;
+    if (page === undefined || page === null) page = source.pos;
+    if (page === undefined || page === null) {
+      page = null;
+    } else if (
+      (
+        typeof page === "number" &&
+        (!Number.isSafeInteger(page) || page < 0)
+      ) ||
+      (
+        typeof page === "string" &&
+        (
+          !page ||
+          page.length > 256 ||
+          /[\u0000-\u001f\u007f-\u009f]/.test(page)
+        )
+      ) ||
+      (typeof page !== "number" && typeof page !== "string")
+    ) {
+      return null;
+    }
+    var title = source.title;
+    if (title === undefined || title === null) {
+      title = null;
+    } else if (
+      typeof title !== "string" ||
+      title.length > 1024 ||
+      /[\u0000-\u001f\u007f-\u009f]/.test(title)
+    ) {
+      return null;
+    }
     var selectionState = "unknown";
     var selection = null;
     if (Object.prototype.hasOwnProperty.call(source, "selection")) {
@@ -2625,15 +2592,14 @@
         ? source.selection.trim().slice(0, 400)
         : "";
       var anchoredToCurrentPage = true;
-      if (
-        source.sel_page !== undefined &&
-        source.sel_page !== null &&
-        source.pos !== undefined &&
-        source.pos !== null
-      ) {
+      if (source.sel_page !== undefined && source.sel_page !== null) {
+        var selectionPage = source.pos;
+        if (selectionPage === undefined || selectionPage === null) {
+          selectionPage = page;
+        }
         anchoredToCurrentPage = sameActiveScalar(
           source.sel_page,
-          source.pos
+          selectionPage
         );
       }
       if (selectedText && anchoredToCurrentPage) {
@@ -2646,45 +2612,19 @@
     return {
       kind: source.kind,
       file: file,
-      title: typeof source.title === "string"
-        ? source.title.slice(0, 1024)
-        : null,
-      page: page === undefined ? null : page,
+      title: title,
+      page: page,
       selectionState: selectionState,
       selection: selection,
     };
   }
 
-  function fetchCurrentActiveReading(expected) {
-    var fetcher = window.__bwReaderFetch;
-    if (typeof fetcher !== "function" && typeof window.fetch === "function") {
-      fetcher = window.fetch.bind(window);
+  function sameActiveScalar(left, right) {
+    if (left === null || left === undefined) {
+      return right === null || right === undefined;
     }
-    if (typeof fetcher !== "function") {
-      return Promise.reject(directError(
-        "Reader 缺少当前页面读取能力",
-        "BW_READER_ACTIVE_READING_FETCH_UNAVAILABLE",
-        true
-      ));
-    }
-    // @interaction context.active.read
-    return Promise.resolve(fetcher("/pdf/api/active-reading", {
-      method: "GET",
-      credentials: "same-origin",
-      cache: "no-store",
-    })).then(function (response) {
-      if (!response || response.ok !== true ||
-          typeof response.json !== "function") {
-        throw directError(
-          "Reader 当前页面读取失败",
-          "BW_READER_ACTIVE_READING_FETCH",
-          true
-        );
-      }
-      return response.json();
-    }).then(function (value) {
-      return normalizeServerActiveReading(value, expected);
-    });
+    if (right === null || right === undefined) return false;
+    return String(left) === String(right);
   }
 
   function activeReadingPumpAlive(state) {
@@ -2745,12 +2685,12 @@
   function runActiveReadingPump(state) {
     var pump = state && state.activeReadingPump;
     if (!activeReadingPumpAlive(state) || pump.inFlight) return;
-    var expected = localActiveReadingExpectation();
-    if (!expected) {
+    var current = localActiveReadingSnapshot();
+    if (!current) {
       scheduleActiveReadingPump(state, ACTIVE_READING_POLL_MS);
       return;
     }
-    var signature = JSON.stringify(expected);
+    var signature = JSON.stringify(current);
     var now = Date.now();
     if (
       signature === pump.lastSignature &&
@@ -2760,13 +2700,12 @@
       return;
     }
     pump.inFlight = true;
-    fetchCurrentActiveReading(expected).then(function (current) {
+    Promise.resolve().then(function () {
       if (!activeReadingPumpAlive(state)) return null;
-      var latest = localActiveReadingExpectation();
+      var latest = localActiveReadingSnapshot();
       if (!latest || JSON.stringify(latest) !== signature) {
         return null;
       }
-      if (!current) return null;
       var activeReading = Object.assign({}, current, {
         observedAtEpochMs: Date.now(),
       });
