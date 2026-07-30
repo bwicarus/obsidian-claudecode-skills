@@ -12,24 +12,20 @@ import os
 import subprocess
 import time
 import uuid
-from pathlib import Path
 from typing import Any
 
 
 PI_HOST = os.environ.get(
     "BW_PI_HOST",
-    "bwicarus@bwicarus.taile44d0c.ts.net",
+    "pi",
 )
 REMOTE = os.environ.get(
     "BW_BRIDGE_REMOTE",
     "/home/bwicarus/claude/scripts/reader_bridge.py",
 )
-IDLE_SECONDS = int(os.environ.get("BW_BRIDGE_IDLE_S", "60"))
 CONNECT_TIMEOUT_SECONDS = 10
 CALL_TIMEOUT_SECONDS = 45
-CONTROL_DIRECTORY = (
-    Path(os.environ.get("TEMP", "/tmp")) / "bw-bridge-ssh"
-)
+CREATE_NO_WINDOW = getattr(subprocess, "CREATE_NO_WINDOW", 0)
 MAX_TEXT_CHARS = 4_000
 READER_SYNC_MARKERS = ("[[READER_SYNC]]", "[[/READER_SYNC]]")
 
@@ -62,8 +58,6 @@ def _validate_turn_payload(payload: Any) -> dict[str, str]:
 
 
 def _ssh_base() -> list[str]:
-    CONTROL_DIRECTORY.mkdir(parents=True, exist_ok=True)
-    control = CONTROL_DIRECTORY / "cm-%C"
     return [
         "ssh",
         "-o",
@@ -71,29 +65,11 @@ def _ssh_base() -> list[str]:
         "-o",
         f"ConnectTimeout={CONNECT_TIMEOUT_SECONDS}",
         "-o",
-        "ControlMaster=auto",
-        "-o",
-        f"ControlPath={control}",
-        "-o",
-        f"ControlPersist={IDLE_SECONDS}",
-        "-o",
         "ServerAliveInterval=15",
         "-o",
         "ServerAliveCountMax=2",
         PI_HOST,
     ]
-
-
-def _drop_master() -> None:
-    try:
-        subprocess.run(
-            _ssh_base()[:-1] + ["-O", "exit", PI_HOST],
-            capture_output=True,
-            timeout=10,
-            check=False,
-        )
-    except Exception:
-        pass
 
 
 def _run_once(envelope: dict[str, Any]) -> dict[str, Any]:
@@ -105,6 +81,7 @@ def _run_once(envelope: dict[str, Any]) -> dict[str, Any]:
         capture_output=True,
         timeout=CALL_TIMEOUT_SECONDS,
         check=False,
+        creationflags=CREATE_NO_WINDOW if os.name == "nt" else 0,
     )
     if completed.returncode != 0:
         detail = (
@@ -133,7 +110,7 @@ def call(
     file: str | None = None,
     page: int | None = None,
 ) -> dict[str, Any]:
-    """Send one fixed bridge envelope, retrying one dead SSH master once."""
+    """Send one fixed bridge envelope, retrying one failed SSH launch once."""
     if kind != "assistant_turn":
         raise SidebarBridgeError("历史同步只允许 assistant_turn")
     turn_payload = _validate_turn_payload(payload)
@@ -153,7 +130,6 @@ def call(
     try:
         return _run_once(envelope)
     except Exception as first:
-        _drop_master()
         try:
             result = _run_once(envelope)
         except Exception as second:

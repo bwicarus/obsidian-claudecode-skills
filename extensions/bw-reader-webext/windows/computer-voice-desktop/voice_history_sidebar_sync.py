@@ -47,6 +47,7 @@ SNAPSHOT_ANCHOR_MAX_AGE = timedelta(minutes=3)
 HISTORY_POLL_SECONDS = 0.75
 FINAL_TAIL_POLLS = 3
 OFFLINE_EXIT_POLLS = 40
+PUBLISH_FAILURE_BACKOFF_POLLS = 20
 ERROR_ALREADY_EXISTS = 183
 READER_SYNC_MARKERS = ("[[READER_SYNC]]", "[[/READER_SYNC]]")
 
@@ -833,11 +834,13 @@ class CaptureBoundHistorySynchronizer:
         self.tail_polls = 0
         self._lease_thread_id: str | None = None
         self._minimum_assistant_index: int | None = None
+        self._failure_backoff_polls = 0
         self.last_result: dict[str, Any] | None = None
 
     def _release_lease(self) -> None:
         self._lease_thread_id = None
         self._minimum_assistant_index = None
+        self._failure_backoff_polls = 0
 
     def cancel(self) -> None:
         """Drop the in-memory capture lease without publishing a final turn."""
@@ -879,6 +882,9 @@ class CaptureBoundHistorySynchronizer:
             or self._minimum_assistant_index is None
         ):
             return None
+        if self._failure_backoff_polls > 0:
+            self._failure_backoff_polls -= 1
+            return self.last_result
         file, page = snapshot_anchor(self.snapshot_path)
         self.last_result = sync_once(
             global_state_path=self.global_state_path,
@@ -893,6 +899,16 @@ class CaptureBoundHistorySynchronizer:
             minimum_assistant_index=self._minimum_assistant_index,
             allow_last_good=False,
         )
+        if (
+            self.last_result.get("error")
+            and self.last_result.get("pending", 0) > 0
+            and self.last_result.get("published", 0) == 0
+        ):
+            self._failure_backoff_polls = (
+                PUBLISH_FAILURE_BACKOFF_POLLS
+            )
+        else:
+            self._failure_backoff_polls = 0
         return self.last_result
 
     def observe(

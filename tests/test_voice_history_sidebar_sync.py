@@ -622,6 +622,100 @@ class VoiceHistorySidebarSyncTest(unittest.TestCase):
                 )
         run_once.assert_not_called()
 
+    def test_sidebar_ssh_uses_verified_alias_without_mux_and_hides_window(self):
+        completed = type(
+            "Completed",
+            (),
+            {
+                "returncode": 0,
+                "stdout": '{"ok":true}',
+                "stderr": "",
+            },
+        )()
+        with patch.object(
+            SIDEBAR.subprocess,
+            "run",
+            return_value=completed,
+        ) as run:
+            self.assertEqual(
+                SIDEBAR._run_once(
+                    {
+                        "version": 1,
+                        "kind": "assistant_turn",
+                        "request_id": "req-hide-window",
+                        "payload": {
+                            "text": "a",
+                            "user_utterance": "u",
+                        },
+                    }
+                ),
+                {"ok": True},
+            )
+        command = run.call_args.args[0]
+        self.assertIn("pi", command)
+        self.assertNotIn("ControlMaster=auto", command)
+        self.assertFalse(
+            any(str(part).startswith("ControlPath=") for part in command)
+        )
+        self.assertEqual(
+            run.call_args.kwargs["creationflags"],
+            (
+                SIDEBAR.CREATE_NO_WINDOW
+                if SIDEBAR.os.name == "nt"
+                else 0
+            ),
+        )
+
+    def test_capture_publish_failure_is_bounded_by_poll_backoff(self):
+        self.recent([msg("user", "old-u"), msg("assistant", "old-a")])
+        attempts = []
+
+        def reject(*args, **kwargs):
+            attempts.append((args, kwargs))
+            return {"ok": False}
+
+        syncer = SYNC.CaptureBoundHistorySynchronizer(
+            root=self.root,
+            publisher=reject,
+            global_state_path=self.global_state,
+            continuity_path=self.continuity,
+            state_path=self.state,
+            archive_path=self.archive,
+        )
+        syncer.observe(
+            service_online=True,
+            capture_active=True,
+            snapshot_mode=True,
+        )
+        self.recent(
+            [
+                msg("user", "old-u"),
+                msg("assistant", "old-a"),
+                msg("user", "new-u"),
+                msg("assistant", "new-a"),
+            ]
+        )
+        failed = syncer.observe(
+            service_online=True,
+            capture_active=True,
+            snapshot_mode=True,
+        )
+        self.assertEqual(failed["pending"], 1)
+        self.assertEqual(len(attempts), 1)
+        for _ in range(SYNC.PUBLISH_FAILURE_BACKOFF_POLLS):
+            syncer.observe(
+                service_online=True,
+                capture_active=True,
+                snapshot_mode=True,
+            )
+        self.assertEqual(len(attempts), 1)
+        syncer.observe(
+            service_online=True,
+            capture_active=True,
+            snapshot_mode=True,
+        )
+        self.assertEqual(len(attempts), 2)
+
 
 if __name__ == "__main__":
     unittest.main()
