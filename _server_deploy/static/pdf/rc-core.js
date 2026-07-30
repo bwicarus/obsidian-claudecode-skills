@@ -524,6 +524,7 @@
       }).then(function (r) { return r.json(); });
     },
     getConfig: function () {
+      // @interaction context.sync.read
       return fetch(_ctxU('/pdf/api/context-sync'), {
         method: 'GET',
         credentials: 'include',

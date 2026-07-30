@@ -3599,4 +3599,4 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 ## Codex：双向上下文新增旧注入 / 快照 MCP 可逆切换（2026-07-30 JST）
 - **改了什么**：设置页新增单一模式开关；切换先取消在途拨号、结束当前通话/上下文 WSS，再由 Windows 原子保存 `legacy-inject` 或 `snapshot-mcp`，两条链互斥。
 - **安全语义**：切回旧版前 Windows 必须清除快照；切换期间新的可信电话点击 fail closed，下一次通话才按新模式启动，桥接器常驻进程不退出。
-- **怎么验的/下一步**：生成物校验、Reader 定向合同与 Windows build/无音频 self-test 通过；待提交推送、安装候选与 Reader 原子部署后由 iPad 实测。
+- **怎么验的/安装**：生成物校验、Reader 定向合同与 Windows build/无音频 self-test 通过；0.1.27 已原子安装，健康为 `idle / captureActive=false`，回滚目录 `C:\Users\bwica\bw-computer-voice-bridge-backups\install-0.1.27-20260730T131334217Z-552a090f`；Reader 部署后由 iPad 实测。
