@@ -1512,6 +1512,25 @@
     );
   }
 
+  // 复用一条常驻链路前必须**主动验活**。
+  //
+  // DirectSocket.closed 只在 _fail() 里置 true,而 _fail 的三条触发路径(open 超时、
+  // socket.onerror、socket.onclose)全部依赖浏览器事件回调。iOS PWA 页面进入后台或被
+  // 系统冻结时这些回调可能长时间不触发甚至不触发 —— Windows 服务重启后,前端的 closed
+  // 会长期滞留 false,于是"复用"到一条实际已死的 socket:STATUS/START 写进虚空,
+  // Windows 侧零连接、零 START、**零错误码**(前端全程认为链路正常)。
+  //
+  // 底层 readyState 由浏览器维护,比我们的被动标志可靠一档,所以在 closed 之外再硬校验
+  // 一次。注意 _fail() 会把 this.socket 置空,因此 socket 缺失同样视为不可用。
+  // ⚠ 这仍不是充分条件:iOS 上 readyState 也可能滞后于真实 TCP 状态,所以调用方必须
+  // 配合"首次请求有界超时 + 丢弃重建"的第二层兜底(见 availability())。
+  function directChannelLive(channel) {
+    if (!channel || channel.closed) return false;
+    var socket = channel.socket;
+    if (!socket) return false;
+    return socket.readyState === 1;   // WebSocket.OPEN
+  }
+
   function borrowSnapshotChannelForStatus(attempt) {
     var state = snapshotLink;
     if (!state || state.stopped) return Promise.resolve(null);
@@ -1522,8 +1541,7 @@
         resolved !== state ||
         snapshotLink !== state ||
         state.stopped ||
-        !state.channel ||
-        state.channel.closed
+        !directChannelLive(state.channel)
       ) {
         return null;
       }
@@ -1550,6 +1568,7 @@
       cancelled: false,
       channel: null,
       borrowedSnapshot: false,
+      retriedAfterStaleBorrow: false,
       promise: null,
     };
     availabilityAttempt = attempt;
@@ -1569,7 +1588,34 @@
             false
           );
         }
-        return channel.request("status", {}).then(normalizeStatusPayload);
+        return channel.request("status", {}).then(normalizeStatusPayload)
+          .catch(function (error) {
+            // 第二层兜底:readyState 说 OPEN 也可能是滞后的(iOS 尤甚)。借来的链路
+            // 首次 STATUS 失败 → 判定它已死,丢弃、重建、**只重试一次**。
+            // 只重试一次是刻意的:无限重试会把一次点击放大成连接风暴;而新建链路
+            // 自己失败就是真失败,不该再兜。
+            if (attempt.borrowedSnapshot !== true) throw error;
+            if (attempt.retriedAfterStaleBorrow) throw error;
+            if (attempt.cancelled) throw error;
+            attempt.retriedAfterStaleBorrow = true;
+            return stopSnapshotLink().then(function () {
+              attempt.borrowedSnapshot = false;
+              attempt.channel = null;
+              return openDirect(null, function (created) {
+                attempt.channel = created;
+              });
+            }).then(function (fresh) {
+              if (attempt.cancelled) {
+                fresh.close();
+                throw directError(
+                  "状态刷新已让位给电话按钮启动",
+                  "BW_COMPUTER_VOICE_DIRECT_CANCELLED",
+                  false
+                );
+              }
+              return fresh.request("status", {}).then(normalizeStatusPayload);
+            });
+          });
       }).then(function (status) {
       return {
         state: status.state,
@@ -2923,12 +2969,13 @@
     return Promise.resolve(state.promise).catch(function () {
       return null;
     }).then(function (resolved) {
+      // 电话按钮的 START 走这条。判定不准的代价最大:借到死链路 → START 写进虚空 →
+      // Windows 完全收不到,用户看到的就是"单击没反应、要按两次"。
       var usable = (
         resolved === state &&
         snapshotLink === state &&
         !state.stopped &&
-        state.channel &&
-        !state.channel.closed &&
+        directChannelLive(state.channel) &&
         state.sessionBytes instanceof Uint8Array &&
         state.sessionBytes.length === 16
       );
