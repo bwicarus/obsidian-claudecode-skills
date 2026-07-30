@@ -756,6 +756,8 @@ function createHarness(overrides = {}) {
     ? scenario.timers.clearTimeout.bind(scenario.timers)
     : clearTimeout;
   const clickHandlers = [];
+  const documentEventHandlers = new Map();
+  const windowEventHandlers = new Map();
   const phoneButtons = {
     "asst-call": {
       id: "asst-call",
@@ -775,6 +777,7 @@ function createHarness(overrides = {}) {
     },
   };
   const document = {
+    visibilityState: scenario.visibilityState || "visible",
     getElementById(id) {
       return phoneButtons[id] || null;
     },
@@ -782,7 +785,11 @@ function createHarness(overrides = {}) {
       if (type === "click") {
         assert.equal(capture, true);
         clickHandlers.push(handler);
+        return;
       }
+      const handlers = documentEventHandlers.get(type) || [];
+      handlers.push(handler);
+      documentEventHandlers.set(type, handlers);
     },
   };
   Object.values(phoneButtons).forEach((button) => {
@@ -820,6 +827,11 @@ function createHarness(overrides = {}) {
     location: { origin: scenario.origin },
     setTimeout: scheduleTimeout,
     clearTimeout: cancelTimeout,
+    addEventListener(type, handler) {
+      const handlers = windowEventHandlers.get(type) || [];
+      handlers.push(handler);
+      windowEventHandlers.set(type, handlers);
+    },
     dispatchEvent() {},
     AbortController,
     document,
@@ -884,6 +896,19 @@ function createHarness(overrides = {}) {
     server,
     clickHandlers,
     phoneButtons,
+    dispatchDocumentEvent(type) {
+      for (const handler of documentEventHandlers.get(type) || []) {
+        handler({ type });
+      }
+    },
+    dispatchWindowEvent(type) {
+      for (const handler of windowEventHandlers.get(type) || []) {
+        handler({ type });
+      }
+    },
+    setVisibilityState(value) {
+      document.visibilityState = value;
+    },
   };
 }
 
@@ -1091,6 +1116,112 @@ test("snapshot-mcp 模式在未通话时直连 Windows 更新本地快照，通�
   harness.api.setSelectedEngine("codex");
   await harness.api.stop("test");
   assert.equal(harness.api.isActive(), false);
+});
+
+test("snapshot-mcp 后台挂起的重连计时器在回到前台时立即恢复且不重复连接", async () => {
+  const harness = createHarness({
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncEnabled: true,
+    activeReading: {
+      kind: "pdf",
+      file: "book.pdf",
+      title: "Resume Book",
+      pos: 18,
+    },
+  });
+  harness.api.setSelectedEngine("computer_client");
+  await waitForRequest(harness, "context-open");
+  await waitForCondition(
+    () => harness.scenario.activeReadingRequests.length >= 1,
+    "initial snapshot before background",
+  );
+  assert.equal(harness.server.sockets.length, 1);
+
+  const firstSocket = harness.server.sockets[0];
+  firstSocket.readyState = 3;
+  firstSocket.onclose?.();
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(harness.server.sockets.length, 1);
+
+  harness.setVisibilityState("visible");
+  harness.dispatchDocumentEvent("visibilitychange");
+  await waitForCondition(
+    () => harness.server.sockets.length === 2,
+    "foreground snapshot reconnect",
+    500,
+  );
+  await waitForCondition(
+    () => harness.server.requests.filter(
+      (request) => request.type === "context-open",
+    ).length === 2,
+    "foreground context-open",
+    500,
+  );
+
+  harness.dispatchWindowEvent("pageshow");
+  harness.dispatchWindowEvent("online");
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(harness.server.sockets.length, 2);
+  assert.equal(
+    harness.server.requests.some((request) => request.type === "start"),
+    false,
+  );
+  assert.equal(harness.scenario.microphoneRequests.length, 0);
+  harness.api.setSelectedEngine("codex");
+});
+
+test("snapshot-mcp 前台唤醒不为其他模型、关闭同步或活动通话抢建连接", async () => {
+  const otherEngine = createHarness({
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncEnabled: true,
+  });
+  otherEngine.api.setSelectedEngine("codex");
+  otherEngine.dispatchDocumentEvent("visibilitychange");
+  otherEngine.dispatchWindowEvent("pageshow");
+  otherEngine.dispatchWindowEvent("online");
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(otherEngine.server.sockets.length, 0);
+
+  const syncDisabled = createHarness({
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncEnabled: false,
+  });
+  syncDisabled.api.setSelectedEngine("computer_client");
+  syncDisabled.dispatchDocumentEvent("visibilitychange");
+  syncDisabled.dispatchWindowEvent("pageshow");
+  syncDisabled.dispatchWindowEvent("online");
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(syncDisabled.server.sockets.length, 0);
+
+  const activeCall = createHarness({
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncEnabled: true,
+    activeReading: {
+      kind: "pdf",
+      file: "book.pdf",
+      pos: 19,
+    },
+  });
+  activeCall.api.setSelectedEngine("computer_client");
+  await waitForRequest(activeCall, "context-open");
+  phoneClick(activeCall, { trusted: true });
+  const started = await activeCall.api.startFromUserGesture();
+  assert.equal(started.ok, true);
+  const socketCount = activeCall.server.sockets.length;
+  activeCall.dispatchDocumentEvent("visibilitychange");
+  activeCall.dispatchWindowEvent("pageshow");
+  activeCall.dispatchWindowEvent("online");
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(activeCall.server.sockets.length, socketCount);
+  assert.equal(
+    activeCall.server.requests.filter(
+      (request) => request.type === "start",
+    ).length,
+    1,
+  );
+  assert.equal(activeCall.scenario.microphoneRequests.length, 1);
+  activeCall.api.setSelectedEngine("codex");
+  await activeCall.api.stop("test");
 });
 
 test("snapshot-mcp 从 PWA pend 实时解析 vbook 真实卷页并拒绝跨页旧选区", async () => {

@@ -2842,6 +2842,27 @@
     }, delay);
   }
 
+  function resumeSnapshotLinkFromForeground(event) {
+    if (
+      event &&
+      event.type === "visibilitychange" &&
+      document &&
+      document.visibilityState === "hidden"
+    ) {
+      return;
+    }
+    if (!snapshotLinkWanted()) return;
+    // iOS may suspend this one-second timer while the PWA is backgrounded.
+    // Foreground signals are an explicit wake-up: discard the suspended timer
+    // and reconcile now. `reconcileSnapshotLink` itself fences an existing
+    // open/in-progress link, so pageshow + online cannot create duplicates.
+    if (snapshotReconnectTimer) {
+      clearTimeout(snapshotReconnectTimer);
+      snapshotReconnectTimer = null;
+    }
+    reconcileSnapshotLink();
+  }
+
   function reconcileSnapshotLink() {
     if (!snapshotLinkWanted()) {
       return stopSnapshotLink();
@@ -3621,6 +3642,14 @@
   installGestureCapture();
   if (window && typeof window.addEventListener === "function") {
     window.addEventListener("pagehide", abortForPageExit);
+    window.addEventListener("pageshow", resumeSnapshotLinkFromForeground);
+    window.addEventListener("online", resumeSnapshotLinkFromForeground);
+  }
+  if (document && typeof document.addEventListener === "function") {
+    document.addEventListener(
+      "visibilitychange",
+      resumeSnapshotLinkFromForeground
+    );
   }
 
   RC.computerVoice = Object.freeze({
