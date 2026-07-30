@@ -40,7 +40,8 @@ powershell -File scripts\deploy_from_windows.ps1 -PreflightOnly
 
 薄封装，不含门禁：查本地干净且已推送 → `deploy_remote_guard.sh` 安全闸 →
 Pi 上 `git merge --ff-only` → Pi 上跑 `deploy_reader.sh`。任一段失败即停。
-预检通过、**且人工验收通过**后，去掉 `-PreflightOnly` 再跑一次。
+预检通过后按下文“验收与登记”的时点执行正式部署；Reader/PWA 共享可回滚 UI 默认直接上
+生产 iPad 验收，不再先经过独立扩展测试。
 
 ⚠ 这条链**必须在 Windows 本机终端跑**。经 `ssh → cmd → powershell` 嵌套远程驱动会因引号解析
 失败并留下孤儿进程（2026-07-29 实测）。
@@ -89,33 +90,33 @@ nginx 配置：**Pi 的 `/etc/nginx/sites-available/bwicarus` 与 git 里的 VPS
 绝不可 cp 覆盖**（会冲掉 Tailscale 证书配置，全站挂）。只能手工 patch 对应 server 块，
 `nginx -t` 通过后再 reload。
 
-## 阅读器 / PWA / 扩展改动的额外门禁
+## 阅读器 / PWA / 扩展改动的最短门禁
 
-来自 `CLAUDE.md` 顶部交接入口，A/B 分类之外**另加**：
+Reader/PWA 直接部署默认只需：`build.py`（共享生成物）→ 改动对应合同测试
+→ `deploy_from_windows.ps1 -PreflightOnly`。共享核心/协议改动可补全量 Reader Node；
+Python 全量只在改到 Python/部署逻辑时跑。`handoff_check.py` 只在交接或发布边界跑一次，
+不重复追 Windows `fcntl`/Pi-only 已知基线。
 
-```bash
-python3 extensions/bw-reader-webext/handoff_check.py            # 改动前
-python3 extensions/bw-reader-webext/handoff_check.py --full     # 改动后
-python3 extensions/bw-reader-webext/handoff_check.py --production  # 发布前，比对 Pi 生产与测试渠道
-```
+扩展候选、`test_release_pipeline.py`、`release_preflight.py` 与独立浏览器只服务扩展正式渠道，
+或用户明确要求的扩展测试，不再插进 Reader/PWA 的默认部署链。
 
-共享源码变化后还要跑：`build.py` → `node --test tests/reader_contract/*.test.mjs` →
-`python3 -m unittest discover -s tests -p 'test_*.py'` → `test_release_pipeline.py`。
-Windows 上只有 44 个 Python 模块可跑，另 24 个因 `fcntl` 结构性跑不了、17 个 Pi-only
-失败是正确行为——清单见 [`cross-machine-dev-setup.md`](cross-machine-dev-setup.md)，不要去"修"。
+若一次聚焦定位和目标测试后仍有真实设备不确定性，明确指出疑点并直接让用户在 iPad 协同验收；
+失败就回滚修理。其他 AI 仅按需补审，不是固定步骤。
 
 ## 验收与登记
 
-- **验收按改动类型分级**（2026-07-29 用户拍板）：
+- **验收按改动类型分级**（2026-07-31 用户更新流程）：
 
-  | 改动类型 | 部署前 |
+  | 改动类型 | 验收时点 |
   |---|---|
-  | 新功能、UI/视觉变更、交互变更、数据迁移/schema、不可逆操作、扩展正式渠道发布 | **必须**先交付完整人工验收清单，用户做视觉与交互，agent 只监控后台请求/数据流/日志/持久化 |
-  | 修 bug、重构、性能优化、纯文档 | **预检通过即可部署**，不必等用户验收 |
+  | Reader/PWA 共享的新功能、UI/视觉或交互变更（可原子回滚） | 合同测试和预检通过后**直接部署到生产 iPad**，用户在 iPad 验收；不默认插入独立扩展测试 |
+  | 扩展专属改动 | 独立测试环境仅在用户明确要求时使用；扩展正式渠道发布仍须发布前人工验收 |
+  | 数据迁移/schema、不可逆操作 | **必须部署前验收** |
+  | 修 bug、重构、性能优化、纯文档 | **预检通过即可部署** |
 
-  免验收前提（缺一条就退回必须验收）：不改变任何用户可见界面或交互 / 被修行为有合同测试覆盖 /
-  `deploy_reader.sh` 全程通过。部署后必须主动报健康检查结果。拿不准就按"必须验收"。
-- 浏览器自动化算工程回归，**不能冒充**需验收档的用户人工验收。
+  直接部署/免验收前提：目标行为有合同测试覆盖 / `deploy_reader.sh` 全程通过 /
+  不含数据迁移、schema 或不可逆操作。部署后必须主动报健康检查；用户报错时优先回滚。
+- 独立浏览器自动化是按需工程回归，不再是 Reader/PWA 部署的默认中间步骤。
 - Windows 侧浏览器测试只用 `BW Codex Chrome Test` + `%LOCALAPPDATA%\BWReaderExtensionTest\browser-profile-v2`，
   或 Claude Code 内置 Browser pane（独立 profile、无扩展、无 cookie，做不了扩展链测试）。
   **不动日常 Chrome、账号和已装扩展。**

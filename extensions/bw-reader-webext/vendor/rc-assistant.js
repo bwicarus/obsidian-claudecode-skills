@@ -373,38 +373,22 @@ if (window.__bwPwaProviderOnly) return;
     var card = document.createElement('div'); card.className = 'ams-task ams-voice-part';
     card.innerHTML = '<div class="ams-tdef">加载中…</div>';
     container.appendChild(card);
-    var _voiceEngineRevision = null;
-    try {
-      if (window.RC && RC.computerVoice &&
-          typeof RC.computerVoice.beginSelectedEngineUpdate === 'function') {
-        _voiceEngineRevision =
-          RC.computerVoice.beginSelectedEngineUpdate();
-      }
-    } catch (_) {}
     fetch('/api/assistant/voice-config').then(function (r) { return r.json(); }).then(function (d) {
       if (!d || !d.ok) { card.innerHTML = '<div class="ams-tdef">拉取语音设置失败</div>'; return; }
       var c = d.cfg || {};
-      try {
-        if (window.RC && RC.computerVoice &&
-            typeof RC.computerVoice.setSelectedEngine === 'function') {
-          RC.computerVoice.setSelectedEngine(
-            c.rt_engine || '',
-            _voiceEngineRevision
-          );
-        }
-      } catch (_) {}
+      // 历史 computer_client 值只属于旧电话复用方案；独立电脑按钮上线后，
+      // 普通电话把它按默认豆包显示，用户下次保存时自然覆盖。
+      var voiceEngine = c.rt_engine === 'computer_client' ? '' : (c.rt_engine || '');
       function esc2(x) { var e = document.createElement('div'); e.textContent = String(x == null ? '' : x); return e.innerHTML; }
       // ㉖b:按通话引擎分组渲染——选 GPT 就藏豆包 S2S 专属项、显示 GPT 专属项;朗读/ASR 与引擎无关恒显。
-      var isOA = (c.rt_engine === 'openai' || c.rt_engine === 'openai_rtc');
-      var isComputer = c.rt_engine === 'computer_client';
+      var isOA = (voiceEngine === 'openai' || voiceEngine === 'openai_rtc');
       var H = '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="rt_engine" style="flex:1 1 100%">' +
-          '<option value=""' + (!c.rt_engine ? ' selected' : '') + '>通话引擎:豆包 S2S(默认)</option>' +
-          '<option value="openai_rtc"' + (c.rt_engine === 'openai_rtc' ? ' selected' : '') + '>通话引擎:GPT Realtime(WebRTC·推荐:外放无回声+可随时插话)</option>' +
-          '<option value="openai"' + (c.rt_engine === 'openai' ? ' selected' : '') + '>通话引擎:GPT Realtime(WebSocket·外放半双工)</option>' +
-          '<option value="grok"' + (c.rt_engine === 'grok' ? ' selected' : '') + '>通话引擎:Grok Voice(WebSocket·耳机推荐)</option>' +
-          '<option value="computer_client"' + (isComputer ? ' selected' : '') + '>通话引擎:电脑客户端桥接器(Codex/ChatGPT Desktop)</option>' +
+          '<option value=""' + (!voiceEngine ? ' selected' : '') + '>通话引擎:豆包 S2S(默认)</option>' +
+          '<option value="openai_rtc"' + (voiceEngine === 'openai_rtc' ? ' selected' : '') + '>通话引擎:GPT Realtime(WebRTC·推荐:外放无回声+可随时插话)</option>' +
+          '<option value="openai"' + (voiceEngine === 'openai' ? ' selected' : '') + '>通话引擎:GPT Realtime(WebSocket·外放半双工)</option>' +
+          '<option value="grok"' + (voiceEngine === 'grok' ? ' selected' : '') + '>通话引擎:Grok Voice(WebSocket·耳机推荐)</option>' +
         '</select></div>';
-      if (c.rt_engine === 'grok') {   // ── 94 Grok 专属:音色 + 能力边界说明 ──
+      if (voiceEngine === 'grok') {   // ── 94 Grok 专属:音色 + 能力边界说明 ──
         var _GKV = ['eve', 'ara', 'rex', 'sal', 'leo'];
         H += '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="rt_grok_voice" style="flex:1 1 100%">' +
           _GKV.map(function (v) { return '<option value="' + v + '"' + ((c.rt_grok_voice || 'eve') === v ? ' selected' : '') + '>Grok 音色:' + v + (v === 'eve' ? '(默认)' : '') + '</option>'; }).join('') +
@@ -451,8 +435,6 @@ if (window.__bwPwaProviderOnly) return;
         '<label class="ams-cur" style="display:flex;align-items:center;gap:6px;margin:4px 0 2px;cursor:pointer">' +
         '<input type="checkbox" data-k="rt_tool_reply"' + (c.rt_tool_reply ? ' checked' : '') + '>工具完成后口头回报(搜索/配图等展示型工具:关=静默入库只显示卡片[推荐];开=AI 拿到结果后自由回答)</label>' +
           '<div class="ams-tdef" style="margin:2px 0 6px">语言选「自动」它跟着你切换;读日语书建议选「日本語」或「自动」(原文按原生发音念)。以上都是下次开话生效;接话灵敏度=semantic VAD 的 eagerness(按语义判断你说完没)。</div>';
-      } else if (isComputer) {
-        H += '<div class="ams-tdef">电话按钮会把当前网页麦克风送入 Windows 虚拟麦克风，并只回传 Codex/ChatGPT 进程树在独立虚拟扬声器上的输出；不使用物理/RDP 麦克风，也不提供全系统输出回退。选择本项不会控制电脑，只有点击电话按钮才会发送一次启动请求并按需打开本机服务与 Codex。</div>';
       } else {      // ── 豆包 S2S 专属 ──
         H += '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="speaker" style="flex:1 1 100%">' +
           _VC_SPK.map(function (o) { return '<option value="' + o[0] + '"' + ((c.speaker || _VC_SPK[0][0]) === o[0] ? ' selected' : '') + '>' + o[1] + '</option>'; }).join('') +
@@ -495,32 +477,14 @@ if (window.__bwPwaProviderOnly) return;
         '<input type="range" id="vcv-card-sec" min="5" max="60" step="5" style="flex:1;accent-color:#7b6cff"></div>' +
         '<label class="ams-cur" style="display:flex;align-items:center;gap:6px;margin-top:4px;cursor:pointer">' +
         '<input type="checkbox" data-k="asr_v2"' + (c.asr_v2 ? ' checked' : '') + '>ASR 2.0(长按麦克风的豆包识别换新模型,关键词召回+20%;⚠需先在火山控制台开通「流式语音识别2.0」商品,没开通会连不上)</label>' +
-        ((isOA || isComputer) ? '' :
+        (isOA ? '' :
         '<div class="ams-tdef" style="margin-top:6px">改完即存;通话中改音色/语速立即生效;朗读音色/语气下一句生效(2.0 音色支持自然语言语气指令;停顿由 AI 的标点/省略号控制)。人设/风格下次开话生效。角色扮演在这里写人设+挑音色(SC2.0 克隆音色线不支持工具协议,不接)</div>');
       card.innerHTML = H;
-      if (isComputer && window.RC && RC.computerVoice &&
-          typeof RC.computerVoice.mountSettings === 'function') {
-        RC.computerVoice.mountSettings(card);
-      }
       function _save(k, v, el) {
         var body = {}; body[k] = v;
-        var engineRevision = null;
         function _recoverFailedEngineSave() {
           if (k !== 'rt_engine') return;
-          // beginSelectedEngineUpdate deliberately fenced both the old and
-          // proposed values. Re-fetch and redraw the authoritative server
-          // value after a failed POST so the visible select and capture gate
-          // cannot remain divergent.
           _renderVoiceCfg(container);
-        }
-        if (k === 'rt_engine') {
-          try {
-            if (window.RC && RC.computerVoice &&
-                typeof RC.computerVoice.beginSelectedEngineUpdate === 'function') {
-              engineRevision =
-                RC.computerVoice.beginSelectedEngineUpdate();
-            }
-          } catch (_) {}
         }
         fetch('/api/assistant/voice-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
           .then(function (r) { return r.json(); })
@@ -528,17 +492,6 @@ if (window.__bwPwaProviderOnly) return;
             if (x && x.ok) {
               if (typeof _toast === 'function') _toast('已保存');
               try { if (window.RC && RC.voicecall && RC.voicecall.pushCfg) RC.voicecall.pushCfg(); } catch (_) {}
-              if (k === 'rt_engine') {
-                try {
-                  if (window.RC && RC.computerVoice &&
-                      typeof RC.computerVoice.setSelectedEngine === 'function') {
-                    RC.computerVoice.setSelectedEngine(
-                      v || '',
-                      engineRevision
-                    );
-                  }
-                } catch (_) {}
-              }
               if (k === 'rt_engine') _renderVoiceCfg(container);   // 切引擎:整卡重绘,只显示该引擎相关项(89:container=tab2 pane)
             } else {
               if (typeof _toast === 'function') _toast('保存失败');

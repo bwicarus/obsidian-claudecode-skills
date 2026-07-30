@@ -42,14 +42,14 @@
 
 ## 2. 当前版本和已经完成的主线
 
-当前生产 Reader/PWA 版本：**0.2.74**；当前已发布 Windows 扩展版本：**0.2.72**。
+当前生产 Reader/PWA 版本：**0.2.75**；当前已发布 Windows 扩展版本：**0.2.72**。
 
-当前 Windows 工作区正在准备 **0.2.75** 快照 MCP 收口候选；它保留已验收的电脑语音直连和
-可逆、互斥的 `legacy-inject` / `snapshot-mcp` 双模式，并补齐 Windows 直连结果卡片、
-PWA 对话备份及按需读取既有笔迹局部合成图。该候选尚未发布渠道或部署 Reader/PWA，不能把
-工作区版本当作当前生产事实。
+当前 Windows 工作区正在准备 **0.2.76** 独立电脑客户端按钮候选：原麦克风位置改为电脑图标，
+普通电话按钮继续只负责豆包、GPT 或 Grok；电脑桥状态、上下文同步与
+`legacy-inject` / `snapshot-mcp` 回退开关集中到新的“电脑客户端”设置标签。该候选尚未发布
+渠道或部署 Reader/PWA，不能把工作区版本当作当前生产事实。
 
-当前 PWA/服务端共享 runtime 为 **0.2.74**，已发布 Windows 扩展仍为 **0.2.72**，产品名精确为
+当前 PWA/服务端共享 runtime 为 **0.2.75**，已发布 Windows 扩展仍为 **0.2.72**，产品名精确为
 **“BW网页伴读”**。0.2.72 把“电脑客户端”通话收口为免配对 direct v2：书籍 PWA 只从精确
 生产 Origin 连接固定 Windows WSS；普通网页只能经 isolated content runtime 与扩展
 background 的固定 relay 连接同一地址。Pi 不再中继配对、状态、启动、心跳、信令或音频；
@@ -403,6 +403,9 @@ python3 extensions/bw-reader-webext/test_release_pipeline.py
 实现退回旧模型。
 
 ## 10. Windows 真机测试渠道
+
+本节只保留为按需渠道。2026-07-31 起，Reader/PWA 共享改动默认直接部署到生产 iPad
+由用户验收；只有扩展专属改动或用户明确要求时，才先进入这里的独立测试环境。
 
 - Windows：`100.99.9.124`，用户 `bwicarus`
 - Chrome：`C:\Program Files\Google\Chrome\Application\chrome.exe`

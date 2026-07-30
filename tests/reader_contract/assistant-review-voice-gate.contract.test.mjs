@@ -53,23 +53,30 @@ test("review mode gates every realtime voice entry before transport", () => {
   assert.match(toggle, /if \(_reviewVoiceGate\(true\)\) return false/);
 });
 
-test("phone click and microphone long press are blocked but dictation click stays", () => {
+test("computer and phone clicks are blocked in review; hidden legacy mic stays inert", () => {
   const button = functionBody("injectBtn", "_lpPop");
   const longAction = functionBody("_micLongAction", "_bindLongPress");
   const topbar = functionBody("injectTopbarBtns", "_fmtCutoff");
 
   const gateAt = button.indexOf("_reviewVoiceGate(true)");
+  const computerAt = button.indexOf("_computerVoiceStart(opts, generation)");
   const callAt = button.indexOf("window._voiceCallS2S");
-  assert.ok(gateAt >= 0 && callAt > gateAt);
+  assert.ok(gateAt >= 0 && computerAt > gateAt && callAt > gateAt);
   assert.match(longAction, /if \(_reviewVoiceGate\(true\)\) return/);
 
-  // A normal click still delegates to rc-assistant's system dictation
-  // handler. Only the 600 ms callback enters _micLongAction.
+  assert.match(
+    button,
+    /mic\.style\.display = 'none'[\s\S]*mic\.setAttribute\('aria-hidden', 'true'\)[\s\S]*mic\.tabIndex = -1/,
+  );
   assert.match(
     topbar,
-    /tm\.addEventListener\('click', function \(\) \{ try \{ srcMic\.click\(\)/
+    /tm\.addEventListener\('click', function \(\) \{ try \{ srcComputer\.click\(\)/
   );
-  assert.match(topbar, /_bindLongPress\(tm, _micLongAction\)/);
+  assert.match(
+    topbar,
+    /tc\.addEventListener\('click', function \(\) \{ try \{ srcCall\.click\(\)/,
+  );
+  assert.doesNotMatch(topbar, /srcMic|vc-top-mic|_bindLongPress/);
   assert.match(
     SOURCE,
     /canCaptureComputerVoiceGesture:\s*function \(\) \{ return !_assistantInReview\(\); \}/

@@ -59,7 +59,7 @@
   // 麦克风仍可单击走系统听写，只把长按连续 ASR 标成不可用。
   function _syncReviewVoiceUi() {
     var blocked = _assistantInReview();
-    ['asst-call', 'vc-top-call'].forEach(function (id) {
+    ['asst-call', 'vc-top-call', 'asst-computer', 'vc-top-computer'].forEach(function (id) {
       var el = document.getElementById(id);
       if (!el) return;
       _rememberVoiceTitle(el);
@@ -605,13 +605,16 @@
       '#rc-vc.vc-inline{display:none !important}' +   // 66 用户裁定:输入框上方的通话条残留版面撤除(状态看按钮/字幕;对话在侧栏流)
       '#asst-input.vc-live{box-shadow:0 0 0 1.5px rgba(94,92,230,.6),0 0 16px rgba(94,92,230,.22);border-radius:14px;transition:box-shadow .3s}' +
       // 侧栏 composer 里的通话入口按钮(样式镜像 #asst-mic;通话中绿色呼吸)
-      '#asst-call{background:#16203a;border:1px solid #2a3a63;color:#9fb4e0;width:42px;height:42px;border-radius:12px;cursor:pointer;flex:none;display:flex;align-items:center;justify-content:center;transition:background .2s,color .2s,border-color .2s,transform .1s;-webkit-tap-highlight-color:transparent}' +
-      '#asst-call:active{transform:scale(.9)}' +
-      '#asst-call.on{background:#1a7f4b;border-color:#1a7f4b;color:#fff;animation:vcCallPulse 1.6s ease-in-out infinite}' +
+       '#asst-call,#asst-computer{background:#16203a;border:1px solid #2a3a63;color:#9fb4e0;width:42px;height:42px;border-radius:12px;cursor:pointer;flex:none;display:flex;align-items:center;justify-content:center;transition:background .2s,color .2s,border-color .2s,transform .1s;-webkit-tap-highlight-color:transparent}' +
+       '#asst-call:active,#asst-computer:active{transform:scale(.9)}' +
+       '#asst-call.on{background:#1a7f4b;border-color:#1a7f4b;color:#fff;animation:vcCallPulse 1.6s ease-in-out infinite}' +
       // 播报中:蓝色快脉冲(盖过 .on 绿;user 开口打断后自动回绿)
-      '#asst-call.speaking{background:#0a84ff;border-color:#0a84ff;color:#fff;animation:vcCallPulse 1s ease-in-out infinite}' +
-      '#asst-call.connecting{background:#8a5a00;border-color:#ff9f0a;color:#ffd60a;animation:vcCallPulse .7s ease-in-out infinite}' +
-      '#asst-call.vc-review-disabled,#vc-top-call.vc-review-disabled{opacity:.48;cursor:not-allowed;animation:none!important}' +
+       '#asst-call.speaking{background:#0a84ff;border-color:#0a84ff;color:#fff;animation:vcCallPulse 1s ease-in-out infinite}' +
+       '#asst-call.connecting{background:#8a5a00;border-color:#ff9f0a;color:#ffd60a;animation:vcCallPulse .7s ease-in-out infinite}' +
+       '#asst-computer.on{background:#1a7f4b;border-color:#1a7f4b;color:#fff;animation:vcCallPulse 1.6s ease-in-out infinite}' +
+       '#asst-computer.speaking{background:#0a84ff;border-color:#0a84ff;color:#fff;animation:vcCallPulse 1s ease-in-out infinite}' +
+       '#asst-computer.connecting{background:#8a5a00;border-color:#ff9f0a;color:#ffd60a;animation:vcCallPulse .7s ease-in-out infinite}' +
+       '#asst-call.vc-review-disabled,#vc-top-call.vc-review-disabled,#asst-computer.vc-review-disabled,#vc-top-computer.vc-review-disabled{opacity:.48;cursor:not-allowed;animation:none!important}' +
       // ASR 连续听(mic 长按开):紫色呼吸,与系统听写的蓝 .on 区分
       '#asst-mic.asr{background:#bf5af2 !important;border-color:#bf5af2 !important;color:#fff !important;animation:vcCallPulse 1.6s ease-in-out infinite}' +
       // 朗读开关播报中:淡蓝呼吸
@@ -627,12 +630,15 @@
       // 顶栏语音按钮(侧栏收起时显示;样式蹭顶栏原生 button,状态只动颜色+呼吸)
       '#vc-top-mic.on{color:#0a84ff !important;border-color:#0a84ff !important}' +
       '#vc-top-mic.asr{color:#bf5af2 !important;border-color:#bf5af2 !important;animation:vcCallPulse 1.6s ease-in-out infinite}' +
-      '#vc-top-call.on{color:#30d158 !important;border-color:#30d158 !important;animation:vcCallPulse 2.2s ease-in-out infinite}' +
-      '#vc-top-call.speaking{color:#0a84ff !important;border-color:#0a84ff !important;animation:vcCallPulse 1s ease-in-out infinite}' +
-      '#vc-top-call.connecting{color:#ff9f0a !important;border-color:#ff9f0a !important;animation:vcCallPulse .7s ease-in-out infinite}' +
-      '#vc-top-mic,#vc-top-call{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:manipulation}' +
+       '#vc-top-call.on{color:#30d158 !important;border-color:#30d158 !important;animation:vcCallPulse 2.2s ease-in-out infinite}' +
+       '#vc-top-call.speaking{color:#0a84ff !important;border-color:#0a84ff !important;animation:vcCallPulse 1s ease-in-out infinite}' +
+       '#vc-top-call.connecting{color:#ff9f0a !important;border-color:#ff9f0a !important;animation:vcCallPulse .7s ease-in-out infinite}' +
+       '#vc-top-computer.on{color:#30d158 !important;border-color:#30d158 !important;animation:vcCallPulse 2.2s ease-in-out infinite}' +
+       '#vc-top-computer.speaking{color:#0a84ff !important;border-color:#0a84ff !important;animation:vcCallPulse 1s ease-in-out infinite}' +
+       '#vc-top-computer.connecting{color:#ff9f0a !important;border-color:#ff9f0a !important;animation:vcCallPulse .7s ease-in-out infinite}' +
+       '#vc-top-mic,#vc-top-call,#vc-top-computer{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:manipulation}' +
       // 长按/连点这些控件时禁掉 iOS 文本选中高亮与放大镜(长按手势专用控件,选中毫无意义)
-      '#asst-call,#asst-mic,#vc-tool-btn,.vc-speak-tg,#asst-input button,#asst-quick button,#rc-vc .vc-grab,#rc-vc .vc-head button{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:manipulation}' +
+       '#asst-call,#asst-computer,#asst-mic,#vc-tool-btn,.vc-speak-tg,#asst-input button,#asst-quick button,#rc-vc .vc-grab,#rc-vc .vc-head button{-webkit-user-select:none;user-select:none;-webkit-touch-callout:none;touch-action:manipulation}' +
       '#rc-vc .vc-grab{touch-action:none}' +   // 抓手保持 none(要拖拽调高)
       // 工具调用状态按钮 + 详情弹层(v3-⑤)
       '#vc-tool-btn{background:#16203a;border:1px solid #2a3a63;color:#9fb4e0;width:42px;height:42px;border-radius:12px;cursor:pointer;flex:none;display:none;align-items:center;justify-content:center;font-size:18px;-webkit-tap-highlight-color:transparent}' +
@@ -672,6 +678,21 @@
   function callBtnSpeaking(on) {
     if (mode === 'agent') { var tg = document.querySelector('.vc-speak-tg'); if (tg) tg.classList[on ? 'add' : 'remove']('speaking'); return; }
     var b = document.getElementById('asst-call'); if (b) b.classList[on ? 'add' : 'remove']('speaking');
+  }
+  function computerBtnConnecting(on) {
+    var b = document.getElementById('asst-computer');
+    if (b) b.classList[on ? 'add' : 'remove']('connecting');
+  }
+  function computerBtnOn(on) {
+    var b = document.getElementById('asst-computer');
+    computerBtnConnecting(false);
+    if (!b) return;
+    b.classList[on ? 'add' : 'remove']('on');
+    if (!on) b.classList.remove('speaking');
+  }
+  function computerBtnSpeaking(on) {
+    var b = document.getElementById('asst-computer');
+    if (b) b.classList[on ? 'add' : 'remove']('speaking');
   }
   // agent 模式无浮层:ASR 转写直接进侧栏输入框,状态用 placeholder + 按钮特效表达
   var _origPh = null;
@@ -5475,9 +5496,13 @@
     }
   }
 
-  function teardown(closeBox) {
-    _setComputerVoiceDialPending(false);
-    _cancelComputerVoiceGesture();
+  function teardown(closeBox, preserveComputerGesture) {
+    // 从普通电话切到电脑按钮时，捕获阶段刚取得的 iOS 可信手势必须原样保留；
+    // setDialPending(false) 本身也会释放 prepared surface，不能只跳过 cancel。
+    if (!preserveComputerGesture) {
+      _setComputerVoiceDialPending(false);
+      _cancelComputerVoiceGesture();
+    }
     if (_computerVoiceUnsub) {
       try { _computerVoiceUnsub(); } catch (e) {}
       _computerVoiceUnsub = null;
@@ -5513,19 +5538,22 @@
     } catch (e) {}
     vt.sent = 0; vt.tail = ''; vt.pref = ''; pendingUtter = null;
     capClear();   // 挂断:字幕/等待指示一并收掉
-    callBtnOn(false); callBtnSpeaking(false); taPlaceholder(null);
+    callBtnOn(false); callBtnSpeaking(false);
+    computerBtnOn(false); computerBtnSpeaking(false);
+    taPlaceholder(null);
     if (box) { box.classList.remove('on'); if (closeBox) { box.remove(); box = null; } }
     try { _refreshSpeakTg(); } catch (e) {}
-    _audioSession('playback');   // 挂断:会话切回纯播放(耳机路由;若视频等还在响导致这次没生效,下次 _ttsEnsure 会再声明)
+    // 普通电话→电脑按钮切换时，捕获阶段已把 iOS 会话设成 play-and-record；
+    // 此处若改回 playback，会让刚取得的电脑桥麦克风静音并迫使用户点第二次。
+    if (!preserveComputerGesture) _audioSession('playback');
     try { _ttsShutdown(); } catch (e) {}   // 朗读通道 ws+ac 一并关(通话期建的 ac 路由粘扬声器;残留 ws 会悬空收帧)→ 下次朗读重建拿干净会话
     _aecTeardown(); _aecKill(_taec);   // AEC 环回随通话走(pc/audio 元素清干净)
   }
 
-  // 通话引擎分流(㉚):s2s 通话按设置选 WebRTC 直连(外放无回声+全双工)或 WS relay(豆包 S2S / GPT-WS);
-  // agent 模式(mic 长按 ASR)恒走豆包 relay,不受 rt_engine 影响(与 WS 版 relay 按 mode 分发同语义)
+  // 普通电话与电脑客户端是两个独立入口。普通电话只按 rt_engine 选择豆包/GPT/Grok；
+  // 电脑按钮直接进入 Windows 桥，绝不再靠 computer_client 劫持电话按钮。
   var _computerVoiceOwnedButtons = new WeakSet();
-  var _computerVoiceEngine = null;
-  var _computerVoiceEngineRevision = null;
+  var _computerVoiceStarting = false;
   function _setComputerVoiceDialPending(value) {
     try {
       if (window.RC && RC.computerVoice &&
@@ -5542,63 +5570,14 @@
       }
     } catch (e) {}
   }
-  function _reserveComputerVoiceEngineUpdate() {
-    try {
-      if (window.RC && RC.computerVoice &&
-          typeof RC.computerVoice.reserveSelectedEngineUpdate === 'function') {
-        return RC.computerVoice.reserveSelectedEngineUpdate();
-      }
-    } catch (e) {}
-    return null;
-  }
-  function _setComputerVoiceEngine(engine, revision) {
-    var nextEngine = String(engine || '');
-    var accepted = true;
-    try {
-      if (window.RC && RC.computerVoice &&
-          typeof RC.computerVoice.setSelectedEngine === 'function') {
-        RC.computerVoice.setSelectedEngine(
-          nextEngine,
-          revision
-        );
-        if (typeof RC.computerVoice.isSelectedEngineRevisionCurrent === 'function') {
-          accepted = RC.computerVoice.isSelectedEngineRevisionCurrent(revision);
-        }
-      }
-    } catch (e) { accepted = false; }
-    if (!accepted) return false;
-    _computerVoiceEngine = nextEngine;
-    _computerVoiceEngineRevision = revision;
-    return true;
-  }
-  function _refreshComputerVoiceEngine() {
-    var revision = _reserveComputerVoiceEngineUpdate();
-    fetch('/api/assistant/voice-config').then(function (r) {
-      return r.json();
-    }).then(function (d) {
-      _setComputerVoiceEngine(
-        (((d || {}).cfg) || {}).rt_engine,
-        revision
-      );
-    }).catch(function () {
-      _setComputerVoiceEngine('', revision);
-    });
-  }
   function _publishComputerVoiceButton(button) {
     if (!_computerVoiceOwnedButtons.has(button)) return false;
     try {
-      if (_computerVoiceEngine !== null &&
-          typeof RC.computerVoice.setSelectedEngine === 'function') {
-        RC.computerVoice.setSelectedEngine(
-          _computerVoiceEngine,
-          _computerVoiceEngineRevision
-        );
-      }
       return !!(
         window.RC &&
         RC.computerVoice &&
-        typeof RC.computerVoice.registerPhoneButton === 'function' &&
-        RC.computerVoice.registerPhoneButton(button) === true
+        typeof RC.computerVoice.registerComputerButton === 'function' &&
+        RC.computerVoice.registerComputerButton(button) === true
       );
     } catch (e) {
       return false;
@@ -5609,11 +5588,38 @@
     _computerVoiceOwnedButtons.add(button);
     return _publishComputerVoiceButton(button);
   }
+  function _computerVoiceActive() {
+    try {
+      return !!(
+        window.RC && RC.computerVoice &&
+        RC.computerVoice.isActive && RC.computerVoice.isActive()
+      );
+    } catch (e) { return false; }
+  }
+  function _stopComputerVoiceOnly(reason) {
+    _gen++;
+    _computerVoiceStarting = false;
+    _connecting = false;
+    _setComputerVoiceDialPending(false);
+    _cancelComputerVoiceGesture();
+    if (_computerVoiceUnsub) {
+      try { _computerVoiceUnsub(); } catch (e) {}
+      _computerVoiceUnsub = null;
+    }
+    try {
+      if (_computerVoiceActive()) {
+        RC.computerVoice.stop(reason || 'reader-computer-button').catch(function () {});
+      }
+    } catch (e) {}
+    computerBtnConnecting(false);
+    computerBtnOn(false);
+    taPlaceholder(null);
+  }
 
   function _computerVoiceStart(opts, generation) {
     if (!window.RC || !RC.computerVoice ||
         typeof RC.computerVoice.startFromUserGesture !== 'function') {
-      callBtnConnecting(false);
+      computerBtnConnecting(false);
       setSt('电脑客户端组件未加载');
       try { RC.toast('电脑客户端组件未加载'); } catch (e) {}
       return;
@@ -5622,40 +5628,44 @@
       try { _computerVoiceUnsub(); } catch (e) {}
       _computerVoiceUnsub = null;
     }
-    // 电脑桥不自动重连；断线必须由用户再次点电话按钮，避免重复快捷键。
+    // 电脑桥不自动重连；断线必须由用户再次点电脑按钮，避免重复快捷键。
     _userHung = true;
+    _computerVoiceStarting = true;
     _computerVoiceUnsub = RC.computerVoice.onStatus(function (status) {
       if (generation !== _gen) return;
       var state = status && status.state || '';
       setSt(status && status.message || ('电脑客户端:' + state));
       if (state === 'connected') {
-        callBtnConnecting(false);
-        callBtnOn(true);
+        computerBtnConnecting(false);
+        computerBtnOn(true);
         taPlaceholder('电脑客户端通话中…');
       } else if (state === 'failed' || state === 'stopped') {
-        callBtnConnecting(false);
-        callBtnOn(false);
+        _computerVoiceStarting = false;
+        computerBtnConnecting(false);
+        computerBtnOn(false);
         taPlaceholder(null);
       }
     });
     setSt('正在确认电脑客户端…');
-    callBtnConnecting(true);
+    computerBtnConnecting(true);
     RC.computerVoice.startFromUserGesture(opts || {}).then(function () {
+      _computerVoiceStarting = false;
       _connecting = false;
       _setComputerVoiceDialPending(false);
       if (generation !== _gen) {
         RC.computerVoice.stop('stale-reader-start').catch(function () {});
       }
     }).catch(function (error) {
+      _computerVoiceStarting = false;
       _connecting = false;
       _setComputerVoiceDialPending(false);
       if (generation !== _gen) return;
       _userHung = true;
-      callBtnConnecting(false);
-      callBtnOn(false);
+      computerBtnConnecting(false);
+      computerBtnOn(false);
       var startMessage = (error && error.code ===
         'BW_COMPUTER_VOICE_GESTURE_REQUIRED')
-        ? '电脑语音模型刚载入，请再点一次电话按钮'
+        ? '电脑客户端刚载入，请再点一次电脑按钮'
         : ((error && error.message) || '电脑客户端启动失败');
       setSt(startMessage);
       taPlaceholder(null);
@@ -5669,52 +5679,27 @@
   toggle._connect = function (opts) {
     if (_reviewVoiceGate(false)) return;
     if (mode !== 's2s') { start(opts); return; }
+    if (_computerVoiceStarting || _computerVoiceActive()) {
+      _stopComputerVoiceOnly('ordinary-voice-start');
+    }
     // 133:这个 fetch 以前不受世代管辖 —— 用户在它在途时挂断,迟到的 .then 照样把拨号**复活**,
     // 建出一路没人管的通话。拨号前记世代,回调里过期就直接丢弃。
     var g0 = _gen;
     _connecting = true;
-    _setComputerVoiceDialPending(true);
-    var engineRevision = _reserveComputerVoiceEngineUpdate();
     fetch('/api/assistant/voice-config').then(function (r) { return r.json(); }).then(function (d) {
       if (g0 !== _gen || _reviewVoiceGate(false)) { try { console.warn('[vc] voice-config 迟到或已进入复习模式,拨号已取消'); } catch (e) {} return; }
       var engine = (((d || {}).cfg) || {}).rt_engine;
-      if (!_setComputerVoiceEngine(engine, engineRevision)) {
-        _connecting = false;
-        _setComputerVoiceDialPending(false);
-        _cancelComputerVoiceGesture();
-        callBtnConnecting(false);
-        setSt('语音模型设置已变化，请再点一次电话按钮');
-        return;
-      }
-      if (engine === 'computer_client') _computerVoiceStart(opts, g0);
-      else {
-        _connecting = false;
-        _setComputerVoiceDialPending(false);
-        _cancelComputerVoiceGesture();
-        if (engine === 'openai_rtc') rtcStart(opts);
-        else start(opts);
-      }
-    }).catch(function () {
-      // A rejected GET from an older dial generation must not tear down the
-      // pending gesture prepared by a newer trusted click.
-      if (g0 !== _gen) return;
-      var configRevisionCurrent =
-        _setComputerVoiceEngine('', engineRevision);
       _connecting = false;
-      _setComputerVoiceDialPending(false);
-      _cancelComputerVoiceGesture();
+      if (engine === 'openai_rtc') rtcStart(opts);
+      else start(opts);   // 历史 computer_client 值按默认豆包处理，不再控制电脑桥。
+    }).catch(function () {
+      if (g0 !== _gen) return;
+      _connecting = false;
       callBtnConnecting(false);
       if (_reviewVoiceGate(false)) return;
-      setSt(configRevisionCurrent
-        ? '读取语音模型失败，请重试'
-        : '语音模型设置已变化，请再点一次电话按钮');
-      // The authoritative engine is unknown. In particular, a previously
-      // confirmed computer_client must never silently fall back to Pi
-      // /voice-rt, and a stale failed GET must not bypass a newer settings
-      // revision. A later trusted click performs a fresh configuration read.
+      setSt('读取语音模型失败，请重试');
     });
   };
-  _refreshComputerVoiceEngine();
   function toggle(opts) {
     injectCss();
     opts = opts || {};
@@ -5729,21 +5714,16 @@
       } catch (e) {}
     }
     mode = (opts && opts.mode) || 'agent';
-    try {
-      if (window.RC && RC.computerVoice && RC.computerVoice.isActive &&
-          RC.computerVoice.isActive()) {
-        teardown(false);
-        setSt('已挂断(再点 📞 重新通话)');
-        return true;
-      }
-    } catch (e) {}
+    if (_computerVoiceStarting || _computerVoiceActive()) {
+      _stopComputerVoiceOnly('ordinary-voice-start');
+    }
     if (_connecting) {
       _gen++;
       _connecting = false;
       _setComputerVoiceDialPending(false);
       _cancelComputerVoiceGesture();
       callBtnConnecting(false);
-      setSt('电脑桥接启动已取消');
+      setSt('语音通话启动已取消');
       return true;
     }
     if (ws) { teardown(false); setSt('已挂断(再点 📞 重新通话)'); return; }
@@ -5908,26 +5888,63 @@
     try { ws.send(JSON.stringify({ type: 'ink', page: page, strokes: strokes.slice(0, 60) })); setSt('通话中 · 已同步你的圈画'); } catch (e) {}
   }
 
-  // ── 入口按钮:注入侧栏 composer,挤在语音输入 #asst-mic 旁(SF 电话线条图标;通话中绿色呼吸)──
+  // ── 入口按钮：电脑客户端占原麦克风位置；普通电话保留在它右侧。──
   function injectBtn() {
     var input = document.getElementById('asst-input');
     if (!input) return false;
+    var mic = document.getElementById('asst-mic');
+    if (mic) {
+      mic.style.display = 'none';
+      mic.setAttribute('aria-hidden', 'true');
+      mic.tabIndex = -1;
+    }
+    var existingComputer = document.getElementById('asst-computer');
     var existingCall = document.getElementById('asst-call');
-    if (existingCall) {
-      _publishComputerVoiceButton(existingCall);
+    if (existingComputer && existingCall) {
+      _publishComputerVoiceButton(existingComputer);
       return true;
     }
     injectCss();
+    var c = document.createElement('button');
+    c.id = 'asst-computer'; c.type = 'button';
+    c.title = '电脑客户端桥接：点=连接 Windows 上的 Codex/ChatGPT，再点=停止';
+    c.setAttribute('aria-label', '电脑客户端桥接');
+    c.innerHTML = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="3.5" y="4.5" width="17" height="12" rx="2"/><path d="M8 20h8M12 16.5V20"/></svg>';
     var b = document.createElement('button');
     b.id = 'asst-call'; b.type = 'button';
-    b.title = '豆包语音通话(S2S 专属):点=开始,再点=挂断;翻页/圈画/选中它都实时知道,说"找视频/翻到第N页"它真执行。文本对话请长按旁边的麦克风(ASR 模式)';
+    b.title = '普通实时语音通话：点=开始，再点=挂断';
     b.innerHTML = '<svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="M5 5.3C5 14.8 9.2 19 18.7 19c.72 0 1.3-.58 1.3-1.3v-2.35c0-.56-.36-1.06-.9-1.23l-2.62-.87a1.3 1.3 0 0 0-1.33.32l-.95.95a11.6 11.6 0 0 1-4.72-4.72l.95-.95c.35-.35.47-.87.32-1.33L9.85 4.9A1.3 1.3 0 0 0 8.62 4H6.3C5.58 4 5 4.58 5 5.3z"/></svg>';
-    var mic = document.getElementById('asst-mic');
-    if (mic && mic.parentNode === input) input.insertBefore(b, mic.nextSibling);
-    else input.insertBefore(b, input.firstChild);
-    _ownComputerVoiceButton(b);
-    // 单击 = S2S 通话开关(用户裁定:不要"先开小窗再按开始"的两步;语音输入归旁边的系统听写 #asst-mic)。
-    // 旧 agent 模式(豆包 ASR 转写进输入框)入口撤掉,代码保留(window._voiceCall 仍可调)。
+    if (mic && mic.parentNode === input) {
+      input.insertBefore(c, mic);
+      input.insertBefore(b, mic);
+    } else {
+      input.insertBefore(b, input.firstChild);
+      input.insertBefore(c, b);
+    }
+    _ownComputerVoiceButton(c);
+    c.addEventListener('click', function () {
+      if (_reviewVoiceGate(true)) return;
+      if (_computerVoiceStarting || _computerVoiceActive()) {
+        _stopComputerVoiceOnly('reader-computer-button');
+        setSt('电脑桥接已停止');
+        return;
+      }
+      if (ws || _rtc.on || _connecting || _reconnT || _reconnPend) {
+        teardown(false, true);
+      }
+      var opts = {};
+      try {
+        var ctx = (window.RC && RC.adapter && RC.adapter().getContext()) || {};
+        opts.file = ctx.file_rel || ctx.file || '';
+        opts.page = ctx.page ||
+          (ctx.current_section_idx != null ? (ctx.current_section_idx + 1) : 0);
+      } catch (e) {}
+      var generation = ++_gen;
+      _connecting = true;
+      _setComputerVoiceDialPending(true);
+      try { navigator.vibrate && navigator.vibrate(10); } catch (e) {}
+      _computerVoiceStart(opts, generation);
+    });
     b.addEventListener('click', function () {
       if (_reviewVoiceGate(true)) return;
       if (ws || _reconnT || _reconnPend) {   // 通话中/重连排队中 → 挂断(开关 off)
@@ -5936,7 +5953,7 @@
         return;
       }
       try { navigator.vibrate && navigator.vibrate(10); } catch (e) {}
-      if (window._voiceCallS2S) window._voiceCallS2S(); else toggle({ mode: 's2s' });   // 电话按钮=S2S 专属
+      if (window._voiceCallS2S) window._voiceCallS2S(); else toggle({ mode: 's2s' });
     });
     // 工具进行中按钮(v3-⑯b):调用开始出现转圈,点击=中止,结束自动消失
     var tb = document.createElement('button');
@@ -5989,38 +6006,40 @@
     _bindLongPress(m, _micLongAction);
     return true;
   }
-  // ── 顶栏语音按钮(㉒,用户设计):侧栏收起时顶栏出 mic+电话,逻辑与侧栏完全一致——
-  //    mic 单击=Apple 听写(转发给 #asst-mic 原 handler,说完自动发送)/长按=豆包 ASR;电话=S2S 开关。
+  // ── 顶栏语音按钮：侧栏收起时显示电脑客户端 + 普通电话。──
   //    状态镜像:观察侧栏按钮 class(on/asr/speaking)同步变色呼吸;侧栏打开时这俩隐藏(那边有同款)。──
   function injectTopbarBtns() {
-    if (document.getElementById('vc-top-mic')) {
-      _publishComputerVoiceButton(document.getElementById('vc-top-call'));
+    if (document.getElementById('vc-top-computer')) {
+      _publishComputerVoiceButton(document.getElementById('vc-top-computer'));
       return true;
     }
     var anchor = document.getElementById('fs-toggle');
-    var srcMic = document.getElementById('asst-mic'), srcCall = document.getElementById('asst-call');
-    if (!anchor || !anchor.parentNode || !srcMic || !srcCall) return false;
+    var srcComputer = document.getElementById('asst-computer');
+    var srcCall = document.getElementById('asst-call');
+    if (!anchor || !anchor.parentNode || !srcComputer || !srcCall) return false;
     injectCss();
     var tm = document.createElement('button');
-    tm.id = 'vc-top-mic'; tm.type = 'button';
-    tm.title = '语音输入:单击=系统听写(说完自动发送);长按=豆包连续听(ASR,到点会弹紫)';
-    tm.innerHTML = '<svg class="rc-tbi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><rect x="9" y="2.5" width="6" height="11" rx="3"/><path d="M5.5 10.5v.5a6.5 6.5 0 0 0 13 0v-.5"/><path d="M12 17.5V21"/></svg>';
+    tm.id = 'vc-top-computer'; tm.type = 'button';
+    tm.title = '电脑客户端桥接：点=连接，再点=停止';
+    tm.setAttribute('aria-label', '电脑客户端桥接');
+    tm.innerHTML = srcComputer.innerHTML;
     var tc = document.createElement('button');
     tc.id = 'vc-top-call'; tc.type = 'button';
-    tc.title = '豆包语音通话(S2S):点=开始,再点=挂断';
+    tc.title = '普通实时语音通话：点=开始，再点=挂断';
     tc.innerHTML = srcCall.innerHTML;   // 复用侧栏电话的 SF 线条 SVG
     anchor.parentNode.insertBefore(tm, anchor);
     anchor.parentNode.insertBefore(tc, anchor);
-    _ownComputerVoiceButton(tc);
-    tm.addEventListener('click', function () { try { srcMic.click(); } catch (e) {} });   // 单击=听写开/停(原 handler;长按后的 click 已被 _bindLongPress 吞)
-    _bindLongPress(tm, _micLongAction);
+    _ownComputerVoiceButton(tm);
+    tm.addEventListener('click', function () { try { srcComputer.click(); } catch (e) {} });
     tc.addEventListener('click', function () { try { srcCall.click(); } catch (e) {} });
     function _mirror(src, dst, cls) {   // 状态镜像:侧栏按钮的状态类 → 顶栏同名类
-      new MutationObserver(function () {
+      function sync() {
         cls.forEach(function (c) { dst.classList.toggle(c, src.classList.contains(c)); });
-      }).observe(src, { attributes: true, attributeFilter: ['class'] });
+      }
+      new MutationObserver(sync).observe(src, { attributes: true, attributeFilter: ['class'] });
+      sync();   // 顶栏可能晚于连接建立；创建时先复制当前状态，不能只等下一次变化。
     }
-    _mirror(srcMic, tm, ['on', 'asr']);
+    _mirror(srcComputer, tm, ['on', 'speaking', 'connecting']);
     _mirror(srcCall, tc, ['on', 'speaking', 'connecting']);
     _syncReviewVoiceUi();
     function _vis() {   // 侧栏开=隐藏(功能在侧栏里);收起才显示

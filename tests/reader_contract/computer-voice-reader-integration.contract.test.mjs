@@ -8,104 +8,102 @@ const full = manifest.content_scripts[1].js;
 const assistant = read("_server_deploy/static/pdf/rc-assistant.js");
 const voicecall = read("_server_deploy/static/pdf/rc-voicecall.js");
 const runtime = read("_server_deploy/static/pdf/rc-computer-voice.js");
+const settings = read("_server_deploy/static/pdf/rc-settings.js");
 const background = read("extensions/bw-reader-webext/background.js");
 const offscreen = read("extensions/bw-reader-webext/offscreen.js");
 
-test("电脑客户端选项复用共享设置和电话按钮，选择本身不启动", () => {
-  assert.match(assistant, /value="computer_client"/);
-  assert.match(assistant, /RC\.computerVoice\.mountSettings\(card\)/);
+test("电脑客户端使用独立按钮与设置标签，历史引擎值回落普通电话", () => {
+  assert.doesNotMatch(assistant, /value="computer_client"/);
+  assert.doesNotMatch(assistant, /RC\.computerVoice\.mountSettings\(card\)/);
   assert.doesNotMatch(
     assistant,
     /computer_client[\s\S]{0,300}startFromUserGesture/,
   );
   assert.match(
-    voicecall,
-    /engine === 'computer_client'\) _computerVoiceStart\(opts, g0\)/,
+    assistant,
+    /var voiceEngine = c\.rt_engine === 'computer_client' \? '' : \(c\.rt_engine \|\| ''\)/,
   );
+  assert.match(settings, /data-pane="computer">电脑客户端<\/button>/);
+  assert.match(settings, /id="rcset-computer-inline"/);
+  assert.match(settings, /RC\.computerVoice\.mountSettings\(host\)/);
+  assert.match(voicecall, /c\.id = 'asst-computer'; c\.type = 'button'/);
+  assert.match(voicecall, /b\.id = 'asst-call'; b\.type = 'button'/);
   assert.match(
     voicecall,
     /RC\.computerVoice\.startFromUserGesture\(opts \|\| \{\}\)/,
   );
-  assert.match(
-    assistant,
-    /RC\.computerVoice\.setSelectedEngine\(\s*c\.rt_engine \|\| '',\s*_voiceEngineRevision\s*\)/,
-  );
-  assert.match(
-    runtime,
-    /function setSelectedEngine\(engine, revision\)[\s\S]*engine === "computer_client"/,
-  );
 });
 
-test("语音配置 fetch 用 revision 与拨号世代围栏，第二次点击会取消 pending gesture", () => {
-  assert.match(
-    runtime,
-    /function reserveSelectedEngineUpdate\(\)[\s\S]*selectedEngineRevision \+= 1/,
-  );
-  assert.match(
-    runtime,
-    /revision < selectedEngineRevision[\s\S]*return computerVoiceSelected/,
-  );
-  assert.match(
-    assistant,
-    /beginSelectedEngineUpdate\(\)[\s\S]*fetch\('\/api\/assistant\/voice-config'\)[\s\S]*setSelectedEngine\(\s*c\.rt_engine \|\| '',\s*_voiceEngineRevision/,
-  );
-  assert.match(
-    voicecall,
-    /_setComputerVoiceDialPending\(true\)[\s\S]*var engineRevision = _reserveComputerVoiceEngineUpdate\(\)[\s\S]*fetch\('\/api\/assistant\/voice-config'\)[\s\S]*g0 !== _gen[\s\S]*_setComputerVoiceEngine\(engine, engineRevision\)/,
-  );
-  assert.match(
-    voicecall,
-    /if \(_connecting\) \{[\s\S]*_gen\+\+[\s\S]*_setComputerVoiceDialPending\(false\)[\s\S]*_cancelComputerVoiceGesture\(\)[\s\S]*return true/,
-  );
+test("普通电话不再启动电脑桥，两个入口切换时互斥清理", () => {
   const connectStart = voicecall.indexOf("toggle._connect = function (opts)");
   const connectEnd = voicecall.indexOf("function toggle(opts)", connectStart);
   assert.ok(connectStart >= 0 && connectEnd > connectStart);
   const connect = voicecall.slice(connectStart, connectEnd);
-  const failedGet = connect.slice(connect.lastIndexOf("}).catch(function () {"));
-  assert.match(
-    failedGet,
-    /_setComputerVoiceEngine\('', engineRevision\)[\s\S]*_setComputerVoiceDialPending\(false\)[\s\S]*_cancelComputerVoiceGesture\(\)/,
+  assert.doesNotMatch(connect, /_computerVoiceStart\(|startFromUserGesture/);
+  assert.match(connect, /if \(_computerVoiceStarting \|\| _computerVoiceActive\(\)\)[\s\S]*_stopComputerVoiceOnly\('ordinary-voice-start'\)/);
+  assert.match(connect, /if \(engine === 'openai_rtc'\) rtcStart\(opts\);\s*else start\(opts\)/);
+
+  const teardownStart = voicecall.indexOf(
+    "function teardown(closeBox, preserveComputerGesture)",
   );
-  const failedGetGenerationGuard = failedGet.indexOf("if (g0 !== _gen) return;");
+  const teardownEnd = voicecall.indexOf(
+    "function _setComputerVoiceDialPending",
+    teardownStart,
+  );
+  assert.ok(teardownStart >= 0 && teardownEnd > teardownStart);
+  const teardown = voicecall.slice(teardownStart, teardownEnd);
+  assert.match(
+    teardown,
+    /if \(!preserveComputerGesture\) \{\s*_setComputerVoiceDialPending\(false\);\s*_cancelComputerVoiceGesture\(\);\s*\}/,
+  );
+  assert.match(
+    teardown,
+    /if \(!preserveComputerGesture\) _audioSession\('playback'\)/,
+  );
+
+  const injectStart = voicecall.indexOf("function injectBtn()");
+  const computerClickStart = voicecall.indexOf(
+    "c.addEventListener('click'",
+    injectStart,
+  );
+  const computerClickEnd = voicecall.indexOf(
+    "b.addEventListener('click'",
+    computerClickStart,
+  );
   assert.ok(
-    failedGetGenerationGuard >= 0 &&
-      failedGetGenerationGuard < failedGet.indexOf("_setComputerVoiceEngine('', engineRevision)") &&
-      failedGetGenerationGuard < failedGet.indexOf("_setComputerVoiceDialPending(false)") &&
-      failedGetGenerationGuard < failedGet.indexOf("_cancelComputerVoiceGesture()"),
-    "an old rejected GET must be fenced before it can clear a newer dial gesture",
+    injectStart >= 0 &&
+      computerClickStart > injectStart &&
+      computerClickEnd > computerClickStart,
   );
-  assert.doesNotMatch(
-    failedGet,
-    /\bstart\(opts\)/,
-    "failed or stale config GET must not fall back to another voice engine",
-  );
-  assert.match(
-    assistant,
-    /function _recoverFailedEngineSave\(\)[\s\S]*_renderVoiceCfg\(container\)/,
-  );
-  assert.match(
-    assistant,
-    /else \{[\s\S]*_recoverFailedEngineSave\(\);[\s\S]*\}\s*\)\.catch\(function \(\) \{[\s\S]*_recoverFailedEngineSave\(\)/,
+  const computerClick = voicecall.slice(computerClickStart, computerClickEnd);
+  assert.match(computerClick, /if \(ws \|\| _rtc\.on \|\| _connecting \|\| _reconnT \|\| _reconnPend\)[\s\S]*teardown\(false, true\)/);
+  assert.match(computerClick, /_setComputerVoiceDialPending\(true\)[\s\S]*_computerVoiceStart\(opts, generation\)/);
+  assert.ok(
+    computerClick.indexOf("teardown(false, true)") <
+      computerClick.indexOf("_setComputerVoiceDialPending(true)") &&
+      computerClick.indexOf("_setComputerVoiceDialPending(true)") <
+        computerClick.indexOf("_computerVoiceStart(opts, generation)"),
+    "ordinary voice must release while preserving the trusted surface before START",
   );
 });
 
-test("只有 voicecall 闭包创建并登记的电话按钮身份可以签发 START 租约", () => {
-  assert.match(runtime, /var registeredPhoneButtons = new WeakSet\(\)/);
+test("只有 voicecall 闭包创建并登记的电脑按钮身份可以签发 START 租约", () => {
+  assert.match(runtime, /var registeredComputerButtons = new WeakSet\(\)/);
   assert.match(
     runtime,
-    /function registerPhoneButton\(button\)[\s\S]*registeredPhoneButtons\.add\(button\)/,
+    /function registerComputerButton\(button\)[\s\S]*registeredComputerButtons\.add\(button\)/,
   );
   assert.match(
     runtime,
-    /function phoneButtonFromEvent\(event\)[\s\S]*registeredPhoneButtons\.has\(target\)/,
+    /function computerButtonFromEvent\(event\)[\s\S]*target\.id === "asst-computer"[\s\S]*target\.id === "vc-top-computer"[\s\S]*registeredComputerButtons\.has\(target\)/,
   );
   assert.match(voicecall, /var _computerVoiceOwnedButtons = new WeakSet\(\)/);
   assert.match(
     voicecall,
-    /_computerVoiceOwnedButtons\.has\(button\)[\s\S]*RC\.computerVoice\.registerPhoneButton\(button\)/,
+    /_computerVoiceOwnedButtons\.has\(button\)[\s\S]*RC\.computerVoice\.registerComputerButton\(button\)/,
   );
-  assert.match(voicecall, /_ownComputerVoiceButton\(b\)/);
-  assert.match(voicecall, /_ownComputerVoiceButton\(tc\)/);
+  assert.match(voicecall, /_ownComputerVoiceButton\(c\)/);
+  assert.match(voicecall, /_ownComputerVoiceButton\(tm\)/);
 });
 
 test("Reader v3 严格区分 app-output 下行与 browser-microphone track 3 上行", () => {
@@ -182,7 +180,7 @@ test("旧 offscreen 文件仅为惰性 tombstone，不能恢复 Native/WebRTC �
   );
 });
 
-test("v3 只在可信电话手势预备可撤销麦克风，设置变更围栏且 START 走固定 WSS", () => {
+test("v3 只在可信电脑按钮手势预备可撤销麦克风，START 走固定 WSS", () => {
   assert.match(
     runtime,
     /wss:\/\/bwicarus-2\.taile44d0c\.ts\.net\/reader-computer-voice\/v1/,
@@ -190,7 +188,7 @@ test("v3 只在可信电话手势预备可撤销麦克风，设置变更围栏�
   assert.match(runtime, /channel\.request\("hello", \{\s*protocolVersion: 3/);
   assert.match(
     runtime,
-    /\(selectedEngineKnown && computerVoiceSelected\)[\s\S]*\(!selectedEngineKnown && selectedEngineMutationRevision === null\)[\s\S]*prepareSurfaceFromGesture\(\)/,
+    /function computerButtonFromEvent\(event\)[\s\S]*registeredComputerButtons\.has\(target\)/,
   );
   assert.match(
     runtime,
@@ -200,14 +198,16 @@ test("v3 只在可信电话手势预备可撤销麦克风，设置变更围栏�
     runtime,
     /function prepareSurfaceFromGesture\(\)[\s\S]*prepareMicrophoneFromGesture\(preparedSurface\)/,
   );
+  assert.match(runtime, /if \(!active\) \{[\s\S]*prepareSurfaceFromGesture\(\)/);
   assert.match(
     runtime,
-    /function beginSelectedEngineUpdate\(\)[\s\S]*selectedEngineKnown = false[\s\S]*selectedEngineMutationRevision = revision[\s\S]*clearPreparedSurface\(true\)/,
+    /function snapshotLinkWanted\(\)[\s\S]*contextSyncEnabled\(\)[\s\S]*contextDeliveryMode !== CONTEXT_DELIVERY_LEGACY/,
   );
-  assert.match(
-    runtime,
-    /function setSelectedEngine\(engine, revision\)[\s\S]*completesMutation[\s\S]*selectedEngineMutationRevision = null[\s\S]*selectedEngineAcceptedRevision = revision[\s\S]*computerVoiceSelected = engine === "computer_client"/,
+  const snapshotWanted = runtime.slice(
+    runtime.indexOf("function snapshotLinkWanted()"),
+    runtime.indexOf("function stopSnapshotLink()", runtime.indexOf("function snapshotLinkWanted()")),
   );
+  assert.doesNotMatch(snapshotWanted, /selectedEngineKnown|computerVoiceSelected/);
   assert.match(
     runtime,
     /function directChannelLive\(channel\)[\s\S]*channel\.socket[\s\S]*socket\.readyState === 1/,

@@ -1,6 +1,7 @@
 /* rc-settings.js — 统一控制层(window.RC.settings):PDF / EPUB / HTML 阅读器共用的**一份**设置面板。
  * 规格 ground truth = PDF 原生面板(pdf_reader.html #settings-mask + reader.src/21-misc-ai.js):
- * 5 个 tab(AI·翻译 / 阅读 / 语法 / 高亮 / 便签)+ 底部「取消 / 保存」两段式;共有控件的 id / 文案 / 结构 / 内联样式
+ * 7 个 tab(AI·翻译 / 电脑客户端 / 阅读 / 语法 / 高亮 / 便签 / 网页翻译)
+ * + 底部「取消 / 保存」两段式;共有控件的 id / 文案 / 结构 / 内联样式
  * 逐字照搬原生,阅读器特有块经 host / opts 门控显隐(data-sec):
  *   PDF 特有:  页码对齐 / 本书插图描述 / 书籍目录 / 旋转自动排版 / 去边 / 文字层校准
  *              —— HTML 逐字复制原生模板,内联 onclick 直调原生 window.*(applyPageOffset / saveFigToggle /
@@ -34,7 +35,7 @@
  *
  * API(对外不变):RC.settings.open(opts) / close() / aiParams() / hlColors() / injectCss()
  * opts(全部可选):
- *   tab                        打开时定位 tab('ai'|'read'|'grammar'|'hl')
+ *   tab                        打开时定位 tab('ai'|'computer'|'read'|'grammar'|'hl'|'note'|'web')
  *   host:'pdf'                 PDF host-bind 模式(见上)
  *   ids:{mask,langChecks}      容器 id 覆盖(PDF 传 settings-mask / lang-checks)
  *   keys:{tab}                 tab 记忆键(PDF 传 pdf-set-tab;默认 eph-set-tab)
@@ -520,6 +521,19 @@
           '<div id="rcset-sync-status" style="font-size:12px;color:#aebbd0;line-height:1.55;white-space:pre-wrap">正在读取同步状态……</div>' +
           '<ul id="rcset-sync-conflicts" style="display:none;margin:8px 0 0;padding-left:18px;color:#8fa0ba;font-size:11px;line-height:1.5"></ul>' +
         '</div>' +
+        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:6px;cursor:pointer">' +
+          '<input type="checkbox" id="set-debug" style="width:16px;height:16px"> 显示调试日志（左下角浮窗）' +
+        '</label>' +
+      '</div>';
+
+    // ════ pane: 电脑客户端（Windows 桥接、上下文同步和回退模式集中在这里）════
+    var paneComputer =
+      '<div class="set-pane" data-pane="computer" style="display:none">' +
+        '<div style="background:#11203a;border:1px solid #2a3550;border-radius:8px;padding:12px;margin-bottom:16px">' +
+          '<div style="font-size:13px;color:#cfe0ff;font-weight:600;margin-bottom:4px">电脑客户端桥接</div>' +
+          '<div style="font-size:11px;color:#8a9bb4;line-height:1.6;margin-bottom:10px">电脑图标按钮是唯一启动入口；普通电话按钮只负责豆包、GPT 或 Grok。查看状态不会启动应用、采音或发送快捷键。</div>' +
+          '<div id="rcset-computer-inline"></div>' +
+        '</div>' +
         '<div style="background:#11203a;border:1px solid #2a3550;border-radius:8px;padding:12px;margin:16px 0">' +
           '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe0ff;font-weight:600;cursor:pointer">' +
             '<input type="checkbox" id="set-ctx-sync" style="width:16px;height:16px"> 🔁 双向上下文同步（默认关闭）' +
@@ -538,9 +552,6 @@
           '</div>' +
           '<div id="set-ctx-sync-msg" style="font-size:11px;color:#e0b080;margin-top:6px;display:none"></div>' +
         '</div>' +
-        '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe6ff;margin-bottom:6px;cursor:pointer">' +
-          '<input type="checkbox" id="set-debug" style="width:16px;height:16px"> 显示调试日志（左下角浮窗）' +
-        '</label>' +
       '</div>';
 
     // ════ pane: 阅读(共有块逐字照搬 PDF;PDF/EPUB 特有块 data-sec 门控)════
@@ -798,13 +809,14 @@
         '<h3 class="ep-set-h3">⚙️ 设置</h3>' +
         '<div class="set-tabs">' +
           '<button type="button" class="set-tab active" data-pane="ai">AI·翻译</button>' +
+          '<button type="button" class="set-tab" data-pane="computer">电脑客户端</button>' +
           '<button type="button" class="set-tab" data-pane="read">阅读</button>' +
           '<button type="button" class="set-tab" data-sec="grammar-tab" data-pane="grammar">语法</button>' +
           '<button type="button" class="set-tab" data-pane="hl">高亮</button>' +
           '<button type="button" class="set-tab" data-pane="note">便签</button>' +
           '<button type="button" class="set-tab" data-sec="web-tab" data-pane="web">网页翻译</button>' +
         '</div>' +
-        '<div class="ep-set-body">' + paneAi + paneRead + paneGrammar + paneHl + paneNote + paneWeb + '</div>' +
+        '<div class="ep-set-body">' + paneAi + paneComputer + paneRead + paneGrammar + paneHl + paneNote + paneWeb + '</div>' +
         '<div style="display:flex;gap:8px;justify-content:flex-end;padding-top:12px;border-top:1px solid #2a3550;margin-top:2px">' +
           '<button id="rcset-cancel" style="background:#1a2540;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:7px 16px;cursor:pointer;font-size:13px">取消</button>' +
           '<button id="rcset-save" style="background:#244470;border:1px solid #3b6db5;color:#fff;border-radius:6px;padding:7px 16px;cursor:pointer;font-size:13px">保存</button>' +
@@ -1158,6 +1170,13 @@
     });
   }
 
+  function _fillComputerPane() {
+    var host = $('rcset-computer-inline');
+    if (!host || !window.RC || !RC.computerVoice ||
+        typeof RC.computerVoice.mountSettings !== 'function') return;
+    RC.computerVoice.mountSettings(host);
+  }
+
   function open(opts) {
     _opts = opts || {};
     if (_opts.host) _host = _opts.host;
@@ -1170,6 +1189,7 @@
     _fillNotePane();     // 便签 tab 回填(host 无关,设备级 rc-note-* 键;PDF 的 onFill 同样不管这块)
     _fillWebPane();      // 网页翻译 tab 回填(host 无关;非 web host 时 web-* 控件不存在,自动跳过)
     _fillSyncPane();     // 纯 PWA 本地冲突；扩展 owner 只读并引导到 trusted popup
+    _fillComputerPane(); // Windows 桥状态只读刷新，不启动应用、采音或快捷键
     _fillCtxSync();      // 双向上下文同步总开关(自闭环:change 即落盘,不依赖各宿主的保存路径)
     if (typeof _opts.onFill === 'function') {
       try { _opts.onFill(); } catch (e) { toast('设置回填失败：' + (e && e.message)); }   // PDF:原生 _fillSettings(同名 id 全量回填)

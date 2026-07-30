@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "BW网页伴读",
-  "version": "0.2.75",
+  "version": "0.2.76",
   "description": "把阅读器的查词、翻译、解释、卡片、绘图和 AI 助手带到任意网页，并在书籍 PWA 中自动接管共享界面。",
   "permissions": [
     "storage",

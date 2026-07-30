@@ -5,7 +5,7 @@ if (window.__bwPwaProviderOnly) return;
  *
  * 控制与固定帧 PCM 音频只走固定的 tailnet WSS，不经过 Pi。Tailnet 身份和
  * 固定 Origin 由 Windows 端校验；Reader 不保存身份或凭据。选择模型、加载
- * 设置和 STATUS 都不会启动 Windows 应用或采音；只有电话按钮的一次真实
+ * 设置和 STATUS 都不会启动 Windows 应用或采音；只有电脑按钮的一次真实
  * 用户操作会发送 START。
  */
 (function () {
@@ -85,7 +85,9 @@ if (window.__bwPwaProviderOnly) return;
   var statusListeners = [];
   var availabilityAttempt = null;
   var lastClientFailure = null;
-  var registeredPhoneButtons = new WeakSet();
+  var registeredComputerButtons = new WeakSet();
+  // 仅供旧合同/旧缓存页面回退；新 voicecall 不再登记电话按钮。
+  var registeredLegacyPhoneButtons = new WeakSet();
   var selectedEngineKnown = false;
   var computerVoiceSelected = false;
   var selectedEngineRevision = 0;
@@ -2717,7 +2719,7 @@ if (window.__bwPwaProviderOnly) return;
         if (attempt.cancelled) {
           if (!attempt.borrowedSnapshot) channel.close();
           throw directError(
-            "状态刷新已让位给电话按钮启动",
+            "状态刷新已让位给电脑按钮启动",
             "BW_COMPUTER_VOICE_DIRECT_CANCELLED",
             false
           );
@@ -2743,7 +2745,7 @@ if (window.__bwPwaProviderOnly) return;
               if (attempt.cancelled) {
                 fresh.close();
                 throw directError(
-                  "状态刷新已让位给电话按钮启动",
+                  "状态刷新已让位给电脑按钮启动",
                   "BW_COMPUTER_VOICE_DIRECT_CANCELLED",
                   false
                 );
@@ -2861,7 +2863,7 @@ if (window.__bwPwaProviderOnly) return;
     var name = String(error && error.name || "");
     if (name === "NotAllowedError" || name === "SecurityError") {
       return directError(
-        "浏览器没有获得麦克风权限；请允许后再次点击电话按钮",
+        "浏览器没有获得麦克风权限；请允许后再次点击电脑按钮",
         "BW_COMPUTER_VOICE_MICROPHONE_PERMISSION",
         false
       );
@@ -2909,7 +2911,7 @@ if (window.__bwPwaProviderOnly) return;
     track.onended = function () {
       failForMicrophoneState(
         surface,
-        "网页麦克风已被系统停止；请重新点击电话按钮",
+        "网页麦克风已被系统停止；请重新点击电脑按钮",
         "BW_COMPUTER_VOICE_MICROPHONE_ENDED"
       );
     };
@@ -2929,7 +2931,7 @@ if (window.__bwPwaProviderOnly) return;
         if (track.muted === true) {
           failForMicrophoneState(
             surface,
-            "网页麦克风持续被系统暂停；请回到页面后重新点击电话按钮",
+            "网页麦克风持续被系统暂停；请回到页面后重新点击电脑按钮",
             "BW_COMPUTER_VOICE_MICROPHONE_MUTED"
           );
         }
@@ -3228,7 +3230,7 @@ if (window.__bwPwaProviderOnly) return;
       var resumed = surface.context.resume();
       if (resumed && typeof resumed.catch === "function") {
         resumed.catch(function () {
-          // 下一次电话点击会只重试同一个 AudioContext，不会挂断。
+          // 下一次电脑按钮点击会只重试同一个 AudioContext，不会挂断。
         });
       }
     } catch (_) {}
@@ -3261,7 +3263,7 @@ if (window.__bwPwaProviderOnly) return;
     var surface = clearPreparedSurface(false);
     if (!surface || surface.released) {
       throw directError(
-        "必须由一次真实电话按钮点击启动 Windows 桥接器",
+        "必须由一次真实电脑按钮点击启动 Windows 桥接器",
         "BW_COMPUTER_VOICE_GESTURE_REQUIRED",
         false
       );
@@ -3335,7 +3337,7 @@ if (window.__bwPwaProviderOnly) return;
         emitStatus({
           state: "audio-blocked",
           sessionId: state.sessionId,
-          message: "浏览器阻止了声音；请再次点击电话按钮允许播放",
+          message: "浏览器阻止了声音；请再次点击电脑按钮允许播放",
           code: "BW_COMPUTER_VOICE_AUDIO_BLOCKED",
         });
       }
@@ -3383,7 +3385,7 @@ if (window.__bwPwaProviderOnly) return;
       emitStatus({
         state: "audio-blocked",
         sessionId: state.sessionId,
-        message: "浏览器仍阻止播放，请再次点击电话按钮允许声音",
+        message: "浏览器仍阻止播放，请再次点击电脑按钮允许声音",
         code: "BW_COMPUTER_VOICE_AUDIO_BLOCKED",
       });
       throw directError(
@@ -4076,8 +4078,6 @@ if (window.__bwPwaProviderOnly) return;
   function snapshotLinkWanted() {
     return !!(
       ownsReaderUi() &&
-      selectedEngineKnown &&
-      computerVoiceSelected &&
       contextSyncEnabled() &&
       contextDeliveryMode !== CONTEXT_DELIVERY_LEGACY &&
       !contextModeChanging &&
@@ -4116,7 +4116,7 @@ if (window.__bwPwaProviderOnly) return;
     return Promise.resolve(state.promise).catch(function () {
       return null;
     }).then(function (resolved) {
-      // 电话按钮的 START 走这条。判定不准的代价最大:借到死链路 → START 写进虚空 →
+      // 电脑按钮的 START 走这条。判定不准的代价最大:借到死链路 → START 写进虚空 →
       // Windows 完全收不到,用户看到的就是"单击没反应、要按两次"。
       var usable = (
         resolved === state &&
@@ -4841,7 +4841,7 @@ if (window.__bwPwaProviderOnly) return;
         emitStatus({
           state: "audio-blocked",
           sessionId: state.sessionId,
-          message: "浏览器阻止了声音；请再次点击电话按钮允许播放",
+          message: "浏览器阻止了声音；请再次点击电脑按钮允许播放",
           code: "BW_COMPUTER_VOICE_AUDIO_BLOCKED",
         });
       } else {
@@ -4872,9 +4872,12 @@ if (window.__bwPwaProviderOnly) return;
     }
     state.cancelled = true;
     state.stopped = true;
+    state.acceptPcm = false;
     state.uplinkActive = false;
     stopContextPump(state);
-    stopSurfaceMicrophone(state.surface);
+    // 本地音频与路由立即释放；Windows STOP 回执只负责远端收尾。
+    // 这样从电脑按钮切到普通电话时，两套 AudioContext 不会因慢 ACK 短暂重叠。
+    releaseSurface(state.surface);
     clearHeartbeat(state);
     if (!state.started) {
       // START 尚未确认时不能把 STOP 排在同一条 WSS 后面等待：Windows
@@ -4882,7 +4885,6 @@ if (window.__bwPwaProviderOnly) return;
       // 启动。立即关闭连接会取消所有在途请求，并让远端会话租约 fail closed。
       var startingChannel = state.channel;
       state.channel = null;
-      releaseSurface(state.surface);
       emitStatus({
         state: "stopped",
         message: "电脑桥接启动已取消；若 Codex Voice 已亮起，请在 Windows 退出",
@@ -4917,7 +4919,6 @@ if (window.__bwPwaProviderOnly) return;
     }).then(function () {
       var stoppedChannel = state.channel;
       state.channel = null;
-      releaseSurface(state.surface);
       emitStatus({
         state: "stopped",
         message: "电脑桥接已停止；请确认 Windows 的 Codex Voice 已退出",
@@ -4930,15 +4931,47 @@ if (window.__bwPwaProviderOnly) return;
     });
   }
 
-  function phoneButtonFromEvent(event) {
+  function computerButtonFromEvent(event) {
     var target = event && event.target;
     while (target) {
-      if (target.id === "asst-call" || target.id === "vc-top-call") {
-        return registeredPhoneButtons.has(target) ? target : null;
+      if (
+        target.id === "asst-computer" ||
+        target.id === "vc-top-computer"
+      ) {
+        return registeredComputerButtons.has(target) ? target : null;
+      }
+      if (
+        (target.id === "asst-call" || target.id === "vc-top-call") &&
+        registeredLegacyPhoneButtons.has(target) &&
+        (
+          (selectedEngineKnown && computerVoiceSelected) ||
+          (!selectedEngineKnown && selectedEngineMutationRevision === null)
+        )
+      ) {
+        return target;
       }
       target = target.parentNode;
     }
     return null;
+  }
+
+  function registerComputerButton(button) {
+    if (
+      !button ||
+      button.nodeType !== 1 ||
+      String(button.tagName || "").toUpperCase() !== "BUTTON" ||
+      (
+        button.id !== "asst-computer" &&
+        button.id !== "vc-top-computer"
+      ) ||
+      button.type !== "button" ||
+      button.ownerDocument !== window.document ||
+      button.isConnected !== true
+    ) {
+      return false;
+    }
+    registeredComputerButtons.add(button);
+    return true;
   }
 
   function registerPhoneButton(button) {
@@ -4953,14 +4986,14 @@ if (window.__bwPwaProviderOnly) return;
     ) {
       return false;
     }
-    registeredPhoneButtons.add(button);
+    registeredLegacyPhoneButtons.add(button);
     return true;
   }
 
   function installGestureCapture() {
     if (!document || typeof document.addEventListener !== "function") return;
     document.addEventListener("click", function (event) {
-      if (!phoneButtonFromEvent(event)) return;
+      if (!computerButtonFromEvent(event)) return;
       if (event.isTrusted !== true) return;
       if (contextModeChanging) return;
       try {
@@ -4985,22 +5018,10 @@ if (window.__bwPwaProviderOnly) return;
         clearPreparedSurface(true);
         return;
       }
-      if (
-        !active &&
-        (
-          (selectedEngineKnown && computerVoiceSelected) ||
-          (!selectedEngineKnown && selectedEngineMutationRevision === null)
-        )
-      ) {
-        // The first authoritative voice-config GET may still be in flight when
-        // the user performs the one trusted click that iOS grants us. Prepare
-        // only the reversible local surface now; the later authoritative
-        // engine result still decides whether any WSS/START is allowed.
-        //
-        // A settings mutation is different: beginSelectedEngineUpdate() keeps
-        // its own mutation token, so unrelated GET revisions cannot reopen a
-        // mic lease for either the old or proposed value while POST is in
-        // flight.
+      if (!active) {
+        // The dedicated computer button is the sole trusted approval surface.
+        // Prepare only the reversible local media lease during its trusted
+        // gesture; the later bubble handler still decides whether to START.
         prepareSurfaceFromGesture();
       }
     }, true);
@@ -5013,14 +5034,11 @@ if (window.__bwPwaProviderOnly) return;
 
   function beginSelectedEngineUpdate() {
     var revision = reserveSelectedEngineUpdate();
-    // A settings write is not authoritative until the server ACKs it. Fence
-    // both the old and proposed values so a phone click during the POST cannot
-    // acquire a microphone lease for either one.
+    // Compatibility-only bookkeeping for older hosts. The ordinary phone
+    // engine no longer grants or revokes computer-bridge authority.
     selectedEngineKnown = false;
     computerVoiceSelected = false;
     selectedEngineMutationRevision = revision;
-    clearPreparedSurface(true);
-    stopSnapshotLink();
     return revision;
   }
 
@@ -5060,13 +5078,7 @@ if (window.__bwPwaProviderOnly) return;
     selectedEngineAcceptedRevision = revision;
     selectedEngineKnown = true;
     computerVoiceSelected = engine === "computer_client";
-    if (!computerVoiceSelected) {
-      clearPreparedSurface(true);
-      clearActiveSnapshotState(active);
-      clearSnapshotLink();
-    } else if (!dialPending) {
-      reconcileSnapshotLink();
-    }
+    if (!dialPending) reconcileSnapshotLink();
     return computerVoiceSelected;
   }
 
@@ -5146,7 +5158,14 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   function mountSettings(container) {
-    if (!container || container.querySelector(".rc-computer-voice-settings")) return;
+    if (!container) return;
+    var existingRoot = container.querySelector(".rc-computer-voice-settings");
+    if (existingRoot) {
+      if (typeof existingRoot.__rcComputerVoiceRefresh === "function") {
+        existingRoot.__rcComputerVoiceRefresh();
+      }
+      return;
+    }
     var root = document.createElement("div");
     root.className = "rc-computer-voice-settings";
     root.innerHTML =
@@ -5169,7 +5188,7 @@ if (window.__bwPwaProviderOnly) return;
         (value.state === "idle" && value.status && value.status.ready === true)
       ) {
         status.textContent =
-          "● Windows 桥接器已就绪；只有点击电话按钮才会启动。";
+          "● Windows 桥接器已就绪；只有点击电脑按钮才会启动。";
       } else if (value.state === "offline") {
         status.textContent = "○ Windows 桥接器离线或电脑正在睡眠。";
       } else {
@@ -5179,7 +5198,7 @@ if (window.__bwPwaProviderOnly) return;
       detail.textContent =
         "固定 Tailnet 直连，无需配对或填写地址；" +
         "桥接器不会创建或安装虚拟设备，A/B 必须是 Windows 已有的两根独立虚拟音频线；" +
-        "电话按钮才会申请当前网页麦克风并送入 Windows 虚拟麦克风；" +
+        "电脑按钮才会申请当前网页麦克风并送入 Windows 虚拟麦克风；" +
         "Codex 输出固定到独立虚拟扬声器后按进程树回传。" +
         "选择模型或刷新状态不会启动应用或采音。" +
         "挂断只保证停止桥接，Codex Voice 需在 Windows 确认退出。";
@@ -5213,6 +5232,7 @@ if (window.__bwPwaProviderOnly) return;
       });
     }
 
+    root.__rcComputerVoiceRefresh = refresh;
     root.querySelector('[data-role="refresh"]').addEventListener("click", refresh);
     refresh();
   }
@@ -5246,6 +5266,7 @@ if (window.__bwPwaProviderOnly) return;
     contextSyncChanged: contextSyncChanged,
     setContextDeliveryMode: setContextDeliveryMode,
     cancelPreparedGesture: cancelPreparedGesture,
+    registerComputerButton: registerComputerButton,
     registerPhoneButton: registerPhoneButton,
     startFromUserGesture: startFromUserGesture,
     stop: stop,

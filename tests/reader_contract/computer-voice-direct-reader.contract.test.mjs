@@ -158,6 +158,7 @@ function createServer(scenario) {
     deferredContextClears: [],
     deferredContextOpens: [],
     deferredSocketCloses: [],
+    deferredStops: [],
   };
 
   const result = (socket, request, payload) => {
@@ -246,6 +247,15 @@ function createServer(scenario) {
     const socket = server.deferredSocketCloses.shift();
     socket.readyState = 3;
     queueMicrotask(() => socket.onclose?.());
+  };
+
+  server.resolveDeferredStop = () => {
+    assert.ok(server.deferredStops.length, "missing deferred STOP");
+    const { socket, request } = server.deferredStops.shift();
+    result(socket, request, {
+      sessionId: request.sessionId,
+      state: "idle",
+    });
   };
 
   const failure = (socket, request, error) => {
@@ -474,6 +484,10 @@ function createServer(scenario) {
         return;
       }
       if (request.type === "stop") {
+        if (scenario.deferStopResult === true) {
+          server.deferredStops.push({ socket: this, request });
+          return;
+        }
         result(this, request, {
           sessionId: request.sessionId,
           state: "idle",
@@ -861,6 +875,7 @@ function createHarness(overrides = {}) {
     binaryOnStatus: false,
     helloPayload: null,
     deferStartResult: false,
+    deferStopResult: false,
     initialAudioState: "suspended",
     resumePlan: [],
     audioContexts: [],
@@ -946,6 +961,24 @@ function createHarness(overrides = {}) {
       type: "button",
     },
   };
+  const computerButtons = {
+    "asst-computer": {
+      id: "asst-computer",
+      isConnected: true,
+      nodeType: 1,
+      parentNode: null,
+      tagName: "BUTTON",
+      type: "button",
+    },
+    "vc-top-computer": {
+      id: "vc-top-computer",
+      isConnected: true,
+      nodeType: 1,
+      parentNode: null,
+      tagName: "BUTTON",
+      type: "button",
+    },
+  };
   const document = {
     visibilityState: scenario.visibilityState || "visible",
     documentElement: {
@@ -954,7 +987,7 @@ function createHarness(overrides = {}) {
       },
     },
     getElementById(id) {
-      return phoneButtons[id] || null;
+      return computerButtons[id] || phoneButtons[id] || null;
     },
     addEventListener(type, handler, capture) {
       if (type === "click") {
@@ -968,6 +1001,9 @@ function createHarness(overrides = {}) {
     },
   };
   Object.values(phoneButtons).forEach((button) => {
+    button.ownerDocument = document;
+  });
+  Object.values(computerButtons).forEach((button) => {
     button.ownerDocument = document;
   });
   const navigator = createNavigator(scenario);
@@ -1095,6 +1131,18 @@ function createHarness(overrides = {}) {
   });
   vm.runInContext(SOURCE, context, { filename: "rc-computer-voice.js" });
   assert.equal(
+    window.RC.computerVoice.registerComputerButton(
+      computerButtons["asst-computer"],
+    ),
+    true,
+  );
+  assert.equal(
+    window.RC.computerVoice.registerComputerButton(
+      computerButtons["vc-top-computer"],
+    ),
+    true,
+  );
+  assert.equal(
     window.RC.computerVoice.registerPhoneButton(phoneButtons["asst-call"]),
     true,
   );
@@ -1107,6 +1155,7 @@ function createHarness(overrides = {}) {
     scenario,
     server,
     clickHandlers,
+    computerButtons,
     phoneButtons,
     dispatchDocumentEvent(type, detail) {
       for (const handler of documentEventHandlers.get(type) || []) {
@@ -1125,6 +1174,23 @@ function createHarness(overrides = {}) {
       document.documentElement.dataset.bwReaderUiOwner = value;
     },
   };
+}
+
+function computerClick(harness, {
+  id = "asst-computer",
+  trusted = true,
+  target = null,
+} = {}) {
+  const event = {
+    isTrusted: trusted,
+    target: target || harness.computerButtons[id],
+    prevented: false,
+    stopped: false,
+    preventDefault() { this.prevented = true; },
+    stopImmediatePropagation() { this.stopped = true; },
+  };
+  harness.clickHandlers[0](event);
+  return event;
 }
 
 function phoneClick(harness, {
@@ -1174,6 +1240,11 @@ function contextRequests(harness) {
   return harness.server.requests.filter((request) => request.type === "context");
 }
 
+async function disableSnapshot(harness) {
+  harness.scenario.contextSyncEnabled = false;
+  await harness.api.contextSyncChanged();
+}
+
 test("v3 HELLO 后直接 STATUS，固定 WSS 且不读取浏览器身份或麦克风", async () => {
   const harness = createHarness();
   const availability = await harness.api.availability();
@@ -1203,7 +1274,7 @@ test("v3 HELLO 后直接 STATUS，固定 WSS 且不读取浏览器身份或麦�
   assert.doesNotMatch(SOURCE, /data-role="(?:endpoint|code|pair|forget)"/);
 });
 
-test("START 只消费受控电话按钮的真实点击，直接调用、伪同 ID 与宿主页 click 均 fail closed", async () => {
+test("旧 computer_client 电话入口仅保留受控兼容，直接调用与伪同 ID 均 fail closed", async () => {
   const direct = createHarness();
   await assert.rejects(
     direct.api.startFromUserGesture(),
@@ -1265,7 +1336,43 @@ test("START 只消费受控电话按钮的真实点击，直接调用、伪同 I
   assert.equal(forwarded.scenario.microphoneRequests.length, 1);
 });
 
-test("首次配置仍在加载时一次可信点击可保留手势并完成 computer_client START", async () => {
+test("专用电脑按钮独立于普通语音模型签发 START，伪同 ID 与普通电话均无权", async () => {
+  const dedicated = createHarness();
+  assert.equal(dedicated.api.setSelectedEngine("native"), false);
+  computerClick(dedicated, { trusted: true });
+  const started = await dedicated.api.startFromUserGesture();
+  assert.equal(started.ok, true);
+  assert.equal(dedicated.scenario.microphoneRequests.length, 1);
+  assert.equal(
+    dedicated.server.requests.filter((request) => request.type === "start").length,
+    1,
+  );
+  await dedicated.api.stop("test");
+
+  const ordinaryPhone = createHarness();
+  ordinaryPhone.api.setSelectedEngine("native");
+  phoneClick(ordinaryPhone, { trusted: true });
+  await assert.rejects(
+    ordinaryPhone.api.startFromUserGesture(),
+    (error) => error?.code === "BW_COMPUTER_VOICE_GESTURE_REQUIRED",
+  );
+  assert.equal(ordinaryPhone.scenario.microphoneRequests.length, 0);
+
+  const decoy = createHarness();
+  const original = decoy.computerButtons["asst-computer"];
+  const replacement = {
+    ...original,
+    ownerDocument: original.ownerDocument,
+  };
+  computerClick(decoy, { trusted: true, target: replacement });
+  await assert.rejects(
+    decoy.api.startFromUserGesture(),
+    (error) => error?.code === "BW_COMPUTER_VOICE_GESTURE_REQUIRED",
+  );
+  assert.equal(decoy.scenario.microphoneRequests.length, 0);
+});
+
+test("首次配置仍在加载时一次可信旧电话点击仍可兼容 computer_client START", async () => {
   const harness = createHarness();
   phoneClick(harness, { trusted: true });
   assert.equal(
@@ -1290,13 +1397,13 @@ test("首次配置仍在加载时一次可信点击可保留手势并完成 comp
   await harness.api.stop("test");
 });
 
-test("首次配置最终不是 computer_client 时会停止迟到的麦克风轨道", async () => {
+test("专用电脑按钮不受历史 computer_client 配置回落影响", async () => {
   let resolveMicrophone;
   const microphone = new Promise((resolve) => {
     resolveMicrophone = resolve;
   });
   const harness = createHarness({ microphonePlan: [microphone] });
-  phoneClick(harness, { trusted: true });
+  computerClick(harness, { trusted: true });
   assert.equal(harness.scenario.microphoneRequests.length, 1);
 
   harness.api.setDialPending(true);
@@ -1305,13 +1412,39 @@ test("首次配置最终不是 computer_client 时会停止迟到的麦克风轨
   resolveMicrophone(stream);
   await new Promise((resolve) => setImmediate(resolve));
 
-  assert.equal(stream.track.stopped, true);
-  assert.equal(harness.server.sockets.length, 0);
-  await assert.rejects(
-    harness.api.startFromUserGesture(),
-    (error) => error?.code === "BW_COMPUTER_VOICE_GESTURE_REQUIRED",
-  );
+  assert.equal(stream.track.stopped, false);
+  const started = await harness.api.startFromUserGesture();
+  assert.equal(started.ok, true);
+  assert.equal(harness.server.sockets.length, 1);
   harness.api.setDialPending(false);
+  await harness.api.stop("test");
+});
+
+test("STOP 回执延迟时本地麦克风与 AudioContext 先立即释放", async () => {
+  const harness = createHarness({ deferStopResult: true });
+  const started = await startWithTrustedGesture(harness);
+  assert.equal(started.ok, true);
+  const context = harness.scenario.audioContexts.at(-1);
+  const track = harness.scenario.microphoneTracks.at(-1);
+  assert.equal(context.closed, false);
+  assert.equal(track.stopped, false);
+
+  const stopping = harness.api.stop("switch-to-ordinary-voice");
+  assert.equal(harness.api.isActive(), false);
+  assert.equal(track.stopped, true);
+  assert.equal(context.closed, true);
+  await waitForCondition(
+    () => harness.server.deferredStops.length === 1,
+    "deferred STOP request",
+  );
+  assert.equal(
+    harness.server.activeSocket.readyState,
+    1,
+    "remote STOP may still be waiting while local routing is already released",
+  );
+  harness.server.resolveDeferredStop();
+  const stopped = await stopping;
+  assert.equal(stopped.state, "stopped");
 });
 
 test("snapshot-mcp 真实拨号顺序保留并原地升级常驻 WSS", async () => {
@@ -1392,7 +1525,7 @@ test("snapshot-mcp 真实拨号顺序保留并原地升级常驻 WSS", async () 
     "selection clear heartbeat",
   );
 
-  harness.api.setSelectedEngine("codex");
+  await disableSnapshot(harness);
   await harness.api.stop("test");
   assert.equal(harness.api.isActive(), false);
 });
@@ -1461,8 +1594,7 @@ test("snapshot-mcp 常驻 WSS 接收严格结果卡并回 rendered ACK，不发�
   );
   assert.equal(harness.scenario.microphoneRequests.length, 0);
   assert.equal(harness.api.isActive(), false);
-  harness.api.setSelectedEngine("codex");
-  await harness.api.contextSyncChanged();
+  await disableSnapshot(harness);
 });
 
 test("snapshot-mcp 停笔后主动发布整页合成图，MCP 请求复用缓存且不发送 START", async () => {
@@ -1569,8 +1701,7 @@ test("snapshot-mcp 停笔后主动发布整页合成图，MCP 请求复用缓存
     false,
   );
   assert.equal(harness.scenario.microphoneRequests.length, 0);
-  harness.api.setSelectedEngine("codex");
-  await harness.api.contextSyncChanged();
+  await disableSnapshot(harness);
 });
 
 test("snapshot-mcp 笔迹版本不匹配时拒绝错误版本且不为它重复截图", async () => {
@@ -1626,8 +1757,7 @@ test("snapshot-mcp 笔迹版本不匹配时拒绝错误版本且不为它重复�
     harness.server.requests.some((request) => request.type === "start"),
     false,
   );
-  harness.api.setSelectedEngine("codex");
-  await harness.api.contextSyncChanged();
+  await disableSnapshot(harness);
 });
 
 test("snapshot-mcp 对未触发 onclose 的 CLOSED 常驻 WSS 主动验活后只重建一次", async () => {
@@ -1655,7 +1785,7 @@ test("snapshot-mcp 对未触发 onclose 的 CLOSED 常驻 WSS 主动验活后只
     harness.server.requests.filter((request) => request.type === "start").length,
     1,
   );
-  harness.api.setSelectedEngine("codex");
+  await disableSnapshot(harness);
   await harness.api.stop("test");
 });
 
@@ -1700,7 +1830,7 @@ test("snapshot-mcp 借用 STATUS 静默超时后重建一次并恢复常驻快�
     "restored context-only snapshot link",
   );
   assert.equal(harness.server.sockets.length, 3);
-  harness.api.setSelectedEngine("codex");
+  await disableSnapshot(harness);
 });
 
 test("snapshot-mcp 晋升链 stale-OPEN 的首个只读探测超时后重连但绝不重发 START", async () => {
@@ -1737,7 +1867,7 @@ test("snapshot-mcp 晋升链 stale-OPEN 的首个只读探测超时后重连但�
     1,
     "only the fresh, proven channel may send the single authorized START",
   );
-  harness.api.setSelectedEngine("codex");
+  await disableSnapshot(harness);
   await harness.api.stop("test");
 });
 
@@ -1878,7 +2008,7 @@ test("snapshot-mcp 晋升等待期间被停止会关闭认领到的旧 WSS", asy
     harness.server.requests.some((request) => request.type === "start"),
     false,
   );
-  harness.api.setSelectedEngine("codex");
+  await disableSnapshot(harness);
 });
 
 test("snapshot-mcp 后台挂起的重连计时器在回到前台时立即恢复且不重复连接", async () => {
@@ -1930,7 +2060,7 @@ test("snapshot-mcp 后台挂起的重连计时器在回到前台时立即恢复�
     false,
   );
   assert.equal(harness.scenario.microphoneRequests.length, 0);
-  harness.api.setSelectedEngine("codex");
+  await disableSnapshot(harness);
 });
 
 test("snapshot-mcp pagehide 立即释放 WSS，不等待异步清空再恢复", async () => {
@@ -1982,7 +2112,7 @@ test("snapshot-mcp pagehide 立即释放 WSS，不等待异步清空再恢复", 
   harness.dispatchWindowEvent("online");
   await new Promise((resolve) => setTimeout(resolve, 25));
   assert.equal(harness.server.sockets.length, 2);
-  harness.api.setSelectedEngine("codex");
+  await disableSnapshot(harness);
 });
 
 test("PWA 与扩展只由当前 UI owner 维护 Windows 快照连接", async () => {
@@ -2023,7 +2153,7 @@ test("PWA 与扩展只由当前 UI owner 维护 Windows 快照连接", async () 
   });
   await waitForRequest(extension, "context-open");
   assert.equal(extension.server.sockets.length, 1);
-  extension.api.setSelectedEngine("codex");
+  await disableSnapshot(extension);
 });
 
 test("同源普通网页没有 book owner marker 时不被扩展门禁误吞", async () => {
@@ -2036,7 +2166,7 @@ test("同源普通网页没有 book owner marker 时不被扩展门禁误吞", a
   assert.equal(extension.server.sockets.length, 1);
 });
 
-test("snapshot-mcp 前台唤醒不为其他模型、关闭同步或活动通话抢建连接", async () => {
+test("snapshot-mcp 前台唤醒独立于普通语音模型，关闭同步或活动通话不重复建链", async () => {
   const otherEngine = createHarness({
     contextDeliveryMode: "snapshot-mcp",
     contextSyncEnabled: true,
@@ -2046,7 +2176,13 @@ test("snapshot-mcp 前台唤醒不为其他模型、关闭同步或活动通话�
   otherEngine.dispatchWindowEvent("pageshow");
   otherEngine.dispatchWindowEvent("online");
   await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.equal(otherEngine.server.sockets.length, 0);
+  assert.equal(otherEngine.server.sockets.length, 1);
+  assert.equal(
+    otherEngine.server.requests.some((request) => request.type === "start"),
+    false,
+  );
+  assert.equal(otherEngine.scenario.microphoneRequests.length, 0);
+  await disableSnapshot(otherEngine);
 
   const syncDisabled = createHarness({
     contextDeliveryMode: "snapshot-mcp",
@@ -2086,7 +2222,7 @@ test("snapshot-mcp 前台唤醒不为其他模型、关闭同步或活动通话�
     1,
   );
   assert.equal(activeCall.scenario.microphoneRequests.length, 1);
-  activeCall.api.setSelectedEngine("codex");
+  await disableSnapshot(activeCall);
   await activeCall.api.stop("test");
 });
 
@@ -2190,7 +2326,7 @@ test("snapshot-mcp 仅转发 Pi ACK 绑定的 vbook 真实卷页并拒绝跨页�
     SOURCE,
     /now - pump\.lastSentAt < ACTIVE_READING_HEARTBEAT_MS/,
   );
-  harness.api.setSelectedEngine("codex");
+  await disableSnapshot(harness);
   await harness.api.stop("test");
 });
 
@@ -2247,7 +2383,7 @@ test("snapshot-mcp 跳过畸形 PWA pend 且后续合法状态可恢复实时发
     "recovered selection",
   );
   assert.equal(harness.scenario.activeReadingRequests[0].active.title, null);
-  harness.api.setSelectedEngine("codex");
+  await disableSnapshot(harness);
   await harness.api.stop("test");
 });
 
@@ -2282,7 +2418,7 @@ test("切回 legacy-inject 前先清空 Windows 快照，再恢复 Pi 旧注入"
     harness.server.requests.some((request) => request.type === "start"),
     false,
   );
-  harness.api.setSelectedEngine("codex");
+  await disableSnapshot(harness);
 });
 
 test("设置页模式开关先清快照并关闭旧 WSS，再原子切到 legacy 且不发送 START", async () => {
@@ -2322,7 +2458,7 @@ test("设置页模式开关先清快照并关闭旧 WSS，再原子切到 legacy
     false,
   );
   assert.equal(harness.server.sockets.at(-1).readyState, 3);
-  harness.api.setSelectedEngine("codex");
+  await disableSnapshot(harness);
 });
 
 test("关闭上下文同步会先清空 Windows 快照且不触发音频 START", async () => {
@@ -2350,7 +2486,7 @@ test("关闭上下文同步会先清空 Windows 快照且不触发音频 START",
     harness.server.requests.some((request) => request.type === "start"),
     false,
   );
-  harness.api.setSelectedEngine("codex");
+  await disableSnapshot(harness);
 });
 
 test("选择模型、STATUS 与非 computer_client 的真实电话点击都不申请麦克风", async () => {

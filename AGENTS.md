@@ -53,38 +53,30 @@ Codex 用 `$env:BWAB_CLI` 的 `send / inbox / wait / notify`；Claude 用 Channe
 不要回退旧 SQLite 邮箱，改由正式入口重新打开。完整规则见
 [`references/agent-collaboration.md`](references/agent-collaboration.md)。
 
-共享源码变化后：
+共享源码变化后按范围选最短闭环，不再把整套命令每次全跑：
 
 ```bash
 python3 extensions/bw-reader-webext/build.py
-node --test --test-reporter=spec tests/reader_contract/*.test.mjs
-python3 -m unittest discover -s tests -p 'test_*.py'
-python3 extensions/bw-reader-webext/test_release_pipeline.py
-python3 extensions/bw-reader-webext/release_preflight.py \
-  --artifact extensions/bw-reader-webext-X.Y.Z-windows-test.zip \
-  --skip-browser
+node --test --test-reporter=spec tests/reader_contract/<改动对应测试>.test.mjs
 ```
 
-浏览器行为按改动范围选择 `extensions/bw-reader-webext/test_*.py`，完整矩阵见
-[扩展交接](references/reader-extension-handoff.md#9-测试)。Windows 只使用既有
+共享核心/协议改动再补全量 Reader Node（它很快）；Python 全量仅在改到 Python 或部署逻辑时跑；
+`handoff_check.py` 只在交接/发布边界跑一次，已确认的 Windows `fcntl`/Pi-only 基线不重复追。
+`test_release_pipeline.py`、扩展候选与 `release_preflight.py` 只用于扩展正式渠道或用户明确要求的
+扩展候选，不再是 Reader/PWA 直接部署的前置步骤。
+
+浏览器行为只有用户明确要求或目标无法在生产 iPad 验收时，才按范围选择
+`extensions/bw-reader-webext/test_*.py`。Windows 只使用既有
 `BW Codex Chrome Test` 独立环境及 `%LOCALAPPDATA%\BWReaderExtensionTest\browser-profile-v2`；
 不得修改日常 Chrome/profile，也不得用在线 channel launcher 覆盖待测本地候选。
-上面的 `--skip-browser` 只用于开发期检查候选元数据，不能作为发布通过证据；运行前把
-`X.Y.Z` 换成实际不可变候选版本。
 
-### 门禁耗时（2026-07-29 Windows 实测，别凭感觉分层）
+### 调试时限与协作
 
-| 命令 | 耗时 | 怎么用 |
-|---|---|---|
-| `node --test tests/reader_contract/*.test.mjs`（59 文件 / 578 测试） | **1.5s** | 全跑。没有任何理由挑着跑 |
-| `python3 extensions/bw-reader-webext/handoff_check.py` | **41s** | 开工一次、收工一次 |
-| `python3 -m unittest discover -s tests -p 'test_*.py'` | **96s** | 全跑。挑着跑省下的时间不值漏测的风险 |
+默认先做一次聚焦定位和最小修复；目标合同测试通过但真实行为仍不确定时，直接说明疑点并让用户
+在 iPad 一起看，失败就回滚/修理，不为穷尽所有可能性追加无关全量检查或长时间死磕。
+其他 AI 只在疑难点、交叉审查或用户明确希望时按需介入，不作为固定门禁。
 
-**三项合计约 2.3 分钟。**要按改动范围分层的是**浏览器测试矩阵**（`test_*.py` 中的
-Chromium 项、`handoff_check.py --full`、`release_preflight.py`）——那才是贵的部分，
-按 [扩展交接 §9](references/reader-extension-handoff.md#9-测试) 选。上面三项别省。
-
-⚠ **Windows 上必须 `PYTHONUTF8=1`，否则 `handoff_check.py` 0.2 秒就崩**：
+⚠ Windows 上若运行 `handoff_check.py`，必须 `PYTHONUTF8=1`，否则它会因 GBK 输出崩溃：
 它输出 `✓`(U+2713) 时撞 GBK 控制台，抛 `UnicodeEncodeError`——看起来像代码 bug，
 其实是环境。终端另需 `chcp 65001`。加上后正常跑完（41s）。
 
@@ -136,34 +128,33 @@ webapp/voice-rt 健康探针、E2E 冒烟。**脚本失败会自己回滚并报�
   `scripts/deploy_reader.sh`；旧文档里的手工文件列表不能代替 manifest。
   清单外文件（`insights.py`/`fitness*.py`/`qa_server.py`/`control.html` 等）不在 reader
   release 边界内，仍是 `cp` + restart，但要自己先备份 —— 见 [部署流程](references/deployment-workflow.md)。
-- **人工验收按改动类型分级**（2026-07-29 用户拍板，取代原先"每次都要完整验收"）：
+- **验收按改动类型分级**（2026-07-31 用户更新流程）：
 
-  | 改动类型 | 部署前 |
+  | 改动类型 | 验收时点 |
   |---|---|
-  | 新功能、UI/视觉变更、交互变更 | **必须**先一次性交付完整人工浏览器验收清单，用户做全部视觉与交互操作，agent 只监控后台请求/数据流/日志/持久化；验收与后台证据都通过才可部署 |
-  | 数据迁移、schema 变更、不可逆操作、扩展**正式**渠道发布 | 同上，**必须**验收 |
-  | 修 bug、重构、性能优化、纯文档 | 预检通过即可部署，**不必等用户验收** |
+  | Reader/PWA 共享的新功能、UI/视觉或交互变更（可由原子部署回滚） | 合同测试与无副作用预检通过后**直接部署到生产 iPad**，由用户在 iPad 验收；默认不插入独立扩展测试环境 |
+  | 扩展专属改动 | 只有用户明确要求时才用 `BW Codex Chrome Test`；扩展**正式**渠道发布仍须发布前人工验收 |
+  | 数据迁移、schema 变更、不可逆操作 | **必须部署前验收** |
+  | 修 bug、重构、性能优化、纯文档 | 预检通过即可部署，不必等用户验收 |
 
-  免验收那一档有三个前提，缺一条就退回"必须验收"：①**不改变任何用户可见的界面或交互**；
-  ②被修的行为**有合同测试覆盖**（没有就先补一个，那本来也是修 bug 的一部分）；
-  ③`deploy_reader.sh` 全程通过（它带自动回滚）。
+  直接部署或免验收都要求：①目标行为有合同测试覆盖；②`deploy_reader.sh` 全程通过（它带自动回滚）；
+  ③不含数据迁移/schema/不可逆操作。用户在生产 iPad 报错时，优先回滚到最近可用提交再修。
   部署后 agent **必须**主动报健康检查与关键端点结果，不能"部署完就完了"。
-  拿不准算哪一档就当"必须验收"——分级是为了省掉重复劳动，不是为了少做事。
-  用户已知悉此档的取舍：回归可能先打到生产再被发现，由自动回滚兜底。
-- 独立浏览器自动化仍可作为工程回归，但不能替代或冒充需验收档的用户人工验收。
+  用户已知悉直接 iPad 验收的取舍：可见回归可能先到生产，由原子回滚和 git 历史兜底。
+- 独立浏览器自动化仅按需使用，不再作为 Reader/PWA 部署的默认中间步骤。
 - 物理手写笔、双真实设备同步、registry 跨代迁移等未自动覆盖场景不得误报通过。
 
 ### 何时必须停下问用户，何时不要停
 
 安全边界只覆盖**不可逆或触及用户设备/生产**的动作。把这份谨慎泛化到整个流程会让每一步都卡住。
 
-**必须停**：**需验收档**的正式部署（新功能/UI/交互/数据迁移，见上方分级表）、发布扩展正式 channel、
+**必须停**：数据迁移/schema/不可逆操作、发布扩展正式 channel、
 安装/注册 native host 或开机项、首次配对、动用户的日常 Chrome/账号/已装扩展、
 改 nginx 或 systemd、删除生产数据、跨机改到别人正在改的文件（安全闸退出码 2/3）。
 
 **不要停**：本地 build、跑测试、`handoff_check.py`、`--preflight-only` 预检、
-读日志与状态、`git status`/`fetch`、在专用测试 profile 里跑浏览器回归。
-这些无副作用，做完直接报结论。
+读日志与状态、`git status`/`fetch`，以及合同测试覆盖且可原子回滚的 Reader/PWA 直接部署。
+前述检查无副作用；直接部署由原子回滚保护，均做完后主动报结论。
 
 ### 维护你自己的项目认知（重要）
 
