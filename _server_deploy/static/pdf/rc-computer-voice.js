@@ -61,6 +61,7 @@
     "starting-service": true,
     "starting-app": true,
     "waiting-app-ready": true,
+    "waiting-voice-ready": true,
     "starting-capture": true,
   });
 
@@ -2111,6 +2112,8 @@
         "两根虚拟音频线缆尚未安装、失活或配置不匹配",
       BW_COMPUTER_VOICE_DIRECT_OUTPUT_ROUTE_UNVERIFIED:
         "尚未验证 Codex/ChatGPT 输出已固定到虚拟扬声器 B",
+      BW_COMPUTER_VOICE_DIRECT_VOICE_READY_TIMEOUT:
+        "等待 Codex 语音子系统就绪超时",
     };
     return reason ? (messages[reason] || reason) : "";
   }
@@ -2120,6 +2123,7 @@
       "starting-service": "正在启动 Windows 桥接服务…",
       "starting-app": "正在启动 Windows 电脑客户端…",
       "waiting-app-ready": "正在等待 Windows 电脑客户端就绪…",
+      "waiting-voice-ready": "正在等待 Codex 语音子系统就绪…",
       "starting-capture": "正在启动受限的 Windows 音频采集…",
       ready: "Windows 桥接器已就绪",
       active: "Windows 已开始受限音频桥接",

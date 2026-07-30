@@ -49,6 +49,7 @@ ONLINE_STATES = frozenset(
         "reader-connected",
         "starting-app",
         "waiting-app-ready",
+        "waiting-voice-ready",
         "starting-capture",
         "active",
     }

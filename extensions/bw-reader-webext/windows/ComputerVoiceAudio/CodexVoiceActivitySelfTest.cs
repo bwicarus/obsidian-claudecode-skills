@@ -5,12 +5,94 @@ internal static class CodexVoiceActivitySelfTest
     internal static void Run(ICollection<string> checks)
     {
         CheckActivityRule(checks);
+        CheckAvailabilityWait(checks);
         CheckPreexistingVoiceIsNotOwned(checks);
         CheckNewVoiceIsOwned(checks);
         CheckStartTimeoutAndReadError(checks);
         CheckStopConfirmation(checks);
         CheckLocalCloseMonitor(checks);
         CheckOwnershipSafeShortcutStop(checks);
+    }
+
+    private static void CheckAvailabilityWait(
+        ICollection<string> checks)
+    {
+        FakeCodexVoiceActivitySource readySource = new(
+            CodexVoiceActivitySnapshot.Unavailable(),
+            CodexVoiceActivitySnapshot.Unavailable(),
+            CodexVoiceActivitySnapshot.Available(100, 200));
+        FakeCodexVoiceActivityClock readyClock = new();
+        CodexVoiceActivitySnapshot ready =
+            new CodexVoiceActivityController(
+                readySource,
+                readyClock)
+            .WaitForAvailableAsync(
+                TimeSpan.FromSeconds(3),
+                TimeSpan.FromSeconds(1),
+                CancellationToken.None).GetAwaiter().GetResult();
+
+        FakeCodexVoiceActivitySource timeoutSource = new(
+            CodexVoiceActivitySnapshot.Unavailable());
+        FakeCodexVoiceActivityClock timeoutClock = new();
+        DirectProtocolException timeoutFailure = Capture(
+            () => new CodexVoiceActivityController(
+                timeoutSource,
+                timeoutClock)
+            .WaitForAvailableAsync(
+                TimeSpan.FromSeconds(2),
+                TimeSpan.FromSeconds(1),
+                CancellationToken.None));
+
+        FakeCodexVoiceActivitySource errorSource = new(
+            CodexVoiceActivitySnapshot.Error());
+        FakeCodexVoiceActivityClock errorClock = new();
+        DirectProtocolException errorFailure = Capture(
+            () => new CodexVoiceActivityController(
+                errorSource,
+                errorClock)
+            .WaitForAvailableAsync(
+                TimeSpan.FromSeconds(2),
+                TimeSpan.FromSeconds(1),
+                CancellationToken.None));
+
+        using CancellationTokenSource canceled = new();
+        canceled.Cancel();
+        FakeCodexVoiceActivitySource canceledSource = new(
+            CodexVoiceActivitySnapshot.Available(100, 200));
+        bool cancellationObserved = false;
+        try
+        {
+            _ = new CodexVoiceActivityController(
+                canceledSource,
+                new FakeCodexVoiceActivityClock())
+            .WaitForAvailableAsync(
+                TimeSpan.FromSeconds(2),
+                TimeSpan.FromSeconds(1),
+                canceled.Token).GetAwaiter().GetResult();
+        }
+        catch (OperationCanceledException)
+        {
+            cancellationObserved = true;
+        }
+
+        Require(
+            ready.Status == CodexVoiceActivityReadStatus.Available
+            && readySource.ReadCount == 3
+            && readyClock.DelayCount == 2
+            && timeoutFailure.Code
+                == CodexVoiceActivityController.VoiceReadyTimeoutCode
+            && timeoutFailure.Retryable
+            && timeoutSource.ReadCount == 3
+            && timeoutClock.DelayCount == 2
+            && errorFailure.Code
+                == CodexVoiceActivityController.ActivityReadFailedCode
+            && errorFailure.Retryable
+            && errorSource.ReadCount == 1
+            && errorClock.DelayCount == 0
+            && cancellationObserved
+            && canceledSource.ReadCount == 0,
+            "codex-voice-availability-wait-is-bounded-and-cancelable",
+            checks);
     }
 
     private static void CheckActivityRule(ICollection<string> checks)

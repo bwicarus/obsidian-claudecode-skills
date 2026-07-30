@@ -3557,3 +3557,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：前台恢复含延迟 `context-clear` ACK 竞态合同，全量 Reader Node 合同通过；Windows 不可变候选 verify/self-test 通过且 `audioActivated=false`。
 - **发布事实**：Reader 提交到 `93a1f86`，预检与正式原子部署 exit 0，事务备份 `/home/bwicarus/deploy-backups/reader/20260730T055826Z-158334`；Windows 0.1.22 已安装并保留永久回滚目录。
 - **当前现场/下一步**：Windows 仍停在 revision 1122 的陈旧第 26 页，缓存正文 1307 字可诊断查看；Pi 近五分钟无 iPad 请求，需 iPad 完整重开一次加载新脚本后验收 revision、正文与选区更新。
+
+## Codex：快照身份、同源页图与首次语音 ready 修复候选（2026-07-30 JST，未安装部署）
+- **改了什么**：合并书 `focus/drawing` 与 active-reading 共用已验证 canonical 身份；Windows viewer 改为 localhost 本地 PDF 页图；START 在媒体和快捷键前有界等待 Codex voice capability ready。
+- **安全语义**：无 canonical 的 vbook 事件 fail closed；页图不代理 Pi 凭据且失败不清正文/选区；voice 等待可取消，已 Active 不重发 `Ctrl+Shift+C`，超时为独立 retryable 错误。
+- **怎么验的**：Reader Node 全量、桌面与打包测试、Release build、无音频 C# self-test、页图真实 PyMuPDF smoke 与发布流水线通过，`audioActivated=false`。
+- **门禁事实**：Windows 发布源白名单已补齐现有真实文件；handoff 只剩既有 Windows `fcntl` 平台项与提交前脏树，语音/快照定向回归无失败。
+- **没做/下一步**：未安装、push 或部署；下一步生成并验证 Windows 候选，先安装 Windows，再通过正式入口部署 Reader/PWA，最后由 iPad 验收单击语音与正文/选区/页图。

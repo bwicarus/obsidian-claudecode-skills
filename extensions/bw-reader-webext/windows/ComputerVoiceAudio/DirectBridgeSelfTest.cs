@@ -120,6 +120,24 @@ internal static class DirectBridgeSelfTest
             statusPath,
             "0123456789abcdef0123456789abcdef");
         await statusWriter.WriteAsync(
+            "waiting-voice-ready",
+            readerConnected: true,
+            captureActive: false,
+            CancellationToken.None).ConfigureAwait(false);
+        using (JsonDocument waitingStatus = JsonDocument.Parse(
+            await File.ReadAllTextAsync(statusPath).ConfigureAwait(false)))
+        {
+            Require(
+                waitingStatus.RootElement.GetProperty("state")
+                    .GetString() == "waiting-voice-ready"
+                && waitingStatus.RootElement
+                    .GetProperty("readerConnected").GetBoolean()
+                && !waitingStatus.RootElement
+                    .GetProperty("captureActive").GetBoolean(),
+                "direct-runtime-status-allows-waiting-voice-ready",
+                checks);
+        }
+        await statusWriter.WriteAsync(
             "idle",
             readerConnected: false,
             captureActive: false,
@@ -347,9 +365,10 @@ internal static class DirectBridgeSelfTest
             startPayload.GetProperty("state").GetString() == "active"
             && appLauncher.EnsureRunningCount == 1
             && appLauncher.WaitReadyCount == 1
+            && mediaAdapter.WaitVoiceReadyCount == 1
             && mediaAdapter.StartCount == 1
             && mediaAdapter.CaptureActive
-            && events.Count == 3
+            && events.Count == 4
             && session.Phase == DirectProtocolPhase.Active,
             "direct-start-is-only-app-and-capture-trigger",
             checks);
@@ -635,6 +654,9 @@ internal static class DirectBridgeSelfTest
             origin,
             checks).ConfigureAwait(false);
         await CheckAppTimeoutAsync(
+            configPath,
+            checks).ConfigureAwait(false);
+        await CheckVoiceReadyGateAsync(
             configPath,
             checks).ConfigureAwait(false);
         await CheckDisconnectCancellationAsync(
@@ -2052,6 +2074,102 @@ internal static class DirectBridgeSelfTest
             && launcher.CancellationObserved
             && media.StartCount == 0,
             "direct-disconnect-cancels-app-wait-before-capture",
+            checks);
+    }
+
+    private static async Task CheckVoiceReadyGateAsync(
+        string configPath,
+        ICollection<string> checks)
+    {
+        DirectBridgeConfigStore store = new(configPath);
+        FakeDirectAppLauncher timeoutLauncher = new();
+        FakeDirectMediaAdapter timeoutMedia = new()
+        {
+            VoiceReadyFailure = new DirectProtocolException(
+                CodexVoiceActivityController.VoiceReadyTimeoutCode,
+                "fake voice ready timeout",
+                retryable: true),
+        };
+        await using (
+            DirectBridgeCoordinator timeoutCoordinator = new(
+                store,
+                timeoutLauncher,
+                timeoutMedia))
+        {
+            List<string> states = [];
+            DirectProtocolException? failure = null;
+            try
+            {
+                _ = await timeoutCoordinator.StartAsync(
+                    "connection-voice-ready-timeout",
+                    "session-" + DirectBase64Url.Encode(
+                        Enumerable.Repeat((byte)0x71, 16).ToArray()),
+                    (state, _) =>
+                    {
+                        states.Add(state);
+                        return Task.CompletedTask;
+                    },
+                    (_, _) => Task.CompletedTask,
+                    CancellationToken.None).ConfigureAwait(false);
+            }
+            catch (DirectProtocolException exception)
+            {
+                failure = exception;
+            }
+            Require(
+                failure?.Code
+                    == CodexVoiceActivityController.VoiceReadyTimeoutCode
+                && failure.Retryable
+                && timeoutLauncher.EnsureRunningCount == 1
+                && timeoutLauncher.WaitReadyCount == 1
+                && timeoutMedia.WaitVoiceReadyCount == 1
+                && timeoutMedia.StartCount == 0
+                && states.SequenceEqual(new[]
+                {
+                    "starting-app",
+                    "waiting-app-ready",
+                    "waiting-voice-ready",
+                }),
+                "direct-voice-ready-timeout-precedes-media-and-shortcut",
+                checks);
+        }
+
+        FakeDirectAppLauncher canceledLauncher = new();
+        FakeDirectMediaAdapter canceledMedia = new()
+        {
+            WaitVoiceReadyUntilCanceled = true,
+        };
+        await using DirectBridgeCoordinator canceledCoordinator = new(
+            store,
+            canceledLauncher,
+            canceledMedia);
+        using CancellationTokenSource disconnected = new();
+        Task<DirectMediaStartResult> start =
+            canceledCoordinator.StartAsync(
+                "connection-voice-ready-cancel",
+                "session-" + DirectBase64Url.Encode(
+                    Enumerable.Repeat((byte)0x72, 16).ToArray()),
+                (_, _) => Task.CompletedTask,
+                (_, _) => Task.CompletedTask,
+                disconnected.Token);
+        await canceledMedia.VoiceReadyWaitEntered.Task.WaitAsync(
+            TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+        disconnected.Cancel();
+        bool canceled = false;
+        try
+        {
+            _ = await start.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            canceled = true;
+        }
+        Require(
+            canceled
+            && canceledMedia.VoiceReadyCancellationObserved
+            && canceledMedia.StartCount == 0
+            && !canceledMedia.CaptureActive,
+            "direct-disconnect-cancels-voice-ready-before-media",
             checks);
     }
 
@@ -6563,6 +6681,27 @@ internal static class DirectBridgeSelfTest
 
         internal int StartCount { get; private set; }
 
+        internal int WaitVoiceReadyCount { get; private set; }
+
+        internal DirectProtocolException? VoiceReadyFailure
+        {
+            get;
+            init;
+        }
+
+        internal bool WaitVoiceReadyUntilCanceled { get; init; }
+
+        internal bool VoiceReadyCancellationObserved
+        {
+            get;
+            private set;
+        }
+
+        internal TaskCompletionSource<bool> VoiceReadyWaitEntered
+        {
+            get;
+        } = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
         internal DirectMediaStartRequest? LastStartRequest
         {
             get;
@@ -6604,6 +6743,37 @@ internal static class DirectBridgeSelfTest
             OutputRouteVerified;
 
         public Task<DirectProtocolException?> Completion => _completion;
+
+        public async Task WaitForVoiceReadyAsync(
+            TimeSpan timeout,
+            CancellationToken cancellationToken)
+        {
+            WaitVoiceReadyCount++;
+            if (timeout <= TimeSpan.Zero)
+            {
+                throw new InvalidOperationException(
+                    "fake received an invalid voice ready timeout");
+            }
+            if (VoiceReadyFailure is not null)
+            {
+                throw VoiceReadyFailure;
+            }
+            if (WaitVoiceReadyUntilCanceled)
+            {
+                VoiceReadyWaitEntered.TrySetResult(true);
+                try
+                {
+                    await Task.Delay(
+                        Timeout.InfiniteTimeSpan,
+                        cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                    VoiceReadyCancellationObserved = true;
+                    throw;
+                }
+            }
+        }
 
         public async Task<DirectMediaStartResult> StartAsync(
             DirectMediaStartRequest request,

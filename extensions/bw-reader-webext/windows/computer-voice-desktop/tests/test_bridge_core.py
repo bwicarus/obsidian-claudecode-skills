@@ -743,6 +743,22 @@ class DirectDesktopCoreTests(unittest.TestCase):
         self.assertFalse(invalid.service_online)
         self.assertIsNone(invalid.last_error)
 
+    def test_waiting_voice_ready_remains_online_without_capture(self) -> None:
+        self.enable_config()
+        runner = FakeProcessRunner()
+        pid = start_direct_service(self.paths, runner, now=NOW)
+        self.write_runtime(
+            pid=pid,
+            state="waiting-voice-ready",
+            reader_connected=True,
+        )
+
+        status = read_direct_status(self.paths, runner, now=NOW)
+
+        self.assertTrue(status.service_online)
+        self.assertTrue(status.reader_connected)
+        self.assertFalse(status.capture_active)
+
     def test_three_states_are_independent(self) -> None:
         value = self.enable_config()
         runner = FakeProcessRunner()

@@ -546,6 +546,16 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
 
     public Task<DirectProtocolException?> Completion => _completion;
 
+    public async Task WaitForVoiceReadyAsync(
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        _ = await _voiceActivity.WaitForAvailableAsync(
+            timeout,
+            CodexVoiceActivityController.MonitorInterval,
+            cancellationToken).ConfigureAwait(false);
+    }
+
     public async Task<DirectMediaStartResult> StartAsync(
         DirectMediaStartRequest request,
         Func<DirectPcmFrame, CancellationToken, Task> sendFrameAsync,

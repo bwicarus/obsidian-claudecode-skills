@@ -325,6 +325,14 @@ function createServer(scenario) {
             payload: { state: "starting-app", reason: null },
           }),
         }));
+        queueMicrotask(() => this.onmessage?.({
+          data: JSON.stringify({
+            contract: DIRECT_CONTRACT,
+            type: "event",
+            event: "status",
+            payload: { state: "waiting-voice-ready", reason: null },
+          }),
+        }));
         for (const frame of scenario.framesBeforeStartResult || []) {
           queueMicrotask(() => this.onmessage?.({ data: frame(request.sessionId) }));
         }

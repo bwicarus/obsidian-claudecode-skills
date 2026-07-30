@@ -70,6 +70,10 @@ internal interface IDirectMediaAdapter : IAsyncDisposable
 
     Task<DirectProtocolException?> Completion { get; }
 
+    Task WaitForVoiceReadyAsync(
+        TimeSpan timeout,
+        CancellationToken cancellationToken);
+
     Task<DirectMediaStartResult> StartAsync(
         DirectMediaStartRequest request,
         Func<DirectPcmFrame, CancellationToken, Task> sendFrameAsync,
@@ -92,6 +96,14 @@ internal sealed class UnwiredDirectMediaAdapter : IDirectMediaAdapter
 
     public Task<DirectProtocolException?> Completion =>
         Task.FromResult<DirectProtocolException?>(null);
+
+    public Task WaitForVoiceReadyAsync(
+        TimeSpan timeout,
+        CancellationToken cancellationToken) =>
+        Task.FromException(
+            new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_MEDIA_NOT_WIRED",
+                "Windows 直连媒体适配器尚未接线"));
 
     public Task<DirectMediaStartResult> StartAsync(
         DirectMediaStartRequest request,
@@ -119,6 +131,8 @@ internal sealed class UnwiredDirectMediaAdapter : IDirectMediaAdapter
 internal sealed class DirectBridgeCoordinator : IAsyncDisposable
 {
     private static readonly TimeSpan AppReadyTimeout = TimeSpan.FromSeconds(20);
+    private static readonly TimeSpan VoiceReadyTimeout =
+        TimeSpan.FromSeconds(12);
     private readonly DirectBridgeConfigStore _configStore;
     private readonly IDirectAppLauncher _appLauncher;
     private readonly IDirectMediaAdapter _mediaAdapter;
@@ -378,6 +392,14 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
                     "BW_COMPUTER_VOICE_DIRECT_APP_TARGET_INVALID",
                     "Codex 目标进程校验失败");
             }
+
+            await reportStatusAsync(
+                "waiting-voice-ready",
+                "BW_COMPUTER_VOICE_DIRECT_WAITING_VOICE_READY")
+                .ConfigureAwait(false);
+            await _mediaAdapter.WaitForVoiceReadyAsync(
+                VoiceReadyTimeout,
+                cancellationToken).ConfigureAwait(false);
 
             await reportStatusAsync(
                 "starting-capture",

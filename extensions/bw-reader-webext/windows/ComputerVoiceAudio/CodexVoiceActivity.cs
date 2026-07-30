@@ -189,6 +189,8 @@ internal sealed class CodexVoiceActivityController
         "BW_COMPUTER_VOICE_DIRECT_ACTIVITY_UNAVAILABLE";
     internal const string ActivityReadFailedCode =
         "BW_COMPUTER_VOICE_DIRECT_ACTIVITY_READ_FAILED";
+    internal const string VoiceReadyTimeoutCode =
+        "BW_COMPUTER_VOICE_DIRECT_VOICE_READY_TIMEOUT";
     internal const string StartNotConfirmedCode =
         "BW_COMPUTER_VOICE_DIRECT_VOICE_START_NOT_CONFIRMED";
     internal const string StopNotConfirmedCode =
@@ -221,6 +223,50 @@ internal sealed class CodexVoiceActivityController
 
     internal CodexVoiceActivitySnapshot ReadCurrent() =>
         ReadRequired();
+
+    internal async Task<CodexVoiceActivitySnapshot>
+        WaitForAvailableAsync(
+            TimeSpan timeout,
+            TimeSpan pollInterval,
+            CancellationToken cancellationToken)
+    {
+        ValidatePolling(timeout, pollInterval);
+        DateTimeOffset deadline = _clock.UtcNow + timeout;
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            CodexVoiceActivitySnapshot snapshot = _source.Read();
+            if (
+                snapshot.Status
+                == CodexVoiceActivityReadStatus.Available
+            )
+            {
+                return snapshot;
+            }
+            if (
+                snapshot.Status
+                == CodexVoiceActivityReadStatus.Error
+            )
+            {
+                throw new DirectProtocolException(
+                    ActivityReadFailedCode,
+                    "读取 Codex 麦克风活动状态失败",
+                    retryable: true);
+            }
+
+            TimeSpan remaining = deadline - _clock.UtcNow;
+            if (remaining <= TimeSpan.Zero)
+            {
+                throw new DirectProtocolException(
+                    VoiceReadyTimeoutCode,
+                    "等待 Codex 语音子系统就绪超时",
+                    retryable: true);
+            }
+            await _clock.DelayAsync(
+                Min(pollInterval, remaining),
+                cancellationToken).ConfigureAwait(false);
+        }
+    }
 
     internal CodexVoiceStopPlan PrepareStop(
         CodexVoiceStartConfirmation confirmation)
