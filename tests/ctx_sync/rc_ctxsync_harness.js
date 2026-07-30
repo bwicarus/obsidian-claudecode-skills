@@ -294,6 +294,36 @@ function check(name, cond, extra) {
   check('取的是当前页', /file=a\.pdf/.test(env.posts[env.posts.length - 1].url) &&
     /page=3/.test(env.posts[env.posts.length - 1].url), env.posts[env.posts.length - 1].url);
 
+  // 服务端第一次观察新墨迹只会启动稳定计时并返回 pending。前端必须在约 1s 后
+  // 有界确认一次；稳定后停止，不能永久卡 pending，也不能变成持续轮询。
+  env = makeEnv(); RC = load(env);
+  env.store['eph-ctx-sync'] = '1';
+  env.queueResponse({
+    ok: true, file: 'a.pdf', page: 4, empty: false,
+    stable: false, inProgress: true, drawingRevision: null, ref: null
+  });
+  env.queueResponse({
+    ok: true, file: 'a.pdf', page: 4, empty: false,
+    stable: true, inProgress: false, drawingRevision: 'dr_0123456789abcdef',
+    ref: { kind: 'drawing', file: 'a.pdf', page: 4, revision: 'dr_0123456789abcdef' }
+  });
+  RC.outgoing.drawingTouched('a.pdf', 4);
+  await sleep(1100);
+  check('停笔后的首次状态查询已发出',
+    env.posts.filter(function (p) { return /outgoing\/drawing/.test(p.url); }).length === 1);
+  env.flushInflight();
+  await sleep(1100);
+  check('pending 后仅发一次稳定确认',
+    env.posts.filter(function (p) { return /outgoing\/drawing/.test(p.url); }).length === 2);
+  env.flushInflight();
+  await sleep(1100);
+  check('取得 stable revision 后停止查询',
+    env.posts.filter(function (p) { return /outgoing\/drawing/.test(p.url); }).length === 2);
+  check('稳定引用已更新到前端状态',
+    RC.outgoing.lastDrawing() &&
+    RC.outgoing.lastDrawing().drawingRevision === 'dr_0123456789abcdef',
+    JSON.stringify(RC.outgoing.lastDrawing()));
+
   // ── 7) 绘图区长按焦点:不干扰笔/擦除/滚动,可取消,目标失效不设 ──────────
   console.log('[7] 绘图区长按焦点');
   let dfp = [], dcp = [];

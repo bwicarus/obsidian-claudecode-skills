@@ -307,17 +307,29 @@
     _og.drawTimer = null;
     if (!_ctxOn() || !_og.drawPend || _og.inflight) return;
     var q = _og.drawPend; _og.drawPend = null; _og.inflight = true;
+    var confirmStable = false;
     // 取当前页绘图引用:服务端按"内容摘要 + 静默 1s"判定是否已稳定,未稳定不给引用
     // @interaction context.drawing.revision
     fetch(_ctxU('/pdf/api/outgoing/drawing?file=' + encodeURIComponent(q.file) +
                 (q.page != null ? '&page=' + encodeURIComponent(q.page) : '')),
           { credentials: 'include' })
       .then(function (r) { return r.json(); })
-      .then(function (d) { _og.lastDrawing = d ? Object.assign({ file: q.file }, d) : null; })
+      .then(function (d) {
+        _og.lastDrawing = d ? Object.assign({ file: q.file }, d) : null;
+        // 这一请求可能是服务端第一次见到新墨迹,只会启动稳定计时并返回 pending。
+        // 停笔后仅再确认一次即可取得 stable revision；不能无限轮询。
+        confirmStable = !!(d && d.ok !== false && d.empty === false &&
+                           d.stable === false && !q.confirmed);
+      })
       .catch(function () {})
       .then(function () {
         _og.inflight = false;
-        if (_og.drawPend) _ogSchedDraw(0);   // 期间又画了 → 回来再取一次最新
+        if (_og.drawPend) {
+          _ogSchedDraw(0);                   // 期间又画了 → 回来再取一次最新
+        } else if (confirmStable) {
+          _og.drawPend = { file: q.file, page: q.page, confirmed: true };
+          _ogSchedDraw(_OG_DRAW_MS);         // pending 后只做一次有界稳定确认
+        }
       });
   }
   function _ogSchedDraw(ms) {

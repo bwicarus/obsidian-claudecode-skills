@@ -3590,3 +3590,8 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：真实 `phoneClick → dialPending → config ACK → START`、迟到麦克风、静默 STATUS、stale-OPEN、慢关闭与 START-unknown 反例均通过；全量 Reader Node、生成物校验与发布流水线通过。
 - **既有基线**：全量 Python/handoff 仍只命中相同的 Windows `fcntl`、Pi 路径与既有测试数据差异；本轮未改 Python 生产逻辑。
 - **没做/下一步**：未主动 START、采音、发快捷键或部署；下一步精确提交、推送并走 Reader 原子部署，再由用户完整刷新 iPad 后单击一次电话按钮验收。
+
+## Codex：绘图稳定状态不再永久卡 pending（2026-07-30 JST）
+- **根因/改动**：停笔后的唯一查询只启动服务端稳定计时；前端收到 pending 后现在延迟约 1 秒仅确认一次，取得 stable revision 后停止，不做持续轮询。
+- **怎么验的**：真实 `rc-core.js` harness 覆盖 pending→一次确认→stable→停止，全部通过；vendor 由 build.py 重生成。
+- **边界/下一步**：本次只修稳定事件；MCP 仍只有绘图状态与引用，尚未传复合页图，因此 AI 仍不能视觉辨认笔迹内容。下一步接现有直接命令回写卡片，并单独补受控视觉读取。
