@@ -91,7 +91,9 @@ loopback 目标。关闭桌面控制窗不等于关闭 bootstrap；bootstrap 空
 - `app-output` 与 `user-mic` 两个固定 track ID；
 - 每帧 960 samples / 1,920 bytes；
 - 帧头包含合同版本、会话、track、严格递增 sequence 和单调 timestamp；
-- 每轨和总队列都有硬上限；不得丢帧后继续伪装连续，溢出立即 fail closed；
+- 每轨和总队列都有硬上限；帧格式、会话和传输 sequence 缺口仍立即 fail closed；
+- 浏览器麦克风上行的已验证帧若因网络/调度突发填满 200 ms 本地 render 队列，只丢最旧
+  待播放帧、保留最新语音并记录丢帧，不让一次瞬时拥塞结束整通电话或累积陈旧延迟；
 - PWA 只播放 `app-output`，`user-mic` 不回放，防止耳返。
 
 PCM 只在 Tailscale 加密直连中出现，不写 Pi、磁盘、日志或浏览器持久存储。后续若切换 Opus，

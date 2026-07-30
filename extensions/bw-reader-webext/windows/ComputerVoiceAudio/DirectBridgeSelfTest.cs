@@ -177,6 +177,8 @@ internal static class DirectBridgeSelfTest
                 == TimeSpan.FromSeconds(5),
             "direct-runtime-status-heartbeat-is-five-seconds",
             checks);
+        await CheckRuntimeStatusHeartbeatRecoveryAsync(checks)
+            .ConfigureAwait(false);
         CheckDirectOutputRouteEvidence(initial, checks);
         await CheckServiceLeaseAsync(
             installationRoot,
@@ -720,6 +722,67 @@ internal static class DirectBridgeSelfTest
         await CheckReaderContextMcpProtocolAsync(
             root,
             checks).ConfigureAwait(false);
+    }
+
+    private static async Task CheckRuntimeStatusHeartbeatRecoveryAsync(
+        ICollection<string> checks)
+    {
+        int ticks = 0;
+        int writes = 0;
+        int recoveries = 0;
+        await DirectBridgeServer.RunRuntimeStatusHeartbeatLoopAsync(
+            _ => ValueTask.FromResult(++ticks <= 2),
+            _ =>
+            {
+                writes += 1;
+                return writes == 1
+                    ? Task.FromException(new IOException("test"))
+                    : Task.CompletedTask;
+            },
+            () => recoveries += 1,
+            CancellationToken.None).ConfigureAwait(false);
+
+        bool cancellationEscaped = false;
+        using CancellationTokenSource cancelled = new();
+        cancelled.Cancel();
+        try
+        {
+            await DirectBridgeServer.RunRuntimeStatusHeartbeatLoopAsync(
+                _ => ValueTask.FromResult(true),
+                token => Task.FromCanceled(token),
+                () => throw new InvalidOperationException(
+                    "cancellation must not be reported as recoverable"),
+                cancelled.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+            cancellationEscaped = true;
+        }
+
+        bool logicFailureEscaped = false;
+        try
+        {
+            await DirectBridgeServer.RunRuntimeStatusHeartbeatLoopAsync(
+                _ => ValueTask.FromResult(true),
+                _ => Task.FromException(
+                    new InvalidOperationException("test")),
+                () => throw new InvalidOperationException(
+                    "logic failure must not be reported as recoverable"),
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (InvalidOperationException)
+        {
+            logicFailureEscaped = true;
+        }
+
+        Require(
+            ticks == 3
+            && writes == 2
+            && recoveries == 1
+            && cancellationEscaped
+            && logicFailureEscaped,
+            "direct-runtime-status-heartbeat-recovers-one-io-failure",
+            checks);
     }
 
     private static async Task CheckExplicitStopFailureAsync(

@@ -1072,24 +1072,67 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     {
         using PeriodicTimer timer = new(
             DirectBridgeContract.RuntimeStatusHeartbeatInterval);
-        while (await timer.WaitForNextTickAsync(cancellationToken)
+        await RunRuntimeStatusHeartbeatLoopAsync(
+            token => timer.WaitForNextTickAsync(token),
+            async token =>
+            {
+                string state;
+                bool readerConnected;
+                bool captureActive;
+                lock (_runtimeStateGate)
+                {
+                    state = _runtimeState;
+                    readerConnected = _runtimeReaderConnected;
+                    captureActive = _runtimeCaptureActive;
+                }
+                await _statusWriter.WriteAsync(
+                    state,
+                    readerConnected,
+                    captureActive,
+                    _coordinator.LastError,
+                    token).ConfigureAwait(false);
+            },
+            () =>
+            {
+                try
+                {
+                    DirectSecurityLog.Write(
+                        _serviceInstanceId,
+                        "runtime-status-heartbeat-retry",
+                        "BW_COMPUTER_VOICE_DIRECT_STATUS_WRITE_RETRY",
+                        ok: false);
+                }
+                catch
+                {
+                    // Heartbeat recovery cannot depend on stderr being open.
+                }
+            },
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    internal static async Task RunRuntimeStatusHeartbeatLoopAsync(
+        Func<CancellationToken, ValueTask<bool>> waitNextTickAsync,
+        Func<CancellationToken, Task> writeStatusAsync,
+        Action recoverableWriteFailure,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(waitNextTickAsync);
+        ArgumentNullException.ThrowIfNull(writeStatusAsync);
+        ArgumentNullException.ThrowIfNull(recoverableWriteFailure);
+        while (await waitNextTickAsync(cancellationToken)
             .ConfigureAwait(false))
         {
-            string state;
-            bool readerConnected;
-            bool captureActive;
-            lock (_runtimeStateGate)
+            try
             {
-                state = _runtimeState;
-                readerConnected = _runtimeReaderConnected;
-                captureActive = _runtimeCaptureActive;
+                await writeStatusAsync(cancellationToken)
+                    .ConfigureAwait(false);
             }
-            await _statusWriter.WriteAsync(
-                state,
-                readerConnected,
-                captureActive,
-                _coordinator.LastError,
-                cancellationToken).ConfigureAwait(false);
+            catch (Exception exception)
+                when (exception is IOException
+                    or UnauthorizedAccessException)
+            {
+                recoverableWriteFailure();
+            }
         }
     }
 

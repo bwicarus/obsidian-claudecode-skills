@@ -1339,18 +1339,16 @@ internal static class ContractSelfTest
             index < BoundedUplinkPcmQueue.MaximumFrames;
             index++)
         {
-            queue.Push(new byte[Pcm48kMonoFramer.BytesPerChunk]);
+            queue.Push(Enumerable.Repeat(
+                checked((byte)index),
+                Pcm48kMonoFramer.BytesPerChunk).ToArray());
         }
-        bool overflowRejected = false;
-        try
-        {
-            queue.Push(new byte[Pcm48kMonoFramer.BytesPerChunk]);
-        }
-        catch (DirectProtocolException exception)
-        {
-            overflowRejected = exception.Code
-                == "BW_COMPUTER_VOICE_DIRECT_UPLINK_QUEUE_OVERFLOW";
-        }
+        queue.Push(Enumerable.Repeat(
+            (byte)BoundedUplinkPcmQueue.MaximumFrames,
+            Pcm48kMonoFramer.BytesPerChunk).ToArray());
+        byte[] oldestRetained =
+            new byte[Pcm48kMonoFramer.BytesPerChunk];
+        int retainedBytes = queue.Read(oldestRetained);
         queue.StopAndClear();
         bool stoppedRejected = false;
         try
@@ -1365,10 +1363,12 @@ internal static class ContractSelfTest
         Require(
             BoundedUplinkPcmQueue.MaximumBufferedMilliseconds == 200
             && BoundedUplinkPcmQueue.MaximumFrames == 10
-            && overflowRejected
+            && queue.DroppedFrames == 1
+            && retainedBytes == Pcm48kMonoFramer.BytesPerChunk
+            && oldestRetained.All(value => value == 1)
             && stoppedRejected
             && queue.BufferedFrames == 0,
-            "virtual-mic-uplink-queue-is-bounded-to-200ms",
+            "virtual-mic-uplink-queue-drops-oldest-and-stays-bounded",
             checks);
 
         FakeVirtualRenderRuntimeFactory factory = new();
@@ -1399,6 +1399,11 @@ internal static class ContractSelfTest
                 factory.EndpointId
                     == "test-virtual-microphone-render"
                 && factory.Runtime.InitializeThreadId != 0
+                && factory.Runtime.InitializeOrder == 1
+                && factory.Runtime.PrimeOrder == 2
+                && factory.Runtime.StartOrder == 3
+                && factory.Runtime.InitializeThreadId
+                    == factory.Runtime.PrimeThreadId
                 && factory.Runtime.InitializeThreadId
                     == factory.Runtime.StartThreadId
                 && factory.Runtime.InitializeThreadId
@@ -1419,6 +1424,42 @@ internal static class ContractSelfTest
         finally
         {
             session.Dispose();
+        }
+
+        FakeVirtualRenderRuntimeFactory fallbackFactory = new();
+        VirtualMicrophoneRenderSession fallbackSession =
+            VirtualMicrophoneRenderSession.PrepareForTest(
+                VirtualMicrophoneRenderRequest.Create(
+                    "test-virtual-microphone-render-fallback"),
+                fallbackFactory);
+        try
+        {
+            fallbackSession.StartAsync().GetAwaiter().GetResult();
+            fallbackSession.Push(new DirectPcmFrame(
+                DirectPcmTrack.BrowserMicrophone,
+                Sequence: 0,
+                TimestampMicroseconds: 20_000,
+                PcmS16Le: Enumerable.Repeat(
+                    (byte)0x4a,
+                    Pcm48kMonoFramer.BytesPerChunk).ToArray()));
+            bool renderedWithoutSignal =
+                fallbackFactory.Runtime.RenderObserved.Wait(
+                    TimeSpan.FromSeconds(2));
+            fallbackSession.StopAsync().GetAwaiter().GetResult();
+            Require(
+                VirtualMicrophoneRenderSession
+                    .RenderWakeFallbackMilliseconds == 100
+                && renderedWithoutSignal
+                && fallbackFactory.Runtime.RenderedPcm.Length
+                    == Pcm48kMonoFramer.BytesPerChunk
+                && fallbackFactory.Runtime.RenderedPcm.All(
+                    value => value == 0x4a),
+                "virtual-mic-render-session-recovers-missed-first-event",
+                checks);
+        }
+        finally
+        {
+            fallbackSession.Dispose();
         }
     }
 
@@ -1485,13 +1526,22 @@ internal static class ContractSelfTest
         IVirtualMicrophoneRenderRuntime
     {
         private EventWaitHandle? _audioReady;
+        private int _callOrder;
 
         internal ManualResetEventSlim RenderObserved { get; } =
             new(initialState: false);
 
         internal int InitializeThreadId { get; private set; }
 
+        internal int InitializeOrder { get; private set; }
+
+        internal int PrimeThreadId { get; private set; }
+
+        internal int PrimeOrder { get; private set; }
+
         internal int StartThreadId { get; private set; }
+
+        internal int StartOrder { get; private set; }
 
         internal int RenderThreadId { get; private set; }
 
@@ -1505,11 +1555,19 @@ internal static class ContractSelfTest
         {
             _audioReady = audioReadyEvent;
             InitializeThreadId = Environment.CurrentManagedThreadId;
+            InitializeOrder = ++_callOrder;
+        }
+
+        public void Prime()
+        {
+            PrimeThreadId = Environment.CurrentManagedThreadId;
+            PrimeOrder = ++_callOrder;
         }
 
         public void Start()
         {
             StartThreadId = Environment.CurrentManagedThreadId;
+            StartOrder = ++_callOrder;
         }
 
         public void Render(BoundedUplinkPcmQueue source)

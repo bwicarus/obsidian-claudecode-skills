@@ -47,6 +47,7 @@ internal sealed class BoundedUplinkPcmQueue
     private readonly object _gate = new();
     private readonly Queue<byte[]> _frames = new();
     private int _headOffset;
+    private long _droppedFrames;
     private bool _stopped;
 
     internal int BufferedFrames
@@ -56,6 +57,17 @@ internal sealed class BoundedUplinkPcmQueue
             lock (_gate)
             {
                 return _frames.Count;
+            }
+        }
+    }
+
+    internal long DroppedFrames
+    {
+        get
+        {
+            lock (_gate)
+            {
+                return _droppedFrames;
             }
         }
     }
@@ -78,9 +90,10 @@ internal sealed class BoundedUplinkPcmQueue
             }
             if (_frames.Count >= MaximumFrames)
             {
-                throw new DirectProtocolException(
-                    "BW_COMPUTER_VOICE_DIRECT_UPLINK_QUEUE_OVERFLOW",
-                    "浏览器麦克风上行延迟超过 200 毫秒");
+                byte[] stale = _frames.Dequeue();
+                Array.Clear(stale);
+                _headOffset = 0;
+                _droppedFrames += 1;
             }
             _frames.Enqueue(pcmS16Le.ToArray());
         }
@@ -130,6 +143,8 @@ internal sealed class BoundedUplinkPcmQueue
 internal interface IVirtualMicrophoneRenderRuntime : IDisposable
 {
     void Initialize(EventWaitHandle audioReadyEvent);
+
+    void Prime();
 
     void Start();
 
@@ -289,6 +304,7 @@ internal sealed class NativeVirtualMicrophoneRenderRuntime :
     private IAudioRenderClient? _renderClient;
     private uint _bufferFrameCount;
     private bool _initialized;
+    private bool _primed;
     private bool _started;
     private int _disposed;
 
@@ -435,9 +451,64 @@ internal sealed class NativeVirtualMicrophoneRenderRuntime :
         }
     }
 
+    public void Prime()
+    {
+        _ = RequireInitializedAudioClient();
+        IAudioRenderClient renderClient = _renderClient
+            ?? throw new InvalidOperationException(
+                "BW_COMPUTER_VOICE_DIRECT_RENDER_SERVICE_MISSING");
+        if (_primed || _started)
+        {
+            throw new InvalidOperationException(
+                "BW_COMPUTER_VOICE_DIRECT_RENDER_ALREADY_PRIMED");
+        }
+
+        nint destination = 0;
+        bool released = false;
+        try
+        {
+            RequireSucceeded(
+                renderClient.GetBuffer(
+                    _bufferFrameCount,
+                    out destination),
+                "virtual-microphone.get-prime-render-buffer");
+            RequireSucceeded(
+                renderClient.ReleaseBuffer(
+                    _bufferFrameCount,
+                    (uint)AudioClientBufferFlags.Silent),
+                "virtual-microphone.release-prime-render-buffer");
+            released = true;
+            _primed = true;
+        }
+        catch (Exception exception)
+        {
+            if (destination != 0 && !released)
+            {
+                try
+                {
+                    RequireSucceeded(
+                        renderClient.ReleaseBuffer(
+                            _bufferFrameCount,
+                            (uint)AudioClientBufferFlags.Silent),
+                        "virtual-microphone.rollback-prime-render-buffer");
+                }
+                catch (Exception rollback)
+                {
+                    throw new AggregateException(exception, rollback);
+                }
+            }
+            throw;
+        }
+    }
+
     public void Start()
     {
         IAudioClient audioClient = RequireInitializedAudioClient();
+        if (!_primed)
+        {
+            throw new InvalidOperationException(
+                "BW_COMPUTER_VOICE_DIRECT_RENDER_NOT_PRIMED");
+        }
         RequireSucceeded(
             audioClient.Start(),
             "virtual-microphone.start-render");
@@ -553,6 +624,7 @@ internal sealed class NativeVirtualMicrophoneRenderRuntime :
             RequireSucceeded(
                 audioClient.Reset(),
                 "virtual-microphone.reset-render");
+            _primed = false;
         }
         catch (Exception exception)
         {
@@ -642,6 +714,8 @@ internal sealed class VirtualMicrophoneRenderSession :
     IDisposable,
     IAsyncDisposable
 {
+    internal const int RenderWakeFallbackMilliseconds = 100;
+
     private readonly object _gate = new();
     private readonly VirtualMicrophoneRenderRequest _request;
     private readonly IVirtualMicrophoneRenderRuntimeFactory _runtimeFactory;
@@ -680,6 +754,8 @@ internal sealed class VirtualMicrophoneRenderSession :
     internal Task Completion => _completed.Task;
 
     internal int BufferedFrames => _queue.BufferedFrames;
+
+    internal long DroppedFrames => _queue.DroppedFrames;
 
     internal static VirtualMicrophoneRenderSession Prepare(
         VirtualMicrophoneRenderRequest request) =>
@@ -797,6 +873,8 @@ internal sealed class VirtualMicrophoneRenderSession :
             runtime.Initialize(_audioReady);
             initialized = true;
             _lifetime.Token.ThrowIfCancellationRequested();
+            runtime.Prime();
+            _lifetime.Token.ThrowIfCancellationRequested();
             runtime.Start();
             if (_lifetime.IsCancellationRequested)
             {
@@ -816,7 +894,7 @@ internal sealed class VirtualMicrophoneRenderSession :
                     _audioReady);
             while (!_lifetime.IsCancellationRequested)
             {
-                _audioReady.WaitOne();
+                _audioReady.WaitOne(RenderWakeFallbackMilliseconds);
                 if (_lifetime.IsCancellationRequested)
                 {
                     break;

@@ -3577,3 +3577,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：相关合同测试、全量 Reader Node 合同及 Windows build/self-test 通过，新增同 session 晋升与 owner 切换断言。
 - **既有基线**：全量 Python/handoff 仍受 Windows `fcntl`、Linux shell/路径与既有测试数据影响；本次无 Python 生产改动，定向合同无回归。
 - **边界/下一步**：未主动 START、采音或发快捷键；Reader 部署后完整刷新 iPad PWA，用一次电话点击验收，扩展 vendor 仅随下次正式候选发布。
+
+## Codex：Windows 0.1.25 修复通话数秒后断开（2026-07-30 JST）
+- **根因/改动**：已证实断开由 200 ms 上行队列溢出触发；补 WASAPI `Start` 前静音预填、100 ms 首事件兜底，拥塞时丢最旧实时帧而不杀通话，协议/身份错误仍 fail closed。
+- **连带加固**：runtime status 单次 I/O 写失败不再永久杀死五秒心跳，避免健康 listener 后续被监督器按陈旧状态重启。
+- **验证/安装**：C# 无音频 self-test、桌面/打包定向测试及 Reader Node 合同全过；0.1.25 候选 verify/self-test 后原子安装，回滚目录 `C:\Users\bwica\bw-computer-voice-bridge-backups\install-0.1.25-20260730T104200692Z-a3662911`。
+- **当前状态/下一步**：任务 Running，唯一 listener/runtime/health 身份一致，双心跳周期同 PID/instance 且 `idle / captureActive=false`；未自动 START、采音或发键，下一步由用户在 iPad 真机确认通话持续与双向声音。

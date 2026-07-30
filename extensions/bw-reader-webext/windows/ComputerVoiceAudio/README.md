@@ -210,8 +210,11 @@ Voice generation 的 Windows 账本确认最长允许 5 秒；回执前下行 PC
 | 36 | 1920 | 960 个 48 kHz mono signed-16 little-endian 样本 |
 
 `VirtualMicrophoneRenderSession` 在专用 MTA 线程以 shared/event-driven 模式打开 A
-render endpoint；队列上限 200 ms，欠载写确定性静音，溢出、时间戳/sequence/session
-错配或 native backpressure 均 fail closed。START 在 A 成功打开前不得发送快捷键。
+render endpoint；`Start` 前先向 WASAPI 初始缓冲提交确定性静音，首个事件丢失时同一
+线程最多等待 100 ms 后主动推进一次。队列硬上限 200 ms，欠载写确定性静音。网络或
+调度短突发导致队列满时丢弃最旧帧并保留最新语音，不累积过期延迟，也不因此结束整通
+电话；帧格式、时间戳/sequence/session 错配或 native 端点失败仍 fail closed。START
+在 A 成功打开前不得发送快捷键。
 
 下行 process-loopback 只捕获目标进程及子进程，不读系统混音。`/5` 在快捷键前把精确
 Codex root PID 的 eRender 三种 role 指向 B、eCapture 三种 role 指向 A 的录音侧；
