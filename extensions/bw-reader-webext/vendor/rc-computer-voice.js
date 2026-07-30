@@ -24,6 +24,7 @@ if (window.__bwPwaProviderOnly) return;
   var PCM_UPLINK_BUFFER_LIMIT_BYTES = PCM_FRAME_BYTES * 10;
   var MAX_PENDING = 16;
   var OPEN_TIMEOUT_MS = 6000;
+  var CLOSE_TIMEOUT_MS = 1500;
   var REQUEST_TIMEOUT_MS = 7000;
   var START_TIMEOUT_MS = 45000;
   var HEARTBEAT_INTERVAL_MS = 5000;
@@ -393,6 +394,29 @@ if (window.__bwPwaProviderOnly) return;
 
   function currentOrigin() {
     return String(window.location && window.location.origin || "");
+  }
+
+  function extensionRuntimeWorld() {
+    var runtime = window.chrome && window.chrome.runtime;
+    return !!(
+      runtime &&
+      typeof runtime.id === "string" &&
+      runtime.id
+    );
+  }
+
+  function ownsReaderUi() {
+    if (currentOrigin() !== READER_ORIGIN) return true;
+    var root = document && document.documentElement;
+    var owner = root && root.dataset
+      ? String(root.dataset.bwReaderUiOwner || "")
+      : "";
+    // Only a true PWA book handoff publishes an explicit owner. Ordinary
+    // same-origin pages have no owner marker and must keep the extension path.
+    if (owner !== "pwa" && owner !== "extension") return true;
+    return extensionRuntimeWorld()
+      ? owner === "extension"
+      : owner === "pwa";
   }
 
   function exactRelayMessage(value, type, fields, label) {
@@ -818,6 +842,21 @@ if (window.__bwPwaProviderOnly) return;
     }
   };
 
+  ExtensionRelaySocket.prototype.forceClose = function () {
+    if (this.terminal && this.readyState === 3) {
+      this._finishClosed();
+      return;
+    }
+    this.terminal = true;
+    this.readyState = 3;
+    try {
+      if (this.port && typeof this.port.disconnect === "function") {
+        this.port.disconnect();
+      }
+    } catch (_) {}
+    this._finishClosed();
+  };
+
   function createDirectTransport(endpoint) {
     if (currentOrigin() === READER_ORIGIN) {
       if (typeof window.WebSocket !== "function") {
@@ -857,7 +896,26 @@ if (window.__bwPwaProviderOnly) return;
     this.openReject = null;
     this.openTimer = null;
     this.closingPromise = null;
+    this.closeResolve = null;
+    this.closeTimer = null;
   }
+
+  DirectSocket.prototype.setOptions = function (options) {
+    this.options = options || {};
+    return this;
+  };
+
+  DirectSocket.prototype._finishClose = function () {
+    if (this.closeTimer) {
+      clearTimeout(this.closeTimer);
+      this.closeTimer = null;
+    }
+    if (this.closeResolve) {
+      var resolve = this.closeResolve;
+      this.closeResolve = null;
+      resolve();
+    }
+  };
 
   DirectSocket.prototype._fail = function (error) {
     if (this.closed) return;
@@ -880,6 +938,7 @@ if (window.__bwPwaProviderOnly) return;
     try {
       if (socket && socket.readyState < 2) socket.close(1002, "protocol-error");
     } catch (_) {}
+    this._finishClose();
     if (!this.intentional && typeof this.options.onFatal === "function") {
       try { this.options.onFatal(error); } catch (_) {}
     }
@@ -936,6 +995,7 @@ if (window.__bwPwaProviderOnly) return;
         ));
       };
       socket.onclose = function () {
+        self._finishClose();
         if (self.intentional || self.closed) return;
         self._fail(directError(
           "Windows 桥接器连接已断开",
@@ -1233,16 +1293,32 @@ if (window.__bwPwaProviderOnly) return;
     });
     this.pending.clear();
     var socket = this.socket;
-    var transportClosed =
-      socket && typeof socket.whenClosed === "function"
-        ? socket.whenClosed()
-        : Promise.resolve();
-    this.closingPromise = Promise.resolve(transportClosed).catch(function () {});
+    if (socket && socket.readyState < 3) {
+      var self = this;
+      this.closingPromise = new Promise(function (resolve) {
+        self.closeResolve = resolve;
+        self.closeTimer = setTimeout(function () {
+          try {
+            if (typeof socket.forceClose === "function") socket.forceClose();
+          } catch (_) {}
+          self._finishClose();
+        }, CLOSE_TIMEOUT_MS);
+      });
+      if (typeof socket.whenClosed === "function") {
+        Promise.resolve(socket.whenClosed()).then(
+          function () { self._finishClose(); },
+          function () { self._finishClose(); }
+        );
+      }
+    } else {
+      this.closingPromise = Promise.resolve();
+    }
     try {
       if (socket && socket.readyState < 2) {
         socket.close(1000, "client-stop");
       }
     } catch (_) {}
+    if (socket && socket.readyState === 3) this._finishClose();
     this.socket = null;
     return this.closingPromise;
   };
@@ -1430,39 +1506,74 @@ if (window.__bwPwaProviderOnly) return;
     var attempt = availabilityAttempt;
     if (!attempt) return Promise.resolve();
     attempt.cancelled = true;
-    if (attempt.channel) attempt.channel.close();
+    if (attempt.channel && !attempt.borrowedSnapshot) {
+      attempt.channel.close();
+    }
     return Promise.resolve(attempt.promise).then(
       function () {},
       function () {}
     );
   }
 
+  function borrowSnapshotChannelForStatus(attempt) {
+    var state = snapshotLink;
+    if (!state || state.stopped) return Promise.resolve(null);
+    return Promise.resolve(state.promise).catch(function () {
+      return null;
+    }).then(function (resolved) {
+      if (
+        resolved !== state ||
+        snapshotLink !== state ||
+        state.stopped ||
+        !state.channel ||
+        state.channel.closed
+      ) {
+        return null;
+      }
+      attempt.borrowedSnapshot = true;
+      attempt.channel = state.channel;
+      return state.channel;
+    });
+  }
+
   function availability() {
     if (active) return Promise.resolve(activeAvailability(active));
+    if (!ownsReaderUi()) {
+      return Promise.resolve({
+        state: "unavailable",
+        reason: "当前 Reader 界面由另一运行时接管",
+        code: "BW_COMPUTER_VOICE_UI_NOT_OWNER",
+        endpoint: DIRECT_ENDPOINT,
+        status: null,
+      });
+    }
     if (availabilityAttempt) return availabilityAttempt.promise;
 
     var attempt = {
       cancelled: false,
       channel: null,
+      borrowedSnapshot: false,
       promise: null,
     };
     availabilityAttempt = attempt;
-    var yieldedSnapshot = !!snapshotLink;
-    attempt.promise = stopSnapshotLink().then(function () {
-      return openDirect(null, function (channel) {
-      attempt.channel = channel;
-      });
-    }).then(function (channel) {
-      if (attempt.cancelled) {
-        channel.close();
-        throw directError(
-          "状态刷新已让位给电话按钮启动",
-          "BW_COMPUTER_VOICE_DIRECT_CANCELLED",
-          false
-        );
-      }
-      return channel.request("status", {}).then(normalizeStatusPayload);
-    }).then(function (status) {
+    attempt.promise = borrowSnapshotChannelForStatus(attempt)
+      .then(function (channel) {
+        if (channel) return channel;
+        return openDirect(null, function (created) {
+          attempt.channel = created;
+        });
+      })
+      .then(function (channel) {
+        if (attempt.cancelled) {
+          if (!attempt.borrowedSnapshot) channel.close();
+          throw directError(
+            "状态刷新已让位给电话按钮启动",
+            "BW_COMPUTER_VOICE_DIRECT_CANCELLED",
+            false
+          );
+        }
+        return channel.request("status", {}).then(normalizeStatusPayload);
+      }).then(function (status) {
       return {
         state: status.state,
         reason: status.reason,
@@ -1473,14 +1584,12 @@ if (window.__bwPwaProviderOnly) return;
       if (attempt.cancelled && active) return activeAvailability(active);
       return offlineAvailability(error);
     }).finally(function () {
-      var closePromise = attempt.channel
+      var closePromise = attempt.channel && !attempt.borrowedSnapshot
         ? attempt.channel.close()
         : Promise.resolve();
       attempt.channel = null;
       if (availabilityAttempt === attempt) availabilityAttempt = null;
-      return closePromise.then(function () {
-        if (yieldedSnapshot) scheduleSnapshotReconnect(0);
-      });
+      return closePromise;
     });
     return attempt.promise;
   }
@@ -2778,6 +2887,7 @@ if (window.__bwPwaProviderOnly) return;
 
   function snapshotLinkWanted() {
     return !!(
+      ownsReaderUi() &&
       selectedEngineKnown &&
       computerVoiceSelected &&
       contextSyncEnabled() &&
@@ -2804,6 +2914,44 @@ if (window.__bwPwaProviderOnly) return;
       closePromise,
       Promise.resolve(state.promise).catch(function () {}),
     ]).then(function () {});
+  }
+
+  function claimSnapshotLinkForStart() {
+    var state = snapshotLink;
+    if (!state) return Promise.resolve(null);
+    if (snapshotReconnectTimer) {
+      clearTimeout(snapshotReconnectTimer);
+      snapshotReconnectTimer = null;
+    }
+    return Promise.resolve(state.promise).catch(function () {
+      return null;
+    }).then(function (resolved) {
+      var usable = (
+        resolved === state &&
+        snapshotLink === state &&
+        !state.stopped &&
+        state.channel &&
+        !state.channel.closed &&
+        state.sessionBytes instanceof Uint8Array &&
+        state.sessionBytes.length === 16
+      );
+      if (!usable) {
+        return snapshotLink === state
+          ? stopSnapshotLink().then(function () { return null; })
+          : null;
+      }
+      snapshotLink = null;
+      snapshotLinkGeneration += 1;
+      stopContextPump(state);
+      state.stopped = true;
+      var claimed = {
+        channel: state.channel,
+        sessionId: state.sessionId,
+        sessionBytes: state.sessionBytes,
+      };
+      state.channel = null;
+      return claimed;
+    });
   }
 
   function clearSnapshotState(state) {
@@ -2907,9 +3055,11 @@ if (window.__bwPwaProviderOnly) return;
       return Promise.resolve(snapshotLink);
     }
     var generation = ++snapshotLinkGeneration;
+    var session = randomSession();
     var state = {
       channel: null,
-      sessionId: randomSession().id,
+      sessionId: session.id,
+      sessionBytes: session.bytes,
       contextOnly: true,
       stopped: false,
       contextPump: null,
@@ -3188,12 +3338,40 @@ if (window.__bwPwaProviderOnly) return;
     }
   }
 
+  function activeDirectOptions(state) {
+    return {
+      onStatus: function (status) {
+        if (active !== state || state.stopped) return;
+        emitStatus({
+          state: status.state,
+          sessionId: state.sessionId,
+          message: statusMessage(status.state, status.reason),
+        });
+      },
+      onFatal: function (error) {
+        if (active === state && !state.stopped) {
+          failActive(state, error, true);
+        }
+      },
+      onBinary: function (buffer) {
+        handlePcmFrame(state, buffer);
+      },
+    };
+  }
+
   function startFromUserGesture(options) {
     options = options || {};
     if (active) {
       return Promise.reject(directError(
         "电脑客户端通话已经启动",
         "BW_COMPUTER_VOICE_ALREADY_ACTIVE",
+        false
+      ));
+    }
+    if (!ownsReaderUi()) {
+      return Promise.reject(directError(
+        "当前 Reader 界面由另一运行时接管",
+        "BW_COMPUTER_VOICE_UI_NOT_OWNER",
         false
       ));
     }
@@ -3232,10 +3410,24 @@ if (window.__bwPwaProviderOnly) return;
     };
     surface.ownerState = state;
     active = state;
-    var availabilityClosed = Promise.all([
-      cancelAvailabilityForStart(),
-      stopSnapshotLink(),
-    ]);
+    var availabilityClosed = cancelAvailabilityForStart().then(function () {
+      return claimSnapshotLinkForStart();
+    }).then(function (claimed) {
+      if (!claimed) return null;
+      if (state.stopped || state.cancelled || active !== state) {
+        return claimed.channel.close().then(function () {
+          throw directError(
+            "Windows 桥接启动已取消",
+            "BW_COMPUTER_VOICE_DIRECT_CANCELLED",
+            false
+          );
+        });
+      }
+      state.sessionId = claimed.sessionId;
+      state.sessionBytes = claimed.sessionBytes;
+      state.channel = claimed.channel.setOptions(activeDirectOptions(state));
+      return state.channel;
+    });
     emitStatus({
       state: "checking",
       sessionId: state.sessionId,
@@ -3264,22 +3456,10 @@ if (window.__bwPwaProviderOnly) return;
           true
         );
       }
-      return openDirect({
-        onStatus: function (status) {
-          if (active !== state || state.stopped) return;
-          emitStatus({
-            state: status.state,
-            sessionId: state.sessionId,
-            message: statusMessage(status.state, status.reason),
-          });
-        },
-        onFatal: function (error) {
-          if (active === state && !state.stopped) failActive(state, error, true);
-        },
-        onBinary: function (buffer) {
-          handlePcmFrame(state, buffer);
-        },
-      }, function (channel) {
+      if (state.channel && !state.channel.closed) {
+        return state.channel;
+      }
+      return openDirect(activeDirectOptions(state), function (channel) {
         state.channel = channel;
       });
     }).then(function (channel) {
@@ -3590,7 +3770,10 @@ if (window.__bwPwaProviderOnly) return;
 
   function abortForPageExit() {
     clearPreparedSurface(true);
-    clearSnapshotLink();
+    // Page lifecycle events may freeze script execution before CONTEXT-CLEAR
+    // receives an ACK. Release the WSS slot immediately; freshness rules keep
+    // any last snapshot from being mistaken for current content.
+    stopSnapshotLink();
     var state = active;
     active = null;
     dialPending = false;
@@ -3603,6 +3786,19 @@ if (window.__bwPwaProviderOnly) return;
     stopSurfaceMicrophone(state.surface);
     if (state.channel) state.channel.close();
     releaseSurface(state.surface);
+  }
+
+  function readerUiOwnerChanged() {
+    if (ownsReaderUi()) {
+      reconcileSnapshotLink();
+      return;
+    }
+    clearPreparedSurface(true);
+    if (active) {
+      stop("ui-owner-changed");
+      return;
+    }
+    stopSnapshotLink();
   }
 
   function mountSettings(container) {
@@ -3684,6 +3880,10 @@ if (window.__bwPwaProviderOnly) return;
     window.addEventListener("online", resumeSnapshotLinkFromForeground);
   }
   if (document && typeof document.addEventListener === "function") {
+    document.addEventListener(
+      "bw:book-ui-owner-changed",
+      readerUiOwnerChanged
+    );
     document.addEventListener(
       "visibilitychange",
       resumeSnapshotLinkFromForeground

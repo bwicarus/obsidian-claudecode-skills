@@ -4280,6 +4280,40 @@ internal static class DirectBridgeSelfTest
                 .GetProperty("state").GetString() == "unknown",
             "direct-snapshot-clear-removes-page-and-selection",
             checks);
+
+        _ = RequireSuccess(
+            await SendAsync(
+                contextSession,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "start",
+                    requestId = "request-snapshot-promote-start",
+                    sessionId = contextSessionId,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "start");
+        Require(
+            contextSession.Phase == DirectProtocolPhase.Active
+            && coordinator.ActiveSessionId == contextSessionId
+            && media.StartCount == 2
+            && media.LastStartRequest?.StartTypist == false,
+            "direct-snapshot-context-only-session-promotes-in-place",
+            checks);
+        _ = RequireSuccess(
+            await SendAsync(
+                contextSession,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "stop",
+                    requestId = "request-snapshot-promote-stop",
+                    sessionId = contextSessionId,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "stop");
     }
 
     private static async Task CheckLocalPdfSnapshotResolutionAsync(

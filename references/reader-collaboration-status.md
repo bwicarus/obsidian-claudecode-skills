@@ -3570,3 +3570,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：C# build/self-test、Reader Node 合同、0.1.24 包 verify/self-test 通过；真实 Codex 两轮调用保持同一 bridge PID/instanceId，callSequence `1 → 2`。
 - **安装/配置**：0.1.24 native 已原子替换，回滚目录 `C:\Users\bwica\bw-computer-voice-bridge-backups\install-0.1.24-20260730T090722024Z-9c9fed26`；`reader_snapshot` 已改为 `http://127.0.0.1:43128/mcp`。
 - **边界/下一步**：全程 `captureActive=false`，未发快捷键、未部署 Pi；Python/handoff 仍只有既有 Windows `fcntl`/Linux 路径失败。重启 Codex 后旧 stdio 子进程才退出，再复测 Desktop Process Manager 上游闪窗。
+
+## Codex：Reader 与通话复用同一条 Windows WSS（2026-07-30 JST）
+- **改了什么**：常驻快照连接原位晋升为通话连接，`close()` 等真实关闭且有界超时；PWA 与扩展按当前 UI owner 互斥持有唯一 WSS。
+- **根因**：状态检查/START 在旧连接尚未释放时另建 WSS，以及两套运行时同时连单槽服务，均会命中 409 并被前端笼统显示为桥接器离线。
+- **怎么验的**：相关合同测试、全量 Reader Node 合同及 Windows build/self-test 通过，新增同 session 晋升与 owner 切换断言。
+- **既有基线**：全量 Python/handoff 仍受 Windows `fcntl`、Linux shell/路径与既有测试数据影响；本次无 Python 生产改动，定向合同无回归。
+- **边界/下一步**：未主动 START、采音或发快捷键；Reader 部署后完整刷新 iPad PWA，用一次电话点击验收，扩展 vendor 仅随下次正式候选发布。

@@ -154,6 +154,7 @@ function createServer(scenario) {
     activeSocket: null,
     deferredStart: null,
     deferredContextClears: [],
+    deferredContextOpens: [],
   };
 
   const result = (socket, request, payload) => {
@@ -192,6 +193,19 @@ function createServer(scenario) {
         scenario.activeReadingRequests.length
         + scenario.contextClearRequests.length,
       outcome: "accepted",
+    });
+  };
+
+  server.resolveDeferredContextOpen = () => {
+    assert.ok(
+      server.deferredContextOpens.length,
+      "missing deferred CONTEXT-OPEN",
+    );
+    const { socket, request } = server.deferredContextOpens.shift();
+    result(socket, request, {
+      sessionId: request.sessionId,
+      state: "context-only",
+      mode: scenario.contextDeliveryMode || "legacy-inject",
     });
   };
 
@@ -284,6 +298,10 @@ function createServer(scenario) {
         return;
       }
       if (request.type === "context-open") {
+        if (scenario.deferContextOpen) {
+          server.deferredContextOpens.push({ socket: this, request });
+          return;
+        }
         result(this, request, {
           sessionId: request.sessionId,
           state: "context-only",
@@ -515,6 +533,7 @@ function createRelayRuntime(server, scenario) {
           }
           if (message.type === "close") {
             assert.deepEqual(Object.keys(message), ["type"]);
+            if (scenario.relayCloseHangs) return;
             socket?.close();
             return;
           }
@@ -759,6 +778,7 @@ function createHarness(overrides = {}) {
     relayLifecycle: [],
     relayOverlapAttempts: 0,
     relayAutoAck: true,
+    relayCloseHangs: false,
     pendingRelayAcks: [],
     journalCalls: [],
     journalResponder: null,
@@ -769,12 +789,15 @@ function createHarness(overrides = {}) {
     activeReadingRequests: [],
     contextClearRequests: [],
     deferContextClear: false,
+    deferContextOpen: false,
     activeReadingFetches: 0,
     contextSyncEnabled: false,
     activeReading: null,
     serverActiveReading: null,
     contextModePosts: [],
     realtimeVoiceAllowed: true,
+    uiOwner: "",
+    extensionWorld: false,
     ...overrides,
   };
   const server = createServer(scenario);
@@ -807,6 +830,11 @@ function createHarness(overrides = {}) {
   };
   const document = {
     visibilityState: scenario.visibilityState || "visible",
+    documentElement: {
+      dataset: {
+        bwReaderUiOwner: scenario.uiOwner || "",
+      },
+    },
     getElementById(id) {
       return phoneButtons[id] || null;
     },
@@ -873,6 +901,12 @@ function createHarness(overrides = {}) {
     window.chrome = {
       runtime: createRelayRuntime(server, scenario),
     };
+  } else if (scenario.extensionWorld) {
+    window.chrome = {
+      runtime: {
+        id: "abcdefghijklmnopabcdefghijklmnop",
+      },
+    };
   }
   const context = vm.createContext({
     window,
@@ -928,9 +962,9 @@ function createHarness(overrides = {}) {
     server,
     clickHandlers,
     phoneButtons,
-    dispatchDocumentEvent(type) {
+    dispatchDocumentEvent(type, detail) {
       for (const handler of documentEventHandlers.get(type) || []) {
-        handler({ type });
+        handler({ type, detail });
       }
     },
     dispatchWindowEvent(type) {
@@ -940,6 +974,9 @@ function createHarness(overrides = {}) {
     },
     setVisibilityState(value) {
       document.visibilityState = value;
+    },
+    setUiOwner(value) {
+      document.documentElement.dataset.bwReaderUiOwner = value;
     },
   };
 }
@@ -1082,7 +1119,7 @@ test("START 只消费受控电话按钮的真实点击，直接调用、伪同 I
   assert.equal(forwarded.scenario.microphoneRequests.length, 1);
 });
 
-test("snapshot-mcp 模式在未通话时直连 Windows 更新本地快照，通话时复用同一路径且不并跑旧注入", async () => {
+test("snapshot-mcp 常驻 WSS 原地升级为通话且不并跑旧注入", async () => {
   const harness = createHarness({
     contextDeliveryMode: "snapshot-mcp",
     contextSyncEnabled: true,
@@ -1118,12 +1155,17 @@ test("snapshot-mcp 模式在未通话时直连 Windows 更新本地快照，通�
     deliveryMode: "snapshot-mcp",
   });
   const backgroundSocket = harness.server.sockets[0];
+  const available = await harness.api.availability();
+  assert.equal(available.state, "idle");
+  assert.equal(harness.server.sockets.length, 1);
+  assert.equal(backgroundSocket.readyState, 1);
 
   phoneClick(harness, { trusted: true });
   const started = await harness.api.startFromUserGesture();
   assert.equal(started.ok, true);
-  assert.equal(backgroundSocket.readyState, 3);
-  assert.equal(harness.server.sockets.length, 2);
+  assert.equal(backgroundSocket.readyState, 1);
+  assert.equal(harness.server.sockets.length, 1);
+  assert.equal(harness.server.activeSocket, backgroundSocket);
   const starts = harness.server.requests.filter(
     (request) => request.type === "start",
   );
@@ -1132,6 +1174,7 @@ test("snapshot-mcp 模式在未通话时直连 Windows 更新本地快照，通�
   );
   assert.equal(starts.length, 1);
   assert.equal(opens.length, 1);
+  assert.equal(starts[0].sessionId, opens[0].sessionId);
   assert.equal(harness.scenario.microphoneRequests.length, 1);
 
   harness.scenario.activeReading = {
@@ -1148,6 +1191,38 @@ test("snapshot-mcp 模式在未通话时直连 Windows 更新本地快照，通�
   harness.api.setSelectedEngine("codex");
   await harness.api.stop("test");
   assert.equal(harness.api.isActive(), false);
+});
+
+test("snapshot-mcp 晋升等待期间被停止会关闭认领到的旧 WSS", async () => {
+  const harness = createHarness({
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncEnabled: true,
+    deferContextOpen: true,
+  });
+  harness.api.setSelectedEngine("computer_client");
+  await waitForCondition(
+    () => harness.server.deferredContextOpens.length === 1,
+    "deferred context-open",
+  );
+  const snapshotSocket = harness.server.sockets[0];
+
+  phoneClick(harness, { trusted: true });
+  const rejected = assert.rejects(
+    harness.api.startFromUserGesture(),
+    (error) => error?.code === "BW_COMPUTER_VOICE_DIRECT_CANCELLED",
+  );
+  await harness.api.stop("test-cancel-during-claim");
+  harness.server.resolveDeferredContextOpen();
+  await rejected;
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(snapshotSocket.readyState, 3);
+  assert.equal(harness.api.isActive(), false);
+  assert.equal(
+    harness.server.requests.some((request) => request.type === "start"),
+    false,
+  );
+  harness.api.setSelectedEngine("codex");
 });
 
 test("snapshot-mcp 后台挂起的重连计时器在回到前台时立即恢复且不重复连接", async () => {
@@ -1202,11 +1277,10 @@ test("snapshot-mcp 后台挂起的重连计时器在回到前台时立即恢复�
   harness.api.setSelectedEngine("codex");
 });
 
-test("snapshot-mcp pagehide 清空未完成时 pageshow 会在清空后恢复且不重复连接", async () => {
+test("snapshot-mcp pagehide 立即释放 WSS，不等待异步清空再恢复", async () => {
   const harness = createHarness({
     contextDeliveryMode: "snapshot-mcp",
     contextSyncEnabled: true,
-    deferContextClear: true,
     activeReading: {
       kind: "pdf",
       file: "book.pdf",
@@ -1221,29 +1295,25 @@ test("snapshot-mcp pagehide 清空未完成时 pageshow 会在清空后恢复且
     "snapshot before pagehide",
   );
   assert.equal(harness.server.sockets.length, 1);
+  const firstSocket = harness.server.sockets[0];
 
   harness.dispatchWindowEvent("pagehide");
-  await waitForCondition(
-    () => harness.server.deferredContextClears.length === 1,
-    "deferred pagehide context-clear",
-  );
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(firstSocket.readyState, 3);
+  assert.equal(harness.scenario.contextClearRequests.length, 0);
   harness.dispatchWindowEvent("pageshow");
   harness.dispatchDocumentEvent("visibilitychange");
   harness.dispatchWindowEvent("online");
-  await new Promise((resolve) => setTimeout(resolve, 25));
-  assert.equal(harness.server.sockets.length, 1);
-
-  harness.server.resolveDeferredContextClear();
   await waitForCondition(
     () => harness.server.sockets.length === 2,
-    "snapshot reconnect after pagehide clear",
+    "snapshot reconnect after pagehide",
     500,
   );
   await waitForCondition(
     () => harness.server.requests.filter(
       (request) => request.type === "context-open",
     ).length === 2,
-    "context-open after pagehide clear",
+    "context-open after pagehide",
     500,
   );
   assert.equal(
@@ -1256,8 +1326,58 @@ test("snapshot-mcp pagehide 清空未完成时 pageshow 会在清空后恢复且
   harness.dispatchWindowEvent("online");
   await new Promise((resolve) => setTimeout(resolve, 25));
   assert.equal(harness.server.sockets.length, 2);
-  harness.scenario.deferContextClear = false;
   harness.api.setSelectedEngine("codex");
+});
+
+test("PWA 与扩展只由当前 UI owner 维护 Windows 快照连接", async () => {
+  const page = createHarness({
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncEnabled: true,
+    uiOwner: "pwa",
+  });
+  page.api.setSelectedEngine("computer_client");
+  await waitForRequest(page, "context-open");
+  const pageSocket = page.server.sockets[0];
+
+  page.setUiOwner("extension");
+  page.dispatchDocumentEvent("bw:book-ui-owner-changed", {
+    owner: "extension",
+  });
+  await waitForCondition(
+    () => pageSocket.readyState === 3,
+    "page owner releases snapshot socket",
+    500,
+  );
+
+  const extension = createHarness({
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncEnabled: true,
+    uiOwner: "pwa",
+    extensionWorld: true,
+  });
+  extension.api.setSelectedEngine("computer_client");
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(extension.server.sockets.length, 0);
+  const unavailable = await extension.api.availability();
+  assert.equal(unavailable.code, "BW_COMPUTER_VOICE_UI_NOT_OWNER");
+
+  extension.setUiOwner("extension");
+  extension.dispatchDocumentEvent("bw:book-ui-owner-changed", {
+    owner: "extension",
+  });
+  await waitForRequest(extension, "context-open");
+  assert.equal(extension.server.sockets.length, 1);
+  extension.api.setSelectedEngine("codex");
+});
+
+test("同源普通网页没有 book owner marker 时不被扩展门禁误吞", async () => {
+  const extension = createHarness({
+    extensionWorld: true,
+    uiOwner: "",
+  });
+  const available = await extension.api.availability();
+  assert.equal(available.state, "idle");
+  assert.equal(extension.server.sockets.length, 1);
 });
 
 test("snapshot-mcp 前台唤醒不为其他模型、关闭同步或活动通话抢建连接", async () => {
@@ -1751,6 +1871,33 @@ test("状态刷新让位并释放单标签 relay 后才 START，通话中刷新�
   assert.equal(current.state, "active");
   assert.equal(harness.scenario.relayPorts.length, portCount);
   assert.equal(harness.server.sockets.length, socketCount);
+  await harness.api.stop("test");
+});
+
+test("扩展后台不确认 close 时有界强制释放 relay 后才允许新连接", async () => {
+  const timers = createManualTimers();
+  const harness = createHarness({
+    origin: "https://arbitrary.example",
+    extensionRelay: true,
+    relayCloseHangs: true,
+    timers,
+  });
+  const refresh = harness.api.availability();
+  await waitForRequest(harness, "status");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(timers.count(1500), 1);
+  timers.runOne(1500);
+  const available = await refresh;
+  assert.equal(available.state, "idle");
+  assert.equal(
+    harness.scenario.relayLifecycle.includes("port-disconnect"),
+    true,
+  );
+
+  const started = await startWithTrustedGesture(harness);
+  assert.equal(started.ok, true);
+  assert.equal(harness.scenario.relayOverlapAttempts, 0);
+  assert.equal(harness.scenario.relayPorts.length, 2);
   await harness.api.stop("test");
 });
 
