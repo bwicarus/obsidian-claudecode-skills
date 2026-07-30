@@ -3619,3 +3619,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **笔迹语义**：笔迹段直接给无参看图入口，pending 时工具有界等待 PWA 稳定合成；成功看图后常驻进程记住当前笔迹，未变化旧图不再抢占模糊指代。
 - **怎么验的**：Windows C# Release build 与无音频 self-test 通过；0.1.30 包 verify/self-test 及安装后真实 HTTP MCP 调用确认仅一段 Markdown、无 raw schema/revision。
 - **安装/下一步**：已原子替换 Windows 七文件，回滚目录 `C:\Users\bwica\bw-computer-voice-bridge-backups\install-0.1.30-20260730T154723418Z`；未改 Pi/PWA、未启动语音或采音，重开 Codex 后做四种真机问法。
+
+## Codex：PWA 主动发布稳定页图并统一上下文接力（2026-07-31 JST）
+- **改了什么**：停笔约两秒后 PWA 主动合成并经既有认证 WSS 发布当前页、笔迹和可见叠加层；Windows 按真实卷、页和笔迹版本缓存，换页/新笔/清空立即废止旧图。
+- **上下文语义**：本地网页、Markdown 与 MCP 复用同一有序自然语言投影；选区从 `page.context` 直接折叠，内部 revision/ref/latestEvent 不再展示。
+- **怎么验的**：Reader Node 全量合同、C# build/无音频 self-test、候选包 self-test 与部署预检通过；公网三份脚本均确认新发布标记。
+- **安装/发布**：Windows 0.1.31 已原子安装，回滚目录 `C:\Users\bwica\bw-computer-voice-bridge-backups\install-0.1.31-20260730T163634875Z`；Reader 事务 `20260730T164027Z-246192` 完成，服务健康。
+- **没做/下一步**：未启动语音、采音或发快捷键；用户完整刷新 iPad 后画一笔、停两秒，再检查本地页图、选区与模糊指代看图。
