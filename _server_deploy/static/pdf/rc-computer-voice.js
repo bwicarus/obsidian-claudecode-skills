@@ -1657,7 +1657,9 @@
       ) {
         return null;
       }
-      return Promise.resolve(RC.captureInkRegion()).then(function (shot) {
+      return Promise.resolve(RC.captureInkRegion({
+        page: request.page,
+      })).then(function (shot) {
         var latest = localActiveReadingSnapshot();
         if (
           !latest ||

@@ -903,6 +903,7 @@ function createHarness(overrides = {}) {
     readerResultReceipt: { outcome: "rendered" },
     readerVisualChunks: [],
     readerVisualCaptureCalls: 0,
+    readerVisualCaptureTargets: [],
     readerVisualCapture: null,
     readerVisualDrawing: null,
     readerVisualOutgoingState: {
@@ -994,8 +995,9 @@ function createHarness(overrides = {}) {
           return structuredClone(scenario.readerResultReceipt);
         },
       },
-      captureInkRegion() {
+      captureInkRegion(target) {
         scenario.readerVisualCaptureCalls += 1;
+        scenario.readerVisualCaptureTargets.push(structuredClone(target));
         return Promise.resolve(scenario.readerVisualCapture);
       },
       outgoing: {
@@ -1496,6 +1498,10 @@ test("snapshot-mcp MCP 视觉请求复用笔迹合成图并在 64KiB 内分块�
   );
 
   assert.equal(harness.scenario.readerVisualCaptureCalls, 1);
+  assert.deepEqual(
+    harness.scenario.readerVisualCaptureTargets,
+    [{ page: 24 }],
+  );
   assert.equal(
     harness.scenario.readerVisualChunks.map((chunk) => chunk.data).join(""),
     b64,

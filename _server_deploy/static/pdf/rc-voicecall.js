@@ -4477,21 +4477,37 @@
       return b64.length > 3000 ? { media_type: 'image/jpeg', b64: b64 } : null;
     } catch (e) { return null; }
   }
-  // 当前视口里**带手写**的页(page-wrap 或 pdf-upage);给 see_ink 按笔迹外接框截局部用。
-  function _curInkPageEl() {
+  function _inkTargetPage(target) {
+    if (target == null) return null;
+    var page = (typeof target === 'object') ? target.page : target;
+    return (page == null || page === '') ? null : String(page);
+  }
+  function _inkPageMatchesTarget(el, targetPage) {
+    if (targetPage == null) return true;   // 旧语音链无参调用:保持"首个可见墨迹页"
+    var page = null;
+    if (el && el.dataset && el.dataset.pageNum != null) page = el.dataset.pageNum;
+    else if (el && el.__upRec && el.__upRec.page != null) page = el.__upRec.page;
+    return page != null && String(page) === targetPage;
+  }
+  // 当前视口里**带手写**的页(page-wrap 或 pdf-upage);target 可选。
+  // 快照 MCP 会传精确页码,双页同时可见时不能把相邻页的墨迹图冒充当前 revision。
+  function _curInkPageEl(target) {
+    var targetPage = _inkTargetPage(target);
     var els = document.querySelectorAll('.page-wrap[data-page-num], .pdf-upage');
     for (var i = 0; i < els.length; i++) {
       var el = els[i], r = el.getBoundingClientRect();
-      if (r.bottom > 0 && r.top < (window.innerHeight || 0) && el.__inkStrokes && el.__inkStrokes.length) return el;
+      if (r.bottom > 0 && r.top < (window.innerHeight || 0) &&
+          _inkPageMatchesTarget(el, targetPage) &&
+          el.__inkStrokes && el.__inkStrokes.length) return el;
     }
     return null;
   }
   // 用户点子:前端截图但**灵活截局部**——按笔迹外接框(+留白上下文)只截那一小块,而非整屏。所见即所得 + 聚焦。
-  async function _captureInkRegion() {
+  async function _captureInkRegion(target) {
     try {
       var surface = _visualSurface();
       if (surface && surface.strokes.length) return await _captureSurface(surface, _surfaceInkCrop(surface));
-      var el = _curInkPageEl();
+      var el = _curInkPageEl(target);
       var strokes = el && el.__inkStrokes;
       if (!el || !strokes || !strokes.length) return null;
       var x0 = 1, y0 = 1, x1 = 0, y1 = 0;   // 笔迹外接框(归一化 0-1)
