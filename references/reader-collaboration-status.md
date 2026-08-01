@@ -3641,9 +3641,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：Reader Node 全量合同通过，生成的扩展 vendor 与真源同批更新。
 - **没做/下一步**：未触发麦克风、采音或快捷键；部署后由用户直接在 iPad App 实测。
 
-## Codex：电脑客户端 Codex / GPT Classic 目标选择候选（2026-08-01 JST，Windows 已安装）
+## Codex：电脑客户端 Codex / GPT Classic 目标选择发布（2026-08-01 JST）
 - **改了什么**：电脑客户端页新增“语音与文字接力目标”；START 将固定 `appKind` 贯穿 Swift、WSS、Windows 应用/语音控制与旧版 typist。
 - **上下文边界**：App 原生通话的 Reader `context` / `active-reading` 复用同一 WSS；快照 MCP 与旧版文字注入仍互斥，GPT Classic 文字接力须显式开启旧版模式。
 - **怎么验的**：Reader 全量合同通过；Windows 0.1.38 保留 283 项完整自检、绘图/MCP、`/6` A/B 总线与 F24 broker，包校验及桌面 96 项测试通过，均未激活音频。
 - **安装**：已备份并替换 native/typist 六项，清理 6 个占用旧 EXE 的 MCP 子进程后恢复监听；新 PID 35844 为 `idle`、`captureActive=false`，Swift 已直接写入 iCloud 工程。
-- **没做/下一步**：未启动 Codex/GPT Classic、未发快捷键或采音；Reader 设置页尚未提交推送/部署，待发布后由用户在 iPad App 分别实测两个目标。
+- **发布/下一步**：提交至 `82519c3`，Reader 0.2.76 事务 `20260801T142225Z-343375` 的 E2E 与服务健康检查全过；未启动应用、发快捷键或采音，用户重开 iPad App 后分别实测两个目标。
