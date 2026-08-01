@@ -5586,9 +5586,28 @@ if (window.__bwPwaProviderOnly) return;
   function _toggleNativeComputerVoiceApp() {
     if (!_nativeComputerVoiceAppAvailable()) return false;
     try {
-      window.webkit.messageHandlers.bwNativeComputerVoice.postMessage({
-        action: 'toggle'
-      });
+      var computerVoice = window.RC && RC.computerVoice;
+      function postTarget(appKind) {
+        window.webkit.messageHandlers.bwNativeComputerVoice.postMessage({
+          action: 'toggle',
+          appKind: appKind === 'chatgpt-classic'
+            ? 'chatgpt-classic'
+            : 'codex-desktop'
+        });
+      }
+      var current = computerVoice &&
+        typeof computerVoice.getTargetApp === 'function'
+          ? computerVoice.getTargetApp()
+          : 'codex-desktop';
+      if (computerVoice && typeof computerVoice.loadTargetApp === 'function') {
+        computerVoice.loadTargetApp().then(postTarget, function (error) {
+          if (window.RC && typeof RC.toast === 'function') {
+            RC.toast(error && error.message || '无法读取电脑客户端目标');
+          }
+        });
+      } else {
+        postTarget(current);
+      }
       return true;
     } catch (e) {
       return false;

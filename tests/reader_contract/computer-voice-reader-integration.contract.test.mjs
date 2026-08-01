@@ -12,7 +12,7 @@ const settings = read("_server_deploy/static/pdf/rc-settings.js");
 const background = read("extensions/bw-reader-webext/background.js");
 const offscreen = read("extensions/bw-reader-webext/offscreen.js");
 
-test("电脑客户端保留原按钮与设置标签，但 App 内只发送原生 toggle", () => {
+test("电脑客户端保留原按钮与设置标签，App toggle 携带固定目标", () => {
   assert.doesNotMatch(assistant, /value="computer_client"/);
   assert.doesNotMatch(assistant, /RC\.computerVoice\.mountSettings\(card\)/);
   assert.doesNotMatch(
@@ -34,8 +34,16 @@ test("电脑客户端保留原按钮与设置标签，但 App 内只发送原生
   );
   assert.match(
     voicecall,
-    /function _toggleNativeComputerVoiceApp\(\)[\s\S]*bwNativeComputerVoice\.postMessage\(\{\s*action: 'toggle'\s*\}\)/,
+    /function _toggleNativeComputerVoiceApp\(\)[\s\S]*loadTargetApp/,
   );
+  assert.match(
+    voicecall,
+    /function postTarget\(appKind\)[\s\S]*bwNativeComputerVoice\.postMessage\(\{[\s\S]*action: 'toggle',[\s\S]*appKind:/,
+  );
+  assert.match(runtime, /rt_computer_target/);
+  assert.match(runtime, /<option value="codex-desktop">Codex<\/option>/);
+  assert.match(runtime, /<option value="chatgpt-classic">GPT Classic<\/option>/);
+  assert.match(runtime, /appKind: state\.appKind/);
 });
 
 test("App 电脑按钮只切换原生桥，普通电话保持独立", () => {
@@ -265,6 +273,50 @@ test("BWReader App 接管电脑按钮后，网页运行时不会预备麦克风�
     /function startFromUserGesture[\s\S]*return surface\.microphonePromise[\s\S]*channel\.request\("start", \{\s*sessionId: state\.sessionId/,
   );
   assert.doesNotMatch(runtime, /connectNative|RTCPeerConnection|signalTransport/);
+});
+
+test("App 原生语音复用同一 WSS 承载 Reader 上下文且停止时清泵", () => {
+  assert.match(
+    runtime,
+    /function nativeContextRequest\(action, fields, timeoutMs\)[\s\S]*action !== "context" && action !== "active-reading"[\s\S]*bwNativeComputerContext\.postMessage\(\{[\s\S]*requestId:[\s\S]*action:[\s\S]*fields:/,
+  );
+  assert.match(
+    runtime,
+    /window\.__bwNativeComputerContextApplyResult = applyNativeContextResult/,
+  );
+  assert.match(
+    runtime,
+    /function prepareNativeContextHandoff\(\)[\s\S]*nativeContextHandoffPending = true[\s\S]*RC\.ctxSync\.getConfig\(\)[\s\S]*contextDeliveryMode = value\.deliveryMode[\s\S]*return stopSnapshotLink\(\)/,
+  );
+  assert.match(
+    runtime,
+    /function snapshotLinkWanted\(\)[\s\S]*!nativeComputerVoiceOwnsWss\(\)/,
+  );
+  assert.match(
+    runtime,
+    /function setContextDeliveryMode\(mode\)[\s\S]*if \(nativeComputerVoiceOwnsWss\(\)\)[\s\S]*BW_READER_CONTEXT_DELIVERY_MODE_NATIVE_BUSY/,
+  );
+  const nativeRelay = runtime.slice(
+    runtime.indexOf("function startNativeContextRelay(sessionId)"),
+    runtime.indexOf("function reconcileNativeContextRelay()"),
+  );
+  assert.match(nativeRelay, /startContextPump\(state\)/);
+  assert.match(
+    nativeRelay,
+    /contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT[\s\S]*startActiveReadingPump\(state\)/,
+  );
+  assert.match(
+    runtime,
+    /function stopNativeContextRelay\(\)[\s\S]*state\.stopped = true[\s\S]*stopContextPump\(state\)[\s\S]*rejectNativeContextRequests/,
+  );
+  assert.match(
+    runtime,
+    /"bw-native-computer-voice-state",\s*reconcileNativeContextRelay/,
+  );
+  assert.match(
+    runtime,
+    /GPT Classic：[\s\S]*“测试旧版文字注入”[\s\S]*实时快照\/MCP 仍属于 Codex/,
+  );
 });
 
 test("扩展上行用 sequence + binary-accepted 单 credit，STATUS 保留 lastError", () => {

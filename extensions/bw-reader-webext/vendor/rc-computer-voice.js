@@ -43,6 +43,8 @@ if (window.__bwPwaProviderOnly) return;
   var READER_VISUAL_MAX_CHUNKS = 20;
   var CONTEXT_DELIVERY_LEGACY = "legacy-inject";
   var CONTEXT_DELIVERY_SNAPSHOT = "snapshot-mcp";
+  var COMPUTER_TARGET_CODEX = "codex-desktop";
+  var COMPUTER_TARGET_CLASSIC = "chatgpt-classic";
   var ACTIVE_READING_POLL_MS = 250;
   var ACTIVE_READING_HEARTBEAT_MS = 60000;
   var SNAPSHOT_RECONNECT_MS = 1000;
@@ -51,6 +53,7 @@ if (window.__bwPwaProviderOnly) return;
   var CONTEXT_LIVE_WAIT_S = 20;
   var CONTEXT_RETRY_MS = 500;
   var CONTEXT_WAIT_DENIED_RETRY_MS = 1000;
+  var NATIVE_CONTEXT_REQUEST_TIMEOUT_MS = 8000;
   var CONTEXT_EVENT_TYPES = Object.freeze({
     "page.context": true,
     focus: true,
@@ -85,6 +88,9 @@ if (window.__bwPwaProviderOnly) return;
   var statusListeners = [];
   var availabilityAttempt = null;
   var lastClientFailure = null;
+  var computerTarget = COMPUTER_TARGET_CODEX;
+  var computerTargetLoaded = false;
+  var computerTargetLoadPromise = null;
   var registeredComputerButtons = new WeakSet();
   // 仅供旧合同/旧缓存页面回退；新 voicecall 不再登记电话按钮。
   var registeredLegacyPhoneButtons = new WeakSet();
@@ -108,6 +114,10 @@ if (window.__bwPwaProviderOnly) return;
   var snapshotLink = null;
   var snapshotLinkGeneration = 0;
   var snapshotReconnectTimer = null;
+  var nativeContextState = null;
+  var nativeContextHandoffPending = false;
+  var nativeContextRequestSequence = 0;
+  var nativeContextPending = Object.create(null);
   var readerVisualCache = null;
   var readerVisualCaptureKey = null;
   var readerVisualCapturePromise = null;
@@ -124,6 +134,117 @@ if (window.__bwPwaProviderOnly) return;
     error.code = String(code || "BW_COMPUTER_VOICE_DIRECT_FAILED");
     error.retryable = retryable === true;
     return error;
+  }
+
+  function normalizeComputerTarget(value) {
+    return value === COMPUTER_TARGET_CLASSIC
+      ? COMPUTER_TARGET_CLASSIC
+      : COMPUTER_TARGET_CODEX;
+  }
+
+  function getComputerTarget() {
+    return computerTarget;
+  }
+
+  function computerTargetFetch(url, options) {
+    if (!window || typeof window.fetch !== "function") {
+      return Promise.reject(new Error("Reader 设置接口不可用"));
+    }
+    return window.fetch(url, options);
+  }
+
+  function loadComputerTarget() {
+    if (computerTargetLoaded) return Promise.resolve(computerTarget);
+    if (computerTargetLoadPromise) return computerTargetLoadPromise;
+    computerTargetLoadPromise = computerTargetFetch(
+      "/api/assistant/voice-config"
+    ).then(
+      function (response) { return response.json(); }
+    ).then(function (value) {
+      if (!value || value.ok !== true) {
+        throw new Error("电脑客户端目标读取失败");
+      }
+      computerTarget = normalizeComputerTarget(
+        value.cfg && value.cfg.rt_computer_target
+      );
+      computerTargetLoaded = true;
+      return computerTarget;
+    }).finally(function () {
+      computerTargetLoadPromise = null;
+    });
+    return computerTargetLoadPromise;
+  }
+
+  function computerTargetBusy() {
+    var nativeState = null;
+    try {
+      nativeState = window.__BW_NATIVE_COMPUTER_VOICE_STATE__;
+    } catch (error) {}
+    return !!active || dialPending || !!(
+      nativeState &&
+      (nativeState.active === true || nativeState.busy === true)
+    );
+  }
+
+  function nativeComputerVoiceState() {
+    try {
+      var value = window.__BW_NATIVE_COMPUTER_VOICE_STATE__;
+      return plainObject(value) ? value : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function nativeComputerVoiceOwnsWss() {
+    var value = nativeComputerVoiceState();
+    return !!(
+      nativeContextHandoffPending ||
+      (value && (value.active === true || value.busy === true))
+    );
+  }
+
+  function nativeContextHandlerAvailable() {
+    try {
+      return !!(
+        window.webkit &&
+        window.webkit.messageHandlers &&
+        window.webkit.messageHandlers.bwNativeComputerContext &&
+        typeof window.webkit.messageHandlers.bwNativeComputerContext
+          .postMessage === "function"
+      );
+    } catch (_) {
+      return false;
+    }
+  }
+
+  function setComputerTarget(value) {
+    var normalized = normalizeComputerTarget(value);
+    if (computerTargetBusy()) {
+      return Promise.reject(directError(
+        "请先结束当前电脑语音，再切换目标",
+        "BW_COMPUTER_VOICE_TARGET_BUSY",
+        true
+      ));
+    }
+    var body = { rt_computer_target: normalized };
+    return computerTargetFetch("/api/assistant/voice-config", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    }).then(function (response) { return response.json(); }).then(
+      function (result) {
+        if (!result || result.ok !== true) {
+          throw directError(
+            "无法保存电脑客户端目标",
+            "BW_COMPUTER_VOICE_TARGET_STORAGE_FAILED",
+            true
+          );
+        }
+        computerTarget = normalized;
+        computerTargetLoaded = true;
+        return normalized;
+      }
+    );
   }
 
   function plainObject(value) {
@@ -2483,6 +2604,13 @@ if (window.__bwPwaProviderOnly) return;
         true
       ));
     }
+    if (nativeComputerVoiceOwnsWss()) {
+      return Promise.reject(directError(
+        "请先结束 App 电脑语音，再切换上下文交付模式",
+        "BW_READER_CONTEXT_DELIVERY_MODE_NATIVE_BUSY",
+        true
+      ));
+    }
 
     contextModeChanging = true;
     var channel = null;
@@ -3518,10 +3646,104 @@ if (window.__bwPwaProviderOnly) return;
     return value;
   }
 
+  function rejectNativeContextRequests(message, code) {
+    Object.keys(nativeContextPending).forEach(function (requestId) {
+      var pending = nativeContextPending[requestId];
+      delete nativeContextPending[requestId];
+      if (pending.timer) clearTimeout(pending.timer);
+      pending.reject(directError(
+        message || "原生 Reader 上下文连接已停止",
+        code || "BW_NATIVE_COMPUTER_CONTEXT_STOPPED",
+        true
+      ));
+    });
+  }
+
+  function applyNativeContextResult(value) {
+    if (!plainObject(value) || typeof value.requestId !== "string") return;
+    var pending = nativeContextPending[value.requestId];
+    if (!pending) return;
+    delete nativeContextPending[value.requestId];
+    if (pending.timer) clearTimeout(pending.timer);
+    if (value.ok === true && Object.prototype.hasOwnProperty.call(value, "value")) {
+      pending.resolve(value.value);
+      return;
+    }
+    var detail = plainObject(value.error) ? value.error : {};
+    pending.reject(directError(
+      typeof detail.message === "string" && detail.message
+        ? detail.message
+        : "原生 Reader 上下文请求失败",
+      typeof detail.code === "string" && detail.code
+        ? detail.code
+        : "BW_NATIVE_COMPUTER_CONTEXT_FAILED",
+      detail.retryable === true
+    ));
+  }
+
+  window.__bwNativeComputerContextApplyResult = applyNativeContextResult;
+
+  function nativeContextRequest(action, fields, timeoutMs) {
+    if (
+      (action !== "context" && action !== "active-reading") ||
+      !plainObject(fields) ||
+      !nativeContextHandlerAvailable()
+    ) {
+      return Promise.reject(directError(
+        "BWReader App 原生上下文通道不可用",
+        "BW_NATIVE_COMPUTER_CONTEXT_UNAVAILABLE",
+        true
+      ));
+    }
+    var requestId = "native-context-" + Date.now().toString(36) + "-" +
+      (++nativeContextRequestSequence).toString(36);
+    return new Promise(function (resolve, reject) {
+      var timer = setTimeout(function () {
+        var pending = nativeContextPending[requestId];
+        if (!pending) return;
+        delete nativeContextPending[requestId];
+        pending.reject(directError(
+          "BWReader App 原生上下文请求超时",
+          "BW_NATIVE_COMPUTER_CONTEXT_TIMEOUT",
+          true
+        ));
+      }, timeoutMs || NATIVE_CONTEXT_REQUEST_TIMEOUT_MS);
+      nativeContextPending[requestId] = {
+        resolve: resolve,
+        reject: reject,
+        timer: timer,
+      };
+      try {
+        window.webkit.messageHandlers.bwNativeComputerContext.postMessage({
+          requestId: requestId,
+          action: action,
+          fields: fields,
+        });
+      } catch (error) {
+        delete nativeContextPending[requestId];
+        clearTimeout(timer);
+        reject(directError(
+          error && error.message || "无法发送原生 Reader 上下文请求",
+          "BW_NATIVE_COMPUTER_CONTEXT_SEND_FAILED",
+          true
+        ));
+      }
+    });
+  }
+
+  var nativeContextChannel = Object.freeze({
+    request: nativeContextRequest,
+  });
+
   function contextPumpAlive(state, pump) {
-    var ownsLink = state && state.contextOnly === true
-      ? snapshotLink === state
-      : active === state && state.started;
+    var ownsLink = false;
+    if (state && state.nativeContext === true) {
+      ownsLink = nativeContextState === state;
+    } else if (state && state.contextOnly === true) {
+      ownsLink = snapshotLink === state;
+    } else {
+      ownsLink = active === state && state.started;
+    }
     return !!(
       state &&
       pump &&
@@ -3959,7 +4181,9 @@ if (window.__bwPwaProviderOnly) return;
       !state.activeReadingPump.stopped &&
       contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT &&
       (
-        state.contextOnly === true
+        state.nativeContext === true
+          ? nativeContextState === state
+          : state.contextOnly === true
           ? snapshotLink === state
           : active === state && state.started
       )
@@ -4075,6 +4299,123 @@ if (window.__bwPwaProviderOnly) return;
     runActiveReadingPump(state);
   }
 
+  function stopNativeContextRelay() {
+    var state = nativeContextState;
+    nativeContextState = null;
+    if (!state) return;
+    state.stopped = true;
+    stopContextPump(state);
+    rejectNativeContextRequests(
+      "原生 Reader 上下文连接已停止",
+      "BW_NATIVE_COMPUTER_CONTEXT_STOPPED"
+    );
+  }
+
+  function startNativeContextRelay(sessionId) {
+    if (
+      typeof sessionId !== "string" ||
+      !sessionId ||
+      sessionId.length > 160 ||
+      !nativeContextHandlerAvailable()
+    ) {
+      return null;
+    }
+    if (
+      nativeContextState &&
+      !nativeContextState.stopped &&
+      nativeContextState.sessionId === sessionId
+    ) {
+      return nativeContextState;
+    }
+    stopNativeContextRelay();
+    var state = {
+      channel: nativeContextChannel,
+      sessionId: sessionId,
+      nativeContext: true,
+      contextOnly: false,
+      stopped: false,
+      contextPump: null,
+      activeReadingPump: null,
+    };
+    nativeContextState = state;
+    if (contextSyncEnabled()) {
+      startContextPump(state);
+      if (contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT) {
+        startActiveReadingPump(state);
+        primeReaderVisualFromOutgoing();
+      }
+    }
+    return state;
+  }
+
+  function reconcileNativeContextRelay() {
+    var value = nativeComputerVoiceState();
+    if (
+      value &&
+      value.active === true &&
+      typeof value.sessionId === "string" &&
+      value.sessionId
+    ) {
+      nativeContextHandoffPending = false;
+      var sessionId = value.sessionId;
+      return stopSnapshotLink().then(function () {
+        var latest = nativeComputerVoiceState();
+        if (
+          latest &&
+          latest.active === true &&
+          latest.sessionId === sessionId
+        ) {
+          startNativeContextRelay(sessionId);
+        }
+      });
+    }
+    stopNativeContextRelay();
+    if (!value || value.busy !== true) {
+      nativeContextHandoffPending = false;
+      return reconcileSnapshotLink();
+    }
+    return Promise.resolve(null);
+  }
+
+  function prepareNativeContextHandoff() {
+    nativeContextHandoffPending = true;
+    stopNativeContextRelay();
+    var modeReady = contextDeliveryMode
+      ? Promise.resolve(contextDeliveryMode)
+      : (
+          RC.ctxSync && typeof RC.ctxSync.getConfig === "function"
+            ? RC.ctxSync.getConfig().then(function (value) {
+                if (
+                  !value ||
+                  (value.deliveryMode !== CONTEXT_DELIVERY_LEGACY &&
+                    value.deliveryMode !== CONTEXT_DELIVERY_SNAPSHOT)
+                ) {
+                  throw directError(
+                    "Reader 上下文交付模式无效",
+                    "BW_READER_CONTEXT_DELIVERY_MODE_INVALID",
+                    false
+                  );
+                }
+                contextDeliveryMode = value.deliveryMode;
+                return contextDeliveryMode;
+              })
+            : Promise.reject(directError(
+                "Reader 上下文交付模式尚未就绪",
+                "BW_READER_CONTEXT_DELIVERY_MODE_UNAVAILABLE",
+                true
+              ))
+        );
+    return modeReady.then(function () {
+      return stopSnapshotLink();
+    }).then(function () {
+      return "native-ready";
+    }).catch(function (error) {
+      nativeContextHandoffPending = false;
+      reconcileSnapshotLink();
+      throw error;
+    });
+  }
+
   function snapshotLinkWanted() {
     return !!(
       ownsReaderUi() &&
@@ -4082,7 +4423,8 @@ if (window.__bwPwaProviderOnly) return;
       contextDeliveryMode !== CONTEXT_DELIVERY_LEGACY &&
       !contextModeChanging &&
       !active &&
-      !dialPending
+      !dialPending &&
+      !nativeComputerVoiceOwnsWss()
     );
   }
 
@@ -4687,6 +5029,7 @@ if (window.__bwPwaProviderOnly) return;
       contextPump: null,
       activeReadingPump: null,
       contextDeliveryMode: null,
+      appKind: getComputerTarget(),
       claimedSnapshot: false,
       retriedAfterStaleClaim: false,
       pcm: {
@@ -4781,6 +5124,7 @@ if (window.__bwPwaProviderOnly) return;
       });
       return channel.request("start", {
         sessionId: state.sessionId,
+        appKind: state.appKind,
       }, START_TIMEOUT_MS);
     }).then(function (started) {
       exactObject(started, ["sessionId", "state", "media"], [], "START 响应");
@@ -5112,6 +5456,18 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   function contextSyncChanged() {
+    if (nativeContextState && !nativeContextState.stopped) {
+      if (contextSyncEnabled()) {
+        startContextPump(nativeContextState);
+        if (contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT) {
+          startActiveReadingPump(nativeContextState);
+          primeReaderVisualFromOutgoing();
+        }
+      } else {
+        stopContextPump(nativeContextState);
+      }
+      return Promise.resolve(nativeContextState);
+    }
     if (
       active &&
       active.started &&
@@ -5134,6 +5490,7 @@ if (window.__bwPwaProviderOnly) return;
     // receives an ACK. Release the WSS slot immediately; freshness rules keep
     // any last snapshot from being mistaken for current content.
     stopSnapshotLink();
+    stopNativeContextRelay();
     var state = active;
     active = null;
     dialPending = false;
@@ -5173,6 +5530,16 @@ if (window.__bwPwaProviderOnly) return;
     var root = document.createElement("div");
     root.className = "rc-computer-voice-settings";
     root.innerHTML =
+      '<label class="ams-tdef" for="rc-computer-target">语音与文字接力目标</label>' +
+      '<select id="rc-computer-target" data-role="target" ' +
+      'style="width:100%;margin:6px 0 7px;background:#0d1322;' +
+      'border:1px solid #2a3550;color:#e6e6f0;border-radius:6px;' +
+      'padding:8px 10px;font-size:13px">' +
+      '<option value="codex-desktop">Codex</option>' +
+      '<option value="chatgpt-classic">GPT Classic</option>' +
+      '</select>' +
+      '<div class="ams-tdef" data-role="target-detail" ' +
+      'style="margin-bottom:9px"></div>' +
       '<div class="ams-tdef" data-role="status">正在读取 Windows 直连状态…</div>' +
       '<div class="ams-row" style="margin-top:7px">' +
       '<button type="button" class="ams-btn" data-role="refresh">刷新直连状态</button>' +
@@ -5182,9 +5549,22 @@ if (window.__bwPwaProviderOnly) return;
       'style="display:none;margin-top:7px;white-space:pre-wrap;' +
       'user-select:text;color:#ffb4a8"></div>';
     container.appendChild(root);
+    var targetSelect = root.querySelector('[data-role="target"]');
+    var targetDetail = root.querySelector('[data-role="target-detail"]');
     var status = root.querySelector('[data-role="status"]');
     var detail = root.querySelector('[data-role="detail"]');
     var errorDetail = root.querySelector('[data-role="error"]');
+
+    function renderTarget() {
+      var target = getComputerTarget();
+      targetSelect.value = target;
+      targetSelect.disabled = computerTargetBusy();
+      targetDetail.textContent = target === COMPUTER_TARGET_CLASSIC
+        ? "GPT Classic：语音启停与音频回传以 GPT Classic 为目标；" +
+          "文字接力仅在“测试旧版文字注入”开启时发送到 GPT Classic，" +
+          "实时快照/MCP 仍属于 Codex。"
+        : "Codex：语音启停、音频回传和已有上下文工具/文字接力均以 Codex 为目标。";
+    }
 
     function render(value) {
       if (
@@ -5203,9 +5583,9 @@ if (window.__bwPwaProviderOnly) return;
         "固定 Tailnet 直连，无需配对或填写地址；" +
         "桥接器不会创建或安装虚拟设备，A/B 必须是 Windows 已有的两根独立虚拟音频线；" +
         "电脑按钮才会申请当前网页麦克风并送入 Windows 虚拟麦克风；" +
-        "Codex 输出固定到独立虚拟扬声器后按进程树回传。" +
-        "选择模型或刷新状态不会启动应用或采音。" +
-        "挂断只保证停止桥接，Codex Voice 需在 Windows 确认退出。";
+        "所选目标的输出固定到独立虚拟扬声器后按进程树回传。" +
+        "切换目标或刷新状态不会启动应用或采音。" +
+        "通话中不能切换目标；挂断会按本次目标停止桥接与语音。";
       var remoteError = value.status && value.status.lastError;
       if (remoteError) {
         errorDetail.style.display = "";
@@ -5237,15 +5617,43 @@ if (window.__bwPwaProviderOnly) return;
     }
 
     root.__rcComputerVoiceRefresh = refresh;
+    targetSelect.addEventListener("change", function () {
+      var previous = getComputerTarget();
+      targetSelect.disabled = true;
+      setComputerTarget(targetSelect.value).then(function () {
+        renderTarget();
+        if (RC && typeof RC.toast === "function") {
+          RC.toast("电脑客户端目标已保存，下次连接生效");
+        }
+      }).catch(function (error) {
+        targetSelect.value = previous;
+        renderTarget();
+        if (RC && typeof RC.toast === "function") {
+          RC.toast(error.message || "电脑客户端目标切换失败");
+        }
+      });
+    });
+    window.addEventListener("bw-native-computer-voice-state", renderTarget);
     root.querySelector('[data-role="refresh"]').addEventListener("click", refresh);
+    renderTarget();
+    loadComputerTarget().then(renderTarget).catch(renderTarget);
     refresh();
   }
 
+  // Preference-only read: no application launch, microphone access or START.
+  // Begin during module load so the computer button already has the saved
+  // target even when the settings pane has not been opened this session.
+  loadComputerTarget().catch(function () {});
   installGestureCapture();
   if (window && typeof window.addEventListener === "function") {
     window.addEventListener("pagehide", abortForPageExit);
     window.addEventListener("pageshow", resumeSnapshotLinkFromForeground);
+    window.addEventListener("pageshow", reconcileNativeContextRelay);
     window.addEventListener("online", resumeSnapshotLinkFromForeground);
+    window.addEventListener(
+      "bw-native-computer-voice-state",
+      reconcileNativeContextRelay
+    );
   }
   if (document && typeof document.addEventListener === "function") {
     document.addEventListener(
@@ -5268,7 +5676,11 @@ if (window.__bwPwaProviderOnly) return;
     setSelectedEngine: setSelectedEngine,
     setDialPending: setDialPending,
     contextSyncChanged: contextSyncChanged,
+    prepareNativeContextHandoff: prepareNativeContextHandoff,
     setContextDeliveryMode: setContextDeliveryMode,
+    getTargetApp: getComputerTarget,
+    loadTargetApp: loadComputerTarget,
+    setTargetApp: setComputerTarget,
     cancelPreparedGesture: cancelPreparedGesture,
     registerComputerButton: registerComputerButton,
     registerPhoneButton: registerPhoneButton,

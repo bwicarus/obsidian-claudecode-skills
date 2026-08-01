@@ -10952,7 +10952,7 @@ _VOICE_CFG_FIELDS = ("speaker", "speech_rate", "loudness_rate", "explicit_dialec
                      "rt_engine", "rt_model", "rt_voice", "rt_effort", "rt_image", "rt_lang",
                      "rt_instructions", "rt_eagerness", "rt_full_duplex", "rt_compact_tokens",
                      "rt_voice_mode", "rt_auto_text", "rt_tts_speak", "rt_noise", "rt_tool_reply", "rt_speed", "rt_grok_voice",
-                     "rt_grok_vad", "rt_grok_replace", "rt_budget_usd")
+                     "rt_grok_vad", "rt_grok_replace", "rt_budget_usd", "rt_computer_target")
 
 
 @bp.route("/voice-config", methods=["GET", "POST"])
@@ -10966,6 +10966,20 @@ def assistant_voice_config():
         cfg = {}
     if request.method == "POST":
         b = request.get_json(silent=True) or {}
+        computer_target = b.get("rt_computer_target")
+        if (
+            "rt_computer_target" in b
+            and computer_target not in (
+                "codex-desktop",
+                "chatgpt-classic",
+                "",
+                None,
+            )
+        ):
+            return jsonify({
+                "ok": False,
+                "error": "invalid rt_computer_target",
+            }), 400
         for k in _VOICE_CFG_FIELDS:
             if k not in b:
                 continue
