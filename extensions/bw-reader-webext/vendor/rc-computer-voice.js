@@ -150,7 +150,7 @@ if (window.__bwPwaProviderOnly) return;
     if (!window || typeof window.fetch !== "function") {
       return Promise.reject(new Error("Reader 设置接口不可用"));
     }
-    // @interaction computer-voice.target.config
+    // @interaction computer-voice.bridge.request
     return window.fetch(url, options);
   }
 
