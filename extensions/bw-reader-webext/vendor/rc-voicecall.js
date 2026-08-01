@@ -5599,15 +5599,10 @@ if (window.__bwPwaProviderOnly) return;
         typeof computerVoice.getTargetApp === 'function'
           ? computerVoice.getTargetApp()
           : 'codex-desktop';
-      if (computerVoice && typeof computerVoice.loadTargetApp === 'function') {
-        computerVoice.loadTargetApp().then(postTarget, function (error) {
-          if (window.RC && typeof RC.toast === 'function') {
-            RC.toast(error && error.message || '无法读取电脑客户端目标');
-          }
-        });
-      } else {
-        postTarget(current);
-      }
+      // A trusted App button gesture must synchronously cross into Swift.
+      // Target loading is already warmed in rc-computer-voice; never put an
+      // authenticated fetch between the user gesture and postMessage.
+      postTarget(current);
       return true;
     } catch (e) {
       return false;

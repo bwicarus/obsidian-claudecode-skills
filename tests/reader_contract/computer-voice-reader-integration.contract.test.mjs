@@ -34,8 +34,13 @@ test("电脑客户端保留原按钮与设置标签，App toggle 携带固定目
   );
   assert.match(
     voicecall,
-    /function _toggleNativeComputerVoiceApp\(\)[\s\S]*loadTargetApp/,
+    /function _toggleNativeComputerVoiceApp\(\)[\s\S]*getTargetApp[\s\S]*postTarget\(current\)/,
   );
+  const nativeToggle = voicecall.slice(
+    voicecall.indexOf("function _toggleNativeComputerVoiceApp()"),
+    voicecall.indexOf("function _computerVoiceActive()"),
+  );
+  assert.doesNotMatch(nativeToggle, /loadTargetApp\(\)\.then/);
   assert.match(
     voicecall,
     /function postTarget\(appKind\)[\s\S]*bwNativeComputerVoice\.postMessage\(\{[\s\S]*action: 'toggle',[\s\S]*appKind:/,
@@ -44,6 +49,10 @@ test("电脑客户端保留原按钮与设置标签，App toggle 携带固定目
   assert.match(runtime, /<option value="codex-desktop">Codex<\/option>/);
   assert.match(runtime, /<option value="chatgpt-classic">GPT Classic<\/option>/);
   assert.match(runtime, /appKind: state\.appKind/);
+  assert.match(
+    runtime,
+    /if \(!response \|\| response\.ok !== true \|\|[\s\S]*typeof response\.json !== "function"\)/,
+  );
 });
 
 test("App 电脑按钮只切换原生桥，普通电话保持独立", () => {

@@ -157,7 +157,13 @@
     computerTargetLoadPromise = computerTargetFetch(
       "/api/assistant/voice-config"
     ).then(
-      function (response) { return response.json(); }
+      function (response) {
+        if (!response || response.ok !== true ||
+            typeof response.json !== "function") {
+          throw new Error("电脑客户端目标读取失败");
+        }
+        return response.json();
+      }
     ).then(function (value) {
       if (!value || value.ok !== true) {
         throw new Error("电脑客户端目标读取失败");
