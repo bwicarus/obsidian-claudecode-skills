@@ -52,6 +52,11 @@ DEFAULT_STATE_DIR = INSTALL_DIR / "state"
 QUEUE_CONTRACT = "reader-voice-typist-queue/3"
 QUEUE_RECEIPT_MIN_LIMIT = 1024
 QUEUE_STATUS_CONTRACT = "reader-voice-typist-queue-status/1"
+DEFAULT_TARGET_APP = "codex-desktop"
+TARGET_APP_PACKAGE_PREFIXES = {
+    DEFAULT_TARGET_APP: "OpenAI.Codex_",
+    "chatgpt-classic": "OpenAI.ChatGPT-Desktop_",
+}
 
 MARKER = "[[READER_SYNC]]"
 MARKER_END = "[[/READER_SYNC]]"
@@ -593,7 +598,7 @@ def process_generation_alive(
         kernel32.CloseHandle(handle)
 
 
-def _process_name(pid: int) -> str:
+def _process_image_path(pid: int) -> str:
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
@@ -602,10 +607,25 @@ def _process_name(pid: int) -> str:
         buf = ctypes.create_unicode_buffer(1024)
         size = wt.DWORD(1024)
         if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
-            return Path(buf.value).stem
+            return buf.value
         return ""
     finally:
         kernel32.CloseHandle(handle)
+
+
+def _process_name(pid: int) -> str:
+    path = _process_image_path(pid)
+    return Path(path).stem if path else ""
+
+
+def target_process_path_matches(image_path: str, target_app_kind: str) -> bool:
+    """Match one packaged app even though both executables are ChatGPT.exe."""
+    package_prefix = TARGET_APP_PACKAGE_PREFIXES.get(target_app_kind)
+    if package_prefix is None:
+        return False
+    normalized = str(image_path or "").replace("/", "\\").casefold()
+    marker = f"\\windowsapps\\{package_prefix}".casefold()
+    return marker in normalized and normalized.endswith("\\chatgpt.exe")
 
 
 def _is_cloaked(hwnd: int) -> bool:
@@ -648,6 +668,9 @@ def resolve_target(cfg: Dict[str, Any]) -> WindowInfo:
     pattern = cfg.get("window_title_regex")
     regex = re.compile(pattern) if pattern else None
     pinned = cfg.get("hwnd")
+    target_app_kind = str(cfg.get("app_kind") or DEFAULT_TARGET_APP)
+    if target_app_kind not in TARGET_APP_PACKAGE_PREFIXES:
+        raise WindowError("target_app_invalid", "configured target app is invalid")
 
     matches: List[WindowInfo] = []
     for win in enumerate_windows():
@@ -656,6 +679,11 @@ def resolve_target(cfg: Dict[str, Any]) -> WindowInfo:
         if regex and not regex.search(win.title):
             continue
         if want_proc and _process_name(win.pid).lower() != want_proc:
+            continue
+        if not target_process_path_matches(
+            _process_image_path(win.pid),
+            target_app_kind,
+        ):
             continue
         if _is_cloaked(win.hwnd):
             continue
@@ -676,6 +704,71 @@ def resolve_target(cfg: Dict[str, Any]) -> WindowInfo:
         raise WindowError("window_ambiguous",
                           f"{len(matches)} windows matched the target: {detail}")
     return matches[0]
+
+
+class ClassicComposerAutomation:
+    """Exact UI Automation bridge for ChatGPT Classic's composer controls."""
+
+    COMPOSER_ID = "prompt-textarea"
+    SEND_ID = "composer-submit-button"
+
+    def __init__(self, hwnd: int):
+        self.hwnd = int(hwnd)
+
+    def _with_element(self, automation_id: str, action) -> None:
+        try:
+            import comtypes
+            import comtypes.client
+            comtypes.CoInitialize()
+            try:
+                comtypes.client.GetModule("UIAutomationCore.dll")
+                from comtypes.gen import UIAutomationClient as UIA
+
+                automation = comtypes.client.CreateObject(
+                    UIA.CUIAutomation,
+                    interface=UIA.IUIAutomation,
+                )
+                root = automation.ElementFromHandle(self.hwnd)
+                condition = automation.CreatePropertyCondition(
+                    UIA.UIA_AutomationIdPropertyId,
+                    automation_id,
+                )
+                matches = root.FindAll(UIA.TreeScope_Descendants, condition)
+                candidates = []
+                for index in range(matches.Length):
+                    element = matches.GetElement(index)
+                    if element.CurrentIsEnabled and not element.CurrentIsOffscreen:
+                        candidates.append(element)
+                if len(candidates) != 1:
+                    raise WindowError(
+                        "classic_composer_ambiguous",
+                        f"GPT Classic control {automation_id!r} is not unique",
+                    )
+                action(candidates[0], UIA)
+            finally:
+                comtypes.CoUninitialize()
+        except WindowError:
+            raise
+        except Exception as exc:
+            raise WindowError(
+                "classic_uia_failed",
+                f"GPT Classic UI Automation failed: {exc}",
+            ) from exc
+
+    def focus_composer(self) -> None:
+        self._with_element(self.COMPOSER_ID, lambda element, _uia: element.SetFocus())
+
+    def invoke_send(self) -> None:
+        def invoke(element, uia) -> None:
+            pattern = element.GetCurrentPattern(uia.UIA_InvokePatternId)
+            if pattern is None:
+                raise WindowError(
+                    "classic_send_not_invokable",
+                    "GPT Classic send button has no Invoke pattern",
+                )
+            pattern.QueryInterface(uia.IUIAutomationInvokePattern).Invoke()
+
+        self._with_element(self.SEND_ID, invoke)
 
 
 def force_foreground(hwnd: int, timeout: float = 2.0, attempts: int = 3) -> None:
@@ -733,6 +826,7 @@ def point_is_ours(hwnd: int, x: int, y: int) -> bool:
 
 DEFAULT_CONFIG_BODY: Dict[str, Any] = {
     "target": {
+        "app_kind": DEFAULT_TARGET_APP,
         "process_name": "ChatGPT",
         "window_class": "Chrome_WidgetWin_1",
         "window_title_regex": "^(ChatGPT|Codex)",
@@ -794,6 +888,20 @@ DEFAULT_CONFIG_BODY: Dict[str, Any] = {
         "restore_clipboard": True,
     },
 }
+
+
+def apply_target_app(cfg: Dict[str, Any], target_app_kind: str) -> Dict[str, Any]:
+    """Apply fixed runtime policy for the selected packaged desktop app."""
+    if target_app_kind not in TARGET_APP_PACKAGE_PREFIXES:
+        raise ValueError(f"unsupported target app: {target_app_kind}")
+    cfg["target"]["app_kind"] = target_app_kind
+    if target_app_kind == "chatgpt-classic":
+        cfg["target"]["session_mode"] = "follow_active"
+        cfg["target"]["session_id"] = None
+        cfg["hotkeys"]["copy_session_id"] = None
+        cfg["verification"]["method"] = "none"
+        cfg["safety"]["require_transcript_verification"] = False
+    return cfg
 
 
 def load_config(path: Path) -> Dict[str, Any]:
@@ -1440,11 +1548,19 @@ class VoiceTypist:
                            send_hotkey: str) -> SubmitResult:
         # 1. Conversation identity, straight from the app.
         mark = time.time()
+        target_app_kind = str(
+            self.cfg["target"].get("app_kind") or DEFAULT_TARGET_APP
+        )
         session_hotkey = self._hotkey("copy_session_id")
         expected = self.cfg["target"].get("session_id")
         mode = str(self.cfg["target"].get("session_mode", "pinned")).lower()
         session_id: Optional[str] = None
-        if session_hotkey:
+        if target_app_kind == "chatgpt-classic":
+            # Classic exposes neither Codex's Copy Session ID command nor its
+            # local rollout records. Package identity, paste readback and the
+            # cleared composer remain the delivery fences.
+            session_id = None
+        elif session_hotkey:
             session_id = self._copy_via(session_hotkey, "session")
             # Reading an id is still mandatory in either mode: it proves a
             # conversation is open at all (the settings page yields nothing) and
@@ -1486,6 +1602,16 @@ class VoiceTypist:
             if user32.GetForegroundWindow() != window.hwnd:
                 raise WindowError("focus_lost",
                                   "focus left the target window after the click")
+        classic_automation: Optional[ClassicComposerAutomation] = None
+        if target_app_kind == "chatgpt-classic":
+            classic_automation = ClassicComposerAutomation(window.hwnd)
+            classic_automation.focus_composer()
+            time.sleep(self._t("after_click"))
+            if user32.GetForegroundWindow() != window.hwnd:
+                raise WindowError(
+                    "focus_lost",
+                    "focus left GPT Classic after composer activation",
+                )
         refocus = self._hotkey("refocus_composer")
         if refocus:
             press(refocus, settle=self._t("after_click"))
@@ -1547,7 +1673,11 @@ class VoiceTypist:
         if user32.GetForegroundWindow() != window.hwnd:
             raise WindowError("focus_lost", "focus left the target window before submit")
         self._abort_if_halted()
-        press(send_hotkey, settle=0.06)
+        if classic_automation is not None:
+            classic_automation.invoke_send()
+            time.sleep(0.06)
+        else:
+            press(send_hotkey, settle=0.06)
         self._last_submit = time.time()
 
         # 5. Did it actually leave the composer?  Poll until it empties rather
@@ -2934,7 +3064,8 @@ def cmd_queue_status(args) -> int:
 
 
 def cmd_run(args) -> int:
-    cfg = load_config(args.config)
+    target_app = str(getattr(args, "target_app", DEFAULT_TARGET_APP))
+    cfg = apply_target_app(load_config(args.config), target_app)
     set_dpi_awareness()
     log = AuditLog(args.log)
     state = RunState(args.state_dir)
@@ -3050,6 +3181,7 @@ def cmd_run(args) -> int:
     log.write({
         "event": "started",
         "dry_run": args.dry_run,
+        "target_app": target_app,
         "transport": typist_ipc_runtime.CONTRACT,
         "pipe": typist_ipc_runtime.PIPE_NAME,
         "config": str(args.config),
@@ -3123,6 +3255,7 @@ def cmd_run(args) -> int:
                     "owner_pid": owner_pid or None,
                     "owner_process_start_file_time_utc":
                         owner_start or None,
+                    "target_app": target_app,
                 })
                 last_status = now
 
@@ -3206,6 +3339,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--log", type=Path, default=DEFAULT_LOG)
     parser.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
+    parser.add_argument(
+        "--target-app",
+        choices=tuple(TARGET_APP_PACKAGE_PREFIXES),
+        default=DEFAULT_TARGET_APP,
+        help="fixed packaged app target for this process",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("init-config", help="write a default config file")

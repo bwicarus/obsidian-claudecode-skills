@@ -2,6 +2,7 @@ namespace BwReader.ComputerVoiceAudio;
 
 internal sealed record DirectAppTarget(
     uint RootProcessId,
+    long RootProcessStartFileTimeUtc,
     string AppKind,
     string AppUserModelId);
 
@@ -48,11 +49,16 @@ internal sealed class UnwiredDirectAppLauncher : IDirectAppLauncher
 internal sealed record DirectMediaStartRequest(
     string SessionId,
     uint RootProcessId,
+    long RootProcessStartFileTimeUtc,
     string AppKind,
     string AppUserModelId,
     string VirtualMicrophoneRenderEndpointId,
+    string VirtualMicrophoneCaptureEndpointId,
     string VirtualSpeakerRenderEndpointId,
-    bool StartTypist = true);
+    bool StartTypist = true,
+    bool AutomatePerAppAudioRoute = false,
+    string VirtualSpeakerCaptureEndpointId = "",
+    bool FixedVirtualAudioBus = false);
 
 internal sealed record DirectMediaStartResult(
     bool HostReady,
@@ -63,6 +69,8 @@ internal interface IDirectMediaAdapter : IAsyncDisposable
     bool IsWired { get; }
 
     bool CaptureActive { get; }
+
+    bool CleanupPending { get; }
 
     bool IsOutputRouteVerified(DirectBridgeConfig config);
 
@@ -85,6 +93,8 @@ internal sealed class UnwiredDirectMediaAdapter : IDirectMediaAdapter
     public bool IsWired => false;
 
     public bool CaptureActive => false;
+
+    public bool CleanupPending => false;
 
     public bool IsOutputRouteVerified(DirectBridgeConfig config) => false;
 
@@ -131,6 +141,7 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
     private readonly object _runtimeErrorGate = new();
     private string? _activeConnectionId;
     private string? _activeSessionId;
+    private string? _activeAppKind;
     private long? _heartbeatDeadlineMilliseconds;
     private uint _heartbeatSequence;
     private bool _disposed;
@@ -161,6 +172,8 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
     }
 
     internal bool CaptureActive => _mediaAdapter.CaptureActive;
+
+    internal bool CleanupPending => _mediaAdapter.CleanupPending;
 
     internal bool AppLauncherReady => _appLauncher.IsWired;
 
@@ -253,13 +266,23 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
             VirtualRenderEndpointProbe.ValidateExactActiveRender(
                 config.VirtualSpeakerRenderEndpointId,
                 "virtual-speaker");
+            if (config.PerAppAudioRouteAutomationEnabled)
+            {
+                VirtualCaptureEndpointProbe.ValidateExactActiveCapture(
+                    config.VirtualMicrophoneCaptureEndpointId);
+            }
+            if (config.FixedVirtualAudioBusEnabled)
+            {
+                VirtualCaptureEndpointProbe.ValidateExactActiveCapture(
+                    config.VirtualSpeakerCaptureEndpointId);
+            }
             return null;
         }
         catch (Exception exception)
         {
             return new DirectProtocolException(
                 "BW_COMPUTER_VOICE_DIRECT_RENDER_ENDPOINT_UNAVAILABLE",
-                "虚拟音频播放端点未就绪",
+                "虚拟音频端点未就绪",
                 retryable: true,
                 innerException: exception);
         }
@@ -274,6 +297,7 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
         StartAsync(
             connectionId,
             sessionId,
+            DirectAppTargets.CodexDesktop,
             DirectContextDeliveryMode.LegacyInject,
             reportStatusAsync,
             sendFrameAsync,
@@ -282,6 +306,23 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
     internal async Task<DirectMediaStartResult> StartAsync(
         string connectionId,
         string sessionId,
+        string contextDeliveryMode,
+        Func<string, string, Task> reportStatusAsync,
+        Func<DirectPcmFrame, CancellationToken, Task> sendFrameAsync,
+        CancellationToken cancellationToken)
+        => await StartAsync(
+            connectionId,
+            sessionId,
+            DirectAppTargets.CodexDesktop,
+            contextDeliveryMode,
+            reportStatusAsync,
+            sendFrameAsync,
+            cancellationToken).ConfigureAwait(false);
+
+    internal async Task<DirectMediaStartResult> StartAsync(
+        string connectionId,
+        string sessionId,
+        string appKind,
         string contextDeliveryMode,
         Func<string, string, Task> reportStatusAsync,
         Func<DirectPcmFrame, CancellationToken, Task> sendFrameAsync,
@@ -296,6 +337,7 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
                 if (
                     _activeConnectionId == connectionId
                     && _activeSessionId == sessionId
+                    && _activeAppKind == appKind
                     && _mediaAdapter.CaptureActive
                 )
                 {
@@ -304,13 +346,31 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
                         HostReady: true,
                         CaptureActive: true);
                 }
-                throw new DirectProtocolException(
-                    "BW_COMPUTER_VOICE_DIRECT_BUSY",
-                    "另一个电脑语音会话正在使用桥接器",
-                    retryable: true);
+                if (_mediaAdapter.CleanupPending)
+                {
+                    await _mediaAdapter.StopAsync(CancellationToken.None)
+                        .ConfigureAwait(false);
+                    if (_mediaAdapter.CleanupPending)
+                    {
+                        throw new DirectProtocolException(
+                            "BW_COMPUTER_VOICE_DIRECT_MEDIA_CLEANUP_PENDING",
+                            "上一次 Windows 音频清理尚未完成",
+                            retryable: true);
+                    }
+                    ClearActiveSession();
+                }
+                else
+                {
+                    throw new DirectProtocolException(
+                        "BW_COMPUTER_VOICE_DIRECT_BUSY",
+                        "另一个电脑语音会话正在使用桥接器",
+                        retryable: true);
+                }
             }
 
             DirectBridgeConfig config = _configStore.Load();
+            DirectAppTargetProfile appProfile =
+                DirectAppTargets.Require(appKind);
             if (
                 !DirectContextDeliveryMode.IsSupported(
                     contextDeliveryMode)
@@ -334,8 +394,8 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
                 "BW_COMPUTER_VOICE_DIRECT_STARTING_APP")
                 .ConfigureAwait(false);
             await _appLauncher.EnsureRunningAsync(
-                config.AppKind,
-                DirectBridgeContract.CodexAppUserModelId,
+                appKind,
+                appProfile.AppUserModelId,
                 cancellationToken).ConfigureAwait(false);
 
             await reportStatusAsync(
@@ -346,8 +406,8 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
             try
             {
                 target = await _appLauncher.WaitForUniqueReadyAsync(
-                    config.AppKind,
-                    DirectBridgeContract.CodexAppUserModelId,
+                    appKind,
+                    appProfile.AppUserModelId,
                     AppReadyTimeout,
                     cancellationToken).ConfigureAwait(false);
             }
@@ -362,9 +422,10 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
 
             if (
                 target.RootProcessId == 0
-                || target.AppKind != config.AppKind
+                || target.RootProcessStartFileTimeUtc <= 0
+                || target.AppKind != appKind
                 || target.AppUserModelId
-                    != DirectBridgeContract.CodexAppUserModelId
+                    != appProfile.AppUserModelId
             )
             {
                 throw new DirectProtocolException(
@@ -381,13 +442,21 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
                     new DirectMediaStartRequest(
                         sessionId,
                         target.RootProcessId,
-                        config.AppKind,
-                        DirectBridgeContract.CodexAppUserModelId,
+                        target.RootProcessStartFileTimeUtc,
+                        appKind,
+                        appProfile.AppUserModelId,
                         config.VirtualMicrophoneRenderEndpointId,
+                        config.VirtualMicrophoneCaptureEndpointId,
                         config.VirtualSpeakerRenderEndpointId,
                         StartTypist:
                             contextDeliveryMode
-                            == DirectContextDeliveryMode.LegacyInject),
+                                == DirectContextDeliveryMode.LegacyInject,
+                        AutomatePerAppAudioRoute:
+                            config.PerAppAudioRouteAutomationEnabled,
+                        VirtualSpeakerCaptureEndpointId:
+                            config.VirtualSpeakerCaptureEndpointId,
+                        FixedVirtualAudioBus:
+                            config.FixedVirtualAudioBusEnabled),
                     sendFrameAsync,
                     cancellationToken).ConfigureAwait(false);
             if (!started.HostReady
@@ -395,17 +464,56 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
                 || !_mediaAdapter.CaptureActive
                 || _mediaAdapter.Completion.IsCompleted)
             {
+                // 这四项过去共用一个 code 且 runtime status 不落 message,失败时
+                // 无法区分是宿主没就绪、捕获没激活,还是适配器已提前收摊。code 保持
+                // 不变(self-test 断言依赖它),改用 stage 精确指出是哪一项——stage
+                // 只允许小写字母/连字符/点,经 AudioCaptureStageException 进异常链。
+                string failedStage =
+                    !started.HostReady
+                        ? "media-start.host-not-ready"
+                        : !started.CaptureActive
+                            ? "media-start.started-capture-inactive"
+                            : !_mediaAdapter.CaptureActive
+                                ? "media-start.adapter-capture-inactive"
+                                : "media-start.adapter-completed";
+                // Completion 的结果类型就是 DirectProtocolException?,终端媒体失败
+                // 会经 TrySetResult 塞在里面。过去只看 IsCompleted、把 Result 丢掉,
+                // 于是真正的错误码被一个空壳 MEDIA_START_UNCONFIRMED 盖住。真实异常
+                // 存在时直接抛它,让根因浮到 runtime status 上。
+                DirectProtocolException? terminal = null;
+                if (_mediaAdapter.Completion.IsCompleted)
+                {
+                    try
+                    {
+                        terminal = _mediaAdapter.Completion.Result;
+                    }
+                    catch (Exception completionFailure)
+                    {
+                        terminal = new DirectProtocolException(
+                            "BW_COMPUTER_VOICE_DIRECT_MEDIA_TERMINAL_FAULT",
+                            "媒体适配器以异常结束",
+                            innerException: completionFailure);
+                    }
+                }
                 await _mediaAdapter.StopAsync(CancellationToken.None)
                     .ConfigureAwait(false);
+                if (terminal is not null)
+                {
+                    throw terminal;
+                }
                 throw new DirectProtocolException(
                     "BW_COMPUTER_VOICE_DIRECT_MEDIA_START_UNCONFIRMED",
-                    "媒体适配器没有确认捕获已启动");
+                    "媒体适配器没有确认捕获已启动",
+                    innerException: new AudioCaptureStageException(
+                        failedStage,
+                        0));
             }
 
             lock (_heartbeatGate)
             {
                 _activeConnectionId = connectionId;
                 _activeSessionId = sessionId;
+                _activeAppKind = appKind;
                 _heartbeatSequence = 0;
                 _heartbeatDeadlineMilliseconds = checked(
                     _monotonicMilliseconds()
@@ -418,7 +526,13 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
         catch (Exception exception)
         {
             _ = RecordFailure(exception, "start");
-            if (_activeSessionId is null && _mediaAdapter.CaptureActive)
+            if (
+                _activeSessionId is null
+                && (
+                    _mediaAdapter.CaptureActive
+                    || _mediaAdapter.CleanupPending
+                )
+            )
             {
                 await _mediaAdapter.StopAsync(CancellationToken.None)
                     .ConfigureAwait(false);
@@ -461,6 +575,14 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
             }
             DirectProtocolException? failure =
                 await completion.ConfigureAwait(false);
+            if (_mediaAdapter.CleanupPending)
+            {
+                throw failure
+                    ?? new DirectProtocolException(
+                        "BW_COMPUTER_VOICE_DIRECT_MEDIA_CLEANUP_PENDING",
+                        "Windows 音频清理仍持有未释放资源",
+                        retryable: true);
+            }
             ClearActiveSession();
             if (failure is not null)
             {
@@ -549,7 +671,7 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
             bool requireActiveOwner,
             CancellationToken cancellationToken)
     {
-        await ValidateSnapshotOwnerAsync(
+        _ = await ValidateSnapshotOwnerAsync(
             connectionId,
             sessionId,
             requireActiveOwner,
@@ -570,7 +692,7 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
             bool requireActiveOwner,
             CancellationToken cancellationToken)
     {
-        await ValidateSnapshotOwnerAsync(
+        _ = await ValidateSnapshotOwnerAsync(
             connectionId,
             sessionId,
             requireActiveOwner,
@@ -590,7 +712,7 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
             bool requireActiveOwner,
             CancellationToken cancellationToken)
     {
-        await ValidateSnapshotOwnerAsync(
+        _ = await ValidateSnapshotOwnerAsync(
             connectionId,
             sessionId,
             requireActiveOwner,
@@ -601,7 +723,7 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
             cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task ValidateSnapshotOwnerAsync(
+    private async Task<string?> ValidateSnapshotOwnerAsync(
         string connectionId,
         string sessionId,
         bool requireActiveOwner,
@@ -621,6 +743,7 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
                         "BW_READER_CONTEXT_SNAPSHOT_NOT_ACTIVE",
                         "活动通话的本地快照租约已失效");
                 }
+                return _activeAppKind;
             }
             else if (_activeSessionId is not null)
             {
@@ -629,6 +752,7 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
                     "活动通话已占用 Windows 桥接器",
                     retryable: true);
             }
+            return null;
         }
         finally
         {
@@ -657,9 +781,10 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
             {
                 // There is no peer left to receive a teardown error.  The
                 // media adapter preserves its terminal failure in Completion;
-                // connection cleanup must still release the session lease.
+                // retain the session lease whenever cleanup still owns
+                // resources so a later retry can finish the same generation.
             }
-            finally
+            if (!_mediaAdapter.CleanupPending)
             {
                 ClearActiveSession();
             }
@@ -740,6 +865,7 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
         {
             _activeConnectionId = null;
             _activeSessionId = null;
+            _activeAppKind = null;
             _heartbeatDeadlineMilliseconds = null;
             _heartbeatSequence = 0;
         }
@@ -791,7 +917,7 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
                     if (completion.IsCompleted)
                     {
                         _ = await completion.ConfigureAwait(false);
-                        stopSettled = true;
+                        stopSettled = !_mediaAdapter.CleanupPending;
                     }
                 }
                 catch

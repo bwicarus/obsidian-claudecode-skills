@@ -37,6 +37,7 @@ internal static class AudioBridgeContract
             "--self-test",
             "--list-direct-microphones",
             "--list-direct-render-endpoints",
+            "--probe-codex-app-audio-route --config <absolute-path>",
             "--probe-direct-output-route --config <absolute-path>",
             "--diagnose-direct-audio-no-start --config <absolute-path>",
         },

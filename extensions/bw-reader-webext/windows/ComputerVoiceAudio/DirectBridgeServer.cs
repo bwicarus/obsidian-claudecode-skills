@@ -30,16 +30,16 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
 
     private readonly DirectBridgeConfigStore _configStore;
     private readonly DirectBridgeCoordinator _coordinator;
-    private readonly SemaphoreSlim _connectionGate = new(1, 1);
+    private readonly DirectConnectionOwnership _connectionOwnership = new();
     private readonly SemaphoreSlim _disposeGate = new(1, 1);
     private readonly string _serviceInstanceId;
     private readonly DirectRuntimeStatusWriter _statusWriter;
     private readonly DirectServiceLease _serviceLease;
+    private readonly DirectSnapshotViewer _snapshotViewer;
     private readonly object _runtimeStateGate = new();
     private string _runtimeState = "starting";
     private bool _runtimeReaderConnected;
     private bool _runtimeCaptureActive;
-    private bool _connectionActive;
     private bool _disposed;
     private bool _disposeCompleted;
 
@@ -65,6 +65,12 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         _serviceLease = new DirectServiceLease(
             configStore.InstallationRoot,
             configStore.Path);
+        _snapshotViewer = new DirectSnapshotViewer(
+            Path.Combine(
+                configStore.InstallationRoot,
+                "runtime",
+                FileDirectSnapshotContextAdapter.SnapshotFileName),
+            config.ListenPort);
     }
 
     internal async Task<int> RunAsync(CancellationToken cancellationToken)
@@ -105,6 +111,15 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         app.MapGet(
             "/healthz",
             context => HandleHealthAsync(context, cancellationToken));
+        app.MapGet(
+            DirectSnapshotViewer.ViewerPath,
+            _snapshotViewer.HandleViewerAsync);
+        app.MapGet(
+            DirectSnapshotViewer.SnapshotPath,
+            _snapshotViewer.HandleSnapshotAsync);
+        app.MapGet(
+            DirectSnapshotViewer.MarkdownPath,
+            _snapshotViewer.HandleMarkdownAsync);
         app.Map(
             "/reader-computer-voice/v1",
             context => HandleBridgeAsync(context, cancellationToken));
@@ -241,50 +256,66 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             return;
         }
 
-        await _connectionGate.WaitAsync(serviceCancellationToken)
-            .ConfigureAwait(false);
-        try
-        {
-            if (_connectionActive)
-            {
-                context.Response.StatusCode =
-                    StatusCodes.Status409Conflict;
-                return;
-            }
-            _connectionActive = true;
-        }
-        finally
-        {
-            _connectionGate.Release();
-        }
-
         string connectionId = "connection-"
             + DirectBase64Url.Encode(
                 System.Security.Cryptography.RandomNumberGenerator
                     .GetBytes(12));
+        DirectConnectionLease? connection = null;
         try
         {
-            using CancellationTokenSource connectionLifetime =
-                CancellationTokenSource.CreateLinkedTokenSource(
-                    serviceCancellationToken,
-                    context.RequestAborted);
-            CancellationToken connectionToken =
-                connectionLifetime.Token;
             using WebSocket socket = await context.WebSockets
                 .AcceptWebSocketAsync().ConfigureAwait(false);
+            DirectConnectionClaim claim =
+                await _connectionOwnership.ClaimAsync(
+                    connectionId,
+                    serviceCancellationToken,
+                    context.RequestAborted).ConfigureAwait(false);
+            connection = claim.Current;
+            CancellationToken connectionToken = connection.Token;
+            if (!await _connectionOwnership.TryAttachAsync(
+                connection,
+                socket,
+                connectionToken).ConfigureAwait(false))
+            {
+                socket.Abort();
+                return;
+            }
+            if (claim.Previous is DirectConnectionLease previous)
+            {
+                await _coordinator.StopForConnectionAsync(
+                    previous.ConnectionId).ConfigureAwait(false);
+                try
+                {
+                    await previous.Released.WaitAsync(
+                        TimeSpan.FromSeconds(2),
+                        connectionToken).ConfigureAwait(false);
+                }
+                catch (TimeoutException)
+                {
+                    // Cancellation plus Abort has already revoked the old
+                    // owner.  A slow old HTTP handler must not block the new
+                    // authenticated connection indefinitely.
+                }
+            }
+            connectionToken.ThrowIfCancellationRequested();
             DirectConnectionPhaseDeadline phaseDeadline = new();
             DirectSecurityLog.Write(
                 _serviceInstanceId,
                 "reader-connect",
                 "BW_COMPUTER_VOICE_DIRECT_READER_CONNECTED",
                 ok: true);
-            await WriteRuntimeStatusAsync(
+            if (!await WriteConnectionRuntimeStatusAsync(
+                connection,
                 "reader-connected",
                 readerConnected: true,
                 captureActive: false,
-                connectionToken).ConfigureAwait(false);
+                connectionToken).ConfigureAwait(false))
+            {
+                return;
+            }
             await RunConnectionAsync(
                 socket,
+                connection,
                 connectionId,
                 origin,
                 phaseDeadline,
@@ -303,27 +334,25 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         }
         finally
         {
-            await _coordinator.StopForConnectionAsync(connectionId)
-                .ConfigureAwait(false);
-            await WriteRuntimeStatusAsync(
-                "idle",
-                readerConnected: false,
-                captureActive: false,
-                CancellationToken.None).ConfigureAwait(false);
-            await _connectionGate.WaitAsync().ConfigureAwait(false);
-            try
+            if (connection is not null)
             {
-                _connectionActive = false;
-            }
-            finally
-            {
-                _connectionGate.Release();
+                await _coordinator.StopForConnectionAsync(connectionId)
+                    .ConfigureAwait(false);
+                bool cleanupPending = _coordinator.CleanupPending;
+                await _connectionOwnership.CompleteAsync(
+                    connection,
+                    () => WriteRuntimeStatusAsync(
+                        cleanupPending ? "faulted" : "idle",
+                        readerConnected: false,
+                        captureActive: false,
+                        CancellationToken.None)).ConfigureAwait(false);
             }
         }
     }
 
     private async Task RunConnectionAsync(
         WebSocket socket,
+        DirectConnectionLease connection,
         string connectionId,
         string origin,
         DirectConnectionPhaseDeadline phaseDeadline,
@@ -401,6 +430,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                         "BW_COMPUTER_VOICE_DIRECT_MEDIA_STOPPED_UNEXPECTEDLY",
                         "媒体捕获意外停止");
                 await HandleConnectionFailureAsync(
+                    connection,
                     connectionId,
                     socket,
                     sendGate,
@@ -416,6 +446,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             )
             {
                 await HandleConnectionFailureAsync(
+                    connection,
                     connectionId,
                     socket,
                     sendGate,
@@ -432,6 +463,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             )
             {
                 await HandleConnectionFailureAsync(
+                    connection,
                     connectionId,
                     socket,
                     sendGate,
@@ -480,6 +512,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 catch (DirectProtocolException failure)
                 {
                     await HandleConnectionFailureAsync(
+                        connection,
                         connectionId,
                         socket,
                         sendGate,
@@ -501,7 +534,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                     message,
                     async (state, reason) =>
                     {
-                        await WriteRuntimeStatusAsync(
+                        _ = await WriteConnectionRuntimeStatusAsync(
+                            connection,
                             state,
                             readerConnected: true,
                             captureActive: state == "active",
@@ -561,6 +595,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             )
             {
                 await HandleConnectionFailureAsync(
+                    connection,
                     connectionId,
                     socket,
                     sendGate,
@@ -573,6 +608,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             if (phaseDeadline.IsExpired(protocol.Phase))
             {
                 await HandleConnectionFailureAsync(
+                    connection,
                     connectionId,
                     socket,
                     sendGate,
@@ -612,6 +648,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                         ?? throw new DirectProtocolException(
                             "BW_COMPUTER_VOICE_DIRECT_UPLINK_NOT_ACTIVE",
                             "浏览器麦克风上行尚未启动"));
+                    _snapshotViewer.OpenIfSnapshotMode(
+                        _configStore.Load().ContextDeliveryMode);
                 }
                 else if (
                     phaseBeforeMessage == DirectProtocolPhase.Active
@@ -628,6 +666,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 )
             {
                 await HandleConnectionFailureAsync(
+                    connection,
                     connectionId,
                     socket,
                     sendGate,
@@ -647,6 +686,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 if (failure is not null)
                 {
                     await HandleConnectionFailureAsync(
+                        connection,
                         connectionId,
                         socket,
                         sendGate,
@@ -658,6 +698,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             if (_coordinator.IsHeartbeatExpired(connectionId))
             {
                 await HandleConnectionFailureAsync(
+                    connection,
                     connectionId,
                     socket,
                     sendGate,
@@ -670,7 +711,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
 
             if (_coordinator.CaptureActive)
             {
-                await WriteRuntimeStatusAsync(
+                _ = await WriteConnectionRuntimeStatusAsync(
+                    connection,
                     "active",
                     readerConnected: true,
                     captureActive: true,
@@ -678,8 +720,11 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             }
             else
             {
-                await WriteRuntimeStatusAsync(
-                    "reader-connected",
+                _ = await WriteConnectionRuntimeStatusAsync(
+                    connection,
+                    _coordinator.CleanupPending
+                        ? "faulted"
+                        : "reader-connected",
                     readerConnected: true,
                     captureActive: false,
                     cancellationToken).ConfigureAwait(false);
@@ -799,6 +844,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     }
 
     private async Task HandleConnectionFailureAsync(
+        DirectConnectionLease connection,
         string connectionId,
         WebSocket socket,
         SemaphoreSlim sendGate,
@@ -813,7 +859,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             logEvent,
             failure.Code,
             ok: false);
-        await WriteRuntimeStatusAsync(
+        _ = await WriteConnectionRuntimeStatusAsync(
+            connection,
             "faulted",
             readerConnected: true,
             captureActive: false,
@@ -1001,6 +1048,21 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             values[0],
             config.AllowedTailscaleUserLogin,
             StringComparison.OrdinalIgnoreCase);
+
+    private Task<bool> WriteConnectionRuntimeStatusAsync(
+        DirectConnectionLease connection,
+        string state,
+        bool readerConnected,
+        bool captureActive,
+        CancellationToken cancellationToken) =>
+        _connectionOwnership.RunIfCurrentAsync(
+            connection,
+            () => WriteRuntimeStatusAsync(
+                state,
+                readerConnected,
+                captureActive,
+                cancellationToken),
+            cancellationToken);
 
     private async Task WriteRuntimeStatusAsync(
         string state,
@@ -1213,9 +1275,17 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             // uses one await-using disposal call in production, so that one
             // call must consume the retry budget itself.
             _disposed = true;
-            await DisposeCoordinatorWithBoundedRetryAsync()
+            try
+            {
+                await DisposeCoordinatorWithBoundedRetryAsync()
+                    .ConfigureAwait(false);
+            }
+            finally
+            {
+                _snapshotViewer.Dispose();
+            }
+            await _connectionOwnership.DisposeAsync()
                 .ConfigureAwait(false);
-            _connectionGate.Dispose();
             _disposeCompleted = true;
         }
         finally
@@ -1254,6 +1324,263 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 new AggregateException(failures));
         }
         throw new AggregateException(failures);
+    }
+}
+
+internal sealed record DirectConnectionClaim(
+    DirectConnectionLease Current,
+    DirectConnectionLease? Previous);
+
+internal sealed class DirectConnectionLease
+{
+    private readonly CancellationTokenSource _lifetime;
+    private readonly CancellationToken _token;
+    private readonly TaskCompletionSource<bool> _released = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly object _socketGate = new();
+    private WebSocket? _socket;
+    private bool _retired;
+    private int _completed;
+
+    internal DirectConnectionLease(
+        long generation,
+        string connectionId,
+        CancellationTokenSource lifetime)
+    {
+        Generation = generation;
+        ConnectionId = connectionId;
+        _lifetime = lifetime;
+        _token = lifetime.Token;
+    }
+
+    internal long Generation { get; }
+
+    internal string ConnectionId { get; }
+
+    internal CancellationToken Token => _token;
+
+    internal Task Released => _released.Task;
+
+    internal bool IsCompleted =>
+        Volatile.Read(ref _completed) != 0;
+
+    internal bool TryAttach(WebSocket socket)
+    {
+        lock (_socketGate)
+        {
+            if (_retired)
+            {
+                return false;
+            }
+            if (_socket is not null)
+            {
+                return ReferenceEquals(_socket, socket);
+            }
+            _socket = socket;
+            return true;
+        }
+    }
+
+    internal void Retire()
+    {
+        WebSocket? socket;
+        lock (_socketGate)
+        {
+            if (_retired)
+            {
+                return;
+            }
+            _retired = true;
+            socket = _socket;
+            _socket = null;
+        }
+        try
+        {
+            _lifetime.Cancel();
+        }
+        catch
+        {
+            // Cancellation callbacks belong to the retiring connection and
+            // cannot be allowed to reject the authenticated replacement.
+        }
+        try
+        {
+            socket?.Abort();
+        }
+        catch
+        {
+            // The peer may have closed concurrently.  Ownership is already
+            // revoked even when the transport has nothing left to abort.
+        }
+    }
+
+    internal void Complete()
+    {
+        if (Interlocked.Exchange(ref _completed, 1) != 0)
+        {
+            return;
+        }
+        Retire();
+        _released.TrySetResult(true);
+        _lifetime.Dispose();
+    }
+}
+
+internal sealed class DirectConnectionOwnership : IAsyncDisposable
+{
+    private readonly SemaphoreSlim _gate = new(1, 1);
+    private DirectConnectionLease? _current;
+    private long _generation;
+    private bool _disposed;
+
+    internal async Task<DirectConnectionClaim> ClaimAsync(
+        string connectionId,
+        CancellationToken serviceCancellationToken,
+        CancellationToken requestCancellationToken)
+    {
+        CancellationTokenSource lifetime =
+            CancellationTokenSource.CreateLinkedTokenSource(
+                serviceCancellationToken,
+                requestCancellationToken);
+        DirectConnectionLease? current = null;
+        DirectConnectionLease? previous = null;
+        try
+        {
+            await _gate.WaitAsync(lifetime.Token).ConfigureAwait(false);
+            try
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                lifetime.Token.ThrowIfCancellationRequested();
+                current = new DirectConnectionLease(
+                    checked(++_generation),
+                    connectionId,
+                    lifetime);
+                previous = _current;
+                _current = current;
+            }
+            finally
+            {
+                _gate.Release();
+            }
+        }
+        catch
+        {
+            lifetime.Dispose();
+            throw;
+        }
+
+        previous?.Retire();
+        return new DirectConnectionClaim(current!, previous);
+    }
+
+    internal async Task<bool> TryAttachAsync(
+        DirectConnectionLease connection,
+        WebSocket socket,
+        CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return ReferenceEquals(_current, connection)
+                && connection.TryAttach(socket);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    internal async Task<bool> IsCurrentAsync(
+        DirectConnectionLease connection,
+        CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return ReferenceEquals(_current, connection);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    internal async Task<bool> RunIfCurrentAsync(
+        DirectConnectionLease connection,
+        Func<Task> action,
+        CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (!ReferenceEquals(_current, connection))
+            {
+                return false;
+            }
+            await action().ConfigureAwait(false);
+            return true;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    internal async Task CompleteAsync(
+        DirectConnectionLease connection,
+        Func<Task> onCurrent)
+    {
+        if (connection.IsCompleted)
+        {
+            return;
+        }
+        try
+        {
+            await _gate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                if (ReferenceEquals(_current, connection))
+                {
+                    try
+                    {
+                        await onCurrent().ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        _current = null;
+                    }
+                }
+            }
+            finally
+            {
+                _gate.Release();
+            }
+        }
+        finally
+        {
+            connection.Complete();
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        DirectConnectionLease? current;
+        await _gate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (_disposed)
+            {
+                return;
+            }
+            _disposed = true;
+            current = _current;
+            _current = null;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+        current?.Complete();
     }
 }
 

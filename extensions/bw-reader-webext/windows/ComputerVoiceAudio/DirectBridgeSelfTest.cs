@@ -1,9 +1,12 @@
 using System.Buffers.Binary;
+using System.Diagnostics;
+using System.Net;
 using System.Net.WebSockets;
 using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using Microsoft.AspNetCore.Http;
 
 namespace BwReader.ComputerVoiceAudio;
 
@@ -77,13 +80,19 @@ internal static class DirectBridgeSelfTest
                 == "bwicarus@gmail.com"
             && initial.ExperimentalSingleUserMode
             && initial.VirtualMicrophoneRenderEndpointId
-                == "explicit-test-render-microphone"
+                == "{0.0.0.00000000}."
+                    + "{11111111-1111-1111-1111-111111111111}"
+            && initial.VirtualMicrophoneCaptureEndpointId
+                == "{0.0.1.00000000}."
+                    + "{22222222-2222-2222-2222-222222222222}"
             && initial.VirtualSpeakerRenderEndpointId
-                == "explicit-test-render-speaker"
+                == "{0.0.0.00000000}."
+                    + "{33333333-3333-3333-3333-333333333333}"
+            && initial.PerAppAudioRouteAutomationEnabled
             && initial.ExperimentalSingleUserMode
             && initial.ContextDeliveryMode
                 == DirectContextDeliveryMode.LegacyInject,
-            "direct-config-v4-localhost-single-user-two-render-endpoints",
+            "direct-config-v5-localhost-single-user-explicit-a-b-routes",
             checks);
         Require(
             DirectBridgeServer.TailscaleLoginMatches(
@@ -628,6 +637,8 @@ internal static class DirectBridgeSelfTest
         await CheckDisconnectCancellationAsync(
             configPath,
             checks).ConfigureAwait(false);
+        await CheckConnectionTakeoverOwnershipAsync(checks)
+            .ConfigureAwait(false);
         await CheckServerCloseCancelsBlockedStartAsync(
             configPath,
             checks).ConfigureAwait(false);
@@ -651,6 +662,9 @@ internal static class DirectBridgeSelfTest
         await CheckExplicitStopFailureAsync(
             configPath,
             checks).ConfigureAwait(false);
+        await CheckRetainedCleanupOwnershipAsync(
+            configPath,
+            checks).ConfigureAwait(false);
         await CheckStaleStopPreservesActiveSessionAsync(
             configPath,
             checks).ConfigureAwait(false);
@@ -670,6 +684,9 @@ internal static class DirectBridgeSelfTest
         await CheckSnapshotMcpModeAsync(
             root,
             origin,
+            checks).ConfigureAwait(false);
+        await CheckSnapshotMetadataFoldAsync(
+            root,
             checks).ConfigureAwait(false);
         await CheckReaderContextMcpProtocolAsync(
             root,
@@ -931,6 +948,110 @@ internal static class DirectBridgeSelfTest
             checks);
     }
 
+    private static async Task CheckRetainedCleanupOwnershipAsync(
+        string configPath,
+        ICollection<string> checks)
+    {
+        FakeDirectMediaAdapter media = new()
+        {
+            RetainCleanupOnStop = true,
+        };
+        await using DirectBridgeCoordinator coordinator = new(
+            new DirectBridgeConfigStore(configPath),
+            new FakeDirectAppLauncher(),
+            media);
+        DirectBridgeProtocolSession session = new(
+            "connection-retained-cleanup",
+            "https://extension-page.example",
+            new DirectBridgeConfigStore(configPath),
+            coordinator,
+            () => DateTimeOffset.UtcNow);
+        List<object> events = [];
+        List<byte[]> frames = [];
+        _ = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "hello",
+                    requestId = "request-retained-cleanup-hello",
+                    protocolVersion = 3,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "hello");
+        string sessionId = "session-" + DirectBase64Url.Encode(
+            Enumerable.Repeat((byte)0x73, 16).ToArray());
+        _ = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "start",
+                    requestId = "request-retained-cleanup-start",
+                    sessionId,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "start");
+
+        JsonElement stop = await SendAsync(
+            session,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "stop",
+                requestId = "request-retained-cleanup-stop",
+                sessionId,
+            },
+            events,
+            frames).ConfigureAwait(false);
+        JsonElement status = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "status",
+                    requestId = "request-retained-cleanup-status",
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "status");
+        Require(
+            !stop.GetProperty("ok").GetBoolean()
+            && stop.GetProperty("error").GetProperty("code")
+                .GetString()
+                == "BW_COMPUTER_VOICE_DIRECT_MEDIA_CLEANUP_PENDING"
+            && coordinator.ActiveSessionId == sessionId
+            && media.CleanupPending
+            && !media.CaptureActive
+            && session.Phase == DirectProtocolPhase.Active
+            && status.GetProperty("state").GetString() == "faulted"
+            && !status.GetProperty("ready").GetBoolean()
+            && status.GetProperty("reason").GetString()
+                == "BW_COMPUTER_VOICE_DIRECT_MEDIA_CLEANUP_PENDING",
+            "direct-stop-retains-owner-and-reports-faulted-while-cleanup-pending",
+            checks);
+
+        await coordinator.StopForConnectionAsync(
+            "connection-retained-cleanup").ConfigureAwait(false);
+        bool peerCloseRetainedOwner =
+            coordinator.ActiveSessionId == sessionId
+            && media.CleanupPending;
+        media.RetainCleanupOnStop = false;
+        await coordinator.StopForConnectionAsync(
+            "connection-retained-cleanup").ConfigureAwait(false);
+        Require(
+            peerCloseRetainedOwner
+            && coordinator.ActiveSessionId is null
+            && !media.CleanupPending,
+            "direct-peer-close-retries-retained-cleanup-before-releasing-owner",
+            checks);
+    }
+
     private static async Task CheckPeerAbortDuringStopAsync(
         string configPath,
         ICollection<string> checks)
@@ -1122,6 +1243,7 @@ internal static class DirectBridgeSelfTest
                     "--ensure-running",
                     "7001",
                     "133600000000000000",
+                    DirectAppTargets.CodexDesktop,
                 }),
             "direct-typist-started-result-creates-owned-lease",
             checks);
@@ -1372,6 +1494,31 @@ internal static class DirectBridgeSelfTest
             "direct-shortcut-pre-cancel-has-no-side-effect",
             checks);
 
+        using CancellationTokenSource canceledDuringValidation = new();
+        bool validationCanceled = false;
+        try
+        {
+            WindowsDirectMediaAdapter.SendShortcutAtAtomicCommitBoundary(
+                () => canceledDuringValidation.Cancel(),
+                () =>
+                {
+                    shortcutCount++;
+                    return true;
+                },
+                () => commitCount++,
+                canceledDuringValidation.Token);
+        }
+        catch (OperationCanceledException)
+        {
+            validationCanceled = true;
+        }
+        Require(
+            validationCanceled
+            && shortcutCount == 1
+            && commitCount == 1,
+            "direct-shortcut-validation-race-has-no-side-effect",
+            checks);
+
         int invalidEndpointShortcutCount = 0;
         bool invalidPreparedMediaRejected = false;
         try
@@ -1401,6 +1548,42 @@ internal static class DirectBridgeSelfTest
             && invalidEndpointShortcutCount == 0
             && commitCount == 1,
             "direct-shortcut-rechecks-prepared-audio-before-side-effect",
+            checks);
+
+        Require(
+            WindowsDirectMediaAdapter.CanRestorePerAppAudioRoute(
+                voiceSettled: true,
+                captureLifetimeReleased: true,
+                outputSessionReleased: true,
+                renderSessionReleased: true,
+                outputRouteObserverReleased: true,
+                outputPumpReleased: true,
+                renderMonitorReleased: true)
+            && !WindowsDirectMediaAdapter.CanRestorePerAppAudioRoute(
+                voiceSettled: false,
+                captureLifetimeReleased: true,
+                outputSessionReleased: true,
+                renderSessionReleased: true,
+                outputRouteObserverReleased: true,
+                outputPumpReleased: true,
+                renderMonitorReleased: true)
+            && !WindowsDirectMediaAdapter.CanRestorePerAppAudioRoute(
+                voiceSettled: true,
+                captureLifetimeReleased: true,
+                outputSessionReleased: false,
+                renderSessionReleased: true,
+                outputRouteObserverReleased: true,
+                outputPumpReleased: true,
+                renderMonitorReleased: true)
+            && !WindowsDirectMediaAdapter.CanRestorePerAppAudioRoute(
+                voiceSettled: true,
+                captureLifetimeReleased: true,
+                outputSessionReleased: true,
+                renderSessionReleased: true,
+                outputRouteObserverReleased: true,
+                outputPumpReleased: false,
+                renderMonitorReleased: true),
+            "direct-route-restore-waits-for-voice-and-media-settlement",
             checks);
 
         object oldGeneration = new();
@@ -1538,7 +1721,7 @@ internal static class DirectBridgeSelfTest
             WindowsCodexAppProbe.VoiceShortcutEvents(
                 VoiceShortcutInputBatch.ReleasePressedKeys);
         bool everyPartialReleased = true;
-        for (uint inserted = 0; inserted <= 6; inserted++)
+        for (uint inserted = 0; inserted <= 2; inserted++)
         {
             List<VoiceShortcutInputBatch> batches = [];
             bool accepted =
@@ -1549,10 +1732,10 @@ internal static class DirectBridgeSelfTest
                         return batch
                             == VoiceShortcutInputBatch.Activation
                             ? inserted
-                            : 3;
+                            : 1;
                     });
-            bool expectedCleanup = inserted is >= 1 and <= 5;
-            everyPartialReleased &= accepted == (inserted == 6)
+            bool expectedCleanup = inserted == 1;
+            everyPartialReleased &= accepted == (inserted == 2)
                 && batches.SequenceEqual(
                     expectedCleanup
                         ? new[]
@@ -1569,26 +1752,20 @@ internal static class DirectBridgeSelfTest
             !WindowsCodexAppProbe.SendVoiceShortcutInputSequence(
                 batch => batch
                     == VoiceShortcutInputBatch.Activation
-                    ? 3u
+                    ? 1u
                     : throw new InvalidOperationException(
                         "release input failed"));
         Require(
             activationEvents.SequenceEqual(
                 new[]
                 {
-                    new VoiceShortcutKeyEvent(0x11, KeyUp: false),
-                    new VoiceShortcutKeyEvent(0x10, KeyUp: false),
-                    new VoiceShortcutKeyEvent(0x43, KeyUp: false),
-                    new VoiceShortcutKeyEvent(0x43, KeyUp: true),
-                    new VoiceShortcutKeyEvent(0x10, KeyUp: true),
-                    new VoiceShortcutKeyEvent(0x11, KeyUp: true),
+                    new VoiceShortcutKeyEvent(0x87, KeyUp: false),
+                    new VoiceShortcutKeyEvent(0x87, KeyUp: true),
                 })
             && releaseEvents.SequenceEqual(
                 new[]
                 {
-                    new VoiceShortcutKeyEvent(0x43, KeyUp: true),
-                    new VoiceShortcutKeyEvent(0x10, KeyUp: true),
-                    new VoiceShortcutKeyEvent(0x11, KeyUp: true),
+                    new VoiceShortcutKeyEvent(0x87, KeyUp: true),
                 })
             && everyPartialReleased
             && cleanupThrowRemainsFailed,
@@ -1597,12 +1774,50 @@ internal static class DirectBridgeSelfTest
 
         CodexAppTarget shortcutExpected = new(
             RootProcessId: 7001,
+            RootProcessStartFileTimeUtc: 133700000000000000,
             ProcessTree: new HashSet<uint> { 7001, 7002 },
             WindowHandle: (nint)71);
         CodexAppTarget shortcutCurrentWithChildChurn = new(
             RootProcessId: 7001,
+            RootProcessStartFileTimeUtc: 133700000000000000,
             ProcessTree: new HashSet<uint> { 7001, 7003, 7004 },
             WindowHandle: (nint)72);
+        int audioPolicyProbeCount = 0;
+        int audioPolicyCandidateCount = 0;
+        CodexAudioPolicyTarget convergedAudioPolicy =
+            await WindowsCodexAppProbe.WaitForAudioPolicyProcessAsync(
+                shortcutExpected,
+                TimeSpan.FromSeconds(1),
+                CancellationToken.None,
+                probe: () =>
+                {
+                    audioPolicyProbeCount++;
+                    return new CodexAppProbeState(
+                        RootCount: 1,
+                        WindowCount: 1,
+                        ReadyTarget: shortcutCurrentWithChildChurn);
+                },
+                candidates: _ =>
+                {
+                    audioPolicyCandidateCount++;
+                    return audioPolicyCandidateCount == 1
+                        ? new uint[] { 7003, 7004 }
+                        : new uint[] { 7004 };
+                },
+                delay: (_, cancellationToken) =>
+                {
+                    cancellationToken.ThrowIfCancellationRequested();
+                    return Task.CompletedTask;
+                });
+        Require(
+            convergedAudioPolicy.ProcessId == 7004
+            && ReferenceEquals(
+                convergedAudioPolicy.AppTarget,
+                shortcutCurrentWithChildChurn)
+            && audioPolicyProbeCount == 3
+            && audioPolicyCandidateCount == 3,
+            "direct-audio-service-transient-ambiguity-converges",
+            checks);
         List<VoiceShortcutInputBatch> globalBatches = [];
         VoiceShortcutSendResult globalShortcut =
             WindowsCodexAppProbe.SendValidatedGlobalVoiceShortcut(
@@ -1613,8 +1828,8 @@ internal static class DirectBridgeSelfTest
                 {
                     globalBatches.Add(batch);
                     return batch == VoiceShortcutInputBatch.Activation
-                        ? 6u
-                        : 3u;
+                        ? 2u
+                        : 1u;
                 },
                 () => 0);
         VoiceShortcutSendResult changedRoot =
@@ -1627,6 +1842,18 @@ internal static class DirectBridgeSelfTest
                 shortcutConfigured: true,
                 _ => throw new InvalidOperationException(
                     "changed target must not receive input"),
+                () => 0);
+        VoiceShortcutSendResult changedGeneration =
+            WindowsCodexAppProbe.SendValidatedGlobalVoiceShortcut(
+                shortcutExpected,
+                shortcutCurrentWithChildChurn with
+                {
+                    RootProcessStartFileTimeUtc =
+                        133700000000000001,
+                },
+                shortcutConfigured: true,
+                _ => throw new InvalidOperationException(
+                    "changed generation must not receive input"),
                 () => 0);
         VoiceShortcutSendResult invalidBinding =
             WindowsCodexAppProbe.SendValidatedGlobalVoiceShortcut(
@@ -1646,8 +1873,8 @@ internal static class DirectBridgeSelfTest
                 {
                     partialBatches.Add(batch);
                     return batch == VoiceShortcutInputBatch.Activation
-                        ? 3u
-                        : 3u;
+                        ? 1u
+                        : 1u;
                 },
                 () => 5);
         bool validGlobalShortcutConfig =
@@ -1655,14 +1882,14 @@ internal static class DirectBridgeSelfTest
                 """
                 [
                   {"command":"composer.submit","key":"Ctrl+Shift+L"},
-                  {"command":"realtimeVoice","key":"Ctrl+Shift+C"}
+                  {"command":"realtimeVoice","key":"F24"}
                 ]
                 """);
         bool rejectsDuplicateCommand =
             !WindowsCodexAppProbe.IsExpectedGlobalVoiceShortcutConfig(
                 """
                 [
-                  {"command":"realtimeVoice","key":"Ctrl+Shift+C"},
+                  {"command":"realtimeVoice","key":"F24"},
                   {"command":"realtimeVoice","key":"Ctrl+Shift+V"}
                 ]
                 """);
@@ -1670,8 +1897,8 @@ internal static class DirectBridgeSelfTest
             !WindowsCodexAppProbe.IsExpectedGlobalVoiceShortcutConfig(
                 """
                 [
-                  {"command":"realtimeVoice","key":"Ctrl+Shift+C"},
-                  {"command":"other","key":"Ctrl+Shift+C"}
+                  {"command":"realtimeVoice","key":"F24"},
+                  {"command":"other","key":"F24"}
                 ]
                 """);
         bool rejectsMalformedBinding =
@@ -1679,21 +1906,23 @@ internal static class DirectBridgeSelfTest
                 """
                 [
                   {"command":"realtimeVoice"},
-                  {"command":"other","key":"Ctrl+Shift+C"}
+                  {"command":"other","key":"F24"}
                 ]
                 """);
         Require(
             globalShortcut.Sent
-            && globalShortcut.InsertedInputCount == 6
+            && globalShortcut.InsertedInputCount == 2
             && globalBatches.SequenceEqual(
                 new[] { VoiceShortcutInputBatch.Activation })
             && changedRoot.FailureCode
+                == "BW_COMPUTER_VOICE_DIRECT_SHORTCUT_TARGET_CHANGED"
+            && changedGeneration.FailureCode
                 == "BW_COMPUTER_VOICE_DIRECT_SHORTCUT_TARGET_CHANGED"
             && invalidBinding.FailureCode
                 == "BW_COMPUTER_VOICE_DIRECT_SHORTCUT_CONFIG_INVALID"
             && partialGlobalShortcut.FailureCode
                 == "BW_COMPUTER_VOICE_DIRECT_SHORTCUT_INPUT_FAILED"
-            && partialGlobalShortcut.InsertedInputCount == 3
+            && partialGlobalShortcut.InsertedInputCount == 1
             && partialGlobalShortcut.Win32Error == 5
             && partialBatches.SequenceEqual(new[]
             {
@@ -1705,10 +1934,6 @@ internal static class DirectBridgeSelfTest
             && rejectsShortcutCollision
             && rejectsMalformedBinding,
             "direct-os-global-shortcut-ignores-foreground-and-child-churn",
-            checks);
-        Require(
-            !WindowsCodexAppProbe.SupportsOwnedVoiceStop,
-            "direct-stop-does-not-claim-unverified-app-voice-toggle",
             checks);
     }
 
@@ -1971,6 +2196,107 @@ internal static class DirectBridgeSelfTest
             && launcher.CancellationObserved
             && media.StartCount == 0,
             "direct-disconnect-cancels-app-wait-before-capture",
+            checks);
+    }
+
+    private static async Task CheckConnectionTakeoverOwnershipAsync(
+        ICollection<string> checks)
+    {
+        await using DirectConnectionOwnership ownership = new();
+        DirectConnectionClaim first = await ownership.ClaimAsync(
+            "connection-takeover-first",
+            CancellationToken.None,
+            CancellationToken.None).ConfigureAwait(false);
+        using FakeDirectWebSocket firstSocket = new();
+        bool firstAttached = await ownership.TryAttachAsync(
+            first.Current,
+            firstSocket,
+            CancellationToken.None).ConfigureAwait(false);
+
+        DirectConnectionClaim second = await ownership.ClaimAsync(
+            "connection-takeover-second",
+            CancellationToken.None,
+            CancellationToken.None).ConfigureAwait(false);
+        using FakeDirectWebSocket secondSocket = new();
+        bool secondAttached = await ownership.TryAttachAsync(
+            second.Current,
+            secondSocket,
+            CancellationToken.None).ConfigureAwait(false);
+        int staleCompletionWrites = 0;
+        await ownership.CompleteAsync(
+            first.Current,
+            () =>
+            {
+                staleCompletionWrites++;
+                return Task.CompletedTask;
+            }).ConfigureAwait(false);
+        bool secondRemainsCurrent = await ownership.IsCurrentAsync(
+            second.Current,
+            CancellationToken.None).ConfigureAwait(false);
+
+        Task<DirectConnectionClaim> thirdTask = ownership.ClaimAsync(
+            "connection-takeover-third",
+            CancellationToken.None,
+            CancellationToken.None);
+        Task<DirectConnectionClaim> fourthTask = ownership.ClaimAsync(
+            "connection-takeover-fourth",
+            CancellationToken.None,
+            CancellationToken.None);
+        DirectConnectionClaim[] concurrent =
+            await Task.WhenAll(thirdTask, fourthTask).ConfigureAwait(false);
+        DirectConnectionClaim winner = concurrent.MaxBy(
+            claim => claim.Current.Generation)!;
+        DirectConnectionClaim loser = concurrent.MinBy(
+            claim => claim.Current.Generation)!;
+        using FakeDirectWebSocket loserSocket = new();
+        using FakeDirectWebSocket winnerSocket = new();
+        bool loserAttached = await ownership.TryAttachAsync(
+            loser.Current,
+            loserSocket,
+            CancellationToken.None).ConfigureAwait(false);
+        bool winnerAttached = await ownership.TryAttachAsync(
+            winner.Current,
+            winnerSocket,
+            CancellationToken.None).ConfigureAwait(false);
+        int loserCompletionWrites = 0;
+        int winnerCompletionWrites = 0;
+        await ownership.CompleteAsync(
+            loser.Current,
+            () =>
+            {
+                loserCompletionWrites++;
+                return Task.CompletedTask;
+            }).ConfigureAwait(false);
+        await ownership.CompleteAsync(
+            winner.Current,
+            () =>
+            {
+                winnerCompletionWrites++;
+                return Task.CompletedTask;
+            }).ConfigureAwait(false);
+
+        Require(
+            firstAttached
+            && secondAttached
+            && ReferenceEquals(second.Previous, first.Current)
+            && first.Current.Token.IsCancellationRequested
+            && firstSocket.State == WebSocketState.Aborted
+            && first.Current.Released.IsCompleted
+            && staleCompletionWrites == 0
+            && secondRemainsCurrent
+            && second.Current.Token.IsCancellationRequested
+            && secondSocket.State == WebSocketState.Aborted
+            && winner.Current.Generation
+                > loser.Current.Generation
+            && loser.Current.Token.IsCancellationRequested
+            && !loserAttached
+            && winnerAttached
+            && loserCompletionWrites == 0
+            && winnerCompletionWrites == 1
+            && loser.Current.Released.IsCompleted
+            && winner.Current.Released.IsCompleted
+            && winnerSocket.State == WebSocketState.Aborted,
+            "direct-authenticated-connection-takeover-is-newest-wins",
             checks);
     }
 
@@ -2479,6 +2805,7 @@ internal static class DirectBridgeSelfTest
 
         CodexAppTarget firstTarget = new(
             RootProcessId: 4100,
+            RootProcessStartFileTimeUtc: 133700000000000000,
             ProcessTree: new HashSet<uint> { 4100, 4101 },
             WindowHandle: 1);
         DirectOutputRouteEvidenceTracker tracker = new(firstTarget);
@@ -2535,6 +2862,7 @@ internal static class DirectBridgeSelfTest
 
         CodexAppTarget nextTarget = new(
             RootProcessId: 5100,
+            RootProcessStartFileTimeUtc: 133700000000000001,
             ProcessTree: new HashSet<uint> { 5100, 5101 },
             WindowHandle: 2);
         tracker.SetTarget(nextTarget);
@@ -2846,9 +3174,11 @@ internal static class DirectBridgeSelfTest
                 new DirectMediaStartRequest(
                     "session-" + DirectBase64Url.Encode(new byte[16]),
                     123,
+                    133700000000000000,
                     "codex-desktop",
                     DirectBridgeContract.CodexAppUserModelId,
                     "virtual-mic-render",
+                    "virtual-mic-capture",
                     "virtual-speaker-render"),
                 (_, _) => Task.CompletedTask,
                 CancellationToken.None).GetAwaiter().GetResult();
@@ -2916,16 +3246,16 @@ internal static class DirectBridgeSelfTest
         Require(
             rejected
             && CheckExperimentalAndStrictOrigins(root)
-            && CheckStrictV3ConfigSchema(root),
+            && CheckStrictV5ConfigSchema(root),
             "direct-origin-policy-is-explicit-and-canonical",
             checks);
     }
 
-    private static bool CheckStrictV3ConfigSchema(string root)
+    private static bool CheckStrictV5ConfigSchema(string root)
     {
         string schemaRoot = System.IO.Path.Combine(
             root,
-            "strict-v3-schema");
+            "strict-v5-schema");
         string configPath = System.IO.Path.Combine(
             schemaRoot,
             "native-host",
@@ -2939,6 +3269,16 @@ internal static class DirectBridgeSelfTest
             "https://bwicarus.taile44d0c.ts.net",
             localOptIn: false).GetAwaiter().GetResult();
         string validJson = File.ReadAllText(configPath);
+        DirectBridgeConfig strict =
+            new DirectBridgeConfigStore(configPath).Load();
+        if (
+            !strict.PerAppAudioRouteAutomationEnabled
+            || string.IsNullOrEmpty(
+                strict.VirtualMicrophoneCaptureEndpointId)
+        )
+        {
+            return false;
+        }
 
         List<Action<JsonObject>> mutations =
         [
@@ -2952,9 +3292,20 @@ internal static class DirectBridgeSelfTest
             value => value["pairedClientFingerprintSha256"] =
                 "legacy-fingerprint",
             value => value["virtualMicrophoneRenderEndpointId"] = "",
+            value => value["virtualMicrophoneCaptureEndpointId"] = "",
             value => value["virtualSpeakerRenderEndpointId"] = "",
             value => value["virtualSpeakerRenderEndpointId"] =
                 value["virtualMicrophoneRenderEndpointId"]!.GetValue<string>(),
+            value => value["virtualMicrophoneCaptureEndpointId"] =
+                value["virtualMicrophoneRenderEndpointId"]!.GetValue<string>(),
+            value => value["virtualMicrophoneRenderEndpointId"] =
+                value["virtualMicrophoneCaptureEndpointId"]!.GetValue<string>(),
+            value => value["virtualSpeakerRenderEndpointId"] =
+                value["virtualMicrophoneCaptureEndpointId"]!.GetValue<string>(),
+            value => value["contract"] =
+                DirectBridgeContract.LegacyConfigContract,
+            value => value["contract"] =
+                "reader-computer-voice-direct-config/3",
             value => value["experimentalSingleUserMode"] = false,
         ];
         foreach (Action<JsonObject> mutate in mutations)
@@ -2981,7 +3332,19 @@ internal static class DirectBridgeSelfTest
                 }
             }
         }
-        return true;
+
+        JsonObject legacy =
+            JsonNode.Parse(validJson)?.AsObject()
+            ?? throw new InvalidOperationException(
+                "self-test config JSON was not an object");
+        legacy["contract"] =
+            DirectBridgeContract.LegacyConfigContract;
+        legacy.Remove("virtualMicrophoneCaptureEndpointId");
+        File.WriteAllText(configPath, legacy.ToJsonString());
+        DirectBridgeConfig loadedLegacy =
+            new DirectBridgeConfigStore(configPath).Load();
+        return !loadedLegacy.PerAppAudioRouteAutomationEnabled
+            && loadedLegacy.VirtualMicrophoneCaptureEndpointId == "";
     }
 
     private static bool CheckExperimentalAndStrictOrigins(string root)
@@ -4168,6 +4531,1122 @@ internal static class DirectBridgeSelfTest
                 == "unknown",
             "direct-reader-context-mcp-never-returns-stale-page-or-selection-text",
             checks);
+
+        JsonObject drawingFreshness = new()
+        {
+            ["activeReading"] = new JsonObject
+            {
+                ["file"] = "drawing.pdf",
+                ["page"] = 1,
+                ["receivedAtEpochMs"] = 1_000_000L,
+                ["fresh"] = true,
+            },
+            ["contextStatus"] = "ready",
+            ["currentPage"] = new JsonObject
+            {
+                ["file"] = "drawing.pdf",
+                ["page"] = 1,
+                ["stable"] = true,
+                ["text"] = "x",
+                ["textAvailable"] = true,
+                ["visual"] = new JsonObject
+                {
+                    ["drawing"] = new JsonObject
+                    {
+                        ["empty"] = false,
+                        ["lastEditedAt"] = 1000.0,
+                        ["freshWindowS"] = 120.0,
+                        ["freshness"] = "recent",
+                    },
+                },
+            },
+        };
+        ReaderContextMcpServer.ApplyFreshness(
+            drawingFreshness,
+            DateTimeOffset.FromUnixTimeMilliseconds(
+                1_120_000));
+        string? atBoundary = drawingFreshness["currentPage"]
+            ?["visual"]?["drawing"]?["freshness"]
+            ?.GetValue<string>();
+        ReaderContextMcpServer.ApplyFreshness(
+            drawingFreshness,
+            DateTimeOffset.FromUnixTimeMilliseconds(
+                1_120_001));
+        Require(
+            atBoundary == "recent"
+            && drawingFreshness["currentPage"]
+                ?["visual"]?["drawing"]?["freshness"]
+                ?.GetValue<string>() == "stale",
+            "direct-reader-context-mcp-recomputes-drawing-freshness",
+            checks);
+    }
+
+    private static async Task CheckSnapshotMetadataFoldAsync(
+        string root,
+        ICollection<string> checks)
+    {
+        string snapshotPath = System.IO.Path.Combine(
+            root,
+            "snapshot-metadata",
+            FileDirectSnapshotContextAdapter.SnapshotFileName);
+        FileDirectSnapshotContextAdapter adapter = new(
+            snapshotPath,
+            () => DateTimeOffset.FromUnixTimeMilliseconds(
+                1_750_000_005_000));
+        string sessionId =
+            "session-" + DirectBase64Url.Encode(
+                Enumerable.Range(112, 16)
+                    .Select(value => (byte)value)
+                    .ToArray());
+        JsonElement activeValue = JsonSerializer.SerializeToElement(new
+        {
+            kind = "epub",
+            file = "book.epub",
+            title = "Metadata Book",
+            page = 3,
+            selectionState = "unknown",
+            selection = (string?)null,
+            observedAtEpochMs = 1_750_000_000_000,
+        });
+        _ = await adapter.ForwardActiveReadingAsync(
+            "request-metadata-active",
+            sessionId,
+            FileDirectSnapshotContextAdapter.ValidateActiveReading(
+                activeValue),
+            CancellationToken.None).ConfigureAwait(false);
+
+        JsonElement pageValue = JsonSerializer.SerializeToElement(new
+        {
+            v = 1,
+            seq = 1,
+            type = "page.context",
+            ts = 1_750_000_001,
+            id = "0000000000000101",
+            kind = "epub",
+            file = "book.epub",
+            title = "Metadata Book",
+            page = 3,
+            stable = true,
+            page_context = new
+            {
+                reason = "dwell",
+                text =
+                    "日本の歴史と食文化 1 P\n"
+                    + "A\nR\nT\n1\n食\n文\n化\n概\n論\n"
+                    + "||||||\n"
+                    + "4 縄文~平安時代\n"
+                    + "f] l l l / A ] ] ] [ ] [ [ [ []]]]]] [[[[\n"
+                    + "正文\\⟦HIGHLIGHT literal\\⟧"
+                    + "⟦HIGHLIGHT color=\"yellow\""
+                    + " note=\"重点\"⟧高亮内容⟦/HIGHLIGHT⟧"
+                    + "和图像引用必须同时可见"
+                    + "⟦CARD_START type=\"note\"⟧卡片内容"
+                    + "⟦CARD_END⟧",
+                text_available = true,
+                text_source = "epub:viewport",
+                fallback_reason = (string?)null,
+                truncated = false,
+                visual = new
+                {
+                    page_image =
+                        "/pdf/api/page-image?file=book.epub&page=3",
+                    has_ink = true,
+                    unknownVisual = "drop-me",
+                    drawing = new
+                    {
+                        contract = "reader-outgoing-context/1",
+                        file = "book.epub",
+                        page = "3",
+                        freshness = "recent",
+                        lastEditedAt = 1_750_000_000.0,
+                        freshWindowS = 120.0,
+                        inProgress = false,
+                        stable = true,
+                        drawingRevision = "dr_0123456789abcdef",
+                        pendingSince = (double?)null,
+                        unknownDrawing = "drop-me",
+                        @ref = new
+                        {
+                            kind = "drawing",
+                            file = "book.epub",
+                            page = "3",
+                            revision = "dr_0123456789abcdef",
+                            secret = "drop-me",
+                        },
+                        empty = false,
+                    },
+                },
+                embeds = new
+                {
+                    highlights = 1,
+                    blocks = 2,
+                    error = "diagnostic-not-contract",
+                    unanchored = new[]
+                    {
+                        new
+                        {
+                            id = "h1",
+                            text = "未锚定\r\n原文\t尾",
+                            color = "yellow",
+                            note = "note\rline\tend",
+                            kind = "highlight",
+                            _reason = "not_found_in_page_text",
+                            privateGeometry = "drop-me",
+                        },
+                    },
+                },
+                viewport = new
+                {
+                    center = 7,
+                    @from = 1,
+                    to = 14,
+                    total = 20,
+                    pad = 6,
+                    unknownViewport = "drop-me",
+                },
+            },
+        });
+        _ = await adapter.ForwardJournalAsync(
+            "request-metadata-page",
+            sessionId,
+            new DirectContextEvent(
+                1,
+                "page.context",
+                "0000000000000101",
+                pageValue),
+            CancellationToken.None).ConfigureAwait(false);
+
+        using JsonDocument folded = JsonDocument.Parse(
+            await File.ReadAllTextAsync(snapshotPath)
+                .ConfigureAwait(false));
+        JsonElement page = folded.RootElement.GetProperty(
+            "currentPage");
+        JsonElement visual = page.GetProperty("visual");
+        JsonElement drawing = visual.GetProperty("drawing");
+        JsonElement embeds = page.GetProperty("embeds");
+        JsonElement viewport = page.GetProperty("viewport");
+        string markdownPath = DirectSnapshotMarkdown.PathFor(
+            snapshotPath);
+        string markdown = await File.ReadAllTextAsync(markdownPath)
+            .ConfigureAwait(false);
+        JsonObject foldedObject = JsonNode.Parse(
+            folded.RootElement.GetRawText()) as JsonObject
+            ?? throw new InvalidOperationException(
+                "snapshot metadata projection root invalid");
+        string renderedMarkdown =
+            DirectSnapshotMarkdown.Render(foldedObject);
+        string terminal = DirectSnapshotTerminal.Render(
+            foldedObject,
+            new CodexVoiceHistorySnapshot(
+                CodexVoiceHistoryBindingStatus.Bound,
+                "11111111-2222-3333-4444-555555555555",
+                BindingVersion: 9,
+                CodexVoiceHistoryDataStatus.Available,
+                [
+                    new("user", "语音层问题"),
+                    new("assistant", "语音层回答"),
+                ],
+                CodexVoiceHistoryDataStatus.Available,
+                [
+                    new("user", "完整线程问题"),
+                    new("assistant", "完整线程最终回答"),
+                ],
+                Gap: false));
+        DirectSnapshotTerminal.ReaderTextProjection markerProjection =
+            DirectSnapshotTerminal.ParseAnnotatedReaderText(
+                "A\\⟦HIGHLIGHT literal\\⟧"
+                + "⟦HIGHLIGHT color=\"yellow\"⟧B"
+                + "⟦/HIGHLIGHT⟧C"
+                + "⟦CARD_START type=\"note\"⟧D"
+                + "⟦CARD_END⟧E");
+        string scannerProjection =
+            DirectSnapshotTerminal.ReadableReaderText(
+                "日本の歴史と食文化 1 P\n"
+                + "A\nR\nT\n1\n食\n文\n化\n概\n論\n"
+                + "||||||\n"
+                + "4 縄文~平安時代\n"
+                + "f] l l l / A ] ] ] [ ] [ [ [ []]]]]] [[[[\n"
+                + "公式の変数は改行を保持する:\n"
+                + "x\ny\nz\nw\n"
+                + "X\nY\nZ\nW\n"
+                + "f(x) = [a/b]\n"
+                + "int[] values = [1, 2];");
+        bool danglingEscapeRejected = false;
+        try
+        {
+            _ = DirectSnapshotTerminal.PlainReaderText("bad\\");
+        }
+        catch (InvalidOperationException exception)
+            when (exception.Message.Contains(
+                "BW_READER_CONTEXT_MARK_ESCAPE_INVALID",
+                StringComparison.Ordinal))
+        {
+            danglingEscapeRejected = true;
+        }
+        Require(
+            scannerProjection.Contains(
+                "日本の歴史と食文化 1 PART1 食文化概論",
+                StringComparison.Ordinal)
+            && !scannerProjection.Contains(
+                "||||||",
+                StringComparison.Ordinal)
+            && !scannerProjection.Contains(
+                "f] l l l / A",
+                StringComparison.Ordinal)
+            && scannerProjection.Contains(
+                "x\ny\nz\nw",
+                StringComparison.Ordinal)
+            && scannerProjection.Contains(
+                "X\nY\nZ\nW",
+                StringComparison.Ordinal)
+            && scannerProjection.Contains(
+                "f(x) = [a/b]",
+                StringComparison.Ordinal)
+            && scannerProjection.Contains(
+                "int[] values = [1, 2];",
+                StringComparison.Ordinal),
+            "direct-snapshot-presentation-denoise-is-conservative",
+            checks);
+        Require(
+            renderedMarkdown.Contains(
+                "日本の歴史と食文化 1 PART1 食文化概論",
+                StringComparison.Ordinal),
+            "direct-snapshot-markdown-render-joins-stacked-title",
+            checks);
+        Require(
+            markdown.Contains(
+                "日本の歴史と食文化 1 PART1 食文化概論",
+                StringComparison.Ordinal),
+            "direct-snapshot-markdown-joins-stacked-title",
+            checks);
+        Require(
+            !markdown.Contains(
+                "||||||",
+                StringComparison.Ordinal)
+            && !markdown.Contains(
+                "f] l l l / A",
+                StringComparison.Ordinal),
+            "direct-snapshot-markdown-hides-extraction-debris",
+            checks);
+        Require(
+            markdown.Contains(
+                "### 协议高亮正文",
+                StringComparison.Ordinal)
+            && markdown.Contains(
+                "### 协议卡片与便签",
+                StringComparison.Ordinal)
+            && markdown.Contains(
+                "高亮内容",
+                StringComparison.Ordinal)
+            && markdown.Contains(
+                "卡片内容",
+                StringComparison.Ordinal),
+            "direct-snapshot-markdown-renders-mark-sections",
+            checks);
+        Require(
+            !markdown.Contains(
+                "⟦HIGHLIGHT color=",
+                StringComparison.Ordinal)
+            && !markdown.Contains(
+                "⟦CARD_START",
+                StringComparison.Ordinal),
+            "direct-snapshot-markdown-hides-protocol-markers",
+            checks);
+        Require(
+            markdown.Contains(
+                "日本の歴史と食文化 1 PART1 食文化概論",
+                StringComparison.Ordinal)
+            && !markdown.Contains(
+                "||||||",
+                StringComparison.Ordinal)
+            && !markdown.Contains(
+                "f] l l l / A",
+                StringComparison.Ordinal)
+            && markdown.Contains(
+                "### 协议高亮正文",
+                StringComparison.Ordinal)
+            && markdown.Contains(
+                "### 协议卡片与便签",
+                StringComparison.Ordinal)
+            && markdown.Contains(
+                "高亮内容",
+                StringComparison.Ordinal)
+            && markdown.Contains(
+                "卡片内容",
+                StringComparison.Ordinal)
+            && !markdown.Contains(
+                "⟦HIGHLIGHT color=",
+                StringComparison.Ordinal)
+            && !markdown.Contains(
+                "⟦CARD_START",
+                StringComparison.Ordinal),
+            "direct-snapshot-markdown-expands-reader-body-and-marks",
+            checks);
+        Require(
+            terminal.Contains(
+                "日本の歴史と食文化 1 PART1 食文化概論",
+                StringComparison.Ordinal)
+            && !terminal.Contains(
+                "||||||",
+                StringComparison.Ordinal)
+            && !terminal.Contains(
+                "f] l l l / A",
+                StringComparison.Ordinal)
+            && terminal.Contains(
+                "【高亮与嵌入内容】",
+                StringComparison.Ordinal)
+            && terminal.Contains(
+                "高亮内容",
+                StringComparison.Ordinal)
+            && terminal.Contains(
+                "卡片内容",
+                StringComparison.Ordinal),
+            "direct-snapshot-terminal-expands-reader-body-and-marks",
+            checks);
+        Require(
+            page.GetProperty("kind").GetString() == "epub"
+            && page.GetProperty("fallbackReason").ValueKind
+                == JsonValueKind.Null
+            && visual.GetProperty("has_ink").GetBoolean()
+            && !visual.TryGetProperty("unknownVisual", out _)
+            && drawing.GetProperty("freshness").GetString()
+                == "recent"
+            && drawing.GetProperty("page").GetInt32() == 3
+            && !drawing.TryGetProperty("unknownDrawing", out _)
+            && !drawing.GetProperty("ref")
+                .TryGetProperty("secret", out _)
+            && embeds.GetProperty("highlights").GetInt64() == 1
+            && !embeds.TryGetProperty("error", out _)
+            && !embeds.GetProperty("unanchored")[0]
+                .TryGetProperty("privateGeometry", out _)
+            && embeds.GetProperty("unanchored")[0]
+                .GetProperty("text").GetString()
+                == "未锚定\n原文    尾"
+            && embeds.GetProperty("unanchored")[0]
+                .GetProperty("note").GetString()
+                == "note\nline    end"
+            && viewport.GetProperty("from").GetInt64() == 1
+            && viewport.GetProperty("to").GetInt64() == 14
+            && !viewport.TryGetProperty(
+                "unknownViewport",
+                out _)
+            && page.GetProperty("text").GetString()!.Contains(
+                "||||||",
+                StringComparison.Ordinal)
+            && page.GetProperty("text").GetString()!.Contains(
+                "⟦HIGHLIGHT color=",
+                StringComparison.Ordinal)
+            && markdown.Contains(
+                "高亮内容",
+                StringComparison.Ordinal)
+            && markdown.Contains(
+                "日本の歴史と食文化 1 PART1 食文化概論",
+                StringComparison.Ordinal)
+            && !markdown.Contains(
+                "||||||",
+                StringComparison.Ordinal)
+            && !markdown.Contains(
+                "f] l l l / A",
+                StringComparison.Ordinal)
+            && markdown.Contains(
+                "图像引用必须同时可见",
+                StringComparison.Ordinal)
+            && markdown.Contains(
+                "### 协议高亮正文",
+                StringComparison.Ordinal)
+            && markdown.Contains(
+                "### 协议卡片与便签",
+                StringComparison.Ordinal)
+            && markdown.Contains(
+                "卡片内容",
+                StringComparison.Ordinal)
+            && markdown.Contains(
+                "在 Reader 中打开原图",
+                StringComparison.Ordinal)
+            && markdown.Contains(
+                "不会携带跨站登录 Cookie",
+                StringComparison.Ordinal)
+            && !markdown.Contains(
+                "![当前页图]",
+                StringComparison.Ordinal)
+            && markdown.Contains(
+                "⟦HIGHLIGHT literal⟧",
+                StringComparison.Ordinal)
+            && !markdown.Contains(
+                "⟦HIGHLIGHT color=",
+                StringComparison.Ordinal)
+            && !markdown.Contains(
+                "⟦CARD_START",
+                StringComparison.Ordinal)
+            && markdown.Contains(
+                "dr_0123456789abcdef",
+                StringComparison.Ordinal)
+            && terminal.Contains(
+                "【当前页正文】",
+                StringComparison.Ordinal)
+            && terminal.Contains(
+                "【高亮与嵌入内容】",
+                StringComparison.Ordinal)
+            && terminal.Contains(
+                "高亮内容",
+                StringComparison.Ordinal)
+            && terminal.Contains(
+                "日本の歴史と食文化 1 PART1 食文化概論",
+                StringComparison.Ordinal)
+            && !terminal.Contains(
+                "||||||",
+                StringComparison.Ordinal)
+            && !terminal.Contains(
+                "f] l l l / A",
+                StringComparison.Ordinal)
+            && terminal.Contains(
+                "https://bwicarus.taile44d0c.ts.net/pdf/api/page-image",
+                StringComparison.Ordinal)
+            && terminal.Contains(
+                "【语音层最近对话】",
+                StringComparison.Ordinal)
+            && terminal.Contains(
+                "用户：语音层问题",
+                StringComparison.Ordinal)
+            && terminal.Contains(
+                "【Codex 线程历史】",
+                StringComparison.Ordinal)
+            && terminal.Contains(
+                "助手：完整线程最终回答",
+                StringComparison.Ordinal)
+            && markerProjection.PlainText
+                == "A⟦HIGHLIGHT literal⟧BCDE"
+            && markerProjection.Highlights.Count == 1
+            && markerProjection.Highlights[0].Text == "B"
+            && markerProjection.Cards.Count == 1
+            && markerProjection.Cards[0].Text == "D"
+            && scannerProjection.Contains(
+                "日本の歴史と食文化 1 PART1 食文化概論",
+                StringComparison.Ordinal)
+            && !scannerProjection.Contains(
+                "||||||",
+                StringComparison.Ordinal)
+            && !scannerProjection.Contains(
+                "f] l l l / A",
+                StringComparison.Ordinal)
+            && scannerProjection.Contains(
+                "x\ny\nz\nw",
+                StringComparison.Ordinal)
+            && scannerProjection.Contains(
+                "X\nY\nZ\nW",
+                StringComparison.Ordinal)
+            && scannerProjection.Contains(
+                "f(x) = [a/b]",
+                StringComparison.Ordinal)
+            && scannerProjection.Contains(
+                "int[] values = [1, 2];",
+                StringComparison.Ordinal)
+            && DirectSnapshotTerminal.UnescapeReaderText("\\n")
+                == "\\n"
+            && DirectSnapshotTerminal.UnescapeReaderText(
+                "\\\\⟦")
+                == "\\⟦"
+            && danglingEscapeRejected,
+            "direct-snapshot-folds-whitelisted-metadata-and-live-presentations",
+            checks);
+
+        using DirectSnapshotViewer localViewer = new(
+            snapshotPath,
+            DirectBridgeContract.DefaultListenPort);
+        DefaultHttpContext viewerContext = new();
+        viewerContext.Request.Method = HttpMethods.Get;
+        viewerContext.Request.Host = new HostString(
+            DirectBridgeContract.ListenHost,
+            DirectBridgeContract.DefaultListenPort);
+        viewerContext.Connection.RemoteIpAddress =
+            IPAddress.Loopback;
+        await using MemoryStream viewerBody = new();
+        viewerContext.Response.Body = viewerBody;
+        await localViewer.HandleViewerAsync(viewerContext)
+            .ConfigureAwait(false);
+        string viewerHtml = Encoding.UTF8.GetString(
+            viewerBody.ToArray());
+
+        DefaultHttpContext snapshotContext = new();
+        snapshotContext.Request.Method = HttpMethods.Get;
+        snapshotContext.Request.Host = new HostString(
+            DirectBridgeContract.ListenHost,
+            DirectBridgeContract.DefaultListenPort);
+        snapshotContext.Connection.RemoteIpAddress =
+            IPAddress.Loopback;
+        await using MemoryStream snapshotBody = new();
+        snapshotContext.Response.Body = snapshotBody;
+        await localViewer.HandleSnapshotAsync(snapshotContext)
+            .ConfigureAwait(false);
+        using JsonDocument liveProjection = JsonDocument.Parse(
+            snapshotBody.ToArray());
+
+        DefaultHttpContext foreignContext = new();
+        foreignContext.Request.Method = HttpMethods.Get;
+        foreignContext.Request.Host = new HostString(
+            DirectBridgeContract.ListenHost,
+            DirectBridgeContract.DefaultListenPort);
+        foreignContext.Connection.RemoteIpAddress =
+            IPAddress.Parse("100.64.0.10");
+        await using MemoryStream foreignBody = new();
+        foreignContext.Response.Body = foreignBody;
+        await localViewer.HandleViewerAsync(foreignContext)
+            .ConfigureAwait(false);
+        ProcessStartInfo viewerStart =
+            DirectSnapshotViewer.CreateEdgeStartInfo(
+                @"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
+                "http://127.0.0.1:43128"
+                    + DirectSnapshotViewer.ViewerPath,
+                @"C:\runtime\reader-context-viewer-profile");
+        string[] viewerArguments = viewerStart.ArgumentList.ToArray();
+        Require(
+            viewerContext.Response.StatusCode
+                == StatusCodes.Status200OK
+            && viewerHtml.Contains(
+                DirectSnapshotViewer.SnapshotPath,
+                StringComparison.Ordinal)
+            && viewerHtml.Contains(
+                "本地查看器的跨站内嵌请求可能没有登录 Cookie",
+                StringComparison.Ordinal)
+            && viewerHtml.Contains(
+                "function parseReaderText",
+                StringComparison.Ordinal)
+            && snapshotContext.Response.StatusCode
+                == StatusCodes.Status200OK
+            && liveProjection.RootElement
+                .GetProperty("contextStatus").GetString()
+                == "stale"
+            && !liveProjection.RootElement
+                .GetProperty("currentPage")
+                .GetProperty("textAvailable").GetBoolean()
+            && foreignContext.Response.StatusCode
+                == StatusCodes.Status403Forbidden
+            && foreignBody.Length == 0
+            && !viewerStart.UseShellExecute
+            && viewerStart.FileName.EndsWith(
+                @"Microsoft\Edge\Application\msedge.exe",
+                StringComparison.Ordinal)
+            && viewerArguments.Contains(
+                "--app=http://127.0.0.1:43128"
+                    + DirectSnapshotViewer.ViewerPath,
+                StringComparer.Ordinal)
+            && viewerArguments.Contains(
+                @"--user-data-dir=C:\runtime\reader-context-viewer-profile",
+                StringComparer.Ordinal)
+            && viewerArguments.Contains(
+                "--disable-extensions",
+                StringComparer.Ordinal)
+            && viewerArguments.Contains(
+                "--disable-sync",
+                StringComparer.Ordinal)
+            && !viewerArguments.Contains(
+                "--reader-context-view",
+                StringComparer.Ordinal),
+            "direct-snapshot-loopback-viewer-is-local-fresh-and-honest",
+            checks);
+
+        adapter = new FileDirectSnapshotContextAdapter(
+            snapshotPath,
+            () => DateTimeOffset.FromUnixTimeMilliseconds(
+                1_750_000_006_000));
+        _ = await adapter.ForwardActiveReadingAsync(
+            "request-metadata-restart",
+            sessionId,
+            FileDirectSnapshotContextAdapter.ValidateActiveReading(
+                activeValue),
+            CancellationToken.None).ConfigureAwait(false);
+        using (JsonDocument restored = JsonDocument.Parse(
+            await File.ReadAllTextAsync(snapshotPath)
+                .ConfigureAwait(false)))
+        {
+            JsonElement restoredPage = restored.RootElement
+                .GetProperty("currentPage");
+            Require(
+                restoredPage.GetProperty("visual")
+                    .GetProperty("drawing")
+                    .GetProperty("drawingRevision").GetString()
+                    == "dr_0123456789abcdef"
+                && restoredPage.GetProperty("embeds")
+                    .GetProperty("highlights").GetInt64() == 1
+                && restoredPage.GetProperty("viewport")
+                    .GetProperty("center").GetInt64() == 7,
+                "direct-snapshot-restart-restores-only-validated-page-metadata",
+                checks);
+        }
+
+        JsonElement leanPage = JsonSerializer.SerializeToElement(new
+        {
+            v = 1,
+            seq = 2,
+            type = "page.context",
+            ts = 1_750_000_002,
+            id = "0000000000000102",
+            kind = "epub",
+            file = "book.epub",
+            title = "Metadata Book",
+            page = 3,
+            stable = true,
+            page_context = new
+            {
+                reason = "dwell",
+                text = "new page state",
+                text_available = true,
+                text_source = "epub:whole-section",
+                fallback_reason = (string?)null,
+                truncated = false,
+            },
+        });
+        _ = await adapter.ForwardJournalAsync(
+            "request-metadata-lean",
+            sessionId,
+            new DirectContextEvent(
+                2,
+                "page.context",
+                "0000000000000102",
+                leanPage),
+            CancellationToken.None).ConfigureAwait(false);
+        using JsonDocument lean = JsonDocument.Parse(
+            await File.ReadAllTextAsync(snapshotPath)
+                .ConfigureAwait(false));
+        JsonElement leanCurrent = lean.RootElement.GetProperty(
+            "currentPage");
+        Require(
+            !leanCurrent.TryGetProperty("visual", out _)
+            && !leanCurrent.TryGetProperty("embeds", out _)
+            && !leanCurrent.TryGetProperty("viewport", out _),
+            "direct-snapshot-new-event-does-not-retain-optional-page-metadata",
+            checks);
+
+        long revisionBeforeInvalid = lean.RootElement
+            .GetProperty("revision").GetInt64();
+        JsonElement invalidDrawing = JsonSerializer.SerializeToElement(
+            new
+            {
+                v = 1,
+                seq = 3,
+                type = "page.context",
+                ts = 1_750_000_003,
+                id = "0000000000000103",
+                kind = "epub",
+                file = "book.epub",
+                title = "Metadata Book",
+                page = 3,
+                stable = true,
+                page_context = new
+                {
+                    reason = "dwell",
+                    text = "invalid must not commit",
+                    text_available = true,
+                    text_source = "epub:viewport",
+                    fallback_reason = (string?)null,
+                    truncated = false,
+                    visual = new
+                    {
+                        page_image =
+                            "/pdf/api/page-image?file=book.epub&page=3",
+                        has_ink = true,
+                        drawing = new
+                        {
+                            contract = "reader-outgoing-context/1",
+                            file = "book.epub",
+                            page = 3,
+                            freshness = "stable",
+                            lastEditedAt = 1_750_000_002.0,
+                            freshWindowS = 120.0,
+                            inProgress = false,
+                            stable = false,
+                            drawingRevision = (string?)null,
+                            pendingSince = 0.0,
+                            @ref = (object?)null,
+                            empty = false,
+                        },
+                    },
+                },
+            });
+        try
+        {
+            _ = await adapter.ForwardJournalAsync(
+                "request-metadata-invalid",
+                sessionId,
+                new DirectContextEvent(
+                    3,
+                    "page.context",
+                    "0000000000000103",
+                    invalidDrawing),
+                CancellationToken.None).ConfigureAwait(false);
+            throw new InvalidOperationException(
+                "invalid drawing freshness was accepted");
+        }
+        catch (DirectProtocolException exception)
+            when (exception.Code
+                == "BW_READER_CONTEXT_SNAPSHOT_EVENT_INVALID")
+        {
+        }
+        using JsonDocument afterInvalid = JsonDocument.Parse(
+            await File.ReadAllTextAsync(snapshotPath)
+                .ConfigureAwait(false));
+        Require(
+            afterInvalid.RootElement.GetProperty("revision")
+                .GetInt64() == revisionBeforeInvalid
+            && afterInvalid.RootElement.GetProperty("currentPage")
+                .GetProperty("text").GetString()
+                == "new page state",
+            "direct-snapshot-invalid-metadata-is-atomic-and-fail-closed",
+            checks);
+
+        JsonElement pendingDrawing = JsonSerializer.SerializeToElement(
+            new
+            {
+                v = 1,
+                seq = 4,
+                type = "drawing",
+                state = "pending",
+                ts = 1_750_000_004,
+                file = "book.epub",
+                page = 3,
+                drawingRevision = (string?)null,
+                @ref = (object?)null,
+            });
+        _ = await adapter.ForwardJournalAsync(
+            "request-drawing-pending",
+            sessionId,
+            new DirectContextEvent(
+                4,
+                "drawing",
+                "0000000000000104",
+                pendingDrawing),
+            CancellationToken.None).ConfigureAwait(false);
+        JsonElement stableDrawing = JsonSerializer.SerializeToElement(
+            new
+            {
+                v = 1,
+                seq = 5,
+                type = "drawing",
+                state = "stable",
+                ts = 1_750_000_005,
+                file = "book.epub",
+                page = 3,
+                drawingRevision = "dr_fedcba9876543210",
+                @ref = new
+                {
+                    kind = "drawing",
+                    file = "book.epub",
+                    page = 3,
+                    revision = "dr_fedcba9876543210",
+                },
+            });
+        _ = await adapter.ForwardJournalAsync(
+            "request-drawing-stable",
+            sessionId,
+            new DirectContextEvent(
+                5,
+                "drawing",
+                "0000000000000105",
+                stableDrawing),
+            CancellationToken.None).ConfigureAwait(false);
+        using JsonDocument afterDrawing = JsonDocument.Parse(
+            await File.ReadAllTextAsync(snapshotPath)
+                .ConfigureAwait(false));
+        JsonElement updatedDrawing = afterDrawing.RootElement
+            .GetProperty("currentPage")
+            .GetProperty("visual")
+            .GetProperty("drawing");
+        Require(
+            updatedDrawing.GetProperty("stable").GetBoolean()
+            && !updatedDrawing.GetProperty("inProgress").GetBoolean()
+            && updatedDrawing.GetProperty("drawingRevision")
+                .GetString() == "dr_fedcba9876543210"
+            && updatedDrawing.GetProperty("ref")
+                .GetProperty("revision").GetString()
+                == "dr_fedcba9876543210",
+            "direct-snapshot-independent-drawing-events-update-current-page",
+            checks);
+
+        JsonElement unstablePage = JsonSerializer.SerializeToElement(
+            new
+            {
+                v = 1,
+                seq = 6,
+                type = "page.context",
+                ts = 1_750_000_006,
+                id = "0000000000000106",
+                kind = "epub",
+                file = "book.epub",
+                title = "Metadata Book",
+                page = 3,
+                stable = false,
+                page_context = new
+                {
+                    reason = "scroll",
+                    text = "unstable must not commit",
+                    text_available = true,
+                    text_source = "epub:viewport",
+                    fallback_reason = (string?)null,
+                    truncated = false,
+                },
+            });
+        JsonElement objectPage = JsonSerializer.SerializeToElement(
+            new
+            {
+                v = 1,
+                seq = 7,
+                type = "page.context",
+                ts = 1_750_000_007,
+                id = "0000000000000107",
+                kind = "epub",
+                file = "book.epub",
+                title = "Metadata Book",
+                page = new { chapter = 3 },
+                stable = true,
+                page_context = new
+                {
+                    reason = "dwell",
+                    text = "object page must not commit",
+                    text_available = true,
+                    text_source = "epub:viewport",
+                    fallback_reason = (string?)null,
+                    truncated = false,
+                },
+            });
+        JsonElement arrayPage = JsonSerializer.SerializeToElement(
+            new
+            {
+                v = 1,
+                seq = 8,
+                type = "page.context",
+                ts = 1_750_000_008,
+                id = "0000000000000108",
+                kind = "epub",
+                file = "book.epub",
+                title = "Metadata Book",
+                page = new[] { 3 },
+                stable = true,
+                page_context = new
+                {
+                    reason = "dwell",
+                    text = "array page must not commit",
+                    text_available = true,
+                    text_source = "epub:viewport",
+                    fallback_reason = (string?)null,
+                    truncated = false,
+                },
+            });
+        JsonElement mismatchedInk = JsonSerializer.SerializeToElement(
+            new
+            {
+                v = 1,
+                seq = 9,
+                type = "page.context",
+                ts = 1_750_000_009,
+                id = "0000000000000109",
+                kind = "epub",
+                file = "book.epub",
+                title = "Metadata Book",
+                page = 3,
+                stable = true,
+                page_context = new
+                {
+                    reason = "dwell",
+                    text = "ink mismatch must not commit",
+                    text_available = true,
+                    text_source = "epub:viewport",
+                    fallback_reason = (string?)null,
+                    truncated = false,
+                    visual = new
+                    {
+                        page_image = (string?)null,
+                        has_ink = false,
+                        drawing = new
+                        {
+                            contract = "reader-outgoing-context/1",
+                            file = "book.epub",
+                            page = 3,
+                            freshness = "recent",
+                            lastEditedAt = 1_750_000_008.0,
+                            freshWindowS = 120.0,
+                            inProgress = false,
+                            stable = true,
+                            drawingRevision = "dr_0011223344556677",
+                            pendingSince = (double?)null,
+                            @ref = new
+                            {
+                                kind = "drawing",
+                                file = "book.epub",
+                                page = 3,
+                                revision = "dr_0011223344556677",
+                            },
+                            empty = false,
+                        },
+                    },
+                },
+            });
+        bool rejectsUnstable = await SnapshotEventRejectedAsync(
+            adapter,
+            "request-reject-unstable",
+            sessionId,
+            6,
+            "0000000000000106",
+            unstablePage).ConfigureAwait(false);
+        bool rejectsObjectPage = await SnapshotEventRejectedAsync(
+            adapter,
+            "request-reject-object-page",
+            sessionId,
+            7,
+            "0000000000000107",
+            objectPage).ConfigureAwait(false);
+        bool rejectsArrayPage = await SnapshotEventRejectedAsync(
+            adapter,
+            "request-reject-array-page",
+            sessionId,
+            8,
+            "0000000000000108",
+            arrayPage).ConfigureAwait(false);
+        bool rejectsInkMismatch = await SnapshotEventRejectedAsync(
+            adapter,
+            "request-reject-ink-mismatch",
+            sessionId,
+            9,
+            "0000000000000109",
+            mismatchedInk).ConfigureAwait(false);
+        using JsonDocument afterStrictRejections = JsonDocument.Parse(
+            await File.ReadAllTextAsync(snapshotPath)
+                .ConfigureAwait(false));
+        Require(
+            rejectsUnstable
+            && rejectsObjectPage
+            && rejectsArrayPage
+            && rejectsInkMismatch
+            && afterStrictRejections.RootElement
+                .GetProperty("revision").GetInt64()
+                == afterDrawing.RootElement
+                    .GetProperty("revision").GetInt64()
+            && afterStrictRejections.RootElement
+                .GetProperty("currentPage")
+                .GetProperty("text").GetString()
+                == "new page state",
+            "direct-snapshot-rejects-unstable-invalid-page-and-ink-mismatch",
+            checks);
+
+        string retryRoot = System.IO.Path.Combine(
+            root,
+            "snapshot-persist-retry");
+        Directory.CreateDirectory(retryRoot);
+        string blockedDirectory = System.IO.Path.Combine(
+            retryRoot,
+            "blocked");
+        await File.WriteAllTextAsync(
+            blockedDirectory,
+            "directory blocker").ConfigureAwait(false);
+        string retrySnapshotPath = System.IO.Path.Combine(
+            blockedDirectory,
+            FileDirectSnapshotContextAdapter.SnapshotFileName);
+        FileDirectSnapshotContextAdapter retryAdapter = new(
+            retrySnapshotPath,
+            () => DateTimeOffset.FromUnixTimeMilliseconds(
+                1_750_000_010_000));
+        JsonElement retryPage = JsonSerializer.SerializeToElement(
+            new
+            {
+                v = 1,
+                seq = 1,
+                type = "page.context",
+                ts = 1_750_000_010,
+                id = "0000000000000201",
+                kind = "pdf",
+                file = "retry.pdf",
+                title = "Retry",
+                page = 1,
+                stable = true,
+                page_context = new
+                {
+                    reason = "dwell",
+                    text = "retry commits once",
+                    text_available = true,
+                    text_source = "pdf:text-layer",
+                    fallback_reason = (string?)null,
+                    truncated = false,
+                },
+            });
+        DirectContextEvent retryEvent = new(
+            1,
+            "page.context",
+            "0000000000000201",
+            retryPage);
+        bool firstWriteFailed = false;
+        try
+        {
+            _ = await retryAdapter.ForwardJournalAsync(
+                "request-persist-retry",
+                sessionId,
+                retryEvent,
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (DirectProtocolException exception)
+            when (exception.Code
+                == "BW_READER_CONTEXT_SNAPSHOT_WRITE_FAILED")
+        {
+            firstWriteFailed = true;
+        }
+        File.Delete(blockedDirectory);
+        Directory.CreateDirectory(blockedDirectory);
+        DirectSnapshotForwardResult retryAccepted =
+            await retryAdapter.ForwardJournalAsync(
+                "request-persist-retry",
+                sessionId,
+                retryEvent,
+                CancellationToken.None).ConfigureAwait(false);
+        DirectSnapshotForwardResult retryDuplicate =
+            await retryAdapter.ForwardJournalAsync(
+                "request-persist-retry-duplicate",
+                sessionId,
+                retryEvent,
+                CancellationToken.None).ConfigureAwait(false);
+        using JsonDocument retriedSnapshot = JsonDocument.Parse(
+            await File.ReadAllTextAsync(retrySnapshotPath)
+                .ConfigureAwait(false));
+        Require(
+            firstWriteFailed
+            && retryAccepted.Outcome == "accepted"
+            && retryAccepted.Revision == 1
+            && retryDuplicate.Outcome == "duplicate"
+            && retryDuplicate.Revision == 1
+            && retriedSnapshot.RootElement
+                .GetProperty("revision").GetInt64() == 1
+            && retriedSnapshot.RootElement
+                .GetProperty("currentPage")
+                .GetProperty("text").GetString()
+                == "retry commits once",
+            "direct-snapshot-persist-failure-rolls-back-for-identical-retry",
+            checks);
+    }
+
+    private static async Task<bool> SnapshotEventRejectedAsync(
+        FileDirectSnapshotContextAdapter adapter,
+        string requestId,
+        string sessionId,
+        long sequence,
+        string eventId,
+        JsonElement payload)
+    {
+        try
+        {
+            _ = await adapter.ForwardJournalAsync(
+                requestId,
+                sessionId,
+                new DirectContextEvent(
+                    sequence,
+                    "page.context",
+                    eventId,
+                    payload),
+                CancellationToken.None).ConfigureAwait(false);
+            return false;
+        }
+        catch (DirectProtocolException exception)
+            when (exception.Code
+                == "BW_READER_CONTEXT_SNAPSHOT_EVENT_INVALID")
+        {
+            return true;
+        }
     }
 
     private static async Task WriteConfigAsync(
@@ -4191,9 +5670,14 @@ internal static class DirectBridgeSelfTest
             contract = DirectBridgeContract.ConfigContract,
             localOptIn,
             virtualMicrophoneRenderEndpointId =
-                "explicit-test-render-microphone",
+                "{0.0.0.00000000}."
+                + "{11111111-1111-1111-1111-111111111111}",
+            virtualMicrophoneCaptureEndpointId =
+                "{0.0.1.00000000}."
+                + "{22222222-2222-2222-2222-222222222222}",
             virtualSpeakerRenderEndpointId =
-                "explicit-test-render-speaker",
+                "{0.0.0.00000000}."
+                + "{33333333-3333-3333-3333-333333333333}",
             listenHost = DirectBridgeContract.ListenHost,
             listenPort = DirectBridgeContract.DefaultListenPort,
             allowedOrigins = new[] { origin },
@@ -4459,6 +5943,7 @@ internal static class DirectBridgeSelfTest
             }
             return new DirectAppTarget(
                 4242,
+                133700000000000000,
                 appKind,
                 appUserModelId);
         }
@@ -4638,6 +6123,10 @@ internal static class DirectBridgeSelfTest
 
         public bool CaptureActive { get; private set; }
 
+        public bool CleanupPending { get; private set; }
+
+        internal bool RetainCleanupOnStop { get; set; }
+
         internal bool OutputRouteVerified { get; set; } = true;
 
         public bool IsOutputRouteVerified(
@@ -4655,10 +6144,18 @@ internal static class DirectBridgeSelfTest
             LastStartRequest = request;
             if (
                 request.RootProcessId != 4242
+                || request.RootProcessStartFileTimeUtc
+                    != 133700000000000000
                 || request.VirtualMicrophoneRenderEndpointId
-                    != "explicit-test-render-microphone"
+                    != "{0.0.0.00000000}."
+                        + "{11111111-1111-1111-1111-111111111111}"
+                || request.VirtualMicrophoneCaptureEndpointId
+                    != "{0.0.1.00000000}."
+                        + "{22222222-2222-2222-2222-222222222222}"
                 || request.VirtualSpeakerRenderEndpointId
-                    != "explicit-test-render-speaker"
+                    != "{0.0.0.00000000}."
+                        + "{33333333-3333-3333-3333-333333333333}"
+                || !request.AutomatePerAppAudioRoute
             )
             {
                 throw new InvalidOperationException(
@@ -4669,6 +6166,7 @@ internal static class DirectBridgeSelfTest
                 TaskCreationOptions.RunContinuationsAsynchronously);
             _completion = _completionSource.Task;
             CaptureActive = true;
+            CleanupPending = false;
             CleanupOwnership = true;
             if (EmitDuringStart)
             {
@@ -4695,6 +6193,7 @@ internal static class DirectBridgeSelfTest
         internal void Fail(DirectProtocolException exception)
         {
             CaptureActive = false;
+            CleanupPending = RetainCleanupOnStop;
             _completionSource?.TrySetResult(exception);
         }
 
@@ -4734,6 +6233,7 @@ internal static class DirectBridgeSelfTest
             }
             CaptureActive = false;
             _sender = null;
+            CleanupPending = RetainCleanupOnStop;
             _completionSource?.TrySetResult(StopFailure);
             _completionSource = null;
         }
@@ -4749,6 +6249,7 @@ internal static class DirectBridgeSelfTest
                     "fake media dispose failed");
             }
             CleanupOwnership = false;
+            CleanupPending = false;
             return ValueTask.CompletedTask;
         }
     }

@@ -26,14 +26,17 @@ direct v3 媒体路径。
 
 服务只绑定 `127.0.0.1`；预期由 Windows Tailscale Serve 在 tailnet 内终止
 TLS/WSS 并反代固定路径 `/reader-computer-voice/v1`。C# 不修改 Tailscale、防火墙、
-默认音频设备、系统代理或应用音量路由。
+默认音频设备或系统代理。`/5` 实验配置只在一次 Codex Voice 生命周期内通过 Windows
+内部 AudioPolicyConfig 接口切换 Codex 自身的应用输入/输出路由，不打开设置 UI，
+不改其他应用；结束后按事务快照精确恢复。
 
-strict config contract 为 `reader-computer-voice-direct-config/4`，字段必须恰好为：
+strict config contract 为 `reader-computer-voice-direct-config/5`，字段必须恰好为：
 
 ```text
 contract
 localOptIn
 virtualMicrophoneRenderEndpointId
+virtualMicrophoneCaptureEndpointId
 virtualSpeakerRenderEndpointId
 listenHost
 listenPort
@@ -50,16 +53,22 @@ contextDeliveryMode
 
 - `listenHost` 必须逐字等于 `127.0.0.1`；
 - `experimentalSingleUserMode` 当前必须为 `true`；`false` 直接 fail closed；
-- `outputScope` 只能为 `process-only`，`appKind` 只能为 `codex-desktop`；
-- `contextDeliveryMode` 只能为 `legacy-inject` 或 `snapshot-mcp`；旧 `/3`
-  配置只兼容解释为前者，两条末端不同时运行；
+- `outputScope` 只能为 `process-only`；`appKind` 只接受固定白名单
+  `codex-desktop` / `chatgpt-classic`，Reader 每次 START 可明确携带本次目标；
+- `contextDeliveryMode` 只能为 `legacy-inject` 或 `snapshot-mcp`，两条末端不同时运行；
+- `/5` 的 A/B `virtual*RenderEndpointId` 必须是明确的 eRender MMDevice ID，
+  `virtualMicrophoneCaptureEndpointId` 必须另行明确配置为 A 的 eCapture MMDevice ID；
+  capture ID 绝不从 render ID、设备名称或 association 属性推导；
 - A/B endpoint ID 必须非空、无控制字符、互不相同，并逐字传给
   `IMMDeviceEnumerator.GetDevice`；
+- `/5` 才启用实验性的 Codex 按应用路由事务；旧 `/4` 仅作为
+  `no-route-automation` 回滚配置加载，缺少 capture ID 时不会切换任何应用设备；
 - 不存在 first/default endpoint、物理/RDP 麦克风或全系统输出 fallback；
 - config 不含 pairing code、客户端公钥、旧 `microphoneEndpointId` 或认证兼容字段。
 
 旧 `/1` 配置不由原生服务迁移。桌面控制面只能把它识别为
-`legacy-migration-required`，经本地显式确认后生成严格 `/4`。
+`legacy-migration-required`；没有显式 capture ID 时只能生成 `/4`
+`no-route-automation` 配置，不能猜测并静默升级为 `/5`。
 
 ## 来源与身份边界
 
@@ -87,21 +96,26 @@ background 的固定 relay，不能把 URL、设备 ID、AUMID、进程、路径
   `context-open` 建立无 START、无应用/采音/快捷键副作用的纯上下文连接；此阶段没有
   30 秒 START deadline。
 - `status`、模型选择和刷新无副作用。
-- START 的 `sessionId` 为 `session-` 加 16 随机字节的 22 位无 padding base64url。
+- START 的 `sessionId` 为 `session-` 加 16 随机字节的 22 位无 padding base64url；
+  可选 `appKind` 选择 `codex-desktop` 或 `chatgpt-classic`，省略时保持 Codex。
 - `legacy-inject` 的 START 顺序为：
   `localOptIn → A/B endpoint probe → ensure app → wait unique ready →
-  attach B route observer → validate local realtimeVoice binding → start typist →
-  start A render → start process-loopback → revalidate endpoint/media/binding →
-  global shortcut → commit/pump`。
+  validate A capture → attach B route observer →
+  recover/acquire exact six-role app routes →
+  validate local realtimeVoice binding → start typist →
+  start A render → start configured output capture（`/6` 为显式 B capture，旧合同才走
+  process-loopback）→ revalidate endpoint/media/binding →
+  target voice control → commit/pump`。
   每个副作用前都有取消围栏；B route observer 只观察公开 Core Audio session，
-  不修改默认设备或应用路由，且“尚未观察到”不会阻止首次 START。
-- `snapshot-mcp` 使用同一条已验收音频顺序，但明确跳过 `start typist`；
-  `context` 与 `active-reading` 原子写
+  与负责六项持久应用端点的事务对象分离，且“尚未观察到”不会阻止首次 START。
+- `snapshot-mcp` 对两个应用目标都明确跳过 `start typist`，与旧版文字注入保持互斥；
+  GPT Classic 需要文字接力时必须显式切到 `legacy-inject`。在快照模式中，
+  `context` 与 `active-reading` 只原子写
   `runtime/reader-context-snapshot.json`，不调用 named pipe。
 - 关闭同步或切回 `legacy-inject` 时先发 `context-clear`；它只清掉本地页面/选区，
   不启动或停止应用、音频、快捷键和 typist。
 - 当前 Codex 把 `realtimeVoice` 注册为 `os-global`；桥只接受当前用户
-  `~/.codex/keybindings.json` 中唯一的 `Ctrl+Shift+C` 绑定，且不切换、置顶或校验
+  `~/.codex/keybindings.json` 中唯一的 `F24` 绑定，且不切换、置顶或校验
   Codex 前台窗口。动态 Electron 子进程增减不改变固定 packaged-app root 的身份；
   root 变化仍在发送前 fail closed。
 - `SendInput` 使用完整的 Win32 `INPUT` union（mouse/keyboard/hardware），自测按当前
@@ -114,10 +128,23 @@ background 的固定 relay，不能把 URL、设备 ID、AUMID、进程、路径
   best-effort teardown。只有 helper 证明为本次 START 新建且 exact PID + process
   start FILETIME 仍匹配的 typist
   才形成 stop lease；原本已运行或竞态启动的 typist 不归本次会话停止。
+- `/5` 的路由 lease 在两条音频 session 停止并释放后逆序恢复六项；每项只有在
+  当前值仍等于本桥目标时才写回快照值，用户或其他程序期间做出的外部改动保持不动。
+  原值为 unset 时通过 null HSTRING 精确恢复，绝不调用全局 ClearAll。
 - bridge-owned typist 同时获得 bridge 进程的 exact PID + process-start FILETIME，
   运行时持续核对 owner 代次；C# 整体崩溃、PID 消失或复用时 typist 自退。managed
   模式不使用 10 分钟 idle 误杀，手工无 owner 启动仍保留 600 秒孤儿兜底。
-- 服务不猜测 Codex Voice UI 的 toggle 状态，不发送第二次快捷键冒充“退出 Voice”。
+- 服务不读取 Codex 蓝色 Voice 球或其他 UI 状态；它只读
+  `CapabilityAccessManager\ConsentStore\microphone` 中当前目标包的 capability-use
+  起止时间戳，把它作为“该包正在使用麦克风”的代理信号。这个注册表信号不是 Codex
+  官方 Voice/蓝球 API，也不证明具体 UI 形态。
+- START 以该代理信号确认新 Voice generation，并持续监听本地关闭或 generation
+  替换。STOP 只会在 Voice 仍属桥接器开启的同一 generation、且 Codex 根进程代次仍
+  相同时发送一次关闭快捷键；预先存在、已经关闭或被新 generation 替换的 Voice
+  一律不切换。
+- GPT Classic 不复用 Codex 全局快捷键；桥只在已校验的唯一 GPT Classic 进程树窗口内，
+  通过 UI Automation 调用唯一可见、可用的“启动语音功能”或“结束语音功能”按钮，
+  并使用该包自己的麦克风 capability-use 时间戳确认启停。
 
 ## Windows 本地快照 MCP
 
@@ -156,12 +183,13 @@ START 期间始终只有一个并发 `ReceiveAsync`。peer 在 START 回执前�
 render endpoint；队列上限 200 ms，欠载写确定性静音，溢出、时间戳/sequence/session
 错配或 native backpressure 均 fail closed。START 在 A 成功打开前不得发送快捷键。
 
-下行 process-loopback 只捕获目标进程及子进程，不读系统混音。Codex 应用输出需由用户在
-Windows 音量混合器中一次性路由到 B；B 处于 Active 只证明 endpoint 可打开。服务在 B 上
+下行 process-loopback 只捕获目标进程及子进程，不读系统混音。`/5` 在快捷键前把精确
+Codex root PID 的 eRender 三种 role 指向 B、eCapture 三种 role 指向 A 的录音侧；
+六项先完整快照并落盘，再逐项 Set + Get 读回，任一步失败都逆序回滚。服务同时在 B 上
 注册公开 `IAudioSessionManager2` notification，并在枚举前注册以封住创建竞态；只有当前
 Codex 进程树出现当前 Active session 才报告 route verified。Inactive/Expired、外部 PID、
-旧进程树或观察失败都保持 unverified，避免应用已改回物理扬声器后仍用旧历史 session
-冒充当前路由；探针不启动 capture、应用、typist 或快捷键。
+旧进程树或观察失败都保持 unverified；这个观察信号不代替策略接口的逐项读回。
+旧 `/4` 不自动改应用路由，仍可作为手工音量混合器回滚入口。
 
 ## context → typist IPC
 
@@ -231,12 +259,22 @@ dotnet run --project .\ComputerVoiceAudio.csproj -c Release --no-build -- --self
 dotnet run --project .\ComputerVoiceAudio.csproj -c Release --no-build -- `
   --list-direct-render-endpoints
 dotnet run --project .\ComputerVoiceAudio.csproj -c Release --no-build -- `
+  --list-direct-microphones
+dotnet run --project .\ComputerVoiceAudio.csproj -c Release --no-build -- `
+  --probe-codex-app-audio-route --config <absolute-direct-config>
+dotnet run --project .\ComputerVoiceAudio.csproj -c Release --no-build -- `
   --probe-direct-output-route --config <absolute-direct-config>
 dotnet run --project .\ComputerVoiceAudio.csproj -c Release --no-build -- `
   --diagnose-direct-audio-no-start --config <absolute-direct-config>
 ```
 
-`--describe`、`--self-test`、endpoint 枚举和 output-route probe 不打开音频。
+`--probe-codex-app-audio-route` 只接受 `/5`，定位当前唯一 Codex root PID，
+读取 render/capture × Console/Multimedia/Communications 六项持久应用路由，并逐项返回
+target、match 与 `Present|Unset|Error`。结果固定
+`audioRouteMutated:false`；该命令不写路由、不恢复、不启动 capture/Codex，也不发快捷键，
+可用于实测前后精确核对切换与恢复。
+
+`--describe`、`--self-test`、endpoint 枚举和两个 route probe 不打开音频。
 `--diagnose-direct-audio-no-start` 只初始化并立即释放 A render 与 process-loopback/B
 probe，不调用 capture `Start`、不启动 Codex/typist，也不发送快捷键。无启动诊断通过仍
 不能代替真实双向声音验收。

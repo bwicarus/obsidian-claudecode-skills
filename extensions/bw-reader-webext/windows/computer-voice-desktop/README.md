@@ -41,14 +41,15 @@ Codex/ChatGPT 的应用输出目标，bridge 不向 B 写入。B 的录音侧不
 项目不安装驱动，也不能把 Realtek、Steam、Oculus 等现有端点冒充为两根独立线缆。
 没有两根已签名虚拟线缆时必须停在安装门，不能保存占位配置。
 
-端点存在不等于应用已路由。窗口提供“打开 Windows 音量混合器”，进入官方
-`ms-settings:apps-volume` 后需一次性把 Codex/ChatGPT 输出选择为 B。
-bridge 不调用未文档化的 `AudioPolicyConfigFactory`，也不修改系统全局
-默认设备。C# 在 B 上通过公开 Core Audio session API 观察当前 Codex 进程树；
+端点存在不等于应用已路由。严格 `/5` 另需安装时明确写入 A 的 Active eCapture
+MMDevice ID；桌面窗口不会根据名称或设备关联自行猜测。`/5` 的 C# 在 START 内使用
+Windows 内部 AudioPolicyConfig 只切换精确 Codex PID 的六项应用端点，并在 STOP
+精确恢复，不修改系统全局默认设备或打开设置 UI。C# 同时在 B 上通过公开 Core Audio
+session API 观察当前 Codex 进程树；
 只有出现当前 Active session 才报告 route verified，Inactive/Expired 历史 session
 不算；未观察到时保持
 `BW_COMPUTER_VOICE_DIRECT_OUTPUT_ROUTE_UNVERIFIED`。这条正向证据仍不能代替
-最终有声 E2E。
+最终有声 E2E。旧 `/4` 保留“打开 Windows 音量混合器”的手工回滚路径，不进行自动路由。
 
 ## UI 的三个状态
 
@@ -102,7 +103,7 @@ schtasks.exe /Run /TN "BW Computer Voice Direct Bootstrap"
 所有命令不用 shell。直接启动和停止均走可注入 `ProcessRunner`；Windows
 停止会在同一个 `QUERY_LIMITED_INFORMATION | TERMINATE` 进程句柄上先复核
 完整 EXE 路径、再终止，避免两次打开之间的 PID reuse。偏离时 fail closed。
-状态刷新和两个播放端点选择不会调用 `ProcessRunner.start()` 或
+状态刷新、两个播放端点选择和独立的麦克风录音端选择不会调用 `ProcessRunner.start()` 或
 `schtasks /Run`。
 
 计划任务的固定动作不是任意命令，而是无控制台桌面启动器：
@@ -130,14 +131,15 @@ GUI 不再提供会被 supervisor 立即抵消的单独“停止”按钮。“�
 
 ## direct config 合同
 
-合同为 `reader-computer-voice-direct-config/4`，字段集合必须恰好为：
+自动路由合同为 `reader-computer-voice-direct-config/5`，字段集合必须恰好为：
 
 ```json
 {
-  "contract": "reader-computer-voice-direct-config/4",
+  "contract": "reader-computer-voice-direct-config/5",
   "localOptIn": true,
   "experimentalSingleUserMode": true,
   "virtualMicrophoneRenderEndpointId": "{explicit-virtual-microphone-render-endpoint-id}",
+  "virtualMicrophoneCaptureEndpointId": "{explicit-virtual-microphone-capture-endpoint-id}",
   "virtualSpeakerRenderEndpointId": "{explicit-virtual-speaker-render-endpoint-id}",
   "listenHost": "127.0.0.1",
   "listenPort": 43128,
@@ -166,14 +168,24 @@ GUI 不再提供会被 supervisor 立即抵消的单独“停止”按钮。“�
   named-pipe → voice-typist 的旧文字注入末端；后者把 PWA 直连事件原子折叠到
   Windows `runtime/reader-context-snapshot.json`，START 明确跳过 typist，并由同一个
   原生 EXE 的只读 MCP 模式按需返回快照。两条路径互斥。
-- 旧 `/3` 配置仍按 `legacy-inject` 解释，作为明确回滚入口；不会因为升级程序而静默
-  切换。当前实验候选在安装/替换时另行显式写入 `snapshot-mcp`。
+- `/5` 才启用实验性的 Codex 按应用快速切换：直接调用 Windows 内部
+  AudioPolicyConfig，不打开音量混合器或设置 UI，不修改系统默认设备；START 前快照
+  render/capture × Console/Multimedia/Communications 六项并逐项读回，Voice 关闭后
+  只在当前值仍等于桥目标时恢复原值。
+- 旧 `/4` 只作为 `no-route-automation` 兼容配置加载；它没有 capture ID，绝不从
+  render ID、名称或 association 属性推导。桌面 GUI 用第三个只读下拉框独立枚举
+  Active eCapture；已有 `/5` 只按完整 endpoint ID 精确回显。下拉框首项是明确的
+  “不启用自动路由（兼容 `/4`）”，保存前仍须在确认框中确认；配置中的 capture
+  当前失活时保持空白并拒绝保存，不能把失活误当成用户选择了 `/4`。
 - `virtualMicrophoneRenderEndpointId` 与
   `virtualSpeakerRenderEndpointId` 必须是两个不同的 Active eRender
   endpoint；空值、同值、失活或默认设备推断全部拒绝。
+- `virtualMicrophoneCaptureEndpointId` 必须是另行明确选择的 A eCapture
+  MMDevice ID；render/capture 方向交叉或缺失均拒绝。
 - 旧配置中的 `microphoneEndpointId` 只显示显式迁移提示。runtime、
   supervisor 和启动路径绝不把它当作 v3 fallback；只有用户选好 A/B 并
-  再次确认保存时才迁移。
+  另行选好 A 的 eCapture、再次确认保存时才迁移为 `/5`；不选 capture
+  只能明确迁移为无自动路由的 `/4`。
 - `appKind` 固定 `codex-desktop`。Reader 不能提交路径、命令或 AUMID。
 - 本机应用 allowlist 只在代码内维护：
   - Codex：`OpenAI.Codex_2p2nqsd0c76g0!App`
@@ -361,7 +373,8 @@ BW-Computer-Voice-Bridge.exe --self-test
 - 旧 `microphoneEndpointId` 只触发显式迁移提示，不能静默启动；
 - runtime status v2 严格校验 `lastError`，UI 不泄露 endpoint；
 - offline/stale/PID 不匹配不能显示 online 或 Reader connected；
-- direct config v4 严格字段、双模式互斥、实验单用户 v3、固定 Tailscale 登录身份且无
+- direct config v5 严格字段、`/4` no-route 回滚、双模式互斥、实验单用户 v3、
+  固定 Tailscale 登录身份且无
   浏览器长期 token；
 - 无 Chrome/CDP/WebSocket 运行依赖；
 - START/STOP 只经过注入 runner 且使用严格路径；

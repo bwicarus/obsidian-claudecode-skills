@@ -315,6 +315,13 @@ internal sealed class DirectBridgeProtocolSession
                 : DirectOutputRouteProbe.UnverifiedReason;
             ready = outputRouteVerified;
         }
+        else if (_coordinator.CleanupPending)
+        {
+            state = "faulted";
+            reason = _coordinator.LastError?.Code
+                ?? "BW_COMPUTER_VOICE_DIRECT_MEDIA_CLEANUP_PENDING";
+            ready = false;
+        }
         else if (!config.LocalOptIn)
         {
             state = "unavailable";
@@ -374,15 +381,35 @@ internal sealed class DirectBridgeProtocolSession
             sendPcmFrameAsync,
         CancellationToken cancellationToken)
     {
-        RequireExactKeys(
-            message,
-            "contract",
-            "type",
-            "requestId",
-            "sessionId");
+        bool hasAppKind = message.TryGetProperty(
+            "appKind",
+            out _);
+        if (hasAppKind)
+        {
+            RequireExactKeys(
+                message,
+                "contract",
+                "type",
+                "requestId",
+                "sessionId",
+                "appKind");
+        }
+        else
+        {
+            RequireExactKeys(
+                message,
+                "contract",
+                "type",
+                "requestId",
+                "sessionId");
+        }
         RequireAuthenticated();
         string sessionId = RequireSafeId(message, "sessionId");
         _ = DirectPcmFrameCodec.ParseSessionId(sessionId);
+        string appKind = hasAppKind
+            ? RequireString(message, "appKind", 32)
+            : DirectAppTargets.CodexDesktop;
+        _ = DirectAppTargets.Require(appKind);
         DirectPcmStartGate pcmGate = new(
             (frame, token) => sendPcmFrameAsync(
                 sessionId,
@@ -396,6 +423,7 @@ internal sealed class DirectBridgeProtocolSession
                 await _coordinator.StartAsync(
                     _connectionId,
                     sessionId,
+                    appKind,
                     RequireContextDeliveryMode(),
                     reportStatusAsync,
                     pcmGate.SendAsync,

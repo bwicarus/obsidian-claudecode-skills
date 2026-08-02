@@ -8,13 +8,19 @@ namespace BwReader.ComputerVoiceAudio;
 
 internal sealed record CodexAppTarget(
     uint RootProcessId,
+    long RootProcessStartFileTimeUtc,
     IReadOnlySet<uint> ProcessTree,
-    nint WindowHandle);
+    nint WindowHandle,
+    string AppKind = DirectAppTargets.CodexDesktop);
 
 internal sealed record CodexAppProbeState(
     int RootCount,
     int WindowCount,
     CodexAppTarget? ReadyTarget);
+
+internal sealed record CodexAudioPolicyTarget(
+    CodexAppTarget AppTarget,
+    uint ProcessId);
 
 internal enum VoiceShortcutInputBatch
 {
@@ -44,25 +50,25 @@ internal readonly record struct VoiceShortcutInteropLayout(
 
 internal static class WindowsCodexAppProbe
 {
-    // The packaged app currently exposes only the observed START shortcut to
-    // this bridge.  There is no locally verified, ownership-safe application
-    // voice stop primitive.  Bridge STOP must not guess that sending the same
-    // shortcut a second time is a safe toggle.
-    internal static bool SupportsOwnedVoiceStop => false;
-
     private const uint SnapshotProcesses = 0x00000002;
+    private const uint ProcessQueryLimitedInformation = 0x00001000;
+    private const int ProcessCommandLineInformation = 60;
+    private const int MaximumCommandLineBytes = 64 * 1024;
+    private const string ChromiumAudioServiceMarker =
+        "--utility-sub-type=audio.mojom.AudioService";
     private const uint KeyEventKeyUp = 0x0002;
-    private const ushort VirtualKeyControl = 0x11;
-    private const ushort VirtualKeyShift = 0x10;
-    private const ushort VirtualKeyC = 0x43;
+    private const ushort VirtualKeyF24 = 0x87;
     private const uint InputKeyboard = 1;
     private const string RealtimeVoiceCommand = "realtimeVoice";
-    private const string RealtimeVoiceShortcut = "Ctrl+Shift+C";
+    private const string RealtimeVoiceShortcut = "F24";
     private const int MaximumKeybindingsBytes = 64 * 1024;
 
-    internal static CodexAppTarget RequireReady()
+    internal static CodexAppTarget RequireReady() =>
+        RequireReady(DirectAppTargets.CodexDesktop);
+
+    internal static CodexAppTarget RequireReady(string appKind)
     {
-        CodexAppProbeState state = Probe();
+        CodexAppProbeState state = Probe(appKind);
         if (state.RootCount != 1)
         {
             throw new InvalidOperationException(
@@ -76,7 +82,208 @@ internal static class WindowsCodexAppProbe
         return state.ReadyTarget;
     }
 
-    internal static CodexAppProbeState Probe()
+    internal static uint RequireAudioPolicyProcess(
+        CodexAppTarget target)
+    {
+        uint[] matches = FindAudioPolicyProcesses(target);
+        if (matches.Length == 1)
+        {
+            return matches[0];
+        }
+        throw new DirectProtocolException(
+            matches.Length == 0
+                ? "BW_COMPUTER_VOICE_DIRECT_AUDIO_SERVICE_NOT_READY"
+                : "BW_COMPUTER_VOICE_DIRECT_AUDIO_SERVICE_AMBIGUOUS",
+            matches.Length == 0
+                ? "Codex 音频服务进程尚未就绪"
+                : "检测到多个 Codex 音频服务进程",
+            retryable: true);
+    }
+
+    internal static uint[] FindAudioPolicyProcesses(
+        CodexAppTarget target)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        return target.ProcessTree
+            .Where(processId =>
+                TryReadCommandLine(processId, out string commandLine)
+                && commandLine.Contains(
+                    ChromiumAudioServiceMarker,
+                    StringComparison.Ordinal))
+            .Order()
+            .ToArray();
+    }
+
+    internal static async Task<CodexAudioPolicyTarget>
+        WaitForAudioPolicyProcessAsync(
+            CodexAppTarget expected,
+            TimeSpan timeout,
+            CancellationToken cancellationToken,
+            Func<CodexAppProbeState>? probe = null,
+            Func<CodexAppTarget, IReadOnlyList<uint>>? candidates = null,
+            Func<TimeSpan, CancellationToken, Task>? delay = null)
+    {
+        ArgumentNullException.ThrowIfNull(expected);
+        if (timeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(timeout));
+        }
+        probe ??= () => Probe(expected.AppKind);
+        candidates ??= FindAudioPolicyProcesses;
+        delay ??= Task.Delay;
+        long deadline = Stopwatch.GetTimestamp()
+            + checked((long)(timeout.TotalSeconds
+                * Stopwatch.Frequency));
+        int lastCandidateCount = 0;
+        uint stableProcessId = 0;
+        int stableObservationCount = 0;
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            CodexAppProbeState state = probe();
+            if (state.RootCount > 1)
+            {
+                throw new DirectProtocolException(
+                    "BW_COMPUTER_VOICE_DIRECT_APP_TARGET_CHANGED",
+                    "等待音频服务时 Codex 目标进程变得不唯一",
+                    retryable: true);
+            }
+            if (state.ReadyTarget is CodexAppTarget current)
+            {
+                if (
+                    current.RootProcessId != expected.RootProcessId
+                    || current.RootProcessStartFileTimeUtc
+                        != expected.RootProcessStartFileTimeUtc
+                )
+                {
+                    throw new DirectProtocolException(
+                        "BW_COMPUTER_VOICE_DIRECT_APP_TARGET_CHANGED",
+                        "等待音频服务时 Codex 目标进程已变化",
+                        retryable: true);
+                }
+                uint[] currentCandidates = candidates(current)
+                    .Distinct()
+                    .Order()
+                    .ToArray();
+                lastCandidateCount = currentCandidates.Length;
+                if (currentCandidates.Length == 1)
+                {
+                    uint processId = currentCandidates[0];
+                    if (stableProcessId == processId)
+                    {
+                        stableObservationCount++;
+                    }
+                    else
+                    {
+                        stableProcessId = processId;
+                        stableObservationCount = 1;
+                    }
+                    if (stableObservationCount >= 2)
+                    {
+                        return new CodexAudioPolicyTarget(
+                            current,
+                            processId);
+                    }
+                }
+                else
+                {
+                    stableProcessId = 0;
+                    stableObservationCount = 0;
+                }
+            }
+            if (Stopwatch.GetTimestamp() >= deadline)
+            {
+                throw new DirectProtocolException(
+                    lastCandidateCount == 0
+                        ? "BW_COMPUTER_VOICE_DIRECT_AUDIO_SERVICE_NOT_READY"
+                        : "BW_COMPUTER_VOICE_DIRECT_AUDIO_SERVICE_AMBIGUOUS",
+                    lastCandidateCount == 0
+                        ? "等待 Codex 音频服务进程就绪超时"
+                        : "等待多个 Codex 音频服务进程收敛超时",
+                    retryable: true);
+            }
+            await delay(
+                    TimeSpan.FromMilliseconds(150),
+                    cancellationToken)
+                .ConfigureAwait(false);
+        }
+    }
+
+    private static bool TryReadCommandLine(
+        uint processId,
+        out string commandLine)
+    {
+        commandLine = "";
+        nint process = OpenProcess(
+            ProcessQueryLimitedInformation,
+            inheritHandle: false,
+            processId);
+        if (process == 0)
+        {
+            return false;
+        }
+        nint buffer = 0;
+        try
+        {
+            _ = NtQueryInformationProcess(
+                process,
+                ProcessCommandLineInformation,
+                0,
+                0,
+                out int required);
+            if (
+                required <= Marshal.SizeOf<UNICODE_STRING>()
+                || required > MaximumCommandLineBytes
+            )
+            {
+                return false;
+            }
+            buffer = Marshal.AllocHGlobal(required);
+            int status = NtQueryInformationProcess(
+                process,
+                ProcessCommandLineInformation,
+                buffer,
+                required,
+                out int returned);
+            if (status < 0 || returned > required)
+            {
+                return false;
+            }
+            UNICODE_STRING value =
+                Marshal.PtrToStructure<UNICODE_STRING>(buffer);
+            if (
+                value.Buffer == 0
+                || value.Length == 0
+                || value.Length > value.MaximumLength
+                || (value.Length & 1) != 0
+            )
+            {
+                return false;
+            }
+            commandLine = Marshal.PtrToStringUni(
+                value.Buffer,
+                value.Length / sizeof(char)) ?? "";
+            return commandLine.Length != 0;
+        }
+        catch
+        {
+            commandLine = "";
+            return false;
+        }
+        finally
+        {
+            if (buffer != 0)
+            {
+                Marshal.FreeHGlobal(buffer);
+            }
+            _ = CloseHandle(process);
+        }
+    }
+
+    internal static CodexAppProbeState Probe() =>
+        Probe(DirectAppTargets.CodexDesktop);
+
+    internal static CodexAppProbeState Probe(string appKind)
     {
         if (!OperatingSystem.IsWindows())
         {
@@ -84,10 +291,14 @@ internal static class WindowsCodexAppProbe
                 "BW_COMPUTER_VOICE_AUDIO_WINDOWS_REQUIRED");
         }
 
+        DirectAppTargetProfile profile = DirectAppTargets.Require(appKind);
         int sessionId = Process.GetCurrentProcess().SessionId;
         Dictionary<uint, uint> parents = SnapshotParents();
         Dictionary<uint, Process> eligible = new();
-        foreach (Process process in Process.GetProcessesByName("ChatGPT"))
+        // 进程名/映像名按目标 profile 取:Codex 是 ChatGPT(.exe),GPT Classic 是
+        // ChatGPT Classic(.exe)。此处曾硬编码 "ChatGPT",Classic 的进程一个都进不来。
+        foreach (
+            Process process in Process.GetProcessesByName(profile.ProcessName))
         {
             try
             {
@@ -99,10 +310,10 @@ internal static class WindowsCodexAppProbe
                 string path = process.MainModule?.FileName ?? "";
                 if (
                     !path.Contains(
-                        @"\WindowsApps\OpenAI.Codex_",
+                        profile.PackagePathMarker,
                         StringComparison.OrdinalIgnoreCase)
                     || !path.EndsWith(
-                        @"\ChatGPT.exe",
+                        profile.ExecutableSuffix,
                         StringComparison.OrdinalIgnoreCase)
                 )
                 {
@@ -171,10 +382,38 @@ internal static class WindowsCodexAppProbe
                     windows.Length,
                     ReadyTarget: null);
             }
+            long rootProcessStartFileTimeUtc;
+            try
+            {
+                eligible[root].Refresh();
+                rootProcessStartFileTimeUtc = eligible[root]
+                    .StartTime
+                    .ToUniversalTime()
+                    .ToFileTimeUtc();
+            }
+            catch
+            {
+                return new CodexAppProbeState(
+                    RootCount: 1,
+                    windows.Length,
+                    ReadyTarget: null);
+            }
+            if (rootProcessStartFileTimeUtc <= 0)
+            {
+                return new CodexAppProbeState(
+                    RootCount: 1,
+                    windows.Length,
+                    ReadyTarget: null);
+            }
             return new CodexAppProbeState(
                 RootCount: 1,
                 WindowCount: 1,
-                new CodexAppTarget(root, tree, windows[0]));
+                new CodexAppTarget(
+                    root,
+                    rootProcessStartFileTimeUtc,
+                    tree,
+                    windows[0],
+                    profile.AppKind));
         }
         finally
         {
@@ -196,7 +435,38 @@ internal static class WindowsCodexAppProbe
         {
             throw new DirectProtocolException(
                 "BW_COMPUTER_VOICE_DIRECT_SHORTCUT_CONFIG_INVALID",
-                "Codex 全局语音快捷键必须唯一配置为 Ctrl+Shift+C");
+                "Codex 全局语音快捷键必须唯一配置为 F24");
+        }
+    }
+
+    internal static void RequireCurrentReadyTarget(
+        CodexAppTarget expected)
+    {
+        ArgumentNullException.ThrowIfNull(expected);
+        CodexAppTarget current;
+        try
+        {
+            current = RequireReady(expected.AppKind);
+        }
+        catch (Exception exception)
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_SHORTCUT_TARGET_UNAVAILABLE",
+                "发送快捷键前无法确认唯一 Codex 目标",
+                retryable: true,
+                innerException: exception);
+        }
+        if (
+            current.RootProcessId != expected.RootProcessId
+            || current.RootProcessStartFileTimeUtc
+                != expected.RootProcessStartFileTimeUtc
+            || current.AppKind != expected.AppKind
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_SHORTCUT_TARGET_CHANGED",
+                "Codex 目标进程在发送快捷键前发生变化",
+                retryable: true);
         }
     }
 
@@ -226,10 +496,16 @@ internal static class WindowsCodexAppProbe
     internal static VoiceShortcutSendResult
         SendVoiceShortcutDetailed(CodexAppTarget expected)
     {
+        if (expected.AppKind != DirectAppTargets.CodexDesktop)
+        {
+            return ShortcutFailure(
+                "BW_COMPUTER_VOICE_DIRECT_SHORTCUT_TARGET_INVALID",
+                "Codex 全局快捷键不能用于其他应用目标");
+        }
         CodexAppTarget current;
         try
         {
-            current = RequireReady();
+            current = RequireReady(expected.AppKind);
         }
         catch
         {
@@ -247,17 +523,17 @@ internal static class WindowsCodexAppProbe
             {
                 VoiceShortcutKeyEvent[] events =
                     VoiceShortcutEvents(batch);
-                INPUT[] inputs = new INPUT[events.Length];
+                uint inserted = 0;
                 for (int index = 0; index < events.Length; index++)
                 {
-                    inputs[index] = Key(
-                        events[index].VirtualKey,
-                        events[index].KeyUp);
+                    KeybdEvent(
+                        checked((byte)events[index].VirtualKey),
+                        scan: 0,
+                        events[index].KeyUp ? KeyEventKeyUp : 0,
+                        extraInfo: 0);
+                    inserted++;
                 }
-                return SendInput(
-                    checked((uint)inputs.Length),
-                    inputs,
-                    Marshal.SizeOf<INPUT>());
+                return inserted;
             },
             Marshal.GetLastPInvokeError);
     }
@@ -278,7 +554,13 @@ internal static class WindowsCodexAppProbe
         // Electron child processes are dynamic.  The process-loopback target
         // and the global-hotkey owner are both anchored to the stable packaged
         // app root, so unrelated child churn must not reject START.
-        if (current.RootProcessId != expected.RootProcessId)
+        if (
+            expected.AppKind != DirectAppTargets.CodexDesktop
+            || current.AppKind != DirectAppTargets.CodexDesktop
+            || current.RootProcessId != expected.RootProcessId
+            || current.RootProcessStartFileTimeUtc
+                != expected.RootProcessStartFileTimeUtc
+        )
         {
             return ShortcutFailure(
                 "BW_COMPUTER_VOICE_DIRECT_SHORTCUT_TARGET_CHANGED",
@@ -288,7 +570,7 @@ internal static class WindowsCodexAppProbe
         {
             return ShortcutFailure(
                 "BW_COMPUTER_VOICE_DIRECT_SHORTCUT_CONFIG_INVALID",
-                "Codex 全局语音快捷键必须唯一配置为 Ctrl+Shift+C");
+                "Codex 全局语音快捷键必须唯一配置为 F24");
         }
 
         uint insertedInputCount = 0;
@@ -434,16 +716,14 @@ internal static class WindowsCodexAppProbe
         Func<VoiceShortcutInputBatch, uint> sendBatch)
     {
         uint inserted = sendBatch(VoiceShortcutInputBatch.Activation);
-        if (inserted == 6)
+        if (inserted == 2)
         {
             return true;
         }
-        if (inserted is >= 1 and <= 5)
+        if (inserted == 1)
         {
-            // SendInput may have left Ctrl, Shift, or C down.  Release all
-            // three in reverse order.  This cleanup is intentionally
-            // best-effort and the activation remains failed regardless of
-            // how many release events Windows accepts.
+            // SendInput may have left F24 down. This cleanup is
+            // intentionally best-effort and the activation remains failed.
             try
             {
                 _ = sendBatch(
@@ -462,18 +742,12 @@ internal static class WindowsCodexAppProbe
         {
             VoiceShortcutInputBatch.Activation =>
             [
-                new(VirtualKeyControl, KeyUp: false),
-                new(VirtualKeyShift, KeyUp: false),
-                new(VirtualKeyC, KeyUp: false),
-                new(VirtualKeyC, KeyUp: true),
-                new(VirtualKeyShift, KeyUp: true),
-                new(VirtualKeyControl, KeyUp: true),
+                new(VirtualKeyF24, KeyUp: false),
+                new(VirtualKeyF24, KeyUp: true),
             ],
             VoiceShortcutInputBatch.ReleasePressedKeys =>
             [
-                new(VirtualKeyC, KeyUp: true),
-                new(VirtualKeyShift, KeyUp: true),
-                new(VirtualKeyControl, KeyUp: true),
+                new(VirtualKeyF24, KeyUp: true),
             ],
             _ => throw new ArgumentOutOfRangeException(nameof(batch)),
         };
@@ -556,6 +830,14 @@ internal static class WindowsCodexAppProbe
     }
 
     [StructLayout(LayoutKind.Sequential)]
+    private struct UNICODE_STRING
+    {
+        internal ushort Length;
+        internal ushort MaximumLength;
+        internal nint Buffer;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
     private struct INPUT
     {
         internal uint Type;
@@ -622,9 +904,34 @@ internal static class WindowsCodexAppProbe
     [DllImport("kernel32.dll", SetLastError = true)]
     private static extern bool CloseHandle(nint handle);
 
+    [DllImport("kernel32.dll", SetLastError = true)]
+    private static extern nint OpenProcess(
+        uint desiredAccess,
+        bool inheritHandle,
+        uint processId);
+
+    [DllImport("ntdll.dll")]
+    private static extern int NtQueryInformationProcess(
+        nint process,
+        int processInformationClass,
+        nint processInformation,
+        int processInformationLength,
+        out int returnLength);
+
     [DllImport("user32.dll", SetLastError = true)]
     private static extern uint SendInput(
         uint inputCount,
         INPUT[] inputs,
         int inputSize);
+
+    [DllImport(
+        "user32.dll",
+        EntryPoint = "keybd_event",
+        SetLastError = false)]
+    private static extern void KeybdEvent(
+        byte virtualKey,
+        byte scan,
+        uint flags,
+        nuint extraInfo);
+
 }

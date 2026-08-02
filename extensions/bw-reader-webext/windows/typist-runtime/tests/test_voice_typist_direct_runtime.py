@@ -117,6 +117,39 @@ class DirectFormatterTest(unittest.TestCase):
         self.assertEqual(VT.format_context_event(event), "")
 
 
+class TargetAppPolicyTest(unittest.TestCase):
+    def test_packaged_apps_are_distinguished_by_full_image_path(self) -> None:
+        codex = (
+            r"C:\Program Files\WindowsApps\OpenAI.Codex_1.0.0.0_x64__2p2nqsd0c76g0"
+            r"\app\ChatGPT.exe"
+        )
+        classic = (
+            r"C:\Program Files\WindowsApps\OpenAI.ChatGPT-Desktop_1.0.0.0_x64__2p2nqsd0c76g0"
+            r"\app\ChatGPT.exe"
+        )
+        self.assertTrue(VT.target_process_path_matches(codex, "codex-desktop"))
+        self.assertFalse(VT.target_process_path_matches(codex, "chatgpt-classic"))
+        self.assertTrue(VT.target_process_path_matches(classic, "chatgpt-classic"))
+        self.assertFalse(VT.target_process_path_matches(classic, "codex-desktop"))
+
+    def test_classic_uses_exact_uia_controls_without_codex_session_checks(self) -> None:
+        cfg = VT.apply_target_app(
+            copy.deepcopy(VT.DEFAULT_CONFIG_BODY),
+            "chatgpt-classic",
+        )
+        self.assertEqual(cfg["target"]["app_kind"], "chatgpt-classic")
+        self.assertEqual(cfg["target"]["session_mode"], "follow_active")
+        self.assertIsNone(cfg["target"]["session_id"])
+        self.assertIsNone(cfg["hotkeys"]["copy_session_id"])
+        self.assertEqual(cfg["verification"]["method"], "none")
+        self.assertFalse(cfg["safety"]["require_transcript_verification"])
+        self.assertEqual(VT.ClassicComposerAutomation.COMPOSER_ID, "prompt-textarea")
+        self.assertEqual(
+            VT.ClassicComposerAutomation.SEND_ID,
+            "composer-submit-button",
+        )
+
+
 class DurableRuntimeTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
