@@ -23,7 +23,7 @@ concurrency:
 
 env:
   APP_NAME: bwicarus-test
-  BUNDLE_ID: space.bwicarus.bwreader
+  BUNDLE_ID: space.bwicarus.bwreader2
   EXT_DIR: extensions/bw-reader-webext
 
 jobs:
