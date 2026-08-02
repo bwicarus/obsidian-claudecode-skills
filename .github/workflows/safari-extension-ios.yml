@@ -43,13 +43,20 @@ jobs:
           # failure below can be read without guessing.
           xcrun safari-web-extension-converter --help || true
 
+      # The runner's own python3 is Homebrew-managed and refuses installs under
+      # PEP 668 (externally-managed-environment). Bring an isolated interpreter
+      # instead of forcing packages into it.
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
       - name: Install packaging deps
-        run: python3 -m pip install --quiet --upgrade pillow
+        run: python -m pip install --quiet --upgrade pillow
 
       - name: Build the Apple-shaped extension package
         working-directory: ${{ env.EXT_DIR }}
         run: |
-          python3 package_safari.py
+          python package_safari.py
           ls -l ../bw-reader-webext-*-safari-ios.zip
 
       - name: Unpack it for the converter
@@ -57,7 +64,7 @@ jobs:
           mkdir -p build/src
           unzip -q extensions/bw-reader-webext-*-safari-ios.zip -d build/src
           echo "--- manifest that Apple will see ---"
-          python3 -c "import json;m=json.load(open('build/src/manifest.json'));print(json.dumps({k:m[k] for k in ('name','version','permissions','background')},ensure_ascii=False,indent=2))"
+          python -c "import json;m=json.load(open('build/src/manifest.json'));print(json.dumps({k:m[k] for k in ('name','version','permissions','background')},ensure_ascii=False,indent=2))"
 
       - name: Convert to an Xcode project
         run: |
@@ -82,7 +89,7 @@ jobs:
           echo "--- available schemes ---"
           xcodebuild -project "$PROJ" -list
           SCHEME=$(xcodebuild -project "$PROJ" -list -json \
-            | python3 -c "import json,sys;s=json.load(sys.stdin)['project']['schemes'];ios=[x for x in s if 'iOS' in x];print((ios or s)[0])")
+            | python -c "import json,sys;s=json.load(sys.stdin)['project']['schemes'];ios=[x for x in s if 'iOS' in x];print((ios or s)[0])")
           echo "scheme=$SCHEME" >> "$GITHUB_OUTPUT"
           echo "Using project=$PROJ scheme=$SCHEME"
 
