@@ -55,7 +55,10 @@ TRUSTED_PWA_MATCHES = {
     ACTIVE_ORIGIN + "pdf/fav/open",
     ACTIVE_ORIGIN + "pdf/fav/open?*",
 }
-APP_NAME = "BW网页伴读"
+# Must match the product name registered in App Store Connect for BUNDLE_ID --
+# the upload is rejected outright when they differ. This is also the name shown
+# in the iPad Safari extension list, so it is the user-facing one.
+APP_NAME = "bwicarus-test"
 BUNDLE_ID = "space.bwicarus.bwreader"
 SKU = "bw-reader-ipad-001"
 PRIMARY_LANGUAGE = "zh-Hans"
