@@ -681,6 +681,10 @@ internal static class DirectBridgeSelfTest
             checks).ConfigureAwait(false);
         await CheckContextIpcContractAsync(
             checks).ConfigureAwait(false);
+        await CheckContextDeliveryModeSetAsync(
+            root,
+            origin,
+            checks).ConfigureAwait(false);
         await CheckSnapshotMcpModeAsync(
             root,
             origin,
@@ -4335,6 +4339,241 @@ internal static class DirectBridgeSelfTest
                 .GetProperty("selection")
                 .GetProperty("state").GetString() == "unknown",
             "direct-snapshot-clear-removes-page-and-selection",
+            checks);
+    }
+
+    private static async Task CheckContextDeliveryModeSetAsync(
+        string root,
+        string origin,
+        ICollection<string> checks)
+    {
+        string installationRoot = System.IO.Path.Combine(
+            root,
+            "context-mode-set");
+        string configPath = System.IO.Path.Combine(
+            installationRoot,
+            "native-host",
+            "direct.json");
+        string statusPath = System.IO.Path.Combine(
+            installationRoot,
+            "runtime",
+            "computer-voice-direct.status.json");
+        await WriteConfigAsync(
+            configPath,
+            statusPath,
+            origin,
+            localOptIn: true).ConfigureAwait(false);
+
+        DirectBridgeConfigStore store = new(configPath);
+        DirectBridgeConfig initial = store.Load();
+        FakeDirectAppLauncher launcher = new();
+        FakeDirectMediaAdapter media = new();
+        await using DirectBridgeCoordinator coordinator = new(
+            store,
+            launcher,
+            media,
+            renderEndpointProbe: _ => null);
+        List<object> events = [];
+        List<byte[]> frames = [];
+        string modeSessionId =
+            "session-" + DirectBase64Url.Encode(
+                Enumerable.Range(96, 16)
+                    .Select(value => (byte)value)
+                    .ToArray());
+
+        DirectBridgeProtocolSession setter = new(
+            "connection-context-mode-set",
+            origin,
+            store,
+            coordinator);
+        _ = RequireSuccess(
+            await SendAsync(
+                setter,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "hello",
+                    requestId = "request-mode-set-hello",
+                    protocolVersion = 3,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "hello");
+        JsonElement changed = RequireSuccess(
+            await SendAsync(
+                setter,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "context-mode-set",
+                    requestId = "request-mode-set-snapshot",
+                    mode = DirectContextDeliveryMode.SnapshotMcp,
+                    sessionId = modeSessionId,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "context-mode-set");
+        DirectBridgeConfig snapshotConfig = store.Load();
+        Require(
+            changed.GetProperty("mode").GetString()
+                == DirectContextDeliveryMode.SnapshotMcp
+            && changed.GetProperty("previousMode").GetString()
+                == DirectContextDeliveryMode.LegacyInject
+            && snapshotConfig.ContextDeliveryMode
+                == DirectContextDeliveryMode.SnapshotMcp
+            && snapshotConfig.VirtualMicrophoneRenderEndpointId
+                == initial.VirtualMicrophoneRenderEndpointId
+            && snapshotConfig.VirtualSpeakerRenderEndpointId
+                == initial.VirtualSpeakerRenderEndpointId
+            && snapshotConfig.AllowedOrigins.SetEquals(
+                initial.AllowedOrigins)
+            && launcher.EnsureRunningCount == 0
+            && launcher.WaitReadyCount == 0
+            && media.StartCount == 0,
+            "direct-context-mode-set-persists-atomically-without-side-effects",
+            checks);
+
+        DirectBridgeProtocolSession contextOnly = new(
+            "connection-context-mode-open",
+            origin,
+            store,
+            coordinator);
+        _ = RequireSuccess(
+            await SendAsync(
+                contextOnly,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "hello",
+                    requestId = "request-mode-open-hello",
+                    protocolVersion = 3,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "hello");
+        _ = RequireSuccess(
+            await SendAsync(
+                contextOnly,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "context-open",
+                    requestId = "request-mode-open",
+                    sessionId = modeSessionId,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "context-open");
+        JsonElement busy = await SendAsync(
+            contextOnly,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "context-mode-set",
+                requestId = "request-mode-set-busy",
+                mode = DirectContextDeliveryMode.LegacyInject,
+                sessionId = modeSessionId,
+            },
+            events,
+            frames).ConfigureAwait(false);
+        Require(
+            !busy.GetProperty("ok").GetBoolean()
+            && busy.GetProperty("error").GetProperty("code")
+                .GetString()
+                == "BW_READER_CONTEXT_DELIVERY_MODE_BUSY"
+            && store.Load().ContextDeliveryMode
+                == DirectContextDeliveryMode.SnapshotMcp,
+            "direct-context-mode-set-rejects-context-only-owner",
+            checks);
+
+        DirectBridgeProtocolSession rollback = new(
+            "connection-context-mode-rollback",
+            origin,
+            store,
+            coordinator);
+        _ = RequireSuccess(
+            await SendAsync(
+                rollback,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "hello",
+                    requestId = "request-mode-rollback-hello",
+                    protocolVersion = 3,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "hello");
+        JsonElement invalid = await SendAsync(
+            rollback,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "context-mode-set",
+                requestId = "request-mode-set-invalid",
+                mode = "invalid-mode",
+                sessionId = modeSessionId,
+            },
+            events,
+            frames).ConfigureAwait(false);
+        JsonElement restored = RequireSuccess(
+            await SendAsync(
+                rollback,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "context-mode-set",
+                    requestId = "request-mode-set-legacy",
+                    mode = DirectContextDeliveryMode.LegacyInject,
+                    sessionId = modeSessionId,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "context-mode-set");
+        DirectBridgeProtocolSession observer = new(
+            "connection-context-mode-observer",
+            origin,
+            store,
+            coordinator);
+        _ = RequireSuccess(
+            await SendAsync(
+                observer,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "hello",
+                    requestId = "request-mode-observer-hello",
+                    protocolVersion = 3,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "hello");
+        JsonElement observed = RequireSuccess(
+            await SendAsync(
+                observer,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "context-mode",
+                    requestId = "request-mode-observer",
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "context-mode");
+        Require(
+            !invalid.GetProperty("ok").GetBoolean()
+            && invalid.GetProperty("error").GetProperty("code")
+                .GetString()
+                == "BW_READER_CONTEXT_DELIVERY_MODE_INVALID"
+            && restored.GetProperty("mode").GetString()
+                == DirectContextDeliveryMode.LegacyInject
+            && restored.GetProperty("previousMode").GetString()
+                == DirectContextDeliveryMode.SnapshotMcp
+            && observed.GetProperty("mode").GetString()
+                == DirectContextDeliveryMode.LegacyInject
+            && store.Load().ContextDeliveryMode
+                == DirectContextDeliveryMode.LegacyInject,
+            "direct-context-mode-set-validates-and-persists-across-connections",
             checks);
     }
 

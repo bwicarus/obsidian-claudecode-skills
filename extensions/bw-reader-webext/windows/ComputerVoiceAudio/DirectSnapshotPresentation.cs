@@ -1461,6 +1461,7 @@ internal static class DirectSnapshotTerminal
 
 internal sealed class DirectSnapshotViewer : IDisposable
 {
+    private const string ViewerWindowTitle = "Reader 实时快照";
     private const int MaximumPresentationBytes = 2 * 1024 * 1024;
     internal const string ViewerPath = "/reader-context-view";
     internal const string SnapshotPath =
@@ -1899,6 +1900,7 @@ internal sealed class DirectSnapshotViewer : IDisposable
     private readonly string _profilePath;
     private readonly object _gate = new();
     private Process? _viewerProcess;
+    private string? _viewerOwnerId;
     private bool _disposed;
 
     internal DirectSnapshotViewer(string snapshotPath) : this(
@@ -2072,10 +2074,13 @@ internal sealed class DirectSnapshotViewer : IDisposable
         }
     }
 
-    internal void OpenIfSnapshotMode(string contextDeliveryMode)
+    internal void OpenIfSnapshotMode(
+        string contextDeliveryMode,
+        string ownerId)
     {
         if (
             contextDeliveryMode != DirectContextDeliveryMode.SnapshotMcp
+            || string.IsNullOrWhiteSpace(ownerId)
             || _disposed)
         {
             return;
@@ -2086,12 +2091,18 @@ internal sealed class DirectSnapshotViewer : IDisposable
             {
                 return;
             }
-            if (_viewerProcess is { HasExited: false })
+            if (
+                _viewerProcess is { HasExited: false }
+                && string.Equals(
+                    _viewerOwnerId,
+                    ownerId,
+                    StringComparison.Ordinal)
+            )
             {
                 return;
             }
-            _viewerProcess?.Dispose();
-            _viewerProcess = null;
+            StopViewerProcessBestEffort();
+            CloseStaleViewerWindowsBestEffort();
 
             try
             {
@@ -2103,6 +2114,9 @@ internal sealed class DirectSnapshotViewer : IDisposable
                     _viewerUrl,
                     _profilePath);
                 _viewerProcess = Process.Start(start);
+                _viewerOwnerId = _viewerProcess is null
+                    ? null
+                    : ownerId;
             }
             catch (Exception exception) when (
                 exception is IOException
@@ -2112,9 +2126,28 @@ internal sealed class DirectSnapshotViewer : IDisposable
             {
                 // Presentation is best-effort. Voice and MCP continue even
                 // if Windows cannot create the isolated app-mode viewer.
-                _viewerProcess?.Dispose();
-                _viewerProcess = null;
+                StopViewerProcessBestEffort();
             }
+        }
+    }
+
+    internal void CloseForConnection(string ownerId)
+    {
+        if (string.IsNullOrWhiteSpace(ownerId))
+        {
+            return;
+        }
+        lock (_gate)
+        {
+            if (!string.Equals(
+                _viewerOwnerId,
+                ownerId,
+                StringComparison.Ordinal))
+            {
+                return;
+            }
+            StopViewerProcessBestEffort();
+            CloseStaleViewerWindowsBestEffort();
         }
     }
 
@@ -2155,8 +2188,66 @@ internal sealed class DirectSnapshotViewer : IDisposable
         lock (_gate)
         {
             _disposed = true;
-            _viewerProcess?.Dispose();
-            _viewerProcess = null;
+            StopViewerProcessBestEffort();
+            CloseStaleViewerWindowsBestEffort();
+        }
+    }
+
+    private void StopViewerProcessBestEffort()
+    {
+        Process? process = _viewerProcess;
+        _viewerProcess = null;
+        _viewerOwnerId = null;
+        if (process is null)
+        {
+            return;
+        }
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
+        }
+        catch (Exception exception) when (
+            exception is InvalidOperationException
+            or NotSupportedException
+            or System.ComponentModel.Win32Exception)
+        {
+        }
+        finally
+        {
+            process.Dispose();
+        }
+    }
+
+    private static void CloseStaleViewerWindowsBestEffort()
+    {
+        foreach (Process process in Process.GetProcessesByName("msedge"))
+        {
+            try
+            {
+                if (
+                    string.Equals(
+                        process.MainWindowTitle,
+                        ViewerWindowTitle,
+                        StringComparison.Ordinal)
+                    && !process.HasExited
+                )
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+            }
+            catch (Exception exception) when (
+                exception is InvalidOperationException
+                or NotSupportedException
+                or System.ComponentModel.Win32Exception)
+            {
+            }
+            finally
+            {
+                process.Dispose();
+            }
         }
     }
 

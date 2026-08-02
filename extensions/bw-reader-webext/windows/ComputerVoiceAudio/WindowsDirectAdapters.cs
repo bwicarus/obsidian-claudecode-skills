@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Runtime.InteropServices;
 using System.Text.Json;
+using BwReader.ComputerVoiceAudio.Interop;
 
 namespace BwReader.ComputerVoiceAudio;
 
@@ -438,6 +439,351 @@ internal sealed class WindowsDirectTypistLeaseController
         "python.exe");
 }
 
+internal interface IDirectCaptureEndpointMuteBackend
+{
+    bool ReadMuted(string endpointId);
+
+    void WriteMuted(string endpointId, bool muted);
+}
+
+internal sealed class DirectCaptureEndpointMuteLease
+{
+    private readonly IDirectCaptureEndpointMuteBackend _backend;
+    private readonly string _endpointId;
+    private readonly bool _restoreRequired;
+    private bool _restored;
+
+    private DirectCaptureEndpointMuteLease(
+        IDirectCaptureEndpointMuteBackend backend,
+        string endpointId,
+        bool restoreRequired)
+    {
+        _backend = backend;
+        _endpointId = endpointId;
+        _restoreRequired = restoreRequired;
+    }
+
+    internal static DirectCaptureEndpointMuteLease Acquire(
+        IDirectCaptureEndpointMuteBackend backend,
+        string endpointId)
+    {
+        ArgumentNullException.ThrowIfNull(backend);
+        if (string.IsNullOrWhiteSpace(endpointId))
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_MIC_ENDPOINT_MISSING",
+                "虚拟麦克风采集端点未配置");
+        }
+
+        bool originallyMuted = false;
+        bool originalStateRead = false;
+        try
+        {
+            originallyMuted = backend.ReadMuted(endpointId);
+            originalStateRead = true;
+            if (originallyMuted)
+            {
+                backend.WriteMuted(endpointId, muted: false);
+            }
+            if (backend.ReadMuted(endpointId))
+            {
+                throw new InvalidOperationException(
+                    "capture endpoint remained muted after unmute");
+            }
+            return new DirectCaptureEndpointMuteLease(
+                backend,
+                endpointId,
+                restoreRequired: originallyMuted);
+        }
+        catch (Exception exception)
+        {
+            Exception failure = exception;
+            if (originalStateRead && originallyMuted)
+            {
+                try
+                {
+                    backend.WriteMuted(endpointId, muted: true);
+                }
+                catch (Exception restoreException)
+                {
+                    failure = new AggregateException(
+                        exception,
+                        restoreException);
+                }
+            }
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_MIC_ENDPOINT_UNMUTE_FAILED",
+                "Windows 虚拟麦克风采集端点无法解除静音",
+                retryable: true,
+                innerException: failure);
+        }
+    }
+
+    internal void RequireUnmuted()
+    {
+        if (_restored)
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_MIC_MUTE_LEASE_RESTORED",
+                "虚拟麦克风静音状态租约已释放");
+        }
+        try
+        {
+            if (_backend.ReadMuted(_endpointId))
+            {
+                throw new DirectProtocolException(
+                    "BW_COMPUTER_VOICE_DIRECT_MIC_ENDPOINT_MUTED",
+                    "Windows 虚拟麦克风采集端点已被重新静音",
+                    retryable: true);
+            }
+        }
+        catch (DirectProtocolException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_MIC_ENDPOINT_STATE_FAILED",
+                "无法确认 Windows 虚拟麦克风静音状态",
+                retryable: true,
+                innerException: exception);
+        }
+    }
+
+    internal void Restore()
+    {
+        if (_restored)
+        {
+            return;
+        }
+        if (!_restoreRequired)
+        {
+            _restored = true;
+            return;
+        }
+        try
+        {
+            if (!_backend.ReadMuted(_endpointId))
+            {
+                _backend.WriteMuted(_endpointId, muted: true);
+            }
+            if (!_backend.ReadMuted(_endpointId))
+            {
+                throw new InvalidOperationException(
+                    "capture endpoint mute state was not restored");
+            }
+            _restored = true;
+        }
+        catch (Exception exception)
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_MIC_ENDPOINT_RESTORE_FAILED",
+                "Windows 虚拟麦克风静音状态恢复失败",
+                retryable: true,
+                innerException: exception);
+        }
+    }
+}
+
+internal sealed class NativeDirectCaptureEndpointMuteBackend :
+    IDirectCaptureEndpointMuteBackend
+{
+    private static readonly Guid EndpointVolumeInterfaceId =
+        new("5CDF2C82-841E-4546-9722-0CF74078229A");
+    private static readonly Guid EventContext =
+        new("2C138E74-1C55-4B65-A371-39C44C6D93B6");
+
+    public bool ReadMuted(string endpointId) =>
+        WithEndpointVolume(
+            endpointId,
+            volume =>
+            {
+                RequireSucceeded(
+                    volume.GetMute(out bool muted),
+                    "virtual-microphone.get-mute");
+                return muted;
+            });
+
+    public void WriteMuted(string endpointId, bool muted)
+    {
+        _ = WithEndpointVolume(
+            endpointId,
+            volume =>
+            {
+                Guid eventContext = EventContext;
+                RequireSucceeded(
+                    volume.SetMute(muted, ref eventContext),
+                    "virtual-microphone.set-mute");
+                return true;
+            });
+    }
+
+    private static T WithEndpointVolume<T>(
+        string endpointId,
+        Func<IAudioEndpointVolumeForBridge, T> action)
+    {
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new PlatformNotSupportedException(
+                "BW_COMPUTER_VOICE_AUDIO_WINDOWS_REQUIRED");
+        }
+        object? enumeratorObject = null;
+        IMMDevice? endpoint = null;
+        object? endpointVolumeObject = null;
+        using ComMtaLease apartment = ComMtaLease.Enter();
+        try
+        {
+            Type enumeratorType = Type.GetTypeFromCLSID(
+                ExplicitMicrophoneInterop.ClsidMmDeviceEnumerator,
+                throwOnError: true)
+                ?? throw new InvalidOperationException(
+                    "BW_COMPUTER_VOICE_AUDIO_MMDEVICE_TYPE_MISSING");
+            enumeratorObject = Activator.CreateInstance(enumeratorType);
+            if (enumeratorObject is not IMMDeviceEnumerator enumerator)
+            {
+                throw new InvalidOperationException(
+                    "BW_COMPUTER_VOICE_AUDIO_MMDEVICE_ENUMERATOR_INVALID");
+            }
+            RequireSucceeded(
+                enumerator.GetDevice(endpointId, out endpoint),
+                "virtual-microphone.get-explicit-capture-device");
+            if (endpoint is null)
+            {
+                throw new AudioCaptureStageException(
+                    "virtual-microphone.get-explicit-capture-device",
+                    unchecked((int)0x80070490));
+            }
+            RequireSucceeded(
+                endpoint.GetState(out DeviceState state),
+                "virtual-microphone.get-capture-device-state");
+            if ((state & DeviceState.Active) == 0)
+            {
+                throw new AudioCaptureStageException(
+                    "virtual-microphone.capture-device-inactive",
+                    unchecked((int)0x88890004));
+            }
+            if (endpoint is not IMMEndpoint direction)
+            {
+                throw new AudioCaptureStageException(
+                    "virtual-microphone.query-capture-data-flow",
+                    unchecked((int)0x80004002));
+            }
+            RequireSucceeded(
+                direction.GetDataFlow(out AudioDataFlow dataFlow),
+                "virtual-microphone.get-capture-data-flow");
+            if (dataFlow != AudioDataFlow.Capture)
+            {
+                throw new AudioCaptureStageException(
+                    "virtual-microphone.capture-data-flow-mismatch",
+                    unchecked((int)0x80070057));
+            }
+            Guid interfaceId = EndpointVolumeInterfaceId;
+            RequireSucceeded(
+                endpoint.Activate(
+                    ref interfaceId,
+                    ComClassContext.All,
+                    nint.Zero,
+                    out endpointVolumeObject),
+                "virtual-microphone.activate-endpoint-volume");
+            if (
+                endpointVolumeObject
+                    is not IAudioEndpointVolumeForBridge endpointVolume
+            )
+            {
+                throw new AudioCaptureStageException(
+                    "virtual-microphone.query-endpoint-volume",
+                    unchecked((int)0x80004002));
+            }
+            return action(endpointVolume);
+        }
+        finally
+        {
+            ReleaseComObject(endpointVolumeObject);
+            ReleaseComObject(endpoint);
+            ReleaseComObject(enumeratorObject);
+        }
+    }
+
+    private static void RequireSucceeded(int result, string operation)
+    {
+        if (result != ProcessLoopbackInterop.Succeeded)
+        {
+            throw new AudioCaptureStageException(
+                operation,
+                result,
+                result < 0
+                    ? Marshal.GetExceptionForHR(result)
+                    : null);
+        }
+    }
+
+    private static void ReleaseComObject(object? value)
+    {
+        if (
+            OperatingSystem.IsWindows()
+            && value is not null
+            && Marshal.IsComObject(value)
+        )
+        {
+            Marshal.FinalReleaseComObject(value);
+        }
+    }
+}
+
+[ComImport]
+[Guid("5CDF2C82-841E-4546-9722-0CF74078229A")]
+[InterfaceType(ComInterfaceType.InterfaceIsIUnknown)]
+internal interface IAudioEndpointVolumeForBridge
+{
+    [PreserveSig]
+    int RegisterControlChangeNotify(nint notify);
+
+    [PreserveSig]
+    int UnregisterControlChangeNotify(nint notify);
+
+    [PreserveSig]
+    int GetChannelCount(out uint channelCount);
+
+    [PreserveSig]
+    int SetMasterVolumeLevel(float levelDb, ref Guid eventContext);
+
+    [PreserveSig]
+    int SetMasterVolumeLevelScalar(float level, ref Guid eventContext);
+
+    [PreserveSig]
+    int GetMasterVolumeLevel(out float levelDb);
+
+    [PreserveSig]
+    int GetMasterVolumeLevelScalar(out float level);
+
+    [PreserveSig]
+    int SetChannelVolumeLevel(
+        uint channel,
+        float levelDb,
+        ref Guid eventContext);
+
+    [PreserveSig]
+    int SetChannelVolumeLevelScalar(
+        uint channel,
+        float level,
+        ref Guid eventContext);
+
+    [PreserveSig]
+    int GetChannelVolumeLevel(uint channel, out float levelDb);
+
+    [PreserveSig]
+    int GetChannelVolumeLevelScalar(uint channel, out float level);
+
+    [PreserveSig]
+    int SetMute(
+        [MarshalAs(UnmanagedType.Bool)] bool muted,
+        ref Guid eventContext);
+
+    [PreserveSig]
+    int GetMute([MarshalAs(UnmanagedType.Bool)] out bool muted);
+}
+
 internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
 {
     private static readonly TimeSpan AudioPolicyProcessReadyTimeout =
@@ -450,6 +796,8 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
         _outputRouteObserverFactory;
     private readonly Func<IPerAppAudioPolicyBackend>
         _audioPolicyBackendFactory;
+    private readonly Func<IDirectCaptureEndpointMuteBackend>
+        _captureEndpointMuteBackendFactory;
     private readonly string _audioRouteJournalPath;
     private readonly Func<string, CodexVoiceActivityController>
         _voiceActivityFactory;
@@ -471,6 +819,7 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
     private DirectTypistLease? _ownedTypistLease;
     private IPerAppAudioPolicyBackend? _audioPolicyBackend;
     private PerAppAudioRouteLease? _audioRouteLease;
+    private DirectCaptureEndpointMuteLease? _captureEndpointMuteLease;
     private CodexVoiceStartBaseline? _voiceStartBaseline;
     private CodexVoiceStartConfirmation? _voiceConfirmation;
     private CodexAppTarget? _voiceTarget;
@@ -489,7 +838,8 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
             System.IO.Path.Combine(
                 installationRoot,
                 "runtime",
-                "computer-voice-audio-route.transaction.json"))
+                "computer-voice-audio-route.transaction.json"),
+            CreateNativeCaptureEndpointMuteBackend)
     {
     }
 
@@ -498,6 +848,8 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
         IDirectOutputRouteObserverFactory? outputRouteObserverFactory = null,
         Func<IPerAppAudioPolicyBackend>? audioPolicyBackendFactory = null,
         string? audioRouteJournalPath = null,
+        Func<IDirectCaptureEndpointMuteBackend>?
+            captureEndpointMuteBackendFactory = null,
         CodexVoiceActivityController? voiceActivity = null,
         ICodexVoiceShortcutSender? voiceShortcutSender = null)
     {
@@ -514,13 +866,14 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
             ?? System.IO.Path.Combine(
                 System.IO.Path.GetTempPath(),
                 "bw-computer-voice-audio-route.self-test-disabled.json");
+        _captureEndpointMuteBackendFactory =
+            captureEndpointMuteBackendFactory
+            ?? CreateNativeCaptureEndpointMuteBackend;
         _voiceActivityFactory = voiceActivity is null
             ? appKind => new CodexVoiceActivityController(
                 new WindowsRegistryCodexVoiceActivitySource(appKind),
                 new SystemCodexVoiceActivityClock(),
-                appKind == DirectAppTargets.ChatGptClassic
-                    ? new ExactTargetVoiceOwnershipAttestor()
-                    : new FailClosedCodexVoiceOwnershipAttestor())
+                CreateVoiceOwnershipAttestor(appKind))
             : _ => voiceActivity;
         _voiceShortcutSenderFactory = voiceShortcutSender is null
             ? appKind => appKind switch
@@ -547,6 +900,21 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
         return new NativePerAppAudioPolicyBackend();
     }
 
+    private static IDirectCaptureEndpointMuteBackend
+        CreateNativeCaptureEndpointMuteBackend() =>
+        new NativeDirectCaptureEndpointMuteBackend();
+
+    internal static ICodexVoiceOwnershipAttestor
+        CreateVoiceOwnershipAttestor(string appKind)
+    {
+        _ = DirectAppTargets.Require(appKind);
+        // Ownership is granted only after this bridge has a successful
+        // shortcut/UIA receipt and observes a newer activity generation for
+        // the same process. Pre-existing, replaced, or restarted Voice
+        // sessions still fail closed in ConfirmStarted/PrepareStop.
+        return new ExactTargetVoiceOwnershipAttestor();
+    }
+
     private CodexVoiceActivityController VoiceActivity =>
         _voiceActivity
         ?? throw new DirectProtocolException(
@@ -560,6 +928,94 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
             "BW_COMPUTER_VOICE_DIRECT_VOICE_TARGET_MISSING",
             "语音控制目标尚未配置",
             retryable: true);
+
+    private const int ClassicPrimeAttempts = 20;
+    private const int ClassicPrimeDelayMilliseconds = 250;
+    private static readonly TimeSpan ClassicPrimeSettleDelay =
+        TimeSpan.FromMilliseconds(600);
+
+    /// <summary>
+    /// Give GPT Classic an audio session so its per-app route can be set.
+    /// </summary>
+    /// <remarks>
+    /// Windows refuses a per-app route for a process that owns no audio
+    /// session, answering E_INVALIDARG. Chromium creates that session lazily,
+    /// only once the app actually uses audio, so a freshly launched Classic is
+    /// absent from the volume mixer and cannot be routed at all -- waiting does
+    /// not help because nothing will bring the session into being on its own.
+    ///
+    /// The entry is persisted though: it survives the audio stopping and only
+    /// disappears when the app itself exits. So briefly starting and stopping
+    /// voice mints the entry, after which the normal order (route, then start
+    /// voice) works unchanged -- no audio can leak to the wrong device because
+    /// the real call still begins only after the route is in place.
+    ///
+    /// Codex never needs this: its audio service stays resident once used.
+    /// </remarks>
+    private void PrimeClassicAudioSession(
+        uint audioPolicyProcessId,
+        CodexAppTarget target)
+    {
+        PerAppAudioRouteKey probeKey = PerAppAudioRouteKey.All[0];
+        using IPerAppAudioPolicyBackend backend = _audioPolicyBackendFactory();
+
+        static bool Readable(
+            IPerAppAudioPolicyBackend policy,
+            uint processId,
+            PerAppAudioRouteKey key)
+        {
+            try
+            {
+                return policy.Read(processId, key).Kind
+                    != PersistedAudioEndpointKind.Error;
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        if (Readable(backend, audioPolicyProcessId, probeKey))
+        {
+            // The app already holds a session; nothing to mint.
+            return;
+        }
+
+        VoiceShortcutSender.Send(target, DirectVoiceCommand.Start);
+        bool minted = false;
+        for (int attempt = 0; attempt < ClassicPrimeAttempts; attempt++)
+        {
+            Thread.Sleep(ClassicPrimeDelayMilliseconds);
+            if (Readable(backend, audioPolicyProcessId, probeKey))
+            {
+                minted = true;
+                break;
+            }
+        }
+
+        // Always hand the app back the way it was found. A priming failure must
+        // not leave voice running, so the stop is attempted even when the entry
+        // never appeared, and its own failure must not mask the real cause.
+        try
+        {
+            VoiceShortcutSender.Send(target, DirectVoiceCommand.Stop);
+        }
+        catch (DirectProtocolException)
+        {
+        }
+        Thread.Sleep(ClassicPrimeSettleDelay);
+
+        if (!minted)
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_AUDIO_SESSION_PRIME_FAILED",
+                "无法让 GPT Classic 建立音频会话；其按应用音频路由不可设置",
+                retryable: true,
+                innerException: new AudioCaptureStageException(
+                    "audio-route.prime-session",
+                    0));
+        }
+    }
 
     private void ConfigureVoiceTarget(string appKind)
     {
@@ -623,6 +1079,8 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
         IDirectOutputRouteObserver? pendingOutputRouteObserver = null;
         IPerAppAudioPolicyBackend? pendingAudioPolicyBackend = null;
         PerAppAudioRouteLease? pendingAudioRouteLease = null;
+        DirectCaptureEndpointMuteLease?
+            pendingCaptureEndpointMuteLease = null;
         CodexVoiceStartBaseline? initialVoiceBaseline = null;
         CodexVoiceStartBaseline? boundaryVoiceBaseline = null;
         CodexVoiceShortcutReceipt? shortcutReceipt = null;
@@ -743,6 +1201,13 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                 target = audioPolicyTarget.AppTarget;
                 audioPolicyProcessId = audioPolicyTarget.ProcessId;
             }
+            if (
+                request.AutomatePerAppAudioRoute
+                && appProfile.AppKind == DirectAppTargets.ChatGptClassic
+            )
+            {
+                PrimeClassicAudioSession(audioPolicyProcessId, target);
+            }
             _ = await VoiceActivity.WaitForAvailableAsync(
                 VoiceReadyTimeout,
                 CodexVoiceActivityController.MonitorInterval,
@@ -786,6 +1251,22 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                             "上一次 Codex 音频路由尚未恢复",
                             retryable: true);
                     }
+                    // Windows refuses a per-app audio route for a process that
+                    // owns no audio session: the policy store answers
+                    // E_INVALIDARG (0x80070057), which is why a freshly started
+                    // target fails here no matter how long we wait. Chromium
+                    // only creates that session when the app actually starts
+                    // using audio, which for GPT Classic means after its voice
+                    // button is invoked -- the app is absent from the volume
+                    // mixer until that moment.
+                    //
+                    // Codex is unaffected because its audio service stays
+                    // resident once used, so its session already exists and the
+                    // route is still applied before voice starts. Only Classic
+                    // has to invert the order: start voice, then route. The
+                    // brief window in between can let the first fragment of
+                    // audio reach the default device, which is the unavoidable
+                    // cost of the platform's ordering rule.
                     pendingAudioRouteLease = routeController.Acquire(
                         new PerAppAudioRouteRequest(
                             audioPolicyProcessId,
@@ -800,9 +1281,14 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                     {
                         throw new DirectProtocolException(
                             "BW_COMPUTER_VOICE_DIRECT_VOICE_ALREADY_ACTIVE_WRONG_ROUTE",
-                            "Codex 语音已在使用其他音频路由；请先关闭后再由 Reader 开启",
+                            "语音已在使用其他音频路由；请先关闭后再由 Reader 开启",
                             retryable: true);
                     }
+                    pendingCaptureEndpointMuteLease =
+                        DirectCaptureEndpointMuteLease.Acquire(
+                            _captureEndpointMuteBackendFactory(),
+                            request
+                                .VirtualMicrophoneCaptureEndpointId);
                 }
                 // The bounded process-loopback queue has no consumer until
                 // the atomic shortcut commit below. Start the already-approved
@@ -858,8 +1344,14 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                                 pendingAudioRouteLease
                                 ?? throw new DirectProtocolException(
                                     "BW_COMPUTER_VOICE_DIRECT_AUDIO_ROUTE_LEASE_MISSING",
-                                    "Codex 按应用音频路由租约不存在")
+                                    "按应用音频路由租约不存在")
                             ).RequireStillApplied();
+                            (
+                                pendingCaptureEndpointMuteLease
+                                ?? throw new DirectProtocolException(
+                                    "BW_COMPUTER_VOICE_DIRECT_MIC_MUTE_LEASE_MISSING",
+                                    "虚拟麦克风静音状态租约不存在")
+                            ).RequireUnmuted();
                         }
                         RequirePreparedMediaRunning(
                             outputSession.State,
@@ -912,6 +1404,9 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                         pendingAudioPolicyBackend = null;
                         _audioRouteLease = pendingAudioRouteLease;
                         pendingAudioRouteLease = null;
+                        _captureEndpointMuteLease =
+                            pendingCaptureEndpointMuteLease;
+                        pendingCaptureEndpointMuteLease = null;
                         _voiceStartBaseline =
                             boundaryVoiceBaseline;
                         _voiceConfirmation = null;
@@ -996,6 +1491,16 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                         {
                             pendingOutputRouteObserver?.Dispose();
                             pendingOutputRouteObserver = null;
+                            return Task.CompletedTask;
+                        },
+                        () =>
+                        {
+                            if (pendingCaptureEndpointMuteLease is null)
+                            {
+                                return Task.CompletedTask;
+                            }
+                            pendingCaptureEndpointMuteLease.Restore();
+                            pendingCaptureEndpointMuteLease = null;
                             return Task.CompletedTask;
                         },
                         () =>
@@ -1261,6 +1766,7 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
         || _voiceStartBaseline is not null
         || _voiceConfirmation is not null
         || _voiceTarget is not null
+        || _captureEndpointMuteLease is not null
         || _audioRouteLease is not null
         || _audioPolicyBackend is not null
         || _ownedTypistLease is not null;
@@ -1391,6 +1897,10 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
         CodexVoiceStartConfirmation? voiceConfirmation =
             _voiceConfirmation;
         CodexAppTarget? voiceTarget = _voiceTarget;
+        DirectCaptureEndpointMuteLease? captureEndpointMuteLease =
+            _captureEndpointMuteLease;
+        bool captureEndpointMuteRestored =
+            captureEndpointMuteLease is null;
         PerAppAudioRouteLease? audioRouteLease = _audioRouteLease;
         IPerAppAudioPolicyBackend? audioPolicyBackend =
             _audioPolicyBackend;
@@ -1604,6 +2114,38 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
             },
             () =>
             {
+                if (captureEndpointMuteLease is null)
+                {
+                    captureEndpointMuteRestored = true;
+                    return Task.CompletedTask;
+                }
+                bool mediaSettled = CanRestorePerAppAudioRoute(
+                    voiceSettled,
+                    _captureLifetime is null,
+                    _outputSession is null,
+                    _renderSession is null,
+                    _outputRouteObserver is null,
+                    _outputPump is null,
+                    _renderMonitor is null);
+                if (!mediaSettled)
+                {
+                    throw new DirectProtocolException(
+                        "BW_COMPUTER_VOICE_DIRECT_MIC_MUTE_RESTORE_DEFERRED",
+                        "Codex 语音或媒体尚未安全收口，虚拟麦克风静音状态保留等待重试",
+                        retryable: true);
+                }
+                captureEndpointMuteLease.Restore();
+                captureEndpointMuteRestored = true;
+                if (ReferenceEquals(
+                    _captureEndpointMuteLease,
+                    captureEndpointMuteLease))
+                {
+                    _captureEndpointMuteLease = null;
+                }
+                return Task.CompletedTask;
+            },
+            () =>
+            {
                 if (audioRouteLease is null)
                 {
                     audioRouteRestored = true;
@@ -1644,6 +2186,7 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                 if (
                     audioPolicyBackend is null
                     || !audioRouteRestored
+                    || !captureEndpointMuteRestored
                 )
                 {
                     return Task.CompletedTask;

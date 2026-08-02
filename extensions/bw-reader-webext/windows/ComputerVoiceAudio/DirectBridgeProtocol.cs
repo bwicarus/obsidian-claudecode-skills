@@ -101,6 +101,9 @@ internal sealed class DirectBridgeProtocolSession
                 case "context-mode":
                     payload = HandleContextMode(message);
                     break;
+                case "context-mode-set":
+                    payload = HandleContextModeSet(message);
+                    break;
                 case "context-open":
                     payload = HandleContextOpen(message);
                     break;
@@ -253,6 +256,49 @@ internal sealed class DirectBridgeProtocolSession
         return new
         {
             mode = RequireContextDeliveryMode(),
+        };
+    }
+
+    private object HandleContextModeSet(JsonElement message)
+    {
+        RequireExactKeys(
+            message,
+            "contract",
+            "type",
+            "requestId",
+            "mode",
+            "sessionId");
+        RequireAuthenticated();
+        string sessionId = RequireSafeId(message, "sessionId");
+        _ = DirectPcmFrameCodec.ParseSessionId(sessionId);
+        string mode = RequireString(message, "mode", 32);
+        if (!DirectContextDeliveryMode.IsSupported(mode))
+        {
+            throw new DirectProtocolException(
+                "BW_READER_CONTEXT_DELIVERY_MODE_INVALID",
+                "Reader 上下文交付模式无效");
+        }
+        if (
+            _phase != DirectProtocolPhase.AwaitingStart
+            || _contextOnlySessionId is not null
+            || _coordinator.ActiveSessionId is not null
+            || _coordinator.CaptureActive
+            || _coordinator.CleanupPending
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_READER_CONTEXT_DELIVERY_MODE_BUSY",
+                "请先结束电脑语音并清理旧上下文链路",
+                retryable: true);
+        }
+
+        string previousMode =
+            _configStore.SetContextDeliveryMode(mode);
+        _contextDeliveryMode = mode;
+        return new
+        {
+            mode,
+            previousMode,
         };
     }
 

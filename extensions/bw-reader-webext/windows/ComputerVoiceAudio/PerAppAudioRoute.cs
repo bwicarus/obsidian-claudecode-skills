@@ -288,24 +288,57 @@ internal sealed class PerAppAudioRouteController
         }
     }
 
+    // A target the bridge just launched has not necessarily finished bringing
+    // its audio policy online: the per-app store answers ERROR_NOT_FOUND as
+    // Unset (a legitimate "nothing pinned yet"), but while the app is still
+    // starting the read itself can fail outright. That is a transient cold
+    // start condition, not a reason to abandon the whole call, so the snapshot
+    // is retried within a bounded window. A target that was already running
+    // succeeds on the first pass and pays nothing.
+    private const int SnapshotAttempts = 8;
+    private const int SnapshotRetryDelayMilliseconds = 400;
+
     private Dictionary<PerAppAudioRouteKey, PersistedAudioEndpoint>
         SnapshotOrThrow(uint processId)
     {
-        Dictionary<PerAppAudioRouteKey, PersistedAudioEndpoint>
-            snapshot = [];
-        foreach (PerAppAudioRouteKey key in PerAppAudioRouteKey.All)
+        PerAppAudioRouteKey failedKey = PerAppAudioRouteKey.All[0];
+        int failedHResult = 0;
+        for (int attempt = 0; attempt < SnapshotAttempts; attempt++)
         {
-            PersistedAudioEndpoint value = SafeRead(processId, key);
-            if (value.Kind == PersistedAudioEndpointKind.Error)
+            if (attempt > 0)
             {
-                throw new DirectProtocolException(
-                    "BW_COMPUTER_VOICE_DIRECT_AUDIO_ROUTE_SNAPSHOT_FAILED",
-                    "无法读取 Codex 原应用音频路由",
-                    retryable: true);
+                Thread.Sleep(SnapshotRetryDelayMilliseconds);
             }
-            snapshot.Add(key, value);
+            Dictionary<PerAppAudioRouteKey, PersistedAudioEndpoint>
+                snapshot = [];
+            bool complete = true;
+            foreach (PerAppAudioRouteKey key in PerAppAudioRouteKey.All)
+            {
+                PersistedAudioEndpoint value = SafeRead(processId, key);
+                if (value.Kind == PersistedAudioEndpointKind.Error)
+                {
+                    failedKey = key;
+                    failedHResult = value.HResult;
+                    complete = false;
+                    break;
+                }
+                snapshot.Add(key, value);
+            }
+            if (complete)
+            {
+                return snapshot;
+            }
         }
-        return snapshot;
+        // Carry the failing key and HRESULT out instead of collapsing every
+        // cause into one opaque code -- the stage lands in runtime status.
+        throw new DirectProtocolException(
+            "BW_COMPUTER_VOICE_DIRECT_AUDIO_ROUTE_SNAPSHOT_FAILED",
+            $"无法读取目标应用音频路由(key={failedKey}, "
+                + $"hr=0x{unchecked((uint)failedHResult):X8})",
+            retryable: true,
+            innerException: new AudioCaptureStageException(
+                "audio-route.snapshot-read",
+                failedHResult));
     }
 
     private void ApplyAndReadBackOrThrow(

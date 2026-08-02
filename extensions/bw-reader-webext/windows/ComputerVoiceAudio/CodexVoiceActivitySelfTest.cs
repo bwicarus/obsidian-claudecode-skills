@@ -110,6 +110,16 @@ internal static class CodexVoiceActivitySelfTest
             && !CodexVoiceActivitySnapshot.Error().Active,
             "codex-voice-activity-filetime-rule",
             checks);
+
+        Require(
+            WindowsDirectMediaAdapter.CreateVoiceOwnershipAttestor(
+                DirectAppTargets.CodexDesktop)
+                is ExactTargetVoiceOwnershipAttestor
+            && WindowsDirectMediaAdapter.CreateVoiceOwnershipAttestor(
+                DirectAppTargets.ChatGptClassic)
+                is ExactTargetVoiceOwnershipAttestor,
+            "voice-targets-attest-only-observed-owned-generation",
+            checks);
     }
 
     private static void CheckPreexistingVoiceIsNotOwned(

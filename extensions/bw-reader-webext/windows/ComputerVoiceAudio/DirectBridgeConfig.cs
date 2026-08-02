@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace BwReader.ComputerVoiceAudio;
 
@@ -26,6 +27,7 @@ internal sealed class DirectBridgeConfigStore
 {
     private const int MaximumConfigBytes = 64 * 1024;
     private readonly string _path;
+    private readonly object _writeGate = new();
 
     internal DirectBridgeConfigStore(string path)
     {
@@ -347,6 +349,130 @@ internal sealed class DirectBridgeConfigStore
         )
         {
             throw ConfigInvalid(exception);
+        }
+    }
+
+    internal string SetContextDeliveryMode(string mode)
+    {
+        if (!DirectContextDeliveryMode.IsSupported(mode))
+        {
+            throw new DirectProtocolException(
+                "BW_READER_CONTEXT_DELIVERY_MODE_INVALID",
+                "Reader 上下文交付模式无效");
+        }
+
+        lock (_writeGate)
+        {
+            DirectBridgeConfig current = Load();
+            string previousMode = current.ContextDeliveryMode;
+            if (string.Equals(
+                previousMode,
+                mode,
+                StringComparison.Ordinal))
+            {
+                return previousMode;
+            }
+
+            string temporaryPath = _path
+                + ".tmp-"
+                + Guid.NewGuid().ToString("N");
+            try
+            {
+                JsonNode? parsed = JsonNode.Parse(
+                    File.ReadAllText(_path, Encoding.UTF8),
+                    nodeOptions: null,
+                    documentOptions: new JsonDocumentOptions
+                    {
+                        AllowTrailingCommas = false,
+                        CommentHandling = JsonCommentHandling.Disallow,
+                        MaxDepth = 8,
+                    });
+                if (parsed is not JsonObject root)
+                {
+                    throw ConfigInvalid();
+                }
+                root["contextDeliveryMode"] = mode;
+                string json = root.ToJsonString(
+                    new JsonSerializerOptions(
+                        DirectBridgeContract.JsonOptions)
+                    {
+                        WriteIndented = true,
+                    });
+                byte[] bytes = new UTF8Encoding(
+                    encoderShouldEmitUTF8Identifier: false)
+                    .GetBytes(json);
+                if (bytes.Length is <= 0 or > MaximumConfigBytes)
+                {
+                    throw ConfigInvalid();
+                }
+
+                using (FileStream stream = new(
+                    temporaryPath,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.None,
+                    bufferSize: 4096,
+                    FileOptions.WriteThrough))
+                {
+                    stream.Write(bytes);
+                    stream.Flush(flushToDisk: true);
+                }
+
+                DirectBridgeConfig staged =
+                    new DirectBridgeConfigStore(temporaryPath).Load();
+                if (!string.Equals(
+                    staged.ContextDeliveryMode,
+                    mode,
+                    StringComparison.Ordinal))
+                {
+                    throw ConfigInvalid();
+                }
+
+                File.Replace(
+                    temporaryPath,
+                    _path,
+                    destinationBackupFileName: null,
+                    ignoreMetadataErrors: true);
+                DirectBridgeConfig persisted = Load();
+                if (!string.Equals(
+                    persisted.ContextDeliveryMode,
+                    mode,
+                    StringComparison.Ordinal))
+                {
+                    throw ConfigInvalid();
+                }
+                return previousMode;
+            }
+            catch (DirectProtocolException)
+            {
+                throw;
+            }
+            catch (Exception exception) when (
+                exception is IOException
+                or UnauthorizedAccessException
+                or JsonException
+                or ArgumentException
+                or NotSupportedException)
+            {
+                throw new DirectProtocolException(
+                    "BW_READER_CONTEXT_DELIVERY_MODE_WRITE_FAILED",
+                    "Windows 上下文交付模式写入失败",
+                    retryable: true,
+                    innerException: exception);
+            }
+            finally
+            {
+                try
+                {
+                    File.Delete(temporaryPath);
+                }
+                catch
+                {
+                    // A stale same-directory temporary file is harmless and
+                    // must not turn a successful atomic replacement into a
+                    // failed mode switch.
+                }
+            }
         }
     }
 

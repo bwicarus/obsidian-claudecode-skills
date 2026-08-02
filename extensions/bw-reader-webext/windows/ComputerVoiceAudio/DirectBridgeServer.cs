@@ -336,8 +336,15 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         {
             if (connection is not null)
             {
-                await _coordinator.StopForConnectionAsync(connectionId)
-                    .ConfigureAwait(false);
+                try
+                {
+                    await _coordinator.StopForConnectionAsync(connectionId)
+                        .ConfigureAwait(false);
+                }
+                finally
+                {
+                    _snapshotViewer.CloseForConnection(connectionId);
+                }
                 bool cleanupPending = _coordinator.CleanupPending;
                 await _connectionOwnership.CompleteAsync(
                     connection,
@@ -649,7 +656,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                             "BW_COMPUTER_VOICE_DIRECT_UPLINK_NOT_ACTIVE",
                             "浏览器麦克风上行尚未启动"));
                     _snapshotViewer.OpenIfSnapshotMode(
-                        _configStore.Load().ContextDeliveryMode);
+                        _configStore.Load().ContextDeliveryMode,
+                        connectionId);
                 }
                 else if (
                     phaseBeforeMessage == DirectProtocolPhase.Active
@@ -657,6 +665,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 )
                 {
                     uplinkSequenceGuard.End();
+                    _snapshotViewer.CloseForConnection(connectionId);
                 }
             }
             catch (OperationCanceledException)
