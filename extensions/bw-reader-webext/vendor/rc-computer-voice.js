@@ -5276,6 +5276,12 @@ if (window.__bwPwaProviderOnly) return;
       };
     }).catch(function (error) {
       failActive(state, error, true);
+      // Cleared here as well, because failActive returns early when the state
+      // is absent or already marked -- and then nothing clears it. The button
+      // stays in its waiting colour and refuses further presses, so a single
+      // failed start leaves the user with no way to try again. Whatever went
+      // wrong, the button has to come back.
+      dialPending = false;
       throw error;
     });
   }
