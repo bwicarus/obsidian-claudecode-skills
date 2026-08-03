@@ -449,6 +449,43 @@ async function stop() {
 // need host access to every site, and package_safari.py deliberately forbids
 // that ("host permission must remain restricted to the active Pi"). That line is
 // a decision, not an oversight, so it stands until its owner says otherwise.
+// Pages announce themselves; this receives them.
+//
+// Whichever tab the user is actually looking at reports its own content, so
+// switching tabs switches the context -- something polling could never do,
+// since activeTab does not extend past the tab the call began in. No extra
+// permission is involved: content scripts are already present on every page.
+if (chrome.runtime?.onMessage) {
+  chrome.runtime.onMessage.addListener((message) => {
+    if (!message || message.type !== "BW_PAGE_ACTIVE" || !message.page) return undefined;
+    if (!active) return undefined;
+
+    const page = message.page;
+    const signature = `${page.url}|${(page.text || "").length}|${page.selection || ""}`;
+    if (signature === lastSignature) return undefined;
+    lastSignature = signature;
+
+    window.RC.computerVoice
+      .sendWebPageContext({
+        url: page.url,
+        title: page.title,
+        text: page.text,
+        selection: page.selection,
+        observedAtEpochMs: Date.now(),
+      })
+      .then(() => {
+        els.ctxTitle.textContent = page.title || "(无标题)";
+        els.ctxUrl.textContent =
+          `${page.url}　·　正文 ${(page.text || "").length} 字` +
+          (page.selection ? `　·　选中 ${page.selection.length} 字` : "");
+      })
+      .catch((err) => {
+        els.detail.textContent += "\n跟随更新 ✗ " + describe(err);
+      });
+    return undefined;
+  });
+}
+
 const FOLLOW_INTERVAL_MS = 4000;
 let followTimer = null;
 let lastSignature = "";
