@@ -151,4 +151,39 @@ testButton.addEventListener("click", async () => {
   }
 });
 
+// 一次性诊断:确认扩展自身页面(safari-web-extension:// 源)能否取得麦克风。
+// content script 拿不到 getUserMedia 是确定的,但扩展页面不是 content script。
+// 若这里能拿到,Safari Realtime 就能整个留在扩展内完成,不必经 App Group +
+// deep link 那条多跳桥 —— 那条桥用户实测几乎每次失败。
+// 结论出来后这段应当移除。
+const micButton = document.getElementById("mic-test");
+const micStatus = document.getElementById("mic-status");
+if (micButton && micStatus) {
+  micButton.addEventListener("click", async () => {
+    micButton.disabled = true;
+    micStatus.textContent = "请求中…";
+    let stream = null;
+    try {
+      if (!navigator.mediaDevices?.getUserMedia) {
+        micStatus.textContent = "✗ 该环境没有 mediaDevices.getUserMedia";
+        return;
+      }
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const track = stream.getAudioTracks()[0];
+      micStatus.textContent = track
+        ? `✓ 拿到麦克风:${track.label || "(无标签)"} state=${track.readyState}`
+        : "✗ 授权通过但没有音轨";
+    } catch (error) {
+      // name 比 message 更能区分:NotAllowedError=被拒,NotFoundError=无设备,
+      // NotSupportedError/TypeError=该上下文根本不提供。
+      micStatus.textContent =
+        `✗ ${error?.name || "Error"}: ${error?.message || String(error)}`;
+    } finally {
+      // 立刻释放,避免探测按钮占着麦克风。
+      stream?.getTracks().forEach((t) => t.stop());
+      micButton.disabled = false;
+    }
+  });
+}
+
 loadStatus();
