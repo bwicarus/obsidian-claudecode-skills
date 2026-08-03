@@ -232,6 +232,16 @@ class BridgeAndDeliveryTest(unittest.TestCase):
         self.assertLess(mark, post, "本地轮次必须在落库广播前登记，避免自己的 SSE 回声重复渲染")
         self.assertIn("_liveSeen['u:' + _b.turn_id] = 1", js[mark:post])
 
+    def test_native_agent_final_utterance_is_idempotent_while_busy(self) -> None:
+        js = (ROOT / "_server_deploy/static/pdf/rc-voicecall.js").read_text("utf-8")
+        self.assertIn("utterKey === activeUtter", js)
+        self.assertIn("utterKey === _utterKey(pendingUtter)", js)
+        self.assertIn(
+            "setTimeout(function () { sendToAssistant(queuedUtter, true); }, 0)",
+            js,
+            "排队问题必须等当前 send() 退出 streaming 状态后再发送",
+        )
+
     def test_no_new_outward_service(self) -> None:
         """只复用既有 reader-events,不许再开一个对外端口/长连接。"""
         js = (ROOT / "_server_deploy/static/pdf/rc-assistant.js").read_text("utf-8")

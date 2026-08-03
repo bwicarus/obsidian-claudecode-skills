@@ -60,6 +60,7 @@ if (window.__bwPwaProviderOnly) return;
     _nativeAgentWatchdog = null;
     _nativeAgentWatchdogKind = '';
     _nativeAgent = { phase: 'idle', active: false, busy: false, speaking: false };
+    pendingUtter = null; activeUtter = '';
     callBtnOn(false); callBtnConnecting(false); callBtnSpeaking(false);
     taPlaceholder(null);
     if (message) {
@@ -168,6 +169,8 @@ if (window.__bwPwaProviderOnly) return;
   });
   var vt = { sent: 0, tail: '', sid: 0, pref: '' };   // 语音 tap 状态:已消费长度 / 未成句尾巴 / 句序号 / 上次 full(前缀判定轮次替换)
   var pendingUtter = null;                   // 助手忙时到达的新话(覆盖式排队,回答完自动发)
+  var activeUtter = '';                      // 当前正在回答的终稿指纹；拦同一 ASR 终稿的重复投递
+  function _utterKey(text) { return String(text || '').trim().replace(/\s+/g, ' '); }
   var _reviewVoiceHint = '复习模式暂不启动实时语音通话；普通听写和朗读仍可使用';
   function _assistantInReview() {
     try {
@@ -2721,6 +2724,15 @@ if (window.__bwPwaProviderOnly) return;
     if (rest.trim()) speak(rest);
   }
   window.__asstVoiceTap = function (full, done) {
+    // 回答结束与 TTS 开关无关：先释放本轮终稿指纹，再把真正不同的排队问题
+    // 放到下一任务发送（此刻 rc-assistant 还没把 streaming 置回 false）。
+    if (done) {
+      activeUtter = '';
+      if (pendingUtter) {
+        var queuedUtter = pendingUtter; pendingUtter = null;
+        setTimeout(function () { sendToAssistant(queuedUtter, true); }, 0);
+      }
+    }
     if (!speakOn()) return;                 // 「🔊 朗读」没点亮=零 TTS 成本(读比听快,用户拍板默认关)
     if (ws && mode === 's2s') return;       // S2S 通话:豆包自己出声,朗读开关不适用
     if (!(ws && mode === 'agent') && !_nativeAgent.active) _ttsEnsure();   // 没开 ASR 通话(纯打字/听写提问)→ lazy 朗读专用通道
@@ -2747,14 +2759,22 @@ if (window.__bwPwaProviderOnly) return;
           if (wd && wd.readyState === 1) wd.send(JSON.stringify({ type: 'speak_done' }));   // FinishSession:让尾巴合成完
         }
       } catch (e) {}
-      if (pendingUtter) { var p = pendingUtter; pendingUtter = null; sendToAssistant(p, true); }   // 排队的下一句(别掐掉刚念的尾巴)
     }
   };
   window.__asstVoiceOn = function () { return speakOn() && !(ws && mode === 's2s'); };   // 朗读亮且非 S2S 通话 → 后端回答用『适合朗读』风格
   function sendToAssistant(text, keepAudio) {
+    text = String(text || '').trim();
+    if (!text) return;
     if (!keepAudio) bargeIn();        // 新问题:停掉还在念的旧回答(排队派发除外)
     vt.sent = 0; vt.tail = ''; vt.pref = ''; vt.mood = null;
-    if (window.__asstBusy && window.__asstBusy()) { pendingUtter = text; taPlaceholder('⏳ 上一条还在答,已排队:' + text.slice(0, 14) + '…'); return; }
+    var utterKey = _utterKey(text);
+    if (window.__asstBusy && window.__asstBusy()) {
+      // iOS/relay 偶尔会把同一个 final utterance 再交付一次。它不是用户的新问题，
+      // 不应在当前回答结束后被放大成第二个完整回合。
+      if (utterKey && (utterKey === activeUtter || utterKey === _utterKey(pendingUtter))) return;
+      pendingUtter = text; taPlaceholder('⏳ 上一条还在答,已排队:' + text.slice(0, 14) + '…'); return;
+    }
+    activeUtter = utterKey;
     taPlaceholder('🎙 说话即可,松口自动发送…');
     if (window.__asstSend) window.__asstSend(text);
     else threadMsg('asst-note', '⚠ 助手未加载,请刷新页面');
@@ -5675,7 +5695,7 @@ if (window.__bwPwaProviderOnly) return;
       fetch('/api/assistant/compact-history', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
         body: JSON.stringify({ file: (toggle._opts || {}).file || '' }) }).catch(function () {});
     } catch (e) {}
-    vt.sent = 0; vt.tail = ''; vt.pref = ''; pendingUtter = null;
+    vt.sent = 0; vt.tail = ''; vt.pref = ''; pendingUtter = null; activeUtter = '';
     capClear();   // 挂断:字幕/等待指示一并收掉
     callBtnOn(false); callBtnSpeaking(false);
     computerBtnOn(false); computerBtnSpeaking(false);
