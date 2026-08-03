@@ -187,3 +187,55 @@ if (micButton && micStatus) {
 }
 
 loadStatus();
+
+// 第二个一次性诊断:扩展页面能否直接连到 Windows 桥接器的 WSS。
+// 端点主机名(bwicarus-2)与 manifest 里放行的 Pi(bwicarus)不同,而扩展页面的
+// 网络限制又与 content script 不同 —— 到底要不要改 host_permissions/CSP,
+// 靠猜不如直接连一次。区分三种结局:握手成功、被策略拒(CSP/权限)、连不上(网络)。
+// 结论出来后这段应当移除。
+const wssButton = document.getElementById("wss-test");
+const wssStatus = document.getElementById("wss-status");
+if (wssButton && wssStatus) {
+  const ENDPOINT =
+    "wss://bwicarus-2.taile44d0c.ts.net/reader-computer-voice/v1";
+  wssButton.addEventListener("click", () => {
+    wssButton.disabled = true;
+    wssStatus.textContent = "连接中…";
+    let socket = null;
+    let settled = false;
+    const finish = (text) => {
+      if (settled) return;
+      settled = true;
+      wssStatus.textContent = text;
+      wssButton.disabled = false;
+      try { socket?.close(); } catch (e) {}
+    };
+    // 只测能否握手,不发 HELLO、不发 START,不会启动任何语音。
+    const timer = setTimeout(
+      () => finish("✗ 8 秒未建立,也未报错(可能被静默拦截或网络不通)"),
+      8000
+    );
+    try {
+      socket = new WebSocket(ENDPOINT);
+    } catch (error) {
+      clearTimeout(timer);
+      finish(`✗ 构造失败 ${error?.name || "Error"}: ${error?.message || error}`);
+      return;
+    }
+    socket.onopen = () => {
+      clearTimeout(timer);
+      finish("✓ 握手成功,扩展页面可直连 Windows");
+    };
+    // WebSocket 的 error 事件不带原因(规范如此,防跨源探测),
+    // 所以 close 的 code 才是唯一线索:1006=异常关闭(多为策略或网络)。
+    socket.onclose = (event) => {
+      clearTimeout(timer);
+      finish(`✗ 关闭 code=${event.code} clean=${event.wasClean}`);
+    };
+    socket.onerror = () => {
+      clearTimeout(timer);
+      finish("✗ error 事件(无详情,看上面的 close code)");
+    };
+  });
+}
+
