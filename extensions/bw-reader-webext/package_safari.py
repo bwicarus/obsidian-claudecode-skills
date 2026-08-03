@@ -35,6 +35,9 @@ ROOT_FILES = (
     "popup.js",
     "call.html",
     "call.js",
+    # Imported by call.js as a module; omitting it here would ship a page whose
+    # import fails at load, with nothing on screen to say why.
+    "ctxlink.js",
 )
 ROOT_DIRS = ("src", "vendor", "icons")
 BACKGROUND_SCRIPTS = (

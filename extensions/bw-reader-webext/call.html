@@ -1,25 +1,24 @@
 <!DOCTYPE html>
 <!--
-  In-extension voice call surface.
+  The context bridge.
+//
+  This page no longer holds a call. Audio belongs to the App alone -- one link,
+  held end to end, never handed over -- while this keeps Windows informed of
+  whatever the user is actually looking at. Switching between a web page, the
+  reader, or a book in the App is therefore not a handover at all: whichever
+  surface is in front simply writes the snapshot, and the last write wins.
 
-  This page exists because of two measured facts, not a guess: extension pages
-  (unlike content scripts) can obtain getUserMedia, and they can open a
-  WebSocket to the Windows bridge host directly. Both were verified on device
-  before this file was written.
+  That also removes the reason the previous version dropped the call on every
+  switch. Two surfaces were competing to own one voice link and the bridge
+  admits a single owner, so each switch evicted the other. Nothing here can
+  compete: the endpoint refuses START, STOP and audio frames outright.
 
-  Consequently the call runs entirely here. There is no native message, no App
-  Group file, no deep link, and no containing App involved. The previous design
-  routed every call through seven such hops, where any one of them failing
-  surfaced only as "cannot connect" with nothing to inspect.
-
-  What this page cannot do is survive backgrounding: iOS suspends extension
-  pages when the user leaves. Handing a live call over to the App is a separate,
-  later step -- it is only worth building once this path is known to work, so
-  that a handover failure cannot be confused with a connection failure.
+  Left open in a tab while reading. It is the one place that can hold a socket
+  on iOS -- the background service worker is reclaimed, this is not.
 -->
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
-<title>电脑语音</title>
+<title>上下文桥</title>
 <style>
   :root { color-scheme: light dark; }
   body {
@@ -40,56 +39,43 @@
     word-break: break-all;
   }
 
-  button {
-    -webkit-appearance: none; appearance: none; width: 100%;
-    border: 0; border-radius: 12px; padding: 15px;
-    font: 600 16px/1 -apple-system, system-ui, sans-serif;
-    background: #0a84ff; color: #fff;
-  }
-  button:disabled { opacity: .45; }
-  button.stop { background: #ff453a; }
-
-  #status { margin-top: 14px; font-size: 14px; min-height: 1.6em; }
+  #status { font-size: 14px; min-height: 1.6em; }
   .ok  { color: #30d158; }
   .err { color: #ff453a; }
+  .dim { color: color-mix(in srgb, CanvasText 45%, transparent); }
 
-  /* Failures here must be readable on the device itself. Asking the user to
-     relay a console they cannot open is how the previous three builds burned
-     a TestFlight round each without producing a single usable detail. */
+  .hint {
+    margin-top: 18px; padding: 12px 14px; border-radius: 10px;
+    background: color-mix(in srgb, CanvasText 6%, transparent);
+    font-size: 13px; line-height: 1.7;
+    color: color-mix(in srgb, CanvasText 70%, transparent);
+  }
+
+  /* Failures have to be readable on the device itself; there is no console to
+     open on an iPad, and asking for one wastes a TestFlight round. */
   #detail {
     margin-top: 12px; padding: 10px; border-radius: 8px; display: none;
     background: color-mix(in srgb, CanvasText 7%, transparent);
     font: 11px/1.45 ui-monospace, Menlo, monospace;
     white-space: pre-wrap; word-break: break-all;
-    max-height: 40vh; overflow: auto;
+    max-height: 36vh; overflow: auto;
   }
 </style>
 
-<h1>电脑语音</h1>
-<div class="sub">直接连接 Windows,不经过 App</div>
+<h1>上下文桥</h1>
+<div class="sub">把你正在看的页面告诉 Windows 上的助手</div>
 
 <div class="card">
-  <div class="ctx-title" id="ctxTitle">（未取得网页上下文）</div>
+  <div class="ctx-title" id="ctxTitle">等待页面…</div>
   <div class="ctx-url" id="ctxUrl"></div>
 </div>
 
-<!-- The id is not cosmetic. registerComputerButton accepts only #asst-computer
-     or #vc-top-computer, of type=button and attached to this document; the
-     capture-phase listener then matches the click against that same set before
-     it will prepare an audio lease. A differently named button is rejected as
-     "not a real computer-button press" (BW_COMPUTER_VOICE_GESTURE_REQUIRED),
-     which is exactly what the first build hit. -->
-<button id="asst-computer" type="button">开始通话</button>
-<div id="status"></div>
+<div id="status" class="dim">正在连接…</div>
 <pre id="detail"></pre>
 
-<!-- Load order follows the dependency chain, not preference:
-     rc-core      defines RC, ctxSync, toast
-     rc-voicecall supplies canCaptureComputerVoiceGesture, which the gesture
-                  capture consults before preparing anything -- without it the
-                  listener returns early and no lease is ever taken
-     rc-computer-voice installs that capture and owns the bridge protocol -->
-<script src="vendor/rc-core.js"></script>
-<script src="vendor/rc-voicecall.js"></script>
-<script src="vendor/rc-computer-voice.js"></script>
-<script src="call.js"></script>
+<div class="hint">
+  语音由 App 负责,这里只送上下文。<br>
+  保持本页开着,换标签、滚动、选中都会自动跟随。
+</div>
+
+<script type="module" src="call.js"></script>
