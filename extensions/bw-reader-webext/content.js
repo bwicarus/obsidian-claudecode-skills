@@ -341,26 +341,72 @@
   }
 })();
 
-// Report this page to an in-progress call, when it is the page being looked at.
+// Tell Windows what this page is, from the page itself.
 //
-// The call runs in an extension page of its own and cannot read other tabs --
-// activeTab covers only the tab it was opened from. Rather than widening the
-// extension to all sites (package_safari.py deliberately keeps host access to
-// the Pi alone), the page reports itself: content scripts already run here, so
-// no new permission is involved.
+// The context endpoint accepts many concurrent connections, plays no part in
+// audio ownership, and evicts nobody -- so every page can simply describe
+// itself while the App holds the call from end to end. Snapshot writes are
+// serialised there and the last one wins, which means switching pages needs no
+// coordination at all: whichever page is in front writes, and that is the
+// context. Closing a page just closes its link; the snapshot survives.
 //
-// Everything is guarded. A previous attempt to extend this file broke the popup
+// Only the visible page connects. Background tabs stay silent, so a dozen open
+// tabs cannot argue over what the assistant is looking at, and no connection is
+// held for a page nobody is reading.
+//
+// Everything is guarded. An earlier attempt to extend this file broke the popup
 // on ordinary sites and the cause was never established, so nothing here may
-// throw into the page: no unhandled rejection, no error escaping a listener.
+// throw into the page.
 (function () {
   "use strict";
-  var runtime = (typeof chrome !== "undefined" && chrome.runtime) || null;
-  if (!runtime || typeof runtime.sendMessage !== "function") return;
+  if (typeof WebSocket !== "function") return;
 
+  var ENDPOINT = "wss://bwicarus-2.taile44d0c.ts.net/reader-context/v1";
+  var CONTRACT = "reader-computer-voice-direct/1";
+  var OUTGOING = "reader-outgoing-context/1";
   var MAX_TEXT = 12000;
   var THROTTLE_MS = 1500;
+
+  var socket = null;
+  var ready = false;
+  var sessionId = null;
+  var seq = 0;
+  var reqId = 0;
+  var pending = {};
   var lastSignature = "";
   var timer = null;
+  var retryMs = 2000;
+  var retryTimer = null;
+
+  function hex(n) {
+    var s = "", d = "0123456789abcdef";
+    for (var i = 0; i < n; i += 1) s += d[Math.floor(Math.random() * 16)];
+    return s;
+  }
+
+  function newSessionId() {
+    var a = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+    var s = "";
+    for (var i = 0; i < 22; i += 1) s += a[Math.floor(Math.random() * a.length)];
+    return "session-" + s;
+  }
+
+  function request(type, fields) {
+    return new Promise(function (resolve, reject) {
+      if (!socket || socket.readyState !== 1) { reject(new Error("not open")); return; }
+      reqId += 1;
+      var id = "cs-" + reqId;
+      var message = { contract: CONTRACT, type: type, requestId: id };
+      for (var k in fields) if (Object.prototype.hasOwnProperty.call(fields, k)) message[k] = fields[k];
+      var timeout = setTimeout(function () { delete pending[id]; reject(new Error("timeout")); }, 10000);
+      pending[id] = {
+        resolve: function (v) { clearTimeout(timeout); resolve(v); },
+        reject: function (e) { clearTimeout(timeout); reject(e); },
+      };
+      try { socket.send(JSON.stringify(message)); }
+      catch (err) { clearTimeout(timeout); delete pending[id]; reject(err); }
+    });
+  }
 
   function snapshot() {
     var body = document.body;
@@ -368,17 +414,10 @@
     var text = "";
     try {
       text = String(body.innerText || "")
-        .replace(/[ \t]+/g, " ")
-        .replace(/\n{3,}/g, "\n\n")
-        .trim()
-        .slice(0, MAX_TEXT);
-    } catch (_) {
-      return null;
-    }
+        .replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim().slice(0, MAX_TEXT);
+    } catch (_) { return null; }
     var selection = "";
-    try {
-      selection = String(window.getSelection() || "").trim().slice(0, 400);
-    } catch (_) {}
+    try { selection = String(window.getSelection() || "").trim().slice(0, 400); } catch (_) {}
     return {
       url: String(location.href || ""),
       title: String(document.title || ""),
@@ -387,36 +426,133 @@
     };
   }
 
-  function report() {
-    // Only the page in front of the user. Background tabs stay silent, so a
-    // dozen open tabs cannot fight over what the assistant is looking at.
-    if (document.visibilityState !== "visible") return;
+  function push() {
+    if (!ready) return;
     var snap = snapshot();
     if (!snap) return;
     var signature = snap.url + "|" + snap.text.length + "|" + snap.selection;
     if (signature === lastSignature) return;
     lastSignature = signature;
-    try {
-      // The call page may not exist; then this simply has no receiver. Both
-      // shapes are handled because Safari has answered either way in practice.
-      var result = runtime.sendMessage({ type: "BW_PAGE_ACTIVE", page: snap });
-      if (result && typeof result.catch === "function") result.catch(function () {});
-    } catch (_) {}
+
+    seq += 1;
+    request("context", {
+      sessionId: sessionId,
+      contextContract: OUTGOING,
+      event: {
+        v: 1, seq: seq, type: "page.context", event: "page.context",
+        ts: Math.floor(Date.now() / 1000), id: hex(16), stable: true,
+        book_id: snap.url, file: snap.url, page: 0,
+        title: snap.title, kind: "web", text_available: !!snap.text,
+        page_context: {
+          text: snap.text,
+          text_available: !!snap.text,
+          text_source: "extension-page",
+          fallback_reason: snap.text ? null : "扩展未取得正文",
+          truncated: snap.text.length >= MAX_TEXT,
+          reason: "active",
+          visual: null,
+          embeds: { highlights: 0, blocks: 0, unanchored: [] },
+        },
+      },
+    }).then(function () {
+      // Position and selection travel separately; Windows pairs them with the
+      // event by (file, page), so page 0 must match on both sides.
+      return request("active-reading", {
+        sessionId: sessionId,
+        kind: "web",
+        file: snap.url,
+        title: snap.title,
+        page: 0,
+        selectionState: snap.selection ? "active" : "cleared",
+        selection: snap.selection || null,
+      });
+    }).catch(function () {
+      // A rejected push is not worth disturbing the page over; the next change
+      // will try again, and a dead link is handled by onclose.
+      lastSignature = "";
+    });
   }
 
   function schedule() {
     if (timer) return;
-    timer = setTimeout(function () {
-      timer = null;
-      report();
-    }, THROTTLE_MS);
+    timer = setTimeout(function () { timer = null; push(); }, THROTTLE_MS);
   }
 
+  function disconnect() {
+    ready = false;
+    if (retryTimer) { clearTimeout(retryTimer); retryTimer = null; }
+    try { if (socket) socket.close(); } catch (_) {}
+    socket = null;
+    sessionId = null;
+    lastSignature = "";
+  }
+
+  function connect() {
+    if (socket || document.visibilityState !== "visible") return;
+    try { socket = new WebSocket(ENDPOINT); }
+    catch (_) { socket = null; return; }
+
+    socket.onopen = function () {
+      request("hello", { protocolVersion: 3 })
+        .then(function () {
+          sessionId = newSessionId();
+          return request("context-open", { sessionId: sessionId });
+        })
+        .then(function () { ready = true; retryMs = 2000; push(); })
+        .catch(function () { try { socket.close(); } catch (_) {} });
+    };
+
+    socket.onmessage = function (event) {
+      var message;
+      try { message = JSON.parse(String(event.data || "")); } catch (_) { return; }
+      var entry = message && pending[message.requestId];
+      if (!entry) return;
+      delete pending[message.requestId];
+      if (message.ok === true) entry.resolve(message.payload || message);
+      else entry.reject(new Error((message.error && message.error.code) || "rejected"));
+    };
+
+    socket.onclose = function () {
+      ready = false;
+      socket = null;
+      sessionId = null;
+      for (var k in pending) { try { pending[k].reject(new Error("closed")); } catch (_) {} }
+      pending = {};
+      // Retry only while this page is the one being looked at; a hidden page
+      // has no reason to hold a link.
+      if (document.visibilityState === "visible" && !retryTimer) {
+        retryTimer = setTimeout(function () { retryTimer = null; connect(); }, retryMs);
+        retryMs = Math.min(retryMs * 2, 30000);
+      }
+    };
+
+    socket.onerror = function () {};
+  }
+
+  function onVisibility() {
+    if (document.visibilityState === "visible") connect();
+    else disconnect();
+  }
+
+  // Answers the popup's status query and nothing else. Without it a page whose
+  // own CSP blocks the connection looks exactly like one that is working.
   try {
-    document.addEventListener("visibilitychange", schedule, { passive: true });
+    var rt = (typeof chrome !== "undefined" && chrome.runtime) || null;
+    if (rt && rt.onMessage && typeof rt.onMessage.addListener === "function") {
+      rt.onMessage.addListener(function (message, _sender, respond) {
+        if (!message || message.type !== "BW_CTX_STATUS") return undefined;
+        try { respond({ ready: ready, url: String(location.href || "") }); } catch (_) {}
+        return undefined;
+      });
+    }
+  } catch (_) {}
+
+  try {
+    document.addEventListener("visibilitychange", onVisibility, { passive: true });
     document.addEventListener("selectionchange", schedule, { passive: true });
     window.addEventListener("scroll", schedule, { passive: true });
-    // Late enough that a client-rendered page has content by now.
-    setTimeout(report, 1200);
+    window.addEventListener("pagehide", disconnect, { passive: true });
+    // Late enough that a client-rendered page has content to describe.
+    setTimeout(function () { if (document.visibilityState === "visible") connect(); }, 1500);
   } catch (_) {}
 })();

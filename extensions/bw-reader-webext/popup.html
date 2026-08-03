@@ -31,13 +31,11 @@
     <button id="test">测试连接</button>
   </div>
   <p id="status"></p>
-  <!-- Opens the call in its own extension page rather than running it here: a
-       popup is torn down the moment it loses focus, which would cut the call
-       the first time the user looked at anything else. -->
+  <!-- No button: the page you are reading reports itself. Nothing to start, and
+       nothing to keep open. -->
   <section class="voice-panel" aria-labelledby="voice-heading">
-    <h4 id="voice-heading">电脑语音</h4>
-    <button id="voice-open">开始通话</button>
-    <p id="voice-status">连接 Windows 上的语音助手</p>
+    <h4 id="voice-heading">上下文</h4>
+    <p id="voice-status">检查中…</p>
   </section>
   <section class="sync-panel" aria-labelledby="sync-heading">
     <h4 id="sync-heading">跨设备同步</h4>
