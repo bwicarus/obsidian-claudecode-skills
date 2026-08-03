@@ -256,19 +256,14 @@ final class NativeVoiceBridge: ObservableObject {
         )
         state = NativeVoiceBridgeState(
             phase: .preparing,
-            detail: "正在申请麦克风并交接 Reader 上下文…"
+            detail: "正在申请麦克风…"
         )
 
         do {
             if safariWebContext == nil {
-                guard let reader else {
-                    throw BridgeFailure.readerNotReady
-                }
                 guard await requestMicrophonePermission() else {
                     throw BridgeFailure.microphoneDenied
                 }
-                try requireCurrent(generation)
-                try await reader.prepareForNativeVoice()
                 try requireCurrent(generation)
             } else {
                 guard await requestMicrophonePermission() else {
