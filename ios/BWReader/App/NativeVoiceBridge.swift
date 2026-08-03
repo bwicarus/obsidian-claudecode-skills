@@ -124,6 +124,10 @@ final class NativeVoiceBridge: ObservableObject {
     private var currentNetworkPath: NativeVoiceNetworkPath?
     private var recoveryInProgress = false
     private var recoveryDisconnectTask: Task<Void, Never>?
+    private var safariWebContext: ReaderNativeWebContext?
+    private var safariContextRevision = ""
+    private var safariContextSequence: Int64 = 0
+    private var safariContextTask: Task<Void, Never>?
 
     init() {
         audio.onFailure = { [weak self] error in
@@ -220,7 +224,8 @@ final class NativeVoiceBridge: ObservableObject {
     }
 
     func start(
-        appKind: DirectVoiceTargetApp = .codexDesktop
+        appKind: DirectVoiceTargetApp = .codexDesktop,
+        safariWebContext: ReaderNativeWebContext? = nil
     ) async {
         guard !state.isActive, !state.isBusy else {
             return
@@ -237,6 +242,11 @@ final class NativeVoiceBridge: ObservableObject {
         resumeArmed = false
         activeAppKind = appKind
         audioInterrupted = false
+        self.safariWebContext = safariWebContext
+        safariContextRevision = ""
+        safariContextSequence = 0
+        safariContextTask?.cancel()
+        safariContextTask = nil
         recoveryDisconnectTask?.cancel()
         recoveryDisconnectTask = nil
         setMicrophoneMuted(false)
@@ -250,15 +260,17 @@ final class NativeVoiceBridge: ObservableObject {
         )
 
         do {
-            guard let reader else {
-                throw BridgeFailure.readerNotReady
-            }
             guard await requestMicrophonePermission() else {
                 throw BridgeFailure.microphoneDenied
             }
             try requireCurrent(generation)
-            try await reader.prepareForNativeVoice()
-            try requireCurrent(generation)
+            if safariWebContext == nil {
+                guard let reader else {
+                    throw BridgeFailure.readerNotReady
+                }
+                try await reader.prepareForNativeVoice()
+                try requireCurrent(generation)
+            }
 
             try audio.start()
             try requireCurrent(generation)
@@ -297,6 +309,14 @@ final class NativeVoiceBridge: ObservableObject {
                 sessionId: session.id
             )
             resumeArmed = true
+            if let context = safariWebContext {
+                try await forwardSafariWebContext(
+                    context,
+                    socket: socket,
+                    sessionId: session.id
+                )
+                startSafariContextPump(generation: generation)
+            }
         } catch {
             guard generation == operationGeneration else {
                 return
@@ -319,6 +339,7 @@ final class NativeVoiceBridge: ObservableObject {
         resumeArmed = false
         audioInterrupted = false
         recoveryInProgress = false
+        stopSafariContextPump(clearContext: true)
         cleanupInProgress = true
         recordDiagnostic(category: "control", message: "用户挂断")
         state = NativeVoiceBridgeState(
@@ -453,6 +474,138 @@ final class NativeVoiceBridge: ObservableObject {
         microphoneConsumer = nil
     }
 
+    private func startSafariContextPump(generation: UInt64) {
+        safariContextTask?.cancel()
+        safariContextTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            while !Task.isCancelled,
+                  generation == self.operationGeneration,
+                  self.safariWebContext != nil {
+                do {
+                    if self.state.phase == .active,
+                       let pending = try self.sharedStore
+                        .consumeAnyPendingVoice(),
+                       pending.requestID.count >= 8 {
+                        await self.stop()
+                        return
+                    }
+                    if self.state.phase == .active,
+                       let latest = try self.sharedStore
+                        .readLatestWebContext(),
+                       latest.revision != self.safariContextRevision,
+                       let socket = self.socket,
+                       let sessionId = self.state.sessionId {
+                        self.safariWebContext = latest
+                        try await self.forwardSafariWebContext(
+                            latest,
+                            socket: socket,
+                            sessionId: sessionId
+                        )
+                    }
+                } catch {
+                    self.recordDiagnostic(
+                        category: "context",
+                        message: "Safari 网页上下文更新失败：\(error.localizedDescription)"
+                    )
+                }
+                try? await Task.sleep(nanoseconds: 500_000_000)
+            }
+        }
+    }
+
+    private func stopSafariContextPump(clearContext: Bool) {
+        safariContextTask?.cancel()
+        safariContextTask = nil
+        if clearContext {
+            safariWebContext = nil
+            safariContextRevision = ""
+            safariContextSequence = 0
+        }
+    }
+
+    private func forwardSafariWebContext(
+        _ context: ReaderNativeWebContext,
+        socket: DirectVoiceSocket,
+        sessionId: String
+    ) async throws {
+        guard context.isValid else {
+            throw DirectVoiceFailure(
+                code: "BW_NATIVE_WEB_CONTEXT_INVALID",
+                message: "Safari 网页上下文无效",
+                retryable: false
+            )
+        }
+        safariContextSequence += 1
+        let sequence = safariContextSequence
+        let timestampMilliseconds = Int64(Date().timeIntervalSince1970 * 1_000)
+        let timestampSeconds = timestampMilliseconds / 1_000
+        let eventID = String(
+            UUID().uuidString.lowercased()
+                .replacingOccurrences(of: "-", with: "")
+                .prefix(16)
+        )
+        var pageContext: [String: DirectJSONValue] = [
+            "reason": .string(context.selection.isEmpty ? "page" : "selection"),
+            "text": .string(context.visibleText),
+            "text_available": .bool(!context.visibleText.isEmpty),
+            "text_source": .string("safari-web-visible"),
+            "fallback_reason": context.visibleText.isEmpty
+                ? .string("no-visible-text") : .null,
+            "truncated": .bool(context.visibleText.utf8.count >= 32_768),
+        ]
+        if !context.selection.isEmpty {
+            pageContext["selection"] = .string(
+                String(context.selection.prefix(400))
+            )
+        }
+        let event: DirectJSONValue = .object([
+            "v": .number(1),
+            "seq": .number(Double(sequence)),
+            "type": .string("page.context"),
+            "ts": .number(Double(timestampSeconds)),
+            "id": .string(eventID),
+            "kind": .string("web"),
+            "file": .string(context.url),
+            "title": .string(context.title),
+            "page": .number(1),
+            "stable": .bool(true),
+            "page_context": .object(pageContext),
+        ])
+        _ = try await socket.requestReaderContext(
+            action: "context",
+            fields: [
+                "sessionId": .string(sessionId),
+                "contextContract": .string("reader-outgoing-context/1"),
+                "event": event,
+            ]
+        )
+        safariContextRevision = context.revision
+
+        // This enrichment exists only in snapshot-mcp mode. Legacy injection
+        // already received the page.context above, so rejection is harmless.
+        let selectionState = context.selection.isEmpty ? "cleared" : "active"
+        _ = try? await socket.requestReaderContext(
+            action: "active-reading",
+            fields: [
+                "sessionId": .string(sessionId),
+                "activeContract": .string("reader-active-reading/1"),
+                "active": .object([
+                    "kind": .string("web"),
+                    "file": .string(context.url),
+                    "title": .string(context.title),
+                    "page": .number(1),
+                    "selectionState": .string(selectionState),
+                    "selection": context.selection.isEmpty
+                        ? .null
+                        : .string(String(context.selection.prefix(400))),
+                    "observedAtEpochMs": .number(
+                        Double(timestampMilliseconds)
+                    ),
+                ]),
+            ]
+        )
+    }
+
     private func handle(
         _ event: DirectVoiceEvent,
         generation: UInt64
@@ -537,6 +690,7 @@ final class NativeVoiceBridge: ObservableObject {
         resumeArmed = false
         reconnectTask?.cancel()
         reconnectTask = nil
+        stopSafariContextPump(clearContext: true)
         audioInterrupted = false
         recoveryInProgress = false
         cleanupInProgress = true
@@ -571,6 +725,7 @@ final class NativeVoiceBridge: ObservableObject {
         resumeArmed = false
         reconnectTask?.cancel()
         reconnectTask = nil
+        stopSafariContextPump(clearContext: true)
         audioInterrupted = false
         recoveryInProgress = false
         cleanupInProgress = true
@@ -858,6 +1013,14 @@ final class NativeVoiceBridge: ObservableObject {
                 detail: "已自动恢复：\(trigger)",
                 sessionId: session.id
             )
+            if let context = safariWebContext {
+                try await forwardSafariWebContext(
+                    context,
+                    socket: newSocket,
+                    sessionId: session.id
+                )
+                startSafariContextPump(generation: generation)
+            }
         } catch {
             recoveryInProgress = false
             guard generation == operationGeneration,

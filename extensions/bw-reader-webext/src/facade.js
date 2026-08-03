@@ -29,9 +29,70 @@
     set: (key, value) => localStoreCall('BW_LOCAL_STORAGE_SET', key, value),
     remove: (key) => localStoreCall('BW_LOCAL_STORAGE_REMOVE', key)
   });
+
+  const nativeBridgeEncoder = new TextEncoder();
+  const nativeBridgeTrimUtf8 = (value, maximumBytes) => {
+    const text = String(value || '');
+    if (nativeBridgeEncoder.encode(text).byteLength <= maximumBytes) return text;
+    let result = '';
+    let used = 0;
+    for (const character of text) {
+      const bytes = nativeBridgeEncoder.encode(character).byteLength;
+      if (used + bytes > maximumBytes) break;
+      result += character;
+      used += bytes;
+    }
+    return result;
+  };
+  const nativeBridgeRevision = (value) => {
+    const text = String(value || '');
+    let first = 0x811c9dc5;
+    let second = 0x9e3779b9;
+    for (let index = 0; index < text.length; index += 1) {
+      const code = text.charCodeAt(index);
+      first = Math.imul(first ^ code, 0x01000193) >>> 0;
+      second = Math.imul(second ^ (code + index), 0x85ebca6b) >>> 0;
+    }
+    return first.toString(16).padStart(8, '0') +
+      second.toString(16).padStart(8, '0');
+  };
+  const nativeBridgeWebContext = () => {
+    let value = {};
+    try {
+      value = (window.RC && RC.adapter && RC.adapter().getContext()) || {};
+    } catch (_) {}
+    const url = nativeBridgeTrimUtf8(window.location.href, 2048);
+    const title = nativeBridgeTrimUtf8(
+      value.book_name || value.book || value.title || document.title,
+      1024
+    );
+    const visibleText = nativeBridgeTrimUtf8(
+      value.visible_text || value.text || '',
+      32768
+    );
+    const selection = nativeBridgeTrimUtf8(
+      value.selection || window.getSelection?.().toString() || '',
+      4096
+    );
+    return {
+      url,
+      title,
+      visibleText,
+      selection,
+      revision: nativeBridgeRevision(
+        [url, title, visibleText, selection].join('\u001f')
+      )
+    };
+  };
+
   const nativeComputerVoiceBridge = (() => {
     const CONTRACT = 'bw-reader-native/1';
-    const ACTIONS = new Set(['capabilities', 'voice.status', 'voice.toggle']);
+    const ACTIONS = new Set([
+      'capabilities',
+      'voice.status',
+      'voice.toggle',
+      'voice.context'
+    ]);
     const APP_KINDS = new Set(['codex-desktop', 'chatgpt-classic']);
     const encoder = new TextEncoder();
     let available = false;
@@ -48,6 +109,9 @@
     let pollTimer = null;
     let statusInFlight = null;
     let toggleInFlight = null;
+    let contextInFlight = null;
+    let lastContextRevision = '';
+    let contextRefreshTimer = null;
 
     const requestId = () => {
       const bytes = new Uint8Array(18);
@@ -149,6 +213,32 @@
         refreshStatus().catch(() => {});
       }, latestState.busy ? 700 : 4000);
     };
+    const pushContextIfChanged = () => {
+      if (!available || (!latestState.active && !latestState.busy)) {
+        return Promise.resolve(false);
+      }
+      if (contextInFlight) return contextInFlight;
+      const webContext = nativeBridgeWebContext();
+      if (webContext.revision === lastContextRevision) {
+        return Promise.resolve(false);
+      }
+      contextInFlight = call('voice.context', { webContext }).then((value) => {
+        lastContextRevision = webContext.revision;
+        if (value.state) publishState(value.state);
+        return true;
+      }).finally(() => {
+        contextInFlight = null;
+      });
+      return contextInFlight;
+    };
+    const scheduleContextRefresh = () => {
+      if (!available || (!latestState.active && !latestState.busy)) return;
+      if (contextRefreshTimer) clearTimeout(contextRefreshTimer);
+      contextRefreshTimer = setTimeout(() => {
+        contextRefreshTimer = null;
+        pushContextIfChanged().catch(() => {});
+      }, 250);
+    };
     const refreshStatus = () => {
       if (!available) {
         return Promise.reject(Object.assign(new Error('BWReader App 原生桥不可用'), {
@@ -158,6 +248,7 @@
       if (statusInFlight) return statusInFlight;
       statusInFlight = call('voice.status').then((value) => {
         publishState(value.state);
+        pushContextIfChanged().catch(() => {});
         return latestState;
       }).finally(() => {
         statusInFlight = null;
@@ -170,6 +261,7 @@
       if (
         !actions.has('voice.status') ||
         !actions.has('voice.toggle') ||
+        !actions.has('voice.context') ||
         value.launchScheme !== 'bwreader' ||
         !appKinds.has('codex-desktop')
       ) {
@@ -202,10 +294,8 @@
       }
       if (toggleInFlight) return toggleInFlight;
       const id = requestId();
-      const selectionText = trimUtf8(
-        window.getSelection?.().toString() || '',
-        4096
-      );
+      const webContext = nativeBridgeWebContext();
+      const shouldLaunch = !latestState.active && !latestState.busy;
       publishState(Object.assign({}, latestState, {
         phase: latestState.active ? 'stopping' : 'launching',
         busy: true,
@@ -215,8 +305,9 @@
       toggleInFlight = call('voice.toggle', {
         requestId: id,
         appKind: target,
-        selectionText
+        webContext
       }).then((value) => {
+        lastContextRevision = webContext.revision;
         publishState(value.state);
         return value;
       }).catch((error) => {
@@ -236,8 +327,10 @@
       // Keep the custom-scheme navigation in the original trusted click.  The
       // native handler writes the same one-time request id into the App Group;
       // the App waits briefly if URL delivery wins that race.
-      const launchURL = `${launchScheme}://native-voice?requestId=${encodeURIComponent(id)}`;
-      try { window.location.assign(launchURL); } catch (_) {}
+      if (shouldLaunch) {
+        const launchURL = `${launchScheme}://native-voice?requestId=${encodeURIComponent(id)}`;
+        try { window.location.assign(launchURL); } catch (_) {}
+      }
       return toggleInFlight;
     };
 
@@ -249,15 +342,258 @@
         refreshStatus().catch(() => {});
       }
     });
+    document.addEventListener('selectionchange', () => {
+      scheduleContextRefresh();
+    });
+    window.addEventListener('scroll', scheduleContextRefresh, { passive: true });
+    window.addEventListener('hashchange', scheduleContextRefresh);
+    window.addEventListener('popstate', scheduleContextRefresh);
     setTimeout(() => initialize().catch(() => {}), 0);
     return Object.freeze({
       available: () => available,
       state: () => Object.assign({}, latestState),
       refreshStatus,
+      pushContextIfChanged,
       toggle
     });
   })();
   window.__bwNativeComputerVoiceExtensionBridge = nativeComputerVoiceBridge;
+
+  const nativeAgentVoiceBridge = (() => {
+    const CONTRACT = 'bw-reader-native/1';
+    const ACTIONS = new Set([
+      'capabilities',
+      'agent.status',
+      'agent.toggle',
+      'agent.events',
+      'agent.command'
+    ]);
+    let available = false;
+    let launchScheme = '';
+    let cursor = 0;
+    let pollTimer = null;
+    let pollInFlight = null;
+    let commandTail = Promise.resolve();
+    let latestState = {
+      phase: 'unavailable',
+      active: false,
+      busy: false,
+      speaking: false
+    };
+
+    const requestId = () => {
+      const bytes = new Uint8Array(18);
+      crypto.getRandomValues(bytes);
+      return Array.from(bytes, (value) =>
+        value.toString(16).padStart(2, '0')
+      ).join('');
+    };
+    const call = (action, details) => new Promise((resolve, reject) => {
+      if (!ACTIONS.has(action)) {
+        reject(Object.assign(new Error('BWReader App 原生语音请求无效'), {
+          code: 'BW_NATIVE_APP_REQUEST_INVALID'
+        }));
+        return;
+      }
+      chrome.runtime.sendMessage(Object.assign({
+        type: 'BW_NATIVE_APP_REQUEST',
+        action,
+        requestId: details?.requestId || requestId()
+      }, details || {}), (response) => {
+        const runtimeError = chrome.runtime.lastError;
+        const data = response?.data;
+        if (runtimeError || !response?.ok || !data?.ok) {
+          reject(Object.assign(new Error(
+            runtimeError?.message || data?.error || response?.error ||
+            'BWReader App 原生语音暂时不可用'
+          ), {
+            code: data?.code || response?.code || 'BW_NATIVE_APP_UNAVAILABLE'
+          }));
+          return;
+        }
+        if (data.contract !== CONTRACT || data.action !== action) {
+          reject(Object.assign(new Error('BWReader App 原生语音响应无效'), {
+            code: 'BW_NATIVE_APP_RESPONSE_INVALID'
+          }));
+          return;
+        }
+        resolve(data);
+      });
+    });
+    const dispatch = (event, payload) => {
+      window.dispatchEvent(new CustomEvent('bw-native-agent-voice-event', {
+        detail: { event, payload: payload || {} }
+      }));
+    };
+    const publishState = (state) => {
+      const value = state && typeof state === 'object' ? state : {};
+      latestState = {
+        phase: String(value.phase || 'idle'),
+        active: value.active === true,
+        busy: value.busy === true,
+        speaking: value.speaking === true,
+        detail: String(value.detail || '')
+      };
+      dispatch('state', Object.assign({}, latestState));
+      schedulePoll();
+    };
+    const pollEvents = () => {
+      if (!available || pollInFlight) return pollInFlight || Promise.resolve();
+      pollInFlight = call('agent.events', { after: cursor }).then((value) => {
+        for (const item of value.events || []) {
+          cursor = Math.max(cursor, Number(item.sequence || 0));
+          dispatch(item.event, item.payload || {});
+          if (item.event === 'state') publishState(item.payload || {});
+        }
+        cursor = Math.max(cursor, Number(value.cursor || 0));
+      }).finally(() => {
+        pollInFlight = null;
+        schedulePoll();
+      });
+      return pollInFlight;
+    };
+    const schedulePoll = () => {
+      if (pollTimer) clearTimeout(pollTimer);
+      pollTimer = null;
+      if (!available || document.visibilityState === 'hidden') return;
+      const delay = latestState.active || latestState.busy ? 350 : 2000;
+      pollTimer = setTimeout(() => {
+        pollTimer = null;
+        pollEvents().catch(() => {});
+      }, delay);
+    };
+    const refreshStatus = () => call('agent.status').then((value) => {
+      publishState(value.state);
+      return Object.assign({}, latestState);
+    });
+    const toggle = (command, context) => {
+      const operation = command === 'stop' ? 'stop' : 'start';
+      const id = requestId();
+      const coldStart = operation === 'start' &&
+        !latestState.active && !latestState.busy;
+      publishState(Object.assign({}, latestState, {
+        phase: operation === 'start' ? 'launching' : 'stopping',
+        busy: true
+      }));
+      const details = { requestId: id, command: operation };
+      if (operation === 'start') {
+        details.webContext = context || nativeBridgeWebContext();
+      }
+      const result = call('agent.toggle', details).then((value) => {
+        publishState(value.state);
+        pollEvents().catch(() => {});
+        return value;
+      }).catch((error) => {
+        publishState({
+          phase: 'failed', active: false, busy: false, speaking: false,
+          detail: error.message
+        });
+        throw error;
+      });
+      if (coldStart && launchScheme === 'bwreader') {
+        try {
+          window.location.assign(
+            `${launchScheme}://native-agent?requestId=${encodeURIComponent(id)}`
+          );
+        } catch (_) {}
+      }
+      return result;
+    };
+    const command = (name, body) => {
+      const details = { command: name };
+      if (name === 'speak') {
+        details.text = nativeBridgeTrimUtf8(body?.text, 32768);
+        details.mood = nativeBridgeTrimUtf8(body?.mood, 256);
+      }
+      const operation = commandTail.then(() => call('agent.command', details));
+      commandTail = operation.catch(() => {});
+      return operation.then((value) => {
+        if (value.state) publishState(value.state);
+        return value;
+      });
+    };
+    const post = (body) => {
+      const action = String(body?.action || '');
+      if (action === 'start') return toggle('start', nativeBridgeWebContext());
+      if (action === 'stop') return toggle('stop');
+      if (action === 'speak' || action === 'speak_done' || action === 'cancel') {
+        return command(action, body);
+      }
+      return Promise.reject(Object.assign(new Error('原生语音命令无效'), {
+        code: 'BW_NATIVE_AGENT_COMMAND_INVALID'
+      }));
+    };
+    const installCompatibilityShim = () => {
+      let webkit = window.webkit;
+      if (!webkit || typeof webkit !== 'object') {
+        webkit = {};
+        try { window.webkit = webkit; } catch (_) { return false; }
+      }
+      let handlers = webkit.messageHandlers;
+      if (!handlers || typeof handlers !== 'object') {
+        handlers = {};
+        try { webkit.messageHandlers = handlers; } catch (_) { return false; }
+      }
+      if (!handlers.bwNativeAgentVoice) {
+        try {
+          handlers.bwNativeAgentVoice = Object.freeze({
+            postMessage(body) { post(body).catch(() => {}); }
+          });
+        } catch (_) { return false; }
+      }
+      window.__BW_NATIVE_AGENT_VOICE__ = true;
+      window.dispatchEvent(new CustomEvent(
+        'bw-native-agent-voice-capability',
+        { detail: { available: true } }
+      ));
+      return true;
+    };
+    const initialize = () => call('capabilities').then((value) => {
+      const actions = new Set(value.actions || []);
+      if ([
+        'agent.status', 'agent.toggle', 'agent.events', 'agent.command'
+      ].some((action) => !actions.has(action)) || value.launchScheme !== 'bwreader') {
+        throw Object.assign(new Error('BWReader App 原生 Realtime 能力不完整'), {
+          code: 'BW_NATIVE_APP_CAPABILITY_MISSING'
+        });
+      }
+      available = true;
+      launchScheme = value.launchScheme;
+      // Event files survive extension/background suspension.  Establish the
+      // current cursor before exposing the bridge so a newly loaded page never
+      // replays ASR/TTS events from an older conversation.
+      return call('agent.events', { after: 0 }).then((history) => {
+        cursor = Math.max(cursor, Number(history.cursor || 0));
+        installCompatibilityShim();
+        return refreshStatus();
+      }).catch((error) => {
+        available = false;
+        throw error;
+      });
+    }).catch((error) => {
+      available = false;
+      window.__BW_NATIVE_AGENT_VOICE__ = false;
+      throw error;
+    });
+
+    window.addEventListener('pageshow', () => {
+      if (available) refreshStatus().then(() => pollEvents()).catch(() => {});
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && available) {
+        refreshStatus().then(() => pollEvents()).catch(() => {});
+      }
+    });
+    setTimeout(() => initialize().catch(() => {}), 0);
+    return Object.freeze({
+      available: () => available,
+      state: () => Object.assign({}, latestState),
+      refreshStatus,
+      pollEvents,
+      post
+    });
+  })();
+  window.__bwNativeAgentVoiceExtensionBridge = nativeAgentVoiceBridge;
   const pageCardPresentationCall = (type, cid, value) => new Promise(
     (resolve, reject) => {
       chrome.runtime.sendMessage({ type, cid, value }, (response) => {

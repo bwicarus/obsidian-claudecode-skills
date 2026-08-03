@@ -117,6 +117,99 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                 context: context
             )
 
+        case "voice.context":
+            guard exactKeys(
+                message,
+                required: ["contract", "action", "requestId", "webContext"]
+            ), let webContext = decodeWebContext(message["webContext"])
+            else {
+                complete(context, response: schemaFailure(
+                    action: action,
+                    requestID: requestID
+                ))
+                return
+            }
+            do {
+                try store.writeLatestWebContext(webContext)
+                var response = baseResponse(action: action, requestID: requestID)
+                response["state"] = (try store.readStatus() ?? .idle)
+                    .responseDictionary
+                complete(context, response: response)
+            } catch {
+                complete(context, response: bridgeFailure(
+                    action: action,
+                    requestID: requestID,
+                    error: error
+                ))
+            }
+
+        case "agent.status":
+            guard exactKeys(
+                message,
+                required: ["contract", "action", "requestId"]
+            ) else {
+                complete(context, response: schemaFailure(
+                    action: action,
+                    requestID: requestID
+                ))
+                return
+            }
+            do {
+                var response = baseResponse(action: action, requestID: requestID)
+                response["state"] = (try store.readAgentStatus() ?? .idle)
+                    .responseDictionary
+                complete(context, response: response)
+            } catch {
+                complete(context, response: bridgeFailure(
+                    action: action,
+                    requestID: requestID,
+                    error: error
+                ))
+            }
+
+        case "agent.toggle":
+            handleAgentToggle(
+                message,
+                action: action,
+                requestID: requestID,
+                context: context
+            )
+
+        case "agent.events":
+            guard exactKeys(
+                message,
+                required: ["contract", "action", "requestId", "after"]
+            ), let after = (message["after"] as? NSNumber)?.int64Value,
+               after >= 0
+            else {
+                complete(context, response: schemaFailure(
+                    action: action,
+                    requestID: requestID
+                ))
+                return
+            }
+            do {
+                let events = try store.readAgentEvents(after: after)
+                var response = baseResponse(action: action, requestID: requestID)
+                response["events"] = events.map(\.responseDictionary)
+                response["cursor"] = events.last?.sequence ?? after
+                complete(context, response: response)
+            } catch {
+                complete(context, response: bridgeFailure(
+                    action: action,
+                    requestID: requestID,
+                    error: error
+                ))
+            }
+
+        case "agent.command":
+            handleAgentCommand(
+                message,
+                action: action,
+                requestID: requestID,
+                context: context
+            )
+
         default:
             complete(
                 context,
@@ -138,13 +231,13 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
     ) {
         guard exactKeys(
             message,
-            required: ["contract", "action", "requestId", "appKind"],
-            optional: ["sourceURL", "selectionText"]
+            required: [
+                "contract", "action", "requestId", "appKind", "webContext",
+            ]
         ),
         let appKind = message["appKind"] as? String,
         ReaderNativeBridgeContract.supportedAppKinds.contains(appKind),
-        validSourceURLField(message["sourceURL"]),
-        validTextField(message["selectionText"], maximumBytes: 4_096),
+        let webContext = decodeWebContext(message["webContext"]),
         let launchURL = ReaderNativeBridgeContract.launchURL(
             requestID: requestID
         )
@@ -163,10 +256,12 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             let command = ReaderNativePendingVoiceCommand(
                 requestID: requestID,
                 appKind: appKind,
-                sourceURL: message["sourceURL"] as? String,
-                selectionText: message["selectionText"] as? String
+                sourceURL: webContext.url,
+                selectionText: webContext.selection,
+                webContext: webContext
             )
             try store.writePending(command)
+            try store.writeLatestWebContext(webContext)
             let status = try store.readStatus() ?? .idle
             var response = baseResponse(
                 action: action,
@@ -188,6 +283,139 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                 )
             )
         }
+    }
+
+    private func handleAgentToggle(
+        _ message: [String: Any],
+        action: String,
+        requestID: String,
+        context: NSExtensionContext
+    ) {
+        guard let command = message["command"] as? String,
+              command == "start" || command == "stop"
+        else {
+            complete(context, response: schemaFailure(
+                action: action,
+                requestID: requestID
+            ))
+            return
+        }
+        let required: Set<String> = command == "start"
+            ? ["contract", "action", "requestId", "command", "webContext"]
+            : ["contract", "action", "requestId", "command"]
+        guard exactKeys(message, required: required) else {
+            complete(context, response: schemaFailure(
+                action: action,
+                requestID: requestID
+            ))
+            return
+        }
+        let webContext = command == "start"
+            ? decodeWebContext(message["webContext"])
+            : nil
+        guard command != "start" || webContext != nil else {
+            complete(context, response: schemaFailure(
+                action: action,
+                requestID: requestID
+            ))
+            return
+        }
+        do {
+            var response = baseResponse(action: action, requestID: requestID)
+            if command == "start" {
+                let pending = ReaderNativePendingAgentToggle(
+                    requestID: requestID,
+                    command: command,
+                    webContext: webContext
+                )
+                try store.writePendingAgentToggle(pending)
+                response["launchURL"] = ReaderNativeBridgeContract.launchURL(
+                    requestID: requestID,
+                    host: "native-agent"
+                )?.absoluteString
+            } else {
+                try store.writeAgentControl(ReaderNativeAgentControl(
+                    requestID: requestID,
+                    command: "stop"
+                ))
+            }
+            response["state"] = (try store.readAgentStatus() ?? .idle)
+                .responseDictionary
+            complete(context, response: response)
+        } catch {
+            complete(context, response: bridgeFailure(
+                action: action,
+                requestID: requestID,
+                error: error
+            ))
+        }
+    }
+
+    private func handleAgentCommand(
+        _ message: [String: Any],
+        action: String,
+        requestID: String,
+        context: NSExtensionContext
+    ) {
+        guard let command = message["command"] as? String,
+              ["speak", "speak_done", "cancel"].contains(command)
+        else {
+            complete(context, response: schemaFailure(
+                action: action,
+                requestID: requestID
+            ))
+            return
+        }
+        let required: Set<String> = command == "speak"
+            ? ["contract", "action", "requestId", "command", "text"]
+            : ["contract", "action", "requestId", "command"]
+        let optional: Set<String> = command == "speak" ? ["mood"] : []
+        guard exactKeys(message, required: required, optional: optional),
+              command != "speak" || validTextField(
+                message["text"],
+                maximumBytes: 32_768
+              ),
+              validTextField(message["mood"], maximumBytes: 256)
+        else {
+            complete(context, response: schemaFailure(
+                action: action,
+                requestID: requestID
+            ))
+            return
+        }
+        do {
+            try store.writeAgentControl(ReaderNativeAgentControl(
+                requestID: requestID,
+                command: command,
+                text: message["text"] as? String,
+                mood: message["mood"] as? String
+            ))
+            var response = baseResponse(action: action, requestID: requestID)
+            response["state"] = (try store.readAgentStatus() ?? .idle)
+                .responseDictionary
+            complete(context, response: response)
+        } catch {
+            complete(context, response: bridgeFailure(
+                action: action,
+                requestID: requestID,
+                error: error
+            ))
+        }
+    }
+
+    private func decodeWebContext(_ value: Any?) -> ReaderNativeWebContext? {
+        guard let value,
+              JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value),
+              let context = try? JSONDecoder().decode(
+                ReaderNativeWebContext.self,
+                from: data
+              ),
+              context.isValid
+        else {
+            return nil
+        }
+        return context
     }
 
     private func validSourceURLField(_ value: Any?) -> Bool {
@@ -222,6 +450,20 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             return false
         }
         return true
+    }
+
+    private func bridgeFailure(
+        action: String,
+        requestID: String,
+        error: Error
+    ) -> [String: Any] {
+        failure(
+            action: action,
+            requestID: requestID,
+            code: "BW_NATIVE_BRIDGE_STORE_FAILED",
+            message: error.localizedDescription,
+            retryable: true
+        )
     }
 
     private func exactKeys(

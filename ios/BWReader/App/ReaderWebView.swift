@@ -70,6 +70,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private let nativeAgentVoice = NativeAgentVoiceSession()
     private var nativeAgentVoiceCommandTail: Task<Void, Never>?
     private var nativeAgentVoiceWasReady = false
+    private var externalNativeAgentVoice = false
+    private var externalNativeAgentControlTask: Task<Void, Never>?
     private var nativePencilInteraction: UIPencilInteraction?
     private var lastNativePencilTapTimestamp: TimeInterval = -1
 
@@ -338,6 +340,63 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         updateNativeVoiceButton(state: nativeVoiceBridge.state)
     }
 
+    func startExternalNativeAgentVoice(
+        webContext: ReaderNativeWebContext
+    ) async {
+        guard webContext.isValid else { return }
+        if let bridge = nativeVoiceBridge, bridge.state.phase != .idle {
+            await bridge.stop()
+        }
+        await nativeAgentVoice.stop()
+        externalNativeAgentControlTask?.cancel()
+        externalNativeAgentVoice = true
+        nativeAgentVoiceWasReady = false
+        try? ReaderNativeBridgeStore().writeLatestWebContext(webContext)
+        await nativeAgentVoice.start(context: NativeAgentVoiceContext())
+        startExternalNativeAgentControlPump()
+    }
+
+    private func startExternalNativeAgentControlPump() {
+        externalNativeAgentControlTask?.cancel()
+        externalNativeAgentControlTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let store = ReaderNativeBridgeStore()
+            while !Task.isCancelled && self.externalNativeAgentVoice {
+                do {
+                    for control in try store.consumeAgentControls() {
+                        switch control.command {
+                        case "stop":
+                            await self.nativeAgentVoice.stop()
+                            self.externalNativeAgentVoice = false
+                        case "speak":
+                            if let text = control.text {
+                                try await self.nativeAgentVoice.speak(
+                                    text,
+                                    mood: control.mood
+                                )
+                            }
+                        case "speak_done":
+                            try await self.nativeAgentVoice.finishSpeaking()
+                        case "cancel":
+                            await self.nativeAgentVoice.cancelSpeaking()
+                        default:
+                            break
+                        }
+                    }
+                } catch {
+                    self.publishExternalNativeAgentEvent(
+                        "error",
+                        payload: ReaderNativeAgentEventPayload(
+                            error: error.localizedDescription
+                        )
+                    )
+                }
+                try? await Task.sleep(nanoseconds: 250_000_000)
+            }
+            self.externalNativeAgentControlTask = nil
+        }
+    }
+
     func reload() {
         loadError = nil
         let request = URLRequest(
@@ -543,6 +602,14 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         )
     }
 
+    private func publishExternalNativeAgentEvent(
+        _ event: String,
+        payload: ReaderNativeAgentEventPayload = .init()
+    ) {
+        let store = ReaderNativeBridgeStore()
+        try? store.appendAgentEvent(event: event, payload: payload)
+    }
+
     private func isTrustedReaderURL(_ url: URL?) -> Bool {
         guard let url else { return false }
         return url.scheme?.lowercased()
@@ -584,13 +651,40 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             (phase, active, busy, speaking, detail) =
                 ("failed", false, false, false, message)
         }
-        sendNativeAgentVoiceEvent("state", payload: [
+        let payload: [String: Any] = [
             "phase": phase,
             "active": active,
             "busy": busy,
             "speaking": speaking,
             "detail": detail,
-        ])
+        ]
+        if externalNativeAgentVoice {
+            let status = ReaderNativeAgentStatus(
+                phase: phase,
+                active: active,
+                busy: busy,
+                speaking: speaking,
+                detail: detail.isEmpty ? nil : detail
+            )
+            let store = ReaderNativeBridgeStore()
+            try? store.writeAgentStatus(status)
+            publishExternalNativeAgentEvent(
+                "state",
+                payload: ReaderNativeAgentEventPayload(
+                    phase: phase,
+                    active: active,
+                    busy: busy,
+                    speaking: speaking,
+                    detail: detail
+                )
+            )
+            if phase == "idle" {
+                externalNativeAgentVoice = false
+                externalNativeAgentControlTask?.cancel()
+            }
+        } else {
+            sendNativeAgentVoiceEvent("state", payload: payload)
+        }
     }
 
     private func resolvedNativePencilAction(
@@ -846,7 +940,11 @@ extension ReaderWebViewModel: NativeAgentVoiceSessionDelegate {
         updateNativeAgentVoiceState()
         if state == .listening, !nativeAgentVoiceWasReady {
             nativeAgentVoiceWasReady = true
-            sendNativeAgentVoiceEvent("agent_ready")
+            if externalNativeAgentVoice {
+                publishExternalNativeAgentEvent("agent_ready")
+            } else {
+                sendNativeAgentVoiceEvent("agent_ready")
+            }
         } else if state == .idle {
             nativeAgentVoiceWasReady = false
         } else if case .failed = state {
@@ -858,37 +956,73 @@ extension ReaderWebViewModel: NativeAgentVoiceSessionDelegate {
         _ session: NativeAgentVoiceSession,
         didUpdateTranscript text: String
     ) {
-        sendNativeAgentVoiceEvent("asr", payload: ["text": text])
+        if externalNativeAgentVoice {
+            publishExternalNativeAgentEvent(
+                "asr",
+                payload: ReaderNativeAgentEventPayload(text: text)
+            )
+        } else {
+            sendNativeAgentVoiceEvent("asr", payload: ["text": text])
+        }
     }
 
     func nativeAgentVoiceSession(
         _ session: NativeAgentVoiceSession,
         didFinalizeUtterance text: String
     ) {
-        sendNativeAgentVoiceEvent("utterance", payload: ["text": text])
+        if externalNativeAgentVoice {
+            publishExternalNativeAgentEvent(
+                "utterance",
+                payload: ReaderNativeAgentEventPayload(text: text)
+            )
+        } else {
+            sendNativeAgentVoiceEvent("utterance", payload: ["text": text])
+        }
     }
 
     func nativeAgentVoiceSession(
         _ session: NativeAgentVoiceSession,
         didReceiveSpokenSegment text: String
     ) {
-        sendNativeAgentVoiceEvent("tts_seg", payload: ["text": text])
+        if externalNativeAgentVoice {
+            publishExternalNativeAgentEvent(
+                "tts_seg",
+                payload: ReaderNativeAgentEventPayload(text: text)
+            )
+        } else {
+            sendNativeAgentVoiceEvent("tts_seg", payload: ["text": text])
+        }
     }
 
     func nativeAgentVoiceSessionDidFinishSpeaking(
         _ session: NativeAgentVoiceSession
     ) {
-        sendNativeAgentVoiceEvent("tts_end")
+        if externalNativeAgentVoice {
+            publishExternalNativeAgentEvent("tts_end")
+        } else {
+            sendNativeAgentVoiceEvent("tts_end")
+        }
     }
 
     func nativeAgentVoiceSession(
         _ session: NativeAgentVoiceSession,
         didFail error: Error
     ) {
-        sendNativeAgentVoiceEvent(
-            "error",
-            payload: ["error": error.localizedDescription]
-        )
+        if externalNativeAgentVoice {
+            publishExternalNativeAgentEvent(
+                "error",
+                payload: ReaderNativeAgentEventPayload(
+                    error: error.localizedDescription
+                )
+            )
+            externalNativeAgentVoice = false
+            externalNativeAgentControlTask?.cancel()
+        } else {
+            sendNativeAgentVoiceEvent(
+                "error",
+                payload: ["error": error.localizedDescription]
+            )
+        }
     }
 }
 

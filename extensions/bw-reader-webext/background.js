@@ -53,7 +53,12 @@ const NATIVE_APP_IDENTIFIER = "space.bwicarus.bwreader2";
 const NATIVE_APP_ACTIONS = new Set([
   "capabilities",
   "voice.status",
-  "voice.toggle"
+  "voice.toggle",
+  "voice.context",
+  "agent.status",
+  "agent.toggle",
+  "agent.events",
+  "agent.command"
 ]);
 const NATIVE_APP_KINDS = new Set([
   "codex-desktop",
@@ -61,7 +66,26 @@ const NATIVE_APP_KINDS = new Set([
 ]);
 const NATIVE_APP_REQUEST_ID_RE = /^[A-Za-z0-9_-]{8,96}$/;
 const NATIVE_APP_MAX_SOURCE_URL_BYTES = 2048;
+const NATIVE_APP_MAX_TITLE_BYTES = 1024;
+const NATIVE_APP_MAX_VISIBLE_TEXT_BYTES = 32768;
 const NATIVE_APP_MAX_SELECTION_BYTES = 4096;
+const NATIVE_APP_MAX_AGENT_TEXT_BYTES = 32768;
+const NATIVE_APP_MAX_AGENT_MOOD_BYTES = 256;
+const NATIVE_APP_WEB_REVISION_RE = /^[a-f0-9]{16}$/;
+const NATIVE_APP_AGENT_COMMANDS = new Set([
+  "speak",
+  "speak_done",
+  "cancel"
+]);
+const NATIVE_APP_AGENT_EVENTS = new Set([
+  "state",
+  "agent_ready",
+  "asr",
+  "utterance",
+  "tts_seg",
+  "tts_end",
+  "error"
+]);
 const LOCAL_STORAGE_KEYS = new Set([
   "bwReaderExtensionPreferencesV2",
   "webHighlightsV1",
@@ -4538,10 +4562,67 @@ function nativeAppByteLength(value) {
   return new TextEncoder().encode(String(value || "")).byteLength;
 }
 
+function nativeAppExactKeys(value, required, optional = []) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const keys = Object.keys(value);
+  const requiredSet = new Set(required);
+  const allowed = new Set([...required, ...optional]);
+  return required.every((key) => Object.prototype.hasOwnProperty.call(value, key)) &&
+    keys.every((key) => allowed.has(key)) &&
+    keys.length >= requiredSet.size;
+}
+
 function nativeAppPublicError(message, code = "BW_NATIVE_APP_UNAVAILABLE") {
   return Object.assign(new Error(String(message || "BWReader App 暂时不可用")), {
     code: String(code || "BW_NATIVE_APP_UNAVAILABLE")
   });
+}
+
+function nativeAppWebContext(value, sender) {
+  if (!nativeAppExactKeys(
+    value,
+    ["url", "title", "visibleText", "selection", "revision"]
+  )) {
+    throw nativeAppPublicError(
+      "网页上下文格式无效",
+      "BW_NATIVE_APP_WEB_CONTEXT_INVALID"
+    );
+  }
+  const senderURL = String(sender?.tab?.url || "");
+  let trustedURL;
+  try { trustedURL = new URL(senderURL); } catch (_) { trustedURL = null; }
+  if (
+    !trustedURL ||
+    !["http:", "https:"].includes(trustedURL.protocol) ||
+    trustedURL.username ||
+    trustedURL.password ||
+    nativeAppByteLength(senderURL) > NATIVE_APP_MAX_SOURCE_URL_BYTES ||
+    typeof value.url !== "string" ||
+    typeof value.title !== "string" ||
+    typeof value.visibleText !== "string" ||
+    typeof value.selection !== "string" ||
+    typeof value.revision !== "string" ||
+    nativeAppByteLength(value.url) > NATIVE_APP_MAX_SOURCE_URL_BYTES ||
+    nativeAppByteLength(value.title) > NATIVE_APP_MAX_TITLE_BYTES ||
+    nativeAppByteLength(value.visibleText) > NATIVE_APP_MAX_VISIBLE_TEXT_BYTES ||
+    nativeAppByteLength(value.selection) > NATIVE_APP_MAX_SELECTION_BYTES ||
+    !NATIVE_APP_WEB_REVISION_RE.test(value.revision)
+  ) {
+    throw nativeAppPublicError(
+      "网页上下文格式无效",
+      "BW_NATIVE_APP_WEB_CONTEXT_INVALID"
+    );
+  }
+  // The page may race a same-document navigation between collection and
+  // delivery. Never trust its URL field; bind the context to Safari's
+  // authenticated top-level sender instead.
+  return {
+    url: senderURL,
+    title: value.title,
+    visibleText: value.visibleText,
+    selection: value.selection,
+    revision: value.revision
+  };
 }
 
 function nativeAppRequestPayload(message, sender) {
@@ -4559,12 +4640,22 @@ function nativeAppRequestPayload(message, sender) {
       "BW_NATIVE_APP_REQUEST_INVALID"
     );
   }
-  const allowed = new Set(["type", "action", "requestId"]);
-  if (action === "voice.toggle") {
-    allowed.add("appKind");
-    allowed.add("selectionText");
+  const base = ["type", "action", "requestId"];
+  let required = base;
+  let optional = [];
+  if (action === "voice.toggle") required = [...base, "appKind", "webContext"];
+  if (action === "voice.context") required = [...base, "webContext"];
+  if (action === "agent.toggle") required = [...base, "command"];
+  if (action === "agent.events") required = [...base, "after"];
+  if (action === "agent.command") required = [...base, "command"];
+  if (action === "agent.toggle" && message.command === "start") {
+    required = [...required, "webContext"];
   }
-  if (Object.keys(message).some((key) => !allowed.has(key))) {
+  if (action === "agent.command" && message.command === "speak") {
+    required = [...required, "text"];
+    optional = ["mood"];
+  }
+  if (!nativeAppExactKeys(message, required, optional)) {
     throw nativeAppPublicError(
       "BWReader App 请求字段无效",
       "BW_NATIVE_APP_REQUEST_INVALID"
@@ -4575,29 +4666,66 @@ function nativeAppRequestPayload(message, sender) {
     action,
     requestId
   };
-  if (action !== "voice.toggle") return payload;
-
-  const appKind = String(message.appKind || "");
-  if (!NATIVE_APP_KINDS.has(appKind)) {
-    throw nativeAppPublicError(
-      "电脑客户端目标无效",
-      "BW_NATIVE_APP_KIND_INVALID"
-    );
-  }
-  payload.appKind = appKind;
-  const sourceURL = String(sender?.url || sender?.tab?.url || "");
-  if (/^https?:\/\//i.test(sourceURL) && nativeAppByteLength(sourceURL) <= NATIVE_APP_MAX_SOURCE_URL_BYTES) {
-    payload.sourceURL = sourceURL;
-  }
-  if (message.selectionText != null) {
-    const selectionText = String(message.selectionText);
-    if (nativeAppByteLength(selectionText) > NATIVE_APP_MAX_SELECTION_BYTES) {
+  if (action === "voice.toggle") {
+    const appKind = String(message.appKind || "");
+    if (!NATIVE_APP_KINDS.has(appKind)) {
       throw nativeAppPublicError(
-        "当前选中文字过长，无法交给 BWReader App",
-        "BW_NATIVE_APP_SELECTION_TOO_LARGE"
+        "电脑客户端目标无效",
+        "BW_NATIVE_APP_KIND_INVALID"
       );
     }
-    if (selectionText) payload.selectionText = selectionText;
+    payload.appKind = appKind;
+    payload.webContext = nativeAppWebContext(message.webContext, sender);
+  } else if (action === "voice.context") {
+    payload.webContext = nativeAppWebContext(message.webContext, sender);
+  } else if (action === "agent.toggle") {
+    const command = String(message.command || "");
+    if (command !== "start" && command !== "stop") {
+      throw nativeAppPublicError(
+        "原生语音开关命令无效",
+        "BW_NATIVE_AGENT_COMMAND_INVALID"
+      );
+    }
+    payload.command = command;
+    if (command === "start") {
+      payload.webContext = nativeAppWebContext(message.webContext, sender);
+    }
+  } else if (action === "agent.events") {
+    const after = Number(message.after);
+    if (!Number.isSafeInteger(after) || after < 0) {
+      throw nativeAppPublicError(
+        "原生语音事件游标无效",
+        "BW_NATIVE_AGENT_CURSOR_INVALID"
+      );
+    }
+    payload.after = after;
+  } else if (action === "agent.command") {
+    const command = String(message.command || "");
+    if (!NATIVE_APP_AGENT_COMMANDS.has(command)) {
+      throw nativeAppPublicError(
+        "原生语音命令无效",
+        "BW_NATIVE_AGENT_COMMAND_INVALID"
+      );
+    }
+    payload.command = command;
+    if (command === "speak") {
+      if (
+        typeof message.text !== "string" ||
+        !message.text.trim() ||
+        nativeAppByteLength(message.text) > NATIVE_APP_MAX_AGENT_TEXT_BYTES ||
+        (message.mood != null && (
+          typeof message.mood !== "string" ||
+          nativeAppByteLength(message.mood) > NATIVE_APP_MAX_AGENT_MOOD_BYTES
+        ))
+      ) {
+        throw nativeAppPublicError(
+          "原生语音朗读命令无效",
+          "BW_NATIVE_AGENT_COMMAND_INVALID"
+        );
+      }
+      payload.text = message.text;
+      if (message.mood != null) payload.mood = message.mood;
+    }
   }
   return payload;
 }
@@ -4674,6 +4802,8 @@ function normalizeNativeAppState(raw) {
     phase,
     active: raw.active === true,
     busy: raw.busy === true,
+    speaking: raw.speaking === true,
+    detail: String(raw.detail || "").slice(0, 240),
     updatedAt: String(raw.updatedAt || "").slice(0, 80)
   };
   if (raw.sessionId != null) {
@@ -4751,6 +4881,32 @@ function normalizeNativeAppResponse(response, payload) {
     normalized.launchScheme = "bwreader";
     return normalized;
   }
+  if (payload.action === "agent.events") {
+    if (!Array.isArray(response.events) || !Number.isSafeInteger(Number(response.cursor))) {
+      throw nativeAppPublicError(
+        "BWReader App 原生语音事件无效",
+        "BW_NATIVE_APP_RESPONSE_INVALID"
+      );
+    }
+    normalized.events = response.events.map((item) => {
+      const sequence = Number(item?.sequence);
+      const event = String(item?.event || "");
+      if (
+        !Number.isSafeInteger(sequence) || sequence < 1 ||
+        !/^[a-z][a-z0-9_]{1,31}$/.test(event) ||
+        !item.payload || typeof item.payload !== "object" ||
+        Array.isArray(item.payload)
+      ) {
+        throw nativeAppPublicError(
+          "BWReader App 原生语音事件无效",
+          "BW_NATIVE_APP_RESPONSE_INVALID"
+        );
+      }
+      return { sequence, event, payload: item.payload };
+    });
+    normalized.cursor = Number(response.cursor);
+    return normalized;
+  }
   normalized.state = normalizeNativeAppState(response.state);
   if (payload.action === "voice.toggle") {
     const expectedLaunchURL = `bwreader://native-voice?requestId=${encodeURIComponent(payload.requestId)}`;
@@ -4762,6 +4918,15 @@ function normalizeNativeAppResponse(response, payload) {
     }
     normalized.launchURL = expectedLaunchURL;
     normalized.opened = response.opened === true;
+  } else if (payload.action === "agent.toggle" && payload.command === "start") {
+    const expectedLaunchURL = `bwreader://native-agent?requestId=${encodeURIComponent(payload.requestId)}`;
+    if (response.launchURL !== expectedLaunchURL) {
+      throw nativeAppPublicError(
+        "BWReader App Realtime 启动地址无效",
+        "BW_NATIVE_APP_RESPONSE_INVALID"
+      );
+    }
+    normalized.launchURL = expectedLaunchURL;
   }
   return normalized;
 }
