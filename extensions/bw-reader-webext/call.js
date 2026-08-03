@@ -39,9 +39,23 @@ const fetchLog = [];
     // stops it from taking the call down. A synthetic JSON response lets
     // ctxSync's .then(r => r.json()) finish normally instead of rejecting.
     if (url.indexOf("/pdf/api/context-sync") !== -1) {
-      if (fetchLog.length < 12) fetchLog.push(`(已拦截) ${url}`);
+      // The caller verifies the reply against what it asked for -- ok, plus the
+      // same enabled and deliveryMode it sent -- so the request body is echoed
+      // back. A flat refusal fails that check (BW_READER_CONTEXT_MODE_ACK).
+      //
+      // The acknowledgement is honest at the level that matters here: the mode
+      // being negotiated is how the Pi should relay context, and this page does
+      // not route context through the Pi at all. It writes the snapshot locally
+      // and the bridge collects it over the socket. So whatever mode is asked
+      // for is, trivially, in effect.
+      let echo = { ok: true };
+      try {
+        const sent = init && init.body ? JSON.parse(String(init.body)) : {};
+        echo = { ok: true, enabled: sent.enabled, deliveryMode: sent.deliveryMode };
+      } catch (_) {}
+      if (fetchLog.length < 12) fetchLog.push(`(已拦截,回显) ${url}`);
       return Promise.resolve(
-        new Response('{"ok":false,"skipped":"extension-page"}', {
+        new Response(JSON.stringify(echo), {
           status: 200,
           headers: { "Content-Type": "application/json" },
         })
