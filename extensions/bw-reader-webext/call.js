@@ -151,33 +151,31 @@ function publishContext(ctx) {
     // cannot be inferred from the current origin.
     if (typeof RC.ctxSync.setBase === "function") RC.ctxSync.setBase(READER_ORIGIN);
 
-    if (typeof RC.ctxSync.enabled === "function" && !RC.ctxSync.enabled()) {
-      // Deliberately NOT setEnabled(): that also POSTs the flag to the Pi with
-      // credentials, to sync the preference across devices. From this origin
-      // that request cannot succeed -- the Pi does not recognise
-      // safari-web-extension:// -- and 1.0.9 died on exactly that as
-      // "TypeError: Load failed", taking the call down with it.
-      //
-      // The flag itself lives in localStorage and is all report() consults;
-      // the cross-device sync is irrelevant here, because this context travels
-      // to Windows over the bridge socket, not through the Pi.
-      try {
-        if (RC.ctxSync.LS_KEY) localStorage.setItem(RC.ctxSync.LS_KEY, "1");
-      } catch (_) {}
-      if (typeof RC.ctxSync.enabled === "function" && !RC.ctxSync.enabled()) {
-        return "✗ 无法启用上下文开关";
-      }
-    }
+    // Neither setEnabled() nor report() is used, and both were tried: each ends
+    // in a request to the Pi that this origin cannot make. setEnabled POSTs the
+    // preference; report() finishes with _ctxSchedule(), queueing the upload
+    // that feeds the Pi→Windows snapshot path. Both surfaced as
+    // "TypeError: Load failed" and took the call down with them (1.0.9, 1.0.10).
+    //
+    // That upload path is not how this context reaches Windows. The bridge polls
+    // localActiveReadingSnapshot(), which reads _state().pend directly and sends
+    // it over the socket as active-reading -- no network of its own, and it does
+    // not consult the enable flag either. So the snapshot is written straight
+    // in, and the Pi is left out of a conversation it is not part of.
+    const state = typeof RC.ctxSync._state === "function" ? RC.ctxSync._state() : null;
+    if (!state) return "✗ 无法访问 ctxSync 状态";
 
-    const ok = RC.ctxSync.report({
+    state.pend = {
       kind: "web",
       url: ctx.url,
       title: ctx.title || "",
       text: ctx.text || "",
       selection: ctx.selection || "",
-      reason: "call",
-    });
-    return ok ? "✓ 已上报" : "✗ report 被拒(开关或 base)";
+    };
+    // Stale canonical belongs to whatever document was described before; leaving
+    // it attached is how one page's title ends up on another's content.
+    state.canonical = null;
+    return "✓ 已就绪(直填快照)";
   } catch (err) {
     return "✗ " + describe(err);
   }
