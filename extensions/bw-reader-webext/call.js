@@ -12,6 +12,7 @@
 import { ContextLink } from "./ctxlink.js";
 
 const els = {
+  btn: document.getElementById("asst-computer"),
   status: document.getElementById("status"),
   detail: document.getElementById("detail"),
   ctxTitle: document.getElementById("ctxTitle"),
@@ -92,5 +93,72 @@ if (chrome.runtime?.onMessage) {
     }
   } catch (_) {}
 })();
+
+// --- placing a call from here ------------------------------------------------
+// Either side may start it, and whoever does holds it: the other end only sends
+// context and never asks for audio, so switching between them no longer drops
+// the call. Before, both tried to own the one voice link and each switch evicted
+// the other.
+let voiceActive = false;
+
+function voiceReady() {
+  const RC = window.RC;
+  if (!RC?.computerVoice?.startFromUserGesture) return "✗ 语音模块未加载";
+  // The capture listener consults this first; without rc-voicecall it returns
+  // early and no audio lease is ever taken, which only surfaces later as
+  // GESTURE_REQUIRED at the moment of dialling.
+  try {
+    if (RC.voicecall?.canCaptureComputerVoiceGesture?.() !== true) {
+      return "✗ 手势许可未通过";
+    }
+  } catch (err) {
+    return "✗ " + describe(err);
+  }
+  // Rejected silently on any mismatch -- wrong id, wrong type, detached node --
+  // so the boolean is checked rather than assumed.
+  if (!RC.computerVoice.registerComputerButton(els.btn)) return "✗ 按钮注册被拒";
+  return null;
+}
+
+if (els.btn) {
+  const problem = voiceReady();
+  if (problem) {
+    els.btn.disabled = true;
+    els.btn.textContent = problem;
+  }
+
+  els.btn.addEventListener("click", async () => {
+    const RC = window.RC;
+    els.btn.disabled = true;
+    try {
+      if (voiceActive) {
+        await RC.computerVoice.stop();
+        voiceActive = false;
+        els.btn.textContent = "开始通话";
+        els.btn.classList.remove("stop");
+      } else {
+        await RC.computerVoice.startFromUserGesture({});
+        voiceActive = true;
+        els.btn.textContent = "结束通话";
+        els.btn.classList.add("stop");
+      }
+    } catch (err) {
+      // A busy bridge is the ordinary case, not a fault: the App may already be
+      // holding the call, and then there is nothing to start here.
+      note("通话: " + describe(err));
+    }
+    els.btn.disabled = false;
+  });
+
+  // The bridge can end the call on its own; without this the button would go on
+  // claiming it is live.
+  window.RC?.computerVoice?.onStatus?.((s) => {
+    if (voiceActive && s?.active === false) {
+      voiceActive = false;
+      els.btn.textContent = "开始通话";
+      els.btn.classList.remove("stop");
+    }
+  });
+}
 
 window.addEventListener("pagehide", () => link.close());

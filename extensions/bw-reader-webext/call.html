@@ -39,6 +39,15 @@
     word-break: break-all;
   }
 
+  button {
+    -webkit-appearance: none; appearance: none; width: 100%;
+    border: 0; border-radius: 12px; padding: 15px; margin-bottom: 14px;
+    font: 600 16px/1 -apple-system, system-ui, sans-serif;
+    background: #0a84ff; color: #fff;
+  }
+  button:disabled { opacity: .45; }
+  button.stop { background: #ff453a; }
+
   #status { font-size: 14px; min-height: 1.6em; }
   .ok  { color: #30d158; }
   .err { color: #ff453a; }
@@ -62,20 +71,33 @@
   }
 </style>
 
-<h1>上下文桥</h1>
-<div class="sub">把你正在看的页面告诉 Windows 上的助手</div>
+<h1>电脑语音</h1>
+<div class="sub">直接连接 Windows,并跟随你正在看的页面</div>
 
 <div class="card">
   <div class="ctx-title" id="ctxTitle">等待页面…</div>
   <div class="ctx-url" id="ctxUrl"></div>
 </div>
 
+<!-- Same id as the reader's own computer button, and not by coincidence:
+     registerComputerButton accepts only #asst-computer or #vc-top-computer, and
+     the capture-phase listener matches the click against that same set before
+     it will take an audio lease. -->
+<button id="asst-computer" type="button">开始通话</button>
 <div id="status" class="dim">正在连接…</div>
 <pre id="detail"></pre>
 
 <div class="hint">
-  语音由 App 负责,这里只送上下文。<br>
-  保持本页开着,换标签、滚动、选中都会自动跟随。
+  在这里或 App 里启动都可以 —— 谁先启动谁持有,另一端只送上下文,切换不会断。<br>
+  换标签、滚动、选中都会自动跟随。
 </div>
 
+<!-- Loaded again because this page can once more place a call. Order follows
+     the dependency chain: rc-core defines RC; rc-voicecall supplies
+     canCaptureComputerVoiceGesture, without which the capture listener returns
+     early and no audio lease is ever taken; rc-computer-voice owns the bridge
+     protocol. Classic scripts, so they run before the module below. -->
+<script src="vendor/rc-core.js"></script>
+<script src="vendor/rc-voicecall.js"></script>
+<script src="vendor/rc-computer-voice.js"></script>
 <script type="module" src="call.js"></script>
