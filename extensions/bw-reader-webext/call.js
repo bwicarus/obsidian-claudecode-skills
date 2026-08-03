@@ -25,6 +25,29 @@ const fetchLog = [];
   const original = window.fetch.bind(window);
   window.fetch = function (input, init) {
     const url = String((input && input.url) || input || "").slice(0, 120);
+
+    // ctxSync's upload, short-circuited rather than attempted.
+    //
+    // It feeds the Pi→Windows snapshot path, which this page does not use: the
+    // context here is written straight into the local snapshot and travels over
+    // the bridge socket. And it could never succeed anyway -- the request
+    // carries credentials:'include', while the extension authenticates with a
+    // device token and holds no Pi cookie, so the best case was always a 401.
+    //
+    // Setting a base was the tidier fix and did not take; with three builds
+    // already spent on this one request, blocking it outright is what actually
+    // stops it from taking the call down. A synthetic JSON response lets
+    // ctxSync's .then(r => r.json()) finish normally instead of rejecting.
+    if (url.indexOf("/pdf/api/context-sync") !== -1) {
+      if (fetchLog.length < 12) fetchLog.push(`(已拦截) ${url}`);
+      return Promise.resolve(
+        new Response('{"ok":false,"skipped":"extension-page"}', {
+          status: 200,
+          headers: { "Content-Type": "application/json" },
+        })
+      );
+    }
+
     return original(input, init).then(
       (res) => {
         if (fetchLog.length < 12) fetchLog.push(`${res.status} ${url}`);
