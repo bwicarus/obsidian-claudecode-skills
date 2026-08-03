@@ -442,7 +442,12 @@ async function useLegacyDelivery() {
     els.btn.disabled = true;
     return;
   }
-  els.detail.textContent += "\n交付模式 " + (await useLegacyDelivery());
+  // Deliberately left on snapshot-mcp. Switching to legacy-inject did make the
+  // module pull the journal this page can answer, but the two modes are
+  // different delivery mechanisms, not better and worse ones: the Windows
+  // snapshot view exists only under snapshot-mcp. Legacy traded a working
+  // feature (position, selection, freshness -- all visible and correct) for one
+  // that did not arrive anyway. Keeping the mode the bridge was configured for.
   const ctx = await loadContext();
   if (!ctx) {
     els.ctxTitle.textContent = "（未取得网页上下文）";
