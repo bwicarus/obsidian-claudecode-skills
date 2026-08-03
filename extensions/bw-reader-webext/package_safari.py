@@ -105,10 +105,25 @@ def safari_manifest(*, compat: bool = False) -> dict:
     # request to the containing BWReader app.  The app remains the sole owner of
     # microphone/audio/WSS; the extension never starts a second voice runtime.
     # offscreen remains Windows-Chrome-only.
+    # activeTab + scripting let the popup read the page it was opened over, at
+    # the moment the user opens it, and only then. The alternative -- a listener
+    # living in every page's content script -- was tried and broke the popup
+    # outright on ordinary sites; nothing permanent should be added to every page
+    # for something needed once per call.
+    #
+    # activeTab is granted by the click itself and expires with it, so this is
+    # narrower than a host permission despite reading arbitrary pages.
     manifest["permissions"] = (
         ["storage", "alarms", "nativeMessaging"]
         if compat
-        else ["storage", "alarms", "nativeMessaging", "unlimitedStorage"]
+        else [
+            "storage",
+            "alarms",
+            "nativeMessaging",
+            "unlimitedStorage",
+            "activeTab",
+            "scripting",
+        ]
     )
     manifest["host_permissions"] = [ACTIVE_ORIGIN + "*"]
     manifest["background"] = (
@@ -194,6 +209,8 @@ def validate(manifest: dict, *, compat: bool = False) -> None:
         "alarms",
         "nativeMessaging",
         "unlimitedStorage",
+        "activeTab",
+        "scripting",
     }
     permissions = manifest.get("permissions") or []
     if len(permissions) != len(expected_permissions) or set(permissions) != expected_permissions:

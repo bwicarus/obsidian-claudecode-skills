@@ -172,10 +172,31 @@ if (voiceButton && voiceStatus) {
       // A failure here is not fatal -- the call still works, the assistant just
       // knows which page it is rather than what it says -- so it degrades
       // instead of blocking the call.
+      // Injected for this one call, into the tab the user just opened the popup
+      // over. Replaces the previous approach of a permanent listener in every
+      // page's content script, which broke the popup on ordinary sites.
       let page = null;
-      if (tab?.id != null) {
+      if (tab?.id != null && chrome.scripting?.executeScript) {
         try {
-          page = await chrome.tabs.sendMessage(tab.id, { type: "BW_VOICE_PAGE_CONTEXT" });
+          const [result] = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: () => {
+              // innerText, not textContent: it honours display:none and reads in
+              // visual order, keeping nav chrome and inline scripts out.
+              const raw = String(document.body?.innerText || "");
+              const text = raw.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+              let selection = "";
+              try {
+                selection = String(window.getSelection() || "").trim();
+              } catch (_) {}
+              return {
+                // Bounded so a long page cannot exceed the bridge's message ceiling.
+                text: text.slice(0, 12000),
+                selection: selection.slice(0, 2000),
+              };
+            },
+          });
+          page = result?.result || null;
         } catch {
           page = null;
         }
