@@ -35,6 +35,9 @@ targets:
         MARKETING_VERSION: "0.2.3"
         PRODUCT_BUNDLE_IDENTIFIER: space.bwicarus.bwreader2
         PRODUCT_NAME: bwicarus-test
+        # XcodeGen's application preset defaults to universal and overrides
+        # project-level values, so keep the container explicitly iPad-only.
+        TARGETED_DEVICE_FAMILY: "2"
     dependencies:
       - target: BWReaderSafariExtension
         embed: true
