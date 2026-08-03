@@ -68,6 +68,12 @@ if (window.__bwPwaProviderOnly) return;
   var EXTENSION_RELAY_PORT = "BW_COMPUTER_VOICE_DIRECT_V3";
   var DIRECT_ENDPOINT =
     "wss://bwicarus-2.taile44d0c.ts.net/reader-computer-voice/v1";
+  // Context only: many connections may share it, it takes no part in audio
+  // ownership, and it refuses START/STOP outright. Used for the snapshot link
+  // inside the App, where Swift already owns the voice and a second connection
+  // on the voice endpoint would evict it.
+  var CONTEXT_ENDPOINT =
+    "wss://bwicarus-2.taile44d0c.ts.net/reader-context/v1";
   var STATUS_STATES = Object.freeze({
     idle: true,
     ready: true,
@@ -767,8 +773,12 @@ if (window.__bwPwaProviderOnly) return;
         false
       );
     }
+    // Still a fixed allowlist, now with two members rather than one. The second
+    // is the context-only endpoint, which accepts concurrent connections and
+    // refuses START/STOP -- so admitting it cannot widen what a page may do.
     if (
-      url.toString() !== DIRECT_ENDPOINT
+      url.toString() !== DIRECT_ENDPOINT &&
+      url.toString() !== CONTEXT_ENDPOINT
     ) {
       throw directError(
         "只允许已固定的 Windows 电脑语音 WSS 地址",
@@ -2757,7 +2767,10 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   function openDirect(options, onCreate) {
-    var channel = new DirectSocket(DIRECT_ENDPOINT, options);
+    // Defaults to the voice endpoint, so every existing caller is unaffected.
+    // Only the snapshot link inside the App passes anything else.
+    var endpoint = (options && options.endpoint) || DIRECT_ENDPOINT;
+    var channel = new DirectSocket(endpoint, options);
     if (typeof onCreate === "function") onCreate(channel);
     return channel.open().then(function () {
       return hello(channel);
@@ -4667,6 +4680,18 @@ if (window.__bwPwaProviderOnly) return;
     };
     snapshotLink = state;
     var work = openDirect({
+      // Inside the App, Swift owns the voice link end to end. This snapshot
+      // connection bypassed the gesture guard and opened on the voice endpoint
+      // anyway, and the bridge admits one owner -- so every switch back to the
+      // reader evicted the native call. On the context endpoint it cannot: that
+      // one is shared and refuses START/STOP.
+      //
+      // Elsewhere the flag is absent and this stays on the voice endpoint,
+      // which matters for the web Reader on the Pi: it has no native voice and
+      // still has to dial for itself.
+      endpoint: window.__BW_NATIVE_COMPUTER_VOICE__ === true
+        ? CONTEXT_ENDPOINT
+        : DIRECT_ENDPOINT,
       onFatal: function (error) {
         if (snapshotLink !== state || state.stopped) return;
         contextDeliveryMode = null;
