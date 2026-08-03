@@ -42,11 +42,20 @@
   var _nativeAgent = { phase: 'idle', active: false, busy: false, speaking: false };
   var _nativeAgentWatchdog = null;
   var _nativeAgentWatchdogKind = '';
+  function _extensionNativeAgentBridge() {
+    try {
+      var bridge = window.__bwNativeAgentVoiceExtensionBridge;
+      return bridge && typeof bridge.available === 'function' &&
+        bridge.available() === true && typeof bridge.post === 'function'
+          ? bridge : null;
+    } catch (e) { return null; }
+  }
   function _nativeAgentAvailable() {
     try {
-      return window.__BW_NATIVE_AGENT_VOICE__ === true &&
+      var appWebView = window.__BW_NATIVE_AGENT_VOICE__ === true &&
         !!(window.webkit && window.webkit.messageHandlers &&
            window.webkit.messageHandlers.bwNativeAgentVoice);
+      return appWebView || !!_extensionNativeAgentBridge();
     } catch (e) { return false; }
   }
   function _nativeAgentEngaged() {
@@ -85,7 +94,18 @@
   function _nativeAgentPost(body) {
     if (!_nativeAgentAvailable()) return false;
     try {
-      window.webkit.messageHandlers.bwNativeAgentVoice.postMessage(body);
+      if (window.webkit && window.webkit.messageHandlers &&
+          window.webkit.messageHandlers.bwNativeAgentVoice) {
+        window.webkit.messageHandlers.bwNativeAgentVoice.postMessage(body);
+        return true;
+      }
+      var bridge = _extensionNativeAgentBridge();
+      if (!bridge) return false;
+      bridge.post(body).catch(function (error) {
+        _nativeAgentResetLocal(
+          (error && error.message) || 'BWReader App 原生语音请求失败'
+        );
+      });
       return true;
     } catch (e) { return false; }
   }

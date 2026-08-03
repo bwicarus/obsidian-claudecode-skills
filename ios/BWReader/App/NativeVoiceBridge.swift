@@ -260,15 +260,20 @@ final class NativeVoiceBridge: ObservableObject {
         )
 
         do {
-            guard await requestMicrophonePermission() else {
-                throw BridgeFailure.microphoneDenied
-            }
-            try requireCurrent(generation)
             if safariWebContext == nil {
                 guard let reader else {
                     throw BridgeFailure.readerNotReady
                 }
+                guard await requestMicrophonePermission() else {
+                    throw BridgeFailure.microphoneDenied
+                }
+                try requireCurrent(generation)
                 try await reader.prepareForNativeVoice()
+                try requireCurrent(generation)
+            } else {
+                guard await requestMicrophonePermission() else {
+                    throw BridgeFailure.microphoneDenied
+                }
                 try requireCurrent(generation)
             }
 

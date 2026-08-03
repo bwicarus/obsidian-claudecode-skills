@@ -2,7 +2,7 @@ import Foundation
 import MediaPlayer
 import Network
 
-let nativeAppBuildVersion = "1.0.2.1"
+let nativeAppBuildVersion = "1.0.3.1"
 
 struct NativeVoiceDiagnosticEntry: Identifiable, Equatable {
     let id = UUID()

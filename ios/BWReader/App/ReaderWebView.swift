@@ -475,9 +475,13 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             guard let bridge else {
                 return
             }
+            self.externalNativeAgentVoice = false
+            self.externalNativeAgentControlTask?.cancel()
+            self.externalNativeAgentControlTask = nil
             if self.nativeAgentVoice.state != .idle {
                 await self.nativeAgentVoice.stop()
             }
+            _ = try? ReaderNativeBridgeStore().consumeAgentControls()
             switch bridge.state.phase {
             case .idle, .failed:
                 await bridge.start(appKind: appKind)
