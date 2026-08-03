@@ -29,10 +29,10 @@ targets:
       base:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
         ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
-        CURRENT_PROJECT_VERSION: "3"
+        CURRENT_PROJECT_VERSION: "1"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: App/Info.plist
-        MARKETING_VERSION: "0.2.3"
+        MARKETING_VERSION: "0.3"
         PRODUCT_BUNDLE_IDENTIFIER: space.bwicarus.bwreader2
         PRODUCT_NAME: bwicarus-test
         # XcodeGen's application preset defaults to universal and overrides
@@ -85,10 +85,10 @@ targets:
       base:
         APPLICATION_EXTENSION_API_ONLY: YES
         COMPRESS_PNG_FILES: NO
-        CURRENT_PROJECT_VERSION: "3"
+        CURRENT_PROJECT_VERSION: "1"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Extension/Info.plist
-        MARKETING_VERSION: "0.2.3"
+        MARKETING_VERSION: "0.3"
         PRODUCT_BUNDLE_IDENTIFIER: space.bwicarus.bwreader2.Extension
         PRODUCT_MODULE_NAME: BWReaderSafariExtension
         PRODUCT_NAME: BWReaderSafariExtension
