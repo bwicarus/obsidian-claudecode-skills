@@ -1,0 +1,85 @@
+<!DOCTYPE html>
+<!--
+  In-extension voice call surface.
+
+  This page exists because of two measured facts, not a guess: extension pages
+  (unlike content scripts) can obtain getUserMedia, and they can open a
+  WebSocket to the Windows bridge host directly. Both were verified on device
+  before this file was written.
+
+  Consequently the call runs entirely here. There is no native message, no App
+  Group file, no deep link, and no containing App involved. The previous design
+  routed every call through seven such hops, where any one of them failing
+  surfaced only as "cannot connect" with nothing to inspect.
+
+  What this page cannot do is survive backgrounding: iOS suspends extension
+  pages when the user leaves. Handing a live call over to the App is a separate,
+  later step -- it is only worth building once this path is known to work, so
+  that a handover failure cannot be confused with a connection failure.
+-->
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>电脑语音</title>
+<style>
+  :root { color-scheme: light dark; }
+  body {
+    margin: 0; padding: 20px 18px calc(20px + env(safe-area-inset-bottom));
+    font: 15px/1.6 -apple-system, system-ui, sans-serif;
+    background: Canvas; color: CanvasText;
+  }
+  h1 { font-size: 17px; margin: 0 0 4px; }
+  .sub { color: color-mix(in srgb, CanvasText 55%, transparent); font-size: 13px; margin-bottom: 18px; }
+
+  .card {
+    border: 1px solid color-mix(in srgb, CanvasText 15%, transparent);
+    border-radius: 12px; padding: 14px; margin-bottom: 14px;
+  }
+  .ctx-title { font-weight: 600; margin-bottom: 2px; word-break: break-word; }
+  .ctx-url {
+    font-size: 12px; color: color-mix(in srgb, CanvasText 50%, transparent);
+    word-break: break-all;
+  }
+
+  button {
+    -webkit-appearance: none; appearance: none; width: 100%;
+    border: 0; border-radius: 12px; padding: 15px;
+    font: 600 16px/1 -apple-system, system-ui, sans-serif;
+    background: #0a84ff; color: #fff;
+  }
+  button:disabled { opacity: .45; }
+  button.stop { background: #ff453a; }
+
+  #status { margin-top: 14px; font-size: 14px; min-height: 1.6em; }
+  .ok  { color: #30d158; }
+  .err { color: #ff453a; }
+
+  /* Failures here must be readable on the device itself. Asking the user to
+     relay a console they cannot open is how the previous three builds burned
+     a TestFlight round each without producing a single usable detail. */
+  #detail {
+    margin-top: 12px; padding: 10px; border-radius: 8px; display: none;
+    background: color-mix(in srgb, CanvasText 7%, transparent);
+    font: 11px/1.45 ui-monospace, Menlo, monospace;
+    white-space: pre-wrap; word-break: break-all;
+    max-height: 40vh; overflow: auto;
+  }
+</style>
+
+<h1>电脑语音</h1>
+<div class="sub">直接连接 Windows,不经过 App</div>
+
+<div class="card">
+  <div class="ctx-title" id="ctxTitle">（未取得网页上下文）</div>
+  <div class="ctx-url" id="ctxUrl"></div>
+</div>
+
+<button id="btn">开始通话</button>
+<div id="status"></div>
+<pre id="detail"></pre>
+
+<!-- Load order matters: rc-core defines the RC namespace plus ctxSync/toast
+     that rc-computer-voice probes for. Every such cross-module call is guarded
+     by a typeof check, so a partial namespace degrades rather than throws. -->
+<script src="vendor/rc-core.js"></script>
+<script src="vendor/rc-computer-voice.js"></script>
+<script src="call.js"></script>

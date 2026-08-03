@@ -24,7 +24,18 @@ from PIL import Image
 
 HERE = Path(__file__).resolve().parent
 EXTENSIONS = HERE.parent
-ROOT_FILES = ("background.js", "content.js", "popup.html", "popup.js")
+# call.html/call.js host the voice call in an extension page of its own. They
+# need no manifest declaration -- web_accessible_resources governs what web
+# pages may reach, and the extension opening its own page is not that -- but
+# this list is a whitelist, so anything omitted here simply never ships.
+ROOT_FILES = (
+    "background.js",
+    "content.js",
+    "popup.html",
+    "popup.js",
+    "call.html",
+    "call.js",
+)
 ROOT_DIRS = ("src", "vendor", "icons")
 BACKGROUND_SCRIPTS = (
     "vendor/reader-runtime-account-context.js",

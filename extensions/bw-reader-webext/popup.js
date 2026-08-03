@@ -151,91 +151,38 @@ testButton.addEventListener("click", async () => {
   }
 });
 
-// 一次性诊断:确认扩展自身页面(safari-web-extension:// 源)能否取得麦克风。
-// content script 拿不到 getUserMedia 是确定的,但扩展页面不是 content script。
-// 若这里能拿到,Safari Realtime 就能整个留在扩展内完成,不必经 App Group +
-// deep link 那条多跳桥 —— 那条桥用户实测几乎每次失败。
-// 结论出来后这段应当移除。
-const micButton = document.getElementById("mic-test");
-const micStatus = document.getElementById("mic-status");
-if (micButton && micStatus) {
-  micButton.addEventListener("click", async () => {
-    micButton.disabled = true;
-    micStatus.textContent = "请求中…";
-    let stream = null;
+// Both one-off probes that stood here have served their purpose: extension
+// pages can obtain the microphone, and they can open a WebSocket to the bridge
+// host without any manifest change. Those two results are what justify running
+// the call in the extension instead of handing it to the App, so the probes are
+// gone and the real entry point takes their place.
+const voiceButton = document.getElementById("voice-open");
+const voiceStatus = document.getElementById("voice-status");
+
+if (voiceButton && voiceStatus) {
+  voiceButton.addEventListener("click", async () => {
+    voiceButton.disabled = true;
     try {
-      if (!navigator.mediaDevices?.getUserMedia) {
-        micStatus.textContent = "✗ 该环境没有 mediaDevices.getUserMedia";
-        return;
-      }
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const track = stream.getAudioTracks()[0];
-      micStatus.textContent = track
-        ? `✓ 拿到麦克风:${track.label || "(无标签)"} state=${track.readyState}`
-        : "✗ 授权通过但没有音轨";
+      // Captured here rather than in the call page because only the popup can
+      // see which tab is active; once the call page opens, the popup is gone
+      // and the active tab is the call page itself.
+      const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+
+      await chrome.storage.local.set({
+        bwCallContext: {
+          url: tab?.url || "",
+          title: tab?.title || "",
+          // Stamped so the call page can refuse context old enough to be about
+          // some other page entirely.
+          capturedAt: Date.now(),
+        },
+      });
+
+      await chrome.tabs.create({ url: chrome.runtime.getURL("call.html") });
+      window.close();
     } catch (error) {
-      // name 比 message 更能区分:NotAllowedError=被拒,NotFoundError=无设备,
-      // NotSupportedError/TypeError=该上下文根本不提供。
-      micStatus.textContent =
-        `✗ ${error?.name || "Error"}: ${error?.message || String(error)}`;
-    } finally {
-      // 立刻释放,避免探测按钮占着麦克风。
-      stream?.getTracks().forEach((t) => t.stop());
-      micButton.disabled = false;
+      voiceButton.disabled = false;
+      voiceStatus.textContent = "✗ " + (error?.message || String(error));
     }
   });
 }
-
-loadStatus();
-
-// 第二个一次性诊断:扩展页面能否直接连到 Windows 桥接器的 WSS。
-// 端点主机名(bwicarus-2)与 manifest 里放行的 Pi(bwicarus)不同,而扩展页面的
-// 网络限制又与 content script 不同 —— 到底要不要改 host_permissions/CSP,
-// 靠猜不如直接连一次。区分三种结局:握手成功、被策略拒(CSP/权限)、连不上(网络)。
-// 结论出来后这段应当移除。
-const wssButton = document.getElementById("wss-test");
-const wssStatus = document.getElementById("wss-status");
-if (wssButton && wssStatus) {
-  const ENDPOINT =
-    "wss://bwicarus-2.taile44d0c.ts.net/reader-computer-voice/v1";
-  wssButton.addEventListener("click", () => {
-    wssButton.disabled = true;
-    wssStatus.textContent = "连接中…";
-    let socket = null;
-    let settled = false;
-    const finish = (text) => {
-      if (settled) return;
-      settled = true;
-      wssStatus.textContent = text;
-      wssButton.disabled = false;
-      try { socket?.close(); } catch (e) {}
-    };
-    // 只测能否握手,不发 HELLO、不发 START,不会启动任何语音。
-    const timer = setTimeout(
-      () => finish("✗ 8 秒未建立,也未报错(可能被静默拦截或网络不通)"),
-      8000
-    );
-    try {
-      socket = new WebSocket(ENDPOINT);
-    } catch (error) {
-      clearTimeout(timer);
-      finish(`✗ 构造失败 ${error?.name || "Error"}: ${error?.message || error}`);
-      return;
-    }
-    socket.onopen = () => {
-      clearTimeout(timer);
-      finish("✓ 握手成功,扩展页面可直连 Windows");
-    };
-    // WebSocket 的 error 事件不带原因(规范如此,防跨源探测),
-    // 所以 close 的 code 才是唯一线索:1006=异常关闭(多为策略或网络)。
-    socket.onclose = (event) => {
-      clearTimeout(timer);
-      finish(`✗ 关闭 code=${event.code} clean=${event.wasClean}`);
-    };
-    socket.onerror = () => {
-      clearTimeout(timer);
-      finish("✗ error 事件(无详情,看上面的 close code)");
-    };
-  });
-}
-
