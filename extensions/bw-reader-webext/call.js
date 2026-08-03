@@ -62,6 +62,22 @@ const fetchLog = [];
       );
     }
 
+    // Serve the outgoing journal locally.
+    //
+    // Page text does not travel on active-reading -- that carries only
+    // kind/file/title/page/selection. It arrives as a page.context event, which
+    // the bridge pulls from the Pi's journal: the Reader writes events there,
+    // the bridge reads them and forwards them to Windows. An extension page is
+    // not in that loop and never will be, which is why the snapshot kept
+    // reporting 正文可用: false however the local snapshot was filled.
+    //
+    // So the journal is answered here instead, in the same shape the Pi returns.
+    // Everything downstream is untouched: the module validates, forwards, and
+    // acknowledges exactly as it does for a real one.
+    if (url.indexOf("/pdf/api/outgoing/journal") !== -1) {
+      return Promise.resolve(serveJournal(url));
+    }
+
     return original(input, init).then(
       (res) => {
         if (fetchLog.length < 12) fetchLog.push(`${res.status} ${url}`);
@@ -74,6 +90,74 @@ const fetchLog = [];
     );
   };
 })();
+
+// --- local outgoing journal --------------------------------------------------
+// Holds the page as one page.context event and hands it over once. The shape
+// mirrors reader-specs/fixtures/outgoing-events.jsonl, whose fields are exactly
+// the ones the Windows snapshot renders (stable / text_available / text_source /
+// fallback_reason / truncated).
+const journal = { events: [], head: 0 };
+
+function publishPageContext(ctx) {
+  journal.head += 1;
+  journal.events.push({
+    v: 1,
+    seq: journal.head,
+    type: "page.context",
+    event: "page.context",
+    ts: Math.floor(Date.now() / 1000),
+    // 12 hex, as the fixture has it.
+    id: Array.from({ length: 12 }, () => "0123456789abcdef"[(Math.random() * 16) | 0]).join(""),
+    stable: true,
+    book_id: ctx.url,
+    file: ctx.url,
+    page: null,
+    title: ctx.title || "",
+    kind: "web",
+    text_available: !!ctx.text,
+    page_context: {
+      text: ctx.text || "",
+      text_available: !!ctx.text,
+      text_source: ctx.text ? "web:innerText" : null,
+      // Stated, not hidden: the assistant should know the page was cut rather
+      // than treat a truncated page as the whole of it.
+      fallback_reason: ctx.text ? null : "扩展未取得正文",
+      truncated: (ctx.text || "").length >= 12000,
+      reason: "call",
+      visual: null,
+      embeds: { highlights: 0, blocks: 0, unanchored: [] },
+    },
+  });
+}
+
+function serveJournal(url) {
+  let since = 0;
+  try {
+    const m = /[?&]since=([^&]*)/.exec(url);
+    if (m) since = parseInt(decodeURIComponent(m[1]), 10) || 0;
+  } catch (_) {}
+
+  // Sequence numbers must run unbroken from since+1 or the module declares a
+  // gap and stops the context bridge outright.
+  const pending = journal.events.filter((e) => e.seq > since);
+
+  return new Response(
+    JSON.stringify({
+      ok: true,
+      contract: "reader-outgoing-context/1",
+      cursor: since,
+      head: journal.head,
+      events: pending,
+      gap: false,
+      note: "",
+      waited: 0,
+      // Says "no long-poll here" rather than leaving the caller to wait out a
+      // timeout that will never arrive.
+      waitDenied: pending.length === 0,
+    }),
+    { status: 200, headers: { "Content-Type": "application/json" } }
+  );
+}
 
 const els = {
   btn: document.getElementById("asst-computer"),
@@ -260,7 +344,12 @@ function publishContext(ctx) {
     // Stale canonical belongs to whatever document was described before; leaving
     // it attached is how one page's title ends up on another's content.
     state.canonical = null;
-    return "✓ 已就绪(直填快照)";
+
+    // The snapshot carries position and selection; the text rides the journal.
+    publishPageContext(ctx);
+    return ctx.text
+      ? `✓ 已就绪(快照 + 正文 ${ctx.text.length} 字)`
+      : "✓ 已就绪(仅位置,无正文)";
   } catch (err) {
     return "✗ " + describe(err);
   }
