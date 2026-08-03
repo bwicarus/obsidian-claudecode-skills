@@ -1,0 +1,111 @@
+name: BWReader
+
+options:
+  createIntermediateGroups: true
+  deploymentTarget:
+    iOS: "17.0"
+
+settings:
+  base:
+    CODE_SIGN_STYLE: Automatic
+    DEVELOPMENT_TEAM: 7MDVSLPV8F
+    IPHONEOS_DEPLOYMENT_TARGET: "17.0"
+    SWIFT_VERSION: "5.0"
+    SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
+    SUPPORTS_MACCATALYST: NO
+    SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: NO
+    TARGETED_DEVICE_FAMILY: "2"
+
+targets:
+  BWReader:
+    type: application
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: App
+        excludes:
+          - Info.plist
+    settings:
+      base:
+        ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
+        ASSETCATALOG_COMPILER_GLOBAL_ACCENT_COLOR_NAME: AccentColor
+        CURRENT_PROJECT_VERSION: "2"
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: App/Info.plist
+        MARKETING_VERSION: "0.2.3"
+        PRODUCT_BUNDLE_IDENTIFIER: space.bwicarus.bwreader2
+        PRODUCT_NAME: bwicarus-test
+    dependencies:
+      - target: BWReaderSafariExtension
+        embed: true
+        codeSign: true
+        copy:
+          destination: plugins
+
+  BWReaderSafariExtension:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Extension/SafariWebExtensionHandler.swift
+      # Keep the staging directory itself out of the bundle. Root files are
+      # copied one by one, while the three referenced directories preserve the
+      # paths used by manifest.json (src/..., vendor/..., and icons/...).
+      - path: Extension/Resources/manifest.json
+        buildPhase: resources
+        optional: true
+      - path: Extension/Resources/background.js
+        buildPhase: resources
+        optional: true
+      - path: Extension/Resources/content.js
+        buildPhase: resources
+        optional: true
+      - path: Extension/Resources/popup.html
+        buildPhase: resources
+        optional: true
+      - path: Extension/Resources/popup.js
+        buildPhase: resources
+        optional: true
+      - path: Extension/Resources/src
+        type: folder
+        buildPhase: resources
+        optional: true
+      - path: Extension/Resources/vendor
+        type: folder
+        buildPhase: resources
+        optional: true
+      - path: Extension/Resources/icons
+        type: folder
+        buildPhase: resources
+        optional: true
+    settings:
+      base:
+        APPLICATION_EXTENSION_API_ONLY: YES
+        COMPRESS_PNG_FILES: NO
+        CURRENT_PROJECT_VERSION: "2"
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Extension/Info.plist
+        MARKETING_VERSION: "0.2.3"
+        PRODUCT_BUNDLE_IDENTIFIER: space.bwicarus.bwreader2.Extension
+        PRODUCT_MODULE_NAME: BWReaderSafariExtension
+        PRODUCT_NAME: BWReaderSafariExtension
+        SKIP_INSTALL: YES
+        # Apple requires an embedded app extension to declare both iPhone and
+        # iPad even when its containing app is intentionally iPad-only.
+        TARGETED_DEVICE_FAMILY: "1,2"
+
+schemes:
+  BWReader:
+    build:
+      targets:
+        BWReader: all
+    run:
+      config: Debug
+    profile:
+      config: Release
+    analyze:
+      config: Debug
+    archive:
+      config: Release
+    management:
+      shared: true

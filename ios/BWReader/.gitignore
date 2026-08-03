@@ -1,0 +1,4 @@
+BWReader.xcodeproj/
+Extension/Resources/*
+!Extension/Resources/.gitkeep
+
