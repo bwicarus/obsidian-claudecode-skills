@@ -357,6 +357,8 @@ function publishContext(ctx) {
 
 // --- call lifecycle ---------------------------------------------------------
 let active = false;
+// Kept so the call can hand the page to Windows once the session is up.
+let pageContext = null;
 
 async function start() {
   els.btn.disabled = true;
@@ -368,6 +370,27 @@ async function start() {
     // requests capture as part of starting.
     await window.RC.computerVoice.startFromUserGesture({});
     active = true;
+
+    // Sent after the call is up, because the action requires an authenticated
+    // active session. This is the one path by which page text reaches Windows;
+    // a failure here costs the assistant the page contents but not the call, so
+    // it is reported rather than thrown.
+    if (pageContext) {
+      window.RC.computerVoice
+        .sendWebPageContext({
+          url: pageContext.url,
+          title: pageContext.title,
+          text: pageContext.text,
+          selection: pageContext.selection,
+          observedAtEpochMs: pageContext.capturedAt,
+        })
+        .then((ack) => {
+          els.detail.textContent += `\n网页上下文 ✓ 已送达(revision ${ack?.revision ?? "?"})`;
+        })
+        .catch((err) => {
+          els.detail.textContent += "\n网页上下文 ✗ " + describe(err);
+        });
+    }
     els.btn.disabled = false;
     els.btn.textContent = "结束通话";
     els.btn.classList.add("stop");

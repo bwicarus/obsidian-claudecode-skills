@@ -28,6 +28,9 @@
   var HEARTBEAT_TIMEOUT_MS = 15000;
   var START_GESTURE_LEASE_TTL_MS = 5000;
   var OUTGOING_CONTEXT_CONTRACT = "reader-outgoing-context/1";
+  // Windows 侧合同(Codex 实现,0.1.73):扩展页直接上行网页正文。
+  var WEB_PAGE_CONTEXT_CONTRACT = "reader-web-page-context/1";
+
   var ACTIVE_READING_CONTRACT = "reader-active-reading/1";
   var READER_RESULT_DELIVERY_CONTRACT = "reader-result-delivery/1";
   var READER_RESULT_EVENT = "reader-result";
@@ -5710,8 +5713,59 @@
     );
   }
 
+  // Push the current web page to Windows over the live call.
+  //
+  // Page text has no other way in. active-reading carries position and
+  // selection only, and page.context is assembled by Windows from the Pi --
+  // which has never seen the page a browser extension is looking at. This
+  // action closes that gap: Windows writes the payload straight into its
+  // snapshot with textSource=extension-page.
+  //
+  // Only meaningful from an extension page. A Reader page's text already
+  // reaches Windows through the Pi, and calling this there would merely
+  // describe the same document twice.
+  function sendWebPageContext(page) {
+    if (!active || !active.channel) {
+      return Promise.reject(directError(
+        "电脑客户端通话未建立,无法发送网页上下文",
+        "BW_COMPUTER_VOICE_WEB_CONTEXT_INACTIVE",
+        true
+      ));
+    }
+    page = page || {};
+    var url = typeof page.url === "string" ? page.url : "";
+    if (!/^https?:\/\//i.test(url)) {
+      return Promise.reject(directError(
+        "网页上下文 URL 必须是 http/https",
+        "BW_COMPUTER_VOICE_WEB_CONTEXT_URL",
+        false
+      ));
+    }
+    var text = typeof page.text === "string" ? page.text : "";
+    var selection = typeof page.selection === "string" ? page.selection : "";
+    // Truncation is reported rather than hidden, so the assistant knows it is
+    // holding part of a page instead of mistaking it for the whole.
+    var truncated = text.length > 12000 || page.truncated === true;
+    return active.channel.request("web-page-context", {
+      sessionId: active.sessionId,
+      webContextContract: WEB_PAGE_CONTEXT_CONTRACT,
+      context: {
+        url: url,
+        title: typeof page.title === "string" ? page.title : "",
+        text: text.slice(0, 12000),
+        truncated: truncated,
+        selectionState: selection ? "active" : "cleared",
+        selection: selection.slice(0, 400),
+        observedAtEpochMs: Number.isSafeInteger(page.observedAtEpochMs)
+          ? page.observedAtEpochMs
+          : Date.now(),
+      },
+    });
+  }
+
   RC.computerVoice = Object.freeze({
     contract: BRIDGE_CONTRACT,
+    sendWebPageContext: sendWebPageContext,
     directContract: DIRECT_CONTRACT,
     availability: availability,
     reserveSelectedEngineUpdate: reserveSelectedEngineUpdate,
