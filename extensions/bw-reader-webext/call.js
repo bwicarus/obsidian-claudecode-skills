@@ -394,6 +394,10 @@ async function start() {
           const outcome = ack?.outcome ?? "?";
           const seq = ack?.seq ?? ack?.cursor ?? "?";
           els.detail.textContent += `\n网页上下文 ✓ ${outcome} (seq ${seq})`;
+          // Only after the first send lands: following sends deltas against it,
+          // so starting before it is acknowledged would leave the bridge with a
+          // later page and no baseline.
+          startFollowing();
         })
         .catch((err) => {
           els.detail.textContent += "\n网页上下文 ✗ " + describe(err);
@@ -423,10 +427,96 @@ async function stop() {
     detail(["停止时报错(通话可能已断): " + describe(err)]);
   }
   active = false;
+  // Otherwise the interval keeps scripting the tab after the call is over.
+  stopFollowing();
   els.btn.disabled = false;
   els.btn.textContent = "开始通话";
   els.btn.classList.remove("stop");
   say("已结束");
+}
+
+// --- keeping the page current ------------------------------------------------
+// The first send is a photograph; this keeps it a view. While the call is up the
+// tab is re-read on an interval and a fresh page.context goes out whenever it
+// actually changed -- scrolling into new text, selecting something, or the page
+// itself updating.
+//
+// Polling rather than listening in the page: a listener would mean permanent
+// code in every site, which is what broke the popup outright once already. This
+// costs one scripted read every few seconds and leaves nothing behind.
+//
+// Scope is the tab the call started from. Following the user across tabs would
+// need host access to every site, and package_safari.py deliberately forbids
+// that ("host permission must remain restricted to the active Pi"). That line is
+// a decision, not an oversight, so it stands until its owner says otherwise.
+const FOLLOW_INTERVAL_MS = 4000;
+let followTimer = null;
+let lastSignature = "";
+
+async function readTab(tabId) {
+  if (tabId == null || !chrome.scripting?.executeScript) return null;
+  try {
+    const [res] = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => {
+        const raw = String(document.body?.innerText || "");
+        const text = raw.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+        let selection = "";
+        try {
+          selection = String(window.getSelection() || "").trim();
+        } catch (_) {}
+        return {
+          url: String(location.href || ""),
+          title: String(document.title || ""),
+          text: text.slice(0, 12000),
+          selection: selection.slice(0, 2000),
+        };
+      },
+    });
+    return res?.result || null;
+  } catch {
+    // Expected once the tab navigates away: activeTab lapses with it. Not an
+    // error worth surfacing -- the call carries on with the last known page.
+    return null;
+  }
+}
+
+function startFollowing() {
+  if (followTimer || !pageContext?.tabId) return;
+  lastSignature = `${pageContext.url}|${(pageContext.text || "").length}|${pageContext.selection || ""}`;
+
+  followTimer = setInterval(async () => {
+    if (!active) return;
+    const fresh = await readTab(pageContext.tabId);
+    if (!fresh) return;
+
+    // Compared before sending: the bridge would otherwise receive an identical
+    // page every few seconds, and each one costs a sequence number and a round
+    // trip for nothing.
+    const signature = `${fresh.url}|${fresh.text.length}|${fresh.selection}`;
+    if (signature === lastSignature) return;
+    lastSignature = signature;
+
+    try {
+      await window.RC.computerVoice.sendWebPageContext({
+        url: fresh.url,
+        title: fresh.title,
+        text: fresh.text,
+        selection: fresh.selection,
+        observedAtEpochMs: Date.now(),
+      });
+      els.ctxUrl.textContent =
+        `${fresh.url}　·　正文 ${fresh.text.length} 字` +
+        (fresh.selection ? `　·　选中 ${fresh.selection.length} 字` : "");
+    } catch (err) {
+      els.detail.textContent += "\n跟随更新 ✗ " + describe(err);
+    }
+  }, FOLLOW_INTERVAL_MS);
+}
+
+function stopFollowing() {
+  if (followTimer) clearInterval(followTimer);
+  followTimer = null;
 }
 
 els.btn.addEventListener("click", () => (active ? stop() : start()));
@@ -442,6 +532,9 @@ if (window.RC && window.RC.computerVoice && window.RC.computerVoice.onStatus) {
       active = false;
       els.btn.textContent = "开始通话";
       els.btn.classList.remove("stop");
+      // The bridge can end the call without the button being touched, so the
+      // interval has to be released here too.
+      stopFollowing();
       say("通话已断开", "err");
     }
   });

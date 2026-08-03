@@ -204,6 +204,11 @@ if (voiceButton && voiceStatus) {
 
       await chrome.storage.local.set({
         bwCallContext: {
+          // Carried so the call page can re-read this same tab while the call
+          // runs. activeTab stays granted until that tab navigates away, which
+          // is what makes scroll and selection tracking possible without any
+          // broader host permission.
+          tabId: tab?.id ?? null,
           url: page?.url || tab?.url || "",
           title: page?.title || tab?.title || "",
           text: page?.text || "",
