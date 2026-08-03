@@ -1427,6 +1427,26 @@
     this._finishClosed();
   };
 
+  // True only for a document served from the extension itself -- popup, options,
+  // or a dedicated page. A content script does NOT qualify: it runs under the
+  // host page's origin, so the scheme alone separates "our own code" from "a web
+  // page we were injected into", which is the distinction that matters here.
+  var OWN_EXTENSION_SCHEMES = [
+    "safari-web-extension://",
+    "chrome-extension://",
+    "moz-extension://",
+  ];
+
+  function isOwnExtensionPage(runtime) {
+    if (!runtime || typeof runtime.id !== "string" || !runtime.id) return false;
+    var origin = currentOrigin();
+    if (!origin) return false;
+    for (var i = 0; i < OWN_EXTENSION_SCHEMES.length; i += 1) {
+      if (origin.indexOf(OWN_EXTENSION_SCHEMES[i]) === 0) return true;
+    }
+    return false;
+  }
+
   function createDirectTransport(endpoint) {
     if (currentOrigin() === READER_ORIGIN) {
       if (typeof window.WebSocket !== "function") {
@@ -1440,6 +1460,26 @@
       return new window.WebSocket(endpoint);
     }
     var runtime = window.chrome && window.chrome.runtime;
+    // An extension's own page is the extension's own code, exactly as the
+    // background is -- it is not a web page that happens to be injected into.
+    // Relaying it through the background buys no additional trust and costs the
+    // one thing that matters on iOS, where the background is reclaimed
+    // aggressively: the relay port dies mid-session and the call reports only
+    // "disconnected", with the bridge never having seen a connection at all.
+    // The origin cannot be forged -- the browser assigns it -- and the bridge
+    // still enforces its own origin allowlist and Tailscale identity check, so
+    // dialling directly from here is no weaker than dialling from the Reader.
+    if (isOwnExtensionPage(runtime)) {
+      if (typeof window.WebSocket !== "function") {
+        throw directError(
+          "扩展页缺少 WebSocket 能力",
+          "BW_COMPUTER_VOICE_DIRECT_OFFLINE",
+          true
+        );
+      }
+      // @interaction computer-voice.bridge.request
+      return new window.WebSocket(endpoint);
+    }
     if (
       runtime &&
       typeof runtime.id === "string" &&
