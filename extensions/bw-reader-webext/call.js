@@ -416,11 +416,33 @@ if (window.RC && window.RC.computerVoice && window.RC.computerVoice.onStatus) {
   });
 }
 
+// Switch the bridge to the delivery mode this page can actually feed.
+//
+// Under snapshot-mcp, Windows pulls context from the Pi itself and nothing the
+// extension does can reach it -- which is why 1.0.18's journal was never even
+// requested, and the snapshot kept showing only active-reading events. Under
+// legacy-inject the module pulls the outgoing journal instead, and that request
+// is one this page answers.
+//
+// Done at load rather than on the click: it awaits a round trip, and awaiting
+// inside the gesture would risk the audio lease taken during it.
+async function useLegacyDelivery() {
+  const RC = window.RC;
+  if (!RC?.computerVoice?.setContextDeliveryMode) return "✗ 接口不可用";
+  try {
+    await RC.computerVoice.setContextDeliveryMode("legacy-inject");
+    return "✓ legacy-inject";
+  } catch (err) {
+    return "✗ " + describe(err);
+  }
+}
+
 (async function init() {
   if (!selfCheck()) {
     els.btn.disabled = true;
     return;
   }
+  els.detail.textContent += "\n交付模式 " + (await useLegacyDelivery());
   const ctx = await loadContext();
   if (!ctx) {
     els.ctxTitle.textContent = "（未取得网页上下文）";
