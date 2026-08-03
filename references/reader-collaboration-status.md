@@ -3647,3 +3647,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：Reader 全量合同通过；Windows 0.1.38 保留 283 项完整自检、绘图/MCP、`/6` A/B 总线与 F24 broker，包校验及桌面 96 项测试通过，均未激活音频。
 - **安装**：已备份并替换 native/typist 六项，清理 6 个占用旧 EXE 的 MCP 子进程后恢复监听；新 PID 35844 为 `idle`、`captureActive=false`，Swift 已直接写入 iCloud 工程。
 - **发布/下一步**：提交至 `82519c3`，Reader 0.2.76 事务 `20260801T142225Z-343375` 的 E2E 与服务健康检查全过；未启动应用、发快捷键或采音，用户重开 iPad App 后分别实测两个目标。
+
+## Codex：iOS 阅读器、原生语音与 Safari 扩展合并（2026-08-03 JST）
+- **改了什么**：新增固定 XcodeGen 双 target 工程；`space.bwicarus.bwreader2` 容器承载最新版七个 Swift，内嵌 `space.bwicarus.bwreader2.Extension`，解决两个同 bundle App 互相覆盖。
+- **构建合同**：Safari 仍由 `package_safari.py` 派生；App 为 iPad-only，扩展按 Apple 规则为 universal，归档逐项校验双 bundle、版本、handler、签名与扩展包根目录全部资源。
+- **怎么验的**：Reader Node 合同全过；Windows Python/handoff 只保留既有 `fcntl` 与无关 fixture 基线；macOS build-only 完成模拟器编译、签名 archive、IPA 导出和资源逐字节校验。
+- **发布**：`0.2.3 (2)` 已由同一分支工作流成功上传 TestFlight；旧 Swift Playgrounds 包冻结为本地回退参考，后续 iOS 发布源码以 `ios/BWReader/` 为准。
+- **下一步**：等待 App Store Connect 处理完成后，用户在 iPad 安装并验收阅读器、电脑语音按钮及 Safari 扩展是否同时存在可用。
