@@ -122,10 +122,53 @@ async function loadContext() {
     if (ctx.capturedAt && Date.now() - ctx.capturedAt > 5 * 60 * 1000) return null;
 
     els.ctxTitle.textContent = ctx.title || "(无标题)";
-    els.ctxUrl.textContent = ctx.url;
+    els.ctxUrl.textContent = ctx.url
+      + (ctx.text ? `　·　正文 ${ctx.text.length} 字` : "　·　无正文");
+    // Appended to the self-check block: a refused report is silent otherwise,
+    // and would show up only as an assistant that answers about nothing.
+    els.detail.textContent += "\n上下文 " + publishContext(ctx);
     return ctx;
   } catch {
     return null;
+  }
+}
+
+// Hand the page to RC.ctxSync, which is where rc-computer-voice reads the
+// active-reading snapshot from -- there is no other inlet. kind:"web" is a
+// first-class case there, so nothing needs inventing; it just has to be filled.
+//
+// Reported as "web" and never as a book: the assistant must talk about the page
+// in front of the user, and inheriting a Reader book here would be the silent
+// kind of wrong -- confident answers about the wrong document.
+const READER_ORIGIN = "https://bwicarus.taile44d0c.ts.net";
+
+function publishContext(ctx) {
+  const RC = window.RC;
+  if (!RC || !RC.ctxSync) return "✗ RC.ctxSync 不可用";
+  try {
+    // Required for kind:"web": report() refuses it outright when no base is set,
+    // because an extension runs on other people's sites and the sync target
+    // cannot be inferred from the current origin.
+    if (typeof RC.ctxSync.setBase === "function") RC.ctxSync.setBase(READER_ORIGIN);
+
+    if (typeof RC.ctxSync.enabled === "function" && !RC.ctxSync.enabled()) {
+      // Off by default in this origin's storage -- the extension page has its
+      // own. Opening a call is an unambiguous request to send context, so turn
+      // it on here rather than failing with an error the user cannot act on.
+      if (typeof RC.ctxSync.setEnabled === "function") RC.ctxSync.setEnabled(true);
+    }
+
+    const ok = RC.ctxSync.report({
+      kind: "web",
+      url: ctx.url,
+      title: ctx.title || "",
+      text: ctx.text || "",
+      selection: ctx.selection || "",
+      reason: "call",
+    });
+    return ok ? "✓ 已上报" : "✗ report 被拒(开关或 base)";
+  } catch (err) {
+    return "✗ " + describe(err);
   }
 }
 

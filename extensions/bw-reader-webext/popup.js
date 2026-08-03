@@ -168,10 +168,25 @@ if (voiceButton && voiceStatus) {
       // and the active tab is the call page itself.
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
 
+      // The content script has the page body; the tab record only has its title.
+      // A failure here is not fatal -- the call still works, the assistant just
+      // knows which page it is rather than what it says -- so it degrades
+      // instead of blocking the call.
+      let page = null;
+      if (tab?.id != null) {
+        try {
+          page = await chrome.tabs.sendMessage(tab.id, { type: "BW_VOICE_PAGE_CONTEXT" });
+        } catch {
+          page = null;
+        }
+      }
+
       await chrome.storage.local.set({
         bwCallContext: {
-          url: tab?.url || "",
-          title: tab?.title || "",
+          url: page?.url || tab?.url || "",
+          title: page?.title || tab?.title || "",
+          text: page?.text || "",
+          selection: page?.selection || "",
           // Stamped so the call page can refuse context old enough to be about
           // some other page entirely.
           capturedAt: Date.now(),
