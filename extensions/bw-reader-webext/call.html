@@ -73,13 +73,23 @@
   <div class="ctx-url" id="ctxUrl"></div>
 </div>
 
-<button id="btn">开始通话</button>
+<!-- The id is not cosmetic. registerComputerButton accepts only #asst-computer
+     or #vc-top-computer, of type=button and attached to this document; the
+     capture-phase listener then matches the click against that same set before
+     it will prepare an audio lease. A differently named button is rejected as
+     "not a real computer-button press" (BW_COMPUTER_VOICE_GESTURE_REQUIRED),
+     which is exactly what the first build hit. -->
+<button id="asst-computer" type="button">开始通话</button>
 <div id="status"></div>
 <pre id="detail"></pre>
 
-<!-- Load order matters: rc-core defines the RC namespace plus ctxSync/toast
-     that rc-computer-voice probes for. Every such cross-module call is guarded
-     by a typeof check, so a partial namespace degrades rather than throws. -->
+<!-- Load order follows the dependency chain, not preference:
+     rc-core      defines RC, ctxSync, toast
+     rc-voicecall supplies canCaptureComputerVoiceGesture, which the gesture
+                  capture consults before preparing anything -- without it the
+                  listener returns early and no lease is ever taken
+     rc-computer-voice installs that capture and owns the bridge protocol -->
 <script src="vendor/rc-core.js"></script>
+<script src="vendor/rc-voicecall.js"></script>
 <script src="vendor/rc-computer-voice.js"></script>
 <script src="call.js"></script>

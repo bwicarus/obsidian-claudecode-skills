@@ -13,7 +13,7 @@
 // fragile hop is not merely avoided -- it does not exist on this path.
 
 const els = {
-  btn: document.getElementById("btn"),
+  btn: document.getElementById("asst-computer"),
   status: document.getElementById("status"),
   detail: document.getElementById("detail"),
   ctxTitle: document.getElementById("ctxTitle"),
@@ -68,6 +68,33 @@ function selfCheck() {
     return false;
   }
   notes.push("RC.computerVoice ✓");
+
+  // The gesture capture consults this before preparing anything; if the module
+  // is absent it returns early and no audio lease is ever taken, which later
+  // surfaces as GESTURE_REQUIRED at the point of dialling rather than here.
+  let gestureAllowed = null;
+  try {
+    gestureAllowed = RC.voicecall
+      && typeof RC.voicecall.canCaptureComputerVoiceGesture === "function"
+      ? RC.voicecall.canCaptureComputerVoiceGesture()
+      : null;
+  } catch (err) {
+    gestureAllowed = "抛错: " + describe(err);
+  }
+  notes.push("手势许可 " + (gestureAllowed === true ? "✓"
+    : gestureAllowed === null ? "✗ rc-voicecall.js 未加载" : "✗ " + gestureAllowed));
+
+  // Registration is what makes this button a trusted approval surface. It is
+  // rejected silently on any mismatch -- wrong id, wrong type, detached node --
+  // so the boolean is checked rather than assumed.
+  const registered = RC.computerVoice.registerComputerButton(els.btn);
+  notes.push("按钮注册 " + (registered ? "✓" : "✗ 被拒(id/type/挂载不合要求)"));
+
+  if (!registered || gestureAllowed !== true) {
+    say("✗ 无法接受点击", "err");
+    detail(notes);
+    return false;
+  }
 
   try {
     const target = RC.computerVoice.getTargetApp && RC.computerVoice.getTargetApp();
