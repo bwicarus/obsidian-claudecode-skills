@@ -12,6 +12,32 @@
 // unset makes rc-computer-voice fall back to the page's own fetch, so the
 // fragile hop is not merely avoided -- it does not exist on this path.
 
+// Three builds have now died on "TypeError: Load failed" -- Safari's wording for
+// a failed fetch -- and each time I removed the request I believed was to blame
+// and hit it again. The request is not where I keep guessing, so stop guessing:
+// record every fetch this page makes and show it next to the failure.
+//
+// Cheap and self-limiting: it captures URL and outcome only, keeps the last few,
+// and is removed once the culprit is known.
+const fetchLog = [];
+(function instrumentFetch() {
+  if (typeof window.fetch !== "function") return;
+  const original = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    const url = String((input && input.url) || input || "").slice(0, 120);
+    return original(input, init).then(
+      (res) => {
+        if (fetchLog.length < 12) fetchLog.push(`${res.status} ${url}`);
+        return res;
+      },
+      (err) => {
+        if (fetchLog.length < 12) fetchLog.push(`✗ ${err && err.name} ${url}`);
+        throw err;
+      }
+    );
+  };
+})();
+
 const els = {
   btn: document.getElementById("asst-computer"),
   status: document.getElementById("status"),
@@ -204,8 +230,8 @@ async function start() {
     detail([
       describe(err),
       "",
-      "若为 BW_COMPUTER_VOICE_* 开头,是桥接协议本身拒绝(Windows 侧可查);",
-      "若为网络或 1006,是链路不通(确认 Tailscale 在线、Windows 桥接器在跑)。",
+      fetchLog.length ? "本页发出的请求:" : "本页未发出任何请求",
+      ...fetchLog.map((line) => "  " + line),
     ]);
   }
 }
