@@ -3,10 +3,15 @@ import SwiftUI
 @main
 struct BWReaderNativeApp: App {
     @StateObject private var voiceBridge = NativeVoiceBridge()
+    @StateObject private var nativeCommandReceiver =
+        ReaderNativeCommandReceiver()
 
     var body: some Scene {
         WindowGroup {
-            ReaderRootView(voiceBridge: voiceBridge)
+            ReaderRootView(
+                voiceBridge: voiceBridge,
+                nativeCommandReceiver: nativeCommandReceiver
+            )
         }
     }
 }
@@ -14,6 +19,7 @@ struct BWReaderNativeApp: App {
 private struct ReaderRootView: View {
     @StateObject private var reader = ReaderWebViewModel()
     @ObservedObject var voiceBridge: NativeVoiceBridge
+    @ObservedObject var nativeCommandReceiver: ReaderNativeCommandReceiver
     @State private var showsDiagnostics = false
 
     var body: some View {
@@ -39,6 +45,24 @@ private struct ReaderRootView: View {
                 }
             }
 
+            if let notice = nativeCommandReceiver.notice {
+                Text(notice)
+                    .font(.footnote)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .padding(.top, 10)
+                    .onTapGesture {
+                        nativeCommandReceiver.dismissNotice()
+                    }
+                    .frame(
+                        maxWidth: .infinity,
+                        maxHeight: .infinity,
+                        alignment: .top
+                    )
+            }
+
             // Hidden, nonvisual support entry: long-press the bottom-left
             // corner for two seconds. It never changes Reader page behavior.
             Color.clear
@@ -59,6 +83,13 @@ private struct ReaderRootView: View {
         .preferredColorScheme(.dark)
         .task {
             voiceBridge.bind(reader: reader)
+            nativeCommandReceiver.bind(
+                reader: reader,
+                voiceBridge: voiceBridge
+            )
+        }
+        .onOpenURL { url in
+            nativeCommandReceiver.receive(url)
         }
         .sheet(isPresented: $showsDiagnostics) {
             NativeVoiceDiagnosticsView(bridge: voiceBridge)

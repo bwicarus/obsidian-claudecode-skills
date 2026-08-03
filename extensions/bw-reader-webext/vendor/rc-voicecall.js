@@ -5558,27 +5558,76 @@ if (window.__bwPwaProviderOnly) return;
   // 电脑按钮直接进入 Windows 桥，绝不再靠 computer_client 劫持电话按钮。
   var _computerVoiceOwnedButtons = new WeakSet();
   var _computerVoiceStarting = false;
+  var _nativeComputerVoiceEventsBound = false;
+  function _extensionNativeComputerVoiceBridge() {
+    try {
+      var bridge = window.__bwNativeComputerVoiceExtensionBridge;
+      return bridge && typeof bridge.available === 'function' &&
+        bridge.available() === true && typeof bridge.toggle === 'function'
+          ? bridge
+          : null;
+    } catch (e) {
+      return null;
+    }
+  }
   function _nativeComputerVoiceAppAvailable() {
     try {
-      return window.__BW_NATIVE_COMPUTER_VOICE__ === true &&
+      var webViewAvailable = window.__BW_NATIVE_COMPUTER_VOICE__ === true &&
         !!(
           window.webkit &&
           window.webkit.messageHandlers &&
           window.webkit.messageHandlers.bwNativeComputerVoice &&
           typeof window.webkit.messageHandlers.bwNativeComputerVoice.postMessage === 'function'
         );
+      return webViewAvailable || !!_extensionNativeComputerVoiceBridge();
     } catch (e) {
       return false;
     }
   }
+  function _applyNativeComputerVoiceState(value) {
+    var state = value && typeof value === 'object' ? value : {};
+    ['asst-computer', 'vc-top-computer'].forEach(function (id) {
+      _configureNativeComputerVoiceButton(document.getElementById(id));
+    });
+    if (state.active === true) {
+      computerBtnConnecting(false);
+      computerBtnOn(true);
+      taPlaceholder('电脑客户端通话中…');
+    } else if (state.busy === true) {
+      computerBtnOn(false);
+      computerBtnConnecting(true);
+      taPlaceholder('正在交给 BWReader App…');
+    } else {
+      computerBtnConnecting(false);
+      computerBtnOn(false);
+      taPlaceholder(null);
+    }
+    if (state.title) setSt(String(state.title));
+  }
+  function _bindNativeComputerVoiceEvents() {
+    if (_nativeComputerVoiceEventsBound) return;
+    _nativeComputerVoiceEventsBound = true;
+    window.addEventListener('bw-native-computer-voice-capability', function () {
+      ['asst-computer', 'vc-top-computer'].forEach(function (id) {
+        _configureNativeComputerVoiceButton(document.getElementById(id));
+      });
+    });
+    window.addEventListener('bw-native-computer-voice-state', function (event) {
+      _applyNativeComputerVoiceState(event && event.detail);
+    });
+  }
   function _configureNativeComputerVoiceButton(button) {
     if (!button) return false;
+    _bindNativeComputerVoiceEvents();
     var available = _nativeComputerVoiceAppAvailable();
     button.disabled = !available;
     button.classList.toggle('native-app-required', !available);
     button.setAttribute('aria-disabled', available ? 'false' : 'true');
     if (!available) {
-      button.title = '电脑客户端语音仅在 BWReader App 中可用';
+      button.title = '请安装或更新 BWReader App 后使用电脑客户端语音';
+      button.setAttribute('aria-label', button.title);
+    } else if (_extensionNativeComputerVoiceBridge()) {
+      button.title = '在 BWReader App 中启动电脑客户端语音';
       button.setAttribute('aria-label', button.title);
     }
     return available;
@@ -5588,12 +5637,34 @@ if (window.__bwPwaProviderOnly) return;
     try {
       var computerVoice = window.RC && RC.computerVoice;
       function postTarget(appKind) {
-        window.webkit.messageHandlers.bwNativeComputerVoice.postMessage({
-          action: 'toggle',
-          appKind: appKind === 'chatgpt-classic'
-            ? 'chatgpt-classic'
-            : 'codex-desktop'
+        var target = appKind === 'chatgpt-classic'
+          ? 'chatgpt-classic'
+          : 'codex-desktop';
+        if (
+          window.webkit &&
+          window.webkit.messageHandlers &&
+          window.webkit.messageHandlers.bwNativeComputerVoice &&
+          typeof window.webkit.messageHandlers.bwNativeComputerVoice.postMessage === 'function'
+        ) {
+          window.webkit.messageHandlers.bwNativeComputerVoice.postMessage({
+            action: 'toggle',
+            appKind: target
+          });
+          return true;
+        }
+        var bridge = _extensionNativeComputerVoiceBridge();
+        if (!bridge) return false;
+        computerBtnConnecting(true);
+        setSt('正在打开 BWReader App…');
+        bridge.toggle(target).catch(function (error) {
+          computerBtnConnecting(false);
+          computerBtnOn(false);
+          taPlaceholder(null);
+          var message = error && error.message || '无法联系 BWReader App 原生语音';
+          setSt(message);
+          try { if (window.RC && RC.toast) RC.toast(message); } catch (e) {}
         });
+        return true;
       }
       var current = computerVoice &&
         typeof computerVoice.getTargetApp === 'function'
@@ -5602,8 +5673,7 @@ if (window.__bwPwaProviderOnly) return;
       // A trusted App button gesture must synchronously cross into Swift.
       // Target loading is already warmed in rc-computer-voice; never put an
       // authenticated fetch between the user gesture and postMessage.
-      postTarget(current);
-      return true;
+      return postTarget(current);
     } catch (e) {
       return false;
     }
@@ -5981,8 +6051,8 @@ if (window.__bwPwaProviderOnly) return;
     c.addEventListener('click', function () {
       if (_reviewVoiceGate(true)) return;
       if (!_nativeComputerVoiceAppAvailable()) {
-        setSt('电脑客户端语音仅在 BWReader App 中可用');
-        try { RC.toast('电脑客户端语音仅在 BWReader App 中可用'); } catch (e) {}
+        setSt('请安装或更新 BWReader App 后使用电脑客户端语音');
+        try { RC.toast('请安装或更新 BWReader App 后使用电脑客户端语音'); } catch (e) {}
         return;
       }
       if (ws || _rtc.on || _connecting || _reconnT || _reconnPend) {

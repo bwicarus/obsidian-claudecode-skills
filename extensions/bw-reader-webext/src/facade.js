@@ -29,6 +29,235 @@
     set: (key, value) => localStoreCall('BW_LOCAL_STORAGE_SET', key, value),
     remove: (key) => localStoreCall('BW_LOCAL_STORAGE_REMOVE', key)
   });
+  const nativeComputerVoiceBridge = (() => {
+    const CONTRACT = 'bw-reader-native/1';
+    const ACTIONS = new Set(['capabilities', 'voice.status', 'voice.toggle']);
+    const APP_KINDS = new Set(['codex-desktop', 'chatgpt-classic']);
+    const encoder = new TextEncoder();
+    let available = false;
+    let launchScheme = '';
+    let supportedAppKinds = new Set();
+    let latestState = {
+      phase: 'unavailable',
+      active: false,
+      busy: false,
+      sessionId: null,
+      appKind: null,
+      updatedAt: ''
+    };
+    let pollTimer = null;
+    let statusInFlight = null;
+    let toggleInFlight = null;
+
+    const requestId = () => {
+      const bytes = new Uint8Array(18);
+      crypto.getRandomValues(bytes);
+      return Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
+    };
+    const trimUtf8 = (value, maximumBytes) => {
+      const text = String(value || '');
+      if (encoder.encode(text).byteLength <= maximumBytes) return text;
+      let result = '';
+      let used = 0;
+      for (const character of text) {
+        const bytes = encoder.encode(character).byteLength;
+        if (used + bytes > maximumBytes) break;
+        result += character;
+        used += bytes;
+      }
+      return result;
+    };
+    const call = (action, details) => new Promise((resolve, reject) => {
+      if (!ACTIONS.has(action)) {
+        reject(Object.assign(new Error('BWReader App 请求无效'), {
+          code: 'BW_NATIVE_APP_REQUEST_INVALID'
+        }));
+        return;
+      }
+      chrome.runtime.sendMessage(Object.assign({
+        type: 'BW_NATIVE_APP_REQUEST',
+        action,
+        requestId: details?.requestId || requestId()
+      }, details || {}), (response) => {
+        const runtimeError = chrome.runtime.lastError;
+        const data = response?.data;
+        if (runtimeError || !response?.ok || !data?.ok) {
+          reject(Object.assign(new Error(
+            runtimeError?.message ||
+            data?.error ||
+            response?.error ||
+            'BWReader App 暂时不可用'
+          ), {
+            code: data?.code || response?.code || 'BW_NATIVE_APP_UNAVAILABLE'
+          }));
+          return;
+        }
+        if (data.contract !== CONTRACT || data.action !== action) {
+          reject(Object.assign(new Error('BWReader App 响应无效'), {
+            code: 'BW_NATIVE_APP_RESPONSE_INVALID'
+          }));
+          return;
+        }
+        resolve(data);
+      });
+    });
+    const titleFor = (state) => {
+      if (state.active === true) return '电脑客户端语音已连接';
+      if (state.busy === true) return '正在交给 BWReader App 处理电脑语音…';
+      if (state.phase === 'failed') return '电脑客户端语音启动失败';
+      return '在 BWReader App 中启动电脑客户端语音';
+    };
+    const publishState = (state) => {
+      const value = state && typeof state === 'object' ? state : {};
+      latestState = {
+        phase: String(value.phase || 'idle'),
+        active: value.active === true,
+        busy: value.busy === true,
+        sessionId: typeof value.sessionId === 'string' ? value.sessionId : null,
+        appKind: APP_KINDS.has(value.appKind) ? value.appKind : null,
+        updatedAt: String(value.updatedAt || '')
+      };
+      window.__BW_NATIVE_COMPUTER_VOICE_STATE__ = {
+        active: latestState.active,
+        busy: latestState.busy,
+        sessionId: latestState.sessionId,
+        appKind: latestState.appKind,
+        phase: latestState.phase,
+        title: titleFor(latestState)
+      };
+      window.dispatchEvent(new CustomEvent(
+        'bw-native-computer-voice-state',
+        { detail: window.__BW_NATIVE_COMPUTER_VOICE_STATE__ }
+      ));
+      scheduleStatusPoll();
+    };
+    const publishCapability = () => {
+      window.dispatchEvent(new CustomEvent(
+        'bw-native-computer-voice-capability',
+        { detail: { available, appKinds: Array.from(supportedAppKinds) } }
+      ));
+    };
+    const scheduleStatusPoll = () => {
+      if (pollTimer) {
+        clearTimeout(pollTimer);
+        pollTimer = null;
+      }
+      if (!available || document.visibilityState === 'hidden') return;
+      if (!latestState.busy && !latestState.active) return;
+      pollTimer = setTimeout(() => {
+        pollTimer = null;
+        refreshStatus().catch(() => {});
+      }, latestState.busy ? 700 : 4000);
+    };
+    const refreshStatus = () => {
+      if (!available) {
+        return Promise.reject(Object.assign(new Error('BWReader App 原生桥不可用'), {
+          code: 'BW_NATIVE_APP_NOT_SUPPORTED'
+        }));
+      }
+      if (statusInFlight) return statusInFlight;
+      statusInFlight = call('voice.status').then((value) => {
+        publishState(value.state);
+        return latestState;
+      }).finally(() => {
+        statusInFlight = null;
+      });
+      return statusInFlight;
+    };
+    const initialize = () => call('capabilities').then((value) => {
+      const actions = new Set(value.actions || []);
+      const appKinds = new Set(value.appKinds || []);
+      if (
+        !actions.has('voice.status') ||
+        !actions.has('voice.toggle') ||
+        value.launchScheme !== 'bwreader' ||
+        !appKinds.has('codex-desktop')
+      ) {
+        throw Object.assign(new Error('BWReader App 电脑语音能力不完整'), {
+          code: 'BW_NATIVE_APP_CAPABILITY_MISSING'
+        });
+      }
+      available = true;
+      launchScheme = value.launchScheme;
+      supportedAppKinds = appKinds;
+      window.__BW_NATIVE_COMPUTER_VOICE__ = true;
+      publishCapability();
+      return refreshStatus().catch(() => latestState);
+    }).catch((error) => {
+      available = false;
+      launchScheme = '';
+      supportedAppKinds = new Set();
+      window.__BW_NATIVE_COMPUTER_VOICE__ = false;
+      publishCapability();
+      throw error;
+    });
+    const toggle = (appKind) => {
+      const target = appKind === 'chatgpt-classic'
+        ? 'chatgpt-classic'
+        : 'codex-desktop';
+      if (!available || !supportedAppKinds.has(target) || launchScheme !== 'bwreader') {
+        return Promise.reject(Object.assign(new Error('请先安装或更新 BWReader App'), {
+          code: 'BW_NATIVE_APP_NOT_SUPPORTED'
+        }));
+      }
+      if (toggleInFlight) return toggleInFlight;
+      const id = requestId();
+      const selectionText = trimUtf8(
+        window.getSelection?.().toString() || '',
+        4096
+      );
+      publishState(Object.assign({}, latestState, {
+        phase: latestState.active ? 'stopping' : 'launching',
+        busy: true,
+        appKind: target,
+        updatedAt: new Date().toISOString()
+      }));
+      toggleInFlight = call('voice.toggle', {
+        requestId: id,
+        appKind: target,
+        selectionText
+      }).then((value) => {
+        publishState(value.state);
+        return value;
+      }).catch((error) => {
+        publishState({
+          phase: 'failed',
+          active: false,
+          busy: false,
+          sessionId: null,
+          appKind: target,
+          updatedAt: new Date().toISOString()
+        });
+        throw error;
+      }).finally(() => {
+        toggleInFlight = null;
+      });
+
+      // Keep the custom-scheme navigation in the original trusted click.  The
+      // native handler writes the same one-time request id into the App Group;
+      // the App waits briefly if URL delivery wins that race.
+      const launchURL = `${launchScheme}://native-voice?requestId=${encodeURIComponent(id)}`;
+      try { window.location.assign(launchURL); } catch (_) {}
+      return toggleInFlight;
+    };
+
+    window.addEventListener('pageshow', () => {
+      if (available) refreshStatus().catch(() => {});
+    });
+    document.addEventListener('visibilitychange', () => {
+      if (document.visibilityState === 'visible' && available) {
+        refreshStatus().catch(() => {});
+      }
+    });
+    setTimeout(() => initialize().catch(() => {}), 0);
+    return Object.freeze({
+      available: () => available,
+      state: () => Object.assign({}, latestState),
+      refreshStatus,
+      toggle
+    });
+  })();
+  window.__bwNativeComputerVoiceExtensionBridge = nativeComputerVoiceBridge;
   const pageCardPresentationCall = (type, cid, value) => new Promise(
     (resolve, reject) => {
       chrome.runtime.sendMessage({ type, cid, value }, (response) => {

@@ -10,6 +10,8 @@ const voicecall = read("_server_deploy/static/pdf/rc-voicecall.js");
 const runtime = read("_server_deploy/static/pdf/rc-computer-voice.js");
 const settings = read("_server_deploy/static/pdf/rc-settings.js");
 const background = read("extensions/bw-reader-webext/background.js");
+const facade = read("extensions/bw-reader-webext/src/facade.js");
+const safariPackager = read("extensions/bw-reader-webext/package_safari.py");
 const offscreen = read("extensions/bw-reader-webext/offscreen.js");
 
 test("电脑客户端保留原按钮与设置标签，App toggle 携带固定目标", () => {
@@ -129,6 +131,48 @@ test("App 电脑按钮只切换原生桥，普通电话保持独立", () => {
   assert.doesNotMatch(
     phoneClick,
     /_toggleNativeComputerVoiceApp|_computerVoiceStart|_setComputerVoiceDialPending|startFromUserGesture/,
+  );
+});
+
+test("Safari 电脑按钮只把一次性请求交给宿主 App", () => {
+  assert.match(
+    safariPackager,
+    /\["storage", "alarms", "nativeMessaging"\]/,
+  );
+  assert.match(background, /const NATIVE_APP_CONTRACT = "bw-reader-native\/1"/);
+  assert.match(
+    background,
+    /runtime\.sendNativeMessage\([\s\S]*NATIVE_APP_IDENTIFIER,[\s\S]*payload/,
+  );
+  assert.match(
+    background,
+    /const NATIVE_APP_ACTIONS = new Set\(\[[\s\S]*"capabilities"[\s\S]*"voice\.status"[\s\S]*"voice\.toggle"/,
+  );
+  assert.match(
+    facade,
+    /window\.__bwNativeComputerVoiceExtensionBridge = nativeComputerVoiceBridge/,
+  );
+  assert.match(
+    facade,
+    /call\('voice\.toggle',[\s\S]*window\.location\.assign\(launchURL\)/,
+  );
+  assert.match(
+    voicecall,
+    /function _extensionNativeComputerVoiceBridge\(\)[\s\S]*bridge\.available\(\) === true[\s\S]*bridge\.toggle/,
+  );
+  assert.match(
+    voicecall,
+    /function _nativeComputerVoiceAppAvailable\(\)[\s\S]*webViewAvailable \|\| !!_extensionNativeComputerVoiceBridge\(\)/,
+  );
+  const phoneClickStart = voicecall.indexOf("b.addEventListener('click'");
+  const phoneClickEnd = voicecall.indexOf(
+    "var tb = document.createElement('button')",
+    phoneClickStart,
+  );
+  const phoneClick = voicecall.slice(phoneClickStart, phoneClickEnd);
+  assert.doesNotMatch(
+    phoneClick,
+    /BW_NATIVE_APP_REQUEST|sendNativeMessage|nativeComputerVoiceExtensionBridge/,
   );
 });
 

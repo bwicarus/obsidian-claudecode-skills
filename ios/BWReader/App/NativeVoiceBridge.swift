@@ -96,6 +96,7 @@ final class NativeVoiceBridge: ObservableObject {
                 )
             }
             updateRemoteControls()
+            publishSharedStatus()
         }
     }
 
@@ -106,6 +107,7 @@ final class NativeVoiceBridge: ObservableObject {
 
     private weak var reader: ReaderWebViewModel?
     private let audio = NativeAudioEngine()
+    private let sharedStore = ReaderNativeBridgeStore()
     private let pathMonitor = NativeVoicePathMonitor()
     private let remoteControls = NativeVoiceRemoteControls()
     private var socket: DirectVoiceSocket?
@@ -175,6 +177,7 @@ final class NativeVoiceBridge: ObservableObject {
             category: "app",
             message: "BWReaderNative \(nativeAppBuildVersion) 已启动"
         )
+        publishSharedStatus()
     }
 
     var activeTargetName: String {
@@ -184,6 +187,36 @@ final class NativeVoiceBridge: ObservableObject {
     func bind(reader: ReaderWebViewModel) {
         self.reader = reader
         reader.bind(nativeVoiceBridge: self)
+    }
+
+    private func publishSharedStatus() {
+        let phase: String
+        switch state.phase {
+        case .idle:
+            phase = "idle"
+        case .preparing:
+            phase = "preparing"
+        case .connecting:
+            phase = "connecting"
+        case .starting:
+            phase = "starting"
+        case .active:
+            phase = "active"
+        case .suspended:
+            phase = "suspended"
+        case .stopping:
+            phase = "stopping"
+        case .failed:
+            phase = "failed"
+        }
+        try? sharedStore.writeStatus(ReaderNativeVoiceStatus(
+            phase: phase,
+            active: state.isActive,
+            busy: state.isBusy,
+            sessionID: state.sessionId,
+            appKind: activeAppKind.rawValue,
+            detail: state.detail
+        ))
     }
 
     func start(

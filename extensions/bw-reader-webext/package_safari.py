@@ -5,6 +5,7 @@ The Chromium manifest remains the source of truth. This script creates a
 temporary Safari/iOS manifest without modifying the installed Windows build:
 
 - MV3 service worker only (no cross-browser background.scripts fallback)
+- nativeMessaging for the containing BWReader app bridge
 - unlimitedStorage for the cross-site dictionary/translation/card caches
 - active Pi backend only
 - opaque 1024 px App Store icon
@@ -89,12 +90,14 @@ def add_tree(
 def safari_manifest(*, compat: bool = False) -> dict:
     manifest = json.loads((HERE / "manifest.json").read_text(encoding="utf-8"))
     manifest["name"] = APP_NAME
-    # Native Messaging/offscreen are legacy Windows-Chrome-only surfaces.
-    # Safari receives the shared direct-v2 content runtime, not a native sender.
+    # Safari uses nativeMessaging only to hand a user-approved computer-voice
+    # request to the containing BWReader app.  The app remains the sole owner of
+    # microphone/audio/WSS; the extension never starts a second voice runtime.
+    # offscreen remains Windows-Chrome-only.
     manifest["permissions"] = (
-        ["storage", "alarms"]
+        ["storage", "alarms", "nativeMessaging"]
         if compat
-        else ["storage", "alarms", "unlimitedStorage"]
+        else ["storage", "alarms", "nativeMessaging", "unlimitedStorage"]
     )
     manifest["host_permissions"] = [ACTIVE_ORIGIN + "*"]
     manifest["background"] = (
@@ -175,9 +178,10 @@ def validate(manifest: dict, *, compat: bool = False) -> None:
         raise SystemExit("Safari package requires Manifest V3")
     if manifest.get("host_permissions") != [ACTIVE_ORIGIN + "*"]:
         raise SystemExit("Safari host permission must remain restricted to the active Pi")
-    expected_permissions = {"storage", "alarms"} if compat else {
+    expected_permissions = {"storage", "alarms", "nativeMessaging"} if compat else {
         "storage",
         "alarms",
+        "nativeMessaging",
         "unlimitedStorage",
     }
     permissions = manifest.get("permissions") or []

@@ -26,6 +26,16 @@ private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
 
 @MainActor
 final class ReaderWebViewModel: NSObject, ObservableObject {
+    private enum NativePencilAction: String {
+        case toggleEraser = "toggle-eraser"
+        case showPalette = "show-palette"
+    }
+
+    private enum NativePencilGesture: String {
+        case doubleTap = "double-tap"
+        case squeeze
+    }
+
     enum NativeVoiceHandoffError: LocalizedError {
         case webVoiceAlreadyActive
         case contextRelayUnavailable
@@ -47,6 +57,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativeComputerVoiceMessageProxy: WeakScriptMessageHandler?
     private var nativeComputerContextMessageProxy: WeakScriptMessageHandler?
     private weak var nativeVoiceBridge: NativeVoiceBridge?
+    private var nativePencilInteraction: UIPencilInteraction?
+    private var lastNativePencilTapTimestamp: TimeInterval = -1
 
     override init() {
         let configuration = WKWebViewConfiguration()
@@ -155,6 +167,110 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
+        contentController.addUserScript(WKUserScript(
+            source: """
+            (() => {
+              if (window.__BW_NATIVE_PENCIL__) return;
+              window.__BW_NATIVE_PENCIL__ = true;
+
+              const dispatchOverride = (detail) => {
+                try {
+                  const event = new CustomEvent("bw-native-pencil-action", {
+                    detail,
+                    cancelable: true
+                  });
+                  return window.dispatchEvent(event) === false;
+                } catch (error) {
+                  return false;
+                }
+              };
+
+              const toggleEraser = () => {
+                // A note being edited owns the pencil before the page layer.
+                const noteButton = document.querySelector(
+                  '.rc-note.rc-note-editing .rc-note-tool[data-t="eraser"]'
+                );
+                if (noteButton) {
+                  noteButton.click();
+                  return true;
+                }
+
+                const toolbars = [
+                  ["#ink-toolbar", "data-tool"],
+                  ["#ep-ink-toolbar", "data-itool"],
+                  [".bw-ink-tools", "data-tool"]
+                ];
+                for (const [selector, attribute] of toolbars) {
+                  const toolbar = document.querySelector(selector);
+                  if (!toolbar) continue;
+                  const eraser = toolbar.querySelector(
+                    `[${attribute}="eraser"]`
+                  );
+                  const pen = toolbar.querySelector(`[${attribute}="pen"]`);
+                  if (!eraser) continue;
+                  const target = eraser.classList.contains("on") && pen
+                    ? pen
+                    : eraser;
+                  target.click();
+                  return true;
+                }
+                return false;
+              };
+
+              const showPalette = () => {
+                if (document.querySelector(
+                  ".rc-note.rc-note-editing, #ink-toolbar.show, " +
+                  "#ep-ink-toolbar.show, .bw-ink-tools.show"
+                )) return true;
+
+                if (typeof window.__bwWebInk?.set === "function") {
+                  window.__bwWebInk.set(true);
+                  return true;
+                }
+                try {
+                  if (window.RC?.actions?.has?.("ink.toggle")) {
+                    const result = window.RC.actions.run("ink.toggle", {});
+                    result?.catch?.(() => {});
+                    return true;
+                  }
+                } catch (error) {}
+                if (typeof window.inkToggle === "function") {
+                  window.inkToggle();
+                  return true;
+                }
+                return false;
+              };
+
+              window.__bwNativePencilPerform = (input) => {
+                const detail = input && typeof input === "object" ? input : {};
+                let handled = dispatchOverride(detail);
+                if (!handled && detail.action === "toggle-eraser") {
+                  handled = toggleEraser();
+                } else if (!handled && detail.action === "show-palette") {
+                  handled = showPalette();
+                }
+                window.__BW_NATIVE_PENCIL_LAST_ACTION__ = {
+                  ...detail,
+                  handled,
+                  at: Date.now()
+                };
+                if (!handled) {
+                  try { window.RC?.toast?.("当前页面尚未准备好绘图工具"); }
+                  catch (error) {}
+                }
+                return handled;
+              };
+            })();
+            """,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
+
+        let nativePencilInteraction = UIPencilInteraction()
+        nativePencilInteraction.delegate = self
+        nativePencilInteraction.isEnabled = true
+        webView.addInteraction(nativePencilInteraction)
+        self.nativePencilInteraction = nativePencilInteraction
 
         webView.navigationDelegate = self
         webView.uiDelegate = self
@@ -265,6 +381,84 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 return
             }
         }
+    }
+
+    private func resolvedNativePencilAction(
+        preferredAction: UIPencilPreferredAction,
+        fallback: NativePencilAction
+    ) -> NativePencilAction? {
+        if preferredAction == .ignore {
+            return nil
+        }
+        if preferredAction == .switchEraser
+            || preferredAction == .switchPrevious
+        {
+            return .toggleEraser
+        }
+        if preferredAction == .showColorPalette
+            || preferredAction == .showInkAttributes
+        {
+            return .showPalette
+        }
+        if #available(iOS 17.5, *) {
+            if preferredAction == .showContextualPalette {
+                return .showPalette
+            }
+            if preferredAction == .runSystemShortcut {
+                // A system shortcut is owned by iPadOS, not by Reader.
+                return nil
+            }
+        }
+        return fallback
+    }
+
+    private func performNativePencilAction(
+        _ action: NativePencilAction,
+        gesture: NativePencilGesture,
+        preferredAction: UIPencilPreferredAction
+    ) {
+        guard webView.url != nil else {
+            return
+        }
+        let payload: [String: Any] = [
+            "action": action.rawValue,
+            "gesture": gesture.rawValue,
+            "preferredAction": preferredAction.rawValue,
+        ]
+        guard
+            JSONSerialization.isValidJSONObject(payload),
+            let data = try? JSONSerialization.data(withJSONObject: payload),
+            let literal = String(data: data, encoding: .utf8)
+        else {
+            return
+        }
+        webView.evaluateJavaScript(
+            "window.__bwNativePencilPerform?.(\(literal))",
+            completionHandler: nil
+        )
+    }
+
+    private func receiveNativePencilDoubleTap(timestamp: TimeInterval) {
+        // Newer iPadOS versions may call both the modern and deprecated
+        // delegate entry points for the same physical tap. Keep it one-shot.
+        if lastNativePencilTapTimestamp >= 0,
+           abs(timestamp - lastNativePencilTapTimestamp) < 0.15
+        {
+            return
+        }
+        lastNativePencilTapTimestamp = timestamp
+        let preferredAction = UIPencilInteraction.preferredTapAction
+        guard let action = resolvedNativePencilAction(
+            preferredAction: preferredAction,
+            fallback: .toggleEraser
+        ) else {
+            return
+        }
+        performNativePencilAction(
+            action,
+            gesture: .doubleTap,
+            preferredAction: preferredAction
+        )
     }
 
     private func handleNativeComputerContext(
@@ -570,6 +764,44 @@ extension ReaderWebViewModel: WKUIDelegate {
             webView.load(URLRequest(url: url))
         }
         return nil
+    }
+}
+
+extension ReaderWebViewModel: UIPencilInteractionDelegate {
+    func pencilInteractionDidTap(_ interaction: UIPencilInteraction) {
+        receiveNativePencilDoubleTap(
+            timestamp: ProcessInfo.processInfo.systemUptime
+        )
+    }
+
+    @available(iOS 17.5, *)
+    func pencilInteraction(
+        _ interaction: UIPencilInteraction,
+        didReceiveTap tap: UIPencilInteraction.Tap
+    ) {
+        receiveNativePencilDoubleTap(timestamp: tap.timestamp)
+    }
+
+    @available(iOS 17.5, *)
+    func pencilInteraction(
+        _ interaction: UIPencilInteraction,
+        didReceiveSqueeze squeeze: UIPencilInteraction.Squeeze
+    ) {
+        guard squeeze.phase == .ended else {
+            return
+        }
+        let preferredAction = UIPencilInteraction.preferredSqueezeAction
+        guard let action = resolvedNativePencilAction(
+            preferredAction: preferredAction,
+            fallback: .showPalette
+        ) else {
+            return
+        }
+        performNativePencilAction(
+            action,
+            gesture: .squeeze,
+            preferredAction: preferredAction
+        )
     }
 }
 

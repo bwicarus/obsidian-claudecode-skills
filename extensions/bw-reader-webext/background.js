@@ -45,6 +45,23 @@ const PAGE_CARD_PRESENTATION_MESSAGES = new Set([
 const TRANSLATION_CACHE_MESSAGES = new Set([
   "BW_TRANSLATION_CACHE_GET"
 ]);
+const NATIVE_APP_MESSAGES = new Set([
+  "BW_NATIVE_APP_REQUEST"
+]);
+const NATIVE_APP_CONTRACT = "bw-reader-native/1";
+const NATIVE_APP_IDENTIFIER = "space.bwicarus.bwreader2";
+const NATIVE_APP_ACTIONS = new Set([
+  "capabilities",
+  "voice.status",
+  "voice.toggle"
+]);
+const NATIVE_APP_KINDS = new Set([
+  "codex-desktop",
+  "chatgpt-classic"
+]);
+const NATIVE_APP_REQUEST_ID_RE = /^[A-Za-z0-9_-]{8,96}$/;
+const NATIVE_APP_MAX_SOURCE_URL_BYTES = 2048;
+const NATIVE_APP_MAX_SELECTION_BYTES = 4096;
 const LOCAL_STORAGE_KEYS = new Set([
   "bwReaderExtensionPreferencesV2",
   "webHighlightsV1",
@@ -4517,6 +4534,250 @@ chrome.runtime.onConnect.addListener((port) => {
   });
 });
 
+function nativeAppByteLength(value) {
+  return new TextEncoder().encode(String(value || "")).byteLength;
+}
+
+function nativeAppPublicError(message, code = "BW_NATIVE_APP_UNAVAILABLE") {
+  return Object.assign(new Error(String(message || "BWReader App 暂时不可用")), {
+    code: String(code || "BW_NATIVE_APP_UNAVAILABLE")
+  });
+}
+
+function nativeAppRequestPayload(message, sender) {
+  if (!message || typeof message !== "object" || Array.isArray(message)) {
+    throw nativeAppPublicError(
+      "BWReader App 请求无效",
+      "BW_NATIVE_APP_REQUEST_INVALID"
+    );
+  }
+  const action = String(message.action || "");
+  const requestId = String(message.requestId || "");
+  if (!NATIVE_APP_ACTIONS.has(action) || !NATIVE_APP_REQUEST_ID_RE.test(requestId)) {
+    throw nativeAppPublicError(
+      "BWReader App 请求无效",
+      "BW_NATIVE_APP_REQUEST_INVALID"
+    );
+  }
+  const allowed = new Set(["type", "action", "requestId"]);
+  if (action === "voice.toggle") {
+    allowed.add("appKind");
+    allowed.add("selectionText");
+  }
+  if (Object.keys(message).some((key) => !allowed.has(key))) {
+    throw nativeAppPublicError(
+      "BWReader App 请求字段无效",
+      "BW_NATIVE_APP_REQUEST_INVALID"
+    );
+  }
+  const payload = {
+    contract: NATIVE_APP_CONTRACT,
+    action,
+    requestId
+  };
+  if (action !== "voice.toggle") return payload;
+
+  const appKind = String(message.appKind || "");
+  if (!NATIVE_APP_KINDS.has(appKind)) {
+    throw nativeAppPublicError(
+      "电脑客户端目标无效",
+      "BW_NATIVE_APP_KIND_INVALID"
+    );
+  }
+  payload.appKind = appKind;
+  const sourceURL = String(sender?.url || sender?.tab?.url || "");
+  if (/^https?:\/\//i.test(sourceURL) && nativeAppByteLength(sourceURL) <= NATIVE_APP_MAX_SOURCE_URL_BYTES) {
+    payload.sourceURL = sourceURL;
+  }
+  if (message.selectionText != null) {
+    const selectionText = String(message.selectionText);
+    if (nativeAppByteLength(selectionText) > NATIVE_APP_MAX_SELECTION_BYTES) {
+      throw nativeAppPublicError(
+        "当前选中文字过长，无法交给 BWReader App",
+        "BW_NATIVE_APP_SELECTION_TOO_LARGE"
+      );
+    }
+    if (selectionText) payload.selectionText = selectionText;
+  }
+  return payload;
+}
+
+function sendSafariNativeMessage(payload) {
+  const runtime = globalThis.browser?.runtime || chrome.runtime;
+  if (!runtime || typeof runtime.sendNativeMessage !== "function") {
+    return Promise.reject(nativeAppPublicError(
+      "当前浏览器没有 BWReader App 原生桥",
+      "BW_NATIVE_APP_NOT_SUPPORTED"
+    ));
+  }
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (response, error) => {
+      if (settled) return;
+      settled = true;
+      if (error) reject(error);
+      else resolve(response);
+    };
+    const callback = (response) => {
+      const runtimeError = runtime.lastError || chrome.runtime?.lastError;
+      if (runtimeError) {
+        finish(null, nativeAppPublicError(
+          "无法联系 BWReader App 原生桥",
+          "BW_NATIVE_APP_UNAVAILABLE"
+        ));
+        return;
+      }
+      finish(response, null);
+    };
+    try {
+      // Safari ignores the application identifier and always targets the
+      // containing app's native extension.  Keeping the real bundle ID here
+      // also gives Chromium a deterministic, fail-closed host lookup.
+      const result = runtime.sendNativeMessage(
+        NATIVE_APP_IDENTIFIER,
+        payload,
+        callback
+      );
+      if (result && typeof result.then === "function") {
+        result.then(
+          (response) => finish(response, null),
+          () => finish(null, nativeAppPublicError(
+            "无法联系 BWReader App 原生桥",
+            "BW_NATIVE_APP_UNAVAILABLE"
+          ))
+        );
+      }
+    } catch (_) {
+      finish(null, nativeAppPublicError(
+        "无法联系 BWReader App 原生桥",
+        "BW_NATIVE_APP_UNAVAILABLE"
+      ));
+    }
+  });
+}
+
+function normalizeNativeAppState(raw) {
+  if (!raw || typeof raw !== "object" || Array.isArray(raw)) {
+    throw nativeAppPublicError(
+      "BWReader App 状态响应无效",
+      "BW_NATIVE_APP_RESPONSE_INVALID"
+    );
+  }
+  const phase = String(raw.phase || "");
+  if (!/^[a-z][a-z0-9.-]{1,63}$/.test(phase)) {
+    throw nativeAppPublicError(
+      "BWReader App 状态响应无效",
+      "BW_NATIVE_APP_RESPONSE_INVALID"
+    );
+  }
+  const state = {
+    phase,
+    active: raw.active === true,
+    busy: raw.busy === true,
+    updatedAt: String(raw.updatedAt || "").slice(0, 80)
+  };
+  if (raw.sessionId != null) {
+    const sessionId = String(raw.sessionId);
+    if (!NATIVE_APP_REQUEST_ID_RE.test(sessionId) && !/^[A-Za-z0-9_-]{1,160}$/.test(sessionId)) {
+      throw nativeAppPublicError(
+        "BWReader App 会话状态无效",
+        "BW_NATIVE_APP_RESPONSE_INVALID"
+      );
+    }
+    state.sessionId = sessionId;
+  }
+  if (raw.appKind != null) {
+    const appKind = String(raw.appKind);
+    if (!NATIVE_APP_KINDS.has(appKind)) {
+      throw nativeAppPublicError(
+        "BWReader App 目标状态无效",
+        "BW_NATIVE_APP_RESPONSE_INVALID"
+      );
+    }
+    state.appKind = appKind;
+  }
+  return state;
+}
+
+function normalizeNativeAppResponse(response, payload) {
+  if (
+    !response ||
+    typeof response !== "object" ||
+    Array.isArray(response) ||
+    response.contract !== NATIVE_APP_CONTRACT ||
+    response.action !== payload.action ||
+    response.requestId !== payload.requestId ||
+    typeof response.ok !== "boolean"
+  ) {
+    throw nativeAppPublicError(
+      "BWReader App 响应无效",
+      "BW_NATIVE_APP_RESPONSE_INVALID"
+    );
+  }
+  if (response.ok !== true) {
+    return {
+      contract: NATIVE_APP_CONTRACT,
+      action: payload.action,
+      requestId: payload.requestId,
+      ok: false,
+      code: String(response.code || "BW_NATIVE_APP_REJECTED").slice(0, 96),
+      error: String(response.error || "BWReader App 拒绝了请求").slice(0, 240)
+    };
+  }
+  const normalized = {
+    contract: NATIVE_APP_CONTRACT,
+    action: payload.action,
+    requestId: payload.requestId,
+    ok: true
+  };
+  if (payload.action === "capabilities") {
+    const actions = Array.isArray(response.actions) ? response.actions.map(String) : [];
+    const appKinds = Array.isArray(response.appKinds) ? response.appKinds.map(String) : [];
+    if (
+      !actions.includes("capabilities") ||
+      !actions.includes("voice.status") ||
+      !actions.includes("voice.toggle") ||
+      appKinds.some((value) => !NATIVE_APP_KINDS.has(value)) ||
+      !appKinds.includes("codex-desktop") ||
+      response.launchScheme !== "bwreader"
+    ) {
+      throw nativeAppPublicError(
+        "BWReader App 电脑语音能力不完整",
+        "BW_NATIVE_APP_CAPABILITY_MISSING"
+      );
+    }
+    normalized.actions = Array.from(new Set(actions));
+    normalized.appKinds = Array.from(new Set(appKinds));
+    normalized.launchScheme = "bwreader";
+    return normalized;
+  }
+  normalized.state = normalizeNativeAppState(response.state);
+  if (payload.action === "voice.toggle") {
+    const expectedLaunchURL = `bwreader://native-voice?requestId=${encodeURIComponent(payload.requestId)}`;
+    if (response.launchURL !== expectedLaunchURL) {
+      throw nativeAppPublicError(
+        "BWReader App 启动地址无效",
+        "BW_NATIVE_APP_RESPONSE_INVALID"
+      );
+    }
+    normalized.launchURL = expectedLaunchURL;
+    normalized.opened = response.opened === true;
+  }
+  return normalized;
+}
+
+async function handleNativeAppMessage(message, sender) {
+  if (!sender?.tab || sender.frameId !== 0) {
+    throw nativeAppPublicError(
+      "只有当前网页可以请求 BWReader App",
+      "BW_NATIVE_APP_SENDER_INVALID"
+    );
+  }
+  const payload = nativeAppRequestPayload(message, sender);
+  const response = await sendSafariNativeMessage(payload);
+  return normalizeNativeAppResponse(response, payload);
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!sender || sender.id !== chrome.runtime.id) return false;
   if (
@@ -4524,11 +4785,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     !ACCOUNT_MESSAGES.has(message?.type) &&
     !LOCAL_STORAGE_MESSAGES.has(message?.type) &&
     !PAGE_CARD_PRESENTATION_MESSAGES.has(message?.type) &&
-    !TRANSLATION_CACHE_MESSAGES.has(message?.type)
+    !TRANSLATION_CACHE_MESSAGES.has(message?.type) &&
+    !NATIVE_APP_MESSAGES.has(message?.type)
   ) {
     return false;
   }
-  const operation = LOCAL_STORAGE_MESSAGES.has(message.type)
+  const operation = NATIVE_APP_MESSAGES.has(message.type)
+    ? handleNativeAppMessage(message, sender)
+    : LOCAL_STORAGE_MESSAGES.has(message.type)
     ? handleLocalStorageMessage(message, sender)
     : PAGE_CARD_PRESENTATION_MESSAGES.has(message.type)
       ? handlePageCardPresentationMessage(message, sender)
