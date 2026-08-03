@@ -152,10 +152,21 @@ function publishContext(ctx) {
     if (typeof RC.ctxSync.setBase === "function") RC.ctxSync.setBase(READER_ORIGIN);
 
     if (typeof RC.ctxSync.enabled === "function" && !RC.ctxSync.enabled()) {
-      // Off by default in this origin's storage -- the extension page has its
-      // own. Opening a call is an unambiguous request to send context, so turn
-      // it on here rather than failing with an error the user cannot act on.
-      if (typeof RC.ctxSync.setEnabled === "function") RC.ctxSync.setEnabled(true);
+      // Deliberately NOT setEnabled(): that also POSTs the flag to the Pi with
+      // credentials, to sync the preference across devices. From this origin
+      // that request cannot succeed -- the Pi does not recognise
+      // safari-web-extension:// -- and 1.0.9 died on exactly that as
+      // "TypeError: Load failed", taking the call down with it.
+      //
+      // The flag itself lives in localStorage and is all report() consults;
+      // the cross-device sync is irrelevant here, because this context travels
+      // to Windows over the bridge socket, not through the Pi.
+      try {
+        if (RC.ctxSync.LS_KEY) localStorage.setItem(RC.ctxSync.LS_KEY, "1");
+      } catch (_) {}
+      if (typeof RC.ctxSync.enabled === "function" && !RC.ctxSync.enabled()) {
+        return "✗ 无法启用上下文开关";
+      }
     }
 
     const ok = RC.ctxSync.report({
