@@ -5727,6 +5727,23 @@ if (window.__bwPwaProviderOnly) return;
   // Only meaningful from an extension page. A Reader page's text already
   // reaches Windows through the Pi, and calling this there would merely
   // describe the same document twice.
+  // Sequence must be a positive integer and rise; the bridge treats a repeat or
+  // a gap as a journal fault and stops forwarding context.
+  var webContextSeq = 0;
+  function nextWebContextSeq() {
+    webContextSeq += 1;
+    return webContextSeq;
+  }
+
+  function webContextEventId() {
+    var hex = "0123456789abcdef";
+    var out = "";
+    for (var i = 0; i < 12; i += 1) {
+      out += hex[Math.floor(Math.random() * 16)];
+    }
+    return out;
+  }
+
   function sendWebPageContext(page) {
     if (!active || !active.channel) {
       return Promise.reject(directError(
@@ -5745,23 +5762,47 @@ if (window.__bwPwaProviderOnly) return;
       ));
     }
     var text = typeof page.text === "string" ? page.text : "";
-    var selection = typeof page.selection === "string" ? page.selection : "";
     // Truncation is reported rather than hidden, so the assistant knows it is
     // holding part of a page instead of mistaking it for the whole.
     var truncated = text.length > 12000 || page.truncated === true;
-    return active.channel.request("web-page-context", {
+    text = text.slice(0, 12000);
+
+    // Sent on the existing context action rather than a dedicated one. The
+    // bridge runs 0.1.71, which has no web-page-context; carrying the page as a
+    // page.context event needs nothing new on the Windows side and keeps that
+    // known-good voice baseline intact.
+    //
+    // page must be 0, matching the pos the active-reading snapshot reports.
+    // Windows pairs the two by (file, page); a mismatch leaves the context
+    // pending forever, which is exactly how this looked before -- snapshot
+    // showing active-reading only, page null, text unavailable.
+    return active.channel.request("context", {
       sessionId: active.sessionId,
-      webContextContract: WEB_PAGE_CONTEXT_CONTRACT,
-      context: {
-        url: url,
+      contextContract: OUTGOING_CONTEXT_CONTRACT,
+      event: {
+        v: 1,
+        seq: nextWebContextSeq(),
+        type: "page.context",
+        event: "page.context",
+        ts: Math.floor(Date.now() / 1000),
+        id: webContextEventId(),
+        stable: true,
+        book_id: url,
+        file: url,
+        page: 0,
         title: typeof page.title === "string" ? page.title : "",
-        text: text.slice(0, 12000),
-        truncated: truncated,
-        selectionState: selection ? "active" : "cleared",
-        selection: selection.slice(0, 400),
-        observedAtEpochMs: Number.isSafeInteger(page.observedAtEpochMs)
-          ? page.observedAtEpochMs
-          : Date.now(),
+        kind: "web",
+        text_available: !!text,
+        page_context: {
+          text: text,
+          text_available: !!text,
+          text_source: "extension-page",
+          fallback_reason: text ? null : "扩展未取得正文",
+          truncated: truncated,
+          reason: "call",
+          visual: null,
+          embeds: { highlights: 0, blocks: 0, unanchored: [] },
+        },
       },
     });
   }

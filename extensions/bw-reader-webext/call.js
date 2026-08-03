@@ -337,6 +337,11 @@ function publishContext(ctx) {
     state.pend = {
       kind: "web",
       url: ctx.url,
+      // Windows pairs active-reading with the page.context event by
+      // (file, page). The event declares page 0, so the snapshot must say the
+      // same or the pairing never completes and context stays pending -- which
+      // is precisely what the snapshot showed: active-reading only, page null.
+      pos: 0,
       title: ctx.title || "",
       text: ctx.text || "",
       selection: ctx.selection || "",
