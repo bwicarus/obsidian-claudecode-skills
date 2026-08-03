@@ -225,6 +225,13 @@ class BridgeAndDeliveryTest(unittest.TestCase):
             self.assertIn("assistant-history", h, f"{host} 未接入既有 SSE 总线")
             self.assertIn("onHistoryEvent", h)
 
+    def test_local_voice_turn_ignores_its_own_history_echo(self) -> None:
+        js = (ROOT / "_server_deploy/static/pdf/rc-assistant.js").read_text("utf-8")
+        mark = js.index("_liveSeen[_b.turn_id] = 1")
+        post = js.index("fetch('/api/assistant/log'", mark)
+        self.assertLess(mark, post, "本地轮次必须在落库广播前登记，避免自己的 SSE 回声重复渲染")
+        self.assertIn("_liveSeen['u:' + _b.turn_id] = 1", js[mark:post])
+
     def test_no_new_outward_service(self) -> None:
         """只复用既有 reader-events,不许再开一个对外端口/长连接。"""
         js = (ROOT / "_server_deploy/static/pdf/rc-assistant.js").read_text("utf-8")
@@ -402,4 +409,3 @@ class ContractStaticPathTest(unittest.TestCase):
         seg = asst.split("契约校验:", 1)[1][:900]
         self.assertIn("except Exception as _ce", seg,
                       "只 catch ValueError 会让 ContractError/FileNotFoundError 漏成 500")
-

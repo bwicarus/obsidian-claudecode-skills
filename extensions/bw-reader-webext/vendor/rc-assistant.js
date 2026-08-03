@@ -2668,6 +2668,14 @@ if (window.__bwPwaProviderOnly) return;
         var _ps = RC.turnCard.partsOf(_vTid);
         if (_ps && _ps.length) { _b.parts = _ps; _b.turn_id = _vTid; }
       } catch (e) {}
+      // This turn is already rendered by the local realtime voice path.  The
+      // /log endpoint also publishes an assistant-history event for other
+      // connected readers; without recording the local turn first, our own
+      // event consumer appends the same user/assistant pair a second time.
+      if (_b.turn_id && _liveSeen) {
+        _liveSeen[_b.turn_id] = 1;
+        _liveSeen['u:' + _b.turn_id] = 1;
+      }
       fetch('/api/assistant/log', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
         body: JSON.stringify(_b) }).catch(function () {});
     } catch (e) {}

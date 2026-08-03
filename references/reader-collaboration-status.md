@@ -3654,3 +3654,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：Reader Node 合同全过；Windows Python/handoff 只保留既有 `fcntl` 与无关 fixture 基线；macOS build-only 完成模拟器编译、签名 archive、IPA 导出和资源逐字节校验。
 - **发布**：`0.2.3 (2)` 已由同一分支工作流成功上传 TestFlight；旧 Swift Playgrounds 包冻结为本地回退参考，后续 iOS 发布源码以 `ios/BWReader/` 为准。
 - **下一步**：等待 App Store Connect 处理完成后，用户在 iPad 安装并验收阅读器、电脑语音按钮及 Safari 扩展是否同时存在可用。
+
+## Codex：Realtime 对话历史自回声去重（2026-08-03 JST）
+- **改了什么**：本地已渲染的语音轮次在 `/api/assistant/log` 广播前登记 `turn_id`，当前页面不再把自己的 `assistant-history` 事件追加第二遍；其他设备的真实新轮次仍实时到达。
+- **怎么验的**：新增广播前登记顺序合同并通过，Reader Node 全量合同通过；Windows 全文件 Python 仍只有已登记的 `fcntl` 环境基线。
+- **发布**：App 与扩展版本线切到 `1.0.1`；远程 Reader 与 TestFlight 同批发布。
+- **没做/下一步**：未主动启动语音或发送测试消息；用户刷新现有页面并在 iPad 实测连续两轮 Realtime 对话。
