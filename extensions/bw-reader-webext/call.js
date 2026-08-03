@@ -390,7 +390,10 @@ async function start() {
           observedAtEpochMs: pageContext.capturedAt,
         })
         .then((ack) => {
-          els.detail.textContent += `\n网页上下文 ✓ 已送达(revision ${ack?.revision ?? "?"})`;
+          // The older context ACK reports outcome and seq, not revision.
+          const outcome = ack?.outcome ?? "?";
+          const seq = ack?.seq ?? ack?.cursor ?? "?";
+          els.detail.textContent += `\n网页上下文 ✓ ${outcome} (seq ${seq})`;
         })
         .catch((err) => {
           els.detail.textContent += "\n网页上下文 ✗ " + describe(err);
@@ -477,6 +480,10 @@ async function useLegacyDelivery() {
   // feature (position, selection, freshness -- all visible and correct) for one
   // that did not arrive anyway. Keeping the mode the bridge was configured for.
   const ctx = await loadContext();
+  // Kept for start(), which cannot reach this scope's local. Missing this
+  // assignment made the guard in start() permanently false, so the page was
+  // never sent at all -- 1.0.22 could not have worked whatever else was right.
+  pageContext = ctx;
   if (!ctx) {
     els.ctxTitle.textContent = "（未取得网页上下文）";
     els.ctxUrl.textContent = "AI 将听不到当前网页内容";

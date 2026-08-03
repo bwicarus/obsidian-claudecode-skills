@@ -5735,10 +5735,13 @@ if (window.__bwPwaProviderOnly) return;
     return webContextSeq;
   }
 
+  // Exactly 16 lowercase hex. The fixture writes "<12hex>" as a placeholder,
+  // which is what misled the first attempt; 0.1.71's ValidateEvent wants 16 and
+  // rejects anything else.
   function webContextEventId() {
     var hex = "0123456789abcdef";
     var out = "";
-    for (var i = 0; i < 12; i += 1) {
+    for (var i = 0; i < 16; i += 1) {
       out += hex[Math.floor(Math.random() * 16)];
     }
     return out;
