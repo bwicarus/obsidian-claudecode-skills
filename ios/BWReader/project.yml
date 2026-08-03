@@ -74,6 +74,15 @@ targets:
       - path: Extension/Resources/popup.js
         buildPhase: resources
         optional: true
+      # The in-extension call surface. Root files are enumerated one by one
+      # here, so a file that ships in the Safari package still has to be listed
+      # again or it silently never reaches the built extension.
+      - path: Extension/Resources/call.html
+        buildPhase: resources
+        optional: true
+      - path: Extension/Resources/call.js
+        buildPhase: resources
+        optional: true
       - path: Extension/Resources/src
         type: folder
         buildPhase: resources
