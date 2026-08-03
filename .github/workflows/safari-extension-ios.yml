@@ -192,6 +192,22 @@ jobs:
           rm -f "$RUNNER_TEMP/dist.p12"
           security find-identity -v -p codesigning build.keychain
 
+      - name: Install provisioning profiles
+        env:
+          APP_PROFILE_BASE64: ${{ secrets.APPLE_APP_PROFILE_BASE64 }}
+          EXTENSION_PROFILE_BASE64: ${{ secrets.APPLE_EXTENSION_PROFILE_BASE64 }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          PROFILES="$HOME/Library/MobileDevice/Provisioning Profiles"
+          mkdir -p "$PROFILES"
+          echo "$APP_PROFILE_BASE64" | base64 --decode \
+            > "$PROFILES/BWReader-App-Store-App.mobileprovision"
+          echo "$EXTENSION_PROFILE_BASE64" | base64 --decode \
+            > "$PROFILES/BWReader-App-Store-Extension.mobileprovision"
+          test -s "$PROFILES/BWReader-App-Store-App.mobileprovision"
+          test -s "$PROFILES/BWReader-App-Store-Extension.mobileprovision"
+
       - name: Place App Store Connect API key
         env:
           API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
@@ -207,12 +223,11 @@ jobs:
           cp "$RUNNER_TEMP/private_keys/AuthKey_${API_KEY_ID}.p8" \
             ~/.appstoreconnect/private_keys/
 
-      # -allowProvisioningUpdates with the API key lets Xcode create and fetch
-      # both the app and extension profiles without checked-in profiles.
+      # Both targets use fixed App Store profiles and the imported distribution
+      # certificate. This avoids creating a disposable development certificate
+      # on every fresh GitHub runner.
       - name: Archive signed device candidate
         env:
-          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
           TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         shell: bash
         run: |
@@ -224,12 +239,8 @@ jobs:
             -scheme "$SCHEME" \
             -destination "generic/platform=iOS" \
             -archivePath "$RUNNER_TEMP/app.xcarchive" \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$RUNNER_TEMP/private_keys/AuthKey_${API_KEY_ID}.p8" \
-            -authenticationKeyID "$API_KEY_ID" \
-            -authenticationKeyIssuerID "$API_ISSUER_ID" \
             DEVELOPMENT_TEAM="$TEAM_ID" \
-            CODE_SIGN_STYLE=Automatic \
+            CODE_SIGN_STYLE=Manual \
             CODE_SIGN_IDENTITY="Apple Distribution" \
             | tee "$RUNNER_TEMP/build-logs/archive.log"
 
@@ -352,8 +363,6 @@ jobs:
       - name: Export IPA
         env:
           TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
         shell: bash
         run: |
           set -euo pipefail
@@ -365,6 +374,13 @@ jobs:
             <key>method</key><string>app-store-connect</string>
             <key>teamID</key><string>${TEAM_ID}</string>
             <key>destination</key><string>export</string>
+            <key>signingStyle</key><string>manual</string>
+            <key>signingCertificate</key><string>Apple Distribution</string>
+            <key>provisioningProfiles</key>
+            <dict>
+              <key>space.bwicarus.bwreader2</key><string>BWReader App Store App</string>
+              <key>space.bwicarus.bwreader2.Extension</key><string>BWReader App Store Extension</string>
+            </dict>
             <key>uploadSymbols</key><true/>
           </dict>
           </plist>
@@ -374,10 +390,6 @@ jobs:
             -archivePath "$RUNNER_TEMP/app.xcarchive" \
             -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
             -exportPath "$RUNNER_TEMP/export" \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$RUNNER_TEMP/private_keys/AuthKey_${API_KEY_ID}.p8" \
-            -authenticationKeyID "$API_KEY_ID" \
-            -authenticationKeyIssuerID "$API_ISSUER_ID" \
             | tee "$RUNNER_TEMP/build-logs/export.log"
           find "$RUNNER_TEMP/export" -maxdepth 1 -type f -print
 
