@@ -5,6 +5,7 @@ import WebKit
 private let readerStartURL = URL(string: "https://bwicarus.taile44d0c.ts.net/pdf/")!
 private let nativeComputerVoiceMessageName = "bwNativeComputerVoice"
 private let nativeComputerContextMessageName = "bwNativeComputerContext"
+private let nativeAgentVoiceMessageName = "bwNativeAgentVoice"
 
 private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
     weak var delegate: WKScriptMessageHandler?
@@ -26,6 +27,14 @@ private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
 
 @MainActor
 final class ReaderWebViewModel: NSObject, ObservableObject {
+    private enum NativeAgentVoiceCommand {
+        case start(NativeAgentVoiceContext)
+        case stop
+        case speak(String, String?)
+        case finishSpeaking
+        case cancelSpeaking
+    }
+
     private enum NativePencilAction: String {
         case toggleEraser = "toggle-eraser"
         case showPalette = "show-palette"
@@ -56,7 +65,11 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     @Published private(set) var loadError: String?
     private var nativeComputerVoiceMessageProxy: WeakScriptMessageHandler?
     private var nativeComputerContextMessageProxy: WeakScriptMessageHandler?
+    private var nativeAgentVoiceMessageProxy: WeakScriptMessageHandler?
     private weak var nativeVoiceBridge: NativeVoiceBridge?
+    private let nativeAgentVoice = NativeAgentVoiceSession()
+    private var nativeAgentVoiceCommandTail: Task<Void, Never>?
+    private var nativeAgentVoiceWasReady = false
     private var nativePencilInteraction: UIPencilInteraction?
     private var lastNativePencilTapTimestamp: TimeInterval = -1
 
@@ -92,6 +105,13 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         contentController.add(
             nativeComputerContextMessageProxy,
             name: nativeComputerContextMessageName
+        )
+        let nativeAgentVoiceMessageProxy =
+            WeakScriptMessageHandler(delegate: self)
+        self.nativeAgentVoiceMessageProxy = nativeAgentVoiceMessageProxy
+        contentController.add(
+            nativeAgentVoiceMessageProxy,
+            name: nativeAgentVoiceMessageName
         )
         contentController.addUserScript(WKUserScript(
             source: """
@@ -162,6 +182,29 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 );
                 if (addedButton) applyAll();
               }).observe(document, { childList: true, subtree: true });
+            })();
+            """,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
+        contentController.addUserScript(WKUserScript(
+            source: """
+            (() => {
+              if (location.protocol !== "https:" ||
+                  location.hostname.toLowerCase() !==
+                    "bwicarus.taile44d0c.ts.net") return;
+              window.__BW_NATIVE_AGENT_VOICE__ = true;
+              window.__bwNativeAgentVoiceDispatch = (value) => {
+                const detail = value && typeof value === "object" ? value : {};
+                window.dispatchEvent(new CustomEvent(
+                  "bw-native-agent-voice-event",
+                  { detail }
+                ));
+              };
+              window.dispatchEvent(new CustomEvent(
+                "bw-native-agent-voice-capability",
+                { detail: { available: true } }
+              ));
             })();
             """,
             injectionTime: .atDocumentStart,
@@ -280,6 +323,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         webView.backgroundColor = .black
         webView.scrollView.backgroundColor = .black
         webView.scrollView.contentInsetAdjustmentBehavior = .never
+        nativeAgentVoice.delegate = self
     }
 
     func loadIfNeeded() {
@@ -372,6 +416,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             guard let bridge else {
                 return
             }
+            if self.nativeAgentVoice.state != .idle {
+                await self.nativeAgentVoice.stop()
+            }
             switch bridge.state.phase {
             case .idle, .failed:
                 await bridge.start(appKind: appKind)
@@ -381,6 +428,169 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 return
             }
         }
+    }
+
+    private func handleNativeAgentVoice(
+        _ body: [String: Any]
+    ) {
+        guard let action = body["action"] as? String else {
+            return
+        }
+        switch action {
+        case "start":
+            guard body.count == 3,
+                  let file = body["file"] as? String,
+                  file.count <= 2_048,
+                  let pageNumber = body["page"] as? NSNumber else {
+                return
+            }
+            let page = pageNumber.intValue
+            enqueueNativeAgentVoiceCommand(.start(
+                NativeAgentVoiceContext(
+                    fileRelativePath: file.isEmpty ? nil : file,
+                    page: page > 0 ? page : nil
+                )
+            ))
+        case "stop":
+            guard body.count == 1 else { return }
+            enqueueNativeAgentVoiceCommand(.stop)
+        case "speak":
+            guard body.count == 3,
+                  let text = body["text"] as? String,
+                  !text.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                  ).isEmpty,
+                  let mood = body["mood"] as? String else {
+                return
+            }
+            enqueueNativeAgentVoiceCommand(.speak(
+                text,
+                mood.isEmpty ? nil : mood
+            ))
+        case "speak_done":
+            guard body.count == 1 else { return }
+            enqueueNativeAgentVoiceCommand(.finishSpeaking)
+        case "cancel":
+            guard body.count == 1 else { return }
+            enqueueNativeAgentVoiceCommand(.cancelSpeaking)
+        default:
+            return
+        }
+    }
+
+    /// WK messages arrive independently. Chaining them here preserves the
+    /// relay protocol order (`speak*` before `speak_done`, and `cancel` after
+    /// the text it supersedes) even when an actor send suspends.
+    private func enqueueNativeAgentVoiceCommand(
+        _ command: NativeAgentVoiceCommand
+    ) {
+        let previous = nativeAgentVoiceCommandTail
+        let task = Task { @MainActor [weak self] in
+            if let previous {
+                await previous.value
+            }
+            guard let self else { return }
+            await self.executeNativeAgentVoiceCommand(command)
+        }
+        nativeAgentVoiceCommandTail = task
+    }
+
+    private func executeNativeAgentVoiceCommand(
+        _ command: NativeAgentVoiceCommand
+    ) async {
+        do {
+            switch command {
+            case .start(let context):
+                if let bridge = nativeVoiceBridge,
+                   bridge.state.phase != .idle {
+                    await bridge.stop()
+                }
+                await nativeAgentVoice.start(context: context)
+            case .stop:
+                await nativeAgentVoice.stop()
+            case .speak(let text, let mood):
+                try await nativeAgentVoice.speak(text, mood: mood)
+            case .finishSpeaking:
+                try await nativeAgentVoice.finishSpeaking()
+            case .cancelSpeaking:
+                await nativeAgentVoice.cancelSpeaking()
+            }
+        } catch {
+            sendNativeAgentVoiceEvent(
+                "error",
+                payload: ["error": error.localizedDescription]
+            )
+        }
+    }
+
+    private func sendNativeAgentVoiceEvent(
+        _ event: String,
+        payload: [String: Any] = [:]
+    ) {
+        guard isTrustedReaderURL(webView.url) else { return }
+        let value: [String: Any] = [
+            "event": event,
+            "payload": payload,
+        ]
+        guard JSONSerialization.isValidJSONObject(value),
+              let data = try? JSONSerialization.data(withJSONObject: value),
+              let literal = String(data: data, encoding: .utf8) else {
+            return
+        }
+        webView.evaluateJavaScript(
+            "window.__bwNativeAgentVoiceDispatch?.(\(literal))",
+            completionHandler: nil
+        )
+    }
+
+    private func isTrustedReaderURL(_ url: URL?) -> Bool {
+        guard let url else { return false }
+        return url.scheme?.lowercased()
+                == readerStartURL.scheme?.lowercased()
+            && url.host?.lowercased()
+                == readerStartURL.host?.lowercased()
+    }
+
+    private func updateNativeAgentVoiceState() {
+        let phase: String
+        let active: Bool
+        let busy: Bool
+        let speaking: Bool
+        let detail: String
+        switch nativeAgentVoice.state {
+        case .idle:
+            (phase, active, busy, speaking, detail) =
+                ("idle", false, false, false, "")
+        case .requestingMicrophone:
+            (phase, active, busy, speaking, detail) =
+                ("requesting-microphone", false, true, false,
+                 "正在申请麦克风")
+        case .connecting:
+            (phase, active, busy, speaking, detail) =
+                ("connecting", false, true, false, "正在连接语音中继")
+        case .listening:
+            (phase, active, busy, speaking, detail) =
+                ("listening", true, false, false, "连续听中")
+        case .speaking:
+            (phase, active, busy, speaking, detail) =
+                ("speaking", true, false, true, "正在朗读回答")
+        case .suspended:
+            (phase, active, busy, speaking, detail) =
+                ("suspended", true, true, false, "系统音频暂时中断")
+        case .stopping:
+            (phase, active, busy, speaking, detail) =
+                ("stopping", false, true, false, "正在结束通话")
+        case .failed(let message):
+            (phase, active, busy, speaking, detail) =
+                ("failed", false, false, false, message)
+        }
+        sendNativeAgentVoiceEvent("state", payload: [
+            "phase": phase,
+            "active": active,
+            "busy": busy,
+            "speaking": speaking,
+            "detail": detail,
+        ])
     }
 
     private func resolvedNativePencilAction(
@@ -628,6 +838,60 @@ extension ReaderWebViewModel {
     }
 }
 
+extension ReaderWebViewModel: NativeAgentVoiceSessionDelegate {
+    func nativeAgentVoiceSession(
+        _ session: NativeAgentVoiceSession,
+        didChangeState state: NativeAgentVoiceState
+    ) {
+        updateNativeAgentVoiceState()
+        if state == .listening, !nativeAgentVoiceWasReady {
+            nativeAgentVoiceWasReady = true
+            sendNativeAgentVoiceEvent("agent_ready")
+        } else if state == .idle {
+            nativeAgentVoiceWasReady = false
+        } else if case .failed = state {
+            nativeAgentVoiceWasReady = false
+        }
+    }
+
+    func nativeAgentVoiceSession(
+        _ session: NativeAgentVoiceSession,
+        didUpdateTranscript text: String
+    ) {
+        sendNativeAgentVoiceEvent("asr", payload: ["text": text])
+    }
+
+    func nativeAgentVoiceSession(
+        _ session: NativeAgentVoiceSession,
+        didFinalizeUtterance text: String
+    ) {
+        sendNativeAgentVoiceEvent("utterance", payload: ["text": text])
+    }
+
+    func nativeAgentVoiceSession(
+        _ session: NativeAgentVoiceSession,
+        didReceiveSpokenSegment text: String
+    ) {
+        sendNativeAgentVoiceEvent("tts_seg", payload: ["text": text])
+    }
+
+    func nativeAgentVoiceSessionDidFinishSpeaking(
+        _ session: NativeAgentVoiceSession
+    ) {
+        sendNativeAgentVoiceEvent("tts_end")
+    }
+
+    func nativeAgentVoiceSession(
+        _ session: NativeAgentVoiceSession,
+        didFail error: Error
+    ) {
+        sendNativeAgentVoiceEvent(
+            "error",
+            payload: ["error": error.localizedDescription]
+        )
+    }
+}
+
 extension ReaderWebViewModel: WKScriptMessageHandler {
     func userContentController(
         _ userContentController: WKUserContentController,
@@ -680,6 +944,19 @@ extension ReaderWebViewModel: WKScriptMessageHandler {
                 return
             }
             handleNativeComputerContext(body)
+        } else if message.name == nativeAgentVoiceMessageName {
+            guard
+                message.frameInfo.isMainFrame,
+                message.webView === webView,
+                webView.url?.scheme?.lowercased()
+                    == readerStartURL.scheme?.lowercased(),
+                webView.url?.host?.lowercased()
+                    == readerStartURL.host?.lowercased(),
+                let body = message.body as? [String: Any]
+            else {
+                return
+            }
+            handleNativeAgentVoice(body)
         }
     }
 }
@@ -702,6 +979,7 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         if let nativeVoiceBridge {
             updateNativeVoiceButton(state: nativeVoiceBridge.state)
         }
+        updateNativeAgentVoiceState()
     }
 
     func webView(
@@ -735,6 +1013,11 @@ extension ReaderWebViewModel: WKNavigationDelegate {
 
         let webSchemes = ["http", "https", "about", "blob", "data"]
         guard !webSchemes.contains(scheme) else {
+            if (scheme == "http" || scheme == "https"),
+               !isTrustedReaderURL(url),
+               nativeAgentVoice.state != .idle {
+                enqueueNativeAgentVoiceCommand(.stop)
+            }
             decisionHandler(.allow)
             return
         }

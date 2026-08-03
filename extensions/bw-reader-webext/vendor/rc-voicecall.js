@@ -39,6 +39,133 @@ if (window.__bwPwaProviderOnly) return;
   }
   // mode:'agent'(默认,耳=豆包ASR/嘴=豆包TTS/大脑=侧栏助手完整管线) | 's2s'(豆包端到端,旧路保留)
   var mode = 'agent';
+  // BWReader App 中 agent 模式只把媒体层交给原生代码；识别终稿仍回到
+  // handleAgentMsg → __asstSend，模型选择、工具、历史和对话 UI 继续复用网页助手。
+  // Safari/PWA/普通浏览器没有此 capability，原 WebAudio + /voice-rt 路径逐字保留。
+  var _nativeAgent = { phase: 'idle', active: false, busy: false, speaking: false };
+  var _nativeAgentWatchdog = null;
+  var _nativeAgentWatchdogKind = '';
+  function _nativeAgentAvailable() {
+    try {
+      return window.__BW_NATIVE_AGENT_VOICE__ === true &&
+        !!(window.webkit && window.webkit.messageHandlers &&
+           window.webkit.messageHandlers.bwNativeAgentVoice);
+    } catch (e) { return false; }
+  }
+  function _nativeAgentEngaged() {
+    return _nativeAgent.active === true || _nativeAgent.busy === true;
+  }
+  function _nativeAgentResetLocal(message) {
+    if (_nativeAgentWatchdog) clearTimeout(_nativeAgentWatchdog);
+    _nativeAgentWatchdog = null;
+    _nativeAgentWatchdogKind = '';
+    _nativeAgent = { phase: 'idle', active: false, busy: false, speaking: false };
+    callBtnOn(false); callBtnConnecting(false); callBtnSpeaking(false);
+    taPlaceholder(null);
+    if (message) {
+      setSt(message);
+      try { RC.toast(message); } catch (e) {}
+    }
+  }
+  function _nativeAgentArmWatchdog(kind) {
+    if (_nativeAgentWatchdog) clearTimeout(_nativeAgentWatchdog);
+    _nativeAgentWatchdogKind = kind === 'stop' ? 'stop' : 'start';
+    _nativeAgentWatchdog = setTimeout(function () {
+      var timedOutKind = _nativeAgentWatchdogKind;
+      _nativeAgentWatchdog = null;
+      _nativeAgentWatchdogKind = '';
+      if (timedOutKind === 'stop' && _nativeAgent.active) {
+        _nativeAgent.busy = false;
+        callBtnConnecting(false);
+        setSt('原生语音挂断状态未知，请再点一次');
+        try { RC.toast('原生语音挂断状态未知，请再点一次'); } catch (e) {}
+      } else {
+        _nativeAgentResetLocal('BWReader App 原生语音未返回状态，请重试');
+      }
+    }, 45000);
+  }
+  function _nativeAgentPost(body) {
+    if (!_nativeAgentAvailable()) return false;
+    try {
+      window.webkit.messageHandlers.bwNativeAgentVoice.postMessage(body);
+      return true;
+    } catch (e) { return false; }
+  }
+  function _nativeAgentStart(opts) {
+    opts = opts || {};
+    _nativeAgent.busy = true;
+    callBtnConnecting(true);
+    taPlaceholder('连接原生语音…');
+    var posted = _nativeAgentPost({
+      action: 'start',
+      file: String(opts.file || ''),
+      page: Number(opts.page || 0)
+    });
+    if (!posted) {
+      _nativeAgentResetLocal(null);
+      return false;
+    }
+    _nativeAgentArmWatchdog('start');
+    return true;
+  }
+  function _nativeAgentStop() {
+    _nativeAgent.busy = true;
+    var posted = _nativeAgentPost({ action: 'stop' });
+    if (!posted) {
+      _nativeAgent.busy = false;
+      callBtnConnecting(false);
+      setSt('无法联系 BWReader App 原生语音');
+      try { RC.toast('无法联系 BWReader App 原生语音'); } catch (e) {}
+      return false;
+    }
+    _nativeAgentArmWatchdog('stop');
+    return true;
+  }
+  window.addEventListener('bw-native-agent-voice-event', function (event) {
+    var message = (event && event.detail) || {};
+    var payload = message.payload || {};
+    if (message.event === 'state') {
+      if (_nativeAgentWatchdog) clearTimeout(_nativeAgentWatchdog);
+      _nativeAgentWatchdog = null;
+      _nativeAgentWatchdogKind = '';
+      _nativeAgent.phase = String(payload.phase || 'idle');
+      _nativeAgent.active = payload.active === true;
+      _nativeAgent.busy = payload.busy === true;
+      _nativeAgent.speaking = payload.speaking === true;
+      callBtnOn(_nativeAgent.active);
+      callBtnConnecting(_nativeAgent.busy && !_nativeAgent.active);
+      callBtnSpeaking(_nativeAgent.speaking);
+      if (_nativeAgent.busy) {
+        _nativeAgentArmWatchdog(
+          _nativeAgent.phase === 'stopping' ? 'stop' : 'start'
+        );
+      }
+      if (_nativeAgent.phase === 'failed') {
+        setSt('启动失败: ' + String(payload.detail || '原生语音连接失败'));
+        taPlaceholder(null);
+        try { RC.toast(String(payload.detail || '原生语音连接失败')); } catch (e) {}
+      } else if (_nativeAgent.phase === 'idle') {
+        taPlaceholder(null);
+      } else if (_nativeAgent.phase === 'listening') {
+        setSt('通话中 · 原生后台音频');
+        taPlaceholder('🎙 连续听中,说话即可…');
+      } else if (payload.detail) {
+        setSt(String(payload.detail));
+      }
+      return;
+    }
+    // Keep one agent event consumer. Native and browser transports feed the
+    // exact same ASR/utterance/TTS envelope into the existing assistant flow.
+    // Native reports tts_seg when AVAudioEngine receives that segment's first
+    // PCM block, so its subtitle can be shown immediately instead of waiting
+    // for the browser AudioContext chunk binder that this path intentionally
+    // does not use.
+    if (message.event === 'tts_seg') {
+      if (payload.text) capShow(payload.text);
+      return;
+    }
+    handleAgentMsg(message);
+  });
   var vt = { sent: 0, tail: '', sid: 0, pref: '' };   // 语音 tap 状态:已消费长度 / 未成句尾巴 / 句序号 / 上次 full(前缀判定轮次替换)
   var pendingUtter = null;                   // 助手忙时到达的新话(覆盖式排队,回答完自动发)
   var _reviewVoiceHint = '复习模式暂不启动实时语音通话；普通听写和朗读仍可使用';
@@ -2217,12 +2344,17 @@ if (window.__bwPwaProviderOnly) return;
   function speak(text) {
     var t = cleanForSpeech(text);
     if (!t) return;
+    if (_nativeAgent.active) {
+      _nativeAgentPost({ action: 'speak', text: t, mood: vt.mood || '' });
+      return;
+    }
     var w = (ws && mode === 'agent' && ws.readyState === 1) ? ws : _tts.ws;   // agent 通话在→走它;否则朗读专用通道
     if (w && w.readyState === 1) { try { w.send(JSON.stringify({ type: 'speak', text: t, id: ++vt.sid, mood: vt.mood || '' })); } catch (e) {} }
   }
   function bargeIn() {   // 打断:清本地播放队列 + 作废 relay 侧排队/在流的合成(两条通道都发)
     try { _sq.length = 0; if (_sqT) { clearInterval(_sqT); _sqT = null; } } catch (e) {}   // 67b:排队待念的也作废
     stopPlayback(); _ttsStopPlay(); capClear();
+    if (_nativeAgentEngaged()) _nativeAgentPost({ action: 'cancel' });
     try { if (ws && mode === 'agent' && ws.readyState === 1) ws.send(JSON.stringify({ type: 'cancel' })); } catch (e) {}
     try { if (_tts.ws && _tts.ws.readyState === 1) _tts.ws.send(JSON.stringify({ type: 'cancel' })); } catch (e) {}
   }
@@ -2591,7 +2723,7 @@ if (window.__bwPwaProviderOnly) return;
   window.__asstVoiceTap = function (full, done) {
     if (!speakOn()) return;                 // 「🔊 朗读」没点亮=零 TTS 成本(读比听快,用户拍板默认关)
     if (ws && mode === 's2s') return;       // S2S 通话:豆包自己出声,朗读开关不适用
-    if (!(ws && mode === 'agent')) _ttsEnsure();   // 没开 ASR 通话(纯打字/听写提问)→ lazy 朗读专用通道
+    if (!(ws && mode === 'agent') && !_nativeAgent.active) _ttsEnsure();   // 没开 ASR 通话(纯打字/听写提问)→ lazy 朗读专用通道
     full = String(full || '');
     // 轮次替换判定(编排器每个工具轮 answer 从头重来):full 不再是已消费前缀的延伸 → 念完上轮残句,从新文本头接着念。
     // ⚠ 不 bargeIn:轮间过渡(开场白→工具→正式回答)要连贯念完;真正的打断只在新提问(sendToAssistant)。
@@ -2609,8 +2741,11 @@ if (window.__bwPwaProviderOnly) return;
       if (vt.tail.trim()) _speakSeg(vt.tail.replace(/[\[【]语气?[::]?[^\]】]{0,12}$/, ''));
       vt.sent = 0; vt.tail = ''; vt.pref = '';
       try {
-        var wd = (ws && mode === 'agent' && ws.readyState === 1) ? ws : _tts.ws;
-        if (wd && wd.readyState === 1) wd.send(JSON.stringify({ type: 'speak_done' }));   // FinishSession:让尾巴合成完
+        if (_nativeAgent.active) _nativeAgentPost({ action: 'speak_done' });
+        else {
+          var wd = (ws && mode === 'agent' && ws.readyState === 1) ? ws : _tts.ws;
+          if (wd && wd.readyState === 1) wd.send(JSON.stringify({ type: 'speak_done' }));   // FinishSession:让尾巴合成完
+        }
       } catch (e) {}
       if (pendingUtter) { var p = pendingUtter; pendingUtter = null; sendToAssistant(p, true); }   // 排队的下一句(别掐掉刚念的尾巴)
     }
@@ -5802,7 +5937,11 @@ if (window.__bwPwaProviderOnly) return;
   }
   toggle._connect = function (opts) {
     if (_reviewVoiceGate(false)) return;
-    if (mode !== 's2s') { start(opts); return; }
+    if (mode !== 's2s') {
+      if (mode === 'agent' && _nativeAgentAvailable()) _nativeAgentStart(opts);
+      else start(opts);
+      return;
+    }
     if (_computerVoiceStarting || _computerVoiceActive()) {
       _stopComputerVoiceOnly('ordinary-voice-start');
     }
@@ -5850,11 +5989,24 @@ if (window.__bwPwaProviderOnly) return;
       setSt('语音通话启动已取消');
       return true;
     }
+    if (_nativeAgentEngaged()) {
+      _nativeAgentStop();
+      setSt('正在结束原生语音通话…');
+      return true;
+    }
     if (ws) { teardown(false); setSt('已挂断(再点 📞 重新通话)'); return; }
     if (mode === 'agent') {   // agent 模式无浮层:状态全靠按钮特效(绿=在听/蓝=在念)+ 输入框(转写/placeholder)
       toggle._opts = opts || {};
       taPlaceholder('连接语音…');
-      start(toggle._opts);
+      if (_nativeAgentAvailable()) {
+        if (!_nativeAgentStart(toggle._opts)) {
+          callBtnConnecting(false);
+          taPlaceholder(null);
+          setSt('无法联系 BWReader App 原生语音');
+        }
+      } else {
+        start(toggle._opts);
+      }
       return true;
     }
     if (!box) {
@@ -6357,7 +6509,7 @@ if (window.__bwPwaProviderOnly) return;
   RC.voicecall = { toggle: toggle,
     canCaptureComputerVoiceGesture: function () { return !_assistantInReview(); },
     isOpen: function () {
-    try { return !!ws || !!(RC.computerVoice && RC.computerVoice.isActive && RC.computerVoice.isActive()); }
+    try { return !!ws || _nativeAgentEngaged() || !!(RC.computerVoice && RC.computerVoice.isActive && RC.computerVoice.isActive()); }
     catch (e) { return !!ws; }
   }, setPage: setPage, syncInk: syncInk, syncState: syncState,
     // 设置面板改了语音配置 → 通知 relay 热更(S2S 通话中才有意义;relay 指纹含 tts,变了才真发 UpdateConfig)

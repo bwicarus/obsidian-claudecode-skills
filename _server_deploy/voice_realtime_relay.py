@@ -1104,6 +1104,7 @@ def _tts_channel(bws, key: str, speaker: str, span: str = ""):
     打断(cancel)= close 连接+作废世代:立即哑火。返回 {"speak","done","cancel"},音频裸转发 bws。"""
     tts = {"ws": None, "sid": None, "reader": None, "gen": 0}
     uni = {"q": None, "worker": None, "section": None, "gen": 0, "ws": None}
+    uni_end = object()   # 排在本轮所有 speak 之后；worker 到这里才可宣告 tts_end
     _tts_span = [span]   # 146:记账要 span
 
     async def _uni_synth_one(text: str, g: int, mood: str = ""):
@@ -1158,6 +1159,12 @@ def _tts_channel(bws, key: str, speaker: str, span: str = ""):
                 item = await uni["q"].get()
                 if item is None or g != uni["gen"]:
                     return
+                if item is uni_end:
+                    try:
+                        await bws.send(json.dumps({"event": "tts_end"}, ensure_ascii=False))
+                    except Exception:
+                        pass
+                    continue
                 try:
                     await _uni_synth_one(item[0], g, item[1])
                 except Exception as ex:
@@ -1252,11 +1259,14 @@ def _tts_channel(bws, key: str, speaker: str, span: str = ""):
             await cancel()
 
     async def done():   # 这轮回答文本发完
-        if _is_uni():   # 单向引擎:句子各自完整合成,无轮级收尾;补个 tts_end 让前端状态复位
-            try:
-                await bws.send(json.dumps({"event": "tts_end"}, ensure_ascii=False))
-            except Exception:
-                pass
+        if _is_uni():   # 单向引擎:结束标记也进串行队列,不得越过仍在合成的 speak
+            if uni["q"] is not None and uni["worker"] is not None and not uni["worker"].done():
+                await uni["q"].put(uni_end)
+            else:
+                try:
+                    await bws.send(json.dumps({"event": "tts_end"}, ensure_ascii=False))
+                except Exception:
+                    pass
             return
         if tts["ws"] and tts["sid"]:
             try:
