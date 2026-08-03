@@ -46,6 +46,28 @@ const els = {
   ctxUrl: document.getElementById("ctxUrl"),
 };
 
+// Point ctxSync at the Pi immediately, before anything can use it.
+//
+// The instrumented log named the culprit: two requests to a bare
+// "/pdf/api/context-sync". Relative, so in this page they resolve against
+// safari-web-extension://<uuid>/ -- an address that does not exist, which is
+// what Safari reports as "TypeError: Load failed". They fired even with no
+// context loaded and publishContext never called, so they are ctxSync's own
+// doing, not something any call of mine triggered. That is why three builds of
+// removing my own calls changed nothing.
+//
+// With a base set, the same requests address the Pi. They may well be rejected
+// there for lack of a session -- but a 401 is an answer, and an answer does not
+// reject the promise or take the call down with it.
+(function anchorContextSyncBase() {
+  try {
+    const RC = window.RC;
+    if (RC && RC.ctxSync && typeof RC.ctxSync.setBase === "function") {
+      RC.ctxSync.setBase("https://bwicarus.taile44d0c.ts.net");
+    }
+  } catch (_) {}
+})();
+
 function say(text, cls) {
   els.status.textContent = text;
   els.status.className = cls || "";
