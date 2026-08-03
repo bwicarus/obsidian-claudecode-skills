@@ -230,6 +230,7 @@ jobs:
             -authenticationKeyIssuerID "$API_ISSUER_ID" \
             DEVELOPMENT_TEAM="$TEAM_ID" \
             CODE_SIGN_STYLE=Automatic \
+            CODE_SIGN_IDENTITY="Apple Distribution" \
             | tee "$RUNNER_TEMP/build-logs/archive.log"
 
       - name: Validate archived app and extension
