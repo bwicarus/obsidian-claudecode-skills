@@ -376,12 +376,149 @@
   // an active call therefore survives that visual change.
 
 
-  // The computer button's own handler now opens the extension page (see
-  // delegateToExtensionPage in rc-computer-voice.js). Intercepting the click
-  // here as well would mean two things racing to open it, and the interception
-  // sat downstream of the vendor handler that registers first -- which is why
-  // it never fired.
-  window.__bwInlineComputerVoiceSurface = null;
+  // Keep the button in exactly the same Reader/sidebar position, but place one
+  // tiny extension-owned foreground document over it.  The trusted click,
+  // microphone, playback and WSS then all live under safari-web-extension://
+  // without opening BWReader or a separate call tab.  The frame is moved, not
+  // recreated, when the UI switches between the sidebar and top-bar buttons;
+  // an active call therefore survives that visual change.
+  const inlineComputerVoiceSurface = (() => {
+    const runtime = window.chrome && window.chrome.runtime;
+    if (!runtime || typeof runtime.getURL !== 'function') return null;
+    let extensionRoot = '';
+    try { extensionRoot = String(runtime.getURL('')); } catch (_) {}
+    if (!extensionRoot.startsWith('safari-web-extension://')) return null;
+
+    const CONTRACT = 'bw-extension-computer-voice-frame/1';
+    const frame = document.createElement('iframe');
+    // call.html, not the separate inline document: this one already carries the
+    // context link and the page-following that the user just verified, while
+    // inline-computer-voice.js has neither. One document in two forms beats two
+    // documents drifting apart.
+    frame.src = runtime.getURL('call.html?compact=1');
+    frame.title = '电脑客户端桥接';
+    frame.setAttribute('allow', 'microphone; autoplay');
+    frame.setAttribute('aria-label', '电脑客户端桥接');
+    frame.setAttribute('scrolling', 'no');
+    const important = (name, value) => frame.style.setProperty(name, value, 'important');
+    important('position', 'fixed');
+    important('left', '-100px');
+    important('top', '-100px');
+    important('width', '42px');
+    important('height', '42px');
+    important('border', '0');
+    important('border-radius', '12px');
+    important('background', 'transparent');
+    important('z-index', '2147483646');
+    important('opacity', '0');
+    important('pointer-events', 'none');
+
+    let ready = false;
+    let lastTarget = '';
+    let lastState = 'idle';
+
+    const visibleButton = () => {
+      const candidates = [
+        document.getElementById('asst-computer'),
+        document.getElementById('vc-top-computer')
+      ];
+      for (const button of candidates) {
+        if (!button || !button.isConnected) continue;
+        const rect = button.getBoundingClientRect();
+        const style = window.getComputedStyle(button);
+        if (
+          rect.width >= 20 && rect.height >= 20 &&
+          rect.bottom > 0 && rect.right > 0 &&
+          rect.top < window.innerHeight && rect.left < window.innerWidth &&
+          style.display !== 'none' && style.visibility !== 'hidden' &&
+          Number(style.opacity || 1) > 0
+        ) return { button, rect };
+      }
+      return null;
+    };
+
+    const targetApp = () => {
+      try {
+        return window.RC && RC.computerVoice &&
+          typeof RC.computerVoice.getTargetApp === 'function' &&
+          RC.computerVoice.getTargetApp() === 'chatgpt-classic'
+            ? 'chatgpt-classic'
+            : 'codex-desktop';
+      } catch (_) {
+        return 'codex-desktop';
+      }
+    };
+
+    const configure = () => {
+      const target = targetApp();
+      if (!ready || target === lastTarget || !frame.contentWindow) return;
+      lastTarget = target;
+      frame.contentWindow.postMessage({
+        contract: CONTRACT,
+        type: 'configure',
+        appKind: target
+      }, '*');
+    };
+
+    const position = () => {
+      const found = visibleButton();
+      if (!ready || !found) {
+        important('opacity', '0');
+        important('pointer-events', 'none');
+        important('left', '-100px');
+        important('top', '-100px');
+        return;
+      }
+      const rect = found.rect;
+      important('left', `${Math.round(rect.left)}px`);
+      important('top', `${Math.round(rect.top)}px`);
+      important('width', `${Math.round(rect.width)}px`);
+      important('height', `${Math.round(rect.height)}px`);
+      important('border-radius', window.getComputedStyle(found.button).borderRadius || '12px');
+      important('opacity', '1');
+      important('pointer-events', 'auto');
+      found.button.classList.toggle('on', lastState === 'active');
+      found.button.classList.toggle('connecting', lastState === 'connecting');
+      configure();
+    };
+
+    window.addEventListener('message', (event) => {
+      if (event.source !== frame.contentWindow) return;
+      const data = event.data;
+      if (!data || data.contract !== CONTRACT || typeof data.type !== 'string') return;
+      if (data.type === 'ready') {
+        ready = !!(data.value && data.value.ok === true);
+        lastTarget = '';
+        configure();
+        position();
+        return;
+      }
+      if (data.type !== 'state' || !data.value) return;
+      lastState = String(data.value.state || 'idle');
+      const message = String(data.value.message || '');
+      const found = visibleButton();
+      if (found && message) {
+        found.button.title = message;
+        found.button.setAttribute('aria-label', message);
+      }
+      if (lastState === 'failed' && message) {
+        try { window.RC && RC.toast && RC.toast(message); } catch (_) {}
+      }
+      position();
+    });
+
+    (document.documentElement || document.body).appendChild(frame);
+    window.addEventListener('resize', position, { passive: true });
+    window.addEventListener('scroll', position, { passive: true, capture: true });
+    const timer = window.setInterval(position, 250);
+    window.addEventListener('pagehide', () => window.clearInterval(timer), { once: true });
+    // Exposed so the shared layer can tell whether this surface took the click.
+    // When it is not ready the frame stays invisible and click-through, the
+    // press lands on the original button, and the module opens a tab instead --
+    // the fallback needs no coordination beyond knowing which happened.
+    return Object.freeze({ position, isReady: function () { return ready; } });
+  })();
+  window.__bwInlineComputerVoiceSurface = inlineComputerVoiceSurface;
 
   const nativeAgentVoiceBridge = (() => {
     const CONTRACT = 'bw-reader-native/1';

@@ -42,8 +42,11 @@ ROOT_FILES = (
     # import fails at load, with nothing on screen to say why.
     "ctxlink.js",
 )
+# call.html is what the sidebar button now embeds (in its compact form), so it
+# is the document web pages must be allowed to frame. inline-computer-voice.html
+# stays listed while it remains in the package.
 INLINE_COMPUTER_VOICE_RESOURCES = [{
-    "resources": ["inline-computer-voice.html"],
+    "resources": ["call.html", "inline-computer-voice.html"],
     "matches": ["https://*/*", "http://*/*"],
 }]
 ROOT_DIRS = ("src", "vendor", "icons")

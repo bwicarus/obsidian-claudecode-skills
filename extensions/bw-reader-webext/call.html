@@ -71,6 +71,33 @@
   }
 </style>
 
+<style>
+  /* Compact form, used when this page is embedded over the sidebar button.
+     Everything but the button is hidden -- the frame is 42px, and the same
+     document then serves both uses instead of a second copy drifting apart. */
+  :root.compact body { padding: 0; background: transparent; }
+  :root.compact h1,
+  :root.compact .sub,
+  :root.compact .card,
+  :root.compact #status,
+  :root.compact #detail,
+  :root.compact .hint { display: none !important; }
+  :root.compact button {
+    width: 42px; height: 42px; padding: 0; margin: 0;
+    border-radius: 12px; font-size: 0;
+    background: #16203a; border: 1px solid #2a3a63;
+  }
+  :root.compact button.stop { background: #1a7f4b; border-color: #1a7f4b; }
+  :root.compact button::after { content: "🖥"; font-size: 18px; }
+</style>
+<script>
+  // Applied before first paint so the embedded form never flashes the full
+  // layout inside a 42px frame.
+  if (new URLSearchParams(location.search).get("compact") === "1") {
+    document.documentElement.classList.add("compact");
+  }
+</script>
+
 <h1>电脑语音</h1>
 <div class="sub">直接连接 Windows,并跟随你正在看的页面</div>
 
