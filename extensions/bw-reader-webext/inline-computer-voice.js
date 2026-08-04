@@ -156,10 +156,15 @@
       active = false;
       // The code is what distinguishes "refused by the bridge" from "never got
       // there", and it is exactly what has been invisible until now.
-      trace("start-failed",
-        (error && error.code ? error.code + " | " : "") +
-        (error && error.message ? error.message : String(error)));
-      render("failed", error && error.message || "电脑客户端启动失败");
+      var detail = (error && error.code ? error.code + " | " : "") +
+        (error && error.message ? error.message : String(error));
+      trace("start-failed", detail);
+      // Carried into the message so the on-page bar shows the code, not just a
+      // generic sentence -- the code is what separates "refused by the bridge"
+      // from "never got there".
+      render("failed", detail +
+        "  [id=" + (window.chrome && chrome.runtime && chrome.runtime.id ? "有" : "无") +
+        " origin=" + String(location.origin).slice(0, 32) + "]");
     });
   });
 

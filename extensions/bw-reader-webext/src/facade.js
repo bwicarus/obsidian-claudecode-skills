@@ -374,6 +374,41 @@
   // without opening BWReader or a separate call tab.  The frame is moved, not
   // recreated, when the UI switches between the sidebar and top-bar buttons;
   // an active call therefore survives that visual change.
+
+  // A visible, dismissible failure notice for the inline computer-voice frame.
+  // Deliberately self-contained -- own element, own inline styles, nothing
+  // borrowed from the host page or from the popup, which is what the previous
+  // attempt got wrong.
+  function showInlineVoiceError(message) {
+    try {
+      var id = 'bw-inline-voice-error';
+      var box = document.getElementById(id);
+      if (!box) {
+        box = document.createElement('div');
+        box.id = id;
+        var set = function (k, v) { box.style.setProperty(k, v, 'important'); };
+        set('position', 'fixed');
+        set('left', '12px');
+        set('right', '12px');
+        set('bottom', '12px');
+        set('z-index', '2147483647');
+        set('padding', '12px 14px');
+        set('border-radius', '10px');
+        set('background', 'rgba(20,20,22,.95)');
+        set('color', '#fff');
+        set('font', '13px/1.55 -apple-system, system-ui, sans-serif');
+        set('box-shadow', '0 6px 24px rgba(0,0,0,.35)');
+        set('white-space', 'pre-wrap');
+        set('word-break', 'break-word');
+        box.addEventListener('click', function () {
+          try { box.remove(); } catch (_) {}
+        });
+        (document.body || document.documentElement).appendChild(box);
+      }
+      box.textContent = '电脑语音失败：' + String(message) + '\n（点此关闭）';
+    } catch (_) {}
+  }
+
   const inlineComputerVoiceSurface = (() => {
     const runtime = window.chrome && window.chrome.runtime;
     if (!runtime || typeof runtime.getURL !== 'function') return null;
@@ -491,6 +526,12 @@
       }
       if (lastState === 'failed' && message) {
         try { window.RC && RC.toast && RC.toast(message); } catch (_) {}
+        // RC.toast belongs to the Reader and is absent on ordinary sites, so a
+        // failure here was reaching nobody. This bar is the only place the
+        // reason can appear: Windows records nothing (the call never arrives),
+        // the frame is 42px, and long-press does not surface titles on iPad.
+        // Remove once the break is located.
+        showInlineVoiceError(message);
       }
       position();
     });

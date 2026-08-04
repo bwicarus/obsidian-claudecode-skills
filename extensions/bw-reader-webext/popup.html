@@ -37,16 +37,6 @@
     <h4 id="voice-heading">上下文</h4>
     <p id="voice-status">检查中…</p>
   </section>
-  <!-- Temporary: the voice failure leaves no trace anywhere else. Remove with the
-       trace() calls in inline-computer-voice.js once the break is located.
-       Deliberately built from the same <section>/<h4>/<p> shape as the panels
-       around it: the previous attempt introduced a <pre> and a second <button>,
-       and the popup stopped opening -- the global `button { flex: 1 }` rule is
-       written for the pair inside .row, not for a stray one. -->
-  <section class="sync-panel" aria-labelledby="trace-heading">
-    <h4 id="trace-heading">语音诊断</h4>
-    <p id="voice-trace">读取中…</p>
-  </section>
   <section class="sync-panel" aria-labelledby="sync-heading">
     <h4 id="sync-heading">跨设备同步</h4>
     <p id="sync-status">正在读取同步状态……</p>
