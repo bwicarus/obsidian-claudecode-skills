@@ -30,12 +30,23 @@ function randomHex(length) {
   return out;
 }
 
-// session- plus 22 base64url characters, per the bridge's expected shape.
+// session- plus 22 base64url characters: the encoding of 16 random bytes.
+//
+// Drawing 22 characters at random from the alphabet is not the same thing and
+// the bridge rejects it as "base64url 字段无效". 22 characters carry 132 bits
+// while 16 bytes are 128, so the final character only ever holds 2 bits and is
+// restricted to A/Q/g/w -- a constraint random picking violates almost every
+// time. Encoding real bytes satisfies it by construction.
 function newSessionId() {
-  const alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-  let out = "";
-  for (let i = 0; i < 22; i += 1) out += alphabet[(Math.random() * alphabet.length) | 0];
-  return "session-" + out;
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  let binary = "";
+  for (let i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
+  const b64 = btoa(binary)
+    .replace(/\+/g, "-")
+    .replace(/\//g, "_")
+    .replace(/=+$/, "");
+  return "session-" + b64;
 }
 
 export class ContextLink {

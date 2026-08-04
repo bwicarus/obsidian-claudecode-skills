@@ -384,11 +384,18 @@
     return s;
   }
 
+  // 22 base64url characters means the encoding of 16 bytes, not 22 characters
+  // drawn from the alphabet: the last one carries only 2 bits and is limited to
+  // A/Q/g/w, so random picking is rejected as "base64url 字段无效".
   function newSessionId() {
-    var a = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
-    var s = "";
-    for (var i = 0; i < 22; i += 1) s += a[Math.floor(Math.random() * a.length)];
-    return "session-" + s;
+    var bytes = new Uint8Array(16);
+    crypto.getRandomValues(bytes);
+    var binary = "";
+    for (var i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
+    return "session-" + btoa(binary)
+      .replace(/\+/g, "-")
+      .replace(/\//g, "_")
+      .replace(/=+$/, "");
   }
 
   function request(type, fields) {
