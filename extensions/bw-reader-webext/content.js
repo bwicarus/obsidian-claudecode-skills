@@ -509,6 +509,7 @@
       // Position and selection travel separately; Windows pairs them with the
       // event by (file, page), so page 0 must match on both sides.
       pushedOnce = true;
+      logStage("context-accepted", "len=" + snap.text.length + " url=" + snap.url.slice(0, 100));
       // Nested under `active` with its own contract. Flat fields are refused
       // as BW_COMPUTER_VOICE_DIRECT_MESSAGE_INVALID -- which is why the page
       // position never reached Windows while the text quietly did.
@@ -530,6 +531,7 @@
       // link failing silently is why the snapshot sat on a book for hours while
       // every web page went unreported. Recorded for the call page to show.
       lastSignature = "";
+      logStage("push-failed", (error && (error.code || error.message)) || String(error));
       try {
         chrome.storage.local.set({
           bwCtxLastError: {
@@ -567,7 +569,12 @@
           sessionId = newSessionId();
           return request("context-open", { sessionId: sessionId });
         })
-        .then(function () { ready = true; retryMs = 2000; push(); })
+        .then(function () {
+          ready = true;
+          retryMs = 2000;
+          logStage("link-open", "url=" + String(location.href).slice(0, 120));
+          push();
+        })
         .catch(function () { try { socket.close(); } catch (_) {} });
     };
 
