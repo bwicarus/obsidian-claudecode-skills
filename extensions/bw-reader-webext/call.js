@@ -144,6 +144,8 @@ if (chrome.runtime?.onMessage) {
 // the call. Before, both tried to own the one voice link and each switch evicted
 // the other.
 let voiceActive = false;
+// Set by the host through configure when embedded; otherwise from the URL.
+let frameAppKind = "";
 
 // Publish the call state so every page's sidebar button can show it.
 //
@@ -208,7 +210,7 @@ if (els.btn) {
       } else {
         // Carried from the sidebar button, so the page dials the same target
         // the Reader was set to rather than silently defaulting.
-        const appKind = new URLSearchParams(location.search).get("app") || "";
+        const appKind = frameAppKind || new URLSearchParams(location.search).get("app") || "";
         await RC.computerVoice.startFromUserGesture(
           appKind ? { appKind } : {}
         );
@@ -254,11 +256,15 @@ if (els.btn) {
   // document, so a refusal is expected and not an error -- the button stays and
   // one press completes it.
   (async function autoStart() {
+    // Only when this page was opened for the call. Embedded over the sidebar
+    // button it is present from the moment the page loads, and dialling then
+    // would place a call nobody asked for.
+    if (new URLSearchParams(location.search).get("compact") === "1") return;
     if (voiceReady()) return;
     els.btn.disabled = true;
     els.btn.textContent = "正在连接…";
     try {
-      const appKind = new URLSearchParams(location.search).get("app") || "";
+      const appKind = frameAppKind || new URLSearchParams(location.search).get("app") || "";
       await window.RC.computerVoice.startFromUserGesture(appKind ? { appKind } : {});
       voiceActive = true;
       els.btn.textContent = "结束通话";
@@ -295,6 +301,47 @@ function closeWhenDone(delayMs) {
       if (!document.hidden) say("通话已结束，可关闭本页", "dim");
     }, 300);
   }, Math.max(0, delayMs || 0));
+}
+
+// --- embedded form -----------------------------------------------------------
+// When framed over the sidebar button, tell the host it is usable.
+//
+// The host keeps the frame invisible and click-through until this arrives, so
+// that a frame which failed to load never swallows the press -- the click falls
+// to the original button and a tab opens instead. Silence here is precisely the
+// fallback, which is why 1.0.55 always opened a tab: this page never announced
+// itself, having been written before it was ever embedded.
+const FRAME_CONTRACT = "bw-extension-computer-voice-frame/1";
+const embedded = new URLSearchParams(location.search).get("compact") === "1";
+
+if (embedded && window.parent !== window) {
+  const tell = (type, value) => {
+    try {
+      window.parent.postMessage(
+        { contract: FRAME_CONTRACT, type, value: value || null },
+        "*"
+      );
+    } catch (_) {}
+  };
+
+  // The host may set which desktop app to dial before the first press.
+  window.addEventListener("message", (event) => {
+    if (event.source !== window.parent) return;
+    const d = event.data;
+    if (!d || d.contract !== FRAME_CONTRACT || d.type !== "configure") return;
+    if (d.appKind) frameAppKind = String(d.appKind);
+  });
+
+  // Announced only once the button is genuinely operable: voiceReady() has
+  // passed and the button is registered. Claiming readiness earlier would take
+  // the click and then be unable to act on it.
+  const problem = els.btn ? voiceReady() : "✗ 无按钮";
+  tell("ready", { ok: !problem });
+  if (problem) note("内嵌未就绪: " + problem);
+
+  window.RC?.computerVoice?.onStatus?.((s) => {
+    tell("state", { state: s?.state || "", message: s?.message || "" });
+  });
 }
 
 window.addEventListener("pagehide", () => link.close());
