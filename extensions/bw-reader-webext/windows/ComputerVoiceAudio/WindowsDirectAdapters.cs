@@ -1016,96 +1016,30 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
         }
     }
 
-    private async Task<(
-        CodexAudioPolicyTarget AudioPolicyTarget,
-        CodexVoiceShortcutReceipt? ShortcutReceipt)>
-        PrimeCodexAudioSessionAsync(
+    private async Task<CodexAudioPolicyTarget> PrimeCodexAudioSessionAsync(
         CodexAppTarget target,
-        CodexVoiceStartBaseline baseline,
         CancellationToken cancellationToken)
     {
-        ArgumentNullException.ThrowIfNull(target);
-        ArgumentNullException.ThrowIfNull(baseline);
-        uint[] existing = WindowsCodexAppProbe
-            .FindAudioPolicyProcesses(target);
-        if (existing.Length == 1)
-        {
-            return (
-                new CodexAudioPolicyTarget(target, existing[0]),
-                null);
-        }
-        if (existing.Length > 1)
-        {
-            throw new DirectProtocolException(
-                "BW_COMPUTER_VOICE_DIRECT_AUDIO_SERVICE_AMBIGUOUS",
-                "检测到多个 Codex 音频服务进程",
-                retryable: true);
-        }
-
-        // F24 is a toggle, not an idempotent Start command.  Never press it
-        // merely to probe an already-active Voice session.  If its audio
-        // process is still converging, waiting is the only safe operation.
-        if (!baseline.ShortcutRequired)
-        {
-            CodexAudioPolicyTarget activeTarget =
-                await WindowsCodexAppProbe
-                    .WaitForAudioPolicyProcessAsync(
-                        target,
-                        AudioPolicyProcessReadyTimeout,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-            return (activeTarget, null);
-        }
-
         VoiceShortcutSender.Send(target, DirectVoiceCommand.Start);
-        CodexVoiceShortcutReceipt receipt =
-            VoiceActivity.RecordShortcutSent(baseline, target);
         try
         {
-            CodexAudioPolicyTarget startedTarget =
-                await WindowsCodexAppProbe
-                    .WaitForAudioPolicyProcessAsync(
-                        target,
-                        AudioPolicyProcessReadyTimeout,
-                        cancellationToken)
-                    .ConfigureAwait(false);
-            // Keep the session running.  The normal START boundary will reuse
-            // this exact receipt, so the bridge still owns and can stop it.
-            return (startedTarget, receipt);
+            return await WindowsCodexAppProbe
+                .WaitForAudioPolicyProcessAsync(
+                    target,
+                    AudioPolicyProcessReadyTimeout,
+                    cancellationToken)
+                .ConfigureAwait(false);
         }
-        catch
+        finally
         {
             try
             {
-                CodexVoiceActivitySnapshot current =
-                    VoiceActivity.ReadCurrent();
-                if (current.Active)
-                {
-                    CodexVoiceStartConfirmation confirmation =
-                        await VoiceActivity.ConfirmStartedAsync(
-                                baseline,
-                                receipt,
-                                CodexVoiceActivityController
-                                    .TransitionTimeout,
-                                CodexVoiceActivityController
-                                    .MonitorInterval,
-                                CancellationToken.None)
-                            .ConfigureAwait(false);
-                    await StopOwnedVoiceAsync(
-                            VoiceActivity,
-                            VoiceShortcutSender,
-                            () => WindowsCodexAppProbe.RequireReady(
-                                target.AppKind),
-                            baseline,
-                            confirmation,
-                            target)
-                        .ConfigureAwait(false);
-                }
+                VoiceShortcutSender.Send(target, DirectVoiceCommand.Stop);
             }
-            catch
+            catch (DirectProtocolException)
             {
             }
-            throw;
+            Thread.Sleep(AudioSessionPrimeSettleDelay);
         }
     }
 
@@ -1176,9 +1110,6 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
         CodexVoiceStartBaseline? initialVoiceBaseline = null;
         CodexVoiceStartBaseline? boundaryVoiceBaseline = null;
         CodexVoiceShortcutReceipt? shortcutReceipt = null;
-        CodexVoiceStartConfirmation? primedVoiceConfirmation = null;
-        CodexAppTarget? primedVoiceTarget = null;
-        bool primedVoiceTransferred = false;
         bool committedOwnedResources = false;
         Exception? startFailure = null;
         await _stateGate.WaitAsync(cancellationToken).ConfigureAwait(false);
@@ -1273,12 +1204,6 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                 WindowsCodexAppProbe
                     .RequireExpectedGlobalVoiceShortcut();
             }
-            _ = await VoiceActivity.WaitForAvailableAsync(
-                VoiceReadyTimeout,
-                CodexVoiceActivityController.MonitorInterval,
-                cancellationToken).ConfigureAwait(false);
-            initialVoiceBaseline =
-                VoiceActivity.CaptureStartBaseline();
             uint audioPolicyProcessId = target.RootProcessId;
             // Chromium 的 audio.mojom.AudioService 是 lazy-start:只有真正开始
             // 播放/录音才会被拉起。Codex 与 GPT Classic 冷启动时都可能没有该
@@ -1293,31 +1218,13 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                 && appProfile.UsesCodexGlobalShortcut
             )
             {
-                var primed =
+                CodexAudioPolicyTarget audioPolicyTarget =
                     await PrimeCodexAudioSessionAsync(
                             target,
-                            initialVoiceBaseline,
                             cancellationToken)
                         .ConfigureAwait(false);
-                CodexAudioPolicyTarget audioPolicyTarget =
-                    primed.AudioPolicyTarget;
                 target = audioPolicyTarget.AppTarget;
                 audioPolicyProcessId = audioPolicyTarget.ProcessId;
-                shortcutReceipt = primed.ShortcutReceipt;
-                if (shortcutReceipt is not null)
-                {
-                    primedVoiceConfirmation =
-                        await VoiceActivity.ConfirmStartedAsync(
-                                initialVoiceBaseline,
-                                shortcutReceipt,
-                                CodexVoiceActivityController
-                                    .TransitionTimeout,
-                                CodexVoiceActivityController
-                                    .MonitorInterval,
-                                CancellationToken.None)
-                            .ConfigureAwait(false);
-                    primedVoiceTarget = target;
-                }
             }
             else if (
                 request.AutomatePerAppAudioRoute
@@ -1326,6 +1233,12 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
             {
                 PrimeClassicAudioSession(audioPolicyProcessId, target);
             }
+            _ = await VoiceActivity.WaitForAvailableAsync(
+                VoiceReadyTimeout,
+                CodexVoiceActivityController.MonitorInterval,
+                cancellationToken).ConfigureAwait(false);
+            initialVoiceBaseline =
+                VoiceActivity.CaptureStartBaseline();
             BoundedPcmPacketQueue outputQueue = new(
                 32,
                 2 * 1024 * 1024);
@@ -1471,9 +1384,7 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                             renderSession.State,
                             renderSession.Completion.IsCompleted);
                         boundaryVoiceBaseline =
-                            primedVoiceConfirmation is null
-                                ? VoiceActivity.CaptureStartBaseline()
-                                : initialVoiceBaseline;
+                            VoiceActivity.CaptureStartBaseline();
                     },
                     () =>
                     {
@@ -1482,10 +1393,7 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                             ?? throw new DirectProtocolException(
                                 "BW_COMPUTER_VOICE_DIRECT_VOICE_BASELINE_MISSING",
                                 "Codex 语音状态基线不存在");
-                        if (
-                            primedVoiceConfirmation is null
-                            && baseline.ShortcutRequired
-                        )
+                        if (baseline.ShortcutRequired)
                         {
                             VoiceShortcutSender.Send(
                                 target,
@@ -1525,11 +1433,8 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                             pendingCaptureEndpointMuteLease;
                         pendingCaptureEndpointMuteLease = null;
                         _voiceStartBaseline =
-                            primedVoiceConfirmation is null
-                                ? boundaryVoiceBaseline
-                                : null;
-                        _voiceConfirmation =
-                            primedVoiceConfirmation;
+                            boundaryVoiceBaseline;
+                        _voiceConfirmation = null;
                         _voiceTarget = target;
                         _outputPump = PumpAsync(
                             DirectPcmTrack.AppOutput,
@@ -1542,23 +1447,19 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                             renderSession,
                             completion,
                             lifetime);
-                        primedVoiceTransferred =
-                            primedVoiceConfirmation is not null;
                         committedOwnedResources = true;
                     },
                     cancellationToken);
                 CodexVoiceStartConfirmation voiceConfirmation =
-                    primedVoiceConfirmation
-                    ?? await VoiceActivity.ConfirmStartedAsync(
-                            boundaryVoiceBaseline
-                            ?? throw new DirectProtocolException(
-                                "BW_COMPUTER_VOICE_DIRECT_VOICE_BASELINE_MISSING",
-                                "Codex 语音状态基线不存在"),
-                            shortcutReceipt,
-                            CodexVoiceActivityController.TransitionTimeout,
-                            CodexVoiceActivityController.MonitorInterval,
-                            CancellationToken.None)
-                        .ConfigureAwait(false);
+                    await VoiceActivity.ConfirmStartedAsync(
+                        boundaryVoiceBaseline
+                        ?? throw new DirectProtocolException(
+                            "BW_COMPUTER_VOICE_DIRECT_VOICE_BASELINE_MISSING",
+                            "Codex 语音状态基线不存在"),
+                        shortcutReceipt,
+                        CodexVoiceActivityController.TransitionTimeout,
+                        CodexVoiceActivityController.MonitorInterval,
+                        CancellationToken.None).ConfigureAwait(false);
                 _voiceConfirmation = voiceConfirmation;
                 _voiceStartBaseline = null;
                 CancellationTokenSource voiceMonitorLifetime = new();
@@ -1603,23 +1504,6 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                 }
                 Exception? cleanupFailure =
                     await RunBestEffortCleanupAsync(
-                        async () =>
-                        {
-                            if (primedVoiceConfirmation is null)
-                            {
-                                return;
-                            }
-                            await StopOwnedVoiceAsync(
-                                    VoiceActivity,
-                                    VoiceShortcutSender,
-                                    () => WindowsCodexAppProbe
-                                        .RequireReady(target.AppKind),
-                                    initialVoiceBaseline,
-                                    primedVoiceConfirmation,
-                                    primedVoiceTarget ?? target)
-                                .ConfigureAwait(false);
-                            primedVoiceConfirmation = null;
-                        },
                         () =>
                         {
                             lifetime.Cancel();
@@ -1710,41 +1594,6 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
         {
             try
             {
-                if (
-                    primedVoiceConfirmation is not null
-                    && !primedVoiceTransferred
-                )
-                {
-                    try
-                    {
-                        CodexAppTarget cleanupTarget =
-                            primedVoiceTarget
-                            ?? throw new DirectProtocolException(
-                                "BW_COMPUTER_VOICE_DIRECT_VOICE_TARGET_MISSING",
-                                "预热语音目标不存在，无法安全关闭",
-                                retryable: true);
-                        await StopOwnedVoiceAsync(
-                                VoiceActivity,
-                                VoiceShortcutSender,
-                                () => WindowsCodexAppProbe.RequireReady(
-                                    cleanupTarget.AppKind),
-                                initialVoiceBaseline,
-                                primedVoiceConfirmation,
-                                cleanupTarget)
-                            .ConfigureAwait(false);
-                        primedVoiceConfirmation = null;
-                    }
-                    catch (Exception cleanupException)
-                    {
-                        if (startFailure is null)
-                        {
-                            throw;
-                        }
-                        throw CombineStartAndCleanupFailures(
-                            startFailure,
-                            cleanupException);
-                    }
-                }
                 if (pendingTypistLease is not null)
                 {
                     await ReleasePendingTypistAfterStartFailureAsync(
