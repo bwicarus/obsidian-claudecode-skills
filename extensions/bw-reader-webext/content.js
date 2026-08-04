@@ -565,6 +565,28 @@
   // states belong to the module that created it, and fighting over them would
   // produce a button that flickers between two owners.
   var lastVoiceState = "";
+
+  // The marker class needs a rule of its own, and one strong enough to win:
+  // the button already carries the module's own state classes, and without
+  // !important its idle colour would keep painting over this.
+  //
+  // The vendor's own classes are left alone. Two owners writing the same
+  // classes produce a button that flickers between them.
+  function ensureVoiceStyle() {
+    try {
+      if (document.getElementById("bw-voice-live-style")) return;
+      var css = document.createElement("style");
+      css.id = "bw-voice-live-style";
+      css.textContent =
+        "#asst-computer.bw-voice-live,#vc-top-computer.bw-voice-live{" +
+        "background:#1f8f4e!important;color:#fff!important;" +
+        "box-shadow:0 0 0 2px rgba(48,209,88,.45)!important}" +
+        "#asst-computer.bw-voice-stopping,#vc-top-computer.bw-voice-stopping{" +
+        "background:#8a6d1f!important;color:#fff!important}";
+      (document.head || document.documentElement).appendChild(css);
+    } catch (_) {}
+  }
+
   function reflectVoiceState() {
     try {
       chrome.storage.local.get("bwVoiceState", function (bag) {
@@ -582,7 +604,9 @@
             : "启动电脑客户端语音";
           b.title = label;
           b.setAttribute("aria-label", label);
+          ensureVoiceStyle();
           b.classList.toggle("bw-voice-live", state === "active");
+          b.classList.toggle("bw-voice-stopping", state === "stopping");
         });
       });
     } catch (_) {}
