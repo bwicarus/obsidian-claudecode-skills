@@ -4540,7 +4540,13 @@ if (window.__bwPwaProviderOnly) return;
         !state.stopped &&
         directChannelLive(state.channel) &&
         state.sessionBytes instanceof Uint8Array &&
-        state.sessionBytes.length === 16
+        state.sessionBytes.length === 16 &&
+        // A context-only connection cannot become a call: the bridge refuses
+        // START on it (BW_COMPUTER_VOICE_DIRECT_PHASE_INVALID). Where the
+        // snapshot link sits on the context endpoint -- inside the App, and on
+        // an extension page -- the call must open its own socket instead of
+        // borrowing this one.
+        state.endpoint === DIRECT_ENDPOINT
       );
       if (!usable) {
         return snapshotLink === state
@@ -4679,8 +4685,13 @@ if (window.__bwPwaProviderOnly) return;
     }
     var generation = ++snapshotLinkGeneration;
     var session = randomSession();
+    var snapshotEndpoint = (
+      window.__BW_NATIVE_COMPUTER_VOICE__ === true ||
+      isOwnExtensionPage(window.chrome && window.chrome.runtime)
+    ) ? CONTEXT_ENDPOINT : DIRECT_ENDPOINT;
     var state = {
       channel: null,
+      endpoint: snapshotEndpoint,
       sessionId: session.id,
       sessionBytes: session.bytes,
       contextOnly: true,
@@ -4700,9 +4711,19 @@ if (window.__bwPwaProviderOnly) return;
       // Elsewhere the flag is absent and this stays on the voice endpoint,
       // which matters for the web Reader on the Pi: it has no native voice and
       // still has to dial for itself.
-      endpoint: window.__BW_NATIVE_COMPUTER_VOICE__ === true
-        ? CONTEXT_ENDPOINT
-        : DIRECT_ENDPOINT,
+      // The snapshot link only ever carries context, so it belongs on the
+      // context endpoint wherever a separate owner holds the audio -- inside the
+      // App, where Swift holds it, and on an extension page, where this same
+      // module is about to dial for it.
+      //
+      // Sharing the voice endpoint put both on one socket: the snapshot link
+      // connected first and moved it into the context-only phase, and the call
+      // then tried to START on a connection no longer accepting it
+      // (BW_COMPUTER_VOICE_DIRECT_PHASE_INVALID). Two purposes, two sockets.
+      //
+      // The Reader on the Pi keeps the voice endpoint: there is no second owner
+      // there, and the snapshot link is the connection it later dials on.
+      endpoint: snapshotEndpoint,
       onFatal: function (error) {
         if (snapshotLink !== state || state.stopped) return;
         contextDeliveryMode = null;
