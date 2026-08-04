@@ -233,12 +233,26 @@ function voiceReady() {
 if (els.btn) {
   const problem = voiceReady();
   if (problem) {
-    els.btn.disabled = true;
+    // Left pressable on purpose.
+    //
+    // Disabling it made the reason unreachable: this button is the only surface
+    // the user has, the detail panel is hidden in compact form, and a control
+    // that refuses to respond looks identical to one that is broken. Pressing
+    // it now states the reason instead, which on an iPad is the only way the
+    // reason travels at all.
     els.btn.textContent = problem;
+    els.btn.classList.add("stop");
+    note("未就绪: " + problem);
   }
 
   els.btn.addEventListener("click", async () => {
     const RC = window.RC;
+    const stillUnready = voiceReady();
+    if (stillUnready) {
+      note("未就绪: " + stillUnready);
+      probeEndpoint();
+      return;
+    }
     els.btn.disabled = true;
     try {
       if (voiceActive) {

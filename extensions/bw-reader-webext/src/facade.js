@@ -396,6 +396,11 @@
 
     const CONTRACT = 'bw-extension-computer-voice-frame/1';
     const frameLog = [];
+    // Guards against leaving the user with no control at all. The frame is an
+    // extension document and load failure is close to unthinkable, but "close
+    // to" is not a state worth shipping a dead button for.
+    let retired = false;
+    let loaded = false;
     const frame = document.createElement('iframe');
     // call.html, not the separate inline document: this one already carries the
     // context link and the page-following that the user just verified, while
@@ -452,8 +457,11 @@
           rect.width >= 20 && rect.height >= 20 &&
           rect.bottom > 0 && rect.right > 0 &&
           rect.top < window.innerHeight && rect.left < window.innerWidth &&
-          style.display !== 'none' && style.visibility !== 'hidden' &&
-          Number(style.opacity || 1) > 0
+          style.display !== 'none' &&
+          // visibility and opacity are not checked: once the frame takes over,
+          // this button is hidden by us, and a hidden button still has to be
+          // measurable or the frame would lose the place it stands in.
+          true
         ) return { button, rect };
       }
       return null;
@@ -484,12 +492,28 @@
 
     const position = () => {
       const found = visibleButton();
-      if (!ready || !found) {
+      // Shown as soon as there is a place for it, rather than after the frame
+      // reports itself ready.
+      //
+      // Waiting for ready was the whole failure: a frame that could not finish
+      // its checks stayed transparent and click-through, so every press landed
+      // on the button underneath and opened a tab -- while looking, from the
+      // outside, exactly as if nothing had been built at all. Nor could it say
+      // why, since a frame nobody can press cannot be asked.
+      //
+      // Standing in for the button rather than covering it also settles the
+      // layering question for good: the original is hidden, so there is no
+      // second control left to compete for the press.
+      if (!found || retired) {
         important('opacity', '0');
         important('pointer-events', 'none');
         important('left', '-100px');
         important('top', '-100px');
         return;
+      }
+      if (found.button.style.visibility !== 'hidden') {
+        found.button.style.setProperty('visibility', 'hidden', 'important');
+        found.button.setAttribute('data-bw-frame-standin', '1');
       }
       const rect = found.rect;
       important('left', `${Math.round(rect.left)}px`);
@@ -561,6 +585,18 @@
       }
       return false;
     };
+    frame.addEventListener('load', () => { loaded = true; });
+    // Retires the frame if it never loads, restoring the original button so the
+    // user is not left pressing a blank square. Generous, because a cold
+    // extension page on a busy tab can take a moment.
+    window.setTimeout(() => {
+      if (loaded) return;
+      retired = true;
+      const found = visibleButton();
+      if (found) found.button.style.removeProperty('visibility');
+      position();
+    }, 8000);
+
     (document.documentElement || document.body).appendChild(frame);
     if (!attach()) {
       const relocate = window.setInterval(() => {
