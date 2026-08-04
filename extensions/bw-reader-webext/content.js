@@ -374,6 +374,7 @@
   var reqId = 0;
   var pending = {};
   var lastSignature = "";
+  var pushedOnce = false;
   var timer = null;
   var retryMs = 2000;
   var retryTimer = null;
@@ -464,6 +465,7 @@
     }).then(function () {
       // Position and selection travel separately; Windows pairs them with the
       // event by (file, page), so page 0 must match on both sides.
+      pushedOnce = true;
       return request("active-reading", {
         sessionId: sessionId,
         kind: "web",
@@ -473,10 +475,20 @@
         selectionState: snap.selection ? "active" : "cleared",
         selection: snap.selection || null,
       });
-    }).catch(function () {
-      // A rejected push is not worth disturbing the page over; the next change
-      // will try again, and a dead link is handled by onclose.
+    }).catch(function (error) {
+      // Not worth disturbing the page over, but it must not vanish either: this
+      // link failing silently is why the snapshot sat on a book for hours while
+      // every web page went unreported. Recorded for the call page to show.
       lastSignature = "";
+      try {
+        chrome.storage.local.set({
+          bwCtxLastError: {
+            at: new Date().toISOString().slice(11, 19),
+            url: String(location.href).slice(0, 80),
+            message: String((error && (error.message || error.code)) || error || "unknown"),
+          },
+        });
+      } catch (_) {}
     });
   }
 
@@ -548,7 +560,13 @@
     if (rt && rt.onMessage && typeof rt.onMessage.addListener === "function") {
       rt.onMessage.addListener(function (message, _sender, respond) {
         if (!message || message.type !== "BW_CTX_STATUS") return undefined;
-        try { respond({ ready: ready, url: String(location.href || "") }); } catch (_) {}
+        try {
+          respond({
+            ready: ready,
+            pushedOnce: pushedOnce,
+            url: String(location.href || ""),
+          });
+        } catch (_) {}
         return undefined;
       });
     }

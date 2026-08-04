@@ -118,6 +118,28 @@ if (chrome.runtime?.onMessage) {
   });
 }
 
+// Show what the page-side link is doing.
+//
+// Web context is sent by each page's own content script, not from here -- this
+// page cannot see the tab the user is reading. So "等待页面…" was misleading: it
+// suggested this page was waiting for something it would never receive.
+//
+// What it can usefully show is whether that other link is failing, which until
+// now was invisible: the snapshot stayed on a book for hours while every web
+// page went unreported and nothing anywhere said why.
+async function showPageLinkState() {
+  try {
+    const bag = await chrome.storage.local.get("bwCtxLastError");
+    const err = bag?.bwCtxLastError;
+    if (!err) return;
+    // Stale errors describe a page the user has long left; only recent ones
+    // say anything about now.
+    els.ctxTitle.textContent = "网页上报失败";
+    els.ctxUrl.textContent = `${err.at}  ${err.url}`;
+    note("网页上报: " + err.message);
+  } catch (_) {}
+}
+
 // The page that was open when this bridge was started, captured by the popup.
 // Without it the bridge would sit blank until the user scrolled or switched.
 (async function seed() {
@@ -127,8 +149,13 @@ if (chrome.runtime?.onMessage) {
     const ctx = bag?.bwCallContext;
     if (ctx?.url && (!ctx.capturedAt || Date.now() - ctx.capturedAt < 5 * 60 * 1000)) {
       forward(ctx);
+    } else {
+      els.ctxTitle.textContent = "上下文由各网页自行上报";
+      els.ctxUrl.textContent = "本页只负责通话";
     }
   } catch (_) {}
+  showPageLinkState();
+  setInterval(showPageLinkState, 5000);
 })();
 
 // --- placing a call from here ------------------------------------------------
