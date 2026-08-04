@@ -5197,6 +5197,16 @@
       return channel.request("start", {
         sessionId: state.sessionId,
         appKind: state.appKind,
+        // Declares that a person just pressed the button, and means it: the
+        // bridge will stop an existing owner to hand the call over here.
+        //
+        // Safe to state unconditionally at this point, and only at this point.
+        // This request is reachable from nowhere else -- startFromUserGesture
+        // has no internal callers, reconnects run on the snapshot link, and
+        // that link is context-only and never sends START. Automatic recovery
+        // must never take the call away from whoever is holding it; only a
+        // deliberate press may.
+        takeover: true,
       }, START_TIMEOUT_MS);
     }).then(function (started) {
       exactObject(started, ["sessionId", "state", "media"], [], "START 响应");

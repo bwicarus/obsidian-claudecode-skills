@@ -143,9 +143,14 @@ if (els.btn) {
         els.btn.classList.add("stop");
       }
     } catch (err) {
-      // A busy bridge is the ordinary case, not a fault: the App may already be
-      // holding the call, and then there is nothing to start here.
-      note("通话: " + describe(err));
+      // BUSY is an answer, not a failure: someone else holds the call. Said
+      // plainly, because "通话: BW_..._BUSY" reads like a fault when in fact
+      // nothing is broken and the user only needs to know where the call is.
+      if (err?.code === "BW_COMPUTER_VOICE_DIRECT_BUSY") {
+        note("另一端正在通话（App 或阅读器）。在那边挂断后即可在此发起。");
+      } else {
+        note("通话: " + describe(err));
+      }
     }
     els.btn.disabled = false;
   });
