@@ -113,8 +113,10 @@ async function forward(page) {
 // stay quiet, so a dozen open tabs cannot argue over what the assistant sees.
 if (chrome.runtime?.onMessage) {
   chrome.runtime.onMessage.addListener((message) => {
-    // Kept for a future page-side reporter. Nothing sends this today: the
-    // content-script link was withdrawn after it never once connected.
+    // Sent by whichever page the user is looking at. The page only forwards a
+    // message; this side owns the connection and the protocol. That division is
+    // what made it work in 1.0.25, and what the later attempt gave up by having
+    // each page open its own socket.
     if (message?.type === "BW_PAGE_ACTIVE" && message.page) forward(message.page);
     return undefined;
   });

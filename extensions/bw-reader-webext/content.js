@@ -340,3 +340,82 @@
     }, true);
   }
 })();
+// Report this page to an in-progress call, when it is the page being looked at.
+//
+// The call runs in an extension page of its own and cannot read other tabs --
+// activeTab covers only the tab it was opened from. Rather than widening the
+// extension to all sites (package_safari.py deliberately keeps host access to
+// the Pi alone), the page reports itself: content scripts already run here, so
+// no new permission is involved.
+//
+// Everything is guarded. A previous attempt to extend this file broke the popup
+// on ordinary sites and the cause was never established, so nothing here may
+// throw into the page: no unhandled rejection, no error escaping a listener.
+(function () {
+  "use strict";
+  var runtime = (typeof chrome !== "undefined" && chrome.runtime) || null;
+  if (!runtime || typeof runtime.sendMessage !== "function") return;
+
+  var MAX_TEXT = 12000;
+  var THROTTLE_MS = 1500;
+  var lastSignature = "";
+  var timer = null;
+
+  function snapshot() {
+    var body = document.body;
+    if (!body) return null;
+    var text = "";
+    try {
+      text = String(body.innerText || "")
+        .replace(/[ \t]+/g, " ")
+        .replace(/\n{3,}/g, "\n\n")
+        .trim()
+        .slice(0, MAX_TEXT);
+    } catch (_) {
+      return null;
+    }
+    var selection = "";
+    try {
+      selection = String(window.getSelection() || "").trim().slice(0, 400);
+    } catch (_) {}
+    return {
+      url: String(location.href || ""),
+      title: String(document.title || ""),
+      text: text,
+      selection: selection,
+    };
+  }
+
+  function report() {
+    // Only the page in front of the user. Background tabs stay silent, so a
+    // dozen open tabs cannot fight over what the assistant is looking at.
+    if (document.visibilityState !== "visible") return;
+    var snap = snapshot();
+    if (!snap) return;
+    var signature = snap.url + "|" + snap.text.length + "|" + snap.selection;
+    if (signature === lastSignature) return;
+    lastSignature = signature;
+    try {
+      // The call page may not exist; then this simply has no receiver. Both
+      // shapes are handled because Safari has answered either way in practice.
+      var result = runtime.sendMessage({ type: "BW_PAGE_ACTIVE", page: snap });
+      if (result && typeof result.catch === "function") result.catch(function () {});
+    } catch (_) {}
+  }
+
+  function schedule() {
+    if (timer) return;
+    timer = setTimeout(function () {
+      timer = null;
+      report();
+    }, THROTTLE_MS);
+  }
+
+  try {
+    document.addEventListener("visibilitychange", schedule, { passive: true });
+    document.addEventListener("selectionchange", schedule, { passive: true });
+    window.addEventListener("scroll", schedule, { passive: true });
+    // Late enough that a client-rendered page has content by now.
+    setTimeout(report, 1200);
+  } catch (_) {}
+})();
