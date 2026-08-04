@@ -67,7 +67,26 @@ function say(text, cls) {
   els.status.className = cls || "dim";
 }
 
+// Forwards a line to the embedding page.
+//
+// Defined up here rather than inside the embedded block below because note()
+// runs long before that block, and the diagnostics worth reading are the early
+// ones. Silent and harmless when this page stands on its own.
+function frameTell(type, value) {
+  if (!EMBEDDED || window.parent === window) return;
+  try {
+    window.parent.postMessage(
+      { contract: "bw-extension-computer-voice-frame/1", type, value: value || null },
+      "*"
+    );
+  } catch (_) {}
+}
+
 function note(line) {
+  // Compact form hides #detail, so on an iPad this is the only way the reason
+  // for a failure ever reaches a human: there is no console to open, and every
+  // blind round trip costs a TestFlight build.
+  frameTell("log", { line: String(line) });
   els.detail.style.display = "block";
   els.detail.textContent = (els.detail.textContent + "\n" + line).trim().split("\n").slice(-14).join("\n");
 }
@@ -321,14 +340,7 @@ const FRAME_CONTRACT = "bw-extension-computer-voice-frame/1";
 const embedded = EMBEDDED;
 
 if (embedded && window.parent !== window) {
-  const tell = (type, value) => {
-    try {
-      window.parent.postMessage(
-        { contract: FRAME_CONTRACT, type, value: value || null },
-        "*"
-      );
-    } catch (_) {}
-  };
+  const tell = frameTell;
 
   // The host may set which desktop app to dial before the first press.
   window.addEventListener("message", (event) => {

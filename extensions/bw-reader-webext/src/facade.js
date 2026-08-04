@@ -395,6 +395,7 @@
     }
 
     const CONTRACT = 'bw-extension-computer-voice-frame/1';
+    const frameLog = [];
     const frame = document.createElement('iframe');
     // call.html, not the separate inline document: this one already carries the
     // context link and the page-following that the user just verified, while
@@ -514,6 +515,18 @@
         position();
         return;
       }
+      // Kept because the frame's own detail panel is hidden in compact form.
+      // A failure that says only "connection failed" costs another build to
+      // diagnose; the lines leading up to it usually name the cause outright.
+      if (data.type === 'log') {
+        const line = data.value && data.value.line;
+        if (line) {
+          frameLog.push(String(line));
+          if (frameLog.length > 6) frameLog.shift();
+          try { console.log('[bw-voice-frame]', line); } catch (_) {}
+        }
+        return;
+      }
       if (data.type !== 'state' || !data.value) return;
       lastState = String(data.value.state || 'idle');
       const message = String(data.value.message || '');
@@ -522,13 +535,39 @@
         found.button.title = message;
         found.button.setAttribute('aria-label', message);
       }
-      if (lastState === 'failed' && message) {
-        try { window.RC && RC.toast && RC.toast(message); } catch (_) {}
+      if (lastState === 'failed') {
+        const full = [message].concat(frameLog).filter(Boolean).join(String.fromCharCode(10));
+        if (full) { try { window.RC && RC.toast && RC.toast(full); } catch (_) {} }
       }
       position();
     });
 
+    // Placed inside the shadow tree, alongside the button it covers.
+    //
+    // On the page document it lost every click: the shadow host carries
+    // z-index 2147483647 -- the maximum -- and the frame could only reach
+    // 2147483646, so the host sat on top and every press went to the original
+    // button. Raising the frame is impossible; joining the same tree is not.
+    //
+    // Moved rather than placed once, because this code runs long before the
+    // shadow root is created further down this file. Attaching to the page
+    // document first and relocating on the first sighting keeps both orders
+    // valid; the Reader's own pages have no shadow and simply stay put.
+    const attach = () => {
+      const target = window.__bwShadow;
+      if (target && frame.parentNode !== target) {
+        target.appendChild(frame);
+        return true;
+      }
+      return false;
+    };
     (document.documentElement || document.body).appendChild(frame);
+    if (!attach()) {
+      const relocate = window.setInterval(() => {
+        if (attach()) window.clearInterval(relocate);
+      }, 200);
+      window.addEventListener('pagehide', () => window.clearInterval(relocate), { once: true });
+    }
     window.addEventListener('resize', position, { passive: true });
     window.addEventListener('scroll', position, { passive: true, capture: true });
     const timer = window.setInterval(position, 250);
