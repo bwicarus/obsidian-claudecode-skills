@@ -399,9 +399,11 @@
     function openCallPage(appKind) {
       const url = callUrl + (appKind ? '?app=' + encodeURIComponent(appKind) : '');
       try {
+        // A fixed window name, so a second press reuses the same tab instead of
+        // stacking another one -- and the call it already holds survives.
         // Opened from the click itself, so Safari treats it as user-initiated
         // and does not suppress it as a popup.
-        const opened = window.open(url, '_blank');
+        const opened = window.open(url, 'bw-computer-voice');
         if (opened) return true;
       } catch (_) {}
       try {

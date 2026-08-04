@@ -167,8 +167,61 @@ if (els.btn) {
       voiceActive = false;
       els.btn.textContent = "开始通话";
       els.btn.classList.remove("stop");
+      // The page exists for the call. Once the call is over it is a stray tab,
+      // and a stray tab is how the user ends up with several of them.
+      //
+      // Briefly delayed so the reason stays readable when the call ended in a
+      // failure -- closing instantly would take the explanation with it.
+      closeWhenDone(s?.error ? 4000 : 600);
     }
   });
+
+  // Dial on arrival: the sidebar press was the user's decision, and making them
+  // press a second time here is asking for the same consent twice.
+  //
+  // Safari does not always carry gesture activation across a newly opened
+  // document, so a refusal is expected and not an error -- the button stays and
+  // one press completes it.
+  (async function autoStart() {
+    if (voiceReady()) return;
+    els.btn.disabled = true;
+    els.btn.textContent = "正在连接…";
+    try {
+      const appKind = new URLSearchParams(location.search).get("app") || "";
+      await window.RC.computerVoice.startFromUserGesture(appKind ? { appKind } : {});
+      voiceActive = true;
+      els.btn.textContent = "结束通话";
+      els.btn.classList.add("stop");
+    } catch (err) {
+      els.btn.textContent = "开始通话";
+      if (err?.code === "BW_COMPUTER_VOICE_GESTURE_REQUIRED") {
+        note("请点击上方按钮开始通话（本页需要一次点击才能取得麦克风）。");
+      } else if (err?.code === "BW_COMPUTER_VOICE_DIRECT_BUSY") {
+        note("另一端正在通话（App 或阅读器）。在那边挂断后即可在此发起。");
+      } else {
+        note("自动连接失败: " + describe(err));
+      }
+    }
+    els.btn.disabled = false;
+  })();
+}
+
+// Closing is only allowed for a window that script opened -- which this one is,
+// via the sidebar button. When that does not hold (a manually opened tab), the
+// page stays and says so rather than appearing stuck.
+function closeWhenDone(delayMs) {
+  setTimeout(() => {
+    try {
+      link.close();
+    } catch (_) {}
+    try {
+      window.close();
+    } catch (_) {}
+    // Still here a moment later means the browser refused to close it.
+    setTimeout(() => {
+      if (!document.hidden) say("通话已结束，可关闭本页", "dim");
+    }, 300);
+  }, Math.max(0, delayMs || 0));
 }
 
 window.addEventListener("pagehide", () => link.close());
