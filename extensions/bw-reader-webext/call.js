@@ -165,6 +165,19 @@ async function showPageLinkState() {
 // the other.
 let voiceActive = false;
 
+// Publish the call state so every page's sidebar button can show it.
+//
+// The button that opened this page has no idea what happened next: it lives in
+// another document and hears nothing back. Writing the state where any page can
+// read it is what lets the button stop looking idle during a call.
+function publishVoiceState(state, detail) {
+  try {
+    chrome.storage.local.set({
+      bwVoiceState: { state, detail: detail || "", at: Date.now() },
+    });
+  } catch (_) {}
+}
+
 function voiceReady() {
   const RC = window.RC;
   if (!RC?.computerVoice?.startFromUserGesture) return "✗ 语音模块未加载";
@@ -197,9 +210,21 @@ if (els.btn) {
     try {
       if (voiceActive) {
         await RC.computerVoice.stop();
-        voiceActive = false;
-        els.btn.textContent = "开始通话";
-        els.btn.classList.remove("stop");
+        // Confirmed rather than assumed: a stop that is merely sent, and then
+        // reported as done, is how a call goes on running on Windows while the
+        // button says otherwise.
+        const stillActive = (() => {
+          try { return RC.computerVoice.isActive() === true; } catch (_) { return false; }
+        })();
+        voiceActive = stillActive;
+        if (stillActive) {
+          note("停止已发出，但桥接仍报通话中 —— 请再按一次。");
+          publishVoiceState("stopping");
+        } else {
+          els.btn.textContent = "开始通话";
+          els.btn.classList.remove("stop");
+          publishVoiceState("idle");
+        }
       } else {
         // Carried from the sidebar button, so the page dials the same target
         // the Reader was set to rather than silently defaulting.
@@ -210,6 +235,7 @@ if (els.btn) {
         voiceActive = true;
         els.btn.textContent = "结束通话";
         els.btn.classList.add("stop");
+        publishVoiceState("active");
       }
     } catch (err) {
       // BUSY is an answer, not a failure: someone else holds the call. Said
@@ -231,6 +257,7 @@ if (els.btn) {
       voiceActive = false;
       els.btn.textContent = "开始通话";
       els.btn.classList.remove("stop");
+      publishVoiceState("idle");
       // The page exists for the call. Once the call is over it is a stray tab,
       // and a stray tab is how the user ends up with several of them.
       //
@@ -256,8 +283,10 @@ if (els.btn) {
       voiceActive = true;
       els.btn.textContent = "结束通话";
       els.btn.classList.add("stop");
+      publishVoiceState("active");
     } catch (err) {
       els.btn.textContent = "开始通话";
+      publishVoiceState("idle");
       if (err?.code === "BW_COMPUTER_VOICE_GESTURE_REQUIRED") {
         note("请点击上方按钮开始通话（本页需要一次点击才能取得麦克风）。");
       } else if (err?.code === "BW_COMPUTER_VOICE_DIRECT_BUSY") {

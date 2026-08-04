@@ -555,6 +555,39 @@
     socket.onerror = function () {};
   }
 
+  // Reflect the call state on this page's own computer button.
+  //
+  // The button opens the call page and then hears nothing more -- it sits in a
+  // different document. Reading the published state is what stops it from
+  // looking idle while a call is running.
+  //
+  // Only the label and a marker class are touched. The button's own visual
+  // states belong to the module that created it, and fighting over them would
+  // produce a button that flickers between two owners.
+  var lastVoiceState = "";
+  function reflectVoiceState() {
+    try {
+      chrome.storage.local.get("bwVoiceState", function (bag) {
+        var v = (bag && bag.bwVoiceState) || null;
+        var state = v && v.state ? String(v.state) : "idle";
+        // A state left over from a previous session says nothing about now.
+        if (v && v.at && Date.now() - v.at > 6 * 60 * 60 * 1000) state = "idle";
+        if (state === lastVoiceState) return;
+        lastVoiceState = state;
+        ["asst-computer", "vc-top-computer"].forEach(function (id) {
+          var b = document.getElementById(id);
+          if (!b) return;
+          var label = state === "active" ? "电脑客户端通话中（点击打开通话页）"
+            : state === "stopping" ? "正在结束通话…"
+            : "启动电脑客户端语音";
+          b.title = label;
+          b.setAttribute("aria-label", label);
+          b.classList.toggle("bw-voice-live", state === "active");
+        });
+      });
+    } catch (_) {}
+  }
+
   function onVisibility() {
     if (document.visibilityState === "visible") connect();
     else disconnect();
@@ -596,9 +629,11 @@
     // and the comparison already prevents resending.
     setInterval(function () {
       if (document.visibilityState !== "visible") return;
+      reflectVoiceState();
       if (!socket) connect();
       else push();
     }, 5000);
+    reflectVoiceState();
     // Late enough that a client-rendered page has content to describe.
     setTimeout(function () { if (document.visibilityState === "visible") connect(); }, 1500);
   } catch (_) {}
