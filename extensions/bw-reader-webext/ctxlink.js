@@ -167,14 +167,21 @@ export class ContextLink {
       },
     });
 
+    // Nested under `active`, with its own contract -- sent flat it is refused as
+    // BW_COMPUTER_VOICE_DIRECT_MESSAGE_INVALID, and since the preceding context
+    // call succeeds, the snapshot updates while this half silently fails.
     await this.#request("active-reading", {
       sessionId: this.sessionId,
-      kind: "web",
-      file: url,
-      title: String(page.title || ""),
-      page: 0,
-      selectionState: selection ? "active" : "cleared",
-      selection: selection || null,
+      activeContract: "reader-active-reading/1",
+      active: {
+        kind: "web",
+        file: url,
+        title: String(page.title || ""),
+        page: 0,
+        selectionState: selection ? "active" : "cleared",
+        selection: selection || null,
+        observedAtEpochMs: Date.now(),
+      },
     });
 
     return { ok: true, seq: this.seq };

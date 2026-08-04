@@ -466,14 +466,21 @@
       // Position and selection travel separately; Windows pairs them with the
       // event by (file, page), so page 0 must match on both sides.
       pushedOnce = true;
+      // Nested under `active` with its own contract. Flat fields are refused
+      // as BW_COMPUTER_VOICE_DIRECT_MESSAGE_INVALID -- which is why the page
+      // position never reached Windows while the text quietly did.
       return request("active-reading", {
         sessionId: sessionId,
-        kind: "web",
-        file: snap.url,
-        title: snap.title,
-        page: 0,
-        selectionState: snap.selection ? "active" : "cleared",
-        selection: snap.selection || null,
+        activeContract: "reader-active-reading/1",
+        active: {
+          kind: "web",
+          file: snap.url,
+          title: snap.title,
+          page: 0,
+          selectionState: snap.selection ? "active" : "cleared",
+          selection: snap.selection || null,
+          observedAtEpochMs: Date.now(),
+        },
       });
     }).catch(function (error) {
       // Not worth disturbing the page over, but it must not vanish either: this
