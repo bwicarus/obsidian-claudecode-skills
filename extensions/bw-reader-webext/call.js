@@ -11,6 +11,43 @@
 
 import { ContextLink } from "./ctxlink.js";
 
+// Short-circuit ctxSync's upload instead of letting it be attempted.
+//
+// It is issued as a bare "/pdf/api/context-sync", which in this page resolves
+// against safari-web-extension://<uuid>/ -- an address that does not exist, and
+// Safari reports the miss as "TypeError: Load failed". Dialling then fails with
+// that message and no mention of voice, which is what the user saw.
+//
+// The request is unnecessary here regardless: it feeds the Pi→Windows snapshot
+// path, while this page sends context over its own socket. And it could not
+// succeed anyway -- it carries credentials:'include' and the extension holds no
+// Pi cookie.
+//
+// The caller checks the reply against what it asked for, so the request body is
+// echoed back; a flat refusal fails that check as BW_READER_CONTEXT_MODE_ACK.
+//
+// This was here before call.js was rewritten as the context bridge and was lost
+// in that rewrite.
+(function interceptContextSync() {
+  if (typeof window.fetch !== "function") return;
+  const original = window.fetch.bind(window);
+  window.fetch = function (input, init) {
+    const url = String((input && input.url) || input || "");
+    if (url.indexOf("/pdf/api/context-sync") === -1) return original(input, init);
+    let echo = { ok: true };
+    try {
+      const sent = init && init.body ? JSON.parse(String(init.body)) : {};
+      echo = { ok: true, enabled: sent.enabled, deliveryMode: sent.deliveryMode };
+    } catch (_) {}
+    return Promise.resolve(
+      new Response(JSON.stringify(echo), {
+        status: 200,
+        headers: { "Content-Type": "application/json" },
+      })
+    );
+  };
+})();
+
 const els = {
   btn: document.getElementById("asst-computer"),
   status: document.getElementById("status"),
