@@ -24,10 +24,11 @@ from PIL import Image
 
 HERE = Path(__file__).resolve().parent
 EXTENSIONS = HERE.parent
-# call.html/call.js host the voice call in an extension page of its own. They
-# need no manifest declaration -- web_accessible_resources governs what web
-# pages may reach, and the extension opening its own page is not that -- but
-# this list is a whitelist, so anything omitted here simply never ships.
+# call.html/call.js host the optional full-page bridge. The inline computer
+# button is different: facade.js embeds its extension-owned document into the
+# current HTTP(S) page so microphone and WSS stay out of Safari's reclaimable
+# background worker. That one HTML resource is therefore deliberately exposed
+# below through a narrow web_accessible_resources declaration.
 ROOT_FILES = (
     "background.js",
     "content.js",
@@ -35,10 +36,16 @@ ROOT_FILES = (
     "popup.js",
     "call.html",
     "call.js",
+    "inline-computer-voice.html",
+    "inline-computer-voice.js",
     # Imported by call.js as a module; omitting it here would ship a page whose
     # import fails at load, with nothing on screen to say why.
     "ctxlink.js",
 )
+INLINE_COMPUTER_VOICE_RESOURCES = [{
+    "resources": ["inline-computer-voice.html"],
+    "matches": ["https://*/*", "http://*/*"],
+}]
 ROOT_DIRS = ("src", "vendor", "icons")
 BACKGROUND_SCRIPTS = (
     "vendor/reader-runtime-account-context.js",
@@ -139,6 +146,7 @@ def safari_manifest(*, compat: bool = False) -> dict:
         if compat
         else {**OPAQUE_ICONS, "1024": SAFARI_ICON}
     )
+    manifest["web_accessible_resources"] = INLINE_COMPUTER_VOICE_RESOURCES
     return manifest
 
 
@@ -207,6 +215,10 @@ def validate(manifest: dict, *, compat: bool = False) -> None:
         raise SystemExit("Safari package requires Manifest V3")
     if manifest.get("host_permissions") != [ACTIVE_ORIGIN + "*"]:
         raise SystemExit("Safari host permission must remain restricted to the active Pi")
+    if manifest.get("web_accessible_resources") != INLINE_COMPUTER_VOICE_RESOURCES:
+        raise SystemExit(
+            "Safari may expose only the inline computer-voice frame to HTTP(S) pages"
+        )
     expected_permissions = {"storage", "alarms", "nativeMessaging"} if compat else {
         "storage",
         "alarms",

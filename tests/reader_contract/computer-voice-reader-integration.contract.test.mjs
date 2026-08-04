@@ -12,6 +12,9 @@ const settings = read("_server_deploy/static/pdf/rc-settings.js");
 const background = read("extensions/bw-reader-webext/background.js");
 const facade = read("extensions/bw-reader-webext/src/facade.js");
 const safariPackager = read("extensions/bw-reader-webext/package_safari.py");
+const inlineComputerVoice = read(
+  "extensions/bw-reader-webext/inline-computer-voice.js",
+);
 const offscreen = read("extensions/bw-reader-webext/offscreen.js");
 
 test("电脑客户端保留原按钮与设置标签，App 与扩展按宿主分流", () => {
@@ -184,6 +187,26 @@ test("Safari 扩展电脑按钮直接启停 RC bridge，App WebView 仍走 postM
   assert.doesNotMatch(
     phoneClick,
     /BW_NATIVE_APP_REQUEST|sendNativeMessage|nativeComputerVoiceExtensionBridge/,
+  );
+});
+
+test("Safari 侧栏电脑按钮在原位置使用扩展前台文档直连，不依赖后台 relay", () => {
+  assert.match(facade, /startsWith\('safari-web-extension:\/\/'\)/);
+  assert.match(facade, /runtime\.getURL\('inline-computer-voice\.html'\)/);
+  assert.match(facade, /setAttribute\('allow', 'microphone; autoplay'\)/);
+  assert.match(facade, /document\.getElementById\('asst-computer'\)/);
+  assert.match(facade, /document\.getElementById\('vc-top-computer'\)/);
+  assert.match(
+    inlineComputerVoice,
+    /RC\.computerVoice\.startFromUserGesture\(\{ appKind: appKind \}\)/,
+  );
+  assert.doesNotMatch(
+    inlineComputerVoice,
+    /runtime\.connect|sendNativeMessage|window\.location|call\.html/,
+  );
+  assert.match(
+    safariPackager,
+    /"resources": \["inline-computer-voice\.html"\][\s\S]*"matches": \["https:\/\/\*\/\*", "http:\/\/\*\/\*"\]/,
   );
 });
 

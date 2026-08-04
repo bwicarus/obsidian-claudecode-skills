@@ -1,0 +1,72 @@
+<!doctype html>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>电脑客户端语音</title>
+<style>
+  :root { color-scheme: dark; }
+  html, body {
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    overflow: hidden;
+    background: transparent;
+  }
+  button {
+    -webkit-appearance: none;
+    appearance: none;
+    box-sizing: border-box;
+    width: 100%;
+    height: 100%;
+    margin: 0;
+    padding: 0;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: #9fb4e0;
+    background: #16203a;
+    border: 1px solid #2a3a63;
+    border-radius: 12px;
+    -webkit-tap-highlight-color: transparent;
+    touch-action: manipulation;
+  }
+  button:active { transform: scale(.9); }
+  button.connecting {
+    color: #ffd60a;
+    background: #8a5a00;
+    border-color: #ff9f0a;
+    animation: pulse .7s ease-in-out infinite;
+  }
+  button.on {
+    color: #fff;
+    background: #1a7f4b;
+    border-color: #1a7f4b;
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  button.failed {
+    color: #fff;
+    background: #8f2d2d;
+    border-color: #ff6961;
+  }
+  button:disabled { opacity: .7; }
+  @keyframes pulse {
+    0%, 100% { box-shadow: 0 0 0 0 rgba(26,127,75,.5); }
+    50% { box-shadow: 0 0 0 7px rgba(26,127,75,0); }
+  }
+</style>
+
+<button id="asst-computer" type="button" aria-label="电脑客户端桥接">
+  <svg viewBox="0 0 24 24" width="20" height="20" fill="none"
+       stroke="currentColor" stroke-width="1.7" stroke-linecap="round"
+       stroke-linejoin="round" aria-hidden="true">
+    <rect x="3.5" y="4.5" width="17" height="12" rx="2"></rect>
+    <path d="M8 20h8M12 16.5V20"></path>
+  </svg>
+</button>
+
+<!-- This frame is an extension-owned foreground document.  It keeps the same
+     visible button in the Reader sidebar, but microphone and WSS therefore use
+     the extension origin instead of the reclaimable iOS background worker. -->
+<script src="vendor/rc-core.js"></script>
+<script src="vendor/rc-voicecall.js"></script>
+<script src="vendor/rc-computer-voice.js"></script>
+<script src="inline-computer-voice.js"></script>
