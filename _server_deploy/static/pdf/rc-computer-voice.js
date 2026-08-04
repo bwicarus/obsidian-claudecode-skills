@@ -783,7 +783,7 @@
         false
       );
     }
-    return DIRECT_ENDPOINT;
+    return url.toString();
   }
 
   function messageBytes(text) {
@@ -5101,7 +5101,7 @@
       contextPump: null,
       activeReadingPump: null,
       contextDeliveryMode: null,
-      appKind: getComputerTarget(),
+      appKind: normalizeComputerTarget(options.appKind || getComputerTarget()),
       claimedSnapshot: false,
       retriedAfterStaleClaim: false,
       pcm: {

@@ -5731,15 +5731,17 @@
   var _computerVoiceOwnedButtons = new WeakSet();
   var _computerVoiceStarting = false;
   var _nativeComputerVoiceEventsBound = false;
-  function _extensionNativeComputerVoiceBridge() {
+  function _extensionComputerVoiceDirectAvailable() {
     try {
-      var bridge = window.__bwNativeComputerVoiceExtensionBridge;
-      return bridge && typeof bridge.available === 'function' &&
-        bridge.available() === true && typeof bridge.toggle === 'function'
-          ? bridge
-          : null;
+      var runtime = window.chrome && window.chrome.runtime;
+      return !!(
+        runtime && typeof runtime.id === 'string' && runtime.id &&
+        typeof runtime.connect === 'function' &&
+        window.RC && RC.computerVoice &&
+        typeof RC.computerVoice.startFromUserGesture === 'function'
+      );
     } catch (e) {
-      return null;
+      return false;
     }
   }
   function _nativeComputerVoiceAppAvailable() {
@@ -5751,12 +5753,17 @@
           window.webkit.messageHandlers.bwNativeComputerVoice &&
           typeof window.webkit.messageHandlers.bwNativeComputerVoice.postMessage === 'function'
         );
-      return webViewAvailable || !!_extensionNativeComputerVoiceBridge();
+      return webViewAvailable || _extensionComputerVoiceDirectAvailable();
     } catch (e) {
       return false;
     }
   }
   function _applyNativeComputerVoiceState(value) {
+    // Safari extension pages own their direct bridge state locally.  Ignore
+    // stale containing-App events so they cannot repaint a live direct call
+    // as "opening BWReader App" or turn its button off.
+    if (_extensionComputerVoiceDirectAvailable() &&
+        window.__BW_NATIVE_COMPUTER_VOICE__ !== true) return;
     var state = value && typeof value === 'object' ? value : {};
     ['asst-computer', 'vc-top-computer'].forEach(function (id) {
       _configureNativeComputerVoiceButton(document.getElementById(id));
@@ -5798,8 +5805,8 @@
     if (!available) {
       button.title = '请安装或更新 BWReader App 后使用电脑客户端语音';
       button.setAttribute('aria-label', button.title);
-    } else if (_extensionNativeComputerVoiceBridge()) {
-      button.title = '在 BWReader App 中启动电脑客户端语音';
+    } else if (_extensionComputerVoiceDirectAvailable()) {
+      button.title = '直接连接 Windows 电脑客户端语音';
       button.setAttribute('aria-label', button.title);
     }
     return available;
@@ -5824,18 +5831,12 @@
           });
           return true;
         }
-        var bridge = _extensionNativeComputerVoiceBridge();
-        if (!bridge) return false;
-        computerBtnConnecting(true);
-        setSt('正在打开 BWReader App…');
-        bridge.toggle(target).catch(function (error) {
-          computerBtnConnecting(false);
-          computerBtnOn(false);
-          taPlaceholder(null);
-          var message = error && error.message || '无法联系 BWReader App 原生语音';
-          setSt(message);
-          try { if (window.RC && RC.toast) RC.toast(message); } catch (e) {}
-        });
+        if (!_extensionComputerVoiceDirectAvailable()) return false;
+        if (_computerVoiceStarting || _computerVoiceActive()) {
+          _stopComputerVoiceOnly('extension-computer-button');
+          return true;
+        }
+        _computerVoiceStart({ appKind: target }, _gen);
         return true;
       }
       var current = computerVoice &&

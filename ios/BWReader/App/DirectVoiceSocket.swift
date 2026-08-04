@@ -143,7 +143,8 @@ actor DirectVoiceSocket {
     /// Starts one exact Windows voice session.  This convenience method opens
     /// and authenticates the WSS first when necessary.
     func start(
-        appKind: DirectVoiceTargetApp = .codexDesktop
+        appKind: DirectVoiceTargetApp = .codexDesktop,
+        takeover: Bool = false
     ) async throws -> DirectVoiceSession {
         if state == .disconnected || state == .failed {
             try await connect()
@@ -181,6 +182,9 @@ actor DirectVoiceSocket {
             ]
             if appKind != .codexDesktop {
                 startFields["appKind"] = .string(appKind.rawValue)
+            }
+            if takeover {
+                startFields["takeover"] = .bool(true)
             }
             let payload = try await request(
                 action: "start",

@@ -272,14 +272,19 @@
       available = true;
       launchScheme = value.launchScheme;
       supportedAppKinds = appKinds;
-      window.__BW_NATIVE_COMPUTER_VOICE__ = true;
+      // This is only the optional containing-App command bridge.  Do not set
+      // __BW_NATIVE_COMPUTER_VOICE__: that flag is reserved for the App's own
+      // WKWebView, where Swift truly owns microphone/audio/WSS.  Setting it in
+      // ordinary Safari pages disables their trusted computer-button gesture
+      // and forces the old App deep-link path.
+      window.__BW_NATIVE_APP_COMPUTER_VOICE__ = true;
       publishCapability();
       return refreshStatus().catch(() => latestState);
     }).catch((error) => {
       available = false;
       launchScheme = '';
       supportedAppKinds = new Set();
-      window.__BW_NATIVE_COMPUTER_VOICE__ = false;
+      window.__BW_NATIVE_APP_COMPUTER_VOICE__ = false;
       publishCapability();
       throw error;
     });

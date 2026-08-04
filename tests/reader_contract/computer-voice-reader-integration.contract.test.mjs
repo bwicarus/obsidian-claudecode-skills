@@ -14,7 +14,7 @@ const facade = read("extensions/bw-reader-webext/src/facade.js");
 const safariPackager = read("extensions/bw-reader-webext/package_safari.py");
 const offscreen = read("extensions/bw-reader-webext/offscreen.js");
 
-test("电脑客户端保留原按钮与设置标签，App toggle 携带固定目标", () => {
+test("电脑客户端保留原按钮与设置标签，App 与扩展按宿主分流", () => {
   assert.doesNotMatch(assistant, /value="computer_client"/);
   assert.doesNotMatch(assistant, /RC\.computerVoice\.mountSettings\(card\)/);
   assert.doesNotMatch(
@@ -32,7 +32,7 @@ test("电脑客户端保留原按钮与设置标签，App toggle 携带固定目
   assert.match(voicecall, /b\.id = 'asst-call'; b\.type = 'button'/);
   assert.match(
     voicecall,
-    /function _nativeComputerVoiceAppAvailable\(\)[\s\S]*window\.__BW_NATIVE_COMPUTER_VOICE__ === true[\s\S]*bwNativeComputerVoice\.postMessage/,
+    /function _nativeComputerVoiceAppAvailable\(\)[\s\S]*window\.__BW_NATIVE_COMPUTER_VOICE__ === true[\s\S]*bwNativeComputerVoice\.postMessage[\s\S]*_extensionComputerVoiceDirectAvailable\(\)/,
   );
   assert.match(
     voicecall,
@@ -47,6 +47,18 @@ test("电脑客户端保留原按钮与设置标签，App toggle 携带固定目
     voicecall,
     /function postTarget\(appKind\)[\s\S]*bwNativeComputerVoice\.postMessage\(\{[\s\S]*action: 'toggle',[\s\S]*appKind:/,
   );
+  assert.match(
+    nativeToggle,
+    /if \(_computerVoiceStarting \|\| _computerVoiceActive\(\)\)[\s\S]*_stopComputerVoiceOnly\('extension-computer-button'\)/,
+  );
+  assert.match(
+    nativeToggle,
+    /_computerVoiceStart\(\{ appKind: target \}, _gen\)/,
+  );
+  assert.doesNotMatch(
+    nativeToggle,
+    /__bwNativeComputerVoiceExtensionBridge|bridge\.toggle|window\.location\.assign|voice\.toggle/,
+  );
   assert.match(runtime, /rt_computer_target/);
   assert.match(runtime, /<option value="codex-desktop">Codex<\/option>/);
   assert.match(runtime, /<option value="chatgpt-classic">GPT Classic<\/option>/);
@@ -57,7 +69,7 @@ test("电脑客户端保留原按钮与设置标签，App toggle 携带固定目
   );
 });
 
-test("App 电脑按钮只切换原生桥，普通电话保持独立", () => {
+test("电脑按钮按宿主分流，普通电话保持独立", () => {
   const connectStart = voicecall.indexOf("toggle._connect = function (opts)");
   const connectEnd = voicecall.indexOf("function toggle(opts)", connectStart);
   assert.ok(connectStart >= 0 && connectEnd > connectStart);
@@ -117,7 +129,7 @@ test("App 电脑按钮只切换原生桥，普通电话保持独立", () => {
         computerClick.indexOf("teardown(false, true)") &&
       computerClick.indexOf("teardown(false, true)") <
         computerClick.indexOf("_toggleNativeComputerVoiceApp()"),
-    "gate and native availability must be checked before releasing ordinary voice and toggling the App",
+    "gate and host availability must be checked before releasing ordinary voice and dispatching the computer route",
   );
 
   const phoneClickStart = computerClickEnd;
@@ -134,35 +146,34 @@ test("App 电脑按钮只切换原生桥，普通电话保持独立", () => {
   );
 });
 
-test("Safari 电脑按钮只把一次性请求交给宿主 App", () => {
-  assert.match(
-    safariPackager,
-    /\["storage", "alarms", "nativeMessaging"\]/,
-  );
-  assert.match(background, /const NATIVE_APP_CONTRACT = "bw-reader-native\/1"/);
-  assert.match(
-    background,
-    /runtime\.sendNativeMessage\([\s\S]*NATIVE_APP_IDENTIFIER,[\s\S]*payload/,
-  );
-  assert.match(
-    background,
-    /const NATIVE_APP_ACTIONS = new Set\(\[[\s\S]*"capabilities"[\s\S]*"voice\.status"[\s\S]*"voice\.toggle"/,
-  );
+test("Safari 扩展电脑按钮直接启停 RC bridge，App WebView 仍走 postMessage", () => {
   assert.match(
     facade,
-    /window\.__bwNativeComputerVoiceExtensionBridge = nativeComputerVoiceBridge/,
+    /window\.__BW_NATIVE_APP_COMPUTER_VOICE__ = true/,
   );
-  assert.match(
+  assert.doesNotMatch(
     facade,
-    /call\('voice\.toggle',[\s\S]*window\.location\.assign\(launchURL\)/,
+    /window\.__BW_NATIVE_COMPUTER_VOICE__ = true/,
   );
   assert.match(
     voicecall,
-    /function _extensionNativeComputerVoiceBridge\(\)[\s\S]*bridge\.available\(\) === true[\s\S]*bridge\.toggle/,
+    /function _extensionComputerVoiceDirectAvailable\(\)[\s\S]*window\.chrome && window\.chrome\.runtime[\s\S]*runtime\.connect[\s\S]*RC\.computerVoice\.startFromUserGesture/,
+  );
+  const nativeToggle = voicecall.slice(
+    voicecall.indexOf("function _toggleNativeComputerVoiceApp()"),
+    voicecall.indexOf("function _setComputerVoiceDialPending"),
   );
   assert.match(
-    voicecall,
-    /function _nativeComputerVoiceAppAvailable\(\)[\s\S]*webViewAvailable \|\| !!_extensionNativeComputerVoiceBridge\(\)/,
+    nativeToggle,
+    /window\.webkit[\s\S]*bwNativeComputerVoice\.postMessage\(\{[\s\S]*action: 'toggle',[\s\S]*appKind: target/,
+  );
+  assert.match(
+    nativeToggle,
+    /_extensionComputerVoiceDirectAvailable\(\)[\s\S]*_stopComputerVoiceOnly\('extension-computer-button'\)[\s\S]*_computerVoiceStart\(\{ appKind: target \}, _gen\)/,
+  );
+  assert.doesNotMatch(
+    nativeToggle,
+    /__bwNativeComputerVoiceExtensionBridge|bridge\.toggle|window\.location\.assign|voice\.toggle/,
   );
   const phoneClickStart = voicecall.indexOf("b.addEventListener('click'");
   const phoneClickEnd = voicecall.indexOf(
@@ -176,7 +187,7 @@ test("Safari 电脑按钮只把一次性请求交给宿主 App", () => {
   );
 });
 
-test("电脑按钮身份仍由 voicecall 闭包登记，非 App 环境统一禁用", () => {
+test("电脑按钮身份仍由 voicecall 闭包登记，App/扩展以外环境统一禁用", () => {
   assert.match(runtime, /var registeredComputerButtons = new WeakSet\(\)/);
   assert.match(
     runtime,
@@ -187,6 +198,10 @@ test("电脑按钮身份仍由 voicecall 闭包登记，非 App 环境统一禁�
     /function computerButtonFromEvent\(event\)[\s\S]*target\.id === "asst-computer"[\s\S]*target\.id === "vc-top-computer"[\s\S]*registeredComputerButtons\.has\(target\)/,
   );
   assert.match(voicecall, /var _computerVoiceOwnedButtons = new WeakSet\(\)/);
+  assert.match(
+    voicecall,
+    /function _extensionComputerVoiceDirectAvailable\(\)[\s\S]*runtime\.id[\s\S]*runtime\.connect[\s\S]*startFromUserGesture/,
+  );
   assert.match(
     voicecall,
     /_computerVoiceOwnedButtons\.has\(button\)[\s\S]*RC\.computerVoice\.registerComputerButton\(button\)/,
@@ -399,7 +414,22 @@ test("扩展上行用 sequence + binary-accepted 单 credit，STATUS 保留 last
 
 test("Reader v3 固定 WSS 免配对直连，不保存身份或显示显式配置", () => {
   assert.match(runtime, /channel\.request\("hello", \{\s*protocolVersion: 3/);
-  assert.match(runtime, /new DirectSocket\(DIRECT_ENDPOINT, options\)/);
+  assert.match(
+    runtime,
+    /function normalizeEndpoint\(value\)[\s\S]*url\.toString\(\) !== DIRECT_ENDPOINT[\s\S]*url\.toString\(\) !== CONTEXT_ENDPOINT[\s\S]*return url\.toString\(\)/,
+  );
+  assert.match(
+    runtime,
+    /function normalizeEndpoint\(value\)[\s\S]*url\.toString\(\) !== DIRECT_ENDPOINT &&[\s\S]*url\.toString\(\) !== CONTEXT_ENDPOINT/,
+  );
+  assert.match(
+    runtime,
+    /function openDirect\(options, onCreate\)[\s\S]*var endpoint = \(options && options\.endpoint\) \|\| DIRECT_ENDPOINT;[\s\S]*new DirectSocket\(endpoint, options\)/,
+  );
+  assert.match(
+    runtime,
+    /endpoint: window\.__BW_NATIVE_COMPUTER_VOICE__ === true[\s\S]*\? CONTEXT_ENDPOINT[\s\S]*: DIRECT_ENDPOINT/,
+  );
   assert.doesNotMatch(
     runtime,
     /indexedDB|generateKey|exportKey|clientPublicKeySpki|pairingCode|deviceToken|chrome\.storage|localStorage|Authorization|Bearer /i,

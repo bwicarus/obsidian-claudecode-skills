@@ -296,7 +296,10 @@ final class NativeVoiceBridge: ObservableObject {
                 category: "protocol",
                 message: "→ START \(appKind.rawValue)"
             )
-            let session = try await socket.start(appKind: appKind)
+            let session = try await socket.start(
+                appKind: appKind,
+                takeover: true
+            )
             try requireCurrent(generation)
 
             try startMicrophonePipeline(
@@ -482,13 +485,6 @@ final class NativeVoiceBridge: ObservableObject {
                   generation == self.operationGeneration,
                   self.safariWebContext != nil {
                 do {
-                    if self.state.phase == .active,
-                       let pending = try self.sharedStore
-                        .consumeAnyPendingVoice(),
-                       pending.requestID.count >= 8 {
-                        await self.stop()
-                        return
-                    }
                     if self.state.phase == .active,
                        let latest = try self.sharedStore
                         .readLatestWebContext(),
