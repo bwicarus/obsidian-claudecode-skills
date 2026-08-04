@@ -406,7 +406,31 @@
       .replace(/\bey[A-Za-z0-9_-]{20,}/g, "<jwt>");
   }
 
+  // Always recorded locally first; sent onward only when the link happens to be
+  // up.
+  //
+  // Sending was the sole destination at first, which made the log depend on the
+  // very connection it exists to explain: when that connection failed -- the one
+  // case that matters -- not a single line was written anywhere. The log file on
+  // Windows stayed empty and said nothing about why.
+  //
+  // The local copy is capped and readable from the call page, so a link that
+  // never opens still leaves a record of trying.
   function logStage(stage, detail) {
+    var entry = {
+      at: new Date().toISOString().slice(11, 19),
+      stage: String(stage).slice(0, 64),
+      detail: clean(detail),
+    };
+    try {
+      chrome.storage.local.get("bwCtxLog", function (bag) {
+        var list = (bag && bag.bwCtxLog) || [];
+        list.push(entry);
+        while (list.length > 30) list.shift();
+        chrome.storage.local.set({ bwCtxLog: list });
+      });
+    } catch (_) {}
+
     if (!ready || !socket || socket.readyState !== 1) return;
     logSeq += 1;
     try {
@@ -560,8 +584,9 @@
 
   function connect() {
     if (socket || document.visibilityState !== "visible") return;
+    logStage("connect-try", ENDPOINT);
     try { socket = new WebSocket(ENDPOINT); }
-    catch (_) { socket = null; return; }
+    catch (e) { logStage("connect-throw", e && e.message); socket = null; return; }
 
     socket.onopen = function () {
       request("hello", { protocolVersion: 3 })
@@ -575,7 +600,10 @@
           logStage("link-open", "url=" + String(location.href).slice(0, 120));
           push();
         })
-        .catch(function () { try { socket.close(); } catch (_) {} });
+        .catch(function (e) {
+          logStage("handshake-failed", (e && (e.code || e.message)) || String(e));
+          try { socket.close(); } catch (_) {}
+        });
     };
 
     socket.onmessage = function (event) {
@@ -589,6 +617,7 @@
     };
 
     socket.onclose = function () {
+      logStage("socket-closed", "ready=" + ready);
       ready = false;
       socket = null;
       sessionId = null;

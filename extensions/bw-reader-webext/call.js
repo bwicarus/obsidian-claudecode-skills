@@ -127,6 +127,23 @@ if (chrome.runtime?.onMessage) {
 // What it can usefully show is whether that other link is failing, which until
 // now was invisible: the snapshot stayed on a book for hours while every web
 // page went unreported and nothing anywhere said why.
+// Read the page-side trail. It is kept in storage precisely because the link it
+// describes may never open, in which case nothing would reach Windows to be
+// logged there.
+async function showPageLog() {
+  try {
+    const bag = await chrome.storage.local.get("bwCtxLog");
+    const list = bag?.bwCtxLog || [];
+    if (!list.length) return;
+    els.detail.style.display = "block";
+    els.detail.textContent = list
+      .slice(-14)
+      .map((e) => `${e.at} ${e.stage}${e.detail ? "  " + e.detail : ""}`)
+      .join("
+");
+  } catch (_) {}
+}
+
 async function showPageLinkState() {
   try {
     const bag = await chrome.storage.local.get("bwCtxLastError");
@@ -155,7 +172,8 @@ async function showPageLinkState() {
     }
   } catch (_) {}
   showPageLinkState();
-  setInterval(showPageLinkState, 5000);
+  showPageLog();
+  setInterval(function () { showPageLinkState(); showPageLog(); }, 5000);
 })();
 
 // --- placing a call from here ------------------------------------------------
