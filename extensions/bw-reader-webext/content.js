@@ -584,6 +584,21 @@
     document.addEventListener("selectionchange", schedule, { passive: true });
     window.addEventListener("scroll", schedule, { passive: true });
     window.addEventListener("pagehide", disconnect, { passive: true });
+    // visibilitychange alone is not enough on iOS: switching tabs often freezes
+    // a page rather than hiding it, and the event never arrives -- the snapshot
+    // then keeps describing whichever page last managed to report.
+    window.addEventListener("focus", onVisibility, { passive: true });
+    window.addEventListener("pageshow", onVisibility, { passive: true });
+    document.addEventListener("resume", onVisibility, { passive: true });
+
+    // Last resort. Every event above can be missed; this cannot. It only reads
+    // the page and compares -- unchanged pages cost nothing beyond the read,
+    // and the comparison already prevents resending.
+    setInterval(function () {
+      if (document.visibilityState !== "visible") return;
+      if (!socket) connect();
+      else push();
+    }, 5000);
     // Late enough that a client-rendered page has content to describe.
     setTimeout(function () { if (document.visibilityState === "visible") connect(); }, 1500);
   } catch (_) {}
