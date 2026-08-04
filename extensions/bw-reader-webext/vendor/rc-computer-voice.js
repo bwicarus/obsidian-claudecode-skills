@@ -1453,8 +1453,19 @@ if (window.__bwPwaProviderOnly) return;
     "moz-extension://",
   ];
 
-  function isOwnExtensionPage(runtime) {
-    if (!runtime || typeof runtime.id !== "string" || !runtime.id) return false;
+  // Decided on origin alone. The browser assigns it and no page can forge it,
+  // and a content script never carries it -- it runs under the host page's
+  // origin -- so the scheme by itself draws the line this needs.
+  //
+  // runtime.id was required here originally, as corroboration. That was wrong:
+  // Safari does not expose it to an extension document embedded in an HTTP(S)
+  // page, so the inline computer-voice frame failed this test, fell through to
+  // the relay branch, and went back through the very background worker the
+  // frame existed to avoid. The call then failed in a way that produced no
+  // error anywhere, because the relay simply never answered.
+  //
+  // The runtime argument stays for callers, but is not consulted.
+  function isOwnExtensionPage(_runtime) {
     var origin = currentOrigin();
     if (!origin) return false;
     for (var i = 0; i < OWN_EXTENSION_SCHEMES.length; i += 1) {

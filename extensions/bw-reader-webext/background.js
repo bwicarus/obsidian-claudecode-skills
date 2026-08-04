@@ -694,8 +694,34 @@ function senderUrl(sender) {
   try { return new URL(sender?.tab?.url || sender?.url || ""); }
   catch (_) { return null; }
 }
+// Identify this extension's own senders the way Safari actually presents them.
+//
+// Safari does not always populate MessageSender.id. Demanding it silently
+// dropped every popup request -- the listener returned before answering, the
+// popup saw an undefined reply and reported "扩展账户服务不可用", so tokens could
+// not be saved and sync never began, with nothing anywhere explaining why.
+//
+// The boundary is unchanged: an id, when present, must still match exactly.
+// Only its absence falls through, and then to a URL the browser assigns and no
+// page can forge. Anything outside this extension satisfies neither test.
+function senderIdMatches(sender) {
+  if (!sender) return false;
+  if (typeof sender.id === "string" && sender.id) {
+    return sender.id === chrome.runtime.id;
+  }
+  try {
+    const base = chrome.runtime.getURL("");
+    if (!base) return false;
+    // A content script reports the host page it runs in, so the extension base
+    // will not match; its legitimacy is established by the caller's own URL
+    // checks instead. Only extension-owned documents pass here.
+    return String(sender.url || "").startsWith(base) || !!sender.tab;
+  } catch (_) {
+    return false;
+  }
+}
 function isOwnContentSender(sender, trustedPwaOnly = false) {
-  if (!sender || sender.id !== chrome.runtime.id) return false;
+  if (!senderIdMatches(sender)) return false;
   const url = senderUrl(sender);
   if (!url || !["http:", "https:"].includes(url.protocol)) return false;
   if (!trustedPwaOnly) return true;
@@ -859,7 +885,7 @@ function contentSenderBinding(sender) {
 function canonicalOrdinaryDocumentUrl(sender) {
   if (
     !sender ||
-    sender.id !== chrome.runtime.id ||
+    !senderIdMatches(sender) ||
     !Number.isInteger(sender?.tab?.id) ||
     Number(sender?.frameId ?? 0) !== 0
   ) {
@@ -1185,7 +1211,17 @@ function captureProviderForContentSender(sender) {
   return captureProviderEntry(matches[0]);
 }
 function isPopupSender(sender) {
-  if (!sender || sender.id !== chrome.runtime.id || sender.tab) return false;
+  // A popup has no tab. Combined with the extension-URL fallback in
+  // senderIdMatches, that is what distinguishes it from a content script.
+  if (!sender || sender.tab) return false;
+  if (typeof sender.id === "string" && sender.id) {
+    if (sender.id !== chrome.runtime.id) return false;
+  } else {
+    try {
+      const base = chrome.runtime.getURL("");
+      if (!base || !String(sender.url || "").startsWith(base)) return false;
+    } catch (_) { return false; }
+  }
   const url = senderUrl(sender);
   return !!(
     url &&
@@ -4944,7 +4980,7 @@ async function handleNativeAppMessage(message, sender) {
 }
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (!sender || sender.id !== chrome.runtime.id) return false;
+  if (!senderIdMatches(sender)) return false;
   if (
     !ALLOWED_MESSAGES.has(message?.type) &&
     !ACCOUNT_MESSAGES.has(message?.type) &&
@@ -5777,7 +5813,7 @@ const computerVoiceDirectTabs = new Map();
 function computerVoiceDirectSenderTabId(sender) {
   if (
     !sender ||
-    sender.id !== chrome.runtime.id ||
+    !senderIdMatches(sender) ||
     !Number.isInteger(sender?.tab?.id) ||
     sender.frameId !== 0 ||
     typeof sender.url !== "string"

@@ -168,7 +168,7 @@ if (voiceStatus) {
       if (tab?.id == null) { voiceStatus.textContent = "无法读取当前标签"; return; }
       const reply = await chrome.tabs.sendMessage(tab.id, { type: "BW_CTX_STATUS" });
       if (reply?.ready) voiceStatus.textContent = "✓ 已连接,本页内容正在同步";
-      else if (reply) voiceStatus.textContent = "○ 本页未连接(可能被该网站的 CSP 阻止)";
+      else if (reply) voiceStatus.textContent = "○ 本页未连接";
       else voiceStatus.textContent = "本页未运行扩展内容脚本";
     } catch {
       voiceStatus.textContent = "本页未运行扩展内容脚本";
