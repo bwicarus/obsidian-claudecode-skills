@@ -113,48 +113,11 @@ async function forward(page) {
 // stay quiet, so a dozen open tabs cannot argue over what the assistant sees.
 if (chrome.runtime?.onMessage) {
   chrome.runtime.onMessage.addListener((message) => {
+    // Kept for a future page-side reporter. Nothing sends this today: the
+    // content-script link was withdrawn after it never once connected.
     if (message?.type === "BW_PAGE_ACTIVE" && message.page) forward(message.page);
     return undefined;
   });
-}
-
-// Show what the page-side link is doing.
-//
-// Web context is sent by each page's own content script, not from here -- this
-// page cannot see the tab the user is reading. So "等待页面…" was misleading: it
-// suggested this page was waiting for something it would never receive.
-//
-// What it can usefully show is whether that other link is failing, which until
-// now was invisible: the snapshot stayed on a book for hours while every web
-// page went unreported and nothing anywhere said why.
-// Read the page-side trail. It is kept in storage precisely because the link it
-// describes may never open, in which case nothing would reach Windows to be
-// logged there.
-async function showPageLog() {
-  try {
-    const bag = await chrome.storage.local.get("bwCtxLog");
-    const list = bag?.bwCtxLog || [];
-    if (!list.length) return;
-    els.detail.style.display = "block";
-    els.detail.textContent = list
-      .slice(-14)
-      .map((e) => `${e.at} ${e.stage}${e.detail ? "  " + e.detail : ""}`)
-      .join("
-");
-  } catch (_) {}
-}
-
-async function showPageLinkState() {
-  try {
-    const bag = await chrome.storage.local.get("bwCtxLastError");
-    const err = bag?.bwCtxLastError;
-    if (!err) return;
-    // Stale errors describe a page the user has long left; only recent ones
-    // say anything about now.
-    els.ctxTitle.textContent = "网页上报失败";
-    els.ctxUrl.textContent = `${err.at}  ${err.url}`;
-    note("网页上报: " + err.message);
-  } catch (_) {}
 }
 
 // The page that was open when this bridge was started, captured by the popup.
@@ -171,9 +134,6 @@ async function showPageLinkState() {
       els.ctxUrl.textContent = "本页只负责通话";
     }
   } catch (_) {}
-  showPageLinkState();
-  showPageLog();
-  setInterval(function () { showPageLinkState(); showPageLog(); }, 5000);
 })();
 
 // --- placing a call from here ------------------------------------------------

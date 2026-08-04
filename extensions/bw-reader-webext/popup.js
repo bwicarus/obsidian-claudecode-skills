@@ -156,22 +156,69 @@ testButton.addEventListener("click", async () => {
 // host without any manifest change. Those two results are what justify running
 // the call in the extension instead of handing it to the App, so the probes are
 // gone and the real entry point takes their place.
+const voiceButton = document.getElementById("voice-open");
 const voiceStatus = document.getElementById("voice-status");
 
-// The page reports itself now, so there is nothing here to start. This only
-// says whether it managed to reach Windows -- a page whose own CSP blocks the
-// connection would otherwise look identical to one that is working.
-if (voiceStatus) {
-  (async () => {
+if (voiceButton && voiceStatus) {
+  voiceButton.addEventListener("click", async () => {
+    voiceButton.disabled = true;
     try {
+      // Captured here rather than in the call page because only the popup can
+      // see which tab is active; once the call page opens, the popup is gone
+      // and the active tab is the call page itself.
       const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-      if (tab?.id == null) { voiceStatus.textContent = "无法读取当前标签"; return; }
-      const reply = await chrome.tabs.sendMessage(tab.id, { type: "BW_CTX_STATUS" });
-      if (reply?.ready) voiceStatus.textContent = "✓ 已连接,本页内容正在同步";
-      else if (reply) voiceStatus.textContent = "○ 本页未连接";
-      else voiceStatus.textContent = "本页未运行扩展内容脚本";
-    } catch {
-      voiceStatus.textContent = "本页未运行扩展内容脚本";
+
+      // The content script has the page body; the tab record only has its title.
+      // A failure here is not fatal -- the call still works, the assistant just
+      // knows which page it is rather than what it says -- so it degrades
+      // instead of blocking the call.
+      // Injected for this one call, into the tab the user just opened the popup
+      // over. Replaces the previous approach of a permanent listener in every
+      // page's content script, which broke the popup on ordinary sites.
+      let page = null;
+      if (tab?.id != null && chrome.scripting?.executeScript) {
+        try {
+          const [result] = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: () => {
+              // innerText, not textContent: it honours display:none and reads in
+              // visual order, keeping nav chrome and inline scripts out.
+              const raw = String(document.body?.innerText || "");
+              const text = raw.replace(/[ \t]+/g, " ").replace(/\n{3,}/g, "\n\n").trim();
+              let selection = "";
+              try {
+                selection = String(window.getSelection() || "").trim();
+              } catch (_) {}
+              return {
+                // Bounded so a long page cannot exceed the bridge's message ceiling.
+                text: text.slice(0, 12000),
+                selection: selection.slice(0, 2000),
+              };
+            },
+          });
+          page = result?.result || null;
+        } catch {
+          page = null;
+        }
+      }
+
+      await chrome.storage.local.set({
+        bwCallContext: {
+          url: page?.url || tab?.url || "",
+          title: page?.title || tab?.title || "",
+          text: page?.text || "",
+          selection: page?.selection || "",
+          // Stamped so the call page can refuse context old enough to be about
+          // some other page entirely.
+          capturedAt: Date.now(),
+        },
+      });
+
+      await chrome.tabs.create({ url: chrome.runtime.getURL("call.html") });
+      window.close();
+    } catch (error) {
+      voiceButton.disabled = false;
+      voiceStatus.textContent = "✗ " + (error?.message || String(error));
     }
-  })();
+  });
 }
