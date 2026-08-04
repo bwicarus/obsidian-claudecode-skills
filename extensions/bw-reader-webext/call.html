@@ -89,15 +89,12 @@
   }
   :root.compact button.stop { background: #1a7f4b; border-color: #1a7f4b; }
   :root.compact button::after { content: "🖥"; font-size: 18px; }
-</style>
-<script>
-  // Applied before first paint so the embedded form never flashes the full
-  // layout inside a 42px frame.
-  if (new URLSearchParams(location.search).get("compact") === "1") {
-    document.documentElement.classList.add("compact");
-  }
-</script>
 
+  /* The compact class is set by call.js. Inline <script> cannot do it here:
+     an extension page's default CSP is script-src 'self', so the tag was
+     dropped without a word -- which is why the frame kept rendering the full
+     layout and never announced itself. */
+</style>
 <h1>电脑语音</h1>
 <div class="sub">直接连接 Windows,并跟随你正在看的页面</div>
 

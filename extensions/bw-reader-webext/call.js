@@ -11,6 +11,12 @@
 
 import { ContextLink } from "./ctxlink.js";
 
+// Marks the embedded form. Done here rather than in an inline <script>, which an
+// extension page's CSP (script-src 'self') silently refuses -- that refusal is
+// why the frame stayed unannounced and every press fell through to a new tab.
+const EMBEDDED = new URLSearchParams(location.search).get("compact") === "1";
+if (EMBEDDED) document.documentElement.classList.add("compact");
+
 // Short-circuit ctxSync's upload instead of letting it be attempted.
 //
 // It is issued as a bare "/pdf/api/context-sync", which in this page resolves
@@ -259,7 +265,7 @@ if (els.btn) {
     // Only when this page was opened for the call. Embedded over the sidebar
     // button it is present from the moment the page loads, and dialling then
     // would place a call nobody asked for.
-    if (new URLSearchParams(location.search).get("compact") === "1") return;
+    if (EMBEDDED) return;
     if (voiceReady()) return;
     els.btn.disabled = true;
     els.btn.textContent = "正在连接…";
@@ -312,7 +318,7 @@ function closeWhenDone(delayMs) {
 // fallback, which is why 1.0.55 always opened a tab: this page never announced
 // itself, having been written before it was ever embedded.
 const FRAME_CONTRACT = "bw-extension-computer-voice-frame/1";
-const embedded = new URLSearchParams(location.search).get("compact") === "1";
+const embedded = EMBEDDED;
 
 if (embedded && window.parent !== window) {
   const tell = (type, value) => {

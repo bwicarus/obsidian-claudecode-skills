@@ -387,7 +387,12 @@
     if (!runtime || typeof runtime.getURL !== 'function') return null;
     let extensionRoot = '';
     try { extensionRoot = String(runtime.getURL('')); } catch (_) {}
-    if (!extensionRoot.startsWith('safari-web-extension://')) return null;
+    // Any extension scheme, not Safari's alone: the check exists to confirm this
+    // is an extension context at all, and hard-coding one browser's prefix also
+    // made the whole surface unreachable in Chrome, where it can be debugged.
+    if (!/^(safari-web-extension|chrome-extension|moz-extension):\/\//.test(extensionRoot)) {
+      return null;
+    }
 
     const CONTRACT = 'bw-extension-computer-voice-frame/1';
     const frame = document.createElement('iframe');
