@@ -5060,8 +5060,54 @@
     });
   }
 
+  // A content script cannot place this call, so it hands it to a page that can.
+  //
+  // Dialling from an ordinary web page reaches Windows only by way of the
+  // background worker, and on iOS that worker is reclaimed -- the connection
+  // then times out with nothing to show for it. An extension page of our own
+  // connects directly and has been observed to work. So the button opens that
+  // page instead of trying here.
+  //
+  // Only in a content script: the condition is "the extension APIs exist, but
+  // this document is not one of ours". The Reader on the Pi has no chrome
+  // runtime and is unaffected; an extension page satisfies isOwnExtensionPage
+  // and dials normally.
+  function delegateToExtensionPage(options) {
+    var runtime = window.chrome && window.chrome.runtime;
+    if (!runtime || typeof runtime.getURL !== "function") return null;
+    if (isOwnExtensionPage(runtime)) return null;
+    var url;
+    try {
+      url = runtime.getURL("call.html");
+    } catch (_) {
+      return null;
+    }
+    if (!url) return null;
+    var appKind = options && options.appKind;
+    if (appKind) url += "?app=" + encodeURIComponent(String(appKind));
+    try {
+      // A fixed name so a second press reuses the same tab rather than stacking
+      // another one on top of a call already in progress.
+      var opened = window.open(url, "bw-computer-voice");
+      if (opened) return Promise.resolve({ ok: true, delegated: true });
+    } catch (_) {}
+    try {
+      // A blocked window would otherwise leave the press with no visible effect
+      // at all, which is indistinguishable from the button being broken.
+      window.location.href = url;
+      return Promise.resolve({ ok: true, delegated: true });
+    } catch (_) {}
+    return Promise.reject(directError(
+      "无法打开扩展通话页",
+      "BW_COMPUTER_VOICE_DELEGATE_FAILED",
+      false
+    ));
+  }
+
   function startFromUserGesture(options) {
     options = options || {};
+    var delegated = delegateToExtensionPage(options);
+    if (delegated) return delegated;
     if (contextModeChanging) {
       return Promise.reject(directError(
         "Reader 正在切换上下文模式，请稍后再拨号",

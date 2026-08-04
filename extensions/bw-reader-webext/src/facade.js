@@ -376,69 +376,12 @@
   // an active call therefore survives that visual change.
 
 
-  // The computer button opens the extension's own page, and the call runs there.
-  //
-  // It ran in an embedded iframe until now. That kept the button in place but
-  // put the call inside a document nested in an ordinary web page, and there the
-  // WebSocket to Windows only ever timed out -- the connection was attempted and
-  // never completed, while a standalone extension page had connected fine all
-  // along. The difference is the nesting, so the nesting goes.
-  //
-  // The page shows the same context it sends, so it doubles as the snapshot view
-  // the user asked for: what the assistant is being told, visible on the device
-  // that is telling it.
-  const inlineComputerVoiceSurface = (() => {
-    const runtime = window.chrome && window.chrome.runtime;
-    if (!runtime || typeof runtime.getURL !== 'function') return null;
-    let callUrl = '';
-    try { callUrl = String(runtime.getURL('call.html')); } catch (_) {}
-    if (!callUrl.startsWith('safari-web-extension://')) return null;
-
-    const buttonIds = ['asst-computer', 'vc-top-computer'];
-
-    function openCallPage(appKind) {
-      const url = callUrl + (appKind ? '?app=' + encodeURIComponent(appKind) : '');
-      try {
-        // A fixed window name, so a second press reuses the same tab instead of
-        // stacking another one -- and the call it already holds survives.
-        // Opened from the click itself, so Safari treats it as user-initiated
-        // and does not suppress it as a popup.
-        const opened = window.open(url, 'bw-computer-voice');
-        if (opened) return true;
-      } catch (_) {}
-      try {
-        // A blocked window leaves the user with nothing and no explanation;
-        // navigating the current tab at least gets them to the call.
-        window.location.href = url;
-        return true;
-      } catch (_) {}
-      return false;
-    }
-
-    // Capture phase, because the Reader's own handler would otherwise try to
-    // dial in this page -- which is exactly the path that cannot reach Windows.
-    document.addEventListener('click', (event) => {
-      let node = event.target;
-      while (node && node !== document) {
-        if (node.id && buttonIds.includes(node.id)) {
-          event.preventDefault();
-          event.stopImmediatePropagation();
-          let appKind = 'codex-desktop';
-          try {
-            const stored = window.RC && RC.computerVoice && RC.computerVoice.getTargetApp
-              ? RC.computerVoice.getTargetApp() : '';
-            if (stored) appKind = stored;
-          } catch (_) {}
-          openCallPage(appKind);
-          return;
-        }
-        node = node.parentNode;
-      }
-    }, true);
-
-    return Object.freeze({ open: openCallPage });
-  })();
-  window.__bwInlineComputerVoiceSurface = inlineComputerVoiceSurface;
+  // The computer button's own handler now opens the extension page (see
+  // delegateToExtensionPage in rc-computer-voice.js). Intercepting the click
+  // here as well would mean two things racing to open it, and the interception
+  // sat downstream of the vendor handler that registers first -- which is why
+  // it never fired.
+  window.__bwInlineComputerVoiceSurface = null;
 
   const nativeAgentVoiceBridge = (() => {
     const CONTRACT = 'bw-reader-native/1';
