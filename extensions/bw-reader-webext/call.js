@@ -91,6 +91,32 @@ function note(line) {
   els.detail.textContent = (els.detail.textContent + "\n" + line).trim().split("\n").slice(-14).join("\n");
 }
 
+// Asks the bridge over plain HTTPS why the socket would not open.
+//
+// A WebSocket that is refused reports nothing useful: the specification denies
+// onerror any detail, deliberately, so a 403 and an unreachable host look
+// identical from script. The same endpoint answers an ordinary request from the
+// same document with the same Origin, and there the status is readable -- 426
+// means the door is open and the refusal lies elsewhere, 403 means this
+// document's Origin is not on the bridge's list.
+//
+// Origin is the live question for the embedded form: the list admits
+// safari-web-extension:// under any UUID and refuses null outright, and which
+// of the two a framed extension document sends is not something reading the
+// specification settles.
+async function probeEndpoint() {
+  // Stated here because rc-computer-voice keeps its endpoints private -- the
+  // frozen surface exports no accessor. Diagnostics only; a drift would cost a
+  // misleading probe, never a misrouted call.
+  const url = "https://bwicarus-2.taile44d0c.ts.net/reader-computer-voice/v1";
+  try {
+    const res = await fetch(url, { method: "GET", cache: "no-store" });
+    note("探测 " + res.status + " @ " + location.origin);
+  } catch (err) {
+    note("探测失败 " + describe(err) + " @ " + location.origin);
+  }
+}
+
 function describe(err) {
   if (!err) return "(no error)";
   if (err.code && err.message) return `${err.code} | ${err.message}`;
@@ -252,6 +278,7 @@ if (els.btn) {
         note("另一端正在通话（App 或阅读器）。在那边挂断后即可在此发起。");
       } else {
         note("通话: " + describe(err));
+        probeEndpoint();
       }
     }
     els.btn.disabled = false;
