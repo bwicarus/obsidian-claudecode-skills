@@ -337,7 +337,13 @@ if (embedded && window.parent !== window) {
   // the click and then be unable to act on it.
   const problem = els.btn ? voiceReady() : "✗ 无按钮";
   tell("ready", { ok: !problem });
-  if (problem) note("内嵌未就绪: " + problem);
+  if (problem) {
+    note("内嵌未就绪: " + problem);
+    // Also as a state message: the host writes those into the button's title,
+    // which is the only place the reason can be seen. Inside a 42px frame that
+    // stays invisible on failure, nothing else is readable.
+    tell("state", { state: "failed", message: "内嵌未就绪: " + problem });
+  }
 
   window.RC?.computerVoice?.onStatus?.((s) => {
     tell("state", { state: s?.state || "", message: s?.message || "" });
