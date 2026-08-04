@@ -7,6 +7,37 @@
   var starting = false;
   var active = false;
 
+  // Diagnostic trail, readable from the popup.
+  //
+  // The failure this exists for is silent from every angle: nothing reaches
+  // Windows, so there is no server-side record; the frame is 42px and cannot
+  // show text; toast needs RC on the host page; and long-press does not reliably
+  // surface a title on iPad. Without a trail, each attempt at a fix is a guess
+  // costing one TestFlight round.
+  //
+  // Remove once the break is located.
+  function trace(stage, detail) {
+    try {
+      chrome.storage.local.get("bwVoiceTrace", function (bag) {
+        var list = (bag && bag.bwVoiceTrace) || [];
+        list.push({
+          at: new Date().toISOString().slice(11, 19),
+          stage: String(stage),
+          detail: detail === undefined ? "" : String(detail).slice(0, 200),
+        });
+        // Keep only the recent tail: one failed attempt is what matters, and an
+        // unbounded list would eventually be the thing that breaks.
+        while (list.length > 24) list.shift();
+        chrome.storage.local.set({ bwVoiceTrace: list });
+      });
+    } catch (_) {}
+  }
+
+  trace("frame-loaded", location.href.slice(0, 60));
+  trace("env", "runtime.id=" + (window.chrome && chrome.runtime && chrome.runtime.id ? "有" : "无")
+    + " origin=" + String(location.origin).slice(0, 40)
+    + " secure=" + (window.isSecureContext ? "是" : "否"));
+
   function send(type, value) {
     try {
       window.parent.postMessage({
@@ -55,6 +86,21 @@
     RC.voicecall.canCaptureComputerVoiceGesture() !== true ||
     RC.computerVoice.registerComputerButton(button) !== true
   ) {
+    // Each condition separately, so the trail names the one that failed rather
+    // than reporting the whole check as "not ready".
+    trace("ready-failed",
+      "button=" + (button ? "有" : "无") +
+      " RC=" + (window.RC ? "有" : "无") +
+      " cv=" + (window.RC && RC.computerVoice ? "有" : "无") +
+      " vc=" + (window.RC && RC.voicecall ? "有" : "无") +
+      " gesture=" + (function () {
+        try { return RC.voicecall.canCaptureComputerVoiceGesture() === true ? "许可" : "拒绝"; }
+        catch (e) { return "抛错"; }
+      })() +
+      " register=" + (function () {
+        try { return RC.computerVoice.registerComputerButton(button) === true ? "成功" : "被拒"; }
+        catch (e) { return "抛错"; }
+      })());
     if (button) render("failed", "扩展电脑语音组件未就绪");
     send("ready", { ok: false });
     return;
@@ -98,18 +144,26 @@
     }
 
     starting = true;
+    trace("click", "开始拨号");
     render("connecting", "正在连接 Windows 电脑客户端…");
     RC.computerVoice.startFromUserGesture({ appKind: appKind }).then(function () {
+      trace("start-ok", "通话已建立");
       starting = false;
       active = true;
       render("active", "电脑客户端通话中，再点停止");
     }).catch(function (error) {
       starting = false;
       active = false;
+      // The code is what distinguishes "refused by the bridge" from "never got
+      // there", and it is exactly what has been invisible until now.
+      trace("start-failed",
+        (error && error.code ? error.code + " | " : "") +
+        (error && error.message ? error.message : String(error)));
       render("failed", error && error.message || "电脑客户端启动失败");
     });
   });
 
+  trace("ready-ok", "组件就绪，等待点击");
   render("idle", "启动电脑客户端语音");
   send("ready", { ok: true });
 })();

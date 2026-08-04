@@ -175,3 +175,37 @@ if (voiceStatus) {
     }
   })();
 }
+
+// Temporary diagnostic readout. The voice failure produces no record on Windows,
+// cannot be shown in a 42px frame, and long-press does not surface titles
+// reliably on iPad -- so the frame writes its progress to storage and it is read
+// back here. Remove together with trace() in inline-computer-voice.js.
+const traceBox = document.getElementById("voice-trace");
+const traceClear = document.getElementById("trace-clear");
+
+async function renderTrace() {
+  if (!traceBox) return;
+  try {
+    const bag = await chrome.storage.local.get("bwVoiceTrace");
+    const list = bag?.bwVoiceTrace || [];
+    if (!list.length) {
+      // An empty trail is itself a finding: the frame never ran.
+      traceBox.textContent =
+        "（无记录）\n按过电脑按钮后仍为空，说明 iframe 从未加载。";
+      return;
+    }
+    traceBox.textContent = list
+      .map((e) => `${e.at}  ${e.stage}` + (e.detail ? "\n      " + e.detail : ""))
+      .join("\n");
+  } catch (error) {
+    traceBox.textContent = "读取失败: " + (error?.message || String(error));
+  }
+}
+
+if (traceClear) {
+  traceClear.addEventListener("click", async () => {
+    try { await chrome.storage.local.remove("bwVoiceTrace"); } catch (_) {}
+    renderTrace();
+  });
+}
+renderTrace();
