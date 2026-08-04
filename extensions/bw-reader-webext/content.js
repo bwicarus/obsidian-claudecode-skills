@@ -379,6 +379,49 @@
   var retryMs = 2000;
   var retryTimer = null;
 
+  // Stage log, carried over the link that is already open.
+  //
+  // This link failing has been invisible from every angle: Windows keeps no
+  // record of what never arrived, the iPad has no console to open, and a catch
+  // that only reset a variable said nothing at all. Every blind fix has cost a
+  // TestFlight round.
+  //
+  // Failures are swallowed deliberately -- diagnostics must not become the
+  // fault. Sent one entry at a time rather than batched, because a batch lost on
+  // disconnect loses precisely the entries that would explain the disconnect.
+  var logSeq = 0;
+
+  function clean(value) {
+    var text = String(value === undefined || value === null ? "" : value);
+    var out = "";
+    for (var i = 0; i < text.length && out.length < 500; i += 1) {
+      var code = text.charCodeAt(i);
+      // Control characters would corrupt the JSONL the bridge appends to.
+      out += (code < 32 || code === 127) ? " " : text.charAt(i);
+    }
+    // Anything credential-shaped is removed before it reaches a file that
+    // outlives this session.
+    return out
+      .replace(/(bearer|token|authorization)([\s:=]+)\S+/gi, "$1$2<redacted>")
+      .replace(/\bey[A-Za-z0-9_-]{20,}/g, "<jwt>");
+  }
+
+  function logStage(stage, detail) {
+    if (!ready || !socket || socket.readyState !== 1) return;
+    logSeq += 1;
+    try {
+      request("log", {
+        sessionId: sessionId,
+        entries: [{
+          at: new Date().toISOString(),
+          source: "content-script",
+          stage: String(stage).slice(0, 64),
+          detail: clean(detail),
+        }],
+      }).catch(function () {});
+    } catch (_) {}
+  }
+
   function hex(n) {
     var s = "", d = "0123456789abcdef";
     for (var i = 0; i < n; i += 1) s += d[Math.floor(Math.random() * 16)];
@@ -566,27 +609,6 @@
   // produce a button that flickers between two owners.
   var lastVoiceState = "";
 
-  // The marker class needs a rule of its own, and one strong enough to win:
-  // the button already carries the module's own state classes, and without
-  // !important its idle colour would keep painting over this.
-  //
-  // The vendor's own classes are left alone. Two owners writing the same
-  // classes produce a button that flickers between them.
-  function ensureVoiceStyle() {
-    try {
-      if (document.getElementById("bw-voice-live-style")) return;
-      var css = document.createElement("style");
-      css.id = "bw-voice-live-style";
-      css.textContent =
-        "#asst-computer.bw-voice-live,#vc-top-computer.bw-voice-live{" +
-        "background:#1f8f4e!important;color:#fff!important;" +
-        "box-shadow:0 0 0 2px rgba(48,209,88,.45)!important}" +
-        "#asst-computer.bw-voice-stopping,#vc-top-computer.bw-voice-stopping{" +
-        "background:#8a6d1f!important;color:#fff!important}";
-      (document.head || document.documentElement).appendChild(css);
-    } catch (_) {}
-  }
-
   function reflectVoiceState() {
     try {
       chrome.storage.local.get("bwVoiceState", function (bag) {
@@ -604,9 +626,11 @@
             : "启动电脑客户端语音";
           b.title = label;
           b.setAttribute("aria-label", label);
-          ensureVoiceStyle();
-          b.classList.toggle("bw-voice-live", state === "active");
-          b.classList.toggle("bw-voice-stopping", state === "stopping");
+          // Text only. Two earlier attempts at colouring this button ended with
+          // the whole set losing its styling -- the button's appearance belongs
+          // to the module that built it, and a second writer only breaks it.
+          if (b.classList.contains("bw-voice-live")) b.classList.remove("bw-voice-live");
+          if (b.classList.contains("bw-voice-stopping")) b.classList.remove("bw-voice-stopping");
         });
       });
     } catch (_) {}
