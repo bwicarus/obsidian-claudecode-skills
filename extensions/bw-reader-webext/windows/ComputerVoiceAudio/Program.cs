@@ -90,6 +90,15 @@ internal static class Program
             }
             if (
                 args.Length == 3
+                && args[0]
+                    == "--reset-app-audio-routes-to-default"
+                && args[1] == "--app-kind"
+            )
+            {
+                return ResetAppAudioRoutesToDefault(args[2]);
+            }
+            if (
+                args.Length == 3
                 && args[0] == "--probe-direct-output-route"
                 && args[1] == "--config"
             )
@@ -262,6 +271,8 @@ internal static class Program
                 "--list-direct-render-endpoints",
                 "--probe-codex-voice-state",
                 "--probe-codex-app-audio-route --config <absolute-path>",
+                "--reset-app-audio-routes-to-default --app-kind "
+                    + "<codex-desktop|chatgpt-classic>",
                 "--probe-direct-output-route --config <absolute-path>",
                 "--diagnose-direct-audio-no-start --config <absolute-path>",
                 "--direct-serve --config <absolute-path>",
@@ -271,5 +282,54 @@ internal static class Program
             },
         }, JsonOptions));
         return 64;
+    }
+
+    private static int ResetAppAudioRoutesToDefault(string appKind)
+    {
+        DirectAppTargetProfile profile = DirectAppTargets.Require(appKind);
+        CodexAppTarget target = WindowsCodexAppProbe.RequireReady(
+            profile.AppKind);
+        uint processId = WindowsCodexAppProbe.RequireAudioPolicyProcess(
+            target);
+        using NativePerAppAudioPolicyBackend backend = new();
+        List<object> routes = [];
+        bool ok = true;
+        foreach (PerAppAudioRouteKey key in PerAppAudioRouteKey.All)
+        {
+            PersistedAudioEndpoint before = backend.Read(processId, key);
+            PerAppAudioPolicyWriteResult write = backend.Write(
+                processId,
+                key,
+                endpointId: null);
+            PersistedAudioEndpoint after = backend.Read(processId, key);
+            bool cleared = write.Succeeded
+                && after.Kind == PersistedAudioEndpointKind.Unset;
+            ok &= cleared;
+            routes.Add(new
+            {
+                flow = key.FlowName,
+                role = key.RoleName,
+                before = before.Kind.ToString().ToLowerInvariant(),
+                beforeEndpointId = before.EndpointId,
+                cleared,
+                writeHResult = write.Succeeded
+                    ? null
+                    : $"0x{unchecked((uint)write.HResult):X8}",
+                after = after.Kind.ToString().ToLowerInvariant(),
+                afterEndpointId = after.EndpointId,
+            });
+        }
+        Console.WriteLine(JsonSerializer.Serialize(new
+        {
+            contract = "reader-computer-voice-audio-route-reset/1",
+            ok,
+            appKind = profile.AppKind,
+            processId,
+            routes,
+            captureStarted = false,
+            shortcutSent = false,
+            appLaunched = false,
+        }, JsonOptions));
+        return ok ? 0 : 1;
     }
 }

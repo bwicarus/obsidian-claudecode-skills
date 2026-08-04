@@ -21,6 +21,8 @@ internal sealed class DirectBridgeProtocolSession
     private bool _authenticated;
     private string? _contextDeliveryMode;
     private string? _contextOnlySessionId;
+    private string? _activeVoiceSessionId;
+    private string? _activeVoiceAppKind;
     private DirectProtocolPhase _phase =
         DirectProtocolPhase.AwaitingAuthentication;
 
@@ -430,32 +432,64 @@ internal sealed class DirectBridgeProtocolSession
         bool hasAppKind = message.TryGetProperty(
             "appKind",
             out _);
+        bool hasTakeover = message.TryGetProperty(
+            "takeover",
+            out _);
+        List<string> expectedKeys =
+        [
+            "contract",
+            "type",
+            "requestId",
+            "sessionId",
+        ];
         if (hasAppKind)
         {
-            RequireExactKeys(
-                message,
-                "contract",
-                "type",
-                "requestId",
-                "sessionId",
-                "appKind");
+            expectedKeys.Add("appKind");
         }
-        else
+        if (hasTakeover)
         {
-            RequireExactKeys(
-                message,
-                "contract",
-                "type",
-                "requestId",
-                "sessionId");
+            expectedKeys.Add("takeover");
         }
+        RequireExactKeys(message, [.. expectedKeys]);
         RequireAuthenticated();
         string sessionId = RequireSafeId(message, "sessionId");
         _ = DirectPcmFrameCodec.ParseSessionId(sessionId);
         string appKind = hasAppKind
             ? RequireString(message, "appKind", 32)
             : DirectAppTargets.CodexDesktop;
+        bool takeover = hasTakeover
+            && RequireBoolean(message, "takeover");
         _ = DirectAppTargets.Require(appKind);
+        if (_phase is not (
+            DirectProtocolPhase.AwaitingStart
+            or DirectProtocolPhase.Active))
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_PHASE_INVALID",
+                "当前连接阶段不接受 START");
+        }
+        if (
+            _phase == DirectProtocolPhase.Active
+            && (
+                !string.Equals(
+                    _activeVoiceSessionId,
+                    sessionId,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    _activeVoiceAppKind,
+                    appKind,
+                    StringComparison.Ordinal)
+            )
+        )
+        {
+            // Replacing a session on the same transport would also require
+            // resetting both PCM sequence guards.  Keep takeover scoped to a
+            // second AwaitingStart connection; an active transport may only
+            // repeat its exact START idempotently.
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_SESSION_MISMATCH",
+                "活动连接上的 START 与当前会话不匹配");
+        }
         DirectPcmStartGate pcmGate = new(
             (frame, token) => sendPcmFrameAsync(
                 sessionId,
@@ -471,6 +505,7 @@ internal sealed class DirectBridgeProtocolSession
                     sessionId,
                     appKind,
                     RequireContextDeliveryMode(),
+                    takeover,
                     reportStatusAsync,
                     pcmGate.SendAsync,
                     cancellationToken).ConfigureAwait(false);
@@ -485,6 +520,8 @@ internal sealed class DirectBridgeProtocolSession
                 },
             };
             _phase = DirectProtocolPhase.Active;
+            _activeVoiceSessionId = sessionId;
+            _activeVoiceAppKind = appKind;
             return new DirectStartActionResult(
                 payload,
                 pcmGate.ReleaseAsync);
@@ -514,6 +551,8 @@ internal sealed class DirectBridgeProtocolSession
             sessionId,
             cancellationToken).ConfigureAwait(false);
         _phase = DirectProtocolPhase.AwaitingStart;
+        _activeVoiceSessionId = null;
+        _activeVoiceAppKind = null;
         return new
         {
             sessionId,
@@ -891,6 +930,23 @@ internal sealed class DirectBridgeProtocolSession
                 $"{name} 字段无效");
         }
         return result;
+    }
+
+    private static bool RequireBoolean(
+        JsonElement message,
+        string name)
+    {
+        if (
+            !message.TryGetProperty(name, out JsonElement value)
+            || value.ValueKind is not (
+                JsonValueKind.True or JsonValueKind.False)
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_MESSAGE_INVALID",
+                $"{name} 字段无效");
+        }
+        return value.GetBoolean();
     }
 
     private static void RequireObject(JsonElement value)

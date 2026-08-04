@@ -639,6 +639,9 @@ internal static class DirectBridgeSelfTest
             checks).ConfigureAwait(false);
         await CheckConnectionTakeoverOwnershipAsync(checks)
             .ConfigureAwait(false);
+        await CheckOwnerPreservingStartSemanticsAsync(
+            configPath,
+            checks).ConfigureAwait(false);
         await CheckServerCloseCancelsBlockedStartAsync(
             configPath,
             checks).ConfigureAwait(false);
@@ -2207,101 +2210,494 @@ internal static class DirectBridgeSelfTest
         ICollection<string> checks)
     {
         await using DirectConnectionOwnership ownership = new();
-        DirectConnectionClaim first = await ownership.ClaimAsync(
+        DirectConnectionLease first = await ownership.CreateAsync(
             "connection-takeover-first",
             CancellationToken.None,
             CancellationToken.None).ConfigureAwait(false);
         using FakeDirectWebSocket firstSocket = new();
         bool firstAttached = await ownership.TryAttachAsync(
-            first.Current,
+            first,
             firstSocket,
             CancellationToken.None).ConfigureAwait(false);
 
-        DirectConnectionClaim second = await ownership.ClaimAsync(
+        DirectConnectionLease second = await ownership.CreateAsync(
             "connection-takeover-second",
             CancellationToken.None,
             CancellationToken.None).ConfigureAwait(false);
         using FakeDirectWebSocket secondSocket = new();
         bool secondAttached = await ownership.TryAttachAsync(
-            second.Current,
+            second,
             secondSocket,
             CancellationToken.None).ConfigureAwait(false);
+        bool firstUnowned = !await ownership.IsCurrentAsync(
+            first,
+            CancellationToken.None).ConfigureAwait(false);
+        bool secondUnowned = !await ownership.IsCurrentAsync(
+            second,
+            CancellationToken.None).ConfigureAwait(false);
+        DirectConnectionLease? noPrevious =
+            await ownership.PromoteAsync(
+                first,
+                CancellationToken.None).ConfigureAwait(false);
+        bool firstCurrent = await ownership.IsCurrentAsync(
+            first,
+            CancellationToken.None).ConfigureAwait(false);
+        bool secondStillUnowned = !await ownership.IsCurrentAsync(
+            second,
+            CancellationToken.None).ConfigureAwait(false);
+        int releaseWrites = 0;
+        bool released = await ownership.ReleaseAsync(
+            first,
+            () =>
+            {
+                releaseWrites++;
+                return Task.CompletedTask;
+            }).ConfigureAwait(false);
+        bool firstStillOpen =
+            !first.Token.IsCancellationRequested
+            && firstSocket.State == WebSocketState.Open;
+        bool noOwnerAfterStop = !await ownership.IsCurrentAsync(
+            first,
+            CancellationToken.None).ConfigureAwait(false);
+
+        _ = await ownership.PromoteAsync(
+            second,
+            CancellationToken.None).ConfigureAwait(false);
+        DirectConnectionLease third = await ownership.CreateAsync(
+            "connection-takeover-third",
+            CancellationToken.None,
+            CancellationToken.None).ConfigureAwait(false);
+        using FakeDirectWebSocket thirdSocket = new();
+        bool thirdAttached = await ownership.TryAttachAsync(
+            third,
+            thirdSocket,
+            CancellationToken.None).ConfigureAwait(false);
+        DirectConnectionLease? replaced =
+            await ownership.PromoteAsync(
+                third,
+                CancellationToken.None).ConfigureAwait(false);
         int staleCompletionWrites = 0;
         await ownership.CompleteAsync(
-            first.Current,
+            second,
             () =>
             {
                 staleCompletionWrites++;
                 return Task.CompletedTask;
             }).ConfigureAwait(false);
-        bool secondRemainsCurrent = await ownership.IsCurrentAsync(
-            second.Current,
-            CancellationToken.None).ConfigureAwait(false);
-
-        Task<DirectConnectionClaim> thirdTask = ownership.ClaimAsync(
-            "connection-takeover-third",
-            CancellationToken.None,
-            CancellationToken.None);
-        Task<DirectConnectionClaim> fourthTask = ownership.ClaimAsync(
-            "connection-takeover-fourth",
-            CancellationToken.None,
-            CancellationToken.None);
-        DirectConnectionClaim[] concurrent =
-            await Task.WhenAll(thirdTask, fourthTask).ConfigureAwait(false);
-        DirectConnectionClaim winner = concurrent.MaxBy(
-            claim => claim.Current.Generation)!;
-        DirectConnectionClaim loser = concurrent.MinBy(
-            claim => claim.Current.Generation)!;
-        using FakeDirectWebSocket loserSocket = new();
-        using FakeDirectWebSocket winnerSocket = new();
-        bool loserAttached = await ownership.TryAttachAsync(
-            loser.Current,
-            loserSocket,
-            CancellationToken.None).ConfigureAwait(false);
-        bool winnerAttached = await ownership.TryAttachAsync(
-            winner.Current,
-            winnerSocket,
-            CancellationToken.None).ConfigureAwait(false);
-        int loserCompletionWrites = 0;
-        int winnerCompletionWrites = 0;
+        int currentCompletionWrites = 0;
         await ownership.CompleteAsync(
-            loser.Current,
+            third,
             () =>
             {
-                loserCompletionWrites++;
+                currentCompletionWrites++;
                 return Task.CompletedTask;
             }).ConfigureAwait(false);
         await ownership.CompleteAsync(
-            winner.Current,
-            () =>
-            {
-                winnerCompletionWrites++;
-                return Task.CompletedTask;
-            }).ConfigureAwait(false);
+            first,
+            () => Task.CompletedTask).ConfigureAwait(false);
 
         Require(
             firstAttached
             && secondAttached
-            && ReferenceEquals(second.Previous, first.Current)
-            && first.Current.Token.IsCancellationRequested
-            && firstSocket.State == WebSocketState.Aborted
-            && first.Current.Released.IsCompleted
-            && staleCompletionWrites == 0
-            && secondRemainsCurrent
-            && second.Current.Token.IsCancellationRequested
+            && firstUnowned
+            && secondUnowned
+            && noPrevious is null
+            && firstCurrent
+            && secondStillUnowned
+            && released
+            && releaseWrites == 1
+            && firstStillOpen
+            && noOwnerAfterStop
+            && thirdAttached
+            && ReferenceEquals(replaced, second)
+            && second.Token.IsCancellationRequested
             && secondSocket.State == WebSocketState.Aborted
-            && winner.Current.Generation
-                > loser.Current.Generation
-            && loser.Current.Token.IsCancellationRequested
-            && !loserAttached
-            && winnerAttached
-            && loserCompletionWrites == 0
-            && winnerCompletionWrites == 1
-            && loser.Current.Released.IsCompleted
-            && winner.Current.Released.IsCompleted
-            && winnerSocket.State == WebSocketState.Aborted,
-            "direct-authenticated-connection-takeover-is-newest-wins",
+            && staleCompletionWrites == 0
+            && currentCompletionWrites == 1
+            && second.Released.IsCompleted
+            && third.Released.IsCompleted
+            && thirdSocket.State == WebSocketState.Aborted,
+            "direct-transport-connects-unowned-and-promotes-only-after-start",
             checks);
+    }
+
+    private static async Task CheckOwnerPreservingStartSemanticsAsync(
+        string configPath,
+        ICollection<string> checks)
+    {
+        static string Session(byte value) =>
+            "session-" + DirectBase64Url.Encode(
+                Enumerable.Repeat(value, 16).ToArray());
+
+        long monotonicMilliseconds = 1_000;
+        FakeDirectAppLauncher launcher = new();
+        FakeDirectMediaAdapter media = new()
+        {
+            // Production media owns cleanup resources during a healthy call.
+            // This catches the regression where CleanupPending was mistaken
+            // for a stale-owner signal and a contender stopped the call.
+            CleanupPendingDuringCapture = true,
+        };
+        DirectBridgeConfigStore store = new(configPath);
+        await using DirectBridgeCoordinator coordinator = new(
+            store,
+            launcher,
+            media,
+            () => monotonicMilliseconds,
+            renderEndpointProbe: _ => null);
+        const string firstConnection = "connection-owner-first";
+        string firstSession = Session(31);
+        _ = await coordinator.StartAsync(
+            firstConnection,
+            firstSession,
+            DirectAppTargets.CodexDesktop,
+            DirectContextDeliveryMode.LegacyInject,
+            takeover: false,
+            (_, _) => Task.CompletedTask,
+            (_, _) => Task.CompletedTask,
+            CancellationToken.None).ConfigureAwait(false);
+
+        List<object> events = [];
+        List<byte[]> pcmFrames = [];
+        DirectBridgeProtocolSession unauthenticated = new(
+            "connection-owner-unauthenticated",
+            "https://extension-page.example",
+            store,
+            coordinator);
+        JsonElement unauthenticatedTakeover = await SendAsync(
+            unauthenticated,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "start",
+                requestId = "request-owner-unauthenticated",
+                sessionId = Session(32),
+                takeover = true,
+            },
+            events,
+            pcmFrames).ConfigureAwait(false);
+        Require(
+            !unauthenticatedTakeover.GetProperty("ok").GetBoolean()
+            && unauthenticatedTakeover.GetProperty("error")
+                .GetProperty("code").GetString()
+                == "BW_COMPUTER_VOICE_DIRECT_AUTH_REQUIRED"
+            && coordinator.ActiveSessionId == firstSession
+            && media.StopCount == 0,
+            "direct-unauthenticated-start-never-displaces-owner",
+            checks);
+
+        DirectBridgeProtocolSession contender = new(
+            "connection-owner-contender",
+            "https://extension-page.example",
+            store,
+            coordinator);
+        _ = RequireSuccess(
+            await SendAsync(
+                contender,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "hello",
+                    requestId = "request-owner-hello",
+                    protocolVersion = 3,
+                },
+                events,
+                pcmFrames).ConfigureAwait(false),
+            "hello");
+        JsonElement invalidTakeoverString = await SendAsync(
+            contender,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "start",
+                requestId = "request-owner-takeover-string",
+                sessionId = Session(38),
+                takeover = "true",
+            },
+            events,
+            pcmFrames).ConfigureAwait(false);
+        JsonElement invalidTakeoverNumber = await SendAsync(
+            contender,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "start",
+                requestId = "request-owner-takeover-number",
+                sessionId = Session(39),
+                takeover = 1,
+            },
+            events,
+            pcmFrames).ConfigureAwait(false);
+        JsonElement invalidTakeoverNull = await SendAsync(
+            contender,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "start",
+                requestId = "request-owner-takeover-null",
+                sessionId = Session(40),
+                takeover = (bool?)null,
+            },
+            events,
+            pcmFrames).ConfigureAwait(false);
+        JsonElement invalidTakeoverExtra = await SendAsync(
+            contender,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "start",
+                requestId = "request-owner-takeover-extra",
+                sessionId = Session(41),
+                takeover = true,
+                unexpected = true,
+            },
+            events,
+            pcmFrames).ConfigureAwait(false);
+        bool InvalidMessage(JsonElement reply) =>
+            !reply.GetProperty("ok").GetBoolean()
+            && reply.GetProperty("error").GetProperty("code")
+                .GetString()
+                == "BW_COMPUTER_VOICE_DIRECT_MESSAGE_INVALID";
+        Require(
+            InvalidMessage(invalidTakeoverString)
+            && InvalidMessage(invalidTakeoverNumber)
+            && InvalidMessage(invalidTakeoverNull)
+            && InvalidMessage(invalidTakeoverExtra)
+            && coordinator.ActiveSessionId == firstSession
+            && media.StopCount == 0
+            && media.StartCount == 1,
+            "direct-takeover-is-strict-boolean-with-exact-keys",
+            checks);
+        _ = RequireSuccess(
+            await SendAsync(
+                contender,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "status",
+                    requestId = "request-owner-status",
+                },
+                events,
+                pcmFrames).ConfigureAwait(false),
+            "status");
+        Require(
+            coordinator.ActiveSessionId == firstSession
+            && media.StopCount == 0
+            && launcher.EnsureRunningCount == 1,
+            "direct-status-does-not-claim-or-displace-owner",
+            checks);
+
+        string secondSession = Session(33);
+        JsonElement busy = await SendAsync(
+            contender,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "start",
+                requestId = "request-owner-busy",
+                sessionId = secondSession,
+            },
+            events,
+            pcmFrames).ConfigureAwait(false);
+        Require(
+            !busy.GetProperty("ok").GetBoolean()
+            && busy.GetProperty("error").GetProperty("code")
+                .GetString() == "BW_COMPUTER_VOICE_DIRECT_BUSY"
+            && busy.GetProperty("error").GetProperty("retryable")
+                .GetBoolean()
+            && coordinator.ActiveSessionId == firstSession
+            && coordinator.LastError is null
+            && media.CaptureActive
+            && media.StopCount == 0
+            && media.StartCount == 1,
+            "direct-healthy-owner-rejects-ordinary-start-without-global-error",
+            checks);
+
+        _ = RequireSuccess(
+            await SendAsync(
+                contender,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "start",
+                    requestId = "request-owner-takeover",
+                    sessionId = secondSession,
+                    takeover = true,
+                },
+                events,
+                pcmFrames).ConfigureAwait(false),
+            "start");
+        Require(
+            coordinator.ActiveSessionId == secondSession
+            && coordinator.LastError is null
+            && media.CaptureActive
+            && media.StopCount == 1
+            && media.StartCount == 2,
+            "direct-authenticated-explicit-takeover-replaces-owner-once",
+            checks);
+
+        JsonElement sameTransportReplacement = await SendAsync(
+            contender,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "start",
+                requestId = "request-owner-same-transport-replace",
+                sessionId = Session(34),
+                takeover = true,
+            },
+            events,
+            pcmFrames).ConfigureAwait(false);
+        Require(
+            !sameTransportReplacement.GetProperty("ok").GetBoolean()
+            && sameTransportReplacement.GetProperty("error")
+                .GetProperty("code").GetString()
+                == "BW_COMPUTER_VOICE_DIRECT_SESSION_MISMATCH"
+            && coordinator.ActiveSessionId == secondSession
+            && media.StopCount == 1
+            && media.StartCount == 2,
+            "direct-active-transport-cannot-replace-its-pcm-session",
+            checks);
+
+        monotonicMilliseconds = checked(
+            1_000
+            + DirectBridgeContract.ClientHeartbeatTimeoutMilliseconds);
+        DirectBridgeProtocolSession recovery = new(
+            "connection-owner-recovery",
+            "https://extension-page.example",
+            store,
+            coordinator);
+        _ = RequireSuccess(
+            await SendAsync(
+                recovery,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "hello",
+                    requestId = "request-owner-recovery-hello",
+                    protocolVersion = 3,
+                },
+                events,
+                pcmFrames).ConfigureAwait(false),
+            "hello");
+        string recoveredSession = Session(35);
+        _ = RequireSuccess(
+            await SendAsync(
+                recovery,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "start",
+                    requestId = "request-owner-recovery-start",
+                    sessionId = recoveredSession,
+                },
+                events,
+                pcmFrames).ConfigureAwait(false),
+            "start");
+        Require(
+            coordinator.ActiveSessionId == recoveredSession
+            && media.StopCount == 2
+            && media.StartCount == 3
+            && media.CaptureActive,
+            "direct-heartbeat-expired-owner-allows-ordinary-recovery",
+            checks);
+
+        FakeDirectAppLauncher concurrentLauncher = new();
+        FakeDirectMediaAdapter concurrentMedia = new()
+        {
+            CleanupPendingDuringCapture = true,
+        };
+        await using DirectBridgeCoordinator concurrentCoordinator = new(
+            store,
+            concurrentLauncher,
+            concurrentMedia,
+            renderEndpointProbe: _ => null);
+        async Task<string> AttemptAsync(
+            string connectionId,
+            string sessionId)
+        {
+            try
+            {
+                _ = await concurrentCoordinator.StartAsync(
+                    connectionId,
+                    sessionId,
+                    DirectAppTargets.CodexDesktop,
+                    DirectContextDeliveryMode.LegacyInject,
+                    takeover: false,
+                    (_, _) => Task.CompletedTask,
+                    (_, _) => Task.CompletedTask,
+                    CancellationToken.None).ConfigureAwait(false);
+                return "started";
+            }
+            catch (DirectProtocolException exception)
+            {
+                return exception.Code;
+            }
+        }
+        string[] concurrentOutcomes = await Task.WhenAll(
+            AttemptAsync("connection-race-a", Session(36)),
+            AttemptAsync("connection-race-b", Session(37)))
+            .ConfigureAwait(false);
+        Require(
+            concurrentOutcomes.Count(value => value == "started") == 1
+            && concurrentOutcomes.Count(
+                value => value == "BW_COMPUTER_VOICE_DIRECT_BUSY") == 1
+            && concurrentMedia.StartCount == 1
+            && concurrentMedia.StopCount == 0
+            && concurrentCoordinator.LastError is null,
+            "direct-concurrent-ordinary-starts-have-one-owner",
+            checks);
+
+        FakeDirectAppLauncher cleanupLauncher = new();
+        FakeDirectMediaAdapter cleanupMedia = new()
+        {
+            CleanupPendingDuringCapture = true,
+            RetainCleanupOnStop = true,
+        };
+        await using DirectBridgeCoordinator cleanupCoordinator = new(
+            store,
+            cleanupLauncher,
+            cleanupMedia,
+            renderEndpointProbe: _ => null);
+        string cleanupOwnerSession = Session(42);
+        _ = await cleanupCoordinator.StartAsync(
+            "connection-cleanup-owner",
+            cleanupOwnerSession,
+            DirectAppTargets.CodexDesktop,
+            DirectContextDeliveryMode.LegacyInject,
+            takeover: false,
+            (_, _) => Task.CompletedTask,
+            (_, _) => Task.CompletedTask,
+            CancellationToken.None).ConfigureAwait(false);
+        bool cleanupBlockedPromotion = false;
+        try
+        {
+            _ = await cleanupCoordinator.StartAsync(
+                "connection-cleanup-contender",
+                Session(43),
+                DirectAppTargets.CodexDesktop,
+                DirectContextDeliveryMode.LegacyInject,
+                takeover: true,
+                (_, _) => Task.CompletedTask,
+                (_, _) => Task.CompletedTask,
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (DirectProtocolException exception)
+        {
+            cleanupBlockedPromotion = exception.Code
+                == "BW_COMPUTER_VOICE_DIRECT_MEDIA_CLEANUP_PENDING";
+        }
+        Require(
+            cleanupBlockedPromotion
+            && cleanupCoordinator.ActiveSessionId == cleanupOwnerSession
+            && cleanupMedia.CleanupPending
+            && cleanupMedia.StartCount == 1
+            && cleanupMedia.StopCount == 1,
+            "direct-takeover-cleanup-failure-retains-old-owner",
+            checks);
+        cleanupMedia.RetainCleanupOnStop = false;
+        _ = await cleanupCoordinator.StopForConnectionAsync(
+            "connection-cleanup-owner").ConfigureAwait(false);
     }
 
     private static async Task CheckServerCloseCancelsBlockedStartAsync(
@@ -6366,6 +6762,8 @@ internal static class DirectBridgeSelfTest
 
         internal bool RetainCleanupOnStop { get; set; }
 
+        internal bool CleanupPendingDuringCapture { get; init; }
+
         internal bool OutputRouteVerified { get; set; } = true;
 
         public bool IsOutputRouteVerified(
@@ -6405,7 +6803,7 @@ internal static class DirectBridgeSelfTest
                 TaskCreationOptions.RunContinuationsAsynchronously);
             _completion = _completionSource.Task;
             CaptureActive = true;
-            CleanupPending = false;
+            CleanupPending = CleanupPendingDuringCapture;
             CleanupOwnership = true;
             if (EmitDuringStart)
             {

@@ -299,6 +299,7 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
             sessionId,
             DirectAppTargets.CodexDesktop,
             DirectContextDeliveryMode.LegacyInject,
+            takeover: false,
             reportStatusAsync,
             sendFrameAsync,
             cancellationToken);
@@ -315,6 +316,7 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
             sessionId,
             DirectAppTargets.CodexDesktop,
             contextDeliveryMode,
+            takeover: false,
             reportStatusAsync,
             sendFrameAsync,
             cancellationToken).ConfigureAwait(false);
@@ -324,6 +326,25 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
         string sessionId,
         string appKind,
         string contextDeliveryMode,
+        Func<string, string, Task> reportStatusAsync,
+        Func<DirectPcmFrame, CancellationToken, Task> sendFrameAsync,
+        CancellationToken cancellationToken)
+        => await StartAsync(
+            connectionId,
+            sessionId,
+            appKind,
+            contextDeliveryMode,
+            takeover: false,
+            reportStatusAsync,
+            sendFrameAsync,
+            cancellationToken).ConfigureAwait(false);
+
+    internal async Task<DirectMediaStartResult> StartAsync(
+        string connectionId,
+        string sessionId,
+        string appKind,
+        string contextDeliveryMode,
+        bool takeover,
         Func<string, string, Task> reportStatusAsync,
         Func<DirectPcmFrame, CancellationToken, Task> sendFrameAsync,
         CancellationToken cancellationToken)
@@ -346,25 +367,50 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
                         HostReady: true,
                         CaptureActive: true);
                 }
-                if (_mediaAdapter.CleanupPending)
-                {
-                    await _mediaAdapter.StopAsync(CancellationToken.None)
-                        .ConfigureAwait(false);
-                    if (_mediaAdapter.CleanupPending)
-                    {
-                        throw new DirectProtocolException(
-                            "BW_COMPUTER_VOICE_DIRECT_MEDIA_CLEANUP_PENDING",
-                            "上一次 Windows 音频清理尚未完成",
-                            retryable: true);
-                    }
-                    ClearActiveSession();
-                }
-                else
+                bool healthyOwner =
+                    _mediaAdapter.CaptureActive
+                    && !ActiveHeartbeatExpired();
+                if (healthyOwner && !takeover)
                 {
                     throw new DirectProtocolException(
                         "BW_COMPUTER_VOICE_DIRECT_BUSY",
                         "另一个电脑语音会话正在使用桥接器",
                         retryable: true);
+                }
+                else
+                {
+                    // A healthy owner is preserved unless the authenticated
+                    // START explicitly asks to take over.  A heartbeat-expired
+                    // or capture-inactive owner is already stale, so a normal
+                    // START may recover it without inventing a second
+                    // liveness clock. CleanupPending is intentionally not a
+                    // health signal: live media owns cleanup resources too.
+                    await _mediaAdapter.StopAsync(CancellationToken.None)
+                        .ConfigureAwait(false);
+                    Task<DirectProtocolException?> completion =
+                        _mediaAdapter.Completion;
+                    if (!completion.IsCompleted)
+                    {
+                        throw new DirectProtocolException(
+                            "BW_COMPUTER_VOICE_DIRECT_MEDIA_STOP_UNCONFIRMED",
+                            "旧电脑语音会话没有确认停止完成",
+                            retryable: true);
+                    }
+                    DirectProtocolException? stopFailure =
+                        await completion.ConfigureAwait(false);
+                    if (_mediaAdapter.CleanupPending)
+                    {
+                        throw stopFailure
+                            ?? new DirectProtocolException(
+                                "BW_COMPUTER_VOICE_DIRECT_MEDIA_CLEANUP_PENDING",
+                                "旧 Windows 音频清理仍持有未释放资源",
+                                retryable: true);
+                    }
+                    ClearActiveSession();
+                    if (stopFailure is not null)
+                    {
+                        throw stopFailure;
+                    }
                 }
             }
 
@@ -525,7 +571,18 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
         }
         catch (Exception exception)
         {
-            _ = RecordFailure(exception, "start");
+            // BUSY belongs to the competing connection, not the healthy
+            // owner. Do not let an unowned STATUS/START attempt poison the
+            // global runtime error surfaced to the active call.
+            if (
+                exception is not DirectProtocolException
+                {
+                    Code: "BW_COMPUTER_VOICE_DIRECT_BUSY"
+                }
+            )
+            {
+                _ = RecordFailure(exception, "start");
+            }
             if (
                 _activeSessionId is null
                 && (
@@ -745,13 +802,9 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
                 }
                 return _activeAppKind;
             }
-            else if (_activeSessionId is not null)
-            {
-                throw new DirectProtocolException(
-                    "BW_COMPUTER_VOICE_DIRECT_BUSY",
-                    "活动通话已占用 Windows 桥接器",
-                    retryable: true);
-            }
+            // Context-only writers are independent from the single audio
+            // owner.  Their writes are serialized by the snapshot adapter;
+            // the last completed write becomes the current snapshot.
             return null;
         }
         finally
@@ -760,7 +813,7 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
         }
     }
 
-    internal async Task StopForConnectionAsync(string connectionId)
+    internal async Task<bool> StopForConnectionAsync(string connectionId)
     {
         await _stateGate.WaitAsync().ConfigureAwait(false);
         try
@@ -770,7 +823,7 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
                 || _activeSessionId is null
             )
             {
-                return;
+                return false;
             }
             try
             {
@@ -788,6 +841,49 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
             {
                 ClearActiveSession();
             }
+            return true;
+        }
+        finally
+        {
+            _stateGate.Release();
+        }
+    }
+
+    internal async Task<bool> FailAndStopForConnectionAsync(
+        string connectionId,
+        Exception failure,
+        string stage)
+    {
+        await _stateGate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (
+                _activeConnectionId != connectionId
+                || _activeSessionId is null
+            )
+            {
+                return false;
+            }
+            // Record the failure while the same state gate still proves this
+            // connection owns media.  Otherwise a retired transport could
+            // wake on the old Completion task after a replacement START and
+            // overwrite the new owner's clean runtime state.
+            _ = RecordFailure(failure, stage);
+            try
+            {
+                await _mediaAdapter.StopAsync(CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+            catch
+            {
+                // Keep the failure already recorded above. Cleanup ownership
+                // remains visible through CleanupPending/Completion.
+            }
+            if (!_mediaAdapter.CleanupPending)
+            {
+                ClearActiveSession();
+            }
+            return true;
         }
         finally
         {
@@ -858,6 +954,16 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
 
     internal bool IsHeartbeatExpired(string connectionId) =>
         GetHeartbeatRemainingMilliseconds(connectionId) == 0;
+
+    private bool ActiveHeartbeatExpired()
+    {
+        lock (_heartbeatGate)
+        {
+            return _activeSessionId is not null
+                && _heartbeatDeadlineMilliseconds is long deadline
+                && deadline <= _monotonicMilliseconds();
+        }
+    }
 
     private void ClearActiveSession()
     {
