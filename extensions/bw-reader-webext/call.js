@@ -137,7 +137,12 @@ if (els.btn) {
         els.btn.textContent = "开始通话";
         els.btn.classList.remove("stop");
       } else {
-        await RC.computerVoice.startFromUserGesture({});
+        // Carried from the sidebar button, so the page dials the same target
+        // the Reader was set to rather than silently defaulting.
+        const appKind = new URLSearchParams(location.search).get("app") || "";
+        await RC.computerVoice.startFromUserGesture(
+          appKind ? { appKind } : {}
+        );
         voiceActive = true;
         els.btn.textContent = "结束通话";
         els.btn.classList.add("stop");

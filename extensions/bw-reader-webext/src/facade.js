@@ -375,173 +375,66 @@
   // recreated, when the UI switches between the sidebar and top-bar buttons;
   // an active call therefore survives that visual change.
 
-  // A visible, dismissible failure notice for the inline computer-voice frame.
-  // Deliberately self-contained -- own element, own inline styles, nothing
-  // borrowed from the host page or from the popup, which is what the previous
-  // attempt got wrong.
-  function showInlineVoiceError(message) {
-    try {
-      var id = 'bw-inline-voice-error';
-      var box = document.getElementById(id);
-      if (!box) {
-        box = document.createElement('div');
-        box.id = id;
-        var set = function (k, v) { box.style.setProperty(k, v, 'important'); };
-        set('position', 'fixed');
-        set('left', '12px');
-        set('right', '12px');
-        set('bottom', '12px');
-        set('z-index', '2147483647');
-        set('padding', '12px 14px');
-        set('border-radius', '10px');
-        set('background', 'rgba(20,20,22,.95)');
-        set('color', '#fff');
-        set('font', '13px/1.55 -apple-system, system-ui, sans-serif');
-        set('box-shadow', '0 6px 24px rgba(0,0,0,.35)');
-        set('white-space', 'pre-wrap');
-        set('word-break', 'break-word');
-        box.addEventListener('click', function () {
-          try { box.remove(); } catch (_) {}
-        });
-        (document.body || document.documentElement).appendChild(box);
-      }
-      box.textContent = '电脑语音失败：' + String(message) + '\n（点此关闭）';
-    } catch (_) {}
-  }
 
+  // The computer button opens the extension's own page, and the call runs there.
+  //
+  // It ran in an embedded iframe until now. That kept the button in place but
+  // put the call inside a document nested in an ordinary web page, and there the
+  // WebSocket to Windows only ever timed out -- the connection was attempted and
+  // never completed, while a standalone extension page had connected fine all
+  // along. The difference is the nesting, so the nesting goes.
+  //
+  // The page shows the same context it sends, so it doubles as the snapshot view
+  // the user asked for: what the assistant is being told, visible on the device
+  // that is telling it.
   const inlineComputerVoiceSurface = (() => {
     const runtime = window.chrome && window.chrome.runtime;
     if (!runtime || typeof runtime.getURL !== 'function') return null;
-    let extensionRoot = '';
-    try { extensionRoot = String(runtime.getURL('')); } catch (_) {}
-    if (!extensionRoot.startsWith('safari-web-extension://')) return null;
+    let callUrl = '';
+    try { callUrl = String(runtime.getURL('call.html')); } catch (_) {}
+    if (!callUrl.startsWith('safari-web-extension://')) return null;
 
-    const CONTRACT = 'bw-extension-computer-voice-frame/1';
-    const frame = document.createElement('iframe');
-    frame.src = runtime.getURL('inline-computer-voice.html');
-    frame.title = '电脑客户端桥接';
-    frame.setAttribute('allow', 'microphone; autoplay');
-    frame.setAttribute('aria-label', '电脑客户端桥接');
-    frame.setAttribute('scrolling', 'no');
-    const important = (name, value) => frame.style.setProperty(name, value, 'important');
-    important('position', 'fixed');
-    important('left', '-100px');
-    important('top', '-100px');
-    important('width', '42px');
-    important('height', '42px');
-    important('border', '0');
-    important('border-radius', '12px');
-    important('background', 'transparent');
-    important('z-index', '2147483646');
-    important('opacity', '0');
-    important('pointer-events', 'none');
+    const buttonIds = ['asst-computer', 'vc-top-computer'];
 
-    let ready = false;
-    let lastTarget = '';
-    let lastState = 'idle';
-
-    const visibleButton = () => {
-      const candidates = [
-        document.getElementById('asst-computer'),
-        document.getElementById('vc-top-computer')
-      ];
-      for (const button of candidates) {
-        if (!button || !button.isConnected) continue;
-        const rect = button.getBoundingClientRect();
-        const style = window.getComputedStyle(button);
-        if (
-          rect.width >= 20 && rect.height >= 20 &&
-          rect.bottom > 0 && rect.right > 0 &&
-          rect.top < window.innerHeight && rect.left < window.innerWidth &&
-          style.display !== 'none' && style.visibility !== 'hidden' &&
-          Number(style.opacity || 1) > 0
-        ) return { button, rect };
-      }
-      return null;
-    };
-
-    const targetApp = () => {
+    function openCallPage(appKind) {
+      const url = callUrl + (appKind ? '?app=' + encodeURIComponent(appKind) : '');
       try {
-        return window.RC && RC.computerVoice &&
-          typeof RC.computerVoice.getTargetApp === 'function' &&
-          RC.computerVoice.getTargetApp() === 'chatgpt-classic'
-            ? 'chatgpt-classic'
-            : 'codex-desktop';
-      } catch (_) {
-        return 'codex-desktop';
-      }
-    };
+        // Opened from the click itself, so Safari treats it as user-initiated
+        // and does not suppress it as a popup.
+        const opened = window.open(url, '_blank');
+        if (opened) return true;
+      } catch (_) {}
+      try {
+        // A blocked window leaves the user with nothing and no explanation;
+        // navigating the current tab at least gets them to the call.
+        window.location.href = url;
+        return true;
+      } catch (_) {}
+      return false;
+    }
 
-    const configure = () => {
-      const target = targetApp();
-      if (!ready || target === lastTarget || !frame.contentWindow) return;
-      lastTarget = target;
-      frame.contentWindow.postMessage({
-        contract: CONTRACT,
-        type: 'configure',
-        appKind: target
-      }, '*');
-    };
+    // Capture phase, because the Reader's own handler would otherwise try to
+    // dial in this page -- which is exactly the path that cannot reach Windows.
+    document.addEventListener('click', (event) => {
+      let node = event.target;
+      while (node && node !== document) {
+        if (node.id && buttonIds.includes(node.id)) {
+          event.preventDefault();
+          event.stopImmediatePropagation();
+          let appKind = 'codex-desktop';
+          try {
+            const stored = window.RC && RC.computerVoice && RC.computerVoice.getTargetApp
+              ? RC.computerVoice.getTargetApp() : '';
+            if (stored) appKind = stored;
+          } catch (_) {}
+          openCallPage(appKind);
+          return;
+        }
+        node = node.parentNode;
+      }
+    }, true);
 
-    const position = () => {
-      const found = visibleButton();
-      if (!ready || !found) {
-        important('opacity', '0');
-        important('pointer-events', 'none');
-        important('left', '-100px');
-        important('top', '-100px');
-        return;
-      }
-      const rect = found.rect;
-      important('left', `${Math.round(rect.left)}px`);
-      important('top', `${Math.round(rect.top)}px`);
-      important('width', `${Math.round(rect.width)}px`);
-      important('height', `${Math.round(rect.height)}px`);
-      important('border-radius', window.getComputedStyle(found.button).borderRadius || '12px');
-      important('opacity', '1');
-      important('pointer-events', 'auto');
-      found.button.classList.toggle('on', lastState === 'active');
-      found.button.classList.toggle('connecting', lastState === 'connecting');
-      configure();
-    };
-
-    window.addEventListener('message', (event) => {
-      if (event.source !== frame.contentWindow) return;
-      const data = event.data;
-      if (!data || data.contract !== CONTRACT || typeof data.type !== 'string') return;
-      if (data.type === 'ready') {
-        ready = !!(data.value && data.value.ok === true);
-        lastTarget = '';
-        configure();
-        position();
-        return;
-      }
-      if (data.type !== 'state' || !data.value) return;
-      lastState = String(data.value.state || 'idle');
-      const message = String(data.value.message || '');
-      const found = visibleButton();
-      if (found && message) {
-        found.button.title = message;
-        found.button.setAttribute('aria-label', message);
-      }
-      if (lastState === 'failed' && message) {
-        try { window.RC && RC.toast && RC.toast(message); } catch (_) {}
-        // RC.toast belongs to the Reader and is absent on ordinary sites, so a
-        // failure here was reaching nobody. This bar is the only place the
-        // reason can appear: Windows records nothing (the call never arrives),
-        // the frame is 42px, and long-press does not surface titles on iPad.
-        // Remove once the break is located.
-        showInlineVoiceError(message);
-      }
-      position();
-    });
-
-    (document.documentElement || document.body).appendChild(frame);
-    window.addEventListener('resize', position, { passive: true });
-    window.addEventListener('scroll', position, { passive: true, capture: true });
-    const timer = window.setInterval(position, 250);
-    window.addEventListener('pagehide', () => window.clearInterval(timer), { once: true });
-    return Object.freeze({ position });
+    return Object.freeze({ open: openCallPage });
   })();
   window.__bwInlineComputerVoiceSurface = inlineComputerVoiceSurface;
 
