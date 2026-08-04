@@ -418,9 +418,25 @@
     let lastState = 'idle';
 
     const visibleButton = () => {
+      // Looked up inside the shadow root, not the page document.
+      //
+      // The extension's whole UI lives in a shadow tree, and vendor code only
+      // reaches it because build.py hands those files a Proxy in place of
+      // `document`. This file is not wrapped that way, so plain
+      // document.getElementById never found the button -- position() therefore
+      // saw "no button", kept the frame hidden, and every press fell through to
+      // opening a tab. That is why the embedded form appeared to do nothing.
+      //
+      // Read at call time: the shadow root is created further down this file,
+      // long after this closure is built.
+      const scope = window.__bwShadow || document;
       const candidates = [
-        document.getElementById('asst-computer'),
-        document.getElementById('vc-top-computer')
+        scope.getElementById
+          ? scope.getElementById('asst-computer')
+          : scope.querySelector('#asst-computer'),
+        scope.getElementById
+          ? scope.getElementById('vc-top-computer')
+          : scope.querySelector('#vc-top-computer')
       ];
       for (const button of candidates) {
         if (!button || !button.isConnected) continue;
