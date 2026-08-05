@@ -710,14 +710,18 @@ function senderUrl(sender) {
 // popup saw an undefined reply and reported "扩展账户服务不可用", so tokens could
 // not be saved and sync never began, with nothing anywhere explaining why.
 //
-// The boundary is unchanged: an id, when present, must still match exactly.
-// Only its absence falls through, and then to a URL the browser assigns and no
-// page can forge. Anything outside this extension satisfies neither test.
+// The boundary is unchanged: when both ids exist they must match exactly.
+// Safari can omit chrome.runtime.id even while MessageSender.id is present,
+// though, so that missing runtime value must not reject every internal message.
+// In that case fall back to a browser-assigned extension URL, or to sender.tab
+// for a content script; the caller still validates tab URL and frame afterwards.
 function senderIdMatches(sender) {
   if (!sender) return false;
-  if (typeof sender.id === "string" && sender.id) {
-    return sender.id === chrome.runtime.id;
-  }
+  const senderId = typeof sender.id === "string" ? sender.id : "";
+  const runtimeId = typeof chrome.runtime.id === "string"
+    ? chrome.runtime.id
+    : "";
+  if (senderId && runtimeId) return senderId === runtimeId;
   try {
     const base = chrome.runtime.getURL("");
     if (!base) return false;
@@ -1222,15 +1226,7 @@ function captureProviderForContentSender(sender) {
 function isPopupSender(sender) {
   // A popup has no tab. Combined with the extension-URL fallback in
   // senderIdMatches, that is what distinguishes it from a content script.
-  if (!sender || sender.tab) return false;
-  if (typeof sender.id === "string" && sender.id) {
-    if (sender.id !== chrome.runtime.id) return false;
-  } else {
-    try {
-      const base = chrome.runtime.getURL("");
-      if (!base || !String(sender.url || "").startsWith(base)) return false;
-    } catch (_) { return false; }
-  }
+  if (!sender || sender.tab || !senderIdMatches(sender)) return false;
   const url = senderUrl(sender);
   return !!(
     url &&

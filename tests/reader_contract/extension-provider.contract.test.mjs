@@ -642,6 +642,7 @@ function harness({
   syncRuntimeFactory = null,
   syncConflictControlFactory = null,
   ownerLeaseHandler = null,
+  runtimeId = "extension-test",
 } = {}) {
   const connectListeners = [];
   const messageListeners = [];
@@ -941,7 +942,10 @@ function harness({
     },
     chrome: {
       runtime: {
-        id: "extension-test",
+        id: runtimeId,
+        getURL(path = "") {
+          return `chrome-extension://extension-test/${String(path).replace(/^\/+/, "")}`;
+        },
         getManifest: () => ({ version: "test" }),
         onConnect: {
           addListener(listener) {
@@ -3287,6 +3291,32 @@ function popupSender() {
     url: "chrome-extension://extension-test/popup.html",
   };
 }
+
+test("Safari 的不透明 sender id 不会阻断合法 popup 与当前网页内容脚本", async () => {
+  const h = harness({ runtimeId: "" });
+  await authorizePersistentAccount(h, NAMESPACE, TICKET);
+
+  const pageSender = ordinaryContentSender(
+    "https://example.com/article",
+    { id: "safari-content-opaque-id" },
+  );
+  const saved = await h.sendRuntimeMessage({
+    type: "BW_LOCAL_STORAGE_SET",
+    key: "reviewQueueV2",
+    value: { schema: 2, cards: [] },
+  }, pageSender);
+  assert.equal(saved.ok, true, JSON.stringify(saved));
+
+  const provider = makePort("/pdf/view");
+  await authorizePort(h, provider);
+  const popup = popupSender();
+  popup.id = "safari-popup-opaque-id";
+  const status = await h.sendRuntimeMessage({
+    type: "BW_ACCOUNT_STATUS",
+    target: { tabId: provider.sender.tab.id, frameId: 0 },
+  }, popup);
+  assert.equal(status.ok, true, JSON.stringify(status));
+});
 
 function jsonResponse(data, status = 200) {
   return new Response(JSON.stringify(data), {
