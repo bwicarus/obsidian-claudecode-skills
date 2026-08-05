@@ -14,7 +14,9 @@ settings:
     SUPPORTED_PLATFORMS: "iphoneos iphonesimulator"
     SUPPORTS_MACCATALYST: NO
     SUPPORTS_XR_DESIGNED_FOR_IPHONE_IPAD: NO
-    TARGETED_DEVICE_FAMILY: "2"
+    # 1,2 = iPhone and iPad. The extension was already universal; only this
+    # container held the app to iPad, so an iPhone could not install it at all.
+    TARGETED_DEVICE_FAMILY: "1,2"
 
 targets:
   BWReader:
@@ -36,12 +38,13 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: App/Info.plist
-        MARKETING_VERSION: "1.0.62"
+        MARKETING_VERSION: "1.0.63"
         PRODUCT_BUNDLE_IDENTIFIER: space.bwicarus.bwreader2
         PRODUCT_NAME: bwicarus-test
-        # XcodeGen's application preset defaults to universal and overrides
-        # project-level values, so keep the container explicitly iPad-only.
-        TARGETED_DEVICE_FAMILY: "2"
+        # Stated explicitly because XcodeGen's application preset overrides
+        # project-level values -- the setting has to be repeated here to hold,
+        # in either direction.
+        TARGETED_DEVICE_FAMILY: "1,2"
     dependencies:
       - target: BWReaderSafariExtension
         embed: true
@@ -113,7 +116,7 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Extension/Info.plist
-        MARKETING_VERSION: "1.0.62"
+        MARKETING_VERSION: "1.0.63"
         PRODUCT_BUNDLE_IDENTIFIER: space.bwicarus.bwreader2.Extension
         PRODUCT_MODULE_NAME: BWReaderSafariExtension
         PRODUCT_NAME: BWReaderSafariExtension
