@@ -3515,6 +3515,228 @@
     _inkLiveHide();       // 再清隐视口叠加层(顺序:先主 canvas 后叠加层 → 无 1 帧空档;eraser 未用到叠加层也无妨)
     if (wasEraser && _epInk.quickErase) _inkArmRevert(900);   // 临时橡皮:擦完抬笔,停 0.9s 没再擦 → 自动回笔
   }
+
+  // App-native PencilKit adapter. EPUB/reflow geometry belongs to this host,
+  // so Swift only supplies viewport-normalized points and this code performs
+  // section binding, canonical normalization, persistence and composite-shot
+  // refresh through the same path as the existing PWA pen.
+  (function installNativeInkHost() {
+    var surfaceMap = Object.create(null), reportTimer = 0;
+    var documentToken = (window.crypto && typeof window.crypto.randomUUID === 'function')
+      ? window.crypto.randomUUID()
+      : (Date.now().toString(36) + '-' + Math.random().toString(36).slice(2));
+    var appliedOps = Object.create(null), appliedOrder = [];
+    var surfaceSelector = '.fav-item-userpage[data-uid], .fav-pdf-page[data-favpdf-file], .ep-usec, .ep-sec';
+    var interactiveSelector = [
+      'button', 'a', '[role="button"]', 'input', 'textarea', 'select',
+      '.rc-note', '.rc-up-bar', '.rc-up-edit', '.ep-up-editbtn',
+      '.rc-up-edit', '.rc-up-bar', '.fav-up-editbtn', '.fav-up-edit'
+    ].join(',');
+
+    function eligible(el) {
+      if (!el || el.classList.contains('ph')) return false;
+      if (el.classList.contains('fav-item-userpage')) {
+        if (el.classList.contains('fav-up-editing')) return false;
+        if (el.dataset.uid && el.dataset.inkFile) {
+          _epInk.fileOf[el.dataset.uid] = el.dataset.inkFile;
+        }
+      }
+      if (el.classList.contains('fav-pdf-page')) {
+        var file = el.dataset && el.dataset.favpdfFile;
+        if (!file || !(_epInk.favPdfLoaded && _epInk.favPdfLoaded[file])) return false;
+      }
+      if (el.classList.contains('ep-usec') &&
+          (el.classList.contains('editing') || document.body.classList.contains('ep-up-editing'))) {
+        return false;
+      }
+      return true;
+    }
+    function surfaceId(el) {
+      var idx = _inkIdxOf(el);
+      return idx == null || idx === '' ? null : 'section:' + String(idx);
+    }
+    function resolveSurface(id) {
+      var cached = surfaceMap[id];
+      if (cached && cached.isConnected && eligible(cached)) return cached;
+      var all = document.querySelectorAll(surfaceSelector);
+      for (var i = 0; i < all.length; i++) {
+        if (eligible(all[i]) && surfaceId(all[i]) === id) {
+          _inkEnsure(all[i], _inkIdxOf(all[i]));
+          surfaceMap[id] = all[i];
+          return all[i];
+        }
+      }
+      return null;
+    }
+    function normalizedRect(rect) {
+      var vw = window.innerWidth || 1, vh = window.innerHeight || 1;
+      if (rect.right <= 0 || rect.bottom <= 0 || rect.left >= vw || rect.top >= vh ||
+          !(rect.width > 0 && rect.height > 0)) return null;
+      return {
+        x: rect.left / vw, y: rect.top / vh,
+        width: rect.width / vw, height: rect.height / vh
+      };
+    }
+    function exclusionsOf(el) {
+      var out = [];
+      el.querySelectorAll(interactiveSelector).forEach(function (child) {
+        if (out.length >= 128) return;
+        var rect = normalizedRect(child.getBoundingClientRect());
+        if (rect) out.push(rect);
+      });
+      return out;
+    }
+    function describe() {
+      surfaceMap = Object.create(null);
+      var surfaces = [];
+      document.querySelectorAll(surfaceSelector).forEach(function (el) {
+        if (!eligible(el)) return;
+        // Preserve the existing lazy-canvas behavior: offscreen EPUB sections
+        // do not get an ink canvas merely because Swift requested a layout.
+        if (!normalizedRect(el.getBoundingClientRect())) return;
+        var idx = _inkIdxOf(el);
+        _inkEnsure(el, idx);
+        var id = surfaceId(el), rect = el.__inkCv && normalizedRect(el.__inkCv.getBoundingClientRect());
+        if (!id || !rect) return;
+        surfaceMap[id] = el;
+        surfaces.push({ id: id, rect: rect, exclusions: exclusionsOf(el) });
+      });
+      return { type: 'layout', documentToken: documentToken, surfaces: surfaces };
+    }
+    function report() {
+      if (window.__BW_NATIVE_PENCILKIT_INK__ !== true) return;
+      try {
+        var handler = window.webkit && window.webkit.messageHandlers &&
+          window.webkit.messageHandlers.bwNativePencilInk;
+        if (handler && handler.postMessage) handler.postMessage(describe());
+      } catch (_) {}
+    }
+    function scheduleReport() {
+      if (reportTimer) return;
+      reportTimer = setTimeout(function () { reportTimer = 0; report(); }, 50);
+    }
+    function parsedSegments(input, requireTwoPoints) {
+      var raw = input && Array.isArray(input.segments) ? input.segments.slice(0, 64) : [];
+      var out = [];
+      for (var i = 0; i < raw.length; i++) {
+        var segment = raw[i] || {}, id = String(segment.surfaceId || '');
+        var el = resolveSurface(id), points = Array.isArray(segment.points) ? segment.points.slice(0, 4096) : [];
+        if (!el || (requireTwoPoints ? points.length < 2 : !points.length)) return null;
+        points = points.map(function (point) {
+          if (!Array.isArray(point) || point.length < 2) return null;
+          var x = Number(point[0]), y = Number(point[1]);
+          if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+          return [Math.max(0, Math.min(1, x)), Math.max(0, Math.min(1, y))];
+        });
+        if (points.some(function (point) { return !point; })) return null;
+        out.push({ raw: segment, id: id, el: el, idx: _inkIdxOf(el), points: points });
+      }
+      return out.length ? out : null;
+    }
+    function operationId(input) {
+      if (!input || input.documentToken !== documentToken) return null;
+      var id = String(input.opId || '');
+      return /^[A-Za-z0-9_-]{1,96}$/.test(id) ? id : null;
+    }
+    function rememberOperation(id, operation) {
+      if (appliedOps[id]) return appliedOps[id];
+      appliedOps[id] = operation;
+      appliedOrder.push(id);
+      if (appliedOrder.length > 512) delete appliedOps[appliedOrder.shift()];
+      return operation;
+    }
+    function finishOperation(operation) {
+      Object.keys(operation.touched).forEach(function (key) {
+        var segment = operation.touched[key];
+        _epInk.lastEl = segment.el;
+        _inkRedraw(segment.el);
+        _inkScheduleSave(segment.el, segment.idx);
+      });
+      operation.state = 'applied';
+      scheduleReport();
+      return operation.kind === 'commit'
+        ? { ok: true, written: operation.written, sections: Object.keys(operation.touched) }
+        : { ok: true, removed: operation.removed, sections: Object.keys(operation.touched) };
+    }
+    function resumeCommit(operation) {
+      while (operation.nextSegment < operation.segments.length) {
+        var segment = operation.segments[operation.nextSegment];
+        var color = /^#[0-9a-f]{6}$/i.test(String(segment.raw.color || '')) ? String(segment.raw.color) : '#ff3b30';
+        var width = Math.max(1, Math.min(20, Number(segment.raw.width) || 4));
+        if (!operation.touched[segment.id]) {
+          _inkPushUndo(segment.el);
+          operation.touched[segment.id] = segment;
+        }
+        _inkStrokesOf(segment.el).push({ t: 'pen', c: color, w: width, p: segment.points });
+        operation.nextSegment += 1;
+        operation.written += 1;
+      }
+      operation.state = 'mutated';
+      return finishOperation(operation);
+    }
+    window.__bwNativeInkHost = {
+      describe: describe,
+      refresh: report,
+      ownsPoint: function (clientX, clientY) {
+        var hit = document.elementFromPoint(clientX, clientY);
+        if (!hit || (hit.closest && hit.closest(interactiveSelector))) return false;
+        var el = hit.closest && hit.closest(surfaceSelector);
+        return !!(el && eligible(el));
+      },
+      commit: function (input) {
+        if (window.__BW_NATIVE_PENCILKIT_INK__ !== true) return { ok: false, error: 'native_disabled' };
+        var opId = operationId(input);
+        if (!opId) return { ok: false, error: 'native_document_stale' };
+        if (appliedOps[opId]) {
+          if (appliedOps[opId].state === 'applied') return { ok: true, duplicate: true };
+          return appliedOps[opId].kind === 'commit' && appliedOps[opId].state === 'mutating'
+            ? resumeCommit(appliedOps[opId])
+            : finishOperation(appliedOps[opId]);
+        }
+        var segments = parsedSegments(input, true);
+        if (!segments) return { ok: false, error: 'native_surface_stale' };
+        var operation = rememberOperation(opId, {
+          kind: 'commit', state: 'mutating', touched: Object.create(null),
+          segments: segments, nextSegment: 0, written: 0
+        });
+        return resumeCommit(operation);
+      },
+      erase: function (input) {
+        if (window.__BW_NATIVE_PENCILKIT_INK__ !== true) return { ok: false, error: 'native_disabled' };
+        var opId = operationId(input);
+        if (!opId) return { ok: false, error: 'native_document_stale' };
+        if (appliedOps[opId]) {
+          if (appliedOps[opId].state === 'applied') return { ok: true, duplicate: true };
+          return finishOperation(appliedOps[opId]);
+        }
+        var segments = parsedSegments(input, false);
+        if (!segments) return { ok: false, error: 'native_surface_stale' };
+        var touched = Object.create(null), removed = 0;
+        segments.forEach(function (segment) {
+          if (!touched[segment.id]) { _inkPushUndo(segment.el); touched[segment.id] = segment; }
+          segment.points.forEach(function (point) {
+            if (RCInk.eraseAt(_inkStrokesOf(segment.el), point, 0.018)) removed += 1;
+          });
+        });
+        var operation = rememberOperation(opId, {
+          kind: 'erase', state: 'mutated', touched: touched, removed: removed
+        });
+        return finishOperation(operation);
+      }
+    };
+    window.addEventListener('scroll', scheduleReport, true);
+    window.addEventListener('resize', scheduleReport, true);
+    window.addEventListener('pageshow', scheduleReport, true);
+    document.addEventListener('rc-upage-resize', scheduleReport, true);
+    try {
+      new MutationObserver(scheduleReport).observe(document.documentElement, {
+        childList: true, subtree: true, attributes: true,
+        attributeFilter: ['class', 'style', 'data-uid', 'data-favpdf-file']
+      });
+    } catch (_) {}
+    setTimeout(report, 0);
+    setTimeout(report, 350);
+  })();
   // Apple Pencil 触摸(touchType=stylus)阻止默认滚动 → 笔不滚页;手指放行照常滚
   function _inkBlockStylusScroll(e) { for (var i = 0; i < e.touches.length; i++) { if (e.touches[i].touchType === 'stylus') { e.preventDefault(); break; } } }
 

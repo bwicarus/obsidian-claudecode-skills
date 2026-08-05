@@ -3682,3 +3682,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **集成边界**：不接管 Windows 桥接、Safari 上下文或书籍墨迹合同；Widget 保留共享快照读取代码，但当前发布签名先不启用 Widget App Group，未共享时显示打开阅读器入口。
 - **怎么验的**：macOS CI 完成三 target Swift 编译、固定 profile 签名、归档/包内校验和 IPA 导出；1.0.66(1) 因 Siri 描述含保留品牌词被拒，修正后的 1.0.67(1) 已上传且 App Store Connect API 返回 `processingState=VALID`（run 31004348587）。
 - **下一步**：实机验收 Pencil 双击/挤压、OCR 质量、系统翻译语言包、快捷指令、Spotlight 与 Widget；Portal 一次性关联 App Group 后可恢复 Widget 最近阅读内容。
+
+## Codex：App 原生 PencilKit 墨迹接入与公式批处理（2026-08-05 JST）
+- **改了什么**：App 内 PDF/EPUB 由 PencilKit 实时采笔，映射回既有墨迹数组、持久化、绘图 revision 与合成图；外部 PWA 仍保留原 Canvas 画笔。
+- **可靠性**：每笔带文档代际与幂等 operation ID，保存失败可重试而不重复落笔；未确认写入时阻止切书，并保留网页画笔作为布局未就绪时的 fallback。
+- **公式**：设备端普通文字识别不变；公式先复用现有 DocLayout 公式框与 AI LaTeX 批处理，Core ML 版将逐页读取已下载书籍的本地页图，不重复下载整本书。
+- **怎么验的**：JS 语法、专项墨迹故障重放与全量 Reader 合同完成；全量仅保留既有 extension-popup harness 漂移，Swift 类型检查交由 macOS CI。
+- **没做/下一步**：未改 Windows 桥接；发布 1.0.68 后实机验收 PDF/EPUB 落笔、橡皮擦、AI 看合成笔迹及公式框批处理。

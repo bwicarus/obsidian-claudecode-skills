@@ -34,6 +34,12 @@ private struct ReaderRootView: View {
             ReaderWebView(model: reader)
                 .ignoresSafeArea(edges: .bottom)
 
+            NativePencilLiveOverlay(
+                reader: reader,
+                controller: reader.nativePencilInk
+            )
+            .ignoresSafeArea(edges: .bottom)
+
             if reader.isLoading {
                 ProgressView()
                     .tint(.white)
@@ -65,6 +71,25 @@ private struct ReaderRootView: View {
                         maxWidth: .infinity,
                         maxHeight: .infinity,
                         alignment: .top
+                    )
+            }
+
+
+            if let message = reader.nativePencilInk.lastError {
+                Text("Pencil 笔迹未保存：\(message)（点按重试）")
+                    .font(.footnote)
+                    .multilineTextAlignment(.center)
+                    .padding(.horizontal, 14)
+                    .padding(.vertical, 10)
+                    .background(.ultraThinMaterial, in: Capsule())
+                    .padding(.bottom, 14)
+                    .onTapGesture {
+                        reader.nativePencilInk.retry()
+                    }
+                    .frame(
+                        maxWidth: .infinity,
+                        maxHeight: .infinity,
+                        alignment: .bottom
                     )
             }
 

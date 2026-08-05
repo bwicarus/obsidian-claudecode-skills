@@ -301,6 +301,217 @@ function _inkPointerUp(e) {
 }
 window._inkPointerDown = _inkPointerDown;
 
+// App-native PencilKit adapter.  The App only sends viewport-normalized
+// points; this host remains the sole owner of page identity, canonical
+// coordinates, persistence, undo and drawing revision emission.  PWA pages
+// never set __BW_NATIVE_PENCILKIT_INK__, so their original pointer engine is
+// unchanged.
+(function installNativeInkHost() {
+  var surfaceMap = Object.create(null), reportTimer = 0;
+  var documentToken = (window.crypto && typeof window.crypto.randomUUID === 'function')
+    ? window.crypto.randomUUID()
+    : (Date.now().toString(36) + '-' + Math.random().toString(36).slice(2));
+  var appliedOps = Object.create(null), appliedOrder = [];
+  var interactiveSelector = [
+    'button', 'a', '[role="button"]', 'input', 'textarea', 'select',
+    '.rc-note', '.rc-up-bar', '.rc-up-edit', '.up2-b-btn', '.up2-block-tools'
+  ].join(',');
+
+  function surfaceId(pw) {
+    if (pw.classList.contains('pdf-upage')) {
+      var uid = (pw.dataset && pw.dataset.uid) || (pw.__upRec && pw.__upRec.id);
+      return uid ? 'upage:' + String(uid) : null;
+    }
+    var page = parseInt(pw.dataset && pw.dataset.pageNum, 10);
+    return Number.isFinite(page) ? 'page:' + page : null;
+  }
+  function eligible(pw) {
+    if (!pw || !pw.__inkCanvas) return false;
+    if (pw.classList.contains('pdf-upage')) {
+      return !pw.classList.contains('editing') &&
+        !pw.classList.contains('fav-up-editing');
+    }
+    return pw.dataset.loaded === '1' &&
+      !document.body.classList.contains('up-editing');
+  }
+  function resolveSurface(id) {
+    var cached = surfaceMap[id];
+    if (cached && cached.isConnected && eligible(cached)) return cached;
+    var all = document.querySelectorAll('.page-wrap[data-page-num], .pdf-upage');
+    for (var i = 0; i < all.length; i++) {
+      if (surfaceId(all[i]) === id && eligible(all[i])) {
+        surfaceMap[id] = all[i];
+        return all[i];
+      }
+    }
+    return null;
+  }
+  function normalizedRect(rect) {
+    var vw = window.innerWidth || 1, vh = window.innerHeight || 1;
+    if (rect.right <= 0 || rect.bottom <= 0 || rect.left >= vw || rect.top >= vh ||
+        !(rect.width > 0 && rect.height > 0)) return null;
+    return {
+      x: rect.left / vw, y: rect.top / vh,
+      width: rect.width / vw, height: rect.height / vh
+    };
+  }
+  function exclusionsOf(pw) {
+    var out = [];
+    pw.querySelectorAll(interactiveSelector).forEach(function (el) {
+      if (out.length >= 128) return;
+      var rect = normalizedRect(el.getBoundingClientRect());
+      if (rect) out.push(rect);
+    });
+    return out;
+  }
+  function describe() {
+    surfaceMap = Object.create(null);
+    var surfaces = [];
+    document.querySelectorAll('.page-wrap[data-page-num], .pdf-upage').forEach(function (pw) {
+      if (!eligible(pw)) return;
+      var id = surfaceId(pw), rect = normalizedRect(pw.__inkCanvas.getBoundingClientRect());
+      if (!id || !rect) return;
+      surfaceMap[id] = pw;
+      surfaces.push({ id: id, rect: rect, exclusions: exclusionsOf(pw) });
+    });
+    return { type: 'layout', documentToken: documentToken, surfaces: surfaces };
+  }
+  function report() {
+    if (window.__BW_NATIVE_PENCILKIT_INK__ !== true) return;
+    try {
+      var handler = window.webkit && window.webkit.messageHandlers &&
+        window.webkit.messageHandlers.bwNativePencilInk;
+      if (handler && handler.postMessage) handler.postMessage(describe());
+    } catch (_) {}
+  }
+  function scheduleReport() {
+    if (reportTimer) return;
+    reportTimer = setTimeout(function () { reportTimer = 0; report(); }, 50);
+  }
+  function parsedSegments(input, requireTwoPoints) {
+    var raw = input && Array.isArray(input.segments) ? input.segments.slice(0, 64) : [];
+    var out = [];
+    for (var i = 0; i < raw.length; i++) {
+      var segment = raw[i] || {}, id = String(segment.surfaceId || '');
+      var pw = resolveSurface(id), points = Array.isArray(segment.points) ? segment.points.slice(0, 4096) : [];
+      if (!pw || (requireTwoPoints ? points.length < 2 : !points.length)) return null;
+      points = points.map(function (point) {
+        if (!Array.isArray(point) || point.length < 2) return null;
+        var x = Number(point[0]), y = Number(point[1]);
+        if (!Number.isFinite(x) || !Number.isFinite(y)) return null;
+        return [Math.max(0, Math.min(1, x)), Math.max(0, Math.min(1, y))];
+      });
+      if (points.some(function (point) { return !point; })) return null;
+      out.push({ raw: segment, id: id, pw: pw, points: points });
+    }
+    return out.length ? out : null;
+  }
+  function operationId(input) {
+    if (!input || input.documentToken !== documentToken) return null;
+    var id = String(input.opId || '');
+    return /^[A-Za-z0-9_-]{1,96}$/.test(id) ? id : null;
+  }
+  function rememberOperation(id, operation) {
+    if (appliedOps[id]) return appliedOps[id];
+    appliedOps[id] = operation;
+    appliedOrder.push(id);
+    if (appliedOrder.length > 512) delete appliedOps[appliedOrder.shift()];
+    return operation;
+  }
+  function finishOperation(operation) {
+    Object.keys(operation.touched).forEach(function (key) {
+      var segment = operation.touched[key];
+      var page = parseInt(segment.pw.dataset && segment.pw.dataset.pageNum, 10);
+      _ink.lastPw = segment.pw;
+      _inkRedraw(segment.pw);
+      _inkScheduleSave(segment.pw, Number.isFinite(page) ? page : 0);
+    });
+    operation.state = 'applied';
+    scheduleReport();
+    return operation.kind === 'commit'
+      ? { ok: true, written: operation.written, surfaces: Object.keys(operation.touched) }
+      : { ok: true, removed: operation.removed, surfaces: Object.keys(operation.touched) };
+  }
+  function resumeCommit(operation) {
+    while (operation.nextSegment < operation.segments.length) {
+      var segment = operation.segments[operation.nextSegment];
+      var color = /^#[0-9a-f]{6}$/i.test(String(segment.raw.color || '')) ? String(segment.raw.color) : '#ff3b30';
+      var width = Math.max(1, Math.min(20, Number(segment.raw.width) || 4));
+      if (!operation.touched[segment.id]) {
+        _inkPushUndo(segment.pw);
+        operation.touched[segment.id] = segment;
+      }
+      _inkStrokesOf(segment.pw).push({ t: 'pen', c: color, w: width, p: segment.points });
+      operation.nextSegment += 1;
+      operation.written += 1;
+    }
+    operation.state = 'mutated';
+    return finishOperation(operation);
+  }
+  window.__bwNativeInkHost = {
+    describe: describe,
+    refresh: report,
+    ownsPoint: function (clientX, clientY) {
+      var hit = document.elementFromPoint(clientX, clientY);
+      if (!hit || (hit.closest && hit.closest(interactiveSelector))) return false;
+      var pw = hit.closest && hit.closest('.page-wrap[data-page-num], .pdf-upage');
+      return !!(pw && eligible(pw));
+    },
+    commit: function (input) {
+      if (window.__BW_NATIVE_PENCILKIT_INK__ !== true) return { ok: false, error: 'native_disabled' };
+      var opId = operationId(input);
+      if (!opId) return { ok: false, error: 'native_document_stale' };
+      if (appliedOps[opId]) {
+        if (appliedOps[opId].state === 'applied') return { ok: true, duplicate: true };
+        return appliedOps[opId].kind === 'commit' && appliedOps[opId].state === 'mutating'
+          ? resumeCommit(appliedOps[opId])
+          : finishOperation(appliedOps[opId]);
+      }
+      var segments = parsedSegments(input, true);
+      if (!segments) return { ok: false, error: 'native_surface_stale' };
+      var operation = rememberOperation(opId, {
+        kind: 'commit', state: 'mutating', touched: Object.create(null),
+        segments: segments, nextSegment: 0, written: 0
+      });
+      return resumeCommit(operation);
+    },
+    erase: function (input) {
+      if (window.__BW_NATIVE_PENCILKIT_INK__ !== true) return { ok: false, error: 'native_disabled' };
+      var opId = operationId(input);
+      if (!opId) return { ok: false, error: 'native_document_stale' };
+      if (appliedOps[opId]) {
+        if (appliedOps[opId].state === 'applied') return { ok: true, duplicate: true };
+        return finishOperation(appliedOps[opId]);
+      }
+      var segments = parsedSegments(input, false);
+      if (!segments) return { ok: false, error: 'native_surface_stale' };
+      var touched = Object.create(null), removed = 0;
+      segments.forEach(function (segment) {
+        if (!touched[segment.id]) { _inkPushUndo(segment.pw); touched[segment.id] = segment; }
+        segment.points.forEach(function (point) {
+          if (RCInk.eraseAt(_inkStrokesOf(segment.pw), point, 0.018)) removed += 1;
+          });
+      });
+      var operation = rememberOperation(opId, {
+        kind: 'erase', state: 'mutated', touched: touched, removed: removed
+      });
+      return finishOperation(operation);
+    }
+  };
+  window.addEventListener('scroll', scheduleReport, true);
+  window.addEventListener('resize', scheduleReport, true);
+  window.addEventListener('pageshow', scheduleReport, true);
+  document.addEventListener('rc-upage-resize', scheduleReport, true);
+  try {
+    new MutationObserver(scheduleReport).observe(document.documentElement, {
+      childList: true, subtree: true, attributes: true,
+      attributeFilter: ['class', 'style', 'data-page-num', 'data-loaded']
+    });
+  } catch (_) {}
+  setTimeout(report, 0);
+  setTimeout(report, 350);
+})();
+
 // ── 保存 / 加载 ──
 // ⚠ 900ms 防抖窗口内关页/切后台/整页 reload(插入页 job 完成后)会丢最后一批笔画 →
 //   dirty 集合 + pagehide/切后台 sendBeacon 立即补发(后端 get_json 可读 Blob application/json)。

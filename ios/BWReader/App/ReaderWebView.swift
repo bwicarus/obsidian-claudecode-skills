@@ -6,6 +6,7 @@ private let readerStartURL = URL(string: "https://bwicarus.taile44d0c.ts.net/pdf
 private let nativeComputerVoiceMessageName = "bwNativeComputerVoice"
 private let nativeComputerContextMessageName = "bwNativeComputerContext"
 private let nativeAgentVoiceMessageName = "bwNativeAgentVoice"
+private let nativePencilInkMessageName = "bwNativePencilInk"
 
 private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
     weak var delegate: WKScriptMessageHandler?
@@ -66,6 +67,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativeComputerVoiceMessageProxy: WeakScriptMessageHandler?
     private var nativeComputerContextMessageProxy: WeakScriptMessageHandler?
     private var nativeAgentVoiceMessageProxy: WeakScriptMessageHandler?
+    private var nativePencilInkMessageProxy: WeakScriptMessageHandler?
     private weak var nativeVoiceBridge: NativeVoiceBridge?
     private let nativeAgentVoice = NativeAgentVoiceSession()
     private var nativeAgentVoiceCommandTail: Task<Void, Never>?
@@ -75,6 +77,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativePencilInteraction: UIPencilInteraction?
     private var lastNativePencilTapTimestamp: TimeInterval = -1
     private let nativePencilSettings = NativePencilSettings.shared
+    let nativePencilInk = NativePencilInkController()
     private var readerForeground = true
 
     override init() {
@@ -116,6 +119,13 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         contentController.add(
             nativeAgentVoiceMessageProxy,
             name: nativeAgentVoiceMessageName
+        )
+        let nativePencilInkMessageProxy =
+            WeakScriptMessageHandler(delegate: self)
+        self.nativePencilInkMessageProxy = nativePencilInkMessageProxy
+        contentController.add(
+            nativePencilInkMessageProxy,
+            name: nativePencilInkMessageName
         )
         contentController.addUserScript(WKUserScript(
             source: """
@@ -220,6 +230,20 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             (() => {
               if (window.__BW_NATIVE_PENCIL__) return;
               window.__BW_NATIVE_PENCIL__ = true;
+              // The App owns Apple Pencil sampling through PencilKit. The
+              // web/PWA ink engine remains intact and is used whenever this
+              // App-only flag is absent.
+              window.__BW_NATIVE_PENCILKIT_INK__ = true;
+
+              // App-native PencilKit is the only pen control surface here.
+              // The old controls and pointer engine remain untouched in PWA
+              // and non-Apple clients, where this flag/style do not exist.
+              const style = document.createElement("style");
+              style.id = "bw-native-pencilkit-style";
+              style.textContent =
+                "#ink-fab,#ink-toolbar,#ep-ink-btn,#ep-ink-toolbar{" +
+                "display:none!important}";
+              (document.head || document.documentElement).appendChild(style);
 
               const dispatchOverride = (detail) => {
                 try {
@@ -424,6 +448,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 "bw-native-reader-foreground",
                 { detail: { active: \(value) } }
               ));
+              if (\(value)) window.__bwNativeInkHost?.refresh?.();
             })();
             """
         )
@@ -758,9 +783,15 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         gesture: NativePencilGesture,
         preferredAction: UIPencilPreferredAction
     ) {
-        guard webView.url != nil else {
-            return
+        guard webView.url != nil else { return }
+        switch action {
+        case .toggleEraser:
+            nativePencilInk.toggleEraser()
+        case .showPalette:
+            nativePencilInk.showPalette()
         }
+        // Keep note/editor-specific gesture routing in the web host. Page ink
+        // itself is still sampled only by PencilKit inside the App.
         let payload: [String: Any] = [
             "action": action.rawValue,
             "gesture": gesture.rawValue,
@@ -1142,6 +1173,19 @@ extension ReaderWebViewModel: WKScriptMessageHandler {
                 return
             }
             handleNativeAgentVoice(body)
+        } else if message.name == nativePencilInkMessageName {
+            guard
+                message.frameInfo.isMainFrame,
+                message.webView === webView,
+                webView.url?.scheme?.lowercased()
+                    == readerStartURL.scheme?.lowercased(),
+                webView.url?.host?.lowercased()
+                    == readerStartURL.host?.lowercased(),
+                let body = message.body as? [String: Any]
+            else {
+                return
+            }
+            nativePencilInk.updateLayout(from: body)
         }
     }
 }
@@ -1153,6 +1197,7 @@ extension ReaderWebViewModel: WKNavigationDelegate {
     ) {
         isLoading = true
         loadError = nil
+        nativePencilInk.invalidateDocument()
     }
 
     func webView(
@@ -1194,6 +1239,14 @@ extension ReaderWebViewModel: WKNavigationDelegate {
             let scheme = url.scheme?.lowercased()
         else {
             decisionHandler(.allow)
+            return
+        }
+
+        if nativePencilInk.hasPendingOperations,
+           navigationAction.targetFrame?.isMainFrame != false
+        {
+            nativePencilInk.reportNavigationBlocked()
+            decisionHandler(.cancel)
             return
         }
 

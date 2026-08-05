@@ -7,6 +7,7 @@ final class NativeReaderToolsCoordinator: ObservableObject {
         case idle
         case refreshing
         case recognizing
+        case recognizingFormulas
         case preparingAnnotation
         case savingAnnotation
 
@@ -16,6 +17,7 @@ final class NativeReaderToolsCoordinator: ObservableObject {
     @Published private(set) var snapshot: ReaderSharedSnapshot?
     @Published private(set) var viewportImage: UIImage?
     @Published private(set) var recognizedText = ""
+    @Published private(set) var formulaStatus: NativeFormulaRecognitionStatus?
     @Published private(set) var activity: Activity = .idle
     @Published private(set) var notice: String?
     @Published private(set) var errorMessage: String?
@@ -55,7 +57,33 @@ final class NativeReaderToolsCoordinator: ObservableObject {
             viewportImage = image
             recognizedText = text
             snapshot = try await snapshotTask
-            notice = "已使用设备端实况文本识别当前视口"
+            notice = "已使用设备端实况文本识别当前视口普通文字"
+        }
+    }
+
+    func recognizeBookFormulas(using reader: ReaderWebViewModel) async {
+        await perform(.recognizingFormulas) {
+            let current = try await reader.refreshNativeSharedSnapshot()
+            snapshot = current
+            formulaStatus = try await reader.startNativeFormulaRecognition(
+                file: current.file
+            )
+            if formulaStatus?.detectingBoxes == true {
+                notice = "已启动现有公式框检测；稍后点刷新即可继续 AI 批处理"
+            } else {
+                notice = formulaStatus?.remaining == 0
+                    ? "本书公式已全部转成 LaTeX"
+                    : "公式已交给现有 AI 批处理；关闭此页面也会继续"
+            }
+        }
+    }
+
+    func refreshFormulaStatus(using reader: ReaderWebViewModel) async {
+        guard let file = snapshot?.file, !file.isEmpty else { return }
+        await perform(.recognizingFormulas) {
+            formulaStatus = try await reader.startNativeFormulaRecognition(
+                file: file
+            )
         }
     }
 
@@ -219,9 +247,40 @@ struct NativeReaderToolsView: View {
                     await coordinator.recognizeCurrentViewport(using: reader)
                 }
             } label: {
-                Label("识别当前视口文字", systemImage: "text.viewfinder")
+                Label("识别当前视口普通文字", systemImage: "text.viewfinder")
             }
             .disabled(coordinator.activity.isBusy)
+
+            Button {
+                Task {
+                    await coordinator.recognizeBookFormulas(using: reader)
+                }
+            } label: {
+                Label("批量识别本书公式", systemImage: "function")
+            }
+            .disabled(
+                coordinator.activity.isBusy
+                    || coordinator.snapshot?.file.lowercased().hasSuffix(".pdf") != true
+            )
+
+            Text("普通文字在设备上识别；公式框当前复用现有 DocLayout 模型预处理，再由 AI 批量转成 LaTeX。后续 Core ML 版会逐页读取已下载书籍的本地页图，不会重复下载整本书。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if let status = coordinator.formulaStatus {
+                HStack {
+                    Text(status.summary)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Button("刷新") {
+                        Task {
+                            await coordinator.refreshFormulaStatus(using: reader)
+                        }
+                    }
+                    .buttonStyle(.borderless)
+                }
+            }
 
             Button {
                 Task {
@@ -315,6 +374,8 @@ struct NativeReaderToolsView: View {
             return "正在读取页面"
         case .recognizing:
             return "正在设备端识别"
+        case .recognizingFormulas:
+            return "正在连接公式批处理"
         case .preparingAnnotation:
             return "正在截取视口"
         case .savingAnnotation:
