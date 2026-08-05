@@ -224,13 +224,49 @@ jobs:
           cp "$RUNNER_TEMP/private_keys/AuthKey_${API_KEY_ID}.p8" \
             ~/.appstoreconnect/private_keys/
 
-      # The existing App and Safari targets use fixed profiles. The Widget uses
-      # Xcode-managed distribution signing while reusing the same certificate.
+      - name: Prepare Widget App Store profile
+        env:
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
+          FASTLANE_SKIP_UPDATE_CHECK: "1"
+          FASTLANE_HIDE_CHANGELOG: "1"
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v fastlane >/dev/null || sudo gem install fastlane --no-document
+          API_JSON="$RUNNER_TEMP/fastlane-api-key.json"
+          API_KEY_ID="$API_KEY_ID" API_ISSUER_ID="$API_ISSUER_ID" \
+          API_KEY_PATH="$RUNNER_TEMP/private_keys/AuthKey_${API_KEY_ID}.p8" \
+          API_JSON="$API_JSON" python <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          Path(os.environ["API_JSON"]).write_text(
+              json.dumps({
+                  "key_id": os.environ["API_KEY_ID"],
+                  "issuer_id": os.environ["API_ISSUER_ID"],
+                  "key": Path(os.environ["API_KEY_PATH"]).read_text(),
+                  "in_house": False,
+              }),
+              encoding="utf-8",
+          )
+          PY
+          fastlane sigh \
+            --api_key_path "$API_JSON" \
+            --app_identifier "$WIDGET_BUNDLE_ID" \
+            --provisioning_name "BWReader App Store Widget" \
+            --ignore_profiles_with_different_name true \
+            --output_path "$RUNNER_TEMP" \
+            --filename "BWReaderWidget.mobileprovision" \
+            --skip_install false
+          test -s "$RUNNER_TEMP/BWReaderWidget.mobileprovision"
+
+      # All three targets now use deterministic App Store profiles and the one
+      # imported distribution certificate; no development certificate is made.
       - name: Archive signed device candidate
         env:
           TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
         shell: bash
         run: |
           set -euo pipefail
@@ -241,10 +277,6 @@ jobs:
             -scheme "$SCHEME" \
             -destination "generic/platform=iOS" \
             -archivePath "$RUNNER_TEMP/app.xcarchive" \
-            -allowProvisioningUpdates \
-            -authenticationKeyPath "$RUNNER_TEMP/private_keys/AuthKey_${API_KEY_ID}.p8" \
-            -authenticationKeyID "$API_KEY_ID" \
-            -authenticationKeyIssuerID "$API_ISSUER_ID" \
             DEVELOPMENT_TEAM="$TEAM_ID" \
             | tee "$RUNNER_TEMP/build-logs/archive.log"
 

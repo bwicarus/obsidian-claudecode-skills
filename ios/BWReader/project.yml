@@ -144,8 +144,9 @@ targets:
     settings:
       base:
         APPLICATION_EXTENSION_API_ONLY: YES
+        CODE_SIGN_IDENTITY: Apple Distribution
         CODE_SIGN_ENTITLEMENTS: Widget/BWReaderWidget.entitlements
-        CODE_SIGN_STYLE: Automatic
+        CODE_SIGN_STYLE: Manual
         CURRENT_PROJECT_VERSION: "1"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Widget/Info.plist
@@ -153,6 +154,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: space.bwicarus.bwreader2.Widget
         PRODUCT_MODULE_NAME: BWReaderWidget
         PRODUCT_NAME: BWReaderWidget
+        PROVISIONING_PROFILE_SPECIFIER: BWReader App Store Widget
         SKIP_INSTALL: YES
         TARGETED_DEVICE_FAMILY: "1,2"
 
