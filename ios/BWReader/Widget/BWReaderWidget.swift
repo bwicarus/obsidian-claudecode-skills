@@ -62,7 +62,7 @@ private struct ReaderWidgetView: View {
 
     private var detail: String {
         guard let snapshot = entry.snapshot else {
-            return "打开阅读器后，这里会显示最近阅读进度。"
+            return "点击打开 BWReader"
         }
         let selection = snapshot.selection.trimmingCharacters(in: .whitespacesAndNewlines)
         if !selection.isEmpty {
@@ -141,7 +141,7 @@ struct BWReaderRecentWidget: Widget {
             ReaderWidgetView(entry: entry)
         }
         .configurationDisplayName("最近阅读")
-        .description("查看 BWReader 最近打开的内容与阅读进度。")
+        .description("快速打开 BWReader；共享进度可用时会自动显示。")
         .supportedFamilies([.systemSmall, .systemMedium])
     }
 }

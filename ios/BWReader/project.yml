@@ -145,7 +145,6 @@ targets:
       base:
         APPLICATION_EXTENSION_API_ONLY: YES
         CODE_SIGN_IDENTITY: Apple Distribution
-        CODE_SIGN_ENTITLEMENTS: Widget/BWReaderWidget.entitlements
         CODE_SIGN_STYLE: Manual
         CURRENT_PROJECT_VERSION: "1"
         GENERATE_INFOPLIST_FILE: NO
