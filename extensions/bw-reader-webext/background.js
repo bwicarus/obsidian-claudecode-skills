@@ -58,7 +58,11 @@ const NATIVE_APP_ACTIONS = new Set([
   "agent.status",
   "agent.toggle",
   "agent.events",
-  "agent.command"
+  "agent.command",
+  "notes.status",
+  "notes.list",
+  "notes.read",
+  "notes.create"
 ]);
 const NATIVE_APP_KINDS = new Set([
   "codex-desktop",
@@ -71,6 +75,10 @@ const NATIVE_APP_MAX_VISIBLE_TEXT_BYTES = 32768;
 const NATIVE_APP_MAX_SELECTION_BYTES = 4096;
 const NATIVE_APP_MAX_AGENT_TEXT_BYTES = 32768;
 const NATIVE_APP_MAX_AGENT_MOOD_BYTES = 256;
+const NATIVE_APP_MAX_NOTE_NAME_BYTES = 512;
+const NATIVE_APP_MAX_NOTE_TEXT_BYTES = 262144;
+const NATIVE_APP_MAX_NOTE_SOURCE_BYTES = 8192;
+const NATIVE_APP_MAX_NOTE_PAGE = 10000000;
 const NATIVE_APP_WEB_REVISION_RE = /^[a-f0-9]{16}$/;
 const NATIVE_APP_AGENT_COMMANDS = new Set([
   "speak",
@@ -4685,6 +4693,11 @@ function nativeAppRequestPayload(message, sender) {
   if (action === "agent.toggle") required = [...base, "command"];
   if (action === "agent.events") required = [...base, "after"];
   if (action === "agent.command") required = [...base, "command"];
+  if (action === "notes.read") required = [...base, "noteId"];
+  if (action === "notes.create") {
+    required = [...base, "name", "text"];
+    optional = ["file", "page"];
+  }
   if (action === "agent.toggle" && message.command === "start") {
     required = [...required, "webContext"];
   }
@@ -4762,6 +4775,55 @@ function nativeAppRequestPayload(message, sender) {
       }
       payload.text = message.text;
       if (message.mood != null) payload.mood = message.mood;
+    }
+  } else if (action === "notes.read") {
+    const noteId = String(message.noteId || "");
+    if (!NATIVE_APP_REQUEST_ID_RE.test(noteId)) {
+      throw nativeAppPublicError(
+        "本机笔记编号无效",
+        "BW_NATIVE_NOTE_ID_INVALID"
+      );
+    }
+    payload.noteId = noteId;
+  } else if (action === "notes.create") {
+    const name = typeof message.name === "string" ? message.name.trim() : "";
+    const text = typeof message.text === "string" ? message.text.trim() : "";
+    const file = message.file == null ? "" : message.file;
+    const page = message.page == null ? 0 : message.page;
+    if (
+      !name || !text ||
+      nativeAppByteLength(name) > NATIVE_APP_MAX_NOTE_NAME_BYTES ||
+      nativeAppByteLength(text) > NATIVE_APP_MAX_NOTE_TEXT_BYTES ||
+      typeof file !== "string" ||
+      nativeAppByteLength(file) > NATIVE_APP_MAX_NOTE_SOURCE_BYTES ||
+      !Number.isSafeInteger(page) || page < 0 || page > NATIVE_APP_MAX_NOTE_PAGE
+    ) {
+      throw nativeAppPublicError(
+        "本机笔记内容无效",
+        "BW_NATIVE_NOTE_CREATE_INVALID"
+      );
+    }
+    const source = senderUrl(sender);
+    const trustedBookHost = !!source &&
+      TRUSTED_PWA_ORIGINS.has(source.origin) &&
+      TRUSTED_PWA_PATHS.has(source.pathname);
+    payload.name = name;
+    payload.text = text;
+    if (trustedBookHost) {
+      // 真书的 file/page 是 DocumentHost 私有身份，必须原样保留。
+      payload.file = file;
+      payload.page = page;
+    } else {
+      // 普通网页来源只能取浏览器认证的顶层 tab URL，不能信任页面自报 file。
+      const canonicalSource = "web:" + canonicalOrdinaryDocumentUrl(sender);
+      if (nativeAppByteLength(canonicalSource) > NATIVE_APP_MAX_NOTE_SOURCE_BYTES) {
+        throw nativeAppPublicError(
+          "当前网页地址过长，无法作为笔记来源",
+          "BW_NATIVE_NOTE_CREATE_INVALID"
+        );
+      }
+      payload.file = canonicalSource;
+      payload.page = 0;
     }
   }
   return payload;
@@ -4866,6 +4928,88 @@ function normalizeNativeAppState(raw) {
   return state;
 }
 
+function normalizeNativeNotesStorage(raw) {
+  if (
+    !nativeAppExactKeys(
+      raw,
+      ["enabled", "configured", "folderName", "updatedAt", "count"],
+      ["pendingCount"]
+    ) ||
+    typeof raw.enabled !== "boolean" ||
+    typeof raw.configured !== "boolean" ||
+    typeof raw.folderName !== "string" ||
+    nativeAppByteLength(raw.folderName) > 2048 ||
+    !Number.isSafeInteger(Number(raw.updatedAt)) ||
+    !Number.isSafeInteger(Number(raw.count)) ||
+    Number(raw.count) < 0 || Number(raw.count) > 50 ||
+    (raw.pendingCount != null && (
+      !Number.isSafeInteger(Number(raw.pendingCount)) ||
+      Number(raw.pendingCount) < 0 || Number(raw.pendingCount) > 200
+    ))
+  ) {
+    throw nativeAppPublicError(
+      "BWReader App 本机笔记状态无效",
+      "BW_NATIVE_APP_RESPONSE_INVALID"
+    );
+  }
+  return {
+    enabled: raw.enabled,
+    configured: raw.configured,
+    folderName: raw.folderName,
+    updatedAt: Number(raw.updatedAt),
+    count: Number(raw.count),
+    pendingCount: Number(raw.pendingCount || 0)
+  };
+}
+
+function normalizeNativeNote(raw, includeContent) {
+  const required = [
+    "id", "title", "fileName", "preview", "contentTruncated",
+    "sourceFile", "sourcePage", "createdAt"
+  ];
+  if (includeContent) required.push("content");
+  if (
+    !nativeAppExactKeys(raw, required, ["pendingExport"]) ||
+    typeof raw.id !== "string" ||
+    !NATIVE_APP_REQUEST_ID_RE.test(raw.id) ||
+    typeof raw.title !== "string" ||
+    nativeAppByteLength(raw.title) > 2048 ||
+    typeof raw.fileName !== "string" ||
+    nativeAppByteLength(raw.fileName) > 2048 ||
+    typeof raw.preview !== "string" ||
+    nativeAppByteLength(raw.preview) > 4096 ||
+    typeof raw.contentTruncated !== "boolean" ||
+    typeof raw.sourceFile !== "string" ||
+    nativeAppByteLength(raw.sourceFile) > 8192 ||
+    !Number.isSafeInteger(Number(raw.sourcePage)) ||
+    Number(raw.sourcePage) < 0 ||
+    !Number.isSafeInteger(Number(raw.createdAt)) ||
+    (raw.pendingExport != null && typeof raw.pendingExport !== "boolean") ||
+    (includeContent && (
+      typeof raw.content !== "string" ||
+      nativeAppByteLength(raw.content) > 131072
+    ))
+  ) {
+    throw nativeAppPublicError(
+      "BWReader App 本机笔记内容无效",
+      "BW_NATIVE_APP_RESPONSE_INVALID"
+    );
+  }
+  const note = {
+    id: raw.id,
+    title: raw.title,
+    fileName: raw.fileName,
+    preview: raw.preview,
+    contentTruncated: raw.contentTruncated,
+    sourceFile: raw.sourceFile,
+    sourcePage: Number(raw.sourcePage),
+    createdAt: Number(raw.createdAt),
+    pendingExport: raw.pendingExport === true
+  };
+  if (includeContent) note.content = raw.content;
+  return note;
+}
+
 function normalizeNativeAppResponse(response, payload) {
   if (
     !response ||
@@ -4944,6 +5088,84 @@ function normalizeNativeAppResponse(response, payload) {
     normalized.cursor = Number(response.cursor);
     return normalized;
   }
+  if (payload.action === "notes.status") {
+    normalized.storage = normalizeNativeNotesStorage(response.storage);
+    return normalized;
+  }
+  if (payload.action === "notes.list") {
+    normalized.storage = normalizeNativeNotesStorage(response.storage);
+    if (!Array.isArray(response.notes)) {
+      throw nativeAppPublicError(
+        "BWReader App 本机笔记列表无效",
+        "BW_NATIVE_APP_RESPONSE_INVALID"
+      );
+    }
+    normalized.notes = response.notes.map((note) =>
+      normalizeNativeNote(note, false)
+    );
+    return normalized;
+  }
+  if (payload.action === "notes.read") {
+    normalized.note = normalizeNativeNote(response.note, true);
+    return normalized;
+  }
+  if (payload.action === "notes.create") {
+    if (response.handled === false) {
+      if (
+        !nativeAppExactKeys(response, [
+          "contract", "action", "requestId", "ok", "handled", "disposition"
+        ]) || response.disposition !== "pi"
+      ) {
+        throw nativeAppPublicError(
+          "BWReader App 本机笔记回落响应无效",
+          "BW_NATIVE_APP_RESPONSE_INVALID"
+        );
+      }
+      normalized.handled = false;
+      normalized.disposition = "pi";
+      return normalized;
+    }
+    const queued = response.disposition === "queued";
+    const committed = response.disposition === "committed";
+    const pathKey = queued ? "plannedFileName" : "notePath";
+    if (
+      response.handled !== true ||
+      (!queued && !committed) ||
+      !nativeAppExactKeys(response, [
+        "contract", "action", "requestId", "ok", "handled", "disposition",
+        pathKey, "obsidianURL", "note"
+      ]) ||
+      typeof response[pathKey] !== "string" || !response[pathKey] ||
+      nativeAppByteLength(response[pathKey]) > 2048 ||
+      typeof response.obsidianURL !== "string" ||
+      nativeAppByteLength(response.obsidianURL) > 4096
+    ) {
+      throw nativeAppPublicError(
+        "BWReader App 本机笔记创建响应无效",
+        "BW_NATIVE_APP_RESPONSE_INVALID"
+      );
+    }
+    const note = normalizeNativeNote(response.note, true);
+    if (
+      note.fileName !== response[pathKey] ||
+      (queued && (
+        !note.pendingExport || response.obsidianURL !== ""
+      )) ||
+      (committed && note.pendingExport)
+    ) {
+      throw nativeAppPublicError(
+        "BWReader App 本机笔记创建结果不一致",
+        "BW_NATIVE_APP_RESPONSE_INVALID"
+      );
+    }
+    normalized.handled = true;
+    normalized.disposition = response.disposition;
+    if (queued) normalized.plannedFileName = response.plannedFileName;
+    if (committed) normalized.notePath = response.notePath;
+    normalized.obsidianURL = response.obsidianURL;
+    normalized.note = note;
+    return normalized;
+  }
   normalized.state = normalizeNativeAppState(response.state);
   if (payload.action === "voice.toggle") {
     const expectedLaunchURL = `bwreader://native-voice?requestId=${encodeURIComponent(payload.requestId)}`;
@@ -4969,7 +5191,19 @@ function normalizeNativeAppResponse(response, payload) {
 }
 
 async function handleNativeAppMessage(message, sender) {
-  if (!sender?.tab || sender.frameId !== 0) {
+  const action = String(message?.action || "");
+  const isReadOnlyNotesAction = action === "notes.status" ||
+    action === "notes.list" || action === "notes.read";
+  let isOwnedExtensionPage = false;
+  if (isReadOnlyNotesAction) {
+    try {
+      const root = String(chrome.runtime.getURL(""));
+      isOwnedExtensionPage = !!root &&
+        String(sender?.url || "").startsWith(root);
+    } catch (_) {}
+  }
+  const isTopLevelContentScript = !!sender?.tab && sender.frameId === 0;
+  if (!isTopLevelContentScript && !isOwnedExtensionPage) {
     throw nativeAppPublicError(
       "只有当前网页可以请求 BWReader App",
       "BW_NATIVE_APP_SENDER_INVALID"

@@ -7,6 +7,7 @@ private let nativeComputerVoiceMessageName = "bwNativeComputerVoice"
 private let nativeComputerContextMessageName = "bwNativeComputerContext"
 private let nativeAgentVoiceMessageName = "bwNativeAgentVoice"
 private let nativePencilInkMessageName = "bwNativePencilInk"
+private let nativeLocalNotesMessageName = "bwNativeLocalNotes"
 
 private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
     weak var delegate: WKScriptMessageHandler?
@@ -22,6 +23,33 @@ private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
         delegate?.userContentController(
             userContentController,
             didReceive: message
+        )
+    }
+}
+
+private final class WeakScriptMessageHandlerWithReply:
+    NSObject,
+    WKScriptMessageHandlerWithReply
+{
+    weak var delegate: WKScriptMessageHandlerWithReply?
+
+    init(delegate: WKScriptMessageHandlerWithReply) {
+        self.delegate = delegate
+    }
+
+    func userContentController(
+        _ userContentController: WKUserContentController,
+        didReceive message: WKScriptMessage,
+        replyHandler: @escaping (Any?, String?) -> Void
+    ) {
+        guard let delegate else {
+            replyHandler(nil, "本机笔记处理器不可用")
+            return
+        }
+        delegate.userContentController(
+            userContentController,
+            didReceive: message,
+            replyHandler: replyHandler
         )
     }
 }
@@ -68,6 +96,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativeComputerContextMessageProxy: WeakScriptMessageHandler?
     private var nativeAgentVoiceMessageProxy: WeakScriptMessageHandler?
     private var nativePencilInkMessageProxy: WeakScriptMessageHandler?
+    private var nativeLocalNotesMessageProxy: WeakScriptMessageHandlerWithReply?
     private weak var nativeVoiceBridge: NativeVoiceBridge?
     private let nativeAgentVoice = NativeAgentVoiceSession()
     private var nativeAgentVoiceCommandTail: Task<Void, Never>?
@@ -126,6 +155,14 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         contentController.add(
             nativePencilInkMessageProxy,
             name: nativePencilInkMessageName
+        )
+        let nativeLocalNotesMessageProxy =
+            WeakScriptMessageHandlerWithReply(delegate: self)
+        self.nativeLocalNotesMessageProxy = nativeLocalNotesMessageProxy
+        contentController.addScriptMessageHandler(
+            nativeLocalNotesMessageProxy,
+            contentWorld: .page,
+            name: nativeLocalNotesMessageName
         )
         contentController.addUserScript(WKUserScript(
             source: """
@@ -199,6 +236,79 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
               }).observe(document, { childList: true, subtree: true });
             })();
             """,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
+        contentController.addUserScript(WKUserScript(
+            source: #"""
+            (() => {
+              if (window.__BW_NATIVE_LOCAL_NOTES_FETCH__) return;
+              if (location.protocol !== "https:" ||
+                  location.hostname.toLowerCase() !==
+                    "bwicarus.taile44d0c.ts.net") return;
+              const handler = window.webkit?.messageHandlers?.bwNativeLocalNotes;
+              if (!handler || typeof handler.postMessage !== "function") return;
+              const originalFetch = window.fetch.bind(window);
+              const targetPath = "/pdf/api/to-note";
+              const requestURL = (input) => {
+                try {
+                  return new URL(
+                    typeof input === "string" || input instanceof URL
+                      ? String(input)
+                      : String(input?.url || ""),
+                    location.href
+                  );
+                } catch (_) {
+                  return null;
+                }
+              };
+              window.fetch = (input, init) => {
+                const url = requestURL(input);
+                const method = String(
+                  init?.method || (input instanceof Request ? input.method : "GET")
+                ).toUpperCase();
+                if (!url || url.origin !== location.origin ||
+                    url.pathname !== targetPath || method !== "POST") {
+                  return originalFetch(input, init);
+                }
+                return (async () => {
+                  let bodyText = typeof init?.body === "string" ? init.body : "";
+                  if (!bodyText && input instanceof Request) {
+                    bodyText = await input.clone().text();
+                  }
+                  let payload;
+                  try {
+                    payload = JSON.parse(bodyText || "{}");
+                  } catch (_) {
+                    return originalFetch(input, init);
+                  }
+                  let result;
+                  try {
+                    result = await handler.postMessage({
+                      action: "create",
+                      payload
+                    });
+                  } catch (error) {
+                    throw new Error(
+                      "本机笔记桥不可用：" + String(error?.message || error)
+                    );
+                  }
+                  if (!result || result.handled !== true) {
+                    return originalFetch(input, init);
+                  }
+                  const response = result.response &&
+                    typeof result.response === "object"
+                    ? result.response
+                    : { ok: false, error: "本机笔记响应无效" };
+                  return new Response(JSON.stringify(response), {
+                    status: Number.isInteger(result.status) ? result.status : 200,
+                    headers: { "Content-Type": "application/json; charset=utf-8" }
+                  });
+                })();
+              };
+              window.__BW_NATIVE_LOCAL_NOTES_FETCH__ = true;
+            })();
+            """#,
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
@@ -1186,6 +1296,131 @@ extension ReaderWebViewModel: WKScriptMessageHandler {
                 return
             }
             nativePencilInk.updateLayout(from: body)
+        }
+    }
+}
+
+extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
+    func userContentController(
+        _ userContentController: WKUserContentController,
+        didReceive message: WKScriptMessage,
+        replyHandler: @escaping (Any?, String?) -> Void
+    ) {
+        guard message.name == nativeLocalNotesMessageName else {
+            replyHandler(nil, "不支持的本机笔记消息")
+            return
+        }
+        guard
+            message.frameInfo.isMainFrame,
+            message.webView === webView,
+            webView.url?.scheme?.lowercased()
+                == readerStartURL.scheme?.lowercased(),
+            webView.url?.host?.lowercased()
+                == readerStartURL.host?.lowercased(),
+            message.frameInfo.request.url?.path.hasPrefix("/pdf/") == true,
+            webView.url?.path.hasPrefix("/pdf/") == true
+        else {
+            replyHandler(nil, "本机笔记来源无效")
+            return
+        }
+
+        let manager = ReaderLocalNotesManager.shared
+        guard manager.isEnabled else {
+            replyHandler(["handled": false], nil)
+            return
+        }
+        guard
+            let body = message.body as? [String: Any],
+            Set(body.keys) == ["action", "payload"],
+            body["action"] as? String == "create",
+            let payload = body["payload"] as? [String: Any],
+            Set(["text", "name"]).isSubset(of: Set(payload.keys)),
+            Set(payload.keys).isSubset(
+                of: Set(["text", "name", "file", "page"])
+            ),
+            let text = payload["text"] as? String,
+            let name = payload["name"] as? String,
+            !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            !name.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            text.utf8.count <= 262_144,
+            name.utf8.count <= 512
+        else {
+            replyHandler([
+                "handled": true,
+                "status": 400,
+                "response": [
+                    "ok": false,
+                    "error": "本机笔记字段无效",
+                ],
+            ], nil)
+            return
+        }
+        let sourceFile: String
+        if let value = payload["file"] {
+            guard let value = value as? String, value.utf8.count <= 8_192 else {
+                replyHandler([
+                    "handled": true,
+                    "status": 400,
+                    "response": [
+                        "ok": false,
+                        "error": "本机笔记来源无效",
+                    ],
+                ], nil)
+                return
+            }
+            sourceFile = value
+        } else {
+            sourceFile = ""
+        }
+        let sourcePage: Int
+        if let value = payload["page"] {
+            guard let number = value as? NSNumber,
+                  number.doubleValue.isFinite,
+                  number.doubleValue.rounded() == number.doubleValue,
+                  (0...10_000_000).contains(number.doubleValue)
+            else {
+                replyHandler([
+                    "handled": true,
+                    "status": 400,
+                    "response": [
+                        "ok": false,
+                        "error": "本机笔记页码无效",
+                    ],
+                ], nil)
+                return
+            }
+            sourcePage = number.intValue
+        } else {
+            sourcePage = 0
+        }
+
+        Task { @MainActor in
+            do {
+                let receipt = try await manager.createNote(
+                    name: name,
+                    text: text,
+                    sourceFile: sourceFile,
+                    sourcePage: sourcePage
+                )
+                replyHandler([
+                    "handled": true,
+                    "status": 200,
+                    "response": [
+                        "ok": true,
+                        "note_path": receipt.notePath,
+                        "obsidian_url": receipt.obsidianURL,
+                    ],
+                ], nil)
+            } catch {
+                replyHandler([
+                    "handled": true,
+                    "status": 500,
+                    "response": [
+                        "ok": false,
+                        "error": error.localizedDescription,
+                    ],
+                ], nil)
+            }
         }
     }
 }

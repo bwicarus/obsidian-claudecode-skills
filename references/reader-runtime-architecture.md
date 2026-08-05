@@ -147,6 +147,20 @@ python3 extensions/bw-reader-webext/build.py
 collection 就自动上传。无扩展真书 PWA 使用自己的本地 fallback；逐 collection 接线前，
 旧数据源继续保留。
 
+### iOS App 的可选 Obsidian 笔记线路
+
+- 默认继续使用 Pi 的 `/pdf/api/to-note`；本地线路是每台设备单独开启的设置，不进入
+  `user-settings` 或 `sync-v3`。
+- 开启后，BWReader App 接管其 WKWebView 中精确的 `/pdf/api/to-note` 请求；Safari 扩展
+  对同一路由使用严格的 `notes.create` 原生消息。两端共享创建、列表与读取能力，关闭时
+  原请求继续交给 Pi。
+- 安全作用域 bookmark 只保存在 App 容器并只由 App 解析。Safari 扩展不得取得 bookmark
+  或直接访问 Vault；扩展创建的笔记先原子写入 App Group outbox，并立即进入两端共享投影，
+  再由持有目录权限的 App 自动落盘。相同 request ID 与相同正文均保持幂等，禁止失败时
+  静默回落 Pi 造成双份笔记。
+- 本地 Markdown 是可读笔记，不替代书内便签的稳定 ID、锚点、revision、mutation ID、
+  tombstone 或 `DocumentNoteRepository`；两类数据不得合并成同一真源。
+
 ### 永远属于 PWA/书籍的数据
 
 - PDF/EPUB/HTML/Markdown 文件与渲染缓存；

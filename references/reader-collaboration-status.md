@@ -3706,3 +3706,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 ## Codex / Claude：Safari 网页上下文同页直投（2026-08-06 JST）
 - **改了什么**：网页正文由 content script 直接投给同页 shadow 树中的通话 frame，再复用既有 ContextLink 写入 `/reader-context/v1`；不再依赖易被回收的 background、模式预查或偏好门。
 - **边界/下一步**：仅可见前台页上报，runtime 消息保留为无 frame 兜底；专项合同与归档通过后上传 1.0.71，Windows 0.1.90 与原生 App 未改。
+
+# 2026-08-06 iOS 可选 Obsidian 本地笔记（TestFlight 候选制作中）
+
+- App 新增设备级 Vault 授权；App 与 Safari 扩展共享 `notes.create/status/list/read`，关闭时仍走 Pi。
+- bookmark 仅由 App 持有；扩展写 App Group outbox 并立即更新共享投影，App 存活后幂等落盘。
+- 本地开启后的错误不静默回落 Pi，避免重复写；Xcode 云构建、TestFlight 与文件提供器实测待完成。
+- 未迁移书内便签/高亮/锚点或 sync-v3；下一步统一构建 1.0.72 并实机验收。

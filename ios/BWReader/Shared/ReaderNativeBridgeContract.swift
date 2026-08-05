@@ -16,6 +16,10 @@ enum ReaderNativeBridgeContract {
         "agent.toggle",
         "agent.events",
         "agent.command",
+        "notes.status",
+        "notes.list",
+        "notes.read",
+        "notes.create",
     ]
     static let supportedAppKinds = [
         "codex-desktop",
