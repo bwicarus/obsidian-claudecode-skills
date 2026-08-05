@@ -473,7 +473,7 @@ test("扩展上下文按设置和前台状态独立运行，不随语音停止",
   assert.doesNotMatch(closeWhenDone, /closeContextLink|link\.close/);
 });
 
-test("普通网页上下文优先同页直投，不再被偏好读取或后台进程阻断", () => {
+test("普通网页上下文同页直投后一次 POST，不再保活 WSS", () => {
   assert.match(contentScript, /function deliverToFrame\(snap\)/);
   assert.match(contentScript, /iframe\[src\*="call\.html"\]/);
   assert.match(
@@ -484,12 +484,35 @@ test("普通网页上下文优先同页直投，不再被偏好读取或后台�
     callPage,
     /d\.contract !== "bw-page-context\/1"[\s\S]*forwardDirect\(d\.page\)/,
   );
+  assert.match(
+    callPage,
+    /SNAPSHOT_POST_URL\s*=\s*[\s\S]*"https:\/\/bwicarus-2\.taile44d0c\.ts\.net\/reader-context\/snapshot"/,
+  );
+  assert.match(
+    callPage,
+    /async function postSnapshot\(page\)[\s\S]*event:\s*\{[\s\S]*type: "page\.context"[\s\S]*active:\s*\{[\s\S]*kind: "web"/,
+  );
+  assert.match(
+    callPage,
+    /fetch\(SNAPSHOT_POST_URL, \{[\s\S]*method: "POST"[\s\S]*"Content-Type": "application\/json"/,
+  );
   const directStart = callPage.indexOf("async function forwardDirect(page)");
-  const directEnd = callPage.indexOf("function ensureDirectLink", directStart);
+  const directEnd = callPage.indexOf("if (chrome.runtime?.onMessage)", directStart);
   const directBody = callPage.slice(directStart, directEnd);
   assert.match(directBody, /if \(!contextSurfaceVisible\(\)\) return/);
-  assert.match(directBody, /const current = ensureDirectLink\(\)/);
-  assert.doesNotMatch(directBody, /contextPreferenceKnown|contextSyncEnabled/);
+  assert.match(directBody, /await postSnapshot\(page\)[\s\S]*lastSignature = signature/);
+  assert.doesNotMatch(
+    directBody,
+    /ensureDirectLink|ContextLink|contextPreferenceKnown|contextSyncEnabled/,
+  );
+  assert.match(
+    safariPackager,
+    /BRIDGE_ORIGIN = "https:\/\/bwicarus-2\.taile44d0c\.ts\.net\/"/,
+  );
+  assert.match(
+    safariPackager,
+    /manifest\["host_permissions"\] = \[ACTIVE_ORIGIN \+ "\*", BRIDGE_ORIGIN \+ "\*"\]/,
+  );
 });
 
 test("App 电脑按钮兼容缓存的一字段 Codex 消息，版本号取自安装包", () => {

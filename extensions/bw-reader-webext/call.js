@@ -386,20 +386,6 @@ async function forwardDirect(page) {
   }
 }
 
-// Opens the context link without consulting the preference.
-//
-// ensureContextLink() returns null unless the preference is known and enabled;
-// this one only needs the page to be visible. Same ContextLink, same endpoint,
-// same protocol -- only the gating differs.
-function ensureDirectLink() {
-  if (!contextSurfaceVisible()) return null;
-  if (!link) {
-    link = new ContextLink(contextLinkStatus);
-    link.connect();
-  }
-  return link;
-}
-
 if (chrome.runtime?.onMessage) {
   chrome.runtime.onMessage.addListener((message) => {
     // Sent by whichever page the user is looking at. The page only forwards a

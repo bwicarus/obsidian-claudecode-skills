@@ -3707,6 +3707,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **改了什么**：网页正文由 content script 直接投给同页 shadow 树中的通话 frame，再复用既有 ContextLink 写入 `/reader-context/v1`；不再依赖易被回收的 background、模式预查或偏好门。
 - **边界/下一步**：仅可见前台页上报，runtime 消息保留为无 frame 兜底；专项合同与归档通过后上传 1.0.71，Windows 0.1.90 与原生 App 未改。
 
+## Codex / Claude：Safari 网页快照一次性 POST（2026-08-06 JST）
+- **改了什么**：同页 frame 将每次网页快照直接 POST 到 Windows `/reader-context/snapshot`，移除该主路径的 WSS 会话、握手与重连依赖；正文事件与 active-reading 同请求嵌套提交。
+- **权限/验证**：Safari host 权限只新增具名 Windows Tailnet 主机并由精确合同锁定；桥 0.1.92 与 serve 路由已实测 204 覆盖快照，1.0.75 上传后验普通网页约两秒变为 `kind=web`。
+
 # 2026-08-06 iOS 可选 Obsidian 本地笔记（TestFlight 候选制作中）
 
 - App 新增设备级 Vault 授权；App 与 Safari 扩展共享 `notes.create/status/list/read`，关闭时仍走 Pi。
