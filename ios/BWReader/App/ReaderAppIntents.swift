@@ -36,7 +36,7 @@ struct ScanCurrentPageIntent: AppIntent {
 struct AnnotateCurrentPageIntent: AppIntent {
     static var title: LocalizedStringResource = "批注当前页面"
     static var description = IntentDescription(
-        "打开 BW 阅读器的原生 Apple Pencil 页面批注。"
+        "打开 BW 阅读器的原生手写笔页面批注。"
     )
     static var openAppWhenRun = true
 
@@ -49,7 +49,7 @@ struct AnnotateCurrentPageIntent: AppIntent {
 struct OpenNativeToolsIntent: AppIntent {
     static var title: LocalizedStringResource = "打开阅读工具"
     static var description = IntentDescription(
-        "打开 BW 阅读器的原生识别、翻译与 Apple Pencil 工具。"
+        "打开 BW 阅读器的原生识别、翻译与手写笔工具。"
     )
     static var openAppWhenRun = true
 
