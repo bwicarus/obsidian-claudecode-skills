@@ -3680,5 +3680,5 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 ## Codex：iOS 原生阅读能力五项整合（2026-08-05 JST）
 - **改了什么**：App 新增 PencilKit 标注与 Pencil 手势设置、VisionKit 当前视口 OCR、iOS 18 系统翻译、App Intents/Spotlight，以及小/中号快速入口 Widget。
 - **集成边界**：不接管 Windows 桥接、Safari 上下文或书籍墨迹合同；Widget 保留共享快照读取代码，但当前发布签名先不启用 Widget App Group，未共享时显示打开阅读器入口。
-- **怎么验的**：Windows 静态检查、plist 解析与发布管线专项测试通过；macOS CI 已通过三 target Swift 模拟器编译，继续验证签名、归档与上传。
-- **下一步**：TestFlight 后实机验收 Pencil 双击/挤压、OCR 质量、系统翻译语言包、快捷指令、Spotlight 与 Widget；Portal 一次性关联 App Group 后可恢复 Widget 最近阅读内容。
+- **怎么验的**：macOS CI 完成三 target Swift 编译、固定 profile 签名、归档/包内校验和 IPA 导出；1.0.66(1) 已成功上传 TestFlight（run 31002593425）。
+- **下一步**：实机验收 Pencil 双击/挤压、OCR 质量、系统翻译语言包、快捷指令、Spotlight 与 Widget；Portal 一次性关联 App Group 后可恢复 Widget 最近阅读内容。
