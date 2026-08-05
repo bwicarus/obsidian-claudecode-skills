@@ -13,6 +13,7 @@
   "use strict";
   if (window.__bwPwaProviderOnly) return;
   if (window.__bwReaderDoc) return;   // 幂等
+  const ORIGIN = "https://bwicarus.taile44d0c.ts.net";
 
   const localStoreCall = (type, key, value) => new Promise((resolve, reject) => {
     chrome.runtime.sendMessage({ type, key, value }, (response) => {
@@ -2018,7 +2019,6 @@
   // 跨源 + Bearer + SSE 统一走 background 长连 port(content script 的 fetch 受宿主页 CORS 限制,
   // background 有 host_permissions 才能带 Bearer 直连)。流式响应用 ReadableStream 原样重建,
   // rc-assistant 的 getReader() 打字机 / rid 续传语义不变。非本服务的绝对 URL(如词典音频)走原生 fetch。
-  const ORIGIN = "https://bwicarus.taile44d0c.ts.net";
   // 共享阅读器语音层仍按“同源 /voice-rt”组织；普通网页的同源是宿主网站，
   // 因此由宿主适配层只提供一次服务地址解析，rc-voicecall 继续保持唯一实现。
   // PWA 未提供这个 hook 时仍使用它自己的 location.host。
