@@ -251,11 +251,39 @@ if (chrome.runtime?.onMessage) {
   });
 }
 
+// Reads extension storage under either API shape.
+//
+// Safari's chrome.* surface is not uniformly promise-based: chrome.storage
+// .local.get may take a callback and return undefined instead of a promise.
+// `await` on that yields undefined rather than throwing, so the failure was
+// invisible twice over -- the catch never fired, and the caller went on to
+// treat "no data" as "the user turned sync off". Both shapes are handled here,
+// and a genuine failure now rejects so it can be reported.
+function storageGet(keys) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const done = (value) => { if (!settled) { settled = true; resolve(value); } };
+    const fail = (err) => { if (!settled) { settled = true; reject(err); } };
+    try {
+      const returned = chrome.storage.local.get(keys, (bag) => {
+        const err = chrome.runtime?.lastError;
+        if (err) fail(new Error(err.message || "storage.get 失败"));
+        else done(bag);
+      });
+      if (returned && typeof returned.then === "function") returned.then(done, fail);
+    } catch (err) {
+      fail(err);
+    }
+    // Neither shape answered. Better a stated timeout than silence.
+    window.setTimeout(() => fail(new Error("storage.get 无响应")), 5000);
+  });
+}
+
 // The page that was open when this bridge was started, captured by the popup.
 // Without it the bridge would sit blank until the user scrolled or switched.
 (async function seed() {
   try {
-    const bag = await chrome.storage.local.get([
+    const bag = await storageGet([
       PREFERENCE_KEY,
       ACTIVE_CONTEXT_KEY,
       "bwCallContext",
@@ -271,10 +299,20 @@ if (chrome.runtime?.onMessage) {
       els.ctxTitle.textContent = "上下文由各网页自行上报";
       els.ctxUrl.textContent = "本页只负责通话";
     }
-  } catch (_) {
-    contextPreferenceKnown = true;
-    contextSyncEnabled = false;
-    say("上下文同步设置不可用", "err");
+  } catch (err) {
+    // Unknown, not off.
+    //
+    // Declaring sync disabled here was the trap: a preference that could not be
+    // read is not a preference set to false, yet this permanently silenced the
+    // link -- and the user turning the switch on changed nothing, because the
+    // switch's value was never the thing being consulted. Leaving it unknown
+    // lets the retry below, and storage.onChanged, still recover.
+    contextPreferenceKnown = false;
+    say("上下文同步设置读取失败,正在重试", "err");
+    // Compact form hides #status, so on an iPad this is the only way the reason
+    // travels. Silence here cost a full evening of guessing.
+    note("设置读取失败: " + describe(err));
+    window.setTimeout(() => { seed(); }, 3000);
   }
 })();
 
