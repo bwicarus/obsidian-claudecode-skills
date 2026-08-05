@@ -144,6 +144,7 @@ targets:
       - path: Widget/BWReaderWidget.swift
       - path: Shared/ReaderNativeBridgeContract.swift
       - path: Shared/ReaderSharedSnapshot.swift
+      - path: Shared/ReaderLocalNoteBridge.swift
     settings:
       base:
         APPLICATION_EXTENSION_API_ONLY: YES
