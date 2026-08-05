@@ -125,6 +125,7 @@ function describe(err) {
 
 const PREFERENCE_KEY = "bwReaderExtensionPreferencesV2";
 const CONTEXT_SYNC_KEY = "eph-ctx-sync";
+const ACTIVE_CONTEXT_KEY = "bwActivePageContextV1";
 
 // Compared before sending. Without it the same page would be resent on every
 // scroll event, each one costing a sequence number and two round trips.
@@ -219,14 +220,22 @@ async function forward(page, force) {
   if (!current) return;
   const signature = `${page.url}|${page.title || ""}|${contentDigest(page.text)}|${contentDigest(page.selection)}`;
   if (!force && signature === lastSignature) return;
-  lastSignature = signature;
 
   try {
     const result = await current.send(page);
     if (result?.skipped) note("待连接,已暂存当前页");
+    else if (result?.ok) lastSignature = signature;
   } catch (err) {
     note("上报失败: " + describe(err));
+    if (lastSignature === signature) lastSignature = "";
   }
+}
+
+function storedPage(value) {
+  if (!value || value.schema !== 1 || !value.page) return null;
+  const age = Date.now() - Number(value.capturedAt || 0);
+  if (!Number.isFinite(age) || age < 0 || age > 5 * 60 * 1000) return null;
+  return value.page.url ? value.page : null;
 }
 
 // Every page announces itself while it is the one being viewed; background tabs
@@ -246,10 +255,17 @@ if (chrome.runtime?.onMessage) {
 // Without it the bridge would sit blank until the user scrolled or switched.
 (async function seed() {
   try {
-    const bag = await chrome.storage.local.get([PREFERENCE_KEY, "bwCallContext"]);
+    const bag = await chrome.storage.local.get([
+      PREFERENCE_KEY,
+      ACTIVE_CONTEXT_KEY,
+      "bwCallContext",
+    ]);
     applyContextPreference(bag?.[PREFERENCE_KEY]);
+    const persisted = storedPage(bag?.[ACTIVE_CONTEXT_KEY]);
     const ctx = bag?.bwCallContext;
-    if (ctx?.url && (!ctx.capturedAt || Date.now() - ctx.capturedAt < 5 * 60 * 1000)) {
+    if (persisted) {
+      forward(persisted, true);
+    } else if (ctx?.url && (!ctx.capturedAt || Date.now() - ctx.capturedAt < 5 * 60 * 1000)) {
       forward(ctx, true);
     } else {
       els.ctxTitle.textContent = "上下文由各网页自行上报";
@@ -264,8 +280,14 @@ if (chrome.runtime?.onMessage) {
 
 if (chrome.storage?.onChanged) {
   chrome.storage.onChanged.addListener((changes, areaName) => {
-    if (areaName !== "local" || !changes?.[PREFERENCE_KEY]) return;
-    applyContextPreference(changes[PREFERENCE_KEY].newValue);
+    if (areaName !== "local" || !changes) return;
+    if (changes[PREFERENCE_KEY]) {
+      applyContextPreference(changes[PREFERENCE_KEY].newValue);
+    }
+    if (changes[ACTIVE_CONTEXT_KEY]) {
+      const page = storedPage(changes[ACTIVE_CONTEXT_KEY].newValue);
+      if (page) forward(page, true);
+    }
   });
 }
 

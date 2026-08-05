@@ -2,7 +2,9 @@ import Foundation
 import MediaPlayer
 import Network
 
-let nativeAppBuildVersion = "1.0.34"
+let nativeAppBuildVersion =
+    Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString")
+        as? String ?? "unknown"
 
 struct NativeVoiceDiagnosticEntry: Identifiable, Equatable {
     let id = UUID()

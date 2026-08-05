@@ -1081,11 +1081,24 @@ extension ReaderWebViewModel: WKScriptMessageHandler {
                 webView.url?.host?.lowercased()
                     == readerStartURL.host?.lowercased(),
                 let body = message.body as? [String: Any],
-                body.count == 2,
-                body["action"] as? String == "toggle",
-                let rawAppKind = body["appKind"] as? String,
-                let appKind = DirectVoiceTargetApp(rawValue: rawAppKind)
+                body["action"] as? String == "toggle"
             else {
+                reportNativeVoiceToggleRejected(rejection)
+                return
+            }
+            let appKind: DirectVoiceTargetApp
+            if body.count == 1, body["appKind"] == nil {
+                // A cached Reader bundle may still send the original
+                // one-field message. It can safely mean Codex only; selecting
+                // Classic continues to require the explicit second field.
+                appKind = .codexDesktop
+            } else if
+                body.count == 2,
+                let rawAppKind = body["appKind"] as? String,
+                let parsed = DirectVoiceTargetApp(rawValue: rawAppKind)
+            {
+                appKind = parsed
+            } else {
                 reportNativeVoiceToggleRejected(rejection)
                 return
             }

@@ -15,6 +15,10 @@ const callPage = read("extensions/bw-reader-webext/call.js");
 const contentScript = read("extensions/bw-reader-webext/content.js");
 const safariPackager = read("extensions/bw-reader-webext/package_safari.py");
 const offscreen = read("extensions/bw-reader-webext/offscreen.js");
+const readerWebView = read("ios/BWReader/App/ReaderWebView.swift");
+const nativeVoiceSystem = read(
+  "ios/BWReader/App/NativeVoiceSystemIntegration.swift",
+);
 
 test("电脑客户端保留原按钮与设置标签，App 与扩展按宿主分流", () => {
   assert.doesNotMatch(assistant, /value="computer_client"/);
@@ -430,6 +434,22 @@ test("扩展上下文按设置和前台状态独立运行，不随语音停止",
   }
   assert.match(contentScript, /\["pageshow", "focus", "online"\]/);
   assert.match(contentScript, /contentDigest\(snap\.text\)/);
+  assert.match(contentScript, /ACTIVE_CONTEXT_KEY = "bwActivePageContextV1"/);
+  assert.match(
+    contentScript,
+    /chrome\.storage\.local\.set\(\{ \[ACTIVE_CONTEXT_KEY\]: envelope \}/,
+  );
+  assert.match(callPage, /ACTIVE_CONTEXT_KEY = "bwActivePageContextV1"/);
+  assert.match(callPage, /function storedPage\(value\)/);
+  assert.match(callPage, /changes\[ACTIVE_CONTEXT_KEY\][\s\S]*forward\(page, true\)/);
+  const forwardStart = callPage.indexOf("async function forward(page, force)");
+  const forwardEnd = callPage.indexOf("function storedPage", forwardStart);
+  const forwardBody = callPage.slice(forwardStart, forwardEnd);
+  assert.ok(
+    forwardBody.indexOf("await current.send(page)") <
+      forwardBody.indexOf("lastSignature = signature"),
+    "page deduplication may advance only after Windows accepts the snapshot",
+  );
   assert.match(callPage, /function closeContextLink\(\)/);
   assert.match(callPage, /if \(!EMBEDDED\) closeWhenDone/);
   const closeWhenDone = callPage.slice(
@@ -437,6 +457,22 @@ test("扩展上下文按设置和前台状态独立运行，不随语音停止",
     callPage.indexOf("// --- embedded form", callPage.indexOf("function closeWhenDone")),
   );
   assert.doesNotMatch(closeWhenDone, /closeContextLink|link\.close/);
+});
+
+test("App 电脑按钮兼容缓存的一字段 Codex 消息，版本号取自安装包", () => {
+  assert.match(
+    readerWebView,
+    /if body\.count == 1, body\["appKind"\] == nil[\s\S]*appKind = \.codexDesktop/,
+  );
+  assert.match(
+    readerWebView,
+    /body\.count == 2[\s\S]*DirectVoiceTargetApp\(rawValue: rawAppKind\)/,
+  );
+  assert.match(
+    nativeVoiceSystem,
+    /CFBundleShortVersionString/,
+  );
+  assert.doesNotMatch(nativeVoiceSystem, /nativeAppBuildVersion = "\d/);
 });
 
 test("扩展上行用 sequence + binary-accepted 单 credit，STATUS 保留 lastError", () => {

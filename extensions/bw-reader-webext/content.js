@@ -360,7 +360,10 @@
   var THROTTLE_MS = 1500;
   var PREFERENCE_KEY = "bwReaderExtensionPreferencesV2";
   var CONTEXT_SYNC_KEY = "eph-ctx-sync";
+  var ACTIVE_CONTEXT_KEY = "bwActivePageContextV1";
   var lastSignature = "";
+  var pendingSignature = "";
+  var contextRevision = 0;
   var timer = null;
   var preferenceKnown = false;
   var contextSyncEnabled = false;
@@ -381,6 +384,7 @@
     contextSyncEnabled = next;
     if (!changed) return;
     lastSignature = "";
+    pendingSignature = "";
     if (contextSyncEnabled) schedule(true);
   }
 
@@ -428,14 +432,45 @@
     if (!snap) return;
     var signature = snap.url + "|" + snap.title + "|" +
       contentDigest(snap.text) + "|" + contentDigest(snap.selection);
-    if (!force && signature === lastSignature) return;
-    lastSignature = signature;
+    if (!force && (signature === lastSignature || signature === pendingSignature)) return;
+    pendingSignature = signature;
+    contextRevision += 1;
+    var envelope = {
+      schema: 1,
+      revision: Date.now() + "-" + contextRevision,
+      capturedAt: Date.now(),
+      page: snap,
+    };
+
+    function finishStorage(success) {
+      if (pendingSignature === signature) pendingSignature = "";
+      if (!success) {
+        schedule(true);
+        return;
+      }
+      lastSignature = signature;
+      // Retain the runtime message as a fast path. The storage record is the
+      // reliable handoff: a late-starting inline call frame reads it back, so
+      // losing this message can no longer leave its lastPage empty forever.
+      try {
+        var result = runtime.sendMessage({ type: "BW_PAGE_ACTIVE", page: snap });
+        if (result && typeof result.catch === "function") result.catch(function () {});
+      } catch (_) {}
+    }
+
     try {
-      // The call page may not exist; then this simply has no receiver. Both
-      // shapes are handled because Safari has answered either way in practice.
-      var result = runtime.sendMessage({ type: "BW_PAGE_ACTIVE", page: snap });
-      if (result && typeof result.catch === "function") result.catch(function () {});
-    } catch (_) {}
+      if (!chrome.storage || !chrome.storage.local) {
+        finishStorage(false);
+        return;
+      }
+      chrome.storage.local.set({ [ACTIVE_CONTEXT_KEY]: envelope }, function () {
+        var failed = false;
+        try { failed = !!(chrome.runtime && chrome.runtime.lastError); } catch (_) {}
+        finishStorage(!failed);
+      });
+    } catch (_) {
+      finishStorage(false);
+    }
   }
 
   function schedule(force) {
