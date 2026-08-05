@@ -23,6 +23,7 @@ env:
   BUNDLE_ID: space.bwicarus.bwreader2
   EXTENSION_BUNDLE_ID: space.bwicarus.bwreader2.Extension
   WIDGET_BUNDLE_ID: space.bwicarus.bwreader2.Widget
+  APP_GROUP_ID: group.space.bwicarus.bwreader2
   EXT_DIR: extensions/bw-reader-webext
   PROJECT_DIR: ios/BWReader
   PROJECT_FILE: ios/BWReader/BWReader.xcodeproj
@@ -51,7 +52,7 @@ jobs:
           python-version: "3.12"
 
       - name: Install packaging dependencies
-        run: python -m pip install --quiet --upgrade pillow
+        run: python -m pip install --quiet --upgrade pillow pyjwt cryptography
 
       - name: Build and capture the Safari package
         id: safari
@@ -237,10 +238,124 @@ jobs:
           API_JSON="$RUNNER_TEMP/fastlane-api-key.json"
           API_KEY_ID="$API_KEY_ID" API_ISSUER_ID="$API_ISSUER_ID" \
           API_KEY_PATH="$RUNNER_TEMP/private_keys/AuthKey_${API_KEY_ID}.p8" \
+          APP_BUNDLE_ID="$BUNDLE_ID" WIDGET_BUNDLE_ID="$WIDGET_BUNDLE_ID" \
           API_JSON="$API_JSON" python <<'PY'
           import json
           import os
+          import time
+          import urllib.parse
+          import urllib.request
           from pathlib import Path
+
+          import jwt
+
+          key = Path(os.environ["API_KEY_PATH"]).read_text()
+          token = jwt.encode(
+              {
+                  "iss": os.environ["API_ISSUER_ID"],
+                  "iat": int(time.time()) - 30,
+                  "exp": int(time.time()) + 600,
+                  "aud": "appstoreconnect-v1",
+              },
+              key,
+              algorithm="ES256",
+              headers={"kid": os.environ["API_KEY_ID"], "typ": "JWT"},
+          )
+
+          def request(method, path, payload=None):
+              body = None if payload is None else json.dumps(payload).encode()
+              req = urllib.request.Request(
+                  "https://api.appstoreconnect.apple.com" + path,
+                  data=body,
+                  method=method,
+                  headers={
+                      "Authorization": "Bearer " + token,
+                      "Content-Type": "application/json",
+                  },
+              )
+              with urllib.request.urlopen(req) as response:
+                  return json.load(response)
+
+          def find_bundle(identifier):
+              query = urllib.parse.urlencode({"filter[identifier]": identifier})
+              values = request("GET", "/v1/bundleIds?" + query)["data"]
+              return values[0] if values else None
+
+          # Reuse the exact App Group settings already approved for the main
+          # App instead of hard-coding a second interpretation of the contract.
+          app_bundle = find_bundle(os.environ["APP_BUNDLE_ID"])
+          if app_bundle is None:
+              raise SystemExit("main App bundle ID is missing")
+          app_caps = request(
+              "GET",
+              f"/v1/bundleIds/{app_bundle['id']}/bundleIdCapabilities",
+          )["data"]
+          app_group = next(
+              (
+                  value
+                  for value in app_caps
+                  if value["attributes"].get("capabilityType") == "APP_GROUPS"
+              ),
+              None,
+          )
+          if app_group is None:
+              raise SystemExit("main App has no App Groups capability to reuse")
+          if not app_group["attributes"].get("settings"):
+              raise SystemExit("main App Groups capability has no reusable settings")
+
+          widget_bundle = find_bundle(os.environ["WIDGET_BUNDLE_ID"])
+          if widget_bundle is None:
+              widget_bundle = request(
+                  "POST",
+                  "/v1/bundleIds",
+                  {
+                      "data": {
+                          "type": "bundleIds",
+                          "attributes": {
+                              "identifier": os.environ["WIDGET_BUNDLE_ID"],
+                              "name": "BWReader Widget",
+                              "platform": "IOS",
+                          },
+                      }
+                  },
+              )["data"]
+              print("registered Widget bundle ID")
+
+          widget_caps = request(
+              "GET",
+              f"/v1/bundleIds/{widget_bundle['id']}/bundleIdCapabilities",
+          )["data"]
+          widget_group = next(
+              (
+                  value
+                  for value in widget_caps
+                  if value["attributes"].get("capabilityType") == "APP_GROUPS"
+              ),
+              None,
+          )
+          if widget_group is None:
+              request(
+                  "POST",
+                  "/v1/bundleIdCapabilities",
+                  {
+                      "data": {
+                          "type": "bundleIdCapabilities",
+                          "attributes": {
+                              "capabilityType": "APP_GROUPS",
+                              "settings": app_group["attributes"].get("settings"),
+                          },
+                          "relationships": {
+                              "bundleId": {
+                                  "data": {
+                                      "type": "bundleIds",
+                                      "id": widget_bundle["id"],
+                                  }
+                              }
+                          },
+                      }
+                  },
+              )
+              print("enabled Widget App Groups capability")
 
           Path(os.environ["API_JSON"]).write_text(
               json.dumps({
@@ -261,6 +376,22 @@ jobs:
             --filename "BWReaderWidget.mobileprovision" \
             --skip_install false
           test -s "$RUNNER_TEMP/BWReaderWidget.mobileprovision"
+          security cms -D -i "$RUNNER_TEMP/BWReaderWidget.mobileprovision" \
+            > "$RUNNER_TEMP/widget-profile.plist"
+          APP_GROUP_ID="$APP_GROUP_ID" PROFILE="$RUNNER_TEMP/widget-profile.plist" \
+          python <<'PY'
+          import os
+          import plistlib
+
+          with open(os.environ["PROFILE"], "rb") as handle:
+              profile = plistlib.load(handle)
+          groups = profile.get("Entitlements", {}).get(
+              "com.apple.security.application-groups", []
+          )
+          if os.environ["APP_GROUP_ID"] not in groups:
+              raise SystemExit("Widget profile is missing the shared App Group")
+          print("validated Widget App Group profile")
+          PY
 
       # All three targets now use deterministic App Store profiles and the one
       # imported distribution certificate; no development certificate is made.
