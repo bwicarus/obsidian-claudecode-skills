@@ -11,7 +11,9 @@ internal sealed record DirectActiveReading(
     JsonElement Page,
     string SelectionState,
     string? Selection,
-    long ObservedAtEpochMilliseconds);
+    long ObservedAtEpochMilliseconds,
+    string? ViewFile = null,
+    JsonElement? ViewPage = null);
 
 internal sealed record DirectSnapshotForwardResult(
     string Outcome,
@@ -193,6 +195,15 @@ internal sealed class FileDirectSnapshotContextAdapter :
                     ["receivedAtEpochMs"] =
                         _utcNow().ToUnixTimeMilliseconds(),
                 };
+                if (
+                    activeReading.ViewFile is not null
+                    && activeReading.ViewPage is JsonElement viewPage
+                )
+                {
+                    next["viewFile"] = activeReading.ViewFile;
+                    next["viewPage"] = JsonNode.Parse(
+                        viewPage.GetRawText());
+                }
                 bool changedPage = _activeReading is not null
                     && !SamePage(_activeReading, next);
                 _activeReading = next;
@@ -309,7 +320,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
         HashSet<string> keys = value.EnumerateObject()
             .Select(property => property.Name)
             .ToHashSet(StringComparer.Ordinal);
-        if (!keys.SetEquals(new[]
+        string[] requiredKeys =
         {
             "kind",
             "file",
@@ -318,7 +329,16 @@ internal sealed class FileDirectSnapshotContextAdapter :
             "selectionState",
             "selection",
             "observedAtEpochMs",
-        }))
+        };
+        HashSet<string> allowedKeys = requiredKeys
+            .Append("viewFile")
+            .Append("viewPage")
+            .ToHashSet(StringComparer.Ordinal);
+        if (
+            requiredKeys.Any(key => !keys.Contains(key))
+            || keys.Any(key => !allowedKeys.Contains(key))
+            || keys.Contains("viewFile") != keys.Contains("viewPage")
+        )
         {
             throw ActiveReadingInvalid();
         }
@@ -330,6 +350,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
             || value.GetProperty("file").GetString() is not string file
             || file.Length is < 1 or > 4096
             || file.Any(char.IsControl)
+            || file.StartsWith("vbook:", StringComparison.Ordinal)
         )
         {
             throw ActiveReadingInvalid();
@@ -376,6 +397,31 @@ internal sealed class FileDirectSnapshotContextAdapter :
         {
             throw ActiveReadingInvalid();
         }
+        string? viewFile = null;
+        JsonElement? viewPage = null;
+        if (keys.Contains("viewFile"))
+        {
+            JsonElement viewFileValue = value.GetProperty("viewFile");
+            JsonElement viewPageValue = value.GetProperty("viewPage");
+            if (
+                kind == "web"
+                || viewFileValue.ValueKind != JsonValueKind.String
+                || viewFileValue.GetString() is not string candidateViewFile
+                || !candidateViewFile.StartsWith(
+                    "vbook:",
+                    StringComparison.Ordinal)
+                || candidateViewFile.Length is < 7 or > 4096
+                || candidateViewFile.Any(char.IsControl)
+                || !ValidPageIdentifier(
+                    JsonNode.Parse(viewPageValue.GetRawText()),
+                    allowNull: false)
+            )
+            {
+                throw ActiveReadingInvalid();
+            }
+            viewFile = candidateViewFile;
+            viewPage = viewPageValue.Clone();
+        }
         JsonElement selectionValue = value.GetProperty("selection");
         string? selection = selectionValue.ValueKind switch
         {
@@ -404,7 +450,9 @@ internal sealed class FileDirectSnapshotContextAdapter :
             page.Clone(),
             selectionState,
             selection,
-            observedAt);
+            observedAt,
+            viewFile,
+            viewPage);
     }
 
     private void FoldJournal(DirectContextEvent contextEvent)
@@ -427,6 +475,23 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 BuildPageContext(value);
             bool changedPage = _stablePage is not null
                 && !SamePage(_stablePage, stablePage);
+            if (
+                _activeReading is JsonObject priorActive
+                && SamePage(priorActive, activeReading)
+                && StringValue(priorActive["viewFile"])
+                    is string priorViewFile
+                && priorViewFile.StartsWith(
+                    "vbook:",
+                    StringComparison.Ordinal)
+                && ValidPageIdentifier(
+                    priorActive["viewPage"],
+                    allowNull: false)
+            )
+            {
+                activeReading["viewFile"] = priorViewFile;
+                activeReading["viewPage"] =
+                    priorActive["viewPage"]?.DeepClone();
+            }
             _stablePage = stablePage;
             _activeReading = activeReading;
             if (changedPage)
@@ -1631,7 +1696,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
         {
             throw JournalInvalid();
         }
-        return new JsonObject
+        JsonObject restored = new()
         {
             ["kind"] = kind,
             ["file"] = file,
@@ -1644,6 +1709,31 @@ internal sealed class FileDirectSnapshotContextAdapter :
             ["receivedAtEpochMs"] =
                 source["receivedAtEpochMs"]?.GetValue<long?>(),
         };
+        bool hasViewFile = source.ContainsKey("viewFile");
+        bool hasViewPage = source.ContainsKey("viewPage");
+        if (hasViewFile != hasViewPage)
+        {
+            throw JournalInvalid();
+        }
+        if (hasViewFile)
+        {
+            string? viewFile = StringValue(source["viewFile"]);
+            JsonNode? viewPage = source["viewPage"]?.DeepClone();
+            if (
+                kind == "web"
+                || viewFile is null
+                || !viewFile.StartsWith("vbook:", StringComparison.Ordinal)
+                || viewFile.Length is < 7 or > 4096
+                || viewFile.Any(char.IsControl)
+                || !ValidPageIdentifier(viewPage, allowNull: false)
+            )
+            {
+                throw JournalInvalid();
+            }
+            restored["viewFile"] = viewFile;
+            restored["viewPage"] = viewPage;
+        }
+        return restored;
     }
 
     private static JsonObject RestoreStablePage(

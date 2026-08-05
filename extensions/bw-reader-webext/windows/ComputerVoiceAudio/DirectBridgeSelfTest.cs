@@ -4111,11 +4111,57 @@ internal static class DirectBridgeSelfTest
                         selectionState = "active",
                         selection = "selected words",
                         observedAtEpochMs = 1_750_000_000_000,
+                        viewFile = "vbook:g_test",
+                        viewPage = 105,
                     },
                 },
                 events,
                 frames).ConfigureAwait(false),
             "active-reading");
+        DirectActiveReading aliasedActiveReading =
+            FileDirectSnapshotContextAdapter.ValidateActiveReading(
+                JsonSerializer.SerializeToElement(new
+                {
+                    kind = "pdf",
+                    file = "books/part-2.pdf",
+                    title = "Merged Book",
+                    page = 7,
+                    selectionState = "unknown",
+                    selection = (string?)null,
+                    observedAtEpochMs = 1_750_000_000_500,
+                    viewFile = "vbook:g_book",
+                    viewPage = 31,
+                }));
+        bool incompleteViewAliasRejected = false;
+        try
+        {
+            _ = FileDirectSnapshotContextAdapter.ValidateActiveReading(
+                JsonSerializer.SerializeToElement(new
+                {
+                    kind = "pdf",
+                    file = "books/part-2.pdf",
+                    title = "Merged Book",
+                    page = 7,
+                    selectionState = "unknown",
+                    selection = (string?)null,
+                    observedAtEpochMs = 1_750_000_000_500,
+                    viewFile = "vbook:g_book",
+                }));
+        }
+        catch (DirectProtocolException exception)
+        {
+            incompleteViewAliasRejected =
+                exception.Code
+                    == "BW_READER_ACTIVE_READING_SCHEMA_INVALID";
+        }
+        Require(
+            aliasedActiveReading.File == "books/part-2.pdf"
+            && aliasedActiveReading.Page.GetInt32() == 7
+            && aliasedActiveReading.ViewFile == "vbook:g_book"
+            && aliasedActiveReading.ViewPage?.GetInt32() == 31
+            && incompleteViewAliasRejected,
+            "direct-active-reading-view-alias-is-paired-and-canonical",
+            checks);
         JsonElement contextAck = RequireSuccess(
             await SendAsync(
                 contextSession,
@@ -4206,6 +4252,15 @@ internal static class DirectBridgeSelfTest
             && snapshotRoot.GetProperty("activeReading")
                 .GetProperty("receivedAtEpochMs").GetInt64()
                 == 1_750_000_005_000
+            && snapshotRoot.GetProperty("activeReading")
+                .GetProperty("file").GetString() == "book.pdf"
+            && snapshotRoot.GetProperty("activeReading")
+                .GetProperty("page").GetInt32() == 5
+            && snapshotRoot.GetProperty("activeReading")
+                .GetProperty("viewFile").GetString()
+                == "vbook:g_test"
+            && snapshotRoot.GetProperty("activeReading")
+                .GetProperty("viewPage").GetInt32() == 105
             && snapshotRoot.GetProperty("currentPage")
                 .GetProperty("text").GetString()
                 == "Windows local snapshot text"
