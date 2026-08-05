@@ -3689,3 +3689,12 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **公式**：设备端普通文字识别不变；公式先复用现有 DocLayout 公式框与 AI LaTeX 批处理，Core ML 版将逐页读取已下载书籍的本地页图，不重复下载整本书。
 - **怎么验的**：JS 语法、专项墨迹故障重放与全量 Reader 合同完成；全量仅保留既有 extension-popup harness 漂移，Swift 类型检查交由 macOS CI。
 - **没做/下一步**：未改 Windows 桥接；发布 1.0.68 后实机验收 PDF/EPUB 落笔、橡皮擦、AI 看合成笔迹及公式框批处理。
+
+## Codex / Claude：Safari 紧凑通话页设置读取兼容（2026-08-05 JST）
+- **改了什么**：`call.js` 同时兼容 callback 与 Promise storage；读取失败保持 unknown 并重试，错误经 frame 通道显示，不再静默当成用户关闭同步。
+- **怎么验的**：JS 语法与上下文专项合同通过；统一 TestFlight 产物由 Codex 集成分支生成，Claude 不再单独出包。
+- **边界/下一步**：Windows 0.1.90 与 App 逻辑未改；用户更新后开启同步并切普通网页，确认快照变为 `kind=web`。
+
+## Codex：iOS 1.0.69 单一制品整合（2026-08-05 JST）
+- **改了什么**：将 App 原生五项、PencilKit/公式接入与 Safari storage 兼容修复合入同一 TestFlight 分支，App、扩展、Widget 版本统一递增。
+- **怎么验/下一步**：专项合同、JS 语法与 Safari 打包通过后上传；Windows 0.1.90 未改，用户只需验普通网页约两秒内覆盖为 `kind=web`。

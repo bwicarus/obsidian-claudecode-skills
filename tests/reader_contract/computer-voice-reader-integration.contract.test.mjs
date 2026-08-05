@@ -446,6 +446,14 @@ test("扩展上下文按设置和前台状态独立运行，不随语音停止",
   );
   assert.match(background, /LOCAL_STORAGE_KEYS = new Set\(\[[\s\S]*"bwActivePageContextV1"/);
   assert.match(callPage, /ACTIVE_CONTEXT_KEY = "bwActivePageContextV1"/);
+  assert.match(callPage, /function storageGet\(keys\)/);
+  assert.match(callPage, /chrome\.storage\.local\.get\(keys, \(bag\) =>/);
+  assert.match(callPage, /returned\.then\(done, fail\)/);
+  assert.match(callPage, /const bag = await storageGet\(\[/);
+  assert.match(
+    callPage,
+    /contextPreferenceKnown = false;[\s\S]*note\("设置读取失败: " \+ describe\(err\)\)[\s\S]*seed\(\)/,
+  );
   assert.match(callPage, /function storedPage\(value\)/);
   assert.match(callPage, /changes\[ACTIVE_CONTEXT_KEY\][\s\S]*forward\(page, true\)/);
   const forwardStart = callPage.indexOf("async function forward(page, force)");
