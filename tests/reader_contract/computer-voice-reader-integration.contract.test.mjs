@@ -473,6 +473,25 @@ test("扩展上下文按设置和前台状态独立运行，不随语音停止",
   assert.doesNotMatch(closeWhenDone, /closeContextLink|link\.close/);
 });
 
+test("普通网页上下文优先同页直投，不再被偏好读取或后台进程阻断", () => {
+  assert.match(contentScript, /function deliverToFrame\(snap\)/);
+  assert.match(contentScript, /iframe\[src\*="call\.html"\]/);
+  assert.match(
+    contentScript,
+    /contract: "bw-page-context\/1", type: "page", page: snap/,
+  );
+  assert.match(
+    callPage,
+    /d\.contract !== "bw-page-context\/1"[\s\S]*forwardDirect\(d\.page\)/,
+  );
+  const directStart = callPage.indexOf("async function forwardDirect(page)");
+  const directEnd = callPage.indexOf("function ensureDirectLink", directStart);
+  const directBody = callPage.slice(directStart, directEnd);
+  assert.match(directBody, /if \(!contextSurfaceVisible\(\)\) return/);
+  assert.match(directBody, /const current = ensureDirectLink\(\)/);
+  assert.doesNotMatch(directBody, /contextPreferenceKnown|contextSyncEnabled/);
+});
+
 test("App 电脑按钮兼容缓存的一字段 Codex 消息，版本号取自安装包", () => {
   assert.match(
     readerWebView,
