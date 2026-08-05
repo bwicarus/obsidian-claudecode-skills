@@ -289,22 +289,99 @@ window.addEventListener("message", (event) => {
 //
 // Document visibility is still honoured: background tabs stay quiet, so a dozen
 // open tabs cannot argue over what the assistant is looking at.
+// One-shot delivery. No socket, no handshake, no session.
+//
+// A page's context is used once and thrown away: collect, send, done. It was
+// travelling over the voice link's machinery -- WebSocket, hello, context-open,
+// session id, reconnect backoff -- all of which exists to keep a conversation
+// alive across time, and none of which this needs.
+//
+// The cost was not complexity but reach: a socket has to be held open by a
+// document that stays alive, and on iOS every extension document is short-lived.
+// That made "which document can hold the connection" the central problem for an
+// evening. For a POST it is not a problem at all -- the frame only has to exist
+// at the instant of sending, and it is recreated with every page.
+const SNAPSHOT_POST_URL =
+  "https://bwicarus-2.taile44d0c.ts.net/reader-context/snapshot";
+
+function randomHex(length) {
+  const hex = "0123456789abcdef";
+  let out = "";
+  for (let i = 0; i < length; i += 1) out += hex[(Math.random() * 16) | 0];
+  return out;
+}
+
+async function postSnapshot(page) {
+  const url = String(page.url || "");
+  const text = String(page.text || "").slice(0, 12000);
+  const selection = String(page.selection || "").slice(0, 400);
+  const body = {
+    event: {
+      v: 1,
+      seq: 1,
+      type: "page.context",
+      event: "page.context",
+      ts: Math.floor(Date.now() / 1000),
+      id: randomHex(16),
+      stable: true,
+      book_id: url,
+      file: url,
+      page: 0,
+      title: String(page.title || ""),
+      kind: "web",
+      text_available: !!text,
+      page_context: {
+        text,
+        text_available: !!text,
+        text_source: "extension-page",
+        fallback_reason: text ? null : "扩展未取得正文",
+        truncated: String(page.text || "").length > 12000,
+        reason: "active",
+        visual: null,
+        embeds: { highlights: 0, blocks: 0, unanchored: [] },
+      },
+    },
+    // Nested under `active` with its own shape -- sent flat the bridge refuses
+    // it, and because the context half succeeds first, the refusal would be
+    // invisible: the snapshot updates while the reading position silently does
+    // not.
+    active: {
+      kind: "web",
+      file: url,
+      title: String(page.title || ""),
+      page: 0,
+      selectionState: selection ? "active" : "cleared",
+      selection: selection || null,
+      observedAtEpochMs: Date.now(),
+    },
+  };
+  const response = await fetch(SNAPSHOT_POST_URL, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+    cache: "no-store",
+  });
+  if (!response.ok) {
+    let detail = "";
+    try { detail = (await response.text()).slice(0, 200); } catch (_) {}
+    throw new Error(`HTTP ${response.status}${detail ? " " + detail : ""}`);
+  }
+}
+
 async function forwardDirect(page) {
   lastPage = page;
   render(page);
   if (!contextSurfaceVisible()) return;
-  const current = ensureDirectLink();
-  if (!current) return;
   const signature =
     `${page.url}|${page.title || ""}|` +
     `${contentDigest(page.text)}|${contentDigest(page.selection)}`;
   if (signature === lastSignature) return;
   try {
-    const result = await current.send(page);
-    if (result?.ok) lastSignature = signature;
-    else if (result?.skipped) note("待连接,已暂存当前页");
+    await postSnapshot(page);
+    lastSignature = signature;
   } catch (err) {
-    note("直投失败: " + describe(err));
+    // Said out loud. Every silent failure in this chain cost a build to find.
+    note("快照投递失败: " + describe(err));
     if (lastSignature === signature) lastSignature = "";
   }
 }
