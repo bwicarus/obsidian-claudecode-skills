@@ -123,11 +123,18 @@ function describe(err) {
   return err.message || String(err);
 }
 
+const PREFERENCE_KEY = "bwReaderExtensionPreferencesV2";
+const CONTEXT_SYNC_KEY = "eph-ctx-sync";
+
 // Compared before sending. Without it the same page would be resent on every
 // scroll event, each one costing a sequence number and two round trips.
 let lastSignature = "";
+let lastPage = null;
+let contextPreferenceKnown = false;
+let contextSyncEnabled = false;
+let link = null;
 
-const link = new ContextLink((s) => {
+function contextLinkStatus(s) {
   if (s.state === "open") say("● 已连接,正在跟随", "ok");
   else if (s.state === "connecting") say("正在连接…");
   else if (s.state === "retrying") {
@@ -137,7 +144,65 @@ const link = new ContextLink((s) => {
     say("✗ 握手失败", "err");
     note("握手: " + describe(s.error));
   }
-});
+}
+
+function enabledFromRecord(record) {
+  return !!(
+    record &&
+    record.schema === 2 &&
+    record.values &&
+    record.values[CONTEXT_SYNC_KEY] === "1"
+  );
+}
+
+function contextSurfaceVisible() {
+  return document.visibilityState !== "hidden";
+}
+
+function closeContextLink() {
+  const current = link;
+  link = null;
+  lastSignature = "";
+  if (!current) return;
+  try { current.close(); } catch (_) {}
+}
+
+function ensureContextLink() {
+  if (!contextPreferenceKnown || !contextSyncEnabled || !contextSurfaceVisible()) {
+    return null;
+  }
+  if (!link) {
+    link = new ContextLink(contextLinkStatus);
+    link.connect();
+  }
+  return link;
+}
+
+function applyContextPreference(record) {
+  const next = enabledFromRecord(record);
+  const changed = !contextPreferenceKnown || next !== contextSyncEnabled;
+  contextPreferenceKnown = true;
+  contextSyncEnabled = next;
+  if (!changed) return;
+  lastSignature = "";
+  if (!contextSyncEnabled) {
+    closeContextLink();
+    say("上下文同步已关闭", "dim");
+    return;
+  }
+  const current = ensureContextLink();
+  if (current && lastPage) forward(lastPage, true);
+}
+
+function contentDigest(value) {
+  const text = String(value || "");
+  let hash = 2166136261;
+  for (let i = 0; i < text.length; i += 1) {
+    hash ^= text.charCodeAt(i);
+    hash = Math.imul(hash, 16777619);
+  }
+  return (hash >>> 0).toString(16);
+}
 
 function render(page) {
   els.ctxTitle.textContent = page.title || "(无标题)";
@@ -146,14 +211,18 @@ function render(page) {
     (page.selection ? `　·　选中 ${page.selection.length} 字` : "");
 }
 
-async function forward(page) {
-  const signature = `${page.url}|${(page.text || "").length}|${page.selection || ""}`;
-  if (signature === lastSignature) return;
+async function forward(page, force) {
+  lastPage = page;
+  render(page);
+  if (!contextPreferenceKnown || !contextSyncEnabled || !contextSurfaceVisible()) return;
+  const current = ensureContextLink();
+  if (!current) return;
+  const signature = `${page.url}|${page.title || ""}|${contentDigest(page.text)}|${contentDigest(page.selection)}`;
+  if (!force && signature === lastSignature) return;
   lastSignature = signature;
 
-  render(page);
   try {
-    const result = await link.send(page);
+    const result = await current.send(page);
     if (result?.skipped) note("待连接,已暂存当前页");
   } catch (err) {
     note("上报失败: " + describe(err));
@@ -168,7 +237,7 @@ if (chrome.runtime?.onMessage) {
     // message; this side owns the connection and the protocol. That division is
     // what made it work in 1.0.25, and what the later attempt gave up by having
     // each page open its own socket.
-    if (message?.type === "BW_PAGE_ACTIVE" && message.page) forward(message.page);
+    if (message?.type === "BW_PAGE_ACTIVE" && message.page) forward(message.page, false);
     return undefined;
   });
 }
@@ -176,18 +245,43 @@ if (chrome.runtime?.onMessage) {
 // The page that was open when this bridge was started, captured by the popup.
 // Without it the bridge would sit blank until the user scrolled or switched.
 (async function seed() {
-  link.connect();
   try {
-    const bag = await chrome.storage.local.get("bwCallContext");
+    const bag = await chrome.storage.local.get([PREFERENCE_KEY, "bwCallContext"]);
+    applyContextPreference(bag?.[PREFERENCE_KEY]);
     const ctx = bag?.bwCallContext;
     if (ctx?.url && (!ctx.capturedAt || Date.now() - ctx.capturedAt < 5 * 60 * 1000)) {
-      forward(ctx);
+      forward(ctx, true);
     } else {
       els.ctxTitle.textContent = "上下文由各网页自行上报";
       els.ctxUrl.textContent = "本页只负责通话";
     }
-  } catch (_) {}
+  } catch (_) {
+    contextPreferenceKnown = true;
+    contextSyncEnabled = false;
+    say("上下文同步设置不可用", "err");
+  }
 })();
+
+if (chrome.storage?.onChanged) {
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== "local" || !changes?.[PREFERENCE_KEY]) return;
+    applyContextPreference(changes[PREFERENCE_KEY].newValue);
+  });
+}
+
+function resumeContextLink() {
+  if (!contextSurfaceVisible()) {
+    closeContextLink();
+    return;
+  }
+  const current = ensureContextLink();
+  if (current && lastPage) forward(lastPage, true);
+}
+
+document.addEventListener("visibilitychange", resumeContextLink, { passive: true });
+window.addEventListener("pageshow", resumeContextLink, { passive: true });
+window.addEventListener("focus", resumeContextLink, { passive: true });
+window.addEventListener("online", resumeContextLink, { passive: true });
 
 // --- placing a call from here ------------------------------------------------
 // Either side may start it, and whoever does holds it: the other end only sends
@@ -311,7 +405,7 @@ if (els.btn) {
       //
       // Briefly delayed so the reason stays readable when the call ended in a
       // failure -- closing instantly would take the explanation with it.
-      closeWhenDone(s?.error ? 4000 : 600);
+      if (!EMBEDDED) closeWhenDone(s?.error ? 4000 : 600);
     }
   });
 
@@ -356,9 +450,6 @@ if (els.btn) {
 // page stays and says so rather than appearing stuck.
 function closeWhenDone(delayMs) {
   setTimeout(() => {
-    try {
-      link.close();
-    } catch (_) {}
     try {
       window.close();
     } catch (_) {}
@@ -409,4 +500,4 @@ if (embedded && window.parent !== window) {
   });
 }
 
-window.addEventListener("pagehide", () => link.close());
+window.addEventListener("pagehide", closeContextLink);

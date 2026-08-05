@@ -17,6 +17,7 @@ struct BWReaderNativeApp: App {
 }
 
 private struct ReaderRootView: View {
+    @Environment(\.scenePhase) private var scenePhase
     @StateObject private var reader = ReaderWebViewModel()
     @ObservedObject var voiceBridge: NativeVoiceBridge
     @ObservedObject var nativeCommandReceiver: ReaderNativeCommandReceiver
@@ -90,6 +91,9 @@ private struct ReaderRootView: View {
         }
         .onOpenURL { url in
             nativeCommandReceiver.receive(url)
+        }
+        .onChange(of: scenePhase, initial: true) { _, phase in
+            reader.setReaderForeground(phase == .active)
         }
         .sheet(isPresented: $showsDiagnostics) {
             NativeVoiceDiagnosticsView(bridge: voiceBridge)

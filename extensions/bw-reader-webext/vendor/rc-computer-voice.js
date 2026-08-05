@@ -4422,7 +4422,29 @@ if (window.__bwPwaProviderOnly) return;
     return state;
   }
 
+  function nativeReaderUsesDedicatedContextLink() {
+    return window.__BW_NATIVE_COMPUTER_VOICE__ === true;
+  }
+
+  function readerContextSurfaceVisible() {
+    if (
+      nativeReaderUsesDedicatedContextLink() &&
+      window.__BW_NATIVE_READER_FOREGROUND__ === false
+    ) {
+      return false;
+    }
+    return !document || document.visibilityState !== "hidden";
+  }
+
   function reconcileNativeContextRelay() {
+    // The App voice socket owns audio only. Reader context has its own
+    // /reader-context/v1 connection and must stay alive whether this device,
+    // another device, or no device currently owns the voice session.
+    if (nativeReaderUsesDedicatedContextLink()) {
+      nativeContextHandoffPending = false;
+      stopNativeContextRelay();
+      return reconcileSnapshotLink();
+    }
     var value = nativeComputerVoiceState();
     if (
       value &&
@@ -4480,6 +4502,9 @@ if (window.__bwPwaProviderOnly) return;
               ))
         );
     return modeReady.then(function () {
+      if (nativeReaderUsesDedicatedContextLink()) {
+        return reconcileSnapshotLink();
+      }
       return stopSnapshotLink();
     }).then(function () {
       return "native-ready";
@@ -4491,14 +4516,17 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   function snapshotLinkWanted() {
+    var independentOfVoice = nativeReaderUsesDedicatedContextLink();
     return !!(
       ownsReaderUi() &&
       contextSyncEnabled() &&
       contextDeliveryMode !== CONTEXT_DELIVERY_LEGACY &&
       !contextModeChanging &&
-      !active &&
-      !dialPending &&
-      !nativeComputerVoiceOwnsWss()
+      readerContextSurfaceVisible() &&
+      (
+        independentOfVoice ||
+        (!active && !dialPending && !nativeComputerVoiceOwnsWss())
+      )
     );
   }
 
@@ -4643,23 +4671,15 @@ if (window.__bwPwaProviderOnly) return;
       } catch (_) {}
     }
     return closing.catch(function () {}).then(function () {
-      // Windows accepts exactly one Reader WSS. Never let a replacement race
-      // the old connection's server-side finally block: reconnect only after
-      // the browser/relay close has settled (or its bounded close timeout did).
+      // One page owns at most one of its own context links. Reconnect only
+      // after that link has settled; Windows may simultaneously accept links
+      // from other Apps/devices and applies their valid updates by arrival.
       scheduleSnapshotReconnect(delay);
     });
   }
 
   function resumeSnapshotLinkFromForeground(event) {
-    if (
-      event &&
-      event.type === "visibilitychange" &&
-      document &&
-      document.visibilityState === "hidden"
-    ) {
-      return;
-    }
-    if (!snapshotLinkWanted()) return;
+    if (!snapshotLinkWanted()) return reconcileSnapshotLink();
     // iOS may suspend this one-second timer while the PWA is backgrounded.
     // Foreground signals are an explicit wake-up: discard the suspended timer
     // and reconcile now. `reconcileSnapshotLink` itself fences an existing
@@ -5625,6 +5645,11 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   function contextSyncChanged() {
+    if (nativeReaderUsesDedicatedContextLink()) {
+      stopNativeContextRelay();
+      if (!contextSyncEnabled()) return clearSnapshotLink();
+      return reconcileSnapshotLink();
+    }
     if (nativeContextState && !nativeContextState.stopped) {
       if (contextSyncEnabled()) {
         startContextPump(nativeContextState);
@@ -5822,6 +5847,10 @@ if (window.__bwPwaProviderOnly) return;
     window.addEventListener(
       "bw-native-computer-voice-state",
       reconcileNativeContextRelay
+    );
+    window.addEventListener(
+      "bw-native-reader-foreground",
+      resumeSnapshotLinkFromForeground
     );
   }
   if (document && typeof document.addEventListener === "function") {

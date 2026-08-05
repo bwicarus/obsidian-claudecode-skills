@@ -358,8 +358,41 @@
 
   var MAX_TEXT = 12000;
   var THROTTLE_MS = 1500;
+  var PREFERENCE_KEY = "bwReaderExtensionPreferencesV2";
+  var CONTEXT_SYNC_KEY = "eph-ctx-sync";
   var lastSignature = "";
   var timer = null;
+  var preferenceKnown = false;
+  var contextSyncEnabled = false;
+
+  function enabledFromRecord(record) {
+    return !!(
+      record &&
+      record.schema === 2 &&
+      record.values &&
+      record.values[CONTEXT_SYNC_KEY] === "1"
+    );
+  }
+
+  function applyPreference(record) {
+    var next = enabledFromRecord(record);
+    var changed = !preferenceKnown || next !== contextSyncEnabled;
+    preferenceKnown = true;
+    contextSyncEnabled = next;
+    if (!changed) return;
+    lastSignature = "";
+    if (contextSyncEnabled) schedule(true);
+  }
+
+  function contentDigest(value) {
+    var text = String(value || "");
+    var hash = 2166136261;
+    for (var i = 0; i < text.length; i += 1) {
+      hash ^= text.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return (hash >>> 0).toString(16);
+  }
 
   function snapshot() {
     var body = document.body;
@@ -386,14 +419,16 @@
     };
   }
 
-  function report() {
+  function report(force) {
+    if (!preferenceKnown || !contextSyncEnabled) return;
     // Only the page in front of the user. Background tabs stay silent, so a
     // dozen open tabs cannot fight over what the assistant is looking at.
     if (document.visibilityState !== "visible") return;
     var snap = snapshot();
     if (!snap) return;
-    var signature = snap.url + "|" + snap.text.length + "|" + snap.selection;
-    if (signature === lastSignature) return;
+    var signature = snap.url + "|" + snap.title + "|" +
+      contentDigest(snap.text) + "|" + contentDigest(snap.selection);
+    if (!force && signature === lastSignature) return;
     lastSignature = signature;
     try {
       // The call page may not exist; then this simply has no receiver. Both
@@ -403,19 +438,42 @@
     } catch (_) {}
   }
 
-  function schedule() {
+  function schedule(force) {
+    if (force) lastSignature = "";
     if (timer) return;
     timer = setTimeout(function () {
       timer = null;
-      report();
+      report(!!force);
     }, THROTTLE_MS);
   }
 
   try {
-    document.addEventListener("visibilitychange", schedule, { passive: true });
-    document.addEventListener("selectionchange", schedule, { passive: true });
-    window.addEventListener("scroll", schedule, { passive: true });
-    // Late enough that a client-rendered page has content by now.
-    setTimeout(report, 1200);
+    document.addEventListener("visibilitychange", function () {
+      if (document.visibilityState === "visible") schedule(true);
+    }, { passive: true });
+    document.addEventListener("selectionchange", function () {
+      schedule(false);
+    }, { passive: true });
+    window.addEventListener("scroll", function () {
+      schedule(false);
+    }, { passive: true });
+    ["pageshow", "focus", "online"].forEach(function (type) {
+      window.addEventListener(type, function () { schedule(true); }, { passive: true });
+    });
+
+    if (chrome.storage && chrome.storage.local) {
+      Promise.resolve(chrome.storage.local.get(PREFERENCE_KEY)).then(function (bag) {
+        applyPreference(bag && bag[PREFERENCE_KEY]);
+      }).catch(function () {
+        preferenceKnown = true;
+        contextSyncEnabled = false;
+      });
+      if (chrome.storage.onChanged) {
+        chrome.storage.onChanged.addListener(function (changes, areaName) {
+          if (areaName !== "local" || !changes || !changes[PREFERENCE_KEY]) return;
+          applyPreference(changes[PREFERENCE_KEY].newValue);
+        });
+      }
+    }
   } catch (_) {}
 })();

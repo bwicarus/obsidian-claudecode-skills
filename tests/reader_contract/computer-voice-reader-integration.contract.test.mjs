@@ -11,10 +11,9 @@ const runtime = read("_server_deploy/static/pdf/rc-computer-voice.js");
 const settings = read("_server_deploy/static/pdf/rc-settings.js");
 const background = read("extensions/bw-reader-webext/background.js");
 const facade = read("extensions/bw-reader-webext/src/facade.js");
+const callPage = read("extensions/bw-reader-webext/call.js");
+const contentScript = read("extensions/bw-reader-webext/content.js");
 const safariPackager = read("extensions/bw-reader-webext/package_safari.py");
-const inlineComputerVoice = read(
-  "extensions/bw-reader-webext/inline-computer-voice.js",
-);
 const offscreen = read("extensions/bw-reader-webext/offscreen.js");
 
 test("电脑客户端保留原按钮与设置标签，App 与扩展按宿主分流", () => {
@@ -190,23 +189,23 @@ test("Safari 扩展电脑按钮直接启停 RC bridge，App WebView 仍走 postM
   );
 });
 
-test("Safari 侧栏电脑按钮在原位置使用扩展前台文档直连，不依赖后台 relay", () => {
-  assert.match(facade, /startsWith\('safari-web-extension:\/\/'\)/);
-  assert.match(facade, /runtime\.getURL\('inline-computer-voice\.html'\)/);
+test("Safari 侧栏电脑按钮在原位置嵌入扩展通话页直连，不依赖后台 relay", () => {
+  assert.match(facade, /\^\(safari-web-extension\|chrome-extension\|moz-extension\)/);
+  assert.match(facade, /runtime\.getURL\('call\.html\?compact=1'\)/);
   assert.match(facade, /setAttribute\('allow', 'microphone; autoplay'\)/);
-  assert.match(facade, /document\.getElementById\('asst-computer'\)/);
-  assert.match(facade, /document\.getElementById\('vc-top-computer'\)/);
+  assert.match(facade, /getElementById\('asst-computer'\)/);
+  assert.match(facade, /getElementById\('vc-top-computer'\)/);
   assert.match(
-    inlineComputerVoice,
-    /RC\.computerVoice\.startFromUserGesture\(\{ appKind: appKind \}\)/,
+    callPage,
+    /RC\.computerVoice\.startFromUserGesture/,
   );
   assert.doesNotMatch(
-    inlineComputerVoice,
-    /runtime\.connect|sendNativeMessage|window\.location|call\.html/,
+    callPage,
+    /runtime\.connect|sendNativeMessage/,
   );
   assert.match(
     safariPackager,
-    /"resources": \["inline-computer-voice\.html"\][\s\S]*"matches": \["https:\/\/\*\/\*", "http:\/\/\*\/\*"\]/,
+    /"resources": \["call\.html", "inline-computer-voice\.html"\][\s\S]*"matches": \["https:\/\/\*\/\*", "http:\/\/\*\/\*"\]/,
   );
 });
 
@@ -366,7 +365,7 @@ test("BWReader App 接管电脑按钮后，网页运行时不会预备麦克风�
   assert.doesNotMatch(runtime, /connectNative|RTCPeerConnection|signalTransport/);
 });
 
-test("App 原生语音复用同一 WSS 承载 Reader 上下文且停止时清泵", () => {
+test("App 原生语音与 Reader 上下文使用独立 WSS，语音启停不再切断快照", () => {
   assert.match(
     runtime,
     /function nativeContextRequest\(action, fields, timeoutMs\)[\s\S]*action !== "context" && action !== "active-reading"[\s\S]*bwNativeComputerContext\.postMessage\(\{[\s\S]*requestId:[\s\S]*action:[\s\S]*fields:/,
@@ -377,11 +376,19 @@ test("App 原生语音复用同一 WSS 承载 Reader 上下文且停止时清泵
   );
   assert.match(
     runtime,
-    /function prepareNativeContextHandoff\(\)[\s\S]*nativeContextHandoffPending = true[\s\S]*RC\.ctxSync\.getConfig\(\)[\s\S]*contextDeliveryMode = value\.deliveryMode[\s\S]*return stopSnapshotLink\(\)/,
+    /function prepareNativeContextHandoff\(\)[\s\S]*nativeContextHandoffPending = true[\s\S]*RC\.ctxSync\.getConfig\(\)[\s\S]*contextDeliveryMode = value\.deliveryMode[\s\S]*nativeReaderUsesDedicatedContextLink\(\)[\s\S]*return reconcileSnapshotLink\(\)/,
   );
   assert.match(
     runtime,
-    /function snapshotLinkWanted\(\)[\s\S]*!nativeComputerVoiceOwnsWss\(\)/,
+    /function snapshotLinkWanted\(\)[\s\S]*independentOfVoice[\s\S]*readerContextSurfaceVisible\(\)[\s\S]*independentOfVoice \|\|[\s\S]*!nativeComputerVoiceOwnsWss\(\)/,
+  );
+  assert.match(
+    runtime,
+    /function reconcileNativeContextRelay\(\)[\s\S]*nativeReaderUsesDedicatedContextLink\(\)[\s\S]*stopNativeContextRelay\(\)[\s\S]*return reconcileSnapshotLink\(\)/,
+  );
+  assert.match(
+    runtime,
+    /"bw-native-reader-foreground",\s*resumeSnapshotLinkFromForeground/,
   );
   assert.match(
     runtime,
@@ -408,6 +415,24 @@ test("App 原生语音复用同一 WSS 承载 Reader 上下文且停止时清泵
     runtime,
     /GPT Classic：[\s\S]*“测试旧版文字注入”[\s\S]*实时快照\/MCP 仍属于 Codex/,
   );
+});
+
+test("扩展上下文按设置和前台状态独立运行，不随语音停止", () => {
+  for (const source of [callPage, contentScript]) {
+    assert.match(source, /bwReaderExtensionPreferencesV2/);
+    assert.match(source, /eph-ctx-sync/);
+    assert.match(source, /chrome\.storage\.onChanged/);
+    assert.match(source, /document\.visibilityState/);
+  }
+  assert.match(contentScript, /\["pageshow", "focus", "online"\]/);
+  assert.match(contentScript, /contentDigest\(snap\.text\)/);
+  assert.match(callPage, /function closeContextLink\(\)/);
+  assert.match(callPage, /if \(!EMBEDDED\) closeWhenDone/);
+  const closeWhenDone = callPage.slice(
+    callPage.indexOf("function closeWhenDone"),
+    callPage.indexOf("// --- embedded form", callPage.indexOf("function closeWhenDone")),
+  );
+  assert.doesNotMatch(closeWhenDone, /closeContextLink|link\.close/);
 });
 
 test("扩展上行用 sequence + binary-accepted 单 credit，STATUS 保留 lastError", () => {
@@ -451,7 +476,7 @@ test("Reader v3 固定 WSS 免配对直连，不保存身份或显示显式配�
   );
   assert.match(
     runtime,
-    /endpoint: window\.__BW_NATIVE_COMPUTER_VOICE__ === true[\s\S]*\? CONTEXT_ENDPOINT[\s\S]*: DIRECT_ENDPOINT/,
+    /var snapshotEndpoint = \([\s\S]*window\.__BW_NATIVE_COMPUTER_VOICE__ === true[\s\S]*\? CONTEXT_ENDPOINT : DIRECT_ENDPOINT[\s\S]*endpoint: snapshotEndpoint/,
   );
   assert.doesNotMatch(
     runtime,

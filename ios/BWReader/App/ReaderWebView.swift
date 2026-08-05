@@ -74,6 +74,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var externalNativeAgentControlTask: Task<Void, Never>?
     private var nativePencilInteraction: UIPencilInteraction?
     private var lastNativePencilTapTimestamp: TimeInterval = -1
+    private var readerForeground = true
 
     override init() {
         let configuration = WKWebViewConfiguration()
@@ -119,6 +120,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             source: """
             (() => {
               window.__BW_NATIVE_COMPUTER_VOICE__ = true;
+              window.__BW_NATIVE_READER_FOREGROUND__ = true;
               window.__BW_NATIVE_COMPUTER_VOICE_APP_VERSION__ =
                 "\(nativeAppBuildVersion)";
 
@@ -405,6 +407,25 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             timeoutInterval: 30
         )
         webView.load(request)
+    }
+
+    func setReaderForeground(_ foreground: Bool) {
+        readerForeground = foreground
+        guard webView.url != nil else {
+            return
+        }
+        let value = foreground ? "true" : "false"
+        webView.evaluateJavaScript(
+            """
+            (() => {
+              window.__BW_NATIVE_READER_FOREGROUND__ = \(value);
+              window.dispatchEvent(new CustomEvent(
+                "bw-native-reader-foreground",
+                { detail: { active: \(value) } }
+              ));
+            })();
+            """
+        )
     }
 
     func prepareForNativeVoice() async throws {
@@ -1117,6 +1138,7 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         if let nativeVoiceBridge {
             updateNativeVoiceButton(state: nativeVoiceBridge.state)
         }
+        setReaderForeground(readerForeground)
         updateNativeAgentVoiceState()
     }
 
