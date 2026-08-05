@@ -362,6 +362,38 @@
   var CONTEXT_SYNC_KEY = "eph-ctx-sync";
   var ACTIVE_CONTEXT_KEY = "bwActivePageContextV1";
 
+  // Shows a line on the page itself.
+  //
+  // Every diagnostic so far travelled through the frame to the host, which
+  // means a broken frame silenced the very report meant to reveal it -- an
+  // instrument wired through the thing it was measuring. This writes straight
+  // into the page, owes nothing to the frame, and is the only way to see the
+  // steps that happen before the frame is involved at all.
+  //
+  // Temporary. It exists to answer one question and should come out once the
+  // answer is in.
+  function probeLine(text) {
+    try {
+      var box = document.getElementById("__bw_probe");
+      if (!box) {
+        box = document.createElement("div");
+        box.id = "__bw_probe";
+        box.style.cssText =
+          "position:fixed;left:8px;bottom:8px;z-index:2147483647;" +
+          "max-width:70vw;max-height:40vh;overflow:auto;" +
+          "background:rgba(12,18,32,.92);color:#cfe3ff;" +
+          "font:11px/1.5 ui-monospace,Menlo,monospace;" +
+          "padding:8px 10px;border-radius:8px;white-space:pre-wrap;" +
+          "pointer-events:none";
+        (document.body || document.documentElement).appendChild(box);
+      }
+      var stamp = new Date().toLocaleTimeString();
+      var nl = String.fromCharCode(10);
+      box.textContent = (stamp + "  " + text + nl + box.textContent)
+        .split(nl).slice(0, 12).join(nl);
+    } catch (_) {}
+  }
+
   // Delivers a snapshot to the bridge frame embedded in this page.
   //
   // The frame lives in the extension's shadow tree, which this script can reach
@@ -372,6 +404,10 @@
     try {
       var scope = window.__bwShadow || document;
       var frame = scope.querySelector('iframe[src*="call.html"]');
+      probeLine(
+        "找框: shadow=" + (window.__bwShadow ? "有" : "无") +
+        " 框=" + (frame ? "有" : "无")
+      );
       if (!frame || !frame.contentWindow) {
         if (!window.__bwFrameMissingReported) {
           window.__bwFrameMissingReported = true;
@@ -492,7 +528,9 @@
       // in silence, and no way to tell from the outside which one had.
       //
       // The frame is a child of this document. Nothing needs to leave the page.
-      deliverToFrame(snap);
+      probeLine("采集: " + String(snap && snap.url || "").slice(0, 60));
+      var delivered = deliverToFrame(snap);
+      probeLine("投递到框: " + (delivered ? "成功" : "失败(没找到框)"));
       // Kept only as a fallback for surfaces with no frame of their own.
       try {
         var result = runtime.sendMessage({ type: "BW_PAGE_ACTIVE", page: snap });
