@@ -111,17 +111,12 @@ extension ReaderWebViewModel {
         _ body: String,
         arguments: [String: Any]
     ) async throws -> [String: Any] {
-        let raw: Any = try await withCheckedThrowingContinuation {
-            (continuation: CheckedContinuation<Any, Error>) in
-            webView.callAsyncJavaScript(
-                body,
-                arguments: arguments,
-                in: nil,
-                contentWorld: .page
-            ) { result in
-                continuation.resume(with: result)
-            }
-        }
+        let raw: Any? = try await webView.callAsyncJavaScript(
+            body,
+            arguments: arguments,
+            in: nil,
+            contentWorld: .page
+        )
         guard
             let json = raw as? String,
             let data = json.data(using: .utf8),
