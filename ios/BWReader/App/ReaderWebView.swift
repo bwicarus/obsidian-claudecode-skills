@@ -74,6 +74,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var externalNativeAgentControlTask: Task<Void, Never>?
     private var nativePencilInteraction: UIPencilInteraction?
     private var lastNativePencilTapTimestamp: TimeInterval = -1
+    private let nativePencilSettings = NativePencilSettings.shared
     private var readerForeground = true
 
     override init() {
@@ -713,9 +714,20 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     }
 
     private func resolvedNativePencilAction(
+        mapping: NativePencilGestureMapping,
         preferredAction: UIPencilPreferredAction,
         fallback: NativePencilAction
     ) -> NativePencilAction? {
+        switch mapping {
+        case .disabled:
+            return nil
+        case .toggleEraser:
+            return .toggleEraser
+        case .showPalette:
+            return .showPalette
+        case .followSystem:
+            break
+        }
         if preferredAction == .ignore {
             return nil
         }
@@ -778,6 +790,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         lastNativePencilTapTimestamp = timestamp
         let preferredAction = UIPencilInteraction.preferredTapAction
         guard let action = resolvedNativePencilAction(
+            mapping: nativePencilSettings.doubleTap,
             preferredAction: preferredAction,
             fallback: .toggleEraser
         ) else {
@@ -1248,6 +1261,7 @@ extension ReaderWebViewModel: UIPencilInteractionDelegate {
         }
         let preferredAction = UIPencilInteraction.preferredSqueezeAction
         guard let action = resolvedNativePencilAction(
+            mapping: nativePencilSettings.squeeze,
             preferredAction: preferredAction,
             fallback: .showPalette
         ) else {

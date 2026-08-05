@@ -3676,3 +3676,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **改了什么**：网页采集改走既有 `__bwExtensionStore` 网关读取同步开关并写入最新页；该快照键纳入后台白名单，页面恢复前台时重新读取设置后立即上报。
 - **怎么验的**：JS 语法、电脑语音/上下文专项合同与 Safari 打包通过，包内已核对为新接力代码。
 - **边界/下一步**：未改 Windows 0.1.86、语音 START、路由或 PCM；上传 TestFlight 后由用户确认普通网页可覆盖 PDF 快照。
+
+## Codex：iOS 原生阅读能力五项整合（2026-08-05 JST）
+- **改了什么**：App 新增 PencilKit 标注与 Pencil 手势设置、VisionKit 当前视口 OCR、iOS 18 系统翻译、App Intents/Spotlight，以及读取 App Group 最近阅读快照的小/中号 Widget。
+- **集成边界**：全部能力只读或写入 App Group 本地存储，不接管 Windows 桥接、Safari 上下文或书籍墨迹合同；现有扩展源码原样保留。
+- **怎么验的**：Windows 静态检查、plist 解析与发布管线通过；Swift SDK 编译、三 target 签名、归档和 TestFlight 上传由现有 macOS CI 完成。
+- **下一步**：实机分别验收 Pencil 双击/挤压、OCR 质量、系统翻译语言包、快捷指令、Spotlight 与 Widget 刷新时机。

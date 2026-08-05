@@ -1,4 +1,6 @@
+import CoreSpotlight
 import SwiftUI
+import WidgetKit
 
 @main
 struct BWReaderNativeApp: App {
@@ -22,6 +24,8 @@ private struct ReaderRootView: View {
     @ObservedObject var voiceBridge: NativeVoiceBridge
     @ObservedObject var nativeCommandReceiver: ReaderNativeCommandReceiver
     @State private var showsDiagnostics = false
+    @State private var showsNativeTools = false
+    @State private var nativeToolsInitialAction: ReaderNativeFeatureAction?
 
     var body: some View {
         ZStack {
@@ -80,6 +84,25 @@ private struct ReaderRootView: View {
                 )
                 .padding(4)
 
+            Button {
+                nativeToolsInitialAction = .openNativeTools
+                showsNativeTools = true
+            } label: {
+                Image(systemName: "text.viewfinder")
+                    .font(.system(size: 17, weight: .semibold))
+                    .frame(width: 44, height: 44)
+                    .background(.ultraThinMaterial, in: Circle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityLabel("打开原生阅读工具")
+            .frame(
+                maxWidth: .infinity,
+                maxHeight: .infinity,
+                alignment: .topTrailing
+            )
+            .padding(.top, 8)
+            .padding(.trailing, 10)
+
         }
         .preferredColorScheme(.dark)
         .task {
@@ -90,13 +113,87 @@ private struct ReaderRootView: View {
             )
         }
         .onOpenURL { url in
-            nativeCommandReceiver.receive(url)
+            if let route = ReaderNativeActivityRoute.parse(url) {
+                handleNativeFeatureRoute(route)
+            } else {
+                nativeCommandReceiver.receive(url)
+            }
+        }
+        .onContinueUserActivity(CSSearchableItemActionType) { activity in
+            if let route = ReaderNativeActivityRoute.parse(activity) {
+                handleNativeFeatureRoute(route)
+            }
         }
         .onChange(of: scenePhase, initial: true) { _, phase in
             reader.setReaderForeground(phase == .active)
         }
+        .task {
+            BWReaderAppShortcuts.updateAppShortcutParameters()
+        }
+        .task(id: scenePhase) {
+            guard scenePhase == .active else { return }
+            consumePendingNativeFeatureRequest()
+            await refreshNativeFeatureSnapshot()
+            var secondsUntilSnapshotRefresh = 12
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: 1_000_000_000)
+                } catch {
+                    return
+                }
+                consumePendingNativeFeatureRequest()
+                secondsUntilSnapshotRefresh -= 1
+                if secondsUntilSnapshotRefresh <= 0 {
+                    await refreshNativeFeatureSnapshot()
+                    secondsUntilSnapshotRefresh = 12
+                }
+            }
+        }
         .sheet(isPresented: $showsDiagnostics) {
             NativeVoiceDiagnosticsView(bridge: voiceBridge)
+        }
+        .sheet(isPresented: $showsNativeTools) {
+            NativeReaderToolsView(
+                reader: reader,
+                initialAction: nativeToolsInitialAction
+            )
+        }
+    }
+
+    @MainActor
+    private func handleNativeFeatureRoute(_ route: ReaderNativeActivityRoute) {
+        if let readerURL = route.readerURL {
+            _ = reader.openNativeReaderURL(readerURL)
+        }
+        switch route.action {
+        case .openReader:
+            break
+        case .scanCurrentPage, .annotateCurrentPage, .openNativeTools:
+            nativeToolsInitialAction = route.action
+            showsNativeTools = true
+        }
+    }
+
+    @MainActor
+    private func consumePendingNativeFeatureRequest() {
+        guard let request = ReaderNativeFeatureStore().consumePendingAction() else {
+            return
+        }
+        handleNativeFeatureRoute(
+            ReaderNativeActivityRoute(action: request.action, readerURL: nil)
+        )
+    }
+
+    @MainActor
+    private func refreshNativeFeatureSnapshot() async {
+        do {
+            let snapshot = try await reader.captureNativeReaderSnapshot()
+            let changed = try ReaderNativeFeatureStore().writeSnapshot(snapshot)
+            guard changed else { return }
+            WidgetCenter.shared.reloadAllTimelines()
+            try? await ReaderSpotlightIndex.indexCurrentSnapshot(snapshot)
+        } catch {
+            // A transient page load must never interfere with the Reader UI.
         }
     }
 }

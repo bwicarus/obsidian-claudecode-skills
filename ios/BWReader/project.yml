@@ -29,6 +29,7 @@ targets:
           - Info.plist
           - BWReader.entitlements
       - path: Shared/ReaderNativeBridgeContract.swift
+      - path: Shared/ReaderSharedSnapshot.swift
     settings:
       base:
         ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon
@@ -38,7 +39,7 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: App/Info.plist
-        MARKETING_VERSION: "1.0.65"
+        MARKETING_VERSION: "1.0.66"
         PRODUCT_BUNDLE_IDENTIFIER: space.bwicarus.bwreader2
         PRODUCT_NAME: bwicarus-test
         # Stated explicitly because XcodeGen's application preset overrides
@@ -47,6 +48,11 @@ targets:
         TARGETED_DEVICE_FAMILY: "1,2"
     dependencies:
       - target: BWReaderSafariExtension
+        embed: true
+        codeSign: true
+        copy:
+          destination: plugins
+      - target: BWReaderWidget
         embed: true
         codeSign: true
         copy:
@@ -116,13 +122,36 @@ targets:
         CURRENT_PROJECT_VERSION: "1"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Extension/Info.plist
-        MARKETING_VERSION: "1.0.65"
+        MARKETING_VERSION: "1.0.66"
         PRODUCT_BUNDLE_IDENTIFIER: space.bwicarus.bwreader2.Extension
         PRODUCT_MODULE_NAME: BWReaderSafariExtension
         PRODUCT_NAME: BWReaderSafariExtension
         SKIP_INSTALL: YES
         # Apple requires an embedded app extension to declare both iPhone and
         # iPad even when its containing app is intentionally iPad-only.
+        TARGETED_DEVICE_FAMILY: "1,2"
+
+  BWReaderWidget:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "17.0"
+    sources:
+      - path: Widget/BWReaderWidget.swift
+      - path: Shared/ReaderNativeBridgeContract.swift
+      - path: Shared/ReaderSharedSnapshot.swift
+    settings:
+      base:
+        APPLICATION_EXTENSION_API_ONLY: YES
+        CODE_SIGN_ENTITLEMENTS: Widget/BWReaderWidget.entitlements
+        CODE_SIGN_STYLE: Automatic
+        CURRENT_PROJECT_VERSION: "1"
+        GENERATE_INFOPLIST_FILE: NO
+        INFOPLIST_FILE: Widget/Info.plist
+        MARKETING_VERSION: "1.0.66"
+        PRODUCT_BUNDLE_IDENTIFIER: space.bwicarus.bwreader2.Widget
+        PRODUCT_MODULE_NAME: BWReaderWidget
+        PRODUCT_NAME: BWReaderWidget
+        SKIP_INSTALL: YES
         TARGETED_DEVICE_FAMILY: "1,2"
 
 schemes:

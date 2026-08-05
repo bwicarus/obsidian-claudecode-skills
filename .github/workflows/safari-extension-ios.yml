@@ -22,6 +22,7 @@ env:
   APP_NAME: bwicarus-test
   BUNDLE_ID: space.bwicarus.bwreader2
   EXTENSION_BUNDLE_ID: space.bwicarus.bwreader2.Extension
+  WIDGET_BUNDLE_ID: space.bwicarus.bwreader2.Widget
   EXT_DIR: extensions/bw-reader-webext
   PROJECT_DIR: ios/BWReader
   PROJECT_FILE: ios/BWReader/BWReader.xcodeproj
@@ -223,12 +224,13 @@ jobs:
           cp "$RUNNER_TEMP/private_keys/AuthKey_${API_KEY_ID}.p8" \
             ~/.appstoreconnect/private_keys/
 
-      # Both targets use fixed App Store profiles and the imported distribution
-      # certificate. This avoids creating a disposable development certificate
-      # on every fresh GitHub runner.
+      # The existing App and Safari targets use fixed profiles. The Widget uses
+      # Xcode-managed distribution signing while reusing the same certificate.
       - name: Archive signed device candidate
         env:
           TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
         shell: bash
         run: |
           set -euo pipefail
@@ -239,8 +241,11 @@ jobs:
             -scheme "$SCHEME" \
             -destination "generic/platform=iOS" \
             -archivePath "$RUNNER_TEMP/app.xcarchive" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/private_keys/AuthKey_${API_KEY_ID}.p8" \
+            -authenticationKeyID "$API_KEY_ID" \
+            -authenticationKeyIssuerID "$API_ISSUER_ID" \
             DEVELOPMENT_TEAM="$TEAM_ID" \
-            CODE_SIGN_STYLE=Manual \
             CODE_SIGN_IDENTITY="Apple Distribution" \
             | tee "$RUNNER_TEMP/build-logs/archive.log"
 
@@ -254,14 +259,17 @@ jobs:
           test -n "$APP_PATH" || { echo "archive contains no app"; exit 1; }
           APPEX_PATH="$APP_PATH/PlugIns/BWReaderSafariExtension.appex"
           test -d "$APPEX_PATH" || { echo "embedded Safari extension is missing"; exit 1; }
+          WIDGET_PATH="$APP_PATH/PlugIns/BWReaderWidget.appex"
+          test -d "$WIDGET_PATH" || { echo "embedded Reader widget is missing"; exit 1; }
 
           # The web package must land at the appex root, never under an extra
           # Resources directory.
           test -f "$APPEX_PATH/manifest.json"
           test ! -e "$APPEX_PATH/Resources/manifest.json"
 
-          APP_PATH="$APP_PATH" APPEX_PATH="$APPEX_PATH" \
+          APP_PATH="$APP_PATH" APPEX_PATH="$APPEX_PATH" WIDGET_PATH="$WIDGET_PATH" \
           APP_BUNDLE_ID="$BUNDLE_ID" EXT_BUNDLE_ID="$EXTENSION_BUNDLE_ID" \
+          WIDGET_BUNDLE_ID="$WIDGET_BUNDLE_ID" \
           SAFARI_PACKAGE="$SAFARI_PACKAGE" python <<'PY'
           import os
           import plistlib
@@ -271,6 +279,7 @@ jobs:
 
           app = Path(os.environ["APP_PATH"])
           appex = Path(os.environ["APPEX_PATH"])
+          widget = Path(os.environ["WIDGET_PATH"])
 
           def load_info(bundle: Path) -> dict:
               with (bundle / "Info.plist").open("rb") as handle:
@@ -296,6 +305,7 @@ jobs:
 
           app_info = load_info(app)
           extension_info = load_info(appex)
+          widget_info = load_info(widget)
           validate_platform(
               app_info,
               label="app",
@@ -311,6 +321,12 @@ jobs:
               bundle_id=os.environ["EXT_BUNDLE_ID"],
               expected_families=[1, 2],
           )
+          validate_platform(
+              widget_info,
+              label="widget",
+              bundle_id=os.environ["WIDGET_BUNDLE_ID"],
+              expected_families=[1, 2],
+          )
 
           app_version = (
               str(app_info.get("CFBundleShortVersionString")),
@@ -320,9 +336,17 @@ jobs:
               str(extension_info.get("CFBundleShortVersionString")),
               str(extension_info.get("CFBundleVersion")),
           )
+          widget_version = (
+              str(widget_info.get("CFBundleShortVersionString")),
+              str(widget_info.get("CFBundleVersion")),
+          )
           if app_version != extension_version:
               raise SystemExit(
                   f"app/extension version mismatch: {app_version!r} != {extension_version!r}"
+              )
+          if app_version != widget_version:
+              raise SystemExit(
+                  f"app/widget version mismatch: {app_version!r} != {widget_version!r}"
               )
           extension_contract = extension_info.get("NSExtension", {})
           if extension_contract.get("NSExtensionPointIdentifier") != "com.apple.Safari.web-extension":
@@ -332,6 +356,9 @@ jobs:
                   "unexpected Safari extension handler: "
                   f"{extension_contract.get('NSExtensionPrincipalClass')!r}"
               )
+          widget_contract = widget_info.get("NSExtension", {})
+          if widget_contract.get("NSExtensionPointIdentifier") != "com.apple.widgetkit-extension":
+              raise SystemExit("embedded widget has the wrong extension point")
 
           missing = []
           changed = []
@@ -354,14 +381,17 @@ jobs:
               "validated archive:",
               app_info["CFBundleIdentifier"],
               extension_info["CFBundleIdentifier"],
+              widget_info["CFBundleIdentifier"],
               "version", ".".join(app_version),
           )
           PY
 
           codesign --verify --strict --verbose=2 "$APPEX_PATH"
+          codesign --verify --strict --verbose=2 "$WIDGET_PATH"
           codesign --verify --deep --strict --verbose=2 "$APP_PATH"
           codesign -d --verbose=4 "$APP_PATH" 2>&1 | tee "$RUNNER_TEMP/build-logs/app-codesign.txt"
           codesign -d --verbose=4 "$APPEX_PATH" 2>&1 | tee "$RUNNER_TEMP/build-logs/extension-codesign.txt"
+          codesign -d --verbose=4 "$WIDGET_PATH" 2>&1 | tee "$RUNNER_TEMP/build-logs/widget-codesign.txt"
 
       - name: Export IPA
         env:
@@ -369,6 +399,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          APP_PATH="$(find "$RUNNER_TEMP/app.xcarchive/Products/Applications" -maxdepth 1 -type d -name '*.app' -print -quit)"
+          WIDGET_PATH="$APP_PATH/PlugIns/BWReaderWidget.appex"
+          security cms -D -i "$WIDGET_PATH/embedded.mobileprovision" \
+            > "$RUNNER_TEMP/widget-profile.plist"
+          WIDGET_PROFILE="$(/usr/libexec/PlistBuddy -c 'Print :Name' "$RUNNER_TEMP/widget-profile.plist")"
+          test -n "$WIDGET_PROFILE" || { echo "Widget profile name is empty"; exit 1; }
           cat > "$RUNNER_TEMP/ExportOptions.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -383,6 +419,7 @@ jobs:
             <dict>
               <key>space.bwicarus.bwreader2</key><string>BWReader App Store App</string>
               <key>space.bwicarus.bwreader2.Extension</key><string>BWReader App Store Extension</string>
+              <key>space.bwicarus.bwreader2.Widget</key><string>${WIDGET_PROFILE}</string>
             </dict>
             <key>uploadSymbols</key><true/>
           </dict>
