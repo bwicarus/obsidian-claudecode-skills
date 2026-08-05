@@ -88,6 +88,7 @@ const NATIVE_APP_AGENT_EVENTS = new Set([
 ]);
 const LOCAL_STORAGE_KEYS = new Set([
   "bwReaderExtensionPreferencesV2",
+  "bwActivePageContextV1",
   "webHighlightsV1",
   "webCardPinsV1",
   "webInkV1",

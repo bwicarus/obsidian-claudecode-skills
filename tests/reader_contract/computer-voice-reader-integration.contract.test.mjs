@@ -437,8 +437,14 @@ test("扩展上下文按设置和前台状态独立运行，不随语音停止",
   assert.match(contentScript, /ACTIVE_CONTEXT_KEY = "bwActivePageContextV1"/);
   assert.match(
     contentScript,
-    /chrome\.storage\.local\.set\(\{ \[ACTIVE_CONTEXT_KEY\]: envelope \}/,
+    /extensionStore\.set\(ACTIVE_CONTEXT_KEY, envelope\)/,
   );
+  assert.match(contentScript, /extensionStore\.get\(PREFERENCE_KEY\)/);
+  assert.doesNotMatch(
+    contentScript,
+    /Promise\.resolve\(chrome\.storage\.local\.get\(PREFERENCE_KEY\)\)/,
+  );
+  assert.match(background, /LOCAL_STORAGE_KEYS = new Set\(\[[\s\S]*"bwActivePageContextV1"/);
   assert.match(callPage, /ACTIVE_CONTEXT_KEY = "bwActivePageContextV1"/);
   assert.match(callPage, /function storedPage\(value\)/);
   assert.match(callPage, /changes\[ACTIVE_CONTEXT_KEY\][\s\S]*forward\(page, true\)/);

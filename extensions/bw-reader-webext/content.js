@@ -367,6 +367,7 @@
   var timer = null;
   var preferenceKnown = false;
   var contextSyncEnabled = false;
+  var extensionStore = window.__bwExtensionStore || null;
 
   function enabledFromRecord(record) {
     return !!(
@@ -458,19 +459,14 @@
       } catch (_) {}
     }
 
-    try {
-      if (!chrome.storage || !chrome.storage.local) {
-        finishStorage(false);
-        return;
-      }
-      chrome.storage.local.set({ [ACTIVE_CONTEXT_KEY]: envelope }, function () {
-        var failed = false;
-        try { failed = !!(chrome.runtime && chrome.runtime.lastError); } catch (_) {}
-        finishStorage(!failed);
-      });
-    } catch (_) {
+    if (!extensionStore || typeof extensionStore.set !== "function") {
       finishStorage(false);
+      return;
     }
+    Promise.resolve(extensionStore.set(ACTIVE_CONTEXT_KEY, envelope)).then(
+      function () { finishStorage(true); },
+      function () { finishStorage(false); }
+    );
   }
 
   function schedule(force) {
@@ -493,16 +489,28 @@
       schedule(false);
     }, { passive: true });
     ["pageshow", "focus", "online"].forEach(function (type) {
-      window.addEventListener(type, function () { schedule(true); }, { passive: true });
+      window.addEventListener(type, function () {
+        refreshPreference(true);
+      }, { passive: true });
     });
 
-    if (chrome.storage && chrome.storage.local) {
-      Promise.resolve(chrome.storage.local.get(PREFERENCE_KEY)).then(function (bag) {
-        applyPreference(bag && bag[PREFERENCE_KEY]);
+    function refreshPreference(forceReport) {
+      if (!extensionStore || typeof extensionStore.get !== "function") {
+        preferenceKnown = true;
+        contextSyncEnabled = false;
+        return;
+      }
+      Promise.resolve(extensionStore.get(PREFERENCE_KEY)).then(function (record) {
+        applyPreference(record);
+        if (forceReport && contextSyncEnabled) schedule(true);
       }).catch(function () {
         preferenceKnown = true;
         contextSyncEnabled = false;
       });
+    }
+
+    refreshPreference(true);
+    if (chrome.storage && chrome.storage.local) {
       if (chrome.storage.onChanged) {
         chrome.storage.onChanged.addListener(function (changes, areaName) {
           if (areaName !== "local" || !changes || !changes[PREFERENCE_KEY]) return;
