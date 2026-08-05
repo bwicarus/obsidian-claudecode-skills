@@ -361,6 +361,36 @@
   var PREFERENCE_KEY = "bwReaderExtensionPreferencesV2";
   var CONTEXT_SYNC_KEY = "eph-ctx-sync";
   var ACTIVE_CONTEXT_KEY = "bwActivePageContextV1";
+
+  // Delivers a snapshot to the bridge frame embedded in this page.
+  //
+  // The frame lives in the extension's shadow tree, which this script can reach
+  // because it set it up; window.__bwShadow is visible from the isolated world.
+  // Speaks only to a frame whose src is our own call.html, and reports when it
+  // cannot find one -- a delivery that goes nowhere must not look like success.
+  function deliverToFrame(snap) {
+    try {
+      var scope = window.__bwShadow || document;
+      var frame = scope.querySelector('iframe[src*="call.html"]');
+      if (!frame || !frame.contentWindow) {
+        if (!window.__bwFrameMissingReported) {
+          window.__bwFrameMissingReported = true;
+          try {
+            console.warn("[bw-context] 页面内没有桥接框，上下文改由后台通道尝试");
+          } catch (_) {}
+        }
+        return false;
+      }
+      frame.contentWindow.postMessage(
+        { contract: "bw-page-context/1", type: "page", page: snap },
+        "*"
+      );
+      return true;
+    } catch (err) {
+      try { console.warn("[bw-context] 直投失败:", err && err.message); } catch (_) {}
+      return false;
+    }
+  }
   var lastSignature = "";
   var pendingSignature = "";
   var contextRevision = 0;
@@ -453,6 +483,17 @@
       // Retain the runtime message as a fast path. The storage record is the
       // reliable handoff: a late-starting inline call frame reads it back, so
       // losing this message can no longer leave its lastPage empty forever.
+      // Handed straight to the frame in this very page.
+      //
+      // It used to go out through runtime.sendMessage -- across a process
+      // boundary, to a background worker iOS reclaims at will, and back down
+      // again -- with a storage relay bolted on to cover the messages that got
+      // lost on the way. Two paths patching each other, three places to fail
+      // in silence, and no way to tell from the outside which one had.
+      //
+      // The frame is a child of this document. Nothing needs to leave the page.
+      deliverToFrame(snap);
+      // Kept only as a fallback for surfaces with no frame of their own.
       try {
         var result = runtime.sendMessage({ type: "BW_PAGE_ACTIVE", page: snap });
         if (result && typeof result.catch === "function") result.catch(function () {});
