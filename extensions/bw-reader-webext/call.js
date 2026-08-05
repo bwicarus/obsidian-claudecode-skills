@@ -265,6 +265,64 @@ function storedPage(value) {
 
 // Every page announces itself while it is the one being viewed; background tabs
 // stay quiet, so a dozen open tabs cannot argue over what the assistant sees.
+// Snapshots handed over directly by the content script in the hosting page.
+//
+// Same document tree, no process boundary, no background worker to be reclaimed
+// and no storage relay to fall out of step. This is the path that carries the
+// page now; the runtime message below stays as a fallback for surfaces that
+// have no frame of their own.
+window.addEventListener("message", (event) => {
+  const d = event.data;
+  if (!d || d.contract !== "bw-page-context/1" || d.type !== "page") return;
+  if (!d.page || typeof d.page !== "object") return;
+  forwardDirect(d.page);
+});
+
+// The direct path, deliberately not guarded by the preference gates.
+//
+// forward() refuses to send unless the preference has been read and is true.
+// That was reasonable when the preference decided whether to sync at all, but
+// it also meant a preference that could not be read -- for any reason, in any
+// layer -- silently disabled the whole link, and the switch the user actually
+// toggled was never the thing consulted. A page handed to us by the content
+// script in our own document is intent enough.
+//
+// Document visibility is still honoured: background tabs stay quiet, so a dozen
+// open tabs cannot argue over what the assistant is looking at.
+async function forwardDirect(page) {
+  lastPage = page;
+  render(page);
+  if (!contextSurfaceVisible()) return;
+  const current = ensureDirectLink();
+  if (!current) return;
+  const signature =
+    `${page.url}|${page.title || ""}|` +
+    `${contentDigest(page.text)}|${contentDigest(page.selection)}`;
+  if (signature === lastSignature) return;
+  try {
+    const result = await current.send(page);
+    if (result?.ok) lastSignature = signature;
+    else if (result?.skipped) note("待连接,已暂存当前页");
+  } catch (err) {
+    note("直投失败: " + describe(err));
+    if (lastSignature === signature) lastSignature = "";
+  }
+}
+
+// Opens the context link without consulting the preference.
+//
+// ensureContextLink() returns null unless the preference is known and enabled;
+// this one only needs the page to be visible. Same ContextLink, same endpoint,
+// same protocol -- only the gating differs.
+function ensureDirectLink() {
+  if (!contextSurfaceVisible()) return null;
+  if (!link) {
+    link = new ContextLink(contextLinkStatus);
+    link.connect();
+  }
+  return link;
+}
+
 if (chrome.runtime?.onMessage) {
   chrome.runtime.onMessage.addListener((message) => {
     // Sent by whichever page the user is looking at. The page only forwards a
