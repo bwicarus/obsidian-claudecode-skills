@@ -136,6 +136,7 @@ let contextSyncEnabled = false;
 let link = null;
 
 function contextLinkStatus(s) {
+  note("链路: " + JSON.stringify(s?.state ?? s));
   if (s.state === "open") say("● 已连接,正在跟随", "ok");
   else if (s.state === "connecting") say("正在连接…");
   else if (s.state === "retrying") {
@@ -181,6 +182,14 @@ function ensureContextLink() {
 
 function applyContextPreference(record) {
   const next = enabledFromRecord(record);
+  // A preference read as false and a preference never written look identical
+  // once folded into a boolean, yet they call for opposite fixes: one means the
+  // switch is off, the other means the switch is being read from the wrong key.
+  note(
+    "读到偏好: " +
+    (record === undefined ? "undefined(未写入)" : JSON.stringify(record)) +
+    " → " + next
+  );
   const changed = !contextPreferenceKnown || next !== contextSyncEnabled;
   contextPreferenceKnown = true;
   contextSyncEnabled = next;
@@ -212,9 +221,25 @@ function render(page) {
     (page.selection ? `　·　选中 ${page.selection.length} 字` : "");
 }
 
+// Last reported gate state, so the report below fires on change rather than on
+// every page event -- the same line repeating fifty times would bury the moment
+// it changed, which is the only moment that matters.
+let lastGateReport = "";
+
 async function forward(page, force) {
   lastPage = page;
   render(page);
+  const gate =
+    `known=${contextPreferenceKnown} enabled=${contextSyncEnabled} ` +
+    `visible=${contextSurfaceVisible()} link=${link ? "yes" : "no"}`;
+  if (gate !== lastGateReport) {
+    lastGateReport = gate;
+    // States, not a failure. Three conditions guard this path and from the
+    // outside they are indistinguishable: nothing is sent, nothing is said, and
+    // which one stopped it cannot be told apart. On a device with no console
+    // that difference costs a build to learn, so it is stated up front.
+    note("同步门: " + gate);
+  }
   if (!contextPreferenceKnown || !contextSyncEnabled || !contextSurfaceVisible()) return;
   const current = ensureContextLink();
   if (!current) return;
