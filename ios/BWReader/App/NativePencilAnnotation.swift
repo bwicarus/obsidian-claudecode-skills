@@ -17,6 +17,7 @@ extension NativePencilGestureMapping {
     }
 }
 
+@MainActor
 struct NativePencilSettingsSection: View {
     @ObservedObject private var settings: NativePencilSettings
 

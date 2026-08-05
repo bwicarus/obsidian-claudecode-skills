@@ -44,7 +44,6 @@ extension ReaderWebViewModel {
         else {
             return false
         }
-        loadError = nil
         webView.load(
             URLRequest(
                 url: url,
