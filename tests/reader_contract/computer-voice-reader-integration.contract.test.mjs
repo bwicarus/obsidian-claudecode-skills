@@ -368,6 +368,10 @@ test("BWReader App 接管电脑按钮后，网页运行时不会预备麦克风�
 test("App 原生语音与 Reader 上下文使用独立 WSS，语音启停不再切断快照", () => {
   assert.match(
     runtime,
+    /function nativeReaderUsesDedicatedContextLink\(\)[\s\S]*window\.__BW_NATIVE_COMPUTER_VOICE__ === true[\s\S]*contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT/,
+  );
+  assert.match(
+    runtime,
     /function nativeContextRequest\(action, fields, timeoutMs\)[\s\S]*action !== "context" && action !== "active-reading"[\s\S]*bwNativeComputerContext\.postMessage\(\{[\s\S]*requestId:[\s\S]*action:[\s\S]*fields:/,
   );
   assert.match(

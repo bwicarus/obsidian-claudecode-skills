@@ -4420,7 +4420,12 @@
   }
 
   function nativeReaderUsesDedicatedContextLink() {
-    return window.__BW_NATIVE_COMPUTER_VOICE__ === true;
+    // /reader-context/v1 is the snapshot-MCP transport. Legacy injection must
+    // keep using the native voice WSS so typist receives the Reader payload.
+    return (
+      window.__BW_NATIVE_COMPUTER_VOICE__ === true &&
+      contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT
+    );
   }
 
   function readerContextSurfaceVisible() {
