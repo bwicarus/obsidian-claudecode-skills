@@ -300,7 +300,10 @@ jobs:
               app_info,
               label="app",
               bundle_id=os.environ["APP_BUNDLE_ID"],
-              expected_families=[2],
+              # Universal, matching the extension. This gate exists to catch a
+              # device family that drifted by accident, so it is stated in both
+              # places and has to be moved deliberately -- as here.
+              expected_families=[1, 2],
           )
           validate_platform(
               extension_info,
