@@ -3711,6 +3711,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **改了什么**：同页 frame 将每次网页快照直接 POST 到 Windows `/reader-context/snapshot`，移除该主路径的 WSS 会话、握手与重连依赖；正文事件与 active-reading 同请求嵌套提交。
 - **权限/验证**：Safari host 权限只新增具名 Windows Tailnet 主机并由精确合同锁定；桥 0.1.92 与 serve 路由已实测 204 覆盖快照，1.0.75 上传后验普通网页约两秒变为 `kind=web`。
 
+## Codex / Claude：Safari POST 上游可见诊断（2026-08-06 JST）
+- **改了什么**：临时诊断直接写普通网页 DOM，显示脚本加载、偏好、上报入口、shadow/frame 查找与投递结果；不再依赖正在被测的内嵌 frame，重复状态自动去重。
+- **边界/下一步**：纯诊断、不改投递决策；1.0.76 实机回报左下角内容后立即撤除，Windows 桥保持 0.1.94。
+
 # 2026-08-06 iOS 可选 Obsidian 本地笔记（TestFlight 候选制作中）
 
 - App 新增设备级 Vault 授权；App 与 Safari 扩展共享 `notes.create/status/list/read`，关闭时仍走 Pi。

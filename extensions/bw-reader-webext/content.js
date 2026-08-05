@@ -374,6 +374,8 @@
   // answer is in.
   function probeLine(text) {
     try {
+      if (window.__bwProbeLast === text) return;
+      window.__bwProbeLast = text;
       var box = document.getElementById("__bw_probe");
       if (!box) {
         box = document.createElement("div");
@@ -393,6 +395,7 @@
         .split(nl).slice(0, 12).join(nl);
     } catch (_) {}
   }
+  probeLine("脚本已加载: " + String(location.href || "").slice(0, 60));
 
   // Delivers a snapshot to the bridge frame embedded in this page.
   //
@@ -446,6 +449,11 @@
 
   function applyPreference(record) {
     var next = enabledFromRecord(record);
+    probeLine(
+      "偏好: raw=" +
+      (record && record.values ? String(record.values[CONTEXT_SYNC_KEY]) : "undefined") +
+      " enabled=" + (next ? "是" : "否")
+    );
     var changed = !preferenceKnown || next !== contextSyncEnabled;
     preferenceKnown = true;
     contextSyncEnabled = next;
@@ -491,6 +499,11 @@
   }
 
   function report(force) {
+    probeLine(
+      "上报入口: known=" + (preferenceKnown ? "是" : "否") +
+      " enabled=" + (contextSyncEnabled ? "是" : "否") +
+      " visible=" + String(document.visibilityState)
+    );
     if (!preferenceKnown || !contextSyncEnabled) return;
     // Only the page in front of the user. Background tabs stay silent, so a
     // dozen open tabs cannot fight over what the assistant is looking at.
