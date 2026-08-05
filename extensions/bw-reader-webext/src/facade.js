@@ -459,6 +459,9 @@
     const bridge = environment.bridge;
     const URLCtor = environment.URL;
     const ResponseCtor = environment.Response;
+    if (typeof URLCtor !== 'function' || typeof ResponseCtor !== 'function') {
+      return async function unavailableNativeNotesInterceptor() { return null; };
+    }
     let safariExtension = false;
     try {
       safariExtension = new URLCtor(String(runtime.getURL(''))).protocol ===
@@ -535,8 +538,8 @@
     origin: ORIGIN,
     runtime: chrome.runtime,
     bridge: nativeAppDataBridge,
-    URL,
-    Response
+    URL: globalThis.URL,
+    Response: globalThis.Response
   });
 
   // iOS may reclaim the Safari extension background even while a long-lived
