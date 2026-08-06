@@ -525,11 +525,23 @@ test("普通网页上下文同页直投后一次 POST，不再保活 WSS", () =>
   assert.match(contentScript, /iframe\[src\*="call\.html"\]/);
   assert.match(
     contentScript,
+    /d\.contract !== "bw-frame-probe\/1"[\s\S]*event\.source !== frame\.contentWindow[\s\S]*probeLine\(String\(d\.text\)\)/,
+  );
+  assert.match(
+    contentScript,
     /contract: "bw-page-context\/1", type: "page", page: snap/,
   );
   assert.match(
     callPage,
     /d\.contract !== "bw-page-context\/1"[\s\S]*forwardDirect\(d\.page\)/,
+  );
+  assert.match(
+    callPage,
+    /function frameProbe\(text\)[\s\S]*contract: "bw-frame-probe\/1"/,
+  );
+  assert.match(
+    callPage,
+    /框收到页面:[\s\S]*框: 开始 POST[\s\S]*框: POST 成功[\s\S]*框: POST 失败/,
   );
   assert.match(
     callPage,
@@ -546,7 +558,10 @@ test("普通网页上下文同页直投后一次 POST，不再保活 WSS", () =>
   const directStart = callPage.indexOf("async function forwardDirect(page)");
   const directEnd = callPage.indexOf("if (chrome.runtime?.onMessage)", directStart);
   const directBody = callPage.slice(directStart, directEnd);
-  assert.match(directBody, /if \(!contextSurfaceVisible\(\)\) return/);
+  assert.match(
+    directBody,
+    /if \(!contextSurfaceVisible\(\)\) \{[\s\S]*frameProbe\("框: 文档不可见,跳过"\)[\s\S]*return/,
+  );
   assert.match(directBody, /await postSnapshot\(page\)[\s\S]*lastSignature = signature/);
   assert.doesNotMatch(
     directBody,

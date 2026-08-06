@@ -406,6 +406,9 @@
     window.addEventListener("message", function (event) {
       var d = event.data;
       if (!d || d.contract !== "bw-frame-probe/1" || !d.text) return;
+      var scope = window.__bwShadow || document;
+      var frame = scope.querySelector('iframe[src*="call.html"]');
+      if (!frame || event.source !== frame.contentWindow) return;
       probeLine(String(d.text));
     });
   } catch (_) {}
