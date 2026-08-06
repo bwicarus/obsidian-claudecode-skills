@@ -372,28 +372,15 @@
   //
   // Temporary. It exists to answer one question and should come out once the
   // answer is in.
+  // Routed through the shared channel now.
+  //
+  // This used to own its own box, while the frame owned another way of
+  // speaking and the bridge owned a third. Three unconnected instruments meant
+  // "delivered" and "nothing arrived" could both be true-looking with no way to
+  // reconcile them. One channel, and every line says who spoke it.
   function probeLine(text) {
-    try {
-      if (window.__bwProbeLast === text) return;
-      window.__bwProbeLast = text;
-      var box = document.getElementById("__bw_probe");
-      if (!box) {
-        box = document.createElement("div");
-        box.id = "__bw_probe";
-        box.style.cssText =
-          "position:fixed;left:8px;bottom:8px;z-index:2147483647;" +
-          "max-width:70vw;max-height:40vh;overflow:auto;" +
-          "background:rgba(12,18,32,.92);color:#cfe3ff;" +
-          "font:11px/1.5 ui-monospace,Menlo,monospace;" +
-          "padding:8px 10px;border-radius:8px;white-space:pre-wrap;" +
-          "pointer-events:none";
-        (document.body || document.documentElement).appendChild(box);
-      }
-      var stamp = new Date().toLocaleTimeString();
-      var nl = String.fromCharCode(10);
-      box.textContent = (stamp + "  " + text + nl + box.textContent)
-        .split(nl).slice(0, 12).join(nl);
-    } catch (_) {}
+    var P = window.__bwProbe;
+    if (P) P.probe("page", text);
   }
   probeLine("脚本已加载: " + String(location.href || "").slice(0, 60));
 
@@ -403,14 +390,7 @@
   // say it handed the snapshot over, and the bridge can say nothing arrived,
   // with no way to see which of the two is mistaken.
   try {
-    window.addEventListener("message", function (event) {
-      var d = event.data;
-      if (!d || d.contract !== "bw-frame-probe/1" || !d.text) return;
-      var scope = window.__bwShadow || document;
-      var frame = scope.querySelector('iframe[src*="call.html"]');
-      if (!frame || event.source !== frame.contentWindow) return;
-      probeLine(String(d.text));
-    });
+    if (window.__bwProbe) window.__bwProbe.startProbeHost({ enabled: true });
   } catch (_) {}
 
   // Delivers a snapshot to the bridge frame embedded in this page.
@@ -427,6 +407,10 @@
         "找框: shadow=" + (window.__bwShadow ? "有" : "无") +
         " 框=" + (frame ? "有" : "无")
       );
+      // Registered by identity, so only frames we embedded may report.
+      try {
+        if (frame && window.__bwProbe) window.__bwProbe.trustFrame(frame);
+      } catch (_) {}
       if (!frame || !frame.contentWindow) {
         if (!window.__bwFrameMissingReported) {
           window.__bwFrameMissingReported = true;
