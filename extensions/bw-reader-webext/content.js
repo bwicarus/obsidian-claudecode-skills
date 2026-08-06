@@ -504,7 +504,19 @@
       " enabled=" + (contextSyncEnabled ? "是" : "否") +
       " visible=" + String(document.visibilityState)
     );
-    if (!preferenceKnown || !contextSyncEnabled) return;
+    // Only a preference actually read as false stops the report.
+    //
+    // "Not yet known" was being treated as "the user turned it off", and the
+    // page then went unreported forever. Tonight that state proved reachable in
+    // a way none of the failure paths explain -- both of them set the flag, yet
+    // ten seconds after load it was still unset, so refreshPreference had not
+    // run at all. Whatever the cause, silence-by-default is the wrong answer to
+    // an unread setting: the page in front of the user is the same page whether
+    // or not a preference finished loading.
+    //
+    // An explicit false is still honoured. Turning sync off keeps working; not
+    // knowing yet no longer means off.
+    if (preferenceKnown && !contextSyncEnabled) return;
     // Only the page in front of the user. Background tabs stay silent, so a
     // dozen open tabs cannot fight over what the assistant is looking at.
     if (document.visibilityState !== "visible") return;
@@ -588,16 +600,15 @@
 
     function refreshPreference(forceReport) {
       if (!extensionStore || typeof extensionStore.get !== "function") {
-        preferenceKnown = true;
-        contextSyncEnabled = false;
+        // Left unknown on purpose: no store means the answer is unavailable,
+        // not that the answer is no.
         return;
       }
       Promise.resolve(extensionStore.get(PREFERENCE_KEY)).then(function (record) {
         applyPreference(record);
         if (forceReport && contextSyncEnabled) schedule(true);
       }).catch(function () {
-        preferenceKnown = true;
-        contextSyncEnabled = false;
+        // Same reasoning: a read that failed tells us nothing about intent.
       });
     }
 
