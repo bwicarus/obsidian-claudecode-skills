@@ -440,6 +440,14 @@ test("扩展上下文按设置和前台状态独立运行，不随语音停止",
     /extensionStore\.set\(ACTIVE_CONTEXT_KEY, envelope\)/,
   );
   assert.match(contentScript, /extensionStore\.get\(PREFERENCE_KEY\)/);
+  assert.match(
+    contentScript,
+    /if \(preferenceKnown && !contextSyncEnabled\) return/,
+  );
+  assert.doesNotMatch(
+    contentScript,
+    /if \(!preferenceKnown \|\| !contextSyncEnabled\) return/,
+  );
   assert.doesNotMatch(
     contentScript,
     /Promise\.resolve\(chrome\.storage\.local\.get\(PREFERENCE_KEY\)\)/,
