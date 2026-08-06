@@ -36,6 +36,7 @@
         "http://*/*"
       ],
       "js": [
+        "src/bw-probe.js",
         "src/facade.js",
         "src/settings-sync.js",
         "vendor/html2canvas.min.js",

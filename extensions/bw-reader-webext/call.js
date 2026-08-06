@@ -279,9 +279,13 @@ function storedPage(value) {
 // nothing in between to say why. Ninth time tonight the failing link also
 // swallowed the report of its own failure.
 function frameProbe(text) {
+  // Same channel as the page, tagged with who is speaking. Loaded as a content
+  // script into the hosting page, the shared helper is not reachable from
+  // inside this document, so the wire format is written out here -- it is one
+  // message shape, kept in step with src/bw-probe.js.
   try {
     window.parent.postMessage(
-      { contract: "bw-frame-probe/1", text: String(text) },
+      { contract: "bw-probe/1", where: "frame", text: String(text) },
       "*"
     );
   } catch (_) {}
