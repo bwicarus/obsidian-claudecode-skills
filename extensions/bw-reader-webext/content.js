@@ -362,7 +362,6 @@
   var ACTIVE_CONTEXT_HEARTBEAT_MS = 60000;
   var PREFERENCE_KEY = "bwReaderExtensionPreferencesV2";
   var CONTEXT_SYNC_KEY = "eph-ctx-sync";
-  var ACTIVE_CONTEXT_KEY = "bwActivePageContextV1";
 
   function createSourceInstanceId() {
     var bytes = new Uint8Array(16);
@@ -423,60 +422,8 @@
     if (window.__bwProbe) window.__bwProbe.startProbeHost();
   } catch (_) {}
 
-  // Delivers a snapshot to the bridge frame embedded in this page.
-  //
-  // The frame lives in the extension's shadow tree, which this script can reach
-  // because it set it up; window.__bwShadow is visible from the isolated world.
-  // Speaks only to a frame whose src is our own call.html, and reports when it
-  // cannot find one -- a delivery that goes nowhere must not look like success.
-  function deliverToFrame(snap) {
-    try {
-      var scope = window.__bwShadow || document;
-      var frame = scope.querySelector('iframe[src*="call.html"]');
-      probeLine(
-        "找框: shadow=" + (window.__bwShadow ? "有" : "无") +
-        " 框=" + (frame ? "有" : "无")
-      );
-      // Registered by identity, so only frames we embedded may report.
-      try {
-        if (frame && window.__bwProbe) window.__bwProbe.trustFrame(frame);
-      } catch (_) {}
-      if (!frame || !frame.contentWindow) {
-        // Through the shared channel, not console: on iOS there is no Web
-        // Inspector, so console.warn is indistinguishable from writing nothing.
-        probeLine("投递: 页面内没有桥接框，改走后台通道");
-        return false;
-      }
-      try {
-        if (
-          window.__bwBrowserControl &&
-          typeof window.__bwBrowserControl.install === "function"
-        ) {
-          window.__bwBrowserControl.install({
-            frame: frame,
-            sourceInstanceId: sourceInstanceId,
-          });
-        } else {
-          probeLine("浏览控制: 执行器尚未加载");
-        }
-      } catch (installError) {
-        probeLine(
-          "浏览控制安装失败: " +
-          ((installError && installError.message) || "未知")
-        );
-      }
-      frame.contentWindow.postMessage(
-        { contract: "bw-page-context/1", type: "page", page: snap },
-        "*"
-      );
-      return true;
-    } catch (err) {
-      probeLine("投递失败: " + ((err && err.message) || "未知"));
-      return false;
-    }
-  }
-
   var LOCAL_VISUAL_CONTRACT = "bw-reader-visual-local/1";
+  var LOCAL_BROWSER_CONTROL_CONTRACT = "bw-browser-control/1";
 
   function exactVisualKeys(value, keys) {
     if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -489,23 +436,9 @@
     return true;
   }
 
-  function ownCallFrameForSource(source) {
-    if (source !== sourceInstanceId) return null;
-    var scope = window.__bwShadow || document;
-    var frame = scope.querySelector('iframe[src*="call.html"]');
-    if (!frame || !frame.contentWindow) return null;
-    try {
-      var ownCallUrl = runtime.getURL("call.html");
-      if (typeof frame.src !== "string" || !frame.src.startsWith(ownCallUrl)) return null;
-    } catch (_) {
-      return null;
-    }
-    return frame;
-  }
-
   function normalizeLocalVisualRequest(message) {
-    if (!exactVisualKeys(message, ["contract", "type", "request"])) return null;
-    if (message.contract !== LOCAL_VISUAL_CONTRACT || message.type !== "capture-request") return null;
+    if (!exactVisualKeys(message, ["type", "request", "expectedViewKey"])) return null;
+    if (message.type !== "BW_READER_VISUAL_CAPTURE") return null;
     var request = message.request;
     if (!exactVisualKeys(request, [
       "contract", "commandKind", "correlation", "sourceInstanceId",
@@ -523,36 +456,83 @@
       (request.scope === "selection-near") !== (typeof request.selectionId === "string") ||
       request.maxBytes !== 786432 || request.chunkCharacters !== 48000
     ) return null;
+    if (
+      typeof message.expectedViewKey !== "string" ||
+      message.expectedViewKey.length < 1 || message.expectedViewKey.length > 160 ||
+      /[\u0000-\u001f\u007f]/.test(message.expectedViewKey)
+    ) return null;
+    return { request: request, expectedViewKey: message.expectedViewKey };
+  }
+
+  function normalizeLocalBrowserControlRequest(message) {
+    if (!exactVisualKeys(message, [
+      "type", "request", "snapshotRevision", "file", "page", "expectedViewKey"
+    ]) || message.type !== "BW_READER_BROWSER_CONTROL" ||
+        !Number.isSafeInteger(message.snapshotRevision) || message.snapshotRevision < 1 ||
+        message.file !== String(location.href || "") || message.page !== 0 ||
+        typeof message.expectedViewKey !== "string" ||
+        !viewKeyMatchesCurrent(message.expectedViewKey)) return null;
+    var request = message.request;
+    var actions = [
+      "next-viewport", "previous-viewport", "scroll-to-text",
+      "scroll-to-heading", "scroll-to-selection"
+    ];
+    var textAction = request &&
+      (request.action === "scroll-to-text" || request.action === "scroll-to-heading");
+    var selectionAction = request && request.action === "scroll-to-selection";
+    var keys = ["contract", "type", "requestId", "sourceInstanceId", "action"];
+    if (textAction) keys.push("target");
+    if (selectionAction) keys.push("selectionId");
+    if (!exactVisualKeys(request, keys) ||
+        request.contract !== LOCAL_BROWSER_CONTROL_CONTRACT ||
+        request.type !== "request" ||
+        !/^[A-Za-z0-9._:-]{1,128}$/.test(String(request.requestId || "")) ||
+        request.sourceInstanceId !== sourceInstanceId || !actions.includes(request.action) ||
+        (textAction && (typeof request.target !== "string" ||
+          !request.target.trim() || request.target !== request.target.trim() ||
+          request.target.length > 320)) ||
+        (selectionAction &&
+          !/^[A-Za-z0-9._:-]{1,160}$/.test(String(request.selectionId || "")))) return null;
     return request;
   }
 
-  function sendLocalVisualResponse(target, request, capture) {
+  function localVisualResponse(request, capture) {
     var ready = !!(
       capture &&
       capture.media_type === "image/jpeg" &&
       typeof capture.b64 === "string" &&
       capture.b64.length > 0
     );
-    try {
-      target.postMessage({
-        contract: LOCAL_VISUAL_CONTRACT,
-        type: "capture-response",
-        correlation: request.correlation,
-        sourceInstanceId: request.sourceInstanceId,
-        status: ready ? "ready" : "unavailable",
-        mimeType: ready ? "image/jpeg" : "",
-        b64: ready ? capture.b64 : "",
-      }, "*");
-    } catch (_) {}
+    return {
+      contract: LOCAL_VISUAL_CONTRACT,
+      type: "capture-response",
+      correlation: request.correlation,
+      sourceInstanceId: request.sourceInstanceId,
+      status: ready ? "ready" : "unavailable",
+      mimeType: ready ? "image/jpeg" : "",
+      b64: ready ? capture.b64 : "",
+    };
   }
 
-  async function captureVisualForFrame(request) {
+  function visualRequestMatchesLive(request, expectedViewKey) {
+    if (
+      request.sourceInstanceId !== sourceInstanceId ||
+      request.file !== String(location.href || "")
+    ) return false;
+    if (!viewKeyMatchesCurrent(expectedViewKey)) return false;
+    var drawing = webDrawingState().drawing;
+    var liveRevision = drawing ? drawing.drawingRevision : null;
+    return liveRevision === request.drawingRevision;
+  }
+
+  async function captureVisualForRuntime(request, expectedViewKey) {
     if (document.visibilityState !== "visible") return null;
     try {
       if (!document.hasFocus()) return null;
     } catch (_) {}
     var RC = window.RC;
     if (!RC) return null;
+    if (!visualRequestMatchesLive(request, expectedViewKey)) return null;
     var target = {
       scope: request.scope,
       page: request.page,
@@ -561,32 +541,127 @@
       snapshotRevision: request.snapshotRevision,
       drawingRevision: request.drawingRevision,
     };
+    var capture = null;
     if (
       request.scope === "viewport-context" &&
       typeof RC.capturePageComposite === "function"
-    ) return await RC.capturePageComposite(target);
-    if (
+    ) capture = await RC.capturePageComposite(target);
+    else if (
       (request.scope === "drawing-nearby" || request.scope === "selection-near") &&
       typeof RC.captureInkRegion === "function"
-    ) return await RC.captureInkRegion(target);
-    return null;
+    ) capture = await RC.captureInkRegion(target);
+    return visualRequestMatchesLive(request, expectedViewKey) ? capture : null;
   }
 
-  window.addEventListener("message", function (event) {
-    var request = normalizeLocalVisualRequest(event.data);
-    if (!request) return;
-    var frame = ownCallFrameForSource(request.sourceInstanceId);
-    if (!frame || event.source !== frame.contentWindow) return;
-    Promise.resolve(captureVisualForFrame(request)).then(
-      function (capture) { sendLocalVisualResponse(event.source, request, capture); },
-      function () { sendLocalVisualResponse(event.source, request, null); }
-    );
-  });
+  function trustedInternalRuntimeSender(sender) {
+    if (!sender || sender.tab) return false;
+    var senderId = typeof sender.id === "string" ? sender.id : "";
+    var runtimeId = typeof runtime.id === "string" ? runtime.id : "";
+    if (senderId && runtimeId) return senderId === runtimeId;
+    try {
+      return typeof sender.url === "string" && sender.url.startsWith(runtime.getURL(""));
+    } catch (_) { return false; }
+  }
+
+  function runtimeRequest(message, timeoutMs) {
+    return new Promise(function (resolve, reject) {
+      var settled = false;
+      var timer = setTimeout(function () {
+        if (settled) return;
+        settled = true;
+        reject(new Error("runtime.sendMessage 超时"));
+      }, Number(timeoutMs) || 15000);
+      function done(value) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        var err = runtime.lastError;
+        if (err) reject(new Error(err.message || "runtime.sendMessage 失败"));
+        else resolve(value);
+      }
+      try {
+        var returned = runtime.sendMessage(message, done);
+        if (returned && typeof returned.then === "function") returned.then(
+          function (value) { if (!settled) { settled = true; clearTimeout(timer); resolve(value); } },
+          function (err) { if (!settled) { settled = true; clearTimeout(timer); reject(err); } }
+        );
+      } catch (err) { clearTimeout(timer); reject(err); }
+    });
+  }
+
+  function claimCallFrame() {
+    var frame = null;
+    try {
+      var surface = window.__bwInlineComputerVoiceSurface;
+      if (!surface || typeof surface.frameForClaim !== "function") return;
+      frame = surface.frameForClaim();
+      if (!frame || !frame.contentWindow ||
+          String(frame.src || "") !== runtime.getURL("call.html") + "?compact=1") return;
+      var bytes = new Uint8Array(32);
+      window.crypto.getRandomValues(bytes);
+      var binary = "";
+      for (var i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
+      var capability = window.btoa(binary)
+        .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+      var appKind = "codex-desktop";
+      try {
+        if (window.RC && RC.computerVoice &&
+            typeof RC.computerVoice.getTargetApp === "function" &&
+            RC.computerVoice.getTargetApp() === "chatgpt-classic") {
+          appKind = "chatgpt-classic";
+        }
+      } catch (_) {}
+      runtimeRequest({
+        type: "BW_READER_CALL_CLAIM_CREATE",
+        capability: capability,
+        sourceInstanceId: sourceInstanceId,
+        appKind: appKind,
+      }, 5000)
+        .then(function (reply) {
+          if (!reply || reply.ok !== true) throw new Error("后台拒绝通话页认领");
+          frame.contentWindow.postMessage({
+            contract: "bw-reader-call-claim/1",
+            type: "claim",
+            capability: capability,
+          }, "*");
+          probeLine("通话页认领: 已投递一次性能力");
+        }).catch(function (err) {
+          probeLine("通话页认领失败: " + ((err && err.message) || "未知"));
+        });
+    } catch (err) {
+      probeLine("通话页认领异常: " + ((err && err.message) || "未知"));
+    }
+  }
+
+  if (runtime.onMessage && typeof runtime.onMessage.addListener === "function") {
+    runtime.onMessage.addListener(function (message, sender, sendResponse) {
+      if (!trustedInternalRuntimeSender(sender)) return false;
+      var visual = normalizeLocalVisualRequest(message);
+      if (visual) {
+        Promise.resolve(captureVisualForRuntime(visual.request, visual.expectedViewKey)).then(
+          function (capture) { sendResponse(localVisualResponse(visual.request, capture)); },
+          function () { sendResponse(localVisualResponse(visual.request, null)); }
+        );
+        return true;
+      }
+      var request = normalizeLocalBrowserControlRequest(message);
+      if (!request) return false;
+      var executor = window.__bwBrowserControl;
+      if (!executor || typeof executor.execute !== "function") return false;
+      sendResponse(executor.execute(request));
+      return false;
+    });
+  }
+
   var lastSignature = "";
   var pendingSignature = "";
-  var contextRevision = 0;
   var viewportRevision = 0;
+  var activationRevision = 1;
+  var activationTimer = null;
   var lastBrowserControlCorrelation = "";
+  var lastWebDrawingRevision = "";
+  var lastWebDrawingEditedAt = 0;
+  var lastObservedUrl = String(location.href || "");
   var timer = null;
   var preferenceKnown = false;
   var contextSyncEnabled = false;
@@ -630,6 +705,82 @@
       hash = Math.imul(hash, 16777619);
     }
     return (hash >>> 0).toString(16);
+  }
+
+  function webDrawingState() {
+    var snapshot = null;
+    try {
+      snapshot = window.__bwWebInk &&
+        typeof window.__bwWebInk.exportSnapshot === "function"
+        ? window.__bwWebInk.exportSnapshot()
+        : null;
+    } catch (_) {}
+    var strokes = snapshot && Array.isArray(snapshot.strokes)
+      ? snapshot.strokes
+      : [];
+    if (!strokes.length) {
+      lastWebDrawingRevision = "";
+      lastWebDrawingEditedAt = 0;
+      return {
+        page_image: null,
+        has_ink: false,
+        drawing: null,
+      };
+    }
+    var serialized = JSON.stringify(strokes);
+    var revision = "dr_" +
+      contentDigest(canonicalDocumentKey() + "\n" + serialized).padStart(8, "0") +
+      contentDigest("web-drawing\n" + serialized).padStart(8, "0");
+    if (revision !== lastWebDrawingRevision) {
+      lastWebDrawingRevision = revision;
+      lastWebDrawingEditedAt = Date.now() / 1000;
+    }
+    var file = String(location.href || "");
+    return {
+      page_image: null,
+      has_ink: true,
+      drawing: {
+        contract: "reader-outgoing-context/1",
+        file: file,
+        page: 0,
+        freshness: "recent",
+        lastEditedAt: lastWebDrawingEditedAt,
+        freshWindowS: 30,
+        inProgress: false,
+        stable: true,
+        drawingRevision: revision,
+        pendingSince: null,
+        ref: {
+          kind: "drawing",
+          file: file,
+          page: 0,
+          revision: revision,
+        },
+        empty: false,
+      },
+    };
+  }
+
+  function viewKeyMatchesCurrent(expected) {
+    var text = String(expected || "");
+    var fallback = /^fallback:(\d+)$/.exec(text);
+    if (fallback) return Number(fallback[1]) === viewportRevision;
+    var parts = text.split(":");
+    if (parts.length !== 5 || Number(parts[0]) !== viewportRevision) return false;
+    var visual = window.visualViewport || null;
+    var scrolling = document.scrollingElement || document.documentElement || document.body;
+    var width = Number(visual && visual.width) || Number(window.innerWidth) ||
+      Number(document.documentElement && document.documentElement.clientWidth) || 0;
+    var height = Number(visual && visual.height) || Number(window.innerHeight) ||
+      Number(document.documentElement && document.documentElement.clientHeight) || 0;
+    var scrollLeft = Number(window.scrollX);
+    var scrollTop = Number(window.scrollY);
+    if (!isFinite(scrollLeft)) scrollLeft = Number(scrolling && scrolling.scrollLeft) || 0;
+    if (!isFinite(scrollTop)) scrollTop = Number(scrolling && scrolling.scrollTop) || 0;
+    return Number(parts[1]) === Math.round(scrollLeft) &&
+      Number(parts[2]) === Math.round(scrollTop) &&
+      Number(parts[3]) === Math.round(width) &&
+      Number(parts[4]) === Math.round(height);
   }
 
   function normalizeReadableText(value) {
@@ -1133,6 +1284,7 @@
     if (lastBrowserControlCorrelation) {
       viewportPayload.controlCorrelation = lastBrowserControlCorrelation;
     }
+    var visualState = webDrawingState();
     return {
       url: String(location.href || ""),
       title: String(document.title || ""),
@@ -1141,17 +1293,74 @@
       text: visibleText,
       selection: selection,
       selectionRegions: selectionRegions,
+      visual: visualState,
       viewKey: viewKey,
       viewport: viewportPayload,
       document: {
         sourceInstanceId: sourceInstanceId,
         documentKey: canonicalDocumentKey(),
+        // Browser activation is intentionally transport-only metadata. It
+        // fences the background document de-duplication for A -> B -> A even
+        // when iOS freezes A without first delivering visibilitychange; it is
+        // never copied into the Windows reader-document/1 payload.
+        activationRevision: activationRevision,
         // call.js computes SHA-256 and enforces the byte bound in its trusted
         // extension origin before constructing the POST field.
         text: fullText,
         truncated: fullTextTruncated,
       },
     };
+  }
+
+  function sha256Text(value) {
+    if (!window.crypto || !window.crypto.subtle || typeof TextEncoder !== "function") {
+      return Promise.reject(new Error("缺少 SHA-256 支持"));
+    }
+    return window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)).then(
+      function (digest) {
+        return Array.prototype.map.call(new Uint8Array(digest), function (byte) {
+          return byte.toString(16).padStart(2, "0");
+        }).join("");
+      }
+    );
+  }
+
+  function boundRelayDocumentText(value) {
+    var original = String(value || "");
+    var text = original.slice(0, 256 * 1024);
+    if (text && /[\uD800-\uDBFF]/.test(text.charAt(text.length - 1))) {
+      text = text.slice(0, -1);
+    }
+    var encoder = new TextEncoder();
+    if (encoder.encode(text).byteLength <= 768 * 1024) {
+      return { text: text, truncated: text.length < original.length };
+    }
+    var low = 0;
+    var high = text.length;
+    while (low < high) {
+      var middle = Math.ceil((low + high) / 2);
+      if (encoder.encode(text.slice(0, middle)).byteLength <= 768 * 1024) low = middle;
+      else high = middle - 1;
+    }
+    if (low > 0 && /[\uD800-\uDBFF]/.test(text.charAt(low - 1))) low -= 1;
+    return { text: text.slice(0, low), truncated: true };
+  }
+
+  function prepareRelaySnapshot(snap) {
+    var fullText = String(snap.document.text || "");
+    var bounded = boundRelayDocumentText(fullText);
+    return sha256Text(fullText).then(function (contentRevision) {
+      return Object.assign({}, snap, {
+        document: {
+          sourceInstanceId: snap.document.sourceInstanceId,
+          documentKey: snap.document.documentKey,
+          activationRevision: snap.document.activationRevision,
+          contentRevision: contentRevision,
+          text: bounded.text,
+          truncated: !!snap.document.truncated || bounded.truncated,
+        },
+      });
+    });
   }
 
   function report(force) {
@@ -1199,6 +1408,7 @@
     var signature = snap.url + "|" + snap.title + "|" + snap.viewKey + "|" +
       contentDigest(snap.text) + "|" + contentDigest(snap.selection) + "|" +
       contentDigest(JSON.stringify(snap.selectionRegions || null)) + "|" +
+      contentDigest(JSON.stringify(snap.visual || null)) + "|" +
       contentDigest(snap.document && snap.document.text);
     if (!force && signature === lastSignature) {
       probeLine("跳过: 内容签名未变");
@@ -1210,77 +1420,39 @@
     }
     pendingSignature = signature;
 
-    // Delivered before storage is touched, not after it succeeds.
-    //
-    // This call used to sit inside finishStorage -- the success callback of the
-    // storage write -- which quietly made the direct path depend on the very
-    // relay it was meant to replace. When the write stalled or failed the
-    // callback never ran, and the delivery, along with every line reporting it,
-    // went silent. Tonight's log showed exactly that: the gates all opened and
-    // then nothing followed.
-    //
-    // The frame is in this page and the snapshot is already in hand. Nothing
-    // about handing it over requires a storage write to have completed first.
     probeLine("采集: " + String(snap.url || "").slice(0, 60));
-    var delivered = deliverToFrame(snap);
-    probeLine("投递到框: " + (delivered ? "成功" : "失败(没找到框)"));
-
-    // The direct frame bounds and hashes document.text before network I/O.
-    // Do not also copy the unbounded corpus candidate into extension storage
-    // or the legacy runtime fallback: those paths exist only to recover the
-    // live viewport when a frame starts late, and large pages can exceed their
-    // quotas before the intended POST gets a chance to apply its byte cap.
-    var legacyPage = {
-      url: snap.url,
-      title: snap.title,
-      text: snap.text,
-      selection: snap.selection,
-      viewKey: snap.viewKey,
-      viewport: snap.viewport,
-      selectionRegions: snap.selectionRegions,
-    };
-
-    contextRevision += 1;
-    var envelope = {
-      schema: 1,
-      revision: Date.now() + "-" + contextRevision,
-      capturedAt: Date.now(),
-      page: legacyPage,
-    };
-
-    function finishStorage(success) {
-      if (pendingSignature === signature) pendingSignature = "";
-      if (!success) {
-        schedule(true);
-        return;
+    probeLine("后台 POST: 准备边界快照");
+    prepareRelaySnapshot(snap).then(function (relaySnap) {
+      if (document.visibilityState !== "visible") {
+        throw new Error("哈希完成时页面已不可见，丢弃旧快照");
       }
-      lastSignature = signature;
-      // Retain the runtime message as a fast path. The storage record is the
-      // reliable handoff: a late-starting inline call frame reads it back, so
-      // losing this message can no longer leave its lastPage empty forever.
-      // Handed straight to the frame in this very page.
-      //
-      // It used to go out through runtime.sendMessage -- across a process
-      // boundary, to a background worker iOS reclaims at will, and back down
-      // again -- with a storage relay bolted on to cover the messages that got
-      // lost on the way. Two paths patching each other, three places to fail
-      // in silence, and no way to tell from the outside which one had.
-      //
-      // The frame is a child of this document. Nothing needs to leave the page.
-      // Kept only as a fallback for surfaces with no frame of their own.
       try {
-        var result = runtime.sendMessage({ type: "BW_PAGE_ACTIVE", page: legacyPage });
-        if (result && typeof result.catch === "function") result.catch(function () {});
-      } catch (_) {}
-    }
-
-    if (!extensionStore || typeof extensionStore.set !== "function") {
-      finishStorage(false);
-      return;
-    }
-    Promise.resolve(extensionStore.set(ACTIVE_CONTEXT_KEY, envelope)).then(
-      function () { finishStorage(true); },
-      function () { finishStorage(false); }
+        if (!document.hasFocus()) throw new Error("哈希完成时页面已失焦，丢弃旧快照");
+      } catch (err) { throw err; }
+      if (String(location.href || "") !== snap.url) {
+        throw new Error("哈希完成时页面地址已变化，丢弃旧快照");
+      }
+      probeLine("后台 POST: 开始");
+      return runtimeRequest({ type: "BW_READER_CONTEXT_POST", snapshot: relaySnap }, 15000);
+    }).then(
+      function (reply) {
+        if (!reply || reply.ok !== true || !reply.data) {
+          throw new Error(String(reply && (reply.error || reply.code) || "后台拒绝快照"));
+        }
+        var snapshotRevision = Number(reply.data.snapshotRevision);
+        if (!Number.isSafeInteger(snapshotRevision) || snapshotRevision < 1) {
+          throw new Error("后台回执缺少有效 revision");
+        }
+        if (pendingSignature === signature) pendingSignature = "";
+        lastSignature = signature;
+        probeLine("后台 POST: 成功 revision=" + snapshotRevision);
+        claimCallFrame();
+      },
+      function (err) {
+        if (pendingSignature === signature) pendingSignature = "";
+        probeLine("后台 POST 失败: " + ((err && err.message) || "未知"));
+        schedule(true);
+      }
     );
   }
 
@@ -1294,8 +1466,34 @@
   }
 
   try {
+    function noteForegroundActivation(reason) {
+      if (document.visibilityState !== "visible") return;
+      try { if (!document.hasFocus()) return; } catch (_) {}
+      if (activationTimer) return;
+      activationTimer = setTimeout(function () {
+        activationTimer = null;
+        if (document.visibilityState !== "visible") return;
+        try { if (!document.hasFocus()) return; } catch (_) {}
+        activationRevision += 1;
+        lastSignature = "";
+        probeLine("前台激活: " + reason + " #" + activationRevision);
+        claimCallFrame();
+        refreshPreference(true);
+      }, 120);
+    }
+    function noteLocationChange(reason) {
+      var current = String(location.href || "");
+      if (!current || current === lastObservedUrl) return;
+      lastObservedUrl = current;
+      activationRevision += 1;
+      viewportRevision += 1;
+      lastSignature = "";
+      pendingSignature = "";
+      probeLine("页面地址变化: " + reason + " #" + activationRevision);
+      schedule(true);
+    }
     document.addEventListener("visibilitychange", function () {
-      if (document.visibilityState === "visible") schedule(true);
+      if (document.visibilityState === "visible") noteForegroundActivation("visible");
     }, { passive: true });
     document.addEventListener("selectionchange", function () {
       schedule(false);
@@ -1341,17 +1539,40 @@
       if (event && event.target === document) return;
       noteViewportScroll();
     }, { capture: true, passive: true });
-    ["pageshow", "focus", "online"].forEach(function (type) {
+    ["pageshow", "focus", "resume"].forEach(function (type) {
       window.addEventListener(type, function () {
-        refreshPreference(true);
+        noteForegroundActivation(type);
       }, { passive: true });
     });
+    window.addEventListener("online", function () {
+      refreshPreference(true);
+    }, { passive: true });
+    ["hashchange", "popstate"].forEach(function (type) {
+      window.addEventListener(type, function () {
+        noteLocationChange(type);
+      }, { passive: true });
+    });
+    // pushState/replaceState may not emit either event, and patching History
+    // from an isolated content-script world would not intercept page-world
+    // calls. A bounded URL poll observes that last case without trusting the
+    // host page or waiting for the 60-second context heartbeat.
+    window.setInterval(function () {
+      noteLocationChange("poll");
+    }, 1000);
     // Keep asserting which foreground page is current even when its body and
     // selection do not change. Background pages still fail the strict focus
     // gate in report(), so they cannot win merely by having a live timer.
     window.setInterval(function () {
       if (contextSyncEnabled) schedule(true);
     }, ACTIVE_CONTEXT_HEARTBEAT_MS);
+    // Service-worker memory can be reclaimed while the iframe remains alive.
+    // Re-establish only the one-time frame claim at a bounded cadence; no page
+    // data or control result travels on this bootstrap channel.
+    window.setInterval(function () {
+      if (document.visibilityState !== "visible") return;
+      try { if (!document.hasFocus()) return; } catch (_) {}
+      claimCallFrame();
+    }, 15000);
 
     // Asks the switch itself, rather than a copy of it.
     //
@@ -1478,6 +1699,7 @@
     }
 
     refreshPreference(true);
+    claimCallFrame();
     if (chrome.storage && chrome.storage.local) {
       if (chrome.storage.onChanged) {
         chrome.storage.onChanged.addListener(function (changes, areaName) {

@@ -72,14 +72,8 @@ function harness() {
   const region = new FakeElement("path", { "data-region-id": "rg_safe_1" });
   const svg = new FakeElement("svg").append(region);
   const body = new FakeElement("body").append(heading, paragraph, svg);
-  const listeners = new Map();
   const refreshes = [];
   const responses = [];
-  const frameWindow = { postMessage(value) { responses.push(structuredClone(value)); } };
-  const frame = {
-    contentWindow: frameWindow,
-    src: "safari-web-extension://unit-test/call.html?compact=1",
-  };
   const document = {
     body,
     documentElement: body,
@@ -104,8 +98,6 @@ function harness() {
     scrollY: 0,
     __bwShadow: { querySelectorAll: (selector) => body.querySelectorAll(selector) },
     getComputedStyle() { return { display: "block", visibility: "visible", overflowY: "visible" }; },
-    addEventListener(type, listener) { listeners.set(type, listener); },
-    removeEventListener(type, listener) { if (listeners.get(type) === listener) listeners.delete(type); },
     dispatchEvent(event) { refreshes.push(event); return true; },
     scrollBy({ top }) { this.scrollY += top; },
     scrollTo(x, y) { this.scrollX = x; this.scrollY = y; },
@@ -136,8 +128,7 @@ function harness() {
   };
   vm.runInNewContext(SOURCE, sandbox, { filename: "browser-control.js" });
   const api = window.__bwBrowserControl;
-  api.install({ frame, sourceInstanceId: "source_abc-123" });
-  const send = (data, source = frameWindow) => listeners.get("message")({ source, data });
+  const send = (data) => responses.push(structuredClone(api.execute(data)));
   const request = (action, extra = {}) => ({
     contract: "bw-browser-control/1",
     type: "request",
@@ -146,7 +137,7 @@ function harness() {
     action,
     ...extra,
   });
-  return { api, document, window, frame, send, request, responses, refreshes, heading, paragraph, region };
+  return { api, document, window, send, request, responses, refreshes, heading, paragraph, region };
 }
 
 test("contract exposes only five fixed actions and contains no dynamic execution/navigation surface", () => {
@@ -162,53 +153,25 @@ test("contract exposes only five fixed actions and contains no dynamic execution
   assert.doesNotMatch(SOURCE, /querySelector(All)?\s*\(\s*(?:raw|request|target|selectionId)/);
 });
 
-test("only the installed frame can issue a command and a repeated request is idempotent", () => {
+test("the content-owned execute API keeps repeated requests idempotent", () => {
   const h = harness();
   const command = h.request("next-viewport");
-  h.send(command, { postMessage() {} });
-  assert.equal(h.responses.length, 0);
-  assert.equal(h.window.scrollY, 0);
-
   h.send(command);
   assert.equal(h.responses[0].ok, true);
   assert.equal(h.window.scrollY, 656);
   assert.equal(h.refreshes[0].type, "bw:browser-control-refresh");
   assert.equal(h.refreshes[0].detail.sourceInstanceId, "source_abc-123");
 
-  h.api.install({ frame: h.frame, sourceInstanceId: "source_abc-123" });
   h.send(command);
   assert.equal(h.responses.length, 2);
   assert.equal(h.window.scrollY, 656, "retry must not scroll a second time");
 });
 
-test("installation rejects a frame that is not this extension's call.html", () => {
-  const h = harness();
-  for (const src of [
-    "https://evil.test/call.html",
-    "safari-web-extension://different-extension/call.html",
-    "safari-web-extension://unit-test/not-call.html",
-  ]) {
-    assert.throws(
-      () => h.api.install({
-        frame: { src, contentWindow: { postMessage() {} } },
-        sourceInstanceId: "source_abc-123",
-      }),
-      /embedded call\.html frame/,
-      src,
-    );
-  }
-});
-
-test("inactive documents and mismatched sources fail closed", () => {
+test("inactive documents fail closed", () => {
   const h = harness();
   h.document.focused = false;
   h.send(h.request("next-viewport"));
   assert.equal(h.responses.at(-1).error.code, "BW_BROWSER_CONTROL_DOCUMENT_INACTIVE");
-  assert.equal(h.window.scrollY, 0);
-
-  h.document.focused = true;
-  h.send({ ...h.request("next-viewport"), sourceInstanceId: "source_other" });
-  assert.equal(h.responses.at(-1).error.code, "BW_BROWSER_CONTROL_SOURCE_MISMATCH");
   assert.equal(h.window.scrollY, 0);
 });
 

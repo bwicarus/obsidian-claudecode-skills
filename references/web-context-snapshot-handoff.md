@@ -12,8 +12,8 @@
 
 ```
 content.js  采集正文与位置
-   ↓ postMessage（同页，不跨进程）
-call.js     内嵌框，扩展 origin
+   ↓ runtime.sendMessage（固定 operation + 严格 schema）
+background.js  校验 sender.tab / URL / sourceInstanceId
    ↓ 一次 POST /reader-context/snapshot（无长连接、无握手、无会话）
 Windows 桥  覆盖快照，最后一发赢
 ```
@@ -22,11 +22,17 @@ Windows 桥  覆盖快照，最后一发赢
 长连接的全部机制（hello、context-open、会话 id、重连退避）都是为了
 让一段对话跨时间存活，这里一样用不上。而 socket 必须由活着的文档持有，
 iOS 上每种扩展文档都短命 —— 那才是真正的代价。
-POST 不需要任何东西活着：框只需在发送的那一瞬间存在。
+POST 不需要任何东西长期活着：内容脚本只需在发送的那一瞬间唤醒后台。
 
-**为什么由内嵌框发而不是 content script 直发**：桥的 origin 白名单只认
-`safari-web-extension://` 与 Reader 站点，网页 origin 一律 403。
-这是整条链路上**唯一真正的硬约束**，其余复杂度都是自找的。
+**为什么由后台发而不是内容脚本或宿主页面发**：桥的 origin 白名单只认
+`safari-web-extension://` 与 Reader 站点，网页 origin 一律 403；同时宿主页面不应看到正文、
+视觉请求或浏览器控制结果。后台只接受本扩展顶层 content sender，校验当前 tab URL，并只向具名
+Windows 端点发送固定结构。它不是任意 fetch proxy。
+
+`call.js` 仍是当前标签的电脑语音与 AI 工具连接持有者，但不再通过普通 `postMessage` 接收业务数据。
+内容脚本只把一次性随机 capability 交给它自己创建的精确 iframe window；后台把该 frame 绑定到
+`tabId + frameId + documentId + sourceInstanceId`。此后按需视觉与固定浏览器动作均经 runtime relay，
+并在返回前再次核对 source、URL、viewKey 与 snapshot revision。
 
 ---
 
@@ -99,7 +105,7 @@ if (P) P.skip("模块名", "为什么提前返回");
 
 ---
 
-## 四、Windows 侧（0.1.95）
+## 四、Windows 侧
 
 - `POST /reader-context/snapshot` + **`OPTIONS` 预检**
   ⚠ 缺预检时浏览器报 `Load failed`，看着像网络不通，
@@ -144,7 +150,9 @@ if (P) P.skip("模块名", "为什么提前返回");
 | 文件 | 作用 |
 |---|---|
 | `extensions/bw-reader-webext/content.js` | 采集、正文提取、投递、焦点判定 |
-| `extensions/bw-reader-webext/call.js` | 框内 POST、位置/正文分离、框内诊断 |
+| `extensions/bw-reader-webext/background.js` | sender 校验、固定 POST、标签绑定与视觉/控制 relay |
+| `extensions/bw-reader-webext/call.js` | 电脑语音与 AI 工具 WSS、一次性 frame claim |
+| `extensions/bw-reader-webext/src/browser-control.js` | 五种固定页面动作，不接受脚本、URL 或 selector |
 | `extensions/bw-reader-webext/src/bw-probe.js` | 统一诊断通道与调试开关 |
 | `extensions/bw-reader-webext/package_safari.py` | host 权限（含 Windows 桥这台具名主机） |
 | `windows/ComputerVoiceAudio/DirectBridgeServer.cs` | POST 端点、CORS 预检、请求日志 |

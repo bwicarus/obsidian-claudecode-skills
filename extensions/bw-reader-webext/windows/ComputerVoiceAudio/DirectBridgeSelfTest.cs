@@ -705,6 +705,11 @@ internal static class DirectBridgeSelfTest
         await CheckReaderDocumentAndViewportAsync(
             root,
             checks).ConfigureAwait(false);
+        await CheckSnapshotPostEndpointAsync(
+            root,
+            configPath,
+            origin,
+            checks).ConfigureAwait(false);
         await CheckReaderVisualDeliveryAsync(
             root,
             checks).ConfigureAwait(false);
@@ -5168,6 +5173,96 @@ internal static class DirectBridgeSelfTest
                 events,
                 frames).ConfigureAwait(false),
             "active-reading");
+        DirectActiveReading stableOrdinalReading =
+            FileDirectSnapshotContextAdapter.ValidateActiveReading(
+                JsonSerializer.SerializeToElement(new
+                {
+                    kind = "web",
+                    file = "https://example.test/regions",
+                    title = "Stable regions",
+                    page = 0,
+                    selectionState = "unknown",
+                    selection = (string?)null,
+                    observedAtEpochMs = 1_750_000_000_100L,
+                    sourceInstanceId = "source-stable-regions",
+                    selectionRegions = new
+                    {
+                        contract = "reader-selection-regions/1",
+                        total = 2,
+                        truncated = false,
+                        items = new[]
+                        {
+                            new
+                            {
+                                selectionId = "selection-2",
+                                label = "#2 12:01",
+                                ordinal = 2,
+                                createdAtEpochMs = 1_750_000_000_001L,
+                            },
+                            new
+                            {
+                                selectionId = "selection-3",
+                                label = "#3 12:02",
+                                ordinal = 3,
+                                createdAtEpochMs = 1_750_000_000_002L,
+                            },
+                        },
+                    },
+                }));
+        JsonElement stableOrdinalRegions =
+            stableOrdinalReading.SelectionRegions!.Value;
+        bool descendingOrdinalRejected = false;
+        try
+        {
+            _ = FileDirectSnapshotContextAdapter.ValidateActiveReading(
+                JsonSerializer.SerializeToElement(new
+                {
+                    kind = "web",
+                    file = "https://example.test/regions",
+                    title = "Stable regions",
+                    page = 0,
+                    selectionState = "unknown",
+                    selection = (string?)null,
+                    observedAtEpochMs = 1_750_000_000_100L,
+                    sourceInstanceId = "source-stable-regions",
+                    selectionRegions = new
+                    {
+                        contract = "reader-selection-regions/1",
+                        total = 2,
+                        truncated = false,
+                        items = new[]
+                        {
+                            new
+                            {
+                                selectionId = "selection-3",
+                                label = "#3 12:02",
+                                ordinal = 3,
+                                createdAtEpochMs = 1_750_000_000_002L,
+                            },
+                            new
+                            {
+                                selectionId = "selection-2",
+                                label = "#2 12:01",
+                                ordinal = 2,
+                                createdAtEpochMs = 1_750_000_000_001L,
+                            },
+                        },
+                    },
+                }));
+        }
+        catch (DirectProtocolException exception)
+        {
+            descendingOrdinalRejected = exception.Code
+                == "BW_READER_ACTIVE_READING_SCHEMA_INVALID";
+        }
+        Require(
+            stableOrdinalRegions.GetProperty("items")[0]
+                .GetProperty("ordinal").GetInt32() == 2
+            && stableOrdinalRegions.GetProperty("items")[1]
+                .GetProperty("ordinal").GetInt32() == 3
+            && descendingOrdinalRejected,
+            "direct-active-reading-selection-ordinals-allow-stable-gaps",
+            checks);
         DirectActiveReading aliasedActiveReading =
             FileDirectSnapshotContextAdapter.ValidateActiveReading(
                 JsonSerializer.SerializeToElement(new
@@ -6262,6 +6357,121 @@ internal static class DirectBridgeSelfTest
             checks);
     }
 
+    private static async Task CheckSnapshotPostEndpointAsync(
+        string root,
+        string configPath,
+        string origin,
+        ICollection<string> checks)
+    {
+        string snapshotRoot = System.IO.Path.Combine(
+            root,
+            "snapshot-post-endpoint");
+        Directory.CreateDirectory(snapshotRoot);
+        string snapshotPath = System.IO.Path.Combine(
+            snapshotRoot,
+            FileDirectSnapshotContextAdapter.SnapshotFileName);
+        FileDirectSnapshotContextAdapter adapter = new(snapshotPath);
+        await using DirectBridgeServer server = new(
+            new DirectBridgeConfigStore(configPath),
+            new FakeDirectAppLauncher(),
+            new FakeDirectMediaAdapter(),
+            snapshotContextAdapter: adapter);
+
+        DefaultHttpContext optionsContext = SnapshotPostContext(
+            HttpMethods.Options,
+            origin);
+        await InvokeSnapshotPostAsync(server, optionsContext)
+            .ConfigureAwait(false);
+
+        byte[] payload = JsonSerializer.SerializeToUtf8Bytes(new
+        {
+            active = new
+            {
+                kind = "web",
+                file = "https://example.test/endpoint",
+                title = "Endpoint",
+                page = 1,
+                selectionState = "unknown",
+                selection = (string?)null,
+                observedAtEpochMs = 1_786_000_000_000L,
+                sourceInstanceId = "source-snapshot-post",
+            },
+        });
+        DefaultHttpContext postContext = SnapshotPostContext(
+            HttpMethods.Post,
+            origin);
+        postContext.Request.ContentType = "application/json";
+        postContext.Request.ContentLength = payload.Length;
+        postContext.Request.Body = new MemoryStream(payload);
+        await using MemoryStream responseBody = new();
+        postContext.Response.Body = responseBody;
+        await InvokeSnapshotPostAsync(server, postContext)
+            .ConfigureAwait(false);
+
+        using JsonDocument snapshot = JsonDocument.Parse(
+            await File.ReadAllBytesAsync(snapshotPath)
+                .ConfigureAwait(false));
+        long revision = snapshot.RootElement.GetProperty("revision")
+            .GetInt64();
+        Require(
+            optionsContext.Response.StatusCode
+                == StatusCodes.Status204NoContent
+            && optionsContext.Response.Headers[
+                "Access-Control-Expose-Headers"]
+                == "X-BW-Snapshot-Revision"
+            && optionsContext.Response.Headers[
+                "Access-Control-Allow-Methods"]
+                == "POST, OPTIONS"
+            && postContext.Response.StatusCode
+                == StatusCodes.Status204NoContent
+            && postContext.Response.Headers[
+                "Access-Control-Allow-Origin"] == origin
+            && postContext.Response.Headers[
+                "Access-Control-Expose-Headers"]
+                == "X-BW-Snapshot-Revision"
+            && postContext.Response.Headers[
+                "X-BW-Snapshot-Revision"]
+                == revision.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture)
+            && responseBody.Length == 0,
+            "direct-snapshot-post-exposes-applied-revision-to-allowed-origin",
+            checks);
+
+        static DefaultHttpContext SnapshotPostContext(
+            string method,
+            string allowedOrigin)
+        {
+            DefaultHttpContext context = new();
+            context.Request.Method = method;
+            context.Request.Headers.Origin = allowedOrigin;
+            context.Request.Headers["Tailscale-User-Login"] =
+                "bwicarus@gmail.com";
+            return context;
+        }
+
+        static async Task InvokeSnapshotPostAsync(
+            DirectBridgeServer target,
+            HttpContext context)
+        {
+            System.Reflection.MethodInfo method =
+                typeof(DirectBridgeServer).GetMethod(
+                    "HandleSnapshotPostAsync",
+                    System.Reflection.BindingFlags.Instance
+                        | System.Reflection.BindingFlags.NonPublic)
+                ?? throw new InvalidOperationException(
+                    "snapshot POST handler is unavailable");
+            object? invocation = method.Invoke(
+                target,
+                new object[] { context, CancellationToken.None });
+            if (invocation is not Task task)
+            {
+                throw new InvalidOperationException(
+                    "snapshot POST handler did not return a Task");
+            }
+            await task.ConfigureAwait(false);
+        }
+    }
+
     private static async Task CheckReaderVisualDeliveryAsync(
         string root,
         ICollection<string> checks)
@@ -6271,6 +6481,8 @@ internal static class DirectBridgeSelfTest
         int sentToA = 0;
         int sentToB = 0;
         TaskCompletionSource<bool> bSent = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource<bool> tamperedSent = new(
             TaskCreationOptions.RunContinuationsAsynchronously);
         ReaderContextSourceLease leaseA = router.Attach(
             "source-A",
@@ -6286,7 +6498,14 @@ internal static class DirectBridgeSelfTest
             (_, _) =>
             {
                 sentToB += 1;
-                bSent.TrySetResult(true);
+                if (sentToB == 1)
+                {
+                    bSent.TrySetResult(true);
+                }
+                else if (sentToB == 2)
+                {
+                    tamperedSent.TrySetResult(true);
+                }
                 return Task.CompletedTask;
             });
         ReaderVisualDeliveryRequest request = new(
@@ -6333,7 +6552,59 @@ internal static class DirectBridgeSelfTest
             "direct-reader-visual-routes-only-to-exact-source",
             checks);
 
+        ReaderVisualDeliveryRequest tamperedRequest = request with
+        {
+            Correlation = "visual-identity-tamper",
+            DrawingRevision = "drawing-expected",
+        };
+        Task<ReaderVisualCapture?> tamperedTask = broker.RequestAsync(
+            tamperedRequest,
+            CancellationToken.None);
+        await tamperedSent.Task.WaitAsync(TimeSpan.FromSeconds(1))
+            .ConfigureAwait(false);
+        bool tamperedIdentityRejected = false;
+        try
+        {
+            _ = broker.Accept(
+                leaseB,
+                new ReaderVisualDeliveryChunk(
+                    "session-AAAAAAAAAAAAAAAAAAAAAA",
+                    tamperedRequest.Correlation,
+                    tamperedRequest.SourceInstanceId,
+                    tamperedRequest.SnapshotRevision,
+                    tamperedRequest.File,
+                    JsonSerializer.SerializeToElement(4),
+                    "drawing-tampered",
+                    tamperedRequest.Scope,
+                    null,
+                    "chunk",
+                    ReaderVisualDeliveryProtocol.MimeType,
+                    0,
+                    1,
+                    (uint)jpeg.Length,
+                    Convert.ToBase64String(jpeg)));
+        }
+        catch (ReaderVisualDeliveryException exception)
+        {
+            tamperedIdentityRejected = exception.Code
+                == "BW_READER_VISUAL_IDENTITY_MISMATCH";
+        }
         router.Detach(leaseB);
+        bool tamperedRequestRetired = false;
+        try
+        {
+            _ = await tamperedTask.ConfigureAwait(false);
+        }
+        catch (ReaderVisualDeliveryException exception)
+        {
+            tamperedRequestRetired = exception.Code
+                == "BW_READER_VISUAL_SOURCE_OFFLINE";
+        }
+        Require(
+            tamperedIdentityRejected && tamperedRequestRetired,
+            "direct-reader-visual-rpc-rejects-tampered-capture-identity",
+            checks);
+
         bool offlineNoFallback = false;
         try
         {
@@ -6570,6 +6841,33 @@ internal static class DirectBridgeSelfTest
                 ["reason"] = "none",
             },
         };
+        JsonObject SnapshotWithDrawing(
+            long revision,
+            string drawingRevision,
+            bool stable = true)
+        {
+            JsonObject snapshot = Snapshot(revision);
+            JsonObject page = snapshot["currentPage"]!.AsObject();
+            page["visual"] = new JsonObject
+            {
+                ["drawing"] = new JsonObject
+                {
+                    ["stable"] = stable,
+                    ["inProgress"] = false,
+                    ["empty"] = false,
+                    ["drawingRevision"] = drawingRevision,
+                },
+            };
+            return snapshot;
+        }
+        JsonObject stableDrawing = SnapshotWithDrawing(
+            30,
+            "drawing-stable-a");
+        ReaderVisualDeliveryRequest? drawingRequest =
+            ReaderContextMcpServer.BuildVisualRequest(
+                stableDrawing,
+                "drawing-nearby",
+                null);
         Require(
             ReaderContextMcpServer.BuildVisualRequest(
                 Snapshot(30),
@@ -6586,8 +6884,22 @@ internal static class DirectBridgeSelfTest
             && ReaderContextMcpServer.BuildVisualRequest(
                 Snapshot(30),
                 "viewport-context",
-                "selection-1") is null,
-            "direct-reader-visual-selection-scope-requires-known-region",
+                "selection-1") is null
+            && drawingRequest is not null
+            && ReaderContextMcpServer.VisualRequestStillCurrent(
+                SnapshotWithDrawing(30, "drawing-stable-a"),
+                drawingRequest)
+            && !ReaderContextMcpServer.VisualRequestStillCurrent(
+                SnapshotWithDrawing(30, "drawing-stable-b"),
+                drawingRequest)
+            && ReaderContextMcpServer.BuildVisualRequest(
+                SnapshotWithDrawing(
+                    30,
+                    "drawing-unstable",
+                    stable: false),
+                "drawing-nearby",
+                null) is null,
+            "direct-reader-visual-scopes-require-stable-current-identity",
             checks);
         await File.WriteAllTextAsync(
             snapshotPath,
@@ -6614,7 +6926,9 @@ internal static class DirectBridgeSelfTest
                 },
             },
         });
-        string VisualMcpInput(bool includeDuplicate = false) => string.Join(
+        string VisualMcpInput(
+            bool includeDuplicate = false,
+            string scope = "viewport-context") => string.Join(
             Environment.NewLine,
             JsonSerializer.Serialize(new
             {
@@ -6643,7 +6957,7 @@ internal static class DirectBridgeSelfTest
                     name = ReaderContextMcpServer.VisualToolName,
                     arguments = new
                     {
-                        scope = "viewport-context",
+                        scope,
                     },
                 },
             }),
@@ -6745,6 +7059,48 @@ internal static class DirectBridgeSelfTest
                 "direct-reader-visual-mcp-discards-superseded-snapshot",
                 checks);
         }
+
+        await File.WriteAllTextAsync(
+            snapshotPath,
+            SnapshotWithDrawing(
+                51,
+                "drawing-same-revision-a").ToJsonString(
+                    DirectBridgeContract.JsonOptions),
+            new UTF8Encoding(false)).ConfigureAwait(false);
+        StringWriter changedDrawingOutput = new();
+        ReaderContextMcpServer changedDrawingMcp = new(
+            snapshotPath,
+            new StringReader(VisualMcpInput(
+                scope: "drawing-nearby")),
+            changedDrawingOutput,
+            utcNow: () => DateTimeOffset.FromUnixTimeMilliseconds(
+                1_786_000_001_000L),
+            fetchVisualAsync: async (_, cancellationToken) =>
+            {
+                await File.WriteAllTextAsync(
+                    snapshotPath,
+                    SnapshotWithDrawing(
+                        51,
+                        "drawing-same-revision-b").ToJsonString(
+                            DirectBridgeContract.JsonOptions),
+                    new UTF8Encoding(false),
+                    cancellationToken).ConfigureAwait(false);
+                return new ReaderVisualCapture(
+                    ReaderVisualDeliveryProtocol.MimeType,
+                    jpeg);
+            });
+        _ = await changedDrawingMcp.RunAsync(CancellationToken.None)
+            .ConfigureAwait(false);
+        using JsonDocument changedDrawingResponse = JsonDocument.Parse(
+            changedDrawingOutput.ToString()
+                .Split(
+                    new[] { "\r\n", "\n" },
+                    StringSplitOptions.RemoveEmptyEntries)[2]);
+        Require(
+            changedDrawingResponse.RootElement.GetProperty("result")
+                .GetProperty("isError").GetBoolean(),
+            "direct-reader-visual-mcp-rejects-same-revision-drawing-change",
+            checks);
     }
 
     private static async Task CheckReaderBrowserControlAsync(

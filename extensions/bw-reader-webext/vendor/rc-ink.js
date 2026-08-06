@@ -39,6 +39,11 @@ if (window.__bwPwaProviderOnly) return;
     return pad(date.getHours()) + ':' + pad(date.getMinutes());
   }
 
+  function _regionOrdinal(s) {
+    var value = Number(s && s.ordinal);
+    return Number.isSafeInteger(value) && value > 0 ? value : 0;
+  }
+
   function _pointInPolygon(point, points) {
     var inside = false;
     for (var i = 0, j = points.length - 1; i < points.length; j = i++) {
@@ -50,7 +55,11 @@ if (window.__bwPwaProviderOnly) return;
     return inside;
   }
 
-  function _regionNumbers(strokes) {
+  // Region ordinals are data, not a render-time array index. Old strokes did
+  // not carry one, so migrate them in deterministic creation order. Once an
+  // ordinal exists it is never compacted when another region is erased; the
+  // host's existing whole-stroke JSON persistence carries it across reloads.
+  function ensureRegionOrdinals(strokes) {
     var regions = (strokes || []).filter(function (stroke) { return stroke && stroke.t === 'region'; });
     regions.sort(function (a, b) {
       var byTime = _regionTimestamp(a) - _regionTimestamp(b);
@@ -58,9 +67,24 @@ if (window.__bwPwaProviderOnly) return;
       var aid = String(a.id || ''), bid = String(b.id || '');
       return aid < bid ? -1 : (aid > bid ? 1 : 0);
     });
-    var numbers = new Map();
-    for (var i = 0; i < regions.length; i++) numbers.set(regions[i], i + 1);
+    var numbers = new Map(), used = Object.create(null), missing = [], max = 0;
+    for (var i = 0; i < regions.length; i++) {
+      var ordinal = _regionOrdinal(regions[i]);
+      if (!ordinal || used[ordinal]) { missing.push(regions[i]); continue; }
+      used[ordinal] = true; max = Math.max(max, ordinal); numbers.set(regions[i], ordinal);
+    }
+    for (var j = 0; j < missing.length; j++) {
+      do { max += 1; } while (used[max]);
+      missing[j].ordinal = max;
+      used[max] = true; numbers.set(missing[j], max);
+    }
     return numbers;
+  }
+
+  function nextRegionOrdinal(strokes) {
+    var numbers = ensureRegionOrdinals(strokes), next = 0;
+    numbers.forEach(function (ordinal) { next = Math.max(next, ordinal); });
+    return next + 1;
   }
 
   // 画一条笔画:pen=平滑 quadratic(单点=点笔头)/ line / arrow / rect
@@ -192,7 +216,7 @@ if (window.__bwPwaProviderOnly) return;
     if (visible === false) return;
     var cssW = parseFloat(cv.style.width) || cv.width;
     var dpr = (cv.width / cssW) || 1;
-    var arr = strokes || [], regionNumbers = _regionNumbers(arr);
+    var arr = strokes || [], regionNumbers = ensureRegionOrdinals(arr);
     for (var i = 0; i < arr.length; i++) {
       var drawDefs = defs;
       if (arr[i] && arr[i].t === 'region') {
@@ -219,6 +243,8 @@ if (window.__bwPwaProviderOnly) return;
 
   window.RCInk = { drawStroke: drawStroke, ptSeg: ptSeg, hit: hit, norm: norm,
                    redraw: redraw, eraseAt: eraseAt, pushUndo: pushUndo,
+                   ensureRegionOrdinals: ensureRegionOrdinals,
+                   nextRegionOrdinal: nextRegionOrdinal,
                    positionToolbarAbove: positionToolbarAbove,
                    REGION_MAX_POINTS: REGION_MAX_POINTS };
 })();

@@ -134,29 +134,11 @@ function describe(err) {
 const PREFERENCE_KEY = "bwReaderExtensionPreferencesV2";
 const CONTEXT_SYNC_KEY = "eph-ctx-sync";
 const CONTEXT_SYNC_MIRROR_KEY = "bwCtxSyncMirrorV1";
-const ACTIVE_CONTEXT_KEY = "bwActivePageContextV1";
+const VISUAL_BINDING_SIGNAL_KEY = "bwReaderVisualBindingsV1";
 
-// Compared before sending. Without it the same page would be resent on every
-// scroll event, each one costing a sequence number and two round trips.
-let lastSignature = "";
-let lastPage = null;
 let contextPreferenceKnown = false;
 let contextSyncEnabled = false;
 let contextMirrorKnown = false;
-let link = null;
-
-function contextLinkStatus(s) {
-  note("链路: " + JSON.stringify(s?.state ?? s));
-  if (s.state === "open") say("● 已连接,正在跟随", "ok");
-  else if (s.state === "connecting") say("正在连接…");
-  else if (s.state === "retrying") {
-    say(`✗ 已断开,${Math.round((s.delayMs || 0) / 1000)} 秒后重试`, "err");
-    if (s.error) note("断开: " + describe(s.error));
-  } else if (s.state === "error") {
-    say("✗ 握手失败", "err");
-    note("握手: " + describe(s.error));
-  }
-}
 
 function enabledFromRecord(record) {
   return !!(
@@ -169,25 +151,6 @@ function enabledFromRecord(record) {
 
 function contextSurfaceVisible() {
   return document.visibilityState !== "hidden";
-}
-
-function closeContextLink() {
-  const current = link;
-  link = null;
-  lastSignature = "";
-  if (!current) return;
-  try { current.close(); } catch (_) {}
-}
-
-function ensureContextLink() {
-  if (!contextPreferenceKnown || !contextSyncEnabled || !contextSurfaceVisible()) {
-    return null;
-  }
-  if (!link) {
-    link = new ContextLink(contextLinkStatus);
-    link.connect();
-  }
-  return link;
 }
 
 function applyContextPreference(record, mirrorValue) {
@@ -209,79 +172,37 @@ function applyContextPreference(record, mirrorValue) {
   contextPreferenceKnown = true;
   contextSyncEnabled = next;
   if (!changed) return;
-  lastSignature = "";
   if (!contextSyncEnabled) {
-    closeContextLink();
     closeVisualLink();
     say("上下文同步已关闭", "dim");
-    return;
-  }
-  const current = ensureContextLink();
-  if (current && lastPage) forward(lastPage, true);
-}
-
-function contentDigest(value) {
-  const text = String(value || "");
-  let hash = 2166136261;
-  for (let i = 0; i < text.length; i += 1) {
-    hash ^= text.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(16);
-}
-
-function render(page) {
-  els.ctxTitle.textContent = page.title || "(无标题)";
-  els.ctxUrl.textContent =
-    `${page.url}　·　正文 ${(page.text || "").length} 字` +
-    (page.selection ? `　·　选中 ${page.selection.length} 字` : "");
-}
-
-// Last reported gate state, so the report below fires on change rather than on
-// every page event -- the same line repeating fifty times would bury the moment
-// it changed, which is the only moment that matters.
-let lastGateReport = "";
-let lastBodySignature = "";
-let lastDocumentSignature = "";
-let preparedDocumentCache = null;
-let directPostRunning = false;
-let directPostQueued = null;
-
-async function forward(page, force) {
-  lastPage = page;
-  render(page);
-  const gate =
-    `known=${contextPreferenceKnown} enabled=${contextSyncEnabled} ` +
-    `visible=${contextSurfaceVisible()} link=${link ? "yes" : "no"}`;
-  if (gate !== lastGateReport) {
-    lastGateReport = gate;
-    // States, not a failure. Three conditions guard this path and from the
-    // outside they are indistinguishable: nothing is sent, nothing is said, and
-    // which one stopped it cannot be told apart. On a device with no console
-    // that difference costs a build to learn, so it is stated up front.
-    note("同步门: " + gate);
-  }
-  if (!contextPreferenceKnown || !contextSyncEnabled || !contextSurfaceVisible()) return;
-  const current = ensureContextLink();
-  if (!current) return;
-  const signature = `${page.url}|${page.title || ""}|${page.viewKey || ""}|${contentDigest(page.text)}|${contentDigest(page.selection)}`;
-  if (!force && signature === lastSignature) return;
-
-  try {
-    const result = await current.send(page);
-    if (result?.skipped) note("待连接,已暂存当前页");
-    else if (result?.ok) lastSignature = signature;
-  } catch (err) {
-    note("上报失败: " + describe(err));
-    if (lastSignature === signature) lastSignature = "";
   }
 }
 
-function storedPage(value) {
-  if (!value || value.schema !== 1 || !value.page) return null;
+let contextWasVisible = contextSurfaceVisible();
+
+function storedVisualContext(value) {
+  if (!value || value.schema !== 1 || !exactKeys(value, [
+    "schema", "capturedAt", "identity", "visual", "viewKey", "snapshotRevision",
+  ])) return null;
   const age = Date.now() - Number(value.capturedAt || 0);
   if (!Number.isFinite(age) || age < 0 || age > 5 * 60 * 1000) return null;
-  return value.page.url ? value.page : null;
+  const identity = value.identity;
+  if (
+    !exactKeys(identity, ["sourceInstanceId", "file", "page"]) ||
+    !/^[A-Za-z0-9_-]{22}$/.test(String(identity.sourceInstanceId || "")) ||
+    !/^https?:\/\//.test(String(identity.file || "")) || identity.file.length > 4096 ||
+    identity.page !== 0 || typeof value.viewKey !== "string" ||
+    value.viewKey.length < 1 || value.viewKey.length > 160 ||
+    !Number.isSafeInteger(value.snapshotRevision) || value.snapshotRevision < 1
+  ) return null;
+  return {
+    url: identity.file,
+    title: "",
+    viewKey: value.viewKey,
+    visual: value.visual,
+    document: { sourceInstanceId: identity.sourceInstanceId },
+    snapshotRevision: value.snapshotRevision,
+  };
 }
 
 // Every page announces itself while it is the one being viewed; background tabs
@@ -311,6 +232,30 @@ function frameProbe(text) {
     );
   } catch (_) {}
 }
+
+// The only parent->frame security bootstrap. It carries a one-time random
+// capability, never page data or a business success result. background.js
+// consumes it once and binds this exact tab/frame/document before any visual or
+// browser-control request is accepted.
+window.addEventListener("message", (event) => {
+  if (event.source !== window.parent) return;
+  const message = event.data;
+  if (!exactKeys(message, ["contract", "type", "capability"]) ||
+      message.contract !== "bw-reader-call-claim/1" || message.type !== "claim" ||
+      !/^[A-Za-z0-9_-]{43}$/.test(String(message.capability || ""))) return;
+  runtimeRequest({
+    type: "BW_READER_CALL_CLAIM_BIND",
+    capability: message.capability,
+  }, 5000).then((reply) => {
+    if (reply?.ok !== true || reply.data?.bound !== true ||
+        !["codex-desktop", "chatgpt-classic"].includes(reply.data?.appKind)) {
+      throw new Error("后台拒绝绑定通话页");
+    }
+    frameAppKind = reply.data.appKind;
+    frameProbe("通话页认领: 已绑定当前 frame");
+    return refreshVisualContext();
+  }).catch((err) => frameProbe("通话页认领失败: " + describe(err)));
+});
 
 function exactKeys(value, keys) {
   if (!value || typeof value !== "object" || Array.isArray(value)) return false;
@@ -387,9 +332,9 @@ function normalizeVisualEvent(message) {
 let visualLink = null;
 let visualSourceInstanceId = "";
 let visualPage = null;
+let visualCommitted = null;
+let activeVisualContext = null;
 let visualQueue = Promise.resolve();
-const visualCapturePending = new Map();
-const browserControlPending = new Map();
 let browserControlQueue = Promise.resolve();
 
 function closeVisualLink() {
@@ -397,6 +342,7 @@ function closeVisualLink() {
   visualLink = null;
   visualSourceInstanceId = "";
   visualPage = null;
+  visualCommitted = null;
   if (!current) return;
   try { current.close(); } catch (_) {}
 }
@@ -409,30 +355,23 @@ function visualLinkStatus(status) {
 }
 
 function localVisualCapture(request) {
-  return new Promise((resolve) => {
-    const timer = window.setTimeout(() => {
-      visualCapturePending.delete(request.correlation);
-      resolve(null);
-    }, 20000);
-    visualCapturePending.set(request.correlation, {
-      sourceInstanceId: request.sourceInstanceId,
-      resolve: (value) => {
-        window.clearTimeout(timer);
-        resolve(value);
-      },
-    });
-    try {
-      window.parent.postMessage({
-        contract: LOCAL_VISUAL_CONTRACT,
-        type: "capture-request",
-        request,
-      }, "*");
-    } catch (_) {
-      window.clearTimeout(timer);
-      visualCapturePending.delete(request.correlation);
-      resolve(null);
-    }
-  });
+  return runtimeRequest({
+    type: "BW_READER_VISUAL_CAPTURE",
+    request,
+    expectedViewKey: visualCommitted?.viewKey || "",
+  }, 20000).then((reply) => {
+    const data = reply?.ok === true ? reply.data : null;
+    if (!data || !exactKeys(data, [
+      "contract", "type", "correlation", "sourceInstanceId",
+      "status", "mimeType", "b64",
+    ]) || data.contract !== LOCAL_VISUAL_CONTRACT ||
+      data.type !== "capture-response" || data.correlation !== request.correlation ||
+      data.sourceInstanceId !== request.sourceInstanceId ||
+      !["ready", "unavailable"].includes(data.status) ||
+      typeof data.mimeType !== "string" || typeof data.b64 !== "string"
+    ) return null;
+    return data;
+  }, () => null);
 }
 
 function visualChunkFields(request, fields) {
@@ -484,13 +423,34 @@ async function deliverVisualRequest(request) {
     request.sourceInstanceId !== visualSourceInstanceId
   ) return;
   if (
+    !visualCommitted ||
+    request.snapshotRevision !== visualCommitted.snapshotRevision ||
     request.sourceInstanceId !== String(visualPage?.document?.sourceInstanceId || "") ||
-    request.file !== String(visualPage?.url || "")
+    request.file !== String(visualPage?.url || "") ||
+    request.sourceInstanceId !== visualCommitted.sourceInstanceId ||
+    request.file !== visualCommitted.file ||
+    String(visualPage?.viewKey || "") !== visualCommitted.viewKey ||
+    (visualPage?.visual?.drawing?.drawingRevision || null) !==
+      visualCommitted.drawingRevision
   ) {
     await sendVisualUnavailable(request);
     return;
   }
   const capture = await localVisualCapture(request);
+  if (
+    !visualCommitted ||
+    request.snapshotRevision !== visualCommitted.snapshotRevision ||
+    request.sourceInstanceId !== String(visualPage?.document?.sourceInstanceId || "") ||
+    request.file !== String(visualPage?.url || "") ||
+    request.sourceInstanceId !== visualCommitted.sourceInstanceId ||
+    request.file !== visualCommitted.file ||
+    String(visualPage?.viewKey || "") !== visualCommitted.viewKey ||
+    (visualPage?.visual?.drawing?.drawingRevision || null) !==
+      visualCommitted.drawingRevision
+  ) {
+    await sendVisualUnavailable(request);
+    return;
+  }
   const decoded = capture?.status === "ready" && capture?.mimeType === "image/jpeg"
     ? decodeVisualBase64(capture.b64)
     : null;
@@ -574,37 +534,32 @@ function normalizeBrowserControlEvent(message) {
   };
 }
 
-function localBrowserControl(request) {
-  return new Promise((resolve) => {
-    const timer = window.setTimeout(() => {
-      browserControlPending.delete(request.correlation);
-      resolve(null);
-    }, 10000);
-    browserControlPending.set(request.correlation, {
-      sourceInstanceId: request.sourceInstanceId,
-      action: request.action,
-      resolve: (value) => {
-        window.clearTimeout(timer);
-        resolve(value);
-      },
-    });
-    const local = {
-      contract: LOCAL_BROWSER_CONTROL_CONTRACT,
-      type: "request",
-      requestId: request.correlation,
-      sourceInstanceId: request.sourceInstanceId,
-      action: request.action,
-    };
-    if (request.target !== null) local.target = request.target;
-    if (request.selectionId !== null) local.selectionId = request.selectionId;
-    try {
-      window.parent.postMessage(local, "*");
-    } catch (_) {
-      window.clearTimeout(timer);
-      browserControlPending.delete(request.correlation);
-      resolve(null);
-    }
-  });
+function localBrowserControl(request, committedViewKey) {
+  const local = {
+    contract: LOCAL_BROWSER_CONTROL_CONTRACT,
+    type: "request",
+    requestId: request.correlation,
+    sourceInstanceId: request.sourceInstanceId,
+    action: request.action,
+  };
+  if (request.target !== null) local.target = request.target;
+  if (request.selectionId !== null) local.selectionId = request.selectionId;
+  return runtimeRequest({
+    type: "BW_READER_BROWSER_CONTROL",
+    request: local,
+    snapshotRevision: request.snapshotRevision,
+    file: request.file,
+    page: request.page,
+    expectedViewKey: committedViewKey,
+  }, 10000).then((reply) => {
+    const data = reply?.ok === true ? reply.data : null;
+    if (!data || data.contract !== LOCAL_BROWSER_CONTROL_CONTRACT ||
+      data.type !== "result" || data.requestId !== local.requestId ||
+      data.sourceInstanceId !== local.sourceInstanceId ||
+      data.action !== local.action || typeof data.ok !== "boolean"
+    ) return null;
+    return data;
+  }, () => null);
 }
 
 function fallbackBrowserState() {
@@ -621,12 +576,16 @@ async function deliverBrowserControlRequest(request) {
     !visualLink || !visualLink.sessionId ||
     request.sourceInstanceId !== visualSourceInstanceId
   ) return;
+  const committed = visualCommitted;
   let result = null;
   if (
+    committed && request.snapshotRevision === committed.snapshotRevision &&
+    request.sourceInstanceId === committed.sourceInstanceId &&
+    request.file === committed.file && request.page === committed.page &&
     request.sourceInstanceId === String(visualPage?.document?.sourceInstanceId || "") &&
     request.file === String(visualPage?.url || "") &&
-    request.page === 0
-  ) result = await localBrowserControl(request);
+    String(visualPage?.viewKey || "") === committed.viewKey
+  ) result = await localBrowserControl(request, committed.viewKey);
   const state = result?.ok === true && result.state
     ? result.state
     : fallbackBrowserState();
@@ -666,6 +625,7 @@ function handleContextBridgeEvent(message) {
 }
 
 function ensureVisualLink(page) {
+  activeVisualContext = page;
   // The page message itself only exists after content.js has passed the
   // context-sync preference gate. Unknown is therefore safe during startup,
   // while an explicit false must tear down the already-registered visual and
@@ -680,466 +640,20 @@ function ensureVisualLink(page) {
   const source = String(page?.document?.sourceInstanceId || "");
   if (!/^[A-Za-z0-9_-]{22}$/.test(source)) return;
   visualPage = page;
+  visualCommitted = {
+    snapshotRevision: page.snapshotRevision,
+    sourceInstanceId: source,
+    file: String(page.url || ""),
+    page: 0,
+    viewKey: String(page.viewKey || ""),
+    drawingRevision: page.visual?.drawing?.drawingRevision || null,
+  };
   if (visualLink && visualSourceInstanceId === source) return;
   try { visualLink?.close(); } catch (_) {}
   visualSourceInstanceId = source;
   visualLink = new ContextLink(visualLinkStatus, handleContextBridgeEvent);
   visualLink.bindVisualSource(source).catch(() => {});
   visualLink.connect();
-}
-
-window.addEventListener("message", (event) => {
-  const d = event.data;
-  if (
-    event.source === window.parent &&
-    d?.contract === LOCAL_BROWSER_CONTROL_CONTRACT &&
-    d?.type === "result"
-  ) {
-    const pending = browserControlPending.get(d.requestId);
-    if (!pending || pending.sourceInstanceId !== d.sourceInstanceId || pending.action !== d.action) return;
-    const success = d.ok === true &&
-      exactKeys(d, [
-        "contract", "type", "requestId", "sourceInstanceId", "action", "ok", "state",
-      ]) &&
-      exactKeys(d.state, ["scrollX", "scrollY", "url", "title"]) &&
-      Number.isFinite(Number(d.state.scrollX)) &&
-      Number.isFinite(Number(d.state.scrollY)) &&
-      /^https?:\/\//.test(String(d.state.url || ""));
-    const failure = d.ok === false &&
-      exactKeys(d, [
-        "contract", "type", "requestId", "sourceInstanceId", "action", "ok", "error",
-      ]) &&
-      exactKeys(d.error, ["code", "message", "retryable"]) &&
-      typeof d.error.code === "string" &&
-      typeof d.error.message === "string" &&
-      typeof d.error.retryable === "boolean";
-    if (!success && !failure) return;
-    browserControlPending.delete(d.requestId);
-    pending.resolve(success
-      ? { ok: true, state: d.state }
-      : { ok: false, error: d.error });
-    return;
-  }
-  if (
-    event.source === window.parent &&
-    exactKeys(d, [
-      "contract", "type", "correlation", "sourceInstanceId",
-      "status", "mimeType", "b64",
-    ]) &&
-    d.contract === LOCAL_VISUAL_CONTRACT &&
-    d.type === "capture-response"
-  ) {
-    const pending = visualCapturePending.get(d.correlation);
-    if (!pending || pending.sourceInstanceId !== d.sourceInstanceId) return;
-    visualCapturePending.delete(d.correlation);
-    pending.resolve({
-      status: d.status,
-      mimeType: d.mimeType,
-      b64: d.b64,
-    });
-    return;
-  }
-  if (!d || d.contract !== "bw-page-context/1" || d.type !== "page") return;
-  if (event.source !== window.parent) return;
-  if (!d.page || typeof d.page !== "object") return;
-  frameProbe("框收到页面: " + String(d.page.url || "").slice(0, 50));
-  ensureVisualLink(d.page);
-  queueDirect(d.page);
-});
-
-// The direct path, deliberately not guarded by the preference gates.
-//
-// forward() refuses to send unless the preference has been read and is true.
-// That was reasonable when the preference decided whether to sync at all, but
-// it also meant a preference that could not be read -- for any reason, in any
-// layer -- silently disabled the whole link, and the switch the user actually
-// toggled was never the thing consulted. A page handed to us by the content
-// script in our own document is intent enough.
-//
-// Document visibility is still honoured: background tabs stay quiet, so a dozen
-// open tabs cannot argue over what the assistant is looking at.
-// One-shot delivery. No socket, no handshake, no session.
-//
-// A page's context is used once and thrown away: collect, send, done. It was
-// travelling over the voice link's machinery -- WebSocket, hello, context-open,
-// session id, reconnect backoff -- all of which exists to keep a conversation
-// alive across time, and none of which this needs.
-//
-// The cost was not complexity but reach: a socket has to be held open by a
-// document that stays alive, and on iOS every extension document is short-lived.
-// That made "which document can hold the connection" the central problem for an
-// evening. For a POST it is not a problem at all -- the frame only has to exist
-// at the instant of sending, and it is recreated with every page.
-const SNAPSHOT_POST_URL =
-  "https://bwicarus-2.taile44d0c.ts.net/reader-context/snapshot";
-// A document is sent once per content revision and stored outside the live
-// snapshot.  Keep enough room for the complete text of an ordinary long page
-// (including CJK), while the bridge still enforces a hard request/corpus cap.
-const MAX_DOCUMENT_UTF8_BYTES = 768 * 1024;
-const MAX_DOCUMENT_CHARACTERS = 256 * 1024;
-const MAX_CONTEXT_URL_CHARACTERS = 4096;
-const MAX_CONTEXT_TITLE_CHARACTERS = 1024;
-
-function normalizeReadableText(value) {
-  return String(value || "")
-    .replace(/\r\n?/g, "\n")
-    .replace(/\u00a0/g, " ")
-    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
-    .replace(/[ \t]+/g, " ")
-    .replace(/ *\n */g, "\n")
-    .replace(/\n{3,}/g, "\n\n")
-    .trim();
-}
-
-function safeContextTitle(value) {
-  return String(value || "")
-    .replace(/[\u0000-\u001f\u007f]/g, " ")
-    .slice(0, MAX_CONTEXT_TITLE_CHARACTERS);
-}
-
-function safeContextUrl(value) {
-  const text = String(value || "");
-  if (
-    !text || text.length > MAX_CONTEXT_URL_CHARACTERS ||
-    /[\u0000-\u001f\u007f]/.test(text)
-  ) return null;
-  try {
-    const parsed = new URL(text);
-    const canonical = parsed.href;
-    return (
-      (parsed.protocol === "http:" || parsed.protocol === "https:") &&
-      canonical.length <= MAX_CONTEXT_URL_CHARACTERS &&
-      !/[\u0000-\u001f\u007f]/.test(canonical)
-    ) ? canonical : null;
-  } catch (_) {
-    return null;
-  }
-}
-
-async function sha256Hex(value) {
-  if (!globalThis.crypto?.subtle || typeof TextEncoder !== "function") {
-    throw new Error("扩展页缺少 SHA-256 支持");
-  }
-  const bytes = new TextEncoder().encode(String(value || ""));
-  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
-  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
-}
-
-function boundUtf8Text(value, maxBytes) {
-  const text = String(value || "");
-  const encoder = new TextEncoder();
-  if (encoder.encode(text).byteLength <= maxBytes) return { text, truncated: false };
-  let low = 0;
-  let high = text.length;
-  while (low < high) {
-    const middle = Math.ceil((low + high) / 2);
-    if (encoder.encode(text.slice(0, middle)).byteLength <= maxBytes) low = middle;
-    else high = middle - 1;
-  }
-  // Never leave a dangling UTF-16 high surrogate at the byte boundary.
-  if (low > 0 && /[\uD800-\uDBFF]/.test(text.charAt(low - 1))) low -= 1;
-  return { text: text.slice(0, low), truncated: true };
-}
-
-async function prepareDocument(page) {
-  const raw = page && page.document;
-  if (!raw || typeof raw !== "object") return null;
-  const sourceInstanceId = String(raw.sourceInstanceId || "");
-  if (!/^[A-Za-z0-9_-]{22}$/.test(sourceInstanceId)) {
-    throw new Error("页面来源标识无效");
-  }
-  const fullText = normalizeReadableText(raw.text);
-  const url = safeContextUrl(page.url);
-  if (!url) throw new Error("页面 URL 无效");
-  const documentKey = safeContextUrl(raw.documentKey) || url;
-  if (
-    preparedDocumentCache &&
-    preparedDocumentCache.sourceInstanceId === sourceInstanceId &&
-    preparedDocumentCache.documentKey === documentKey &&
-    preparedDocumentCache.fullText === fullText &&
-    preparedDocumentCache.sourceTruncated === !!raw.truncated
-  ) return preparedDocumentCache.payload;
-  let characterBoundText = fullText.slice(0, MAX_DOCUMENT_CHARACTERS);
-  if (
-    characterBoundText &&
-    /[\uD800-\uDBFF]/.test(characterBoundText.charAt(characterBoundText.length - 1))
-  ) characterBoundText = characterBoundText.slice(0, -1);
-  const characterTruncated = characterBoundText.length < fullText.length;
-  const bounded = boundUtf8Text(characterBoundText, MAX_DOCUMENT_UTF8_BYTES);
-  const payload = {
-    contract: "reader-document/1",
-    sourceInstanceId,
-    documentKey,
-    url,
-    title: safeContextTitle(page.title),
-    // Hash the normalized full text, not the transmitted prefix. A change
-    // beyond the byte bound still produces a new corpus revision.
-    contentRevision: await sha256Hex(fullText),
-    text: bounded.text,
-    truncated: !!raw.truncated || characterTruncated || bounded.truncated,
-    observedAtEpochMs: Date.now(),
-  };
-  preparedDocumentCache = {
-    sourceInstanceId,
-    documentKey,
-    fullText,
-    sourceTruncated: !!raw.truncated,
-    payload,
-  };
-  return payload;
-}
-
-function prepareViewport(page) {
-  const raw = page && page.viewport && typeof page.viewport === "object"
-    ? page.viewport
-    : {};
-  const selection = normalizeReadableText(raw.selection ?? page.selection ?? "").slice(0, 400);
-  const visibleText = normalizeReadableText(raw.visibleText ?? page.text ?? "").slice(0, 12000);
-  const sourceInstanceId = String(page?.document?.sourceInstanceId || "");
-  const url = safeContextUrl(page?.url);
-  if (!url) throw new Error("页面 URL 无效");
-  const documentKey = safeContextUrl(page?.document?.documentKey) || url;
-  const payload = {
-    contract: "reader-viewport/1",
-    sourceInstanceId,
-    documentKey,
-    url,
-    title: safeContextTitle(page?.title),
-    beforeText: normalizeReadableText(raw.beforeText || "").slice(-2400),
-    visibleText,
-    afterText: normalizeReadableText(raw.afterText || "").slice(0, 2400),
-    selectionState: selection ? "active" : "cleared",
-    selection: selection || null,
-    observedAtEpochMs: Date.now(),
-  };
-  const controlCorrelation = safeVisualId(raw.controlCorrelation, true);
-  if (raw.controlCorrelation !== undefined && raw.controlCorrelation !== null) {
-    if (!controlCorrelation) throw new Error("浏览控制关联标识无效");
-    payload.controlCorrelation = controlCorrelation;
-  }
-  return payload;
-}
-
-function prepareSelectionRegions(page) {
-  const raw = page?.selectionRegions;
-  if (raw === undefined) {
-    return {
-      contract: "reader-selection-regions/1",
-      total: 0,
-      truncated: false,
-      items: [],
-    };
-  }
-  if (
-    !exactKeys(raw, ["contract", "total", "truncated", "items"]) ||
-    raw.contract !== "reader-selection-regions/1" ||
-    !Number.isSafeInteger(raw.total) || raw.total < 0 || raw.total > 1000000 ||
-    typeof raw.truncated !== "boolean" ||
-    !Array.isArray(raw.items) || raw.items.length > 128 ||
-    raw.truncated !== (raw.total > raw.items.length) ||
-    (!raw.truncated && raw.total !== raw.items.length)
-  ) throw new Error("页面选区索引无效");
-  const seen = new Set();
-  let priorOrdinal = 0;
-  const firstOrdinal = raw.total - raw.items.length + 1;
-  const items = raw.items.map((item, index) => {
-    if (
-      !exactKeys(item, [
-        "selectionId", "label", "ordinal", "createdAtEpochMs",
-      ]) ||
-      !safeVisualId(item.selectionId, false) || seen.has(item.selectionId) ||
-      typeof item.label !== "string" || item.label.length < 1 ||
-      item.label.length > 80 || /[\u0000-\u001f\u007f]/.test(item.label) ||
-      !Number.isSafeInteger(item.ordinal) || item.ordinal <= priorOrdinal ||
-      item.ordinal !== firstOrdinal + index ||
-      item.ordinal < 1 || item.ordinal > raw.total ||
-      !item.label.startsWith(`#${item.ordinal} `) ||
-      !Number.isSafeInteger(item.createdAtEpochMs) || item.createdAtEpochMs < 0
-    ) throw new Error("页面选区条目无效");
-    seen.add(item.selectionId);
-    priorOrdinal = item.ordinal;
-    return {
-      selectionId: item.selectionId,
-      label: item.label,
-      ordinal: item.ordinal,
-      createdAtEpochMs: item.createdAtEpochMs,
-    };
-  });
-  if (items.length > 0 && priorOrdinal !== raw.total) {
-    throw new Error("页面选区条目序号无效");
-  }
-  return {
-    contract: "reader-selection-regions/1",
-    total: raw.total,
-    truncated: raw.truncated,
-    items,
-  };
-}
-
-function randomHex(length) {
-  const hex = "0123456789abcdef";
-  let out = "";
-  for (let i = 0; i < length; i += 1) out += hex[(Math.random() * 16) | 0];
-  return out;
-}
-
-// `bodyIsRepeat` marks a page whose text was already delivered.
-//
-// Position and body are different kinds of fact and were being treated as one.
-// Where the user is looking is state: it has to be true right now, every time.
-// The body is content: once given, repeating it only crowds the assistant's
-// context. Skipping the whole report to avoid the repetition made the position
-// stale too, and a stale position does not read as "unchanged" -- it reads as
-// "still here", which is a different claim and sometimes a false one.
-//
-// A repeat still sends `active` plus the structured viewport. The legacy
-// page.context body is omitted, so the bridge can refresh current position
-// without overwriting stable snapshot text. A new document revision is carried
-// independently even when the visible viewport itself is a repeat.
-async function postSnapshot(page, bodyIsRepeat, documentPayload) {
-  const viewport = prepareViewport(page);
-  const url = viewport.url;
-  const title = viewport.title;
-  const text = viewport.visibleText;
-  const selection = viewport.selection || "";
-  const selectionRegions = prepareSelectionRegions(page);
-  const body = {
-    // Current view and full document are deliberately separate. The bridge may
-    // put viewport text in the live snapshot and persist document in a corpus;
-    // document.text must never become currentPage.text by accident.
-    viewport,
-    // Nested under `active` with its own shape -- sent flat the bridge refuses
-    // it, and because the context half succeeds first, the refusal would be
-    // invisible: the snapshot updates while the reading position silently does
-    // not.
-    active: {
-      kind: "web",
-      file: url,
-      title,
-      page: 0,
-      selectionState: selection ? "active" : "cleared",
-      selection: selection || null,
-      sourceInstanceId: viewport.sourceInstanceId,
-      selectionRegions,
-      observedAtEpochMs: Date.now(),
-    },
-  };
-  if (documentPayload) body.document = documentPayload;
-  if (!bodyIsRepeat) {
-    body.event = {
-      v: 1,
-      seq: 1,
-      type: "page.context",
-      event: "page.context",
-      ts: Math.floor(Date.now() / 1000),
-      id: randomHex(16),
-      stable: true,
-      book_id: url,
-      file: url,
-      page: 0,
-      title,
-      kind: "web",
-      text_available: !!text,
-      page_context: {
-        text,
-        text_available: !!text,
-        text_source: "extension-viewport",
-        fallback_reason: text ? null : "扩展未取得正文",
-        truncated: String(page.viewport?.visibleText ?? page.text ?? "").length > 12000,
-        reason: "active",
-        visual: null,
-        embeds: { highlights: 0, blocks: 0, unanchored: [] },
-      },
-    };
-  }
-  const response = await fetch(SNAPSHOT_POST_URL, {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-    cache: "no-store",
-  });
-  if (!response.ok) {
-    let detail = "";
-    try { detail = (await response.text()).slice(0, 200); } catch (_) {}
-    throw new Error(`HTTP ${response.status}${detail ? " " + detail : ""}`);
-  }
-}
-
-async function forwardDirect(page) {
-  lastPage = page;
-  render(page);
-  if (!contextSurfaceVisible()) {
-    frameProbe("框: 文档不可见,跳过");
-    return;
-  }
-  // The current view includes URL, title, visible body and the internal view
-  // key. A selection or heartbeat in the same view does not resend the body;
-  // an actual scroll does, even when adjacent regions contain identical text.
-  const bodySig =
-    `${page.url}|${page.title || ""}|${page.viewKey || ""}|${contentDigest(page.text)}`;
-  const bodyIsRepeat = bodySig === lastBodySignature;
-  try {
-    const preparedDocument = await prepareDocument(page);
-    const documentSig = preparedDocument
-      ? `${preparedDocument.sourceInstanceId}|${preparedDocument.documentKey}|${preparedDocument.contentRevision}`
-      : "";
-    const documentPayload = documentSig && documentSig !== lastDocumentSignature
-      ? preparedDocument
-      : null;
-    frameProbe(
-      (bodyIsRepeat ? "框: 开始 POST(仅位置" : "框: 开始 POST(视口") +
-      (documentPayload ? "+全文)" : ")")
-    );
-    await postSnapshot(page, bodyIsRepeat, documentPayload);
-    lastBodySignature = bodySig;
-    if (documentPayload) lastDocumentSignature = documentSig;
-    frameProbe(
-      (bodyIsRepeat ? "框: POST 成功(仅位置" : "框: POST 成功(视口") +
-      (documentPayload ? "+全文)" : ")")
-    );
-  } catch (err) {
-    // Said out loud. Every silent failure in this chain cost a build to find.
-    note("快照投递失败: " + describe(err));
-    frameProbe("框: POST 失败 " + describe(err));
-  }
-}
-
-// Serialize one-shot writes and coalesce anything waiting behind the active
-// request to the newest view. Without this, a slow POST for the old scroll
-// position can complete after a newer POST and overwrite the snapshot with a
-// stale viewport even though the user has already moved on.
-async function drainDirectQueue() {
-  if (directPostRunning) return;
-  directPostRunning = true;
-  try {
-    while (directPostQueued) {
-      const next = directPostQueued;
-      directPostQueued = null;
-      await forwardDirect(next);
-    }
-  } finally {
-    directPostRunning = false;
-    // A page can be queued between the loop condition and finally in unusual
-    // promise scheduling. Re-enter rather than leaving the newest view stuck.
-    if (directPostQueued) drainDirectQueue();
-  }
-}
-
-function queueDirect(page) {
-  if (directPostQueued) frameProbe("框: 合并等待中的旧视图");
-  directPostQueued = page;
-  drainDirectQueue();
-}
-
-if (chrome.runtime?.onMessage) {
-  chrome.runtime.onMessage.addListener((message) => {
-    // Sent by whichever page the user is looking at. The page only forwards a
-    // message; this side owns the connection and the protocol. That division is
-    // what made it work in 1.0.25, and what the later attempt gave up by having
-    // each page open its own socket.
-    if (message?.type === "BW_PAGE_ACTIVE" && message.page) forward(message.page, false);
-    return undefined;
-  });
 }
 
 // Reads extension storage under either API shape.
@@ -1150,6 +664,47 @@ if (chrome.runtime?.onMessage) {
 // invisible twice over -- the catch never fired, and the caller went on to
 // treat "no data" as "the user turned sync off". Both shapes are handled here,
 // and a genuine failure now rejects so it can be reported.
+function runtimeRequest(message, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error("runtime.sendMessage 超时"));
+    }, timeoutMs);
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      const err = chrome.runtime?.lastError;
+      if (err) reject(new Error(err.message || "runtime.sendMessage 失败"));
+      else resolve(value);
+    };
+    try {
+      const returned = chrome.runtime.sendMessage(message, done);
+      if (returned && typeof returned.then === "function") returned.then(
+        (value) => { if (!settled) { settled = true; window.clearTimeout(timer); resolve(value); } },
+        (err) => { if (!settled) { settled = true; window.clearTimeout(timer); reject(err); } }
+      );
+    } catch (err) {
+      window.clearTimeout(timer);
+      reject(err);
+    }
+  });
+}
+
+async function refreshVisualContext() {
+  try {
+    const reply = await runtimeRequest({ type: "BW_READER_VISUAL_CONTEXT_GET" }, 5000);
+    const page = reply?.ok === true ? storedVisualContext(reply.data) : null;
+    if (!page) return false;
+    ensureVisualLink(page);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
 function storageGet(keys) {
   return new Promise((resolve, reject) => {
     let settled = false;
@@ -1177,20 +732,13 @@ function storageGet(keys) {
     const bag = await storageGet([
       PREFERENCE_KEY,
       CONTEXT_SYNC_MIRROR_KEY,
-      ACTIVE_CONTEXT_KEY,
-      "bwCallContext",
     ]);
     applyContextPreference(
       bag?.[PREFERENCE_KEY],
       bag?.[CONTEXT_SYNC_MIRROR_KEY]
     );
-    const persisted = storedPage(bag?.[ACTIVE_CONTEXT_KEY]);
-    const ctx = bag?.bwCallContext;
-    if (persisted) {
-      forward(persisted, true);
-    } else if (ctx?.url && (!ctx.capturedAt || Date.now() - ctx.capturedAt < 5 * 60 * 1000)) {
-      forward(ctx, true);
-    } else {
+    const visualReady = await refreshVisualContext();
+    if (!visualReady) {
       els.ctxTitle.textContent = "上下文由各网页自行上报";
       els.ctxUrl.textContent = "本页只负责通话";
     }
@@ -1224,28 +772,33 @@ if (chrome.storage?.onChanged) {
     } else if (changes[PREFERENCE_KEY]) {
       applyContextPreference(changes[PREFERENCE_KEY].newValue);
     }
-    if (changes[ACTIVE_CONTEXT_KEY]) {
-      const page = storedPage(changes[ACTIVE_CONTEXT_KEY].newValue);
-      if (page) forward(page, true);
-    }
+    if (changes[VISUAL_BINDING_SIGNAL_KEY]) refreshVisualContext();
   });
 }
 
-function resumeContextLink() {
-  if (!contextSurfaceVisible()) {
-    closeContextLink();
+function resumeVisualLink() {
+  const visible = contextSurfaceVisible();
+  if (!visible) {
+    contextWasVisible = false;
     closeVisualLink();
     return;
   }
-  const current = ensureContextLink();
-  if (current && lastPage) forward(lastPage, true);
-  if (lastPage) ensureVisualLink(lastPage);
+  if (!contextWasVisible) {
+    // The bridge corpus is deliberately bounded and another foreground tab
+    // may have replaced it while this page was hidden. Reattach this page's
+    // full document once when it returns; tab-local de-duplication alone would
+    // otherwise make A -> B -> A leave snapshot A paired with corpus B.
+    contextWasVisible = true;
+  }
+  refreshVisualContext().then((ready) => {
+    if (!ready && activeVisualContext) ensureVisualLink(activeVisualContext);
+  });
 }
 
-document.addEventListener("visibilitychange", resumeContextLink, { passive: true });
-window.addEventListener("pageshow", resumeContextLink, { passive: true });
-window.addEventListener("focus", resumeContextLink, { passive: true });
-window.addEventListener("online", resumeContextLink, { passive: true });
+document.addEventListener("visibilitychange", resumeVisualLink, { passive: true });
+window.addEventListener("pageshow", resumeVisualLink, { passive: true });
+window.addEventListener("focus", resumeVisualLink, { passive: true });
+window.addEventListener("online", resumeVisualLink, { passive: true });
 
 // --- placing a call from here ------------------------------------------------
 // Either side may start it, and whoever does holds it: the other end only sends
@@ -1253,7 +806,8 @@ window.addEventListener("online", resumeContextLink, { passive: true });
 // the call. Before, both tried to own the one voice link and each switch evicted
 // the other.
 let voiceActive = false;
-// Set by the host through configure when embedded; otherwise from the URL.
+// Set only by the authenticated one-time frame claim when embedded; otherwise
+// from this extension page's own URL. The hosting web page cannot choose it.
 let frameAppKind = "";
 
 // Publish the call state so every page's sidebar button can show it.
@@ -1438,14 +992,6 @@ const embedded = EMBEDDED;
 if (embedded && window.parent !== window) {
   const tell = frameTell;
 
-  // The host may set which desktop app to dial before the first press.
-  window.addEventListener("message", (event) => {
-    if (event.source !== window.parent) return;
-    const d = event.data;
-    if (!d || d.contract !== FRAME_CONTRACT || d.type !== "configure") return;
-    if (d.appKind) frameAppKind = String(d.appKind);
-  });
-
   // Announced only once the button is genuinely operable: voiceReady() has
   // passed and the button is registered. Claiming readiness earlier would take
   // the click and then be unable to act on it.
@@ -1464,4 +1010,4 @@ if (embedded && window.parent !== window) {
   });
 }
 
-window.addEventListener("pagehide", closeContextLink);
+window.addEventListener("pagehide", closeVisualLink);

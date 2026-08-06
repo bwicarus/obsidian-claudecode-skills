@@ -102,12 +102,20 @@
   function documentSize(){const de=document.documentElement,b=document.body;return{width:Math.max(1,innerWidth,de?.scrollWidth||0,b?.scrollWidth||0),height:Math.max(1,innerHeight,de?.scrollHeight||0,b?.scrollHeight||0)};}
   const isRegion=s=>s?.t==='region'||s?.kind==='selection';
   function regionOrder(a,b){const byTime=(Number(a.createdAtEpochMs)||0)-(Number(b.createdAtEpochMs)||0);if(byTime)return byTime;const left=String(a.id||''),right=String(b.id||'');return left<right?-1:left>right?1:0;}
+  function storedRegionOrdinal(s){const value=Number(s?.ordinal);return Number.isSafeInteger(value)&&value>0?value:0;}
+  function ensureRegionOrdinals(){
+    const regions=strokes.filter(isRegion).sort(regionOrder),used=new Set(),missing=[],map=new Map();let max=0;
+    regions.forEach(s=>{const ordinal=storedRegionOrdinal(s);if(!ordinal||used.has(ordinal)){missing.push(s);return;}used.add(ordinal);max=Math.max(max,ordinal);map.set(s.id,ordinal);});
+    missing.forEach(s=>{do{max+=1;}while(used.has(max));s.ordinal=max;used.add(max);map.set(s.id,max);});
+    return map;
+  }
+  function nextRegionOrdinal(){let next=0;ensureRegionOrdinals().forEach(ordinal=>{next=Math.max(next,ordinal);});return next+1;}
   const strokePoints=s=>{const pts=s?.pts||[];return isRegion(s)?pts.slice(0,MAX_REGION_POINTS):pts;};
   function regionId(){const bytes=new Uint32Array(2);try{crypto.getRandomValues(bytes);}catch(_){bytes[0]=Math.random()*0xffffffff;bytes[1]=Math.random()*0xffffffff;}return'rg_'+Date.now().toString(36)+'_'+Array.from(bytes,n=>Math.floor(n).toString(36)).join('');}
   function regionClock(value){const d=new Date(Number(value)||Date.now());return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');}
   function regionLabels(){
-    const map=new Map();
-    strokes.filter(isRegion).sort(regionOrder).forEach((s,index)=>map.set(s.id,{ordinal:index+1,label:'#'+(index+1)+' '+regionClock(s.createdAtEpochMs)}));
+    const ordinals=ensureRegionOrdinals(),map=new Map();
+    strokes.filter(isRegion).forEach(s=>{const ordinal=ordinals.get(s.id)||storedRegionOrdinal(s);map.set(s.id,{ordinal,label:'#'+ordinal+' '+regionClock(s.createdAtEpochMs)});});
     return map;
   }
   function strokeBounds(s){
@@ -298,7 +306,7 @@
       active={erase:true,id:e.pointerId,penEraser:tool!=='eraser',captureEl,nativePen,cx:e.clientX,cy:e.clientY};
     }else{
       const selection=tool==='selection';
-      active={id:e.pointerId,t:selection?'region':'pen',kind:selection?'selection':undefined,regionId:selection?regionId():undefined,createdAtEpochMs:selection?Date.now():undefined,color:selection?'#0a84ff':color,width:selection?2:width,pts:[p],cx:e.clientX,cy:e.clientY,captureEl,nativePen};
+      active={id:e.pointerId,t:selection?'region':'pen',kind:selection?'selection':undefined,regionId:selection?regionId():undefined,ordinal:selection?nextRegionOrdinal():undefined,createdAtEpochMs:selection?Date.now():undefined,color:selection?'#0a84ff':color,width:selection?2:width,pts:[p],cx:e.clientX,cy:e.clientY,captureEl,nativePen};
     }
     document.addEventListener('pointermove',onMove,true);
     document.addEventListener('pointerup',onUp,true);
@@ -325,7 +333,7 @@
     if(!current.erase&&current.pts.length){
       if(isRegion(current)){
         if(current.pts.length>=3){
-          strokes.push({t:'region',kind:'selection',id:current.regionId,createdAtEpochMs:current.createdAtEpochMs,color:current.color,width:current.width,pts:current.pts.slice(0,MAX_REGION_POINTS-1)});
+          strokes.push({t:'region',kind:'selection',id:current.regionId,ordinal:current.ordinal,createdAtEpochMs:current.createdAtEpochMs,color:current.color,width:current.width,pts:current.pts.slice(0,MAX_REGION_POINTS-1)});
         }else if(undo.length)undo.pop();
       }else strokes.push({t:'pen',color:current.color,width:current.width,pts:current.pts});
       const penOverflow=strokes.filter(s=>!isRegion(s)).length-600;

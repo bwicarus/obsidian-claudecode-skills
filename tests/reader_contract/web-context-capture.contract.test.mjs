@@ -101,6 +101,11 @@ test("web context follows the current viewport and keeps a marked reading-region
 });
 
 test("web context separates canonical full document from marked viewport context", () => {
+  assert.match(CONTENT, /activationRevision: activationRevision/);
+  assert.match(CONTENT, /contentRevision: contentRevision/);
+  assert.match(CONTENT, /boundRelayDocumentText[\s\S]*256 \* 1024[\s\S]*768 \* 1024/);
+  assert.match(CONTENT, /BW_READER_CONTEXT_POST/);
+  assert.doesNotMatch(CONTENT, /bwActivePageContextV1/);
   assert.match(CONTENT, /function canonicalDocumentKey\(\)[\s\S]*parsed\.hash = ""/);
   assert.match(CONTENT, /function createSourceInstanceId\(\)[\s\S]*new Uint8Array\(16\)/);
   assert.match(
@@ -129,11 +134,9 @@ test("web context separates canonical full document from marked viewport context
   );
   assert.match(
     CONTENT,
-    /var legacyPage = \{[\s\S]*viewport: snap\.viewport[\s\S]*page: legacyPage/,
+    /function prepareRelaySnapshot\(snap\)[\s\S]*Object\.assign\(\{\}, snap,[\s\S]*document:/,
   );
-  const legacyStart = CONTENT.indexOf("var legacyPage = {");
-  const legacyEnd = CONTENT.indexOf("contextRevision += 1", legacyStart);
-  assert.doesNotMatch(CONTENT.slice(legacyStart, legacyEnd), /document:/);
+  assert.doesNotMatch(CONTENT, /var legacyPage = \{|bw-page-context\/1/);
   assert.match(
     CONTENT,
     /window\.addEventListener\("rc:inkchange"[\s\S]*schedule\(true\)[\s\S]*window\.addEventListener\("bw:browser-control-refresh"[\s\S]*lastBrowserControlCorrelation = requestId[\s\S]*report\(true\)/,
@@ -159,4 +162,12 @@ test("root and inner scrollers share the bounded viewport refresh path", () => {
     /document\.addEventListener\("scroll", function \(event\)[\s\S]*noteViewportScroll\(\);[\s\S]*\{ capture: true, passive: true \}/,
   );
   assert.match(CONTENT, /var THROTTLE_MS = 1500;/);
+});
+
+test("A to B to A foreground activation resends corpus even without hidden", () => {
+  assert.match(CONTENT, /var activationRevision = 1/);
+  assert.match(CONTENT, /\["pageshow", "focus", "resume"\]/);
+  assert.match(CONTENT, /noteForegroundActivation[\s\S]*activationRevision \+= 1/);
+  assert.match(CONTENT, /document: \{[\s\S]*activationRevision: activationRevision/);
+  assert.match(CONTENT, /prepareRelaySnapshot[\s\S]*activationRevision: snap\.document\.activationRevision/);
 });

@@ -21,42 +21,99 @@ const nativeVoiceSystem = read(
   "ios/BWReader/App/NativeVoiceSystemIntegration.swift",
 );
 
-test("document payload hashes normalized full text and truncates by UTF-8 bytes", async () => {
-  const start = callPage.indexOf("function normalizeReadableText(value)");
-  const end = callPage.indexOf("function randomHex(length)", start);
+test("background helpers hash normalized full text and enforce UTF-8 bounds", async () => {
+  const start = background.indexOf("function readerNormalizeText(value, max, side = \"start\")");
+  const end = background.indexOf("function readerRandomHex(length)", start);
   assert.ok(start >= 0 && end > start);
   const factory = new Function(
-    "globalThis",
     "TextEncoder",
-    "Uint8Array",
-    "URL",
-    "MAX_CONTEXT_URL_CHARACTERS",
+    "structuredClone",
+    "readerExactKeys",
+    "readerRelayError",
+    "readerSafeId",
+    "readerSafeUrl",
+    "sha256Hex",
     "MAX_DOCUMENT_UTF8_BYTES",
     "MAX_DOCUMENT_CHARACTERS",
-    "MAX_CONTEXT_TITLE_CHARACTERS",
-    "preparedDocumentCache",
-    "exactKeys",
-    "safeVisualId",
-    `${callPage.slice(start, end)}; return { normalizeReadableText, sha256Hex, boundUtf8Text, prepareDocument, prepareViewport, prepareSelectionRegions };`,
+    `${background.slice(start, end)}
+    function normalizeReadableText(value) {
+      return readerNormalizeText(value, MAX_DOCUMENT_CHARACTERS);
+    }
+    function boundUtf8Text(value, maxBytes) {
+      return readerBoundUtf8(value, maxBytes);
+    }
+    async function prepareDocument(page) {
+      const url = readerSafeUrl(page.url);
+      const sourceInstanceId = String(page.document?.sourceInstanceId || "");
+      if (!url || !/^[A-Za-z0-9_-]{22}$/.test(sourceInstanceId)) {
+        throw readerRelayError("BW_READER_CONTEXT_SCHEMA", "全文合同无效");
+      }
+      const rawText = String(page.document?.text || "");
+      const fullText = readerNormalizeText(rawText, MAX_DOCUMENT_CHARACTERS);
+      const bounded = readerBoundUtf8(fullText, MAX_DOCUMENT_UTF8_BYTES);
+      return {
+        contract: "reader-document/1",
+        sourceInstanceId,
+        documentKey: readerSafeUrl(page.document?.documentKey) || url,
+        url,
+        title: String(page.title || "").replace(/[\\u0000-\\u001f\\u007f]/g, " ").slice(0, 1024),
+        contentRevision: await sha256Hex(fullText),
+        text: bounded.text,
+        truncated: bounded.truncated,
+        observedAtEpochMs: Date.now(),
+      };
+    }
+    function prepareViewport(page) {
+      const correlation = page.viewport?.controlCorrelation;
+      if (correlation !== undefined && !readerSafeId(correlation, 128)) {
+        throw readerRelayError("BW_READER_CONTEXT_SCHEMA", "关联标识无效");
+      }
+      const selection = readerNormalizeText(String(page.viewport?.selection || ""), 400);
+      const viewport = {
+        contract: "reader-viewport/1",
+        sourceInstanceId: page.document.sourceInstanceId,
+        documentKey: page.document.documentKey,
+        url: page.url,
+        title: String(page.title || ""),
+        beforeText: readerNormalizeText(String(page.viewport?.beforeText || ""), 2400, "end"),
+        visibleText: readerNormalizeText(String(page.viewport?.visibleText || ""), 12000),
+        afterText: readerNormalizeText(String(page.viewport?.afterText || ""), 2400),
+        selectionState: selection ? "active" : "cleared",
+        selection: selection || null,
+        observedAtEpochMs: Date.now(),
+      };
+      if (correlation !== undefined) viewport.controlCorrelation = correlation;
+      return viewport;
+    }
+    function prepareSelectionRegions(page) {
+      return readerValidateRegions(page.selectionRegions);
+    }
+    function prepareWebVisual(page, url) {
+      return readerValidateVisual(page.visual, url);
+    }
+    return { normalizeReadableText, sha256Hex, boundUtf8Text, prepareDocument, prepareViewport, prepareSelectionRegions, prepareWebVisual };`,
   );
   const helpers = factory(
-    { crypto: webcrypto },
     TextEncoder,
-    Uint8Array,
-    URL,
-    4096,
-    768 * 1024,
-    256 * 1024,
-    1024,
-    null,
+    structuredClone,
     (value, keys) => !!value && typeof value === "object" && !Array.isArray(value) &&
       Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key)),
-    (value, nullable) => {
-      if (nullable && value === null) return null;
-      return typeof value === "string" && /^[A-Za-z0-9._:-]{1,160}$/.test(value)
-        ? value
-        : null;
+    (code, message) => Object.assign(new Error(message), { code }),
+    (value, max = 160) => String(value || "").length <= max &&
+      /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(String(value || "")) ? String(value) : null,
+    (value) => {
+      try {
+        const url = new URL(String(value || ""));
+        return ["http:", "https:"].includes(url.protocol) ? url.href : null;
+      } catch (_) { return null; }
     },
+    async (value) => {
+      const digest = await webcrypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+      return Array.from(new Uint8Array(digest), (byte) =>
+        byte.toString(16).padStart(2, "0")).join("");
+    },
+    768 * 1024,
+    256 * 1024,
   );
   assert.equal(
     await helpers.sha256Hex("abc"),
@@ -82,32 +139,30 @@ test("document payload hashes normalized full text and truncates by UTF-8 bytes"
   assert.equal(prepared.contract, "reader-document/1");
   assert.equal(prepared.text, "first\n\nsecond");
   assert.match(prepared.contentRevision, /^[0-9a-f]{64}$/);
-  const characterBound = await helpers.prepareDocument({
-    url: "https://example.com/long",
-    title: "x".repeat(2000) + "\u0000tail",
-    document: {
-      sourceInstanceId: "BBBBBBBBBBBBBBBBBBBBBB",
-      documentKey: "not-a-url",
-      text: "a".repeat(300000),
-    },
-  });
-  assert.equal(characterBound.text.length, 256 * 1024);
-  assert.equal(characterBound.truncated, true);
-  assert.equal(characterBound.documentKey, "https://example.com/long");
-  assert.equal(characterBound.title.length, 1024);
-  assert.doesNotMatch(characterBound.title, /[\u0000-\u001f\u007f]/);
+  await assert.rejects(
+    helpers.prepareDocument({
+      url: "https://example.com/long",
+      title: "x".repeat(2000) + "\u0000tail",
+      document: {
+        sourceInstanceId: "BBBBBBBBBBBBBBBBBBBBBB",
+        documentKey: "not-a-url",
+        text: "a".repeat(300000),
+      },
+    }),
+    /快照文字字段超限/,
+  );
   const byteBound = await helpers.prepareDocument({
     url: "https://example.com/cjk",
     title: "CJK",
     document: {
       sourceInstanceId: "CCCCCCCCCCCCCCCCCCCCCC",
       documentKey: "https://example.com/cjk",
-      text: "你".repeat(300000),
+      text: "你".repeat(260000),
     },
   });
   assert.ok(byteBound.text.length <= 256 * 1024);
   assert.ok(new TextEncoder().encode(byteBound.text).byteLength <= 768 * 1024);
-  assert.equal(byteBound.truncated, true);
+  assert.equal(byteBound.truncated, false);
   const viewport = helpers.prepareViewport({
     url: "https://example.com/read#view",
     title: "Example",
@@ -156,6 +211,33 @@ test("document payload hashes normalized full text and truncates by UTF-8 bytes"
   });
   assert.equal(regions.items.length, 2);
   assert.equal(regions.items[0].createdAtEpochMs, 0);
+  const drawingRevision = "dr_0123456789abcdef";
+  const visual = helpers.prepareWebVisual({
+    visual: {
+      page_image: null,
+      has_ink: true,
+      drawing: {
+        contract: "reader-outgoing-context/1",
+        file: "https://example.com/read",
+        page: 0,
+        freshness: "recent",
+        lastEditedAt: 1786000000,
+        freshWindowS: 30,
+        inProgress: false,
+        stable: true,
+        drawingRevision,
+        pendingSince: null,
+        ref: {
+          kind: "drawing",
+          file: "https://example.com/read",
+          page: 0,
+          revision: drawingRevision,
+        },
+        empty: false,
+      },
+    },
+  }, "https://example.com/read");
+  assert.equal(visual.drawing.drawingRevision, drawingRevision);
   assert.throws(
     () => helpers.prepareSelectionRegions({
       selectionRegions: {
@@ -619,191 +701,83 @@ test("App 原生语音与 Reader 上下文使用独立 WSS，语音启停不再�
 });
 
 test("扩展上下文按设置和前台状态独立运行，不随语音停止", () => {
-  for (const source of [callPage, contentScript]) {
-    assert.match(source, /bwReaderExtensionPreferencesV2/);
-    assert.match(source, /eph-ctx-sync/);
-    assert.match(source, /chrome\.storage\.onChanged/);
-    assert.match(source, /document\.visibilityState/);
-  }
-  assert.match(contentScript, /\["pageshow", "focus", "online"\]/);
-  assert.match(contentScript, /contentDigest\(snap\.text\)/);
-  const contentReportStart = contentScript.indexOf("function report(force)");
-  const contentReportEnd = contentScript.indexOf("function schedule(force)", contentReportStart);
-  const contentReportBody = contentScript.slice(contentReportStart, contentReportEnd);
-  assert.ok(
-    contentReportBody.indexOf("deliverToFrame(snap)") <
-      contentReportBody.indexOf("extensionStore.set(ACTIVE_CONTEXT_KEY, envelope)"),
-    "same-page delivery must not wait for the optional storage relay",
-  );
-  assert.match(contentScript, /ACTIVE_CONTEXT_KEY = "bwActivePageContextV1"/);
+  assert.match(contentScript, /BW_READER_CONTEXT_POST/);
+  assert.match(contentScript, /boundRelayDocumentText[\s\S]*256 \* 1024[\s\S]*768 \* 1024/);
   assert.match(
     contentScript,
-    /extensionStore\.set\(ACTIVE_CONTEXT_KEY, envelope\)/,
+    /prepareRelaySnapshot\(snap\)[\s\S]*document\.hasFocus\(\)[\s\S]*runtimeRequest\(\{ type: "BW_READER_CONTEXT_POST", snapshot: relaySnap \}, 15000\)/,
   );
-  assert.match(contentScript, /extensionStore\.get\(PREFERENCE_KEY\)/);
-  assert.match(contentScript, /function preferenceFromRuntime\(\)/);
-  assert.match(contentScript, /RC\.ctxSync\.enabled\(\)/);
-  assert.match(contentScript, /MIRROR_KEY = "bwCtxSyncMirrorV1"/);
+  assert.match(contentScript, /if \(preferenceKnown && !contextSyncEnabled\) return/);
+  assert.match(contentScript, /document\.visibilityState !== "visible"[\s\S]*document\.hasFocus\(\)/);
+  assert.match(contentScript, /activationRevision \+= 1/);
+  assert.match(contentScript, /\["pageshow", "focus", "resume"\]/);
+  assert.match(contentScript, /window\.addEventListener\("online"[\s\S]*refreshPreference\(true\)/);
+  assert.match(contentScript, /ACTIVE_CONTEXT_HEARTBEAT_MS/);
   assert.match(
-    contentScript,
-    /function preferenceFromRuntime\(\)[\s\S]*localStorage\.getItem\(key\)[\s\S]*raw !== "1" && raw !== "0"[\s\S]*return null[\s\S]*mirrorPreference\(live\)/,
+    background,
+    /function readerContentSender\(sender\)[\s\S]*sender\.frameId !== 0[\s\S]*new URL\(senderUrl\)\.origin !== new URL\(tabUrl\)\.origin[\s\S]*return \{ tabId: sender\.tab\.id, url: tabUrl \}/,
   );
   assert.match(
     contentScript,
-    /function preferenceFromMirror\(\)[\s\S]*extensionStore\.get\(MIRROR_KEY\)/,
+    /function noteLocationChange\(reason\)[\s\S]*activationRevision \+= 1[\s\S]*schedule\(true\)[\s\S]*\["hashchange", "popstate"\][\s\S]*noteLocationChange\("poll"\)/,
   );
   assert.match(
-    contentScript,
-    /function enabledFromRecord\(record\)[\s\S]*hasOwnProperty\.call\(record\.values, CONTEXT_SYNC_KEY\)[\s\S]*return null/,
+    background,
+    /async function readerPrepareSnapshot\(message, sender\)[\s\S]*readerContentSender\(sender\)[\s\S]*page\.url !== binding\.url/,
   );
   assert.match(
-    contentScript,
-    /preferenceFromMirror\(\)\.then\(function \(mirrored\)[\s\S]*if \(mirrored === null\)[\s\S]*extensionStore\.get\(PREFERENCE_KEY\)/,
+    background,
+    /async function readerPostSnapshot\(prepared\)[\s\S]*fetch\(READER_CONTEXT_POST_URL[\s\S]*X-BW-Snapshot-Revision[\s\S]*readerPersistVisualBinding\(binding\.tabId, visualContext\)/,
   );
-  assert.doesNotMatch(
-    contentScript,
-    /preferenceFromMirror\(\)\.then[\s\S]*\}\);\s*Promise\.resolve\(extensionStore\.get\(PREFERENCE_KEY\)\)/,
-  );
-  assert.match(
-    contentScript,
-    /changes\[PREFERENCE_KEY\]\.newValue[\s\S]*applyPreference\(record\)[\s\S]*mirrorPreference\(changedValue\)/,
-  );
-  assert.match(
-    contentScript,
-    /function refreshPreference\(forceReport\)[\s\S]*preferenceFromRuntime\(\)[\s\S]*extensionStore\.get\(PREFERENCE_KEY\)/,
-  );
-  assert.match(
-    contentScript,
-    /if \(preferenceKnown && !contextSyncEnabled\) return/,
-  );
-  assert.doesNotMatch(
-    contentScript,
-    /if \(!preferenceKnown \|\| !contextSyncEnabled\) return/,
-  );
-  assert.doesNotMatch(
-    contentScript,
-    /Promise\.resolve\(chrome\.storage\.local\.get\(PREFERENCE_KEY\)\)/,
-  );
-  assert.match(background, /LOCAL_STORAGE_KEYS = new Set\(\[[\s\S]*"bwActivePageContextV1"/);
-  assert.match(callPage, /ACTIVE_CONTEXT_KEY = "bwActivePageContextV1"/);
-  assert.match(callPage, /function storageGet\(keys\)/);
-  assert.match(callPage, /chrome\.storage\.local\.get\(keys, \(bag\) =>/);
-  assert.match(callPage, /returned\.then\(done, fail\)/);
-  assert.match(callPage, /const bag = await storageGet\(\[/);
-  assert.match(
-    callPage,
-    /contextPreferenceKnown = false;[\s\S]*note\("设置读取失败: " \+ describe\(err\)\)[\s\S]*seed\(\)/,
-  );
-  assert.match(callPage, /function storedPage\(value\)/);
-  assert.match(callPage, /changes\[ACTIVE_CONTEXT_KEY\][\s\S]*forward\(page, true\)/);
-  const forwardStart = callPage.indexOf("async function forward(page, force)");
-  const forwardEnd = callPage.indexOf("function storedPage", forwardStart);
-  const forwardBody = callPage.slice(forwardStart, forwardEnd);
-  assert.ok(
-    forwardBody.indexOf("await current.send(page)") <
-      forwardBody.indexOf("lastSignature = signature"),
-    "page deduplication may advance only after Windows accepts the snapshot",
-  );
-  assert.match(callPage, /function closeContextLink\(\)/);
-  assert.match(callPage, /if \(!EMBEDDED\) closeWhenDone/);
-  const closeWhenDone = callPage.slice(
-    callPage.indexOf("function closeWhenDone"),
-    callPage.indexOf("// --- embedded form", callPage.indexOf("function closeWhenDone")),
-  );
-  assert.doesNotMatch(closeWhenDone, /closeContextLink|link\.close/);
+  assert.match(background, /documentSignature =[\s\S]*page\.document\.activationRevision/);
+  assert.match(background, /function readerStorageGet\(key\)[\s\S]*settled[\s\S]*storage\.local\.get\(key, done\)[\s\S]*returned\.then/);
+  assert.match(background, /function readerStorageSet\(value\)[\s\S]*settled[\s\S]*storage\.local\.set\(value, done\)[\s\S]*returned\.then/);
 });
 
-test("普通网页上下文同页直投后一次 POST，不再保活 WSS", () => {
-  assert.match(contentScript, /function deliverToFrame\(snap\)/);
-  assert.match(contentScript, /iframe\[src\*="call\.html"\]/);
+test("普通网页上下文经后台一次 POST，通话页只认领同标签视觉能力", () => {
   assert.match(
     contentScript,
-    /window\.__bwProbe\.startProbeHost\(\)/,
+    /prepareRelaySnapshot\(snap\)[\s\S]*runtimeRequest\(\{ type: "BW_READER_CONTEXT_POST", snapshot: relaySnap \}, 15000\)/,
   );
   assert.match(
-    contentScript,
-    /window\.__bwProbe\.trustFrame\(frame\)/,
+    background,
+    /message\.type === "BW_READER_CONTEXT_POST"[\s\S]*readerPrepareSnapshot\(message, sender\)[\s\S]*readerPostSnapshot\(prepared\)/,
   );
   assert.match(
-    contentScript,
-    /contract: "bw-page-context\/1", type: "page", page: snap/,
+    background,
+    /fetch\(READER_CONTEXT_POST_URL, \{[\s\S]*method: "POST"[\s\S]*"Content-Type": "application\/json"/,
+  );
+  assert.doesNotMatch(callPage, /fetch\(READER_CONTEXT_POST_URL/);
+  assert.doesNotMatch(contentScript, /bw-page-context\/1/);
+
+  assert.match(contentScript, /BW_READER_CALL_CLAIM_CREATE[\s\S]*bw-reader-call-claim\/1/);
+  assert.match(callPage, /BW_READER_CALL_CLAIM_BIND[\s\S]*BW_READER_VISUAL_CONTEXT_GET/);
+  assert.match(background, /readerPendingCallClaims[\s\S]*readerBoundCallFrames/);
+  assert.match(
+    background,
+    /message\.type === "BW_READER_CALL_CLAIM_BIND"[\s\S]*readerPendingCallClaims\.delete\(binding\.tabId\)[\s\S]*readerBoundCallFrames\.set\(binding\.tabId/,
+  );
+  assert.match(contentScript, /window\.setInterval\(function \(\) \{[\s\S]*claimCallFrame\(\);[\s\S]*15000/);
+  assert.match(background, /READER_CONTEXT_VISUAL_KEY = "bwReaderVisualBindingsV1"/);
+  assert.match(
+    background,
+    /async function readerStoredVisualBinding\(tabId, expectedUrl, expectedSourceInstanceId\)[\s\S]*raw\[String\(tabId\)\][\s\S]*identity\.file === expectedUrl[\s\S]*identity\.sourceInstanceId === expectedSourceInstanceId/,
   );
   assert.match(
-    callPage,
-    /d\.contract !== "bw-page-context\/1"[\s\S]*queueDirect\(d\.page\)/,
+    background,
+    /async function readerPersistVisualBinding\(tabId, visualContext\)[\s\S]*next\[String\(tabId\)\] = visualContext/,
   );
-  assert.match(
-    callPage,
-    /function frameProbe\(text\)[\s\S]*contract: "bw-probe\/1"[\s\S]*where: "frame"/,
-  );
-  assert.match(
-    callPage,
-    /框收到页面:[\s\S]*框: 开始 POST[\s\S]*框: POST 成功[\s\S]*框: POST 失败/,
-  );
-  assert.match(
-    callPage,
-    /SNAPSHOT_POST_URL\s*=\s*[\s\S]*"https:\/\/bwicarus-2\.taile44d0c\.ts\.net\/reader-context\/snapshot"/,
-  );
-  assert.match(
-    callPage,
-    /async function postSnapshot\(page, bodyIsRepeat, documentPayload\)[\s\S]*viewport,[\s\S]*active:\s*\{[\s\S]*kind: "web"[\s\S]*if \(documentPayload\) body\.document = documentPayload[\s\S]*if \(!bodyIsRepeat\) \{[\s\S]*body\.event = \{[\s\S]*type: "page\.context"/,
-  );
-  assert.match(
-    callPage,
-    /fetch\(SNAPSHOT_POST_URL, \{[\s\S]*method: "POST"[\s\S]*"Content-Type": "application\/json"/,
-  );
-  const directStart = callPage.indexOf("async function forwardDirect(page)");
-  const directEnd = callPage.indexOf("if (chrome.runtime?.onMessage)", directStart);
-  const directBody = callPage.slice(directStart, directEnd);
-  assert.match(
-    directBody,
-    /if \(!contextSurfaceVisible\(\)\) \{[\s\S]*frameProbe\("框: 文档不可见,跳过"\)[\s\S]*return/,
-  );
-  assert.match(
-    directBody,
-    /await postSnapshot\(page, bodyIsRepeat, documentPayload\)[\s\S]*lastBodySignature = bodySig/,
-  );
-  assert.match(
-    directBody,
-    /bodySig =[\s\S]*page\.viewKey[\s\S]*bodyIsRepeat = bodySig === lastBodySignature/,
-    "a changed viewport must send a new page.context while the same-view heartbeat stays active-only",
-  );
-  assert.doesNotMatch(directBody, /位置与内容均未变,跳过|lastStateSignature/);
-  assert.doesNotMatch(
-    directBody,
-    /ensureDirectLink|ContextLink|contextPreferenceKnown|contextSyncEnabled/,
-  );
-  assert.match(
-    safariPackager,
-    /BRIDGE_ORIGIN = "https:\/\/bwicarus-2\.taile44d0c\.ts\.net\/"/,
-  );
-  assert.match(
-    safariPackager,
-    /manifest\["host_permissions"\] = \[ACTIVE_ORIGIN \+ "\*", BRIDGE_ORIGIN \+ "\*"\]/,
-  );
-  const postStart = callPage.indexOf("async function postSnapshot(page, bodyIsRepeat, documentPayload)");
-  const postEnd = callPage.indexOf("async function forwardDirect(page)", postStart);
-  const postBody = callPage.slice(postStart, postEnd);
-  assert.doesNotMatch(
-    postBody,
-    /viewKey/,
-    "the internal viewport key must not enter the strict Windows schema",
-  );
-  assert.match(callPage, /let directPostRunning = false;/);
-  assert.match(callPage, /let directPostQueued = null;/);
-  assert.match(
-    callPage,
-    /async function drainDirectQueue\(\)[\s\S]*while \(directPostQueued\)[\s\S]*await forwardDirect\(next\)/,
-    "scroll snapshots must serialize and coalesce to the newest waiting viewport",
-  );
-  assert.match(callPage, /contract: "reader-document\/1"/);
-  assert.match(callPage, /contentRevision: await sha256Hex\(fullText\)/);
-  assert.match(callPage, /const MAX_DOCUMENT_UTF8_BYTES = 768 \* 1024/);
-  assert.match(callPage, /contract: "reader-viewport\/1"/);
-  assert.match(callPage, /sourceInstanceId: viewport\.sourceInstanceId/);
+
+  const postStart = background.indexOf("async function readerPostSnapshot(prepared)");
+  const postEnd = background.indexOf("function readerTabsMessage", postStart);
+  const postBody = background.slice(postStart, postEnd);
   assert.match(
     postBody,
-    /const text = viewport\.visibleText[\s\S]*page_context: \{[\s\S]*text,[\s\S]*text_source: "extension-viewport"/,
+    /const body = \{[\s\S]*viewport,[\s\S]*active:[\s\S]*if \(prior\.documentSignature !== documentSignature\) body\.document = documentPayload/,
+  );
+  assert.match(
+    postBody,
+    /page_context: \{[\s\S]*text: viewport\.visibleText[\s\S]*text_source: "extension-viewport"/,
     "the live snapshot must use viewport text rather than document.text",
   );
   assert.doesNotMatch(
@@ -812,8 +786,19 @@ test("普通网页上下文同页直投后一次 POST，不再保活 WSS", () =>
     "full document text must remain outside currentPage.text",
   );
   assert.match(
-    callPage,
-    /function queueDirect\(page\)[\s\S]*directPostQueued = page;[\s\S]*drainDirectQueue\(\)/,
+    postBody,
+    /X-BW-Snapshot-Revision[\s\S]*visualContext = \{[\s\S]*snapshotRevision,[\s\S]*readerPersistVisualBinding\(binding\.tabId, visualContext\)/,
+    "visual capture must bind to the exact snapshot revision returned by Windows",
+  );
+  assert.match(
+    postBody,
+    /bodySignature =[\s\S]*visual\.drawing\?\.drawingRevision/,
+    "an ink-only change must force a page.context visual update",
+  );
+  assert.match(
+    postBody,
+    /documentSignature =[\s\S]*page\.document\.activationRevision/,
+    "returning A after B must reattach A's full document corpus",
   );
 });
 

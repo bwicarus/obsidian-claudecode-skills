@@ -3784,6 +3784,6 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 ## Codex：按需视觉上下文与网页受限控制（2026-08-06 JST）
 - **改了什么**：App/PWA/Safari 统一提供当前视口、笔迹附近与闭合选区附近的按需合成图；网页另提供全文语料、视口前后文和当前段标记。
 - **工具边界**：浏览器只开放上下视口、滚到文字/标题/当前选区五种固定动作；选区 ID 只能取自当前快照索引，未知或过期 ID 拒绝。
-- **可靠性**：全文按 Codex thread 首读一次，位置与正文分离；多设备同 URL 以 sourceInstanceId 隔离，重复 JSON 键与跨源混合均 fail closed。
+- **可靠性**：全文按 Codex thread 首读一次，位置与正文分离；多设备同 URL 以 sourceInstanceId 隔离，重复 JSON 键与跨源混合均 fail closed；闭合选区序号持久且删除旧选区不重排。
 - **怎么验**：Windows 编译/直连自检、Reader Node 全量、Python 门禁与发布管线；真实 iPad/Pencil/Safari 行为待统一 1.0.92 实机验收。
 - **边界**：未改已验收的 Windows 语音 START/STOP/F24；快照只索引最近 128 个选区，更早选区暂不可按 ID 寻址。

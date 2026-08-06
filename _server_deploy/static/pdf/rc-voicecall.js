@@ -4600,6 +4600,8 @@
     if (!canvas || !s.strokes.length || !window.RCInk || !RCInk.drawStroke) return;
     var ctx2 = canvas.getContext('2d');
     var sx = canvas.width / Math.max(1, crop.width), sy = canvas.height / Math.max(1, crop.height);
+    var regionNumbers = RCInk.ensureRegionOrdinals
+      ? RCInk.ensureRegionOrdinals(s.strokes) : null;
     var regions = s.strokes.filter(function (st) { return st && st.t === 'region'; });
     regions.sort(function (a, b) {
       var at = Number(a.createdAtEpochMs) || 0, bt = Number(b.createdAtEpochMs) || 0;
@@ -4634,7 +4636,10 @@
         canvas.width,
         canvas.height,
         Math.min(sx, sy),
-        st && st.t === 'region' ? { regionNumber: regions.indexOf(st) + 1 } : undefined
+        st && st.t === 'region' ? {
+          regionNumber: (regionNumbers && regionNumbers.get(st)) ||
+            Number(st.ordinal) || regions.indexOf(st) + 1
+        } : undefined
       );
     });
   }
@@ -4642,16 +4647,28 @@
     if (!s || !crop || !(crop.width > 0) || !(crop.height > 0)) return null;
     await _loadH2C();
     var longEdge = Math.max(crop.width, crop.height, 1);
-    var canvas = await window.html2canvas(s.element, {
+    // Web ink reports document.body as its geometry surface, while the
+    // extension's cards/notes portal is a sibling under <html>.  Capture the
+    // whole document tree only for that web shape; PDF/EPUB keep their exact
+    // renderer surface.  The ink SVG is excluded from the web base and drawn
+    // once below so crop coordinates and selected-region emphasis stay exact.
+    var webPinRoot = s.element === document.body &&
+      document.getElementById('bw-reader-pins');
+    var captureRoot = webPinRoot ? (document.documentElement || s.element) : s.element;
+    var canvas = await window.html2canvas(captureRoot, {
       x: Math.round(crop.x), y: Math.round(crop.y),
       width: Math.round(crop.width), height: Math.round(crop.height),
       scale: Math.min(2, window.devicePixelRatio || 1, 1600 / longEdge),
       useCORS: true, logging: false, backgroundColor: '#ffffff',
       ignoreElements: function (el) {
         var id = el.id || '';
-        return id === 'bw-reader-host' || id === 'bw-reader-pins' ||
+        var classes = el.classList;
+        return id === 'bw-reader-host' || (!webPinRoot && id === 'bw-reader-pins') ||
                id === 'ep-side' || id === 'rc-vc' || id === 'vc-cap' ||
-               id === 'word-pop' || id === 'sel-toolbar';
+               id === 'word-pop' || id === 'sel-toolbar' ||
+               !!(webPinRoot && classes &&
+                  (classes.contains('bw-ink-document') ||
+                   classes.contains('bw-ink-canvas')));
       }
     });
     _drawSurfaceInk(canvas, s, crop, selectionId);
@@ -4677,14 +4694,20 @@
       await _loadH2C();
       // 60 尺寸上限(审核P1):长边≤1600px——2×DPR 整视口无上限时复杂页 base64 可超服务端消息上限,断的是整条控制 WS
       var longEdge = Math.max(window.innerWidth, window.innerHeight);
-      var canvas = await window.html2canvas(document.body, {
+      // 普通网页的卡片/便签 portal (#bw-reader-pins) 与 body 同为 html
+      // 的直接子节点；以 body 为根会在进入裁剪前就把 portal 丢掉。
+      // 改从 documentElement 合成整棵页面树，同时继续排除固定控制 UI。
+      var captureRoot = document.documentElement || document.body;
+      var canvas = await window.html2canvas(captureRoot, {
         x: window.scrollX, y: window.scrollY,
         width: window.innerWidth, height: window.innerHeight,
         scale: Math.min(2, window.devicePixelRatio || 1, 1600 / longEdge),
         useCORS: true, logging: false, backgroundColor: '#ffffff',
         ignoreElements: function (el) {
           var id = el.id || '';
-          return id === 'ep-side' || id === 'rc-vc' || id === 'vc-cap' || id === 'word-pop' || id === 'sel-toolbar';
+          return id === 'bw-reader-host' ||
+                 id === 'ep-side' || id === 'rc-vc' || id === 'vc-cap' ||
+                 id === 'word-pop' || id === 'sel-toolbar';
         }
       });
       // 质量阶梯:编码后目标 ≤900KB base64(0.8→0.6→0.45),超了逐级降质而不是赌网关上限
@@ -4737,19 +4760,26 @@
       if (!rect || !(rect.width > 0) || !(rect.height > 0)) return null;
       await _loadH2C();
       var longEdge = Math.max(rect.width, rect.height, 1);
-      var canvas = await window.html2canvas(document.body, {
+      var captureRoot = document.documentElement || document.body;
+      var canvas = await window.html2canvas(captureRoot, {
         x: Math.max(0, Math.round((window.scrollX || 0) + rect.left)),
         y: Math.max(0, Math.round((window.scrollY || 0) + rect.top)),
         width: Math.round(rect.width),
         height: Math.round(rect.height),
         scale: Math.min(2, window.devicePixelRatio || 1, 1600 / longEdge),
         useCORS: true, logging: false, backgroundColor: '#ffffff',
-        // 卡片/便签可能是 page 元素之外的 portal 兄弟节点。这里以 body
-        // 为渲染源再裁页，不能排除 bw-reader-pins / vc-cards。
+        // 卡片/便签可能是 body 的 portal 兄弟节点。这里以整棵 html
+        // 为渲染源再裁页，不能排除 bw-reader-pins / vc-cards。墨迹 SVG
+        // 会在下方按精确 crop/selection 再补画一次，因此底图必须排除，
+        // 否则 html2canvas 与 _drawSurfaceInk 会把同一笔迹叠画两遍。
         ignoreElements: function (el) {
           var id = el.id || '';
-          return id === 'ep-side' || id === 'rc-vc' || id === 'vc-cap' ||
-                 id === 'word-pop' || id === 'sel-toolbar';
+          var classes = el.classList;
+          return id === 'bw-reader-host' ||
+                 id === 'ep-side' || id === 'rc-vc' || id === 'vc-cap' ||
+                 id === 'word-pop' || id === 'sel-toolbar' ||
+                 !!(classes && (classes.contains('bw-ink-document') ||
+                                classes.contains('bw-ink-canvas')));
         }
       });
       if (surface && surfaceCrop) {
@@ -4920,7 +4950,17 @@
         return stroke && stroke.t === 'region' &&
           typeof stroke.id === 'string' &&
           /^[A-Za-z0-9._:-]{1,160}$/.test(stroke.id);
-      }).sort(function (left, right) {
+      });
+      var regionNumbers = window.RCInk && RCInk.ensureRegionOrdinals
+        ? RCInk.ensureRegionOrdinals(strokes) : null;
+      regions.sort(function (left, right) {
+        var leftOrdinal = (regionNumbers && regionNumbers.get(left)) ||
+          Number(left.ordinal) || 0;
+        var rightOrdinal = (regionNumbers && regionNumbers.get(right)) ||
+          Number(right.ordinal) || 0;
+        if (leftOrdinal && rightOrdinal && leftOrdinal !== rightOrdinal) {
+          return leftOrdinal - rightOrdinal;
+        }
         var byTime = (Number(left.createdAtEpochMs) || 0) -
           (Number(right.createdAtEpochMs) || 0);
         if (byTime) return byTime;
@@ -4929,7 +4969,8 @@
       var total = regions.length;
       var first = Math.max(0, total - 128);
       var items = regions.slice(first).map(function (stroke, index) {
-        var ordinal = first + index + 1;
+        var ordinal = (regionNumbers && regionNumbers.get(stroke)) ||
+          Number(stroke.ordinal) || first + index + 1;
         var createdAt = Number(stroke.createdAtEpochMs) || 0;
         var date = createdAt > 0 ? new Date(createdAt) : null;
         var pad = function (value) { return String(value).padStart(2, '0'); };

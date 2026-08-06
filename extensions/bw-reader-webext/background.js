@@ -48,6 +48,21 @@ const TRANSLATION_CACHE_MESSAGES = new Set([
 const NATIVE_APP_MESSAGES = new Set([
   "BW_NATIVE_APP_REQUEST"
 ]);
+const READER_RELAY_MESSAGES = new Set([
+  "BW_READER_CONTEXT_POST",
+  "BW_READER_CALL_CLAIM_CREATE",
+  "BW_READER_CALL_CLAIM_BIND",
+  "BW_READER_VISUAL_CONTEXT_GET",
+  "BW_READER_VISUAL_CAPTURE",
+  "BW_READER_BROWSER_CONTROL"
+]);
+const READER_CONTEXT_POST_URL =
+  "https://bwicarus-2.taile44d0c.ts.net/reader-context/snapshot";
+const READER_CONTEXT_VISUAL_KEY = "bwReaderVisualBindingsV1";
+const READER_CONTEXT_MAX_DOCUMENT_UTF8_BYTES = 768 * 1024;
+const READER_CONTEXT_MAX_DOCUMENT_CHARACTERS = 256 * 1024;
+const READER_CONTEXT_MAX_MESSAGE_BYTES = 1024 * 1024;
+const READER_CONTEXT_BINDING_MAX_AGE_MS = 5 * 60 * 1000;
 const NATIVE_APP_CONTRACT = "bw-reader-native/1";
 const NATIVE_APP_IDENTIFIER = "space.bwicarus.bwreader2";
 const NATIVE_APP_ACTIONS = new Set([
@@ -96,7 +111,6 @@ const NATIVE_APP_AGENT_EVENTS = new Set([
 ]);
 const LOCAL_STORAGE_KEYS = new Set([
   "bwReaderExtensionPreferencesV2",
-  "bwActivePageContextV1",
   "webHighlightsV1",
   "webCardPinsV1",
   "webInkV1",
@@ -5210,6 +5224,711 @@ async function handleNativeAppMessage(message, sender) {
   return normalizeNativeAppResponse(response, payload);
 }
 
+// ── Reader context / visual / browser-control internal relay ────────────────
+// Host pages never receive a callable network or control primitive. A top-level
+// content script can submit only its own URL-bound snapshot; an embedded,
+// extension-owned call.html can request only the two fixed operations below.
+const readerContextStateByTab = new Map();
+const readerPendingCallClaims = new Map();
+const readerBoundCallFrames = new Map();
+let readerContextPostQueue = Promise.resolve();
+
+function readerRelayError(code, message) {
+  return Object.assign(new Error(message), { code });
+}
+
+function readerExactKeys(value, keys) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const actual = Object.keys(value).sort();
+  const expected = keys.slice().sort();
+  return actual.length === expected.length &&
+    actual.every((key, index) => key === expected[index]);
+}
+
+function readerSafeId(value, max = 160) {
+  const text = String(value || "");
+  return text.length <= max && /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(text)
+    ? text
+    : null;
+}
+
+function readerSafeUrl(value) {
+  const text = String(value || "");
+  if (!text || text.length > 4096 || /[\u0000-\u001f\u007f]/.test(text)) return null;
+  try {
+    const parsed = new URL(text);
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) return null;
+    return parsed.href === text ? text : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+function readerContentSender(sender) {
+  if (
+    !senderIdMatches(sender) || !Number.isInteger(sender?.tab?.id) ||
+    sender.frameId !== 0 || typeof sender.url !== "string" ||
+    typeof sender.tab.url !== "string"
+  ) throw readerRelayError("BW_READER_CONTEXT_SENDER", "只允许顶层网页脚本提交自身快照");
+  const senderUrl = readerSafeUrl(sender.url);
+  const tabUrl = readerSafeUrl(sender.tab.url);
+  if (!senderUrl || !tabUrl || new URL(senderUrl).origin !== new URL(tabUrl).origin) {
+    throw readerRelayError("BW_READER_CONTEXT_SENDER", "网页脚本与当前标签页来源不一致");
+  }
+  // MessageSender.url may lag after a same-origin SPA pushState. The current
+  // tab URL is authoritative; cross-origin drift remains rejected above.
+  return { tabId: sender.tab.id, url: tabUrl };
+}
+
+function readerCallSender(sender, requireClaim = true) {
+  if (
+    !senderIdMatches(sender) || !Number.isInteger(sender?.tab?.id) ||
+    !Number.isInteger(sender?.frameId) || sender.frameId <= 0 ||
+    typeof sender.url !== "string"
+  ) throw readerRelayError("BW_READER_CALL_SENDER", "只允许内嵌通话页请求网页能力");
+  const base = String(chrome.runtime.getURL("call.html"));
+  if (sender.url !== base + "?compact=1") {
+    throw readerRelayError("BW_READER_CALL_SENDER", "通话页来源无效");
+  }
+  const tabUrl = readerSafeUrl(sender.tab.url);
+  if (!tabUrl) throw readerRelayError("BW_READER_CALL_SENDER", "通话页标签 URL 无效");
+  const bound = readerBoundCallFrames.get(sender.tab.id);
+  if (requireClaim && (!bound || bound.frameId !== sender.frameId ||
+      bound.documentId !== String(sender.documentId || "") || bound.tabUrl !== tabUrl)) {
+    throw readerRelayError("BW_READER_CALL_SENDER", "通话页尚未由顶层网页认领");
+  }
+  return {
+    tabId: sender.tab.id,
+    url: tabUrl,
+    sourceInstanceId: requireClaim ? bound.sourceInstanceId : "",
+  };
+}
+
+function readerNormalizeText(value, max, side = "start") {
+  if (typeof value !== "string" || value.length > max) {
+    throw readerRelayError("BW_READER_CONTEXT_SCHEMA", "快照文字字段超限");
+  }
+  const text = value
+    .replace(/\r\n?/g, "\n").replace(/\u00a0/g, " ")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
+    .replace(/[ \t]+/g, " ").replace(/ *\n */g, "\n")
+    .replace(/\n{3,}/g, "\n\n").trim();
+  return side === "end" ? text.slice(-max) : text.slice(0, max);
+}
+
+function readerValidateRegions(raw) {
+  if (
+    !readerExactKeys(raw, ["contract", "total", "truncated", "items"]) ||
+    raw.contract !== "reader-selection-regions/1" ||
+    !Number.isSafeInteger(raw.total) || raw.total < 0 || raw.total > 1000000 ||
+    typeof raw.truncated !== "boolean" || !Array.isArray(raw.items) ||
+    raw.items.length > 128 || raw.truncated !== (raw.total > raw.items.length) ||
+    (!raw.truncated && raw.total !== raw.items.length)
+  ) throw readerRelayError("BW_READER_CONTEXT_SCHEMA", "页面选区索引无效");
+  const seen = new Set();
+  let priorOrdinal = 0;
+  const items = raw.items.map((item) => {
+    if (
+      !readerExactKeys(item, ["selectionId", "label", "ordinal", "createdAtEpochMs"]) ||
+      !readerSafeId(item.selectionId) || seen.has(item.selectionId) ||
+      typeof item.label !== "string" || item.label.length < 1 || item.label.length > 80 ||
+      /[\u0000-\u001f\u007f]/.test(item.label) ||
+      !Number.isSafeInteger(item.ordinal) || item.ordinal <= priorOrdinal ||
+      item.ordinal < 1 || item.ordinal > 2147483647 ||
+      !item.label.startsWith(`#${item.ordinal} `) ||
+      !Number.isSafeInteger(item.createdAtEpochMs) || item.createdAtEpochMs < 0
+    ) throw readerRelayError("BW_READER_CONTEXT_SCHEMA", "页面选区条目无效");
+    seen.add(item.selectionId);
+    priorOrdinal = item.ordinal;
+    return { ...item };
+  });
+  return { contract: raw.contract, total: raw.total, truncated: raw.truncated, items };
+}
+
+function readerValidateVisual(raw, url) {
+  if (
+    !readerExactKeys(raw, ["page_image", "has_ink", "drawing"]) ||
+    raw.page_image !== null || typeof raw.has_ink !== "boolean"
+  ) throw readerRelayError("BW_READER_CONTEXT_SCHEMA", "页面视觉状态无效");
+  if (!raw.has_ink) {
+    if (raw.drawing !== null) throw readerRelayError("BW_READER_CONTEXT_SCHEMA", "空笔迹状态无效");
+    return { page_image: null, has_ink: false, drawing: null };
+  }
+  const d = raw.drawing;
+  if (
+    !readerExactKeys(d, ["contract", "file", "page", "freshness", "lastEditedAt",
+      "freshWindowS", "inProgress", "stable", "drawingRevision", "pendingSince", "ref", "empty"]) ||
+    d.contract !== "reader-outgoing-context/1" || d.file !== url || d.page !== 0 ||
+    d.freshness !== "recent" || !Number.isFinite(d.lastEditedAt) || d.lastEditedAt <= 0 ||
+    d.freshWindowS !== 30 || d.inProgress !== false || d.stable !== true || d.empty !== false ||
+    !/^dr_[0-9a-f]{16}$/.test(String(d.drawingRevision || "")) || d.pendingSince !== null ||
+    !readerExactKeys(d.ref, ["kind", "file", "page", "revision"]) ||
+    d.ref.kind !== "drawing" || d.ref.file !== url || d.ref.page !== 0 ||
+    d.ref.revision !== d.drawingRevision
+  ) throw readerRelayError("BW_READER_CONTEXT_SCHEMA", "页面笔迹版本无效");
+  return structuredClone(raw);
+}
+
+function readerBoundUtf8(value, maxBytes) {
+  const encoder = new TextEncoder();
+  if (encoder.encode(value).byteLength <= maxBytes) return { text: value, truncated: false };
+  let low = 0, high = value.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (encoder.encode(value.slice(0, middle)).byteLength <= maxBytes) low = middle;
+    else high = middle - 1;
+  }
+  if (low > 0 && /[\uD800-\uDBFF]/.test(value.charAt(low - 1))) low -= 1;
+  return { text: value.slice(0, low), truncated: true };
+}
+
+async function readerPrepareSnapshot(message, sender) {
+  const binding = readerContentSender(sender);
+  if (!readerExactKeys(message, ["type", "snapshot"])) {
+    throw readerRelayError("BW_READER_CONTEXT_SCHEMA", "快照消息字段无效");
+  }
+  let encoded;
+  try { encoded = new TextEncoder().encode(JSON.stringify(message.snapshot)); }
+  catch (_) { throw readerRelayError("BW_READER_CONTEXT_SCHEMA", "快照不能序列化"); }
+  if (encoded.byteLength > READER_CONTEXT_MAX_MESSAGE_BYTES) {
+    throw readerRelayError("BW_READER_CONTEXT_LIMIT", "快照消息超过 1 MiB");
+  }
+  const page = message.snapshot;
+  if (!readerExactKeys(page, ["url", "title", "text", "selection", "selectionRegions",
+    "visual", "viewKey", "viewport", "document"]) || page.url !== binding.url ||
+    typeof page.title !== "string" || page.title.length > 1024 ||
+    /[\u0000-\u001f\u007f]/.test(page.title) ||
+    typeof page.viewKey !== "string" || page.viewKey.length < 1 || page.viewKey.length > 160 ||
+    /[\u0000-\u001f\u007f]/.test(page.viewKey)
+  ) throw readerRelayError("BW_READER_CONTEXT_SCHEMA", "页面快照合同无效");
+  const doc = page.document;
+  if (!readerExactKeys(doc, ["sourceInstanceId", "documentKey", "activationRevision", "contentRevision", "text", "truncated"]) ||
+    !/^[A-Za-z0-9_-]{22}$/.test(String(doc.sourceInstanceId || "")) ||
+    !readerSafeUrl(doc.documentKey) || typeof doc.text !== "string" ||
+    doc.text.length > READER_CONTEXT_MAX_DOCUMENT_CHARACTERS ||
+    new TextEncoder().encode(doc.text).byteLength > READER_CONTEXT_MAX_DOCUMENT_UTF8_BYTES ||
+    !/^[a-f0-9]{64}$/.test(String(doc.contentRevision || "")) ||
+    typeof doc.truncated !== "boolean" || !Number.isSafeInteger(doc.activationRevision) ||
+    doc.activationRevision < 1 || doc.activationRevision > 1000000000
+  ) throw readerRelayError("BW_READER_CONTEXT_SCHEMA", "全文合同无效");
+  const vp = page.viewport;
+  const vpKeys = ["beforeText", "visibleText", "afterText", "selectionState", "selection", "viewKey"];
+  if (Object.prototype.hasOwnProperty.call(vp || {}, "controlCorrelation")) vpKeys.push("controlCorrelation");
+  if (!readerExactKeys(vp, vpKeys) || vp.viewKey !== page.viewKey ||
+    !["active", "cleared"].includes(vp.selectionState) ||
+    typeof vp.selection !== "string" || vp.selection.length > 400 ||
+    (vp.selectionState === "active") !== !!vp.selection ||
+    (vp.controlCorrelation !== undefined && !readerSafeId(vp.controlCorrelation, 128))
+  ) throw readerRelayError("BW_READER_CONTEXT_SCHEMA", "视口合同无效");
+  const visibleText = readerNormalizeText(vp.visibleText, 12000);
+  const selection = readerNormalizeText(vp.selection, 400);
+  if (readerNormalizeText(page.text, 12000) !== visibleText ||
+    readerNormalizeText(page.selection, 400) !== selection) {
+    throw readerRelayError("BW_READER_CONTEXT_SCHEMA", "页面与视口文字不一致");
+  }
+  const url = binding.url;
+  const visual = readerValidateVisual(page.visual, url);
+  const selectionRegions = readerValidateRegions(page.selectionRegions);
+  const fullText = readerNormalizeText(doc.text, READER_CONTEXT_MAX_DOCUMENT_CHARACTERS);
+  const bounded = readerBoundUtf8(fullText, READER_CONTEXT_MAX_DOCUMENT_UTF8_BYTES);
+  if (!doc.truncated && await sha256Hex(fullText) !== doc.contentRevision) {
+    throw readerRelayError("BW_READER_CONTEXT_SCHEMA", "全文内容哈希不匹配");
+  }
+  const viewport = {
+    contract: "reader-viewport/1", sourceInstanceId: doc.sourceInstanceId,
+    documentKey: doc.documentKey, url, title: page.title,
+    beforeText: readerNormalizeText(vp.beforeText, 2400, "end"), visibleText,
+    afterText: readerNormalizeText(vp.afterText, 2400),
+    selectionState: selection ? "active" : "cleared", selection: selection || null,
+    observedAtEpochMs: Date.now(),
+  };
+  if (vp.controlCorrelation !== undefined) viewport.controlCorrelation = vp.controlCorrelation;
+  const documentPayload = {
+    contract: "reader-document/1", sourceInstanceId: doc.sourceInstanceId,
+    documentKey: doc.documentKey, url, title: page.title,
+    contentRevision: doc.contentRevision, text: bounded.text,
+    truncated: doc.truncated || bounded.truncated, observedAtEpochMs: Date.now(),
+  };
+  return { binding, page, viewport, visual, selectionRegions, documentPayload };
+}
+
+function readerRandomHex(length) {
+  const bytes = new Uint8Array(Math.ceil(length / 2));
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("").slice(0, length);
+}
+
+function readerVisualContext(value) {
+  if (!readerExactKeys(value, [
+    "schema", "capturedAt", "identity", "visual", "viewKey", "snapshotRevision"
+  ]) || value.schema !== 1 || !Number.isSafeInteger(value.capturedAt) ||
+    Date.now() - value.capturedAt < 0 ||
+    Date.now() - value.capturedAt > READER_CONTEXT_BINDING_MAX_AGE_MS ||
+    !readerExactKeys(value.identity, ["sourceInstanceId", "file", "page"]) ||
+    !/^[A-Za-z0-9_-]{22}$/.test(String(value.identity.sourceInstanceId || "")) ||
+    !readerSafeUrl(value.identity.file) || value.identity.page !== 0 ||
+    typeof value.viewKey !== "string" || value.viewKey.length < 1 ||
+    value.viewKey.length > 160 || /[\u0000-\u001f\u007f]/.test(value.viewKey) ||
+    !Number.isSafeInteger(value.snapshotRevision) || value.snapshotRevision < 1
+  ) return null;
+  let visual;
+  try { visual = readerValidateVisual(value.visual, value.identity.file); }
+  catch (_) { return null; }
+  return {
+    schema: 1,
+    capturedAt: value.capturedAt,
+    identity: { ...value.identity },
+    visual,
+    viewKey: value.viewKey,
+    snapshotRevision: value.snapshotRevision,
+  };
+}
+
+function readerStorageGet(key) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(readerRelayError("BW_READER_STORAGE_TIMEOUT", "storage.get 超时"));
+    }, 5000);
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const err = chrome.runtime?.lastError;
+      if (err) reject(new Error(err.message || "storage.get 失败"));
+      else resolve(value || {});
+    };
+    try {
+      const returned = chrome.storage.local.get(key, done);
+      if (returned && typeof returned.then === "function") returned.then(
+        (value) => { if (!settled) { settled = true; clearTimeout(timer); resolve(value || {}); } },
+        (err) => { if (!settled) { settled = true; clearTimeout(timer); reject(err); } }
+      );
+    } catch (err) { clearTimeout(timer); reject(err); }
+  });
+}
+
+function readerStorageSet(value) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(readerRelayError("BW_READER_STORAGE_TIMEOUT", "storage.set 超时"));
+    }, 5000);
+    const done = () => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const err = chrome.runtime?.lastError;
+      if (err) reject(new Error(err.message || "storage.set 失败"));
+      else resolve();
+    };
+    try {
+      const returned = chrome.storage.local.set(value, done);
+      if (returned && typeof returned.then === "function") returned.then(
+        () => { if (!settled) { settled = true; clearTimeout(timer); resolve(); } },
+        (err) => { if (!settled) { settled = true; clearTimeout(timer); reject(err); } }
+      );
+    } catch (err) { clearTimeout(timer); reject(err); }
+  });
+}
+
+async function readerStoredVisualBinding(tabId, expectedUrl, expectedSourceInstanceId) {
+  const live = readerContextStateByTab.get(tabId)?.visualContext;
+  const checkedLive = readerVisualContext(live);
+  if (checkedLive && checkedLive.identity.file === expectedUrl &&
+      checkedLive.identity.sourceInstanceId === expectedSourceInstanceId) return checkedLive;
+  const bag = await readerStorageGet(READER_CONTEXT_VISUAL_KEY);
+  const raw = bag?.[READER_CONTEXT_VISUAL_KEY];
+  const checked = readerVisualContext(raw && raw[String(tabId)]);
+  if (checked && checked.identity.file === expectedUrl &&
+      checked.identity.sourceInstanceId === expectedSourceInstanceId) {
+    const prior = readerContextStateByTab.get(tabId) || {};
+    readerContextStateByTab.set(tabId, { ...prior, visualContext: checked });
+  }
+  return checked && checked.identity.file === expectedUrl &&
+    checked.identity.sourceInstanceId === expectedSourceInstanceId ? checked : null;
+}
+
+async function readerPersistVisualBinding(tabId, visualContext) {
+  const bag = await readerStorageGet(READER_CONTEXT_VISUAL_KEY);
+  const prior = bag?.[READER_CONTEXT_VISUAL_KEY];
+  const next = prior && typeof prior === "object" && !Array.isArray(prior)
+    ? { ...prior }
+    : {};
+  for (const [key, value] of Object.entries(next)) {
+    if (!readerVisualContext(value)) delete next[key];
+  }
+  next[String(tabId)] = visualContext;
+  await readerStorageSet({ [READER_CONTEXT_VISUAL_KEY]: next });
+}
+
+async function readerDeleteVisualBinding(tabId, expectedUrl, removeAny) {
+  const bag = await readerStorageGet(READER_CONTEXT_VISUAL_KEY);
+  const prior = bag?.[READER_CONTEXT_VISUAL_KEY];
+  if (!prior || typeof prior !== "object" || Array.isArray(prior) ||
+      !Object.prototype.hasOwnProperty.call(prior, String(tabId))) return;
+  const stored = readerVisualContext(prior[String(tabId)]);
+  if (!removeAny && (!stored || !expectedUrl || stored.identity.file !== expectedUrl)) return;
+  const next = { ...prior };
+  delete next[String(tabId)];
+  await readerStorageSet({ [READER_CONTEXT_VISUAL_KEY]: next });
+}
+
+function readerDropTabState(tabId, removeAny) {
+  const live = readerVisualContext(readerContextStateByTab.get(tabId)?.visualContext);
+  const expectedUrl = live?.identity?.file ||
+    readerBoundCallFrames.get(tabId)?.tabUrl || readerPendingCallClaims.get(tabId)?.tabUrl || "";
+  readerContextStateByTab.delete(tabId);
+  readerPendingCallClaims.delete(tabId);
+  readerBoundCallFrames.delete(tabId);
+  const operation = readerContextPostQueue.then(() =>
+    readerDeleteVisualBinding(tabId, expectedUrl, removeAny === true)
+  );
+  readerContextPostQueue = operation.catch(() => {});
+}
+
+function readerHandleTabUrlUpdate(tabId, nextUrl) {
+  const canonical = readerSafeUrl(nextUrl);
+  const live = readerVisualContext(readerContextStateByTab.get(tabId)?.visualContext);
+  const bound = readerBoundCallFrames.get(tabId);
+  const pending = readerPendingCallClaims.get(tabId);
+  // onUpdated may be delivered after the new document already committed its
+  // snapshot. Never let that late notification erase the new binding.
+  if (canonical && live?.identity?.file === canonical) {
+    if (bound && (bound.tabUrl !== canonical ||
+        bound.sourceInstanceId !== live.identity.sourceInstanceId)) {
+      readerBoundCallFrames.delete(tabId);
+    }
+    if (pending && (pending.tabUrl !== canonical ||
+        pending.sourceInstanceId !== live.identity.sourceInstanceId)) {
+      readerPendingCallClaims.delete(tabId);
+    }
+    return;
+  }
+  // The new document can claim/bind its call frame before its first snapshot
+  // finishes committing. A delayed tabs.onUpdated must retire only the old
+  // visual state, not the already-authenticated claim for nextUrl.
+  if (canonical && (bound?.tabUrl === canonical || pending?.tabUrl === canonical)) {
+    const expectedUrl = live?.identity?.file ||
+      (bound?.tabUrl !== canonical ? bound?.tabUrl : "") ||
+      (pending?.tabUrl !== canonical ? pending?.tabUrl : "") || "";
+    readerContextStateByTab.delete(tabId);
+    if (bound?.tabUrl !== canonical) readerBoundCallFrames.delete(tabId);
+    if (pending?.tabUrl !== canonical) readerPendingCallClaims.delete(tabId);
+    const operation = readerContextPostQueue.then(() =>
+      readerDeleteVisualBinding(tabId, expectedUrl, false)
+    );
+    readerContextPostQueue = operation.catch(() => {});
+    return;
+  }
+  readerDropTabState(tabId, false);
+}
+
+if (chrome.tabs?.onRemoved?.addListener) {
+  chrome.tabs.onRemoved.addListener((tabId) => readerDropTabState(tabId, true));
+}
+if (chrome.tabs?.onUpdated?.addListener) {
+  chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+    if (typeof changeInfo?.url === "string") readerHandleTabUrlUpdate(tabId, changeInfo.url);
+  });
+}
+
+async function readerPostSnapshot(prepared) {
+  const { binding, page, viewport, visual, selectionRegions, documentPayload } = prepared;
+  const prior = readerContextStateByTab.get(binding.tabId) || {};
+  const bodySignature = `${page.url}|${page.title}|${page.viewKey}|${await sha256Hex(page.text)}|${visual.drawing?.drawingRevision || ""}`;
+  const documentSignature = `${documentPayload.sourceInstanceId}|${documentPayload.documentKey}|${documentPayload.contentRevision}|${page.document.activationRevision}`;
+  const bodyIsRepeat = prior.bodySignature === bodySignature;
+  const body = {
+    viewport,
+    active: {
+      kind: "web", file: page.url, title: page.title, page: 0,
+      selectionState: viewport.selectionState, selection: viewport.selection,
+      sourceInstanceId: viewport.sourceInstanceId, selectionRegions,
+      observedAtEpochMs: Date.now(),
+    },
+  };
+  if (prior.documentSignature !== documentSignature) body.document = documentPayload;
+  if (!bodyIsRepeat) {
+    body.event = {
+      v: 1, seq: 1, type: "page.context", event: "page.context",
+      ts: Math.floor(Date.now() / 1000), id: readerRandomHex(16), stable: true,
+      book_id: page.url, file: page.url, page: 0, title: page.title, kind: "web",
+      text_available: !!viewport.visibleText,
+      page_context: {
+        text: viewport.visibleText, text_available: !!viewport.visibleText,
+        text_source: "extension-viewport", fallback_reason: viewport.visibleText ? null : "扩展未取得正文",
+        truncated: false, reason: "active", visual,
+        embeds: { highlights: 0, blocks: 0, unanchored: [] },
+      },
+    };
+  }
+  // @interaction computer-voice.bridge.request
+  const response = await fetch(READER_CONTEXT_POST_URL, {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body), cache: "no-store",
+  });
+  if (!response.ok) throw readerRelayError("BW_READER_CONTEXT_POST", `Windows 快照 HTTP ${response.status}`);
+  const snapshotRevision = Number(response.headers.get("X-BW-Snapshot-Revision"));
+  if (!Number.isSafeInteger(snapshotRevision) || snapshotRevision < 1) {
+    throw readerRelayError("BW_READER_CONTEXT_POST", "Windows 快照回执无效");
+  }
+  const visualContext = {
+    schema: 1,
+    capturedAt: Date.now(),
+    identity: {
+      sourceInstanceId: viewport.sourceInstanceId,
+      file: viewport.url,
+      page: 0,
+    },
+    visual,
+    viewKey: page.viewKey,
+    snapshotRevision,
+  };
+  readerContextStateByTab.set(binding.tabId, {
+    bodySignature,
+    documentSignature,
+    visualContext,
+  });
+  await readerPersistVisualBinding(binding.tabId, visualContext);
+  return { snapshotRevision, visualContext };
+}
+
+function readerTabsMessage(tabId, message, timeoutMs) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(readerRelayError("BW_READER_CONTENT_TIMEOUT", "顶层网页响应超时"));
+    }, timeoutMs);
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      const err = chrome.runtime.lastError;
+      if (err) reject(new Error(err.message || "tabs.sendMessage 失败"));
+      else resolve(value);
+    };
+    try {
+      const returned = chrome.tabs.sendMessage(tabId, message, { frameId: 0 }, done);
+      if (returned && typeof returned.then === "function") returned.then(
+        (value) => { if (!settled) { settled = true; clearTimeout(timer); resolve(value); } },
+        (err) => { if (!settled) { settled = true; clearTimeout(timer); reject(err); } }
+      );
+    } catch (err) { clearTimeout(timer); reject(err); }
+  });
+}
+
+function readerCommittedRequest(binding, request, expectedViewKey) {
+  return !!(
+    binding && request &&
+    request.sourceInstanceId === binding.identity.sourceInstanceId &&
+    request.snapshotRevision === binding.snapshotRevision &&
+    request.file === binding.identity.file && request.page === 0 &&
+    expectedViewKey === binding.viewKey &&
+    (request.drawingRevision || null) ===
+      (binding.visual?.drawing?.drawingRevision || null)
+  );
+}
+
+function readerSafeViewKey(value) {
+  return typeof value === "string" && value.length >= 1 && value.length <= 160 &&
+    !/[\u0000-\u001f\u007f]/.test(value)
+    ? value
+    : null;
+}
+
+function readerValidateVisualRequest(message, committed) {
+  if (!readerExactKeys(message, ["type", "request", "expectedViewKey"]) ||
+      !readerSafeViewKey(message.expectedViewKey)) {
+    throw readerRelayError("BW_READER_VISUAL_SCHEMA", "视觉请求外层合同无效");
+  }
+  const request = message.request;
+  if (!readerExactKeys(request, [
+    "contract", "commandKind", "correlation", "sourceInstanceId",
+    "snapshotRevision", "file", "page", "drawingRevision", "scope",
+    "selectionId", "maxBytes", "chunkCharacters",
+  ]) || request.contract !== "reader-visual-delivery/2" ||
+    request.commandKind !== "capture-composite" ||
+    !readerSafeId(request.correlation) ||
+    !/^[A-Za-z0-9_-]{22}$/.test(String(request.sourceInstanceId || "")) ||
+    !Number.isSafeInteger(request.snapshotRevision) || request.snapshotRevision < 1 ||
+    !readerSafeUrl(request.file) || request.page !== 0 ||
+    (request.drawingRevision !== null && !readerSafeId(request.drawingRevision)) ||
+    !["viewport-context", "drawing-nearby", "selection-near"].includes(request.scope) ||
+    (request.selectionId !== null && !readerSafeId(request.selectionId)) ||
+    (request.scope === "selection-near") !== (request.selectionId !== null) ||
+    request.maxBytes !== 786432 || request.chunkCharacters !== 48000 ||
+    !readerCommittedRequest(committed, request, message.expectedViewKey)
+  ) throw readerRelayError("BW_READER_VISUAL_SCHEMA", "视觉请求合同无效");
+  return request;
+}
+
+function readerValidateControlRequest(message, committed) {
+  if (!readerExactKeys(message, [
+    "type", "request", "snapshotRevision", "file", "page", "expectedViewKey"
+  ]) || !Number.isSafeInteger(message.snapshotRevision) || message.snapshotRevision < 1 ||
+    !readerSafeUrl(message.file) || message.page !== 0 ||
+    !readerSafeViewKey(message.expectedViewKey)) {
+    throw readerRelayError("BW_READER_BROWSER_SCHEMA", "浏览控制外层合同无效");
+  }
+  const request = message.request;
+  const actions = [
+    "next-viewport", "previous-viewport", "scroll-to-text",
+    "scroll-to-heading", "scroll-to-selection",
+  ];
+  const textAction = request?.action === "scroll-to-text" ||
+    request?.action === "scroll-to-heading";
+  const selectionAction = request?.action === "scroll-to-selection";
+  const keys = ["contract", "type", "requestId", "sourceInstanceId", "action"];
+  if (textAction) keys.push("target");
+  if (selectionAction) keys.push("selectionId");
+  if (!readerExactKeys(request, keys) || request.contract !== "bw-browser-control/1" ||
+    request.type !== "request" || !readerSafeId(request.requestId, 128) ||
+    !/^[A-Za-z0-9_-]{22}$/.test(String(request.sourceInstanceId || "")) ||
+    !actions.includes(request.action) ||
+    (textAction && (typeof request.target !== "string" || !request.target.trim() ||
+      request.target !== request.target.trim() || request.target.length > 320)) ||
+    (selectionAction && !readerSafeId(request.selectionId)) ||
+    !readerCommittedRequest(committed, {
+      sourceInstanceId: request.sourceInstanceId,
+      snapshotRevision: message.snapshotRevision,
+      file: message.file,
+      page: message.page,
+      drawingRevision: committed.visual?.drawing?.drawingRevision || null,
+    }, message.expectedViewKey)
+  ) throw readerRelayError("BW_READER_BROWSER_SCHEMA", "浏览控制请求合同无效");
+  return request;
+}
+
+function readerValidateVisualReply(result, request) {
+  if (!readerExactKeys(result, [
+    "contract", "type", "correlation", "sourceInstanceId",
+    "status", "mimeType", "b64"
+  ]) || result.contract !== "bw-reader-visual-local/1" ||
+    result.type !== "capture-response" ||
+    result.correlation !== request.correlation ||
+    result.sourceInstanceId !== request.sourceInstanceId ||
+    !["ready", "unavailable"].includes(result.status) ||
+    typeof result.mimeType !== "string" || typeof result.b64 !== "string"
+  ) throw readerRelayError("BW_READER_CONTENT_RESPONSE", "网页视觉回包身份无效");
+  if (result.status === "unavailable") {
+    if (result.mimeType || result.b64) {
+      throw readerRelayError("BW_READER_CONTENT_RESPONSE", "不可用视觉回包必须为空");
+    }
+    return result;
+  }
+  if (result.mimeType !== "image/jpeg" || !result.b64 ||
+    result.b64.length > 4 * Math.ceil(786432 / 3) ||
+    !/^(?:[A-Za-z0-9+/]{4})*(?:[A-Za-z0-9+/]{2}==|[A-Za-z0-9+/]{3}=)?$/.test(result.b64)
+  ) throw readerRelayError("BW_READER_CONTENT_RESPONSE", "网页视觉数据无效");
+  let decoded;
+  try { decoded = atob(result.b64); }
+  catch (_) { decoded = ""; }
+  if (!decoded || decoded.length > 786432 || decoded.charCodeAt(0) !== 0xff ||
+    decoded.charCodeAt(1) !== 0xd8 || decoded.charCodeAt(2) !== 0xff
+  ) throw readerRelayError("BW_READER_CONTENT_RESPONSE", "网页视觉不是有效 JPEG");
+  return result;
+}
+
+function readerValidateControlReply(result, request) {
+  const base = ["contract", "type", "requestId", "sourceInstanceId", "action", "ok"];
+  if (!result || result.contract !== "bw-browser-control/1" || result.type !== "result" ||
+    result.requestId !== request.requestId ||
+    result.sourceInstanceId !== request.sourceInstanceId ||
+    result.action !== request.action || typeof result.ok !== "boolean"
+  ) throw readerRelayError("BW_READER_CONTENT_RESPONSE", "浏览控制回包身份无效");
+  if (result.ok) {
+    if (!readerExactKeys(result, [...base, "state"]) ||
+      !readerExactKeys(result.state, ["scrollX", "scrollY", "url", "title"]) ||
+      !Number.isFinite(Number(result.state.scrollX)) ||
+      !Number.isFinite(Number(result.state.scrollY)) ||
+      !readerSafeUrl(result.state.url) || typeof result.state.title !== "string" ||
+      result.state.title.length > 1024
+    ) throw readerRelayError("BW_READER_CONTENT_RESPONSE", "浏览控制成功回包无效");
+  } else if (!readerExactKeys(result, [...base, "error"]) ||
+    !readerExactKeys(result.error, ["code", "message", "retryable"]) ||
+    !readerSafeId(result.error.code, 96) || typeof result.error.message !== "string" ||
+    result.error.message.length > 320 || typeof result.error.retryable !== "boolean"
+  ) throw readerRelayError("BW_READER_CONTENT_RESPONSE", "浏览控制失败回包无效");
+  return result;
+}
+
+async function handleReaderRelayMessage(message, sender) {
+  if (message.type === "BW_READER_CALL_CLAIM_CREATE") {
+    const binding = readerContentSender(sender);
+    if (!readerExactKeys(message, ["type", "capability", "sourceInstanceId", "appKind"]) ||
+        !/^[A-Za-z0-9_-]{43}$/.test(String(message.capability || "")) ||
+        !/^[A-Za-z0-9_-]{22}$/.test(String(message.sourceInstanceId || "")) ||
+        !NATIVE_APP_KINDS.has(String(message.appKind || ""))) {
+      throw readerRelayError("BW_READER_CALL_CLAIM", "通话页认领能力无效");
+    }
+    readerPendingCallClaims.set(binding.tabId, {
+      capability: message.capability,
+      sourceInstanceId: message.sourceInstanceId,
+      appKind: message.appKind,
+      tabUrl: binding.url,
+      expiresAt: Date.now() + 10000,
+    });
+    return { accepted: true };
+  }
+  if (message.type === "BW_READER_CALL_CLAIM_BIND") {
+    const binding = readerCallSender(sender, false);
+    const pending = readerPendingCallClaims.get(binding.tabId);
+    if (!readerExactKeys(message, ["type", "capability"]) || !pending ||
+        pending.expiresAt < Date.now() || pending.tabUrl !== binding.url ||
+        message.capability !== pending.capability) {
+      throw readerRelayError("BW_READER_CALL_CLAIM", "通话页认领已失效");
+    }
+    readerPendingCallClaims.delete(binding.tabId);
+    readerBoundCallFrames.set(binding.tabId, {
+      frameId: sender.frameId,
+      documentId: String(sender.documentId || ""),
+      tabUrl: binding.url,
+      sourceInstanceId: pending.sourceInstanceId,
+    });
+    return { bound: true, appKind: pending.appKind };
+  }
+  if (message.type === "BW_READER_CONTEXT_POST") {
+    const prepared = await readerPrepareSnapshot(message, sender);
+    const operation = readerContextPostQueue.then(() => readerPostSnapshot(prepared));
+    readerContextPostQueue = operation.catch(() => {});
+    return operation;
+  }
+  const binding = readerCallSender(sender);
+  if (message.type === "BW_READER_VISUAL_CONTEXT_GET") {
+    if (!readerExactKeys(message, ["type"])) {
+      throw readerRelayError("BW_READER_VISUAL_SCHEMA", "视觉状态查询字段无效");
+    }
+    const visualContext = await readerStoredVisualBinding(
+      binding.tabId, binding.url, binding.sourceInstanceId
+    );
+    if (!visualContext) {
+      throw readerRelayError("BW_READER_VISUAL_UNAVAILABLE", "当前标签页尚无已提交视觉状态");
+    }
+    return visualContext;
+  }
+  const committed = await readerStoredVisualBinding(
+    binding.tabId, binding.url, binding.sourceInstanceId
+  );
+  if (!committed) {
+    throw readerRelayError("BW_READER_VISUAL_UNAVAILABLE", "当前标签页尚无已提交视觉状态");
+  }
+  if (message.type === "BW_READER_VISUAL_CAPTURE") {
+    const request = readerValidateVisualRequest(message, committed);
+    const result = await readerTabsMessage(binding.tabId, message, 20000);
+    return readerValidateVisualReply(result, request);
+  }
+  const request = readerValidateControlRequest(message, committed);
+  const result = await readerTabsMessage(binding.tabId, message, 10000);
+  return readerValidateControlReply(result, request);
+}
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!senderIdMatches(sender)) return false;
   if (
@@ -5218,11 +5937,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     !LOCAL_STORAGE_MESSAGES.has(message?.type) &&
     !PAGE_CARD_PRESENTATION_MESSAGES.has(message?.type) &&
     !TRANSLATION_CACHE_MESSAGES.has(message?.type) &&
-    !NATIVE_APP_MESSAGES.has(message?.type)
+    !NATIVE_APP_MESSAGES.has(message?.type) &&
+    !READER_RELAY_MESSAGES.has(message?.type)
   ) {
     return false;
   }
-  const operation = NATIVE_APP_MESSAGES.has(message.type)
+  const operation = READER_RELAY_MESSAGES.has(message.type)
+    ? handleReaderRelayMessage(message, sender)
+    : NATIVE_APP_MESSAGES.has(message.type)
     ? handleNativeAppMessage(message, sender)
     : LOCAL_STORAGE_MESSAGES.has(message.type)
     ? handleLocalStorageMessage(message, sender)
@@ -5240,7 +5962,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     .then((data) => sendResponse({ ok: true, data }))
     .catch((error) => {
       const explicitCode = String(error?.code || "");
-      const code = explicitCode || "BW_ACCOUNT_OPERATION";
+      const code = explicitCode ||
+        (READER_RELAY_MESSAGES.has(message.type) ? "BW_READER_RELAY" : "BW_ACCOUNT_OPERATION");
       const isAccountOperation = ACCOUNT_MESSAGES.has(message.type);
       sendResponse({
         ok: false,

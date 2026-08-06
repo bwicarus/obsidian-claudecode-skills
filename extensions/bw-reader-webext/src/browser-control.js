@@ -3,8 +3,9 @@
 // Executes the small, auditable set of browser movements exposed to the AI.
 //
 // This file deliberately does not accept JavaScript, selectors or navigation
-// targets.  A request can only move the current foreground document, and only
-// when it came from the exact call.html frame embedded by this extension.
+// targets. A request can only move the current foreground document. The
+// content script is the sole caller; background.js authenticates the
+// extension-owned call.html sender before forwarding a request here.
 (function () {
   const CONTRACT = "bw-browser-control/1";
   const REFRESH_EVENT = "bw:browser-control-refresh";
@@ -24,9 +25,6 @@
   const MAX_SEARCH_TEXT = 500000;
   const MAX_CACHE = 64;
 
-  let installedFrame = null;
-  let installedSourceInstanceId = "";
-  let messageListener = null;
   const completed = new Map();
 
   function clipped(value, limit) {
@@ -228,9 +226,6 @@
     if (typeof raw.sourceInstanceId !== "string" || !SAFE_ID.test(raw.sourceInstanceId)) {
       invalid("BW_BROWSER_CONTROL_INVALID_REQUEST", "sourceInstanceId 无效");
     }
-    if (raw.sourceInstanceId !== installedSourceInstanceId) {
-      invalid("BW_BROWSER_CONTROL_SOURCE_MISMATCH", "请求不属于当前页面实例", true);
-    }
     if (!ACTION_SET.has(raw.action)) {
       invalid("BW_BROWSER_CONTROL_ACTION_NOT_ALLOWED", "不支持的浏览器控制动作");
     }
@@ -256,7 +251,7 @@
     return raw;
   }
 
-  function execute(request) {
+  function perform(request) {
     if (!isForegroundDocument()) {
       invalid("BW_BROWSER_CONTROL_DOCUMENT_INACTIVE", "页面不在前台，未执行控制", true);
     }
@@ -298,28 +293,18 @@
     while (completed.size > MAX_CACHE) completed.delete(completed.keys().next().value);
   }
 
-  function send(response) {
-    try { installedFrame?.contentWindow?.postMessage(response, "*"); } catch (_) {}
-  }
-
-  function onMessage(event) {
-    if (!installedFrame || !isTrustedCallFrame(installedFrame) ||
-        event.source !== installedFrame.contentWindow) return;
-    const request = event.data;
+  function execute(request) {
     const base = responseBase(request);
     try {
       const checked = validateRequest(request);
       const cacheKey = `${checked.sourceInstanceId}:${checked.requestId}`;
       const prior = completed.get(cacheKey);
-      if (prior) {
-        send(prior);
-        return;
-      }
-      const response = Object.freeze({ ...base, ok: true, state: execute(checked) });
+      if (prior) return prior;
+      const response = Object.freeze({ ...base, ok: true, state: perform(checked) });
       remember(cacheKey, response);
-      send(response);
+      return response;
     } catch (error) {
-      send(Object.freeze({
+      return Object.freeze({
         ...base,
         ok: false,
         error: Object.freeze({
@@ -327,65 +312,14 @@
           message: clipped(error && error.message || "浏览器控制失败", 320),
           retryable: !!(error && error.retryable),
         }),
-      }));
+      });
     }
-  }
-
-  function uninstall() {
-    if (messageListener) {
-      try { window.removeEventListener("message", messageListener); } catch (_) {}
-    }
-    messageListener = null;
-    installedFrame = null;
-    installedSourceInstanceId = "";
-    completed.clear();
-  }
-
-  function isTrustedCallFrame(frame) {
-    try {
-      const runtime = window.chrome && window.chrome.runtime;
-      if (!runtime || typeof runtime.getURL !== "function") return false;
-      const expected = String(runtime.getURL("call.html")).replace(/[?#].*$/, "");
-      const actual = String(frame && frame.src || "").replace(/[?#].*$/, "");
-      // Exact extension URL comparison matters for Safari's custom scheme:
-      // generic URL parsers can report `origin === "null"` for every UUID,
-      // which would accidentally trust another extension's call.html.
-      return !!expected && actual === expected;
-    } catch (_) {
-      return false;
-    }
-  }
-
-  function install(options) {
-    const frame = options && options.frame;
-    const sourceInstanceId = String(options && options.sourceInstanceId || "");
-    if (!frame || !frame.contentWindow || typeof frame.contentWindow.postMessage !== "function" ||
-        !isTrustedCallFrame(frame)) {
-      throw new TypeError("browser-control requires the embedded call.html frame");
-    }
-    if (!SAFE_ID.test(sourceInstanceId)) {
-      throw new TypeError("browser-control requires a safe sourceInstanceId");
-    }
-    if (
-      frame === installedFrame &&
-      sourceInstanceId === installedSourceInstanceId &&
-      messageListener === onMessage
-    ) {
-      return Object.freeze({ contract: CONTRACT, sourceInstanceId });
-    }
-    uninstall();
-    installedFrame = frame;
-    installedSourceInstanceId = sourceInstanceId;
-    messageListener = onMessage;
-    window.addEventListener("message", messageListener);
-    return Object.freeze({ contract: CONTRACT, sourceInstanceId });
   }
 
   window.__bwBrowserControl = Object.freeze({
     contract: CONTRACT,
     refreshEvent: REFRESH_EVENT,
     actions: ACTIONS,
-    install,
-    uninstall,
+    execute,
   });
 })();

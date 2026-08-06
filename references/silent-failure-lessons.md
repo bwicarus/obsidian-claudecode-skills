@@ -207,8 +207,8 @@ iPad 上没有 Web Inspector。`console.warn` 等于什么都没写。
 
 ```
 content.js 采集
-  → postMessage 给同页的内嵌框（不跨进程、不经 background）
-  → 框内一次 POST /reader-context/snapshot（不建长连接、不握手、不保会话）
+  → runtime 固定操作交给受信 background（严格校验 sender 与 schema）
+  → background 一次 POST /reader-context/snapshot（不建长连接、不握手、不保会话）
   → 桥覆盖快照，最后一发赢
 ```
 
@@ -224,7 +224,11 @@ context-open、会话 id、重连退避）。那些是为**让一段对话跨时
 而 iOS 上每种扩展文档都短命（background 被回收、popup 一关即毁、
 内嵌框随页面而亡）。于是"哪个文档能扛住这条连接"成了一整晚的中心难题。
 
-对 POST 来说这根本不是问题：框只需在发送的那一瞬间存在，而它随每张页面重建。
+对 POST 来说这根本不是问题：内容脚本只需在发送的那一瞬间唤醒后台。
+
+后续加入按需视觉与页面控制时又补了一条安全规则：宿主网页不能作为业务 relay。
+iframe 的一次性 capability 只投给扩展亲手创建的精确 `contentWindow`；正文、图像请求、控制命令与
+结果均走扩展 runtime，并绑定 `tabId + frameId + documentId + sourceInstanceId + revision`。
 
 **当一个约束显得无解时，先回头问这个约束是不是自找的。**
 
@@ -234,8 +238,9 @@ context-open、会话 id、重连退避）。那些是为**让一段对话跨时
 
 | 文件 | 作用 |
 |---|---|
-| `extensions/bw-reader-webext/content.js` | 采集、投递、页面内诊断探针 |
-| `extensions/bw-reader-webext/call.js` | 框内 POST、框内诊断回报 |
+| `extensions/bw-reader-webext/content.js` | 采集、合成图、固定页面动作与页面内诊断探针 |
+| `extensions/bw-reader-webext/background.js` | 受信 sender 校验、固定 POST 与标签级 relay |
+| `extensions/bw-reader-webext/call.js` | 语音/工具 WSS 与一次性 frame claim |
 | `windows/ComputerVoiceAudio/DirectBridgeServer.cs` | POST 端点、CORS 预检、请求日志 |
 | `windows/ComputerVoiceAudio/DirectBridgeAdapters.cs` | 故障留痕 `failures.jsonl` |
 | `runtime/reader-context-post.log` | 每次 POST 尝试（含被拒） |

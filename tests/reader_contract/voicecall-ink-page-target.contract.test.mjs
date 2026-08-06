@@ -7,6 +7,14 @@ const SOURCE = fs.readFileSync(
   "_server_deploy/static/pdf/rc-voicecall.js",
   "utf8",
 );
+const INK_SOURCE = fs.readFileSync(
+  "_server_deploy/static/pdf/rc-ink.js",
+  "utf8",
+);
+const WEB_INK_SOURCE = fs.readFileSync(
+  "extensions/bw-reader-webext/src/web-ink.js",
+  "utf8",
+);
 
 function loadRealInkPagePicker(elements) {
   const start = SOURCE.indexOf("  function _inkTargetPage(target) {");
@@ -65,6 +73,28 @@ ${SOURCE.slice(start, end)}
       };
     })()`,
   );
+}
+
+function loadStableSelectionHelpers(strokes) {
+  const inkWindow = {};
+  vm.runInNewContext(INK_SOURCE, { window: inkWindow });
+  const start = SOURCE.indexOf("  function _selectionRegionsForPage(target) {");
+  const end = SOURCE.indexOf("  // 用户点子:前端截图但", start);
+  assert.ok(start >= 0 && end > start, "real selection region index missing");
+  const selectionRegions = vm.runInNewContext(
+    `(function (surface) {
+      function _visualSurface() { return surface; }
+      function _curInkPageEl() { return null; }
+${SOURCE.slice(start, end)}
+      return _selectionRegionsForPage;
+    })(surface)`,
+    {
+      surface: { strokes },
+      window: { RCInk: inkWindow.RCInk },
+      RCInk: inkWindow.RCInk,
+    },
+  );
+  return { ink: inkWindow.RCInk, selectionRegions };
 }
 
 function visibleInkPage(page) {
@@ -177,7 +207,13 @@ test("capturePageComposite 对 PDF、EPUB 与插入页使用同一精确页身�
     bodyCaptureStart,
   );
   const bodyCapture = SOURCE.slice(bodyCaptureStart, bodyCaptureEnd);
-  assert.match(bodyCapture, /html2canvas\(document\.body,/);
+  assert.match(
+    bodyCapture,
+    /captureRoot = document\.documentElement \|\| document\.body;[\s\S]*html2canvas\(captureRoot,/,
+  );
+  assert.match(bodyCapture, /id === 'bw-reader-host'/);
+  assert.match(bodyCapture, /classes\.contains\('bw-ink-document'\)/);
+  assert.match(bodyCapture, /classes\.contains\('bw-ink-canvas'\)/);
   assert.doesNotMatch(
     bodyCapture,
     /id\s*===\s*['"](?:bw-reader-pins|vc-cards)['"]/,
@@ -189,4 +225,46 @@ test("capturePageComposite 对 PDF、EPUB 与插入页使用同一精确页身�
     ),
     /_captureBodyPageRect\(r\)\s*\|\|\s*await _captureEl\(el\)/,
   );
+});
+
+test("闭合选区 ordinal 创建后随笔画持久化，删除早期选区不重排后续编号", () => {
+  const strokes = [
+    { t: "region", id: "rg_a", createdAtEpochMs: 1000, p: [[0, 0], [1, 0], [0, 1]] },
+    { t: "region", id: "rg_b", createdAtEpochMs: 2000, p: [[0, 0], [1, 0], [0, 1]] },
+    { t: "region", id: "rg_c", createdAtEpochMs: 3000, p: [[0, 0], [1, 0], [0, 1]] },
+  ];
+  const initial = loadStableSelectionHelpers(strokes);
+  initial.ink.ensureRegionOrdinals(strokes);
+  assert.deepEqual(strokes.map((stroke) => stroke.ordinal), [1, 2, 3]);
+
+  const reloadedAfterDelete = JSON.parse(JSON.stringify(strokes)).slice(1);
+  const stable = loadStableSelectionHelpers(reloadedAfterDelete);
+  assert.equal(stable.ink.nextRegionOrdinal(reloadedAfterDelete), 4);
+  const items = Array.from(stable.selectionRegions({ page: 1 }).items);
+  assert.deepEqual(
+    items.map((item) => [item.selectionId, item.ordinal]),
+    [["rg_b", 2], ["rg_c", 3]],
+  );
+  assert.match(items[0].label, /^#2 \d{2}:\d{2}$/);
+  assert.match(items[1].label, /^#3 \d{2}:\d{2}$/);
+
+  assert.match(WEB_INK_SOURCE, /ordinal:selection\?nextRegionOrdinal\(\):undefined/);
+  assert.match(WEB_INK_SOURCE, /ordinal:current\.ordinal/);
+  assert.doesNotMatch(
+    WEB_INK_SOURCE,
+    /forEach\(\(s,index\)=>map\.set\(s\.id,\{ordinal:index\+1/,
+  );
+});
+
+test("普通网页 surface 合成保留 portal 卡片且只补画一次墨迹", () => {
+  const start = SOURCE.indexOf("async function _captureSurface");
+  const end = SOURCE.indexOf("async function _captureView", start);
+  assert.ok(start >= 0 && end > start);
+  const capture = SOURCE.slice(start, end);
+  assert.match(capture, /s\.element === document\.body/);
+  assert.match(capture, /document\.getElementById\('bw-reader-pins'\)/);
+  assert.match(capture, /webPinRoot \? \(document\.documentElement \|\| s\.element\) : s\.element/);
+  assert.match(capture, /!webPinRoot && id === 'bw-reader-pins'/);
+  assert.match(capture, /classes\.contains\('bw-ink-document'\)/);
+  assert.match(capture, /_drawSurfaceInk\(canvas, s, crop, selectionId\)/);
 });

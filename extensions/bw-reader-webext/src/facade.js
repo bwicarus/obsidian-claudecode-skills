@@ -603,7 +603,6 @@
     important('pointer-events', 'none');
 
     let ready = false;
-    let lastTarget = '';
     let lastState = 'idle';
 
     const visibleButton = () => {
@@ -645,29 +644,6 @@
       return null;
     };
 
-    const targetApp = () => {
-      try {
-        return window.RC && RC.computerVoice &&
-          typeof RC.computerVoice.getTargetApp === 'function' &&
-          RC.computerVoice.getTargetApp() === 'chatgpt-classic'
-            ? 'chatgpt-classic'
-            : 'codex-desktop';
-      } catch (_) {
-        return 'codex-desktop';
-      }
-    };
-
-    const configure = () => {
-      const target = targetApp();
-      if (!ready || target === lastTarget || !frame.contentWindow) return;
-      lastTarget = target;
-      frame.contentWindow.postMessage({
-        contract: CONTRACT,
-        type: 'configure',
-        appKind: target
-      }, '*');
-    };
-
     const position = () => {
       const found = visibleButton();
       // Shown as soon as there is a place for it, rather than after the frame
@@ -703,7 +679,6 @@
       important('pointer-events', 'auto');
       found.button.classList.toggle('on', lastState === 'active');
       found.button.classList.toggle('connecting', lastState === 'connecting');
-      configure();
     };
 
     window.addEventListener('message', (event) => {
@@ -712,8 +687,6 @@
       if (!data || data.contract !== CONTRACT || typeof data.type !== 'string') return;
       if (data.type === 'ready') {
         ready = !!(data.value && data.value.ok === true);
-        lastTarget = '';
-        configure();
         position();
         return;
       }
@@ -785,12 +758,25 @@
     window.addEventListener('resize', position, { passive: true });
     window.addEventListener('scroll', position, { passive: true, capture: true });
     const timer = window.setInterval(position, 250);
-    window.addEventListener('pagehide', () => window.clearInterval(timer), { once: true });
+    window.addEventListener('pagehide', () => {
+      retired = true;
+      window.clearInterval(timer);
+    }, { once: true });
     // Exposed so the shared layer can tell whether this surface took the click.
     // When it is not ready the frame stays invisible and click-through, the
     // press lands on the original button, and the module opens a tab instead --
     // the fallback needs no coordination beyond knowing which happened.
-    return Object.freeze({ position, isReady: function () { return ready; } });
+    return Object.freeze({
+      position,
+      isReady: function () { return ready; },
+      // Isolated-world closure capability: content.js can claim only the exact
+      // frame created above. A host page can clone DOM attributes or insert a
+      // competing web-accessible call.html, but it cannot manufacture this
+      // object identity or replace the closed-over reference.
+      frameForClaim: function () {
+        return !retired && frame.isConnected ? frame : null;
+      },
+    });
   })();
   window.__bwInlineComputerVoiceSurface = inlineComputerVoiceSurface;
 
