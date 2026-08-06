@@ -3393,6 +3393,9 @@
     // 便签 gate:手指落在便签上(聚焦文字/双击橡皮/长按样式)全归便签自己,页面 ink 不掺和
     var noteEl = e.target && e.target.closest ? e.target.closest('.rc-note') : null;
     if (noteEl && e.pointerType === 'touch') return;
+    // BWReader App 的书页墨迹只由原生 PencilKit 采样；旧网页层仅保留便签手写。
+    // PWA/浏览器不会设置该标志，原有 Canvas 画笔行为保持不变。
+    if (window.__BW_NATIVE_PENCILKIT_INK__ === true && !noteEl) return;
     // 手指快速双击切 笔↔临时橡皮(照搬 PDF gate:手写模式开 或 已画过墨迹 lastEl 设了→均拦截;两者皆否时双击留给系统选词)。
     // 手指本身永不画(只滚动/双击切工具),所以双击检测干净,不和「画点」抢。这是 Apple Pencil 笔身双击在浏览器拿不到时的替代。
     if (e.pointerType === 'touch' && !_epInk.drawing && (_epInk.mode || _epInk.lastEl)) {
