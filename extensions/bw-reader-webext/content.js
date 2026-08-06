@@ -478,12 +478,34 @@
     if (!body) return null;
     var text = "";
     try {
-      text = String(body.innerText || "")
-        .replace(/[ \t]+/g, " ")
-        .replace(/\n{3,}/g, "\n\n")
-        .trim()
+      var root = articleRoot() || body;
+      text = articleText(root);
+      var whole = String(body.innerText || "");
+      // Falls back when extraction keeps too little to be the article. A short
+      // page is legitimate; a page whose "article" is a fraction of its text
+      // means the wrong subtree was chosen, and half a page beats none.
+      if (text.length < 200 && whole.length > text.length * 2) {
+        probeLine("正文提取: 命中过短,回退全页");
+        text = whole;
+      } else if (root !== body) {
+        probeLine(
+          "正文提取: " + String(root.tagName || "").toLowerCase() +
+          " " + text.length + "/" + whole.length + " 字"
+        );
+      }
+      text = text
+        // Collapses runs of spaces and tabs, then runs of blank lines.
+        //
+        // Built from character codes rather than written as literals: this
+        // file passes through several layers of quoting on its way here, and
+        // each of them has a claim on the backslash. Codes have no such
+        // ambiguity, and the intent is stated above them.
+        .replace(new RegExp("[ " + String.fromCharCode(9) + "]+", "g"), " ")
+        .replace(new RegExp(String.fromCharCode(10) + "{3,}", "g"), String.fromCharCode(10) + String.fromCharCode(10))
+.trim()
         .slice(0, MAX_TEXT);
-    } catch (_) {
+    } catch (err) {
+      probeLine("正文提取失败: " + ((err && err.message) || "未知"));
       return null;
     }
     var selection = "";
