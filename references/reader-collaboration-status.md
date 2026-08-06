@@ -3689,3 +3689,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **公式**：设备端普通文字识别不变；公式先复用现有 DocLayout 公式框与 AI LaTeX 批处理，Core ML 版将逐页读取已下载书籍的本地页图，不重复下载整本书。
 - **怎么验的**：JS 语法、专项墨迹故障重放与全量 Reader 合同完成；全量仅保留既有 extension-popup harness 漂移，Swift 类型检查交由 macOS CI。
 - **没做/下一步**：未改 Windows 桥接；发布 1.0.68 后实机验收 PDF/EPUB 落笔、橡皮擦、AI 看合成笔迹及公式框批处理。
+
+## Codex / Claude：App 书页墨迹收敛为单一 PencilKit 所有者（2026-08-06 JST）
+- **改了什么**：原生标志存在时，PDF/EPUB 旧网页层不再接书页 Pencil；便签仍保留独立网页笔迹，PWA fallback 不变；统一 App 包另补回扩展正文提取的三个运行时函数。
+- **怎么验**：PencilKit 专项合同通过；Reader 全量仅保留既有 popup fixture 漂移；Pi 原子预检、部署 E2E 与 iOS 签名归档全部通过。
+- **发布**：Reader 事务 `20260806T055818Z-614633` 成功；统一 App/扩展 `1.0.85 (1)` 已上传 TestFlight。
+- **边界/下一步**：未改 Windows 桥；用户重新打开书页，验证至少两种颜色与两种明显粗细，若完全不落笔再单独检查原生 layout 命中。
