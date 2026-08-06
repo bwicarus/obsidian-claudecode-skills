@@ -67,7 +67,8 @@ PDF `reader.js` 也是生成物，唯一源码在 `_server_deploy/static/pdf/rea
   父状态、账户、registry digest 或 owner lease 不一致时 fail closed。
 - 直连：WebRTC 只加速变化传输，服务端 relay 仍是持久备份；内容宿主只拿不透明
   `accountProof`，不得取得 namespace/Bearer/owner token。
-- 普通网页墨迹：仅当前标签页会话；响应式正文宽度变化后清空，不把坐标误当长期内容锚。
+- 普通网页墨迹：仅当前标签页会话；响应式正文宽度变化保留已提交笔迹、仅取消尚未完成的
+  当前笔画，刷新或关闭标签页后清空，不把坐标误当长期内容锚。
 
 深层同步、租约、BFCache、v2 因果迁移和 KG 规则不要从本文推导，必须回看
 [统一架构](reader-runtime-architecture.md)。

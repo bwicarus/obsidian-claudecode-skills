@@ -10,12 +10,33 @@ from __future__ import annotations
 
 import pathlib
 import tempfile
+import os
 
 from playwright.sync_api import sync_playwright
 
 
 EXT = pathlib.Path(__file__).resolve().parent
-CHROME = pathlib.Path.home() / ".cache/ms-playwright/chromium-1223/chrome-linux/chrome"
+PLAYWRIGHT_CHROME = (
+    pathlib.Path.home()
+    / ".cache/ms-playwright/chromium-1223/chrome-linux/chrome"
+)
+WINDOWS_PLAYWRIGHT = pathlib.Path(
+    os.environ.get("LOCALAPPDATA", "")
+) / "ms-playwright"
+WINDOWS_CHROMIUMS = sorted(
+    WINDOWS_PLAYWRIGHT.glob("chromium-*/chrome-win64/chrome.exe"),
+    reverse=True,
+)
+WINDOWS_CHROME = pathlib.Path(
+    r"C:\Program Files\Google\Chrome\Application\chrome.exe"
+)
+CHROME = (
+    WINDOWS_CHROMIUMS[0]
+    if WINDOWS_CHROMIUMS
+    else WINDOWS_CHROME
+    if WINDOWS_CHROME.exists()
+    else PLAYWRIGHT_CHROME
+)
 URL = "http://ink-input.test/"
 
 HTML = """<!doctype html>
@@ -360,9 +381,9 @@ def main() -> None:
                 )
                 assert capture == {"got": 2, "lost": 2}, capture
 
-                # Ordinary-web ink is deliberately temporary. Responsive width
-                # changes invalidate document coordinates, so committed strokes are
-                # discarded. Historical webInkV1 data remains untouched.
+                # Ordinary-web ink is session-only, but a responsive width change
+                # must not erase committed strokes. Historical webInkV1 data also
+                # remains untouched.
                 settle_at(page, 1000)
                 page.evaluate(
                     """() => document.querySelector('#bw-reader-host').shadowRoot
@@ -376,11 +397,37 @@ def main() -> None:
                     """() => document.querySelector('#bw-reader-pins').shadowRoot
                       .querySelectorAll('.bw-ink-document path').length === 1"""
                 )
+                before_resize = page.evaluate(
+                    """() => {
+                      const path = document.querySelector('#bw-reader-pins').shadowRoot
+                        .querySelector('.bw-ink-document path');
+                      return {
+                        color: path.getAttribute('stroke'),
+                        width: path.getAttribute('stroke-width'),
+                        data: path.getAttribute('d')
+                      };
+                    }"""
+                )
                 page.set_viewport_size({"width": 900, "height": 800})
                 page.wait_for_function(
                     """() => document.querySelector('#bw-reader-pins').shadowRoot
-                      .querySelectorAll('.bw-ink-document path').length === 0"""
+                      .querySelectorAll('.bw-ink-document path').length === 1"""
                 )
+                preserved = page.evaluate(
+                    """() => {
+                      const path = document.querySelector('#bw-reader-pins').shadowRoot
+                        .querySelector('.bw-ink-document path');
+                      return {
+                        color: path.getAttribute('stroke'),
+                        width: path.getAttribute('stroke-width'),
+                        data: path.getAttribute('d')
+                      };
+                    }"""
+                )
+                assert preserved == before_resize, {
+                    "before": before_resize,
+                    "after": preserved,
+                }
                 assert page.evaluate(
                     "() => localStorage.getItem('webInkV1')"
                 ) == "legacy-web-ink-must-remain"

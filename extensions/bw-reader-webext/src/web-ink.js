@@ -103,12 +103,12 @@
   // 网页笔迹不持久化(用户拍板,与阅读器不同):只活在当前页面会话,刷新/关页即清。persist 留空壳保调用点不动。
   function persist(){}
   function currentLayoutWidth(){const r=document.documentElement.getBoundingClientRect();return Math.round(r.width||document.documentElement.clientWidth||innerWidth||0);}
-  function discardForLayoutChange(nextWidth){
+  function preserveForLayoutChange(nextWidth){
     nextWidth=Math.round(Number(nextWidth)||0);
     if(!nextWidth)return;
     const changed=layoutWidth&&Math.abs(nextWidth-layoutWidth)>1;
     layoutWidth=nextWidth;
-    if(!changed||(!strokes.length&&!active))return;
+    if(!changed||!active)return;
     if(active){
       const current=active;
       try{if(active.captureEl?.hasPointerCapture(active.id))active.captureEl.releasePointerCapture(active.id);}catch(_){}
@@ -117,15 +117,23 @@
       document.removeEventListener('pointercancel',onUp,true);
       document.removeEventListener('lostpointercapture',onLostCapture,true);
       document.removeEventListener('selectstart',preventSel,true);
+      // pointerdown snapshots the committed history before a stroke starts.
+      // A responsive reflow may invalidate only that unfinished stroke; restore
+      // an in-progress erase, or drop the unused undo snapshot for a pen stroke.
+      if(undo.length){
+        if(current.erase){
+          const beforeStroke=undo.pop();
+          try{strokes=JSON.parse(beforeStroke);}catch(_){}
+        }else undo.pop();
+      }
       active=null;
       if(current.nativePen)releaseShieldAt(current.cx,current.cy);
     }
-    strokes=[];undo=[];draw();renderSvg();persist();emitInkChange();
-    window.RC?.toast?.('网页排版宽度已变化，临时笔迹已清除');
+    draw();renderSvg();
   }
   function observeLayoutWidth(){
     if(layoutRaf)return;
-    layoutRaf=requestAnimationFrame(()=>{layoutRaf=0;discardForLayoutChange(currentLayoutWidth());});
+    layoutRaf=requestAnimationFrame(()=>{layoutRaf=0;preserveForLayoutChange(currentLayoutWidth());});
   }
   function snapshot(){undo.push(JSON.stringify(strokes));if(undo.length>30)undo.shift();}
   function hitStroke(s,p){const rr=Math.max(12,(s.width||3)*2);return (s.pts||[]).some(q=>Math.hypot(q.x-p.x,q.y-p.y)<=rr);}
