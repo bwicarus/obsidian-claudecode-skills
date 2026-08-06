@@ -20,7 +20,8 @@ internal static class CodexAppAudioRouteProbe
     internal static object Run(
         DirectBridgeConfig config,
         Func<CodexAppTarget>? targetProvider = null,
-        Func<IPerAppAudioPolicyBackend>? backendFactory = null)
+        Func<IPerAppAudioPolicyBackend>? backendFactory = null,
+        Func<CodexAppTarget, uint>? audioPolicyProcessProvider = null)
     {
         ArgumentNullException.ThrowIfNull(config);
         if (
@@ -58,6 +59,10 @@ internal static class CodexAppAudioRouteProbe
             selectedBackend = backendFactory();
         }
         using IPerAppAudioPolicyBackend backend = selectedBackend;
+        audioPolicyProcessProvider ??=
+            WindowsCodexAppProbe.RequireAudioPolicyProcess;
+        uint audioPolicyProcessId =
+            audioPolicyProcessProvider(target);
         CodexAppAudioRouteProbeItem[] routes =
             PerAppAudioRouteKey.All.Select(key =>
             {
@@ -69,7 +74,7 @@ internal static class CodexAppAudioRouteProbe
                 try
                 {
                     current = backend.Read(
-                        target.RootProcessId,
+                        audioPolicyProcessId,
                         key);
                 }
                 catch (Exception exception)
@@ -109,7 +114,8 @@ internal static class CodexAppAudioRouteProbe
         {
             contract = Contract,
             ok = true,
-            processId = target.RootProcessId,
+            processId = audioPolicyProcessId,
+            rootProcessId = target.RootProcessId,
             automationConfigured = true,
             allMatch = routes.All(item => item.Match),
             routes,

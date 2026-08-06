@@ -29,6 +29,8 @@ from bridge_core import (  # noqa: E402
     LocalOptOutDuringStart,
     RenderEndpoint,
     SERVICE_RECORD_CONTRACT,
+    SHORTCUT_BROKER_CONTRACT,
+    ShortcutBrokerRequestProcessor,
     WindowsProcessRunner,
     build_direct_config,
     build_local_app_launch_command,
@@ -66,6 +68,9 @@ VIRTUAL_MICROPHONE_CAPTURE = (
 VIRTUAL_MICROPHONE_CAPTURE_DEVICE = CaptureEndpoint(
     VIRTUAL_MICROPHONE_CAPTURE,
     "Virtual microphone A recording side",
+)
+VIRTUAL_SPEAKER_CAPTURE = (
+    "{0.0.1.00000000}.{44444444-4444-4444-4444-444444444444}"
 )
 
 
@@ -123,6 +128,67 @@ class DirectDesktopCoreTests(unittest.TestCase):
                 VIRTUAL_SPEAKER,
             ],
         )
+
+    def test_shortcut_broker_is_strict_and_idempotent(self) -> None:
+        sends: list[str] = []
+        processor = ShortcutBrokerRequestProcessor(
+            lambda: sends.append("F24")
+        )
+        request = {
+            "contract": SHORTCUT_BROKER_CONTRACT,
+            "type": "toggle",
+            "requestId": "shortcut-AAAAAAAAAAAAAAAAAAAAAA",
+            "rootProcessId": 4242,
+            "rootProcessStartTimeUtc": "2026-08-01T08:00:00.0000000Z",
+        }
+        payload = (
+            json.dumps(request, separators=(",", ":")).encode("utf-8")
+            + b"\n"
+        )
+        first = json.loads(processor.process(payload))
+        duplicate = json.loads(processor.process(payload))
+        self.assertEqual(first, duplicate)
+        self.assertEqual(
+            first,
+            {
+                "contract": SHORTCUT_BROKER_CONTRACT,
+                "type": "receipt",
+                "requestId": request["requestId"],
+                "ok": True,
+            },
+        )
+        self.assertEqual(sends, ["F24"])
+
+        invalid = {**request, "shortcut": "F24"}
+        rejected = json.loads(
+            processor.process(
+                json.dumps(invalid).encode("utf-8") + b"\n"
+            )
+        )
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(sends, ["F24"])
+
+    def test_shortcut_broker_caches_failure_without_retry(self) -> None:
+        attempts = 0
+
+        def fail() -> None:
+            nonlocal attempts
+            attempts += 1
+            raise OSError("injected")
+
+        processor = ShortcutBrokerRequestProcessor(fail)
+        request = {
+            "contract": SHORTCUT_BROKER_CONTRACT,
+            "type": "toggle",
+            "requestId": "shortcut-AQEBAQEBAQEBAQEBAQEBAQ",
+            "rootProcessId": 7,
+            "rootProcessStartTimeUtc": "2026-08-01T08:00:00Z",
+        }
+        payload = json.dumps(request).encode("utf-8") + b"\n"
+        first = processor.process(payload)
+        second = processor.process(payload)
+        self.assertEqual(first, second)
+        self.assertEqual(attempts, 1)
 
     def write_runtime(
         self,
@@ -200,6 +266,27 @@ class DirectDesktopCoreTests(unittest.TestCase):
                 self.paths.runtime_status,
                 allowed_origins=["https://user@example.test"],
             )
+
+    def test_fixed_audio_bus_config_has_explicit_b_capture(self) -> None:
+        value = build_direct_config(
+            VIRTUAL_MICROPHONE.endpoint_id,
+            VIRTUAL_SPEAKER.endpoint_id,
+            self.paths.runtime_status,
+            virtual_microphone_capture_endpoint_id=(
+                VIRTUAL_MICROPHONE_CAPTURE
+            ),
+            virtual_speaker_capture_endpoint_id=(
+                VIRTUAL_SPEAKER_CAPTURE
+            ),
+        )
+        self.assertEqual(
+            value["contract"],
+            "reader-computer-voice-direct-config/6",
+        )
+        self.assertEqual(
+            value["virtualSpeakerCaptureEndpointId"],
+            VIRTUAL_SPEAKER_CAPTURE,
+        )
 
     def test_v5_config_requires_explicit_single_user_true(self) -> None:
         invalid = build_direct_config(

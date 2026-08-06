@@ -246,6 +246,44 @@ class VoiceTypistHelperLeaseTest(unittest.TestCase):
         self.assertEqual(stop_calls, [])
         self.assertEqual(launcher.status_calls, 1)
 
+    def test_ensure_running_defaults_to_codex_and_accepts_classic(self):
+        calls: list[tuple[int, int, str]] = []
+
+        class EnsureLauncher:
+            def ensure_running(self, owner_pid, owner_start, target_app):
+                calls.append((owner_pid, owner_start, target_app))
+                return {"running": True, "targetApp": target_app}
+
+        for argv, expected in (
+            (["--ensure-running", "4512", "133700000000000000"],
+             "codex-desktop"),
+            (["--ensure-running", "4512", "133700000000000000",
+              "chatgpt-classic"], "chatgpt-classic"),
+        ):
+            with self.subTest(expected=expected), patch(
+                "bw_computer_voice_typist_helper.VoiceTypistLauncher",
+                return_value=EnsureLauncher(),
+            ), contextlib.redirect_stdout(io.StringIO()):
+                self.assertEqual(main(argv), 0)
+        self.assertEqual(calls, [
+            (4512, 133700000000000000, "codex-desktop"),
+            (4512, 133700000000000000, "chatgpt-classic"),
+        ])
+
+    def test_ensure_running_rejects_unknown_target(self):
+        output = io.StringIO()
+        with contextlib.redirect_stdout(output):
+            returncode = main([
+                "--ensure-running", "4512", "133700000000000000",
+                "not-an-app",
+            ])
+        self.assertEqual(returncode, 1)
+        payload = json.loads(output.getvalue())
+        self.assertEqual(
+            payload["code"],
+            "BW_COMPUTER_VOICE_TYPIST_TARGET_INVALID",
+        )
+
     def test_reused_pid_with_different_start_time_fails_closed_without_stop(self):
         launcher = FakeLauncher([
             state(

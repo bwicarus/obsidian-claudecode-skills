@@ -1,6 +1,7 @@
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
+using System.Globalization;
 
 namespace BwReader.ComputerVoiceAudio;
 
@@ -13,7 +14,21 @@ internal sealed record DirectActiveReading(
     string? Selection,
     long ObservedAtEpochMilliseconds,
     string? ViewFile = null,
-    JsonElement? ViewPage = null);
+    JsonElement? ViewPage = null,
+    string? SourceInstanceId = null,
+    JsonElement? SelectionRegions = null);
+
+internal sealed record DirectViewportContext(
+    string SourceInstanceId,
+    string DocumentKey,
+    string Url,
+    string? Title,
+    string BeforeText,
+    string VisibleText,
+    string AfterText,
+    string SelectionState,
+    string? Selection,
+    long ObservedAtEpochMilliseconds);
 
 internal sealed record DirectSnapshotForwardResult(
     string Outcome,
@@ -31,6 +46,12 @@ internal interface IDirectSnapshotContextAdapter
         string requestId,
         string sessionId,
         DirectActiveReading activeReading,
+        CancellationToken cancellationToken);
+
+    Task<DirectSnapshotForwardResult> ForwardViewportAsync(
+        string requestId,
+        string sessionId,
+        DirectViewportContext viewport,
         CancellationToken cancellationToken);
 
     Task<DirectSnapshotForwardResult> ClearAsync(
@@ -53,6 +74,13 @@ internal sealed class UnwiredDirectSnapshotContextAdapter :
         string requestId,
         string sessionId,
         DirectActiveReading activeReading,
+        CancellationToken cancellationToken) =>
+        Task.FromException<DirectSnapshotForwardResult>(Unavailable());
+
+    public Task<DirectSnapshotForwardResult> ForwardViewportAsync(
+        string requestId,
+        string sessionId,
+        DirectViewportContext viewport,
         CancellationToken cancellationToken) =>
         Task.FromException<DirectSnapshotForwardResult>(Unavailable());
 
@@ -110,6 +138,19 @@ internal sealed class FileDirectSnapshotContextAdapter :
         JsonObject Focus,
         JsonObject? LatestEvent,
         string? PendingPageFailureReason,
+        IReadOnlyList<string> RecentEventOrder);
+
+    private sealed record FocusFoldResult(
+        JsonObject Focus,
+        JsonObject? Selection);
+
+    private sealed record AdapterState(
+        long Revision,
+        JsonObject? StablePage,
+        JsonObject? ActiveReading,
+        JsonObject Selection,
+        JsonObject Focus,
+        JsonObject? LatestEvent,
         IReadOnlyList<string> RecentEventOrder);
 
     private sealed record FocusFoldResult(
@@ -209,44 +250,19 @@ internal sealed class FileDirectSnapshotContextAdapter :
                     next["viewPage"] = JsonNode.Parse(
                         viewPage.GetRawText());
                 }
-                bool changedPage = _activeReading is not null
-                    && !SameActiveReadingIdentity(
-                        _activeReading,
-                        next);
-                _activeReading = next;
-                if (_localBookPageResolver is not null)
+                if (activeReading.SourceInstanceId is not null)
                 {
-                    LocalBookPageResolution resolution =
-                        await _localBookPageResolver.ResolveAsync(
-                            activeReading,
-                            cancellationToken).ConfigureAwait(false);
-                    if (resolution.Applicable)
-                    {
-                        if (
-                            resolution.Success
-                            && resolution.CurrentPage is not null
-                        )
-                        {
-                            _stablePage = resolution.CurrentPage;
-                            _pendingPageFailureReason = null;
-                        }
-                        else
-                        {
-                            if (
-                                _stablePage is null
-                                || !SamePageEquivalent(
-                                    _stablePage,
-                                    next)
-                            )
-                            {
-                                _stablePage = null;
-                            }
-                            _pendingPageFailureReason =
-                                resolution.FailureReason
-                                ?? "local-pdf-resolution-failed";
-                        }
-                    }
+                    next["sourceInstanceId"] =
+                        activeReading.SourceInstanceId;
                 }
+                if (activeReading.SelectionRegions is JsonElement regions)
+                {
+                    next["selectionRegions"] = JsonNode.Parse(
+                        regions.GetRawText());
+                }
+                bool changedPage = _activeReading is not null
+                    && !SameActiveReadingIdentity(_activeReading, next);
+                _activeReading = next;
                 if (activeReading.SelectionState == "active")
                 {
                     _selection = ActiveSelection(
@@ -262,10 +278,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
                     changedPage
                     || (
                         _selection["ref"] is JsonObject selectionRef
-                        && !SameLogicalPage(
-                            next,
-                            selectionRef,
-                            next)
+                        && !SameLogicalPage(next, selectionRef, next)
                     )
                 )
                 {
@@ -302,6 +315,89 @@ internal sealed class FileDirectSnapshotContextAdapter :
         }
     }
 
+    public async Task<DirectSnapshotForwardResult> ForwardViewportAsync(
+        string requestId,
+        string sessionId,
+        DirectViewportContext viewport,
+        CancellationToken cancellationToken)
+    {
+        ValidateRequestIdentity(requestId, sessionId);
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            AdapterState before = CaptureState();
+            try
+            {
+                if (
+                    _activeReading is not JsonObject active
+                    || !string.Equals(
+                        StringValue(active["sourceInstanceId"]),
+                        viewport.SourceInstanceId,
+                        StringComparison.Ordinal)
+                    || !string.Equals(
+                        StringValue(active["file"]),
+                        viewport.Url,
+                        StringComparison.Ordinal)
+                    || _stablePage is not JsonObject stable
+                    || !string.Equals(
+                        StringValue(stable["file"]),
+                        viewport.Url,
+                        StringComparison.Ordinal)
+                )
+                {
+                    throw new DirectProtocolException(
+                        "BW_READER_VIEWPORT_IDENTITY_MISMATCH",
+                        "Reader 当前视口与活动页面身份不一致",
+                        retryable: true);
+                }
+                JsonObject viewportJson = new()
+                {
+                    ["contract"] = "reader-viewport/1",
+                    ["sourceInstanceId"] = viewport.SourceInstanceId,
+                    ["documentKey"] = viewport.DocumentKey,
+                    ["url"] = viewport.Url,
+                    ["title"] = viewport.Title,
+                    ["beforeText"] = viewport.BeforeText,
+                    ["visibleText"] = viewport.VisibleText,
+                    ["afterText"] = viewport.AfterText,
+                    ["selectionState"] = viewport.SelectionState,
+                    ["selection"] = viewport.Selection,
+                    ["observedAtEpochMs"] =
+                        viewport.ObservedAtEpochMilliseconds,
+                    ["receivedAtEpochMs"] =
+                        _utcNow().ToUnixTimeMilliseconds(),
+                };
+                stable["sourceInstanceId"] = viewport.SourceInstanceId;
+                stable["documentKey"] = viewport.DocumentKey;
+                stable["readingWindow"] = viewportJson;
+                stable["text"] = viewport.VisibleText;
+                stable["textAvailable"] =
+                    !string.IsNullOrWhiteSpace(viewport.VisibleText);
+                _revision = checked(_revision + 1);
+                _latestEvent = new JsonObject
+                {
+                    ["source"] = "viewport",
+                    ["seq"] = null,
+                    ["id"] = requestId,
+                    ["type"] = "viewport.context",
+                    ["ts"] = viewport.ObservedAtEpochMilliseconds,
+                };
+                await PersistAsync(cancellationToken)
+                    .ConfigureAwait(false);
+            }
+            catch
+            {
+                RestoreState(before);
+                throw;
+            }
+            return new DirectSnapshotForwardResult("accepted", _revision);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
     public async Task<DirectSnapshotForwardResult> ClearAsync(
         string requestId,
         string sessionId,
@@ -317,7 +413,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 _revision = checked(_revision + 1);
                 _stablePage = null;
                 _activeReading = null;
-                _pendingPageFailureReason = null;
                 _selection = UnknownSelection("snapshot-cleared");
                 _focus = UnknownFocus("snapshot-cleared");
                 _latestEvent = new JsonObject
@@ -377,6 +472,8 @@ internal sealed class FileDirectSnapshotContextAdapter :
         HashSet<string> allowedKeys = requiredKeys
             .Append("viewFile")
             .Append("viewPage")
+            .Append("sourceInstanceId")
+            .Append("selectionRegions")
             .ToHashSet(StringComparer.Ordinal);
         if (
             requiredKeys.Any(key => !keys.Contains(key))
@@ -466,6 +563,28 @@ internal sealed class FileDirectSnapshotContextAdapter :
             viewFile = candidateViewFile;
             viewPage = viewPageValue.Clone();
         }
+        string? sourceInstanceId = null;
+        if (keys.Contains("sourceInstanceId"))
+        {
+            JsonElement sourceValue = value.GetProperty(
+                "sourceInstanceId");
+            if (
+                sourceValue.ValueKind != JsonValueKind.String
+                || sourceValue.GetString() is not string candidateSource
+                || candidateSource.Length is < 1 or > 160
+                || !DirectBridgeContract.IsSafeId(candidateSource)
+            )
+            {
+                throw ActiveReadingInvalid();
+            }
+            sourceInstanceId = candidateSource;
+        }
+        JsonElement? selectionRegions = null;
+        if (keys.Contains("selectionRegions"))
+        {
+            selectionRegions = ValidateSelectionRegions(
+                value.GetProperty("selectionRegions"));
+        }
         JsonElement selectionValue = value.GetProperty("selection");
         string? selection = selectionValue.ValueKind switch
         {
@@ -496,7 +615,344 @@ internal sealed class FileDirectSnapshotContextAdapter :
             selection,
             observedAt,
             viewFile,
-            viewPage);
+            viewPage,
+            sourceInstanceId,
+            selectionRegions);
+    }
+
+    private static JsonElement ValidateSelectionRegions(
+        JsonElement value)
+    {
+        if (value.ValueKind != JsonValueKind.Object)
+        {
+            throw ActiveReadingInvalid();
+        }
+        try
+        {
+            DirectJsonValidation.RequireNoDuplicateKeys(value);
+        }
+        catch (DirectProtocolException exception)
+        {
+            throw ActiveReadingInvalid(exception);
+        }
+        HashSet<string> fields = value.EnumerateObject()
+            .Select(property => property.Name)
+            .ToHashSet(StringComparer.Ordinal);
+        if (
+            !fields.SetEquals(new[]
+            {
+                "contract", "total", "truncated", "items",
+            })
+            || value.GetProperty("contract").ValueKind
+                != JsonValueKind.String
+            || value.GetProperty("contract").GetString()
+                != "reader-selection-regions/1"
+            || !value.GetProperty("total").TryGetInt32(out int total)
+            || total is < 0 or > 1_000_000
+            || value.GetProperty("truncated").ValueKind
+                is not (JsonValueKind.True or JsonValueKind.False)
+            || value.GetProperty("items").ValueKind
+                != JsonValueKind.Array
+        )
+        {
+            throw ActiveReadingInvalid();
+        }
+        bool truncated = value.GetProperty("truncated").GetBoolean();
+        JsonElement items = value.GetProperty("items");
+        int count = items.GetArrayLength();
+        if (
+            count > 128
+            || truncated != (total > count)
+            || (!truncated && total != count)
+        )
+        {
+            throw ActiveReadingInvalid();
+        }
+        HashSet<string> ids = new(StringComparer.Ordinal);
+        int priorOrdinal = 0;
+        int expectedOrdinal = total - count + 1;
+        foreach (JsonElement item in items.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object)
+            {
+                throw ActiveReadingInvalid();
+            }
+            try
+            {
+                DirectJsonValidation.RequireNoDuplicateKeys(item);
+            }
+            catch (DirectProtocolException exception)
+            {
+                throw ActiveReadingInvalid(exception);
+            }
+            HashSet<string> itemFields = item.EnumerateObject()
+                .Select(property => property.Name)
+                .ToHashSet(StringComparer.Ordinal);
+            if (
+                !itemFields.SetEquals(new[]
+                {
+                    "selectionId", "label", "ordinal",
+                    "createdAtEpochMs",
+                })
+                || item.GetProperty("selectionId").ValueKind
+                    != JsonValueKind.String
+                || item.GetProperty("selectionId").GetString()
+                    is not string selectionId
+                || selectionId.Length is < 1 or > 160
+                || !DirectBridgeContract.IsSafeId(selectionId)
+                || !ids.Add(selectionId)
+                || item.GetProperty("label").ValueKind
+                    != JsonValueKind.String
+                || item.GetProperty("label").GetString()
+                    is not string label
+                || label.Length is < 1 or > 80
+                || label.Any(char.IsControl)
+                || !item.GetProperty("ordinal").TryGetInt32(
+                    out int ordinal)
+                || ordinal != expectedOrdinal
+                || ordinal <= priorOrdinal
+                || ordinal < 1
+                || ordinal > total
+                || !label.StartsWith(
+                    "#" + ordinal.ToString(
+                        CultureInfo.InvariantCulture) + " ",
+                    StringComparison.Ordinal)
+                || !item.GetProperty("createdAtEpochMs").TryGetInt64(
+                    out long createdAt)
+                || createdAt is < 0 or > 9_007_199_254_740_991
+            )
+            {
+                throw ActiveReadingInvalid();
+            }
+            priorOrdinal = ordinal;
+            expectedOrdinal = checked(expectedOrdinal + 1);
+        }
+        if (count > 0 && priorOrdinal != total)
+        {
+            throw ActiveReadingInvalid();
+        }
+        return value.Clone();
+    }
+
+    internal static bool SelectionRegionExists(
+        JsonNode? source,
+        string? selectionId)
+    {
+        if (
+            source is null
+            || string.IsNullOrEmpty(selectionId)
+            || selectionId.Length > 160
+            || !DirectBridgeContract.IsSafeId(selectionId)
+        )
+        {
+            return false;
+        }
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(
+                source.ToJsonString(DirectBridgeContract.JsonOptions));
+            JsonElement validated = ValidateSelectionRegions(
+                document.RootElement);
+            return validated.GetProperty("items")
+                .EnumerateArray()
+                .Any(item => string.Equals(
+                    item.GetProperty("selectionId").GetString(),
+                    selectionId,
+                    StringComparison.Ordinal));
+        }
+        catch (Exception exception) when (
+            exception is DirectProtocolException
+            or JsonException
+            or InvalidOperationException
+        )
+        {
+            return false;
+        }
+    }
+
+    internal static DirectViewportContext ValidateViewport(
+        JsonElement value)
+    {
+        if (value.ValueKind != JsonValueKind.Object)
+        {
+            throw ViewportInvalid();
+        }
+        try
+        {
+            DirectJsonValidation.RequireNoDuplicateKeys(value);
+        }
+        catch (DirectProtocolException exception)
+        {
+            throw ViewportInvalid(exception);
+        }
+        string[] fields =
+        {
+            "contract",
+            "sourceInstanceId",
+            "documentKey",
+            "url",
+            "title",
+            "beforeText",
+            "visibleText",
+            "afterText",
+            "selectionState",
+            "selection",
+            "observedAtEpochMs",
+        };
+        HashSet<string> actual = value.EnumerateObject()
+            .Select(property => property.Name)
+            .ToHashSet(StringComparer.Ordinal);
+        if (!actual.SetEquals(fields))
+        {
+            throw ViewportInvalid();
+        }
+        string sourceInstanceId = RequiredSafeViewportId(
+            value,
+            "sourceInstanceId",
+            160);
+        string documentKey = RequiredViewportUrl(
+            value,
+            "documentKey");
+        if (
+            value.GetProperty("contract").ValueKind
+                != JsonValueKind.String
+            || value.GetProperty("contract").GetString()
+                != "reader-viewport/1"
+            || value.GetProperty("url").ValueKind
+                != JsonValueKind.String
+            || value.GetProperty("url").GetString() is not string url
+            || url.Length is < 1 or > 4096
+            || url.Any(char.IsControl)
+            || !Uri.TryCreate(url, UriKind.Absolute, out Uri? uri)
+            || uri.Scheme is not ("http" or "https")
+            || value.GetProperty("selectionState").ValueKind
+                != JsonValueKind.String
+            || value.GetProperty("selectionState").GetString()
+                is not string selectionState
+            || selectionState is not (
+                "active" or "cleared" or "unknown")
+            || !value.GetProperty("observedAtEpochMs")
+                .TryGetInt64(out long observedAt)
+            || observedAt is < 1 or > 9_007_199_254_740_991
+        )
+        {
+            throw ViewportInvalid();
+        }
+        string beforeText = RequiredViewportText(
+            value,
+            "beforeText",
+            12_000);
+        string visibleText = RequiredViewportText(
+            value,
+            "visibleText",
+            24_000);
+        string afterText = RequiredViewportText(
+            value,
+            "afterText",
+            12_000);
+        JsonElement titleValue = value.GetProperty("title");
+        string? title = titleValue.ValueKind switch
+        {
+            JsonValueKind.Null => null,
+            JsonValueKind.String => titleValue.GetString(),
+            _ => throw ViewportInvalid(),
+        };
+        if (
+            title is { Length: > 1024 }
+            || (title is not null && title.Any(char.IsControl))
+        )
+        {
+            throw ViewportInvalid();
+        }
+        JsonElement selectionValue = value.GetProperty("selection");
+        string? selection = selectionValue.ValueKind switch
+        {
+            JsonValueKind.Null => null,
+            JsonValueKind.String => selectionValue.GetString(),
+            _ => throw ViewportInvalid(),
+        };
+        if (
+            selection is { Length: > 400 }
+            || (
+                selectionState == "active"
+                && string.IsNullOrWhiteSpace(selection)
+            )
+            || (selectionState != "active" && selection is not null)
+        )
+        {
+            throw ViewportInvalid();
+        }
+        return new DirectViewportContext(
+            sourceInstanceId,
+            documentKey,
+            url,
+            title,
+            beforeText,
+            visibleText,
+            afterText,
+            selectionState,
+            selection,
+            observedAt);
+    }
+
+    private static string RequiredSafeViewportId(
+        JsonElement value,
+        string field,
+        int maximumLength)
+    {
+        if (
+            !value.TryGetProperty(field, out JsonElement property)
+            || property.ValueKind != JsonValueKind.String
+            || property.GetString() is not string result
+            || result.Length is < 1
+            || result.Length > maximumLength
+            || !DirectBridgeContract.IsSafeId(result)
+        )
+        {
+            throw ViewportInvalid();
+        }
+        return result;
+    }
+
+    private static string RequiredViewportUrl(
+        JsonElement value,
+        string field)
+    {
+        if (
+            !value.TryGetProperty(field, out JsonElement property)
+            || property.ValueKind != JsonValueKind.String
+            || property.GetString() is not string result
+            || result.Length is < 1 or > 4096
+            || result.Any(char.IsControl)
+            || !Uri.TryCreate(result, UriKind.Absolute, out Uri? uri)
+            || uri.Scheme is not ("http" or "https")
+        )
+        {
+            throw ViewportInvalid();
+        }
+        return result;
+    }
+
+    private static string RequiredViewportText(
+        JsonElement value,
+        string field,
+        int maximumLength)
+    {
+        if (
+            !value.TryGetProperty(field, out JsonElement property)
+            || property.ValueKind != JsonValueKind.String
+            || property.GetString() is not string result
+            || result.Length > maximumLength
+            || result.Any(character =>
+                char.IsControl(character)
+                && character is not ('\r' or '\n' or '\t'))
+        )
+        {
+            throw ViewportInvalid();
+        }
+        return result.Replace("\r\n", "\n", StringComparison.Ordinal)
+            .Replace('\r', '\n')
+            .Trim();
     }
 
     private void FoldJournal(DirectContextEvent contextEvent)
@@ -504,8 +960,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
         JsonObject value = JsonNode.Parse(
             contextEvent.Payload.GetRawText()) as JsonObject
             ?? throw JournalInvalid();
-        long windowsReceivedAtEpochMs =
-            _utcNow().ToUnixTimeMilliseconds();
         JsonObject latestEvent = new()
         {
             ["source"] = "outgoing-context",
@@ -518,55 +972,47 @@ internal sealed class FileDirectSnapshotContextAdapter :
         if (contextEvent.Type == "page.context")
         {
             (JsonObject stablePage, JsonObject activeReading) =
-                BuildPageContext(
-                    value,
-                    windowsReceivedAtEpochMs);
-            JsonObject pageContext =
-                value["page_context"] as JsonObject
-                ?? throw JournalInvalid();
-            string? pageSelection =
-                StringValue(pageContext["selection"]);
-            if (
-                pageContext.ContainsKey("selection")
-                && (
-                    StringValue(pageContext["reason"]) != "selection"
-                    || string.IsNullOrWhiteSpace(pageSelection)
-                    || pageSelection.Length > 400
-                    || pageSelection.Any(character =>
-                        char.IsControl(character)
-                        && character is not ('\r' or '\n' or '\t'))
-                )
-            )
-            {
-                throw JournalInvalid();
-            }
+                BuildPageContext(value);
             bool changedPage = _stablePage is not null
                 && !SamePage(_stablePage, stablePage);
             if (
                 _activeReading is JsonObject priorActive
                 && SamePageEquivalent(priorActive, activeReading)
-                && HasViewBinding(priorActive)
             )
             {
-                activeReading["viewFile"] =
-                    priorActive["viewFile"]?.DeepClone();
-                activeReading["viewPage"] =
-                    priorActive["viewPage"]?.DeepClone();
+                if (
+                    HasViewBinding(priorActive)
+                    && StringValue(priorActive["viewFile"])
+                        is string priorViewFile
+                )
+                {
+                    activeReading["viewFile"] = priorViewFile;
+                    activeReading["viewPage"] =
+                        priorActive["viewPage"]?.DeepClone();
+                }
+                if (
+                    StringValue(priorActive["sourceInstanceId"])
+                        is string priorSource
+                )
+                {
+                    activeReading["sourceInstanceId"] = priorSource;
+                }
+                if (
+                    priorActive["selectionRegions"]
+                        is JsonObject priorRegions
+                )
+                {
+                    activeReading["selectionRegions"] =
+                        priorRegions.DeepClone();
+                }
             }
             _stablePage = stablePage;
             _activeReading = activeReading;
-            _pendingPageFailureReason = null;
             if (changedPage)
             {
                 _selection = ClearedSelection(
                     "stable-page-changed");
                 _focus = UnknownFocus("stable-page-changed");
-            }
-            if (!string.IsNullOrWhiteSpace(pageSelection))
-            {
-                _selection = ActiveSelection(
-                    pageSelection,
-                    activeReading);
             }
         }
         else if (contextEvent.Type == "focus")
@@ -583,10 +1029,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
         }
         else if (contextEvent.Type == "drawing")
         {
-            _stablePage = FoldDrawingEvent(
-                value,
-                _stablePage,
-                windowsReceivedAtEpochMs);
+            _stablePage = FoldDrawingEvent(value, _stablePage);
         }
         else if (contextEvent.Type == "command-failed")
         {
@@ -597,9 +1040,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
     }
 
     private (JsonObject StablePage, JsonObject ActiveReading)
-        BuildPageContext(
-            JsonObject value,
-            long windowsReceivedAtEpochMs)
+        BuildPageContext(JsonObject value)
     {
         string? file = StringValue(value["file"])
             ?? StringValue(value["book_id"]);
@@ -645,9 +1086,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
         JsonObject? visual = CopyVisual(
             pageContext["visual"],
             file,
-            safePage,
-            NumericValue(value["ts"]),
-            windowsReceivedAtEpochMs);
+            safePage);
         if (visual is not null)
         {
             next["visual"] = visual;
@@ -744,10 +1183,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
         string? text = StringValue(safe["text"]);
         bool samePage =
             stablePage is not null
-            && SameLogicalPage(
-                stablePage,
-                safe,
-                activeReading);
+            && SameLogicalPage(stablePage, safe, activeReading);
         if (!samePage)
         {
             return new FocusFoldResult(
@@ -1006,8 +1442,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
 
     private static JsonObject? FoldDrawingEvent(
         JsonObject value,
-        JsonObject? stablePage,
-        long windowsReceivedAtEpochMs)
+        JsonObject? stablePage)
     {
         if (stablePage is null)
         {
@@ -1053,10 +1488,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
         double freshWindow =
             NumericValue(existingDrawing["freshWindowS"])
             ?? 120.0;
-        double? ageAtReceive = NumericValue(
-            existingDrawing["lastEditedAgeAtReceiveSec"]);
-        long? ageAnchorAt = LongValue(
-            existingDrawing["lastEditedReceivedAtEpochMs"]);
         if (state == "pending")
         {
             visual["drawing"] = new JsonObject
@@ -1066,9 +1497,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 ["page"] = stablePage["page"]?.DeepClone(),
                 ["freshness"] = "recent",
                 ["lastEditedAt"] = eventSeconds,
-                ["lastEditedAgeAtReceiveSec"] = 0.0,
-                ["lastEditedReceivedAtEpochMs"] =
-                    windowsReceivedAtEpochMs,
                 ["freshWindowS"] = freshWindow,
                 ["inProgress"] = true,
                 ["stable"] = false,
@@ -1096,18 +1524,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
             {
                 throw JournalInvalid();
             }
-            if (
-                ageAtReceive is null
-                || ageAtReceive < 0
-                || ageAnchorAt is null
-                || ageAnchorAt < 1
-            )
-            {
-                ageAtReceive = Math.Max(
-                    0,
-                    eventSeconds - lastEditedAt);
-                ageAnchorAt = windowsReceivedAtEpochMs;
-            }
             visual["drawing"] = new JsonObject
             {
                 ["contract"] = "reader-outgoing-context/1",
@@ -1116,8 +1532,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 ["freshness"] =
                     DrawingFreshness(existingDrawing["freshness"]),
                 ["lastEditedAt"] = lastEditedAt,
-                ["lastEditedAgeAtReceiveSec"] = ageAtReceive,
-                ["lastEditedReceivedAtEpochMs"] = ageAnchorAt,
                 ["freshWindowS"] = freshWindow,
                 ["inProgress"] = false,
                 ["stable"] = true,
@@ -1141,9 +1555,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
     private static JsonObject? CopyVisual(
         JsonNode? node,
         string file,
-        JsonNode page,
-        double? sourceEventSeconds = null,
-        long? windowsReceivedAtEpochMs = null)
+        JsonNode page)
     {
         if (node is null)
         {
@@ -1177,9 +1589,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
         JsonObject? drawing = CopyDrawing(
             value["drawing"],
             file,
-            page,
-            sourceEventSeconds,
-            windowsReceivedAtEpochMs);
+            page);
         if (
             (drawing is null && hasInk)
             || (
@@ -1202,9 +1612,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
     private static JsonObject? CopyDrawing(
         JsonNode? node,
         string file,
-        JsonNode page,
-        double? sourceEventSeconds = null,
-        long? windowsReceivedAtEpochMs = null)
+        JsonNode page)
     {
         if (node is null || node.GetValueKind() == JsonValueKind.Null)
         {
@@ -1240,17 +1648,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
         double? freshWindow = NumericValue(value["freshWindowS"]);
         double? pendingSince = NullableNumericValue(
             value["pendingSince"]);
-        bool restoringPersistedDrawing =
-            sourceEventSeconds is null
-            || windowsReceivedAtEpochMs is null;
-        double? ageAtReceive = restoringPersistedDrawing
-            ? NullableNumericValue(
-                value["lastEditedAgeAtReceiveSec"])
-            : null;
-        long? ageAnchorAt = restoringPersistedDrawing
-            ? NullableLongValue(
-                value["lastEditedReceivedAtEpochMs"])
-            : null;
         if (
             freshWindow is null
             || freshWindow is <= 0 or > 3600
@@ -1268,18 +1665,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
                     || pendingSince < 0
                 )
             )
-            || (
-                ageAtReceive is not null
-                && (
-                    !double.IsFinite(ageAtReceive.Value)
-                    || ageAtReceive < 0
-                )
-            )
-            || (
-                ageAnchorAt is not null
-                && ageAnchorAt < 1
-            )
-            || (ageAtReceive is null) != (ageAnchorAt is null)
         )
         {
             throw JournalInvalid();
@@ -1345,18 +1730,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
         {
             throw JournalInvalid();
         }
-        if (
-            !empty
-            && sourceEventSeconds is not null
-            && windowsReceivedAtEpochMs is not null
-        )
-        {
-            ageAtReceive = Math.Max(
-                0,
-                sourceEventSeconds.Value - lastEditedAt!.Value);
-            ageAnchorAt = windowsReceivedAtEpochMs;
-        }
-        JsonObject drawing = new()
+        return new JsonObject
         {
             ["contract"] = contract,
             ["file"] = file,
@@ -1371,12 +1745,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
             ["ref"] = reference,
             ["empty"] = empty,
         };
-        if (!empty && ageAtReceive is not null && ageAnchorAt is not null)
-        {
-            drawing["lastEditedAgeAtReceiveSec"] = ageAtReceive;
-            drawing["lastEditedReceivedAtEpochMs"] = ageAnchorAt;
-        }
-        return drawing;
     }
 
     private static JsonObject? CopyEmbeds(JsonNode? node)
@@ -1503,6 +1871,76 @@ internal sealed class FileDirectSnapshotContextAdapter :
         };
     }
 
+    private static JsonObject CopyReadingWindow(
+        JsonNode? node,
+        string sourceInstanceId,
+        string documentKey,
+        string file)
+    {
+        if (node is not JsonObject value)
+        {
+            throw JournalInvalid();
+        }
+        string? contract = StringValue(value["contract"]);
+        string? source = StringValue(value["sourceInstanceId"]);
+        string? key = StringValue(value["documentKey"]);
+        string? url = StringValue(value["url"]);
+        string? title = StringValue(value["title"]);
+        string? before = StringValue(value["beforeText"]);
+        string? visible = StringValue(value["visibleText"]);
+        string? after = StringValue(value["afterText"]);
+        string? selectionState = StringValue(
+            value["selectionState"]);
+        string? selection = StringValue(value["selection"]);
+        long? observedAt = value["observedAtEpochMs"]
+            ?.GetValue<long?>();
+        long? receivedAt = value["receivedAtEpochMs"]
+            ?.GetValue<long?>();
+        if (
+            contract != "reader-viewport/1"
+            || !string.Equals(
+                source,
+                sourceInstanceId,
+                StringComparison.Ordinal)
+            || !string.Equals(
+                key,
+                documentKey,
+                StringComparison.Ordinal)
+            || !string.Equals(url, file, StringComparison.Ordinal)
+            || title is { Length: > 1024 }
+            || before is null or { Length: > 12_000 }
+            || visible is null or { Length: > 24_000 }
+            || after is null or { Length: > 12_000 }
+            || selectionState is not (
+                "active" or "cleared" or "unknown")
+            || selection is { Length: > 400 }
+            || (selectionState == "active")
+                != !string.IsNullOrWhiteSpace(selection)
+            || observedAt is null or < 1
+            || receivedAt is null or < 1
+        )
+        {
+            throw JournalInvalid();
+        }
+        return new JsonObject
+        {
+            ["contract"] = contract,
+            ["sourceInstanceId"] = source,
+            ["documentKey"] = key,
+            ["url"] = url,
+            ["title"] = title,
+            ["beforeText"] = before,
+            ["visibleText"] = visible,
+            ["afterText"] = after,
+            ["selectionState"] = selectionState,
+            ["selection"] = selectionState == "active"
+                ? selection
+                : null,
+            ["observedAtEpochMs"] = observedAt,
+            ["receivedAtEpochMs"] = receivedAt,
+        };
+    }
+
     private static bool BooleanValue(
         JsonNode? node,
         out bool value)
@@ -1586,27 +2024,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
         return value ?? throw JournalInvalid();
     }
 
-    private static long? NullableLongValue(JsonNode? node)
-    {
-        if (node is null || node.GetValueKind() == JsonValueKind.Null)
-        {
-            return null;
-        }
-        return LongValue(node) ?? throw JournalInvalid();
-    }
-
-    private static long? LongValue(JsonNode? node)
-    {
-        if (
-            node is JsonValue value
-            && value.TryGetValue(out long number)
-        )
-        {
-            return number;
-        }
-        return null;
-    }
-
     private static bool PageEquivalent(
         JsonNode? left,
         JsonNode? right)
@@ -1650,6 +2067,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
             if (
                 _stablePage is null
                 || !SamePage(_stablePage, _activeReading)
+                || WebSourceDiffers(_stablePage, _activeReading)
             )
             {
                 contextStatus = "pending";
@@ -1657,6 +2075,16 @@ internal sealed class FileDirectSnapshotContextAdapter :
                     _activeReading,
                     _pendingPageFailureReason);
             }
+        }
+        if (
+            contextStatus == "ready"
+            && effectivePage is not null
+            && _activeReading is not null
+            && SamePageEquivalent(effectivePage, _activeReading)
+            && _activeReading["selectionRegions"] is JsonObject regions
+        )
+        {
+            effectivePage["selectionRegions"] = regions.DeepClone();
         }
         return new JsonObject
         {
@@ -1740,7 +2168,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
             _focus.DeepClone() as JsonObject
                 ?? UnknownFocus("snapshot-checkpoint-failed"),
             _latestEvent?.DeepClone() as JsonObject,
-            _pendingPageFailureReason,
             _recentEventOrder.ToArray());
 
     private void RestoreState(AdapterState state)
@@ -1755,8 +2182,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
             ?? UnknownFocus("snapshot-rollback-failed");
         _latestEvent =
             state.LatestEvent?.DeepClone() as JsonObject;
-        _pendingPageFailureReason =
-            state.PendingPageFailureReason;
         _recentEventOrder.Clear();
         _recentEventIds.Clear();
         foreach (string eventId in state.RecentEventOrder)
@@ -1887,6 +2312,19 @@ internal sealed class FileDirectSnapshotContextAdapter :
             ["receivedAtEpochMs"] =
                 source["receivedAtEpochMs"]?.GetValue<long?>(),
         };
+        string? sourceInstanceId = StringValue(
+            source["sourceInstanceId"]);
+        if (sourceInstanceId is not null)
+        {
+            if (
+                sourceInstanceId.Length > 160
+                || !DirectBridgeContract.IsSafeId(sourceInstanceId)
+            )
+            {
+                throw JournalInvalid();
+            }
+            restored["sourceInstanceId"] = sourceInstanceId;
+        }
         bool hasViewFile = source.ContainsKey("viewFile");
         bool hasViewPage = source.ContainsKey("viewPage");
         if (hasViewFile != hasViewPage)
@@ -1900,9 +2338,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
             if (
                 kind == "web"
                 || viewFile is null
-                || !viewFile.StartsWith(
-                    "vbook:",
-                    StringComparison.Ordinal)
+                || !viewFile.StartsWith("vbook:", StringComparison.Ordinal)
                 || viewFile.Length is < 7 or > 4096
                 || viewFile.Any(char.IsControl)
                 || !ValidPageIdentifier(viewPage, allowNull: false)
@@ -1913,7 +2349,38 @@ internal sealed class FileDirectSnapshotContextAdapter :
             restored["viewFile"] = viewFile;
             restored["viewPage"] = viewPage;
         }
+        JsonObject? selectionRegions = RestoreSelectionRegions(
+            source["selectionRegions"]);
+        if (selectionRegions is not null)
+        {
+            restored["selectionRegions"] = selectionRegions;
+        }
         return restored;
+    }
+
+    private static JsonObject? RestoreSelectionRegions(JsonNode? source)
+    {
+        if (source is null)
+        {
+            return null;
+        }
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(
+                source.ToJsonString(DirectBridgeContract.JsonOptions));
+            JsonElement validated = ValidateSelectionRegions(
+                document.RootElement);
+            return JsonNode.Parse(validated.GetRawText()) as JsonObject
+                ?? throw JournalInvalid();
+        }
+        catch (DirectProtocolException)
+        {
+            throw JournalInvalid();
+        }
+        catch (JsonException)
+        {
+            throw JournalInvalid();
+        }
     }
 
     private static JsonObject RestoreStablePage(
@@ -1971,6 +2438,35 @@ internal sealed class FileDirectSnapshotContextAdapter :
         {
             restored["viewport"] = viewport;
         }
+        string? sourceInstanceId = StringValue(
+            source["sourceInstanceId"]);
+        string? documentKey = StringValue(source["documentKey"]);
+        if (sourceInstanceId is not null || documentKey is not null)
+        {
+            if (
+                string.IsNullOrEmpty(sourceInstanceId)
+                || sourceInstanceId.Length > 160
+                || !DirectBridgeContract.IsSafeId(sourceInstanceId)
+                || string.IsNullOrEmpty(documentKey)
+                || documentKey.Length > 4096
+                || documentKey.Any(char.IsControl)
+                || !Uri.TryCreate(
+                    documentKey,
+                    UriKind.Absolute,
+                    out Uri? documentUri)
+                || documentUri.Scheme is not ("http" or "https")
+            )
+            {
+                throw JournalInvalid();
+            }
+            restored["sourceInstanceId"] = sourceInstanceId;
+            restored["documentKey"] = documentKey;
+            restored["readingWindow"] = CopyReadingWindow(
+                source["readingWindow"],
+                sourceInstanceId,
+                documentKey,
+                file);
+        }
         return restored;
     }
 
@@ -2001,23 +2497,21 @@ internal sealed class FileDirectSnapshotContextAdapter :
     private static JsonObject RestoreFocus(JsonObject? source)
     {
         string? state = StringValue(source?["state"]);
-        if (state is null)
-        {
-            return UnknownFocus("snapshot-missing-focus");
-        }
         if (state == "unknown")
         {
             return UnknownFocus(
                 StringValue(source?["reason"])
-                    ?? "snapshot-restored-unknown");
+                    ?? "snapshot-invalid-focus");
         }
         if (state is not ("active" or "cleared"))
         {
             return UnknownFocus("snapshot-invalid-focus");
         }
         string? kind = StringValue(source?["kind"]);
-        JsonObject? reference = source?["ref"] as JsonObject;
-        if (!ValidFocusKind(kind) || reference is null)
+        if (
+            !ValidFocusKind(kind)
+            || source?["ref"] is not JsonObject reference
+        )
         {
             return UnknownFocus("snapshot-invalid-focus");
         }
@@ -2098,6 +2592,11 @@ internal sealed class FileDirectSnapshotContextAdapter :
             StringComparison.Ordinal)
         && JsonNode.DeepEquals(left["page"], right["page"]);
 
+    // Same page by equivalence rather than by raw JSON shape.
+    //
+    // SamePage uses DeepEquals, so 12 and "12" read as different pages even
+    // though the readers treat them as one. PageEquivalent already knows the
+    // difference; these comparisons need it too.
     private static bool SamePageEquivalent(
         JsonObject left,
         JsonObject right) =>
@@ -2107,11 +2606,42 @@ internal sealed class FileDirectSnapshotContextAdapter :
             StringComparison.Ordinal)
         && PageEquivalent(left["page"], right["page"]);
 
+    private static bool WebSourceDiffers(
+        JsonObject stablePage,
+        JsonObject activeReading)
+    {
+        if (
+            !string.Equals(
+                StringValue(activeReading["kind"]),
+                "web",
+                StringComparison.Ordinal)
+            || StringValue(activeReading["sourceInstanceId"])
+                is not string activeSource
+        )
+        {
+            return false;
+        }
+        return !string.Equals(
+            StringValue(stablePage["sourceInstanceId"]),
+            activeSource,
+            StringComparison.Ordinal);
+    }
+
+    // Whether this reading carries a usable volume view.
+    //
+    // Both halves must be present and well formed. A half-written binding is
+    // worse than none: it would claim a mapping the other half cannot honour.
     private static bool HasViewBinding(JsonObject value) =>
         StringValue(value["viewFile"]) is string viewFile
         && viewFile.StartsWith("vbook:", StringComparison.Ordinal)
         && ValidPageIdentifier(value["viewPage"], allowNull: false);
 
+    // Identity of an active reading, view binding included.
+    //
+    // Two readings on the same canonical page are still different readings if
+    // one is being viewed through a volume and the other is not, or through a
+    // different volume page. Comparing only the canonical page would call them
+    // equal and the selection would survive a move it should not have.
     private static bool SameActiveReadingIdentity(
         JsonObject left,
         JsonObject right)
@@ -2138,6 +2668,14 @@ internal sealed class FileDirectSnapshotContextAdapter :
             );
     }
 
+    // Whether a reference names the same page as the canonical one, allowing
+    // for the reference having been written in volume coordinates.
+    //
+    // A selection made while reading a merged volume records the volume's file
+    // and page. Compared directly against the canonical member it never
+    // matches, and the selection gets discarded on every context event. The
+    // active reading holds the mapping between the two, so it is consulted
+    // before declaring a mismatch.
     private static bool SameLogicalPage(
         JsonObject canonicalPage,
         JsonObject reference,
@@ -2209,6 +2747,14 @@ internal sealed class FileDirectSnapshotContextAdapter :
         new(
             "BW_READER_ACTIVE_READING_SCHEMA_INVALID",
             "Reader active-reading 更新无效",
+            retryable: false,
+            innerException: inner);
+
+    private static DirectProtocolException ViewportInvalid(
+        Exception? inner = null) =>
+        new(
+            "BW_READER_VIEWPORT_SCHEMA_INVALID",
+            "Reader 当前视口更新无效",
             retryable: false,
             innerException: inner);
 

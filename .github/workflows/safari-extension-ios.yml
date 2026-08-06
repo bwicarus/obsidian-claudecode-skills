@@ -1,10 +1,13 @@
-# Build the combined BWReader iPad app and its Safari Web Extension without a
-# local Mac.  The Xcode project is generated from the checked-in XcodeGen spec;
-# package_safari.py remains the only source of the Apple-shaped web resources.
+# Build the Safari (iOS) Web Extension without a Mac.
 #
-# Manual trigger only. macOS minutes bill at 10x on private repositories, so
-# this workflow must never run on an ordinary push.
-name: BWReader iOS App
+# GitHub's macOS runner does what we have no machine for: run Apple's
+# safari-web-extension-converter and xcodebuild. The Chromium manifest stays
+# the source of truth -- package_safari.py derives an Apple-shaped manifest at
+# build time, exactly as it does locally.
+#
+# Manual trigger only. macOS minutes bill at 10x on private repos, so this must
+# never fire on ordinary pushes.
+name: Safari Extension (iOS)
 
 on:
   workflow_dispatch:
@@ -15,21 +18,13 @@ on:
         default: false
 
 concurrency:
-  group: bwreader-ios
+  group: safari-ios
   cancel-in-progress: false
 
 env:
   APP_NAME: bwicarus-test
-  BUNDLE_ID: space.bwicarus.bwreader2
-  EXTENSION_BUNDLE_ID: space.bwicarus.bwreader2.Extension
-  WIDGET_BUNDLE_ID: space.bwicarus.bwreader2.Widget
-  APP_GROUP_ID: group.space.bwicarus.bwreader2
+  BUNDLE_ID: space.bwicarus.bwreader
   EXT_DIR: extensions/bw-reader-webext
-  PROJECT_DIR: ios/BWReader
-  PROJECT_FILE: ios/BWReader/BWReader.xcodeproj
-  SCHEME: BWReader
-  XCODEGEN_VERSION: "2.46.0"
-  XCODEGEN_SHA256: 4d9e34b62172d645eed6457cac13fc222569974098ef4ee9c3368bedf0196806
 
 jobs:
   build:
@@ -44,143 +39,59 @@ jobs:
           sw_vers
           xcodebuild -version
           python3 --version
+          # The converter's flags differ between Xcode versions; print them so a
+          # failure below can be read without guessing.
+          xcrun safari-web-extension-converter --help || true
 
-      # The runner's own Python is externally managed. Use a private 3.12
-      # installation rather than forcing Pillow into the system interpreter.
-      - uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
+      - name: Install packaging deps
+        run: python3 -m pip install --quiet --upgrade pillow
 
-      - name: Install packaging dependencies
-        run: python -m pip install --quiet --upgrade pillow pyjwt cryptography
-
-      - name: Build and capture the Safari package
-        id: safari
+      - name: Build the Apple-shaped extension package
         working-directory: ${{ env.EXT_DIR }}
-        shell: bash
         run: |
-          set -euo pipefail
-          OUTPUT="$(python package_safari.py)"
-          printf '%s\n' "$OUTPUT"
+          python3 package_safari.py
+          ls -l ../bw-reader-webext-*-safari-ios.zip
 
-          PACKAGE="$(printf '%s\n' "$OUTPUT" | sed -n 's/^package=//p')"
-          REPORTED_SHA="$(printf '%s\n' "$OUTPUT" | sed -n 's/^sha256=//p')"
-          REPORTED_BUNDLE_ID="$(printf '%s\n' "$OUTPUT" | sed -n 's/^bundle_id=//p')"
-          test -n "$PACKAGE" || { echo "package_safari.py did not report package=..."; exit 1; }
-          test -n "$REPORTED_SHA" || { echo "package_safari.py did not report sha256=..."; exit 1; }
-          test "$REPORTED_BUNDLE_ID" = "$BUNDLE_ID" || {
-            echo "package_safari.py bundle ID drift: $REPORTED_BUNDLE_ID != $BUNDLE_ID"
-            exit 1
-          }
-          PACKAGE="$(python -c 'import os,sys; print(os.path.realpath(sys.argv[1]))' "$PACKAGE")"
-          case "$PACKAGE" in
-            "$GITHUB_WORKSPACE"/extensions/bw-reader-webext-*-safari-ios.zip) ;;
-            *) echo "unexpected Safari package path: $PACKAGE"; exit 1 ;;
-          esac
-          test -f "$PACKAGE"
-
-          ACTUAL_SHA="$(shasum -a 256 "$PACKAGE" | awk '{print $1}')"
-          test "$ACTUAL_SHA" = "$REPORTED_SHA" || {
-            echo "Safari package digest does not match package_safari.py output"
-            exit 1
-          }
-
-          cp "$PACKAGE" "$RUNNER_TEMP/safari-extension.zip"
-          echo "package=$PACKAGE" >> "$GITHUB_OUTPUT"
-          echo "artifact=$RUNNER_TEMP/safari-extension.zip" >> "$GITHUB_OUTPUT"
-          echo "sha256=$ACTUAL_SHA" >> "$GITHUB_OUTPUT"
-
-      - name: Stage Safari resources at the extension root
-        env:
-          SAFARI_PACKAGE: ${{ steps.safari.outputs.package }}
-        shell: bash
+      - name: Unpack it for the converter
         run: |
-          set -euo pipefail
-          RESOURCES="$GITHUB_WORKSPACE/$PROJECT_DIR/Extension/Resources"
-          rm -rf "$RESOURCES"
-          mkdir -p "$RESOURCES"
-          unzip -q "$SAFARI_PACKAGE" -d "$RESOURCES"
+          mkdir -p build/src
+          unzip -q extensions/bw-reader-webext-*-safari-ios.zip -d build/src
+          echo "--- manifest that Apple will see ---"
+          python3 -c "import json;m=json.load(open('build/src/manifest.json'));print(json.dumps({k:m[k] for k in ('name','version','permissions','background')},ensure_ascii=False,indent=2))"
 
-          test -f "$RESOURCES/manifest.json"
-          test -f "$RESOURCES/background.js"
-          test -d "$RESOURCES/src"
-          test -d "$RESOURCES/vendor"
-          test -d "$RESOURCES/icons"
-          echo "--- manifest that the extension target will embed ---"
-          RESOURCES="$RESOURCES" APP_NAME="$APP_NAME" python <<'PY'
-          import json
-          import os
-          from pathlib import Path
-
-          manifest = json.loads(
-              (Path(os.environ["RESOURCES"]) / "manifest.json").read_text(encoding="utf-8")
-          )
-          if manifest.get("name") != os.environ["APP_NAME"]:
-              raise SystemExit(
-                  f"Safari manifest name drift: {manifest.get('name')!r} != {os.environ['APP_NAME']!r}"
-              )
-          print(
-              json.dumps(
-                  {key: manifest[key] for key in ("name", "version", "permissions", "background")},
-                  ensure_ascii=False,
-                  indent=2,
-              )
-          )
-          PY
-
-      - name: Install pinned XcodeGen
-        shell: bash
+      - name: Convert to an Xcode project
         run: |
-          set -euo pipefail
-          ARCHIVE="$RUNNER_TEMP/xcodegen.zip"
-          INSTALL_ROOT="$RUNNER_TEMP/xcodegen-release"
-          curl --fail --location --retry 3 \
-            "https://github.com/yonaskolb/XcodeGen/releases/download/${XCODEGEN_VERSION}/xcodegen.zip" \
-            --output "$ARCHIVE"
-          echo "${XCODEGEN_SHA256}  ${ARCHIVE}" | shasum -a 256 -c -
-          rm -rf "$INSTALL_ROOT"
-          mkdir -p "$INSTALL_ROOT"
-          unzip -q "$ARCHIVE" -d "$INSTALL_ROOT"
-          test -x "$INSTALL_ROOT/xcodegen/bin/xcodegen"
-          echo "$INSTALL_ROOT/xcodegen/bin" >> "$GITHUB_PATH"
-          "$INSTALL_ROOT/xcodegen/bin/xcodegen" --version | tee "$RUNNER_TEMP/xcodegen-version.txt"
-          grep -F "$XCODEGEN_VERSION" "$RUNNER_TEMP/xcodegen-version.txt"
+          xcrun safari-web-extension-converter build/src \
+            --project-location build/xcode \
+            --app-name "$APP_NAME" \
+            --bundle-identifier "$BUNDLE_ID" \
+            --swift \
+            --copy-resources \
+            --no-open \
+            --force \
+            --no-prompt
+          find build/xcode -maxdepth 2 -name '*.xcodeproj' -print
 
-      - name: Generate the Xcode project
-        shell: bash
+      # The generated scheme name is not fixed -- it follows the app name and
+      # gains a platform suffix. Read it rather than hardcoding a guess.
+      - name: Resolve project and scheme
+        id: proj
         run: |
-          set -euo pipefail
-          rm -rf "$PROJECT_FILE"
-          xcodegen generate \
-            --spec "$PROJECT_DIR/project.yml" \
-            --project "$PROJECT_DIR"
-          test -d "$PROJECT_FILE"
-          xcodebuild -project "$PROJECT_FILE" -list
-
-      - name: Build unsigned simulator candidate
-        shell: bash
-        run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/build-logs"
-          set -o pipefail
-          xcodebuild build \
-            -project "$PROJECT_FILE" \
-            -scheme "$SCHEME" \
-            -configuration Debug \
-            -destination "generic/platform=iOS Simulator" \
-            -derivedDataPath "$RUNNER_TEMP/DerivedData-simulator" \
-            CODE_SIGNING_ALLOWED=NO \
-            CODE_SIGNING_REQUIRED=NO \
-            | tee "$RUNNER_TEMP/build-logs/simulator-build.log"
+          PROJ=$(find build/xcode -maxdepth 2 -name '*.xcodeproj' | head -1)
+          echo "project=$PROJ" >> "$GITHUB_OUTPUT"
+          echo "--- available schemes ---"
+          xcodebuild -project "$PROJ" -list
+          SCHEME=$(xcodebuild -project "$PROJ" -list -json \
+            | python3 -c "import json,sys;s=json.load(sys.stdin)['project']['schemes'];ios=[x for x in s if 'iOS' in x];print((ios or s)[0])")
+          echo "scheme=$SCHEME" >> "$GITHUB_OUTPUT"
+          echo "Using project=$PROJ scheme=$SCHEME"
 
       - name: Import signing certificate
         env:
           P12_BASE64: ${{ secrets.APPLE_DIST_P12_BASE64 }}
           P12_PASSWORD: ${{ secrets.APPLE_DIST_P12_PASSWORD }}
-        shell: bash
         run: |
-          set -euo pipefail
-          KEYCHAIN_PASSWORD="$(uuidgen)"
+          KEYCHAIN_PASSWORD=$(uuidgen)
           echo "$P12_BASE64" | base64 --decode > "$RUNNER_TEMP/dist.p12"
           security create-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
           security set-keychain-settings -lut 21600 build.keychain
@@ -188,327 +99,52 @@ jobs:
           security unlock-keychain -p "$KEYCHAIN_PASSWORD" build.keychain
           security import "$RUNNER_TEMP/dist.p12" -k build.keychain \
             -P "$P12_PASSWORD" -T /usr/bin/codesign -T /usr/bin/security
-          # Without this, codesign blocks on a UI prompt no one can answer.
+          # Without this, codesign blocks on a UI prompt that no one can answer.
           security set-key-partition-list -S apple-tool:,apple: \
             -s -k "$KEYCHAIN_PASSWORD" build.keychain >/dev/null
           rm -f "$RUNNER_TEMP/dist.p12"
+          echo "--- identities available to codesign ---"
           security find-identity -v -p codesigning build.keychain
-
-      - name: Install provisioning profiles
-        env:
-          APP_PROFILE_BASE64: ${{ secrets.APPLE_APP_PROFILE_BASE64 }}
-          EXTENSION_PROFILE_BASE64: ${{ secrets.APPLE_EXTENSION_PROFILE_BASE64 }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          PROFILES="$HOME/Library/MobileDevice/Provisioning Profiles"
-          mkdir -p "$PROFILES"
-          echo "$APP_PROFILE_BASE64" | base64 --decode \
-            > "$PROFILES/BWReader-App-Store-App.mobileprovision"
-          echo "$EXTENSION_PROFILE_BASE64" | base64 --decode \
-            > "$PROFILES/BWReader-App-Store-Extension.mobileprovision"
-          test -s "$PROFILES/BWReader-App-Store-App.mobileprovision"
-          test -s "$PROFILES/BWReader-App-Store-Extension.mobileprovision"
 
       - name: Place App Store Connect API key
         env:
           API_KEY_BASE64: ${{ secrets.APPLE_API_KEY_BASE64 }}
           API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-        shell: bash
         run: |
-          set -euo pipefail
           mkdir -p "$RUNNER_TEMP/private_keys"
           echo "$API_KEY_BASE64" | base64 --decode \
             > "$RUNNER_TEMP/private_keys/AuthKey_${API_KEY_ID}.p8"
-          # Also place it where xcodebuild and altool look by default.
+          # Also where xcodebuild looks by default.
           mkdir -p ~/.appstoreconnect/private_keys
           cp "$RUNNER_TEMP/private_keys/AuthKey_${API_KEY_ID}.p8" \
             ~/.appstoreconnect/private_keys/
 
-      - name: Prepare Widget App Store profile
+      # -allowProvisioningUpdates with an API key lets Xcode create and fetch the
+      # profiles itself, so no provisioning profile has to be exported by hand.
+      - name: Archive
         env:
           API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
-          FASTLANE_SKIP_UPDATE_CHECK: "1"
-          FASTLANE_HIDE_CHANGELOG: "1"
-        shell: bash
-        run: |
-          set -euo pipefail
-          command -v fastlane >/dev/null || sudo gem install fastlane --no-document
-          API_JSON="$RUNNER_TEMP/fastlane-api-key.json"
-          API_KEY_ID="$API_KEY_ID" API_ISSUER_ID="$API_ISSUER_ID" \
-          API_KEY_PATH="$RUNNER_TEMP/private_keys/AuthKey_${API_KEY_ID}.p8" \
-          WIDGET_BUNDLE_ID="$WIDGET_BUNDLE_ID" \
-          API_JSON="$API_JSON" python <<'PY'
-          import json
-          import os
-          import time
-          import urllib.parse
-          import urllib.request
-          from pathlib import Path
-
-          import jwt
-
-          key = Path(os.environ["API_KEY_PATH"]).read_text()
-          token = jwt.encode(
-              {
-                  "iss": os.environ["API_ISSUER_ID"],
-                  "iat": int(time.time()) - 30,
-                  "exp": int(time.time()) + 600,
-                  "aud": "appstoreconnect-v1",
-              },
-              key,
-              algorithm="ES256",
-              headers={"kid": os.environ["API_KEY_ID"], "typ": "JWT"},
-          )
-
-          def request(method, path, payload=None):
-              body = None if payload is None else json.dumps(payload).encode()
-              req = urllib.request.Request(
-                  "https://api.appstoreconnect.apple.com" + path,
-                  data=body,
-                  method=method,
-                  headers={
-                      "Authorization": "Bearer " + token,
-                      "Content-Type": "application/json",
-                  },
-              )
-              with urllib.request.urlopen(req) as response:
-                  return json.load(response)
-
-          def find_bundle(identifier):
-              query = urllib.parse.urlencode({"filter[identifier]": identifier})
-              values = request("GET", "/v1/bundleIds?" + query)["data"]
-              return values[0] if values else None
-
-          widget_bundle = find_bundle(os.environ["WIDGET_BUNDLE_ID"])
-          if widget_bundle is None:
-              widget_bundle = request(
-                  "POST",
-                  "/v1/bundleIds",
-                  {
-                      "data": {
-                          "type": "bundleIds",
-                          "attributes": {
-                              "identifier": os.environ["WIDGET_BUNDLE_ID"],
-                              "name": "BWReader Widget",
-                              "platform": "IOS",
-                          },
-                      }
-                  },
-              )["data"]
-              print("registered Widget bundle ID")
-
-          Path(os.environ["API_JSON"]).write_text(
-              json.dumps({
-                  "key_id": os.environ["API_KEY_ID"],
-                  "issuer_id": os.environ["API_ISSUER_ID"],
-                  "key": Path(os.environ["API_KEY_PATH"]).read_text(),
-                  "in_house": False,
-              }),
-              encoding="utf-8",
-          )
-          PY
-          fastlane sigh \
-            --api_key_path "$API_JSON" \
-            --app_identifier "$WIDGET_BUNDLE_ID" \
-            --provisioning_name "BWReader App Store Widget" \
-            --ignore_profiles_with_different_name true \
-            --output_path "$RUNNER_TEMP" \
-            --filename "BWReaderWidget.mobileprovision" \
-            --skip_install false
-          test -s "$RUNNER_TEMP/BWReaderWidget.mobileprovision"
-          security cms -D -i "$RUNNER_TEMP/BWReaderWidget.mobileprovision" \
-            > "$RUNNER_TEMP/widget-profile.plist"
-          WIDGET_BUNDLE_ID="$WIDGET_BUNDLE_ID" PROFILE="$RUNNER_TEMP/widget-profile.plist" \
-          python <<'PY'
-          import os
-          import plistlib
-
-          with open(os.environ["PROFILE"], "rb") as handle:
-              profile = plistlib.load(handle)
-          application_identifier = profile.get("Entitlements", {}).get(
-              "application-identifier", ""
-          )
-          if not application_identifier.endswith("." + os.environ["WIDGET_BUNDLE_ID"]):
-              raise SystemExit("Widget profile bundle identifier mismatch")
-          print("validated Widget distribution profile")
-          PY
-
-      # All three targets now use deterministic App Store profiles and the one
-      # imported distribution certificate; no development certificate is made.
-      - name: Archive signed device candidate
-        env:
           TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        shell: bash
         run: |
-          set -euo pipefail
-          mkdir -p "$RUNNER_TEMP/build-logs"
-          set -o pipefail
           xcodebuild archive \
-            -project "$PROJECT_FILE" \
-            -scheme "$SCHEME" \
+            -project "${{ steps.proj.outputs.project }}" \
+            -scheme "${{ steps.proj.outputs.scheme }}" \
             -destination "generic/platform=iOS" \
             -archivePath "$RUNNER_TEMP/app.xcarchive" \
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/private_keys/AuthKey_${API_KEY_ID}.p8" \
+            -authenticationKeyID "$API_KEY_ID" \
+            -authenticationKeyIssuerID "$API_ISSUER_ID" \
             DEVELOPMENT_TEAM="$TEAM_ID" \
-            | tee "$RUNNER_TEMP/build-logs/archive.log"
-
-      - name: Validate archived app and extension
-        env:
-          SAFARI_PACKAGE: ${{ steps.safari.outputs.package }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          APP_PATH="$(find "$RUNNER_TEMP/app.xcarchive/Products/Applications" -maxdepth 1 -type d -name '*.app' -print -quit)"
-          test -n "$APP_PATH" || { echo "archive contains no app"; exit 1; }
-          APPEX_PATH="$APP_PATH/PlugIns/BWReaderSafariExtension.appex"
-          test -d "$APPEX_PATH" || { echo "embedded Safari extension is missing"; exit 1; }
-          WIDGET_PATH="$APP_PATH/PlugIns/BWReaderWidget.appex"
-          test -d "$WIDGET_PATH" || { echo "embedded Reader widget is missing"; exit 1; }
-
-          # The web package must land at the appex root, never under an extra
-          # Resources directory.
-          test -f "$APPEX_PATH/manifest.json"
-          test ! -e "$APPEX_PATH/Resources/manifest.json"
-
-          APP_PATH="$APP_PATH" APPEX_PATH="$APPEX_PATH" WIDGET_PATH="$WIDGET_PATH" \
-          APP_BUNDLE_ID="$BUNDLE_ID" EXT_BUNDLE_ID="$EXTENSION_BUNDLE_ID" \
-          WIDGET_BUNDLE_ID="$WIDGET_BUNDLE_ID" \
-          SAFARI_PACKAGE="$SAFARI_PACKAGE" python <<'PY'
-          import os
-          import plistlib
-          import sys
-          import zipfile
-          from pathlib import Path
-
-          app = Path(os.environ["APP_PATH"])
-          appex = Path(os.environ["APPEX_PATH"])
-          widget = Path(os.environ["WIDGET_PATH"])
-
-          def load_info(bundle: Path) -> dict:
-              with (bundle / "Info.plist").open("rb") as handle:
-                  return plistlib.load(handle)
-
-          def validate_platform(
-              info: dict,
-              *,
-              label: str,
-              bundle_id: str,
-              expected_families: list[int],
-          ) -> None:
-              if info.get("CFBundleIdentifier") != bundle_id:
-                  raise SystemExit(f"{label} bundle ID mismatch: {info.get('CFBundleIdentifier')!r}")
-              if str(info.get("MinimumOSVersion")) != "17.0":
-                  raise SystemExit(f"{label} MinimumOSVersion must be 17.0: {info.get('MinimumOSVersion')!r}")
-              families = [int(value) for value in info.get("UIDeviceFamily", [])]
-              if families != expected_families:
-                  raise SystemExit(
-                      f"{label} device family mismatch: "
-                      f"UIDeviceFamily={families!r}, expected={expected_families!r}"
-                  )
-
-          app_info = load_info(app)
-          extension_info = load_info(appex)
-          widget_info = load_info(widget)
-          validate_platform(
-              app_info,
-              label="app",
-              bundle_id=os.environ["APP_BUNDLE_ID"],
-              # Universal, matching the extension. This gate exists to catch a
-              # device family that drifted by accident, so it is stated in both
-              # places and has to be moved deliberately -- as here.
-              expected_families=[1, 2],
-          )
-          validate_platform(
-              extension_info,
-              label="extension",
-              bundle_id=os.environ["EXT_BUNDLE_ID"],
-              expected_families=[1, 2],
-          )
-          validate_platform(
-              widget_info,
-              label="widget",
-              bundle_id=os.environ["WIDGET_BUNDLE_ID"],
-              expected_families=[1, 2],
-          )
-
-          app_version = (
-              str(app_info.get("CFBundleShortVersionString")),
-              str(app_info.get("CFBundleVersion")),
-          )
-          extension_version = (
-              str(extension_info.get("CFBundleShortVersionString")),
-              str(extension_info.get("CFBundleVersion")),
-          )
-          widget_version = (
-              str(widget_info.get("CFBundleShortVersionString")),
-              str(widget_info.get("CFBundleVersion")),
-          )
-          if app_version != extension_version:
-              raise SystemExit(
-                  f"app/extension version mismatch: {app_version!r} != {extension_version!r}"
-              )
-          if app_version != widget_version:
-              raise SystemExit(
-                  f"app/widget version mismatch: {app_version!r} != {widget_version!r}"
-              )
-          extension_contract = extension_info.get("NSExtension", {})
-          if extension_contract.get("NSExtensionPointIdentifier") != "com.apple.Safari.web-extension":
-              raise SystemExit("embedded extension is not a Safari Web Extension")
-          if extension_contract.get("NSExtensionPrincipalClass") != "BWReaderSafariExtension.SafariWebExtensionHandler":
-              raise SystemExit(
-                  "unexpected Safari extension handler: "
-                  f"{extension_contract.get('NSExtensionPrincipalClass')!r}"
-              )
-          widget_contract = widget_info.get("NSExtension", {})
-          if widget_contract.get("NSExtensionPointIdentifier") != "com.apple.widgetkit-extension":
-              raise SystemExit("embedded widget has the wrong extension point")
-
-          missing = []
-          changed = []
-          with zipfile.ZipFile(os.environ["SAFARI_PACKAGE"]) as archive:
-              for member in archive.infolist():
-                  if member.is_dir():
-                      continue
-                  target = appex / member.filename
-                  if not target.is_file():
-                      missing.append(member.filename)
-                  elif target.read_bytes() != archive.read(member):
-                      changed.append(member.filename)
-          if missing or changed:
-              raise SystemExit(
-                  "Safari resource integrity failure: "
-                  f"missing={missing!r}, changed={changed!r}"
-              )
-
-          print(
-              "validated archive:",
-              app_info["CFBundleIdentifier"],
-              extension_info["CFBundleIdentifier"],
-              widget_info["CFBundleIdentifier"],
-              "version", ".".join(app_version),
-          )
-          PY
-
-          codesign --verify --strict --verbose=2 "$APPEX_PATH"
-          codesign --verify --strict --verbose=2 "$WIDGET_PATH"
-          codesign --verify --deep --strict --verbose=2 "$APP_PATH"
-          codesign -d --verbose=4 "$APP_PATH" 2>&1 | tee "$RUNNER_TEMP/build-logs/app-codesign.txt"
-          codesign -d --verbose=4 "$APPEX_PATH" 2>&1 | tee "$RUNNER_TEMP/build-logs/extension-codesign.txt"
-          codesign -d --verbose=4 "$WIDGET_PATH" 2>&1 | tee "$RUNNER_TEMP/build-logs/widget-codesign.txt"
+            CODE_SIGN_STYLE=Automatic
 
       - name: Export IPA
         env:
           TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
-        shell: bash
+          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
+          API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
         run: |
-          set -euo pipefail
-          APP_PATH="$(find "$RUNNER_TEMP/app.xcarchive/Products/Applications" -maxdepth 1 -type d -name '*.app' -print -quit)"
-          WIDGET_PATH="$APP_PATH/PlugIns/BWReaderWidget.appex"
-          security cms -D -i "$WIDGET_PATH/embedded.mobileprovision" \
-            > "$RUNNER_TEMP/widget-profile.plist"
-          WIDGET_PROFILE="$(/usr/libexec/PlistBuddy -c 'Print :Name' "$RUNNER_TEMP/widget-profile.plist")"
-          test -n "$WIDGET_PROFILE" || { echo "Widget profile name is empty"; exit 1; }
           cat > "$RUNNER_TEMP/ExportOptions.plist" <<PLIST
           <?xml version="1.0" encoding="UTF-8"?>
           <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -517,60 +153,42 @@ jobs:
             <key>method</key><string>app-store-connect</string>
             <key>teamID</key><string>${TEAM_ID}</string>
             <key>destination</key><string>export</string>
-            <key>signingStyle</key><string>manual</string>
-            <key>signingCertificate</key><string>Apple Distribution</string>
-            <key>provisioningProfiles</key>
-            <dict>
-              <key>space.bwicarus.bwreader2</key><string>BWReader App Store App</string>
-              <key>space.bwicarus.bwreader2.Extension</key><string>BWReader App Store Extension</string>
-              <key>space.bwicarus.bwreader2.Widget</key><string>${WIDGET_PROFILE}</string>
-            </dict>
             <key>uploadSymbols</key><true/>
           </dict>
           </plist>
           PLIST
-          set -o pipefail
           xcodebuild -exportArchive \
             -archivePath "$RUNNER_TEMP/app.xcarchive" \
             -exportOptionsPlist "$RUNNER_TEMP/ExportOptions.plist" \
             -exportPath "$RUNNER_TEMP/export" \
-            | tee "$RUNNER_TEMP/build-logs/export.log"
-          find "$RUNNER_TEMP/export" -maxdepth 1 -type f -print
+            -allowProvisioningUpdates \
+            -authenticationKeyPath "$RUNNER_TEMP/private_keys/AuthKey_${API_KEY_ID}.p8" \
+            -authenticationKeyID "$API_KEY_ID" \
+            -authenticationKeyIssuerID "$API_ISSUER_ID"
+          ls -l "$RUNNER_TEMP/export"
+
+      - name: Upload build artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: safari-ios-build
+          retention-days: 7
+          path: |
+            ${{ runner.temp }}/export/*.ipa
+            extensions/bw-reader-webext-*-safari-ios.zip
+          if-no-files-found: warn
 
       - name: Upload to TestFlight
         if: ${{ inputs.upload }}
         env:
           API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           API_ISSUER_ID: ${{ secrets.APPLE_API_ISSUER_ID }}
-        shell: bash
         run: |
-          set -euo pipefail
-          IPA="$(find "$RUNNER_TEMP/export" -maxdepth 1 -name '*.ipa' -print -quit)"
-          test -n "$IPA" || { echo "no IPA produced"; exit 1; }
+          IPA=$(find "$RUNNER_TEMP/export" -name '*.ipa' | head -1)
+          test -n "$IPA" || { echo "no ipa produced"; exit 1; }
           xcrun altool --upload-app -f "$IPA" -t ios \
             --apiKey "$API_KEY_ID" --apiIssuer "$API_ISSUER_ID"
 
-      - name: Upload build artifacts
+      - name: Clean up keychain
         if: always()
-        uses: actions/upload-artifact@v4
-        with:
-          name: bwreader-ios-build
-          retention-days: 7
-          path: |
-            ${{ runner.temp }}/export/*.ipa
-            ${{ runner.temp }}/safari-extension.zip
-            ${{ runner.temp }}/build-logs/
-            ${{ runner.temp }}/xcodegen-version.txt
-            ios/BWReader/BWReader.xcodeproj/
-          if-no-files-found: warn
-
-      - name: Clean up signing material
-        if: always()
-        env:
-          API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-        shell: bash
-        run: |
-          rm -f "$RUNNER_TEMP/dist.p12"
-          rm -rf "$RUNNER_TEMP/private_keys"
-          rm -f "$HOME/.appstoreconnect/private_keys/AuthKey_${API_KEY_ID}.p8"
-          security delete-keychain build.keychain || true
+        run: security delete-keychain build.keychain || true

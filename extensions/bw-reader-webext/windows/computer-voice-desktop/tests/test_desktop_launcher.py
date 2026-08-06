@@ -363,7 +363,7 @@ class DesktopLauncherTests(unittest.TestCase):
         self.assertIn("不会从 A 的播放端 ID 推导", source)
         self.assertIn("自动音频路由不会启用", source)
 
-    def test_enable_with_capture_saves_v5_inputs_explicitly(self) -> None:
+    def test_enable_with_capture_confirms_fixed_audio_bus(self) -> None:
         window = BridgeWindow.__new__(BridgeWindow)
         window.root = object()
         window.paths = object()
@@ -406,7 +406,8 @@ class DesktopLauncherTests(unittest.TestCase):
             ) as save,
         ):
             window.on_enable_config()
-        self.assertIn("strict /5", confirmations[0][1])
+        self.assertIn("保存 /6", confirmations[0][1])
+        self.assertIn("不再查找 AudioService", confirmations[0][1])
         self.assertEqual(
             save.call_args.kwargs[
                 "virtual_microphone_capture_endpoint_id"
@@ -689,8 +690,14 @@ class DesktopLauncherTests(unittest.TestCase):
                 "desktop_launcher.run_bootstrap_with_history_sync",
                 return_value=7,
             ) as bootstrap,
+            patch(
+                "desktop_launcher.WindowsShortcutBroker",
+            ) as broker,
         ):
             self.assertEqual(main(), 7)
+        broker.assert_called_once_with()
+        broker.return_value.__enter__.assert_called_once_with()
+        broker.return_value.__exit__.assert_called_once()
         bootstrap.assert_called_once()
 
     def test_history_worker_cli_is_exact_and_headless(self) -> None:

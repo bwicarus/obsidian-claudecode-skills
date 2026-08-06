@@ -92,11 +92,8 @@ TRUSTED_PWA_MATCHES = {
 # the upload is rejected outright when they differ. This is also the name shown
 # in the iPad Safari extension list, so it is the user-facing one.
 APP_NAME = "bwicarus-test"
-# Must match the bundle ID of the App Store Connect record, otherwise
-# altool cannot resolve which app the upload belongs to.
-BUNDLE_ID = "space.bwicarus.bwreader2"
-# Matches the App Store Connect record (Apple ID 6793932077).
-SKU = "bw-reader-ipad-002"
+BUNDLE_ID = "space.bwicarus.bwreader"
+SKU = "bw-reader-ipad-001"
 PRIMARY_LANGUAGE = "zh-Hans"
 SAFARI_ICON = "icons/icon-1024-safari.png"
 # 诊断结论:极简包 + 这六个全不透明 RGB 图标可通过 Apple 校验(RGBA 透明 512 疑似打包失败根因)。

@@ -19,6 +19,9 @@ param(
 
     [long]$OwnerStartFileTimeUtc = 0,
 
+    [ValidateSet('codex-desktop', 'chatgpt-classic')]
+    [string]$TargetApp = 'codex-desktop',
+
     # Send options
     [string]$Text,
     [string]$File,
@@ -85,8 +88,11 @@ function Read-TypistLease {
     try {
         $lease = Get-Content -LiteralPath $Path -Raw | ConvertFrom-Json
         $names = @($lease.PSObject.Properties.Name | Sort-Object)
-        if (($names -join ',') -ne
-            'ownerPid,ownerStartFileTimeUtc,pid,script,startedAtFileTimeUtc') {
+        $fieldList = $names -join ','
+        if ($fieldList -ne
+                'ownerPid,ownerStartFileTimeUtc,pid,script,startedAtFileTimeUtc' -and
+            $fieldList -ne
+                'ownerPid,ownerStartFileTimeUtc,pid,script,startedAtFileTimeUtc,targetApp') {
             throw 'lease fields mismatch'
         }
         if ($lease.pid -isnot [long] -and $lease.pid -isnot [int]) {
@@ -104,6 +110,18 @@ function Read-TypistLease {
         }
         if ([string]$lease.script -cne [string]$script) {
             throw 'lease script mismatch'
+        }
+        $leaseTargetApp = if ($null -ne $lease.PSObject.Properties['targetApp']) {
+            [string]$lease.targetApp
+        } else {
+            'codex-desktop'
+        }
+        if ($leaseTargetApp -notin @('codex-desktop', 'chatgpt-classic')) {
+            throw 'lease target app invalid'
+        }
+        if ($null -eq $lease.PSObject.Properties['targetApp']) {
+            $lease | Add-Member -NotePropertyName targetApp `
+                -NotePropertyValue $leaseTargetApp
         }
         $hasOwnerPid = $null -ne $lease.ownerPid
         $hasOwnerStart = $null -ne $lease.ownerStartFileTimeUtc
@@ -158,6 +176,11 @@ function Get-TypistProcess {
             $commandLine -notmatch
                 '(?i)(?:^|\s)--owner-process-(?:id|start-file-time-utc)(?=\s|$)'
         }
+        $targetAppPattern = '(?i)(?:^|\s)--target-app\s+' +
+            [Regex]::Escape([string]$lease.targetApp) + '(?=\s|$)'
+        $targetArgumentsMatch = $commandLine -match $targetAppPattern -or
+            ([string]$lease.targetApp -ceq 'codex-desktop' -and
+             $commandLine -notmatch '(?i)(?:^|\s)--target-app(?=\s|$)')
         if ($started -ne [long]$lease.startedAtFileTimeUtc -or
             ![String]::Equals(
                 [string]$row.ExecutablePath,
@@ -165,7 +188,8 @@ function Get-TypistProcess {
                 [StringComparison]::OrdinalIgnoreCase
             ) -or
             $commandLine -notmatch $scriptPattern -or
-            !$ownerArgumentsMatch) {
+            !$ownerArgumentsMatch -or
+            !$targetArgumentsMatch) {
             throw 'PID identity mismatch'
         }
         # Force System.Diagnostics.Process to own a handle to this exact process.
@@ -190,7 +214,9 @@ function Write-TypistLease {
     param(
         [System.Diagnostics.Process]$Process,
         [int]$OwnerProcessId = 0,
-        [long]$OwnerProcessStartFileTimeUtc = 0
+        [long]$OwnerProcessStartFileTimeUtc = 0,
+        [ValidateSet('codex-desktop', 'chatgpt-classic')]
+        [string]$TargetApplication = 'codex-desktop'
     )
     $lease = [ordered]@{
         pid = $Process.Id
@@ -202,6 +228,7 @@ function Write-TypistLease {
         ownerStartFileTimeUtc = if ($OwnerProcessStartFileTimeUtc -gt 0) {
             $OwnerProcessStartFileTimeUtc
         } else { $null }
+        targetApp = $TargetApplication
     }
     $tmp = "$pidFile.tmp"
     $lease | ConvertTo-Json -Compress | Set-Content -LiteralPath $tmp -Encoding UTF8 -NoNewline
@@ -221,7 +248,13 @@ function Remove-TypistLeaseIfMatch {
 
 function Invoke-Typist {
     param([string[]]$TypistArgs)
-    $all = @($script, '--config', $config, '--log', $log, '--state-dir', $stateDir) + $TypistArgs
+    $all = @(
+        $script,
+        '--config', $config,
+        '--log', $log,
+        '--state-dir', $stateDir,
+        '--target-app', $TargetApp
+    ) + $TypistArgs
     & $python @all
     $exitCode = $LASTEXITCODE
     if ($exitCode -ne 0) {
@@ -302,6 +335,9 @@ switch ($Action) {
             ownerStartFileTimeUtc = if ($lease) {
                 $lease.ownerStartFileTimeUtc
             } else { $null }
+            targetApp      = if ($lease) {
+                [string]$lease.targetApp
+            } else { $TargetApp }
             panelRunning  = [bool](Get-PanelProcess)
             paused        = Test-Path -LiteralPath (Join-Path $stateDir 'PAUSED')
             emergencyStop = Test-Path -LiteralPath (Join-Path $stateDir 'EMERGENCY_STOP')
@@ -366,6 +402,7 @@ switch ($Action) {
                 '--config', $config,
                 '--log', $log,
                 '--state-dir', $stateDir,
+                '--target-app', $TargetApp,
                 'run',
                 '--idle-exit-seconds',
                 $(if ($OwnerPid -gt 0) { '0' } else { '600' })
@@ -383,7 +420,8 @@ switch ($Action) {
             $lease = Write-TypistLease `
                 -Process $process `
                 -OwnerProcessId $OwnerPid `
-                -OwnerProcessStartFileTimeUtc $OwnerStartFileTimeUtc
+                -OwnerProcessStartFileTimeUtc $OwnerStartFileTimeUtc `
+                -TargetApplication $TargetApp
             $ready = $false
             $deadline = [DateTime]::UtcNow.AddSeconds(5)
             while ([DateTime]::UtcNow -lt $deadline) {

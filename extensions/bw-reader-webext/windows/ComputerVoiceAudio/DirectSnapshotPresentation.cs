@@ -62,14 +62,7 @@ internal static class DirectSnapshotMarkdown
         }
     }
 
-    internal static string Render(JsonObject snapshot) =>
-        ReaderContextMcpServer.BuildAssistantContext(
-            snapshot,
-            drawingToolAvailable: true);
-
-    // Kept only as a rollback reference while the local viewer and MCP use
-    // the same ordered context relay. It is never served.
-    private static string RenderLegacy(JsonObject snapshot)
+    internal static string Render(JsonObject snapshot)
     {
         StringBuilder output = new();
         output.AppendLine("# Reader 实时快照");
@@ -1468,18 +1461,13 @@ internal static class DirectSnapshotTerminal
 
 internal sealed class DirectSnapshotViewer : IDisposable
 {
+    private const string ViewerWindowTitle = "Reader 实时快照";
     private const int MaximumPresentationBytes = 2 * 1024 * 1024;
     internal const string ViewerPath = "/reader-context-view";
     internal const string SnapshotPath =
         "/reader-context-snapshot.json";
     internal const string MarkdownPath =
         "/reader-context-live.md";
-    internal const string DrawingImagePath =
-        "/reader-context-current-drawing.jpg";
-    internal const string CurrentPageImageAsset =
-        "current-page";
-    internal const string CurrentPageImageUrl =
-        SnapshotPath + "?asset=" + CurrentPageImageAsset;
 
     private static readonly byte[] ViewerDocument =
         Encoding.UTF8.GetBytes(
@@ -1534,10 +1522,6 @@ internal sealed class DirectSnapshotViewer : IDisposable
                 .body { min-height: 10rem; max-height: 54vh; overflow: auto;
                   padding: .85rem; border-radius: 10px; background: #080d19;
                   border: 1px solid #1f2a42; }
-                .diagnostic { border-color: #76591f;
-                  background: rgba(57, 42, 14, .92); }
-                .diagnostic .body { border-color: #76591f;
-                  background: #171107; }
                 .muted { color: #9aa9c2; }
                 .warning { color: #ffd37d; }
                 ul { margin: .4rem 0 0; padding-left: 1.4rem; }
@@ -1572,15 +1556,9 @@ internal sealed class DirectSnapshotViewer : IDisposable
                   <pre id="selection" class="muted">当前没有可用选区。</pre>
                 </section>
                 <section class="wide">
-                  <h2>AI 当前可用的页面正文</h2>
+                  <h2>当前页正文</h2>
                   <pre id="pageMeta" class="muted"></pre>
                   <pre id="pageBody" class="body">尚未收到稳定页正文。</pre>
-                </section>
-                <section id="cachedSection"
-                         class="wide diagnostic" hidden>
-                  <h2>最近收到的缓存正文（仅诊断，AI 当前不会使用）</h2>
-                  <pre id="cachedMeta" class="warning"></pre>
-                  <pre id="cachedBody" class="body"></pre>
                 </section>
                 <section>
                   <h2>高亮、卡片与未锚定内容</h2>
@@ -1592,13 +1570,13 @@ internal sealed class DirectSnapshotViewer : IDisposable
                 </section>
                 <section class="wide">
                   <h2>绘图与页图</h2>
-                   <pre id="drawing" class="muted">当前页没有视觉引用。</pre>
-                   <p id="imageNote" class="warning" hidden></p>
-                   <a id="imageLink" target="_blank" rel="noreferrer" hidden>
-                     在新窗口打开 Windows 本地页图
-                   </a>
-                   <img id="pageImage" alt="Windows 本地渲染的当前 PDF 页"
-                        referrerpolicy="no-referrer">
+                  <pre id="drawing" class="muted">当前页没有视觉引用。</pre>
+                  <p id="imageNote" class="warning" hidden></p>
+                  <a id="imageLink" target="_blank" rel="noreferrer" hidden>
+                    在 Reader 中打开原图（可能需要登录）
+                  </a>
+                  <img id="pageImage" alt="当前页图（加载失败时请使用上方链接）"
+                       referrerpolicy="no-referrer">
                 </section>
                 <section class="wide">
                   <h2>最近阅读器事件</h2>
@@ -1614,9 +1592,6 @@ internal sealed class DirectSnapshotViewer : IDisposable
                 const selection = byId("selection");
                 const pageMeta = byId("pageMeta");
                 const pageBody = byId("pageBody");
-                const cachedSection = byId("cachedSection");
-                const cachedMeta = byId("cachedMeta");
-                const cachedBody = byId("cachedBody");
                 const embeds = byId("embeds");
                 const viewport = byId("viewport");
                 const drawing = byId("drawing");
@@ -1624,9 +1599,6 @@ internal sealed class DirectSnapshotViewer : IDisposable
                 const imageLink = byId("imageLink");
                 const pageImage = byId("pageImage");
                 const latest = byId("latest");
-                let pageImageKey = null;
-                let pageImageObjectUrl = null;
-                let pageImageGeneration = 0;
 
                 const valueText = value =>
                   value === null || value === undefined
@@ -1741,127 +1713,13 @@ internal sealed class DirectSnapshotViewer : IDisposable
                   return { plain, highlights, cards };
                 }
 
-                function clearImageVisual() {
-                  if (pageImageObjectUrl !== null) {
-                    URL.revokeObjectURL(pageImageObjectUrl);
-                    pageImageObjectUrl = null;
-                  }
+                function resetImage() {
                   pageImage.removeAttribute("src");
                   pageImage.style.display = "none";
                   imageLink.hidden = true;
                   imageLink.removeAttribute("href");
                   imageNote.hidden = true;
                   imageNote.textContent = "";
-                }
-
-                function resetImage() {
-                  pageImageGeneration += 1;
-                  pageImageKey = null;
-                  clearImageVisual();
-                }
-
-                // 已删除旧行为：“本地查看器的跨站内嵌请求可能没有登录 Cookie”。
-                // 当前页图只从 Windows localhost 同源端点读取。
-                async function updatePageImage(snapshot, page) {
-                  const revisionValue = snapshot.revision;
-                  const file = typeof page?.file === "string"
-                    ? page.file
-                    : null;
-                  const pageNumber = Number.isInteger(page?.page)
-                    ? page.page
-                    : null;
-                  const kind = typeof page?.kind === "string"
-                    ? page.kind
-                    : snapshot.activeReading?.kind;
-                  const key = file !== null
-                    && pageNumber !== null
-                    && revisionValue !== null
-                    && revisionValue !== undefined
-                      ? `${file}\u0000${pageNumber}\u0000${revisionValue}`
-                      : null;
-                  if (key === pageImageKey) return;
-
-                  pageImageKey = key;
-                  pageImageGeneration += 1;
-                  const generation = pageImageGeneration;
-                  clearImageVisual();
-                  if (key === null) {
-                    imageNote.hidden = false;
-                    imageNote.textContent =
-                      "本地页图不可用：当前快照没有可解析的书页。";
-                    return;
-                  }
-                  if (kind !== "pdf") {
-                    imageNote.hidden = false;
-                    imageNote.textContent =
-                      "本地页图仅用于 PDF；当前内容不是 PDF。";
-                    return;
-                  }
-
-                  const url = new URL(
-                    "/reader-context-snapshot.json",
-                    window.location.origin);
-                  url.searchParams.set("asset", "current-page");
-                  url.searchParams.set(
-                    "revision",
-                    String(revisionValue));
-                  imageNote.hidden = false;
-                  imageNote.textContent =
-                    "正在从 Windows 本地书库生成当前页图……";
-                  try {
-                    const response = await fetch(url, {
-                      cache: "no-store",
-                      credentials: "same-origin"
-                    });
-                    if (generation !== pageImageGeneration) return;
-                    if (!response.ok) {
-                      imageNote.textContent =
-                        response.status === 409
-                          ? "快照已更新，等待下一轮本地页图。"
-                          : `Windows 本地页图不可用（HTTP ${response.status}）；`
-                            + "正文和选区仍可正常使用。";
-                      return;
-                    }
-                    const blob = await response.blob();
-                    if (generation !== pageImageGeneration) return;
-                    if (blob.type !== "image/png" || blob.size === 0) {
-                      imageNote.textContent =
-                        "Windows 本地页图格式无效；"
-                        + "正文和选区仍可正常使用。";
-                      return;
-                    }
-                    const objectUrl = URL.createObjectURL(blob);
-                    if (generation !== pageImageGeneration) {
-                      URL.revokeObjectURL(objectUrl);
-                      return;
-                    }
-                    pageImageObjectUrl = objectUrl;
-                    pageImage.onload = () => {
-                      if (generation !== pageImageGeneration) return;
-                      pageImage.style.display = "block";
-                      imageNote.hidden = false;
-                      imageNote.textContent =
-                        "页图由 Windows 本地 PDF 渲染；"
-                        + "未向 Pi 发送图片请求或登录凭据。";
-                    };
-                    pageImage.onerror = () => {
-                      if (generation !== pageImageGeneration) return;
-                      pageImage.style.display = "none";
-                      imageNote.hidden = false;
-                      imageNote.textContent =
-                        "Windows 本地页图无法显示；"
-                        + "正文和选区仍可正常使用。";
-                    };
-                    pageImage.src = objectUrl;
-                    imageLink.href = objectUrl;
-                    imageLink.hidden = false;
-                  } catch {
-                    if (generation !== pageImageGeneration) return;
-                    imageNote.hidden = false;
-                    imageNote.textContent =
-                      "Windows 本地页图生成失败；"
-                      + "正文和选区仍可正常使用。";
-                  }
                 }
 
                 function clearProjection(message) {
@@ -1872,9 +1730,6 @@ internal sealed class DirectSnapshotViewer : IDisposable
                   selection.textContent = "当前没有可用选区。";
                   pageMeta.textContent = "";
                   pageBody.textContent = "没有可安全显示的正文。";
-                  cachedSection.hidden = true;
-                  cachedMeta.textContent = "";
-                  cachedBody.textContent = "";
                   embeds.replaceChildren();
                   viewport.textContent = "当前没有 EPUB 视口。";
                   drawing.textContent = "当前页没有视觉引用。";
@@ -1940,38 +1795,10 @@ internal sealed class DirectSnapshotViewer : IDisposable
                       `已截断：${valueText(page.truncated)}`
                     ].join("  |  ");
                     pageBody.textContent = projection.plain
-                      || (contextStatus === "stale"
-                        ? "AI 当前没有可用正文（快照已陈旧）。"
-                        : "（当前页无文字层）");
+                      || "（当前页无文字层）";
                   } else {
                     pageMeta.textContent = "";
                     pageBody.textContent = "尚未收到稳定页正文。";
-                  }
-
-                  const cached =
-                    snapshot.presentationDiagnostic?.cachedPage;
-                  cachedSection.hidden = true;
-                  cachedMeta.textContent = "";
-                  cachedBody.textContent = "";
-                  if (cached?.aiUsable === false
-                      && typeof cached.text === "string"
-                      && cached.text.length > 0) {
-                    cachedSection.hidden = false;
-                    cachedMeta.textContent = [
-                      "仅供排查传输与陈旧状态；"
-                        + "reader_context_snapshot 不会返回这段正文。",
-                      `原更新时间：${valueText(cached.updatedAtUtc)}`,
-                      `原页码：${valueText(cached.page)}`,
-                      `文件：${valueText(cached.file)}`,
-                      `来源：${valueText(cached.textSource)}`,
-                      `已截断：${valueText(cached.truncated)}`
-                    ].join("\n");
-                    try {
-                      cachedBody.textContent =
-                        parseReaderText(cached.text).plain;
-                    } catch {
-                      cachedBody.textContent = cached.text;
-                    }
                   }
 
                   embeds.replaceChildren();
@@ -2010,7 +1837,37 @@ internal sealed class DirectSnapshotViewer : IDisposable
                     ? JSON.stringify(snapshot.latestEvent, null, 2)
                     : "暂无事件。";
 
-                  void updatePageImage(snapshot, page);
+                  resetImage();
+                  const image = page?.visual?.page_image;
+                  if (typeof image === "string" && image.length > 0) {
+                    let url;
+                    try {
+                      url = new URL(
+                        image,
+                        "https://bwicarus.taile44d0c.ts.net");
+                    } catch {
+                      throw new Error("页图 URL 无效");
+                    }
+                    if (url.protocol !== "https:"
+                        || url.origin
+                          !== "https://bwicarus.taile44d0c.ts.net") {
+                      throw new Error("页图 URL 来源无效");
+                    }
+                    imageLink.href = url.href;
+                    imageLink.hidden = false;
+                    imageNote.hidden = false;
+                    imageNote.textContent =
+                      "页图接口受 Reader 登录保护。"
+                      + "本地查看器的跨站内嵌请求可能没有登录 Cookie；"
+                      + "失败时请使用原图链接，并在 Reader 中登录。";
+                    pageImage.onload = () => {
+                      pageImage.style.display = "block";
+                    };
+                    pageImage.onerror = () => {
+                      pageImage.style.display = "none";
+                    };
+                    pageImage.src = url.href;
+                  }
                 }
 
                 async function refresh() {
@@ -2037,258 +1894,13 @@ internal sealed class DirectSnapshotViewer : IDisposable
             </html>
             """);
 
-    private static readonly byte[] RelayViewerDocument =
-        Encoding.UTF8.GetBytes(
-            """
-            <!doctype html>
-            <html lang="zh-CN">
-            <head>
-              <meta charset="utf-8">
-              <meta name="viewport" content="width=device-width,initial-scale=1">
-              <title>Reader 上下文接力</title>
-              <style>
-                :root {
-                  color-scheme: dark;
-                  font-family: "Segoe UI", "Microsoft YaHei UI", sans-serif;
-                  background: #0b1020;
-                  color: #e8edf8;
-                }
-                * { box-sizing: border-box; }
-                body { margin: 0; min-height: 100vh; background:
-                  radial-gradient(circle at top right, #173464 0, transparent 36rem),
-                  #0b1020; }
-                header {
-                  position: sticky; top: 0; z-index: 2;
-                  display: flex; gap: 1rem; align-items: center;
-                  justify-content: space-between;
-                  padding: .9rem 1.25rem;
-                  background: rgba(9, 14, 29, .94);
-                  border-bottom: 1px solid #263655;
-                  backdrop-filter: blur(12px);
-                }
-                header h1 { margin: 0; font-size: 1.1rem; }
-                a { color: #8ec5ff; }
-                .pill { border-radius: 999px; padding: .25rem .7rem;
-                  background: #293755; color: #dce8ff; font-size: .82rem; }
-                .pill.ready { background: #0e614c; }
-                .pill.error { background: #7b2431; }
-                main { width: min(1050px, 100%); margin: 0 auto;
-                  padding: 1rem; display: grid; gap: 1rem; }
-                section { border: 1px solid #263655; border-radius: 14px;
-                  padding: 1.1rem 1.25rem;
-                  background: rgba(18, 26, 47, .93);
-                  box-shadow: 0 12px 36px rgba(0,0,0,.24); }
-                #relay h1 { font-size: 1.35rem; margin: 0 0 1rem; }
-                #relay h2 { color: #bad6ff; font-size: 1.05rem;
-                  margin: 1.4rem 0 .65rem; }
-                #relay p { margin: .45rem 0; line-height: 1.7;
-                  white-space: pre-wrap; overflow-wrap: anywhere; }
-                #relay blockquote { margin: .6rem 0; padding: .65rem .9rem;
-                  border-left: 4px solid #6ba8ef; border-radius: 6px;
-                  color: #c7d9f5; background: #0b1427; }
-                #relay ul { margin: .4rem 0; padding-left: 1.35rem; }
-                #relay li { margin: .35rem 0; line-height: 1.6;
-                  white-space: pre-wrap; overflow-wrap: anywhere; }
-                .muted { color: #aebbd0; }
-                .warning { color: #ffd37d; }
-                #drawingImage { display: none; width: 100%; max-height: 72vh;
-                  object-fit: contain; margin-top: .8rem; border-radius: 10px;
-                  border: 1px solid #31456a; background: #050811; }
-              </style>
-            </head>
-            <body>
-              <header>
-                <h1>Reader 上下文接力</h1>
-                <div>
-                  <span id="status" class="pill">等待 Reader</span>
-                  <a href="/reader-context-live.md" target="_blank"
-                     rel="noreferrer">查看 Markdown 原文</a>
-                </div>
-              </header>
-              <main>
-                <section id="relay">
-                  <p class="muted">等待首个 Reader 上下文……</p>
-                </section>
-                <section>
-                  <h2>当前页、笔迹与页面附属内容合成图</h2>
-                  <p id="drawingStatus" class="muted">
-                    当前没有已经稳定并发布的合成图。
-                  </p>
-                  <a id="drawingLink"
-                     href="/reader-context-current-drawing.jpg"
-                     target="_blank" rel="noreferrer" hidden>
-                    在新窗口打开当前合成图
-                  </a>
-                  <img id="drawingImage"
-                       alt="PWA 渲染的当前页、笔迹与页面附属内容合成图">
-                </section>
-              </main>
-              <script>
-                "use strict";
-                const relay = document.getElementById("relay");
-                const status = document.getElementById("status");
-                const drawingStatus =
-                  document.getElementById("drawingStatus");
-                const drawingLink =
-                  document.getElementById("drawingLink");
-                const drawingImage =
-                  document.getElementById("drawingImage");
-                let lastMarkdown = "";
-                let drawingEtag = "";
-                let drawingObjectUrl = "";
-
-                function clearDrawingImage() {
-                  if (drawingObjectUrl) {
-                    URL.revokeObjectURL(drawingObjectUrl);
-                    drawingObjectUrl = "";
-                  }
-                  drawingEtag = "";
-                  drawingImage.removeAttribute("src");
-                  drawingImage.style.display = "none";
-                  drawingLink.hidden = true;
-                }
-
-                function appendTextElement(tag, text, className) {
-                  const node = document.createElement(tag);
-                  node.textContent = text;
-                  if (className) node.className = className;
-                  relay.append(node);
-                  return node;
-                }
-
-                function renderMarkdown(markdown) {
-                  if (markdown === lastMarkdown) return;
-                  lastMarkdown = markdown;
-                  relay.replaceChildren();
-                  let list = null;
-                  let quote = null;
-                  for (const raw of markdown.replace(/\r\n?/g, "\n").split("\n")) {
-                    const line = raw.trimEnd();
-                    if (line.startsWith("# ")) {
-                      list = null; quote = null;
-                      appendTextElement("h1", line.slice(2));
-                    } else if (line.startsWith("## ")) {
-                      list = null; quote = null;
-                      appendTextElement("h2", line.slice(3));
-                    } else if (line.startsWith("> ")) {
-                      list = null;
-                      if (!quote) {
-                        quote = document.createElement("blockquote");
-                        relay.append(quote);
-                      }
-                      const paragraph = document.createElement("p");
-                      paragraph.textContent = line.slice(2);
-                      quote.append(paragraph);
-                    } else if (line.startsWith("- ")) {
-                      quote = null;
-                      if (!list) {
-                        list = document.createElement("ul");
-                        relay.append(list);
-                      }
-                      const item = document.createElement("li");
-                      item.textContent = line.slice(2)
-                        .replace(/\*\*/g, "").replace(/`/g, "");
-                      list.append(item);
-                    } else if (line.length > 0) {
-                      list = null; quote = null;
-                      const italic = line.startsWith("_")
-                        && line.endsWith("_") && line.length > 2;
-                      appendTextElement(
-                        "p",
-                        italic ? line.slice(1, -1) : line,
-                        italic ? "muted" : "");
-                    } else {
-                      list = null; quote = null;
-                    }
-                  }
-                }
-
-                async function refreshRelay() {
-                  try {
-                    const response = await fetch(
-                      "/reader-context-live.md",
-                      { cache: "no-store", credentials: "same-origin" });
-                    const markdown = await response.text();
-                    if (!response.ok) throw new Error(`HTTP ${response.status}`);
-                    renderMarkdown(markdown);
-                    status.textContent = "已连接";
-                    status.className = "pill ready";
-                  } catch (error) {
-                    status.textContent = "等待更新";
-                    status.className = "pill error";
-                    if (!lastMarkdown) {
-                      relay.replaceChildren();
-                      appendTextElement(
-                        "p",
-                        `上下文暂时不可读：${error.message}`,
-                        "warning");
-                    }
-                  }
-                }
-
-                async function refreshDrawing() {
-                  try {
-                    const headers = {};
-                    if (drawingEtag) headers["If-None-Match"] = drawingEtag;
-                    const response = await fetch(
-                      "/reader-context-current-drawing.jpg",
-                      {
-                        cache: "no-store",
-                        credentials: "same-origin",
-                        headers
-                      });
-                    if (response.status === 304) return;
-                    if (!response.ok) {
-                      clearDrawingImage();
-                      drawingStatus.textContent =
-                        response.status === 404
-                          ? "当前没有稳定笔迹；旧笔迹图不会被复用。"
-                          : "PWA 正在生成当前合成图，稍后会自动出现。";
-                      drawingLink.hidden = true;
-                      return;
-                    }
-                    const blob = await response.blob();
-                    if (blob.type !== "image/jpeg" || blob.size === 0) {
-                      throw new Error("invalid image");
-                    }
-                    const objectUrl = URL.createObjectURL(blob);
-                    if (drawingObjectUrl) URL.revokeObjectURL(drawingObjectUrl);
-                    drawingObjectUrl = objectUrl;
-                    drawingEtag = response.headers.get("ETag") || "";
-                    drawingImage.src = objectUrl;
-                    drawingImage.style.display = "block";
-                    drawingLink.hidden = false;
-                    drawingStatus.textContent =
-                      "已取得 PWA 渲染的最新当前页合成图。"
-                      + "AI 需要判断圈画、箭头或重叠关系时会读取同一张图。";
-                  } catch {
-                    clearDrawingImage();
-                    drawingStatus.textContent =
-                      "当前合成图暂不可用；不会展示旧页或旧笔迹图。";
-                  }
-                }
-
-                void refreshRelay();
-                void refreshDrawing();
-                setInterval(() => void refreshRelay(), 1000);
-                setInterval(() => void refreshDrawing(), 1500);
-              </script>
-            </body>
-            </html>
-            """);
-
     private readonly string _snapshotPath;
     private readonly int _listenPort;
     private readonly string _viewerUrl;
     private readonly string _profilePath;
-    private readonly ILocalSnapshotPageImageRenderer
-        _pageImageRenderer;
-    private readonly Func<
-        ReaderVisualDeliveryRequest,
-        CancellationToken,
-        Task<ReaderVisualCapture?>>? _fetchPublishedVisualAsync;
     private readonly object _gate = new();
     private Process? _viewerProcess;
+    private string? _viewerOwnerId;
     private bool _disposed;
 
     internal DirectSnapshotViewer(string snapshotPath) : this(
@@ -2299,19 +1911,10 @@ internal sealed class DirectSnapshotViewer : IDisposable
 
     internal DirectSnapshotViewer(
         string snapshotPath,
-        int listenPort,
-        ILocalSnapshotPageImageRenderer? pageImageRenderer = null,
-        Func<
-            ReaderVisualDeliveryRequest,
-            CancellationToken,
-            Task<ReaderVisualCapture?>>? fetchPublishedVisualAsync = null)
+        int listenPort)
     {
         _snapshotPath = System.IO.Path.GetFullPath(snapshotPath);
         _listenPort = listenPort;
-        _pageImageRenderer = pageImageRenderer
-            ?? new LocalSnapshotPageImageRenderer(
-                LocalBookPageResolverOptions.FromEnvironment());
-        _fetchPublishedVisualAsync = fetchPublishedVisualAsync;
         _viewerUrl =
             $"http://{DirectBridgeContract.ListenHost}:{listenPort}"
             + ViewerPath;
@@ -2331,18 +1934,12 @@ internal sealed class DirectSnapshotViewer : IDisposable
         }
         return WriteBytesAsync(
             context,
-            RelayViewerDocument,
+            ViewerDocument,
             StatusCodes.Status200OK);
     }
 
     internal async Task HandleSnapshotAsync(HttpContext context)
     {
-        if (IsCurrentPageImageRequest(context))
-        {
-            await HandleCurrentPageImageAsync(context)
-                .ConfigureAwait(false);
-            return;
-        }
         if (!PrepareLocalResponse(
             context,
             "application/json; charset=utf-8"))
@@ -2366,220 +1963,6 @@ internal sealed class DirectSnapshotViewer : IDisposable
             JsonSerializer.SerializeToUtf8Bytes(
                 snapshot,
                 DirectBridgeContract.JsonOptions),
-            StatusCodes.Status200OK).ConfigureAwait(false);
-    }
-
-    internal async Task HandleCurrentPageImageAsync(
-        HttpContext context)
-    {
-        if (!PrepareLocalResponse(context, "image/png"))
-        {
-            return;
-        }
-        JsonObject? snapshot = await ReadFreshSnapshotAsync(
-            context.RequestAborted).ConfigureAwait(false);
-        if (snapshot is null)
-        {
-            await WriteImageFailureAsync(
-                context,
-                StatusCodes.Status503ServiceUnavailable,
-                "local-page-image-snapshot-unavailable")
-                .ConfigureAwait(false);
-            return;
-        }
-        if (
-            !TryNonNegativeRevision(
-                snapshot["revision"],
-                out long revision)
-        )
-        {
-            await WriteImageFailureAsync(
-                context,
-                StatusCodes.Status503ServiceUnavailable,
-                "local-page-image-revision-invalid")
-                .ConfigureAwait(false);
-            return;
-        }
-        if (
-            context.Request.Query.TryGetValue(
-                "revision",
-                out Microsoft.Extensions.Primitives.StringValues
-                    requestedRevision)
-            && (
-                requestedRevision.Count != 1
-                || !long.TryParse(
-                    requestedRevision[0],
-                    System.Globalization.NumberStyles.None,
-                    System.Globalization.CultureInfo.InvariantCulture,
-                    out long expectedRevision)
-                || expectedRevision < 0
-            )
-        )
-        {
-            await WriteImageFailureAsync(
-                context,
-                StatusCodes.Status400BadRequest,
-                "local-page-image-revision-invalid")
-                .ConfigureAwait(false);
-            return;
-        }
-        if (
-            requestedRevision.Count == 1
-            && long.Parse(
-                requestedRevision[0]!,
-                System.Globalization.CultureInfo.InvariantCulture)
-                != revision
-        )
-        {
-            await WriteImageFailureAsync(
-                context,
-                StatusCodes.Status409Conflict,
-                "local-page-image-revision-changed")
-                .ConfigureAwait(false);
-            return;
-        }
-
-        LocalSnapshotPageImageResult rendered;
-        try
-        {
-            rendered = await _pageImageRenderer.RenderAsync(
-                snapshot,
-                context.RequestAborted).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch
-        {
-            rendered = LocalSnapshotPageImageResult.Failed(
-                "local-page-image-render-failed");
-        }
-        if (
-            !rendered.Success
-            || rendered.PngBytes is not { Length: > 0 } png
-        )
-        {
-            string reason = rendered.FailureReason
-                ?? "local-page-image-render-failed";
-            int status = reason is
-                "local-page-image-page-unavailable"
-                or "local-page-image-not-pdf"
-                or "local-page-image-file-missing"
-                ? StatusCodes.Status404NotFound
-                : StatusCodes.Status503ServiceUnavailable;
-            await WriteImageFailureAsync(
-                context,
-                status,
-                reason).ConfigureAwait(false);
-            return;
-        }
-        if (!string.IsNullOrWhiteSpace(rendered.CacheTag))
-        {
-            context.Response.Headers.ETag =
-                '"' + rendered.CacheTag + '"';
-        }
-        await WriteBytesAsync(
-            context,
-            png,
-            StatusCodes.Status200OK).ConfigureAwait(false);
-    }
-
-    internal async Task HandleDrawingImageAsync(HttpContext context)
-    {
-        if (!PrepareLocalResponse(context, "image/jpeg"))
-        {
-            return;
-        }
-        if (_fetchPublishedVisualAsync is null)
-        {
-            await WriteImageFailureAsync(
-                context,
-                StatusCodes.Status503ServiceUnavailable,
-                "reader-drawing-image-cache-unavailable")
-                .ConfigureAwait(false);
-            return;
-        }
-        JsonObject? snapshot = await ReadFreshSnapshotAsync(
-            context.RequestAborted).ConfigureAwait(false);
-        ReaderVisualDeliveryRequest? request = snapshot is null
-            ? null
-            : ReaderContextMcpServer.BuildVisualRequest(snapshot);
-        if (snapshot is null || request is null)
-        {
-            await WriteImageFailureAsync(
-                context,
-                StatusCodes.Status404NotFound,
-                "reader-drawing-image-not-ready")
-                .ConfigureAwait(false);
-            return;
-        }
-        ReaderVisualCapture? visual;
-        try
-        {
-            visual = await _fetchPublishedVisualAsync(
-                request,
-                context.RequestAborted).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            throw;
-        }
-        catch (ReaderVisualDeliveryException)
-        {
-            visual = null;
-        }
-        if (
-            visual is null
-            || visual.MimeType
-                != ReaderVisualDeliveryProtocol.MimeType
-            || visual.Data.Length == 0
-        )
-        {
-            await WriteImageFailureAsync(
-                context,
-                StatusCodes.Status503ServiceUnavailable,
-                "reader-drawing-image-waiting-for-pwa")
-                .ConfigureAwait(false);
-            return;
-        }
-        JsonObject? latest = await ReadFreshSnapshotAsync(
-            context.RequestAborted).ConfigureAwait(false);
-        if (
-            latest is null
-            || !ReaderContextMcpServer.VisualRequestStillCurrent(
-                latest,
-                request)
-        )
-        {
-            await WriteImageFailureAsync(
-                context,
-                StatusCodes.Status409Conflict,
-                "reader-drawing-image-superseded")
-                .ConfigureAwait(false);
-            return;
-        }
-        string etag = '"'
-            + Convert.ToHexString(
-                SHA256.HashData(visual.Data))
-                .ToLowerInvariant()
-            + '"';
-        context.Response.Headers.ETag = etag;
-        if (
-            context.Request.Headers.IfNoneMatch.Count == 1
-            && string.Equals(
-                context.Request.Headers.IfNoneMatch[0],
-                etag,
-                StringComparison.Ordinal)
-        )
-        {
-            context.Response.StatusCode =
-                StatusCodes.Status304NotModified;
-            return;
-        }
-        await WriteBytesAsync(
-            context,
-            visual.Data,
             StatusCodes.Status200OK).ConfigureAwait(false);
     }
 
@@ -2672,12 +2055,9 @@ internal sealed class DirectSnapshotViewer : IDisposable
             {
                 return null;
             }
-            JsonObject? persistedPage =
-                snapshot["currentPage"]?.DeepClone() as JsonObject;
             ReaderContextMcpServer.ApplyFreshness(
                 snapshot,
                 DateTimeOffset.UtcNow);
-            AddStalePageDiagnostic(snapshot, persistedPage);
             return snapshot;
         }
         catch (OperationCanceledException)
@@ -2694,59 +2074,13 @@ internal sealed class DirectSnapshotViewer : IDisposable
         }
     }
 
-    private static void AddStalePageDiagnostic(
-        JsonObject snapshot,
-        JsonObject? persistedPage)
-    {
-        if (
-            snapshot["contextStatus"]?.GetValue<string>() != "stale"
-            || snapshot["currentPage"] is not JsonObject stalePage
-            || stalePage["text"]?.GetValue<string>() is not string staleText
-            || staleText.Length != 0
-            || persistedPage is null
-        )
-        {
-            return;
-        }
-
-        // ApplyFreshness has replaced currentPage in the projection. Preserve
-        // the pre-freshness page only in this localhost response; it is never
-        // persisted and never reaches reader_context_snapshot.
-        string? text = persistedPage["text"]?.GetValue<string>();
-        if (string.IsNullOrEmpty(text))
-        {
-            return;
-        }
-        JsonObject? active = snapshot["activeReading"] as JsonObject;
-        snapshot["presentationDiagnostic"] = new JsonObject
-        {
-            ["cachedPage"] = new JsonObject
-            {
-                ["aiUsable"] = false,
-                ["updatedAtUtc"] =
-                    snapshot["updatedAtUtc"]?.DeepClone(),
-                ["file"] =
-                    persistedPage["file"]?.DeepClone()
-                    ?? active?["file"]?.DeepClone(),
-                ["title"] =
-                    persistedPage["title"]?.DeepClone()
-                    ?? active?["title"]?.DeepClone(),
-                ["page"] =
-                    persistedPage["page"]?.DeepClone()
-                    ?? active?["page"]?.DeepClone(),
-                ["text"] = text,
-                ["textSource"] =
-                    persistedPage["textSource"]?.DeepClone(),
-                ["truncated"] =
-                    persistedPage["truncated"]?.DeepClone(),
-            },
-        };
-    }
-
-    internal void OpenIfSnapshotMode(string contextDeliveryMode)
+    internal void OpenIfSnapshotMode(
+        string contextDeliveryMode,
+        string ownerId)
     {
         if (
             contextDeliveryMode != DirectContextDeliveryMode.SnapshotMcp
+            || string.IsNullOrWhiteSpace(ownerId)
             || _disposed)
         {
             return;
@@ -2757,12 +2091,18 @@ internal sealed class DirectSnapshotViewer : IDisposable
             {
                 return;
             }
-            if (_viewerProcess is { HasExited: false })
+            if (
+                _viewerProcess is { HasExited: false }
+                && string.Equals(
+                    _viewerOwnerId,
+                    ownerId,
+                    StringComparison.Ordinal)
+            )
             {
                 return;
             }
-            _viewerProcess?.Dispose();
-            _viewerProcess = null;
+            StopViewerProcessBestEffort();
+            CloseStaleViewerWindowsBestEffort();
 
             try
             {
@@ -2774,6 +2114,9 @@ internal sealed class DirectSnapshotViewer : IDisposable
                     _viewerUrl,
                     _profilePath);
                 _viewerProcess = Process.Start(start);
+                _viewerOwnerId = _viewerProcess is null
+                    ? null
+                    : ownerId;
             }
             catch (Exception exception) when (
                 exception is IOException
@@ -2783,9 +2126,28 @@ internal sealed class DirectSnapshotViewer : IDisposable
             {
                 // Presentation is best-effort. Voice and MCP continue even
                 // if Windows cannot create the isolated app-mode viewer.
-                _viewerProcess?.Dispose();
-                _viewerProcess = null;
+                StopViewerProcessBestEffort();
             }
+        }
+    }
+
+    internal void CloseForConnection(string ownerId)
+    {
+        if (string.IsNullOrWhiteSpace(ownerId))
+        {
+            return;
+        }
+        lock (_gate)
+        {
+            if (!string.Equals(
+                _viewerOwnerId,
+                ownerId,
+                StringComparison.Ordinal))
+            {
+                return;
+            }
+            StopViewerProcessBestEffort();
+            CloseStaleViewerWindowsBestEffort();
         }
     }
 
@@ -2826,8 +2188,66 @@ internal sealed class DirectSnapshotViewer : IDisposable
         lock (_gate)
         {
             _disposed = true;
-            _viewerProcess?.Dispose();
-            _viewerProcess = null;
+            StopViewerProcessBestEffort();
+            CloseStaleViewerWindowsBestEffort();
+        }
+    }
+
+    private void StopViewerProcessBestEffort()
+    {
+        Process? process = _viewerProcess;
+        _viewerProcess = null;
+        _viewerOwnerId = null;
+        if (process is null)
+        {
+            return;
+        }
+        try
+        {
+            if (!process.HasExited)
+            {
+                process.Kill(entireProcessTree: true);
+            }
+        }
+        catch (Exception exception) when (
+            exception is InvalidOperationException
+            or NotSupportedException
+            or System.ComponentModel.Win32Exception)
+        {
+        }
+        finally
+        {
+            process.Dispose();
+        }
+    }
+
+    private static void CloseStaleViewerWindowsBestEffort()
+    {
+        foreach (Process process in Process.GetProcessesByName("msedge"))
+        {
+            try
+            {
+                if (
+                    string.Equals(
+                        process.MainWindowTitle,
+                        ViewerWindowTitle,
+                        StringComparison.Ordinal)
+                    && !process.HasExited
+                )
+                {
+                    process.Kill(entireProcessTree: true);
+                }
+            }
+            catch (Exception exception) when (
+                exception is InvalidOperationException
+                or NotSupportedException
+                or System.ComponentModel.Win32Exception)
+            {
+            }
+            finally
+            {
+                process.Dispose();
+            }
         }
     }
 
@@ -2869,7 +2289,9 @@ internal sealed class DirectSnapshotViewer : IDisposable
         context.Response.Headers.Pragma = "no-cache";
         context.Response.Headers["Content-Security-Policy"] =
             "default-src 'none'; connect-src 'self'; "
-            + "img-src 'self' blob:; style-src 'unsafe-inline'; "
+            + "img-src 'self' "
+            + DirectSnapshotMarkdown.ReaderOrigin
+            + "; style-src 'unsafe-inline'; "
             + "script-src 'unsafe-inline'; base-uri 'none'; "
             + "form-action 'none'; frame-ancestors 'none'";
         context.Response.Headers["Cross-Origin-Resource-Policy"] =
@@ -2900,29 +2322,6 @@ internal sealed class DirectSnapshotViewer : IDisposable
             value,
             context.RequestAborted).ConfigureAwait(false);
     }
-
-    private static Task WriteImageFailureAsync(
-        HttpContext context,
-        int statusCode,
-        string reason)
-    {
-        context.Response.ContentType = "text/plain; charset=utf-8";
-        return WriteBytesAsync(
-            context,
-            Encoding.UTF8.GetBytes(reason),
-            statusCode);
-    }
-
-    private static bool IsCurrentPageImageRequest(
-        HttpContext context) =>
-        context.Request.Query.TryGetValue(
-            "asset",
-            out Microsoft.Extensions.Primitives.StringValues asset)
-        && asset.Count == 1
-        && string.Equals(
-            asset[0],
-            CurrentPageImageAsset,
-            StringComparison.Ordinal);
 
     private static bool TryNonNegativeRevision(
         JsonNode? node,
