@@ -397,6 +397,19 @@
   }
   probeLine("脚本已加载: " + String(location.href || "").slice(0, 60));
 
+  // Frame reports, shown on the page's own probe.
+  //
+  // Without this the frame's half of the journey stays invisible: the page can
+  // say it handed the snapshot over, and the bridge can say nothing arrived,
+  // with no way to see which of the two is mistaken.
+  try {
+    window.addEventListener("message", function (event) {
+      var d = event.data;
+      if (!d || d.contract !== "bw-frame-probe/1" || !d.text) return;
+      probeLine(String(d.text));
+    });
+  } catch (_) {}
+
   // Delivers a snapshot to the bridge frame embedded in this page.
   //
   // The frame lives in the extension's shadow tree, which this script can reach
