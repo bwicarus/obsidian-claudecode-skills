@@ -5168,6 +5168,96 @@ internal static class DirectBridgeSelfTest
                 events,
                 frames).ConfigureAwait(false),
             "active-reading");
+        DirectActiveReading stableOrdinalReading =
+            FileDirectSnapshotContextAdapter.ValidateActiveReading(
+                JsonSerializer.SerializeToElement(new
+                {
+                    kind = "web",
+                    file = "https://example.test/regions",
+                    title = "Stable regions",
+                    page = 0,
+                    selectionState = "unknown",
+                    selection = (string?)null,
+                    observedAtEpochMs = 1_750_000_000_100L,
+                    sourceInstanceId = "source-stable-regions",
+                    selectionRegions = new
+                    {
+                        contract = "reader-selection-regions/1",
+                        total = 2,
+                        truncated = false,
+                        items = new[]
+                        {
+                            new
+                            {
+                                selectionId = "selection-2",
+                                label = "#2 12:01",
+                                ordinal = 2,
+                                createdAtEpochMs = 1_750_000_000_001L,
+                            },
+                            new
+                            {
+                                selectionId = "selection-3",
+                                label = "#3 12:02",
+                                ordinal = 3,
+                                createdAtEpochMs = 1_750_000_000_002L,
+                            },
+                        },
+                    },
+                }));
+        JsonElement stableOrdinalRegions =
+            stableOrdinalReading.SelectionRegions!.Value;
+        bool descendingOrdinalRejected = false;
+        try
+        {
+            _ = FileDirectSnapshotContextAdapter.ValidateActiveReading(
+                JsonSerializer.SerializeToElement(new
+                {
+                    kind = "web",
+                    file = "https://example.test/regions",
+                    title = "Stable regions",
+                    page = 0,
+                    selectionState = "unknown",
+                    selection = (string?)null,
+                    observedAtEpochMs = 1_750_000_000_100L,
+                    sourceInstanceId = "source-stable-regions",
+                    selectionRegions = new
+                    {
+                        contract = "reader-selection-regions/1",
+                        total = 2,
+                        truncated = false,
+                        items = new[]
+                        {
+                            new
+                            {
+                                selectionId = "selection-3",
+                                label = "#3 12:02",
+                                ordinal = 3,
+                                createdAtEpochMs = 1_750_000_000_002L,
+                            },
+                            new
+                            {
+                                selectionId = "selection-2",
+                                label = "#2 12:01",
+                                ordinal = 2,
+                                createdAtEpochMs = 1_750_000_000_001L,
+                            },
+                        },
+                    },
+                }));
+        }
+        catch (DirectProtocolException exception)
+        {
+            descendingOrdinalRejected = exception.Code
+                == "BW_READER_ACTIVE_READING_SCHEMA_INVALID";
+        }
+        Require(
+            stableOrdinalRegions.GetProperty("items")[0]
+                .GetProperty("ordinal").GetInt32() == 2
+            && stableOrdinalRegions.GetProperty("items")[1]
+                .GetProperty("ordinal").GetInt32() == 3
+            && descendingOrdinalRejected,
+            "direct-active-reading-selection-ordinals-allow-stable-gaps",
+            checks);
         DirectActiveReading aliasedActiveReading =
             FileDirectSnapshotContextAdapter.ValidateActiveReading(
                 JsonSerializer.SerializeToElement(new

@@ -658,7 +658,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
         }
         HashSet<string> ids = new(StringComparer.Ordinal);
         int priorOrdinal = 0;
-        int expectedOrdinal = total - count + 1;
         foreach (JsonElement item in items.EnumerateArray())
         {
             if (item.ValueKind != JsonValueKind.Object)
@@ -697,10 +696,8 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 || label.Any(char.IsControl)
                 || !item.GetProperty("ordinal").TryGetInt32(
                     out int ordinal)
-                || ordinal != expectedOrdinal
                 || ordinal <= priorOrdinal
                 || ordinal < 1
-                || ordinal > total
                 || !label.StartsWith(
                     "#" + ordinal.ToString(
                         CultureInfo.InvariantCulture) + " ",
@@ -713,11 +710,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 throw ActiveReadingInvalid();
             }
             priorOrdinal = ordinal;
-            expectedOrdinal = checked(expectedOrdinal + 1);
-        }
-        if (count > 0 && priorOrdinal != total)
-        {
-            throw ActiveReadingInvalid();
         }
         return value.Clone();
     }
