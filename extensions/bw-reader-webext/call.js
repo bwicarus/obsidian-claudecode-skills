@@ -271,10 +271,27 @@ function storedPage(value) {
 // and no storage relay to fall out of step. This is the path that carries the
 // page now; the runtime message below stays as a fallback for surfaces that
 // have no frame of their own.
+// Reports from inside the frame, shown by the host page.
+//
+// Everything this file says goes through note() to the host's own status line,
+// which the page-level probe never displays -- so this entire leg has been
+// mute. The page reported "delivered to frame" and the bridge saw nothing, with
+// nothing in between to say why. Ninth time tonight the failing link also
+// swallowed the report of its own failure.
+function frameProbe(text) {
+  try {
+    window.parent.postMessage(
+      { contract: "bw-frame-probe/1", text: String(text) },
+      "*"
+    );
+  } catch (_) {}
+}
+
 window.addEventListener("message", (event) => {
   const d = event.data;
   if (!d || d.contract !== "bw-page-context/1" || d.type !== "page") return;
   if (!d.page || typeof d.page !== "object") return;
+  frameProbe("框收到页面: " + String(d.page.url || "").slice(0, 50));
   forwardDirect(d.page);
 });
 
@@ -371,17 +388,26 @@ async function postSnapshot(page) {
 async function forwardDirect(page) {
   lastPage = page;
   render(page);
-  if (!contextSurfaceVisible()) return;
+  if (!contextSurfaceVisible()) {
+    frameProbe("框: 文档不可见,跳过");
+    return;
+  }
   const signature =
     `${page.url}|${page.title || ""}|` +
     `${contentDigest(page.text)}|${contentDigest(page.selection)}`;
-  if (signature === lastSignature) return;
+  if (signature === lastSignature) {
+    frameProbe("框: 内容未变,跳过");
+    return;
+  }
   try {
+    frameProbe("框: 开始 POST");
     await postSnapshot(page);
     lastSignature = signature;
+    frameProbe("框: POST 成功");
   } catch (err) {
     // Said out loud. Every silent failure in this chain cost a build to find.
     note("快照投递失败: " + describe(err));
+    frameProbe("框: POST 失败 " + describe(err));
     if (lastSignature === signature) lastSignature = "";
   }
 }
