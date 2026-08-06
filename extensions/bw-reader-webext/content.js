@@ -639,11 +639,21 @@
 
     function mirrorPreference(value) {
       try {
-        if (!extensionStore || typeof extensionStore.set !== "function") return;
+        if (!extensionStore || typeof extensionStore.set !== "function") {
+          probeLine("镜像写入: 无存储通道");
+          return;
+        }
         Promise.resolve(
           extensionStore.set(MIRROR_KEY, { schema: 1, enabled: !!value })
-        ).catch(function () {});
-      } catch (_) {}
+        ).then(
+          function () { probeLine("镜像写入: " + (value ? "开" : "关")); },
+          function (err) {
+            probeLine("镜像写入失败: " + (err && err.message || "未知"));
+          }
+        );
+      } catch (err) {
+        probeLine("镜像写入异常: " + (err && err.message || "未知"));
+      }
     }
 
     function preferenceFromRuntime() {
@@ -666,6 +676,7 @@
           return live;
         }
       } catch (_) {}
+      probeLine("RC.ctxSync: 不可用(本页读不到开关)");
       return null;
     }
 
@@ -699,7 +710,13 @@
         return;
       }
       preferenceFromMirror().then(function (mirrored) {
-        if (mirrored === null) return;
+        if (mirrored === null) {
+          // Said out loud. An empty mirror is the most likely state on a fresh
+          // install and it looks exactly like a working one that reads false --
+          // staying quiet here would hide the single fact worth knowing.
+          probeLine("镜像偏好: 空(尚未写入)");
+          return;
+        }
         preferenceKnown = true;
         var changedMirror = contextSyncEnabled !== mirrored;
         contextSyncEnabled = mirrored;
