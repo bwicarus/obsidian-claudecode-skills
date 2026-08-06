@@ -24,16 +24,21 @@ const ANNOTATION = readFileSync(
   "utf8",
 );
 
-test("App-only PencilKit ownership leaves a web fallback when native layout is stale", () => {
+test("App-only PencilKit owns book-page strokes while web ink still owns sticky notes", () => {
   assert.match(WEBVIEW, /window\.__BW_NATIVE_PENCILKIT_INK__ = true/);
   for (const source of [PDF, EPUB]) {
     const pointerStart = source.indexOf("function _inkPointerDown(e)");
     const pointerEnd = source.indexOf("function _inkPointerMove(e)", pointerStart);
     assert.ok(pointerStart >= 0 && pointerEnd > pointerStart);
-    assert.doesNotMatch(
-      source.slice(pointerStart, pointerEnd),
-      /__BW_NATIVE_PENCILKIT_INK__|__bwNativeInkHost/,
+    const pointerDown = source.slice(pointerStart, pointerEnd);
+    const noteIndex = pointerDown.indexOf("noteEl");
+    const nativeGuardIndex = pointerDown.indexOf(
+      "window.__BW_NATIVE_PENCILKIT_INK__ === true && !noteEl",
     );
+    const stickyNoteRouteIndex = pointerDown.indexOf("RC.stickynote");
+    assert.ok(noteIndex >= 0 && nativeGuardIndex > noteIndex);
+    assert.ok(stickyNoteRouteIndex > nativeGuardIndex);
+    assert.match(pointerDown, /if \(noteEl\)[\s\S]*penBegin/);
   }
 });
 
