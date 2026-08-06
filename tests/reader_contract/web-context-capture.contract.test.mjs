@@ -37,3 +37,54 @@ test("article extraction consumes live text nodes once and excludes hidden ances
   assert.match(extract, /style\.display !== "none"/);
   assert.match(extract, /if \(ok && el\.parentElement\) ok = rendered\(el\.parentElement\)/);
 });
+
+test("web context follows the current viewport and keeps whole-article fallback", () => {
+  const viewportStart = CONTENT.indexOf("function viewportArticleText(root)");
+  const snapshotStart = CONTENT.indexOf("function snapshot()", viewportStart);
+  const reportStart = CONTENT.indexOf("function report(force)", snapshotStart);
+  assert.ok(viewportStart >= 0 && snapshotStart > viewportStart && reportStart > snapshotStart);
+
+  const viewport = CONTENT.slice(viewportStart, snapshotStart);
+  assert.match(viewport, /document\.createRange\(\)/);
+  assert.match(viewport, /range\.getClientRects\(\)/);
+  assert.match(
+    viewport,
+    /function clippingRect\(el\)[\s\S]*style\.overflowX[\s\S]*style\.overflowY/,
+  );
+  assert.match(
+    viewport,
+    /function visibleTextSlice\(value, rects, firstVisible, lastVisible\)[\s\S]*value\.slice\(start, end\)/,
+  );
+  assert.match(
+    viewport,
+    /if \(!visibleText\.trim\(\)\) return null/,
+  );
+  assert.match(viewport, /viewKey:[\s\S]*viewportRevision[\s\S]*scrollTop/);
+
+  const snapshot = CONTENT.slice(snapshotStart, reportStart);
+  assert.match(
+    snapshot,
+    /var viewport = viewportArticleText\(root\);[\s\S]*if \(viewport\)[\s\S]*text = viewport\.text[\s\S]*else \{[\s\S]*text = articleText\(root\)/,
+  );
+  assert.match(snapshot, /viewKey: viewKey/);
+  assert.match(
+    CONTENT,
+    /signature = snap\.url \+ "\|" \+ snap\.title \+ "\|" \+ snap\.viewKey/,
+  );
+});
+
+test("root and inner scrollers share the bounded viewport refresh path", () => {
+  assert.match(
+    CONTENT,
+    /function noteViewportScroll\(\) \{[\s\S]*viewportRevision \+= 1;[\s\S]*schedule\(false\)/,
+  );
+  assert.match(
+    CONTENT,
+    /window\.addEventListener\("scroll", noteViewportScroll, \{ passive: true \}\)/,
+  );
+  assert.match(
+    CONTENT,
+    /document\.addEventListener\("scroll", function \(event\)[\s\S]*noteViewportScroll\(\);[\s\S]*\{ capture: true, passive: true \}/,
+  );
+  assert.match(CONTENT, /var THROTTLE_MS = 1500;/);
+});

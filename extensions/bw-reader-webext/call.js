@@ -226,6 +226,8 @@ function render(page) {
 // it changed, which is the only moment that matters.
 let lastGateReport = "";
 let lastBodySignature = "";
+let directPostRunning = false;
+let directPostQueued = null;
 
 async function forward(page, force) {
   lastPage = page;
@@ -244,7 +246,7 @@ async function forward(page, force) {
   if (!contextPreferenceKnown || !contextSyncEnabled || !contextSurfaceVisible()) return;
   const current = ensureContextLink();
   if (!current) return;
-  const signature = `${page.url}|${page.title || ""}|${contentDigest(page.text)}|${contentDigest(page.selection)}`;
+  const signature = `${page.url}|${page.title || ""}|${page.viewKey || ""}|${contentDigest(page.text)}|${contentDigest(page.selection)}`;
   if (!force && signature === lastSignature) return;
 
   try {
@@ -297,7 +299,7 @@ window.addEventListener("message", (event) => {
   if (!d || d.contract !== "bw-page-context/1" || d.type !== "page") return;
   if (!d.page || typeof d.page !== "object") return;
   frameProbe("框收到页面: " + String(d.page.url || "").slice(0, 50));
-  forwardDirect(d.page);
+  queueDirect(d.page);
 });
 
 // The direct path, deliberately not guarded by the preference gates.
@@ -411,11 +413,11 @@ async function forwardDirect(page) {
     frameProbe("框: 文档不可见,跳过");
     return;
   }
-  // The stable page includes URL, title and body. A selection or heartbeat does
-  // not need to resend it; an active-only POST updates the live position while
-  // preserving the accepted stable text on Windows.
+  // The current view includes URL, title, visible body and the internal view
+  // key. A selection or heartbeat in the same view does not resend the body;
+  // an actual scroll does, even when adjacent regions contain identical text.
   const bodySig =
-    `${page.url}|${page.title || ""}|${contentDigest(page.text)}`;
+    `${page.url}|${page.title || ""}|${page.viewKey || ""}|${contentDigest(page.text)}`;
   const bodyIsRepeat = bodySig === lastBodySignature;
   try {
     frameProbe(bodyIsRepeat ? "框: 开始 POST(仅位置)" : "框: 开始 POST");
@@ -427,6 +429,33 @@ async function forwardDirect(page) {
     note("快照投递失败: " + describe(err));
     frameProbe("框: POST 失败 " + describe(err));
   }
+}
+
+// Serialize one-shot writes and coalesce anything waiting behind the active
+// request to the newest view. Without this, a slow POST for the old scroll
+// position can complete after a newer POST and overwrite the snapshot with a
+// stale viewport even though the user has already moved on.
+async function drainDirectQueue() {
+  if (directPostRunning) return;
+  directPostRunning = true;
+  try {
+    while (directPostQueued) {
+      const next = directPostQueued;
+      directPostQueued = null;
+      await forwardDirect(next);
+    }
+  } finally {
+    directPostRunning = false;
+    // A page can be queued between the loop condition and finally in unusual
+    // promise scheduling. Re-enter rather than leaving the newest view stuck.
+    if (directPostQueued) drainDirectQueue();
+  }
+}
+
+function queueDirect(page) {
+  if (directPostQueued) frameProbe("框: 合并等待中的旧视图");
+  directPostQueued = page;
+  drainDirectQueue();
 }
 
 if (chrome.runtime?.onMessage) {

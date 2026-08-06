@@ -434,6 +434,7 @@
   var lastSignature = "";
   var pendingSignature = "";
   var contextRevision = 0;
+  var viewportRevision = 0;
   var timer = null;
   var preferenceKnown = false;
   var contextSyncEnabled = false;
@@ -617,25 +618,238 @@
     try { return String(root.innerText || ""); } catch (_) { return ""; }
   }
 
+  // Reads only the prose intersecting the current visual viewport.
+  //
+  // The previous snapshot used articleText(root), so scrolling produced the
+  // same whole-article body and was discarded by content de-duplication. Text
+  // ranges give line boxes in viewport coordinates without cloning or changing
+  // the host page. A missing Range/TreeWalker implementation is reported by a
+  // null return so snapshot() can retain the existing whole-article fallback.
+  function viewportArticleText(root) {
+    if (
+      !root ||
+      typeof document.createRange !== "function" ||
+      typeof document.createTreeWalker !== "function" ||
+      typeof NodeFilter === "undefined"
+    ) return null;
+
+    var visual = window.visualViewport || null;
+    var width = Number(visual && visual.width) ||
+      Number(window.innerWidth) ||
+      Number(document.documentElement && document.documentElement.clientWidth) || 0;
+    var height = Number(visual && visual.height) ||
+      Number(window.innerHeight) ||
+      Number(document.documentElement && document.documentElement.clientHeight) || 0;
+    if (!(width > 0) || !(height > 0)) return null;
+
+    var left = Number(visual && visual.offsetLeft) || 0;
+    var top = Number(visual && visual.offsetTop) || 0;
+    var right = left + width;
+    var bottom = top + height;
+    var scrolling = document.scrollingElement || document.documentElement || document.body;
+    var scrollLeft = Number(window.scrollX);
+    var scrollTop = Number(window.scrollY);
+    if (!isFinite(scrollLeft)) scrollLeft = Number(scrolling && scrolling.scrollLeft) || 0;
+    if (!isFinite(scrollTop)) scrollTop = Number(scrolling && scrolling.scrollTop) || 0;
+
+    var parts = [];
+    var block = null;
+    var blockText = "";
+    var range = null;
+    var visibilityCache = typeof WeakMap === "function" ? new WeakMap() : null;
+    var clipCache = typeof WeakMap === "function" ? new WeakMap() : null;
+
+    function rendered(el) {
+      if (!el || el.nodeType !== 1) return true;
+      if (visibilityCache && visibilityCache.has(el)) return visibilityCache.get(el);
+      var ok = true;
+      try {
+        if (
+          el.hidden ||
+          el.getAttribute("aria-hidden") === "true" ||
+          el.matches(ARTICLE_DROP)
+        ) ok = false;
+      } catch (_) {}
+      if (ok) {
+        try {
+          var style = window.getComputedStyle(el);
+          ok = !!style &&
+            style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            style.visibility !== "collapse" &&
+            style.contentVisibility !== "hidden" &&
+            parseFloat(style.opacity || "1") !== 0;
+        } catch (_) {}
+      }
+      if (ok && el.parentElement) ok = rendered(el.parentElement);
+      if (visibilityCache) visibilityCache.set(el, ok);
+      return ok;
+    }
+
+    // Intersect the visual viewport with every overflow-clipping ancestor.
+    // A text line can be inside the browser viewport but outside an inner
+    // reading pane; getClientRects alone cannot distinguish those two cases.
+    function clippingRect(el) {
+      if (!el || el.nodeType !== 1) {
+        return { left: left, top: top, right: right, bottom: bottom };
+      }
+      if (clipCache && clipCache.has(el)) return clipCache.get(el);
+      var inherited = clippingRect(el.parentElement);
+      if (!inherited) {
+        if (clipCache) clipCache.set(el, null);
+        return null;
+      }
+      var clip = {
+        left: inherited.left,
+        top: inherited.top,
+        right: inherited.right,
+        bottom: inherited.bottom,
+      };
+      try {
+        var style = window.getComputedStyle(el);
+        var rect = el.getBoundingClientRect();
+        var clipsX = /^(auto|scroll|hidden|clip|overlay)$/.test(
+          String(style && style.overflowX || "")
+        );
+        var clipsY = /^(auto|scroll|hidden|clip|overlay)$/.test(
+          String(style && style.overflowY || "")
+        );
+        if (clipsX) {
+          clip.left = Math.max(clip.left, rect.left);
+          clip.right = Math.min(clip.right, rect.right);
+        }
+        if (clipsY) {
+          clip.top = Math.max(clip.top, rect.top);
+          clip.bottom = Math.min(clip.bottom, rect.bottom);
+        }
+      } catch (_) {}
+      if (clip.left >= clip.right || clip.top >= clip.bottom) clip = null;
+      if (clipCache) clipCache.set(el, clip);
+      return clip;
+    }
+
+    function intersects(rect, clip) {
+      return !!(
+        rect && clip && rect.width > 0 && rect.height > 0 &&
+        rect.right > clip.left && rect.left < clip.right &&
+        rect.bottom > clip.top && rect.top < clip.bottom
+      );
+    }
+
+    // A single text node can wrap over many screens. Appending the entire node
+    // when only its final line is visible sends the beginning of the paragraph
+    // and may push the actually visible line past MAX_TEXT. Browser line boxes
+    // do not expose character offsets, so use their ordered ratio to take a
+    // bounded slice, with one line of context on both sides.
+    function visibleTextSlice(value, rects, firstVisible, lastVisible) {
+      if (!rects.length || firstVisible < 0 || lastVisible < firstVisible) return "";
+      if (firstVisible === 0 && lastVisible === rects.length - 1) return value;
+      var startRatio = Math.max(0, firstVisible - 1) / rects.length;
+      var endRatio = Math.min(rects.length, lastVisible + 2) / rects.length;
+      var start = Math.floor(value.length * startRatio);
+      var end = Math.ceil(value.length * endRatio);
+      var boundary = /[\s,.;:!?，。；：！？、]/;
+      var floor = Math.max(0, start - 80);
+      var ceiling = Math.min(value.length, end + 80);
+      while (start > floor && !boundary.test(value.charAt(start - 1))) start -= 1;
+      while (end < ceiling && !boundary.test(value.charAt(end))) end += 1;
+      return value.slice(start, end);
+    }
+
+    function textBlock(el) {
+      try {
+        var found = el.closest(ARTICLE_BLOCK);
+        if (found && (found === root || root.contains(found))) return found;
+      } catch (_) {}
+      return root;
+    }
+
+    function flush() {
+      var value = blockText.replace(/\s+/g, " ").trim();
+      if (value) parts.push(value);
+      blockText = "";
+    }
+
+    try {
+      range = document.createRange();
+      if (!range || typeof range.getClientRects !== "function") return null;
+      var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      var node = walker.nextNode();
+      var seen = 0;
+      while (node && seen < 8000) {
+        seen += 1;
+        var parent = node.parentElement;
+        var value = String(node.nodeValue || "");
+        if (value.trim() && parent && rendered(parent)) {
+          range.selectNodeContents(node);
+          var rects = Array.prototype.slice.call(range.getClientRects() || []);
+          var clip = clippingRect(parent);
+          var firstVisible = -1;
+          var lastVisible = -1;
+          for (var i = 0; i < rects.length; i += 1) {
+            if (intersects(rects[i], clip)) {
+              if (firstVisible < 0) firstVisible = i;
+              lastVisible = i;
+            }
+          }
+          if (firstVisible >= 0) {
+            var nextBlock = textBlock(parent);
+            if (block && nextBlock !== block) flush();
+            block = nextBlock;
+            blockText += visibleTextSlice(value, rects, firstVisible, lastVisible);
+          }
+        }
+        node = walker.nextNode();
+      }
+    } catch (_) {
+      return null;
+    } finally {
+      try { if (range && typeof range.detach === "function") range.detach(); } catch (_) {}
+    }
+    flush();
+    var visibleText = parts.join(String.fromCharCode(10) + String.fromCharCode(10));
+    if (!visibleText.trim()) return null;
+    return {
+      text: visibleText,
+      // Internal only: it makes a real view movement distinct even when two
+      // adjacent regions contain identical text. call.js consumes the key for
+      // de-duplication but never places it in the strict Windows payload.
+      viewKey: [
+        viewportRevision,
+        Math.round(scrollLeft),
+        Math.round(scrollTop),
+        Math.round(width),
+        Math.round(height),
+      ].join(":"),
+    };
+  }
+
   function snapshot() {
     var body = document.body;
     if (!body) return null;
     var text = "";
+    var viewKey = "fallback:" + viewportRevision;
     try {
       var root = articleRoot() || body;
-      text = articleText(root);
-      var whole = String(body.innerText || "");
-      // Falls back when extraction keeps too little to be the article. A short
-      // page is legitimate; a page whose "article" is a fraction of its text
-      // means the wrong subtree was chosen, and half a page beats none.
-      if (text.length < 200 && whole.length > text.length * 2) {
-        probeLine("正文提取: 命中过短,回退全页");
-        text = whole;
-      } else if (root !== body) {
-        probeLine(
-          "正文提取: " + String(root.tagName || "").toLowerCase() +
-          " " + text.length + "/" + whole.length + " 字"
-        );
+      var viewport = viewportArticleText(root);
+      if (viewport) {
+        text = viewport.text;
+        viewKey = viewport.viewKey;
+        probeLine("视口正文: " + text.length + " 字");
+      } else {
+        text = articleText(root);
+        var whole = String(body.innerText || "");
+        // Range geometry is unavailable: retain the established whole-article
+        // extraction and its conservative fallback instead of losing context.
+        if (text.length < 200 && whole.length > text.length * 2) {
+          probeLine("正文提取: 命中过短,回退全页");
+          text = whole;
+        } else if (root !== body) {
+          probeLine(
+            "正文提取: " + String(root.tagName || "").toLowerCase() +
+            " " + text.length + "/" + whole.length + " 字"
+          );
+        }
       }
       text = text
         // Collapses runs of spaces and tabs, then runs of blank lines.
@@ -661,6 +875,7 @@
       title: String(document.title || ""),
       text: text,
       selection: selection,
+      viewKey: viewKey,
     };
   }
 
@@ -706,7 +921,7 @@
     }
     var snap = snapshot();
     if (!snap) return;
-    var signature = snap.url + "|" + snap.title + "|" +
+    var signature = snap.url + "|" + snap.title + "|" + snap.viewKey + "|" +
       contentDigest(snap.text) + "|" + contentDigest(snap.selection);
     if (!force && signature === lastSignature) {
       probeLine("跳过: 内容签名未变");
@@ -793,9 +1008,18 @@
     document.addEventListener("selectionchange", function () {
       schedule(false);
     }, { passive: true });
-    window.addEventListener("scroll", function () {
+    function noteViewportScroll() {
+      viewportRevision += 1;
       schedule(false);
-    }, { passive: true });
+    }
+    window.addEventListener("scroll", noteViewportScroll, { passive: true });
+    // Element scroll events do not bubble. Capture them at document level so a
+    // site whose reading pane is an inner scroller updates just like the root
+    // page. The document target is already covered by window above.
+    document.addEventListener("scroll", function (event) {
+      if (event && event.target === document) return;
+      noteViewportScroll();
+    }, { capture: true, passive: true });
     ["pageshow", "focus", "online"].forEach(function (type) {
       window.addEventListener(type, function () {
         refreshPreference(true);
