@@ -390,7 +390,10 @@
   // say it handed the snapshot over, and the bridge can say nothing arrived,
   // with no way to see which of the two is mistaken.
   try {
-    if (window.__bwProbe) window.__bwProbe.startProbeHost({ enabled: true });
+    // No enabled flag: the channel reads its own setting, so reporting is off
+    // until ?bwdebug=1 turns it on. Shipping it on by default would put a
+    // diagnostic overlay on every page the user visits.
+    if (window.__bwProbe) window.__bwProbe.startProbeHost();
   } catch (_) {}
 
   // Delivers a snapshot to the bridge frame embedded in this page.
