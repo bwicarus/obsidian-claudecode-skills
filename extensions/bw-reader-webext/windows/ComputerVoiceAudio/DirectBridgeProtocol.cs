@@ -247,6 +247,13 @@ internal sealed class DirectBridgeProtocolSession
     private readonly DirectBridgeConfigStore _configStore;
     private readonly DirectBridgeCoordinator _coordinator;
     private readonly IDirectCodexVoiceControl _codexVoiceControl;
+    private readonly Func<string, ReaderContextSourceLease>
+        _registerReaderSource;
+    private readonly Func<
+        ReaderVisualDeliveryChunk,
+        ReaderVisualDeliveryAck> _acceptReaderVisual;
+    private readonly Action<ReaderBrowserControlResponse>
+        _acceptReaderBrowserControl;
     private readonly Func<DateTimeOffset> _utcNow;
     private bool _helloSeen;
     private bool _authenticated;
@@ -254,6 +261,7 @@ internal sealed class DirectBridgeProtocolSession
     private string? _contextOnlySessionId;
     private string? _activeVoiceSessionId;
     private string? _activeVoiceAppKind;
+    private string? _registeredSourceInstanceId;
     private DirectProtocolPhase _phase =
         DirectProtocolPhase.AwaitingAuthentication;
 
@@ -263,7 +271,14 @@ internal sealed class DirectBridgeProtocolSession
         DirectBridgeConfigStore configStore,
         DirectBridgeCoordinator coordinator,
         Func<DateTimeOffset>? utcNow = null,
-        IDirectCodexVoiceControl? codexVoiceControl = null)
+        IDirectCodexVoiceControl? codexVoiceControl = null,
+        Func<string, ReaderContextSourceLease>?
+            registerReaderSource = null,
+        Func<
+            ReaderVisualDeliveryChunk,
+            ReaderVisualDeliveryAck>? acceptReaderVisual = null,
+        Action<ReaderBrowserControlResponse>?
+            acceptReaderBrowserControl = null)
     {
         if (!DirectBridgeContract.IsSafeId(connectionId))
         {
@@ -276,6 +291,21 @@ internal sealed class DirectBridgeProtocolSession
         _coordinator = coordinator;
         _codexVoiceControl = codexVoiceControl
             ?? DirectCodexVoiceControl.Shared;
+        _registerReaderSource = registerReaderSource
+            ?? (_ => throw new DirectProtocolException(
+                "BW_READER_VISUAL_UNAVAILABLE",
+                "Reader 视觉来源路由尚未接线",
+                retryable: true));
+        _acceptReaderVisual = acceptReaderVisual
+            ?? (_ => throw new DirectProtocolException(
+                "BW_READER_VISUAL_UNAVAILABLE",
+                "Reader 视觉接收器尚未接线",
+                retryable: true));
+        _acceptReaderBrowserControl = acceptReaderBrowserControl
+            ?? (_ => throw new DirectProtocolException(
+                "BW_READER_BROWSER_CONTROL_UNAVAILABLE",
+                "Reader 浏览控制接收器尚未接线",
+                retryable: true));
         _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
     }
 
@@ -348,6 +378,15 @@ internal sealed class DirectBridgeProtocolSession
                     break;
                 case "context-open":
                     payload = HandleContextOpen(message);
+                    break;
+                case ReaderVisualDeliveryProtocol.RegisterType:
+                    payload = HandleVisualRegister(message);
+                    break;
+                case ReaderVisualDeliveryProtocol.ChunkType:
+                    payload = HandleReaderVisual(message);
+                    break;
+                case ReaderBrowserControlProtocol.ResponseType:
+                    payload = HandleReaderBrowserControl(message);
                     break;
                 case "start":
                     DirectStartActionResult start =
@@ -582,6 +621,122 @@ internal sealed class DirectBridgeProtocolSession
             sessionId,
             state = "context-only",
             mode = DirectContextDeliveryMode.SnapshotMcp,
+        };
+    }
+
+    private object HandleVisualRegister(JsonElement message)
+    {
+        RequireExactKeys(
+            message,
+            "contract",
+            "type",
+            "requestId",
+            "sessionId",
+            "sourceInstanceId");
+        RequireAuthenticated();
+        if (
+            RequireContextDeliveryMode()
+                != DirectContextDeliveryMode.SnapshotMcp
+            || _phase != DirectProtocolPhase.ContextOnly
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_READER_VISUAL_CONTEXT_ONLY_REQUIRED",
+                "Reader 视觉来源只允许在纯上下文连接中注册");
+        }
+        string sessionId = RequireSafeId(message, "sessionId");
+        _ = DirectPcmFrameCodec.ParseSessionId(sessionId);
+        RequireContextOnlySession(sessionId);
+        if (_registeredSourceInstanceId is not null)
+        {
+            throw new DirectProtocolException(
+                "BW_READER_VISUAL_SOURCE_REPEATED",
+                "每条 Reader 上下文连接只能注册一次视觉来源");
+        }
+        string sourceInstanceId = RequireSafeId(
+            message,
+            "sourceInstanceId");
+        _ = _registerReaderSource(sourceInstanceId);
+        _registeredSourceInstanceId = sourceInstanceId;
+        return new
+        {
+            sessionId,
+            sourceInstanceId,
+            state = "registered",
+        };
+    }
+
+    private object HandleReaderVisual(JsonElement message)
+    {
+        RequireAuthenticated();
+        if (
+            RequireContextDeliveryMode()
+                != DirectContextDeliveryMode.SnapshotMcp
+            || _phase != DirectProtocolPhase.ContextOnly
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_READER_VISUAL_CONTEXT_ONLY_REQUIRED",
+                "Reader 视觉只允许在纯上下文连接中回传");
+        }
+        ReaderVisualDeliveryChunk chunk =
+            ReaderVisualDeliveryProtocol.ValidateChunk(message);
+        RequireContextOnlySession(chunk.SessionId);
+        if (
+            _registeredSourceInstanceId is null
+            || !string.Equals(
+                _registeredSourceInstanceId,
+                chunk.SourceInstanceId,
+                StringComparison.Ordinal)
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_READER_VISUAL_SOURCE_MISMATCH",
+                "Reader 视觉回传来源与当前连接不匹配");
+        }
+        ReaderVisualDeliveryAck ack = _acceptReaderVisual(chunk);
+        return new
+        {
+            correlation = ack.Correlation,
+            chunkIndex = ack.ChunkIndex,
+            accepted = ack.Accepted,
+            complete = ack.Complete,
+        };
+    }
+
+    private object HandleReaderBrowserControl(JsonElement message)
+    {
+        RequireAuthenticated();
+        if (
+            RequireContextDeliveryMode()
+                != DirectContextDeliveryMode.SnapshotMcp
+            || _phase != DirectProtocolPhase.ContextOnly
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_READER_BROWSER_CONTROL_CONTEXT_ONLY_REQUIRED",
+                "Reader 浏览控制只允许在纯上下文连接中回传");
+        }
+        ReaderBrowserControlResponse response =
+            ReaderBrowserControlProtocol.ValidateResponse(message);
+        RequireContextOnlySession(response.SessionId);
+        if (
+            _registeredSourceInstanceId is null
+            || !string.Equals(
+                _registeredSourceInstanceId,
+                response.SourceInstanceId,
+                StringComparison.Ordinal)
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_READER_BROWSER_CONTROL_SOURCE_MISMATCH",
+                "Reader 浏览控制回传来源与当前连接不匹配");
+        }
+        _acceptReaderBrowserControl(response);
+        return new
+        {
+            correlation = response.Correlation,
+            accepted = true,
         };
     }
 

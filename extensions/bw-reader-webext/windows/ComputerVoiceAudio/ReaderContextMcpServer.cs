@@ -7,6 +7,8 @@ namespace BwReader.ComputerVoiceAudio;
 internal sealed class ReaderContextMcpServer
 {
     internal const string ToolName = "reader_context_snapshot";
+    internal const string VisualToolName = "reader_visual_image";
+    internal const string BrowserControlToolName = "reader_browser_control";
     internal const string ServerName = "bw-reader-context-snapshot";
     internal const string ServerVersion = "1.0.0";
     internal static readonly TimeSpan FreshnessWindow =
@@ -23,6 +25,18 @@ internal sealed class ReaderContextMcpServer
     private readonly Func<DateTimeOffset> _utcNow;
     private readonly string _instanceId;
     private readonly string _startedAt;
+    private readonly ReaderDocumentCorpusStore _documentCorpus;
+    private readonly ReaderContextReadLedger _readLedger;
+    private readonly HashSet<string> _unscopedDocumentReads =
+        new(StringComparer.Ordinal);
+    private readonly Func<
+        ReaderVisualDeliveryRequest,
+        CancellationToken,
+        Task<ReaderVisualCapture?>>? _fetchVisualAsync;
+    private readonly Func<
+        ReaderBrowserControlRequest,
+        CancellationToken,
+        Task<ReaderBrowserControlResponse>>? _controlBrowserAsync;
     private JsonObject? _latestSnapshot;
     private long _latestRevision = -1;
     private long _loadSequence;
@@ -35,7 +49,15 @@ internal sealed class ReaderContextMcpServer
         TextReader input,
         TextWriter output,
         Func<DateTimeOffset>? utcNow = null,
-        string? instanceId = null)
+        string? instanceId = null,
+        Func<
+            ReaderVisualDeliveryRequest,
+            CancellationToken,
+            Task<ReaderVisualCapture?>>? fetchVisualAsync = null,
+        Func<
+            ReaderBrowserControlRequest,
+            CancellationToken,
+            Task<ReaderBrowserControlResponse>>? controlBrowserAsync = null)
     {
         if (!Path.IsPathFullyQualified(statePath))
         {
@@ -48,7 +70,23 @@ internal sealed class ReaderContextMcpServer
         _output = output;
         _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
         _instanceId = instanceId ?? Guid.NewGuid().ToString();
+        _fetchVisualAsync = fetchVisualAsync;
+        _controlBrowserAsync = controlBrowserAsync;
         _startedAt = _utcNow().ToString("O");
+        string directory = Path.GetDirectoryName(_statePath)
+            ?? throw new ArgumentException(
+                "snapshot state directory is invalid",
+                nameof(statePath));
+        _documentCorpus = new ReaderDocumentCorpusStore(
+            Path.Combine(
+                directory,
+                ReaderDocumentCorpusStore.CorpusFileName),
+            _utcNow);
+        _readLedger = new ReaderContextReadLedger(
+            Path.Combine(
+                directory,
+                ReaderContextReadLedger.LedgerFileName),
+            _utcNow);
     }
 
     internal async Task<int> RunAsync(
@@ -249,35 +287,134 @@ internal sealed class ReaderContextMcpServer
             cancellationToken).ConfigureAwait(false);
     }
 
-    private static JsonObject BuildToolList() =>
-        new()
-        {
-            ["tools"] = new JsonArray
+    private JsonObject BuildToolList()
+    {
+        JsonArray tools =
+        [
+            new JsonObject
             {
-                new JsonObject
+                ["name"] = ToolName,
+                ["description"] =
+                    "Read the newest Windows-local Reader page and "
+                    + "selection snapshot. The tool is read-only. "
+                    + "Check contextStatus before using currentPage; "
+                    + "never reuse text when it is pending or stale.",
+                ["inputSchema"] = new JsonObject
                 {
-                    ["name"] = ToolName,
-                    ["description"] =
-                        "Read the newest Windows-local Reader page and "
-                        + "selection snapshot. The tool is read-only. "
-                        + "Check contextStatus before using currentPage; "
-                        + "never reuse text when it is pending or stale.",
-                    ["inputSchema"] = new JsonObject
+                    ["type"] = "object",
+                    ["additionalProperties"] = false,
+                    ["properties"] = new JsonObject(),
+                },
+                ["annotations"] = ReadOnlyAnnotations(),
+            },
+        ];
+        if (_fetchVisualAsync is not null)
+        {
+            tools.Add(new JsonObject
+            {
+                ["name"] = VisualToolName,
+                ["description"] =
+                    "Request a fresh JPEG composite from the exact Reader "
+                    + "document instance named by the current snapshot. "
+                    + "Choose the current viewport, nearby drawing activity, "
+                    + "or a custom selection region. For selection-near, use "
+                    + "only an ID listed in currentPage.selectionRegions.items; "
+                    + "never invent one. Truncated older regions are unavailable. "
+                    + "The result is discarded "
+                    + "if the page or snapshot changes while it is captured.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["additionalProperties"] = false,
+                    ["required"] = new JsonArray("scope"),
+                    ["properties"] = new JsonObject
                     {
-                        ["type"] = "object",
-                        ["additionalProperties"] = false,
-                        ["properties"] = new JsonObject(),
-                    },
-                    ["annotations"] = new JsonObject
-                    {
-                        ["readOnlyHint"] = true,
-                        ["destructiveHint"] = false,
-                        ["idempotentHint"] = true,
-                        ["openWorldHint"] = false,
+                        ["scope"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["enum"] = new JsonArray(
+                                "viewport-context",
+                                "drawing-nearby",
+                                "selection-near"),
+                        },
+                        ["selectionId"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["pattern"] = "^[A-Za-z0-9._:-]{1,160}$",
+                        },
                     },
                 },
-            },
+                ["annotations"] = ReadOnlyAnnotations(),
+            });
+        }
+        if (_controlBrowserAsync is not null)
+        {
+            tools.Add(new JsonObject
+            {
+                ["name"] = BrowserControlToolName,
+                ["description"] =
+                    "Control only the exact focused Reader or browser source "
+                    + "named by the current snapshot. Supported actions are "
+                    + "bounded viewport scrolling and locating visible text, "
+                    + "a heading, or a Reader selection. For "
+                    + "scroll-to-selection, use only an ID listed in "
+                    + "currentPage.selectionRegions.items; never invent one. "
+                    + "Truncated older regions are unavailable. Arbitrary URLs, "
+                    + "selectors, and scripts are not accepted.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["additionalProperties"] = false,
+                    ["required"] = new JsonArray("action"),
+                    ["properties"] = new JsonObject
+                    {
+                        ["action"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["enum"] = new JsonArray(
+                                "next-viewport",
+                                "previous-viewport",
+                                "scroll-to-text",
+                                "scroll-to-heading",
+                                "scroll-to-selection"),
+                        },
+                        ["target"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["minLength"] = 1,
+                            ["maxLength"] =
+                                ReaderBrowserControlProtocol
+                                    .MaximumTargetCharacters,
+                        },
+                        ["selectionId"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["pattern"] = "^[A-Za-z0-9._:-]{1,160}$",
+                        },
+                    },
+                },
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = false,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = false,
+                    ["openWorldHint"] = false,
+                },
+            });
+        }
+        return new JsonObject
+        {
+            ["tools"] = tools,
         };
+    }
+
+    private static JsonObject ReadOnlyAnnotations() => new()
+    {
+        ["readOnlyHint"] = true,
+        ["destructiveHint"] = false,
+        ["idempotentHint"] = true,
+        ["openWorldHint"] = false,
+    };
 
     private async Task HandleToolCallAsync(
         JsonNode id,
@@ -290,16 +427,6 @@ internal sealed class ReaderContextMcpServer
                 "name",
                 out JsonElement nameValue)
             || nameValue.ValueKind != JsonValueKind.String
-            || nameValue.GetString() != ToolName
-            || (
-                parameters.TryGetProperty(
-                    "arguments",
-                    out JsonElement arguments)
-                && (
-                    arguments.ValueKind != JsonValueKind.Object
-                    || arguments.EnumerateObject().Any()
-                )
-            )
         )
         {
             await WriteErrorAsync(
@@ -310,9 +437,51 @@ internal sealed class ReaderContextMcpServer
             return;
         }
 
+        string toolName = nameValue.GetString()!;
+        JsonElement arguments = parameters.TryGetProperty(
+            "arguments",
+            out JsonElement argumentValue)
+            ? argumentValue
+            : default;
         _callSequence = checked(_callSequence + 1);
+        if (toolName == VisualToolName && _fetchVisualAsync is not null)
+        {
+            await HandleVisualToolCallAsync(
+                id,
+                arguments,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (
+            toolName == BrowserControlToolName
+            && _controlBrowserAsync is not null
+        )
+        {
+            await HandleBrowserControlToolCallAsync(
+                id,
+                arguments,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (
+            toolName != ToolName
+            || !HasNoArguments(arguments)
+        )
+        {
+            await WriteErrorAsync(
+                id,
+                -32602,
+                "Invalid tool call",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         await TryLoadLatestAsync(cancellationToken).ConfigureAwait(false);
         JsonObject payload = BuildToolPayload();
+        DocumentReadReceipt? receipt = await AttachDocumentContextAsync(
+            payload,
+            parameters,
+            cancellationToken).ConfigureAwait(false);
         await WriteResultAsync(
             id,
             new JsonObject
@@ -328,6 +497,813 @@ internal sealed class ReaderContextMcpServer
                 },
             },
             cancellationToken).ConfigureAwait(false);
+        // Mark only after the JSON-RPC result has been flushed to Codex.
+        // A crash or ledger failure may repeat a document, but can never make
+        // a new conversation silently miss its first full-page delivery.
+        if (receipt is not null)
+        {
+            if (receipt.ThreadId is null)
+            {
+                _unscopedDocumentReads.Add(
+                    receipt.DocumentKey
+                    + "\n"
+                    + receipt.ContentRevision);
+            }
+            else
+            {
+                try
+                {
+                    _ = await _readLedger.MarkReadAsync(
+                        receipt.ThreadId,
+                        receipt.DocumentKey,
+                        receipt.ContentRevision,
+                        cancellationToken).ConfigureAwait(false);
+                }
+                catch (
+                    Exception exception
+                ) when (
+                    exception is IOException
+                    or UnauthorizedAccessException
+                    or JsonException
+                )
+                {
+                }
+            }
+        }
+    }
+
+    private async Task HandleBrowserControlToolCallAsync(
+        JsonNode id,
+        JsonElement arguments,
+        CancellationToken cancellationToken)
+    {
+        if (!TryReadBrowserControlArguments(
+            arguments,
+            out string action,
+            out string? target,
+            out string? selectionId))
+        {
+            await WriteErrorAsync(
+                id,
+                -32602,
+                "Invalid tool call",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await TryLoadLatestAsync(cancellationToken).ConfigureAwait(false);
+        JsonObject before = BuildToolPayload();
+        ReaderBrowserControlRequest? request =
+            BuildBrowserControlRequest(
+                before,
+                action,
+                target,
+                selectionId);
+        if (request is null)
+        {
+            await WriteBrowserControlToolErrorAsync(
+                id,
+                "browser-source-not-ready",
+                "当前快照没有可精确定位的在线页面来源。请先重新读取 Reader 上下文。",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        ReaderBrowserControlResponse response;
+        try
+        {
+            response = await _controlBrowserAsync!(
+                request,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (ReaderBrowserControlException exception)
+        {
+            await WriteBrowserControlToolErrorAsync(
+                id,
+                exception.Code,
+                exception.Message,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        JsonObject after = BuildToolPayload();
+        bool snapshotAdvanced = false;
+        bool requiresSnapshotAdvance =
+            BrowserControlResponseRequiresSnapshotAdvance(
+                response.Status);
+        int attempts = requiresSnapshotAdvance ? 40 : 1;
+        for (int attempt = 0; attempt < attempts; attempt += 1)
+        {
+            await TryLoadLatestAsync(cancellationToken)
+                .ConfigureAwait(false);
+            after = BuildToolPayload();
+            if (!BrowserControlRequestStillCurrent(after, request))
+            {
+                await WriteBrowserControlToolErrorAsync(
+                    id,
+                    "BW_READER_BROWSER_CONTROL_SNAPSHOT_SUPERSEDED",
+                    "控制期间当前页面来源或页面身份已变化，本次结果已丢弃。",
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            if (
+                !requiresSnapshotAdvance
+                || BrowserControlSnapshotAdvanced(after, request)
+            )
+            {
+                snapshotAdvanced = true;
+                break;
+            }
+            if (attempt + 1 < attempts)
+            {
+                await Task.Delay(
+                    TimeSpan.FromMilliseconds(50),
+                    cancellationToken).ConfigureAwait(false);
+            }
+        }
+        if (!snapshotAdvanced)
+        {
+            await WriteBrowserControlToolErrorAsync(
+                id,
+                "BW_READER_BROWSER_CONTROL_CONTEXT_REFRESH_TIMEOUT",
+                "浏览器已执行控制，但新的视口快照未在限定时间内到达。",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await WriteResultAsync(
+            id,
+            new JsonObject
+            {
+                ["content"] = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["type"] = "text",
+                        ["text"] = new JsonObject
+                        {
+                            ["contract"] =
+                                ReaderBrowserControlProtocol
+                                    .ControlContract,
+                            ["status"] = response.Status,
+                            ["action"] = response.Action,
+                            ["sourceInstanceId"] =
+                                response.SourceInstanceId,
+                            ["snapshotRevision"] =
+                                LongValue(after["revision"])
+                                    ?? response.SnapshotRevision,
+                            ["scrollX"] = response.ScrollX,
+                            ["scrollY"] = response.ScrollY,
+                            ["url"] = response.Url,
+                            ["title"] = response.Title,
+                        }.ToJsonString(
+                            DirectBridgeContract.JsonOptions),
+                    },
+                },
+            },
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private static bool TryReadBrowserControlArguments(
+        JsonElement arguments,
+        out string action,
+        out string? target,
+        out string? selectionId)
+    {
+        action = string.Empty;
+        target = null;
+        selectionId = null;
+        if (arguments.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+        try
+        {
+            DirectJsonValidation.RequireNoDuplicateKeys(arguments);
+        }
+        catch (DirectProtocolException)
+        {
+            return false;
+        }
+        HashSet<string> fields = arguments.EnumerateObject()
+            .Select(property => property.Name)
+            .ToHashSet(StringComparer.Ordinal);
+        if (
+            !fields.Contains("action")
+            || fields.Any(field => field is not (
+                "action" or "target" or "selectionId"))
+            || arguments.GetProperty("action").ValueKind
+                != JsonValueKind.String
+            || arguments.GetProperty("action").GetString()
+                is not string requestedAction
+            || !ReaderBrowserControlProtocol.IsAction(requestedAction)
+        )
+        {
+            return false;
+        }
+        if (fields.Contains("target"))
+        {
+            JsonElement value = arguments.GetProperty("target");
+            if (
+                value.ValueKind != JsonValueKind.String
+                || value.GetString() is not string requestedTarget
+                || string.IsNullOrWhiteSpace(requestedTarget)
+                || requestedTarget.Length
+                    > ReaderBrowserControlProtocol
+                        .MaximumTargetCharacters
+                || requestedTarget.Any(char.IsControl)
+            )
+            {
+                return false;
+            }
+            target = requestedTarget;
+        }
+        if (fields.Contains("selectionId"))
+        {
+            JsonElement value = arguments.GetProperty("selectionId");
+            if (
+                value.ValueKind != JsonValueKind.String
+                || value.GetString() is not string requestedSelection
+                || requestedSelection.Length is < 1 or > 160
+                || !DirectBridgeContract.IsSafeId(requestedSelection)
+            )
+            {
+                return false;
+            }
+            selectionId = requestedSelection;
+        }
+        bool shapeValid = requestedAction switch
+        {
+            "next-viewport" or "previous-viewport" =>
+                fields.SetEquals(new[] { "action" }),
+            "scroll-to-text" or "scroll-to-heading" =>
+                fields.SetEquals(new[] { "action", "target" }),
+            "scroll-to-selection" =>
+                fields.SetEquals(new[] { "action", "selectionId" }),
+            _ => false,
+        };
+        if (!shapeValid)
+        {
+            return false;
+        }
+        action = requestedAction;
+        return true;
+    }
+
+    internal static ReaderBrowserControlRequest?
+        BuildBrowserControlRequest(
+            JsonObject payload,
+            string action,
+            string? target,
+            string? selectionId)
+    {
+        if (
+            !ReaderBrowserControlProtocol.IsAction(action)
+            || LongValue(payload["revision"]) is not long revision
+            || revision < 0
+            || payload["contextStatus"]?.GetValue<string>() != "ready"
+            || payload["activeReading"] is not JsonObject active
+            || payload["currentPage"] is not JsonObject page
+            || StringValue(active["kind"]) != "web"
+            || StringValue(page["kind"]) != "web"
+            || page["stable"]?.GetValue<bool?>() != true
+            || StringValue(active["sourceInstanceId"])
+                is not string activeSource
+            || StringValue(page["sourceInstanceId"])
+                is not string pageSource
+            || activeSource != pageSource
+            || !DirectBridgeContract.IsSafeId(activeSource)
+            || StringValue(page["file"]) is not string file
+            || string.IsNullOrWhiteSpace(file)
+            || page["page"] is not JsonNode pageIdentity
+        )
+        {
+            return null;
+        }
+        if (
+            action == "scroll-to-selection"
+                ? !FileDirectSnapshotContextAdapter.SelectionRegionExists(
+                    page["selectionRegions"],
+                    selectionId)
+                : selectionId is not null
+        )
+        {
+            return null;
+        }
+        return new ReaderBrowserControlRequest(
+            "control-" + Guid.NewGuid().ToString("N"),
+            activeSource,
+            revision,
+            file,
+            pageIdentity.DeepClone(),
+            action,
+            target,
+            selectionId);
+    }
+
+    internal static bool BrowserControlRequestStillCurrent(
+        JsonObject payload,
+        ReaderBrowserControlRequest request)
+    {
+        ReaderBrowserControlRequest? current =
+            BuildBrowserControlRequest(
+                payload,
+                request.Action,
+                request.Target,
+                request.SelectionId);
+        return current is not null
+            && current.SourceInstanceId == request.SourceInstanceId
+            && current.SnapshotRevision >= request.SnapshotRevision
+            && current.File == request.File
+            && JsonNode.DeepEquals(current.Page, request.Page);
+    }
+
+    internal static bool BrowserControlSnapshotAdvanced(
+        JsonObject payload,
+        ReaderBrowserControlRequest request) =>
+        BrowserControlRequestStillCurrent(payload, request)
+        && LongValue(payload["revision"])
+            is long revision
+        && revision > request.SnapshotRevision;
+
+    internal static bool BrowserControlResponseRequiresSnapshotAdvance(
+        string status) => status == "success";
+
+    private async Task WriteBrowserControlToolErrorAsync(
+        JsonNode id,
+        string code,
+        string message,
+        CancellationToken cancellationToken)
+    {
+        await WriteResultAsync(
+            id,
+            new JsonObject
+            {
+                ["content"] = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["type"] = "text",
+                        ["text"] = new JsonObject
+                        {
+                            ["ok"] = false,
+                            ["code"] = code,
+                            ["message"] = message,
+                        }.ToJsonString(
+                            DirectBridgeContract.JsonOptions),
+                    },
+                },
+                ["isError"] = true,
+            },
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task HandleVisualToolCallAsync(
+        JsonNode id,
+        JsonElement arguments,
+        CancellationToken cancellationToken)
+    {
+        if (!TryReadVisualArguments(
+            arguments,
+            out string scope,
+            out string? selectionId))
+        {
+            await WriteErrorAsync(
+                id,
+                -32602,
+                "Invalid tool call",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await TryLoadLatestAsync(cancellationToken).ConfigureAwait(false);
+        JsonObject before = BuildToolPayload();
+        ReaderVisualDeliveryRequest? request = BuildVisualRequest(
+            before,
+            scope,
+            selectionId);
+        if (request is null)
+        {
+            await WriteVisualToolErrorAsync(
+                id,
+                "visual-source-not-ready",
+                "当前快照没有可精确定位的在线页面来源。请先重新读取 Reader 上下文。",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        ReaderVisualCapture? capture;
+        try
+        {
+            capture = await _fetchVisualAsync!(
+                request,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (ReaderVisualDeliveryException exception)
+        {
+            await WriteVisualToolErrorAsync(
+                id,
+                exception.Code,
+                exception.Message,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await TryLoadLatestAsync(cancellationToken).ConfigureAwait(false);
+        JsonObject after = BuildToolPayload();
+        if (!VisualRequestStillCurrent(after, request))
+        {
+            await WriteVisualToolErrorAsync(
+                id,
+                "BW_READER_VISUAL_SNAPSHOT_SUPERSEDED",
+                "取图期间当前页面或笔迹版本已变化，本次图像已丢弃。",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (
+            capture is null
+            || capture.MimeType
+                != ReaderVisualDeliveryProtocol.MimeType
+            || capture.Data.Length == 0
+        )
+        {
+            await WriteVisualToolErrorAsync(
+                id,
+                "BW_READER_VISUAL_UNAVAILABLE",
+                "当前页面没有返回可用的合成图。",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        JsonObject metadata = new()
+        {
+            ["scope"] = request.Scope,
+            ["sourceInstanceId"] = request.SourceInstanceId,
+            ["snapshotRevision"] = request.SnapshotRevision,
+            ["file"] = request.File,
+            ["page"] = request.Page.DeepClone(),
+            ["drawingRevision"] = request.DrawingRevision,
+            ["selectionId"] = request.SelectionId,
+        };
+        await WriteResultAsync(
+            id,
+            new JsonObject
+            {
+                ["content"] = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["type"] = "text",
+                        ["text"] = metadata.ToJsonString(
+                            DirectBridgeContract.JsonOptions),
+                    },
+                    new JsonObject
+                    {
+                        ["type"] = "image",
+                        ["data"] = Convert.ToBase64String(capture.Data),
+                        ["mimeType"] = capture.MimeType,
+                        ["_meta"] = new JsonObject
+                        {
+                            ["codex/imageDetail"] = "original",
+                        },
+                    },
+                },
+            },
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private static bool TryReadVisualArguments(
+        JsonElement arguments,
+        out string scope,
+        out string? selectionId)
+    {
+        scope = string.Empty;
+        selectionId = null;
+        if (arguments.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+        try
+        {
+            DirectJsonValidation.RequireNoDuplicateKeys(arguments);
+        }
+        catch (DirectProtocolException)
+        {
+            return false;
+        }
+        HashSet<string> fields = arguments.EnumerateObject()
+            .Select(property => property.Name)
+            .ToHashSet(StringComparer.Ordinal);
+        if (
+            !fields.Contains("scope")
+            || fields.Any(field => field is not (
+                "scope" or "selectionId"))
+            || arguments.GetProperty("scope").ValueKind
+                != JsonValueKind.String
+            || arguments.GetProperty("scope").GetString()
+                is not string requestedScope
+            || !ReaderVisualDeliveryProtocol.IsScope(requestedScope)
+        )
+        {
+            return false;
+        }
+        if (fields.Contains("selectionId"))
+        {
+            JsonElement selection = arguments.GetProperty("selectionId");
+            if (
+                selection.ValueKind != JsonValueKind.String
+                || selection.GetString() is not string requestedSelection
+                || requestedSelection.Length is < 1 or > 160
+                || !DirectBridgeContract.IsSafeId(requestedSelection)
+                || requestedScope != "selection-near"
+            )
+            {
+                return false;
+            }
+            selectionId = requestedSelection;
+        }
+        if (
+            (requestedScope == "selection-near")
+                != (selectionId is not null)
+        )
+        {
+            return false;
+        }
+        scope = requestedScope;
+        return true;
+    }
+
+    internal static ReaderVisualDeliveryRequest? BuildVisualRequest(
+        JsonObject payload,
+        string scope,
+        string? selectionId)
+    {
+        if (
+            !ReaderVisualDeliveryProtocol.IsScope(scope)
+            || LongValue(payload["revision"]) is not long revision
+            || revision < 0
+            || payload["contextStatus"]?.GetValue<string>() != "ready"
+            || payload["activeReading"] is not JsonObject active
+            || payload["currentPage"] is not JsonObject page
+            || page["stable"]?.GetValue<bool?>() != true
+            || StringValue(active["sourceInstanceId"])
+                is not string activeSource
+            || StringValue(page["sourceInstanceId"])
+                is not string pageSource
+            || !string.Equals(
+                activeSource,
+                pageSource,
+                StringComparison.Ordinal)
+            || !DirectBridgeContract.IsSafeId(activeSource)
+            || StringValue(page["file"]) is not string file
+            || string.IsNullOrWhiteSpace(file)
+            || page["page"] is not JsonNode pageIdentity
+        )
+        {
+            return null;
+        }
+        if (
+            scope == "selection-near"
+                ? !FileDirectSnapshotContextAdapter.SelectionRegionExists(
+                    page["selectionRegions"],
+                    selectionId)
+                : selectionId is not null
+        )
+        {
+            return null;
+        }
+
+        string? drawingRevision = null;
+        if (
+            page["visual"] is JsonObject visual
+            && visual["drawing"] is JsonObject drawing
+            && drawing["drawingRevision"] is JsonValue revisionValue
+            && revisionValue.TryGetValue(out string? candidateRevision)
+        )
+        {
+            drawingRevision = candidateRevision;
+        }
+        if (
+            scope == "drawing-nearby"
+            && (
+                page["visual"] is not JsonObject drawingVisual
+                || drawingVisual["drawing"] is not JsonObject drawingState
+                || drawingState["stable"]?.GetValue<bool?>() != true
+                || drawingState["inProgress"]?.GetValue<bool?>() != false
+                || drawingState["empty"]?.GetValue<bool?>() != false
+                || string.IsNullOrEmpty(drawingRevision)
+            )
+        )
+        {
+            return null;
+        }
+        return new ReaderVisualDeliveryRequest(
+            "visual-" + Guid.NewGuid().ToString("N"),
+            activeSource,
+            revision,
+            file,
+            pageIdentity.DeepClone(),
+            drawingRevision,
+            scope,
+            selectionId);
+    }
+
+    internal static bool VisualRequestStillCurrent(
+        JsonObject payload,
+        ReaderVisualDeliveryRequest request)
+    {
+        ReaderVisualDeliveryRequest? current = BuildVisualRequest(
+            payload,
+            request.Scope,
+            request.SelectionId);
+        return current is not null
+            && current.SourceInstanceId == request.SourceInstanceId
+            && current.SnapshotRevision == request.SnapshotRevision
+            && current.File == request.File
+            && JsonNode.DeepEquals(current.Page, request.Page)
+            && current.DrawingRevision == request.DrawingRevision;
+    }
+
+    private async Task WriteVisualToolErrorAsync(
+        JsonNode id,
+        string code,
+        string message,
+        CancellationToken cancellationToken)
+    {
+        await WriteResultAsync(
+            id,
+            new JsonObject
+            {
+                ["content"] = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["type"] = "text",
+                        ["text"] = new JsonObject
+                        {
+                            ["ok"] = false,
+                            ["code"] = code,
+                            ["message"] = message,
+                        }.ToJsonString(
+                            DirectBridgeContract.JsonOptions),
+                    },
+                },
+                ["isError"] = true,
+            },
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private static bool HasNoArguments(JsonElement arguments) =>
+        arguments.ValueKind == JsonValueKind.Undefined
+        || (
+            arguments.ValueKind == JsonValueKind.Object
+            && !arguments.EnumerateObject().Any()
+        );
+
+    private sealed record DocumentReadReceipt(
+        string? ThreadId,
+        string DocumentKey,
+        string ContentRevision);
+
+    private async Task<DocumentReadReceipt?> AttachDocumentContextAsync(
+        JsonObject payload,
+        JsonElement parameters,
+        CancellationToken cancellationToken)
+    {
+        string status = StringValue(payload["contextStatus"])
+            ?? "pending";
+        if (status != "ready")
+        {
+            SetDocumentDelivery(payload, "snapshot-not-ready");
+            return null;
+        }
+
+        ReaderDocumentCorpusEntry? document;
+        try
+        {
+            document = await _documentCorpus.ReadAsync(cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (
+            Exception exception
+        ) when (
+            exception is IOException
+            or UnauthorizedAccessException
+            or JsonException
+            or DirectProtocolException
+        )
+        {
+            SetDocumentDelivery(payload, "corpus-invalid");
+            return null;
+        }
+        if (document is null)
+        {
+            SetDocumentDelivery(payload, "corpus-missing");
+            return null;
+        }
+        if (!DocumentMatchesSnapshot(payload, document))
+        {
+            SetDocumentDelivery(payload, "corpus-superseded");
+            return null;
+        }
+
+        bool scoped = ReaderContextReadLedger.TryThreadId(
+            parameters,
+            out string threadId);
+        string processDocumentKey = document.DocumentKey
+            + "\n"
+            + document.ContentRevision;
+        bool alreadyDelivered = !scoped
+            && _unscopedDocumentReads.Contains(processDocumentKey);
+        if (scoped)
+        {
+            try
+            {
+                alreadyDelivered = await _readLedger.HasReadAsync(
+                    threadId,
+                    document.DocumentKey,
+                    document.ContentRevision,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (
+                Exception exception
+            ) when (
+                exception is IOException
+                or UnauthorizedAccessException
+                or JsonException
+            )
+            {
+                // Failure to read the ledger must repeat, never omit, text.
+                alreadyDelivered = false;
+            }
+        }
+        string delivery = scoped
+            ? alreadyDelivered
+                ? "already-delivered"
+                : "first-in-thread"
+            : alreadyDelivered
+                ? "already-delivered-in-process"
+                : "first-in-process";
+        payload["documentContext"] = new JsonObject
+        {
+            ["contract"] = ReaderDocumentCorpusStore.DocumentContract,
+            ["scope"] = scoped ? "thread" : "mcp-process",
+            ["delivery"] = delivery,
+            ["sourceInstanceId"] = document.SourceInstanceId,
+            ["documentKey"] = document.DocumentKey,
+            ["url"] = document.Url,
+            ["title"] = document.Title,
+            ["contentRevision"] = document.ContentRevision,
+            ["truncated"] = document.Truncated,
+            ["observedAtEpochMs"] =
+                document.ObservedAtEpochMilliseconds,
+            ["text"] = alreadyDelivered ? null : document.Text,
+        };
+        SetDocumentDelivery(payload, delivery);
+        return !alreadyDelivered
+            ? new DocumentReadReceipt(
+                scoped ? threadId : null,
+                document.DocumentKey,
+                document.ContentRevision)
+            : null;
+    }
+
+    private static bool DocumentMatchesSnapshot(
+        JsonObject payload,
+        ReaderDocumentCorpusEntry document)
+    {
+        JsonObject? active = payload["activeReading"] as JsonObject;
+        JsonObject? page = payload["currentPage"] as JsonObject;
+        JsonObject? readingWindow = page?["readingWindow"] as JsonObject;
+        return active is not null
+            && page is not null
+            && readingWindow is not null
+            && string.Equals(
+                StringValue(active["sourceInstanceId"]),
+                document.SourceInstanceId,
+                StringComparison.Ordinal)
+            && string.Equals(
+                StringValue(page["sourceInstanceId"]),
+                document.SourceInstanceId,
+                StringComparison.Ordinal)
+            && string.Equals(
+                StringValue(readingWindow["documentKey"]),
+                document.DocumentKey,
+                StringComparison.Ordinal)
+            && string.Equals(
+                StringValue(page["file"]),
+                document.Url,
+                StringComparison.Ordinal);
+    }
+
+    private static void SetDocumentDelivery(
+        JsonObject payload,
+        string value)
+    {
+        if (payload["mcp"] is JsonObject mcp)
+        {
+            mcp["documentDelivery"] = value;
+        }
     }
 
     private JsonObject BuildToolPayload()
@@ -578,6 +1554,17 @@ internal sealed class ReaderContextMcpServer
         {
             return null;
         }
+    }
+
+    private static string? StringValue(JsonNode? value)
+    {
+        if (value is not JsonValue jsonValue)
+        {
+            return null;
+        }
+        return jsonValue.TryGetValue(out string? text)
+            ? text
+            : null;
     }
 
     private void HandleNotification(string method)

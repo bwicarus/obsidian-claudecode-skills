@@ -204,10 +204,15 @@ internal static class Program
                     encoderShouldEmitUTF8Identifier: false);
                 Console.OutputEncoding = new System.Text.UTF8Encoding(
                     encoderShouldEmitUTF8Identifier: false);
+                NamedPipeReaderVisualRpcClient visualClient = new();
+                NamedPipeReaderBrowserControlRpcClient browserControlClient =
+                    new();
                 ReaderContextMcpServer server = new(
                     Path.GetFullPath(args[2]),
                     Console.In,
-                    Console.Out);
+                    Console.Out,
+                    fetchVisualAsync: visualClient.RequestAsync,
+                    controlBrowserAsync: browserControlClient.RequestAsync);
                 return await server.RunAsync(CancellationToken.None)
                     .ConfigureAwait(false);
             }
@@ -248,7 +253,7 @@ internal static class Program
                 contract = AudioBridgeContract.Contract,
                 ok = false,
                 error = "BW_COMPUTER_VOICE_AUDIO_SELF_TEST_FAILED",
-                detail = exception.Message,
+                detail = exception.ToString(),
             }, JsonOptions));
             return 1;
         }

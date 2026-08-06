@@ -702,6 +702,15 @@ internal static class DirectBridgeSelfTest
         await CheckReaderContextMcpProtocolAsync(
             root,
             checks).ConfigureAwait(false);
+        await CheckReaderDocumentAndViewportAsync(
+            root,
+            checks).ConfigureAwait(false);
+        await CheckReaderVisualDeliveryAsync(
+            root,
+            checks).ConfigureAwait(false);
+        await CheckReaderBrowserControlAsync(
+            root,
+            checks).ConfigureAwait(false);
     }
 
     private static async Task CheckExplicitStopFailureAsync(
@@ -5136,6 +5145,24 @@ internal static class DirectBridgeSelfTest
                         observedAtEpochMs = 1_750_000_000_000,
                         viewFile = "vbook:g_test",
                         viewPage = 105,
+                        sourceInstanceId = "source-selection-test",
+                        selectionRegions = new
+                        {
+                            contract = "reader-selection-regions/1",
+                            total = 1,
+                            truncated = false,
+                            items = new[]
+                            {
+                                new
+                                {
+                                    selectionId = "selection-1",
+                                    label = "#1 12:00",
+                                    ordinal = 1,
+                                    createdAtEpochMs =
+                                        1_750_000_000_000L,
+                                },
+                            },
+                        },
                     },
                 },
                 events,
@@ -5284,9 +5311,19 @@ internal static class DirectBridgeSelfTest
                 == "vbook:g_test"
             && snapshotRoot.GetProperty("activeReading")
                 .GetProperty("viewPage").GetInt32() == 105
+            && snapshotRoot.GetProperty("activeReading")
+                .GetProperty("selectionRegions")
+                .GetProperty("items")[0]
+                .GetProperty("selectionId").GetString()
+                == "selection-1"
             && snapshotRoot.GetProperty("currentPage")
                 .GetProperty("text").GetString()
                 == "Windows local snapshot text"
+            && snapshotRoot.GetProperty("currentPage")
+                .GetProperty("selectionRegions")
+                .GetProperty("items")[0]
+                .GetProperty("selectionId").GetString()
+                == "selection-1"
             && snapshotRoot.GetProperty("selection")
                 .GetProperty("state").GetString() == "active"
             && snapshotRoot.GetProperty("selection")
@@ -5895,6 +5932,1252 @@ internal static class DirectBridgeSelfTest
                 ?["visual"]?["drawing"]?["freshness"]
                 ?.GetValue<string>() == "stale",
             "direct-reader-context-mcp-recomputes-drawing-freshness",
+            checks);
+    }
+
+    private static async Task CheckReaderDocumentAndViewportAsync(
+        string root,
+        ICollection<string> checks)
+    {
+        string documentRoot = System.IO.Path.Combine(
+            root,
+            "reader-document-viewport");
+        Directory.CreateDirectory(documentRoot);
+        string snapshotPath = System.IO.Path.Combine(
+            documentRoot,
+            FileDirectSnapshotContextAdapter.SnapshotFileName);
+        DateTimeOffset now = DateTimeOffset.FromUnixTimeMilliseconds(
+            1_786_100_001_000L);
+        FileDirectSnapshotContextAdapter adapter = new(
+            snapshotPath,
+            () => now);
+        string sessionId = "session-" + DirectBase64Url.Encode(
+            Enumerable.Range(160, 16)
+                .Select(value => (byte)value)
+                .ToArray());
+        const string sourceInstanceId = "web-source-document-1";
+        const string url = "https://example.test/long-article";
+        const string visibleText = "当前显示部分";
+        const string fullText =
+            "全文开头\n当前显示部分\n全文结尾";
+
+        DirectActiveReading active = new(
+            "web",
+            url,
+            "Long article",
+            JsonSerializer.SerializeToElement("viewport"),
+            "unknown",
+            null,
+            now.ToUnixTimeMilliseconds(),
+            SourceInstanceId: sourceInstanceId);
+        JsonElement pageValue = JsonSerializer.SerializeToElement(new
+        {
+            v = 1,
+            seq = 1,
+            type = "page.context",
+            ts = now.ToUnixTimeSeconds(),
+            id = "0000000000000201",
+            kind = "web",
+            file = url,
+            title = "Long article",
+            page = "viewport",
+            stable = true,
+            page_context = new
+            {
+                reason = "viewport",
+                text = visibleText,
+                text_available = true,
+                text_source = "extension-page",
+                fallback_reason = (string?)null,
+                truncated = false,
+            },
+        });
+        _ = await adapter.ForwardJournalAsync(
+            "request-document-page",
+            sessionId,
+            new DirectContextEvent(
+                1,
+                "page.context",
+                "0000000000000201",
+                pageValue),
+            CancellationToken.None).ConfigureAwait(false);
+        _ = await adapter.ForwardActiveReadingAsync(
+            "request-document-active",
+            sessionId,
+            active,
+            CancellationToken.None).ConfigureAwait(false);
+        using (JsonDocument beforeViewport = JsonDocument.Parse(
+            await File.ReadAllTextAsync(snapshotPath)
+                .ConfigureAwait(false)))
+        {
+            Require(
+                beforeViewport.RootElement
+                    .GetProperty("contextStatus").GetString()
+                    == "pending",
+                "direct-reader-web-source-waits-for-matching-viewport",
+                checks);
+        }
+
+        JsonElement viewportValue = JsonSerializer.SerializeToElement(new
+        {
+            contract = "reader-viewport/1",
+            sourceInstanceId,
+            documentKey = url,
+            url,
+            title = "Long article",
+            beforeText = "前文",
+            visibleText,
+            afterText = "后文",
+            selectionState = "unknown",
+            selection = (string?)null,
+            observedAtEpochMs = now.ToUnixTimeMilliseconds(),
+        });
+        DirectViewportContext viewport =
+            FileDirectSnapshotContextAdapter.ValidateViewport(
+                viewportValue);
+        _ = await adapter.ForwardViewportAsync(
+            "request-document-viewport",
+            sessionId,
+            viewport,
+            CancellationToken.None).ConfigureAwait(false);
+
+        bool viewportExtraRejected = false;
+        try
+        {
+            JsonObject invalidViewport = JsonNode.Parse(
+                viewportValue.GetRawText())!.AsObject();
+            invalidViewport["selector"] = "body";
+            _ = FileDirectSnapshotContextAdapter.ValidateViewport(
+                JsonSerializer.SerializeToElement(invalidViewport));
+        }
+        catch (DirectProtocolException exception)
+        {
+            viewportExtraRejected = exception.Code
+                == "BW_READER_VIEWPORT_SCHEMA_INVALID";
+        }
+
+        string revision = ReaderDocumentCorpusStore.ComputeRevision(
+            fullText);
+        JsonElement documentValue = JsonSerializer.SerializeToElement(new
+        {
+            contract = ReaderDocumentCorpusStore.DocumentContract,
+            sourceInstanceId,
+            documentKey = url,
+            url,
+            title = "Long article",
+            contentRevision = revision,
+            text = fullText,
+            truncated = false,
+            observedAtEpochMs = now.ToUnixTimeMilliseconds(),
+        });
+        ReaderDocumentCorpusStore corpus = new(
+            System.IO.Path.Combine(
+                documentRoot,
+                ReaderDocumentCorpusStore.CorpusFileName),
+            () => now);
+        await corpus.SaveAsync(
+            documentValue,
+            CancellationToken.None).ConfigureAwait(false);
+        ReaderDocumentCorpusEntry saved =
+            await corpus.ReadAsync(CancellationToken.None)
+                .ConfigureAwait(false)
+            ?? throw new InvalidOperationException(
+                "reader document corpus was not persisted");
+
+        async Task<JsonObject[]> ReadSnapshotsAsync(
+            string instanceId,
+            int callCount,
+            string? threadId = null)
+        {
+            List<string> requests =
+            [
+                JsonSerializer.Serialize(new
+                {
+                    jsonrpc = "2.0",
+                    id = 1,
+                    method = "initialize",
+                    @params = new
+                    {
+                        protocolVersion = "2025-06-18",
+                    },
+                }),
+            ];
+            for (int index = 0; index < callCount; index += 1)
+            {
+                JsonObject parameters = new()
+                {
+                    ["name"] = ReaderContextMcpServer.ToolName,
+                    ["arguments"] = new JsonObject(),
+                };
+                if (threadId is not null)
+                {
+                    parameters["_meta"] = new JsonObject
+                    {
+                        ["threadId"] = threadId,
+                    };
+                }
+                requests.Add(new JsonObject
+                {
+                    ["jsonrpc"] = "2.0",
+                    ["id"] = index + 2,
+                    ["method"] = "tools/call",
+                    ["params"] = parameters,
+                }.ToJsonString(DirectBridgeContract.JsonOptions));
+            }
+            requests.Add(string.Empty);
+            StringWriter output = new();
+            ReaderContextMcpServer server = new(
+                snapshotPath,
+                new StringReader(string.Join(
+                    Environment.NewLine,
+                    requests)),
+                output,
+                utcNow: () => now,
+                instanceId: instanceId);
+            _ = await server.RunAsync(CancellationToken.None)
+                .ConfigureAwait(false);
+            JsonDocument[] responses = output.ToString()
+                .Split(
+                    new[] { "\r\n", "\n" },
+                    StringSplitOptions.RemoveEmptyEntries)
+                .Select(value => JsonDocument.Parse(value))
+                .ToArray();
+            try
+            {
+                return responses.Skip(1).Select(response =>
+                {
+                    string text = response.RootElement
+                        .GetProperty("result")
+                        .GetProperty("content")[0]
+                        .GetProperty("text")
+                        .GetString()!;
+                    return JsonNode.Parse(text)!.AsObject();
+                }).ToArray();
+            }
+            finally
+            {
+                foreach (JsonDocument response in responses)
+                {
+                    response.Dispose();
+                }
+            }
+        }
+
+        JsonObject[] firstProcess = await ReadSnapshotsAsync(
+            "document-process-1",
+            2).ConfigureAwait(false);
+        JsonObject[] secondProcess = await ReadSnapshotsAsync(
+            "document-process-2",
+            1).ConfigureAwait(false);
+        string threadId = Guid.NewGuid().ToString("D");
+        JsonObject[] firstThreadProcess = await ReadSnapshotsAsync(
+            "document-thread-process-1",
+            1,
+            threadId).ConfigureAwait(false);
+        JsonObject[] secondThreadProcess = await ReadSnapshotsAsync(
+            "document-thread-process-2",
+            1,
+            threadId).ConfigureAwait(false);
+
+        JsonObject firstDocument = firstProcess[0]
+            ["documentContext"]!.AsObject();
+        JsonObject repeatedDocument = firstProcess[1]
+            ["documentContext"]!.AsObject();
+        JsonObject newProcessDocument = secondProcess[0]
+            ["documentContext"]!.AsObject();
+        JsonObject firstThreadDocument = firstThreadProcess[0]
+            ["documentContext"]!.AsObject();
+        JsonObject repeatedThreadDocument = secondThreadProcess[0]
+            ["documentContext"]!.AsObject();
+        JsonObject persistedSnapshot = JsonNode.Parse(
+            await File.ReadAllTextAsync(snapshotPath)
+                .ConfigureAwait(false))!.AsObject();
+        JsonObject readingWindow = persistedSnapshot["currentPage"]!
+            ["readingWindow"]!.AsObject();
+
+        Require(
+            saved.Text == fullText
+            && saved.ContentRevision == revision
+            && viewportExtraRejected
+            && readingWindow["beforeText"]?.GetValue<string>() == "前文"
+            && readingWindow["visibleText"]?.GetValue<string>()
+                == visibleText
+            && readingWindow["afterText"]?.GetValue<string>() == "后文"
+            && persistedSnapshot["currentPage"]?["text"]
+                ?.GetValue<string>() == visibleText,
+            "direct-reader-document-and-viewport-are-strict-and-atomic",
+            checks);
+        Require(
+            firstDocument["scope"]?.GetValue<string>() == "mcp-process"
+            && firstDocument["delivery"]?.GetValue<string>()
+                == "first-in-process"
+            && firstDocument["text"]?.GetValue<string>() == fullText
+            && repeatedDocument["delivery"]?.GetValue<string>()
+                == "already-delivered-in-process"
+            && repeatedDocument["text"] is null
+            && newProcessDocument["delivery"]?.GetValue<string>()
+                == "first-in-process"
+            && newProcessDocument["text"]?.GetValue<string>() == fullText,
+            "direct-reader-document-unscoped-delivers-once-per-mcp-process",
+            checks);
+        Require(
+            firstThreadDocument["scope"]?.GetValue<string>() == "thread"
+            && firstThreadDocument["delivery"]?.GetValue<string>()
+                == "first-in-thread"
+            && firstThreadDocument["text"]?.GetValue<string>() == fullText
+            && repeatedThreadDocument["delivery"]?.GetValue<string>()
+                == "already-delivered"
+            && repeatedThreadDocument["text"] is null,
+            "direct-reader-document-thread-ledger-survives-mcp-processes",
+            checks);
+    }
+
+    private static async Task CheckReaderVisualDeliveryAsync(
+        string root,
+        ICollection<string> checks)
+    {
+        ReaderContextSourceRouter router = new();
+        ReaderVisualDeliveryBroker broker = new(router);
+        int sentToA = 0;
+        int sentToB = 0;
+        TaskCompletionSource<bool> bSent = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        ReaderContextSourceLease leaseA = router.Attach(
+            "source-A",
+            "connection-A",
+            (_, _) =>
+            {
+                sentToA += 1;
+                return Task.CompletedTask;
+            });
+        ReaderContextSourceLease leaseB = router.Attach(
+            "source-B",
+            "connection-B",
+            (_, _) =>
+            {
+                sentToB += 1;
+                bSent.TrySetResult(true);
+                return Task.CompletedTask;
+            });
+        ReaderVisualDeliveryRequest request = new(
+            "visual-self-test",
+            "source-B",
+            17,
+            "https://example.test/article",
+            JsonValue.Create(4)!,
+            null,
+            "viewport-context",
+            null);
+        Task<ReaderVisualCapture?> captureTask = broker.RequestAsync(
+            request,
+            CancellationToken.None);
+        await bSent.Task.WaitAsync(TimeSpan.FromSeconds(1))
+            .ConfigureAwait(false);
+        byte[] jpeg = [0xff, 0xd8, 0xff, 0xd9];
+        ReaderVisualDeliveryAck ack = broker.Accept(
+            leaseB,
+            new ReaderVisualDeliveryChunk(
+                "session-AAAAAAAAAAAAAAAAAAAAAA",
+                request.Correlation,
+                request.SourceInstanceId,
+                request.SnapshotRevision,
+                request.File,
+                JsonSerializer.SerializeToElement(4),
+                null,
+                request.Scope,
+                null,
+                "chunk",
+                ReaderVisualDeliveryProtocol.MimeType,
+                0,
+                1,
+                (uint)jpeg.Length,
+                Convert.ToBase64String(jpeg)));
+        ReaderVisualCapture? capture = await captureTask
+            .ConfigureAwait(false);
+        Require(
+            sentToA == 0
+            && sentToB == 1
+            && ack.Complete
+            && capture is not null
+            && capture.Data.SequenceEqual(jpeg),
+            "direct-reader-visual-routes-only-to-exact-source",
+            checks);
+
+        router.Detach(leaseB);
+        bool offlineNoFallback = false;
+        try
+        {
+            _ = await broker.RequestAsync(
+                request with
+                {
+                    Correlation = "visual-source-offline",
+                },
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (ReaderVisualDeliveryException exception)
+        {
+            offlineNoFallback =
+                exception.Code == "BW_READER_VISUAL_SOURCE_OFFLINE";
+        }
+        Require(
+            offlineNoFallback && sentToA == 0,
+            "direct-reader-visual-offline-source-never-falls-back",
+            checks);
+        router.Detach(leaseA);
+
+        JsonElement validChunk = JsonSerializer.SerializeToElement(new
+        {
+            contract = DirectBridgeContract.Contract,
+            type = ReaderVisualDeliveryProtocol.ChunkType,
+            requestId = "visual-chunk-request",
+            sessionId = "session-AAAAAAAAAAAAAAAAAAAAAA",
+            correlation = request.Correlation,
+            sourceInstanceId = request.SourceInstanceId,
+            snapshotRevision = request.SnapshotRevision,
+            file = request.File,
+            page = 4,
+            drawingRevision = (string?)null,
+            scope = request.Scope,
+            selectionId = (string?)null,
+            status = "chunk",
+            mimeType = ReaderVisualDeliveryProtocol.MimeType,
+            chunkIndex = 0,
+            chunkCount = 1,
+            totalBytes = jpeg.Length,
+            data = Convert.ToBase64String(jpeg),
+        });
+        ReaderVisualDeliveryChunk validated =
+            ReaderVisualDeliveryProtocol.ValidateChunk(validChunk);
+        bool extraFieldRejected = false;
+        try
+        {
+            JsonObject withExtra = JsonNode.Parse(
+                validChunk.GetRawText())!.AsObject();
+            withExtra["unexpected"] = true;
+            _ = ReaderVisualDeliveryProtocol.ValidateChunk(
+                JsonSerializer.SerializeToElement(withExtra));
+        }
+        catch (DirectProtocolException)
+        {
+            extraFieldRejected = true;
+        }
+        Require(
+            validated.SnapshotRevision == request.SnapshotRevision
+            && extraFieldRejected
+            && NamedPipeReaderVisualRpcClient.RequiredPipeOptions
+                == (
+                    System.IO.Pipes.PipeOptions.Asynchronous
+                    | System.IO.Pipes.PipeOptions.CurrentUserOnly)
+            && NamedPipeReaderVisualRpcServer.RequiredPipeOptions
+                == (
+                    System.IO.Pipes.PipeOptions.Asynchronous
+                    | System.IO.Pipes.PipeOptions.CurrentUserOnly),
+            "direct-reader-visual-chunks-and-pipe-are-strict",
+            checks);
+
+        byte[] framed = Encoding.UTF8.GetBytes("{\"visual\":true}");
+        await using MemoryStream frameStream = new();
+        await ReaderVisualRpcFraming.WriteAsync(
+            frameStream,
+            framed,
+            CancellationToken.None).ConfigureAwait(false);
+        frameStream.Position = 0;
+        byte[] readFrame = await ReaderVisualRpcFraming.ReadAsync(
+            frameStream,
+            CancellationToken.None).ConfigureAwait(false);
+        Require(
+            readFrame.SequenceEqual(framed),
+            "direct-reader-visual-rpc-framing-round-trips",
+            checks);
+
+        string configPath = System.IO.Path.Combine(
+            root,
+            "main",
+            "native-host",
+            "direct.json");
+        DirectBridgeConfigStore visualStore = new(configPath);
+        _ = visualStore.SetContextDeliveryMode(
+            DirectContextDeliveryMode.SnapshotMcp);
+        await using DirectBridgeCoordinator visualCoordinator = new(
+            visualStore,
+            new FakeDirectAppLauncher(),
+            new FakeDirectMediaAdapter());
+        ReaderContextSourceLease? registeredLease = null;
+        DirectBridgeProtocolSession visualSession = new(
+            "connection-visual-register",
+            "https://bwicarus.taile44d0c.ts.net",
+            visualStore,
+            visualCoordinator,
+            registerReaderSource: source =>
+            {
+                registeredLease = router.Attach(
+                    source,
+                    "connection-visual-register",
+                    (_, _) => Task.CompletedTask);
+                return registeredLease;
+            });
+        List<object> protocolEvents = [];
+        List<byte[]> protocolPcm = [];
+        _ = RequireSuccess(
+            await SendAsync(
+                visualSession,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "hello",
+                    requestId = "request-visual-hello",
+                    protocolVersion = 3,
+                },
+                protocolEvents,
+                protocolPcm).ConfigureAwait(false),
+            "hello");
+        string visualSessionId =
+            "session-AAAAAAAAAAAAAAAAAAAAAA";
+        _ = RequireSuccess(
+            await SendAsync(
+                visualSession,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "context-open",
+                    requestId = "request-visual-open",
+                    sessionId = visualSessionId,
+                },
+                protocolEvents,
+                protocolPcm).ConfigureAwait(false),
+            "context-open");
+        JsonElement registered = RequireSuccess(
+            await SendAsync(
+                visualSession,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = ReaderVisualDeliveryProtocol.RegisterType,
+                    requestId = "request-visual-register",
+                    sessionId = visualSessionId,
+                    sourceInstanceId = "source-protocol",
+                },
+                protocolEvents,
+                protocolPcm).ConfigureAwait(false),
+            ReaderVisualDeliveryProtocol.RegisterType);
+        Require(
+            registered.GetProperty("sourceInstanceId").GetString()
+                == "source-protocol"
+            && registeredLease is not null
+            && DirectBridgeServer.IsContextEndpointActionAllowed(
+                JsonSerializer.Serialize(new
+                {
+                    type = ReaderVisualDeliveryProtocol.RegisterType,
+                }))
+            && DirectBridgeServer.IsContextEndpointActionAllowed(
+                JsonSerializer.Serialize(new
+                {
+                    type = ReaderVisualDeliveryProtocol.ChunkType,
+                })),
+            "direct-reader-visual-registers-only-after-context-open",
+            checks);
+        if (registeredLease is not null)
+        {
+            router.Detach(registeredLease);
+        }
+
+        string mcpRoot = System.IO.Path.Combine(root, "visual-mcp");
+        Directory.CreateDirectory(mcpRoot);
+        string snapshotPath = System.IO.Path.Combine(
+            mcpRoot,
+            FileDirectSnapshotContextAdapter.SnapshotFileName);
+        JsonObject SelectionRegions() => new()
+        {
+            ["contract"] = "reader-selection-regions/1",
+            ["total"] = 1,
+            ["truncated"] = false,
+            ["items"] = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["selectionId"] = "selection-1",
+                    ["label"] = "#1 12:00",
+                    ["ordinal"] = 1,
+                    ["createdAtEpochMs"] = 1_786_000_000_000L,
+                },
+            },
+        };
+        JsonObject Snapshot(long revision) => new()
+        {
+            ["schema"] =
+                FileDirectSnapshotContextAdapter.SnapshotContract,
+            ["revision"] = revision,
+            ["updatedAtUtc"] = "2026-08-06T00:00:00Z",
+            ["activeReading"] = new JsonObject
+            {
+                ["kind"] = "web",
+                ["file"] = "https://example.test/article",
+                ["title"] = "Visual",
+                ["page"] = 1,
+                ["sourceInstanceId"] = "source-B",
+                ["receivedAtEpochMs"] = 1_786_000_000_000L,
+                ["fresh"] = true,
+                ["selectionRegions"] = SelectionRegions(),
+            },
+            ["contextStatus"] = "ready",
+            ["currentPage"] = new JsonObject
+            {
+                ["kind"] = "web",
+                ["file"] = "https://example.test/article",
+                ["title"] = "Visual",
+                ["page"] = 1,
+                ["sourceInstanceId"] = "source-B",
+                ["stable"] = true,
+                ["text"] = "visible",
+                ["textAvailable"] = true,
+                ["selectionRegions"] = SelectionRegions(),
+            },
+            ["selection"] = new JsonObject
+            {
+                ["state"] = "unknown",
+                ["text"] = null,
+                ["ref"] = null,
+                ["reason"] = "none",
+            },
+        };
+        Require(
+            ReaderContextMcpServer.BuildVisualRequest(
+                Snapshot(30),
+                "selection-near",
+                "selection-1") is not null
+            && ReaderContextMcpServer.BuildVisualRequest(
+                Snapshot(30),
+                "selection-near",
+                "selection-missing") is null
+            && ReaderContextMcpServer.BuildVisualRequest(
+                Snapshot(30),
+                "selection-near",
+                null) is null
+            && ReaderContextMcpServer.BuildVisualRequest(
+                Snapshot(30),
+                "viewport-context",
+                "selection-1") is null,
+            "direct-reader-visual-selection-scope-requires-known-region",
+            checks);
+        await File.WriteAllTextAsync(
+            snapshotPath,
+            Snapshot(31).ToJsonString(
+                DirectBridgeContract.JsonOptions),
+            new UTF8Encoding(false)).ConfigureAwait(false);
+        string duplicateVisualCall =
+            "{\"jsonrpc\":\"2.0\",\"id\":4,\"method\":\"tools/call\"," +
+            "\"params\":{\"name\":\"" +
+            ReaderContextMcpServer.VisualToolName +
+            "\",\"arguments\":{\"scope\":\"viewport-context\"," +
+            "\"scope\":\"drawing-nearby\"}}}";
+        string recoveryVisualCall = JsonSerializer.Serialize(new
+        {
+            jsonrpc = "2.0",
+            id = 5,
+            method = "tools/call",
+            @params = new
+            {
+                name = ReaderContextMcpServer.VisualToolName,
+                arguments = new
+                {
+                    scope = "viewport-context",
+                },
+            },
+        });
+        string VisualMcpInput(bool includeDuplicate = false) => string.Join(
+            Environment.NewLine,
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 1,
+                method = "initialize",
+                @params = new
+                {
+                    protocolVersion = "2025-03-26",
+                },
+            }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 2,
+                method = "tools/list",
+                @params = new { },
+            }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 3,
+                method = "tools/call",
+                @params = new
+                {
+                    name = ReaderContextMcpServer.VisualToolName,
+                    arguments = new
+                    {
+                        scope = "viewport-context",
+                    },
+                },
+            }),
+            includeDuplicate ? duplicateVisualCall : string.Empty,
+            includeDuplicate ? recoveryVisualCall : string.Empty,
+            "");
+        StringWriter visualOutput = new();
+        ReaderContextMcpServer visualMcp = new(
+            snapshotPath,
+            new StringReader(VisualMcpInput(includeDuplicate: true)),
+            visualOutput,
+            utcNow: () => DateTimeOffset.FromUnixTimeMilliseconds(
+                1_786_000_001_000L),
+            fetchVisualAsync: (_, _) =>
+                Task.FromResult<ReaderVisualCapture?>(
+                    new ReaderVisualCapture(
+                        ReaderVisualDeliveryProtocol.MimeType,
+                        jpeg)));
+        _ = await visualMcp.RunAsync(CancellationToken.None)
+            .ConfigureAwait(false);
+        JsonDocument[] visualResponses = visualOutput.ToString()
+            .Split(
+                new[] { "\r\n", "\n" },
+                StringSplitOptions.RemoveEmptyEntries)
+            .Select(value => JsonDocument.Parse(value))
+            .ToArray();
+        try
+        {
+            JsonElement tools = visualResponses[1].RootElement
+                .GetProperty("result").GetProperty("tools");
+            JsonElement content = visualResponses[2].RootElement
+                .GetProperty("result").GetProperty("content");
+            bool duplicateRejectedAndRecovered =
+                visualResponses[3].RootElement.GetProperty("error")
+                    .GetProperty("code").GetInt32() == -32602
+                && visualResponses[4].RootElement.GetProperty("result")
+                    .GetProperty("content")[1]
+                    .GetProperty("type").GetString() == "image";
+            Require(
+                tools.GetArrayLength() == 2
+                && tools[1].GetProperty("name").GetString()
+                    == ReaderContextMcpServer.VisualToolName
+                && content.GetArrayLength() == 2
+                && content[1].GetProperty("type").GetString()
+                    == "image"
+                && content[1].GetProperty("_meta")
+                    .GetProperty("codex/imageDetail").GetString()
+                    == "original"
+                && duplicateRejectedAndRecovered,
+                "direct-reader-visual-mcp-returns-inline-original-image",
+                checks);
+        }
+        finally
+        {
+            foreach (JsonDocument response in visualResponses)
+            {
+                response.Dispose();
+            }
+        }
+
+        await File.WriteAllTextAsync(
+            snapshotPath,
+            Snapshot(41).ToJsonString(
+                DirectBridgeContract.JsonOptions),
+            new UTF8Encoding(false)).ConfigureAwait(false);
+        StringWriter staleOutput = new();
+        ReaderContextMcpServer staleMcp = new(
+            snapshotPath,
+            new StringReader(VisualMcpInput()),
+            staleOutput,
+            utcNow: () => DateTimeOffset.FromUnixTimeMilliseconds(
+                1_786_000_001_000L),
+            fetchVisualAsync: async (_, cancellationToken) =>
+            {
+                await File.WriteAllTextAsync(
+                    snapshotPath,
+                    Snapshot(42).ToJsonString(
+                        DirectBridgeContract.JsonOptions),
+                    new UTF8Encoding(false),
+                    cancellationToken).ConfigureAwait(false);
+                return new ReaderVisualCapture(
+                    ReaderVisualDeliveryProtocol.MimeType,
+                    jpeg);
+            });
+        _ = await staleMcp.RunAsync(CancellationToken.None)
+            .ConfigureAwait(false);
+        JsonDocument staleResponse = JsonDocument.Parse(
+            staleOutput.ToString()
+                .Split(
+                    new[] { "\r\n", "\n" },
+                    StringSplitOptions.RemoveEmptyEntries)[2]);
+        using (staleResponse)
+        {
+            JsonElement result = staleResponse.RootElement
+                .GetProperty("result");
+            Require(
+                result.GetProperty("isError").GetBoolean()
+                && result.GetProperty("content").GetArrayLength() == 1,
+                "direct-reader-visual-mcp-discards-superseded-snapshot",
+                checks);
+        }
+    }
+
+    private static async Task CheckReaderBrowserControlAsync(
+        string root,
+        ICollection<string> checks)
+    {
+        ReaderContextSourceRouter router = new();
+        ReaderBrowserControlBroker broker = new(router);
+        int sentToA = 0;
+        int sentToB = 0;
+        TaskCompletionSource<bool> twoSent = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        ReaderContextSourceLease leaseA = router.Attach(
+            "control-source-A",
+            "control-connection-A",
+            (_, _) =>
+            {
+                sentToA += 1;
+                return Task.CompletedTask;
+            });
+        ReaderContextSourceLease leaseB = router.Attach(
+            "control-source-B",
+            "control-connection-B",
+            (_, _) =>
+            {
+                sentToB += 1;
+                if (sentToB == 2)
+                {
+                    twoSent.TrySetResult(true);
+                }
+                return Task.CompletedTask;
+            });
+        ReaderBrowserControlRequest next = new(
+            "control-next",
+            "control-source-B",
+            71,
+            "https://example.test/article",
+            JsonValue.Create(4)!,
+            "next-viewport",
+            null,
+            null);
+        ReaderBrowserControlRequest heading = next with
+        {
+            Correlation = "control-heading",
+            Action = "scroll-to-heading",
+            Target = "Results",
+        };
+        Task<ReaderBrowserControlResponse> nextTask = broker.RequestAsync(
+            next,
+            CancellationToken.None);
+        Task<ReaderBrowserControlResponse> headingTask = broker.RequestAsync(
+            heading,
+            CancellationToken.None);
+        await twoSent.Task.WaitAsync(TimeSpan.FromSeconds(1))
+            .ConfigureAwait(false);
+
+        ReaderBrowserControlResponse Response(
+            ReaderBrowserControlRequest request,
+            string status,
+            double y) => new(
+                "session-AAAAAAAAAAAAAAAAAAAAAA",
+                request.Correlation,
+                request.SourceInstanceId,
+                request.SnapshotRevision,
+                request.File,
+                JsonSerializer.SerializeToElement(4),
+                request.Action,
+                status,
+                0,
+                y,
+                request.File,
+                "Article");
+        broker.Accept(leaseB, Response(heading, "success", 800));
+        broker.Accept(leaseB, Response(next, "success", 400));
+        ReaderBrowserControlResponse[] isolated =
+            await Task.WhenAll(nextTask, headingTask).ConfigureAwait(false);
+        Require(
+            sentToA == 0
+            && sentToB == 2
+            && isolated[0].Action == "next-viewport"
+            && isolated[0].ScrollY == 400
+            && isolated[1].Action == "scroll-to-heading"
+            && isolated[1].ScrollY == 800,
+            "direct-reader-browser-control-routes-and-isolates-correlations",
+            checks);
+
+        bool identityRejected = false;
+        ReaderBrowserControlRequest mismatch = next with
+        {
+            Correlation = "control-mismatch",
+        };
+        Task<ReaderBrowserControlResponse> mismatchTask =
+            broker.RequestAsync(mismatch, CancellationToken.None);
+        await Task.Delay(10).ConfigureAwait(false);
+        try
+        {
+            broker.Accept(
+                leaseB,
+                Response(mismatch, "success", 0) with
+                {
+                    SnapshotRevision = 72,
+                });
+        }
+        catch (ReaderBrowserControlException exception)
+        {
+            identityRejected = exception.Code ==
+                "BW_READER_BROWSER_CONTROL_IDENTITY_MISMATCH";
+        }
+        router.Detach(leaseB);
+        bool disconnected = false;
+        try
+        {
+            _ = await mismatchTask.ConfigureAwait(false);
+        }
+        catch (ReaderBrowserControlException exception)
+        {
+            disconnected = exception.Code ==
+                "BW_READER_BROWSER_CONTROL_SOURCE_OFFLINE";
+        }
+        bool noFallback = false;
+        try
+        {
+            _ = await broker.RequestAsync(
+                next with { Correlation = "control-offline" },
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (ReaderBrowserControlException exception)
+        {
+            noFallback = exception.Code ==
+                "BW_READER_BROWSER_CONTROL_SOURCE_OFFLINE";
+        }
+        Require(
+            identityRejected && disconnected && noFallback && sentToA == 0,
+            "direct-reader-browser-control-fails-closed-on-stale-or-offline-source",
+            checks);
+        router.Detach(leaseA);
+
+        JsonElement validResponse = JsonSerializer.SerializeToElement(new
+        {
+            contract = DirectBridgeContract.Contract,
+            type = ReaderBrowserControlProtocol.ResponseType,
+            requestId = "control-response",
+            sessionId = "session-AAAAAAAAAAAAAAAAAAAAAA",
+            correlation = next.Correlation,
+            sourceInstanceId = next.SourceInstanceId,
+            snapshotRevision = next.SnapshotRevision,
+            file = next.File,
+            page = 4,
+            action = next.Action,
+            status = "success",
+            scrollX = 0,
+            scrollY = 400,
+            url = next.File,
+            title = "Article",
+        });
+        ReaderBrowserControlResponse validated =
+            ReaderBrowserControlProtocol.ValidateResponse(validResponse);
+        bool extraRejected = false;
+        bool arbitraryActionRejected = false;
+        try
+        {
+            JsonObject extra = JsonNode.Parse(
+                validResponse.GetRawText())!.AsObject();
+            extra["selector"] = "body";
+            _ = ReaderBrowserControlProtocol.ValidateResponse(
+                JsonSerializer.SerializeToElement(extra));
+        }
+        catch (DirectProtocolException)
+        {
+            extraRejected = true;
+        }
+        try
+        {
+            JsonObject arbitrary = JsonNode.Parse(
+                validResponse.GetRawText())!.AsObject();
+            arbitrary["action"] = "javascript";
+            _ = ReaderBrowserControlProtocol.ValidateResponse(
+                JsonSerializer.SerializeToElement(arbitrary));
+        }
+        catch (DirectProtocolException)
+        {
+            arbitraryActionRejected = true;
+        }
+        JsonObject requestNode =
+            ReaderBrowserControlRpcProtocol.Request(heading);
+        using JsonDocument requestDocument = JsonDocument.Parse(
+            requestNode.ToJsonString(DirectBridgeContract.JsonOptions));
+        ReaderBrowserControlRequest validatedRequest =
+            ReaderBrowserControlRpcProtocol.ValidateRequest(
+                requestDocument.RootElement);
+        Require(
+            validated.Status == "success"
+            && extraRejected
+            && arbitraryActionRejected
+            && validatedRequest.Action == "scroll-to-heading"
+            && NamedPipeReaderBrowserControlRpcClient.RequiredPipeOptions
+                == (
+                    System.IO.Pipes.PipeOptions.Asynchronous
+                    | System.IO.Pipes.PipeOptions.CurrentUserOnly)
+            && NamedPipeReaderBrowserControlRpcServer.RequiredPipeOptions
+                == (
+                    System.IO.Pipes.PipeOptions.Asynchronous
+                    | System.IO.Pipes.PipeOptions.CurrentUserOnly),
+            "direct-reader-browser-control-schema-and-pipe-are-strict",
+            checks);
+
+        string mcpRoot = System.IO.Path.Combine(root, "browser-control-mcp");
+        Directory.CreateDirectory(mcpRoot);
+        string snapshotPath = System.IO.Path.Combine(
+            mcpRoot,
+            FileDirectSnapshotContextAdapter.SnapshotFileName);
+        JsonObject SelectionRegions() => new()
+        {
+            ["contract"] = "reader-selection-regions/1",
+            ["total"] = 1,
+            ["truncated"] = false,
+            ["items"] = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["selectionId"] = "selection-1",
+                    ["label"] = "#1 12:00",
+                    ["ordinal"] = 1,
+                    ["createdAtEpochMs"] = 1_786_000_000_000L,
+                },
+            },
+        };
+        JsonObject Snapshot(
+            long revision,
+            string source = "control-source-B",
+            int pageIdentity = 4,
+            string kind = "web") => new()
+        {
+            ["schema"] =
+                FileDirectSnapshotContextAdapter.SnapshotContract,
+            ["revision"] = revision,
+            ["updatedAtUtc"] = "2026-08-06T00:00:00Z",
+            ["activeReading"] = new JsonObject
+            {
+                ["kind"] = kind,
+                ["file"] = "https://example.test/article",
+                ["title"] = "Article",
+                ["page"] = pageIdentity,
+                ["sourceInstanceId"] = source,
+                ["receivedAtEpochMs"] = 1_786_000_000_000L,
+                ["fresh"] = true,
+                ["selectionRegions"] = SelectionRegions(),
+            },
+            ["contextStatus"] = "ready",
+            ["currentPage"] = new JsonObject
+            {
+                ["kind"] = kind,
+                ["file"] = "https://example.test/article",
+                ["title"] = "Article",
+                ["page"] = pageIdentity,
+                ["sourceInstanceId"] = source,
+                ["stable"] = true,
+                ["text"] = "visible",
+                ["textAvailable"] = true,
+                ["selectionRegions"] = SelectionRegions(),
+            },
+            ["selection"] = new JsonObject
+            {
+                ["state"] = "unknown",
+                ["text"] = null,
+                ["ref"] = null,
+                ["reason"] = "none",
+            },
+        };
+        Require(
+            ReaderContextMcpServer.BuildBrowserControlRequest(
+                Snapshot(80),
+                "scroll-to-selection",
+                null,
+                "selection-1") is not null
+            && ReaderContextMcpServer.BuildBrowserControlRequest(
+                Snapshot(80),
+                "scroll-to-selection",
+                null,
+                "selection-missing") is null
+            && ReaderContextMcpServer.BuildBrowserControlRequest(
+                Snapshot(80),
+                "scroll-to-selection",
+                null,
+                null) is null
+            && ReaderContextMcpServer.BuildBrowserControlRequest(
+                Snapshot(80),
+                "next-viewport",
+                null,
+                "selection-1") is null,
+            "direct-reader-browser-control-selection-requires-known-region",
+            checks);
+        await File.WriteAllTextAsync(
+            snapshotPath,
+            Snapshot(81).ToJsonString(
+                DirectBridgeContract.JsonOptions),
+            new UTF8Encoding(false)).ConfigureAwait(false);
+        object ToolCall(int id, object arguments) => new
+        {
+            jsonrpc = "2.0",
+            id,
+            method = "tools/call",
+            @params = new
+            {
+                name = ReaderContextMcpServer.BrowserControlToolName,
+                arguments,
+            },
+        };
+        string duplicateBrowserCall =
+            "{\"jsonrpc\":\"2.0\",\"id\":8,\"method\":\"tools/call\"," +
+            "\"params\":{\"name\":\"" +
+            ReaderContextMcpServer.BrowserControlToolName +
+            "\",\"arguments\":{\"action\":\"next-viewport\"," +
+            "\"action\":\"previous-viewport\"}}}";
+        string mcpInput = string.Join(
+            Environment.NewLine,
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 1,
+                method = "initialize",
+                @params = new
+                {
+                    protocolVersion = "2025-03-26",
+                },
+            }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 2,
+                method = "tools/list",
+                @params = new { },
+            }),
+            JsonSerializer.Serialize(ToolCall(
+                3,
+                new { action = "next-viewport" })),
+            JsonSerializer.Serialize(ToolCall(
+                4,
+                new { action = "javascript", target = "alert(1)" })),
+            JsonSerializer.Serialize(ToolCall(
+                5,
+                new
+                {
+                    action = "scroll-to-text",
+                    target = "needle",
+                    selector = "body",
+                })),
+            JsonSerializer.Serialize(ToolCall(
+                6,
+                new
+                {
+                    action = "scroll-to-heading",
+                    target = "Heading",
+                    url = "https://evil.test/",
+                })),
+            JsonSerializer.Serialize(ToolCall(
+                7,
+                new
+                {
+                    action = "scroll-to-selection",
+                    selectionId = "selection-1",
+                    js = "1+1",
+                })),
+            duplicateBrowserCall,
+            JsonSerializer.Serialize(ToolCall(
+                9,
+                new { action = "next-viewport" })),
+            "");
+        StringWriter output = new();
+        ReaderContextMcpServer mcp = new(
+            snapshotPath,
+            new StringReader(mcpInput),
+            output,
+            utcNow: () => DateTimeOffset.FromUnixTimeMilliseconds(
+                1_786_000_001_000L),
+            controlBrowserAsync: async (request, token) =>
+            {
+                await File.WriteAllTextAsync(
+                    snapshotPath,
+                    Snapshot(request.SnapshotRevision + 1).ToJsonString(
+                        DirectBridgeContract.JsonOptions),
+                    new UTF8Encoding(false),
+                    token).ConfigureAwait(false);
+                return Response(request, "success", 500);
+            });
+        _ = await mcp.RunAsync(CancellationToken.None)
+            .ConfigureAwait(false);
+        JsonDocument[] responses = output.ToString()
+            .Split(
+                new[] { "\r\n", "\n" },
+                StringSplitOptions.RemoveEmptyEntries)
+            .Select(value => JsonDocument.Parse(value))
+            .ToArray();
+        try
+        {
+            JsonElement tools = responses[1].RootElement
+                .GetProperty("result").GetProperty("tools");
+            JsonElement validResult = responses[2].RootElement
+                .GetProperty("result").GetProperty("content")[0];
+            bool invalidCallsRejected = responses
+                .Skip(3)
+                .Take(4)
+                .All(response => response.RootElement
+                    .GetProperty("error")
+                    .GetProperty("code").GetInt32() == -32602);
+            bool duplicateRejectedAndRecovered =
+                responses[7].RootElement.GetProperty("error")
+                    .GetProperty("code").GetInt32() == -32602
+                && responses[8].RootElement.GetProperty("result")
+                    .GetProperty("content")[0]
+                    .GetProperty("type").GetString() == "text";
+            Require(
+                tools.EnumerateArray().Any(tool =>
+                    tool.GetProperty("name").GetString()
+                        == ReaderContextMcpServer.BrowserControlToolName)
+                && validResult.GetProperty("type").GetString() == "text"
+                && invalidCallsRejected
+                && duplicateRejectedAndRecovered,
+                "direct-reader-browser-control-mcp-allows-only-fixed-actions",
+                checks);
+        }
+        finally
+        {
+            foreach (JsonDocument response in responses)
+            {
+                response.Dispose();
+            }
+        }
+
+        ReaderBrowserControlRequest currentRequest =
+            ReaderContextMcpServer.BuildBrowserControlRequest(
+                Snapshot(90),
+                "next-viewport",
+                null,
+                null)!;
+        Require(
+            ReaderContextMcpServer.BrowserControlRequestStillCurrent(
+                Snapshot(91),
+                currentRequest)
+            && ReaderContextMcpServer.BrowserControlSnapshotAdvanced(
+                Snapshot(91),
+                currentRequest)
+            && !ReaderContextMcpServer.BrowserControlSnapshotAdvanced(
+                Snapshot(90),
+                currentRequest)
+            && ReaderContextMcpServer
+                .BrowserControlResponseRequiresSnapshotAdvance("success")
+            && !ReaderContextMcpServer
+                .BrowserControlResponseRequiresSnapshotAdvance("not-found")
+            && !ReaderContextMcpServer
+                .BrowserControlResponseRequiresSnapshotAdvance("rejected")
+            && !ReaderContextMcpServer.BrowserControlRequestStillCurrent(
+                Snapshot(91, source: "other-source"),
+                currentRequest)
+            && !ReaderContextMcpServer.BrowserControlRequestStillCurrent(
+                Snapshot(91, pageIdentity: 5),
+                currentRequest)
+            && ReaderContextMcpServer.BuildBrowserControlRequest(
+                Snapshot(92, kind: "pdf"),
+                "next-viewport",
+                null,
+                null) is null,
+            "direct-reader-browser-control-rechecks-source-and-page-after-command",
             checks);
     }
 

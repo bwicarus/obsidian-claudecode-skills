@@ -37,6 +37,13 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     private readonly DirectRuntimeStatusWriter _statusWriter;
     private readonly DirectServiceLease _serviceLease;
     private readonly DirectSnapshotViewer _snapshotViewer;
+    private readonly ReaderDocumentCorpusStore _documentCorpus;
+    private readonly ReaderContextSourceRouter _readerSourceRouter = new();
+    private readonly ReaderVisualDeliveryBroker _readerVisualBroker;
+    private readonly NamedPipeReaderVisualRpcServer _readerVisualRpcServer;
+    private readonly ReaderBrowserControlBroker _readerBrowserControlBroker;
+    private readonly NamedPipeReaderBrowserControlRpcServer
+        _readerBrowserControlRpcServer;
     private readonly object _runtimeStateGate = new();
     private string _runtimeState = "starting";
     private bool _runtimeReaderConnected;
@@ -74,6 +81,22 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 "runtime",
                 FileDirectSnapshotContextAdapter.SnapshotFileName),
             config.ListenPort);
+        string runtimeDirectory = Path.GetDirectoryName(
+            config.RuntimeStatusPath)
+            ?? Path.Combine(configStore.InstallationRoot, "runtime");
+        _documentCorpus = new ReaderDocumentCorpusStore(
+            Path.Combine(
+                runtimeDirectory,
+                ReaderDocumentCorpusStore.CorpusFileName));
+        _readerVisualBroker = new ReaderVisualDeliveryBroker(
+            _readerSourceRouter);
+        _readerVisualRpcServer = new NamedPipeReaderVisualRpcServer(
+            _readerVisualBroker);
+        _readerBrowserControlBroker = new ReaderBrowserControlBroker(
+            _readerSourceRouter);
+        _readerBrowserControlRpcServer =
+            new NamedPipeReaderBrowserControlRpcServer(
+                _readerBrowserControlBroker);
     }
 
     internal async Task<int> RunAsync(CancellationToken cancellationToken)
@@ -92,8 +115,13 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         builder.WebHost.ConfigureKestrel(options =>
         {
             options.AddServerHeader = false;
-            options.Limits.MaxRequestBodySize =
-                DirectBridgeContract.MaximumMessageBytes;
+            // Web page corpus POSTs are bounded and validated separately.
+            // WebSocket text frames retain the stricter 64 KiB contract in
+            // ReceiveMessageAsync; raising the HTTP envelope does not widen it.
+            // One request can carry the current viewport plus a one-time full
+            // document corpus.  The document store still validates every
+            // field and caps text at 256 Ki characters.
+            options.Limits.MaxRequestBodySize = 2 * 1024 * 1024;
             options.Limits.RequestHeadersTimeout =
                 TimeSpan.FromSeconds(10);
             options.Listen(
@@ -161,9 +189,23 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
 
         CancellationTokenSource? heartbeatLifetime = null;
         Task? heartbeatTask = null;
+        CancellationTokenSource? visualRpcLifetime = null;
+        Task? visualRpcTask = null;
+        CancellationTokenSource? browserControlRpcLifetime = null;
+        Task? browserControlRpcTask = null;
         try
         {
             await app.StartAsync(cancellationToken).ConfigureAwait(false);
+            visualRpcLifetime =
+                CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken);
+            visualRpcTask = _readerVisualRpcServer.RunAsync(
+                visualRpcLifetime.Token);
+            browserControlRpcLifetime =
+                CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken);
+            browserControlRpcTask = _readerBrowserControlRpcServer.RunAsync(
+                browserControlRpcLifetime.Token);
             await _serviceLease.WriteAsync(cancellationToken)
                 .ConfigureAwait(false);
             await WriteRuntimeStatusAsync(
@@ -191,6 +233,36 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         }
         finally
         {
+            if (browserControlRpcLifetime is not null)
+            {
+                browserControlRpcLifetime.Cancel();
+            }
+            if (browserControlRpcTask is not null)
+            {
+                try
+                {
+                    await browserControlRpcTask.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                }
+            }
+            browserControlRpcLifetime?.Dispose();
+            if (visualRpcLifetime is not null)
+            {
+                visualRpcLifetime.Cancel();
+            }
+            if (visualRpcTask is not null)
+            {
+                try
+                {
+                    await visualRpcTask.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                }
+            }
+            visualRpcLifetime?.Dispose();
             if (heartbeatLifetime is not null)
             {
                 heartbeatLifetime.Cancel();
@@ -443,16 +515,140 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                     StatusCodes.Status400BadRequest;
                 return;
             }
+            DirectJsonValidation.RequireNoDuplicateKeys(root);
+            HashSet<string> fields = root.EnumerateObject()
+                .Select(property => property.Name)
+                .ToHashSet(StringComparer.Ordinal);
+            if (
+                fields.Count == 0
+                || fields.Any(field => field is not (
+                    "event" or "active" or "viewport" or "document"))
+            )
+            {
+                throw new DirectProtocolException(
+                    "BW_READER_CONTEXT_POST_SCHEMA_INVALID",
+                    "Reader 快照 POST 字段无效",
+                    retryable: false);
+            }
 
-            int applied = 0;
+            DirectContextEvent? contextEvent = null;
+            DirectActiveReading? activeReading = null;
+            DirectViewportContext? viewport = null;
+            JsonElement? documentValue = null;
             if (
                 root.TryGetProperty("event", out JsonElement eventValue)
                 && eventValue.ValueKind == JsonValueKind.Object
             )
             {
-                DirectContextEvent contextEvent =
+                contextEvent =
                     NamedPipeDirectContextAdapter.ValidateEvent(
                         eventValue);
+            }
+            else if (fields.Contains("event"))
+            {
+                throw new DirectProtocolException(
+                    "BW_READER_CONTEXT_POST_SCHEMA_INVALID",
+                    "Reader 快照 event 无效",
+                    retryable: false);
+            }
+            if (
+                root.TryGetProperty("active", out JsonElement activeValue)
+                && activeValue.ValueKind == JsonValueKind.Object
+            )
+            {
+                activeReading =
+                    FileDirectSnapshotContextAdapter.ValidateActiveReading(
+                        activeValue);
+            }
+            else if (fields.Contains("active"))
+            {
+                throw new DirectProtocolException(
+                    "BW_READER_CONTEXT_POST_SCHEMA_INVALID",
+                    "Reader 快照 active 无效",
+                    retryable: false);
+            }
+            if (
+                root.TryGetProperty("viewport", out JsonElement viewportValue)
+                && viewportValue.ValueKind == JsonValueKind.Object
+            )
+            {
+                viewport = FileDirectSnapshotContextAdapter.ValidateViewport(
+                    viewportValue);
+            }
+            else if (fields.Contains("viewport"))
+            {
+                throw new DirectProtocolException(
+                    "BW_READER_CONTEXT_POST_SCHEMA_INVALID",
+                    "Reader 快照 viewport 无效",
+                    retryable: false);
+            }
+            if (
+                root.TryGetProperty("document", out JsonElement corpusValue)
+                && corpusValue.ValueKind == JsonValueKind.Object
+            )
+            {
+                _ = ReaderDocumentCorpusStore.Validate(corpusValue);
+                documentValue = corpusValue;
+            }
+            else if (fields.Contains("document"))
+            {
+                throw new DirectProtocolException(
+                    "BW_READER_CONTEXT_POST_SCHEMA_INVALID",
+                    "Reader 快照 document 无效",
+                    retryable: false);
+            }
+            if (
+                viewport is not null
+                && activeReading is null
+            )
+            {
+                throw new DirectProtocolException(
+                    "BW_READER_CONTEXT_POST_SCHEMA_INVALID",
+                    "Reader 当前视口必须与 active-reading 同时提交",
+                    retryable: false);
+            }
+            if (
+                viewport is not null
+                && activeReading is not null
+                && !string.Equals(
+                    viewport.SourceInstanceId,
+                    activeReading.SourceInstanceId,
+                    StringComparison.Ordinal)
+            )
+            {
+                throw new DirectProtocolException(
+                    "BW_READER_CONTEXT_POST_IDENTITY_MISMATCH",
+                    "Reader viewport 与 active 来源不一致",
+                    retryable: false);
+            }
+            if (
+                documentValue is JsonElement corpus
+                && viewport is not null
+            )
+            {
+                ReaderDocumentCorpusEntry documentEntry =
+                    ReaderDocumentCorpusStore.Validate(corpus);
+                if (
+                    !string.Equals(
+                        documentEntry.SourceInstanceId,
+                        viewport.SourceInstanceId,
+                        StringComparison.Ordinal)
+                    || !string.Equals(
+                        documentEntry.DocumentKey,
+                        viewport.DocumentKey,
+                        StringComparison.Ordinal)
+                )
+                {
+                    throw new DirectProtocolException(
+                        "BW_READER_CONTEXT_POST_IDENTITY_MISMATCH",
+                        "Reader 全文与当前视口身份不一致",
+                        retryable: false);
+                }
+            }
+
+            int applied = 0;
+            if (contextEvent is not null)
+            {
                 await adapter.ForwardJournalAsync(
                     requestId,
                     sessionId,
@@ -460,18 +656,28 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                     serviceCancellationToken).ConfigureAwait(false);
                 applied += 1;
             }
-            if (
-                root.TryGetProperty("active", out JsonElement activeValue)
-                && activeValue.ValueKind == JsonValueKind.Object
-            )
+            if (activeReading is not null)
             {
-                DirectActiveReading activeReading =
-                    FileDirectSnapshotContextAdapter.ValidateActiveReading(
-                        activeValue);
                 await adapter.ForwardActiveReadingAsync(
                     requestId,
                     sessionId,
                     activeReading,
+                    serviceCancellationToken).ConfigureAwait(false);
+                applied += 1;
+            }
+            if (viewport is not null)
+            {
+                await adapter.ForwardViewportAsync(
+                    requestId,
+                    sessionId,
+                    viewport,
+                    serviceCancellationToken).ConfigureAwait(false);
+                applied += 1;
+            }
+            if (documentValue is JsonElement documentEntryValue)
+            {
+                await _documentCorpus.SaveAsync(
+                    documentEntryValue,
                     serviceCancellationToken).ConfigureAwait(false);
                 applied += 1;
             }
@@ -580,11 +786,42 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 serviceCancellationToken,
                 context.RequestAborted);
         using SemaphoreSlim sendGate = new(1, 1);
+        ReaderContextSourceLease? sourceLease = null;
         DirectBridgeProtocolSession protocol = new(
             connectionId,
             origin,
             _configStore,
-            _coordinator);
+            _coordinator,
+            registerReaderSource: sourceInstanceId =>
+            {
+                sourceLease = _readerSourceRouter.Attach(
+                    sourceInstanceId,
+                    connectionId,
+                    (message, cancellationToken) => SendJsonAsync(
+                        socket,
+                        sendGate,
+                        message,
+                        cancellationToken));
+                return sourceLease;
+            },
+            acceptReaderVisual: chunk =>
+            {
+                ReaderContextSourceLease lease = sourceLease
+                    ?? throw new DirectProtocolException(
+                        "BW_READER_VISUAL_SOURCE_NOT_REGISTERED",
+                        "Reader 视觉来源尚未注册",
+                        retryable: true);
+                return _readerVisualBroker.Accept(lease, chunk);
+            },
+            acceptReaderBrowserControl: response =>
+            {
+                ReaderContextSourceLease lease = sourceLease
+                    ?? throw new DirectProtocolException(
+                        "BW_READER_BROWSER_CONTROL_SOURCE_NOT_REGISTERED",
+                        "Reader 浏览控制来源尚未注册",
+                        retryable: true);
+                _readerBrowserControlBroker.Accept(lease, response);
+            });
 
         try
         {
@@ -654,6 +891,14 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         catch (WebSocketException)
         {
         }
+        finally
+        {
+            if (sourceLease is not null)
+            {
+                _readerSourceRouter.Detach(sourceLease);
+            }
+            socket.Abort();
+        }
     }
 
     internal static bool IsContextEndpointActionAllowed(string json)
@@ -678,7 +923,10 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 "context" or
                 "active-reading" or
                 "context-clear" or
-                "log";
+                "log" or
+                ReaderVisualDeliveryProtocol.RegisterType or
+                ReaderVisualDeliveryProtocol.ChunkType or
+                ReaderBrowserControlProtocol.ResponseType;
         }
         catch (JsonException)
         {
