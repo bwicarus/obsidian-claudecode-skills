@@ -28,7 +28,8 @@ internal sealed record DirectViewportContext(
     string AfterText,
     string SelectionState,
     string? Selection,
-    long ObservedAtEpochMilliseconds);
+    long ObservedAtEpochMilliseconds,
+    string? ControlCorrelation = null);
 
 internal sealed record DirectSnapshotForwardResult(
     string Outcome,
@@ -349,6 +350,11 @@ internal sealed class FileDirectSnapshotContextAdapter :
                     ["receivedAtEpochMs"] =
                         _utcNow().ToUnixTimeMilliseconds(),
                 };
+                if (viewport.ControlCorrelation is not null)
+                {
+                    viewportJson["controlCorrelation"] =
+                        viewport.ControlCorrelation;
+                }
                 stable["sourceInstanceId"] = viewport.SourceInstanceId;
                 stable["documentKey"] = viewport.DocumentKey;
                 stable["readingWindow"] = viewportJson;
@@ -767,7 +773,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
         {
             throw ViewportInvalid(exception);
         }
-        string[] fields =
+        string[] requiredFields =
         {
             "contract",
             "sourceInstanceId",
@@ -784,7 +790,13 @@ internal sealed class FileDirectSnapshotContextAdapter :
         HashSet<string> actual = value.EnumerateObject()
             .Select(property => property.Name)
             .ToHashSet(StringComparer.Ordinal);
-        if (!actual.SetEquals(fields))
+        HashSet<string> allowed = requiredFields
+            .Append("controlCorrelation")
+            .ToHashSet(StringComparer.Ordinal);
+        if (
+            requiredFields.Any(field => !actual.Contains(field))
+            || actual.Any(field => !allowed.Contains(field))
+        )
         {
             throw ViewportInvalid();
         }
@@ -864,6 +876,14 @@ internal sealed class FileDirectSnapshotContextAdapter :
         {
             throw ViewportInvalid();
         }
+        string? controlCorrelation = null;
+        if (actual.Contains("controlCorrelation"))
+        {
+            controlCorrelation = RequiredSafeViewportId(
+                value,
+                "controlCorrelation",
+                160);
+        }
         return new DirectViewportContext(
             sourceInstanceId,
             documentKey,
@@ -874,7 +894,8 @@ internal sealed class FileDirectSnapshotContextAdapter :
             afterText,
             selectionState,
             selection,
-            observedAt);
+            observedAt,
+            controlCorrelation);
     }
 
     private static string RequiredSafeViewportId(
@@ -1878,6 +1899,10 @@ internal sealed class FileDirectSnapshotContextAdapter :
             ?.GetValue<long?>();
         long? receivedAt = value["receivedAtEpochMs"]
             ?.GetValue<long?>();
+        bool hasControlCorrelation = value.ContainsKey(
+            "controlCorrelation");
+        string? controlCorrelation = StringValue(
+            value["controlCorrelation"]);
         if (
             contract != "reader-viewport/1"
             || !string.Equals(
@@ -1900,11 +1925,20 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 != !string.IsNullOrWhiteSpace(selection)
             || observedAt is null or < 1
             || receivedAt is null or < 1
+            || (
+                hasControlCorrelation
+                && (
+                    string.IsNullOrEmpty(controlCorrelation)
+                    || controlCorrelation.Length > 160
+                    || !DirectBridgeContract.IsSafeId(
+                        controlCorrelation)
+                )
+            )
         )
         {
             throw JournalInvalid();
         }
-        return new JsonObject
+        JsonObject restored = new()
         {
             ["contract"] = contract,
             ["sourceInstanceId"] = source,
@@ -1921,6 +1955,11 @@ internal sealed class FileDirectSnapshotContextAdapter :
             ["observedAtEpochMs"] = observedAt,
             ["receivedAtEpochMs"] = receivedAt,
         };
+        if (controlCorrelation is not null)
+        {
+            restored["controlCorrelation"] = controlCorrelation;
+        }
+        return restored;
     }
 
     private static bool BooleanValue(

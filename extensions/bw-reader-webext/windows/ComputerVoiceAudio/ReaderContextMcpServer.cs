@@ -591,7 +591,12 @@ internal sealed class ReaderContextMcpServer
         bool requiresSnapshotAdvance =
             BrowserControlResponseRequiresSnapshotAdvance(
                 response.Status);
-        int attempts = requiresSnapshotAdvance ? 40 : 1;
+        // A successful scroll is not complete until the exact viewport report
+        // produced by that control arrives. Unrelated snapshot revisions can
+        // advance while several readers are online, so revision alone is not
+        // an acknowledgement. The page echoes request.Correlation in its next
+        // reader-viewport/1 payload; wait about five seconds for that receipt.
+        int attempts = requiresSnapshotAdvance ? 100 : 1;
         for (int attempt = 0; attempt < attempts; attempt += 1)
         {
             await TryLoadLatestAsync(cancellationToken)
@@ -824,7 +829,13 @@ internal sealed class ReaderContextMcpServer
         BrowserControlRequestStillCurrent(payload, request)
         && LongValue(payload["revision"])
             is long revision
-        && revision > request.SnapshotRevision;
+        && revision > request.SnapshotRevision
+        && payload["currentPage"] is JsonObject page
+        && page["readingWindow"] is JsonObject readingWindow
+        && string.Equals(
+            StringValue(readingWindow["controlCorrelation"]),
+            request.Correlation,
+            StringComparison.Ordinal);
 
     internal static bool BrowserControlResponseRequiresSnapshotAdvance(
         string status) => status == "success";
