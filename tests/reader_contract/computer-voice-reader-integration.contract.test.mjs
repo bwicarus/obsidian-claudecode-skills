@@ -75,6 +75,48 @@ test("电脑客户端保留原按钮与设置标签，App 与扩展按宿主分�
   );
 });
 
+test("电脑客户端设置读取真实 Codex 语音状态并按目标状态控制一次快捷键", () => {
+  assert.match(runtime, /\["codexVoice"\][\s\S]*STATUS 响应/);
+  assert.match(
+    runtime,
+    /function normalizeCodexVoicePayload[\s\S]*"available"[\s\S]*"unavailable"[\s\S]*"error"/,
+  );
+
+  const setStart = runtime.indexOf("function setCodexVoiceActive(desiredActive)");
+  const setEnd = runtime.indexOf("function makeAudioSurface()", setStart);
+  assert.ok(setStart >= 0 && setEnd > setStart);
+  const setBody = runtime.slice(setStart, setEnd);
+  assert.match(
+    setBody,
+    /opened\.request\([\s\S]*"codex-voice-set"[\s\S]*\{ active: desiredActive \}/,
+  );
+  assert.match(setBody, /if \(codexVoiceSetPromise\) return codexVoiceSetPromise/);
+  assert.doesNotMatch(setBody, /request\(\s*"(?:start|stop)"/);
+
+  const settingsStart = runtime.indexOf("function mountSettings(container)");
+  const settingsEnd = runtime.indexOf("// Preference-only read", settingsStart);
+  const settingsBody = runtime.slice(settingsStart, settingsEnd);
+  assert.match(settingsBody, /data-role="codex-voice-status"/);
+  assert.match(settingsBody, /data-role="codex-voice-toggle"/);
+  assert.match(settingsBody, /● Codex 正在使用麦克风（通常表示语音已开启）/);
+  assert.match(settingsBody, /○ Codex 当前未使用麦克风（通常表示语音已关闭）/);
+  assert.match(
+    settingsBody,
+    /var desiredActive = !latestCodexVoice\.active;[\s\S]*setCodexVoiceActive\(desiredActive\)/,
+  );
+  assert.match(
+    settingsBody,
+    /codexVoiceToggle\.addEventListener\("click", function \(event\)[\s\S]*event\.isTrusted !== true[\s\S]*setCodexVoiceActive\(desiredActive\)/,
+    "a third-party host must not synthesize the privileged Windows shortcut click",
+  );
+
+  const refreshStart = settingsBody.indexOf("function refresh()");
+  const refreshEnd = settingsBody.indexOf("root.__rcComputerVoiceRefresh", refreshStart);
+  const refreshBody = settingsBody.slice(refreshStart, refreshEnd);
+  assert.match(refreshBody, /availability\(\)\.then\(render\)/);
+  assert.doesNotMatch(refreshBody, /setCodexVoiceActive|codex-voice-set/);
+});
+
 test("电脑按钮按宿主分流，普通电话保持独立", () => {
   const connectStart = voicecall.indexOf("toggle._connect = function (opts)");
   const connectEnd = voicecall.indexOf("function toggle(opts)", connectStart);
