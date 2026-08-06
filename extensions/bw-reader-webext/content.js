@@ -542,45 +542,80 @@
     return best || body;
   }
 
-  // Reads text from a subtree with the page furniture skipped.
-  //
-  // Reads the live tree rather than a detached clone. innerText reports what is
-  // actually rendered, but only for elements that are in the document -- on a
-  // clone it quietly degrades to textContent and starts including everything
-  // display:none was hiding. That is why extraction once reported more text
-  // than the whole page contained.
-  //
-  // So instead of removing furniture from a copy, the furniture is skipped
-  // while walking the original: same result, nothing detached, page untouched.
+  var ARTICLE_BLOCK =
+    "p,h1,h2,h3,h4,h5,h6,li,dd,dt,blockquote,figcaption,td,th,pre," +
+    "article,main,section,div";
+
+  // Reads each rendered text node exactly once. Element-level innerText cannot
+  // be used here: accepting both a parent block and one of its child blocks
+  // duplicates the child's text, while detached clones include hidden text.
   function articleText(root) {
     var parts = [];
+    var block = null;
+    var blockText = "";
+    var visibilityCache = typeof WeakMap === "function" ? new WeakMap() : null;
+
+    function rendered(el) {
+      if (!el || el.nodeType !== 1) return true;
+      if (visibilityCache && visibilityCache.has(el)) return visibilityCache.get(el);
+      var ok = true;
+      try {
+        if (
+          el.hidden ||
+          el.getAttribute("aria-hidden") === "true" ||
+          el.matches(ARTICLE_DROP)
+        ) ok = false;
+      } catch (_) {}
+      if (ok) {
+        try {
+          var style = window.getComputedStyle(el);
+          ok = !!style &&
+            style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            style.visibility !== "collapse" &&
+            style.contentVisibility !== "hidden" &&
+            parseFloat(style.opacity || "1") !== 0;
+        } catch (_) {}
+      }
+      if (ok && el.parentElement) ok = rendered(el.parentElement);
+      if (visibilityCache) visibilityCache.set(el, ok);
+      return ok;
+    }
+
+    function textBlock(el) {
+      try {
+        var found = el.closest(ARTICLE_BLOCK);
+        if (found && (found === root || root.contains(found))) return found;
+      } catch (_) {}
+      return root;
+    }
+
+    function flush() {
+      var value = blockText.replace(/\s+/g, " ").trim();
+      if (value) parts.push(value);
+      blockText = "";
+    }
+
     try {
-      var walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
-        acceptNode: function (el) {
-          try {
-            if (el.matches(ARTICLE_DROP)) return NodeFilter.FILTER_REJECT;
-          } catch (_) {}
-          // Blocks that hold text directly are what we want; everything else is
-          // structure to descend through.
-          if (/^(P|H1|H2|H3|H4|H5|H6|LI|DD|DT|BLOCKQUOTE|FIGCAPTION|TD|TH)$/
-              .test(el.tagName)) {
-            return NodeFilter.FILTER_ACCEPT;
-          }
-          return NodeFilter.FILTER_SKIP;
-        },
-      });
+      var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
       var node = walker.nextNode();
       var seen = 0;
-      while (node && seen < 4000) {
-        var t = "";
-        try { t = String(node.innerText || "").trim(); } catch (_) {}
-        if (t) parts.push(t);
+      while (node && seen < 8000) {
         seen += 1;
+        var parent = node.parentElement;
+        var value = String(node.nodeValue || "");
+        if (value.trim() && parent && rendered(parent)) {
+          var nextBlock = textBlock(parent);
+          if (block && nextBlock !== block) flush();
+          block = nextBlock;
+          blockText += value;
+        }
         node = walker.nextNode();
       }
     } catch (_) {}
+    flush();
     if (parts.length) return parts.join(String.fromCharCode(10) + String.fromCharCode(10));
-    // No block-level text found: fall back to the subtree as rendered.
+    // Graceful fallback for unusual DOM implementations without TreeWalker.
     try { return String(root.innerText || ""); } catch (_) { return ""; }
   }
 
@@ -665,7 +700,9 @@
     // one page in front of the user from the several merely on screen.
     var focused = true;
     try { focused = document.hasFocus(); } catch (_) {}
-    if (!focused && !force) {
+    // `force` only bypasses content de-duplication. It must never let an
+    // unfocused tab overwrite the page that is actually in front of the user.
+    if (!focused) {
       probeLine("跳过: 本页未获焦点");
       return;
     }
@@ -673,7 +710,14 @@
     if (!snap) return;
     var signature = snap.url + "|" + snap.title + "|" +
       contentDigest(snap.text) + "|" + contentDigest(snap.selection);
-    if (!force && (signature === lastSignature || signature === pendingSignature)) return;
+    if (!force && signature === lastSignature) {
+      probeLine("跳过: 内容签名未变");
+      return;
+    }
+    if (!force && signature === pendingSignature) {
+      probeLine("跳过: 同签名投递中");
+      return;
+    }
     pendingSignature = signature;
 
     // Delivered before storage is touched, not after it succeeds.

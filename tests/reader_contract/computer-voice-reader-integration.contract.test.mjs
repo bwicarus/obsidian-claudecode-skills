@@ -525,7 +525,7 @@ test("普通网页上下文同页直投后一次 POST，不再保活 WSS", () =>
   assert.match(contentScript, /iframe\[src\*="call\.html"\]/);
   assert.match(
     contentScript,
-    /window\.__bwProbe\.startProbeHost\(\{ enabled: true \}\)/,
+    /window\.__bwProbe\.startProbeHost\(\)/,
   );
   assert.match(
     contentScript,

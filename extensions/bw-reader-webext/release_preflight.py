@@ -46,6 +46,7 @@ ROOT_FILES = (
     "popup.js",
 )
 SRC_FILES = (
+    "bw-probe.js",
     "computer-voice-native-protocol.js",
     "direct-sync-content-host.js",
     "facade.js",
@@ -313,6 +314,7 @@ def expected_runtime_js(source_root: Path = HERE) -> tuple[str, ...]:
         fail("build.py FILES 首项必须是 rc-core.js")
     wrapped_after_core = wrapped[1:]
     return (
+        "src/bw-probe.js",
         "src/facade.js",
         "src/settings-sync.js",
         "vendor/html2canvas.min.js",
