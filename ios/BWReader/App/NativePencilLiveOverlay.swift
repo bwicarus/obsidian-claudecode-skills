@@ -349,6 +349,10 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
         private var appliedTool: NativePencilInkController.Tool?
         private var appliedColor = ""
         private var appliedWidth: CGFloat = 0
+        private var appliedWebFallbackGeneration = -1
+        private var appliedWebFallbackTool: NativePencilInkController.Tool?
+        private var appliedWebFallbackColor = ""
+        private var appliedWebFallbackWidth: CGFloat = 0
         private var appliedRetryRequest = 0
         private var appliedDocumentGeneration = 0
         private var canvasToolActive = false
@@ -383,6 +387,24 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
         ) {
             synchronizeDocumentGeneration(on: canvas)
             let width = max(1, min(requestedWidth, 16))
+            // The web ink engine is the fail-safe owner whenever PencilKit's
+            // hit-test declines a stroke. Keep both owners on the same style
+            // so that falling back never collapses to the old red/2.5 line.
+            if appliedWebFallbackGeneration != appliedDocumentGeneration
+                || appliedWebFallbackTool != tool
+                || appliedWebFallbackColor != colorHex
+                || appliedWebFallbackWidth != width
+            {
+                appliedWebFallbackGeneration = appliedDocumentGeneration
+                appliedWebFallbackTool = tool
+                appliedWebFallbackColor = colorHex
+                appliedWebFallbackWidth = width
+                reader.synchronizeWebInkFallbackStyle(
+                    tool: tool,
+                    colorHex: colorHex,
+                    width: width
+                )
+            }
             guard
                 appliedTool != tool
                     || appliedColor != colorHex
@@ -794,6 +816,39 @@ extension UIColor {
 
 @MainActor
 fileprivate extension ReaderWebViewModel {
+    func synchronizeWebInkFallbackStyle(
+        tool: NativePencilInkController.Tool,
+        colorHex: String,
+        width: CGFloat
+    ) {
+        let safeColor = colorHex.range(
+            of: #"^#[0-9a-fA-F]{6}$"#,
+            options: .regularExpression
+        ) == nil ? "#ff3b30" : colorHex
+        let safeWidth = max(1, min(width, 16))
+        let webTool = tool == .eraser ? "eraser" : "pen"
+        webView.evaluateJavaScript(
+            """
+            (() => {
+              const color = \(String(reflecting: safeColor));
+              const width = \(safeWidth);
+              const tool = \(String(reflecting: webTool));
+              if (typeof _ink === "object") {
+                _ink.color = color;
+                _ink.width = width;
+                _ink.tool = tool;
+              }
+              if (typeof _epInk === "object") {
+                _epInk.color = color;
+                _epInk.width = width;
+                _epInk.tool = tool;
+              }
+            })();
+            """,
+            completionHandler: nil
+        )
+    }
+
     func applyNativePencilOperation(
         _ operation: NativeInkOperation
     ) async throws {
