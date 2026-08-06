@@ -440,6 +440,12 @@ test("扩展上下文按设置和前台状态独立运行，不随语音停止",
     /extensionStore\.set\(ACTIVE_CONTEXT_KEY, envelope\)/,
   );
   assert.match(contentScript, /extensionStore\.get\(PREFERENCE_KEY\)/);
+  assert.match(contentScript, /function preferenceFromRuntime\(\)/);
+  assert.match(contentScript, /RC\.ctxSync\.enabled\(\)/);
+  assert.match(
+    contentScript,
+    /function refreshPreference\(forceReport\)[\s\S]*preferenceFromRuntime\(\)[\s\S]*extensionStore\.get\(PREFERENCE_KEY\)/,
+  );
   assert.match(
     contentScript,
     /if \(preferenceKnown && !contextSyncEnabled\) return/,
