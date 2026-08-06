@@ -20,6 +20,7 @@ concurrency:
 
 env:
   APP_NAME: bwicarus-test
+  IOS_BUILD_NUMBER: ${{ github.run_number }}
   BUNDLE_ID: space.bwicarus.bwreader2
   EXTENSION_BUNDLE_ID: space.bwicarus.bwreader2.Extension
   WIDGET_BUNDLE_ID: space.bwicarus.bwreader2.Widget
@@ -169,6 +170,7 @@ jobs:
             -configuration Debug \
             -destination "generic/platform=iOS Simulator" \
             -derivedDataPath "$RUNNER_TEMP/DerivedData-simulator" \
+            CURRENT_PROJECT_VERSION="$IOS_BUILD_NUMBER" \
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             | tee "$RUNNER_TEMP/build-logs/simulator-build.log"
@@ -351,6 +353,7 @@ jobs:
             -destination "generic/platform=iOS" \
             -archivePath "$RUNNER_TEMP/app.xcarchive" \
             DEVELOPMENT_TEAM="$TEAM_ID" \
+            CURRENT_PROJECT_VERSION="$IOS_BUILD_NUMBER" \
             | tee "$RUNNER_TEMP/build-logs/archive.log"
 
       - name: Validate archived app and extension
@@ -451,6 +454,11 @@ jobs:
           if app_version != widget_version:
               raise SystemExit(
                   f"app/widget version mismatch: {app_version!r} != {widget_version!r}"
+              )
+          expected_build = os.environ["IOS_BUILD_NUMBER"]
+          if app_version[1] != expected_build:
+              raise SystemExit(
+                  f"archive build mismatch: {app_version[1]!r} != {expected_build!r}"
               )
           extension_contract = extension_info.get("NSExtension", {})
           if extension_contract.get("NSExtensionPointIdentifier") != "com.apple.Safari.web-extension":
