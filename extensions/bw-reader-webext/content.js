@@ -439,12 +439,15 @@
   var extensionStore = window.__bwExtensionStore || null;
 
   function enabledFromRecord(record) {
-    return !!(
-      record &&
-      record.schema === 2 &&
-      record.values &&
-      record.values[CONTEXT_SYNC_KEY] === "1"
-    );
+    if (
+      !record ||
+      record.schema !== 2 ||
+      !record.values ||
+      !Object.prototype.hasOwnProperty.call(record.values, CONTEXT_SYNC_KEY)
+    ) return null;
+    var raw = record.values[CONTEXT_SYNC_KEY];
+    if (raw !== "1" && raw !== "0") return null;
+    return raw === "1";
   }
 
   function applyPreference(record) {
@@ -452,15 +455,17 @@
     probeLine(
       "偏好: raw=" +
       (record && record.values ? String(record.values[CONTEXT_SYNC_KEY]) : "undefined") +
-      " enabled=" + (next ? "是" : "否")
+      " enabled=" + (next === null ? "未知" : (next ? "是" : "否"))
     );
+    if (next === null) return false;
     var changed = !preferenceKnown || next !== contextSyncEnabled;
     preferenceKnown = true;
     contextSyncEnabled = next;
-    if (!changed) return;
+    if (!changed) return true;
     lastSignature = "";
     pendingSignature = "";
     if (contextSyncEnabled) schedule(true);
+    return true;
   }
 
   function contentDigest(value) {
@@ -670,7 +675,10 @@
           // mirror with its local default.
           var key = String(RC.ctxSync.LS_KEY || "");
           var raw = key ? localStorage.getItem(key) : null;
-          if (raw !== "1" && raw !== "0") return null;
+          if (raw !== "1" && raw !== "0") {
+            probeLine("RC.ctxSync: 本页无显式值");
+            return null;
+          }
           var live = !!RC.ctxSync.enabled();
           mirrorPreference(live);
           return live;
@@ -715,19 +723,20 @@
           // install and it looks exactly like a working one that reads false --
           // staying quiet here would hide the single fact worth knowing.
           probeLine("镜像偏好: 空(尚未写入)");
-          return;
+          return Promise.resolve(extensionStore.get(PREFERENCE_KEY)).then(function (record) {
+            var fallback = enabledFromRecord(record);
+            if (!applyPreference(record)) return;
+            mirrorPreference(fallback);
+            if (forceReport && contextSyncEnabled) schedule(true);
+          }).catch(function () {
+            // A failed legacy read still says nothing about user intent.
+          });
         }
         preferenceKnown = true;
         var changedMirror = contextSyncEnabled !== mirrored;
         contextSyncEnabled = mirrored;
         probeLine("镜像偏好: " + (mirrored ? "开" : "关"));
         if (contextSyncEnabled && (forceReport || changedMirror)) schedule(true);
-      });
-      Promise.resolve(extensionStore.get(PREFERENCE_KEY)).then(function (record) {
-        applyPreference(record);
-        if (forceReport && contextSyncEnabled) schedule(true);
-      }).catch(function () {
-        // Same reasoning: a read that failed tells us nothing about intent.
       });
     }
 
@@ -736,7 +745,10 @@
       if (chrome.storage.onChanged) {
         chrome.storage.onChanged.addListener(function (changes, areaName) {
           if (areaName !== "local" || !changes || !changes[PREFERENCE_KEY]) return;
-          applyPreference(changes[PREFERENCE_KEY].newValue);
+          var record = changes[PREFERENCE_KEY].newValue;
+          var changedValue = enabledFromRecord(record);
+          if (!applyPreference(record)) return;
+          mirrorPreference(changedValue);
         });
       }
     }

@@ -461,6 +461,22 @@ test("扩展上下文按设置和前台状态独立运行，不随语音停止",
   );
   assert.match(
     contentScript,
+    /function enabledFromRecord\(record\)[\s\S]*hasOwnProperty\.call\(record\.values, CONTEXT_SYNC_KEY\)[\s\S]*return null/,
+  );
+  assert.match(
+    contentScript,
+    /preferenceFromMirror\(\)\.then\(function \(mirrored\)[\s\S]*if \(mirrored === null\)[\s\S]*extensionStore\.get\(PREFERENCE_KEY\)/,
+  );
+  assert.doesNotMatch(
+    contentScript,
+    /preferenceFromMirror\(\)\.then[\s\S]*\}\);\s*Promise\.resolve\(extensionStore\.get\(PREFERENCE_KEY\)\)/,
+  );
+  assert.match(
+    contentScript,
+    /changes\[PREFERENCE_KEY\]\.newValue[\s\S]*applyPreference\(record\)[\s\S]*mirrorPreference\(changedValue\)/,
+  );
+  assert.match(
+    contentScript,
     /function refreshPreference\(forceReport\)[\s\S]*preferenceFromRuntime\(\)[\s\S]*extensionStore\.get\(PREFERENCE_KEY\)/,
   );
   assert.match(
