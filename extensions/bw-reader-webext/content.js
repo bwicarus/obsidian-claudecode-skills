@@ -537,18 +537,46 @@
     return best || body;
   }
 
-  // Reads text from a subtree with the page furniture stripped.
-  // Works on a clone, so the page itself is never touched.
+  // Reads text from a subtree with the page furniture skipped.
+  //
+  // Reads the live tree rather than a detached clone. innerText reports what is
+  // actually rendered, but only for elements that are in the document -- on a
+  // clone it quietly degrades to textContent and starts including everything
+  // display:none was hiding. That is why extraction once reported more text
+  // than the whole page contained.
+  //
+  // So instead of removing furniture from a copy, the furniture is skipped
+  // while walking the original: same result, nothing detached, page untouched.
   function articleText(root) {
-    var src = root;
+    var parts = [];
     try {
-      src = root.cloneNode(true);
-      var junk = src.querySelectorAll(ARTICLE_DROP);
-      for (var i = 0; i < junk.length; i += 1) {
-        if (junk[i].parentNode) junk[i].parentNode.removeChild(junk[i]);
+      var walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT, {
+        acceptNode: function (el) {
+          try {
+            if (el.matches(ARTICLE_DROP)) return NodeFilter.FILTER_REJECT;
+          } catch (_) {}
+          // Blocks that hold text directly are what we want; everything else is
+          // structure to descend through.
+          if (/^(P|H1|H2|H3|H4|H5|H6|LI|DD|DT|BLOCKQUOTE|FIGCAPTION|TD|TH)$/
+              .test(el.tagName)) {
+            return NodeFilter.FILTER_ACCEPT;
+          }
+          return NodeFilter.FILTER_SKIP;
+        },
+      });
+      var node = walker.nextNode();
+      var seen = 0;
+      while (node && seen < 4000) {
+        var t = "";
+        try { t = String(node.innerText || "").trim(); } catch (_) {}
+        if (t) parts.push(t);
+        seen += 1;
+        node = walker.nextNode();
       }
-    } catch (_) { src = root; }
-    try { return String(src.innerText || ""); } catch (_) { return ""; }
+    } catch (_) {}
+    if (parts.length) return parts.join(String.fromCharCode(10) + String.fromCharCode(10));
+    // No block-level text found: fall back to the subtree as rendered.
+    try { return String(root.innerText || ""); } catch (_) { return ""; }
   }
 
   function snapshot() {
@@ -619,7 +647,23 @@
     if (preferenceKnown && !contextSyncEnabled) return;
     // Only the page in front of the user. Background tabs stay silent, so a
     // dozen open tabs cannot fight over what the assistant is looking at.
-    if (document.visibilityState !== "visible") return;
+    if (document.visibilityState !== "visible") {
+      probeLine("跳过: 页面不可见");
+      return;
+    }
+    // Focus as well as visibility.
+    //
+    // visibilityState alone calls every un-minimised tab "visible", so a tab
+    // the user is not looking at can still report -- and under last-write-wins
+    // it overwrites the page they actually have open. That happened: a login
+    // page overwrote the article being read. Focus is what distinguishes the
+    // one page in front of the user from the several merely on screen.
+    var focused = true;
+    try { focused = document.hasFocus(); } catch (_) {}
+    if (!focused && !force) {
+      probeLine("跳过: 本页未获焦点");
+      return;
+    }
     var snap = snapshot();
     if (!snap) return;
     var signature = snap.url + "|" + snap.title + "|" +
