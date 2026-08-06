@@ -226,7 +226,6 @@ function render(page) {
 // it changed, which is the only moment that matters.
 let lastGateReport = "";
 let lastBodySignature = "";
-let lastStateSignature = "";
 
 async function forward(page, force) {
   lastPage = page;
@@ -334,16 +333,6 @@ function randomHex(length) {
   return out;
 }
 
-// Remembers when each page's body was last actually sent, so a repeat can say
-// when rather than say nothing.
-const bodySentAt = new Map();
-
-function clockText(ms) {
-  const d = new Date(ms);
-  const pad = (n) => String(n).padStart(2, "0");
-  return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;
-}
-
 // `bodyIsRepeat` marks a page whose text was already delivered.
 //
 // Position and body are different kinds of fact and were being treated as one.
@@ -353,29 +342,30 @@ function clockText(ms) {
 // stale too, and a stale position does not read as "unchanged" -- it reads as
 // "still here", which is a different claim and sometimes a false one.
 //
-// So a repeat still reports, with the body replaced by a note saying when the
-// real one was sent. The assistant then knows both that the user is still on
-// this page and that it has already seen its contents.
+// A repeat sends only `active`. The bridge keeps the last stable page body and
+// refreshes its active-reading timestamp, so the assistant sees a current
+// location without the real body being overwritten by a placeholder.
 async function postSnapshot(page, bodyIsRepeat) {
   const url = String(page.url || "");
-  let text = String(page.text || "").slice(0, 12000);
-  let repeatNote = null;
-  if (bodyIsRepeat) {
-    const at = bodySentAt.get(url);
-    repeatNote = at
-      ? `（正文与 ${clockText(at)} 送出的相同，未重复发送）`
-      : "（正文与此前送出的相同，未重复发送）";
-    text = repeatNote;
-  } else {
-    bodySentAt.set(url, Date.now());
-    // Bounded: one entry per page visited, cleared oldest-first.
-    if (bodySentAt.size > 60) {
-      bodySentAt.delete(bodySentAt.keys().next().value);
-    }
-  }
+  const text = String(page.text || "").slice(0, 12000);
   const selection = String(page.selection || "").slice(0, 400);
   const body = {
-    event: {
+    // Nested under `active` with its own shape -- sent flat the bridge refuses
+    // it, and because the context half succeeds first, the refusal would be
+    // invisible: the snapshot updates while the reading position silently does
+    // not.
+    active: {
+      kind: "web",
+      file: url,
+      title: String(page.title || ""),
+      page: 0,
+      selectionState: selection ? "active" : "cleared",
+      selection: selection || null,
+      observedAtEpochMs: Date.now(),
+    },
+  };
+  if (!bodyIsRepeat) {
+    body.event = {
       v: 1,
       seq: 1,
       type: "page.context",
@@ -392,30 +382,15 @@ async function postSnapshot(page, bodyIsRepeat) {
       page_context: {
         text,
         text_available: !!text,
-        text_source: bodyIsRepeat ? "extension-page-repeat" : "extension-page",
-        fallback_reason: bodyIsRepeat
-          ? "正文此前已送出，本次仅更新阅读位置"
-          : (text ? null : "扩展未取得正文"),
+        text_source: "extension-page",
+        fallback_reason: text ? null : "扩展未取得正文",
         truncated: String(page.text || "").length > 12000,
         reason: "active",
         visual: null,
         embeds: { highlights: 0, blocks: 0, unanchored: [] },
       },
-    },
-    // Nested under `active` with its own shape -- sent flat the bridge refuses
-    // it, and because the context half succeeds first, the refusal would be
-    // invisible: the snapshot updates while the reading position silently does
-    // not.
-    active: {
-      kind: "web",
-      file: url,
-      title: String(page.title || ""),
-      page: 0,
-      selectionState: selection ? "active" : "cleared",
-      selection: selection || null,
-      observedAtEpochMs: Date.now(),
-    },
-  };
+    };
+  }
   const response = await fetch(SNAPSHOT_POST_URL, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -436,28 +411,21 @@ async function forwardDirect(page) {
     frameProbe("框: 文档不可见,跳过");
     return;
   }
-  // Two signatures, because they answer two different questions.
-  const bodySig = `${page.url}|${contentDigest(page.text)}`;
-  const stateSig =
-    `${page.url}|${page.title || ""}|${contentDigest(page.selection)}`;
+  // The stable page includes URL, title and body. A selection or heartbeat does
+  // not need to resend it; an active-only POST updates the live position while
+  // preserving the accepted stable text on Windows.
+  const bodySig =
+    `${page.url}|${page.title || ""}|${contentDigest(page.text)}`;
   const bodyIsRepeat = bodySig === lastBodySignature;
-  // Nothing at all has changed -- not the page, not the selection, not the
-  // text. Only then is silence honest.
-  if (bodyIsRepeat && stateSig === lastStateSignature) {
-    frameProbe("框: 位置与内容均未变,跳过");
-    return;
-  }
   try {
     frameProbe(bodyIsRepeat ? "框: 开始 POST(仅位置)" : "框: 开始 POST");
     await postSnapshot(page, bodyIsRepeat);
     lastBodySignature = bodySig;
-    lastStateSignature = stateSig;
-    frameProbe(bodyIsRepeat ? "框: POST 成功(正文标注为重复)" : "框: POST 成功");
+    frameProbe(bodyIsRepeat ? "框: POST 成功(仅位置)" : "框: POST 成功");
   } catch (err) {
     // Said out loud. Every silent failure in this chain cost a build to find.
     note("快照投递失败: " + describe(err));
     frameProbe("框: POST 失败 " + describe(err));
-    if (lastSignature === signature) lastSignature = "";
   }
 }
 

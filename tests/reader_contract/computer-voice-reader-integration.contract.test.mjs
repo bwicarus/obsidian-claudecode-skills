@@ -553,7 +553,7 @@ test("普通网页上下文同页直投后一次 POST，不再保活 WSS", () =>
   );
   assert.match(
     callPage,
-    /async function postSnapshot\(page\)[\s\S]*event:\s*\{[\s\S]*type: "page\.context"[\s\S]*active:\s*\{[\s\S]*kind: "web"/,
+    /async function postSnapshot\(page, bodyIsRepeat\)[\s\S]*active:\s*\{[\s\S]*kind: "web"[\s\S]*if \(!bodyIsRepeat\) \{[\s\S]*body\.event = \{[\s\S]*type: "page\.context"/,
   );
   assert.match(
     callPage,
@@ -566,7 +566,11 @@ test("普通网页上下文同页直投后一次 POST，不再保活 WSS", () =>
     directBody,
     /if \(!contextSurfaceVisible\(\)\) \{[\s\S]*frameProbe\("框: 文档不可见,跳过"\)[\s\S]*return/,
   );
-  assert.match(directBody, /await postSnapshot\(page\)[\s\S]*lastSignature = signature/);
+  assert.match(
+    directBody,
+    /await postSnapshot\(page, bodyIsRepeat\)[\s\S]*lastBodySignature = bodySig/,
+  );
+  assert.doesNotMatch(directBody, /位置与内容均未变,跳过|lastStateSignature/);
   assert.doesNotMatch(
     directBody,
     /ensureDirectLink|ContextLink|contextPreferenceKnown|contextSyncEnabled/,

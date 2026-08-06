@@ -17,6 +17,14 @@ test("web context only reports the focused page even on forced refresh", () => {
   assert.doesNotMatch(report, /!focused\s*&&\s*!force/);
 });
 
+test("focused web context has a bounded heartbeat that cannot bypass focus", () => {
+  assert.match(CONTENT, /var ACTIVE_CONTEXT_HEARTBEAT_MS = 60000;/);
+  assert.match(
+    CONTENT,
+    /window\.setInterval\(function \(\) \{[\s\S]*if \(contextSyncEnabled\) schedule\(true\);[\s\S]*ACTIVE_CONTEXT_HEARTBEAT_MS/,
+  );
+});
+
 test("article extraction consumes live text nodes once and excludes hidden ancestors", () => {
   const extractStart = CONTENT.indexOf("function articleText(root)");
   const extractEnd = CONTENT.indexOf("function snapshot()", extractStart);

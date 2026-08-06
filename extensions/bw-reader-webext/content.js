@@ -358,6 +358,7 @@
 
   var MAX_TEXT = 12000;
   var THROTTLE_MS = 1500;
+  var ACTIVE_CONTEXT_HEARTBEAT_MS = 60000;
   var PREFERENCE_KEY = "bwReaderExtensionPreferencesV2";
   var CONTEXT_SYNC_KEY = "eph-ctx-sync";
   var ACTIVE_CONTEXT_KEY = "bwActivePageContextV1";
@@ -803,6 +804,12 @@
         refreshPreference(true);
       }, { passive: true });
     });
+    // Keep asserting which foreground page is current even when its body and
+    // selection do not change. Background pages still fail the strict focus
+    // gate in report(), so they cannot win merely by having a live timer.
+    window.setInterval(function () {
+      if (contextSyncEnabled) schedule(true);
+    }, ACTIVE_CONTEXT_HEARTBEAT_MS);
 
     // Asks the switch itself, rather than a copy of it.
     //
