@@ -39,6 +39,57 @@ const trustedSources = new Set();
 
 let host = null;
 let enabled = false;
+// Held so reports made before the stored setting arrives are not lost. Startup
+// is exactly when things go wrong, and a channel that only works after it has
+// finished configuring itself would miss that window.
+const pending = [];
+
+const DEBUG_KEY = "bwProbeDebugV1";
+const URL_FLAG = "bwdebug";
+
+// Reads the debug setting, and lets a URL flag set it.
+//
+// The flag is the whole point of the design: the switch has to be reachable
+// from any page, on a device with no console and no developer tools. Adding
+// ?bwdebug=1 anywhere turns reporting on everywhere and it stays on until
+// ?bwdebug=0 turns it off -- stored in extension storage rather than
+// localStorage, because localStorage belongs to the site and would make the
+// setting mean something different on every domain. That distinction cost an
+// evening once; see references/silent-failure-lessons.md.
+function resolveDebugSetting() {
+  let fromUrl = null;
+  try {
+    const flag = new URLSearchParams(location.search).get(URL_FLAG);
+    if (flag === "1" || flag === "true") fromUrl = true;
+    else if (flag === "0" || flag === "false") fromUrl = false;
+  } catch (_) {}
+
+  const apply = (on) => {
+    enabled = !!on;
+    if (!enabled) return;
+    // Anything reported during startup is replayed now, in order.
+    const queued = pending.splice(0, pending.length);
+    for (const item of queued) probe(item.where, item.text);
+  };
+
+  if (fromUrl !== null) {
+    apply(fromUrl);
+    try {
+      chrome.storage?.local?.set({ [DEBUG_KEY]: { schema: 1, on: fromUrl } });
+    } catch (_) {}
+    return;
+  }
+  try {
+    const got = chrome.storage?.local?.get(DEBUG_KEY, (bag) => {
+      apply(!!(bag && bag[DEBUG_KEY] && bag[DEBUG_KEY].on));
+    });
+    // Safari's chrome.* is not uniformly promise-based; both shapes are handled
+    // because assuming one of them is how a setting silently reads as absent.
+    if (got && typeof got.then === "function") {
+      got.then((bag) => apply(!!(bag && bag[DEBUG_KEY] && bag[DEBUG_KEY].on)));
+    }
+  } catch (_) {}
+}
 
 function ensureHost() {
   if (host && host.isConnected) return host;
@@ -68,7 +119,13 @@ function stamp() {
 // Reports one step. `where` names the speaker; without it two contradictory
 // lines cannot be told apart.
 function probe(where, text) {
-  if (!enabled) return;
+  if (!enabled) {
+    // Queued rather than dropped: reports made before the setting resolves are
+    // replayed once it does, so turning debugging on does not lose the startup
+    // it was turned on to inspect.
+    if (pending.length < 40) pending.push({ where: String(where), text: String(text) });
+    return;
+  }
   try {
     const box = ensureHost();
     const nl = String.fromCharCode(10);
@@ -91,8 +148,8 @@ function trustFrame(frame) {
 
 // Starts listening for reports from trusted frames.
 function startProbeHost(options) {
-  enabled = !(options && options.enabled === false);
-  if (!enabled) return;
+  if (options && options.enabled === true) enabled = true;
+  else resolveDebugSetting();
   try {
     window.addEventListener("message", (event) => {
       const d = event.data;
