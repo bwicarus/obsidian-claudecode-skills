@@ -12,7 +12,7 @@ internal static class CodexVoiceActivitySelfTest
         CheckStartTimeoutAndReadError(checks);
         CheckStopConfirmation(checks);
         CheckLocalCloseMonitor(checks);
-        CheckOwnershipSafeShortcutStop(checks);
+        CheckOwnershipValidationDoesNotToggleVoice(checks);
     }
 
     private static void CheckShortcutBrokerContract(
@@ -81,7 +81,7 @@ internal static class CodexVoiceActivitySelfTest
                 == "bw-reader-codex-voice-shortcut-v1"
             && NamedPipeCodexVoiceShortcutBrokerTransport.ExchangeTimeout
                 == TimeSpan.FromSeconds(2)
-            && root.EnumerateObject().Count() == 5
+            && root.EnumerateObject().Count() == 6
             && root.GetProperty("contract").GetString()
                 == "bw-codex-voice-shortcut/1"
             && root.GetProperty("type").GetString() == "toggle"
@@ -90,6 +90,8 @@ internal static class CodexVoiceActivitySelfTest
                 == target.RootProcessId
             && root.GetProperty("rootProcessStartTimeUtc")
                 .GetString()!.EndsWith('Z')
+            && root.GetProperty("windowHandle").GetInt64()
+                == target.WindowHandle.ToInt64()
             && failure.Code
                 == "BW_COMPUTER_VOICE_SHORTCUT_BROKER_SEND_FAILED"
             && failure.Retryable
@@ -416,7 +418,7 @@ internal static class CodexVoiceActivitySelfTest
             checks);
     }
 
-    private static void CheckOwnershipSafeShortcutStop(
+    private static void CheckOwnershipValidationDoesNotToggleVoice(
         ICollection<string> checks)
     {
         CodexAppTarget ownedTarget = new(
@@ -489,7 +491,7 @@ internal static class CodexVoiceActivitySelfTest
             ownedTarget));
 
         Require(
-            ownedSender.SendCount == 1
+            ownedSender.SendCount == 0
             && preexistingSender.SendCount == 0
             && replacementSender.SendCount == 0
             && replacementFailure.Code
@@ -498,7 +500,7 @@ internal static class CodexVoiceActivitySelfTest
             && provisionalSender.SendCount == 0
             && provisionalFailure.Code
                 == "BW_COMPUTER_VOICE_DIRECT_VOICE_OWNERSHIP_UNCONFIRMED",
-            "codex-voice-stop-only-toggles-owned-same-generation",
+            "codex-voice-stop-validates-ownership-without-toggle",
             checks);
     }
 

@@ -1273,17 +1273,21 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                             request.VirtualSpeakerRenderEndpointId,
                             request.VirtualMicrophoneCaptureEndpointId,
                             _audioRouteJournalPath));
-                    if (
-                        initialVoiceBaseline.Snapshot.Active
-                        && !pendingAudioRouteLease
-                            .AlreadyTargetedBeforeAcquire
-                    )
-                    {
-                        throw new DirectProtocolException(
-                            "BW_COMPUTER_VOICE_DIRECT_VOICE_ALREADY_ACTIVE_WRONG_ROUTE",
-                            "语音已在使用其他音频路由；请先关闭后再由 Reader 开启",
-                            retryable: true);
-                    }
+                    // An already-running Codex voice is no longer an error.
+                    //
+                    // This refused the call whenever Codex was listening on its
+                    // own devices, and told the user to close it first. That was
+                    // coherent while the bridge opened Codex's voice itself: it
+                    // expected to find it closed. Now the two are deliberately
+                    // separate -- the user opens voice from its own switch, and
+                    // this side only carries audio -- so finding it already open
+                    // is the normal case, not a conflict.
+                    //
+                    // Nothing needs closing either. The lease above is
+                    // per-process and has already been acquired by the time
+                    // execution reaches here, so Codex's audio is on the virtual
+                    // devices from this point on; the check was rejecting a
+                    // state it had itself just made correct.
                     pendingCaptureEndpointMuteLease =
                         DirectCaptureEndpointMuteLease.Acquire(
                             _captureEndpointMuteBackendFactory(),
@@ -1368,16 +1372,23 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                             ?? throw new DirectProtocolException(
                                 "BW_COMPUTER_VOICE_DIRECT_VOICE_BASELINE_MISSING",
                                 "Codex 语音状态基线不存在");
-                        if (baseline.ShortcutRequired)
-                        {
-                            VoiceShortcutSender.Send(
-                                target,
-                                DirectVoiceCommand.Start);
-                            shortcutReceipt =
-                                VoiceActivity.RecordShortcutSent(
-                                    baseline,
-                                    target);
-                        }
+                        // Codex's own voice is no longer opened from here.
+                        //
+                        // Starting it was the source of every start-time
+                        // failure this link has had: the shortcut landing but
+                        // the session being stale, the session already running
+                        // on another route, the priming toggle cancelling the
+                        // real one, the recent-thread pointer aiming at a
+                        // conversation that no longer exists. None of those are
+                        // ours to control -- they are the internal state of an
+                        // application that never agreed to be driven this way.
+                        //
+                        // So this side now only carries audio. Whether anyone
+                        // is listening is a separate question with a separate
+                        // switch, and a call placed to nobody is not a failure:
+                        // it simply goes unanswered. The baseline is still
+                        // captured, because reporting whether Codex is
+                        // listening remains useful -- acting on it does not.
                         return true;
                     },
                     () =>
@@ -1457,7 +1468,12 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                         startException as DirectProtocolException
                         ?? new DirectProtocolException(
                             "BW_COMPUTER_VOICE_DIRECT_VOICE_START_NOT_CONFIRMED",
-                            "Codex 语音状态未确认",
+                            // Says what actually happened. The old wording
+                            // ("shortcut sent, no new session confirmed")
+                            // described a step this side no longer performs,
+                            // and sent every investigation after a keystroke
+                            // that was never pressed.
+                            "音频链路建立失败；未能确认通话就绪",
                             retryable: true,
                             innerException: startException);
                     _ = Interlocked.CompareExchange(
@@ -1869,14 +1885,17 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                 retryable: true);
         }
 
-        voiceShortcutSender.Send(
-            currentTarget,
-            DirectVoiceCommand.Stop);
-        _ = await voiceActivity.ConfirmStoppedAsync(
-            plan.Snapshot,
-            CodexVoiceActivityController.TransitionTimeout,
-            CodexVoiceActivityController.MonitorInterval,
-            CancellationToken.None).ConfigureAwait(false);
+        // Symmetric with start: this side does not close Codex's voice either.
+        //
+        // Hanging up here used to leave the two ends disagreeing -- the bridge
+        // believed the call was over while Codex went on holding the route,
+        // and the next dial was refused as ALREADY_ACTIVE_WRONG_ROUTE. Leaving
+        // it alone costs nothing: the audio stops flowing the moment the pump
+        // does, and the watchdog restores the route regardless.
+        _ = voiceShortcutSender;
+        _ = plan;
+        _ = voiceActivity;
+        await Task.CompletedTask.ConfigureAwait(false);
     }
 
     private async Task<DirectProtocolException?>
@@ -1905,9 +1924,22 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
         IPerAppAudioPolicyBackend? audioPolicyBackend =
             _audioPolicyBackend;
         bool audioRouteRestored = audioRouteLease is null;
-        bool voiceSettled =
-            voiceStartBaseline is null
-            && voiceConfirmation is null;
+        // Codex's own voice no longer gates the route being handed back.
+        //
+        // This waited for that voice to be closed before restoring, which held
+        // while the bridge was the one closing it. Since START/STOP stopped
+        // touching the F24 toggle, nothing on this side ever closes it -- so the
+        // condition could never be met and the route was never returned. The
+        // volume mixer kept every application pinned to the virtual devices long
+        // after the call had ended.
+        //
+        // What actually has to settle is this side's own media: the pump, the
+        // sessions, the observers. Those are checked below and are the real
+        // reason a route cannot be pulled out from under a live stream. Codex
+        // continuing to listen is not a reason to keep the machine rerouted.
+        bool voiceSettled = true;
+        _ = voiceStartBaseline;
+        _ = voiceConfirmation;
         DirectTypistLease? typistLease = _ownedTypistLease;
         bool hadOwnedResources = HasOwnedCleanupResources;
         _captureActive = false;
@@ -2254,25 +2286,48 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                 while (queue.TryRead(out PcmPacket packet))
                 {
                     progressed = true;
-                    framer.Push(packet);
-                    while (framer.TryRead(out PcmFrameChunk chunk))
+                    try
                     {
-                        if (
-                            chunk.Sequence is < 0 or > uint.MaxValue
-                            || chunk.TimestampUs < 0
-                        )
+                        framer.Push(packet);
+                        while (framer.TryRead(out PcmFrameChunk chunk))
                         {
-                            throw new DirectProtocolException(
-                                "BW_COMPUTER_VOICE_DIRECT_PCM_FRAME_INVALID",
-                                "PCM 序列或时间戳无效");
+                            if (
+                                chunk.Sequence is < 0 or > uint.MaxValue
+                                || chunk.TimestampUs < 0
+                            )
+                            {
+                                throw new DirectProtocolException(
+                                    "BW_COMPUTER_VOICE_DIRECT_PCM_FRAME_INVALID",
+                                    "PCM 序列或时间戳无效");
+                            }
+                            try
+                            {
+                                await sendFrameAsync(
+                                    new DirectPcmFrame(
+                                        track,
+                                        checked((uint)chunk.Sequence),
+                                        checked((ulong)chunk.TimestampUs),
+                                        chunk.Data),
+                                    cancellationToken).ConfigureAwait(false);
+                            }
+                            catch (Exception exception) when (!(
+                                exception is OperationCanceledException
+                                && cancellationToken.IsCancellationRequested))
+                            {
+                                throw MediaPumpFailure(
+                                    exception,
+                                    "media-pump.websocket-send");
+                            }
                         }
-                        await sendFrameAsync(
-                            new DirectPcmFrame(
-                                track,
-                                checked((uint)chunk.Sequence),
-                                checked((ulong)chunk.TimestampUs),
-                                chunk.Data),
-                            cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (Exception exception) when (
+                        exception is not DirectProtocolException
+                        && !(exception is OperationCanceledException
+                            && cancellationToken.IsCancellationRequested))
+                    {
+                        throw MediaPumpFailure(
+                            exception,
+                            "media-pump.frame");
                     }
                 }
                 if (
@@ -2280,7 +2335,9 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                     && queue.CompletionError is not null
                 )
                 {
-                    throw queue.CompletionError;
+                    throw MediaPumpFailure(
+                        queue.CompletionError,
+                        "media-pump.capture-source");
                 }
                 if (!progressed)
                 {
@@ -2317,6 +2374,18 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
             ScheduleOwnedFailureCleanup(ownerLifetime);
         }
     }
+
+    private static DirectProtocolException MediaPumpFailure(
+        Exception exception,
+        string stage) =>
+        exception as DirectProtocolException
+        ?? new DirectProtocolException(
+            "BW_COMPUTER_VOICE_DIRECT_MEDIA_PUMP_FAILED",
+            "Windows PCM 传输中断",
+            retryable: true,
+            innerException: AudioCaptureStageException.From(
+                stage,
+                exception));
 
     private async Task MonitorRenderAsync(
         VirtualMicrophoneRenderSession renderSession,

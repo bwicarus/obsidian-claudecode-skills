@@ -165,6 +165,7 @@ internal static partial class CodexVoiceShortcutBrokerContract
         if (
             target.RootProcessId == 0
             || target.RootProcessStartFileTimeUtc <= 0
+            || target.WindowHandle == 0
         )
         {
             throw new ArgumentException(
@@ -195,6 +196,7 @@ internal static partial class CodexVoiceShortcutBrokerContract
                 requestId,
                 rootProcessId = target.RootProcessId,
                 rootProcessStartTimeUtc = startTimeUtc,
+                windowHandle = target.WindowHandle.ToInt64(),
             },
             JsonOptions);
     }

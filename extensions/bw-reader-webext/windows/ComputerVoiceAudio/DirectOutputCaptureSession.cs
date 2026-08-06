@@ -1,8 +1,9 @@
 namespace BwReader.ComputerVoiceAudio;
 
 // A small common owner for the two supported output sources.  Legacy /4 and
-// /5 keep process-loopback for rollback compatibility; fixed-bus /6 captures
-// the dedicated B cable directly and never discovers a Chromium AudioService
+// /5 keep process-loopback for rollback compatibility.  Fixed-bus /6 keeps
+// the per-app route lease, but captures the dedicated B cable directly so the
+// long-lived PCM source is not tied to a replaceable Chromium AudioService
 // process.
 internal sealed class DirectOutputCaptureSession : IAsyncDisposable
 {

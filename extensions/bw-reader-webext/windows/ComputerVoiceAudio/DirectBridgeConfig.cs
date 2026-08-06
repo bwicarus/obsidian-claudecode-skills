@@ -329,7 +329,7 @@ internal sealed class DirectBridgeConfigStore
                 System.IO.Path.GetFullPath(runtimeStatusPath),
                 contextDeliveryMode,
                 PerAppAudioRouteAutomationEnabled:
-                    !legacyV4 && !fixedAudioBus,
+                    !legacyV4,
                 VirtualSpeakerCaptureEndpointId:
                     virtualSpeakerCaptureEndpointId,
                 FixedVirtualAudioBusEnabled: fixedAudioBus);

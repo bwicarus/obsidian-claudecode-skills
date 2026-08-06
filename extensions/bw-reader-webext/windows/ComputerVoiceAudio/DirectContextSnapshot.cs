@@ -11,7 +11,9 @@ internal sealed record DirectActiveReading(
     JsonElement Page,
     string SelectionState,
     string? Selection,
-    long ObservedAtEpochMilliseconds);
+    long ObservedAtEpochMilliseconds,
+    string? ViewFile = null,
+    JsonElement? ViewPage = null);
 
 internal sealed record DirectSnapshotForwardResult(
     string Outcome,
@@ -193,8 +195,17 @@ internal sealed class FileDirectSnapshotContextAdapter :
                     ["receivedAtEpochMs"] =
                         _utcNow().ToUnixTimeMilliseconds(),
                 };
+                if (
+                    activeReading.ViewFile is not null
+                    && activeReading.ViewPage is JsonElement viewPage
+                )
+                {
+                    next["viewFile"] = activeReading.ViewFile;
+                    next["viewPage"] = JsonNode.Parse(
+                        viewPage.GetRawText());
+                }
                 bool changedPage = _activeReading is not null
-                    && !SamePage(_activeReading, next);
+                    && !SameActiveReadingIdentity(_activeReading, next);
                 _activeReading = next;
                 if (activeReading.SelectionState == "active")
                 {
@@ -211,7 +222,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
                     changedPage
                     || (
                         _selection["ref"] is JsonObject selectionRef
-                        && !SamePage(selectionRef, next)
+                        && !SameLogicalPage(next, selectionRef, next)
                     )
                 )
                 {
@@ -309,7 +320,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
         HashSet<string> keys = value.EnumerateObject()
             .Select(property => property.Name)
             .ToHashSet(StringComparer.Ordinal);
-        if (!keys.SetEquals(new[]
+        string[] requiredKeys =
         {
             "kind",
             "file",
@@ -318,7 +329,16 @@ internal sealed class FileDirectSnapshotContextAdapter :
             "selectionState",
             "selection",
             "observedAtEpochMs",
-        }))
+        };
+        HashSet<string> allowedKeys = requiredKeys
+            .Append("viewFile")
+            .Append("viewPage")
+            .ToHashSet(StringComparer.Ordinal);
+        if (
+            requiredKeys.Any(key => !keys.Contains(key))
+            || keys.Any(key => !allowedKeys.Contains(key))
+            || keys.Contains("viewFile") != keys.Contains("viewPage")
+        )
         {
             throw ActiveReadingInvalid();
         }
@@ -330,6 +350,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
             || value.GetProperty("file").GetString() is not string file
             || file.Length is < 1 or > 4096
             || file.Any(char.IsControl)
+            || file.StartsWith("vbook:", StringComparison.Ordinal)
         )
         {
             throw ActiveReadingInvalid();
@@ -376,6 +397,31 @@ internal sealed class FileDirectSnapshotContextAdapter :
         {
             throw ActiveReadingInvalid();
         }
+        string? viewFile = null;
+        JsonElement? viewPage = null;
+        if (keys.Contains("viewFile"))
+        {
+            JsonElement viewFileValue = value.GetProperty("viewFile");
+            JsonElement viewPageValue = value.GetProperty("viewPage");
+            if (
+                kind == "web"
+                || viewFileValue.ValueKind != JsonValueKind.String
+                || viewFileValue.GetString() is not string candidateViewFile
+                || !candidateViewFile.StartsWith(
+                    "vbook:",
+                    StringComparison.Ordinal)
+                || candidateViewFile.Length is < 7 or > 4096
+                || candidateViewFile.Any(char.IsControl)
+                || !ValidPageIdentifier(
+                    JsonNode.Parse(viewPageValue.GetRawText()),
+                    allowNull: false)
+            )
+            {
+                throw ActiveReadingInvalid();
+            }
+            viewFile = candidateViewFile;
+            viewPage = viewPageValue.Clone();
+        }
         JsonElement selectionValue = value.GetProperty("selection");
         string? selection = selectionValue.ValueKind switch
         {
@@ -404,7 +450,9 @@ internal sealed class FileDirectSnapshotContextAdapter :
             page.Clone(),
             selectionState,
             selection,
-            observedAt);
+            observedAt,
+            viewFile,
+            viewPage);
     }
 
     private void FoldJournal(DirectContextEvent contextEvent)
@@ -427,6 +475,18 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 BuildPageContext(value);
             bool changedPage = _stablePage is not null
                 && !SamePage(_stablePage, stablePage);
+            if (
+                _activeReading is JsonObject priorActive
+                && SamePageEquivalent(priorActive, activeReading)
+                && HasViewBinding(priorActive)
+                && StringValue(priorActive["viewFile"])
+                    is string priorViewFile
+            )
+            {
+                activeReading["viewFile"] = priorViewFile;
+                activeReading["viewPage"] =
+                    priorActive["viewPage"]?.DeepClone();
+            }
             _stablePage = stablePage;
             _activeReading = activeReading;
             if (changedPage)
@@ -438,7 +498,10 @@ internal sealed class FileDirectSnapshotContextAdapter :
         }
         else if (contextEvent.Type == "focus")
         {
-            FocusFoldResult folded = BuildFocus(value, _stablePage);
+            FocusFoldResult folded = BuildFocus(
+                value,
+                _stablePage,
+                _activeReading);
             _focus = folded.Focus;
             if (folded.Selection is not null)
             {
@@ -539,7 +602,8 @@ internal sealed class FileDirectSnapshotContextAdapter :
 
     private static FocusFoldResult BuildFocus(
         JsonObject value,
-        JsonObject? stablePage)
+        JsonObject? stablePage,
+        JsonObject? activeReading)
     {
         string? action = StringValue(value["action"]);
         if (action == "cancel")
@@ -600,13 +664,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
         string? text = StringValue(safe["text"]);
         bool samePage =
             stablePage is not null
-            && string.Equals(
-                StringValue(stablePage["file"]),
-                StringValue(safe["file"]),
-                StringComparison.Ordinal)
-            && PageEquivalent(
-                stablePage["page"],
-                safe["page"]);
+            && SameLogicalPage(stablePage, safe, activeReading);
         if (!samePage)
         {
             return new FocusFoldResult(
@@ -1631,7 +1689,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
         {
             throw JournalInvalid();
         }
-        return new JsonObject
+        JsonObject restored = new()
         {
             ["kind"] = kind,
             ["file"] = file,
@@ -1644,6 +1702,31 @@ internal sealed class FileDirectSnapshotContextAdapter :
             ["receivedAtEpochMs"] =
                 source["receivedAtEpochMs"]?.GetValue<long?>(),
         };
+        bool hasViewFile = source.ContainsKey("viewFile");
+        bool hasViewPage = source.ContainsKey("viewPage");
+        if (hasViewFile != hasViewPage)
+        {
+            throw JournalInvalid();
+        }
+        if (hasViewFile)
+        {
+            string? viewFile = StringValue(source["viewFile"]);
+            JsonNode? viewPage = source["viewPage"]?.DeepClone();
+            if (
+                kind == "web"
+                || viewFile is null
+                || !viewFile.StartsWith("vbook:", StringComparison.Ordinal)
+                || viewFile.Length is < 7 or > 4096
+                || viewFile.Any(char.IsControl)
+                || !ValidPageIdentifier(viewPage, allowNull: false)
+            )
+            {
+                throw JournalInvalid();
+            }
+            restored["viewFile"] = viewFile;
+            restored["viewPage"] = viewPage;
+        }
+        return restored;
     }
 
     private static JsonObject RestoreStablePage(
@@ -1825,6 +1908,90 @@ internal sealed class FileDirectSnapshotContextAdapter :
             StringValue(right["file"]),
             StringComparison.Ordinal)
         && JsonNode.DeepEquals(left["page"], right["page"]);
+
+    // Same page by equivalence rather than by raw JSON shape.
+    //
+    // SamePage uses DeepEquals, so 12 and "12" read as different pages even
+    // though the readers treat them as one. PageEquivalent already knows the
+    // difference; these comparisons need it too.
+    private static bool SamePageEquivalent(
+        JsonObject left,
+        JsonObject right) =>
+        string.Equals(
+            StringValue(left["file"]),
+            StringValue(right["file"]),
+            StringComparison.Ordinal)
+        && PageEquivalent(left["page"], right["page"]);
+
+    // Whether this reading carries a usable volume view.
+    //
+    // Both halves must be present and well formed. A half-written binding is
+    // worse than none: it would claim a mapping the other half cannot honour.
+    private static bool HasViewBinding(JsonObject value) =>
+        StringValue(value["viewFile"]) is string viewFile
+        && viewFile.StartsWith("vbook:", StringComparison.Ordinal)
+        && ValidPageIdentifier(value["viewPage"], allowNull: false);
+
+    // Identity of an active reading, view binding included.
+    //
+    // Two readings on the same canonical page are still different readings if
+    // one is being viewed through a volume and the other is not, or through a
+    // different volume page. Comparing only the canonical page would call them
+    // equal and the selection would survive a move it should not have.
+    private static bool SameActiveReadingIdentity(
+        JsonObject left,
+        JsonObject right)
+    {
+        if (!SamePageEquivalent(left, right))
+        {
+            return false;
+        }
+        bool leftHasView = HasViewBinding(left);
+        bool rightHasView = HasViewBinding(right);
+        if (leftHasView != rightHasView)
+        {
+            return false;
+        }
+        return !leftHasView
+            || (
+                string.Equals(
+                    StringValue(left["viewFile"]),
+                    StringValue(right["viewFile"]),
+                    StringComparison.Ordinal)
+                && PageEquivalent(
+                    left["viewPage"],
+                    right["viewPage"])
+            );
+    }
+
+    // Whether a reference names the same page as the canonical one, allowing
+    // for the reference having been written in volume coordinates.
+    //
+    // A selection made while reading a merged volume records the volume's file
+    // and page. Compared directly against the canonical member it never
+    // matches, and the selection gets discarded on every context event. The
+    // active reading holds the mapping between the two, so it is consulted
+    // before declaring a mismatch.
+    private static bool SameLogicalPage(
+        JsonObject canonicalPage,
+        JsonObject reference,
+        JsonObject? activeReading)
+    {
+        if (SamePageEquivalent(canonicalPage, reference))
+        {
+            return true;
+        }
+        return activeReading is not null
+            && HasViewBinding(activeReading)
+            && SamePageEquivalent(canonicalPage, activeReading)
+            && string.Equals(
+                StringValue(activeReading["viewFile"]),
+                StringValue(reference["file"]),
+                StringComparison.Ordinal)
+            && PageEquivalent(
+                activeReading["viewPage"],
+                reference["page"]);
+    }
 
     private static string? StringValue(JsonNode? value)
     {

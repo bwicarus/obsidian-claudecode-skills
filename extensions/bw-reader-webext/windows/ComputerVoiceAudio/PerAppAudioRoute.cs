@@ -619,44 +619,50 @@ internal sealed class PerAppAudioRouteLease : IDisposable
             }
 
             PersistedAudioEndpoint original = snapshot[key];
+            // A snapshot that already points at this transaction's virtual
+            // endpoint is not a trustworthy pre-call route. It normally means
+            // an older bridge run failed to clear its persisted override and
+            // the next run captured that residue as the "original" value.
+            // Clearing the override (null) returns this flow/role to the
+            // current Windows default instead of making the residue permanent.
             string? restoreEndpoint = original.Kind switch
             {
+                PersistedAudioEndpointKind.Present
+                    when PerAppAudioRouteController.EndpointEqualsTarget(
+                        original,
+                        target) => null,
                 PersistedAudioEndpointKind.Present =>
                     original.EndpointId,
                 PersistedAudioEndpointKind.Unset => null,
                 _ => throw new InvalidOperationException(
                     "A route snapshot cannot contain an error"),
             };
-            PerAppAudioPolicyWriteResult write;
-            try
+            PersistedAudioEndpoint expected = restoreEndpoint is null
+                ? PersistedAudioEndpoint.Unset()
+                : PersistedAudioEndpoint.Present(restoreEndpoint);
+            bool restoredExactly = TryWriteAndReadBack(
+                backend,
+                request.ProcessId,
+                key,
+                restoreEndpoint,
+                expected);
+            if (
+                !restoredExactly
+                && restoreEndpoint is not null
+            )
             {
-                write = backend.Write(
+                // The saved endpoint may have disappeared while the bridge was
+                // active (RDP attach/detach and USB/Bluetooth changes do this).
+                // A failed exact restore must not leave the app pinned to the
+                // bridge's virtual devices, so fall back once to Windows default.
+                restoredExactly = TryWriteAndReadBack(
+                    backend,
                     request.ProcessId,
                     key,
-                    restoreEndpoint);
+                    endpointId: null,
+                    PersistedAudioEndpoint.Unset());
             }
-            catch
-            {
-                failed.Add(key);
-                continue;
-            }
-            if (!write.Succeeded)
-            {
-                failed.Add(key);
-                continue;
-            }
-
-            PersistedAudioEndpoint readBack;
-            try
-            {
-                readBack = backend.Read(request.ProcessId, key);
-            }
-            catch
-            {
-                failed.Add(key);
-                continue;
-            }
-            if (!Equivalent(readBack, original))
+            if (!restoredExactly)
             {
                 failed.Add(key);
                 continue;
@@ -669,6 +675,39 @@ internal sealed class PerAppAudioRouteLease : IDisposable
             restored,
             preserved,
             failed);
+    }
+
+    private static bool TryWriteAndReadBack(
+        IPerAppAudioPolicyBackend backend,
+        uint processId,
+        PerAppAudioRouteKey key,
+        string? endpointId,
+        PersistedAudioEndpoint expected)
+    {
+        PerAppAudioPolicyWriteResult write;
+        try
+        {
+            write = backend.Write(processId, key, endpointId);
+        }
+        catch
+        {
+            return false;
+        }
+        if (!write.Succeeded)
+        {
+            return false;
+        }
+
+        PersistedAudioEndpoint readBack;
+        try
+        {
+            readBack = backend.Read(processId, key);
+        }
+        catch
+        {
+            return false;
+        }
+        return Equivalent(readBack, expected);
     }
 
     private static bool Equivalent(
