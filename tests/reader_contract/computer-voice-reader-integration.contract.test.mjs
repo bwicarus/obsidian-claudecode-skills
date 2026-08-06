@@ -245,7 +245,7 @@ test("background helpers hash normalized full text and enforce UTF-8 bounds", as
         total: 3,
         truncated: true,
         items: [
-          { selectionId: "region-2", label: "#2 12:00", ordinal: 2, createdAtEpochMs: 1 },
+          { selectionId: "region-2", label: "#3 12:00", ordinal: 2, createdAtEpochMs: 1 },
         ],
       },
     }),
