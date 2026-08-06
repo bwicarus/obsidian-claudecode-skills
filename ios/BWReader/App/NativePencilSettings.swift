@@ -4,6 +4,7 @@ import Foundation
 enum NativePencilGestureMapping: String, CaseIterable, Identifiable {
     case followSystem = "follow-system"
     case toggleEraser = "toggle-eraser"
+    case toggleSelection = "toggle-selection"
     case showPalette = "show-palette"
     case disabled
 

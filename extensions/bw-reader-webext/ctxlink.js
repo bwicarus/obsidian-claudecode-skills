@@ -50,8 +50,9 @@ function newSessionId() {
 }
 
 export class ContextLink {
-  constructor(onStatus) {
+  constructor(onStatus, onEvent) {
     this.onStatus = typeof onStatus === "function" ? onStatus : () => {};
+    this.onEvent = typeof onEvent === "function" ? onEvent : () => {};
     this.socket = null;
     this.sessionId = null;
     this.ready = false;
@@ -65,6 +66,10 @@ export class ContextLink {
     // the previous snapshot, but it would be describing a page the user may
     // have left while the link was down.
     this.lastPage = null;
+    // A context connection may expose exactly one visual source. Keep the
+    // binding across reconnects, but restate it after each context-open.
+    this.sourceInstanceId = null;
+    this.registeredSourceInstanceId = null;
   }
 
   connect() {
@@ -86,6 +91,7 @@ export class ContextLink {
           this.sessionId = newSessionId();
           return this.#request("context-open", { sessionId: this.sessionId });
         })
+        .then(() => this.#registerVisualSource())
         .then(() => {
           this.ready = true;
           this.retryMs = RECONNECT_MIN_MS;
@@ -105,6 +111,7 @@ export class ContextLink {
       this.ready = false;
       this.socket = null;
       this.sessionId = null;
+      this.registeredSourceInstanceId = null;
       for (const [, entry] of this.pending) entry.reject(new Error("连接已关闭"));
       this.pending.clear();
       if (this.closed) return;
@@ -114,6 +121,22 @@ export class ContextLink {
     // WebSocket error events carry no reason by specification; close code and
     // the absence of a completed handshake are the only signals available.
     socket.onerror = () => {};
+  }
+
+  bindVisualSource(sourceInstanceId) {
+    const value = String(sourceInstanceId || "");
+    if (!/^[A-Za-z0-9_-]{22}$/.test(value)) {
+      return Promise.reject(new Error("页面视觉来源标识无效"));
+    }
+    if (this.sourceInstanceId && this.sourceInstanceId !== value) {
+      return Promise.reject(new Error("一条上下文连接不能切换视觉来源"));
+    }
+    this.sourceInstanceId = value;
+    return this.#registerVisualSource();
+  }
+
+  sendRequest(type, fields) {
+    return this.#request(type, fields);
   }
 
   close() {
@@ -225,10 +248,37 @@ export class ContextLink {
       return;
     }
     const entry = this.pending.get(message?.requestId);
-    if (!entry) return;
+    if (!entry) {
+      if (
+        message?.contract === CONTRACT &&
+        message?.type === "event" &&
+        typeof message?.event === "string"
+      ) {
+        try { this.onEvent(message); } catch (_) {}
+      }
+      return;
+    }
     this.pending.delete(message.requestId);
     if (message.ok === true) entry.resolve(message.payload ?? message);
     else entry.reject(new Error(message?.error?.message || message?.error?.code || "请求被拒绝"));
+  }
+
+  #registerVisualSource() {
+    if (
+      !this.sourceInstanceId ||
+      !this.sessionId ||
+      !this.socket ||
+      this.socket.readyState !== 1 ||
+      this.registeredSourceInstanceId === this.sourceInstanceId
+    ) return Promise.resolve({ skipped: true });
+    const source = this.sourceInstanceId;
+    return this.#request("visual-register", {
+      sessionId: this.sessionId,
+      sourceInstanceId: source,
+    }).then((result) => {
+      this.registeredSourceInstanceId = source;
+      return result;
+    });
   }
 
   #scheduleRetry(err) {

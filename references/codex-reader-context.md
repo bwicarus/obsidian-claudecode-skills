@@ -67,7 +67,8 @@ PDF `reader.js` 也是生成物，唯一源码在 `_server_deploy/static/pdf/rea
   父状态、账户、registry digest 或 owner lease 不一致时 fail closed。
 - 直连：WebRTC 只加速变化传输，服务端 relay 仍是持久备份；内容宿主只拿不透明
   `accountProof`，不得取得 namespace/Bearer/owner token。
-- 普通网页墨迹：仅当前标签页会话；响应式正文宽度变化后清空，不把坐标误当长期内容锚。
+- 普通网页墨迹：仅当前标签页会话；响应式正文宽度变化保留已提交笔迹、仅取消尚未完成的
+  当前笔画，刷新或关闭标签页后清空，不把坐标误当长期内容锚。
 
 深层同步、租约、BFCache、v2 因果迁移和 KG 规则不要从本文推导，必须回看
 [统一架构](reader-runtime-architecture.md)。
@@ -111,9 +112,12 @@ PDF `reader.js` 也是生成物，唯一源码在 `_server_deploy/static/pdf/rea
   MCP→webapp 身份 token 职责不同，任何凭据都不得写进本文、页面或日志。
 - Windows `snapshot-mcp` 是独立实验末端，不是 Pi `mcp_server.py` 的缓存：Pi 继续提供
   active/journal，PWA 经电脑语音的固定 WSS 直连更新 Windows 本地快照，客户端只通过
-  `reader_context_snapshot` 按需读取；该工具只回一份按旧语音助手状态优先级整理的 Markdown，
-  不把内部 JSON 暴露给模型。笔迹段按需明确指向无参只读 `reader_drawing_image`，由它另取
-  PWA 当前“原页＋笔迹”合成图；普通正文/选区读取不取图。两者与
+  `reader_context_snapshot` 按需读取。网页来源把“视口前文 / 当前可见正文 / 视口后文”分开，
+  当前可见部分是结构化字段；完整网页正文只在一个 Codex 线程首次读取该文档版本时返回，
+  后续只更新视口，避免重复灌满上下文。`reader_visual_image` 只在 AI 明确调用时向当前
+  source/revision 请求视口、笔迹附近或闭合选区附近的“正文＋笔迹＋卡片/便签”JPEG；
+  `reader_browser_control` 只允许前后滚动一屏及滚到可见文字、标题或自定义选区，禁止任意
+  URL、CSS selector 和脚本。三者与
   旧 voice-typist 注入互斥。入口与回滚合同见
   [电脑直连音频桥](reader-computer-audio-bridge.md#实验上下文末端2026-07-30)。
 - 内容脚本和页面只能调用固定 operation/schema 的桥；不得退化成任意

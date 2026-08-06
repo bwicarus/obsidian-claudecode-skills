@@ -13,6 +13,7 @@
   "use strict";
   if (window.__bwPwaProviderOnly) return;
   if (window.__bwReaderDoc) return;   // 幂等
+  const ORIGIN = "https://bwicarus.taile44d0c.ts.net";
 
   const localStoreCall = (type, key, value) => new Promise((resolve, reject) => {
     chrome.runtime.sendMessage({ type, key, value }, (response) => {
@@ -364,6 +365,183 @@
   })();
   window.__bwNativeComputerVoiceExtensionBridge = nativeComputerVoiceBridge;
 
+  const nativeAppDataBridge = (() => {
+    const CONTRACT = 'bw-reader-native/1';
+    const ACTIONS = new Set([
+      'notes.status', 'notes.list', 'notes.read', 'notes.create'
+    ]);
+    const safeId = /^[A-Za-z0-9_-]{8,96}$/;
+    const utf8Length = (value) => new TextEncoder().encode(String(value || '')).byteLength;
+    const requestId = () => {
+      const bytes = new Uint8Array(18);
+      crypto.getRandomValues(bytes);
+      return Array.from(
+        bytes,
+        (value) => value.toString(16).padStart(2, '0')
+      ).join('');
+    };
+    const call = (action, details) => new Promise((resolve, reject) => {
+      if (!ACTIONS.has(action)) {
+        reject(Object.assign(new Error('BWReader App 数据请求无效'), {
+          code: 'BW_NATIVE_APP_REQUEST_INVALID'
+        }));
+        return;
+      }
+      chrome.runtime.sendMessage(Object.assign({
+        type: 'BW_NATIVE_APP_REQUEST',
+        action,
+        requestId: requestId()
+      }, details || {}), (response) => {
+        const runtimeError = chrome.runtime.lastError;
+        const data = response?.data;
+        if (runtimeError || !response?.ok || !data?.ok) {
+          reject(Object.assign(new Error(
+            runtimeError?.message ||
+            data?.error ||
+            response?.error ||
+            'BWReader App 本机数据暂时不可用'
+          ), {
+            code: data?.code || response?.code || 'BW_NATIVE_APP_UNAVAILABLE'
+          }));
+          return;
+        }
+        if (data.contract !== CONTRACT || data.action !== action) {
+          reject(Object.assign(new Error('BWReader App 数据响应无效'), {
+            code: 'BW_NATIVE_APP_RESPONSE_INVALID'
+          }));
+          return;
+        }
+        resolve(data);
+      });
+    });
+    return Object.freeze({
+      status: () => call('notes.status'),
+      listNotes: () => call('notes.list'),
+      readNote: (noteId) => {
+        const value = String(noteId || '');
+        if (!safeId.test(value)) {
+          return Promise.reject(Object.assign(new Error('本机笔记编号无效'), {
+            code: 'BW_NATIVE_NOTE_ID_INVALID'
+          }));
+        }
+        return call('notes.read', { noteId: value });
+      },
+      createNote: (details) => {
+        const value = details && typeof details === 'object' && !Array.isArray(details)
+          ? details
+          : {};
+        const keys = Object.keys(value);
+        const allowed = new Set(['name', 'text', 'file', 'page']);
+        const name = typeof value.name === 'string' ? value.name.trim() : '';
+        const text = typeof value.text === 'string' ? value.text.trim() : '';
+        const file = value.file == null ? '' : value.file;
+        const page = value.page == null ? 0 : value.page;
+        if (
+          keys.some((key) => !allowed.has(key)) ||
+          !name || !text ||
+          utf8Length(name) > 512 || utf8Length(text) > 262144 ||
+          typeof file !== 'string' || utf8Length(file) > 8192 ||
+          !Number.isSafeInteger(page) || page < 0 || page > 10000000
+        ) {
+          return Promise.reject(Object.assign(new Error('本机笔记内容无效'), {
+            code: 'BW_NATIVE_NOTE_CREATE_INVALID'
+          }));
+        }
+        return call('notes.create', { name, text, file, page });
+      }
+    });
+  })();
+  window.__bwNativeAppDataBridge = nativeAppDataBridge;
+
+  function createNativeLocalNotesFetchInterceptor(environment) {
+    const origin = String(environment.origin || '');
+    const runtime = environment.runtime;
+    const bridge = environment.bridge;
+    const URLCtor = environment.URL;
+    const ResponseCtor = environment.Response;
+    if (typeof URLCtor !== 'function' || typeof ResponseCtor !== 'function') {
+      return async function unavailableNativeNotesInterceptor() { return null; };
+    }
+    let safariExtension = false;
+    try {
+      safariExtension = new URLCtor(String(runtime.getURL(''))).protocol ===
+        'safari-web-extension:';
+    } catch (_) {}
+
+    function invalid(message) {
+      return Object.assign(new TypeError(message), {
+        code: 'BW_NATIVE_NOTE_CREATE_INVALID'
+      });
+    }
+
+    return async function intercept(url, init) {
+      if (!safariExtension) return null;
+      let target;
+      try { target = new URLCtor(String(url)); }
+      catch (_) { return null; }
+      const method = String(init?.method || 'GET').toUpperCase();
+      if (
+        target.origin !== origin ||
+        target.pathname !== '/pdf/api/to-note' ||
+        method !== 'POST'
+      ) {
+        return null;
+      }
+      if (typeof init?.body !== 'string') {
+        throw invalid('本机笔记请求正文必须是 JSON');
+      }
+      let body;
+      try { body = JSON.parse(init.body); }
+      catch (_) { throw invalid('本机笔记请求正文不是有效 JSON'); }
+      if (!body || typeof body !== 'object' || Array.isArray(body)) {
+        throw invalid('本机笔记请求正文无效');
+      }
+      const result = await bridge.createNote(body);
+      if (result?.handled === false && result.disposition === 'pi') {
+        return null;
+      }
+      if (
+        result?.handled !== true ||
+        (result.disposition !== 'queued' && result.disposition !== 'committed') ||
+        (result.disposition === 'queued' && (
+          typeof result.plannedFileName !== 'string' || !result.plannedFileName
+        )) ||
+        (result.disposition === 'committed' && (
+          typeof result.notePath !== 'string' || !result.notePath
+        )) ||
+        typeof result.obsidianURL !== 'string'
+      ) {
+        throw Object.assign(new Error('BWReader App 本机笔记响应无效'), {
+          code: 'BW_NATIVE_APP_RESPONSE_INVALID'
+        });
+      }
+      const displayPath = result.disposition === 'queued'
+        ? result.plannedFileName
+        : result.notePath;
+      return new ResponseCtor(JSON.stringify({
+        ok: true,
+        // note_path stays for the existing Reader success UI; when queued it
+        // is explicitly only the planned name and may gain a suffix on write.
+        note_path: displayPath,
+        planned_note_path: result.disposition === 'queued' ? displayPath : '',
+        obsidian_url: result.obsidianURL,
+        local_disposition: result.disposition,
+        pending_export: result.disposition === 'queued'
+      }), {
+        status: 200,
+        headers: { 'content-type': 'application/json; charset=utf-8' }
+      });
+    };
+  }
+
+  const nativeLocalNotesFetchInterceptor = createNativeLocalNotesFetchInterceptor({
+    origin: ORIGIN,
+    runtime: chrome.runtime,
+    bridge: nativeAppDataBridge,
+    URL: globalThis.URL,
+    Response: globalThis.Response
+  });
+
   // iOS may reclaim the Safari extension background even while a long-lived
   // Port and WSS are active.  The shared Reader button used to call through
   // that worker, so a click could disappear before Windows saw a connection.
@@ -425,7 +603,6 @@
     important('pointer-events', 'none');
 
     let ready = false;
-    let lastTarget = '';
     let lastState = 'idle';
 
     const visibleButton = () => {
@@ -467,29 +644,6 @@
       return null;
     };
 
-    const targetApp = () => {
-      try {
-        return window.RC && RC.computerVoice &&
-          typeof RC.computerVoice.getTargetApp === 'function' &&
-          RC.computerVoice.getTargetApp() === 'chatgpt-classic'
-            ? 'chatgpt-classic'
-            : 'codex-desktop';
-      } catch (_) {
-        return 'codex-desktop';
-      }
-    };
-
-    const configure = () => {
-      const target = targetApp();
-      if (!ready || target === lastTarget || !frame.contentWindow) return;
-      lastTarget = target;
-      frame.contentWindow.postMessage({
-        contract: CONTRACT,
-        type: 'configure',
-        appKind: target
-      }, '*');
-    };
-
     const position = () => {
       const found = visibleButton();
       // Shown as soon as there is a place for it, rather than after the frame
@@ -525,7 +679,6 @@
       important('pointer-events', 'auto');
       found.button.classList.toggle('on', lastState === 'active');
       found.button.classList.toggle('connecting', lastState === 'connecting');
-      configure();
     };
 
     window.addEventListener('message', (event) => {
@@ -534,8 +687,6 @@
       if (!data || data.contract !== CONTRACT || typeof data.type !== 'string') return;
       if (data.type === 'ready') {
         ready = !!(data.value && data.value.ok === true);
-        lastTarget = '';
-        configure();
         position();
         return;
       }
@@ -607,12 +758,25 @@
     window.addEventListener('resize', position, { passive: true });
     window.addEventListener('scroll', position, { passive: true, capture: true });
     const timer = window.setInterval(position, 250);
-    window.addEventListener('pagehide', () => window.clearInterval(timer), { once: true });
+    window.addEventListener('pagehide', () => {
+      retired = true;
+      window.clearInterval(timer);
+    }, { once: true });
     // Exposed so the shared layer can tell whether this surface took the click.
     // When it is not ready the frame stays invisible and click-through, the
     // press lands on the original button, and the module opens a tab instead --
     // the fallback needs no coordination beyond knowing which happened.
-    return Object.freeze({ position, isReady: function () { return ready; } });
+    return Object.freeze({
+      position,
+      isReady: function () { return ready; },
+      // Isolated-world closure capability: content.js can claim only the exact
+      // frame created above. A host page can clone DOM attributes or insert a
+      // competing web-accessible call.html, but it cannot manufacture this
+      // object identity or replace the closed-over reference.
+      frameForClaim: function () {
+        return !retired && frame.isConnected ? frame : null;
+      },
+    });
   })();
   window.__bwInlineComputerVoiceSurface = inlineComputerVoiceSurface;
 
@@ -1844,7 +2008,6 @@
   // 跨源 + Bearer + SSE 统一走 background 长连 port(content script 的 fetch 受宿主页 CORS 限制,
   // background 有 host_permissions 才能带 Bearer 直连)。流式响应用 ReadableStream 原样重建,
   // rc-assistant 的 getReader() 打字机 / rid 续传语义不变。非本服务的绝对 URL(如词典音频)走原生 fetch。
-  const ORIGIN = "https://bwicarus.taile44d0c.ts.net";
   // 共享阅读器语音层仍按“同源 /voice-rt”组织；普通网页的同源是宿主网站，
   // 因此由宿主适配层只提供一次服务地址解析，rc-voicecall 继续保持唯一实现。
   // PWA 未提供这个 hook 时仍使用它自己的 location.host。
@@ -2144,6 +2307,8 @@
     if (u.startsWith("/")) u = ORIGIN + u;
     if (!u.startsWith(ORIGIN + "/")) return fetch(url, init);   // 外站资源走原生
     if (init.signal?.aborted) throw new DOMException("aborted", "AbortError");
+    const nativeNoteResponse = await nativeLocalNotesFetchInterceptor(u, init);
+    if (nativeNoteResponse) return nativeNoteResponse;
     const encodedBody = await encodeBridgedBody(init.body);
     if (init.signal?.aborted) throw new DOMException("aborted", "AbortError");
     const id = ++_seq;

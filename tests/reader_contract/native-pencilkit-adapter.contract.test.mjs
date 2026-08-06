@@ -19,6 +19,10 @@ const WEBVIEW = readFileSync(
   new URL("ios/BWReader/App/ReaderWebView.swift", ROOT),
   "utf8",
 );
+const ANNOTATION = readFileSync(
+  new URL("ios/BWReader/App/NativePencilAnnotation.swift", ROOT),
+  "utf8",
+);
 
 test("App PencilKit keeps the web page-ink fallback when native hit-testing declines", () => {
   assert.match(WEBVIEW, /window\.__BW_NATIVE_PENCILKIT_INK__ = true/);
@@ -34,6 +38,11 @@ test("App PencilKit keeps the web page-ink fallback when native hit-testing decl
     assert.match(pointerDown, /if \(noteEl\)[\s\S]*penBegin/);
     assert.doesNotMatch(pointerDown, /__BW_NATIVE_PENCILKIT_INK__[^\n]*return/);
   }
+  assert.match(SWIFT, /synchronizeWebInkFallbackStyle/);
+  assert.match(SWIFT, /typeof _ink === "object"/);
+  assert.match(SWIFT, /_ink\.color = color/);
+  assert.match(SWIFT, /typeof _epInk === "object"/);
+  assert.match(SWIFT, /_epInk\.width = width/);
 });
 
 test("native strokes use frozen stable surfaces and the existing save path", () => {
@@ -81,4 +90,27 @@ test("Swift keeps uncommitted PencilKit strokes until the host accepts them", ()
   assert.ok(evaluateIndex >= 0 && confirmIndex > evaluateIndex);
   assert.match(SWIFT, /guard !interactionActive/);
   assert.match(SWIFT, /点按重试|retryRequest/);
+});
+
+test("native PencilKit keeps the selected colour and width through persistence", () => {
+  assert.match(SWIFT, /strokeColor = controller\.colorHex/);
+  assert.match(SWIFT, /strokeWidth = max\(1, min\(controller\.width, 16\)\)/);
+  assert.match(
+    SWIFT,
+    /canonicalSegments\([\s\S]{0,220}color: strokeColor,[\s\S]{0,80}width: strokeWidth/,
+  );
+  assert.match(SWIFT, /color: color,[\s\S]{0,80}width: max\(1, min\(width, 16\)\)/);
+  assert.doesNotMatch(SWIFT, /color: stroke\.ink\.color\.bwHexString/);
+  assert.doesNotMatch(SWIFT, /stroke\.path\.first\?\.size\.width/);
+});
+
+test("viewport annotation exposes pen colour, width and eraser controls", () => {
+  assert.match(ANNOTATION, /ForEach\(colors, id: \\.self\)/);
+  assert.match(ANNOTATION, /Slider\(value: \$selectedWidth, in: 1\.\.\.16\)/);
+  assert.match(ANNOTATION, /case \.eraser:[\s\S]{0,80}PKEraserTool\(\.vector\)/);
+  assert.match(ANNOTATION, /color: UIColor\(bwHex: colorHex\)/);
+  assert.doesNotMatch(
+    ANNOTATION,
+    /PKInkingTool\(\.pen, color: \.systemRed, width: 4\)/,
+  );
 });

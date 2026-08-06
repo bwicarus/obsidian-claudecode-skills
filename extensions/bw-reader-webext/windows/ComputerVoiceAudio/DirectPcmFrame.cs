@@ -119,15 +119,16 @@ internal static class DirectPcmFrameCodec
 
 internal sealed class DirectPcmStartGate
 {
-    // START cannot release PCM until Codex Voice has been observed through
-    // the Windows capability ledger and the JSON success reply is on the
-    // wire.  That confirmation has a five-second timeout, so reusing the
-    // 400 ms live-playback horizon here can tear down an otherwise healthy
-    // start before its reply.  Keep this bootstrap buffer separately bounded;
-    // the Reader still enforces the advertised 400 ms playback horizon.
-    internal const int BootstrapBufferMilliseconds = 6000;
-    private const int FramesPerTrack =
-        BootstrapBufferMilliseconds / 20;
+    // START 回执发出前,目标应用输出的音频先缓冲在这里,回执后再按序重放。
+    // 窗口原为 PcmQueueLimitMilliseconds(200ms)= 10 帧,只够"语音本来就开着"
+    // 的快路径;一旦本次 START 需要先发快捷键唤起语音,等待应用响应与 voice
+    // activity 确认远超 200ms,缓冲必然撑爆并结束整个通话 —— 表现就是语音刚
+    // 起来就被关掉、App 按钮变绿一两秒又灭。
+    // 不能靠丢帧化解:下行帧要过 DirectPcmSequenceGuard,序列必须严格 +1,丢一
+    // 帧就是 PCM_SEQUENCE_INVALID。所以只能放大窗口到覆盖唤起耗时。
+    // 15 秒 = 750 帧;按 PcmPayloadBytes 计每轨约 1.4 MB,仍是有界的。
+    private const int StartGateWindowMilliseconds = 15_000;
+    private const int FramesPerTrack = StartGateWindowMilliseconds / 20;
     private readonly object _gate = new();
     private readonly Queue<DirectPcmFrame> _buffer = new();
     private readonly Dictionary<DirectPcmTrack, int> _trackCounts = [];

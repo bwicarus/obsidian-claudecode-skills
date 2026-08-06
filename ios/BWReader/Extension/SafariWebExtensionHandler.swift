@@ -210,6 +210,225 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                 context: context
             )
 
+        case "notes.status":
+            guard exactKeys(
+                message,
+                required: ["contract", "action", "requestId"]
+            ) else {
+                complete(context, response: schemaFailure(
+                    action: action,
+                    requestID: requestID
+                ))
+                return
+            }
+            do {
+                let state = try ReaderNativeFeatureStore()
+                    .loadLocalNotesState() ?? .unavailable
+                let pending = try ReaderLocalNoteOutboxStore().pending()
+                let notes = mergedLocalNotes(state: state, pending: pending)
+                var response = baseResponse(action: action, requestID: requestID)
+                response["storage"] = localNotesStorageDictionary(
+                    state,
+                    pendingCount: pending.count,
+                    totalCount: notes.count
+                )
+                complete(context, response: response)
+            } catch {
+                complete(context, response: bridgeFailure(
+                    action: action,
+                    requestID: requestID,
+                    error: error
+                ))
+            }
+
+        case "notes.list":
+            guard exactKeys(
+                message,
+                required: ["contract", "action", "requestId"]
+            ) else {
+                complete(context, response: schemaFailure(
+                    action: action,
+                    requestID: requestID
+                ))
+                return
+            }
+            do {
+                let state = try ReaderNativeFeatureStore()
+                    .loadLocalNotesState() ?? .unavailable
+                let pending = try ReaderLocalNoteOutboxStore().pending()
+                let notes = mergedLocalNotes(state: state, pending: pending)
+                var response = baseResponse(action: action, requestID: requestID)
+                response["storage"] = localNotesStorageDictionary(
+                    state,
+                    pendingCount: pending.count,
+                    totalCount: notes.count
+                )
+                response["notes"] = notes.map(localNoteSummaryDictionary)
+                complete(context, response: response)
+            } catch {
+                complete(context, response: bridgeFailure(
+                    action: action,
+                    requestID: requestID,
+                    error: error
+                ))
+            }
+
+        case "notes.read":
+            guard exactKeys(
+                message,
+                required: ["contract", "action", "requestId", "noteId"]
+            ), let noteID = message["noteId"] as? String,
+               ReaderNativeBridgeContract.isSafeRequestID(noteID)
+            else {
+                complete(context, response: schemaFailure(
+                    action: action,
+                    requestID: requestID
+                ))
+                return
+            }
+            do {
+                let state = try ReaderNativeFeatureStore()
+                    .loadLocalNotesState() ?? .unavailable
+                let pending = try ReaderLocalNoteOutboxStore().pending()
+                let notes = mergedLocalNotes(state: state, pending: pending)
+                guard let note = notes.first(where: { $0.id == noteID }) else {
+                    complete(context, response: failure(
+                        action: action,
+                        requestID: requestID,
+                        code: "BW_NATIVE_NOTE_NOT_FOUND",
+                        message: "本机笔记索引中没有这条记录"
+                    ))
+                    return
+                }
+                var response = baseResponse(action: action, requestID: requestID)
+                response["note"] = localNoteDictionary(note)
+                complete(context, response: response)
+            } catch {
+                complete(context, response: bridgeFailure(
+                    action: action,
+                    requestID: requestID,
+                    error: error
+                ))
+            }
+
+        case "notes.create":
+            guard exactKeys(
+                message,
+                required: ["contract", "action", "requestId", "name", "text"],
+                optional: ["file", "page"]
+            ),
+            let name = message["name"] as? String,
+            let text = message["text"] as? String
+            else {
+                complete(context, response: schemaFailure(
+                    action: action,
+                    requestID: requestID
+                ))
+                return
+            }
+            let sourceFile: String
+            if let value = message["file"] {
+                guard let value = value as? String else {
+                    complete(context, response: schemaFailure(
+                        action: action,
+                        requestID: requestID
+                    ))
+                    return
+                }
+                sourceFile = value
+            } else {
+                sourceFile = ""
+            }
+            let sourcePage: Int
+            if let value = message["page"] {
+                guard let number = value as? NSNumber,
+                      number.doubleValue.isFinite,
+                      number.doubleValue.rounded() == number.doubleValue,
+                      (0...10_000_000).contains(number.doubleValue)
+                else {
+                    complete(context, response: schemaFailure(
+                        action: action,
+                        requestID: requestID
+                    ))
+                    return
+                }
+                sourcePage = number.intValue
+            } else {
+                sourcePage = 0
+            }
+            do {
+                let state = try ReaderNativeFeatureStore()
+                    .loadLocalNotesState() ?? .unavailable
+                guard state.enabled else {
+                    var response = baseResponse(
+                        action: action,
+                        requestID: requestID
+                    )
+                    response["handled"] = false
+                    response["disposition"] = "pi"
+                    complete(context, response: response)
+                    return
+                }
+                guard let request = ReaderLocalNoteCreateRequest(
+                    id: requestID,
+                    name: name,
+                    text: text,
+                    sourceFile: sourceFile,
+                    sourcePage: sourcePage,
+                    vaultGeneration: state.vaultGeneration
+                ) else {
+                    complete(context, response: schemaFailure(
+                        action: action,
+                        requestID: requestID
+                    ))
+                    return
+                }
+                guard state.configured else {
+                    complete(context, response: failure(
+                        action: action,
+                        requestID: requestID,
+                        code: "BW_NATIVE_NOTES_FOLDER_REQUIRED",
+                        message: "请先在 BWReader App 中选择 Obsidian Vault"
+                    ))
+                    return
+                }
+                if let committed = state.notes.first(where: {
+                    localNote($0, hasSamePayloadAs: request)
+                }) {
+                    var response = baseResponse(
+                        action: action,
+                        requestID: requestID
+                    )
+                    response["handled"] = true
+                    response["disposition"] = "committed"
+                    response["notePath"] = committed.fileName
+                    response["obsidianURL"] = obsidianURL(
+                        folderName: state.folderName,
+                        fileName: committed.fileName
+                    )
+                    response["note"] = localNoteDictionary(committed)
+                    complete(context, response: response)
+                    return
+                }
+                let queued = try ReaderLocalNoteOutboxStore().enqueue(request)
+                var response = baseResponse(
+                    action: action,
+                    requestID: requestID
+                )
+                response["handled"] = true
+                response["disposition"] = "queued"
+                response["plannedFileName"] = queued.desiredFileName
+                response["obsidianURL"] = ""
+                response["note"] = localNoteDictionary(queued.projection)
+                complete(context, response: response)
+            } catch {
+                complete(context, response: bridgeFailure(
+                    action: action,
+                    requestID: requestID,
+                    error: error
+                ))
+            }
+
         default:
             complete(
                 context,
@@ -416,6 +635,91 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             return nil
         }
         return context
+    }
+
+    private func localNotesStorageDictionary(
+        _ state: ReaderLocalNotesSharedState,
+        pendingCount: Int,
+        totalCount: Int
+    ) -> [String: Any] {
+        [
+            "enabled": state.enabled,
+            "configured": state.configured,
+            "folderName": state.folderName,
+            "updatedAt": state.updatedAtMilliseconds,
+            "count": totalCount,
+            "pendingCount": pendingCount,
+        ]
+    }
+
+    private func localNoteSummaryDictionary(
+        _ note: ReaderLocalNoteProjection
+    ) -> [String: Any] {
+        [
+            "id": note.id,
+            "title": note.title,
+            "fileName": note.fileName,
+            "preview": note.preview,
+            "contentTruncated": note.contentTruncated,
+            "sourceFile": note.sourceFile,
+            "sourcePage": note.sourcePage,
+            "createdAt": note.createdAtMilliseconds,
+            "pendingExport": note.pendingExport == true,
+        ]
+    }
+
+    private func localNoteDictionary(
+        _ note: ReaderLocalNoteProjection
+    ) -> [String: Any] {
+        var value = localNoteSummaryDictionary(note)
+        value["content"] = note.content
+        return value
+    }
+
+    private func mergedLocalNotes(
+        state: ReaderLocalNotesSharedState,
+        pending: [ReaderLocalNoteCreateRequest]
+    ) -> [ReaderLocalNoteProjection] {
+        var result: [ReaderLocalNoteProjection] = []
+        for note in pending.reversed().map(\.projection) + state.notes {
+            if result.contains(where: {
+                $0.id == note.id ||
+                    ($0.title == note.title &&
+                     $0.contentHash == note.contentHash &&
+                     $0.sourceFile == note.sourceFile &&
+                     $0.sourcePage == note.sourcePage)
+            }) {
+                continue
+            }
+            result.append(note)
+            if result.count == 50 { break }
+        }
+        return result
+    }
+
+    private func localNote(
+        _ note: ReaderLocalNoteProjection,
+        hasSamePayloadAs request: ReaderLocalNoteCreateRequest
+    ) -> Bool {
+        note.title == request.name &&
+            note.contentHash == request.contentHash &&
+            note.sourceFile == request.sourceFile &&
+            note.sourcePage == request.sourcePage
+    }
+
+    private func obsidianURL(folderName: String, fileName: String) -> String {
+        var components = URLComponents()
+        components.scheme = "obsidian"
+        components.host = "open"
+        components.queryItems = [
+            URLQueryItem(name: "vault", value: folderName),
+            URLQueryItem(
+                name: "file",
+                value: URL(fileURLWithPath: fileName)
+                    .deletingPathExtension().lastPathComponent
+            ),
+        ]
+        return components.url?.absoluteString ?? ""
     }
 
     private func validSourceURLField(_ value: Any?) -> Bool {

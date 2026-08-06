@@ -1,4 +1,3 @@
-using System.Runtime.InteropServices;
 using System.Text.Json;
 
 namespace BwReader.ComputerVoiceAudio;
@@ -20,14 +19,13 @@ internal static class PerAppAudioRouteSelfTest
     internal static void Run(ICollection<string> checks)
     {
         CheckExactSixTupleContract(checks);
-        CheckRegistrySchemaIsPinnedAndScoped(checks);
-        CheckWindowsIdentityHashVectors(checks);
-        CheckNativeBackendConstructionWithoutMutation(checks);
-        CheckPersistedRegistryValueNamesAreExact(checks);
+        CheckNativeAbiIsPinnedAndScoped(checks);
         CheckEndpointPackingIsFlowSpecific(checks);
         CheckReadOnlyProbeReportsSixRoutesWithoutWrites(checks);
         CheckPreexistingTargetSignalIsExact(checks);
+        CheckPollutedSnapshotFallsBackToDefaults(checks);
         CheckTransactionRestoresAndPreservesExternalChange(checks);
+        CheckInvalidOriginalFallsBackToDefault(checks);
         CheckLeaseRevalidationFailsClosed(checks);
         CheckApplyFailureRollsBack(checks);
         CheckReadbackMismatchRollsBack(checks);
@@ -38,74 +36,50 @@ internal static class PerAppAudioRouteSelfTest
         CheckInvalidCrashJournalHasNoWrites(checks);
     }
 
-    private static void CheckWindowsIdentityHashVectors(
+    private static void CheckNativeAbiIsPinnedAndScoped(
         ICollection<string> checks)
     {
-        if (!OperatingSystem.IsWindows())
-        {
-            checks.Add(
-                "per-app-audio-route-windows-identity-hash-vectors-windows-only");
-            return;
-        }
-        const string codexIdentity =
-            "OpenAI.Codex_2p2nqsd0c76g0!App";
-        const string chromeIdentity =
-            @"\Device\HarddiskVolume3\Program Files\Google\Chrome\Application\chrome.exe";
+        Type session = typeof(NativeAudioPolicyConfigSession);
+        System.Reflection.BindingFlags nonPublicStatic =
+            System.Reflection.BindingFlags.NonPublic
+            | System.Reflection.BindingFlags.Static;
+        Type? setDelegate = session.GetNestedType(
+            "SetPersistedDefaultAudioEndpointDelegate",
+            System.Reflection.BindingFlags.NonPublic);
+        Type? getDelegate = session.GetNestedType(
+            "GetPersistedDefaultAudioEndpointDelegate",
+            System.Reflection.BindingFlags.NonPublic);
+        int? setSlot = session.GetField(
+            "SetPersistedDefaultAudioEndpointSlot",
+            nonPublicStatic)?.GetRawConstantValue() as int?;
+        int? getSlot = session.GetField(
+            "GetPersistedDefaultAudioEndpointSlot",
+            nonPublicStatic)?.GetRawConstantValue() as int?;
+        Guid? iid = session.GetField(
+            "AudioPolicyConfigFactoryIid",
+            nonPublicStatic)?.GetValue(null) as Guid?;
         Require(
-            WindowsPersistedAppAudioRouteStore.ComputeIdentityKeyHash(
-                codexIdentity) == "346b7ff"
-            && WindowsPersistedAppAudioRouteStore.ComputeIdentityKeyHash(
-                chromeIdentity) == "44813011",
-            "per-app-audio-route-windows-identity-hash-vectors",
-            checks);
-    }
-
-    private static void CheckRegistrySchemaIsPinnedAndScoped(
-        ICollection<string> checks)
-    {
-        Require(
-            (int)PerAppAudioDataFlow.Render == 0
+            setDelegate is not null
+            && getDelegate is not null
+            && setSlot == 25
+            && getSlot == 26
+            && iid
+                == new Guid(
+                    "ab3d4648-e242-459f-b02f-541c70306324")
+            && session.GetMethods(
+                System.Reflection.BindingFlags.Instance
+                | System.Reflection.BindingFlags.Public
+                | System.Reflection.BindingFlags.NonPublic
+                | System.Reflection.BindingFlags.Static).All(method =>
+                !method.Name.Contains(
+                    "ClearAll",
+                    StringComparison.Ordinal))
+            && (int)PerAppAudioDataFlow.Render == 0
             && (int)PerAppAudioDataFlow.Capture == 1
             && (int)PerAppAudioRole.Console == 0
             && (int)PerAppAudioRole.Multimedia == 1
             && (int)PerAppAudioRole.Communications == 2,
-            "per-app-audio-registry-schema-is-pinned-and-scoped",
-            checks);
-    }
-
-    private static void CheckNativeBackendConstructionWithoutMutation(
-        ICollection<string> checks)
-    {
-        if (!OperatingSystem.IsWindows())
-        {
-            checks.Add(
-                "per-app-audio-policy-live-read-windows-only");
-            return;
-        }
-        using NativePerAppAudioPolicyBackend backend = new();
-        Require(
-            backend is not null,
-            "per-app-audio-registry-backend-construction-without-mutation",
-            checks);
-    }
-
-    private static void CheckPersistedRegistryValueNamesAreExact(
-        ICollection<string> checks)
-    {
-        string[] names = PerAppAudioRouteKey.All.Select(
-            key => key.RegistryValueName).ToArray();
-        Require(
-            names.SequenceEqual(
-            [
-                "000_000",
-                "001_000",
-                "002_000",
-                "000_001",
-                "001_001",
-                "002_001",
-            ])
-            && names.Distinct(StringComparer.Ordinal).Count() == 6,
-            "per-app-audio-registry-six-role-flow-value-names",
+            "per-app-audio-policy-abi-is-pinned-and-no-clear-all",
             checks);
     }
 
@@ -242,6 +216,27 @@ internal static class PerAppAudioRouteSelfTest
         mixed.Dispose();
     }
 
+    private static void CheckPollutedSnapshotFallsBackToDefaults(
+        ICollection<string> checks)
+    {
+        using TemporaryRouteJournal journal = new();
+        using FakePerAppAudioPolicyBackend backend =
+            FakePerAppAudioPolicyBackend.WithTargets();
+        PerAppAudioRouteLease lease =
+            new PerAppAudioRouteController(backend).Acquire(
+                Request(journal.Path));
+
+        PerAppAudioRouteRestoreResult restored = lease.Restore();
+        Require(
+            restored.Succeeded
+            && !File.Exists(journal.Path)
+            && PerAppAudioRouteKey.All.All(key =>
+                backend.Read(ProcessId, key).Kind
+                    == PersistedAudioEndpointKind.Unset),
+            "per-app-audio-route-polluted-snapshot-clears-to-defaults",
+            checks);
+    }
+
     private static void
         CheckReadOnlyProbeReportsSixRoutesWithoutWrites(
             ICollection<string> checks)
@@ -281,9 +276,11 @@ internal static class PerAppAudioRouteSelfTest
             config,
             () => new CodexAppTarget(
                 ProcessId,
+                133700000000000000,
                 new HashSet<uint> { ProcessId },
                 WindowHandle: 1),
-            () => backend);
+            () => backend,
+            _ => ProcessId);
         using JsonDocument document = JsonDocument.Parse(
             JsonSerializer.Serialize(
                 result,
@@ -422,6 +419,40 @@ internal static class PerAppAudioRouteSelfTest
             && backend.Writes.Any(write =>
                 write.EndpointId is null),
             "per-app-audio-route-restore-is-conditional-and-exact",
+            checks);
+    }
+
+    private static void CheckInvalidOriginalFallsBackToDefault(
+        ICollection<string> checks)
+    {
+        using TemporaryRouteJournal journal = new();
+        using FakePerAppAudioPolicyBackend backend =
+            FakePerAppAudioPolicyBackend.WithMixedOriginals();
+        PerAppAudioRouteLease lease =
+            new PerAppAudioRouteController(backend).Acquire(
+                Request(journal.Path));
+        // Six apply writes happen first. During reverse-order restore the
+        // physical capture endpoint is write #9; fail that exact restore and
+        // require the one-shot null/default fallback to complete the lease.
+        backend.FailWriteNumbers.Add(9);
+
+        PerAppAudioRouteRestoreResult restored = lease.Restore();
+        Require(
+            restored.Succeeded
+            && !File.Exists(journal.Path)
+            && backend.Read(
+                ProcessId,
+                new(
+                    PerAppAudioDataFlow.Capture,
+                    PerAppAudioRole.Console)).Kind
+                == PersistedAudioEndpointKind.Unset
+            && backend.Read(
+                ProcessId,
+                new(
+                    PerAppAudioDataFlow.Render,
+                    PerAppAudioRole.Console)).EndpointId
+                == PhysicalRender,
+            "per-app-audio-route-invalid-original-falls-back-to-default",
             checks);
     }
 
@@ -678,8 +709,7 @@ internal static class PerAppAudioRouteSelfTest
 
         internal List<(
             PerAppAudioRouteKey Key,
-            string? EndpointId)> Writes
-        { get; } = [];
+            string? EndpointId)> Writes { get; } = [];
 
         internal int ReadCount { get; private set; }
 

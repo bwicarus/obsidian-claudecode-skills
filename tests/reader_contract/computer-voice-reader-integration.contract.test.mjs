@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
+import { webcrypto } from "node:crypto";
 
 const read = (path) => fs.readFileSync(path, "utf8");
 const manifest = JSON.parse(read("extensions/bw-reader-webext/manifest.json"));
@@ -19,6 +20,238 @@ const readerWebView = read("ios/BWReader/App/ReaderWebView.swift");
 const nativeVoiceSystem = read(
   "ios/BWReader/App/NativeVoiceSystemIntegration.swift",
 );
+
+test("background helpers hash normalized full text and enforce UTF-8 bounds", async () => {
+  const start = background.indexOf("function readerNormalizeText(value, max, side = \"start\")");
+  const end = background.indexOf("function readerRandomHex(length)", start);
+  assert.ok(start >= 0 && end > start);
+  const factory = new Function(
+    "TextEncoder",
+    "structuredClone",
+    "readerExactKeys",
+    "readerRelayError",
+    "readerSafeId",
+    "readerSafeUrl",
+    "sha256Hex",
+    "MAX_DOCUMENT_UTF8_BYTES",
+    "MAX_DOCUMENT_CHARACTERS",
+    `${background.slice(start, end)}
+    function normalizeReadableText(value) {
+      return readerNormalizeText(value, MAX_DOCUMENT_CHARACTERS);
+    }
+    function boundUtf8Text(value, maxBytes) {
+      return readerBoundUtf8(value, maxBytes);
+    }
+    async function prepareDocument(page) {
+      const url = readerSafeUrl(page.url);
+      const sourceInstanceId = String(page.document?.sourceInstanceId || "");
+      if (!url || !/^[A-Za-z0-9_-]{22}$/.test(sourceInstanceId)) {
+        throw readerRelayError("BW_READER_CONTEXT_SCHEMA", "全文合同无效");
+      }
+      const rawText = String(page.document?.text || "");
+      const fullText = readerNormalizeText(rawText, MAX_DOCUMENT_CHARACTERS);
+      const bounded = readerBoundUtf8(fullText, MAX_DOCUMENT_UTF8_BYTES);
+      return {
+        contract: "reader-document/1",
+        sourceInstanceId,
+        documentKey: readerSafeUrl(page.document?.documentKey) || url,
+        url,
+        title: String(page.title || "").replace(/[\\u0000-\\u001f\\u007f]/g, " ").slice(0, 1024),
+        contentRevision: await sha256Hex(fullText),
+        text: bounded.text,
+        truncated: bounded.truncated,
+        observedAtEpochMs: Date.now(),
+      };
+    }
+    function prepareViewport(page) {
+      const correlation = page.viewport?.controlCorrelation;
+      if (correlation !== undefined && !readerSafeId(correlation, 128)) {
+        throw readerRelayError("BW_READER_CONTEXT_SCHEMA", "关联标识无效");
+      }
+      const selection = readerNormalizeText(String(page.viewport?.selection || ""), 400);
+      const viewport = {
+        contract: "reader-viewport/1",
+        sourceInstanceId: page.document.sourceInstanceId,
+        documentKey: page.document.documentKey,
+        url: page.url,
+        title: String(page.title || ""),
+        beforeText: readerNormalizeText(String(page.viewport?.beforeText || ""), 2400, "end"),
+        visibleText: readerNormalizeText(String(page.viewport?.visibleText || ""), 12000),
+        afterText: readerNormalizeText(String(page.viewport?.afterText || ""), 2400),
+        selectionState: selection ? "active" : "cleared",
+        selection: selection || null,
+        observedAtEpochMs: Date.now(),
+      };
+      if (correlation !== undefined) viewport.controlCorrelation = correlation;
+      return viewport;
+    }
+    function prepareSelectionRegions(page) {
+      return readerValidateRegions(page.selectionRegions);
+    }
+    function prepareWebVisual(page, url) {
+      return readerValidateVisual(page.visual, url);
+    }
+    return { normalizeReadableText, sha256Hex, boundUtf8Text, prepareDocument, prepareViewport, prepareSelectionRegions, prepareWebVisual };`,
+  );
+  const helpers = factory(
+    TextEncoder,
+    structuredClone,
+    (value, keys) => !!value && typeof value === "object" && !Array.isArray(value) &&
+      Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key)),
+    (code, message) => Object.assign(new Error(message), { code }),
+    (value, max = 160) => String(value || "").length <= max &&
+      /^[A-Za-z0-9][A-Za-z0-9._:-]*$/.test(String(value || "")) ? String(value) : null,
+    (value) => {
+      try {
+        const url = new URL(String(value || ""));
+        return ["http:", "https:"].includes(url.protocol) ? url.href : null;
+      } catch (_) { return null; }
+    },
+    async (value) => {
+      const digest = await webcrypto.subtle.digest("SHA-256", new TextEncoder().encode(value));
+      return Array.from(new Uint8Array(digest), (byte) =>
+        byte.toString(16).padStart(2, "0")).join("");
+    },
+    768 * 1024,
+    256 * 1024,
+  );
+  assert.equal(
+    await helpers.sha256Hex("abc"),
+    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+  );
+  assert.equal(helpers.normalizeReadableText(" a\r\n\r\n\r\n b\u00a0 c "), "a\n\nb c");
+  const bounded = helpers.boundUtf8Text("你".repeat(100), 10);
+  assert.equal(new TextEncoder().encode(bounded.text).byteLength <= 10, true);
+  assert.equal(bounded.truncated, true);
+  const prepared = await helpers.prepareDocument({
+    url: "https://example.com/read#view",
+    title: "Example",
+    document: {
+      sourceInstanceId: "AAAAAAAAAAAAAAAAAAAAAA",
+      documentKey: "https://example.com/read",
+      text: "  first\r\n\r\n\r\nsecond  ",
+    },
+  });
+  assert.deepEqual(Object.keys(prepared), [
+    "contract", "sourceInstanceId", "documentKey", "url", "title",
+    "contentRevision", "text", "truncated", "observedAtEpochMs",
+  ]);
+  assert.equal(prepared.contract, "reader-document/1");
+  assert.equal(prepared.text, "first\n\nsecond");
+  assert.match(prepared.contentRevision, /^[0-9a-f]{64}$/);
+  await assert.rejects(
+    helpers.prepareDocument({
+      url: "https://example.com/long",
+      title: "x".repeat(2000) + "\u0000tail",
+      document: {
+        sourceInstanceId: "BBBBBBBBBBBBBBBBBBBBBB",
+        documentKey: "not-a-url",
+        text: "a".repeat(300000),
+      },
+    }),
+    /快照文字字段超限/,
+  );
+  const byteBound = await helpers.prepareDocument({
+    url: "https://example.com/cjk",
+    title: "CJK",
+    document: {
+      sourceInstanceId: "CCCCCCCCCCCCCCCCCCCCCC",
+      documentKey: "https://example.com/cjk",
+      text: "你".repeat(260000),
+    },
+  });
+  assert.ok(byteBound.text.length <= 256 * 1024);
+  assert.ok(new TextEncoder().encode(byteBound.text).byteLength <= 768 * 1024);
+  assert.equal(byteBound.truncated, false);
+  const viewport = helpers.prepareViewport({
+    url: "https://example.com/read#view",
+    title: "Example",
+    document: { sourceInstanceId: "AAAAAAAAAAAAAAAAAAAAAA", documentKey: "https://example.com/read" },
+    viewport: { beforeText: "before", visibleText: "current", afterText: "after", selection: "sel" },
+  });
+  assert.deepEqual(Object.keys(viewport), [
+    "contract", "sourceInstanceId", "documentKey", "url", "title",
+    "beforeText", "visibleText", "afterText", "selectionState", "selection",
+    "observedAtEpochMs",
+  ]);
+  assert.equal(viewport.contract, "reader-viewport/1");
+  assert.equal(viewport.visibleText, "current");
+  assert.equal(viewport.selectionState, "active");
+  const correlatedViewport = helpers.prepareViewport({
+    url: "https://example.com/read",
+    title: "Example",
+    document: { sourceInstanceId: "AAAAAAAAAAAAAAAAAAAAAA", documentKey: "https://example.com/read" },
+    viewport: {
+      beforeText: "before",
+      visibleText: "current",
+      afterText: "after",
+      selection: "",
+      controlCorrelation: "control-123",
+    },
+  });
+  assert.equal(correlatedViewport.controlCorrelation, "control-123");
+  assert.throws(
+    () => helpers.prepareViewport({
+      url: "https://example.com/read",
+      document: { sourceInstanceId: "AAAAAAAAAAAAAAAAAAAAAA", documentKey: "https://example.com/read" },
+      viewport: { visibleText: "current", controlCorrelation: "bad id" },
+    }),
+    /关联标识无效/,
+  );
+  const regions = helpers.prepareSelectionRegions({
+    selectionRegions: {
+      contract: "reader-selection-regions/1",
+      total: 2,
+      truncated: false,
+      items: [
+        { selectionId: "region-1", label: "#1 --:--", ordinal: 1, createdAtEpochMs: 0 },
+        { selectionId: "region-2", label: "#2 12:00", ordinal: 2, createdAtEpochMs: 1786000000000 },
+      ],
+    },
+  });
+  assert.equal(regions.items.length, 2);
+  assert.equal(regions.items[0].createdAtEpochMs, 0);
+  const drawingRevision = "dr_0123456789abcdef";
+  const visual = helpers.prepareWebVisual({
+    visual: {
+      page_image: null,
+      has_ink: true,
+      drawing: {
+        contract: "reader-outgoing-context/1",
+        file: "https://example.com/read",
+        page: 0,
+        freshness: "recent",
+        lastEditedAt: 1786000000,
+        freshWindowS: 30,
+        inProgress: false,
+        stable: true,
+        drawingRevision,
+        pendingSince: null,
+        ref: {
+          kind: "drawing",
+          file: "https://example.com/read",
+          page: 0,
+          revision: drawingRevision,
+        },
+        empty: false,
+      },
+    },
+  }, "https://example.com/read");
+  assert.equal(visual.drawing.drawingRevision, drawingRevision);
+  assert.throws(
+    () => helpers.prepareSelectionRegions({
+      selectionRegions: {
+        contract: "reader-selection-regions/1",
+        total: 3,
+        truncated: true,
+        items: [
+          { selectionId: "region-2", label: "#3 12:00", ordinal: 2, createdAtEpochMs: 1 },
+        ],
+      },
+    }),
+    /页面选区条目/,
+  );
+});
 
 test("电脑客户端保留原按钮与设置标签，App 与扩展按宿主分流", () => {
   assert.doesNotMatch(assistant, /value="computer_client"/);
@@ -468,43 +701,105 @@ test("App 原生语音与 Reader 上下文使用独立 WSS，语音启停不再�
 });
 
 test("扩展上下文按设置和前台状态独立运行，不随语音停止", () => {
-  for (const source of [callPage, contentScript]) {
-    assert.match(source, /bwReaderExtensionPreferencesV2/);
-    assert.match(source, /eph-ctx-sync/);
-    assert.match(source, /chrome\.storage\.onChanged/);
-    assert.match(source, /document\.visibilityState/);
-  }
-  assert.match(contentScript, /\["pageshow", "focus", "online"\]/);
-  assert.match(contentScript, /contentDigest\(snap\.text\)/);
-  assert.match(contentScript, /ACTIVE_CONTEXT_KEY = "bwActivePageContextV1"/);
+  assert.match(contentScript, /BW_READER_CONTEXT_POST/);
+  assert.match(contentScript, /boundRelayDocumentText[\s\S]*256 \* 1024[\s\S]*768 \* 1024/);
   assert.match(
     contentScript,
-    /extensionStore\.set\(ACTIVE_CONTEXT_KEY, envelope\)/,
+    /prepareRelaySnapshot\(snap\)[\s\S]*document\.hasFocus\(\)[\s\S]*runtimeRequest\(\{ type: "BW_READER_CONTEXT_POST", snapshot: relaySnap \}, 15000\)/,
   );
-  assert.match(contentScript, /extensionStore\.get\(PREFERENCE_KEY\)/);
-  assert.doesNotMatch(
+  assert.match(contentScript, /if \(preferenceKnown && !contextSyncEnabled\) return/);
+  assert.match(contentScript, /document\.visibilityState !== "visible"[\s\S]*document\.hasFocus\(\)/);
+  assert.match(contentScript, /activationRevision \+= 1/);
+  assert.match(contentScript, /\["pageshow", "focus", "resume"\]/);
+  assert.match(contentScript, /window\.addEventListener\("online"[\s\S]*refreshPreference\(true\)/);
+  assert.match(contentScript, /ACTIVE_CONTEXT_HEARTBEAT_MS/);
+  assert.match(
+    background,
+    /function readerContentSender\(sender\)[\s\S]*sender\.frameId !== 0[\s\S]*new URL\(senderUrl\)\.origin !== new URL\(tabUrl\)\.origin[\s\S]*return \{ tabId: sender\.tab\.id, url: tabUrl \}/,
+  );
+  assert.match(
     contentScript,
-    /Promise\.resolve\(chrome\.storage\.local\.get\(PREFERENCE_KEY\)\)/,
+    /function noteLocationChange\(reason\)[\s\S]*activationRevision \+= 1[\s\S]*schedule\(true\)[\s\S]*\["hashchange", "popstate"\][\s\S]*noteLocationChange\("poll"\)/,
   );
-  assert.match(background, /LOCAL_STORAGE_KEYS = new Set\(\[[\s\S]*"bwActivePageContextV1"/);
-  assert.match(callPage, /ACTIVE_CONTEXT_KEY = "bwActivePageContextV1"/);
-  assert.match(callPage, /function storedPage\(value\)/);
-  assert.match(callPage, /changes\[ACTIVE_CONTEXT_KEY\][\s\S]*forward\(page, true\)/);
-  const forwardStart = callPage.indexOf("async function forward(page, force)");
-  const forwardEnd = callPage.indexOf("function storedPage", forwardStart);
-  const forwardBody = callPage.slice(forwardStart, forwardEnd);
-  assert.ok(
-    forwardBody.indexOf("await current.send(page)") <
-      forwardBody.indexOf("lastSignature = signature"),
-    "page deduplication may advance only after Windows accepts the snapshot",
+  assert.match(
+    background,
+    /async function readerPrepareSnapshot\(message, sender\)[\s\S]*readerContentSender\(sender\)[\s\S]*page\.url !== binding\.url/,
   );
-  assert.match(callPage, /function closeContextLink\(\)/);
-  assert.match(callPage, /if \(!EMBEDDED\) closeWhenDone/);
-  const closeWhenDone = callPage.slice(
-    callPage.indexOf("function closeWhenDone"),
-    callPage.indexOf("// --- embedded form", callPage.indexOf("function closeWhenDone")),
+  assert.match(
+    background,
+    /async function readerPostSnapshot\(prepared\)[\s\S]*fetch\(READER_CONTEXT_POST_URL[\s\S]*X-BW-Snapshot-Revision[\s\S]*readerPersistVisualBinding\(binding\.tabId, visualContext\)/,
   );
-  assert.doesNotMatch(closeWhenDone, /closeContextLink|link\.close/);
+  assert.match(background, /documentSignature =[\s\S]*page\.document\.activationRevision/);
+  assert.match(background, /function readerStorageGet\(key\)[\s\S]*settled[\s\S]*storage\.local\.get\(key, done\)[\s\S]*returned\.then/);
+  assert.match(background, /function readerStorageSet\(value\)[\s\S]*settled[\s\S]*storage\.local\.set\(value, done\)[\s\S]*returned\.then/);
+});
+
+test("普通网页上下文经后台一次 POST，通话页只认领同标签视觉能力", () => {
+  assert.match(
+    contentScript,
+    /prepareRelaySnapshot\(snap\)[\s\S]*runtimeRequest\(\{ type: "BW_READER_CONTEXT_POST", snapshot: relaySnap \}, 15000\)/,
+  );
+  assert.match(
+    background,
+    /message\.type === "BW_READER_CONTEXT_POST"[\s\S]*readerPrepareSnapshot\(message, sender\)[\s\S]*readerPostSnapshot\(prepared\)/,
+  );
+  assert.match(
+    background,
+    /fetch\(READER_CONTEXT_POST_URL, \{[\s\S]*method: "POST"[\s\S]*"Content-Type": "application\/json"/,
+  );
+  assert.doesNotMatch(callPage, /fetch\(READER_CONTEXT_POST_URL/);
+  assert.doesNotMatch(contentScript, /bw-page-context\/1/);
+
+  assert.match(contentScript, /BW_READER_CALL_CLAIM_CREATE[\s\S]*bw-reader-call-claim\/1/);
+  assert.match(callPage, /BW_READER_CALL_CLAIM_BIND[\s\S]*BW_READER_VISUAL_CONTEXT_GET/);
+  assert.match(background, /readerPendingCallClaims[\s\S]*readerBoundCallFrames/);
+  assert.match(
+    background,
+    /message\.type === "BW_READER_CALL_CLAIM_BIND"[\s\S]*readerPendingCallClaims\.delete\(binding\.tabId\)[\s\S]*readerBoundCallFrames\.set\(binding\.tabId/,
+  );
+  assert.match(contentScript, /window\.setInterval\(function \(\) \{[\s\S]*claimCallFrame\(\);[\s\S]*15000/);
+  assert.match(background, /READER_CONTEXT_VISUAL_KEY = "bwReaderVisualBindingsV1"/);
+  assert.match(
+    background,
+    /async function readerStoredVisualBinding\(tabId, expectedUrl, expectedSourceInstanceId\)[\s\S]*raw\[String\(tabId\)\][\s\S]*identity\.file === expectedUrl[\s\S]*identity\.sourceInstanceId === expectedSourceInstanceId/,
+  );
+  assert.match(
+    background,
+    /async function readerPersistVisualBinding\(tabId, visualContext\)[\s\S]*next\[String\(tabId\)\] = visualContext/,
+  );
+
+  const postStart = background.indexOf("async function readerPostSnapshot(prepared)");
+  const postEnd = background.indexOf("function readerTabsMessage", postStart);
+  const postBody = background.slice(postStart, postEnd);
+  assert.match(
+    postBody,
+    /const body = \{[\s\S]*viewport,[\s\S]*active:[\s\S]*if \(prior\.documentSignature !== documentSignature\) body\.document = documentPayload/,
+  );
+  assert.match(
+    postBody,
+    /page_context: \{[\s\S]*text: viewport\.visibleText[\s\S]*text_source: "extension-viewport"/,
+    "the live snapshot must use viewport text rather than document.text",
+  );
+  assert.doesNotMatch(
+    postBody,
+    /page_context:\s*\{[\s\S]*documentPayload\.text/,
+    "full document text must remain outside currentPage.text",
+  );
+  assert.match(
+    postBody,
+    /X-BW-Snapshot-Revision[\s\S]*visualContext = \{[\s\S]*snapshotRevision,[\s\S]*readerPersistVisualBinding\(binding\.tabId, visualContext\)/,
+    "visual capture must bind to the exact snapshot revision returned by Windows",
+  );
+  assert.match(
+    postBody,
+    /bodySignature =[\s\S]*visual\.drawing\?\.drawingRevision/,
+    "an ink-only change must force a page.context visual update",
+  );
+  assert.match(
+    postBody,
+    /documentSignature =[\s\S]*page\.document\.activationRevision/,
+    "returning A after B must reattach A's full document corpus",
+  );
 });
 
 test("App 电脑按钮兼容缓存的一字段 Codex 消息，版本号取自安装包", () => {

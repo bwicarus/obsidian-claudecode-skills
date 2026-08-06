@@ -66,6 +66,9 @@ function harness({
     querySelector(selector) {
       return elements.get(selector) || null;
     },
+    getElementById(id) {
+      return elements.get(`#${id}`) || null;
+    },
     createElement(tagName) {
       return element(String(tagName || "").toLowerCase());
     },
@@ -108,8 +111,16 @@ function harness({
   return { elements, messages, tabQueries };
 }
 
-test("popup 不直接接触 chrome.storage，只调用后台账户 status/save/test", () => {
-  assert.equal(SOURCE.includes("chrome.storage"), false);
+test("popup 账户逻辑不读 storage，只有通话上下文暂存可写入", () => {
+  const voiceEntryOffset = SOURCE.indexOf("// Both one-off probes");
+  assert.ok(voiceEntryOffset > 0);
+  assert.equal(SOURCE.slice(0, voiceEntryOffset).includes("chrome.storage"), false);
+  assert.equal(SOURCE.includes("chrome.storage.local.get"), false);
+  assert.equal(
+    (SOURCE.match(/chrome\.storage\.local\.set/g) || []).length,
+    1,
+  );
+  assert.equal(SOURCE.includes("bwCallContext"), true);
   assert.equal(SOURCE.includes("apiToken"), false);
   for (const type of [
     "BW_ACCOUNT_STATUS",

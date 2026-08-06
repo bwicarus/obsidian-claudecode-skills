@@ -53,7 +53,8 @@ contextDeliveryMode
 
 - `listenHost` 必须逐字等于 `127.0.0.1`；
 - `experimentalSingleUserMode` 当前必须为 `true`；`false` 直接 fail closed；
-- `outputScope` 只能为 `process-only`，`appKind` 只能为 `codex-desktop`；
+- `outputScope` 只能为 `process-only`；`appKind` 只接受固定白名单
+  `codex-desktop` / `chatgpt-classic`，Reader 每次 START 可明确携带本次目标；
 - `contextDeliveryMode` 只能为 `legacy-inject` 或 `snapshot-mcp`，两条末端不同时运行；
 - `/5` 的 A/B `virtual*RenderEndpointId` 必须是明确的 eRender MMDevice ID，
   `virtualMicrophoneCaptureEndpointId` 必须另行明确配置为 A 的 eCapture MMDevice ID；
@@ -87,33 +88,34 @@ background 的固定 relay，不能把 URL、设备 ID、AUMID、进程、路径
 所有文本消息使用 `reader-computer-voice-direct/1`：
 
 ```json
-{"contract":"reader-computer-voice-direct/1","type":"hello|status|context-mode|context-mode-set|context-open|start|heartbeat|context|active-reading|context-clear|stop","requestId":"..."}
+{"contract":"reader-computer-voice-direct/1","type":"hello|status|context-mode|context-open|start|heartbeat|context|active-reading|context-clear|stop","requestId":"..."}
 ```
 
 - 新连接先发严格 `hello`，`protocolVersion` 必须为 `3`；成功后进入等待 START。
 - `context-mode` 只读返回该连接在 HELLO 时锁定的模式。`snapshot-mcp` 可用
-- `context-mode-set` 仅允许在未启动通话的已认证连接上切换两种模式；
-  从 `snapshot-mcp` 切回旧注入时，Windows 必须先清空本地快照，再原子写配置。
   `context-open` 建立无 START、无应用/采音/快捷键副作用的纯上下文连接；此阶段没有
   30 秒 START deadline。
 - `status`、模型选择和刷新无副作用。
-- START 的 `sessionId` 为 `session-` 加 16 随机字节的 22 位无 padding base64url。
+- START 的 `sessionId` 为 `session-` 加 16 随机字节的 22 位无 padding base64url；
+  可选 `appKind` 选择 `codex-desktop` 或 `chatgpt-classic`，省略时保持 Codex。
 - `legacy-inject` 的 START 顺序为：
   `localOptIn → A/B endpoint probe → ensure app → wait unique ready →
   validate A capture → attach B route observer →
   recover/acquire exact six-role app routes →
   validate local realtimeVoice binding → start typist →
-  start A render → start process-loopback → revalidate endpoint/media/binding →
-  global shortcut → commit/pump`。
+  start A render → start configured output capture（`/6` 为显式 B capture，旧合同才走
+  process-loopback）→ revalidate endpoint/media/binding →
+  target voice control → commit/pump`。
   每个副作用前都有取消围栏；B route observer 只观察公开 Core Audio session，
   与负责六项持久应用端点的事务对象分离，且“尚未观察到”不会阻止首次 START。
-- `snapshot-mcp` 使用同一条已验收音频顺序，但明确跳过 `start typist`；
-  `context` 与 `active-reading` 原子写
+- `snapshot-mcp` 对两个应用目标都明确跳过 `start typist`，与旧版文字注入保持互斥；
+  GPT Classic 需要文字接力时必须显式切到 `legacy-inject`。在快照模式中，
+  `context` 与 `active-reading` 只原子写
   `runtime/reader-context-snapshot.json`，不调用 named pipe。
 - 关闭同步或切回 `legacy-inject` 时先发 `context-clear`；它只清掉本地页面/选区，
   不启动或停止应用、音频、快捷键和 typist。
 - 当前 Codex 把 `realtimeVoice` 注册为 `os-global`；桥只接受当前用户
-  `~/.codex/keybindings.json` 中唯一的 `Ctrl+Shift+C` 绑定，且不切换、置顶或校验
+  `~/.codex/keybindings.json` 中唯一的 `F24` 绑定，且不切换、置顶或校验
   Codex 前台窗口。动态 Electron 子进程增减不改变固定 packaged-app root 的身份；
   root 变化仍在发送前 fail closed。
 - `SendInput` 使用完整的 Win32 `INPUT` union（mouse/keyboard/hardware），自测按当前
@@ -128,81 +130,39 @@ background 的固定 relay，不能把 URL、设备 ID、AUMID、进程、路径
   才形成 stop lease；原本已运行或竞态启动的 typist 不归本次会话停止。
 - `/5` 的路由 lease 在两条音频 session 停止并释放后逆序恢复六项；每项只有在
   当前值仍等于本桥目标时才写回快照值，用户或其他程序期间做出的外部改动保持不动。
-  原值为 unset 时只删除该应用该角色的 exact pair，绝不调用全局 ClearAll。
-- 无活动音频 session 时，内部 AudioPolicyConfig 的 PID 接口会返回
-  `0x80070057`，因此它不作为 `/5` 的持久路由真值。桥用
-  `GetApplicationUserModelId` 取得稳定 AUMID，再在当前用户
-  `Multimedia\Audio\DefaultEndpoint` 中按默认值唯一匹配应用键；每个角色同时验证和写入
-  endpoint 主值与 `_p` property-set ID，后者只从对应 MMDevice 的只读属性取得。
-  Windows“重置声音设备和音量”后应用键可能完全不存在：此时六路快照明确视为
-  `unset`，首个已写事务日志的写操作才按 Windows 已观察到的 32 位 `hash * 33 + UTF-16`
-  身份键规则创建 AUMID 键并读回确认；恢复 `unset` 时只删除六组 endpoint pair，保留
-  仅含 AUMID 的空身份键供下一次使用和音量合成器识别。这个键名算法是本机实测兼容实现，
-  不是 Microsoft 公布的稳定合同；已有键仍一律以默认 AUMID 为权威，重复身份、值类型或
-  pair 不一致、设备属性缺失均在发快捷键前 fail closed。
+  原值为 unset 时通过 null HSTRING 精确恢复，绝不调用全局 ClearAll。
 - bridge-owned typist 同时获得 bridge 进程的 exact PID + process-start FILETIME，
   运行时持续核对 owner 代次；C# 整体崩溃、PID 消失或复用时 typist 自退。managed
   模式不使用 10 分钟 idle 误杀，手工无 owner 启动仍保留 600 秒孤儿兜底。
 - 服务不读取 Codex 蓝色 Voice 球或其他 UI 状态；它只读
-  `CapabilityAccessManager\ConsentStore\microphone` 中 Codex 包的 capability-use
+  `CapabilityAccessManager\ConsentStore\microphone` 中当前目标包的 capability-use
   起止时间戳，把它作为“该包正在使用麦克风”的代理信号。这个注册表信号不是 Codex
   官方 Voice/蓝球 API，也不证明具体 UI 形态。
 - START 以该代理信号确认新 Voice generation，并持续监听本地关闭或 generation
   替换。STOP 只会在 Voice 仍属桥接器开启的同一 generation、且 Codex 根进程代次仍
   相同时发送一次关闭快捷键；预先存在、已经关闭或被新 generation 替换的 Voice
   一律不切换。
+- GPT Classic 不复用 Codex 全局快捷键；桥只在已校验的唯一 GPT Classic 进程树窗口内，
+  通过 UI Automation 调用唯一可见、可用的“启动语音功能”或“结束语音功能”按钮，
+  并使用该包自己的麦克风 capability-use 时间戳确认启停。
 
 ## Windows 本地快照 MCP
 
-`--direct-serve` 在现有 `127.0.0.1:43128` 监听器内同时提供
-Streamable HTTP MCP：
-
-```toml
-[mcp_servers.reader_snapshot]
-url = "http://127.0.0.1:43128/mcp"
-```
-
-它与 WSS、快照查看器共用同一个常驻 EXE 和同一个 MCP instance；Codex 会话只作为
-HTTP 客户端连接，不再为每个会话拉起一个快照 MCP 子进程。`GET /healthz` 的
-`readerContextMcp` 只报告 path 与 instanceId，便于检查实例是否发生替换。
-
-为回滚和隔离诊断，EXE 仍保留零额外运行时依赖的 stdio 入口：
+同一自包含 EXE 提供零额外运行时依赖的 stdio MCP：
 
 ```powershell
 .\bw-computer-voice-audio.exe --reader-context-mcp --state `
   C:\Users\bwica\bw-computer-voice-bridge\runtime\reader-context-snapshot.json
 ```
 
-stdio 回滚入口只注册 `reader_context_snapshot`，不接受 mutation，也没有可复用的 WSS
-视觉 Broker。常驻 HTTP MCP 的快照工具只返回一份模型可见 Markdown：按位置、选区、正文、
-显式焦点、附属内容和笔迹顺序预处理，不返回内部 JSON；诊断计数仅放结果 `_meta`。普通页文/
-选区读取不会截图。当前页有笔迹时，笔迹段直接写明无参只读
-`reader_drawing_image`；若稳定版本仍在约 1 秒确认窗口内，工具会有界等待后再复用现有 Reader
-合成 JPEG。收图前后仍校验 file/page/revision/ref，变化即丢弃；成功后常驻 MCP 记住已看过的
-当前笔迹，使未变化旧笔迹不再抢占模糊指代。绘图年龄用同一 PWA 事件内部的相对时间建立接收时
-年龄，再叠加 Windows 本地接收时钟，不直接比较两台设备的墙上时钟。
-
-服务进程在同一 MCP 连接中保持 instance/call sequence，逐次读取原子快照；最新文件损坏时
-保留上一次有效 revision。`active-reading` 超过三分钟则返回 `contextStatus=stale`，正文与
-选区不会作为当前内容返回。选区状态严格区分 `active`、`cleared`、`unknown`，取消选择或换页
-时不会沿用旧文本；新鲜度使用 Windows 收到心跳的时间，不信任 iPad 的墙上时钟。
-
-`snapshot-mcp` 收到 PDF 的 `active-reading` 后，会按 Reader 的 1-based 页码从
-Windows 本地书库只读提取正文并在同一次原子快照更新中标为 ready；默认书库根为
-`C:\obsidian`，默认解释器为当前用户的
-`AppData\Local\Programs\Python\Python313\python.exe`。需要改位置时只给服务进程设置
-`BW_READER_LIBRARY_ROOT` / `BW_READER_PYTHON`；Reader 传入的 file 必须是书库根下相对
-PDF 路径，绝对路径、`..`、reparse point/symlink 一律拒绝。提取固定使用
-`python -I` + PyMuPDF，内存缓存键包含规范路径、文件长度、UTC mtime 与页码；失败时
-当前页保持 pending/空正文并带明确 fallbackReason，不沿用旧页正文。
+它只注册 `reader_context_snapshot`，不接受 mutation。服务进程在同一 MCP
+连接中保持 instance/call sequence，逐次读取原子快照；最新文件损坏时保留上一次有效
+revision。`active-reading` 超过三分钟则返回 `contextStatus=stale`，正文与选区不会作为
+当前内容返回。选区状态严格区分 `active`、`cleared`、`unknown`，取消选择或换页时不会
+沿用旧文本；新鲜度使用 Windows 收到心跳的时间，不信任 iPad 的墙上时钟。
 
 START 期间始终只有一个并发 `ReceiveAsync`。peer 在 START 回执前关闭会取消应用等待和
 媒体链；若预取到一条非 close 消息，只做单条有界缓存，START 结算后按原顺序处理。
-Voice generation 的 Windows 账本确认最长允许 5 秒；回执前下行 PCM 因此使用独立的
-6 秒有界 bootstrap 缓冲，不能误用浏览器对外公布的 400 ms 实时播放窗口。回执发送后
-浏览器仍只保留 400 ms 播放 horizon。若 pump、render 或 Voice monitor 在 START 返回前
-终止，coordinator 必须先保留并返回首个 terminal code，再做完整 owned-resource teardown；
-不得用 `MEDIA_START_UNCONFIRMED` 覆盖可诊断的真实错误。
 
 ## 浏览器麦克风上行
 
@@ -220,11 +180,8 @@ Voice generation 的 Windows 账本确认最长允许 5 秒；回执前下行 PC
 | 36 | 1920 | 960 个 48 kHz mono signed-16 little-endian 样本 |
 
 `VirtualMicrophoneRenderSession` 在专用 MTA 线程以 shared/event-driven 模式打开 A
-render endpoint；`Start` 前先向 WASAPI 初始缓冲提交确定性静音，首个事件丢失时同一
-线程最多等待 100 ms 后主动推进一次。队列硬上限 200 ms，欠载写确定性静音。网络或
-调度短突发导致队列满时丢弃最旧帧并保留最新语音，不累积过期延迟，也不因此结束整通
-电话；帧格式、时间戳/sequence/session 错配或 native 端点失败仍 fail closed。START
-在 A 成功打开前不得发送快捷键。
+render endpoint；队列上限 200 ms，欠载写确定性静音，溢出、时间戳/sequence/session
+错配或 native backpressure 均 fail closed。START 在 A 成功打开前不得发送快捷键。
 
 下行 process-loopback 只捕获目标进程及子进程，不读系统混音。`/5` 在快捷键前把精确
 Codex root PID 的 eRender 三种 role 指向 B、eCapture 三种 role 指向 A 的录音侧；

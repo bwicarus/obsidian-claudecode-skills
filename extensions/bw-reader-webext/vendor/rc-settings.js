@@ -73,6 +73,7 @@ if (window.__bwPwaProviderOnly) return;
   var mask = null, modal = null;
   var _syncPollTimer = 0;
   var _syncRequestGeneration = 0;
+  var _nativeNotesRequestGeneration = 0;
   var _host = '';                                                   // '' = EPUB/HTML(内部实现);'pdf' = host-bind 原生
   var _ids = { mask: 'ep-settings-mask', langChecks: 'eph-lang-checks' };
   var _tabKey = LS.tab;
@@ -250,6 +251,7 @@ if (window.__bwPwaProviderOnly) return;
   var NOTE_OP_KEY = 'rc-note-opacity', NOTE_AC_KEY = 'rc-note-autocontrast';   // 与 rc-stickynote.js 读取端一致
   var NOTE_LP_KEY = 'rc-note-longpress';   // 长按进入编辑时长(毫秒;rc-stickynote.lpMs 读,钳 200–800 缺省 350)
   var NOTE_BLUR_KEY = 'rc-note-blur';      // 磨砂强度(blur px;rc-stickynote.noteBlur 读,钳 0–24 缺省 10)
+  var INK_DOUBLE_TAP_KEY = 'rc-ink-double-tap-action';
   function _fillNotePane() {
     var op = $('rcset-note-op'), ov = $('rcset-note-op-val'), ac = $('rcset-note-autoc');
     if (!op) return;
@@ -275,6 +277,11 @@ if (window.__bwPwaProviderOnly) return;
       bl.value = px;
       if (bv) bv.textContent = px;
     }
+    var dt = $('rcset-ink-double-tap');
+    if (dt) {
+      var action = lsGet(INK_DOUBLE_TAP_KEY) || 'eraser';
+      dt.value = /^(eraser|selection|none)$/.test(action) ? action : 'eraser';
+    }
   }
   function _saveNotePane() {
     var op = $('rcset-note-op'), ac = $('rcset-note-autoc');
@@ -295,8 +302,168 @@ if (window.__bwPwaProviderOnly) return;
       if (isNaN(px)) px = 10;
       lsSet(NOTE_BLUR_KEY, String(Math.max(0, Math.min(24, px))));   // 下面 refreshStyle 里 applyColor 会重设 blur
     }
+    var dt = $('rcset-ink-double-tap');
+    if (dt) {
+      var action = /^(eraser|selection|none)$/.test(dt.value) ? dt.value : 'eraser';
+      lsSet(INK_DOUBLE_TAP_KEY, action);
+    }
     // 即时应用到所有已挂载便签(rc-stickynote 未加载的页面(如 HTML 阅读器)只落盘,下次进书生效)
     try { if (window.RC && RC.stickynote && RC.stickynote.refreshStyle) RC.stickynote.refreshStyle(); } catch (_) {}
+  }
+
+  // ── BWReader App / Safari 扩展共享 Markdown 笔记，不接入书内便签 repository / anchor。──
+  // facade 在扩展隔离世界安装 __bwNativeAppDataBridge；普通 PWA 没有桥时明确显示不可用并保留重试。
+  function _nativeNotesBridge() {
+    var bridge = window.__bwNativeAppDataBridge;
+    if (!bridge || typeof bridge.status !== 'function' ||
+        typeof bridge.listNotes !== 'function' || typeof bridge.readNote !== 'function') return null;
+    return bridge;
+  }
+  function _nativeNotesSafeText(value, max) {
+    return String(value == null ? '' : value)
+      .replace(/[\u0000-\u001f\u007f]/g, ' ')
+      .trim()
+      .slice(0, max || 240);
+  }
+  function _setNativeNotesStatus(message, error) {
+    var el = $('rcset-native-notes-status'); if (!el) return;
+    el.textContent = String(message || '');
+    el.style.color = error ? '#f0a0a0' : '#aebbd0';
+  }
+  function _nativeNotesStorageText(storage, loadedCount) {
+    storage = storage && typeof storage === 'object' ? storage : {};
+    var count = loadedCount == null
+      ? Math.max(0, Number(storage.count) || 0)
+      : Math.max(0, Number(loadedCount) || 0);
+    var folder = _nativeNotesSafeText(storage.folderName, 120);
+    var pending = Math.max(0, Number(storage.pendingCount) || 0);
+    if (!storage.configured) {
+      return 'BWReader App 尚未选择 Obsidian Vault 文件夹。请先在 App 中配置，然后点“查看 / 刷新”。';
+    }
+    if (!storage.enabled) {
+      return 'BWReader App 本机笔记线路已关闭' +
+        (folder ? '（' + folder + '）' : '') + '；扩展继续使用原有 Pi 线路，并可查看已索引的 ' + count + ' 条历史笔记。';
+    }
+    if (!count) {
+      return '已连接' + (folder ? '“' + folder + '”' : '本机 Vault') + '，目前没有 App 本机 Markdown 笔记。';
+    }
+    return '已连接' + (folder ? '“' + folder + '”' : '本机 Vault') + '，App 与扩展共享 ' + count + ' 条笔记' +
+      (pending ? '，其中 ' + pending + ' 条等待 App 写入 Vault。' : '。');
+  }
+  function _nativeNotesFailure(prefix, error) {
+    var message = _nativeNotesSafeText(error && error.message, 180) || 'BWReader App 本机数据暂时不可用';
+    _setNativeNotesStatus(prefix + '：' + message + '。可点“查看 / 刷新”重试。', true);
+  }
+  function _clearNativeNotesResult() {
+    var list = $('rcset-native-notes-list'); if (list) list.replaceChildren();
+    var detail = $('rcset-native-notes-detail'); if (detail) detail.style.display = 'none';
+    var title = $('rcset-native-notes-title'); if (title) title.textContent = '';
+    var meta = $('rcset-native-notes-meta'); if (meta) meta.textContent = '';
+    var body = $('rcset-native-notes-body'); if (body) body.textContent = '';
+  }
+  function _nativeNoteDate(value) {
+    try {
+      var date = new Date(Number(value));
+      return isNaN(date.getTime()) ? '' : date.toLocaleString();
+    } catch (_) { return ''; }
+  }
+  function _readNativeNote(noteId) {
+    var bridge = _nativeNotesBridge();
+    var generation = ++_nativeNotesRequestGeneration;
+    if (!bridge) {
+      _setNativeNotesStatus('当前页面没有 BWReader App 原生桥；请在已启用 BW 网页伴读的 iPhone / iPad Safari 页面重试。', true);
+      return;
+    }
+    _setNativeNotesStatus('正在读取本机笔记正文……', false);
+    Promise.resolve().then(function () { return bridge.readNote(noteId); }).then(function (result) {
+      if (generation !== _nativeNotesRequestGeneration) return;
+      var note = result && result.note;
+      if (!note || typeof note.content !== 'string') throw new Error('BWReader App 返回的笔记正文无效');
+      var detail = $('rcset-native-notes-detail');
+      var title = $('rcset-native-notes-title');
+      var meta = $('rcset-native-notes-meta');
+      var body = $('rcset-native-notes-body');
+      if (!detail || !title || !meta || !body) return;
+      title.textContent = String(note.title || note.fileName || '未命名笔记');
+      var source = String(note.sourceFile || '');
+      if (source && Number(note.sourcePage) > 0) source += ' · 第 ' + Number(note.sourcePage) + ' 页';
+      meta.textContent = [String(note.fileName || ''), source, _nativeNoteDate(note.createdAt)]
+        .filter(Boolean).join(' · ');
+      // 本机 Markdown 永远按纯文本显示；不得用 innerHTML / Markdown HTML renderer。
+      body.textContent = note.content + (note.contentTruncated ? '\n\n（内容投影已截断）' : '');
+      detail.style.display = '';
+      _setNativeNotesStatus('已打开“' + _nativeNotesSafeText(note.title || note.fileName || '未命名笔记', 120) + '”。', false);
+    }).catch(function (error) {
+      if (generation !== _nativeNotesRequestGeneration) return;
+      _nativeNotesFailure('读取正文失败', error);
+    });
+  }
+  function _renderNativeNotesList(result) {
+    var list = $('rcset-native-notes-list'); if (!list) return;
+    list.replaceChildren();
+    var notes = result && Array.isArray(result.notes) ? result.notes : [];
+    _setNativeNotesStatus(_nativeNotesStorageText(result && result.storage), false);
+    notes.forEach(function (note) {
+      var row = document.createElement('button');
+      row.type = 'button';
+      row.className = 'rcset-native-note-row';
+      row.style.cssText = 'display:block;width:100%;text-align:left;background:#0d1322;border:1px solid #2a3550;color:#cfe6ff;border-radius:6px;padding:8px 10px;margin:6px 0;cursor:pointer';
+      var head = document.createElement('b');
+      head.style.cssText = 'display:block;font-size:12px;overflow-wrap:anywhere';
+      head.textContent = String(note.title || note.fileName || '未命名笔记') +
+        (note.pendingExport ? '（等待写入）' : '');
+      var meta = document.createElement('small');
+      meta.style.cssText = 'display:block;color:#8fa5c8;font-size:10px;margin-top:3px;overflow-wrap:anywhere';
+      meta.textContent = [String(note.fileName || ''), _nativeNoteDate(note.createdAt)].filter(Boolean).join(' · ');
+      var preview = document.createElement('span');
+      preview.style.cssText = 'display:block;color:#aebbd0;font-size:11px;line-height:1.45;margin-top:4px;white-space:pre-wrap;overflow-wrap:anywhere';
+      preview.textContent = String(note.preview || '').slice(0, 240);
+      row.appendChild(head); row.appendChild(meta); row.appendChild(preview);
+      row.addEventListener('click', function () { _readNativeNote(note.id); });
+      list.appendChild(row);
+    });
+  }
+  function _loadNativeNotes() {
+    var bridge = _nativeNotesBridge();
+    var button = $('rcset-native-notes-refresh');
+    var generation = ++_nativeNotesRequestGeneration;
+    _clearNativeNotesResult();
+    if (!bridge) {
+      if (button) button.disabled = false;
+      _setNativeNotesStatus('当前页面没有 BWReader App 原生桥；请在已启用 BW 网页伴读的 iPhone / iPad Safari 页面重试。', true);
+      return;
+    }
+    if (button) button.disabled = true;
+    _setNativeNotesStatus('正在读取 App 本机笔记列表……', false);
+    Promise.resolve().then(function () { return bridge.listNotes(); }).then(function (result) {
+      if (generation !== _nativeNotesRequestGeneration) return;
+      _renderNativeNotesList(result || {});
+    }).catch(function (error) {
+      if (generation !== _nativeNotesRequestGeneration) return;
+      _nativeNotesFailure('读取列表失败', error);
+    }).then(function () {
+      if (generation === _nativeNotesRequestGeneration && button) button.disabled = false;
+    });
+  }
+  function _fillNativeNotesPane() {
+    var button = $('rcset-native-notes-refresh');
+    var generation = ++_nativeNotesRequestGeneration;
+    _clearNativeNotesResult();
+    if (button) button.disabled = false;
+    if (_host !== 'web') return;
+    var bridge = _nativeNotesBridge();
+    if (!bridge) {
+      _setNativeNotesStatus('当前页面没有 BWReader App 原生桥；请在已启用 BW 网页伴读的 iPhone / iPad Safari 页面重试。', true);
+      return;
+    }
+    _setNativeNotesStatus('正在读取 BWReader App 本机笔记状态……', false);
+    Promise.resolve().then(function () { return bridge.status(); }).then(function (result) {
+      if (generation !== _nativeNotesRequestGeneration) return;
+      _setNativeNotesStatus(_nativeNotesStorageText(result && result.storage), false);
+    }).catch(function (error) {
+      if (generation !== _nativeNotesRequestGeneration) return;
+      _nativeNotesFailure('读取状态失败', error);
+    });
   }
 
   // ── 网页翻译 tab 回填/保存(host 无关;非 web host 时 web-* 控件不存在自动跳过。键均与 web-immersive 同源)──
@@ -738,8 +905,29 @@ if (window.__bwPwaProviderOnly) return;
         '<label class="ep-set-chk"><input type="checkbox" id="rcset-note-autoc"> 文字 / 手写笔自动对比色</label>' +
         '<div class="ep-set-note">开：按便签底色深浅自动选前景色——浅色便签配深字深笔，深色便签（石墨/墨绿）配浅字浅笔；<b>已画的笔迹不改色</b>，只影响文字显示和新笔画。关：固定深色文字＋红笔。</div>' +
         '<hr class="ep-set-hr">' +
+        '<label style="' + LBL + '">👆 触屏双击动作</label>' +
+        '<select id="rcset-ink-double-tap" style="' + SEL + '">' +
+          '<option value="eraser">切换画笔与临时橡皮</option>' +
+          '<option value="selection">切换画笔与选区笔</option>' +
+          '<option value="none">不执行操作</option>' +
+        '</select>' +
+        '<div class="ep-set-note">Apple Pencil 笔身双击由 App 上方的 Apple Pencil 设置单独控制；这里控制触屏连续双击。</div>' +
+        '<hr class="ep-set-hr">' +
         '<div class="ep-set-slrow"><span>长按进入编辑 <small id="rcset-note-lp-val">350</small> ms</span><input type="range" id="rcset-note-lp" min="200" max="800" step="50" value="350"></div>' +
         '<div class="ep-set-note" style="margin:-2px 0 0">按住便签（任意部分）多久进入编辑模式（移动 / 缩放 / 换色 / 删除）。越短越灵敏，太短容易误触。保存后下次长按生效。</div>' +
+        '<div data-sec="native-app-notes" style="display:none">' +
+          '<hr class="ep-set-hr">' +
+          '<label style="' + LBL + '">📚 App / 扩展共享 Markdown 笔记</label>' +
+          '<div class="ep-set-note" style="margin:-2px 0 8px">开启本机线路后，网页扩展与 App 都能创建、查看和读取笔记；扩展创建的内容先进入共享队列，再由 App 自动写入 Obsidian。关闭时保留原有 Pi 线路。</div>' +
+          '<div id="rcset-native-notes-status" role="status" aria-live="polite" style="font-size:11px;color:#aebbd0;line-height:1.55;white-space:pre-wrap;margin-bottom:8px">尚未读取</div>' +
+          '<button id="rcset-native-notes-refresh" type="button" style="width:100%;background:#1a2540;border:1px solid #3b6db5;color:#9fcbff;border-radius:6px;padding:8px;font-size:12px;cursor:pointer">查看 / 刷新</button>' +
+          '<div id="rcset-native-notes-list" style="margin-top:8px"></div>' +
+          '<div id="rcset-native-notes-detail" style="display:none;background:#0d1322;border:1px solid #2a3550;border-radius:7px;padding:10px;margin-top:10px">' +
+            '<div id="rcset-native-notes-title" style="font-size:13px;color:#cfe6ff;font-weight:600;overflow-wrap:anywhere"></div>' +
+            '<div id="rcset-native-notes-meta" style="font-size:10px;color:#8fa5c8;line-height:1.45;margin:4px 0 8px;overflow-wrap:anywhere"></div>' +
+            '<pre id="rcset-native-notes-body" style="margin:0;white-space:pre-wrap;overflow-wrap:anywhere;user-select:text;-webkit-user-select:text;color:#dbe7f7;font:12px/1.6 ui-monospace,SFMono-Regular,Menlo,monospace"></pre>' +
+          '</div>' +
+        '</div>' +
       '</div>';
 
     // 网页翻译 tab（仅 host:'web' 显示，gateSections 门控 data-sec="web-tab"）。收纳纯网页翻译设置，
@@ -906,6 +1094,8 @@ if (window.__bwPwaProviderOnly) return;
     if (_nbl) _nbl.addEventListener('input', function () {
       var v = $('rcset-note-blur-val'); if (v) v.textContent = this.value;
     });
+    var _nativeNotesRefresh = $('rcset-native-notes-refresh');
+    if (_nativeNotesRefresh) _nativeNotesRefresh.addEventListener('click', _loadNativeNotes);
 
     // 语言「保存」:PDF=原生 saveLangPicker(读 #lang-checks);EPUB=onSaveLangs(epub 版 saveLangPicker 读 #eph-lang-checks)
     $('rcset-lang-save').addEventListener('click', function () {
@@ -948,6 +1138,7 @@ if (window.__bwPwaProviderOnly) return;
     _show('read-vocab', !web);   // 生词下划线/点词翻译:web host 挪到网页 tab,EPUB/HTML 留阅读 tab
     _show('grammar-tab', !web);  // web host:语法(显示方式+KG 列表)并入网页 tab,隐藏独立语法 tab;PDF/EPUB/HTML 保留
     _show('pwa-sync', !!_pwaSyncControl());
+    _show('native-app-notes', web);   // 只在扩展自己的 host:'web' 设置里展示；书内便签设置不混入 App 笔记
   }
 
   // ── tab 切换 + 记忆 ──
@@ -1190,6 +1381,7 @@ if (window.__bwPwaProviderOnly) return;
     _renderAiInline();   // AI tab 内嵌模型配置表(host 无关,数据在服务端;PDF 的 onFill 不管这块)
     _fillFiller();       // 143:语音垫话总策略(同上——服务端数据,PDF 的 onFill 也不管)
     _fillNotePane();     // 便签 tab 回填(host 无关,设备级 rc-note-* 键;PDF 的 onFill 同样不管这块)
+    _fillNativeNotesPane(); // 扩展 host:web 只读探测 App 笔记状态；列表/正文均由用户显式请求
     _fillWebPane();      // 网页翻译 tab 回填(host 无关;非 web host 时 web-* 控件不存在,自动跳过)
     _fillSyncPane();     // 纯 PWA 本地冲突；扩展 owner 只读并引导到 trusted popup
     _fillComputerPane(); // Windows 桥状态只读刷新，不启动应用、采音或快捷键

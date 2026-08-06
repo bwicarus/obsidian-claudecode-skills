@@ -222,3 +222,5 @@ if (voiceButton && voiceStatus) {
     }
   });
 }
+
+loadStatus();

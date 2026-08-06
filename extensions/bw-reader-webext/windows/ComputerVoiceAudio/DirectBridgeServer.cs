@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Globalization;
 using System.Net;
 using System.Net.WebSockets;
 using System.Text;
@@ -30,25 +31,27 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
 
     private readonly DirectBridgeConfigStore _configStore;
     private readonly DirectBridgeCoordinator _coordinator;
-    private readonly ReaderResultDeliveryBroker _readerResultBroker =
-        new();
-    private readonly ReaderVisualDeliveryBroker _readerVisualBroker =
-        new();
-    private readonly SemaphoreSlim _connectionGate = new(1, 1);
+    private readonly DirectConnectionOwnership _connectionOwnership = new();
+    private readonly SemaphoreSlim _startPromotionGate = new(1, 1);
     private readonly SemaphoreSlim _disposeGate = new(1, 1);
     private readonly string _serviceInstanceId;
     private readonly DirectRuntimeStatusWriter _statusWriter;
     private readonly DirectServiceLease _serviceLease;
     private readonly DirectSnapshotViewer _snapshotViewer;
-    private readonly ReaderContextMcpHttpEndpoint
-        _readerContextMcpEndpoint;
+    private readonly ReaderDocumentCorpusStore _documentCorpus;
+    private readonly ReaderContextSourceRouter _readerSourceRouter = new();
+    private readonly ReaderVisualDeliveryBroker _readerVisualBroker;
+    private readonly NamedPipeReaderVisualRpcServer _readerVisualRpcServer;
+    private readonly ReaderBrowserControlBroker _readerBrowserControlBroker;
+    private readonly NamedPipeReaderBrowserControlRpcServer
+        _readerBrowserControlRpcServer;
     private readonly object _runtimeStateGate = new();
     private string _runtimeState = "starting";
     private bool _runtimeReaderConnected;
     private bool _runtimeCaptureActive;
-    private bool _connectionActive;
     private bool _disposed;
     private bool _disposeCompleted;
+    private readonly IDirectSnapshotContextAdapter? _snapshotContextAdapter;
 
     internal DirectBridgeServer(
         DirectBridgeConfigStore configStore,
@@ -58,6 +61,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         IDirectSnapshotContextAdapter? snapshotContextAdapter = null)
     {
         _configStore = configStore;
+        _snapshotContextAdapter = snapshotContextAdapter;
         DirectBridgeConfig config = configStore.Load();
         _coordinator = new DirectBridgeCoordinator(
             configStore,
@@ -72,26 +76,28 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         _serviceLease = new DirectServiceLease(
             configStore.InstallationRoot,
             configStore.Path);
-        string snapshotPath = Path.Combine(
-            configStore.InstallationRoot,
-            "runtime",
-            FileDirectSnapshotContextAdapter.SnapshotFileName);
         _snapshotViewer = new DirectSnapshotViewer(
-            snapshotPath,
-            config.ListenPort,
-            fetchPublishedVisualAsync:
-                _readerVisualBroker.GetPublishedAsync);
-        _readerContextMcpEndpoint =
-            new ReaderContextMcpHttpEndpoint(
-                new ReaderContextMcpServer(
-                    snapshotPath,
-                    TextReader.Null,
-                    TextWriter.Null,
-                    deliverResultAsync:
-                        _readerResultBroker.DeliverAsync,
-                    fetchVisualAsync:
-                        _readerVisualBroker.GetPublishedAsync),
-                config.ListenPort);
+            Path.Combine(
+                configStore.InstallationRoot,
+                "runtime",
+                FileDirectSnapshotContextAdapter.SnapshotFileName),
+            config.ListenPort);
+        string runtimeDirectory = Path.GetDirectoryName(
+            config.RuntimeStatusPath)
+            ?? Path.Combine(configStore.InstallationRoot, "runtime");
+        _documentCorpus = new ReaderDocumentCorpusStore(
+            Path.Combine(
+                runtimeDirectory,
+                ReaderDocumentCorpusStore.CorpusFileName));
+        _readerVisualBroker = new ReaderVisualDeliveryBroker(
+            _readerSourceRouter);
+        _readerVisualRpcServer = new NamedPipeReaderVisualRpcServer(
+            _readerVisualBroker);
+        _readerBrowserControlBroker = new ReaderBrowserControlBroker(
+            _readerSourceRouter);
+        _readerBrowserControlRpcServer =
+            new NamedPipeReaderBrowserControlRpcServer(
+                _readerBrowserControlBroker);
     }
 
     internal async Task<int> RunAsync(CancellationToken cancellationToken)
@@ -110,8 +116,13 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         builder.WebHost.ConfigureKestrel(options =>
         {
             options.AddServerHeader = false;
-            options.Limits.MaxRequestBodySize =
-                DirectBridgeContract.MaximumMessageBytes;
+            // Web page corpus POSTs are bounded and validated separately.
+            // WebSocket text frames retain the stricter 64 KiB contract in
+            // ReceiveMessageAsync; raising the HTTP envelope does not widen it.
+            // One request can carry the current viewport plus a one-time full
+            // document corpus.  The document store still validates every
+            // field and caps text at 256 Ki characters.
+            options.Limits.MaxRequestBodySize = 2 * 1024 * 1024;
             options.Limits.RequestHeadersTimeout =
                 TimeSpan.FromSeconds(10);
             options.Listen(
@@ -141,24 +152,36 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         app.MapGet(
             DirectSnapshotViewer.MarkdownPath,
             _snapshotViewer.HandleMarkdownAsync);
-        app.MapGet(
-            DirectSnapshotViewer.DrawingImagePath,
-            _snapshotViewer.HandleDrawingImageAsync);
-        app.MapMethods(
-            ReaderContextMcpHttpEndpoint.Path,
-            [
-                HttpMethods.Post,
-                HttpMethods.Get,
-                HttpMethods.Delete,
-                HttpMethods.Put,
-                HttpMethods.Patch,
-                HttpMethods.Options,
-                HttpMethods.Head,
-            ],
-            _readerContextMcpEndpoint.HandleAsync);
         app.Map(
             "/reader-computer-voice/v1",
             context => HandleBridgeAsync(context, cancellationToken));
+        app.Map(
+            "/reader-context/v1",
+            context => HandleContextBridgeAsync(context, cancellationToken));
+        // One-shot snapshot delivery.
+        //
+        // A page's context is used once and discarded -- collect, send, done --
+        // yet it was travelling over the voice link's machinery: a WebSocket,
+        // a handshake, a session, reconnect backoff. All of that exists to keep
+        // a conversation alive, and none of it applies here.
+        //
+        // The cost was not complexity but reach. A socket must be held by a
+        // document that stays alive, and on iOS every extension document is
+        // short-lived: the background worker is reclaimed, the popup dies when
+        // dismissed, an embedded frame dies with its page. A POST needs none of
+        // that. The worker can be woken, post once, and be reclaimed again.
+        // POST and its preflight both, on the same path.
+        //
+        // A JSON body makes this a non-simple request, so a browser sends
+        // OPTIONS first and refuses to send the real one until that is
+        // answered. Nothing here answered it, so the request never left Safari
+        // -- reported as "Load failed", indistinguishable from the host being
+        // unreachable. It also explains why this endpoint tested clean from
+        // Python: a script issues no preflight, only browsers do.
+        app.MapMethods(
+            "/reader-context/snapshot",
+            new[] { "POST", "OPTIONS" },
+            context => HandleSnapshotPostAsync(context, cancellationToken));
         app.MapFallback(context =>
         {
             context.Response.StatusCode = StatusCodes.Status404NotFound;
@@ -167,9 +190,23 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
 
         CancellationTokenSource? heartbeatLifetime = null;
         Task? heartbeatTask = null;
+        CancellationTokenSource? visualRpcLifetime = null;
+        Task? visualRpcTask = null;
+        CancellationTokenSource? browserControlRpcLifetime = null;
+        Task? browserControlRpcTask = null;
         try
         {
             await app.StartAsync(cancellationToken).ConfigureAwait(false);
+            visualRpcLifetime =
+                CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken);
+            visualRpcTask = _readerVisualRpcServer.RunAsync(
+                visualRpcLifetime.Token);
+            browserControlRpcLifetime =
+                CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken);
+            browserControlRpcTask = _readerBrowserControlRpcServer.RunAsync(
+                browserControlRpcLifetime.Token);
             await _serviceLease.WriteAsync(cancellationToken)
                 .ConfigureAwait(false);
             await WriteRuntimeStatusAsync(
@@ -197,6 +234,36 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         }
         finally
         {
+            if (browserControlRpcLifetime is not null)
+            {
+                browserControlRpcLifetime.Cancel();
+            }
+            if (browserControlRpcTask is not null)
+            {
+                try
+                {
+                    await browserControlRpcTask.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                }
+            }
+            browserControlRpcLifetime?.Dispose();
+            if (visualRpcLifetime is not null)
+            {
+                visualRpcLifetime.Cancel();
+            }
+            if (visualRpcTask is not null)
+            {
+                try
+                {
+                    await visualRpcTask.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                }
+            }
+            visualRpcLifetime?.Dispose();
             if (heartbeatLifetime is not null)
             {
                 heartbeatLifetime.Cancel();
@@ -261,11 +328,6 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             serviceInstanceId = _serviceInstanceId,
             state = _coordinator.CaptureActive ? "active" : "idle",
             captureActive = _coordinator.CaptureActive,
-            readerContextMcp = new
-            {
-                path = ReaderContextMcpHttpEndpoint.Path,
-                instanceId = _readerContextMcpEndpoint.InstanceId,
-            },
         }, DirectBridgeContract.JsonOptions, serviceCancellationToken)
             .ConfigureAwait(false);
     }
@@ -297,50 +359,39 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             return;
         }
 
-        await _connectionGate.WaitAsync(serviceCancellationToken)
-            .ConfigureAwait(false);
-        try
-        {
-            if (_connectionActive)
-            {
-                context.Response.StatusCode =
-                    StatusCodes.Status409Conflict;
-                return;
-            }
-            _connectionActive = true;
-        }
-        finally
-        {
-            _connectionGate.Release();
-        }
-
         string connectionId = "connection-"
             + DirectBase64Url.Encode(
                 System.Security.Cryptography.RandomNumberGenerator
                     .GetBytes(12));
+        DirectConnectionLease? connection = null;
         try
         {
-            using CancellationTokenSource connectionLifetime =
-                CancellationTokenSource.CreateLinkedTokenSource(
-                    serviceCancellationToken,
-                    context.RequestAborted);
-            CancellationToken connectionToken =
-                connectionLifetime.Token;
             using WebSocket socket = await context.WebSockets
                 .AcceptWebSocketAsync().ConfigureAwait(false);
+            connection =
+                await _connectionOwnership.CreateAsync(
+                    connectionId,
+                    serviceCancellationToken,
+                    context.RequestAborted).ConfigureAwait(false);
+            CancellationToken connectionToken = connection.Token;
+            if (!await _connectionOwnership.TryAttachAsync(
+                connection,
+                socket,
+                connectionToken).ConfigureAwait(false))
+            {
+                socket.Abort();
+                return;
+            }
+            connectionToken.ThrowIfCancellationRequested();
             DirectConnectionPhaseDeadline phaseDeadline = new();
             DirectSecurityLog.Write(
                 _serviceInstanceId,
                 "reader-connect",
                 "BW_COMPUTER_VOICE_DIRECT_READER_CONNECTED",
                 ok: true);
-            await WriteRuntimeStatusAsync(
-                "reader-connected",
-                readerConnected: true,
-                captureActive: false,
-                connectionToken).ConfigureAwait(false);
             await RunConnectionAsync(
                 socket,
+                connection,
                 connectionId,
                 origin,
                 phaseDeadline,
@@ -359,29 +410,548 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         }
         finally
         {
-            _readerResultBroker.Detach(connectionId);
-            _readerVisualBroker.Detach(connectionId);
-            await _coordinator.StopForConnectionAsync(connectionId)
+            if (connection is not null)
+            {
+                try
+                {
+                    await _coordinator.StopForConnectionAsync(connectionId)
+                        .ConfigureAwait(false);
+                }
+                finally
+                {
+                    _snapshotViewer.CloseForConnection(connectionId);
+                }
+                bool cleanupPending = _coordinator.CleanupPending;
+                await _connectionOwnership.CompleteAsync(
+                    connection,
+                    () => WriteRuntimeStatusAsync(
+                        cleanupPending ? "faulted" : "idle",
+                        readerConnected: false,
+                        captureActive: false,
+                        CancellationToken.None)).ConfigureAwait(false);
+            }
+        }
+    }
+
+    // Accepts a whole snapshot in one request: page context, active reading, or
+    // both. Same origin rule as the socket endpoints -- this opens no new door.
+    private async Task HandleSnapshotPostAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        bool originOk = OriginAllowed(
+            context,
+            requireOrigin: true,
+            out string origin);
+        // Granted only to origins that already passed the allow-list, so this
+        // widens nothing: a refused origin still gets no header and its
+        // preflight fails, exactly as before.
+        if (originOk)
+        {
+            context.Response.Headers["Access-Control-Allow-Origin"] = origin;
+            context.Response.Headers["Access-Control-Expose-Headers"] =
+                "X-BW-Snapshot-Revision";
+            context.Response.Headers["Vary"] = "Origin";
+        }
+        if (HttpMethods.IsOptions(context.Request.Method))
+        {
+            AppendSnapshotPostLog(
+                origin,
+                originOk ? "preflight-ok" : "preflight-refused",
+                null);
+            if (!originOk)
+            {
+                context.Response.StatusCode =
+                    StatusCodes.Status403Forbidden;
+                return;
+            }
+            context.Response.Headers["Access-Control-Allow-Methods"] =
+                "POST, OPTIONS";
+            context.Response.Headers["Access-Control-Allow-Headers"] =
+                "Content-Type";
+            context.Response.Headers["Access-Control-Max-Age"] = "600";
+            context.Response.StatusCode = StatusCodes.Status204NoContent;
+            return;
+        }
+        // Every attempt is recorded, accepted or not.
+        //
+        // "Nothing arrived" and "something arrived and was refused" look
+        // identical from the other end of the network, and telling them apart
+        // has cost several rounds tonight: one means the extension never sent,
+        // the other means it sent and this side said no. The line below answers
+        // that in one glance.
+        AppendSnapshotPostLog(
+            origin,
+            originOk ? "origin-ok" : "origin-refused",
+            context.Request.ContentLength);
+        if (!originOk)
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return;
+        }
+        IDirectSnapshotContextAdapter? adapter = _snapshotContextAdapter;
+        if (adapter is null)
+        {
+            context.Response.StatusCode =
+                StatusCodes.Status503ServiceUnavailable;
+            return;
+        }
+
+        // Synthesised per request. Sessions exist to tie a socket's messages
+        // together; a lone POST has nothing to tie.
+        string sessionId = "session-" + DirectBase64Url.Encode(
+            System.Security.Cryptography.RandomNumberGenerator.GetBytes(16));
+        string requestId = "post-" + DirectBase64Url.Encode(
+            System.Security.Cryptography.RandomNumberGenerator.GetBytes(9));
+
+        try
+        {
+            using JsonDocument document = await JsonDocument
+                .ParseAsync(
+                    context.Request.Body,
+                    cancellationToken: serviceCancellationToken)
                 .ConfigureAwait(false);
-            await WriteRuntimeStatusAsync(
-                "idle",
-                readerConnected: false,
-                captureActive: false,
-                CancellationToken.None).ConfigureAwait(false);
-            await _connectionGate.WaitAsync().ConfigureAwait(false);
-            try
+            JsonElement root = document.RootElement;
+            if (root.ValueKind != JsonValueKind.Object)
             {
-                _connectionActive = false;
+                context.Response.StatusCode =
+                    StatusCodes.Status400BadRequest;
+                return;
             }
-            finally
+            DirectJsonValidation.RequireNoDuplicateKeys(root);
+            HashSet<string> fields = root.EnumerateObject()
+                .Select(property => property.Name)
+                .ToHashSet(StringComparer.Ordinal);
+            if (
+                fields.Count == 0
+                || fields.Any(field => field is not (
+                    "event" or "active" or "viewport" or "document"))
+            )
             {
-                _connectionGate.Release();
+                throw new DirectProtocolException(
+                    "BW_READER_CONTEXT_POST_SCHEMA_INVALID",
+                    "Reader 快照 POST 字段无效",
+                    retryable: false);
             }
+
+            DirectContextEvent? contextEvent = null;
+            DirectActiveReading? activeReading = null;
+            DirectViewportContext? viewport = null;
+            JsonElement? documentValue = null;
+            if (
+                root.TryGetProperty("event", out JsonElement eventValue)
+                && eventValue.ValueKind == JsonValueKind.Object
+            )
+            {
+                contextEvent =
+                    NamedPipeDirectContextAdapter.ValidateEvent(
+                        eventValue);
+            }
+            else if (fields.Contains("event"))
+            {
+                throw new DirectProtocolException(
+                    "BW_READER_CONTEXT_POST_SCHEMA_INVALID",
+                    "Reader 快照 event 无效",
+                    retryable: false);
+            }
+            if (
+                root.TryGetProperty("active", out JsonElement activeValue)
+                && activeValue.ValueKind == JsonValueKind.Object
+            )
+            {
+                activeReading =
+                    FileDirectSnapshotContextAdapter.ValidateActiveReading(
+                        activeValue);
+            }
+            else if (fields.Contains("active"))
+            {
+                throw new DirectProtocolException(
+                    "BW_READER_CONTEXT_POST_SCHEMA_INVALID",
+                    "Reader 快照 active 无效",
+                    retryable: false);
+            }
+            if (
+                root.TryGetProperty("viewport", out JsonElement viewportValue)
+                && viewportValue.ValueKind == JsonValueKind.Object
+            )
+            {
+                viewport = FileDirectSnapshotContextAdapter.ValidateViewport(
+                    viewportValue);
+            }
+            else if (fields.Contains("viewport"))
+            {
+                throw new DirectProtocolException(
+                    "BW_READER_CONTEXT_POST_SCHEMA_INVALID",
+                    "Reader 快照 viewport 无效",
+                    retryable: false);
+            }
+            if (
+                root.TryGetProperty("document", out JsonElement corpusValue)
+                && corpusValue.ValueKind == JsonValueKind.Object
+            )
+            {
+                _ = ReaderDocumentCorpusStore.Validate(corpusValue);
+                documentValue = corpusValue;
+            }
+            else if (fields.Contains("document"))
+            {
+                throw new DirectProtocolException(
+                    "BW_READER_CONTEXT_POST_SCHEMA_INVALID",
+                    "Reader 快照 document 无效",
+                    retryable: false);
+            }
+            if (
+                viewport is not null
+                && activeReading is null
+            )
+            {
+                throw new DirectProtocolException(
+                    "BW_READER_CONTEXT_POST_SCHEMA_INVALID",
+                    "Reader 当前视口必须与 active-reading 同时提交",
+                    retryable: false);
+            }
+            if (
+                viewport is not null
+                && activeReading is not null
+                && !string.Equals(
+                    viewport.SourceInstanceId,
+                    activeReading.SourceInstanceId,
+                    StringComparison.Ordinal)
+            )
+            {
+                throw new DirectProtocolException(
+                    "BW_READER_CONTEXT_POST_IDENTITY_MISMATCH",
+                    "Reader viewport 与 active 来源不一致",
+                    retryable: false);
+            }
+            if (
+                documentValue is JsonElement corpus
+                && viewport is not null
+            )
+            {
+                ReaderDocumentCorpusEntry documentEntry =
+                    ReaderDocumentCorpusStore.Validate(corpus);
+                if (
+                    !string.Equals(
+                        documentEntry.SourceInstanceId,
+                        viewport.SourceInstanceId,
+                        StringComparison.Ordinal)
+                    || !string.Equals(
+                        documentEntry.DocumentKey,
+                        viewport.DocumentKey,
+                        StringComparison.Ordinal)
+                )
+                {
+                    throw new DirectProtocolException(
+                        "BW_READER_CONTEXT_POST_IDENTITY_MISMATCH",
+                        "Reader 全文与当前视口身份不一致",
+                        retryable: false);
+                }
+            }
+
+            int applied = 0;
+            long? appliedRevision = null;
+            if (contextEvent is not null)
+            {
+                DirectSnapshotForwardResult result =
+                    await adapter.ForwardJournalAsync(
+                    requestId,
+                    sessionId,
+                    contextEvent,
+                    serviceCancellationToken).ConfigureAwait(false);
+                appliedRevision = result.Revision;
+                applied += 1;
+            }
+            if (activeReading is not null)
+            {
+                DirectSnapshotForwardResult result =
+                    await adapter.ForwardActiveReadingAsync(
+                    requestId,
+                    sessionId,
+                    activeReading,
+                    serviceCancellationToken).ConfigureAwait(false);
+                appliedRevision = result.Revision;
+                applied += 1;
+            }
+            if (viewport is not null)
+            {
+                DirectSnapshotForwardResult result =
+                    await adapter.ForwardViewportAsync(
+                    requestId,
+                    sessionId,
+                    viewport,
+                    serviceCancellationToken).ConfigureAwait(false);
+                appliedRevision = result.Revision;
+                applied += 1;
+            }
+            if (documentValue is JsonElement documentEntryValue)
+            {
+                await _documentCorpus.SaveAsync(
+                    documentEntryValue,
+                    serviceCancellationToken).ConfigureAwait(false);
+                applied += 1;
+            }
+            if (applied == 0)
+            {
+                context.Response.StatusCode =
+                    StatusCodes.Status400BadRequest;
+                return;
+            }
+            if (appliedRevision is long revision)
+            {
+                context.Response.Headers["X-BW-Snapshot-Revision"] =
+                    revision.ToString(CultureInfo.InvariantCulture);
+            }
+            context.Response.StatusCode = StatusCodes.Status204NoContent;
+        }
+        catch (DirectProtocolException failure)
+        {
+            // The reason travels back in the body. A caller that cannot see why
+            // it was rejected has to guess, and guessing across a network
+            // boundary is what made this link so hard to diagnose.
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+            context.Response.ContentType = "application/json; charset=utf-8";
+            await context.Response.WriteAsync(
+                JsonSerializer.Serialize(new
+                {
+                    ok = false,
+                    code = failure.Code,
+                    message = failure.Message,
+                }),
+                serviceCancellationToken).ConfigureAwait(false);
+        }
+        catch (JsonException)
+        {
+            context.Response.StatusCode = StatusCodes.Status400BadRequest;
+        }
+    }
+
+    // Best-effort by design: a diagnostic must never break what it observes.
+    private void AppendSnapshotPostLog(
+        string origin,
+        string outcome,
+        long? contentLength)
+    {
+        try
+        {
+            DirectBridgeConfig config = _configStore.Load();
+            string? directory = System.IO.Path.GetDirectoryName(
+                config.RuntimeStatusPath);
+            if (string.IsNullOrEmpty(directory))
+            {
+                return;
+            }
+            string path = System.IO.Path.Combine(
+                directory,
+                "reader-context-post.log");
+            string line = string.Format(
+                System.Globalization.CultureInfo.InvariantCulture,
+                "{0:O}	{1}	{2}	{3}",
+                DateTimeOffset.Now,
+                outcome,
+                string.IsNullOrEmpty(origin) ? "(no-origin)" : origin,
+                contentLength?.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture)
+                    ?? "-");
+            System.IO.File.AppendAllText(
+                path,
+                line + Environment.NewLine,
+                new System.Text.UTF8Encoding(false));
+            var info = new System.IO.FileInfo(path);
+            if (info.Length > 128 * 1024)
+            {
+                string[] all = System.IO.File.ReadAllLines(path);
+                System.IO.File.WriteAllLines(
+                    path,
+                    all.Skip(Math.Max(0, all.Length - 200)));
+            }
+        }
+        catch
+        {
+        }
+    }
+
+    private async Task HandleContextBridgeAsync(
+        HttpContext context,
+        CancellationToken serviceCancellationToken)
+    {
+        if (
+            !HttpMethods.IsGet(context.Request.Method)
+            || !context.WebSockets.IsWebSocketRequest
+        )
+        {
+            context.Response.StatusCode =
+                StatusCodes.Status426UpgradeRequired;
+            return;
+        }
+        if (!OriginAllowed(context, requireOrigin: true, out string origin))
+        {
+            context.Response.StatusCode = StatusCodes.Status403Forbidden;
+            return;
+        }
+
+        string connectionId = "context-"
+            + DirectBase64Url.Encode(
+                System.Security.Cryptography.RandomNumberGenerator
+                    .GetBytes(12));
+        using WebSocket socket = await context.WebSockets
+            .AcceptWebSocketAsync().ConfigureAwait(false);
+        using CancellationTokenSource lifetime =
+            CancellationTokenSource.CreateLinkedTokenSource(
+                serviceCancellationToken,
+                context.RequestAborted);
+        using SemaphoreSlim sendGate = new(1, 1);
+        ReaderContextSourceLease? sourceLease = null;
+        DirectBridgeProtocolSession protocol = new(
+            connectionId,
+            origin,
+            _configStore,
+            _coordinator,
+            registerReaderSource: sourceInstanceId =>
+            {
+                sourceLease = _readerSourceRouter.Attach(
+                    sourceInstanceId,
+                    connectionId,
+                    (message, cancellationToken) => SendJsonAsync(
+                        socket,
+                        sendGate,
+                        message,
+                        cancellationToken));
+                return sourceLease;
+            },
+            acceptReaderVisual: chunk =>
+            {
+                ReaderContextSourceLease lease = sourceLease
+                    ?? throw new DirectProtocolException(
+                        "BW_READER_VISUAL_SOURCE_NOT_REGISTERED",
+                        "Reader 视觉来源尚未注册",
+                        retryable: true);
+                return _readerVisualBroker.Accept(lease, chunk);
+            },
+            acceptReaderBrowserControl: response =>
+            {
+                ReaderContextSourceLease lease = sourceLease
+                    ?? throw new DirectProtocolException(
+                        "BW_READER_BROWSER_CONTROL_SOURCE_NOT_REGISTERED",
+                        "Reader 浏览控制来源尚未注册",
+                        retryable: true);
+                _readerBrowserControlBroker.Accept(lease, response);
+            });
+
+        try
+        {
+            while (
+                !lifetime.IsCancellationRequested
+                && socket.State == WebSocketState.Open
+            )
+            {
+                DirectClientMessage? incoming = await ReceiveMessageAsync(
+                    socket,
+                    lifetime.Token).ConfigureAwait(false);
+                if (incoming is null)
+                {
+                    break;
+                }
+                if (incoming.MessageType != WebSocketMessageType.Text)
+                {
+                    await socket.CloseAsync(
+                        WebSocketCloseStatus.InvalidMessageType,
+                        "context endpoint accepts text only",
+                        CancellationToken.None).ConfigureAwait(false);
+                    break;
+                }
+                string message = incoming.Text
+                    ?? throw new DirectProtocolException(
+                        "BW_COMPUTER_VOICE_DIRECT_MESSAGE_INVALID",
+                        "上下文消息无效");
+                if (!IsContextEndpointActionAllowed(message))
+                {
+                    await SendJsonAsync(
+                        socket,
+                        sendGate,
+                        new
+                        {
+                            contract = DirectBridgeContract.Contract,
+                            ok = false,
+                            code = "BW_READER_CONTEXT_ACTION_INVALID",
+                            message = "上下文端点不接受音频或控制操作",
+                            retryable = false,
+                        },
+                        lifetime.Token).ConfigureAwait(false);
+                    continue;
+                }
+                DirectProtocolReply reply = await protocol.HandleAsync(
+                    message,
+                    (_, _) => Task.CompletedTask,
+                    (_, _, _) => Task.FromException(
+                        new DirectProtocolException(
+                            "BW_READER_CONTEXT_PCM_FORBIDDEN",
+                            "上下文端点不发送音频")),
+                    lifetime.Token).ConfigureAwait(false);
+                await SendJsonAsync(
+                    socket,
+                    sendGate,
+                    reply.Envelope,
+                    lifetime.Token).ConfigureAwait(false);
+                if (reply.AfterSendAsync is not null)
+                {
+                    await reply.AfterSendAsync(lifetime.Token)
+                        .ConfigureAwait(false);
+                }
+            }
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        catch (WebSocketException)
+        {
+        }
+        finally
+        {
+            if (sourceLease is not null)
+            {
+                _readerSourceRouter.Detach(sourceLease);
+            }
+            socket.Abort();
+        }
+    }
+
+    internal static bool IsContextEndpointActionAllowed(string json)
+    {
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(json);
+            if (
+                document.RootElement.ValueKind != JsonValueKind.Object
+                || !document.RootElement.TryGetProperty(
+                    "type",
+                    out JsonElement typeElement)
+                || typeElement.ValueKind != JsonValueKind.String
+            )
+            {
+                return false;
+            }
+            return typeElement.GetString() is
+                "hello" or
+                "context-mode" or
+                "context-open" or
+                "context" or
+                "active-reading" or
+                "context-clear" or
+                "log" or
+                ReaderVisualDeliveryProtocol.RegisterType or
+                ReaderVisualDeliveryProtocol.ChunkType or
+                ReaderBrowserControlProtocol.ResponseType;
+        }
+        catch (JsonException)
+        {
+            return false;
         }
     }
 
     private async Task RunConnectionAsync(
         WebSocket socket,
+        DirectConnectionLease connection,
         string connectionId,
         string origin,
         DirectConnectionPhaseDeadline phaseDeadline,
@@ -394,15 +964,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             connectionId,
             origin,
             _configStore,
-            _coordinator,
-            acknowledgeReaderResult:
-                ack => _readerResultBroker.Acknowledge(
-                    connectionId,
-                    ack),
-            acceptReaderVisual:
-                chunk => _readerVisualBroker.Accept(
-                    connectionId,
-                    chunk));
+            _coordinator);
         Task<DirectClientMessage?>? prefetchedReceiveTask = null;
 
         while (
@@ -433,7 +995,12 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                     deadlineLifetime.Token);
                 monitoredTasks.Add(phaseTimeout);
             }
-            if (ShouldMonitorMedia(_coordinator))
+            bool ownsAudioTransport =
+                protocol.Phase == DirectProtocolPhase.Active
+                && await _connectionOwnership.IsCurrentAsync(
+                    connection,
+                    cancellationToken).ConfigureAwait(false);
+            if (ownsAudioTransport && ShouldMonitorMedia(_coordinator))
             {
                 mediaCompletion = _coordinator.MediaCompletion;
                 monitoredTasks.Add(mediaCompletion);
@@ -467,6 +1034,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                         "BW_COMPUTER_VOICE_DIRECT_MEDIA_STOPPED_UNEXPECTEDLY",
                         "媒体捕获意外停止");
                 await HandleConnectionFailureAsync(
+                    connection,
                     connectionId,
                     socket,
                     sendGate,
@@ -482,6 +1050,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             )
             {
                 await HandleConnectionFailureAsync(
+                    connection,
                     connectionId,
                     socket,
                     sendGate,
@@ -498,6 +1067,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             )
             {
                 await HandleConnectionFailureAsync(
+                    connection,
                     connectionId,
                     socket,
                     sendGate,
@@ -546,6 +1116,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 catch (DirectProtocolException failure)
                 {
                     await HandleConnectionFailureAsync(
+                        connection,
                         connectionId,
                         socket,
                         sendGate,
@@ -567,6 +1138,10 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                     message,
                     async (state, reason) =>
                     {
+                        // Only START invokes this callback, and coordinator
+                        // serializes START before the connection is promoted
+                        // to owner.  STATUS/HELLO never write global runtime
+                        // state and never acquire ownership.
                         await WriteRuntimeStatusAsync(
                             state,
                             readerConnected: true,
@@ -597,10 +1172,57 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             DirectProtocolReply reply;
             if (IsStartRequest(message))
             {
+                async Task<DirectProtocolReply> StartAndPromoteAsync(
+                    CancellationToken startCancellationToken)
+                {
+                    await _startPromotionGate.WaitAsync(
+                        startCancellationToken).ConfigureAwait(false);
+                    try
+                    {
+                        DirectProtocolPhase startPhase = protocol.Phase;
+                        DirectProtocolReply startReply =
+                            await HandleMessageAsync(startCancellationToken)
+                                .ConfigureAwait(false);
+                        if (
+                            startPhase != DirectProtocolPhase.Active
+                            && protocol.Phase
+                                == DirectProtocolPhase.Active
+                        )
+                        {
+                            DirectConnectionLease? previous =
+                                await _connectionOwnership.PromoteAsync(
+                                    connection,
+                                    startCancellationToken)
+                                    .ConfigureAwait(false);
+                            if (previous is not null)
+                            {
+                                try
+                                {
+                                    await previous.Released.WaitAsync(
+                                        TimeSpan.FromSeconds(2),
+                                        startCancellationToken)
+                                        .ConfigureAwait(false);
+                                }
+                                catch (TimeoutException)
+                                {
+                                    // The old transport is already revoked;
+                                    // its slow HTTP unwind cannot hold the
+                                    // START/promotion transaction forever.
+                                }
+                            }
+                        }
+                        return startReply;
+                    }
+                    finally
+                    {
+                        _startPromotionGate.Release();
+                    }
+                }
+
                 DirectPeerMonitorOutcome<DirectProtocolReply> monitored =
                     await MonitorStartForPeerCloseAsync(
                         socket,
-                        HandleMessageAsync,
+                        StartAndPromoteAsync,
                         cancellationToken).ConfigureAwait(false);
                 if (monitored.PeerClosed)
                 {
@@ -627,6 +1249,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             )
             {
                 await HandleConnectionFailureAsync(
+                    connection,
                     connectionId,
                     socket,
                     sendGate,
@@ -639,6 +1262,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             if (phaseDeadline.IsExpired(protocol.Phase))
             {
                 await HandleConnectionFailureAsync(
+                    connection,
                     connectionId,
                     socket,
                     sendGate,
@@ -646,6 +1270,27 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                         protocol.Phase),
                     "connection-phase-timeout").ConfigureAwait(false);
                 break;
+            }
+            bool becameActive =
+                phaseBeforeMessage != DirectProtocolPhase.Active
+                && protocol.Phase == DirectProtocolPhase.Active;
+            bool stoppedBeingActive =
+                phaseBeforeMessage == DirectProtocolPhase.Active
+                && protocol.Phase != DirectProtocolPhase.Active;
+            bool failedAuthenticatedStartWithoutOwner =
+                IsStartRequest(message)
+                && protocol.IsAuthenticated
+                && phaseBeforeMessage != DirectProtocolPhase.Active
+                && protocol.Phase != DirectProtocolPhase.Active
+                && _coordinator.ActiveSessionId is null
+                && _coordinator.LastError is not null;
+            if (failedAuthenticatedStartWithoutOwner)
+            {
+                await WriteRuntimeStatusAsync(
+                    "faulted",
+                    readerConnected: false,
+                    captureActive: false,
+                    cancellationToken).ConfigureAwait(false);
             }
             using CancellationTokenSource replyLifetime =
                 CancellationTokenSource.CreateLinkedTokenSource(
@@ -663,35 +1308,13 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                     sendGate,
                     reply.Envelope,
                     replyLifetime.Token).ConfigureAwait(false);
-                if (
-                    phaseBeforeMessage
-                        == DirectProtocolPhase.AwaitingAuthentication
-                    && protocol.IsAuthenticated
-                )
-                {
-                    _readerResultBroker.Attach(
-                        connectionId,
-                        (envelope, token) => SendJsonAsync(
-                            socket,
-                            sendGate,
-                            envelope,
-                            token));
-                    _readerVisualBroker.Attach(
-                        connectionId,
-                        (envelope, token) => SendJsonAsync(
-                            socket,
-                            sendGate,
-                            envelope,
-                            token));
-                }
                 if (reply.AfterSendAsync is not null)
                 {
                     await reply.AfterSendAsync(replyLifetime.Token)
                         .ConfigureAwait(false);
                 }
                 if (
-                    phaseBeforeMessage != DirectProtocolPhase.Active
-                    && protocol.Phase == DirectProtocolPhase.Active
+                    becameActive
                 )
                 {
                     uplinkSequenceGuard.Begin(
@@ -700,14 +1323,22 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                             "BW_COMPUTER_VOICE_DIRECT_UPLINK_NOT_ACTIVE",
                             "浏览器麦克风上行尚未启动"));
                     _snapshotViewer.OpenIfSnapshotMode(
-                        _configStore.Load().ContextDeliveryMode);
+                        _configStore.Load().ContextDeliveryMode,
+                        connectionId);
                 }
                 else if (
-                    phaseBeforeMessage == DirectProtocolPhase.Active
-                    && protocol.Phase != DirectProtocolPhase.Active
+                    stoppedBeingActive
                 )
                 {
                     uplinkSequenceGuard.End();
+                    _snapshotViewer.CloseForConnection(connectionId);
+                    await _connectionOwnership.ReleaseAsync(
+                        connection,
+                        () => WriteRuntimeStatusAsync(
+                            "idle",
+                            readerConnected: false,
+                            captureActive: false,
+                            CancellationToken.None)).ConfigureAwait(false);
                 }
             }
             catch (OperationCanceledException)
@@ -717,6 +1348,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 )
             {
                 await HandleConnectionFailureAsync(
+                    connection,
                     connectionId,
                     socket,
                     sendGate,
@@ -736,6 +1368,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 if (failure is not null)
                 {
                     await HandleConnectionFailureAsync(
+                        connection,
                         connectionId,
                         socket,
                         sendGate,
@@ -747,6 +1380,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             if (_coordinator.IsHeartbeatExpired(connectionId))
             {
                 await HandleConnectionFailureAsync(
+                    connection,
                     connectionId,
                     socket,
                     sendGate,
@@ -759,7 +1393,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
 
             if (_coordinator.CaptureActive)
             {
-                await WriteRuntimeStatusAsync(
+                _ = await WriteConnectionRuntimeStatusAsync(
+                    connection,
                     "active",
                     readerConnected: true,
                     captureActive: true,
@@ -767,8 +1402,11 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             }
             else
             {
-                await WriteRuntimeStatusAsync(
-                    "reader-connected",
+                _ = await WriteConnectionRuntimeStatusAsync(
+                    connection,
+                    _coordinator.CleanupPending
+                        ? "faulted"
+                        : "reader-connected",
                     readerConnected: true,
                     captureActive: false,
                     cancellationToken).ConfigureAwait(false);
@@ -888,25 +1526,32 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     }
 
     private async Task HandleConnectionFailureAsync(
+        DirectConnectionLease connection,
         string connectionId,
         WebSocket socket,
         SemaphoreSlim sendGate,
         DirectProtocolException failure,
         string logEvent)
     {
-        _ = _coordinator.RecordFailure(failure, logEvent);
-        await _coordinator.StopForConnectionAsync(connectionId)
-            .ConfigureAwait(false);
+        bool stoppedCurrentOwner =
+            await _coordinator.FailAndStopForConnectionAsync(
+                connectionId,
+                failure,
+                logEvent).ConfigureAwait(false);
         DirectSecurityLog.Write(
             _serviceInstanceId,
             logEvent,
             failure.Code,
             ok: false);
-        await WriteRuntimeStatusAsync(
-            "faulted",
-            readerConnected: true,
-            captureActive: false,
-            CancellationToken.None).ConfigureAwait(false);
+        if (stoppedCurrentOwner)
+        {
+            _ = await WriteConnectionRuntimeStatusAsync(
+                connection,
+                "faulted",
+                readerConnected: true,
+                captureActive: false,
+                CancellationToken.None).ConfigureAwait(false);
+        }
         try
         {
             using CancellationTokenSource notificationDeadline = new(
@@ -1091,6 +1736,21 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             config.AllowedTailscaleUserLogin,
             StringComparison.OrdinalIgnoreCase);
 
+    private Task<bool> WriteConnectionRuntimeStatusAsync(
+        DirectConnectionLease connection,
+        string state,
+        bool readerConnected,
+        bool captureActive,
+        CancellationToken cancellationToken) =>
+        _connectionOwnership.RunIfCurrentAsync(
+            connection,
+            () => WriteRuntimeStatusAsync(
+                state,
+                readerConnected,
+                captureActive,
+                cancellationToken),
+            cancellationToken);
+
     private async Task WriteRuntimeStatusAsync(
         string state,
         bool readerConnected,
@@ -1116,67 +1776,24 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     {
         using PeriodicTimer timer = new(
             DirectBridgeContract.RuntimeStatusHeartbeatInterval);
-        await RunRuntimeStatusHeartbeatLoopAsync(
-            token => timer.WaitForNextTickAsync(token),
-            async token =>
-            {
-                string state;
-                bool readerConnected;
-                bool captureActive;
-                lock (_runtimeStateGate)
-                {
-                    state = _runtimeState;
-                    readerConnected = _runtimeReaderConnected;
-                    captureActive = _runtimeCaptureActive;
-                }
-                await _statusWriter.WriteAsync(
-                    state,
-                    readerConnected,
-                    captureActive,
-                    _coordinator.LastError,
-                    token).ConfigureAwait(false);
-            },
-            () =>
-            {
-                try
-                {
-                    DirectSecurityLog.Write(
-                        _serviceInstanceId,
-                        "runtime-status-heartbeat-retry",
-                        "BW_COMPUTER_VOICE_DIRECT_STATUS_WRITE_RETRY",
-                        ok: false);
-                }
-                catch
-                {
-                    // Heartbeat recovery cannot depend on stderr being open.
-                }
-            },
-            cancellationToken).ConfigureAwait(false);
-    }
-
-    internal static async Task RunRuntimeStatusHeartbeatLoopAsync(
-        Func<CancellationToken, ValueTask<bool>> waitNextTickAsync,
-        Func<CancellationToken, Task> writeStatusAsync,
-        Action recoverableWriteFailure,
-        CancellationToken cancellationToken)
-    {
-        ArgumentNullException.ThrowIfNull(waitNextTickAsync);
-        ArgumentNullException.ThrowIfNull(writeStatusAsync);
-        ArgumentNullException.ThrowIfNull(recoverableWriteFailure);
-        while (await waitNextTickAsync(cancellationToken)
+        while (await timer.WaitForNextTickAsync(cancellationToken)
             .ConfigureAwait(false))
         {
-            try
+            string state;
+            bool readerConnected;
+            bool captureActive;
+            lock (_runtimeStateGate)
             {
-                await writeStatusAsync(cancellationToken)
-                    .ConfigureAwait(false);
+                state = _runtimeState;
+                readerConnected = _runtimeReaderConnected;
+                captureActive = _runtimeCaptureActive;
             }
-            catch (Exception exception)
-                when (exception is IOException
-                    or UnauthorizedAccessException)
-            {
-                recoverableWriteFailure();
-            }
+            await _statusWriter.WriteAsync(
+                state,
+                readerConnected,
+                captureActive,
+                _coordinator.LastError,
+                cancellationToken).ConfigureAwait(false);
         }
     }
 
@@ -1354,7 +1971,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             {
                 _snapshotViewer.Dispose();
             }
-            _connectionGate.Dispose();
+            await _connectionOwnership.DisposeAsync()
+                .ConfigureAwait(false);
             _disposeCompleted = true;
         }
         finally
@@ -1393,6 +2011,312 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 new AggregateException(failures));
         }
         throw new AggregateException(failures);
+    }
+}
+
+internal sealed class DirectConnectionLease
+{
+    private readonly CancellationTokenSource _lifetime;
+    private readonly CancellationToken _token;
+    private readonly TaskCompletionSource<bool> _released = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly object _socketGate = new();
+    private WebSocket? _socket;
+    private bool _retired;
+    private int _completed;
+
+    internal DirectConnectionLease(
+        long generation,
+        string connectionId,
+        CancellationTokenSource lifetime)
+    {
+        Generation = generation;
+        ConnectionId = connectionId;
+        _lifetime = lifetime;
+        _token = lifetime.Token;
+    }
+
+    internal long Generation { get; }
+
+    internal string ConnectionId { get; }
+
+    internal CancellationToken Token => _token;
+
+    internal Task Released => _released.Task;
+
+    internal bool IsCompleted =>
+        Volatile.Read(ref _completed) != 0;
+
+    internal bool TryAttach(WebSocket socket)
+    {
+        lock (_socketGate)
+        {
+            if (_retired)
+            {
+                return false;
+            }
+            if (_socket is not null)
+            {
+                return ReferenceEquals(_socket, socket);
+            }
+            _socket = socket;
+            return true;
+        }
+    }
+
+    internal void Retire()
+    {
+        WebSocket? socket;
+        lock (_socketGate)
+        {
+            if (_retired)
+            {
+                return;
+            }
+            _retired = true;
+            socket = _socket;
+            _socket = null;
+        }
+        try
+        {
+            _lifetime.Cancel();
+        }
+        catch
+        {
+            // Cancellation callbacks belong to the retiring connection and
+            // cannot be allowed to reject the authenticated replacement.
+        }
+        try
+        {
+            socket?.Abort();
+        }
+        catch
+        {
+            // The peer may have closed concurrently.  Ownership is already
+            // revoked even when the transport has nothing left to abort.
+        }
+    }
+
+    internal void Complete()
+    {
+        if (Interlocked.Exchange(ref _completed, 1) != 0)
+        {
+            return;
+        }
+        Retire();
+        _released.TrySetResult(true);
+        _lifetime.Dispose();
+    }
+}
+
+internal sealed class DirectConnectionOwnership : IAsyncDisposable
+{
+    private readonly SemaphoreSlim _gate = new(1, 1);
+    private DirectConnectionLease? _current;
+    private long _generation;
+    private bool _disposed;
+
+    internal async Task<DirectConnectionLease> CreateAsync(
+        string connectionId,
+        CancellationToken serviceCancellationToken,
+        CancellationToken requestCancellationToken)
+    {
+        CancellationTokenSource lifetime =
+            CancellationTokenSource.CreateLinkedTokenSource(
+                serviceCancellationToken,
+                requestCancellationToken);
+        DirectConnectionLease? connection = null;
+        try
+        {
+            await _gate.WaitAsync(lifetime.Token).ConfigureAwait(false);
+            try
+            {
+                ObjectDisposedException.ThrowIf(_disposed, this);
+                lifetime.Token.ThrowIfCancellationRequested();
+                connection = new DirectConnectionLease(
+                    checked(++_generation),
+                    connectionId,
+                    lifetime);
+            }
+            finally
+            {
+                _gate.Release();
+            }
+        }
+        catch
+        {
+            lifetime.Dispose();
+            throw;
+        }
+        return connection!;
+    }
+
+    internal async Task<bool> TryAttachAsync(
+        DirectConnectionLease connection,
+        WebSocket socket,
+        CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            return !connection.IsCompleted
+                && connection.TryAttach(socket);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    internal async Task<DirectConnectionLease?> PromoteAsync(
+        DirectConnectionLease connection,
+        CancellationToken cancellationToken)
+    {
+        DirectConnectionLease? previous;
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            ObjectDisposedException.ThrowIf(_disposed, this);
+            if (connection.IsCompleted)
+            {
+                throw new OperationCanceledException(
+                    "语音连接已经结束",
+                    connection.Token);
+            }
+            if (ReferenceEquals(_current, connection))
+            {
+                return null;
+            }
+            previous = _current;
+            _current = connection;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+        previous?.Retire();
+        return previous;
+    }
+
+    internal async Task<bool> ReleaseAsync(
+        DirectConnectionLease connection,
+        Func<Task> onCurrent)
+    {
+        await _gate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (!ReferenceEquals(_current, connection))
+            {
+                return false;
+            }
+            try
+            {
+                await onCurrent().ConfigureAwait(false);
+            }
+            finally
+            {
+                _current = null;
+            }
+            return true;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    internal async Task<bool> IsCurrentAsync(
+        DirectConnectionLease connection,
+        CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            return ReferenceEquals(_current, connection);
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    internal async Task<bool> RunIfCurrentAsync(
+        DirectConnectionLease connection,
+        Func<Task> action,
+        CancellationToken cancellationToken)
+    {
+        await _gate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            if (!ReferenceEquals(_current, connection))
+            {
+                return false;
+            }
+            await action().ConfigureAwait(false);
+            return true;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+    }
+
+    internal async Task CompleteAsync(
+        DirectConnectionLease connection,
+        Func<Task> onCurrent)
+    {
+        if (connection.IsCompleted)
+        {
+            return;
+        }
+        try
+        {
+            await _gate.WaitAsync().ConfigureAwait(false);
+            try
+            {
+                if (ReferenceEquals(_current, connection))
+                {
+                    try
+                    {
+                        await onCurrent().ConfigureAwait(false);
+                    }
+                    finally
+                    {
+                        _current = null;
+                    }
+                }
+            }
+            finally
+            {
+                _gate.Release();
+            }
+        }
+        finally
+        {
+            connection.Complete();
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        DirectConnectionLease? current;
+        await _gate.WaitAsync().ConfigureAwait(false);
+        try
+        {
+            if (_disposed)
+            {
+                return;
+            }
+            _disposed = true;
+            current = _current;
+            _current = null;
+        }
+        finally
+        {
+            _gate.Release();
+        }
+        current?.Complete();
     }
 }
 

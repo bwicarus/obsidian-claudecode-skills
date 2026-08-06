@@ -1,5 +1,24 @@
 import Foundation
 
+private func readerUTF8Prefix(
+    _ value: String,
+    maximumBytes: Int
+) -> String {
+    let data = Data(value.utf8)
+    guard data.count > maximumBytes else { return value }
+    var end = maximumBytes
+    while end > max(0, maximumBytes - 4) {
+        if let result = String(
+            data: Data(data.prefix(end)),
+            encoding: .utf8
+        ) {
+            return result
+        }
+        end -= 1
+    }
+    return ""
+}
+
 struct ReaderSharedSnapshot: Codable, Equatable, Sendable {
     static let schema = 1
 
@@ -109,11 +128,89 @@ struct ReaderQuickNote: Codable, Equatable, Identifiable, Sendable {
     }
 }
 
+struct ReaderLocalNoteProjection: Codable, Equatable, Identifiable, Sendable {
+    let id: String
+    let title: String
+    let fileName: String
+    let content: String
+    let contentHash: String
+    let contentTruncated: Bool
+    let sourceFile: String
+    let sourcePage: Int
+    let createdAtMilliseconds: Int64
+    let pendingExport: Bool?
+
+    init(
+        id: String = UUID().uuidString,
+        title: String,
+        fileName: String,
+        content: String,
+        sourceFile: String,
+        sourcePage: Int,
+        pendingExport: Bool = false,
+        now: Date = Date()
+    ) {
+        let contentLimit = 131_072
+        self.id = id
+        self.title = readerUTF8Prefix(title, maximumBytes: 2_048)
+        self.fileName = readerUTF8Prefix(fileName, maximumBytes: 2_048)
+        self.content = readerUTF8Prefix(content, maximumBytes: contentLimit)
+        contentHash = ReaderLocalNoteFormat.contentHash(content)
+        contentTruncated = content.utf8.count > contentLimit
+        self.sourceFile = readerUTF8Prefix(sourceFile, maximumBytes: 8_192)
+        self.sourcePage = max(0, sourcePage)
+        createdAtMilliseconds = Int64(now.timeIntervalSince1970 * 1_000)
+        self.pendingExport = pendingExport
+    }
+
+    var preview: String {
+        readerUTF8Prefix(content, maximumBytes: 2_048)
+    }
+}
+
+struct ReaderLocalNotesSharedState: Codable, Equatable, Sendable {
+    static let schema = 2
+
+    let schema: Int
+    let enabled: Bool
+    let configured: Bool
+    let folderName: String
+    let vaultGeneration: String
+    let updatedAtMilliseconds: Int64
+    let notes: [ReaderLocalNoteProjection]
+
+    init(
+        enabled: Bool,
+        configured: Bool,
+        folderName: String,
+        vaultGeneration: String,
+        notes: [ReaderLocalNoteProjection],
+        now: Date = Date()
+    ) {
+        schema = Self.schema
+        self.enabled = enabled
+        self.configured = configured
+        self.folderName = readerUTF8Prefix(folderName, maximumBytes: 2_048)
+        self.vaultGeneration = vaultGeneration
+        updatedAtMilliseconds = Int64(now.timeIntervalSince1970 * 1_000)
+        self.notes = Array(notes.prefix(50))
+    }
+
+    static let unavailable = ReaderLocalNotesSharedState(
+        enabled: false,
+        configured: false,
+        folderName: "",
+        vaultGeneration: "",
+        notes: []
+    )
+}
+
 struct ReaderNativeFeatureStore: Sendable {
     private static let directoryName = "NativeFeatures"
     private static let snapshotName = "reader-snapshot.json"
     private static let pendingActionName = "pending-action.json"
     private static let quickNotesName = "quick-notes.json"
+    private static let localNotesStateName = "local-notes-state.json"
 
     private var rootURL: URL? {
         FileManager.default.containerURL(
@@ -194,6 +291,21 @@ struct ReaderNativeFeatureStore: Sendable {
 
     func readQuickNotes() -> [ReaderQuickNote] {
         (try? read([ReaderQuickNote].self, named: Self.quickNotesName)) ?? []
+    }
+
+    func writeLocalNotesState(_ state: ReaderLocalNotesSharedState) throws {
+        try write(state, named: Self.localNotesStateName)
+    }
+
+    func readLocalNotesState() -> ReaderLocalNotesSharedState {
+        (try? loadLocalNotesState()) ?? .unavailable
+    }
+
+    func loadLocalNotesState() throws -> ReaderLocalNotesSharedState? {
+        try read(
+            ReaderLocalNotesSharedState.self,
+            named: Self.localNotesStateName
+        )
     }
 
     func annotationDirectory() throws -> URL {

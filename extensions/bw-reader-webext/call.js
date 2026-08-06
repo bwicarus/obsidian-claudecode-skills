@@ -11,6 +11,14 @@
 
 import { ContextLink } from "./ctxlink.js";
 
+const VISUAL_DELIVERY_CONTRACT = "reader-visual-delivery/2";
+const LOCAL_VISUAL_CONTRACT = "bw-reader-visual-local/1";
+const BROWSER_CONTROL_CONTRACT = "reader-browser-control/1";
+const LOCAL_BROWSER_CONTROL_CONTRACT = "bw-browser-control/1";
+const VISUAL_CHUNK_CHARACTERS = 48000;
+const VISUAL_MAX_BYTES = 786432;
+const VISUAL_MAX_CHUNKS = 24;
+
 // Marks the embedded form. Done here rather than in an inline <script>, which an
 // extension page's CSP (script-src 'self') silently refuses -- that refusal is
 // why the frame stayed unannounced and every press fell through to a new tab.
@@ -125,27 +133,12 @@ function describe(err) {
 
 const PREFERENCE_KEY = "bwReaderExtensionPreferencesV2";
 const CONTEXT_SYNC_KEY = "eph-ctx-sync";
-const ACTIVE_CONTEXT_KEY = "bwActivePageContextV1";
+const CONTEXT_SYNC_MIRROR_KEY = "bwCtxSyncMirrorV1";
+const VISUAL_BINDING_SIGNAL_KEY = "bwReaderVisualBindingsV1";
 
-// Compared before sending. Without it the same page would be resent on every
-// scroll event, each one costing a sequence number and two round trips.
-let lastSignature = "";
-let lastPage = null;
 let contextPreferenceKnown = false;
 let contextSyncEnabled = false;
-let link = null;
-
-function contextLinkStatus(s) {
-  if (s.state === "open") say("● 已连接,正在跟随", "ok");
-  else if (s.state === "connecting") say("正在连接…");
-  else if (s.state === "retrying") {
-    say(`✗ 已断开,${Math.round((s.delayMs || 0) / 1000)} 秒后重试`, "err");
-    if (s.error) note("断开: " + describe(s.error));
-  } else if (s.state === "error") {
-    say("✗ 握手失败", "err");
-    note("握手: " + describe(s.error));
-  }
-}
+let contextMirrorKnown = false;
 
 function enabledFromRecord(record) {
   return !!(
@@ -160,94 +153,575 @@ function contextSurfaceVisible() {
   return document.visibilityState !== "hidden";
 }
 
-function closeContextLink() {
-  const current = link;
-  link = null;
-  lastSignature = "";
-  if (!current) return;
-  try { current.close(); } catch (_) {}
-}
-
-function ensureContextLink() {
-  if (!contextPreferenceKnown || !contextSyncEnabled || !contextSurfaceVisible()) {
-    return null;
-  }
-  if (!link) {
-    link = new ContextLink(contextLinkStatus);
-    link.connect();
-  }
-  return link;
-}
-
-function applyContextPreference(record) {
-  const next = enabledFromRecord(record);
+function applyContextPreference(record, mirrorValue) {
+  const hasMirror = typeof mirrorValue === "boolean";
+  if (!hasMirror && contextMirrorKnown) return;
+  if (hasMirror) contextMirrorKnown = true;
+  const next = hasMirror ? mirrorValue : enabledFromRecord(record);
+  // A preference read as false and a preference never written look identical
+  // once folded into a boolean, yet they call for opposite fixes: one means the
+  // switch is off, the other means the switch is being read from the wrong key.
+  note(
+    "读到偏好: " +
+    (hasMirror
+      ? "跨站镜像=" + String(mirrorValue)
+      : record === undefined ? "undefined(未写入)" : JSON.stringify(record)) +
+    " → " + next
+  );
   const changed = !contextPreferenceKnown || next !== contextSyncEnabled;
   contextPreferenceKnown = true;
   contextSyncEnabled = next;
   if (!changed) return;
-  lastSignature = "";
   if (!contextSyncEnabled) {
-    closeContextLink();
+    closeVisualLink();
     say("上下文同步已关闭", "dim");
-    return;
-  }
-  const current = ensureContextLink();
-  if (current && lastPage) forward(lastPage, true);
-}
-
-function contentDigest(value) {
-  const text = String(value || "");
-  let hash = 2166136261;
-  for (let i = 0; i < text.length; i += 1) {
-    hash ^= text.charCodeAt(i);
-    hash = Math.imul(hash, 16777619);
-  }
-  return (hash >>> 0).toString(16);
-}
-
-function render(page) {
-  els.ctxTitle.textContent = page.title || "(无标题)";
-  els.ctxUrl.textContent =
-    `${page.url}　·　正文 ${(page.text || "").length} 字` +
-    (page.selection ? `　·　选中 ${page.selection.length} 字` : "");
-}
-
-async function forward(page, force) {
-  lastPage = page;
-  render(page);
-  if (!contextPreferenceKnown || !contextSyncEnabled || !contextSurfaceVisible()) return;
-  const current = ensureContextLink();
-  if (!current) return;
-  const signature = `${page.url}|${page.title || ""}|${contentDigest(page.text)}|${contentDigest(page.selection)}`;
-  if (!force && signature === lastSignature) return;
-
-  try {
-    const result = await current.send(page);
-    if (result?.skipped) note("待连接,已暂存当前页");
-    else if (result?.ok) lastSignature = signature;
-  } catch (err) {
-    note("上报失败: " + describe(err));
-    if (lastSignature === signature) lastSignature = "";
   }
 }
 
-function storedPage(value) {
-  if (!value || value.schema !== 1 || !value.page) return null;
+let contextWasVisible = contextSurfaceVisible();
+
+function storedVisualContext(value) {
+  if (!value || value.schema !== 1 || !exactKeys(value, [
+    "schema", "capturedAt", "identity", "visual", "viewKey", "snapshotRevision",
+  ])) return null;
   const age = Date.now() - Number(value.capturedAt || 0);
   if (!Number.isFinite(age) || age < 0 || age > 5 * 60 * 1000) return null;
-  return value.page.url ? value.page : null;
+  const identity = value.identity;
+  if (
+    !exactKeys(identity, ["sourceInstanceId", "file", "page"]) ||
+    !/^[A-Za-z0-9_-]{22}$/.test(String(identity.sourceInstanceId || "")) ||
+    !/^https?:\/\//.test(String(identity.file || "")) || identity.file.length > 4096 ||
+    identity.page !== 0 || typeof value.viewKey !== "string" ||
+    value.viewKey.length < 1 || value.viewKey.length > 160 ||
+    !Number.isSafeInteger(value.snapshotRevision) || value.snapshotRevision < 1
+  ) return null;
+  return {
+    url: identity.file,
+    title: "",
+    viewKey: value.viewKey,
+    visual: value.visual,
+    document: { sourceInstanceId: identity.sourceInstanceId },
+    snapshotRevision: value.snapshotRevision,
+  };
 }
 
 // Every page announces itself while it is the one being viewed; background tabs
 // stay quiet, so a dozen open tabs cannot argue over what the assistant sees.
-if (chrome.runtime?.onMessage) {
-  chrome.runtime.onMessage.addListener((message) => {
-    // Sent by whichever page the user is looking at. The page only forwards a
-    // message; this side owns the connection and the protocol. That division is
-    // what made it work in 1.0.25, and what the later attempt gave up by having
-    // each page open its own socket.
-    if (message?.type === "BW_PAGE_ACTIVE" && message.page) forward(message.page, false);
-    return undefined;
+// Snapshots handed over directly by the content script in the hosting page.
+//
+// Same document tree, no process boundary, no background worker to be reclaimed
+// and no storage relay to fall out of step. This is the path that carries the
+// page now; the runtime message below stays as a fallback for surfaces that
+// have no frame of their own.
+// Reports from inside the frame, shown by the host page.
+//
+// Everything this file says goes through note() to the host's own status line,
+// which the page-level probe never displays -- so this entire leg has been
+// mute. The page reported "delivered to frame" and the bridge saw nothing, with
+// nothing in between to say why. Ninth time tonight the failing link also
+// swallowed the report of its own failure.
+function frameProbe(text) {
+  // Same channel as the page, tagged with who is speaking. Loaded as a content
+  // script into the hosting page, the shared helper is not reachable from
+  // inside this document, so the wire format is written out here -- it is one
+  // message shape, kept in step with src/bw-probe.js.
+  try {
+    window.parent.postMessage(
+      { contract: "bw-probe/1", where: "frame", text: String(text) },
+      "*"
+    );
+  } catch (_) {}
+}
+
+// The only parent->frame security bootstrap. It carries a one-time random
+// capability, never page data or a business success result. background.js
+// consumes it once and binds this exact tab/frame/document before any visual or
+// browser-control request is accepted.
+window.addEventListener("message", (event) => {
+  if (event.source !== window.parent) return;
+  const message = event.data;
+  if (!exactKeys(message, ["contract", "type", "capability"]) ||
+      message.contract !== "bw-reader-call-claim/1" || message.type !== "claim" ||
+      !/^[A-Za-z0-9_-]{43}$/.test(String(message.capability || ""))) return;
+  runtimeRequest({
+    type: "BW_READER_CALL_CLAIM_BIND",
+    capability: message.capability,
+  }, 5000).then((reply) => {
+    if (reply?.ok !== true || reply.data?.bound !== true ||
+        !["codex-desktop", "chatgpt-classic"].includes(reply.data?.appKind)) {
+      throw new Error("后台拒绝绑定通话页");
+    }
+    frameAppKind = reply.data.appKind;
+    frameProbe("通话页认领: 已绑定当前 frame");
+    return refreshVisualContext();
+  }).catch((err) => frameProbe("通话页认领失败: " + describe(err)));
+});
+
+function exactKeys(value, keys) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const actual = Object.keys(value).sort();
+  const expected = keys.slice().sort();
+  return actual.length === expected.length &&
+    actual.every((key, index) => key === expected[index]);
+}
+
+function safeVisualId(value, nullable) {
+  if (nullable && value === null) return null;
+  const text = String(value || "");
+  return /^[A-Za-z0-9._:-]{1,160}$/.test(text) ? text : null;
+}
+
+function validVisualPage(value) {
+  return (
+    Number.isSafeInteger(value) && value >= 0
+  ) || (
+    typeof value === "string" &&
+    value.length >= 1 && value.length <= 256 &&
+    !/[\u0000-\u001f\u007f]/.test(value)
+  );
+}
+
+function normalizeVisualEvent(message) {
+  if (!exactKeys(message, ["contract", "type", "event", "payload"])) return null;
+  if (
+    message.contract !== "reader-computer-voice-direct/1" ||
+    message.type !== "event" ||
+    message.event !== "reader-visual-request"
+  ) return null;
+  const p = message.payload;
+  if (!exactKeys(p, [
+    "contract", "commandKind", "correlation", "sourceInstanceId",
+    "snapshotRevision", "file", "page", "drawingRevision", "scope",
+    "selectionId", "maxBytes", "chunkCharacters",
+  ])) return null;
+  const correlation = safeVisualId(p.correlation, false);
+  const sourceInstanceId = safeVisualId(p.sourceInstanceId, false);
+  const drawingRevision = safeVisualId(p.drawingRevision, true);
+  const selectionId = safeVisualId(p.selectionId, true);
+  if (
+    p.contract !== VISUAL_DELIVERY_CONTRACT ||
+    p.commandKind !== "capture-composite" ||
+    !correlation || !sourceInstanceId ||
+    !Number.isSafeInteger(p.snapshotRevision) || p.snapshotRevision < 0 ||
+    typeof p.file !== "string" || p.file.length < 1 || p.file.length > 4096 ||
+    /[\u0000-\u001f\u007f]/.test(p.file) ||
+    !validVisualPage(p.page) ||
+    (p.drawingRevision !== null && !drawingRevision) ||
+    !["viewport-context", "drawing-nearby", "selection-near"].includes(p.scope) ||
+    (p.selectionId !== null && !selectionId) ||
+    (p.scope === "selection-near") !== !!selectionId ||
+    p.maxBytes !== VISUAL_MAX_BYTES ||
+    p.chunkCharacters !== VISUAL_CHUNK_CHARACTERS
+  ) return null;
+  return {
+    contract: VISUAL_DELIVERY_CONTRACT,
+    commandKind: "capture-composite",
+    correlation,
+    sourceInstanceId,
+    snapshotRevision: p.snapshotRevision,
+    file: p.file,
+    page: p.page,
+    drawingRevision,
+    scope: p.scope,
+    selectionId,
+    maxBytes: p.maxBytes,
+    chunkCharacters: p.chunkCharacters,
+  };
+}
+
+let visualLink = null;
+let visualSourceInstanceId = "";
+let visualPage = null;
+let visualCommitted = null;
+let activeVisualContext = null;
+let visualQueue = Promise.resolve();
+let browserControlQueue = Promise.resolve();
+
+function closeVisualLink() {
+  const current = visualLink;
+  visualLink = null;
+  visualSourceInstanceId = "";
+  visualPage = null;
+  visualCommitted = null;
+  if (!current) return;
+  try { current.close(); } catch (_) {}
+}
+
+function visualLinkStatus(status) {
+  if (status?.state === "error" || status?.state === "retrying") {
+    frameProbe("视觉链路: " + status.state +
+      (status.error ? " " + describe(status.error) : ""));
+  }
+}
+
+function localVisualCapture(request) {
+  return runtimeRequest({
+    type: "BW_READER_VISUAL_CAPTURE",
+    request,
+    expectedViewKey: visualCommitted?.viewKey || "",
+  }, 20000).then((reply) => {
+    const data = reply?.ok === true ? reply.data : null;
+    if (!data || !exactKeys(data, [
+      "contract", "type", "correlation", "sourceInstanceId",
+      "status", "mimeType", "b64",
+    ]) || data.contract !== LOCAL_VISUAL_CONTRACT ||
+      data.type !== "capture-response" || data.correlation !== request.correlation ||
+      data.sourceInstanceId !== request.sourceInstanceId ||
+      !["ready", "unavailable"].includes(data.status) ||
+      typeof data.mimeType !== "string" || typeof data.b64 !== "string"
+    ) return null;
+    return data;
+  }, () => null);
+}
+
+function visualChunkFields(request, fields) {
+  return Object.assign({
+    sessionId: visualLink?.sessionId || "",
+    correlation: request.correlation,
+    sourceInstanceId: request.sourceInstanceId,
+    snapshotRevision: request.snapshotRevision,
+    file: request.file,
+    page: request.page,
+    drawingRevision: request.drawingRevision,
+    scope: request.scope,
+    selectionId: request.selectionId,
+  }, fields);
+}
+
+async function sendVisualUnavailable(request) {
+  if (!visualLink) return;
+  await visualLink.sendRequest("reader-visual", visualChunkFields(request, {
+    status: "unavailable",
+    mimeType: "",
+    chunkIndex: 0,
+    chunkCount: 0,
+    totalBytes: 0,
+    data: "",
+  }));
+}
+
+function decodeVisualBase64(value) {
+  const b64 = String(value || "");
+  if (!b64 || b64.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(b64)) return null;
+  try {
+    const binary = atob(b64);
+    if (btoa(binary) !== b64 || binary.length < 3) return null;
+    if (
+      binary.charCodeAt(0) !== 0xff ||
+      binary.charCodeAt(1) !== 0xd8 ||
+      binary.charCodeAt(2) !== 0xff
+    ) return null;
+    return { b64, totalBytes: binary.length };
+  } catch (_) {
+    return null;
+  }
+}
+
+async function deliverVisualRequest(request) {
+  if (
+    !visualLink || !visualLink.sessionId ||
+    request.sourceInstanceId !== visualSourceInstanceId
+  ) return;
+  if (
+    !visualCommitted ||
+    request.snapshotRevision !== visualCommitted.snapshotRevision ||
+    request.sourceInstanceId !== String(visualPage?.document?.sourceInstanceId || "") ||
+    request.file !== String(visualPage?.url || "") ||
+    request.sourceInstanceId !== visualCommitted.sourceInstanceId ||
+    request.file !== visualCommitted.file ||
+    String(visualPage?.viewKey || "") !== visualCommitted.viewKey ||
+    (visualPage?.visual?.drawing?.drawingRevision || null) !==
+      visualCommitted.drawingRevision
+  ) {
+    await sendVisualUnavailable(request);
+    return;
+  }
+  const capture = await localVisualCapture(request);
+  if (
+    !visualCommitted ||
+    request.snapshotRevision !== visualCommitted.snapshotRevision ||
+    request.sourceInstanceId !== String(visualPage?.document?.sourceInstanceId || "") ||
+    request.file !== String(visualPage?.url || "") ||
+    request.sourceInstanceId !== visualCommitted.sourceInstanceId ||
+    request.file !== visualCommitted.file ||
+    String(visualPage?.viewKey || "") !== visualCommitted.viewKey ||
+    (visualPage?.visual?.drawing?.drawingRevision || null) !==
+      visualCommitted.drawingRevision
+  ) {
+    await sendVisualUnavailable(request);
+    return;
+  }
+  const decoded = capture?.status === "ready" && capture?.mimeType === "image/jpeg"
+    ? decodeVisualBase64(capture.b64)
+    : null;
+  if (
+    !decoded || decoded.totalBytes > request.maxBytes ||
+    Math.ceil(decoded.b64.length / request.chunkCharacters) > VISUAL_MAX_CHUNKS
+  ) {
+    await sendVisualUnavailable(request);
+    return;
+  }
+  const chunkCount = Math.ceil(decoded.b64.length / request.chunkCharacters);
+  for (let index = 0; index < chunkCount; index += 1) {
+    await visualLink.sendRequest("reader-visual", visualChunkFields(request, {
+      status: "chunk",
+      mimeType: "image/jpeg",
+      chunkIndex: index,
+      chunkCount,
+      totalBytes: decoded.totalBytes,
+      data: decoded.b64.slice(
+        index * request.chunkCharacters,
+        (index + 1) * request.chunkCharacters
+      ),
+    }));
+  }
+}
+
+function handleVisualBridgeEvent(message) {
+  const request = normalizeVisualEvent(message);
+  if (!request || request.sourceInstanceId !== visualSourceInstanceId) return;
+  visualQueue = visualQueue
+    .then(() => deliverVisualRequest(request))
+    .catch((err) => frameProbe("视觉回传失败: " + describe(err)));
+}
+
+function normalizeBrowserControlEvent(message) {
+  if (!exactKeys(message, ["contract", "type", "event", "payload"])) return null;
+  if (
+    message.contract !== "reader-computer-voice-direct/1" ||
+    message.type !== "event" ||
+    message.event !== "reader-browser-control-request"
+  ) return null;
+  const p = message.payload;
+  if (!exactKeys(p, [
+    "contract", "commandKind", "correlation", "sourceInstanceId",
+    "snapshotRevision", "file", "page", "action", "target", "selectionId",
+  ])) return null;
+  const correlation = safeVisualId(p.correlation, false);
+  const sourceInstanceId = safeVisualId(p.sourceInstanceId, false);
+  const selectionId = safeVisualId(p.selectionId, true);
+  const actions = [
+    "next-viewport", "previous-viewport", "scroll-to-text",
+    "scroll-to-heading", "scroll-to-selection",
+  ];
+  const textAction = p.action === "scroll-to-text" || p.action === "scroll-to-heading";
+  const selectionAction = p.action === "scroll-to-selection";
+  if (
+    p.contract !== BROWSER_CONTROL_CONTRACT ||
+    p.commandKind !== "browser-control" ||
+    !correlation || !sourceInstanceId ||
+    !Number.isSafeInteger(p.snapshotRevision) || p.snapshotRevision < 0 ||
+    typeof p.file !== "string" || p.file.length < 1 || p.file.length > 4096 ||
+    /[\u0000-\u001f\u007f]/.test(p.file) ||
+    !validVisualPage(p.page) ||
+    !actions.includes(p.action) ||
+    (textAction
+      ? typeof p.target !== "string" || !p.target.trim() || p.target.length > 320
+      : p.target !== null) ||
+    (selectionAction ? !selectionId : p.selectionId !== null)
+  ) return null;
+  return {
+    contract: BROWSER_CONTROL_CONTRACT,
+    commandKind: "browser-control",
+    correlation,
+    sourceInstanceId,
+    snapshotRevision: p.snapshotRevision,
+    file: p.file,
+    page: p.page,
+    action: p.action,
+    target: textAction ? p.target.trim() : null,
+    selectionId: selectionAction ? selectionId : null,
+  };
+}
+
+function localBrowserControl(request, committedViewKey) {
+  const local = {
+    contract: LOCAL_BROWSER_CONTROL_CONTRACT,
+    type: "request",
+    requestId: request.correlation,
+    sourceInstanceId: request.sourceInstanceId,
+    action: request.action,
+  };
+  if (request.target !== null) local.target = request.target;
+  if (request.selectionId !== null) local.selectionId = request.selectionId;
+  return runtimeRequest({
+    type: "BW_READER_BROWSER_CONTROL",
+    request: local,
+    snapshotRevision: request.snapshotRevision,
+    file: request.file,
+    page: request.page,
+    expectedViewKey: committedViewKey,
+  }, 10000).then((reply) => {
+    const data = reply?.ok === true ? reply.data : null;
+    if (!data || data.contract !== LOCAL_BROWSER_CONTROL_CONTRACT ||
+      data.type !== "result" || data.requestId !== local.requestId ||
+      data.sourceInstanceId !== local.sourceInstanceId ||
+      data.action !== local.action || typeof data.ok !== "boolean"
+    ) return null;
+    return data;
+  }, () => null);
+}
+
+function fallbackBrowserState() {
+  return {
+    scrollX: 0,
+    scrollY: 0,
+    url: String(visualPage?.url || ""),
+    title: String(visualPage?.title || "").slice(0, 1024),
+  };
+}
+
+async function deliverBrowserControlRequest(request) {
+  if (
+    !visualLink || !visualLink.sessionId ||
+    request.sourceInstanceId !== visualSourceInstanceId
+  ) return;
+  const committed = visualCommitted;
+  let result = null;
+  if (
+    committed && request.snapshotRevision === committed.snapshotRevision &&
+    request.sourceInstanceId === committed.sourceInstanceId &&
+    request.file === committed.file && request.page === committed.page &&
+    request.sourceInstanceId === String(visualPage?.document?.sourceInstanceId || "") &&
+    request.file === String(visualPage?.url || "") &&
+    String(visualPage?.viewKey || "") === committed.viewKey
+  ) result = await localBrowserControl(request, committed.viewKey);
+  const state = result?.ok === true && result.state
+    ? result.state
+    : fallbackBrowserState();
+  const status = result?.ok === true
+    ? "success"
+    : result?.error?.code === "BW_BROWSER_CONTROL_TARGET_NOT_FOUND"
+      ? "not-found"
+      : "rejected";
+  await visualLink.sendRequest("reader-browser-control", {
+    sessionId: visualLink.sessionId,
+    correlation: request.correlation,
+    sourceInstanceId: request.sourceInstanceId,
+    snapshotRevision: request.snapshotRevision,
+    file: request.file,
+    page: request.page,
+    action: request.action,
+    status,
+    scrollX: Number.isFinite(Number(state.scrollX)) ? Number(state.scrollX) : 0,
+    scrollY: Number.isFinite(Number(state.scrollY)) ? Number(state.scrollY) : 0,
+    url: /^https?:\/\//.test(String(state.url || ""))
+      ? String(state.url).slice(0, 4096)
+      : String(visualPage?.url || ""),
+    title: String(state.title || "").replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 1024),
+  });
+}
+
+function handleContextBridgeEvent(message) {
+  if (message?.event === "reader-visual-request") {
+    handleVisualBridgeEvent(message);
+    return;
+  }
+  const request = normalizeBrowserControlEvent(message);
+  if (!request || request.sourceInstanceId !== visualSourceInstanceId) return;
+  browserControlQueue = browserControlQueue
+    .then(() => deliverBrowserControlRequest(request))
+    .catch((err) => frameProbe("浏览控制回传失败: " + describe(err)));
+}
+
+function ensureVisualLink(page) {
+  activeVisualContext = page;
+  // The page message itself only exists after content.js has passed the
+  // context-sync preference gate. Unknown is therefore safe during startup,
+  // while an explicit false must tear down the already-registered visual and
+  // browser-control source immediately.
+  if (
+    (contextPreferenceKnown && !contextSyncEnabled) ||
+    !contextSurfaceVisible()
+  ) {
+    closeVisualLink();
+    return;
+  }
+  const source = String(page?.document?.sourceInstanceId || "");
+  if (!/^[A-Za-z0-9_-]{22}$/.test(source)) return;
+  visualPage = page;
+  visualCommitted = {
+    snapshotRevision: page.snapshotRevision,
+    sourceInstanceId: source,
+    file: String(page.url || ""),
+    page: 0,
+    viewKey: String(page.viewKey || ""),
+    drawingRevision: page.visual?.drawing?.drawingRevision || null,
+  };
+  if (visualLink && visualSourceInstanceId === source) return;
+  try { visualLink?.close(); } catch (_) {}
+  visualSourceInstanceId = source;
+  visualLink = new ContextLink(visualLinkStatus, handleContextBridgeEvent);
+  visualLink.bindVisualSource(source).catch(() => {});
+  visualLink.connect();
+}
+
+// Reads extension storage under either API shape.
+//
+// Safari's chrome.* surface is not uniformly promise-based: chrome.storage
+// .local.get may take a callback and return undefined instead of a promise.
+// `await` on that yields undefined rather than throwing, so the failure was
+// invisible twice over -- the catch never fired, and the caller went on to
+// treat "no data" as "the user turned sync off". Both shapes are handled here,
+// and a genuine failure now rejects so it can be reported.
+function runtimeRequest(message, timeoutMs = 15000) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const timer = window.setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      reject(new Error("runtime.sendMessage 超时"));
+    }, timeoutMs);
+    const done = (value) => {
+      if (settled) return;
+      settled = true;
+      window.clearTimeout(timer);
+      const err = chrome.runtime?.lastError;
+      if (err) reject(new Error(err.message || "runtime.sendMessage 失败"));
+      else resolve(value);
+    };
+    try {
+      const returned = chrome.runtime.sendMessage(message, done);
+      if (returned && typeof returned.then === "function") returned.then(
+        (value) => { if (!settled) { settled = true; window.clearTimeout(timer); resolve(value); } },
+        (err) => { if (!settled) { settled = true; window.clearTimeout(timer); reject(err); } }
+      );
+    } catch (err) {
+      window.clearTimeout(timer);
+      reject(err);
+    }
+  });
+}
+
+async function refreshVisualContext() {
+  try {
+    const reply = await runtimeRequest({ type: "BW_READER_VISUAL_CONTEXT_GET" }, 5000);
+    const page = reply?.ok === true ? storedVisualContext(reply.data) : null;
+    if (!page) return false;
+    ensureVisualLink(page);
+    return true;
+  } catch (_) {
+    return false;
+  }
+}
+
+function storageGet(keys) {
+  return new Promise((resolve, reject) => {
+    let settled = false;
+    const done = (value) => { if (!settled) { settled = true; resolve(value); } };
+    const fail = (err) => { if (!settled) { settled = true; reject(err); } };
+    try {
+      const returned = chrome.storage.local.get(keys, (bag) => {
+        const err = chrome.runtime?.lastError;
+        if (err) fail(new Error(err.message || "storage.get 失败"));
+        else done(bag);
+      });
+      if (returned && typeof returned.then === "function") returned.then(done, fail);
+    } catch (err) {
+      fail(err);
+    }
+    // Neither shape answered. Better a stated timeout than silence.
+    window.setTimeout(() => fail(new Error("storage.get 无响应")), 5000);
   });
 }
 
@@ -255,55 +729,76 @@ if (chrome.runtime?.onMessage) {
 // Without it the bridge would sit blank until the user scrolled or switched.
 (async function seed() {
   try {
-    const bag = await chrome.storage.local.get([
+    const bag = await storageGet([
       PREFERENCE_KEY,
-      ACTIVE_CONTEXT_KEY,
-      "bwCallContext",
+      CONTEXT_SYNC_MIRROR_KEY,
     ]);
-    applyContextPreference(bag?.[PREFERENCE_KEY]);
-    const persisted = storedPage(bag?.[ACTIVE_CONTEXT_KEY]);
-    const ctx = bag?.bwCallContext;
-    if (persisted) {
-      forward(persisted, true);
-    } else if (ctx?.url && (!ctx.capturedAt || Date.now() - ctx.capturedAt < 5 * 60 * 1000)) {
-      forward(ctx, true);
-    } else {
+    applyContextPreference(
+      bag?.[PREFERENCE_KEY],
+      bag?.[CONTEXT_SYNC_MIRROR_KEY]
+    );
+    const visualReady = await refreshVisualContext();
+    if (!visualReady) {
       els.ctxTitle.textContent = "上下文由各网页自行上报";
       els.ctxUrl.textContent = "本页只负责通话";
     }
-  } catch (_) {
-    contextPreferenceKnown = true;
-    contextSyncEnabled = false;
-    say("上下文同步设置不可用", "err");
+  } catch (err) {
+    // Unknown, not off.
+    //
+    // Declaring sync disabled here was the trap: a preference that could not be
+    // read is not a preference set to false, yet this permanently silenced the
+    // link -- and the user turning the switch on changed nothing, because the
+    // switch's value was never the thing being consulted. Leaving it unknown
+    // lets the retry below, and storage.onChanged, still recover.
+    contextPreferenceKnown = false;
+    say("上下文同步设置读取失败,正在重试", "err");
+    // Compact form hides #status, so on an iPad this is the only way the reason
+    // travels. Silence here cost a full evening of guessing.
+    note("设置读取失败: " + describe(err));
+    window.setTimeout(() => { seed(); }, 3000);
   }
 })();
 
 if (chrome.storage?.onChanged) {
   chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== "local" || !changes) return;
-    if (changes[PREFERENCE_KEY]) {
+    if (changes[CONTEXT_SYNC_MIRROR_KEY]) {
+      const value = changes[CONTEXT_SYNC_MIRROR_KEY].newValue;
+      if (typeof value === "boolean") {
+        applyContextPreference(undefined, value);
+      } else {
+        contextMirrorKnown = false;
+      }
+    } else if (changes[PREFERENCE_KEY]) {
       applyContextPreference(changes[PREFERENCE_KEY].newValue);
     }
-    if (changes[ACTIVE_CONTEXT_KEY]) {
-      const page = storedPage(changes[ACTIVE_CONTEXT_KEY].newValue);
-      if (page) forward(page, true);
-    }
+    if (changes[VISUAL_BINDING_SIGNAL_KEY]) refreshVisualContext();
   });
 }
 
-function resumeContextLink() {
-  if (!contextSurfaceVisible()) {
-    closeContextLink();
+function resumeVisualLink() {
+  const visible = contextSurfaceVisible();
+  if (!visible) {
+    contextWasVisible = false;
+    closeVisualLink();
     return;
   }
-  const current = ensureContextLink();
-  if (current && lastPage) forward(lastPage, true);
+  if (!contextWasVisible) {
+    // The bridge corpus is deliberately bounded and another foreground tab
+    // may have replaced it while this page was hidden. Reattach this page's
+    // full document once when it returns; tab-local de-duplication alone would
+    // otherwise make A -> B -> A leave snapshot A paired with corpus B.
+    contextWasVisible = true;
+  }
+  refreshVisualContext().then((ready) => {
+    if (!ready && activeVisualContext) ensureVisualLink(activeVisualContext);
+  });
 }
 
-document.addEventListener("visibilitychange", resumeContextLink, { passive: true });
-window.addEventListener("pageshow", resumeContextLink, { passive: true });
-window.addEventListener("focus", resumeContextLink, { passive: true });
-window.addEventListener("online", resumeContextLink, { passive: true });
+document.addEventListener("visibilitychange", resumeVisualLink, { passive: true });
+window.addEventListener("pageshow", resumeVisualLink, { passive: true });
+window.addEventListener("focus", resumeVisualLink, { passive: true });
+window.addEventListener("online", resumeVisualLink, { passive: true });
 
 // --- placing a call from here ------------------------------------------------
 // Either side may start it, and whoever does holds it: the other end only sends
@@ -311,7 +806,8 @@ window.addEventListener("online", resumeContextLink, { passive: true });
 // the call. Before, both tried to own the one voice link and each switch evicted
 // the other.
 let voiceActive = false;
-// Set by the host through configure when embedded; otherwise from the URL.
+// Set only by the authenticated one-time frame claim when embedded; otherwise
+// from this extension page's own URL. The hosting web page cannot choose it.
 let frameAppKind = "";
 
 // Publish the call state so every page's sidebar button can show it.
@@ -496,14 +992,6 @@ const embedded = EMBEDDED;
 if (embedded && window.parent !== window) {
   const tell = frameTell;
 
-  // The host may set which desktop app to dial before the first press.
-  window.addEventListener("message", (event) => {
-    if (event.source !== window.parent) return;
-    const d = event.data;
-    if (!d || d.contract !== FRAME_CONTRACT || d.type !== "configure") return;
-    if (d.appKind) frameAppKind = String(d.appKind);
-  });
-
   // Announced only once the button is genuinely operable: voiceReady() has
   // passed and the button is registered. Claiming readiness earlier would take
   // the click and then be unable to act on it.
@@ -522,4 +1010,4 @@ if (embedded && window.parent !== window) {
   });
 }
 
-window.addEventListener("pagehide", closeContextLink);
+window.addEventListener("pagehide", closeVisualLink);

@@ -1,23 +1,30 @@
-using System.Diagnostics;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
-using System.Net.WebSockets;
 
 namespace BwReader.ComputerVoiceAudio;
 
 internal sealed record ReaderVisualDeliveryRequest(
     string Correlation,
+    string SourceInstanceId,
+    long SnapshotRevision,
     string File,
     JsonNode Page,
-    string DrawingRevision);
+    string? DrawingRevision,
+    string Scope,
+    string? SelectionId);
 
 internal sealed record ReaderVisualDeliveryChunk(
+    string SessionId,
     string Correlation,
-    string Status,
+    string SourceInstanceId,
+    long SnapshotRevision,
     string File,
     JsonElement Page,
-    string DrawingRevision,
+    string? DrawingRevision,
+    string Scope,
+    string? SelectionId,
+    string Status,
     string MimeType,
     uint ChunkIndex,
     uint ChunkCount,
@@ -34,19 +41,39 @@ internal sealed record ReaderVisualCapture(
     string MimeType,
     byte[] Data);
 
+internal sealed class ReaderVisualDeliveryException : Exception
+{
+    internal ReaderVisualDeliveryException(
+        string code,
+        string message,
+        bool retryable,
+        Exception? innerException = null)
+        : base(message, innerException)
+    {
+        Code = code;
+        Retryable = retryable;
+    }
+
+    internal string Code { get; }
+    internal bool Retryable { get; }
+}
+
 internal static class ReaderVisualDeliveryProtocol
 {
     internal const string DeliveryContract =
-        "reader-visual-delivery/1";
+        "reader-visual-delivery/2";
     internal const string EventName = "reader-visual-request";
     internal const string ChunkType = "reader-visual";
+    internal const string RegisterType = "visual-register";
+    internal const string MimeType = "image/jpeg";
     internal const int MaximumImageBytes = 768 * 1024;
     internal const int ChunkCharacters = 48_000;
-    internal const int MaximumChunkCount = 20;
-    internal const string MimeType = "image/jpeg";
+    internal const int MaximumChunkCount = 24;
 
-    internal static object Event(
-        ReaderVisualDeliveryRequest request) =>
+    internal static bool IsScope(string value) => value is
+        "viewport-context" or "drawing-nearby" or "selection-near";
+
+    internal static object Event(ReaderVisualDeliveryRequest request) =>
         new
         {
             contract = DirectBridgeContract.Contract,
@@ -55,10 +82,15 @@ internal static class ReaderVisualDeliveryProtocol
             payload = new
             {
                 contract = DeliveryContract,
+                commandKind = "capture-composite",
                 correlation = request.Correlation,
+                sourceInstanceId = request.SourceInstanceId,
+                snapshotRevision = request.SnapshotRevision,
                 file = request.File,
                 page = request.Page,
                 drawingRevision = request.DrawingRevision,
+                scope = request.Scope,
+                selectionId = request.SelectionId,
                 maxBytes = MaximumImageBytes,
                 chunkCharacters = ChunkCharacters,
             },
@@ -72,20 +104,42 @@ internal static class ReaderVisualDeliveryProtocol
             "contract",
             "type",
             "requestId",
+            "sessionId",
             "correlation",
-            "status",
+            "sourceInstanceId",
+            "snapshotRevision",
             "file",
             "page",
             "drawingRevision",
+            "scope",
+            "selectionId",
+            "status",
             "mimeType",
             "chunkIndex",
             "chunkCount",
             "totalBytes",
             "data");
-        string correlation = RequiredSafeId(
+        if (
+            RequiredString(message, "contract", 128)
+                != DirectBridgeContract.Contract
+            || RequiredString(message, "type", 32) != ChunkType
+        )
+        {
+            throw Invalid("Reader 视觉消息合同无效");
+        }
+        string sessionId = RequiredSafeId(message, "sessionId");
+        _ = DirectPcmFrameCodec.ParseSessionId(sessionId);
+        string correlation = RequiredSafeId(message, "correlation");
+        string sourceInstanceId = RequiredSafeId(
             message,
-            "correlation");
-        string status = RequiredString(message, "status", 16);
+            "sourceInstanceId");
+        long snapshotRevision = RequiredInt64(
+            message,
+            "snapshotRevision");
+        if (snapshotRevision < 0)
+        {
+            throw Invalid("Reader 视觉 snapshotRevision 无效");
+        }
         string file = RequiredString(message, "file", 4096);
         if (file.Any(char.IsControl))
         {
@@ -96,14 +150,24 @@ internal static class ReaderVisualDeliveryProtocol
         {
             throw Invalid("Reader 视觉 page 无效");
         }
-        string revision = RequiredString(
+        string? drawingRevision = OptionalSafeString(
             message,
             "drawingRevision",
-            19);
-        if (!IsDrawingRevision(revision))
+            160);
+        string scope = RequiredString(message, "scope", 32);
+        if (!IsScope(scope))
         {
-            throw Invalid("Reader 视觉 drawingRevision 无效");
+            throw Invalid("Reader 视觉 scope 无效");
         }
+        string? selectionId = OptionalSafeString(
+            message,
+            "selectionId",
+            160);
+        if ((scope == "selection-near") != (selectionId is not null))
+        {
+            throw Invalid("Reader 视觉 selectionId 与 scope 不匹配");
+        }
+        string status = RequiredString(message, "status", 16);
         string mimeType = RequiredString(
             message,
             "mimeType",
@@ -148,11 +212,16 @@ internal static class ReaderVisualDeliveryProtocol
             throw Invalid("Reader 视觉 chunk 字段无效");
         }
         return new ReaderVisualDeliveryChunk(
+            sessionId,
             correlation,
-            status,
+            sourceInstanceId,
+            snapshotRevision,
             file,
             page.Clone(),
-            revision,
+            drawingRevision,
+            scope,
+            selectionId,
+            status,
             mimeType,
             chunkIndex,
             chunkCount,
@@ -173,7 +242,16 @@ internal static class ReaderVisualDeliveryProtocol
             && actual.ValueKind == JsonValueKind.Number
         )
         {
-            return expected.GetValue<long>() == actual.GetInt64();
+            JsonValue expectedValue = expected.AsValue();
+            long? expectedNumber =
+                expectedValue.TryGetValue(out long longValue)
+                    ? longValue
+                    : expectedValue.TryGetValue(out int intValue)
+                        ? intValue
+                        : null;
+            return expectedNumber is not null
+                && actual.TryGetInt64(out long actualNumber)
+                && expectedNumber.Value == actualNumber;
         }
         if (
             expected.GetValueKind() == JsonValueKind.String
@@ -188,6 +266,13 @@ internal static class ReaderVisualDeliveryProtocol
         return false;
     }
 
+    internal static bool IsJpeg(ReadOnlySpan<byte> bytes) =>
+        bytes.Length >= 4
+        && bytes[0] == 0xff
+        && bytes[1] == 0xd8
+        && bytes[^2] == 0xff
+        && bytes[^1] == 0xd9;
+
     private static bool ValidPage(JsonElement page)
     {
         if (
@@ -197,111 +282,126 @@ internal static class ReaderVisualDeliveryProtocol
         {
             return number >= 0;
         }
-        if (
-            page.ValueKind == JsonValueKind.String
+        return page.ValueKind == JsonValueKind.String
             && page.GetString() is string text
-        )
-        {
-            return text.Length is >= 1 and <= 256
-                && !text.Any(char.IsControl);
-        }
-        return false;
+            && text.Length is >= 1 and <= 256
+            && !text.Any(char.IsControl);
     }
-
-    private static bool IsDrawingRevision(string revision) =>
-        revision.Length == 19
-        && revision.StartsWith("dr_", StringComparison.Ordinal)
-        && revision.AsSpan(3).IndexOfAnyExcept(
-            "0123456789abcdef") < 0;
 
     private static bool IsBase64(string value)
     {
         foreach (char character in value)
         {
-            if (
+            if (!(
                 character is >= 'A' and <= 'Z'
                 or >= 'a' and <= 'z'
                 or >= '0' and <= '9'
-                or '+'
-                or '/'
-                or '='
-            )
+                or '+' or '/' or '='
+            ))
             {
-                continue;
+                return false;
             }
-            return false;
         }
-        int padding = value.EndsWith(
-            "==",
-            StringComparison.Ordinal)
-            ? 2
-            : value.EndsWith(
-                "=",
-                StringComparison.Ordinal)
-                ? 1
-                : 0;
-        return value.AsSpan(0, value.Length - padding)
-            .IndexOf('=') < 0;
+        return true;
+    }
+
+    private static string? OptionalSafeString(
+        JsonElement message,
+        string name,
+        int maximumLength)
+    {
+        JsonElement value = message.GetProperty(name);
+        if (value.ValueKind == JsonValueKind.Null)
+        {
+            return null;
+        }
+        if (
+            value.ValueKind != JsonValueKind.String
+            || value.GetString() is not string result
+            || result.Length is < 1
+            || result.Length > maximumLength
+            || !DirectBridgeContract.IsSafeId(result)
+        )
+        {
+            throw Invalid($"Reader 视觉 {name} 无效");
+        }
+        return result;
     }
 
     private static string RequiredSafeId(
-        JsonElement value,
-        string field)
+        JsonElement message,
+        string name)
     {
-        string result = RequiredString(value, field, 160);
+        string result = RequiredString(message, name, 160);
         if (!DirectBridgeContract.IsSafeId(result))
         {
-            throw Invalid($"Reader 视觉 {field} 无效");
+            throw Invalid($"Reader 视觉 {name} 无效");
         }
         return result;
     }
 
     private static string RequiredString(
-        JsonElement value,
-        string field,
+        JsonElement message,
+        string name,
         int maximumLength,
         bool allowEmpty = false)
     {
         if (
-            !value.TryGetProperty(field, out JsonElement property)
-            || property.ValueKind != JsonValueKind.String
-            || property.GetString() is not string result
-            || result.Length > maximumLength
+            !message.TryGetProperty(name, out JsonElement value)
+            || value.ValueKind != JsonValueKind.String
+            || value.GetString() is not string result
             || (!allowEmpty && result.Length == 0)
+            || result.Length > maximumLength
         )
         {
-            throw Invalid($"Reader 视觉 {field} 无效");
+            throw Invalid($"Reader 视觉 {name} 无效");
+        }
+        return result;
+    }
+
+    private static long RequiredInt64(
+        JsonElement message,
+        string name)
+    {
+        if (
+            !message.TryGetProperty(name, out JsonElement value)
+            || value.ValueKind != JsonValueKind.Number
+            || !value.TryGetInt64(out long result)
+        )
+        {
+            throw Invalid($"Reader 视觉 {name} 无效");
         }
         return result;
     }
 
     private static uint RequiredUInt32(
-        JsonElement value,
-        string field)
+        JsonElement message,
+        string name)
     {
         if (
-            !value.TryGetProperty(field, out JsonElement property)
-            || property.ValueKind != JsonValueKind.Number
-            || !property.TryGetUInt32(out uint result)
+            !message.TryGetProperty(name, out JsonElement value)
+            || value.ValueKind != JsonValueKind.Number
+            || !value.TryGetUInt32(out uint result)
         )
         {
-            throw Invalid($"Reader 视觉 {field} 无效");
+            throw Invalid($"Reader 视觉 {name} 无效");
         }
         return result;
     }
 
     private static void RequireExactFields(
         JsonElement value,
-        params string[] fields)
+        params string[] expected)
     {
         if (value.ValueKind != JsonValueKind.Object)
         {
             throw Invalid("Reader 视觉消息必须是对象");
         }
+        DirectJsonValidation.RequireNoDuplicateKeys(value);
         HashSet<string> actual = value.EnumerateObject()
             .Select(property => property.Name)
             .ToHashSet(StringComparer.Ordinal);
-        if (!actual.SetEquals(fields))
+        if (!actual.SetEquals(expected))
         {
             throw Invalid("Reader 视觉消息字段不匹配");
         }
@@ -314,234 +414,346 @@ internal static class ReaderVisualDeliveryProtocol
             retryable: false);
 }
 
-internal sealed class ReaderVisualDeliveryException : Exception
+internal sealed class ReaderContextSourceLease
 {
-    internal string Code { get; }
+    private readonly TaskCompletionSource<bool> _retired = new(
+        TaskCreationOptions.RunContinuationsAsynchronously);
 
-    internal bool Retryable { get; }
-
-    internal ReaderVisualDeliveryException(
-        string code,
-        string message,
-        bool retryable,
-        Exception? innerException = null)
-        : base(message, innerException)
+    internal ReaderContextSourceLease(
+        string sourceInstanceId,
+        string connectionId,
+        long generation)
     {
-        Code = code;
-        Retryable = retryable;
+        SourceInstanceId = sourceInstanceId;
+        ConnectionId = connectionId;
+        Generation = generation;
+    }
+
+    internal string SourceInstanceId { get; }
+    internal string ConnectionId { get; }
+    internal long Generation { get; }
+    internal Task LeaseRetired => _retired.Task;
+    internal void Retire() => _retired.TrySetResult(true);
+}
+
+internal sealed class ReaderContextSourceRouter
+{
+    private sealed record SourceRegistration(
+        ReaderContextSourceLease Lease,
+        Func<object, CancellationToken, Task> SendAsync);
+
+    private readonly object _gate = new();
+    private readonly Dictionary<string, SourceRegistration> _sources =
+        new(StringComparer.Ordinal);
+    private long _generation;
+
+    internal ReaderContextSourceLease Attach(
+        string sourceInstanceId,
+        string connectionId,
+        Func<object, CancellationToken, Task> sendAsync)
+    {
+        if (
+            !DirectBridgeContract.IsSafeId(sourceInstanceId)
+            || !DirectBridgeContract.IsSafeId(connectionId)
+        )
+        {
+            throw new ArgumentException(
+                "source and connection must be safe identifiers");
+        }
+        ArgumentNullException.ThrowIfNull(sendAsync);
+        ReaderContextSourceLease? retired = null;
+        ReaderContextSourceLease lease;
+        lock (_gate)
+        {
+            if (_sources.TryGetValue(
+                sourceInstanceId,
+                out SourceRegistration? existing))
+            {
+                retired = existing.Lease;
+            }
+            lease = new ReaderContextSourceLease(
+                sourceInstanceId,
+                connectionId,
+                checked(++_generation));
+            _sources[sourceInstanceId] = new SourceRegistration(
+                lease,
+                sendAsync);
+        }
+        retired?.Retire();
+        return lease;
+    }
+
+    internal void Detach(ReaderContextSourceLease lease)
+    {
+        ArgumentNullException.ThrowIfNull(lease);
+        bool removed = false;
+        lock (_gate)
+        {
+            if (
+                _sources.TryGetValue(
+                    lease.SourceInstanceId,
+                    out SourceRegistration? current)
+                && ReferenceEquals(current.Lease, lease)
+            )
+            {
+                _sources.Remove(lease.SourceInstanceId);
+                removed = true;
+            }
+        }
+        if (removed)
+        {
+            lease.Retire();
+        }
+    }
+
+    internal bool TryGetLease(
+        string sourceInstanceId,
+        out ReaderContextSourceLease? lease)
+    {
+        lock (_gate)
+        {
+            if (_sources.TryGetValue(
+                sourceInstanceId,
+                out SourceRegistration? registration))
+            {
+                lease = registration.Lease;
+                return true;
+            }
+        }
+        lease = null;
+        return false;
+    }
+
+    internal async Task SendAsync(
+        ReaderContextSourceLease lease,
+        object message,
+        CancellationToken cancellationToken)
+    {
+        Func<object, CancellationToken, Task> sendAsync;
+        lock (_gate)
+        {
+            if (
+                !_sources.TryGetValue(
+                    lease.SourceInstanceId,
+                    out SourceRegistration? current)
+                || !ReferenceEquals(current.Lease, lease)
+            )
+            {
+                throw new ReaderVisualDeliveryException(
+                    "BW_READER_SOURCE_OFFLINE",
+                    "指定 Reader 页面来源已离线",
+                    retryable: true);
+            }
+            sendAsync = current.SendAsync;
+        }
+        await sendAsync(message, cancellationToken).ConfigureAwait(false);
     }
 }
 
 internal sealed class ReaderVisualDeliveryBroker
 {
-    private const int MaximumPendingDeliveries = 1;
-    private const string PublishedCorrelationPrefix = "publish-";
     private static readonly TimeSpan DeliveryTimeout =
         TimeSpan.FromSeconds(12);
-    private static readonly TimeSpan PublishedWaitTimeout =
-        TimeSpan.FromSeconds(4);
+    private const int MaximumPendingDeliveries = 4;
 
     private sealed class PendingDelivery
     {
         internal PendingDelivery(
             ReaderVisualDeliveryRequest request,
-            TaskCompletionSource<ReaderVisualCapture?> completion)
+            ReaderContextSourceLease lease)
         {
             Request = request;
-            Completion = completion;
+            Lease = lease;
         }
 
         internal ReaderVisualDeliveryRequest Request { get; }
+        internal ReaderContextSourceLease Lease { get; }
         internal TaskCompletionSource<ReaderVisualCapture?> Completion
-        {
-            get;
-        }
+            { get; } = new(
+                TaskCreationOptions.RunContinuationsAsynchronously);
         internal StringBuilder Base64 { get; } = new();
         internal uint ExpectedChunkIndex { get; set; }
         internal uint? ChunkCount { get; set; }
         internal uint? TotalBytes { get; set; }
     }
 
-    private sealed class PublishedDelivery
-    {
-        internal PublishedDelivery(ReaderVisualDeliveryRequest request)
-        {
-            Request = request;
-        }
-
-        internal ReaderVisualDeliveryRequest Request { get; }
-        internal StringBuilder Base64 { get; } = new();
-        internal uint ExpectedChunkIndex { get; set; }
-        internal uint? ChunkCount { get; set; }
-        internal uint? TotalBytes { get; set; }
-    }
-
+    private readonly ReaderContextSourceRouter _router;
     private readonly object _gate = new();
     private readonly Dictionary<string, PendingDelivery> _pending =
         new(StringComparer.Ordinal);
-    private PublishedDelivery? _publishedPending;
-    private ReaderVisualDeliveryRequest? _publishedRequest;
-    private ReaderVisualCapture? _publishedCapture;
-    private TaskCompletionSource<bool> _publishedChanged =
-        NewPublishedSignal();
-    private string? _connectionId;
-    private Func<object, CancellationToken, Task>? _sendAsync;
 
-    internal void Attach(
-        string connectionId,
-        Func<object, CancellationToken, Task> sendAsync)
+    internal ReaderVisualDeliveryBroker(
+        ReaderContextSourceRouter router)
     {
-        ArgumentNullException.ThrowIfNull(sendAsync);
-        lock (_gate)
-        {
-            _connectionId = connectionId;
-            _sendAsync = sendAsync;
-        }
+        _router = router;
     }
 
-    internal void Detach(string connectionId)
+    internal async Task<ReaderVisualCapture?> RequestAsync(
+        ReaderVisualDeliveryRequest request,
+        CancellationToken cancellationToken)
     {
-        PendingDelivery[] abandoned;
+        if (
+            !_router.TryGetLease(
+                request.SourceInstanceId,
+                out ReaderContextSourceLease? lease)
+            || lease is null
+        )
+        {
+            throw new ReaderVisualDeliveryException(
+                "BW_READER_VISUAL_SOURCE_OFFLINE",
+                "快照指定的 Reader 页面来源当前不在线",
+                retryable: true);
+        }
+        PendingDelivery pending = new(request, lease);
         lock (_gate)
         {
-            if (!string.Equals(
-                _connectionId,
-                connectionId,
-                StringComparison.Ordinal))
+            if (_pending.Count >= MaximumPendingDeliveries)
             {
-                return;
+                throw new ReaderVisualDeliveryException(
+                    "BW_READER_VISUAL_CAPACITY",
+                    "Reader 视觉请求仍在处理中",
+                    retryable: true);
             }
-            _connectionId = null;
-            _sendAsync = null;
-            abandoned = _pending.Values.ToArray();
-            _pending.Clear();
+            if (!_pending.TryAdd(request.Correlation, pending))
+            {
+                throw new ReaderVisualDeliveryException(
+                    "BW_READER_VISUAL_DUPLICATE_PENDING",
+                    "相同 Reader 视觉请求仍在处理中",
+                    retryable: true);
+            }
         }
-        ReaderVisualDeliveryException failure = new(
-            "BW_READER_VISUAL_READER_DISCONNECTED",
-            "Reader 视觉获取前直连已断开",
-            retryable: true);
-        foreach (PendingDelivery pending in abandoned)
+        try
         {
-            pending.Completion.TrySetException(failure);
+            await _router.SendAsync(
+                lease,
+                ReaderVisualDeliveryProtocol.Event(request),
+                cancellationToken).ConfigureAwait(false);
+            Task winner = await Task.WhenAny(
+                pending.Completion.Task,
+                lease.LeaseRetired,
+                Task.Delay(DeliveryTimeout, cancellationToken))
+                .ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            if (winner == pending.Completion.Task)
+            {
+                return await pending.Completion.Task.ConfigureAwait(false);
+            }
+            if (winner == lease.LeaseRetired)
+            {
+                throw new ReaderVisualDeliveryException(
+                    "BW_READER_VISUAL_SOURCE_OFFLINE",
+                    "取图期间指定 Reader 页面来源已离线",
+                    retryable: true);
+            }
+            throw new ReaderVisualDeliveryException(
+                "BW_READER_VISUAL_TIMEOUT",
+                "Reader 视觉获取超时",
+                retryable: true);
+        }
+        finally
+        {
+            lock (_gate)
+            {
+                if (
+                    _pending.TryGetValue(
+                        request.Correlation,
+                        out PendingDelivery? current)
+                    && ReferenceEquals(current, pending)
+                )
+                {
+                    _pending.Remove(request.Correlation);
+                }
+            }
         }
     }
 
     internal ReaderVisualDeliveryAck Accept(
-        string connectionId,
+        ReaderContextSourceLease lease,
         ReaderVisualDeliveryChunk chunk)
     {
         PendingDelivery pending;
         ReaderVisualCapture? completed = null;
-        TaskCompletionSource<bool>? publishedChanged = null;
-        ReaderVisualDeliveryAck? publishedAck = null;
         lock (_gate)
         {
-            if (!string.Equals(
-                _connectionId,
-                connectionId,
-                StringComparison.Ordinal))
+            if (
+                !_pending.TryGetValue(chunk.Correlation, out pending!)
+                || !ReferenceEquals(pending.Lease, lease)
+            )
             {
                 throw ProtocolFailure(
                     "BW_READER_VISUAL_NOT_PENDING",
                     "Reader 视觉请求不存在或已过期");
             }
-            if (!_pending.TryGetValue(
-                chunk.Correlation,
-                out pending!))
+            RequireIdentity(pending.Request, chunk);
+            if (chunk.Status == "unavailable")
             {
-                if (!chunk.Correlation.StartsWith(
-                    PublishedCorrelationPrefix,
-                    StringComparison.Ordinal))
-                {
-                    throw ProtocolFailure(
-                        "BW_READER_VISUAL_NOT_PENDING",
-                        "Reader 视觉请求不存在或已过期");
-                }
-                publishedAck = AcceptPublishedLocked(
-                    chunk,
-                    out publishedChanged);
+                _pending.Remove(chunk.Correlation);
+                pending.Completion.TrySetResult(null);
             }
             else
             {
-                RequireIdentity(pending.Request, chunk);
-                if (chunk.Status == "unavailable")
+                if (
+                    chunk.ChunkIndex != pending.ExpectedChunkIndex
+                    || (
+                        pending.ChunkCount is uint count
+                        && count != chunk.ChunkCount
+                    )
+                    || (
+                        pending.TotalBytes is uint bytes
+                        && bytes != chunk.TotalBytes
+                    )
+                )
                 {
-                    _pending.Remove(chunk.Correlation);
-                    pending.Completion.TrySetResult(null);
-                    completed = null;
+                    throw ProtocolFailure(
+                        "BW_READER_VISUAL_SEQUENCE_INVALID",
+                        "Reader 视觉分块顺序或元数据不一致");
                 }
-                else
+                pending.ChunkCount ??= chunk.ChunkCount;
+                pending.TotalBytes ??= chunk.TotalBytes;
+                pending.Base64.Append(chunk.Data);
+                pending.ExpectedChunkIndex += 1;
+                if (
+                    pending.Base64.Length
+                    > ReaderVisualDeliveryProtocol.MaximumImageBytes
+                        * 4 / 3 + 4
+                )
                 {
-                    if (
-                        chunk.ChunkIndex != pending.ExpectedChunkIndex
-                        || (
-                            pending.ChunkCount is uint count
-                            && count != chunk.ChunkCount
-                        )
-                        || (
-                            pending.TotalBytes is uint expectedBytes
-                            && expectedBytes != chunk.TotalBytes
-                        )
-                    )
+                    throw ProtocolFailure(
+                        "BW_READER_VISUAL_CAPACITY",
+                        "Reader 视觉数据超过大小上限");
+                }
+                if (pending.ExpectedChunkIndex == chunk.ChunkCount)
+                {
+                    byte[] data;
+                    try
+                    {
+                        data = Convert.FromBase64String(
+                            pending.Base64.ToString());
+                    }
+                    catch (FormatException exception)
                     {
                         throw ProtocolFailure(
-                            "BW_READER_VISUAL_SEQUENCE_INVALID",
-                            "Reader 视觉分块顺序或元数据不一致");
+                            "BW_READER_VISUAL_SCHEMA_INVALID",
+                            "Reader 视觉 base64 无效",
+                            exception);
                     }
-                    pending.ChunkCount ??= chunk.ChunkCount;
-                    pending.TotalBytes ??= chunk.TotalBytes;
-                    pending.Base64.Append(chunk.Data);
-                    pending.ExpectedChunkIndex += 1;
                     if (
-                        pending.Base64.Length
-                            > ReaderVisualDeliveryProtocol
-                                .MaximumImageBytes * 4 / 3 + 4
+                        data.Length != chunk.TotalBytes
+                        || !ReaderVisualDeliveryProtocol.IsJpeg(data)
                     )
                     {
+                        Array.Clear(data);
                         throw ProtocolFailure(
-                            "BW_READER_VISUAL_CAPACITY",
-                            "Reader 视觉数据超过大小上限");
+                            "BW_READER_VISUAL_IMAGE_INVALID",
+                            "Reader 视觉 JPEG 无效");
                     }
-                    if (
-                        pending.ExpectedChunkIndex
-                        == chunk.ChunkCount
-                    )
-                    {
-                        byte[] bytes;
-                        try
-                        {
-                            bytes = Convert.FromBase64String(
-                                pending.Base64.ToString());
-                        }
-                        catch (FormatException exception)
-                        {
-                            throw ProtocolFailure(
-                                "BW_READER_VISUAL_SCHEMA_INVALID",
-                                "Reader 视觉 base64 无效",
-                                exception);
-                        }
-                        if (
-                            bytes.Length != chunk.TotalBytes
-                            || !IsJpeg(bytes)
-                        )
-                        {
-                            throw ProtocolFailure(
-                                "BW_READER_VISUAL_IMAGE_INVALID",
-                                "Reader 视觉 JPEG 无效");
-                        }
-                        completed = new ReaderVisualCapture(
-                            ReaderVisualDeliveryProtocol.MimeType,
-                            bytes);
-                        _pending.Remove(chunk.Correlation);
-                        pending.Completion.TrySetResult(completed);
-                    }
+                    completed = new ReaderVisualCapture(
+                        ReaderVisualDeliveryProtocol.MimeType,
+                        data);
+                    _pending.Remove(chunk.Correlation);
+                    pending.Completion.TrySetResult(completed);
                 }
             }
-        }
-        publishedChanged?.TrySetResult(true);
-        if (publishedAck is not null)
-        {
-            return publishedAck;
         }
         return new ReaderVisualDeliveryAck(
             chunk.Correlation,
@@ -552,330 +764,29 @@ internal sealed class ReaderVisualDeliveryBroker
                 || completed is not null);
     }
 
-    internal async Task<ReaderVisualCapture?> GetPublishedAsync(
-        ReaderVisualDeliveryRequest request,
-        CancellationToken cancellationToken)
-    {
-        Stopwatch elapsed = Stopwatch.StartNew();
-        while (elapsed.Elapsed < PublishedWaitTimeout)
-        {
-            Task changed;
-            lock (_gate)
-            {
-                ReaderVisualCapture? current =
-                    MatchingPublishedLocked(request);
-                if (current is not null)
-                {
-                    return current;
-                }
-                changed = _publishedChanged.Task;
-            }
-            TimeSpan remaining =
-                PublishedWaitTimeout - elapsed.Elapsed;
-            if (remaining <= TimeSpan.Zero)
-            {
-                break;
-            }
-            try
-            {
-                await changed.WaitAsync(
-                    remaining,
-                    cancellationToken).ConfigureAwait(false);
-            }
-            catch (TimeoutException)
-            {
-                return null;
-            }
-        }
-        return null;
-    }
-
-    internal async Task<ReaderVisualCapture?> RequestAsync(
-        ReaderVisualDeliveryRequest request,
-        CancellationToken cancellationToken)
-    {
-        Func<object, CancellationToken, Task> sendAsync;
-        TaskCompletionSource<ReaderVisualCapture?> completion = new(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        lock (_gate)
-        {
-            if (_sendAsync is null || _connectionId is null)
-            {
-                throw new ReaderVisualDeliveryException(
-                    "BW_READER_VISUAL_READER_OFFLINE",
-                    "当前没有已认证的 Reader 直连可获取视觉",
-                    retryable: true);
-            }
-            if (_pending.Count >= MaximumPendingDeliveries)
-            {
-                throw new ReaderVisualDeliveryException(
-                    "BW_READER_VISUAL_CAPACITY",
-                    "Reader 视觉请求仍在处理中",
-                    retryable: true);
-            }
-            if (!_pending.TryAdd(
-                request.Correlation,
-                new PendingDelivery(request, completion)))
-            {
-                throw new ReaderVisualDeliveryException(
-                    "BW_READER_VISUAL_DUPLICATE_PENDING",
-                    "相同 Reader 视觉请求仍在处理中",
-                    retryable: true);
-            }
-            sendAsync = _sendAsync;
-        }
-        try
-        {
-            await sendAsync(
-                ReaderVisualDeliveryProtocol.Event(request),
-                cancellationToken).ConfigureAwait(false);
-            try
-            {
-                return await completion.Task.WaitAsync(
-                    DeliveryTimeout,
-                    cancellationToken).ConfigureAwait(false);
-            }
-            catch (TimeoutException exception)
-            {
-                throw new ReaderVisualDeliveryException(
-                    "BW_READER_VISUAL_TIMEOUT",
-                    "Reader 视觉获取超时",
-                    retryable: true,
-                    exception);
-            }
-        }
-        catch (ReaderVisualDeliveryException)
-        {
-            throw;
-        }
-        catch (OperationCanceledException)
-            when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (Exception exception)
-            when (
-                exception is IOException
-                or WebSocketException
-                or ObjectDisposedException
-                or InvalidOperationException
-            )
-        {
-            throw new ReaderVisualDeliveryException(
-                "BW_READER_VISUAL_SEND_FAILED",
-                "Reader 视觉请求无法写入当前直连",
-                retryable: true,
-                exception);
-        }
-        finally
-        {
-            lock (_gate)
-            {
-                if (
-                    _pending.TryGetValue(
-                        request.Correlation,
-                        out PendingDelivery? current)
-                    && ReferenceEquals(
-                        current.Completion,
-                        completion)
-                )
-                {
-                    _pending.Remove(request.Correlation);
-                }
-            }
-        }
-    }
-
     private static void RequireIdentity(
         ReaderVisualDeliveryRequest request,
         ReaderVisualDeliveryChunk chunk)
     {
         if (
-            !string.Equals(
-                request.File,
-                chunk.File,
-                StringComparison.Ordinal)
+            request.SourceInstanceId != chunk.SourceInstanceId
+            || request.SnapshotRevision != chunk.SnapshotRevision
+            || request.File != chunk.File
             || !ReaderVisualDeliveryProtocol.PageEquivalent(
                 request.Page,
                 chunk.Page)
-            || !string.Equals(
-                request.DrawingRevision,
-                chunk.DrawingRevision,
-                StringComparison.Ordinal)
+            || request.DrawingRevision != chunk.DrawingRevision
+            || request.Scope != chunk.Scope
+            || request.SelectionId != chunk.SelectionId
         )
         {
             throw ProtocolFailure(
                 "BW_READER_VISUAL_IDENTITY_MISMATCH",
-                "Reader 视觉页或笔迹版本与请求不一致");
+                "Reader 视觉来源、页面或版本与请求不一致");
         }
     }
 
-    private ReaderVisualDeliveryAck AcceptPublishedLocked(
-        ReaderVisualDeliveryChunk chunk,
-        out TaskCompletionSource<bool>? changed)
-    {
-        changed = null;
-        ReaderVisualDeliveryRequest incoming = new(
-            chunk.Correlation,
-            chunk.File,
-            JsonNode.Parse(chunk.Page.GetRawText())
-                ?? throw ProtocolFailure(
-                    "BW_READER_VISUAL_SCHEMA_INVALID",
-                    "Reader 视觉 page 无效"),
-            chunk.DrawingRevision);
-        if (chunk.Status == "unavailable")
-        {
-            _publishedPending = null;
-            if (
-                _publishedRequest is not null
-                && SameIdentity(_publishedRequest, incoming)
-            )
-            {
-                _publishedRequest = null;
-                _publishedCapture = null;
-                changed = RotatePublishedSignalLocked();
-            }
-            return new ReaderVisualDeliveryAck(
-                chunk.Correlation,
-                0,
-                Accepted: true,
-                Complete: true);
-        }
-
-        if (
-            _publishedPending is null
-            || !string.Equals(
-                _publishedPending.Request.Correlation,
-                chunk.Correlation,
-                StringComparison.Ordinal)
-        )
-        {
-            if (chunk.ChunkIndex != 0)
-            {
-                throw ProtocolFailure(
-                    "BW_READER_VISUAL_SEQUENCE_INVALID",
-                    "Reader 主动视觉发布必须从首块开始");
-            }
-            _publishedPending = new PublishedDelivery(incoming);
-        }
-        PublishedDelivery pending = _publishedPending;
-        RequireIdentity(pending.Request, chunk);
-        if (
-            chunk.ChunkIndex != pending.ExpectedChunkIndex
-            || (
-                pending.ChunkCount is uint count
-                && count != chunk.ChunkCount
-            )
-            || (
-                pending.TotalBytes is uint expectedBytes
-                && expectedBytes != chunk.TotalBytes
-            )
-        )
-        {
-            throw ProtocolFailure(
-                "BW_READER_VISUAL_SEQUENCE_INVALID",
-                "Reader 主动视觉分块顺序或元数据不一致");
-        }
-        pending.ChunkCount ??= chunk.ChunkCount;
-        pending.TotalBytes ??= chunk.TotalBytes;
-        pending.Base64.Append(chunk.Data);
-        pending.ExpectedChunkIndex += 1;
-        if (
-            pending.Base64.Length
-            > ReaderVisualDeliveryProtocol.MaximumImageBytes * 4 / 3 + 4
-        )
-        {
-            _publishedPending = null;
-            throw ProtocolFailure(
-                "BW_READER_VISUAL_CAPACITY",
-                "Reader 主动视觉数据超过大小上限");
-        }
-        if (pending.ExpectedChunkIndex != chunk.ChunkCount)
-        {
-            return new ReaderVisualDeliveryAck(
-                chunk.Correlation,
-                chunk.ChunkIndex,
-                Accepted: true,
-                Complete: false);
-        }
-
-        byte[] bytes;
-        try
-        {
-            bytes = Convert.FromBase64String(
-                pending.Base64.ToString());
-        }
-        catch (FormatException exception)
-        {
-            _publishedPending = null;
-            throw ProtocolFailure(
-                "BW_READER_VISUAL_SCHEMA_INVALID",
-                "Reader 主动视觉 base64 无效",
-                exception);
-        }
-        if (
-            bytes.Length != chunk.TotalBytes
-            || !IsJpeg(bytes)
-        )
-        {
-            _publishedPending = null;
-            throw ProtocolFailure(
-                "BW_READER_VISUAL_IMAGE_INVALID",
-                "Reader 主动视觉 JPEG 无效");
-        }
-        _publishedRequest = pending.Request;
-        _publishedCapture = new ReaderVisualCapture(
-            ReaderVisualDeliveryProtocol.MimeType,
-            bytes);
-        _publishedPending = null;
-        changed = RotatePublishedSignalLocked();
-        return new ReaderVisualDeliveryAck(
-            chunk.Correlation,
-            chunk.ChunkIndex,
-            Accepted: true,
-            Complete: true);
-    }
-
-    private ReaderVisualCapture? MatchingPublishedLocked(
-        ReaderVisualDeliveryRequest request) =>
-        _publishedRequest is not null
-        && _publishedCapture is not null
-        && SameIdentity(_publishedRequest, request)
-            ? _publishedCapture
-            : null;
-
-    private TaskCompletionSource<bool> RotatePublishedSignalLocked()
-    {
-        TaskCompletionSource<bool> previous = _publishedChanged;
-        _publishedChanged = NewPublishedSignal();
-        return previous;
-    }
-
-    private static TaskCompletionSource<bool> NewPublishedSignal() =>
-        new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-    private static bool SameIdentity(
-        ReaderVisualDeliveryRequest left,
-        ReaderVisualDeliveryRequest right) =>
-        string.Equals(
-            left.File,
-            right.File,
-            StringComparison.Ordinal)
-        && JsonNode.DeepEquals(left.Page, right.Page)
-        && string.Equals(
-            left.DrawingRevision,
-            right.DrawingRevision,
-            StringComparison.Ordinal);
-
-    private static bool IsJpeg(byte[] bytes) =>
-        bytes.Length >= 4
-        && bytes[0] == 0xff
-        && bytes[1] == 0xd8
-        && bytes[2] == 0xff
-        && bytes[^2] == 0xff
-        && bytes[^1] == 0xd9;
-
-    private static DirectProtocolException ProtocolFailure(
+    private static ReaderVisualDeliveryException ProtocolFailure(
         string code,
         string message,
         Exception? innerException = null) =>

@@ -1,5 +1,6 @@
 import SwiftUI
 import UIKit
+import UniformTypeIdentifiers
 
 @MainActor
 final class NativeReaderToolsCoordinator: ObservableObject {
@@ -140,8 +141,11 @@ typealias NativeReaderFeatureCoordinator = NativeReaderToolsCoordinator
 struct NativeReaderToolsView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var coordinator = NativeReaderToolsCoordinator()
+    @StateObject private var localNotes = ReaderLocalNotesManager.shared
     @State private var presentsAnnotation = false
     @State private var presentsTranslation = false
+    @State private var presentsLocalNotesFolderPicker = false
+    @State private var selectedLocalNote: ReaderLocalNoteProjection?
     @State private var translationText = ""
     @State private var performedInitialAction = false
 
@@ -162,6 +166,7 @@ struct NativeReaderToolsView: View {
                 currentPageSection
                 nativeActionsSection
                 recognitionSection
+                localNotesSection
                 quickNotesSection
                 NativePencilSettingsSection()
                 statusSection
@@ -192,6 +197,36 @@ struct NativeReaderToolsView: View {
                 if let image = coordinator.viewportImage {
                     NativePencilAnnotationEditor(image: image) { annotated in
                         Task { await coordinator.saveAnnotation(annotated) }
+                    }
+                }
+            }
+            .fileImporter(
+                isPresented: $presentsLocalNotesFolderPicker,
+                allowedContentTypes: [.folder]
+            ) { result in
+                switch result {
+                case .success(let url):
+                    localNotes.configureFolder(url)
+                case .failure(let error):
+                    if (error as? CocoaError)?.code != .userCancelled {
+                        localNotes.reportError(error)
+                    }
+                }
+            }
+            .sheet(item: $selectedLocalNote) { note in
+                NavigationStack {
+                    ScrollView {
+                        Text(note.content)
+                            .frame(maxWidth: .infinity, alignment: .leading)
+                            .padding()
+                            .textSelection(.enabled)
+                    }
+                    .navigationTitle(note.title)
+                    .navigationBarTitleDisplayMode(.inline)
+                    .toolbar {
+                        ToolbarItem(placement: .confirmationAction) {
+                            Button("完成") { selectedLocalNote = nil }
+                        }
                     }
                 }
             }
@@ -344,6 +379,82 @@ struct NativeReaderToolsView: View {
                         .foregroundStyle(.secondary)
                     }
                 }
+            }
+        }
+    }
+
+    @ViewBuilder
+    private var localNotesSection: some View {
+        Section("本地 Obsidian 笔记") {
+            Toggle(
+                "写入 iPad 本地 Vault",
+                isOn: Binding(
+                    get: { localNotes.isEnabled },
+                    set: { localNotes.setEnabled($0) }
+                )
+            )
+            .disabled(!localNotes.isConfigured)
+
+            Button {
+                presentsLocalNotesFolderPicker = true
+            } label: {
+                Label(
+                    localNotes.isConfigured ? "更换 Vault 文件夹" : "选择 Vault 文件夹",
+                    systemImage: "folder.badge.plus"
+                )
+            }
+
+            if localNotes.isConfigured {
+                LabeledContent(
+                    "当前文件夹",
+                    value: localNotes.folderName.isEmpty
+                        ? "已授权文件夹"
+                        : localNotes.folderName
+                )
+                Button("移除本地文件夹授权", role: .destructive) {
+                    localNotes.clearFolder()
+                }
+            }
+
+            if !localNotes.notes.isEmpty {
+                ForEach(localNotes.notes.prefix(8)) { note in
+                    Button {
+                        selectedLocalNote = note
+                    } label: {
+                        VStack(alignment: .leading, spacing: 4) {
+                            Text(note.title)
+                                .font(.body.weight(.medium))
+                                .foregroundStyle(.primary)
+                                .lineLimit(2)
+                            Text(note.preview)
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                                .lineLimit(3)
+                            Text(note.fileName)
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                                .lineLimit(1)
+                        }
+                        .frame(maxWidth: .infinity, alignment: .leading)
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            Text("关闭时继续使用原有 Pi 笔记线路；开启后，App 与 Safari 扩展共享创建、查看和读取能力。扩展创建的内容会先安全排队，再由 App 自动写入所选 Vault。请选择 Vault 根目录，以便 Obsidian 链接能够正确打开。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if let notice = localNotes.notice {
+                Label(notice, systemImage: "checkmark.circle.fill")
+                    .font(.footnote)
+                    .foregroundStyle(.green)
+            }
+            if let error = localNotes.errorMessage {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
             }
         }
     }

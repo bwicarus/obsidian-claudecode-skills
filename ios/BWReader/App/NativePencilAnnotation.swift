@@ -9,6 +9,8 @@ extension NativePencilGestureMapping {
             return "跟随 iPad 设置"
         case .toggleEraser:
             return "切换画笔与橡皮"
+        case .toggleSelection:
+            return "切换画笔与选区笔"
         case .showPalette:
             return "显示绘图工具"
         case .disabled:
@@ -122,7 +124,12 @@ final class NativePencilAnnotationSession: ObservableObject {
 struct NativePencilAnnotationEditor: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var session: NativePencilAnnotationSession
+    @State private var selectedTool = NativePencilAnnotationTool.pen
+    @State private var selectedColorHex = "#ff3b30"
+    @State private var selectedWidth: CGFloat = 4
     let onSave: (UIImage) -> Void
+
+    private let colors = ["#ff3b30", "#007aff", "#111111", "#34c759"]
 
     init(image: UIImage, onSave: @escaping (UIImage) -> Void) {
         _session = StateObject(
@@ -133,25 +140,75 @@ struct NativePencilAnnotationEditor: View {
 
     var body: some View {
         NavigationStack {
-            GeometryReader { proxy in
-                ZStack {
-                    Color.black
-                    Image(uiImage: session.sourceImage)
-                        .resizable()
-                        .scaledToFit()
-                    NativePencilCanvas(
-                        drawing: $session.drawing,
-                        canvasSize: $session.canvasSize
-                    )
+            VStack(spacing: 0) {
+                GeometryReader { proxy in
+                    ZStack {
+                        Color.black
+                        Image(uiImage: session.sourceImage)
+                            .resizable()
+                            .scaledToFit()
+                        NativePencilCanvas(
+                            drawing: $session.drawing,
+                            canvasSize: $session.canvasSize,
+                            tool: selectedTool,
+                            colorHex: selectedColorHex,
+                            width: selectedWidth
+                        )
+                    }
+                    .onAppear {
+                        session.canvasSize = proxy.size
+                    }
+                    .onChange(of: proxy.size) { _, value in
+                        session.canvasSize = value
+                    }
                 }
-                .onAppear {
-                    session.canvasSize = proxy.size
+
+                HStack(spacing: 12) {
+                    Button {
+                        selectedTool = .pen
+                    } label: {
+                        Image(systemName: "pencil.tip")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(selectedTool == .pen ? .blue : .gray)
+
+                    Button {
+                        selectedTool = .eraser
+                    } label: {
+                        Image(systemName: "eraser")
+                    }
+                    .buttonStyle(.borderedProminent)
+                    .tint(selectedTool == .eraser ? .blue : .gray)
+
+                    ForEach(colors, id: \.self) { color in
+                        Button {
+                            selectedColorHex = color
+                            selectedTool = .pen
+                        } label: {
+                            Circle()
+                                .fill(Color(uiColor: UIColor(bwHex: color)))
+                                .frame(width: 24, height: 24)
+                                .overlay {
+                                    if selectedColorHex == color {
+                                        Circle().stroke(.white, lineWidth: 2)
+                                    }
+                                }
+                        }
+                        .buttonStyle(.plain)
+                    }
+
+                    Image(systemName: "line.diagonal")
+                    Slider(value: $selectedWidth, in: 1...16)
+                        .frame(maxWidth: 180)
+                    Text("\(Int(selectedWidth))")
+                        .font(.caption.monospacedDigit())
+                        .frame(width: 24)
                 }
-                .onChange(of: proxy.size) { _, value in
-                    session.canvasSize = value
-                }
+                .padding(.horizontal, 14)
+                .padding(.vertical, 10)
+                .background(.ultraThinMaterial)
             }
-            .ignoresSafeArea(edges: .bottom)
+            .background(Color.black.ignoresSafeArea())
             .navigationTitle("标注当前视口")
             .navigationBarTitleDisplayMode(.inline)
             .toolbar {
@@ -174,9 +231,17 @@ struct NativePencilAnnotationEditor: View {
     }
 }
 
+private enum NativePencilAnnotationTool: Equatable {
+    case pen
+    case eraser
+}
+
 private struct NativePencilCanvas: UIViewRepresentable {
     @Binding var drawing: PKDrawing
     @Binding var canvasSize: CGSize
+    let tool: NativePencilAnnotationTool
+    let colorHex: String
+    let width: CGFloat
 
     func makeCoordinator() -> Coordinator {
         Coordinator(parent: self)
@@ -188,12 +253,17 @@ private struct NativePencilCanvas: UIViewRepresentable {
         canvas.backgroundColor = .clear
         canvas.isOpaque = false
         canvas.drawingPolicy = .pencilOnly
-        canvas.tool = PKInkingTool(.pen, color: .systemRed, width: 4)
-        context.coordinator.attachToolPicker(to: canvas)
+        context.coordinator.applySelectedTool(
+            to: canvas,
+            tool: tool,
+            colorHex: colorHex,
+            width: width
+        )
         return canvas
     }
 
     func updateUIView(_ canvas: PKCanvasView, context: Context) {
+        context.coordinator.parent = self
         if canvas.drawing.dataRepresentation() != drawing.dataRepresentation() {
             canvas.drawing = drawing
         }
@@ -202,28 +272,50 @@ private struct NativePencilCanvas: UIViewRepresentable {
                 canvasSize = canvas.bounds.size
             }
         }
-        context.coordinator.attachToolPicker(to: canvas)
+        context.coordinator.applySelectedTool(
+            to: canvas,
+            tool: tool,
+            colorHex: colorHex,
+            width: width
+        )
     }
 
     final class Coordinator: NSObject, PKCanvasViewDelegate {
         var parent: NativePencilCanvas
-        private let toolPicker = PKToolPicker()
-        private weak var attachedCanvas: PKCanvasView?
+        private var appliedTool: NativePencilAnnotationTool?
+        private var appliedColorHex = ""
+        private var appliedWidth: CGFloat = 0
 
         init(parent: NativePencilCanvas) {
             self.parent = parent
         }
 
-        func attachToolPicker(to canvas: PKCanvasView) {
-            guard attachedCanvas !== canvas || !canvas.isFirstResponder else {
+        func applySelectedTool(
+            to canvas: PKCanvasView,
+            tool: NativePencilAnnotationTool,
+            colorHex: String,
+            width requestedWidth: CGFloat
+        ) {
+            let width = max(1, min(requestedWidth, 16))
+            guard
+                appliedTool != tool
+                    || appliedColorHex != colorHex
+                    || appliedWidth != width
+            else {
                 return
             }
-            DispatchQueue.main.async { [weak self, weak canvas] in
-                guard let self, let canvas, canvas.window != nil else { return }
-                self.attachedCanvas = canvas
-                self.toolPicker.addObserver(canvas)
-                self.toolPicker.setVisible(true, forFirstResponder: canvas)
-                canvas.becomeFirstResponder()
+            appliedTool = tool
+            appliedColorHex = colorHex
+            appliedWidth = width
+            switch tool {
+            case .pen:
+                canvas.tool = PKInkingTool(
+                    .pen,
+                    color: UIColor(bwHex: colorHex),
+                    width: width
+                )
+            case .eraser:
+                canvas.tool = PKEraserTool(.vector)
             }
         }
 

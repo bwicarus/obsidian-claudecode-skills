@@ -70,6 +70,14 @@ BACKGROUND_SCRIPTS = (
 )
 BACKGROUND_IMPORTS = BACKGROUND_SCRIPTS[:-1]
 ACTIVE_ORIGIN = "https://bwicarus.taile44d0c.ts.net/"
+# The Windows bridge. Narrow on purpose: one named host, nothing wildcarded.
+#
+# The extension already talks to this machine -- the computer-voice link has run
+# over wss:// to it all along -- but WebSocket does not consult host permissions
+# and fetch does, so posting a snapshot needs it stated. Adding it grants no
+# reach the extension did not already have; it only makes the existing reach
+# usable by the one request that needs it.
+BRIDGE_ORIGIN = "https://bwicarus-2.taile44d0c.ts.net/"
 TRUSTED_PWA_MATCHES = {
     ACTIVE_ORIGIN + "pdf/view",
     ACTIVE_ORIGIN + "pdf/view?*",
@@ -84,10 +92,7 @@ TRUSTED_PWA_MATCHES = {
 # the upload is rejected outright when they differ. This is also the name shown
 # in the iPad Safari extension list, so it is the user-facing one.
 APP_NAME = "bwicarus-test"
-# Must match the bundle ID of the App Store Connect record, otherwise
-# altool cannot resolve which app the upload belongs to.
 BUNDLE_ID = "space.bwicarus.bwreader2"
-# Matches the App Store Connect record (Apple ID 6793932077).
 SKU = "bw-reader-ipad-002"
 PRIMARY_LANGUAGE = "zh-Hans"
 SAFARI_ICON = "icons/icon-1024-safari.png"
@@ -138,7 +143,7 @@ def safari_manifest(*, compat: bool = False) -> dict:
             "scripting",
         ]
     )
-    manifest["host_permissions"] = [ACTIVE_ORIGIN + "*"]
+    manifest["host_permissions"] = [ACTIVE_ORIGIN + "*", BRIDGE_ORIGIN + "*"]
     manifest["background"] = (
         {"scripts": list(BACKGROUND_SCRIPTS), "persistent": False}
         if compat
@@ -216,8 +221,14 @@ def validate(manifest: dict, *, compat: bool = False) -> None:
     validate_background_imports()
     if manifest.get("manifest_version") != 3:
         raise SystemExit("Safari package requires Manifest V3")
-    if manifest.get("host_permissions") != [ACTIVE_ORIGIN + "*"]:
-        raise SystemExit("Safari host permission must remain restricted to the active Pi")
+    if manifest.get("host_permissions") != [
+        ACTIVE_ORIGIN + "*",
+        BRIDGE_ORIGIN + "*",
+    ]:
+        raise SystemExit(
+            "Safari host permissions must remain exactly the active Pi and the "
+            "Windows bridge"
+        )
     if manifest.get("web_accessible_resources") != INLINE_COMPUTER_VOICE_RESOURCES:
         raise SystemExit(
             "Safari may expose only the inline computer-voice frame to HTTP(S) pages"

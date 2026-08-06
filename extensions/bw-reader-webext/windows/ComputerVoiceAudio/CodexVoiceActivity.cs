@@ -44,16 +44,60 @@ internal interface ICodexVoiceActivitySource
     CodexVoiceActivitySnapshot Read();
 }
 
+internal enum DirectVoiceCommand
+{
+    Start,
+    Stop,
+}
+
 internal interface ICodexVoiceShortcutSender
 {
-    void Send(CodexAppTarget target);
+    void Send(CodexAppTarget target, DirectVoiceCommand command);
 }
 
 internal sealed class WindowsCodexVoiceShortcutSender
     : ICodexVoiceShortcutSender
 {
-    public void Send(CodexAppTarget target) =>
-        WindowsCodexAppProbe.SendVoiceShortcutOrThrow(target);
+    private readonly ICodexVoiceShortcutBrokerTransport _transport;
+
+    internal WindowsCodexVoiceShortcutSender()
+        : this(new NamedPipeCodexVoiceShortcutBrokerTransport())
+    {
+    }
+
+    internal WindowsCodexVoiceShortcutSender(
+        ICodexVoiceShortcutBrokerTransport transport)
+    {
+        _transport = transport
+            ?? throw new ArgumentNullException(nameof(transport));
+    }
+
+    public void Send(
+        CodexAppTarget target,
+        DirectVoiceCommand command)
+    {
+        ArgumentNullException.ThrowIfNull(target);
+        if (target.AppKind != DirectAppTargets.CodexDesktop)
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_SHORTCUT_TARGET_INVALID",
+                "Codex 全局快捷键不能用于其他应用目标");
+        }
+        // Recheck the same root generation immediately before asking the
+        // interactive-user broker to emit F24.  The broker is deliberately
+        // only a one-shot input executor, not an app-discovery authority.
+        WindowsCodexAppProbe.RequireCurrentReadyTarget(target);
+        WindowsCodexAppProbe.RequireExpectedGlobalVoiceShortcut();
+
+        string requestId = CodexVoiceShortcutBrokerContract.NewRequestId();
+        string request = CodexVoiceShortcutBrokerContract.SerializeRequest(
+            requestId,
+            target);
+        string receipt = _transport.Exchange(request);
+        CodexVoiceShortcutBrokerContract.RequireSuccessfulReceipt(
+            receipt,
+            requestId);
+    }
 }
 
 internal sealed class WindowsRegistryCodexVoiceActivitySource
@@ -68,6 +112,21 @@ internal sealed class WindowsRegistryCodexVoiceActivitySource
 
     private const string StartValueName = "LastUsedTimeStart";
     private const string StopValueName = "LastUsedTimeStop";
+    private readonly string _registryPath;
+
+    internal WindowsRegistryCodexVoiceActivitySource()
+        : this(DirectAppTargets.CodexDesktop)
+    {
+    }
+
+    internal WindowsRegistryCodexVoiceActivitySource(string appKind)
+    {
+        DirectAppTargetProfile profile = DirectAppTargets.Require(appKind);
+        _registryPath =
+            @"Software\Microsoft\Windows\CurrentVersion\"
+            + @"CapabilityAccessManager\ConsentStore\microphone\"
+            + profile.MicrophoneConsentPackageKey;
+    }
 
     public CodexVoiceActivitySnapshot Read()
     {
@@ -79,7 +138,7 @@ internal sealed class WindowsRegistryCodexVoiceActivitySource
         try
         {
             using RegistryKey? key = Registry.CurrentUser.OpenSubKey(
-                RegistryPath,
+                _registryPath,
                 writable: false);
             if (key is null)
             {
@@ -160,11 +219,55 @@ internal sealed record CodexVoiceStartBaseline(
     internal bool ShortcutRequired => !Snapshot.Active;
 }
 
+internal sealed record CodexVoiceShortcutReceipt(
+    Guid AttemptId,
+    uint RootProcessId,
+    long RootProcessStartFileTimeUtc,
+    long SentAtFileTimeUtc);
+
+internal sealed record CodexVoiceOwnershipToken(
+    Guid AttemptId,
+    uint RootProcessId,
+    long RootProcessStartFileTimeUtc,
+    long VoiceStartFileTimeUtc);
+
+internal interface ICodexVoiceOwnershipAttestor
+{
+    CodexVoiceOwnershipToken? TryAttest(
+        CodexVoiceShortcutReceipt receipt,
+        CodexVoiceActivitySnapshot observedTransition);
+}
+
+internal sealed class FailClosedCodexVoiceOwnershipAttestor
+    : ICodexVoiceOwnershipAttestor
+{
+    public CodexVoiceOwnershipToken? TryAttest(
+        CodexVoiceShortcutReceipt receipt,
+        CodexVoiceActivitySnapshot observedTransition) =>
+        null;
+}
+
+internal sealed class ExactTargetVoiceOwnershipAttestor
+    : ICodexVoiceOwnershipAttestor
+{
+    public CodexVoiceOwnershipToken? TryAttest(
+        CodexVoiceShortcutReceipt receipt,
+        CodexVoiceActivitySnapshot observedTransition) =>
+        new(
+            receipt.AttemptId,
+            receipt.RootProcessId,
+            receipt.RootProcessStartFileTimeUtc,
+            observedTransition.LastUsedTimeStart);
+}
+
 internal sealed record CodexVoiceStartConfirmation(
     CodexVoiceActivitySnapshot Snapshot,
-    bool StartedByBridge)
+    bool ObservedAfterShortcut,
+    CodexVoiceOwnershipToken? OwnershipToken)
 {
-    internal bool OwnsVoice => StartedByBridge;
+    internal bool StartedByBridge => OwnershipToken is not null;
+
+    internal bool OwnsVoice => OwnershipToken is not null;
 }
 
 internal sealed record CodexVoiceStopPlan(
@@ -189,8 +292,6 @@ internal sealed class CodexVoiceActivityController
         "BW_COMPUTER_VOICE_DIRECT_ACTIVITY_UNAVAILABLE";
     internal const string ActivityReadFailedCode =
         "BW_COMPUTER_VOICE_DIRECT_ACTIVITY_READ_FAILED";
-    internal const string VoiceReadyTimeoutCode =
-        "BW_COMPUTER_VOICE_DIRECT_VOICE_READY_TIMEOUT";
     internal const string StartNotConfirmedCode =
         "BW_COMPUTER_VOICE_DIRECT_VOICE_START_NOT_CONFIRMED";
     internal const string StopNotConfirmedCode =
@@ -200,22 +301,27 @@ internal sealed class CodexVoiceActivityController
 
     private readonly ICodexVoiceActivitySource _source;
     private readonly ICodexVoiceActivityClock _clock;
+    private readonly ICodexVoiceOwnershipAttestor _ownershipAttestor;
 
     internal CodexVoiceActivityController()
         : this(
             new WindowsRegistryCodexVoiceActivitySource(),
-            new SystemCodexVoiceActivityClock())
+            new SystemCodexVoiceActivityClock(),
+            new FailClosedCodexVoiceOwnershipAttestor())
     {
     }
 
     internal CodexVoiceActivityController(
         ICodexVoiceActivitySource source,
-        ICodexVoiceActivityClock clock)
+        ICodexVoiceActivityClock clock,
+        ICodexVoiceOwnershipAttestor? ownershipAttestor = null)
     {
         ArgumentNullException.ThrowIfNull(source);
         ArgumentNullException.ThrowIfNull(clock);
         _source = source;
         _clock = clock;
+        _ownershipAttestor = ownershipAttestor
+            ?? new FailClosedCodexVoiceOwnershipAttestor();
     }
 
     internal CodexVoiceStartBaseline CaptureStartBaseline() =>
@@ -243,14 +349,11 @@ internal sealed class CodexVoiceActivityController
             {
                 return snapshot;
             }
-            if (
-                snapshot.Status
-                == CodexVoiceActivityReadStatus.Error
-            )
+            if (snapshot.Status == CodexVoiceActivityReadStatus.Error)
             {
                 throw new DirectProtocolException(
                     ActivityReadFailedCode,
-                    "读取 Codex 麦克风活动状态失败",
+                    "读取目标应用麦克风活动状态失败",
                     retryable: true);
             }
 
@@ -258,14 +361,37 @@ internal sealed class CodexVoiceActivityController
             if (remaining <= TimeSpan.Zero)
             {
                 throw new DirectProtocolException(
-                    VoiceReadyTimeoutCode,
-                    "等待 Codex 语音子系统就绪超时",
+                    "BW_COMPUTER_VOICE_DIRECT_VOICE_READY_TIMEOUT",
+                    "等待目标应用语音子系统就绪超时",
                     retryable: true);
             }
             await _clock.DelayAsync(
                 Min(pollInterval, remaining),
                 cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    internal CodexVoiceShortcutReceipt RecordShortcutSent(
+        CodexVoiceStartBaseline baseline,
+        CodexAppTarget target)
+    {
+        ArgumentNullException.ThrowIfNull(baseline);
+        ArgumentNullException.ThrowIfNull(target);
+        if (
+            !baseline.ShortcutRequired
+            || target.RootProcessId == 0
+            || target.RootProcessStartFileTimeUtc <= 0
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_VOICE_SHORTCUT_RECEIPT_INVALID",
+                "Codex 语音快捷键回执无效");
+        }
+        return new CodexVoiceShortcutReceipt(
+            Guid.NewGuid(),
+            target.RootProcessId,
+            target.RootProcessStartFileTimeUtc,
+            _clock.UtcNow.UtcDateTime.ToFileTimeUtc());
     }
 
     internal CodexVoiceStopPlan PrepareStop(
@@ -284,6 +410,7 @@ internal sealed class CodexVoiceActivityController
     internal async Task<CodexVoiceStartConfirmation>
         ConfirmStartedAsync(
             CodexVoiceStartBaseline baseline,
+            CodexVoiceShortcutReceipt? shortcutReceipt,
             TimeSpan timeout,
             TimeSpan pollInterval,
             CancellationToken cancellationToken)
@@ -296,7 +423,8 @@ internal sealed class CodexVoiceActivityController
         {
             return new CodexVoiceStartConfirmation(
                 baseline.Snapshot,
-                StartedByBridge: false);
+                ObservedAfterShortcut: false,
+                OwnershipToken: null);
         }
 
         DateTimeOffset deadline = _clock.UtcNow + timeout;
@@ -312,9 +440,19 @@ internal sealed class CodexVoiceActivityController
                         baseline.Snapshot.LastUsedTimeStop)
             )
             {
+                CodexVoiceOwnershipToken? ownershipToken =
+                    shortcutReceipt is null
+                        ? null
+                        : ValidateOwnershipToken(
+                            shortcutReceipt,
+                            current,
+                            _ownershipAttestor.TryAttest(
+                                shortcutReceipt,
+                                current));
                 return new CodexVoiceStartConfirmation(
                     current,
-                    StartedByBridge: true);
+                    ObservedAfterShortcut: true,
+                    ownershipToken);
             }
 
             TimeSpan remaining = deadline - _clock.UtcNow;
@@ -446,6 +584,32 @@ internal sealed class CodexVoiceActivityController
         CodexVoiceActivitySnapshot snapshot = _source.Read();
         RequireAvailable(snapshot);
         return snapshot;
+    }
+
+    private static CodexVoiceOwnershipToken? ValidateOwnershipToken(
+        CodexVoiceShortcutReceipt receipt,
+        CodexVoiceActivitySnapshot transition,
+        CodexVoiceOwnershipToken? token)
+    {
+        if (token is null)
+        {
+            return null;
+        }
+        if (
+            token.AttemptId != receipt.AttemptId
+            || token.RootProcessId != receipt.RootProcessId
+            || token.RootProcessStartFileTimeUtc
+                != receipt.RootProcessStartFileTimeUtc
+            || token.VoiceStartFileTimeUtc
+                != transition.LastUsedTimeStart
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_VOICE_OWNERSHIP_ATTESTATION_INVALID",
+                "Codex 语音所有权证明与本次快捷键不匹配",
+                retryable: true);
+        }
+        return token;
     }
 
     private static void RequireAvailable(

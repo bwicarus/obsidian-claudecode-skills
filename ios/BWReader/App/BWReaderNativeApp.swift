@@ -155,6 +155,16 @@ private struct ReaderRootView: View {
         .task {
             BWReaderAppShortcuts.updateAppShortcutParameters()
         }
+        .task {
+            while !Task.isCancelled {
+                await ReaderLocalNotesManager.shared.drainPendingCreates()
+                do {
+                    try await Task.sleep(nanoseconds: 2_000_000_000)
+                } catch {
+                    return
+                }
+            }
+        }
         .task(id: scenePhase) {
             guard scenePhase == .active else { return }
             consumePendingNativeFeatureRequest()

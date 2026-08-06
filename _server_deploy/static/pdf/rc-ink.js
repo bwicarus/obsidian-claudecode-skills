@@ -16,17 +16,112 @@
 (function () {
   'use strict';
 
+  var REGION_MAX_POINTS = 512;
+
   function _pts(s) { return s.p || s.pts || []; }
+
+  function _regionPoints(s) { return _pts(s).slice(0, REGION_MAX_POINTS); }
+
+  function _regionTimestamp(s) {
+    var value = Number(s && s.createdAtEpochMs);
+    return Number.isFinite(value) && value > 0 ? value : 0;
+  }
+
+  function _regionTimeLabel(s) {
+    var stamp = _regionTimestamp(s);
+    if (!stamp) return '--:--';
+    var date = new Date(stamp);
+    if (!Number.isFinite(date.getTime())) return '--:--';
+    var pad = function (value) { return String(value).padStart(2, '0'); };
+    return pad(date.getHours()) + ':' + pad(date.getMinutes());
+  }
+
+  function _regionOrdinal(s) {
+    var value = Number(s && s.ordinal);
+    return Number.isSafeInteger(value) && value > 0 ? value : 0;
+  }
+
+  function _pointInPolygon(point, points) {
+    var inside = false;
+    for (var i = 0, j = points.length - 1; i < points.length; j = i++) {
+      var xi = points[i][0], yi = points[i][1], xj = points[j][0], yj = points[j][1];
+      var crosses = ((yi > point[1]) !== (yj > point[1])) &&
+        (point[0] < (xj - xi) * (point[1] - yi) / ((yj - yi) || Number.EPSILON) + xi);
+      if (crosses) inside = !inside;
+    }
+    return inside;
+  }
+
+  // Region ordinals are data, not a render-time array index. Old strokes did
+  // not carry one, so migrate them in deterministic creation order. Once an
+  // ordinal exists it is never compacted when another region is erased; the
+  // host's existing whole-stroke JSON persistence carries it across reloads.
+  function ensureRegionOrdinals(strokes) {
+    var regions = (strokes || []).filter(function (stroke) { return stroke && stroke.t === 'region'; });
+    regions.sort(function (a, b) {
+      var byTime = _regionTimestamp(a) - _regionTimestamp(b);
+      if (byTime) return byTime;
+      var aid = String(a.id || ''), bid = String(b.id || '');
+      return aid < bid ? -1 : (aid > bid ? 1 : 0);
+    });
+    var numbers = new Map(), used = Object.create(null), missing = [], max = 0;
+    for (var i = 0; i < regions.length; i++) {
+      var ordinal = _regionOrdinal(regions[i]);
+      if (!ordinal || used[ordinal]) { missing.push(regions[i]); continue; }
+      used[ordinal] = true; max = Math.max(max, ordinal); numbers.set(regions[i], ordinal);
+    }
+    for (var j = 0; j < missing.length; j++) {
+      do { max += 1; } while (used[max]);
+      missing[j].ordinal = max;
+      used[max] = true; numbers.set(missing[j], max);
+    }
+    return numbers;
+  }
+
+  function nextRegionOrdinal(strokes) {
+    var numbers = ensureRegionOrdinals(strokes), next = 0;
+    numbers.forEach(function (ordinal) { next = Math.max(next, ordinal); });
+    return next + 1;
+  }
 
   // 画一条笔画:pen=平滑 quadratic(单点=点笔头)/ line / arrow / rect
   function drawStroke(ctx, s, W, H, dpr, defs) {
-    var pts = _pts(s); if (!pts.length) return;
+    var pts = s && s.t === 'region' ? _regionPoints(s) : _pts(s); if (!pts.length) return;
     ctx.strokeStyle = s.c || (defs && defs.color) || '#e74c3c';
     ctx.lineWidth = Math.max(0.6, (s.w || (defs && defs.width) || 2.5) * dpr);
     ctx.lineCap = 'round'; ctx.lineJoin = 'round';
     var X = function (i) { return pts[i][0] * W; }, Y = function (i) { return pts[i][1] * H; };
     var t = s.t || 'pen';
-    if (t === 'pen') {
+    if (t === 'region' && pts.length >= 3) {
+      ctx.save();
+      ctx.beginPath(); ctx.moveTo(X(0), Y(0));
+      for (var rp = 1; rp < pts.length; rp++) ctx.lineTo(X(rp), Y(rp));
+      ctx.closePath();
+      ctx.fillStyle = ctx.strokeStyle;
+      ctx.globalAlpha = 0.18;
+      try { ctx.fill('evenodd'); } catch (_) { ctx.fill(); }
+      ctx.globalAlpha = 0.92;
+      ctx.stroke();
+
+      var minX = X(0), minY = Y(0);
+      for (var rb = 1; rb < pts.length; rb++) {
+        minX = Math.min(minX, X(rb)); minY = Math.min(minY, Y(rb));
+      }
+      var number = defs && Number.isFinite(defs.regionNumber) ? defs.regionNumber : '?';
+      var label = '#' + number + ' ' + _regionTimeLabel(s);
+      var fontSize = Math.max(10, 11 * dpr), pad = Math.max(3, 3 * dpr);
+      ctx.font = '600 ' + fontSize + 'px -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif';
+      ctx.textBaseline = 'top';
+      var labelWidth = (ctx.measureText ? ctx.measureText(label).width : label.length * fontSize * 0.62) + pad * 2;
+      var labelHeight = fontSize + pad * 2;
+      var labelX = Math.max(0, Math.min(W - labelWidth, minX));
+      var labelY = Math.max(0, Math.min(H - labelHeight, minY - labelHeight - 2 * dpr));
+      ctx.globalAlpha = 0.82; ctx.fillStyle = '#111827';
+      ctx.fillRect(labelX, labelY, labelWidth, labelHeight);
+      ctx.globalAlpha = 1; ctx.fillStyle = '#ffffff';
+      ctx.fillText(label, labelX + pad, labelY + pad);
+      ctx.restore();
+    } else if (t === 'pen') {
       ctx.beginPath(); ctx.moveTo(X(0), Y(0));
       if (pts.length === 1) { ctx.lineTo(X(0) + 0.1, Y(0)); }
       else {
@@ -63,7 +158,14 @@
 
   // 橡皮命中:rect 按边框带命中,其余分段 + 单点距离
   function hit(s, pt, thr) {
-    var pts = _pts(s); if (!pts.length) return false;
+    var pts = s && s.t === 'region' ? _regionPoints(s) : _pts(s); if (!pts.length) return false;
+    if (s.t === 'region' && pts.length >= 3) {
+      if (_pointInPolygon(pt, pts)) return true;
+      for (var r = 0; r < pts.length; r++) {
+        if (ptSeg(pt, pts[r], pts[(r + 1) % pts.length]) < thr) return true;
+      }
+      return false;
+    }
     if (s.t === 'rect' && pts.length >= 2) {
       var x0 = Math.min(pts[0][0], pts[1][0]), x1 = Math.max(pts[0][0], pts[1][0]);
       var y0 = Math.min(pts[0][1], pts[1][1]), y1 = Math.max(pts[0][1], pts[1][1]);
@@ -84,6 +186,24 @@
     return [(cx - r.left) / r.width, (cy - r.top) / r.height];
   }
 
+  // 将浮动工具栏放到最近一次 Pencil hover/落笔点上方；没有锚点时恢复调用方 CSS 的旧固定位置。
+  function positionToolbarAbove(toolbar, anchor) {
+    if (!toolbar) return;
+    if (!anchor || !Number.isFinite(anchor.x) || !Number.isFinite(anchor.y)) {
+      ['left', 'top', 'right', 'bottom', 'transform'].forEach(function (name) { toolbar.style.removeProperty(name); });
+      return;
+    }
+    var rect = toolbar.getBoundingClientRect();
+    if (!(rect.width > 0 && rect.height > 0)) return;
+    var margin = 8, gap = 14;
+    var maxLeft = Math.max(margin, (window.innerWidth || rect.width) - rect.width - margin);
+    var maxTop = Math.max(margin, (window.innerHeight || rect.height) - rect.height - margin);
+    var left = Math.max(margin, Math.min(maxLeft, anchor.x - rect.width / 2));
+    var top = Math.max(margin, Math.min(maxTop, anchor.y - rect.height - gap));
+    toolbar.style.left = left + 'px'; toolbar.style.top = top + 'px';
+    toolbar.style.right = 'auto'; toolbar.style.bottom = 'auto'; toolbar.style.transform = 'none';
+  }
+
   // 整 canvas 重绘(visible=false 时只清空;dpr 按物理宽/css 宽推,与两阅读器原实现一致)
   function redraw(cv, strokes, visible, defs) {
     if (!cv) return;
@@ -93,8 +213,14 @@
     if (visible === false) return;
     var cssW = parseFloat(cv.style.width) || cv.width;
     var dpr = (cv.width / cssW) || 1;
-    var arr = strokes || [];
-    for (var i = 0; i < arr.length; i++) drawStroke(ctx, arr[i], cv.width, cv.height, dpr, defs);
+    var arr = strokes || [], regionNumbers = ensureRegionOrdinals(arr);
+    for (var i = 0; i < arr.length; i++) {
+      var drawDefs = defs;
+      if (arr[i] && arr[i].t === 'region') {
+        drawDefs = Object.assign({}, defs || {}, { regionNumber: regionNumbers.get(arr[i]) });
+      }
+      drawStroke(ctx, arr[i], cv.width, cv.height, dpr, drawDefs);
+    }
   }
 
   // 就地擦除(纯数据:调用侧自己 redraw/记 dirty/调度保存);返回是否删了东西
@@ -113,5 +239,9 @@
   }
 
   window.RCInk = { drawStroke: drawStroke, ptSeg: ptSeg, hit: hit, norm: norm,
-                   redraw: redraw, eraseAt: eraseAt, pushUndo: pushUndo };
+                   redraw: redraw, eraseAt: eraseAt, pushUndo: pushUndo,
+                   ensureRegionOrdinals: ensureRegionOrdinals,
+                   nextRegionOrdinal: nextRegionOrdinal,
+                   positionToolbarAbove: positionToolbarAbove,
+                   REGION_MAX_POINTS: REGION_MAX_POINTS };
 })();

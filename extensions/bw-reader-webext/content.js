@@ -357,36 +357,344 @@
   if (!runtime || typeof runtime.sendMessage !== "function") return;
 
   var MAX_TEXT = 12000;
+  var MAX_VIEWPORT_SIDE_TEXT = 2400;
   var THROTTLE_MS = 1500;
+  var ACTIVE_CONTEXT_HEARTBEAT_MS = 60000;
   var PREFERENCE_KEY = "bwReaderExtensionPreferencesV2";
   var CONTEXT_SYNC_KEY = "eph-ctx-sync";
-  var ACTIVE_CONTEXT_KEY = "bwActivePageContextV1";
+
+  function createSourceInstanceId() {
+    var bytes = new Uint8Array(16);
+    try {
+      if (window.crypto && typeof window.crypto.getRandomValues === "function") {
+        window.crypto.getRandomValues(bytes);
+      } else {
+        for (var i = 0; i < bytes.length; i += 1) bytes[i] = (Math.random() * 256) | 0;
+      }
+      var binary = "";
+      for (var j = 0; j < bytes.length; j += 1) binary += String.fromCharCode(bytes[j]);
+      return window.btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+    } catch (_) {
+      // Identity is routing metadata, never an authentication secret. Keep the
+      // contract valid even on an unusual page realm without Web Crypto/btoa.
+      var fallback = "";
+      var alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+      for (var k = 0; k < 21; k += 1) fallback += alphabet[(Math.random() * 64) | 0];
+      return fallback + "AQgw".charAt((Math.random() * 4) | 0);
+    }
+  }
+
+  // One identity per top-level document instance. A reload gets a new one;
+  // scroll/focus/heartbeat reports from the same document keep it.
+  var sourceInstanceId = createSourceInstanceId();
+
+  // Shows a line on the page itself.
+  //
+  // Every diagnostic so far travelled through the frame to the host, which
+  // means a broken frame silenced the very report meant to reveal it -- an
+  // instrument wired through the thing it was measuring. This writes straight
+  // into the page, owes nothing to the frame, and is the only way to see the
+  // steps that happen before the frame is involved at all.
+  //
+  // Temporary. It exists to answer one question and should come out once the
+  // answer is in.
+  // Routed through the shared channel now.
+  //
+  // This used to own its own box, while the frame owned another way of
+  // speaking and the bridge owned a third. Three unconnected instruments meant
+  // "delivered" and "nothing arrived" could both be true-looking with no way to
+  // reconcile them. One channel, and every line says who spoke it.
+  function probeLine(text) {
+    var P = window.__bwProbe;
+    if (P) P.probe("page", text);
+  }
+  probeLine("脚本已加载: " + String(location.href || "").slice(0, 60));
+
+  // Frame reports, shown on the page's own probe.
+  //
+  // Without this the frame's half of the journey stays invisible: the page can
+  // say it handed the snapshot over, and the bridge can say nothing arrived,
+  // with no way to see which of the two is mistaken.
+  try {
+    // No enabled flag: the channel reads its own setting, so reporting is off
+    // until ?bwdebug=1 turns it on. Shipping it on by default would put a
+    // diagnostic overlay on every page the user visits.
+    if (window.__bwProbe) window.__bwProbe.startProbeHost();
+  } catch (_) {}
+
+  var LOCAL_VISUAL_CONTRACT = "bw-reader-visual-local/1";
+  var LOCAL_BROWSER_CONTROL_CONTRACT = "bw-browser-control/1";
+
+  function exactVisualKeys(value, keys) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    var actual = Object.keys(value).sort();
+    var expected = keys.slice().sort();
+    if (actual.length !== expected.length) return false;
+    for (var i = 0; i < actual.length; i += 1) {
+      if (actual[i] !== expected[i]) return false;
+    }
+    return true;
+  }
+
+  function normalizeLocalVisualRequest(message) {
+    if (!exactVisualKeys(message, ["type", "request", "expectedViewKey"])) return null;
+    if (message.type !== "BW_READER_VISUAL_CAPTURE") return null;
+    var request = message.request;
+    if (!exactVisualKeys(request, [
+      "contract", "commandKind", "correlation", "sourceInstanceId",
+      "snapshotRevision", "file", "page", "drawingRevision", "scope",
+      "selectionId", "maxBytes", "chunkCharacters",
+    ])) return null;
+    if (
+      request.contract !== "reader-visual-delivery/2" ||
+      request.commandKind !== "capture-composite" ||
+      !/^[A-Za-z0-9._:-]{1,160}$/.test(String(request.correlation || "")) ||
+      request.sourceInstanceId !== sourceInstanceId ||
+      !Number.isSafeInteger(request.snapshotRevision) || request.snapshotRevision < 0 ||
+      request.file !== String(location.href || "") ||
+      !["viewport-context", "drawing-nearby", "selection-near"].includes(request.scope) ||
+      (request.scope === "selection-near") !== (typeof request.selectionId === "string") ||
+      request.maxBytes !== 786432 || request.chunkCharacters !== 48000
+    ) return null;
+    if (
+      typeof message.expectedViewKey !== "string" ||
+      message.expectedViewKey.length < 1 || message.expectedViewKey.length > 160 ||
+      /[\u0000-\u001f\u007f]/.test(message.expectedViewKey)
+    ) return null;
+    return { request: request, expectedViewKey: message.expectedViewKey };
+  }
+
+  function normalizeLocalBrowserControlRequest(message) {
+    if (!exactVisualKeys(message, [
+      "type", "request", "snapshotRevision", "file", "page", "expectedViewKey"
+    ]) || message.type !== "BW_READER_BROWSER_CONTROL" ||
+        !Number.isSafeInteger(message.snapshotRevision) || message.snapshotRevision < 1 ||
+        message.file !== String(location.href || "") || message.page !== 0 ||
+        typeof message.expectedViewKey !== "string" ||
+        !viewKeyMatchesCurrent(message.expectedViewKey)) return null;
+    var request = message.request;
+    var actions = [
+      "next-viewport", "previous-viewport", "scroll-to-text",
+      "scroll-to-heading", "scroll-to-selection"
+    ];
+    var textAction = request &&
+      (request.action === "scroll-to-text" || request.action === "scroll-to-heading");
+    var selectionAction = request && request.action === "scroll-to-selection";
+    var keys = ["contract", "type", "requestId", "sourceInstanceId", "action"];
+    if (textAction) keys.push("target");
+    if (selectionAction) keys.push("selectionId");
+    if (!exactVisualKeys(request, keys) ||
+        request.contract !== LOCAL_BROWSER_CONTROL_CONTRACT ||
+        request.type !== "request" ||
+        !/^[A-Za-z0-9._:-]{1,128}$/.test(String(request.requestId || "")) ||
+        request.sourceInstanceId !== sourceInstanceId || !actions.includes(request.action) ||
+        (textAction && (typeof request.target !== "string" ||
+          !request.target.trim() || request.target !== request.target.trim() ||
+          request.target.length > 320)) ||
+        (selectionAction &&
+          !/^[A-Za-z0-9._:-]{1,160}$/.test(String(request.selectionId || "")))) return null;
+    return request;
+  }
+
+  function localVisualResponse(request, capture) {
+    var ready = !!(
+      capture &&
+      capture.media_type === "image/jpeg" &&
+      typeof capture.b64 === "string" &&
+      capture.b64.length > 0
+    );
+    return {
+      contract: LOCAL_VISUAL_CONTRACT,
+      type: "capture-response",
+      correlation: request.correlation,
+      sourceInstanceId: request.sourceInstanceId,
+      status: ready ? "ready" : "unavailable",
+      mimeType: ready ? "image/jpeg" : "",
+      b64: ready ? capture.b64 : "",
+    };
+  }
+
+  function visualRequestMatchesLive(request, expectedViewKey) {
+    if (
+      request.sourceInstanceId !== sourceInstanceId ||
+      request.file !== String(location.href || "")
+    ) return false;
+    if (!viewKeyMatchesCurrent(expectedViewKey)) return false;
+    var drawing = webDrawingState().drawing;
+    var liveRevision = drawing ? drawing.drawingRevision : null;
+    return liveRevision === request.drawingRevision;
+  }
+
+  async function captureVisualForRuntime(request, expectedViewKey) {
+    if (document.visibilityState !== "visible") return null;
+    try {
+      if (!document.hasFocus()) return null;
+    } catch (_) {}
+    var RC = window.RC;
+    if (!RC) return null;
+    if (!visualRequestMatchesLive(request, expectedViewKey)) return null;
+    var target = {
+      scope: request.scope,
+      page: request.page,
+      selectionId: request.selectionId,
+      sourceInstanceId: request.sourceInstanceId,
+      snapshotRevision: request.snapshotRevision,
+      drawingRevision: request.drawingRevision,
+    };
+    var capture = null;
+    if (
+      request.scope === "viewport-context" &&
+      typeof RC.capturePageComposite === "function"
+    ) capture = await RC.capturePageComposite(target);
+    else if (
+      (request.scope === "drawing-nearby" || request.scope === "selection-near") &&
+      typeof RC.captureInkRegion === "function"
+    ) capture = await RC.captureInkRegion(target);
+    return visualRequestMatchesLive(request, expectedViewKey) ? capture : null;
+  }
+
+  function trustedInternalRuntimeSender(sender) {
+    if (!sender || sender.tab) return false;
+    var senderId = typeof sender.id === "string" ? sender.id : "";
+    var runtimeId = typeof runtime.id === "string" ? runtime.id : "";
+    if (senderId && runtimeId) return senderId === runtimeId;
+    try {
+      return typeof sender.url === "string" && sender.url.startsWith(runtime.getURL(""));
+    } catch (_) { return false; }
+  }
+
+  function runtimeRequest(message, timeoutMs) {
+    return new Promise(function (resolve, reject) {
+      var settled = false;
+      var timer = setTimeout(function () {
+        if (settled) return;
+        settled = true;
+        reject(new Error("runtime.sendMessage 超时"));
+      }, Number(timeoutMs) || 15000);
+      function done(value) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        var err = runtime.lastError;
+        if (err) reject(new Error(err.message || "runtime.sendMessage 失败"));
+        else resolve(value);
+      }
+      try {
+        var returned = runtime.sendMessage(message, done);
+        if (returned && typeof returned.then === "function") returned.then(
+          function (value) { if (!settled) { settled = true; clearTimeout(timer); resolve(value); } },
+          function (err) { if (!settled) { settled = true; clearTimeout(timer); reject(err); } }
+        );
+      } catch (err) { clearTimeout(timer); reject(err); }
+    });
+  }
+
+  function claimCallFrame() {
+    var frame = null;
+    try {
+      var surface = window.__bwInlineComputerVoiceSurface;
+      if (!surface || typeof surface.frameForClaim !== "function") return;
+      frame = surface.frameForClaim();
+      if (!frame || !frame.contentWindow ||
+          String(frame.src || "") !== runtime.getURL("call.html") + "?compact=1") return;
+      var bytes = new Uint8Array(32);
+      window.crypto.getRandomValues(bytes);
+      var binary = "";
+      for (var i = 0; i < bytes.length; i += 1) binary += String.fromCharCode(bytes[i]);
+      var capability = window.btoa(binary)
+        .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+      var appKind = "codex-desktop";
+      try {
+        if (window.RC && RC.computerVoice &&
+            typeof RC.computerVoice.getTargetApp === "function" &&
+            RC.computerVoice.getTargetApp() === "chatgpt-classic") {
+          appKind = "chatgpt-classic";
+        }
+      } catch (_) {}
+      runtimeRequest({
+        type: "BW_READER_CALL_CLAIM_CREATE",
+        capability: capability,
+        sourceInstanceId: sourceInstanceId,
+        appKind: appKind,
+      }, 5000)
+        .then(function (reply) {
+          if (!reply || reply.ok !== true) throw new Error("后台拒绝通话页认领");
+          frame.contentWindow.postMessage({
+            contract: "bw-reader-call-claim/1",
+            type: "claim",
+            capability: capability,
+          }, "*");
+          probeLine("通话页认领: 已投递一次性能力");
+        }).catch(function (err) {
+          probeLine("通话页认领失败: " + ((err && err.message) || "未知"));
+        });
+    } catch (err) {
+      probeLine("通话页认领异常: " + ((err && err.message) || "未知"));
+    }
+  }
+
+  if (runtime.onMessage && typeof runtime.onMessage.addListener === "function") {
+    runtime.onMessage.addListener(function (message, sender, sendResponse) {
+      if (!trustedInternalRuntimeSender(sender)) return false;
+      var visual = normalizeLocalVisualRequest(message);
+      if (visual) {
+        Promise.resolve(captureVisualForRuntime(visual.request, visual.expectedViewKey)).then(
+          function (capture) { sendResponse(localVisualResponse(visual.request, capture)); },
+          function () { sendResponse(localVisualResponse(visual.request, null)); }
+        );
+        return true;
+      }
+      var request = normalizeLocalBrowserControlRequest(message);
+      if (!request) return false;
+      var executor = window.__bwBrowserControl;
+      if (!executor || typeof executor.execute !== "function") return false;
+      sendResponse(executor.execute(request));
+      return false;
+    });
+  }
+
   var lastSignature = "";
   var pendingSignature = "";
-  var contextRevision = 0;
+  var viewportRevision = 0;
+  var activationRevision = 1;
+  var activationTimer = null;
+  var lastBrowserControlCorrelation = "";
+  var lastWebDrawingRevision = "";
+  var lastWebDrawingEditedAt = 0;
+  var lastObservedUrl = String(location.href || "");
   var timer = null;
   var preferenceKnown = false;
   var contextSyncEnabled = false;
   var extensionStore = window.__bwExtensionStore || null;
 
   function enabledFromRecord(record) {
-    return !!(
-      record &&
-      record.schema === 2 &&
-      record.values &&
-      record.values[CONTEXT_SYNC_KEY] === "1"
-    );
+    if (
+      !record ||
+      record.schema !== 2 ||
+      !record.values ||
+      !Object.prototype.hasOwnProperty.call(record.values, CONTEXT_SYNC_KEY)
+    ) return null;
+    var raw = record.values[CONTEXT_SYNC_KEY];
+    if (raw !== "1" && raw !== "0") return null;
+    return raw === "1";
   }
 
   function applyPreference(record) {
     var next = enabledFromRecord(record);
+    probeLine(
+      "偏好: raw=" +
+      (record && record.values ? String(record.values[CONTEXT_SYNC_KEY]) : "undefined") +
+      " enabled=" + (next === null ? "未知" : (next ? "是" : "否"))
+    );
+    if (next === null) return false;
     var changed = !preferenceKnown || next !== contextSyncEnabled;
     preferenceKnown = true;
     contextSyncEnabled = next;
-    if (!changed) return;
+    if (!changed) return true;
     lastSignature = "";
     pendingSignature = "";
     if (contextSyncEnabled) schedule(true);
+    return true;
   }
 
   function contentDigest(value) {
@@ -399,73 +707,752 @@
     return (hash >>> 0).toString(16);
   }
 
+  function webDrawingState() {
+    var snapshot = null;
+    try {
+      snapshot = window.__bwWebInk &&
+        typeof window.__bwWebInk.exportSnapshot === "function"
+        ? window.__bwWebInk.exportSnapshot()
+        : null;
+    } catch (_) {}
+    var strokes = snapshot && Array.isArray(snapshot.strokes)
+      ? snapshot.strokes
+      : [];
+    if (!strokes.length) {
+      lastWebDrawingRevision = "";
+      lastWebDrawingEditedAt = 0;
+      return {
+        page_image: null,
+        has_ink: false,
+        drawing: null,
+      };
+    }
+    var serialized = JSON.stringify(strokes);
+    var revision = "dr_" +
+      contentDigest(canonicalDocumentKey() + "\n" + serialized).padStart(8, "0") +
+      contentDigest("web-drawing\n" + serialized).padStart(8, "0");
+    if (revision !== lastWebDrawingRevision) {
+      lastWebDrawingRevision = revision;
+      lastWebDrawingEditedAt = Date.now() / 1000;
+    }
+    var file = String(location.href || "");
+    return {
+      page_image: null,
+      has_ink: true,
+      drawing: {
+        contract: "reader-outgoing-context/1",
+        file: file,
+        page: 0,
+        freshness: "recent",
+        lastEditedAt: lastWebDrawingEditedAt,
+        freshWindowS: 30,
+        inProgress: false,
+        stable: true,
+        drawingRevision: revision,
+        pendingSince: null,
+        ref: {
+          kind: "drawing",
+          file: file,
+          page: 0,
+          revision: revision,
+        },
+        empty: false,
+      },
+    };
+  }
+
+  function viewKeyMatchesCurrent(expected) {
+    var text = String(expected || "");
+    var fallback = /^fallback:(\d+)$/.exec(text);
+    if (fallback) return Number(fallback[1]) === viewportRevision;
+    var parts = text.split(":");
+    if (parts.length !== 5 || Number(parts[0]) !== viewportRevision) return false;
+    var visual = window.visualViewport || null;
+    var scrolling = document.scrollingElement || document.documentElement || document.body;
+    var width = Number(visual && visual.width) || Number(window.innerWidth) ||
+      Number(document.documentElement && document.documentElement.clientWidth) || 0;
+    var height = Number(visual && visual.height) || Number(window.innerHeight) ||
+      Number(document.documentElement && document.documentElement.clientHeight) || 0;
+    var scrollLeft = Number(window.scrollX);
+    var scrollTop = Number(window.scrollY);
+    if (!isFinite(scrollLeft)) scrollLeft = Number(scrolling && scrolling.scrollLeft) || 0;
+    if (!isFinite(scrollTop)) scrollTop = Number(scrolling && scrolling.scrollTop) || 0;
+    return Number(parts[1]) === Math.round(scrollLeft) &&
+      Number(parts[2]) === Math.round(scrollTop) &&
+      Number(parts[3]) === Math.round(width) &&
+      Number(parts[4]) === Math.round(height);
+  }
+
+  function normalizeReadableText(value) {
+    return String(value || "")
+      .replace(new RegExp(String.fromCharCode(13) + String.fromCharCode(10), "g"), String.fromCharCode(10))
+      .replace(new RegExp(String.fromCharCode(13), "g"), String.fromCharCode(10))
+      .replace(new RegExp(String.fromCharCode(160), "g"), " ")
+      .replace(new RegExp("[ " + String.fromCharCode(9) + "]+", "g"), " ")
+      .replace(new RegExp(" *" + String.fromCharCode(10) + " *", "g"), String.fromCharCode(10))
+      .replace(new RegExp(String.fromCharCode(10) + "{3,}", "g"), String.fromCharCode(10) + String.fromCharCode(10))
+      .trim();
+  }
+
+  // Stable identity for a document, independent of in-page anchors. A valid
+  // rel=canonical is authoritative; otherwise the current HTTP(S) URL without
+  // its fragment is used. URL performs hostname/default-port normalization for
+  // us, while query parameters remain because they can select different text.
+  function canonicalDocumentKey() {
+    var candidate = String(location.href || "");
+    try {
+      var declared = document.querySelector('link[rel~="canonical"][href]');
+      if (declared) candidate = String(declared.href || candidate);
+    } catch (_) {}
+    try {
+      var parsed = new URL(candidate, String(location.href || ""));
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        parsed = new URL(String(location.href || ""));
+      }
+      parsed.hash = "";
+      parsed.username = "";
+      parsed.password = "";
+      return parsed.toString();
+    } catch (_) {
+      return String(location.href || "").split("#")[0];
+    }
+  }
+
+  // Structural chrome: on nearly every page, part of none of them.
+  var ARTICLE_CHROME =
+    '[role=navigation],[role=banner],[role=contentinfo],[role=search],' +
+    '[role=menu],[role=menubar],[role=toolbar],[role=tablist],' +
+    '[aria-hidden="true"],nav,header,footer,aside';
+  var ARTICLE_DROP = ARTICLE_CHROME + ',script,style,noscript,form,button';
+
+  // Scores a subtree by how much of it reads as prose.
+  //
+  // Navigation is many short strings spread across many links; an article is
+  // long runs of text in few blocks. Dividing text length by link density
+  // separates the two without knowing anything about the site. Deliberately
+  // simple -- the aim is to drop menus and sidebars, not to win every layout.
+  function proseScore(el) {
+    var text = "";
+    try { text = String(el.innerText || ""); } catch (_) { return 0; }
+    var len = text.replace(/\s+/g, " ").trim().length;
+    if (len < 140) return 0;
+    var linkLen = 0;
+    try {
+      var links = el.querySelectorAll("a");
+      for (var i = 0; i < links.length; i += 1) {
+        linkLen += String(links[i].innerText || "").length;
+      }
+    } catch (_) {}
+    var linkRatio = len > 0 ? linkLen / len : 1;
+    // Mostly-links subtrees are menus however long they run.
+    if (linkRatio > 0.55) return 0;
+    var blocks = 0;
+    try { blocks = el.querySelectorAll("p,h1,h2,h3,li,blockquote").length; } catch (_) {}
+    return len * (1 - linkRatio) * (1 + Math.min(blocks, 40) / 20);
+  }
+
+  // Picks the subtree that reads most like an article, else the body.
+  //
+  // Declared landmarks come first: a page that says <article> or role=main has
+  // already answered the question. Scoring is the fallback for the many pages
+  // that declare nothing.
+  function articleRoot() {
+    var body = document.body;
+    if (!body) return null;
+    var declared = null;
+    try { declared = body.querySelector("article,[role=main],main"); } catch (_) {}
+    if (declared && proseScore(declared) > 0) return declared;
+
+    var best = null, bestScore = 0;
+    try {
+      var candidates = body.querySelectorAll("article,main,section,div");
+      // Bounded: a deep page holds thousands of divs, and scanning all of them
+      // on every navigation would cost more than the extraction is worth.
+      var limit = Math.min(candidates.length, 400);
+      for (var i = 0; i < limit; i += 1) {
+        var el = candidates[i];
+        try { if (el.closest(ARTICLE_CHROME)) continue; } catch (_) {}
+        var score = proseScore(el);
+        if (score > bestScore) { bestScore = score; best = el; }
+      }
+    } catch (_) {}
+    return best || body;
+  }
+
+  var ARTICLE_BLOCK =
+    "p,h1,h2,h3,h4,h5,h6,li,dd,dt,blockquote,figcaption,td,th,pre," +
+    "article,main,section,div";
+  var articleTextTraversalTruncated = false;
+
+  // Reads each rendered text node exactly once. Element-level innerText cannot
+  // be used here: accepting both a parent block and one of its child blocks
+  // duplicates the child's text, while detached clones include hidden text.
+  function articleText(root) {
+    articleTextTraversalTruncated = false;
+    var parts = [];
+    var block = null;
+    var blockText = "";
+    var visibilityCache = typeof WeakMap === "function" ? new WeakMap() : null;
+
+    function rendered(el) {
+      if (!el || el.nodeType !== 1) return true;
+      if (visibilityCache && visibilityCache.has(el)) return visibilityCache.get(el);
+      var ok = true;
+      try {
+        if (
+          el.hidden ||
+          el.getAttribute("aria-hidden") === "true" ||
+          el.matches(ARTICLE_DROP)
+        ) ok = false;
+      } catch (_) {}
+      if (ok) {
+        try {
+          var style = window.getComputedStyle(el);
+          ok = !!style &&
+            style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            style.visibility !== "collapse" &&
+            style.contentVisibility !== "hidden" &&
+            parseFloat(style.opacity || "1") !== 0;
+        } catch (_) {}
+      }
+      if (ok && el.parentElement) ok = rendered(el.parentElement);
+      if (visibilityCache) visibilityCache.set(el, ok);
+      return ok;
+    }
+
+    function textBlock(el) {
+      try {
+        var found = el.closest(ARTICLE_BLOCK);
+        if (found && (found === root || root.contains(found))) return found;
+      } catch (_) {}
+      return root;
+    }
+
+    function flush() {
+      var value = blockText.replace(/\s+/g, " ").trim();
+      if (value) parts.push(value);
+      blockText = "";
+    }
+
+    try {
+      var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      var node = walker.nextNode();
+      var seen = 0;
+      while (node && seen < 8000) {
+        seen += 1;
+        var parent = node.parentElement;
+        var value = String(node.nodeValue || "");
+        if (value.trim() && parent && rendered(parent)) {
+          var nextBlock = textBlock(parent);
+          if (block && nextBlock !== block) flush();
+          block = nextBlock;
+          blockText += value;
+        }
+        node = walker.nextNode();
+      }
+      if (node) articleTextTraversalTruncated = true;
+    } catch (_) {
+      articleTextTraversalTruncated = true;
+    }
+    flush();
+    if (parts.length) return parts.join(String.fromCharCode(10) + String.fromCharCode(10));
+    // Graceful fallback for unusual DOM implementations without TreeWalker.
+    try { return String(root.innerText || ""); } catch (_) { return ""; }
+  }
+
+  // Reads only the prose intersecting the current visual viewport.
+  //
+  // The previous snapshot used articleText(root), so scrolling produced the
+  // same whole-article body and was discarded by content de-duplication. Text
+  // ranges give line boxes in viewport coordinates without cloning or changing
+  // the host page. A missing Range/TreeWalker implementation is reported by a
+  // null return so snapshot() can retain the existing whole-article fallback.
+  function viewportArticleText(root) {
+    if (
+      !root ||
+      typeof document.createRange !== "function" ||
+      typeof document.createTreeWalker !== "function" ||
+      typeof NodeFilter === "undefined"
+    ) return null;
+
+    var visual = window.visualViewport || null;
+    var width = Number(visual && visual.width) ||
+      Number(window.innerWidth) ||
+      Number(document.documentElement && document.documentElement.clientWidth) || 0;
+    var height = Number(visual && visual.height) ||
+      Number(window.innerHeight) ||
+      Number(document.documentElement && document.documentElement.clientHeight) || 0;
+    if (!(width > 0) || !(height > 0)) return null;
+
+    var left = Number(visual && visual.offsetLeft) || 0;
+    var top = Number(visual && visual.offsetTop) || 0;
+    var right = left + width;
+    var bottom = top + height;
+    var scrolling = document.scrollingElement || document.documentElement || document.body;
+    var scrollLeft = Number(window.scrollX);
+    var scrollTop = Number(window.scrollY);
+    if (!isFinite(scrollLeft)) scrollLeft = Number(scrolling && scrolling.scrollLeft) || 0;
+    if (!isFinite(scrollTop)) scrollTop = Number(scrolling && scrolling.scrollTop) || 0;
+
+    var parts = [];
+    var beforeText = "";
+    var afterText = "";
+    var sawVisible = false;
+    var block = null;
+    var blockText = "";
+    var range = null;
+    var visibilityCache = typeof WeakMap === "function" ? new WeakMap() : null;
+    var clipCache = typeof WeakMap === "function" ? new WeakMap() : null;
+
+    function rendered(el) {
+      if (!el || el.nodeType !== 1) return true;
+      if (visibilityCache && visibilityCache.has(el)) return visibilityCache.get(el);
+      var ok = true;
+      try {
+        if (
+          el.hidden ||
+          el.getAttribute("aria-hidden") === "true" ||
+          el.matches(ARTICLE_DROP)
+        ) ok = false;
+      } catch (_) {}
+      if (ok) {
+        try {
+          var style = window.getComputedStyle(el);
+          ok = !!style &&
+            style.display !== "none" &&
+            style.visibility !== "hidden" &&
+            style.visibility !== "collapse" &&
+            style.contentVisibility !== "hidden" &&
+            parseFloat(style.opacity || "1") !== 0;
+        } catch (_) {}
+      }
+      if (ok && el.parentElement) ok = rendered(el.parentElement);
+      if (visibilityCache) visibilityCache.set(el, ok);
+      return ok;
+    }
+
+    // Intersect the visual viewport with every overflow-clipping ancestor.
+    // A text line can be inside the browser viewport but outside an inner
+    // reading pane; getClientRects alone cannot distinguish those two cases.
+    function clippingRect(el) {
+      if (!el || el.nodeType !== 1) {
+        return { left: left, top: top, right: right, bottom: bottom };
+      }
+      if (clipCache && clipCache.has(el)) return clipCache.get(el);
+      var inherited = clippingRect(el.parentElement);
+      if (!inherited) {
+        if (clipCache) clipCache.set(el, null);
+        return null;
+      }
+      var clip = {
+        left: inherited.left,
+        top: inherited.top,
+        right: inherited.right,
+        bottom: inherited.bottom,
+      };
+      try {
+        var style = window.getComputedStyle(el);
+        var rect = el.getBoundingClientRect();
+        var clipsX = /^(auto|scroll|hidden|clip|overlay)$/.test(
+          String(style && style.overflowX || "")
+        );
+        var clipsY = /^(auto|scroll|hidden|clip|overlay)$/.test(
+          String(style && style.overflowY || "")
+        );
+        if (clipsX) {
+          clip.left = Math.max(clip.left, rect.left);
+          clip.right = Math.min(clip.right, rect.right);
+        }
+        if (clipsY) {
+          clip.top = Math.max(clip.top, rect.top);
+          clip.bottom = Math.min(clip.bottom, rect.bottom);
+        }
+      } catch (_) {}
+      if (clip.left >= clip.right || clip.top >= clip.bottom) clip = null;
+      if (clipCache) clipCache.set(el, clip);
+      return clip;
+    }
+
+    function intersects(rect, clip) {
+      return !!(
+        rect && clip && rect.width > 0 && rect.height > 0 &&
+        rect.right > clip.left && rect.left < clip.right &&
+        rect.bottom > clip.top && rect.top < clip.bottom
+      );
+    }
+
+    // A single text node can wrap over many screens. Browser line boxes do not
+    // expose character offsets, so map their ordered range back to a bounded
+    // character slice. Before/current/after use the same approximation, which
+    // keeps the three fields disjoint instead of smuggling context into the
+    // supposedly-visible field.
+    function textSliceForLines(value, rects, firstLine, endLine) {
+      if (!rects.length || firstLine < 0 || endLine <= firstLine) return "";
+      if (firstLine === 0 && endLine === rects.length) return value;
+      var startRatio = Math.max(0, firstLine) / rects.length;
+      var endRatio = Math.min(rects.length, endLine) / rects.length;
+      var start = Math.floor(value.length * startRatio);
+      var end = Math.ceil(value.length * endRatio);
+      var boundary = /[\s,.;:!?，。；：！？、]/;
+      var floor = Math.max(0, start - 80);
+      var ceiling = Math.min(value.length, end + 80);
+      while (start > floor && !boundary.test(value.charAt(start - 1))) start -= 1;
+      while (end < ceiling && !boundary.test(value.charAt(end))) end += 1;
+      return value.slice(start, end);
+    }
+
+    function addBefore(value) {
+      value = normalizeReadableText(value);
+      if (!value) return;
+      beforeText = normalizeReadableText(beforeText + "\n\n" + value);
+      if (beforeText.length > MAX_VIEWPORT_SIDE_TEXT) {
+        beforeText = beforeText.slice(beforeText.length - MAX_VIEWPORT_SIDE_TEXT);
+      }
+    }
+
+    function addAfter(value) {
+      if (afterText.length >= MAX_VIEWPORT_SIDE_TEXT) return;
+      value = normalizeReadableText(value);
+      if (!value) return;
+      afterText = normalizeReadableText(afterText + "\n\n" + value)
+        .slice(0, MAX_VIEWPORT_SIDE_TEXT);
+    }
+
+    function textBlock(el) {
+      try {
+        var found = el.closest(ARTICLE_BLOCK);
+        if (found && (found === root || root.contains(found))) return found;
+      } catch (_) {}
+      return root;
+    }
+
+    function flush() {
+      var value = blockText.replace(/\s+/g, " ").trim();
+      if (value) parts.push(value);
+      blockText = "";
+    }
+
+    try {
+      range = document.createRange();
+      if (!range || typeof range.getClientRects !== "function") return null;
+      var walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT);
+      var node = walker.nextNode();
+      var seen = 0;
+      while (node && seen < 8000) {
+        seen += 1;
+        var parent = node.parentElement;
+        var value = String(node.nodeValue || "");
+        if (value.trim() && parent && rendered(parent)) {
+          range.selectNodeContents(node);
+          var rects = Array.prototype.slice.call(range.getClientRects() || []);
+          var clip = clippingRect(parent);
+          var firstVisible = -1;
+          var lastVisible = -1;
+          for (var i = 0; i < rects.length; i += 1) {
+            if (intersects(rects[i], clip)) {
+              if (firstVisible < 0) firstVisible = i;
+              lastVisible = i;
+            }
+          }
+          if (firstVisible >= 0) {
+            if (firstVisible > 0) {
+              addBefore(textSliceForLines(value, rects, 0, firstVisible));
+            }
+            var nextBlock = textBlock(parent);
+            if (block && nextBlock !== block) flush();
+            block = nextBlock;
+            blockText += textSliceForLines(value, rects, firstVisible, lastVisible + 1);
+            sawVisible = true;
+            if (lastVisible + 1 < rects.length) {
+              addAfter(textSliceForLines(value, rects, lastVisible + 1, rects.length));
+            }
+          } else if (rects.length) {
+            var allBefore = true;
+            var allAfter = true;
+            for (var r = 0; r < rects.length; r += 1) {
+              if (rects[r].bottom > (clip ? clip.top : top)) allBefore = false;
+              if (rects[r].top < (clip ? clip.bottom : bottom)) allAfter = false;
+            }
+            if (!sawVisible && allBefore) addBefore(value);
+            else if (sawVisible && allAfter) addAfter(value);
+          }
+        }
+        node = walker.nextNode();
+      }
+    } catch (_) {
+      return null;
+    } finally {
+      try { if (range && typeof range.detach === "function") range.detach(); } catch (_) {}
+    }
+    flush();
+    var visibleText = parts.join(String.fromCharCode(10) + String.fromCharCode(10));
+    if (!visibleText.trim()) return null;
+    return {
+      beforeText: normalizeReadableText(beforeText),
+      visibleText: normalizeReadableText(visibleText),
+      afterText: normalizeReadableText(afterText),
+      // Internal only: it makes a real view movement distinct even when two
+      // adjacent regions contain identical text. call.js consumes the key for
+      // de-duplication but never places it in the strict Windows payload.
+      viewKey: [
+        viewportRevision,
+        Math.round(scrollLeft),
+        Math.round(scrollTop),
+        Math.round(width),
+        Math.round(height),
+      ].join(":"),
+    };
+  }
+
   function snapshot() {
     var body = document.body;
     if (!body) return null;
-    var text = "";
+    var fullText = "";
+    var visibleText = "";
+    var beforeText = "";
+    var afterText = "";
+    var fullTextTruncated = false;
+    var viewKey = "fallback:" + viewportRevision;
     try {
-      text = String(body.innerText || "")
-        .replace(/[ \t]+/g, " ")
-        .replace(/\n{3,}/g, "\n\n")
-        .trim()
-        .slice(0, MAX_TEXT);
-    } catch (_) {
+      var root = articleRoot() || body;
+      var whole = String(body.innerText || "");
+      // The corpus is the complete readable page, not merely the article root.
+      // body.innerText follows the live rendered tree, so hidden script/style
+      // content stays out while navigation, sidebars and secondary reading
+      // regions remain available for the conversation's first full read.
+      fullText = whole;
+      if (!fullText.trim()) {
+        fullText = articleText(body);
+        fullTextTruncated = articleTextTraversalTruncated;
+      }
+      if (root !== body) {
+        probeLine(
+          "全文提取: 整页 " + fullText.length + " 字; 视口主栏 " +
+          String(root.tagName || "").toLowerCase()
+        );
+      }
+      fullText = normalizeReadableText(fullText);
+
+      var viewport = viewportArticleText(root);
+      if (viewport) {
+        visibleText = viewport.visibleText;
+        beforeText = viewport.beforeText;
+        afterText = viewport.afterText;
+        viewKey = viewport.viewKey;
+        probeLine(
+          "视口正文: 前 " + beforeText.length +
+          " / 当前 " + visibleText.length +
+          " / 后 " + afterText.length + " 字"
+        );
+      } else {
+        // Range geometry is unavailable: keep the article-like reading region
+        // as the marked current view. The complete body remains separately in
+        // document.text and never masquerades as the viewport.
+        visibleText = root === body ? fullText : articleText(root);
+      }
+      visibleText = normalizeReadableText(visibleText).slice(0, MAX_TEXT);
+      beforeText = normalizeReadableText(beforeText).slice(-MAX_VIEWPORT_SIDE_TEXT);
+      afterText = normalizeReadableText(afterText).slice(0, MAX_VIEWPORT_SIDE_TEXT);
+    } catch (err) {
+      probeLine("正文提取失败: " + ((err && err.message) || "未知"));
       return null;
     }
     var selection = "";
     try {
       selection = String(window.getSelection() || "").trim().slice(0, 400);
     } catch (_) {}
+    var selectionRegions = {
+      contract: "reader-selection-regions/1",
+      total: 0,
+      truncated: false,
+      items: [],
+    };
+    try {
+      if (typeof window.RC?.selectionRegionsForPage === "function") {
+        selectionRegions = window.RC.selectionRegionsForPage({ page: 0 });
+      }
+    } catch (_) {}
+    var viewportPayload = {
+      beforeText: beforeText,
+      visibleText: visibleText,
+      afterText: afterText,
+      selectionState: selection ? "active" : "cleared",
+      selection: selection,
+      viewKey: viewKey,
+    };
+    if (lastBrowserControlCorrelation) {
+      viewportPayload.controlCorrelation = lastBrowserControlCorrelation;
+    }
+    var visualState = webDrawingState();
     return {
       url: String(location.href || ""),
       title: String(document.title || ""),
-      text: text,
+      // Compatibility aliases for the existing snapshot path. They are the
+      // current viewport only; the full document never enters page.text.
+      text: visibleText,
       selection: selection,
+      selectionRegions: selectionRegions,
+      visual: visualState,
+      viewKey: viewKey,
+      viewport: viewportPayload,
+      document: {
+        sourceInstanceId: sourceInstanceId,
+        documentKey: canonicalDocumentKey(),
+        // Browser activation is intentionally transport-only metadata. It
+        // fences the background document de-duplication for A -> B -> A even
+        // when iOS freezes A without first delivering visibilitychange; it is
+        // never copied into the Windows reader-document/1 payload.
+        activationRevision: activationRevision,
+        // call.js computes SHA-256 and enforces the byte bound in its trusted
+        // extension origin before constructing the POST field.
+        text: fullText,
+        truncated: fullTextTruncated,
+      },
     };
   }
 
+  function sha256Text(value) {
+    if (!window.crypto || !window.crypto.subtle || typeof TextEncoder !== "function") {
+      return Promise.reject(new Error("缺少 SHA-256 支持"));
+    }
+    return window.crypto.subtle.digest("SHA-256", new TextEncoder().encode(value)).then(
+      function (digest) {
+        return Array.prototype.map.call(new Uint8Array(digest), function (byte) {
+          return byte.toString(16).padStart(2, "0");
+        }).join("");
+      }
+    );
+  }
+
+  function boundRelayDocumentText(value) {
+    var original = String(value || "");
+    var text = original.slice(0, 256 * 1024);
+    if (text && /[\uD800-\uDBFF]/.test(text.charAt(text.length - 1))) {
+      text = text.slice(0, -1);
+    }
+    var encoder = new TextEncoder();
+    if (encoder.encode(text).byteLength <= 768 * 1024) {
+      return { text: text, truncated: text.length < original.length };
+    }
+    var low = 0;
+    var high = text.length;
+    while (low < high) {
+      var middle = Math.ceil((low + high) / 2);
+      if (encoder.encode(text.slice(0, middle)).byteLength <= 768 * 1024) low = middle;
+      else high = middle - 1;
+    }
+    if (low > 0 && /[\uD800-\uDBFF]/.test(text.charAt(low - 1))) low -= 1;
+    return { text: text.slice(0, low), truncated: true };
+  }
+
+  function prepareRelaySnapshot(snap) {
+    var fullText = String(snap.document.text || "");
+    var bounded = boundRelayDocumentText(fullText);
+    return sha256Text(fullText).then(function (contentRevision) {
+      return Object.assign({}, snap, {
+        document: {
+          sourceInstanceId: snap.document.sourceInstanceId,
+          documentKey: snap.document.documentKey,
+          activationRevision: snap.document.activationRevision,
+          contentRevision: contentRevision,
+          text: bounded.text,
+          truncated: !!snap.document.truncated || bounded.truncated,
+        },
+      });
+    });
+  }
+
   function report(force) {
-    if (!preferenceKnown || !contextSyncEnabled) return;
+    probeLine(
+      "上报入口: known=" + (preferenceKnown ? "是" : "否") +
+      " enabled=" + (contextSyncEnabled ? "是" : "否") +
+      " visible=" + String(document.visibilityState)
+    );
+    // Only a preference actually read as false stops the report.
+    //
+    // "Not yet known" was being treated as "the user turned it off", and the
+    // page then went unreported forever. Tonight that state proved reachable in
+    // a way none of the failure paths explain -- both of them set the flag, yet
+    // ten seconds after load it was still unset, so refreshPreference had not
+    // run at all. Whatever the cause, silence-by-default is the wrong answer to
+    // an unread setting: the page in front of the user is the same page whether
+    // or not a preference finished loading.
+    //
+    // An explicit false is still honoured. Turning sync off keeps working; not
+    // knowing yet no longer means off.
+    if (preferenceKnown && !contextSyncEnabled) return;
     // Only the page in front of the user. Background tabs stay silent, so a
     // dozen open tabs cannot fight over what the assistant is looking at.
-    if (document.visibilityState !== "visible") return;
-    var snap = snapshot();
-    if (!snap) return;
-    var signature = snap.url + "|" + snap.title + "|" +
-      contentDigest(snap.text) + "|" + contentDigest(snap.selection);
-    if (!force && (signature === lastSignature || signature === pendingSignature)) return;
-    pendingSignature = signature;
-    contextRevision += 1;
-    var envelope = {
-      schema: 1,
-      revision: Date.now() + "-" + contextRevision,
-      capturedAt: Date.now(),
-      page: snap,
-    };
-
-    function finishStorage(success) {
-      if (pendingSignature === signature) pendingSignature = "";
-      if (!success) {
-        schedule(true);
-        return;
-      }
-      lastSignature = signature;
-      // Retain the runtime message as a fast path. The storage record is the
-      // reliable handoff: a late-starting inline call frame reads it back, so
-      // losing this message can no longer leave its lastPage empty forever.
-      try {
-        var result = runtime.sendMessage({ type: "BW_PAGE_ACTIVE", page: snap });
-        if (result && typeof result.catch === "function") result.catch(function () {});
-      } catch (_) {}
-    }
-
-    if (!extensionStore || typeof extensionStore.set !== "function") {
-      finishStorage(false);
+    if (document.visibilityState !== "visible") {
+      probeLine("跳过: 页面不可见");
       return;
     }
-    Promise.resolve(extensionStore.set(ACTIVE_CONTEXT_KEY, envelope)).then(
-      function () { finishStorage(true); },
-      function () { finishStorage(false); }
+    // Focus as well as visibility.
+    //
+    // visibilityState alone calls every un-minimised tab "visible", so a tab
+    // the user is not looking at can still report -- and under last-write-wins
+    // it overwrites the page they actually have open. That happened: a login
+    // page overwrote the article being read. Focus is what distinguishes the
+    // one page in front of the user from the several merely on screen.
+    var focused = true;
+    try { focused = document.hasFocus(); } catch (_) {}
+    // `force` only bypasses content de-duplication. It must never let an
+    // unfocused tab overwrite the page that is actually in front of the user.
+    if (!focused) {
+      probeLine("跳过: 本页未获焦点");
+      return;
+    }
+    var snap = snapshot();
+    if (!snap) return;
+    var signature = snap.url + "|" + snap.title + "|" + snap.viewKey + "|" +
+      contentDigest(snap.text) + "|" + contentDigest(snap.selection) + "|" +
+      contentDigest(JSON.stringify(snap.selectionRegions || null)) + "|" +
+      contentDigest(JSON.stringify(snap.visual || null)) + "|" +
+      contentDigest(snap.document && snap.document.text);
+    if (!force && signature === lastSignature) {
+      probeLine("跳过: 内容签名未变");
+      return;
+    }
+    if (!force && signature === pendingSignature) {
+      probeLine("跳过: 同签名投递中");
+      return;
+    }
+    pendingSignature = signature;
+
+    probeLine("采集: " + String(snap.url || "").slice(0, 60));
+    probeLine("后台 POST: 准备边界快照");
+    prepareRelaySnapshot(snap).then(function (relaySnap) {
+      if (document.visibilityState !== "visible") {
+        throw new Error("哈希完成时页面已不可见，丢弃旧快照");
+      }
+      try {
+        if (!document.hasFocus()) throw new Error("哈希完成时页面已失焦，丢弃旧快照");
+      } catch (err) { throw err; }
+      if (String(location.href || "") !== snap.url) {
+        throw new Error("哈希完成时页面地址已变化，丢弃旧快照");
+      }
+      probeLine("后台 POST: 开始");
+      return runtimeRequest({ type: "BW_READER_CONTEXT_POST", snapshot: relaySnap }, 15000);
+    }).then(
+      function (reply) {
+        if (!reply || reply.ok !== true || !reply.data) {
+          throw new Error(String(reply && (reply.error || reply.code) || "后台拒绝快照"));
+        }
+        var snapshotRevision = Number(reply.data.snapshotRevision);
+        if (!Number.isSafeInteger(snapshotRevision) || snapshotRevision < 1) {
+          throw new Error("后台回执缺少有效 revision");
+        }
+        if (pendingSignature === signature) pendingSignature = "";
+        lastSignature = signature;
+        probeLine("后台 POST: 成功 revision=" + snapshotRevision);
+        claimCallFrame();
+      },
+      function (err) {
+        if (pendingSignature === signature) pendingSignature = "";
+        probeLine("后台 POST 失败: " + ((err && err.message) || "未知"));
+        schedule(true);
+      }
     );
   }
 
@@ -479,42 +1466,248 @@
   }
 
   try {
+    function noteForegroundActivation(reason) {
+      if (document.visibilityState !== "visible") return;
+      try { if (!document.hasFocus()) return; } catch (_) {}
+      if (activationTimer) return;
+      activationTimer = setTimeout(function () {
+        activationTimer = null;
+        if (document.visibilityState !== "visible") return;
+        try { if (!document.hasFocus()) return; } catch (_) {}
+        activationRevision += 1;
+        lastSignature = "";
+        probeLine("前台激活: " + reason + " #" + activationRevision);
+        claimCallFrame();
+        refreshPreference(true);
+      }, 120);
+    }
+    function noteLocationChange(reason) {
+      var current = String(location.href || "");
+      if (!current || current === lastObservedUrl) return;
+      lastObservedUrl = current;
+      activationRevision += 1;
+      viewportRevision += 1;
+      lastSignature = "";
+      pendingSignature = "";
+      probeLine("页面地址变化: " + reason + " #" + activationRevision);
+      schedule(true);
+    }
     document.addEventListener("visibilitychange", function () {
-      if (document.visibilityState === "visible") schedule(true);
+      if (document.visibilityState === "visible") noteForegroundActivation("visible");
     }, { passive: true });
     document.addEventListener("selectionchange", function () {
       schedule(false);
     }, { passive: true });
-    window.addEventListener("scroll", function () {
-      schedule(false);
+    window.addEventListener("rc:inkchange", function () {
+      viewportRevision += 1;
+      schedule(true);
     }, { passive: true });
-    ["pageshow", "focus", "online"].forEach(function (type) {
+    // Browser-control replies only mean that the scroll operation ran. Force
+    // the resulting viewport through the snapshot path before the MCP tool is
+    // allowed to report success, so an immediate follow-up read cannot see the
+    // pre-scroll viewport.
+    window.addEventListener("bw:browser-control-refresh", function (event) {
+      var detail = event && event.detail;
+      var requestId = String(detail && detail.requestId || "");
+      var source = String(detail && detail.sourceInstanceId || "");
+      if (
+        source !== sourceInstanceId ||
+        !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(requestId)
+      ) return;
+      lastBrowserControlCorrelation = requestId;
+      viewportRevision += 1;
+      // This acknowledgement is part of the control operation itself. Bypass
+      // the ordinary 1.5 s scroll throttle so Windows can prove it received
+      // the viewport produced by this exact request rather than an unrelated
+      // heartbeat revision.
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      lastSignature = "";
+      report(true);
+    }, { passive: true });
+    function noteViewportScroll() {
+      viewportRevision += 1;
+      schedule(false);
+    }
+    window.addEventListener("scroll", noteViewportScroll, { passive: true });
+    // Element scroll events do not bubble. Capture them at document level so a
+    // site whose reading pane is an inner scroller updates just like the root
+    // page. The document target is already covered by window above.
+    document.addEventListener("scroll", function (event) {
+      if (event && event.target === document) return;
+      noteViewportScroll();
+    }, { capture: true, passive: true });
+    ["pageshow", "focus", "resume"].forEach(function (type) {
       window.addEventListener(type, function () {
-        refreshPreference(true);
+        noteForegroundActivation(type);
       }, { passive: true });
     });
+    window.addEventListener("online", function () {
+      refreshPreference(true);
+    }, { passive: true });
+    ["hashchange", "popstate"].forEach(function (type) {
+      window.addEventListener(type, function () {
+        noteLocationChange(type);
+      }, { passive: true });
+    });
+    // pushState/replaceState may not emit either event, and patching History
+    // from an isolated content-script world would not intercept page-world
+    // calls. A bounded URL poll observes that last case without trusting the
+    // host page or waiting for the 60-second context heartbeat.
+    window.setInterval(function () {
+      noteLocationChange("poll");
+    }, 1000);
+    // Keep asserting which foreground page is current even when its body and
+    // selection do not change. Background pages still fail the strict focus
+    // gate in report(), so they cannot win merely by having a live timer.
+    window.setInterval(function () {
+      if (contextSyncEnabled) schedule(true);
+    }, ACTIVE_CONTEXT_HEARTBEAT_MS);
+    // Service-worker memory can be reclaimed while the iframe remains alive.
+    // Re-establish only the one-time frame claim at a bounded cadence; no page
+    // data or control result travels on this bootstrap channel.
+    window.setInterval(function () {
+      if (document.visibilityState !== "visible") return;
+      try { if (!document.hasFocus()) return; } catch (_) {}
+      claimCallFrame();
+    }, 15000);
+
+    // Asks the switch itself, rather than a copy of it.
+    //
+    // The setting is owned by RC.ctxSync and persisted to localStorage; this
+    // file was reading chrome.storage.local under a different key entirely. Two
+    // different stores, two different names -- so the value came back undefined
+    // no matter how many times the user toggled it, and undefined folded to
+    // false. Every "I turned it on and nothing happened" tonight was this.
+    //
+    // RC lives in this same page, injected alongside this script, so the switch
+    // can simply be asked. The storage read stays as a fallback for surfaces
+    // where RC is absent.
+    // Mirrors the switch into extension storage, which every site can see.
+    //
+    // RC.ctxSync keeps the setting in localStorage, and a content script's
+    // localStorage belongs to the host site -- one copy per domain, none of
+    // them shared. So the switch was only ever readable on whichever site it
+    // happened to be flipped on. That is why the same build reported enabled=是
+    // on one page and enabled=否 on the next: not a race, a different store.
+    //
+    // Extension storage is per-extension rather than per-site, so a value seen
+    // once is written there and every other page reads it back. The mirror is
+    // deliberately its own key: the existing preferences record has a shape
+    // this file does not own, and writing a single boolean into it would mean
+    // guessing at that shape.
+    var MIRROR_KEY = "bwCtxSyncMirrorV1";
+
+    function mirrorPreference(value) {
+      try {
+        if (!extensionStore || typeof extensionStore.set !== "function") {
+          probeLine("镜像写入: 无存储通道");
+          return;
+        }
+        Promise.resolve(
+          extensionStore.set(MIRROR_KEY, { schema: 1, enabled: !!value })
+        ).then(
+          function () { probeLine("镜像写入: " + (value ? "开" : "关")); },
+          function (err) {
+            probeLine("镜像写入失败: " + (err && err.message || "未知"));
+          }
+        );
+      } catch (err) {
+        probeLine("镜像写入异常: " + (err && err.message || "未知"));
+      }
+    }
+
+    function preferenceFromRuntime() {
+      try {
+        var RC = window.RC;
+        if (
+          RC && RC.ctxSync &&
+          typeof RC.ctxSync.enabled === "function"
+        ) {
+          // rc-core is injected on every website. Its enabled() helper returns
+          // false both for an explicit "0" and for a missing site-local key.
+          // Only the former is user intent; treating the latter as intent
+          // would let the next ordinary website overwrite a true cross-site
+          // mirror with its local default.
+          var key = String(RC.ctxSync.LS_KEY || "");
+          var raw = key ? localStorage.getItem(key) : null;
+          if (raw !== "1" && raw !== "0") {
+            probeLine("RC.ctxSync: 本页无显式值");
+            return null;
+          }
+          var live = !!RC.ctxSync.enabled();
+          mirrorPreference(live);
+          return live;
+        }
+      } catch (_) {}
+      probeLine("RC.ctxSync: 不可用(本页读不到开关)");
+      return null;
+    }
+
+    // Reads the mirror. Only used where the switch itself is out of reach --
+    // that is, on every site other than the one it was flipped on.
+    function preferenceFromMirror() {
+      if (!extensionStore || typeof extensionStore.get !== "function") {
+        return Promise.resolve(null);
+      }
+      return Promise.resolve(extensionStore.get(MIRROR_KEY))
+        .then(function (record) {
+          if (!record || typeof record !== "object") return null;
+          return !!record.enabled;
+        })
+        .catch(function () { return null; });
+    }
 
     function refreshPreference(forceReport) {
-      if (!extensionStore || typeof extensionStore.get !== "function") {
+      var live = preferenceFromRuntime();
+      if (live !== null) {
         preferenceKnown = true;
-        contextSyncEnabled = false;
+        var changedLive = contextSyncEnabled !== live;
+        contextSyncEnabled = live;
+        if (forceReport && contextSyncEnabled) schedule(true);
+        else if (changedLive && contextSyncEnabled) schedule(true);
         return;
       }
-      Promise.resolve(extensionStore.get(PREFERENCE_KEY)).then(function (record) {
-        applyPreference(record);
-        if (forceReport && contextSyncEnabled) schedule(true);
-      }).catch(function () {
+      if (!extensionStore || typeof extensionStore.get !== "function") {
+        // Left unknown on purpose: no store means the answer is unavailable,
+        // not that the answer is no.
+        return;
+      }
+      preferenceFromMirror().then(function (mirrored) {
+        if (mirrored === null) {
+          // Said out loud. An empty mirror is the most likely state on a fresh
+          // install and it looks exactly like a working one that reads false --
+          // staying quiet here would hide the single fact worth knowing.
+          probeLine("镜像偏好: 空(尚未写入)");
+          return Promise.resolve(extensionStore.get(PREFERENCE_KEY)).then(function (record) {
+            var fallback = enabledFromRecord(record);
+            if (!applyPreference(record)) return;
+            mirrorPreference(fallback);
+            if (forceReport && contextSyncEnabled) schedule(true);
+          }).catch(function () {
+            // A failed legacy read still says nothing about user intent.
+          });
+        }
         preferenceKnown = true;
-        contextSyncEnabled = false;
+        var changedMirror = contextSyncEnabled !== mirrored;
+        contextSyncEnabled = mirrored;
+        probeLine("镜像偏好: " + (mirrored ? "开" : "关"));
+        if (contextSyncEnabled && (forceReport || changedMirror)) schedule(true);
       });
     }
 
     refreshPreference(true);
+    claimCallFrame();
     if (chrome.storage && chrome.storage.local) {
       if (chrome.storage.onChanged) {
         chrome.storage.onChanged.addListener(function (changes, areaName) {
           if (areaName !== "local" || !changes || !changes[PREFERENCE_KEY]) return;
-          applyPreference(changes[PREFERENCE_KEY].newValue);
+          var record = changes[PREFERENCE_KEY].newValue;
+          var changedValue = enabledFromRecord(record);
+          if (!applyPreference(record)) return;
+          mirrorPreference(changedValue);
         });
       }
     }

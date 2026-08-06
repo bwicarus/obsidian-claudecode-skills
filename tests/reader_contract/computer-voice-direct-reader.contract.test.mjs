@@ -14,7 +14,7 @@ const READER_ORIGIN = "https://bwicarus.taile44d0c.ts.net";
 const RELAY_PORT = "BW_COMPUTER_VOICE_DIRECT_V3";
 const DIRECT_CONTRACT = "reader-computer-voice-direct/1";
 const RESULT_DELIVERY_CONTRACT = "reader-result-delivery/1";
-const VISUAL_DELIVERY_CONTRACT = "reader-visual-delivery/1";
+const VISUAL_DELIVERY_CONTRACT = "reader-visual-delivery/2";
 
 function createAudioContextClass(scenario) {
   return class FakeAudioContext {
@@ -390,6 +390,15 @@ function createServer(scenario) {
           sessionId: request.sessionId,
           state: "context-only",
           mode: scenario.contextDeliveryMode || "legacy-inject",
+        });
+        return;
+      }
+      if (request.type === "visual-register") {
+        scenario.readerVisualRegistrations.push(structuredClone(request));
+        result(this, request, {
+          sessionId: request.sessionId,
+          sourceInstanceId: request.sourceInstanceId,
+          state: "registered",
         });
         return;
       }
@@ -917,6 +926,7 @@ function createHarness(overrides = {}) {
     readerResultAcks: [],
     readerResultReceipt: { outcome: "rendered" },
     readerVisualChunks: [],
+    readerVisualRegistrations: [],
     readerVisualCaptureCalls: 0,
     readerVisualCaptureTargets: [],
     readerVisualCompositeCaptureCalls: 0,
@@ -1234,6 +1244,26 @@ async function waitForCondition(predicate, label, timeoutMs = 2500) {
     await new Promise((resolve) => setTimeout(resolve, 5));
   }
   assert.fail(`timed out waiting for ${label}`);
+}
+
+function visualRequest(harness, fields = {}) {
+  const registration = harness.scenario.readerVisualRegistrations.at(-1);
+  assert.ok(registration, "missing visual-register");
+  return {
+    contract: VISUAL_DELIVERY_CONTRACT,
+    commandKind: "capture-composite",
+    correlation: "visual-0123456789abcdef",
+    sourceInstanceId: registration.sourceInstanceId,
+    snapshotRevision: 1,
+    file: "book.pdf",
+    page: 24,
+    drawingRevision: null,
+    scope: "viewport-context",
+    selectionId: null,
+    maxBytes: 768 * 1024,
+    chunkCharacters: 48000,
+    ...fields,
+  };
 }
 
 function contextRequests(harness) {
@@ -1597,7 +1627,7 @@ test("snapshot-mcp 常驻 WSS 接收严格结果卡并回 rendered ACK，不发�
   await disableSnapshot(harness);
 });
 
-test("snapshot-mcp 停笔后主动发布整页合成图，MCP 请求复用缓存且不发送 START", async () => {
+test("snapshot-mcp 只在 MCP 按需请求时发送合成图且不发送 START", async () => {
   const b64 = Buffer.alloc(70000, 0x11).toString("base64");
   const drawingRevision = "dr_0123456789abcdef";
   const harness = createHarness({
@@ -1623,23 +1653,13 @@ test("snapshot-mcp 停笔后主动发布整页合成图，MCP 请求复用缓存
   });
   harness.api.setSelectedEngine("computer_client");
   await waitForRequest(harness, "context-open");
-  await waitForCondition(
-    () => harness.scenario.readerVisualChunks.filter(
-      (chunk) => chunk.correlation.startsWith("publish-"),
-    ).length === 2,
-    "proactive reader visual chunks",
-  );
+  await waitForRequest(harness, "visual-register");
+  assert.equal(harness.scenario.readerVisualChunks.length, 0);
 
   const pullCorrelation = "visual-0123456789abcdef0123456789abcdef";
-  harness.server.emitReaderVisual({
-    contract: VISUAL_DELIVERY_CONTRACT,
+  harness.server.emitReaderVisual(visualRequest(harness, {
     correlation: pullCorrelation,
-    file: "book.pdf",
-    page: 24,
-    drawingRevision,
-    maxBytes: 768 * 1024,
-    chunkCharacters: 48000,
-  });
+  }));
   await waitForCondition(
     () => harness.scenario.readerVisualChunks.filter(
       (chunk) => chunk.correlation === pullCorrelation,
@@ -1651,7 +1671,7 @@ test("snapshot-mcp 停笔后主动发布整页合成图，MCP 请求复用缓存
   assert.equal(harness.scenario.readerVisualCaptureCalls, 0);
   assert.deepEqual(
     harness.scenario.readerVisualCompositeCaptureTargets,
-    [{ page: 24 }],
+    [{ page: 24, scope: "viewport-context" }],
   );
   const pullChunks = harness.scenario.readerVisualChunks.filter(
     (chunk) => chunk.correlation === pullCorrelation,
@@ -1665,6 +1685,13 @@ test("snapshot-mcp 停笔后主动发布整页合成图，MCP 请求复用缓存
     assert.equal(chunk.status, "chunk");
     assert.equal(chunk.chunkIndex, index);
     assert.equal(chunk.chunkCount, 2);
+    assert.equal(chunk.scope, "viewport-context");
+    assert.equal(chunk.selectionId, null);
+    assert.equal(chunk.sourceInstanceId,
+      harness.scenario.readerVisualRegistrations[0].sourceInstanceId);
+    assert.equal(chunk.snapshotRevision, 1);
+    assert.equal(chunk.sessionId,
+      harness.scenario.readerVisualRegistrations[0].sessionId);
     assert.ok(Buffer.byteLength(JSON.stringify(chunk), "utf8") < 65536);
   });
   harness.dispatchDocumentEvent("bw-reader-drawing-state", {
@@ -1675,33 +1702,179 @@ test("snapshot-mcp 停笔后主动发布整页合成图，MCP 请求复用缓存
   });
   await new Promise((resolve) => setTimeout(resolve, 20));
   assert.equal(harness.scenario.readerVisualCompositeCaptureCalls, 1);
-  assert.equal(
-    harness.scenario.readerVisualChunks.filter(
-      (chunk) => chunk.correlation.startsWith("publish-") &&
-        chunk.status === "chunk",
-    ).length,
-    2,
-  );
+  assert.equal(harness.scenario.readerVisualChunks.length, 2);
   harness.dispatchDocumentEvent("bw-reader-drawing-state", {
     state: "changed",
     file: "book.pdf",
     page: 24,
     drawingRevision: null,
   });
-  await waitForCondition(
-    () => harness.scenario.readerVisualChunks.some(
-      (chunk) => chunk.correlation.startsWith("publish-") &&
-        chunk.status === "unavailable" &&
-        chunk.drawingRevision === drawingRevision,
-    ),
-    "reader visual invalidation",
-  );
+  await new Promise((resolve) => setTimeout(resolve, 20));
+  assert.equal(harness.scenario.readerVisualChunks.length, 2);
   assert.equal(
     harness.server.requests.some((request) => request.type === "start"),
     false,
   );
   assert.equal(harness.scenario.microphoneRequests.length, 0);
   await disableSnapshot(harness);
+});
+
+test("snapshot-mcp 按需视觉 scope 固定分派且回传身份元数据，不复用旧整页缓存", async () => {
+  const drawingRevision = "dr_0123456789abcdef";
+  const harness = createHarness({
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncEnabled: true,
+    activeReading: {
+      kind: "pdf",
+      file: "book.pdf",
+      title: "Snapshot Book",
+      pos: 24,
+    },
+    readerVisualDrawing: {
+      file: "book.pdf",
+      page: 24,
+      stable: true,
+      empty: false,
+      drawingRevision,
+    },
+    readerVisualCapture: {
+      media_type: "image/jpeg",
+      b64: Buffer.alloc(4000, 0x22).toString("base64"),
+    },
+  });
+  harness.api.setSelectedEngine("computer_client");
+  await waitForRequest(harness, "context-open");
+  await waitForRequest(harness, "visual-register");
+  harness.scenario.readerVisualCaptureCalls = 0;
+  harness.scenario.readerVisualCaptureTargets.length = 0;
+  harness.scenario.readerVisualCompositeCaptureCalls = 0;
+  harness.scenario.readerVisualCompositeCaptureTargets.length = 0;
+
+  const cases = [
+    {
+      scope: "viewport-context",
+      selectionId: null,
+      capture: "composite",
+      target: { page: 24, scope: "viewport-context" },
+    },
+    {
+      scope: "drawing-nearby",
+      selectionId: null,
+      capture: "ink",
+      target: { page: 24, scope: "drawing-nearby" },
+    },
+    {
+      scope: "selection-near",
+      selectionId: "r-selection-24",
+      capture: "ink",
+      target: {
+        page: 24,
+        scope: "selection-near",
+        selectionId: "r-selection-24",
+      },
+    },
+  ];
+
+  for (let index = 0; index < cases.length; index += 1) {
+    const item = cases[index];
+    const correlation = `visual-scope-${index}`;
+    const payload = visualRequest(harness, {
+      correlation,
+      drawingRevision: item.scope === "viewport-context"
+        ? null
+        : drawingRevision,
+      scope: item.scope,
+      selectionId: item.selectionId,
+    });
+    harness.server.emitReaderVisual(payload);
+    await waitForCondition(
+      () => harness.scenario.readerVisualChunks.some(
+        (chunk) => chunk.correlation === correlation,
+      ),
+      `scoped reader visual ${item.scope}`,
+    );
+    const chunk = harness.scenario.readerVisualChunks.find(
+      (candidate) => candidate.correlation === correlation,
+    );
+    assert.equal(chunk.status, "chunk");
+    assert.equal(chunk.scope, item.scope);
+    assert.equal(chunk.selectionId, item.selectionId);
+    assert.equal(chunk.file, "book.pdf");
+    assert.equal(chunk.page, 24);
+    assert.equal(
+      chunk.drawingRevision,
+      item.scope === "viewport-context" ? null : drawingRevision,
+    );
+    if (item.capture === "composite") {
+      assert.deepEqual(
+        harness.scenario.readerVisualCompositeCaptureTargets.at(-1),
+        item.target,
+      );
+    } else {
+      assert.deepEqual(
+        harness.scenario.readerVisualCaptureTargets.at(-1),
+        item.target,
+      );
+    }
+  }
+
+  assert.equal(harness.scenario.readerVisualCompositeCaptureCalls, 1);
+  assert.equal(harness.scenario.readerVisualCaptureCalls, 2);
+  assert.equal(
+    harness.server.requests.some((request) => request.type === "start"),
+    false,
+  );
+  await disableSnapshot(harness);
+});
+
+test("snapshot-mcp 按需视觉 scope 对越权范围与缺失 selectionId 均 fail closed", async () => {
+  const invalidPayloads = [
+    { scope: "arbitrary-selector" },
+    { scope: "selection-near" },
+  ];
+  for (let index = 0; index < invalidPayloads.length; index += 1) {
+    const harness = createHarness({
+      contextDeliveryMode: "snapshot-mcp",
+      contextSyncEnabled: true,
+      activeReading: {
+        kind: "pdf",
+        file: "book.pdf",
+        title: "Snapshot Book",
+        pos: 24,
+      },
+      readerVisualDrawing: {
+        file: "book.pdf",
+        page: 24,
+        stable: true,
+        empty: false,
+        drawingRevision: "dr_0123456789abcdef",
+      },
+      readerVisualCapture: {
+        media_type: "image/jpeg",
+        b64: Buffer.alloc(4000, 0x33).toString("base64"),
+      },
+    });
+    harness.api.setSelectedEngine("computer_client");
+    await waitForRequest(harness, "context-open");
+    await waitForRequest(harness, "visual-register");
+    const socket = harness.server.sockets.at(-1);
+    const baselineChunks = harness.scenario.readerVisualChunks.length;
+    const payload = visualRequest(harness, {
+      correlation: `visual-invalid-${index}`,
+      drawingRevision: "dr_0123456789abcdef",
+      selectionId: null,
+      ...invalidPayloads[index],
+    });
+    harness.server.emitReaderVisual(payload, socket);
+    await waitForCondition(
+      () => socket.readyState === 3,
+      `invalid visual scope ${index} closes socket`,
+    );
+    assert.equal(harness.scenario.readerVisualChunks.length, baselineChunks);
+    assert.equal(harness.scenario.readerVisualCaptureCalls, 0);
+    assert.ok(harness.scenario.readerVisualCompositeCaptureCalls <= 1);
+    await disableSnapshot(harness);
+  }
 });
 
 test("snapshot-mcp 笔迹版本不匹配时拒绝错误版本且不为它重复截图", async () => {
@@ -1728,17 +1901,14 @@ test("snapshot-mcp 笔迹版本不匹配时拒绝错误版本且不为它重复�
   });
   harness.api.setSelectedEngine("computer_client");
   await waitForRequest(harness, "context-open");
+  await waitForRequest(harness, "visual-register");
 
   const correlation = "visual-fedcba9876543210fedcba9876543210";
-  harness.server.emitReaderVisual({
-    contract: VISUAL_DELIVERY_CONTRACT,
+  harness.server.emitReaderVisual(visualRequest(harness, {
     correlation,
-    file: "book.pdf",
-    page: 24,
     drawingRevision: "dr_bbbbbbbbbbbbbbbb",
-    maxBytes: 768 * 1024,
-    chunkCharacters: 48000,
-  });
+    scope: "drawing-nearby",
+  }));
   await waitForCondition(
     () => harness.scenario.readerVisualChunks.some(
       (chunk) => chunk.correlation === correlation,
@@ -2281,6 +2451,7 @@ test("snapshot-mcp 仅转发 Pi ACK 绑定的 vbook 真实卷页并拒绝跨页�
     "page",
     "selection",
     "selectionState",
+    "sourceInstanceId",
     "title",
     "viewFile",
     "viewPage",
@@ -2292,6 +2463,7 @@ test("snapshot-mcp 仅转发 Pi ACK 绑定的 vbook 真实卷页并拒绝跨页�
   assert.equal(forwarded.viewPage, 31);
   assert.equal(forwarded.selectionState, "cleared");
   assert.equal(forwarded.selection, null);
+  assert.match(forwarded.sourceInstanceId, /^source-[A-Za-z0-9_-]{22}$/);
 
   const withoutSelection = { ...harness.scenario.activeReading, pos: 32 };
   delete withoutSelection.selection;

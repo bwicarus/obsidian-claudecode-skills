@@ -1,8 +1,6 @@
-using Microsoft.Win32;
-using System.Globalization;
+using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 using System.Runtime.Versioning;
-using System.Security;
 using System.Text;
 using System.Text.Json;
 
@@ -51,29 +49,6 @@ internal readonly record struct PerAppAudioRouteKey(
         _ => throw new InvalidOperationException(
             "Unknown per-app audio role"),
     };
-
-    internal string RegistryValueName
-    {
-        get
-        {
-            string role = Role switch
-            {
-                PerAppAudioRole.Console => "000",
-                PerAppAudioRole.Multimedia => "001",
-                PerAppAudioRole.Communications => "002",
-                _ => throw new InvalidOperationException(
-                    "Unknown per-app audio role"),
-            };
-            string flow = Flow switch
-            {
-                PerAppAudioDataFlow.Render => "000",
-                PerAppAudioDataFlow.Capture => "001",
-                _ => throw new InvalidOperationException(
-                    "Unknown per-app audio data flow"),
-            };
-            return role + "_" + flow;
-        }
-    }
 }
 
 internal enum PersistedAudioEndpointKind
@@ -313,24 +288,57 @@ internal sealed class PerAppAudioRouteController
         }
     }
 
+    // A target the bridge just launched has not necessarily finished bringing
+    // its audio policy online: the per-app store answers ERROR_NOT_FOUND as
+    // Unset (a legitimate "nothing pinned yet"), but while the app is still
+    // starting the read itself can fail outright. That is a transient cold
+    // start condition, not a reason to abandon the whole call, so the snapshot
+    // is retried within a bounded window. A target that was already running
+    // succeeds on the first pass and pays nothing.
+    private const int SnapshotAttempts = 8;
+    private const int SnapshotRetryDelayMilliseconds = 400;
+
     private Dictionary<PerAppAudioRouteKey, PersistedAudioEndpoint>
         SnapshotOrThrow(uint processId)
     {
-        Dictionary<PerAppAudioRouteKey, PersistedAudioEndpoint>
-            snapshot = [];
-        foreach (PerAppAudioRouteKey key in PerAppAudioRouteKey.All)
+        PerAppAudioRouteKey failedKey = PerAppAudioRouteKey.All[0];
+        int failedHResult = 0;
+        for (int attempt = 0; attempt < SnapshotAttempts; attempt++)
         {
-            PersistedAudioEndpoint value = SafeRead(processId, key);
-            if (value.Kind == PersistedAudioEndpointKind.Error)
+            if (attempt > 0)
             {
-                throw new DirectProtocolException(
-                    "BW_COMPUTER_VOICE_DIRECT_AUDIO_ROUTE_SNAPSHOT_FAILED",
-                    "无法读取 Codex 原应用音频路由",
-                    retryable: true);
+                Thread.Sleep(SnapshotRetryDelayMilliseconds);
             }
-            snapshot.Add(key, value);
+            Dictionary<PerAppAudioRouteKey, PersistedAudioEndpoint>
+                snapshot = [];
+            bool complete = true;
+            foreach (PerAppAudioRouteKey key in PerAppAudioRouteKey.All)
+            {
+                PersistedAudioEndpoint value = SafeRead(processId, key);
+                if (value.Kind == PersistedAudioEndpointKind.Error)
+                {
+                    failedKey = key;
+                    failedHResult = value.HResult;
+                    complete = false;
+                    break;
+                }
+                snapshot.Add(key, value);
+            }
+            if (complete)
+            {
+                return snapshot;
+            }
         }
-        return snapshot;
+        // Carry the failing key and HRESULT out instead of collapsing every
+        // cause into one opaque code -- the stage lands in runtime status.
+        throw new DirectProtocolException(
+            "BW_COMPUTER_VOICE_DIRECT_AUDIO_ROUTE_SNAPSHOT_FAILED",
+            $"无法读取目标应用音频路由(key={failedKey}, "
+                + $"hr=0x{unchecked((uint)failedHResult):X8})",
+            retryable: true,
+            innerException: new AudioCaptureStageException(
+                "audio-route.snapshot-read",
+                failedHResult));
     }
 
     private void ApplyAndReadBackOrThrow(
@@ -611,44 +619,50 @@ internal sealed class PerAppAudioRouteLease : IDisposable
             }
 
             PersistedAudioEndpoint original = snapshot[key];
+            // A snapshot that already points at this transaction's virtual
+            // endpoint is not a trustworthy pre-call route. It normally means
+            // an older bridge run failed to clear its persisted override and
+            // the next run captured that residue as the "original" value.
+            // Clearing the override (null) returns this flow/role to the
+            // current Windows default instead of making the residue permanent.
             string? restoreEndpoint = original.Kind switch
             {
+                PersistedAudioEndpointKind.Present
+                    when PerAppAudioRouteController.EndpointEqualsTarget(
+                        original,
+                        target) => null,
                 PersistedAudioEndpointKind.Present =>
                     original.EndpointId,
                 PersistedAudioEndpointKind.Unset => null,
                 _ => throw new InvalidOperationException(
                     "A route snapshot cannot contain an error"),
             };
-            PerAppAudioPolicyWriteResult write;
-            try
+            PersistedAudioEndpoint expected = restoreEndpoint is null
+                ? PersistedAudioEndpoint.Unset()
+                : PersistedAudioEndpoint.Present(restoreEndpoint);
+            bool restoredExactly = TryWriteAndReadBack(
+                backend,
+                request.ProcessId,
+                key,
+                restoreEndpoint,
+                expected);
+            if (
+                !restoredExactly
+                && restoreEndpoint is not null
+            )
             {
-                write = backend.Write(
+                // The saved endpoint may have disappeared while the bridge was
+                // active (RDP attach/detach and USB/Bluetooth changes do this).
+                // A failed exact restore must not leave the app pinned to the
+                // bridge's virtual devices, so fall back once to Windows default.
+                restoredExactly = TryWriteAndReadBack(
+                    backend,
                     request.ProcessId,
                     key,
-                    restoreEndpoint);
+                    endpointId: null,
+                    PersistedAudioEndpoint.Unset());
             }
-            catch
-            {
-                failed.Add(key);
-                continue;
-            }
-            if (!write.Succeeded)
-            {
-                failed.Add(key);
-                continue;
-            }
-
-            PersistedAudioEndpoint readBack;
-            try
-            {
-                readBack = backend.Read(request.ProcessId, key);
-            }
-            catch
-            {
-                failed.Add(key);
-                continue;
-            }
-            if (!Equivalent(readBack, original))
+            if (!restoredExactly)
             {
                 failed.Add(key);
                 continue;
@@ -661,6 +675,39 @@ internal sealed class PerAppAudioRouteLease : IDisposable
             restored,
             preserved,
             failed);
+    }
+
+    private static bool TryWriteAndReadBack(
+        IPerAppAudioPolicyBackend backend,
+        uint processId,
+        PerAppAudioRouteKey key,
+        string? endpointId,
+        PersistedAudioEndpoint expected)
+    {
+        PerAppAudioPolicyWriteResult write;
+        try
+        {
+            write = backend.Write(processId, key, endpointId);
+        }
+        catch
+        {
+            return false;
+        }
+        if (!write.Succeeded)
+        {
+            return false;
+        }
+
+        PersistedAudioEndpoint readBack;
+        try
+        {
+            readBack = backend.Read(processId, key);
+        }
+        catch
+        {
+            return false;
+        }
+        return Equivalent(readBack, expected);
     }
 
     private static bool Equivalent(
@@ -1192,6 +1239,11 @@ internal static class AudioPolicyEndpointId
 internal sealed class NativePerAppAudioPolicyBackend :
     IPerAppAudioPolicyBackend
 {
+    private readonly BlockingCollection<
+        Action<NativeAudioPolicyConfigSession>> _work = new();
+    private readonly TaskCompletionSource<Exception?> _ready =
+        new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly Thread _thread;
     private int _disposed;
 
     internal NativePerAppAudioPolicyBackend()
@@ -1201,598 +1253,373 @@ internal sealed class NativePerAppAudioPolicyBackend :
             throw new PlatformNotSupportedException(
                 "Per-app audio routing requires Windows");
         }
+        _thread = new Thread(Worker)
+        {
+            IsBackground = true,
+            Name = "BW per-app audio policy",
+        };
+        _thread.Start();
+        Exception? failure = _ready.Task.GetAwaiter().GetResult();
+        if (failure is not null)
+        {
+            _work.Dispose();
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_AUDIO_POLICY_UNAVAILABLE",
+                "Windows 按应用音频策略接口不可用",
+                retryable: true,
+                innerException: failure);
+        }
     }
 
     public PersistedAudioEndpoint Read(
         uint processId,
-        PerAppAudioRouteKey key)
-    {
-        ThrowIfDisposed();
-        return WindowsPersistedAppAudioRouteStore.Read(
-            processId,
-            key);
-    }
+        PerAppAudioRouteKey key) =>
+        Invoke(session => session.Read(processId, key));
 
     public PerAppAudioPolicyWriteResult Write(
         uint processId,
         PerAppAudioRouteKey key,
-        string? endpointId)
-    {
-        ThrowIfDisposed();
-        return WindowsPersistedAppAudioRouteStore.Write(
+        string? endpointId) =>
+        Invoke(session => session.Write(
             processId,
             key,
-            endpointId);
+            endpointId));
+
+    public void Dispose()
+    {
+        if (Interlocked.Exchange(ref _disposed, 1) != 0)
+        {
+            return;
+        }
+        _work.CompleteAdding();
+        if (_thread.Join(TimeSpan.FromSeconds(5)))
+        {
+            _work.Dispose();
+        }
+    }
+
+    private T Invoke<T>(
+        Func<NativeAudioPolicyConfigSession, T> action)
+    {
+        ObjectDisposedException.ThrowIf(
+            Volatile.Read(ref _disposed) != 0,
+            this);
+        TaskCompletionSource<T> result =
+            new(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            _work.Add(session =>
+            {
+                try
+                {
+                    result.TrySetResult(action(session));
+                }
+                catch (Exception exception)
+                {
+                    result.TrySetException(exception);
+                }
+            });
+        }
+        catch (InvalidOperationException)
+        {
+            throw new ObjectDisposedException(
+                nameof(NativePerAppAudioPolicyBackend));
+        }
+        return result.Task.GetAwaiter().GetResult();
+    }
+
+    private void Worker()
+    {
+        bool initialized = false;
+        try
+        {
+            int initializeResult =
+                NativeAudioPolicyConfigSession.RoInitialize(
+                    1 /* RO_INIT_MULTITHREADED */);
+            if (initializeResult < 0)
+            {
+                Marshal.ThrowExceptionForHR(initializeResult);
+            }
+            initialized = true;
+            using NativeAudioPolicyConfigSession session = new();
+            _ready.TrySetResult(null);
+            foreach (
+                Action<NativeAudioPolicyConfigSession> action
+                in _work.GetConsumingEnumerable()
+            )
+            {
+                action(session);
+            }
+        }
+        catch (Exception exception)
+        {
+            _ready.TrySetResult(exception);
+        }
+        finally
+        {
+            if (initialized)
+            {
+                NativeAudioPolicyConfigSession.RoUninitialize();
+            }
+        }
+    }
+}
+
+[SupportedOSPlatform("windows")]
+internal sealed class NativeAudioPolicyConfigSession : IDisposable
+{
+    private const string RuntimeClass =
+        "Windows.Media.Internal.AudioPolicyConfig";
+    private const int ErrorNotFoundHResult =
+        unchecked((int)0x80070490);
+    // IUnknown (3) + IInspectable (3) + the 19 methods preceding
+    // SetPersistedDefaultAudioEndpoint in the 21H2 contract.
+    private const int SetPersistedDefaultAudioEndpointSlot = 25;
+    private const int GetPersistedDefaultAudioEndpointSlot = 26;
+    private static readonly Guid AudioPolicyConfigFactoryIid =
+        new("ab3d4648-e242-459f-b02f-541c70306324");
+    private IntPtr _factoryPointer;
+
+    internal NativeAudioPolicyConfigSession()
+    {
+        IntPtr className = IntPtr.Zero;
+        IntPtr factoryPointer = IntPtr.Zero;
+        try
+        {
+            ThrowIfFailed(WindowsCreateString(
+                RuntimeClass,
+                (uint)RuntimeClass.Length,
+                out className));
+            Guid iid = AudioPolicyConfigFactoryIid;
+            ThrowIfFailed(RoGetActivationFactory(
+                className,
+                ref iid,
+                out factoryPointer));
+            // .NET 8's built-in COM marshaller rejects InterfaceIsIInspectable
+            // RCWs. Retain the queried ABI pointer and call the two required
+            // methods through their stable vtable slots instead.
+            _factoryPointer = factoryPointer;
+            factoryPointer = IntPtr.Zero;
+        }
+        finally
+        {
+            if (factoryPointer != IntPtr.Zero)
+            {
+                Marshal.Release(factoryPointer);
+            }
+            if (className != IntPtr.Zero)
+            {
+                _ = WindowsDeleteString(className);
+            }
+        }
+    }
+
+    internal PersistedAudioEndpoint Read(
+        uint processId,
+        PerAppAudioRouteKey key)
+    {
+        IntPtr factoryPointer = _factoryPointer;
+        if (factoryPointer == IntPtr.Zero)
+        {
+            throw new ObjectDisposedException(
+                nameof(NativeAudioPolicyConfigSession));
+        }
+        GetPersistedDefaultAudioEndpointDelegate getPersisted =
+            VtableDelegate<GetPersistedDefaultAudioEndpointDelegate>(
+                factoryPointer,
+                GetPersistedDefaultAudioEndpointSlot);
+        IntPtr value = IntPtr.Zero;
+        int hresult;
+        try
+        {
+            hresult = getPersisted(
+                factoryPointer,
+                processId,
+                key.Flow,
+                key.Role,
+                out value);
+            if (hresult == ErrorNotFoundHResult)
+            {
+                return PersistedAudioEndpoint.Unset();
+            }
+            if (hresult < 0)
+            {
+                return PersistedAudioEndpoint.Error(
+                    hresult,
+                    "audio-policy-get");
+            }
+            if (value == IntPtr.Zero)
+            {
+                return PersistedAudioEndpoint.Unset();
+            }
+            IntPtr buffer = WindowsGetStringRawBuffer(
+                value,
+                out uint length);
+            if (buffer == IntPtr.Zero || length == 0)
+            {
+                return PersistedAudioEndpoint.Unset();
+            }
+            string? packed = Marshal.PtrToStringUni(
+                buffer,
+                checked((int)length));
+            if (!AudioPolicyEndpointId.TryUnpack(
+                packed,
+                key.Flow,
+                out string endpointId))
+            {
+                return PersistedAudioEndpoint.Error(
+                    unchecked((int)0x8007000D),
+                    "audio-policy-unpack");
+            }
+            return PersistedAudioEndpoint.Present(endpointId);
+        }
+        catch (Exception exception)
+        {
+            return PersistedAudioEndpoint.Error(
+                Marshal.GetHRForException(exception),
+                "audio-policy-get");
+        }
+        finally
+        {
+            if (value != IntPtr.Zero)
+            {
+                _ = WindowsDeleteString(value);
+            }
+        }
+    }
+
+    internal PerAppAudioPolicyWriteResult Write(
+        uint processId,
+        PerAppAudioRouteKey key,
+        string? endpointId)
+    {
+        IntPtr factoryPointer = _factoryPointer;
+        if (factoryPointer == IntPtr.Zero)
+        {
+            throw new ObjectDisposedException(
+                nameof(NativeAudioPolicyConfigSession));
+        }
+        SetPersistedDefaultAudioEndpointDelegate setPersisted =
+            VtableDelegate<SetPersistedDefaultAudioEndpointDelegate>(
+                factoryPointer,
+                SetPersistedDefaultAudioEndpointSlot);
+        IntPtr value = IntPtr.Zero;
+        try
+        {
+            if (endpointId is not null)
+            {
+                string packed = AudioPolicyEndpointId.Pack(
+                    endpointId,
+                    key.Flow);
+                int createResult = WindowsCreateString(
+                    packed,
+                    (uint)packed.Length,
+                    out value);
+                if (createResult < 0)
+                {
+                    return PerAppAudioPolicyWriteResult.Failure(
+                        createResult,
+                        "audio-policy-create-string");
+                }
+            }
+            int hresult = setPersisted(
+                factoryPointer,
+                processId,
+                key.Flow,
+                key.Role,
+                value);
+            return hresult >= 0
+                ? PerAppAudioPolicyWriteResult.Success()
+                : PerAppAudioPolicyWriteResult.Failure(
+                    hresult,
+                    "audio-policy-set");
+        }
+        catch (Exception exception)
+        {
+            return PerAppAudioPolicyWriteResult.Failure(
+                Marshal.GetHRForException(exception),
+                "audio-policy-set");
+        }
+        finally
+        {
+            if (value != IntPtr.Zero)
+            {
+                _ = WindowsDeleteString(value);
+            }
+        }
     }
 
     public void Dispose()
     {
-        _ = Interlocked.Exchange(ref _disposed, 1);
+        IntPtr factoryPointer = Interlocked.Exchange(
+            ref _factoryPointer,
+            IntPtr.Zero);
+        if (factoryPointer != IntPtr.Zero)
+        {
+            Marshal.Release(factoryPointer);
+        }
     }
 
-    private void ThrowIfDisposed() =>
-        ObjectDisposedException.ThrowIf(
-            Volatile.Read(ref _disposed) != 0,
-            this);
-}
+    private static T VtableDelegate<T>(
+        IntPtr instance,
+        int slot)
+        where T : Delegate
+    {
+        IntPtr vtable = Marshal.ReadIntPtr(instance);
+        IntPtr method = Marshal.ReadIntPtr(
+            vtable,
+            checked(slot * IntPtr.Size));
+        return Marshal.GetDelegateForFunctionPointer<T>(method);
+    }
 
-[SupportedOSPlatform("windows")]
-internal static class WindowsPersistedAppAudioRouteStore
-{
-    internal const string RegistryPath =
-        @"Software\Microsoft\Multimedia\Audio\DefaultEndpoint";
-    internal const string EndpointPropertySetIdValueName =
-        "{9637b4b9-11ee-4c35-b43c-7b2452c993cc},1";
-    private const string MmDevicesRegistryPath =
-        @"SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio";
-    private const uint ProcessQueryLimitedInformation = 0x1000;
-    private const int ErrorInsufficientBuffer = 122;
-
-    [SupportedOSPlatform("windows")]
-    internal static PersistedAudioEndpoint Read(
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int SetPersistedDefaultAudioEndpointDelegate(
+        IntPtr instance,
         uint processId,
-        PerAppAudioRouteKey key)
-    {
-        if (processId == 0)
-        {
-            return PersistedAudioEndpoint.Error(
-                unchecked((int)0x80070057),
-                "audio-policy-app-identity");
-        }
+        PerAppAudioDataFlow flow,
+        PerAppAudioRole role,
+        IntPtr deviceId);
 
-        try
-        {
-            using RegistryKey? app = OpenUniqueAppKey(
-                processId,
-                writable: false,
-                createIfMissing: false);
-            if (app is null)
-            {
-                // A freshly reset Windows volume mixer has no per-app key at
-                // all. That means every persisted route is unset, not corrupt.
-                // The first journaled Write creates the deterministic identity
-                // key before adding any endpoint pair.
-                return PersistedAudioEndpoint.Unset();
-            }
-            string valueName = key.RegistryValueName;
-            object? raw = app.GetValue(
-                valueName,
-                defaultValue: null,
-                RegistryValueOptions.DoNotExpandEnvironmentNames);
-            object? rawPropertySetId = app.GetValue(
-                valueName + "_p",
-                defaultValue: null,
-                RegistryValueOptions.DoNotExpandEnvironmentNames);
-            if (raw is null && rawPropertySetId is null)
-            {
-                return PersistedAudioEndpoint.Unset();
-            }
-            if (
-                raw is not string packed
-                || rawPropertySetId is not string propertySetId
-                || !AudioPolicyEndpointId.TryUnpack(
-                    packed,
-                    key.Flow,
-                    out string endpointId)
-                || !string.Equals(
-                    propertySetId,
-                    ReadEndpointPropertySetId(endpointId, key.Flow),
-                    StringComparison.OrdinalIgnoreCase)
-            )
-            {
-                return PersistedAudioEndpoint.Error(
-                    unchecked((int)0x8007000D),
-                    "audio-policy-registry-unpack");
-            }
-            return PersistedAudioEndpoint.Present(endpointId);
-        }
-        catch (Exception exception) when (
-            exception is IOException
-            or UnauthorizedAccessException
-            or SecurityException
-            or ArgumentException
-            or ObjectDisposedException
-            or InvalidOperationException
-            or COMException
-        )
-        {
-            return PersistedAudioEndpoint.Error(
-                Marshal.GetHRForException(exception),
-                "audio-policy-registry-read");
-        }
-    }
-
-    [SupportedOSPlatform("windows")]
-    internal static PerAppAudioPolicyWriteResult Write(
+    [UnmanagedFunctionPointer(CallingConvention.StdCall)]
+    private delegate int GetPersistedDefaultAudioEndpointDelegate(
+        IntPtr instance,
         uint processId,
-        PerAppAudioRouteKey key,
-        string? endpointId)
-    {
-        string valueName = key.RegistryValueName;
-        try
-        {
-            using RegistryKey app = OpenUniqueAppKey(
-                processId,
-                writable: true,
-                createIfMissing: true)
-                ?? throw new InvalidOperationException(
-                    "The per-app audio identity cannot be provisioned");
-            RegistryValueSnapshot originalValue =
-                RegistryValueSnapshot.Read(
-                app,
-                valueName);
-            RegistryValueSnapshot originalPropertySetId =
-                RegistryValueSnapshot.Read(
-                app,
-                valueName + "_p");
-            RequireStringOrMissing(originalValue);
-            RequireStringOrMissing(originalPropertySetId);
+        PerAppAudioDataFlow flow,
+        PerAppAudioRole role,
+        out IntPtr deviceId);
 
-            try
-            {
-                if (endpointId is null)
-                {
-                    app.DeleteValue(
-                        valueName,
-                        throwOnMissingValue: false);
-                    app.DeleteValue(
-                        valueName + "_p",
-                        throwOnMissingValue: false);
-                }
-                else
-                {
-                    string packed = AudioPolicyEndpointId.Pack(
-                        endpointId,
-                        key.Flow);
-                    string propertySetId = ReadEndpointPropertySetId(
-                        endpointId,
-                        key.Flow);
-                    app.SetValue(
-                        valueName + "_p",
-                        propertySetId,
-                        RegistryValueKind.String);
-                    app.SetValue(
-                        valueName,
-                        packed,
-                        RegistryValueKind.String);
-                }
-                app.Flush();
-                if (!PostconditionMatches(
-                    app,
-                    valueName,
-                    key,
-                    endpointId))
-                {
-                    throw new InvalidOperationException(
-                        "The per-app audio route readback mismatched");
-                }
-                return PerAppAudioPolicyWriteResult.Success();
-            }
-            catch (Exception exception) when (
-                exception is IOException
-                or UnauthorizedAccessException
-                or SecurityException
-                or ArgumentException
-                or ObjectDisposedException
-                or InvalidOperationException
-                or COMException
-            )
-            {
-                try
-                {
-                    RestorePair(
-                        app,
-                        valueName,
-                        originalValue,
-                        originalPropertySetId);
-                }
-                catch
-                {
-                    return PerAppAudioPolicyWriteResult.Failure(
-                        unchecked((int)0x80004005),
-                        "audio-policy-registry-write-rollback");
-                }
-                return PerAppAudioPolicyWriteResult.Failure(
-                    Marshal.GetHRForException(exception),
-                    "audio-policy-registry-write");
-            }
-        }
-        catch (Exception exception) when (
-            exception is IOException
-            or UnauthorizedAccessException
-            or SecurityException
-            or ArgumentException
-            or ObjectDisposedException
-            or InvalidOperationException
-            or COMException
-        )
+    private static void ThrowIfFailed(int hresult)
+    {
+        if (hresult < 0)
         {
-            return PerAppAudioPolicyWriteResult.Failure(
-                Marshal.GetHRForException(exception),
-                "audio-policy-registry-write");
+            Marshal.ThrowExceptionForHR(hresult);
         }
     }
 
-    private static RegistryKey? OpenUniqueAppKey(
-        uint processId,
-        bool writable,
-        bool createIfMissing)
-    {
-        string identity = ReadApplicationUserModelId(processId);
-        using RegistryKey? root = createIfMissing
-            ? Registry.CurrentUser.CreateSubKey(
-                RegistryPath,
-                writable: true)
-            : Registry.CurrentUser.OpenSubKey(
-                RegistryPath,
-                writable: false);
-        if (root is null)
-        {
-            return null;
-        }
+    [DllImport("combase.dll", ExactSpelling = true)]
+    internal static extern int RoInitialize(uint initType);
 
-        string? matchingSubKey = null;
-        foreach (string subKeyName in root.GetSubKeyNames())
-        {
-            using RegistryKey? candidate = root.OpenSubKey(
-                subKeyName,
-                writable: false);
-            string? candidateIdentity = candidate?.GetValue(
-                "",
-                defaultValue: null,
-                RegistryValueOptions.DoNotExpandEnvironmentNames)
-                as string;
-            if (!string.Equals(
-                candidateIdentity,
-                identity,
-                StringComparison.OrdinalIgnoreCase))
-            {
-                continue;
-            }
-            if (matchingSubKey is not null)
-            {
-                throw new InvalidOperationException(
-                    "The per-app audio identity is ambiguous");
-            }
-            matchingSubKey = subKeyName;
-        }
-        if (matchingSubKey is null)
-        {
-            if (!createIfMissing)
-            {
-                return null;
-            }
-            matchingSubKey = ProvisionIdentityKey(root, identity);
-        }
-        return Registry.CurrentUser.OpenSubKey(
-            RegistryPath + "\\" + matchingSubKey,
-            writable)
-            ?? throw new InvalidOperationException(
-                "The per-app audio route key cannot be opened");
-    }
+    [DllImport("combase.dll", ExactSpelling = true)]
+    internal static extern void RoUninitialize();
 
-    internal static string ComputeIdentityKeyHash(string identity)
-    {
-        if (
-            string.IsNullOrWhiteSpace(identity)
-            || identity.Length > 4096
-            || identity.Any(char.IsControl)
-        )
-        {
-            throw new ArgumentException(
-                "The per-app audio identity is invalid",
-                nameof(identity));
-        }
-        uint hash = 0;
-        foreach (char value in identity)
-        {
-            hash = unchecked((hash * 33) + value);
-        }
-        return hash.ToString("x", CultureInfo.InvariantCulture);
-    }
+    [DllImport("combase.dll", ExactSpelling = true)]
+    private static extern int RoGetActivationFactory(
+        IntPtr activatableClassId,
+        ref Guid iid,
+        out IntPtr factory);
 
-    private static string ProvisionIdentityKey(
-        RegistryKey root,
-        string identity)
-    {
-        string keyPrefix = ComputeIdentityKeyHash(identity);
-        for (int collision = 0; collision < 4096; collision++)
-        {
-            string candidateName = keyPrefix
-                + "_"
-                + collision.ToString(CultureInfo.InvariantCulture);
-            using RegistryKey? existing = root.OpenSubKey(
-                candidateName,
-                writable: true);
-            if (existing is not null)
-            {
-                string? existingIdentity = existing.GetValue(
-                    "",
-                    defaultValue: null,
-                    RegistryValueOptions.DoNotExpandEnvironmentNames)
-                    as string;
-                if (string.Equals(
-                    existingIdentity,
-                    identity,
-                    StringComparison.OrdinalIgnoreCase))
-                {
-                    return candidateName;
-                }
-                continue;
-            }
+    [DllImport("combase.dll", ExactSpelling = true)]
+    private static extern int WindowsCreateString(
+        [MarshalAs(UnmanagedType.LPWStr)] string source,
+        uint length,
+        out IntPtr value);
 
-            using RegistryKey created = root.CreateSubKey(
-                candidateName,
-                writable: true)
-                ?? throw new InvalidOperationException(
-                    "The per-app audio identity key cannot be created");
-            string? racedIdentity = created.GetValue(
-                "",
-                defaultValue: null,
-                RegistryValueOptions.DoNotExpandEnvironmentNames)
-                as string;
-            if (
-                racedIdentity is not null
-                && !string.Equals(
-                    racedIdentity,
-                    identity,
-                    StringComparison.OrdinalIgnoreCase)
-            )
-            {
-                continue;
-            }
-            if (
-                racedIdentity is null
-                && (
-                    created.ValueCount != 0
-                    || created.SubKeyCount != 0
-                )
-            )
-            {
-                // Do not claim a concurrently created or malformed key.
-                continue;
-            }
-            if (racedIdentity is null)
-            {
-                created.SetValue(
-                    "",
-                    identity,
-                    RegistryValueKind.String);
-                created.Flush();
-            }
-            string? verifiedIdentity = created.GetValue(
-                "",
-                defaultValue: null,
-                RegistryValueOptions.DoNotExpandEnvironmentNames)
-                as string;
-            if (!string.Equals(
-                verifiedIdentity,
-                identity,
-                StringComparison.OrdinalIgnoreCase))
-            {
-                throw new InvalidOperationException(
-                    "The per-app audio identity key readback mismatched");
-            }
-            return candidateName;
-        }
-        throw new InvalidOperationException(
-            "The per-app audio identity collision limit was exceeded");
-    }
+    [DllImport("combase.dll", ExactSpelling = true)]
+    private static extern int WindowsDeleteString(IntPtr value);
 
-    private static string ReadEndpointPropertySetId(
-        string endpointId,
-        PerAppAudioDataFlow flow)
-    {
-        AudioPolicyEndpointId.ValidateForFlow(endpointId, flow);
-        string endpointGuid = endpointId[^38..];
-        string flowName = flow switch
-        {
-            PerAppAudioDataFlow.Render => "Render",
-            PerAppAudioDataFlow.Capture => "Capture",
-            _ => throw new ArgumentOutOfRangeException(nameof(flow)),
-        };
-        using RegistryKey? properties = Registry.LocalMachine.OpenSubKey(
-            MmDevicesRegistryPath
-            + "\\"
-            + flowName
-            + "\\"
-            + endpointGuid
-            + "\\Properties",
-            writable: false);
-        string? propertySetId = properties?.GetValue(
-            EndpointPropertySetIdValueName,
-            defaultValue: null,
-            RegistryValueOptions.DoNotExpandEnvironmentNames)
-            as string;
-        if (
-            propertySetId is null
-            || !Guid.TryParseExact(propertySetId, "B", out _)
-        )
-        {
-            throw new InvalidOperationException(
-                "The endpoint property-set identity is unavailable");
-        }
-        return propertySetId;
-    }
+    [DllImport("combase.dll", ExactSpelling = true)]
+    private static extern IntPtr WindowsGetStringRawBuffer(
+        IntPtr value,
+        out uint length);
 
-    private static bool PostconditionMatches(
-        RegistryKey app,
-        string valueName,
-        PerAppAudioRouteKey key,
-        string? endpointId)
-    {
-        object? actualValue = app.GetValue(
-            valueName,
-            defaultValue: null,
-            RegistryValueOptions.DoNotExpandEnvironmentNames);
-        object? actualPropertySetId = app.GetValue(
-            valueName + "_p",
-            defaultValue: null,
-            RegistryValueOptions.DoNotExpandEnvironmentNames);
-        if (endpointId is null)
-        {
-            return actualValue is null
-                && actualPropertySetId is null;
-        }
-        return actualValue is string packed
-            && actualPropertySetId is string propertySetId
-            && string.Equals(
-                packed,
-                AudioPolicyEndpointId.Pack(endpointId, key.Flow),
-                StringComparison.OrdinalIgnoreCase)
-            && string.Equals(
-                propertySetId,
-                ReadEndpointPropertySetId(endpointId, key.Flow),
-                StringComparison.OrdinalIgnoreCase);
-    }
-
-    private static void RestorePair(
-        RegistryKey app,
-        string valueName,
-        RegistryValueSnapshot originalValue,
-        RegistryValueSnapshot originalPropertySetId)
-    {
-        originalPropertySetId.Restore(app, valueName + "_p");
-        originalValue.Restore(app, valueName);
-        app.Flush();
-    }
-
-    private static void RequireStringOrMissing(
-        RegistryValueSnapshot value)
-    {
-        if (
-            value.Exists
-            && value.Kind != RegistryValueKind.String
-        )
-        {
-            throw new InvalidOperationException(
-                "The per-app audio route has an unexpected value type");
-        }
-    }
-
-    private static string ReadApplicationUserModelId(uint processId)
-    {
-        IntPtr process = OpenProcess(
-            ProcessQueryLimitedInformation,
-            inheritHandle: false,
-            processId);
-        if (process == IntPtr.Zero)
-        {
-            Marshal.ThrowExceptionForHR(
-                Marshal.GetHRForLastWin32Error());
-        }
-        try
-        {
-            uint length = 0;
-            int first = GetApplicationUserModelId(
-                process,
-                ref length,
-                null);
-            if (
-                first != ErrorInsufficientBuffer
-                || length is < 2 or > 4096
-            )
-            {
-                Marshal.ThrowExceptionForHR(
-                    HResultFromWin32(first));
-            }
-            StringBuilder identity = new(checked((int)length));
-            int second = GetApplicationUserModelId(
-                process,
-                ref length,
-                identity);
-            if (second != 0 || identity.Length == 0)
-            {
-                Marshal.ThrowExceptionForHR(
-                    HResultFromWin32(second));
-            }
-            return identity.ToString();
-        }
-        finally
-        {
-            _ = CloseHandle(process);
-        }
-    }
-
-    private static int HResultFromWin32(int error) =>
-        error <= 0
-            ? error
-            : unchecked((int)(0x80070000U | (uint)error));
-
-    [DllImport("kernel32.dll", SetLastError = true)]
-    private static extern IntPtr OpenProcess(
-        uint desiredAccess,
-        [MarshalAs(UnmanagedType.Bool)] bool inheritHandle,
-        uint processId);
-
-    [DllImport("kernel32.dll", ExactSpelling = true)]
-    [return: MarshalAs(UnmanagedType.Bool)]
-    private static extern bool CloseHandle(IntPtr handle);
-
-    [DllImport(
-        "kernel32.dll",
-        CharSet = CharSet.Unicode,
-        ExactSpelling = true)]
-    private static extern int GetApplicationUserModelId(
-        IntPtr process,
-        ref uint applicationUserModelIdLength,
-        StringBuilder? applicationUserModelId);
-
-    private sealed record RegistryValueSnapshot(
-        bool Exists,
-        RegistryValueKind Kind,
-        object? Value)
-    {
-        internal static RegistryValueSnapshot Read(
-            RegistryKey key,
-            string valueName)
-        {
-            object? value = key.GetValue(
-                valueName,
-                defaultValue: null,
-                RegistryValueOptions.DoNotExpandEnvironmentNames);
-            return value is null
-                ? new(false, RegistryValueKind.Unknown, null)
-                : new(true, key.GetValueKind(valueName), value);
-        }
-
-        internal void Restore(
-            RegistryKey key,
-            string valueName)
-        {
-            if (!Exists)
-            {
-                key.DeleteValue(
-                    valueName,
-                    throwOnMissingValue: false);
-                return;
-            }
-            key.SetValue(
-                valueName,
-                Value
-                    ?? throw new InvalidOperationException(
-                        "A present registry value cannot be null"),
-                Kind);
-        }
-    }
 }
