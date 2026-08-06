@@ -357,11 +357,37 @@
   if (!runtime || typeof runtime.sendMessage !== "function") return;
 
   var MAX_TEXT = 12000;
+  var MAX_VIEWPORT_SIDE_TEXT = 2400;
   var THROTTLE_MS = 1500;
   var ACTIVE_CONTEXT_HEARTBEAT_MS = 60000;
   var PREFERENCE_KEY = "bwReaderExtensionPreferencesV2";
   var CONTEXT_SYNC_KEY = "eph-ctx-sync";
   var ACTIVE_CONTEXT_KEY = "bwActivePageContextV1";
+
+  function createSourceInstanceId() {
+    var bytes = new Uint8Array(16);
+    try {
+      if (window.crypto && typeof window.crypto.getRandomValues === "function") {
+        window.crypto.getRandomValues(bytes);
+      } else {
+        for (var i = 0; i < bytes.length; i += 1) bytes[i] = (Math.random() * 256) | 0;
+      }
+      var binary = "";
+      for (var j = 0; j < bytes.length; j += 1) binary += String.fromCharCode(bytes[j]);
+      return window.btoa(binary).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
+    } catch (_) {
+      // Identity is routing metadata, never an authentication secret. Keep the
+      // contract valid even on an unusual page realm without Web Crypto/btoa.
+      var fallback = "";
+      var alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+      for (var k = 0; k < 21; k += 1) fallback += alphabet[(Math.random() * 64) | 0];
+      return fallback + "AQgw".charAt((Math.random() * 4) | 0);
+    }
+  }
+
+  // One identity per top-level document instance. A reload gets a new one;
+  // scroll/focus/heartbeat reports from the same document keep it.
+  var sourceInstanceId = createSourceInstanceId();
 
   // Shows a line on the page itself.
   //
@@ -421,6 +447,24 @@
         probeLine("投递: 页面内没有桥接框，改走后台通道");
         return false;
       }
+      try {
+        if (
+          window.__bwBrowserControl &&
+          typeof window.__bwBrowserControl.install === "function"
+        ) {
+          window.__bwBrowserControl.install({
+            frame: frame,
+            sourceInstanceId: sourceInstanceId,
+          });
+        } else {
+          probeLine("浏览控制: 执行器尚未加载");
+        }
+      } catch (installError) {
+        probeLine(
+          "浏览控制安装失败: " +
+          ((installError && installError.message) || "未知")
+        );
+      }
       frame.contentWindow.postMessage(
         { contract: "bw-page-context/1", type: "page", page: snap },
         "*"
@@ -431,10 +475,118 @@
       return false;
     }
   }
+
+  var LOCAL_VISUAL_CONTRACT = "bw-reader-visual-local/1";
+
+  function exactVisualKeys(value, keys) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+    var actual = Object.keys(value).sort();
+    var expected = keys.slice().sort();
+    if (actual.length !== expected.length) return false;
+    for (var i = 0; i < actual.length; i += 1) {
+      if (actual[i] !== expected[i]) return false;
+    }
+    return true;
+  }
+
+  function ownCallFrameForSource(source) {
+    if (source !== sourceInstanceId) return null;
+    var scope = window.__bwShadow || document;
+    var frame = scope.querySelector('iframe[src*="call.html"]');
+    if (!frame || !frame.contentWindow) return null;
+    try {
+      var ownCallUrl = runtime.getURL("call.html");
+      if (typeof frame.src !== "string" || !frame.src.startsWith(ownCallUrl)) return null;
+    } catch (_) {
+      return null;
+    }
+    return frame;
+  }
+
+  function normalizeLocalVisualRequest(message) {
+    if (!exactVisualKeys(message, ["contract", "type", "request"])) return null;
+    if (message.contract !== LOCAL_VISUAL_CONTRACT || message.type !== "capture-request") return null;
+    var request = message.request;
+    if (!exactVisualKeys(request, [
+      "contract", "commandKind", "correlation", "sourceInstanceId",
+      "snapshotRevision", "file", "page", "drawingRevision", "scope",
+      "selectionId", "maxBytes", "chunkCharacters",
+    ])) return null;
+    if (
+      request.contract !== "reader-visual-delivery/2" ||
+      request.commandKind !== "capture-composite" ||
+      !/^[A-Za-z0-9._:-]{1,160}$/.test(String(request.correlation || "")) ||
+      request.sourceInstanceId !== sourceInstanceId ||
+      !Number.isSafeInteger(request.snapshotRevision) || request.snapshotRevision < 0 ||
+      request.file !== String(location.href || "") ||
+      !["viewport-context", "drawing-nearby", "selection-near"].includes(request.scope) ||
+      (request.scope === "selection-near") !== (typeof request.selectionId === "string") ||
+      request.maxBytes !== 786432 || request.chunkCharacters !== 48000
+    ) return null;
+    return request;
+  }
+
+  function sendLocalVisualResponse(target, request, capture) {
+    var ready = !!(
+      capture &&
+      capture.media_type === "image/jpeg" &&
+      typeof capture.b64 === "string" &&
+      capture.b64.length > 0
+    );
+    try {
+      target.postMessage({
+        contract: LOCAL_VISUAL_CONTRACT,
+        type: "capture-response",
+        correlation: request.correlation,
+        sourceInstanceId: request.sourceInstanceId,
+        status: ready ? "ready" : "unavailable",
+        mimeType: ready ? "image/jpeg" : "",
+        b64: ready ? capture.b64 : "",
+      }, "*");
+    } catch (_) {}
+  }
+
+  async function captureVisualForFrame(request) {
+    if (document.visibilityState !== "visible") return null;
+    try {
+      if (!document.hasFocus()) return null;
+    } catch (_) {}
+    var RC = window.RC;
+    if (!RC) return null;
+    var target = {
+      scope: request.scope,
+      page: request.page,
+      selectionId: request.selectionId,
+      sourceInstanceId: request.sourceInstanceId,
+      snapshotRevision: request.snapshotRevision,
+      drawingRevision: request.drawingRevision,
+    };
+    if (
+      request.scope === "viewport-context" &&
+      typeof RC.capturePageComposite === "function"
+    ) return await RC.capturePageComposite(target);
+    if (
+      (request.scope === "drawing-nearby" || request.scope === "selection-near") &&
+      typeof RC.captureInkRegion === "function"
+    ) return await RC.captureInkRegion(target);
+    return null;
+  }
+
+  window.addEventListener("message", function (event) {
+    var request = normalizeLocalVisualRequest(event.data);
+    if (!request) return;
+    var frame = ownCallFrameForSource(request.sourceInstanceId);
+    if (!frame || event.source !== frame.contentWindow) return;
+    Promise.resolve(captureVisualForFrame(request)).then(
+      function (capture) { sendLocalVisualResponse(event.source, request, capture); },
+      function () { sendLocalVisualResponse(event.source, request, null); }
+    );
+  });
   var lastSignature = "";
   var pendingSignature = "";
   var contextRevision = 0;
   var viewportRevision = 0;
+  var lastBrowserControlCorrelation = "";
   var timer = null;
   var preferenceKnown = false;
   var contextSyncEnabled = false;
@@ -478,6 +630,41 @@
       hash = Math.imul(hash, 16777619);
     }
     return (hash >>> 0).toString(16);
+  }
+
+  function normalizeReadableText(value) {
+    return String(value || "")
+      .replace(new RegExp(String.fromCharCode(13) + String.fromCharCode(10), "g"), String.fromCharCode(10))
+      .replace(new RegExp(String.fromCharCode(13), "g"), String.fromCharCode(10))
+      .replace(new RegExp(String.fromCharCode(160), "g"), " ")
+      .replace(new RegExp("[ " + String.fromCharCode(9) + "]+", "g"), " ")
+      .replace(new RegExp(" *" + String.fromCharCode(10) + " *", "g"), String.fromCharCode(10))
+      .replace(new RegExp(String.fromCharCode(10) + "{3,}", "g"), String.fromCharCode(10) + String.fromCharCode(10))
+      .trim();
+  }
+
+  // Stable identity for a document, independent of in-page anchors. A valid
+  // rel=canonical is authoritative; otherwise the current HTTP(S) URL without
+  // its fragment is used. URL performs hostname/default-port normalization for
+  // us, while query parameters remain because they can select different text.
+  function canonicalDocumentKey() {
+    var candidate = String(location.href || "");
+    try {
+      var declared = document.querySelector('link[rel~="canonical"][href]');
+      if (declared) candidate = String(declared.href || candidate);
+    } catch (_) {}
+    try {
+      var parsed = new URL(candidate, String(location.href || ""));
+      if (parsed.protocol !== "http:" && parsed.protocol !== "https:") {
+        parsed = new URL(String(location.href || ""));
+      }
+      parsed.hash = "";
+      parsed.username = "";
+      parsed.password = "";
+      return parsed.toString();
+    } catch (_) {
+      return String(location.href || "").split("#")[0];
+    }
   }
 
   // Structural chrome: on nearly every page, part of none of them.
@@ -544,11 +731,13 @@
   var ARTICLE_BLOCK =
     "p,h1,h2,h3,h4,h5,h6,li,dd,dt,blockquote,figcaption,td,th,pre," +
     "article,main,section,div";
+  var articleTextTraversalTruncated = false;
 
   // Reads each rendered text node exactly once. Element-level innerText cannot
   // be used here: accepting both a parent block and one of its child blocks
   // duplicates the child's text, while detached clones include hidden text.
   function articleText(root) {
+    articleTextTraversalTruncated = false;
     var parts = [];
     var block = null;
     var blockText = "";
@@ -611,7 +800,10 @@
         }
         node = walker.nextNode();
       }
-    } catch (_) {}
+      if (node) articleTextTraversalTruncated = true;
+    } catch (_) {
+      articleTextTraversalTruncated = true;
+    }
     flush();
     if (parts.length) return parts.join(String.fromCharCode(10) + String.fromCharCode(10));
     // Graceful fallback for unusual DOM implementations without TreeWalker.
@@ -653,6 +845,9 @@
     if (!isFinite(scrollTop)) scrollTop = Number(scrolling && scrolling.scrollTop) || 0;
 
     var parts = [];
+    var beforeText = "";
+    var afterText = "";
+    var sawVisible = false;
     var block = null;
     var blockText = "";
     var range = null;
@@ -736,16 +931,16 @@
       );
     }
 
-    // A single text node can wrap over many screens. Appending the entire node
-    // when only its final line is visible sends the beginning of the paragraph
-    // and may push the actually visible line past MAX_TEXT. Browser line boxes
-    // do not expose character offsets, so use their ordered ratio to take a
-    // bounded slice, with one line of context on both sides.
-    function visibleTextSlice(value, rects, firstVisible, lastVisible) {
-      if (!rects.length || firstVisible < 0 || lastVisible < firstVisible) return "";
-      if (firstVisible === 0 && lastVisible === rects.length - 1) return value;
-      var startRatio = Math.max(0, firstVisible - 1) / rects.length;
-      var endRatio = Math.min(rects.length, lastVisible + 2) / rects.length;
+    // A single text node can wrap over many screens. Browser line boxes do not
+    // expose character offsets, so map their ordered range back to a bounded
+    // character slice. Before/current/after use the same approximation, which
+    // keeps the three fields disjoint instead of smuggling context into the
+    // supposedly-visible field.
+    function textSliceForLines(value, rects, firstLine, endLine) {
+      if (!rects.length || firstLine < 0 || endLine <= firstLine) return "";
+      if (firstLine === 0 && endLine === rects.length) return value;
+      var startRatio = Math.max(0, firstLine) / rects.length;
+      var endRatio = Math.min(rects.length, endLine) / rects.length;
       var start = Math.floor(value.length * startRatio);
       var end = Math.ceil(value.length * endRatio);
       var boundary = /[\s,.;:!?，。；：！？、]/;
@@ -754,6 +949,23 @@
       while (start > floor && !boundary.test(value.charAt(start - 1))) start -= 1;
       while (end < ceiling && !boundary.test(value.charAt(end))) end += 1;
       return value.slice(start, end);
+    }
+
+    function addBefore(value) {
+      value = normalizeReadableText(value);
+      if (!value) return;
+      beforeText = normalizeReadableText(beforeText + "\n\n" + value);
+      if (beforeText.length > MAX_VIEWPORT_SIDE_TEXT) {
+        beforeText = beforeText.slice(beforeText.length - MAX_VIEWPORT_SIDE_TEXT);
+      }
+    }
+
+    function addAfter(value) {
+      if (afterText.length >= MAX_VIEWPORT_SIDE_TEXT) return;
+      value = normalizeReadableText(value);
+      if (!value) return;
+      afterText = normalizeReadableText(afterText + "\n\n" + value)
+        .slice(0, MAX_VIEWPORT_SIDE_TEXT);
     }
 
     function textBlock(el) {
@@ -793,10 +1005,26 @@
             }
           }
           if (firstVisible >= 0) {
+            if (firstVisible > 0) {
+              addBefore(textSliceForLines(value, rects, 0, firstVisible));
+            }
             var nextBlock = textBlock(parent);
             if (block && nextBlock !== block) flush();
             block = nextBlock;
-            blockText += visibleTextSlice(value, rects, firstVisible, lastVisible);
+            blockText += textSliceForLines(value, rects, firstVisible, lastVisible + 1);
+            sawVisible = true;
+            if (lastVisible + 1 < rects.length) {
+              addAfter(textSliceForLines(value, rects, lastVisible + 1, rects.length));
+            }
+          } else if (rects.length) {
+            var allBefore = true;
+            var allAfter = true;
+            for (var r = 0; r < rects.length; r += 1) {
+              if (rects[r].bottom > (clip ? clip.top : top)) allBefore = false;
+              if (rects[r].top < (clip ? clip.bottom : bottom)) allAfter = false;
+            }
+            if (!sawVisible && allBefore) addBefore(value);
+            else if (sawVisible && allAfter) addAfter(value);
           }
         }
         node = walker.nextNode();
@@ -810,7 +1038,9 @@
     var visibleText = parts.join(String.fromCharCode(10) + String.fromCharCode(10));
     if (!visibleText.trim()) return null;
     return {
-      text: visibleText,
+      beforeText: normalizeReadableText(beforeText),
+      visibleText: normalizeReadableText(visibleText),
+      afterText: normalizeReadableText(afterText),
       // Internal only: it makes a real view movement distinct even when two
       // adjacent regions contain identical text. call.js consumes the key for
       // de-duplication but never places it in the strict Windows payload.
@@ -827,41 +1057,52 @@
   function snapshot() {
     var body = document.body;
     if (!body) return null;
-    var text = "";
+    var fullText = "";
+    var visibleText = "";
+    var beforeText = "";
+    var afterText = "";
+    var fullTextTruncated = false;
     var viewKey = "fallback:" + viewportRevision;
     try {
       var root = articleRoot() || body;
+      var whole = String(body.innerText || "");
+      // The corpus is the complete readable page, not merely the article root.
+      // body.innerText follows the live rendered tree, so hidden script/style
+      // content stays out while navigation, sidebars and secondary reading
+      // regions remain available for the conversation's first full read.
+      fullText = whole;
+      if (!fullText.trim()) {
+        fullText = articleText(body);
+        fullTextTruncated = articleTextTraversalTruncated;
+      }
+      if (root !== body) {
+        probeLine(
+          "全文提取: 整页 " + fullText.length + " 字; 视口主栏 " +
+          String(root.tagName || "").toLowerCase()
+        );
+      }
+      fullText = normalizeReadableText(fullText);
+
       var viewport = viewportArticleText(root);
       if (viewport) {
-        text = viewport.text;
+        visibleText = viewport.visibleText;
+        beforeText = viewport.beforeText;
+        afterText = viewport.afterText;
         viewKey = viewport.viewKey;
-        probeLine("视口正文: " + text.length + " 字");
+        probeLine(
+          "视口正文: 前 " + beforeText.length +
+          " / 当前 " + visibleText.length +
+          " / 后 " + afterText.length + " 字"
+        );
       } else {
-        text = articleText(root);
-        var whole = String(body.innerText || "");
-        // Range geometry is unavailable: retain the established whole-article
-        // extraction and its conservative fallback instead of losing context.
-        if (text.length < 200 && whole.length > text.length * 2) {
-          probeLine("正文提取: 命中过短,回退全页");
-          text = whole;
-        } else if (root !== body) {
-          probeLine(
-            "正文提取: " + String(root.tagName || "").toLowerCase() +
-            " " + text.length + "/" + whole.length + " 字"
-          );
-        }
+        // Range geometry is unavailable: keep the article-like reading region
+        // as the marked current view. The complete body remains separately in
+        // document.text and never masquerades as the viewport.
+        visibleText = root === body ? fullText : articleText(root);
       }
-      text = text
-        // Collapses runs of spaces and tabs, then runs of blank lines.
-        //
-        // Built from character codes rather than written as literals: this
-        // file passes through several layers of quoting on its way here, and
-        // each of them has a claim on the backslash. Codes have no such
-        // ambiguity, and the intent is stated above them.
-        .replace(new RegExp("[ " + String.fromCharCode(9) + "]+", "g"), " ")
-        .replace(new RegExp(String.fromCharCode(10) + "{3,}", "g"), String.fromCharCode(10) + String.fromCharCode(10))
-.trim()
-        .slice(0, MAX_TEXT);
+      visibleText = normalizeReadableText(visibleText).slice(0, MAX_TEXT);
+      beforeText = normalizeReadableText(beforeText).slice(-MAX_VIEWPORT_SIDE_TEXT);
+      afterText = normalizeReadableText(afterText).slice(0, MAX_VIEWPORT_SIDE_TEXT);
     } catch (err) {
       probeLine("正文提取失败: " + ((err && err.message) || "未知"));
       return null;
@@ -870,12 +1111,46 @@
     try {
       selection = String(window.getSelection() || "").trim().slice(0, 400);
     } catch (_) {}
+    var selectionRegions = {
+      contract: "reader-selection-regions/1",
+      total: 0,
+      truncated: false,
+      items: [],
+    };
+    try {
+      if (typeof window.RC?.selectionRegionsForPage === "function") {
+        selectionRegions = window.RC.selectionRegionsForPage({ page: 0 });
+      }
+    } catch (_) {}
+    var viewportPayload = {
+      beforeText: beforeText,
+      visibleText: visibleText,
+      afterText: afterText,
+      selectionState: selection ? "active" : "cleared",
+      selection: selection,
+      viewKey: viewKey,
+    };
+    if (lastBrowserControlCorrelation) {
+      viewportPayload.controlCorrelation = lastBrowserControlCorrelation;
+    }
     return {
       url: String(location.href || ""),
       title: String(document.title || ""),
-      text: text,
+      // Compatibility aliases for the existing snapshot path. They are the
+      // current viewport only; the full document never enters page.text.
+      text: visibleText,
       selection: selection,
+      selectionRegions: selectionRegions,
       viewKey: viewKey,
+      viewport: viewportPayload,
+      document: {
+        sourceInstanceId: sourceInstanceId,
+        documentKey: canonicalDocumentKey(),
+        // call.js computes SHA-256 and enforces the byte bound in its trusted
+        // extension origin before constructing the POST field.
+        text: fullText,
+        truncated: fullTextTruncated,
+      },
     };
   }
 
@@ -922,7 +1197,9 @@
     var snap = snapshot();
     if (!snap) return;
     var signature = snap.url + "|" + snap.title + "|" + snap.viewKey + "|" +
-      contentDigest(snap.text) + "|" + contentDigest(snap.selection);
+      contentDigest(snap.text) + "|" + contentDigest(snap.selection) + "|" +
+      contentDigest(JSON.stringify(snap.selectionRegions || null)) + "|" +
+      contentDigest(snap.document && snap.document.text);
     if (!force && signature === lastSignature) {
       probeLine("跳过: 内容签名未变");
       return;
@@ -948,12 +1225,27 @@
     var delivered = deliverToFrame(snap);
     probeLine("投递到框: " + (delivered ? "成功" : "失败(没找到框)"));
 
+    // The direct frame bounds and hashes document.text before network I/O.
+    // Do not also copy the unbounded corpus candidate into extension storage
+    // or the legacy runtime fallback: those paths exist only to recover the
+    // live viewport when a frame starts late, and large pages can exceed their
+    // quotas before the intended POST gets a chance to apply its byte cap.
+    var legacyPage = {
+      url: snap.url,
+      title: snap.title,
+      text: snap.text,
+      selection: snap.selection,
+      viewKey: snap.viewKey,
+      viewport: snap.viewport,
+      selectionRegions: snap.selectionRegions,
+    };
+
     contextRevision += 1;
     var envelope = {
       schema: 1,
       revision: Date.now() + "-" + contextRevision,
       capturedAt: Date.now(),
-      page: snap,
+      page: legacyPage,
     };
 
     function finishStorage(success) {
@@ -977,7 +1269,7 @@
       // The frame is a child of this document. Nothing needs to leave the page.
       // Kept only as a fallback for surfaces with no frame of their own.
       try {
-        var result = runtime.sendMessage({ type: "BW_PAGE_ACTIVE", page: snap });
+        var result = runtime.sendMessage({ type: "BW_PAGE_ACTIVE", page: legacyPage });
         if (result && typeof result.catch === "function") result.catch(function () {});
       } catch (_) {}
     }
@@ -1007,6 +1299,35 @@
     }, { passive: true });
     document.addEventListener("selectionchange", function () {
       schedule(false);
+    }, { passive: true });
+    window.addEventListener("rc:inkchange", function () {
+      viewportRevision += 1;
+      schedule(true);
+    }, { passive: true });
+    // Browser-control replies only mean that the scroll operation ran. Force
+    // the resulting viewport through the snapshot path before the MCP tool is
+    // allowed to report success, so an immediate follow-up read cannot see the
+    // pre-scroll viewport.
+    window.addEventListener("bw:browser-control-refresh", function (event) {
+      var detail = event && event.detail;
+      var requestId = String(detail && detail.requestId || "");
+      var source = String(detail && detail.sourceInstanceId || "");
+      if (
+        source !== sourceInstanceId ||
+        !/^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/.test(requestId)
+      ) return;
+      lastBrowserControlCorrelation = requestId;
+      viewportRevision += 1;
+      // This acknowledgement is part of the control operation itself. Bypass
+      // the ordinary 1.5 s scroll throttle so Windows can prove it received
+      // the viewport produced by this exact request rather than an unrelated
+      // heartbeat revision.
+      if (timer) {
+        clearTimeout(timer);
+        timer = null;
+      }
+      lastSignature = "";
+      report(true);
     }, { passive: true });
     function noteViewportScroll() {
       viewportRevision += 1;

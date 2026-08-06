@@ -76,10 +76,6 @@ internal interface IDirectMediaAdapter : IAsyncDisposable
 
     Task<DirectProtocolException?> Completion { get; }
 
-    Task WaitForVoiceReadyAsync(
-        TimeSpan timeout,
-        CancellationToken cancellationToken);
-
     Task<DirectMediaStartResult> StartAsync(
         DirectMediaStartRequest request,
         Func<DirectPcmFrame, CancellationToken, Task> sendFrameAsync,
@@ -104,14 +100,6 @@ internal sealed class UnwiredDirectMediaAdapter : IDirectMediaAdapter
 
     public Task<DirectProtocolException?> Completion =>
         Task.FromResult<DirectProtocolException?>(null);
-
-    public Task WaitForVoiceReadyAsync(
-        TimeSpan timeout,
-        CancellationToken cancellationToken) =>
-        Task.FromException(
-            new DirectProtocolException(
-                "BW_COMPUTER_VOICE_DIRECT_MEDIA_NOT_WIRED",
-                "Windows 直连媒体适配器尚未接线"));
 
     public Task<DirectMediaStartResult> StartAsync(
         DirectMediaStartRequest request,
@@ -139,8 +127,6 @@ internal sealed class UnwiredDirectMediaAdapter : IDirectMediaAdapter
 internal sealed class DirectBridgeCoordinator : IAsyncDisposable
 {
     private static readonly TimeSpan AppReadyTimeout = TimeSpan.FromSeconds(20);
-    private static readonly TimeSpan VoiceReadyTimeout =
-        TimeSpan.FromSeconds(12);
     private readonly DirectBridgeConfigStore _configStore;
     private readonly IDirectAppLauncher _appLauncher;
     private readonly IDirectMediaAdapter _mediaAdapter;
@@ -548,14 +534,6 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
             }
 
             await reportStatusAsync(
-                "waiting-voice-ready",
-                "BW_COMPUTER_VOICE_DIRECT_WAITING_VOICE_READY")
-                .ConfigureAwait(false);
-            await _mediaAdapter.WaitForVoiceReadyAsync(
-                VoiceReadyTimeout,
-                cancellationToken).ConfigureAwait(false);
-
-            await reportStatusAsync(
                 "starting-capture",
                 "BW_COMPUTER_VOICE_DIRECT_STARTING_CAPTURE")
                 .ConfigureAwait(false);
@@ -581,12 +559,10 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
                             config.FixedVirtualAudioBusEnabled),
                     sendFrameAsync,
                     cancellationToken).ConfigureAwait(false);
-            Task<DirectProtocolException?> mediaCompletion =
-                _mediaAdapter.Completion;
             if (!started.HostReady
                 || !started.CaptureActive
                 || !_mediaAdapter.CaptureActive
-                || mediaCompletion.IsCompleted)
+                || _mediaAdapter.Completion.IsCompleted)
             {
                 // 这四项过去共用一个 code 且 runtime status 不落 message,失败时
                 // 无法区分是宿主没就绪、捕获没激活,还是适配器已提前收摊。code 保持

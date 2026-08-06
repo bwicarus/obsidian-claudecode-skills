@@ -11,6 +11,14 @@
 
 import { ContextLink } from "./ctxlink.js";
 
+const VISUAL_DELIVERY_CONTRACT = "reader-visual-delivery/2";
+const LOCAL_VISUAL_CONTRACT = "bw-reader-visual-local/1";
+const BROWSER_CONTROL_CONTRACT = "reader-browser-control/1";
+const LOCAL_BROWSER_CONTROL_CONTRACT = "bw-browser-control/1";
+const VISUAL_CHUNK_CHARACTERS = 48000;
+const VISUAL_MAX_BYTES = 786432;
+const VISUAL_MAX_CHUNKS = 24;
+
 // Marks the embedded form. Done here rather than in an inline <script>, which an
 // extension page's CSP (script-src 'self') silently refuses -- that refusal is
 // why the frame stayed unannounced and every press fell through to a new tab.
@@ -125,6 +133,7 @@ function describe(err) {
 
 const PREFERENCE_KEY = "bwReaderExtensionPreferencesV2";
 const CONTEXT_SYNC_KEY = "eph-ctx-sync";
+const CONTEXT_SYNC_MIRROR_KEY = "bwCtxSyncMirrorV1";
 const ACTIVE_CONTEXT_KEY = "bwActivePageContextV1";
 
 // Compared before sending. Without it the same page would be resent on every
@@ -133,6 +142,7 @@ let lastSignature = "";
 let lastPage = null;
 let contextPreferenceKnown = false;
 let contextSyncEnabled = false;
+let contextMirrorKnown = false;
 let link = null;
 
 function contextLinkStatus(s) {
@@ -180,14 +190,19 @@ function ensureContextLink() {
   return link;
 }
 
-function applyContextPreference(record) {
-  const next = enabledFromRecord(record);
+function applyContextPreference(record, mirrorValue) {
+  const hasMirror = typeof mirrorValue === "boolean";
+  if (!hasMirror && contextMirrorKnown) return;
+  if (hasMirror) contextMirrorKnown = true;
+  const next = hasMirror ? mirrorValue : enabledFromRecord(record);
   // A preference read as false and a preference never written look identical
   // once folded into a boolean, yet they call for opposite fixes: one means the
   // switch is off, the other means the switch is being read from the wrong key.
   note(
     "读到偏好: " +
-    (record === undefined ? "undefined(未写入)" : JSON.stringify(record)) +
+    (hasMirror
+      ? "跨站镜像=" + String(mirrorValue)
+      : record === undefined ? "undefined(未写入)" : JSON.stringify(record)) +
     " → " + next
   );
   const changed = !contextPreferenceKnown || next !== contextSyncEnabled;
@@ -197,6 +212,7 @@ function applyContextPreference(record) {
   lastSignature = "";
   if (!contextSyncEnabled) {
     closeContextLink();
+    closeVisualLink();
     say("上下文同步已关闭", "dim");
     return;
   }
@@ -226,6 +242,8 @@ function render(page) {
 // it changed, which is the only moment that matters.
 let lastGateReport = "";
 let lastBodySignature = "";
+let lastDocumentSignature = "";
+let preparedDocumentCache = null;
 let directPostRunning = false;
 let directPostQueued = null;
 
@@ -294,11 +312,438 @@ function frameProbe(text) {
   } catch (_) {}
 }
 
+function exactKeys(value, keys) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const actual = Object.keys(value).sort();
+  const expected = keys.slice().sort();
+  return actual.length === expected.length &&
+    actual.every((key, index) => key === expected[index]);
+}
+
+function safeVisualId(value, nullable) {
+  if (nullable && value === null) return null;
+  const text = String(value || "");
+  return /^[A-Za-z0-9._:-]{1,160}$/.test(text) ? text : null;
+}
+
+function validVisualPage(value) {
+  return (
+    Number.isSafeInteger(value) && value >= 0
+  ) || (
+    typeof value === "string" &&
+    value.length >= 1 && value.length <= 256 &&
+    !/[\u0000-\u001f\u007f]/.test(value)
+  );
+}
+
+function normalizeVisualEvent(message) {
+  if (!exactKeys(message, ["contract", "type", "event", "payload"])) return null;
+  if (
+    message.contract !== "reader-computer-voice-direct/1" ||
+    message.type !== "event" ||
+    message.event !== "reader-visual-request"
+  ) return null;
+  const p = message.payload;
+  if (!exactKeys(p, [
+    "contract", "commandKind", "correlation", "sourceInstanceId",
+    "snapshotRevision", "file", "page", "drawingRevision", "scope",
+    "selectionId", "maxBytes", "chunkCharacters",
+  ])) return null;
+  const correlation = safeVisualId(p.correlation, false);
+  const sourceInstanceId = safeVisualId(p.sourceInstanceId, false);
+  const drawingRevision = safeVisualId(p.drawingRevision, true);
+  const selectionId = safeVisualId(p.selectionId, true);
+  if (
+    p.contract !== VISUAL_DELIVERY_CONTRACT ||
+    p.commandKind !== "capture-composite" ||
+    !correlation || !sourceInstanceId ||
+    !Number.isSafeInteger(p.snapshotRevision) || p.snapshotRevision < 0 ||
+    typeof p.file !== "string" || p.file.length < 1 || p.file.length > 4096 ||
+    /[\u0000-\u001f\u007f]/.test(p.file) ||
+    !validVisualPage(p.page) ||
+    (p.drawingRevision !== null && !drawingRevision) ||
+    !["viewport-context", "drawing-nearby", "selection-near"].includes(p.scope) ||
+    (p.selectionId !== null && !selectionId) ||
+    (p.scope === "selection-near") !== !!selectionId ||
+    p.maxBytes !== VISUAL_MAX_BYTES ||
+    p.chunkCharacters !== VISUAL_CHUNK_CHARACTERS
+  ) return null;
+  return {
+    contract: VISUAL_DELIVERY_CONTRACT,
+    commandKind: "capture-composite",
+    correlation,
+    sourceInstanceId,
+    snapshotRevision: p.snapshotRevision,
+    file: p.file,
+    page: p.page,
+    drawingRevision,
+    scope: p.scope,
+    selectionId,
+    maxBytes: p.maxBytes,
+    chunkCharacters: p.chunkCharacters,
+  };
+}
+
+let visualLink = null;
+let visualSourceInstanceId = "";
+let visualPage = null;
+let visualQueue = Promise.resolve();
+const visualCapturePending = new Map();
+const browserControlPending = new Map();
+let browserControlQueue = Promise.resolve();
+
+function closeVisualLink() {
+  const current = visualLink;
+  visualLink = null;
+  visualSourceInstanceId = "";
+  visualPage = null;
+  if (!current) return;
+  try { current.close(); } catch (_) {}
+}
+
+function visualLinkStatus(status) {
+  if (status?.state === "error" || status?.state === "retrying") {
+    frameProbe("视觉链路: " + status.state +
+      (status.error ? " " + describe(status.error) : ""));
+  }
+}
+
+function localVisualCapture(request) {
+  return new Promise((resolve) => {
+    const timer = window.setTimeout(() => {
+      visualCapturePending.delete(request.correlation);
+      resolve(null);
+    }, 20000);
+    visualCapturePending.set(request.correlation, {
+      sourceInstanceId: request.sourceInstanceId,
+      resolve: (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+    });
+    try {
+      window.parent.postMessage({
+        contract: LOCAL_VISUAL_CONTRACT,
+        type: "capture-request",
+        request,
+      }, "*");
+    } catch (_) {
+      window.clearTimeout(timer);
+      visualCapturePending.delete(request.correlation);
+      resolve(null);
+    }
+  });
+}
+
+function visualChunkFields(request, fields) {
+  return Object.assign({
+    sessionId: visualLink?.sessionId || "",
+    correlation: request.correlation,
+    sourceInstanceId: request.sourceInstanceId,
+    snapshotRevision: request.snapshotRevision,
+    file: request.file,
+    page: request.page,
+    drawingRevision: request.drawingRevision,
+    scope: request.scope,
+    selectionId: request.selectionId,
+  }, fields);
+}
+
+async function sendVisualUnavailable(request) {
+  if (!visualLink) return;
+  await visualLink.sendRequest("reader-visual", visualChunkFields(request, {
+    status: "unavailable",
+    mimeType: "",
+    chunkIndex: 0,
+    chunkCount: 0,
+    totalBytes: 0,
+    data: "",
+  }));
+}
+
+function decodeVisualBase64(value) {
+  const b64 = String(value || "");
+  if (!b64 || b64.length % 4 !== 0 || !/^[A-Za-z0-9+/]+={0,2}$/.test(b64)) return null;
+  try {
+    const binary = atob(b64);
+    if (btoa(binary) !== b64 || binary.length < 3) return null;
+    if (
+      binary.charCodeAt(0) !== 0xff ||
+      binary.charCodeAt(1) !== 0xd8 ||
+      binary.charCodeAt(2) !== 0xff
+    ) return null;
+    return { b64, totalBytes: binary.length };
+  } catch (_) {
+    return null;
+  }
+}
+
+async function deliverVisualRequest(request) {
+  if (
+    !visualLink || !visualLink.sessionId ||
+    request.sourceInstanceId !== visualSourceInstanceId
+  ) return;
+  if (
+    request.sourceInstanceId !== String(visualPage?.document?.sourceInstanceId || "") ||
+    request.file !== String(visualPage?.url || "")
+  ) {
+    await sendVisualUnavailable(request);
+    return;
+  }
+  const capture = await localVisualCapture(request);
+  const decoded = capture?.status === "ready" && capture?.mimeType === "image/jpeg"
+    ? decodeVisualBase64(capture.b64)
+    : null;
+  if (
+    !decoded || decoded.totalBytes > request.maxBytes ||
+    Math.ceil(decoded.b64.length / request.chunkCharacters) > VISUAL_MAX_CHUNKS
+  ) {
+    await sendVisualUnavailable(request);
+    return;
+  }
+  const chunkCount = Math.ceil(decoded.b64.length / request.chunkCharacters);
+  for (let index = 0; index < chunkCount; index += 1) {
+    await visualLink.sendRequest("reader-visual", visualChunkFields(request, {
+      status: "chunk",
+      mimeType: "image/jpeg",
+      chunkIndex: index,
+      chunkCount,
+      totalBytes: decoded.totalBytes,
+      data: decoded.b64.slice(
+        index * request.chunkCharacters,
+        (index + 1) * request.chunkCharacters
+      ),
+    }));
+  }
+}
+
+function handleVisualBridgeEvent(message) {
+  const request = normalizeVisualEvent(message);
+  if (!request || request.sourceInstanceId !== visualSourceInstanceId) return;
+  visualQueue = visualQueue
+    .then(() => deliverVisualRequest(request))
+    .catch((err) => frameProbe("视觉回传失败: " + describe(err)));
+}
+
+function normalizeBrowserControlEvent(message) {
+  if (!exactKeys(message, ["contract", "type", "event", "payload"])) return null;
+  if (
+    message.contract !== "reader-computer-voice-direct/1" ||
+    message.type !== "event" ||
+    message.event !== "reader-browser-control-request"
+  ) return null;
+  const p = message.payload;
+  if (!exactKeys(p, [
+    "contract", "commandKind", "correlation", "sourceInstanceId",
+    "snapshotRevision", "file", "page", "action", "target", "selectionId",
+  ])) return null;
+  const correlation = safeVisualId(p.correlation, false);
+  const sourceInstanceId = safeVisualId(p.sourceInstanceId, false);
+  const selectionId = safeVisualId(p.selectionId, true);
+  const actions = [
+    "next-viewport", "previous-viewport", "scroll-to-text",
+    "scroll-to-heading", "scroll-to-selection",
+  ];
+  const textAction = p.action === "scroll-to-text" || p.action === "scroll-to-heading";
+  const selectionAction = p.action === "scroll-to-selection";
+  if (
+    p.contract !== BROWSER_CONTROL_CONTRACT ||
+    p.commandKind !== "browser-control" ||
+    !correlation || !sourceInstanceId ||
+    !Number.isSafeInteger(p.snapshotRevision) || p.snapshotRevision < 0 ||
+    typeof p.file !== "string" || p.file.length < 1 || p.file.length > 4096 ||
+    /[\u0000-\u001f\u007f]/.test(p.file) ||
+    !validVisualPage(p.page) ||
+    !actions.includes(p.action) ||
+    (textAction
+      ? typeof p.target !== "string" || !p.target.trim() || p.target.length > 320
+      : p.target !== null) ||
+    (selectionAction ? !selectionId : p.selectionId !== null)
+  ) return null;
+  return {
+    contract: BROWSER_CONTROL_CONTRACT,
+    commandKind: "browser-control",
+    correlation,
+    sourceInstanceId,
+    snapshotRevision: p.snapshotRevision,
+    file: p.file,
+    page: p.page,
+    action: p.action,
+    target: textAction ? p.target.trim() : null,
+    selectionId: selectionAction ? selectionId : null,
+  };
+}
+
+function localBrowserControl(request) {
+  return new Promise((resolve) => {
+    const timer = window.setTimeout(() => {
+      browserControlPending.delete(request.correlation);
+      resolve(null);
+    }, 10000);
+    browserControlPending.set(request.correlation, {
+      sourceInstanceId: request.sourceInstanceId,
+      action: request.action,
+      resolve: (value) => {
+        window.clearTimeout(timer);
+        resolve(value);
+      },
+    });
+    const local = {
+      contract: LOCAL_BROWSER_CONTROL_CONTRACT,
+      type: "request",
+      requestId: request.correlation,
+      sourceInstanceId: request.sourceInstanceId,
+      action: request.action,
+    };
+    if (request.target !== null) local.target = request.target;
+    if (request.selectionId !== null) local.selectionId = request.selectionId;
+    try {
+      window.parent.postMessage(local, "*");
+    } catch (_) {
+      window.clearTimeout(timer);
+      browserControlPending.delete(request.correlation);
+      resolve(null);
+    }
+  });
+}
+
+function fallbackBrowserState() {
+  return {
+    scrollX: 0,
+    scrollY: 0,
+    url: String(visualPage?.url || ""),
+    title: String(visualPage?.title || "").slice(0, 1024),
+  };
+}
+
+async function deliverBrowserControlRequest(request) {
+  if (
+    !visualLink || !visualLink.sessionId ||
+    request.sourceInstanceId !== visualSourceInstanceId
+  ) return;
+  let result = null;
+  if (
+    request.sourceInstanceId === String(visualPage?.document?.sourceInstanceId || "") &&
+    request.file === String(visualPage?.url || "") &&
+    request.page === 0
+  ) result = await localBrowserControl(request);
+  const state = result?.ok === true && result.state
+    ? result.state
+    : fallbackBrowserState();
+  const status = result?.ok === true
+    ? "success"
+    : result?.error?.code === "BW_BROWSER_CONTROL_TARGET_NOT_FOUND"
+      ? "not-found"
+      : "rejected";
+  await visualLink.sendRequest("reader-browser-control", {
+    sessionId: visualLink.sessionId,
+    correlation: request.correlation,
+    sourceInstanceId: request.sourceInstanceId,
+    snapshotRevision: request.snapshotRevision,
+    file: request.file,
+    page: request.page,
+    action: request.action,
+    status,
+    scrollX: Number.isFinite(Number(state.scrollX)) ? Number(state.scrollX) : 0,
+    scrollY: Number.isFinite(Number(state.scrollY)) ? Number(state.scrollY) : 0,
+    url: /^https?:\/\//.test(String(state.url || ""))
+      ? String(state.url).slice(0, 4096)
+      : String(visualPage?.url || ""),
+    title: String(state.title || "").replace(/[\u0000-\u001f\u007f]/g, " ").slice(0, 1024),
+  });
+}
+
+function handleContextBridgeEvent(message) {
+  if (message?.event === "reader-visual-request") {
+    handleVisualBridgeEvent(message);
+    return;
+  }
+  const request = normalizeBrowserControlEvent(message);
+  if (!request || request.sourceInstanceId !== visualSourceInstanceId) return;
+  browserControlQueue = browserControlQueue
+    .then(() => deliverBrowserControlRequest(request))
+    .catch((err) => frameProbe("浏览控制回传失败: " + describe(err)));
+}
+
+function ensureVisualLink(page) {
+  // The page message itself only exists after content.js has passed the
+  // context-sync preference gate. Unknown is therefore safe during startup,
+  // while an explicit false must tear down the already-registered visual and
+  // browser-control source immediately.
+  if (
+    (contextPreferenceKnown && !contextSyncEnabled) ||
+    !contextSurfaceVisible()
+  ) {
+    closeVisualLink();
+    return;
+  }
+  const source = String(page?.document?.sourceInstanceId || "");
+  if (!/^[A-Za-z0-9_-]{22}$/.test(source)) return;
+  visualPage = page;
+  if (visualLink && visualSourceInstanceId === source) return;
+  try { visualLink?.close(); } catch (_) {}
+  visualSourceInstanceId = source;
+  visualLink = new ContextLink(visualLinkStatus, handleContextBridgeEvent);
+  visualLink.bindVisualSource(source).catch(() => {});
+  visualLink.connect();
+}
+
 window.addEventListener("message", (event) => {
   const d = event.data;
+  if (
+    event.source === window.parent &&
+    d?.contract === LOCAL_BROWSER_CONTROL_CONTRACT &&
+    d?.type === "result"
+  ) {
+    const pending = browserControlPending.get(d.requestId);
+    if (!pending || pending.sourceInstanceId !== d.sourceInstanceId || pending.action !== d.action) return;
+    const success = d.ok === true &&
+      exactKeys(d, [
+        "contract", "type", "requestId", "sourceInstanceId", "action", "ok", "state",
+      ]) &&
+      exactKeys(d.state, ["scrollX", "scrollY", "url", "title"]) &&
+      Number.isFinite(Number(d.state.scrollX)) &&
+      Number.isFinite(Number(d.state.scrollY)) &&
+      /^https?:\/\//.test(String(d.state.url || ""));
+    const failure = d.ok === false &&
+      exactKeys(d, [
+        "contract", "type", "requestId", "sourceInstanceId", "action", "ok", "error",
+      ]) &&
+      exactKeys(d.error, ["code", "message", "retryable"]) &&
+      typeof d.error.code === "string" &&
+      typeof d.error.message === "string" &&
+      typeof d.error.retryable === "boolean";
+    if (!success && !failure) return;
+    browserControlPending.delete(d.requestId);
+    pending.resolve(success
+      ? { ok: true, state: d.state }
+      : { ok: false, error: d.error });
+    return;
+  }
+  if (
+    event.source === window.parent &&
+    exactKeys(d, [
+      "contract", "type", "correlation", "sourceInstanceId",
+      "status", "mimeType", "b64",
+    ]) &&
+    d.contract === LOCAL_VISUAL_CONTRACT &&
+    d.type === "capture-response"
+  ) {
+    const pending = visualCapturePending.get(d.correlation);
+    if (!pending || pending.sourceInstanceId !== d.sourceInstanceId) return;
+    visualCapturePending.delete(d.correlation);
+    pending.resolve({
+      status: d.status,
+      mimeType: d.mimeType,
+      b64: d.b64,
+    });
+    return;
+  }
   if (!d || d.contract !== "bw-page-context/1" || d.type !== "page") return;
+  if (event.source !== window.parent) return;
   if (!d.page || typeof d.page !== "object") return;
   frameProbe("框收到页面: " + String(d.page.url || "").slice(0, 50));
+  ensureVisualLink(d.page);
   queueDirect(d.page);
 });
 
@@ -327,6 +772,209 @@ window.addEventListener("message", (event) => {
 // at the instant of sending, and it is recreated with every page.
 const SNAPSHOT_POST_URL =
   "https://bwicarus-2.taile44d0c.ts.net/reader-context/snapshot";
+// A document is sent once per content revision and stored outside the live
+// snapshot.  Keep enough room for the complete text of an ordinary long page
+// (including CJK), while the bridge still enforces a hard request/corpus cap.
+const MAX_DOCUMENT_UTF8_BYTES = 768 * 1024;
+const MAX_DOCUMENT_CHARACTERS = 256 * 1024;
+const MAX_CONTEXT_URL_CHARACTERS = 4096;
+const MAX_CONTEXT_TITLE_CHARACTERS = 1024;
+
+function normalizeReadableText(value) {
+  return String(value || "")
+    .replace(/\r\n?/g, "\n")
+    .replace(/\u00a0/g, " ")
+    .replace(/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/g, "")
+    .replace(/[ \t]+/g, " ")
+    .replace(/ *\n */g, "\n")
+    .replace(/\n{3,}/g, "\n\n")
+    .trim();
+}
+
+function safeContextTitle(value) {
+  return String(value || "")
+    .replace(/[\u0000-\u001f\u007f]/g, " ")
+    .slice(0, MAX_CONTEXT_TITLE_CHARACTERS);
+}
+
+function safeContextUrl(value) {
+  const text = String(value || "");
+  if (
+    !text || text.length > MAX_CONTEXT_URL_CHARACTERS ||
+    /[\u0000-\u001f\u007f]/.test(text)
+  ) return null;
+  try {
+    const parsed = new URL(text);
+    const canonical = parsed.href;
+    return (
+      (parsed.protocol === "http:" || parsed.protocol === "https:") &&
+      canonical.length <= MAX_CONTEXT_URL_CHARACTERS &&
+      !/[\u0000-\u001f\u007f]/.test(canonical)
+    ) ? canonical : null;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function sha256Hex(value) {
+  if (!globalThis.crypto?.subtle || typeof TextEncoder !== "function") {
+    throw new Error("扩展页缺少 SHA-256 支持");
+  }
+  const bytes = new TextEncoder().encode(String(value || ""));
+  const digest = await globalThis.crypto.subtle.digest("SHA-256", bytes);
+  return Array.from(new Uint8Array(digest), (byte) => byte.toString(16).padStart(2, "0")).join("");
+}
+
+function boundUtf8Text(value, maxBytes) {
+  const text = String(value || "");
+  const encoder = new TextEncoder();
+  if (encoder.encode(text).byteLength <= maxBytes) return { text, truncated: false };
+  let low = 0;
+  let high = text.length;
+  while (low < high) {
+    const middle = Math.ceil((low + high) / 2);
+    if (encoder.encode(text.slice(0, middle)).byteLength <= maxBytes) low = middle;
+    else high = middle - 1;
+  }
+  // Never leave a dangling UTF-16 high surrogate at the byte boundary.
+  if (low > 0 && /[\uD800-\uDBFF]/.test(text.charAt(low - 1))) low -= 1;
+  return { text: text.slice(0, low), truncated: true };
+}
+
+async function prepareDocument(page) {
+  const raw = page && page.document;
+  if (!raw || typeof raw !== "object") return null;
+  const sourceInstanceId = String(raw.sourceInstanceId || "");
+  if (!/^[A-Za-z0-9_-]{22}$/.test(sourceInstanceId)) {
+    throw new Error("页面来源标识无效");
+  }
+  const fullText = normalizeReadableText(raw.text);
+  const url = safeContextUrl(page.url);
+  if (!url) throw new Error("页面 URL 无效");
+  const documentKey = safeContextUrl(raw.documentKey) || url;
+  if (
+    preparedDocumentCache &&
+    preparedDocumentCache.sourceInstanceId === sourceInstanceId &&
+    preparedDocumentCache.documentKey === documentKey &&
+    preparedDocumentCache.fullText === fullText &&
+    preparedDocumentCache.sourceTruncated === !!raw.truncated
+  ) return preparedDocumentCache.payload;
+  let characterBoundText = fullText.slice(0, MAX_DOCUMENT_CHARACTERS);
+  if (
+    characterBoundText &&
+    /[\uD800-\uDBFF]/.test(characterBoundText.charAt(characterBoundText.length - 1))
+  ) characterBoundText = characterBoundText.slice(0, -1);
+  const characterTruncated = characterBoundText.length < fullText.length;
+  const bounded = boundUtf8Text(characterBoundText, MAX_DOCUMENT_UTF8_BYTES);
+  const payload = {
+    contract: "reader-document/1",
+    sourceInstanceId,
+    documentKey,
+    url,
+    title: safeContextTitle(page.title),
+    // Hash the normalized full text, not the transmitted prefix. A change
+    // beyond the byte bound still produces a new corpus revision.
+    contentRevision: await sha256Hex(fullText),
+    text: bounded.text,
+    truncated: !!raw.truncated || characterTruncated || bounded.truncated,
+    observedAtEpochMs: Date.now(),
+  };
+  preparedDocumentCache = {
+    sourceInstanceId,
+    documentKey,
+    fullText,
+    sourceTruncated: !!raw.truncated,
+    payload,
+  };
+  return payload;
+}
+
+function prepareViewport(page) {
+  const raw = page && page.viewport && typeof page.viewport === "object"
+    ? page.viewport
+    : {};
+  const selection = normalizeReadableText(raw.selection ?? page.selection ?? "").slice(0, 400);
+  const visibleText = normalizeReadableText(raw.visibleText ?? page.text ?? "").slice(0, 12000);
+  const sourceInstanceId = String(page?.document?.sourceInstanceId || "");
+  const url = safeContextUrl(page?.url);
+  if (!url) throw new Error("页面 URL 无效");
+  const documentKey = safeContextUrl(page?.document?.documentKey) || url;
+  const payload = {
+    contract: "reader-viewport/1",
+    sourceInstanceId,
+    documentKey,
+    url,
+    title: safeContextTitle(page?.title),
+    beforeText: normalizeReadableText(raw.beforeText || "").slice(-2400),
+    visibleText,
+    afterText: normalizeReadableText(raw.afterText || "").slice(0, 2400),
+    selectionState: selection ? "active" : "cleared",
+    selection: selection || null,
+    observedAtEpochMs: Date.now(),
+  };
+  const controlCorrelation = safeVisualId(raw.controlCorrelation, true);
+  if (raw.controlCorrelation !== undefined && raw.controlCorrelation !== null) {
+    if (!controlCorrelation) throw new Error("浏览控制关联标识无效");
+    payload.controlCorrelation = controlCorrelation;
+  }
+  return payload;
+}
+
+function prepareSelectionRegions(page) {
+  const raw = page?.selectionRegions;
+  if (raw === undefined) {
+    return {
+      contract: "reader-selection-regions/1",
+      total: 0,
+      truncated: false,
+      items: [],
+    };
+  }
+  if (
+    !exactKeys(raw, ["contract", "total", "truncated", "items"]) ||
+    raw.contract !== "reader-selection-regions/1" ||
+    !Number.isSafeInteger(raw.total) || raw.total < 0 || raw.total > 1000000 ||
+    typeof raw.truncated !== "boolean" ||
+    !Array.isArray(raw.items) || raw.items.length > 128 ||
+    raw.truncated !== (raw.total > raw.items.length) ||
+    (!raw.truncated && raw.total !== raw.items.length)
+  ) throw new Error("页面选区索引无效");
+  const seen = new Set();
+  let priorOrdinal = 0;
+  const firstOrdinal = raw.total - raw.items.length + 1;
+  const items = raw.items.map((item, index) => {
+    if (
+      !exactKeys(item, [
+        "selectionId", "label", "ordinal", "createdAtEpochMs",
+      ]) ||
+      !safeVisualId(item.selectionId, false) || seen.has(item.selectionId) ||
+      typeof item.label !== "string" || item.label.length < 1 ||
+      item.label.length > 80 || /[\u0000-\u001f\u007f]/.test(item.label) ||
+      !Number.isSafeInteger(item.ordinal) || item.ordinal <= priorOrdinal ||
+      item.ordinal !== firstOrdinal + index ||
+      item.ordinal < 1 || item.ordinal > raw.total ||
+      !item.label.startsWith(`#${item.ordinal} `) ||
+      !Number.isSafeInteger(item.createdAtEpochMs) || item.createdAtEpochMs < 0
+    ) throw new Error("页面选区条目无效");
+    seen.add(item.selectionId);
+    priorOrdinal = item.ordinal;
+    return {
+      selectionId: item.selectionId,
+      label: item.label,
+      ordinal: item.ordinal,
+      createdAtEpochMs: item.createdAtEpochMs,
+    };
+  });
+  if (items.length > 0 && priorOrdinal !== raw.total) {
+    throw new Error("页面选区条目序号无效");
+  }
+  return {
+    contract: "reader-selection-regions/1",
+    total: raw.total,
+    truncated: raw.truncated,
+    items,
+  };
+}
 
 function randomHex(length) {
   const hex = "0123456789abcdef";
@@ -344,14 +992,22 @@ function randomHex(length) {
 // stale too, and a stale position does not read as "unchanged" -- it reads as
 // "still here", which is a different claim and sometimes a false one.
 //
-// A repeat sends only `active`. The bridge keeps the last stable page body and
-// refreshes its active-reading timestamp, so the assistant sees a current
-// location without the real body being overwritten by a placeholder.
-async function postSnapshot(page, bodyIsRepeat) {
-  const url = String(page.url || "");
-  const text = String(page.text || "").slice(0, 12000);
-  const selection = String(page.selection || "").slice(0, 400);
+// A repeat still sends `active` plus the structured viewport. The legacy
+// page.context body is omitted, so the bridge can refresh current position
+// without overwriting stable snapshot text. A new document revision is carried
+// independently even when the visible viewport itself is a repeat.
+async function postSnapshot(page, bodyIsRepeat, documentPayload) {
+  const viewport = prepareViewport(page);
+  const url = viewport.url;
+  const title = viewport.title;
+  const text = viewport.visibleText;
+  const selection = viewport.selection || "";
+  const selectionRegions = prepareSelectionRegions(page);
   const body = {
+    // Current view and full document are deliberately separate. The bridge may
+    // put viewport text in the live snapshot and persist document in a corpus;
+    // document.text must never become currentPage.text by accident.
+    viewport,
     // Nested under `active` with its own shape -- sent flat the bridge refuses
     // it, and because the context half succeeds first, the refusal would be
     // invisible: the snapshot updates while the reading position silently does
@@ -359,13 +1015,16 @@ async function postSnapshot(page, bodyIsRepeat) {
     active: {
       kind: "web",
       file: url,
-      title: String(page.title || ""),
+      title,
       page: 0,
       selectionState: selection ? "active" : "cleared",
       selection: selection || null,
+      sourceInstanceId: viewport.sourceInstanceId,
+      selectionRegions,
       observedAtEpochMs: Date.now(),
     },
   };
+  if (documentPayload) body.document = documentPayload;
   if (!bodyIsRepeat) {
     body.event = {
       v: 1,
@@ -378,15 +1037,15 @@ async function postSnapshot(page, bodyIsRepeat) {
       book_id: url,
       file: url,
       page: 0,
-      title: String(page.title || ""),
+      title,
       kind: "web",
       text_available: !!text,
       page_context: {
         text,
         text_available: !!text,
-        text_source: "extension-page",
+        text_source: "extension-viewport",
         fallback_reason: text ? null : "扩展未取得正文",
-        truncated: String(page.text || "").length > 12000,
+        truncated: String(page.viewport?.visibleText ?? page.text ?? "").length > 12000,
         reason: "active",
         visual: null,
         embeds: { highlights: 0, blocks: 0, unanchored: [] },
@@ -420,10 +1079,24 @@ async function forwardDirect(page) {
     `${page.url}|${page.title || ""}|${page.viewKey || ""}|${contentDigest(page.text)}`;
   const bodyIsRepeat = bodySig === lastBodySignature;
   try {
-    frameProbe(bodyIsRepeat ? "框: 开始 POST(仅位置)" : "框: 开始 POST");
-    await postSnapshot(page, bodyIsRepeat);
+    const preparedDocument = await prepareDocument(page);
+    const documentSig = preparedDocument
+      ? `${preparedDocument.sourceInstanceId}|${preparedDocument.documentKey}|${preparedDocument.contentRevision}`
+      : "";
+    const documentPayload = documentSig && documentSig !== lastDocumentSignature
+      ? preparedDocument
+      : null;
+    frameProbe(
+      (bodyIsRepeat ? "框: 开始 POST(仅位置" : "框: 开始 POST(视口") +
+      (documentPayload ? "+全文)" : ")")
+    );
+    await postSnapshot(page, bodyIsRepeat, documentPayload);
     lastBodySignature = bodySig;
-    frameProbe(bodyIsRepeat ? "框: POST 成功(仅位置)" : "框: POST 成功");
+    if (documentPayload) lastDocumentSignature = documentSig;
+    frameProbe(
+      (bodyIsRepeat ? "框: POST 成功(仅位置" : "框: POST 成功(视口") +
+      (documentPayload ? "+全文)" : ")")
+    );
   } catch (err) {
     // Said out loud. Every silent failure in this chain cost a build to find.
     note("快照投递失败: " + describe(err));
@@ -503,10 +1176,14 @@ function storageGet(keys) {
   try {
     const bag = await storageGet([
       PREFERENCE_KEY,
+      CONTEXT_SYNC_MIRROR_KEY,
       ACTIVE_CONTEXT_KEY,
       "bwCallContext",
     ]);
-    applyContextPreference(bag?.[PREFERENCE_KEY]);
+    applyContextPreference(
+      bag?.[PREFERENCE_KEY],
+      bag?.[CONTEXT_SYNC_MIRROR_KEY]
+    );
     const persisted = storedPage(bag?.[ACTIVE_CONTEXT_KEY]);
     const ctx = bag?.bwCallContext;
     if (persisted) {
@@ -537,7 +1214,14 @@ function storageGet(keys) {
 if (chrome.storage?.onChanged) {
   chrome.storage.onChanged.addListener((changes, areaName) => {
     if (areaName !== "local" || !changes) return;
-    if (changes[PREFERENCE_KEY]) {
+    if (changes[CONTEXT_SYNC_MIRROR_KEY]) {
+      const value = changes[CONTEXT_SYNC_MIRROR_KEY].newValue;
+      if (typeof value === "boolean") {
+        applyContextPreference(undefined, value);
+      } else {
+        contextMirrorKnown = false;
+      }
+    } else if (changes[PREFERENCE_KEY]) {
       applyContextPreference(changes[PREFERENCE_KEY].newValue);
     }
     if (changes[ACTIVE_CONTEXT_KEY]) {
@@ -550,10 +1234,12 @@ if (chrome.storage?.onChanged) {
 function resumeContextLink() {
   if (!contextSurfaceVisible()) {
     closeContextLink();
+    closeVisualLink();
     return;
   }
   const current = ensureContextLink();
   if (current && lastPage) forward(lastPage, true);
+  if (lastPage) ensureVisualLink(lastPage);
 }
 
 document.addEventListener("visibilitychange", resumeContextLink, { passive: true });

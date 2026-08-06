@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
+import { webcrypto } from "node:crypto";
 
 const read = (path) => fs.readFileSync(path, "utf8");
 const manifest = JSON.parse(read("extensions/bw-reader-webext/manifest.json"));
@@ -19,6 +20,156 @@ const readerWebView = read("ios/BWReader/App/ReaderWebView.swift");
 const nativeVoiceSystem = read(
   "ios/BWReader/App/NativeVoiceSystemIntegration.swift",
 );
+
+test("document payload hashes normalized full text and truncates by UTF-8 bytes", async () => {
+  const start = callPage.indexOf("function normalizeReadableText(value)");
+  const end = callPage.indexOf("function randomHex(length)", start);
+  assert.ok(start >= 0 && end > start);
+  const factory = new Function(
+    "globalThis",
+    "TextEncoder",
+    "Uint8Array",
+    "URL",
+    "MAX_CONTEXT_URL_CHARACTERS",
+    "MAX_DOCUMENT_UTF8_BYTES",
+    "MAX_DOCUMENT_CHARACTERS",
+    "MAX_CONTEXT_TITLE_CHARACTERS",
+    "preparedDocumentCache",
+    "exactKeys",
+    "safeVisualId",
+    `${callPage.slice(start, end)}; return { normalizeReadableText, sha256Hex, boundUtf8Text, prepareDocument, prepareViewport, prepareSelectionRegions };`,
+  );
+  const helpers = factory(
+    { crypto: webcrypto },
+    TextEncoder,
+    Uint8Array,
+    URL,
+    4096,
+    768 * 1024,
+    256 * 1024,
+    1024,
+    null,
+    (value, keys) => !!value && typeof value === "object" && !Array.isArray(value) &&
+      Object.keys(value).length === keys.length && keys.every((key) => Object.hasOwn(value, key)),
+    (value, nullable) => {
+      if (nullable && value === null) return null;
+      return typeof value === "string" && /^[A-Za-z0-9._:-]{1,160}$/.test(value)
+        ? value
+        : null;
+    },
+  );
+  assert.equal(
+    await helpers.sha256Hex("abc"),
+    "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad",
+  );
+  assert.equal(helpers.normalizeReadableText(" a\r\n\r\n\r\n b\u00a0 c "), "a\n\nb c");
+  const bounded = helpers.boundUtf8Text("你".repeat(100), 10);
+  assert.equal(new TextEncoder().encode(bounded.text).byteLength <= 10, true);
+  assert.equal(bounded.truncated, true);
+  const prepared = await helpers.prepareDocument({
+    url: "https://example.com/read#view",
+    title: "Example",
+    document: {
+      sourceInstanceId: "AAAAAAAAAAAAAAAAAAAAAA",
+      documentKey: "https://example.com/read",
+      text: "  first\r\n\r\n\r\nsecond  ",
+    },
+  });
+  assert.deepEqual(Object.keys(prepared), [
+    "contract", "sourceInstanceId", "documentKey", "url", "title",
+    "contentRevision", "text", "truncated", "observedAtEpochMs",
+  ]);
+  assert.equal(prepared.contract, "reader-document/1");
+  assert.equal(prepared.text, "first\n\nsecond");
+  assert.match(prepared.contentRevision, /^[0-9a-f]{64}$/);
+  const characterBound = await helpers.prepareDocument({
+    url: "https://example.com/long",
+    title: "x".repeat(2000) + "\u0000tail",
+    document: {
+      sourceInstanceId: "BBBBBBBBBBBBBBBBBBBBBB",
+      documentKey: "not-a-url",
+      text: "a".repeat(300000),
+    },
+  });
+  assert.equal(characterBound.text.length, 256 * 1024);
+  assert.equal(characterBound.truncated, true);
+  assert.equal(characterBound.documentKey, "https://example.com/long");
+  assert.equal(characterBound.title.length, 1024);
+  assert.doesNotMatch(characterBound.title, /[\u0000-\u001f\u007f]/);
+  const byteBound = await helpers.prepareDocument({
+    url: "https://example.com/cjk",
+    title: "CJK",
+    document: {
+      sourceInstanceId: "CCCCCCCCCCCCCCCCCCCCCC",
+      documentKey: "https://example.com/cjk",
+      text: "你".repeat(300000),
+    },
+  });
+  assert.ok(byteBound.text.length <= 256 * 1024);
+  assert.ok(new TextEncoder().encode(byteBound.text).byteLength <= 768 * 1024);
+  assert.equal(byteBound.truncated, true);
+  const viewport = helpers.prepareViewport({
+    url: "https://example.com/read#view",
+    title: "Example",
+    document: { sourceInstanceId: "AAAAAAAAAAAAAAAAAAAAAA", documentKey: "https://example.com/read" },
+    viewport: { beforeText: "before", visibleText: "current", afterText: "after", selection: "sel" },
+  });
+  assert.deepEqual(Object.keys(viewport), [
+    "contract", "sourceInstanceId", "documentKey", "url", "title",
+    "beforeText", "visibleText", "afterText", "selectionState", "selection",
+    "observedAtEpochMs",
+  ]);
+  assert.equal(viewport.contract, "reader-viewport/1");
+  assert.equal(viewport.visibleText, "current");
+  assert.equal(viewport.selectionState, "active");
+  const correlatedViewport = helpers.prepareViewport({
+    url: "https://example.com/read",
+    title: "Example",
+    document: { sourceInstanceId: "AAAAAAAAAAAAAAAAAAAAAA", documentKey: "https://example.com/read" },
+    viewport: {
+      beforeText: "before",
+      visibleText: "current",
+      afterText: "after",
+      selection: "",
+      controlCorrelation: "control-123",
+    },
+  });
+  assert.equal(correlatedViewport.controlCorrelation, "control-123");
+  assert.throws(
+    () => helpers.prepareViewport({
+      url: "https://example.com/read",
+      document: { sourceInstanceId: "AAAAAAAAAAAAAAAAAAAAAA", documentKey: "https://example.com/read" },
+      viewport: { visibleText: "current", controlCorrelation: "bad id" },
+    }),
+    /关联标识无效/,
+  );
+  const regions = helpers.prepareSelectionRegions({
+    selectionRegions: {
+      contract: "reader-selection-regions/1",
+      total: 2,
+      truncated: false,
+      items: [
+        { selectionId: "region-1", label: "#1 --:--", ordinal: 1, createdAtEpochMs: 0 },
+        { selectionId: "region-2", label: "#2 12:00", ordinal: 2, createdAtEpochMs: 1786000000000 },
+      ],
+    },
+  });
+  assert.equal(regions.items.length, 2);
+  assert.equal(regions.items[0].createdAtEpochMs, 0);
+  assert.throws(
+    () => helpers.prepareSelectionRegions({
+      selectionRegions: {
+        contract: "reader-selection-regions/1",
+        total: 3,
+        truncated: true,
+        items: [
+          { selectionId: "region-2", label: "#2 12:00", ordinal: 2, createdAtEpochMs: 1 },
+        ],
+      },
+    }),
+    /页面选区条目/,
+  );
+});
 
 test("电脑客户端保留原按钮与设置标签，App 与扩展按宿主分流", () => {
   assert.doesNotMatch(assistant, /value="computer_client"/);
@@ -595,7 +746,7 @@ test("普通网页上下文同页直投后一次 POST，不再保活 WSS", () =>
   );
   assert.match(
     callPage,
-    /async function postSnapshot\(page, bodyIsRepeat\)[\s\S]*active:\s*\{[\s\S]*kind: "web"[\s\S]*if \(!bodyIsRepeat\) \{[\s\S]*body\.event = \{[\s\S]*type: "page\.context"/,
+    /async function postSnapshot\(page, bodyIsRepeat, documentPayload\)[\s\S]*viewport,[\s\S]*active:\s*\{[\s\S]*kind: "web"[\s\S]*if \(documentPayload\) body\.document = documentPayload[\s\S]*if \(!bodyIsRepeat\) \{[\s\S]*body\.event = \{[\s\S]*type: "page\.context"/,
   );
   assert.match(
     callPage,
@@ -610,7 +761,7 @@ test("普通网页上下文同页直投后一次 POST，不再保活 WSS", () =>
   );
   assert.match(
     directBody,
-    /await postSnapshot\(page, bodyIsRepeat\)[\s\S]*lastBodySignature = bodySig/,
+    /await postSnapshot\(page, bodyIsRepeat, documentPayload\)[\s\S]*lastBodySignature = bodySig/,
   );
   assert.match(
     directBody,
@@ -630,7 +781,7 @@ test("普通网页上下文同页直投后一次 POST，不再保活 WSS", () =>
     safariPackager,
     /manifest\["host_permissions"\] = \[ACTIVE_ORIGIN \+ "\*", BRIDGE_ORIGIN \+ "\*"\]/,
   );
-  const postStart = callPage.indexOf("async function postSnapshot(page, bodyIsRepeat)");
+  const postStart = callPage.indexOf("async function postSnapshot(page, bodyIsRepeat, documentPayload)");
   const postEnd = callPage.indexOf("async function forwardDirect(page)", postStart);
   const postBody = callPage.slice(postStart, postEnd);
   assert.doesNotMatch(
@@ -644,6 +795,21 @@ test("普通网页上下文同页直投后一次 POST，不再保活 WSS", () =>
     callPage,
     /async function drainDirectQueue\(\)[\s\S]*while \(directPostQueued\)[\s\S]*await forwardDirect\(next\)/,
     "scroll snapshots must serialize and coalesce to the newest waiting viewport",
+  );
+  assert.match(callPage, /contract: "reader-document\/1"/);
+  assert.match(callPage, /contentRevision: await sha256Hex\(fullText\)/);
+  assert.match(callPage, /const MAX_DOCUMENT_UTF8_BYTES = 768 \* 1024/);
+  assert.match(callPage, /contract: "reader-viewport\/1"/);
+  assert.match(callPage, /sourceInstanceId: viewport\.sourceInstanceId/);
+  assert.match(
+    postBody,
+    /const text = viewport\.visibleText[\s\S]*page_context: \{[\s\S]*text,[\s\S]*text_source: "extension-viewport"/,
+    "the live snapshot must use viewport text rather than document.text",
+  );
+  assert.doesNotMatch(
+    postBody,
+    /page_context:\s*\{[\s\S]*documentPayload\.text/,
+    "full document text must remain outside currentPage.text",
   );
   assert.match(
     callPage,

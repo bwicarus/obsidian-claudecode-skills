@@ -39,6 +39,7 @@
         "src/bw-probe.js",
         "src/facade.js",
         "src/settings-sync.js",
+        "src/browser-control.js",
         "vendor/html2canvas.min.js",
         "vendor/mathjax-full.js",
         "vendor/marked.js",

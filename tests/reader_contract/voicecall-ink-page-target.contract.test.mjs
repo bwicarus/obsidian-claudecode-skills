@@ -22,13 +22,30 @@ ${SOURCE.slice(start, end)}
         querySelectorAll(selector) {
           assert.equal(
             selector,
-            ".page-wrap[data-page-num], .pdf-upage",
+            ".page-wrap[data-page-num], .pdf-upage, " +
+              ".ep-sec[data-idx], .ep-usec[data-uid]",
           );
           return elements;
         },
       },
       window: { innerHeight: 900 },
     },
+  );
+}
+
+function loadRealScopedCropHelpers() {
+  const start = SOURCE.indexOf("  function _visualCaptureScope(target) {");
+  const end = SOURCE.indexOf("  function _drawSurfaceInk(", start);
+  assert.ok(start >= 0 && end > start, "real scoped crop helpers missing");
+  return vm.runInNewContext(
+    `(function () {
+${SOURCE.slice(start, end)}
+      return {
+        scope: _visualCaptureScope,
+        selectionId: _visualCaptureSelectionId,
+        crop: _surfaceInkCrop
+      };
+    })()`,
   );
 }
 
@@ -71,12 +88,56 @@ test("captureInkRegion 页目标在双页可见时精确选页，无参保持旧
       return { top: 100, bottom: 850 };
     },
   };
-  const pick = loadRealInkPagePicker([page21, page22, inserted23]);
+  const epub24 = {
+    dataset: { idx: "24" },
+    __inkStrokes: [{ p: [[0.3, 0.3], [0.4, 0.4]] }],
+    getBoundingClientRect() {
+      return { top: 120, bottom: 820 };
+    },
+  };
+  const pick = loadRealInkPagePicker([page21, page22, inserted23, epub24]);
 
   assert.equal(pick(), page21);
   assert.equal(pick({ page: 22 }), page22);
   assert.equal(pick({ page: "23" }), inserted23);
-  assert.equal(pick({ page: 24 }), null);
+  assert.equal(pick({ page: 24 }), epub24);
+  assert.equal(pick({ page: 25 }), null);
+});
+
+test("selection-near 只按精确 region id 取归一化外接框并保留上下文留白", () => {
+  const helper = loadRealScopedCropHelpers();
+  const surface = {
+    width: 1000,
+    height: 500,
+    viewport: { width: 420, height: 280 },
+    strokes: [
+      {
+        t: "pen",
+        id: "r-target",
+        p: [[0.01, 0.01], [0.99, 0.99]],
+      },
+      {
+        t: "region",
+        id: "r-other",
+        p: [[0.7, 0.7], [0.8, 0.8], [0.75, 0.85]],
+      },
+      {
+        t: "region",
+        id: "r-target",
+        p: [[0.2, 0.3], [0.3, 0.4], [0.25, 0.45]],
+      },
+    ],
+  };
+
+  assert.equal(helper.scope({ scope: "selection-near" }), "selection-near");
+  assert.equal(helper.scope({ scope: "arbitrary" }), null);
+  assert.equal(helper.selectionId({ selectionId: "r-target" }), "r-target");
+  assert.equal(helper.selectionId({ selectionId: "bad selector[]" }), null);
+  assert.deepEqual(
+    { ...helper.crop(surface, "r-target") },
+    { x: 40, y: 47.5, width: 420, height: 280 },
+  );
+  assert.equal(helper.crop(surface, "r-missing"), null);
 });
 
 test("capturePageComposite 对 PDF、EPUB 与插入页使用同一精确页身份", () => {

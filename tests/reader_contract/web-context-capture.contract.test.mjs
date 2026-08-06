@@ -1,12 +1,37 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { webcrypto } from "node:crypto";
 
 const ROOT = new URL("../../", import.meta.url);
 const CONTENT = readFileSync(
   new URL("extensions/bw-reader-webext/content.js", ROOT),
   "utf8",
 );
+
+test("source instance id is a real 128-bit base64url value", () => {
+  const start = CONTENT.indexOf("function createSourceInstanceId()");
+  const end = CONTENT.indexOf("var sourceInstanceId = createSourceInstanceId()", start);
+  assert.ok(start >= 0 && end > start);
+  const factory = new Function(
+    "window",
+    "Uint8Array",
+    "Math",
+    `${CONTENT.slice(start, end)}; return createSourceInstanceId;`,
+  );
+  const create = factory(
+    {
+      crypto: webcrypto,
+      btoa: (value) => Buffer.from(value, "binary").toString("base64"),
+    },
+    Uint8Array,
+    Math,
+  );
+  const id = create();
+  assert.match(id, /^[A-Za-z0-9_-]{22}$/);
+  const base64 = id.replace(/-/g, "+").replace(/_/g, "/") + "==";
+  assert.equal(Buffer.from(base64, "base64").byteLength, 16);
+});
 
 test("web context only reports the focused page even on forced refresh", () => {
   const reportStart = CONTENT.indexOf("function report(force)");
@@ -36,9 +61,10 @@ test("article extraction consumes live text nodes once and excludes hidden ances
   assert.match(extract, /el\.matches\(ARTICLE_DROP\)/);
   assert.match(extract, /style\.display !== "none"/);
   assert.match(extract, /if \(ok && el\.parentElement\) ok = rendered\(el\.parentElement\)/);
+  assert.match(extract, /if \(node\) articleTextTraversalTruncated = true/);
 });
 
-test("web context follows the current viewport and keeps whole-article fallback", () => {
+test("web context follows the current viewport and keeps a marked reading-region fallback", () => {
   const viewportStart = CONTENT.indexOf("function viewportArticleText(root)");
   const snapshotStart = CONTENT.indexOf("function snapshot()", viewportStart);
   const reportStart = CONTENT.indexOf("function report(force)", snapshotStart);
@@ -53,7 +79,7 @@ test("web context follows the current viewport and keeps whole-article fallback"
   );
   assert.match(
     viewport,
-    /function visibleTextSlice\(value, rects, firstVisible, lastVisible\)[\s\S]*value\.slice\(start, end\)/,
+    /function textSliceForLines\(value, rects, firstLine, endLine\)[\s\S]*value\.slice\(start, end\)/,
   );
   assert.match(
     viewport,
@@ -64,12 +90,58 @@ test("web context follows the current viewport and keeps whole-article fallback"
   const snapshot = CONTENT.slice(snapshotStart, reportStart);
   assert.match(
     snapshot,
-    /var viewport = viewportArticleText\(root\);[\s\S]*if \(viewport\)[\s\S]*text = viewport\.text[\s\S]*else \{[\s\S]*text = articleText\(root\)/,
+    /fullText = whole;[\s\S]*var viewport = viewportArticleText\(root\);[\s\S]*visibleText = viewport\.visibleText[\s\S]*beforeText = viewport\.beforeText[\s\S]*afterText = viewport\.afterText/,
   );
+  assert.match(snapshot, /visibleText = root === body \? fullText : articleText\(root\)/);
   assert.match(snapshot, /viewKey: viewKey/);
   assert.match(
     CONTENT,
     /signature = snap\.url \+ "\|" \+ snap\.title \+ "\|" \+ snap\.viewKey/,
+  );
+});
+
+test("web context separates canonical full document from marked viewport context", () => {
+  assert.match(CONTENT, /function canonicalDocumentKey\(\)[\s\S]*parsed\.hash = ""/);
+  assert.match(CONTENT, /function createSourceInstanceId\(\)[\s\S]*new Uint8Array\(16\)/);
+  assert.match(
+    CONTENT,
+    /viewportPayload = \{[\s\S]*beforeText:[\s\S]*visibleText:[\s\S]*afterText:[\s\S]*selectionState:/,
+  );
+  const viewportStart = CONTENT.indexOf("var viewportPayload = {");
+  const viewportEnd = CONTENT.indexOf("return {", viewportStart);
+  assert.doesNotMatch(
+    CONTENT.slice(viewportStart, viewportEnd),
+    /selectionRegions/,
+    "selection region metadata must not change reader-viewport/1",
+  );
+  assert.match(
+    CONTENT,
+    /document: \{[\s\S]*sourceInstanceId:[\s\S]*documentKey: canonicalDocumentKey\(\)[\s\S]*text: fullText/,
+  );
+  assert.match(CONTENT, /truncated: fullTextTruncated/);
+  assert.match(
+    CONTENT,
+    /var whole = String\(body\.innerText \|\| ""\);[\s\S]*fullText = whole/,
+  );
+  assert.match(
+    CONTENT,
+    /text: visibleText,[\s\S]*selectionRegions: selectionRegions,[\s\S]*viewport: viewportPayload/,
+  );
+  assert.match(
+    CONTENT,
+    /var legacyPage = \{[\s\S]*viewport: snap\.viewport[\s\S]*page: legacyPage/,
+  );
+  const legacyStart = CONTENT.indexOf("var legacyPage = {");
+  const legacyEnd = CONTENT.indexOf("contextRevision += 1", legacyStart);
+  assert.doesNotMatch(CONTENT.slice(legacyStart, legacyEnd), /document:/);
+  assert.match(
+    CONTENT,
+    /window\.addEventListener\("rc:inkchange"[\s\S]*schedule\(true\)[\s\S]*window\.addEventListener\("bw:browser-control-refresh"[\s\S]*lastBrowserControlCorrelation = requestId[\s\S]*report\(true\)/,
+  );
+  assert.match(
+    CONTENT,
+    /viewportPayload\.controlCorrelation = lastBrowserControlCorrelation/,
+    "the post-control viewport must carry the exact browser request correlation",
   );
 });
 

@@ -1,7 +1,5 @@
-using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 
 namespace BwReader.ComputerVoiceAudio;
 
@@ -1374,107 +1372,6 @@ internal sealed class DirectBridgeProtocolSession
                 reason,
             },
         };
-
-    private object HandleReaderResultAck(JsonElement message)
-    {
-        RequireAuthenticated();
-        HashSet<string> actual = message.EnumerateObject()
-            .Select(property => property.Name)
-            .ToHashSet(StringComparer.Ordinal);
-        HashSet<string> expected = new(
-            [
-                "contract",
-                "type",
-                "requestId",
-                "correlation",
-                "outcome",
-            ],
-            StringComparer.Ordinal);
-        bool hasError = actual.Remove("error");
-        if (!actual.SetEquals(expected))
-        {
-            throw new DirectProtocolException(
-                "BW_READER_RESULT_ACK_INVALID",
-                "Reader 结果回执字段不匹配");
-        }
-        string correlation = RequireSafeId(
-            message,
-            "correlation");
-        if (correlation.Length > 40)
-        {
-            throw new DirectProtocolException(
-                "BW_READER_RESULT_ACK_INVALID",
-                "Reader 结果回执 correlation 过长");
-        }
-        string outcome = RequireString(
-            message,
-            "outcome",
-            16);
-        if (
-            outcome is not (
-                ReaderResultDeliveryProtocol.RenderedOutcome
-                or ReaderResultDeliveryProtocol.ReplayOutcome
-                or ReaderResultDeliveryProtocol.RejectedOutcome)
-        )
-        {
-            throw new DirectProtocolException(
-                "BW_READER_RESULT_ACK_INVALID",
-                "Reader 结果回执 outcome 无效");
-        }
-        string? error = null;
-        if (hasError)
-        {
-            error = RequireString(message, "error", 500);
-        }
-        if (
-            (outcome
-                == ReaderResultDeliveryProtocol.RejectedOutcome)
-                != hasError
-        )
-        {
-            throw new DirectProtocolException(
-                "BW_READER_RESULT_ACK_INVALID",
-                "Reader 拒绝回执必须且只能携带 error");
-        }
-        bool matched = _acknowledgeReaderResult(
-            new ReaderResultDeliveryAck(
-                correlation,
-                outcome,
-                error));
-        return new
-        {
-            correlation,
-            outcome,
-            matched,
-        };
-    }
-
-    private object HandleReaderVisual(JsonElement message)
-    {
-        RequireAuthenticated();
-        if (
-            RequireContextDeliveryMode()
-                != DirectContextDeliveryMode.SnapshotMcp
-            || _phase is not (
-                DirectProtocolPhase.ContextOnly
-                or DirectProtocolPhase.Active)
-        )
-        {
-            throw new DirectProtocolException(
-                "BW_READER_VISUAL_MODE_REQUIRED",
-                "Reader 视觉只允许在快照 MCP 连接中回传");
-        }
-        ReaderVisualDeliveryChunk chunk =
-            ReaderVisualDeliveryProtocol.ValidateChunk(message);
-        ReaderVisualDeliveryAck ack = _acceptReaderVisual(chunk);
-        return new
-        {
-            correlation = ack.Correlation,
-            chunkIndex = ack.ChunkIndex,
-            accepted = ack.Accepted,
-            complete = ack.Complete,
-        };
-    }
 
     private void RequireAuthenticated()
     {

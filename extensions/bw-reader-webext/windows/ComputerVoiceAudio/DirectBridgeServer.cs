@@ -327,11 +327,6 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             serviceInstanceId = _serviceInstanceId,
             state = _coordinator.CaptureActive ? "active" : "idle",
             captureActive = _coordinator.CaptureActive,
-            readerContextMcp = new
-            {
-                path = ReaderContextMcpHttpEndpoint.Path,
-                instanceId = _readerContextMcpEndpoint.InstanceId,
-            },
         }, DirectBridgeContract.JsonOptions, serviceCancellationToken)
             .ConfigureAwait(false);
     }
@@ -954,15 +949,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             connectionId,
             origin,
             _configStore,
-            _coordinator,
-            acknowledgeReaderResult:
-                ack => _readerResultBroker.Acknowledge(
-                    connectionId,
-                    ack),
-            acceptReaderVisual:
-                chunk => _readerVisualBroker.Accept(
-                    connectionId,
-                    chunk));
+            _coordinator);
         Task<DirectClientMessage?>? prefetchedReceiveTask = null;
 
         while (
@@ -1306,27 +1293,6 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                     sendGate,
                     reply.Envelope,
                     replyLifetime.Token).ConfigureAwait(false);
-                if (
-                    phaseBeforeMessage
-                        == DirectProtocolPhase.AwaitingAuthentication
-                    && protocol.IsAuthenticated
-                )
-                {
-                    _readerResultBroker.Attach(
-                        connectionId,
-                        (envelope, token) => SendJsonAsync(
-                            socket,
-                            sendGate,
-                            envelope,
-                            token));
-                    _readerVisualBroker.Attach(
-                        connectionId,
-                        (envelope, token) => SendJsonAsync(
-                            socket,
-                            sendGate,
-                            envelope,
-                            token));
-                }
                 if (reply.AfterSendAsync is not null)
                 {
                     await reply.AfterSendAsync(replyLifetime.Token)
@@ -1795,67 +1761,24 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     {
         using PeriodicTimer timer = new(
             DirectBridgeContract.RuntimeStatusHeartbeatInterval);
-        await RunRuntimeStatusHeartbeatLoopAsync(
-            token => timer.WaitForNextTickAsync(token),
-            async token =>
-            {
-                string state;
-                bool readerConnected;
-                bool captureActive;
-                lock (_runtimeStateGate)
-                {
-                    state = _runtimeState;
-                    readerConnected = _runtimeReaderConnected;
-                    captureActive = _runtimeCaptureActive;
-                }
-                await _statusWriter.WriteAsync(
-                    state,
-                    readerConnected,
-                    captureActive,
-                    _coordinator.LastError,
-                    token).ConfigureAwait(false);
-            },
-            () =>
-            {
-                try
-                {
-                    DirectSecurityLog.Write(
-                        _serviceInstanceId,
-                        "runtime-status-heartbeat-retry",
-                        "BW_COMPUTER_VOICE_DIRECT_STATUS_WRITE_RETRY",
-                        ok: false);
-                }
-                catch
-                {
-                    // Heartbeat recovery cannot depend on stderr being open.
-                }
-            },
-            cancellationToken).ConfigureAwait(false);
-    }
-
-    internal static async Task RunRuntimeStatusHeartbeatLoopAsync(
-        Func<CancellationToken, ValueTask<bool>> waitNextTickAsync,
-        Func<CancellationToken, Task> writeStatusAsync,
-        Action recoverableWriteFailure,
-        CancellationToken cancellationToken)
-    {
-        ArgumentNullException.ThrowIfNull(waitNextTickAsync);
-        ArgumentNullException.ThrowIfNull(writeStatusAsync);
-        ArgumentNullException.ThrowIfNull(recoverableWriteFailure);
-        while (await waitNextTickAsync(cancellationToken)
+        while (await timer.WaitForNextTickAsync(cancellationToken)
             .ConfigureAwait(false))
         {
-            try
+            string state;
+            bool readerConnected;
+            bool captureActive;
+            lock (_runtimeStateGate)
             {
-                await writeStatusAsync(cancellationToken)
-                    .ConfigureAwait(false);
+                state = _runtimeState;
+                readerConnected = _runtimeReaderConnected;
+                captureActive = _runtimeCaptureActive;
             }
-            catch (Exception exception)
-                when (exception is IOException
-                    or UnauthorizedAccessException)
-            {
-                recoverableWriteFailure();
-            }
+            await _statusWriter.WriteAsync(
+                state,
+                readerConnected,
+                captureActive,
+                _coordinator.LastError,
+                cancellationToken).ConfigureAwait(false);
         }
     }
 

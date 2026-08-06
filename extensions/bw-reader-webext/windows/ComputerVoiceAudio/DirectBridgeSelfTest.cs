@@ -94,28 +94,6 @@ internal static class DirectBridgeSelfTest
                 == DirectContextDeliveryMode.LegacyInject,
             "direct-config-v5-localhost-single-user-explicit-a-b-routes",
             checks);
-        DirectBridgeConfig switched =
-            store.UpdateContextDeliveryMode(
-                DirectContextDeliveryMode.SnapshotMcp);
-        DirectBridgeConfig switchedReloaded = store.Load();
-        Require(
-            switched.ContextDeliveryMode
-                == DirectContextDeliveryMode.SnapshotMcp
-            && switchedReloaded.ContextDeliveryMode
-                == DirectContextDeliveryMode.SnapshotMcp
-            && switchedReloaded.VirtualMicrophoneRenderEndpointId
-                == initial.VirtualMicrophoneRenderEndpointId
-            && switchedReloaded.VirtualMicrophoneCaptureEndpointId
-                == initial.VirtualMicrophoneCaptureEndpointId
-            && switchedReloaded.VirtualSpeakerRenderEndpointId
-                == initial.VirtualSpeakerRenderEndpointId
-            && !Directory.EnumerateFiles(
-                System.IO.Path.GetDirectoryName(configPath)!,
-                "*.tmp").Any(),
-            "direct-context-mode-config-update-is-atomic-and-preserves-routes",
-            checks);
-        _ = store.UpdateContextDeliveryMode(
-            DirectContextDeliveryMode.LegacyInject);
         Require(
             DirectBridgeServer.TailscaleLoginMatches(
                 initial,
@@ -141,24 +119,6 @@ internal static class DirectBridgeSelfTest
         DirectRuntimeStatusWriter statusWriter = new(
             statusPath,
             "0123456789abcdef0123456789abcdef");
-        await statusWriter.WriteAsync(
-            "waiting-voice-ready",
-            readerConnected: true,
-            captureActive: false,
-            CancellationToken.None).ConfigureAwait(false);
-        using (JsonDocument waitingStatus = JsonDocument.Parse(
-            await File.ReadAllTextAsync(statusPath).ConfigureAwait(false)))
-        {
-            Require(
-                waitingStatus.RootElement.GetProperty("state")
-                    .GetString() == "waiting-voice-ready"
-                && waitingStatus.RootElement
-                    .GetProperty("readerConnected").GetBoolean()
-                && !waitingStatus.RootElement
-                    .GetProperty("captureActive").GetBoolean(),
-                "direct-runtime-status-allows-waiting-voice-ready",
-                checks);
-        }
         await statusWriter.WriteAsync(
             "idle",
             readerConnected: false,
@@ -199,8 +159,6 @@ internal static class DirectBridgeSelfTest
                 == TimeSpan.FromSeconds(5),
             "direct-runtime-status-heartbeat-is-five-seconds",
             checks);
-        await CheckRuntimeStatusHeartbeatRecoveryAsync(checks)
-            .ConfigureAwait(false);
         CheckDirectOutputRouteEvidence(initial, checks);
         await CheckServiceLeaseAsync(
             installationRoot,
@@ -390,10 +348,9 @@ internal static class DirectBridgeSelfTest
             startPayload.GetProperty("state").GetString() == "active"
             && appLauncher.EnsureRunningCount == 1
             && appLauncher.WaitReadyCount == 1
-            && mediaAdapter.WaitVoiceReadyCount == 1
             && mediaAdapter.StartCount == 1
             && mediaAdapter.CaptureActive
-            && events.Count == 4
+            && events.Count == 3
             && session.Phase == DirectProtocolPhase.Active,
             "direct-start-is-only-app-and-capture-trigger",
             checks);
@@ -681,9 +638,6 @@ internal static class DirectBridgeSelfTest
         await CheckAppTimeoutAsync(
             configPath,
             checks).ConfigureAwait(false);
-        await CheckVoiceReadyGateAsync(
-            configPath,
-            checks).ConfigureAwait(false);
         await CheckDisconnectCancellationAsync(
             configPath,
             checks).ConfigureAwait(false);
@@ -757,67 +711,6 @@ internal static class DirectBridgeSelfTest
         await CheckReaderBrowserControlAsync(
             root,
             checks).ConfigureAwait(false);
-    }
-
-    private static async Task CheckRuntimeStatusHeartbeatRecoveryAsync(
-        ICollection<string> checks)
-    {
-        int ticks = 0;
-        int writes = 0;
-        int recoveries = 0;
-        await DirectBridgeServer.RunRuntimeStatusHeartbeatLoopAsync(
-            _ => ValueTask.FromResult(++ticks <= 2),
-            _ =>
-            {
-                writes += 1;
-                return writes == 1
-                    ? Task.FromException(new IOException("test"))
-                    : Task.CompletedTask;
-            },
-            () => recoveries += 1,
-            CancellationToken.None).ConfigureAwait(false);
-
-        bool cancellationEscaped = false;
-        using CancellationTokenSource cancelled = new();
-        cancelled.Cancel();
-        try
-        {
-            await DirectBridgeServer.RunRuntimeStatusHeartbeatLoopAsync(
-                _ => ValueTask.FromResult(true),
-                token => Task.FromCanceled(token),
-                () => throw new InvalidOperationException(
-                    "cancellation must not be reported as recoverable"),
-                cancelled.Token).ConfigureAwait(false);
-        }
-        catch (OperationCanceledException)
-        {
-            cancellationEscaped = true;
-        }
-
-        bool logicFailureEscaped = false;
-        try
-        {
-            await DirectBridgeServer.RunRuntimeStatusHeartbeatLoopAsync(
-                _ => ValueTask.FromResult(true),
-                _ => Task.FromException(
-                    new InvalidOperationException("test")),
-                () => throw new InvalidOperationException(
-                    "logic failure must not be reported as recoverable"),
-                CancellationToken.None).ConfigureAwait(false);
-        }
-        catch (InvalidOperationException)
-        {
-            logicFailureEscaped = true;
-        }
-
-        Require(
-            ticks == 3
-            && writes == 2
-            && recoveries == 1
-            && cancellationEscaped
-            && logicFailureEscaped,
-            "direct-runtime-status-heartbeat-recovers-one-io-failure",
-            checks);
     }
 
     private static async Task CheckExplicitStopFailureAsync(
@@ -3270,39 +3163,6 @@ internal static class DirectBridgeSelfTest
             && failedGateStayedClosed,
             "direct-pcm-start-gate-abort-and-sender-failure-stay-closed",
             checks);
-
-        List<uint> bootstrapSequences = [];
-        DirectPcmStartGate bootstrapGate = new(
-            (item, _) =>
-            {
-                bootstrapSequences.Add(item.Sequence);
-                return Task.CompletedTask;
-            });
-        int bootstrapFrameCount =
-            DirectBridgeContract.PcmQueueLimitMilliseconds / 20 + 10;
-        for (uint sequence = 0;
-            sequence < bootstrapFrameCount;
-            sequence++)
-        {
-            await bootstrapGate.SendAsync(
-                frame with
-                {
-                    Sequence = sequence,
-                    TimestampMicroseconds =
-                        checked((sequence + 1) * 20_000),
-                },
-                CancellationToken.None).ConfigureAwait(false);
-        }
-        await bootstrapGate.ReleaseAsync(CancellationToken.None)
-            .ConfigureAwait(false);
-        Require(
-            DirectPcmStartGate.BootstrapBufferMilliseconds
-                > DirectBridgeContract.PcmQueueLimitMilliseconds
-            && bootstrapSequences.SequenceEqual(
-                Enumerable.Range(0, bootstrapFrameCount)
-                    .Select(value => checked((uint)value))),
-            "direct-pcm-start-bootstrap-window-outlives-live-horizon",
-            checks);
     }
 
     private static void CheckDirectOutputRouteEvidence(
@@ -4204,47 +4064,6 @@ internal static class DirectBridgeSelfTest
             "source",
             "shortcutSent",
         });
-    }
-
-    private static async Task CheckEarlyMediaFailurePreservedAsync(
-        DirectBridgeConfigStore store,
-        ICollection<string> checks)
-    {
-        DirectProtocolException expected = new(
-            "BW_COMPUTER_VOICE_DIRECT_PCM_START_GATE_FULL",
-            "fake terminal media failure",
-            retryable: true);
-        FakeDirectMediaAdapter media = new()
-        {
-            FailBeforeStartReturns = expected,
-        };
-        await using DirectBridgeCoordinator coordinator = new(
-            store,
-            new FakeDirectAppLauncher(),
-            media,
-            renderEndpointProbe: _ => null);
-        string sessionId = "session-" + DirectBase64Url.Encode(
-            Enumerable.Repeat((byte)0x4f, 16).ToArray());
-        DirectProtocolException? observed = null;
-        try
-        {
-            _ = await coordinator.StartAsync(
-                "connection-early-media-failure",
-                sessionId,
-                (_, _) => Task.CompletedTask,
-                (_, _) => Task.CompletedTask,
-                CancellationToken.None).ConfigureAwait(false);
-        }
-        catch (DirectProtocolException exception)
-        {
-            observed = exception;
-        }
-        Require(
-            ReferenceEquals(observed, expected)
-            && media.StopCount == 1
-            && coordinator.LastError?.Code == expected.Code,
-            "direct-early-media-failure-preserves-terminal-code",
-            checks);
     }
 
     private static void CheckProductionAdapterBoundaries(
@@ -5636,654 +5455,6 @@ internal static class DirectBridgeSelfTest
                 .GetProperty("state").GetString() == "unknown",
             "direct-snapshot-clear-removes-page-and-selection",
             checks);
-
-        _ = RequireSuccess(
-            await SendAsync(
-                contextSession,
-                new
-                {
-                    contract = DirectBridgeContract.Contract,
-                    type = "start",
-                    requestId = "request-snapshot-promote-start",
-                    sessionId = contextSessionId,
-                },
-                events,
-                frames).ConfigureAwait(false),
-            "start");
-        Require(
-            contextSession.Phase == DirectProtocolPhase.Active
-            && coordinator.ActiveSessionId == contextSessionId
-            && media.StartCount == 2
-            && media.LastStartRequest?.StartTypist == false,
-            "direct-snapshot-context-only-session-promotes-in-place",
-            checks);
-        _ = RequireSuccess(
-            await SendAsync(
-                contextSession,
-                new
-                {
-                    contract = DirectBridgeContract.Contract,
-                    type = "stop",
-                    requestId = "request-snapshot-promote-stop",
-                    sessionId = contextSessionId,
-                },
-                events,
-                frames).ConfigureAwait(false),
-            "stop");
-        string modeChangeSessionId =
-            "session-" + DirectBase64Url.Encode(
-                Enumerable.Range(96, 16)
-                    .Select(value => (byte)value)
-                    .ToArray());
-        JsonElement modeChanged = RequireSuccess(
-            await SendAsync(
-                contextSession,
-                new
-                {
-                    contract = DirectBridgeContract.Contract,
-                    type = "context-mode-set",
-                    requestId = "request-snapshot-mode-set-legacy",
-                    mode = DirectContextDeliveryMode.LegacyInject,
-                    sessionId = modeChangeSessionId,
-                },
-                events,
-                frames).ConfigureAwait(false),
-            "context-mode-set");
-        Require(
-            modeChanged.GetProperty("previousMode").GetString()
-                == DirectContextDeliveryMode.SnapshotMcp
-            && modeChanged.GetProperty("mode").GetString()
-                == DirectContextDeliveryMode.LegacyInject
-            && store.Load().ContextDeliveryMode
-                == DirectContextDeliveryMode.LegacyInject
-            && media.StartCount == 2
-            && legacy.ForwardCount == 0,
-            "direct-context-mode-set-clears-snapshot-before-legacy",
-            checks);
-    }
-
-    private static async Task CheckLocalPdfSnapshotResolutionAsync(
-        string root,
-        ICollection<string> checks)
-    {
-        string snapshotPath = System.IO.Path.Combine(
-            root,
-            "local-pdf-snapshot",
-            FileDirectSnapshotContextAdapter.SnapshotFileName);
-        Queue<LocalBookPageResolution> results = new(
-        [
-            LocalBookPageResolution.Ready(new JsonObject
-            {
-                ["kind"] = "pdf",
-                ["file"] = "books/local.pdf",
-                ["title"] = "Local",
-                ["page"] = 3,
-                ["stable"] = true,
-                ["reason"] = "windows-local-pdf",
-                ["text"] = "local page three",
-                ["textAvailable"] = true,
-                ["textSource"] = "windows-local-pdf",
-                ["fallbackReason"] = null,
-                ["truncated"] = false,
-            }),
-            LocalBookPageResolution.Failed(
-                "local-pdf-transient-failure"),
-            LocalBookPageResolution.Failed(
-                "local-pdf-file-missing"),
-        ]);
-        FileDirectSnapshotContextAdapter adapter = new(
-            snapshotPath,
-            () => DateTimeOffset.FromUnixTimeMilliseconds(
-                1_750_000_000_500),
-            new FakeLocalBookPageResolver(results));
-        string sessionId = "session-" + DirectBase64Url.Encode(
-            Enumerable.Range(112, 16)
-                .Select(value => (byte)value)
-                .ToArray());
-
-        _ = await adapter.ForwardActiveReadingAsync(
-            "request-local-pdf-ready",
-            sessionId,
-            FileDirectSnapshotContextAdapter.ValidateActiveReading(
-                JsonSerializer.SerializeToElement(new
-                {
-                    kind = "pdf",
-                    file = "books/local.pdf",
-                    title = "Local",
-                    page = 3,
-                    selectionState = "active",
-                    selection = "selected now",
-                    observedAtEpochMs = 1_750_000_000_000,
-                })),
-            CancellationToken.None).ConfigureAwait(false);
-        using JsonDocument ready = JsonDocument.Parse(
-            await File.ReadAllTextAsync(snapshotPath)
-                .ConfigureAwait(false));
-        Require(
-            ready.RootElement.GetProperty("contextStatus")
-                .GetString() == "ready"
-            && ready.RootElement.GetProperty("currentPage")
-                .GetProperty("text").GetString()
-                == "local page three"
-            && ready.RootElement.GetProperty("currentPage")
-                .GetProperty("textSource").GetString()
-                == "windows-local-pdf"
-            && ready.RootElement.GetProperty("selection")
-                .GetProperty("text").GetString()
-                == "selected now",
-            "direct-snapshot-local-pdf-resolves-body-and-selection",
-            checks);
-
-        _ = await adapter.ForwardActiveReadingAsync(
-            "request-local-pdf-same-page-failed",
-            sessionId,
-            FileDirectSnapshotContextAdapter.ValidateActiveReading(
-                JsonSerializer.SerializeToElement(new
-                {
-                    kind = "pdf",
-                    file = "books/local.pdf",
-                    title = "Local",
-                    page = 3,
-                    selectionState = "unknown",
-                    selection = (string?)null,
-                    observedAtEpochMs = 1_750_000_000_800,
-                })),
-            CancellationToken.None).ConfigureAwait(false);
-        using JsonDocument samePageFailed = JsonDocument.Parse(
-            await File.ReadAllTextAsync(snapshotPath)
-                .ConfigureAwait(false));
-        Require(
-            samePageFailed.RootElement.GetProperty("contextStatus")
-                .GetString() == "ready"
-            && samePageFailed.RootElement.GetProperty("currentPage")
-                .GetProperty("text").GetString()
-                == "local page three",
-            "direct-snapshot-same-page-resolver-failure-keeps-last-valid-body",
-            checks);
-
-        _ = await adapter.ForwardActiveReadingAsync(
-            "request-local-pdf-failed",
-            sessionId,
-            FileDirectSnapshotContextAdapter.ValidateActiveReading(
-                JsonSerializer.SerializeToElement(new
-                {
-                    kind = "pdf",
-                    file = "books/missing.pdf",
-                    title = "Missing",
-                    page = 4,
-                    selectionState = "cleared",
-                    selection = (string?)null,
-                    observedAtEpochMs = 1_750_000_001_000,
-                })),
-            CancellationToken.None).ConfigureAwait(false);
-        using JsonDocument failed = JsonDocument.Parse(
-            await File.ReadAllTextAsync(snapshotPath)
-                .ConfigureAwait(false));
-        JsonElement failedPage =
-            failed.RootElement.GetProperty("currentPage");
-        Require(
-            failed.RootElement.GetProperty("contextStatus")
-                .GetString() == "pending"
-            && failedPage.GetProperty("file").GetString()
-                == "books/missing.pdf"
-            && failedPage.GetProperty("page").GetInt32() == 4
-            && failedPage.GetProperty("text").GetString() == ""
-            && !failedPage.GetProperty("textAvailable").GetBoolean()
-            && failedPage.GetProperty("fallbackReason").GetString()
-                == "local-pdf-file-missing",
-            "direct-snapshot-local-pdf-failure-never-reuses-old-page",
-            checks);
-    }
-
-    private static async Task CheckVbookCanonicalIdentityAsync(
-        string root,
-        ICollection<string> checks)
-    {
-        string snapshotPath = System.IO.Path.Combine(
-            root,
-            "snapshot-vbook-identity",
-            FileDirectSnapshotContextAdapter.SnapshotFileName);
-        FileDirectSnapshotContextAdapter adapter = new(
-            snapshotPath,
-            () => DateTimeOffset.FromUnixTimeMilliseconds(
-                1_750_000_010_000));
-        string sessionId =
-            "session-" + DirectBase64Url.Encode(
-                Enumerable.Range(176, 16)
-                    .Select(value => (byte)value)
-                    .ToArray());
-        static DirectContextEvent Event(
-            long sequence,
-            string type,
-            object value) =>
-            new(
-                sequence,
-                type,
-                sequence.ToString("x16"),
-                JsonSerializer.SerializeToElement(value));
-
-        _ = await adapter.ForwardActiveReadingAsync(
-            "request-vbook-active",
-            sessionId,
-            FileDirectSnapshotContextAdapter.ValidateActiveReading(
-                JsonSerializer.SerializeToElement(new
-                {
-                    kind = "pdf",
-                    file = "books/part-2.pdf",
-                    title = "Merged Book",
-                    page = 7,
-                    selectionState = "unknown",
-                    selection = (string?)null,
-                    observedAtEpochMs = 1_750_000_007_000,
-                    viewFile = "vbook:g_book",
-                    viewPage = 31,
-                })),
-            CancellationToken.None).ConfigureAwait(false);
-        _ = await adapter.ForwardJournalAsync(
-            "request-vbook-page",
-            sessionId,
-            Event(
-                1,
-                "page.context",
-                new
-                {
-                    v = 1,
-                    seq = 1,
-                    type = "page.context",
-                    ts = 1_750_000_008,
-                    id = "0000000000000001",
-                    kind = "pdf",
-                    file = "books/part-2.pdf",
-                    page = 7,
-                    stable = true,
-                    page_context = new
-                    {
-                        reason = "stable",
-                        text = "canonical member page body",
-                        text_available = true,
-                        text_source = "pdf-text",
-                        truncated = false,
-                    },
-                }),
-            CancellationToken.None).ConfigureAwait(false);
-        _ = await adapter.ForwardJournalAsync(
-            "request-vbook-focus",
-            sessionId,
-            Event(
-                2,
-                "focus",
-                new
-                {
-                    v = 1,
-                    seq = 2,
-                    type = "focus",
-                    ts = 1_750_000_009,
-                    id = "0000000000000002",
-                    action = "set",
-                    kind = "text",
-                    @ref = new
-                    {
-                        file = "vbook:g_book",
-                        page = 31,
-                        text = "vbook selected text",
-                    },
-                }),
-            CancellationToken.None).ConfigureAwait(false);
-        using (JsonDocument selected = JsonDocument.Parse(
-            await File.ReadAllTextAsync(snapshotPath)
-                .ConfigureAwait(false)))
-        {
-            Require(
-                selected.RootElement.GetProperty("contextStatus")
-                    .GetString() == "ready"
-                && selected.RootElement.GetProperty("currentPage")
-                    .GetProperty("text").GetString()
-                    == "canonical member page body"
-                && selected.RootElement.GetProperty("activeReading")
-                    .GetProperty("viewFile").GetString()
-                    == "vbook:g_book"
-                && selected.RootElement.GetProperty("activeReading")
-                    .GetProperty("viewPage").GetInt32() == 31
-                && selected.RootElement.GetProperty("selection")
-                    .GetProperty("state").GetString() == "active"
-                && selected.RootElement.GetProperty("selection")
-                    .GetProperty("text").GetString()
-                    == "vbook selected text",
-                "direct-snapshot-vbook-alias-matches-canonical-member-page",
-                checks);
-        }
-
-        _ = await adapter.ForwardJournalAsync(
-            "request-vbook-wrong-focus",
-            sessionId,
-            Event(
-                3,
-                "focus",
-                new
-                {
-                    v = 1,
-                    seq = 3,
-                    type = "focus",
-                    ts = 1_750_000_010,
-                    id = "0000000000000003",
-                    action = "replace",
-                    kind = "text",
-                    @ref = new
-                    {
-                        file = "vbook:g_other",
-                        page = 31,
-                        text = "must not leak",
-                    },
-                }),
-            CancellationToken.None).ConfigureAwait(false);
-        using (JsonDocument mismatched = JsonDocument.Parse(
-            await File.ReadAllTextAsync(snapshotPath)
-                .ConfigureAwait(false)))
-        {
-            Require(
-                mismatched.RootElement.GetProperty("selection")
-                    .GetProperty("state").GetString() == "unknown"
-                && mismatched.RootElement.GetProperty("selection")
-                    .GetProperty("reason").GetString()
-                    == "focus-page-mismatch",
-                "direct-snapshot-vbook-cross-book-focus-remains-fail-closed",
-                checks);
-        }
-
-        bool unresolvedRejected = false;
-        try
-        {
-            _ = FileDirectSnapshotContextAdapter.ValidateActiveReading(
-                JsonSerializer.SerializeToElement(new
-                {
-                    kind = "pdf",
-                    file = "vbook:g_book",
-                    title = "Unresolved",
-                    page = 31,
-                    selectionState = "unknown",
-                    selection = (string?)null,
-                    observedAtEpochMs = 1_750_000_011_000,
-                }));
-        }
-        catch (DirectProtocolException exception)
-        {
-            unresolvedRejected =
-                exception.Code == "BW_READER_ACTIVE_READING_SCHEMA_INVALID";
-        }
-        Require(
-            unresolvedRejected,
-            "direct-snapshot-unresolved-vbook-active-reading-is-rejected",
-            checks);
-
-        FileDirectSnapshotContextAdapter restored = new(
-            snapshotPath,
-            () => DateTimeOffset.FromUnixTimeMilliseconds(
-                1_750_000_012_000));
-        _ = await restored.ForwardJournalAsync(
-            "request-vbook-focus-restored",
-            sessionId,
-            Event(
-                4,
-                "focus",
-                new
-                {
-                    v = 1,
-                    seq = 4,
-                    type = "focus",
-                    ts = 1_750_000_012,
-                    id = "0000000000000004",
-                    action = "replace",
-                    kind = "text",
-                    @ref = new
-                    {
-                        file = "vbook:g_book",
-                        page = 31,
-                        text = "restored alias selected text",
-                    },
-                }),
-            CancellationToken.None).ConfigureAwait(false);
-        using JsonDocument restoredSelected = JsonDocument.Parse(
-            await File.ReadAllTextAsync(snapshotPath)
-                .ConfigureAwait(false));
-        Require(
-            restoredSelected.RootElement.GetProperty("selection")
-                .GetProperty("state").GetString() == "active"
-            && restoredSelected.RootElement.GetProperty("selection")
-                .GetProperty("text").GetString()
-                == "restored alias selected text",
-            "direct-snapshot-vbook-binding-survives-restart",
-            checks);
-    }
-
-    private static async Task CheckSnapshotFocusFoldAsync(
-        string root,
-        ICollection<string> checks)
-    {
-        string snapshotPath = System.IO.Path.Combine(
-            root,
-            "snapshot-focus",
-            FileDirectSnapshotContextAdapter.SnapshotFileName);
-        FileDirectSnapshotContextAdapter adapter = new(
-            snapshotPath,
-            () => DateTimeOffset.FromUnixTimeMilliseconds(
-                1_750_000_005_000));
-        string sessionId =
-            "session-" + DirectBase64Url.Encode(
-                Enumerable.Range(144, 16)
-                    .Select(value => (byte)value)
-                    .ToArray());
-        static DirectContextEvent Event(
-            long sequence,
-            string type,
-            object value) =>
-            new(
-                sequence,
-                type,
-                sequence.ToString("x16"),
-                JsonSerializer.SerializeToElement(value));
-
-        _ = await adapter.ForwardJournalAsync(
-            "request-focus-page",
-            sessionId,
-            Event(
-                1,
-                "page.context",
-                new
-                {
-                    v = 1,
-                    seq = 1,
-                    type = "page.context",
-                    ts = 1_750_000_001,
-                    id = "0000000000000001",
-                    kind = "pdf",
-                    file = "book.pdf",
-                    page = 5,
-                    stable = true,
-                    page_context = new
-                    {
-                        reason = "stable",
-                        text = "focus page body",
-                        text_available = true,
-                        text_source = "pdf-text",
-                        truncated = false,
-                    },
-                }),
-            CancellationToken.None).ConfigureAwait(false);
-        _ = await adapter.ForwardJournalAsync(
-            "request-focus-text",
-            sessionId,
-            Event(
-                2,
-                "focus",
-                new
-                {
-                    v = 1,
-                    seq = 2,
-                    type = "focus",
-                    ts = 1_750_000_002,
-                    id = "0000000000000002",
-                    action = "set",
-                    kind = "text",
-                    @ref = new
-                    {
-                        file = "book.pdf",
-                        page = 5,
-                        text = "instant selected text",
-                    },
-                }),
-            CancellationToken.None).ConfigureAwait(false);
-        using JsonDocument selected = JsonDocument.Parse(
-            await File.ReadAllTextAsync(snapshotPath)
-                .ConfigureAwait(false));
-        Require(
-            selected.RootElement.GetProperty("focus")
-                .GetProperty("state").GetString() == "active"
-            && selected.RootElement.GetProperty("focus")
-                .GetProperty("kind").GetString() == "text"
-            && selected.RootElement.GetProperty("selection")
-                .GetProperty("state").GetString() == "active"
-            && selected.RootElement.GetProperty("selection")
-                .GetProperty("text").GetString()
-                == "instant selected text",
-            "direct-snapshot-focus-text-updates-selection-immediately",
-            checks);
-
-        _ = await adapter.ForwardJournalAsync(
-            "request-focus-image",
-            sessionId,
-            Event(
-                3,
-                "focus",
-                new
-                {
-                    v = 1,
-                    seq = 3,
-                    type = "focus",
-                    ts = 1_750_000_003,
-                    id = "0000000000000003",
-                    action = "replace",
-                    kind = "image",
-                    @ref = new
-                    {
-                        id = "image-1",
-                        url = "/pdf/api/page-image?file=book.pdf&page=5",
-                        file = "book.pdf",
-                        page = 5,
-                    },
-                }),
-            CancellationToken.None).ConfigureAwait(false);
-        using JsonDocument imageFocused = JsonDocument.Parse(
-            await File.ReadAllTextAsync(snapshotPath)
-                .ConfigureAwait(false));
-        Require(
-            imageFocused.RootElement.GetProperty("focus")
-                .GetProperty("kind").GetString() == "image"
-            && imageFocused.RootElement.GetProperty("focus")
-                .GetProperty("ref").TryGetProperty("privateGeometry", out _)
-                == false
-            && imageFocused.RootElement.GetProperty("selection")
-                .GetProperty("text").GetString()
-                == "instant selected text",
-            "direct-snapshot-focus-nontext-is-whitelisted-without-erasing-selection",
-            checks);
-
-        _ = await adapter.ForwardJournalAsync(
-            "request-focus-cancel",
-            sessionId,
-            Event(
-                4,
-                "focus",
-                new
-                {
-                    v = 1,
-                    seq = 4,
-                    type = "focus",
-                    ts = 1_750_000_004,
-                    id = "0000000000000004",
-                    action = "cancel",
-                    cancelledObject = new
-                    {
-                        kind = "text",
-                        @ref = new
-                        {
-                            file = "book.pdf",
-                            page = 5,
-                            text = "instant selected text",
-                        },
-                    },
-                }),
-            CancellationToken.None).ConfigureAwait(false);
-        _ = await adapter.ForwardJournalAsync(
-            "request-command-failed",
-            sessionId,
-            Event(
-                5,
-                "command-failed",
-                new
-                {
-                    v = 1,
-                    seq = 5,
-                    type = "command-failed",
-                    ts = 1_750_000_005,
-                    id = "0000000000000005",
-                    correlation = "corr-5",
-                    commandId = "command-5",
-                    taskId = "task-5",
-                    step = 2,
-                    retryable = true,
-                    error = "reader command failed",
-                }),
-            CancellationToken.None).ConfigureAwait(false);
-        using JsonDocument cancelled = JsonDocument.Parse(
-            await File.ReadAllTextAsync(snapshotPath)
-                .ConfigureAwait(false));
-        Require(
-            cancelled.RootElement.GetProperty("focus")
-                .GetProperty("state").GetString() == "cleared"
-            && cancelled.RootElement.GetProperty("selection")
-                .GetProperty("state").GetString() == "cleared"
-            && cancelled.RootElement.GetProperty("latestEvent")
-                .GetProperty("correlation").GetString() == "corr-5"
-            && cancelled.RootElement.GetProperty("latestEvent")
-                .GetProperty("retryable").GetBoolean(),
-            "direct-snapshot-focus-cancel-and-command-failure-are-explicit",
-            checks);
-
-        FileDirectSnapshotContextAdapter restored = new(
-            snapshotPath,
-            () => DateTimeOffset.FromUnixTimeMilliseconds(
-                1_750_000_006_000));
-        _ = await restored.ForwardJournalAsync(
-            "request-focus-restart",
-            sessionId,
-            Event(
-                6,
-                "command-failed",
-                new
-                {
-                    v = 1,
-                    seq = 6,
-                    type = "command-failed",
-                    ts = 1_750_000_006,
-                    id = "0000000000000006",
-                    correlation = "corr-6",
-                    commandId = "command-6",
-                    taskId = "task-6",
-                    step = 3,
-                    retryable = false,
-                    error = "still failed",
-                }),
-            CancellationToken.None).ConfigureAwait(false);
-        using JsonDocument restarted = JsonDocument.Parse(
-            await File.ReadAllTextAsync(snapshotPath)
-                .ConfigureAwait(false));
-        Require(
-            restarted.RootElement.GetProperty("focus")
-                .GetProperty("state").GetString() == "cleared"
-            && restarted.RootElement.GetProperty("selection")
-                .GetProperty("state").GetString() == "cleared",
-            "direct-snapshot-focus-restores-validated-state",
-            checks);
     }
 
     private static async Task CheckContextDeliveryModeSetAsync(
@@ -6627,23 +5798,18 @@ internal static class DirectBridgeSelfTest
             JsonElement tools = responses[1].RootElement
                 .GetProperty("result")
                 .GetProperty("tools");
-            JsonElement firstContent = responses[2].RootElement
+            string firstText = responses[2].RootElement
                 .GetProperty("result")
-                .GetProperty("content");
-            JsonElement secondContent = responses[3].RootElement
-                .GetProperty("result")
-                .GetProperty("content");
-            string firstAssistantContext = firstContent[0]
+                .GetProperty("content")[0]
                 .GetProperty("text")
                 .GetString()!;
-            JsonElement firstDiagnostics = responses[2].RootElement
+            string secondText = responses[3].RootElement
                 .GetProperty("result")
-                .GetProperty("_meta")
-                .GetProperty("bw.reader/mcp");
-            JsonElement secondDiagnostics = responses[3].RootElement
-                .GetProperty("result")
-                .GetProperty("_meta")
-                .GetProperty("bw.reader/mcp");
+                .GetProperty("content")[0]
+                .GetProperty("text")
+                .GetString()!;
+            using JsonDocument first = JsonDocument.Parse(firstText);
+            using JsonDocument second = JsonDocument.Parse(secondText);
             Require(
                 exit == 0
                 && responses.Length == 4
@@ -6654,44 +5820,21 @@ internal static class DirectBridgeSelfTest
                 && tools.GetArrayLength() == 1
                 && tools[0].GetProperty("name").GetString()
                     == ReaderContextMcpServer.ToolName
-                && firstContent.GetArrayLength() == 1
-                && firstContent.EnumerateArray().All(item =>
-                    item.GetProperty("type").GetString() == "text")
-                && firstAssistantContext.StartsWith(
-                    "# Reader 当前上下文",
-                    StringComparison.Ordinal)
-                && firstAssistantContext.Contains(
-                    "静默背景",
-                    StringComparison.Ordinal)
-                && firstAssistantContext.IndexOf(
-                    "## 阅读近况",
-                    StringComparison.Ordinal)
-                    < firstAssistantContext.IndexOf(
-                        "## 当前页正文",
-                        StringComparison.Ordinal)
-                && firstAssistantContext.IndexOf(
-                    "## 当前页正文",
-                    StringComparison.Ordinal)
-                    < firstAssistantContext.IndexOf(
-                        "## 当前笔迹与页面视觉",
-                        StringComparison.Ordinal)
-                && !firstAssistantContext.Contains(
-                    "{\"schema\"",
-                    StringComparison.Ordinal)
-                && !firstAssistantContext.Contains(
-                    "\"revision\"",
-                    StringComparison.Ordinal)
-                && firstDiagnostics.GetProperty(
-                    "instanceId").GetString()
+                && first.RootElement.GetProperty("schema").GetString()
+                    == FileDirectSnapshotContextAdapter.SnapshotContract
+                && first.RootElement.GetProperty("contextStatus")
+                    .GetString() == "pending"
+                && first.RootElement.GetProperty("mcp")
+                    .GetProperty("instanceId").GetString()
                     == "mcp-self-test-instance"
-                && secondDiagnostics.GetProperty(
-                    "instanceId").GetString()
+                && second.RootElement.GetProperty("mcp")
+                    .GetProperty("instanceId").GetString()
                     == "mcp-self-test-instance"
-                && firstDiagnostics.GetProperty(
-                    "callSequence").GetInt64() == 1
-                && secondDiagnostics.GetProperty(
-                    "callSequence").GetInt64() == 2,
-                "direct-reader-context-mcp-is-persistent-read-only-text-context",
+                && first.RootElement.GetProperty("mcp")
+                    .GetProperty("callSequence").GetInt64() == 1
+                && second.RootElement.GetProperty("mcp")
+                    .GetProperty("callSequence").GetInt64() == 2,
+                "direct-reader-context-mcp-is-persistent-read-only-single-tool",
                 checks);
         }
         finally
@@ -6701,226 +5844,6 @@ internal static class DirectBridgeSelfTest
                 response.Dispose();
             }
         }
-
-        ReaderContextMcpServer httpServer = new(
-            snapshotPath,
-            TextReader.Null,
-            TextWriter.Null,
-            utcNow: () => DateTimeOffset.FromUnixTimeMilliseconds(
-                1_750_000_010_000),
-            instanceId: "mcp-http-self-test-instance");
-        ReaderContextMcpHttpEndpoint httpEndpoint = new(
-            httpServer,
-            DirectBridgeContract.DefaultListenPort);
-        string initializeRequest = JsonSerializer.Serialize(new
-        {
-            jsonrpc = "2.0",
-            id = 10,
-            method = "initialize",
-            @params = new
-            {
-                protocolVersion = "2025-06-18",
-                capabilities = new { },
-                clientInfo = new
-                {
-                    name = "http-self-test",
-                    version = "1",
-                },
-            },
-        });
-        var httpInitialize = await SendReaderContextMcpHttpAsync(
-            httpEndpoint,
-            HttpMethods.Post,
-            initializeRequest).ConfigureAwait(false);
-        string futureInitializeRequest = JsonSerializer.Serialize(new
-        {
-            jsonrpc = "2.0",
-            id = 9,
-            method = "initialize",
-            @params = new
-            {
-                protocolVersion = "future-unknown-version",
-                capabilities = new { },
-                clientInfo = new
-                {
-                    name = "http-future-self-test",
-                    version = "1",
-                },
-            },
-        });
-        var httpFutureInitialize =
-            await SendReaderContextMcpHttpAsync(
-                httpEndpoint,
-                HttpMethods.Post,
-                futureInitializeRequest).ConfigureAwait(false);
-        var httpNotification = await SendReaderContextMcpHttpAsync(
-            httpEndpoint,
-            HttpMethods.Post,
-            JsonSerializer.Serialize(new
-            {
-                jsonrpc = "2.0",
-                method = "notifications/initialized",
-            })).ConfigureAwait(false);
-        string toolCall(int id) => JsonSerializer.Serialize(new
-        {
-            jsonrpc = "2.0",
-            id,
-            method = "tools/call",
-            @params = new
-            {
-                name = ReaderContextMcpServer.ToolName,
-                arguments = new { },
-            },
-        });
-        var httpCalls = await Task.WhenAll(
-            SendReaderContextMcpHttpAsync(
-                httpEndpoint,
-                HttpMethods.Post,
-                toolCall(11)),
-            SendReaderContextMcpHttpAsync(
-                httpEndpoint,
-                HttpMethods.Post,
-                toolCall(12))).ConfigureAwait(false);
-        using JsonDocument httpInitializeDocument =
-            JsonDocument.Parse(httpInitialize.Body);
-        using JsonDocument httpFutureInitializeDocument =
-            JsonDocument.Parse(httpFutureInitialize.Body);
-        using JsonDocument httpFirstResponse =
-            JsonDocument.Parse(httpCalls[0].Body);
-        using JsonDocument httpSecondResponse =
-            JsonDocument.Parse(httpCalls[1].Body);
-        JsonElement httpFirstSnapshot = httpFirstResponse.RootElement
-            .GetProperty("result")
-            .GetProperty("_meta")
-            .GetProperty("bw.reader/mcp");
-        JsonElement httpSecondSnapshot = httpSecondResponse.RootElement
-            .GetProperty("result")
-            .GetProperty("_meta")
-            .GetProperty("bw.reader/mcp");
-        long[] httpCallSequences =
-        [
-            httpFirstSnapshot.GetProperty("callSequence").GetInt64(),
-            httpSecondSnapshot.GetProperty("callSequence").GetInt64(),
-        ];
-        Array.Sort(httpCallSequences);
-        Require(
-            ReaderContextMcpHttpEndpoint.Path == "/mcp"
-            && httpInitialize.StatusCode == StatusCodes.Status200OK
-            && httpInitializeDocument.RootElement
-                .GetProperty("result")
-                .GetProperty("serverInfo")
-                .GetProperty("name").GetString()
-                == ReaderContextMcpServer.ServerName
-            && httpFutureInitialize.StatusCode
-                == StatusCodes.Status200OK
-            && httpFutureInitializeDocument.RootElement
-                .GetProperty("result")
-                .GetProperty("protocolVersion").GetString()
-                == ReaderContextMcpServer.LatestProtocolVersion
-            && httpCalls.All(
-                call => call.StatusCode
-                    == StatusCodes.Status200OK)
-            && httpFirstSnapshot.GetProperty(
-                "instanceId").GetString()
-                == "mcp-http-self-test-instance"
-            && httpSecondSnapshot.GetProperty(
-                "instanceId").GetString()
-                == "mcp-http-self-test-instance"
-            && httpCallSequences.SequenceEqual(new long[] { 1, 2 }),
-            "direct-reader-context-http-mcp-reuses-one-serialized-instance",
-            checks);
-        Require(
-            httpNotification.StatusCode
-                == StatusCodes.Status202Accepted
-            && httpNotification.Body.Length == 0,
-            "direct-reader-context-http-mcp-notification-is-accepted",
-            checks);
-
-        var httpGet = await SendReaderContextMcpHttpAsync(
-            httpEndpoint,
-            HttpMethods.Get,
-            body: null).ConfigureAwait(false);
-        var httpDelete = await SendReaderContextMcpHttpAsync(
-            httpEndpoint,
-            HttpMethods.Delete,
-            body: null).ConfigureAwait(false);
-        var httpForwarded = await SendReaderContextMcpHttpAsync(
-            httpEndpoint,
-            HttpMethods.Post,
-            initializeRequest,
-            context =>
-            {
-                context.Request.Headers["X-Forwarded-For"] =
-                    "127.0.0.1";
-            }).ConfigureAwait(false);
-        var httpRemote = await SendReaderContextMcpHttpAsync(
-            httpEndpoint,
-            HttpMethods.Post,
-            initializeRequest,
-            context =>
-            {
-                context.Connection.RemoteIpAddress =
-                    IPAddress.Parse("192.0.2.1");
-            }).ConfigureAwait(false);
-        var httpBadHost = await SendReaderContextMcpHttpAsync(
-            httpEndpoint,
-            HttpMethods.Post,
-            initializeRequest,
-            context =>
-            {
-                context.Request.Host = new HostString(
-                    "localhost",
-                    DirectBridgeContract.DefaultListenPort);
-            }).ConfigureAwait(false);
-        var httpBadOriginGet = await SendReaderContextMcpHttpAsync(
-            httpEndpoint,
-            HttpMethods.Get,
-            body: null,
-            context =>
-            {
-                context.Request.Headers.Origin =
-                    "https://example.invalid";
-            }).ConfigureAwait(false);
-        var httpBadProtocol = await SendReaderContextMcpHttpAsync(
-            httpEndpoint,
-            HttpMethods.Post,
-            toolCall(13),
-            context =>
-            {
-                context.Request.Headers["MCP-Protocol-Version"] =
-                    "future-unknown-version";
-            }).ConfigureAwait(false);
-        var httpSupportedProtocol =
-            await SendReaderContextMcpHttpAsync(
-                httpEndpoint,
-                HttpMethods.Post,
-                toolCall(14),
-                context =>
-                {
-                    context.Request.Headers["MCP-Protocol-Version"] =
-                        "2025-11-25";
-                }).ConfigureAwait(false);
-        Require(
-            httpGet.StatusCode
-                == StatusCodes.Status405MethodNotAllowed
-            && httpDelete.StatusCode
-                == StatusCodes.Status405MethodNotAllowed
-            && httpGet.Allow == HttpMethods.Post
-            && httpDelete.Allow == HttpMethods.Post
-            && httpForwarded.StatusCode
-                == StatusCodes.Status403Forbidden
-            && httpRemote.StatusCode
-                == StatusCodes.Status403Forbidden
-            && httpBadHost.StatusCode
-                == StatusCodes.Status403Forbidden
-            && httpBadOriginGet.StatusCode
-                == StatusCodes.Status403Forbidden
-            && httpBadProtocol.StatusCode
-                == StatusCodes.Status400BadRequest
-            && httpSupportedProtocol.StatusCode
-                == StatusCodes.Status200OK,
-            "direct-reader-context-http-mcp-is-loopback-post-only",
-            checks);
 
         JsonObject stale = new()
         {
@@ -6959,8 +5882,7 @@ internal static class DirectBridgeSelfTest
             stale["contextStatus"]?.GetValue<string>() == "stale"
             && stale["currentPage"]?["text"]?.GetValue<string>() == ""
             && stale["selection"]?["state"]?.GetValue<string>()
-                == "unknown"
-            && stale["presentationDiagnostic"] is null,
+                == "unknown",
             "direct-reader-context-mcp-never-returns-stale-page-or-selection-text",
             checks);
 
@@ -9760,31 +8682,6 @@ internal static class DirectBridgeSelfTest
         }
     }
 
-    private sealed class FakeLocalBookPageResolver :
-        ILocalBookPageResolver
-    {
-        private readonly Queue<LocalBookPageResolution> _results;
-
-        internal FakeLocalBookPageResolver(
-            Queue<LocalBookPageResolution> results)
-        {
-            _results = results;
-        }
-
-        public Task<LocalBookPageResolution> ResolveAsync(
-            DirectActiveReading activeReading,
-            CancellationToken cancellationToken)
-        {
-            cancellationToken.ThrowIfCancellationRequested();
-            if (_results.Count == 0)
-            {
-                throw new InvalidOperationException(
-                    "fake local page result exhausted");
-            }
-            return Task.FromResult(_results.Dequeue());
-        }
-    }
-
     private sealed class FakeDirectMediaAdapter : IDirectMediaAdapter
     {
         private Func<DirectPcmFrame, CancellationToken, Task>? _sender;
@@ -9799,29 +8696,7 @@ internal static class DirectBridgeSelfTest
 
         internal int StartCount { get; private set; }
 
-        internal int WaitVoiceReadyCount { get; private set; }
-
-        internal DirectProtocolException? VoiceReadyFailure
-        {
-            get;
-            init;
-        }
-
-        internal bool WaitVoiceReadyUntilCanceled { get; init; }
-
-        internal bool VoiceReadyCancellationObserved
-        {
-            get;
-            private set;
-        }
-
-        internal TaskCompletionSource<bool> VoiceReadyWaitEntered
-        {
-            get;
-        } = new(TaskCreationOptions.RunContinuationsAsynchronously);
-
-        internal DirectMediaStartRequest? LastStartRequest
-        {
+        internal DirectMediaStartRequest? LastStartRequest {
             get;
             private set;
         }
@@ -9829,12 +8704,6 @@ internal static class DirectBridgeSelfTest
         internal int StopCount { get; private set; }
 
         internal bool EmitDuringStart { get; init; }
-
-        internal DirectProtocolException? FailBeforeStartReturns
-        {
-            get;
-            init;
-        }
 
         internal DirectProtocolException? StopFailure { get; init; }
 
@@ -9867,37 +8736,6 @@ internal static class DirectBridgeSelfTest
             OutputRouteVerified;
 
         public Task<DirectProtocolException?> Completion => _completion;
-
-        public async Task WaitForVoiceReadyAsync(
-            TimeSpan timeout,
-            CancellationToken cancellationToken)
-        {
-            WaitVoiceReadyCount++;
-            if (timeout <= TimeSpan.Zero)
-            {
-                throw new InvalidOperationException(
-                    "fake received an invalid voice ready timeout");
-            }
-            if (VoiceReadyFailure is not null)
-            {
-                throw VoiceReadyFailure;
-            }
-            if (WaitVoiceReadyUntilCanceled)
-            {
-                VoiceReadyWaitEntered.TrySetResult(true);
-                try
-                {
-                    await Task.Delay(
-                        Timeout.InfiniteTimeSpan,
-                        cancellationToken).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                {
-                    VoiceReadyCancellationObserved = true;
-                    throw;
-                }
-            }
-        }
 
         public async Task<DirectMediaStartResult> StartAsync(
             DirectMediaStartRequest request,
@@ -9942,12 +8780,6 @@ internal static class DirectBridgeSelfTest
                         PcmS16Le: new byte[
                             Pcm48kMonoFramer.BytesPerChunk]),
                     cancellationToken).ConfigureAwait(false);
-            }
-            if (FailBeforeStartReturns is not null)
-            {
-                CaptureActive = false;
-                _completionSource.TrySetResult(
-                    FailBeforeStartReturns);
             }
             return new DirectMediaStartResult(
                 HostReady: true,

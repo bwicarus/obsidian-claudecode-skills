@@ -115,7 +115,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
 
     private readonly string _statePath;
     private readonly Func<DateTimeOffset> _utcNow;
-    private readonly ILocalBookPageResolver? _localBookPageResolver;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly Queue<string> _recentEventOrder = new();
     private readonly HashSet<string> _recentEventIds =
@@ -128,21 +127,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
     private JsonObject _focus = UnknownFocus(
         "snapshot-not-received");
     private JsonObject? _latestEvent;
-    private string? _pendingPageFailureReason;
-
-    private sealed record AdapterState(
-        long Revision,
-        JsonObject? StablePage,
-        JsonObject? ActiveReading,
-        JsonObject Selection,
-        JsonObject Focus,
-        JsonObject? LatestEvent,
-        string? PendingPageFailureReason,
-        IReadOnlyList<string> RecentEventOrder);
-
-    private sealed record FocusFoldResult(
-        JsonObject Focus,
-        JsonObject? Selection);
 
     private sealed record AdapterState(
         long Revision,
@@ -159,8 +143,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
 
     internal FileDirectSnapshotContextAdapter(
         string statePath,
-        Func<DateTimeOffset>? utcNow = null,
-        ILocalBookPageResolver? localBookPageResolver = null)
+        Func<DateTimeOffset>? utcNow = null)
     {
         if (!System.IO.Path.IsPathFullyQualified(statePath))
         {
@@ -170,7 +153,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
         }
         _statePath = System.IO.Path.GetFullPath(statePath);
         _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
-        _localBookPageResolver = localBookPageResolver;
         LoadExistingState();
     }
 
@@ -1114,7 +1096,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
             ["observedAtEpochMs"] =
                 EpochSecondsToMilliseconds(value["ts"]),
             ["receivedAtEpochMs"] =
-                windowsReceivedAtEpochMs,
+                _utcNow().ToUnixTimeMilliseconds(),
         };
         return (next, activeReading);
     }
@@ -2071,9 +2053,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
             )
             {
                 contextStatus = "pending";
-                effectivePage = PendingPage(
-                    _activeReading,
-                    _pendingPageFailureReason);
+                effectivePage = PendingPage(_activeReading);
             }
         }
         if (
@@ -2233,8 +2213,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 root["focus"] as JsonObject);
             _latestEvent = root["latestEvent"]?.DeepClone()
                 as JsonObject;
-            _pendingPageFailureReason = StringValue(
-                currentPage?["fallbackReason"]);
         }
         catch
         {
@@ -2246,7 +2224,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
             _selection = UnknownSelection("snapshot-invalid");
             _focus = UnknownFocus("snapshot-invalid");
             _latestEvent = null;
-            _pendingPageFailureReason = null;
         }
     }
 
@@ -2263,9 +2240,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
         }
     }
 
-    private static JsonObject PendingPage(
-        JsonObject active,
-        string? failureReason) =>
+    private static JsonObject PendingPage(JsonObject active) =>
         new()
         {
             ["kind"] = active["kind"]?.DeepClone(),
@@ -2275,9 +2250,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
             ["stable"] = false,
             ["text"] = "",
             ["textAvailable"] = false,
-            ["textSource"] = null,
-            ["fallbackReason"] = failureReason,
-            ["truncated"] = false,
         };
 
     private static JsonObject? RestoreActiveReading(

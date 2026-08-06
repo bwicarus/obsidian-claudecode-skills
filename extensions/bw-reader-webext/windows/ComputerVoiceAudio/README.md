@@ -88,13 +88,11 @@ background 的固定 relay，不能把 URL、设备 ID、AUMID、进程、路径
 所有文本消息使用 `reader-computer-voice-direct/1`：
 
 ```json
-{"contract":"reader-computer-voice-direct/1","type":"hello|status|context-mode|context-mode-set|context-open|start|heartbeat|context|active-reading|context-clear|stop","requestId":"..."}
+{"contract":"reader-computer-voice-direct/1","type":"hello|status|context-mode|context-open|start|heartbeat|context|active-reading|context-clear|stop","requestId":"..."}
 ```
 
 - 新连接先发严格 `hello`，`protocolVersion` 必须为 `3`；成功后进入等待 START。
 - `context-mode` 只读返回该连接在 HELLO 时锁定的模式。`snapshot-mcp` 可用
-- `context-mode-set` 仅允许在未启动通话的已认证连接上切换两种模式；
-  从 `snapshot-mcp` 切回旧注入时，Windows 必须先清空本地快照，再原子写配置。
   `context-open` 建立无 START、无应用/采音/快捷键副作用的纯上下文连接；此阶段没有
   30 秒 START deadline。
 - `status`、模型选择和刷新无副作用。
@@ -150,55 +148,21 @@ background 的固定 relay，不能把 URL、设备 ID、AUMID、进程、路径
 
 ## Windows 本地快照 MCP
 
-`--direct-serve` 在现有 `127.0.0.1:43128` 监听器内同时提供
-Streamable HTTP MCP：
-
-```toml
-[mcp_servers.reader_snapshot]
-url = "http://127.0.0.1:43128/mcp"
-```
-
-它与 WSS、快照查看器共用同一个常驻 EXE 和同一个 MCP instance；Codex 会话只作为
-HTTP 客户端连接，不再为每个会话拉起一个快照 MCP 子进程。`GET /healthz` 的
-`readerContextMcp` 只报告 path 与 instanceId，便于检查实例是否发生替换。
-
-为回滚和隔离诊断，EXE 仍保留零额外运行时依赖的 stdio 入口：
+同一自包含 EXE 提供零额外运行时依赖的 stdio MCP：
 
 ```powershell
 .\bw-computer-voice-audio.exe --reader-context-mcp --state `
   C:\Users\bwica\bw-computer-voice-bridge\runtime\reader-context-snapshot.json
 ```
 
-stdio 回滚入口只注册 `reader_context_snapshot`，不接受 mutation，也没有可复用的 WSS
-视觉 Broker。常驻 HTTP MCP 的快照工具只返回一份模型可见 Markdown：按位置、选区、正文、
-显式焦点、附属内容和笔迹顺序预处理，不返回内部 JSON；诊断计数仅放结果 `_meta`。普通页文/
-选区读取不会截图。当前页有笔迹时，笔迹段直接写明无参只读
-`reader_drawing_image`；若稳定版本仍在约 1 秒确认窗口内，工具会有界等待后再复用现有 Reader
-合成 JPEG。收图前后仍校验 file/page/revision/ref，变化即丢弃；成功后常驻 MCP 记住已看过的
-当前笔迹，使未变化旧笔迹不再抢占模糊指代。绘图年龄用同一 PWA 事件内部的相对时间建立接收时
-年龄，再叠加 Windows 本地接收时钟，不直接比较两台设备的墙上时钟。
-
-服务进程在同一 MCP 连接中保持 instance/call sequence，逐次读取原子快照；最新文件损坏时
-保留上一次有效 revision。`active-reading` 超过三分钟则返回 `contextStatus=stale`，正文与
-选区不会作为当前内容返回。选区状态严格区分 `active`、`cleared`、`unknown`，取消选择或换页
-时不会沿用旧文本；新鲜度使用 Windows 收到心跳的时间，不信任 iPad 的墙上时钟。
-
-`snapshot-mcp` 收到 PDF 的 `active-reading` 后，会按 Reader 的 1-based 页码从
-Windows 本地书库只读提取正文并在同一次原子快照更新中标为 ready；默认书库根为
-`C:\obsidian`，默认解释器为当前用户的
-`AppData\Local\Programs\Python\Python313\python.exe`。需要改位置时只给服务进程设置
-`BW_READER_LIBRARY_ROOT` / `BW_READER_PYTHON`；Reader 传入的 file 必须是书库根下相对
-PDF 路径，绝对路径、`..`、reparse point/symlink 一律拒绝。提取固定使用
-`python -I` + PyMuPDF，内存缓存键包含规范路径、文件长度、UTC mtime 与页码；失败时
-当前页保持 pending/空正文并带明确 fallbackReason，不沿用旧页正文。
+它只注册 `reader_context_snapshot`，不接受 mutation。服务进程在同一 MCP
+连接中保持 instance/call sequence，逐次读取原子快照；最新文件损坏时保留上一次有效
+revision。`active-reading` 超过三分钟则返回 `contextStatus=stale`，正文与选区不会作为
+当前内容返回。选区状态严格区分 `active`、`cleared`、`unknown`，取消选择或换页时不会
+沿用旧文本；新鲜度使用 Windows 收到心跳的时间，不信任 iPad 的墙上时钟。
 
 START 期间始终只有一个并发 `ReceiveAsync`。peer 在 START 回执前关闭会取消应用等待和
 媒体链；若预取到一条非 close 消息，只做单条有界缓存，START 结算后按原顺序处理。
-Voice generation 的 Windows 账本确认最长允许 5 秒；回执前下行 PCM 因此使用独立的
-6 秒有界 bootstrap 缓冲，不能误用浏览器对外公布的 400 ms 实时播放窗口。回执发送后
-浏览器仍只保留 400 ms 播放 horizon。若 pump、render 或 Voice monitor 在 START 返回前
-终止，coordinator 必须先保留并返回首个 terminal code，再做完整 owned-resource teardown；
-不得用 `MEDIA_START_UNCONFIRMED` 覆盖可诊断的真实错误。
 
 ## 浏览器麦克风上行
 
@@ -216,11 +180,8 @@ Voice generation 的 Windows 账本确认最长允许 5 秒；回执前下行 PC
 | 36 | 1920 | 960 个 48 kHz mono signed-16 little-endian 样本 |
 
 `VirtualMicrophoneRenderSession` 在专用 MTA 线程以 shared/event-driven 模式打开 A
-render endpoint；`Start` 前先向 WASAPI 初始缓冲提交确定性静音，首个事件丢失时同一
-线程最多等待 100 ms 后主动推进一次。队列硬上限 200 ms，欠载写确定性静音。网络或
-调度短突发导致队列满时丢弃最旧帧并保留最新语音，不累积过期延迟，也不因此结束整通
-电话；帧格式、时间戳/sequence/session 错配或 native 端点失败仍 fail closed。START
-在 A 成功打开前不得发送快捷键。
+render endpoint；队列上限 200 ms，欠载写确定性静音，溢出、时间戳/sequence/session
+错配或 native backpressure 均 fail closed。START 在 A 成功打开前不得发送快捷键。
 
 下行 process-loopback 只捕获目标进程及子进程，不读系统混音。`/5` 在快捷键前把精确
 Codex root PID 的 eRender 三种 role 指向 B、eCapture 三种 role 指向 A 的录音侧；
