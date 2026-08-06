@@ -4,94 +4,99 @@ internal static class CodexVoiceActivitySelfTest
 {
     internal static void Run(ICollection<string> checks)
     {
+        CheckShortcutBrokerContract(checks);
         CheckActivityRule(checks);
-        CheckAvailabilityWait(checks);
         CheckPreexistingVoiceIsNotOwned(checks);
         CheckNewVoiceIsOwned(checks);
+        CheckUnattestedTransitionFailsClosed(checks);
         CheckStartTimeoutAndReadError(checks);
         CheckStopConfirmation(checks);
         CheckLocalCloseMonitor(checks);
-        CheckOwnershipSafeShortcutStop(checks);
+        CheckOwnershipValidationDoesNotToggleVoice(checks);
     }
 
-    private static void CheckAvailabilityWait(
+    private static void CheckShortcutBrokerContract(
         ICollection<string> checks)
     {
-        FakeCodexVoiceActivitySource readySource = new(
-            CodexVoiceActivitySnapshot.Unavailable(),
-            CodexVoiceActivitySnapshot.Unavailable(),
-            CodexVoiceActivitySnapshot.Available(100, 200));
-        FakeCodexVoiceActivityClock readyClock = new();
-        CodexVoiceActivitySnapshot ready =
-            new CodexVoiceActivityController(
-                readySource,
-                readyClock)
-            .WaitForAvailableAsync(
-                TimeSpan.FromSeconds(3),
-                TimeSpan.FromSeconds(1),
-                CancellationToken.None).GetAwaiter().GetResult();
-
-        FakeCodexVoiceActivitySource timeoutSource = new(
-            CodexVoiceActivitySnapshot.Unavailable());
-        FakeCodexVoiceActivityClock timeoutClock = new();
-        DirectProtocolException timeoutFailure = Capture(
-            () => new CodexVoiceActivityController(
-                timeoutSource,
-                timeoutClock)
-            .WaitForAvailableAsync(
-                TimeSpan.FromSeconds(2),
-                TimeSpan.FromSeconds(1),
-                CancellationToken.None));
-
-        FakeCodexVoiceActivitySource errorSource = new(
-            CodexVoiceActivitySnapshot.Error());
-        FakeCodexVoiceActivityClock errorClock = new();
-        DirectProtocolException errorFailure = Capture(
-            () => new CodexVoiceActivityController(
-                errorSource,
-                errorClock)
-            .WaitForAvailableAsync(
-                TimeSpan.FromSeconds(2),
-                TimeSpan.FromSeconds(1),
-                CancellationToken.None));
-
-        using CancellationTokenSource canceled = new();
-        canceled.Cancel();
-        FakeCodexVoiceActivitySource canceledSource = new(
-            CodexVoiceActivitySnapshot.Available(100, 200));
-        bool cancellationObserved = false;
+        CodexAppTarget target = Target();
+        string requestId =
+            CodexVoiceShortcutBrokerContract.NewRequestId();
+        string request =
+            CodexVoiceShortcutBrokerContract.SerializeRequest(
+                requestId,
+                target);
+        using System.Text.Json.JsonDocument document =
+            System.Text.Json.JsonDocument.Parse(request);
+        System.Text.Json.JsonElement root = document.RootElement;
+        CodexVoiceShortcutBrokerContract.RequireSuccessfulReceipt(
+            System.Text.Json.JsonSerializer.Serialize(new
+            {
+                contract = CodexVoiceShortcutBrokerContract.Contract,
+                type = CodexVoiceShortcutBrokerContract.ReceiptType,
+                requestId,
+                ok = true,
+            }),
+            requestId);
+        DirectProtocolException failure = Capture(() =>
+        {
+            CodexVoiceShortcutBrokerContract.RequireSuccessfulReceipt(
+                System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    contract =
+                        CodexVoiceShortcutBrokerContract.Contract,
+                    type =
+                        CodexVoiceShortcutBrokerContract.ReceiptType,
+                    requestId,
+                    ok = false,
+                    code =
+                        "BW_COMPUTER_VOICE_SHORTCUT_BROKER_SEND_FAILED",
+                }),
+                requestId);
+            return Task.CompletedTask;
+        });
+        bool invalidExtraRejected = false;
         try
         {
-            _ = new CodexVoiceActivityController(
-                canceledSource,
-                new FakeCodexVoiceActivityClock())
-            .WaitForAvailableAsync(
-                TimeSpan.FromSeconds(2),
-                TimeSpan.FromSeconds(1),
-                canceled.Token).GetAwaiter().GetResult();
+            CodexVoiceShortcutBrokerContract.RequireSuccessfulReceipt(
+                System.Text.Json.JsonSerializer.Serialize(new
+                {
+                    contract =
+                        CodexVoiceShortcutBrokerContract.Contract,
+                    type =
+                        CodexVoiceShortcutBrokerContract.ReceiptType,
+                    requestId,
+                    ok = true,
+                    extra = true,
+                }),
+                requestId);
         }
-        catch (OperationCanceledException)
+        catch (DirectProtocolException exception) when (
+            exception.Code
+                == "BW_COMPUTER_VOICE_DIRECT_SHORTCUT_BROKER_RECEIPT_INVALID")
         {
-            cancellationObserved = true;
+            invalidExtraRejected = true;
         }
-
         Require(
-            ready.Status == CodexVoiceActivityReadStatus.Available
-            && readySource.ReadCount == 3
-            && readyClock.DelayCount == 2
-            && timeoutFailure.Code
-                == CodexVoiceActivityController.VoiceReadyTimeoutCode
-            && timeoutFailure.Retryable
-            && timeoutSource.ReadCount == 3
-            && timeoutClock.DelayCount == 2
-            && errorFailure.Code
-                == CodexVoiceActivityController.ActivityReadFailedCode
-            && errorFailure.Retryable
-            && errorSource.ReadCount == 1
-            && errorClock.DelayCount == 0
-            && cancellationObserved
-            && canceledSource.ReadCount == 0,
-            "codex-voice-availability-wait-is-bounded-and-cancelable",
+            NamedPipeCodexVoiceShortcutBrokerTransport.PipeName
+                == "bw-reader-codex-voice-shortcut-v1"
+            && NamedPipeCodexVoiceShortcutBrokerTransport.ExchangeTimeout
+                == TimeSpan.FromSeconds(2)
+            && root.EnumerateObject().Count() == 6
+            && root.GetProperty("contract").GetString()
+                == "bw-codex-voice-shortcut/1"
+            && root.GetProperty("type").GetString() == "toggle"
+            && root.GetProperty("requestId").GetString() == requestId
+            && root.GetProperty("rootProcessId").GetUInt32()
+                == target.RootProcessId
+            && root.GetProperty("rootProcessStartTimeUtc")
+                .GetString()!.EndsWith('Z')
+            && root.GetProperty("windowHandle").GetInt64()
+                == target.WindowHandle.ToInt64()
+            && failure.Code
+                == "BW_COMPUTER_VOICE_SHORTCUT_BROKER_SEND_FAILED"
+            && failure.Retryable
+            && invalidExtraRejected,
+            "codex-voice-shortcut-broker-one-shot-contract",
             checks);
     }
 
@@ -106,6 +111,16 @@ internal static class CodexVoiceActivitySelfTest
             && !CodexVoiceActivitySnapshot.Unavailable().Active
             && !CodexVoiceActivitySnapshot.Error().Active,
             "codex-voice-activity-filetime-rule",
+            checks);
+
+        Require(
+            WindowsDirectMediaAdapter.CreateVoiceOwnershipAttestor(
+                DirectAppTargets.CodexDesktop)
+                is ExactTargetVoiceOwnershipAttestor
+            && WindowsDirectMediaAdapter.CreateVoiceOwnershipAttestor(
+                DirectAppTargets.ChatGptClassic)
+                is ExactTargetVoiceOwnershipAttestor,
+            "voice-targets-attest-only-observed-owned-generation",
             checks);
     }
 
@@ -122,6 +137,7 @@ internal static class CodexVoiceActivitySelfTest
         CodexVoiceStartConfirmation confirmation =
             controller.ConfirmStartedAsync(
                 baseline,
+                shortcutReceipt: null,
                 TimeSpan.FromSeconds(3),
                 TimeSpan.FromMilliseconds(250),
                 CancellationToken.None).GetAwaiter().GetResult();
@@ -145,13 +161,19 @@ internal static class CodexVoiceActivitySelfTest
             CodexVoiceActivitySnapshot.Available(100, 200),
             CodexVoiceActivitySnapshot.Available(300, 0));
         FakeCodexVoiceActivityClock clock = new();
-        CodexVoiceActivityController controller = new(source, clock);
+        CodexVoiceActivityController controller = new(
+            source,
+            clock,
+            new MatchingCodexVoiceOwnershipAttestor());
 
         CodexVoiceStartBaseline baseline =
             controller.CaptureStartBaseline();
+        CodexVoiceShortcutReceipt receipt =
+            controller.RecordShortcutSent(baseline, Target());
         CodexVoiceStartConfirmation confirmation =
             controller.ConfirmStartedAsync(
                 baseline,
+                receipt,
                 TimeSpan.FromSeconds(3),
                 TimeSpan.FromMilliseconds(250),
                 CancellationToken.None).GetAwaiter().GetResult();
@@ -164,6 +186,44 @@ internal static class CodexVoiceActivitySelfTest
             && confirmation.Snapshot.LastUsedTimeStart == 300
             && clock.DelayCount == 1,
             "codex-voice-new-activation-owned",
+            checks);
+    }
+
+    private static void CheckUnattestedTransitionFailsClosed(
+        ICollection<string> checks)
+    {
+        FakeCodexVoiceActivitySource source = new(
+            CodexVoiceActivitySnapshot.Available(100, 200),
+            CodexVoiceActivitySnapshot.Available(300, 0),
+            CodexVoiceActivitySnapshot.Available(300, 0));
+        CodexVoiceActivityController controller = new(
+            source,
+            new FakeCodexVoiceActivityClock());
+        CodexVoiceStartBaseline baseline =
+            controller.CaptureStartBaseline();
+        CodexVoiceStartConfirmation confirmation =
+            controller.ConfirmStartedAsync(
+                baseline,
+                controller.RecordShortcutSent(baseline, Target()),
+                TimeSpan.FromSeconds(1),
+                TimeSpan.FromMilliseconds(250),
+                CancellationToken.None).GetAwaiter().GetResult();
+        FakeCodexVoiceShortcutSender sender = new();
+        DirectProtocolException stopFailure = Capture(
+            () => WindowsDirectMediaAdapter.StopOwnedVoiceAsync(
+                controller,
+                sender,
+                () => Target(),
+                baseline: null,
+                confirmation,
+                Target()));
+        Require(
+            confirmation.ObservedAfterShortcut
+            && !confirmation.OwnsVoice
+            && sender.SendCount == 0
+            && stopFailure.Code
+                == "BW_COMPUTER_VOICE_DIRECT_VOICE_OWNERSHIP_UNCONFIRMED",
+            "codex-voice-unattested-transition-is-never-auto-closed",
             checks);
     }
 
@@ -181,6 +241,9 @@ internal static class CodexVoiceActivitySelfTest
         DirectProtocolException timeoutFailure = Capture(
             () => timeoutController.ConfirmStartedAsync(
                 timeoutBaseline,
+                timeoutController.RecordShortcutSent(
+                    timeoutBaseline,
+                    Target()),
                 TimeSpan.FromSeconds(2),
                 TimeSpan.FromSeconds(1),
                 CancellationToken.None));
@@ -197,6 +260,9 @@ internal static class CodexVoiceActivitySelfTest
         DirectProtocolException readFailure = Capture(
             () => errorController.ConfirmStartedAsync(
                 errorBaseline,
+                errorController.RecordShortcutSent(
+                    errorBaseline,
+                    Target()),
                 TimeSpan.FromSeconds(2),
                 TimeSpan.FromSeconds(1),
                 CancellationToken.None));
@@ -213,6 +279,9 @@ internal static class CodexVoiceActivitySelfTest
         DirectProtocolException unavailableFailure = Capture(
             () => unavailableController.ConfirmStartedAsync(
                 unavailableBaseline,
+                unavailableController.RecordShortcutSent(
+                    unavailableBaseline,
+                    Target()),
                 TimeSpan.FromSeconds(2),
                 TimeSpan.FromSeconds(1),
                 CancellationToken.None));
@@ -246,7 +315,8 @@ internal static class CodexVoiceActivitySelfTest
         CodexVoiceActivityController controller = new(source, clock);
         CodexVoiceStartConfirmation confirmation = new(
             CodexVoiceActivitySnapshot.Available(300, 0),
-            StartedByBridge: true);
+            ObservedAfterShortcut: true,
+            OwnershipToken: Token(300));
         CodexVoiceStopPlan plan = controller.PrepareStop(confirmation);
 
         CodexVoiceActivitySnapshot stopped =
@@ -286,7 +356,8 @@ internal static class CodexVoiceActivitySelfTest
             replacementController.PrepareStop(
                 new CodexVoiceStartConfirmation(
                     CodexVoiceActivitySnapshot.Available(300, 0),
-                    StartedByBridge: true));
+                    ObservedAfterShortcut: true,
+                    OwnershipToken: Token(300)));
 
         Require(
             staleStopFailure.Code
@@ -313,7 +384,8 @@ internal static class CodexVoiceActivitySelfTest
             controller.MonitorForLocalCloseAsync(
                 new CodexVoiceStartConfirmation(
                     active,
-                    StartedByBridge: true),
+                    ObservedAfterShortcut: true,
+                    OwnershipToken: Token(300)),
                 TimeSpan.FromMilliseconds(250),
                 CancellationToken.None).GetAwaiter().GetResult();
 
@@ -335,7 +407,8 @@ internal static class CodexVoiceActivitySelfTest
             .MonitorForLocalCloseAsync(
                 new CodexVoiceStartConfirmation(
                     active,
-                    StartedByBridge: true),
+                    ObservedAfterShortcut: true,
+                    OwnershipToken: Token(300)),
                 TimeSpan.FromMilliseconds(250),
                 CancellationToken.None).GetAwaiter().GetResult();
         Require(
@@ -345,11 +418,12 @@ internal static class CodexVoiceActivitySelfTest
             checks);
     }
 
-    private static void CheckOwnershipSafeShortcutStop(
+    private static void CheckOwnershipValidationDoesNotToggleVoice(
         ICollection<string> checks)
     {
         CodexAppTarget ownedTarget = new(
             4242,
+            133700000000000000,
             new HashSet<uint> { 4242 },
             (nint)17);
         FakeCodexVoiceShortcutSender ownedSender = new();
@@ -365,7 +439,8 @@ internal static class CodexVoiceActivitySelfTest
             baseline: null,
             new CodexVoiceStartConfirmation(
                 CodexVoiceActivitySnapshot.Available(300, 0),
-                StartedByBridge: true),
+                ObservedAfterShortcut: true,
+                OwnershipToken: Token(300)),
             ownedTarget).GetAwaiter().GetResult();
 
         FakeCodexVoiceShortcutSender preexistingSender = new();
@@ -380,7 +455,8 @@ internal static class CodexVoiceActivitySelfTest
             baseline: null,
             new CodexVoiceStartConfirmation(
                 CodexVoiceActivitySnapshot.Available(300, 0),
-                StartedByBridge: false),
+                ObservedAfterShortcut: false,
+                OwnershipToken: null),
             ownedTarget).GetAwaiter().GetResult();
 
         FakeCodexVoiceShortcutSender replacementSender = new();
@@ -396,35 +472,51 @@ internal static class CodexVoiceActivitySelfTest
                 baseline: null,
                 new CodexVoiceStartConfirmation(
                     CodexVoiceActivitySnapshot.Available(300, 0),
-                    StartedByBridge: true),
+                    ObservedAfterShortcut: true,
+                    OwnershipToken: Token(300)),
                 ownedTarget));
 
         FakeCodexVoiceShortcutSender provisionalSender = new();
-        WindowsDirectMediaAdapter.StopOwnedVoiceAsync(
+        DirectProtocolException provisionalFailure = Capture(
+            () => WindowsDirectMediaAdapter.StopOwnedVoiceAsync(
             new CodexVoiceActivityController(
                 new FakeCodexVoiceActivitySource(
-                    CodexVoiceActivitySnapshot.Available(300, 0),
-                    CodexVoiceActivitySnapshot.Available(300, 0),
-                    CodexVoiceActivitySnapshot.Available(300, 400)),
+                    CodexVoiceActivitySnapshot.Available(300, 0)),
                 new FakeCodexVoiceActivityClock()),
             provisionalSender,
             () => ownedTarget,
             new CodexVoiceStartBaseline(
                 CodexVoiceActivitySnapshot.Available(100, 200)),
             confirmation: null,
-            ownedTarget).GetAwaiter().GetResult();
+            ownedTarget));
 
         Require(
-            ownedSender.SendCount == 1
+            ownedSender.SendCount == 0
             && preexistingSender.SendCount == 0
             && replacementSender.SendCount == 0
             && replacementFailure.Code
                 == "BW_COMPUTER_VOICE_DIRECT_VOICE_REPLACED_CLEANUP_PENDING"
             && replacementFailure.Retryable
-            && provisionalSender.SendCount == 1,
-            "codex-voice-stop-only-toggles-owned-same-generation",
+            && provisionalSender.SendCount == 0
+            && provisionalFailure.Code
+                == "BW_COMPUTER_VOICE_DIRECT_VOICE_OWNERSHIP_UNCONFIRMED",
+            "codex-voice-stop-validates-ownership-without-toggle",
             checks);
     }
+
+    private static CodexAppTarget Target() => new(
+        4242,
+        133700000000000000,
+        new HashSet<uint> { 4242 },
+        (nint)17);
+
+    private static CodexVoiceOwnershipToken Token(
+        long voiceStartFileTimeUtc) =>
+        new(
+            Guid.Parse("11111111-1111-1111-1111-111111111111"),
+            4242,
+            133700000000000000,
+            voiceStartFileTimeUtc);
 
     private static DirectProtocolException Capture(
         Func<Task> action)
@@ -513,10 +605,25 @@ internal static class CodexVoiceActivitySelfTest
     {
         internal int SendCount { get; private set; }
 
-        public void Send(CodexAppTarget target)
+        public void Send(
+            CodexAppTarget target,
+            DirectVoiceCommand command)
         {
             ArgumentNullException.ThrowIfNull(target);
             SendCount++;
         }
+    }
+
+    private sealed class MatchingCodexVoiceOwnershipAttestor
+        : ICodexVoiceOwnershipAttestor
+    {
+        public CodexVoiceOwnershipToken? TryAttest(
+            CodexVoiceShortcutReceipt receipt,
+            CodexVoiceActivitySnapshot observedTransition) =>
+            new(
+                receipt.AttemptId,
+                receipt.RootProcessId,
+                receipt.RootProcessStartFileTimeUtc,
+                observedTransition.LastUsedTimeStart);
     }
 }

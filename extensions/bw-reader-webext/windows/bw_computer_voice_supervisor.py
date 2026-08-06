@@ -40,12 +40,30 @@ _ALLOWED_LAUNCHER_ACTIONS = frozenset({"Status", "Start"})
 _SAFE_COMMAND_ID = re.compile(r"^[A-Za-z0-9._:-]{1,160}$")
 _SHORTCUT_KEY = re.compile(r"^(?:[a-z0-9]|f(?:[1-9]|1[0-9]|2[0-4]))$")
 _SHORTCUT_MODIFIERS = frozenset({"ctrl", "shift", "alt", "win"})
+DEFAULT_TYPIST_TARGET_APP = "codex-desktop"
+ALLOWED_TYPIST_TARGET_APPS = frozenset({
+    DEFAULT_TYPIST_TARGET_APP,
+    "chatgpt-classic",
+})
+# 语音 appKind 与 typist 目标是同一组目标,历史上这里散着 "chatgpt-desktop" 字面量,
+# 而 typist/launcher 用的是 "chatgpt-classic" → 一段接受一段拒绝。统一到同一集合,
+# 别再各写各的字面量。
+ALLOWED_APP_KINDS = ALLOWED_TYPIST_TARGET_APPS
 
 
 class SupervisorError(RuntimeError):
     def __init__(self, code: str, message: str):
         super().__init__(message)
         self.code = code
+
+
+def require_typist_target_app(value: object) -> str:
+    if not isinstance(value, str) or value not in ALLOWED_TYPIST_TARGET_APPS:
+        raise SupervisorError(
+            "BW_COMPUTER_VOICE_TYPIST_TARGET_INVALID",
+            "voice-typist 目标应用无效",
+        )
+    return value
 
 
 @dataclass(frozen=True)
@@ -62,6 +80,7 @@ class TypistState:
     process_start_file_time_utc: int | None
     paused: bool
     emergency_stop: bool
+    target_app_kind: str = DEFAULT_TYPIST_TARGET_APP
     owner_pid: int | None = None
     owner_start_file_time_utc: int | None = None
 
@@ -118,7 +137,7 @@ class LocalBridgeConfig:
                 "本地配置禁止全系统输出捕获",
             )
         app_kind = value.get("appKind")
-        if app_kind not in {"chatgpt-desktop", "codex-desktop"}:
+        if app_kind not in ALLOWED_APP_KINDS:
             raise SupervisorError(
                 "BW_COMPUTER_VOICE_CONFIG_INVALID",
                 "本地目标应用无效",
@@ -305,7 +324,9 @@ class VoiceTypistLauncher:
         self,
         owner_pid: int | None = None,
         owner_start_file_time_utc: int | None = None,
+        target_app_kind: str = DEFAULT_TYPIST_TARGET_APP,
     ) -> dict[str, Any]:
+        target_app_kind = require_typist_target_app(target_app_kind)
         if (owner_pid is None) != (owner_start_file_time_utc is None):
             raise SupervisorError(
                 "BW_COMPUTER_VOICE_TYPIST_OWNER_INVALID",
@@ -334,6 +355,11 @@ class VoiceTypistLauncher:
                 "voice-typist 已暂停，拒绝自动恢复",
             )
         if before.running:
+            if before.target_app_kind != target_app_kind:
+                raise SupervisorError(
+                    "BW_COMPUTER_VOICE_TYPIST_TARGET_BUSY",
+                    "voice-typist 正在服务另一个目标应用，拒绝复用",
+                )
             if owner_pid is not None and before.owner_pid is not None:
                 if (
                     before.owner_pid != owner_pid
@@ -353,6 +379,7 @@ class VoiceTypistLauncher:
                 "pid": before.pid,
                 "processStartFileTimeUtc":
                     before.process_start_file_time_utc,
+                "targetApp": before.target_app_kind,
                 "result": result,
             }
 
@@ -363,6 +390,11 @@ class VoiceTypistLauncher:
                 str(owner_pid),
                 "-OwnerStartFileTimeUtc",
                 str(owner_start_file_time_utc),
+            )
+        if target_app_kind != DEFAULT_TYPIST_TARGET_APP:
+            start_arguments += (
+                "-TargetApp",
+                target_app_kind,
             )
         started = self._invoke(
             "Start",
@@ -386,12 +418,18 @@ class VoiceTypistLauncher:
                 "BW_COMPUTER_VOICE_TYPIST_OWNER_MISMATCH",
                 "voice-typist 启动后的 owner 代次不匹配",
             )
+        if after.target_app_kind != target_app_kind:
+            raise SupervisorError(
+                "BW_COMPUTER_VOICE_TYPIST_TARGET_MISMATCH",
+                "voice-typist 启动后的目标应用不匹配",
+            )
         return {
             "contract": CONTRACT,
             "running": True,
             "pid": after.pid,
             "processStartFileTimeUtc":
                 after.process_start_file_time_utc,
+            "targetApp": after.target_app_kind,
             "result": (
                 "started"
                 if owner_pid is not None or started.returncode == 0
@@ -449,6 +487,9 @@ class VoiceTypistLauncher:
             )
         owner_pid = status["ownerPid"]
         owner_start = status["ownerStartFileTimeUtc"]
+        target_app_kind = require_typist_target_app(
+            status.get("targetApp", DEFAULT_TYPIST_TARGET_APP)
+        )
         if (owner_pid is None) != (owner_start is None):
             raise SupervisorError(
                 "BW_COMPUTER_VOICE_TYPIST_STATUS_INVALID",
@@ -527,6 +568,7 @@ class VoiceTypistLauncher:
             ),
             paused=bool(status["paused"]),
             emergency_stop=bool(status["emergencyStop"]),
+            target_app_kind=target_app_kind,
             owner_pid=owner_pid if running else None,
             owner_start_file_time_utc=(
                 owner_start if running else None
@@ -749,7 +791,7 @@ class CombinedVoiceStartCoordinator:
                 "BW_COMPUTER_VOICE_APP_NOT_READY",
                 "目标应用根进程无效",
             )
-        if app_kind not in {"chatgpt-desktop", "codex-desktop"}:
+        if app_kind not in ALLOWED_APP_KINDS:
             raise SupervisorError(
                 "BW_COMPUTER_VOICE_APP_NOT_READY",
                 "目标应用类型无效",

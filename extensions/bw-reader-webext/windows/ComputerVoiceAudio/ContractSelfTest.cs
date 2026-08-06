@@ -19,12 +19,11 @@ internal static class ContractSelfTest
         CheckSessionLifecycle(checks);
         CheckExplicitMicrophoneLifecycle(checks);
         CheckVirtualMicrophoneRenderContract(checks);
+        CheckCaptureEndpointMuteLease(checks);
         CheckInteropVtables(checks);
         PerAppAudioRouteSelfTest.Run(checks);
         CodexVoiceActivitySelfTest.Run(checks);
         CodexVoiceHistorySelfTest.Run(checks);
-        LocalBookPageResolverSelfTest.Run(checks);
-        LocalSnapshotPageImageRendererSelfTest.Run(checks);
         DirectBridgeSelfTest.Run(checks);
 
         return new
@@ -34,6 +33,95 @@ internal static class ContractSelfTest
             audioActivated = false,
             checks,
         };
+    }
+
+    private static void CheckCaptureEndpointMuteLease(
+        ICollection<string> checks)
+    {
+        const string endpointId = "capture-endpoint-A";
+        FakeCaptureEndpointMuteBackend muted = new(
+            initialMuted: true);
+        DirectCaptureEndpointMuteLease lease =
+            DirectCaptureEndpointMuteLease.Acquire(
+                muted,
+                endpointId);
+        lease.RequireUnmuted();
+        Require(
+            !muted.Muted
+            && muted.Writes.SequenceEqual([false])
+            && muted.EndpointIds.All(value => value == endpointId),
+            "capture-endpoint-muted-is-unmuted-by-exact-id",
+            checks);
+        lease.Restore();
+        lease.Restore();
+        Require(
+            muted.Muted
+            && muted.Writes.SequenceEqual([false, true]),
+            "capture-endpoint-original-mute-restored-once",
+            checks);
+
+        FakeCaptureEndpointMuteBackend alreadyUnmuted = new(
+            initialMuted: false);
+        DirectCaptureEndpointMuteLease noChange =
+            DirectCaptureEndpointMuteLease.Acquire(
+                alreadyUnmuted,
+                endpointId);
+        noChange.RequireUnmuted();
+        noChange.Restore();
+        Require(
+            !alreadyUnmuted.Muted
+            && alreadyUnmuted.Writes.Count == 0,
+            "capture-endpoint-existing-unmuted-state-is-left-alone",
+            checks);
+
+        FakeCaptureEndpointMuteBackend remuted = new(
+            initialMuted: true);
+        DirectCaptureEndpointMuteLease remutedLease =
+            DirectCaptureEndpointMuteLease.Acquire(
+                remuted,
+                endpointId);
+        remuted.Muted = true;
+        bool remuteRejected = false;
+        try
+        {
+            remutedLease.RequireUnmuted();
+        }
+        catch (DirectProtocolException exception)
+            when (
+                exception.Code
+                    == "BW_COMPUTER_VOICE_DIRECT_MIC_ENDPOINT_MUTED"
+            )
+        {
+            remuteRejected = true;
+        }
+        Require(
+            remuteRejected,
+            "capture-endpoint-remute-fails-before-shortcut",
+            checks);
+        remutedLease.Restore();
+
+        FakeCaptureEndpointMuteBackend stuckMuted = new(
+            initialMuted: true,
+            ignoreUnmute: true);
+        bool readbackRejected = false;
+        try
+        {
+            _ = DirectCaptureEndpointMuteLease.Acquire(
+                stuckMuted,
+                endpointId);
+        }
+        catch (DirectProtocolException exception)
+            when (
+                exception.Code
+                    == "BW_COMPUTER_VOICE_DIRECT_MIC_ENDPOINT_UNMUTE_FAILED"
+            )
+        {
+            readbackRejected = true;
+        }
+        Require(
+            readbackRejected && stuckMuted.Muted,
+            "capture-endpoint-unmute-readback-fails-closed",
+            checks);
     }
 
     private static void CheckPcm48kMonoFramer(
@@ -1211,6 +1299,31 @@ internal static class ContractSelfTest
             "iaudiocaptureclient-vtable-3-methods-in-order",
             checks);
 
+        string[] endpointVolumeMethods =
+            typeof(IAudioEndpointVolumeForBridge)
+                .GetMethods()
+                .Select(method => method.Name)
+                .ToArray();
+        Require(
+            endpointVolumeMethods.SequenceEqual(new[]
+            {
+                "RegisterControlChangeNotify",
+                "UnregisterControlChangeNotify",
+                "GetChannelCount",
+                "SetMasterVolumeLevel",
+                "SetMasterVolumeLevelScalar",
+                "GetMasterVolumeLevel",
+                "GetMasterVolumeLevelScalar",
+                "SetChannelVolumeLevel",
+                "SetChannelVolumeLevelScalar",
+                "GetChannelVolumeLevel",
+                "GetChannelVolumeLevelScalar",
+                "SetMute",
+                "GetMute",
+            }),
+            "iaudioendpointvolume-vtable-through-mute-is-exact",
+            checks);
+
         string[] deviceEnumeratorMethods =
             typeof(IMMDeviceEnumerator)
                 .GetMethods()
@@ -1862,5 +1975,41 @@ internal static class ContractSelfTest
         public void Complete(Exception? error) =>
             throw new InvalidOperationException(
                 "BW_COMPUTER_VOICE_AUDIO_FAKE_COMPLETE_FAILURE");
+    }
+
+    private sealed class FakeCaptureEndpointMuteBackend :
+        IDirectCaptureEndpointMuteBackend
+    {
+        private readonly bool _ignoreUnmute;
+
+        internal FakeCaptureEndpointMuteBackend(
+            bool initialMuted,
+            bool ignoreUnmute = false)
+        {
+            Muted = initialMuted;
+            _ignoreUnmute = ignoreUnmute;
+        }
+
+        internal bool Muted { get; set; }
+
+        internal List<bool> Writes { get; } = [];
+
+        internal List<string> EndpointIds { get; } = [];
+
+        public bool ReadMuted(string endpointId)
+        {
+            EndpointIds.Add(endpointId);
+            return Muted;
+        }
+
+        public void WriteMuted(string endpointId, bool muted)
+        {
+            EndpointIds.Add(endpointId);
+            Writes.Add(muted);
+            if (!(_ignoreUnmute && !muted))
+            {
+                Muted = muted;
+            }
+        }
     }
 }

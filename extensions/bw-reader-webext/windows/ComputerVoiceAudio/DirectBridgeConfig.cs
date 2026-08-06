@@ -19,7 +19,9 @@ internal sealed record DirectBridgeConfig(
     string AppKind,
     string RuntimeStatusPath,
     string ContextDeliveryMode,
-    bool PerAppAudioRouteAutomationEnabled = false);
+    bool PerAppAudioRouteAutomationEnabled = false,
+    string VirtualSpeakerCaptureEndpointId = "",
+    bool FixedVirtualAudioBusEnabled = false);
 
 internal sealed class DirectBridgeConfigStore
 {
@@ -76,9 +78,13 @@ internal sealed class DirectBridgeConfigStore
             string contract = RequireString(root, "contract", 128);
             bool legacyV4 =
                 contract == DirectBridgeContract.LegacyConfigContract;
+            bool fixedAudioBus =
+                contract
+                == DirectBridgeContract.FixedAudioBusConfigContract;
             if (
                 !legacyV4
                 && contract != DirectBridgeContract.ConfigContract
+                && !fixedAudioBus
             )
             {
                 throw ConfigInvalid();
@@ -101,6 +107,25 @@ internal sealed class DirectBridgeConfigStore
                     "runtimeStatusPath",
                     "contextDeliveryMode");
             }
+            else if (!fixedAudioBus)
+            {
+                RequireExactKeys(
+                    root,
+                    "contract",
+                    "localOptIn",
+                    "virtualMicrophoneRenderEndpointId",
+                    "virtualMicrophoneCaptureEndpointId",
+                    "virtualSpeakerRenderEndpointId",
+                    "listenHost",
+                    "listenPort",
+                    "allowedOrigins",
+                    "allowedTailscaleUserLogin",
+                    "experimentalSingleUserMode",
+                    "outputScope",
+                    "appKind",
+                    "runtimeStatusPath",
+                    "contextDeliveryMode");
+            }
             else
             {
                 RequireExactKeys(
@@ -110,6 +135,7 @@ internal sealed class DirectBridgeConfigStore
                     "virtualMicrophoneRenderEndpointId",
                     "virtualMicrophoneCaptureEndpointId",
                     "virtualSpeakerRenderEndpointId",
+                    "virtualSpeakerCaptureEndpointId",
                     "listenHost",
                     "listenPort",
                     "allowedOrigins",
@@ -135,6 +161,12 @@ internal sealed class DirectBridgeConfigStore
                 root,
                 "virtualSpeakerRenderEndpointId",
                 VirtualMicrophoneRenderRequest.MaximumEndpointIdLength);
+            string virtualSpeakerCaptureEndpointId = fixedAudioBus
+                ? RequireString(
+                    root,
+                    "virtualSpeakerCaptureEndpointId",
+                    VirtualMicrophoneRenderRequest.MaximumEndpointIdLength)
+                : "";
             if (
                 virtualMicrophoneRenderEndpointId.Any(char.IsControl)
                 || (
@@ -143,6 +175,10 @@ internal sealed class DirectBridgeConfigStore
                         char.IsControl)
                 )
                 || virtualSpeakerRenderEndpointId.Any(char.IsControl)
+                || (
+                    fixedAudioBus
+                    && virtualSpeakerCaptureEndpointId.Any(char.IsControl)
+                )
                 || string.IsNullOrWhiteSpace(
                     virtualMicrophoneRenderEndpointId)
                 || (
@@ -152,6 +188,11 @@ internal sealed class DirectBridgeConfigStore
                 )
                 || string.IsNullOrWhiteSpace(
                     virtualSpeakerRenderEndpointId)
+                || (
+                    fixedAudioBus
+                    && string.IsNullOrWhiteSpace(
+                        virtualSpeakerCaptureEndpointId)
+                )
                 || string.Equals(
                     virtualMicrophoneRenderEndpointId,
                     virtualSpeakerRenderEndpointId,
@@ -173,6 +214,19 @@ internal sealed class DirectBridgeConfigStore
                     AudioPolicyEndpointId.ValidateForFlow(
                         virtualMicrophoneCaptureEndpointId,
                         PerAppAudioDataFlow.Capture);
+                    if (fixedAudioBus)
+                    {
+                        AudioPolicyEndpointId.ValidateForFlow(
+                            virtualSpeakerCaptureEndpointId,
+                            PerAppAudioDataFlow.Capture);
+                        if (string.Equals(
+                            virtualMicrophoneCaptureEndpointId,
+                            virtualSpeakerCaptureEndpointId,
+                            StringComparison.OrdinalIgnoreCase))
+                        {
+                            throw ConfigInvalid();
+                        }
+                    }
                 }
                 catch (DirectProtocolException exception)
                 {
@@ -216,7 +270,7 @@ internal sealed class DirectBridgeConfigStore
             string appKind = RequireString(root, "appKind", 32);
             if (
                 outputScope != AudioBridgeContract.CaptureScope
-                || appKind != "codex-desktop"
+                || !DirectAppTargets.IsSupported(appKind)
             )
             {
                 throw ConfigInvalid();
@@ -274,7 +328,11 @@ internal sealed class DirectBridgeConfigStore
                 appKind,
                 System.IO.Path.GetFullPath(runtimeStatusPath),
                 contextDeliveryMode,
-                PerAppAudioRouteAutomationEnabled: !legacyV4);
+                PerAppAudioRouteAutomationEnabled:
+                    !legacyV4,
+                VirtualSpeakerCaptureEndpointId:
+                    virtualSpeakerCaptureEndpointId,
+                FixedVirtualAudioBusEnabled: fixedAudioBus);
         }
         catch (DirectProtocolException)
         {
@@ -294,7 +352,7 @@ internal sealed class DirectBridgeConfigStore
         }
     }
 
-    internal DirectBridgeConfig UpdateContextDeliveryMode(string mode)
+    internal string SetContextDeliveryMode(string mode)
     {
         if (!DirectContextDeliveryMode.IsSupported(mode))
         {
@@ -306,90 +364,113 @@ internal sealed class DirectBridgeConfigStore
         lock (_writeGate)
         {
             DirectBridgeConfig current = Load();
-            if (current.ContextDeliveryMode == mode)
+            string previousMode = current.ContextDeliveryMode;
+            if (string.Equals(
+                previousMode,
+                mode,
+                StringComparison.Ordinal))
             {
-                return current;
+                return previousMode;
             }
 
             string temporaryPath = _path
-                + "."
-                + Guid.NewGuid().ToString("N")
-                + ".tmp";
+                + ".tmp-"
+                + Guid.NewGuid().ToString("N");
             try
             {
-                JsonObject root =
-                    JsonNode.Parse(File.ReadAllText(_path, Encoding.UTF8))
-                        as JsonObject
-                    ?? throw ConfigInvalid();
+                JsonNode? parsed = JsonNode.Parse(
+                    File.ReadAllText(_path, Encoding.UTF8),
+                    nodeOptions: null,
+                    documentOptions: new JsonDocumentOptions
+                    {
+                        AllowTrailingCommas = false,
+                        CommentHandling = JsonCommentHandling.Disallow,
+                        MaxDepth = 8,
+                    });
+                if (parsed is not JsonObject root)
+                {
+                    throw ConfigInvalid();
+                }
                 root["contextDeliveryMode"] = mode;
-                string serialized = root.ToJsonString(
-                    DirectBridgeContract.JsonOptions);
-                if (
-                    serialized.Length == 0
-                    || Encoding.UTF8.GetByteCount(serialized)
-                        > MaximumConfigBytes
-                )
+                string json = root.ToJsonString(
+                    new JsonSerializerOptions(
+                        DirectBridgeContract.JsonOptions)
+                    {
+                        WriteIndented = true,
+                    });
+                byte[] bytes = new UTF8Encoding(
+                    encoderShouldEmitUTF8Identifier: false)
+                    .GetBytes(json);
+                if (bytes.Length is <= 0 or > MaximumConfigBytes)
                 {
                     throw ConfigInvalid();
                 }
 
-                using (
-                    FileStream stream = new(
-                        temporaryPath,
-                        FileMode.CreateNew,
-                        FileAccess.Write,
-                        FileShare.None,
-                        bufferSize: 4096,
-                        FileOptions.WriteThrough)
-                )
-                using (
-                    StreamWriter writer = new(
-                        stream,
-                        new UTF8Encoding(
-                            encoderShouldEmitUTF8Identifier: false),
-                        bufferSize: 4096,
-                        leaveOpen: true)
-                )
+                using (FileStream stream = new(
+                    temporaryPath,
+                    FileMode.CreateNew,
+                    FileAccess.Write,
+                    FileShare.None,
+                    bufferSize: 4096,
+                    FileOptions.WriteThrough))
                 {
-                    writer.Write(serialized);
-                    writer.Flush();
+                    stream.Write(bytes);
                     stream.Flush(flushToDisk: true);
                 }
-                File.Move(temporaryPath, _path, overwrite: true);
-                DirectBridgeConfig updated = Load();
-                if (updated.ContextDeliveryMode != mode)
+
+                DirectBridgeConfig staged =
+                    new DirectBridgeConfigStore(temporaryPath).Load();
+                if (!string.Equals(
+                    staged.ContextDeliveryMode,
+                    mode,
+                    StringComparison.Ordinal))
                 {
                     throw ConfigInvalid();
                 }
-                return updated;
+
+                File.Replace(
+                    temporaryPath,
+                    _path,
+                    destinationBackupFileName: null,
+                    ignoreMetadataErrors: true);
+                DirectBridgeConfig persisted = Load();
+                if (!string.Equals(
+                    persisted.ContextDeliveryMode,
+                    mode,
+                    StringComparison.Ordinal))
+                {
+                    throw ConfigInvalid();
+                }
+                return previousMode;
             }
             catch (DirectProtocolException)
             {
                 throw;
             }
-            catch (
-                Exception exception
-            ) when (
+            catch (Exception exception) when (
                 exception is IOException
                 or UnauthorizedAccessException
                 or JsonException
                 or ArgumentException
-                or InvalidOperationException
-            )
+                or NotSupportedException)
             {
-                throw ConfigInvalid(exception);
+                throw new DirectProtocolException(
+                    "BW_READER_CONTEXT_DELIVERY_MODE_WRITE_FAILED",
+                    "Windows 上下文交付模式写入失败",
+                    retryable: true,
+                    innerException: exception);
             }
             finally
             {
                 try
                 {
-                    if (File.Exists(temporaryPath))
-                    {
-                        File.Delete(temporaryPath);
-                    }
+                    File.Delete(temporaryPath);
                 }
                 catch
                 {
+                    // A stale same-directory temporary file is harmless and
+                    // must not turn a successful atomic replacement into a
+                    // failed mode switch.
                 }
             }
         }

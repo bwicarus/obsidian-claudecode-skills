@@ -52,10 +52,99 @@ DEFAULT_STATE_DIR = INSTALL_DIR / "state"
 QUEUE_CONTRACT = "reader-voice-typist-queue/3"
 QUEUE_RECEIPT_MIN_LIMIT = 1024
 QUEUE_STATUS_CONTRACT = "reader-voice-typist-queue-status/1"
+DEFAULT_TARGET_APP = "codex-desktop"
+TARGET_APP_PACKAGE_PREFIXES = {
+    DEFAULT_TARGET_APP: "OpenAI.Codex_",
+    "chatgpt-classic": "OpenAI.ChatGPT-Desktop_",
+}
+TARGET_APP_PROCESS_NAMES = {
+    DEFAULT_TARGET_APP: "ChatGPT",
+    "chatgpt-classic": "ChatGPT Classic",
+}
+TARGET_APP_EXECUTABLE_NAMES = {
+    DEFAULT_TARGET_APP: "ChatGPT.exe",
+    "chatgpt-classic": "ChatGPT Classic.exe",
+}
 
 MARKER = "[[READER_SYNC]]"
 MARKER_END = "[[/READER_SYNC]]"
 SENTINEL_PREFIX = "\u2400voice-typist-probe\u2400"
+
+
+def composer_text_matches(
+    expected: str,
+    actual: Optional[str],
+    *,
+    allow_trailing_newline: bool = False,
+) -> bool:
+    """Compare composer text without treating Windows newline encoding as edits."""
+    if actual is None:
+        return False
+
+    def normalize_newlines(value: str) -> str:
+        return value.replace("\r\n", "\n").replace("\r", "\n")
+
+    normalized_expected = normalize_newlines(expected)
+    normalized_actual = normalize_newlines(actual)
+    return (
+        normalized_actual == normalized_expected
+        or (
+            allow_trailing_newline
+            and normalized_actual == normalized_expected + "\n"
+        )
+    )
+
+
+def text_shape(value: Optional[str]) -> Dict[str, Any]:
+    """Describe a string's structure without recording any of its content.
+
+    Used to diagnose composer readback mismatches: the payload is user text and
+    must never reach the log, but counts of the characters that get rewritten by
+    contenteditable serialisation are enough to identify the transformation.
+    """
+    if value is None:
+        return {"len": None}
+    return {
+        "len": len(value),
+        "cr": value.count("\r"),
+        "lf": value.count("\n"),
+        "crlf": value.count("\r\n"),
+        # The three literals below are U+00A0, U+2028 and U+2029 -- they render
+        # like plain spaces in most editors but are exactly the characters a
+        # contenteditable serialiser substitutes in. Do not "tidy" them.
+        "nbsp": value.count(" "),
+        "u2028": value.count(" "),
+        "u2029": value.count(" "),
+        "tab": value.count("\t"),
+        "blank_run": value.count("\n\n"),
+    }
+
+
+def first_difference(expected: str, actual: Optional[str]) -> Dict[str, Any]:
+    """Locate the first mismatch, reporting code points instead of characters.
+
+    Comparison runs on newline-normalised copies so that a pure CRLF difference
+    does not mask a real one further along.
+    """
+    if actual is None:
+        return {"index": None, "reason": "actual-missing"}
+    normalized_expected = expected.replace("\r\n", "\n").replace("\r", "\n")
+    normalized_actual = actual.replace("\r\n", "\n").replace("\r", "\n")
+    limit = min(len(normalized_expected), len(normalized_actual))
+    index = limit
+    for position in range(limit):
+        if normalized_expected[position] != normalized_actual[position]:
+            index = position
+            break
+    return {
+        "index": index,
+        "normalized_equal": normalized_expected == normalized_actual,
+        "normalized_expected_len": len(normalized_expected),
+        "normalized_actual_len": len(normalized_actual),
+        # Code points only -- never the characters themselves.
+        "expected_cp": [ord(c) for c in normalized_expected[index:index + 6]],
+        "actual_cp": [ord(c) for c in normalized_actual[index:index + 6]],
+    }
 
 if os.name != "nt":  # pragma: no cover - the component is Windows-only by design
     raise SystemExit("voice_typist requires Windows")
@@ -593,7 +682,7 @@ def process_generation_alive(
         kernel32.CloseHandle(handle)
 
 
-def _process_name(pid: int) -> str:
+def _process_image_path(pid: int) -> str:
     PROCESS_QUERY_LIMITED_INFORMATION = 0x1000
     handle = kernel32.OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, False, pid)
     if not handle:
@@ -602,10 +691,27 @@ def _process_name(pid: int) -> str:
         buf = ctypes.create_unicode_buffer(1024)
         size = wt.DWORD(1024)
         if kernel32.QueryFullProcessImageNameW(handle, 0, buf, ctypes.byref(size)):
-            return Path(buf.value).stem
+            return buf.value
         return ""
     finally:
         kernel32.CloseHandle(handle)
+
+
+def _process_name(pid: int) -> str:
+    path = _process_image_path(pid)
+    return Path(path).stem if path else ""
+
+
+def target_process_path_matches(image_path: str, target_app_kind: str) -> bool:
+    """Match the exact packaged app and its current executable name."""
+    package_prefix = TARGET_APP_PACKAGE_PREFIXES.get(target_app_kind)
+    executable_name = TARGET_APP_EXECUTABLE_NAMES.get(target_app_kind)
+    if package_prefix is None or executable_name is None:
+        return False
+    normalized = str(image_path or "").replace("/", "\\").casefold()
+    marker = f"\\windowsapps\\{package_prefix}".casefold()
+    suffix = f"\\{executable_name}".casefold()
+    return marker in normalized and normalized.endswith(suffix)
 
 
 def _is_cloaked(hwnd: int) -> bool:
@@ -648,6 +754,9 @@ def resolve_target(cfg: Dict[str, Any]) -> WindowInfo:
     pattern = cfg.get("window_title_regex")
     regex = re.compile(pattern) if pattern else None
     pinned = cfg.get("hwnd")
+    target_app_kind = str(cfg.get("app_kind") or DEFAULT_TARGET_APP)
+    if target_app_kind not in TARGET_APP_PACKAGE_PREFIXES:
+        raise WindowError("target_app_invalid", "configured target app is invalid")
 
     matches: List[WindowInfo] = []
     for win in enumerate_windows():
@@ -656,6 +765,11 @@ def resolve_target(cfg: Dict[str, Any]) -> WindowInfo:
         if regex and not regex.search(win.title):
             continue
         if want_proc and _process_name(win.pid).lower() != want_proc:
+            continue
+        if not target_process_path_matches(
+            _process_image_path(win.pid),
+            target_app_kind,
+        ):
             continue
         if _is_cloaked(win.hwnd):
             continue
@@ -676,6 +790,98 @@ def resolve_target(cfg: Dict[str, Any]) -> WindowInfo:
         raise WindowError("window_ambiguous",
                           f"{len(matches)} windows matched the target: {detail}")
     return matches[0]
+
+
+class ClassicComposerAutomation:
+    """Exact UI Automation bridge for ChatGPT Classic's composer controls."""
+
+    COMPOSER_ID = "prompt-textarea"
+    SEND_ID = "composer-submit-button"
+
+    def __init__(self, hwnd: int):
+        self.hwnd = int(hwnd)
+
+    def _with_element(self, automation_id: str, action) -> None:
+        try:
+            import comtypes
+            import comtypes.client
+            comtypes.CoInitialize()
+            try:
+                comtypes.client.GetModule("UIAutomationCore.dll")
+                from comtypes.gen import UIAutomationClient as UIA
+
+                automation = comtypes.client.CreateObject(
+                    UIA.CUIAutomation,
+                    interface=UIA.IUIAutomation,
+                )
+                root = automation.ElementFromHandle(self.hwnd)
+                condition = automation.CreatePropertyCondition(
+                    UIA.UIA_AutomationIdPropertyId,
+                    automation_id,
+                )
+                matches = root.FindAll(UIA.TreeScope_Descendants, condition)
+                candidates = []
+                for index in range(matches.Length):
+                    element = matches.GetElement(index)
+                    if element.CurrentIsEnabled and not element.CurrentIsOffscreen:
+                        candidates.append(element)
+                if len(candidates) != 1:
+                    raise WindowError(
+                        "classic_composer_ambiguous",
+                        f"GPT Classic control {automation_id!r} is not unique",
+                    )
+                action(candidates[0], UIA)
+            finally:
+                comtypes.CoUninitialize()
+        except WindowError:
+            raise
+        except Exception as exc:
+            raise WindowError(
+                "classic_uia_failed",
+                f"GPT Classic UI Automation failed: {exc}",
+            ) from exc
+
+    def focus_composer(self) -> None:
+        self._with_element(self.COMPOSER_ID, lambda element, _uia: element.SetFocus())
+
+    def read_composer_value(self) -> Optional[str]:
+        """Read the composer through UIA, bypassing the clipboard round trip.
+
+        ``Ctrl+A``/``Ctrl+C`` makes Chromium serialise the contenteditable DOM
+        back to text/plain, which re-inserts block separators; no amount of
+        newline normalisation can undo that, so the readback can differ from
+        what was pasted even when the composer holds exactly the right text.
+        ValuePattern returns the control's own value and skips that step.
+
+        Returns ``None`` when the pattern is unavailable.  An empty composer
+        reports its placeholder here, so callers must not treat a non-empty
+        result as proof that the payload landed -- check for the marker.
+        """
+        captured: Dict[str, Optional[str]] = {}
+
+        def read(element, uia) -> None:
+            pattern = element.GetCurrentPattern(uia.UIA_ValuePatternId)
+            if pattern is None:
+                captured["value"] = None
+                return
+            captured["value"] = pattern.QueryInterface(
+                uia.IUIAutomationValuePattern
+            ).CurrentValue
+
+        self._with_element(self.COMPOSER_ID, read)
+        return captured.get("value")
+
+    def invoke_send(self) -> None:
+        def invoke(element, uia) -> None:
+            pattern = element.GetCurrentPattern(uia.UIA_InvokePatternId)
+            if pattern is None:
+                raise WindowError(
+                    "classic_send_not_invokable",
+                    "GPT Classic send button has no Invoke pattern",
+                )
+            pattern.QueryInterface(uia.IUIAutomationInvokePattern).Invoke()
+
+        self._with_element(self.SEND_ID, invoke)
 
 
 def force_foreground(hwnd: int, timeout: float = 2.0, attempts: int = 3) -> None:
@@ -731,8 +937,54 @@ def point_is_ours(hwnd: int, x: int, y: int) -> bool:
 # Configuration and runtime state
 # --------------------------------------------------------------------------
 
+# Injected once per call so the target knows these messages are reading
+# context, not questions. It is wrapped in the same markers as everything else,
+# so a target that already follows the rules absorbs it silently; one that does
+# not is told, in its first line, to stay quiet.
+SESSION_PREAMBLE_TEXT = (
+    MARKER
+    + """
+我会通过一个阅读器把当前阅读内容自动发给你。这类消息一律被
+[[READER_SYNC]] 和 [[/READER_SYNC]] 包裹。
+
+对这类消息的唯一正确反应是：安静地读进去，不要回复任何内容。
+
+具体规则：
+
+1. 收到 [[READER_SYNC]] 块时，不要输出任何字。不要说"好的""收到""明白"，
+   不要复述、不要总结、不要评论、不要提问、不要给建议。就当作我把书翻到了
+   那一页给你看，而不是我在对你说话。
+
+2. 语音通话中尤其重要：任何回应都会被读出来打断我阅读。宁可完全沉默。
+
+3. 只有当我直接对你说话或提问时才开口。判断标准是：那句话不在
+   [[READER_SYNC]] 块里。
+
+4. 我提问时，默认我问的是最近一次同步的内容。"这段""这里""这句"
+   指的是最近的 SELECTED；"这页"指最近的 PAGE。不要反问我指的是什么，
+   先按最近的上下文回答。
+
+块内各行的含义：
+
+- PAGE 是我当前在看的页，id 是版本号，p12 是页码；
+  img= 表示该页有图，ink=1 表示该页有我的手写批注。
+- SELECTED 是我在这一页里选中的文字，也就是我关注的重点。
+- TEXT: 之后是该页正文；标 (truncated) 表示正文被截断了，
+  不要因此提醒我，也不要试图补全。
+- 带 sid= 的行是我新选中的一段文字或卡片。
+- CLEAR 表示我取消了那次选择，把对应内容从"当前关注"里去掉，但仍然不要回复。
+- DRAWING_PENDING 表示我正在这一页上画，还没画完，别急着猜。
+- DRAWING 表示我在这一页的手写批注已经定稿。
+
+同一页的内容可能反复同步（我翻页、改选区、继续画）。
+以最新一条为准，旧的直接覆盖，不要把它们当成多次不同的提问。
+"""
+    + MARKER_END
+)
+
 DEFAULT_CONFIG_BODY: Dict[str, Any] = {
     "target": {
+        "app_kind": DEFAULT_TARGET_APP,
         "process_name": "ChatGPT",
         "window_class": "Chrome_WidgetWin_1",
         "window_title_regex": "^(ChatGPT|Codex)",
@@ -793,7 +1045,31 @@ DEFAULT_CONFIG_BODY: Dict[str, Any] = {
         "require_transcript_verification": False,
         "restore_clipboard": True,
     },
+    "session_preamble": {
+        # Sent once per call, before any page content reaches the app.
+        # Without it the target has no way to know that these messages are
+        # reading context rather than questions, and answers every one of
+        # them -- which in a voice call means talking over the reader.
+        # Set enabled to false to suppress, or replace text to reword.
+        "enabled": True,
+        "text": SESSION_PREAMBLE_TEXT,
+    },
 }
+
+
+def apply_target_app(cfg: Dict[str, Any], target_app_kind: str) -> Dict[str, Any]:
+    """Apply fixed runtime policy for the selected packaged desktop app."""
+    if target_app_kind not in TARGET_APP_PACKAGE_PREFIXES:
+        raise ValueError(f"unsupported target app: {target_app_kind}")
+    cfg["target"]["app_kind"] = target_app_kind
+    cfg["target"]["process_name"] = TARGET_APP_PROCESS_NAMES[target_app_kind]
+    if target_app_kind == "chatgpt-classic":
+        cfg["target"]["session_mode"] = "follow_active"
+        cfg["target"]["session_id"] = None
+        cfg["hotkeys"]["copy_session_id"] = None
+        cfg["verification"]["method"] = "none"
+        cfg["safety"]["require_transcript_verification"] = False
+    return cfg
 
 
 def load_config(path: Path) -> Dict[str, Any]:
@@ -1440,11 +1716,19 @@ class VoiceTypist:
                            send_hotkey: str) -> SubmitResult:
         # 1. Conversation identity, straight from the app.
         mark = time.time()
+        target_app_kind = str(
+            self.cfg["target"].get("app_kind") or DEFAULT_TARGET_APP
+        )
         session_hotkey = self._hotkey("copy_session_id")
         expected = self.cfg["target"].get("session_id")
         mode = str(self.cfg["target"].get("session_mode", "pinned")).lower()
         session_id: Optional[str] = None
-        if session_hotkey:
+        if target_app_kind == "chatgpt-classic":
+            # Classic exposes neither Codex's Copy Session ID command nor its
+            # local rollout records. Package identity, paste readback and the
+            # cleared composer remain the delivery fences.
+            session_id = None
+        elif session_hotkey:
             session_id = self._copy_via(session_hotkey, "session")
             # Reading an id is still mandatory in either mode: it proves a
             # conversation is open at all (the settings page yields nothing) and
@@ -1486,6 +1770,16 @@ class VoiceTypist:
             if user32.GetForegroundWindow() != window.hwnd:
                 raise WindowError("focus_lost",
                                   "focus left the target window after the click")
+        classic_automation: Optional[ClassicComposerAutomation] = None
+        if target_app_kind == "chatgpt-classic":
+            classic_automation = ClassicComposerAutomation(window.hwnd)
+            classic_automation.focus_composer()
+            time.sleep(self._t("after_click"))
+            if user32.GetForegroundWindow() != window.hwnd:
+                raise WindowError(
+                    "focus_lost",
+                    "focus left GPT Classic after composer activation",
+                )
         refocus = self._hotkey("refocus_composer")
         if refocus:
             press(refocus, settle=self._t("after_click"))
@@ -1526,8 +1820,58 @@ class VoiceTypist:
         if Clipboard.sequence() != seq_before:
             raise ClipboardError("another process took the clipboard mid-paste")
         # Then wait for the paste to land, not for a fixed worst case.
-        matched, post = self._read_composer_until(lambda v: v == text,
-                                                  self._t("after_paste"))
+        matched, post = self._read_composer_until(
+            lambda v: composer_text_matches(
+                text,
+                v,
+                allow_trailing_newline=(target_app_kind == "chatgpt-classic"),
+            ),
+            self._t("after_paste"),
+        )
+        if not matched and classic_automation is not None:
+            # The clipboard readback makes Chromium serialise the composer DOM
+            # back to text/plain, which re-inserts block separators the paste
+            # never contained -- that is why normalising newlines still leaves a
+            # mismatch, and why the delta tracked the line count (78->80, 111->118)
+            # without ever being a plain CRLF expansion. Ask UIA for the control's
+            # own value instead; it skips that serialisation entirely.
+            uia_value: Optional[str] = None
+            uia_error: Optional[str] = None
+            try:
+                uia_value = classic_automation.read_composer_value()
+            except WindowError as exc:
+                uia_error = exc.code
+            except Exception as exc:  # pragma: no cover - defensive
+                uia_error = type(exc).__name__
+            # An empty composer reports its placeholder, so a value is only ours
+            # when it carries the marker.
+            if uia_value is not None and MARKER in uia_value and composer_text_matches(
+                text,
+                uia_value,
+                allow_trailing_newline=True,
+            ):
+                self.log.write({
+                    "event": "classic_paste_verified_via_uia",
+                    "event_id": event_id,
+                })
+                matched, post = True, uia_value
+            else:
+                # Neither route agreed: record the shape of both so the real
+                # transformation can be identified. Payload text never lands here.
+                self.log.write({
+                    "event": "classic_paste_readback_diff",
+                    "event_id": event_id,
+                    "uia_error": uia_error,
+                    "uia_has_marker": (
+                        None if uia_value is None else (MARKER in uia_value)
+                    ),
+                    "expected": text_shape(text),
+                    "clipboard": text_shape(post),
+                    "uia": text_shape(uia_value),
+                    "clipboard_diff": first_difference(text, post),
+                    "uia_diff": first_difference(text, uia_value),
+                })
+
         if not matched:
             got = "nothing" if post is None else f"{len(post)} chars"
             if post and MARKER in post:
@@ -1547,13 +1891,41 @@ class VoiceTypist:
         if user32.GetForegroundWindow() != window.hwnd:
             raise WindowError("focus_lost", "focus left the target window before submit")
         self._abort_if_halted()
-        press(send_hotkey, settle=0.06)
+        if classic_automation is not None:
+            classic_automation.invoke_send()
+            time.sleep(0.06)
+        else:
+            press(send_hotkey, settle=0.06)
         self._last_submit = time.time()
 
         # 5. Did it actually leave the composer?  Poll until it empties rather
         #    than always paying the slowest observed round trip.
-        emptied, leftover = self._read_composer_until(
-            lambda v: v is None or not v.strip(), self._t("after_submit"))
+        if classic_automation is not None:
+            # Ctrl+A/Ctrl+C is not a safe way to ask "did it send?" here: once
+            # the message posts, focus can leave the composer, and select-all
+            # then copies the conversation instead -- a large non-empty result
+            # that reads exactly like "the app refused to post it". UIA asks the
+            # control itself. An empty composer reports its placeholder rather
+            # than an empty string, so the question is whether our payload is
+            # still sitting there, not whether the field is blank.
+            emptied = False
+            leftover = None
+            deadline = time.time() + self._t("after_submit")
+            while True:
+                try:
+                    leftover = classic_automation.read_composer_value()
+                except WindowError:
+                    leftover = None
+                if leftover is None or MARKER not in leftover:
+                    emptied = True
+                    break
+                if time.time() >= deadline:
+                    break
+                time.sleep(0.05)
+        else:
+            emptied, leftover = self._read_composer_until(
+                lambda v: v is None or not v.strip(),
+                self._t("after_submit"))
         if not emptied:
             # The keystroke reached the app; the app refused to post it.  The
             # observed cause is a conversation whose turn is not live -- Codex
@@ -1658,6 +2030,13 @@ class SubmitQueue:
         self.log = log
         self.max_retries = int(cfg["limits"]["max_retries"])
         self.settle = float(cfg["limits"].get("coalesce_settle_seconds", 1.5))
+        preamble = cfg.get("session_preamble") or {}
+        self._preamble_text = (
+            str(preamble.get("text") or "")
+            if preamble.get("enabled", True)
+            else ""
+        )
+        self._preamble_session: Optional[str] = None
         self.max_size = int(cfg["limits"]["queue_size"])
         if self.max_size < 1:
             raise ValueError("limits.queue_size must be positive")
@@ -2021,6 +2400,77 @@ class SubmitQueue:
                         "discarded": removed,
                     })
 
+    def _submit_session_preamble_once(
+        self,
+        session_id: Optional[str],
+    ) -> None:
+        """Send the behaviour rules ahead of a session's first real payload.
+
+        Delivered directly rather than through the queue: it is not an IPC
+        event, so it has no sequence or receipt of its own and must not be
+        coalesced away by the page content that follows it.
+
+        A failure here only costs a chattier assistant, never the reading
+        itself, so it is logged and the claim released for a later retry
+        instead of aborting the delivery it was meant to precede.
+        """
+        if not self._preamble_text or not session_id:
+            return
+        with self._lock:
+            if self._preamble_session == session_id:
+                return
+            self._preamble_session = session_id
+        try:
+            result = self.typist.submit(
+                self._preamble_text,
+                f"preamble-{sha256_text(session_id)[:16]}",
+                "session.preamble",
+                "voice-typist-preamble",
+            )
+        except Exception as exc:  # pragma: no cover - defensive
+            with self._lock:
+                if self._preamble_session == session_id:
+                    self._preamble_session = None
+            self.log.write({
+                "event": "session_preamble_failed",
+                "session": session_id,
+                "error": type(exc).__name__,
+            })
+            return
+        # A HOLD outcome means the app is not accepting anything right now --
+        # the queued payload behind this preamble is being held for exactly the
+        # same reason. Releasing the claim here would re-send the rules on every
+        # single pump for the whole cooldown, which is how one call produced
+        # dozens of identical attempts. Keep the claim; only a failure specific
+        # to this message is worth another try.
+        if not result.ok and result.outcome not in SubmitQueue.HOLD:
+            with self._lock:
+                if self._preamble_session == session_id:
+                    self._preamble_session = None
+        self.log.write({
+            "event": "session_preamble_submitted",
+            "session": session_id,
+            "ok": result.ok,
+            "outcome": result.outcome,
+            "chars": len(self._preamble_text),
+        })
+
+    def has_undelivered(self, session_id: str, event_type: str) -> bool:
+        """Whether an event of this type is queued and has not started sending.
+
+        Used to suppress page context while the reader is holding a selection:
+        the selection is the more specific statement of what the user wants the
+        assistant to look at, so re-sending the whole page around it only
+        produces extra messages.
+        """
+        with self._lock:
+            return any(
+                item.session_id == session_id
+                and item.event_type == event_type
+                and not item.delivery_started
+                for item in self.items
+            )
+
     def enqueue(self, item: PendingItem) -> bool:
         with self._lock:
             if (
@@ -2075,23 +2525,35 @@ class SubmitQueue:
             if identity not in candidate_receipts:
                 candidate_receipts.append(identity)
             if item.coalesce_key:
-                for index, queued in enumerate(candidate):
-                    if queued.coalesce_key == item.coalesce_key:
-                        candidate[index] = item
-                        candidate_receipts = self._trim_receipts(
-                            candidate_receipts,
-                            candidate,
-                        )
-                        self._persist(candidate, candidate_receipts)
-                        self.items = deque(candidate)
-                        self.receipts = deque(candidate_receipts)
+                replaceable = [
+                    index
+                    for index, queued in enumerate(candidate)
+                    if (
+                        queued.coalesce_key == item.coalesce_key
+                        and queued.committed
+                        and not queued.delivery_started
+                    )
+                ]
+                if replaceable:
+                    superseded = [candidate[index] for index in replaceable]
+                    candidate[replaceable[0]] = item
+                    for index in reversed(replaceable[1:]):
+                        candidate.pop(index)
+                    candidate_receipts = self._trim_receipts(
+                        candidate_receipts,
+                        candidate,
+                    )
+                    self._persist(candidate, candidate_receipts)
+                    self.items = deque(candidate)
+                    self.receipts = deque(candidate_receipts)
+                    for queued in superseded:
                         self.log.write({
                             "event": "coalesced",
                             "superseded_event_id": queued.event_id,
                             "by_event_id": item.event_id,
                             "key": item.coalesce_key,
                         })
-                        return True
+                    return True
             if len(candidate) >= self.max_size:
                 raise RuntimeError("voice-typist durable queue is full")
             candidate.append(item)
@@ -2194,6 +2656,7 @@ class SubmitQueue:
             self._persist(candidate)
             self.items = deque(candidate)
             item = marked
+        self._submit_session_preamble_once(item.session_id)
         result = self.typist.submit(item.text, item.event_id, item.event_type,
                                     item.source)
         with self._lock:
@@ -2333,6 +2796,46 @@ def enqueue_ipc_event(
             f"{exc.reason}: {exc}") from exc
     event_id = str(event.get("id") or "")
     event_type = str(event.get("type") or "")
+    target_app_kind = str(
+        (cfg.get("target") or {}).get("app_kind") or DEFAULT_TARGET_APP
+    )
+    is_classic = target_app_kind == "chatgpt-classic"
+
+    # Selecting one sentence used to produce page -> selection -> page -> page as
+    # four separate messages: focus coalesced correctly but page.context carried
+    # no key at all, so every page report was delivered on its own. Classic has
+    # no rollout verification and each delivery is a visible message in the
+    # user's conversation, so the churn is far more costly there than the extra
+    # page text is worth.
+    #
+    # Two rules turn that into a single message. Both are scoped to Classic so
+    # the Codex ordering keeps its current behaviour byte for byte.
+    if (
+        is_classic
+        and event_type == "page.context"
+        and queue.has_undelivered(session_id, "focus")
+    ):
+        # A selection is already waiting: it is the more specific statement of
+        # what the user is pointing at, and it carries its own page reference.
+        queue.ensure_persisted()
+        log.write({
+            "event": "page_context_suppressed_for_focus",
+            "event_id": event_id,
+            "session": session_id,
+            "seq": sequence,
+        })
+        return True
+
+    if event_type == "focus":
+        # Classic shares one key with page.context so that a later selection
+        # supersedes the page report queued just before it; Codex keeps its own.
+        coalesce_key = (
+            f"{session_id}:reading" if is_classic else f"{session_id}:focus"
+        )
+    elif is_classic and event_type == "page.context":
+        coalesce_key = f"{session_id}:reading"
+    else:
+        coalesce_key = None
     queue.activate_session(session_id)
     if not text:
         # Even a silent event advances the IPC ledger.  Persist an empty queue
@@ -2354,6 +2857,7 @@ def enqueue_ipc_event(
         source="direct-v3-ipc",
         session_id=session_id,
         sequence=sequence,
+        coalesce_key=coalesce_key,
         committed=False,
     ))
     log.write({
@@ -2934,7 +3438,8 @@ def cmd_queue_status(args) -> int:
 
 
 def cmd_run(args) -> int:
-    cfg = load_config(args.config)
+    target_app = str(getattr(args, "target_app", DEFAULT_TARGET_APP))
+    cfg = apply_target_app(load_config(args.config), target_app)
     set_dpi_awareness()
     log = AuditLog(args.log)
     state = RunState(args.state_dir)
@@ -3050,6 +3555,7 @@ def cmd_run(args) -> int:
     log.write({
         "event": "started",
         "dry_run": args.dry_run,
+        "target_app": target_app,
         "transport": typist_ipc_runtime.CONTRACT,
         "pipe": typist_ipc_runtime.PIPE_NAME,
         "config": str(args.config),
@@ -3123,6 +3629,7 @@ def cmd_run(args) -> int:
                     "owner_pid": owner_pid or None,
                     "owner_process_start_file_time_utc":
                         owner_start or None,
+                    "target_app": target_app,
                 })
                 last_status = now
 
@@ -3206,6 +3713,12 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--log", type=Path, default=DEFAULT_LOG)
     parser.add_argument("--state-dir", type=Path, default=DEFAULT_STATE_DIR)
+    parser.add_argument(
+        "--target-app",
+        choices=tuple(TARGET_APP_PACKAGE_PREFIXES),
+        default=DEFAULT_TARGET_APP,
+        help="fixed packaged app target for this process",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
     p = sub.add_parser("init-config", help="write a default config file")

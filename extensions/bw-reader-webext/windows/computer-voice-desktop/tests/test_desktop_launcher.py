@@ -3,7 +3,6 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 import sys
-import tempfile
 import unittest
 from unittest.mock import patch
 
@@ -15,12 +14,7 @@ from bridge_core import CaptureEndpoint  # noqa: E402
 from bridge_core import BridgeError, DirectStatus  # noqa: E402
 from bridge_core import RenderEndpoint  # noqa: E402
 from control_plane import TaskInspection  # noqa: E402
-from desktop_launcher import (  # noqa: E402
-    BridgeWindow,
-    history_sync_enabled,
-    main,
-    start_history_sync_worker,
-)
+from desktop_launcher import BridgeWindow, main  # noqa: E402
 
 
 VIRTUAL_MICROPHONE = RenderEndpoint("id-a", "virtual mic A")
@@ -361,9 +355,9 @@ class DesktopLauncherTests(unittest.TestCase):
         self.assertIn("不要把 Realtek、Steam、Oculus", source)
         self.assertIn("两根彼此独立、已签名的虚拟音频线缆", source)
         self.assertIn("不会从 A 的播放端 ID 推导", source)
-        self.assertIn("自动音频路由不会启用", source)
+        self.assertIn("挂断后恢复原选择", source)
 
-    def test_enable_with_capture_saves_v5_inputs_explicitly(self) -> None:
+    def test_enable_with_capture_confirms_fixed_audio_bus(self) -> None:
         window = BridgeWindow.__new__(BridgeWindow)
         window.root = object()
         window.paths = object()
@@ -406,7 +400,8 @@ class DesktopLauncherTests(unittest.TestCase):
             ) as save,
         ):
             window.on_enable_config()
-        self.assertIn("strict /5", confirmations[0][1])
+        self.assertIn("保存 /6", confirmations[0][1])
+        self.assertIn("下行直接读取 B", confirmations[0][1])
         self.assertEqual(
             save.call_args.kwargs[
                 "virtual_microphone_capture_endpoint_id"
@@ -574,19 +569,11 @@ class DesktopLauncherTests(unittest.TestCase):
                 "desktop_launcher.start_direct_service",
                 side_effect=lambda *_: order.append("direct") or 4242,
             ),
-            patch(
-                "desktop_launcher.start_history_sync_worker",
-                side_effect=lambda *_: order.append("history") or 4343,
-            ),
         ):
             window.on_start()
         self.assertEqual(
             order,
-            ["opt-in", "task-missing", "direct", "history"],
-        )
-        self.assertIn(
-            "侧栏同步 worker PID 4343",
-            str(window.footer.values[-1]["text"]),
+            ["opt-in", "task-missing", "direct"],
         )
         self.assertIn(
             "未受后台 supervisor",
@@ -686,95 +673,24 @@ class DesktopLauncherTests(unittest.TestCase):
                 return_value=object(),
             ),
             patch(
-                "desktop_launcher.run_bootstrap_with_history_sync",
+                "desktop_launcher.run_idle_bootstrap",
                 return_value=7,
             ) as bootstrap,
+            patch(
+                "desktop_launcher.WindowsShortcutBroker",
+            ) as broker,
+            patch(
+                "desktop_launcher.WindowsKeepAwakeLease",
+            ) as keep_awake,
         ):
             self.assertEqual(main(), 7)
+        keep_awake.assert_called_once_with()
+        keep_awake.return_value.__enter__.assert_called_once_with()
+        keep_awake.return_value.__exit__.assert_called_once()
+        broker.assert_called_once_with()
+        broker.return_value.__enter__.assert_called_once_with()
+        broker.return_value.__exit__.assert_called_once()
         bootstrap.assert_called_once()
-
-    def test_history_worker_cli_is_exact_and_headless(self) -> None:
-        sentinel_paths = type(
-            "Paths",
-            (),
-            {"root": Path("C:/fixed"), "direct_config": Path("x")},
-        )()
-        with (
-            patch.object(
-                sys,
-                "argv",
-                ["desktop_launcher.py", "--history-sync-worker"],
-            ),
-            patch(
-                "desktop_launcher.BridgePaths.discover",
-                return_value=sentinel_paths,
-            ),
-            patch(
-                "desktop_launcher.WindowsProcessRunner",
-                return_value=object(),
-            ),
-            patch(
-                "desktop_launcher.run_service_bound_history_worker",
-                return_value=0,
-            ) as worker,
-        ):
-            self.assertEqual(main(), 0)
-        worker.assert_called_once()
-
-    def test_history_sync_requires_strict_snapshot_mode_opt_in(self) -> None:
-        paths = object()
-        with patch(
-            "desktop_launcher.load_direct_config",
-            side_effect=[
-                None,
-                {
-                    "localOptIn": True,
-                    "contextDeliveryMode": "legacy-inject",
-                },
-                {
-                    "localOptIn": False,
-                    "contextDeliveryMode": "snapshot-mcp",
-                },
-                {
-                    "localOptIn": True,
-                    "contextDeliveryMode": "snapshot-mcp",
-                },
-            ],
-        ):
-            self.assertFalse(history_sync_enabled(paths))
-            self.assertFalse(history_sync_enabled(paths))
-            self.assertFalse(history_sync_enabled(paths))
-            self.assertTrue(history_sync_enabled(paths))
-
-    def test_history_worker_spawn_uses_exact_installed_desktop_binary(self):
-        with tempfile.TemporaryDirectory() as raw:
-            root = Path(raw).resolve()
-            executable = (
-                root
-                / "desktop-launcher"
-                / "BW-Computer-Voice-Bridge.exe"
-            )
-            executable.parent.mkdir()
-            executable.write_bytes(b"exe")
-            paths = type(
-                "Paths",
-                (),
-                {"root": root, "desktop_launcher": executable},
-            )()
-            process = type("Process", (), {"pid": 4243})()
-            with patch(
-                "desktop_launcher.subprocess.Popen",
-                return_value=process,
-            ) as popen:
-                self.assertEqual(start_history_sync_worker(paths), 4243)
-            self.assertEqual(
-                popen.call_args.args[0],
-                [str(executable), "--history-sync-worker"],
-            )
-            self.assertEqual(
-                Path(popen.call_args.kwargs["cwd"]),
-                root,
-            )
 
     def test_self_test_is_headless_safe_for_noconsole_package(self) -> None:
         with (

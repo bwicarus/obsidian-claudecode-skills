@@ -16,8 +16,10 @@ from typing import Callable
 
 from bw_computer_voice_supervisor import (
     CONTRACT,
+    DEFAULT_TYPIST_TARGET_APP,
     SupervisorError,
     VoiceTypistLauncher,
+    require_typist_target_app,
 )
 
 
@@ -142,10 +144,16 @@ def _write(payload: dict[str, object]) -> None:
 
 def main(argv: list[str]) -> int:
     try:
-        if len(argv) == 3 and argv[0] == "--ensure-running":
+        if len(argv) in {3, 4} and argv[0] == "--ensure-running":
+            target_app_kind = (
+                require_typist_target_app(argv[3])
+                if len(argv) == 4
+                else DEFAULT_TYPIST_TARGET_APP
+            )
             result = VoiceTypistLauncher().ensure_running(
                 _parse_positive_integer(argv[1], "owner PID"),
                 _parse_positive_integer(argv[2], "owner 启动时间"),
+                target_app_kind,
             )
         elif len(argv) == 3 and argv[0] == "--stop-if-owned":
             result = stop_if_owned(

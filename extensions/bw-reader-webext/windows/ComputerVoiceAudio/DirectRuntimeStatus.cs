@@ -80,7 +80,6 @@ internal sealed class DirectRuntimeStatusWriter
             "reader-connected",
             "starting-app",
             "waiting-app-ready",
-            "waiting-voice-ready",
             "starting-capture",
             "active",
             "faulted",

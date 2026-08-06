@@ -90,6 +90,10 @@ internal sealed class BoundedUplinkPcmQueue
             }
             if (_frames.Count >= MaximumFrames)
             {
+                // The uplink sequence has already been validated before this
+                // jitter queue. Keep latency bounded by dropping stale audio;
+                // unlike the downlink START gate, this cannot create a later
+                // protocol sequence gap.
                 byte[] stale = _frames.Dequeue();
                 Array.Clear(stale);
                 _headOffset = 0;

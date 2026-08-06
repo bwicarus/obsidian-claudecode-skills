@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import queue
-import subprocess
 import sys
 import threading
 import tkinter as tk
@@ -26,6 +25,8 @@ from bridge_core import (
     FIXED_SHORTCUT,
     ProcessRunner,
     RenderEndpoint,
+    WindowsKeepAwakeLease,
+    WindowsShortcutBroker,
     WindowsProcessRunner,
     build_self_test_report,
     disable_and_stop_direct_service,
@@ -52,83 +53,11 @@ from control_plane import (
     remove_tailscale_serve,
     run_bootstrap_task_if_owned,
 )
-from voice_history_sidebar_sync import (
-    CaptureBoundHistorySynchronizer,
-    history_worker_lease,
-    monitor_capture_history,
-    run_service_bound_history_worker,
-)
 
 
 APP_TITLE = "电脑客户端桥接器"
 APP_VERSION = "0.7.0-snapshot-mcp-source"
 LEGACY_CAPTURE_OPTION = "不启用自动路由（兼容 /4）"
-
-
-def history_sync_enabled(paths: BridgePaths) -> bool:
-    """Enable sidebar return only for a strict, opted-in snapshot config."""
-    config = load_direct_config(paths)
-    return bool(
-        config is not None
-        and config.get("localOptIn") is True
-        and config.get("contextDeliveryMode") == CONTEXT_DELIVERY_SNAPSHOT
-    )
-
-
-def start_history_sync_worker(paths: BridgePaths) -> int:
-    """Start the exact installed desktop binary in its headless worker mode."""
-    executable = paths.desktop_launcher.resolve()
-    root = paths.root.resolve()
-    if (
-        not executable.is_file()
-        or executable.parent.parent.resolve() != root
-    ):
-        raise BridgeError("历史同步 worker 不属于当前固定安装根。")
-    process = subprocess.Popen(
-        [str(executable), "--history-sync-worker"],
-        cwd=str(root),
-        stdin=subprocess.DEVNULL,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        shell=False,
-        close_fds=True,
-        creationflags=(
-            subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-        ),
-    )
-    return process.pid
-
-
-def run_bootstrap_with_history_sync(
-    paths: BridgePaths,
-    runner: ProcessRunner,
-) -> int:
-    """Keep history sync beside the existing persistent bootstrap supervisor."""
-    stop_event = threading.Event()
-    synchronizer = CaptureBoundHistorySynchronizer(root=paths.root)
-
-    def monitor() -> None:
-        with history_worker_lease(paths.root) as owned:
-            if not owned:
-                return
-            monitor_capture_history(
-                stop_event=stop_event,
-                status_provider=lambda: read_direct_status(paths, runner),
-                enabled_provider=lambda: history_sync_enabled(paths),
-                synchronizer=synchronizer,
-            )
-
-    thread = threading.Thread(
-        target=monitor,
-        name="reader-sidebar-history",
-        daemon=True,
-    )
-    thread.start()
-    try:
-        return run_idle_bootstrap(paths, runner)
-    finally:
-        stop_event.set()
-        thread.join(timeout=3)
 
 
 class BridgeWindow:
@@ -694,7 +623,15 @@ class BridgeWindow:
         self,
         config: dict[str, Any] | None,
     ) -> None:
-        if config and config.get(
+        if config and config.get("virtualSpeakerCaptureEndpointId"):
+            self.audio_route_status.configure(
+                text=(
+                    "● 固定 A/B 音频总线：已启用（/6；Codex 自动切换，"
+                    "挂断后恢复；下行直接读取 B）"
+                ),
+                foreground="#167347",
+            )
+        elif config and config.get(
             "virtualMicrophoneCaptureEndpointId"
         ):
             capture_id = str(
@@ -706,7 +643,7 @@ class BridgeWindow:
             ):
                 self.audio_route_status.configure(
                     text=(
-                        "● Codex 自动音频路由：已启用（/5，"
+                        "● 旧版 Codex 自动音频路由：已启用（/5，"
                         "显式 eCapture；通话结束恢复原选择）"
                     ),
                     foreground="#167347",
@@ -903,16 +840,18 @@ class BridgeWindow:
         )
         if not self._confirm_mutation(
             (
-                "保存并启用本机配置"
+                "保存并启用固定 A/B 音频总线"
                 if virtual_microphone_capture is not None
                 else "保存 /4 兼容配置（自动路由未启用）"
             ),
             (
                 "将写入两个互不相同的 Active eRender 端点、"
                 + (
-                    "一个另行明确选择的 Active eCapture 端点，"
-                    "并保存 strict /5；Codex 输入/输出将按应用"
-                    "自动切换且结束后恢复；"
+                    "一个另行明确选择的 A 录音端，并按虚拟扬声器"
+                    " B 的同名端点自动确定 B 录音端，保存 /6；"
+                    "通话将只把目标应用自动切到固定 A/B 总线，"
+                    "挂断后恢复原选择；下行直接读取 B，"
+                    "不再把 PCM 捕获绑在 AudioService 进程上；"
                     if virtual_microphone_capture is not None
                     else
                     "但未选择 Codex 虚拟麦克风输入；将明确保存"
@@ -959,7 +898,7 @@ class BridgeWindow:
                 text=(
                     "配置已启用；"
                     + (
-                        "Codex 按应用自动音频路由已启用；"
+                        "固定 A/B 音频总线已启用；"
                         if saved.get(
                             "virtualMicrophoneCaptureEndpointId"
                         )
@@ -1047,7 +986,7 @@ class BridgeWindow:
         ):
             return
 
-        def action() -> tuple[str, int | None, int | None]:
+        def action() -> tuple[str, int | None]:
             task = inspect_bootstrap_task(
                 self.paths,
                 self.control_paths,
@@ -1083,18 +1022,15 @@ class BridgeWindow:
                 self.control_paths,
                 self.control_runner,
             ):
-                return "supervised", None, None
+                return "supervised", None
             pid = start_direct_service(
                 self.paths,
                 self.process_runner,
             )
-            history_pid = start_history_sync_worker(self.paths)
-            return "direct", pid, history_pid
+            return "direct", pid
 
-        def success(
-            result: tuple[str, int | None, int | None]
-        ) -> None:
-            mode, pid, history_pid = result
+        def success(result: tuple[str, int | None]) -> None:
+            mode, pid = result
             self.refresh_static()
             if mode == "supervised":
                 self.footer.configure(
@@ -1108,7 +1044,6 @@ class BridgeWindow:
                 self.footer.configure(
                     text=(
                         f"直连监听器已请求启动（PID {pid}）；"
-                        f"侧栏同步 worker PID {history_pid}；"
                         "本登录未受后台 supervisor 保护。"
                     ),
                     foreground="#9a6700",
@@ -1381,18 +1316,14 @@ def main() -> int:
             print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if report["ok"] else 1
     if sys.argv[1:] == ["--bootstrap"]:
-        return run_bootstrap_with_history_sync(
-            BridgePaths.discover(),
-            WindowsProcessRunner(),
-        )
-    if sys.argv[1:] == ["--history-sync-worker"]:
-        paths = BridgePaths.discover()
-        runner = WindowsProcessRunner()
-        return run_service_bound_history_worker(
-            root=paths.root,
-            status_provider=lambda: read_direct_status(paths, runner),
-            enabled_provider=lambda: history_sync_enabled(paths),
-        )
+        # The interactive current-user bootstrap owns the only keyboard
+        # injection surface.  Do not start the native direct child until its
+        # authenticated local pipe is already accepting requests.
+        with WindowsKeepAwakeLease(), WindowsShortcutBroker():
+            return run_idle_bootstrap(
+                BridgePaths.discover(),
+                WindowsProcessRunner(),
+            )
     if sys.argv[1:]:
         raise SystemExit("此源码入口不接受 Reader 提交的参数或命令。")
     root = tk.Tk()

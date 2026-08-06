@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import ctypes
+from ctypes import wintypes
 from datetime import datetime, timedelta, timezone
 import json
 import os
@@ -15,6 +17,8 @@ SOURCE_ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(SOURCE_ROOT))
 
 from bridge_core import (  # noqa: E402
+    _send_f24_keybd_event,
+    _wake_display_for_shortcut,
     BridgeError,
     BridgePaths,
     CaptureEndpoint,
@@ -29,6 +33,9 @@ from bridge_core import (  # noqa: E402
     LocalOptOutDuringStart,
     RenderEndpoint,
     SERVICE_RECORD_CONTRACT,
+    SHORTCUT_BROKER_CONTRACT,
+    ShortcutBrokerRequestProcessor,
+    WindowsKeepAwakeLease,
     WindowsProcessRunner,
     build_direct_config,
     build_local_app_launch_command,
@@ -66,6 +73,9 @@ VIRTUAL_MICROPHONE_CAPTURE = (
 VIRTUAL_MICROPHONE_CAPTURE_DEVICE = CaptureEndpoint(
     VIRTUAL_MICROPHONE_CAPTURE,
     "Virtual microphone A recording side",
+)
+VIRTUAL_SPEAKER_CAPTURE = (
+    "{0.0.1.00000000}.{44444444-4444-4444-4444-444444444444}"
 )
 
 
@@ -123,6 +133,236 @@ class DirectDesktopCoreTests(unittest.TestCase):
                 VIRTUAL_SPEAKER,
             ],
         )
+
+    def test_keep_awake_lease_sets_and_restores_execution_state(self) -> None:
+        class Function:
+            def __init__(self, callback) -> None:
+                self.callback = callback
+                self.argtypes = None
+                self.restype = None
+
+            def __call__(self, *args):
+                return self.callback(*args)
+
+        flags: list[int] = []
+        kernel32 = type("FakeKernel32", (), {})()
+        kernel32.SetThreadExecutionState = Function(
+            lambda value: flags.append(int(value)) or 1
+        )
+
+        with (
+            patch("bridge_core.os.name", "nt"),
+            patch(
+                "bridge_core.ctypes.WinDLL",
+                create=True,
+                return_value=kernel32,
+            ),
+        ):
+            with WindowsKeepAwakeLease():
+                self.assertEqual(
+                    flags,
+                    [WindowsKeepAwakeLease.ACTIVE_FLAGS],
+                )
+
+        self.assertEqual(
+            flags,
+            [
+                WindowsKeepAwakeLease.ACTIVE_FLAGS,
+                WindowsKeepAwakeLease.ES_CONTINUOUS,
+            ],
+        )
+
+    def test_shortcut_display_wake_is_one_shot(self) -> None:
+        class Function:
+            def __init__(self, callback) -> None:
+                self.callback = callback
+                self.argtypes = None
+                self.restype = None
+
+            def __call__(self, *args):
+                return self.callback(*args)
+
+        flags: list[int] = []
+        kernel32 = type("FakeKernel32", (), {})()
+        kernel32.SetThreadExecutionState = Function(
+            lambda value: flags.append(int(value)) or 1
+        )
+
+        with patch(
+            "bridge_core.ctypes.WinDLL",
+            create=True,
+            return_value=kernel32,
+        ):
+            _wake_display_for_shortcut()
+
+        self.assertEqual(
+            flags,
+            [
+                WindowsKeepAwakeLease.ES_SYSTEM_REQUIRED
+                | WindowsKeepAwakeLease.ES_DISPLAY_REQUIRED
+            ],
+        )
+
+    def test_shortcut_validates_target_and_sends_one_global_toggle(self) -> None:
+        class Function:
+            def __init__(self, callback) -> None:
+                self.callback = callback
+                self.argtypes = None
+                self.restype = None
+
+            def __call__(self, *args):
+                return self.callback(*args)
+
+        key_events: list[tuple[int, int]] = []
+        user32 = type("FakeUser32", (), {})()
+        user32.IsWindow = Function(lambda _handle: True)
+
+        def get_window_process_id(_handle, process_id) -> int:
+            ctypes.cast(
+                process_id,
+                ctypes.POINTER(wintypes.DWORD),
+            ).contents.value = 7
+            return 8
+
+        user32.GetWindowThreadProcessId = Function(get_window_process_id)
+        user32.keybd_event = Function(
+            lambda key, _scan, flags, _extra:
+                key_events.append((int(key), int(flags)))
+        )
+
+        with (
+            patch("bridge_core.os.name", "nt"),
+            patch(
+                "bridge_core._expected_f24_binding_is_configured",
+                return_value=True,
+            ),
+            patch("bridge_core._wake_display_for_shortcut") as wake,
+            patch(
+                "bridge_core._windows_process_tree",
+                return_value={7},
+            ) as process_tree,
+            patch(
+                "bridge_core.ctypes.WinDLL",
+                create=True,
+                return_value=user32,
+            ),
+        ):
+            _send_f24_keybd_event(7, 42)
+
+        self.assertEqual(key_events, [(0x87, 0), (0x87, 0x0002)])
+        wake.assert_called_once_with()
+        process_tree.assert_called_once_with(7)
+
+    def test_shortcut_rejects_window_outside_target_tree(self) -> None:
+        class Function:
+            def __init__(self, callback) -> None:
+                self.callback = callback
+                self.argtypes = None
+                self.restype = None
+
+            def __call__(self, *args):
+                return self.callback(*args)
+
+        key_events: list[tuple[int, int]] = []
+        user32 = type("FakeUser32", (), {})()
+        user32.IsWindow = Function(lambda _handle: True)
+
+        def get_window_process_id(_handle, process_id) -> int:
+            ctypes.cast(
+                process_id,
+                ctypes.POINTER(wintypes.DWORD),
+            ).contents.value = 99
+            return 8
+
+        user32.GetWindowThreadProcessId = Function(get_window_process_id)
+        user32.keybd_event = Function(
+            lambda key, _scan, flags, _extra:
+                key_events.append((int(key), int(flags)))
+        )
+
+        with (
+            patch("bridge_core.os.name", "nt"),
+            patch(
+                "bridge_core._expected_f24_binding_is_configured",
+                return_value=True,
+            ),
+            patch("bridge_core._wake_display_for_shortcut"),
+            patch("bridge_core._windows_process_tree", return_value={7}),
+            patch(
+                "bridge_core.ctypes.WinDLL",
+                create=True,
+                return_value=user32,
+            ),
+        ):
+            with self.assertRaises(BridgeError):
+                _send_f24_keybd_event(7, 42)
+
+        self.assertEqual(key_events, [])
+
+    def test_shortcut_broker_is_strict_and_idempotent(self) -> None:
+        sends: list[tuple[int, int]] = []
+        processor = ShortcutBrokerRequestProcessor(
+            lambda root_process_id, window_handle: sends.append(
+                (root_process_id, window_handle)
+            )
+        )
+        request = {
+            "contract": SHORTCUT_BROKER_CONTRACT,
+            "type": "toggle",
+            "requestId": "shortcut-AAAAAAAAAAAAAAAAAAAAAA",
+            "rootProcessId": 4242,
+            "rootProcessStartTimeUtc": "2026-08-01T08:00:00.0000000Z",
+            "windowHandle": 1717,
+        }
+        payload = (
+            json.dumps(request, separators=(",", ":")).encode("utf-8")
+            + b"\n"
+        )
+        first = json.loads(processor.process(payload))
+        duplicate = json.loads(processor.process(payload))
+        self.assertEqual(first, duplicate)
+        self.assertEqual(
+            first,
+            {
+                "contract": SHORTCUT_BROKER_CONTRACT,
+                "type": "receipt",
+                "requestId": request["requestId"],
+                "ok": True,
+            },
+        )
+        self.assertEqual(sends, [(4242, 1717)])
+
+        invalid = {**request, "shortcut": "F24"}
+        rejected = json.loads(
+            processor.process(
+                json.dumps(invalid).encode("utf-8") + b"\n"
+            )
+        )
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(sends, [(4242, 1717)])
+
+    def test_shortcut_broker_caches_failure_without_retry(self) -> None:
+        attempts = 0
+
+        def fail(_root_process_id: int, _window_handle: int) -> None:
+            nonlocal attempts
+            attempts += 1
+            raise OSError("injected")
+
+        processor = ShortcutBrokerRequestProcessor(fail)
+        request = {
+            "contract": SHORTCUT_BROKER_CONTRACT,
+            "type": "toggle",
+            "requestId": "shortcut-AQEBAQEBAQEBAQEBAQEBAQ",
+            "rootProcessId": 7,
+            "rootProcessStartTimeUtc": "2026-08-01T08:00:00Z",
+            "windowHandle": 17,
+        }
+        payload = json.dumps(request).encode("utf-8") + b"\n"
+        first = processor.process(payload)
+        second = processor.process(payload)
+        self.assertEqual(first, second)
+        self.assertEqual(attempts, 1)
 
     def write_runtime(
         self,
@@ -200,6 +440,27 @@ class DirectDesktopCoreTests(unittest.TestCase):
                 self.paths.runtime_status,
                 allowed_origins=["https://user@example.test"],
             )
+
+    def test_fixed_audio_bus_config_has_explicit_b_capture(self) -> None:
+        value = build_direct_config(
+            VIRTUAL_MICROPHONE.endpoint_id,
+            VIRTUAL_SPEAKER.endpoint_id,
+            self.paths.runtime_status,
+            virtual_microphone_capture_endpoint_id=(
+                VIRTUAL_MICROPHONE_CAPTURE
+            ),
+            virtual_speaker_capture_endpoint_id=(
+                VIRTUAL_SPEAKER_CAPTURE
+            ),
+        )
+        self.assertEqual(
+            value["contract"],
+            "reader-computer-voice-direct-config/6",
+        )
+        self.assertEqual(
+            value["virtualSpeakerCaptureEndpointId"],
+            VIRTUAL_SPEAKER_CAPTURE,
+        )
 
     def test_v5_config_requires_explicit_single_user_true(self) -> None:
         invalid = build_direct_config(
@@ -742,22 +1003,6 @@ class DirectDesktopCoreTests(unittest.TestCase):
         invalid = read_direct_status(self.paths, runner, now=NOW)
         self.assertFalse(invalid.service_online)
         self.assertIsNone(invalid.last_error)
-
-    def test_waiting_voice_ready_remains_online_without_capture(self) -> None:
-        self.enable_config()
-        runner = FakeProcessRunner()
-        pid = start_direct_service(self.paths, runner, now=NOW)
-        self.write_runtime(
-            pid=pid,
-            state="waiting-voice-ready",
-            reader_connected=True,
-        )
-
-        status = read_direct_status(self.paths, runner, now=NOW)
-
-        self.assertTrue(status.service_online)
-        self.assertTrue(status.reader_connected)
-        self.assertFalse(status.capture_active)
 
     def test_three_states_are_independent(self) -> None:
         value = self.enable_config()

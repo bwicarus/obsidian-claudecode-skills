@@ -7,6 +7,8 @@ internal static class DirectBridgeContract
     internal const string Contract = "reader-computer-voice-direct/1";
     internal const string ConfigContract =
         "reader-computer-voice-direct-config/5";
+    internal const string FixedAudioBusConfigContract =
+        "reader-computer-voice-direct-config/6";
     internal const string LegacyConfigContract =
         "reader-computer-voice-direct-config/4";
     internal const string RuntimeStatusContract =
@@ -28,6 +30,8 @@ internal static class DirectBridgeContract
     internal const int ClientHeartbeatTimeoutMilliseconds = 15_000;
     internal const string CodexAppUserModelId =
         "OpenAI.Codex_2p2nqsd0c76g0!App";
+    internal const string ChatGptClassicAppUserModelId =
+        "OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0!ChatGPT";
     internal static readonly TimeSpan RuntimeStatusHeartbeatInterval =
         TimeSpan.FromSeconds(5);
 

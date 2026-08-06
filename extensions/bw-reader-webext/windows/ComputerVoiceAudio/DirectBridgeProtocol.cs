@@ -1,7 +1,5 @@
-using System.Net.WebSockets;
 using System.Text;
 using System.Text.Json;
-using System.Text.Json.Nodes;
 
 namespace BwReader.ComputerVoiceAudio;
 
@@ -14,20 +12,248 @@ internal enum DirectProtocolPhase
     Active,
 }
 
+internal sealed record DirectCodexVoiceState(
+    string Status,
+    bool? Active,
+    string? Source);
+
+internal sealed record DirectCodexVoiceSetResult(
+    DirectCodexVoiceState State,
+    bool ShortcutSent);
+
+internal interface IDirectCodexVoiceControl
+{
+    DirectCodexVoiceState ReadState();
+
+    Task<DirectCodexVoiceSetResult> SetActiveAsync(
+        bool active,
+        CancellationToken cancellationToken);
+}
+
+internal sealed class DirectCodexVoiceControl : IDirectCodexVoiceControl
+{
+    internal const string StateSource =
+        "windows-microphone-capability-ledger";
+
+    internal static DirectCodexVoiceControl Shared { get; } =
+        CreateProduction();
+
+    private readonly Func<CodexVoiceActivitySnapshot> _readSnapshot;
+    private readonly Func<
+        bool,
+        CodexVoiceActivitySnapshot,
+        CancellationToken,
+        Task<CodexVoiceActivitySnapshot>> _transitionAsync;
+    private readonly SemaphoreSlim _transitionGate;
+
+    internal DirectCodexVoiceControl(
+        Func<CodexVoiceActivitySnapshot> readSnapshot,
+        Func<
+            bool,
+            CodexVoiceActivitySnapshot,
+            CancellationToken,
+            Task<CodexVoiceActivitySnapshot>> transitionAsync,
+        SemaphoreSlim? transitionGate = null)
+    {
+        _readSnapshot = readSnapshot
+            ?? throw new ArgumentNullException(nameof(readSnapshot));
+        _transitionAsync = transitionAsync
+            ?? throw new ArgumentNullException(nameof(transitionAsync));
+        _transitionGate = transitionGate ?? new SemaphoreSlim(1, 1);
+    }
+
+    public DirectCodexVoiceState ReadState()
+    {
+        try
+        {
+            return ToState(_readSnapshot());
+        }
+        catch
+        {
+            // STATUS must remain a side-effect-free diagnostic even if the
+            // Windows capability ledger is temporarily unreadable.
+            return new DirectCodexVoiceState(
+                "error",
+                Active: null,
+                StateSource);
+        }
+    }
+
+    public async Task<DirectCodexVoiceSetResult> SetActiveAsync(
+        bool active,
+        CancellationToken cancellationToken)
+    {
+        await _transitionGate.WaitAsync(cancellationToken)
+            .ConfigureAwait(false);
+        try
+        {
+            CodexVoiceActivitySnapshot before = ReadRequired();
+            if (before.Active == active)
+            {
+                return new DirectCodexVoiceSetResult(
+                    ToState(before),
+                    ShortcutSent: false);
+            }
+
+            CodexVoiceActivitySnapshot confirmed =
+                await _transitionAsync(
+                    active,
+                    before,
+                    cancellationToken).ConfigureAwait(false);
+            RequireAvailable(confirmed);
+            if (confirmed.Active != active)
+            {
+                throw new DirectProtocolException(
+                    active
+                        ? CodexVoiceActivityController.StartNotConfirmedCode
+                        : CodexVoiceActivityController.StopNotConfirmedCode,
+                    active
+                        ? "未确认 Codex 语音已开启"
+                        : "未确认 Codex 语音已关闭",
+                    retryable: true);
+            }
+            return new DirectCodexVoiceSetResult(
+                ToState(confirmed),
+                ShortcutSent: true);
+        }
+        finally
+        {
+            _transitionGate.Release();
+        }
+    }
+
+    private CodexVoiceActivitySnapshot ReadRequired()
+    {
+        try
+        {
+            CodexVoiceActivitySnapshot snapshot = _readSnapshot();
+            RequireAvailable(snapshot);
+            return snapshot;
+        }
+        catch (DirectProtocolException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            throw new DirectProtocolException(
+                CodexVoiceActivityController.ActivityReadFailedCode,
+                "读取 Codex 语音状态失败",
+                retryable: true,
+                innerException: exception);
+        }
+    }
+
+    private static void RequireAvailable(
+        CodexVoiceActivitySnapshot snapshot)
+    {
+        if (snapshot.Status == CodexVoiceActivityReadStatus.Unavailable)
+        {
+            throw new DirectProtocolException(
+                CodexVoiceActivityController.ActivityUnavailableCode,
+                "Codex 语音状态当前不可用",
+                retryable: true);
+        }
+        if (snapshot.Status == CodexVoiceActivityReadStatus.Error)
+        {
+            throw new DirectProtocolException(
+                CodexVoiceActivityController.ActivityReadFailedCode,
+                "读取 Codex 语音状态失败",
+                retryable: true);
+        }
+    }
+
+    private static DirectCodexVoiceState ToState(
+        CodexVoiceActivitySnapshot snapshot) =>
+        snapshot.Status switch
+        {
+            CodexVoiceActivityReadStatus.Available => new(
+                "available",
+                snapshot.Active,
+                StateSource),
+            CodexVoiceActivityReadStatus.Unavailable => new(
+                "unavailable",
+                Active: null,
+                StateSource),
+            _ => new(
+                "error",
+                Active: null,
+                StateSource),
+        };
+
+    private static DirectCodexVoiceControl CreateProduction()
+    {
+        WindowsRegistryCodexVoiceActivitySource source = new(
+            DirectAppTargets.CodexDesktop);
+        CodexVoiceActivityController controller = new(
+            source,
+            new SystemCodexVoiceActivityClock());
+        WindowsCodexVoiceShortcutSender shortcutSender = new();
+        return new DirectCodexVoiceControl(
+            source.Read,
+            async (active, before, cancellationToken) =>
+            {
+                CodexAppTarget target = RequireCodexTarget();
+                if (active)
+                {
+                    CodexVoiceStartBaseline baseline = new(before);
+                    shortcutSender.Send(target, DirectVoiceCommand.Start);
+                    CodexVoiceShortcutReceipt receipt =
+                        controller.RecordShortcutSent(baseline, target);
+                    CodexVoiceStartConfirmation confirmation =
+                        await controller.ConfirmStartedAsync(
+                            baseline,
+                            receipt,
+                            CodexVoiceActivityController.TransitionTimeout,
+                            CodexVoiceActivityController.MonitorInterval,
+                            cancellationToken).ConfigureAwait(false);
+                    return confirmation.Snapshot;
+                }
+
+                shortcutSender.Send(target, DirectVoiceCommand.Stop);
+                return await controller.ConfirmStoppedAsync(
+                    before,
+                    CodexVoiceActivityController.TransitionTimeout,
+                    CodexVoiceActivityController.MonitorInterval,
+                    cancellationToken).ConfigureAwait(false);
+            });
+    }
+
+    private static CodexAppTarget RequireCodexTarget()
+    {
+        try
+        {
+            return WindowsCodexAppProbe.RequireReady(
+                DirectAppTargets.CodexDesktop);
+        }
+        catch (DirectProtocolException)
+        {
+            throw;
+        }
+        catch (Exception exception)
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_SHORTCUT_TARGET_UNAVAILABLE",
+                "无法确认唯一的 Codex 快捷键目标",
+                retryable: true,
+                innerException: exception);
+        }
+    }
+}
+
 internal sealed class DirectBridgeProtocolSession
 {
     private readonly string _connectionId;
     private readonly DirectBridgeConfigStore _configStore;
     private readonly DirectBridgeCoordinator _coordinator;
-    private readonly Func<ReaderResultDeliveryAck, bool>
-        _acknowledgeReaderResult;
-    private readonly Func<
-        ReaderVisualDeliveryChunk,
-        ReaderVisualDeliveryAck> _acceptReaderVisual;
+    private readonly IDirectCodexVoiceControl _codexVoiceControl;
+    private readonly Func<DateTimeOffset> _utcNow;
     private bool _helloSeen;
     private bool _authenticated;
     private string? _contextDeliveryMode;
     private string? _contextOnlySessionId;
+    private string? _activeVoiceSessionId;
+    private string? _activeVoiceAppKind;
     private DirectProtocolPhase _phase =
         DirectProtocolPhase.AwaitingAuthentication;
 
@@ -37,10 +263,7 @@ internal sealed class DirectBridgeProtocolSession
         DirectBridgeConfigStore configStore,
         DirectBridgeCoordinator coordinator,
         Func<DateTimeOffset>? utcNow = null,
-        Func<ReaderResultDeliveryAck, bool>? acknowledgeReaderResult = null,
-        Func<
-            ReaderVisualDeliveryChunk,
-            ReaderVisualDeliveryAck>? acceptReaderVisual = null)
+        IDirectCodexVoiceControl? codexVoiceControl = null)
     {
         if (!DirectBridgeContract.IsSafeId(connectionId))
         {
@@ -51,13 +274,9 @@ internal sealed class DirectBridgeProtocolSession
         _connectionId = connectionId;
         _configStore = configStore;
         _coordinator = coordinator;
-        _acknowledgeReaderResult =
-            acknowledgeReaderResult ?? (_ => false);
-        _acceptReaderVisual = acceptReaderVisual
-            ?? (_ => throw new DirectProtocolException(
-                "BW_READER_VISUAL_UNAVAILABLE",
-                "Reader 视觉接收器尚未接线",
-                retryable: true));
+        _codexVoiceControl = codexVoiceControl
+            ?? DirectCodexVoiceControl.Shared;
+        _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
     }
 
     internal bool Authenticated => _authenticated;
@@ -116,13 +335,16 @@ internal sealed class DirectBridgeProtocolSession
                 case "status":
                     payload = HandleStatus(message);
                     break;
+                case "codex-voice-set":
+                    payload = await HandleCodexVoiceSetAsync(
+                        message,
+                        cancellationToken).ConfigureAwait(false);
+                    break;
                 case "context-mode":
                     payload = HandleContextMode(message);
                     break;
                 case "context-mode-set":
-                    payload = await HandleContextModeSetAsync(
-                        message,
-                        cancellationToken).ConfigureAwait(false);
+                    payload = HandleContextModeSet(message);
                     break;
                 case "context-open":
                     payload = HandleContextOpen(message);
@@ -157,11 +379,10 @@ internal sealed class DirectBridgeProtocolSession
                         message,
                         cancellationToken).ConfigureAwait(false);
                     break;
-                case ReaderResultDeliveryProtocol.AckType:
-                    payload = HandleReaderResultAck(message);
-                    break;
-                case ReaderVisualDeliveryProtocol.ChunkType:
-                    payload = HandleReaderVisual(message);
+                case "log":
+                    payload = await HandleExtensionLogAsync(
+                        message,
+                        cancellationToken).ConfigureAwait(false);
                     break;
                 case "stop":
                     payload = await HandleStopAsync(
@@ -285,9 +506,7 @@ internal sealed class DirectBridgeProtocolSession
         };
     }
 
-    private async Task<object> HandleContextModeSetAsync(
-        JsonElement message,
-        CancellationToken cancellationToken)
+    private object HandleContextModeSet(JsonElement message)
     {
         RequireExactKeys(
             message,
@@ -297,16 +516,8 @@ internal sealed class DirectBridgeProtocolSession
             "mode",
             "sessionId");
         RequireAuthenticated();
-        if (
-            _phase != DirectProtocolPhase.AwaitingStart
-            || _coordinator.CaptureActive
-        )
-        {
-            throw new DirectProtocolException(
-                "BW_READER_CONTEXT_DELIVERY_MODE_BUSY",
-                "请先结束当前电脑语音，再切换上下文模式",
-                retryable: true);
-        }
+        string sessionId = RequireSafeId(message, "sessionId");
+        _ = DirectPcmFrameCodec.ParseSessionId(sessionId);
         string mode = RequireString(message, "mode", 32);
         if (!DirectContextDeliveryMode.IsSupported(mode))
         {
@@ -314,28 +525,26 @@ internal sealed class DirectBridgeProtocolSession
                 "BW_READER_CONTEXT_DELIVERY_MODE_INVALID",
                 "Reader 上下文交付模式无效");
         }
-        string previousMode = RequireContextDeliveryMode();
-        string sessionId = RequireSafeId(message, "sessionId");
-        _ = DirectPcmFrameCodec.ParseSessionId(sessionId);
         if (
-            previousMode == DirectContextDeliveryMode.SnapshotMcp
-            && mode == DirectContextDeliveryMode.LegacyInject
+            _phase != DirectProtocolPhase.AwaitingStart
+            || _contextOnlySessionId is not null
+            || _coordinator.ActiveSessionId is not null
+            || _coordinator.CaptureActive
+            || _coordinator.CleanupPending
         )
         {
-            await _coordinator.ClearSnapshotContextAsync(
-                _connectionId,
-                RequireSafeId(message, "requestId"),
-                sessionId,
-                requireActiveOwner: false,
-                cancellationToken).ConfigureAwait(false);
+            throw new DirectProtocolException(
+                "BW_READER_CONTEXT_DELIVERY_MODE_BUSY",
+                "请先结束电脑语音并清理旧上下文链路",
+                retryable: true);
         }
-        DirectBridgeConfig updated =
-            _configStore.UpdateContextDeliveryMode(mode);
-        _contextDeliveryMode = updated.ContextDeliveryMode;
-        _contextOnlySessionId = null;
+
+        string previousMode =
+            _configStore.SetContextDeliveryMode(mode);
+        _contextDeliveryMode = mode;
         return new
         {
-            mode = updated.ContextDeliveryMode,
+            mode,
             previousMode,
         };
     }
@@ -399,6 +608,13 @@ internal sealed class DirectBridgeProtocolSession
                 : DirectOutputRouteProbe.UnverifiedReason;
             ready = outputRouteVerified;
         }
+        else if (_coordinator.CleanupPending)
+        {
+            state = "faulted";
+            reason = _coordinator.LastError?.Code
+                ?? "BW_COMPUTER_VOICE_DIRECT_MEDIA_CLEANUP_PENDING";
+            ready = false;
+        }
         else if (!config.LocalOptIn)
         {
             state = "unavailable";
@@ -448,8 +664,51 @@ internal sealed class DirectBridgeProtocolSession
                 hostReady = _coordinator.MediaHostReady,
                 captureActive,
             },
+            codexVoice = CodexVoicePayload(
+                _codexVoiceControl.ReadState(),
+                shortcutSent: false),
         };
     }
+
+    private async Task<object> HandleCodexVoiceSetAsync(
+        JsonElement message,
+        CancellationToken cancellationToken)
+    {
+        RequireExactKeys(
+            message,
+            "contract",
+            "type",
+            "requestId",
+            "active");
+        RequireAuthenticated();
+        if (_phase is not (
+            DirectProtocolPhase.AwaitingStart
+            or DirectProtocolPhase.ContextOnly
+            or DirectProtocolPhase.Active))
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_PHASE_INVALID",
+                "当前连接阶段不能远程控制 Codex 语音");
+        }
+        DirectCodexVoiceSetResult result =
+            await _codexVoiceControl.SetActiveAsync(
+                RequireBoolean(message, "active"),
+                cancellationToken).ConfigureAwait(false);
+        return CodexVoicePayload(
+            result.State,
+            result.ShortcutSent);
+    }
+
+    private static object CodexVoicePayload(
+        DirectCodexVoiceState state,
+        bool shortcutSent) =>
+        new
+        {
+            status = state.Status,
+            active = state.Active,
+            source = state.Source,
+            shortcutSent,
+        };
 
     private async Task<DirectStartActionResult> HandleStartAsync(
         JsonElement message,
@@ -458,15 +717,67 @@ internal sealed class DirectBridgeProtocolSession
             sendPcmFrameAsync,
         CancellationToken cancellationToken)
     {
-        RequireExactKeys(
-            message,
+        bool hasAppKind = message.TryGetProperty(
+            "appKind",
+            out _);
+        bool hasTakeover = message.TryGetProperty(
+            "takeover",
+            out _);
+        List<string> expectedKeys =
+        [
             "contract",
             "type",
             "requestId",
-            "sessionId");
+            "sessionId",
+        ];
+        if (hasAppKind)
+        {
+            expectedKeys.Add("appKind");
+        }
+        if (hasTakeover)
+        {
+            expectedKeys.Add("takeover");
+        }
+        RequireExactKeys(message, [.. expectedKeys]);
         RequireAuthenticated();
         string sessionId = RequireSafeId(message, "sessionId");
         _ = DirectPcmFrameCodec.ParseSessionId(sessionId);
+        string appKind = hasAppKind
+            ? RequireString(message, "appKind", 32)
+            : DirectAppTargets.CodexDesktop;
+        bool takeover = hasTakeover
+            && RequireBoolean(message, "takeover");
+        _ = DirectAppTargets.Require(appKind);
+        if (_phase is not (
+            DirectProtocolPhase.AwaitingStart
+            or DirectProtocolPhase.Active))
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_PHASE_INVALID",
+                "当前连接阶段不接受 START");
+        }
+        if (
+            _phase == DirectProtocolPhase.Active
+            && (
+                !string.Equals(
+                    _activeVoiceSessionId,
+                    sessionId,
+                    StringComparison.Ordinal)
+                || !string.Equals(
+                    _activeVoiceAppKind,
+                    appKind,
+                    StringComparison.Ordinal)
+            )
+        )
+        {
+            // Replacing a session on the same transport would also require
+            // resetting both PCM sequence guards.  Keep takeover scoped to a
+            // second AwaitingStart connection; an active transport may only
+            // repeat its exact START idempotently.
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_SESSION_MISMATCH",
+                "活动连接上的 START 与当前会话不匹配");
+        }
         DirectPcmStartGate pcmGate = new(
             (frame, token) => sendPcmFrameAsync(
                 sessionId,
@@ -480,7 +791,9 @@ internal sealed class DirectBridgeProtocolSession
                 await _coordinator.StartAsync(
                     _connectionId,
                     sessionId,
+                    appKind,
                     RequireContextDeliveryMode(),
+                    takeover,
                     reportStatusAsync,
                     pcmGate.SendAsync,
                     cancellationToken).ConfigureAwait(false);
@@ -495,6 +808,8 @@ internal sealed class DirectBridgeProtocolSession
                 },
             };
             _phase = DirectProtocolPhase.Active;
+            _activeVoiceSessionId = sessionId;
+            _activeVoiceAppKind = appKind;
             return new DirectStartActionResult(
                 payload,
                 pcmGate.ReleaseAsync);
@@ -524,6 +839,8 @@ internal sealed class DirectBridgeProtocolSession
             sessionId,
             cancellationToken).ConfigureAwait(false);
         _phase = DirectProtocolPhase.AwaitingStart;
+        _activeVoiceSessionId = null;
+        _activeVoiceAppKind = null;
         return new
         {
             sessionId,
@@ -772,6 +1089,122 @@ internal sealed class DirectBridgeProtocolSession
         };
     }
 
+    private async Task<object> HandleExtensionLogAsync(
+        JsonElement message,
+        CancellationToken cancellationToken)
+    {
+        RequireExactKeys(
+            message,
+            "contract",
+            "type",
+            "requestId",
+            "sessionId",
+            "entries");
+        RequireAuthenticated();
+        if (_phase is not (
+            DirectProtocolPhase.AwaitingStart
+            or DirectProtocolPhase.ContextOnly
+            or DirectProtocolPhase.Active))
+        {
+            throw new DirectProtocolException(
+                "BW_READER_EXTENSION_LOG_PHASE_INVALID",
+                "当前连接阶段不接受扩展日志");
+        }
+        string sessionId = RequireSafeId(message, "sessionId");
+        _ = DirectPcmFrameCodec.ParseSessionId(sessionId);
+        if (_phase == DirectProtocolPhase.ContextOnly)
+        {
+            RequireContextOnlySession(sessionId);
+        }
+        else if (
+            _phase == DirectProtocolPhase.Active
+            && !string.Equals(
+                _activeVoiceSessionId,
+                sessionId,
+                StringComparison.Ordinal)
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_SESSION_MISMATCH",
+                "扩展日志 sessionId 与当前语音会话不匹配");
+        }
+        if (
+            !message.TryGetProperty("entries", out JsonElement entriesValue)
+            || entriesValue.ValueKind != JsonValueKind.Array
+            || entriesValue.GetArrayLength() is < 1 or > 50
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_READER_EXTENSION_LOG_ENTRIES_INVALID",
+                "扩展日志每批必须包含 1 至 50 条记录");
+        }
+
+        List<DirectExtensionLogEntry> entries = [];
+        foreach (JsonElement entryValue in entriesValue.EnumerateArray())
+        {
+            RequireExactKeys(
+                entryValue,
+                "at",
+                "source",
+                "stage",
+                "detail");
+            string at = RequireString(entryValue, "at", 64);
+            string source = RequireString(entryValue, "source", 32);
+            if (source is not (
+                "extension-page"
+                or "content-script"
+                or "call-page"))
+            {
+                throw new DirectProtocolException(
+                    "BW_READER_EXTENSION_LOG_SOURCE_INVALID",
+                    "扩展日志 source 无效");
+            }
+            string stage = RequireString(entryValue, "stage", 64);
+            if (!DirectBridgeContract.IsSafeId(stage))
+            {
+                throw new DirectProtocolException(
+                    "BW_READER_EXTENSION_LOG_STAGE_INVALID",
+                    "扩展日志 stage 无效");
+            }
+            string detail = RequireString(entryValue, "detail", 500);
+            entries.Add(new DirectExtensionLogEntry(
+                at,
+                source,
+                stage,
+                detail));
+        }
+
+        try
+        {
+            int accepted = await DirectExtensionLogStore.AppendAsync(
+                _configStore.InstallationRoot,
+                _connectionId,
+                sessionId,
+                entries,
+                _utcNow(),
+                cancellationToken).ConfigureAwait(false);
+            return new
+            {
+                ok = true,
+                accepted,
+            };
+        }
+        catch (
+            Exception exception
+        ) when (
+            exception is IOException
+            or UnauthorizedAccessException
+            or NotSupportedException
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_READER_EXTENSION_LOG_WRITE_FAILED",
+                "Windows 无法写入扩展诊断日志",
+                retryable: true,
+                innerException: exception);
+        }
+    }
+
     internal static object StatusEvent(string state, string reason) =>
         new
         {
@@ -784,107 +1217,6 @@ internal sealed class DirectBridgeProtocolSession
                 reason,
             },
         };
-
-    private object HandleReaderResultAck(JsonElement message)
-    {
-        RequireAuthenticated();
-        HashSet<string> actual = message.EnumerateObject()
-            .Select(property => property.Name)
-            .ToHashSet(StringComparer.Ordinal);
-        HashSet<string> expected = new(
-            [
-                "contract",
-                "type",
-                "requestId",
-                "correlation",
-                "outcome",
-            ],
-            StringComparer.Ordinal);
-        bool hasError = actual.Remove("error");
-        if (!actual.SetEquals(expected))
-        {
-            throw new DirectProtocolException(
-                "BW_READER_RESULT_ACK_INVALID",
-                "Reader 结果回执字段不匹配");
-        }
-        string correlation = RequireSafeId(
-            message,
-            "correlation");
-        if (correlation.Length > 40)
-        {
-            throw new DirectProtocolException(
-                "BW_READER_RESULT_ACK_INVALID",
-                "Reader 结果回执 correlation 过长");
-        }
-        string outcome = RequireString(
-            message,
-            "outcome",
-            16);
-        if (
-            outcome is not (
-                ReaderResultDeliveryProtocol.RenderedOutcome
-                or ReaderResultDeliveryProtocol.ReplayOutcome
-                or ReaderResultDeliveryProtocol.RejectedOutcome)
-        )
-        {
-            throw new DirectProtocolException(
-                "BW_READER_RESULT_ACK_INVALID",
-                "Reader 结果回执 outcome 无效");
-        }
-        string? error = null;
-        if (hasError)
-        {
-            error = RequireString(message, "error", 500);
-        }
-        if (
-            (outcome
-                == ReaderResultDeliveryProtocol.RejectedOutcome)
-                != hasError
-        )
-        {
-            throw new DirectProtocolException(
-                "BW_READER_RESULT_ACK_INVALID",
-                "Reader 拒绝回执必须且只能携带 error");
-        }
-        bool matched = _acknowledgeReaderResult(
-            new ReaderResultDeliveryAck(
-                correlation,
-                outcome,
-                error));
-        return new
-        {
-            correlation,
-            outcome,
-            matched,
-        };
-    }
-
-    private object HandleReaderVisual(JsonElement message)
-    {
-        RequireAuthenticated();
-        if (
-            RequireContextDeliveryMode()
-                != DirectContextDeliveryMode.SnapshotMcp
-            || _phase is not (
-                DirectProtocolPhase.ContextOnly
-                or DirectProtocolPhase.Active)
-        )
-        {
-            throw new DirectProtocolException(
-                "BW_READER_VISUAL_MODE_REQUIRED",
-                "Reader 视觉只允许在快照 MCP 连接中回传");
-        }
-        ReaderVisualDeliveryChunk chunk =
-            ReaderVisualDeliveryProtocol.ValidateChunk(message);
-        ReaderVisualDeliveryAck ack = _acceptReaderVisual(chunk);
-        return new
-        {
-            correlation = ack.Correlation,
-            chunkIndex = ack.ChunkIndex,
-            accepted = ack.Accepted,
-            complete = ack.Complete,
-        };
-    }
 
     private void RequireAuthenticated()
     {
@@ -1004,6 +1336,23 @@ internal sealed class DirectBridgeProtocolSession
         return result;
     }
 
+    private static bool RequireBoolean(
+        JsonElement message,
+        string name)
+    {
+        if (
+            !message.TryGetProperty(name, out JsonElement value)
+            || value.ValueKind is not (
+                JsonValueKind.True or JsonValueKind.False)
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_MESSAGE_INVALID",
+                $"{name} 字段无效");
+        }
+        return value.GetBoolean();
+    }
+
     private static void RequireObject(JsonElement value)
     {
         if (value.ValueKind != JsonValueKind.Object)
@@ -1039,231 +1388,92 @@ internal sealed record DirectStartActionResult(
     object Payload,
     Func<CancellationToken, Task> AfterSendAsync);
 
-internal sealed record ReaderResultDeliveryRequest(
-    string Correlation,
-    JsonObject Anchor,
-    JsonArray Parts);
+internal sealed record DirectExtensionLogEntry(
+    string At,
+    string Source,
+    string Stage,
+    string Detail);
 
-internal sealed record ReaderResultDeliveryAck(
-    string Correlation,
-    string Outcome,
-    string? Error);
-
-internal static class ReaderResultDeliveryProtocol
+internal static class DirectExtensionLogStore
 {
-    internal const string DeliveryContract =
-        "reader-result-delivery/1";
-    internal const string EventName = "reader-result";
-    internal const string AckType = "reader-result-ack";
-    internal const string RenderedOutcome = "rendered";
-    internal const string ReplayOutcome = "replay";
-    internal const string RejectedOutcome = "rejected";
+    private const long MaximumLogBytes = 5L * 1024 * 1024;
+    private const string LogContract = "reader-extension-runtime-log/1";
+    private static readonly UTF8Encoding Utf8 = new(
+        encoderShouldEmitUTF8Identifier: false,
+        throwOnInvalidBytes: true);
+    private static readonly SemaphoreSlim WriteGate = new(1, 1);
 
-    internal static object Event(
-        ReaderResultDeliveryRequest request) =>
-        new
-        {
-            contract = DirectBridgeContract.Contract,
-            type = "event",
-            @event = EventName,
-            payload = new
-            {
-                contract = DeliveryContract,
-                correlation = request.Correlation,
-                anchor = request.Anchor,
-                parts = request.Parts,
-            },
-        };
-}
+    internal static string GetLogPath(string installationRoot) =>
+        Path.Combine(
+            Path.GetFullPath(installationRoot),
+            "runtime",
+            "extension-log.jsonl");
 
-internal sealed class ReaderResultDeliveryException : Exception
-{
-    internal string Code { get; }
-
-    internal bool Retryable { get; }
-
-    internal ReaderResultDeliveryException(
-        string code,
-        string message,
-        bool retryable,
-        Exception? innerException = null)
-        : base(message, innerException)
-    {
-        Code = code;
-        Retryable = retryable;
-    }
-}
-
-internal sealed class ReaderResultDeliveryBroker
-{
-    private const int MaximumPendingDeliveries = 4;
-    private static readonly TimeSpan AckTimeout =
-        TimeSpan.FromSeconds(5);
-
-    private readonly object _gate = new();
-    private readonly Dictionary<
-        string,
-        TaskCompletionSource<ReaderResultDeliveryAck>> _pending =
-            new(StringComparer.Ordinal);
-    private string? _connectionId;
-    private Func<object, CancellationToken, Task>? _sendAsync;
-
-    internal void Attach(
+    internal static async Task<int> AppendAsync(
+        string installationRoot,
         string connectionId,
-        Func<object, CancellationToken, Task> sendAsync)
-    {
-        ArgumentNullException.ThrowIfNull(sendAsync);
-        lock (_gate)
-        {
-            _connectionId = connectionId;
-            _sendAsync = sendAsync;
-        }
-    }
-
-    internal void Detach(string connectionId)
-    {
-        TaskCompletionSource<ReaderResultDeliveryAck>[] abandoned;
-        lock (_gate)
-        {
-            if (!string.Equals(
-                _connectionId,
-                connectionId,
-                StringComparison.Ordinal))
-            {
-                return;
-            }
-            _connectionId = null;
-            _sendAsync = null;
-            abandoned = _pending.Values.ToArray();
-            _pending.Clear();
-        }
-        ReaderResultDeliveryException failure = new(
-            "BW_READER_RESULT_READER_DISCONNECTED",
-            "Reader 结果送达前直连已断开",
-            retryable: true);
-        foreach (
-            TaskCompletionSource<ReaderResultDeliveryAck> completion
-                in abandoned
-        )
-        {
-            completion.TrySetException(failure);
-        }
-    }
-
-    internal bool Acknowledge(
-        string connectionId,
-        ReaderResultDeliveryAck ack)
-    {
-        TaskCompletionSource<ReaderResultDeliveryAck>? completion;
-        lock (_gate)
-        {
-            if (
-                !string.Equals(
-                    _connectionId,
-                    connectionId,
-                    StringComparison.Ordinal)
-                || !_pending.TryGetValue(
-                    ack.Correlation,
-                    out completion)
-            )
-            {
-                return false;
-            }
-        }
-        return completion.TrySetResult(ack);
-    }
-
-    internal async Task<ReaderResultDeliveryAck> DeliverAsync(
-        ReaderResultDeliveryRequest request,
+        string sessionId,
+        IReadOnlyList<DirectExtensionLogEntry> entries,
+        DateTimeOffset receivedAtUtc,
         CancellationToken cancellationToken)
     {
-        Func<object, CancellationToken, Task> sendAsync;
-        TaskCompletionSource<ReaderResultDeliveryAck> completion = new(
-            TaskCreationOptions.RunContinuationsAsynchronously);
-        lock (_gate)
+        if (entries.Count is < 1 or > 50)
         {
-            if (_sendAsync is null || _connectionId is null)
-            {
-                throw new ReaderResultDeliveryException(
-                    "BW_READER_RESULT_READER_OFFLINE",
-                    "当前没有已认证的 Reader 直连",
-                    retryable: true);
-            }
-            if (_pending.Count >= MaximumPendingDeliveries)
-            {
-                throw new ReaderResultDeliveryException(
-                    "BW_READER_RESULT_CAPACITY",
-                    "Reader 结果待回执队列已满",
-                    retryable: true);
-            }
-            if (!_pending.TryAdd(request.Correlation, completion))
-            {
-                throw new ReaderResultDeliveryException(
-                    "BW_READER_RESULT_DUPLICATE_PENDING",
-                    "相同 correlation 的 Reader 结果仍在等待回执",
-                    retryable: true);
-            }
-            sendAsync = _sendAsync;
+            throw new ArgumentOutOfRangeException(nameof(entries));
         }
+        string path = GetLogPath(installationRoot);
+        StringBuilder payload = new();
+        foreach (DirectExtensionLogEntry entry in entries)
+        {
+            payload.Append(JsonSerializer.Serialize(new
+            {
+                contract = LogContract,
+                receivedAtUtc,
+                at = entry.At,
+                source = entry.Source,
+                stage = entry.Stage,
+                detail = entry.Detail,
+                connectionId,
+                sessionId,
+            }, DirectBridgeContract.JsonOptions));
+            payload.Append('\n');
+        }
+        byte[] bytes = Utf8.GetBytes(payload.ToString());
 
+        await WriteGate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
-            await sendAsync(
-                ReaderResultDeliveryProtocol.Event(request),
-                cancellationToken).ConfigureAwait(false);
-            try
+            string? directory = Path.GetDirectoryName(path);
+            if (string.IsNullOrWhiteSpace(directory))
             {
-                return await completion.Task.WaitAsync(
-                    AckTimeout,
-                    cancellationToken).ConfigureAwait(false);
+                throw new InvalidOperationException(
+                    "Extension log directory is unavailable");
             }
-            catch (TimeoutException exception)
+            Directory.CreateDirectory(directory);
+            FileInfo current = new(path);
+            if (
+                current.Exists
+                && current.Length + bytes.Length > MaximumLogBytes
+            )
             {
-                throw new ReaderResultDeliveryException(
-                    "BW_READER_RESULT_ACK_TIMEOUT",
-                    "Reader 结果送达后未在时限内收到渲染回执",
-                    retryable: true,
-                    exception);
+                string previousPath = path + ".1";
+                File.Move(path, previousPath, overwrite: true);
             }
-        }
-        catch (ReaderResultDeliveryException)
-        {
-            throw;
-        }
-        catch (OperationCanceledException)
-            when (cancellationToken.IsCancellationRequested)
-        {
-            throw;
-        }
-        catch (
-            Exception exception
-        ) when (
-            exception is WebSocketException
-            or ObjectDisposedException
-            or InvalidOperationException
-        )
-        {
-            throw new ReaderResultDeliveryException(
-                "BW_READER_RESULT_SEND_FAILED",
-                "Reader 结果无法写入当前直连",
-                retryable: true,
-                exception);
+            await using FileStream stream = new(
+                path,
+                FileMode.Append,
+                FileAccess.Write,
+                FileShare.Read,
+                bufferSize: 4096,
+                FileOptions.Asynchronous | FileOptions.WriteThrough);
+            await stream.WriteAsync(bytes, cancellationToken)
+                .ConfigureAwait(false);
+            await stream.FlushAsync(cancellationToken).ConfigureAwait(false);
+            return entries.Count;
         }
         finally
         {
-            lock (_gate)
-            {
-                if (
-                    _pending.TryGetValue(
-                        request.Correlation,
-                        out TaskCompletionSource<
-                            ReaderResultDeliveryAck>? current)
-                    && ReferenceEquals(current, completion)
-                )
-                {
-                    _pending.Remove(request.Correlation);
-                }
-            }
+            WriteGate.Release();
         }
     }
 }

@@ -87,7 +87,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
 
     private readonly string _statePath;
     private readonly Func<DateTimeOffset> _utcNow;
-    private readonly ILocalBookPageResolver? _localBookPageResolver;
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly Queue<string> _recentEventOrder = new();
     private readonly HashSet<string> _recentEventIds =
@@ -100,7 +99,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
     private JsonObject _focus = UnknownFocus(
         "snapshot-not-received");
     private JsonObject? _latestEvent;
-    private string? _pendingPageFailureReason;
 
     private sealed record AdapterState(
         long Revision,
@@ -109,7 +107,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
         JsonObject Selection,
         JsonObject Focus,
         JsonObject? LatestEvent,
-        string? PendingPageFailureReason,
         IReadOnlyList<string> RecentEventOrder);
 
     private sealed record FocusFoldResult(
@@ -118,8 +115,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
 
     internal FileDirectSnapshotContextAdapter(
         string statePath,
-        Func<DateTimeOffset>? utcNow = null,
-        ILocalBookPageResolver? localBookPageResolver = null)
+        Func<DateTimeOffset>? utcNow = null)
     {
         if (!System.IO.Path.IsPathFullyQualified(statePath))
         {
@@ -129,7 +125,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
         }
         _statePath = System.IO.Path.GetFullPath(statePath);
         _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
-        _localBookPageResolver = localBookPageResolver;
         LoadExistingState();
     }
 
@@ -210,43 +205,8 @@ internal sealed class FileDirectSnapshotContextAdapter :
                         viewPage.GetRawText());
                 }
                 bool changedPage = _activeReading is not null
-                    && !SameActiveReadingIdentity(
-                        _activeReading,
-                        next);
+                    && !SameActiveReadingIdentity(_activeReading, next);
                 _activeReading = next;
-                if (_localBookPageResolver is not null)
-                {
-                    LocalBookPageResolution resolution =
-                        await _localBookPageResolver.ResolveAsync(
-                            activeReading,
-                            cancellationToken).ConfigureAwait(false);
-                    if (resolution.Applicable)
-                    {
-                        if (
-                            resolution.Success
-                            && resolution.CurrentPage is not null
-                        )
-                        {
-                            _stablePage = resolution.CurrentPage;
-                            _pendingPageFailureReason = null;
-                        }
-                        else
-                        {
-                            if (
-                                _stablePage is null
-                                || !SamePageEquivalent(
-                                    _stablePage,
-                                    next)
-                            )
-                            {
-                                _stablePage = null;
-                            }
-                            _pendingPageFailureReason =
-                                resolution.FailureReason
-                                ?? "local-pdf-resolution-failed";
-                        }
-                    }
-                }
                 if (activeReading.SelectionState == "active")
                 {
                     _selection = ActiveSelection(
@@ -262,10 +222,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
                     changedPage
                     || (
                         _selection["ref"] is JsonObject selectionRef
-                        && !SameLogicalPage(
-                            next,
-                            selectionRef,
-                            next)
+                        && !SameLogicalPage(next, selectionRef, next)
                     )
                 )
                 {
@@ -317,7 +274,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 _revision = checked(_revision + 1);
                 _stablePage = null;
                 _activeReading = null;
-                _pendingPageFailureReason = null;
                 _selection = UnknownSelection("snapshot-cleared");
                 _focus = UnknownFocus("snapshot-cleared");
                 _latestEvent = new JsonObject
@@ -504,8 +460,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
         JsonObject value = JsonNode.Parse(
             contextEvent.Payload.GetRawText()) as JsonObject
             ?? throw JournalInvalid();
-        long windowsReceivedAtEpochMs =
-            _utcNow().ToUnixTimeMilliseconds();
         JsonObject latestEvent = new()
         {
             ["source"] = "outgoing-context",
@@ -518,55 +472,28 @@ internal sealed class FileDirectSnapshotContextAdapter :
         if (contextEvent.Type == "page.context")
         {
             (JsonObject stablePage, JsonObject activeReading) =
-                BuildPageContext(
-                    value,
-                    windowsReceivedAtEpochMs);
-            JsonObject pageContext =
-                value["page_context"] as JsonObject
-                ?? throw JournalInvalid();
-            string? pageSelection =
-                StringValue(pageContext["selection"]);
-            if (
-                pageContext.ContainsKey("selection")
-                && (
-                    StringValue(pageContext["reason"]) != "selection"
-                    || string.IsNullOrWhiteSpace(pageSelection)
-                    || pageSelection.Length > 400
-                    || pageSelection.Any(character =>
-                        char.IsControl(character)
-                        && character is not ('\r' or '\n' or '\t'))
-                )
-            )
-            {
-                throw JournalInvalid();
-            }
+                BuildPageContext(value);
             bool changedPage = _stablePage is not null
                 && !SamePage(_stablePage, stablePage);
             if (
                 _activeReading is JsonObject priorActive
                 && SamePageEquivalent(priorActive, activeReading)
                 && HasViewBinding(priorActive)
+                && StringValue(priorActive["viewFile"])
+                    is string priorViewFile
             )
             {
-                activeReading["viewFile"] =
-                    priorActive["viewFile"]?.DeepClone();
+                activeReading["viewFile"] = priorViewFile;
                 activeReading["viewPage"] =
                     priorActive["viewPage"]?.DeepClone();
             }
             _stablePage = stablePage;
             _activeReading = activeReading;
-            _pendingPageFailureReason = null;
             if (changedPage)
             {
                 _selection = ClearedSelection(
                     "stable-page-changed");
                 _focus = UnknownFocus("stable-page-changed");
-            }
-            if (!string.IsNullOrWhiteSpace(pageSelection))
-            {
-                _selection = ActiveSelection(
-                    pageSelection,
-                    activeReading);
             }
         }
         else if (contextEvent.Type == "focus")
@@ -583,10 +510,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
         }
         else if (contextEvent.Type == "drawing")
         {
-            _stablePage = FoldDrawingEvent(
-                value,
-                _stablePage,
-                windowsReceivedAtEpochMs);
+            _stablePage = FoldDrawingEvent(value, _stablePage);
         }
         else if (contextEvent.Type == "command-failed")
         {
@@ -597,9 +521,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
     }
 
     private (JsonObject StablePage, JsonObject ActiveReading)
-        BuildPageContext(
-            JsonObject value,
-            long windowsReceivedAtEpochMs)
+        BuildPageContext(JsonObject value)
     {
         string? file = StringValue(value["file"])
             ?? StringValue(value["book_id"]);
@@ -645,9 +567,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
         JsonObject? visual = CopyVisual(
             pageContext["visual"],
             file,
-            safePage,
-            NumericValue(value["ts"]),
-            windowsReceivedAtEpochMs);
+            safePage);
         if (visual is not null)
         {
             next["visual"] = visual;
@@ -675,7 +595,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
             ["observedAtEpochMs"] =
                 EpochSecondsToMilliseconds(value["ts"]),
             ["receivedAtEpochMs"] =
-                windowsReceivedAtEpochMs,
+                _utcNow().ToUnixTimeMilliseconds(),
         };
         return (next, activeReading);
     }
@@ -744,10 +664,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
         string? text = StringValue(safe["text"]);
         bool samePage =
             stablePage is not null
-            && SameLogicalPage(
-                stablePage,
-                safe,
-                activeReading);
+            && SameLogicalPage(stablePage, safe, activeReading);
         if (!samePage)
         {
             return new FocusFoldResult(
@@ -1006,8 +923,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
 
     private static JsonObject? FoldDrawingEvent(
         JsonObject value,
-        JsonObject? stablePage,
-        long windowsReceivedAtEpochMs)
+        JsonObject? stablePage)
     {
         if (stablePage is null)
         {
@@ -1053,10 +969,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
         double freshWindow =
             NumericValue(existingDrawing["freshWindowS"])
             ?? 120.0;
-        double? ageAtReceive = NumericValue(
-            existingDrawing["lastEditedAgeAtReceiveSec"]);
-        long? ageAnchorAt = LongValue(
-            existingDrawing["lastEditedReceivedAtEpochMs"]);
         if (state == "pending")
         {
             visual["drawing"] = new JsonObject
@@ -1066,9 +978,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 ["page"] = stablePage["page"]?.DeepClone(),
                 ["freshness"] = "recent",
                 ["lastEditedAt"] = eventSeconds,
-                ["lastEditedAgeAtReceiveSec"] = 0.0,
-                ["lastEditedReceivedAtEpochMs"] =
-                    windowsReceivedAtEpochMs,
                 ["freshWindowS"] = freshWindow,
                 ["inProgress"] = true,
                 ["stable"] = false,
@@ -1096,18 +1005,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
             {
                 throw JournalInvalid();
             }
-            if (
-                ageAtReceive is null
-                || ageAtReceive < 0
-                || ageAnchorAt is null
-                || ageAnchorAt < 1
-            )
-            {
-                ageAtReceive = Math.Max(
-                    0,
-                    eventSeconds - lastEditedAt);
-                ageAnchorAt = windowsReceivedAtEpochMs;
-            }
             visual["drawing"] = new JsonObject
             {
                 ["contract"] = "reader-outgoing-context/1",
@@ -1116,8 +1013,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 ["freshness"] =
                     DrawingFreshness(existingDrawing["freshness"]),
                 ["lastEditedAt"] = lastEditedAt,
-                ["lastEditedAgeAtReceiveSec"] = ageAtReceive,
-                ["lastEditedReceivedAtEpochMs"] = ageAnchorAt,
                 ["freshWindowS"] = freshWindow,
                 ["inProgress"] = false,
                 ["stable"] = true,
@@ -1141,9 +1036,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
     private static JsonObject? CopyVisual(
         JsonNode? node,
         string file,
-        JsonNode page,
-        double? sourceEventSeconds = null,
-        long? windowsReceivedAtEpochMs = null)
+        JsonNode page)
     {
         if (node is null)
         {
@@ -1177,9 +1070,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
         JsonObject? drawing = CopyDrawing(
             value["drawing"],
             file,
-            page,
-            sourceEventSeconds,
-            windowsReceivedAtEpochMs);
+            page);
         if (
             (drawing is null && hasInk)
             || (
@@ -1202,9 +1093,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
     private static JsonObject? CopyDrawing(
         JsonNode? node,
         string file,
-        JsonNode page,
-        double? sourceEventSeconds = null,
-        long? windowsReceivedAtEpochMs = null)
+        JsonNode page)
     {
         if (node is null || node.GetValueKind() == JsonValueKind.Null)
         {
@@ -1240,17 +1129,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
         double? freshWindow = NumericValue(value["freshWindowS"]);
         double? pendingSince = NullableNumericValue(
             value["pendingSince"]);
-        bool restoringPersistedDrawing =
-            sourceEventSeconds is null
-            || windowsReceivedAtEpochMs is null;
-        double? ageAtReceive = restoringPersistedDrawing
-            ? NullableNumericValue(
-                value["lastEditedAgeAtReceiveSec"])
-            : null;
-        long? ageAnchorAt = restoringPersistedDrawing
-            ? NullableLongValue(
-                value["lastEditedReceivedAtEpochMs"])
-            : null;
         if (
             freshWindow is null
             || freshWindow is <= 0 or > 3600
@@ -1268,18 +1146,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
                     || pendingSince < 0
                 )
             )
-            || (
-                ageAtReceive is not null
-                && (
-                    !double.IsFinite(ageAtReceive.Value)
-                    || ageAtReceive < 0
-                )
-            )
-            || (
-                ageAnchorAt is not null
-                && ageAnchorAt < 1
-            )
-            || (ageAtReceive is null) != (ageAnchorAt is null)
         )
         {
             throw JournalInvalid();
@@ -1345,18 +1211,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
         {
             throw JournalInvalid();
         }
-        if (
-            !empty
-            && sourceEventSeconds is not null
-            && windowsReceivedAtEpochMs is not null
-        )
-        {
-            ageAtReceive = Math.Max(
-                0,
-                sourceEventSeconds.Value - lastEditedAt!.Value);
-            ageAnchorAt = windowsReceivedAtEpochMs;
-        }
-        JsonObject drawing = new()
+        return new JsonObject
         {
             ["contract"] = contract,
             ["file"] = file,
@@ -1371,12 +1226,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
             ["ref"] = reference,
             ["empty"] = empty,
         };
-        if (!empty && ageAtReceive is not null && ageAnchorAt is not null)
-        {
-            drawing["lastEditedAgeAtReceiveSec"] = ageAtReceive;
-            drawing["lastEditedReceivedAtEpochMs"] = ageAnchorAt;
-        }
-        return drawing;
     }
 
     private static JsonObject? CopyEmbeds(JsonNode? node)
@@ -1586,27 +1435,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
         return value ?? throw JournalInvalid();
     }
 
-    private static long? NullableLongValue(JsonNode? node)
-    {
-        if (node is null || node.GetValueKind() == JsonValueKind.Null)
-        {
-            return null;
-        }
-        return LongValue(node) ?? throw JournalInvalid();
-    }
-
-    private static long? LongValue(JsonNode? node)
-    {
-        if (
-            node is JsonValue value
-            && value.TryGetValue(out long number)
-        )
-        {
-            return number;
-        }
-        return null;
-    }
-
     private static bool PageEquivalent(
         JsonNode? left,
         JsonNode? right)
@@ -1653,9 +1481,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
             )
             {
                 contextStatus = "pending";
-                effectivePage = PendingPage(
-                    _activeReading,
-                    _pendingPageFailureReason);
+                effectivePage = PendingPage(_activeReading);
             }
         }
         return new JsonObject
@@ -1740,7 +1566,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
             _focus.DeepClone() as JsonObject
                 ?? UnknownFocus("snapshot-checkpoint-failed"),
             _latestEvent?.DeepClone() as JsonObject,
-            _pendingPageFailureReason,
             _recentEventOrder.ToArray());
 
     private void RestoreState(AdapterState state)
@@ -1755,8 +1580,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
             ?? UnknownFocus("snapshot-rollback-failed");
         _latestEvent =
             state.LatestEvent?.DeepClone() as JsonObject;
-        _pendingPageFailureReason =
-            state.PendingPageFailureReason;
         _recentEventOrder.Clear();
         _recentEventIds.Clear();
         foreach (string eventId in state.RecentEventOrder)
@@ -1808,8 +1631,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 root["focus"] as JsonObject);
             _latestEvent = root["latestEvent"]?.DeepClone()
                 as JsonObject;
-            _pendingPageFailureReason = StringValue(
-                currentPage?["fallbackReason"]);
         }
         catch
         {
@@ -1821,7 +1642,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
             _selection = UnknownSelection("snapshot-invalid");
             _focus = UnknownFocus("snapshot-invalid");
             _latestEvent = null;
-            _pendingPageFailureReason = null;
         }
     }
 
@@ -1838,9 +1658,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
         }
     }
 
-    private static JsonObject PendingPage(
-        JsonObject active,
-        string? failureReason) =>
+    private static JsonObject PendingPage(JsonObject active) =>
         new()
         {
             ["kind"] = active["kind"]?.DeepClone(),
@@ -1850,9 +1668,6 @@ internal sealed class FileDirectSnapshotContextAdapter :
             ["stable"] = false,
             ["text"] = "",
             ["textAvailable"] = false,
-            ["textSource"] = null,
-            ["fallbackReason"] = failureReason,
-            ["truncated"] = false,
         };
 
     private static JsonObject? RestoreActiveReading(
@@ -1900,9 +1715,7 @@ internal sealed class FileDirectSnapshotContextAdapter :
             if (
                 kind == "web"
                 || viewFile is null
-                || !viewFile.StartsWith(
-                    "vbook:",
-                    StringComparison.Ordinal)
+                || !viewFile.StartsWith("vbook:", StringComparison.Ordinal)
                 || viewFile.Length is < 7 or > 4096
                 || viewFile.Any(char.IsControl)
                 || !ValidPageIdentifier(viewPage, allowNull: false)
@@ -2001,23 +1814,21 @@ internal sealed class FileDirectSnapshotContextAdapter :
     private static JsonObject RestoreFocus(JsonObject? source)
     {
         string? state = StringValue(source?["state"]);
-        if (state is null)
-        {
-            return UnknownFocus("snapshot-missing-focus");
-        }
         if (state == "unknown")
         {
             return UnknownFocus(
                 StringValue(source?["reason"])
-                    ?? "snapshot-restored-unknown");
+                    ?? "snapshot-invalid-focus");
         }
         if (state is not ("active" or "cleared"))
         {
             return UnknownFocus("snapshot-invalid-focus");
         }
         string? kind = StringValue(source?["kind"]);
-        JsonObject? reference = source?["ref"] as JsonObject;
-        if (!ValidFocusKind(kind) || reference is null)
+        if (
+            !ValidFocusKind(kind)
+            || source?["ref"] is not JsonObject reference
+        )
         {
             return UnknownFocus("snapshot-invalid-focus");
         }
@@ -2098,6 +1909,11 @@ internal sealed class FileDirectSnapshotContextAdapter :
             StringComparison.Ordinal)
         && JsonNode.DeepEquals(left["page"], right["page"]);
 
+    // Same page by equivalence rather than by raw JSON shape.
+    //
+    // SamePage uses DeepEquals, so 12 and "12" read as different pages even
+    // though the readers treat them as one. PageEquivalent already knows the
+    // difference; these comparisons need it too.
     private static bool SamePageEquivalent(
         JsonObject left,
         JsonObject right) =>
@@ -2107,11 +1923,21 @@ internal sealed class FileDirectSnapshotContextAdapter :
             StringComparison.Ordinal)
         && PageEquivalent(left["page"], right["page"]);
 
+    // Whether this reading carries a usable volume view.
+    //
+    // Both halves must be present and well formed. A half-written binding is
+    // worse than none: it would claim a mapping the other half cannot honour.
     private static bool HasViewBinding(JsonObject value) =>
         StringValue(value["viewFile"]) is string viewFile
         && viewFile.StartsWith("vbook:", StringComparison.Ordinal)
         && ValidPageIdentifier(value["viewPage"], allowNull: false);
 
+    // Identity of an active reading, view binding included.
+    //
+    // Two readings on the same canonical page are still different readings if
+    // one is being viewed through a volume and the other is not, or through a
+    // different volume page. Comparing only the canonical page would call them
+    // equal and the selection would survive a move it should not have.
     private static bool SameActiveReadingIdentity(
         JsonObject left,
         JsonObject right)
@@ -2138,6 +1964,14 @@ internal sealed class FileDirectSnapshotContextAdapter :
             );
     }
 
+    // Whether a reference names the same page as the canonical one, allowing
+    // for the reference having been written in volume coordinates.
+    //
+    // A selection made while reading a merged volume records the volume's file
+    // and page. Compared directly against the canonical member it never
+    // matches, and the selection gets discarded on every context event. The
+    // active reading holds the mapping between the two, so it is consulted
+    // before declaring a mismatch.
     private static bool SameLogicalPage(
         JsonObject canonicalPage,
         JsonObject reference,
