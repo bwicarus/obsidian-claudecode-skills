@@ -434,6 +434,14 @@ test("扩展上下文按设置和前台状态独立运行，不随语音停止",
   }
   assert.match(contentScript, /\["pageshow", "focus", "online"\]/);
   assert.match(contentScript, /contentDigest\(snap\.text\)/);
+  const contentReportStart = contentScript.indexOf("function report(force)");
+  const contentReportEnd = contentScript.indexOf("function schedule(force)", contentReportStart);
+  const contentReportBody = contentScript.slice(contentReportStart, contentReportEnd);
+  assert.ok(
+    contentReportBody.indexOf("deliverToFrame(snap)") <
+      contentReportBody.indexOf("extensionStore.set(ACTIVE_CONTEXT_KEY, envelope)"),
+    "same-page delivery must not wait for the optional storage relay",
+  );
   assert.match(contentScript, /ACTIVE_CONTEXT_KEY = "bwActivePageContextV1"/);
   assert.match(
     contentScript,

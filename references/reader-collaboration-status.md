@@ -3723,6 +3723,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **改了什么**：content script 优先调用同页 `RC.ctxSync.enabled()`，不再把另一套 `chrome.storage` 中从未写入的键当成真实开关；RC 缺失时才走旧存储回退。
 - **怎么验/下一步**：合同锁定运行时开关优先于存储回退；1.0.78 保留诊断，实机同时确认 enabled、采集、投递和桥端 origin-ok 后撤除。
 
+## Codex / Claude：Safari 同页直投解除 storage 前置（2026-08-06 JST）
+- **改了什么**：采集后的快照先直接投给同页 frame，再异步写兼容缓存；storage 卡住或失败不再阻断投递与诊断，旧 runtime 消息仍只是无 frame 兜底。
+- **怎么验/下一步**：合同锁定 `deliverToFrame` 必须早于 storage 写入；1.0.79 实机确认投递成功与桥端 origin-ok 后撤除临时诊断。
+
 # 2026-08-06 iOS 可选 Obsidian 本地笔记（TestFlight 候选制作中）
 
 - App 新增设备级 Vault 授权；App 与 Safari 扩展共享 `notes.create/status/list/read`，关闭时仍走 Pi。
