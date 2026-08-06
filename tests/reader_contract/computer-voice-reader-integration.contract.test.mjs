@@ -450,6 +450,15 @@ test("扩展上下文按设置和前台状态独立运行，不随语音停止",
   assert.match(contentScript, /extensionStore\.get\(PREFERENCE_KEY\)/);
   assert.match(contentScript, /function preferenceFromRuntime\(\)/);
   assert.match(contentScript, /RC\.ctxSync\.enabled\(\)/);
+  assert.match(contentScript, /MIRROR_KEY = "bwCtxSyncMirrorV1"/);
+  assert.match(
+    contentScript,
+    /function preferenceFromRuntime\(\)[\s\S]*localStorage\.getItem\(key\)[\s\S]*raw !== "1" && raw !== "0"[\s\S]*return null[\s\S]*mirrorPreference\(live\)/,
+  );
+  assert.match(
+    contentScript,
+    /function preferenceFromMirror\(\)[\s\S]*extensionStore\.get\(MIRROR_KEY\)/,
+  );
   assert.match(
     contentScript,
     /function refreshPreference\(forceReport\)[\s\S]*preferenceFromRuntime\(\)[\s\S]*extensionStore\.get\(PREFERENCE_KEY\)/,

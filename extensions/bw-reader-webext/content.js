@@ -653,6 +653,14 @@
           RC && RC.ctxSync &&
           typeof RC.ctxSync.enabled === "function"
         ) {
+          // rc-core is injected on every website. Its enabled() helper returns
+          // false both for an explicit "0" and for a missing site-local key.
+          // Only the former is user intent; treating the latter as intent
+          // would let the next ordinary website overwrite a true cross-site
+          // mirror with its local default.
+          var key = String(RC.ctxSync.LS_KEY || "");
+          var raw = key ? localStorage.getItem(key) : null;
+          if (raw !== "1" && raw !== "0") return null;
           var live = !!RC.ctxSync.enabled();
           mirrorPreference(live);
           return live;
