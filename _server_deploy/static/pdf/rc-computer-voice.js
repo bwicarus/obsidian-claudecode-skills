@@ -35,12 +35,17 @@
   var READER_RESULT_DELIVERY_CONTRACT = "reader-result-delivery/1";
   var READER_RESULT_EVENT = "reader-result";
   var READER_RESULT_ACK = "reader-result-ack";
-  var READER_VISUAL_DELIVERY_CONTRACT = "reader-visual-delivery/1";
+  var READER_VISUAL_DELIVERY_CONTRACT = "reader-visual-delivery/2";
   var READER_VISUAL_EVENT = "reader-visual-request";
   var READER_VISUAL_CHUNK = "reader-visual";
   var READER_VISUAL_MAX_BYTES = 768 * 1024;
   var READER_VISUAL_CHUNK_CHARS = 48000;
-  var READER_VISUAL_MAX_CHUNKS = 20;
+  var READER_VISUAL_MAX_CHUNKS = 24;
+  var READER_VISUAL_SCOPES = Object.freeze({
+    "viewport-context": true,
+    "drawing-nearby": true,
+    "selection-near": true,
+  });
   var CONTEXT_DELIVERY_LEGACY = "legacy-inject";
   var CONTEXT_DELIVERY_SNAPSHOT = "snapshot-mcp";
   var COMPUTER_TARGET_CODEX = "codex-desktop";
@@ -130,6 +135,11 @@
   var readerVisualCapturePromise = null;
   var readerVisualGeneration = 0;
   var readerVisualPageKey = null;
+  // One stable identity for this top-level Reader document. Windows uses it
+  // only to route an on-demand visual/control request back to the exact live
+  // surface that most recently described the snapshot; it is never an audio
+  // owner and is regenerated on a real document reload.
+  var readerSourceInstanceId = null;
   var READER_DRAWING_STATE_EVENT = "bw-reader-drawing-state";
   var MICROPHONE_WORKLET =
     'class BWMicCapture extends AudioWorkletProcessor{' +
@@ -664,10 +674,15 @@
       value,
       [
         "contract",
+        "commandKind",
         "correlation",
+        "sourceInstanceId",
+        "snapshotRevision",
         "file",
         "page",
         "drawingRevision",
+        "scope",
+        "selectionId",
         "maxBytes",
         "chunkCharacters",
       ],
@@ -681,10 +696,31 @@
         false
       );
     }
+    if (value.commandKind !== "capture-composite") {
+      throw directError(
+        "Reader 视觉 commandKind 不受支持",
+        "BW_READER_VISUAL_SCHEMA_INVALID",
+        false
+      );
+    }
     var correlation = safeId(
       value.correlation,
       "Reader 笔迹视觉 correlation"
     );
+    var sourceInstanceId = safeId(
+      value.sourceInstanceId,
+      "Reader 视觉 sourceInstanceId"
+    );
+    if (
+      !Number.isSafeInteger(value.snapshotRevision) ||
+      value.snapshotRevision < 0
+    ) {
+      throw directError(
+        "Reader 视觉 snapshotRevision 无效",
+        "BW_READER_VISUAL_SCHEMA_INVALID",
+        false
+      );
+    }
     var file = safeText(
       value.file,
       "Reader 笔迹视觉 file",
@@ -720,19 +756,12 @@
         false
       );
     }
-    var revision = safeText(
-      value.drawingRevision,
-      "Reader 笔迹视觉 drawingRevision",
-      19,
-      false
-    );
-    if (!/^dr_[0-9a-f]{16}$/.test(revision)) {
-      throw directError(
-        "Reader 笔迹视觉 drawingRevision 无效",
-        "BW_READER_VISUAL_SCHEMA_INVALID",
-        false
+    var revision = value.drawingRevision === null
+      ? null
+      : safeId(
+        value.drawingRevision,
+        "Reader 笔迹视觉 drawingRevision"
       );
-    }
     if (
       value.maxBytes !== READER_VISUAL_MAX_BYTES ||
       value.chunkCharacters !== READER_VISUAL_CHUNK_CHARS
@@ -743,14 +772,48 @@
         false
       );
     }
+    var scope = safeText(value.scope, "Reader 笔迹视觉 scope", 32, false);
+    var selectionId = null;
+    if (!READER_VISUAL_SCOPES[scope]) {
+      throw directError(
+        "Reader 笔迹视觉 scope 不受支持",
+        "BW_READER_VISUAL_SCHEMA_INVALID",
+        false
+      );
+    }
+    if (scope === "selection-near") {
+      if (value.selectionId === null) {
+        throw directError(
+          "Reader 选区视觉请求缺少 selectionId",
+          "BW_READER_VISUAL_SCHEMA_INVALID",
+          false
+        );
+      }
+      selectionId = safeId(
+        value.selectionId,
+        "Reader 笔迹视觉 selectionId"
+      );
+    } else if (value.selectionId !== null) {
+      throw directError(
+        "Reader 非选区视觉请求不能携带 selectionId",
+        "BW_READER_VISUAL_SCHEMA_INVALID",
+        false
+      );
+    }
     return {
       contract: READER_VISUAL_DELIVERY_CONTRACT,
+      commandKind: "capture-composite",
       correlation: correlation,
+      sourceInstanceId: sourceInstanceId,
+      snapshotRevision: value.snapshotRevision,
       file: file,
       page: page,
       drawingRevision: revision,
       maxBytes: value.maxBytes,
       chunkCharacters: value.chunkCharacters,
+      scoped: true,
+      scope: scope,
+      selectionId: selectionId,
     };
   }
 
@@ -833,6 +896,11 @@
       id: "session-" + bytesToBase64Url(bytes),
       bytes: bytes,
     };
+  }
+
+  function currentReaderSourceInstanceId() {
+    if (!readerSourceInstanceId) readerSourceInstanceId = randomId("source");
+    return readerSourceInstanceId;
   }
 
   function nextRequestId() {
@@ -1819,12 +1887,18 @@
     request,
     fields
   ) {
-    var payload = Object.assign({
+    var identity = {
+      sessionId: this.readerVisualSessionId,
       correlation: request.correlation,
+      sourceInstanceId: request.sourceInstanceId,
+      snapshotRevision: request.snapshotRevision,
       file: request.file,
       page: request.page,
       drawingRevision: request.drawingRevision,
-    }, fields);
+      scope: request.scope,
+      selectionId: request.selectionId,
+    };
+    var payload = Object.assign(identity, fields);
     return this.request(
       READER_VISUAL_CHUNK,
       payload,
@@ -1893,16 +1967,25 @@
     );
   }
 
-  function readerVisualIdentityKey(file, page, drawingRevision) {
+  function readerVisualIdentityKey(
+    file,
+    page,
+    drawingRevision,
+    scope,
+    selectionId
+  ) {
     return String(file) + "\n" + String(page) + "\n" +
-      String(drawingRevision);
+      String(drawingRevision) + "\n" + String(scope || "legacy") + "\n" +
+      String(selectionId || "");
   }
 
   function readerVisualRequestKey(request) {
     return readerVisualIdentityKey(
       request.file,
       request.page,
-      request.drawingRevision
+      request.drawingRevision,
+      request.scope,
+      request.selectionId
     );
   }
 
@@ -1918,22 +2001,63 @@
     if (
       snapshotLink &&
       !snapshotLink.stopped &&
-      directChannelLive(snapshotLink.channel)
+      directChannelLive(snapshotLink.channel) &&
+      snapshotLink.channel.readerVisualSourceId ===
+        currentReaderSourceInstanceId()
     ) {
       return snapshotLink.channel;
-    }
-    if (
-      active &&
-      active.started &&
-      active.contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT &&
-      directChannelLive(active.channel)
-    ) {
-      return active.channel;
     }
     return null;
   }
 
+  function readerVisualRequestMatchesLive(request) {
+    var current = localActiveReadingSnapshot();
+    if (
+      contextDeliveryMode !== CONTEXT_DELIVERY_SNAPSHOT ||
+      !current ||
+      current.sourceInstanceId !== request.sourceInstanceId ||
+      current.file !== request.file ||
+      !sameActiveScalar(current.page, request.page)
+    ) {
+      return false;
+    }
+    if (request.scope === "viewport-context") return true;
+    return request.drawingRevision !== null &&
+      readerVisualDrawingMatches(request);
+  }
+
   function captureReaderVisual(request) {
+    if (request.scoped === true) {
+      var scopedTarget = {
+        page: request.page,
+        scope: request.scope,
+      };
+      if (request.selectionId) {
+        scopedTarget.selectionId = request.selectionId;
+      }
+      if (request.scope === "viewport-context") {
+        return RC.capturePageComposite &&
+          typeof RC.capturePageComposite === "function"
+          ? Promise.resolve(RC.capturePageComposite(scopedTarget)).catch(
+            function () {
+              return RC.captureView && typeof RC.captureView === "function"
+                ? RC.captureView()
+                : null;
+            }
+          )
+          : Promise.resolve(
+            RC.captureView && typeof RC.captureView === "function"
+              ? RC.captureView()
+              : null
+          );
+      }
+      return RC.captureInkRegion &&
+        typeof RC.captureInkRegion === "function"
+        ? Promise.resolve(RC.captureInkRegion(scopedTarget)).catch(
+          function () { return null; }
+        )
+        : Promise.resolve(null);
+    }
     function captureLegacy() {
       if (
         RC.captureInkRegion &&
@@ -1969,7 +2093,7 @@
 
   function ensureReaderVisual(request) {
     var key = readerVisualRequestKey(request);
-    if (readerVisualCacheMatches(request)) {
+    if (request.scoped !== true && readerVisualCacheMatches(request)) {
       return Promise.resolve(readerVisualCache.shot);
     }
     if (
@@ -1980,36 +2104,30 @@
     }
     var generation = readerVisualGeneration;
     var capturePromise = Promise.resolve().then(function () {
-      var current = localActiveReadingSnapshot();
-      if (
-        contextDeliveryMode !== CONTEXT_DELIVERY_SNAPSHOT ||
-        !current ||
-        current.file !== request.file ||
-        !sameActiveScalar(current.page, request.page) ||
-        !readerVisualDrawingMatches(request)
-      ) {
+      if (!readerVisualRequestMatchesLive(request)) {
         return null;
       }
       return captureReaderVisual(request);
     }).then(function (shot) {
-      var latest = localActiveReadingSnapshot();
       if (
         generation !== readerVisualGeneration ||
-        !latest ||
-        latest.file !== request.file ||
-        !sameActiveScalar(latest.page, request.page) ||
-        !readerVisualDrawingMatches(request)
+        !readerVisualRequestMatchesLive(request)
       ) {
         return null;
       }
       if (!shot) return null;
-      readerVisualCache = {
-        key: key,
-        file: request.file,
-        page: request.page,
-        drawingRevision: request.drawingRevision,
-        shot: shot,
-      };
+      // The proactive cache has the legacy "whole page" wire shape. A scoped
+      // crop must never replace it, otherwise a later reconnect could publish
+      // a selection crop as though it were the legacy page composite.
+      if (request.scoped !== true) {
+        readerVisualCache = {
+          key: key,
+          file: request.file,
+          page: request.page,
+          drawingRevision: request.drawingRevision,
+          shot: shot,
+        };
+      }
       return shot;
     }).finally(function () {
       if (readerVisualCapturePromise === capturePromise) {
@@ -4346,7 +4464,15 @@
       page: page,
       selectionState: selectionState,
       selection: selection,
+      sourceInstanceId: currentReaderSourceInstanceId(),
     };
+    try {
+      if (typeof RC.selectionRegionsForPage === "function") {
+        activeReading.selectionRegions = RC.selectionRegionsForPage({
+          page: page,
+        });
+      }
+    } catch (_) {}
     if (isView) {
       activeReading.viewFile = sourceFile;
       activeReading.viewPage = source.pos;
@@ -4925,14 +5051,38 @@
           );
         }
         if (snapshotLink !== state || state.stopped) return null;
-        startContextPump(state);
-        startActiveReadingPump(state);
-        primeReaderVisualFromOutgoing();
-        emitStatus({
-          state: "context-ready",
-          message: "Windows 本地 Reader 快照已连接",
+        var sourceInstanceId = currentReaderSourceInstanceId();
+        state.channel.readerVisualSessionId = state.sessionId;
+        return state.channel.request("visual-register", {
+          sessionId: state.sessionId,
+          sourceInstanceId: sourceInstanceId,
+        }).then(function (registration) {
+          exactObject(
+            registration,
+            ["sessionId", "sourceInstanceId", "state"],
+            [],
+            "VISUAL-REGISTER 响应"
+          );
+          if (
+            registration.sessionId !== state.sessionId ||
+            registration.sourceInstanceId !== sourceInstanceId ||
+            registration.state !== "registered"
+          ) {
+            throw contextSchemaError(
+              "Windows VISUAL-REGISTER 回执无效",
+              "BW_READER_VISUAL_REGISTER_ACK"
+            );
+          }
+          state.channel.readerVisualSourceId = sourceInstanceId;
+          if (snapshotLink !== state || state.stopped) return null;
+          startContextPump(state);
+          startActiveReadingPump(state);
+          emitStatus({
+            state: "context-ready",
+            message: "Windows 本地 Reader 快照已连接",
+          });
+          return state;
         });
-        return state;
       });
     }).catch(function (error) {
       if (snapshotLink === state) snapshotLink = null;

@@ -4557,12 +4557,27 @@
       return s;
     } catch (e) { return null; }
   }
-  function _surfaceInkCrop(s) {
+  function _visualCaptureScope(target) {
+    var scope = target && typeof target === 'object' ? target.scope : null;
+    return scope === 'viewport-context' || scope === 'drawing-nearby' ||
+      scope === 'selection-near' ? scope : null;
+  }
+  function _visualCaptureSelectionId(target) {
+    var value = target && typeof target === 'object' ? target.selectionId : null;
+    return typeof value === 'string' && /^[A-Za-z0-9._:-]{1,160}$/.test(value)
+      ? value : null;
+  }
+  function _surfaceInkCrop(s, selectionId) {
     var x0 = 1, y0 = 1, x1 = 0, y1 = 0;
     s.strokes.forEach(function (st) {
+      if (selectionId && !(st && st.t === 'region' && st.id === selectionId)) return;
       (st.p || []).forEach(function (pt) {
-        x0 = Math.min(x0, Number(pt[0])); y0 = Math.min(y0, Number(pt[1]));
-        x1 = Math.max(x1, Number(pt[0])); y1 = Math.max(y1, Number(pt[1]));
+        var px = Number(pt[0]), py = Number(pt[1]);
+        if (!Number.isFinite(px) || !Number.isFinite(py)) return;
+        x0 = Math.min(x0, Math.max(0, Math.min(1, px)));
+        y0 = Math.min(y0, Math.max(0, Math.min(1, py)));
+        x1 = Math.max(x1, Math.max(0, Math.min(1, px)));
+        y1 = Math.max(y1, Math.max(0, Math.min(1, py)));
       });
     });
     if (!(x1 >= x0 && y1 >= y0)) return null;
@@ -4581,13 +4596,31 @@
       height: Math.min(wantH, s.height)
     };
   }
-  function _drawSurfaceInk(canvas, s, crop) {
+  function _drawSurfaceInk(canvas, s, crop, selectionId) {
     if (!canvas || !s.strokes.length || !window.RCInk || !RCInk.drawStroke) return;
     var ctx2 = canvas.getContext('2d');
     var sx = canvas.width / Math.max(1, crop.width), sy = canvas.height / Math.max(1, crop.height);
-    s.strokes.forEach(function (st) {
+    var regions = s.strokes.filter(function (st) { return st && st.t === 'region'; });
+    regions.sort(function (a, b) {
+      var at = Number(a.createdAtEpochMs) || 0, bt = Number(b.createdAtEpochMs) || 0;
+      if (at !== bt) return at - bt;
+      return String(a.id || '').localeCompare(String(b.id || ''));
+    });
+    var ordered = s.strokes.slice();
+    if (selectionId) {
+      ordered.sort(function (a, b) {
+        return (a && a.id === selectionId ? 1 : 0) -
+          (b && b.id === selectionId ? 1 : 0);
+      });
+    }
+    ordered.forEach(function (st) {
+      var selected = !!(selectionId && st && st.t === 'region' && st.id === selectionId);
       var clone = {
-        t: st.t || 'pen', c: st.c || '#e74c3c', w: Number(st.w) || 2.5,
+        t: st.t || 'pen',
+        id: st.id,
+        createdAtEpochMs: st.createdAtEpochMs,
+        c: selected ? '#0a84ff' : (st.c || '#e74c3c'),
+        w: selected ? Math.max(3.5, Number(st.w) || 2) : (Number(st.w) || 2.5),
         p: (st.p || []).map(function (pt) {
           return [
             ((Number(pt[0]) * s.width) - crop.x) / crop.width,
@@ -4595,10 +4628,17 @@
           ];
         })
       };
-      if (clone.p.length) RCInk.drawStroke(ctx2, clone, canvas.width, canvas.height, Math.min(sx, sy));
+      if (clone.p.length) RCInk.drawStroke(
+        ctx2,
+        clone,
+        canvas.width,
+        canvas.height,
+        Math.min(sx, sy),
+        st && st.t === 'region' ? { regionNumber: regions.indexOf(st) + 1 } : undefined
+      );
     });
   }
-  async function _captureSurface(s, crop) {
+  async function _captureSurface(s, crop, selectionId) {
     if (!s || !crop || !(crop.width > 0) || !(crop.height > 0)) return null;
     await _loadH2C();
     var longEdge = Math.max(crop.width, crop.height, 1);
@@ -4614,7 +4654,7 @@
                id === 'word-pop' || id === 'sel-toolbar';
       }
     });
-    _drawSurfaceInk(canvas, s, crop);
+    _drawSurfaceInk(canvas, s, crop, selectionId);
     var b64 = '', qs = [0.85, 0.7, 0.5];
     for (var qi = 0; qi < qs.length; qi++) {
       b64 = (canvas.toDataURL('image/jpeg', qs[qi]).split(',')[1]) || '';
@@ -4692,7 +4732,7 @@
     }
     return page != null && String(page) === targetPage;
   }
-  async function _captureBodyPageRect(rect, surface, surfaceCrop) {
+  async function _captureBodyPageRect(rect, surface, surfaceCrop, selectionId) {
     try {
       if (!rect || !(rect.width > 0) || !(rect.height > 0)) return null;
       await _loadH2C();
@@ -4713,7 +4753,7 @@
         }
       });
       if (surface && surfaceCrop) {
-        _drawSurfaceInk(canvas, surface, surfaceCrop);
+        _drawSurfaceInk(canvas, surface, surfaceCrop, selectionId);
       }
       var b64 = '', qs = [0.85, 0.7, 0.5];
       for (var qi = 0; qi < qs.length; qi++) {
@@ -4723,6 +4763,49 @@
       return b64.length > 3000 ? { media_type: 'image/jpeg', b64: b64 } : null;
     } catch (e) { return null; }
   }
+  async function _captureSurfaceCompositeCrop(surface, crop, selectionId) {
+    if (!surface || !surface.element || !crop) return null;
+    var rect = surface.element.getBoundingClientRect();
+    var bodyRect = {
+      left: (surface.element === document.body ? -(window.scrollX || 0) : rect.left) + crop.x,
+      top: (surface.element === document.body ? -(window.scrollY || 0) : rect.top) + crop.y,
+      width: crop.width,
+      height: crop.height
+    };
+    return await _captureBodyPageRect(
+      bodyRect,
+      surface,
+      crop,
+      selectionId
+    ) || await _captureSurface(surface, crop, selectionId);
+  }
+  async function _captureViewportComposite() {
+    var surface = _visualSurface();
+    if (surface) {
+      var vp = surface.viewport || {};
+      var cropX = Math.max(0, Number(vp.x) || 0);
+      var cropY = Math.max(0, Number(vp.y) || 0);
+      var crop = {
+        x: cropX,
+        y: cropY,
+        width: Math.min(
+          Math.max(0, surface.width - cropX),
+          Number(vp.width) || window.innerWidth
+        ),
+        height: Math.min(
+          Math.max(0, surface.height - cropY),
+          Number(vp.height) || window.innerHeight
+        )
+      };
+      return await _captureSurfaceCompositeCrop(surface, crop, null);
+    }
+    return await _captureBodyPageRect({
+      left: 0,
+      top: 0,
+      width: window.innerWidth,
+      height: window.innerHeight
+    }) || await _captureView();
+  }
   // 当前逻辑页的完整“正文 + 墨迹 + 页内卡片/便签/高亮”合成图。
   // 只复用本文件已有 html2canvas/_captureSurface/_captureEl，不另造渲染器：
   // - 普通网页以当前视口 body 合成并补画 canonical strokes；
@@ -4730,6 +4813,13 @@
   // - 宿主尚未装载目标元素时回退当前视口，保持旧语音链可用。
   async function _capturePageComposite(target) {
     try {
+      var requestedScope = _visualCaptureScope(target);
+      if (requestedScope === 'viewport-context') {
+        return await _captureViewportComposite();
+      }
+      if (requestedScope === 'drawing-nearby' || requestedScope === 'selection-near') {
+        return await _captureInkRegion(target);
+      }
       var targetPage = _compositeTargetPage(target);
       var els = document.querySelectorAll(
         '.page-wrap[data-page-num], .pdf-upage, ' +
@@ -4788,15 +4878,22 @@
   function _inkPageMatchesTarget(el, targetPage) {
     if (targetPage == null) return true;   // 旧语音链无参调用:保持"首个可见墨迹页"
     var page = null;
-    if (el && el.dataset && el.dataset.pageNum != null) page = el.dataset.pageNum;
-    else if (el && el.__upRec && el.__upRec.page != null) page = el.__upRec.page;
+    if (el && el.dataset) {
+      if (el.dataset.pageNum != null) page = el.dataset.pageNum;
+      else if (el.dataset.idx != null) page = el.dataset.idx;
+      else if (el.dataset.uid != null) page = el.dataset.uid;
+    }
+    if (page == null && el && el.__upRec && el.__upRec.page != null) page = el.__upRec.page;
     return page != null && String(page) === targetPage;
   }
   // 当前视口里**带手写**的页(page-wrap 或 pdf-upage);target 可选。
   // 快照 MCP 会传精确页码,双页同时可见时不能把相邻页的墨迹图冒充当前 revision。
   function _curInkPageEl(target) {
     var targetPage = _inkTargetPage(target);
-    var els = document.querySelectorAll('.page-wrap[data-page-num], .pdf-upage');
+    var els = document.querySelectorAll(
+      '.page-wrap[data-page-num], .pdf-upage, ' +
+      '.ep-sec[data-idx], .ep-usec[data-uid]'
+    );
     for (var i = 0; i < els.length; i++) {
       var el = els[i], r = el.getBoundingClientRect();
       if (r.bottom > 0 && r.top < (window.innerHeight || 0) &&
@@ -4805,14 +4902,100 @@
     }
     return null;
   }
+  // Small, AI-readable index of closed custom regions on the exact current
+  // page. Geometry stays in the ink layer and is fetched only through the
+  // visual tool; the live snapshot needs just enough metadata to name a region
+  // without guessing or enumerating arbitrary DOM ids.
+  function _selectionRegionsForPage(target) {
+    try {
+      var surface = _visualSurface();
+      var strokes = surface && Array.isArray(surface.strokes)
+        ? surface.strokes : null;
+      if (!strokes) {
+        var el = _curInkPageEl(target);
+        strokes = el && Array.isArray(el.__inkStrokes)
+          ? el.__inkStrokes : [];
+      }
+      var regions = strokes.filter(function (stroke) {
+        return stroke && stroke.t === 'region' &&
+          typeof stroke.id === 'string' &&
+          /^[A-Za-z0-9._:-]{1,160}$/.test(stroke.id);
+      }).sort(function (left, right) {
+        var byTime = (Number(left.createdAtEpochMs) || 0) -
+          (Number(right.createdAtEpochMs) || 0);
+        if (byTime) return byTime;
+        return left.id < right.id ? -1 : (left.id > right.id ? 1 : 0);
+      });
+      var total = regions.length;
+      var first = Math.max(0, total - 128);
+      var items = regions.slice(first).map(function (stroke, index) {
+        var ordinal = first + index + 1;
+        var createdAt = Number(stroke.createdAtEpochMs) || 0;
+        var date = createdAt > 0 ? new Date(createdAt) : null;
+        var pad = function (value) { return String(value).padStart(2, '0'); };
+        var clock = date && Number.isFinite(date.getTime())
+          ? pad(date.getHours()) + ':' + pad(date.getMinutes())
+          : '--:--';
+        return {
+          selectionId: stroke.id,
+          label: '#' + ordinal + ' ' + clock,
+          ordinal: ordinal,
+          createdAtEpochMs: createdAt,
+        };
+      });
+      return {
+        contract: 'reader-selection-regions/1',
+        total: total,
+        truncated: first > 0,
+        items: items,
+      };
+    } catch (e) {
+      return {
+        contract: 'reader-selection-regions/1',
+        total: 0,
+        truncated: false,
+        items: [],
+      };
+    }
+  }
   // 用户点子:前端截图但**灵活截局部**——按笔迹外接框(+留白上下文)只截那一小块,而非整屏。所见即所得 + 聚焦。
   async function _captureInkRegion(target) {
     try {
+      var scope = _visualCaptureScope(target);
+      var selectionId = _visualCaptureSelectionId(target);
+      if (scope === 'selection-near' && !selectionId) return null;
       var surface = _visualSurface();
-      if (surface && surface.strokes.length) return await _captureSurface(surface, _surfaceInkCrop(surface));
+      if (surface && surface.strokes.length) {
+        var surfaceCrop = _surfaceInkCrop(surface, selectionId);
+        if (!surfaceCrop) return null;
+        return scope
+          ? await _captureSurfaceCompositeCrop(surface, surfaceCrop, selectionId)
+          : await _captureSurface(surface, surfaceCrop);
+      }
       var el = _curInkPageEl(target);
       var strokes = el && el.__inkStrokes;
       if (!el || !strokes || !strokes.length) return null;
+      if (scope) {
+        var W0 = el.offsetWidth || el.getBoundingClientRect().width;
+        var H0 = el.offsetHeight || el.getBoundingClientRect().height;
+        var scopedSurface = {
+          element: el,
+          width: W0,
+          height: H0,
+          viewport: {
+            width: Math.min(W0, window.innerWidth || W0),
+            height: Math.min(H0, window.innerHeight || H0)
+          },
+          strokes: strokes
+        };
+        var scopedCrop = _surfaceInkCrop(scopedSurface, selectionId);
+        if (!scopedCrop) return null;
+        return await _captureSurfaceCompositeCrop(
+          scopedSurface,
+          scopedCrop,
+          selectionId
+        );
+      }
       var x0 = 1, y0 = 1, x1 = 0, y1 = 0;   // 笔迹外接框(归一化 0-1)
       strokes.forEach(function (s) { (s.p || []).forEach(function (pt) { x0 = Math.min(x0, pt[0]); y0 = Math.min(y0, pt[1]); x1 = Math.max(x1, pt[0]); y1 = Math.max(y1, pt[1]); }); });
       if (!(x1 > x0 && y1 > y0)) return null;
@@ -4837,6 +5020,7 @@
     RC.captureEl = _captureEl;
     RC.captureInkRegion = _captureInkRegion;
     RC.capturePageComposite = _capturePageComposite;
+    RC.selectionRegionsForPage = _selectionRegionsForPage;
   } catch (e) {}   // 共享截图:视口/指定元素/笔迹局部/**整页叠加合成图**。文字侧栏 EPUB 预拍;语音走 need_shot
   async function _rtcTool(name, args, callId) {   // 工具循环(本地):与 relay WS 版同语义,tool_status 卡/client_action 全复用
     if (name === 'wait_for_user') {   // 静音 no-op:回空 output、不 response.create=安静
