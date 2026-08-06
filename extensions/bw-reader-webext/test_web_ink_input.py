@@ -177,6 +177,25 @@ def main() -> None:
                       .querySelector('#bw-ink-btn').classList.contains('active')"""
                 )
 
+                # Palette settings must be captured by the next stroke rather than
+                # only changing the visible controls.  Safari may commit its native
+                # color/range controls with ``change`` only, so exercise that exact
+                # path instead of Chromium's usual continuous ``input`` event.
+                palette_state = page.evaluate(
+                    """() => {
+                      const root=document.querySelector('#bw-reader-host').shadowRoot;
+                      const color=root.querySelector('.bw-ink-tools input[type=color]');
+                      const width=root.querySelector('.bw-ink-tools input[type=range]');
+                      color.value='#007aff';
+                      color.dispatchEvent(new Event('change',{bubbles:true}));
+                      width.value='9';
+                      width.dispatchEvent(new Event('change',{bubbles:true}));
+                      return {color:color.value,width:Number(width.value)};
+                    }"""
+                )
+                assert palette_state["color"] == "#007aff", palette_state
+                assert palette_state["width"] == 9, palette_state
+
                 session = context.new_cdp_session(page)
                 session.send("Emulation.setTouchEmulationEnabled", {
                     "enabled": True,
@@ -240,6 +259,20 @@ def main() -> None:
                       .querySelectorAll('.bw-ink-document path').length === n + 1""",
                     arg=before_paths,
                 )
+                rendered_tool = page.evaluate(
+                    """() => {
+                      const path=document.querySelector('#bw-reader-pins').shadowRoot
+                        .querySelector('.bw-ink-document path:last-child');
+                      return {
+                        pathColor:path.getAttribute('stroke'),
+                        pathWidth:Number(path.getAttribute('stroke-width'))
+                      };
+                    }"""
+                )
+                assert rendered_tool == {
+                    "pathColor": "#007aff",
+                    "pathWidth": 9,
+                }, rendered_tool
                 after_pen_scroll = page.evaluate("() => scrollY")
                 assert abs(after_pen_scroll - before_pen_scroll) < 4, {
                     "before": before_pen_scroll,

@@ -250,7 +250,12 @@
   document.addEventListener('touchstart',_blk,{passive:false,capture:true});
   document.addEventListener('touchmove',_blk,{passive:false,capture:true});
   tools.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.tool){tool=b.dataset.tool;clearTimeout(revertT);quickErase=false;syncToolUI();return;}if(b.dataset.act==='undo'&&undo.length){strokes=JSON.parse(undo.pop());draw();renderSvg();persist();emitInkChange();}if(b.dataset.act==='clear'&&strokes.length&&confirm('清空当前网页的全部笔迹？')){snapshot();strokes=[];draw();renderSvg();persist();emitInkChange();}if(b.dataset.act==='close')set(false);});
-  tools.querySelector('input[type=color]').oninput=e=>color=e.target.value;tools.querySelector('input[type=range]').oninput=e=>width=Number(e.target.value)||3;
+  const colorInput=tools.querySelector('input[type=color]'),widthInput=tools.querySelector('input[type=range]');
+  const applyColor=e=>{color=e.target.value;},applyWidth=e=>{width=Number(e.target.value)||3;};
+  // iPad Safari 的原生颜色板/滑杆有时只在确认时发 change；两种事件都接住，
+  // 避免控件表面值已变而下一笔仍沿用旧参数。
+  colorInput.addEventListener('input',applyColor);colorInput.addEventListener('change',applyColor);
+  widthInput.addEventListener('input',applyWidth);widthInput.addEventListener('change',applyWidth);
   // set(v)：只切「桌面手写模式」(鼠标可画) + 显示/隐藏工具条。Apple Pencil 不受它管，始终自动落笔。
   function set(v){on=!!v;tools.classList.toggle('show',on);window.RC?.toast?.(on?'桌面手写模式已开(鼠标可画；Apple Pencil 始终可画)':'已退出桌面手写模式(Apple Pencil 仍随时可画)');return on;}
   // 画的过程中页面被滚(手指/滚轮)→ 按最近笔尖屏幕位 + 新滚动量补点,笔迹在文档坐标里连续拖出竖线(用户预期行为)
