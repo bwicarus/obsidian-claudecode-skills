@@ -598,7 +598,40 @@
       }, { passive: true });
     });
 
+    // Asks the switch itself, rather than a copy of it.
+    //
+    // The setting is owned by RC.ctxSync and persisted to localStorage; this
+    // file was reading chrome.storage.local under a different key entirely. Two
+    // different stores, two different names -- so the value came back undefined
+    // no matter how many times the user toggled it, and undefined folded to
+    // false. Every "I turned it on and nothing happened" tonight was this.
+    //
+    // RC lives in this same page, injected alongside this script, so the switch
+    // can simply be asked. The storage read stays as a fallback for surfaces
+    // where RC is absent.
+    function preferenceFromRuntime() {
+      try {
+        var RC = window.RC;
+        if (
+          RC && RC.ctxSync &&
+          typeof RC.ctxSync.enabled === "function"
+        ) {
+          return !!RC.ctxSync.enabled();
+        }
+      } catch (_) {}
+      return null;
+    }
+
     function refreshPreference(forceReport) {
+      var live = preferenceFromRuntime();
+      if (live !== null) {
+        preferenceKnown = true;
+        var changedLive = contextSyncEnabled !== live;
+        contextSyncEnabled = live;
+        if (forceReport && contextSyncEnabled) schedule(true);
+        else if (changedLive && contextSyncEnabled) schedule(true);
+        return;
+      }
       if (!extensionStore || typeof extensionStore.get !== "function") {
         // Left unknown on purpose: no store means the answer is unavailable,
         // not that the answer is no.
