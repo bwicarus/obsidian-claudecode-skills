@@ -622,6 +622,30 @@
     // RC lives in this same page, injected alongside this script, so the switch
     // can simply be asked. The storage read stays as a fallback for surfaces
     // where RC is absent.
+    // Mirrors the switch into extension storage, which every site can see.
+    //
+    // RC.ctxSync keeps the setting in localStorage, and a content script's
+    // localStorage belongs to the host site -- one copy per domain, none of
+    // them shared. So the switch was only ever readable on whichever site it
+    // happened to be flipped on. That is why the same build reported enabled=是
+    // on one page and enabled=否 on the next: not a race, a different store.
+    //
+    // Extension storage is per-extension rather than per-site, so a value seen
+    // once is written there and every other page reads it back. The mirror is
+    // deliberately its own key: the existing preferences record has a shape
+    // this file does not own, and writing a single boolean into it would mean
+    // guessing at that shape.
+    var MIRROR_KEY = "bwCtxSyncMirrorV1";
+
+    function mirrorPreference(value) {
+      try {
+        if (!extensionStore || typeof extensionStore.set !== "function") return;
+        Promise.resolve(
+          extensionStore.set(MIRROR_KEY, { schema: 1, enabled: !!value })
+        ).catch(function () {});
+      } catch (_) {}
+    }
+
     function preferenceFromRuntime() {
       try {
         var RC = window.RC;
@@ -629,10 +653,26 @@
           RC && RC.ctxSync &&
           typeof RC.ctxSync.enabled === "function"
         ) {
-          return !!RC.ctxSync.enabled();
+          var live = !!RC.ctxSync.enabled();
+          mirrorPreference(live);
+          return live;
         }
       } catch (_) {}
       return null;
+    }
+
+    // Reads the mirror. Only used where the switch itself is out of reach --
+    // that is, on every site other than the one it was flipped on.
+    function preferenceFromMirror() {
+      if (!extensionStore || typeof extensionStore.get !== "function") {
+        return Promise.resolve(null);
+      }
+      return Promise.resolve(extensionStore.get(MIRROR_KEY))
+        .then(function (record) {
+          if (!record || typeof record !== "object") return null;
+          return !!record.enabled;
+        })
+        .catch(function () { return null; });
     }
 
     function refreshPreference(forceReport) {
@@ -650,6 +690,14 @@
         // not that the answer is no.
         return;
       }
+      preferenceFromMirror().then(function (mirrored) {
+        if (mirrored === null) return;
+        preferenceKnown = true;
+        var changedMirror = contextSyncEnabled !== mirrored;
+        contextSyncEnabled = mirrored;
+        probeLine("镜像偏好: " + (mirrored ? "开" : "关"));
+        if (contextSyncEnabled && (forceReport || changedMirror)) schedule(true);
+      });
       Promise.resolve(extensionStore.get(PREFERENCE_KEY)).then(function (record) {
         applyPreference(record);
         if (forceReport && contextSyncEnabled) schedule(true);
