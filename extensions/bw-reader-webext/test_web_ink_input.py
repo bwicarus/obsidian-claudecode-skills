@@ -83,6 +83,13 @@ def swipe_up(session, x: float, start_y: float, end_y: float) -> None:
     touch(session, "touchEnd")
 
 
+def finger_double_tap(session, page, x: float, y: float) -> None:
+    for _ in range(2):
+        touch(session, "touchStart", x, y)
+        touch(session, "touchEnd")
+        page.wait_for_timeout(45)
+
+
 def pen_event(session, event_type: str, x: float, y: float,
               *, pressed: bool) -> None:
     session.send("Input.dispatchMouseEvent", {
@@ -112,6 +119,29 @@ def ink_path_count(page) -> int:
         """() => document.querySelector('#bw-reader-pins')?.shadowRoot
           ?.querySelectorAll('.bw-ink-document path').length || 0"""
     )
+
+
+def extension_world(session, contexts: list[dict]) -> int:
+    for context in contexts:
+        try:
+            value = session.send("Runtime.evaluate", {
+                "contextId": context["id"],
+                "expression": "!!window.__bwWebInk",
+                "returnByValue": True,
+            }).get("result", {}).get("value")
+            if value:
+                return context["id"]
+        except Exception:
+            continue
+    raise AssertionError(f"extension isolated world not found: {contexts}")
+
+
+def isolated_value(session, context_id: int, expression: str):
+    return session.send("Runtime.evaluate", {
+        "contextId": context_id,
+        "expression": expression,
+        "returnByValue": True,
+    }).get("result", {}).get("value")
 
 
 def settle_at(page, y: int) -> None:
@@ -148,6 +178,13 @@ def main() -> None:
                     ),
                 )
                 page = context.new_page()
+                session = context.new_cdp_session(page)
+                worlds: list[dict] = []
+                session.on(
+                    "Runtime.executionContextCreated",
+                    lambda event: worlds.append(event["context"]),
+                )
+                session.send("Runtime.enable")
                 page.goto(URL, wait_until="domcontentloaded")
                 page.wait_for_selector("#bw-reader-host", state="attached",
                                        timeout=15_000)
@@ -155,6 +192,8 @@ def main() -> None:
                     """() => !!document.querySelector('#bw-reader-host')
                       ?.shadowRoot?.querySelector('.bw-ink-canvas')"""
                 )
+                page.wait_for_timeout(150)
+                world = extension_world(session, worlds)
 
                 # The display canvas never participates in input. Windows requires
                 # touch-action:none before pen contact, so the only hit-testable ink
@@ -198,6 +237,30 @@ def main() -> None:
                       .querySelector('#bw-ink-btn').classList.contains('active')"""
                 )
 
+                # Before a Pencil has supplied a location, the palette retains its
+                # centered bottom fallback rather than guessing a target point.
+                fallback_palette = page.evaluate(
+                    """() => {
+                      const el=document.querySelector('#bw-reader-host').shadowRoot
+                        .querySelector('.bw-ink-tools');
+                      const r=el.getBoundingClientRect();
+                      return {left:r.left,right:r.right,bottom:r.bottom,
+                        viewportWidth:innerWidth,viewportHeight:innerHeight,
+                        clientWidth:document.documentElement.clientWidth,
+                        clientHeight:document.documentElement.clientHeight,
+                        located:el.classList.contains('located')};
+                    }"""
+                )
+                assert not fallback_palette["located"], fallback_palette
+                assert abs(
+                    (fallback_palette["left"] + fallback_palette["right"]) / 2
+                    - fallback_palette["clientWidth"] / 2
+                ) < 2, fallback_palette
+                assert abs(
+                    fallback_palette["clientHeight"]
+                    - fallback_palette["bottom"] - 18
+                ) < 2, fallback_palette
+
                 # Palette settings must be captured by the next stroke rather than
                 # only changing the visible controls.  Safari may commit its native
                 # color/range controls with ``change`` only, so exercise that exact
@@ -217,11 +280,86 @@ def main() -> None:
                 assert palette_state["color"] == "#007aff", palette_state
                 assert palette_state["width"] == 9, palette_state
 
-                session = context.new_cdp_session(page)
                 session.send("Emulation.setTouchEmulationEnabled", {
                     "enabled": True,
                     "maxTouchPoints": 5,
                 })
+
+                # Pencil hover moves the palette above the tip. Near a viewport
+                # edge it may flip below, but must remain fully clamped on screen.
+                pen_event(session, "mouseMoved", 500, 500, pressed=False)
+                page.wait_for_function(
+                    """() => document.querySelector('#bw-reader-host').shadowRoot
+                      .querySelector('.bw-ink-tools').classList.contains('located')"""
+                )
+                hover_palette = page.evaluate(
+                    """() => {
+                      const r=document.querySelector('#bw-reader-host').shadowRoot
+                        .querySelector('.bw-ink-tools').getBoundingClientRect();
+                      return {left:r.left,right:r.right,top:r.top,bottom:r.bottom};
+                    }"""
+                )
+                assert hover_palette["bottom"] <= 500 - 10, hover_palette
+                pen_event(session, "mouseMoved", 3, 3, pressed=False)
+                edge_palette = page.evaluate(
+                    """() => new Promise(resolve => requestAnimationFrame(() => {
+                      const r=document.querySelector('#bw-reader-host').shadowRoot
+                        .querySelector('.bw-ink-tools').getBoundingClientRect();
+                      resolve({left:r.left,right:r.right,top:r.top,bottom:r.bottom,
+                        width:innerWidth,height:innerHeight});
+                    }))"""
+                )
+                assert edge_palette["left"] >= 7, edge_palette
+                assert edge_palette["top"] >= 7, edge_palette
+                assert edge_palette["right"] <= edge_palette["width"] - 7, edge_palette
+                assert edge_palette["bottom"] <= edge_palette["height"] - 7, edge_palette
+
+                # Finger double tap obeys the cross-surface setting. Missing or
+                # invalid values default to temporary eraser; selection toggles
+                # only between selection and pen; none is a true no-op.
+                page.evaluate(
+                    "() => localStorage.removeItem('rc-ink-double-tap-action')"
+                )
+                finger_double_tap(session, page, 220, 220)
+                assert page.evaluate(
+                    """() => document.querySelector('#bw-reader-host').shadowRoot
+                      .querySelector('[data-tool="eraser"]').classList.contains('on')"""
+                )
+                finger_double_tap(session, page, 220, 220)
+                assert page.evaluate(
+                    """() => document.querySelector('#bw-reader-host').shadowRoot
+                      .querySelector('[data-tool="pen"]').classList.contains('on')"""
+                )
+                page.evaluate(
+                    "() => localStorage.setItem('rc-ink-double-tap-action','selection')"
+                )
+                finger_double_tap(session, page, 260, 220)
+                assert page.evaluate(
+                    """() => document.querySelector('#bw-reader-host').shadowRoot
+                      .querySelector('[data-tool="selection"]')
+                      .classList.contains('on')"""
+                )
+                finger_double_tap(session, page, 260, 220)
+                assert page.evaluate(
+                    """() => document.querySelector('#bw-reader-host').shadowRoot
+                      .querySelector('[data-tool="pen"]').classList.contains('on')"""
+                )
+                page.evaluate(
+                    """() => {
+                      localStorage.setItem('rc-ink-double-tap-action','none');
+                      window.noneTapPrevented=[];
+                      document.addEventListener('pointerup',event=>{
+                        if(event.pointerType==='touch')
+                          window.noneTapPrevented.push(event.defaultPrevented);
+                      },true);
+                    }"""
+                )
+                finger_double_tap(session, page, 300, 220)
+                assert page.evaluate(
+                    """() => document.querySelector('#bw-reader-host').shadowRoot
+                      .querySelector('[data-tool="pen"]').classList.contains('on')"""
+                )
+                assert page.evaluate("() => window.noneTapPrevented") == [False, False]
 
                 # Baseline: extension ink hosts do not intercept ordinary touch.
                 before_touch = page.evaluate("() => scrollY")
@@ -308,6 +446,14 @@ def main() -> None:
                     })"""
                 )
                 assert capture == {"got": 1, "lost": 1}, capture
+                last_point_palette = page.evaluate(
+                    """() => new Promise(resolve => requestAnimationFrame(() => {
+                      const r=document.querySelector('#bw-reader-host').shadowRoot
+                        .querySelector('.bw-ink-tools').getBoundingClientRect();
+                      resolve({left:r.left,right:r.right,top:r.top,bottom:r.bottom});
+                    }))"""
+                )
+                assert last_point_palette["bottom"] <= 545 - 10, last_point_palette
 
                 # Pen-up synchronously disarms the hotspot. Incidental sub-8px
                 # hover jitter must not re-arm it, and there is no idle timer.
@@ -432,6 +578,140 @@ def main() -> None:
                     "() => localStorage.getItem('webInkV1')"
                 ) == "legacy-web-ink-must-remain"
 
+                # Selection pen creates closed, labelled regions without changing
+                # the ordinary pen schema. Labels are derived from creation time +
+                # stable id, so their order remains deterministic after deletion.
+                page.evaluate(
+                    """() => document.querySelector('#bw-reader-host').shadowRoot
+                      .querySelector('.bw-ink-tools [data-tool="selection"]').click()"""
+                )
+                draw_pen_stroke(
+                    session,
+                    [(300, 300), (390, 300), (390, 390), (300, 390)],
+                )
+                page.wait_for_function(
+                    """() => document.querySelector('#bw-reader-pins').shadowRoot
+                      .querySelectorAll('.bw-ink-document path[data-region-id]')
+                      .length === 1"""
+                )
+                first_region = isolated_value(
+                    session,
+                    world,
+                    """(() => {
+                      const pins=document.querySelector('#bw-reader-pins').shadowRoot;
+                      const path=pins.querySelector('.bw-ink-document path[data-region-id]');
+                      const snapshot=window.__bwWebInk.exportSnapshot();
+                      const region=snapshot.strokes.find(s=>s.t==='region');
+                      return {
+                        fill:path.getAttribute('fill'),
+                        fillOpacity:path.getAttribute('fill-opacity'),
+                        closed:path.getAttribute('d').trim().endsWith('Z'),
+                        pathId:path.dataset.regionId,
+                        text:pins.querySelector('.bw-ink-document text')?.textContent,
+                        region
+                      };
+                    })()"""
+                )
+                assert first_region["fill"] == "#0a84ff", first_region
+                assert float(first_region["fillOpacity"]) > 0, first_region
+                assert first_region["closed"], first_region
+                assert first_region["pathId"] == first_region["region"]["id"], first_region
+                assert first_region["text"].startswith("#1 "), first_region
+                assert first_region["region"]["kind"] == "selection", first_region
+                assert first_region["region"]["w"] == 2, first_region
+                assert first_region["region"]["closed"] is True, first_region
+                assert first_region["region"]["ordinal"] == 1, first_region
+                assert first_region["region"]["label"].startswith("#1 "), first_region
+                assert first_region["region"]["createdAtEpochMs"] > 0, first_region
+                assert first_region["region"]["orderKey"].endswith(
+                    ":" + first_region["region"]["id"]
+                ), first_region
+                assert first_region["region"]["p"][0] == first_region["region"]["p"][-1], first_region
+
+                draw_pen_stroke(
+                    session,
+                    [(500, 300), (580, 300), (580, 380), (500, 380)],
+                )
+                page.wait_for_function(
+                    """() => document.querySelector('#bw-reader-pins').shadowRoot
+                      .querySelectorAll('.bw-ink-document path[data-region-id]')
+                      .length === 2"""
+                )
+                labels = page.evaluate(
+                    """() => Array.from(document.querySelector('#bw-reader-pins')
+                      .shadowRoot.querySelectorAll('.bw-ink-document text'))
+                      .map(node=>node.textContent)"""
+                )
+                assert labels[0].startswith("#1 ") and labels[1].startswith("#2 "), labels
+
+                # Exercise the per-path point bound without exposing a test-only
+                # API. More than 64 regions must remain: selections have no
+                # special count limit and must never evict older user regions.
+                page.evaluate(
+                    """() => {
+                      const send=(type,id,x,y,buttons)=>document.dispatchEvent(
+                        new PointerEvent(type,{bubbles:true,cancelable:true,
+                          pointerType:'pen',pointerId:id,clientX:x,clientY:y,
+                          button:type==='pointerup'?0:0,buttons}));
+                      const region=(id,x,y)=>{
+                        send('pointerdown',id,x,y,1);
+                        send('pointermove',id,x+24,y,1);
+                        send('pointermove',id,x+24,y+24,1);
+                        send('pointermove',id,x,y+24,1);
+                        send('pointerup',id,x,y+24,0);
+                      };
+                      for(let i=0;i<63;i++)region(100+i,80+(i%12)*55,470+(i%3)*38);
+                      const id=999,cx=450,cy=360,r=180;
+                      send('pointerdown',id,cx+r,cy,1);
+                      for(let i=1;i<620;i++){
+                        const a=Math.PI*2*i/620;
+                        send('pointermove',id,cx+Math.cos(a)*r,cy+Math.sin(a)*r,1);
+                      }
+                      send('pointerup',id,cx+r,cy,0);
+                    }"""
+                )
+                bounded_regions = isolated_value(
+                    session,
+                    world,
+                    """(() => {
+                      const snapshot=window.__bwWebInk.exportSnapshot();
+                      const regions=snapshot.strokes.filter(s=>s.t==='region');
+                      const pins=document.querySelector('#bw-reader-pins').shadowRoot;
+                      return {
+                        count:regions.length,
+                        pathCount:pins.querySelectorAll(
+                          '.bw-ink-document path[data-region-id]').length,
+                        labelCount:pins.querySelectorAll('.bw-ink-document text').length,
+                        ordinals:regions.map(r=>r.ordinal).sort((a,b)=>a-b),
+                        maxPoints:Math.max(...regions.map(r=>r.p.length)),
+                        allClosed:regions.every(r=>r.closed&&r.p[0][0]===r.p.at(-1)[0]
+                          &&r.p[0][1]===r.p.at(-1)[1]),
+                        ids:regions.map(r=>r.id)
+                      };
+                    })()"""
+                )
+                assert bounded_regions["count"] == 66, bounded_regions
+                assert bounded_regions["pathCount"] == 66, bounded_regions
+                assert bounded_regions["labelCount"] == 66, bounded_regions
+                assert bounded_regions["ordinals"] == list(range(1, 67)), bounded_regions
+                assert bounded_regions["maxPoints"] == 512, bounded_regions
+                assert bounded_regions["allClosed"], bounded_regions
+
+                # Responsive width changes retain committed region identities just
+                # as they retain pen strokes; only an unfinished active path may go.
+                page.set_viewport_size({"width": 840, "height": 800})
+                page.wait_for_timeout(100)
+                after_region_resize = isolated_value(
+                    session,
+                    world,
+                    """window.__bwWebInk.exportSnapshot().strokes
+                      .filter(s=>s.t==='region').map(s=>s.id)"""
+                )
+                assert after_region_resize == bounded_regions["ids"], {
+                    "before": bounded_regions["ids"],
+                    "after": after_region_resize,
+                }
+
                 # Any finger landing while the tiny hotspot is armed removes it
                 # synchronously. A first gesture that starts inside those 32px is
                 # the explicit hybrid tradeoff; the hotspot must never linger.
@@ -455,7 +735,9 @@ def main() -> None:
                 print(
                     "OK: bounded 32px pen pre-hit, pen/eraser pointer ownership, "
                     "synchronous disarm, immediate post-stroke touch scroll, "
-                    "qualified double-tap, host clicks and session reflow pass "
+                    "hover-clamped palette, configurable double-tap, closed "
+                    "selection regions/metadata/bounds, host clicks and session "
+                    "reflow pass "
                     "(Windows direct manipulation still needs a physical pen)"
                 )
             finally:

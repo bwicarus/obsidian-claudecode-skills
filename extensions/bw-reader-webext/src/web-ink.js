@@ -13,8 +13,10 @@
   'use strict';
   if (window.__bwPwaProviderOnly || window.__bwPwaBridge || window.__bwWebInk || !window.__bwRoot || !window.__bwPinRoot) return;
   const root=window.__bwRoot,pinRoot=window.__bwPinRoot,KEY='webInkV1',NS='http://www.w3.org/2000/svg';
+  const DOUBLE_TAP_ACTION_KEY='rc-ink-double-tap-action',MAX_REGION_POINTS=512;
   let strokes=[],undo=[],active=null,on=false,tool='pen',color='#ef4444',width=3,raf=0,renderRaf=0,sizeRaf=0,saveT=0;
   let layoutWidth=0,layoutRaf=0;
+  let hoverToolPoint=null,lastInkPoint=null,toolPositionRaf=0;
   let lastTap=null,touchTap=null,suppressTapClick=null,quickErase=false,revertT=0,prevTool='pen',dbgT=0;   // 照搬 PDF _ink：临时橡皮 / 手指双击切换 / 空闲回笔 + 诊断浮标
   const SHIELD_SIZE=32,SHIELD_REARM_DISTANCE=8;
   const touchPointers=new Set();
@@ -26,15 +28,34 @@
 #bw-root>.bw-ink-shield.show{display:block}
 .bw-ink-document{position:absolute;left:0;top:0;z-index:20;overflow:visible;pointer-events:none}
 .bw-ink-tools{position:fixed;left:50%;bottom:18px;z-index:1000;transform:translateX(-50%);display:none;align-items:center;gap:6px;padding:7px 9px;border:1px solid rgba(255,255,255,.2);border-radius:13px;background:rgba(12,19,36,.9);box-shadow:0 8px 28px rgba(0,0,0,.45);backdrop-filter:blur(14px)}
+.bw-ink-tools.located{bottom:auto;transform:none}
 .bw-ink-tools.show{display:flex}.bw-ink-tools button{height:30px;min-width:31px;border:1px solid #2a3a63;border-radius:7px;background:#16203a;color:#cfe0ff;cursor:pointer}.bw-ink-tools button.on{border-color:#60a5fa;background:#244470}.bw-ink-tools input[type=color]{width:31px;height:30px;padding:2px;border:1px solid #2a3a63;border-radius:7px;background:#16203a}.bw-ink-tools input[type=range]{width:82px;accent-color:#60a5fa}
 .bw-ink-dbg{position:fixed;right:10px;bottom:58px;z-index:1001;padding:4px 9px;border-radius:8px;background:rgba(12,19,36,.92);color:#8ff3c0;font:12px/1.35 ui-monospace,monospace;pointer-events:none;opacity:0;transition:opacity .25s;white-space:nowrap}
 `;window.__bwHead.appendChild(st);window.__bwPinHead?.appendChild(st.cloneNode(true));
   const svg=document.createElementNS(NS,'svg');svg.classList.add('bw-ink-document');svg.setAttribute('aria-hidden','true');pinRoot.appendChild(svg);
   const cv=document.createElement('canvas');cv.className='bw-ink-canvas';root.appendChild(cv);const ctx=cv.getContext('2d');
   const sh=document.createElement('div');sh.className='bw-ink-shield';sh.setAttribute('aria-hidden','true');root.appendChild(sh);
-  const tools=document.createElement('div');tools.className='bw-ink-tools';tools.innerHTML='<button data-tool="pen" class="on" title="画笔">✏️</button><button data-tool="eraser" title="橡皮">⌫</button><input type="color" value="#ef4444" title="笔色"><input type="range" min="1" max="12" step=".5" value="3" title="粗细"><button data-act="undo" title="撤销">↶</button><button data-act="clear" title="清空本页">🗑</button><button data-act="close" title="退出手写模式">✓</button>';root.appendChild(tools);
+  const tools=document.createElement('div');tools.className='bw-ink-tools';tools.innerHTML='<button data-tool="pen" class="on" title="画笔">✏️</button><button data-tool="selection" title="选区笔">选区</button><button data-tool="eraser" title="橡皮">⌫</button><input type="color" value="#ef4444" title="笔色"><input type="range" min="1" max="12" step=".5" value="3" title="粗细"><button data-act="undo" title="撤销">↶</button><button data-act="clear" title="清空本页">🗑</button><button data-act="close" title="退出手写模式">✓</button>';root.appendChild(tools);
   const dbg=document.createElement('div');dbg.className='bw-ink-dbg';root.appendChild(dbg);
   function showDbg(txt){dbg.textContent=txt;dbg.style.opacity='1';clearTimeout(dbgT);dbgT=setTimeout(()=>{dbg.style.opacity='0';},1700);}
+  function resetToolPosition(){
+    tools.classList.remove('located');
+    tools.style.removeProperty('left');tools.style.removeProperty('top');tools.style.removeProperty('bottom');tools.style.removeProperty('transform');
+  }
+  function positionTools(){
+    toolPositionRaf=0;
+    const point=hoverToolPoint||lastInkPoint;
+    if(!point){resetToolPosition();return;}
+    const rect=tools.getBoundingClientRect();
+    if(!rect.width||!rect.height)return;
+    const margin=8,gap=14,maxLeft=Math.max(margin,innerWidth-rect.width-margin),maxTop=Math.max(margin,innerHeight-rect.height-margin);
+    const left=Math.max(margin,Math.min(maxLeft,point.x-rect.width/2));
+    let top=point.y-rect.height-gap;
+    if(top<margin)top=point.y+gap;
+    top=Math.max(margin,Math.min(maxTop,top));
+    tools.classList.add('located');tools.style.left=left+'px';tools.style.top=top+'px';tools.style.bottom='auto';tools.style.transform='none';
+  }
+  function scheduleToolPosition(){if(!toolPositionRaf)toolPositionRaf=requestAnimationFrame(positionTools);}
   function hideShield(){sh.classList.remove('show');}
   function placeShield(x,y){
     if(!Number.isFinite(x)||!Number.isFinite(y))return false;
@@ -60,11 +81,12 @@
   }
   function onPenHover(e){
     if((e.pointerType!=='pen'&&e.pointerType!=='eraser')||e.buttons!==0)return;
+    hoverToolPoint={x:e.clientX,y:e.clientY};scheduleToolPosition();
     armShieldAt(e.clientX,e.clientY);
   }
   function onPenOut(e){
     if((e.pointerType!=='pen'&&e.pointerType!=='eraser')||e.relatedTarget||active)return;
-    shieldPoint=null;shieldHold=null;hideShield();
+    hoverToolPoint=null;scheduleToolPosition();shieldPoint=null;shieldHold=null;hideShield();
   }
   function onTouchPresenceDown(e){
     if(e.pointerType!=='touch')return;
@@ -78,26 +100,74 @@
   const docPoint=e=>({x:e.clientX+scrollX,y:e.clientY+scrollY,p:e.pressure>0?e.pressure:.5});
   function fitDocument(){const de=document.documentElement,b=document.body,w=Math.max(innerWidth,de?.scrollWidth||0,b?.scrollWidth||0),h=Math.max(innerHeight,de?.scrollHeight||0,b?.scrollHeight||0);svg.setAttribute('width',w);svg.setAttribute('height',h);svg.style.width=w+'px';svg.style.height=h+'px';}
   function documentSize(){const de=document.documentElement,b=document.body;return{width:Math.max(1,innerWidth,de?.scrollWidth||0,b?.scrollWidth||0),height:Math.max(1,innerHeight,de?.scrollHeight||0,b?.scrollHeight||0)};}
+  const isRegion=s=>s?.t==='region'||s?.kind==='selection';
+  function regionOrder(a,b){const byTime=(Number(a.createdAtEpochMs)||0)-(Number(b.createdAtEpochMs)||0);if(byTime)return byTime;const left=String(a.id||''),right=String(b.id||'');return left<right?-1:left>right?1:0;}
+  const strokePoints=s=>{const pts=s?.pts||[];return isRegion(s)?pts.slice(0,MAX_REGION_POINTS):pts;};
+  function regionId(){const bytes=new Uint32Array(2);try{crypto.getRandomValues(bytes);}catch(_){bytes[0]=Math.random()*0xffffffff;bytes[1]=Math.random()*0xffffffff;}return'rg_'+Date.now().toString(36)+'_'+Array.from(bytes,n=>Math.floor(n).toString(36)).join('');}
+  function regionClock(value){const d=new Date(Number(value)||Date.now());return String(d.getHours()).padStart(2,'0')+':'+String(d.getMinutes()).padStart(2,'0');}
+  function regionLabels(){
+    const map=new Map();
+    strokes.filter(isRegion).sort(regionOrder).forEach((s,index)=>map.set(s.id,{ordinal:index+1,label:'#'+(index+1)+' '+regionClock(s.createdAtEpochMs)}));
+    return map;
+  }
+  function strokeBounds(s){
+    const pts=strokePoints(s);if(!pts.length)return null;
+    let left=pts[0].x,right=pts[0].x,top=pts[0].y,bottom=pts[0].y;
+    for(let i=1;i<pts.length;i++){left=Math.min(left,pts[i].x);right=Math.max(right,pts[i].x);top=Math.min(top,pts[i].y);bottom=Math.max(bottom,pts[i].y);}
+    return{left,right,top,bottom,width:right-left,height:bottom-top};
+  }
   // 网页坐标只在这里转换一次，交给共享层后与 PDF/EPUB 使用同一 canonical stroke。
   function exportSnapshot(){
     const size=documentSize();
-    const canonical=strokes.map(s=>({
-      t:'pen',c:s.color||'#ef4444',w:Number(s.width)||3,
-      p:(s.pts||[]).map(pt=>[
+    const labels=regionLabels();
+    const canonical=strokes.map(s=>{
+      let points=strokePoints(s).map(pt=>[
         Math.max(0,Math.min(1,Number(pt.x||0)/size.width)),
         Math.max(0,Math.min(1,Number(pt.y||0)/size.height))
-      ])
-    })).filter(s=>s.p.length);
-    return{page:1,hasInk:canonical.length>0,strokes:canonical,width:size.width,height:size.height};
+      ]);
+      if(!isRegion(s))return{t:'pen',c:s.color||'#ef4444',w:Number(s.width)||3,p:points};
+      points=points.slice(0,MAX_REGION_POINTS-1);
+      if(points.length){const first=points[0],last=points[points.length-1];if(first[0]!==last[0]||first[1]!==last[1])points.push(first.slice());}
+      const meta=labels.get(s.id)||{ordinal:0,label:'#? '+regionClock(s.createdAtEpochMs)};
+      return{
+        t:'region',kind:'selection',id:s.id,createdAtEpochMs:Number(s.createdAtEpochMs)||0,
+        orderKey:String(Number(s.createdAtEpochMs)||0)+':'+String(s.id||''),ordinal:meta.ordinal,label:meta.label,
+        closed:true,c:s.color||'#0a84ff',w:Number(s.width)||3,p:points
+      };
+    }).filter(s=>s.p.length);
+    return{page:1,hasInk:canonical.length>0,hasSelection:canonical.some(s=>s.t==='region'),strokes:canonical,width:size.width,height:size.height};
   }
   function emitInkChange(){
     try{window.dispatchEvent(new CustomEvent('rc:inkchange',{detail:{source:'web'}}));}catch(_){}
   }
   function fit(){const d=Math.max(1,devicePixelRatio||1);cv.width=Math.round(innerWidth*d);cv.height=Math.round(innerHeight*d);cv.style.width=innerWidth+'px';cv.style.height=innerHeight+'px';ctx.setTransform(d,0,0,d,0,0);fitDocument();draw();}
-  function path(s){const pts=s.pts||[];if(!pts.length)return;ctx.beginPath();ctx.lineCap='round';ctx.lineJoin='round';ctx.strokeStyle=s.color;ctx.lineWidth=s.width;ctx.moveTo(pts[0].x-scrollX,pts[0].y-scrollY);for(let i=1;i<pts.length;i++)ctx.lineTo(pts[i].x-scrollX,pts[i].y-scrollY);if(pts.length===1)ctx.lineTo(pts[0].x-scrollX+.1,pts[0].y-scrollY+.1);ctx.stroke();}
+  function path(s){
+    const pts=strokePoints(s);if(!pts.length)return;
+    ctx.save();ctx.beginPath();ctx.lineCap='round';ctx.lineJoin='round';ctx.strokeStyle=s.color;ctx.lineWidth=s.width;
+    ctx.moveTo(pts[0].x-scrollX,pts[0].y-scrollY);for(let i=1;i<pts.length;i++)ctx.lineTo(pts[i].x-scrollX,pts[i].y-scrollY);
+    if(isRegion(s)&&pts.length>2){ctx.closePath();ctx.save();ctx.globalAlpha=.14;ctx.fillStyle=s.color;ctx.fill();ctx.restore();}
+    else if(pts.length===1)ctx.lineTo(pts[0].x-scrollX+.1,pts[0].y-scrollY+.1);
+    ctx.stroke();ctx.restore();
+  }
   function draw(){ctx.clearRect(0,0,innerWidth,innerHeight);if(active&&!active.erase)path(active);}
-  function svgD(s){const p=s.pts||[];if(!p.length)return '';let d='M '+p[0].x+' '+p[0].y;for(let i=1;i<p.length;i++)d+=' L '+p[i].x+' '+p[i].y;if(p.length===1)d+=' l .1 .1';return d;}
-  function renderSvg(){renderRaf=0;fitDocument();const f=document.createDocumentFragment();strokes.forEach(s=>{const d=svgD(s);if(!d)return;const p=document.createElementNS(NS,'path');p.setAttribute('d',d);p.setAttribute('fill','none');p.setAttribute('stroke',s.color||'#ef4444');p.setAttribute('stroke-width',String(s.width||3));p.setAttribute('stroke-linecap','round');p.setAttribute('stroke-linejoin','round');p.setAttribute('vector-effect','non-scaling-stroke');f.appendChild(p);});svg.replaceChildren(f);}
+  function svgD(s){const p=strokePoints(s);if(!p.length)return '';let d='M '+p[0].x+' '+p[0].y;for(let i=1;i<p.length;i++)d+=' L '+p[i].x+' '+p[i].y;if(isRegion(s)&&p.length>2)d+=' Z';else if(p.length===1)d+=' l .1 .1';return d;}
+  function renderRegionLabel(fragment,s,meta){
+    const bounds=strokeBounds(s);if(!bounds)return;
+    const label=meta.label,labelWidth=Math.max(48,label.length*7+12),labelHeight=20;
+    const x=Math.max(4,bounds.left),y=bounds.top>=labelHeight+6?bounds.top-labelHeight-4:bounds.top+6;
+    const rect=document.createElementNS(NS,'rect');rect.setAttribute('x',String(x));rect.setAttribute('y',String(y));rect.setAttribute('width',String(labelWidth));rect.setAttribute('height',String(labelHeight));rect.setAttribute('rx','6');rect.setAttribute('fill','rgba(12,19,36,.9)');rect.setAttribute('stroke',s.color||'#0a84ff');rect.setAttribute('stroke-width','1');
+    const text=document.createElementNS(NS,'text');text.setAttribute('x',String(x+6));text.setAttribute('y',String(y+14));text.setAttribute('fill','#fff');text.setAttribute('font-size','12');text.setAttribute('font-family','system-ui,sans-serif');text.textContent=label;
+    fragment.appendChild(rect);fragment.appendChild(text);
+  }
+  function renderSvg(){
+    renderRaf=0;fitDocument();const f=document.createDocumentFragment(),labels=regionLabels();
+    strokes.forEach(s=>{
+      const d=svgD(s);if(!d)return;const p=document.createElementNS(NS,'path'),region=isRegion(s);
+      p.setAttribute('d',d);p.setAttribute('fill',region?(s.color||'#0a84ff'):'none');if(region)p.setAttribute('fill-opacity','.14');p.setAttribute('stroke',s.color||'#ef4444');p.setAttribute('stroke-width',String(s.width||3));p.setAttribute('stroke-linecap','round');p.setAttribute('stroke-linejoin','round');p.setAttribute('vector-effect','non-scaling-stroke');
+      if(region){p.dataset.regionId=s.id||'';p.dataset.regionOrdinal=String(labels.get(s.id)?.ordinal||0);}
+      f.appendChild(p);if(region)renderRegionLabel(f,s,labels.get(s.id)||{label:'#? '+regionClock(s.createdAtEpochMs)});
+    });svg.replaceChildren(f);
+  }
   function scheduleRender(){if(!renderRaf)renderRaf=requestAnimationFrame(renderSvg);}
   function scheduleDraw(){if(!raf)raf=requestAnimationFrame(()=>{raf=0;draw();});}
   // 网页笔迹不持久化(用户拍板,与阅读器不同):只活在当前页面会话,刷新/关页即清。persist 留空壳保调用点不动。
@@ -136,12 +206,22 @@
     layoutRaf=requestAnimationFrame(()=>{layoutRaf=0;preserveForLayoutChange(currentLayoutWidth());});
   }
   function snapshot(){undo.push(JSON.stringify(strokes));if(undo.length>30)undo.shift();}
-  function hitStroke(s,p){const rr=Math.max(12,(s.width||3)*2);return (s.pts||[]).some(q=>Math.hypot(q.x-p.x,q.y-p.y)<=rr);}
+  function segmentDistance(p,a,b){const dx=b.x-a.x,dy=b.y-a.y,l2=dx*dx+dy*dy;if(!l2)return Math.hypot(p.x-a.x,p.y-a.y);const t=Math.max(0,Math.min(1,((p.x-a.x)*dx+(p.y-a.y)*dy)/l2));return Math.hypot(p.x-(a.x+t*dx),p.y-(a.y+t*dy));}
+  function pointInRegion(pts,p){let inside=false;for(let i=0,j=pts.length-1;i<pts.length;j=i++){const a=pts[i],b=pts[j];if(((a.y>p.y)!==(b.y>p.y))&&(p.x<(b.x-a.x)*(p.y-a.y)/((b.y-a.y)||Number.EPSILON)+a.x))inside=!inside;}return inside;}
+  function hitStroke(s,p){
+    const pts=strokePoints(s),rr=Math.max(12,(s.width||3)*2);if(isRegion(s)&&pts.length>2&&pointInRegion(pts,p))return true;
+    for(let i=0;i<pts.length;i++){if(Math.hypot(pts[i].x-p.x,pts[i].y-p.y)<=rr)return true;if(i&&segmentDistance(p,pts[i-1],pts[i])<=rr)return true;}
+    return isRegion(s)&&pts.length>2&&segmentDistance(p,pts[pts.length-1],pts[0])<=rr;
+  }
   // ── 工具态 UI / 临时橡皮 / 手指双击切换(照搬 pdf-tail.js:74/85-123) ──
   function syncToolUI(){tools.querySelectorAll('[data-tool]').forEach(x=>x.classList.toggle('on',x.dataset.tool===tool));}
   function armRevert(ms){clearTimeout(revertT);revertT=setTimeout(()=>{if(active&&active.erase){armRevert(400);return;}exitQuickErase(true);},ms);}
-  function exitQuickErase(toPen){clearTimeout(revertT);revertT=0;quickErase=false;if(toPen){tool=prevTool||'pen';syncToolUI();window.RC?.toast?.('✏️ 已回到笔');}else syncToolUI();}
-  function doubleTapSwitch(){   // 手指快速双击 切 笔↔临时橡皮(浏览器拿不到 Apple Pencil 双击笔身 → 手指双击替代)
+  function exitQuickErase(toPrevious){clearTimeout(revertT);revertT=0;quickErase=false;if(toPrevious){tool=prevTool||'pen';syncToolUI();window.RC?.toast?.(tool==='selection'?'▱ 已回到选区笔':'✏️ 已回到笔');}else syncToolUI();}
+  function configuredDoubleTapAction(){let value='';try{value=String(localStorage.getItem(DOUBLE_TAP_ACTION_KEY)||'').trim().toLowerCase();}catch(_){}return value==='selection'||value==='none'||value==='eraser'?value:'eraser';}
+  function doubleTapSwitch(action=configuredDoubleTapAction()){   // 浏览器拿不到 Apple Pencil 双击笔身，手指快速双击按设置切换工具。
+    if(action==='selection'){
+      clearTimeout(revertT);revertT=0;quickErase=false;tool=tool==='selection'?'pen':'selection';prevTool='pen';syncToolUI();window.RC?.toast?.(tool==='selection'?'▱ 已切换到选区笔':'✏️ 已回到笔');return;
+    }
     if(tool==='eraser'){exitQuickErase(true);}
     else{prevTool=tool;tool='eraser';quickErase=true;syncToolUI();armRevert(2500);window.RC?.toast?.('🧹 临时橡皮(空闲自动回笔)');}
   }
@@ -161,10 +241,12 @@
     if(e.type==='pointercancel'||tap.moved||elapsed>280){lastTap=null;return;}
     const now=performance.now();
     if(lastTap&&now-lastTap.t<350&&Math.hypot(e.clientX-lastTap.x,e.clientY-lastTap.y)<32){
+      const action=configuredDoubleTapAction();
+      if(action==='none'){lastTap=null;suppressTapClick=null;return;}
       e.preventDefault();e.stopPropagation();
       lastTap=null;
       suppressTapClick={t:performance.now(),x:e.clientX,y:e.clientY};
-      doubleTapSwitch();
+      doubleTapSwitch(action);
       return;
     }
     lastTap={t:now,x:e.clientX,y:e.clientY};
@@ -201,6 +283,7 @@
     // 绘制：Apple Pencil / Surface Pen 等主动笔始终(pointerType pen/eraser 通吃)；鼠标仅桌面手写模式；手指永不画(照搬 pdf-tail.js:184)
     if(!(e.pointerType==='pen'||e.pointerType==='eraser'||(e.pointerType==='mouse'&&on)))return;
     e.preventDefault();e.stopPropagation();
+    hoverToolPoint=null;lastInkPoint={x:e.clientX,y:e.clientY};scheduleToolPosition();
     // Windows 在落笔前已由 32px shield 的 touch-action:none 完成仲裁；这里只捕获当前 pointerId。
     // 鼠标桌面手写模式仍捕获 documentElement，不占用笔尖 shield。
     const nativePen=e.pointerType==='pen'||e.pointerType==='eraser';
@@ -214,7 +297,8 @@
       strokes=strokes.filter(s=>!hitStroke(s,p));scheduleRender();persist();
       active={erase:true,id:e.pointerId,penEraser:tool!=='eraser',captureEl,nativePen,cx:e.clientX,cy:e.clientY};
     }else{
-      active={id:e.pointerId,color,width,pts:[p],cx:e.clientX,cy:e.clientY,captureEl,nativePen};
+      const selection=tool==='selection';
+      active={id:e.pointerId,t:selection?'region':'pen',kind:selection?'selection':undefined,regionId:selection?regionId():undefined,createdAtEpochMs:selection?Date.now():undefined,color:selection?'#0a84ff':color,width:selection?2:width,pts:[p],cx:e.clientX,cy:e.clientY,captureEl,nativePen};
     }
     document.addEventListener('pointermove',onMove,true);
     document.addEventListener('pointerup',onUp,true);
@@ -222,7 +306,7 @@
     document.addEventListener('lostpointercapture',onLostCapture,true);
     document.addEventListener('selectstart',preventSel,true);
   }
-  function onMove(e){if(!active||e.pointerId!==active.id)return;e.preventDefault();const p=docPoint(e);active.cx=e.clientX;active.cy=e.clientY;if(active.erase){const n=strokes.filter(s=>!hitStroke(s,p));if(n.length!==strokes.length){strokes=n;scheduleRender();persist();}return;}const a=active.pts,b=a[a.length-1];if(!b||Math.hypot(p.x-b.x,p.y-b.y)>=1.5){a.push(p);scheduleDraw();}}
+  function onMove(e){if(!active||e.pointerId!==active.id)return;e.preventDefault();const p=docPoint(e);active.cx=e.clientX;active.cy=e.clientY;lastInkPoint={x:e.clientX,y:e.clientY};scheduleToolPosition();if(active.erase){const n=strokes.filter(s=>!hitStroke(s,p));if(n.length!==strokes.length){strokes=n;scheduleRender();persist();}return;}const a=active.pts,b=a[a.length-1],limit=isRegion(active)?MAX_REGION_POINTS-1:Number.POSITIVE_INFINITY;if((!b||Math.hypot(p.x-b.x,p.y-b.y)>=1.5)&&a.length<limit){a.push(p);scheduleDraw();}}
   function onUp(e){
     if(!active||e.pointerId!==active.id)return;
     const current=active;
@@ -236,8 +320,17 @@
     document.removeEventListener('selectstart',preventSel,true);
     const wasQuickErase=current.erase&&!current.penEraser;  // 只有手指双击的「临时橡皮」才自动回笔；笔尾橡皮是硬件态，抬笔即结束(笔尖回来自动是笔)
     if(current.nativePen)releaseShieldAt(current.cx,current.cy);
+    lastInkPoint={x:current.cx,y:current.cy};scheduleToolPosition();
     delete current.captureEl;delete current.finishing;
-    if(!current.erase&&current.pts.length){strokes.push(current);if(strokes.length>600)strokes=strokes.slice(-600);}
+    if(!current.erase&&current.pts.length){
+      if(isRegion(current)){
+        if(current.pts.length>=3){
+          strokes.push({t:'region',kind:'selection',id:current.regionId,createdAtEpochMs:current.createdAtEpochMs,color:current.color,width:current.width,pts:current.pts.slice(0,MAX_REGION_POINTS-1)});
+        }else if(undo.length)undo.pop();
+      }else strokes.push({t:'pen',color:current.color,width:current.width,pts:current.pts});
+      const penOverflow=strokes.filter(s=>!isRegion(s)).length-600;
+      if(penOverflow>0){let drop=penOverflow;strokes=strokes.filter(s=>isRegion(s)||drop--<=0);}
+    }
     active=null;draw();renderSvg();persist();emitInkChange();
     if(wasQuickErase&&quickErase)armRevert(900);          // 临时橡皮：擦完抬笔停 0.9s 没再擦 → 自动回笔
   }
@@ -257,7 +350,7 @@
   document.addEventListener('click',suppressRecognizedDoubleTapClick,true);
   document.addEventListener('touchstart',_blk,{passive:false,capture:true});
   document.addEventListener('touchmove',_blk,{passive:false,capture:true});
-  tools.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.tool){tool=b.dataset.tool;clearTimeout(revertT);quickErase=false;syncToolUI();return;}if(b.dataset.act==='undo'&&undo.length){strokes=JSON.parse(undo.pop());draw();renderSvg();persist();emitInkChange();}if(b.dataset.act==='clear'&&strokes.length&&confirm('清空当前网页的全部笔迹？')){snapshot();strokes=[];draw();renderSvg();persist();emitInkChange();}if(b.dataset.act==='close')set(false);});
+  tools.addEventListener('click',e=>{const b=e.target.closest('button');if(!b)return;if(b.dataset.tool){tool=b.dataset.tool;clearTimeout(revertT);quickErase=false;syncToolUI();return;}if(b.dataset.act==='undo'&&undo.length){strokes=JSON.parse(undo.pop());draw();renderSvg();persist();emitInkChange();}if(b.dataset.act==='clear'&&strokes.length&&confirm('清空当前网页的全部笔迹与选区？')){snapshot();strokes=[];draw();renderSvg();persist();emitInkChange();}if(b.dataset.act==='close')set(false);});
   const colorInput=tools.querySelector('input[type=color]'),widthInput=tools.querySelector('input[type=range]');
   const applyColor=e=>{color=e.target.value;},applyWidth=e=>{width=Number(e.target.value)||3;};
   // iPad Safari 的原生颜色板/滑杆有时只在确认时发 change；两种事件都接住，
@@ -265,16 +358,16 @@
   colorInput.addEventListener('input',applyColor);colorInput.addEventListener('change',applyColor);
   widthInput.addEventListener('input',applyWidth);widthInput.addEventListener('change',applyWidth);
   // set(v)：只切「桌面手写模式」(鼠标可画) + 显示/隐藏工具条。Apple Pencil 不受它管，始终自动落笔。
-  function set(v){on=!!v;tools.classList.toggle('show',on);window.RC?.toast?.(on?'桌面手写模式已开(鼠标可画；Apple Pencil 始终可画)':'已退出桌面手写模式(Apple Pencil 仍随时可画)');return on;}
+  function set(v){on=!!v;tools.classList.toggle('show',on);if(on)scheduleToolPosition();window.RC?.toast?.(on?'桌面手写模式已开(鼠标可画；Apple Pencil 始终可画)':'已退出桌面手写模式(Apple Pencil 仍随时可画)');return on;}
   // 画的过程中页面被滚(手指/滚轮)→ 按最近笔尖屏幕位 + 新滚动量补点,笔迹在文档坐标里连续拖出竖线(用户预期行为)
-  addEventListener('scroll',()=>{if(active&&!active.erase){if(active.cx!==undefined)active.pts.push({x:active.cx+scrollX,y:active.cy+scrollY,p:.5});scheduleDraw();}},{passive:true});addEventListener('resize',()=>{observeLayoutWidth();fit();},{passive:true});
+  addEventListener('scroll',()=>{if(active&&!active.erase&&active.cx!==undefined){const limit=isRegion(active)?MAX_REGION_POINTS-1:Number.POSITIVE_INFINITY;if(active.pts.length<limit)active.pts.push({x:active.cx+scrollX,y:active.cy+scrollY,p:.5});scheduleDraw();}},{passive:true});addEventListener('resize',()=>{observeLayoutWidth();fit();scheduleToolPosition();},{passive:true});
   try{new ResizeObserver(observeLayoutWidth).observe(document.documentElement);}catch(_){}
   try{new MutationObserver(()=>{if(!sizeRaf)sizeRaf=requestAnimationFrame(()=>{sizeRaf=0;fitDocument();});}).observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['style','class','hidden','open']});}catch(_){}
   layoutWidth=currentLayoutWidth();fit();
   // 历史 webInkV1 不再读取或写入，但保留原数据；当前网页笔迹只活在本次会话。
   window.__bwWebInk={
     toggle:()=>set(!on),set,
-    state:()=>({on,tool,color,width,pencil:'always'}),
+    state:()=>({on,tool,color,width,pencil:'always',doubleTapAction:configuredDoubleTapAction(),regions:strokes.filter(isRegion).length}),
     exportSnapshot
   };
   window.RC?.actions?.bind?.('ink.toggle',()=>({

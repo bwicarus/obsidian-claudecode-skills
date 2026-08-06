@@ -3773,3 +3773,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验**：真实 Chromium 合同覆盖宽度 `1000→900` 后路径、颜色和粗细逐项不变；Reader Node 全量、发布管线、JS/Python 语法与 diff 门禁通过。
 - **发布/边界**：统一 App/扩展 `1.0.90 (1)` 已签名并上传 TestFlight；Windows 语音启动链未改，全量 Python 仍仅有既有 Windows `fcntl` 基线失败。
 - **下一步**：用户更新后验证网页改宽笔迹仍在；按需视觉工具另行复用现有局部/整页合成并接 Safari `captureVisibleTab`。
+
+## Codex：跨 App/真书/Safari 闭合选区笔（2026-08-06 JST）
+- **改了什么**：三端统一 `region` 元素、时间+动态序号、闭合填充与清晰边界；工具框跟随 Pencil 悬停或最后落笔，设置新增触屏双击的橡皮/选区/关闭三态。
+- **可靠性**：选区数量不设专用上限，单条路径限 512 点；App 触屏双击以绝对工具状态回传 Swift，避免 Web/PencilKit 状态漂移。
+- **怎么验**：真实 Chromium 手写回归、Reader 全量合同、JS/Python 语法与发布管线；Swift 编译交由统一 macOS CI。
+- **边界**：Windows 语音链路未改；AI 按需获取选区附近/笔迹附近/当前视口合成图仍是下一阶段，不在文本快照中连续传图。
+- **下一步**：上传统一 TestFlight 后实机验收 Pencil hover、双击三态、多个选区编号与 PDF/EPUB 持久化。

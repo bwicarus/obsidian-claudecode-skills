@@ -9,6 +9,8 @@ extension NativePencilGestureMapping {
             return "跟随 iPad 设置"
         case .toggleEraser:
             return "切换画笔与橡皮"
+        case .toggleSelection:
+            return "切换画笔与选区笔"
         case .showPalette:
             return "显示绘图工具"
         case .disabled:

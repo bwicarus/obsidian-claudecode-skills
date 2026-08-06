@@ -12,7 +12,7 @@
   const CONTRACT = 'preference-store/1';
   const TO_PAGE = 'extension-to-page';
   const TO_EXTENSION = 'page-to-extension';
-  const PREFIX = /^(eph-|eph2-|rc-note-|bw-set-|set-|pdf-set-)/;
+  const PREFIX = /^(eph-|eph2-|rc-note-|rc-ink-|bw-set-|set-|pdf-set-)/;
   const MAX_VALUE_BYTES = 64 * 1024;
   const MAX_KEYS = 256;
   const originalSetItem = Storage.prototype.setItem;

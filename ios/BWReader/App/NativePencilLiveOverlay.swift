@@ -39,6 +39,7 @@ final class NativePencilInkController: ObservableObject {
     enum Tool {
         case pen
         case eraser
+        case selection
     }
 
     @Published private(set) var tool: Tool = .pen
@@ -50,20 +51,41 @@ final class NativePencilInkController: ObservableObject {
     @Published var paletteVisible = false
     @Published var colorHex = "#ff3b30"
     @Published var width: CGFloat = 4
+    @Published private(set) var paletteAnchor: CGPoint?
+    private var previousDrawingTool: Tool = .pen
 
     var canDraw: Bool { !layout.surfaces.isEmpty }
     var hasPendingOperations: Bool { pendingOperationCount > 0 }
 
     func toggleEraser() {
-        tool = tool == .pen ? .eraser : .pen
+        if tool == .eraser {
+            tool = previousDrawingTool == .eraser ? .pen : previousDrawingTool
+        } else {
+            previousDrawingTool = tool
+            tool = .eraser
+        }
+    }
+
+    func toggleSelection() {
+        tool = tool == .selection ? .pen : .selection
+        previousDrawingTool = tool
     }
 
     func select(_ value: Tool) {
         tool = value
+        if value != .eraser { previousDrawingTool = value }
     }
 
     func showPalette() {
         paletteVisible.toggle()
+    }
+
+    func updatePaletteAnchor(_ point: CGPoint, in bounds: CGRect) {
+        guard bounds.width > 0, bounds.height > 0 else { return }
+        paletteAnchor = CGPoint(
+            x: min(1, max(0, point.x / bounds.width)),
+            y: min(1, max(0, point.y / bounds.height))
+        )
     }
 
     func report(_ error: Error) {
@@ -163,6 +185,7 @@ private struct NativeInkSegment {
 private enum NativeInkOperationKind: String {
     case commit
     case erase
+    case createRegion
 }
 
 private enum NativePencilHostError: LocalizedError {
@@ -182,6 +205,26 @@ private struct NativeInkOperation {
     let kind: NativeInkOperationKind
     let segments: [NativeInkSegment]
     let canvasStrokeCount: Int
+    let regionId: String?
+    let createdAtEpochMs: Int?
+
+    init(
+        id: String,
+        documentToken: String,
+        kind: NativeInkOperationKind,
+        segments: [NativeInkSegment],
+        canvasStrokeCount: Int,
+        regionId: String? = nil,
+        createdAtEpochMs: Int? = nil
+    ) {
+        self.id = id
+        self.documentToken = documentToken
+        self.kind = kind
+        self.segments = segments
+        self.canvasStrokeCount = canvasStrokeCount
+        self.regionId = regionId
+        self.createdAtEpochMs = createdAtEpochMs
+    }
 }
 
 @MainActor
@@ -191,15 +234,35 @@ struct NativePencilLiveOverlay: View {
 
     private let colors = ["#ff3b30", "#007aff", "#111111", "#34c759"]
 
+    private var toolIcon: String {
+        switch controller.tool {
+        case .pen: return "pencil.tip.crop.circle"
+        case .eraser: return "eraser"
+        case .selection: return "lasso"
+        }
+    }
+
+    private func palettePosition(in size: CGSize) -> CGPoint {
+        let anchor = controller.paletteAnchor ?? CGPoint(x: 0.84, y: 0.78)
+        let inset = min(132, size.width / 2)
+        let minimumY: CGFloat = controller.paletteVisible ? 104 : 28
+        let rawY = anchor.y * size.height - (controller.paletteVisible ? 132 : 38)
+        return CGPoint(
+            x: min(max(inset, anchor.x * size.width), max(inset, size.width - inset)),
+            y: min(max(minimumY, rawY), max(minimumY, size.height - 72))
+        )
+    }
+
     var body: some View {
-        ZStack(alignment: .bottomTrailing) {
-            NativePencilCanvasRepresentable(
-                reader: reader,
-                controller: controller,
-                selectedTool: controller.tool,
-                selectedColorHex: controller.colorHex,
-                selectedWidth: controller.width
-            )
+        GeometryReader { geometry in
+            ZStack {
+                NativePencilCanvasRepresentable(
+                    reader: reader,
+                    controller: controller,
+                    selectedTool: controller.tool,
+                    selectedColorHex: controller.colorHex,
+                    selectedWidth: controller.width
+                )
 
             if controller.canDraw {
                 VStack(alignment: .trailing, spacing: 10) {
@@ -240,6 +303,15 @@ struct NativePencilLiveOverlay: View {
                                 }
                                 .buttonStyle(.borderedProminent)
                                 .tint(controller.tool == .eraser ? .blue : .gray)
+
+                                Button {
+                                    controller.select(.selection)
+                                } label: {
+                                    Image(systemName: "lasso")
+                                }
+                                .buttonStyle(.borderedProminent)
+                                .tint(controller.tool == .selection ? .blue : .gray)
+                                .accessibilityLabel("选区笔")
                             }
 
                             HStack {
@@ -255,15 +327,17 @@ struct NativePencilLiveOverlay: View {
                     Button {
                         controller.showPalette()
                     } label: {
-                        Image(systemName: controller.tool == .eraser ? "eraser" : "pencil.tip.crop.circle")
+                        Image(systemName: toolIcon)
                             .font(.title2)
                             .frame(width: 42, height: 42)
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(.blue)
                 }
-                .padding(.trailing, 14)
-                .padding(.bottom, 86)
+                .fixedSize()
+                .position(palettePosition(in: geometry.size))
+                .animation(.easeOut(duration: 0.16), value: controller.paletteAnchor)
+                }
             }
         }
     }
@@ -289,6 +363,10 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
         canvas.isScrollEnabled = false
         canvas.drawingPolicy = .pencilOnly
         canvas.captureRule = { [weak controller] point, event, bounds in
+            // Pencil hover has no touch in UIEvent.allTouches. Let the hover
+            // recognizer receive it; allowedTouchTypes below still limits the
+            // recognizer itself to Apple Pencil.
+            if event?.type == .hover { return true }
             guard
                 let controller,
                 bounds.width > 0,
@@ -314,6 +392,15 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
         eraserPath.cancelsTouchesInView = false
         eraserPath.delegate = context.coordinator
         canvas.addGestureRecognizer(eraserPath)
+
+        let pencilHover = UIHoverGestureRecognizer(
+            target: context.coordinator,
+            action: #selector(Coordinator.trackPencilHover(_:))
+        )
+        pencilHover.allowedTouchTypes = [
+            NSNumber(value: UITouch.TouchType.pencil.rawValue)
+        ]
+        canvas.addGestureRecognizer(pencilHover)
         context.coordinator.canvas = canvas
         context.coordinator.applyState(
             to: canvas,
@@ -357,7 +444,8 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
         private var appliedDocumentGeneration = 0
         private var canvasToolActive = false
         private var activeCanvasTool: NativePencilInkController.Tool?
-        private var eraserGestureActive = false
+        private var pathGestureActive = false
+        private var activePathTool: NativePencilInkController.Tool?
         private var resetCanvasWhenIdle = false
         private var queuedStrokeCount = 0
         private var confirmedStrokeCount = 0
@@ -424,6 +512,12 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
                 )
             case .eraser:
                 canvas.tool = PKEraserTool(.vector)
+            case .selection:
+                canvas.tool = PKInkingTool(
+                    .pen,
+                    color: UIColor.systemCyan,
+                    width: 2
+                )
             }
         }
 
@@ -560,22 +654,26 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
             let bounds = canvas.bounds
             guard bounds.width > 0, bounds.height > 0 else { return }
             let location = gesture.location(in: canvas)
+            if gesture.state == .ended {
+                controller.updatePaletteAnchor(location, in: bounds)
+            }
             let point = [
                 location.x / bounds.width,
                 location.y / bounds.height,
             ]
             switch gesture.state {
             case .began:
-                guard controller.tool == .eraser else { return }
+                guard controller.tool != .pen else { return }
                 synchronizeDocumentGeneration(on: canvas)
-                eraserGestureActive = true
+                pathGestureActive = true
+                activePathTool = controller.tool
                 if eraserDrawingSnapshot == nil {
                     eraserDrawingSnapshot = canvas.drawing
                 }
                 eraserLayout = controller.layout
                 eraserPoints = [point]
             case .changed:
-                guard eraserGestureActive else { return }
+                guard pathGestureActive else { return }
                 if let last = eraserPoints.last {
                     let dx = point[0] - last[0]
                     let dy = point[1] - last[1]
@@ -583,31 +681,80 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
                 }
                 eraserPoints.append(point)
             case .ended, .cancelled, .failed:
-                guard eraserGestureActive else { return }
+                guard pathGestureActive, let pathTool = activePathTool else {
+                    return
+                }
                 eraserPoints.append(point)
-                let segments = canonicalEraserSegments(
+                var segments = canonicalEraserSegments(
                     points: eraserPoints,
                     layout: eraserLayout
                 )
                 eraserPoints = []
+                if pathTool == .selection {
+                    segments = closedRegionSegments(from: segments)
+                }
                 if
                     !segments.isEmpty,
                     let documentToken = eraserLayout.documentToken,
-                    documentToken == controller.layout.documentToken
+                    documentToken == controller.layout.documentToken,
+                    pathTool == .eraser || gesture.state == .ended
                 {
+                    let regionId = pathTool == .selection
+                        ? "rg_" + UUID().uuidString.lowercased()
+                        : nil
                     enqueue(NativeInkOperation(
                         id: UUID().uuidString,
                         documentToken: documentToken,
-                        kind: .erase,
+                        kind: pathTool == .selection ? .createRegion : .erase,
                         segments: segments,
-                        canvasStrokeCount: 0
+                        canvasStrokeCount: 0,
+                        regionId: regionId,
+                        createdAtEpochMs: regionId == nil ? nil : Int(
+                            Date().timeIntervalSince1970 * 1_000
+                        )
                     ))
                 }
-                eraserGestureActive = false
+                pathGestureActive = false
+                activePathTool = nil
                 finishEraserCanvasIfIdle()
                 finishDeferredCanvasWorkIfIdle()
             default:
                 break
+            }
+        }
+
+        @objc func trackPencilHover(_ gesture: UIHoverGestureRecognizer) {
+            guard let canvas else { return }
+            switch gesture.state {
+            case .began, .changed, .ended:
+                controller.updatePaletteAnchor(
+                    gesture.location(in: canvas),
+                    in: canvas.bounds
+                )
+            default:
+                break
+            }
+        }
+
+        private func closedRegionSegments(
+            from segments: [NativeInkSegment]
+        ) -> [NativeInkSegment] {
+            segments.compactMap { segment in
+                var points = Array(segment.points.prefix(511))
+                guard points.count >= 3, let first = points.first else {
+                    return nil
+                }
+                if let last = points.last {
+                    let separated = abs(first[0] - last[0]) > 0.000_1
+                        || abs(first[1] - last[1]) > 0.000_1
+                    if separated { points.append(first) }
+                }
+                return NativeInkSegment(
+                    surfaceId: segment.surfaceId,
+                    color: "#0a84ff",
+                    width: 2,
+                    points: points
+                )
             }
         }
 
@@ -661,7 +808,7 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
         }
 
         private var interactionActive: Bool {
-            canvasToolActive || eraserGestureActive
+            canvasToolActive || pathGestureActive
         }
 
         private func synchronizeDocumentGeneration(on canvas: PKCanvasView) {
@@ -676,6 +823,8 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
             confirmedStrokeCount = 0
             eraserPoints = []
             eraserLayout = .empty
+            pathGestureActive = false
+            activePathTool = nil
             strokeLayout = .empty
             controller.updatePendingOperationCount(0)
             if abandoned > 0 {
@@ -826,7 +975,12 @@ fileprivate extension ReaderWebViewModel {
             options: .regularExpression
         ) == nil ? "#ff3b30" : colorHex
         let safeWidth = max(1, min(width, 16))
-        let webTool = tool == .eraser ? "eraser" : "pen"
+        let webTool: String
+        switch tool {
+        case .pen: webTool = "pen"
+        case .eraser: webTool = "eraser"
+        case .selection: webTool = "region"
+        }
         webView.evaluateJavaScript(
             """
             (() => {
@@ -843,6 +997,18 @@ fileprivate extension ReaderWebViewModel {
                 _epInk.width = width;
                 _epInk.tool = tool;
               }
+              document.querySelectorAll(
+                "#ink-toolbar button[data-tool], " +
+                "#ep-ink-toolbar button[data-itool], " +
+                ".bw-ink-tools button[data-tool]"
+              ).forEach((button) => {
+                const value = button.getAttribute("data-tool")
+                  || button.getAttribute("data-itool");
+                button.classList.toggle(
+                  "on",
+                  value === tool || (tool === "region" && value === "selection")
+                );
+              });
             })();
             """,
             completionHandler: nil
@@ -861,14 +1027,18 @@ fileprivate extension ReaderWebViewModel {
             if let width = segment.width { value["width"] = width }
             return value
         }
-        try await callNativeInkHost(
-            operation.kind.rawValue,
-            payload: [
-                "opId": operation.id,
-                "documentToken": operation.documentToken,
-                "segments": segments,
-            ]
-        )
+        var payload: [String: Any] = [
+            "opId": operation.id,
+            "documentToken": operation.documentToken,
+            "segments": segments,
+        ]
+        if let regionId = operation.regionId {
+            payload["regionId"] = regionId
+        }
+        if let createdAtEpochMs = operation.createdAtEpochMs {
+            payload["createdAtEpochMs"] = createdAtEpochMs
+        }
+        try await callNativeInkHost(operation.kind.rawValue, payload: payload)
     }
 
     func callNativeInkHost(

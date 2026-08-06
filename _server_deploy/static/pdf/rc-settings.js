@@ -248,6 +248,7 @@
   var NOTE_OP_KEY = 'rc-note-opacity', NOTE_AC_KEY = 'rc-note-autocontrast';   // 与 rc-stickynote.js 读取端一致
   var NOTE_LP_KEY = 'rc-note-longpress';   // 长按进入编辑时长(毫秒;rc-stickynote.lpMs 读,钳 200–800 缺省 350)
   var NOTE_BLUR_KEY = 'rc-note-blur';      // 磨砂强度(blur px;rc-stickynote.noteBlur 读,钳 0–24 缺省 10)
+  var INK_DOUBLE_TAP_KEY = 'rc-ink-double-tap-action';
   function _fillNotePane() {
     var op = $('rcset-note-op'), ov = $('rcset-note-op-val'), ac = $('rcset-note-autoc');
     if (!op) return;
@@ -273,6 +274,11 @@
       bl.value = px;
       if (bv) bv.textContent = px;
     }
+    var dt = $('rcset-ink-double-tap');
+    if (dt) {
+      var action = lsGet(INK_DOUBLE_TAP_KEY) || 'eraser';
+      dt.value = /^(eraser|selection|none)$/.test(action) ? action : 'eraser';
+    }
   }
   function _saveNotePane() {
     var op = $('rcset-note-op'), ac = $('rcset-note-autoc');
@@ -292,6 +298,11 @@
       var px = parseInt(bl.value, 10);
       if (isNaN(px)) px = 10;
       lsSet(NOTE_BLUR_KEY, String(Math.max(0, Math.min(24, px))));   // 下面 refreshStyle 里 applyColor 会重设 blur
+    }
+    var dt = $('rcset-ink-double-tap');
+    if (dt) {
+      var action = /^(eraser|selection|none)$/.test(dt.value) ? dt.value : 'eraser';
+      lsSet(INK_DOUBLE_TAP_KEY, action);
     }
     // 即时应用到所有已挂载便签(rc-stickynote 未加载的页面(如 HTML 阅读器)只落盘,下次进书生效)
     try { if (window.RC && RC.stickynote && RC.stickynote.refreshStyle) RC.stickynote.refreshStyle(); } catch (_) {}
@@ -890,6 +901,14 @@
         '<div class="ep-set-note" style="margin:-2px 0 12px">透过便签看到的下方正文的模糊程度：0 = 不模糊（纯半透明），越大越朦胧。</div>' +
         '<label class="ep-set-chk"><input type="checkbox" id="rcset-note-autoc"> 文字 / 手写笔自动对比色</label>' +
         '<div class="ep-set-note">开：按便签底色深浅自动选前景色——浅色便签配深字深笔，深色便签（石墨/墨绿）配浅字浅笔；<b>已画的笔迹不改色</b>，只影响文字显示和新笔画。关：固定深色文字＋红笔。</div>' +
+        '<hr class="ep-set-hr">' +
+        '<label style="' + LBL + '">👆 触屏双击动作</label>' +
+        '<select id="rcset-ink-double-tap" style="' + SEL + '">' +
+          '<option value="eraser">切换画笔与临时橡皮</option>' +
+          '<option value="selection">切换画笔与选区笔</option>' +
+          '<option value="none">不执行操作</option>' +
+        '</select>' +
+        '<div class="ep-set-note">Apple Pencil 笔身双击由 App 上方的 Apple Pencil 设置单独控制；这里控制触屏连续双击。</div>' +
         '<hr class="ep-set-hr">' +
         '<div class="ep-set-slrow"><span>长按进入编辑 <small id="rcset-note-lp-val">350</small> ms</span><input type="range" id="rcset-note-lp" min="200" max="800" step="50" value="350"></div>' +
         '<div class="ep-set-note" style="margin:-2px 0 0">按住便签（任意部分）多久进入编辑模式（移动 / 缩放 / 换色 / 删除）。越短越灵敏，太短容易误触。保存后下次长按生效。</div>' +

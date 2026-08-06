@@ -233,6 +233,7 @@
     { legacyKey: 'rc-note-autocontrast', collection: 'device-preferences', semanticKey: 'note.auto-contrast', codec: 'boolean-string' },
     { legacyKey: 'rc-note-longpress', collection: 'device-preferences', semanticKey: 'note.long-press-ms', codec: 'number-string' },
     { legacyKey: 'rc-note-blur', collection: 'device-preferences', semanticKey: 'note.blur', codec: 'number-string' },
+    { legacyKey: 'rc-ink-double-tap-action', collection: 'device-preferences', semanticKey: 'ink.double-tap-action', codec: 'string' },
     { legacyKey: 'eph-debug', collection: 'device-preferences', semanticKey: 'reader.debug', codec: 'boolean-string' },
     { legacyKey: 'eph-hl-color', collection: 'device-preferences', semanticKey: 'highlight.active-color', codec: 'string' },
     { legacyKey: 'eph-ink-color', collection: 'device-preferences', semanticKey: 'ink.active-color', codec: 'string' },

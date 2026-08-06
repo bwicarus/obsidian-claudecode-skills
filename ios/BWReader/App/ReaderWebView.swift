@@ -66,6 +66,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
 
     private enum NativePencilAction: String {
         case toggleEraser = "toggle-eraser"
+        case toggleSelection = "toggle-selection"
         case showPalette = "show-palette"
     }
 
@@ -399,6 +400,29 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 return false;
               };
 
+              const toggleSelection = () => {
+                const toolbars = [
+                  ["#ink-toolbar", "data-tool"],
+                  ["#ep-ink-toolbar", "data-itool"],
+                  [".bw-ink-tools", "data-tool"]
+                ];
+                for (const [selector, attribute] of toolbars) {
+                  const toolbar = document.querySelector(selector);
+                  if (!toolbar) continue;
+                  const selection = toolbar.querySelector(
+                    `[${attribute}="selection"], [${attribute}="region"]`
+                  );
+                  const pen = toolbar.querySelector(`[${attribute}="pen"]`);
+                  if (!selection) continue;
+                  const target = selection.classList.contains("on") && pen
+                    ? pen
+                    : selection;
+                  target.click();
+                  return true;
+                }
+                return false;
+              };
+
               const showPalette = () => {
                 if (document.querySelector(
                   ".rc-note.rc-note-editing, #ink-toolbar.show, " +
@@ -428,6 +452,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 let handled = dispatchOverride(detail);
                 if (!handled && detail.action === "toggle-eraser") {
                   handled = toggleEraser();
+                } else if (!handled && detail.action === "toggle-selection") {
+                  handled = toggleSelection();
                 } else if (!handled && detail.action === "show-palette") {
                   handled = showPalette();
                 }
@@ -858,6 +884,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             return nil
         case .toggleEraser:
             return .toggleEraser
+        case .toggleSelection:
+            return .toggleSelection
         case .showPalette:
             return .showPalette
         case .followSystem:
@@ -897,6 +925,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         switch action {
         case .toggleEraser:
             nativePencilInk.toggleEraser()
+        case .toggleSelection:
+            nativePencilInk.toggleSelection()
         case .showPalette:
             nativePencilInk.showPalette()
         }
@@ -1293,6 +1323,18 @@ extension ReaderWebViewModel: WKScriptMessageHandler {
                     == readerStartURL.host?.lowercased(),
                 let body = message.body as? [String: Any]
             else {
+                return
+            }
+            if body["type"] as? String == "tool",
+               body.count == 2,
+               let rawTool = body["tool"] as? String
+            {
+                switch rawTool {
+                case "pen": nativePencilInk.select(.pen)
+                case "eraser": nativePencilInk.select(.eraser)
+                case "selection": nativePencilInk.select(.selection)
+                default: return
+                }
                 return
             }
             nativePencilInk.updateLayout(from: body)

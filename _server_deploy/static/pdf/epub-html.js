@@ -3178,6 +3178,8 @@
     saveTimers: {},
     _lastTap: null, quickErase: false, _revertT: null, _prevTool: 'pen',
     ro: null, liveCv: null,   // liveCv:正在画的笔画专用「视口固定」叠加层(避免每帧在整章主 canvas 上 putImageData → 卡顿根因)
+    paletteAnchor: null,      // 最近 Pencil hover/落笔的视口坐标；工具栏打开时跟随到其上方
+    _paletteRaf: null,
   };
   window._epInk = _epInk;
   _epInk.fileOf = {};   // idx(uid) → 原书文件(收藏夹自建页跨书写原书墨迹);缺省 = FREL
@@ -3301,17 +3303,27 @@
     var ctx = cv.getContext('2d');
     ctx.setTransform(1, 0, 0, 1, 0, 0);
     ctx.clearRect(0, 0, cv.width, cv.height);   // 只清视口大小 → 廉价,完全不碰整章主 canvas
-    _inkDrawStroke(ctx, { t: d.stroke.t, c: d.stroke.c, w: d.stroke.w, p: d.live }, cv.width, cv.height, window.devicePixelRatio || 1);
+    _inkDrawStroke(ctx, {
+      t: d.stroke.t, id: d.stroke.id, createdAtEpochMs: d.stroke.createdAtEpochMs,
+      c: d.stroke.c, w: d.stroke.w, p: d.live
+    }, cv.width, cv.height, window.devicePixelRatio || 1);
   }
   // 手写顶栏按钮图标(SF 线条 SVG,跟随 currentColor:active/erasing 态色自动跟):笔态 / 橡皮态
   var _RC_INK_PEN = '<svg class="rc-tbi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M19.3 7.3L16.7 4.7L4.7 16.7L4 20L7.3 19.3Z"/><path d="M7.3 19.3L4.7 16.7"/></svg>';
   var _RC_INK_ERASER = '<svg class="rc-tbi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M19 20h-10.5l-4.21-4.3a1 1 0 0 1 0-1.41l10-10a1 1 0 0 1 1.41 0l5 5a1 1 0 0 1 0 1.41l-9.2 9.3"/><path d="M18 13.3l-6.3-6.3"/></svg>';
+  var _RC_INK_REGION = '<svg class="rc-tbi" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="M5 6.5L11 3.5L19 7L20 15L14 20L6 18L3.5 11Z"/><path d="M5 6.5L6 18" stroke-dasharray="2 2"/></svg>';
   // 工具变更 → 工具栏按钮高亮 + 顶栏 笔/橡皮 图标 + 临时橡皮态(照搬 PDF _inkUpdateToolUI)
   function _inkUpdateToolUI() {
     var t = _epInk.tool, tb = $('ep-ink-toolbar');
     if (tb) [].forEach.call(tb.querySelectorAll('button[data-itool]'), function (b) { b.classList.toggle('on', b.dataset.itool === t); });
     var fb = $('ep-ink-btn');
-    if (fb) { fb.innerHTML = (t === 'eraser') ? _RC_INK_ERASER : _RC_INK_PEN; fb.classList.toggle('ep-ink-erasing', t === 'eraser' && _epInk.quickErase); }
+    if (fb) { fb.innerHTML = (t === 'eraser') ? _RC_INK_ERASER : (t === 'region' ? _RC_INK_REGION : _RC_INK_PEN); fb.classList.toggle('ep-ink-erasing', t === 'eraser' && _epInk.quickErase); }
+    try {
+      if (window.__BW_NATIVE_PENCILKIT_INK__ === true) {
+        var handler = window.webkit && window.webkit.messageHandlers && window.webkit.messageHandlers.bwNativePencilInk;
+        if (handler && handler.postMessage) handler.postMessage({ type: 'tool', tool: t === 'region' ? 'selection' : t });
+      }
+    } catch (_) {}
   }
   function _inkArmRevert(ms) {
     clearTimeout(_epInk._revertT);
@@ -3326,11 +3338,37 @@
     if (toPen) { _epInk.tool = _epInk._prevTool || 'pen'; _inkUpdateToolUI(); if (was && notify) { try { toast('✏️ 已回到笔'); } catch (e) {} } }
     else { _inkUpdateToolUI(); }
   }
-  // 手指快速双击 → 切 笔↔临时橡皮(替代浏览器拿不到的 Apple Pencil 双击笔身;照搬 PDF)
-  function _inkDoubleTapSwitch(el) {
+  function _inkDoubleTapAction() {
+    var value = 'eraser';
+    try { value = String(localStorage.getItem('rc-ink-double-tap-action') || 'eraser'); } catch (_) {}
+    return value === 'selection' || value === 'none' ? value : 'eraser';
+  }
+  // 手指快速双击按设置切换临时橡皮 / 共享选区笔 / 不接管。
+  function _inkDoubleTapSwitch(el, requestedAction) {
+    var action = requestedAction || _inkDoubleTapAction();
+    if (action === 'none') return false;
+    if (action === 'selection') {
+      clearTimeout(_epInk._revertT); _epInk._revertT = null; _epInk.quickErase = false;
+      _epInk.tool = _epInk.tool === 'region' ? 'pen' : 'region';
+      _epInk._prevTool = 'pen';
+      _inkUpdateToolUI();
+      try { toast(_epInk.tool === 'region' ? '⬡ 已切到共享选区笔' : '✏️ 已退出共享选区笔'); } catch (_) {}
+      return true;
+    }
     // 手指永不画 → 双击无误点小点要撤(照搬 PDF:finger 双击 skipUndo=true,不动已有笔画)
     if (_epInk.tool === 'eraser') { _inkExitQuickErase(true, false); }   // 再次双击 → 立刻回笔(还原上一支工具)
     else { _epInk._prevTool = _epInk.tool; _epInk.tool = 'eraser'; _epInk.quickErase = true; _inkUpdateToolUI(); _inkArmRevert(2500); }   // 进临时橡皮 + 武装空闲自动回笔
+    return true;
+  }
+  function _inkRegionId() { return 'r-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10); }
+  function _inkPlaceToolbar() { RCInk.positionToolbarAbove($('ep-ink-toolbar'), _epInk.paletteAnchor); }
+  function _inkRememberPaletteAnchor(clientX, clientY) {
+    if (!Number.isFinite(clientX) || !Number.isFinite(clientY)) return;
+    _epInk.paletteAnchor = { x: clientX, y: clientY };
+    var tb = $('ep-ink-toolbar');
+    if (tb && tb.classList.contains('show') && !_epInk._paletteRaf) {
+      _epInk._paletteRaf = requestAnimationFrame(function () { _epInk._paletteRaf = null; _inkPlaceToolbar(); });
+    }
   }
 
   // ── 便签跨界路由辅助(rc-stickynote:笔尖实时位置决定写便签还是写页面,一条笔画在边界切段)──
@@ -3401,12 +3439,16 @@
     if (e.pointerType === 'touch' && !_epInk.drawing && (_epInk.mode || _epInk.lastEl)) {
       var now = Date.now(), lt = _epInk._lastTap;
       if (lt && now - lt.t < 350 && Math.hypot(e.clientX - lt.x, e.clientY - lt.y) < 32) {
-        e.preventDefault(); e.stopPropagation(); _epInk._lastTap = null; _inkDoubleTapSwitch(el); return;
+        _epInk._lastTap = null;
+        var action = _inkDoubleTapAction();
+        if (action !== 'none') { e.preventDefault(); e.stopPropagation(); _inkDoubleTapSwitch(el, action); return; }
       }
       _epInk._lastTap = { t: now, x: e.clientX, y: e.clientY };
     }
     // 绘制门槛(照搬 PDF):Apple Pencil 始终;鼠标仅桌面手写模式;手指永不画(只滚动/双击切工具)
     if (!(e.pointerType === 'pen' || (e.pointerType === 'mouse' && _epInk.mode))) return;
+    if (e.pointerType === 'pen') _inkRememberPaletteAnchor(e.clientX, e.clientY);
+    if (noteEl && _epInk.tool === 'region') return;   // 共享选区属于书页，不写进便签私有墨迹层
     // 便签路由:笔落在展开便签 body 上 → 整条手势仍由本模块主持,但这一段经 rc-stickynote 的
     // penBegin/penMove/penEnd 写进便签(跨界切割在 _inkPointerMove 处理)。落在 handle/工具等部位 →
     // 直接放行(不 stopPropagation),让便签自身手势(单击折叠/长按移动)接管;两种情况都不画页面
@@ -3437,7 +3479,9 @@
       _epInk.drawing = { el: el, captureEl: el, pid: e.pointerId, idx: idx, eraser: true, pageTouched: true };
     } else {
       _inkPushUndo(el);
-      var stroke = { t: _epInk.tool, c: _epInk.color, w: parseFloat(_epInk.width) || 2.5, p: [pt] };
+      var isRegion = _epInk.tool === 'region';
+      var stroke = { t: _epInk.tool, c: isRegion ? '#0a84ff' : _epInk.color, w: isRegion ? 2 : (parseFloat(_epInk.width) || 2.5), p: [pt] };
+      if (_epInk.tool === 'region') { stroke.id = _inkRegionId(); stroke.createdAtEpochMs = Date.now(); }
       _inkStrokesOf(el).push(stroke);                          // 先入册;绘制期间只画视口叠加层,松手 _inkRedraw 一次性落到主 canvas
       var iw0 = window.innerWidth || 1, ih0 = window.innerHeight || 1;
       _inkLiveShow();
@@ -3453,6 +3497,7 @@
     // 手写笔、手指可能同时存在；只有发起当前笔画的 pointerId 才能阻止
     // 默认动作，手指不能因残留的 pen 状态而丢掉第一轮原生滚动。
     if (e.pointerId !== d.pid) return;
+    if (e.pointerType === 'pen') _inkRememberPaletteAnchor(e.clientX, e.clientY);
     e.preventDefault();
     // ── 便签跨界路由(规格:笔尖实时位置决定写哪层;pen/橡皮参与切割,line/arrow/rect 形状不切)──
     var RS = window.RC && RC.stickynote;
@@ -3476,9 +3521,10 @@
     if (d.eraser) { var ptE = _inkNorm(d.el, e.clientX, e.clientY); if (ptE) _inkEraseAt(d.el, ptE); return; }
     if (!d.stroke) return;   // 防御:路由暂态(悬空段等)下无页面笔画
     var s = d.stroke, iw = window.innerWidth || 1, ih = window.innerHeight || 1;
-    if (s.t === 'pen') {
+    if (s.t === 'pen' || s.t === 'region') {
       var evs = e.getCoalescedEvents ? e.getCoalescedEvents() : [e];   // 合并事件采样(高频笔)→ 逐点入库
       for (var i = 0; i < evs.length; i++) {
+        if (s.t === 'region' && s.p.length >= (RCInk.REGION_MAX_POINTS || 512)) break;
         var p = _inkNorm(d.el, evs[i].clientX, evs[i].clientY); if (!p) continue;
         var lastp = s.p[s.p.length - 1];
         if (lastp) { var dx = p[0] - lastp[0], dy = p[1] - lastp[1]; if (dx * dx + dy * dy < 6e-6) continue; }   // 抽稀近点(防曲线发毛)
@@ -3507,7 +3553,7 @@
     if (d.noteRoute) { if (RS && RS.penEnd) RS.penEnd(); }   // 便签内抬笔:便签段收尾(单点=有意的点,保留)
     else if (!d.eraser && d.stroke) {
       var s = d.stroke;
-      if (s.t !== 'pen' && s.p.length < 2) { var arr = _inkStrokesOf(d.el), i = arr.indexOf(s); if (i >= 0) arr.splice(i, 1); }
+      if ((s.t === 'region' && s.p.length < 3) || (s.t !== 'pen' && s.t !== 'region' && s.p.length < 2)) { var arr = _inkStrokesOf(d.el), i = arr.indexOf(s); if (i >= 0) arr.splice(i, 1); }
     }
     var wasEraser = d.eraser;
     _epInk.drawing = null;
@@ -3618,13 +3664,13 @@
       if (reportTimer) return;
       reportTimer = setTimeout(function () { reportTimer = 0; report(); }, 50);
     }
-    function parsedSegments(input, requireTwoPoints) {
+    function parsedSegments(input, minimumPoints, maximumPoints) {
       var raw = input && Array.isArray(input.segments) ? input.segments.slice(0, 64) : [];
       var out = [];
       for (var i = 0; i < raw.length; i++) {
         var segment = raw[i] || {}, id = String(segment.surfaceId || '');
-        var el = resolveSurface(id), points = Array.isArray(segment.points) ? segment.points.slice(0, 4096) : [];
-        if (!el || (requireTwoPoints ? points.length < 2 : !points.length)) return null;
+        var el = resolveSurface(id), points = Array.isArray(segment.points) ? segment.points.slice(0, maximumPoints || 4096) : [];
+        if (!el || points.length < (minimumPoints || 1)) return null;
         points = points.map(function (point) {
           if (!Array.isArray(point) || point.length < 2) return null;
           var x = Number(point[0]), y = Number(point[1]);
@@ -3657,7 +3703,7 @@
       });
       operation.state = 'applied';
       scheduleReport();
-      return operation.kind === 'commit'
+      return operation.kind === 'commit' || operation.kind === 'createRegion'
         ? { ok: true, written: operation.written, sections: Object.keys(operation.touched) }
         : { ok: true, removed: operation.removed, sections: Object.keys(operation.touched) };
     }
@@ -3671,6 +3717,30 @@
           operation.touched[segment.id] = segment;
         }
         _inkStrokesOf(segment.el).push({ t: 'pen', c: color, w: width, p: segment.points });
+        operation.nextSegment += 1;
+        operation.written += 1;
+      }
+      operation.state = 'mutated';
+      return finishOperation(operation);
+    }
+    function resumeCreateRegion(operation) {
+      while (operation.nextSegment < operation.segments.length) {
+        var segment = operation.segments[operation.nextSegment], raw = segment.raw;
+        var color = /^#[0-9a-f]{6}$/i.test(String(raw.color || '')) ? String(raw.color) : '#ff3b30';
+        var width = Math.max(1, Math.min(20, Number(raw.width) || 3));
+        var regionId = operation.regionId;
+        if (operation.segments.length > 1) regionId = regionId.slice(0, 86) + '-' + operation.nextSegment;
+        var createdAt = Number(raw.createdAtEpochMs || operation.createdAtEpochMs);
+        if (!Number.isFinite(createdAt) || createdAt <= 0) createdAt = operation.createdAtEpochMs;
+        if (!operation.touched[segment.id]) {
+          _inkPushUndo(segment.el);
+          operation.touched[segment.id] = segment;
+        }
+        var regionStrokes = _inkStrokesOf(segment.el);
+        regionStrokes.push({
+          t: 'region', id: regionId, createdAtEpochMs: createdAt,
+          c: color, w: width, p: segment.points.slice(0, RCInk.REGION_MAX_POINTS || 512)
+        });
         operation.nextSegment += 1;
         operation.written += 1;
       }
@@ -3696,13 +3766,34 @@
             ? resumeCommit(appliedOps[opId])
             : finishOperation(appliedOps[opId]);
         }
-        var segments = parsedSegments(input, true);
+        var segments = parsedSegments(input, 2, 4096);
         if (!segments) return { ok: false, error: 'native_surface_stale' };
         var operation = rememberOperation(opId, {
           kind: 'commit', state: 'mutating', touched: Object.create(null),
           segments: segments, nextSegment: 0, written: 0
         });
         return resumeCommit(operation);
+      },
+      createRegion: function (input) {
+        if (window.__BW_NATIVE_PENCILKIT_INK__ !== true) return { ok: false, error: 'native_disabled' };
+        var opId = operationId(input);
+        if (!opId) return { ok: false, error: 'native_document_stale' };
+        if (appliedOps[opId]) {
+          if (appliedOps[opId].state === 'applied') return { ok: true, duplicate: true };
+          return appliedOps[opId].kind === 'createRegion' && appliedOps[opId].state === 'mutating'
+            ? resumeCreateRegion(appliedOps[opId]) : finishOperation(appliedOps[opId]);
+        }
+        var segments = parsedSegments(input, 3, RCInk.REGION_MAX_POINTS || 512);
+        if (!segments) return { ok: false, error: 'native_surface_stale' };
+        var regionId = String(input.regionId || '');
+        if (!/^[A-Za-z0-9_-]{1,96}$/.test(regionId)) return { ok: false, error: 'native_region_invalid' };
+        var createdAt = Number(input.createdAtEpochMs);
+        if (!Number.isFinite(createdAt) || createdAt <= 0) createdAt = Date.now();
+        var operation = rememberOperation(opId, {
+          kind: 'createRegion', state: 'mutating', touched: Object.create(null), opId: opId, regionId: regionId,
+          createdAtEpochMs: createdAt, segments: segments, nextSegment: 0, written: 0
+        });
+        return resumeCreateRegion(operation);
       },
       erase: function (input) {
         if (window.__BW_NATIVE_PENCILKIT_INK__ !== true) return { ok: false, error: 'native_disabled' };
@@ -3712,7 +3803,7 @@
           if (appliedOps[opId].state === 'applied') return { ok: true, duplicate: true };
           return finishOperation(appliedOps[opId]);
         }
-        var segments = parsedSegments(input, false);
+        var segments = parsedSegments(input, 1, 4096);
         if (!segments) return { ok: false, error: 'native_surface_stale' };
         var touched = Object.create(null), removed = 0;
         segments.forEach(function (segment) {
@@ -4152,6 +4243,7 @@
     var b = $('ep-ink-btn'); if (b) b.classList.toggle('active', _epInk.mode);
     var tb = $('ep-ink-toolbar'); if (tb) tb.classList.toggle('show', _epInk.mode);
     if (_epInk.mode) { _visibleLoadedSecs().forEach(function (el) { _inkEnsure(el, parseInt(el.dataset.idx, 10)); }); hideSel(); }
+    if (_epInk.mode) requestAnimationFrame(_inkPlaceToolbar);
   }
   function _inkSetTool(t) { clearTimeout(_epInk._revertT); _epInk._revertT = null; _epInk.quickErase = false; _epInk.tool = t; _inkUpdateToolUI(); }
   function _inkSetColor(c, btn) {
@@ -4206,6 +4298,9 @@
     if (tb) [].forEach.call(tb.querySelectorAll('.ep-ink-color'), function (b) { b.classList.toggle('on', b.dataset.c === _epInk.color); });
     // 委托监听:#ep-col capture pointerdown(找 .ep-sec)+ 触屏 stylus 阻止滚动(笔不滚页,手指照常)
     col.addEventListener('pointerdown', _inkPointerDown, true);
+    document.addEventListener('pointermove', function (e) {
+      if (e.pointerType === 'pen' && !_epInk.drawing && !(e.target && e.target.closest && e.target.closest('#ep-ink-toolbar'))) _inkRememberPaletteAnchor(e.clientX, e.clientY);
+    }, true);
     col.addEventListener('touchstart', _inkBlockStylusScroll, { passive: false });
     col.addEventListener('touchmove', _inkBlockStylusScroll, { passive: false });
     setTimeout(_inkLoadAll, 900);   // 延迟拉 sidecar,不和首屏章节抢连接
