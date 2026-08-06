@@ -416,12 +416,9 @@
         if (frame && window.__bwProbe) window.__bwProbe.trustFrame(frame);
       } catch (_) {}
       if (!frame || !frame.contentWindow) {
-        if (!window.__bwFrameMissingReported) {
-          window.__bwFrameMissingReported = true;
-          try {
-            console.warn("[bw-context] 页面内没有桥接框，上下文改由后台通道尝试");
-          } catch (_) {}
-        }
+        // Through the shared channel, not console: on iOS there is no Web
+        // Inspector, so console.warn is indistinguishable from writing nothing.
+        probeLine("投递: 页面内没有桥接框，改走后台通道");
         return false;
       }
       frame.contentWindow.postMessage(
@@ -430,7 +427,7 @@
       );
       return true;
     } catch (err) {
-      try { console.warn("[bw-context] 直投失败:", err && err.message); } catch (_) {}
+      probeLine("投递失败: " + ((err && err.message) || "未知"));
       return false;
     }
   }
