@@ -20,7 +20,7 @@ const WEBVIEW = readFileSync(
   "utf8",
 );
 
-test("App-only PencilKit owns book-page strokes while web ink still owns sticky notes", () => {
+test("App PencilKit keeps the web page-ink fallback when native hit-testing declines", () => {
   assert.match(WEBVIEW, /window\.__BW_NATIVE_PENCILKIT_INK__ = true/);
   for (const source of [PDF, EPUB]) {
     const pointerStart = source.indexOf("function _inkPointerDown(e)");
@@ -28,13 +28,11 @@ test("App-only PencilKit owns book-page strokes while web ink still owns sticky 
     assert.ok(pointerStart >= 0 && pointerEnd > pointerStart);
     const pointerDown = source.slice(pointerStart, pointerEnd);
     const noteIndex = pointerDown.indexOf("noteEl");
-    const nativeGuardIndex = pointerDown.indexOf(
-      "window.__BW_NATIVE_PENCILKIT_INK__ === true && !noteEl",
-    );
     const stickyNoteRouteIndex = pointerDown.indexOf("RC.stickynote");
-    assert.ok(noteIndex >= 0 && nativeGuardIndex > noteIndex);
-    assert.ok(stickyNoteRouteIndex > nativeGuardIndex);
+    assert.ok(noteIndex >= 0);
+    assert.ok(stickyNoteRouteIndex > noteIndex);
     assert.match(pointerDown, /if \(noteEl\)[\s\S]*penBegin/);
+    assert.doesNotMatch(pointerDown, /__BW_NATIVE_PENCILKIT_INK__[^\n]*return/);
   }
 });
 

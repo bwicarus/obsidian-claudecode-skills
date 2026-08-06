@@ -167,9 +167,9 @@ function _inkPointerDown(e) {
   // 便签 gate:手指落在便签上(聚焦文字/双击橡皮/长按样式)全归便签自己,页面 ink 不掺和
   const noteEl = e.target && e.target.closest ? e.target.closest('.rc-note') : null;
   if (noteEl && e.pointerType === 'touch') return;
-  // BWReader App 的书页墨迹只由原生 PencilKit 采样；旧网页层仅保留便签手写。
-  // PWA/浏览器不会设置该标志，原有 Canvas 画笔行为保持不变。
-  if (window.__BW_NATIVE_PENCILKIT_INK__ === true && !noteEl) return;
+  // 原生 PencilKit 画布位于 WebView 上方；它真正命中时本处理器收不到同一
+  // Pencil 事件。若原生布局或 hit-test 尚未就绪，事件会落回这里继续绘制，
+  // 避免仅凭“支持 PencilKit”的能力标志制造输入黑洞。
   // 手指(touch)快速双击 → 切换 笔↔橡皮。仅「手写激活」时(开了工具栏 或 本次已画过笔)，
   // 不破坏纯阅读时手指双击选段；单指 tap/滑不拦截，照常选词/选段/滚动。
   // 笔正在画时忽略手指（挡掉写字时手掌/另一手误触切橡皮）；窗口/距离收紧防误判
