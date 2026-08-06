@@ -195,7 +195,10 @@ struct NativePencilLiveOverlay: View {
         ZStack(alignment: .bottomTrailing) {
             NativePencilCanvasRepresentable(
                 reader: reader,
-                controller: controller
+                controller: controller,
+                selectedTool: controller.tool,
+                selectedColorHex: controller.colorHex,
+                selectedWidth: controller.width
             )
 
             if controller.canDraw {
@@ -270,6 +273,9 @@ struct NativePencilLiveOverlay: View {
 private struct NativePencilCanvasRepresentable: UIViewRepresentable {
     let reader: ReaderWebViewModel
     @ObservedObject var controller: NativePencilInkController
+    let selectedTool: NativePencilInkController.Tool
+    let selectedColorHex: String
+    let selectedWidth: CGFloat
 
     func makeCoordinator() -> Coordinator {
         Coordinator(reader: reader, controller: controller)
@@ -309,7 +315,12 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
         eraserPath.delegate = context.coordinator
         canvas.addGestureRecognizer(eraserPath)
         context.coordinator.canvas = canvas
-        context.coordinator.applyState(to: canvas)
+        context.coordinator.applyState(
+            to: canvas,
+            tool: selectedTool,
+            colorHex: selectedColorHex,
+            width: selectedWidth
+        )
         return canvas
     }
 
@@ -318,7 +329,12 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
         context: Context
     ) {
         context.coordinator.controller = controller
-        context.coordinator.applyState(to: canvas)
+        context.coordinator.applyState(
+            to: canvas,
+            tool: selectedTool,
+            colorHex: selectedColorHex,
+            width: selectedWidth
+        )
         context.coordinator.retryIfRequested()
     }
 
@@ -342,6 +358,8 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
         private var queuedStrokeCount = 0
         private var confirmedStrokeCount = 0
         private var strokeLayout = NativeInkLayout.empty
+        private var strokeColor = "#ff3b30"
+        private var strokeWidth: CGFloat = 4
         private var eraserPoints: [[CGFloat]] = []
         private var eraserLayout = NativeInkLayout.empty
         private var eraserDrawingSnapshot: PKDrawing?
@@ -357,24 +375,29 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
             appliedDocumentGeneration = controller.documentGeneration
         }
 
-        func applyState(to canvas: PKCanvasView) {
+        func applyState(
+            to canvas: PKCanvasView,
+            tool: NativePencilInkController.Tool,
+            colorHex: String,
+            width requestedWidth: CGFloat
+        ) {
             synchronizeDocumentGeneration(on: canvas)
-            let width = max(1, min(controller.width, 16))
+            let width = max(1, min(requestedWidth, 16))
             guard
-                appliedTool != controller.tool
-                    || appliedColor != controller.colorHex
+                appliedTool != tool
+                    || appliedColor != colorHex
                     || appliedWidth != width
             else {
                 return
             }
-            appliedTool = controller.tool
-            appliedColor = controller.colorHex
+            appliedTool = tool
+            appliedColor = colorHex
             appliedWidth = width
-            switch controller.tool {
+            switch tool {
             case .pen:
                 canvas.tool = PKInkingTool(
                     .pen,
-                    color: UIColor(bwHex: controller.colorHex),
+                    color: UIColor(bwHex: colorHex),
                     width: width
                 )
             case .eraser:
@@ -394,6 +417,12 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
             activeCanvasTool = controller.tool
             if activeCanvasTool == .pen {
                 strokeLayout = controller.layout
+                strokeColor = controller.colorHex
+                strokeWidth = max(1, min(controller.width, 16))
+                // Freeze the selected style at the beginning of this stroke.
+                // PencilKit's sampled stroke colour/first-point size is not a
+                // reliable round-trip source on iPad and previously collapsed
+                // persisted strokes back to red/4.
             } else if eraserDrawingSnapshot == nil {
                 eraserDrawingSnapshot = canvasView.drawing
             }
@@ -426,7 +455,9 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
                 canonicalSegments(
                     for: $0,
                     layout: strokeLayout,
-                    canvasBounds: canvasView.bounds
+                    canvasBounds: canvasView.bounds,
+                    color: strokeColor,
+                    width: strokeWidth
                 )
             }
             guard !segments.isEmpty else {
@@ -448,7 +479,9 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
         private func canonicalSegments(
             for stroke: PKStroke,
             layout: NativeInkLayout,
-            canvasBounds: CGRect
+            canvasBounds: CGRect,
+            color: String,
+            width: CGFloat
         ) -> [NativeInkSegment] {
             guard canvasBounds.width > 0, canvasBounds.height > 0 else {
                 return []
@@ -465,8 +498,8 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
                 }
                 output.append(NativeInkSegment(
                     surfaceId: surface.id,
-                    color: stroke.ink.color.bwHexString,
-                    width: max(1, min(stroke.path.first?.size.width ?? 4, 20)),
+                    color: color,
+                    width: max(1, min(width, 16)),
                     points: currentPoints
                 ))
                 currentPoints = []
@@ -725,7 +758,7 @@ final class NativePencilPassthroughCanvas: PKCanvasView {
     }
 }
 
-private extension UIColor {
+extension UIColor {
     convenience init(bwHex value: String) {
         let clean = value.trimmingCharacters(in: CharacterSet.alphanumerics.inverted)
         var rgb: UInt64 = 0

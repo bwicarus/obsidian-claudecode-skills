@@ -1267,8 +1267,9 @@ test("正式 manifest 在所有 http(s) 页面载入完整扩展，并只在四�
   assert.deepEqual([...full.matches].sort(), ["http://*/*", "https://*/*"]);
   assert.equal(full.run_at, "document_idle");
   assert.equal(full.all_frames, false);
-  assert.equal(full.js[0], "src/facade.js");
-  assert.equal(full.js[1], "src/settings-sync.js");
+  assert.equal(full.js[0], "src/bw-probe.js");
+  assert.equal(full.js[1], "src/facade.js");
+  assert.equal(full.js[2], "src/settings-sync.js");
   assert.equal(
     full.js.indexOf("vendor/reader-runtime-interaction-policy.js") <
       full.js.indexOf("vendor/reader-runtime-vocabulary-state.js"),

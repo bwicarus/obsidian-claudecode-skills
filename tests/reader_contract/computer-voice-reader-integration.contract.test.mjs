@@ -525,7 +525,11 @@ test("普通网页上下文同页直投后一次 POST，不再保活 WSS", () =>
   assert.match(contentScript, /iframe\[src\*="call\.html"\]/);
   assert.match(
     contentScript,
-    /d\.contract !== "bw-frame-probe\/1"[\s\S]*event\.source !== frame\.contentWindow[\s\S]*probeLine\(String\(d\.text\)\)/,
+    /window\.__bwProbe\.startProbeHost\(\{ enabled: true \}\)/,
+  );
+  assert.match(
+    contentScript,
+    /window\.__bwProbe\.trustFrame\(frame\)/,
   );
   assert.match(
     contentScript,
@@ -537,7 +541,7 @@ test("普通网页上下文同页直投后一次 POST，不再保活 WSS", () =>
   );
   assert.match(
     callPage,
-    /function frameProbe\(text\)[\s\S]*contract: "bw-frame-probe\/1"/,
+    /function frameProbe\(text\)[\s\S]*contract: "bw-probe\/1"[\s\S]*where: "frame"/,
   );
   assert.match(
     callPage,
