@@ -5958,6 +5958,7 @@ internal static class DirectBridgeSelfTest
         const string sourceInstanceId = "web-source-document-1";
         const string url = "https://example.test/long-article";
         const string visibleText = "当前显示部分";
+        const string controlCorrelation = "control-document-1";
         const string fullText =
             "全文开头\n当前显示部分\n全文结尾";
 
@@ -6031,6 +6032,7 @@ internal static class DirectBridgeSelfTest
             selectionState = "unknown",
             selection = (string?)null,
             observedAtEpochMs = now.ToUnixTimeMilliseconds(),
+            controlCorrelation,
         });
         DirectViewportContext viewport =
             FileDirectSnapshotContextAdapter.ValidateViewport(
@@ -6055,6 +6057,31 @@ internal static class DirectBridgeSelfTest
             viewportExtraRejected = exception.Code
                 == "BW_READER_VIEWPORT_SCHEMA_INVALID";
         }
+
+        bool viewportCorrelationRejected = false;
+        try
+        {
+            JsonObject invalidCorrelation = JsonNode.Parse(
+                viewportValue.GetRawText())!.AsObject();
+            invalidCorrelation["controlCorrelation"] =
+                "invalid correlation";
+            _ = FileDirectSnapshotContextAdapter.ValidateViewport(
+                JsonSerializer.SerializeToElement(invalidCorrelation));
+        }
+        catch (DirectProtocolException exception)
+        {
+            viewportCorrelationRejected = exception.Code
+                == "BW_READER_VIEWPORT_SCHEMA_INVALID";
+        }
+
+        FileDirectSnapshotContextAdapter restoredAdapter = new(
+            snapshotPath,
+            () => now);
+        _ = await restoredAdapter.ForwardActiveReadingAsync(
+            "request-document-active-restored",
+            sessionId,
+            active,
+            CancellationToken.None).ConfigureAwait(false);
 
         string revision = ReaderDocumentCorpusStore.ComputeRevision(
             fullText);
@@ -6199,10 +6226,13 @@ internal static class DirectBridgeSelfTest
             saved.Text == fullText
             && saved.ContentRevision == revision
             && viewportExtraRejected
+            && viewportCorrelationRejected
             && readingWindow["beforeText"]?.GetValue<string>() == "前文"
             && readingWindow["visibleText"]?.GetValue<string>()
                 == visibleText
             && readingWindow["afterText"]?.GetValue<string>() == "后文"
+            && readingWindow["controlCorrelation"]?.GetValue<string>()
+                == controlCorrelation
             && persistedSnapshot["currentPage"]?["text"]
                 ?.GetValue<string>() == visibleText,
             "direct-reader-document-and-viewport-are-strict-and-atomic",
@@ -6946,44 +6976,68 @@ internal static class DirectBridgeSelfTest
             long revision,
             string source = "control-source-B",
             int pageIdentity = 4,
-            string kind = "web") => new()
+            string kind = "web",
+            string? controlCorrelation = null)
         {
-            ["schema"] =
-                FileDirectSnapshotContextAdapter.SnapshotContract,
-            ["revision"] = revision,
-            ["updatedAtUtc"] = "2026-08-06T00:00:00Z",
-            ["activeReading"] = new JsonObject
+            JsonObject readingWindow = new()
             {
-                ["kind"] = kind,
-                ["file"] = "https://example.test/article",
-                ["title"] = "Article",
-                ["page"] = pageIdentity,
+                ["contract"] = "reader-viewport/1",
                 ["sourceInstanceId"] = source,
+                ["documentKey"] = "https://example.test/article",
+                ["url"] = "https://example.test/article",
+                ["title"] = "Article",
+                ["beforeText"] = "before",
+                ["visibleText"] = "visible",
+                ["afterText"] = "after",
+                ["selectionState"] = "unknown",
+                ["selection"] = null,
+                ["observedAtEpochMs"] = 1_786_000_000_000L,
                 ["receivedAtEpochMs"] = 1_786_000_000_000L,
-                ["fresh"] = true,
-                ["selectionRegions"] = SelectionRegions(),
-            },
-            ["contextStatus"] = "ready",
-            ["currentPage"] = new JsonObject
+            };
+            if (controlCorrelation is not null)
             {
-                ["kind"] = kind,
-                ["file"] = "https://example.test/article",
-                ["title"] = "Article",
-                ["page"] = pageIdentity,
-                ["sourceInstanceId"] = source,
-                ["stable"] = true,
-                ["text"] = "visible",
-                ["textAvailable"] = true,
-                ["selectionRegions"] = SelectionRegions(),
-            },
-            ["selection"] = new JsonObject
+                readingWindow["controlCorrelation"] = controlCorrelation;
+            }
+            return new JsonObject
             {
-                ["state"] = "unknown",
-                ["text"] = null,
-                ["ref"] = null,
-                ["reason"] = "none",
-            },
-        };
+                ["schema"] =
+                    FileDirectSnapshotContextAdapter.SnapshotContract,
+                ["revision"] = revision,
+                ["updatedAtUtc"] = "2026-08-06T00:00:00Z",
+                ["activeReading"] = new JsonObject
+                {
+                    ["kind"] = kind,
+                    ["file"] = "https://example.test/article",
+                    ["title"] = "Article",
+                    ["page"] = pageIdentity,
+                    ["sourceInstanceId"] = source,
+                    ["receivedAtEpochMs"] = 1_786_000_000_000L,
+                    ["fresh"] = true,
+                    ["selectionRegions"] = SelectionRegions(),
+                },
+                ["contextStatus"] = "ready",
+                ["currentPage"] = new JsonObject
+                {
+                    ["kind"] = kind,
+                    ["file"] = "https://example.test/article",
+                    ["title"] = "Article",
+                    ["page"] = pageIdentity,
+                    ["sourceInstanceId"] = source,
+                    ["stable"] = true,
+                    ["text"] = "visible",
+                    ["textAvailable"] = true,
+                    ["selectionRegions"] = SelectionRegions(),
+                    ["readingWindow"] = readingWindow,
+                },
+                ["selection"] = new JsonObject
+                {
+                    ["state"] = "unknown",
+                    ["text"] = null,
+                    ["ref"] = null,
+                    ["reason"] = "none",
+                },
+            };
+        }
         Require(
             ReaderContextMcpServer.BuildBrowserControlRequest(
                 Snapshot(80),
@@ -7094,7 +7148,9 @@ internal static class DirectBridgeSelfTest
             {
                 await File.WriteAllTextAsync(
                     snapshotPath,
-                    Snapshot(request.SnapshotRevision + 1).ToJsonString(
+                    Snapshot(
+                        request.SnapshotRevision + 1,
+                        controlCorrelation: request.Correlation).ToJsonString(
                         DirectBridgeContract.JsonOptions),
                     new UTF8Encoding(false),
                     token).ConfigureAwait(false);
@@ -7155,10 +7211,20 @@ internal static class DirectBridgeSelfTest
                 Snapshot(91),
                 currentRequest)
             && ReaderContextMcpServer.BrowserControlSnapshotAdvanced(
+                Snapshot(
+                    91,
+                    controlCorrelation: currentRequest.Correlation),
+                currentRequest)
+            && !ReaderContextMcpServer.BrowserControlSnapshotAdvanced(
                 Snapshot(91),
                 currentRequest)
             && !ReaderContextMcpServer.BrowserControlSnapshotAdvanced(
-                Snapshot(90),
+                Snapshot(91, controlCorrelation: "wrong-correlation"),
+                currentRequest)
+            && !ReaderContextMcpServer.BrowserControlSnapshotAdvanced(
+                Snapshot(
+                    90,
+                    controlCorrelation: currentRequest.Correlation),
                 currentRequest)
             && ReaderContextMcpServer
                 .BrowserControlResponseRequiresSnapshotAdvance("success")
@@ -7177,7 +7243,7 @@ internal static class DirectBridgeSelfTest
                 "next-viewport",
                 null,
                 null) is null,
-            "direct-reader-browser-control-rechecks-source-and-page-after-command",
+            "direct-reader-browser-control-requires-exact-correlated-viewport",
             checks);
     }
 

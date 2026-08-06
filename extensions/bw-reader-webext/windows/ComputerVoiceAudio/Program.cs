@@ -253,7 +253,7 @@ internal static class Program
                 contract = AudioBridgeContract.Contract,
                 ok = false,
                 error = "BW_COMPUTER_VOICE_AUDIO_SELF_TEST_FAILED",
-                detail = exception.ToString(),
+                detail = exception.Message,
             }, JsonOptions));
             return 1;
         }

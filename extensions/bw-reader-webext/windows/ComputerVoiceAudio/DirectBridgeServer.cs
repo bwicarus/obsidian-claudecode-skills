@@ -1,4 +1,5 @@
 using System.Buffers;
+using System.Globalization;
 using System.Net;
 using System.Net.WebSockets;
 using System.Text;
@@ -448,6 +449,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         if (originOk)
         {
             context.Response.Headers["Access-Control-Allow-Origin"] = origin;
+            context.Response.Headers["Access-Control-Expose-Headers"] =
+                "X-BW-Snapshot-Revision";
             context.Response.Headers["Vary"] = "Origin";
         }
         if (HttpMethods.IsOptions(context.Request.Method))
@@ -647,31 +650,38 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             }
 
             int applied = 0;
+            long? appliedRevision = null;
             if (contextEvent is not null)
             {
-                await adapter.ForwardJournalAsync(
+                DirectSnapshotForwardResult result =
+                    await adapter.ForwardJournalAsync(
                     requestId,
                     sessionId,
                     contextEvent,
                     serviceCancellationToken).ConfigureAwait(false);
+                appliedRevision = result.Revision;
                 applied += 1;
             }
             if (activeReading is not null)
             {
-                await adapter.ForwardActiveReadingAsync(
+                DirectSnapshotForwardResult result =
+                    await adapter.ForwardActiveReadingAsync(
                     requestId,
                     sessionId,
                     activeReading,
                     serviceCancellationToken).ConfigureAwait(false);
+                appliedRevision = result.Revision;
                 applied += 1;
             }
             if (viewport is not null)
             {
-                await adapter.ForwardViewportAsync(
+                DirectSnapshotForwardResult result =
+                    await adapter.ForwardViewportAsync(
                     requestId,
                     sessionId,
                     viewport,
                     serviceCancellationToken).ConfigureAwait(false);
+                appliedRevision = result.Revision;
                 applied += 1;
             }
             if (documentValue is JsonElement documentEntryValue)
@@ -686,6 +696,11 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 context.Response.StatusCode =
                     StatusCodes.Status400BadRequest;
                 return;
+            }
+            if (appliedRevision is long revision)
+            {
+                context.Response.Headers["X-BW-Snapshot-Revision"] =
+                    revision.ToString(CultureInfo.InvariantCulture);
             }
             context.Response.StatusCode = StatusCodes.Status204NoContent;
         }
