@@ -478,6 +478,81 @@
     return (hash >>> 0).toString(16);
   }
 
+  // Structural chrome: on nearly every page, part of none of them.
+  var ARTICLE_CHROME =
+    '[role=navigation],[role=banner],[role=contentinfo],[role=search],' +
+    '[role=menu],[role=menubar],[role=toolbar],[role=tablist],' +
+    '[aria-hidden="true"],nav,header,footer,aside';
+  var ARTICLE_DROP = ARTICLE_CHROME + ',script,style,noscript,form,button';
+
+  // Scores a subtree by how much of it reads as prose.
+  //
+  // Navigation is many short strings spread across many links; an article is
+  // long runs of text in few blocks. Dividing text length by link density
+  // separates the two without knowing anything about the site. Deliberately
+  // simple -- the aim is to drop menus and sidebars, not to win every layout.
+  function proseScore(el) {
+    var text = "";
+    try { text = String(el.innerText || ""); } catch (_) { return 0; }
+    var len = text.replace(/\s+/g, " ").trim().length;
+    if (len < 140) return 0;
+    var linkLen = 0;
+    try {
+      var links = el.querySelectorAll("a");
+      for (var i = 0; i < links.length; i += 1) {
+        linkLen += String(links[i].innerText || "").length;
+      }
+    } catch (_) {}
+    var linkRatio = len > 0 ? linkLen / len : 1;
+    // Mostly-links subtrees are menus however long they run.
+    if (linkRatio > 0.55) return 0;
+    var blocks = 0;
+    try { blocks = el.querySelectorAll("p,h1,h2,h3,li,blockquote").length; } catch (_) {}
+    return len * (1 - linkRatio) * (1 + Math.min(blocks, 40) / 20);
+  }
+
+  // Picks the subtree that reads most like an article, else the body.
+  //
+  // Declared landmarks come first: a page that says <article> or role=main has
+  // already answered the question. Scoring is the fallback for the many pages
+  // that declare nothing.
+  function articleRoot() {
+    var body = document.body;
+    if (!body) return null;
+    var declared = null;
+    try { declared = body.querySelector("article,[role=main],main"); } catch (_) {}
+    if (declared && proseScore(declared) > 0) return declared;
+
+    var best = null, bestScore = 0;
+    try {
+      var candidates = body.querySelectorAll("article,main,section,div");
+      // Bounded: a deep page holds thousands of divs, and scanning all of them
+      // on every navigation would cost more than the extraction is worth.
+      var limit = Math.min(candidates.length, 400);
+      for (var i = 0; i < limit; i += 1) {
+        var el = candidates[i];
+        try { if (el.closest(ARTICLE_CHROME)) continue; } catch (_) {}
+        var score = proseScore(el);
+        if (score > bestScore) { bestScore = score; best = el; }
+      }
+    } catch (_) {}
+    return best || body;
+  }
+
+  // Reads text from a subtree with the page furniture stripped.
+  // Works on a clone, so the page itself is never touched.
+  function articleText(root) {
+    var src = root;
+    try {
+      src = root.cloneNode(true);
+      var junk = src.querySelectorAll(ARTICLE_DROP);
+      for (var i = 0; i < junk.length; i += 1) {
+        if (junk[i].parentNode) junk[i].parentNode.removeChild(junk[i]);
+      }
+    } catch (_) { src = root; }
+    try { return String(src.innerText || ""); } catch (_) { return ""; }
+  }
+
   function snapshot() {
     var body = document.body;
     if (!body) return null;
