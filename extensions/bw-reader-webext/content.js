@@ -526,6 +526,22 @@
       contentDigest(snap.text) + "|" + contentDigest(snap.selection);
     if (!force && (signature === lastSignature || signature === pendingSignature)) return;
     pendingSignature = signature;
+
+    // Delivered before storage is touched, not after it succeeds.
+    //
+    // This call used to sit inside finishStorage -- the success callback of the
+    // storage write -- which quietly made the direct path depend on the very
+    // relay it was meant to replace. When the write stalled or failed the
+    // callback never ran, and the delivery, along with every line reporting it,
+    // went silent. Tonight's log showed exactly that: the gates all opened and
+    // then nothing followed.
+    //
+    // The frame is in this page and the snapshot is already in hand. Nothing
+    // about handing it over requires a storage write to have completed first.
+    probeLine("采集: " + String(snap.url || "").slice(0, 60));
+    var delivered = deliverToFrame(snap);
+    probeLine("投递到框: " + (delivered ? "成功" : "失败(没找到框)"));
+
     contextRevision += 1;
     var envelope = {
       schema: 1,
@@ -553,9 +569,6 @@
       // in silence, and no way to tell from the outside which one had.
       //
       // The frame is a child of this document. Nothing needs to leave the page.
-      probeLine("采集: " + String(snap && snap.url || "").slice(0, 60));
-      var delivered = deliverToFrame(snap);
-      probeLine("投递到框: " + (delivered ? "成功" : "失败(没找到框)"));
       // Kept only as a fallback for surfaces with no frame of their own.
       try {
         var result = runtime.sendMessage({ type: "BW_PAGE_ACTIVE", page: snap });
