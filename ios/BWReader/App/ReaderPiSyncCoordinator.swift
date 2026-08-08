@@ -190,11 +190,11 @@ final class ReaderPiSyncCoordinator: ObservableObject {
 
     init(
         localLibrary: ReaderLocalLibraryManager = .shared,
-        remoteLibrary: ReaderRemoteLibraryCoordinator = ReaderRemoteLibraryCoordinator(),
+        remoteLibrary: ReaderRemoteLibraryCoordinator? = nil,
         dataSyncRunner: (any ReaderPiDataSyncRunning)? = nil
     ) {
         self.localLibrary = localLibrary
-        self.remoteLibrary = remoteLibrary
+        self.remoteLibrary = remoteLibrary ?? ReaderRemoteLibraryCoordinator()
         self.dataSyncRunner = dataSyncRunner ?? ReaderPiWebDataSyncRunner()
     }
 

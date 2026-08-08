@@ -28,7 +28,7 @@ final class ReaderNativePiSyncBridge: NSObject, WKScriptMessageHandlerWithReply 
 
     private weak var webView: WKWebView?
     private let trustedBasePath: String
-    private let ownerInstanceID = "owner-instance-v1:native:\(Self.randomHex())"
+    private let ownerInstanceID: String
     private let deviceFamilyID: String
     private let redirectDelegate: ReaderNativeNoRedirectDelegate
     private let session: URLSession
@@ -38,6 +38,7 @@ final class ReaderNativePiSyncBridge: NSObject, WKScriptMessageHandlerWithReply 
     init(webView: WKWebView, trustedBaseURL: URL) {
         self.webView = webView
         trustedBasePath = trustedBaseURL.path
+        ownerInstanceID = "owner-instance-v1:native:\(Self.randomHex())"
         deviceFamilyID = Self.loadOrCreateDeviceFamilyID()
         let redirectDelegate = ReaderNativeNoRedirectDelegate()
         self.redirectDelegate = redirectDelegate
