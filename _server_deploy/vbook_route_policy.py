@@ -92,6 +92,9 @@ ROUTE_POLICY = {
     'pdf_reader.pdf_api_job_status': 'JOB_OR_RANGE',   # /pdf/api/job-status
     'pdf_reader.pdf_api_jp_vocab_mark': 'PAGE',   # /pdf/api/jp-vocab-mark
     'pdf_reader.pdf_api_list_pdfs': 'GLOBAL',   # /pdf/api/list-pdfs
+    'pdf_reader.pdf_api_library_catalog': 'GLOBAL',   # /pdf/api/library/catalog (原始书库,不经 vbook 重写)
+    'pdf_reader.pdf_api_library_download': 'GLOBAL',   # /pdf/api/library/download/<book_id>
+    'pdf_reader.pdf_api_library_upload': 'GLOBAL',   # /pdf/api/library/upload
     'pdf_reader.pdf_api_lookup_event': 'PAGE',   # /pdf/api/lookup-event
     'pdf_reader.pdf_api_note_composite': 'PAGE',   # /pdf/api/note-composite
     'pdf_reader.pdf_api_notes': 'PAGE',   # /pdf/api/notes
