@@ -3032,7 +3032,18 @@
 
   function borrowSnapshotChannelForStatus(attempt) {
     var state = snapshotLink;
-    if (!state || state.stopped) return Promise.resolve(null);
+    // The App keeps its snapshot on /reader-context/v1.  That endpoint is
+    // deliberately context-only and must never receive STATUS or the
+    // privileged codex-voice-set action.  Only borrow a snapshot channel when
+    // it is already the full computer-voice endpoint; otherwise availability()
+    // opens a bounded, short-lived voice channel for the settings read.
+    if (
+      !state ||
+      state.stopped ||
+      state.endpoint !== DIRECT_ENDPOINT
+    ) {
+      return Promise.resolve(null);
+    }
     return Promise.resolve(state.promise).catch(function () {
       return null;
     }).then(function (resolved) {

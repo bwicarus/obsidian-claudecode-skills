@@ -55,6 +55,7 @@ class FakeElement {
     this.parentElement = null;
     this.listeners = new Map();
     this.queries = new Map();
+    this.attributes = new Map();
     this.value = "";
     this.innerHTML = "";
     this.textContent = "";
@@ -91,6 +92,9 @@ class FakeElement {
     const listeners = this.listeners.get(type) || [];
     listeners.push(listener);
     this.listeners.set(type, listeners);
+  }
+  setAttribute(name, value) {
+    this.attributes.set(name, String(value));
   }
   dispatch(type, extra = {}) {
     const event = {
@@ -174,7 +178,7 @@ function note(documentId, id, rev, text, extra = {}) {
   };
 }
 
-function loadStickynote({ repository, mount = null, fetchCalls = [] }) {
+function loadStickynote({ repository, mount = null, fetchCalls = [], localStorageValues = {} }) {
   const head = new FakeElement("head");
   head._connected = true;
   const body = new FakeElement("body");
@@ -197,7 +201,7 @@ function loadStickynote({ repository, mount = null, fetchCalls = [] }) {
   const sandbox = {
     console,
     document,
-    localStorage: { getItem() { return null; } },
+    localStorage: { getItem(key) { return localStorageValues[key] ?? null; } },
     Promise,
     setTimeout,
     clearTimeout,
@@ -243,6 +247,50 @@ function loadStickynote({ repository, mount = null, fetchCalls = [] }) {
   });
   return { sandbox, documentId, container, fetchCalls };
 }
+
+test("native Pencil tool/style sync is atomic, updates mounted note UI, and keeps regions on the page", async () => {
+  const id = `c_${"a".repeat(32)}`;
+  const repository = {
+    newId: () => `c_${"b".repeat(32)}`,
+    list: async () => [note("web:https://example.test/article", id, 1, "ink")],
+    get: async () => null,
+    create: async () => null,
+    patch: async () => null,
+    remove: async () => null,
+    subscribe: () => () => {},
+  };
+  const { sandbox, container } = loadStickynote({
+    repository,
+  });
+  await tick();
+  await tick();
+
+  const sticky = sandbox.RC.stickynote;
+  const root = container.children.find((child) => child.dataset.noteId === id);
+  const toolButton = root.querySelector(".rc-note-tools").querySelector(".rc-note-tool");
+
+  assert.equal(sticky.synchronizeInkToolStyle("eraser", "#12ABef", 7.5), true);
+  assert.equal(toolButton.classList.contains("on"), true);
+  assert.equal(toolButton.textContent, "🧹");
+
+  assert.equal(sticky.synchronizeInkToolStyle("pen", "red", 7.5), false);
+  assert.equal(sticky.synchronizeInkToolStyle("pen", "#123456", "7.5"), false);
+  assert.equal(toolButton.classList.contains("on"), true, "invalid calls leave the prior tool intact");
+
+  assert.equal(sticky.synchronizeInkToolStyle("region", "#123456", 3), true);
+  assert.equal(sticky.penRoute(100, 100), null, "page region tool must bypass sticky-note ink");
+  assert.equal(sticky.penBegin({ clientX: 100, clientY: 100 }, {}), false);
+  assert.equal(toolButton.disabled, true);
+  assert.match(toolButton.title, /选区笔只作用于书页/);
+
+  assert.equal(sticky.synchronizeInkToolStyle("pen", "#12ABef", 7.5), true);
+  assert.equal(sticky.penRoute(100, 100), id);
+  assert.equal(toolButton.disabled, false);
+  assert.equal(toolButton.classList.contains("on"), false);
+  assert.equal(sticky.penBegin({ clientX: 100, clientY: 100 }, {}), true);
+  assert.equal(sticky.notes()[0].strokes[0].c, "#12abef");
+  assert.equal(sticky.notes()[0].strokes[0].w, 7.5);
+});
 
 test("repository LIST/CHANGE/RESULT 按 noteId+rev 合并，旧 LIST 不覆盖先到 CHANGE", async () => {
   const list = deferred();
@@ -485,4 +533,3 @@ test("web-notes 先 identity，再用完整 web-dom envelope 对称 mount/create
   assert.match(WEB_NOTES_SOURCE, /invalidateAndRefresh\(\)/);
   assert.match(WEB_NOTES_SOURCE, /if \(!currentIdentity && !\(await boundedRefresh\(\)\)\)/);
 });
-

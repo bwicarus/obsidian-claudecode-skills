@@ -138,6 +138,25 @@ final class NativeReaderToolsCoordinator: ObservableObject {
 // Stable integration name for the App root and App Intents routing layer.
 typealias NativeReaderFeatureCoordinator = NativeReaderToolsCoordinator
 
+private enum ReaderTouchDoubleTapAction: String, CaseIterable, Identifiable {
+    case eraser
+    case selection
+    case none
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .eraser:
+            return "切换画笔与橡皮"
+        case .selection:
+            return "切换画笔与选区笔"
+        case .none:
+            return "不执行操作"
+        }
+    }
+}
+
 struct NativeReaderToolsView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var coordinator = NativeReaderToolsCoordinator()
@@ -148,6 +167,9 @@ struct NativeReaderToolsView: View {
     @State private var selectedLocalNote: ReaderLocalNoteProjection?
     @State private var translationText = ""
     @State private var performedInitialAction = false
+    @State private var touchDoubleTapAction = ReaderTouchDoubleTapAction.eraser
+    @State private var touchDoubleTapLoaded = false
+    @State private var touchDoubleTapError: String?
 
     let reader: ReaderWebViewModel
     let initialAction: ReaderNativeFeatureAction?
@@ -169,6 +191,7 @@ struct NativeReaderToolsView: View {
                 localNotesSection
                 quickNotesSection
                 NativePencilSettingsSection()
+                touchInputSection
                 statusSection
             }
             .navigationTitle("原生阅读工具")
@@ -188,6 +211,7 @@ struct NativeReaderToolsView: View {
                 if coordinator.snapshot == nil {
                     await coordinator.refresh(using: reader)
                 }
+                await loadTouchDoubleTapAction()
                 await performInitialActionIfNeeded()
             }
             .sheet(isPresented: $presentsTranslation) {
@@ -230,6 +254,55 @@ struct NativeReaderToolsView: View {
                     }
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var touchInputSection: some View {
+        Section("绘图与触控") {
+            Picker("触屏双击", selection: $touchDoubleTapAction) {
+                ForEach(ReaderTouchDoubleTapAction.allCases) { action in
+                    Text(action.title).tag(action)
+                }
+            }
+            .onChange(of: touchDoubleTapAction) { _, action in
+                guard touchDoubleTapLoaded else { return }
+                Task { await saveTouchDoubleTapAction(action) }
+            }
+
+            Text("这里设置的是手指在书页上的连续双击；Apple Pencil 笔身双击仍由下方 Pencil 设置控制。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if let touchDoubleTapError {
+                Text(touchDoubleTapError)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+            }
+        }
+    }
+
+    private func loadTouchDoubleTapAction() async {
+        do {
+            let rawValue = try await reader.nativeTouchDoubleTapAction()
+            touchDoubleTapAction = ReaderTouchDoubleTapAction(
+                rawValue: rawValue
+            ) ?? .eraser
+            touchDoubleTapError = nil
+        } catch {
+            touchDoubleTapError = "无法读取触屏双击设置：\(error.localizedDescription)"
+        }
+        touchDoubleTapLoaded = true
+    }
+
+    private func saveTouchDoubleTapAction(
+        _ action: ReaderTouchDoubleTapAction
+    ) async {
+        do {
+            try await reader.setNativeTouchDoubleTapAction(action.rawValue)
+            touchDoubleTapError = nil
+        } catch {
+            touchDoubleTapError = "无法保存触屏双击设置：\(error.localizedDescription)"
         }
     }
 

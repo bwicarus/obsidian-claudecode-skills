@@ -1,5 +1,6 @@
 import Foundation
 import PencilKit
+import QuartzCore
 import SwiftUI
 import UIKit
 
@@ -48,10 +49,11 @@ final class NativePencilInkController: ObservableObject {
     @Published private(set) var retryRequest = 0
     @Published private(set) var documentGeneration = 0
     @Published private(set) var pendingOperationCount = 0
-    @Published var paletteVisible = false
+    @Published private(set) var paletteVisible = false
     @Published var colorHex = "#ff3b30"
     @Published var width: CGFloat = 4
     @Published private(set) var paletteAnchor: CGPoint?
+    @Published private(set) var recentPencilAnchor: CGPoint?
     private var previousDrawingTool: Tool = .pen
 
     var canDraw: Bool { !layout.surfaces.isEmpty }
@@ -77,12 +79,18 @@ final class NativePencilInkController: ObservableObject {
     }
 
     func showPalette() {
-        paletteVisible.toggle()
+        if paletteVisible {
+            paletteVisible = false
+            return
+        }
+        paletteAnchor = recentPencilAnchor
+            ?? NativePencilSettings.shared.launcherAnchor
+        paletteVisible = true
     }
 
-    func updatePaletteAnchor(_ point: CGPoint, in bounds: CGRect) {
+    func updateRecentPencilAnchor(_ point: CGPoint, in bounds: CGRect) {
         guard bounds.width > 0, bounds.height > 0 else { return }
-        paletteAnchor = CGPoint(
+        recentPencilAnchor = CGPoint(
             x: min(1, max(0, point.x / bounds.width)),
             y: min(1, max(0, point.y / bounds.height))
         )
@@ -231,6 +239,9 @@ private struct NativeInkOperation {
 struct NativePencilLiveOverlay: View {
     let reader: ReaderWebViewModel
     @ObservedObject var controller: NativePencilInkController
+    @ObservedObject private var settings = NativePencilSettings.shared
+    @State private var launcherDragOrigin: CGPoint?
+    @State private var draggedLauncherAnchor: CGPoint?
 
     private let colors = ["#ff3b30", "#007aff", "#111111", "#34c759"]
 
@@ -245,11 +256,38 @@ struct NativePencilLiveOverlay: View {
     private func palettePosition(in size: CGSize) -> CGPoint {
         let anchor = controller.paletteAnchor ?? CGPoint(x: 0.84, y: 0.78)
         let inset = min(132, size.width / 2)
-        let minimumY: CGFloat = controller.paletteVisible ? 104 : 28
-        let rawY = anchor.y * size.height - (controller.paletteVisible ? 132 : 38)
+        let minimumY: CGFloat = 104
+        let rawY = anchor.y * size.height - 132
         return CGPoint(
             x: min(max(inset, anchor.x * size.width), max(inset, size.width - inset)),
             y: min(max(minimumY, rawY), max(minimumY, size.height - 72))
+        )
+    }
+
+    private func launcherPosition(in size: CGSize) -> CGPoint {
+        let anchor = draggedLauncherAnchor ?? settings.launcherAnchor
+        let inset: CGFloat = 28
+        return CGPoint(
+            x: min(max(inset, anchor.x * size.width), max(inset, size.width - inset)),
+            y: min(max(inset, anchor.y * size.height), max(inset, size.height - inset))
+        )
+    }
+
+    private func normalizedLauncherAnchor(
+        from position: CGPoint,
+        in size: CGSize
+    ) -> CGPoint {
+        guard size.width > 0, size.height > 0 else {
+            return settings.launcherAnchor
+        }
+        let inset: CGFloat = 28
+        let clamped = CGPoint(
+            x: min(max(inset, position.x), max(inset, size.width - inset)),
+            y: min(max(inset, position.y), max(inset, size.height - inset))
+        )
+        return CGPoint(
+            x: clamped.x / size.width,
+            y: clamped.y / size.height
         )
     }
 
@@ -264,9 +302,8 @@ struct NativePencilLiveOverlay: View {
                     selectedWidth: controller.width
                 )
 
-            if controller.canDraw {
-                VStack(alignment: .trailing, spacing: 10) {
-                    if controller.paletteVisible {
+                if controller.canDraw, controller.paletteVisible {
+                    VStack(alignment: .trailing, spacing: 10) {
                         VStack(spacing: 10) {
                             HStack(spacing: 12) {
                                 ForEach(colors, id: \.self) { color in
@@ -322,8 +359,20 @@ struct NativePencilLiveOverlay: View {
                         }
                         .padding(12)
                         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 16))
-                    }
 
+                        Button {
+                            controller.showPalette()
+                        } label: {
+                            Image(systemName: toolIcon)
+                                .font(.title2)
+                                .frame(width: 42, height: 42)
+                        }
+                        .buttonStyle(.borderedProminent)
+                        .tint(.blue)
+                    }
+                    .fixedSize()
+                    .position(palettePosition(in: geometry.size))
+                } else if controller.canDraw {
                     Button {
                         controller.showPalette()
                     } label: {
@@ -333,10 +382,31 @@ struct NativePencilLiveOverlay: View {
                     }
                     .buttonStyle(.borderedProminent)
                     .tint(.blue)
-                }
-                .fixedSize()
-                .position(palettePosition(in: geometry.size))
-                .animation(.easeOut(duration: 0.16), value: controller.paletteAnchor)
+                    .position(launcherPosition(in: geometry.size))
+                    .gesture(
+                        DragGesture(minimumDistance: 8)
+                            .onChanged { value in
+                                let origin = launcherDragOrigin
+                                    ?? launcherPosition(in: geometry.size)
+                                if launcherDragOrigin == nil {
+                                    launcherDragOrigin = origin
+                                }
+                                draggedLauncherAnchor = normalizedLauncherAnchor(
+                                    from: CGPoint(
+                                        x: origin.x + value.translation.width,
+                                        y: origin.y + value.translation.height
+                                    ),
+                                    in: geometry.size
+                                )
+                            }
+                            .onEnded { _ in
+                                if let anchor = draggedLauncherAnchor {
+                                    settings.setLauncherAnchor(anchor)
+                                }
+                                launcherDragOrigin = nil
+                                draggedLauncherAnchor = nil
+                            }
+                    )
                 }
             }
         }
@@ -382,16 +452,16 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
             return controller.layout.surface(at: normalized) != nil
         }
 
-        let eraserPath = UIPanGestureRecognizer(
+        let pencilPath = UIPanGestureRecognizer(
             target: context.coordinator,
             action: #selector(Coordinator.trackPencilPath(_:))
         )
-        eraserPath.allowedTouchTypes = [
+        pencilPath.allowedTouchTypes = [
             NSNumber(value: UITouch.TouchType.pencil.rawValue)
         ]
-        eraserPath.cancelsTouchesInView = false
-        eraserPath.delegate = context.coordinator
-        canvas.addGestureRecognizer(eraserPath)
+        pencilPath.cancelsTouchesInView = true
+        pencilPath.delegate = context.coordinator
+        canvas.addGestureRecognizer(pencilPath)
 
         let pencilHover = UIHoverGestureRecognizer(
             target: context.coordinator,
@@ -402,6 +472,8 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
         ]
         canvas.addGestureRecognizer(pencilHover)
         context.coordinator.canvas = canvas
+        context.coordinator.pathGesture = pencilPath
+        context.coordinator.installSelectionPreview(on: canvas)
         context.coordinator.applyState(
             to: canvas,
             tool: selectedTool,
@@ -432,6 +504,7 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
         let reader: ReaderWebViewModel
         var controller: NativePencilInkController
         weak var canvas: PKCanvasView?
+        weak var pathGesture: UIPanGestureRecognizer?
 
         private var appliedTool: NativePencilInkController.Tool?
         private var appliedColor = ""
@@ -453,8 +526,10 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
         private var strokeColor = "#ff3b30"
         private var strokeWidth: CGFloat = 4
         private var eraserPoints: [[CGFloat]] = []
+        private var selectionPreviewPoints: [CGPoint] = []
         private var eraserLayout = NativeInkLayout.empty
         private var eraserDrawingSnapshot: PKDrawing?
+        private let selectionShapeLayer = CAShapeLayer()
         private var pending: [NativeInkOperation] = []
         private var pumpTask: Task<Void, Never>?
 
@@ -467,6 +542,22 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
             appliedDocumentGeneration = controller.documentGeneration
         }
 
+        func installSelectionPreview(on canvas: PKCanvasView) {
+            selectionShapeLayer.fillColor = UIColor.systemCyan
+                .withAlphaComponent(0.10).cgColor
+            selectionShapeLayer.strokeColor = UIColor.systemCyan.cgColor
+            selectionShapeLayer.lineWidth = 3
+            selectionShapeLayer.lineCap = .round
+            selectionShapeLayer.lineJoin = .round
+            selectionShapeLayer.shadowColor = UIColor.black.cgColor
+            selectionShapeLayer.shadowOpacity = 0.35
+            selectionShapeLayer.shadowRadius = 1.5
+            selectionShapeLayer.shadowOffset = .zero
+            selectionShapeLayer.zPosition = 10_000
+            selectionShapeLayer.isHidden = true
+            canvas.layer.addSublayer(selectionShapeLayer)
+        }
+
         func applyState(
             to canvas: PKCanvasView,
             tool: NativePencilInkController.Tool,
@@ -475,6 +566,13 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
         ) {
             synchronizeDocumentGeneration(on: canvas)
             let width = max(1, min(requestedWidth, 16))
+            pathGesture?.isEnabled = tool != .pen
+            canvas.drawingGestureRecognizer.isEnabled = tool == .pen
+            selectionShapeLayer.frame = canvas.bounds
+            selectionShapeLayer.isHidden = tool != .selection
+            if tool != .selection {
+                clearSelectionPreview()
+            }
             // The web ink engine is the fail-safe owner whenever PencilKit's
             // hit-test declines a stroke. Keep both owners on the same style
             // so that falling back never collapses to the old red/2.5 line.
@@ -513,11 +611,10 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
             case .eraser:
                 canvas.tool = PKEraserTool(.vector)
             case .selection:
-                canvas.tool = PKInkingTool(
-                    .pen,
-                    color: UIColor.systemCyan,
-                    width: 2
-                )
+                // A dedicated Pencil-only recognizer owns selection paths.
+                // Keeping PencilKit's drawing recognizer disabled avoids the
+                // two recognizers racing for the same stroke.
+                canvas.tool = PKInkingTool(.pen, color: .clear, width: 1)
             }
         }
 
@@ -553,6 +650,12 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
             }
             guard activeCanvasTool == .pen else { return }
             let allStrokes = canvasView.drawing.strokes
+            if let lastPoint = allStrokes.last?.path.last?.location {
+                controller.updateRecentPencilAnchor(
+                    lastPoint,
+                    in: canvasView.bounds
+                )
+            }
             let start = min(queuedStrokeCount, allStrokes.count)
             let newStrokes = Array(allStrokes.dropFirst(start))
             guard !newStrokes.isEmpty else { return }
@@ -655,7 +758,7 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
             guard bounds.width > 0, bounds.height > 0 else { return }
             let location = gesture.location(in: canvas)
             if gesture.state == .ended {
-                controller.updatePaletteAnchor(location, in: bounds)
+                controller.updateRecentPencilAnchor(location, in: bounds)
             }
             let point = [
                 location.x / bounds.width,
@@ -672,6 +775,10 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
                 }
                 eraserLayout = controller.layout
                 eraserPoints = [point]
+                if activePathTool == .selection {
+                    selectionPreviewPoints = [location]
+                    updateSelectionPreview()
+                }
             case .changed:
                 guard pathGestureActive else { return }
                 if let last = eraserPoints.last {
@@ -680,11 +787,19 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
                     if dx * dx + dy * dy < 0.000_004 { return }
                 }
                 eraserPoints.append(point)
+                if activePathTool == .selection {
+                    selectionPreviewPoints.append(location)
+                    updateSelectionPreview()
+                }
             case .ended, .cancelled, .failed:
                 guard pathGestureActive, let pathTool = activePathTool else {
                     return
                 }
                 eraserPoints.append(point)
+                if pathTool == .selection {
+                    selectionPreviewPoints.append(location)
+                    updateSelectionPreview()
+                }
                 var segments = canonicalEraserSegments(
                     points: eraserPoints,
                     layout: eraserLayout
@@ -716,6 +831,7 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
                 }
                 pathGestureActive = false
                 activePathTool = nil
+                clearSelectionPreview()
                 finishEraserCanvasIfIdle()
                 finishDeferredCanvasWorkIfIdle()
             default:
@@ -723,11 +839,37 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
             }
         }
 
+        private func updateSelectionPreview() {
+            if let canvas {
+                selectionShapeLayer.frame = canvas.bounds
+            }
+            selectionShapeLayer.isHidden = false
+            let path = UIBezierPath()
+            guard let first = selectionPreviewPoints.first else {
+                selectionShapeLayer.path = nil
+                return
+            }
+            path.move(to: first)
+            for point in selectionPreviewPoints.dropFirst() {
+                path.addLine(to: point)
+            }
+            if selectionPreviewPoints.count >= 3 {
+                path.close()
+            }
+            selectionShapeLayer.path = path.cgPath
+        }
+
+        private func clearSelectionPreview() {
+            selectionPreviewPoints.removeAll(keepingCapacity: true)
+            selectionShapeLayer.path = nil
+            selectionShapeLayer.isHidden = controller.tool != .selection
+        }
+
         @objc func trackPencilHover(_ gesture: UIHoverGestureRecognizer) {
             guard let canvas else { return }
             switch gesture.state {
             case .began, .changed, .ended:
-                controller.updatePaletteAnchor(
+                controller.updateRecentPencilAnchor(
                     gesture.location(in: canvas),
                     in: canvas.bounds
                 )
@@ -822,6 +964,7 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
             queuedStrokeCount = 0
             confirmedStrokeCount = 0
             eraserPoints = []
+            clearSelectionPreview()
             eraserLayout = .empty
             pathGestureActive = false
             activePathTool = nil
@@ -915,7 +1058,22 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
             shouldRecognizeSimultaneouslyWith otherGestureRecognizer:
                 UIGestureRecognizer
         ) -> Bool {
-            true
+            if let pathGesture,
+                gestureRecognizer === pathGesture
+                    || otherGestureRecognizer === pathGesture
+            {
+                return false
+            }
+            return true
+        }
+
+        func gestureRecognizerShouldBegin(
+            _ gestureRecognizer: UIGestureRecognizer
+        ) -> Bool {
+            guard let pathGesture, gestureRecognizer === pathGesture else {
+                return true
+            }
+            return controller.tool != .pen
         }
     }
 }
@@ -996,6 +1154,13 @@ fileprivate extension ReaderWebViewModel {
                 _epInk.color = color;
                 _epInk.width = width;
                 _epInk.tool = tool;
+              }
+              if (
+                window.RC &&
+                RC.stickynote &&
+                typeof RC.stickynote.synchronizeInkToolStyle === "function"
+              ) {
+                RC.stickynote.synchronizeInkToolStyle(tool, color, width);
               }
               document.querySelectorAll(
                 "#ink-toolbar button[data-tool], " +

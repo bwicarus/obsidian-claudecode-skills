@@ -326,6 +326,18 @@ test("电脑客户端设置读取真实 Codex 语音状态并按目标状态控�
   assert.match(setBody, /if \(codexVoiceSetPromise\) return codexVoiceSetPromise/);
   assert.doesNotMatch(setBody, /request\(\s*"(?:start|stop)"/);
 
+  const borrowStart = runtime.indexOf(
+    "function borrowSnapshotChannelForStatus(attempt)",
+  );
+  const borrowEnd = runtime.indexOf("function availability()", borrowStart);
+  assert.ok(borrowStart >= 0 && borrowEnd > borrowStart);
+  const borrowBody = runtime.slice(borrowStart, borrowEnd);
+  assert.match(
+    borrowBody,
+    /state\.endpoint !== DIRECT_ENDPOINT[\s\S]*return Promise\.resolve\(null\)/,
+    "the App's context-only snapshot socket must not carry STATUS or codex-voice-set",
+  );
+
   const settingsStart = runtime.indexOf("function mountSettings(container)");
   const settingsEnd = runtime.indexOf("// Preference-only read", settingsStart);
   const settingsBody = runtime.slice(settingsStart, settingsEnd);

@@ -39,6 +39,11 @@ test("App PencilKit keeps the web page-ink fallback when native hit-testing decl
     assert.doesNotMatch(pointerDown, /__BW_NATIVE_PENCILKIT_INK__[^\n]*return/);
   }
   assert.match(SWIFT, /synchronizeWebInkFallbackStyle/);
+  assert.match(
+    SWIFT,
+    /RC\.stickynote\.synchronizeInkToolStyle\(tool, color, width\)/,
+    "native Pencil tool, colour, and width must also reach mounted sticky notes",
+  );
   assert.match(SWIFT, /typeof _ink === "object"/);
   assert.match(SWIFT, /_ink\.color = color/);
   assert.match(SWIFT, /typeof _epInk === "object"/);

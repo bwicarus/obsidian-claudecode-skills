@@ -81,6 +81,10 @@
   var ctls = {};       // id -> controller {note,root,handle,body,ta,cv,tools,rs,rsTL,...}
   var EDIT = null;     // 编辑模式(长按便签任意部分){note, ctl}:🗑+色板+双缩放手柄+handle 拖拽移动
   var NINK = { tool: 'pen', quickErase: false, _revertT: null, _lastTap: null };  // 便签手写工具态(全局一支笔,同页面 ink 惯例)
+  // 原生 PencilKit 的共享工具态。region 只属于书页：便签记住自己最后一支
+  // pen/eraser，但在共享工具为 region 时拒绝笔路由，绝不偷偷创建私有选区。
+  var SHARED_INK_TOOL = 'pen';
+  var SHARED_INK_STYLE_ACTIVE = false;
   var draw = null;     // 手写进行中 {ctl, stroke|eraser, raf}
   var _selfDraw = false; // 无页面 ink 底座时的后备自管手势进行中
   var _hd = null;      // handle 手势 {ctl, sx, sy, lp, dragging, moved, rect0}
@@ -141,6 +145,8 @@
   }
   // 新笔画颜色:自动对比色开=按便签本色取对比前景;关=固定 INK 默认红(现状)。已有笔画存的 c 不动。
   function strokeColor(ctl) {
+    // App 原生工具条给出的颜色是显式用户选择，优先于便签的自动对比默认值。
+    if (SHARED_INK_STYLE_ACTIVE) return INK.color;
     if (!autoContrast()) return INK.color;
     return isDarkBg(ctl.note.color || DEFAULT_COLOR) ? FG_LIGHT : FG_DARK;
   }
@@ -1628,6 +1634,7 @@
   }
   // 视口点命中哪个便签 body(展开态) → note id | null。倒序遍历:后创建的视觉在上,优先命中。
   function penRoute(x, y) {
+    if (SHARED_INK_TOOL === 'region') return null;
     if (x && typeof x === 'object') { y = x.clientY; x = x.clientX; }
     for (var i = notes.length - 1; i >= 0; i--) {
       var ctl = ctls[notes[i].id];
@@ -1639,6 +1646,7 @@
   }
   // 在命中便签上开一段笔画/橡皮。opts.eraser=页面 ink 当前是橡皮(便签侧自身 NINK 为橡皮时同样生效)。
   function penBegin(e, opts) {
+    if (SHARED_INK_TOOL === 'region') return false;
     var id = penRoute(e.clientX, e.clientY); if (!id) return false;
     var ctl = ctls[id]; if (!ctl) return false;
     var pt = normPt(ctl, e.clientX, e.clientY); if (!pt) return false;
@@ -1767,16 +1775,39 @@
     }, ms);
   }
   function updateToolUI(ctl) {
-    var er = NINK.tool === 'eraser';
+    var region = SHARED_INK_TOOL === 'region';
+    var er = !region && NINK.tool === 'eraser';
     var upd = function (c) {
       var b = c.tools.querySelector('.rc-note-tool');
       if (!b) return;
       b.classList.toggle('on', er);
-      b.textContent = er ? '🧹' : '✒️';
-      b.title = er ? '橡皮中(点回笔;划过笔画删除整条)' : '笔(点切橡皮;手指快速双击也可临时切换)';
+      b.disabled = region;
+      b.setAttribute('aria-disabled', region ? 'true' : 'false');
+      b.textContent = region ? '□' : (er ? '🧹' : '✒️');
+      b.title = region ? '选区笔只作用于书页，便签不接收本次笔迹' : (er ? '橡皮中(点回笔;划过笔画删除整条)' : '笔(点切橡皮;手指快速双击也可临时切换)');
     };
     if (ctl) upd(ctl);
     for (var id in ctls) if (!ctl || ctls[id] !== ctl) upd(ctls[id]);   // NINK 全局 → 所有便签按钮同步
+  }
+
+  // 原生画布 -> 便签的有界同步入口。三个参数必须一次性全部通过校验，
+  // 非法调用不允许留下“工具改了但颜色没改”之类的半状态。
+  function synchronizeInkToolStyle(tool, color, width) {
+    if (arguments.length !== 3) return false;
+    if (tool !== 'pen' && tool !== 'eraser' && tool !== 'region') return false;
+    if (typeof color !== 'string' || !/^#[0-9a-fA-F]{6}$/.test(color)) return false;
+    if (typeof width !== 'number' || !isFinite(width) || width < 1 || width > 16) return false;
+
+    SHARED_INK_TOOL = tool;
+    SHARED_INK_STYLE_ACTIVE = true;
+    INK.color = color.toLowerCase();
+    INK.width = width;
+    clearTimeout(NINK._revertT);
+    NINK._revertT = null;
+    NINK.quickErase = false;
+    if (tool === 'pen' || tool === 'eraser') NINK.tool = tool;
+    updateToolUI(null);
+    return true;
   }
 
   // ─────────────────────────── 点便签外 → 退出 EDIT 编辑模式(保存待存项)───────────────────────────
@@ -2083,6 +2114,8 @@
     penMove: penMove,       // (event)                     追加点(coalesced+抽稀+rAF 重绘)
     penEnd: penEnd,         // ({boundary?})               收尾当前段(boundary=跨界切段,擦边单点丢弃)
     penActive: function () { return !!draw; },
+    // 原生 PencilKit 共享工具同步；region 仅使便签让出笔路由，不创建便签私有选区。
+    synchronizeInkToolStyle: synchronizeInkToolStyle,
     // 外观设置(rc-note-opacity / rc-note-autocontrast)变更后即时应用:对每个已挂载 ctl 重跑 applyColor
     // (rc-settings「便签」tab 保存时调;已有笔画是数据不改色,只影响底色/前景/新笔画)
     refreshStyle: function () { for (var id in ctls) { try { applyColor(ctls[id]); } catch (e) {} } },

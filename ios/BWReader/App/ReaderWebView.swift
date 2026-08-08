@@ -89,6 +89,20 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         }
     }
 
+    enum NativeReaderSettingError: LocalizedError {
+        case pageUnavailable
+        case invalidTouchDoubleTapAction
+
+        var errorDescription: String? {
+            switch self {
+            case .pageUnavailable:
+                return "Reader 页面尚未准备好"
+            case .invalidTouchDoubleTapAction:
+                return "触屏双击动作无效"
+            }
+        }
+    }
+
     let webView: WKWebView
 
     @Published private(set) var isLoading = false
@@ -645,6 +659,48 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         }
         webView.evaluateJavaScript(
             "window.__bwNativeComputerVoiceApplyState?.(\(literal))"
+        )
+    }
+
+    func nativeTouchDoubleTapAction() async throws -> String {
+        guard webView.url != nil else {
+            throw NativeReaderSettingError.pageUnavailable
+        }
+        let value = try await webView.callAsyncJavaScript(
+            """
+            return String(
+              localStorage.getItem("rc-ink-double-tap-action") || "eraser"
+            );
+            """,
+            arguments: [:],
+            in: nil,
+            contentWorld: .page
+        )
+        let action = value as? String ?? "eraser"
+        return ["eraser", "selection", "none"].contains(action)
+            ? action
+            : "eraser"
+    }
+
+    func setNativeTouchDoubleTapAction(_ action: String) async throws {
+        guard ["eraser", "selection", "none"].contains(action) else {
+            throw NativeReaderSettingError.invalidTouchDoubleTapAction
+        }
+        guard webView.url != nil else {
+            throw NativeReaderSettingError.pageUnavailable
+        }
+        _ = try await webView.callAsyncJavaScript(
+            """
+            localStorage.setItem("rc-ink-double-tap-action", action);
+            window.dispatchEvent(new CustomEvent(
+              "bw-ink-double-tap-setting",
+              { detail: { action } }
+            ));
+            return action;
+            """,
+            arguments: ["action": action],
+            in: nil,
+            contentWorld: .page
         )
     }
 

@@ -39,10 +39,58 @@ struct NativePencilSettingsSection: View {
                     Text(mapping.displayName).tag(mapping.rawValue)
                 }
             }
+            VStack(alignment: .leading, spacing: 8) {
+                Text("浮动绘图按钮")
+                HStack(spacing: 10) {
+                    launcherPresetButton(
+                        .topLeading,
+                        systemName: "arrow.up.left"
+                    )
+                    launcherPresetButton(
+                        .topTrailing,
+                        systemName: "arrow.up.right"
+                    )
+                    launcherPresetButton(
+                        .bottomLeading,
+                        systemName: "arrow.down.left"
+                    )
+                    launcherPresetButton(
+                        .bottomTrailing,
+                        systemName: "arrow.down.right"
+                    )
+                    Button("重置") {
+                        settings.resetLauncherAnchor()
+                    }
+                    .buttonStyle(.bordered)
+                }
+            }
             Text("“跟随 iPad 设置”会尊重系统里为 Apple Pencil 选择的动作；这些设置只改变阅读器中的手势，不改变网页墨迹格式。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+            Text("浮动按钮也可在阅读页面中用手指拖动；展开后的工具面板只在打开瞬间使用最近的笔尖位置。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
+    }
+
+    private func launcherPresetButton(
+        _ preset: NativePencilLauncherPreset,
+        systemName: String
+    ) -> some View {
+        Button {
+            settings.setLauncherPreset(preset)
+        } label: {
+            Image(systemName: systemName)
+                .frame(width: 24, height: 24)
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(isSelected(preset) ? .blue : .gray)
+        .accessibilityLabel("浮动按钮\(preset.displayName)")
+    }
+
+    private func isSelected(_ preset: NativePencilLauncherPreset) -> Bool {
+        abs(settings.launcherAnchor.x - preset.anchor.x) < 0.001
+            && abs(settings.launcherAnchor.y - preset.anchor.y) < 0.001
     }
 
     private func mappingBinding(
@@ -60,6 +108,17 @@ struct NativePencilSettingsSection: View {
                 settings[keyPath: keyPath] = mapping
             }
         )
+    }
+}
+
+private extension NativePencilLauncherPreset {
+    var displayName: String {
+        switch self {
+        case .topLeading: return "左上"
+        case .topTrailing: return "右上"
+        case .bottomLeading: return "左下"
+        case .bottomTrailing: return "右下"
+        }
     }
 }
 
