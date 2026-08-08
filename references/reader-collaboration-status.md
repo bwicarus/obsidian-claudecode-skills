@@ -3822,3 +3822,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **安全边界**：壳、脚本与字体受 manifest 摘要和每次启动 token/nonce 约束；EPUB 实际解压字节有界，书籍/AI HTML 经 DOMPurify，本地首版不注入不受信书内 CSS。
 - **怎么验的**：离线包两次生成逐文件一致，Reader 全量、书库/API/同步/打包与发布管线门禁通过；Windows handoff 只保留既有 Linux `fcntl` 环境基线。
 - **发布边界**：必须先由 macOS CI 编译 Swift，再由 iPad 实机验收本地 PDF/EPUB、重开持久化、Pi 显式同步与 Safari 扩展不回归；提交、推送与上传结果另行追加，不从本地测试推断。
+
+## Codex：本地优先离线 Reader 1.1.0 发布候选（2026-08-08 JST）
+- **发布**：统一 App/扩展 `1.1.0 (132)` 由 Actions run `31253611580` 从提交 `73d3d1c8` 成功编译、签名并上传 TestFlight。
+- **怎么验的**：确定性 ReaderBundle、macOS 模拟器编译、设备归档、App/扩展一致性校验、IPA 导出与 Apple 上传均通过；首轮暴露的两处 Swift 编译错误已局部修复。
+- **没做什么**：未部署 Pi 书库/API 生产改动，未把尚无稳定身份的阅读进度、高亮、笔迹、便签或卡片伪装成已同步。
+- **下一步**：等待 Apple 处理后实机验收本机 PDF/EPUB、重开持久化、无 Pi 阅读、Pi 登录/显式同步与 Safari 扩展回归。
