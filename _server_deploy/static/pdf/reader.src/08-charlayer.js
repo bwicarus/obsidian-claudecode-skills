@@ -2,6 +2,111 @@
 
 let _charSel = null;   // {pw, startIdx, endIdx, dragging}
 
+let _nativePageTextLoaderDoc = null;
+function _embeddedWordSegments(text) {
+  const locale = (typeof BOOK_LANGS !== 'undefined' && BOOK_LANGS && BOOK_LANGS[0]) || undefined;
+  try {
+    if (typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function') {
+      const segmenter = new Intl.Segmenter(locale, { granularity: 'word' });
+      let word = 0;
+      return Array.from(segmenter.segment(text)).map((part) => ({
+        start: part.index,
+        end: part.index + part.segment.length,
+        w: part.isWordLike ? word++ : -1,
+      }));
+    }
+  } catch (_) {}
+  // No fake whitespace grouping: without a real tokenizer the conservative
+  // fallback leaves word identity unknown and preserves character selection.
+  return [];
+}
+function _embeddedPageText(textContent, viewport, page) {
+  const chars = [];
+  let wordBase = 0;
+  const items = (textContent && textContent.items || []).filter((item) => item && item.str !== undefined);
+  items.forEach((item, blockIndex) => {
+    const text = String(item.str || '');
+    const units = Array.from(text);
+    if (!units.length || !item.transform) return;
+    const segments = _embeddedWordSegments(text);
+    const [a, b, c, d, e, f] = item.transform;
+    const [vx, vy] = viewport.convertToViewportPoint(e, f);
+    const vertical = item.dir === 'ttb';
+    const itemWidth = Math.max(0.5, Number(item.width) || Math.abs(a) || 1);
+    const itemHeight = Math.max(0.5, Number(item.height) || Math.abs(d) || 1);
+    let codeUnitOffset = 0;
+    units.forEach((unit, unitIndex) => {
+      const startOffset = codeUnitOffset;
+      codeUnitOffset += unit.length;
+      const segment = segments.find((candidate) =>
+        startOffset >= candidate.start && startOffset < candidate.end);
+      const w = segment && segment.w >= 0 ? wordBase + segment.w : -1;
+      const fraction0 = unitIndex / units.length;
+      const fraction1 = (unitIndex + 1) / units.length;
+      let x0, y0, x1, y1;
+      if (vertical) {
+        x0 = vx - itemWidth;
+        x1 = vx;
+        y0 = Math.max(0, vy - itemHeight + itemHeight * fraction0);
+        y1 = Math.max(y0 + 0.5, vy - itemHeight + itemHeight * fraction1);
+      } else {
+        x0 = Math.max(0, vx + itemWidth * fraction0);
+        x1 = Math.max(x0 + 0.5, vx + itemWidth * fraction1);
+        y0 = Math.max(0, vy - itemHeight);
+        y1 = Math.max(y0 + 0.5, vy);
+      }
+      chars.push({
+        c: unit,
+        x0, y0, x1, y1,
+        w,
+        bk: blockIndex,
+        sp: /^\s$/u.test(unit),
+      });
+    });
+    const wordCount = segments.reduce((max, segment) => Math.max(max, segment.w + 1), 0);
+    wordBase += wordCount;
+  });
+  return {
+    chars,
+    pageWidth: viewport.width,
+    pageHeight: viewport.height,
+    revision: 'embedded-v1-' + CHARS_VER + '-' + page + '-' + items.length,
+  };
+}
+function _nativePageTextProvider() {
+  try {
+    const provider = window.BWReaderRuntime && window.BWReaderRuntime.pageTextProvider;
+    return provider && provider.contract === 'reader-page-text-provider/1' ? provider : null;
+  } catch (_) { return null; }
+}
+function _bindNativeEmbeddedPageLoader() {
+  const provider = _nativePageTextProvider();
+  if (!provider || !pdfDoc || _nativePageTextLoaderDoc === pdfDoc) return provider;
+  provider.setEmbeddedPageLoader(async (pageNumber) => {
+    const page = await pdfDoc.getPage(pageNumber);
+    const content = await page.getTextContent();
+    return _embeddedPageText(content, page.getViewport({ scale: 1 }), pageNumber);
+  }, pdfDoc.numPages);
+  _nativePageTextLoaderDoc = pdfDoc;
+  return provider;
+}
+
+if (!window.__bwPageTextRefreshBound) {
+  window.__bwPageTextRefreshBound = true;
+  window.addEventListener('bw:page-text-updated', (event) => {
+    const detail = event && event.detail;
+    if (!detail || detail.contract !== 'reader-page-text-provider/1') return;
+    const page = Number(detail.page);
+    if (!Number.isInteger(page) || page < 1) return;
+    document.querySelectorAll('.page-wrap[data-page-num="' + page + '"]').forEach((wrap) => {
+      const viewport = wrap.__pageTextViewport;
+      if (!viewport || !wrap.isConnected) return;
+      loadCharsAndBindLayer(page, wrap, viewport, 0).catch((error) =>
+        window.dlog?.('chars refresh fail: ' + (error && error.message), '#ff6b6b'));
+    });
+  });
+}
+
 // chars → charBoxes(坐标映射 + reading-order 排序)。初次建层 + cv 校正重取 都用它。
 // PyMuPDF rawdict bbox 已是 image coordinate(y 向下,原点左上),不做 y 翻转(翻了会上下颠倒)。
 function _mapCharBoxes(chars, scale) {
@@ -29,6 +134,8 @@ function _mapCharBoxes(chars, scale) {
 async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   _retry = _retry || 0;
   if (!wrap.isConnected) return;   // 页已被连续模式释放 → 放弃
+  const loadSeq = wrap.__pageTextLoadSeq = (wrap.__pageTextLoadSeq || 0) + 1;
+  wrap.__pageTextViewport = viewport;
   const scale = viewport.scale;
   const cvKey = 'pdf-cv:' + FILE_REL + ':' + num;
   let cvGuess; try { cvGuess = localStorage.getItem(cvKey) || ('v' + CHARS_VER); } catch (_) { cvGuess = 'v' + CHARS_VER; }
@@ -37,7 +144,22 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   const ovP = fetch(`/pdf/api/page-overlay?file=${encodeURIComponent(FILE_REL)}&page=${num}`).then(r => r.json()).catch(() => null);
   let d = null;
   try { d = await (await fetch(charsUrl(cvGuess))).json(); } catch (e) { d = null; }
+  if (!wrap.isConnected || wrap.__pageTextLoadSeq !== loadSeq) return;
   if (!d || !d.ok) {
+    wrap.__pageTextState = (d && d.state) || 'failed';
+    wrap.__pageTextSource = (d && d.source) || null;
+    wrap.__wordSegmentation = (d && d.word_segmentation) || 'unavailable';
+    wrap.__characterGeometry = (d && d.character_geometry) || 'unavailable';
+    wrap.__formulaCoverage = (d && d.formula_coverage) || 'unknown';
+    wrap.__formulaRegions = d && Array.isArray(d.formula_regions) ? d.formula_regions : [];
+    if (d && d.state === 'pending') {
+      window.dlog?.('chars pending: page ' + num);
+      return;
+    }
+    if (d && (d.state === 'failed' || d.state === 'idle')) {
+      window.dlog?.('chars unavailable: ' + (d.error || d.state) + ' on page ' + num, '#ffb454');
+      return;
+    }
     if (_retry < 2 && wrap.isConnected) {
       await new Promise(res => setTimeout(res, 500 + _retry * 600));
       return loadCharsAndBindLayer(num, wrap, viewport, _retry + 1);
@@ -46,6 +168,13 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
     return;
   }
   const charBoxes = _mapCharBoxes(d.chars, scale);
+  wrap.__pageTextState = d.state || (charBoxes.length ? 'ready' : 'readyEmpty');
+  wrap.__pageTextSource = d.source || null;
+  wrap.__pageTextRevision = d.revision || '';
+  wrap.__wordSegmentation = d.word_segmentation || 'unavailable';
+  wrap.__characterGeometry = d.character_geometry || 'unavailable';
+  wrap.__formulaCoverage = d.formula_coverage || 'unknown';
+  wrap.__formulaRegions = Array.isArray(d.formula_regions) ? d.formula_regions : [];
   wrap.__pageWPt = d.page_w;
   wrap.__pageHPt = d.page_h;
   wrap.__viewportScale = scale;
@@ -90,14 +219,15 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   }
   // —— overlay 到了(慢:服务端跑分词/生词,不阻塞上面的选词)：渲染生词/句子 + 校正 cv ——
   ovP.then(async (ov) => {
-    if (!wrap.isConnected) return;
+    if (!wrap.isConnected || wrap.__pageTextLoadSeq !== loadSeq) return;
+    if (ov && Array.isArray(ov.formula_regions)) wrap.__formulaRegions = ov.formula_regions;
     if (ov && ov.ok && ov.cv) {
       try { localStorage.setItem(cvKey, ov.cv); } catch (_) {}   // 记真 cv,下次秒命中缓存
       if (ov.cv !== cvGuess) {
         // cvGuess 猜错(内容自上次起变过)→ 刚 chars 可能来自旧 SW 缓存 → 用真 cv 重取并刷新选词数据
         try {
           const d2 = await (await fetch(charsUrl(ov.cv))).json();
-          if (d2 && d2.ok && wrap.isConnected) {
+          if (d2 && d2.ok && wrap.isConnected && wrap.__pageTextLoadSeq === loadSeq) {
             wrap.__charBoxes = _mapCharBoxes(d2.chars, viewport.scale);
             wrap.__charsBaseW = wrap.classList.contains('crop-on') ? (parseFloat(wrap.style.getPropertyValue('--full-w')) || wrap.clientWidth || 0) : (wrap.clientWidth || 0);   // #51:cv 校正重建同步基准宽(整页布局宽)
             wrap.__pageWPt = d2.page_w; wrap.__pageHPt = d2.page_h;

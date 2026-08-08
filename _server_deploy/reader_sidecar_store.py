@@ -40,6 +40,7 @@ except ImportError:  # pragma: no cover - exercised on Windows deployments.
 
 
 CLAIM_SCHEMA = "reader-sidecar-claim/1"
+CLAIM_EXTENSION_SCHEMA = "reader-sidecar-claim-extension/1"
 BACKUP_SCHEMA = "reader-sidecar-backup/1"
 ACCOUNT_SCHEMA = "reader-sidecar-account/1"
 NAMESPACE_RE = re.compile(r"^acct-v1-[a-f0-9]{64}$")
@@ -56,6 +57,9 @@ LEGACY_DATASETS: tuple[tuple[str, str], ...] = (
     ("assets", "dir"),
     ("pdf-highlights", "dir"),
     ("html-highlights", "dir"),
+    ("pdf-ink", "dir"),
+    ("epub-ink", "dir"),
+    ("reader-userpages", "dir"),
 )
 
 _THREAD_LOCKS: dict[str, threading.RLock] = {}
@@ -319,12 +323,26 @@ def _inventory_dir(base: Path, current: Path, entries: list[dict[str, Any]]) -> 
             raise LegacySnapshotError(f"legacy special file rejected: {child_path}")
 
 
-def inventory_legacy(root: str | Path) -> list[dict[str, Any]]:
-    """Return a deterministic hash inventory for only ``LEGACY_DATASETS``."""
+def _inventory_declared_datasets(
+    root: str | Path,
+    datasets: Sequence[tuple[str, str]],
+) -> list[dict[str, Any]]:
+    """Inventory an exact subset of the fixed legacy registry."""
 
+    declared = dict(LEGACY_DATASETS)
     base = Path(root).expanduser().resolve()
     entries: list[dict[str, Any]] = []
-    for relative, expected_type in LEGACY_DATASETS:
+    seen: set[str] = set()
+    for relative, expected_type in datasets:
+        if (
+            relative in seen
+            or declared.get(relative) != expected_type
+            or expected_type not in ("file", "dir")
+        ):
+            raise LegacySnapshotError(
+                f"legacy dataset is not in the fixed registry: {relative}"
+            )
+        seen.add(relative)
         path = base / relative
         try:
             info = path.lstat()
@@ -352,6 +370,12 @@ def inventory_legacy(root: str | Path) -> list[dict[str, Any]]:
             entries.append({"path": relative, "type": "dir"})
             _inventory_dir(base, path, entries)
     return sorted(entries, key=lambda item: (item["path"], item["type"]))
+
+
+def inventory_legacy(root: str | Path) -> list[dict[str, Any]]:
+    """Return a deterministic hash inventory for only ``LEGACY_DATASETS``."""
+
+    return _inventory_declared_datasets(root, LEGACY_DATASETS)
 
 
 def inventory_digest(inventory: Sequence[dict[str, Any]]) -> str:
@@ -585,6 +609,72 @@ class SidecarStore:
         finally:
             _remove_internal_tree(staging)
 
+    @staticmethod
+    def _validate_claim_datasets(value: Any, *, label: str) -> tuple[str, ...]:
+        declared = dict(LEGACY_DATASETS)
+        if (
+            not isinstance(value, list)
+            or any(not isinstance(item, str) or item not in declared for item in value)
+            or len(value) != len(set(value))
+        ):
+            raise ClaimConflictError(f"invalid legacy claim {label} datasets")
+        return tuple(value)
+
+    @staticmethod
+    def _inventory_uses_only(
+        inventory: Sequence[dict[str, Any]],
+        datasets: Sequence[str],
+    ) -> bool:
+        allowed = set(datasets)
+        return all(
+            isinstance(entry, dict)
+            and isinstance(entry.get("path"), str)
+            and entry["path"].split("/", 1)[0] in allowed
+            for entry in inventory
+        )
+
+    def _validate_claim_extension(
+        self,
+        value: Any,
+        *,
+        claimed: set[str],
+    ) -> dict[str, Any]:
+        if (
+            not isinstance(value, dict)
+            or value.get("schema") != CLAIM_EXTENSION_SCHEMA
+            or not isinstance(value.get("claim_id"), str)
+            or not value.get("claim_id")
+            or not isinstance(value.get("claimed_at"), str)
+        ):
+            raise ClaimConflictError("invalid legacy claim extension")
+        datasets = self._validate_claim_datasets(
+            value.get("datasets"),
+            label="extension",
+        )
+        if not datasets or claimed.intersection(datasets):
+            raise ClaimConflictError("legacy claim extension datasets overlap")
+        inventories: list[list[dict[str, Any]]] = []
+        for section in ("source", "backup", "account"):
+            detail = value.get(section)
+            if (
+                not isinstance(detail, dict)
+                or not isinstance(detail.get("inventory"), list)
+                or detail.get("digest")
+                != inventory_digest(detail.get("inventory", []))
+                or not self._inventory_uses_only(detail["inventory"], datasets)
+            ):
+                raise ClaimConflictError(
+                    f"invalid legacy claim extension {section} inventory"
+                )
+            inventories.append(detail["inventory"])
+        if (
+            inventories[1] != inventories[0]
+            or inventories[2] != inventories[0]
+        ):
+            raise ClaimConflictError("legacy claim extension copies disagree")
+        claimed.update(datasets)
+        return value
+
     def _validate_claim(self, value: Any) -> dict[str, Any]:
         if not isinstance(value, dict) or value.get("schema") != CLAIM_SCHEMA:
             raise ClaimConflictError("invalid legacy claim manifest")
@@ -609,6 +699,19 @@ class SidecarStore:
                 raise ClaimConflictError(f"invalid legacy claim {section} inventory")
         if not isinstance(value.get("claim_id"), str):
             raise ClaimConflictError("invalid legacy claim id")
+        claimed = set(
+            self._validate_claim_datasets(
+                value.get("datasets"),
+                label="base",
+            )
+        )
+        if not self._inventory_uses_only(value["source"]["inventory"], claimed):
+            raise ClaimConflictError("legacy claim source escaped declared datasets")
+        extensions = value.get("extensions", [])
+        if not isinstance(extensions, list):
+            raise ClaimConflictError("invalid legacy claim extensions")
+        for extension in extensions:
+            self._validate_claim_extension(extension, claimed=claimed)
         return value
 
     def read_claim(self) -> dict[str, Any] | None:
@@ -624,6 +727,27 @@ class SidecarStore:
             identity.storage_namespace.encode("ascii")
         ).hexdigest()[:12]
         return f"u{identity.user_id}-{namespace_tag}-{source_digest[:20]}"
+
+    def _extension_claim_id(
+        self,
+        identity: ReaderStorageIdentity,
+        datasets: Sequence[tuple[str, str]],
+        source_digest: str,
+    ) -> str:
+        namespace_tag = hashlib.sha256(
+            identity.storage_namespace.encode("ascii")
+        ).hexdigest()[:12]
+        dataset_tag = hashlib.sha256(
+            json.dumps(
+                [name for name, _kind in datasets],
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ).encode("utf-8")
+        ).hexdigest()[:12]
+        return (
+            f"u{identity.user_id}-{namespace_tag}-ext-{dataset_tag}-"
+            f"{source_digest[:20]}"
+        )
 
     def _backup_paths(self, claim_id: str) -> tuple[Path, Path, Path]:
         root = self.backups_root / claim_id
@@ -733,6 +857,7 @@ class SidecarStore:
                 "claim_id": claim_id,
                 "source_inventory": source_inventory,
                 "source_digest": source_digest,
+                "extensions": [],
             },
         }
 
@@ -827,6 +952,7 @@ class SidecarStore:
             "owner": identity.as_dict(),
             "claimed_at": activated_at,
             "datasets": [name for name, _kind in LEGACY_DATASETS],
+            "extensions": [],
             "source": {
                 "root": str(self.legacy_root),
                 "inventory": source_inventory,
@@ -891,6 +1017,215 @@ class SidecarStore:
         atomic_write_json(self.claim_path, manifest)
         return self._validate_claim(manifest)
 
+    @staticmethod
+    def _claimed_dataset_names(manifest: dict[str, Any]) -> set[str]:
+        names = set(manifest.get("datasets") or [])
+        for extension in manifest.get("extensions") or []:
+            names.update(extension.get("datasets") or [])
+        return names
+
+    def _activate_or_recover_extension(
+        self,
+        account_root: Path,
+        backup_data_root: Path,
+        datasets: Sequence[tuple[str, str]],
+        source_inventory: list[dict[str, Any]],
+    ) -> list[dict[str, Any]]:
+        """Atomically add each fixed top-level dataset, recovering exact copies.
+
+        An extension cannot replace an account path.  A destination left by a
+        crashed prior attempt is accepted only when its complete inventory is
+        byte-for-byte identical to the read-only backup snapshot.
+        """
+
+        staging = self.by_user_root / (
+            f".extend-{account_root.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+        )
+        try:
+            _ensure_dir(staging, label="legacy extension staging")
+            _copy_inventory(backup_data_root, staging, source_inventory)
+            for name, kind in datasets:
+                expected = [
+                    entry
+                    for entry in source_inventory
+                    if entry["path"] == name
+                    or entry["path"].startswith(name + "/")
+                ]
+                destination = account_root / name
+                _reject_symlink(destination, label="legacy extension destination")
+                if destination.exists():
+                    actual = _inventory_declared_datasets(
+                        account_root,
+                        ((name, kind),),
+                    )
+                    if actual != expected:
+                        raise ClaimConflictError(
+                            f"account already has different {name} state"
+                        )
+                    continue
+                if not expected:
+                    continue
+                source = staging / name
+                if not source.exists():
+                    raise LegacySnapshotError(
+                        f"legacy extension staging is incomplete: {name}"
+                    )
+                os.replace(source, destination)
+                _fsync_dir(account_root)
+
+            account_inventory = _inventory_declared_datasets(
+                account_root,
+                datasets,
+            )
+            if account_inventory != source_inventory:
+                raise ClaimConflictError(
+                    "activated legacy extension differs from its backup"
+                )
+            return account_inventory
+        finally:
+            _remove_internal_tree(staging)
+
+    def _record_claim_extension(
+        self,
+        manifest: dict[str, Any],
+        identity: ReaderStorageIdentity,
+        account_root: Path,
+        extension: dict[str, Any],
+    ) -> dict[str, Any]:
+        metadata = self._read_account_metadata(account_root)
+        if metadata is None or not self._metadata_matches(metadata, identity):
+            raise ClaimConflictError("legacy owner account metadata missing")
+        account_claim = metadata.get("legacy_claim")
+        if (
+            not isinstance(account_claim, dict)
+            or account_claim.get("claim_id") != manifest.get("claim_id")
+            or account_claim.get("source_inventory")
+            != manifest.get("source", {}).get("inventory")
+            or account_claim.get("source_digest")
+            != manifest.get("source", {}).get("digest")
+        ):
+            raise ClaimConflictError(
+                "legacy owner account does not match base claim"
+            )
+
+        metadata_copy = json.loads(json.dumps(metadata, ensure_ascii=False))
+        account_claim_copy = metadata_copy["legacy_claim"]
+        account_extensions = account_claim_copy.get("extensions", [])
+        if not isinstance(account_extensions, list):
+            raise ClaimConflictError("invalid account legacy extensions")
+        prior = next(
+            (
+                item
+                for item in account_extensions
+                if isinstance(item, dict)
+                and item.get("claim_id") == extension["claim_id"]
+            ),
+            None,
+        )
+        if prior is not None:
+            prior_content = dict(prior)
+            extension_content = dict(extension)
+            prior_content.pop("claimed_at", None)
+            extension_content.pop("claimed_at", None)
+            if prior_content != extension_content:
+                raise ClaimConflictError(
+                    "account legacy extension marker disagrees"
+                )
+            # Crash recovery keeps the timestamp already committed to account
+            # metadata instead of manufacturing a different manifest record.
+            extension = prior
+        else:
+            account_extensions.append(extension)
+        account_claim_copy["extensions"] = account_extensions
+        atomic_write_json(self._identity_metadata_path(account_root), metadata_copy)
+
+        manifest_copy = json.loads(json.dumps(manifest, ensure_ascii=False))
+        manifest_extensions = manifest_copy.get("extensions", [])
+        if not isinstance(manifest_extensions, list):
+            raise ClaimConflictError("invalid legacy claim extensions")
+        manifest_extensions.append(extension)
+        manifest_copy["extensions"] = manifest_extensions
+        atomic_write_json(self.claim_path, manifest_copy)
+        return self._validate_claim(manifest_copy)
+
+    def _extend_legacy_if_needed(
+        self,
+        manifest: dict[str, Any],
+        identity: ReaderStorageIdentity,
+        account_root: Path,
+    ) -> dict[str, Any]:
+        claimed = self._claimed_dataset_names(manifest)
+        pending = tuple(
+            item for item in LEGACY_DATASETS if item[0] not in claimed
+        )
+        if not pending:
+            return manifest
+
+        source_inventory = _inventory_declared_datasets(
+            self.legacy_root,
+            pending,
+        )
+        source_digest = inventory_digest(source_inventory)
+        claim_id = self._extension_claim_id(
+            identity,
+            pending,
+            source_digest,
+        )
+        backup_root, backup_inventory, backup_digest = (
+            self._create_or_reuse_backup(
+                claim_id,
+                identity,
+                source_inventory,
+                source_digest,
+            )
+        )
+        if (
+            _inventory_declared_datasets(self.legacy_root, pending)
+            != source_inventory
+        ):
+            raise LegacySnapshotError(
+                "legacy extension source changed during backup"
+            )
+        account_inventory = self._activate_or_recover_extension(
+            account_root,
+            backup_root / "data",
+            pending,
+            source_inventory,
+        )
+        if (
+            _inventory_declared_datasets(self.legacy_root, pending)
+            != source_inventory
+        ):
+            raise ClaimConflictError(
+                "legacy extension source changed after account activation"
+            )
+        extension = {
+            "schema": CLAIM_EXTENSION_SCHEMA,
+            "claim_id": claim_id,
+            "claimed_at": _utc_now(),
+            "datasets": [name for name, _kind in pending],
+            "source": {
+                "inventory": source_inventory,
+                "digest": source_digest,
+            },
+            "backup": {
+                "relative_path": backup_root.relative_to(self.root).as_posix(),
+                "inventory": backup_inventory,
+                "digest": backup_digest,
+            },
+            "account": {
+                "relative_path": account_root.relative_to(self.root).as_posix(),
+                "inventory": account_inventory,
+                "digest": inventory_digest(account_inventory),
+            },
+        }
+        return self._record_claim_extension(
+            manifest,
+            identity,
+            account_root,
+            extension,
+        )
+
     def _claim_or_isolate(
         self,
         identity: ReaderStorageIdentity,
@@ -934,6 +1269,25 @@ class SidecarStore:
                 ):
                     raise ClaimConflictError(
                         "legacy owner account does not match claim manifest"
+                    )
+                manifest = self._extend_legacy_if_needed(
+                    manifest,
+                    identity,
+                    account_root,
+                )
+                metadata = self._read_account_metadata(account_root)
+                account_claim = (
+                    metadata.get("legacy_claim")
+                    if isinstance(metadata, dict)
+                    else None
+                )
+                if (
+                    not isinstance(account_claim, dict)
+                    or account_claim.get("extensions", [])
+                    != manifest.get("extensions", [])
+                ):
+                    raise ClaimConflictError(
+                        "account legacy extensions do not match claim manifest"
                     )
             else:
                 self._ensure_empty_account(identity, account_root)

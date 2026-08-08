@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+import shutil
 import sys
 import tempfile
 import threading
@@ -16,6 +17,7 @@ from unittest.mock import patch
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "_server_deploy"))
 
+import reader_sidecar_store as sidecar_module  # noqa: E402
 from reader_sidecar_store import (  # noqa: E402
     ClaimConflictError,
     IdentityMismatchError,
@@ -53,6 +55,9 @@ def _seed_legacy(root: Path) -> None:
         ("pdf-highlights", "pdf-a.json", [{"id": "pdf"}]),
         ("html-highlights", "html-a.json", [{"id": "html"}]),
         ("assets", "registry.json", {"asset-a": {"name": "private image"}}),
+        ("pdf-ink", "pdf-a.json", {"pages": {"3": [{"t": "pen"}]}}),
+        ("epub-ink", "epub-a.json", {"sections": {"2": [{"t": "pen"}]}}),
+        ("reader-userpages", "book-a.json", [{"id": "u_1234abcd"}]),
     ):
         target = root / directory / filename
         target.parent.mkdir(parents=True, exist_ok=True)
@@ -150,6 +155,118 @@ class ReaderSidecarClaimTest(unittest.TestCase):
                     "reader-positions.json",
                 )
 
+    def test_existing_owner_claim_extends_new_fixed_datasets_copy_only(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            legacy = base / "legacy"
+            _seed_legacy(legacy)
+            owner = ReaderStorageIdentity(7, NS_A)
+            other = ReaderStorageIdentity(8, NS_B)
+            new_names = {"pdf-ink", "epub-ink", "reader-userpages"}
+            old_registry = tuple(
+                item
+                for item in sidecar_module.LEGACY_DATASETS
+                if item[0] not in new_names
+            )
+
+            with patch.object(sidecar_module, "LEGACY_DATASETS", old_registry):
+                old_store = SidecarStore(
+                    base / "private",
+                    legacy,
+                    lambda identity: identity == owner,
+                )
+                old_store.account_path(owner, "reader-positions.json")
+                old_claim = old_store.read_claim()
+                assert old_claim is not None
+                self.assertEqual(old_claim.get("extensions"), [])
+
+            source_before = _tree_bytes(legacy)
+            store = SidecarStore(
+                base / "private",
+                legacy,
+                lambda identity: identity == owner,
+            )
+            # A different verified account cannot trigger or observe the old
+            # owner's newly declared legacy state.
+            self.assertFalse(
+                store.account_path(other, "pdf-ink", "pdf-a.json").exists()
+            )
+            self.assertEqual(store.read_claim().get("extensions"), [])
+
+            # Simulate a crash after one exact directory activation. Recovery
+            # may continue only because the bytes match the legacy snapshot.
+            owner_root = store.by_user_root / str(owner.user_id)
+            shutil.copytree(legacy / "pdf-ink", owner_root / "pdf-ink")
+            claimed = store.account_path(owner, "pdf-ink", "pdf-a.json")
+            self.assertEqual(claimed.read_bytes(), source_before["pdf-ink/pdf-a.json"])
+            self.assertEqual(
+                store.account_path(owner, "epub-ink", "epub-a.json").read_bytes(),
+                source_before["epub-ink/epub-a.json"],
+            )
+            self.assertEqual(
+                store.account_path(
+                    owner,
+                    "reader-userpages",
+                    "book-a.json",
+                ).read_bytes(),
+                source_before["reader-userpages/book-a.json"],
+            )
+            self.assertEqual(_tree_bytes(legacy), source_before)
+            manifest = store.read_claim()
+            assert manifest is not None
+            self.assertEqual(len(manifest["extensions"]), 1)
+            self.assertEqual(
+                manifest["extensions"][0]["datasets"],
+                ["pdf-ink", "epub-ink", "reader-userpages"],
+            )
+            backup = store.root / manifest["extensions"][0]["backup"]["relative_path"]
+            self.assertEqual(
+                inventory_legacy(backup / "data"),
+                manifest["extensions"][0]["source"]["inventory"],
+            )
+            self.assertFalse(os.access(backup / "snapshot.json", os.W_OK))
+
+    def test_existing_claim_extension_conflict_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            legacy = base / "legacy"
+            _seed_legacy(legacy)
+            owner = ReaderStorageIdentity(7, NS_A)
+            new_names = {"pdf-ink", "epub-ink", "reader-userpages"}
+            old_registry = tuple(
+                item
+                for item in sidecar_module.LEGACY_DATASETS
+                if item[0] not in new_names
+            )
+            with patch.object(sidecar_module, "LEGACY_DATASETS", old_registry):
+                old_store = SidecarStore(
+                    base / "private",
+                    legacy,
+                    lambda identity: identity == owner,
+                )
+                owner_root = old_store.account_path(owner)
+
+            # This target cannot be proven to be the same legacy dataset, so
+            # the extension must neither replace it nor publish a claim marker.
+            atomic_write_json(
+                owner_root / "pdf-ink" / "pdf-a.json",
+                {"pages": {"9": [{"t": "different"}]}},
+            )
+            store = SidecarStore(
+                base / "private",
+                legacy,
+                lambda identity: identity == owner,
+            )
+            with self.assertRaisesRegex(ClaimConflictError, "different pdf-ink"):
+                store.account_path(owner, "pdf-ink", "pdf-a.json")
+            manifest = store.read_claim()
+            assert manifest is not None
+            self.assertEqual(manifest.get("extensions"), [])
+            self.assertEqual(
+                json.loads((legacy / "pdf-ink" / "pdf-a.json").read_text("utf-8")),
+                {"pages": {"3": [{"t": "pen"}]}},
+            )
+
     def test_missing_manifest_recovers_activated_copy_idempotently(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             base = Path(tmp)
@@ -238,7 +355,10 @@ class ReaderSidecarClaimTest(unittest.TestCase):
             outside.write_text("do not copy", "utf-8")
             assets = legacy / "assets"
             assets.mkdir()
-            (assets / "link").symlink_to(outside)
+            try:
+                (assets / "link").symlink_to(outside)
+            except OSError as exc:
+                self.skipTest(f"symlink creation unavailable: {exc}")
             owner = ReaderStorageIdentity(7, NS_A)
             store = SidecarStore(base / "private", legacy, lambda _identity: True)
             with self.assertRaises(LegacySnapshotError):

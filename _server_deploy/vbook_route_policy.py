@@ -95,6 +95,16 @@ ROUTE_POLICY = {
     'pdf_reader.pdf_api_library_catalog': 'GLOBAL',   # /pdf/api/library/catalog (原始书库,不经 vbook 重写)
     'pdf_reader.pdf_api_library_download': 'GLOBAL',   # /pdf/api/library/download/<book_id>
     'pdf_reader.pdf_api_library_upload': 'GLOBAL',   # /pdf/api/library/upload
+    'pdf_reader.pdf_api_library_ocr_start': 'GLOBAL',   # authenticated opaque library identity
+    'pdf_reader.pdf_api_library_ocr_status': 'GLOBAL',
+    'pdf_reader.pdf_api_library_ocr_pause': 'GLOBAL',
+    'pdf_reader.pdf_api_library_ocr_resume': 'GLOBAL',
+    'pdf_reader.pdf_api_library_ocr_cancel': 'GLOBAL',
+    'pdf_reader.pdf_api_library_ocr_retry': 'GLOBAL',
+    'pdf_reader.pdf_api_library_ocr_page_chars': 'GLOBAL',
+    'pdf_reader.pdf_api_library_attachments': 'GLOBAL',
+    'pdf_reader.pdf_api_library_attachment_download': 'GLOBAL',
+    'pdf_reader.pdf_api_library_user_state': 'GLOBAL',
     'pdf_reader.pdf_api_lookup_event': 'PAGE',   # /pdf/api/lookup-event
     'pdf_reader.pdf_api_note_composite': 'PAGE',   # /pdf/api/note-composite
     'pdf_reader.pdf_api_notes': 'PAGE',   # /pdf/api/notes

@@ -94,6 +94,8 @@ class BookLibraryCatalogTest(unittest.TestCase):
         self.assertEqual(entry["version"], expected)
         self.assertEqual(entry["rel"], "Books/A.pdf")
         self.assertTrue(entry["downloadUrl"].startswith("/pdf/api/library/download/book_"))
+        self.assertIn(entry["bookId"], entry["attachmentsUrl"])
+        self.assertIn(entry["contentSha256"], entry["attachmentsUrl"])
         self.assertNotIn(str(self.vault), json.dumps(entry))
 
         with patch.object(

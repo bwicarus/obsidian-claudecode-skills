@@ -45,6 +45,9 @@ class ReaderDeployManifestTests(unittest.TestCase):
                 "card_improvement_service.py",
                 "card_candidate_service.py",
                 "reader_book_library.py",
+                "reader_book_ocr.py",
+                "reader_book_ocr_worker.py",
+                "reader_book_user_state.py",
                 "favorites_reader.py",
                 "reader_sidecar_store.py",
                 "reader_sync_relay.py",
@@ -174,6 +177,12 @@ class ReaderDeployManifestTests(unittest.TestCase):
                 for entry in self.entries
                 if entry.target_group == "webapp"
                 and entry.target_rel == "card_candidate_service.py"
+            ),
+            next(
+                entry
+                for entry in self.entries
+                if entry.target_group == "webapp"
+                and entry.target_rel == "reader_book_ocr_worker.py"
             ),
         )
         for removed in required_entries:

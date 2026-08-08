@@ -96,6 +96,11 @@ WEBAPP_SOURCE_FILES = (
     # pdf_reader imports the authenticated Pi book catalog/download/upload
     # service at startup; deploy it atomically with the routes.
     "reader_book_library.py",
+    # Manual Pi OCR coordinator and detached page-bounded worker are imported/
+    # launched by pdf_reader; deploy them atomically with the authenticated API.
+    "reader_book_ocr.py",
+    "reader_book_ocr_worker.py",
+    "reader_book_user_state.py",
     "html_reader.py",
     "favorites_reader.py",
     "reader_sidecar_store.py",
@@ -298,6 +303,24 @@ _REQUIRED_EXACT_IDENTITIES = frozenset(
             "_server_deploy/card_candidate_service.py",
             "webapp",
             "card_candidate_service.py",
+            POLICY_EXACT,
+        ),
+        (
+            "_server_deploy/reader_book_ocr.py",
+            "webapp",
+            "reader_book_ocr.py",
+            POLICY_EXACT,
+        ),
+        (
+            "_server_deploy/reader_book_ocr_worker.py",
+            "webapp",
+            "reader_book_ocr_worker.py",
+            POLICY_EXACT,
+        ),
+        (
+            "_server_deploy/reader_book_user_state.py",
+            "webapp",
+            "reader_book_user_state.py",
             POLICY_EXACT,
         ),
         (

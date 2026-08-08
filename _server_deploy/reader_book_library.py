@@ -306,6 +306,7 @@ class BookLibrary:
 
     @staticmethod
     def _public_entry(book_id: str, record: dict) -> dict:
+        content_sha256 = record["contentSha256"]
         return {
             "bookId": book_id,
             "name": record["name"],
@@ -313,9 +314,15 @@ class BookLibrary:
             "rel": record["rel"],
             "size": record["size"],
             "mtime": record["mtimeNs"] // 1_000_000_000,
-            "version": record["contentSha256"],
-            "contentSha256": record["contentSha256"],
+            "version": content_sha256,
+            "contentSha256": content_sha256,
             "downloadUrl": f"/pdf/api/library/download/{book_id}",
+            # One versioned manifest may grow additional attachment domains in
+            # future.  This release publishes derived OCR/formula data only.
+            "attachmentsUrl": (
+                f"/pdf/api/library/attachments/{book_id}"
+                f"?contentSha256={content_sha256}"
+            ),
         }
 
     def _catalog_locked(self) -> tuple[list[dict], dict[str, dict]]:

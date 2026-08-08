@@ -26,8 +26,13 @@ window._runSearch = async () => {
     const d = await r.json();
     if (seq !== _searchSeq) return;   // 已被更新的查询取代
     if (!d.ok) { box.innerHTML = '<div class="sr-empty">搜索失败：' + (d.error || '?') + '</div>'; stat.textContent = ''; return; }
-    stat.textContent = d.total + ' 处 / ' + d.pages + ' 页';
-    if (!d.matches.length) { box.innerHTML = '<div class="sr-empty">未找到「' + _esc(q) + '」</div>'; return; }
+    stat.textContent = d.total + ' 处 / ' + d.pages + ' 页' + (d.incomplete ? ' · 部分页待识别' : '');
+    if (!d.matches.length) {
+      box.innerHTML = '<div class="sr-empty">' + (d.incomplete
+        ? '已完成页面暂未找到「' + _esc(q) + '」；仍有页面待识别'
+        : '未找到「' + _esc(q) + '」') + '</div>';
+      return;
+    }
     const ql = q.toLowerCase();
     box.innerHTML = d.matches.map(m => {
       // snippet 高亮所有 q 出现处（大小写不敏感）

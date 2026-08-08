@@ -432,6 +432,54 @@
       });
     }
 
+    /*
+     * Read several exact records from one IndexedDB snapshot.  Callers that
+     * assemble one logical document state must not issue independent get()
+     * transactions: another tab could commit between them and produce a
+     * snapshot that never existed.  This intentionally exposes only bounded
+     * exact-key reads, not the underlying IDB transaction.
+     */
+    function getMany(requests) {
+      if (!Array.isArray(requests) || requests.length > 64) {
+        return Promise.reject(new DataStoreError(
+          'IndexedDB 批量读取请求无效',
+          'BW_DATA_INVALID'
+        ));
+      }
+      var normalized;
+      try {
+        normalized = requests.map(function (request, index) {
+          if (!request || typeof request !== 'object' || Array.isArray(request)) {
+            throw new DataStoreError(
+              'IndexedDB 批量读取项无效',
+              'BW_DATA_INVALID',
+              { index: index }
+            );
+          }
+          return {
+            collection: safeName(request.collection, 'collection'),
+            id: safeName(request.id, 'id'),
+            includeDeleted: !!request.includeDeleted
+          };
+        });
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      if (!normalized.length) return Promise.resolve([]);
+      return transact([STORE_RECORDS], 'readonly', function (transaction) {
+        var records = transaction.objectStore(STORE_RECORDS);
+        return Promise.all(normalized.map(function (request) {
+          return requestResult(records.get(
+            physicalKey(request.collection, request.id)
+          )).then(function (stored) {
+            var record = fromStoredRecord(stored);
+            if (record && record.deleted && !request.includeDeleted) return null;
+            return record;
+          });
+        }));
+      });
+    }
+
     function list(collection, query) {
       collection = safeName(collection, 'collection');
       query = query || {};
@@ -950,6 +998,7 @@
     return {
       contract: CONTRACT,
       get: get,
+      getMany: getMany,
       list: list,
       put: put,
       remove: remove,

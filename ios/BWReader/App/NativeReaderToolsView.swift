@@ -162,6 +162,7 @@ struct NativeReaderToolsView: View {
     @StateObject private var coordinator = NativeReaderToolsCoordinator()
     @StateObject private var localNotes = ReaderLocalNotesManager.shared
     @StateObject private var piSync = ReaderPiSyncCoordinator()
+    @StateObject private var textRecognition = ReaderTextRecognitionPreferences.shared
     @State private var presentsAnnotation = false
     @State private var presentsTranslation = false
     @State private var presentsLocalLibrary = false
@@ -190,6 +191,7 @@ struct NativeReaderToolsView: View {
                 currentPageSection
                 nativeActionsSection
                 recognitionSection
+                textRecognitionSettingsSection
                 localLibrarySection
                 piSyncSection
                 localNotesSection
@@ -266,6 +268,27 @@ struct NativeReaderToolsView: View {
                     }
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var textRecognitionSettingsSection: some View {
+        Section("文字识别") {
+            Toggle("启用书籍文字识别", isOn: $textRecognition.isEnabled)
+
+            Toggle(
+                "自动识别无文字层书籍",
+                isOn: $textRecognition.automaticLocalProcessingEnabled
+            )
+            .disabled(!textRecognition.isEnabled)
+
+            Text("开启后，PDF 下载到本机或首次打开时会启动这台设备的 Apple 预处理；不会上传书籍，也不会自动调用 Pi。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Text("本机处理失败或效果不理想时，可在书库中为该书手动选择“Pi 预处理”。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 

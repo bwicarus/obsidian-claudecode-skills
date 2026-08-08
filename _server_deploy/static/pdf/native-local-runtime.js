@@ -11,6 +11,14 @@
   var CONTRACT = 'native-local-runtime/1';
   var BOOTSTRAP_CONTRACT = 'reader-native-sync-bootstrap/1';
   var SYNC_REQUEST_CONTRACT = 'reader-pi-sync-request/1';
+  var USER_STATE_REQUEST_CONTRACT = 'reader-book-user-state-web-request/1';
+  var USER_STATE_RESPONSE_CONTRACT = 'reader-book-user-state-web-response/1';
+  var USER_STATE_IMPORT_CONTRACT = 'reader-book-user-state-import/1';
+  var USER_STATE_RECEIPT_CONTRACT = 'reader-book-user-state-import-receipt/1';
+  var USER_STATE_DOMAINS = Object.freeze([
+    'reading-position', 'highlights', 'ink', 'closed-regions',
+    'notes', 'user-pages', 'card-placements', 'entity-references'
+  ]);
   var runtimeRoot = root.BWReaderRuntime = root.BWReaderRuntime || {};
   if (runtimeRoot.nativeLocalRuntime) return;
 
@@ -294,12 +302,544 @@
     });
   }
   function writeState(kind, payload) {
+    if (kind === 'document-notes-legacy') {
+      return writeNotesAndIndexes(payload);
+    }
     return stores.document.put('native-' + kind, {
       id: stateId(kind), documentId: bookId, payload: clone(payload), updatedAt: Date.now()
     }, { mutationId: 'native-' + kind + '-' + randomHex(12) }).then(function () {
       return clone(payload);
     });
   }
+
+  function stateRecordMutation(kind, payload, mutationSuffix, ifRev) {
+    return {
+      operation: 'put',
+      collection: 'native-' + kind,
+      value: {
+        id: stateId(kind), documentId: bookId,
+        payload: clone(payload), updatedAt: Date.now()
+      },
+      options: {
+        mutationId: 'native-' + kind + '-' + mutationSuffix,
+        ifRev: ifRev == null ? undefined : ifRev
+      }
+    };
+  }
+
+  function placementEntityIds(note) {
+    var values = [];
+    function add(value) {
+      value = String(value || '').trim();
+      if (value && value.length <= 240 && values.indexOf(value) < 0) values.push(value);
+    }
+    if (note && note.card) {
+      add(note.card.gid); add(note.card.cid); add(note.card.id);
+    }
+    if (note && note.html) { add(note.html.cid); add(note.html.id); }
+    if (note && note.video) { add(note.video.id); }
+    return values;
+  }
+
+  function deriveCardPlacements(notes) {
+    return (Array.isArray(notes) ? notes : []).filter(function (note) {
+      return !!(note && typeof note === 'object' &&
+        (note.card || note.html || note.video));
+    }).map(function (note) {
+      var kind = note.card ? 'card' : (note.html ? 'html' : 'video');
+      return {
+        placementId: String(note.id || ''),
+        noteId: String(note.id || ''),
+        kind: kind,
+        anchor: clone(note.anchor == null ? null : note.anchor),
+        w: Number.isFinite(Number(note.w)) ? Number(note.w) : null,
+        h: Number.isFinite(Number(note.h)) ? Number(note.h) : null,
+        collapsed: !!note.collapsed,
+        entityIds: placementEntityIds(note)
+      };
+    }).filter(function (item) { return !!item.placementId; });
+  }
+
+  function deriveEntityReferences(placements) {
+    var grouped = Object.create(null);
+    (Array.isArray(placements) ? placements : []).forEach(function (placement) {
+      (Array.isArray(placement.entityIds) ? placement.entityIds : []).forEach(function (entityId) {
+        if (!grouped[entityId]) {
+          grouped[entityId] = {
+            entityId: entityId, kind: placement.kind, placementIds: []
+          };
+        }
+        if (grouped[entityId].placementIds.indexOf(placement.placementId) < 0) {
+          grouped[entityId].placementIds.push(placement.placementId);
+        }
+      });
+    });
+    return Object.keys(grouped).sort().map(function (key) {
+      grouped[key].placementIds.sort();
+      return grouped[key];
+    });
+  }
+
+  function writeNotesAndIndexes(payload) {
+    var notes = Array.isArray(payload) ? clone(payload) : [];
+    var placements = deriveCardPlacements(notes);
+    var references = deriveEntityReferences(placements);
+    var suffix = randomHex(12);
+    return stores.document.batch([
+      stateRecordMutation('document-notes-legacy', notes, suffix + '-notes'),
+      stateRecordMutation('card-placements', placements, suffix + '-cards'),
+      stateRecordMutation('entity-references', references, suffix + '-entities')
+    ]).then(function () { return clone(notes); });
+  }
+
+  var USER_STATE_RECORD_KINDS = Object.freeze([
+    'reading-position', 'document-highlights', 'epub-highlights',
+    'ink', 'epub-ink', 'document-notes-legacy', 'user-pages',
+    'card-placements', 'entity-references', 'user-state-domain-meta'
+  ]);
+  var USER_STATE_DOMAIN_LIMITS = Object.freeze({
+    'reading-position': 64 * 1024,
+    'highlights': 6 * 1024 * 1024,
+    'ink': 24 * 1024 * 1024,
+    'closed-regions': 6 * 1024 * 1024,
+    'notes': 10 * 1024 * 1024,
+    'user-pages': 12 * 1024 * 1024,
+    'card-placements': 3 * 1024 * 1024,
+    'entity-references': 3 * 1024 * 1024
+  });
+
+  function exactKeys(value, keys) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    var actual = Object.keys(value).sort();
+    var expected = keys.slice().sort();
+    return actual.length === expected.length && actual.every(function (key, index) {
+      return key === expected[index];
+    });
+  }
+
+  function canonicalJSONValue(value) {
+    if (value === null || typeof value === 'string' ||
+        typeof value === 'boolean') return value;
+    if (typeof value === 'number') {
+      if (!Number.isFinite(value)) {
+        throw new RuntimeError('书籍附属数据包含非有限数字', 'BW_USER_STATE_INVALID');
+      }
+      return value;
+    }
+    if (Array.isArray(value)) return value.map(canonicalJSONValue);
+    if (!value || typeof value !== 'object') {
+      throw new RuntimeError('书籍附属数据不是 JSON', 'BW_USER_STATE_INVALID');
+    }
+    var output = {};
+    Object.keys(value).sort().forEach(function (key) {
+      if (!key) throw new RuntimeError('书籍附属数据字段名无效', 'BW_USER_STATE_INVALID');
+      output[key] = canonicalJSONValue(value[key]);
+    });
+    return output;
+  }
+
+  function canonicalJSONString(value) {
+    return JSON.stringify(canonicalJSONValue(value));
+  }
+
+  function utf8(value) { return new TextEncoder().encode(String(value)); }
+  function sha256Hex(value) {
+    if (!root.crypto || !root.crypto.subtle ||
+        typeof root.crypto.subtle.digest !== 'function') {
+      return Promise.reject(new RuntimeError(
+        '本机书籍数据摘要不可用', 'BW_USER_STATE_DIGEST_UNAVAILABLE'
+      ));
+    }
+    return root.crypto.subtle.digest('SHA-256', utf8(value)).then(function (buffer) {
+      return Array.prototype.map.call(new Uint8Array(buffer), function (byte) {
+        return byte.toString(16).padStart(2, '0');
+      }).join('');
+    });
+  }
+
+  function recordPayload(record, fallback) {
+    return record && record.value && record.value.payload != null
+      ? clone(record.value.payload) : clone(fallback);
+  }
+
+  function userStateSnapshotRecords() {
+    if (!stores || !stores.document || typeof stores.document.getMany !== 'function') {
+      return Promise.reject(new RuntimeError(
+        '本机书籍数据快照接口不可用', 'BW_USER_STATE_SNAPSHOT_UNAVAILABLE'
+      ));
+    }
+    return stores.document.getMany(USER_STATE_RECORD_KINDS.map(function (kind) {
+      return { collection: 'native-' + kind, id: stateId(kind) };
+    })).then(function (records) {
+      var output = Object.create(null);
+      USER_STATE_RECORD_KINDS.forEach(function (kind, index) {
+        output[kind] = records[index] || null;
+      });
+      return output;
+    });
+  }
+
+  function filteredStrokeMap(value, regions) {
+    var output = {};
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return output;
+    Object.keys(value).forEach(function (surface) {
+      var strokes = Array.isArray(value[surface]) ? value[surface] : [];
+      var selected = strokes.filter(function (stroke) {
+        return !!(stroke && typeof stroke === 'object' &&
+          ((stroke.t === 'region') === regions));
+      }).map(clone);
+      if (selected.length) output[surface] = selected;
+    });
+    return output;
+  }
+
+  function mergeStrokeMaps(ink, regions) {
+    var output = {};
+    var keys = new Set(Object.keys(ink || {}).concat(Object.keys(regions || {})));
+    keys.forEach(function (surface) {
+      var strokes = [];
+      (Array.isArray(ink && ink[surface]) ? ink[surface] : []).forEach(function (stroke) {
+        if (stroke && stroke.t !== 'region') strokes.push(clone(stroke));
+      });
+      (Array.isArray(regions && regions[surface]) ? regions[surface] : []).forEach(function (stroke) {
+        if (stroke && stroke.t === 'region') strokes.push(clone(stroke));
+      });
+      if (strokes.length) output[surface] = strokes;
+    });
+    return output;
+  }
+
+  function userStateDomainsFromRecords(records) {
+    var notes = recordPayload(records['document-notes-legacy'], []);
+    if (!Array.isArray(notes)) notes = [];
+    var derivedCards = deriveCardPlacements(notes);
+    var cardRecord = records['card-placements'];
+    var cards = cardRecord ? recordPayload(cardRecord, []) : derivedCards;
+    if (!Array.isArray(cards)) cards = derivedCards;
+    var derivedEntities = deriveEntityReferences(cards);
+    var entityRecord = records['entity-references'];
+    var entities = entityRecord ? recordPayload(entityRecord, []) : derivedEntities;
+    if (!Array.isArray(entities)) entities = derivedEntities;
+    var pdfInk = recordPayload(records.ink, {});
+    var epubInk = recordPayload(records['epub-ink'], {});
+    return {
+      'reading-position': recordPayload(records['reading-position'], null),
+      'highlights': {
+        pdf: recordPayload(records['document-highlights'], []),
+        epub: recordPayload(records['epub-highlights'], [])
+      },
+      'ink': {
+        pdf: filteredStrokeMap(pdfInk, false),
+        epub: filteredStrokeMap(epubInk, false)
+      },
+      'closed-regions': {
+        pdf: filteredStrokeMap(pdfInk, true),
+        epub: filteredStrokeMap(epubInk, true)
+      },
+      'notes': notes,
+      'user-pages': recordPayload(records['user-pages'], []),
+      'card-placements': cards,
+      'entity-references': entities
+    };
+  }
+
+  function userStateDomainRevision(name, records) {
+    var kinds = {
+      'reading-position': ['reading-position'],
+      'highlights': ['document-highlights', 'epub-highlights'],
+      'ink': ['ink', 'epub-ink'],
+      'closed-regions': ['ink', 'epub-ink'],
+      'notes': ['document-notes-legacy'],
+      'user-pages': ['user-pages'],
+      'card-placements': ['card-placements', 'document-notes-legacy'],
+      'entity-references': ['entity-references', 'document-notes-legacy']
+    }[name] || [];
+    return kinds.reduce(function (revision, kind) {
+      return Math.max(revision, Number(records[kind] && records[kind].rev || 0));
+    }, 0);
+  }
+
+  function userStateDomainEmpty(name, value) {
+    if (name === 'highlights' || name === 'ink' || name === 'closed-regions') {
+      var pdf = value && value.pdf;
+      var epub = value && value.epub;
+      var pdfEmpty = Array.isArray(pdf) ? !pdf.length :
+        !!(pdf && typeof pdf === 'object' && !Object.keys(pdf).length);
+      var epubEmpty = Array.isArray(epub) ? !epub.length :
+        !!(epub && typeof epub === 'object' && !Object.keys(epub).length);
+      return pdfEmpty && epubEmpty;
+    }
+    if (value == null || value === '') return true;
+    if (Array.isArray(value)) return !value.length;
+    return typeof value === 'object' && !Object.keys(value).length;
+  }
+
+  function validateSurfaceMap(value, regions) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    return Object.keys(value).every(function (surface) {
+      var embedded = /^pdf\|(.{1,512})\|([1-9]\d*)$/.exec(surface);
+      var validEmbedded = !!(embedded && embedded[1][0] !== '/' &&
+        utf8(embedded[1]).byteLength <= 512 &&
+        !/^[A-Za-z][A-Za-z0-9+.-]*:/.test(embedded[1]) &&
+        embedded[1].indexOf('\\') < 0 && embedded[1].indexOf('\0') < 0 &&
+        embedded[1].split('/').every(function (part) {
+          return !!part && part !== '.' && part !== '..';
+        }) && Number(embedded[2]) >= 1);
+      if (!(/^(?:\d+|u_[a-fA-F0-9]{4,32})$/.test(surface) || validEmbedded) ||
+          !Array.isArray(value[surface])) return false;
+      return value[surface].every(function (stroke) {
+        return !!(stroke && typeof stroke === 'object' && !Array.isArray(stroke) &&
+          ((stroke.t === 'region') === regions));
+      });
+    });
+  }
+
+  function validateUserStateDomainShape(name, value) {
+    if (name === 'reading-position') {
+      return value === null || !!(value && typeof value === 'object' && !Array.isArray(value));
+    }
+    if (['notes', 'user-pages', 'card-placements', 'entity-references'].indexOf(name) >= 0) {
+      return Array.isArray(value);
+    }
+    if (!exactKeys(value, ['pdf', 'epub'])) return false;
+    if (name === 'highlights') return Array.isArray(value.pdf) && Array.isArray(value.epub);
+    return validateSurfaceMap(value.pdf, name === 'closed-regions') &&
+      validateSurfaceMap(value.epub, name === 'closed-regions');
+  }
+
+  function validateUserStateRequest(request, action, extraKeys) {
+    var keys = ['contract', 'action', 'requestId', 'localBookId'].concat(extraKeys || []);
+    if (!exactKeys(request, keys) || request.contract !== USER_STATE_REQUEST_CONTRACT ||
+        request.action !== action || !/^usr_[a-f0-9]{32}$/.test(String(request.requestId || '')) ||
+        request.localBookId !== bookId) {
+      throw new RuntimeError('本机书籍数据请求无效', 'BW_USER_STATE_REQUEST_INVALID');
+    }
+  }
+
+  function userStateResponse(action, requestId, value) {
+    return Object.assign({
+      contract: USER_STATE_RESPONSE_CONTRACT,
+      action: action,
+      requestId: requestId,
+      ok: true,
+      localBookId: bookId
+    }, value);
+  }
+
+  function computeUserStateHeaders(records) {
+    var domains = userStateDomainsFromRecords(records);
+    var metadata = recordPayload(records['user-state-domain-meta'], {});
+    if (!metadata || typeof metadata !== 'object' || Array.isArray(metadata)) {
+      metadata = {};
+    }
+    return Promise.all(USER_STATE_DOMAINS.map(function (name) {
+      var canonical = canonicalJSONString(domains[name]);
+      return sha256Hex(canonical).then(function (localDigest) {
+        var remembered = metadata[name];
+        var digest = remembered && remembered.localDigest === localDigest &&
+          /^[a-f0-9]{64}$/.test(String(remembered.remoteDigest || ''))
+          ? remembered.remoteDigest : localDigest;
+        return {
+          name: name,
+          digest: digest,
+          revision: userStateDomainRevision(name, records),
+          empty: userStateDomainEmpty(name, domains[name])
+        };
+      });
+    }));
+  }
+
+  function snapshotUserStateHeaders(request) {
+    return bootPromise.then(function () {
+      validateUserStateRequest(request, 'snapshot-headers');
+      return userStateSnapshotRecords();
+    }).then(function (records) {
+      return computeUserStateHeaders(records);
+    }).then(function (headers) {
+      return userStateResponse('snapshot-headers', request.requestId, { headers: headers });
+    });
+  }
+
+  function parseUserStateTransaction(request) {
+    validateUserStateRequest(request, 'apply-atomically', ['transaction']);
+    var transaction = request.transaction;
+    if (!exactKeys(transaction, [
+      'contract', 'transactionId', 'localBookId', 'remoteBookId',
+      'contentSha256', 'packageRevision', 'expectedLocalHeaders', 'domains'
+    ]) || transaction.contract !== USER_STATE_IMPORT_CONTRACT ||
+        !/^us_[a-f0-9]{32}$/.test(String(transaction.transactionId || '')) ||
+        transaction.localBookId !== bookId ||
+        !/^book_[a-f0-9]{32}$/.test(String(transaction.remoteBookId || '')) ||
+        !/^[a-f0-9]{64}$/.test(String(transaction.contentSha256 || '')) ||
+        !Number.isSafeInteger(transaction.packageRevision) ||
+        transaction.packageRevision < 1 || !Array.isArray(transaction.domains) ||
+        !transaction.domains.length || transaction.domains.length > USER_STATE_DOMAINS.length) {
+      throw new RuntimeError('本机书籍数据事务无效', 'BW_USER_STATE_TRANSACTION_INVALID');
+    }
+    var names = new Set();
+    var totalBytes = 0;
+    var parsed = [];
+    var checks = transaction.domains.map(function (domain) {
+      if (!exactKeys(domain, [
+        'name', 'revision', 'digest', 'byteCount', 'empty', 'payloadJson'
+      ]) || USER_STATE_DOMAINS.indexOf(domain.name) < 0 || names.has(domain.name) ||
+          !Number.isSafeInteger(domain.revision) || domain.revision < 1 ||
+          !/^[a-f0-9]{64}$/.test(String(domain.digest || '')) ||
+          !Number.isSafeInteger(domain.byteCount) || domain.byteCount < 0 ||
+          typeof domain.empty !== 'boolean' || typeof domain.payloadJson !== 'string') {
+        throw new RuntimeError('本机书籍数据域无效', 'BW_USER_STATE_DOMAIN_INVALID');
+      }
+      names.add(domain.name);
+      var bytes = utf8(domain.payloadJson).byteLength;
+      totalBytes += bytes;
+      if (bytes !== domain.byteCount || bytes > USER_STATE_DOMAIN_LIMITS[domain.name] ||
+          totalBytes > 64 * 1024 * 1024) {
+        throw new RuntimeError('本机书籍数据域大小无效', 'BW_USER_STATE_DOMAIN_LIMIT');
+      }
+      var value;
+      try { value = JSON.parse(domain.payloadJson); }
+      catch (_) { throw new RuntimeError('本机书籍数据域不是 JSON', 'BW_USER_STATE_DOMAIN_INVALID'); }
+      if (!validateUserStateDomainShape(domain.name, value) ||
+          userStateDomainEmpty(domain.name, value) !== domain.empty) {
+        throw new RuntimeError('本机书籍数据域结构无效', 'BW_USER_STATE_DOMAIN_INVALID');
+      }
+      var parsedDomain = {
+        name: domain.name, value: value, digest: domain.digest,
+        revision: domain.revision, empty: domain.empty, localDigest: null
+      };
+      parsed.push(parsedDomain);
+      return Promise.all([
+        sha256Hex(domain.payloadJson),
+        sha256Hex(canonicalJSONString(value))
+      ]).then(function (digests) {
+        if (digests[0] !== domain.digest) {
+          throw new RuntimeError('本机书籍数据域摘要不一致', 'BW_USER_STATE_DOMAIN_DIGEST');
+        }
+        parsedDomain.localDigest = digests[1];
+      });
+    });
+    if (!transaction.expectedLocalHeaders ||
+        typeof transaction.expectedLocalHeaders !== 'object' ||
+        Array.isArray(transaction.expectedLocalHeaders)) {
+      throw new RuntimeError('本机书籍数据预期状态无效', 'BW_USER_STATE_TRANSACTION_INVALID');
+    }
+    var expectedNames = Object.keys(transaction.expectedLocalHeaders).sort();
+    var domainNames = transaction.domains.map(function (domain) { return domain.name; }).sort();
+    if (expectedNames.length !== domainNames.length ||
+        expectedNames.some(function (name, index) { return name !== domainNames[index]; })) {
+      throw new RuntimeError('本机书籍数据预期域不完整', 'BW_USER_STATE_TRANSACTION_INVALID');
+    }
+    expectedNames.forEach(function (name) {
+      var header = transaction.expectedLocalHeaders[name];
+      if (!exactKeys(header, ['digest', 'revision', 'empty']) ||
+          !/^[a-f0-9]{64}$/.test(String(header.digest || '')) ||
+          !Number.isSafeInteger(header.revision) || header.revision < 0 ||
+          typeof header.empty !== 'boolean') {
+        throw new RuntimeError('本机书籍数据预期头无效', 'BW_USER_STATE_TRANSACTION_INVALID');
+      }
+    });
+    return Promise.all(checks).then(function () {
+      return { transaction: transaction, domains: parsed };
+    });
+  }
+
+  function applyUserStateAtomically(request) {
+    return bootPromise.then(function () {
+      return parseUserStateTransaction(request);
+    }).then(function (parsed) {
+      return userStateSnapshotRecords().then(function (records) {
+        return computeUserStateHeaders(records).then(function (headers) {
+          var actual = Object.create(null);
+          headers.forEach(function (header) { actual[header.name] = header; });
+          Object.keys(parsed.transaction.expectedLocalHeaders).forEach(function (name) {
+            var expected = parsed.transaction.expectedLocalHeaders[name];
+            var observed = actual[name];
+            if (!observed || observed.digest !== expected.digest ||
+                observed.revision !== expected.revision ||
+                observed.empty !== expected.empty) {
+              throw new RuntimeError(
+                '准备导入后本机书籍数据已发生变化',
+                'BW_USER_STATE_LOCAL_CHANGED',
+                { domain: name }
+              );
+            }
+          });
+          return records;
+        });
+      }).then(function (records) {
+        var current = userStateDomainsFromRecords(records);
+        var imported = new Set();
+        parsed.domains.forEach(function (domain) {
+          current[domain.name] = clone(domain.value);
+          imported.add(domain.name);
+        });
+        var domainMeta = recordPayload(records['user-state-domain-meta'], {});
+        if (!domainMeta || typeof domainMeta !== 'object' || Array.isArray(domainMeta)) {
+          domainMeta = {};
+        }
+        parsed.domains.forEach(function (domain) {
+          domainMeta[domain.name] = {
+            remoteDigest: domain.digest,
+            localDigest: domain.localDigest,
+            remoteRevision: domain.revision,
+            empty: domain.empty
+          };
+        });
+        var kinds = new Set();
+        if (imported.has('reading-position')) kinds.add('reading-position');
+        if (imported.has('highlights')) {
+          kinds.add('document-highlights'); kinds.add('epub-highlights');
+        }
+        if (imported.has('ink') || imported.has('closed-regions')) {
+          kinds.add('ink'); kinds.add('epub-ink');
+        }
+        if (imported.has('notes')) kinds.add('document-notes-legacy');
+        if (imported.has('user-pages')) kinds.add('user-pages');
+        if (imported.has('card-placements')) kinds.add('card-placements');
+        if (imported.has('entity-references')) kinds.add('entity-references');
+        kinds.add('user-state-domain-meta');
+        var payloads = {
+          'reading-position': current['reading-position'],
+          'document-highlights': current.highlights.pdf,
+          'epub-highlights': current.highlights.epub,
+          'ink': mergeStrokeMaps(current.ink.pdf, current['closed-regions'].pdf),
+          'epub-ink': mergeStrokeMaps(current.ink.epub, current['closed-regions'].epub),
+          'document-notes-legacy': current.notes,
+          'user-pages': current['user-pages'],
+          'card-placements': current['card-placements'],
+          'entity-references': current['entity-references'],
+          'user-state-domain-meta': domainMeta
+        };
+        var suffix = parsed.transaction.transactionId.slice(3);
+        var mutations = Array.from(kinds).map(function (kind) {
+          return stateRecordMutation(
+            kind,
+            payloads[kind],
+            suffix + '-' + kind,
+            Number(records[kind] && records[kind].rev || 0)
+          );
+        });
+        return stores.document.batch(mutations).then(function () {
+          var digests = {};
+          parsed.domains.forEach(function (domain) { digests[domain.name] = domain.digest; });
+          return userStateResponse('apply-atomically', request.requestId, {
+            receipt: {
+              contract: USER_STATE_RECEIPT_CONTRACT,
+              transactionId: parsed.transaction.transactionId,
+              committed: true,
+              domainDigests: digests
+            }
+          });
+        });
+      });
+    });
+  }
+
+  var bookUserStateAPI = Object.freeze({
+    contract: 'reader-book-user-state-web/1',
+    snapshotHeaders: snapshotUserStateHeaders,
+    applyAtomically: applyUserStateAtomically
+  });
 
   function jsonResponse(value, status) {
     return new Response(JSON.stringify(value), {
@@ -342,6 +882,810 @@
     ).toUpperCase();
   }
   function queryId(url) { return String(url.searchParams.get('id') || ''); }
+
+  // One text provider feeds the existing PDF char-layer, search and assistant
+  // surfaces. Embedded PDF text stays in JavaScript; Apple/Pi OCR is a passive
+  // read through the native reply bridge. These reads must never start OCR or
+  // select a fallback engine: preprocessing is an explicit native UI action.
+  var PAGE_TEXT_REQUEST_CONTRACT = 'reader-native-page-text-request/1';
+  var PAGE_TEXT_RESPONSE_CONTRACT = 'reader-native-page-text-response/1';
+  var PAGE_TEXT_UPDATE_CONTRACT = 'reader-native-page-text-update/1';
+  var PAGE_TEXT_PROVIDER_CONTRACT = 'reader-page-text-provider/1';
+  var PAGE_TEXT_STATES = new Set(['idle', 'pending', 'ready', 'readyEmpty', 'failed']);
+  var PAGE_TEXT_NATIVE_SOURCES = new Set(['apple', 'pi']);
+  var PAGE_TEXT_RESPONSE_COMMON_KEYS = new Set([
+    'contract', 'action', 'requestId', 'ok', 'state', 'source', 'revision', 'error'
+  ]);
+  var PAGE_TEXT_RESPONSE_ACTION_KEYS = Object.freeze({
+    'page-chars': new Set([
+      'page', 'pageWidth', 'pageHeight', 'chars', 'furigana',
+      'wordSegmentation', 'characterGeometry', 'formulaCoverage', 'formulaRegions'
+    ]),
+    status: new Set(['progress']),
+    search: new Set(['matches', 'total', 'pages', 'incomplete'])
+  });
+  var PAGE_TEXT_WORD_STATES = new Set(['ready', 'partial', 'unavailable']);
+  var PAGE_TEXT_GEOMETRY_STATES = new Set(['exact', 'estimated', 'unavailable']);
+  var PAGE_TEXT_FORMULA_COVERAGE = new Set(['unknown', 'unavailable', 'partial', 'complete']);
+  var PAGE_TEXT_PROGRESS_KEYS = new Set([
+    'total', 'ready', 'pending', 'failed', 'activePage', 'currentPage',
+    'textProgress', 'wordProgress', 'formulaProgress',
+    'formulaPendingRegions', 'formulaFailedRegions'
+  ]);
+  var PAGE_TEXT_PHASE_PROGRESS_KEYS = new Set([
+    'total', 'completed', 'pending', 'failed', 'unavailable'
+  ]);
+  var PAGE_TEXT_UPDATE_KEYS = new Set([
+    'contract', 'localBookId', 'page', 'state', 'source', 'revision'
+  ]);
+  var PAGE_TEXT_CHAR_KEYS = new Set([
+    'c', 'x0', 'y0', 'x1', 'y1', 'w', 'bk', 'sp', 'b', 'fml', 'flx'
+  ]);
+  var PAGE_TEXT_FURIGANA_KEYS = new Set(['x0', 'y0', 'x1', 'y1', 'rt', 'wd', 'ctx']);
+  var PAGE_TEXT_FORMULA_KEYS = new Set([
+    'id', 'x0', 'y0', 'x1', 'y1', 'state', 'latex', 'multiline', 'error'
+  ]);
+  var embeddedPageText = Object.create(null);
+  var embeddedPageLoader = null;
+  var embeddedPageCount = 0;
+  var nativePageTextCache = Object.create(null);
+  var nativePageTextPending = Object.create(null);
+  var nativePageTextGeneration = Object.create(null);
+  var nativeFormulaPrefetchPending = Object.create(null);
+  var nativeSearchCache = new Map();
+  var nativeSearchPending = new Map();
+  var nativeSearchGeneration = 0;
+
+  function pageTextError(code, message, retryable) {
+    return {
+      code: String(code || 'BW_PAGE_TEXT_FAILED').slice(0, 96),
+      message: String(message || '页面文字不可用').slice(0, 500),
+      retryable: !!retryable
+    };
+  }
+  function pageTextRequestId() {
+    return 'pt-' + randomHex(12);
+  }
+  function validPage(value) {
+    value = Number(value);
+    return Number.isInteger(value) && value >= 1 && value <= 100000 ? value : 0;
+  }
+  function normalizedPageSize(value) {
+    value = Number(value);
+    return Number.isFinite(value) && value > 0 && value <= 100000 ? value : 0;
+  }
+  function normalizePageTextChars(raw) {
+    if (!Array.isArray(raw) || raw.length > 250000) return null;
+    var out = [];
+    for (var index = 0; index < raw.length; index += 1) {
+      var item = raw[index];
+      if (!item || typeof item !== 'object' || Array.isArray(item) ||
+          Object.keys(item).some(function (key) { return !PAGE_TEXT_CHAR_KEYS.has(key); })) return null;
+      var c = String(item.c == null ? '' : item.c);
+      var x0 = Number(item.x0), y0 = Number(item.y0);
+      var x1 = Number(item.x1), y1 = Number(item.y1);
+      if (!c || c.length > 16 || ![x0, y0, x1, y1].every(Number.isFinite) ||
+          x0 < 0 || y0 < 0 || x1 < x0 || y1 < y0 ||
+          x1 > 100000 || y1 > 100000 ||
+          (item.w != null && !Number.isInteger(Number(item.w))) ||
+          (item.bk != null && !Number.isInteger(Number(item.bk))) ||
+          (item.flx != null && typeof item.flx !== 'string')) return null;
+      out.push({
+        c: c,
+        x0: x0, y0: y0, x1: x1, y1: y1,
+        w: Number.isInteger(Number(item.w)) ? Number(item.w) : -1,
+        bk: Number.isInteger(Number(item.bk)) ? Number(item.bk) : -1,
+        sp: !!item.sp,
+        fml: !!item.fml,
+        flx: item.fml ? String(item.flx || '').slice(0, 4000) : ''
+      });
+    }
+    return out;
+  }
+  function normalizePageTextFurigana(raw) {
+    if (raw == null) return [];
+    if (!Array.isArray(raw) || raw.length > 50000) return null;
+    var out = [];
+    for (var index = 0; index < raw.length; index += 1) {
+      var item = raw[index];
+      if (!item || typeof item !== 'object' || Array.isArray(item) ||
+          Object.keys(item).some(function (key) { return !PAGE_TEXT_FURIGANA_KEYS.has(key); })) return null;
+      var x0 = Number(item.x0), y0 = Number(item.y0);
+      var x1 = Number(item.x1), y1 = Number(item.y1);
+      var rt = String(item.rt == null ? '' : item.rt).trim();
+      if (!rt || rt.length > 500 || ![x0, y0, x1, y1].every(Number.isFinite) ||
+          x0 < 0 || y0 < 0 || x1 < x0 || y1 < y0 ||
+          x1 > 100000 || y1 > 100000) return null;
+      out.push({
+        x0: x0, y0: y0, x1: x1, y1: y1,
+        rt: rt,
+        wd: String(item.wd == null ? '' : item.wd).slice(0, 500),
+        ctx: String(item.ctx == null ? '' : item.ctx).slice(0, 500)
+      });
+    }
+    return out;
+  }
+  function embeddedPageResult(page, input) {
+    input = input || {};
+    var chars = normalizePageTextChars(input.chars || []);
+    var furigana = normalizePageTextFurigana(input.furigana);
+    var pageWidth = normalizedPageSize(input.pageWidth || input.page_w);
+    var pageHeight = normalizedPageSize(input.pageHeight || input.page_h);
+    if (!chars || !furigana || !pageWidth || !pageHeight) {
+      throw new RuntimeError('PDF 内嵌文字层无效', 'BW_PAGE_TEXT_EMBEDDED_INVALID');
+    }
+    return Object.freeze({
+      state: chars.length ? 'ready' : 'readyEmpty',
+      source: 'embedded',
+      revision: String(input.revision || ('embedded-page-' + page)).slice(0, 160),
+      page: page,
+      pageWidth: pageWidth,
+      pageHeight: pageHeight,
+      chars: chars,
+      furigana: furigana,
+      wordSegmentation: chars.some(function (item) { return item.w >= 0; }) ? 'ready' : 'unavailable',
+      // PDF.js exposes item geometry, but per-character boxes below are bounded
+      // estimates within each item rather than server/Pi exact glyph boxes.
+      characterGeometry: chars.length ? 'estimated' : 'unavailable',
+      formulaCoverage: 'unknown',
+      formulaRegions: [],
+      error: null
+    });
+  }
+  function registerEmbeddedPage(page, input) {
+    page = validPage(page);
+    if (!page) throw new RuntimeError('PDF 页码无效', 'BW_PAGE_TEXT_PAGE');
+    embeddedPageText[page] = embeddedPageResult(page, input);
+    return embeddedPageText[page];
+  }
+  function setEmbeddedPageLoader(loader, pageCount) {
+    if (loader != null && typeof loader !== 'function') {
+      throw new RuntimeError('PDF 文字加载器无效', 'BW_PAGE_TEXT_LOADER');
+    }
+    embeddedPageLoader = loader || null;
+    pageCount = Number(pageCount);
+    embeddedPageCount = Number.isInteger(pageCount) && pageCount > 0 && pageCount <= 100000
+      ? pageCount : 0;
+    return true;
+  }
+  function loadEmbeddedPage(page) {
+    page = validPage(page);
+    if (!page) return Promise.reject(new RuntimeError('PDF 页码无效', 'BW_PAGE_TEXT_PAGE'));
+    if (embeddedPageText[page]) return Promise.resolve(embeddedPageText[page]);
+    if (!embeddedPageLoader) return Promise.resolve(null);
+    return Promise.resolve(embeddedPageLoader(page)).then(function (result) {
+      if (!result) return null;
+      return registerEmbeddedPage(page, result);
+    });
+  }
+  function nativePageTextHandler() {
+    var handlers = root.webkit && root.webkit.messageHandlers;
+    var handler = handlers && handlers.bwNativePageText;
+    return handler && typeof handler.postMessage === 'function' ? handler : null;
+  }
+  function nativePageTextRequest(action, fields) {
+    var handler = nativePageTextHandler();
+    if (!handler) return Promise.resolve(null);
+    var requestId = pageTextRequestId();
+    var request = Object.assign({
+      contract: PAGE_TEXT_REQUEST_CONTRACT,
+      action: action,
+      requestId: requestId,
+      localBookId: bookId
+    }, fields || {});
+    return Promise.resolve(handler.postMessage(request)).then(function (raw) {
+      if (!raw || raw.contract !== PAGE_TEXT_RESPONSE_CONTRACT ||
+          raw.action !== action || raw.requestId !== requestId ||
+          typeof raw.ok !== 'boolean' || !PAGE_TEXT_STATES.has(raw.state)) {
+        throw new RuntimeError('原生文字响应合同无效', 'BW_PAGE_TEXT_BRIDGE_RESPONSE');
+      }
+      var actionKeys = PAGE_TEXT_RESPONSE_ACTION_KEYS[action];
+      if (!actionKeys || Object.keys(raw).some(function (key) {
+        return !PAGE_TEXT_RESPONSE_COMMON_KEYS.has(key) && !actionKeys.has(key);
+      })) {
+        throw new RuntimeError('原生文字响应含未知字段', 'BW_PAGE_TEXT_BRIDGE_RESPONSE');
+      }
+      if (raw.error != null) {
+        if (!raw.error || typeof raw.error !== 'object' || Array.isArray(raw.error) ||
+            Object.keys(raw.error).some(function (key) {
+              return ['code', 'message', 'retryable'].indexOf(key) < 0;
+            }) || typeof raw.error.code !== 'string' ||
+            typeof raw.error.message !== 'string' ||
+            typeof raw.error.retryable !== 'boolean') {
+          throw new RuntimeError('原生文字错误字段无效', 'BW_PAGE_TEXT_BRIDGE_RESPONSE');
+        }
+      }
+      var source = raw.source == null ? null : String(raw.source);
+      if (source !== null && !PAGE_TEXT_NATIVE_SOURCES.has(source)) {
+        throw new RuntimeError('原生文字来源无效', 'BW_PAGE_TEXT_BRIDGE_RESPONSE');
+      }
+      return Object.assign({}, raw, {
+        source: source,
+        revision: String(raw.revision || '').slice(0, 160)
+      });
+    });
+  }
+  function normalizeFormulaRegions(raw) {
+    if (raw == null) return [];
+    if (!Array.isArray(raw) || raw.length > 1000) {
+      throw new RuntimeError('公式区域响应无效', 'BW_PAGE_TEXT_BRIDGE_RESPONSE');
+    }
+    return raw.map(function (item, index) {
+      if (!item || typeof item !== 'object' || Array.isArray(item) ||
+          Object.keys(item).some(function (key) { return !PAGE_TEXT_FORMULA_KEYS.has(key); })) {
+        throw new RuntimeError('公式区域响应无效', 'BW_PAGE_TEXT_BRIDGE_RESPONSE');
+      }
+      var state = String(item.state || '');
+      var x0 = Number(item.x0), y0 = Number(item.y0);
+      var x1 = Number(item.x1), y1 = Number(item.y1);
+      if (['pending', 'ready', 'failed'].indexOf(state) < 0 ||
+          ![x0, y0, x1, y1].every(Number.isFinite) ||
+          x0 < 0 || y0 < 0 || x1 <= x0 || y1 <= y0 ||
+          x1 > 100000 || y1 > 100000) {
+        throw new RuntimeError('公式区域响应无效', 'BW_PAGE_TEXT_BRIDGE_RESPONSE');
+      }
+      var latex = String(item.latex || '').trim().slice(0, 4000);
+      if (state === 'ready' && !latex) {
+        throw new RuntimeError('已完成公式缺少 LaTeX', 'BW_PAGE_TEXT_BRIDGE_RESPONSE');
+      }
+      if (item.error != null && (!item.error || typeof item.error !== 'object' ||
+          Array.isArray(item.error) || Object.keys(item.error).some(function (key) {
+            return ['code', 'message', 'retryable'].indexOf(key) < 0;
+          }) || typeof item.error.code !== 'string' ||
+          typeof item.error.message !== 'string' ||
+          typeof item.error.retryable !== 'boolean')) {
+        throw new RuntimeError('公式错误字段无效', 'BW_PAGE_TEXT_BRIDGE_RESPONSE');
+      }
+      return {
+        id: String(item.id || ('formula-' + index)).slice(0, 160),
+        x0: x0, y0: y0, x1: x1, y1: y1,
+        state: state,
+        latex: latex,
+        multiline: !!item.multiline,
+        error: item.error && typeof item.error === 'object'
+          ? pageTextError(item.error.code, item.error.message, item.error.retryable)
+          : null
+      };
+    });
+  }
+  function charInsideRegion(item, region) {
+    var x = (item.x0 + item.x1) / 2;
+    var y = (item.y0 + item.y1) / 2;
+    return x >= region.x0 && x <= region.x1 && y >= region.y0 && y <= region.y1;
+  }
+  function applyFormulaRegions(chars, regions) {
+    if (!regions.length) return chars;
+    // Never expose ordinary OCR noise from a detected formula rectangle. A
+    // pending/failed formula remains an explicit region; a ready one reuses the
+    // established fml/flx character contract consumed by selection and AI.
+    var out = chars.filter(function (item) {
+      if (item.fml) return true;
+      return !regions.some(function (region) { return charInsideRegion(item, region); });
+    });
+    regions.forEach(function (region, regionIndex) {
+      if (region.state !== 'ready') return;
+      var already = out.some(function (item) {
+        return item.fml && charInsideRegion(item, region);
+      });
+      if (already) return;
+      var wrapped = region.multiline ? '$$' + region.latex + '$$' : '$' + region.latex + '$';
+      var units = Array.from(wrapped);
+      var sliceWidth = Math.max(0.5, (region.x1 - region.x0) / Math.max(1, units.length));
+      var wordId = 950000000 + regionIndex;
+      units.forEach(function (unit, index) {
+        out.push({
+          c: unit,
+          x0: region.x0 + index * sliceWidth,
+          y0: region.y0,
+          x1: region.x0 + (index + 1) * sliceWidth,
+          y1: region.y1,
+          w: wordId,
+          bk: 950000 + regionIndex,
+          sp: false,
+          fml: true,
+          flx: index === 0 ? region.latex : ''
+        });
+      });
+    });
+    return out;
+  }
+  function furiganaOutsideFormulaRegions(furigana, regions) {
+    if (!regions.length) return furigana;
+    return furigana.filter(function (item) {
+      return !regions.some(function (region) { return charInsideRegion(item, region); });
+    });
+  }
+  function pageTextEnum(value, allowed, fallback, message) {
+    if (value == null || value === '') return fallback;
+    value = String(value);
+    if (!allowed.has(value)) {
+      throw new RuntimeError(message, 'BW_PAGE_TEXT_BRIDGE_RESPONSE');
+    }
+    return value;
+  }
+  function normalizeNativePage(raw, page) {
+    if (!raw) return null;
+    if (Number(raw.page) !== page) {
+      throw new RuntimeError('原生文字页码不匹配', 'BW_PAGE_TEXT_BRIDGE_RESPONSE');
+    }
+    var state = raw.state;
+    var formulaRegions = normalizeFormulaRegions(raw.formulaRegions);
+    var furigana = normalizePageTextFurigana(raw.furigana);
+    if (!furigana) {
+      throw new RuntimeError('原生注音响应无效', 'BW_PAGE_TEXT_BRIDGE_RESPONSE');
+    }
+    var wordSegmentation = pageTextEnum(
+      raw.wordSegmentation, PAGE_TEXT_WORD_STATES, 'unavailable', '原生分词状态无效');
+    var characterGeometry = pageTextEnum(
+      raw.characterGeometry, PAGE_TEXT_GEOMETRY_STATES, 'unavailable', '原生字符几何状态无效');
+    var formulaCoverage = pageTextEnum(
+      raw.formulaCoverage, PAGE_TEXT_FORMULA_COVERAGE, 'unknown', '原生公式覆盖状态无效');
+    var error = raw.error && typeof raw.error === 'object'
+      ? pageTextError(raw.error.code, raw.error.message, raw.error.retryable)
+      : null;
+    if (state === 'pending' || state === 'failed' || state === 'idle') {
+      if (raw.ok || (Array.isArray(raw.chars) && raw.chars.length)) {
+        throw new RuntimeError('未完成的原生文字不能返回空成功', 'BW_PAGE_TEXT_BRIDGE_RESPONSE');
+      }
+      return {
+        state: state, source: raw.source, revision: raw.revision,
+        page: page, pageWidth: 0, pageHeight: 0, chars: null,
+        furigana: [],
+        wordSegmentation: wordSegmentation,
+        characterGeometry: characterGeometry,
+        formulaCoverage: formulaCoverage,
+        formulaRegions: formulaRegions,
+        error: error || pageTextError(
+          state === 'pending' ? 'BW_PAGE_TEXT_PENDING' :
+            state === 'idle' ? 'BW_PAGE_TEXT_IDLE' : 'BW_PAGE_TEXT_FAILED',
+          state === 'pending' ? '页面文字正在识别' :
+            state === 'idle' ? '页面尚未预处理' : '页面文字识别失败',
+          state !== 'failed'
+        )
+      };
+    }
+    var chars = normalizePageTextChars(raw.chars);
+    var pageWidth = normalizedPageSize(raw.pageWidth);
+    var pageHeight = normalizedPageSize(raw.pageHeight);
+    if (!raw.ok || !PAGE_TEXT_NATIVE_SOURCES.has(raw.source) || !chars ||
+        !pageWidth || !pageHeight ||
+        (state === 'ready' && !chars.length) ||
+        (state === 'readyEmpty' && chars.length)) {
+      throw new RuntimeError('原生文字页数据无效', 'BW_PAGE_TEXT_BRIDGE_RESPONSE');
+    }
+    chars = applyFormulaRegions(chars, formulaRegions);
+    furigana = furiganaOutsideFormulaRegions(furigana, formulaRegions);
+    if (!chars.length) {
+      var formulaPending = formulaRegions.some(function (region) { return region.state === 'pending'; });
+      var formulaFailed = formulaRegions.some(function (region) { return region.state === 'failed'; });
+      if (formulaPending || formulaFailed) {
+        return {
+          state: formulaPending ? 'pending' : 'failed',
+          source: raw.source,
+          revision: raw.revision,
+          page: page,
+          pageWidth: pageWidth,
+          pageHeight: pageHeight,
+          chars: null,
+          furigana: furigana,
+          wordSegmentation: wordSegmentation,
+          characterGeometry: characterGeometry,
+          formulaCoverage: formulaCoverage,
+          formulaRegions: formulaRegions,
+          error: pageTextError(
+            formulaPending ? 'BW_PAGE_FORMULA_PENDING' : 'BW_PAGE_FORMULA_FAILED',
+            formulaPending ? '页面公式正在处理' : '页面公式识别失败',
+            formulaPending
+          )
+        };
+      }
+      state = 'readyEmpty';
+    } else {
+      state = 'ready';
+    }
+    return {
+      state: state, source: raw.source, revision: raw.revision,
+      page: page, pageWidth: pageWidth, pageHeight: pageHeight,
+      chars: chars, furigana: furigana,
+      wordSegmentation: wordSegmentation,
+      characterGeometry: characterGeometry,
+      formulaCoverage: formulaCoverage,
+      formulaRegions: formulaRegions, error: null
+    };
+  }
+  function nativePageForPage(page) {
+    if (nativePageTextCache[page]) return Promise.resolve(nativePageTextCache[page]);
+    if (nativePageTextPending[page]) return nativePageTextPending[page];
+    var generation = nativePageTextGeneration[page] || 0;
+    var pending = nativePageTextRequest('page-chars', { page: page }).then(function (raw) {
+      var result = normalizeNativePage(raw, page);
+      if (result && (nativePageTextGeneration[page] || 0) === generation) {
+        // idle/pending describe a moment, not immutable page content. In
+        // particular, the first bridge request may race native status restore;
+        // caching that answer would make OCR look idle until an unrelated
+        // update event happened. Terminal page data remains cached and keeps
+        // the existing generation fence.
+        if (result.state === 'idle' || result.state === 'pending') {
+          delete nativePageTextCache[page];
+        } else {
+          nativePageTextCache[page] = result;
+        }
+      }
+      return result;
+    }).finally(function () {
+      if (nativePageTextPending[page] === pending) delete nativePageTextPending[page];
+    });
+    nativePageTextPending[page] = pending;
+    return pending;
+  }
+  function mergeEmbeddedFormulaResult(embedded, nativeResult) {
+    if (!embedded || embedded.state !== 'ready' || !nativeResult ||
+        !Array.isArray(nativeResult.formulaRegions) || !nativeResult.formulaRegions.length) {
+      return embedded;
+    }
+    // A real PDF text layer remains authoritative and selectable even while a
+    // formula is pending or failed. Only completed formula recognition may
+    // replace the characters inside its own rectangle; all formula states stay
+    // separately visible through formulaRegions.
+    var readyRegions = nativeResult.formulaRegions.filter(function (region) {
+      return region.state === 'ready';
+    });
+    var chars = applyFormulaRegions(embedded.chars, readyRegions);
+    var furigana = furiganaOutsideFormulaRegions(embedded.furigana || [], readyRegions);
+    return {
+      state: 'ready', source: 'embedded',
+      revision: embedded.revision + '+' + String(nativeResult.revision || 'formula'),
+      page: embedded.page,
+      pageWidth: embedded.pageWidth,
+      pageHeight: embedded.pageHeight,
+      chars: chars,
+      furigana: furigana,
+      wordSegmentation: embedded.wordSegmentation,
+      characterGeometry: embedded.characterGeometry,
+      formulaCoverage: nativeResult.formulaCoverage,
+      formulaRegions: nativeResult.formulaRegions,
+      error: null
+    };
+  }
+  function dispatchPageTextUpdated(page, state, source, revision) {
+    try {
+      root.dispatchEvent(new CustomEvent('bw:page-text-updated', {
+        detail: {
+          contract: PAGE_TEXT_PROVIDER_CONTRACT,
+          page: Number(page), state: state,
+          source: source == null ? null : String(source),
+          revision: String(revision || '').slice(0, 160)
+        }
+      }));
+    } catch (_) {}
+  }
+  function prefetchNativeFormulaForPage(page) {
+    if (!nativePageTextHandler() || nativePageTextCache[page] ||
+        nativeFormulaPrefetchPending[page]) return;
+    var generation = nativePageTextGeneration[page] || 0;
+    var pending = nativePageForPage(page).then(function (result) {
+      // A refresh is useful only when the result survived the generation fence
+      // and is synchronously available to the next char-layer read. Transient
+      // idle/pending replies deliberately remain uncached.
+      if ((nativePageTextGeneration[page] || 0) !== generation ||
+          nativePageTextCache[page] !== result || !result ||
+          !Array.isArray(result.formulaRegions) || !result.formulaRegions.length) return;
+      dispatchPageTextUpdated(page, result.state, result.source, result.revision);
+    }).catch(function () {
+      // Embedded text is already usable. Optional formula enrichment must never
+      // turn a passive text-layer read into a failure or an unhandled rejection.
+    }).finally(function () {
+      if (nativeFormulaPrefetchPending[page] === pending) {
+        delete nativeFormulaPrefetchPending[page];
+      }
+    });
+    nativeFormulaPrefetchPending[page] = pending;
+  }
+  function pageTextForPage(page) {
+    page = validPage(page);
+    if (!page) return Promise.reject(new RuntimeError('PDF 页码无效', 'BW_PAGE_TEXT_PAGE'));
+    return loadEmbeddedPage(page).then(function (embedded) {
+      // A real PDF text layer is authoritative for prose, but formula regions
+      // may still be supplied by native preprocessing. Never wait for that
+      // optional enrichment: downloaded PDFs with a real text layer must be
+      // selectable immediately even while the native bridge is restoring or
+      // hung. A later cached formula result asks the char layer to re-read.
+      if (embedded && embedded.state === 'ready') {
+        if (nativePageTextCache[page]) {
+          return mergeEmbeddedFormulaResult(embedded, nativePageTextCache[page]);
+        }
+        prefetchNativeFormulaForPage(page);
+        return embedded;
+      }
+      // An empty embedded layer is never authoritative: an explicit Apple/Pi
+      // result may exist, so that path still waits for the passive native read.
+      return nativePageForPage(page).then(function (nativeResult) {
+        if (nativeResult && nativeResult.state !== 'idle') return nativeResult;
+        return embedded || nativeResult || {
+          state: 'idle', source: null, revision: '', page: page,
+          pageWidth: 0, pageHeight: 0, chars: null, furigana: [],
+          wordSegmentation: 'unavailable', characterGeometry: 'unavailable',
+          formulaCoverage: 'unknown', formulaRegions: [],
+          error: pageTextError('BW_PAGE_TEXT_IDLE', '页面尚未预处理', true)
+        };
+      });
+    });
+  }
+  function pageTextHTTP(result) {
+    var common = {
+      state: result.state,
+      source: result.source,
+      revision: result.revision || '',
+      page: result.page,
+      word_segmentation: result.wordSegmentation || 'unavailable',
+      character_geometry: result.characterGeometry || 'unavailable',
+      formula_coverage: result.formulaCoverage || 'unknown'
+    };
+    if (result.state === 'ready' || result.state === 'readyEmpty') {
+      return jsonResponse(Object.assign(common, {
+        ok: true,
+        chars: result.chars || [],
+        page_w: result.pageWidth,
+        page_h: result.pageHeight,
+        furigana: result.furigana || [],
+        formula_regions: result.formulaRegions || []
+      }));
+    }
+    var status = result.state === 'pending' ? 202 :
+      result.state === 'failed' ? 422 : 404;
+    return jsonResponse(Object.assign(common, {
+      ok: false,
+      code: result.error && result.error.code || 'BW_PAGE_TEXT_UNAVAILABLE',
+      error: result.error && result.error.message || '页面文字不可用',
+      retryable: !!(result.error && result.error.retryable),
+      // Keep formula state visible even when the whole page is still pending;
+      // consumers must not misread a formula-only page as generic blank OCR.
+      formula_regions: result.formulaRegions || []
+    }), status);
+  }
+  function searchableText(result) {
+    return result && Array.isArray(result.chars)
+      ? result.chars.map(function (item) { return item.c || ''; }).join('') : '';
+  }
+  function pageMatches(text, query, page) {
+    var lower = text.toLocaleLowerCase();
+    var needle = query.toLocaleLowerCase();
+    var positions = [];
+    var cursor = 0;
+    while (positions.length < 1000) {
+      var at = lower.indexOf(needle, cursor);
+      if (at < 0) break;
+      positions.push(at);
+      cursor = at + Math.max(1, needle.length);
+    }
+    if (!positions.length) return null;
+    var first = positions[0];
+    var start = Math.max(0, first - 70);
+    var end = Math.min(text.length, first + query.length + 110);
+    return {
+      page: page,
+      count: positions.length,
+      snippet: (start ? '…' : '') + text.slice(start, end) + (end < text.length ? '…' : '')
+    };
+  }
+  function nativeSearch(query, limit) {
+    return nativePageTextRequest('search', { query: query, limit: limit }).then(function (raw) {
+      if (!raw) return { matches: [], incomplete: true, available: false };
+      if (!Array.isArray(raw.matches) || raw.matches.length > 200 ||
+          typeof raw.incomplete !== 'boolean') {
+        throw new RuntimeError('原生搜索响应无效', 'BW_PAGE_TEXT_BRIDGE_RESPONSE');
+      }
+      pageTextProgressCount(raw.total, 'search.total');
+      pageTextProgressCount(raw.pages, 'search.pages');
+      var matches = raw.matches.map(function (item) {
+        if (!item || typeof item !== 'object' || Array.isArray(item) ||
+            Object.keys(item).some(function (key) {
+              return ['page', 'count', 'snippet'].indexOf(key) < 0;
+            })) {
+          throw new RuntimeError('原生搜索结果字段无效', 'BW_PAGE_TEXT_BRIDGE_RESPONSE');
+        }
+        var page = validPage(item && item.page);
+        if (!page) throw new RuntimeError('原生搜索页码无效', 'BW_PAGE_TEXT_BRIDGE_RESPONSE');
+        var count = pageTextProgressCount(item.count, 'search.matches.count');
+        if (!count) throw new RuntimeError('原生搜索命中数无效', 'BW_PAGE_TEXT_BRIDGE_RESPONSE');
+        return {
+          page: page,
+          count: Math.min(1000, count),
+          snippet: String(item.snippet || '').slice(0, 500)
+        };
+      });
+      return { matches: matches, incomplete: !!raw.incomplete, available: true };
+    });
+  }
+  function nativeSearchKey(query, limit) {
+    return query + '\u0000' + limit;
+  }
+  function nativeSearchProbe(query, limit) {
+    var key = nativeSearchKey(query, limit);
+    if (nativeSearchCache.has(key)) {
+      return { key: key, settled: true, result: nativeSearchCache.get(key) };
+    }
+    if (!nativePageTextHandler()) return { key: key, settled: true, result: null };
+    if (nativeSearchPending.has(key)) return nativeSearchPending.get(key);
+    var generation = nativeSearchGeneration;
+    var probe = { key: key, settled: false, result: null, promise: null };
+    probe.promise = nativeSearch(query, limit).then(function (result) {
+      probe.settled = true;
+      if (generation !== nativeSearchGeneration) return null;
+      probe.result = result && result.available ? result : null;
+      if (probe.result) {
+        if (!nativeSearchCache.has(key) && nativeSearchCache.size >= 32) {
+          nativeSearchCache.delete(nativeSearchCache.keys().next().value);
+        }
+        nativeSearchCache.set(key, probe.result);
+      }
+      return probe.result;
+    }).catch(function () {
+      probe.settled = true;
+      probe.result = null;
+      return null;
+    }).finally(function () {
+      if (nativeSearchPending.get(key) === probe) nativeSearchPending.delete(key);
+    });
+    nativeSearchPending.set(key, probe);
+    return probe;
+  }
+  function combinePageTextSearch(embeddedMatches, embeddedPages, embeddedIncomplete,
+      nativeResult, limit) {
+    var nativeMatches = nativeResult && nativeResult.available ? nativeResult.matches : [];
+    var combined = embeddedMatches.concat(nativeMatches.filter(function (item) {
+      return !embeddedPages.has(item.page);
+    }));
+    combined.sort(function (a, b) { return a.page - b.page; });
+    var total = combined.reduce(function (sum, item) { return sum + item.count; }, 0);
+    var incomplete = nativeResult && nativeResult.available
+      ? nativeResult.incomplete : embeddedIncomplete;
+    return {
+      ok: true,
+      state: incomplete ? 'pending' : 'ready',
+      matches: combined.slice(0, limit),
+      total: total,
+      pages: new Set(combined.map(function (item) { return item.page; })).size,
+      incomplete: incomplete
+    };
+  }
+  function searchPageText(query, limit) {
+    query = String(query || '').trim();
+    limit = Math.max(1, Math.min(200, Number(limit) || 200));
+    if (!query || query.length > 256) {
+      return Promise.reject(new RuntimeError('搜索文字无效', 'BW_PAGE_TEXT_SEARCH_QUERY'));
+    }
+    // With no PDF text-layer pages to search, native sidecars are the only
+    // source and this read must retain the established await semantics.
+    if (!embeddedPageCount) {
+      return nativeSearch(query, limit).catch(function () {
+        return { matches: [], incomplete: true, available: false };
+      }).then(function (nativeResult) {
+        return combinePageTextSearch([], new Set(), true, nativeResult, limit);
+      });
+    }
+    // Otherwise start the passive native search in parallel, but never let a
+    // restoring or hung bridge block authoritative embedded PDF text. A result
+    // that is already settled when the text-layer scan completes is merged;
+    // later results stay in the bounded cache for the next identical search.
+    var nativeProbe = nativeSearchProbe(query, limit);
+    var embeddedPages = new Set();
+    var embeddedMatches = [];
+    var embeddedIncomplete = false;
+    var chain = Promise.resolve();
+    for (let page = 1; page <= embeddedPageCount; page += 1) {
+      chain = chain.then(function () {
+        return loadEmbeddedPage(page).then(function (result) {
+          if (!result || result.state !== 'ready') {
+            embeddedIncomplete = true;
+            return;
+          }
+          embeddedPages.add(page);
+          var match = pageMatches(searchableText(result), query, page);
+          if (match) embeddedMatches.push(match);
+        });
+      });
+    }
+    return chain.then(function () {
+      var nativeResult = nativeSearchCache.get(nativeProbe.key) ||
+        (nativeProbe.settled ? nativeProbe.result : null);
+      return combinePageTextSearch(
+        embeddedMatches, embeddedPages, embeddedIncomplete, nativeResult, limit);
+    });
+  }
+  function pageTextProgressCount(value, field) {
+    value = Number(value);
+    if (!Number.isInteger(value) || value < 0 || value > 10000000) {
+      throw new RuntimeError('原生进度字段无效: ' + field, 'BW_PAGE_TEXT_BRIDGE_RESPONSE');
+    }
+    return value;
+  }
+  function normalizePhaseProgress(raw, field) {
+    if (raw == null) return null;
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw) ||
+        Object.keys(raw).some(function (key) { return !PAGE_TEXT_PHASE_PROGRESS_KEYS.has(key); }) ||
+        Array.from(PAGE_TEXT_PHASE_PROGRESS_KEYS).some(function (key) {
+          return !Object.prototype.hasOwnProperty.call(raw, key);
+        })) {
+      throw new RuntimeError('原生分阶段进度无效: ' + field, 'BW_PAGE_TEXT_BRIDGE_RESPONSE');
+    }
+    var result = {};
+    PAGE_TEXT_PHASE_PROGRESS_KEYS.forEach(function (key) {
+      result[key] = pageTextProgressCount(raw[key], field + '.' + key);
+    });
+    return result;
+  }
+  function normalizePageTextProgress(raw) {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw) ||
+        Object.keys(raw).some(function (key) { return !PAGE_TEXT_PROGRESS_KEYS.has(key); })) {
+      throw new RuntimeError('原生总进度字段无效', 'BW_PAGE_TEXT_BRIDGE_RESPONSE');
+    }
+    var result = {
+      total: pageTextProgressCount(raw.total || 0, 'total'),
+      ready: pageTextProgressCount(raw.ready || 0, 'ready'),
+      pending: pageTextProgressCount(raw.pending || 0, 'pending'),
+      failed: pageTextProgressCount(raw.failed || 0, 'failed'),
+      activePage: raw.activePage == null ? null : validPage(raw.activePage),
+      currentPage: raw.currentPage == null ? null : validPage(raw.currentPage),
+      textProgress: normalizePhaseProgress(raw.textProgress, 'textProgress'),
+      wordProgress: normalizePhaseProgress(raw.wordProgress, 'wordProgress'),
+      formulaProgress: normalizePhaseProgress(raw.formulaProgress, 'formulaProgress'),
+      formulaPendingRegions: pageTextProgressCount(raw.formulaPendingRegions || 0, 'formulaPendingRegions'),
+      formulaFailedRegions: pageTextProgressCount(raw.formulaFailedRegions || 0, 'formulaFailedRegions')
+    };
+    if ((raw.activePage != null && !result.activePage) ||
+        (raw.currentPage != null && !result.currentPage)) {
+      throw new RuntimeError('原生进度页码无效', 'BW_PAGE_TEXT_BRIDGE_RESPONSE');
+    }
+    return result;
+  }
+  function pageTextStatus() {
+    return nativePageTextRequest('status').then(function (raw) {
+      if (!raw) {
+        return {
+          ok: true, state: 'idle', source: null, revision: '',
+          progress: { total: embeddedPageCount, ready: Object.keys(embeddedPageText).length, pending: 0, failed: 0, activePage: null }
+        };
+      }
+      var progress = normalizePageTextProgress(raw.progress);
+      return {
+        ok: raw.ok,
+        state: raw.state,
+        source: raw.source,
+        revision: raw.revision,
+        progress: progress
+      };
+    });
+  }
+  function pageTextUpdate(event) {
+    var detail = event && event.detail;
+    if (!detail || typeof detail !== 'object' || Array.isArray(detail) ||
+        Object.keys(detail).some(function (key) { return !PAGE_TEXT_UPDATE_KEYS.has(key); }) ||
+        detail.contract !== PAGE_TEXT_UPDATE_CONTRACT ||
+        detail.localBookId !== bookId || !validPage(detail.page) ||
+        !PAGE_TEXT_STATES.has(detail.state) ||
+        (detail.source != null && !PAGE_TEXT_NATIVE_SOURCES.has(detail.source))) return;
+    nativePageTextGeneration[Number(detail.page)] =
+      (nativePageTextGeneration[Number(detail.page)] || 0) + 1;
+    delete nativePageTextCache[Number(detail.page)];
+    delete nativePageTextPending[Number(detail.page)];
+    delete nativeFormulaPrefetchPending[Number(detail.page)];
+    nativeSearchGeneration += 1;
+    nativeSearchCache.clear();
+    nativeSearchPending.clear();
+    dispatchPageTextUpdated(detail.page, detail.state, detail.source, detail.revision);
+  }
+  root.addEventListener('bw:native-page-text-updated', pageTextUpdate);
+
+  var pageTextProvider = Object.freeze({
+    contract: PAGE_TEXT_PROVIDER_CONTRACT,
+    registerEmbeddedPage: registerEmbeddedPage,
+    setEmbeddedPageLoader: setEmbeddedPageLoader,
+    pageChars: pageTextForPage,
+    search: searchPageText,
+    status: pageTextStatus
+  });
+  runtimeRoot.pageTextProvider = pageTextProvider;
 
   function listCRUD(kind, responseKey, input, init, url, method, idPrefix) {
     return readState(kind, []).then(function (items) {
@@ -386,6 +1730,40 @@
 
   function handleLocalState(input, init, url, method) {
     var path = url.pathname;
+    if (path === '/pdf/api/page-overlay' && method === 'GET') {
+      return pageTextForPage(url.searchParams.get('page')).then(function (result) {
+        return jsonResponse({
+          ok: true,
+          state: result.state,
+          source: result.source,
+          cv: result.revision || '',
+          formula_regions: result.formulaRegions || [],
+          vocab_marks: [],
+          vocab_sentences: [],
+          mastered_furi: [],
+          offset: { dx: 0, dy: 0, scale: 1 }
+        });
+      }).catch(function (error) {
+        return jsonResponse({ ok: false, state: 'failed', code: error.code || 'BW_PAGE_TEXT_FAILED', error: error.message }, 422);
+      });
+    }
+    if (path === '/pdf/api/page-chars' && method === 'GET') {
+      return pageTextForPage(url.searchParams.get('page')).then(pageTextHTTP).catch(function (error) {
+        return jsonResponse({ ok: false, state: 'failed', code: error.code || 'BW_PAGE_TEXT_FAILED', error: error.message }, 422);
+      });
+    }
+    if (path === '/pdf/api/page-text-status' && method === 'GET') {
+      return pageTextStatus().then(function (status) { return jsonResponse(status); }).catch(function (error) {
+        return jsonResponse({ ok: false, state: 'failed', code: error.code || 'BW_PAGE_TEXT_FAILED', error: error.message }, 422);
+      });
+    }
+    if (path === '/pdf/api/search' && method === 'GET') {
+      return searchPageText(url.searchParams.get('q'), url.searchParams.get('limit')).then(function (result) {
+        return jsonResponse(result);
+      }).catch(function (error) {
+        return jsonResponse({ ok: false, state: 'failed', code: error.code || 'BW_PAGE_TEXT_SEARCH_FAILED', error: error.message }, 422);
+      });
+    }
     if (path === '/pdf/api/reading-pos') {
       if (method === 'GET') {
         return readState('reading-position', null).then(function (position) {
@@ -1053,6 +2431,7 @@
     storageRouter: function () { return router; },
     storage: function () { return router; },
     preferenceStore: function () { return preferences; },
+    bookUserState: bookUserStateAPI,
     documentHost: function () {
       return root.RC && root.RC.documentHost && root.RC.documentHost.current
         ? root.RC.documentHost.current() : null;

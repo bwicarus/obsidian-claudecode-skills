@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from io import BytesIO
+import hashlib
+import json
 from pathlib import Path
 import sys
 import tempfile
@@ -28,6 +30,10 @@ if sys.platform == "win32" and "fcntl" not in sys.modules:
 
 import pdf_reader  # noqa: E402
 from reader_book_library import BookLibrary, UploadTooLargeError  # noqa: E402
+from reader_book_ocr import ReaderBookOcrService  # noqa: E402
+from reader_book_ocr_worker import _publish_attachments  # noqa: E402
+from reader_book_user_state import decode_package  # noqa: E402
+from reader_sidecar_store import SidecarStore  # noqa: E402
 
 
 PDF_A = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\n%%EOF\n"
@@ -39,11 +45,36 @@ class PdfReaderLibraryApiTest(unittest.TestCase):
     def setUp(self) -> None:
         self.temp = tempfile.TemporaryDirectory()
         base = Path(self.temp.name)
+        self.base = base
         self.vault = base / "vault"
         self.vault.mkdir()
         self.library = BookLibrary(self.vault, base / "state")
         self.previous = pdf_reader._READER_BOOK_LIBRARY
+        self.previous_ocr = pdf_reader._READER_BOOK_OCR
+        self.previous_user_state = pdf_reader._READER_BOOK_USER_STATE
+        self.previous_sidecar_store = pdf_reader._READER_SIDECAR_STORE
+        self.previous_sidecar_root = pdf_reader._READER_SIDECAR_ROOT
         pdf_reader._READER_BOOK_LIBRARY = self.library
+        self.ocr_launches = []
+        pdf_reader._READER_BOOK_OCR = ReaderBookOcrService(
+            self.library,
+            base / "ocr",
+            ROOT,
+            launcher=lambda job_dir, source_path, job: self.ocr_launches.append(
+                (job_dir, source_path, job)
+            ),
+            max_pdf_bytes=1024 * 1024,
+            max_pages=100,
+        )
+        legacy = base / "legacy-sidecars"
+        legacy.mkdir()
+        pdf_reader._READER_SIDECAR_ROOT = base / "private-sidecars"
+        pdf_reader._READER_SIDECAR_STORE = SidecarStore(
+            pdf_reader._READER_SIDECAR_ROOT,
+            legacy,
+            authorize_claim=lambda _identity: False,
+        )
+        pdf_reader._READER_BOOK_USER_STATE = None
         self.app = Flask(__name__)
         self.app.secret_key = "test"
         self.identity = IDENTITY
@@ -57,6 +88,10 @@ class PdfReaderLibraryApiTest(unittest.TestCase):
 
     def tearDown(self) -> None:
         pdf_reader._READER_BOOK_LIBRARY = self.previous
+        pdf_reader._READER_BOOK_OCR = self.previous_ocr
+        pdf_reader._READER_BOOK_USER_STATE = self.previous_user_state
+        pdf_reader._READER_SIDECAR_STORE = self.previous_sidecar_store
+        pdf_reader._READER_SIDECAR_ROOT = self.previous_sidecar_root
         self.temp.cleanup()
 
     def test_all_library_routes_require_verified_owner(self) -> None:
@@ -72,6 +107,40 @@ class PdfReaderLibraryApiTest(unittest.TestCase):
             content_type="multipart/form-data",
         )
         self.assertEqual(response.status_code, 401)
+        for route in ("start", "pause", "resume", "cancel", "retry"):
+            denied = self.client.post(
+                f"/pdf/api/library/ocr/{route}",
+                json={"bookId": "book_" + "a" * 32, "contentSha256": "b" * 64},
+            )
+            self.assertEqual(denied.status_code, 401)
+        self.assertEqual(
+            self.client.get(
+                "/pdf/api/library/ocr/status",
+                query_string={"bookId": "book_" + "a" * 32, "contentSha256": "b" * 64},
+            ).status_code,
+            401,
+        )
+        self.assertEqual(
+            self.client.get(
+                "/pdf/api/library/attachments/book_" + "a" * 32,
+                query_string={"contentSha256": "b" * 64},
+            ).status_code,
+            401,
+        )
+        self.assertEqual(
+            self.client.get(
+                "/pdf/api/library/user-state/book_" + "a" * 32,
+                query_string={"contentSha256": "b" * 64},
+            ).status_code,
+            401,
+        )
+        self.assertEqual(
+            self.client.get(
+                "/pdf/api/library/ocr/page-chars/book_" + "a" * 32 + "/1",
+                query_string={"contentSha256": "b" * 64},
+            ).status_code,
+            401,
+        )
 
     def test_verified_non_owner_cannot_access_shared_vault_library(self) -> None:
         self.authorized = False
@@ -86,6 +155,163 @@ class PdfReaderLibraryApiTest(unittest.TestCase):
             content_type="multipart/form-data",
         )
         self.assertEqual(response.status_code, 403)
+        denied = self.client.post(
+            "/pdf/api/library/ocr/start",
+            json={"bookId": "book_" + "a" * 32, "contentSha256": "b" * 64},
+        )
+        self.assertEqual(denied.status_code, 403)
+
+    def test_manual_pi_ocr_contract_uses_only_catalog_identity(self) -> None:
+        (self.vault / "A.pdf").write_bytes(PDF_A)
+        entry = self.client.get("/pdf/api/library/catalog").get_json()["books"][0]
+        started = self.client.post(
+            "/pdf/api/library/ocr/start",
+            json={
+                "bookId": entry["bookId"],
+                "contentSha256": entry["contentSha256"],
+                "engine": "vision",
+            },
+        )
+        self.assertEqual(started.status_code, 200)
+        payload = started.get_json()
+        self.assertEqual(payload["contract"], "reader-library-ocr/1")
+        self.assertEqual(payload["job"]["state"], "queued")
+        self.assertEqual(
+            set(payload["job"]["textProgress"]),
+            {"total", "completed", "pending", "failed", "unavailable"},
+        )
+        self.assertEqual(
+            set(payload["job"]["wordProgress"]),
+            {"total", "completed", "pending", "failed", "unavailable"},
+        )
+        self.assertEqual(
+            set(payload["job"]["formulaProgress"]),
+            {"total", "completed", "pending", "failed", "unavailable"},
+        )
+        self.assertNotIn(str(self.vault), started.get_data(as_text=True))
+        self.assertEqual(len(self.ocr_launches), 1)
+
+        status = self.client.get(
+            "/pdf/api/library/ocr/status",
+            query_string={
+                "bookId": entry["bookId"],
+                "contentSha256": entry["contentSha256"],
+            },
+        )
+        self.assertEqual(status.status_code, 200)
+        self.assertEqual(status.get_json()["job"]["bookId"], entry["bookId"])
+
+        path_attempt = self.client.post(
+            "/pdf/api/library/ocr/start",
+            json={
+                "bookId": entry["bookId"],
+                "contentSha256": entry["contentSha256"],
+                "file": "../../secret.pdf",
+            },
+        )
+        self.assertEqual(path_attempt.status_code, 400)
+        self.assertEqual(path_attempt.get_json()["code"], "invalid-request")
+
+        stale = self.client.post(
+            "/pdf/api/library/ocr/start",
+            json={"bookId": entry["bookId"], "contentSha256": "0" * 64},
+        )
+        self.assertEqual(stale.status_code, 409)
+        self.assertEqual(stale.get_json()["code"], "book-version-changed")
+
+    def test_user_state_package_is_account_scoped_and_version_bound(self) -> None:
+        (self.vault / "A.pdf").write_bytes(PDF_A)
+        entry = self.client.get("/pdf/api/library/catalog").get_json()["books"][0]
+        response = self.client.get(
+            f"/pdf/api/library/user-state/{entry['bookId']}",
+            query_string={"contentSha256": entry["contentSha256"]},
+        )
+        self.assertEqual(response.status_code, 200)
+        package = decode_package(response.data)
+        self.assertEqual(package["bookId"], entry["bookId"])
+        self.assertEqual(package["contentSha256"], entry["contentSha256"])
+        self.assertEqual(len(package["domains"]), 8)
+        account_digest = response.headers["X-Reader-Account-Scope-Digest"]
+        self.assertRegex(account_digest, r"^[a-f0-9]{64}$")
+        self.assertNotIn(IDENTITY["storage_namespace"], response.get_data(as_text=True))
+
+        stale = self.client.get(
+            f"/pdf/api/library/user-state/{entry['bookId']}",
+            query_string={"contentSha256": "0" * 64},
+        )
+        self.assertEqual(stale.status_code, 409)
+
+    def test_versioned_attachments_and_page_formula_layer(self) -> None:
+        (self.vault / "A.pdf").write_bytes(PDF_A)
+        entry = self.client.get("/pdf/api/library/catalog").get_json()["books"][0]
+        service = pdf_reader._READER_BOOK_OCR
+        version = service._version_dir(entry["bookId"], entry["contentSha256"])
+        pages = version / "vision" / "pages"
+        pages.mkdir(parents=True)
+        page = pages / "p000001.json"
+        page.write_text(json.dumps({
+            "schema": "reader-page-chars/1",
+            "bookId": entry["bookId"],
+            "contentSha256": entry["contentSha256"],
+            "engine": "vision",
+            "pageNumber": 1,
+            "page_w": 100,
+            "page_h": 100,
+            "chars": [
+                {"c": "?", "x0": 10, "y0": 10, "x1": 20, "y1": 20, "w": 1, "bk": 1, "b": 0},
+                {"c": "A", "x0": 70, "y0": 70, "x1": 80, "y1": 80, "w": 2, "bk": 2, "b": 0},
+            ],
+            "furigana": [],
+        }), "utf-8")
+        (version / "result.json").write_text('{"engine":"vision"}', "utf-8")
+        global_formula = self.base / "formula-source.json"
+        global_formula.write_text(json.dumps({
+            "formulas": [{"page": 1, "bbox": [0, 0, 0.5, 0.5], "latex": "x"}],
+        }), "utf-8")
+        from types import SimpleNamespace
+        revision, _manifest = _publish_attachments(
+            SimpleNamespace(
+                book_id=entry["bookId"],
+                content_sha256=entry["contentSha256"],
+            ),
+            version / "vision",
+            global_formula,
+        )
+
+        manifest_response = self.client.get(entry["attachmentsUrl"])
+        self.assertEqual(manifest_response.status_code, 200)
+        manifest = manifest_response.get_json()
+        self.assertEqual(manifest["category"], "derived")
+        self.assertEqual(manifest["mergePolicy"], "immutable")
+        self.assertEqual(manifest["revision"], revision)
+
+        page_response = self.client.get(
+            f"/pdf/api/library/ocr/page-chars/{entry['bookId']}/1",
+            query_string={"contentSha256": entry["contentSha256"]},
+        )
+        self.assertEqual(page_response.status_code, 200)
+        chars = page_response.get_json()["chars"]
+        self.assertNotIn("?", [item["c"] for item in chars])
+        self.assertIn("A", [item["c"] for item in chars])
+        self.assertEqual(next(item for item in chars if item.get("flx"))["flx"], "x")
+
+        formula_entry = next(
+            item for item in manifest["files"] if item["attachmentId"] == "ocr-formulas"
+        )
+        downloaded = self.client.get(formula_entry["downloadUrl"])
+        self.assertEqual(downloaded.status_code, 200)
+        self.assertEqual(
+            hashlib.sha256(downloaded.data).hexdigest(), formula_entry["sha256"]
+        )
+        downloaded.close()
+        stale = self.client.get(
+            f"/pdf/api/library/attachments/{entry['bookId']}/ocr-formulas",
+            query_string={
+                "contentSha256": entry["contentSha256"],
+                "revision": "ocr_" + "0" * 20,
+            },
+        )
+        self.assertEqual(stale.status_code, 409)
 
     def test_catalog_download_range_and_upload_contract(self) -> None:
         path = self.vault / "A.pdf"

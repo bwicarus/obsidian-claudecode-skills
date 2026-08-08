@@ -12,6 +12,7 @@ struct ReaderRemoteBook: Codable, Hashable, Identifiable, Sendable {
     let version: String
     let contentSha256: String
     let downloadUrl: String
+    let attachmentsUrl: String?
 
     var id: String { bookId }
 }
@@ -231,6 +232,102 @@ final class ReaderRemoteLibraryClient {
         )
         try fileManager.moveItem(at: stagingURL, to: destinationURL)
         return destinationURL
+    }
+
+    /// Fetches the account-scoped mutable state separately from immutable OCR
+    /// attachments. A missing package is normal; every other response is
+    /// verified before raw JSON bytes may enter native staging.
+    func userStatePackage(
+        book: ReaderRemoteBook,
+        cookies: [HTTPCookie]
+    ) async throws -> ReaderBookUserStateRemotePayload? {
+        try await userStatePackage(
+            bookId: book.bookId,
+            contentSha256: book.contentSha256,
+            cookies: cookies
+        )
+    }
+
+    func userStatePackage(
+        bookId: String,
+        contentSha256: String,
+        cookies: [HTTPCookie]
+    ) async throws -> ReaderBookUserStateRemotePayload? {
+        guard bookId.range(
+            of: #"^book_[a-f0-9]{32}$"#,
+            options: .regularExpression
+        ) != nil,
+              contentSha256.range(
+                of: #"^[a-f0-9]{64}$"#,
+                options: .regularExpression
+              ) != nil else {
+            throw ReaderRemoteLibraryError.invalidResponse
+        }
+        let expectedPath = "/pdf/api/library/user-state/\(bookId)"
+        var components = URLComponents(
+            url: baseURL.appendingPathComponent(
+                "pdf/api/library/user-state/\(bookId)"
+            ),
+            resolvingAgainstBaseURL: false
+        )
+        components?.queryItems = [
+            URLQueryItem(
+                name: "contentSha256",
+                value: contentSha256
+            ),
+        ]
+        guard let url = components?.url,
+              url.scheme?.lowercased() == baseURL.scheme?.lowercased(),
+              url.host?.lowercased() == baseURL.host?.lowercased(),
+              url.port == baseURL.port,
+              url.path == expectedPath else {
+            throw ReaderRemoteLibraryError.invalidDownloadURL
+        }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.cachePolicy = .reloadIgnoringLocalCacheData
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        apply(cookies: cookies, to: &request)
+        let (data, response) = try await session.data(for: request)
+        guard let http = response as? HTTPURLResponse,
+              http.url?.scheme?.lowercased() == baseURL.scheme?.lowercased(),
+              http.url?.host?.lowercased() == baseURL.host?.lowercased(),
+              http.url?.port == baseURL.port,
+              http.url?.path == expectedPath else {
+            throw ReaderRemoteLibraryError.rejected(
+                "Reader 登录状态已失效，请先在 App 中重新登录"
+            )
+        }
+        if http.statusCode == 404 { return nil }
+        try validate(
+            response: response,
+            data: data,
+            expectedPathPrefix: expectedPath
+        )
+        guard data.count <= ReaderBookUserStatePackageCodec.maximumPackageBytes,
+              http.value(
+                forHTTPHeaderField: "X-Reader-User-State-Contract"
+              ) == ReaderBookUserStatePackage.currentContract,
+              let accountScopeDigest = http.value(
+                forHTTPHeaderField: "X-Reader-Account-Scope-Digest"
+              )?.lowercased(),
+              accountScopeDigest.range(
+                of: #"^[a-f0-9]{64}$"#,
+                options: .regularExpression
+              ) != nil else {
+            throw ReaderRemoteLibraryError.rejected(
+                "Pi 返回的书籍附属数据账户证明无效"
+            )
+        }
+        let package = try ReaderBookUserStatePackageCodec.decode(data)
+        guard package.bookId == bookId,
+              package.contentSha256 == contentSha256 else {
+            throw ReaderBookUserStatePackageError.contentVersionMismatch
+        }
+        return ReaderBookUserStateRemotePayload(
+            packageData: data,
+            accountScopeDigest: accountScopeDigest
+        )
     }
 
     private func request(
@@ -460,6 +557,8 @@ final class ReaderRemoteLibraryCoordinator: ObservableObject {
     @Published private(set) var errorMessage: String?
 
     private let client = ReaderRemoteLibraryClient.shared
+    private let pendingUserStateStore =
+        ReaderBookUserStatePendingImportStore.shared
     private let defaults: UserDefaults
     private var links: [ReaderLibrarySyncLink]
     private var activeLibraryID = ""
@@ -541,8 +640,8 @@ final class ReaderRemoteLibraryCoordinator: ObservableObject {
         _ remoteBook: ReaderRemoteBook,
         localLibrary: ReaderLocalLibraryManager,
         cookies: [HTTPCookie]
-    ) async {
-        guard activeBookID == nil else { return }
+    ) async -> ReaderLocalBookRecord? {
+        guard activeBookID == nil else { return nil }
         activeBookID = remoteBook.bookId
         notice = nil
         errorMessage = nil
@@ -556,9 +655,10 @@ final class ReaderRemoteLibraryCoordinator: ObservableObject {
                 cookies: cookies
             )
             await localLibrary.rescan()
-            if let downloaded = localLibrary.books.first(where: {
+            let downloaded = localLibrary.books.first(where: {
                 $0.relativePath == savedURL.lastPathComponent
-            }) {
+            })
+            if let downloaded {
                 localDigests[downloaded.id] = remoteBook.contentSha256
                 upsertLink(
                     localBook: downloaded,
@@ -568,8 +668,72 @@ final class ReaderRemoteLibraryCoordinator: ObservableObject {
             }
             await reconcile(localLibrary: localLibrary)
             notice = "已下载到本机：\(savedURL.lastPathComponent)"
+            return downloaded
         } catch {
             errorMessage = "下载失败：\(error.localizedDescription)"
+            return nil
+        }
+    }
+
+    /// Runs beside immutable OCR attachment download. A mutable user-state
+    /// failure never rolls back the verified original book and the durable
+    /// fetch intent lets the Reader retry after the local page is ready.
+    func fetchAndStageUserState(
+        for remoteBook: ReaderRemoteBook,
+        localBook: ReaderLocalBookRecord,
+        cookies: [HTTPCookie]
+    ) async {
+        do {
+            try await pendingUserStateStore.stageFetchIntent(
+                localBookId: localBook.id,
+                remoteBookId: remoteBook.bookId,
+                contentSha256: remoteBook.contentSha256
+            )
+        } catch {
+            let message = error.localizedDescription
+            errorMessage = "书籍已下载，但无法保留附属数据重试任务：\(message)"
+            ReaderBookUserStatePendingImportStore.publishFailure(
+                localBookId: localBook.id,
+                message: errorMessage ?? message
+            )
+            return
+        }
+
+        do {
+            guard let payload = try await client.userStatePackage(
+                book: remoteBook,
+                cookies: cookies
+            ) else {
+                let message = "Pi 上这本书暂无用户附属数据；原书和识别附件不受影响"
+                try? await pendingUserStateStore.markFetchFailure(
+                    localBookId: localBook.id,
+                    message: message
+                )
+                notice = message
+                ReaderBookUserStatePendingImportStore.publishNotice(
+                    localBookId: localBook.id,
+                    message: message
+                )
+                return
+            }
+            try await pendingUserStateStore.stage(
+                payload: payload,
+                localBookId: localBook.id,
+                remoteBookId: remoteBook.bookId,
+                contentSha256: remoteBook.contentSha256
+            )
+            notice = "书籍已下载，Pi 用户数据将在本机阅读页就绪后安全合并"
+        } catch {
+            let message = error.localizedDescription
+            try? await pendingUserStateStore.markFetchFailure(
+                localBookId: localBook.id,
+                message: message
+            )
+            errorMessage = "书籍已下载，但 Pi 用户数据获取失败：\(message)；打开本书可重试"
+            ReaderBookUserStatePendingImportStore.publishFailure(
+                localBookId: localBook.id,
+                message: errorMessage ?? message
+            )
         }
     }
 

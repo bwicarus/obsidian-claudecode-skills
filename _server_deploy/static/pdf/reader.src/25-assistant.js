@@ -547,10 +547,19 @@
       var pws = document.querySelectorAll('.page-wrap[data-page-num]'), parts = [];
       for (var i = 0; i < pws.length; i++) {
         var pw = pws[i], r = pw.getBoundingClientRect();
-        if (r.height && r.bottom > top + 8 && r.top < bot - 8 && pw.__charBoxes && pw.__charBoxes.length) {   // 与视口相交
-          var t = ''; try { t = _charsRangeToText(pw.__charBoxes, 0, pw.__charBoxes.length - 1); } catch (e) {}
-          t = (t || '').replace(/\s+/g, ' ').trim();
-          if (t) parts.push(t);
+        if (r.height && r.bottom > top + 8 && r.top < bot - 8) {   // 与视口相交
+          if (pw.__charBoxes && pw.__charBoxes.length) {
+            var t = ''; try { t = _charsRangeToText(pw.__charBoxes, 0, pw.__charBoxes.length - 1); } catch (e) {}
+            t = (t || '').replace(/\s+/g, ' ').trim();
+            if (t) parts.push(t);
+          }
+          var regions = Array.isArray(pw.__formulaRegions) ? pw.__formulaRegions : [];
+          var pendingFormula = regions.filter(function (region) { return region && region.state === 'pending'; }).length;
+          var failedFormula = regions.filter(function (region) { return region && region.state === 'failed'; }).length;
+          if (pendingFormula) parts.push('[本页有 ' + pendingFormula + ' 个公式区域正在处理，不能把普通 OCR 字符当作公式]');
+          if (failedFormula) parts.push('[本页有 ' + failedFormula + ' 个公式区域识别失败]');
+          if (pw.__pageTextState === 'pending') parts.push('[本页文字正在识别]');
+          if (pw.__pageTextState === 'failed') parts.push('[本页文字识别失败]');
         }
       }
       var txt = parts.join('\n');
@@ -567,6 +576,27 @@
       c = g || ((typeof window.__voiceContext === 'function') ? (window.__voiceContext() || c) : c);
     } catch (_) {}
     try { if (c && !c.visible_text) c.visible_text = _visibleText(); } catch (_) {}   // 视口焦点(镜像 EPUB 2516):AI 找视频/配图/回答紧扣当前屏幕,不退回泛章节
+    try {
+      var main = document.getElementById('main');
+      var mr = main && main.getBoundingClientRect();
+      var statuses = [];
+      if (mr) document.querySelectorAll('.page-wrap[data-page-num]').forEach(function (pw) {
+        var r = pw.getBoundingClientRect();
+        if (!(r.height && r.bottom > mr.top + 8 && r.top < mr.bottom - 8)) return;
+        var regions = Array.isArray(pw.__formulaRegions) ? pw.__formulaRegions : [];
+        statuses.push({
+          page: Number(pw.dataset.pageNum) || 0,
+          state: pw.__pageTextState || 'idle',
+          source: pw.__pageTextSource || null,
+          word_segmentation: pw.__wordSegmentation || 'unavailable',
+          character_geometry: pw.__characterGeometry || 'unavailable',
+          formula_coverage: pw.__formulaCoverage || 'unknown',
+          formula_pending: regions.filter(function (region) { return region && region.state === 'pending'; }).length,
+          formula_failed: regions.filter(function (region) { return region && region.state === 'failed'; }).length,
+        });
+      });
+      if (statuses.length) c.page_text_status = statuses;
+    } catch (_) {}
     // 便签注入(双击便签 → __noteAttached,见下方注入块):无笔画=文字+锚点附近正文走 context.notes 文本通道;
     // 有笔画=kind:'note' 条目并入 figures 走视觉通道(服务端 see_figure 认 note_id → _note_composite_png 现场合成)
     try {
@@ -1349,4 +1379,3 @@
   }
   loadHistory();
 })();
-

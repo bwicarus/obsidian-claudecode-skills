@@ -1,3 +1,4 @@
+import Combine
 import SwiftUI
 import UIKit
 import WebKit
@@ -115,6 +116,19 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativeLocalNotesMessageProxy: WeakScriptMessageHandlerWithReply?
     private var nativePiGateway: ReaderNativePiGateway?
     private var nativePiSyncBridge: ReaderNativePiSyncBridge?
+    private var nativeBookOCRBridge: NativeBookOCRBridge?
+    private var nativeBookOCRUpdateCancellable: AnyCancellable?
+    private var bookUserStateWebAdapter: ReaderBookUserStateWebAdapter?
+    private var bookUserStateCoordinator: ReaderBookUserStatePackageCoordinator?
+    private let pendingBookUserStateStore =
+        ReaderBookUserStatePendingImportStore.shared
+    private var bookUserStateNotificationCancellables = Set<AnyCancellable>()
+    private var bookUserStateImportTask: Task<Void, Never>?
+    private var bookUserStateContextGeneration: UInt64 = 0
+    private var currentLocalBook: ReaderLocalBookRecord?
+    private weak var currentLocalLibrary: ReaderLocalLibraryManager?
+    private var currentLocalBookContentSHA256: String?
+    private var deferredBookUserStateMessage: (text: String, isError: Bool)?
     private weak var nativeVoiceBridge: NativeVoiceBridge?
     private let nativeAgentVoice = NativeAgentVoiceSession()
     private var nativeAgentVoiceCommandTail: Task<Void, Never>?
@@ -211,7 +225,47 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 contentWorld: .page,
                 name: ReaderNativePiSyncBridge.messageName
             )
+            let nativeBookOCRBridge = NativeBookOCRBridge(
+                webView: webView,
+                trustedBaseURL: localRuntimeServer.baseURL,
+                localBookID: "localbook-welcome"
+            )
+            self.nativeBookOCRBridge = nativeBookOCRBridge
+            contentController.addScriptMessageHandler(
+                nativeBookOCRBridge,
+                contentWorld: .page,
+                name: NativeBookOCRBridge.messageName
+            )
+            nativeBookOCRUpdateCancellable = NativeBookOCRManager.shared
+                .$lastUpdate
+                .compactMap { $0 }
+                .sink { [weak nativeBookOCRBridge, weak webView] update in
+                    guard let nativeBookOCRBridge, let webView else { return }
+                    Task { @MainActor in
+                        await nativeBookOCRBridge.sendUpdate(
+                            update,
+                            to: webView
+                        )
+                    }
+                }
+            do {
+                bookUserStateWebAdapter = try ReaderBookUserStateWebAdapter(
+                    webView: webView,
+                    trustedBaseURL: localRuntimeServer.baseURL,
+                    localBookId: "localbook-welcome"
+                )
+                bookUserStateCoordinator = ReaderBookUserStatePackageCoordinator(
+                    baselineStore: try ReaderBookUserStateBaselineStore()
+                )
+            } catch {
+                // A downloaded package remains in native staging. Opening the
+                // book will show the initialization error and can retry after
+                // a later App launch; nothing is silently discarded here.
+                bookUserStateWebAdapter = nil
+                bookUserStateCoordinator = nil
+            }
         }
+        configureBookUserStateNotifications()
         contentController.addUserScript(WKUserScript(
             source: """
             (() => {
@@ -545,6 +599,391 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         reload()
     }
 
+    private func configureBookUserStateNotifications() {
+        NotificationCenter.default.publisher(
+            for: .readerBookUserStatePendingImportStaged
+        )
+        .sink { [weak self] notification in
+            Task { @MainActor in
+                guard let self,
+                      self.notificationMatchesCurrentLocalBook(notification)
+                else { return }
+                self.schedulePendingBookUserStateImport()
+            }
+        }
+        .store(in: &bookUserStateNotificationCancellables)
+
+        NotificationCenter.default.publisher(
+            for: .readerBookUserStatePendingImportFailed
+        )
+        .sink { [weak self] notification in
+            Task { @MainActor in
+                guard let self,
+                      self.notificationMatchesCurrentLocalBook(notification),
+                      let message = notification.userInfo?[
+                        ReaderBookUserStatePendingImportStore
+                            .notificationMessageKey
+                      ] as? String else { return }
+                self.showBookUserStateMessage(message, isError: true)
+            }
+        }
+        .store(in: &bookUserStateNotificationCancellables)
+
+        NotificationCenter.default.publisher(
+            for: .readerBookUserStatePendingImportNotice
+        )
+        .sink { [weak self] notification in
+            Task { @MainActor in
+                guard let self,
+                      self.notificationMatchesCurrentLocalBook(notification),
+                      let message = notification.userInfo?[
+                        ReaderBookUserStatePendingImportStore
+                            .notificationMessageKey
+                      ] as? String else { return }
+                self.showBookUserStateMessage(message, isError: false)
+            }
+        }
+        .store(in: &bookUserStateNotificationCancellables)
+    }
+
+    private func notificationMatchesCurrentLocalBook(
+        _ notification: Notification
+    ) -> Bool {
+        guard let localBookId = notification.userInfo?[
+            ReaderBookUserStatePendingImportStore.notificationLocalBookIdKey
+        ] as? String else { return false }
+        return localBookId == currentLocalBook?.id
+    }
+
+    private func resetBookUserStateContext(baseURL: URL) {
+        bookUserStateImportTask?.cancel()
+        bookUserStateImportTask = nil
+        bookUserStateContextGeneration &+= 1
+        currentLocalBook = nil
+        currentLocalLibrary = nil
+        currentLocalBookContentSHA256 = nil
+        deferredBookUserStateMessage = nil
+        try? bookUserStateWebAdapter?.updateTrustedContext(
+            baseURL: baseURL,
+            localBookId: "localbook-welcome"
+        )
+    }
+
+    private func schedulePendingBookUserStateImport() {
+        guard bookUserStateImportTask == nil,
+              currentLocalBook != nil,
+              currentLocalLibrary != nil else { return }
+        let generation = bookUserStateContextGeneration
+        bookUserStateImportTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.bookUserStateContextGeneration == generation {
+                    self.bookUserStateImportTask = nil
+                }
+            }
+            do {
+                try await self.importPendingBookUserState(
+                    generation: generation
+                )
+            } catch is CancellationError {
+                // A navigation/context change is expected. The package remains
+                // staged and the next matching book load will retry it.
+            } catch {
+                self.showBookUserStateMessage(
+                    "Pi 用户数据未导入：\(error.localizedDescription)；重新打开本书可重试",
+                    isError: true
+                )
+            }
+        }
+    }
+
+    private func importPendingBookUserState(
+        generation: UInt64
+    ) async throws {
+        guard let localBook = currentLocalBook else {
+            throw CancellationError()
+        }
+        var pending = try await pendingBookUserStateStore.load(
+            localBookId: localBook.id
+        )
+        let fetchIntent = try await pendingBookUserStateStore.loadFetchIntent(
+            localBookId: localBook.id
+        )
+        guard pending != nil || fetchIntent != nil else { return }
+        try await waitForBookUserStateAPI(
+            localBookId: localBook.id,
+            generation: generation
+        )
+        let digest = try await currentLocalContentDigest(
+            localBookId: localBook.id,
+            generation: generation
+        )
+
+        if pending == nil, let fetch = fetchIntent {
+            guard fetch.contentSha256 == digest else {
+                throw ReaderBookUserStatePendingImportError
+                    .contentVersionMismatch
+            }
+            do {
+                let payload = try await ReaderRemoteLibraryClient.shared
+                    .userStatePackage(
+                        bookId: fetch.remoteBookId,
+                        contentSha256: fetch.contentSha256,
+                        cookies: await remoteLibraryCookies()
+                    )
+                guard let payload else {
+                    try await pendingBookUserStateStore
+                        .removeFetchIntent(fetch)
+                    showBookUserStateMessage(
+                        "Pi 上这本书暂无用户附属数据；本机内容未改变",
+                        isError: false
+                    )
+                    return
+                }
+                try await pendingBookUserStateStore.stage(
+                    payload: payload,
+                    localBookId: fetch.localBookId,
+                    remoteBookId: fetch.remoteBookId,
+                    contentSha256: fetch.contentSha256
+                )
+                pending = try await pendingBookUserStateStore.load(
+                    localBookId: localBook.id
+                )
+            } catch {
+                try? await pendingBookUserStateStore.markFetchFailure(
+                    localBookId: localBook.id,
+                    message: error.localizedDescription
+                )
+                throw error
+            }
+        }
+
+        guard let pending else { return }
+        guard pending.contentSha256 == digest else {
+            throw ReaderBookUserStatePendingImportError.contentVersionMismatch
+        }
+        guard generation == bookUserStateContextGeneration,
+              currentLocalBook?.id == pending.localBookId,
+              let coordinator = bookUserStateCoordinator,
+              let adapter = bookUserStateWebAdapter else {
+            throw ReaderBookUserStateWebAdapterError.unavailable
+        }
+        try await verifyCurrentBookUserStateAccountScope(
+            pending,
+            generation: generation
+        )
+        let prepared = try await coordinator.prepareImport(
+            packageData: pending.packageData,
+            accountScopeDigest: pending.accountScopeDigest,
+            localBookId: pending.localBookId,
+            expectedRemoteBookId: pending.remoteBookId,
+            expectedContentSha256: pending.contentSha256,
+            localIsNewOrEmpty: true,
+            applier: adapter
+        )
+
+        // Re-check the local file after the asynchronous snapshot. A path may
+        // keep the same opaque id after external replacement; such a change
+        // must never receive the old book's notes or ink.
+        let beforeCommitDigest = try await currentLocalContentDigest(
+            localBookId: pending.localBookId,
+            generation: generation
+        )
+        guard beforeCommitDigest == pending.contentSha256 else {
+            throw ReaderBookUserStatePendingImportError.contentVersionMismatch
+        }
+        try await verifyCurrentBookUserStateAccountScope(
+            pending,
+            generation: generation
+        )
+        let plan = try await coordinator.commitImport(
+            prepared,
+            applier: adapter
+        )
+        try await pendingBookUserStateStore.remove(pending)
+        showBookUserStatePlan(plan)
+    }
+
+    /// Re-authenticates the native pending hand-off against the currently
+    /// signed-in Pi session. The package's account digest is never accepted as
+    /// proof of the current session merely because it was valid at download.
+    /// This is intentionally called both before local snapshot planning and
+    /// immediately before the first mutating renderer transaction.
+    private func verifyCurrentBookUserStateAccountScope(
+        _ pending: ReaderBookUserStatePendingImport,
+        generation: UInt64
+    ) async throws {
+        guard generation == bookUserStateContextGeneration,
+              currentLocalBook?.id == pending.localBookId else {
+            throw CancellationError()
+        }
+        let cookies = await remoteLibraryCookies()
+        guard !cookies.isEmpty else {
+            throw ReaderBookUserStatePendingImportError
+                .authenticationUnavailable
+        }
+        let current: ReaderBookUserStateRemotePayload
+        do {
+            guard let payload = try await ReaderRemoteLibraryClient.shared
+                .userStatePackage(
+                    bookId: pending.remoteBookId,
+                    contentSha256: pending.contentSha256,
+                    cookies: cookies
+                ) else {
+                throw ReaderBookUserStatePendingImportError
+                    .accountScopeUnavailable
+            }
+            current = payload
+        } catch ReaderRemoteLibraryError.server(let status, _)
+            where status == 401 || status == 403 {
+            throw ReaderBookUserStatePendingImportError
+                .authenticationUnavailable
+        }
+        guard generation == bookUserStateContextGeneration,
+              currentLocalBook?.id == pending.localBookId else {
+            throw CancellationError()
+        }
+        guard current.accountScopeDigest == pending.accountScopeDigest else {
+            throw ReaderBookUserStatePendingImportError.accountScopeChanged
+        }
+    }
+
+    private func waitForBookUserStateAPI(
+        localBookId: String,
+        generation: UInt64
+    ) async throws {
+        for _ in 0..<40 {
+            try Task.checkCancellation()
+            guard generation == bookUserStateContextGeneration,
+                  currentLocalBook?.id == localBookId else {
+                throw CancellationError()
+            }
+            if isLocalRuntimeURL(webView.url),
+               let ready = try? await webView.callAsyncJavaScript(
+                """
+                return window.top === window && Boolean(
+                  window.BWReaderRuntime?.nativeLocalRuntime?.bookUserState &&
+                  typeof window.BWReaderRuntime.nativeLocalRuntime
+                    .bookUserState.snapshotHeaders === "function" &&
+                  typeof window.BWReaderRuntime.nativeLocalRuntime
+                    .bookUserState.applyAtomically === "function"
+                );
+                """,
+                arguments: [:],
+                in: nil,
+                contentWorld: .page
+               ) as? Bool,
+               ready {
+                return
+            }
+            try await Task.sleep(nanoseconds: 250_000_000)
+        }
+        throw ReaderBookUserStateWebAdapterError.unavailable
+    }
+
+    private func currentLocalContentDigest(
+        localBookId: String,
+        generation: UInt64
+    ) async throws -> String {
+        guard generation == bookUserStateContextGeneration,
+              let library = currentLocalLibrary,
+              let original = currentLocalBook,
+              original.id == localBookId else {
+            throw CancellationError()
+        }
+        let current = library.books.first(where: {
+            $0.id == localBookId
+                && $0.relativePath == original.relativePath
+        }) ?? original
+        let digest = try await library.ensureContentSHA256(for: current)
+        guard generation == bookUserStateContextGeneration,
+              currentLocalBook?.id == localBookId else {
+            throw CancellationError()
+        }
+        currentLocalBook = library.books.first(where: {
+            $0.id == localBookId
+                && $0.relativePath == original.relativePath
+        }) ?? current
+        currentLocalBookContentSHA256 = digest
+        if let baseURL = localRuntimeServer?.baseURL {
+            nativeBookOCRBridge?.updateTrustedContext(
+                baseURL: baseURL,
+                localBookID: localBookId,
+                expectedContentSHA256: digest
+            )
+        }
+        return digest
+    }
+
+    private func showBookUserStatePlan(_ plan: ReaderBookUserStateImportPlan) {
+        let imported = plan.decisions.filter { $0.action == .import }.count
+        let conflicts = plan.decisions.filter {
+            $0.classification == .conflict
+        }.count
+        let localNewer = plan.decisions.filter {
+            $0.classification == .localNewer
+        }.count
+        var parts: [String] = []
+        parts.append(imported > 0 ? "已合并 \(imported) 类 Pi 用户数据" : "Pi 用户数据已核对")
+        if localNewer > 0 {
+            parts.append("保留本机较新数据 \(localNewer) 类")
+        }
+        if conflicts > 0 {
+            parts.append("保留冲突数据 \(conflicts) 类，未覆盖")
+        }
+        showBookUserStateMessage(
+            parts.joined(separator: "；"),
+            isError: conflicts > 0
+        )
+    }
+
+    private func showBookUserStateMessage(
+        _ message: String,
+        isError: Bool
+    ) {
+        guard isLocalRuntimeURL(webView.url), !isLoading else {
+            deferredBookUserStateMessage = (message, isError)
+            return
+        }
+        let payload: [String: Any] = [
+            "message": String(message.prefix(1_000)),
+            "isError": isError,
+        ]
+        guard JSONSerialization.isValidJSONObject(payload),
+              let data = try? JSONSerialization.data(withJSONObject: payload),
+              let literal = String(data: data, encoding: .utf8) else { return }
+        webView.evaluateJavaScript(
+            """
+            (() => {
+              const value = \(literal);
+              let banner = document.getElementById("bw-native-user-state-status");
+              if (!banner) {
+                banner = document.createElement("div");
+                banner.id = "bw-native-user-state-status";
+                banner.setAttribute("style", [
+                  "position:fixed", "left:12px", "right:12px", "top:12px",
+                  "z-index:2147483647", "padding:10px 12px",
+                  "border-radius:10px", "color:#fff",
+                  "font:13px/1.5 -apple-system,system-ui,sans-serif",
+                  "white-space:pre-wrap", "word-break:break-word",
+                  "box-shadow:0 2px 12px rgba(0,0,0,.35)"
+                ].join(";"));
+                banner.addEventListener("click", () => banner.remove());
+                document.body.appendChild(banner);
+              }
+              banner.style.background = value.isError
+                ? "rgba(176,0,32,.95)" : "rgba(38,50,56,.94)";
+              banner.textContent = value.message;
+              clearTimeout(window.__bwNativeUserStateStatusTimer);
+              window.__bwNativeUserStateStatusTimer = setTimeout(
+                () => banner.remove(), 16000
+              );
+            })();
+            """,
+            completionHandler: nil
+        )
+    }
+
     func bind(nativeVoiceBridge: NativeVoiceBridge) {
         self.nativeVoiceBridge = nativeVoiceBridge
         updateNativeVoiceButton(state: nativeVoiceBridge.state)
@@ -618,6 +1057,14 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             guard let self else { return }
             do {
                 try await localRuntimeServer.start()
+                self.resetBookUserStateContext(
+                    baseURL: localRuntimeServer.baseURL
+                )
+                self.nativeBookOCRBridge?.updateTrustedContext(
+                    baseURL: localRuntimeServer.baseURL,
+                    localBookID: "localbook-welcome",
+                    expectedContentSHA256: nil
+                )
                 self.webView.load(URLRequest(
                     url: localRuntimeServer.defaultShellURL(),
                     cachePolicy: .reloadIgnoringLocalCacheData,
@@ -648,6 +1095,21 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             let access = try library.makeOpenAccess(for: book)
             try await localRuntimeServer.start()
             let url = try await localRuntimeServer.open(access)
+            bookUserStateImportTask?.cancel()
+            bookUserStateImportTask = nil
+            bookUserStateContextGeneration &+= 1
+            currentLocalBook = book
+            currentLocalLibrary = library
+            currentLocalBookContentSHA256 = book.contentSha256
+            try? bookUserStateWebAdapter?.updateTrustedContext(
+                baseURL: localRuntimeServer.baseURL,
+                localBookId: book.id
+            )
+            nativeBookOCRBridge?.updateTrustedContext(
+                baseURL: localRuntimeServer.baseURL,
+                localBookID: book.id,
+                expectedContentSHA256: book.contentSha256
+            )
             loadError = nil
             webView.load(URLRequest(
                 url: url,
@@ -1650,6 +2112,9 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         isLoading = true
         loadError = nil
         nativePencilInk.invalidateDocument()
+        bookUserStateImportTask?.cancel()
+        bookUserStateImportTask = nil
+        bookUserStateContextGeneration &+= 1
     }
 
     func webView(
@@ -1663,6 +2128,16 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         }
         setReaderForeground(readerForeground)
         updateNativeAgentVoiceState()
+        if let deferred = deferredBookUserStateMessage {
+            deferredBookUserStateMessage = nil
+            showBookUserStateMessage(
+                deferred.text,
+                isError: deferred.isError
+            )
+        }
+        if currentLocalBook != nil, isLocalRuntimeURL(webView.url) {
+            schedulePendingBookUserStateImport()
+        }
     }
 
     func webView(

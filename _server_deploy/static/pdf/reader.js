@@ -99,7 +99,9 @@ localStorage.setItem = function (k, v) {
 // cache buster：避开浏览器/代理的 mime 缓存（之前 nginx 错把 .mjs 当 octet-stream，已修但缓存还在）
 const PDFJS_V = '20260526a';
 // 图片模式(成熟方案:服务端按页出图,只取看到的页,不下载整本 PDF、且不加载 PDF.js 库)。默认开;localStorage 关作安全阀。
-let _imgMode = (() => { try { return localStorage.getItem('pdf-img-mode') !== '0'; } catch (_) { return true; } })();
+let _imgMode = window.__BW_NATIVE_LOCAL_READER__ === true
+  ? false
+  : (() => { try { return localStorage.getItem('pdf-img-mode') !== '0'; } catch (_) { return true; } })();
 let pdfjsLib;
 if (!_imgMode) {   // 仅经典(PDF.js canvas)模式才下载 2.8MB 库;图片模式跳过 → 省库下载 + 那 5 秒 import 等待
   try {
@@ -120,7 +122,7 @@ if (!_imgMode) {   // 仅经典(PDF.js canvas)模式才下载 2.8MB 库;图片�
 }
 // Service Worker:缓存页图(抗 iOS 定期清缓存 + 离线可读看过的页;PWA 标准做法)。只接管页图,其余放行。
 // 作用域 /pdf/ 需 SW 从 /pdf/sw.js 提供。+ 申请持久存储(persist)让缓存更不易被系统清。
-if ('serviceWorker' in navigator) {
+if (window.__BW_NATIVE_LOCAL_READER__ !== true && 'serviceWorker' in navigator) {
   navigator.serviceWorker.register('/pdf/sw.js', { scope: '/pdf/' })
     .then(() => window.dlog && window.dlog('✓ Service Worker 已注册(页图持久缓存)'))
     .catch((e) => window.dlog && window.dlog('SW 注册失败(不影响阅读):' + (e && e.message)));
@@ -423,6 +425,7 @@ window.goPdfList = function () { location.href = '/pdf/'; };
 // 喂给 PDF.js({data}),零网络延迟秒开。key=FILE_REL,value={v,buf};v 跟 ?v=<mtime> 绑定→PDF
 // 变了自动失效重下。>_PDF_CACHE_MAX 的书不整本缓存(防 iPad Safari 单页内存炸),仍走流式 range。
 const _PDF_DB = 'pdf-blob-cache', _PDF_STORE = 'pdfs';
+const _NATIVE_LOCAL_PDF = window.__BW_NATIVE_LOCAL_READER__ === true;
 const _PDF_CACHE_MAX = 360 * 1024 * 1024;   // 360MB 上限(M4 iPad 内存足):≤此整本缓存→{data}喂 PDF.js→永不重拉;>此才走 range(会反复重拉,建议开压缩版)
 const _PDF_VER = (String(PDF_URL).match(/[?&]v=(\d+)/) || [])[1] || '0';
 // 请求"持久化存储":iOS Safari 普通标签页默认 best-effort(7 天没访问 ITP 清掉 + 配额满 LRU 驱逐),
@@ -550,7 +553,7 @@ async function loadPdf() {
     // 未命中 → 走流式(线性化后首页快)+ 后台把整本下到本地,下次秒开。
     let _src = _rangeOpts, _haveBuf = false;
     try {
-      const c = await _idbGet(FILE_REL);
+      const c = _NATIVE_LOCAL_PDF ? null : await _idbGet(FILE_REL);
       // 校验缓存字节数 == 期望大小:防之前(transfer 竞态等)存进坏/被 detach 的 buffer → 命中坏缓存就**永远加载不出**。
       if (c && c.v === _PDF_VER && c.buf && (!PDF_SIZE || c.buf.byteLength === PDF_SIZE)) {
         _src = { data: c.buf }; _haveBuf = true; window.dlog('✓ 命中本地缓存,秒开');
@@ -559,7 +562,7 @@ async function loadPdf() {
     // 未缓存且 ≤360MB:**下载一次(分块续传+进度)→ 缓存 → {data} 喂 PDF.js**,之后从内存读、永不重拉。
     // 为何不用 range「边读边拉」:PDF.js 对这些扫描书的 disableAutoFetch 挡不住,range 模式每次打开都
     // 反复重拉整本(实测累计 >10GB),慢网下灾难。整本下一次后缓存,后续秒开、零网络。>360MB 才 range(装不下内存→建议压缩版)。
-    if (!_haveBuf && PDF_SIZE > 0 && PDF_SIZE < _PDF_CACHE_MAX) {
+    if (!_NATIVE_LOCAL_PDF && !_haveBuf && PDF_SIZE > 0 && PDF_SIZE < _PDF_CACHE_MAX) {
       try {
         pdfLoadShow('📄 下载中…', PDF_SIZE > 30 * 1048576 ? '首次整本下载,下完缓存 → 之后秒开、不再重拉' : '');
         const buf = await _fetchFullWithProgress(PDF_URL);
@@ -568,7 +571,7 @@ async function loadPdf() {
       } catch (e) { window.dlog('整本取失败,回落 range: ' + (e && e.message)); _src = _rangeOpts; _haveBuf = false; }
     }
     // >360MB / 整本取失败 → range(会反复重拉)+ 后台缓存(>360 跳过)
-    if (!_haveBuf) _cachePdfInBackground();
+    if (!_NATIVE_LOCAL_PDF && !_haveBuf) _cachePdfInBackground();
     const task = pdfjsLib.getDocument({ ..._common, ..._src });
     task.onProgress = (p) => {
       if (p.total) {
@@ -668,7 +671,6 @@ async function saveCropSettings(crop, autoOn) {
   _updateCropBtn();
   _refitToWidth(true);
 }
-
 // 单页统一结构(PDF.js 思路):单页也渲进**唯一一个 .page-wrap**(page-container 的子元素),不再直接
 // 渲进 page-container。→ 缩放/适应/字符层/选中全走跟连续一模一样的 wrap 路径,根除「两套 DOM 结构来回
 // 拆建」整类 bug(单页缩放变多页 / 适应回弹)。返回那个唯一 wrap;若残留多页/双页结构则清空重建。
@@ -963,6 +965,20 @@ async function _renderPageInto(num, wrap) {
 
   // 渲染 text layer（让用户选中文本）
   const textContent = await page.getTextContent();
+  // 本机 Reader 的统一 PageTextProvider 先登记真实 PDF 文字层。随后既有
+  // /page-chars、搜索和助手都消费同一份结果；空文字层仍允许显式 Apple/Pi
+  // 预处理结果接管，不会在这里自动触发任何 OCR。
+  try {
+    const pageTextProvider = _bindNativeEmbeddedPageLoader();
+    if (pageTextProvider) {
+      pageTextProvider.registerEmbeddedPage(
+        num,
+        _embeddedPageText(textContent, page.getViewport({ scale: 1 }), num),
+      );
+    }
+  } catch (error) {
+    window.dlog?.('embedded page text register fail: ' + (error && error.message), '#ffb454');
+  }
   const tl = new pdfjsLib.TextLayer({
     textContentSource: textContent,
     container: textLayerDiv,
@@ -1053,7 +1069,6 @@ async function _renderPageInto(num, wrap) {
     loadPageNodes(num);
   }
 }
-
 function loadPageNodes(num) {
   // 共享模式(__uiShared)→ PdfAdapter.renderPageNodes → rc-knowledge.renderInto(知识点卡统一)。
   //   取数(page-nodes,页作用域)+ __lastPageNodes(语音上下文)+ 容器 #kg-nodes 都由 adapter 处理;
@@ -2417,6 +2432,111 @@ async function _setupGrpBoxes(container, mainEl) {
 
 let _charSel = null;   // {pw, startIdx, endIdx, dragging}
 
+let _nativePageTextLoaderDoc = null;
+function _embeddedWordSegments(text) {
+  const locale = (typeof BOOK_LANGS !== 'undefined' && BOOK_LANGS && BOOK_LANGS[0]) || undefined;
+  try {
+    if (typeof Intl !== 'undefined' && typeof Intl.Segmenter === 'function') {
+      const segmenter = new Intl.Segmenter(locale, { granularity: 'word' });
+      let word = 0;
+      return Array.from(segmenter.segment(text)).map((part) => ({
+        start: part.index,
+        end: part.index + part.segment.length,
+        w: part.isWordLike ? word++ : -1,
+      }));
+    }
+  } catch (_) {}
+  // No fake whitespace grouping: without a real tokenizer the conservative
+  // fallback leaves word identity unknown and preserves character selection.
+  return [];
+}
+function _embeddedPageText(textContent, viewport, page) {
+  const chars = [];
+  let wordBase = 0;
+  const items = (textContent && textContent.items || []).filter((item) => item && item.str !== undefined);
+  items.forEach((item, blockIndex) => {
+    const text = String(item.str || '');
+    const units = Array.from(text);
+    if (!units.length || !item.transform) return;
+    const segments = _embeddedWordSegments(text);
+    const [a, b, c, d, e, f] = item.transform;
+    const [vx, vy] = viewport.convertToViewportPoint(e, f);
+    const vertical = item.dir === 'ttb';
+    const itemWidth = Math.max(0.5, Number(item.width) || Math.abs(a) || 1);
+    const itemHeight = Math.max(0.5, Number(item.height) || Math.abs(d) || 1);
+    let codeUnitOffset = 0;
+    units.forEach((unit, unitIndex) => {
+      const startOffset = codeUnitOffset;
+      codeUnitOffset += unit.length;
+      const segment = segments.find((candidate) =>
+        startOffset >= candidate.start && startOffset < candidate.end);
+      const w = segment && segment.w >= 0 ? wordBase + segment.w : -1;
+      const fraction0 = unitIndex / units.length;
+      const fraction1 = (unitIndex + 1) / units.length;
+      let x0, y0, x1, y1;
+      if (vertical) {
+        x0 = vx - itemWidth;
+        x1 = vx;
+        y0 = Math.max(0, vy - itemHeight + itemHeight * fraction0);
+        y1 = Math.max(y0 + 0.5, vy - itemHeight + itemHeight * fraction1);
+      } else {
+        x0 = Math.max(0, vx + itemWidth * fraction0);
+        x1 = Math.max(x0 + 0.5, vx + itemWidth * fraction1);
+        y0 = Math.max(0, vy - itemHeight);
+        y1 = Math.max(y0 + 0.5, vy);
+      }
+      chars.push({
+        c: unit,
+        x0, y0, x1, y1,
+        w,
+        bk: blockIndex,
+        sp: /^\s$/u.test(unit),
+      });
+    });
+    const wordCount = segments.reduce((max, segment) => Math.max(max, segment.w + 1), 0);
+    wordBase += wordCount;
+  });
+  return {
+    chars,
+    pageWidth: viewport.width,
+    pageHeight: viewport.height,
+    revision: 'embedded-v1-' + CHARS_VER + '-' + page + '-' + items.length,
+  };
+}
+function _nativePageTextProvider() {
+  try {
+    const provider = window.BWReaderRuntime && window.BWReaderRuntime.pageTextProvider;
+    return provider && provider.contract === 'reader-page-text-provider/1' ? provider : null;
+  } catch (_) { return null; }
+}
+function _bindNativeEmbeddedPageLoader() {
+  const provider = _nativePageTextProvider();
+  if (!provider || !pdfDoc || _nativePageTextLoaderDoc === pdfDoc) return provider;
+  provider.setEmbeddedPageLoader(async (pageNumber) => {
+    const page = await pdfDoc.getPage(pageNumber);
+    const content = await page.getTextContent();
+    return _embeddedPageText(content, page.getViewport({ scale: 1 }), pageNumber);
+  }, pdfDoc.numPages);
+  _nativePageTextLoaderDoc = pdfDoc;
+  return provider;
+}
+
+if (!window.__bwPageTextRefreshBound) {
+  window.__bwPageTextRefreshBound = true;
+  window.addEventListener('bw:page-text-updated', (event) => {
+    const detail = event && event.detail;
+    if (!detail || detail.contract !== 'reader-page-text-provider/1') return;
+    const page = Number(detail.page);
+    if (!Number.isInteger(page) || page < 1) return;
+    document.querySelectorAll('.page-wrap[data-page-num="' + page + '"]').forEach((wrap) => {
+      const viewport = wrap.__pageTextViewport;
+      if (!viewport || !wrap.isConnected) return;
+      loadCharsAndBindLayer(page, wrap, viewport, 0).catch((error) =>
+        window.dlog?.('chars refresh fail: ' + (error && error.message), '#ff6b6b'));
+    });
+  });
+}
+
 // chars → charBoxes(坐标映射 + reading-order 排序)。初次建层 + cv 校正重取 都用它。
 // PyMuPDF rawdict bbox 已是 image coordinate(y 向下,原点左上),不做 y 翻转(翻了会上下颠倒)。
 function _mapCharBoxes(chars, scale) {
@@ -2444,6 +2564,8 @@ function _mapCharBoxes(chars, scale) {
 async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   _retry = _retry || 0;
   if (!wrap.isConnected) return;   // 页已被连续模式释放 → 放弃
+  const loadSeq = wrap.__pageTextLoadSeq = (wrap.__pageTextLoadSeq || 0) + 1;
+  wrap.__pageTextViewport = viewport;
   const scale = viewport.scale;
   const cvKey = 'pdf-cv:' + FILE_REL + ':' + num;
   let cvGuess; try { cvGuess = localStorage.getItem(cvKey) || ('v' + CHARS_VER); } catch (_) { cvGuess = 'v' + CHARS_VER; }
@@ -2452,7 +2574,22 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   const ovP = fetch(`/pdf/api/page-overlay?file=${encodeURIComponent(FILE_REL)}&page=${num}`).then(r => r.json()).catch(() => null);
   let d = null;
   try { d = await (await fetch(charsUrl(cvGuess))).json(); } catch (e) { d = null; }
+  if (!wrap.isConnected || wrap.__pageTextLoadSeq !== loadSeq) return;
   if (!d || !d.ok) {
+    wrap.__pageTextState = (d && d.state) || 'failed';
+    wrap.__pageTextSource = (d && d.source) || null;
+    wrap.__wordSegmentation = (d && d.word_segmentation) || 'unavailable';
+    wrap.__characterGeometry = (d && d.character_geometry) || 'unavailable';
+    wrap.__formulaCoverage = (d && d.formula_coverage) || 'unknown';
+    wrap.__formulaRegions = d && Array.isArray(d.formula_regions) ? d.formula_regions : [];
+    if (d && d.state === 'pending') {
+      window.dlog?.('chars pending: page ' + num);
+      return;
+    }
+    if (d && (d.state === 'failed' || d.state === 'idle')) {
+      window.dlog?.('chars unavailable: ' + (d.error || d.state) + ' on page ' + num, '#ffb454');
+      return;
+    }
     if (_retry < 2 && wrap.isConnected) {
       await new Promise(res => setTimeout(res, 500 + _retry * 600));
       return loadCharsAndBindLayer(num, wrap, viewport, _retry + 1);
@@ -2461,6 +2598,13 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
     return;
   }
   const charBoxes = _mapCharBoxes(d.chars, scale);
+  wrap.__pageTextState = d.state || (charBoxes.length ? 'ready' : 'readyEmpty');
+  wrap.__pageTextSource = d.source || null;
+  wrap.__pageTextRevision = d.revision || '';
+  wrap.__wordSegmentation = d.word_segmentation || 'unavailable';
+  wrap.__characterGeometry = d.character_geometry || 'unavailable';
+  wrap.__formulaCoverage = d.formula_coverage || 'unknown';
+  wrap.__formulaRegions = Array.isArray(d.formula_regions) ? d.formula_regions : [];
   wrap.__pageWPt = d.page_w;
   wrap.__pageHPt = d.page_h;
   wrap.__viewportScale = scale;
@@ -2505,14 +2649,15 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   }
   // —— overlay 到了(慢:服务端跑分词/生词,不阻塞上面的选词)：渲染生词/句子 + 校正 cv ——
   ovP.then(async (ov) => {
-    if (!wrap.isConnected) return;
+    if (!wrap.isConnected || wrap.__pageTextLoadSeq !== loadSeq) return;
+    if (ov && Array.isArray(ov.formula_regions)) wrap.__formulaRegions = ov.formula_regions;
     if (ov && ov.ok && ov.cv) {
       try { localStorage.setItem(cvKey, ov.cv); } catch (_) {}   // 记真 cv,下次秒命中缓存
       if (ov.cv !== cvGuess) {
         // cvGuess 猜错(内容自上次起变过)→ 刚 chars 可能来自旧 SW 缓存 → 用真 cv 重取并刷新选词数据
         try {
           const d2 = await (await fetch(charsUrl(ov.cv))).json();
-          if (d2 && d2.ok && wrap.isConnected) {
+          if (d2 && d2.ok && wrap.isConnected && wrap.__pageTextLoadSeq === loadSeq) {
             wrap.__charBoxes = _mapCharBoxes(d2.chars, viewport.scale);
             wrap.__charsBaseW = wrap.classList.contains('crop-on') ? (parseFloat(wrap.style.getPropertyValue('--full-w')) || wrap.clientWidth || 0) : (wrap.clientWidth || 0);   // #51:cv 校正重建同步基准宽(整页布局宽)
             wrap.__pageWPt = d2.page_w; wrap.__pageHPt = d2.page_h;
@@ -2834,8 +2979,13 @@ window._runSearch = async () => {
     const d = await r.json();
     if (seq !== _searchSeq) return;   // 已被更新的查询取代
     if (!d.ok) { box.innerHTML = '<div class="sr-empty">搜索失败：' + (d.error || '?') + '</div>'; stat.textContent = ''; return; }
-    stat.textContent = d.total + ' 处 / ' + d.pages + ' 页';
-    if (!d.matches.length) { box.innerHTML = '<div class="sr-empty">未找到「' + _esc(q) + '」</div>'; return; }
+    stat.textContent = d.total + ' 处 / ' + d.pages + ' 页' + (d.incomplete ? ' · 部分页待识别' : '');
+    if (!d.matches.length) {
+      box.innerHTML = '<div class="sr-empty">' + (d.incomplete
+        ? '已完成页面暂未找到「' + _esc(q) + '」；仍有页面待识别'
+        : '未找到「' + _esc(q) + '」') + '</div>';
+      return;
+    }
     const ql = q.toLowerCase();
     box.innerHTML = d.matches.map(m => {
       // snippet 高亮所有 q 出现处（大小写不敏感）
@@ -8237,7 +8387,13 @@ function md(s) {
         .replace(/([一-鿿　-〿＀-￯])([*`])/g, '$1\u200b$2')
         .replace(/([*`])([一-鿿　-〿＀-￯])/g, '$1\u200b$2');
       let html = marked.parse(t);
-      return html.replace(/@@MJX(\d+)@@/g, (_, i) => (math[+i] != null ? math[+i] : ''));   // ③ 还原公式
+      html = html.replace(/@@MJX(\d+)@@/g, (_, i) => {
+        const value = math[+i] != null ? math[+i] : '';
+        return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      });
+      return window.RC && typeof RC.safeHtml === 'function'
+        ? RC.safeHtml(html)
+        : s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
     } catch(_) {}
   }
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
@@ -9792,10 +9948,19 @@ async function _connProbe() {
       var pws = document.querySelectorAll('.page-wrap[data-page-num]'), parts = [];
       for (var i = 0; i < pws.length; i++) {
         var pw = pws[i], r = pw.getBoundingClientRect();
-        if (r.height && r.bottom > top + 8 && r.top < bot - 8 && pw.__charBoxes && pw.__charBoxes.length) {   // 与视口相交
-          var t = ''; try { t = _charsRangeToText(pw.__charBoxes, 0, pw.__charBoxes.length - 1); } catch (e) {}
-          t = (t || '').replace(/\s+/g, ' ').trim();
-          if (t) parts.push(t);
+        if (r.height && r.bottom > top + 8 && r.top < bot - 8) {   // 与视口相交
+          if (pw.__charBoxes && pw.__charBoxes.length) {
+            var t = ''; try { t = _charsRangeToText(pw.__charBoxes, 0, pw.__charBoxes.length - 1); } catch (e) {}
+            t = (t || '').replace(/\s+/g, ' ').trim();
+            if (t) parts.push(t);
+          }
+          var regions = Array.isArray(pw.__formulaRegions) ? pw.__formulaRegions : [];
+          var pendingFormula = regions.filter(function (region) { return region && region.state === 'pending'; }).length;
+          var failedFormula = regions.filter(function (region) { return region && region.state === 'failed'; }).length;
+          if (pendingFormula) parts.push('[本页有 ' + pendingFormula + ' 个公式区域正在处理，不能把普通 OCR 字符当作公式]');
+          if (failedFormula) parts.push('[本页有 ' + failedFormula + ' 个公式区域识别失败]');
+          if (pw.__pageTextState === 'pending') parts.push('[本页文字正在识别]');
+          if (pw.__pageTextState === 'failed') parts.push('[本页文字识别失败]');
         }
       }
       var txt = parts.join('\n');
@@ -9812,6 +9977,27 @@ async function _connProbe() {
       c = g || ((typeof window.__voiceContext === 'function') ? (window.__voiceContext() || c) : c);
     } catch (_) {}
     try { if (c && !c.visible_text) c.visible_text = _visibleText(); } catch (_) {}   // 视口焦点(镜像 EPUB 2516):AI 找视频/配图/回答紧扣当前屏幕,不退回泛章节
+    try {
+      var main = document.getElementById('main');
+      var mr = main && main.getBoundingClientRect();
+      var statuses = [];
+      if (mr) document.querySelectorAll('.page-wrap[data-page-num]').forEach(function (pw) {
+        var r = pw.getBoundingClientRect();
+        if (!(r.height && r.bottom > mr.top + 8 && r.top < mr.bottom - 8)) return;
+        var regions = Array.isArray(pw.__formulaRegions) ? pw.__formulaRegions : [];
+        statuses.push({
+          page: Number(pw.dataset.pageNum) || 0,
+          state: pw.__pageTextState || 'idle',
+          source: pw.__pageTextSource || null,
+          word_segmentation: pw.__wordSegmentation || 'unavailable',
+          character_geometry: pw.__characterGeometry || 'unavailable',
+          formula_coverage: pw.__formulaCoverage || 'unknown',
+          formula_pending: regions.filter(function (region) { return region && region.state === 'pending'; }).length,
+          formula_failed: regions.filter(function (region) { return region && region.state === 'failed'; }).length,
+        });
+      });
+      if (statuses.length) c.page_text_status = statuses;
+    } catch (_) {}
     // 便签注入(双击便签 → __noteAttached,见下方注入块):无笔画=文字+锚点附近正文走 context.notes 文本通道;
     // 有笔画=kind:'note' 条目并入 figures 走视觉通道(服务端 see_figure 认 note_id → _note_composite_png 现场合成)
     try {
@@ -10594,7 +10780,6 @@ async function _connProbe() {
   }
   loadHistory();
 })();
-
 // ── 26-figures.js:页级图注(扫描书插图的 AI 描述)。Apple 风格图区徽标 → 点开描述浮层。──
 // 后端 /pdf/api/page-figures 懒描述+预取(见 pdf_reader._fig_*)。徽标定位用 Claude 给的归一 bbox。
 (function () {

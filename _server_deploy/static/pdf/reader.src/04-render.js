@@ -292,6 +292,20 @@ async function _renderPageInto(num, wrap) {
 
   // 渲染 text layer（让用户选中文本）
   const textContent = await page.getTextContent();
+  // 本机 Reader 的统一 PageTextProvider 先登记真实 PDF 文字层。随后既有
+  // /page-chars、搜索和助手都消费同一份结果；空文字层仍允许显式 Apple/Pi
+  // 预处理结果接管，不会在这里自动触发任何 OCR。
+  try {
+    const pageTextProvider = _bindNativeEmbeddedPageLoader();
+    if (pageTextProvider) {
+      pageTextProvider.registerEmbeddedPage(
+        num,
+        _embeddedPageText(textContent, page.getViewport({ scale: 1 }), num),
+      );
+    }
+  } catch (error) {
+    window.dlog?.('embedded page text register fail: ' + (error && error.message), '#ffb454');
+  }
   const tl = new pdfjsLib.TextLayer({
     textContentSource: textContent,
     container: textLayerDiv,
@@ -382,4 +396,3 @@ async function _renderPageInto(num, wrap) {
     loadPageNodes(num);
   }
 }
-

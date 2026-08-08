@@ -43,6 +43,18 @@ from reader_book_library import (
     UnsafeLibraryPathError,
     UnsupportedBookError,
 )
+from reader_book_ocr import (
+    CONTRACT as READER_BOOK_OCR_CONTRACT,
+    ReaderBookOcrError,
+    ReaderBookOcrService,
+    wire_payload as _reader_book_ocr_wire_payload,
+)
+from reader_book_user_state import (
+    CONTRACT as READER_BOOK_USER_STATE_CONTRACT,
+    ReaderBookUserStateService,
+    UserStatePackageError,
+    UserStatePackageTooLarge,
+)
 
 # AI 后端复用 _client/core 的 ai_backends + scripts/ai_client
 # 同 skilltree.py 已经在 app.py 启动时把 sys.path 加好了
@@ -63,6 +75,8 @@ _READER_STORAGE_IDENTITY = contextvars.ContextVar(
 _READER_SIDECAR_ROOT = None
 _READER_SIDECAR_STORE = None
 _READER_BOOK_LIBRARY = None
+_READER_BOOK_OCR = None
+_READER_BOOK_USER_STATE = None
 
 
 def _reader_book_library():
@@ -74,6 +88,29 @@ def _reader_book_library():
             CLAUDE_DIR / "state" / "reader-book-library",
         )
     return _READER_BOOK_LIBRARY
+
+
+def _reader_book_ocr():
+    """Return the manual-only, content-addressed Pi OCR coordinator."""
+    global _READER_BOOK_OCR
+    if _READER_BOOK_OCR is None:
+        _READER_BOOK_OCR = ReaderBookOcrService(
+            _reader_book_library(),
+            CLAUDE_DIR / "state" / "reader-book-ocr",
+            CLAUDE_DIR,
+        )
+    return _READER_BOOK_OCR
+
+
+def _reader_book_user_state():
+    """Return the account-scoped, deterministic per-book state exporter."""
+    global _READER_BOOK_USER_STATE
+    if _READER_BOOK_USER_STATE is None:
+        _READER_BOOK_USER_STATE = ReaderBookUserStateService(
+            _reader_sidecar_store(),
+            _reader_book_user_state_domain,
+        )
+    return _READER_BOOK_USER_STATE
 
 
 def _reader_storage_identity_coerce(value):
@@ -3686,6 +3723,372 @@ def pdf_api_library_download(book_id):
     return response
 
 
+def _reader_library_ocr_error(exc: ReaderBookOcrError):
+    return jsonify({
+        "ok": False,
+        "contract": READER_BOOK_OCR_CONTRACT,
+        "code": exc.code,
+        "error": str(exc),
+    }), exc.status
+
+
+def _reader_library_ocr_body(*, allow_engine: bool = False):
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict):
+        raise ReaderBookOcrError("invalid-request", "JSON object is required", status=400)
+    allowed = {"bookId", "contentSha256"}
+    if allow_engine:
+        allowed.add("engine")
+    if set(body) - allowed:
+        raise ReaderBookOcrError("invalid-request", "unknown OCR request fields", status=400)
+    return (
+        str(body.get("bookId") or ""),
+        str(body.get("contentSha256") or ""),
+        str(body.get("engine") or "vision"),
+    )
+
+
+@bp.route("/api/library/ocr/start", methods=["POST"])
+def pdf_api_library_ocr_start():
+    """Explicitly start Pi OCR; no Apple/local failure path calls this route."""
+    denied = _reader_library_access_error()
+    if denied is not None:
+        return denied
+    try:
+        book_id, content_sha256, engine = _reader_library_ocr_body(allow_engine=True)
+        job, already = _reader_book_ocr().start(book_id, content_sha256, engine)
+        return jsonify(_reader_book_ocr_wire_payload(job, already=already))
+    except ReaderBookOcrError as exc:
+        return _reader_library_ocr_error(exc)
+
+
+@bp.route("/api/library/ocr/status")
+def pdf_api_library_ocr_status():
+    denied = _reader_library_access_error()
+    if denied is not None:
+        return denied
+    if set(request.args) - {"bookId", "contentSha256"}:
+        return _reader_library_ocr_error(ReaderBookOcrError(
+            "invalid-request", "unknown OCR status fields", status=400
+        ))
+    try:
+        job = _reader_book_ocr().status(
+            str(request.args.get("bookId") or ""),
+            str(request.args.get("contentSha256") or ""),
+        )
+        return jsonify(_reader_book_ocr_wire_payload(job))
+    except ReaderBookOcrError as exc:
+        return _reader_library_ocr_error(exc)
+
+
+def _reader_library_ocr_control(action: str):
+    denied = _reader_library_access_error()
+    if denied is not None:
+        return denied
+    try:
+        book_id, content_sha256, _engine = _reader_library_ocr_body()
+        job = getattr(_reader_book_ocr(), action)(book_id, content_sha256)
+        return jsonify(_reader_book_ocr_wire_payload(job))
+    except ReaderBookOcrError as exc:
+        return _reader_library_ocr_error(exc)
+
+
+@bp.route("/api/library/ocr/pause", methods=["POST"])
+def pdf_api_library_ocr_pause():
+    return _reader_library_ocr_control("pause")
+
+
+@bp.route("/api/library/ocr/resume", methods=["POST"])
+def pdf_api_library_ocr_resume():
+    return _reader_library_ocr_control("resume")
+
+
+@bp.route("/api/library/ocr/cancel", methods=["POST"])
+def pdf_api_library_ocr_cancel():
+    return _reader_library_ocr_control("cancel")
+
+
+@bp.route("/api/library/ocr/retry", methods=["POST"])
+def pdf_api_library_ocr_retry():
+    return _reader_library_ocr_control("retry")
+
+
+@bp.route("/api/library/ocr/page-chars/<book_id>/<int:page>")
+def pdf_api_library_ocr_page_chars(book_id, page):
+    """Return one canonical OCR sidecar, enriched by the existing formula layer."""
+    denied = _reader_library_access_error()
+    if denied is not None:
+        return denied
+    if set(request.args) - {"contentSha256"}:
+        return _reader_library_ocr_error(ReaderBookOcrError(
+            "invalid-request", "unknown OCR page fields", status=400
+        ))
+    try:
+        content_sha256 = str(request.args.get("contentSha256") or "")
+        sidecar, _source_path = _reader_book_ocr().read_page(book_id, content_sha256, page)
+        chars = [dict(item) for item in sidecar.get("chars") or []]
+        furigana = [dict(item) for item in sidecar.get("furigana") or []]
+        page_w = float(sidecar.get("page_w") or 0)
+        page_h = float(sidecar.get("page_h") or 0)
+        formulas = _reader_book_ocr().read_formulas(book_id, content_sha256)
+        _apply_formula_records(chars, furigana, formulas, page, page_w, page_h)
+        response = jsonify({
+            "ok": True,
+            "contract": READER_BOOK_OCR_CONTRACT,
+            "schema": sidecar.get("schema"),
+            "bookId": book_id,
+            "contentSha256": content_sha256,
+            "engine": sidecar.get("engine"),
+            "page": page,
+            "chars": chars,
+            "page_w": page_w,
+            "page_h": page_h,
+            "furigana": furigana,
+        })
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
+    except ReaderBookOcrError as exc:
+        return _reader_library_ocr_error(exc)
+    except (OSError, ValueError):
+        return _reader_library_ocr_error(ReaderBookOcrError(
+            "ocr-sidecar-invalid", "OCR sidecar cannot be mapped to the catalog", status=500
+        ))
+
+
+@bp.route("/api/library/attachments/<book_id>")
+def pdf_api_library_attachments(book_id):
+    denied = _reader_library_access_error()
+    if denied is not None:
+        return denied
+    if set(request.args) - {"contentSha256"}:
+        return _reader_library_ocr_error(ReaderBookOcrError(
+            "invalid-request", "unknown attachment manifest fields", status=400
+        ))
+    try:
+        manifest = _reader_book_ocr().attachment_manifest(
+            book_id, str(request.args.get("contentSha256") or "")
+        )
+        response = jsonify({"ok": True, **manifest})
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
+    except ReaderBookOcrError as exc:
+        return _reader_library_ocr_error(exc)
+
+
+@bp.route("/api/library/attachments/<book_id>/<attachment_id>")
+def pdf_api_library_attachment_download(book_id, attachment_id):
+    denied = _reader_library_access_error()
+    if denied is not None:
+        return denied
+    if set(request.args) - {"contentSha256", "revision"}:
+        return _reader_library_ocr_error(ReaderBookOcrError(
+            "invalid-request", "unknown attachment download fields", status=400
+        ))
+    try:
+        content_sha256 = str(request.args.get("contentSha256") or "")
+        manifest = _reader_book_ocr().attachment_manifest(book_id, content_sha256)
+        revision = str(request.args.get("revision") or "")
+        if revision and revision != manifest.get("revision"):
+            raise ReaderBookOcrError(
+                "ocr-attachment-revision-changed", "attachment revision changed", status=409
+            )
+        entry, path = _reader_book_ocr().read_attachment(
+            book_id, content_sha256, attachment_id
+        )
+        response = send_file(
+            str(path),
+            mimetype="application/json",
+            conditional=True,
+            etag=entry["sha256"],
+        )
+        response.headers["Cache-Control"] = "private, max-age=31536000, immutable"
+        response.headers["X-Reader-Attachment-Id"] = attachment_id
+        response.headers["X-Reader-Attachment-Revision"] = manifest["revision"]
+        return response
+    except ReaderBookOcrError as exc:
+        return _reader_library_ocr_error(exc)
+
+
+def _reader_book_user_state_notes(identity, rel: str) -> list:
+    notes = _notes_load(rel, identity)
+    return [dict(item) for item in notes if isinstance(item, dict)]
+
+
+def _reader_book_user_state_card_placements(notes: list) -> list:
+    placements = []
+    for note in notes:
+        payload = None
+        kind = None
+        if isinstance(note.get("card"), dict):
+            payload, kind = note["card"], "card"
+        elif isinstance(note.get("html"), dict):
+            payload, kind = note["html"], "html"
+        elif isinstance(note.get("video"), dict):
+            payload, kind = note["video"], "video"
+        if payload is None:
+            continue
+        note_id = str(note.get("id") or "")
+        if not note_id:
+            continue
+        entity_ids = []
+        candidates = (
+            [payload.get("gid"), payload.get("cid"), payload.get("id")]
+            if kind == "card"
+            else [payload.get("cid"), payload.get("id")]
+        )
+        for candidate in candidates:
+            candidate = str(candidate or "").strip()
+            if candidate and candidate not in entity_ids:
+                entity_ids.append(candidate[:240])
+        placements.append({
+            "placementId": note_id,
+            "noteId": note_id,
+            "kind": kind,
+            "anchor": note.get("anchor"),
+            "w": note.get("w"),
+            "h": note.get("h"),
+            "collapsed": bool(note.get("collapsed")),
+            "entityIds": entity_ids,
+        })
+    return placements
+
+
+def _reader_book_user_state_entity_references(placements: list) -> list:
+    grouped = {}
+    for placement in placements:
+        for entity_id in placement.get("entityIds") or []:
+            record = grouped.setdefault(entity_id, {
+                "entityId": entity_id,
+                "kind": placement["kind"],
+                "placementIds": [],
+            })
+            if placement["placementId"] not in record["placementIds"]:
+                record["placementIds"].append(placement["placementId"])
+    for record in grouped.values():
+        record["placementIds"].sort()
+    return [grouped[key] for key in sorted(grouped)]
+
+
+def _reader_book_user_state_ink(
+    identity,
+    rel: str,
+    *,
+    regions: bool,
+) -> dict:
+    sources = {
+        "pdf": _ink_load(rel, identity).get("pages"),
+        "epub": _epub_ink_load(rel, identity).get("sections"),
+    }
+    result = {"pdf": {}, "epub": {}}
+    for host, surfaces in sources.items():
+        if not isinstance(surfaces, dict):
+            raise UserStatePackageError(f"invalid {host} ink sidecar")
+        for surface, strokes in surfaces.items():
+            if not isinstance(surface, str) or not isinstance(strokes, list):
+                raise UserStatePackageError(f"invalid {host} ink surface")
+            selected = []
+            for stroke in strokes:
+                if not isinstance(stroke, dict):
+                    raise UserStatePackageError(f"invalid {host} ink stroke")
+                if (stroke.get("t") == "region") == regions:
+                    selected.append(dict(stroke))
+            if selected:
+                result[host][surface] = selected
+    return result
+
+
+def _reader_book_user_state_domain(identity, rel: str, domain: str):
+    """Map current account-scoped Reader state to the shared package shapes."""
+    if domain == "reading-position":
+        value = _reading_pos_load(identity).get(rel)
+        return dict(value) if isinstance(value, dict) else None
+    if domain == "highlights":
+        pdf = _hl_load(rel, identity).get("highlights") or []
+        epub = _epub_hl_load(rel, identity)
+        return {
+            "pdf": [dict(item) for item in pdf if isinstance(item, dict)],
+            "epub": [dict(item) for item in epub if isinstance(item, dict)],
+        }
+    if domain == "ink":
+        return _reader_book_user_state_ink(identity, rel, regions=False)
+    if domain == "closed-regions":
+        return _reader_book_user_state_ink(identity, rel, regions=True)
+    notes = _reader_book_user_state_notes(identity, rel)
+    if domain == "notes":
+        return notes
+    if domain == "user-pages":
+        pages = _upages_load(rel, identity)
+        if any(not isinstance(item, dict) for item in pages):
+            raise UserStatePackageError("invalid user-page sidecar")
+        return [dict(item) for item in pages]
+    placements = _reader_book_user_state_card_placements(notes)
+    if domain == "card-placements":
+        return placements
+    if domain == "entity-references":
+        return _reader_book_user_state_entity_references(placements)
+    raise UserStatePackageError("unknown user-state domain")
+
+
+@bp.route("/api/library/user-state/<book_id>")
+def pdf_api_library_user_state(book_id):
+    """Download one verified account's conflict-aware book state package."""
+    denied = _reader_library_access_error()
+    if denied is not None:
+        return denied
+    if set(request.args) - {"contentSha256"}:
+        return jsonify({
+            "ok": False,
+            "contract": READER_BOOK_USER_STATE_CONTRACT,
+            "error": "unknown user-state request fields",
+        }), 400
+    try:
+        identity = _reader_storage_identity_current()
+        if identity is None:
+            return jsonify({"ok": False, "error": "authentication required"}), 401
+        entry, _path = _reader_book_library().resolve(book_id)
+        content_sha256 = str(request.args.get("contentSha256") or "")
+        if content_sha256 != entry.get("contentSha256"):
+            return jsonify({
+                "ok": False,
+                "contract": READER_BOOK_USER_STATE_CONTRACT,
+                "error": "book version changed",
+            }), 409
+        package = _reader_book_user_state().export_bytes(
+            identity=identity,
+            book_id=book_id,
+            content_sha256=content_sha256,
+            book_reference=str(entry["rel"]),
+        )
+        account_scope_digest = hashlib.sha256(
+            (
+                "reader-book-user-state-account/1\0"
+                + identity.storage_namespace
+            ).encode("utf-8")
+        ).hexdigest()
+        response = Response(package, mimetype="application/json")
+        response.headers["Cache-Control"] = "private, no-store"
+        response.headers["X-Reader-User-State-Contract"] = (
+            READER_BOOK_USER_STATE_CONTRACT
+        )
+        response.headers["X-Reader-Account-Scope-Digest"] = (
+            account_scope_digest
+        )
+        response.headers["ETag"] = hashlib.sha256(package).hexdigest()
+        return response
+    except UnknownBookError:
+        return jsonify({"ok": False, "error": "book not found"}), 404
+    except (UserStatePackageError, UserStatePackageTooLarge) as exc:
+        current_app.logger.warning("reader book user-state export rejected: %s", exc)
+        return jsonify({
+            "ok": False,
+            "contract": READER_BOOK_USER_STATE_CONTRACT,
+            "error": "book user-state unavailable",
+        }), 422
+    except BookLibraryError:
+        current_app.logger.exception("reader book user-state resolve failed")
+        return jsonify({"ok": False, "error": "book catalog unavailable"}), 500
+
+
 # ── 书本预处理（扫描 PDF 补文字层）：检测文字层 → 无则 Google Vision OCR + 嵌入 → 原地替换 ──
 # 只编排现有脚本(scripts/{preprocess_book,google_vision_ocr,embed_google_ocr_to_pdf}.py)。
 _BOOK_PREPROCESS_DIR = CLAUDE_DIR / "state" / "book-preprocess"
@@ -4083,6 +4486,25 @@ def _migrate_book_sidecars(old_rel: str, new_rel: str, old_abs: Path, new_abs: P
             _notes_path(old_rel, identity),
             _notes_path(new_rel, identity),
         )
+    # PDF 墨迹与用户页也已按认证账户分区；同一 identity + 两端文档
+    # lease 保证改名不能和前端保存或后台页锚迁移交错。
+    for dataset, path_for in (
+        ("pdf-ink", _ink_path),
+        ("reader-userpages", _upages_path),
+    ):
+        with ExitStack() as stack:
+            for lock_rel in sorted({old_rel, new_rel}):
+                stack.enter_context(
+                    _reader_sidecar_edit_lock(
+                        dataset,
+                        lock_rel,
+                        identity,
+                    )
+                )
+            _pdf_rename_move_sidecar(
+                path_for(old_rel, identity),
+                path_for(new_rel, identity),
+            )
     # 续读位置的所有书共享一个 JSON，跨进程必须锁整份文件而不是按书锁。
     with _READER_POS_LOCK, _reader_sidecar_store().lock(
         identity,
@@ -4110,8 +4532,8 @@ def _migrate_book_sidecars(old_rel: str, new_rel: str, old_abs: Path, new_abs: P
                 positions,
                 indent=None,
             )
-    # 其余尚未纳入账户 sidecar 的用户数据仍沿原目录迁移。
-    for d in (_INK_DIR, _TR_DIR, _DISMISS_DIR):
+    # 其余尚未纳入账户 sidecar 的数据仍沿原目录迁移。
+    for d in (_TR_DIR, _DISMISS_DIR):
         _pdf_rename_move_sidecar(
             d / f"{o_full}.json",
             d / f"{n_full}.json",
@@ -5730,21 +6152,11 @@ def _page_chars_cached(abs_path, rel: str, page: int):
 _FORMULA_INJECT_VER = 1   # 公式字符层注入逻辑版本(改注入规则就 +1 → cv 变 → 旧缓存失效)
 
 
-def _apply_formula_chars(chars, furigana, rel, page, page_w, page_h):
-    """把公式 OCR 的 LaTeX 注入字符层(用户要的"公式文字层直接替换为 OCR 结果")。
-    字符层是隐藏选择层(视觉靠页图),所以这一步只改"选中公式时拿到什么":
-      ① 删掉公式 bbox 内的原扫描乱码字符 + 落在框内的振假名;
-      ② 塞入 LaTeX 串(切片平铺满整框、同一词 id w、标 fml=1),单击选公式 → 直接得 $...$。
-    随 sidecar latex 改而变 → cv 已含 fig sidecar mtime,前端缓存自动失效。"""
-    try:
-        abs_path = _safe_vault_path(rel)
-        if not abs_path:
-            return
-        data = _fig_load_abs(abs_path)
-    except Exception:
-        return
-    fmls = [f for f in (data.get("formulas") or [])
-            if f.get("page") == page and (f.get("latex") or "").strip()
+def _apply_formula_records(chars, furigana, formulas, page, page_w, page_h):
+    """把已验证的公式记录注入字符层，不负责选择公式 sidecar 来源。"""
+    fmls = [f for f in (formulas or [])
+            if isinstance(f, dict) and f.get("page") == page
+            and (f.get("latex") or "").strip()
             and f.get("bbox") and len(f.get("bbox")) == 4]
     if not fmls:
         return
@@ -5777,6 +6189,22 @@ def _apply_formula_chars(chars, furigana, rel, page, page_w, page_h):
                 "sp": 0, "w": wid, "b": 0, "bk": bk,
                 "fml": 1, "flx": (lx if i == 0 else ""),
             })
+
+
+def _apply_formula_chars(chars, furigana, rel, page, page_w, page_h):
+    """把公式 OCR 的 LaTeX 注入字符层(用户要的"公式文字层直接替换为 OCR 结果")。
+    字符层是隐藏选择层(视觉靠页图),所以这一步只改"选中公式时拿到什么":
+      ① 删掉公式 bbox 内的原扫描乱码字符 + 落在框内的振假名;
+      ② 塞入 LaTeX 串(切片平铺满整框、同一词 id w、标 fml=1),单击选公式 → 直接得 $...$。
+    随 sidecar latex 改而变 → cv 已含 fig sidecar mtime,前端缓存自动失效。"""
+    try:
+        abs_path = _safe_vault_path(rel)
+        if not abs_path:
+            return
+        data = _fig_load_abs(abs_path)
+    except Exception:
+        return
+    _apply_formula_records(chars, furigana, data.get("formulas"), page, page_w, page_h)
 
 
 _OCR_LINE_NOISE_RE = re.compile(r"(?:[|│丨︱‖∥┃┆┇┊┋╎╏]\s*){2,}")
@@ -10100,31 +10528,33 @@ def pdf_api_note_composite():
     return jsonify({"ok": True, "data_url": "data:image/png;base64," + base64.b64encode(png).decode()})
 
 
-# ── 插入页(用户页)sidecar:state/reader-userpages/<sha>.json(按书;设计:references/reader-userpages-favorites.md「一、插入页设计」阶段A)──
+# ── 插入页(用户页)sidecar:账户/reader-userpages/<sha>.json(按书;设计:references/reader-userpages-favorites.md「一、插入页设计」阶段A)──
 # 锚定铁律:用户页 id=u_<8hex>(独立编号空间),插入位置只存 {after:N}——N=原书 PDF 页(1-based)/EPUB 章序(1-based,=idx+1);
 # 0=书首。**绝不挤占原书 page/section 编号**:前端把用户页渲成原书页/章元素的兄弟节点,原书已有高亮/便签/墨迹锚零影响。
-_UPAGES_DIR = CLAUDE_DIR / "state" / "reader-userpages"
-
-
-def _upages_path(rel: str) -> Path:
+def _upages_path(rel: str, identity=None) -> Path:
     import hashlib
-    return _UPAGES_DIR / (hashlib.sha1((rel or "").encode("utf-8")).hexdigest()[:16] + ".json")
+    return _reader_sidecar_path(
+        "reader-userpages",
+        hashlib.sha1((rel or "").encode("utf-8")).hexdigest()[:16] + ".json",
+        identity=identity,
+    )
 
 
-def _upages_load(rel: str) -> list:
-    try:
-        items = json.loads(_upages_path(rel).read_text("utf-8"))
-        return items if isinstance(items, list) else []
-    except Exception:
-        return []
+def _upages_load(rel: str, identity=None) -> list:
+    return _reader_sidecar_json(
+        _upages_path(rel, identity),
+        [],
+        list,
+    )
 
 
-def _upages_save(rel: str, items: list):
-    _UPAGES_DIR.mkdir(parents=True, exist_ok=True)
-    p = _upages_path(rel)
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(items, ensure_ascii=False), "utf-8")
-    tmp.replace(p)
+def _upages_save(rel: str, items: list, identity=None):
+    from reader_sidecar_store import atomic_write_json
+    atomic_write_json(
+        _upages_path(rel, identity),
+        items,
+        indent=None,
+    )
 
 
 def _upages_sorted(items: list) -> list:
@@ -10133,9 +10563,12 @@ def _upages_sorted(items: list) -> list:
 
 @bp.route("/api/userpages", methods=["GET", "POST", "PATCH", "DELETE"])
 def pdf_api_userpages():
-    """用户页 CRUD(sidecar:state/reader-userpages/<sha>.json,PDF/EPUB 同一套,照 notes 模式)。
+    """用户页 CRUD(sidecar:账户/reader-userpages/<sha>.json,PDF/EPUB 同一套,照 notes 模式)。
     GET ?file= → {ok, pages}(按 after,created 排序);POST {file, after, title?, md?} → 建(id=u_<8hex>);
     PATCH {file, id, title?/md?/after?} → 字段级合并;DELETE ?file=&id= → 删。"""
+    identity = _reader_storage_identity_current()
+    if identity is None:
+        return jsonify({"ok": False, "error": "authentication required"}), 401
     _ref0 = (request.args.get("file") or "").strip()
     if not _ref0 and request.method in ("POST", "PATCH"):
         _ref0 = str(((request.get_json(silent=True) or {}).get("file")) or "")
@@ -10149,7 +10582,7 @@ def pdf_api_userpages():
         if request.method == "GET":
             agg = []
             for _mrel, _moff in _parts:
-                for p0 in _upages_sorted(_upages_load(_mrel)):
+                for p0 in _upages_sorted(_upages_load(_mrel, identity)):
                     p2 = dict(p0)
                     if isinstance(p2.get("page"), int):
                         p2["page"] = p2["page"] + _moff       # 真插入页:PDF 页号全局化
@@ -10164,7 +10597,7 @@ def pdf_api_userpages():
         if request.method == "DELETE":
             _uid = (request.args.get("id") or "").strip()
             _home = next((m for m, _o in _parts
-                          if any(x.get("id") == _uid for x in _upages_load(m))), None)
+                          if any(x.get("id") == _uid for x in _upages_load(m, identity))), None)
             if not _home:
                 return jsonify({"ok": True})
             _args = request.args.to_dict()
@@ -10181,7 +10614,7 @@ def pdf_api_userpages():
             if request.method == "PATCH":
                 _uid = (_b.get("id") or "").strip()
                 _home = next(((m, _o) for m, _o in _parts
-                              if any(x.get("id") == _uid for x in _upages_load(m))), None)
+                              if any(x.get("id") == _uid for x in _upages_load(m, identity))), None)
                 if not _home:
                     return jsonify({"ok": False, "error": "未找到"}), 404
                 _b["file"] = _home[0]
@@ -10197,18 +10630,18 @@ def pdf_api_userpages():
                     _b["file"], _b["after"] = _hm[0], _aft - _hm[1]
     if request.method == "GET":
         rel = (request.args.get("file") or "").strip()
-        r = jsonify({"ok": True, "pages": _upages_sorted(_upages_load(rel))})
+        r = jsonify({"ok": True, "pages": _upages_sorted(_upages_load(rel, identity))})
         r.headers["Cache-Control"] = "no-store"
         return r
     if request.method == "DELETE":
         rel = (request.args.get("file") or "").strip()
         uid = (request.args.get("id") or "").strip()
-        with _upages_lock(rel):   # 与后台同步 job 的迁移事务互斥(blocker③)
-            items = _upages_load(rel)
+        with _upages_lock(rel, identity) as owner:   # 与后台同步 job 的迁移事务互斥(blocker③)
+            items = _upages_load(rel, owner)
             hit = next((x for x in items if x.get("id") == uid), None)
             if hit and isinstance(hit.get("page"), int):   # 真插入页:必须走 /api/pdf-insert-page(要改 PDF+迁锚)
                 return jsonify({"ok": False, "error": "真实插入页请用 /api/pdf-insert-page 删除"}), 400
-            _upages_save(rel, [x for x in items if x.get("id") != uid])
+            _upages_save(rel, [x for x in items if x.get("id") != uid], owner)
         try:
             _fav_cascade_userpage_delete(rel, uid)   # 同一张纸:页没了 → 各收藏夹里指向它的条目一并移除(不留墓碑)+ 后台重建 + 推事件
         except Exception:
@@ -10230,10 +10663,9 @@ def pdf_api_userpages():
         except (TypeError, ValueError):
             return 0
 
-    _up_lk = _upages_lock(rel)   # POST/PATCH 全程持锁 RMW(与后台同步 job 迁移事务互斥,blocker③)
-    _up_lk.acquire()
-    try:
-        items = _upages_load(rel)
+    # POST/PATCH 全程持 account-scoped lease RMW(与后台同步 job 迁移事务互斥,blocker③)
+    with _upages_lock(rel, identity) as owner:
+        items = _upages_load(rel, owner)
         if request.method == "POST":
             import uuid as _u
             p = {"id": "u_" + _u.uuid4().hex[:8], "after": _norm_after(body.get("after")),
@@ -10241,7 +10673,7 @@ def pdf_api_userpages():
                  "md": (body.get("md") or "")[:100000],
                  "created": now, "updated": now}
             items.append(p)
-            _upages_save(rel, items)
+            _upages_save(rel, items, owner)
             return jsonify({"ok": True, "id": p["id"], "page": p})
         # PATCH:字段级合并(title/md/after 各自独立更新)
         uid = (body.get("id") or "").strip()
@@ -10263,7 +10695,7 @@ def pdf_api_userpages():
                 if changed:
                     p["md_ver"] = int(p.get("md_ver", 0)) + 1   # 脏标记版本戳:md_ver > synced_ver = 待写回 PDF
                 p["updated"] = now
-                _upages_save(rel, items)
+                _upages_save(rel, items, owner)
                 return jsonify({"ok": True, "page": p, "md_ver": int(p.get("md_ver", 0))})
             # baked 真实页(内容已烧进 PDF):改动仍须重排,走 /api/pdf-insert-page
             return jsonify({"ok": False, "error": "真实插入页请用 /api/pdf-insert-page 编辑"}), 400
@@ -10283,14 +10715,12 @@ def pdf_api_userpages():
             else:
                 p.pop("h", None)   # h<=0 → 复位为默认(keepRatio 等比)
         p["updated"] = now
-        _upages_save(rel, items)
+        _upages_save(rel, items, owner)
         try:
             _reader_publish("text", rel, p.get("id"))   # 推「正文变了」给其它客户端(实时同步)
         except Exception:
             pass
         return jsonify({"ok": True, "page": p})
-    finally:
-        _up_lk.release()
 
 
 # ═══════════ PDF 真插入页(规格 v2):PyMuPDF 修改 PDF 文件本身 + 锚迁移注册表 ═══════════
@@ -10317,21 +10747,16 @@ _PAGE_BACKUP_DIR = CLAUDE_DIR / "state" / "pdf-page-backups"
 _INSPAGE_ACTIVE: set = set()          # 正在改页的 rel(单 worker,进程内互斥即可)
 _INSPAGE_MUTEX = _upthr.Lock()
 
-# 🔴 v4 批次2 BLOCKER 修法③:userpages sidecar 的所有「读改写」必须经一把 per-rel 锁串行化。
-#   单 worker gunicorn 里,前端即时编辑 PATCH(/api/userpages)与后台同步 job 的锚迁移事务(_pam_userpages
-#   phase1 读 → phase2 写)是**独立线程并发**;不加锁 → job 用旧内存快照 phase2 落盘会覆盖 PATCH 刚写的新编辑
-#   = 静默丢字。锁范围:PATCH/POST/DELETE 的 RMW + job 的 collect_plans→apply_plans。per-rel(不同书不互斥)。
-_UPAGES_LOCKS: dict = {}
-_UPAGES_LOCKS_GUARD = _upthr.Lock()
-
-
-def _upages_lock(rel: str):
-    with _UPAGES_LOCKS_GUARD:
-        lk = _UPAGES_LOCKS.get(rel)
-        if lk is None:
-            lk = _upthr.Lock()
-            _UPAGES_LOCKS[rel] = lk
-        return lk
+# userpages sidecar 的所有读改写与后台页锚迁移必须经同一 account/document
+# lease；它同时覆盖线程与多 worker，且不同账户永不共享锁名。
+@contextmanager
+def _upages_lock(rel: str, identity=None):
+    with _reader_sidecar_edit_lock(
+        "reader-userpages",
+        rel,
+        identity,
+    ) as owner:
+        yield owner
 
 
 def _up_journal_path(sha: str) -> Path:
@@ -10478,7 +10903,10 @@ def _pam_highlights(ctx):
         arr, ch = _up_shift_pagelist(d.get("highlights"), ctx["mv"])
         if ch: d["highlights"] = arr
         return ch
-    plan, warn = _up_json_plan(_hl_path(ctx["rel"]), mut)
+    plan, warn = _up_json_plan(
+        _hl_path(ctx["rel"], ctx.get("reader_identity")),
+        mut,
+    )
     return ([plan] if plan else []), ([warn] if warn else [])
 
 
@@ -10501,7 +10929,10 @@ def _pam_notes(ctx):
         if changed:
             d[:] = keep
         return changed
-    plan, warn = _up_json_plan(_notes_path(ctx["rel"]), mut)
+    plan, warn = _up_json_plan(
+        _notes_path(ctx["rel"], ctx.get("reader_identity")),
+        mut,
+    )
     return ([plan] if plan else []), ([warn] if warn else [])
 
 
@@ -10525,7 +10956,10 @@ def _pam_ink(ctx):
         if changed:
             d["pages"] = out
         return changed
-    plan, warn = _up_json_plan(_ink_path(ctx["rel"]), mut)
+    plan, warn = _up_json_plan(
+        _ink_path(ctx["rel"], ctx.get("reader_identity")),
+        mut,
+    )
     return ([plan] if plan else []), ([warn] if warn else [])
 
 
@@ -10580,7 +11014,7 @@ def _pam_favorites(ctx):
 def _pam_userpages(ctx):
     """用户页表自身:真实页记录(page)按 mv 迁;旧虚拟页(after=边界语义)插入>pivot→+1、删除>=pivot→-1;
     最后应用本次 record_op(add/update/remove)。此表必写(record_op 总有事做)。"""
-    path = _upages_path(ctx["rel"])
+    path = _upages_path(ctx["rel"], ctx.get("reader_identity"))
     raw, items = None, []
     if path.exists():
         try:
@@ -11135,7 +11569,7 @@ def _up_prune_backups(sha: str, keep: int = 2):
 
 def _inspage_job(jid: str, mode: str, rel: str, ap: Path, payload: dict):
     """后台 job:insert/edit/delete 三种操作同一套安全流程。"""
-    _reader_storage_identity_bind_for_thread(
+    reader_identity = _reader_storage_identity_bind_for_thread(
         payload.get("_reader_storage_identity")
     )
     import fitz, shutil
@@ -11211,12 +11645,30 @@ def _inspage_job(jid: str, mode: str, rel: str, ap: Path, payload: dict):
                 "pivot": pivot,
                 "new_mtime": new_mtime,
                 "record_op": payload["record_op"],
-                "reader_identity": payload.get("_reader_storage_identity"),
+                "reader_identity": reader_identity,
             }
             # 🔴 BLOCKER③:持 per-rel userpages 锁跨「phase1 读所有 sidecar → phase2 落盘」整个事务,
             #   期间前端 PATCH(/api/userpages)阻塞 → 迁移读到的 userpages 快照与落盘之间不会被 PATCH 插入 →
             #   phase2 不会覆盖 PATCH 刚写的新编辑。doc.save(慢,几秒)在此之前,锁只压这段几毫秒的迁移。
-            with _upages_lock(rel):
+            from contextlib import ExitStack
+            with ExitStack() as account_locks:
+                # PAGE_ANCHOR_MIGRATIONS 会同时改这些账户域。和各自 API
+                # 使用同一 owner/dataset/document lease，避免迁页事务覆盖
+                # 迁移期间刚保存的笔迹、高亮、便签、位置或用户页。
+                for dataset, key in (
+                    ("pdf-highlights", rel),
+                    ("pdf-ink", rel),
+                    ("reader-notes", rel),
+                    ("reader-positions", ""),
+                    ("reader-userpages", rel),
+                ):
+                    account_locks.enter_context(
+                        _reader_sidecar_store().lock(
+                            reader_identity,
+                            dataset,
+                            key,
+                        )
+                    )
                 plans, w2 = _up_collect_plans(ctx)
                 warns += w2
                 _up_apply_plans(plans)
@@ -11250,6 +11702,9 @@ def pdf_api_pdf_insert_page():
     POST {file, after, title?, md?} → 在 after(1-based;0=书首)后插入真实页;
     PATCH {file, id, title?, md?} → 重排该用户页内容(delete_page+同位重插,页号不变);
     DELETE ?file=&id= → 删除该用户页(后续页锚 -1)。均返回 {ok, job_id}。"""
+    identity = _reader_storage_identity_current()
+    if identity is None:
+        return jsonify({"ok": False, "error": "authentication required"}), 401
     if request.method == "DELETE":
         body = {"file": request.args.get("file", ""), "id": request.args.get("id", "")}
     else:
@@ -11272,7 +11727,7 @@ def pdf_api_pdf_insert_page():
         else:
             _uid = (body.get("id") or "").strip()
             _home = next((m for m, _o in _parts
-                          if any(x.get("id") == _uid for x in _upages_load(m))), None)
+                          if any(x.get("id") == _uid for x in _upages_load(m, identity))), None)
             if not _home:
                 return jsonify({"ok": False, "error": "未找到该用户页记录"}), 404
             rel = body["file"] = _home
@@ -11313,7 +11768,7 @@ def pdf_api_pdf_insert_page():
         mode = "insert"
     else:
         uid = (body.get("id") or "").strip()
-        rec = next((x for x in _upages_load(rel) if x.get("id") == uid), None)
+        rec = next((x for x in _upages_load(rel, identity) if x.get("id") == uid), None)
         if not rec:
             return jsonify({"ok": False, "error": "未找到该用户页记录"}), 404
         if not isinstance(rec.get("page"), int):
@@ -11324,8 +11779,8 @@ def pdf_api_pdf_insert_page():
                 #   重插,页号不变 → 零页号锚迁移)。在 per-rel 锁下**原子快照** md+md_ver(与前端 PATCH 串行,防读到半写);
                 #   不脏(md_ver<=synced_ver)直接免同步(省一次昂贵 doc.save);record_op **只带 base_ver,绝不带 md/title**
                 #   (blocker②:job 不回写 sidecar)。base_ver = 服务端权威快照的 md_ver(不信客户端)。
-                with _upages_lock(rel):
-                    rec2 = next((x for x in _upages_load(rel) if x.get("id") == uid), None) or rec
+                with _upages_lock(rel, identity) as owner:
+                    rec2 = next((x for x in _upages_load(rel, owner) if x.get("id") == uid), None) or rec
                     md_ver = int(rec2.get("md_ver", 0)); synced_ver = int(rec2.get("synced_ver", 0))
                     snap_md = (rec2.get("md") or "")[:100000]; snap_title = (rec2.get("title") or "")[:120]
                     page_no = rec2.get("page")
@@ -11361,46 +11816,52 @@ def pdf_api_pdf_insert_page():
 #    在 _job_set/_JOBS 定义之后(它注入 job 基建)。_resolve_epub_book/_FAV_EPUB_DIR 属 EPUB 域,未动。
 
 
-# ── EPUB 手写墨迹 sidecar(按 section idx 存归一化笔画;独立 state/epub-ink/<sha>.json)──
-# 照搬 PDF /api/ink(state/pdf-ink),把锚从「页码」换成「EPUB section 索引」(reflow 无固定页)。
+# ── EPUB 手写墨迹 sidecar(按 section idx 存归一化笔画;账户/epub-ink/<sha>.json)──
+# 照搬 PDF /api/ink,把锚从「页码」换成「EPUB section 索引」(reflow 无固定页)。
 # stroke = {t:'pen'|'line'|'arrow'|'rect', c, w, p:[[x,y],...]},坐标归一化 0-1(相对 section 内容盒)。
-_EPUB_INK_DIR = CLAUDE_DIR / "state" / "epub-ink"
-
-
-def _epub_ink_path(rel: str) -> Path:
+def _epub_ink_path(rel: str, identity=None) -> Path:
     import hashlib
-    return _EPUB_INK_DIR / (hashlib.sha1((rel or "").encode("utf-8")).hexdigest()[:16] + ".json")
+    return _reader_sidecar_path(
+        "epub-ink",
+        hashlib.sha1((rel or "").encode("utf-8")).hexdigest()[:16] + ".json",
+        identity=identity,
+    )
 
 
-def _epub_ink_load(rel: str) -> dict:
-    try:
-        data = json.loads(_epub_ink_path(rel).read_text("utf-8"))
-        if not isinstance(data.get("sections"), dict):
-            data["sections"] = {}
-        data["file_rel"] = rel
-        return data
-    except Exception:
-        return {"file_rel": rel, "sections": {}}
+def _epub_ink_load(rel: str, identity=None) -> dict:
+    data = _reader_sidecar_json(
+        _epub_ink_path(rel, identity),
+        {"file_rel": rel, "sections": {}},
+        dict,
+    )
+    if not isinstance(data.get("sections"), dict):
+        raise ValueError("invalid EPUB ink sidecar JSON shape")
+    data["file_rel"] = rel
+    return data
 
 
-def _epub_ink_save(rel: str, data: dict):
-    _EPUB_INK_DIR.mkdir(parents=True, exist_ok=True)
-    p = _epub_ink_path(rel)
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False), "utf-8")
-    tmp.replace(p)
+def _epub_ink_save(rel: str, data: dict, identity=None):
+    from reader_sidecar_store import atomic_write_json
+    atomic_write_json(
+        _epub_ink_path(rel, identity),
+        data,
+        indent=None,
+    )
 
 
 @bp.route("/api/epub-ink", methods=["GET", "POST"])
 def pdf_api_epub_ink():
-    """EPUB 手写墨迹(按 section idx 存,独立 sidecar:state/epub-ink/<sha>.json)。
+    """EPUB 手写墨迹(按 section idx 存,独立 sidecar:账户/epub-ink/<sha>.json)。
     GET ?file= → {ok, sections:{"<idx>":[stroke,...]}};
     POST {file, idx, strokes:[...]} → 整段替换该 section 墨迹(strokes 空则删该段)。"""
+    identity = _reader_storage_identity_current()
+    if identity is None:
+        return jsonify({"ok": False, "error": "authentication required"}), 401
     if request.method == "GET":
         rel = (request.args.get("file") or "").strip()
         if not rel:
             return jsonify({"ok": False, "error": "缺少 file"}), 400
-        r = jsonify({"ok": True, **_epub_ink_load(rel)})
+        r = jsonify({"ok": True, **_epub_ink_load(rel, identity)})
         r.headers["Cache-Control"] = "no-store"   # 同 /api/ink:实时同步读源禁缓存
         return r
     data = request.get_json(silent=True) or {}
@@ -11425,12 +11886,13 @@ def pdf_api_epub_ink():
         return jsonify({"ok": False, "error": "invalid strokes"}), 400
     if len(strokes) > 5000:
         return jsonify({"ok": False, "error": "too many strokes"}), 400
-    doc = _epub_ink_load(rel)
-    if strokes:
-        doc["sections"][key] = strokes
-    else:
-        doc["sections"].pop(key, None)
-    _epub_ink_save(rel, doc)
+    with _reader_sidecar_edit_lock("epub-ink", rel, identity) as owner:
+        doc = _epub_ink_load(rel, owner)
+        if strokes:
+            doc["sections"][key] = strokes
+        else:
+            doc["sections"].pop(key, None)
+        _epub_ink_save(rel, doc, owner)
     try:
         _reader_publish("ink", rel, key)   # 推「墨迹变了」给其它打开着的客户端(实时同步)
     except Exception:
@@ -14803,28 +15265,27 @@ def pdf_api_ai_stream_result():
                     "full": j.get("full", ""), "error": j.get("error", "")})
 
 
-# ─── 手写墨迹（sidecar JSON 存 state/pdf-ink/<sha1>.json，按页存归一化笔画）──────
+# ─── 手写墨迹（sidecar JSON 存账户/pdf-ink/<sha1>.json，按页存归一化笔画）──────
 
-_INK_DIR = CLAUDE_DIR / "state" / "pdf-ink"
-
-def _ink_path(rel: str) -> Path:
+def _ink_path(rel: str, identity=None) -> Path:
     import hashlib
     sha = hashlib.sha1(rel.encode("utf-8")).hexdigest()
-    _INK_DIR.mkdir(parents=True, exist_ok=True)
-    return _INK_DIR / f"{sha}.json"
+    return _reader_sidecar_path(
+        "pdf-ink",
+        f"{sha}.json",
+        identity=identity,
+    )
 
-def _ink_load(rel: str) -> dict:
-    p = _ink_path(rel)
-    if not p.exists():
-        return {"pdf_rel": rel, "pages": {}}
-    try:
-        data = json.loads(p.read_text("utf-8"))
-        if not isinstance(data.get("pages"), dict):
-            data["pages"] = {}
-        data["pdf_rel"] = rel
-        return data
-    except Exception:
-        return {"pdf_rel": rel, "pages": {}}
+def _ink_load(rel: str, identity=None) -> dict:
+    data = _reader_sidecar_json(
+        _ink_path(rel, identity),
+        {"pdf_rel": rel, "pages": {}},
+        dict,
+    )
+    if not isinstance(data.get("pages"), dict):
+        raise ValueError("invalid PDF ink sidecar JSON shape")
+    data["pdf_rel"] = rel
+    return data
 
 
 # ── 收藏夹域 register:接线在 _ink_load 定义后(注入清单里它最晚定义);块外仍用的 4 个符号回导入 ──
@@ -14842,21 +15303,26 @@ register_favorites(bp, claude_dir=CLAUDE_DIR, obsidian_root=OBSIDIAN_ROOT,
 from favorites_reader import (_FAV_FILE, _fav_cascade_userpage_delete,   # noqa: E402 — 块外仍在用
                               _fav_epub_raw_section, _fav_prebuild_loop)
 
-def _ink_save(rel: str, data: dict):
-    p = _ink_path(rel)
-    tmp = p.with_suffix(".json.tmp")
-    tmp.write_text(json.dumps(data, ensure_ascii=False), "utf-8")
-    tmp.replace(p)
+def _ink_save(rel: str, data: dict, identity=None):
+    from reader_sidecar_store import atomic_write_json
+    atomic_write_json(
+        _ink_path(rel, identity),
+        data,
+        indent=None,
+    )
 
 
 @bp.route("/api/ink", methods=["GET"])
 def pdf_api_ink_list():
     """GET ?file=<rel> → {ok, pages:{"<page>":[stroke,...]}}。
     stroke = {t:'pen'|'line'|'arrow'|'rect', c, w, p:[[x,y],...]}，坐标归一化 0-1。"""
+    identity = _reader_storage_identity_current()
+    if identity is None:
+        return jsonify({"ok": False, "error": "authentication required"}), 401
     rel = request.args.get("file", "")
     if not rel or _safe_vault_path(rel) is None:
         return jsonify({"ok": False, "error": "invalid file"}), 400
-    r = jsonify({"ok": True, **_ink_load(rel)})
+    r = jsonify({"ok": True, **_ink_load(rel, identity)})
     r.headers["Cache-Control"] = "no-store"   # 实时同步的读源(SSE 触发重拉):iOS Safari 缓存旧响应会把画面回退到陈旧墨迹
     return r
 
@@ -14864,6 +15330,9 @@ def pdf_api_ink_list():
 @bp.route("/api/ink", methods=["POST"])
 def pdf_api_ink_save():
     """POST {file, page, strokes:[...]} → 整页替换该页墨迹（strokes 空则删该页）。"""
+    identity = _reader_storage_identity_current()
+    if identity is None:
+        return jsonify({"ok": False, "error": "authentication required"}), 401
     data = request.get_json(silent=True) or {}
     rel = (data.get("file") or "").strip()
     if not rel or _safe_vault_path(rel) is None:
@@ -14879,12 +15348,13 @@ def pdf_api_ink_save():
         return jsonify({"ok": False, "error": "invalid strokes"}), 400
     if len(strokes) > 5000:
         return jsonify({"ok": False, "error": "too many strokes"}), 400
-    doc = _ink_load(rel)
-    if strokes:
-        doc["pages"][str(page)] = strokes
-    else:
-        doc["pages"].pop(str(page), None)
-    _ink_save(rel, doc)
+    with _reader_sidecar_edit_lock("pdf-ink", rel, identity) as owner:
+        doc = _ink_load(rel, owner)
+        if strokes:
+            doc["pages"][str(page)] = strokes
+        else:
+            doc["pages"].pop(str(page), None)
+        _ink_save(rel, doc, owner)
     try:
         _reader_publish("ink", rel, str(page))   # 推给其它打开着的视图(PDF 阅读器/收藏夹):同一张纸,~1s 同步
     except Exception:
