@@ -531,7 +531,7 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
 
     private static func statusRevision(_ status: NativeBookOCRBookStatus) -> String {
         if status.state == .idle, status.contentSHA256.isEmpty { return "0" }
-        String(Int64(status.updatedAt.timeIntervalSince1970 * 1_000))
+        return String(Int64(status.updatedAt.timeIntervalSince1970 * 1_000))
     }
 
     private static func pageRevision(
