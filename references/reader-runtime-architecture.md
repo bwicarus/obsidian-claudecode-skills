@@ -1,19 +1,23 @@
 # 阅读器本地优先统一架构
 
-> 当前基线：2026-07-27 / 浏览器扩展 0.2.55（PWA/服务端与 Windows 测试渠道均已发布）。历史文档、测试或注释若仍写
+> 当前基线不要在本文写死版本号；以 `python3 extensions/bw-reader-webext/handoff_check.py`
+> 和 `references/reader-collaboration-status.md` 的最新发布记录为准。历史文档、测试或注释若仍写
 > “PWA 内网页阅读器”“五个 PWA 入口”“扩展只做 provider”或 `?ui=legacy`，均为已经废弃的
 > 0.2.37 方案，不能继续作为实现依据。
 
 ## 1. 产品边界
 
-正式产品只有 PWA 和浏览器扩展两个客户端，运行矩阵固定为：
+正式产品包含本地优先的 iOS App、独立网页版 PWA 和浏览器扩展。App 不再内嵌远程 PWA；
+它把同一套 Reader HTML/JS/CSS 作为本地渲染组件打进安装包，由 Swift 持有文件、生命周期、
+系统能力和同步入口。网页/真书运行矩阵固定为：
 
 | 页面 | 无扩展 | 有扩展 |
 |---|---|---|
 | 普通 HTTP/HTTPS 网页 | 不提供 BW 功能 | 扩展提供完整网页阅读功能 |
 | PWA 真书：PDF、EPUB、导入 HTML/Markdown、收藏书 | PWA 提供完整阅读器与本地 fallback | 扩展提供共享 UI、网络和通用数据；PWA 只保留书籍渲染、精确锚点和书籍私有数据 |
+| iOS App 本机真书 | App 内置 Reader + 本机数据完整工作 | Safari 扩展不进入 App 的 WKWebView，也不参与所有权 |
 
-由此得到四条硬边界：
+由此得到六条硬边界：
 
 1. PWA 不再抓取、解析、代理或远程渲染第三方网页。
 2. 扩展在任意普通 `http://` / `https://` 页面上都可提供 BW 网页功能，不要求旁边开着 PWA。
@@ -21,6 +25,10 @@
    `DocumentHost` 不更换。
 4. 服务器主要承担账户认证、跨设备变化中转和确实不能在本机完成的受控计算，不再作为普通
    网页阅读器。
+5. App 内禁止启动 Service Worker、PWA install/cache、扩展 TAKEOVER、PWA owner lease 或
+   远程首页；WKWebView 只是 App 内部渲染器，不是第二个客户端。
+6. App 本机文件与本机记录是默认真源；Pi 只在用户触发同步或启用明确的同步策略时参与，
+   断网不能阻止打开、阅读、标注、制卡和保存。
 
 旧 PWA 网页/RBI 路径已经退役并留有只读备份。`/pdf/web/live?url=` 只校验并跳转原网页；
 旧 proxy/frame/resource/RBI 接口返回 `410 pwa_web_reader_retired`。不得重新把它们接回产品。
@@ -38,6 +46,11 @@
              │     ├─ WebDocumentHost
              │     ├─ Extension local store（权威）
              │     └─ Web surfaces（DOM/quote/CSS highlight）
+             │
+             ├── iOS App 本机真书
+             │     ├─ Swift 文件/安全作用域/系统能力/同步入口
+             │     ├─ App-owned local store（权威）
+             │     └─ 内置 Reader renderer + DocumentHost
              │
              ├── 真书 PWA + 扩展
              │     ├─ Extension shared UI（唯一可见共享 UI）
@@ -75,6 +88,18 @@
 
 普通网页不得出现 PDF/EPUB 专属的页码、裁边、双页或书籍设置死按钮。UI 必须从 adapter
 声明的 capability 生成，缺失能力时 fail closed。
+
+### iOS App 本机真书
+
+- App 从安装包内加载固定版本的 Reader 壳、共享组件和 PDF/EPUB renderer，不请求远程首页。
+- Swift 只向页面提供不透明本机书 ID；bookmark、绝对路径和 security-scoped URL 永不进入 JS。
+- PDF 由本机字节流提供 Range，继续复用 PDF.js 与 PDF `DocumentHost`；EPUB 由本机容器提供
+  manifest、section 与资源等价接口，继续复用 EPUB `DocumentHost`。本地首版不注入书籍自带
+  CSS，只使用 Reader 的受信默认样式；恢复书内 CSS 的前提是先完成可靠的作用域隔离与协议净化，
+  不能让不受信书籍样式覆盖 App 的可信 UI。
+- 共享网页组件负责卡片、便签、选区、侧栏和阅读交互；App 本机存储负责它们的数据真值，
+  原生层负责 Pencil、语音、后台、文件、分享和系统入口。
+- 联网 AI、翻译或 Pi 同步失败只降级相应网络能力，不能令本机文档或本机修改不可用。
 
 ### PWA 真书
 
@@ -161,9 +186,24 @@ collection 就自动上传。无扩展真书 PWA 使用自己的本地 fallback�
 - 本地 Markdown 是可读笔记，不替代书内便签的稳定 ID、锚点、revision、mutation ID、
   tombstone 或 `DocumentNoteRepository`；两类数据不得合并成同一真源。
 
-### 永远属于 PWA/书籍的数据
+### iOS 本机书库与 Pi 书库
 
-- PDF/EPUB/HTML/Markdown 文件与渲染缓存；
+- App 本机书库是默认权威来源；Pi 是可选的同步、备份和分发端。App 可列目录、手动上传
+  PDF/EPUB，并把远程书按摘要校验后原子下载到用户选择的本机目录。两端都不得自动覆盖或删除
+  同名文件，分叉必须显示为冲突。
+- App 只保存安全作用域 bookmark、相对路径和有界索引；绝对路径与 bookmark 不得进入 WebView、
+  Safari 扩展、快照或日志。Pi 书籍用持久 `bookId`；本机索引另有持久文件实例 ID，首次发现时
+  可用相对路径区分内容完全相同的副本，随后以索引继承身份，不能把路径当成跨端书籍身份。
+- 本地书直接由 App 内置 Reader 打开，绝不以“上传到 Pi”作为阅读前置；Pi 下载后的书也立即
+  进入同一本机打开路径。
+- App 从同一 Reader 源码打包本地壳，并由原生本地资源接口提供 PDF Range 与 EPUB
+  manifest/section/resource 等价能力；本地首版的书籍自带 CSS 处于明确禁用状态，待作用域隔离
+  合同成熟后再恢复。不得以 PDFKit/另一套 EPUB renderer 取代现有 `DocumentHost`，也不得把
+  本地壳重新命名为 PWA。
+
+### 属于书籍 DocumentHost 的数据
+
+- PDF/EPUB/HTML/Markdown 文件身份与渲染缓存（文件字节可位于 Pi 或用户授权的本机目录）；
 - PDF 文字层、OCR、页几何；
 - EPUB 章节结构与 reflow 定位；
 - 导入 HTML/Markdown 的文档锚点；
@@ -186,7 +226,8 @@ collection 就自动上传。无扩展真书 PWA 使用自己的本地 fallback�
   笔/橡皮抬起或任意手指落下时同步撤销，不允许用延时器恢复，也不得扩大为全页输入层；
 - 如果未来要持久化，必须先设计基于内容锚点的 stroke 投影，再由用户确认。
 
-书籍绘图不受此规则影响，仍由 PWA 按书籍坐标保存。
+书籍绘图不受此规则影响：App 本机真书由 App-owned document store 保存，网页版真书由 PWA
+document store 保存；两端都只通过对应 `DocumentHost` 解释书籍坐标。
 
 ### 闭合选区元素
 

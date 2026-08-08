@@ -654,7 +654,7 @@ const PROVIDER_OPS = new Set([
   "changes", "applyChanges", "status"
 ]);
 const PROVIDER_SYNC_OPS = new Set([
-  "syncStatus"
+  "syncStatus", "syncNow"
 ]);
 const providerPorts = new Set();
 const vocabularyStatePorts = new Set();
@@ -2062,7 +2062,8 @@ async function providerSyncRuntimeFor(requestCaptured) {
           });
         }
         return true;
-      }
+      },
+      collections: registry.syncCollections()
     });
   } catch (error) {
     try { runtime.destroy("conflict-control-create-failed"); } catch (_) {}
@@ -2881,6 +2882,11 @@ async function runProviderSyncCall(captured, operation, args) {
     fenceCapturedAccount(captured);
     return result;
   }
+  if (operation === "syncNow") {
+    const result = await control.syncNow(args || {});
+    fenceCapturedAccount(captured);
+    return result;
+  }
   throw Object.assign(new Error("不允许的同步控制操作"), {
     code: "BW_PROVIDER_OPERATION",
     retryable: false
@@ -3152,7 +3158,8 @@ chrome.runtime.onConnect.addListener((port) => {
           "put",
           "remove",
           "batch",
-          "applyChanges"
+          "applyChanges",
+          "syncNow"
         ].includes(operation) &&
         [
           "BW_ACCOUNT_CONTEXT_STALE",

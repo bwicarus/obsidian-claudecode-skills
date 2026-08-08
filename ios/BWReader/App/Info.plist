@@ -41,6 +41,11 @@
     <true/>
     <key>NSMicrophoneUsageDescription</key>
     <string>用于在阅读时与 Windows 电脑上的语音助手持续通话，包括应用进入后台或锁屏期间。</string>
+    <key>NSAppTransportSecurity</key>
+    <dict>
+        <key>NSAllowsLocalNetworking</key>
+        <true/>
+    </dict>
     <key>UIApplicationSceneManifest</key>
     <dict>
         <key>UIApplicationSupportsMultipleScenes</key>

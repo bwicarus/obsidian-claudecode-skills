@@ -25,6 +25,7 @@ enum NativeReaderCaptureError: LocalizedError {
 private struct NativeReaderJavaScriptSnapshot: Decodable {
     let title: String
     let url: String
+    let localBookID: String
     let file: String
     let page: String
     let pageCount: String
@@ -34,31 +35,20 @@ private struct NativeReaderJavaScriptSnapshot: Decodable {
 
 @MainActor
 extension ReaderWebViewModel {
-    @discardableResult
-    func openNativeReaderURL(_ url: URL) -> Bool {
-        guard
-            url.user == nil,
-            url.password == nil,
-            url.scheme?.lowercased() == "https",
-            url.host?.lowercased() == "bwicarus.taile44d0c.ts.net"
-        else {
-            return false
+    func remoteLibraryCookies() async -> [HTTPCookie] {
+        await withCheckedContinuation { continuation in
+            webView.configuration.websiteDataStore.httpCookieStore
+                .getAllCookies { cookies in
+                    continuation.resume(returning: cookies)
+                }
         }
-        webView.load(
-            URLRequest(
-                url: url,
-                cachePolicy: .useProtocolCachePolicy,
-                timeoutInterval: 30
-            )
-        )
-        return true
     }
 
     /// Captures a bounded, local snapshot of the page currently visible in the
     /// App's WKWebView. This is for App-native tools and the App Group cache;
     /// it does not participate in the Windows voice/context bridge.
     func captureNativeReaderSnapshot() async throws -> ReaderSharedSnapshot {
-        guard webView.url != nil else {
+        guard isTrustedLocalRuntimeFeatureURL(webView.url) else {
             throw NativeReaderCaptureError.pageUnavailable
         }
 
@@ -128,7 +118,9 @@ extension ReaderWebViewModel {
 
           return JSON.stringify({
             title: clean(pending.title || document.title, 1024),
-            url: clean(location.href, 2048),
+            url: window.__BW_NATIVE_LOCAL_READER__ === true
+              ? "" : clean(location.href, 2048),
+            localBookID: clean(window.__BW_NATIVE_LOCAL_BOOK_ID__, 160),
             file: clean(viewBound ? canonical.file : (pendingFile || ""), 2048),
             page: clean(viewBound ? canonical.page : pending.pos, 64),
             pageCount: clean(pending.total, 64),
@@ -162,9 +154,16 @@ extension ReaderWebViewModel {
         else {
             throw NativeReaderCaptureError.invalidPagePayload
         }
+        let route = ReaderNativeActivityRoute.url(
+            for: .openReader,
+            localBookID: value.localBookID.isEmpty ? nil : value.localBookID
+        ) ?? ReaderNativeActivityRoute.url(for: .openReader)
+        guard let route else {
+            throw NativeReaderCaptureError.invalidPagePayload
+        }
         return ReaderSharedSnapshot(
             title: value.title,
-            url: value.url,
+            url: route.absoluteString,
             file: value.file,
             page: value.page,
             pageCount: value.pageCount,

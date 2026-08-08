@@ -44,6 +44,7 @@ class ReaderDeployManifestTests(unittest.TestCase):
                 "card_improvement_runtime.py",
                 "card_improvement_service.py",
                 "card_candidate_service.py",
+                "reader_book_library.py",
                 "favorites_reader.py",
                 "reader_sidecar_store.py",
                 "reader_sync_relay.py",

@@ -30,9 +30,9 @@
     const OPS = new Set([
       'get', 'list', 'put', 'remove', 'batch',
       'changes', 'applyChanges', 'status',
-      // 页面只能观察扩展后台的脱敏冲突摘要；解除暂停必须从扩展弹窗
-      // 的 trusted extension sender 进入，不能由同页 postMessage 伪造。
-      'syncStatus'
+      // 页面只能观察脱敏状态或请求唯一 owner 执行一次正常 journal
+      // drain；不能解除冲突暂停，也不能由同页 postMessage 选择赢家。
+      'syncStatus', 'syncNow'
     ]);
     let port = null;
     let reconnectTimer = 0;

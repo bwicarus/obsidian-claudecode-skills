@@ -33,7 +33,9 @@ REGISTRY_DIGEST_PREFIX = (
 )
 SIGNAL_CONTRACT = "direct-signal/1"
 OWNER_LEASE_CONTRACT = "owner-lease/1"
+NATIVE_SYNC_BOOTSTRAP_CONTRACT = "native-sync-bootstrap/1"
 OWNER_LEASE_TTL_SECONDS = 30
+NATIVE_SYNC_BOOTSTRAP_TTL_SECONDS = 60
 MAX_BODY_BYTES = 2 * 1024 * 1024
 MAX_CHANGES = 100
 MAX_LIMIT = 100
@@ -50,7 +52,9 @@ CAUSAL_CONTRACT = "record-parent-state/1"
 MAX_CAUSAL_PARENT_BYTES = 512 * 1024
 MAX_JS_SAFE_INTEGER = 2**53 - 1
 _SAFE_NAME_RE = re.compile(r"^[A-Za-z0-9._:-]{1,128}$")
-_DEVICE_FAMILY_RE = re.compile(r"^pwa-install-v1-[a-f0-9]{32}$")
+_DEVICE_FAMILY_RE = re.compile(
+    r"^(?:pwa-install|native-app)-v1-[a-f0-9]{32}$"
+)
 
 bp = Blueprint("reader_sync_relay", __name__, url_prefix="/api/reader/sync")
 DEPLOYMENT_PROBE_HEADER = "X-BW-Reader-Deployment-Probe"
@@ -343,8 +347,16 @@ def _owner_lease_holder(body: dict) -> dict:
     if not _DEVICE_FAMILY_RE.fullmatch(device_family_id):
         raise RelayRequestError("deviceFamilyId 无效")
     owner_role = body.get("ownerRole")
-    if owner_role not in {"pwa", "extension"}:
-        raise RelayRequestError("ownerRole 只允许 pwa 或 extension")
+    if owner_role not in {"pwa", "extension", "native"}:
+        raise RelayRequestError("ownerRole 只允许 pwa、extension 或 native")
+    if (
+        owner_role == "native"
+        and not device_family_id.startswith("native-app-v1-")
+    ) or (
+        owner_role != "native"
+        and not device_family_id.startswith("pwa-install-v1-")
+    ):
+        raise RelayRequestError("deviceFamilyId 与 ownerRole 不匹配")
     if not isinstance(body.get("ownerInstanceId"), str):
         raise RelayRequestError("ownerInstanceId 必须是字符串")
     owner_instance_id = _safe_name(
@@ -1219,9 +1231,155 @@ def _owner_lease_request(*, credentials: bool) -> tuple[dict, str, dict]:
         if credentials
         else _owner_lease_holder(body)
     )
+    if not credentials and owner["ownerRole"] == "native":
+        _verify_native_bootstrap_token(
+            body.get("nativeBootstrapToken"),
+            identity=identity,
+            registry_digest=registry_digest,
+            holder=owner,
+        )
     if owner["deviceId"] != device_id:  # pragma: no cover - same parser/input
         raise RelayRequestError("deviceId 不一致")
     return identity, registry_digest, owner
+
+
+def _native_bootstrap_secret() -> bytes:
+    secret = current_app.secret_key
+    if isinstance(secret, str):
+        secret = secret.encode("utf-8")
+    if not isinstance(secret, (bytes, bytearray)) or not secret:
+        raise RelayRequestError(
+            "native sync bootstrap 暂时不可用",
+            "BW_SYNC_NATIVE_BOOTSTRAP",
+            503,
+        )
+    return bytes(secret)
+
+
+def _native_bootstrap_mac(
+    *,
+    namespace: str,
+    registry_digest: str,
+    holder: dict,
+    expires_at: int,
+) -> str:
+    payload = "\0".join((
+        "reader-native-sync-bootstrap-v1",
+        namespace,
+        registry_digest,
+        holder["deviceFamilyId"],
+        holder["ownerInstanceId"],
+        holder["deviceId"],
+        str(expires_at),
+    )).encode("utf-8")
+    return hmac.new(
+        _native_bootstrap_secret(),
+        payload,
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def _native_bootstrap_token(
+    *,
+    namespace: str,
+    registry_digest: str,
+    holder: dict,
+    expires_at: int,
+) -> str:
+    return "native-bootstrap-v1-{}-{}".format(
+        expires_at,
+        _native_bootstrap_mac(
+            namespace=namespace,
+            registry_digest=registry_digest,
+            holder=holder,
+            expires_at=expires_at,
+        ),
+    )
+
+
+def _verify_native_bootstrap_token(
+    value: Any,
+    *,
+    identity: dict,
+    registry_digest: str,
+    holder: dict,
+) -> None:
+    token = str(value or "")
+    match = re.fullmatch(
+        r"native-bootstrap-v1-([0-9]{1,12})-([a-f0-9]{64})",
+        token,
+    )
+    if not match:
+        raise RelayRequestError(
+            "native sync bootstrap 无效",
+            "BW_SYNC_NATIVE_BOOTSTRAP",
+            403,
+        )
+    expires_at = int(match.group(1))
+    now = int(time.time())
+    if expires_at < now or expires_at > now + NATIVE_SYNC_BOOTSTRAP_TTL_SECONDS:
+        raise RelayRequestError(
+            "native sync bootstrap 已失效",
+            "BW_SYNC_NATIVE_BOOTSTRAP",
+            403,
+        )
+    expected = _native_bootstrap_mac(
+        namespace=identity["storage_namespace"],
+        registry_digest=registry_digest,
+        holder=holder,
+        expires_at=expires_at,
+    )
+    if not hmac.compare_digest(match.group(2), expected):
+        raise RelayRequestError(
+            "native sync bootstrap 无效",
+            "BW_SYNC_NATIVE_BOOTSTRAP",
+            403,
+        )
+
+
+@bp.post("/native/bootstrap")
+def native_bootstrap():
+    """Authenticate App sync without exposing a durable credential to JS."""
+    try:
+        body = _request_json(contract=NATIVE_SYNC_BOOTSTRAP_CONTRACT)
+        expected_keys = {
+            "contract",
+            "deviceFamilyId",
+            "deviceId",
+            "ownerInstanceId",
+            "registryDigest",
+            "requestId",
+            "syncChangeContract",
+            "syncContract",
+        }
+        if set(body) != expected_keys:
+            raise RelayRequestError("native sync bootstrap 字段不匹配")
+        registry_digest = _require_sync_fence(body)
+        identity = _identity()
+        request_id = _safe_name(body.get("requestId"), "requestId")
+        holder = _owner_lease_holder({
+            "deviceFamilyId": body.get("deviceFamilyId"),
+            "ownerRole": "native",
+            "ownerInstanceId": body.get("ownerInstanceId"),
+            "deviceId": body.get("deviceId"),
+        })
+        expires_at = int(time.time()) + NATIVE_SYNC_BOOTSTRAP_TTL_SECONDS
+        token = _native_bootstrap_token(
+            namespace=identity["storage_namespace"],
+            registry_digest=registry_digest,
+            holder=holder,
+            expires_at=expires_at,
+        )
+        return _json_response({
+            "ok": True,
+            "contract": NATIVE_SYNC_BOOTSTRAP_CONTRACT,
+            "requestId": request_id,
+            "ownerNamespace": identity["storage_namespace"],
+            "nativeBootstrapToken": token,
+            "expiresAt": expires_at,
+        })
+    except RelayRequestError as exc:
+        return _error(exc, contract=NATIVE_SYNC_BOOTSTRAP_CONTRACT)
 
 
 @bp.post("/owner/claim")

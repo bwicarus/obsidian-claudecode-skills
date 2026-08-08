@@ -34,6 +34,15 @@ from flask import (
     send_file, session, has_request_context,
 )
 from reader_sw_auth import READER_SW_AUTH_JS, READER_SW_AUTH_PLACEHOLDER
+from reader_book_library import (
+    BookLibrary,
+    BookLibraryError,
+    InvalidBookContentError,
+    UploadTooLargeError,
+    UnknownBookError,
+    UnsafeLibraryPathError,
+    UnsupportedBookError,
+)
 
 # AI 后端复用 _client/core 的 ai_backends + scripts/ai_client
 # 同 skilltree.py 已经在 app.py 启动时把 sys.path 加好了
@@ -53,6 +62,18 @@ _READER_STORAGE_IDENTITY = contextvars.ContextVar(
 )
 _READER_SIDECAR_ROOT = None
 _READER_SIDECAR_STORE = None
+_READER_BOOK_LIBRARY = None
+
+
+def _reader_book_library():
+    """Return the vault-wide original-book catalog used by native clients."""
+    global _READER_BOOK_LIBRARY
+    if _READER_BOOK_LIBRARY is None:
+        _READER_BOOK_LIBRARY = BookLibrary(
+            OBSIDIAN_ROOT,
+            CLAUDE_DIR / "state" / "reader-book-library",
+        )
+    return _READER_BOOK_LIBRARY
 
 
 def _reader_storage_identity_coerce(value):
@@ -3592,6 +3613,77 @@ def pdf_file(rel):
 def pdf_api_list_pdfs():
     """vault 里所有 PDF 的列表（控制面板新建书本下拉用）。"""
     return jsonify({"ok": True, "pdfs": _list_vault_pdfs()})
+
+
+def _reader_library_access_status() -> int:
+    """Return 200 only for the verified owner of the shared private vault."""
+    try:
+        identity = _reader_storage_identity_current()
+        if identity is None:
+            return 401
+        authorizer = current_app.extensions.get(
+            "reader_book_library_authorizer"
+        )
+        if not callable(authorizer) or not authorizer(identity):
+            return 403
+        return 200
+    except Exception:
+        return 403
+
+
+def _reader_library_access_error():
+    status = _reader_library_access_status()
+    if status == 200:
+        return None
+    message = "authentication required" if status == 401 else "book library forbidden"
+    return jsonify({"ok": False, "error": message}), status
+
+
+@bp.route("/api/library/catalog")
+def pdf_api_library_catalog():
+    """List original vault PDF/EPUB files without exposing absolute paths."""
+    denied = _reader_library_access_error()
+    if denied is not None:
+        return denied
+    try:
+        books = _reader_book_library().catalog()
+    except BookLibraryError:
+        current_app.logger.exception("reader book catalog failed")
+        return jsonify({"ok": False, "error": "book catalog unavailable"}), 500
+    response = jsonify({"ok": True, "books": books, "count": len(books)})
+    response.headers["Cache-Control"] = "private, no-store"
+    return response
+
+
+@bp.route("/api/library/download/<book_id>")
+def pdf_api_library_download(book_id):
+    """Download one catalogued original book; conditional Range is supported."""
+    denied = _reader_library_access_error()
+    if denied is not None:
+        return denied
+    try:
+        entry, path = _reader_book_library().resolve(book_id)
+    except UnknownBookError:
+        return jsonify({"ok": False, "error": "book not found"}), 404
+    except BookLibraryError:
+        current_app.logger.exception("reader book download resolve failed")
+        return jsonify({"ok": False, "error": "book catalog unavailable"}), 500
+    mimetype = "application/pdf" if entry["kind"] == "pdf" else "application/epub+zip"
+    response = send_file(
+        str(path),
+        mimetype=mimetype,
+        as_attachment=True,
+        download_name=entry["name"],
+        conditional=True,
+        etag=entry["contentSha256"],
+        last_modified=entry["mtime"],
+    )
+    response.headers["Accept-Ranges"] = "bytes"
+    # The URL is stable while bytes may change; revalidate against the digest.
+    response.headers["Cache-Control"] = "private, no-cache"
+    response.headers["X-Reader-Book-Id"] = entry["bookId"]
+    response.headers["X-Reader-Book-Version"] = entry["version"]
+    return response
 
 
 # ── 书本预处理（扫描 PDF 补文字层）：检测文字层 → 无则 Google Vision OCR + 嵌入 → 原地替换 ──
@@ -14084,6 +14176,53 @@ def pdf_api_upload():
         return jsonify({"ok": False, "error": f"启动转换失败：{ex}"}), 500
     return jsonify({"ok": True, "converting": True, "job": job, "rel": rel, "name": dest.name,
                     "view_url": f"/pdf/view?file={urllib.parse.quote(rel, safe='/')}"})
+
+
+@bp.route("/api/library/upload", methods=["POST"])
+def pdf_api_library_upload():
+    """Atomically add an original PDF/EPUB and return its catalog identity."""
+    denied = _reader_library_access_error()
+    if denied is not None:
+        return denied
+    library = _reader_book_library()
+    if (
+        request.content_length is not None
+        and request.content_length > library.max_upload_bytes
+    ):
+        return jsonify({
+            "ok": False,
+            "error": "book upload too large",
+            "maxBytes": library.max_upload_bytes,
+        }), 413
+    upload = request.files.get("file")
+    if upload is None or not upload.filename:
+        return jsonify({"ok": False, "error": "file is required"}), 400
+    target_dir = (request.form.get("target_dir") or "资源/uploads").strip()
+    try:
+        entry, deduplicated = library.ingest(
+            upload.stream,
+            upload.filename,
+            target_dir=target_dir,
+            sanitize_filename=_sanitize_filename,
+        )
+    except UploadTooLargeError as exc:
+        return jsonify({
+            "ok": False,
+            "error": "book upload too large",
+            "maxBytes": exc.max_bytes,
+        }), 413
+    except (UnsupportedBookError, InvalidBookContentError, UnsafeLibraryPathError) as exc:
+        return jsonify({"ok": False, "error": str(exc)}), 400
+    except BookLibraryError:
+        current_app.logger.exception("reader book upload failed")
+        return jsonify({"ok": False, "error": "book upload failed"}), 500
+    return jsonify({
+        "ok": True,
+        "deduplicated": deduplicated,
+        "bookId": entry["bookId"],
+        "contentSha256": entry["contentSha256"],
+        "book": entry,
+    })
 
 
 _EBOOK_CONV_DIR = CLAUDE_DIR / "state" / "pdf-ebook-convert"

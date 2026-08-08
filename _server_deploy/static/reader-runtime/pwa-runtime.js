@@ -225,6 +225,14 @@
         error.code = 'BW_SYNC_OWNER_RESERVED';
         error.retryable = true;
         return Promise.reject(error);
+      },
+      syncNow: function () {
+        var error = new Error(
+          '扩展后台保留同步所有权，但当前命令通道不可用'
+        );
+        error.code = 'BW_SYNC_OWNER_RESERVED';
+        error.retryable = true;
+        return Promise.reject(error);
       }
     });
     return reservedSyncControl;
@@ -931,7 +939,8 @@
       assertFence: function () {
         assertAccountLease(lease);
         return true;
-      }
+      },
+      collections: registry.syncCollections()
     });
     assertAccountLease(lease);
     return pwaSyncRuntime;

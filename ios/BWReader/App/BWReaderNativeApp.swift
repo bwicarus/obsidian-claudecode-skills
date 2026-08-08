@@ -25,6 +25,7 @@ private struct ReaderRootView: View {
     @ObservedObject var nativeCommandReceiver: ReaderNativeCommandReceiver
     @State private var showsDiagnostics = false
     @State private var showsNativeTools = false
+    @State private var showsLibrary = true
     @State private var nativeToolsInitialAction: ReaderNativeFeatureAction?
 
     var body: some View {
@@ -109,17 +110,30 @@ private struct ReaderRootView: View {
                 )
                 .padding(4)
 
-            Button {
-                nativeToolsInitialAction = .openNativeTools
-                showsNativeTools = true
-            } label: {
-                Image(systemName: "text.viewfinder")
-                    .font(.system(size: 17, weight: .semibold))
-                    .frame(width: 44, height: 44)
-                    .background(.ultraThinMaterial, in: Circle())
+            HStack(spacing: 8) {
+                Button {
+                    showsLibrary = true
+                } label: {
+                    Image(systemName: "books.vertical")
+                        .font(.system(size: 17, weight: .semibold))
+                        .frame(width: 44, height: 44)
+                        .background(.ultraThinMaterial, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("打开书库")
+
+                Button {
+                    nativeToolsInitialAction = .openNativeTools
+                    showsNativeTools = true
+                } label: {
+                    Image(systemName: "text.viewfinder")
+                        .font(.system(size: 17, weight: .semibold))
+                        .frame(width: 44, height: 44)
+                        .background(.ultraThinMaterial, in: Circle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityLabel("打开原生阅读工具")
             }
-            .buttonStyle(.plain)
-            .accessibilityLabel("打开原生阅读工具")
             .frame(
                 maxWidth: .infinity,
                 maxHeight: .infinity,
@@ -150,7 +164,7 @@ private struct ReaderRootView: View {
             }
         }
         .onChange(of: scenePhase, initial: true) { _, phase in
-            reader.setReaderForeground(phase == .active)
+            reader.setReaderScenePhase(phase)
         }
         .task {
             BWReaderAppShortcuts.updateAppShortcutParameters()
@@ -193,12 +207,28 @@ private struct ReaderRootView: View {
                 initialAction: nativeToolsInitialAction
             )
         }
+        .sheet(isPresented: $showsLibrary) {
+            ReaderLocalLibraryView(reader: reader)
+        }
     }
 
     @MainActor
     private func handleNativeFeatureRoute(_ route: ReaderNativeActivityRoute) {
-        if let readerURL = route.readerURL {
-            _ = reader.openNativeReaderURL(readerURL)
+        if let localBookID = route.localBookID,
+           let localBook = ReaderLocalLibraryManager.shared.books.first(
+            where: { $0.id == localBookID }
+           ) {
+            showsLibrary = false
+            Task { @MainActor in
+                _ = await reader.openLocalBook(
+                    localBook,
+                    library: ReaderLocalLibraryManager.shared
+                )
+            }
+        } else {
+            // Old Spotlight records without an opaque local book identity
+            // return to the App-owned shelf. The main Reader never loads Pi.
+            showsLibrary = true
         }
         switch route.action {
         case .openReader:
@@ -215,7 +245,7 @@ private struct ReaderRootView: View {
             return
         }
         handleNativeFeatureRoute(
-            ReaderNativeActivityRoute(action: request.action, readerURL: nil)
+            ReaderNativeActivityRoute(action: request.action)
         )
     }
 

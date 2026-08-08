@@ -16,7 +16,13 @@ function md(s) {
         .replace(/([一-鿿　-〿＀-￯])([*`])/g, '$1\u200b$2')
         .replace(/([*`])([一-鿿　-〿＀-￯])/g, '$1\u200b$2');
       let html = marked.parse(t);
-      return html.replace(/@@MJX(\d+)@@/g, (_, i) => (math[+i] != null ? math[+i] : ''));   // ③ 还原公式
+      html = html.replace(/@@MJX(\d+)@@/g, (_, i) => {
+        const value = math[+i] != null ? math[+i] : '';
+        return String(value).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+      });
+      return window.RC && typeof RC.safeHtml === 'function'
+        ? RC.safeHtml(html)
+        : s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');
     } catch(_) {}
   }
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/\n/g,'<br>');

@@ -149,7 +149,8 @@
   }
   function isWriteOperation(operation) {
     return operation === 'put' || operation === 'remove' ||
-      operation === 'batch' || operation === 'applyChanges';
+      operation === 'batch' || operation === 'applyChanges' ||
+      operation === 'syncNow';
   }
   function request(operation, args, timeoutMs) {
     if (!connected) {
@@ -191,7 +192,7 @@
          * background owner is still alive, creating two writers. Keep storage
          * authority attached and let the next explicit status read retry.
          */
-        if (operation !== 'syncStatus') {
+        if (operation !== 'syncStatus' && operation !== 'syncNow') {
           announceDisconnected('request-timeout:' + operation);
         }
         reject(error);
@@ -264,6 +265,9 @@
       contract: 'sync-conflict-control/1',
       status: function () {
         return request('syncStatus', {});
+      },
+      syncNow: function (requestValue) {
+        return request('syncNow', requestValue || {}, 120000);
       }
     });
   }

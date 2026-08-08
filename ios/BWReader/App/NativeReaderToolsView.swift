@@ -161,8 +161,11 @@ struct NativeReaderToolsView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var coordinator = NativeReaderToolsCoordinator()
     @StateObject private var localNotes = ReaderLocalNotesManager.shared
+    @StateObject private var piSync = ReaderPiSyncCoordinator()
     @State private var presentsAnnotation = false
     @State private var presentsTranslation = false
+    @State private var presentsLocalLibrary = false
+    @State private var presentsPiLogin = false
     @State private var presentsLocalNotesFolderPicker = false
     @State private var selectedLocalNote: ReaderLocalNoteProjection?
     @State private var translationText = ""
@@ -173,7 +176,6 @@ struct NativeReaderToolsView: View {
 
     let reader: ReaderWebViewModel
     let initialAction: ReaderNativeFeatureAction?
-
     init(
         reader: ReaderWebViewModel,
         initialAction: ReaderNativeFeatureAction? = nil
@@ -188,6 +190,8 @@ struct NativeReaderToolsView: View {
                 currentPageSection
                 nativeActionsSection
                 recognitionSection
+                localLibrarySection
+                piSyncSection
                 localNotesSection
                 quickNotesSection
                 NativePencilSettingsSection()
@@ -216,6 +220,14 @@ struct NativeReaderToolsView: View {
             }
             .sheet(isPresented: $presentsTranslation) {
                 NativeTranslationToolView(initialText: translationText)
+            }
+            .sheet(isPresented: $presentsLocalLibrary) {
+                ReaderLocalLibraryView(reader: reader)
+            }
+            .sheet(isPresented: $presentsPiLogin) {
+                ReaderPiLoginView(
+                    dataStore: reader.webView.configuration.websiteDataStore
+                )
             }
             .fullScreenCover(isPresented: $presentsAnnotation) {
                 if let image = coordinator.viewportImage {
@@ -254,6 +266,104 @@ struct NativeReaderToolsView: View {
                     }
                 }
             }
+        }
+    }
+
+    @ViewBuilder
+    private var localLibrarySection: some View {
+        Section("书库") {
+            Button {
+                presentsLocalLibrary = true
+            } label: {
+                Label("本机书库", systemImage: "books.vertical")
+            }
+
+            Text("本机书籍会直接离线打开；Pi 只用于显式同步与备份，不是打开本机书籍的前置条件，也不会自动覆盖或删除任何书籍。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var piSyncSection: some View {
+        Section("Pi 同步") {
+            Button {
+                presentsPiLogin = true
+            } label: {
+                Label("登录或重新登录 Pi", systemImage: "person.crop.circle.badge.checkmark")
+            }
+            .disabled(piSync.isRunning)
+
+            Button {
+                Task { await piSync.syncToPi(using: reader) }
+            } label: {
+                Label(
+                    piSync.isRunning ? "正在与 Pi 同步" : "与 Pi 同步",
+                    systemImage: "arrow.triangle.2.circlepath.icloud"
+                )
+            }
+            .disabled(piSync.isRunning)
+
+            if piSync.isRunning {
+                HStack {
+                    ProgressView()
+                    Text(piSync.phase.title)
+                        .font(.footnote)
+                        .foregroundStyle(.secondary)
+                        .lineLimit(2)
+                }
+            }
+
+            if let report = piSync.report {
+                LabeledContent("结果", value: report.state.title)
+                Text("书籍：\(report.books.summary)")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+                Text("数据：\(report.data.summary)")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+
+                if !report.books.remoteNewer.isEmpty {
+                    Text(
+                        "Pi 较新，未覆盖：" +
+                            report.books.remoteNewer.prefix(5).joined(separator: "、")
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                }
+                if !report.books.conflicts.isEmpty {
+                    Text(
+                        "两端冲突，未覆盖：" +
+                            report.books.conflicts.prefix(5).joined(separator: "、")
+                    )
+                    .font(.caption)
+                    .foregroundStyle(.orange)
+                }
+                if !report.unsupported.isEmpty {
+                    Text("仅保存在本机、尚未同步到 Pi：\(report.unsupported.joined(separator: "、"))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+                Text(
+                    report.finishedAt.formatted(
+                        date: .abbreviated,
+                        time: .standard
+                    )
+                )
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+            }
+
+            if let errorMessage = piSync.errorMessage {
+                Text(errorMessage)
+                    .font(.caption)
+                    .foregroundStyle(.red)
+                    .lineLimit(4)
+            }
+
+            Text("本机先保存，再显式同步到 Pi。Pi 较新、两端冲突或结果未知时不会自动覆盖；再次同步会先重新核对目录与摘要。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
         }
     }
 

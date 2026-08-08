@@ -6,11 +6,19 @@ struct ReaderNativeActivityRoute: Equatable, Sendable {
     static let host = "reader-feature"
 
     let action: ReaderNativeFeatureAction
-    let readerURL: URL?
+    let localBookID: String?
+
+    init(
+        action: ReaderNativeFeatureAction,
+        localBookID: String? = nil
+    ) {
+        self.action = action
+        self.localBookID = localBookID
+    }
 
     static func url(
         for action: ReaderNativeFeatureAction,
-        readerURL: URL? = nil
+        localBookID: String? = nil
     ) -> URL? {
         var components = URLComponents()
         components.scheme = ReaderNativeBridgeContract.launchScheme
@@ -18,10 +26,9 @@ struct ReaderNativeActivityRoute: Equatable, Sendable {
         var queryItems = [
             URLQueryItem(name: "action", value: action.rawValue),
         ]
-        if let readerURL, isSupportedReaderURL(readerURL) {
-            queryItems.append(
-                URLQueryItem(name: "url", value: readerURL.absoluteString)
-            )
+        if let localBookID {
+            guard isOpaqueLocalBookID(localBookID) else { return nil }
+            queryItems.append(URLQueryItem(name: "book", value: localBookID))
         }
         components.queryItems = queryItems
         return components.url
@@ -44,13 +51,16 @@ struct ReaderNativeActivityRoute: Equatable, Sendable {
             return nil
         }
 
-        let candidate = components.queryItems?.first(
-            where: { $0.name == "url" }
-        )?.value.flatMap(URL.init(string:))
-        let readerURL = candidate.flatMap {
-            isSupportedReaderURL($0) ? $0 : nil
+        let rawBookID = components.queryItems?.first(
+            where: { $0.name == "book" }
+        )?.value
+        if rawBookID != nil && !isOpaqueLocalBookID(rawBookID ?? "") {
+            return nil
         }
-        return ReaderNativeActivityRoute(action: action, readerURL: readerURL)
+        return ReaderNativeActivityRoute(
+            action: action,
+            localBookID: rawBookID
+        )
     }
 
     static func parse(
@@ -74,24 +84,17 @@ struct ReaderNativeActivityRoute: Equatable, Sendable {
             return nil
         }
 
-        let readerURL = store.readSnapshot().flatMap {
-            URL(string: $0.url)
-        }.flatMap {
-            isSupportedReaderURL($0) ? $0 : nil
+        let storedURL = store.readSnapshot().flatMap { URL(string: $0.url) }
+        if let storedURL, let route = parse(storedURL) {
+            return route
         }
-        return ReaderNativeActivityRoute(
-            action: .openReader,
-            readerURL: readerURL
-        )
+        return ReaderNativeActivityRoute(action: .openReader)
     }
 
-    private static func isSupportedReaderURL(_ url: URL) -> Bool {
-        guard url.user == nil, url.password == nil else { return false }
-        switch url.scheme?.lowercased() {
-        case "http", "https":
-            return true
-        default:
-            return false
+    private static func isOpaqueLocalBookID(_ value: String) -> Bool {
+        guard value.hasPrefix("localbook-"), value.count == 74 else { return false }
+        return value.dropFirst("localbook-".count).unicodeScalars.allSatisfy {
+            (48...57).contains($0.value) || (97...102).contains($0.value)
         }
     }
 }
@@ -120,10 +123,12 @@ enum ReaderSpotlightIndex {
         attributes.contentDescription = contentDescription(for: snapshot)
         attributes.textContent = snapshot.searchableText
         attributes.keywords = spotlightKeywords(for: snapshot)
-        attributes.contentURL = ReaderNativeActivityRoute.url(
-            for: .openReader,
-            readerURL: URL(string: snapshot.url)
-        )
+        let snapshotURL = URL(string: snapshot.url)
+        attributes.contentURL = snapshotURL.flatMap {
+            ReaderNativeActivityRoute.parse($0)
+        } == nil
+            ? ReaderNativeActivityRoute.url(for: .openReader)
+            : snapshotURL
 
         let item = CSSearchableItem(
             uniqueIdentifier: currentItemIdentifier,

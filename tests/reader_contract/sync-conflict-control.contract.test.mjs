@@ -35,11 +35,21 @@ function runtimeWith(status, options = {}) {
       },
       resolveConflict() {
         calls.push("resolveConflict");
-        throw new Error("read-only control must not resolve");
+        throw new Error("manual sync control must not resolve");
       },
-      runNow() {
-        calls.push("runNow");
-        throw new Error("read-only control must not replay");
+      async runNow(reason) {
+        calls.push(`runNow:${reason}`);
+        if (options.runError) throw options.runError;
+        return structuredClone(options.runResult || {
+          contract: "sync-runtime/1",
+          server: {
+            ok: true,
+            pendingLocal: false,
+            applied: 0,
+            conflicts: [],
+          },
+          direct: {},
+        });
       },
     },
   };
@@ -97,6 +107,7 @@ test("status 只发布有界白名单，不签发重试令牌也不泄漏原始�
     },
   }));
   const control = controlFor(source.runtime);
+  assert.equal(control.owner, "extension-background");
   const status = await control.status();
 
   assert.deepEqual(Object.keys(status).sort(), [
@@ -233,6 +244,102 @@ test("状态映射只读且不会调用 runtime 的裁决或重放方法", async
   }
 });
 
+test("syncNow 严格校验请求并复用同一 requestId 的 receipt", async () => {
+  const source = runtimeWith(runtimeStatus(), {
+    runResult: {
+      contract: "sync-runtime/1",
+      server: {
+        ok: true,
+        pendingLocal: false,
+        applied: 3,
+        conflicts: [],
+      },
+      direct: {},
+    },
+  });
+  const control = controlFor(source.runtime, {
+    collections: ["vocabulary-state", "user-settings", "user-settings"],
+  });
+  const request = {
+    contract: "reader-pi-sync-request/1",
+    requestId: "sync-123",
+  };
+  const first = control.syncNow(request);
+  const second = control.syncNow(request);
+  assert.strictEqual(first, second);
+  const result = await first;
+  assert.deepEqual(Object.keys(result).sort(), [
+    "applied",
+    "at",
+    "collections",
+    "conflictCount",
+    "contract",
+    "errorCode",
+    "owner",
+    "pendingLocal",
+    "requestId",
+    "retryable",
+    "state",
+  ]);
+  assert.equal(result.contract, "reader-pi-data-sync-result/1");
+  assert.equal(result.requestId, "sync-123");
+  assert.equal(result.state, "complete");
+  assert.equal(result.applied, 3);
+  assert.deepEqual(result.collections, ["user-settings", "vocabulary-state"]);
+  assert.deepEqual(source.calls, [
+    "status",
+    "runNow:native-pi-sync:sync-123",
+    "status",
+  ]);
+
+  await assert.rejects(
+    control.syncNow({
+      contract: "reader-pi-sync-request/1",
+      requestId: "sync-124",
+      force: true,
+    }),
+    (error) => error && error.code === "BW_PI_SYNC_REQUEST_INVALID",
+  );
+  assert.equal("resolveConflict" in control, false);
+  assert.equal("retryAfterResolution" in control, false);
+});
+
+test("syncNow 遇到 conflict pause 只返回 blocked，不解除暂停或重放", async () => {
+  const source = runtimeWith(runtimeStatus({
+    paused: true,
+    pauseReason: "sync-conflict",
+    lastResult: {
+      server: {
+        conflicts: [{
+          collection: "user-settings",
+          id: "theme",
+          reason: "revision-conflict",
+        }],
+      },
+      direct: {},
+    },
+  }));
+  const result = await controlFor(source.runtime).syncNow({
+    contract: "reader-pi-sync-request/1",
+    requestId: "blocked-1",
+  });
+  assert.equal(result.state, "blocked");
+  assert.equal(result.conflictCount, 1);
+  assert.deepEqual(source.calls, ["status"]);
+});
+
+test("App-owned local runtime reports native-app without masquerading as PWA", async () => {
+  const source = runtimeWith(runtimeStatus());
+  const result = await controlFor(source.runtime, {
+    owner: "native-app",
+  }).syncNow({
+    contract: "reader-pi-sync-request/1",
+    requestId: "native-owner-1",
+  });
+  assert.equal(result.owner, "native-app");
+  assert.equal(result.state, "complete");
+});
+
 test("server lane 与 runtime 异常公开稳定错误码，不泄漏上游文本", async () => {
   const serverFailure = runtimeWith(runtimeStatus({
     lastResult: {
@@ -271,13 +378,17 @@ test("server lane 与 runtime 异常公开稳定错误码，不泄漏上游文�
   );
 });
 
-test("创建控制器只依赖 runtime.status，不依赖 crypto", async () => {
+test("创建控制器只依赖 runtime status/runNow，不依赖 crypto", async () => {
   const calls = [];
   const runtime = {
     contract: "sync-runtime/1",
     async status() {
       calls.push("status");
       return runtimeStatus();
+    },
+    async runNow() {
+      calls.push("runNow");
+      return { server: { ok: true, conflicts: [] }, direct: {} };
     },
   };
   const control = ConflictControl.createSyncConflictControl({

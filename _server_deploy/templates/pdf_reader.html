@@ -1,9 +1,4 @@
-<!doct
-  /* 实况网页模式:书页容器变成网页视窗(其余 UI 全同 PDF 阅读器) */
-  body.web-mode #page-container{height:100%;overflow:hidden;padding:0;display:block}
-  body.web-mode #wl-url{flex:1 1 auto;min-width:0;background:#0d1322;border:1px solid #2a3550;
-    color:#cfe6ff;border-radius:17px;height:32px;padding:0 13px;font-size:13px;outline:none;font-family:inherit}
-ype html>
+<!doctype html>
 <html lang="zh"><head>
 <meta name="bw-reader-app" content="{{ reader_app|default('pdf', true) }}">
 <meta name="bw-reader-route" content="{{ reader_route|default('pdf', true) }}">
@@ -19,6 +14,12 @@ ype html>
      旧 mathjax.js 是 autoload 构建,\boldsymbol 等要现场拉 CDN 组件,拉不到就红字显示命令名(图描述公式炸红的根因) -->
 <script src="/static/qa/mathjax-full.js" async></script>
 <link rel="stylesheet" href="/static/pdf/pdf-styles.css?v={{ shared_js_v }}"><!-- 样式抽出为静态文件(53KB → immutable 缓存) -->
+<style>
+  /* 实况网页模式:书页容器变成网页视窗(其余 UI 全同 PDF 阅读器) */
+  body.web-mode #page-container{height:100%;overflow:hidden;padding:0;display:block}
+  body.web-mode #wl-url{flex:1 1 auto;min-width:0;background:#0d1322;border:1px solid #2a3550;
+    color:#cfe6ff;border-radius:17px;height:32px;padding:0 13px;font-size:13px;outline:none;font-family:inherit}
+</style>
 <!-- 预加载提示:大 JS 在 head 就开始并行拉(它们的 <script> 在 body 尾;HTTP/2 下省一段串行等待) -->
 <link rel="modulepreload" href="/static/pdf/reader.js?v={{ reader_js_v }}">
 {% if ui_shared %}<link rel="preload" as="script" href="/static/pdf/pdf-uishared.js?v={{ shared_js_v }}">{% endif %}

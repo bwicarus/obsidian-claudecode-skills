@@ -51,6 +51,7 @@
     var debounceMs = Math.max(0, Number(options.debounceMs) || 200);
     var retryMinMs = Math.max(1000, Number(options.retryMinMs) || 5000);
     var retryMaxMs = Math.max(retryMinMs, Number(options.retryMaxMs) || 120000);
+    var manualOnly = options.manualOnly === true;
     var paused = true;
     var destroyed = false;
     var generation = 0;
@@ -171,7 +172,7 @@
         result.server.conflicts.length > 0;
     }
     function schedule(reason, delayMs) {
-      if (destroyed || paused) return false;
+      if (destroyed || paused || manualOnly) return false;
       lastReason = String(reason || 'scheduled');
       clearScheduled();
       var scheduledGeneration = generation;

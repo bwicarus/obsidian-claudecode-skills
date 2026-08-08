@@ -22,6 +22,8 @@ from reader_sync_relay import (  # noqa: E402
     MAX_SIGNAL_PEERS,
     MAX_SIGNAL_PAYLOAD_BYTES,
     MAX_SIGNALS,
+    NATIVE_SYNC_BOOTSTRAP_CONTRACT,
+    NATIVE_SYNC_BOOTSTRAP_TTL_SECONDS,
     OWNER_LEASE_CONTRACT,
     OWNER_LEASE_TTL_SECONDS,
     SIGNAL_CONTRACT,
@@ -49,6 +51,11 @@ OTHER_REGISTRY_DIGEST = (
 def _family_id(label: str) -> str:
     digest = hashlib.sha256(label.encode("utf-8")).hexdigest()[:32]
     return "pwa-install-v1-" + digest
+
+
+def _native_family_id(label: str) -> str:
+    digest = hashlib.sha256(label.encode("utf-8")).hexdigest()[:32]
+    return "native-app-v1-" + digest
 
 
 def _parent(record: dict | None):
@@ -577,6 +584,98 @@ class ReaderSyncRelayTest(unittest.TestCase):
         rejected_family = self._claim(invalid_family)
         self.assertEqual(rejected_family.status_code, 400)
         self.assertEqual(rejected_family.json["code"], "BW_SYNC_INVALID")
+
+    def test_native_owner_requires_authenticated_short_bootstrap(self):
+        holder = {
+            "deviceFamilyId": _native_family_id("native-a"),
+            "ownerRole": "native",
+            "ownerInstanceId": "native-owner-instance-a",
+            "deviceId": "native-device-a",
+            "ownerNamespace": NS_A,
+        }
+        bootstrap_body = {
+            "contract": NATIVE_SYNC_BOOTSTRAP_CONTRACT,
+            "requestId": "native-bootstrap-a",
+            "syncContract": "sync-v3",
+            "syncChangeContract": "record-parent-state/1",
+            "registryDigest": REGISTRY_DIGEST,
+            "deviceFamilyId": holder["deviceFamilyId"],
+            "ownerInstanceId": holder["ownerInstanceId"],
+            "deviceId": holder["deviceId"],
+        }
+
+        unauthenticated = self.client.post(
+            "/api/reader/sync/native/bootstrap",
+            json=bootstrap_body,
+        )
+        self.assertEqual(unauthenticated.status_code, 401)
+        self.assertEqual(unauthenticated.json["code"], "BW_SYNC_AUTH")
+        self.assertNotIn("ownerNamespace", unauthenticated.json)
+        self.assertNotIn("nativeBootstrapToken", unauthenticated.json)
+
+        without_bootstrap = self._claim(holder)
+        self.assertEqual(without_bootstrap.status_code, 403)
+        self.assertEqual(
+            without_bootstrap.json["code"],
+            "BW_SYNC_NATIVE_BOOTSTRAP",
+        )
+
+        with mock.patch("reader_sync_relay.time.time", return_value=1_000):
+            bootstrapped = self.client.post(
+                "/api/reader/sync/native/bootstrap",
+                json=bootstrap_body,
+                headers={"X-Test-Account": "a"},
+            )
+        self.assertEqual(bootstrapped.status_code, 200)
+        self.assertEqual(
+            bootstrapped.json["contract"],
+            NATIVE_SYNC_BOOTSTRAP_CONTRACT,
+        )
+        self.assertEqual(bootstrapped.json["requestId"], "native-bootstrap-a")
+        self.assertEqual(bootstrapped.json["ownerNamespace"], NS_A)
+        self.assertEqual(
+            bootstrapped.json["expiresAt"],
+            1_000 + NATIVE_SYNC_BOOTSTRAP_TTL_SECONDS,
+        )
+        self.assertRegex(
+            bootstrapped.json["nativeBootstrapToken"],
+            r"^native-bootstrap-v1-[0-9]{1,12}-[a-f0-9]{64}$",
+        )
+
+        claim_body = self._owner_request(holder)
+        claim_body["nativeBootstrapToken"] = (
+            bootstrapped.json["nativeBootstrapToken"]
+        )
+        with mock.patch("reader_sync_relay.time.time", return_value=1_001):
+            claimed = self.client.post(
+                "/api/reader/sync/owner/claim",
+                json=claim_body,
+                headers={"X-Test-Account": "a"},
+            )
+        self.assertEqual(claimed.status_code, 200)
+        self.assertEqual(claimed.json["ownerRole"], "native")
+        self.assertRegex(
+            claimed.json["ownerToken"],
+            r"^owner-token-v1-[A-Za-z0-9_-]{24,256}$",
+        )
+
+        # The bootstrap is account-, registry-, family-, instance- and
+        # device-bound. It cannot mint a native lease for another identity.
+        other_account_body = {
+            **claim_body,
+            "ownerNamespace": NS_B,
+        }
+        with mock.patch("reader_sync_relay.time.time", return_value=1_001):
+            cross_account = self.client.post(
+                "/api/reader/sync/owner/claim",
+                json=other_account_body,
+                headers={"X-Test-Account": "b"},
+            )
+        self.assertEqual(cross_account.status_code, 403)
+        self.assertEqual(
+            cross_account.json["code"],
+            "BW_SYNC_NATIVE_BOOTSTRAP",
+        )
 
     def test_owner_lease_pwa_handoff_renew_release_and_generation(self):
         extension = self._lease_holder(

@@ -9,12 +9,39 @@ if (window.__bwPwaProviderOnly) return;
  */
 (function () {
   if (!window.RC) window.RC = {};
+  function escapeText(value) {
+    return String(value == null ? '' : value)
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+  }
   window.RC.safeHtml = function (html) {
     try {
+      var source = String(html == null ? '' : html);
+      if (window.DOMPurify && typeof window.DOMPurify.sanitize === 'function') {
+        source = window.DOMPurify.sanitize(source, {
+          USE_PROFILES: { html: true },
+          FORBID_TAGS: [
+            'script', 'style', 'svg', 'math', 'link', 'template', 'iframe',
+            'object', 'embed', 'base', 'meta', 'form', 'area', 'map'
+          ],
+          FORBID_ATTR: [
+            'style', 'srcdoc', 'srcset', 'usemap', 'ismap', 'background',
+            'ping', 'action', 'formaction', 'xlink:href'
+          ],
+          ALLOW_DATA_ATTR: false,
+          ALLOW_UNKNOWN_PROTOCOLS: false,
+          CUSTOM_ELEMENT_HANDLING: {
+            tagNameCheck: null,
+            attributeNameCheck: null,
+            allowCustomizedBuiltInElements: false
+          }
+        });
+      }
       var root = document.createElement('div');
-      root.innerHTML = String(html == null ? '' : html);
+      root.innerHTML = source;
       root.querySelectorAll(
-        'script,style,link,template,iframe,object,embed,base,meta,form'
+        'script,style,svg,math,link,template,iframe,object,embed,base,meta,form,area,map'
       ).forEach(function (node) {
         node.remove();
       });
@@ -23,8 +50,9 @@ if (window.__bwPwaProviderOnly) return;
           var name = String(attr.name || '').toLowerCase();
           var value = String(attr.value || '');
           if (/^on/.test(name) || name === 'srcdoc' || name === 'srcset' ||
-              name === 'style' || name === 'action' ||
-              name === 'formaction') {
+              name === 'style' || name === 'usemap' || name === 'ismap' ||
+              name === 'background' || name === 'ping' ||
+              name === 'action' || name === 'formaction') {
             node.removeAttribute(attr.name);
             return;
           }
@@ -69,10 +97,13 @@ if (window.__bwPwaProviderOnly) return;
           .replace(/([一-鿿　-〿＀-￯])([*`])/g, '$1​$2')
           .replace(/([*`])([一-鿿　-〿＀-￯])/g, '$1​$2');
         var html = marked.parse(t);
-        return html.replace(/@@MJX(\d+)@@/g, function (_, i) { return (math[+i] != null ? math[+i] : ''); });   // 还原公式
+        var restored = html.replace(/@@MJX(\d+)@@/g, function (_, i) {
+          return math[+i] != null ? escapeText(math[+i]) : '';
+        });
+        return window.RC.safeHtml(restored);   // 还原公式后统一净化
       } catch (_) {}
     }
-    return s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/\n/g, '<br>');
+    return escapeText(s).replace(/\n/g, '<br>');
   };
   window.RC.typeset = function (el) {
     try { if (el && window.MathJax && MathJax.typesetPromise) MathJax.typesetPromise([el]).catch(function () {}); } catch (e) {}

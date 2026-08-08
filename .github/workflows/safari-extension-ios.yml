@@ -53,7 +53,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install packaging dependencies
-        run: python -m pip install --quiet --upgrade pillow pyjwt cryptography
+        run: >-
+          python -m pip install --quiet --upgrade
+          pillow pyjwt cryptography jinja2==3.1.6
 
       - name: Build and capture the Safari package
         id: safari
@@ -128,6 +130,17 @@ jobs:
               )
           )
           PY
+
+      - name: Build deterministic native ReaderBundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          READER_BUNDLE="$GITHUB_WORKSPACE/$PROJECT_DIR/Generated/ReaderBundle"
+          python "$GITHUB_WORKSPACE/$PROJECT_DIR/package_local_reader.py" \
+            --output "$READER_BUNDLE"
+          python "$GITHUB_WORKSPACE/$PROJECT_DIR/package_local_reader.py" \
+            --verify "$READER_BUNDLE"
+          test -f "$READER_BUNDLE/bundle-manifest.json"
 
       - name: Install pinned XcodeGen
         shell: bash
@@ -368,6 +381,10 @@ jobs:
           test -d "$APPEX_PATH" || { echo "embedded Safari extension is missing"; exit 1; }
           WIDGET_PATH="$APP_PATH/PlugIns/BWReaderWidget.appex"
           test -d "$WIDGET_PATH" || { echo "embedded Reader widget is missing"; exit 1; }
+          READER_BUNDLE="$APP_PATH/ReaderBundle"
+          test -d "$READER_BUNDLE" || { echo "embedded ReaderBundle is missing"; exit 1; }
+          python "$GITHUB_WORKSPACE/$PROJECT_DIR/package_local_reader.py" \
+            --verify "$READER_BUNDLE"
 
           # The web package must land at the appex root, never under an extra
           # Resources directory.
@@ -569,6 +586,7 @@ jobs:
             ${{ runner.temp }}/safari-extension.zip
             ${{ runner.temp }}/build-logs/
             ${{ runner.temp }}/xcodegen-version.txt
+            ios/BWReader/Generated/ReaderBundle/bundle-manifest.json
             ios/BWReader/BWReader.xcodeproj/
           if-no-files-found: warn
 

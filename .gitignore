@@ -56,3 +56,6 @@ webapp-data/
 
 # PDF.js vendor(第三方库,不入库):生产上同样在 git 之外,直接放 /var/www/html/static/pdfjs
 _server_deploy/static/pdfjs/
+
+# iOS 本地 ReaderBundle 由固定摘要打包脚本在 CI/XcodeGen 前重建，不提交派生产物
+ios/BWReader/Generated/ReaderBundle/

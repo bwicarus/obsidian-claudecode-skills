@@ -93,6 +93,9 @@ WEBAPP_SOURCE_FILES = (
     # 健康检查掩盖首次调用时的 ModuleNotFoundError。
     "card_candidate_service.py",
     "pdf_reader.py",
+    # pdf_reader imports the authenticated Pi book catalog/download/upload
+    # service at startup; deploy it atomically with the routes.
+    "reader_book_library.py",
     "html_reader.py",
     "favorites_reader.py",
     "reader_sidecar_store.py",

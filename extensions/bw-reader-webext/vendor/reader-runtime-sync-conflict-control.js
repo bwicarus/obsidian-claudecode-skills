@@ -1,10 +1,9 @@
-/* sync-conflict-control.js — bounded, read-only conflict status surface.
+/* sync-conflict-control.js — bounded sync status + explicit manual run surface.
  *
- * The wrapped SyncRuntime remains the only synchronization owner.  This
- * module deliberately exposes no "retry" or winner-selection operation:
- * advancing a durable journal conflict requires a real resolver that records
- * the user's local/server choice.  Merely unpausing and replaying the same
- * mutation would create a fake recovery button and an infinite conflict loop.
+ * The wrapped SyncRuntime remains the only synchronization owner. syncNow()
+ * only asks that owner to drain its existing checkpointed journal; it never
+ * unpauses a conflict and never selects a local/server winner. Advancing a
+ * durable conflict still requires a real resolver that records the decision.
  */
 (function (root, factory) {
   var api = factory();
@@ -16,10 +15,14 @@
 
   var CONTRACT = 'sync-conflict-control/1';
   var RUNTIME_CONTRACT = 'sync-runtime/1';
+  var SYNC_REQUEST_CONTRACT = 'reader-pi-sync-request/1';
+  var SYNC_RESULT_CONTRACT = 'reader-pi-data-sync-result/1';
   var MAX_PUBLIC_CONFLICTS = 50;
   var MAX_CONFLICT_COUNT = 1000000;
+  var MAX_MANUAL_RECEIPTS = 64;
   var OWNER_VALUES = {
     pwa: true,
+    'native-app': true,
     'extension-background': true
   };
   var REASON_VALUES = {
@@ -88,6 +91,47 @@
     value = Number(value);
     if (!Number.isSafeInteger(value) || value < 0) return 0;
     return value;
+  }
+  function exactKeys(value, expected) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+    var actual = Object.keys(value).sort();
+    expected = expected.slice().sort();
+    return JSON.stringify(actual) === JSON.stringify(expected);
+  }
+  function checkedSyncRequest(value) {
+    if (
+      !exactKeys(value, ['contract', 'requestId']) ||
+      value.contract !== SYNC_REQUEST_CONTRACT
+    ) {
+      throw controlError(
+        'Pi 同步请求合同无效',
+        'BW_PI_SYNC_REQUEST_INVALID',
+        false
+      );
+    }
+    var requestId = safeIdentifier(
+      value.requestId,
+      128,
+      /^[A-Za-z0-9][A-Za-z0-9._:-]*$/
+    );
+    if (!requestId) {
+      throw controlError(
+        'Pi 同步请求编号无效',
+        'BW_PI_SYNC_REQUEST_INVALID',
+        false
+      );
+    }
+    return { contract: SYNC_REQUEST_CONTRACT, requestId: requestId };
+  }
+  function safeCollections(value) {
+    var seen = Object.create(null);
+    return (Array.isArray(value) ? value : []).map(function (name) {
+      return safeIdentifier(name, 80, /^[A-Za-z0-9._-]+$/);
+    }).filter(function (name) {
+      if (!name || seen[name]) return false;
+      seen[name] = true;
+      return true;
+    }).sort();
   }
   function safeErrorCode(value) {
     value = String(value || '');
@@ -248,11 +292,15 @@
     var assertFence = typeof options.assertFence === 'function'
       ? options.assertFence
       : function () { return true; };
+    var collections = safeCollections(options.collections);
+    var manualReceipts = Object.create(null);
+    var manualReceiptOrder = [];
 
     if (
       !runtime ||
       runtime.contract !== RUNTIME_CONTRACT ||
-      typeof runtime.status !== 'function'
+      typeof runtime.status !== 'function' ||
+      typeof runtime.runNow !== 'function'
     ) {
       throw controlError(
         'sync-runtime/1 不可用',
@@ -327,14 +375,124 @@
       });
     }
 
+    function manualResult(requestId, runtimeStatus, rawResult) {
+      runtimeStatus = runtimeStatus || {};
+      rawResult = rawResult && typeof rawResult === 'object'
+        ? rawResult
+        : null;
+      var summary = collectConflicts(runtimeStatus);
+      var failure = publicFailure(runtimeStatus);
+      var server = rawResult && rawResult.server &&
+        typeof rawResult.server === 'object'
+        ? rawResult.server
+        : {};
+      var skippedCode = rawResult && rawResult.skipped === true
+        ? safeErrorCode(rawResult.code)
+        : '';
+      var state = 'unknown';
+      if (summary.total > 0) state = 'blocked';
+      else if (runtimeStatus.destroyed === true) state = 'error';
+      else if (runtimeStatus.paused === true || skippedCode) state = 'blocked';
+      else if (server.ok === true) {
+        state = server.pendingLocal === true ? 'partial' : 'complete';
+      } else if (server.ok === false || failure) state = 'error';
+      return {
+        contract: SYNC_RESULT_CONTRACT,
+        requestId: requestId,
+        owner: owner,
+        state: state,
+        at: safeTime(now()),
+        collections: collections.slice(),
+        applied: safeRevision(server.applied),
+        pendingLocal: server.pendingLocal === true,
+        conflictCount: summary.total,
+        errorCode: skippedCode || (failure ? failure.code : ''),
+        retryable: failure ? failure.retryable : false
+      };
+    }
+    function trimManualReceipts(limit) {
+      limit = Math.max(0, Number(limit));
+      while (manualReceiptOrder.length > limit) {
+        var removable = -1;
+        for (var index = 0; index < manualReceiptOrder.length; index += 1) {
+          var candidate = manualReceipts[manualReceiptOrder[index]];
+          if (candidate && candidate.settled === true) {
+            removable = index;
+            break;
+          }
+        }
+        if (removable < 0) break;
+        var removed = manualReceiptOrder.splice(removable, 1)[0];
+        delete manualReceipts[removed];
+      }
+    }
+    function syncNow(input) {
+      var request;
+      try {
+        request = checkedSyncRequest(input);
+      } catch (error) {
+        return Promise.reject(error);
+      }
+      var existing = manualReceipts[request.requestId];
+      if (existing) return existing.promise;
+      trimManualReceipts(MAX_MANUAL_RECEIPTS - 1);
+      if (manualReceiptOrder.length >= MAX_MANUAL_RECEIPTS) {
+        return Promise.reject(controlError(
+          'Pi 同步请求过多，请等待正在运行的请求结束',
+          'BW_PI_SYNC_RECEIPT_LIMIT',
+          true
+        ));
+      }
+
+      var entry = { promise: null, settled: false };
+      var operation = readStatus().then(function (before) {
+        if (before.destroyed === true || before.paused === true) {
+          return manualResult(request.requestId, before, null);
+        }
+        return fence().then(function () {
+          return runtime.runNow('native-pi-sync:' + request.requestId);
+        }).then(function (rawResult) {
+          return fence().then(function () {
+            return runtime.status();
+          }).then(function (after) {
+            if (!after || after.contract !== RUNTIME_CONTRACT) {
+              throw controlError(
+                '同步运行时状态无效',
+                'BW_SYNC_CONFLICT_RUNTIME',
+                false
+              );
+            }
+            return fence().then(function () {
+              return manualResult(request.requestId, after, rawResult);
+            });
+          });
+        });
+      });
+      entry.promise = operation;
+      manualReceipts[request.requestId] = entry;
+      manualReceiptOrder.push(request.requestId);
+      operation.then(function () {
+        entry.settled = true;
+        trimManualReceipts(MAX_MANUAL_RECEIPTS);
+      }, function () {
+        entry.settled = true;
+        trimManualReceipts(MAX_MANUAL_RECEIPTS);
+      });
+      return operation;
+    }
+
     return Object.freeze({
       contract: CONTRACT,
-      status: publicStatus
+      owner: owner,
+      status: publicStatus,
+      syncNow: syncNow
     });
   }
 
   return Object.freeze({
     CONTRACT: CONTRACT,
+    SYNC_REQUEST_CONTRACT: SYNC_REQUEST_CONTRACT,
+    SYNC_RESULT_CONTRACT: SYNC_RESULT_CONTRACT,
     ConflictControlError: ConflictControlError,
     createSyncConflictControl: createSyncConflictControl
   });

@@ -204,6 +204,36 @@ test("pending local pages schedule another bounded run while idle success uses i
   runtime.destroy();
 });
 
+test("manualOnly activates the owner but never schedules an implicit sync", async () => {
+  const clock = timers();
+  const store = makeStore("runtime-manual-only");
+  const runtime = SyncRuntime.createSyncRuntime({
+    coordinatorApi: Coordinator,
+    store,
+    registry: DataRegistry,
+    serverGateway: {
+      async push(request) {
+        return {
+          ...empty(request),
+          ackedMutationIds: request.changes.map((change) => change.mutationId),
+        };
+      },
+      async pull(request) { return empty(request); },
+    },
+    setTimeout: clock.setTimeout,
+    clearTimeout: clock.clearTimeout,
+    manualOnly: true,
+  });
+
+  assert.equal(runtime.start("native-app-ready"), true);
+  assert.equal(clock.size(), 0);
+  const result = await runtime.runNow("explicit-settings-button");
+  assert.equal(result.server.ok, true);
+  assert.equal(clock.size(), 0);
+  assert.equal((await runtime.status()).scheduled, false);
+  runtime.destroy();
+});
+
 test("explicit server conflict survives automatic resume until explicit resolution", async () => {
   const clock = timers();
   const store = makeStore("runtime-conflict");

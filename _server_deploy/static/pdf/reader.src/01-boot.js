@@ -54,7 +54,9 @@ localStorage.setItem = function (k, v) {
 // cache buster：避开浏览器/代理的 mime 缓存（之前 nginx 错把 .mjs 当 octet-stream，已修但缓存还在）
 const PDFJS_V = '20260526a';
 // 图片模式(成熟方案:服务端按页出图,只取看到的页,不下载整本 PDF、且不加载 PDF.js 库)。默认开;localStorage 关作安全阀。
-let _imgMode = (() => { try { return localStorage.getItem('pdf-img-mode') !== '0'; } catch (_) { return true; } })();
+let _imgMode = window.__BW_NATIVE_LOCAL_READER__ === true
+  ? false
+  : (() => { try { return localStorage.getItem('pdf-img-mode') !== '0'; } catch (_) { return true; } })();
 let pdfjsLib;
 if (!_imgMode) {   // 仅经典(PDF.js canvas)模式才下载 2.8MB 库;图片模式跳过 → 省库下载 + 那 5 秒 import 等待
   try {
@@ -75,7 +77,7 @@ if (!_imgMode) {   // 仅经典(PDF.js canvas)模式才下载 2.8MB 库;图片�
 }
 // Service Worker:缓存页图(抗 iOS 定期清缓存 + 离线可读看过的页;PWA 标准做法)。只接管页图,其余放行。
 // 作用域 /pdf/ 需 SW 从 /pdf/sw.js 提供。+ 申请持久存储(persist)让缓存更不易被系统清。
-if ('serviceWorker' in navigator) {
+if (window.__BW_NATIVE_LOCAL_READER__ !== true && 'serviceWorker' in navigator) {
   navigator.serviceWorker.register('/pdf/sw.js', { scope: '/pdf/' })
     .then(() => window.dlog && window.dlog('✓ Service Worker 已注册(页图持久缓存)'))
     .catch((e) => window.dlog && window.dlog('SW 注册失败(不影响阅读):' + (e && e.message)));

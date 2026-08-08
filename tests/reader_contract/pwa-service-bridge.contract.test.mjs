@@ -166,7 +166,7 @@ test("PWA bridge 用带编号握手连接 provider，并转发完整 DataStore �
   );
 });
 
-test("READY 后 syncControl 只转发只读 syncStatus，不暴露伪重试操作", async (t) => {
+test("READY 后 syncControl 转发状态与幂等 syncNow，但不暴露冲突裁决", async (t) => {
   const h = harness();
   t.after(() => h.api.disconnect("test-complete"));
   h.api.start({ namespace: NAMESPACE, ticket: TICKET });
@@ -204,6 +204,27 @@ test("READY 后 syncControl 只转发只读 syncStatus，不暴露伪重试操�
     result: status,
   }, statusCall.id));
   assert.equal(JSON.stringify(await pendingStatus), JSON.stringify(status));
+  const request = {
+    contract: "reader-pi-sync-request/1",
+    requestId: "native-sync-1",
+  };
+  const pendingSync = control.syncNow(request);
+  const syncCall = h.posted.at(-1).message;
+  assert.equal(syncCall.type, "CALL");
+  assert.equal(syncCall.payload.operation, "syncNow");
+  assert.deepEqual(syncCall.payload.args, request);
+  const syncResult = {
+    contract: "reader-pi-data-sync-result/1",
+    requestId: request.requestId,
+    owner: "extension-background",
+    state: "complete",
+  };
+  h.emitMessage(toPage("RESULT", {
+    ok: true,
+    result: syncResult,
+  }, syncCall.id));
+  assert.equal(JSON.stringify(await pendingSync), JSON.stringify(syncResult));
+  assert.equal("resolveConflict" in control, false);
   assert.equal("retryAfterResolution" in control, false);
 });
 

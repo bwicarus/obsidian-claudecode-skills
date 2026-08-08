@@ -30,6 +30,7 @@ window.goPdfList = function () { location.href = '/pdf/'; };
 // 喂给 PDF.js({data}),零网络延迟秒开。key=FILE_REL,value={v,buf};v 跟 ?v=<mtime> 绑定→PDF
 // 变了自动失效重下。>_PDF_CACHE_MAX 的书不整本缓存(防 iPad Safari 单页内存炸),仍走流式 range。
 const _PDF_DB = 'pdf-blob-cache', _PDF_STORE = 'pdfs';
+const _NATIVE_LOCAL_PDF = window.__BW_NATIVE_LOCAL_READER__ === true;
 const _PDF_CACHE_MAX = 360 * 1024 * 1024;   // 360MB 上限(M4 iPad 内存足):≤此整本缓存→{data}喂 PDF.js→永不重拉;>此才走 range(会反复重拉,建议开压缩版)
 const _PDF_VER = (String(PDF_URL).match(/[?&]v=(\d+)/) || [])[1] || '0';
 // 请求"持久化存储":iOS Safari 普通标签页默认 best-effort(7 天没访问 ITP 清掉 + 配额满 LRU 驱逐),
@@ -157,7 +158,7 @@ async function loadPdf() {
     // 未命中 → 走流式(线性化后首页快)+ 后台把整本下到本地,下次秒开。
     let _src = _rangeOpts, _haveBuf = false;
     try {
-      const c = await _idbGet(FILE_REL);
+      const c = _NATIVE_LOCAL_PDF ? null : await _idbGet(FILE_REL);
       // 校验缓存字节数 == 期望大小:防之前(transfer 竞态等)存进坏/被 detach 的 buffer → 命中坏缓存就**永远加载不出**。
       if (c && c.v === _PDF_VER && c.buf && (!PDF_SIZE || c.buf.byteLength === PDF_SIZE)) {
         _src = { data: c.buf }; _haveBuf = true; window.dlog('✓ 命中本地缓存,秒开');
@@ -166,7 +167,7 @@ async function loadPdf() {
     // 未缓存且 ≤360MB:**下载一次(分块续传+进度)→ 缓存 → {data} 喂 PDF.js**,之后从内存读、永不重拉。
     // 为何不用 range「边读边拉」:PDF.js 对这些扫描书的 disableAutoFetch 挡不住,range 模式每次打开都
     // 反复重拉整本(实测累计 >10GB),慢网下灾难。整本下一次后缓存,后续秒开、零网络。>360MB 才 range(装不下内存→建议压缩版)。
-    if (!_haveBuf && PDF_SIZE > 0 && PDF_SIZE < _PDF_CACHE_MAX) {
+    if (!_NATIVE_LOCAL_PDF && !_haveBuf && PDF_SIZE > 0 && PDF_SIZE < _PDF_CACHE_MAX) {
       try {
         pdfLoadShow('📄 下载中…', PDF_SIZE > 30 * 1048576 ? '首次整本下载,下完缓存 → 之后秒开、不再重拉' : '');
         const buf = await _fetchFullWithProgress(PDF_URL);
@@ -175,7 +176,7 @@ async function loadPdf() {
       } catch (e) { window.dlog('整本取失败,回落 range: ' + (e && e.message)); _src = _rangeOpts; _haveBuf = false; }
     }
     // >360MB / 整本取失败 → range(会反复重拉)+ 后台缓存(>360 跳过)
-    if (!_haveBuf) _cachePdfInBackground();
+    if (!_NATIVE_LOCAL_PDF && !_haveBuf) _cachePdfInBackground();
     const task = pdfjsLib.getDocument({ ..._common, ..._src });
     task.onProgress = (p) => {
       if (p.total) {
@@ -275,4 +276,3 @@ async function saveCropSettings(crop, autoOn) {
   _updateCropBtn();
   _refitToWidth(true);
 }
-

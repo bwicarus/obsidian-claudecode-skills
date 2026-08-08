@@ -3804,3 +3804,21 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验**：Reader 合同 713/713、专项 40/40、发布管线 24/24、diff 门禁及 macOS 模拟器/设备归档全部通过；Windows 全仓 Python 仅保留既有 Linux/环境基线失败。
 - **发布**：统一 App/扩展 `1.0.93` 已由 Actions run `31241289112` 成功上传 TestFlight；共享 Reader 脚本按生产部署流程更新。
 - **下一步**：实机验证浮标拖动不误开、面板冻结、Pencil 闭合选区、触屏双击三态、便签多色/多粗细/橡皮及 Codex 语音独立按钮。
+
+## Codex：本机文件夹与 Pi 书库第一阶段（2026-08-08 JST）
+- **改了什么**：App 可授权并递归索引本机 PDF/EPUB，按“本机/Pi/全部”浏览；Pi 提供认证目录、Range 下载和按内容幂等上传，纯本地书采用“上传并打开”复用同一 Reader。
+- **一致性/安全**：下载不覆盖、上传目录固定、EPUB 防压缩炸弹、2 GiB 双层上限；持久同步关系区分本机更新/Pi 更新/冲突，同内容本机副本仍逐文件显示。
+- **怎么验**：Reader 合同 716/716；书库/API/部署清单专项 34/34；diff 门禁通过；Windows handoff 仅被既有 Linux `fcntl` 环境基线阻断。
+- **没做什么/下一步**：未提交、推送、部署或上传 TestFlight；macOS 编译与真机文件提供器验收后再发布，完全离线 EPUB/PDF 壳留到第二阶段。
+## Codex：原生 App 两集合 Pi 显式同步闭环（2026-08-08 JST）
+- **改了什么**：设置与词汇状态复用 sync-v3；Swift 私有持有账户 namespace/owner lease，页面只传公开变化与持久 checkpoint；设置区新增固定 Pi 登录 sheet。
+- **怎么验的**：真实本机设置已从 PreferenceStore 进入 `user-settings` 并出现在 sync push；原生同步专项与 53 项 relay/打包/清单测试通过；Node 全量当前仅被并行本地壳 CSP 正则误报阻断，已交本地运行时负责人收口。
+- **边界**：阅读进度、高亮、笔迹、便签与卡片仍明确 pending，未开放不稳定身份；未构建 Xcode/TestFlight，离线 ReaderBundle 打包因本机无 pinned archive cache 未执行。
+- **下一步**：macOS 构建后实机用“登录或重新登录 Pi”建立登录态，再点“与 Pi 同步”验证两集合往返与冲突不覆盖；不得把 native owner 凭据下放页面。
+
+## Codex：iOS App 本地优先离线 Reader 候选（2026-08-08 JST）
+- **改了什么**：App 内置可复现 ReaderBundle，以固定 loopback 和不透明本机书 ID 直接打开 Files 文件夹中的 PDF/EPUB；默认进入本机书架，不再把上传 Pi 或远程 PWA 当阅读前置。
+- **数据与同步**：App 本机数据库是默认真源；设置中的“与 Pi 同步”只显式处理书籍、`user-settings` 与 `vocabulary-state`，其余尚无稳定身份的文档域继续 fail closed。
+- **安全边界**：壳、脚本与字体受 manifest 摘要和每次启动 token/nonce 约束；EPUB 实际解压字节有界，书籍/AI HTML 经 DOMPurify，本地首版不注入不受信书内 CSS。
+- **怎么验的**：离线包两次生成逐文件一致，Reader 全量、书库/API/同步/打包与发布管线门禁通过；Windows handoff 只保留既有 Linux `fcntl` 环境基线。
+- **发布边界**：必须先由 macOS CI 编译 Swift，再由 iPad 实机验收本地 PDF/EPUB、重开持久化、Pi 显式同步与 Safari 扩展不回归；提交、推送与上传结果另行追加，不从本地测试推断。

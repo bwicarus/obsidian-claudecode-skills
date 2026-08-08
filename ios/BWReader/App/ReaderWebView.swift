@@ -2,7 +2,6 @@ import SwiftUI
 import UIKit
 import WebKit
 
-private let readerStartURL = URL(string: "https://bwicarus.taile44d0c.ts.net/pdf/")!
 private let nativeComputerVoiceMessageName = "bwNativeComputerVoice"
 private let nativeComputerContextMessageName = "bwNativeComputerContext"
 private let nativeAgentVoiceMessageName = "bwNativeAgentVoice"
@@ -104,6 +103,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     }
 
     let webView: WKWebView
+    private let localRuntimeServer: ReaderLocalRuntimeServer?
+    private let localRuntimeInitializationError: String?
 
     @Published private(set) var isLoading = false
     @Published private(set) var loadError: String?
@@ -112,6 +113,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativeAgentVoiceMessageProxy: WeakScriptMessageHandler?
     private var nativePencilInkMessageProxy: WeakScriptMessageHandler?
     private var nativeLocalNotesMessageProxy: WeakScriptMessageHandlerWithReply?
+    private var nativePiGateway: ReaderNativePiGateway?
+    private var nativePiSyncBridge: ReaderNativePiSyncBridge?
     private weak var nativeVoiceBridge: NativeVoiceBridge?
     private let nativeAgentVoice = NativeAgentVoiceSession()
     private var nativeAgentVoiceCommandTail: Task<Void, Never>?
@@ -123,8 +126,16 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private let nativePencilSettings = NativePencilSettings.shared
     let nativePencilInk = NativePencilInkController()
     private var readerForeground = true
+    private var readerWasBackgrounded = false
 
     override init() {
+        do {
+            localRuntimeServer = try ReaderLocalRuntimeServer()
+            localRuntimeInitializationError = nil
+        } catch {
+            localRuntimeServer = nil
+            localRuntimeInitializationError = error.localizedDescription
+        }
         let configuration = WKWebViewConfiguration()
         configuration.websiteDataStore = .default()
         configuration.allowsInlineMediaPlayback = true
@@ -179,6 +190,28 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             contentWorld: .page,
             name: nativeLocalNotesMessageName
         )
+        if let localRuntimeServer {
+            let nativePiGateway = ReaderNativePiGateway(
+                webView: webView,
+                trustedBaseURL: localRuntimeServer.baseURL
+            )
+            self.nativePiGateway = nativePiGateway
+            contentController.addScriptMessageHandler(
+                nativePiGateway,
+                contentWorld: .page,
+                name: ReaderNativePiGateway.messageName
+            )
+            let nativePiSyncBridge = ReaderNativePiSyncBridge(
+                webView: webView,
+                trustedBaseURL: localRuntimeServer.baseURL
+            )
+            self.nativePiSyncBridge = nativePiSyncBridge
+            contentController.addScriptMessageHandler(
+                nativePiSyncBridge,
+                contentWorld: .page,
+                name: ReaderNativePiSyncBridge.messageName
+            )
+        }
         contentController.addUserScript(WKUserScript(
             source: """
             (() => {
@@ -258,9 +291,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             source: #"""
             (() => {
               if (window.__BW_NATIVE_LOCAL_NOTES_FETCH__) return;
-              if (location.protocol !== "https:" ||
-                  location.hostname.toLowerCase() !==
-                    "bwicarus.taile44d0c.ts.net") return;
+              const localReader = location.origin ===
+                "http://127.0.0.1:43129";
+              if (!localReader) return;
               const handler = window.webkit?.messageHandlers?.bwNativeLocalNotes;
               if (!handler || typeof handler.postMessage !== "function") return;
               const originalFetch = window.fetch.bind(window);
@@ -330,9 +363,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         contentController.addUserScript(WKUserScript(
             source: """
             (() => {
-              if (location.protocol !== "https:" ||
-                  location.hostname.toLowerCase() !==
-                    "bwicarus.taile44d0c.ts.net") return;
+              const localReader = location.origin ===
+                "http://127.0.0.1:43129";
+              if (!localReader) return;
               window.__BW_NATIVE_AGENT_VOICE__ = true;
               window.__bwNativeAgentVoiceDispatch = (value) => {
                 const detail = value && typeof value === "object" ? value : {};
@@ -576,16 +609,93 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
 
     func reload() {
         loadError = nil
-        let request = URLRequest(
-            url: readerStartURL,
-            cachePolicy: .useProtocolCachePolicy,
-            timeoutInterval: 30
-        )
-        webView.load(request)
+        guard let localRuntimeServer else {
+            loadError = localRuntimeInitializationError
+                ?? ReaderLocalRuntimeError.bundleUnavailable.localizedDescription
+            return
+        }
+        Task { @MainActor [weak self, localRuntimeServer] in
+            guard let self else { return }
+            do {
+                try await localRuntimeServer.start()
+                self.webView.load(URLRequest(
+                    url: localRuntimeServer.defaultShellURL(),
+                    cachePolicy: .reloadIgnoringLocalCacheData,
+                    timeoutInterval: 30
+                ))
+            } catch {
+                self.loadError = error.localizedDescription
+            }
+        }
     }
 
-    func setReaderForeground(_ foreground: Bool) {
+    /// Opens an indexed local book without uploading it. The server retains
+    /// the security-scoped access until another book replaces this session.
+    @discardableResult
+    func openLocalBook(
+        _ book: ReaderLocalBookRecord,
+        library: ReaderLocalLibraryManager
+    ) async -> Bool {
+        guard let localRuntimeServer else {
+            library.reportError(
+                ReaderLocalRuntimeError.serverUnavailable(
+                    localRuntimeInitializationError ?? "本机 Reader 未初始化"
+                )
+            )
+            return false
+        }
+        do {
+            let access = try library.makeOpenAccess(for: book)
+            try await localRuntimeServer.start()
+            let url = try await localRuntimeServer.open(access)
+            loadError = nil
+            webView.load(URLRequest(
+                url: url,
+                cachePolicy: .reloadIgnoringLocalCacheData,
+                timeoutInterval: 30
+            ))
+            return true
+        } catch {
+            library.reportError(error)
+            return false
+        }
+    }
+
+    func setReaderScenePhase(_ phase: ScenePhase) {
+        switch phase {
+        case .background:
+            readerWasBackgrounded = true
+            setReaderForeground(false, restartLocalRuntime: false)
+        case .inactive:
+            setReaderForeground(false, restartLocalRuntime: false)
+        case .active:
+            let shouldRestart = readerWasBackgrounded
+            readerWasBackgrounded = false
+            setReaderForeground(true, restartLocalRuntime: shouldRestart)
+        @unknown default:
+            setReaderForeground(false, restartLocalRuntime: false)
+        }
+    }
+
+    func setReaderForeground(
+        _ foreground: Bool,
+        restartLocalRuntime: Bool = false
+    ) {
+        let wasForeground = readerForeground
         readerForeground = foreground
+        if foreground, !wasForeground, restartLocalRuntime,
+           let localRuntimeServer,
+           isLocalRuntimeURL(webView.url) {
+            Task { @MainActor [weak self, localRuntimeServer] in
+                guard let self else { return }
+                do {
+                    try await localRuntimeServer.restartAfterForeground()
+                    self.webView.reloadFromOrigin()
+                } catch {
+                    self.loadError = error.localizedDescription
+                }
+            }
+        }
         guard webView.url != nil else {
             return
         }
@@ -855,10 +965,30 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
 
     private func isTrustedReaderURL(_ url: URL?) -> Bool {
         guard let url else { return false }
-        return url.scheme?.lowercased()
-                == readerStartURL.scheme?.lowercased()
-            && url.host?.lowercased()
-                == readerStartURL.host?.lowercased()
+        let scheme = url.scheme?.lowercased()
+        let host = url.host?.lowercased()
+        let port = url.port
+        let local = scheme == "http"
+            && host == ReaderLocalRuntimeServer.host
+            && port == Int(ReaderLocalRuntimeServer.port)
+            && localRuntimeServer.map {
+                url.path.hasPrefix($0.baseURL.path)
+            } == true
+        return local
+    }
+
+    private func isLocalRuntimeURL(_ url: URL?) -> Bool {
+        guard let url else { return false }
+        return url.scheme?.lowercased() == "http"
+            && url.host?.lowercased() == ReaderLocalRuntimeServer.host
+            && url.port == Int(ReaderLocalRuntimeServer.port)
+            && localRuntimeServer.map {
+                url.path.hasPrefix($0.baseURL.path)
+            } == true
+    }
+
+    func isTrustedLocalRuntimeFeatureURL(_ url: URL?) -> Bool {
+        isLocalRuntimeURL(url)
     }
 
     private func updateNativeAgentVoiceState() {
@@ -1302,24 +1432,23 @@ extension ReaderWebViewModel: WKScriptMessageHandler {
             let rejection: [String: Any] = [
                 "isMainFrame": message.frameInfo.isMainFrame,
                 "sameWebView": message.webView === webView,
-                "schemeMatches": webView.url?.scheme?.lowercased()
-                    == readerStartURL.scheme?.lowercased(),
-                "hostMatches": webView.url?.host?.lowercased()
-                    == readerStartURL.host?.lowercased(),
+                "trustedReader": isTrustedReaderURL(webView.url),
                 "bodyIsDictionary": sampledBody != nil,
                 "bodyFieldCount": sampledBody?.count ?? -1,
                 "action": (sampledBody?["action"] as? String) ?? "<missing>",
                 "appKind": (sampledBody?["appKind"] as? String) ?? "<missing>",
-                "currentURL": webView.url?.absoluteString ?? "<nil>",
-                "expectedURL": readerStartURL.absoluteString,
+                "currentURL": isLocalRuntimeURL(webView.url)
+                    ? "native-local://<capability-redacted>"
+                    : (webView.url?.absoluteString ?? "<nil>"),
+                "expectedURL": localRuntimeServer == nil
+                    ? "<local-runtime-unavailable>"
+                    : "native-local://<capability-redacted>",
             ]
             guard
                 message.frameInfo.isMainFrame,
                 message.webView === webView,
-                webView.url?.scheme?.lowercased()
-                    == readerStartURL.scheme?.lowercased(),
-                webView.url?.host?.lowercased()
-                    == readerStartURL.host?.lowercased(),
+                isTrustedReaderURL(webView.url),
+                isTrustedReaderURL(message.frameInfo.request.url),
                 let body = message.body as? [String: Any],
                 body["action"] as? String == "toggle"
             else {
@@ -1347,10 +1476,8 @@ extension ReaderWebViewModel: WKScriptMessageHandler {
             guard
                 message.frameInfo.isMainFrame,
                 message.webView === webView,
-                webView.url?.scheme?.lowercased()
-                    == readerStartURL.scheme?.lowercased(),
-                webView.url?.host?.lowercased()
-                    == readerStartURL.host?.lowercased(),
+                isTrustedReaderURL(webView.url),
+                isTrustedReaderURL(message.frameInfo.request.url),
                 let body = message.body as? [String: Any]
             else {
                 return
@@ -1360,10 +1487,8 @@ extension ReaderWebViewModel: WKScriptMessageHandler {
             guard
                 message.frameInfo.isMainFrame,
                 message.webView === webView,
-                webView.url?.scheme?.lowercased()
-                    == readerStartURL.scheme?.lowercased(),
-                webView.url?.host?.lowercased()
-                    == readerStartURL.host?.lowercased(),
+                isTrustedReaderURL(webView.url),
+                isTrustedReaderURL(message.frameInfo.request.url),
                 let body = message.body as? [String: Any]
             else {
                 return
@@ -1373,10 +1498,8 @@ extension ReaderWebViewModel: WKScriptMessageHandler {
             guard
                 message.frameInfo.isMainFrame,
                 message.webView === webView,
-                webView.url?.scheme?.lowercased()
-                    == readerStartURL.scheme?.lowercased(),
-                webView.url?.host?.lowercased()
-                    == readerStartURL.host?.lowercased(),
+                isTrustedReaderURL(webView.url),
+                isTrustedReaderURL(message.frameInfo.request.url),
                 let body = message.body as? [String: Any]
             else {
                 return
@@ -1411,12 +1534,8 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
         guard
             message.frameInfo.isMainFrame,
             message.webView === webView,
-            webView.url?.scheme?.lowercased()
-                == readerStartURL.scheme?.lowercased(),
-            webView.url?.host?.lowercased()
-                == readerStartURL.host?.lowercased(),
-            message.frameInfo.request.url?.path.hasPrefix("/pdf/") == true,
-            webView.url?.path.hasPrefix("/pdf/") == true
+            isTrustedReaderURL(webView.url),
+            isTrustedReaderURL(message.frameInfo.request.url)
         else {
             replyHandler(nil, "本机笔记来源无效")
             return
@@ -1583,14 +1702,25 @@ extension ReaderWebViewModel: WKNavigationDelegate {
             return
         }
 
-        let webSchemes = ["http", "https", "about", "blob", "data"]
-        guard !webSchemes.contains(scheme) else {
-            if (scheme == "http" || scheme == "https"),
-               !isTrustedReaderURL(url),
-               nativeAgentVoice.state != .idle {
-                enqueueNativeAgentVoiceCommand(.stop)
-            }
+        if ["about", "blob", "data"].contains(scheme) {
             decisionHandler(.allow)
+            return
+        }
+
+        if scheme == "http" || scheme == "https" {
+            if isTrustedReaderURL(url) {
+                decisionHandler(.allow)
+                return
+            }
+            // The App-owned WebView is a book renderer, not a general PWA or
+            // browser. External links leave the renderer and cannot become a
+            // new storage/document authority inside this WKWebView.
+            if navigationAction.targetFrame?.isMainFrame != false {
+                UIApplication.shared.open(url)
+                decisionHandler(.cancel)
+            } else {
+                decisionHandler(.cancel)
+            }
             return
         }
 

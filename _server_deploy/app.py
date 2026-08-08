@@ -1600,6 +1600,24 @@ app.extensions["reader_storage_namespace_resolver"] = (
 app.extensions["reader_legacy_sidecar_claim_authorizer"] = (
     _reader_legacy_sidecar_claim_authorized
 )
+
+
+def _reader_book_library_authorized(identity):
+    """The vault-wide original-book library belongs to the admin account."""
+    try:
+        user_id = int(identity.user_id)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    row = get_db().execute(
+        "SELECT role FROM users WHERE id = ?",
+        (user_id,),
+    ).fetchone()
+    return bool(row and row["role"] == "admin")
+
+
+app.extensions["reader_book_library_authorizer"] = (
+    _reader_book_library_authorized
+)
 # HTTP and owner-bound CLI jobs must resolve the same account root.  Tests set
 # WEBAPP_DATA, so they still stay inside a disposable directory.
 from reader_sidecar_store import default_sidecar_root

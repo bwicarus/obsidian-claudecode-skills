@@ -32,8 +32,10 @@ git -C . log --oneline -5
 
 ## 2. 产品与所有权
 
-正式客户端只有 PWA 与扩展：
+正式客户端包含本地优先 iOS App、独立 PWA 与扩展：
 
+- iOS App：安装包内置同一 Reader renderer/共享组件；Swift 拥有本机文件、数据、生命周期与
+  系统能力，Pi 仅作显式同步、备份和联网服务，App 内不运行 PWA/扩展接管协议。
 - 普通网页无扩展：无 BW 功能。
 - 普通网页有扩展：扩展提供全部网页阅读功能。
 - 真书 PWA 无扩展：PWA 提供完整 fallback。
@@ -50,6 +52,7 @@ git -C . log --oneline -5
 | 视觉令牌/共享组件 | `_server_deploy/static/pdf/rc-ui.js`、`rc-*.js` |
 | 共享运行时合同 | `_server_deploy/static/reader-runtime/*.js` |
 | 扩展宿主/adapter | `extensions/bw-reader-webext/src/*.js` |
+| iOS App 本地宿主 | `ios/BWReader/App/*.swift`、`_server_deploy/static/pdf/native-local-runtime.js` |
 | PWA 真书宿主 | `_server_deploy/static/reader-runtime/book-host.js` |
 | PWA 接管桥 | `_server_deploy/static/pdf/pwa-extension-bridge.js` |
 | 后端路由/助手 | `_server_deploy/pdf_reader.py`、`assistant.py`、`voice.py` |

@@ -13,16 +13,22 @@ context 中的索引回看原始长文档。聊天记录、旧版本注释和历
 |---|---|---|
 | 普通 HTTP/HTTPS 网页 | 无 BW 功能 | 扩展提供完整网页阅读功能 |
 | PWA 真书（PDF/EPUB/导入 HTML/Markdown/收藏书） | PWA 完整 fallback | 扩展接管共享 UI、网络与通用数据；PWA 保留 renderer、私有 anchor 和书籍数据 |
+| iOS App 本机真书 | App 内置 Reader、App-owned local store 与原生能力 | Safari 扩展不进入 App WKWebView，也不参与所有权 |
 
 不得恢复 PWA 任意网页解析器，也不得把扩展退回只为 PWA 提供数据的 provider。功能有差异或
 矛盾时先登记到 [运行时冲突](references/reader-runtime-conflicts.md) 或
 [视觉冲突](references/reader-ui-conflicts.md)，不能擅自删掉一边。
+
+iOS App 不内嵌远程 PWA：HTML/JS/CSS renderer 作为本地资源打包，Swift 拥有本机文件、数据、
+生命周期与系统能力。App 内禁止启动 Service Worker、PWA install/cache、扩展 TAKEOVER 或
+PWA owner lease；Pi 只作用户显式触发的同步、备份与联网 AI 网关，不能成为本机开书前置。
 
 ### 源码入口
 
 - 共享视觉与组件：`_server_deploy/static/pdf/rc-ui.js`、`rc-*.js`
 - 共享运行时合同：`_server_deploy/static/reader-runtime/*.js`
 - 扩展宿主与 adapter：`extensions/bw-reader-webext/src/*.js`
+- iOS App 本地宿主：`ios/BWReader/App/*.swift`、`_server_deploy/static/pdf/native-local-runtime.js`
 - PWA 真书宿主/接管桥：`_server_deploy/static/reader-runtime/book-host.js`、
   `_server_deploy/static/pdf/pwa-extension-bridge.js`
 - 服务端业务与桥接：`_server_deploy/pdf_reader.py`、`assistant.py`、`voice.py`、

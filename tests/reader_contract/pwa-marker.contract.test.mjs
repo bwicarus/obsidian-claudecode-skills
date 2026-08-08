@@ -361,7 +361,7 @@ test("marker 只转发严格的同页 PWA owner claim，缺失或伪造时仍只
   );
 });
 
-test("marker 只允许 PWA 查询 syncStatus，不能伪造冲突重试", () => {
+test("marker 只允许 PWA 查询状态或请求 owner 同步，不能伪造冲突裁决", () => {
   const h = harness();
   h.domReady();
   h.emitPage(pageHello("hello-sync-control"));
@@ -377,6 +377,24 @@ test("marker 只允许 PWA 查询 syncStatus，不能伪造冲突重试", () => 
   assert.deepEqual(
     port.messages.find((message) => message.id === "sync-status"),
     statusCall,
+  );
+  const syncNowCall = {
+    protocol: "bw-reader-services/1",
+    direction: "page-to-extension",
+    type: "CALL",
+    id: "sync-now",
+    payload: {
+      operation: "syncNow",
+      args: {
+        contract: "reader-pi-sync-request/1",
+        requestId: "native-sync-1",
+      },
+    },
+  };
+  h.emitPage(syncNowCall);
+  assert.deepEqual(
+    port.messages.find((message) => message.id === "sync-now"),
+    syncNowCall,
   );
 
   const forwardedCalls = port.messages.filter(
