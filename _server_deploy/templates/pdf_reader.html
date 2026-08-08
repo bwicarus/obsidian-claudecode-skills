@@ -494,6 +494,9 @@ window.toggleGrammarPanel = function () {
 // ── 新版本提示条(2026-07-21,缓存惨案制度性防复发):比对加载时 v 与服务器现行 v,
 //    不一致 → 顶部小条一键更新(清代码壳缓存,数据全保留)。触发:回前台(iOS 快照恢复主场景)+ 5min。──
 (function () {
+  // Native-local Reader assets are bundled with the App. Reloading cannot
+  // fetch a newer server shell, so the PWA version probe is meaningless here.
+  if (window.__BW_NATIVE_LOCAL_READER__ === true) return;
   var MYV = {{ shared_js_v|tojson }};
   var shown = false;
   function check() {

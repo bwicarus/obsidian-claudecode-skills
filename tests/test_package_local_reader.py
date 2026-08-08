@@ -52,6 +52,10 @@ class LocalReaderPackagerTests(unittest.TestCase):
         for placeholder in self.packager.PDF_PLACEHOLDERS:
             self.assertIn(placeholder, shell)
         self.assertIn("window.__BW_NATIVE_LOCAL_READER__=true", shell)
+        self.assertIn(
+            "if (window.__BW_NATIVE_LOCAL_READER__ === true) return;",
+            shell,
+        )
         self.assertIn(self.packager.CSP_NONCE_PLACEHOLDER, shell)
         self.assertTrue(all(
             f'nonce="{self.packager.CSP_NONCE_PLACEHOLDER}"' in tag
