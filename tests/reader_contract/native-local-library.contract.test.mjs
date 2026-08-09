@@ -122,6 +122,33 @@ test("native PDF mode uses PDFKit page images without PWA or whole-book caching"
   assert.match(PDF_LOADER, /if \(!_NATIVE_LOCAL_PDF && !_haveBuf/);
 });
 
+test("PDFKit selection identity never blocks first paint and refreshes transient pages", () => {
+  const open = WEB_VIEW.slice(
+    WEB_VIEW.indexOf("private func openLocalBook("),
+    WEB_VIEW.indexOf("private func cancelPendingLocalBookNavigation("),
+  );
+  const backgroundIdentity = WEB_VIEW.slice(
+    WEB_VIEW.indexOf("private func scheduleLocalPDFContentIdentity("),
+    WEB_VIEW.indexOf("/// Completes the native half"),
+  );
+  assert.match(
+    open,
+    /verifiedNativeRemoteBookBinding\([\s\S]*openingContentSHA256 = verified\.localContentSHA256/,
+  );
+  assert.ok(
+    open.indexOf("localRuntimeServer.open(") < open.indexOf("webView.load(URLRequest("),
+    "the PDF shell must begin opening before any fallback digest task",
+  );
+  assert.doesNotMatch(open, /await library\.ensureContentSHA256\(for: openingBook\)/);
+  assert.match(
+    WEB_VIEW,
+    /didFinish navigation:[\s\S]*scheduleLocalPDFContentIdentity\(\)[\s\S]*schedulePendingBookUserStateImport\(\)/,
+  );
+  assert.match(backgroundIdentity, /currentLocalContentDigest\(/);
+  assert.match(backgroundIdentity, /page: nil/);
+  assert.match(backgroundIdentity, /await bridge\.sendUpdate\(/);
+});
+
 test("native deep links preserve PDF pages and EPUB sections without exposing a file path", () => {
   for (const marker of [
     "__BW_LOCAL_INITIAL_PAGE__",

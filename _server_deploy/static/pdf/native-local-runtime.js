@@ -2620,6 +2620,11 @@
   var nativePageTextCache = Object.create(null);
   var nativePageTextPending = Object.create(null);
   var nativePageTextGeneration = Object.create(null);
+  // A native-only PDFKit page may first answer idle while Swift is still
+  // establishing the current file's full-content identity. Keep that page in
+  // the document's passive read set even though transient replies are not
+  // cached, so the later whole-layer update can ask its char layer to retry.
+  var nativePageTextKnownPages = Object.create(null);
   var nativeFormulaPrefetchPending = Object.create(null);
   var nativeTextOverridePages = Object.create(null);
   var nativeSearchCache = new Map();
@@ -3037,6 +3042,7 @@
     };
   }
   function nativePageForPage(page) {
+    nativePageTextKnownPages[page] = true;
     if (nativePageTextCache[page]) return Promise.resolve(nativePageTextCache[page]);
     if (nativePageTextPending[page]) return nativePageTextPending[page];
     var generation = nativePageTextGeneration[page] || 0;
@@ -3670,6 +3676,7 @@
     var pages = Object.create(null);
     [
       embeddedPageText,
+      nativePageTextKnownPages,
       nativePageTextCache,
       nativePageTextPending,
       nativeFormulaPrefetchPending,

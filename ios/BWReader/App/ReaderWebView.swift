@@ -193,6 +193,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         ReaderBookUserStatePendingImportStore.shared
     private var bookUserStateNotificationCancellables = Set<AnyCancellable>()
     private var bookUserStateImportTask: Task<Void, Never>?
+    private var localPDFContentIdentityTask: Task<Void, Never>?
     private var bookUserStateContextGeneration: UInt64 = 0
     private var currentLocalBook: ReaderLocalBookRecord?
     private var currentLocalBookAccess: ReaderLocalBookAccess?
@@ -999,6 +1000,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private func resetBookUserStateContext(baseURL: URL) {
         bookUserStateImportTask?.cancel()
         bookUserStateImportTask = nil
+        localPDFContentIdentityTask?.cancel()
+        localPDFContentIdentityTask = nil
         bookUserStateContextGeneration &+= 1
         currentLocalBook = nil
         currentLocalBookAccess = nil
@@ -1256,6 +1259,60 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             )
         }
         return digest
+    }
+
+    /// Local PDFKit can paint the first page without reading the whole file.
+    /// Keep that fast path: only establish a missing full-content identity once
+    /// the shell is visible, then invalidate the passive page-text reads so the
+    /// already rendered pages build their interactive char layers.
+    private func scheduleLocalPDFContentIdentity() {
+        guard localPDFContentIdentityTask == nil,
+              currentLocalBook?.format == .pdf,
+              currentLocalBookContentSHA256 == nil,
+              let localBookID = currentLocalBook?.id else { return }
+        let generation = bookUserStateContextGeneration
+        localPDFContentIdentityTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            defer {
+                if self.bookUserStateContextGeneration == generation {
+                    self.localPDFContentIdentityTask = nil
+                }
+            }
+            do {
+                let digest = try await self.currentLocalContentDigest(
+                    localBookId: localBookID,
+                    generation: generation
+                )
+                try Task.checkCancellation()
+                guard self.bookUserStateContextGeneration == generation,
+                      self.currentLocalBook?.id == localBookID,
+                      self.isLocalRuntimeURL(self.webView.url),
+                      let bridge = self.nativeBookOCRBridge else { return }
+                self.refreshNativePiRemoteBookBinding()
+                let status = await NativeBookOCRManager.shared.readyStatus(
+                    for: localBookID,
+                    expectedContentSHA256: digest
+                )
+                await bridge.sendUpdate(
+                    NativeBookOCRUpdate(
+                        contract: NativeBookOCRUpdate.contract,
+                        bookID: localBookID,
+                        page: nil,
+                        status: status
+                    ),
+                    to: self.webView
+                )
+            } catch is CancellationError {
+                return
+            } catch {
+                guard self.bookUserStateContextGeneration == generation,
+                      self.currentLocalBook?.id == localBookID else { return }
+                self.showBookUserStateMessage(
+                    "PDF 文字层初始化失败：\(error.localizedDescription)",
+                    isError: true
+                )
+            }
+        }
     }
 
     /// Completes the native half of the legacy PDF insert-page contract. The
@@ -1989,6 +2046,17 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             }) ?? book
             var access = try library.makeOpenAccess(for: openingBook)
             var openingContentSHA256 = openingBook.contentSha256
+            if openingContentSHA256 == nil,
+               let verified = remoteLibraryCoordinator?
+                .verifiedNativeRemoteBookBinding(
+                    for: openingBook,
+                    localContentSHA256: nil
+                ) {
+                // A Pi download/reconciliation already compared the exact
+                // bytes. Reuse that verified identity immediately instead of
+                // hashing a large PDF again before its first page can appear.
+                openingContentSHA256 = verified.localContentSHA256
+            }
             if openingBook.format == .pdf,
                let settlement = try await settleNativePDFMutation(
                     book: openingBook,
@@ -2009,6 +2077,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             )
             bookUserStateImportTask?.cancel()
             bookUserStateImportTask = nil
+            localPDFContentIdentityTask?.cancel()
+            localPDFContentIdentityTask = nil
             bookUserStateContextGeneration &+= 1
             currentLocalBook = openingBook
             currentLocalBookAccess = access
@@ -3123,6 +3193,8 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         nativePencilInk.invalidateDocument()
         bookUserStateImportTask?.cancel()
         bookUserStateImportTask = nil
+        localPDFContentIdentityTask?.cancel()
+        localPDFContentIdentityTask = nil
         bookUserStateContextGeneration &+= 1
     }
 
@@ -3165,6 +3237,7 @@ extension ReaderWebViewModel: WKNavigationDelegate {
             )
         }
         if currentLocalBook != nil, isLocalRuntimeURL(webView.url) {
+            scheduleLocalPDFContentIdentity()
             schedulePendingBookUserStateImport()
         }
     }

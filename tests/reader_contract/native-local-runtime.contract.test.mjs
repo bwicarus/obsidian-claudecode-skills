@@ -3148,6 +3148,56 @@ test("native idle and pending page replies are transient and never poison the ca
   }
 });
 
+test("whole-layer readiness retries a native-only PDFKit page first seen as idle", async () => {
+  let ready = false;
+  const { context, pageTextMessages } = await harness({
+    pageTextReply(message) {
+      return {
+        contract: "reader-native-page-text-response/1",
+        action: message.action,
+        requestId: message.requestId,
+        ok: ready,
+        state: ready ? "ready" : "idle",
+        source: ready ? "apple" : null,
+        revision: ready ? "pdfkit-identity-ready" : "0",
+        page: message.page,
+        pageWidth: ready ? 600 : 0,
+        pageHeight: ready ? 800 : 0,
+        chars: ready
+          ? [{ c: "可", x0: 10, y0: 10, x1: 20, y1: 25, w: 1, bk: 1, sp: false }]
+          : null,
+        formulaRegions: [],
+        error: null,
+      };
+    },
+  });
+  const first = await (await context.fetch("/pdf/api/page-chars?page=9")).json();
+  assert.equal(first.state, "idle");
+
+  const refresh = new Promise((resolve) => {
+    context.addEventListener("bw:page-text-updated", (event) => {
+      if (event.detail.page === 9) resolve(event.detail);
+    });
+  });
+  ready = true;
+  context.dispatchEvent(new context.CustomEvent("bw:native-page-text-updated", {
+    detail: {
+      contract: "reader-native-page-text-update/1",
+      localBookId: "localbook-" + "b".repeat(64),
+      page: null,
+      state: "idle",
+      source: null,
+      revision: "content-identity-ready",
+    },
+  }));
+  assert.equal((await refresh).page, 9);
+
+  const second = await (await context.fetch("/pdf/api/page-chars?page=9")).json();
+  assert.equal(second.state, "ready");
+  assert.equal(second.chars[0].c, "可");
+  assert.equal(pageTextMessages.length, 2);
+});
+
 test("imported Pi page text is consumed without starting Apple OCR", async () => {
   const { context, pageTextMessages } = await harness({
     pageTextReply(message) {
