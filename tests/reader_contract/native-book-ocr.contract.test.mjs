@@ -376,6 +376,25 @@ test("native page text reply bridge is main-frame, trusted, strict, and passive"
   assert.doesNotMatch(BRIDGE, /startLocal|\.resume\(|\.retry\(|startPi/);
 });
 
+test("native page text trust accepts only separator-bounded capability descendants", () => {
+  assert.match(
+    BRIDGE,
+    /private static func pathIsWithin\([\s\S]*let exact = basePath\.hasSuffix\("\/"\)[\s\S]*let withSeparator = exact \+ "\/"[\s\S]*url\.path == exact \|\| url\.path\.hasPrefix\(withSeparator\)/,
+  );
+  assert.match(BRIDGE, /return Self\.pathIsWithin\(url, base: trustedBaseURL\)/);
+  assert.match(BRIDGE, /if !pathIsWithin\(url, base: base\)/);
+
+  const pathIsWithin = (urlPath, basePath) => {
+    const exact = basePath.endsWith("/") ? basePath.slice(0, -1) : basePath;
+    return urlPath === exact || urlPath.startsWith(`${exact}/`);
+  };
+  assert.equal(pathIsWithin("/r/TOKEN/shells/pdf.html", "/r/TOKEN"), true);
+  assert.equal(pathIsWithin("/r/TOKEN/shells/pdf.html", "/r/TOKEN/"), true);
+  assert.equal(pathIsWithin("/r/TOKEN", "/r/TOKEN/"), true);
+  assert.equal(pathIsWithin("/r/TOKENXXX/shells/pdf.html", "/r/TOKEN"), false);
+  assert.equal(pathIsWithin("/other/shells/pdf.html", "/r/TOKEN"), false);
+});
+
 test("PDFKit image pages lazily recover the embedded selectable text layer", () => {
   assert.match(
     MANAGER,
