@@ -555,17 +555,51 @@ def _run_formula_pipeline(args, job_path: Path, control_path: Path) -> int:
     cmd = [doclayout_py, str(yolo), "--book", str(pdf), "--force"]
     if os.name == "posix":
         cmd = ["nice", "-n", "19", *cmd]
-    child = subprocess.Popen(
-        cmd,
-        cwd=str(project),
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
+    # Keeps stderr instead of discarding it.
+    #
+    # Both streams went to DEVNULL, so a detector that could not start -- a
+    # missing interpreter, an unimportable model, a CUDA error -- left the job
+    # sitting at "检测公式区域…" with nothing to read anywhere. The phase looked
+    # slow when it had already failed.
+    detect_log = formula_path.parent / "formula-detect.log"
+    try:
+        log_handle = open(detect_log, "wb")
+    except OSError:
+        log_handle = None
+    try:
+        child = subprocess.Popen(
+            cmd,
+            cwd=str(project),
+            stdout=subprocess.DEVNULL,
+            stderr=log_handle or subprocess.DEVNULL,
+        )
+    except OSError as exc:
+        if log_handle:
+            log_handle.close()
+        # Names the missing piece. "detection did not start" would send the
+        # next reader looking at the wrong layer.
+        raise RuntimeError(
+            f"formula detection could not start: {exc} (cmd={cmd[0]})"
+        ) from exc
     stopped = _run_controlled(child, control_path, job_path, "formula-detect", formula_path)
+    if log_handle:
+        try:
+            log_handle.close()
+        except OSError:
+            pass
     if stopped is not None:
         if stopped in (20, 21):
             return stopped
-        raise RuntimeError(f"formula detection exited with {stopped}")
+        detail = ""
+        try:
+            tail = detect_log.read_bytes()[-800:].decode("utf-8", "replace").strip()
+            if tail:
+                detail = " | " + " ".join(tail.split())[-400:]
+        except OSError:
+            pass
+        raise RuntimeError(
+            f"formula detection exited with {stopped}{detail}"
+        )
     total, have = _formula_counts(formula_path)
     current = _load(job_path, {}) or {}
     total_pages = int(current.get("totalPages") or 0)
