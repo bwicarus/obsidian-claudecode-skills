@@ -3878,8 +3878,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **发布**：提交 `d684a123` 经 Actions run `31306098989` 上传 TestFlight `1.1.3 (139)`；Pi 同提交经原子流程部署，回滚快照为 `20260809T101453Z-868860`，服务健康与 E2E 通过。
 - **边界/下一步**：真机选字、书架返回和后台恢复仍需 iPad 验收；本轮旧 worker 的 LaTeX 结果为 partial 0/1109，新诊断只对部署后重试或新任务生效。
 
-## Codex：文字层选择、持久高亮与 PDF 缩放修复候选（2026-08-09 JST）
+## Codex：文字层选择、持久高亮与 PDF 缩放 1.1.4 发布（2026-08-09 JST）
 - **改了什么**：Pi/PC/Apple/原文文字层按不可变附件分层保存并可在书架显式切换；修复 PDF/EPUB 高亮的 WebKit IndexedDB 事务、EPUB 空图片、书名误开外部浏览器及整层切换未生效。
 - **性能/方向**：PDF 缩放只重绘视口邻页，捏合预览只变换焦点页；iOS 后续以 PDFKit 承担基础渲染、缩放和原生选择，既有 DocumentHost 与共享笔迹/卡片/AI 叠层继续保留。
-- **怎么验的**：Reader Node 全量 932 项、OCR/书库/PC worker Python 专项 65 项、离线 ReaderBundle 与差异检查通过；Windows handoff 仅被既有 Linux `fcntl` 环境阻断。
-- **边界/下一步**：本候选尚未提交、部署或上传；macOS CI 负责编译 Swift，发布后由 iPad 验收文字层切换、高亮、EPUB、返回书架和缩放，再分阶段落地 PDFKit 基础页面。
+- **怎么验的**：Reader Node 全量 932 项、OCR/书库/PC worker Python 专项、离线 ReaderBundle、macOS 模拟器/设备归档与 Pi 完整门禁均通过；Windows handoff 仅被既有 Linux `fcntl` 环境阻断。
+- **发布**：App 提交 `de58710c` 经 Actions run `31310652255` 上传 TestFlight `1.1.4 (140)`；Pi 最终提交 `5e52250d` 原子部署成功，回滚快照为 `20260809T113625Z-895412`；PC worker 已在线并接受任务。
+- **边界/下一步**：仍需 iPad 验收文字层切换、高亮、EPUB、返回书架和缩放；随后分阶段以 PDFKit 替换基础 PDF 页面，并实现名为“ReaderPC 服务器”的统一托盘总控。

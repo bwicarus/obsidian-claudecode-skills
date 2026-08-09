@@ -214,6 +214,9 @@ collection 就自动上传。无扩展真书 PWA 使用自己的本地 fallback�
 - App 的本机 Apple 识别、Pi 识别和 PC 识别是三个显式入口；任何失败都不能自动改派到另一端。
   Pi 始终负责书库身份、任务协调和不可变附件发布，Windows worker 只建立出站 HTTPS 连接，
   不开放入站端口，也不取得可写书库路径。
+- Windows 侧统一托盘总控的正式产品名为“ReaderPC 服务器”。它只统一展示和控制语音、Reader
+  上下文桥与 PC 预处理等独立子进程，不把故障域合并成一个进程；App 与扩展只查询一个本机状态
+  入口。开机启动必须由用户显式开启，空闲时不得加载 OCR 模型或占用 GPU。
 - 派生结果身份至少包含书籍内容摘要、引擎、执行器与 `processingProfile`。切换 Pi/PC 或质量档时
   必须使用干净的可变 staging，不能复用另一档的残页；已发布 release 保持不可变并可按 revision
   审计。原 PDF 永不因 OCR 被覆盖。
