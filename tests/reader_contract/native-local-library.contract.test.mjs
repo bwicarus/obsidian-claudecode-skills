@@ -10,7 +10,11 @@ const REMOTE_LIBRARY = read("ios/BWReader/App/ReaderRemoteLibrary.swift");
 const NATIVE_TOOLS = read("ios/BWReader/App/NativeReaderToolsView.swift");
 const APP_ROOT = read("ios/BWReader/App/BWReaderNativeApp.swift");
 const LOCAL_SERVER = read("ios/BWReader/App/ReaderLocalRuntimeServer.swift");
+const LOCAL_PACKAGER = read("ios/BWReader/package_local_reader.py");
 const NATIVE_PI_GATEWAY = read("ios/BWReader/App/ReaderNativePiGateway.swift");
+const NATIVE_INTERFACE_MANIFEST = read(
+  "ios/BWReader/App/ReaderNativeInterfaceManifest.swift",
+);
 const WEB_VIEW = read("ios/BWReader/App/ReaderWebView.swift");
 const NATIVE_FEATURES = read("ios/BWReader/App/ReaderWebViewNativeFeatures.swift");
 const SPOTLIGHT = read("ios/BWReader/App/ReaderSpotlight.swift");
@@ -118,6 +122,40 @@ test("native PDF mode bypasses PWA ownership and duplicate whole-book caching", 
   assert.match(PDF_LOADER, /if \(!_NATIVE_LOCAL_PDF && !_haveBuf/);
 });
 
+test("native deep links preserve PDF pages and EPUB sections without exposing a file path", () => {
+  for (const marker of [
+    "__BW_LOCAL_INITIAL_PAGE__",
+    "__BW_LOCAL_INITIAL_PAGE_TS__",
+    "__BW_LOCAL_INITIAL_EPUB_POS__",
+    "__BW_LOCAL_INITIAL_EPUB_POS_TS__",
+  ]) {
+    assert.match(LOCAL_PACKAGER, new RegExp(marker));
+    assert.match(LOCAL_SERVER, new RegExp(marker));
+  }
+  assert.match(LOCAL_SERVER, /request\.query\["page"\]/);
+  assert.match(LOCAL_SERVER, /\(1\.\.\.10_000_000\)\.contains\(parsedPage\)/);
+  assert.match(LOCAL_SERVER, /let initialEPUBPosition = max\(0, initialPage - 1\)/);
+  assert.match(LOCAL_SERVER, /initialPage: Int\? = nil/);
+  assert.match(LOCAL_SERVER, /URLQueryItem\([\s\S]*name: "page",[\s\S]*value: String\(initialPage\)/);
+  assert.match(PDF_LOADER, /currentPage = Math\.max\(1, Math\.min\([\s\S]*pdfDoc\.numPages/);
+});
+
+test("legacy Reader shelf navigation opens the App-owned local library", () => {
+  assert.match(WEB_VIEW, /@Published private\(set\) var libraryPresentationRequestID: UUID\?/);
+  assert.match(
+    WEB_VIEW,
+    /private func takeOverLibraryNavigation\(_ url: URL\) -> Bool[\s\S]*url\.path == "\/pdf\/"[\s\S]*libraryPresentationRequestID = UUID\(\)/,
+  );
+  assert.match(
+    WEB_VIEW,
+    /navigationAction\.targetFrame\?\.isMainFrame != false,[\s\S]*takeOverLibraryNavigation\(url\)[\s\S]*decisionHandler\(\.cancel\)/,
+  );
+  assert.match(
+    APP_ROOT,
+    /\.onReceive\(reader\.\$libraryPresentationRequestID\)[\s\S]*guard requestID != nil[\s\S]*showsLibrary = true/,
+  );
+});
+
 test("local activity and snapshot identity expose only opaque book IDs", () => {
   assert.match(SPOTLIGHT, /URLQueryItem\(name: "book", value: localBookID\)/);
   assert.match(SPOTLIGHT, /value\.hasPrefix\("localbook-"\), value\.count == 74/);
@@ -131,7 +169,7 @@ test("local activity and snapshot identity expose only opaque book IDs", () => {
   assert.doesNotMatch(WEB_VIEW, /legacyReader|bwicarus\.taile44d0c\.ts\.net/);
   assert.doesNotMatch(NATIVE_FEATURES, /openNativeReaderURL|candidate\.port|bwicarus\.taile44d0c\.ts\.net/);
   assert.doesNotMatch(SPOTLIGHT, /readerURL|URLQueryItem\(name: "url"|bwicarus\.taile44d0c\.ts\.net/);
-  assert.match(APP_ROOT, /@State private var showsLibrary = true/);
+  assert.match(APP_ROOT, /@State private var showsLibrary = false/);
   assert.match(APP_ROOT, /reader\.setReaderScenePhase\(phase\)/);
   assert.match(WEB_VIEW, /case \.background:[\s\S]*readerWasBackgrounded = true/);
   assert.match(WEB_VIEW, /case \.inactive:[\s\S]*restartLocalRuntime: false/);
@@ -145,12 +183,21 @@ test("local WebView owns both bounded Pi gateway handlers on the main page world
   assert.match(WEB_VIEW, /contentWorld: \.page,\s*name: ReaderNativePiSyncBridge\.messageName/s);
 });
 
-test("native Pi gateway rejects dot segments and encoded path separators before allowlisting", () => {
+test("native Pi gateway canonicalizes first and authorizes through the packaged interface manifest", () => {
   assert.match(NATIVE_PI_GATEWAY, /canonicalRequestPath\(path\)/);
   assert.match(NATIVE_PI_GATEWAY, /components\.percentEncodedPath/);
   assert.match(NATIVE_PI_GATEWAY, /\["%2e", "%2f", "%5c"\]/);
   assert.match(NATIVE_PI_GATEWAY, /segment != "\." && segment != "\.\."/);
-  assert.match(NATIVE_PI_GATEWAY, /isAllowed\(path: canonicalPath\.path\)/);
+  assert.match(NATIVE_PI_GATEWAY, /ReaderNativeInterfaceManifest\(\)/);
+  assert.match(NATIVE_PI_GATEWAY, /path: request\.routePath,[\s\S]*method: request\.method,[\s\S]*surface: surface/);
+  assert.doesNotMatch(NATIVE_PI_GATEWAY, /let exact = Set\(\[/);
+  assert.match(NATIVE_INTERFACE_MANIFEST, /reader-native-interface-manifest\/2/);
+  assert.match(NATIVE_INTERFACE_MANIFEST, /native_reader_interface_manifest\.json/);
+  assert.match(NATIVE_INTERFACE_MANIFEST, /appendingPathComponent\("ReaderBundle"/);
+  assert.match(NATIVE_INTERFACE_MANIFEST, /route\.owner == \.pi/);
+  assert.match(NATIVE_INTERFACE_MANIFEST, /route\.status == \.supported/);
+  assert.match(NATIVE_INTERFACE_MANIFEST, /route\.methods\.contains\(method\)/);
+  assert.match(NATIVE_INTERFACE_MANIFEST, /route\.surfaces\.contains\(surface\)/);
 
   const pathAllowed = (raw) => {
     let url;
@@ -170,4 +217,60 @@ test("native Pi gateway rejects dot segments and encoded path separators before 
   assert.equal(pathAllowed("/api/assistant/%2e%2e/admin"), false);
   assert.equal(pathAllowed("/api/assistant/a%2fb"), false);
   assert.equal(pathAllowed("/api/assistant/a%5cb"), false);
+});
+
+test("native Pi gateway applies structured current/catalog book policies before network", () => {
+  assert.match(
+    NATIVE_INTERFACE_MANIFEST,
+    /func piRoutePolicy\([\s\S]*\) -> ReaderNativePiRoutePolicy\?/,
+  );
+  assert.match(
+    NATIVE_INTERFACE_MANIFEST,
+    /remoteBook: route\.remoteBook/,
+  );
+  assert.match(
+    REMOTE_LIBRARY,
+    /func verifiedNativeRemoteBookBinding\([\s\S]*activeLibraryID == localBook\.libraryID[\s\S]*localDigest == remoteDigest/,
+  );
+  assert.match(
+    NATIVE_PI_GATEWAY,
+    /struct ReaderNativeRemoteBookBinding[\s\S]*localContentSHA256[\s\S]*remoteContentSHA256[\s\S]*remoteRelativePath/,
+  );
+  assert.match(
+    NATIVE_PI_GATEWAY,
+    /switch policy\.scope[\s\S]*case \.current:[\s\S]*currentRemoteBookBinding[\s\S]*case \.catalog:[\s\S]*catalogRemoteBookBindings/,
+  );
+  assert.match(
+    NATIVE_PI_GATEWAY,
+    /rewriteJSONPointer\([\s\S]*identity\.pointer[\s\S]*bindings: bindings/,
+  );
+  assert.match(
+    NATIVE_PI_GATEWAY,
+    /case \.prefixBeforeDelimiter:[\s\S]*value\.range\(of: "::"\)/,
+  );
+  assert.match(
+    NATIVE_PI_GATEWAY,
+    /continuations\[rid\][\s\S]*registered\.epoch == scopeEpoch/,
+  );
+  assert.match(
+    NATIVE_PI_GATEWAY,
+    /prefix == binding\.remoteRelativePath/,
+  );
+  assert.doesNotMatch(
+    NATIVE_PI_GATEWAY,
+    /replacingOccurrences\([\s\S]*remoteRelativePath/,
+  );
+  assert.match(
+    WEB_VIEW,
+    /currentLocalLibrary\.books\.compactMap[\s\S]*verifiedNativeRemoteBookBinding[\s\S]*updateTrustedRemoteBookBindings/,
+  );
+  assert.match(
+    WEB_VIEW,
+    /Publishers\.CombineLatest3\([\s\S]*verifiedNativeRemoteBookBinding/,
+  );
+  assert.match(APP_ROOT, /reader\.bind\(remoteLibrary: remoteLibrary\)/);
+  assert.match(
+    APP_ROOT,
+    /await remoteLibrary\.refresh\([\s\S]*localLibrary: localLibrary/,
+  );
 });

@@ -212,10 +212,13 @@
       if (!(window.RC && RC.phrasepop && RC.phrasepop.show)) { if (opts.fallback) opts.fallback(); return; }
       var langs = (h && h.bookLangs && h.bookLangs()) || [];
       var file = (h && h.fileRel && h.fileRel()) || '';
+      var page = (h && h.selPageNum && h.selPageNum()) ||
+        (h && h.currentPage && h.currentPage()) || 0;
       // 弹框(点击/缓存快开)共用的按钮回调 —— phl 传引用,onFav 精确删它
       var _showOpts = function (rect, result, phl) {
         return {
-          text: text, rect: rect, result: result || null, file: file, langs: langs, ignoreSelector: '#sel-toolbar',
+          text: text, rect: rect, result: result || null, file: file,
+          page: page, langs: langs, ignoreSelector: '#sel-toolbar',
           // 收藏时无需再删高亮:点击模式弹框前已 _removePhraseHighlight(a),快返回模式根本没建高亮 → 只刷新分词。
           //   (旧 removePhraseHighlight(phl||t) 里 phl 恒 null → 按文本删会误删并存的同文本高亮。)
           onFav: function (t, nowFav) {
@@ -251,7 +254,7 @@
         if (h && h.phraseHighlight) { try { phl = h.phraseHighlight(); } catch (e) {} }   // 慢:才建呼吸高亮
       }, 400);
       RC.phrasepop.show({
-        text: text, noDisplay: true, file: file, langs: langs,
+        text: text, noDisplay: true, file: file, page: page, langs: langs,
         onResult: function (data) {
           resolved = true;
           if (hlTimer) { clearTimeout(hlTimer); hlTimer = null; }

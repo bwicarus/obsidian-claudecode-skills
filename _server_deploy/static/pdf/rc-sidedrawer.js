@@ -184,34 +184,91 @@
     return Math.max(lim.min, Math.min(lim.max, n));
   }
   function getWidth() { return _clampWidth(_lsGet(_akey('width', LS_WIDTH), String(_defaultWidth()))); }
+  // 侧栏宽度拖动 / 滑入滑出期间只让 CSS 预览最终几何。宿主的 PDF 栅格化必须等布局稳定后再做，
+  // 否则 pointermove + ResizeObserver + 延迟 reflow 会为同一手势反复重建 canvas/text/ink/note。
+  var _layoutPreviewKinds = { width: false, transition: false };
+  var _layoutCommitDepth = 0;
+  var _layoutNeedsCommit = false;
+  function _layoutPreviewActive() { return !!(_layoutPreviewKinds.width || _layoutPreviewKinds.transition); }
+  function _dispatchLayoutSettled(committed) {
+    try {
+      var ev = (typeof CustomEvent === 'function')
+        ? new CustomEvent('rc:sidedrawer-layout-settled', { detail: { committed: !!committed } })
+        : new Event('rc:sidedrawer-layout-settled');
+      if (!ev.detail) ev.detail = { committed: !!committed };
+      window.dispatchEvent(ev);
+    } catch (e) {}
+  }
+  function _setLayoutPreview(kind, on, committed) {
+    var was = _layoutPreviewActive();
+    _layoutPreviewKinds[kind] = !!on;
+    if (was && !on && committed) _layoutNeedsCommit = true;
+    var active = _layoutPreviewActive();
+    try {
+      document.documentElement.classList.toggle('rc-side-layout-preview', active);
+      if (kind === 'width') document.documentElement.classList.toggle('rc-side-width-preview', !!on);
+    } catch (e) {}
+    if (was && !active) {
+      var needsCommit = _layoutNeedsCommit;
+      _layoutNeedsCommit = false;
+      _dispatchLayoutSettled(needsCommit);
+    }
+  }
+  function _withLayoutCommit(fn) {
+    _layoutCommitDepth += 1;
+    try { return fn(); } finally { _layoutCommitDepth = Math.max(0, _layoutCommitDepth - 1); }
+  }
   function _applyWidth(px) {
     var n = _clampWidth(px);
     document.documentElement.style.setProperty('--ep-side-width', n + 'px');
     return n;
   }
   function setWidth(px, persist) {
+    var commit = persist !== false;
+    if (!commit) _setLayoutPreview('width', true, false);
     var n = _applyWidth(px);
-    if (persist !== false) _lsSet(_akey('width', LS_WIDTH), String(n));
+    if (commit) _lsSet(_akey('width', LS_WIDTH), String(n));
     var r = document.getElementById('ep-gp-width'); if (r) r.value = String(n);
     var v = document.getElementById('ep-gp-width-val'); if (v) v.textContent = String(n);
     var handled = false;
-    try {
-      if (typeof _opts.onWidthChange === 'function') {
-        _opts.onWidthChange(n, persist !== false);
-        handled = true;
-      }
-    } catch (e) {}
-    // 有实时宽度消费方时由它区分 preview/commit，避免 commit 后再补发一轮重复重排。
-    if (persist !== false && !handled) _reflow();
+    if (commit) {
+      _setLayoutPreview('width', false, true);
+      try {
+        if (typeof _opts.onWidthChange === 'function') {
+          _withLayoutCommit(function () { _opts.onWidthChange(n, true); });
+          handled = true;
+        }
+      } catch (e) {}
+      // preview 已由 CSS 变量即时完成；宿主只在 commit 收到一次昂贵重排。
+      if (!handled) _reflow();
+    }
     return n;
   }
-  var _rfT = null;
+  var _rfT = null, _rfSide = null, _rfEnd = null, _rfSeq = 0;
   function _reflow() {   // 挤压↔悬浮切换 / 开关抽屉 → 正文宽度变 → 重排(EPUB=合成 resize 给 epub.js;PDF 经 opts.onReflow 走 _scheduleRefit)
+    var seq = ++_rfSeq;
+    _setLayoutPreview('transition', true, false);
     clearTimeout(_rfT);
-    _rfT = setTimeout(function () {
-      if (typeof _opts.onReflow === 'function') { try { _opts.onReflow(); } catch (e) {} return; }
-      try { window.dispatchEvent(new Event('resize')); } catch (e) {}
-    }, 430);
+    if (_rfSide && _rfEnd) { try { _rfSide.removeEventListener('transitionend', _rfEnd); } catch (e) {} }
+    _rfSide = document.getElementById('ep-side');
+    function finish() {
+      if (seq !== _rfSeq) return;
+      clearTimeout(_rfT); _rfT = null;
+      if (_rfSide && _rfEnd) { try { _rfSide.removeEventListener('transitionend', _rfEnd); } catch (e) {} }
+      _rfEnd = null; _rfSide = null;
+      _setLayoutPreview('transition', false, true);
+      _withLayoutCommit(function () {
+        if (typeof _opts.onReflow === 'function') { try { _opts.onReflow(); } catch (e) {} return; }
+        try { window.dispatchEvent(new Event('resize')); } catch (e) {}
+      });
+    }
+    if (_rfSide) {
+      _rfEnd = function (e) {
+        if (e && e.target === _rfSide && (!e.propertyName || e.propertyName === 'transform')) finish();
+      };
+      try { _rfSide.addEventListener('transitionend', _rfEnd); } catch (e) {}
+    }
+    _rfT = setTimeout(finish, 470);   // 无 transitionend / 悬浮切换的稳定兜底；不是轮询
   }
   function setFloating(on) {
     on = !!on;
@@ -259,6 +316,12 @@
   border-left:1px solid rgba(255,255,255,0.20);
   box-shadow:-14px 0 48px rgba(0,0,0,0.45),inset 1px 0 0 rgba(255,255,255,0.16);
   transform:translateX(102%);transition:transform 0.4s cubic-bezier(.4,0,.2,1);touch-action:pan-y;padding-top:env(safe-area-inset-top)}
+/* 调宽期间去掉高成本玻璃/颗粒与追赶式过渡；松手后立即恢复完整视觉。 */
+html.rc-side-width-preview #ep-side{backdrop-filter:none!important;-webkit-backdrop-filter:none!important}
+html.rc-side-width-preview #ep-side::before{display:none}
+html.rc-side-width-preview #ep-side-handle,
+html.rc-side-width-preview body.ep-side-open:not(.ep-side-floating) #ep-viewer,
+html.rc-side-width-preview body.ep-side-open:not(.ep-side-floating) #html-content{transition:none!important}
 /* 侧栏正文统一排版：卡片/聊天/列表同一字号，标题与辅助信息仍保留层级。 */
 #ep-side{font-family:var(--rc-font-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif);font-size:13px;line-height:1.55}
 #ep-side button,#ep-side input,#ep-side textarea,#ep-side select{font-family:inherit}
@@ -381,8 +444,13 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
       if (done.long) {
         suppressUntil = Date.now() + 650;
         h.classList.remove('resizing');
-        // cancel 是系统中断，不是用户提交：恢复手势前宽度且不持久化。
-        setWidth(cancelled ? done.width : (done.current || done.width), !cancelled);
+        // cancel 是系统中断，不是用户提交：恢复手势前宽度且不持久化/不触发栅格化。
+        if (cancelled) {
+          setWidth(done.width, false);
+          _setLayoutPreview('width', false, false);
+        } else {
+          setWidth(done.current || done.width, true);
+        }
       }
       try { if (h.hasPointerCapture(done.id)) h.releasePointerCapture(done.id); } catch (_) {}
     }
@@ -480,7 +548,10 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
         '<small id="ep-ver-stamp" style="color:#5a6680;font-size:10px;word-break:break-all"></small></div>';
       side.appendChild(ss);
       var _f = ss.querySelector('#ep-gp-floating'); if (_f) _f.addEventListener('change', function () { setFloating(this.checked); });
-      var _w = ss.querySelector('#ep-gp-width'); if (_w) _w.addEventListener('input', function () { setWidth(this.value, true); });
+      var _w = ss.querySelector('#ep-gp-width'); if (_w) {
+        _w.addEventListener('input', function () { setWidth(this.value, false); });
+        _w.addEventListener('change', function () { setWidth(this.value, true); });
+      }
       var _b = ss.querySelector('#ep-gp-blur'); if (_b) _b.addEventListener('input', function () { setBlur(this.value); var v = document.getElementById('ep-gp-blur-val'); if (v) v.textContent = this.value; });
       // 强制更新(2026-07-21 用户提案):只清代码壳缓存(pdf-shell-v1),**保留** pdf-cache-v3 里
       // 已下载的书(页图/字符层);顺手触发 SW 更新检查,再整页重载 → 治 iOS 快照恢复/陈旧缓存滞留
@@ -738,6 +809,8 @@ body.ep-side-open.ep-side-floating #ep-content,body.ep-side-open.ep-side-floatin
     getBlur: getBlur,
     setWidth: setWidth,
     getWidth: getWidth,
+    isLayoutPreviewActive: _layoutPreviewActive,
+    isLayoutCommitActive: function () { return _layoutCommitDepth > 0; },
     applyAppearance: applyAppearance,
     applyQuickVisibility: applyQuickVisibility
   };

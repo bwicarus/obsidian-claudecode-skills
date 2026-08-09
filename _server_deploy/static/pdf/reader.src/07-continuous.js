@@ -28,7 +28,7 @@ async function setupContinuousMode() {
   // IntersectionObserver 先建好,占位**边建边 observe**(把 O(N) 的 observe 也分摊掉,不再一次性 observe 几千个)。
   _contIO = new IntersectionObserver((entries) => {
     entries.forEach(e => {
-      if (e.isIntersecting && e.target.dataset.loaded === '0') {
+      if (e.isIntersecting && e.target.dataset.loaded === '0' && !e.target.__sideRefitPending) {
         _renderPageInto(parseInt(e.target.dataset.pageNum), e.target);
       }
     });
@@ -134,8 +134,10 @@ window._auditScales = function (tag) {
 //      布局即刻正确(focal 复位/滚动读到的 offsetHeight 立即准)、无白闪、不 snap 回旧大小;暂时由旧栅格放缩→略软。
 //   ② 后台(不 await):并发重栅格化到新 scale 高清图,各自 decode-first 换入(缩小走缓存秒回;放大并发一次 fetch ≈300ms)。
 //      重入由 _renderPageImg 的 __imgGen 守卫(最后发起的赢),所以期间用户再捏合也安全。
+// options.rasterScope==='visible-near' 仅供侧栏稳定提交：所有页仍同步得到正确 CSS 几何，只有视口/近邻
+// 已加载页立即高清化；远页标成待 IO 清晰化。用户主动缩放不传 options，保留原来的全量一致性语义。
 // 返回 false(没建过列表 / 结构不符)→ 调用方回退 setupContinuousMode。global scale 已由调用方设好。
-async function _rescaleContinuousInPlace() {
+async function _rescaleContinuousInPlace(options) {
   const container = document.getElementById('page-container');
   const wraps = [...container.querySelectorAll('.page-wrap')];
   if (!wraps.length) return false;
@@ -151,21 +153,48 @@ async function _rescaleContinuousInPlace() {
       estW = Math.floor(v1.width * _cropVisWFrac()); estH = Math.floor(v1.height * _cropVisHFrac());
     } catch (_) {}
   }
-  for (const w of wraps) {
+  const visibleNearOnly = !!(options && options.rasterScope === 'visible-near');
+  const mainEl = visibleNearOnly ? document.getElementById('main') : null;
+  const mainRect = mainEl ? mainEl.getBoundingClientRect() : null;
+  const nearMargin = mainEl ? Math.max(1200, (mainEl.clientHeight || 0) * 1.5) : 1200;
+  // 先读后写：只给已经有栅格/在途内容的有限页读 rect，避免整本占位逐页强制布局。
+  const records = wraps.map(w => {
+    const visual = w.querySelector('.page-img, canvas');
+    const hasRaster = w.dataset.loaded === '1' || !!visual;
+    let rasterNow = !visibleNearOnly;
+    if (visibleNearOnly && hasRaster) {
+      const num = parseInt(w.dataset.pageNum, 10) || 0;
+      const current = (typeof currentPage === 'number') ? currentPage : 0;
+      rasterNow = !!(current && Math.abs(num - current) <= 1);   // spread 对页 + 前后一页兜底
+      if (!rasterNow && mainRect) {
+        const r = w.getBoundingClientRect();
+        rasterNow = r.bottom >= mainRect.top - nearMargin && r.top <= mainRect.bottom + nearMargin;
+      }
+    }
+    return { w, visual, hasRaster, rasterNow };
+  });
+  for (const record of records) {
+    const w = record.w;
     // loaded==='1' 已结算页;loaded==='0' 但有 .page-img/canvas = 上次缩放的后台重渲仍 in-flight
     // (decode-first 期间旧图还挂着)。这类页也必须重标尺并重发渲染:否则连续多次捏合时它被当占位跳过,
     // 上一次的后台渲染(用旧 scale 的 viewport)随后完成、把它定格在旧 scale,本次又没碰它
     // → 页面 scale 混杂(部分页不跟着缩放)。重发的 _renderPageInto 会 bump __imgGen 让旧 in-flight 作废。
-    if (w.dataset.loaded === '1' || w.querySelector('.page-img, canvas')) {
+    if (record.hasRaster) {
       // ① 瞬时:CSS zoom 把现有位图(renderScale 像素)按比例缩到当前 scale。zoom **同时缩放内容+布局占位**
       //    (不像 transform 不影响布局)→ 滚动/行距即刻精确;页内仍是 renderScale 像素坐标 → 稳态 zoom=1 时
       //    选中/高亮/去边坐标完全不变。所有页一次过同步设 zoom → 行间 scale 永远一致;就算某页后台重渲漏了/失败,
       //    zoom 也一直顶着正确视觉尺寸 → 结构上不可能出现"部分页不跟着缩放"。(PDF.js cssTransform 同款思路)
       const rs = w.__renderScale || 0;
       if (rs > 0) w.style.zoom = (scale / rs);
-      // ② 后台按新 scale 重栅格化(decode-first 无闪 + __imgGen 防叠加);完成时 _renderPageImg 把 zoom 归 1(原生清晰)。
+      // ② 侧栏提交只重栅格视口/近邻页；远页保留 CSS 正确尺寸并在进入 IO rootMargin 时再高清化。
       w.dataset.loaded = '0';
-      _renderPageInto(parseInt(w.dataset.pageNum, 10), w).catch(() => {});
+      if (record.rasterNow) {
+        if (visibleNearOnly) w.__sideRefitPending = true;   // 挡住同帧 IO 重入；一个 stable commit 每页最多一次
+        const work = _renderPageInto(parseInt(w.dataset.pageNum, 10), w);
+        Promise.resolve(work).catch(() => {}).finally(() => {
+          if (visibleNearOnly) w.__sideRefitPending = false;
+        });
+      }
     } else if (estW) {
       w.style.width = estW + 'px'; w.style.height = estH + 'px';
     }

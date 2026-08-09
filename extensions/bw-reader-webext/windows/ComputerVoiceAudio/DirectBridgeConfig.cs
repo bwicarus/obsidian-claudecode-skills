@@ -26,6 +26,7 @@ internal sealed record DirectBridgeConfig(
 internal sealed class DirectBridgeConfigStore
 {
     private const int MaximumConfigBytes = 64 * 1024;
+    internal const string NativeAppOrigin = "http://127.0.0.1:43129";
     private readonly string _path;
     private readonly object _writeGate = new();
 
@@ -505,16 +506,7 @@ internal sealed class DirectBridgeConfigStore
         foreach (string origin in origins)
         {
             if (
-                !Uri.TryCreate(origin, UriKind.Absolute, out Uri? uri)
-                || uri.Scheme != Uri.UriSchemeHttps
-                || uri.UserInfo.Length != 0
-                || uri.AbsolutePath != "/"
-                || uri.Query.Length != 0
-                || uri.Fragment.Length != 0
-                || !string.Equals(
-                    uri.GetLeftPart(UriPartial.Authority),
-                    origin,
-                    StringComparison.Ordinal)
+                !IsAllowedOrigin(origin)
                 || !result.Add(origin)
             )
             {
@@ -522,6 +514,27 @@ internal sealed class DirectBridgeConfigStore
             }
         }
         return result;
+    }
+
+    internal static bool IsAllowedOrigin(string origin)
+    {
+        if (string.Equals(
+            origin,
+            NativeAppOrigin,
+            StringComparison.Ordinal))
+        {
+            return true;
+        }
+        return Uri.TryCreate(origin, UriKind.Absolute, out Uri? uri)
+            && uri.Scheme == Uri.UriSchemeHttps
+            && uri.UserInfo.Length == 0
+            && uri.AbsolutePath == "/"
+            && uri.Query.Length == 0
+            && uri.Fragment.Length == 0
+            && string.Equals(
+                uri.GetLeftPart(UriPartial.Authority),
+                origin,
+                StringComparison.Ordinal);
     }
 
     private static string RequireString(

@@ -586,6 +586,13 @@ async function loadPdf() {
     pdfDoc = await task.promise;
     }
     window.dlog('✓ PDF 加载完成，共 ' + pdfDoc.numPages + ' 页');
+    // App-owned cross-book navigation preserves the legacy `page` deep link.
+    // Clamp only after PDF.js knows the real count so an outdated assistant
+    // result cannot leave continuous mode waiting for a non-existent target.
+    currentPage = Math.max(1, Math.min(
+      pdfDoc.numPages,
+      parseInt(currentPage, 10) || 1
+    ));
     document.getElementById('page-total').textContent = '/ ' + (window.__GRP ? window.__GRP.total : pdfDoc.numPages);
     await loadBookCrop();   // 先拉去边配置(_crop/_cropOn)→ 下面 fit-width scale 才能按可见宽算
     // 旋转自动切换排版：开了的话,按当前横/竖屏套用该方向上次存的 {排版+去边开关+双页错位}
@@ -1716,6 +1723,8 @@ window.toggleSpread = async () => {
 
 // 容器宽度变化 → 重算 scale 并重渲染（解决 PDF 被 CSS 缩放拉伸/模糊）
 let _refitDebounce = null, _refitBusy = false, _lastFitWidth = 0;
+let _refitQueued = false, _refitQueuedForce = false, _refitQueuedScope = 'all';
+let _sidePreviewDeferred = false, _sidePreviewForce = false;
 // #main 真实可用内容宽度（clientWidth 含 padding，开侧栏加 padding-right 后必须减掉真实 padding）
 function _mainContentWidth() {
   const m = document.getElementById('main');
@@ -1746,10 +1755,49 @@ function _updateMainOverflowX() {
   else { main.style.overflowX = 'hidden'; main.scrollLeft = 0; }   // 锁 hidden 时归零横向偏移(防从放大态切回适应残留偏移)
 }
 window._updateMainOverflowX = _updateMainOverflowX;
-function _scheduleRefit(force) {
-  if (_refitDebounce) clearTimeout(_refitDebounce);
-  _refitDebounce = setTimeout(() => _refitToWidth(force), 180);
+function _sideDrawerLayoutApi() {
+  try { return window.RC && RC.sidedrawer ? RC.sidedrawer : null; } catch (_) { return null; }
 }
+function _resetSidePreviewRefit() {
+  _sidePreviewDeferred = false;
+  _sidePreviewForce = false;
+}
+function _scheduleRefit(force, scope) {
+  const side = _sideDrawerLayoutApi();
+  const sidePreview = !!(side && typeof side.isLayoutPreviewActive === 'function' && side.isLayoutPreviewActive());
+  const sideCommit = scope === 'visible-near' || !!(side && typeof side.isLayoutCommitActive === 'function' && side.isLayoutCommitActive());
+  if (sidePreview) {
+    _sidePreviewDeferred = true;
+    _sidePreviewForce = _sidePreviewForce || !!force;
+    return;   // 拖动/过渡期只有 CSS 预览；ResizeObserver 不得启动页面栅格化
+  }
+  if (sideCommit) {
+    scope = 'visible-near';
+    force = !!force || _sidePreviewForce;
+    _resetSidePreviewRefit();
+  }
+  const normalizedScope = scope === 'visible-near' ? 'visible-near' : 'all';
+  if (!_refitQueued) {
+    _refitQueued = true;
+    _refitQueuedForce = !!force;
+    _refitQueuedScope = normalizedScope;
+  } else {
+    _refitQueuedForce = _refitQueuedForce || !!force;
+    if (normalizedScope === 'all') _refitQueuedScope = 'all';   // 普通窗口/用户缩放不可被侧栏局部 scope 降级
+  }
+  if (_refitDebounce) clearTimeout(_refitDebounce);
+  _refitDebounce = setTimeout(() => {
+    const runForce = _refitQueuedForce;
+    const runScope = _refitQueuedScope === 'visible-near' ? 'visible-near' : null;
+    _refitQueued = false; _refitQueuedForce = false; _refitQueuedScope = 'all';
+    _refitDebounce = null;
+    _refitToWidth(runForce, false, runScope);
+  }, 180);
+}
+window.addEventListener('rc:sidedrawer-layout-settled', (e) => {
+  if (e && e.detail && e.detail.committed === false) { _resetSidePreviewRefit(); return; }
+  if (_sidePreviewDeferred || (e && e.detail && e.detail.committed)) _scheduleRefit(true, 'visible-near');
+});
 // (已删除「适应溢出兜底 _runFitOverflowGuard」)它测 main.scrollWidth 来「兜底再缩」,但会把**非页面元素**
 // 的假溢出(如错位的 vocab 下划线、知识点抽屉)当真,于是把页面缩到 fit 以下 → 用户报的「适应后瞬间填满
 // 又回弹」就是它干的。_computeFitScale 本身精确(去边时也按可见宽算到正好填满),不需要这个投机性兜底。
@@ -1757,7 +1805,17 @@ function _scheduleRefit(force) {
 // 点「适应」(fitWidth)回到适应。旋转时若处于适应态 → 新方向强制重算适应,不还原该方向旧的手动缩放
 // (用户拍板:自适应开着就无论怎么转都自动适应)。自动 refit(ResizeObserver)不改此意图标志。
 window._atFitWidth = true;
-async function _refitToWidth(force, rebuild) {
+function _captureSideRefitAnchor(main) {
+  try {
+    const wrap = document.querySelector('.page-wrap[data-page-num="' + currentPage + '"]');
+    if (!wrap) return null;
+    const mr = main.getBoundingClientRect(), r = wrap.getBoundingClientRect();
+    if (!r.height || r.bottom <= mr.top || r.top >= mr.bottom) return null;
+    const screenY = Math.max(r.top, Math.min(r.bottom, mr.top + Math.min(mr.height * 0.42, 320)));
+    return { page: String(currentPage), fracY: Math.max(0, Math.min(1, (screenY - r.top) / r.height)), screenY };
+  } catch (_) { return null; }
+}
+async function _refitToWidth(force, rebuild, refitScope) {
   if (_refitBusy || !pdfDoc) return;
   const main = document.getElementById('main');
   const mainW = _mainContentWidth();
@@ -1779,21 +1837,39 @@ async function _refitToWidth(force, rebuild) {
     const v0 = page1.getViewport({scale: 1});
     const newScale = _computeFitScale(v0.width, v0.height);   // 双页含高度约束(整页可见)
     if (Math.abs(newScale - scale) < 0.01 && !force) return;
-    // 保存当前滚动相对位置（按 page-container 高度比例）
+    // 侧栏宽度 / 开合优先保存当前页的屏幕锚点；比例只作普通窗口缩放与异常结构的兜底。
     const container = document.getElementById('page-container');
+    const sideAnchor = refitScope === 'visible-near' ? _captureSideRefitAnchor(main) : null;
     const ratio = container && container.offsetHeight
       ? main.scrollTop / Math.max(1, container.offsetHeight)
       : 0;
     scale = newScale;
     _lastFitWidth = mainW;
+    // 侧栏开合会把 spread 临时切 continuous（关闭时反向还原）。原地 reparent，避免整本占位/已加载页重建。
+    if (refitScope === 'visible-near' && readMode !== 'single' && container) {
+      const structureMismatch = (readMode === 'spread') !== !!container.querySelector('.spread-row');
+      if (structureMismatch && typeof _remodeListInPlace === 'function') _remodeListInPlace();
+    }
     // 统一:三模式都走 wrap 原地重排(单页=唯一 wrap);rebuild 或原地失败才按模式重建(单页→renderPage 重建唯一 wrap)
-    if (rebuild || !(await _rescaleContinuousInPlace())) {
+    const rescaleOptions = refitScope === 'visible-near' ? { rasterScope: 'visible-near' } : undefined;
+    if (rebuild || !(await _rescaleContinuousInPlace(rescaleOptions))) {
       if (readMode === 'single') await renderPage(currentPage);
       else await setupContinuousMode();
     }
-    // 按比例恢复滚动
+    // 恢复同一页内位置；侧栏之外的 resize 保持原有全文高度比例语义。
     requestAnimationFrame(() => {
-      if (container && container.offsetHeight) {
+      let anchored = false;
+      if (sideAnchor) {
+        const target = document.querySelector('.page-wrap[data-page-num="' + sideAnchor.page + '"]');
+        if (target) {
+          const r = target.getBoundingClientRect();
+          if (r.height) {
+            main.scrollTop = Math.max(0, main.scrollTop + (r.top + sideAnchor.fracY * r.height) - sideAnchor.screenY);
+            anchored = true;
+          }
+        }
+      }
+      if (!anchored && container && container.offsetHeight) {
         main.scrollTop = Math.floor(ratio * container.offsetHeight);
       }
       _updateMainOverflowX();   // 适应/去边后内容铺满宽 → 锁横向拖动
@@ -2056,7 +2132,13 @@ window.toggleFullscreen = function () {
       try { localStorage.setItem('pdf-fullscreen', '0'); } catch (_) {}
     }
   }));
-_applyFullscreen(_fsEnabled());   // 载入同步页内全屏态(浏览器全屏须用户手势,不在此触发)
+// Navigation/reload ends the browser Fullscreen API session. A persisted visual
+// class without that session is stale and must not make the toolbar disappear.
+const _restoreFullscreen = _fsEnabled() && _browserFsActive();
+_applyFullscreen(_restoreFullscreen);
+if (!_restoreFullscreen) {
+  try { localStorage.setItem('pdf-fullscreen', '0'); } catch (_) {}
+}
 
 // 连续模式：所有页占位 + IntersectionObserver 懒加载
 async function setupContinuousMode() {
@@ -2089,7 +2171,7 @@ async function setupContinuousMode() {
   // IntersectionObserver 先建好,占位**边建边 observe**(把 O(N) 的 observe 也分摊掉,不再一次性 observe 几千个)。
   _contIO = new IntersectionObserver((entries) => {
     entries.forEach(e => {
-      if (e.isIntersecting && e.target.dataset.loaded === '0') {
+      if (e.isIntersecting && e.target.dataset.loaded === '0' && !e.target.__sideRefitPending) {
         _renderPageInto(parseInt(e.target.dataset.pageNum), e.target);
       }
     });
@@ -2195,8 +2277,10 @@ window._auditScales = function (tag) {
 //      布局即刻正确(focal 复位/滚动读到的 offsetHeight 立即准)、无白闪、不 snap 回旧大小;暂时由旧栅格放缩→略软。
 //   ② 后台(不 await):并发重栅格化到新 scale 高清图,各自 decode-first 换入(缩小走缓存秒回;放大并发一次 fetch ≈300ms)。
 //      重入由 _renderPageImg 的 __imgGen 守卫(最后发起的赢),所以期间用户再捏合也安全。
+// options.rasterScope==='visible-near' 仅供侧栏稳定提交：所有页仍同步得到正确 CSS 几何，只有视口/近邻
+// 已加载页立即高清化；远页标成待 IO 清晰化。用户主动缩放不传 options，保留原来的全量一致性语义。
 // 返回 false(没建过列表 / 结构不符)→ 调用方回退 setupContinuousMode。global scale 已由调用方设好。
-async function _rescaleContinuousInPlace() {
+async function _rescaleContinuousInPlace(options) {
   const container = document.getElementById('page-container');
   const wraps = [...container.querySelectorAll('.page-wrap')];
   if (!wraps.length) return false;
@@ -2212,21 +2296,48 @@ async function _rescaleContinuousInPlace() {
       estW = Math.floor(v1.width * _cropVisWFrac()); estH = Math.floor(v1.height * _cropVisHFrac());
     } catch (_) {}
   }
-  for (const w of wraps) {
+  const visibleNearOnly = !!(options && options.rasterScope === 'visible-near');
+  const mainEl = visibleNearOnly ? document.getElementById('main') : null;
+  const mainRect = mainEl ? mainEl.getBoundingClientRect() : null;
+  const nearMargin = mainEl ? Math.max(1200, (mainEl.clientHeight || 0) * 1.5) : 1200;
+  // 先读后写：只给已经有栅格/在途内容的有限页读 rect，避免整本占位逐页强制布局。
+  const records = wraps.map(w => {
+    const visual = w.querySelector('.page-img, canvas');
+    const hasRaster = w.dataset.loaded === '1' || !!visual;
+    let rasterNow = !visibleNearOnly;
+    if (visibleNearOnly && hasRaster) {
+      const num = parseInt(w.dataset.pageNum, 10) || 0;
+      const current = (typeof currentPage === 'number') ? currentPage : 0;
+      rasterNow = !!(current && Math.abs(num - current) <= 1);   // spread 对页 + 前后一页兜底
+      if (!rasterNow && mainRect) {
+        const r = w.getBoundingClientRect();
+        rasterNow = r.bottom >= mainRect.top - nearMargin && r.top <= mainRect.bottom + nearMargin;
+      }
+    }
+    return { w, visual, hasRaster, rasterNow };
+  });
+  for (const record of records) {
+    const w = record.w;
     // loaded==='1' 已结算页;loaded==='0' 但有 .page-img/canvas = 上次缩放的后台重渲仍 in-flight
     // (decode-first 期间旧图还挂着)。这类页也必须重标尺并重发渲染:否则连续多次捏合时它被当占位跳过,
     // 上一次的后台渲染(用旧 scale 的 viewport)随后完成、把它定格在旧 scale,本次又没碰它
     // → 页面 scale 混杂(部分页不跟着缩放)。重发的 _renderPageInto 会 bump __imgGen 让旧 in-flight 作废。
-    if (w.dataset.loaded === '1' || w.querySelector('.page-img, canvas')) {
+    if (record.hasRaster) {
       // ① 瞬时:CSS zoom 把现有位图(renderScale 像素)按比例缩到当前 scale。zoom **同时缩放内容+布局占位**
       //    (不像 transform 不影响布局)→ 滚动/行距即刻精确;页内仍是 renderScale 像素坐标 → 稳态 zoom=1 时
       //    选中/高亮/去边坐标完全不变。所有页一次过同步设 zoom → 行间 scale 永远一致;就算某页后台重渲漏了/失败,
       //    zoom 也一直顶着正确视觉尺寸 → 结构上不可能出现"部分页不跟着缩放"。(PDF.js cssTransform 同款思路)
       const rs = w.__renderScale || 0;
       if (rs > 0) w.style.zoom = (scale / rs);
-      // ② 后台按新 scale 重栅格化(decode-first 无闪 + __imgGen 防叠加);完成时 _renderPageImg 把 zoom 归 1(原生清晰)。
+      // ② 侧栏提交只重栅格视口/近邻页；远页保留 CSS 正确尺寸并在进入 IO rootMargin 时再高清化。
       w.dataset.loaded = '0';
-      _renderPageInto(parseInt(w.dataset.pageNum, 10), w).catch(() => {});
+      if (record.rasterNow) {
+        if (visibleNearOnly) w.__sideRefitPending = true;   // 挡住同帧 IO 重入；一个 stable commit 每页最多一次
+        const work = _renderPageInto(parseInt(w.dataset.pageNum, 10), w);
+        Promise.resolve(work).catch(() => {}).finally(() => {
+          if (visibleNearOnly) w.__sideRefitPending = false;
+        });
+      }
     } else if (estW) {
       w.style.width = estW + 'px'; w.style.height = estH + 'px';
     }
@@ -3817,14 +3928,127 @@ function _findCharAt(charBoxes, x, y) {
   return best;
 }
 
+function _charBlockId(c) {
+  return (c && c.bk != null && c.bk >= 0)
+    ? c.bk
+    : ((!c || c.w == null || c.w < 0) ? -1 : Math.floor(c.w / 1000000));
+}
+
+function _charBlockGeometry(chars, sIdx, eIdx) {
+  const relevant = new Set();
+  for (let i = sIdx; i <= eIdx; i++) {
+    const id = _charBlockId(chars[i]);
+    if (id >= 0) relevant.add(id);
+  }
+  const blocks = new Map();
+  for (let i = 0; i < chars.length; i++) {
+    const c = chars[i], id = _charBlockId(c);
+    if (id < 0 || !relevant.has(id) || !c) continue;
+    const left = Number(c.left), top = Number(c.top);
+    const width = Number(c.width), height = Number(c.height);
+    if (![left, top, width, height].every(Number.isFinite) || width < 0 || height < 0) continue;
+    let block = blocks.get(id);
+    if (!block) {
+      block = {
+        id,
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+        charWidths: [],
+        charHeights: [],
+      };
+      blocks.set(id, block);
+    } else {
+      block.left = Math.min(block.left, left);
+      block.top = Math.min(block.top, top);
+      block.right = Math.max(block.right, left + width);
+      block.bottom = Math.max(block.bottom, top + height);
+    }
+    if (!c.sp && width > 0) block.charWidths.push(width);
+    if (!c.sp && height > 0) block.charHeights.push(height);
+  }
+  const median = (values, fallback) => {
+    if (!values.length) return fallback;
+    values.sort((a, b) => a - b);
+    return values[Math.floor(values.length / 2)];
+  };
+  for (const block of blocks.values()) {
+    block.width = Math.max(0, block.right - block.left);
+    block.height = Math.max(0, block.bottom - block.top);
+    block.charWidth = Math.max(1, median(block.charWidths, block.width || 1));
+    block.charHeight = Math.max(1, median(block.charHeights, block.height || 1));
+    block.axis = block.width > block.height * 1.15
+      ? 'horizontal'
+      : (block.height > block.width * 1.15 ? 'vertical' : 'ambiguous');
+  }
+  return blocks;
+}
+
+function _charBlockGap(a0, a1, b0, b1) {
+  return Math.max(0, Math.max(a0, b0) - Math.min(a1, b1));
+}
+
+function _charBlockOverlapRatio(a0, a1, b0, b1) {
+  const overlap = Math.max(0, Math.min(a1, b1) - Math.max(a0, b0));
+  const span = Math.max(1, Math.min(a1 - a0, b1 - b0));
+  return overlap / span;
+}
+
+// Apple Vision 常给每一视觉行独立 bk。横排相邻行须 X 投影重叠且 Y 间距小；
+// 竖排相邻列须 Y 投影重叠且 X 间距小。方向明确相反时绝不靠近，避免同一
+// 视觉行上的多个气泡被横向串起来。
+function _charBlocksConnected(a, b) {
+  const xOverlap = _charBlockOverlapRatio(a.left, a.right, b.left, b.right);
+  const yOverlap = _charBlockOverlapRatio(a.top, a.bottom, b.top, b.bottom);
+  const yGap = _charBlockGap(a.top, a.bottom, b.top, b.bottom);
+  const xGap = _charBlockGap(a.left, a.right, b.left, b.right);
+  const horizontal = a.axis !== 'vertical' && b.axis !== 'vertical'
+    && xOverlap >= 0.3
+    && yGap <= Math.max(a.charHeight, b.charHeight) * 1.8;
+  const vertical = a.axis !== 'horizontal' && b.axis !== 'horizontal'
+    && yOverlap >= 0.3
+    && xGap <= Math.max(a.charWidth, b.charWidth) * 1.8;
+  return horizontal || vertical;
+}
+
+function _charConnectedBlockPath(blocks, startId, endId) {
+  const nodes = Array.from(blocks.values());
+  const parent = new Map([[startId, null]]);
+  const queue = [startId];
+  for (let cursor = 0; cursor < queue.length; cursor++) {
+    const id = queue[cursor];
+    if (id === endId) break;
+    const current = blocks.get(id);
+    if (!current) continue;
+    for (const candidate of nodes) {
+      if (parent.has(candidate.id) || !_charBlocksConnected(current, candidate)) continue;
+      parent.set(candidate.id, id);
+      queue.push(candidate.id);
+    }
+  }
+  if (!parent.has(endId)) return null;
+  const path = new Set();
+  for (let id = endId; id != null; id = parent.get(id)) path.add(id);
+  return path;
+}
+
+// 块号是不透明身份，不能用 min/max 表达区间。同块严格只取该块；不同块时
+// 只取端点之间的几何连通路径。若端点不连通，宁可只保留两个端点块，也不把
+// 视觉上夹在中间、语义上属于别的气泡/栏的块吞进来。
+function _charRangeBlockFilter(chars, sIdx, eIdx) {
+  const sb = _charBlockId(chars[sIdx]), eb = _charBlockId(chars[eIdx]);
+  if (sb < 0 || eb < 0) return () => true;
+  if (sb === eb) return (c) => _charBlockId(c) === sb || (_charBlockId(c) < 0 && !!c.sp);
+  const blocks = _charBlockGeometry(chars, sIdx, eIdx);
+  const allowed = _charConnectedBlockPath(blocks, sb, eb) || new Set([sb, eb]);
+  return (c) => allowed.has(_charBlockId(c)) || (_charBlockId(c) < 0 && !!c.sp);
+}
+
 // chars[s..e] 拼成文本（含 X gap 智能空格 + 跨行换行；跟 _selByCharRange 同逻辑）
 function _charsRangeToText(chars, sIdx, eIdx) {
   if (sIdx < 0 || eIdx >= chars.length || sIdx > eIdx) return '';
-  // 块过滤：跳掉 reading order 落在区间中间、却属于别块的字符（双栏交错时把另一栏串进来）
-  const _blk = (c) => (c.bk != null && c.bk >= 0) ? c.bk : ((c.w == null || c.w < 0) ? -1 : Math.floor(c.w / 1000000));
-  const _sb = _blk(chars[sIdx]), _eb = _blk(chars[eIdx]);
-  const _bLo = Math.min(_sb, _eb), _bHi = Math.max(_sb, _eb);
-  const _inBlk = (c) => { if (_sb < 0 || _eb < 0) return true; const b = _blk(c); return b < 0 || (b >= _bLo && b <= _bHi); };
+  const _inBlk = _charRangeBlockFilter(chars, sIdx, eIdx);
   let text = '', lastChar = null;
   const _cjk = s => /[぀-ヿ㐀-鿿　-〿＀-￯]/.test(s || '');
   for (let i = sIdx; i <= eIdx; i++) {
@@ -3922,13 +4146,9 @@ function _selByCharRange(pw, sIdx, eIdx) {
   // 拖选两端自动对齐词边界（英文 \w 词；CJK 字符不动 - isWord 不匹配自动跳过）
   sIdx = _expandToWordStart(chars, sIdx);
   eIdx = _expandToWordEnd(chars, eIdx);
-  // 按块过滤：只保留 block 序号在 [起点块, 终点块] 之间的字符，排除中间插入的别块
-  // （双栏选一栏不带另一栏、题号不粘进指令；跨段落=相邻块仍能选）。w=-1(无块信息)时不过滤
-  // 用 rawdict 块号 bk 过滤(斜体词 w=-1 也有块号)；bk 缺失才回退 w//1e6
-  const _blk = (c) => (c.bk != null && c.bk >= 0) ? c.bk : ((c.w == null || c.w < 0) ? -1 : Math.floor(c.w / 1000000));
-  const _sb = _blk(chars[sIdx]), _eb = _blk(chars[eIdx]);
-  const _bLo = Math.min(_sb, _eb), _bHi = Math.max(_sb, _eb);
-  const _inBlk = (c) => { if (_sb < 0 || _eb < 0) return true; const b = _blk(c); return b < 0 || (b >= _bLo && b <= _bHi); };  // b<0(空格/无词归属)保留，只排明确别块
+  // 同块严格限在该 bk；跨块只接受两端之间的几何连通路径。
+  // bk 缺失才回退 w//1e6，无任何块信息时保持旧行为。
+  const _inBlk = _charRangeBlockFilter(chars, sIdx, eIdx);
   // 拼出选中文本：跨行加 \n；同行按物理 X gap 智能补空格（应对 PDF 数轴等
   // TJ 间隔但无空格 char 的情况，如 '0 1 2 3 4' 在 PyMuPDF rawdict 里没空格 char）
   let text = '';
@@ -4080,14 +4300,25 @@ function _wordExpandFromChar(chars, idx) {
   return {start: s, end: e};
 }
 
-// 同行扩展（双击）—— 含空格
+// 同行扩展（双击）—— 含空格，但不跨块/明显水平空白。
 function _lineExpandFromChar(chars, idx) {
   if (idx < 0 || idx >= chars.length) return null;
   const refTop = chars[idx].top;
   const refH = chars[idx].height;
+  const refBk = _charBlockId(chars[idx]);
+  const _sameLineNeighbor = (a, b) => {
+    if (Math.abs(b.top - refTop) > refH * 0.4) return false;
+    const bBk = _charBlockId(b);
+    if (refBk >= 0 && bBk >= 0 && bBk !== refBk) return false;
+    const left = a.left <= b.left ? a : b;
+    const right = left === a ? b : a;
+    const gap = right.left - (left.left + left.width);
+    const h = Math.max(1, refH, a.height || 0, b.height || 0);
+    return gap <= h * 1.5;
+  };
   let s = idx, e = idx;
-  while (s > 0 && Math.abs(chars[s - 1].top - refTop) <= refH * 0.4) s--;
-  while (e < chars.length - 1 && Math.abs(chars[e + 1].top - refTop) <= refH * 0.4) e++;
+  while (s > 0 && _sameLineNeighbor(chars[s - 1], chars[s])) s--;
+  while (e < chars.length - 1 && _sameLineNeighbor(chars[e], chars[e + 1])) e++;
   // 去掉两端空格
   while (s < e && chars[s].sp) s++;
   while (e > s && chars[e].sp) e--;
@@ -4535,7 +4766,6 @@ function _bindCharLayer(cl, pw) {
   // 暴露给 vocab L 按钮：从 L 按钮上也能转发拖选（既能点翻译，也能从其上拖选）
   pw.__charDrag = { onStart, onMove, onEnd, ptToLocal };
 }
-
 // ──────── 旧 textLayer 事件机制（保留备用，但 char-layer 接管后不会触发）────────
 let _lastClickSpan = null, _legacyClickTime = 0, _legacyClickCount = 0;
 
@@ -5118,7 +5348,11 @@ async function _showPhrasePopoverNative(text, opts) {
   let zh = '', reading = '', accent = null;
   try {
     if (isJa) {
-      const d = await (await fetch('/pdf/api/dict-jp?word=' + encodeURIComponent(text))).json();
+      // @interaction dictionary.jp.read
+      const d = await (await fetch('/pdf/api/dict-jp?word=' + encodeURIComponent(text) +
+        '&file=' + encodeURIComponent(FILE_REL || '') +
+        '&page=' + encodeURIComponent((typeof _selPageNum === 'function' ? _selPageNum() : currentPage) || 0) +
+        '&langs=' + encodeURIComponent((BOOK_LANGS || []).join(',')))).json();
       if (d.ok) { zh = d.zh || ''; reading = d.reading || ''; accent = (d.accent != null ? d.accent : null); }
     }
     if (!zh) {
@@ -6387,9 +6621,7 @@ async function ankiFromResult() {
   if (!sel && !body) { _toast('没有可制卡的内容'); return; }
   const sentence = (_resultContext && _resultContext.sentence) || '';
   // 原句导航链接：卡片背面可点回到 PDF 原文页
-  const srcUrl = FILE_REL ? (location.origin + '/pdf/view?file=' + encodeURIComponent(FILE_REL) + '&page=' + (currentPage || 1)) : '';
-  const text = `【原文】${sel}` + (sentence && sentence !== sel ? `\n【上下文】${sentence}` : '') + `\n【解释】${body}` +
-               (srcUrl ? `\n【原文出处链接（务必原样放进卡片背面，做成可点链接）】${srcUrl}` : '');
+  const text = `【原文】${sel}` + (sentence && sentence !== sel ? `\n【上下文】${sentence}` : '') + `\n【解释】${body}`;
   closeResult();
   const jobUi = _startBgJob('制 Anki 中…');
   try {
@@ -6397,6 +6629,9 @@ async function ankiFromResult() {
     const r = await fetch('/pdf/api/snippets-to-async', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({
+        file: FILE_REL || '',
+        page: currentPage || 1,
+        source: { kind: 'pdf', page: currentPage || 1 },
         snippets: [{text, source: sel || sentence}],
         make_note: false, make_anki: true, note_name: '',
         model: ov.model || '', effort: ov.effort || '',
@@ -6848,15 +7083,17 @@ window._grammarAnki = async (blockId) => {
   const analysis = (block.querySelector('.gb-content')?.textContent || '').trim();
   const fu = (block.querySelector('.gb-fu-answers')?.textContent || '').trim();
   if (!sentence && !analysis) { _toast && _toast('没有可制卡的内容'); return; }
-  const srcUrl = FILE_REL ? (location.origin + '/pdf/view?file=' + encodeURIComponent(FILE_REL) + '&page=' + (currentPage || 1)) : '';
   const text = `【句子】${sentence}` + (zh ? `\n【译文】${zh}` : '') + (analysis ? `\n【语法分析】${analysis}` : '')
-    + (fu ? `\n【追问】${fu}` : '') + (srcUrl ? `\n【原文出处链接（务必原样放进卡片背面，做成可点链接）】${srcUrl}` : '');
+    + (fu ? `\n【追问】${fu}` : '');
   const jobUi = _startBgJob('制 Anki 中…');
   try {
     const ov = _getAiOverrides();
+    // @interaction learning.snippets.enqueue
     const r = await fetch('/pdf/api/snippets-to-async', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ snippets: [{text, source: sentence}], make_note: false, make_anki: true, note_name: '', model: ov.model || '', effort: ov.effort || '' }),
+      body: JSON.stringify({ file: FILE_REL || '', page: currentPage || 1,
+        source: { kind: 'pdf', page: currentPage || 1 },
+        snippets: [{text, source: sentence}], make_note: false, make_anki: true, note_name: '', model: ov.model || '', effort: ov.effort || '' }),
     });
     const d = await r.json();
     if (!d.ok || !d.job_id) { _failBgJob(jobUi, d.error || '提交失败', null); return; }
@@ -7278,7 +7515,6 @@ function _moveDepTip(ev){
   _depTipEl.style.top  = ((ev.clientY||0)+14) + 'px';
 }
 function _hideDepTip(){ if (_depTipEl) _depTipEl.style.display='none'; }
-
 // ─── 字典 SSE 流式渲染：ECDICT 立刻显示，free/mw/translate 后续追加 ───
 async function dictStream(word, ctx) {
   const params = new URLSearchParams({
@@ -7815,8 +8051,12 @@ async function dictStreamJP(word, ctx) {
   const contentEl = document.getElementById('result-content');
   let d;
   try {
+    // @interaction dictionary.jp.read
     const r = await fetch('/pdf/api/dict-jp?word=' + encodeURIComponent(word) +
-      '&context=' + encodeURIComponent(ctx || ''));
+      '&context=' + encodeURIComponent(ctx || '') +
+      '&file=' + encodeURIComponent(FILE_REL || '') +
+      '&page=' + encodeURIComponent((typeof _selPageNum === 'function' ? _selPageNum() : currentPage) || 0) +
+      '&langs=' + encodeURIComponent((BOOK_LANGS || []).join(',')));
     d = await r.json();
   } catch (e) {
     if (myReq === _resultReqId) contentEl.innerHTML = '<div style="color:#c00;padding:14px">查词失败：' + e.message + '</div>';
@@ -8346,9 +8586,13 @@ async function _doCreate(makeNote, makeAnki) {
   try {
     const ov = _getAiOverrides();
     // 提交到服务器后台 job（短请求，立即返回 job_id），再轮询；任务在服务器跑，网页切后台也不中断
+    // @interaction learning.snippets.enqueue
     const r = await fetch('/pdf/api/snippets-to-async', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({
+        file: FILE_REL || '',
+        page: currentPage || 1,
+        source: { kind: 'pdf', page: currentPage || 1 },
         snippets: used.map(d => ({text: d.text, source: d.source})),
         make_note: makeNote, make_anki: makeAnki,
         note_name: noteName,
@@ -8368,7 +8612,6 @@ window.createBothFromDrafts = () => _doCreate(true, true);
 
 // 启动时刷新 badge
 setTimeout(_updateDraftBadge, 200);
-
 function md(s) {
   s = String(s == null ? '' : s);
   if (window.marked && marked.parse) {
@@ -10258,6 +10501,14 @@ async function _connProbe() {
   window.notesReload = function () {
     try { if (window.RC && RC.stickynote && RC.stickynote.loadAll) RC.stickynote.loadAll(); } catch (_) {}
   };
+  // Native PDF assistant actions are committed by native-local-runtime before
+  // they reach this legacy action surface.  Undo can affect either authority,
+  // so one harmless refresh action updates both without exposing a fake
+  // mutation function to the page.
+  window._nativePDFRefreshAnnotations = function () {
+    try { window._reloadHighlights && window._reloadHighlights(); } catch (_) {}
+    try { window.notesReload && window.notesReload(); } catch (_) {}
+  };
   // ── 改动发生时**自动**生成「跳转 + 撤销/重做」卡片(系统在高亮/便签写入时生成,非 AI 文本生成)──
   var _assistEdits = {}, _aeCtr = 0;
   window._assistEdit = function (d) {
@@ -11989,7 +12240,14 @@ window.__upReconcileDelete = function (newMeta) {
       k.charAt(0) === 'u' ? { upage: k.slice(2), secs: s } : { page: +k.slice(2), secs: s })) });
     try {
       if (useBeacon && navigator.sendBeacon) {
-        navigator.sendBeacon('/pdf/api/read-dwell', new Blob([body], { type: 'application/json' }));
+        // The native App owns this same-origin route through a synchronous
+        // WK bridge. Keep the JSON string available synchronously so a
+        // visibility/pagehide flush cannot be lost while Blob.text() is still
+        // queued; the web/PWA path retains the old application/json Blob.
+        const payload = window.__BW_NATIVE_LOCAL_READER__ === true
+          ? body : new Blob([body], { type: 'application/json' });
+        // @interaction learning.read-dwell.report
+        navigator.sendBeacon('/pdf/api/read-dwell', payload);
       } else {
         fetch('/pdf/api/read-dwell', { method: 'POST', headers: { 'Content-Type': 'application/json' },
                                        body, keepalive: true }).catch(() => {});

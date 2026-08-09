@@ -562,7 +562,11 @@ test("Reader 与扩展都不再调用旧 Pi computer-voice API", () => {
   assert.match(runtime, /reader-computer-voice-direct\/1/);
   assert.match(
     runtime,
-    /currentOrigin\(\) === READER_ORIGIN[\s\S]*new window\.WebSocket\(endpoint\)/,
+    /origin === READER_ORIGIN \|\| nativeAppPage[\s\S]*new window\.WebSocket\(endpoint\)/,
+  );
+  assert.match(
+    runtime,
+    /origin === NATIVE_APP_ORIGIN &&[\s\S]*window\.__BW_NATIVE_COMPUTER_VOICE__ === true/,
   );
   assert.match(
     runtime,

@@ -588,6 +588,7 @@ if (window.__bwPwaProviderOnly) return;
       return {};
     }
     var out = {};
+    if (!raw.file && raw.file_rel) raw = Object.assign({}, raw, { file: raw.file_rel });
     ['file', 'url', 'source_ref'].forEach(function (key) {
       if (raw[key]) out[key] = String(raw[key]).slice(0, 2000);
     });

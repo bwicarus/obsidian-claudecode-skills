@@ -9,6 +9,56 @@ private let nativeAgentVoiceMessageName = "bwNativeAgentVoice"
 private let nativePencilInkMessageName = "bwNativePencilInk"
 private let nativeLocalNotesMessageName = "bwNativeLocalNotes"
 
+struct ReaderLastLocalBookReference: Codable, Equatable, Sendable {
+    let libraryID: String
+    let bookID: String
+}
+
+struct ReaderLastLocalBookStore {
+    static let shared = ReaderLastLocalBookStore()
+
+    private let defaults: UserDefaults
+    private let key = "reader.localLibrary.lastFinishedBook.v1"
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    var hasStoredValue: Bool {
+        defaults.object(forKey: key) != nil
+    }
+
+    func load() -> ReaderLastLocalBookReference? {
+        guard let data = defaults.data(forKey: key),
+              let value = try? JSONDecoder().decode(
+                ReaderLastLocalBookReference.self,
+                from: data
+              ),
+              UUID(uuidString: value.libraryID) != nil,
+              value.bookID.hasPrefix("localbook-"),
+              value.bookID.count == 74,
+              value.bookID.dropFirst("localbook-".count).allSatisfy({
+                $0.isHexDigit && !$0.isUppercase
+              }) else {
+            return nil
+        }
+        return value
+    }
+
+    func save(libraryID: String, bookID: String) {
+        let value = ReaderLastLocalBookReference(
+            libraryID: libraryID,
+            bookID: bookID
+        )
+        guard let data = try? JSONEncoder().encode(value) else { return }
+        defaults.set(data, forKey: key)
+    }
+
+    func clear() {
+        defaults.removeObject(forKey: key)
+    }
+}
+
 private final class WeakScriptMessageHandler: NSObject, WKScriptMessageHandler {
     weak var delegate: WKScriptMessageHandler?
 
@@ -56,6 +106,20 @@ private final class WeakScriptMessageHandlerWithReply:
 
 @MainActor
 final class ReaderWebViewModel: NSObject, ObservableObject {
+    private struct PendingLocalBookNavigation {
+        let navigation: WKNavigation
+        let bookID: String
+        let libraryID: String
+        let restorationToken: UUID?
+    }
+
+    private struct NativePDFRecoverySettlement {
+        let book: ReaderLocalBookRecord
+        let access: ReaderLocalBookAccess
+        let contentSHA256: String
+        let recovery: ReaderNativePDFMutationRecoveryReceipt
+    }
+
     private enum NativeAgentVoiceCommand {
         case start(NativeAgentVoiceContext)
         case stop
@@ -109,14 +173,19 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
 
     @Published private(set) var isLoading = false
     @Published private(set) var loadError: String?
+    @Published private(set) var libraryPresentationRequestID: UUID?
     private var nativeComputerVoiceMessageProxy: WeakScriptMessageHandler?
     private var nativeComputerContextMessageProxy: WeakScriptMessageHandler?
     private var nativeAgentVoiceMessageProxy: WeakScriptMessageHandler?
     private var nativePencilInkMessageProxy: WeakScriptMessageHandler?
     private var nativeLocalNotesMessageProxy: WeakScriptMessageHandlerWithReply?
     private var nativePiGateway: ReaderNativePiGateway?
+    private weak var remoteLibraryCoordinator: ReaderRemoteLibraryCoordinator?
+    private var nativePiRemoteLibraryCancellable: AnyCancellable?
     private var nativePiSyncBridge: ReaderNativePiSyncBridge?
     private var nativeBookOCRBridge: NativeBookOCRBridge?
+    private var nativePDFMutationBridge: ReaderNativePDFMutationBridge?
+    private let nativePDFMutationActor = ReaderNativePDFMutationActor()
     private var nativeBookOCRUpdateCancellable: AnyCancellable?
     private var bookUserStateWebAdapter: ReaderBookUserStateWebAdapter?
     private var bookUserStateCoordinator: ReaderBookUserStatePackageCoordinator?
@@ -126,8 +195,15 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var bookUserStateImportTask: Task<Void, Never>?
     private var bookUserStateContextGeneration: UInt64 = 0
     private var currentLocalBook: ReaderLocalBookRecord?
+    private var currentLocalBookAccess: ReaderLocalBookAccess?
     private weak var currentLocalLibrary: ReaderLocalLibraryManager?
     private var currentLocalBookContentSHA256: String?
+    private var pendingLocalBookNavigation: PendingLocalBookNavigation?
+    private var remoteBookNavigationTask: Task<Void, Never>?
+    private var localBookRestoreContinuations = [
+        UUID: CheckedContinuation<Bool, Never>
+    ]()
+    private var waitsForInitialBookDecision = true
     private var deferredBookUserStateMessage: (text: String, isError: Bool)?
     private weak var nativeVoiceBridge: NativeVoiceBridge?
     private let nativeAgentVoice = NativeAgentVoiceSession()
@@ -207,7 +283,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         if let localRuntimeServer {
             let nativePiGateway = ReaderNativePiGateway(
                 webView: webView,
-                trustedBaseURL: localRuntimeServer.baseURL
+                trustedBaseURL: localRuntimeServer.baseURL,
+                piProxyBroker: localRuntimeServer.piProxyBroker
             )
             self.nativePiGateway = nativePiGateway
             contentController.addScriptMessageHandler(
@@ -235,6 +312,23 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 nativeBookOCRBridge,
                 contentWorld: .page,
                 name: NativeBookOCRBridge.messageName
+            )
+            let nativePDFMutationBridge = ReaderNativePDFMutationBridge(
+                webView: webView,
+                trustedBaseURL: localRuntimeServer.baseURL
+            ) { [weak self] command in
+                guard let self else {
+                    throw ReaderNativePDFMutationError.unavailable(
+                        "Reader 页面已经关闭"
+                    )
+                }
+                return try await self.handleNativePDFMutation(command)
+            }
+            self.nativePDFMutationBridge = nativePDFMutationBridge
+            contentController.addScriptMessageHandler(
+                nativePDFMutationBridge,
+                contentWorld: .page,
+                name: ReaderNativePDFMutationBridge.messageName
             )
             nativeBookOCRUpdateCancellable = NativeBookOCRManager.shared
                 .$lastUpdate
@@ -454,7 +548,10 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
               style.id = "bw-native-pencilkit-style";
               style.textContent =
                 "#ink-fab,#ink-toolbar,#ep-ink-btn,#ep-ink-toolbar{" +
-                "display:none!important}";
+                "display:none!important}" +
+                // ReaderRootView owns two 44pt buttons in the upper-right.
+                // Keep the web fullscreen recovery control outside their hit box.
+                "#fs-restore{right:calc(env(safe-area-inset-right,0px) + 112px)!important}";
               (document.head || document.documentElement).appendChild(style);
 
               const dispatchOverride = (detail) => {
@@ -592,11 +689,248 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         nativeAgentVoice.delegate = self
     }
 
+    /// Binds the App-owned Pi catalog to the local reading shell. The gateway
+    /// receives only digest-verified mappings from the currently open local
+    /// library. `scope: current` routes still see one mapping; the bounded set
+    /// exists solely for manifest routes whose policy explicitly says catalog.
+    func bind(remoteLibrary: ReaderRemoteLibraryCoordinator) {
+        guard remoteLibraryCoordinator !== remoteLibrary else { return }
+        remoteLibraryCoordinator = remoteLibrary
+        nativePiRemoteLibraryCancellable = Publishers.CombineLatest3(
+            remoteLibrary.$books,
+            remoteLibrary.$remoteToLocalID,
+            remoteLibrary.$localDigests
+        ).sink { [weak self] _, _, _ in
+            Task { @MainActor [weak self] in
+                self?.refreshNativePiRemoteBookBinding()
+            }
+        }
+        refreshNativePiRemoteBookBinding()
+    }
+
+    private func refreshNativePiRemoteBookBinding() {
+        guard let currentLocalBook,
+              let currentLocalLibrary,
+              let remoteLibraryCoordinator else {
+            nativePiGateway?.updateTrustedRemoteBookBindings(
+                current: nil,
+                catalog: []
+            )
+            return
+        }
+        let currentBinding = remoteLibraryCoordinator
+            .verifiedNativeRemoteBookBinding(
+                for: currentLocalBook,
+                localContentSHA256: currentLocalBookContentSHA256
+            )
+        let catalogBindings = currentLocalLibrary.books.compactMap { book in
+            remoteLibraryCoordinator.verifiedNativeRemoteBookBinding(
+                for: book,
+                localContentSHA256: book.contentSha256
+            )
+        }
+        nativePiGateway?.updateTrustedRemoteBookBindings(
+            current: currentBinding,
+            catalog: catalogBindings
+        )
+    }
+
+    /// Legacy assistant, review and EPUB-conversion actions navigate through
+    /// `/pdf/view?file=...&page=...` (or `/pdf/epub/view`). Those paths belong to
+    /// the Pi/PWA renderer, so allowing them on loopback would replace the
+    /// App-owned book with a 404 page. Preserve the old interface by resolving
+    /// the exact catalog identity, reusing a digest-verified local copy when
+    /// possible, otherwise downloading it, then opening the native shell at the
+    /// requested location.
+    private func takeOverRemoteBookNavigation(_ url: URL) -> Bool {
+        guard currentLocalBook != nil,
+              isTrustedReaderURL(webView.url),
+              url.scheme?.lowercased() == "http",
+              url.host?.lowercased() == ReaderLocalRuntimeServer.host,
+              url.port == Int(ReaderLocalRuntimeServer.port),
+              ["/pdf/view", "/pdf/epub/view"].contains(url.path),
+              let components = URLComponents(
+                url: url,
+                resolvingAgainstBaseURL: false
+              ) else {
+            return false
+        }
+        let queryItems = components.queryItems ?? []
+        guard !queryItems.isEmpty,
+              Set(queryItems.map(\.name)).isSubset(
+                of: Set(["file", "page"])
+              ),
+              queryItems.filter({ $0.name == "file" }).count == 1,
+              queryItems.filter({ $0.name == "page" }).count <= 1 else {
+            return false
+        }
+        let fileValues = queryItems
+            .filter { $0.name == "file" }
+            .compactMap(\.value)
+        guard fileValues.count == 1,
+              Self.isSafeRemoteLibraryRelativePath(fileValues[0]) else {
+            return false
+        }
+        let initialPage: Int
+        if let rawPage = queryItems.first(where: { $0.name == "page" })?.value {
+            guard let page = Int(rawPage),
+                  (1...10_000_000).contains(page) else { return false }
+            initialPage = page
+        } else {
+            initialPage = 1
+        }
+        guard url.fragment == nil || url.fragment?.isEmpty == true else {
+            return false
+        }
+
+        let remoteRelativePath = fileValues[0]
+        guard let sourceBookID = currentLocalBook?.id,
+              let localLibrary = currentLocalLibrary,
+              let remoteLibraryCoordinator else {
+            showBookUserStateMessage(
+                "无法打开目标书籍：本机书库或 Pi 书库尚未连接",
+                isError: true
+            )
+            return true
+        }
+
+        remoteBookNavigationTask?.cancel()
+        let targetDisplayName = remoteRelativePath
+            .split(separator: "/")
+            .last
+            .map(String.init) ?? "目标书籍"
+        showBookUserStateMessage(
+            "正在从书库打开《\(targetDisplayName)》…",
+            isError: false
+        )
+        remoteBookNavigationTask = Task { @MainActor [weak self] in
+            guard let self else { return }
+            let cookies = await self.remoteLibraryCookies()
+            guard !Task.isCancelled,
+                  self.currentLocalBook?.id == sourceBookID else { return }
+            var remoteBook = remoteLibraryCoordinator.books.first {
+                $0.rel == remoteRelativePath
+            }
+            if remoteBook == nil {
+                await remoteLibraryCoordinator.refresh(
+                    cookies: cookies,
+                    localLibrary: localLibrary
+                )
+                remoteBook = remoteLibraryCoordinator.books.first {
+                    $0.rel == remoteRelativePath
+                }
+            }
+            guard !Task.isCancelled,
+                  self.currentLocalBook?.id == sourceBookID else { return }
+            self.refreshNativePiRemoteBookBinding()
+            guard let remoteBook,
+                  ["pdf", "epub"].contains(remoteBook.kind.lowercased()) else {
+                self.showBookUserStateMessage(
+                    remoteLibraryCoordinator.errorMessage
+                        ?? "Pi 书库中没有找到目标 PDF/EPUB",
+                    isError: true
+                )
+                return
+            }
+            let localBook: ReaderLocalBookRecord
+            if let localID = remoteLibraryCoordinator.localBookID(
+                for: remoteBook
+            ),
+               let candidate = localLibrary.books.first(where: {
+                   $0.id == localID
+               }),
+               remoteLibraryCoordinator.verifiedNativeRemoteBookBinding(
+                   for: candidate,
+                   localContentSHA256: candidate.contentSha256
+               )?.remoteRelativePath == remoteRelativePath {
+                localBook = candidate
+            } else {
+                guard let downloaded = await remoteLibraryCoordinator.download(
+                    remoteBook,
+                    localLibrary: localLibrary,
+                    cookies: cookies
+                ) else {
+                    guard !Task.isCancelled else { return }
+                    self.showBookUserStateMessage(
+                        remoteLibraryCoordinator.errorMessage
+                            ?? "目标书籍下载失败，请稍后再试",
+                        isError: true
+                    )
+                    return
+                }
+                localBook = downloaded
+                Task { @MainActor in
+                    await remoteLibraryCoordinator.fetchAndStageUserState(
+                        for: remoteBook,
+                        localBook: downloaded,
+                        cookies: cookies
+                    )
+                }
+            }
+            guard !Task.isCancelled,
+                  self.currentLocalBook?.id == sourceBookID else { return }
+            if !(await self.openLocalBook(
+                localBook,
+                library: localLibrary,
+                restorationToken: nil,
+                initialPage: initialPage
+            )) {
+                self.showBookUserStateMessage(
+                    "目标书籍已在本机，但原生阅读器未能打开它",
+                    isError: true
+                )
+            }
+        }
+        return true
+    }
+
+    /// The shared PDF/EPUB chrome still expresses “back to shelf” as `/pdf/`.
+    /// In the native product the shelf is SwiftUI, not a loopback web route.
+    /// Consume that legacy navigation here so it cannot escape to Safari or a
+    /// loopback 404 while preserving the button's original user-visible action.
+    private func takeOverLibraryNavigation(_ url: URL) -> Bool {
+        guard currentLocalBook != nil,
+              isTrustedReaderURL(webView.url),
+              url.scheme?.lowercased() == "http",
+              url.host?.lowercased() == ReaderLocalRuntimeServer.host,
+              url.port == Int(ReaderLocalRuntimeServer.port),
+              url.path == "/pdf/",
+              url.query == nil,
+              url.fragment == nil else {
+            return false
+        }
+        libraryPresentationRequestID = UUID()
+        return true
+    }
+
+    private static func isSafeRemoteLibraryRelativePath(_ value: String) -> Bool {
+        guard !value.isEmpty, value.utf8.count <= 2_048,
+              !value.hasPrefix("/"), !value.contains("\\"),
+              !value.contains("?"), !value.contains("#"),
+              !value.unicodeScalars.contains(where: {
+                $0.value < 0x20 || $0.value == 0x7f
+              }) else {
+            return false
+        }
+        let segments = value.split(
+            separator: "/",
+            omittingEmptySubsequences: false
+        )
+        return !segments.isEmpty && segments.allSatisfy {
+            !$0.isEmpty && $0 != "." && $0 != ".."
+        }
+    }
+
     func loadIfNeeded() {
-        guard webView.url == nil else {
+        guard !waitsForInitialBookDecision, webView.url == nil else {
             return
         }
         reload()
+    }
+
+    func finishInitialBookDecision() {
+        waitsForInitialBookDecision = false
+        loadIfNeeded()
     }
 
     private func configureBookUserStateNotifications() {
@@ -660,6 +994,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         bookUserStateImportTask = nil
         bookUserStateContextGeneration &+= 1
         currentLocalBook = nil
+        currentLocalBookAccess = nil
         currentLocalLibrary = nil
         currentLocalBookContentSHA256 = nil
         deferredBookUserStateMessage = nil
@@ -909,10 +1244,455 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             nativeBookOCRBridge?.updateTrustedContext(
                 baseURL: baseURL,
                 localBookID: localBookId,
-                expectedContentSHA256: digest
+                expectedContentSHA256: digest,
+                localBookAccess: currentLocalBookAccess
             )
         }
         return digest
+    }
+
+    /// Completes the native half of the legacy PDF insert-page contract. The
+    /// JavaScript runtime owns its IndexedDB page-anchor transaction; Swift
+    /// owns the actual PDF bytes and does not finalize its backup until the
+    /// replacement has been rescanned, reopened and rebound to this WebView.
+    private func settleNativePDFMutation(
+        book: ReaderLocalBookRecord,
+        access: ReaderLocalBookAccess,
+        library: ReaderLocalLibraryManager,
+        expectedTicket: String? = nil,
+        expectedOldContentSHA256: String? = nil,
+        expectedStagedContentSHA256: String? = nil,
+        requiresReceipt: Bool = false,
+        outgoingRollback: Bool = false
+    ) async throws -> NativePDFRecoverySettlement? {
+        guard book.format == .pdf else { return nil }
+        let identity = try await nativePDFMutationActor.recoveryIdentity(
+            book: access
+        )
+        guard identity != nil
+                || expectedTicket != nil
+                || expectedOldContentSHA256 != nil
+                || expectedStagedContentSHA256 != nil
+                || requiresReceipt else {
+            return nil
+        }
+        if let identity, let expectedTicket,
+           expectedTicket != identity.ticket {
+            throw ReaderNativePDFMutationError.commitFailed(
+                "网页与原生 PDF 恢复票据不一致"
+            )
+        }
+
+        let ocrLease: NativeBookOCRPDFMutationLease?
+        if let identity {
+            ocrLease = try await NativeBookOCRManager.shared
+                .beginPDFMutationLease(
+                    bookID: book.id,
+                    expectedOldDigest: identity.ocrLease.oldContentSHA256,
+                    token: identity.ocrLease.token
+                )
+        } else {
+            ocrLease = nil
+        }
+
+        let recovery: ReaderNativePDFMutationRecoveryReceipt
+        if outgoingRollback {
+            guard let identity else {
+                throw ReaderNativePDFMutationError.commitFailed(
+                    "离开本书前找不到待回滚的原生 PDF 事务"
+                )
+            }
+            recovery = try await nativePDFMutationActor
+                .rollbackForOutgoingNavigation(
+                    book: access,
+                    ticket: identity.ticket
+                )
+        } else {
+            recovery = try await nativePDFMutationActor.recover(
+                book: access,
+                ticket: expectedTicket ?? identity?.ticket,
+                oldContentSHA256: expectedOldContentSHA256,
+                stagedContentSHA256: expectedStagedContentSHA256
+            )
+        }
+        let refreshed: ReaderLocalBookRecord
+        let refreshedAccess: ReaderLocalBookAccess
+        if recovery.outcome == .none, identity == nil {
+            refreshed = book
+            refreshedAccess = access
+        } else {
+            refreshed = try await refreshLocalBookAfterPDFMutation(
+                book,
+                library: library,
+                expectedByteCount: recovery.byteCount,
+                expectedContentSHA256: recovery.contentSHA256
+            )
+            refreshedAccess = try library.makeOpenAccess(for: refreshed)
+        }
+
+        if let ocrLease {
+            guard let recoveryTicket = recovery.ticket,
+                  recoveryTicket == identity?.ticket else {
+                throw ReaderNativePDFMutationError.commitFailed(
+                    "原生 PDF 恢复没有返回持久票据"
+                )
+            }
+            try await NativeBookOCRManager.shared.rebuildPDFMutationStatus(
+                lease: ocrLease,
+                resolvedContentSHA256: recovery.contentSHA256,
+                totalPages: recovery.pageCount,
+                message: "PDF 改页恢复：\(recovery.outcome.rawValue)"
+            )
+            try await nativePDFMutationActor.acknowledgeRecovery(
+                book: refreshedAccess,
+                ticket: recoveryTicket
+            )
+            try await NativeBookOCRManager.shared.finishPDFMutationLease(
+                ocrLease
+            )
+        }
+
+        return NativePDFRecoverySettlement(
+            book: refreshed,
+            access: refreshedAccess,
+            contentSHA256: recovery.contentSHA256,
+            recovery: recovery
+        )
+    }
+
+    private func applyNativePDFRecoverySettlement(
+        _ settlement: NativePDFRecoverySettlement,
+        localRuntimeServer: ReaderLocalRuntimeServer,
+        reopenRuntime: Bool
+    ) async throws {
+        if reopenRuntime, settlement.recovery.outcome != .none {
+            _ = try await localRuntimeServer.open(settlement.access)
+        }
+        currentLocalBook = settlement.book
+        currentLocalBookAccess = settlement.access
+        currentLocalBookContentSHA256 = settlement.contentSHA256
+        refreshNativePiRemoteBookBinding()
+        try? bookUserStateWebAdapter?.updateTrustedContext(
+            baseURL: localRuntimeServer.baseURL,
+            localBookId: settlement.book.id
+        )
+        nativeBookOCRBridge?.updateTrustedContext(
+            baseURL: localRuntimeServer.baseURL,
+            localBookID: settlement.book.id,
+            expectedContentSHA256: settlement.contentSHA256,
+            localBookAccess: settlement.access
+        )
+    }
+
+    private func handleNativePDFMutation(
+        _ command: ReaderNativePDFMutationCommand
+    ) async throws -> [String: Any] {
+        switch command {
+        case .prepare(let request):
+            guard let book = currentLocalBook,
+                  let access = currentLocalBookAccess,
+                  let library = currentLocalLibrary,
+                  let localRuntimeServer,
+                  book.id == request.localBookID,
+                  book.format == .pdf,
+                  isLocalRuntimeURL(webView.url) else {
+                throw ReaderNativePDFMutationError.unavailable(
+                    "当前本机 PDF 上下文已经变化"
+                )
+            }
+            let digest = try await library.ensureContentSHA256(for: book)
+            guard currentLocalBook?.id == request.localBookID,
+                  currentLocalBookAccess === access else {
+                throw ReaderNativePDFMutationError.unavailable(
+                    "计算摘要时当前本机 PDF 上下文已经变化"
+                )
+            }
+            currentLocalBookContentSHA256 = digest
+            let ocrLease = try await NativeBookOCRManager.shared
+                .beginPDFMutationLease(
+                    bookID: request.localBookID,
+                    expectedOldDigest: digest
+                )
+            let receipt: ReaderNativePDFMutationPreparedReceipt
+            do {
+                guard currentLocalBook?.id == request.localBookID,
+                      currentLocalBookAccess === access else {
+                    try await NativeBookOCRManager.shared
+                        .abortUnstagedPDFMutationLease(ocrLease)
+                    throw ReaderNativePDFMutationError.unavailable(
+                        "建立 OCR 租约时当前本机 PDF 上下文已经变化"
+                    )
+                }
+                receipt = try await nativePDFMutationActor.prepare(
+                    book: access,
+                    request: request,
+                    ocrLease: ocrLease
+                )
+            } catch {
+                let primary = error.localizedDescription
+                do {
+                    if try await nativePDFMutationActor
+                        .hasUnfinishedMutation(book: access) {
+                        if let settlement = try await settleNativePDFMutation(
+                            book: book,
+                            access: access,
+                            library: library,
+                            outgoingRollback: true
+                        ) {
+                            try await applyNativePDFRecoverySettlement(
+                                settlement,
+                                localRuntimeServer: localRuntimeServer,
+                                reopenRuntime: true
+                            )
+                        }
+                    } else {
+                        try await NativeBookOCRManager.shared
+                            .abortUnstagedPDFMutationLease(ocrLease)
+                    }
+                } catch let recoveryError {
+                    throw ReaderNativePDFMutationError.commitFailed(
+                        "\(primary)；prepare 失败后的恢复也失败："
+                            + recoveryError.localizedDescription
+                    )
+                }
+                throw error
+            }
+            return [
+                "contract": ReaderNativePDFMutationBridge.responseContract,
+                "action": "prepared",
+                "requestId": receipt.requestID,
+                "ok": true,
+                "localBookId": receipt.localBookID,
+                "ticket": receipt.ticket,
+                "operation": receipt.operation.rawValue,
+                "pivotPage": receipt.pivotPage,
+                "oldPageCount": receipt.oldPageCount,
+                "newPageCount": receipt.newPageCount,
+                "oldContentSHA256": receipt.oldContentSHA256,
+                "stagedContentSHA256": receipt.stagedContentSHA256,
+                "warnings": receipt.warnings,
+            ]
+
+        case .commit(let requestID, let localBookID, let ticket):
+            guard let originalBook = currentLocalBook,
+                  let originalAccess = currentLocalBookAccess,
+                  let library = currentLocalLibrary,
+                  let localRuntimeServer,
+                  originalBook.id == localBookID,
+                  originalBook.format == .pdf,
+                  isLocalRuntimeURL(webView.url) else {
+                throw ReaderNativePDFMutationError.unavailable(
+                    "提交时当前本机 PDF 上下文已经变化"
+                )
+            }
+            let replacement = try await nativePDFMutationActor
+                .replacePrepared(ticket: ticket, localBookID: localBookID)
+            do {
+                let refreshed = try await refreshLocalBookAfterPDFMutation(
+                    originalBook,
+                    library: library,
+                    expectedByteCount: replacement.byteCount,
+                    expectedContentSHA256: replacement.contentSHA256
+                )
+                let access = try library.makeOpenAccess(for: refreshed)
+                _ = try await localRuntimeServer.open(access)
+                currentLocalBook = refreshed
+                currentLocalBookAccess = access
+                currentLocalBookContentSHA256 = replacement.contentSHA256
+                refreshNativePiRemoteBookBinding()
+                try? bookUserStateWebAdapter?.updateTrustedContext(
+                    baseURL: localRuntimeServer.baseURL,
+                    localBookId: refreshed.id
+                )
+                return [
+                    "contract": ReaderNativePDFMutationBridge.responseContract,
+                    "action": "committed",
+                    "requestId": requestID,
+                    "ok": true,
+                    "localBookId": localBookID,
+                    "ticket": ticket,
+                    "operation": replacement.operation.rawValue,
+                    "pivotPage": replacement.pivotPage,
+                    "oldPageCount": replacement.oldPageCount,
+                    "newPageCount": replacement.newPageCount,
+                    "contentSHA256": replacement.contentSHA256,
+                    "mtime": Int(replacement.modifiedAt.timeIntervalSince1970),
+                    "byteCount": replacement.byteCount,
+                ]
+            } catch {
+                let primary = error.localizedDescription
+                var rollbackFailure: String?
+                do {
+                    try await nativePDFMutationActor.cancelOrRollback(
+                        ticket: ticket,
+                        localBookID: localBookID
+                    )
+                    guard let settlement = try await settleNativePDFMutation(
+                        book: originalBook,
+                        access: originalAccess,
+                        library: library,
+                        expectedTicket: ticket,
+                        outgoingRollback: true
+                    ) else {
+                        throw ReaderNativePDFMutationError.commitFailed(
+                            "回滚后没有得到原生 PDF 恢复结果"
+                        )
+                    }
+                    try await applyNativePDFRecoverySettlement(
+                        settlement,
+                        localRuntimeServer: localRuntimeServer,
+                        reopenRuntime: true
+                    )
+                } catch {
+                    rollbackFailure = error.localizedDescription
+                }
+                throw ReaderNativePDFMutationError.commitFailed(
+                    rollbackFailure.map {
+                        "\(primary)；自动回滚失败：\($0)"
+                    } ?? "\(primary)；原 PDF 已自动恢复"
+                )
+            }
+
+        case .finalize(let requestID, let localBookID, let ticket):
+            try await nativePDFMutationActor.finalize(
+                ticket: ticket,
+                localBookID: localBookID
+            )
+            return [
+                "contract": ReaderNativePDFMutationBridge.responseContract,
+                "action": "finalized",
+                "requestId": requestID,
+                "ok": true,
+                "localBookId": localBookID,
+                "ticket": ticket,
+            ]
+
+        case .cancel(let requestID, let localBookID, let ticket):
+            guard let originalBook = currentLocalBook,
+                  let originalAccess = currentLocalBookAccess,
+                  let library = currentLocalLibrary,
+                  let localRuntimeServer,
+                  originalBook.id == localBookID,
+                  originalBook.format == .pdf else {
+                throw ReaderNativePDFMutationError.unavailable(
+                    "取消时当前本机 PDF 上下文已经变化"
+                )
+            }
+            try await nativePDFMutationActor.cancelOrRollback(
+                ticket: ticket,
+                localBookID: localBookID
+            )
+            guard let settlement = try await settleNativePDFMutation(
+                book: originalBook,
+                access: originalAccess,
+                library: library,
+                expectedTicket: ticket,
+                outgoingRollback: true
+            ) else {
+                throw ReaderNativePDFMutationError.commitFailed(
+                    "取消后没有得到原生 PDF 恢复结果"
+                )
+            }
+            try await applyNativePDFRecoverySettlement(
+                settlement,
+                localRuntimeServer: localRuntimeServer,
+                reopenRuntime: true
+            )
+            return [
+                "contract": ReaderNativePDFMutationBridge.responseContract,
+                "action": "cancelled",
+                "requestId": requestID,
+                "ok": true,
+                "localBookId": localBookID,
+                "ticket": ticket,
+            ]
+
+        case .recover(
+            let requestID,
+            let localBookID,
+            let ticket,
+            let oldContentSHA256,
+            let stagedContentSHA256
+        ):
+            guard let originalBook = currentLocalBook,
+                  let access = currentLocalBookAccess,
+                  let library = currentLocalLibrary,
+                  let localRuntimeServer,
+                  originalBook.id == localBookID,
+                  originalBook.format == .pdf,
+                  isLocalRuntimeURL(webView.url) else {
+                throw ReaderNativePDFMutationError.unavailable(
+                    "恢复时当前本机 PDF 上下文已经变化"
+                )
+            }
+            guard let settlement = try await settleNativePDFMutation(
+                book: originalBook,
+                access: access,
+                library: library,
+                expectedTicket: ticket,
+                expectedOldContentSHA256: oldContentSHA256,
+                expectedStagedContentSHA256: stagedContentSHA256,
+                requiresReceipt: true
+            ) else {
+                throw ReaderNativePDFMutationError.commitFailed(
+                    "原生 PDF 恢复没有返回结果"
+                )
+            }
+            try await applyNativePDFRecoverySettlement(
+                settlement,
+                localRuntimeServer: localRuntimeServer,
+                reopenRuntime: true
+            )
+            let recovery = settlement.recovery
+            return [
+                "contract": ReaderNativePDFMutationBridge.responseContract,
+                "action": "recovered",
+                "requestId": requestID,
+                "ok": true,
+                "localBookId": localBookID,
+                "ticket": recovery.ticket ?? NSNull(),
+                "outcome": recovery.outcome.rawValue,
+                "contentSHA256": recovery.contentSHA256,
+                "mtime": Int(recovery.modifiedAt.timeIntervalSince1970),
+                "byteCount": recovery.byteCount,
+            ]
+        }
+    }
+
+    private func refreshLocalBookAfterPDFMutation(
+        _ original: ReaderLocalBookRecord,
+        library: ReaderLocalLibraryManager,
+        expectedByteCount: Int64,
+        expectedContentSHA256: String
+    ) async throws -> ReaderLocalBookRecord {
+        for _ in 0..<120 where library.isScanning {
+            try await Task.sleep(nanoseconds: 100_000_000)
+        }
+        guard !library.isScanning else {
+            throw ReaderNativePDFMutationError.commitFailed(
+                "书库扫描长时间未结束"
+            )
+        }
+        await library.rescan()
+        guard let refreshed = library.books.first(where: {
+            $0.id == original.id && $0.relativePath == original.relativePath
+        }),
+        refreshed.byteCount == expectedByteCount else {
+            throw ReaderNativePDFMutationError.commitFailed(
+                library.errorMessage ?? "书库没有确认替换后的 PDF"
+            )
+        }
+        let digest = try await library.ensureContentSHA256(for: refreshed)
+        guard digest == expectedContentSHA256,
+              let withDigest = library.books.first(where: {
+                $0.id == original.id
+                    && $0.relativePath == original.relativePath
+              }) else {
+            throw ReaderNativePDFMutationError.commitFailed(
+                "书库重扫后的 PDF 摘要不匹配"
+            )
+        }
+        return withDigest
     }
 
     private func showBookUserStatePlan(_ plan: ReaderBookUserStateImportPlan) {
@@ -1047,6 +1827,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     }
 
     func reload() {
+        waitsForInitialBookDecision = false
+        cancelPendingLocalBookNavigation()
         loadError = nil
         guard let localRuntimeServer else {
             loadError = localRuntimeInitializationError
@@ -1057,17 +1839,34 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             guard let self else { return }
             do {
                 try await localRuntimeServer.start()
+                if let outgoingBook = self.currentLocalBook,
+                   let outgoingAccess = self.currentLocalBookAccess,
+                   let outgoingLibrary = self.currentLocalLibrary,
+                   outgoingBook.format == .pdf,
+                   let settlement = try await self.settleNativePDFMutation(
+                        book: outgoingBook,
+                        access: outgoingAccess,
+                        library: outgoingLibrary,
+                        outgoingRollback: true
+                   ) {
+                    try await self.applyNativePDFRecoverySettlement(
+                        settlement,
+                        localRuntimeServer: localRuntimeServer,
+                        reopenRuntime: true
+                    )
+                }
                 self.resetBookUserStateContext(
                     baseURL: localRuntimeServer.baseURL
                 )
                 self.nativeBookOCRBridge?.updateTrustedContext(
                     baseURL: localRuntimeServer.baseURL,
                     localBookID: "localbook-welcome",
-                    expectedContentSHA256: nil
+                    expectedContentSHA256: nil,
+                    localBookAccess: nil
                 )
                 self.webView.load(URLRequest(
                     url: localRuntimeServer.defaultShellURL(),
-                    cachePolicy: .reloadIgnoringLocalCacheData,
+                    cachePolicy: .useProtocolCachePolicy,
                     timeoutInterval: 30
                 ))
             } catch {
@@ -1083,6 +1882,60 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         _ book: ReaderLocalBookRecord,
         library: ReaderLocalLibraryManager
     ) async -> Bool {
+        await openLocalBook(
+            book,
+            library: library,
+            restorationToken: nil,
+            initialPage: nil
+        )
+    }
+
+    func restoreLocalBook(
+        _ book: ReaderLocalBookRecord,
+        library: ReaderLocalLibraryManager
+    ) async -> Bool {
+        let token = UUID()
+        return await withCheckedContinuation {
+            (continuation: CheckedContinuation<Bool, Never>) in
+            localBookRestoreContinuations[token] = continuation
+            Task { @MainActor [weak self] in
+                guard let self else {
+                    continuation.resume(returning: false)
+                    return
+                }
+                let started = await self.openLocalBook(
+                    book,
+                    library: library,
+                    restorationToken: token,
+                    initialPage: nil
+                )
+                guard started else {
+                    self.finishLocalBookRestore(token: token, succeeded: false)
+                    return
+                }
+                Task { @MainActor [weak self] in
+                    do {
+                        try await Task.sleep(nanoseconds: 15_000_000_000)
+                    } catch {
+                        return
+                    }
+                    self?.finishLocalBookRestore(
+                        token: token,
+                        succeeded: false
+                    )
+                }
+            }
+        }
+    }
+
+    @discardableResult
+    private func openLocalBook(
+        _ book: ReaderLocalBookRecord,
+        library: ReaderLocalLibraryManager,
+        restorationToken: UUID?,
+        initialPage: Int?
+    ) async -> Bool {
+        waitsForInitialBookDecision = false
         guard let localRuntimeServer else {
             library.reportError(
                 ReaderLocalRuntimeError.serverUnavailable(
@@ -1091,36 +1944,129 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             )
             return false
         }
+        var didClearOutgoingRemoteBinding = false
         do {
-            let access = try library.makeOpenAccess(for: book)
+            let changesBook = currentLocalBook?.id != book.id
+                || currentLocalLibrary?.stableLibraryID
+                    != library.stableLibraryID
+            if changesBook,
+               let outgoingBook = currentLocalBook,
+               let outgoingAccess = currentLocalBookAccess,
+               let outgoingLibrary = currentLocalLibrary,
+               outgoingBook.format == .pdf,
+               let settlement = try await settleNativePDFMutation(
+                    book: outgoingBook,
+                    access: outgoingAccess,
+                    library: outgoingLibrary,
+                    outgoingRollback: true
+               ) {
+                // A switch is not a commit signal. The exact outgoing book is
+                // durably rolled back/cleaned and its OCR lease is released
+                // before any target navigation or identity change begins.
+                try await applyNativePDFRecoverySettlement(
+                    settlement,
+                    localRuntimeServer: localRuntimeServer,
+                    reopenRuntime: true
+                )
+            }
+
+            cancelPendingLocalBookNavigation()
+            // The outgoing page loses its Pi identity only after its native PDF
+            // transaction has settled. A failed rollback leaves this binding and
+            // page in place because the catch below aborts the switch.
+            nativePiGateway?.updateTrustedRemoteBookBinding(nil)
+            didClearOutgoingRemoteBinding = true
+
+            var openingBook = library.books.first(where: {
+                $0.id == book.id && $0.relativePath == book.relativePath
+            }) ?? book
+            var access = try library.makeOpenAccess(for: openingBook)
+            var openingContentSHA256 = openingBook.contentSha256
+            if openingBook.format == .pdf,
+               let settlement = try await settleNativePDFMutation(
+                    book: openingBook,
+                    access: access,
+                    library: library
+               ) {
+                // Incoming crash recovery runs before localRuntimeServer.open,
+                // so neither the shell nor injected JavaScript can observe a
+                // half-replaced PDF/OCR sidecar pair.
+                openingBook = settlement.book
+                access = settlement.access
+                openingContentSHA256 = settlement.contentSHA256
+            }
             try await localRuntimeServer.start()
-            let url = try await localRuntimeServer.open(access)
+            let url = try await localRuntimeServer.open(
+                access,
+                initialPage: initialPage
+            )
             bookUserStateImportTask?.cancel()
             bookUserStateImportTask = nil
             bookUserStateContextGeneration &+= 1
-            currentLocalBook = book
+            currentLocalBook = openingBook
+            currentLocalBookAccess = access
             currentLocalLibrary = library
-            currentLocalBookContentSHA256 = book.contentSha256
+            currentLocalBookContentSHA256 = openingContentSHA256
+            refreshNativePiRemoteBookBinding()
             try? bookUserStateWebAdapter?.updateTrustedContext(
                 baseURL: localRuntimeServer.baseURL,
-                localBookId: book.id
+                localBookId: openingBook.id
             )
             nativeBookOCRBridge?.updateTrustedContext(
                 baseURL: localRuntimeServer.baseURL,
-                localBookID: book.id,
-                expectedContentSHA256: book.contentSha256
+                localBookID: openingBook.id,
+                expectedContentSHA256: openingContentSHA256,
+                localBookAccess: access
             )
             loadError = nil
-            webView.load(URLRequest(
+            guard let navigation = webView.load(URLRequest(
                 url: url,
-                cachePolicy: .reloadIgnoringLocalCacheData,
+                cachePolicy: .useProtocolCachePolicy,
                 timeoutInterval: 30
-            ))
+            )) else {
+                throw ReaderLocalRuntimeError.serverUnavailable(
+                    "本机书籍导航未能启动"
+                )
+            }
+            pendingLocalBookNavigation = PendingLocalBookNavigation(
+                navigation: navigation,
+                bookID: openingBook.id,
+                libraryID: library.stableLibraryID,
+                restorationToken: restorationToken
+            )
             return true
         } catch {
+            if didClearOutgoingRemoteBinding {
+                nativePiGateway?.updateTrustedRemoteBookBinding(nil)
+            }
             library.reportError(error)
+            showBookUserStateMessage(
+                "无法打开目标书籍：\(error.localizedDescription)",
+                isError: true
+            )
+            if let restorationToken {
+                finishLocalBookRestore(
+                    token: restorationToken,
+                    succeeded: false
+                )
+            }
             return false
         }
+    }
+
+    private func cancelPendingLocalBookNavigation() {
+        guard let pending = pendingLocalBookNavigation else { return }
+        pendingLocalBookNavigation = nil
+        if let token = pending.restorationToken {
+            finishLocalBookRestore(token: token, succeeded: false)
+        }
+    }
+
+    private func finishLocalBookRestore(token: UUID, succeeded: Bool) {
+        guard let continuation = localBookRestoreContinuations.removeValue(
+            forKey: token
+        ) else { return }
+        continuation.resume(returning: succeeded)
     }
 
     func setReaderScenePhase(_ phase: ScenePhase) {
@@ -1152,7 +2098,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 guard let self else { return }
                 do {
                     try await localRuntimeServer.restartAfterForeground()
-                    self.webView.reloadFromOrigin()
+                    self.webView.reload()
                 } catch {
                     self.loadError = error.localizedDescription
                 }
@@ -1447,6 +2393,27 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             && localRuntimeServer.map {
                 url.path.hasPrefix($0.baseURL.path)
             } == true
+    }
+
+    private func isFinishedLocalBookURL(
+        _ url: URL?,
+        bookID: String
+    ) -> Bool {
+        guard let url, isLocalRuntimeURL(url),
+              let localRuntimeServer else { return false }
+        let pdfPath = localRuntimeServer.baseURL
+            .appendingPathComponent("shells/pdf.html").path
+        let epubPath = localRuntimeServer.baseURL
+            .appendingPathComponent("shells/epub.html").path
+        guard url.path == pdfPath || url.path == epubPath,
+              let components = URLComponents(
+                url: url,
+                resolvingAgainstBaseURL: false
+              ) else { return false }
+        let bookValues = (components.queryItems ?? [])
+            .filter { $0.name == "book" }
+            .compactMap(\.value)
+        return bookValues == [bookID]
     }
 
     func isTrustedLocalRuntimeFeatureURL(_ url: URL?) -> Bool {
@@ -2005,7 +2972,15 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
 
         let manager = ReaderLocalNotesManager.shared
         guard manager.isEnabled else {
-            replyHandler(["handled": false], nil)
+            replyHandler([
+                "handled": true,
+                "status": 409,
+                "response": [
+                    "ok": false,
+                    "code": "BW_NATIVE_NOTES_DISABLED",
+                    "error": "本机笔记未启用，未向 Pi 或回环地址假提交",
+                ],
+            ], nil)
             return
         }
         guard
@@ -2123,6 +3098,25 @@ extension ReaderWebViewModel: WKNavigationDelegate {
     ) {
         isLoading = false
         loadError = nil
+        if let navigation,
+           let pending = pendingLocalBookNavigation,
+           pending.navigation === navigation {
+            pendingLocalBookNavigation = nil
+            let succeeded = currentLocalBook?.id == pending.bookID
+                && currentLocalLibrary?.stableLibraryID == pending.libraryID
+                && isFinishedLocalBookURL(webView.url, bookID: pending.bookID)
+            if succeeded {
+                // This is deliberately the only persistence point. Starting a
+                // request is not proof that the indexed local book rendered.
+                ReaderLastLocalBookStore.shared.save(
+                    libraryID: pending.libraryID,
+                    bookID: pending.bookID
+                )
+            }
+            if let token = pending.restorationToken {
+                finishLocalBookRestore(token: token, succeeded: succeeded)
+            }
+        }
         if let nativeVoiceBridge {
             updateNativeVoiceButton(state: nativeVoiceBridge.state)
         }
@@ -2145,7 +3139,7 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         didFail navigation: WKNavigation!,
         withError error: Error
     ) {
-        recordLoadFailure(error)
+        recordLoadFailure(error, navigation: navigation)
     }
 
     func webView(
@@ -2153,7 +3147,7 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         didFailProvisionalNavigation navigation: WKNavigation!,
         withError error: Error
     ) {
-        recordLoadFailure(error)
+        recordLoadFailure(error, navigation: navigation)
     }
 
     func webView(
@@ -2183,6 +3177,16 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         }
 
         if scheme == "http" || scheme == "https" {
+            if navigationAction.targetFrame?.isMainFrame != false,
+               takeOverLibraryNavigation(url) {
+                decisionHandler(.cancel)
+                return
+            }
+            if navigationAction.targetFrame?.isMainFrame != false,
+               takeOverRemoteBookNavigation(url) {
+                decisionHandler(.cancel)
+                return
+            }
             if isTrustedReaderURL(url) {
                 decisionHandler(.allow)
                 return
@@ -2203,7 +3207,18 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         decisionHandler(.cancel)
     }
 
-    private func recordLoadFailure(_ error: Error) {
+    private func recordLoadFailure(
+        _ error: Error,
+        navigation: WKNavigation?
+    ) {
+        if let navigation,
+           let pending = pendingLocalBookNavigation,
+           pending.navigation === navigation {
+            pendingLocalBookNavigation = nil
+            if let token = pending.restorationToken {
+                finishLocalBookRestore(token: token, succeeded: false)
+            }
+        }
         let nsError = error as NSError
         guard nsError.code != NSURLErrorCancelled else {
             return

@@ -22,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import threading
 import time
 from pathlib import Path
@@ -30,6 +31,9 @@ from flask import Response, jsonify, request, session
 
 CLAUDE_DIR = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"))
 VAULT_ROOT = Path(os.environ.get("OBSIDIAN_VAULT", "/home/bwicarus/obsidian"))
+
+_NATIVE_EPUB_STATE_CONTRACT = "reader-native-epub-assistant-state/1"
+_NATIVE_EPUB_ACTION_CONTRACT = "reader-native-epub-action/1"
 
 
 # ── 懒加载(避免 import 期循环依赖:pdf_reader 在自己 import 末尾 register 本模块)──
@@ -141,6 +145,71 @@ def _cur_idx(ctx, args=None, key="idx"):
         return int(ctx.get("current_section_idx") or 0)
     except Exception:
         return 0
+
+
+def _native_epub_state(ctx):
+    """Return a validated App-owned EPUB sidecar snapshot or ``None``.
+
+    Native books never let the Pi sidecar masquerade as current state.  The
+    App injects one immutable snapshot when a chat job starts; tools in that
+    job all read the same revision set.  Keep this helper reader-agnostic in
+    shape (plain dicts/lists) so the PDF assistant can adopt the same contract
+    later without importing the native runtime.
+    """
+    raw = (ctx or {}).get("native_local_state")
+    if not isinstance(raw, dict) or raw.get("contract") != _NATIVE_EPUB_STATE_CONTRACT:
+        return None
+    if set(raw) != {"contract", "file", "revisions", "highlights", "notes", "ink"}:
+        return None
+    if not isinstance(raw.get("file"), str) or not re.fullmatch(
+            r"localbook:(?:localbook-)?[0-9a-f]{64}", raw["file"]):
+        return None
+    revisions = raw.get("revisions")
+    if (not isinstance(revisions, dict) or
+            set(revisions) != {"highlights", "notes", "ink"} or
+            any(not isinstance(revisions.get(key), int) or revisions[key] < 0
+                for key in ("highlights", "notes", "ink"))):
+        return None
+    if any(not isinstance(raw.get(k), t) for k, t in (
+            ("highlights", list), ("notes", list), ("ink", dict))):
+        return None
+    return raw
+
+
+def _native_epub_authoritative(ctx) -> bool:
+    return _native_epub_state(ctx) is not None
+
+
+def _epub_conversation_scope(ctx, file_rel):
+    """Keep an opaque local conversation key separate from Pi file access.
+
+    ``file_rel`` is the only value that server-side EPUB/file tools may open.
+    A native-only book has no such path, but its validated App identity can
+    still isolate conversation history without ever becoming a filesystem
+    input.
+    """
+    remote_file = str(file_rel or "").strip()
+    if remote_file:
+        return remote_file, False
+    native = _native_epub_state(ctx)
+    if native is not None:
+        return native["file"], True
+    return "", False
+
+
+def _ctx_epub_highlights(ctx):
+    native = _native_epub_state(ctx)
+    if native is not None:
+        return native["highlights"]
+    file_rel = (ctx or {}).get("file_rel") or ""
+    return _pdf()._epub_hl_load(file_rel) or []
+
+
+def _ctx_epub_notes(ctx):
+    native = _native_epub_state(ctx)
+    if native is not None:
+        return native["notes"]
+    return None
 
 
 # ──────────────────────── 章 → spine section 区间(整章覆盖)────────────────────────
@@ -412,7 +481,7 @@ def _t_read_highlights(args, ctx):
     if not file_rel:
         return {"error": "当前不在 EPUB 电子书里"}
     try:
-        hls = _pdf()._epub_hl_load(file_rel) or []
+        hls = _ctx_epub_highlights(ctx)
     except Exception as e:
         return {"error": str(e)[:120]}
     want = None
@@ -430,6 +499,149 @@ def _t_read_highlights(args, ctx):
         out.append({"section": sec, "text": (h.get("text") or "")[:200],
                     "color": h.get("color"), "note": (h.get("note") or "")[:160]})
     return {"count": len(out), "highlights": out}
+
+
+def _native_note_place(note):
+    anchor = (note or {}).get("anchor") or {}
+    section = anchor.get("section")
+    return f"第{section}章(section idx)" if section is not None else "位置未知"
+
+
+def _t_native_notes_query(args, ctx):
+    notes = _ctx_epub_notes(ctx)
+    if notes is None:
+        return _A()._t_notes_query(args, ctx, kind="epub")
+    color = _A()._note_color_arg(args.get("color"))
+    keyword = str(args.get("keyword") or "").strip().lower()
+    want = None
+    if args.get("section") is not None:
+        try:
+            want = int(args["section"])
+        except (TypeError, ValueError):
+            return {"error": "section 不是数字"}
+    out = []
+    for note in notes:
+        if not isinstance(note, dict) or not note.get("id"):
+            continue
+        anchor = note.get("anchor") or {}
+        if want is not None and anchor.get("section") != want:
+            continue
+        if color and str(note.get("color") or "#ffffff").strip().lower() != color:
+            continue
+        text = str(note.get("text") or "")
+        if keyword and keyword not in text.lower():
+            continue
+        out.append({"id": note["id"], "color": _A()._note_color_label(note.get("color")),
+                    "位置": _native_note_place(note),
+                    "text": text.replace("\n", " ").strip()[:60],
+                    "has_ink": bool(note.get("strokes"))})
+    return {"count": len(out), "notes": out[:50],
+            "note": "这是本机权威便签快照；text 是摘要，全文用 notes_read(id)。"}
+
+
+def _t_native_notes_read(args, ctx):
+    notes = _ctx_epub_notes(ctx)
+    if notes is None:
+        return _A()._t_notes_read(args, ctx, kind="epub")
+    note_id = str(args.get("id") or "").strip()
+    if not note_id:
+        return {"error": "缺 id(先 notes_query 拿便签 id)"}
+    note = next((item for item in notes
+                 if isinstance(item, dict) and item.get("id") == note_id), None)
+    if note is None:
+        return {"error": "本机权威快照里没有这个便签 id"}
+    out = {"id": note_id, "位置": _native_note_place(note),
+           "color": _A()._note_color_label(note.get("color")),
+           "text": str(note.get("text") or "")[:4000] or "(无文字)"}
+    if note.get("strokes"):
+        out.update({"has_ink": True, "stroke_count": len(note.get("strokes") or []),
+                    "note": "这张本机便签含手写笔画；当前工具可确认笔画存在与数量，视觉内容以客户端合成图为准。"})
+    return out
+
+
+def _native_note_action(ctx, action):
+    """Queue one App-owned note mutation; never write the Pi note sidecar."""
+    return {"ok": True, "pending": True,
+            "note": "已把便签操作交给本机原子执行；只有客户端回执成功才算完成，请勿把 pending 说成已经写入。",
+            "client_action": {"fn": "nativeLocalEPUBMutation", "args": [{
+                "contract": _NATIVE_EPUB_ACTION_CONTRACT,
+                "file": _native_epub_state(ctx)["file"],
+                "action": action
+            }]}}
+
+
+def _t_native_notes_create(args, ctx):
+    if not _native_epub_authoritative(ctx):
+        return _A()._t_notes_create(args, ctx, kind="epub")
+    text = str(args.get("text") or "").strip()
+    if not text:
+        return {"error": "缺 text(便签内容)"}
+
+    def f01(value, default):
+        try:
+            return min(0.98, max(0.0, float(value)))
+        except (TypeError, ValueError):
+            return default
+    try:
+        section = (int(args["section"]) if args.get("section") is not None
+                   else int(ctx.get("current_section_idx") or 0))
+    except (TypeError, ValueError):
+        return {"error": "section 不是数字"}
+    import uuid
+    now = int(time.time())
+    note_id = "c_" + uuid.uuid4().hex[:16]
+    color = _A()._note_color_norm(args.get("color"))
+    note = {"id": note_id,
+            "anchor": {"kind": "epub", "section": max(0, section),
+                       "x": f01(args.get("x"), 0.72), "y": f01(args.get("y"), 0.25)},
+            "text": text[:8000], "color": color, "w": 260, "h": 180,
+            "collapsed": False, "strokes": [], "video": None, "card": None,
+            "html": None, "iar": None, "created": now, "updated": now}
+    action = {"id": "act_nnew_" + note_id, "kind": "notes_create",
+              "title": "新建便签:" + text[:24].replace("\n", " "),
+              "detail": (f"位置:{_native_note_place(note)}\n"
+                         f"颜色:{_A()._note_color_label(color)}\n内容:{text[:600]}"),
+              "undo": {"op": "sticky_delete", "file": _native_epub_state(ctx)["file"],
+                       "ids": [note_id]},
+              "redo": {"op": "sticky_create", "file": _native_epub_state(ctx)["file"],
+                       "notes": [note]},
+              "state": "done", "ts": now}
+    return _native_note_action(ctx, action)
+
+
+def _t_native_notes_edit(args, ctx):
+    if not _native_epub_authoritative(ctx):
+        return _A()._t_notes_edit(args, ctx, kind="epub")
+    note_id = str(args.get("id") or "").strip()
+    if not note_id:
+        return {"error": "缺 id(先 notes_query 拿便签 id)"}
+    if args.get("text") is None and args.get("color") is None:
+        return {"error": "text / color 至少给一个"}
+    note = next((item for item in _native_epub_state(ctx)["notes"]
+                 if isinstance(item, dict) and item.get("id") == note_id), None)
+    if note is None:
+        return {"error": "本机权威快照里没有这个便签 id"}
+    old = {"text": str(note.get("text") or ""),
+           "color": str(note.get("color") or "#ffffff")}
+    new = dict(old)
+    if args.get("text") is not None:
+        new["text"] = str(args.get("text"))[:8000]
+    if args.get("color") is not None:
+        new["color"] = _A()._note_color_norm(args.get("color"), dflt=old["color"])
+    now = int(time.time())
+    local_file = _native_epub_state(ctx)["file"]
+    action = {"id": "act_nedit_" + note_id + "_" + os.urandom(3).hex(),
+              "kind": "notes_edit",
+              "title": "修改便签:" + (new["text"] or old["text"])[:24].replace("\n", " "),
+              "detail": (f"位置:{_native_note_place(note)}\n"
+                         f"改前:[{_A()._note_color_label(old['color'])}]{old['text'][:300]}\n"
+                         f"改后:[{_A()._note_color_label(new['color'])}]{new['text'][:300]}"),
+              "undo": {"op": "sticky_set", "file": local_file, "id": note_id,
+                       "fields": old},
+              "redo": {"op": "sticky_set", "file": local_file, "id": note_id,
+                       "fields": new},
+              "state": "done", "ts": now}
+    return _native_note_action(ctx, action)
 
 
 def _t_make_anki(args, ctx):
@@ -645,7 +857,7 @@ def _t_find_highlights(args, ctx):
     if not file_rel:
         return {"error": "当前不在 EPUB 电子书里"}
     try:
-        hls = _pdf()._epub_hl_load(file_rel) or []
+        hls = _ctx_epub_highlights(ctx)
     except Exception as e:
         return {"error": str(e)[:120]}
     want = None
@@ -792,15 +1004,32 @@ def _t_see_figure(args, ctx):
         A = _A()
         vis = []
         ink_any = False
+        native_note_facts = []
         for fg in figs:
             if fg.get("kind") == "note" and fg.get("note_id"):   # 双击带入的手写便签:按 note_id 现场重合成(文字+笔画整体一张图,永远最新 sidecar)
-                try:
-                    png_n = _pdf()._note_composite_png(fg.get("file_rel") or (ctx.get("file_rel") or ""), fg.get("note_id"))
-                except Exception:
-                    png_n = None
-                if png_n:
-                    vis.append({"media_type": "image/png", "b64": base64.b64encode(png_n).decode()})
-                continue
+                native = _native_epub_state(ctx)
+                if native is not None:
+                    note = next((item for item in native["notes"]
+                                 if isinstance(item, dict) and item.get("id") == fg.get("note_id")), None)
+                    if note is not None:
+                        native_note_facts.append({"id": note.get("id"),
+                                                  "text": str(note.get("text") or "")[:4000],
+                                                  "stroke_count": len(note.get("strokes") or [])})
+                    # A native note must never fall back to the stale Pi
+                    # sidecar.  If the client supplied a composed image, the
+                    # ordinary b64 path below remains authoritative.
+                    if not fg.get("b64"):
+                        continue
+                if fg.get("b64"):
+                    pass
+                else:
+                    try:
+                        png_n = _pdf()._note_composite_png(fg.get("file_rel") or (ctx.get("file_rel") or ""), fg.get("note_id"))
+                    except Exception:
+                        png_n = None
+                    if png_n:
+                        vis.append({"media_type": "image/png", "b64": base64.b64encode(png_n).decode()})
+                    continue
             b64 = fg.get("b64")
             mt = fg.get("media_type") or fg.get("mime")
             if b64:   # 前端直接带 base64(data: URI 也走这)
@@ -842,6 +1071,9 @@ def _t_see_figure(args, ctx):
             if not mt:
                 mt = mimetypes.guess_type(str(target))[0] or "image/png"
             vis.append({"media_type": mt, "b64": base64.b64encode(raw).decode()})
+        if not vis and native_note_facts:
+            return {"本机便签": native_note_facts,
+                    "note": "本轮没有携带本机合成图，不能猜测手写笔画内容；可确认便签文字与笔画数量。"}
         if not vis:
             return {"error": "图取不到(src 无效或不是解包目录里的文件)"}
         note = "下面是用户在电子书里带入的插图,描述图里的内容(图表/示意图/曲线/公式排版等文字读不到的视觉信息)。"
@@ -970,18 +1202,18 @@ _etools = {
     "notes_query": ("查用户贴在书页上的**便签**(sticky notes)列表。用户问『我记了什么便签/哪章有便签/我便签里写没写过X/找我那张黄色便签』时用;"
                     "回答『这章讲什么/总结』**不需要**查便签。args {color?, keyword?, section?} 三个过滤可组合,全不传=列全部"
                     "(color 可给色名 白/黄/蓝/绿/粉/石墨/墨绿 或 hex;section=章节 idx)",
-                    lambda a, c: _A()._t_notes_query(a, c, kind="epub")),
+                    _t_native_notes_query),
     "notes_read": ("读某条便签的**全文**+位置(notes_query 的 text 只是摘要)。args {id}(id 从 notes_query 拿)",
-                   lambda a, c: _A()._t_notes_read(a, c, kind="epub")),
+                   _t_native_notes_read),
     "notes_create": ("在书页上**新建一张便签**(有副作用的写操作,只有用户明确要求才调,如『帮我在这章记个便签/贴张便签写上…』)。"
                      "args {text, section?, x?, y?, color?}:text=便签内容(必填);section=章节 idx(不传=当前章);"
                      "x/y=章内位置比例 0~1(不传默认右上区);color 可给色名(白/黄/蓝/绿/粉/石墨/墨绿)或 hex,缺省白。"
                      "建完系统会自动给撤销卡,你不用解释怎么撤销",
-                     lambda a, c: _A()._t_notes_create(a, c, kind="epub")),
+                     _t_native_notes_create),
     "notes_edit": ("**修改已有便签**的文字/颜色(写操作,只有用户明确要求才调,如『把那张便签改成…/便签换个颜色』)。"
                    "args {id, text?, color?}(id 从 notes_query 拿;text/color 至少给一个)。"
                    "**只能改文字和颜色**——手写笔画/位置/尺寸动不了(工具层面就不接收),别答应用户改这些",
-                   lambda a, c: _A()._t_notes_edit(a, c, kind="epub")),
+                   _t_native_notes_edit),
     # ── 以下直接复用 assistant.py 的实现(跨书/召回/写操作/查词/翻译,跟 PDF 助手一致)──
     "search_all_books": ("跨『我所有的书』全文搜索(用户问『哪本书讲过X/别的书有没有X/之前在哪见过』时用)。args {query}",
                          lambda a, c: _A()._t_search_all_books(a, c)),
@@ -1172,6 +1404,39 @@ def _fav_sys_block(ctx, cur) -> str:
     return decl + dir_line + tool_line
 
 
+def _native_state_prompt(ctx) -> str:
+    state = _native_epub_state(ctx)
+    if state is None:
+        return ""
+    highlights = []
+    for item in state["highlights"][:80]:
+        if not isinstance(item, dict):
+            continue
+        highlights.append({"id": item.get("id"),
+                           "section": (item.get("anchor") or {}).get("section"),
+                           "text": str(item.get("text") or "")[:220],
+                           "color": item.get("color"), "note": str(item.get("note") or "")[:160]})
+    notes = []
+    for item in state["notes"][:60]:
+        if not isinstance(item, dict):
+            continue
+        notes.append({"id": item.get("id"),
+                      "section": (item.get("anchor") or {}).get("section"),
+                      "text": str(item.get("text") or "")[:600],
+                      "color": item.get("color"),
+                      "stroke_count": len(item.get("strokes") or [])})
+    ink = [{"section": key, "stroke_count": len(value) if isinstance(value, list) else 0}
+           for key, value in list(state["ink"].items())[:120]]
+    view = {"revisions": state["revisions"], "highlights": highlights,
+            "notes": notes, "ink": ink,
+            "totals": {"highlights": len(state["highlights"]),
+                       "notes": len(state["notes"]), "ink_sections": len(state["ink"])}}
+    return ("\n★【本机权威批注状态】下面内容由 App 在本轮开始时从本机 sidecar 原子注入；"
+            "它覆盖 Pi 上任何同名高亮/便签/笔迹数据。读操作只能以它或对应本机工具结果为准。"
+            "写工具返回 pending 时，只能说已发出本机操作，不能说已经写入。\n" +
+            json.dumps(view, ensure_ascii=False, separators=(",", ":")))
+
+
 def _esys_prompt(ctx):
     A = _A()
     cat = "\n".join(f"- {n}: {d}" for n, (d, _f) in _etools.items())
@@ -1262,7 +1527,7 @@ def _esys_prompt(ctx):
             vocab_line = f"\n本章『还没掌握』的生词(页面下划线词):{vv}"
     return (_ESYS_RULES + f"\n\n【可用工具】\n{cat}\n\n【当前章节】"
             + json.dumps(meta, ensure_ascii=False) + sel_line + toc_line + fig_line + note_line + focus_line + vocab_line + prefer_line
-            + _fav_sys_block(ctx, cur))
+            + _fav_sys_block(ctx, cur) + _native_state_prompt(ctx))
 
 
 _ESYS_STATIC_CACHE = None
@@ -1944,14 +2209,21 @@ def _build_action_from_undo(undo_id, file_rel):
 
 # ── action 的持久化(塞进 assistant 消息 meta["actions"];upsert by id 幂等)──
 def _econvo_save_all(uid, file_rel, msgs):
+    tmp = None
     try:
         p = _econvo_path(uid, file_rel)
         p.parent.mkdir(parents=True, exist_ok=True)
         tmp = p.with_name(p.name + ".tmp")
         tmp.write_text(json.dumps(msgs[-200:], ensure_ascii=False), "utf-8")
         os.replace(tmp, p)
+        return True
     except Exception:
-        pass
+        try:
+            if tmp is not None:
+                tmp.unlink(missing_ok=True)
+        except Exception:
+            pass
+        return False
 
 
 def _econvo_attach_actions(uid, file_rel, actions):
@@ -1977,8 +2249,7 @@ def _econvo_attach_actions(uid, file_rel, actions):
                 by[aid] = len(acts)
                 acts.append(na)
         target["actions"] = acts
-        _econvo_save_all(uid, file_rel, msgs)
-        return True
+        return _econvo_save_all(uid, file_rel, msgs)
 
 
 def _econvo_update_action(uid, file_rel, action):
@@ -1997,9 +2268,37 @@ def _econvo_update_action(uid, file_rel, action):
             for i, a in enumerate(acts):
                 if a.get("id") == aid:
                     acts[i] = action
-                    _econvo_save_all(uid, file_rel, msgs)
-                    return True
+                    return _econvo_save_all(uid, file_rel, msgs)
     return False
+
+
+def _econvo_commit_native_action(uid, file_rel, previous, action):
+    """CAS one App-owned action's *metadata* without touching Pi sidecars.
+
+    The App has already committed the authoritative IndexedDB mutation before
+    calling this helper.  Equality with ``previous`` prevents a stale card
+    from overwriting a newer undo/redo state; equality with ``action`` makes a
+    retry idempotent after a lost response.
+    """
+    action_id = action.get("id") if isinstance(action, dict) else None
+    if not action_id or not isinstance(previous, dict) or previous.get("id") != action_id:
+        return "invalid"
+    with _econvo_lock:
+        msgs = _econvo_load(uid, file_rel)
+        for message in msgs:
+            if message.get("role") != "assistant":
+                continue
+            actions = message.get("actions") or []
+            for index, current in enumerate(actions):
+                if current.get("id") != action_id:
+                    continue
+                if current == action:
+                    return "replay"
+                if current != previous:
+                    return "conflict"
+                actions[index] = action
+                return "committed" if _econvo_save_all(uid, file_rel, msgs) else "persist_failed"
+    return "missing"
 
 
 def _econvo_set_action_state(uid, file_rel, action_id, state):
@@ -2011,8 +2310,7 @@ def _econvo_set_action_state(uid, file_rel, action_id, state):
             for a in (m.get("actions") or []):
                 if a.get("id") == action_id:
                     a["state"] = state
-                    _econvo_save_all(uid, file_rel, msgs)
-                    return True
+                    return _econvo_save_all(uid, file_rel, msgs)
     return False
 
 
@@ -2075,6 +2373,9 @@ def _eassistant_chat():
     ctx_in = body.get("context") or {}
     ctx_in["media_prefer"] = body.get("media_prefer")   # 偏好独立字段(不进 message,避免污染历史)
     file_rel = (ctx_in.get("file") or ctx_in.get("file_rel") or "").strip()
+    conversation_scope, native_only = _epub_conversation_scope(
+        ctx_in, file_rel
+    )
     with _echat_jobs_lock:
         job = _echat_jobs.get(rid)
         if job is None:
@@ -2087,12 +2388,13 @@ def _eassistant_chat():
             force_model = body.get("force_model") if body.get("force_model") in A._CLAUDE_VARIANTS else None
             ctx = dict(ctx_in)
             ctx["file_rel"] = file_rel
+            ctx["_native_local_only"] = native_only
             ctx["book_name"] = ctx.get("book") or ctx.get("book_name") or (file_rel.split("/")[-1] if file_rel else "")
             ctx["_base"] = request.host_url.rstrip("/")
             ctx["_uid"] = uid   # 写操作记 owner=本用户 → 撤销只能撤自己的
             history = [{k: m.get(k) for k in ("role", "content", "section", "book", "selection")}
-                       for m in _econvo_load(uid, file_rel)[-6:]]
-            _econvo_append(uid, file_rel, "user", message,   # 进 agent 前就落库 → 断连也不丢这轮
+                       for m in _econvo_load(uid, conversation_scope)[-6:]]
+            _econvo_append(uid, conversation_scope, "user", message,   # 进 agent 前就落库 → 断连也不丢这轮
                            {"section": ctx.get("current_section_idx"), "book": ctx.get("book_name"),
                             "selection": ctx.get("selection"),
                             # 选区偏移锚 {section,start,end}(前端发送时记录)→ 历史回放里「选中」行可点跳转+临时高亮
@@ -2101,7 +2403,7 @@ def _eassistant_chat():
             job = _echat_jobs[rid] = {"events": [], "answer": "", "trace": None, "done": False,
                                       "lock": threading.Lock(), "uid": uid}
             threading.Thread(target=_echat_worker, daemon=True,
-                             args=(rid, message, ctx, history, force_effort, force_model, uid, file_rel)).start()
+                             args=(rid, message, ctx, history, force_effort, force_model, uid, conversation_scope)).start()
         elif job.get("uid") != uid:
             return jsonify({"ok": False, "error": "forbidden"}), 403
 
@@ -2182,6 +2484,7 @@ def _eassistant_action():
     op = (b.get("op") or "").strip()
     uid = _uid()
     file_rel = (b.get("file") or b.get("file_rel") or "").strip()
+    native_contract = b.get("native_contract")
     if op == "from_task":
         action = _build_action_from_undo((b.get("undo_id") or "").strip(), file_rel)
         if not action:
@@ -2196,7 +2499,29 @@ def _eassistant_action():
             a.setdefault("state", "done")
             a.setdefault("ts", int(time.time()))
         stored = _econvo_attach_actions(uid, file_rel, acts)
+        if native_contract == _NATIVE_EPUB_ACTION_CONTRACT and not stored:
+            return jsonify({"ok": False, "error": "native_action_target_missing"}), 409
         return jsonify({"ok": True, "stored": stored, "actions": acts})
+    if op == "native_commit":
+        if native_contract != _NATIVE_EPUB_ACTION_CONTRACT:
+            return jsonify({"ok": False, "error": "native_contract"}), 400
+        requested_op = b.get("requested_op")
+        previous = b.get("previous_action")
+        action = b.get("action")
+        if requested_op not in ("undo", "redo") or not isinstance(previous, dict) or not isinstance(action, dict):
+            return jsonify({"ok": False, "error": "native_commit_body"}), 400
+        expected_state = "undone" if requested_op == "undo" else "done"
+        if action.get("state") != expected_state:
+            return jsonify({"ok": False, "error": "native_commit_state"}), 400
+        result = _econvo_commit_native_action(uid, file_rel, previous, action)
+        if result == "persist_failed":
+            return jsonify({"ok": False, "error": "native_action_persist_failed"}), 503
+        if result in ("invalid", "missing"):
+            return jsonify({"ok": False, "error": "native_action_missing"}), 404
+        if result == "conflict":
+            return jsonify({"ok": False, "error": "native_action_conflict"}), 409
+        return jsonify({"ok": True, "state": action["state"], "action": action,
+                        "replayed": result == "replay"})
     if op in ("undo", "redo"):
         action = b.get("action") if isinstance(b.get("action"), dict) else {}
         if not action.get("id"):

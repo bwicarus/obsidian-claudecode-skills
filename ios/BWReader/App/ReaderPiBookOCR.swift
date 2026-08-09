@@ -11,7 +11,7 @@ struct ReaderPiOCRStageProgress: Codable, Hashable, Sendable {
 
     var fractionCompleted: Double {
         guard total > 0 else { return 0 }
-        return min(1, max(0, Double(completed + failed + unavailable) / Double(total)))
+        return min(1, max(0, Double(completed) / Double(total)))
     }
 }
 
@@ -56,6 +56,55 @@ private struct ReaderPiOCRWireResponse: Decodable {
     let ok: Bool
     let contract: String
     let job: ReaderPiOCRJob
+}
+
+struct ReaderPiOCRAdoption: Codable, Hashable, Sendable {
+    struct PageSources: Codable, Hashable, Sendable {
+        let overrideCount: Int
+        let charCache: Int
+        let embedded: Int
+        let missing: Int
+
+        private enum CodingKeys: String, CodingKey {
+            case overrideCount = "override"
+            case charCache = "char-cache"
+            case embedded
+            case missing
+        }
+    }
+
+    struct Formula: Codable, Hashable, Sendable {
+        let state: String
+        let count: Int
+        let reason: String?
+    }
+
+    let contract: String
+    let bookId: String
+    let contentSha256: String
+    let available: Bool
+    let alreadyAdopted: Bool
+    let sourceEngine: String
+    let totalPages: Int
+    let pageSources: PageSources
+    let missingPages: [Int]
+    let formula: Formula
+    let totalBytes: Int64?
+    let revision: String?
+}
+
+private struct ReaderPiOCRAdoptionPreviewWireResponse: Decodable {
+    let ok: Bool
+    let contract: String
+    let adoption: ReaderPiOCRAdoption
+}
+
+private struct ReaderPiOCRAdoptWireResponse: Decodable {
+    let ok: Bool
+    let contract: String
+    let already: Bool
+    let job: ReaderPiOCRJob
+    let adoption: ReaderPiOCRAdoption
 }
 
 struct ReaderPiOCRAttachmentFile: Codable, Hashable, Sendable {
@@ -194,6 +243,99 @@ final class ReaderPiOCRClient {
         request.setValue("application/json", forHTTPHeaderField: "Accept")
         apply(cookies: cookies, to: &request)
         return try await jobResponse(for: request, expectedPath: "/pdf/api/library/ocr/status")
+    }
+
+    func adoptionPreview(
+        book: ReaderRemoteBook,
+        cookies: [HTTPCookie]
+    ) async throws -> ReaderPiOCRAdoption {
+        var components = URLComponents(
+            url: try canonicalURL(path: "pdf/api/library/ocr/adoption-preview"),
+            resolvingAgainstBaseURL: false
+        )
+        components?.queryItems = [
+            URLQueryItem(name: "bookId", value: book.bookId),
+            URLQueryItem(name: "contentSha256", value: book.contentSha256),
+        ]
+        guard let url = components?.url else { throw ReaderPiOCRError.invalidURL }
+        var request = URLRequest(url: url)
+        request.httpMethod = "GET"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        apply(cookies: cookies, to: &request)
+        let (data, response) = try await session.data(for: request)
+        try validate(
+            response,
+            data: data,
+            expectedPathPrefix: "/pdf/api/library/ocr/adoption-preview"
+        )
+        let payload: ReaderPiOCRAdoptionPreviewWireResponse
+        do {
+            payload = try JSONDecoder().decode(
+                ReaderPiOCRAdoptionPreviewWireResponse.self,
+                from: data
+            )
+        } catch {
+            throw ReaderPiOCRError.invalidResponse
+        }
+        guard payload.ok, payload.contract == Self.contract else {
+            throw ReaderPiOCRError.invalidResponse
+        }
+        try validate(payload.adoption, for: book)
+        return payload.adoption
+    }
+
+    func adoptExisting(
+        book: ReaderRemoteBook,
+        cookies: [HTTPCookie]
+    ) async throws -> (
+        job: ReaderPiOCRJob,
+        adoption: ReaderPiOCRAdoption,
+        already: Bool
+    ) {
+        var request = URLRequest(
+            url: try canonicalURL(path: "pdf/api/library/ocr/adopt")
+        )
+        request.httpMethod = "POST"
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        request.httpBody = try JSONSerialization.data(withJSONObject: [
+            "bookId": book.bookId,
+            "contentSha256": book.contentSha256,
+        ])
+        apply(cookies: cookies, to: &request)
+        let (data, response) = try await session.data(for: request)
+        try validate(
+            response,
+            data: data,
+            expectedPathPrefix: "/pdf/api/library/ocr/adopt"
+        )
+        let payload: ReaderPiOCRAdoptWireResponse
+        do {
+            payload = try JSONDecoder().decode(
+                ReaderPiOCRAdoptWireResponse.self,
+                from: data
+            )
+        } catch {
+            throw ReaderPiOCRError.invalidResponse
+        }
+        guard payload.ok,
+              payload.contract == Self.contract,
+              payload.job.bookId == book.bookId,
+              payload.job.contentSha256.caseInsensitiveCompare(
+                book.contentSha256
+              ) == .orderedSame else {
+            throw ReaderPiOCRError.invalidResponse
+        }
+        try validate(payload.adoption, for: book)
+        guard payload.adoption.available,
+              payload.adoption.alreadyAdopted,
+              payload.job.engine == "legacy",
+              payload.job.state == "succeeded",
+              payload.job.resultAvailable,
+              payload.job.pageCharsRevision == payload.adoption.revision else {
+            throw ReaderPiOCRError.invalidResponse
+        }
+        return (payload.job, payload.adoption, payload.already)
     }
 
     func control(
@@ -353,7 +495,15 @@ final class ReaderPiOCRClient {
     ) async throws -> ReaderPiOCRJob {
         let (data, response) = try await session.data(for: request)
         try validate(response, data: data, expectedPathPrefix: expectedPath)
-        let payload = try JSONDecoder().decode(ReaderPiOCRWireResponse.self, from: data)
+        let payload: ReaderPiOCRWireResponse
+        do {
+            payload = try JSONDecoder().decode(
+                ReaderPiOCRWireResponse.self,
+                from: data
+            )
+        } catch {
+            throw ReaderPiOCRError.invalidResponse
+        }
         guard payload.ok, payload.contract == Self.contract else {
             throw ReaderPiOCRError.invalidResponse
         }
@@ -386,8 +536,32 @@ final class ReaderPiOCRClient {
             throw ReaderPiOCRError.invalidResponse
         }
         guard (200..<300).contains(http.statusCode) else {
-            let message = String(data: data.prefix(1_024), encoding: .utf8)
+            var message = String(data: data.prefix(1_024), encoding: .utf8)
                 ?? HTTPURLResponse.localizedString(forStatusCode: http.statusCode)
+            let contentType = http.value(forHTTPHeaderField: "Content-Type")?
+                .lowercased() ?? ""
+            let responseObject = (
+                (try? JSONSerialization.jsonObject(with: data)) as? [String: Any]
+            )
+            let responseContract = responseObject?["contract"] as? String
+            if (http.statusCode == 404 && responseContract != Self.contract)
+                || contentType.contains("text/html")
+                || message.trimmingCharacters(in: .whitespacesAndNewlines)
+                    .hasPrefix("<") {
+                message = "Pi 预处理接口未部署，或服务器返回了网页而不是协议数据"
+            } else if responseContract == Self.contract,
+                      let code = responseObject?["code"] as? String {
+                switch code {
+                case "legacy-adoption-busy":
+                    message = "现有 Pi 结果检查正在进行，请稍后重试"
+                case "legacy-result-incomplete":
+                    message = "现有 Pi 预处理结果不完整，暂时不能采用"
+                case "book-ocr-busy":
+                    message = "这本书正在 Pi 预处理中，请完成或取消后再采用"
+                default:
+                    message = responseObject?["error"] as? String ?? message
+                }
+            }
             throw ReaderPiOCRError.server(status: http.statusCode, message: message)
         }
     }
@@ -417,6 +591,59 @@ final class ReaderPiOCRClient {
                   entry.sha256.allSatisfy({ $0.isHexDigit }) else {
                 throw ReaderPiOCRError.invalidManifest
             }
+        }
+    }
+
+    private func validate(
+        _ adoption: ReaderPiOCRAdoption,
+        for book: ReaderRemoteBook
+    ) throws {
+        let sources = adoption.pageSources
+        let sourceCounts = [
+            sources.overrideCount,
+            sources.charCache,
+            sources.embedded,
+            sources.missing,
+        ]
+        guard adoption.contract == "reader-library-ocr-adoption/1",
+              adoption.bookId == book.bookId,
+              adoption.contentSha256.caseInsensitiveCompare(book.contentSha256)
+                == .orderedSame,
+              adoption.sourceEngine == "legacy",
+              adoption.totalPages >= 0,
+              sourceCounts.allSatisfy({
+                $0 >= 0 && $0 <= adoption.totalPages
+              }),
+              ["succeeded", "pending", "failed"].contains(
+                adoption.formula.state
+              ),
+              adoption.formula.count >= 0,
+              adoption.totalBytes.map({ $0 >= 0 }) ?? true,
+              adoption.missingPages.allSatisfy({
+                $0 > 0 && $0 <= adoption.totalPages
+              }),
+              Set(adoption.missingPages).count == adoption.missingPages.count else {
+            throw ReaderPiOCRError.invalidResponse
+        }
+        var sourceTotal = 0
+        for count in sourceCounts {
+            let (next, overflow) = sourceTotal.addingReportingOverflow(count)
+            guard !overflow else { throw ReaderPiOCRError.invalidResponse }
+            sourceTotal = next
+        }
+        let revisionIsValid = adoption.revision.map {
+            $0.range(
+                of: #"^ocr_[0-9a-f]{20}$"#,
+                options: .regularExpression
+            ) != nil
+        } ?? false
+        guard sourceTotal == adoption.totalPages,
+              sources.missing == adoption.missingPages.count,
+              adoption.available == (sources.missing == 0),
+              !adoption.alreadyAdopted
+                || (adoption.available && revisionIsValid),
+              adoption.revision == nil || revisionIsValid else {
+            throw ReaderPiOCRError.invalidResponse
         }
     }
 
@@ -457,9 +684,13 @@ final class ReaderPiOCRClient {
 @MainActor
 final class ReaderPiOCRCoordinator: ObservableObject {
     @Published private(set) var jobs: [String: ReaderPiOCRJob] = [:]
+    @Published private(set) var adoptions: [String: ReaderPiOCRAdoption] = [:]
     @Published private(set) var activeBookID: String?
+    @Published private(set) var previewingBookID: String?
     @Published private(set) var notice: String?
+    @Published private var bookErrors: [String: BookError] = [:]
     @Published private(set) var errorMessage: String?
+    @Published private(set) var errorBookID: String?
 
     private let client = ReaderPiOCRClient.shared
     private var pollingTasks: [String: Task<Void, Never>] = [:]
@@ -467,6 +698,11 @@ final class ReaderPiOCRCoordinator: ObservableObject {
     private struct LocalBinding {
         let bookID: String
         let contentSHA256: String
+    }
+    private struct BookError: Equatable {
+        let contentSHA256: String
+        let message: String
+        let isExplicit: Bool
     }
     private var localBindings: [String: LocalBinding] = [:]
 
@@ -476,7 +712,24 @@ final class ReaderPiOCRCoordinator: ObservableObject {
     }
 
     func job(for book: ReaderRemoteBook) -> ReaderPiOCRJob? {
-        jobs[book.bookId]
+        guard let job = jobs[book.bookId],
+              job.contentSha256.caseInsensitiveCompare(book.contentSha256)
+                == .orderedSame else { return nil }
+        return job
+    }
+
+    func adoption(for book: ReaderRemoteBook) -> ReaderPiOCRAdoption? {
+        guard let adoption = adoptions[book.bookId],
+              adoption.contentSha256.caseInsensitiveCompare(book.contentSha256)
+                == .orderedSame else { return nil }
+        return adoption
+    }
+
+    func error(for book: ReaderRemoteBook) -> String? {
+        guard let error = bookErrors[book.bookId],
+              error.contentSHA256.caseInsensitiveCompare(book.contentSha256)
+                == .orderedSame else { return nil }
+        return error.message
     }
 
     func start(
@@ -500,7 +753,8 @@ final class ReaderPiOCRCoordinator: ObservableObject {
         book: ReaderRemoteBook,
         cookies: [HTTPCookie],
         localBookID: String? = nil,
-        localContentSHA256: String? = nil
+        localContentSHA256: String? = nil,
+        previewsLegacyResults: Bool = false
     ) async {
         remember(
             localBookID: localBookID,
@@ -509,15 +763,100 @@ final class ReaderPiOCRCoordinator: ObservableObject {
         )
         do {
             let job = try await client.status(book: book, cookies: cookies)
+            guard !Task.isCancelled else { return }
             accept(job, book: book, cookies: cookies)
-        } catch let error as ReaderPiOCRError {
-            if case .server(let status, _) = error, status == 404 {
-                jobs.removeValue(forKey: book.bookId)
-                return
+            if job.state == "idle", previewsLegacyResults {
+                if let previewingBookID {
+                    if previewingBookID == book.bookId { return }
+                    recordError(
+                        "正在检查另一册书的现有 Pi 结果，请稍后重试",
+                        for: book,
+                        explicit: false
+                    )
+                    return
+                }
+                previewingBookID = book.bookId
+                defer {
+                    if previewingBookID == book.bookId {
+                        previewingBookID = nil
+                    }
+                }
+                let adoption = try await client.adoptionPreview(
+                    book: book,
+                    cookies: cookies
+                )
+                guard !Task.isCancelled else { return }
+                adoptions[book.bookId] = adoption
+                clearPassiveError(for: book.bookId)
+            } else if job.state != "idle" {
+                adoptions.removeValue(forKey: book.bookId)
             }
-            errorMessage = error.localizedDescription
         } catch {
-            errorMessage = error.localizedDescription
+            guard !isCancellation(error) else { return }
+            recordError(
+                error.localizedDescription,
+                for: book,
+                explicit: false
+            )
+        }
+    }
+
+    func adoptExisting(
+        book: ReaderRemoteBook,
+        cookies: [HTTPCookie],
+        localBookID: String? = nil,
+        localContentSHA256: String? = nil
+    ) async {
+        remember(
+            localBookID: localBookID,
+            localContentSHA256: localContentSHA256,
+            for: book
+        )
+        guard activeBookID == nil || activeBookID == book.bookId else {
+            recordError(
+                "另一册书正在进行 Pi 预处理请求，请稍后再试",
+                for: book,
+                explicit: true
+            )
+            return
+        }
+        activeBookID = book.bookId
+        clearError(for: book.bookId)
+        notice = nil
+        defer { activeBookID = nil }
+        do {
+            let result = try await client.adoptExisting(
+                book: book,
+                cookies: cookies
+            )
+            adoptions[book.bookId] = result.adoption
+            accept(
+                result.job,
+                book: book,
+                cookies: cookies,
+                importsAttachments: false
+            )
+            notice = result.already
+                ? "现有 Pi 预处理结果已经采用"
+                : result.job.message
+            if let localBinding = localBindings[book.bookId] {
+                let imported = await importAvailableAttachments(
+                    book: book,
+                    localBookID: localBinding.bookID,
+                    localContentSHA256: localBinding.contentSHA256,
+                    cookies: cookies,
+                    requiresManifest: true,
+                    reportsExplicitFailure: true
+                )
+                if !imported { notice = nil }
+            }
+        } catch {
+            guard !isCancellation(error) else { return }
+            recordError(
+                error.localizedDescription,
+                for: book,
+                explicit: true
+            )
         }
     }
 
@@ -539,14 +878,20 @@ final class ReaderPiOCRCoordinator: ObservableObject {
     }
 
     /// Explicitly imports an immutable Pi-derived revision into the native
-    /// sidecar store. It is also called after a Pi book download. Missing
-    /// attachments are a valid no-op; checksum/shape failures stay visible.
+    /// sidecar store. It is also called after a Pi book download. A download
+    /// before preprocessing may have no attachments; a published/adopted job
+    /// requires its manifest and reports a missing one as an import failure.
     func importAvailableAttachments(
         book: ReaderRemoteBook,
         localBookID: String,
         localContentSHA256: String,
-        cookies: [HTTPCookie]
+        cookies: [HTTPCookie],
+        requiresManifest: Bool = false,
+        reportsExplicitFailure: Bool = false
     ) async -> Bool {
+        if reportsExplicitFailure {
+            clearError(for: book.bookId)
+        }
         do {
             guard localContentSHA256.caseInsensitiveCompare(
                 book.contentSha256
@@ -558,11 +903,23 @@ final class ReaderPiOCRCoordinator: ObservableObject {
                 localContentSHA256: localContentSHA256,
                 for: book
             )
-            guard let attachmentManifest = try await client
-                .attachmentManifestIfAvailable(
-                book: book,
-                cookies: cookies
-            ) else { return true }
+            let attachmentManifest: ReaderPiOCRAttachmentManifest
+            if requiresManifest {
+                attachmentManifest = try await client.attachmentManifest(
+                    book: book,
+                    cookies: cookies
+                )
+            } else {
+                guard let available = try await client
+                    .attachmentManifestIfAvailable(
+                    book: book,
+                    cookies: cookies
+                ) else {
+                    clearPassiveError(for: book.bookId)
+                    return true
+                }
+                attachmentManifest = available
+            }
             guard attachmentManifest.contentSha256.caseInsensitiveCompare(
                 localContentSHA256
             ) == .orderedSame else {
@@ -572,6 +929,7 @@ final class ReaderPiOCRCoordinator: ObservableObject {
                 expectedContentSHA256: localContentSHA256,
                 revision: attachmentManifest.revision
             ) {
+                clearPassiveError(for: book.bookId)
                 notice = "Pi 预处理结果已是最新"
                 return true
             }
@@ -605,10 +963,16 @@ final class ReaderPiOCRCoordinator: ObservableObject {
                 manifest: manifest,
                 files: bundle.files
             )
+            clearPassiveError(for: book.bookId)
             notice = "已导入 Pi 预处理结果"
             return true
         } catch {
-            errorMessage = "Pi 预处理附件导入失败：\(error.localizedDescription)"
+            guard !isCancellation(error) else { return false }
+            recordError(
+                "Pi 预处理附件导入失败：\(error.localizedDescription)",
+                for: book,
+                explicit: reportsExplicitFailure
+            )
             return false
         }
     }
@@ -616,6 +980,7 @@ final class ReaderPiOCRCoordinator: ObservableObject {
     func dismissMessages() {
         notice = nil
         errorMessage = nil
+        errorBookID = nil
     }
 
     private func perform(
@@ -623,9 +988,16 @@ final class ReaderPiOCRCoordinator: ObservableObject {
         cookies: [HTTPCookie],
         operation: @escaping () async throws -> ReaderPiOCRJob
     ) async {
-        guard activeBookID == nil || activeBookID == book.bookId else { return }
+        guard activeBookID == nil || activeBookID == book.bookId else {
+            recordError(
+                "另一册书正在进行 Pi 预处理请求，请稍后再试",
+                for: book,
+                explicit: true
+            )
+            return
+        }
         activeBookID = book.bookId
-        errorMessage = nil
+        clearError(for: book.bookId)
         notice = nil
         defer { activeBookID = nil }
         do {
@@ -633,17 +1005,25 @@ final class ReaderPiOCRCoordinator: ObservableObject {
             accept(job, book: book, cookies: cookies)
             notice = job.message
         } catch {
-            errorMessage = error.localizedDescription
+            guard !isCancellation(error) else { return }
+            recordError(
+                error.localizedDescription,
+                for: book,
+                explicit: true
+            )
         }
     }
 
     private func accept(
         _ job: ReaderPiOCRJob,
         book: ReaderRemoteBook,
-        cookies: [HTTPCookie]
+        cookies: [HTTPCookie],
+        importsAttachments: Bool = true
     ) {
         jobs[book.bookId] = job
-        if job.resultAvailable,
+        clearPassiveError(for: book.bookId)
+        if importsAttachments,
+           job.resultAvailable,
            let localBinding = localBindings[book.bookId] {
             scheduleAttachmentImport(
                 book: book,
@@ -668,14 +1048,62 @@ final class ReaderPiOCRCoordinator: ObservableObject {
                 guard !Task.isCancelled, let self else { return }
                 do {
                     let job = try await self.client.status(book: book, cookies: cookies)
+                    guard !Task.isCancelled else { return }
                     self.accept(job, book: book, cookies: cookies)
                     if !job.isActive { return }
                 } catch {
-                    self.errorMessage = error.localizedDescription
+                    guard !self.isCancellation(error) else { return }
+                    self.recordError(
+                        error.localizedDescription,
+                        for: book,
+                        explicit: false
+                    )
                     return
                 }
             }
         }
+    }
+
+    private func recordError(
+        _ message: String,
+        for book: ReaderRemoteBook,
+        explicit: Bool
+    ) {
+        let bookID = book.bookId
+        if let existing = bookErrors[bookID],
+           existing.isExplicit,
+           !explicit,
+           existing.contentSHA256.caseInsensitiveCompare(book.contentSha256)
+            == .orderedSame {
+            return
+        }
+        bookErrors[bookID] = BookError(
+            contentSHA256: book.contentSha256.lowercased(),
+            message: message,
+            isExplicit: explicit
+        )
+        if explicit {
+            errorBookID = bookID
+            errorMessage = message
+        }
+    }
+
+    private func clearPassiveError(for bookID: String) {
+        guard bookErrors[bookID]?.isExplicit == false else { return }
+        bookErrors.removeValue(forKey: bookID)
+    }
+
+    private func clearError(for bookID: String) {
+        bookErrors.removeValue(forKey: bookID)
+        guard errorBookID == bookID else { return }
+        errorBookID = nil
+        errorMessage = nil
+    }
+
+    private func isCancellation(_ error: Error) -> Bool {
+        error is CancellationError
+            || (error as? URLError)?.code == .cancelled
+            || Task.isCancelled
     }
 
     private func remember(
@@ -715,7 +1143,8 @@ final class ReaderPiOCRCoordinator: ObservableObject {
                 book: book,
                 localBookID: localBinding.bookID,
                 localContentSHA256: localBinding.contentSHA256,
-                cookies: cookies
+                cookies: cookies,
+                requiresManifest: true
             )
         }
     }

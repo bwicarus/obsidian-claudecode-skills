@@ -135,12 +135,17 @@ def _run_tool(
 ):
     """唯一生产执行出口：先走 registry gate，再调用兼容 handler。"""
 
-    if not _tool_available(name, surface, mode=mode, host=host):
+    native_epub = _native_epub_tool_call(name, targs, ctx)
+    if native_epub is None and not _tool_available(name, surface, mode=mode, host=host):
         return {
             "error": f"tool unavailable on {surface}: {name}",
             "code": "tool_not_available",
         }
-    res = TOOLS[name][1](targs, ctx) or {}
+    if native_epub is not None:
+        handler, native_args, native_ctx = native_epub
+        res = handler(native_args, native_ctx) or {}
+    else:
+        res = TOOLS[name][1](targs, ctx) or {}
     try:
         if name in _PAGES_IN_RESULT and isinstance(res, dict) and not res.get("error"):
             # open_book 是换书:报**目标书**的页数(ctx.file_rel 还是旧书)
@@ -173,10 +178,173 @@ def _vb_localize(file_rel, pages):
     return mrel, [p - moff for p in pages if moff < p <= hi]
 
 
-def _vb_hls(file_rel):
+_NATIVE_PDF_STATE_CONTRACT = "reader-native-pdf-assistant-state/1"
+_NATIVE_EPUB_STATE_CONTRACT = "reader-native-epub-assistant-state/1"
+
+
+def _native_pdf_state(ctx):
+    """Return the App-owned PDF authority snapshot, or ``None`` for legacy/PWA.
+
+    When a digest-verified Pi copy exists, the native gateway rewrites
+    ``context.file_rel`` to that copy.  Local-only requests may instead omit
+    the path and rely on the complete App-supplied text/state.  ``state.file``
+    deliberately stays the opaque App identity: it must never become a
+    Pi-side path or be used for server filesystem access.
+    """
+    if not isinstance(ctx, dict) or "native_local_state" not in ctx:
+        return None
+    state = ctx.get("native_local_state")
+    if isinstance(state, dict) and state.get("contract") == _NATIVE_EPUB_STATE_CONTRACT:
+        return None
+    required = {
+        "contract", "file", "revisions", "highlights", "notes", "ink",
+        "user_pages",
+    }
+    if not isinstance(state, dict) or set(state) != required:
+        raise ValueError("本机 PDF 助手状态合同无效")
+    if state.get("contract") != _NATIVE_PDF_STATE_CONTRACT:
+        raise ValueError("本机 PDF 助手状态版本不受支持")
+    if not re.fullmatch(r"localbook:(?:localbook-)?[0-9a-f]{64}", str(state.get("file") or "")):
+        raise ValueError("本机 PDF 助手书籍身份无效")
+    revisions = state.get("revisions")
+    if not isinstance(revisions, dict) or set(revisions) != {
+        "highlights", "notes", "ink", "user_pages",
+    } or any(not isinstance(value, int) or isinstance(value, bool) or value < 0
+             for value in revisions.values()):
+        raise ValueError("本机 PDF 助手状态修订号无效")
+    if not isinstance(state.get("highlights"), list) \
+            or not isinstance(state.get("notes"), list) \
+            or not isinstance(state.get("user_pages"), list):
+        raise ValueError("本机 PDF 助手列表状态无效")
+    ink = state.get("ink")
+    if not isinstance(ink, dict) or any(
+        not isinstance(key, str) or not key.isdigit() or not isinstance(value, list)
+        for key, value in ink.items()
+    ):
+        raise ValueError("本机 PDF 助手墨迹状态无效")
+    return state
+
+
+def _native_epub_state(ctx):
+    """Validate an App-owned EPUB authority snapshot for generic endpoints."""
+    if not isinstance(ctx, dict) or "native_local_state" not in ctx:
+        return None
+    state = ctx.get("native_local_state")
+    if isinstance(state, dict) and state.get("contract") == _NATIVE_PDF_STATE_CONTRACT:
+        return None
+    required = {"contract", "file", "revisions", "highlights", "notes", "ink"}
+    if not isinstance(state, dict) or set(state) != required:
+        raise ValueError("本机 EPUB 助手状态合同无效")
+    if state.get("contract") != _NATIVE_EPUB_STATE_CONTRACT:
+        raise ValueError("本机 EPUB 助手状态版本不受支持")
+    if not re.fullmatch(r"localbook:(?:localbook-)?[0-9a-f]{64}", str(state.get("file") or "")):
+        raise ValueError("本机 EPUB 助手书籍身份无效")
+    revisions = state.get("revisions")
+    if not isinstance(revisions, dict) or set(revisions) != {
+        "highlights", "notes", "ink",
+    } or any(not isinstance(value, int) or isinstance(value, bool) or value < 0
+             for value in revisions.values()):
+        raise ValueError("本机 EPUB 助手状态修订号无效")
+    if not isinstance(state.get("highlights"), list) or not isinstance(state.get("notes"), list):
+        raise ValueError("本机 EPUB 助手列表状态无效")
+    ink = state.get("ink")
+    if not isinstance(ink, dict) or any(
+        not isinstance(key, str) or not isinstance(value, list)
+        for key, value in ink.items()
+    ):
+        raise ValueError("本机 EPUB 助手墨迹状态无效")
+    return state
+
+
+def _native_reader_state(ctx):
+    """Validate whichever native reader state contract the App supplied."""
+    if not isinstance(ctx, dict) or "native_local_state" not in ctx:
+        return None
+    raw = ctx.get("native_local_state")
+    contract = raw.get("contract") if isinstance(raw, dict) else None
+    if contract == _NATIVE_PDF_STATE_CONTRACT:
+        return _native_pdf_state(ctx)
+    if contract == _NATIVE_EPUB_STATE_CONTRACT:
+        return _native_epub_state(ctx)
+    raise ValueError("本机阅读器助手状态版本不受支持")
+
+
+def _native_epub_tool_call(name, targs, ctx):
+    """Route generic chat/voice tool names to the EPUB document host.
+
+    rc-assistant review mode and rc-voicecall deliberately use the generic
+    assistant endpoints.  They still need EPUB section semantics and must not
+    fall through to PDF/Pi sidecars when the App supplied an EPUB authority.
+    """
+    if _native_epub_state(ctx) is None:
+        return None
+    import epub_assistant as epub
+
+    aliases = {
+        "read_page": "read_section",
+        "goto_page": "goto_section",
+        "highlight": "epub_highlight",
+        "see_page": "see_figure",
+        "see_ink": "see_figure",
+    }
+    target = aliases.get(name, name)
+    handler = epub._tool_fn(target, ctx)
+    if handler is None:
+        return None
+
+    args = dict(targs or {})
+    native_ctx = dict(ctx or {})
+    if native_ctx.get("current_section_idx") is None and native_ctx.get("page") is not None:
+        try:
+            native_ctx["current_section_idx"] = max(0, int(native_ctx["page"]) - 1)
+        except (TypeError, ValueError):
+            pass
+
+    def section_index(value):
+        try:
+            return max(0, int(value) - 1)
+        except (TypeError, ValueError):
+            return value
+
+    if "page" in args and "section" not in args:
+        args["section"] = section_index(args.pop("page"))
+    if target == "read_section" and "section" in args and "idx" not in args:
+        args["idx"] = args.pop("section")
+    if target == "goto_section" and "section" in args and "idx" not in args:
+        args["idx"] = args.pop("section")
+    if "pages" in args and "sections" not in args and isinstance(args.get("pages"), list):
+        args["sections"] = [section_index(value) for value in args.pop("pages")]
+    if target == "read_section" and "idx" not in args and args.get("sections"):
+        # The generic PDF-shaped catalog permits read_page({pages:[...]}), while
+        # the EPUB host reads one spine section at a time.  Keep that call
+        # usable instead of silently falling back to the current section.
+        args["idx"] = args["sections"][0]
+    if target == "auto_highlight":
+        for key in ("from", "to"):
+            if key in args:
+                args[key] = section_index(args[key])
+    return handler, args, native_ctx
+
+
+def _native_pdf_items(ctx, key):
+    state = _native_pdf_state(ctx)
+    return state.get(key) if state is not None else None
+
+
+def _native_pdf_ink_for_page(ctx, page):
+    state = _native_pdf_state(ctx)
+    if state is None:
+        return None
+    return state["ink"].get(str(int(page or 0)), [])
+
+
+def _vb_hls(file_rel, ctx=None):
     """合并书:各卷高亮合并 + page 全局化(前端/AI 都用全局页;删除走 id 路由跨卷定位)。非合并书=原样。
     网页(web:)走字符偏移 sidecar —— 与阅读器同一套存储(审计 #4:两套存储各自为政会让
     AI 说"没有高亮"而页面上明明有)。"""
+    native = _native_pdf_items(ctx, "highlights")
+    if native is not None:
+        return [dict(item) for item in native if isinstance(item, dict)]
     if isinstance(file_rel, str) and file_rel.startswith("web:"):
         try:
             import html_reader as _HR
@@ -193,8 +361,11 @@ def _vb_hls(file_rel):
     return out
 
 
-def _vb_notes(file_rel):
+def _vb_notes(file_rel, ctx=None):
     """合并书:各卷便签合并 + anchor.page 全局化。非合并书=原样 _notes_load。"""
+    native = _native_pdf_items(ctx, "notes")
+    if native is not None:
+        return [dict(item) for item in native if isinstance(item, dict)]
     pdf = _pdf()
     out = []
     for _mrel, _moff, _ in _vb_members(file_rel):
@@ -206,8 +377,13 @@ def _vb_notes(file_rel):
     return out
 
 
-def _vb_note_owner(file_rel, nid):
+def _vb_note_owner(file_rel, nid, ctx=None):
     """合并书:按便签 id 找到它真正落在哪一卷 → (member_rel, offset)。找不到返回 (None, 0)。"""
+    native = _native_pdf_items(ctx, "notes")
+    if native is not None:
+        return (file_rel, 0) if any(
+            isinstance(item, dict) and item.get("id") == nid for item in native
+        ) else (None, 0)
     pdf = _pdf()
     for _mrel, _moff, _ in _vb_members(file_rel):
         if any(x.get("id") == nid for x in (pdf._notes_load(_mrel) or [])):
@@ -2233,15 +2409,28 @@ def _read_one(file_rel, ctx, pg, figd, cap_txt=4800, cap_fig=600, label=None):
     return block
 
 
-def _upage_read_text(file_rel, pdf_page):
+def _upage_read_text(file_rel, pdf_page, ctx=None):
     """自建页(插入页)的内容:题目原文 + 各空标准答案 +(检查过的话)上次判分。
     read_page 直接读这页会读到**空白 PDF**(插入页文件本身是空白,内容在 overlay sidecar)——
     用户实测:AI read_page 自建页只看到标题、答不出题目的根因。这里改从 sidecar blocks 直接取。"""
-    try:
-        import pdf_reader as P
-        items = [it for it in P._upages_load(file_rel) if int(it.get("page") or 0) == int(pdf_page or 0)]
-    except Exception:
+    native = _native_pdf_items(ctx, "user_pages")
+    if native is not None:
         items = []
+        for it in native:
+            if not isinstance(it, dict):
+                continue
+            try:
+                same_page = int(it.get("page") or 0) == int(pdf_page or 0)
+            except (TypeError, ValueError):
+                same_page = False
+            if same_page or (not it.get("page") and str(it.get("id") or "") == str(pdf_page)):
+                items.append(it)
+    else:
+        try:
+            import pdf_reader as P
+            items = [it for it in P._upages_load(file_rel) if int(it.get("page") or 0) == int(pdf_page or 0)]
+        except Exception:
+            items = []
     if not items:
         return ""
     out = []
@@ -2299,7 +2488,7 @@ def _t_read_page(args, ctx):
     parts = []
     up_hit = False
     for pg in pages:
-        up = _upage_read_text(file_rel, pg)   # 自建页:PDF 空白 → 直接读 sidecar blocks(题目+标准答案+上次判分)
+        up = _upage_read_text(file_rel, pg, ctx)   # 原生书读 App 快照;旧书读 Pi sidecar
         if up:
             parts.append(up); up_hit = True; continue
         b = _read_one(file_rel, ctx, pg, figd)
@@ -2407,8 +2596,15 @@ def _t_read_check_report(args, ctx):
     #   (新纸的题目和标准答案就在纸上,read_page 自建页会原样给出)。
     _newer = []
     try:
-        import pdf_reader as P
-        for _it in P._upages_load((ctx or {}).get("file_rel") or r.get("file") or ""):
+        _native_pages = _native_pdf_items(ctx, "user_pages")
+        if _native_pages is None:
+            import pdf_reader as P
+            _candidate_pages = P._upages_load(
+                (ctx or {}).get("file_rel") or r.get("file") or ""
+            )
+        else:
+            _candidate_pages = _native_pages
+        for _it in _candidate_pages:
             if (_it.get("created") or _it.get("updated") or 0) > (r.get("ts") or 0) and not (_it.get("result_md") or "").strip():
                 _ks = {b.get("kind") for b in (_it.get("blocks") or [])}
                 if "blank" in _ks or "button" in _ks:
@@ -3280,14 +3476,18 @@ def _t_see_page(args, ctx):
     # 本页有没有手写笔迹?(ctx 实时墨迹 或 服务端 sidecar)→ 有则必须现场看(离线描述里没这些)
     has_ink = bool(ctx.get("ink"))
     if not has_ink:
-        try:
-            import pdf_reader as _pdfm
-            for pg in pages:
-                _mr, _lp = _vb_src(file_rel, pg)   # 合并书:墨迹边车在真实成员名下
-                if _pdfm._page_ink_strokes(_mr, _lp):
-                    has_ink = True; break
-        except Exception:
-            pass
+        native_state = _native_pdf_state(ctx)
+        if native_state is not None:
+            has_ink = any(bool(_native_pdf_ink_for_page(ctx, pg)) for pg in pages)
+        else:
+            try:
+                import pdf_reader as _pdfm
+                for pg in pages:
+                    _mr, _lp = _vb_src(file_rel, pg)   # 合并书:墨迹边车在真实成员名下
+                    if _pdfm._page_ink_strokes(_mr, _lp):
+                        has_ink = True; break
+            except Exception:
+                pass
     # 没手写 → 先复用已存的离线图描述,有就直接给(省一次视觉调用,也不重复识别)
     if not has_ink:
         printed = [_to_disp(ctx, p) for p in pages]
@@ -3305,6 +3505,7 @@ def _t_see_page(args, ctx):
         import base64
         import fitz
         import pdf_reader as pdf
+        view_pages = list(pages)
         file_rel, pages = _vb_localize(file_rel, pages)   # 视图页→所在卷局部页(单本书恒等)
         if not file_rel:
             return {"error": "页越界"}
@@ -3313,7 +3514,7 @@ def _t_see_page(args, ctx):
         doc = fitz.open(str(ap))
         vis, done, inked = [], [], []
         try:
-            for pg in pages:
+            for page_index, pg in enumerate(pages):
                 if pg < 1 or pg > doc.page_count:
                     continue
                 page = doc[pg - 1]
@@ -3325,7 +3526,10 @@ def _t_see_page(args, ctx):
                     eff = scale * 0.6
                     pix = page.get_pixmap(matrix=fitz.Matrix(eff, eff), alpha=False)
                     png = pix.tobytes("png")
-                strokes = pdf._page_ink_strokes(file_rel, pg)   # 本页手写批注 → 合成进图,让 AI 看到用户画/写了什么
+                source_page = view_pages[page_index] if page_index < len(view_pages) else pg
+                native_strokes = _native_pdf_ink_for_page(ctx, source_page)
+                strokes = (native_strokes if native_strokes is not None
+                           else pdf._page_ink_strokes(file_rel, pg))   # 原生书只信 App 墨迹
                 if strokes:
                     png = pdf._overlay_ink_on_page_png(png, strokes, eff)
                     inked.append(pg)
@@ -3381,12 +3585,16 @@ def _t_see_ink(args, ctx):
         if r:                    #   服务端 _ink_focus_image 退为兜底(view_image 没拿到时才裁,见下)
             return r
     if not strokes:
-        try:   # sidecar 回退:调用方没带实时墨迹(语音壳刚重连/侧栏特殊路径)→ 读服务端存档(与 _sys_prompt 同语义)
-            import pdf_reader as _pdfm0
-            _mr0, _lp0 = _vb_src(file_rel, page)   # 合并书:墨迹边车在真实成员名下
-            strokes = _pdfm0._page_ink_strokes(_mr0, _lp0) or []
-        except Exception:
-            strokes = []
+        native_strokes = _native_pdf_ink_for_page(ctx, page)
+        if native_strokes is not None:
+            strokes = native_strokes
+        else:
+            try:   # 旧阅读器回退 Pi sidecar
+                import pdf_reader as _pdfm0
+                _mr0, _lp0 = _vb_src(file_rel, page)   # 合并书:墨迹边车在真实成员名下
+                strokes = _pdfm0._page_ink_strokes(_mr0, _lp0) or []
+            except Exception:
+                strokes = []
     if not strokes:
         r0 = _viewshot_result(ctx, " 用户问他的手写/圈画,服务端没有这页的笔迹存档(可能画在刚插入的自建页上)——以截图为准。")
         if r0:   # ㉟c 插入页兜底:自建页还没写回 PDF 文件时服务端两手空空,前端截图=用户真实所见
@@ -3429,6 +3637,18 @@ def _t_see_ink(args, ctx):
 
 
 def _t_undo_last(args, ctx):
+    if _native_pdf_state(ctx) is not None:
+        # The App owns this undo stack.  Returning a client action is not a
+        # success by itself: native-local-runtime commits it first and turns a
+        # missing/conflicting undo into a visible response error.
+        return {
+            "ok": True,
+            "note": "已撤销最近一次本机书籍改动",
+            "client_action": {
+                "fn": "_nativePDFUndoLast",
+                "args": ["npdf_" + os.urandom(12).hex()],
+            },
+        }
     try:
         import voice
         r = voice._undo_do(None, owner=ctx.get("_uid"))   # 撤销自己最近一次没撤过的写操作(隔离)
@@ -3522,6 +3742,7 @@ def _hl_char_match(pdf, ap, rel, pg, needle):
 def _t_highlight(args, ctx):
     """把原文句子在 PDF 上画高亮:PyMuPDF search_for 文字→rects(同 char 层坐标系)→写高亮 sidecar。可撤销。"""
     file_rel = ctx.get("file_rel", "")
+    native_pdf = _native_pdf_state(ctx) is not None
     if not file_rel:
         return {"error": "没开书"}
     texts = args.get("texts")
@@ -3592,14 +3813,16 @@ def _t_highlight(args, ctx):
                 ids.append(hid)
                 # 给前端自动「跳转 / 撤销·重做」卡片用:跳转用 PDF 索引,重做用这些字段重建
                 created.append({"id": hid, "pdf_page": pg, "disp_page": _to_disp(ctx, pg),
-                                "color": color, "text": t[:120], "rects": nrects,
-                                "page_w": p.rect.width, "page_h": p.rect.height})
+                                "color": color, "text": t[:2000], "rects": nrects,
+                                "note": "", "kind": "note", "sentence": "", "body": "",
+                                "page_w": p.rect.width, "page_h": p.rect.height,
+                                "time": int(time.time())})
                 placed = True
                 break
             if not placed:
                 miss.append(t[:18])
         doc.close()
-        if ids:
+        if ids and not native_pdf:
             with pdf._hl_edit(file_rel) as db:
                 db["highlights"].extend(pending)
         if not ids:   # 全 miss:必须是显式 error(曾静默返回 0 → AI 说"我先高亮一下"就结束,用户以为画了实际全无)
@@ -3608,9 +3831,13 @@ def _t_highlight(args, ctx):
                     "missed": miss}
         res = {"highlighted": len(ids), "missed": miss, "_created": created,
                # 自动弹「跳转+撤销/重做」卡片(系统在改动发生时生成,非 AI 生成)
-               "client_action": {"fn": "_assistEdit", "args": [{"type": "highlight", "file": file_rel, "items": created}]},
+               "client_action": {"fn": "_assistEdit", "args": [{
+                   "type": "highlight", "file": file_rel, "items": created,
+                   **({"native_operation_id": "npdf_" + os.urandom(12).hex()}
+                      if native_pdf else {}),
+               }]},
                "_jump_page": (pages[0] if pages else None)}
-        if ids:
+        if ids and not native_pdf:
             import voice
             res["undo_id"] = voice._undo_record("highlight", f"{len(ids)} 处高亮", {"file_rel": file_rel, "ids": ids}, owner=ctx.get("_uid"))
             if not (ctx or {}).get("_suppress_creation") and _creation_enabled(str(ctx.get("_uid") or ""), "highlight"):   # auto_highlight 逐页调我时由它汇总登;「记忆」开关可关
@@ -3634,7 +3861,7 @@ def _t_read_highlights(args, ctx):
     if not file_rel:
         return {"error": "没开书"}
     try:
-        hls = _vb_hls(file_rel)   # 合并书=各卷扇入+页全局化;非分卷=原样
+        hls = _vb_hls(file_rel, ctx)   # 原生书=App 权威快照;旧书=Pi sidecar
         pg = args.get("page")
         if pg in ("all", "0", 0):
             pass   # 全书
@@ -3662,7 +3889,7 @@ def _t_find_highlights(args, ctx):
     if not file_rel:
         return {"error": "没开书"}
     try:
-        hls = _vb_hls(file_rel)   # 合并书=各卷扇入+页全局化;非分卷=原样
+        hls = _vb_hls(file_rel, ctx)   # 原生书=App 权威快照;旧书=Pi sidecar
         pages = args.get("pages")
         pg = args.get("page")
         rfrom = args.get("from"); rto = args.get("to")
@@ -3753,6 +3980,7 @@ def _t_auto_highlight(args, ctx):
     → 每页正文**压根不进主编排循环**(不像主流程逐页 read_page+highlight 那样反复重发正文),整章高亮的 token 从
     O(页数×正文) 降到 O(页数×一句报告)。范围:from+to(印刷页区间,配合 toc 最常用)/ pages[列表] / page / 不传=当前页。"""
     file_rel = ctx.get("file_rel", "")
+    native_pdf = _native_pdf_state(ctx) is not None
     if not file_rel:
         return {"error": "没开书"}
     pdf_pages = []
@@ -3833,15 +4061,18 @@ def _t_auto_highlight(args, ctx):
         reports.append({"page": disp, "n": n, "sentences": [s[:24] for s in sents]})
     try:   # 创造物库:写操作留痕(汇总一条,逐页子调用已抑制;「记忆」开关可关)
         _apgs = sorted({c0.get("disp_page") for c0 in created if c0.get("disp_page")})
-        if created and _creation_enabled(str((ctx or {}).get("_uid") or ""), "auto_highlight"):
+        if created and not native_pdf and _creation_enabled(str((ctx or {}).get("_uid") or ""), "auto_highlight"):
             _creation_add(str((ctx or {}).get("_uid") or ""), "highlight",
                           "自动标重点:第 %s 页共 %d 句" % ("、".join(str(x) for x in _apgs) or "?", total),
                           content="\n".join("[%s] p%s %s" % (c0.get("id"), c0.get("pdf_page"), c0.get("text") or "") for c0 in created)[:6000],
                           anchor={"file": file_rel})
     except Exception:
         pass
+    action_data = {"type": "highlight", "file": file_rel, "items": created}
+    if native_pdf:
+        action_data["native_operation_id"] = "npdf_" + os.urandom(12).hex()
     return {"done": True, "total_highlighted": total, "pages": reports,
-            "client_action": {"fn": "_assistEdit", "args": [{"type": "highlight", "file": file_rel, "items": created}]},
+            "client_action": {"fn": "_assistEdit", "args": [action_data]},
             "note": f"已逐页自动标重点,共 {total} 句(分布见 pages)。**别再逐页 read_page**;直接把'标了哪些页、共多少句'简洁告诉用户即可。"}
 
 
@@ -3883,6 +4114,16 @@ def _t_see_figure(args, ctx):
         vis = []; ink_any = False
         for fg in figs:
             if fg.get("kind") == "note" and fg.get("note_id"):   # 双击带入的手写便签:按 note_id 现场重合成(文字+笔画整体一张图,永远最新 sidecar)
+                if _native_pdf_state(ctx) is not None:
+                    # Pi has no authoritative native note sidecar.  Prefer the
+                    # composited view image supplied by the App and otherwise
+                    # fail visibly instead of rendering stale Pi data.
+                    shot = _viewshot_result(
+                        ctx, " 这是本机便签及其手写笔迹的当前合成画面。"
+                    )
+                    if shot:
+                        return shot
+                    return {"error": "本机便签合成图没有随这次上下文送达，请重新点选便签后再试"}
                 try:
                     png_n = pdf._note_composite_png(fg.get("file_rel") or file_rel, fg.get("note_id"))
                 except Exception:
@@ -3960,7 +4201,7 @@ def _t_notes_query(args, ctx, kind="pdf"):
     file_rel = ctx.get("file_rel") or ""
     if not file_rel:
         return {"error": "没开书"}
-    notes = _vb_notes(file_rel)   # 合并书:各卷扇入+anchor.page 全局化
+    notes = _vb_notes(file_rel, ctx)   # 原生书=App 权威快照;旧书=Pi sidecar
     color = _note_color_arg(args.get("color"))
     kw = (args.get("keyword") or "").strip().lower()
     loc = args.get("section") if kind == "epub" else args.get("page")
@@ -3996,7 +4237,7 @@ def _t_notes_read(args, ctx, kind="pdf"):
     nid = (args.get("id") or "").strip()
     if not nid:
         return {"error": "缺 id(先 notes_query 拿便签 id)"}
-    n = next((x for x in _vb_notes(file_rel) if x.get("id") == nid), None)
+    n = next((x for x in _vb_notes(file_rel, ctx) if x.get("id") == nid), None)
     if not n:
         return {"error": "没找到这个 id 的便签(先 notes_query 拿最新列表)"}
     out = {"id": nid, "位置": _note_place(ctx, n.get("anchor"), kind),
@@ -4012,6 +4253,7 @@ def _t_notes_read(args, ctx, kind="pdf"):
 def _t_notes_create(args, ctx, kind="pdf"):
     """建便签(anchor 按 reader 类型组装 x/y 比例锚;EPUB 前端 mount 时懒迁移自动升级成内容锚)。写后带撤销卡。"""
     file_rel = ctx.get("file_rel") or ""
+    native_pdf = kind == "pdf" and _native_pdf_state(ctx) is not None
     if not file_rel:
         return {"error": "没开书"}
     text = (args.get("text") or "").strip()
@@ -4050,19 +4292,20 @@ def _t_notes_create(args, ctx, kind="pdf"):
     n = {"id": "n" + _u.uuid4().hex[:11], "anchor": anchor, "text": text[:8000], "color": color,
          "w": 260, "h": 180, "collapsed": False, "strokes": [], "created": now, "updated": now}
     _view_rel, _view_pg = file_rel, anchor.get("page")   # 前端活在视图坐标(单本书=同一个值)
-    if anchor.get("kind") == "pdf" and anchor.get("page"):
+    if anchor.get("kind") == "pdf" and anchor.get("page") and not native_pdf:
         file_rel, _lp = _vb_src(file_rel, anchor["page"])   # 落盘:贴到真正那一卷(局部页=持久真相;单本恒等)
         if _lp != anchor["page"]:
             anchor = dict(anchor); anchor["page"] = _lp
             n["anchor"] = anchor
-    with pdf._notes_edit(file_rel) as items:
-        items.append(n)
-    try:
-        import voice
-        voice._undo_record("sticky", "便签「" + text.replace("\n", " ")[:14] + "」",
-                           {"file_rel": file_rel, "ids": [n["id"]]}, owner=ctx.get("_uid"))
-    except Exception:
-        pass
+    if not native_pdf:
+        with pdf._notes_edit(file_rel) as items:
+            items.append(n)
+        try:
+            import voice
+            voice._undo_record("sticky", "便签「" + text.replace("\n", " ")[:14] + "」",
+                               {"file_rel": file_rel, "ids": [n["id"]]}, owner=ctx.get("_uid"))
+        except Exception:
+            pass
     res = {"ok": True, "id": n["id"],
            "note": f"已在{place}创建便签(页面会自动刷新显示;下方自动出现撤销卡,你不用再教用户怎么撤销)。"}
     if kind == "epub":
@@ -4077,10 +4320,13 @@ def _t_notes_create(args, ctx, kind="pdf"):
         _vn = dict(n)   # 给前端的副本:anchor 用视图页(合并书里前端按全局页排版)
         if _view_pg is not None:
             _vn["anchor"] = dict(anchor); _vn["anchor"]["page"] = _view_pg
-        res["client_action"] = {"fn": "_assistEdit", "args": [{
+        action_data = {
             "type": "note", "op": "create", "file": _view_rel,
             "items": [{"id": n["id"], "pdf_page": _view_pg, "disp_page": _to_disp(ctx, _view_pg),
-                       "note": _vn}]}]}
+                       "note": _vn}]}
+        if native_pdf:
+            action_data["native_operation_id"] = "npdf_" + os.urandom(12).hex()
+        res["client_action"] = {"fn": "_assistEdit", "args": [action_data]}
     return res
 
 
@@ -4088,6 +4334,7 @@ def _t_notes_edit(args, ctx, kind="pdf"):
     """改便签的文字/颜色。**工具层硬拦**:只收 text/color 两个字段,strokes/anchor/尺寸是用户数据绝不改
     (不只是 prompt 约束——实现里根本不读那些参数)。写前存旧值快照,写后带撤销卡(撤销=恢复旧 text/color)。"""
     file_rel = ctx.get("file_rel") or ""
+    native_pdf = kind == "pdf" and _native_pdf_state(ctx) is not None
     if not file_rel:
         return {"error": "没开书"}
     nid = (args.get("id") or "").strip()
@@ -4097,28 +4344,44 @@ def _t_notes_edit(args, ctx, kind="pdf"):
     if new_text is None and new_color is None:
         return {"error": "text / color 至少给一个(只能改文字和颜色;手写笔画/位置/尺寸不能动)"}
     pdf = _pdf()
-    _own, _ = _vb_note_owner(file_rel, nid)   # 这条便签落在哪一卷(单本书=它自己)
+    _own, _ = _vb_note_owner(file_rel, nid, ctx)   # 原生书从 App 快照定位;旧书查 Pi sidecar
     if not _own:
         return {"error": "没找到这个 id 的便签(先 notes_query 拿最新列表)"}
     file_rel = _own
-    with pdf._notes_edit(file_rel) as items:
-        n = next((x for x in items if x.get("id") == nid), None)
-        if not n:
+    if native_pdf:
+        source = next((item for item in _vb_notes(file_rel, ctx)
+                       if item.get("id") == nid), None)
+        if not source:
             return {"error": "没找到这个 id 的便签(先 notes_query 拿最新列表)"}
-        old = {"text": n.get("text") or "", "color": n.get("color") or "#ffffff"}   # 旧值快照(撤销用)
+        n = dict(source)
+        n["anchor"] = dict(source.get("anchor") or {})
+        old = {"text": n.get("text") or "", "color": n.get("color") or "#ffffff"}
         if new_text is not None:
             n["text"] = str(new_text)[:8000]
         if new_color is not None:
-            n["color"] = _note_color_norm(new_color, dflt=old["color"])   # 色名自动映射;认不出保持原色
+            n["color"] = _note_color_norm(new_color, dflt=old["color"])
         now = int(time.time())
         n["updated"] = now
         new = {"text": n.get("text") or "", "color": n.get("color") or "#ffffff"}
-    try:
-        import voice
-        voice._undo_record("sticky_edit", "改便签「" + (new["text"] or old["text"]).replace("\n", " ")[:14] + "」",
-                           {"file_rel": file_rel, "id": nid, "old": old}, owner=ctx.get("_uid"))
-    except Exception:
-        pass
+    else:
+        with pdf._notes_edit(file_rel) as items:
+            n = next((x for x in items if x.get("id") == nid), None)
+            if not n:
+                return {"error": "没找到这个 id 的便签(先 notes_query 拿最新列表)"}
+            old = {"text": n.get("text") or "", "color": n.get("color") or "#ffffff"}   # 旧值快照(撤销用)
+            if new_text is not None:
+                n["text"] = str(new_text)[:8000]
+            if new_color is not None:
+                n["color"] = _note_color_norm(new_color, dflt=old["color"])   # 色名自动映射;认不出保持原色
+            now = int(time.time())
+            n["updated"] = now
+            new = {"text": n.get("text") or "", "color": n.get("color") or "#ffffff"}
+        try:
+            import voice
+            voice._undo_record("sticky_edit", "改便签「" + (new["text"] or old["text"]).replace("\n", " ")[:14] + "」",
+                               {"file_rel": file_rel, "id": nid, "old": old}, owner=ctx.get("_uid"))
+        except Exception:
+            pass
     res = {"ok": True, "id": nid,
            "note": "便签已更新(只改了文字/颜色,手写笔画和位置不受影响;下方自动出现撤销卡)。"}
     if kind == "epub":
@@ -4133,11 +4396,14 @@ def _t_notes_edit(args, ctx, kind="pdf"):
         res["client_action"] = {"fn": "notesReload", "args": []}
     else:
         a = n.get("anchor") or {}
-        res["client_action"] = {"fn": "_assistEdit", "args": [{
+        action_data = {
             "type": "note", "op": "edit", "file": file_rel,
             "items": [{"id": nid, "pdf_page": a.get("page"),
                        "disp_page": (_to_disp(ctx, a.get("page")) if a.get("page") else None),
-                       "old": old, "new": new}]}]}
+                       "old": old, "new": new}]}
+        if native_pdf:
+            action_data["native_operation_id"] = "npdf_" + os.urandom(12).hex()
+        res["client_action"] = {"fn": "_assistEdit", "args": [action_data]}
     return res
 
 
@@ -5745,6 +6011,18 @@ def _tool_catalog_text(uid="", surface=SURFACE_ASSISTANT_TEXT):
 
 
 def _sys_prompt(ctx):
+    if _native_epub_state(ctx) is not None:
+        # Review mode and voice deep-think use the generic chat route even in
+        # EPUB.  Reuse the established EPUB prompt wholesale so the model sees
+        # section tools/anchors, while _run_tool above executes that same table.
+        import epub_assistant as epub
+        native_ctx = dict(ctx or {})
+        if native_ctx.get("current_section_idx") is None and native_ctx.get("page") is not None:
+            try:
+                native_ctx["current_section_idx"] = max(0, int(native_ctx["page"]) - 1)
+            except (TypeError, ValueError):
+                pass
+        return epub._esys_prompt(native_ctx)
     _uid0 = ctx.get("_uid") or ctx.get("uid") or ""
     # 140:说明仍支持 per-user 覆盖；名称、分组和顺序由冻结 registry 唯一决定。
     cat = _tool_catalog_text(_uid0, SURFACE_ASSISTANT_TEXT)
@@ -5877,16 +6155,21 @@ def _sys_prompt(ctx):
                 inked_pages.append(cur_p)
                 _mrc, _lpc = _vb_src(ctx["file_rel"], cur_p)   # 合并书:圈画文字按真实成员页
                 circled = _clean_tag(_pdfm._text_under_ink(_mrc, _lpc, strokes=fe_ink))
-            # 其余可见页 / 没拿到时回退服务端 sidecar
+            # 其余可见页 / 没拿到时：原生书只读 App 权威快照，旧书才回退 Pi sidecar。
             for p in vis:
                 p = int(p) if p else 0
                 if not p or p == cur_p:
                     continue
                 _mrp, _lpp = _vb_src(ctx["file_rel"], p)   # 合并书:其余可见页同理
-                if _pdfm._page_ink_strokes(_mrp, _lpp):
+                _native_strokes = _native_pdf_ink_for_page(ctx, p)
+                _strokes = (_native_strokes if _native_strokes is not None
+                            else _pdfm._page_ink_strokes(_mrp, _lpp))
+                if _strokes:
                     inked_pages.append(p)
                     if not circled:
-                        circled = _clean_tag(_pdfm._text_under_ink(_mrp, _lpp))
+                        circled = _clean_tag(_pdfm._text_under_ink(
+                            _mrp, _lpp, strokes=_strokes
+                        ))
         except Exception:
             pass
         has_fe_ink = bool(ctx.get("ink"))
@@ -8862,6 +9145,10 @@ def assistant_chat():
             if not isinstance(ctx, dict):
                 return jsonify({"ok": False, "error": "invalid context"}), 400
             ctx = dict(ctx)
+            try:
+                _native_reader_state(ctx)
+            except ValueError as error:
+                return jsonify({"ok": False, "error": str(error)}), 400
             ctx["_assistant_mode"] = assistant_mode
             if assistant_mode == "review" and not (
                 isinstance(ctx.get("review_card"), dict)
@@ -9234,6 +9521,10 @@ def assistant_tool_call():
     if not _tool_available(name, SURFACE_MCP_WORKER):
         return jsonify({"ok": False, "error": f"unknown tool: {name}", "hint": "GET /api/assistant/tools 看目录"}), 400
     ctx = dict(body.get("ctx") or {})
+    try:
+        _native_reader_state(ctx)
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
     ctx["_uid"] = session["user_id"]
     try:
         res = _run_tool(
@@ -9550,15 +9841,26 @@ def assistant_voice_tool():
     if not _logged_in():
         return jsonify({"ok": False}), 401
     body = request.get_json(silent=True) or {}
+    ctx = dict(body.get("ctx") or {})
+    try:
+        _native_reader_state(ctx)
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 400
     raw = (body.get("cmd") or "").strip()
     tool = _parse_tool(raw)
     if tool is None and '"tool"' in raw:
         # 正则级修补(语音模型常见坏点:中文引号当 JSON 引号、尾逗号)后再试一次
         fixed = re.sub(r",\s*([}\]])", r"\1", raw.replace("“", '"').replace("”", '"'))
         tool = _parse_tool(fixed)
-    if not tool or not _tool_available(
-        tool.get("tool"),
-        SURFACE_VOICE_EXECUTE,
+    if not tool or (
+        _native_epub_tool_call(
+            tool.get("tool"),
+            tool.get("args") if isinstance(tool.get("args"), dict) else {},
+            ctx,
+        ) is None and not _tool_available(
+            tool.get("tool"),
+            SURFACE_VOICE_EXECUTE,
+        )
     ):
         return jsonify({"ok": False, "error": "unparseable",
                         "feedback": ("你上一条像是工具调用,但 JSON 没解析成功(很可能字符串里有**没转义的双引号**或**换行**)。"
@@ -9566,7 +9868,6 @@ def assistant_voice_tool():
                                      "不要带换行、整条只输出 JSON 别加别的字。"
                                      if '"tool"' in raw else
                                      f"「{(tool or {}).get('tool', '?')}」不是有效工具" if tool else "没识别出工具调用")})
-    ctx = dict(body.get("ctx") or {})
     ctx["_uid"] = session["user_id"]
     name = tool["tool"]
     targs = tool.get("args") if isinstance(tool.get("args"), dict) else {}

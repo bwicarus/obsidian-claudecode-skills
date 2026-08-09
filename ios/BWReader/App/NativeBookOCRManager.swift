@@ -15,9 +15,15 @@ final class NativeBookOCRManager: ObservableObject {
     private var statusWriteTasks: [String: Task<Void, Never>] = [:]
     private var activeContentSHA256: [String: String] = [:]
     private var invalidatedContentSHA256: [String: String] = [:]
+    private var pdfMutationLeases: [String: NativeBookOCRPDFMutationLease] = [:]
+    private var pdfMutationResolvedStatus: [String: NativeBookOCRBookStatus] = [:]
+    private var activeWriteOperations: [String: Int] = [:]
+    private var writeOperationWaiters: [
+        String: [CheckedContinuation<Void, Never>]
+    ] = [:]
     private var didApplyLoadedStatuses = false
 
-    init(store: NativeBookOCRSidecarStore = NativeBookOCRSidecarStore()) {
+    init(store: NativeBookOCRSidecarStore = .shared) {
         self.store = store
         self.statusLoadTask = Task { [store] in
             (try? await store.loadStatuses()) ?? []
@@ -38,12 +44,148 @@ final class NativeBookOCRManager: ObservableObject {
         }
     }
 
+    func beginPDFMutationLease(
+        bookID: String,
+        expectedOldDigest: String,
+        token: String? = nil
+    ) async throws -> NativeBookOCRPDFMutationLease {
+        guard Self.isSHA256(expectedOldDigest),
+              token == nil || token!.range(
+                of: #"^[a-f0-9]{32}$"#,
+                options: .regularExpression
+              ) != nil else {
+            throw NativeBookOCRError.invalidContentSHA256
+        }
+        let normalized = expectedOldDigest.lowercased()
+        if let active = pdfMutationLeases[bookID] {
+            guard active.oldContentSHA256 == normalized,
+                  token == nil || active.token == token else {
+                throw NativeBookOCRError.storage(
+                    "本书已有另一项 PDF 改页 OCR 租约"
+                )
+            }
+            try await store.beginPDFMutationLease(active)
+            return active
+        }
+        let lease = NativeBookOCRPDFMutationLease(
+            bookID: bookID,
+            token: token ?? UUID().uuidString
+                .replacingOccurrences(of: "-", with: "")
+                .lowercased(),
+            oldContentSHA256: normalized
+        )
+
+        // Close the MainActor gate before the first suspension. Later manual,
+        // import and background writes cannot enter while prior work drains.
+        pdfMutationLeases[bookID] = lease
+        let runningTask = tasks[bookID]
+        runningTask?.cancel()
+        generations[bookID] = UUID()
+        tasks[bookID] = nil
+        if let runningTask { await runningTask.value }
+        await waitForWriteOperations(bookID: bookID)
+        if let statusTail = statusWriteTasks[bookID] {
+            await statusTail.value
+            statusWriteTasks[bookID] = nil
+        }
+        do {
+            try await store.beginPDFMutationLease(lease)
+        } catch {
+            pdfMutationLeases.removeValue(forKey: bookID)
+            throw error
+        }
+        if activeContentSHA256[bookID] == normalized {
+            activeContentSHA256.removeValue(forKey: bookID)
+        }
+        return lease
+    }
+
+    func rebuildPDFMutationStatus(
+        lease: NativeBookOCRPDFMutationLease,
+        resolvedContentSHA256: String,
+        totalPages: Int,
+        message: String
+    ) async throws {
+        guard pdfMutationLeases[lease.bookID] == lease,
+              Self.isSHA256(resolvedContentSHA256),
+              totalPages > 0 else {
+            throw NativeBookOCRError.storage("PDF 改页 OCR 恢复身份无效")
+        }
+        let digest = resolvedContentSHA256.lowercased()
+        let pages = try await store.pages(contentSHA256: digest)
+        guard pdfMutationLeases[lease.bookID] == lease else {
+            throw NativeBookOCRError.storage("PDF 改页 OCR 租约已失效")
+        }
+        let terminal = pages.filter {
+            $0.status == .ready || $0.status == .readyEmpty || $0.status == .failed
+        }.count
+        let state: NativeBookOCRJobState
+        if pages.contains(where: { $0.status == .failed }) {
+            state = .failed
+        } else if terminal >= totalPages {
+            state = .completed
+        } else {
+            state = .paused
+        }
+        let status = Self.makeStatus(
+            bookID: lease.bookID,
+            contentSHA256: digest,
+            state: state,
+            totalPages: totalPages,
+            currentPage: nil,
+            pages: pages,
+            message: message
+        )
+        try await store.writeStatus(status, mutationLease: lease)
+        guard pdfMutationLeases[lease.bookID] == lease else {
+            throw NativeBookOCRError.storage("PDF 改页 OCR 租约已失效")
+        }
+        pdfMutationResolvedStatus[lease.bookID] = status
+        bookStatuses[lease.bookID] = status
+        lastUpdate = NativeBookOCRUpdate(
+            contract: NativeBookOCRUpdate.contract,
+            bookID: lease.bookID,
+            page: nil,
+            status: status
+        )
+    }
+
+    func finishPDFMutationLease(
+        _ lease: NativeBookOCRPDFMutationLease
+    ) async throws {
+        guard pdfMutationLeases[lease.bookID] == lease,
+              let resolved = pdfMutationResolvedStatus[lease.bookID] else {
+            throw NativeBookOCRError.storage(
+                "PDF 改页 OCR 状态尚未持久确认"
+            )
+        }
+        try await store.finishPDFMutationLease(lease)
+        pdfMutationLeases.removeValue(forKey: lease.bookID)
+        pdfMutationResolvedStatus.removeValue(forKey: lease.bookID)
+        activeContentSHA256[lease.bookID] = resolved.contentSHA256.lowercased()
+        invalidatedContentSHA256.removeValue(forKey: lease.bookID)
+    }
+
+    func abortUnstagedPDFMutationLease(
+        _ lease: NativeBookOCRPDFMutationLease
+    ) async throws {
+        guard pdfMutationLeases[lease.bookID] == lease else { return }
+        try await store.finishPDFMutationLease(lease)
+        pdfMutationLeases.removeValue(forKey: lease.bookID)
+        pdfMutationResolvedStatus.removeValue(forKey: lease.bookID)
+        activeContentSHA256[lease.bookID] = lease.oldContentSHA256.lowercased()
+        invalidatedContentSHA256.removeValue(forKey: lease.bookID)
+    }
+
     func activate(
         bookID: String,
         expectedContentSHA256: String
     ) throws {
         guard !bookID.isEmpty, Self.isSHA256(expectedContentSHA256) else {
             throw NativeBookOCRError.invalidContentSHA256
+        }
+        guard pdfMutationLeases[bookID] == nil else {
+            throw NativeBookOCRError.storage("PDF 改页期间不能切换 OCR 摘要")
         }
         let normalized = expectedContentSHA256.lowercased()
         activeContentSHA256[bookID] = normalized
@@ -58,8 +200,10 @@ final class NativeBookOCRManager: ObservableObject {
         bookID: String,
         contentSHA256: String
     ) {
+        let normalized = contentSHA256.lowercased()
+        guard activeContentSHA256[bookID] == normalized else { return }
         activeContentSHA256.removeValue(forKey: bookID)
-        invalidatedContentSHA256[bookID] = contentSHA256.lowercased()
+        invalidatedContentSHA256[bookID] = normalized
     }
 
     func activatedContentSHA256(for bookID: String) -> String? {
@@ -110,6 +254,8 @@ final class NativeBookOCRManager: ObservableObject {
         contentSHA256: String,
         configuration: NativeBookOCRConfiguration = NativeBookOCRConfiguration()
     ) async throws {
+        try beginWriteOperation(bookID: book.record.id)
+        defer { endWriteOperation(bookID: book.record.id) }
         await waitUntilReady()
         try await start(
             book: book,
@@ -120,6 +266,7 @@ final class NativeBookOCRManager: ObservableObject {
     }
 
     func pause(bookID: String) {
+        guard pdfMutationLeases[bookID] == nil else { return }
         guard let expected = activeContentSHA256[bookID] else { return }
         let current = status(
             for: bookID,
@@ -139,6 +286,8 @@ final class NativeBookOCRManager: ObservableObject {
         contentSHA256: String,
         configuration: NativeBookOCRConfiguration = NativeBookOCRConfiguration()
     ) async throws {
+        try beginWriteOperation(bookID: book.record.id)
+        defer { endWriteOperation(bookID: book.record.id) }
         await waitUntilReady()
         let current = status(
             for: book.record.id,
@@ -154,6 +303,7 @@ final class NativeBookOCRManager: ObservableObject {
     }
 
     func cancel(bookID: String) {
+        guard pdfMutationLeases[bookID] == nil else { return }
         guard let expected = activeContentSHA256[bookID] else { return }
         let current = status(
             for: bookID,
@@ -175,6 +325,8 @@ final class NativeBookOCRManager: ObservableObject {
         contentSHA256: String,
         configuration: NativeBookOCRConfiguration = NativeBookOCRConfiguration()
     ) async throws {
+        try beginWriteOperation(bookID: book.record.id)
+        defer { endWriteOperation(bookID: book.record.id) }
         await waitUntilReady()
         let current = status(
             for: book.record.id,
@@ -195,11 +347,12 @@ final class NativeBookOCRManager: ObservableObject {
         page: Int
     ) async throws -> NativeBookOCRPageCharacters? {
         await waitUntilReady()
-        let current = status(
-            for: bookID,
-            expectedContentSHA256: expectedContentSHA256
-        )
-        guard !current.contentSHA256.isEmpty else { return nil }
+        guard Self.isSHA256(expectedContentSHA256),
+              activeContentSHA256[bookID]?.caseInsensitiveCompare(
+                expectedContentSHA256
+              ) == .orderedSame,
+              invalidatedContentSHA256[bookID]
+                != expectedContentSHA256.lowercased() else { return nil }
         return try await store.page(
             contentSHA256: expectedContentSHA256,
             page: page
@@ -219,6 +372,264 @@ final class NativeBookOCRManager: ObservableObject {
         return value?.status
     }
 
+    /// Explicit user action: recognize the selected rectangle with Apple
+    /// Vision, persist it independently from the base page and return the
+    /// effective page immediately. A storage failure is a failed action; it is
+    /// never reported as a transient OCR success.
+    func recognizeSelection(
+        book: ReaderLocalBookAccess,
+        contentSHA256: String,
+        page: Int,
+        bbox: [Double],
+        configuration: NativeBookOCRConfiguration = NativeBookOCRConfiguration()
+    ) async throws -> NativeBookOCRSelectionResult {
+        try beginWriteOperation(bookID: book.record.id)
+        defer { endWriteOperation(bookID: book.record.id) }
+        await waitUntilReady()
+        try validateManualRequest(
+            book: book,
+            contentSHA256: contentSHA256,
+            page: page
+        )
+        let normalizedDigest = contentSHA256.lowercased()
+        let processor = try NativeBookOCRProcessor(fileURL: book.url)
+        let base = try await ensureBasePage(
+            processor: processor,
+            bookID: book.record.id,
+            contentSHA256: normalizedDigest,
+            page: page,
+            configuration: configuration
+        )
+        guard bbox.count == 4,
+              bbox.allSatisfy({ $0.isFinite && $0 >= 0 }),
+              bbox[2] - bbox[0] >= 0.5,
+              bbox[3] - bbox[1] >= 0.5,
+              bbox[2] <= base.pageWidth,
+              bbox[3] <= base.pageHeight else {
+            throw NativeBookOCRError.invalidSelection
+        }
+        try Self.validateCurrentBook(book)
+        let vision = try await processor.processPage(
+            pageNumber: page,
+            contentSHA256: normalizedDigest,
+            configuration: configuration,
+            forceVision: true
+        )
+        try Self.validateCurrentBook(book)
+        guard vision.status == .ready else {
+            throw NativeBookOCRError.noRecognizedText
+        }
+        let selected = vision.chars.filter { character in
+            let x = (character.x0 + character.x1) / 2
+            let y = (character.y0 + character.y1) / 2
+            return x >= bbox[0] && x <= bbox[2]
+                && y >= bbox[1] && y <= bbox[3]
+        }
+        let text = selected.map(\.c).joined()
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !selected.isEmpty, !text.isEmpty else {
+            throw NativeBookOCRError.noRecognizedText
+        }
+        let correction = NativeBookOCRSelectionCorrection(
+            schema: NativeBookOCRSelectionCorrection.schema,
+            id: "ocrfix-" + UUID().uuidString
+                .replacingOccurrences(of: "-", with: "")
+                .lowercased(),
+            contentSHA256: normalizedDigest,
+            page: page,
+            bbox: bbox,
+            text: text,
+            chars: selected,
+            createdAt: Date()
+        )
+        try await store.appendSelectionCorrection(
+            correction,
+            bookID: book.record.id
+        )
+        try Self.validateCurrentBook(book)
+        guard let effective = try await store.page(
+            contentSHA256: normalizedDigest,
+            page: page
+        ) else {
+            throw NativeBookOCRError.storage("选区校正写入后无法读取")
+        }
+        try await publishManualMutation(
+            bookID: book.record.id,
+            contentSHA256: normalizedDigest,
+            page: page,
+            pageCount: await processor.numberOfPages(),
+            message: "已保存第 \(page) 页选区文字校正"
+        )
+        return NativeBookOCRSelectionResult(page: effective, text: text)
+    }
+
+    /// Explicit user action: force Apple Vision for one page and keep the
+    /// result in a separate manual layer above embedded/imported text.
+    func reOCRPage(
+        book: ReaderLocalBookAccess,
+        contentSHA256: String,
+        page: Int,
+        configuration: NativeBookOCRConfiguration = NativeBookOCRConfiguration()
+    ) async throws -> NativeBookOCRPageCharacters {
+        try beginWriteOperation(bookID: book.record.id)
+        defer { endWriteOperation(bookID: book.record.id) }
+        await waitUntilReady()
+        try validateManualRequest(
+            book: book,
+            contentSHA256: contentSHA256,
+            page: page
+        )
+        let normalizedDigest = contentSHA256.lowercased()
+        let processor = try NativeBookOCRProcessor(fileURL: book.url)
+        _ = try await ensureBasePage(
+            processor: processor,
+            bookID: book.record.id,
+            contentSHA256: normalizedDigest,
+            page: page,
+            configuration: configuration
+        )
+        try Self.validateCurrentBook(book)
+        let recognized = try await processor.processPage(
+            pageNumber: page,
+            contentSHA256: normalizedDigest,
+            configuration: configuration,
+            forceVision: true
+        )
+        guard recognized.status == .ready || recognized.status == .readyEmpty else {
+            throw NativeBookOCRError.noRecognizedText
+        }
+        try Self.validateCurrentBook(book)
+        let manual = recognized.replacingTextAuthority(
+            .localOverride,
+            engineRevision: "apple-vision-manual/1"
+        )
+        try await store.writeManualPageOverride(
+            manual,
+            bookID: book.record.id
+        )
+        try Self.validateCurrentBook(book)
+        guard let effective = try await store.page(
+            contentSHA256: normalizedDigest,
+            page: page
+        ) else {
+            throw NativeBookOCRError.storage("单页重扫写入后无法读取")
+        }
+        try await publishManualMutation(
+            bookID: book.record.id,
+            contentSHA256: normalizedDigest,
+            page: page,
+            pageCount: await processor.numberOfPages(),
+            message: "已保存第 \(page) 页本机重扫覆盖"
+        )
+        return effective
+    }
+
+    /// Clears only the explicit whole-page Vision override. Selection
+    /// corrections and the immutable base page remain intact.
+    func clearManualReOCR(
+        book: ReaderLocalBookAccess,
+        contentSHA256: String,
+        page: Int
+    ) async throws -> NativeBookOCRClearResult {
+        try beginWriteOperation(bookID: book.record.id)
+        defer { endWriteOperation(bookID: book.record.id) }
+        await waitUntilReady()
+        try validateManualRequest(
+            book: book,
+            contentSHA256: contentSHA256,
+            page: page
+        )
+        let normalizedDigest = contentSHA256.lowercased()
+        let cleared = try await store.clearManualPageOverride(
+            bookID: book.record.id,
+            contentSHA256: normalizedDigest,
+            page: page
+        )
+        try Self.validateCurrentBook(book)
+        let effective = try await store.page(
+            contentSHA256: normalizedDigest,
+            page: page
+        )
+        if cleared {
+            let processor = try NativeBookOCRProcessor(fileURL: book.url)
+            try await publishManualMutation(
+                bookID: book.record.id,
+                contentSHA256: normalizedDigest,
+                page: page,
+                pageCount: await processor.numberOfPages(),
+                message: "已撤销第 \(page) 页本机重扫；选区校正仍保留"
+            )
+        }
+        return NativeBookOCRClearResult(page: effective, cleared: cleared)
+    }
+
+    private func validateManualRequest(
+        book: ReaderLocalBookAccess,
+        contentSHA256: String,
+        page: Int
+    ) throws {
+        guard book.record.format == .pdf else {
+            throw NativeBookOCRError.pdfRequired
+        }
+        guard Self.isSHA256(contentSHA256), page >= 1 else {
+            throw NativeBookOCRError.invalidContentSHA256
+        }
+        if let indexedDigest = book.record.contentSha256,
+           indexedDigest.caseInsensitiveCompare(contentSHA256) != .orderedSame {
+            throw NativeBookOCRError.invalidContentSHA256
+        }
+        try Self.validateCurrentBook(book)
+        try activate(
+            bookID: book.record.id,
+            expectedContentSHA256: contentSHA256
+        )
+    }
+
+    private func ensureBasePage(
+        processor: NativeBookOCRProcessor,
+        bookID: String,
+        contentSHA256: String,
+        page: Int,
+        configuration: NativeBookOCRConfiguration
+    ) async throws -> NativeBookOCRPageCharacters {
+        if let existing = try await store.basePage(
+            contentSHA256: contentSHA256,
+            page: page
+        ) {
+            return existing
+        }
+        let value = try await processor.processPage(
+            pageNumber: page,
+            contentSHA256: contentSHA256,
+            configuration: configuration
+        )
+        guard value.status == .ready || value.status == .readyEmpty else {
+            throw NativeBookOCRError.noRecognizedText
+        }
+        try await store.writePage(value, bookID: bookID)
+        return value
+    }
+
+    private func publishManualMutation(
+        bookID: String,
+        contentSHA256: String,
+        page: Int,
+        pageCount: Int,
+        message: String
+    ) async throws {
+        let pages = try await store.pages(contentSHA256: contentSHA256)
+        let status = Self.makeStatus(
+            bookID: bookID,
+            contentSHA256: contentSHA256,
+            state: .completed,
+            totalPages: max(pageCount, pages.map(\.page).max() ?? 0),
+            currentPage: nil,
+            pages: pages,
+            message: message
+        )
+        publish(status: status, page: page)
+    }
+
     func search(
         bookID: String,
         expectedContentSHA256: String,
@@ -231,7 +642,13 @@ final class NativeBookOCRManager: ObservableObject {
             expectedContentSHA256: expectedContentSHA256
         )
         let needle = query.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !current.contentSHA256.isEmpty, !needle.isEmpty else {
+        guard Self.isSHA256(expectedContentSHA256),
+              activeContentSHA256[bookID]?.caseInsensitiveCompare(
+                expectedContentSHA256
+              ) == .orderedSame,
+              invalidatedContentSHA256[bookID]
+                != expectedContentSHA256.lowercased(),
+              !needle.isEmpty else {
             return NativeBookOCRSearchResult(
                 matches: [],
                 total: 0,
@@ -240,7 +657,7 @@ final class NativeBookOCRManager: ObservableObject {
             )
         }
         let cap = max(1, min(200, limit))
-        let pages = try await store.pages(
+        let pages = try await store.effectivePages(
             contentSHA256: expectedContentSHA256
         )
         var hits: [NativeBookOCRSearchHit] = []
@@ -260,11 +677,12 @@ final class NativeBookOCRManager: ObservableObject {
         let readyPages = pages.filter {
             $0.status == .ready || $0.status == .readyEmpty
         }.count
+        let totalPages = max(current.totalPages, pages.map(\.page).max() ?? 0)
         return NativeBookOCRSearchResult(
             matches: hits,
             total: total,
             pages: hitPages.sorted(),
-            incomplete: readyPages < current.totalPages
+            incomplete: readyPages < totalPages
                 || hits.count >= cap
         )
     }
@@ -277,6 +695,8 @@ final class NativeBookOCRManager: ObservableObject {
         manifest: NativeBookOCRDerivedAttachmentManifest,
         files: [String: Data]
     ) async throws -> NativeBookOCRImportResult {
+        try beginWriteOperation(bookID: bookID)
+        defer { endWriteOperation(bookID: bookID) }
         await waitUntilReady()
         guard Self.isSHA256(expectedContentSHA256),
               expectedContentSHA256.caseInsensitiveCompare(
@@ -308,6 +728,7 @@ final class NativeBookOCRManager: ObservableObject {
             ))
         }
         let result = try await store.importDerivedAttachments(
+            bookID: bookID,
             expectedContentSHA256: expectedContentSHA256,
             manifest: manifest,
             files: files
@@ -492,7 +913,7 @@ final class NativeBookOCRManager: ObservableObject {
                 }
                 guard generations[bookID] == generation else { return }
                 try Self.validateCurrentBook(book)
-                try await store.writePage(value)
+                try await store.writePage(value, bookID: bookID)
                 try Self.validateCurrentBook(book)
                 cached[pageNumber] = value
                 guard generations[bookID] == generation else { return }
@@ -609,6 +1030,33 @@ final class NativeBookOCRManager: ObservableObject {
             page: nil,
             status: failed
         )
+    }
+
+    private func beginWriteOperation(bookID: String) throws {
+        guard pdfMutationLeases[bookID] == nil else {
+            throw NativeBookOCRError.storage(
+                "PDF 改页期间拒绝并发 OCR 写入"
+            )
+        }
+        activeWriteOperations[bookID, default: 0] += 1
+    }
+
+    private func endWriteOperation(bookID: String) {
+        let remaining = max(0, (activeWriteOperations[bookID] ?? 1) - 1)
+        if remaining > 0 {
+            activeWriteOperations[bookID] = remaining
+            return
+        }
+        activeWriteOperations.removeValue(forKey: bookID)
+        let waiters = writeOperationWaiters.removeValue(forKey: bookID) ?? []
+        waiters.forEach { $0.resume() }
+    }
+
+    private func waitForWriteOperations(bookID: String) async {
+        guard (activeWriteOperations[bookID] ?? 0) > 0 else { return }
+        await withCheckedContinuation { continuation in
+            writeOperationWaiters[bookID, default: []].append(continuation)
+        }
     }
 
     private func replacing(

@@ -10,7 +10,10 @@ const SOURCE = fs.readFileSync(
 );
 const ENDPOINT =
   "wss://bwicarus-2.taile44d0c.ts.net/reader-computer-voice/v1";
+const CONTEXT_ENDPOINT =
+  "wss://bwicarus-2.taile44d0c.ts.net/reader-context/v1";
 const READER_ORIGIN = "https://bwicarus.taile44d0c.ts.net";
+const NATIVE_APP_ORIGIN = "http://127.0.0.1:43129";
 const RELAY_PORT = "BW_COMPUTER_VOICE_DIRECT_V3";
 const DIRECT_CONTRACT = "reader-computer-voice-direct/1";
 const RESULT_DELIVERY_CONTRACT = "reader-result-delivery/1";
@@ -277,7 +280,11 @@ function createServer(scenario) {
 
   class FakeWebSocket {
     constructor(url) {
-      assert.equal(url, ENDPOINT);
+      assert.ok(
+        url === ENDPOINT || url === CONTEXT_ENDPOINT,
+        `unexpected direct endpoint: ${url}`,
+      );
+      scenario.socketUrls.push(url);
       this.url = url;
       this.readyState = 0;
       this.binaryType = "";
@@ -841,7 +848,7 @@ function createJournalFetch(scenario) {
         || scenario.activeReading;
       return Promise.resolve(jsonResponse({
         ok: true,
-        enabled: scenario.contextSyncEnabled === true,
+        enabled: scenarioContextSyncEnabled(scenario),
         active: active ? structuredClone(active) : null,
         fresh: !!active,
         age_sec: active ? 0 : null,
@@ -875,6 +882,13 @@ function createJournalFetch(scenario) {
   };
 }
 
+function scenarioContextSyncEnabled(scenario) {
+  if (scenario.contextSyncStorage instanceof Map) {
+    return scenario.contextSyncStorage.get("eph-ctx-sync") === "1";
+  }
+  return scenario.contextSyncEnabled === true;
+}
+
 function createHarness(overrides = {}) {
   const scenario = {
     offline: false,
@@ -896,6 +910,7 @@ function createHarness(overrides = {}) {
     origin: READER_ORIGIN,
     extensionRelay: false,
     directWebSocketAttempts: 0,
+    socketUrls: [],
     deferStatusResult: false,
     dropFirstBorrowedStatus: false,
     droppedFirstBorrowedStatus: false,
@@ -919,6 +934,8 @@ function createHarness(overrides = {}) {
     deferContextOpen: false,
     activeReadingFetches: 0,
     contextSyncEnabled: false,
+    serverContextSyncEnabled: null,
+    contextSyncStorage: null,
     activeReading: null,
     serverActiveReading: null,
     contextModePosts: [],
@@ -941,6 +958,7 @@ function createHarness(overrides = {}) {
     realtimeVoiceAllowed: true,
     uiOwner: "",
     extensionWorld: false,
+    nativeComputerVoice: false,
     ...overrides,
   };
   const server = createServer(scenario);
@@ -1026,7 +1044,20 @@ function createHarness(overrides = {}) {
       },
       ctxSync: {
         enabled() {
-          return scenario.contextSyncEnabled === true;
+          return scenarioContextSyncEnabled(scenario);
+        },
+        getConfig() {
+          const enabled = typeof scenario.serverContextSyncEnabled === "boolean"
+            ? scenario.serverContextSyncEnabled
+            : scenarioContextSyncEnabled(scenario);
+          if (scenario.contextSyncStorage instanceof Map) {
+            scenario.contextSyncStorage.set("eph-ctx-sync", enabled ? "1" : "0");
+          }
+          return Promise.resolve({
+            ok: true,
+            enabled,
+            deliveryMode: scenario.contextDeliveryMode,
+          });
         },
         _state() {
           return {
@@ -1077,6 +1108,18 @@ function createHarness(overrides = {}) {
     crypto: webcrypto,
     isSecureContext: true,
     location: { origin: scenario.origin },
+    localStorage: {
+      getItem(key) {
+        return scenario.contextSyncStorage instanceof Map
+          ? scenario.contextSyncStorage.get(String(key)) ?? null
+          : null;
+      },
+      setItem(key, value) {
+        if (scenario.contextSyncStorage instanceof Map) {
+          scenario.contextSyncStorage.set(String(key), String(value));
+        }
+      },
+    },
     setTimeout: scheduleTimeout,
     clearTimeout: cancelTimeout,
     addEventListener(type, handler) {
@@ -1089,6 +1132,9 @@ function createHarness(overrides = {}) {
     document,
   };
   window.__bwReaderFetch = createJournalFetch(scenario);
+  if (scenario.nativeComputerVoice) {
+    window.__BW_NATIVE_COMPUTER_VOICE__ = true;
+  }
   if (scenario.extensionRelay) {
     window.chrome = {
       runtime: createRelayRuntime(server, scenario),
@@ -2882,6 +2928,118 @@ test("普通网页只走扩展后台固定 relay，缺少 relay 时绝不回退 
   assert.equal(unavailable.state, "offline");
   assert.equal(unavailable.code, "BW_COMPUTER_VOICE_DIRECT_RELAY_REQUIRED");
   assert.equal(missing.server.sockets.length, 0);
+});
+
+test("原生 App 只有精确 loopback origin 与原生标记同时成立才直连", async () => {
+  const nativeApp = createHarness({
+    origin: NATIVE_APP_ORIGIN,
+    nativeComputerVoice: true,
+  });
+  const available = await nativeApp.api.availability();
+  assert.equal(available.state, "idle");
+  assert.equal(nativeApp.server.sockets.length, 1);
+  assert.equal(nativeApp.scenario.socketUrls[0], ENDPOINT);
+
+  for (const candidate of [
+    { origin: NATIVE_APP_ORIGIN, nativeComputerVoice: false },
+    { origin: "http://127.0.0.1:43130", nativeComputerVoice: true },
+    { origin: "http://localhost:43129", nativeComputerVoice: true },
+  ]) {
+    const rejected = createHarness(candidate);
+    const result = await rejected.api.availability();
+    assert.equal(
+      result.code,
+      "BW_COMPUTER_VOICE_DIRECT_RELAY_REQUIRED",
+      candidate.origin,
+    );
+    assert.equal(rejected.server.sockets.length, 0, candidate.origin);
+  }
+});
+
+test("原生 App 的 eph-ctx-sync=1 完成 context 握手并启动快照泵", async () => {
+  const contextSyncStorage = new Map([["eph-ctx-sync", "1"]]);
+  const harness = createHarness({
+    origin: NATIVE_APP_ORIGIN,
+    nativeComputerVoice: true,
+    contextSyncStorage,
+    contextDeliveryMode: "snapshot-mcp",
+    activeReading: {
+      kind: "pdf",
+      file: "localbook:app-snapshot",
+      title: "Native App Snapshot",
+      pos: 7,
+      selection: "",
+    },
+  });
+
+  harness.api.setSelectedEngine("computer_client");
+  await waitForRequest(harness, "context-open");
+  await waitForCondition(
+    () => harness.scenario.journalCalls.length >= 1,
+    "native App context journal pump",
+  );
+  await waitForCondition(
+    () => harness.scenario.activeReadingRequests.length >= 1,
+    "native App active-reading pump",
+  );
+
+  assert.equal(harness.scenario.socketUrls[0], CONTEXT_ENDPOINT);
+  const actions = harness.server.requests.map((request) => request.type);
+  assert.ok(actions.indexOf("context-mode") >= 0);
+  assert.ok(actions.indexOf("context-open") > actions.indexOf("context-mode"));
+  assert.ok(
+    actions.indexOf("visual-register") > actions.indexOf("context-open"),
+  );
+  assert.deepEqual(harness.scenario.contextModePosts[0], {
+    enabled: true,
+    deliveryMode: "snapshot-mcp",
+  });
+
+  contextSyncStorage.set("eph-ctx-sync", "0");
+  await harness.api.contextSyncChanged();
+});
+
+test("原生 App 未打开设置且未启动语音也会恢复开关并独立上报快照", async () => {
+  const contextSyncStorage = new Map();
+  const harness = createHarness({
+    origin: NATIVE_APP_ORIGIN,
+    nativeComputerVoice: true,
+    contextSyncStorage,
+    serverContextSyncEnabled: true,
+    contextDeliveryMode: "snapshot-mcp",
+    activeReading: {
+      kind: "pdf",
+      file: "localbook:startup-snapshot",
+      title: "Startup Snapshot",
+      pos: 11,
+      selection: "startup selection",
+    },
+  });
+
+  await waitForRequest(harness, "context-open");
+  await waitForCondition(
+    () => harness.scenario.journalCalls.length >= 1,
+    "startup context journal pump",
+  );
+  await waitForCondition(
+    () => harness.scenario.activeReadingRequests.length >= 1,
+    "startup active-reading pump",
+  );
+
+  assert.equal(contextSyncStorage.get("eph-ctx-sync"), "1");
+  assert.equal(harness.scenario.socketUrls[0], CONTEXT_ENDPOINT);
+  assert.equal(
+    harness.server.requests.some((request) => request.type === "start"),
+    false,
+  );
+  assert.equal(harness.scenario.microphoneRequests.length, 0);
+  assert.equal(
+    harness.scenario.activeReadingRequests[0].active.page,
+    11,
+  );
+
+  contextSyncStorage.set("eph-ctx-sync", "0");
+  await harness.api.contextSyncChanged();
 });
 
 test("状态刷新让位并释放单标签 relay 后才 START，通话中刷新不再开连接", async () => {

@@ -570,10 +570,15 @@ if (window.__bwPwaProviderOnly) return;
     var label = (makeNote && makeAnki) ? '笔记+Anki' : (makeNote ? '笔记' : 'Anki');
     var jobUi = _startBgJob('创建' + label + '中…（' + used.length + ' 段）');
     var ov = aiParams();
+    var srcInfo = (typeof _cfg.ankiSource === 'function' ? _cfg.ankiSource() : null) || {};
     // 提交到服务器后台 job(短请求,立即返回 job_id),再轮询;任务在服务器跑,网页切后台也不中断
+    // @interaction learning.snippets.enqueue
     fetch(_cfg.snippetsEndpoint, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
+        file: srcInfo.file || '',
+        page: Math.max(0, Number(srcInfo.page || 0)),
+        source: structuredSource(srcInfo.file || '', srcInfo.sourceUrl || '', srcInfo.page),
         snippets: used.map(function (d) { return { text: d.text, source: d.source }; }),
         make_note: makeNote, make_anki: makeAnki,
         note_name: noteName,
@@ -793,6 +798,19 @@ if (window.__bwPwaProviderOnly) return;
     }).catch(function () {});
   }
 
+  function structuredSource(file, sourceUrl, page) {
+    var kind = /\/pdf\/epub\/view(?:[?#]|$)/.test(sourceUrl || '') || /\.epub$/i.test(file || '')
+      ? 'epub'
+      : (/\/pdf\/html\/view(?:[?#]|$)/.test(sourceUrl || '') || /\.(?:html?|md|markdown)$/i.test(file || '') ? 'html' : 'pdf');
+    var resolvedPage = Math.max(0, Number(page || 0));
+    if (!resolvedPage && sourceUrl) {
+      try { resolvedPage = Math.max(0, Number(new URL(sourceUrl, location.href).searchParams.get('page') || 0)); } catch (_) {}
+    }
+    var out = { kind: kind };
+    if (resolvedPage) out.page = resolvedPage;
+    return out;
+  }
+
   // 从 result-modal「🎴 制 Anki」:把「选中原文 + 上下文 + 这条解释」做成 Anki 卡(后台,复用进度条)
   function ankiFromResult() {
     var srcInfo = (typeof _cfg.ankiSource === 'function' ? _cfg.ankiSource() : null) || {};
@@ -804,18 +822,20 @@ if (window.__bwPwaProviderOnly) return;
     var body = (clone.dataset.raw || clone.textContent || '').trim();
     if (!sel && !body) { _toast('没有可制卡的内容'); return; }
     var sentence = srcInfo.sentence || _curMeta.sentence || '';
-    var srcUrl = srcInfo.sourceUrl || '';   // 原句导航链接:卡片背面可点回到原文页
     var text = '【原文】' + sel +
       (sentence && sentence !== sel ? '\n【上下文】' + sentence : '') +
-      '\n【解释】' + body +
-      (srcUrl ? '\n【原文出处链接（务必原样放进卡片背面，做成可点链接）】' + srcUrl : '');
+      '\n【解释】' + body;
     closeResult();
     var jobUi = _startBgJob('制 Anki 中…');
     var ov = aiParams();
+    // @interaction learning.snippets.enqueue
     fetch(_cfg.snippetsEndpoint, {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({
-        snippets: [{ text: text, source: sel || sentence, file: srcInfo.file || '' }],
+        file: srcInfo.file || '',
+        page: Math.max(0, Number(srcInfo.page || 0)),
+        source: structuredSource(srcInfo.file || '', srcInfo.sourceUrl || '', srcInfo.page),
+        snippets: [{ text: text, source: sel || sentence }],
         make_note: false, make_anki: true, note_name: '',
         model: ov.model || '', effort: ov.effort || '',
       }),

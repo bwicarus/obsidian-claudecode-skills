@@ -17,10 +17,15 @@ private enum ReaderLibrarySource: String, CaseIterable, Identifiable {
     }
 }
 
+@MainActor
+private enum ReaderLibraryRefreshClock {
+    static var lastAutomaticRemoteRefreshAt: Date?
+}
+
 struct ReaderLocalLibraryView: View {
     @Environment(\.dismiss) private var dismiss
     @StateObject private var library = ReaderLocalLibraryManager.shared
-    @StateObject private var remote = ReaderRemoteLibraryCoordinator()
+    @StateObject private var remote: ReaderRemoteLibraryCoordinator
     @StateObject private var nativeOCR = NativeBookOCRManager.shared
     @StateObject private var piOCR = ReaderPiOCRCoordinator()
     @StateObject private var recognitionPreferences = ReaderTextRecognitionPreferences.shared
@@ -29,8 +34,22 @@ struct ReaderLocalLibraryView: View {
     @State private var searchText = ""
     @State private var ocrActionBookID: String?
     @State private var ocrErrorMessage: String?
+    @State private var expandedPreprocessingBookIDs = Set<String>()
 
     let reader: ReaderWebViewModel
+    let startupNotice: String?
+
+    init(
+        reader: ReaderWebViewModel,
+        startupNotice: String? = nil,
+        remote: ReaderRemoteLibraryCoordinator? = nil
+    ) {
+        self.reader = reader
+        self.startupNotice = startupNotice
+        _remote = StateObject(
+            wrappedValue: remote ?? ReaderRemoteLibraryCoordinator()
+        )
+    }
 
     var body: some View {
         NavigationStack {
@@ -42,6 +61,17 @@ struct ReaderLocalLibraryView: View {
                         }
                     }
                     .pickerStyle(.segmented)
+                }
+
+                if let startupNotice, !startupNotice.isEmpty {
+                    Section {
+                        Label(
+                            startupNotice,
+                            systemImage: "exclamationmark.triangle"
+                        )
+                        .font(.footnote)
+                        .foregroundStyle(.orange)
+                    }
                 }
 
                 localFolderSection
@@ -68,7 +98,7 @@ struct ReaderLocalLibraryView: View {
             .toolbar {
                 ToolbarItem(placement: .topBarLeading) {
                     Button {
-                        Task { await refresh() }
+                        Task { await refresh(force: true) }
                     } label: {
                         Label("刷新书库", systemImage: "arrow.clockwise")
                     }
@@ -94,7 +124,7 @@ struct ReaderLocalLibraryView: View {
                     }
                 }
             }
-            .task { await refresh() }
+            .task { await refreshIfStale() }
             .onChange(of: nativeOCR.lastUpdate) { _, update in
                 guard update?.status.state == .failed else { return }
                 ocrErrorMessage = update?.status.message ?? "本机预处理失败"
@@ -213,6 +243,13 @@ struct ReaderLocalLibraryView: View {
                     Text("\(book.format.title) · \(byteCount(book.byteCount)) · \(syncState.title)")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
+                    if book.format == .pdf {
+                        preprocessingToggleButton(
+                            bookID: "local:\(book.id)",
+                            summary: "本机 \(nativeStateTitle(nativeStatus(for: book).state)) · "
+                                + "Pi \(piSummary(remoteBook))"
+                        )
+                    }
                 }
                 Spacer(minLength: 4)
                 actionProgress(
@@ -250,13 +287,27 @@ struct ReaderLocalLibraryView: View {
                 .buttonStyle(.borderedProminent)
             }
 
-            preprocessingPanel(localBook: book, remoteBook: remoteBook)
+            if expandedPreprocessingBookIDs.contains("local:\(book.id)") {
+                preprocessingPanel(localBook: book, remoteBook: remoteBook)
+                    .task(id: piStatusTaskIdentity(
+                        remoteBook: remoteBook,
+                        localBook: book,
+                        previewsLegacyResults: expandedPreprocessingBookIDs.contains(
+                            "local:\(book.id)"
+                        )
+                    )) {
+                        guard let remoteBook else { return }
+                        await refreshPiStatus(
+                            remoteBook,
+                            localBook: book,
+                            previewsLegacyResults: expandedPreprocessingBookIDs.contains(
+                                "local:\(book.id)"
+                            )
+                        )
+                    }
+            }
         }
         .padding(.vertical, 2)
-        .task(id: piStatusTaskIdentity(remoteBook: remoteBook, localBook: book)) {
-            guard let remoteBook else { return }
-            await refreshPiStatus(remoteBook, localBook: book)
-        }
     }
 
     @ViewBuilder
@@ -280,6 +331,12 @@ struct ReaderLocalLibraryView: View {
                     Text("\(book.kind.uppercased()) · \(byteCount(book.size)) · \(syncState.title)")
                         .font(.caption2)
                         .foregroundStyle(.tertiary)
+                    if book.kind.lowercased() == "pdf" {
+                        preprocessingToggleButton(
+                            bookID: "remote:\(book.bookId)",
+                            summary: "Pi \(piSummary(book))"
+                        )
+                    }
                 }
                 Spacer(minLength: 4)
                 actionProgress(
@@ -305,12 +362,26 @@ struct ReaderLocalLibraryView: View {
                 }
             }
 
-            preprocessingPanel(remoteBook: book, localBook: localBook)
+            if expandedPreprocessingBookIDs.contains("remote:\(book.bookId)") {
+                preprocessingPanel(remoteBook: book, localBook: localBook)
+                    .task(id: piStatusTaskIdentity(
+                        remoteBook: book,
+                        localBook: localBook,
+                        previewsLegacyResults: expandedPreprocessingBookIDs.contains(
+                            "remote:\(book.bookId)"
+                        )
+                    )) {
+                        await refreshPiStatus(
+                            book,
+                            localBook: localBook,
+                            previewsLegacyResults: expandedPreprocessingBookIDs.contains(
+                                "remote:\(book.bookId)"
+                            )
+                        )
+                    }
+            }
         }
         .padding(.vertical, 2)
-        .task(id: piStatusTaskIdentity(remoteBook: book, localBook: localBook)) {
-            await refreshPiStatus(book, localBook: localBook)
-        }
     }
 
     @ViewBuilder
@@ -363,7 +434,7 @@ struct ReaderLocalLibraryView: View {
                     localBook: localBook
                 )
             } label: {
-                Label("Pi 文字、分词与公式", systemImage: "server.rack")
+                Label("文字、分词与公式", systemImage: "text.viewfinder")
             }
         } else {
             Text("EPUB 当前不支持 Pi 的 PDF 页图预处理；下载后仍按 EPUB 原文字层阅读。")
@@ -406,11 +477,15 @@ struct ReaderLocalLibraryView: View {
                 .frame(width: 32, alignment: .leading)
             ProgressView(value: stageFraction(
                 total: progress.total,
+                completed: progress.completed
+            ))
+            Text(stageProgressText(
+                total: progress.total,
                 completed: progress.completed,
+                pending: progress.pending,
                 failed: progress.failed,
                 unavailable: progress.unavailable
             ))
-            Text("\(progress.completed)/\(progress.total)")
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
         }
@@ -448,7 +523,7 @@ struct ReaderLocalLibraryView: View {
         }
         .buttonStyle(.bordered)
         .controlSize(.small)
-        .disabled(!recognitionPreferences.isEnabled || ocrActionBookID != nil)
+        .disabled(ocrActionBookID != nil)
     }
 
     @ViewBuilder
@@ -460,10 +535,26 @@ struct ReaderLocalLibraryView: View {
             Label("Pi 预处理", systemImage: "server.rack")
                 .font(.caption.weight(.semibold))
             Spacer()
-            if let remoteBook, let job = piOCR.job(for: remoteBook) {
+            if let remoteBook,
+               piOCR.previewingBookID == remoteBook.bookId {
+                HStack(spacing: 4) {
+                    ProgressView().controlSize(.mini)
+                    Text("正在检查现有结果")
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            } else if let remoteBook,
+               let job = piOCR.job(for: remoteBook),
+               job.state != "idle" {
                 Text(piStateTitle(job.state))
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+            } else if let remoteBook,
+                      let adoption = piOCR.adoption(for: remoteBook),
+                      adoption.available {
+                Text("已有 Pi 结果，可采用")
+                    .font(.caption2)
+                    .foregroundStyle(.tint)
             } else {
                 Text("未开始")
                     .font(.caption2)
@@ -471,7 +562,9 @@ struct ReaderLocalLibraryView: View {
             }
         }
 
-        if let remoteBook, let job = piOCR.job(for: remoteBook) {
+        if let remoteBook,
+           let job = piOCR.job(for: remoteBook),
+           job.state != "idle" {
             piProgress(job)
             HStack {
                 if job.canPause {
@@ -510,8 +603,61 @@ struct ReaderLocalLibraryView: View {
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
+        } else if let remoteBook,
+                  let adoption = piOCR.adoption(for: remoteBook),
+                  adoption.available {
+            VStack(alignment: .leading, spacing: 4) {
+                Text("已找到覆盖 \(adoption.totalPages) 页的旧 Pi 文字与分词结果。")
+                if adoption.formula.state == "succeeded" {
+                    Text("公式结果：已识别 \(adoption.formula.count) 处")
+                } else {
+                    Text("文字与分词可以先采用；公式仍待处理。")
+                }
+            }
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+            HStack {
+                Button("采用现有 Pi 结果") {
+                    Task {
+                        await adoptExistingPiResult(
+                            book: remoteBook,
+                            localBook: localBook
+                        )
+                    }
+                }
+                piStartMenu(remoteBook: remoteBook, localBook: localBook)
+            }
+            .buttonStyle(.bordered)
+            .controlSize(.small)
+            .disabled(
+                ocrActionBookID != nil
+                    || piOCR.activeBookID != nil
+                    || piOCR.previewingBookID != nil
+            )
         } else {
             piStartMenu(remoteBook: remoteBook, localBook: localBook)
+        }
+
+        if let remoteBook,
+           let errorMessage = piOCR.error(for: remoteBook),
+           !errorMessage.isEmpty {
+            Label(errorMessage, systemImage: "exclamationmark.triangle.fill")
+                .font(.caption2)
+                .foregroundStyle(.red)
+                .fixedSize(horizontal: false, vertical: true)
+            if piOCR.job(for: remoteBook)?.state == "idle" {
+                Button("重试检查现有结果") {
+                    Task {
+                        await refreshPiStatus(
+                            remoteBook,
+                            localBook: localBook,
+                            previewsLegacyResults: true
+                        )
+                    }
+                }
+                .buttonStyle(.bordered)
+                .controlSize(.small)
+            }
         }
     }
 
@@ -544,7 +690,13 @@ struct ReaderLocalLibraryView: View {
                 .font(.caption2)
                 .frame(width: 32, alignment: .leading)
             ProgressView(value: progress.fractionCompleted)
-            Text("\(progress.completed)/\(progress.total)")
+            Text(stageProgressText(
+                total: progress.total,
+                completed: progress.completed,
+                pending: progress.pending,
+                failed: progress.failed,
+                unavailable: progress.unavailable
+            ))
                 .font(.caption2.monospacedDigit())
                 .foregroundStyle(.secondary)
         }
@@ -577,16 +729,21 @@ struct ReaderLocalLibraryView: View {
         .buttonStyle(.bordered)
         .controlSize(.small)
         .disabled(
-            !recognitionPreferences.isEnabled
-                || ocrActionBookID != nil
+            ocrActionBookID != nil
                 || piOCR.activeBookID != nil
+                || piOCR.previewingBookID != nil
         )
     }
 
     @ViewBuilder
     private func actionProgress(ids: [String]) -> some View {
-        if let activeBookID = remote.activeBookID,
-           ids.contains(activeBookID) {
+        let activeIDs = [
+            remote.activeBookID,
+            ocrActionBookID,
+            piOCR.activeBookID,
+            piOCR.previewingBookID,
+        ].compactMap { $0 }
+        if activeIDs.contains(where: { ids.contains($0) }) {
             ProgressView().controlSize(.small)
         }
     }
@@ -627,9 +784,6 @@ struct ReaderLocalLibraryView: View {
             errorSection(error)
         }
         if let error = remote.errorMessage {
-            errorSection(error)
-        }
-        if let error = piOCR.errorMessage {
             errorSection(error)
         }
         if let error = ocrErrorMessage {
@@ -684,21 +838,47 @@ struct ReaderLocalLibraryView: View {
         }
     }
 
-    private func refresh() async {
+    @MainActor
+    private func refreshIfStale() async {
+        let now = Date()
+        let localTTL: TimeInterval = 15 * 60
+        let remoteTTL: TimeInterval = 5 * 60
+        if library.isConfigured,
+           library.lastScannedAt.map({
+             now.timeIntervalSince($0) >= localTTL
+           }) ?? true {
+            await library.rescan()
+        }
+        if ReaderLibraryRefreshClock.lastAutomaticRemoteRefreshAt.map({
+            now.timeIntervalSince($0) >= remoteTTL
+        }) ?? true {
+            await refreshRemote()
+        }
+    }
+
+    @MainActor
+    private func refresh(force: Bool) async {
+        guard force else {
+            await refreshIfStale()
+            return
+        }
         if library.isConfigured {
             await library.rescan()
         }
         await refreshRemote()
     }
 
+    @MainActor
     private func refreshRemote() async {
         let cookies = await reader.remoteLibraryCookies()
         await remote.refresh(cookies: cookies, localLibrary: library)
+        ReaderLibraryRefreshClock.lastAutomaticRemoteRefreshAt = Date()
     }
 
     private func refreshPiStatus(
         _ book: ReaderRemoteBook,
-        localBook: ReaderLocalBookRecord?
+        localBook: ReaderLocalBookRecord?,
+        previewsLegacyResults: Bool = false
     ) async {
         guard book.kind.lowercased() == "pdf" else { return }
         let cookies = await reader.remoteLibraryCookies()
@@ -710,7 +890,8 @@ struct ReaderLocalLibraryView: View {
             book: book,
             cookies: cookies,
             localBookID: localIdentity?.bookID,
-            localContentSHA256: localIdentity?.contentSHA256
+            localContentSHA256: localIdentity?.contentSHA256,
+            previewsLegacyResults: previewsLegacyResults
         )
     }
 
@@ -918,7 +1099,11 @@ struct ReaderLocalLibraryView: View {
                 return
             }
         }
-        guard let target else { return }
+        guard let target else {
+            ocrErrorMessage = remote.errorMessage
+                ?? "无法把这本书准备到 Pi 书库，请稍后重试"
+            return
+        }
         if let localDigest,
            target.contentSha256.caseInsensitiveCompare(localDigest)
             != .orderedSame {
@@ -933,6 +1118,10 @@ struct ReaderLocalLibraryView: View {
             localBookID: currentLocalBook?.id,
             localContentSHA256: localDigest
         )
+        if piOCR.errorBookID == target.bookId,
+           let errorMessage = piOCR.errorMessage {
+            ocrErrorMessage = errorMessage
+        }
     }
 
     private func controlPi(
@@ -952,6 +1141,29 @@ struct ReaderLocalLibraryView: View {
             localBookID: localIdentity?.bookID,
             localContentSHA256: localIdentity?.contentSHA256
         )
+        presentPiErrorIfNeeded(for: book)
+    }
+
+    private func adoptExistingPiResult(
+        book: ReaderRemoteBook,
+        localBook: ReaderLocalBookRecord?
+    ) async {
+        guard ocrActionBookID == nil else { return }
+        let actionID = localBook?.id ?? book.bookId
+        ocrActionBookID = actionID
+        defer { if ocrActionBookID == actionID { ocrActionBookID = nil } }
+        let cookies = await reader.remoteLibraryCookies()
+        let localIdentity = await matchingLocalIdentity(
+            for: book,
+            localBook: localBook
+        )
+        await piOCR.adoptExisting(
+            book: book,
+            cookies: cookies,
+            localBookID: localIdentity?.bookID,
+            localContentSHA256: localIdentity?.contentSHA256
+        )
+        presentPiErrorIfNeeded(for: book)
     }
 
     private func importPiAttachments(
@@ -965,15 +1177,27 @@ struct ReaderLocalLibraryView: View {
                 throw ReaderPiOCRError.localContentMismatch
             }
             let cookies = await reader.remoteLibraryCookies()
-            _ = await piOCR.importAvailableAttachments(
+            let imported = await piOCR.importAvailableAttachments(
                 book: book,
                 localBookID: localBook.id,
                 localContentSHA256: digest,
-                cookies: cookies
+                cookies: cookies,
+                requiresManifest: true,
+                reportsExplicitFailure: true
             )
+            if !imported {
+                presentPiErrorIfNeeded(for: book)
+            }
         } catch {
             ocrErrorMessage = error.localizedDescription
         }
+    }
+
+    private func presentPiErrorIfNeeded(for book: ReaderRemoteBook) {
+        guard piOCR.errorBookID == book.bookId,
+              let message = piOCR.errorMessage,
+              !message.isEmpty else { return }
+        ocrErrorMessage = message
     }
 
     private func matchingLocalIdentity(
@@ -993,7 +1217,8 @@ struct ReaderLocalLibraryView: View {
 
     private func piStatusTaskIdentity(
         remoteBook: ReaderRemoteBook?,
-        localBook: ReaderLocalBookRecord?
+        localBook: ReaderLocalBookRecord?,
+        previewsLegacyResults: Bool
     ) -> String {
         [
             remoteBook?.version ?? "none",
@@ -1001,6 +1226,7 @@ struct ReaderLocalLibraryView: View {
             localBook?.contentSha256 ?? "unknown",
             String(localBook?.byteCount ?? -1),
             String(localBook?.modifiedAt?.timeIntervalSince1970 ?? -1),
+            previewsLegacyResults ? "preview" : "status",
         ].joined(separator: ":")
     }
 
@@ -1022,12 +1248,63 @@ struct ReaderLocalLibraryView: View {
 
     private func stageFraction(
         total: Int,
-        completed: Int,
-        failed: Int,
-        unavailable: Int
+        completed: Int
     ) -> Double {
         guard total > 0 else { return 0 }
-        return min(1, max(0, Double(completed + failed + unavailable) / Double(total)))
+        return min(1, max(0, Double(completed) / Double(total)))
+    }
+
+    private func stageProgressText(
+        total: Int,
+        completed: Int,
+        pending: Int,
+        failed: Int,
+        unavailable: Int
+    ) -> String {
+        var parts = ["完成 \(completed)/\(total)"]
+        if pending > 0 { parts.append("待处理 \(pending)") }
+        if failed > 0 { parts.append("失败 \(failed)") }
+        if unavailable > 0 { parts.append("不可用 \(unavailable)") }
+        return parts.joined(separator: " · ")
+    }
+
+    private func preprocessingToggleButton(
+        bookID: String,
+        summary: String
+    ) -> some View {
+        let isExpanded = expandedPreprocessingBookIDs.contains(bookID)
+        return Button {
+            if isExpanded {
+                expandedPreprocessingBookIDs.remove(bookID)
+            } else {
+                expandedPreprocessingBookIDs.insert(bookID)
+            }
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: isExpanded ? "chevron.up" : "chevron.down")
+                Text("处理：\(summary)")
+            }
+        }
+        .buttonStyle(.plain)
+        .font(.caption2)
+        .foregroundStyle(.secondary)
+        .accessibilityLabel(
+            isExpanded ? "收起文字、分词与公式" : "展开文字、分词与公式"
+        )
+    }
+
+    private func piSummary(_ book: ReaderRemoteBook?) -> String {
+        guard let book else { return "未上传" }
+        if piOCR.activeBookID == book.bookId { return "请求中" }
+        if piOCR.previewingBookID == book.bookId { return "检查现有结果中" }
+        if piOCR.error(for: book) != nil { return "失败" }
+        if let job = piOCR.job(for: book), job.state != "idle" {
+            return piStateTitle(job.state)
+        }
+        if piOCR.adoption(for: book)?.available == true {
+            return "已有结果，可采用"
+        }
+        return "未开始"
     }
 
     private func nativeStateTitle(_ state: NativeBookOCRJobState) -> String {

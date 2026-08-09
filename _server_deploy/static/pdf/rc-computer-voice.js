@@ -67,6 +67,7 @@
     "command-failed": true,
   });
   var READER_ORIGIN = "https://bwicarus.taile44d0c.ts.net";
+  var NATIVE_APP_ORIGIN = "http://127.0.0.1:43129";
   var EXTENSION_RELAY_PORT = "BW_COMPUTER_VOICE_DIRECT_V3";
   var DIRECT_ENDPOINT =
     "wss://bwicarus-2.taile44d0c.ts.net/reader-computer-voice/v1";
@@ -1596,10 +1597,17 @@
   }
 
   function createDirectTransport(endpoint) {
-    if (currentOrigin() === READER_ORIGIN) {
+    var origin = currentOrigin();
+    var nativeAppPage = (
+      origin === NATIVE_APP_ORIGIN &&
+      window.__BW_NATIVE_COMPUTER_VOICE__ === true
+    );
+    if (origin === READER_ORIGIN || nativeAppPage) {
       if (typeof window.WebSocket !== "function") {
         throw directError(
-          "Reader 缺少 WebSocket 能力",
+          nativeAppPage
+            ? "原生 App Reader 缺少 WebSocket 能力"
+            : "Reader 缺少 WebSocket 能力",
           "BW_COMPUTER_VOICE_DIRECT_OFFLINE",
           true
         );
@@ -5958,6 +5966,59 @@
     return reconcileSnapshotLink();
   }
 
+  function bootstrapNativeSnapshotLink() {
+    if (window.__BW_NATIVE_COMPUTER_VOICE__ !== true) {
+      return Promise.resolve(null);
+    }
+    if (!RC.ctxSync || typeof RC.ctxSync.getConfig !== "function") {
+      emitStatus({
+        state: "warning",
+        message: "原生 Reader 上下文配置尚未就绪",
+        code: "BW_READER_CONTEXT_BOOTSTRAP_UNAVAILABLE",
+      });
+      return Promise.resolve(null);
+    }
+    // A fresh native-local origin has no eph-ctx-sync cache yet. Previously we
+    // only called getConfig() after the user opened Settings or started voice,
+    // so snapshotLinkWanted() stayed false forever. Bootstrap the preference
+    // and delivery mode at module load, then reconcile the dedicated
+    // /reader-context/v1 link. This path never requests microphone access and
+    // foreground fencing remains centralized in snapshotLinkWanted().
+    return RC.ctxSync.getConfig().then(function (value) {
+      if (
+        !plainObject(value) ||
+        typeof value.enabled !== "boolean" ||
+        (value.deliveryMode !== CONTEXT_DELIVERY_LEGACY &&
+          value.deliveryMode !== CONTEXT_DELIVERY_SNAPSHOT)
+      ) {
+        throw contextSchemaError(
+          "原生 Reader 上下文配置回执无效",
+          "BW_READER_CONTEXT_BOOTSTRAP_SCHEMA"
+        );
+      }
+      contextDeliveryMode = value.deliveryMode;
+      if (
+        plainObject(value.pi_compatibility) &&
+        value.pi_compatibility.confirmed === false
+      ) {
+        emitStatus({
+          state: "warning",
+          message: "实时快照使用 Windows 直连；Pi 兼容状态尚未确认",
+          code: value.pi_compatibility.code ||
+            "BW_READER_CONTEXT_PI_COMPATIBILITY_UNCONFIRMED",
+        });
+      }
+      return reconcileNativeContextRelay();
+    }).catch(function (error) {
+      emitStatus({
+        state: "warning",
+        message: error && error.message || "原生 Reader 实时快照初始化失败",
+        code: error && error.code || "BW_READER_CONTEXT_BOOTSTRAP_FAILED",
+      });
+      return null;
+    });
+  }
+
   function abortForPageExit() {
     clearPreparedSurface(true);
     // Page lifecycle events may freeze script execution before CONTEXT-CLEAR
@@ -6367,4 +6428,7 @@
     },
     mountSettings: mountSettings,
   });
+  // Snapshot delivery is a Reader capability, not a side effect of pressing
+  // the computer-voice button. Start its bounded bootstrap immediately.
+  bootstrapNativeSnapshotLink();
 })();

@@ -15,13 +15,15 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
     private var localBookID: String
     private var expectedContentSHA256: String?
     private var rejectsContentIdentity: Bool
+    private var localBookAccess: ReaderLocalBookAccess?
 
     init(
         webView: WKWebView,
         manager: NativeBookOCRManager = .shared,
         trustedBaseURL: URL,
         localBookID: String,
-        expectedContentSHA256: String? = nil
+        expectedContentSHA256: String? = nil,
+        localBookAccess: ReaderLocalBookAccess? = nil
     ) {
         let normalizedContentSHA256 = Self.normalizedSHA256(
             expectedContentSHA256
@@ -31,6 +33,7 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
         self.trustedBaseURL = trustedBaseURL
         self.localBookID = localBookID
         self.expectedContentSHA256 = normalizedContentSHA256
+        self.localBookAccess = localBookAccess
         self.rejectsContentIdentity = expectedContentSHA256 != nil
             && normalizedContentSHA256 == nil
         super.init()
@@ -47,7 +50,8 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
     func updateTrustedContext(
         baseURL: URL,
         localBookID: String,
-        expectedContentSHA256: String? = nil
+        expectedContentSHA256: String? = nil,
+        localBookAccess: ReaderLocalBookAccess? = nil
     ) {
         let previousBookID = self.localBookID
         trustedBaseURL = baseURL
@@ -55,6 +59,7 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
         self.expectedContentSHA256 = Self.normalizedSHA256(
             expectedContentSHA256
         )
+        self.localBookAccess = localBookAccess
         rejectsContentIdentity = expectedContentSHA256 != nil
             && self.expectedContentSHA256 == nil
         if let expectedContentSHA256 = self.expectedContentSHA256 {
@@ -98,6 +103,7 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
         let expectedContentSHA256 = rejectsContentIdentity ? nil
             : (self.expectedContentSHA256
                 ?? manager.activatedContentSHA256(for: request.localBookID))
+        let requestBookAccess = localBookAccess
         Task { [manager] in
             let status: NativeBookOCRBookStatus
             if let expectedContentSHA256 {
@@ -130,6 +136,30 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
                         request: request,
                         expectedContentSHA256: expectedContentSHA256,
                         status: status,
+                        manager: manager
+                    )
+                case .recognizeSelection:
+                    payload = try await Self.selectionReply(
+                        request: request,
+                        expectedContentSHA256: expectedContentSHA256,
+                        status: status,
+                        book: requestBookAccess,
+                        manager: manager
+                    )
+                case .reOCRPage:
+                    payload = try await Self.reOCRReply(
+                        request: request,
+                        expectedContentSHA256: expectedContentSHA256,
+                        status: status,
+                        book: requestBookAccess,
+                        manager: manager
+                    )
+                case .clearReOCRPage:
+                    payload = try await Self.clearReOCRReply(
+                        request: request,
+                        expectedContentSHA256: expectedContentSHA256,
+                        status: status,
+                        book: requestBookAccess,
                         manager: manager
                     )
                 }
@@ -210,6 +240,9 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
         case pageCharacters = "page-chars"
         case status
         case search
+        case recognizeSelection = "ocr-selection"
+        case reOCRPage = "reocr-page"
+        case clearReOCRPage = "clear-reocr-page"
     }
 
     private struct Request {
@@ -219,6 +252,7 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
         let page: Int?
         let query: String?
         let limit: Int?
+        let bbox: [Double]?
 
         static func parse(
             _ body: Any,
@@ -254,7 +288,8 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
                     localBookID: localBookID,
                     page: page,
                     query: nil,
-                    limit: nil
+                    limit: nil,
+                    bbox: nil
                 )
             case .status:
                 guard Set(value.keys) == common else {
@@ -266,7 +301,8 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
                     localBookID: localBookID,
                     page: nil,
                     query: nil,
-                    limit: nil
+                    limit: nil,
+                    bbox: nil
                 )
             case .search:
                 guard Set(value.keys) == common.union(["query", "limit"]),
@@ -287,7 +323,54 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
                     localBookID: localBookID,
                     page: nil,
                     query: trimmed,
-                    limit: limit
+                    limit: limit,
+                    bbox: nil
+                )
+            case .recognizeSelection:
+                guard Set(value.keys) == common.union(["page", "bbox"]),
+                      let page = strictInteger(value["page"]),
+                      (1...100_000).contains(page),
+                      let rawBBox = value["bbox"] as? [Any],
+                      rawBBox.count == 4 else {
+                    throw BridgeError.invalidRequest
+                }
+                let bbox = try rawBBox.map { raw -> Double in
+                    guard let number = raw as? NSNumber,
+                          CFGetTypeID(number) != CFBooleanGetTypeID(),
+                          number.doubleValue.isFinite,
+                          number.doubleValue >= 0,
+                          number.doubleValue <= 100_000 else {
+                        throw BridgeError.invalidRequest
+                    }
+                    return number.doubleValue
+                }
+                guard bbox[2] - bbox[0] >= 0.5,
+                      bbox[3] - bbox[1] >= 0.5 else {
+                    throw BridgeError.invalidRequest
+                }
+                return Request(
+                    action: action,
+                    requestID: requestID,
+                    localBookID: localBookID,
+                    page: page,
+                    query: nil,
+                    limit: nil,
+                    bbox: bbox
+                )
+            case .reOCRPage, .clearReOCRPage:
+                guard Set(value.keys) == common.union(["page"]),
+                      let page = strictInteger(value["page"]),
+                      (1...100_000).contains(page) else {
+                    throw BridgeError.invalidRequest
+                }
+                return Request(
+                    action: action,
+                    requestID: requestID,
+                    localBookID: localBookID,
+                    page: page,
+                    query: nil,
+                    limit: nil,
+                    bbox: nil
                 )
             }
         }
@@ -356,6 +439,7 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
                 "characterGeometry": NativeBookOCRCharacterGeometryState.unavailable.rawValue,
                 "formulaCoverage": NativeBookOCRFormulaCoverage.unknown.rawValue,
                 "formulaRegions": [],
+                "textAuthority": NativeBookOCRTextAuthority.supplemental.rawValue,
             ]
         }
         return [
@@ -382,6 +466,9 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
             "characterGeometry": value.characterGeometry.rawValue,
             "formulaCoverage": value.formulaCoverage.rawValue,
             "formulaRegions": value.formulaRegions.map(formulaObject),
+            "textAuthority": (
+                value.textAuthority ?? .supplemental
+            ).rawValue,
         ]
     }
 
@@ -458,6 +545,146 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
         ]
     }
 
+    private static func selectionReply(
+        request: Request,
+        expectedContentSHA256: String?,
+        status: NativeBookOCRBookStatus,
+        book: ReaderLocalBookAccess?,
+        manager: NativeBookOCRManager
+    ) async throws -> [String: Any] {
+        let (book, digest) = try mutationContext(
+            request: request,
+            expectedContentSHA256: expectedContentSHA256,
+            book: book
+        )
+        let result = try await manager.recognizeSelection(
+            book: book,
+            contentSHA256: digest,
+            page: request.page!,
+            bbox: request.bbox!
+        )
+        return mutationReply(
+            request: request,
+            page: result.page,
+            fields: [
+                "text": result.text,
+                "cv": pageRevision(result.page),
+                "persisted": true,
+                "page": result.page.page,
+                "textAuthority": NativeBookOCRTextAuthority.localOverride.rawValue,
+            ]
+        )
+    }
+
+    private static func reOCRReply(
+        request: Request,
+        expectedContentSHA256: String?,
+        status: NativeBookOCRBookStatus,
+        book: ReaderLocalBookAccess?,
+        manager: NativeBookOCRManager
+    ) async throws -> [String: Any] {
+        let (book, digest) = try mutationContext(
+            request: request,
+            expectedContentSHA256: expectedContentSHA256,
+            book: book
+        )
+        let page = try await manager.reOCRPage(
+            book: book,
+            contentSHA256: digest,
+            page: request.page!
+        )
+        return mutationReply(
+            request: request,
+            page: page,
+            fields: [
+                "chars": page.chars.filter { $0.sp == 0 }.count,
+                "cv": pageRevision(page),
+                "page": page.page,
+                "textAuthority": NativeBookOCRTextAuthority.localOverride.rawValue,
+            ]
+        )
+    }
+
+    private static func clearReOCRReply(
+        request: Request,
+        expectedContentSHA256: String?,
+        status: NativeBookOCRBookStatus,
+        book: ReaderLocalBookAccess?,
+        manager: NativeBookOCRManager
+    ) async throws -> [String: Any] {
+        let (book, digest) = try mutationContext(
+            request: request,
+            expectedContentSHA256: expectedContentSHA256,
+            book: book
+        )
+        let result = try await manager.clearManualReOCR(
+            book: book,
+            contentSHA256: digest,
+            page: request.page!
+        )
+        if let page = result.page {
+            return mutationReply(
+                request: request,
+                page: page,
+                fields: [
+                    "cleared": result.cleared,
+                    "cv": pageRevision(page),
+                    "page": page.page,
+                    "textAuthority": (
+                        page.textAuthority ?? .supplemental
+                    ).rawValue,
+                ]
+            )
+        }
+        return [
+            "contract": responseContract,
+            "action": request.action.rawValue,
+            "requestId": request.requestID,
+            "ok": true,
+            "state": passiveState(status).rawValue,
+            "source": jsonNullable(status.source?.rawValue),
+            "revision": statusRevision(status),
+            "error": NSNull(),
+            "cleared": result.cleared,
+            "cv": statusRevision(status),
+            "page": request.page!,
+            "textAuthority": NativeBookOCRTextAuthority.supplemental.rawValue,
+        ]
+    }
+
+    private static func mutationContext(
+        request: Request,
+        expectedContentSHA256: String?,
+        book: ReaderLocalBookAccess?
+    ) throws -> (ReaderLocalBookAccess, String) {
+        guard let expectedContentSHA256,
+              let book,
+              book.record.id == request.localBookID,
+              book.record.format == .pdf else {
+            throw NativeBookOCRError.unreadableBook
+        }
+        return (book, expectedContentSHA256)
+    }
+
+    private static func mutationReply(
+        request: Request,
+        page: NativeBookOCRPageCharacters,
+        fields: [String: Any]
+    ) -> [String: Any] {
+        var payload: [String: Any] = [
+            "contract": responseContract,
+            "action": request.action.rawValue,
+            "requestId": request.requestID,
+            "ok": true,
+            "state": page.status.rawValue,
+            "source": jsonNullable(page.source?.rawValue),
+            "revision": pageRevision(page),
+            "error": NSNull(),
+        ]
+        payload.merge(fields) { _, incoming in incoming }
+        return payload
+    }
+
     private static func failureReply(
         request: Request,
         status: NativeBookOCRBookStatus,
@@ -490,6 +717,7 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
                 "characterGeometry": NativeBookOCRCharacterGeometryState.unavailable.rawValue,
                 "formulaCoverage": NativeBookOCRFormulaCoverage.unknown.rawValue,
                 "formulaRegions": [],
+                "textAuthority": NativeBookOCRTextAuthority.supplemental.rawValue,
             ]) { current, _ in current }
         case .status:
             payload["progress"] = [
@@ -510,6 +738,22 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
             payload["total"] = 0
             payload["pages"] = []
             payload["incomplete"] = true
+        case .recognizeSelection:
+            payload["page"] = request.page!
+            payload["text"] = ""
+            payload["cv"] = statusRevision(status)
+            payload["persisted"] = false
+            payload["textAuthority"] = NativeBookOCRTextAuthority.supplemental.rawValue
+        case .reOCRPage:
+            payload["page"] = request.page!
+            payload["chars"] = 0
+            payload["cv"] = statusRevision(status)
+            payload["textAuthority"] = NativeBookOCRTextAuthority.supplemental.rawValue
+        case .clearReOCRPage:
+            payload["page"] = request.page!
+            payload["cleared"] = false
+            payload["cv"] = statusRevision(status)
+            payload["textAuthority"] = NativeBookOCRTextAuthority.supplemental.rawValue
         }
         return payload
     }

@@ -263,7 +263,11 @@ async function _showPhrasePopoverNative(text, opts) {
   let zh = '', reading = '', accent = null;
   try {
     if (isJa) {
-      const d = await (await fetch('/pdf/api/dict-jp?word=' + encodeURIComponent(text))).json();
+      // @interaction dictionary.jp.read
+      const d = await (await fetch('/pdf/api/dict-jp?word=' + encodeURIComponent(text) +
+        '&file=' + encodeURIComponent(FILE_REL || '') +
+        '&page=' + encodeURIComponent((typeof _selPageNum === 'function' ? _selPageNum() : currentPage) || 0) +
+        '&langs=' + encodeURIComponent((BOOK_LANGS || []).join(',')))).json();
       if (d.ok) { zh = d.zh || ''; reading = d.reading || ''; accent = (d.accent != null ? d.accent : null); }
     }
     if (!zh) {

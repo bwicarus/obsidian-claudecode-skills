@@ -484,7 +484,10 @@ if (window.__bwPwaProviderOnly) return;
       try {
         if (isJa) {
           // @interaction dictionary.quick.read
-          var dj = await (await fetch('/pdf/api/dict-jp?word=' + encodeURIComponent(text))).json();
+          var dj = await (await fetch('/pdf/api/dict-jp?word=' + encodeURIComponent(text) +
+            '&file=' + encodeURIComponent(opts.file || '') +
+            '&page=' + encodeURIComponent(opts.page || 0) +
+            '&langs=' + encodeURIComponent((opts.langs || []).join(',')))).json();
           if (dj && dj.ok) { zh = dj.zh || ''; reading = dj.reading || ''; accent = (dj.accent != null ? dj.accent : null); }
         }
         if (!zh) {

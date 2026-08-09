@@ -191,6 +191,13 @@ async function loadPdf() {
     pdfDoc = await task.promise;
     }
     window.dlog('✓ PDF 加载完成，共 ' + pdfDoc.numPages + ' 页');
+    // App-owned cross-book navigation preserves the legacy `page` deep link.
+    // Clamp only after PDF.js knows the real count so an outdated assistant
+    // result cannot leave continuous mode waiting for a non-existent target.
+    currentPage = Math.max(1, Math.min(
+      pdfDoc.numPages,
+      parseInt(currentPage, 10) || 1
+    ));
     document.getElementById('page-total').textContent = '/ ' + (window.__GRP ? window.__GRP.total : pdfDoc.numPages);
     await loadBookCrop();   // 先拉去边配置(_crop/_cropOn)→ 下面 fit-width scale 才能按可见宽算
     // 旋转自动切换排版：开了的话,按当前横/竖屏套用该方向上次存的 {排版+去边开关+双页错位}

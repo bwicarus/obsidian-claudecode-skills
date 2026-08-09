@@ -1,13 +1,31 @@
 import CryptoKit
 import Foundation
 
+struct NativeBookOCRPDFMutationLease: Codable, Equatable, Sendable {
+    let bookID: String
+    let token: String
+    let oldContentSHA256: String
+}
+
+struct NativeBookOCRPDFMutationStageReceipt: Sendable {
+    let hasSource: Bool
+    let hadTarget: Bool
+}
+
 actor NativeBookOCRSidecarStore {
+    static let shared = NativeBookOCRSidecarStore()
+
     private static let maximumAttachments = 5_001
     private static let maximumAttachmentBytes = 32 * 1_024 * 1_024
     private static let maximumBundleBytes = 512 * 1_024 * 1_024
 
     private let fileManager: FileManager
     private let rootURL: URL
+    private var pdfMutationLeases: [String: NativeBookOCRPDFMutationLease] = [:]
+    private var pdfMutationLeasesByDigest:
+        [String: [String: NativeBookOCRPDFMutationLease]] = [:]
+    private var pdfMutationTargetLeaseByDigest:
+        [String: NativeBookOCRPDFMutationLease] = [:]
 
     init(
         fileManager: FileManager = .default,
@@ -24,12 +42,256 @@ actor NativeBookOCRSidecarStore {
         )
     }
 
+    /// The store actor is the serialization point for every OCR sidecar write.
+    /// Calling this after the manager has drained its tasks also waits for all
+    /// earlier store messages before fencing later writes for this book.
+    func beginPDFMutationLease(
+        _ lease: NativeBookOCRPDFMutationLease
+    ) throws {
+        try validatePDFMutationLease(lease)
+        if let active = pdfMutationLeases[lease.bookID] {
+            guard active == lease else {
+                throw NativeBookOCRError.storage(
+                    "本书已有另一项 PDF 改页 OCR 租约"
+                )
+            }
+            return
+        }
+        try registerPDFMutationDigestLease(
+            lease.oldContentSHA256,
+            lease: lease
+        )
+        pdfMutationLeases[lease.bookID] = lease
+    }
+
+    func stagePDFMutation(
+        lease: NativeBookOCRPDFMutationLease,
+        ticket: String,
+        stagedContentSHA256: String,
+        transform: @Sendable (URL) throws -> Void
+    ) throws -> NativeBookOCRPDFMutationStageReceipt {
+        try assertPDFMutationWriteAllowed(
+            bookID: lease.bookID,
+            mutationLease: lease
+        )
+        try validateContentSHA256(stagedContentSHA256)
+        try validatePDFMutationTicket(ticket)
+        let stagedDigest = stagedContentSHA256.lowercased()
+        if let active = pdfMutationTargetLeaseByDigest[stagedDigest],
+           active != lease {
+            throw NativeBookOCRError.storage(
+                "目标 PDF 内容已有另一项 OCR 改页租约"
+            )
+        }
+        try registerPDFMutationDigestLease(stagedDigest, lease: lease)
+        pdfMutationTargetLeaseByDigest[stagedDigest] = lease
+
+        let contentRoot = rootURL.appendingPathComponent(
+            "content",
+            isDirectory: true
+        )
+        let source = contentRoot.appendingPathComponent(
+            lease.oldContentSHA256.lowercased(),
+            isDirectory: true
+        )
+        let staging = contentRoot.appendingPathComponent(
+            ".bw-pdf-mutation-\(ticket).staging",
+            isDirectory: true
+        )
+        let target = contentRoot.appendingPathComponent(
+            stagedDigest,
+            isDirectory: true
+        )
+        let backup = contentRoot.appendingPathComponent(
+            ".bw-pdf-mutation-\(ticket).backup",
+            isDirectory: true
+        )
+        let hasSource = lease.oldContentSHA256.lowercased() != stagedDigest
+            && fileManager.fileExists(atPath: source.path)
+        let hadTarget = fileManager.fileExists(atPath: target.path)
+        guard hasSource else {
+            return NativeBookOCRPDFMutationStageReceipt(
+                hasSource: false,
+                hadTarget: hadTarget
+            )
+        }
+        do {
+            try fileManager.createDirectory(
+                at: contentRoot,
+                withIntermediateDirectories: true
+            )
+            guard !fileManager.fileExists(atPath: staging.path),
+                  !fileManager.fileExists(atPath: backup.path) else {
+                throw NativeBookOCRError.storage(
+                    "本机 OCR staging/backup 已存在"
+                )
+            }
+            try fileManager.copyItem(at: source, to: staging)
+            try transform(staging)
+            return NativeBookOCRPDFMutationStageReceipt(
+                hasSource: true,
+                hadTarget: hadTarget
+            )
+        } catch {
+            try? fileManager.removeItem(at: staging)
+            throw error
+        }
+    }
+
+    func installPDFMutation(
+        lease: NativeBookOCRPDFMutationLease,
+        ticket: String,
+        stagedContentSHA256: String,
+        hasSource: Bool,
+        hadTarget: Bool
+    ) throws {
+        try assertPDFMutationFileAccess(
+            lease: lease,
+            ticket: ticket,
+            stagedContentSHA256: stagedContentSHA256
+        )
+        guard hasSource else { return }
+        let urls = pdfMutationURLs(
+            ticket: ticket,
+            stagedContentSHA256: stagedContentSHA256
+        )
+        guard fileManager.fileExists(atPath: urls.staging.path) else {
+            throw NativeBookOCRError.storage("本机 OCR staging 不存在")
+        }
+        if hadTarget {
+            guard fileManager.fileExists(atPath: urls.target.path),
+                  !fileManager.fileExists(atPath: urls.backup.path) else {
+                throw NativeBookOCRError.storage(
+                    "本机 OCR 目标/备份状态不一致"
+                )
+            }
+            try fileManager.moveItem(at: urls.target, to: urls.backup)
+        } else if fileManager.fileExists(atPath: urls.target.path) {
+            throw NativeBookOCRError.storage(
+                "本机 OCR 目标在事务期间意外出现"
+            )
+        }
+        try fileManager.moveItem(at: urls.staging, to: urls.target)
+    }
+
+    func rollbackPDFMutation(
+        lease: NativeBookOCRPDFMutationLease,
+        ticket: String,
+        stagedContentSHA256: String,
+        hadTarget: Bool,
+        mayHaveInstalled: Bool
+    ) throws {
+        try assertPDFMutationFileAccess(
+            lease: lease,
+            ticket: ticket,
+            stagedContentSHA256: stagedContentSHA256
+        )
+        let urls = pdfMutationURLs(
+            ticket: ticket,
+            stagedContentSHA256: stagedContentSHA256
+        )
+        if fileManager.fileExists(atPath: urls.backup.path) {
+            if fileManager.fileExists(atPath: urls.target.path) {
+                try fileManager.removeItem(at: urls.target)
+            }
+            try fileManager.moveItem(at: urls.backup, to: urls.target)
+        } else if !hadTarget, mayHaveInstalled,
+                  fileManager.fileExists(atPath: urls.target.path) {
+            try fileManager.removeItem(at: urls.target)
+        }
+        try? fileManager.removeItem(at: urls.staging)
+    }
+
+    func cleanupPDFMutationArtifacts(
+        lease: NativeBookOCRPDFMutationLease,
+        ticket: String,
+        stagedContentSHA256: String?
+    ) throws {
+        try assertPDFMutationWriteAllowed(
+            bookID: lease.bookID,
+            mutationLease: lease
+        )
+        try validatePDFMutationTicket(ticket)
+        let contentRoot = rootURL.appendingPathComponent(
+            "content",
+            isDirectory: true
+        )
+        for suffix in [".staging", ".backup"] {
+            let url = contentRoot.appendingPathComponent(
+                ".bw-pdf-mutation-\(ticket)\(suffix)",
+                isDirectory: true
+            )
+            if fileManager.fileExists(atPath: url.path) {
+                try fileManager.removeItem(at: url)
+            }
+        }
+        if let stagedContentSHA256 {
+            try validateContentSHA256(stagedContentSHA256)
+        }
+    }
+
+    func finishPDFMutationLease(
+        _ lease: NativeBookOCRPDFMutationLease
+    ) throws {
+        try validatePDFMutationLease(lease)
+        guard let active = pdfMutationLeases[lease.bookID] else {
+            let conflicting = pdfMutationLeasesByDigest.values.contains {
+                $0[lease.bookID] != nil
+            } || pdfMutationTargetLeaseByDigest.values.contains {
+                $0.bookID == lease.bookID
+            }
+            guard !conflicting else {
+                throw NativeBookOCRError.storage(
+                    "PDF 改页 OCR 租约索引状态不一致"
+                )
+            }
+            return
+        }
+        guard active == lease else {
+            throw NativeBookOCRError.storage(
+                "拒绝结束另一项 PDF 改页 OCR 租约"
+            )
+        }
+        pdfMutationLeases.removeValue(forKey: lease.bookID)
+        for digest in Array(pdfMutationLeasesByDigest.keys) {
+            guard var leases = pdfMutationLeasesByDigest[digest],
+                  leases[lease.bookID] == lease else { continue }
+            leases.removeValue(forKey: lease.bookID)
+            if leases.isEmpty {
+                pdfMutationLeasesByDigest.removeValue(forKey: digest)
+            } else {
+                pdfMutationLeasesByDigest[digest] = leases
+            }
+        }
+        pdfMutationTargetLeaseByDigest =
+            pdfMutationTargetLeaseByDigest.filter { $0.value != lease }
+    }
+
     func page(
         contentSHA256: String,
         page: Int
     ) throws -> NativeBookOCRPageCharacters? {
         try validateContentSHA256(contentSHA256)
         guard page >= 1 else { return nil }
+        let base = try basePage(contentSHA256: contentSHA256, page: page)
+        let manual = try manualPage(contentSHA256: contentSHA256, page: page)
+        let corrections = try selectionCorrections(
+            contentSHA256: contentSHA256,
+            page: page
+        )
+        guard let selected = manual ?? base else {
+            if !corrections.isEmpty {
+                throw NativeBookOCRError.storage("选区校正缺少基础文字页")
+            }
+            return nil
+        }
+        return Self.applyingSelectionCorrections(corrections, to: selected)
+    }
+
+    func basePage(
+        contentSHA256: String,
+        page: Int
+    ) throws -> NativeBookOCRPageCharacters? {
         let url = pageURL(
             contentSHA256: contentSHA256,
             page: page,
@@ -52,6 +314,238 @@ actor NativeBookOCRSidecarStore {
         } catch {
             throw NativeBookOCRError.storage(error.localizedDescription)
         }
+    }
+
+    func writeManualPageOverride(
+        _ value: NativeBookOCRPageCharacters,
+        bookID: String
+    ) throws {
+        try assertPDFMutationWriteAllowed(
+            bookID: bookID,
+            contentSHA256: value.contentSHA256
+        )
+        try validateContentSHA256(value.contentSHA256)
+        guard value.schema == NativeBookOCRPageCharacters.schema,
+              value.page >= 1,
+              value.pageWidth > 0,
+              value.pageHeight > 0,
+              value.textAuthority == .localOverride else {
+            throw NativeBookOCRError.storage("单页手动覆盖结构无效")
+        }
+        let url = manualPageURL(
+            contentSHA256: value.contentSHA256,
+            page: value.page
+        )
+        do {
+            try fileManager.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try encoder().encode(value).write(to: url, options: .atomic)
+        } catch {
+            throw NativeBookOCRError.storage(error.localizedDescription)
+        }
+    }
+
+    func clearManualPageOverride(
+        bookID: String,
+        contentSHA256: String,
+        page: Int
+    ) throws -> Bool {
+        try assertPDFMutationWriteAllowed(
+            bookID: bookID,
+            contentSHA256: contentSHA256
+        )
+        try validateContentSHA256(contentSHA256)
+        guard page >= 1 else { return false }
+        let url = manualPageURL(contentSHA256: contentSHA256, page: page)
+        guard fileManager.fileExists(atPath: url.path) else { return false }
+        do {
+            try fileManager.removeItem(at: url)
+            return true
+        } catch {
+            throw NativeBookOCRError.storage(error.localizedDescription)
+        }
+    }
+
+    func appendSelectionCorrection(
+        _ correction: NativeBookOCRSelectionCorrection,
+        bookID: String
+    ) throws {
+        try assertPDFMutationWriteAllowed(
+            bookID: bookID,
+            contentSHA256: correction.contentSHA256
+        )
+        try validateContentSHA256(correction.contentSHA256)
+        guard correction.schema == NativeBookOCRSelectionCorrection.schema,
+              correction.page >= 1,
+              correction.id.range(
+                of: #"^ocrfix-[0-9a-f]{32}$"#,
+                options: .regularExpression
+              ) != nil,
+              correction.bbox.count == 4,
+              correction.bbox.allSatisfy({ $0.isFinite && $0 >= 0 }),
+              correction.bbox[2] > correction.bbox[0],
+              correction.bbox[3] > correction.bbox[1],
+              !correction.text.trimmingCharacters(
+                in: .whitespacesAndNewlines
+              ).isEmpty,
+              !correction.chars.isEmpty else {
+            throw NativeBookOCRError.storage("选区校正结构无效")
+        }
+        var corrections = try selectionCorrections(
+            contentSHA256: correction.contentSHA256,
+            page: correction.page
+        )
+        guard corrections.count < 256,
+              !corrections.contains(where: { $0.id == correction.id }) else {
+            throw NativeBookOCRError.storage("选区校正数量或身份无效")
+        }
+        corrections.append(correction)
+        let envelope = NativeBookOCRSelectionCorrectionEnvelope(
+            schema: NativeBookOCRSelectionCorrectionEnvelope.schema,
+            contentSHA256: correction.contentSHA256.lowercased(),
+            page: correction.page,
+            corrections: corrections
+        )
+        let url = selectionCorrectionURL(
+            contentSHA256: correction.contentSHA256,
+            page: correction.page
+        )
+        do {
+            try fileManager.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try encoder().encode(envelope).write(to: url, options: .atomic)
+        } catch {
+            throw NativeBookOCRError.storage(error.localizedDescription)
+        }
+    }
+
+    private func manualPage(
+        contentSHA256: String,
+        page: Int
+    ) throws -> NativeBookOCRPageCharacters? {
+        let url = manualPageURL(contentSHA256: contentSHA256, page: page)
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
+        do {
+            let value = try decoder().decode(
+                NativeBookOCRPageCharacters.self,
+                from: Data(contentsOf: url)
+            )
+            guard value.schema == NativeBookOCRPageCharacters.schema,
+                  value.contentSHA256 == contentSHA256.lowercased(),
+                  value.page == page,
+                  value.textAuthority == .localOverride else {
+                throw NativeBookOCRError.storage("单页手动覆盖身份不匹配")
+            }
+            return value
+        } catch let error as NativeBookOCRError {
+            throw error
+        } catch {
+            throw NativeBookOCRError.storage(error.localizedDescription)
+        }
+    }
+
+    private func selectionCorrections(
+        contentSHA256: String,
+        page: Int
+    ) throws -> [NativeBookOCRSelectionCorrection] {
+        let url = selectionCorrectionURL(
+            contentSHA256: contentSHA256,
+            page: page
+        )
+        guard fileManager.fileExists(atPath: url.path) else { return [] }
+        do {
+            let value = try decoder().decode(
+                NativeBookOCRSelectionCorrectionEnvelope.self,
+                from: Data(contentsOf: url)
+            )
+            guard value.schema == NativeBookOCRSelectionCorrectionEnvelope.schema,
+                  value.contentSHA256 == contentSHA256.lowercased(),
+                  value.page == page,
+                  value.corrections.count <= 256,
+                  value.corrections.allSatisfy({ correction in
+                    correction.schema == NativeBookOCRSelectionCorrection.schema
+                        && correction.contentSHA256 == contentSHA256.lowercased()
+                        && correction.page == page
+                        && correction.bbox.count == 4
+                        && !correction.chars.isEmpty
+                  }) else {
+                throw NativeBookOCRError.storage("选区校正身份不匹配")
+            }
+            return value.corrections
+        } catch let error as NativeBookOCRError {
+            throw error
+        } catch {
+            throw NativeBookOCRError.storage(error.localizedDescription)
+        }
+    }
+
+    private static func applyingSelectionCorrections(
+        _ corrections: [NativeBookOCRSelectionCorrection],
+        to initial: NativeBookOCRPageCharacters
+    ) -> NativeBookOCRPageCharacters {
+        guard !corrections.isEmpty else { return initial }
+        var chars = initial.chars
+        var furigana = initial.furigana
+        var formulaRegions = initial.formulaRegions
+        var latest = initial.createdAt
+        var revisionParts = [initial.engineRevision]
+        for correction in corrections.sorted(by: { $0.createdAt < $1.createdAt }) {
+            let box = correction.bbox
+            func contains(_ x0: Double, _ y0: Double, _ x1: Double, _ y1: Double) -> Bool {
+                let x = (x0 + x1) / 2
+                let y = (y0 + y1) / 2
+                return x >= box[0] && x <= box[2]
+                    && y >= box[1] && y <= box[3]
+            }
+            let firstRemoved = chars.firstIndex(where: {
+                contains($0.x0, $0.y0, $0.x1, $0.y1)
+            }) ?? chars.count
+            chars.removeAll(where: {
+                contains($0.x0, $0.y0, $0.x1, $0.y1)
+            })
+            chars.insert(
+                contentsOf: correction.chars,
+                at: min(firstRemoved, chars.count)
+            )
+            furigana.removeAll(where: { item in
+                guard let x0 = item.x0, let y0 = item.y0,
+                      let x1 = item.x1, let y1 = item.y1 else { return false }
+                return contains(x0, y0, x1, y1)
+            })
+            formulaRegions.removeAll(where: { region in
+                !(region.x1 < box[0] || region.x0 > box[2]
+                    || region.y1 < box[1] || region.y0 > box[3])
+            })
+            latest = max(latest, correction.createdAt)
+            revisionParts.append("selection:\(correction.id)")
+        }
+        let meaningful = chars.filter { $0.sp == 0 }
+        return NativeBookOCRPageCharacters(
+            schema: initial.schema,
+            contentSHA256: initial.contentSHA256,
+            page: initial.page,
+            pageWidth: initial.pageWidth,
+            pageHeight: initial.pageHeight,
+            rotation: initial.rotation,
+            geometryDigest: initial.geometryDigest,
+            engineRevision: revisionParts.joined(separator: "+"),
+            status: meaningful.isEmpty ? .readyEmpty : .ready,
+            source: .apple,
+            chars: chars,
+            furigana: furigana,
+            wordSegmentation: initial.wordSegmentation,
+            characterGeometry: initial.characterGeometry,
+            formulaCoverage: formulaRegions.isEmpty
+                ? .unavailable : initial.formulaCoverage,
+            formulaRegions: formulaRegions,
+            createdAt: latest,
+            error: nil,
+            textAuthority: .localOverride
+        )
     }
 
     func pages(contentSHA256: String) throws -> [NativeBookOCRPageCharacters] {
@@ -87,7 +581,22 @@ actor NativeBookOCRSidecarStore {
         }
     }
 
-    func writePage(_ value: NativeBookOCRPageCharacters) throws {
+    func effectivePages(
+        contentSHA256: String
+    ) throws -> [NativeBookOCRPageCharacters] {
+        try pages(contentSHA256: contentSHA256).map { base in
+            try page(contentSHA256: contentSHA256, page: base.page) ?? base
+        }
+    }
+
+    func writePage(
+        _ value: NativeBookOCRPageCharacters,
+        bookID: String
+    ) throws {
+        try assertPDFMutationWriteAllowed(
+            bookID: bookID,
+            contentSHA256: value.contentSHA256
+        )
         try validateContentSHA256(value.contentSHA256)
         guard value.schema == NativeBookOCRPageCharacters.schema,
               value.page >= 1,
@@ -112,7 +621,16 @@ actor NativeBookOCRSidecarStore {
         }
     }
 
-    func writeStatus(_ status: NativeBookOCRBookStatus) throws {
+    func writeStatus(
+        _ status: NativeBookOCRBookStatus,
+        mutationLease: NativeBookOCRPDFMutationLease? = nil
+    ) throws {
+        try assertPDFMutationWriteAllowed(
+            bookID: status.bookID,
+            contentSHA256: status.contentSHA256.isEmpty
+                ? nil : status.contentSHA256,
+            mutationLease: mutationLease
+        )
         guard status.schema == NativeBookOCRBookStatus.schema,
               !status.bookID.isEmpty,
               status.contentSHA256.isEmpty
@@ -225,10 +743,15 @@ actor NativeBookOCRSidecarStore {
     /// The network layer supplies bytes by opaque attachmentId; downloadUrl is
     /// validated metadata and is never opened by this store.
     func importDerivedAttachments(
+        bookID: String,
         expectedContentSHA256: String,
         manifest: NativeBookOCRDerivedAttachmentManifest,
         files: [String: Data]
     ) throws -> NativeBookOCRImportResult {
+        try assertPDFMutationWriteAllowed(
+            bookID: bookID,
+            contentSHA256: expectedContentSHA256
+        )
         try validateContentSHA256(expectedContentSHA256)
         guard expectedContentSHA256.caseInsensitiveCompare(
             manifest.contentSha256
@@ -669,6 +1192,30 @@ actor NativeBookOCRSidecarStore {
             )
     }
 
+    private func manualPageURL(
+        contentSHA256: String,
+        page: Int
+    ) -> URL {
+        contentDirectory(contentSHA256)
+            .appendingPathComponent("overrides/manual", isDirectory: true)
+            .appendingPathComponent(
+                String(format: "p%06d.json", page),
+                isDirectory: false
+            )
+    }
+
+    private func selectionCorrectionURL(
+        contentSHA256: String,
+        page: Int
+    ) -> URL {
+        contentDirectory(contentSHA256)
+            .appendingPathComponent("overrides/selection", isDirectory: true)
+            .appendingPathComponent(
+                String(format: "p%06d.json", page),
+                isDirectory: false
+            )
+    }
+
     private func statusURL(bookID: String) -> URL {
         let digest = Self.sha256(Data(bookID.utf8))
         return rootURL.appendingPathComponent("jobs", isDirectory: true)
@@ -696,6 +1243,137 @@ actor NativeBookOCRSidecarStore {
         ) != nil else {
             throw NativeBookOCRError.invalidAttachment("附件修订号无效")
         }
+    }
+
+    private func validatePDFMutationLease(
+        _ lease: NativeBookOCRPDFMutationLease
+    ) throws {
+        guard lease.bookID.range(
+            of: #"^localbook-[a-f0-9]{64}$"#,
+            options: .regularExpression
+        ) != nil,
+        lease.token.range(
+            of: #"^[a-f0-9]{32}$"#,
+            options: .regularExpression
+        ) != nil,
+        Self.isSHA256(lease.oldContentSHA256) else {
+            throw NativeBookOCRError.storage("PDF 改页 OCR 租约身份无效")
+        }
+    }
+
+    private func registerPDFMutationDigestLease(
+        _ contentSHA256: String,
+        lease: NativeBookOCRPDFMutationLease
+    ) throws {
+        try validateContentSHA256(contentSHA256)
+        let digest = contentSHA256.lowercased()
+        var leases = pdfMutationLeasesByDigest[digest] ?? [:]
+        if let active = leases[lease.bookID], active != lease {
+            throw NativeBookOCRError.storage(
+                "本书的 PDF 摘要已有另一项 OCR 改页租约"
+            )
+        }
+        leases[lease.bookID] = lease
+        pdfMutationLeasesByDigest[digest] = leases
+    }
+
+    private func assertPDFMutationWriteAllowed(
+        bookID: String,
+        contentSHA256: String? = nil,
+        mutationLease: NativeBookOCRPDFMutationLease? = nil
+    ) throws {
+        if let mutationLease {
+            try validatePDFMutationLease(mutationLease)
+            guard mutationLease.bookID == bookID,
+                  pdfMutationLeases[bookID] == mutationLease else {
+                throw NativeBookOCRError.storage(
+                    "PDF 改页 OCR 租约已失效"
+                )
+            }
+            if let contentSHA256 {
+                try validateContentSHA256(contentSHA256)
+                guard pdfMutationLeasesByDigest[
+                    contentSHA256.lowercased()
+                ]?[bookID] == mutationLease else {
+                    throw NativeBookOCRError.storage(
+                        "PDF 改页 OCR 摘要租约已失效"
+                    )
+                }
+            }
+            return
+        }
+        guard pdfMutationLeases[bookID] == nil else {
+            throw NativeBookOCRError.storage(
+                "PDF 改页期间拒绝并发 OCR 写入"
+            )
+        }
+        if let contentSHA256 {
+            try validateContentSHA256(contentSHA256)
+            let digest = contentSHA256.lowercased()
+            guard pdfMutationLeasesByDigest[digest]?[bookID] == nil else {
+                throw NativeBookOCRError.storage(
+                    "本书的 PDF 内容正在改页，拒绝并发 OCR 写入"
+                )
+            }
+            guard pdfMutationTargetLeaseByDigest[digest] == nil else {
+                throw NativeBookOCRError.storage(
+                    "目标 PDF OCR sidecar 正在原子替换，拒绝并发写入"
+                )
+            }
+        }
+    }
+
+    private func validatePDFMutationTicket(_ ticket: String) throws {
+        guard ticket.range(
+            of: #"^npmt_[a-f0-9]{32}$"#,
+            options: .regularExpression
+        ) != nil else {
+            throw NativeBookOCRError.storage("PDF 改页 ticket 无效")
+        }
+    }
+
+    private func assertPDFMutationFileAccess(
+        lease: NativeBookOCRPDFMutationLease,
+        ticket: String,
+        stagedContentSHA256: String
+    ) throws {
+        try assertPDFMutationWriteAllowed(
+            bookID: lease.bookID,
+            mutationLease: lease
+        )
+        try validatePDFMutationTicket(ticket)
+        try validateContentSHA256(stagedContentSHA256)
+        let stagedDigest = stagedContentSHA256.lowercased()
+        guard pdfMutationLeasesByDigest[stagedDigest]?[lease.bookID] == lease,
+              pdfMutationTargetLeaseByDigest[stagedDigest] == lease else {
+            throw NativeBookOCRError.storage(
+                "目标 PDF OCR 摘要租约已失效"
+            )
+        }
+    }
+
+    private func pdfMutationURLs(
+        ticket: String,
+        stagedContentSHA256: String
+    ) -> (staging: URL, target: URL, backup: URL) {
+        let contentRoot = rootURL.appendingPathComponent(
+            "content",
+            isDirectory: true
+        )
+        return (
+            staging: contentRoot.appendingPathComponent(
+                ".bw-pdf-mutation-\(ticket).staging",
+                isDirectory: true
+            ),
+            target: contentRoot.appendingPathComponent(
+                stagedContentSHA256.lowercased(),
+                isDirectory: true
+            ),
+            backup: contentRoot.appendingPathComponent(
+                ".bw-pdf-mutation-\(ticket).backup",
+                isDirectory: true
+            )
+        )
     }
 
     private static func isSHA256(_ value: String) -> Bool {

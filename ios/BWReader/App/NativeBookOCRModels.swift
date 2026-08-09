@@ -34,6 +34,15 @@ enum NativeBookOCRCharacterGeometryState: String, Codable, Sendable {
     case unavailable
 }
 
+/// Indicates whether a native page is only supplemental analysis or is the
+/// user-selected text authority for this page. The latter is intentionally
+/// explicit so PDF.js embedded text cannot silently hide a persisted manual
+/// re-OCR or selection correction.
+enum NativeBookOCRTextAuthority: String, Codable, Sendable {
+    case supplemental
+    case localOverride = "local-override"
+}
+
 enum NativeBookOCRFormulaCoverage: String, Codable, Sendable {
     /// No formula pass has examined this page yet.
     case unknown
@@ -206,6 +215,7 @@ struct NativeBookOCRPageCharacters: Codable, Equatable, Sendable {
     let formulaRegions: [NativeBookOCRFormulaRegion]
     let createdAt: Date
     let error: String?
+    var textAuthority: NativeBookOCRTextAuthority? = nil
 
     enum CodingKeys: String, CodingKey {
         case schema
@@ -226,6 +236,7 @@ struct NativeBookOCRPageCharacters: Codable, Equatable, Sendable {
         case formulaRegions = "formula_regions"
         case createdAt = "created_at"
         case error
+        case textAuthority = "text_authority"
     }
 
     func replacingFormulaAttachment(
@@ -250,7 +261,8 @@ struct NativeBookOCRPageCharacters: Codable, Equatable, Sendable {
             formulaCoverage: attachment.formulaCoverage,
             formulaRegions: attachment.formulaRegions,
             createdAt: max(createdAt, attachment.createdAt),
-            error: error
+            error: error,
+            textAuthority: textAuthority
         )
     }
 
@@ -273,9 +285,80 @@ struct NativeBookOCRPageCharacters: Codable, Equatable, Sendable {
             formulaCoverage: formulaCoverage,
             formulaRegions: formulaRegions,
             createdAt: createdAt,
-            error: error
+            error: error,
+            textAuthority: textAuthority
         )
     }
+
+    func replacingTextAuthority(
+        _ authority: NativeBookOCRTextAuthority,
+        engineRevision: String? = nil
+    ) -> NativeBookOCRPageCharacters {
+        NativeBookOCRPageCharacters(
+            schema: schema,
+            contentSHA256: contentSHA256,
+            page: page,
+            pageWidth: pageWidth,
+            pageHeight: pageHeight,
+            rotation: rotation,
+            geometryDigest: geometryDigest,
+            engineRevision: engineRevision ?? self.engineRevision,
+            status: status,
+            source: source,
+            chars: chars,
+            furigana: furigana,
+            wordSegmentation: wordSegmentation,
+            characterGeometry: characterGeometry,
+            formulaCoverage: formulaCoverage,
+            formulaRegions: formulaRegions,
+            createdAt: createdAt,
+            error: error,
+            textAuthority: authority
+        )
+    }
+}
+
+struct NativeBookOCRSelectionCorrection: Codable, Equatable, Sendable {
+    static let schema = "reader-native-selection-correction/1"
+
+    let schema: String
+    let id: String
+    let contentSHA256: String
+    let page: Int
+    let bbox: [Double]
+    let text: String
+    let chars: [NativeBookOCRCharacter]
+    let createdAt: Date
+
+    enum CodingKeys: String, CodingKey {
+        case schema, id, page, bbox, text, chars
+        case contentSHA256 = "content_sha256"
+        case createdAt = "created_at"
+    }
+}
+
+struct NativeBookOCRSelectionCorrectionEnvelope: Codable, Equatable, Sendable {
+    static let schema = "reader-native-selection-corrections/1"
+
+    let schema: String
+    let contentSHA256: String
+    let page: Int
+    let corrections: [NativeBookOCRSelectionCorrection]
+
+    enum CodingKeys: String, CodingKey {
+        case schema, page, corrections
+        case contentSHA256 = "content_sha256"
+    }
+}
+
+struct NativeBookOCRSelectionResult: Equatable, Sendable {
+    let page: NativeBookOCRPageCharacters
+    let text: String
+}
+
+struct NativeBookOCRClearResult: Equatable, Sendable {
+    let page: NativeBookOCRPageCharacters?
+    let cleared: Bool
 }
 
 /// Kept structurally compatible with the existing page-chars response. The
@@ -406,6 +489,7 @@ enum NativeBookOCRError: LocalizedError {
     case pageUnavailable
     case unsupported
     case unsupportedPageRotation(Int)
+    case invalidSelection
     case noRecognizedText
     case lowConfidence
     case storage(String)
@@ -425,6 +509,8 @@ enum NativeBookOCRError: LocalizedError {
             return "这台设备不支持 Apple 本机文字识别"
         case .unsupportedPageRotation(let rotation):
             return "PDF 页面旋转角度不受支持（\(rotation)°）"
+        case .invalidSelection:
+            return "文字识别选区无效或超出当前页面"
         case .noRecognizedText:
             return "本页没有识别到可用文字"
         case .lowConfidence:

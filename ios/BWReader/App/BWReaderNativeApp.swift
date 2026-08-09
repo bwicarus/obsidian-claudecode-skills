@@ -21,11 +21,15 @@ struct BWReaderNativeApp: App {
 private struct ReaderRootView: View {
     @Environment(\.scenePhase) private var scenePhase
     @StateObject private var reader = ReaderWebViewModel()
+    @StateObject private var remoteLibrary = ReaderRemoteLibraryCoordinator()
     @ObservedObject var voiceBridge: NativeVoiceBridge
     @ObservedObject var nativeCommandReceiver: ReaderNativeCommandReceiver
     @State private var showsDiagnostics = false
     @State private var showsNativeTools = false
-    @State private var showsLibrary = true
+    @State private var showsLibrary = false
+    @State private var startupResolutionPending = true
+    @State private var startupRouteOverrideRequested = false
+    @State private var libraryStartupNotice: String?
     @State private var nativeToolsInitialAction: ReaderNativeFeatureAction?
 
     var body: some View {
@@ -48,6 +52,14 @@ private struct ReaderRootView: View {
                     .background(.ultraThinMaterial, in: Capsule())
                     .frame(maxWidth: .infinity, maxHeight: .infinity, alignment: .top)
                     .padding(.top, 8)
+                    .allowsHitTesting(false)
+            }
+
+            if startupResolutionPending && !reader.isLoading {
+                ProgressView("正在恢复上次阅读")
+                    .tint(.white)
+                    .padding(14)
+                    .background(.ultraThinMaterial, in: Capsule())
                     .allowsHitTesting(false)
             }
 
@@ -150,6 +162,18 @@ private struct ReaderRootView: View {
                 reader: reader,
                 voiceBridge: voiceBridge
             )
+            reader.bind(remoteLibrary: remoteLibrary)
+            let localLibrary = ReaderLocalLibraryManager.shared
+            if localLibrary.isConfigured {
+                let cookies = await reader.remoteLibraryCookies()
+                await remoteLibrary.refresh(
+                    cookies: cookies,
+                    localLibrary: localLibrary
+                )
+            }
+        }
+        .task {
+            await restoreInitialLocalBook()
         }
         .onOpenURL { url in
             if let route = ReaderNativeActivityRoute.parse(url) {
@@ -165,6 +189,10 @@ private struct ReaderRootView: View {
         }
         .onChange(of: scenePhase, initial: true) { _, phase in
             reader.setReaderScenePhase(phase)
+        }
+        .onReceive(reader.$libraryPresentationRequestID) { requestID in
+            guard requestID != nil else { return }
+            showsLibrary = true
         }
         .task {
             BWReaderAppShortcuts.updateAppShortcutParameters()
@@ -208,12 +236,76 @@ private struct ReaderRootView: View {
             )
         }
         .sheet(isPresented: $showsLibrary) {
-            ReaderLocalLibraryView(reader: reader)
+            ReaderLocalLibraryView(
+                reader: reader,
+                startupNotice: libraryStartupNotice,
+                remote: remoteLibrary
+            )
         }
     }
 
     @MainActor
+    private func restoreInitialLocalBook() async {
+        guard startupResolutionPending else { return }
+        defer { startupResolutionPending = false }
+
+        let store = ReaderLastLocalBookStore.shared
+        guard let reference = store.load() else {
+            if store.hasStoredValue {
+                store.clear()
+                libraryStartupNotice = "上次阅读记录已损坏，已清除；请重新打开一本书。"
+            }
+            reader.finishInitialBookDecision()
+            showsLibrary = true
+            return
+        }
+
+        let library = ReaderLocalLibraryManager.shared
+        guard library.isConfigured else {
+            failInitialRestore(
+                "上次书库授权已失效；请重新选择书籍文件夹。"
+            )
+            return
+        }
+        guard reference.libraryID == library.stableLibraryID else {
+            failInitialRestore(
+                "当前书籍文件夹与上次书库不一致；请从当前书库重新打开。"
+            )
+            return
+        }
+        guard let book = library.books.first(where: {
+            $0.id == reference.bookID && $0.libraryID == reference.libraryID
+        }) else {
+            failInitialRestore(
+                "上次阅读的书已移动、删除或尚未进入本机索引；请刷新书库后重新打开。"
+            )
+            return
+        }
+
+        let restored = await reader.restoreLocalBook(book, library: library)
+        guard !startupRouteOverrideRequested else { return }
+        if restored {
+            libraryStartupNotice = nil
+            showsLibrary = false
+        } else {
+            failInitialRestore(
+                "上次阅读的书无法打开，可能已移动或文件夹权限失效；请在书库中重新选择。"
+            )
+        }
+    }
+
+    @MainActor
+    private func failInitialRestore(_ reason: String) {
+        ReaderLastLocalBookStore.shared.clear()
+        libraryStartupNotice = reason
+        reader.finishInitialBookDecision()
+        showsLibrary = true
+    }
+
+    @MainActor
     private func handleNativeFeatureRoute(_ route: ReaderNativeActivityRoute) {
+        startupRouteOverrideRequested = true
+        startupResolutionPending = false
         if let localBookID = route.localBookID,
            let localBook = ReaderLocalLibraryManager.shared.books.first(
             where: { $0.id == localBookID }

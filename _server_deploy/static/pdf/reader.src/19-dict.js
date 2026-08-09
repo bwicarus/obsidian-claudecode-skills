@@ -534,8 +534,12 @@ async function dictStreamJP(word, ctx) {
   const contentEl = document.getElementById('result-content');
   let d;
   try {
+    // @interaction dictionary.jp.read
     const r = await fetch('/pdf/api/dict-jp?word=' + encodeURIComponent(word) +
-      '&context=' + encodeURIComponent(ctx || ''));
+      '&context=' + encodeURIComponent(ctx || '') +
+      '&file=' + encodeURIComponent(FILE_REL || '') +
+      '&page=' + encodeURIComponent((typeof _selPageNum === 'function' ? _selPageNum() : currentPage) || 0) +
+      '&langs=' + encodeURIComponent((BOOK_LANGS || []).join(',')));
     d = await r.json();
   } catch (e) {
     if (myReq === _resultReqId) contentEl.innerHTML = '<div style="color:#c00;padding:14px">查词失败：' + e.message + '</div>';

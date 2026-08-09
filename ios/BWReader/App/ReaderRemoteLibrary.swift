@@ -755,6 +755,44 @@ final class ReaderRemoteLibraryCoordinator: ObservableObject {
         return books.first { $0.bookId == remoteID }
     }
 
+    /// Produces the only book binding accepted by the native Pi gateway. The
+    /// remote entry must come from the current catalog, the mapping must belong
+    /// to the active local folder and every available local digest must agree
+    /// with that catalog entry. A persisted v1 link alone is intentionally not
+    /// sufficient because the Pi file may have changed since the last launch.
+    func verifiedNativeRemoteBookBinding(
+        for localBook: ReaderLocalBookRecord,
+        localContentSHA256: String?
+    ) -> ReaderNativeRemoteBookBinding? {
+        guard activeLibraryID == localBook.libraryID,
+              let remoteBook = remoteBook(for: localBook),
+              remoteBook.kind.lowercased() == localBook.format.rawValue else {
+            return nil
+        }
+        let indexedDigest = localContentSHA256.flatMap(Self.normalizedSHA256)
+        let reconciledDigest = localDigests[localBook.id]
+            .flatMap(Self.normalizedSHA256)
+        if let indexedDigest, let reconciledDigest,
+           indexedDigest != reconciledDigest {
+            return nil
+        }
+        guard let localDigest = reconciledDigest ?? indexedDigest,
+              let remoteDigest = Self.normalizedSHA256(
+                remoteBook.contentSha256
+              ),
+              localDigest == remoteDigest else {
+            return nil
+        }
+        return ReaderNativeRemoteBookBinding(
+            localLibraryID: localBook.libraryID,
+            localBookID: localBook.id,
+            remoteBookID: remoteBook.bookId,
+            localContentSHA256: localDigest,
+            remoteContentSHA256: remoteDigest,
+            remoteRelativePath: remoteBook.rel
+        )
+    }
+
     func syncState(for localBook: ReaderLocalBookRecord) -> ReaderLibrarySyncState {
         guard let remoteBook = remoteBook(for: localBook) else { return .localOnly }
         return linkedState(localBook: localBook, remoteBook: remoteBook)
@@ -875,6 +913,16 @@ final class ReaderRemoteLibraryCoordinator: ObservableObject {
         if localUnchanged, !remoteUnchanged { return .piNewer }
         if remoteUnchanged, !localUnchanged { return .localNewer }
         return .conflict
+    }
+
+    private static func normalizedSHA256(_ value: String) -> String? {
+        guard value.range(
+            of: #"^[a-fA-F0-9]{64}$"#,
+            options: .regularExpression
+        ) != nil else {
+            return nil
+        }
+        return value.lowercased()
     }
 
     private func upsertLink(

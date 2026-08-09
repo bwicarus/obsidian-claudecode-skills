@@ -842,14 +842,21 @@
     var analysis = (block.querySelector('.gb-content') ? block.querySelector('.gb-content').textContent : '').trim();
     var fu = (block.querySelector('.gb-fu-answers') ? block.querySelector('.gb-fu-answers').textContent : '').trim();
     if (!sentence && !analysis) { toast('没有可制卡的内容'); return; }
-    var srcUrl = ''; try { if (spec.sourceUrl) srcUrl = spec.sourceUrl() || ''; } catch (e) {}
     var text = '【句子】' + sentence + (zh ? '\n【译文】' + zh : '') + (analysis ? '\n【语法分析】' + analysis : '') +
-      (fu ? '\n【追问】' + fu : '') + (srcUrl ? '\n【原文出处链接（务必原样放进卡片背面，做成可点链接）】' + srcUrl : '');
+      (fu ? '\n【追问】' + fu : '');
     var jobUi = startBgJob('制 Anki 中…');
     var ov = {}; try { if (spec.aiParams) ov = spec.aiParams() || {}; } catch (e) {}
+    var sourceUrl = ''; try { if (spec.sourceUrl) sourceUrl = spec.sourceUrl() || ''; } catch (e) {}
+    var sourcePage = 0;
+    try { sourcePage = Math.max(0, Number(new URL(sourceUrl, location.href).searchParams.get('page') || 0)); } catch (e) {}
+    var sourceKind = /\/pdf\/epub\/view(?:[?#]|$)/.test(sourceUrl) || /\.epub$/i.test(spec.file || '') ? 'epub'
+      : (/\/pdf\/html\/view(?:[?#]|$)/.test(sourceUrl) || /\.(?:html?|md|markdown)$/i.test(spec.file || '') ? 'html' : 'pdf');
+    // @interaction learning.snippets.enqueue
     fetch('/pdf/api/snippets-to-async', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ snippets: [{ text: text, source: sentence }], make_note: false, make_anki: true, note_name: '', model: ov.model || '', effort: ov.effort || '' })
+      body: JSON.stringify({ file: spec.file || '', page: sourcePage,
+        source: { kind: sourceKind, page: sourcePage },
+        snippets: [{ text: text, source: sentence }], make_note: false, make_anki: true, note_name: '', model: ov.model || '', effort: ov.effort || '' })
     }).then(function (r) { return r.json(); }).then(function (d) {
       if (!d.ok || !d.job_id) { failBgJob(jobUi, d.error || '提交失败'); return; }
       pollBgJob(d.job_id, jobUi);

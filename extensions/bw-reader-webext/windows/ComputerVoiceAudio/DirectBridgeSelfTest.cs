@@ -4310,7 +4310,12 @@ internal static class DirectBridgeSelfTest
                 "computer-voice-direct.status.json"),
             "https://extension-page.example",
             localOptIn: false,
-            experimentalSingleUserMode: true).GetAwaiter().GetResult();
+            experimentalSingleUserMode: true,
+            allowedOrigins:
+            [
+                "https://extension-page.example",
+                DirectBridgeConfigStore.NativeAppOrigin,
+            ]).GetAwaiter().GetResult();
         DirectBridgeConfig experimental =
             new DirectBridgeConfigStore(experimentalPath).Load();
         string strictRoot = System.IO.Path.Combine(root, "strict-origin");
@@ -4342,9 +4347,32 @@ internal static class DirectBridgeSelfTest
             "chrome-extension://jddhhakcblmihidgdobfkcejjinpigak";
         const string safariOrigin =
             "safari-web-extension://E8BEA491-9B80-45DB-8B20-3E586473BD47";
-        return DirectBridgeServer.OriginMatchesAllowlist(
+        return experimental.AllowedOrigins.SetEquals(
+                new[]
+                {
+                    "https://extension-page.example",
+                    DirectBridgeConfigStore.NativeAppOrigin,
+                })
+            && DirectBridgeConfigStore.IsAllowedOrigin(
+                DirectBridgeConfigStore.NativeAppOrigin)
+            && !DirectBridgeConfigStore.IsAllowedOrigin(
+                "http://127.0.0.1:43130")
+            && !DirectBridgeConfigStore.IsAllowedOrigin(
+                "http://localhost:43129")
+            && !DirectBridgeConfigStore.IsAllowedOrigin(
+                "http://127.0.0.1:43129/")
+            && DirectBridgeServer.OriginMatchesAllowlist(
                 experimental,
                 "https://bwicarus.taile44d0c.ts.net")
+            && DirectBridgeServer.OriginMatchesAllowlist(
+                experimental,
+                DirectBridgeConfigStore.NativeAppOrigin)
+            && !DirectBridgeServer.OriginMatchesAllowlist(
+                experimental,
+                "http://127.0.0.1:43130")
+            && !DirectBridgeServer.OriginMatchesAllowlist(
+                experimental,
+                "http://localhost:43129")
             && DirectBridgeServer.OriginMatchesAllowlist(
                 experimental,
                 chromeOrigin)
@@ -8678,7 +8706,8 @@ internal static class DirectBridgeSelfTest
         bool localOptIn,
         bool experimentalSingleUserMode = true,
         string contextDeliveryMode =
-            DirectContextDeliveryMode.LegacyInject)
+            DirectContextDeliveryMode.LegacyInject,
+        string[]? allowedOrigins = null)
     {
         string? directory = System.IO.Path.GetDirectoryName(configPath);
         if (string.IsNullOrEmpty(directory))
@@ -8702,7 +8731,7 @@ internal static class DirectBridgeSelfTest
                 + "{33333333-3333-3333-3333-333333333333}",
             listenHost = DirectBridgeContract.ListenHost,
             listenPort = DirectBridgeContract.DefaultListenPort,
-            allowedOrigins = new[] { origin },
+            allowedOrigins = allowedOrigins ?? new[] { origin },
             allowedTailscaleUserLogin = "bwicarus@gmail.com",
             experimentalSingleUserMode,
             outputScope = "process-only",

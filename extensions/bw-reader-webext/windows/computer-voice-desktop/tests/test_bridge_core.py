@@ -19,6 +19,7 @@ from bridge_core import (  # noqa: E402
     BridgePaths,
     CaptureEndpoint,
     DIRECT_CONFIG_CONTRACT,
+    DEFAULT_ALLOWED_ORIGINS,
     FIXED_ALLOWED_TAILSCALE_USER_LOGIN,
     DIRECT_STATUS_CONTRACT,
     FIXED_APP_KIND,
@@ -26,6 +27,7 @@ from bridge_core import (  # noqa: E402
     FIXED_LISTEN_PORT,
     FIXED_OUTPUT_SCOPE,
     LOCAL_PACKAGED_APP_IDS,
+    NATIVE_APP_ORIGIN,
     LocalOptOutDuringStart,
     RenderEndpoint,
     SERVICE_RECORD_CONTRACT,
@@ -43,6 +45,7 @@ from bridge_core import (  # noqa: E402
     enumerate_active_render_endpoints,
     legacy_microphone_config_requires_migration,
     load_direct_config,
+    migrate_native_app_origin,
     read_direct_status,
     run_idle_bootstrap,
     run_tailscale_read_only_preflight,
@@ -140,6 +143,10 @@ class DirectDesktopCoreTests(unittest.TestCase):
             "requestId": "shortcut-AAAAAAAAAAAAAAAAAAAAAA",
             "rootProcessId": 4242,
             "rootProcessStartTimeUtc": "2026-08-01T08:00:00.0000000Z",
+            # Keep this golden request aligned with the C# serializer.  The
+            # interactive broker validates the exact window generation before
+            # it is allowed to emit F24.
+            "windowHandle": 0x1234,
         }
         payload = (
             json.dumps(request, separators=(",", ":")).encode("utf-8")
@@ -168,6 +175,15 @@ class DirectDesktopCoreTests(unittest.TestCase):
         self.assertFalse(rejected["ok"])
         self.assertEqual(sends, ["F24"])
 
+        wrong_window = {**request, "windowHandle": 0}
+        rejected = json.loads(
+            processor.process(
+                json.dumps(wrong_window).encode("utf-8") + b"\n"
+            )
+        )
+        self.assertFalse(rejected["ok"])
+        self.assertEqual(sends, ["F24"])
+
     def test_shortcut_broker_caches_failure_without_retry(self) -> None:
         attempts = 0
 
@@ -183,6 +199,7 @@ class DirectDesktopCoreTests(unittest.TestCase):
             "requestId": "shortcut-AQEBAQEBAQEBAQEBAQEBAQ",
             "rootProcessId": 7,
             "rootProcessStartTimeUtc": "2026-08-01T08:00:00Z",
+            "windowHandle": 0x2345,
         }
         payload = json.dumps(request).encode("utf-8") + b"\n"
         first = processor.process(payload)
@@ -240,6 +257,10 @@ class DirectDesktopCoreTests(unittest.TestCase):
         self.assertEqual(value["contextDeliveryMode"], "legacy-inject")
         self.assertEqual(value["listenHost"], FIXED_LISTEN_HOST)
         self.assertEqual(value["listenPort"], FIXED_LISTEN_PORT)
+        self.assertEqual(
+            value["allowedOrigins"],
+            list(DEFAULT_ALLOWED_ORIGINS),
+        )
         self.assertIs(value["experimentalSingleUserMode"], True)
         self.assertEqual(
             value["allowedTailscaleUserLogin"],
@@ -266,6 +287,49 @@ class DirectDesktopCoreTests(unittest.TestCase):
                 self.paths.runtime_status,
                 allowed_origins=["https://user@example.test"],
             )
+        for origin in (
+            "http://127.0.0.1:43130",
+            "http://localhost:43129",
+            "http://127.0.0.1:43129/",
+            "HTTP://127.0.0.1:43129",
+        ):
+            with self.subTest(origin=origin):
+                with self.assertRaises(BridgeError):
+                    build_direct_config(
+                        VIRTUAL_MICROPHONE.endpoint_id,
+                        VIRTUAL_SPEAKER.endpoint_id,
+                        self.paths.runtime_status,
+                        allowed_origins=[origin],
+                    )
+
+    def test_existing_config_atomically_gains_native_app_origin(self) -> None:
+        old = build_direct_config(
+            VIRTUAL_MICROPHONE.endpoint_id,
+            VIRTUAL_SPEAKER.endpoint_id,
+            self.paths.runtime_status,
+            allowed_origins=["https://bwicarus.taile44d0c.ts.net"],
+        )
+        self.assertNotIn(NATIVE_APP_ORIGIN, old["allowedOrigins"])
+        self.paths.direct_config.write_text(
+            json.dumps(old),
+            encoding="utf-8",
+        )
+        with patch("bridge_core.os.replace", wraps=os.replace) as replace:
+            migrated = migrate_native_app_origin(self.paths)
+        self.assertIs(migrated, True)
+        self.assertEqual(
+            load_direct_config(self.paths)["allowedOrigins"],
+            list(DEFAULT_ALLOWED_ORIGINS),
+        )
+        replace.assert_called_once()
+        self.assertEqual(
+            list(self.paths.direct_config.parent.glob("*.tmp-*")),
+            [],
+        )
+        with patch("bridge_core.os.replace", wraps=os.replace) as replace:
+            migrated_again = migrate_native_app_origin(self.paths)
+        self.assertIs(migrated_again, False)
+        replace.assert_not_called()
 
     def test_fixed_audio_bus_config_has_explicit_b_capture(self) -> None:
         value = build_direct_config(

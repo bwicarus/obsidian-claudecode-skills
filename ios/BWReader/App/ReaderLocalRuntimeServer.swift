@@ -2,6 +2,7 @@ import CryptoKit
 import FlyingFox
 import FlyingSocks
 import Foundation
+import PDFKit
 import Security
 
 enum ReaderLocalRuntimeError: LocalizedError {
@@ -62,12 +63,58 @@ private actor ReaderLocalRuntimeState {
     }
 }
 
+private struct ReaderLocalBundleVerificationInput: Sendable {
+    let bundleRoot: URL
+    let files: [String: String]
+    let validatesDigests: Bool
+}
+
+private enum ReaderLocalBundleIntegrity {
+    static func sha256Hex(_ data: Data) -> String {
+        SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
+    }
+
+    static func verify(_ input: ReaderLocalBundleVerificationInput) throws {
+        let rootPath = input.bundleRoot.path.hasSuffix("/")
+            ? input.bundleRoot.path : input.bundleRoot.path + "/"
+        for (relative, expectedDigest) in input.files {
+            guard ReaderLocalHTTPHandler.isCanonicalRelativePath(relative),
+                  expectedDigest.count == 64,
+                  expectedDigest.allSatisfy({ $0.isHexDigit && !$0.isUppercase }) else {
+                throw ReaderLocalRuntimeError.bundleUnavailable
+            }
+            let fileURL = relative.split(separator: "/").reduce(input.bundleRoot) {
+                $0.appendingPathComponent(String($1), isDirectory: false)
+            }.resolvingSymlinksInPath().standardizedFileURL
+            guard fileURL.path.hasPrefix(rootPath),
+                  FileManager.default.fileExists(atPath: fileURL.path) else {
+                throw ReaderLocalRuntimeError.bundleUnavailable
+            }
+            guard input.validatesDigests else { continue }
+            guard let bytes = try? Data(
+                contentsOf: fileURL,
+                options: .mappedIfSafe
+            ) else {
+                throw ReaderLocalRuntimeError.bundleUnavailable
+            }
+            let actualDigest = SHA256.hash(data: bytes).map {
+                String(format: "%02x", $0)
+            }.joined()
+            guard actualDigest == expectedDigest else {
+                throw ReaderLocalRuntimeError.bundleUnavailable
+            }
+        }
+    }
+}
+
 private struct ReaderLocalHTTPHandler: HTTPHandler {
     let capabilityToken: String
     let cspNonce: String
     let bundleRoot: URL
     let allowedStaticFiles: Set<String>
+    let staticRevision: String
     let state: ReaderLocalRuntimeState
+    let piProxyBroker: ReaderNativePiProxyBroker
 
     func handleRequest(_ request: HTTPRequest) async throws -> HTTPResponse {
         guard request.method == .GET || request.method == .HEAD else {
@@ -89,6 +136,50 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
               let decodedPath = encodedPath.removingPercentEncoding,
               !decodedPath.contains("\\"), !decodedPath.contains("\0") else {
             return response(status: .badRequest, text: "invalid path")
+        }
+
+        if decodedPath == "/pdf/api/toc" {
+            guard trustedResourceSurface(
+                referer: request.headers[HTTPHeader("Referer")]
+            ) == .pdf else {
+                return response(status: .forbidden, text: "invalid referer")
+            }
+            return await serveNativeTOC(request)
+        }
+
+        if Self.isDirectPiResourcePath(decodedPath) {
+            guard request.method == .GET else {
+                return response(
+                    status: .methodNotAllowed,
+                    text: "method not allowed",
+                    headers: [HTTPHeader("Allow"): "GET"]
+                )
+            }
+            guard let surface = trustedResourceSurface(
+                referer: request.headers[HTTPHeader("Referer")]
+            ) else {
+                return response(status: .forbidden, text: "invalid referer")
+            }
+            do {
+                var result = try await piProxyBroker.responseForResource(
+                    ReaderNativePiResourceProxyRequest(
+                        requestTarget: request.target.rawValue,
+                        surface: surface,
+                        accept: request.headers[HTTPHeader("Accept")] ?? "*/*",
+                        range: request.headers[.range]
+                    )
+                )
+                Self.secure(&result)
+                return result
+            } catch {
+                return response(
+                    status: .badGateway,
+                    text: error.localizedDescription,
+                    headers: [
+                        HTTPHeader("X-BW-Reader-Error"): "pi-resource-unavailable"
+                    ]
+                )
+            }
         }
 
         if decodedPath.hasPrefix("/static/") {
@@ -114,11 +205,38 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
             )
         case "shells/pdf.html", "shells/epub.html":
             return await serveShell(request, relative: relative)
+        case "native-api/book-meta":
+            return await serveBookMeta(request)
         default:
             break
         }
 
         let segments = relative.split(separator: "/", omittingEmptySubsequences: false)
+        if segments.count == 2,
+           segments[0] == Substring(ReaderNativePiProxyBroker.routeComponent) {
+            guard request.method == .GET else {
+                return response(
+                    status: .methodNotAllowed,
+                    text: "method not allowed",
+                    headers: [HTTPHeader("Allow"): "GET"]
+                )
+            }
+            do {
+                var result = try await piProxyBroker.response(
+                    for: String(segments[1])
+                )
+                Self.secure(&result)
+                return result
+            } catch {
+                return response(
+                    status: .badGateway,
+                    text: error.localizedDescription,
+                    headers: [
+                        HTTPHeader("X-BW-Reader-Error"): "pi-stream-unavailable"
+                    ]
+                )
+            }
+        }
         if segments.count == 3,
            segments[0] == "books", segments[2] == "content" {
             return try await serveBook(
@@ -134,11 +252,185 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
         return response(status: .notFound, text: "not found")
     }
 
+    private func trustedResourceSurface(
+        referer: String?
+    ) -> ReaderNativeInterfaceSurface? {
+        guard let referer, referer.utf8.count <= 4_096,
+              let url = URL(string: referer),
+              url.scheme?.lowercased() == "http",
+              url.host?.lowercased() == ReaderLocalRuntimeServer.host,
+              url.port == Int(ReaderLocalRuntimeServer.port),
+              url.user == nil, url.password == nil,
+              url.fragment == nil else {
+            return nil
+        }
+        let prefix = "/r/\(capabilityToken)/shells/"
+        if url.path == "\(prefix)pdf.html" { return .pdf }
+        if url.path == "\(prefix)epub.html" { return .epub }
+        return nil
+    }
+
+    private static func isDirectPiResourcePath(_ path: String) -> Bool {
+        if [
+            "/pdf/api/page-image",
+            "/pdf/api/figure-crop",
+            "/pdf/api/img-proxy",
+            "/pdf/api/reader-events",
+            "/pdf/api/vocab-audio",
+        ].contains(path) {
+            return true
+        }
+        return path.hasPrefix("/pdf/api/asset/")
+            && path.count > "/pdf/api/asset/".count
+            || path.hasPrefix("/api/assistant/voice-clip/")
+            && path.count > "/api/assistant/voice-clip/".count
+    }
+
+    private func serveBookMeta(_ request: HTTPRequest) async -> HTTPResponse {
+        guard request.method == .GET || request.method == .HEAD else {
+            return jsonResponse(
+                request,
+                status: .methodNotAllowed,
+                object: ["ok": false, "error": "method not allowed"],
+                additionalHeaders: [HTTPHeader("Allow"): "GET, HEAD"]
+            )
+        }
+        guard let opaqueBookID = request.query["book"],
+              Self.isOpaqueBookID(opaqueBookID),
+              let access = await state.access(for: opaqueBookID),
+              access.record.format == .pdf else {
+            return jsonResponse(
+                request,
+                status: .notFound,
+                object: ["ok": false, "error": "book unavailable"]
+            )
+        }
+        do {
+            try access.validateCurrentFile(
+                maximumEPUBBytes: ReaderLocalRuntimeServer.maximumEPUBBytes
+            )
+        } catch {
+            return jsonResponse(
+                request,
+                status: .conflict,
+                object: ["ok": false, "error": error.localizedDescription]
+            )
+        }
+        guard let document = PDFDocument(url: access.url),
+              document.pageCount > 0,
+              let firstPage = document.page(at: 0) else {
+            return jsonResponse(
+                request,
+                status: .badRequest,
+                object: ["ok": false, "error": "PDF metadata unavailable"]
+            )
+        }
+        // PyMuPDF's legacy `page.rect` describes the visible, rotated page.
+        // PDFKit's crop box is the matching native rendering geometry and is
+        // also the coordinate space used by the local OCR pipeline.
+        let bounds = firstPage.bounds(for: .cropBox)
+        let modifiedAt = access.record.modifiedAt
+            ?? Date(timeIntervalSince1970: 0)
+        return jsonResponse(
+            request,
+            status: .ok,
+            object: [
+                "ok": true,
+                "page_count": document.pageCount,
+                "page_w": Double(bounds.width),
+                "page_h": Double(bounds.height),
+                "mtime": Int(modifiedAt.timeIntervalSince1970),
+            ]
+        )
+    }
+
+    private func serveNativeTOC(_ request: HTTPRequest) async -> HTTPResponse {
+        guard let fileIdentity = request.query["file"],
+              let opaqueBookID = Self.opaqueBookID(
+                fromLocalFileIdentity: fileIdentity
+              ),
+              let access = await state.access(for: opaqueBookID),
+              access.record.format == .pdf else {
+            return jsonResponse(
+                request,
+                status: .notFound,
+                object: ["ok": false, "error": "book unavailable"]
+            )
+        }
+        do {
+            try access.validateCurrentFile(
+                maximumEPUBBytes: ReaderLocalRuntimeServer.maximumEPUBBytes
+            )
+        } catch {
+            return jsonResponse(
+                request,
+                status: .conflict,
+                object: ["ok": false, "error": error.localizedDescription]
+            )
+        }
+        guard let document = PDFDocument(url: access.url) else {
+            return jsonResponse(
+                request,
+                status: .badRequest,
+                object: ["ok": false, "error": "PDF outline unavailable"]
+            )
+        }
+        let entries = Self.nativeTOCEntries(in: document)
+        var payload: [String: Any] = [
+            "ok": true,
+            "exists": !entries.isEmpty,
+            "source": entries.isEmpty ? "none" : "native",
+            "count": entries.count,
+            "range": [String: Any](),
+        ]
+        if request.query["entries"] != nil {
+            payload["entries"] = entries
+        }
+        return jsonResponse(request, status: .ok, object: payload)
+    }
+
+    private static func nativeTOCEntries(
+        in document: PDFDocument
+    ) -> [[String: Any]] {
+        guard let root = document.outlineRoot else { return [] }
+        var entries: [[String: Any]] = []
+
+        func appendChildren(of parent: PDFOutline, level: Int) {
+            for index in 0..<parent.numberOfChildren {
+                guard let outline = parent.child(at: index) else { continue }
+                let title = (outline.label ?? "")
+                    .trimmingCharacters(in: .whitespacesAndNewlines)
+                let destination = outline.destination
+                if !title.isEmpty, let page = destination?.page {
+                    let pageIndex = document.index(for: page)
+                    if (0..<document.pageCount).contains(pageIndex) {
+                        entries.append([
+                            "title": title,
+                            "page": pageIndex + 1,
+                            "level": max(1, level),
+                        ])
+                    }
+                }
+                appendChildren(of: outline, level: level + 1)
+            }
+        }
+
+        appendChildren(of: root, level: 1)
+        return entries
+    }
+
     private func serveStatic(
         _ request: HTTPRequest,
         decodedPath: String
     ) async throws -> HTTPResponse {
-        let relative = String(decodedPath.dropFirst())
+        let requestedRelative = String(decodedPath.dropFirst())
+        let revisionPrefix = "static/\(staticRevision)/"
+        let isRevisioned = requestedRelative.hasPrefix(revisionPrefix)
+        let relative = isRevisioned
+            ? "static/" + String(
+                requestedRelative.dropFirst(revisionPrefix.count)
+              )
+            : requestedRelative
         guard allowedStaticFiles.contains(relative),
               let url = safeBundleURL(relative: relative) else {
             return response(status: .notFound, text: "resource unavailable")
@@ -148,6 +440,9 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
             contentType: Self.mimeType(for: url.pathExtension),
             cacheControl: [.noCache]
         ).handleRequest(request)
+        result.headers[.cacheControl] = isRevisioned
+            ? "public, max-age=31536000, immutable"
+            : "no-cache"
         Self.secure(&result)
         return result
     }
@@ -179,6 +474,24 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
             ? "/r/\(capabilityToken)/empty.pdf"
             : "/r/\(capabilityToken)/books/\(opaqueID)/content"
         let sha = record?.contentSha256 ?? record?.contentFingerprint ?? ""
+        let initialPage: Int
+        let initialPositionTimestamp: Int
+        if let rawPage = request.query["page"] {
+            guard let parsedPage = Int(rawPage),
+                  (1...10_000_000).contains(parsedPage),
+                  record != nil else {
+                return response(
+                    status: .badRequest,
+                    text: "invalid initial book location"
+                )
+            }
+            initialPage = parsedPage
+            initialPositionTimestamp = Int(Date().timeIntervalSince1970)
+        } else {
+            initialPage = 1
+            initialPositionTimestamp = 0
+        }
+        let initialEPUBPosition = max(0, initialPage - 1)
 
         shell = shell
             .replacingOccurrences(
@@ -206,8 +519,28 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                 with: Self.jsonLiteral(sha)
             )
             .replacingOccurrences(
+                of: "__BW_LOCAL_INITIAL_PAGE__",
+                with: String(initialPage)
+            )
+            .replacingOccurrences(
+                of: "__BW_LOCAL_INITIAL_PAGE_TS__",
+                with: String(initialPositionTimestamp)
+            )
+            .replacingOccurrences(
+                of: "__BW_LOCAL_INITIAL_EPUB_POS__",
+                with: String(initialEPUBPosition)
+            )
+            .replacingOccurrences(
+                of: "__BW_LOCAL_INITIAL_EPUB_POS_TS__",
+                with: String(initialPositionTimestamp)
+            )
+            .replacingOccurrences(
                 of: "__BW_LOCAL_CSP_NONCE__",
                 with: cspNonce
+            )
+            .replacingOccurrences(
+                of: "/static/",
+                with: "/static/\(staticRevision)/"
             )
         guard Self.allScriptTagsCarryNonce(shell, nonce: cspNonce) else {
             return response(
@@ -227,7 +560,11 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
             contentType: "text/html; charset=utf-8",
             cacheControl: "no-store",
             additionalHeaders: [
-                HTTPHeader("Content-Security-Policy"): "default-src 'self'; script-src 'self' 'nonce-\(cspNonce)'; script-src-attr 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob: data:; font-src 'self' data:; worker-src 'self' blob:; connect-src 'self' wss://bwicarus-2.taile44d0c.ts.net; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none'"
+                HTTPHeader("Content-Security-Policy"): "default-src 'self'; script-src 'self' 'nonce-\(cspNonce)'; script-src-attr 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob: data:; font-src 'self' data:; worker-src 'self' blob:; connect-src 'self' wss://bwicarus-2.taile44d0c.ts.net; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none'",
+                // Direct <img>/<audio> requests need the unguessable shell
+                // capability in their same-origin Referer. Cross-origin
+                // requests still receive no Referer under this policy.
+                HTTPHeader("Referrer-Policy"): "same-origin",
             ]
         )
     }
@@ -270,9 +607,37 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
         headers[.contentLength] = String(data.count)
         headers[.cacheControl] = cacheControl
         headers[HTTPHeader("X-Content-Type-Options")] = "nosniff"
-        headers[HTTPHeader("Referrer-Policy")] = "no-referrer"
+        if headers[HTTPHeader("Referrer-Policy")] == nil {
+            headers[HTTPHeader("Referrer-Policy")] = "no-referrer"
+        }
         return HTTPResponse(
             statusCode: .ok,
+            headers: headers,
+            body: request.method == .HEAD ? Data() : data
+        )
+    }
+
+    private func jsonResponse(
+        _ request: HTTPRequest,
+        status: HTTPStatusCode,
+        object: [String: Any],
+        additionalHeaders: HTTPHeaders = [:]
+    ) -> HTTPResponse {
+        guard JSONSerialization.isValidJSONObject(object),
+              let data = try? JSONSerialization.data(withJSONObject: object) else {
+            return response(
+                status: .internalServerError,
+                text: "json encoding unavailable"
+            )
+        }
+        var headers = additionalHeaders
+        headers[.contentType] = "application/json; charset=utf-8"
+        headers[.contentLength] = String(data.count)
+        headers[.cacheControl] = "no-store"
+        headers[HTTPHeader("X-Content-Type-Options")] = "nosniff"
+        headers[HTTPHeader("Referrer-Policy")] = "no-referrer"
+        return HTTPResponse(
+            statusCode: status,
             headers: headers,
             body: request.method == .HEAD ? Data() : data
         )
@@ -328,6 +693,14 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
         return value.dropFirst("localbook-".count).allSatisfy {
             $0.isHexDigit && !$0.isUppercase
         }
+    }
+
+    private static func opaqueBookID(
+        fromLocalFileIdentity value: String
+    ) -> String? {
+        guard value.hasPrefix("localbook:") else { return nil }
+        let opaqueBookID = String(value.dropFirst("localbook:".count))
+        return isOpaqueBookID(opaqueBookID) ? opaqueBookID : nil
     }
 
     static func jsonLiteral(_ value: String) -> String {
@@ -426,7 +799,11 @@ final class ReaderLocalRuntimeServer {
     private let capabilityToken: String
     private let cspNonce: String
     private let state: ReaderLocalRuntimeState
+    let piProxyBroker: ReaderNativePiProxyBroker
     private let server: HTTPServer
+    private let bundleVerificationTask: Task<Void, Error>
+    private let bundleVerificationCacheToken: String
+    private var bundleVerificationRecorded = false
     private var runTask: Task<Void, Never>?
     private var lifecycleTask: Task<Void, Error>?
     private var lifecycleToken: UUID?
@@ -459,25 +836,10 @@ final class ReaderLocalRuntimeServer {
         }
 
         var staticFiles = Set<String>()
-        let rootPath = bundleRoot.path.hasSuffix("/")
-            ? bundleRoot.path : bundleRoot.path + "/"
         for (relative, expectedDigest) in files {
             guard ReaderLocalHTTPHandler.isCanonicalRelativePath(relative),
                   expectedDigest.count == 64,
                   expectedDigest.allSatisfy({ $0.isHexDigit && !$0.isUppercase }) else {
-                throw ReaderLocalRuntimeError.bundleUnavailable
-            }
-            let fileURL = relative.split(separator: "/").reduce(bundleRoot) {
-                $0.appendingPathComponent(String($1), isDirectory: false)
-            }.resolvingSymlinksInPath().standardizedFileURL
-            guard fileURL.path.hasPrefix(rootPath),
-                  let bytes = try? Data(contentsOf: fileURL, options: .mappedIfSafe) else {
-                throw ReaderLocalRuntimeError.bundleUnavailable
-            }
-            let actualDigest = SHA256.hash(data: bytes).map {
-                String(format: "%02x", $0)
-            }.joined()
-            guard actualDigest == expectedDigest else {
                 throw ReaderLocalRuntimeError.bundleUnavailable
             }
             if relative.hasPrefix("static/") {
@@ -485,16 +847,46 @@ final class ReaderLocalRuntimeServer {
             }
         }
 
+        let manifestDigest = ReaderLocalBundleIntegrity.sha256Hex(manifestData)
+        let bundleIdentity = [
+            bundle.bundleIdentifier ?? "unknown",
+            bundle.object(forInfoDictionaryKey: "CFBundleShortVersionString")
+                as? String ?? "0",
+            bundle.object(forInfoDictionaryKey: "CFBundleVersion")
+                as? String ?? "0",
+        ].joined(separator: ":")
+        let verificationCacheToken = "\(bundleIdentity):\(manifestDigest)"
+        let verificationCacheKey = "reader.localRuntime.bundleIntegrity.v1"
+        let cacheHit = UserDefaults.standard.string(forKey: verificationCacheKey)
+            == verificationCacheToken
+        bundleVerificationCacheToken = verificationCacheToken
+        bundleVerificationTask = Task.detached(priority: .utility) {
+            try ReaderLocalBundleIntegrity.verify(
+                ReaderLocalBundleVerificationInput(
+                    bundleRoot: bundleRoot,
+                    files: files,
+                    // The installed App bundle is code-signed and immutable. A
+                    // matching bundle identity + manifest digest can therefore
+                    // reuse the prior full digest pass; existence/path checks
+                    // still run off the main actor on every launch.
+                    validatesDigests: !cacheHit
+                )
+            )
+        }
+
         capabilityToken = try Self.makeRandomHex(byteCount: 32)
         cspNonce = try Self.makeRandomHex(byteCount: 32)
         state = ReaderLocalRuntimeState()
+        piProxyBroker = ReaderNativePiProxyBroker()
         let address = try sockaddr_in.inet(ip4: Self.host, port: Self.port)
         let handler = ReaderLocalHTTPHandler(
             capabilityToken: capabilityToken,
             cspNonce: cspNonce,
             bundleRoot: bundleRoot,
             allowedStaticFiles: staticFiles,
-            state: state
+            staticRevision: String(manifestDigest.prefix(24)),
+            state: state,
+            piProxyBroker: piProxyBroker
         )
         server = HTTPServer(
             address: address,
@@ -505,6 +897,8 @@ final class ReaderLocalRuntimeServer {
     }
 
     deinit {
+        piProxyBroker.cancelAll()
+        bundleVerificationTask.cancel()
         lifecycleTask?.cancel()
         runTask?.cancel()
     }
@@ -558,6 +952,7 @@ final class ReaderLocalRuntimeServer {
     }
 
     private func performStart() async throws {
+        try await ensureBundleVerified()
         if await server.isListening { return }
         lastRunError = nil
         runTask?.cancel()
@@ -582,6 +977,24 @@ final class ReaderLocalRuntimeServer {
         }
     }
 
+    private func ensureBundleVerified() async throws {
+        do {
+            try await bundleVerificationTask.value
+            if !bundleVerificationRecorded {
+                UserDefaults.standard.set(
+                    bundleVerificationCacheToken,
+                    forKey: "reader.localRuntime.bundleIntegrity.v1"
+                )
+                bundleVerificationRecorded = true
+            }
+        } catch {
+            UserDefaults.standard.removeObject(
+                forKey: "reader.localRuntime.bundleIntegrity.v1"
+            )
+            throw ReaderLocalRuntimeError.bundleUnavailable
+        }
+    }
+
     private func joinLifecycleTaskIfPresent() async throws -> Bool {
         guard let transition = lifecycleTask,
               let token = lifecycleToken else { return false }
@@ -602,29 +1015,51 @@ final class ReaderLocalRuntimeServer {
     }
 
     func defaultShellURL() -> URL {
-        makeShellURL(format: .pdf, bookID: nil)
+        makeShellURL(format: .pdf, bookID: nil, initialPage: nil)
     }
 
     /// Replaces the single active document and strongly retains its security
     /// scope. Only the opaque localBookID appears in the renderer URL.
-    func open(_ access: ReaderLocalBookAccess) async throws -> URL {
+    func open(
+        _ access: ReaderLocalBookAccess,
+        initialPage: Int? = nil
+    ) async throws -> URL {
         try access.validateCurrentFile(maximumEPUBBytes: Self.maximumEPUBBytes)
+        if let initialPage,
+           !(1...10_000_000).contains(initialPage) {
+            throw ReaderLocalRuntimeError.serverUnavailable(
+                "本机书籍初始位置无效"
+            )
+        }
         await state.replace(with: access)
-        return makeShellURL(format: access.record.format, bookID: access.record.id)
+        return makeShellURL(
+            format: access.record.format,
+            bookID: access.record.id,
+            initialPage: initialPage
+        )
     }
 
     private func makeShellURL(
         format: ReaderLocalBookFormat,
-        bookID: String?
+        bookID: String?,
+        initialPage: Int?
     ) -> URL {
         let shell = format == .epub ? "epub.html" : "pdf.html"
         var components = URLComponents(
             url: baseURL.appendingPathComponent("shells/\(shell)"),
             resolvingAgainstBaseURL: false
         )!
+        var queryItems = [URLQueryItem]()
         if let bookID {
-            components.queryItems = [URLQueryItem(name: "book", value: bookID)]
+            queryItems.append(URLQueryItem(name: "book", value: bookID))
         }
+        if let initialPage {
+            queryItems.append(URLQueryItem(
+                name: "page",
+                value: String(initialPage)
+            ))
+        }
+        components.queryItems = queryItems.isEmpty ? nil : queryItems
         return components.url!
     }
 

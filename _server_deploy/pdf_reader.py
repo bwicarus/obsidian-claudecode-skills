@@ -79,6 +79,16 @@ _READER_BOOK_OCR = None
 _READER_BOOK_USER_STATE = None
 
 
+def _reader_book_legacy_embedded_page(path, rel: str, page: int):
+    """Read the live embedded layer without creating or changing legacy caches."""
+    is_ja = "ja" in (_book_langs_for(rel) or [])
+    result = _compute_page_chars(path, page, is_ja=is_ja)
+    if result is None:
+        return None
+    chars, page_w, page_h, furigana = result
+    return _strip_graphic_noise(chars), page_w, page_h, furigana
+
+
 def _reader_book_library():
     """Return the vault-wide original-book catalog used by native clients."""
     global _READER_BOOK_LIBRARY
@@ -98,6 +108,11 @@ def _reader_book_ocr():
             _reader_book_library(),
             CLAUDE_DIR / "state" / "reader-book-ocr",
             CLAUDE_DIR,
+            legacy_embedded_page_reader=_reader_book_legacy_embedded_page,
+            legacy_language_resolver=(
+                lambda rel: "ja" if "ja" in (_book_langs_for(rel) or []) else "zh"
+            ),
+            legacy_char_cache_version=_CHAR_CACHE_VER,
         )
     return _READER_BOOK_OCR
 
@@ -3762,6 +3777,50 @@ def pdf_api_library_ocr_start():
         return _reader_library_ocr_error(exc)
 
 
+@bp.route("/api/library/ocr/adoption-preview")
+def pdf_api_library_ocr_adoption_preview():
+    """Inspect path-keyed legacy results without writing or accepting a path."""
+    denied = _reader_library_access_error()
+    if denied is not None:
+        return denied
+    if set(request.args) - {"bookId", "contentSha256"}:
+        return _reader_library_ocr_error(ReaderBookOcrError(
+            "invalid-request", "unknown OCR adoption preview fields", status=400
+        ))
+    try:
+        adoption = _reader_book_ocr().preview_adoption(
+            str(request.args.get("bookId") or ""),
+            str(request.args.get("contentSha256") or ""),
+        )
+        response = jsonify({
+            "ok": True,
+            "contract": READER_BOOK_OCR_CONTRACT,
+            "adoption": adoption,
+        })
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
+    except ReaderBookOcrError as exc:
+        return _reader_library_ocr_error(exc)
+
+
+@bp.route("/api/library/ocr/adopt", methods=["POST"])
+def pdf_api_library_ocr_adopt():
+    """Atomically publish a content-versioned copy of validated legacy results."""
+    denied = _reader_library_access_error()
+    if denied is not None:
+        return denied
+    try:
+        book_id, content_sha256, _engine = _reader_library_ocr_body()
+        job, adoption, already = _reader_book_ocr().adopt_legacy(
+            book_id, content_sha256
+        )
+        payload = _reader_book_ocr_wire_payload(job, already=already)
+        payload["adoption"] = adoption
+        return jsonify(payload)
+    except ReaderBookOcrError as exc:
+        return _reader_library_ocr_error(exc)
+
+
 @bp.route("/api/library/ocr/status")
 def pdf_api_library_ocr_status():
     denied = _reader_library_access_error()
@@ -3825,12 +3884,13 @@ def pdf_api_library_ocr_page_chars(book_id, page):
         ))
     try:
         content_sha256 = str(request.args.get("contentSha256") or "")
-        sidecar, _source_path = _reader_book_ocr().read_page(book_id, content_sha256, page)
+        sidecar, _source_path, formulas = _reader_book_ocr().read_page_bundle(
+            book_id, content_sha256, page
+        )
         chars = [dict(item) for item in sidecar.get("chars") or []]
         furigana = [dict(item) for item in sidecar.get("furigana") or []]
         page_w = float(sidecar.get("page_w") or 0)
         page_h = float(sidecar.get("page_h") or 0)
-        formulas = _reader_book_ocr().read_formulas(book_id, content_sha256)
         _apply_formula_records(chars, furigana, formulas, page, page_w, page_h)
         response = jsonify({
             "ok": True,
@@ -3886,14 +3946,12 @@ def pdf_api_library_attachment_download(book_id, attachment_id):
         ))
     try:
         content_sha256 = str(request.args.get("contentSha256") or "")
-        manifest = _reader_book_ocr().attachment_manifest(book_id, content_sha256)
         revision = str(request.args.get("revision") or "")
-        if revision and revision != manifest.get("revision"):
-            raise ReaderBookOcrError(
-                "ocr-attachment-revision-changed", "attachment revision changed", status=409
-            )
-        entry, path = _reader_book_ocr().read_attachment(
-            book_id, content_sha256, attachment_id
+        entry, path, manifest = _reader_book_ocr().read_attachment(
+            book_id,
+            content_sha256,
+            attachment_id,
+            expected_revision=revision or None,
         )
         response = send_file(
             str(path),
@@ -14916,22 +14974,114 @@ def _start_ai_stream(prompt: str, action: str = "explain", uid: str = "", rid: s
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
+def _snippets_source_context(body):
+    """Validate the caller's document identity and build a server-origin link.
+
+    Native Reader pages run on a private loopback origin, so a URL assembled by
+    JavaScript is not a durable citation.  The client sends only a verified book
+    identity plus a small source descriptor; after the native gateway rewrites
+    ``file`` to the Pi catalog path, this server creates the public Reader link.
+    """
+    file_rel = str(body.get("file") or "").strip().replace("\\", "/")
+    if file_rel:
+        if (len(file_rel.encode("utf-8")) > 2048 or file_rel.startswith("/")
+                or "?" in file_rel or "#" in file_rel
+                or any(part in ("", ".", "..") for part in file_rel.split("/"))
+                or any(ord(ch) < 0x20 or ord(ch) == 0x7f for ch in file_rel)):
+            return None, ("书籍来源无效", 400)
+
+    source = body.get("source")
+    if source is None:
+        source = {}
+    if not isinstance(source, dict) or set(source) - {"kind", "page"}:
+        return None, ("原文来源结构无效", 400)
+    kind = str(source.get("kind") or "").strip().lower()
+    if not kind:
+        suffix = Path(file_rel).suffix.lower()
+        kind = "epub" if suffix == ".epub" else (
+            "html" if suffix in {".html", ".htm", ".md", ".markdown"} else "pdf"
+        )
+    if kind not in {"pdf", "epub", "html"}:
+        return None, ("原文来源类型无效", 400)
+
+    raw_page = source.get("page", body.get("page", 0))
+    try:
+        page = int(raw_page or 0)
+    except (TypeError, ValueError):
+        return None, ("原文页码无效", 400)
+    if (isinstance(raw_page, bool)
+            or isinstance(raw_page, float) and not raw_page.is_integer()
+            or isinstance(raw_page, str) and not re.fullmatch(r"[0-9]+", raw_page.strip())
+            or page < 0 or page > 10_000_000):
+        return None, ("原文页码无效", 400)
+    if body.get("page") not in (None, "", 0, "0"):
+        try:
+            body_page = int(body.get("page"))
+        except (TypeError, ValueError):
+            return None, ("原文页码无效", 400)
+        if (isinstance(body.get("page"), bool)
+                or isinstance(body.get("page"), float)
+                and not body.get("page").is_integer()
+                or isinstance(body.get("page"), str)
+                and not re.fullmatch(r"[0-9]+", body.get("page").strip())):
+            return None, ("原文页码无效", 400)
+        # The vbook before-request adapter may already have translated the
+        # top-level global page to a member-local page.  That authoritative
+        # value intentionally wins over the descriptive copy in source.page.
+        page = body_page
+
+    link = ""
+    if file_rel:
+        base = (os.environ.get("READER_PUBLIC_URL") or request.url_root).rstrip("/")
+        encoded = urllib.parse.quote(file_rel, safe="/")
+        if kind == "epub":
+            link = f"{base}/pdf/epub/view?file={encoded}"
+        elif kind == "html":
+            link = f"{base}/pdf/html/view?file={encoded}"
+        else:
+            link = f"{base}/pdf/view?file={encoded}&page={page or 1}"
+    return {
+        "file": file_rel,
+        "page": page,
+        "kind": kind,
+        "link": link,
+    }, None
+
+
 def _validate_snippets_body(body):
     """校验 snippets-to 入参。返回 (params_dict, None) 或 (None, (errmsg, code))。"""
+    if not isinstance(body, dict):
+        return None, ("请求结构无效", 400)
     snippets = body.get("snippets") or []
     make_note = bool(body.get("make_note"))
     make_anki = bool(body.get("make_anki"))
     note_name = (body.get("note_name") or "").strip()
-    if not snippets:
+    if not isinstance(snippets, list) or not snippets:
         return None, ("无选中段落", 400)
     if not (make_note or make_anki):
         return None, ("至少选一个动作", 400)
     if make_note and not note_name:
         return None, ("笔记名不能为空", 400)
+    source_context, source_error = _snippets_source_context(body)
+    if source_error:
+        return None, source_error
+    normalized = []
+    for item in snippets:
+        if not isinstance(item, dict):
+            return None, ("段落结构无效", 400)
+        normalized.append(dict(item))
+    source_link = source_context["link"]
+    if source_link:
+        marker = "【原文出处链接（务必原样放进卡片背面，做成可点链接）】"
+        first_text = str(normalized[0].get("text") or "")
+        if marker not in first_text:
+            normalized[0]["text"] = first_text + "\n" + marker + source_link
     return {
-        "snippets": snippets, "make_note": make_note, "make_anki": make_anki,
+        "snippets": normalized, "make_note": make_note, "make_anki": make_anki,
         "note_name": note_name, "action": "explain", "uid": _reader_uid(),   # uid 在请求里取好(异步线程没 session)
         "defer_add": bool(body.get("defer_add")),   # B1 融合复习卡:只生成草稿,不 addNotes(确认后经 /api/anki-add-cards 入库)
+        "source_file": source_context["file"],
+        "source_page": source_context["page"],
     }, None
 
 
@@ -14972,7 +15122,7 @@ def _download_image_for_anki(url, timeout=5, max_bytes=10 * 1024 * 1024):
 
 
 def _run_snippets_to(snippets, make_note, make_anki, note_name, action="explain", uid="", image_url=None, defer_add=False,
-                     requirement="", on_step=None) -> dict:
+                     requirement="", on_step=None, source_file="", source_page=0) -> dict:
     """核心执行（同步/后台线程共用）：AI 整理勾选段落 → 创建笔记 / Anki 卡。返回 out dict。
 
     on_step(text): 可选回调——把**内部阶段**实时吐出来(工具指示器 v2:长条态滚动显示「正在…」,
@@ -15181,10 +15331,13 @@ def _run_snippets_to(snippets, make_note, make_anki, note_name, action="explain"
                     _sy.path.insert(0, str(CLAUDE_DIR / "scripts"))
                     import attention_profile as _AP
                     import urllib.parse as _upq
-                    _src = (snippets[0].get("source") or "") if snippets else ""
-                    _qs = _upq.parse_qs(_upq.urlparse(_src).query)
-                    _f = (_qs.get("file") or [""])[0]
-                    _pg = int((_qs.get("page") or ["0"])[0] or 0)
+                    _f = str(source_file or "")
+                    _pg = int(source_page or 0)
+                    if not _f:   # 旧调用者仍可从 source URL 提取；新 Reader 不依赖此路径。
+                        _src = (snippets[0].get("source") or "") if snippets else ""
+                        _qs = _upq.parse_qs(_upq.urlparse(_src).query)
+                        _f = (_qs.get("file") or [""])[0]
+                        _pg = int((_qs.get("page") or ["0"])[0] or 0)
                     if _f and VB is not None:   # 账本存持久真相:真成员+局部页(单本恒等,无条件调用)
                         try:
                             _f, _pg = VB.locate(_f, _pg or 1)

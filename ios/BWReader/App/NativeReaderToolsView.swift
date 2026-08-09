@@ -82,7 +82,7 @@ final class NativeReaderToolsCoordinator: ObservableObject {
     func refreshFormulaStatus(using reader: ReaderWebViewModel) async {
         guard let file = snapshot?.file, !file.isEmpty else { return }
         await perform(.recognizingFormulas) {
-            formulaStatus = try await reader.startNativeFormulaRecognition(
+            formulaStatus = try await reader.refreshNativeFormulaRecognitionStatus(
                 file: file
             )
         }
@@ -501,7 +501,9 @@ struct NativeReaderToolsView: View {
             }
             .disabled(
                 coordinator.activity.isBusy
-                    || coordinator.snapshot?.file.lowercased().hasSuffix(".pdf") != true
+                    || reader.supportsNativeFormulaRecognition(
+                        file: coordinator.snapshot?.file ?? ""
+                    ) == false
             )
 
             Text("普通文字在设备上识别；公式框当前复用现有 DocLayout 模型预处理，再由 AI 批量转成 LaTeX。后续 Core ML 版会逐页读取已下载书籍的本地页图，不会重复下载整本书。")

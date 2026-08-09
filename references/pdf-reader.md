@@ -680,6 +680,8 @@ QA browser daemon 在 :9091 是单独的，跟 PDF reader 没直接关系（PDF 
 
 > **块内 gutter 切列 —— 漫画并排气泡能单独选中（2026-06，`_CHAR_CACHE_VER`→8）**：并排两个气泡的字选中时混在一起。根因:Vision 按整页视觉行读 → 并排气泡左右**交错**(左行1→右行1→左行2…),且 PyMuPDF 并成同一 block(bk 相同)→ 块过滤分不开、拖选 index 区间跨进另一气泡。修:`_split_block_columns` 在每个 block 内检测**竖直空白条**(gutter)切成左右列。阈值 **CJK 感知**:CJK 列(列内字紧挨)用 `0.8×字宽`、Latin(有词缝)用 `3×字宽`——并排气泡间隙常只有 ~1 字宽(料理师1 p12 左列伸到 x847、右列从 889、仅 42px),固定大阈值切不开。每列给唯一 `bk`(选中/句子框块过滤天然分开)+ 整列一起分词(`_apply_jp_tokenize` 改为接收"一列的 char 列表")。`page-chars` 与 `page-vocab-marks` 两处同改（历史；2026-06-10 起 page-vocab-marks 复用 `_page_chars_cached` 同一管道，不再有第二份内联实现，见 §35③）。普通单栏段落无 gutter → 不切(英文教材大段落仍各一个 bk)。
 
+> **Apple Vision 每行独立块的选区围栏（2026-08）**：原生 Vision 常把同一气泡的每一行分别赋予 `bk`，因此不能仅按“同块”选择，也不能用块号的数值区间猜阅读顺序。`13-selection.js` 对同块仍严格限块；跨块只保留端点之间按几何方向连通的路径（横排要求 X 投影重叠且 Y 间距小，竖排交换两轴），端点不连通时只保留两端，双击同行遇块变化或明显水平空白立即停止。这样复用旧 Pi 的 gutter/分词成果，同时让设备端 Vision 的逐行块也不会横向串进别的对话气泡；无 `bk` 的旧文字层保持历史行为。
+
 > **分词按段落（非逐行）—— 跨行复合词读对音（2026-06，`_CHAR_CACHE_VER`→7）**：`_compute_page_chars` 原**逐行**调 fugashi → 跨行的词（`間食`：間 行尾、食 行首）被行边界拆成 `間→あいだ`+`食→しょく`（读音全错，单击只选半个词）。改成 **`_apply_jp_tokenize` 整块(段落)调一次**（块内各行本就连续 reading order，拼起喂 fugashi 就把 `間食` 读 `かんしょく`；word_id=`block*1e6+块内token序号`）。跨行 token 的振假名由 `_furigana_item` 只放在**首字所在行的连续片段**上方（取首字 y 同行的连续 char 算 bbox，否则 ruby 飘行间）。副带：单击 `間食` 选中整词。
 | **F6 词组模式** | 选中后「📘词组」 | `_merge_favorite_phrases`（收藏词组在页内出现处合并 chars 的 `w`→单击选整词组；空白不敏感/ASCII 大小写不敏感/长词组优先/防重叠/**连续文本流校验：相邻字竖直跳变 >2.2 行高拒绝，防跨段误并**；**live 应用不进缓存**）+ `/api/phrases` CRUD（`state/pdf-phrases.json` 全局） | `_isShortPhrase`（中日 2-8 字/拉丁 2-5 词，无句末标点）→ 工具栏「📘词组」按钮（高亮+呼吸）+ 选中框呼吸 1.6s 转常亮；`showPhrasePopover`（复用 word-pop，JP 走 dict-jp 读音+声调，兜底 translate-sentence）+ ☆收藏切换 → `refreshCharsWForAllPages` 原地更新 `w` |
 | **F7 日语生词高亮** | 自动（同英语下划线开关） | `state/jp-vocab.json` store（查过的 JP 词记 looks/last_ts/user_mark）+ `_jp_vocab_bump`（dict-quick want_ja / dict-jp 查词时 looks+1）+ `_build_jp_vocab_marks`（**按 fugashi `w` 分组成 token**，按 mastery 上色画下划线，mastered 不画）。合并进 `vocab_marks`（由 `/api/page-overlay` 与 `/api/page-vocab-marks` 同管道返回，`w` 来自缓存 chars，见 §32 / §35③）+ `/api/jp-vocab-mark`（known/unknown/""/forget） | 复用现有 `.vocab-underline` 渲染；查 JP 词后 `refreshVocabUnderlinesForAllPages` |
@@ -1351,3 +1353,25 @@ E2E 模式:scratchpad 铸 cookie + set_offline,验"入队→重放→服务端�
 → 可放心 SWR/cache-first;客户端持本地掌握集(vocab-mastery-map 一次拉+toggle 时本地增删)过滤渲染
 → 标记掌握=0ms 本地消隐,新页下划线=缓存秒出。触点:_build_vocab_marks/_build_jp_vocab_marks(服务端)
 + 前端 vocab-layer 渲染过滤 + _wordPopMaster 本地集更新 + jp 分支同改。
+
+## §19 原生 App 的功能等价接口与最短执行路径
+
+原生化的验收对象是 **Reader 功能**，不是旧 HTTP 端口本身。旧 PDF/EPUB 调用面由
+`ios/BWReader/native_reader_interface_manifest.json` 分类并作为防回归合同：打包时必须证明每个
+已加载调用都有真实实现，且不得把 `pending`、空响应或页面假成功包装成 `supported`。这个清单
+允许旧共享 UI 继续工作，但不要求 App 为了维持接口外形而绕行旧服务端。
+
+- `owner=local/native` 的书籍、位置、选区、高亮、便签、笔迹、用户页、OCR 与改页操作直接进入
+  App 的本机数据库、sidecar 或原生桥；不先上传 Pi，也不依赖网络。
+- `owner=pi` 只保留真正依赖远端能力的 AI、词典、卡片及远端数据。按书请求必须把不透明本机
+  `localBookID` 核验并改写为已绑定的 Pi 书籍身份；没有绑定时失败可见，禁止串书或假成功。
+- 旧 `sync-batch` 只是兼容入口：原生运行时逐项按 owner 分流，本机项就地提交，Pi 项逐路由授权，
+  返回结果保持原顺序。不能把包含本机身份的整个不透明批次直接代理给 Pi。
+- 实时快照独立连接 Windows context WSS；它不再借语音连接或设置页生命周期，位置与正文也不以
+  同一去重判定互相拖累。
+- PDF 插入、删除和编辑使用本机事务 journal，同步迁移文字、分词、公式、笔迹锚点及渲染缓存；
+  持久写与 OCR 都必须先取得同一本书的 mutation lease，进程中断后由启动恢复决定整体提交或回滚。
+
+发布门槛因此是“调用面有证据 + 功能有真实归属 + 失败可见 + 本机路径不依赖 Pi”。端口可被原生
+直连替代；若替代后旧调用已经没有消费者，应同时从 manifest 和打包门禁中删除，而不是永久保留
+一层无意义代理。

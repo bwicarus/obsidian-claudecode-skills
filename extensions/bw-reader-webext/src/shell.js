@@ -15,9 +15,18 @@
   if (!RC || !RC.sidedrawer || !root) return;   // vendor 未载入(构建缺失)则静默退出
   if (root.querySelector("#header")) return;    // 幂等
 
-  const LS_PIN = "bw-top-pinned";
+  const TOPBAR_PREFS_KEY = "bwTopbarPreferencesV1";
+  const TOPBAR_SESSION_KEY = "bw-topbar-collapsed-session-v1";
   const lsGet = (k) => { try { return localStorage.getItem(k); } catch (e) { return null; } };
-  const lsSet = (k, v) => { try { localStorage.setItem(k, v); } catch (e) {} };
+  const sessionCollapsed = () => {
+    try {
+      const value = sessionStorage.getItem(TOPBAR_SESSION_KEY);
+      return value === null ? null : value === "1";
+    } catch (_) { return null; }
+  };
+  const writeSessionCollapsed = (value) => {
+    try { sessionStorage.setItem(TOPBAR_SESSION_KEY, value ? "1" : "0"); } catch (_) {}
+  };
 
   // ── 样式:#header 系逐字来自 pdf-styles.css(标注差异);pill 沿用抽屉把手的磨砂语言 ──
   const st = document.createElement("style");
@@ -146,22 +155,40 @@ button{-webkit-appearance:none;appearance:none}
 
   // ── 交互：4B 与 PDF / EPUB / HTML 共用 rc-ui 顶栏控制器。──
   const topbar = RC.ui?.mountCollapsibleTopbar?.({
-    bar, mount: root, pillId: "bw-top-pill", storageKey: "rc-topbar-collapsed:web", label: "伴读",
-    defaultCollapsed: lsGet(LS_PIN) !== "1"
+    bar, mount: root, pillId: "bw-top-pill", label: "伴读",
+    defaultCollapsed: false,
+    readCollapsed: sessionCollapsed,
+    writeCollapsed: writeSessionCollapsed,
+    // Ordinary websites may use their own generic `fs-mode` class. Only a
+    // Reader PWA bridge authorizes the shared toolbar to recover that state.
+    recoverFullscreen: !!window.__bwPwaBridge
   });
   const openTop = () => topbar?.setCollapsed(false, true);
   const closeTop = () => topbar?.setCollapsed(true, true);
   bar.querySelector("#bw-top-close").addEventListener("click", closeTop);
 
   const pinBtn = bar.querySelector("#bw-pin");
-  const syncPin = () => pinBtn.classList.toggle("active", lsGet(LS_PIN) === "1");
+  let topbarPinned = false;
+  let pinChangedLocally = false;
+  const syncPin = () => pinBtn.classList.toggle("active", topbarPinned);
   pinBtn.addEventListener("click", () => {
-    lsSet(LS_PIN, lsGet(LS_PIN) === "1" ? "0" : "1");
+    pinChangedLocally = true;
+    topbarPinned = !topbarPinned;
     syncPin();
-    RC.toast(lsGet(LS_PIN) === "1" ? "已钉住:每个页面自动展开顶栏" : "已取消钉住");
+    if (topbarPinned) openTop();
+    Promise.resolve(window.__bwExtensionStore?.set(TOPBAR_PREFS_KEY, {
+      schema: 1,
+      pinned: topbarPinned
+    })).catch(() => RC.toast("顶栏固定状态未能保存"));
+    RC.toast(topbarPinned ? "已钉住:每个页面自动展开顶栏" : "已取消钉住");
   });
   syncPin();
-  if (lsGet(LS_PIN) === "1") openTop();
+  Promise.resolve(window.__bwExtensionStore?.get(TOPBAR_PREFS_KEY)).then((value) => {
+    if (pinChangedLocally) return;
+    topbarPinned = value?.schema === 1 && value?.pinned === true;
+    syncPin();
+    if (topbarPinned) openTop();
+  }).catch(() => {});
 
   bar.querySelector("#bw-asst-btn").addEventListener("click", () => RC.sidedrawer.toggle());
   const pwaBridge = window.__bwPwaBridge;

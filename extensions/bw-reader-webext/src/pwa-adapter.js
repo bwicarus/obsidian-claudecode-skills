@@ -11,6 +11,7 @@
   var hostReady = false;
   var shellReady = false;
   var takeoverStarted = false;
+  var shellWatchTimer = 0;
   var BOOK_MODES = new Set(['pdf', 'epub', 'html', 'favorite']);
   var hostMode = (function () {
     try {
@@ -83,10 +84,51 @@
   }
   function openTab(name) { try { RC.sidedrawer.open(name); } catch (_) {} }
   function noop() {}
+  function positiveRect(element) {
+    if (!element || element.isConnected === false || typeof element.getBoundingClientRect !== 'function') return false;
+    try {
+      var rect = element.getBoundingClientRect();
+      return Number(rect.width) > 0 && Number(rect.height) > 0;
+    } catch (_) { return false; }
+  }
+  function shellSurfaceReady() {
+    if (!shadow) return false;
+    var header = shadow.getElementById('header');
+    var pill = shadow.getElementById('bw-top-pill');
+    if (!header || !pill || header.isConnected === false || pill.isConnected === false) return false;
+    // A deliberately collapsed header has zero height; its visible pill is the
+    // complete recovery surface. Otherwise both controls need real geometry.
+    return positiveRect(pill) && (
+      header.classList?.contains('rc-topbar-collapsed') || positiveRect(header)
+    );
+  }
+  function checkShellSurface() {
+    if (document.visibilityState && document.visibilityState !== 'visible') return;
+    shellReady = shellSurfaceReady();
+    if (!shellReady && bridge.takenOver) {
+      bridge.release();
+      takeoverStarted = false;
+      if (window.__bwRoot) window.__bwRoot.dataset.pwaTakeover = 'shell-lost';
+      return;
+    }
+    if (shellReady && hostReady && !bridge.takenOver) tryTakeover();
+  }
+  function ensureShellWatch() {
+    if (shellWatchTimer || typeof setInterval !== 'function') return;
+    shellWatchTimer = setInterval(checkShellSurface, 1000);
+  }
   function tryTakeover() {
+    shellReady = shellSurfaceReady();
     if (!hostReady || !shellReady || takeoverStarted || typeof bridge.takeover !== 'function') return;
     takeoverStarted = true;
     bridge.takeover().then(function () {
+      if (!shellSurfaceReady()) {
+        bridge.release();
+        takeoverStarted = false;
+        if (window.__bwRoot) window.__bwRoot.dataset.pwaTakeover = 'shell-lost';
+        return;
+      }
+      ensureShellWatch();
       if (window.__bwRoot) window.__bwRoot.dataset.pwaTakeover = 'ready';
       document.dispatchEvent(new CustomEvent('bw:pwa-takeover-ready'));
     }).catch(function (error) {
@@ -345,9 +387,17 @@
   RC.use(PwaAdapter); bindBridgeActions();
   bridge.on('SELECTION', function () { refreshContext(); });
   document.addEventListener('bw:shell-ready', function () {
-    shellReady = true;
+    shellReady = shellSurfaceReady();
+    ensureShellWatch();
     tryTakeover();
   });
+  document.addEventListener('visibilitychange', checkShellSurface);
+  if (typeof window.addEventListener === 'function') {
+    window.addEventListener('pagehide', function () {
+      if (shellWatchTimer) clearInterval(shellWatchTimer);
+      shellWatchTimer = 0;
+    }, { once: true });
+  }
   if (bridge.ready) ready(bridge.state); else bridge.on('READY', ready);
   window.__pwaAdapter = PwaAdapter;
 })();

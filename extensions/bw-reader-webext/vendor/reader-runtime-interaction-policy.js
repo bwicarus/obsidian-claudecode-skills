@@ -90,6 +90,23 @@
     };
   }
 
+  function networkMutation(id, path, methods, options) {
+    options = options || {};
+    return {
+      id: id,
+      matches: [match(path, methods, options.params)],
+      surfaces: options.surfaces || ['pwa', 'extension'],
+      kind: options.kind || 'mutation',
+      ui: 'network-first',
+      local: options.local || null,
+      ack: 'accept-result',
+      offline: options.offline || 'fallback',
+      sync: options.sync || 'direct',
+      transport: transport(options.transport),
+      reason: options.reason || ''
+    };
+  }
+
   function remoteRequired(id, paths, methods, reason, options) {
     options = options || {};
     return {
@@ -243,6 +260,18 @@
       {
         local: { collection: 'reading-position', projection: 'active-document' },
         transport: { outbox: true, extensionBridge: true, serviceWorker: 'none' }
+      }
+    ),
+    backgroundMutation(
+      'learning.read-dwell.report',
+      '/pdf/api/read-dwell',
+      ['POST'],
+      {
+        kind: 'telemetry',
+        offline: 'drop',
+        sync: 'none',
+        transport: { outbox: false, extensionBridge: true, serviceWorker: 'none' },
+        reason: '阅读停留时间是易失增量；发送失败时丢弃，不能在恢复网络后冒充当前活动。'
       }
     ),
     /* 双向上下文同步(2026-07-26):上报「此刻活动的文档」。
@@ -406,6 +435,26 @@
       }
     ),
     remoteRequired(
+      'learning.snippets.enqueue',
+      ['/pdf/api/snippets-to-async'],
+      ['POST'],
+      '笔记与 Anki 后台任务必须由服务器接收并返回任务标识；失败时调用方恢复本地草稿。',
+      {
+        kind: 'command',
+        transport: { extensionBridge: true, serviceWorker: 'none' }
+      }
+    ),
+    networkMutation(
+      'document.epub-action.commit',
+      '/pdf/api/epub-action',
+      ['POST'],
+      {
+        local: { collection: 'epub-actions', projection: 'active-document' },
+        transport: { extensionBridge: true, serviceWorker: 'none' },
+        reason: '由当前运行时选择 App 本地原子存储或 PWA 服务端，并在该后端确认后更新动作卡。'
+      }
+    ),
+    remoteRequired(
       'document.pdf-structure.mutate',
       ['/pdf/api/pdf-insert-page'],
       ['POST', 'PATCH', 'DELETE'],
@@ -459,6 +508,14 @@
           extensionBridge: true,
           serviceWorker: 'private-swr'
         }
+      }
+    ),
+    networkRead(
+      'dictionary.jp.read',
+      ['/pdf/api/dict-jp'],
+      {
+        transport: { extensionBridge: true, serviceWorker: 'none' },
+        reason: '读取日语词典与永久缓存；不可用时由调用方显示失败或退回通用词典。'
       }
     ),
     cachedRead(

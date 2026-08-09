@@ -14,16 +14,21 @@ import math
 import os
 from pathlib import Path
 import re
+import shutil
 import signal
 import subprocess
 import sys
 import tempfile
 import time
 import unicodedata
+import uuid
 
 
 CONTRACT = "reader-library-ocr/1"
 PAGE_SCHEMA = "reader-page-chars/1"
+PUBLICATION_CONTRACT = "reader-book-ocr-publication/1"
+_EXPECTED_JOB_ID: str | None = None
+_EXPECTED_WORKER_GENERATION: str | None = None
 
 
 def _atomic_json(path: Path, value: dict) -> None:
@@ -41,8 +46,27 @@ def _load(path: Path, default=None):
         return default
 
 
+def _set_worker_identity(job_id: str | None, worker_generation: str | None) -> None:
+    global _EXPECTED_JOB_ID, _EXPECTED_WORKER_GENERATION
+    _EXPECTED_JOB_ID = str(job_id or "") or None
+    _EXPECTED_WORKER_GENERATION = str(worker_generation or "") or None
+
+
+def _assert_worker_identity(job_path: Path, job: dict | None = None) -> dict:
+    current = job if isinstance(job, dict) else (_load(job_path, {}) or {})
+    if _EXPECTED_JOB_ID is None and _EXPECTED_WORKER_GENERATION is None:
+        return current
+    if (
+        current.get("jobId") != _EXPECTED_JOB_ID
+        or current.get("workerGeneration") != _EXPECTED_WORKER_GENERATION
+    ):
+        raise RuntimeError("OCR worker generation is no longer current")
+    return current
+
+
 def _update_job(job_path: Path, **changes) -> dict:
     job = _load(job_path, {}) or {}
+    _assert_worker_identity(job_path, job)
     job.update(changes)
     job["updatedAtEpochMs"] = int(time.time() * 1000)
     _atomic_json(job_path, job)
@@ -71,6 +95,102 @@ def _sha256(path: Path) -> str:
         for chunk in iter(lambda: handle.read(4 * 1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _source_identity(stat) -> dict:
+    return {
+        "device": int(stat.st_dev),
+        "inode": int(stat.st_ino),
+        "size": int(stat.st_size),
+        "mtimeNs": int(stat.st_mtime_ns),
+    }
+
+
+def _hash_fd(fd: int) -> str:
+    digest = hashlib.sha256()
+    os.lseek(fd, 0, os.SEEK_SET)
+    with os.fdopen(os.dup(fd), "rb") as handle:
+        for chunk in iter(lambda: handle.read(4 * 1024 * 1024), b""):
+            digest.update(chunk)
+    os.lseek(fd, 0, os.SEEK_SET)
+    return digest.hexdigest()
+
+
+def _open_source_guard(path: Path, expected_sha256: str, max_bytes: int) -> dict:
+    flags = os.O_RDONLY
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(str(path), flags)
+    try:
+        before = os.fstat(fd)
+        if before.st_size <= 0 or before.st_size > max_bytes:
+            raise RuntimeError("PDF exceeds the configured preprocessing size limit")
+        digest = _hash_fd(fd)
+        after = os.fstat(fd)
+        path_stat = path.stat(follow_symlinks=False)
+        identity = _source_identity(after)
+        if (
+            _source_identity(before) != identity
+            or _source_identity(path_stat) != identity
+            or digest != expected_sha256
+        ):
+            raise RuntimeError("book content changed after the preprocessing request")
+        return {
+            "fd": fd,
+            "path": path,
+            "contentSha256": expected_sha256,
+            "identity": identity,
+        }
+    except Exception:
+        os.close(fd)
+        raise
+
+
+def _assert_source_guard(guard: dict, *, rehash: bool) -> None:
+    fd = int(guard["fd"])
+    if (
+        _source_identity(os.fstat(fd)) != guard["identity"]
+        or _source_identity(Path(guard["path"]).stat(follow_symlinks=False))
+        != guard["identity"]
+        or (rehash and _hash_fd(fd) != guard["contentSha256"])
+    ):
+        raise RuntimeError("book content changed before OCR publication")
+
+
+def _close_source_guard(guard: dict | None) -> None:
+    if guard is not None:
+        try:
+            os.close(int(guard["fd"]))
+        except OSError:
+            pass
+
+
+def _verify_source_content(path: Path, expected_sha256: str, max_bytes: int) -> None:
+    guard = _open_source_guard(path, expected_sha256, max_bytes)
+    _close_source_guard(guard)
+
+
+def _manifest_revision(manifest: dict) -> str:
+    """Address every immutable manifest field, excluding its self references."""
+    canonical = {
+        key: value
+        for key, value in manifest.items()
+        if key not in ("revision", "generatedAtEpochMs")
+    }
+    canonical["files"] = [
+        {key: value for key, value in entry.items() if key != "downloadUrl"}
+        for entry in manifest.get("files") or []
+    ]
+    payload = json.dumps(
+        canonical,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return "ocr_" + hashlib.sha256(payload).hexdigest()[:20]
 
 
 def _safe_error(exc: Exception, pdf: Path, project: Path) -> str:
@@ -331,6 +451,8 @@ def _tokenize_directory(
         if any(int(char.get("w", -1)) < 0 for char in chars if not char.get("sp")):
             value["chars"] = _tokenize_chars(chars)
         value["tokenized"] = True
+        if job_path is not None:
+            _assert_worker_identity(job_path)
         _atomic_json(page_path, value)
         completed += 1
         if job_path is not None:
@@ -359,14 +481,15 @@ def _terminate(child: subprocess.Popen) -> None:
     if child.poll() is not None:
         return
     try:
-        if os.name == "posix":
-            os.killpg(child.pid, signal.SIGTERM)
-        else:
-            child.terminate()
+        # Formula/tokenizer children deliberately inherit the worker's process
+        # group.  child.pid is therefore not a process-group id; signalling it
+        # with killpg can miss the child and leave it running after the worker.
+        child.terminate()
         child.wait(timeout=8)
     except Exception:
         try:
             child.kill()
+            child.wait(timeout=8)
         except Exception:
             pass
 
@@ -437,7 +560,6 @@ def _run_formula_pipeline(args, job_path: Path, control_path: Path) -> int:
         cwd=str(project),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        start_new_session=(os.name == "posix"),
     )
     stopped = _run_controlled(child, control_path, job_path, "formula-detect", formula_path)
     if stopped is not None:
@@ -475,7 +597,6 @@ def _run_formula_pipeline(args, job_path: Path, control_path: Path) -> int:
         cwd=str(project),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        start_new_session=(os.name == "posix"),
     )
     stopped = _run_controlled(child, control_path, job_path, "formula-latex", formula_path)
     if stopped is not None:
@@ -494,10 +615,24 @@ def _run_formula_pipeline(args, job_path: Path, control_path: Path) -> int:
     return 0
 
 
-def _publish_attachments(args, job_dir: Path, formula_path: Path) -> tuple[str, dict]:
+def _publish_attachments(
+    args,
+    job_dir: Path,
+    formula_path: Path | None = None,
+    *,
+    formula_records: list[dict] | None = None,
+    manifest_metadata: dict | None = None,
+    publish_manifest: bool = True,
+    output_dir: Path | None = None,
+    generated_at_epoch_ms: int | None = None,
+) -> tuple[str, dict]:
     """Publish a content-addressed, path-free derived-attachment manifest."""
-    version_dir = job_dir.parent
-    raw_formula = _load(formula_path, {}) or {}
+    version_dir = Path(output_dir) if output_dir is not None else job_dir.parent
+    raw_formula = (
+        {"formulas": formula_records}
+        if formula_records is not None
+        else (_load(formula_path, {}) or {})
+    )
     formulas = []
     for value in raw_formula.get("formulas") or []:
         if not isinstance(value, dict):
@@ -553,12 +688,9 @@ def _publish_attachments(args, job_dir: Path, formula_path: Path) -> tuple[str, 
         formula_export_path,
     ))
     files = []
-    revision_digest = hashlib.sha256()
     for attachment_id, kind, logical_name, path in candidates:
         payload = path.read_bytes()
         digest = hashlib.sha256(payload).hexdigest()
-        revision_digest.update(attachment_id.encode("ascii"))
-        revision_digest.update(bytes.fromhex(digest))
         files.append({
             "attachmentId": attachment_id,
             "category": "derived",
@@ -569,25 +701,261 @@ def _publish_attachments(args, job_dir: Path, formula_path: Path) -> tuple[str, 
             "size": len(payload),
             "sha256": digest,
         })
-    revision = "ocr_" + revision_digest.hexdigest()[:20]
-    for item in files:
-        item["downloadUrl"] = (
-            f"/pdf/api/library/attachments/{args.book_id}/{item['attachmentId']}"
-            f"?contentSha256={args.content_sha256}&revision={revision}"
-        )
     manifest = {
         "contract": "reader-book-attachments/1",
         "schema": 1,
         "bookId": args.book_id,
         "contentSha256": args.content_sha256,
-        "revision": revision,
         "category": "derived",
         "mergePolicy": "immutable",
         "files": files,
-        "generatedAtEpochMs": int(time.time() * 1000),
+        "generatedAtEpochMs": (
+            int(time.time() * 1000)
+            if generated_at_epoch_ms is None
+            else int(generated_at_epoch_ms)
+        ),
     }
-    _atomic_json(version_dir / "attachments.json", manifest)
+    if manifest_metadata:
+        allowed_metadata = {
+            "adoptionContract", "source", "pageSources",
+            "formulaState", "formulaReason", "formulaCount",
+            "engine", "totalPages",
+        }
+        if set(manifest_metadata) - allowed_metadata:
+            raise ValueError("unsupported attachment manifest metadata")
+        manifest.update(dict(manifest_metadata))
+    revision = _manifest_revision(manifest)
+    manifest["revision"] = revision
+    for item in files:
+        item["downloadUrl"] = (
+            f"/pdf/api/library/attachments/{args.book_id}/{item['attachmentId']}"
+            f"?contentSha256={args.content_sha256}&revision={revision}"
+        )
+    if publish_manifest:
+        _atomic_json(version_dir / "attachments.json", manifest)
     return revision, manifest
+
+
+def _publish_release(
+    args,
+    job_dir: Path,
+    formula_path: Path,
+    final_job: dict,
+    *,
+    source_path: Path | None = None,
+    source_guard: dict | None = None,
+) -> str:
+    """Build one immutable release and flip the publication fence last."""
+    version_dir = job_dir.parent
+    staging = version_dir / (".release-staging-" + uuid.uuid4().hex)
+    own_source_guard = None
+    try:
+        _assert_worker_identity(job_dir / "job.json")
+        if source_guard is None:
+            if source_path is None:
+                raise RuntimeError("verified source guard is required for publication")
+            own_source_guard = _open_source_guard(
+                Path(source_path), args.content_sha256, int(args.max_bytes)
+            )
+            source_guard = own_source_guard
+        pages = staging / "pages"
+        pages.mkdir(parents=True, exist_ok=False)
+        for source in sorted((job_dir / "pages").glob("p*.json")):
+            if not re.fullmatch(r"p\d{6}\.json", source.name):
+                continue
+            destination = pages / source.name
+            shutil.copyfile(source, destination)
+            os.chmod(destination, 0o600)
+        total_pages = int(final_job.get("totalPages") or 0)
+        formula_state = str(final_job.get("formulaState") or "failed")
+        revision, manifest = _publish_attachments(
+            args,
+            staging,
+            formula_path,
+            manifest_metadata={
+                "engine": args.engine,
+                "totalPages": total_pages,
+                "formulaState": formula_state,
+                "formulaReason": None,
+                "formulaCount": int(final_job.get("formulaTotal") or 0),
+            },
+            publish_manifest=False,
+            output_dir=staging,
+            generated_at_epoch_ms=0,
+        )
+        release_rel = f"releases/{revision}"
+        release_job = {
+            **final_job,
+            "engine": args.engine,
+            "state": "succeeded",
+            "resultAvailable": True,
+            "pageCharsRevision": revision,
+        }
+        release_result = {
+            "engine": args.engine,
+            "revision": revision,
+            "pageCharsRevision": revision,
+            "release": release_rel,
+            "completedAtEpochMs": int(final_job.get("updatedAtEpochMs") or 0),
+            "sourceIdentity": dict(source_guard["identity"]),
+        }
+        _atomic_json(staging / "job.json", release_job)
+        _atomic_json(staging / "result.json", release_result)
+        _atomic_json(staging / "current.json", {
+            "engine": args.engine,
+            "revision": revision,
+        })
+        _atomic_json(staging / "attachments.json", manifest)
+        release_dir = version_dir / "releases" / revision
+        release_dir.parent.mkdir(parents=True, exist_ok=True)
+        if release_dir.exists():
+            existing_manifest = release_dir / "attachments.json"
+            if (
+                not existing_manifest.is_file()
+                or existing_manifest.read_bytes() != (staging / "attachments.json").read_bytes()
+            ):
+                raise RuntimeError("content-addressed OCR release conflict")
+            shutil.rmtree(staging)
+            staging = None
+        else:
+            os.replace(staging, release_dir)
+            staging = None
+        manifest_path = release_dir / "attachments.json"
+        committed_manifest = _load(manifest_path, {}) or {}
+        committed_job = _load(release_dir / "job.json", {}) or {}
+        committed_result = _load(release_dir / "result.json", {}) or {}
+        committed_current = _load(release_dir / "current.json", {}) or {}
+        if (
+            committed_manifest.get("contract") != "reader-book-attachments/1"
+            or committed_manifest.get("bookId") != args.book_id
+            or committed_manifest.get("contentSha256") != args.content_sha256
+            or committed_manifest.get("revision") != revision
+            or committed_manifest.get("engine") != args.engine
+            or int(committed_manifest.get("totalPages") or 0) != total_pages
+            or committed_manifest.get("formulaState") != formula_state
+            or committed_job.get("bookId") != args.book_id
+            or committed_job.get("contentSha256") != args.content_sha256
+            or committed_job.get("engine") != args.engine
+            or committed_job.get("state") != "succeeded"
+            or not committed_job.get("resultAvailable")
+            or committed_job.get("pageCharsRevision") != revision
+            or committed_job.get("formulaState") != formula_state
+            or int(committed_job.get("totalPages") or 0) != total_pages
+            or int(committed_job.get("successfulPages") or 0) != total_pages
+            or committed_result.get("engine") != args.engine
+            or committed_result.get("pageCharsRevision") != revision
+            or committed_result.get("release") != release_rel
+            or committed_result.get("sourceIdentity") != source_guard["identity"]
+            or committed_current != {"engine": args.engine, "revision": revision}
+        ):
+            raise RuntimeError("published OCR release metadata is inconsistent")
+        page_ids = [
+            int(match.group(1))
+            for entry in committed_manifest.get("files") or []
+            if (match := re.fullmatch(
+                r"ocr-page-(\d{6})", str(entry.get("attachmentId") or "")
+            ))
+        ]
+        if page_ids != list(range(1, total_pages + 1)):
+            raise RuntimeError("published OCR release has incomplete pages")
+        if len(committed_manifest.get("files") or []) != total_pages + 1:
+            raise RuntimeError("published OCR release has unexpected files")
+        for entry in committed_manifest.get("files") or []:
+            attachment_id = str(entry.get("attachmentId") or "")
+            match = re.fullmatch(r"ocr-page-(\d{6})", attachment_id)
+            if match:
+                path = release_dir / "pages" / f"p{int(match.group(1)):06d}.json"
+            elif attachment_id == "ocr-formulas":
+                path = release_dir / "formulas.json"
+            else:
+                raise RuntimeError("published OCR release has an unknown attachment")
+            payload = path.read_bytes()
+            if (
+                len(payload) != int(entry.get("size") or -1)
+                or hashlib.sha256(payload).hexdigest() != entry.get("sha256")
+            ):
+                raise RuntimeError("published OCR release digest mismatch")
+            try:
+                value = json.loads(payload.decode("utf-8"))
+            except Exception as exc:
+                raise RuntimeError("published OCR release JSON is invalid") from exc
+            if match:
+                page_number = int(match.group(1))
+                if (
+                    not isinstance(value, dict)
+                    or value.get("schema") != PAGE_SCHEMA
+                    or value.get("bookId") != args.book_id
+                    or value.get("contentSha256") != args.content_sha256
+                    or value.get("engine") != args.engine
+                    or value.get("pageNumber") != page_number
+                    or not isinstance(value.get("chars"), list)
+                    or not isinstance(value.get("furigana"), list)
+                ):
+                    raise RuntimeError("published OCR page identity is invalid")
+            else:
+                formulas = value.get("formulas") if isinstance(value, dict) else None
+                if (
+                    not isinstance(value, dict)
+                    or value.get("schema") != "reader-formula-regions/1"
+                    or value.get("bookId") != args.book_id
+                    or value.get("contentSha256") != args.content_sha256
+                    or not isinstance(formulas, list)
+                    or len(formulas) != int(committed_manifest.get("formulaCount") or 0)
+                ):
+                    raise RuntimeError("published OCR formula identity is invalid")
+                for formula in formulas:
+                    try:
+                        formula_page = int(formula.get("page"))
+                        bbox = [float(number) for number in formula.get("bbox")]
+                    except (AttributeError, TypeError, ValueError) as exc:
+                        raise RuntimeError("published OCR formula record is invalid") from exc
+                    if (
+                        formula_page < 1
+                        or formula_page > total_pages
+                        or len(bbox) != 4
+                        or not all(math.isfinite(number) and 0 <= number <= 1 for number in bbox)
+                        or bbox[0] >= bbox[2]
+                        or bbox[1] >= bbox[3]
+                    ):
+                        raise RuntimeError("published OCR formula record is invalid")
+        _atomic_json(version_dir / "result.json", release_result)
+        _atomic_json(version_dir / "current.json", {
+            "engine": args.engine,
+            "revision": revision,
+        })
+        fence_path = version_dir / "publication.json"
+        previous_fence = _load(fence_path, None)
+        fence = {
+            "contract": PUBLICATION_CONTRACT,
+            "bookId": args.book_id,
+            "contentSha256": args.content_sha256,
+            "engine": args.engine,
+            "revision": revision,
+            "release": release_rel,
+            "manifestSha256": _sha256(manifest_path),
+            "sourceIdentity": dict(source_guard["identity"]),
+        }
+        _assert_source_guard(source_guard, rehash=True)
+        _assert_worker_identity(job_dir / "job.json")
+        _atomic_json(fence_path, fence)
+        try:
+            # Recheck bytes, not only path metadata: an in-place writer can keep
+            # size/mtime stable while changing content during the fence write.
+            _assert_source_guard(source_guard, rehash=True)
+            # The service may have replaced this worker generation while the
+            # fence was being written.  A stale generation must not publish.
+            _assert_worker_identity(job_dir / "job.json")
+        except Exception:
+            if isinstance(previous_fence, dict):
+                _atomic_json(fence_path, previous_fence)
+            else:
+                fence_path.unlink(missing_ok=True)
+            raise
+        return revision
+    finally:
+        if staging is not None and staging.exists():
+            shutil.rmtree(staging, ignore_errors=True)
+        _close_source_guard(own_source_guard)
 
 
 def run(args) -> int:
@@ -599,14 +967,15 @@ def run(args) -> int:
     pdf = Path(args.pdf)
     pages_dir = job_dir / "pages"
     pages_dir.mkdir(parents=True, exist_ok=True)
+    source_guard = None
     try:
-        if not pdf.is_file() or pdf.is_symlink():
-            raise RuntimeError("catalogued PDF is unavailable or is a symlink")
-        stat = pdf.stat()
-        if stat.st_size <= 0 or stat.st_size > args.max_bytes:
-            raise RuntimeError("PDF exceeds the configured preprocessing size limit")
-        if _sha256(pdf) != args.content_sha256:
-            raise RuntimeError("book content changed after the preprocessing request")
+        _update_job(
+            job_path,
+            pid=os.getpid(),
+            workerPid=os.getpid(),
+            processGroupId=(os.getpgrp() if os.name == "posix" else None),
+        )
+        source_guard = _open_source_guard(pdf, args.content_sha256, args.max_bytes)
         document = fitz.open(str(pdf))
         try:
             total = document.page_count
@@ -701,6 +1070,7 @@ def run(args) -> int:
                     "textCharCount": len("".join(text.split())),
                     "generatedAtEpochMs": int(time.time() * 1000),
                 }
+                _assert_worker_identity(job_path)
                 _atomic_json(page_path, sidecar)
                 existing += 1
                 if args.engine == "vision":
@@ -751,6 +1121,8 @@ def run(args) -> int:
                     "--tokenize-dir", str(job_dir),
                     "--job-path", str(job_path),
                     "--control-path", str(control_path),
+                    "--job-id", args.job_id,
+                    "--worker-generation", args.worker_generation,
                 ],
                 cwd=str(args.project),
                 stdout=subprocess.DEVNULL,
@@ -770,27 +1142,16 @@ def run(args) -> int:
             wordProgress=_progress(total, tokenized),
         )
 
-        version_dir = job_dir.parent
-        _atomic_json(version_dir / "result.json", {
-            "engine": args.engine,
-            "textCompletedAtEpochMs": int(time.time() * 1000),
-        })
         formula_path = _formula_path(Path(args.project), pdf)
-        partial_revision, _partial_manifest = _publish_attachments(
-            args, job_dir, formula_path
-        )
-        partial_result = _load(version_dir / "result.json", {}) or {}
-        partial_result["pageCharsRevision"] = partial_revision
-        _atomic_json(version_dir / "result.json", partial_result)
         _update_job(
             job_path,
             textState="succeeded",
-            resultAvailable=True,
+            resultAvailable=False,
             percent=75,
             phase="formula-detect",
             formulaState="queued",
             message="文字 sidecar 已完成，开始检测公式区域",
-            pageCharsRevision=partial_revision,
+            pageCharsRevision=None,
             currentPage=None,
             textProgress=_progress(total, existing),
             wordProgress=_progress(total, tokenized),
@@ -801,39 +1162,38 @@ def run(args) -> int:
         formula_result = _run_formula_pipeline(args, job_path, control_path)
         if formula_result in (20, 21):
             return formula_result
-        revision, _manifest = _publish_attachments(args, job_dir, formula_path)
-        result = _load(version_dir / "result.json", {}) or {}
-        result.update({
-            "engine": args.engine,
-            "pageCharsRevision": revision,
-            "completedAtEpochMs": int(time.time() * 1000),
-        })
-        _atomic_json(version_dir / "result.json", result)
         total, have = _formula_counts(formula_path)
-        _update_job(
-            job_path,
-            state="succeeded",
-            phase="finalizing",
-            textState="succeeded",
-            formulaState=("succeeded" if have == total else "partial"),
-            formulaTotal=total,
-            formulaRecognized=have,
-            formulaPendingRegions=0,
-            formulaFailedRegions=max(0, total - have),
-            currentPage=None,
-            textProgress=_progress(existing, existing),
-            wordProgress=_progress(existing, tokenized),
-            formulaProgress=_progress(existing, existing),
-            percent=100,
-            etaSeconds=0,
-            message=f"Pi 预处理完成：文字 {existing} 页，公式 {have}/{total}",
-            canPause=False,
-            canResume=False,
-            canCancel=False,
-            canRetry=False,
-            resultAvailable=True,
-            pageCharsRevision=revision,
+        current_job = _load(job_path, {}) or {}
+        final_job = {
+            **current_job,
+            "state": "succeeded",
+            "phase": "finalizing",
+            "textState": "succeeded",
+            "formulaState": ("succeeded" if have == total else "partial"),
+            "formulaTotal": total,
+            "formulaRecognized": have,
+            "formulaPendingRegions": 0,
+            "formulaFailedRegions": max(0, total - have),
+            "currentPage": None,
+            "textProgress": _progress(existing, existing),
+            "wordProgress": _progress(existing, tokenized),
+            "formulaProgress": _progress(existing, existing),
+            "percent": 100,
+            "etaSeconds": 0,
+            "message": f"Pi 预处理完成：文字 {existing} 页，公式 {have}/{total}",
+            "canPause": False,
+            "canResume": False,
+            "canCancel": False,
+            "canRetry": False,
+            "resultAvailable": True,
+            "pageCharsRevision": None,
+        }
+        revision = _publish_release(
+            args, job_dir, formula_path, final_job, source_guard=source_guard
         )
+        final_job["pageCharsRevision"] = revision
+        final_job["updatedAtEpochMs"] = int(time.time() * 1000)
+        _atomic_json(job_path, final_job)
         return 0
     except Exception as exc:
         current = _load(job_path, {}) or {}
@@ -902,6 +1262,8 @@ def run(args) -> int:
             canRetry=True,
         )
         return 1
+    finally:
+        _close_source_guard(source_guard)
 
 
 def parse_args(argv=None):
@@ -915,6 +1277,8 @@ def parse_args(argv=None):
     parser.add_argument("--book-id")
     parser.add_argument("--content-sha256")
     parser.add_argument("--engine", choices=("vision", "manga"))
+    parser.add_argument("--job-id")
+    parser.add_argument("--worker-generation")
     parser.add_argument("--max-pages", type=int, default=5000)
     parser.add_argument("--max-bytes", type=int, default=2 * 1024 * 1024 * 1024)
     return parser.parse_args(argv)
@@ -922,13 +1286,17 @@ def parse_args(argv=None):
 
 def main(argv=None) -> int:
     args = parse_args(argv)
+    _set_worker_identity(args.job_id, args.worker_generation)
     if args.tokenize_dir:
         return _tokenize_directory(
             Path(args.tokenize_dir),
             Path(args.job_path) if args.job_path else None,
             Path(args.control_path) if args.control_path else None,
         )
-    required = (args.job_dir, args.pdf, args.project, args.book_id, args.content_sha256, args.engine)
+    required = (
+        args.job_dir, args.pdf, args.project, args.book_id,
+        args.content_sha256, args.engine, args.job_id, args.worker_generation,
+    )
     if not all(required):
         raise SystemExit("worker arguments are required")
     return run(args)

@@ -1099,7 +1099,11 @@
     var contentEl = document.getElementById('result-content');
     var d;
     try {
-      var r = await fetch('/pdf/api/dict-jp?word=' + encodeURIComponent(word) + '&context=' + encodeURIComponent(ctx || ''));
+      var r = await fetch('/pdf/api/dict-jp?word=' + encodeURIComponent(word) +
+        '&context=' + encodeURIComponent(ctx || '') +
+        '&file=' + encodeURIComponent(_ctx.file || '') +
+        '&page=' + encodeURIComponent(_ctx.page || 0) +
+        '&langs=' + encodeURIComponent((_ctx.langs || []).join(',')));
       d = await r.json();
     } catch (e) {
       if (myReq === _resReqId()) contentEl.innerHTML = '<div style="color:#c00;padding:14px">查词失败：' + e.message + '</div>';

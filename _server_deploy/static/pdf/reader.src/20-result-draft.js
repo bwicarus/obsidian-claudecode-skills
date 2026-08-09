@@ -430,9 +430,13 @@ async function _doCreate(makeNote, makeAnki) {
   try {
     const ov = _getAiOverrides();
     // 提交到服务器后台 job（短请求，立即返回 job_id），再轮询；任务在服务器跑，网页切后台也不中断
+    // @interaction learning.snippets.enqueue
     const r = await fetch('/pdf/api/snippets-to-async', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({
+        file: FILE_REL || '',
+        page: currentPage || 1,
+        source: { kind: 'pdf', page: currentPage || 1 },
         snippets: used.map(d => ({text: d.text, source: d.source})),
         make_note: makeNote, make_anki: makeAnki,
         note_name: noteName,
@@ -452,4 +456,3 @@ window.createBothFromDrafts = () => _doCreate(true, true);
 
 // 启动时刷新 badge
 setTimeout(_updateDraftBadge, 200);
-

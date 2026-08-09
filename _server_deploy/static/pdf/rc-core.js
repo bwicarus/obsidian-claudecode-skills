@@ -198,7 +198,12 @@
     _ctxClear();
     if (!_ctxOn() || !_ctxS.pend) return;
     try {
-      var b = new Blob([JSON.stringify(_ctxS.pend)], { type: 'application/json' });
+      var raw = JSON.stringify(_ctxS.pend);
+      // The native sendBeacon shim owns this same-origin local state write.
+      // Give it the JSON synchronously: Blob.text() may never resume after iOS
+      // suspends a pagehide callback, leaving the snapshot on the previous page.
+      var b = window.__BW_NATIVE_LOCAL_READER__ === true
+        ? raw : new Blob([raw], { type: 'application/json' });
       // @interaction context.active.report
       if (navigator.sendBeacon && navigator.sendBeacon(_ctxU('/pdf/api/active-reading'), b)) return;
     } catch (e) {}

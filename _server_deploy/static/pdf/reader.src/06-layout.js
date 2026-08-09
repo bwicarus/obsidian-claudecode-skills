@@ -57,6 +57,8 @@ window.toggleSpread = async () => {
 
 // 容器宽度变化 → 重算 scale 并重渲染（解决 PDF 被 CSS 缩放拉伸/模糊）
 let _refitDebounce = null, _refitBusy = false, _lastFitWidth = 0;
+let _refitQueued = false, _refitQueuedForce = false, _refitQueuedScope = 'all';
+let _sidePreviewDeferred = false, _sidePreviewForce = false;
 // #main 真实可用内容宽度（clientWidth 含 padding，开侧栏加 padding-right 后必须减掉真实 padding）
 function _mainContentWidth() {
   const m = document.getElementById('main');
@@ -87,10 +89,49 @@ function _updateMainOverflowX() {
   else { main.style.overflowX = 'hidden'; main.scrollLeft = 0; }   // 锁 hidden 时归零横向偏移(防从放大态切回适应残留偏移)
 }
 window._updateMainOverflowX = _updateMainOverflowX;
-function _scheduleRefit(force) {
-  if (_refitDebounce) clearTimeout(_refitDebounce);
-  _refitDebounce = setTimeout(() => _refitToWidth(force), 180);
+function _sideDrawerLayoutApi() {
+  try { return window.RC && RC.sidedrawer ? RC.sidedrawer : null; } catch (_) { return null; }
 }
+function _resetSidePreviewRefit() {
+  _sidePreviewDeferred = false;
+  _sidePreviewForce = false;
+}
+function _scheduleRefit(force, scope) {
+  const side = _sideDrawerLayoutApi();
+  const sidePreview = !!(side && typeof side.isLayoutPreviewActive === 'function' && side.isLayoutPreviewActive());
+  const sideCommit = scope === 'visible-near' || !!(side && typeof side.isLayoutCommitActive === 'function' && side.isLayoutCommitActive());
+  if (sidePreview) {
+    _sidePreviewDeferred = true;
+    _sidePreviewForce = _sidePreviewForce || !!force;
+    return;   // 拖动/过渡期只有 CSS 预览；ResizeObserver 不得启动页面栅格化
+  }
+  if (sideCommit) {
+    scope = 'visible-near';
+    force = !!force || _sidePreviewForce;
+    _resetSidePreviewRefit();
+  }
+  const normalizedScope = scope === 'visible-near' ? 'visible-near' : 'all';
+  if (!_refitQueued) {
+    _refitQueued = true;
+    _refitQueuedForce = !!force;
+    _refitQueuedScope = normalizedScope;
+  } else {
+    _refitQueuedForce = _refitQueuedForce || !!force;
+    if (normalizedScope === 'all') _refitQueuedScope = 'all';   // 普通窗口/用户缩放不可被侧栏局部 scope 降级
+  }
+  if (_refitDebounce) clearTimeout(_refitDebounce);
+  _refitDebounce = setTimeout(() => {
+    const runForce = _refitQueuedForce;
+    const runScope = _refitQueuedScope === 'visible-near' ? 'visible-near' : null;
+    _refitQueued = false; _refitQueuedForce = false; _refitQueuedScope = 'all';
+    _refitDebounce = null;
+    _refitToWidth(runForce, false, runScope);
+  }, 180);
+}
+window.addEventListener('rc:sidedrawer-layout-settled', (e) => {
+  if (e && e.detail && e.detail.committed === false) { _resetSidePreviewRefit(); return; }
+  if (_sidePreviewDeferred || (e && e.detail && e.detail.committed)) _scheduleRefit(true, 'visible-near');
+});
 // (已删除「适应溢出兜底 _runFitOverflowGuard」)它测 main.scrollWidth 来「兜底再缩」,但会把**非页面元素**
 // 的假溢出(如错位的 vocab 下划线、知识点抽屉)当真,于是把页面缩到 fit 以下 → 用户报的「适应后瞬间填满
 // 又回弹」就是它干的。_computeFitScale 本身精确(去边时也按可见宽算到正好填满),不需要这个投机性兜底。
@@ -98,7 +139,17 @@ function _scheduleRefit(force) {
 // 点「适应」(fitWidth)回到适应。旋转时若处于适应态 → 新方向强制重算适应,不还原该方向旧的手动缩放
 // (用户拍板:自适应开着就无论怎么转都自动适应)。自动 refit(ResizeObserver)不改此意图标志。
 window._atFitWidth = true;
-async function _refitToWidth(force, rebuild) {
+function _captureSideRefitAnchor(main) {
+  try {
+    const wrap = document.querySelector('.page-wrap[data-page-num="' + currentPage + '"]');
+    if (!wrap) return null;
+    const mr = main.getBoundingClientRect(), r = wrap.getBoundingClientRect();
+    if (!r.height || r.bottom <= mr.top || r.top >= mr.bottom) return null;
+    const screenY = Math.max(r.top, Math.min(r.bottom, mr.top + Math.min(mr.height * 0.42, 320)));
+    return { page: String(currentPage), fracY: Math.max(0, Math.min(1, (screenY - r.top) / r.height)), screenY };
+  } catch (_) { return null; }
+}
+async function _refitToWidth(force, rebuild, refitScope) {
   if (_refitBusy || !pdfDoc) return;
   const main = document.getElementById('main');
   const mainW = _mainContentWidth();
@@ -120,21 +171,39 @@ async function _refitToWidth(force, rebuild) {
     const v0 = page1.getViewport({scale: 1});
     const newScale = _computeFitScale(v0.width, v0.height);   // 双页含高度约束(整页可见)
     if (Math.abs(newScale - scale) < 0.01 && !force) return;
-    // 保存当前滚动相对位置（按 page-container 高度比例）
+    // 侧栏宽度 / 开合优先保存当前页的屏幕锚点；比例只作普通窗口缩放与异常结构的兜底。
     const container = document.getElementById('page-container');
+    const sideAnchor = refitScope === 'visible-near' ? _captureSideRefitAnchor(main) : null;
     const ratio = container && container.offsetHeight
       ? main.scrollTop / Math.max(1, container.offsetHeight)
       : 0;
     scale = newScale;
     _lastFitWidth = mainW;
+    // 侧栏开合会把 spread 临时切 continuous（关闭时反向还原）。原地 reparent，避免整本占位/已加载页重建。
+    if (refitScope === 'visible-near' && readMode !== 'single' && container) {
+      const structureMismatch = (readMode === 'spread') !== !!container.querySelector('.spread-row');
+      if (structureMismatch && typeof _remodeListInPlace === 'function') _remodeListInPlace();
+    }
     // 统一:三模式都走 wrap 原地重排(单页=唯一 wrap);rebuild 或原地失败才按模式重建(单页→renderPage 重建唯一 wrap)
-    if (rebuild || !(await _rescaleContinuousInPlace())) {
+    const rescaleOptions = refitScope === 'visible-near' ? { rasterScope: 'visible-near' } : undefined;
+    if (rebuild || !(await _rescaleContinuousInPlace(rescaleOptions))) {
       if (readMode === 'single') await renderPage(currentPage);
       else await setupContinuousMode();
     }
-    // 按比例恢复滚动
+    // 恢复同一页内位置；侧栏之外的 resize 保持原有全文高度比例语义。
     requestAnimationFrame(() => {
-      if (container && container.offsetHeight) {
+      let anchored = false;
+      if (sideAnchor) {
+        const target = document.querySelector('.page-wrap[data-page-num="' + sideAnchor.page + '"]');
+        if (target) {
+          const r = target.getBoundingClientRect();
+          if (r.height) {
+            main.scrollTop = Math.max(0, main.scrollTop + (r.top + sideAnchor.fracY * r.height) - sideAnchor.screenY);
+            anchored = true;
+          }
+        }
+      }
+      if (!anchored && container && container.offsetHeight) {
         main.scrollTop = Math.floor(ratio * container.offsetHeight);
       }
       _updateMainOverflowX();   // 适应/去边后内容铺满宽 → 锁横向拖动
@@ -397,6 +466,12 @@ window.toggleFullscreen = function () {
       try { localStorage.setItem('pdf-fullscreen', '0'); } catch (_) {}
     }
   }));
-_applyFullscreen(_fsEnabled());   // 载入同步页内全屏态(浏览器全屏须用户手势,不在此触发)
+// Navigation/reload ends the browser Fullscreen API session. A persisted visual
+// class without that session is stale and must not make the toolbar disappear.
+const _restoreFullscreen = _fsEnabled() && _browserFsActive();
+_applyFullscreen(_restoreFullscreen);
+if (!_restoreFullscreen) {
+  try { localStorage.setItem('pdf-fullscreen', '0'); } catch (_) {}
+}
 
 // 连续模式：所有页占位 + IntersectionObserver 懒加载

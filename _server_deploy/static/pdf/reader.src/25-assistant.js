@@ -857,6 +857,14 @@
   window.notesReload = function () {
     try { if (window.RC && RC.stickynote && RC.stickynote.loadAll) RC.stickynote.loadAll(); } catch (_) {}
   };
+  // Native PDF assistant actions are committed by native-local-runtime before
+  // they reach this legacy action surface.  Undo can affect either authority,
+  // so one harmless refresh action updates both without exposing a fake
+  // mutation function to the page.
+  window._nativePDFRefreshAnnotations = function () {
+    try { window._reloadHighlights && window._reloadHighlights(); } catch (_) {}
+    try { window.notesReload && window.notesReload(); } catch (_) {}
+  };
   // ── 改动发生时**自动**生成「跳转 + 撤销/重做」卡片(系统在高亮/便签写入时生成,非 AI 文本生成)──
   var _assistEdits = {}, _aeCtr = 0;
   window._assistEdit = function (d) {

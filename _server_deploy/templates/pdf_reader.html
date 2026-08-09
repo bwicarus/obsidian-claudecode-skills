@@ -28,8 +28,15 @@
 <!-- mfx:在 Claude Design 里设计的动效+美化层(导出回写),tokens+motion/polish/gestures/effects。撤销=删这两行 -->
 <link rel="stylesheet" href="/static/pdf/mfx.css?v=mfx-5">
 <script>
-/* 全屏阅读偏好：渲染前(早于 body)就给 <html> 加 fs-mode，避免开着全屏时刷新一闪顶栏 */
-try { if (localStorage.getItem('pdf-fullscreen') === '1') document.documentElement.classList.add('fs-mode'); } catch (e) {}
+/* 页面导航不会保留 Fullscreen API 会话；不再只凭旧 localStorage 恢复一个无法退出的假全屏。 */
+try {
+  var __bwPdfFullscreenActive = !!(document.fullscreenElement || document.webkitFullscreenElement);
+  if (localStorage.getItem('pdf-fullscreen') === '1' && __bwPdfFullscreenActive) {
+    document.documentElement.classList.add('fs-mode');
+  } else if (!__bwPdfFullscreenActive) {
+    localStorage.setItem('pdf-fullscreen', '0');
+  }
+} catch (e) {}
 </script>
 </head>
 <body>

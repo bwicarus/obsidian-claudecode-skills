@@ -399,15 +399,17 @@ window._grammarAnki = async (blockId) => {
   const analysis = (block.querySelector('.gb-content')?.textContent || '').trim();
   const fu = (block.querySelector('.gb-fu-answers')?.textContent || '').trim();
   if (!sentence && !analysis) { _toast && _toast('没有可制卡的内容'); return; }
-  const srcUrl = FILE_REL ? (location.origin + '/pdf/view?file=' + encodeURIComponent(FILE_REL) + '&page=' + (currentPage || 1)) : '';
   const text = `【句子】${sentence}` + (zh ? `\n【译文】${zh}` : '') + (analysis ? `\n【语法分析】${analysis}` : '')
-    + (fu ? `\n【追问】${fu}` : '') + (srcUrl ? `\n【原文出处链接（务必原样放进卡片背面，做成可点链接）】${srcUrl}` : '');
+    + (fu ? `\n【追问】${fu}` : '');
   const jobUi = _startBgJob('制 Anki 中…');
   try {
     const ov = _getAiOverrides();
+    // @interaction learning.snippets.enqueue
     const r = await fetch('/pdf/api/snippets-to-async', {
       method: 'POST', headers: {'Content-Type': 'application/json'},
-      body: JSON.stringify({ snippets: [{text, source: sentence}], make_note: false, make_anki: true, note_name: '', model: ov.model || '', effort: ov.effort || '' }),
+      body: JSON.stringify({ file: FILE_REL || '', page: currentPage || 1,
+        source: { kind: 'pdf', page: currentPage || 1 },
+        snippets: [{text, source: sentence}], make_note: false, make_anki: true, note_name: '', model: ov.model || '', effort: ov.effort || '' }),
     });
     const d = await r.json();
     if (!d.ok || !d.job_id) { _failBgJob(jobUi, d.error || '提交失败', null); return; }
@@ -829,4 +831,3 @@ function _moveDepTip(ev){
   _depTipEl.style.top  = ((ev.clientY||0)+14) + 'px';
 }
 function _hideDepTip(){ if (_depTipEl) _depTipEl.style.display='none'; }
-

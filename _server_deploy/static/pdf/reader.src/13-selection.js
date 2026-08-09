@@ -69,14 +69,127 @@ function _findCharAt(charBoxes, x, y) {
   return best;
 }
 
+function _charBlockId(c) {
+  return (c && c.bk != null && c.bk >= 0)
+    ? c.bk
+    : ((!c || c.w == null || c.w < 0) ? -1 : Math.floor(c.w / 1000000));
+}
+
+function _charBlockGeometry(chars, sIdx, eIdx) {
+  const relevant = new Set();
+  for (let i = sIdx; i <= eIdx; i++) {
+    const id = _charBlockId(chars[i]);
+    if (id >= 0) relevant.add(id);
+  }
+  const blocks = new Map();
+  for (let i = 0; i < chars.length; i++) {
+    const c = chars[i], id = _charBlockId(c);
+    if (id < 0 || !relevant.has(id) || !c) continue;
+    const left = Number(c.left), top = Number(c.top);
+    const width = Number(c.width), height = Number(c.height);
+    if (![left, top, width, height].every(Number.isFinite) || width < 0 || height < 0) continue;
+    let block = blocks.get(id);
+    if (!block) {
+      block = {
+        id,
+        left,
+        top,
+        right: left + width,
+        bottom: top + height,
+        charWidths: [],
+        charHeights: [],
+      };
+      blocks.set(id, block);
+    } else {
+      block.left = Math.min(block.left, left);
+      block.top = Math.min(block.top, top);
+      block.right = Math.max(block.right, left + width);
+      block.bottom = Math.max(block.bottom, top + height);
+    }
+    if (!c.sp && width > 0) block.charWidths.push(width);
+    if (!c.sp && height > 0) block.charHeights.push(height);
+  }
+  const median = (values, fallback) => {
+    if (!values.length) return fallback;
+    values.sort((a, b) => a - b);
+    return values[Math.floor(values.length / 2)];
+  };
+  for (const block of blocks.values()) {
+    block.width = Math.max(0, block.right - block.left);
+    block.height = Math.max(0, block.bottom - block.top);
+    block.charWidth = Math.max(1, median(block.charWidths, block.width || 1));
+    block.charHeight = Math.max(1, median(block.charHeights, block.height || 1));
+    block.axis = block.width > block.height * 1.15
+      ? 'horizontal'
+      : (block.height > block.width * 1.15 ? 'vertical' : 'ambiguous');
+  }
+  return blocks;
+}
+
+function _charBlockGap(a0, a1, b0, b1) {
+  return Math.max(0, Math.max(a0, b0) - Math.min(a1, b1));
+}
+
+function _charBlockOverlapRatio(a0, a1, b0, b1) {
+  const overlap = Math.max(0, Math.min(a1, b1) - Math.max(a0, b0));
+  const span = Math.max(1, Math.min(a1 - a0, b1 - b0));
+  return overlap / span;
+}
+
+// Apple Vision 常给每一视觉行独立 bk。横排相邻行须 X 投影重叠且 Y 间距小；
+// 竖排相邻列须 Y 投影重叠且 X 间距小。方向明确相反时绝不靠近，避免同一
+// 视觉行上的多个气泡被横向串起来。
+function _charBlocksConnected(a, b) {
+  const xOverlap = _charBlockOverlapRatio(a.left, a.right, b.left, b.right);
+  const yOverlap = _charBlockOverlapRatio(a.top, a.bottom, b.top, b.bottom);
+  const yGap = _charBlockGap(a.top, a.bottom, b.top, b.bottom);
+  const xGap = _charBlockGap(a.left, a.right, b.left, b.right);
+  const horizontal = a.axis !== 'vertical' && b.axis !== 'vertical'
+    && xOverlap >= 0.3
+    && yGap <= Math.max(a.charHeight, b.charHeight) * 1.8;
+  const vertical = a.axis !== 'horizontal' && b.axis !== 'horizontal'
+    && yOverlap >= 0.3
+    && xGap <= Math.max(a.charWidth, b.charWidth) * 1.8;
+  return horizontal || vertical;
+}
+
+function _charConnectedBlockPath(blocks, startId, endId) {
+  const nodes = Array.from(blocks.values());
+  const parent = new Map([[startId, null]]);
+  const queue = [startId];
+  for (let cursor = 0; cursor < queue.length; cursor++) {
+    const id = queue[cursor];
+    if (id === endId) break;
+    const current = blocks.get(id);
+    if (!current) continue;
+    for (const candidate of nodes) {
+      if (parent.has(candidate.id) || !_charBlocksConnected(current, candidate)) continue;
+      parent.set(candidate.id, id);
+      queue.push(candidate.id);
+    }
+  }
+  if (!parent.has(endId)) return null;
+  const path = new Set();
+  for (let id = endId; id != null; id = parent.get(id)) path.add(id);
+  return path;
+}
+
+// 块号是不透明身份，不能用 min/max 表达区间。同块严格只取该块；不同块时
+// 只取端点之间的几何连通路径。若端点不连通，宁可只保留两个端点块，也不把
+// 视觉上夹在中间、语义上属于别的气泡/栏的块吞进来。
+function _charRangeBlockFilter(chars, sIdx, eIdx) {
+  const sb = _charBlockId(chars[sIdx]), eb = _charBlockId(chars[eIdx]);
+  if (sb < 0 || eb < 0) return () => true;
+  if (sb === eb) return (c) => _charBlockId(c) === sb || (_charBlockId(c) < 0 && !!c.sp);
+  const blocks = _charBlockGeometry(chars, sIdx, eIdx);
+  const allowed = _charConnectedBlockPath(blocks, sb, eb) || new Set([sb, eb]);
+  return (c) => allowed.has(_charBlockId(c)) || (_charBlockId(c) < 0 && !!c.sp);
+}
+
 // chars[s..e] 拼成文本（含 X gap 智能空格 + 跨行换行；跟 _selByCharRange 同逻辑）
 function _charsRangeToText(chars, sIdx, eIdx) {
   if (sIdx < 0 || eIdx >= chars.length || sIdx > eIdx) return '';
-  // 块过滤：跳掉 reading order 落在区间中间、却属于别块的字符（双栏交错时把另一栏串进来）
-  const _blk = (c) => (c.bk != null && c.bk >= 0) ? c.bk : ((c.w == null || c.w < 0) ? -1 : Math.floor(c.w / 1000000));
-  const _sb = _blk(chars[sIdx]), _eb = _blk(chars[eIdx]);
-  const _bLo = Math.min(_sb, _eb), _bHi = Math.max(_sb, _eb);
-  const _inBlk = (c) => { if (_sb < 0 || _eb < 0) return true; const b = _blk(c); return b < 0 || (b >= _bLo && b <= _bHi); };
+  const _inBlk = _charRangeBlockFilter(chars, sIdx, eIdx);
   let text = '', lastChar = null;
   const _cjk = s => /[぀-ヿ㐀-鿿　-〿＀-￯]/.test(s || '');
   for (let i = sIdx; i <= eIdx; i++) {
@@ -174,13 +287,9 @@ function _selByCharRange(pw, sIdx, eIdx) {
   // 拖选两端自动对齐词边界（英文 \w 词；CJK 字符不动 - isWord 不匹配自动跳过）
   sIdx = _expandToWordStart(chars, sIdx);
   eIdx = _expandToWordEnd(chars, eIdx);
-  // 按块过滤：只保留 block 序号在 [起点块, 终点块] 之间的字符，排除中间插入的别块
-  // （双栏选一栏不带另一栏、题号不粘进指令；跨段落=相邻块仍能选）。w=-1(无块信息)时不过滤
-  // 用 rawdict 块号 bk 过滤(斜体词 w=-1 也有块号)；bk 缺失才回退 w//1e6
-  const _blk = (c) => (c.bk != null && c.bk >= 0) ? c.bk : ((c.w == null || c.w < 0) ? -1 : Math.floor(c.w / 1000000));
-  const _sb = _blk(chars[sIdx]), _eb = _blk(chars[eIdx]);
-  const _bLo = Math.min(_sb, _eb), _bHi = Math.max(_sb, _eb);
-  const _inBlk = (c) => { if (_sb < 0 || _eb < 0) return true; const b = _blk(c); return b < 0 || (b >= _bLo && b <= _bHi); };  // b<0(空格/无词归属)保留，只排明确别块
+  // 同块严格限在该 bk；跨块只接受两端之间的几何连通路径。
+  // bk 缺失才回退 w//1e6，无任何块信息时保持旧行为。
+  const _inBlk = _charRangeBlockFilter(chars, sIdx, eIdx);
   // 拼出选中文本：跨行加 \n；同行按物理 X gap 智能补空格（应对 PDF 数轴等
   // TJ 间隔但无空格 char 的情况，如 '0 1 2 3 4' 在 PyMuPDF rawdict 里没空格 char）
   let text = '';
@@ -332,14 +441,25 @@ function _wordExpandFromChar(chars, idx) {
   return {start: s, end: e};
 }
 
-// 同行扩展（双击）—— 含空格
+// 同行扩展（双击）—— 含空格，但不跨块/明显水平空白。
 function _lineExpandFromChar(chars, idx) {
   if (idx < 0 || idx >= chars.length) return null;
   const refTop = chars[idx].top;
   const refH = chars[idx].height;
+  const refBk = _charBlockId(chars[idx]);
+  const _sameLineNeighbor = (a, b) => {
+    if (Math.abs(b.top - refTop) > refH * 0.4) return false;
+    const bBk = _charBlockId(b);
+    if (refBk >= 0 && bBk >= 0 && bBk !== refBk) return false;
+    const left = a.left <= b.left ? a : b;
+    const right = left === a ? b : a;
+    const gap = right.left - (left.left + left.width);
+    const h = Math.max(1, refH, a.height || 0, b.height || 0);
+    return gap <= h * 1.5;
+  };
   let s = idx, e = idx;
-  while (s > 0 && Math.abs(chars[s - 1].top - refTop) <= refH * 0.4) s--;
-  while (e < chars.length - 1 && Math.abs(chars[e + 1].top - refTop) <= refH * 0.4) e++;
+  while (s > 0 && _sameLineNeighbor(chars[s - 1], chars[s])) s--;
+  while (e < chars.length - 1 && _sameLineNeighbor(chars[e], chars[e + 1])) e++;
   // 去掉两端空格
   while (s < e && chars[s].sp) s++;
   while (e > s && chars[e].sp) e--;
@@ -787,4 +907,3 @@ function _bindCharLayer(cl, pw) {
   // 暴露给 vocab L 按钮：从 L 按钮上也能转发拖选（既能点翻译，也能从其上拖选）
   pw.__charDrag = { onStart, onMove, onEnd, ptToLocal };
 }
-

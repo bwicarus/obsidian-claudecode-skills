@@ -19,11 +19,15 @@
 </head>
 <body>
   <script>
-  /* 全屏阅读偏好：渲染前(早于紧接着的 #ep-top)就给 <body> 加 fs-mode，避免开着全屏时刷新一闪顶栏。
-     照搬 PDF pdf_reader.html <head> 内联脚本的用意，但 EPUB 的 CSS 选择器是 body.fs-mode #ep-top(复合选择器，要求类直接
-     打在 <body> 上)；<head> 阶段 document.body 还不存在，不能照抄 PDF 挂到 documentElement 那招 —— 改成本段作为
-     <body> 内第一个节点，浏览器解析到它会同步执行完才继续画后面的 #ep-top，效果等价(根治顶栏先闪一下再隐藏)。 */
-  try { if (localStorage.getItem('eph-fs-mode') === '1') document.body.classList.add('fs-mode'); } catch (e) {}
+  /* 页面导航不会保留 Fullscreen API 会话；旧偏好不得单独恢复隐藏顶栏的假全屏。 */
+  try {
+    var __bwEpubFullscreenActive = !!(document.fullscreenElement || document.webkitFullscreenElement);
+    if (localStorage.getItem('eph-fs-mode') === '1' && __bwEpubFullscreenActive) {
+      document.body.classList.add('fs-mode');
+    } else if (!__bwEpubFullscreenActive) {
+      localStorage.setItem('eph-fs-mode', '0');
+    }
+  } catch (e) {}
   </script>
   <style id="ep-book-css"></style>
   <div id="ep-top">

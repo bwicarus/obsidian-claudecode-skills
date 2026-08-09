@@ -25,7 +25,10 @@ test("native book OCR exposes durable manual lifecycle and staged progress", () 
   assert.match(MODELS, /var canPause: Bool/);
   assert.match(MODELS, /var canResume: Bool/);
   assert.match(MODELS, /var canRetry: Bool/);
-  assert.match(STORE, /writeStatus\(_ status: NativeBookOCRBookStatus\)/);
+  assert.match(
+    STORE,
+    /func writeStatus\([\s\S]*_ status: NativeBookOCRBookStatus,[\s\S]*mutationLease:/,
+  );
   assert.match(STORE, /App 上次退出时已保存进度/);
   assert.match(MANAGER, /recordStatusPersistenceFailure/);
   assert.doesNotMatch(MANAGER, /try\? await store\.writeStatus/);
@@ -186,7 +189,7 @@ test("native page text bridge data is available without coupling the core to UI 
   assert.match(MANAGER, /try Self\.validateCurrentBook\(book\)/);
   const restore = MANAGER.slice(
     MANAGER.indexOf("func waitUntilReady"),
-    MANAGER.indexOf("func activate"),
+    MANAGER.indexOf("func beginPDFMutationLease"),
   );
   assert.doesNotMatch(
     restore,
@@ -236,4 +239,31 @@ test("native update event and page formula reply keep the exact public shape", (
   assert.match(BRIDGE, /Dictionary\(grouping: value\.matches/);
   assert.match(BRIDGE, /"count": hits\.count/);
   assert.match(BRIDGE, /"pages": status\.textProgress\.completed/);
+});
+
+test("manual page OCR and selection fixes are local, durable, layered, and never fake success", () => {
+  assert.match(PROCESSOR, /forceVision: Bool = false/);
+  assert.match(PROCESSOR, /if !forceVision, geometry\.rotation == 0/);
+  assert.match(MODELS, /reader-native-selection-corrections\/1/);
+  assert.match(MODELS, /case localOverride = "local-override"/);
+  assert.match(STORE, /func writeManualPageOverride\(/);
+  assert.match(STORE, /func clearManualPageOverride\(/);
+  assert.match(STORE, /func appendSelectionCorrection\(/);
+  assert.match(STORE, /overrides\/manual/);
+  assert.match(STORE, /overrides\/selection/);
+  assert.match(STORE, /applyingSelectionCorrections/);
+  assert.match(STORE, /formulaRegions\.removeAll/);
+  assert.match(MANAGER, /func recognizeSelection\(/);
+  assert.match(MANAGER, /func reOCRPage\(/);
+  assert.match(MANAGER, /func clearManualReOCR\(/);
+  assert.match(MANAGER, /forceVision: true/);
+  assert.match(MANAGER, /try await store\.appendSelectionCorrection/);
+  assert.match(MANAGER, /try await store\.writeManualPageOverride/);
+  assert.match(MANAGER, /try await store\.clearManualPageOverride/);
+  assert.match(BRIDGE, /case recognizeSelection = "ocr-selection"/);
+  assert.match(BRIDGE, /case reOCRPage = "reocr-page"/);
+  assert.match(BRIDGE, /case clearReOCRPage = "clear-reocr-page"/);
+  assert.match(BRIDGE, /private var localBookAccess: ReaderLocalBookAccess\?/);
+  assert.match(BRIDGE, /"persisted": true/);
+  assert.doesNotMatch(MANAGER, /try\? await store\.(?:appendSelectionCorrection|writeManualPageOverride|clearManualPageOverride)/);
 });

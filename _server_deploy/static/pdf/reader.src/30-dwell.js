@@ -52,7 +52,14 @@
       k.charAt(0) === 'u' ? { upage: k.slice(2), secs: s } : { page: +k.slice(2), secs: s })) });
     try {
       if (useBeacon && navigator.sendBeacon) {
-        navigator.sendBeacon('/pdf/api/read-dwell', new Blob([body], { type: 'application/json' }));
+        // The native App owns this same-origin route through a synchronous
+        // WK bridge. Keep the JSON string available synchronously so a
+        // visibility/pagehide flush cannot be lost while Blob.text() is still
+        // queued; the web/PWA path retains the old application/json Blob.
+        const payload = window.__BW_NATIVE_LOCAL_READER__ === true
+          ? body : new Blob([body], { type: 'application/json' });
+        // @interaction learning.read-dwell.report
+        navigator.sendBeacon('/pdf/api/read-dwell', payload);
       } else {
         fetch('/pdf/api/read-dwell', { method: 'POST', headers: { 'Content-Type': 'application/json' },
                                        body, keepalive: true }).catch(() => {});

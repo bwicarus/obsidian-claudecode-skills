@@ -303,9 +303,7 @@ async function ankiFromResult() {
   if (!sel && !body) { _toast('没有可制卡的内容'); return; }
   const sentence = (_resultContext && _resultContext.sentence) || '';
   // 原句导航链接：卡片背面可点回到 PDF 原文页
-  const srcUrl = FILE_REL ? (location.origin + '/pdf/view?file=' + encodeURIComponent(FILE_REL) + '&page=' + (currentPage || 1)) : '';
-  const text = `【原文】${sel}` + (sentence && sentence !== sel ? `\n【上下文】${sentence}` : '') + `\n【解释】${body}` +
-               (srcUrl ? `\n【原文出处链接（务必原样放进卡片背面，做成可点链接）】${srcUrl}` : '');
+  const text = `【原文】${sel}` + (sentence && sentence !== sel ? `\n【上下文】${sentence}` : '') + `\n【解释】${body}`;
   closeResult();
   const jobUi = _startBgJob('制 Anki 中…');
   try {
@@ -313,6 +311,9 @@ async function ankiFromResult() {
     const r = await fetch('/pdf/api/snippets-to-async', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({
+        file: FILE_REL || '',
+        page: currentPage || 1,
+        source: { kind: 'pdf', page: currentPage || 1 },
         snippets: [{text, source: sel || sentence}],
         make_note: false, make_anki: true, note_name: '',
         model: ov.model || '', effort: ov.effort || '',

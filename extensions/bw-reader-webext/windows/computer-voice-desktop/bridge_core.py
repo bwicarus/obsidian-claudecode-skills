@@ -53,7 +53,11 @@ CONTEXT_DELIVERY_SNAPSHOT = "snapshot-mcp"
 CONTEXT_DELIVERY_MODES = frozenset(
     {CONTEXT_DELIVERY_LEGACY, CONTEXT_DELIVERY_SNAPSHOT}
 )
-DEFAULT_ALLOWED_ORIGINS = ("https://bwicarus.taile44d0c.ts.net",)
+NATIVE_APP_ORIGIN = "http://127.0.0.1:43129"
+DEFAULT_ALLOWED_ORIGINS = (
+    "https://bwicarus.taile44d0c.ts.net",
+    NATIVE_APP_ORIGIN,
+)
 ONLINE_STATES = frozenset(
     {
         "starting",
@@ -223,6 +227,7 @@ class ShortcutBrokerRequestProcessor:
                 "requestId",
                 "rootProcessId",
                 "rootProcessStartTimeUtc",
+                "windowHandle",
             }
             or value.get("contract") != SHORTCUT_BROKER_CONTRACT
             or value.get("type") != "toggle"
@@ -233,6 +238,9 @@ class ShortcutBrokerRequestProcessor:
             or not _valid_utc_roundtrip_time(
                 value.get("rootProcessStartTimeUtc")
             )
+            or isinstance(value.get("windowHandle"), bool)
+            or not isinstance(value.get("windowHandle"), int)
+            or not 0 < value["windowHandle"] <= 0x7FFFFFFFFFFFFFFF
         ):
             receipt = self._failure(
                 request_id if _valid_shortcut_request_id(request_id) else "invalid",
@@ -243,6 +251,7 @@ class ShortcutBrokerRequestProcessor:
         signature = (
             value["rootProcessId"],
             value["rootProcessStartTimeUtc"],
+            value["windowHandle"],
         )
         cached = self._receipts.get(request_id)
         if cached is not None:
@@ -555,6 +564,8 @@ def _atomic_write_json(path: Path, value: dict[str, Any]) -> None:
 def _is_valid_origin(value: object) -> bool:
     if not isinstance(value, str):
         return False
+    if value == NATIVE_APP_ORIGIN:
+        return True
     parsed = urlsplit(value)
     return (
         parsed.scheme == "https"
@@ -727,7 +738,7 @@ def validate_direct_config(
         or len(set(origins)) != len(origins)
         or not all(_is_valid_origin(origin) for origin in origins)
     ):
-        raise BridgeError("Reader HTTPS 来源白名单无效。")
+        raise BridgeError("Reader 来源白名单无效。")
     if (
         value.get("allowedTailscaleUserLogin")
         != FIXED_ALLOWED_TAILSCALE_USER_LOGIN
@@ -778,6 +789,39 @@ def load_direct_config(paths: BridgePaths) -> dict[str, Any] | None:
         )
     except BridgeError:
         return None
+
+
+def migrate_native_app_origin(paths: BridgePaths) -> bool:
+    """Atomically add the one fixed App origin to an older valid config."""
+
+    value = read_json(paths.direct_config)
+    if value is None:
+        return False
+    try:
+        validated = validate_direct_config(
+            value,
+            expected_runtime_status=paths.runtime_status,
+        )
+    except BridgeError:
+        # Migration is allowed to extend only an already-valid predecessor;
+        # the normal start/load gate remains responsible for rejecting damage.
+        return False
+    origins = list(validated["allowedOrigins"])
+    if NATIVE_APP_ORIGIN in origins:
+        return False
+    if len(origins) >= 8:
+        raise BridgeError(
+            "Reader 来源白名单已满，无法加入固定原生 App 来源。"
+        )
+    migrated = validate_direct_config(
+        {
+            **validated,
+            "allowedOrigins": [*origins, NATIVE_APP_ORIGIN],
+        },
+        expected_runtime_status=paths.runtime_status,
+    )
+    _atomic_write_json(paths.direct_config, migrated)
+    return True
 
 
 def legacy_microphone_config_requires_migration(
@@ -846,7 +890,7 @@ def build_direct_config(
         raise BridgeError("上下文交付模式无效。")
     origins = list(allowed_origins)
     if not origins or not all(_is_valid_origin(origin) for origin in origins):
-        raise BridgeError("Reader HTTPS 来源白名单无效。")
+        raise BridgeError("Reader 来源白名单无效。")
 
     value = {
         "contract": (
@@ -1281,6 +1325,7 @@ def start_direct_service(
     *,
     now: datetime | None = None,
 ) -> int:
+    migrate_native_app_origin(paths)
     config = load_direct_config(paths)
     if config is None or config.get("localOptIn") is not True:
         raise BridgeError("请先保存并启用直连配置。")
@@ -2154,6 +2199,8 @@ def run_idle_bootstrap(
     stable_polls = 0
     unresponsive_polls = 0
     cycles = 0
+
+    migrate_native_app_origin(paths)
 
     while True:
         config = load_direct_config(paths)

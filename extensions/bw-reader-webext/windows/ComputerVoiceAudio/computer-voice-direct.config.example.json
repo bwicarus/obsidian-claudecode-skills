@@ -8,7 +8,8 @@
   "listenHost": "127.0.0.1",
   "listenPort": 43128,
   "allowedOrigins": [
-    "https://bwicarus.taile44d0c.ts.net"
+    "https://bwicarus.taile44d0c.ts.net",
+    "http://127.0.0.1:43129"
   ],
   "allowedTailscaleUserLogin": "bwicarus@gmail.com",
   "experimentalSingleUserMode": true,

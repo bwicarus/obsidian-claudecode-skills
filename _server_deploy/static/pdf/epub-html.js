@@ -1825,7 +1825,7 @@
     try {
       if (!fileRel) return;
       var url = /\.epub$/i.test(fileRel)
-        ? ('/pdf/epub/view?file=' + encodeURIComponent(fileRel))
+        ? ('/pdf/epub/view?file=' + encodeURIComponent(fileRel) + (page != null ? '&page=' + encodeURIComponent(page) : ''))
         : ('/pdf/view?file=' + encodeURIComponent(fileRel) + (page ? '&page=' + page : ''));
       location.href = url;
     } catch (e) {}
@@ -1891,39 +1891,76 @@
   }
   // 统一入口:单 section(手动 epub_highlight,{section,texts})/ 多 section(整章 auto_highlight,{sections:[{section,texts}],picker:true})。
   //   多 section **串行**逐章定位画高亮,完成后:picker → showHlPicker 逐条跳转/删除列表;否则 → _epAssistEdit 会话撤销⇄重做卡。
-  window.epubHighlight = function (arg) {
-    try {
-      if (!arg) return;
-      var color = arg.color || localStorage.getItem('eph-hl-color') || hlColors()[0];
-      var groups;
-      if (Array.isArray(arg.sections)) {
-        groups = arg.sections.map(function (g) {
-          var ts = (g.texts || []).map(function (t) { return String(t || '').trim(); }).filter(Boolean);
-          var s = parseInt(g.section, 10); if (isNaN(s)) s = _curTopIdx;
-          return { section: s, texts: ts };
-        }).filter(function (g) { return g.texts.length; });
-      } else {
-        var ts0 = (arg.texts || (arg.text ? [arg.text] : [])).map(function (t) { return String(t || '').trim(); }).filter(Boolean);
-        if (!ts0.length) return;
-        var s0 = parseInt(arg.section, 10); if (isNaN(s0)) s0 = _curTopIdx;
-        groups = [{ section: s0, texts: ts0 }];
-      }
-      if (!groups.length) return;
-      var wantPicker = !!arg.picker, firstSection = groups[0].section, allCreated = [];
-      (function runGroup(i) {
-        if (i >= groups.length) {
-          if (groups.length > 1) { try { jumpTo(firstSection, false); } catch (e) {} }   // 收尾回到整章起点
-          if (!allCreated.length) return;
-          if (wantPicker) { try { window.showHlPicker({ items: allCreated }); } catch (e) {} }   // 逐条跳转/删除
-          else { try { _epAssistEdit({ section: firstSection, items: allCreated }); } catch (e) {} }   // 会话撤销⇄重做卡
-          return;
+  function _epubHighlightTransaction(arg) {
+    return new Promise(function (resolve, reject) {
+      try {
+        if (!arg) throw new Error('缺少高亮参数');
+        var color = arg.color || localStorage.getItem('eph-hl-color') || hlColors()[0];
+        var groups;
+        if (Array.isArray(arg.sections)) {
+          groups = arg.sections.map(function (g) {
+            var ts = (g.texts || []).map(function (t) { return String(t || '').trim(); }).filter(Boolean);
+            var s = parseInt(g.section, 10); if (isNaN(s)) s = _curTopIdx;
+            return { section: s, texts: ts };
+          }).filter(function (g) { return g.texts.length; });
+        } else {
+          var ts0 = (arg.texts || (arg.text ? [arg.text] : [])).map(function (t) { return String(t || '').trim(); }).filter(Boolean);
+          if (!ts0.length) throw new Error('没有可定位的高亮原文');
+          var s0 = parseInt(arg.section, 10); if (isNaN(s0)) s0 = _curTopIdx;
+          groups = [{ section: s0, texts: ts0 }];
         }
-        var g = groups[i];
-        _markGroup(g.section, g.texts, color).then(function (created) {
-          allCreated = allCreated.concat(created || []); runGroup(i + 1);
-        });
-      })(0);
-    } catch (e) { dbg('epubHighlight err:' + (e && e.message)); }
+        if (!groups.length) throw new Error('没有可执行的高亮分组');
+        var wantPicker = !!arg.picker, firstSection = groups[0].section, allCreated = [];
+        (function runGroup(i) {
+          if (i >= groups.length) {
+            if (groups.length > 1) { try { jumpTo(firstSection, false); } catch (e) {} }   // 收尾回到整章起点
+            if (!allCreated.length) { reject(new Error('没有在正文中定位到高亮原文')); return; }
+            if (window.__BW_NATIVE_LOCAL_READER__) {
+              var action = {
+                id: 'act_nehl_' + Date.now() + '_' + Math.random().toString(16).slice(2, 8),
+                kind: wantPicker ? 'auto_highlight' : 'epub_highlight',
+                title: (wantPicker ? '自动标重点:' : '高亮:') + allCreated.length + '处',
+                detail: allCreated.map(function (item) { return '· ' + String(item.text || '').slice(0, 120); }).join('\n'),
+                undo: { op: 'hl_delete', file: FREL, ids: allCreated.map(function (item) { return item.id; }) },
+                redo: { op: 'hl_create', file: FREL, items: allCreated },
+                state: 'done', ts: Math.floor(Date.now() / 1000)
+              };
+              _epAttachActions([action]).then(function () {
+                _epShowAction(action);
+                if (wantPicker) { try { window.showHlPicker({ items: allCreated }); } catch (e) {} }
+                resolve({ action: action, items: allCreated });
+              }).catch(function (error) {
+                allCreated.forEach(function (item) {
+                  try { unapplyHl(item); delete _hls[item.id]; } catch (_) {}
+                });
+                toast('高亮未保存:' + String(error && error.message || error));
+                reject(error);
+              });
+              return;
+            }
+            if (wantPicker) { try { window.showHlPicker({ items: allCreated }); } catch (e) {} }   // 逐条跳转/删除
+            else { try { _epAssistEdit({ section: firstSection, items: allCreated }); } catch (e) {} }   // 会话撤销⇄重做卡
+            resolve({ items: allCreated });
+            return;
+          }
+          var g = groups[i];
+          _markGroup(g.section, g.texts, color).then(function (created) {
+            allCreated = allCreated.concat(created || []); runGroup(i + 1);
+          }).catch(reject);
+        })(0);
+      } catch (e) {
+        dbg('epubHighlight err:' + (e && e.message));
+        reject(e);
+      }
+    });
+  }
+  // Keep the established fire-and-forget UI hook while exposing a promise
+  // specifically for native chat/voice write-before-success interception.
+  window.nativeLocalEPUBHighlight = _epubHighlightTransaction;
+  window.epubHighlight = function (arg) {
+    var task = _epubHighlightTransaction(arg);
+    task.catch(function () {});   // old action dispatchers intentionally ignore returns
+    return task;
   };
 
   // ── 「第N章」→ section idx 换算(④ off-by-one 修复)──
@@ -2103,14 +2140,33 @@
     return card;
   }
   function _epShowAction(rec) { var c = _epActionCard(rec); if (c) { _asstBody().appendChild(c); _asstBody().scrollTop = _asstBody().scrollHeight; } return c; }
+  function _epAttachActions(batch) {
+    return new Promise(function (resolve, reject) {
+      function send() {
+        if (window.__asstStreaming) { setTimeout(send, 300); return; }
+        fetch('/pdf/api/epub-action', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ op: 'attach', file: FREL, actions: batch }) })
+          .then(function (response) {
+            return response.json().then(function (payload) {
+              if (!response.ok || !payload || payload.ok !== true || payload.stored !== true) {
+                throw new Error((payload && payload.error) || ('HTTP ' + response.status));
+              }
+              resolve(payload);
+            });
+          }).catch(reject);
+      }
+      send();
+    });
+  }
   // 前端建的 action → 落库(upsert by id,幂等)。流式中先等本轮 assistant 消息落库再 attach(防 attach 落到 user 消息上)。
   var _epPending = [];
   function _epFlushActions() {
     if (!_epPending.length) return;
     if (window.__asstStreaming) { setTimeout(_epFlushActions, 300); return; }   // 共享侧栏流式中缓一缓:等本轮 assistant 消息落库再 attach(rc-assistant._setSendMode 维护标记)
     var batch = _epPending.slice(); _epPending = [];
-    fetch('/pdf/api/epub-action', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ op: 'attach', file: FREL, actions: batch }) }).catch(function () {});
+    _epAttachActions(batch).catch(function (error) {
+      toast('动作未保存:' + String(error && error.message || error));
+    });
   }
   function _epQueueAction(rec) { if (rec) { _epPending.push(rec); _epFlushActions(); } }
   // 后台任务(制卡/笔记/生词)完成 → 拿 undo_id 让后端建完整 action(含快照)+ 落库,再渲卡
@@ -2122,6 +2178,42 @@
       .then(function (d) { if (d && d.ok && d.action) { _epShowAction(d.action); } })
       .catch(function () {});
   }
+
+  // Native note writes are planned by the Pi assistant but committed only by
+  // this client action. `/epub-action` performs the App-owned IndexedDB write
+  // and Pi conversation-metadata commit as one compensated transaction; the
+  // success card is therefore never shown before both halves acknowledge.
+  function _nativeLocalEPUBMutationTransaction(request) {
+    if (!request || request.contract !== 'reader-native-epub-action/1' ||
+        !request.action || request.file !== FREL) {
+      toast('本机便签操作无效');
+      return Promise.reject(new Error('本机便签操作无效'));
+    }
+    // @interaction document.epub-action.commit
+    return fetch('/pdf/api/epub-action', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ op: 'native_apply', contract: request.contract,
+        file: request.file, action: request.action }) })
+      .then(function (response) {
+        return response.json().then(function (payload) {
+          if (!response.ok || !payload || payload.ok !== true || !payload.action) {
+            throw new Error((payload && payload.error) || ('HTTP ' + response.status));
+          }
+          try { window.notesReload(); } catch (_) {}
+          _epShowAction(payload.action);
+          toast('便签已保存');
+          return payload;
+        });
+      }).catch(function (error) {
+        toast('便签未保存:' + String(error && error.message || error));
+        throw error;
+      });
+  }
+  window.nativeLocalEPUBMutationTransaction = _nativeLocalEPUBMutationTransaction;
+  window.nativeLocalEPUBMutation = function (request) {
+    var task = _nativeLocalEPUBMutationTransaction(request);
+    task.catch(function () {});   // established client_action dispatch is fire-and-forget
+    return task;
+  };
 
   // ── window.showHlPicker:逐条渲染一组高亮(色块 + 原文 + ↗跳转 + 🗑删除)= epub2-assist 的偏移锚版。
   //    auto_highlight 标完(picker:true)/ find_highlights(后端 client_action {fn:showHlPicker})都用它。
@@ -2540,7 +2632,10 @@
     ['fullscreenchange', 'webkitfullscreenchange'].forEach(function (ev) {
       document.addEventListener(ev, function () { if (!_fsActive() && document.body.classList.contains('fs-mode')) set(false); });
     });
-    if (localStorage.getItem('eph-fs-mode') === '1') { document.body.classList.add('fs-mode'); btn.classList.add('active'); }   // 恢复记忆:只置类不强拉浏览器全屏(对齐 epub.js)
+    var restore = localStorage.getItem('eph-fs-mode') === '1' && _fsActive();
+    document.body.classList.toggle('fs-mode', restore);
+    btn.classList.toggle('active', restore);
+    if (!restore) { try { localStorage.setItem('eph-fs-mode', '0'); } catch (e) {} }
   })();
   // ── 双指捏合缩放(对照 PDF/epub.js setupEpubPinch:reflow 无栅格 → 捏合映射到字号步进 onFontSize)──
   //   底座换默认手搓版:主文档容器 #ep-content 双指 touchstart 记 Math.hypot 间距 → touchend 按比例换算字号步数
@@ -2693,7 +2788,7 @@
     secEl.dataset.epRuby = '1';
     var nodes = _decoCandidates(secEl, 'ruby').filter(function (n) { return /[㐀-鿿一-鿿A-Za-z]/.test(n.nodeValue); });
     if (!nodes.length) return;
-    reqJson('POST', '/pdf/api/epub-furigana', { file: FREL, texts: nodes.map(function (n) { return n.nodeValue; }) }, function (d) {
+    reqJson('POST', '/pdf/api/epub-furigana', { texts: nodes.map(function (n) { return n.nodeValue; }) }, function (d) {
       if (!_deco.ruby) { secEl.dataset.epRuby = ''; return; }
       var items = d.items || [];
       nodes.forEach(function (n, i) {

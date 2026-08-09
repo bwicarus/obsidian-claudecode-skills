@@ -74,7 +74,8 @@ actor NativeBookOCRProcessor {
     func processPage(
         pageNumber: Int,
         contentSHA256: String,
-        configuration: NativeBookOCRConfiguration
+        configuration: NativeBookOCRConfiguration,
+        forceVision: Bool = false
     ) throws -> NativeBookOCRPageCharacters {
         try Task.checkCancellation()
         guard pageNumber >= 1,
@@ -86,7 +87,7 @@ actor NativeBookOCRProcessor {
             configuration: configuration
         )
 
-        if geometry.rotation == 0,
+        if !forceVision, geometry.rotation == 0,
            let embedded = embeddedCharacters(
                 page: page,
                 geometry: geometry,

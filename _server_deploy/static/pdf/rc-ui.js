@@ -121,10 +121,57 @@ body.fs-mode .rc-topbar-pill{display:none!important}
     if (opts.nativePill) pill.dataset.rcNativeTopbarPill = '1';
     pill.title = '展开 / 收起阅读工具栏';
     mount.appendChild(pill); bar.classList.add('rc-topbar-collapsible');
-    var read = function () { try { var v = localStorage.getItem(key); return v === null ? !!opts.defaultCollapsed : v === '1'; } catch (e) { return !!opts.defaultCollapsed; } };
-    var persist = function (v) { try { localStorage.setItem(key, v ? '1' : '0'); } catch (e) {} };
+    var read = function () {
+      if (typeof opts.readCollapsed === 'function') {
+        try {
+          var custom = opts.readCollapsed();
+          if (custom === true || custom === false) return custom;
+        } catch (e) {}
+        return !!opts.defaultCollapsed;
+      }
+      if (opts.persist === false) return !!opts.defaultCollapsed;
+      try { var v = localStorage.getItem(key); return v === null ? !!opts.defaultCollapsed : v === '1'; }
+      catch (e) { return !!opts.defaultCollapsed; }
+    };
+    var persist = function (v) {
+      if (typeof opts.writeCollapsed === 'function') {
+        try { opts.writeCollapsed(!!v); } catch (e) {}
+        return;
+      }
+      if (opts.persist === false) return;
+      try { localStorage.setItem(key, v ? '1' : '0'); } catch (e) {}
+    };
+    // A document navigation cannot preserve a real Fullscreen API session. Older
+    // builds nevertheless restored the visual fs-mode class from localStorage,
+    // leaving the bar hidden while its expand pill appeared to do nothing.
+    // Expanding is an explicit recovery action: remove only that stale visual
+    // mode, never an actually active browser fullscreen session.
+    function clearStaleFullscreen() {
+      var doc = bar.ownerDocument || document;
+      var browserFullscreen = false;
+      try { browserFullscreen = !!(doc.fullscreenElement || doc.webkitFullscreenElement); } catch (e) {}
+      if (browserFullscreen) return false;
+      var cleared = false;
+      try {
+        [doc.documentElement, doc.body].forEach(function (node) {
+          if (node && node.classList && node.classList.contains('fs-mode')) {
+            node.classList.remove('fs-mode'); cleared = true;
+          }
+        });
+      } catch (e) {}
+      if (!cleared) return false;
+      try { localStorage.setItem('pdf-fullscreen', '0'); } catch (e) {}
+      try { localStorage.setItem('eph-fs-mode', '0'); } catch (e) {}
+      try {
+        var fsButton = doc.getElementById && (doc.getElementById('fs-toggle') || doc.getElementById('bw-book-fullscreen'));
+        if (fsButton) fsButton.classList.remove('active');
+      } catch (e) {}
+      try { window.dispatchEvent(new CustomEvent('bw:topbar-fullscreen-recovered')); } catch (e) {}
+      return true;
+    }
     var collapsed = false;
     function setCollapsed(on, save) {
+      if (!on && opts.recoverFullscreen !== false) clearStaleFullscreen();
       collapsed = !!on; bar.classList.toggle('rc-topbar-collapsed', collapsed);
       pill.dataset.collapsed = collapsed ? '1' : '0'; pill.textContent = collapsed ? '⌄ ' + (opts.label || '伴读') : '⌃';
       pill.setAttribute('aria-expanded', collapsed ? 'false' : 'true');

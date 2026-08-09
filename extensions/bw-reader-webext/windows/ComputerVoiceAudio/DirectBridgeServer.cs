@@ -1640,12 +1640,17 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
 
         // Direct v3 has no browser-held client key.  Its browser boundary is
         // therefore deliberately smaller than the configurable v1 allowlist:
-        // the exact Reader PWA or a controlled extension background origin.
+        // the exact Reader PWA, the fixed native App loopback shell, or a
+        // controlled extension background origin.
         // Content scripts must relay through that background origin instead of
         // making a request whose Origin is an arbitrary visited web page.
         return string.Equals(
                 origin,
                 SingleUserReaderOrigin,
+                StringComparison.Ordinal)
+            || string.Equals(
+                origin,
+                DirectBridgeConfigStore.NativeAppOrigin,
                 StringComparison.Ordinal)
             || IsCanonicalChromeExtensionOrigin(origin)
             || IsCanonicalSafariExtensionOrigin(origin);

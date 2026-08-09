@@ -36,20 +36,39 @@ enum NativeFormulaRecognitionError: LocalizedError {
 
 @MainActor
 extension ReaderWebViewModel {
+    func supportsNativeFormulaRecognition(file: String) -> Bool {
+        if file.lowercased().hasSuffix(".pdf") {
+            return true
+        }
+        guard let localBookID = Self.localBookID(from: file) else {
+            return false
+        }
+        return ReaderLocalLibraryManager.shared.books.contains {
+            $0.id == localBookID && $0.format == .pdf
+        }
+    }
+
     func startNativeFormulaRecognition(
         file: String
     ) async throws -> NativeFormulaRecognitionStatus {
-        guard file.lowercased().hasSuffix(".pdf") else {
+        guard supportsNativeFormulaRecognition(file: file) else {
             throw NativeFormulaRecognitionError.pdfRequired
         }
         let value = try await callReaderJSON(
             """
-            const response = await fetch('/pdf/api/formula-ocr', {
-              method: 'POST',
-              headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({file})
-            });
-            return JSON.stringify(await response.json());
+            try {
+              const response = await fetch('/pdf/api/formula-ocr', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({file})
+              });
+              return JSON.stringify(await response.json());
+            } catch (error) {
+              return JSON.stringify({
+                ok: false,
+                error: String(error && error.message || error)
+              });
+            }
             """,
             arguments: ["file": file]
         )
@@ -57,12 +76,19 @@ extension ReaderWebViewModel {
             if value["error"] as? String == "no_boxes" {
                 let detection = try await callReaderJSON(
                     """
-                    const response = await fetch('/pdf/api/book-figures', {
-                      method: 'POST',
-                      headers: {'Content-Type': 'application/json'},
-                      body: JSON.stringify({file, enabled: true})
-                    });
-                    return JSON.stringify(await response.json());
+                    try {
+                      const response = await fetch('/pdf/api/book-figures', {
+                        method: 'POST',
+                        headers: {'Content-Type': 'application/json'},
+                        body: JSON.stringify({file, enabled: true})
+                      });
+                      return JSON.stringify(await response.json());
+                    } catch (error) {
+                      return JSON.stringify({
+                        ok: false,
+                        error: String(error && error.message || error)
+                      });
+                    }
                     """,
                     arguments: ["file": file]
                 )
@@ -88,6 +114,39 @@ extension ReaderWebViewModel {
         return Self.formulaStatus(from: value)
     }
 
+    func refreshNativeFormulaRecognitionStatus(
+        file: String
+    ) async throws -> NativeFormulaRecognitionStatus {
+        guard supportsNativeFormulaRecognition(file: file) else {
+            throw NativeFormulaRecognitionError.pdfRequired
+        }
+        let value = try await callReaderJSON(
+            """
+            try {
+              const url = new URL('/pdf/api/formula-ocr-status', location.origin);
+              url.searchParams.set('file', file);
+              const response = await fetch(url.pathname + url.search, {
+                method: 'GET', headers: {'Accept': 'application/json'}
+              });
+              return JSON.stringify(await response.json());
+            } catch (error) {
+              return JSON.stringify({
+                ok: false,
+                error: String(error && error.message || error)
+              });
+            }
+            """,
+            arguments: ["file": file]
+        )
+        guard value["ok"] as? Bool == true else {
+            let message = (value["msg"] as? String)
+                ?? (value["error"] as? String)
+                ?? "公式识别状态读取失败"
+            throw NativeFormulaRecognitionError.server(message)
+        }
+        return Self.formulaStatus(from: value)
+    }
+
     private static func formulaStatus(
         from value: [String: Any]
     ) -> NativeFormulaRecognitionStatus {
@@ -105,6 +164,18 @@ extension ReaderWebViewModel {
                 ?? false,
             detectingBoxes: false
         )
+    }
+
+    private static func localBookID(from file: String) -> String? {
+        guard file.hasPrefix("localbook:") else { return nil }
+        let value = String(file.dropFirst("localbook:".count))
+        guard value.range(
+            of: #"^localbook-[a-f0-9]{64}$"#,
+            options: .regularExpression
+        ) != nil else {
+            return nil
+        }
+        return value
     }
 
     private func callReaderJSON(

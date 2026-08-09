@@ -145,9 +145,13 @@ if (window.__bwPwaProviderOnly) return;
       if (!card) return;
       card.innerHTML = '<span class="rc-snip-spin"></span> AI 整理成卡片…';
       var ep = endpoints(opts);
-      var snip = { text: text, file: (opts.file != null ? opts.file : '') };
+      var snip = { text: text };
       if (opts.source) snip.source = opts.source;
-      var body = { snippets: [snip], make_anki: true, make_note: false };
+      var file = opts.file != null ? String(opts.file) : '';
+      var kind = /\.epub$/i.test(file) ? 'epub'
+        : (/\.(?:html?|md|markdown)$/i.test(file) ? 'html' : 'pdf');
+      var body = { file: file, source: { kind: kind }, snippets: [snip], make_anki: true, make_note: false };
+      if (opts.page) { body.page = Number(opts.page) || 0; body.source.page = body.page; }
       if (window.RC && RC.flashcard) body.defer_add = true;   // B1 融合复习卡:草稿模式(未确认不入库)
       if (opts.model) body.model = opts.model;
       if (opts.effort) body.effort = opts.effort;
