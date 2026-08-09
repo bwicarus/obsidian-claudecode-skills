@@ -3937,3 +3937,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：新增五类路径边界合同；专项 15 项、Reader 全量 941 项、发布管线、macOS 模拟器编译、签名设备归档及三目标校验通过。
 - **发布**：Claude 根因提交 `a1d3be5a`，候选 `8678dd67` 经 Actions run `31331437787` 上传 TestFlight `1.1.11 (154)`；状态 run `31331820423` 确认 `COMPLETE / VALID / IN_BETA_TESTING`。
 - **下一步**：用户在同一本本机 PDF 验收拖选、创建高亮和删除高亮；真机通过前不宣称交互验收完成。
+
+## Codex：换书时 WebKit IndexedDB 事务失活修复 1.1.12（2026-08-10 JST）
+- **根因/改动**：换书导航压力下 WebKit 会在 IDB 成功回调与 Promise 续步之间提前提交 readwrite transaction，后续读取因此报“without an in-progress transaction”；现只在 WebKit 写事务存续期用无副作用缺失键读取维持活跃，完成即停止。
+- **性能边界/验证**：不回退 PDF.js、不增加整本下载或扫描；严格 WebKit 生命周期模拟、浏览器 IndexedDB 合同、Reader Node 全量 942 项、ReaderBundle、macOS 模拟器/签名归档及三目标校验通过；Windows Python 仍只有既有平台/仓库基线。
+- **发布**：提交 `560c73be` 经 Actions run `31332479072` 上传 TestFlight `1.1.12 (157)`，状态 run `31332957737` 确认 `COMPLETE / VALID / IN_BETA_TESTING`。
+- **Pi**：原子部署完成，E2E 全过；回滚与取证快照 `/home/bwicarus/deploy-backups/reader/20260809T195429Z-952395`。
+- **下一步**：用户不重启 App 连续切换多本 PDF/EPUB，确认不再长时间停在“打开 PDF”或出现 `BW_LOCAL_STORE_UNAVAILABLE`。
