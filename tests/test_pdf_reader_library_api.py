@@ -434,6 +434,24 @@ class PdfReaderLibraryApiTest(unittest.TestCase):
         self.assertEqual(rejected.status_code, 413)
         self.assertEqual(rejected.get_json()["code"], "worker-payload-too-large")
 
+    def test_worker_claim_reads_json_cached_by_vbook_gate(self) -> None:
+        fake_vbook = types.SimpleNamespace(is_view_ref=lambda _value: False)
+        with patch.object(pdf_reader, "VB", fake_vbook):
+            response = self.client.post(
+                "/pdf/api/library/ocr/worker/claim",
+                json={
+                    "contract": "reader-library-ocr-worker/1",
+                    "workerId": "pc_cached_body",
+                    "capabilities": {
+                        "engines": ["vision"],
+                        "maxPdfBytes": 1024 * 1024,
+                        "maxPageBytes": 1024 * 1024,
+                        "processingProfile": "quality-first-v1",
+                    },
+                },
+            )
+        self.assertEqual(response.status_code, 204)
+
     def test_legacy_adoption_routes_are_authenticated_path_free_and_idempotent(self) -> None:
         (self.vault / "A.pdf").write_bytes(PDF_A)
         entry = self.client.get("/pdf/api/library/catalog").get_json()["books"][0]

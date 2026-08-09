@@ -3874,7 +3874,17 @@ def _reader_library_ocr_worker_json(limit: int):
             "worker-payload-too-large", "PC OCR worker payload exceeds its limit", status=413
         )
     try:
-        raw = request.stream.read(int(limit) + 1)
+        # The vbook blueprint gate may already have parsed JSON to inspect a
+        # possible virtual-book reference. Flask keeps those bytes in its
+        # request cache, while the raw WSGI stream is then exhausted. Reuse
+        # those cached bytes when present; otherwise keep the original bounded
+        # stream read.
+        cached = getattr(request, "_cached_data", None)
+        raw = (
+            bytes(cached)
+            if isinstance(cached, (bytes, bytearray))
+            else request.stream.read(int(limit) + 1)
+        )
     except Exception as exc:
         raise ReaderBookOcrError(
             "invalid-request", "PC OCR worker body could not be read", status=400
