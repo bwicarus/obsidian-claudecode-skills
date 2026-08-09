@@ -11,9 +11,11 @@ const PI = read("ios/BWReader/App/ReaderPiBookOCR.swift");
 const REMOTE = read("ios/BWReader/App/ReaderRemoteLibrary.swift");
 const SETTINGS = read("ios/BWReader/App/NativeReaderToolsView.swift");
 
-test("each PDF exposes independent Apple and Pi preprocessing lifecycles", () => {
+test("each PDF exposes independent Apple, Pi, and PC preprocessing lifecycles", () => {
   assert.match(VIEW, /Label\("本机预处理"/);
-  assert.match(VIEW, /Label\("Pi 预处理"/);
+  assert.match(VIEW, /Label\("Pi \/ PC 预处理"/);
+  assert.match(VIEW, /executor: "pi"/);
+  assert.match(VIEW, /executor: "pc"/);
   for (const action of ["startLocal", "pause", "resume", "cancel", "retry"]) {
     assert.match(VIEW, new RegExp(`nativeOCR\\.${action}\\(`));
   }
@@ -26,6 +28,32 @@ test("each PDF exposes independent Apple and Pi preprocessing lifecycles", () =>
   }
   assert.match(VIEW, /EPUB 使用其可重排文字层/);
   assert.match(VIEW, /EPUB 当前不支持 Pi 的 PDF 页图预处理/);
+});
+
+test("PC preprocessing is an explicit Pi-coordinated executor with live availability", () => {
+  assert.match(PI, /struct ReaderOCRExecutorStatus: Codable, Hashable, Identifiable, Sendable/);
+  assert.match(PI, /pdf\/api\/library\/ocr\/executors/);
+  assert.match(PI, /func refreshExecutors\(cookies:/);
+  assert.match(PI, /@Published private\(set\) var executorStatuses:/);
+  assert.match(PI, /request\.timeoutInterval = 5/);
+  assert.match(PI, /\["pi", "pc"\]\.contains\(executor\)/);
+  assert.match(PI, /if executor == "pc" \{[\s\S]*body\["executor"\] = executor/);
+  assert.doesNotMatch(
+    PI.slice(PI.indexOf("var body = ["), PI.indexOf('if executor == "pc"')),
+    /"executor"/,
+  );
+  assert.match(VIEW, /Menu\(executor == "pc" \? "PC 预处理" : "Pi 预处理"\)/);
+  assert.match(VIEW, /Label\("此电脑 GPU", systemImage: "desktopcomputer"\)/);
+  assert.match(VIEW, /executor == "pc" && !pcExecutorAcceptingJobs/);
+  assert.match(VIEW, /async let executorRefresh: Void = piOCR\.refreshExecutors\(cookies: cookies\)/);
+  assert.match(VIEW, /_ = await \(executorRefresh, bookRefresh\)/);
+  assert.match(VIEW, /status\.lastSeenAtEpochMs/);
+  assert.match(VIEW, /ageMilliseconds <= 35_000/);
+  const automatic = VIEW.slice(
+    VIEW.indexOf("private func startAutomaticNativeOCRIfNeeded"),
+    VIEW.indexOf("private func startNativeOCR", VIEW.indexOf("private func startAutomaticNativeOCRIfNeeded")),
+  );
+  assert.doesNotMatch(automatic, /executor|PC 预处理|piOCR/);
 });
 
 test("preprocessing details default collapsed and keep only sheet-session expansion", () => {

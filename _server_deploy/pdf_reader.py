@@ -45,6 +45,7 @@ from reader_book_library import (
 )
 from reader_book_ocr import (
     CONTRACT as READER_BOOK_OCR_CONTRACT,
+    WORKER_CONTRACT as READER_BOOK_OCR_WORKER_CONTRACT,
     ReaderBookOcrError,
     ReaderBookOcrService,
     wire_payload as _reader_book_ocr_wire_payload,
@@ -3747,31 +3748,48 @@ def _reader_library_ocr_error(exc: ReaderBookOcrError):
     }), exc.status
 
 
-def _reader_library_ocr_body(*, allow_engine: bool = False):
+def _reader_library_ocr_body(
+    *,
+    allow_engine: bool = False,
+    allow_executor: bool = False,
+    allow_processing_profile: bool = False,
+):
     body = request.get_json(silent=True)
     if not isinstance(body, dict):
         raise ReaderBookOcrError("invalid-request", "JSON object is required", status=400)
     allowed = {"bookId", "contentSha256"}
     if allow_engine:
         allowed.add("engine")
+    if allow_executor:
+        allowed.add("executor")
+    if allow_processing_profile:
+        allowed.add("processingProfile")
     if set(body) - allowed:
         raise ReaderBookOcrError("invalid-request", "unknown OCR request fields", status=400)
     return (
         str(body.get("bookId") or ""),
         str(body.get("contentSha256") or ""),
         str(body.get("engine") or "vision"),
+        str(body.get("executor") or "pi"),
+        (str(body.get("processingProfile")) if body.get("processingProfile") is not None else None),
     )
 
 
 @bp.route("/api/library/ocr/start", methods=["POST"])
 def pdf_api_library_ocr_start():
-    """Explicitly start Pi OCR; no Apple/local failure path calls this route."""
+    """Explicitly start Pi or outbound-PC OCR; Apple failure never calls it."""
     denied = _reader_library_access_error()
     if denied is not None:
         return denied
     try:
-        book_id, content_sha256, engine = _reader_library_ocr_body(allow_engine=True)
-        job, already = _reader_book_ocr().start(book_id, content_sha256, engine)
+        book_id, content_sha256, engine, executor, processing_profile = _reader_library_ocr_body(
+            allow_engine=True,
+            allow_executor=True,
+            allow_processing_profile=True,
+        )
+        job, already = _reader_book_ocr().start(
+            book_id, content_sha256, engine, executor, processing_profile
+        )
         return jsonify(_reader_book_ocr_wire_payload(job, already=already))
     except ReaderBookOcrError as exc:
         return _reader_library_ocr_error(exc)
@@ -3810,7 +3828,7 @@ def pdf_api_library_ocr_adopt():
     if denied is not None:
         return denied
     try:
-        book_id, content_sha256, _engine = _reader_library_ocr_body()
+        book_id, content_sha256, _engine, _executor, _profile = _reader_library_ocr_body()
         job, adoption, already = _reader_book_ocr().adopt_legacy(
             book_id, content_sha256
         )
@@ -3840,12 +3858,193 @@ def pdf_api_library_ocr_status():
         return _reader_library_ocr_error(exc)
 
 
+def _reader_library_ocr_worker_error(exc: ReaderBookOcrError):
+    return jsonify({
+        "ok": False,
+        "contract": READER_BOOK_OCR_WORKER_CONTRACT,
+        "code": exc.code,
+        "error": str(exc),
+    }), exc.status
+
+
+def _reader_library_ocr_worker_json(limit: int):
+    content_length = request.content_length
+    if content_length is not None and int(content_length) > int(limit):
+        raise ReaderBookOcrError(
+            "worker-payload-too-large", "PC OCR worker payload exceeds its limit", status=413
+        )
+    try:
+        raw = request.stream.read(int(limit) + 1)
+    except Exception as exc:
+        raise ReaderBookOcrError(
+            "invalid-request", "PC OCR worker body could not be read", status=400
+        ) from exc
+    if len(raw) > int(limit):
+        raise ReaderBookOcrError(
+            "worker-payload-too-large", "PC OCR worker payload exceeds its limit", status=413
+        )
+    try:
+        value = json.loads(raw.decode("utf-8"))
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise ReaderBookOcrError(
+            "invalid-request", "valid UTF-8 JSON is required", status=400
+        ) from exc
+    if not isinstance(value, dict):
+        raise ReaderBookOcrError(
+            "invalid-request", "JSON object is required", status=400
+        )
+    return value
+
+
+@bp.route("/api/library/ocr/executors")
+def pdf_api_library_ocr_executors():
+    denied = _reader_library_access_error()
+    if denied is not None:
+        return denied
+    try:
+        response = jsonify({
+            "ok": True,
+            "contract": READER_BOOK_OCR_CONTRACT,
+            "executors": _reader_book_ocr().executor_status(),
+        })
+        response.headers["Cache-Control"] = "private, no-store"
+        return response
+    except ReaderBookOcrError as exc:
+        return _reader_library_ocr_error(exc)
+
+
+@bp.route("/api/library/ocr/worker/claim", methods=["POST"])
+def pdf_api_library_ocr_worker_claim():
+    denied = _reader_library_access_error()
+    if denied is not None:
+        return denied
+    try:
+        body = _reader_library_ocr_worker_json(64 * 1024)
+        if set(body) != {"contract", "workerId", "capabilities"}:
+            raise ReaderBookOcrError(
+                "invalid-request", "invalid PC OCR claim fields", status=400
+            )
+        if body.get("contract") != READER_BOOK_OCR_WORKER_CONTRACT:
+            raise ReaderBookOcrError(
+                "invalid-worker-contract", "invalid PC OCR worker contract", status=400
+            )
+        result = _reader_book_ocr().claim_pc_worker(
+            str(body.get("workerId") or ""), body.get("capabilities")
+        )
+        if result is None:
+            return Response(status=204)
+        return jsonify({
+            "ok": True,
+            "contract": READER_BOOK_OCR_WORKER_CONTRACT,
+            **result,
+        })
+    except ReaderBookOcrError as exc:
+        return _reader_library_ocr_worker_error(exc)
+
+
+@bp.route("/api/library/ocr/worker/source")
+def pdf_api_library_ocr_worker_source():
+    denied = _reader_library_access_error()
+    if denied is not None:
+        return denied
+    try:
+        entry, path, lease = _reader_book_ocr().pc_worker_source(dict(request.args))
+        response = send_file(
+            str(path),
+            mimetype="application/pdf",
+            conditional=True,
+            etag=entry["contentSha256"],
+            last_modified=entry["mtime"],
+        )
+        response.headers["Accept-Ranges"] = "bytes"
+        response.headers["Cache-Control"] = "private, no-cache"
+        response.headers["X-Reader-OCR-Desired-State"] = lease["desiredState"]
+        response.headers["X-Reader-OCR-Lease-Expires"] = str(
+            lease["lease"]["expiresAtEpochMs"]
+        )
+        return response
+    except ReaderBookOcrError as exc:
+        return _reader_library_ocr_worker_error(exc)
+
+
+@bp.route("/api/library/ocr/worker/heartbeat", methods=["POST"])
+def pdf_api_library_ocr_worker_heartbeat():
+    denied = _reader_library_access_error()
+    if denied is not None:
+        return denied
+    try:
+        body = _reader_library_ocr_worker_json(64 * 1024)
+        result = _reader_book_ocr().pc_worker_heartbeat(body)
+        return jsonify({
+            "ok": True,
+            "contract": READER_BOOK_OCR_WORKER_CONTRACT,
+            **result,
+        })
+    except ReaderBookOcrError as exc:
+        return _reader_library_ocr_worker_error(exc)
+
+
+@bp.route("/api/library/ocr/worker/pages/<int:page>", methods=["PUT"])
+def pdf_api_library_ocr_worker_page(page):
+    denied = _reader_library_access_error()
+    if denied is not None:
+        return denied
+    try:
+        service = _reader_book_ocr()
+        body = _reader_library_ocr_worker_json(
+            service.max_pc_page_bytes + 64 * 1024
+        )
+        result = service.upload_pc_page(page, body)
+        return jsonify({
+            "ok": True,
+            "contract": READER_BOOK_OCR_WORKER_CONTRACT,
+            **result,
+        })
+    except ReaderBookOcrError as exc:
+        return _reader_library_ocr_worker_error(exc)
+
+
+@bp.route("/api/library/ocr/worker/formulas", methods=["PUT"])
+def pdf_api_library_ocr_worker_formulas():
+    denied = _reader_library_access_error()
+    if denied is not None:
+        return denied
+    try:
+        service = _reader_book_ocr()
+        body = _reader_library_ocr_worker_json(service.max_pc_formula_bytes)
+        result = service.upload_pc_formulas(body)
+        return jsonify({
+            "ok": True,
+            "contract": READER_BOOK_OCR_WORKER_CONTRACT,
+            **result,
+        })
+    except ReaderBookOcrError as exc:
+        return _reader_library_ocr_worker_error(exc)
+
+
+@bp.route("/api/library/ocr/worker/complete", methods=["POST"])
+def pdf_api_library_ocr_worker_complete():
+    denied = _reader_library_access_error()
+    if denied is not None:
+        return denied
+    try:
+        body = _reader_library_ocr_worker_json(64 * 1024)
+        result = _reader_book_ocr().complete_pc_worker(body)
+        return jsonify({
+            "ok": True,
+            "contract": READER_BOOK_OCR_WORKER_CONTRACT,
+            **result,
+        })
+    except ReaderBookOcrError as exc:
+        return _reader_library_ocr_worker_error(exc)
+
+
 def _reader_library_ocr_control(action: str):
     denied = _reader_library_access_error()
     if denied is not None:
         return denied
     try:
-        book_id, content_sha256, _engine = _reader_library_ocr_body()
+        book_id, content_sha256, _engine, _executor, _profile = _reader_library_ocr_body()
         job = getattr(_reader_book_ocr(), action)(book_id, content_sha256)
         return jsonify(_reader_book_ocr_wire_payload(job))
     except ReaderBookOcrError as exc:

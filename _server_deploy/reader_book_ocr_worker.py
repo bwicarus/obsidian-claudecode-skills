@@ -27,8 +27,18 @@ import uuid
 CONTRACT = "reader-library-ocr/1"
 PAGE_SCHEMA = "reader-page-chars/1"
 PUBLICATION_CONTRACT = "reader-book-ocr-publication/1"
+PROCESSING_PROFILES = {"pi": "pi-default-v1", "pc": "quality-first-v1"}
 _EXPECTED_JOB_ID: str | None = None
 _EXPECTED_WORKER_GENERATION: str | None = None
+
+
+def _processing_identity(value: dict | None) -> tuple[str, str]:
+    item = value if isinstance(value, dict) else {}
+    executor = str(item.get("executor") or "pi")
+    if executor not in PROCESSING_PROFILES:
+        executor = "pi"
+    profile = str(item.get("processingProfile") or PROCESSING_PROFILES[executor])
+    return executor, profile
 
 
 def _atomic_json(path: Path, value: dict) -> None:
@@ -874,7 +884,7 @@ def _publish_attachments(
         allowed_metadata = {
             "adoptionContract", "source", "pageSources",
             "formulaState", "formulaReason", "formulaCount",
-            "engine", "totalPages",
+            "engine", "executor", "processingProfile", "totalPages",
         }
         if set(manifest_metadata) - allowed_metadata:
             raise ValueError("unsupported attachment manifest metadata")
@@ -923,15 +933,18 @@ def _publish_release(
             os.chmod(destination, 0o600)
         total_pages = int(final_job.get("totalPages") or 0)
         formula_state = str(final_job.get("formulaState") or "failed")
+        executor, processing_profile = _processing_identity(final_job)
         revision, manifest = _publish_attachments(
             args,
             staging,
             formula_path,
             manifest_metadata={
                 "engine": args.engine,
+                "executor": executor,
+                "processingProfile": processing_profile,
                 "totalPages": total_pages,
                 "formulaState": formula_state,
-                "formulaReason": None,
+                "formulaReason": final_job.get("formulaReason"),
                 "formulaCount": int(final_job.get("formulaTotal") or 0),
             },
             publish_manifest=False,
@@ -942,12 +955,16 @@ def _publish_release(
         release_job = {
             **final_job,
             "engine": args.engine,
+            "executor": executor,
+            "processingProfile": processing_profile,
             "state": "succeeded",
             "resultAvailable": True,
             "pageCharsRevision": revision,
         }
         release_result = {
             "engine": args.engine,
+            "executor": executor,
+            "processingProfile": processing_profile,
             "revision": revision,
             "pageCharsRevision": revision,
             "release": release_rel,
@@ -958,6 +975,8 @@ def _publish_release(
         _atomic_json(staging / "result.json", release_result)
         _atomic_json(staging / "current.json", {
             "engine": args.engine,
+            "executor": executor,
+            "processingProfile": processing_profile,
             "revision": revision,
         })
         _atomic_json(staging / "attachments.json", manifest)
@@ -986,11 +1005,13 @@ def _publish_release(
             or committed_manifest.get("contentSha256") != args.content_sha256
             or committed_manifest.get("revision") != revision
             or committed_manifest.get("engine") != args.engine
+            or _processing_identity(committed_manifest) != (executor, processing_profile)
             or int(committed_manifest.get("totalPages") or 0) != total_pages
             or committed_manifest.get("formulaState") != formula_state
             or committed_job.get("bookId") != args.book_id
             or committed_job.get("contentSha256") != args.content_sha256
             or committed_job.get("engine") != args.engine
+            or _processing_identity(committed_job) != (executor, processing_profile)
             or committed_job.get("state") != "succeeded"
             or not committed_job.get("resultAvailable")
             or committed_job.get("pageCharsRevision") != revision
@@ -998,10 +1019,16 @@ def _publish_release(
             or int(committed_job.get("totalPages") or 0) != total_pages
             or int(committed_job.get("successfulPages") or 0) != total_pages
             or committed_result.get("engine") != args.engine
+            or _processing_identity(committed_result) != (executor, processing_profile)
             or committed_result.get("pageCharsRevision") != revision
             or committed_result.get("release") != release_rel
             or committed_result.get("sourceIdentity") != source_guard["identity"]
-            or committed_current != {"engine": args.engine, "revision": revision}
+            or committed_current != {
+                "engine": args.engine,
+                "executor": executor,
+                "processingProfile": processing_profile,
+                "revision": revision,
+            }
         ):
             raise RuntimeError("published OCR release metadata is inconsistent")
         page_ids = [
@@ -1042,6 +1069,7 @@ def _publish_release(
                     or value.get("bookId") != args.book_id
                     or value.get("contentSha256") != args.content_sha256
                     or value.get("engine") != args.engine
+                    or _processing_identity(value) != (executor, processing_profile)
                     or value.get("pageNumber") != page_number
                     or not isinstance(value.get("chars"), list)
                     or not isinstance(value.get("furigana"), list)
@@ -1076,6 +1104,8 @@ def _publish_release(
         _atomic_json(version_dir / "result.json", release_result)
         _atomic_json(version_dir / "current.json", {
             "engine": args.engine,
+            "executor": executor,
+            "processingProfile": processing_profile,
             "revision": revision,
         })
         fence_path = version_dir / "publication.json"
@@ -1085,6 +1115,8 @@ def _publish_release(
             "bookId": args.book_id,
             "contentSha256": args.content_sha256,
             "engine": args.engine,
+            "executor": executor,
+            "processingProfile": processing_profile,
             "revision": revision,
             "release": release_rel,
             "manifestSha256": _sha256(manifest_path),
@@ -1215,6 +1247,8 @@ def run(args) -> int:
                     "bookId": args.book_id,
                     "contentSha256": args.content_sha256,
                     "engine": args.engine,
+                    "executor": "pi",
+                    "processingProfile": PROCESSING_PROFILES["pi"],
                     "pageNumber": page_number,
                     "page_w": float(page.rect.width),
                     "page_h": float(page.rect.height),

@@ -1,0 +1,38 @@
+# Official UniMERNet inference shape.  Runtime options replace all model paths
+# with BW_READER_PC_UNIMERNET_MODEL_DIR before model construction.
+model:
+  arch: unimernet
+  model_type: unimernet
+  model_config:
+    model_name: __LOCAL_UNIMERNET_BASE__
+    max_seq_len: 1536
+  load_pretrained: true
+  pretrained: __LOCAL_UNIMERNET_BASE__/pytorch_model.pth
+  tokenizer_config:
+    path: __LOCAL_UNIMERNET_BASE__
+
+datasets:
+  formula_rec_eval:
+    vis_processor:
+      eval:
+        name: formula_image_eval
+        image_size: [192, 672]
+
+run:
+  runner: runner_iter
+  task: unimernet_train
+  batch_size_train: 1
+  batch_size_eval: 1
+  num_workers: 0
+  iters_per_inner_epoch: 1
+  max_iters: 1
+  seed: 42
+  output_dir: ./state/reader-pc-ocr-unimernet
+  evaluate: true
+  test_splits: [eval]
+  device: cuda
+  world_size: 1
+  dist_url: env://
+  distributed: false
+  generate_cfg:
+    temperature: 0.0

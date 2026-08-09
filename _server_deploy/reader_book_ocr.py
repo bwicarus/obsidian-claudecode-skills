@@ -32,18 +32,62 @@ from reader_sidecar_store import atomic_write_json, exclusive_lock, read_json
 
 
 CONTRACT = "reader-library-ocr/1"
+WORKER_CONTRACT = "reader-library-ocr-worker/1"
 ADOPTION_CONTRACT = "reader-library-ocr-adoption/1"
 ENGINES = frozenset(("vision", "manga"))
+EXECUTORS = frozenset(("pi", "pc"))
+PROCESSING_PROFILES = {
+    "pi": "pi-default-v1",
+    "pc": "quality-first-v1",
+}
 LEGACY_ENGINE = "legacy"
 RESULT_ENGINES = ENGINES | frozenset((LEGACY_ENGINE,))
 ACTIVE_STATES = frozenset(("queued", "running", "pause-requested", "cancel-requested"))
 TERMINAL_STATES = frozenset(("paused", "cancelled", "succeeded", "failed"))
 CONTROL_STATES = frozenset(("running", "paused", "cancelled"))
+FORMULA_STATES = frozenset(("pending", "succeeded", "partial", "failed", "unavailable"))
+PC_PUBLISHABLE_FORMULA_STATES = frozenset(("succeeded", "partial", "unavailable"))
 MAX_PDF_BYTES_DEFAULT = 2 * 1024 * 1024 * 1024
 MAX_PAGES_DEFAULT = 5000
 MAX_ADOPTION_BYTES_DEFAULT = 512 * 1024 * 1024
 MAX_ADOPTION_PAGE_BYTES = 64 * 1024 * 1024
 PUBLICATION_CONTRACT = "reader-book-ocr-publication/1"
+MAX_PC_PAGE_BYTES_DEFAULT = 16 * 1024 * 1024
+MAX_PC_FORMULA_BYTES_DEFAULT = 32 * 1024 * 1024
+MAX_PC_PROGRESS_BYTES_DEFAULT = 64 * 1024
+PC_LEASE_SECONDS_DEFAULT = 45
+PC_ONLINE_SECONDS_DEFAULT = 30
+PC_WORKER_ID_RE = re.compile(r"pc_[A-Za-z0-9_-]{1,64}")
+PC_LEASE_ID_RE = re.compile(r"ocrlease_[0-9a-f]{32}")
+PC_PHASES = frozenset((
+    "preparing", "downloading", "text-ocr", "tokenizing",
+    "formula-detect", "formula-latex", "uploading", "finalizing",
+))
+PC_IDENTITY_FIELDS = frozenset((
+    "contract", "workerId", "bookId", "contentSha256",
+    "jobId", "generation", "leaseId",
+))
+
+
+def _redact_sensitive_text(value) -> str:
+    message = re.sub(r"[\r\n\t]+", " ", str(value))[:300]
+    message = re.sub(
+        r"(?i)(\b(?:authorization|bearer|api[-_ ]?key|access[-_ ]?token|"
+        r"refresh[-_ ]?token|token|key|secret|password)\b\s*[:=]\s*)"
+        r"([^&#;\s]*)",
+        r"\1<redacted>",
+        message,
+    )
+    message = re.sub(
+        r"(?i)(\b(?:authorization|bearer)\b\s+)([^&#;\s]+)",
+        r"\1<redacted>",
+        message,
+    )
+    return re.sub(
+        r"(?:[A-Za-z]:\\|/(?:home|tmp|var|opt|srv)/)[^\r\n]*",
+        "<path>",
+        message,
+    )
 
 
 class ReaderBookOcrError(RuntimeError):
@@ -105,14 +149,16 @@ def _process_start_token(pid) -> str | None:
 def _safe_public_job(job: dict) -> dict:
     """Return the stable wire shape and never leak a filesystem path."""
     keys = (
-        "jobId", "bookId", "contentSha256", "engine", "state", "phase",
+        "jobId", "bookId", "contentSha256", "engine", "executor",
+        "processingProfile", "state", "phase",
         "processedPages", "totalPages", "successfulPages", "failedPages",
         "recognizedPages", "percent", "etaSeconds", "message", "canPause",
         "canResume", "canCancel", "canRetry", "createdAtEpochMs",
         "updatedAtEpochMs", "resultAvailable", "pageCharsRevision",
         "pauseMode", "textState", "formulaState", "formulaTotal",
         "formulaRecognized", "formulaPendingRegions", "formulaFailedRegions",
-        "currentPage", "errorCode", "error",
+        "formulaReason", "currentPage", "errorCode", "error", "executorOnline",
+        "executorLastSeenAtEpochMs",
     )
     out = {key: job.get(key) for key in keys}
 
@@ -130,7 +176,7 @@ def _safe_public_job(job: dict) -> dict:
     out["wordProgress"] = _public_progress("wordProgress")
     out["formulaProgress"] = _public_progress("formulaProgress")
     defaults = {
-        "state": "idle", "phase": "idle", "processedPages": 0,
+        "executor": "pi", "state": "idle", "phase": "idle", "processedPages": 0,
         "totalPages": 0, "successfulPages": 0, "failedPages": 0,
         "recognizedPages": 0, "percent": 0, "etaSeconds": None,
         "message": "尚未开始 Pi 预处理", "canPause": False,
@@ -143,15 +189,12 @@ def _safe_public_job(job: dict) -> dict:
     for key, default in defaults.items():
         if out.get(key) is None:
             out[key] = default
-    if out.get("error"):
-        error = re.sub(r"[\r\n\t]+", " ", str(out["error"]))[:300]
-        error = re.sub(
-            r"(?i)(authorization|bearer|api[-_ ]?key|access[-_ ]?token)\s*[:=]?\s*\S+",
-            r"\1=<redacted>",
-            error,
+    if not out.get("processingProfile"):
+        out["processingProfile"] = PROCESSING_PROFILES.get(
+            out.get("executor"), PROCESSING_PROFILES["pi"]
         )
-        error = re.sub(r"(?:[A-Za-z]:\\|/(?:home|tmp|var|opt|srv)/)[^\r\n]*", "<path>", error)
-        out["error"] = error
+    if out.get("error"):
+        out["error"] = _redact_sensitive_text(out["error"])
     out.pop("sourcePath", None)
     out.pop("pid", None)
     return out
@@ -180,6 +223,10 @@ class ReaderBookOcrService:
         legacy_language_resolver=None,
         legacy_char_cache_version: int | None = None,
         max_adoption_bytes: int | None = None,
+        max_pc_page_bytes: int | None = None,
+        max_pc_formula_bytes: int | None = None,
+        pc_lease_seconds: int | None = None,
+        pc_online_seconds: int | None = None,
     ) -> None:
         self.library = library
         self.state_root = Path(state_root)
@@ -204,6 +251,18 @@ class ReaderBookOcrService:
         self.max_adoption_bytes = int(max_adoption_bytes or _env_positive_int(
             "READER_BOOK_OCR_MAX_ADOPTION_BYTES", MAX_ADOPTION_BYTES_DEFAULT
         ))
+        self.max_pc_page_bytes = int(max_pc_page_bytes or _env_positive_int(
+            "READER_BOOK_OCR_MAX_PC_PAGE_BYTES", MAX_PC_PAGE_BYTES_DEFAULT
+        ))
+        self.max_pc_formula_bytes = int(max_pc_formula_bytes or _env_positive_int(
+            "READER_BOOK_OCR_MAX_PC_FORMULA_BYTES", MAX_PC_FORMULA_BYTES_DEFAULT
+        ))
+        self.pc_lease_ms = int(pc_lease_seconds or _env_positive_int(
+            "READER_BOOK_OCR_PC_LEASE_SECONDS", PC_LEASE_SECONDS_DEFAULT
+        )) * 1000
+        self.pc_online_ms = int(pc_online_seconds or _env_positive_int(
+            "READER_BOOK_OCR_PC_ONLINE_SECONDS", PC_ONLINE_SECONDS_DEFAULT
+        )) * 1000
         self._adoption_singleflight = threading.Lock()
         self._verified_source_cache: dict[tuple, bool] = {}
 
@@ -259,6 +318,30 @@ class ReaderBookOcrService:
             raise ReaderBookOcrError("invalid-engine", "unsupported OCR engine", status=400)
         return self._version_dir(book_id, content_sha256) / engine
 
+    def _archive_mutable_staging_locked(
+        self,
+        version_dir: Path,
+        job_dir: Path,
+        existing: dict | None,
+    ) -> Path | None:
+        if not job_dir.exists():
+            return None
+        archive_root = version_dir / "staging-archive"
+        archive_root.mkdir(parents=True, exist_ok=True)
+        executor, _profile = self._processing_identity(existing)
+        job_id = str((existing or {}).get("jobId") or "nojob")
+        # The directory name is only a short locator (and must stay below
+        # Windows path limits); job.json remains the complete identity record.
+        job_tag = hashlib.sha256(job_id.encode("utf-8")).hexdigest()[:12]
+        name = f"{_now_ms()}-{executor}-{job_tag}"
+        destination = archive_root / name
+        suffix = 0
+        while destination.exists():
+            suffix += 1
+            destination = archive_root / f"{name}-{suffix}"
+        os.replace(job_dir, destination)
+        return destination
+
     @staticmethod
     def _read_optional(path: Path) -> dict | None:
         try:
@@ -266,6 +349,141 @@ class ReaderBookOcrService:
             return value if isinstance(value, dict) else None
         except Exception:
             return None
+
+    @staticmethod
+    def _validate_executor(executor: str) -> str:
+        value = str(executor or "pi").strip().lower()
+        if value not in EXECUTORS:
+            raise ReaderBookOcrError(
+                "invalid-executor", "unsupported OCR executor", status=400
+            )
+        return value
+
+    @classmethod
+    def _validate_processing_profile(cls, executor: str, profile: str | None) -> str:
+        executor = cls._validate_executor(executor)
+        expected = PROCESSING_PROFILES[executor]
+        value = str(profile or expected).strip().lower()
+        if value != expected:
+            raise ReaderBookOcrError(
+                "invalid-processing-profile",
+                f"{executor} OCR requires processingProfile={expected}",
+                status=400,
+            )
+        return value
+
+    @classmethod
+    def _processing_identity(cls, value: dict | None) -> tuple[str, str]:
+        item = value if isinstance(value, dict) else {}
+        executor = str(item.get("executor") or "pi").strip().lower()
+        if executor not in EXECUTORS:
+            executor = "pi"
+        profile = str(
+            item.get("processingProfile") or PROCESSING_PROFILES[executor]
+        ).strip().lower()
+        return executor, profile
+
+    @classmethod
+    def _processing_identity_valid(cls, value: dict | None) -> bool:
+        item = value if isinstance(value, dict) else {}
+        executor = str(item.get("executor") or "pi").strip().lower()
+        if executor not in EXECUTORS:
+            return False
+        profile = str(
+            item.get("processingProfile") or PROCESSING_PROFILES[executor]
+        ).strip().lower()
+        return profile == PROCESSING_PROFILES[executor]
+
+    @staticmethod
+    def _validate_worker_id(worker_id: str) -> str:
+        value = str(worker_id or "")
+        if not PC_WORKER_ID_RE.fullmatch(value):
+            raise ReaderBookOcrError(
+                "invalid-worker-id", "invalid PC OCR workerId", status=400
+            )
+        return value
+
+    @staticmethod
+    def _bounded_json_bytes(value, limit: int, code: str) -> bytes:
+        try:
+            payload = json.dumps(
+                value,
+                ensure_ascii=False,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        except (TypeError, ValueError) as exc:
+            raise ReaderBookOcrError(code, "OCR worker JSON is invalid", status=400) from exc
+        if len(payload) > int(limit):
+            raise ReaderBookOcrError(code, "OCR worker payload exceeds its limit", status=413)
+        return payload
+
+    @staticmethod
+    def _sanitize_worker_error(value) -> str | None:
+        if value is None:
+            return None
+        return _redact_sensitive_text(value)
+
+    def _worker_record_path(self, worker_id: str) -> Path:
+        return self.state_root / "workers" / (self._validate_worker_id(worker_id) + ".json")
+
+    def _touch_pc_worker_locked(self, worker_id: str, capabilities: dict | None = None) -> dict:
+        worker_id = self._validate_worker_id(worker_id)
+        existing = self._read_optional(self._worker_record_path(worker_id)) or {}
+        engines = existing.get("engines") if isinstance(existing.get("engines"), list) else []
+        max_pdf_bytes = int(existing.get("maxPdfBytes") or 0)
+        max_page_bytes = int(existing.get("maxPageBytes") or 0)
+        if capabilities is not None:
+            if not isinstance(capabilities, dict) or set(capabilities) - {
+                "engines", "maxPdfBytes", "maxPageBytes", "processingProfile"
+            }:
+                raise ReaderBookOcrError(
+                    "invalid-worker-capabilities", "invalid PC OCR capabilities", status=400
+                )
+            raw_engines = capabilities.get("engines")
+            if (
+                not isinstance(raw_engines, list)
+                or not raw_engines
+                or len(raw_engines) > len(ENGINES)
+            ):
+                raise ReaderBookOcrError(
+                    "invalid-worker-capabilities", "PC OCR engines are required", status=400
+                )
+            engines = sorted(set(str(item or "").strip().lower() for item in raw_engines))
+            if not engines or any(item not in ENGINES for item in engines):
+                raise ReaderBookOcrError(
+                    "invalid-worker-capabilities", "unsupported PC OCR engine", status=400
+                )
+            if capabilities.get("processingProfile") != PROCESSING_PROFILES["pc"]:
+                raise ReaderBookOcrError(
+                    "invalid-processing-profile",
+                    "PC OCR worker requires processingProfile=quality-first-v1",
+                    status=400,
+                )
+            try:
+                max_pdf_bytes = int(capabilities.get("maxPdfBytes") or self.max_pdf_bytes)
+                max_page_bytes = int(capabilities.get("maxPageBytes") or self.max_pc_page_bytes)
+            except (TypeError, ValueError) as exc:
+                raise ReaderBookOcrError(
+                    "invalid-worker-capabilities", "invalid PC OCR limits", status=400
+                ) from exc
+            if max_pdf_bytes <= 0 or max_page_bytes <= 0:
+                raise ReaderBookOcrError(
+                    "invalid-worker-capabilities", "invalid PC OCR limits", status=400
+                )
+        now = _now_ms()
+        record = {
+            "contract": WORKER_CONTRACT,
+            "workerId": worker_id,
+            "executor": "pc",
+            "engines": engines,
+            "processingProfile": PROCESSING_PROFILES["pc"],
+            "maxPdfBytes": max_pdf_bytes,
+            "maxPageBytes": max_page_bytes,
+            "lastSeenAtEpochMs": now,
+        }
+        atomic_write_json(self._worker_record_path(worker_id), record, indent=2, mode=0o600)
+        return record
 
     def _read_bounded_legacy_json(self, path: Path, source_bytes: list[int]):
         """Read one legacy sidecar without allowing an unbounded allocation."""
@@ -720,6 +938,944 @@ class ReaderBookOcrService:
             formulas.append(normalized)
         return formulas, "succeeded", None
 
+    @staticmethod
+    def _pc_desired_state(job_dir: Path) -> str:
+        value = ReaderBookOcrService._read_optional(job_dir / "control.json") or {}
+        desired = value.get("desiredState")
+        return desired if desired in CONTROL_STATES else "cancelled"
+
+    def _pc_worker_records_locked(self) -> list[dict]:
+        records = []
+        root = self.state_root / "workers"
+        if not root.is_dir():
+            return records
+        for path in root.glob("pc_*.json"):
+            if not PC_WORKER_ID_RE.fullmatch(path.stem):
+                continue
+            record = self._read_optional(path)
+            if (
+                isinstance(record, dict)
+                and record.get("contract") == WORKER_CONTRACT
+                and record.get("workerId") == path.stem
+            ):
+                records.append(record)
+        return records
+
+    def _pc_online_summary_locked(self, engine: str | None = None) -> dict:
+        now = _now_ms()
+        online = []
+        for record in self._pc_worker_records_locked():
+            try:
+                last_seen = int(record.get("lastSeenAtEpochMs") or 0)
+            except (TypeError, ValueError):
+                continue
+            engines = record.get("engines") if isinstance(record.get("engines"), list) else []
+            if now - last_seen <= self.pc_online_ms and (
+                engine is None or engine in engines
+            ):
+                online.append(record)
+        last_seen = max(
+            (int(item.get("lastSeenAtEpochMs") or 0) for item in online),
+            default=None,
+        )
+        return {
+            "online": bool(online),
+            "lastSeenAtEpochMs": last_seen,
+            "workerCount": len(online),
+            "engines": sorted({
+                value
+                for item in online
+                for value in (item.get("engines") or [])
+                if value in ENGINES
+            }),
+        }
+
+    def executor_status(self) -> list[dict]:
+        with exclusive_lock(self.lock_path):
+            active = self._active_jobs_locked()
+            pc = self._pc_online_summary_locked()
+            capacity_free = not active
+            return [
+                {
+                    "executor": "pi",
+                    "online": True,
+                    "acceptingJobs": capacity_free,
+                    "engines": sorted(ENGINES),
+                },
+                {
+                    "executor": "pc",
+                    "online": pc["online"],
+                    "acceptingJobs": bool(pc["online"] and capacity_free),
+                    "engines": pc["engines"],
+                    "lastSeenAtEpochMs": pc["lastSeenAtEpochMs"],
+                    "workerCount": pc["workerCount"],
+                },
+            ]
+
+    def _pc_identity_job_locked(
+        self,
+        payload: dict,
+        *,
+        renew: bool = True,
+    ) -> tuple[Path, Path, dict, str]:
+        if not isinstance(payload, dict) or payload.get("contract") != WORKER_CONTRACT:
+            raise ReaderBookOcrError(
+                "invalid-worker-contract", "invalid PC OCR worker contract", status=400
+            )
+        worker_id = self._validate_worker_id(payload.get("workerId"))
+        book_id = str(payload.get("bookId") or "")
+        content_sha256 = str(payload.get("contentSha256") or "")
+        self._validate_identity(book_id, content_sha256)
+        job_id = str(payload.get("jobId") or "")
+        generation = str(payload.get("generation") or "")
+        lease_id = str(payload.get("leaseId") or "")
+        if (
+            not re.fullmatch(r"ocrjob_[0-9a-f]{32}", job_id)
+            or not re.fullmatch(r"ocrgen_[0-9a-f]{32}", generation)
+            or not PC_LEASE_ID_RE.fullmatch(lease_id)
+        ):
+            raise ReaderBookOcrError(
+                "invalid-worker-identity", "invalid PC OCR job identity", status=400
+            )
+        version_dir = self._version_dir(book_id, content_sha256)
+        engine, job = self._current_job_locked(version_dir)
+        if (
+            engine not in ENGINES
+            or not isinstance(job, dict)
+            or job.get("executor") != "pc"
+            or job.get("jobId") != job_id
+            or job.get("workerGeneration") != generation
+            or job.get("leaseId") != lease_id
+            or job.get("leaseWorkerId") != worker_id
+        ):
+            raise ReaderBookOcrError(
+                "ocr-worker-lease-stale", "PC OCR lease is no longer current", status=409
+            )
+        try:
+            expires_at = int(job.get("leaseExpiresAtEpochMs") or 0)
+        except (TypeError, ValueError):
+            expires_at = 0
+        now = _now_ms()
+        if expires_at <= now:
+            raise ReaderBookOcrError(
+                "ocr-worker-lease-expired", "PC OCR lease expired; claim the job again", status=409
+            )
+        job_dir = version_dir / engine
+        desired = self._pc_desired_state(job_dir)
+        worker = self._touch_pc_worker_locked(worker_id)
+        if renew:
+            job = {
+                **job,
+                "leaseExpiresAtEpochMs": now + self.pc_lease_ms,
+                "executorOnline": True,
+                "executorLastSeenAtEpochMs": worker["lastSeenAtEpochMs"],
+                "updatedAtEpochMs": now,
+            }
+            atomic_write_json(job_dir / "job.json", job, indent=2, mode=0o600)
+        return version_dir, job_dir, job, desired
+
+    @staticmethod
+    def _pc_lease_wire(job: dict, desired: str) -> dict:
+        return {
+            "desiredState": desired,
+            "lease": {
+                "leaseId": job.get("leaseId"),
+                "expiresAtEpochMs": job.get("leaseExpiresAtEpochMs"),
+                "renewAfterMs": 15_000,
+            },
+        }
+
+    def claim_pc_worker(self, worker_id: str, capabilities: dict) -> dict | None:
+        with exclusive_lock(self.lock_path):
+            worker = self._touch_pc_worker_locked(worker_id, capabilities)
+            now = _now_ms()
+            for pointer in sorted(self.state_root.glob("book_*/*/current.json")):
+                version_dir = pointer.parent
+                if (
+                    not BOOK_ID_RE.fullmatch(version_dir.parent.name)
+                    or not SHA256_RE.fullmatch(version_dir.name)
+                ):
+                    continue
+                engine, job = self._current_job_locked(version_dir)
+                if (
+                    engine not in worker["engines"]
+                    or not isinstance(job, dict)
+                    or job.get("executor") != "pc"
+                    or self._processing_identity(job)
+                        != ("pc", PROCESSING_PROFILES["pc"])
+                    or job.get("state") not in ACTIVE_STATES
+                ):
+                    continue
+                job_dir = version_dir / engine
+                if self._pc_desired_state(job_dir) != "running":
+                    continue
+                resolved = self.resolve(job["bookId"], job["contentSha256"])
+                try:
+                    source_size = int(resolved.path.stat().st_size)
+                except OSError:
+                    continue
+                if source_size > int(worker.get("maxPdfBytes") or 0):
+                    continue
+                try:
+                    lease_expires = int(job.get("leaseExpiresAtEpochMs") or 0)
+                except (TypeError, ValueError):
+                    lease_expires = 0
+                lease_worker = str(job.get("leaseWorkerId") or "")
+                if lease_expires > now and lease_worker and lease_worker != worker["workerId"]:
+                    continue
+                lease_id = (
+                    str(job.get("leaseId"))
+                    if lease_expires > now and lease_worker == worker["workerId"]
+                    else "ocrlease_" + uuid.uuid4().hex
+                )
+                total_pages = int(job.get("totalPages") or 0)
+                if total_pages <= 0 or total_pages > self.max_pages:
+                    continue
+                completed_pages = [
+                    page_number
+                    for page_number in range(1, total_pages + 1)
+                    if self._page_for_pc_done(job_dir, page_number, job)
+                ]
+                recognized_pages = sum(
+                    1
+                    for page_number in completed_pages
+                    if (self._read_optional(
+                        job_dir / "pages" / f"p{page_number:06d}.json"
+                    ) or {}).get("chars")
+                )
+                job = {
+                    **job,
+                    "state": "running",
+                    "phase": job.get("phase") if job.get("phase") in PC_PHASES else "preparing",
+                    "leaseId": lease_id,
+                    "leaseWorkerId": worker["workerId"],
+                    "leaseExpiresAtEpochMs": now + self.pc_lease_ms,
+                    "executorOnline": True,
+                    "executorLastSeenAtEpochMs": worker["lastSeenAtEpochMs"],
+                    "processedPages": len(completed_pages),
+                    "successfulPages": len(completed_pages),
+                    "recognizedPages": recognized_pages,
+                    "textProgress": {
+                        "total": total_pages,
+                        "completed": len(completed_pages),
+                        "pending": total_pages - len(completed_pages),
+                        "failed": 0,
+                        "unavailable": 0,
+                    },
+                    "wordProgress": {
+                        "total": total_pages,
+                        "completed": len(completed_pages),
+                        "pending": total_pages - len(completed_pages),
+                        "failed": 0,
+                        "unavailable": 0,
+                    },
+                    "message": "PC 已领取预处理任务",
+                    "updatedAtEpochMs": now,
+                }
+                atomic_write_json(job_dir / "job.json", job, indent=2, mode=0o600)
+                source_url = (
+                    "/pdf/api/library/ocr/worker/source"
+                    f"?contract=reader-library-ocr-worker%2F1&workerId={worker['workerId']}"
+                    f"&bookId={job['bookId']}"
+                    f"&contentSha256={job['contentSha256']}&jobId={job['jobId']}"
+                    f"&generation={job['workerGeneration']}&leaseId={lease_id}"
+                )
+                return {
+                    "lease": {
+                        "leaseId": lease_id,
+                        "expiresAtEpochMs": job["leaseExpiresAtEpochMs"],
+                        "renewAfterMs": 15_000,
+                    },
+                    "job": {
+                        "jobId": job["jobId"],
+                        "bookId": job["bookId"],
+                        "contentSha256": job["contentSha256"],
+                        "engine": engine,
+                        "executor": "pc",
+                        "processingProfile": job["processingProfile"],
+                        "generation": job["workerGeneration"],
+                        "totalPages": total_pages,
+                        "sourceSize": source_size,
+                        "sourceUrl": source_url,
+                        "completedPages": completed_pages,
+                        "limits": {
+                            "maxPages": self.max_pages,
+                            "maxPdfBytes": self.max_pdf_bytes,
+                            "maxPageBytes": min(
+                                self.max_pc_page_bytes,
+                                int(worker.get("maxPageBytes") or self.max_pc_page_bytes),
+                            ),
+                            "maxFormulaBytes": self.max_pc_formula_bytes,
+                        },
+                    },
+                    "desiredState": "running",
+                }
+        return None
+
+    @staticmethod
+    def _page_for_pc_done(job_dir: Path, page_number: int, job: dict) -> bool:
+        from reader_book_ocr_worker import _page_done
+
+        if not _page_done(
+            job_dir / "pages" / f"p{page_number:06d}.json",
+            job["bookId"],
+            job["contentSha256"],
+            job["engine"],
+        ):
+            return False
+        value = ReaderBookOcrService._read_optional(
+            job_dir / "pages" / f"p{page_number:06d}.json"
+        ) or {}
+        return ReaderBookOcrService._processing_identity(value) == (
+            "pc", PROCESSING_PROFILES["pc"]
+        )
+
+    def pc_worker_source(self, payload: dict) -> tuple[dict, Path, dict]:
+        if set(payload) != set(PC_IDENTITY_FIELDS):
+            raise ReaderBookOcrError(
+                "invalid-request", "invalid PC OCR source fields", status=400
+            )
+        resolved = self.resolve(
+            str(payload.get("bookId") or ""), str(payload.get("contentSha256") or "")
+        )
+        with exclusive_lock(self.lock_path):
+            _version_dir, _job_dir, job, desired = self._pc_identity_job_locked(payload)
+            return resolved.entry, resolved.path, self._pc_lease_wire(job, desired)
+
+    @staticmethod
+    def _validate_pc_progress(value, total_pages: int) -> dict | None:
+        if value is None:
+            return None
+        if not isinstance(value, dict) or set(value) - {
+            "textCompleted", "wordCompleted", "formulaDetected",
+            "formulaRecognized", "totalPages",
+        }:
+            raise ReaderBookOcrError(
+                "invalid-worker-progress", "invalid PC OCR progress", status=400
+            )
+        out = {}
+        for key, raw in value.items():
+            if isinstance(raw, bool):
+                raise ReaderBookOcrError(
+                    "invalid-worker-progress", "invalid PC OCR progress", status=400
+                )
+            try:
+                number = int(raw)
+            except (TypeError, ValueError) as exc:
+                raise ReaderBookOcrError(
+                    "invalid-worker-progress", "invalid PC OCR progress", status=400
+                ) from exc
+            if number < 0 or number > 10_000_000:
+                raise ReaderBookOcrError(
+                    "invalid-worker-progress", "invalid PC OCR progress", status=400
+                )
+            out[key] = number
+        if "totalPages" in out and out["totalPages"] != int(total_pages):
+            raise ReaderBookOcrError(
+                "worker-page-count-changed", "PC OCR page count disagrees with Pi", status=409
+            )
+        if out.get("textCompleted", 0) > total_pages or out.get("wordCompleted", 0) > total_pages:
+            raise ReaderBookOcrError(
+                "invalid-worker-progress", "PC OCR page progress exceeds the book", status=400
+            )
+        if out.get("formulaRecognized", 0) > out.get(
+            "formulaDetected", out.get("formulaRecognized", 0)
+        ):
+            raise ReaderBookOcrError(
+                "invalid-worker-progress", "PC OCR formula progress is inconsistent", status=400
+            )
+        return out
+
+    def pc_worker_heartbeat(self, payload: dict) -> dict:
+        allowed = set(PC_IDENTITY_FIELDS) | {
+            "phase", "currentPage", "state", "error", "progress"
+        }
+        if not isinstance(payload, dict) or set(payload) - allowed or not PC_IDENTITY_FIELDS <= set(payload):
+            raise ReaderBookOcrError(
+                "invalid-request", "invalid PC OCR heartbeat fields", status=400
+            )
+        self._bounded_json_bytes(payload, MAX_PC_PROGRESS_BYTES_DEFAULT, "worker-progress-too-large")
+        self.resolve(str(payload.get("bookId") or ""), str(payload.get("contentSha256") or ""))
+        with exclusive_lock(self.lock_path):
+            _version_dir, job_dir, job, desired = self._pc_identity_job_locked(payload)
+            total_pages = int(job.get("totalPages") or 0)
+            self._validate_pc_progress(payload.get("progress"), total_pages)
+            phase = payload.get("phase")
+            if phase is not None and phase not in PC_PHASES:
+                raise ReaderBookOcrError(
+                    "invalid-worker-phase", "invalid PC OCR phase", status=400
+                )
+            current_page = payload.get("currentPage")
+            if current_page is not None:
+                try:
+                    current_page = int(current_page)
+                except (TypeError, ValueError) as exc:
+                    raise ReaderBookOcrError(
+                        "invalid-worker-page", "invalid PC OCR current page", status=400
+                    ) from exc
+                if current_page < 1 or current_page > total_pages:
+                    raise ReaderBookOcrError(
+                        "invalid-worker-page", "invalid PC OCR current page", status=400
+                    )
+            reported_state = payload.get("state", "running")
+            if reported_state not in ("running", "paused", "cancelled", "failed"):
+                raise ReaderBookOcrError(
+                    "invalid-worker-state", "invalid PC OCR worker state", status=400
+                )
+            changes = {
+                "phase": phase or job.get("phase") or "preparing",
+                "currentPage": current_page,
+                "executorOnline": True,
+                "executorLastSeenAtEpochMs": _now_ms(),
+            }
+            if reported_state == "paused":
+                if desired != "paused":
+                    raise ReaderBookOcrError(
+                        "unexpected-worker-stop", "PC OCR pause was not requested", status=409
+                    )
+                changes.update({
+                    "state": "paused", "message": "PC 已保存完成页并暂停",
+                    "canPause": False, "canResume": True, "canCancel": True,
+                    "leaseId": None, "leaseWorkerId": None, "leaseExpiresAtEpochMs": None,
+                })
+            elif reported_state == "cancelled":
+                if desired != "cancelled":
+                    raise ReaderBookOcrError(
+                        "unexpected-worker-stop", "PC OCR cancellation was not requested", status=409
+                    )
+                changes.update({
+                    "state": "cancelled", "message": "PC 预处理已取消；完成页保留",
+                    "canPause": False, "canResume": False, "canCancel": False,
+                    "canRetry": True, "leaseId": None, "leaseWorkerId": None,
+                    "leaseExpiresAtEpochMs": None,
+                })
+            elif reported_state == "failed":
+                changes.update({
+                    "state": "failed", "errorCode": "pc-worker-failed",
+                    "error": self._sanitize_worker_error(payload.get("error") or "PC OCR worker failed"),
+                    "message": "PC 预处理失败；完成页保留，可重试",
+                    "canPause": False, "canResume": False, "canCancel": False,
+                    "canRetry": True, "leaseId": None, "leaseWorkerId": None,
+                    "leaseExpiresAtEpochMs": None,
+                })
+            elif desired == "running":
+                changes.update({
+                    "state": "running", "canPause": True, "canCancel": True,
+                    "message": "PC 正在预处理",
+                })
+            else:
+                changes.update({
+                    "state": "pause-requested" if desired == "paused" else "cancel-requested",
+                    "message": "PC 正在保存完成页后停止",
+                })
+            job = {**job, **changes, "updatedAtEpochMs": _now_ms()}
+            atomic_write_json(job_dir / "job.json", job, indent=2, mode=0o600)
+            response = self._pc_lease_wire(job, desired)
+            response["job"] = _safe_public_job(job)
+            return response
+
+    def _normalize_pc_page(self, page: dict, page_number: int, job: dict) -> tuple[dict, bytes]:
+        allowed = {
+            "schema", "bookId", "contentSha256", "engine", "pageNumber",
+            "page_w", "page_h", "imageWidth", "imageHeight", "chars",
+            "furigana", "textCharCount", "generatedAtEpochMs", "tokenized",
+        }
+        if not isinstance(page, dict) or set(page) - allowed:
+            raise ReaderBookOcrError(
+                "invalid-worker-page", "invalid PC OCR page schema", status=400
+            )
+        if (
+            page.get("schema") != "reader-page-chars/1"
+            or page.get("bookId") != job.get("bookId")
+            or page.get("contentSha256") != job.get("contentSha256")
+            or page.get("engine") != job.get("engine")
+            or page.get("pageNumber") != page_number
+        ):
+            raise ReaderBookOcrError(
+                "worker-page-identity-mismatch", "PC OCR page identity disagrees", status=409
+            )
+        try:
+            page_w = float(page.get("page_w"))
+            page_h = float(page.get("page_h"))
+        except (TypeError, ValueError) as exc:
+            raise ReaderBookOcrError(
+                "invalid-worker-page", "invalid PC OCR page geometry", status=400
+            ) from exc
+        chars = page.get("chars")
+        furigana = page.get("furigana")
+        if (
+            not math.isfinite(page_w) or page_w <= 0
+            or not math.isfinite(page_h) or page_h <= 0
+            or not isinstance(chars, list) or len(chars) > 2_000_000
+            or not isinstance(furigana, list) or len(furigana) > 2_000_000
+        ):
+            raise ReaderBookOcrError(
+                "invalid-worker-page", "invalid PC OCR page content", status=400
+            )
+        for key, maximum in (
+            ("imageWidth", 100_000),
+            ("imageHeight", 100_000),
+            ("textCharCount", 100_000_000),
+            ("generatedAtEpochMs", 10_000_000_000_000),
+        ):
+            if key in page and (
+                isinstance(page[key], bool)
+                or not isinstance(page[key], int)
+                or page[key] < 0
+                or page[key] > maximum
+            ):
+                raise ReaderBookOcrError(
+                    "invalid-worker-page", "invalid PC OCR page metadata", status=400
+                )
+        if "tokenized" in page and not isinstance(page["tokenized"], bool):
+            raise ReaderBookOcrError(
+                "invalid-worker-page", "invalid PC OCR tokenization state", status=400
+            )
+        char_fields = {"c", "x0", "y0", "x1", "y1", "w", "bk", "b", "sp", "line", "conf"}
+        for char in chars:
+            if (
+                not isinstance(char, dict)
+                or set(char) - char_fields
+                or not isinstance(char.get("c"), str)
+                or len(char.get("c")) > 32
+            ):
+                raise ReaderBookOcrError(
+                    "invalid-worker-page", "invalid PC OCR character", status=400
+                )
+            try:
+                geometry = [float(char.get(key)) for key in ("x0", "y0", "x1", "y1")]
+            except (TypeError, ValueError) as exc:
+                raise ReaderBookOcrError(
+                    "invalid-worker-page", "invalid PC OCR character geometry", status=400
+                ) from exc
+            if (
+                not all(math.isfinite(value) and abs(value) <= 10_000_000 for value in geometry)
+                or geometry[0] > geometry[2]
+                or geometry[1] > geometry[3]
+            ):
+                raise ReaderBookOcrError(
+                    "invalid-worker-page", "invalid PC OCR character geometry", status=400
+                )
+            for key in ("w", "bk", "b", "sp", "line"):
+                if key in char and (isinstance(char[key], bool) or not isinstance(char[key], int)):
+                    raise ReaderBookOcrError(
+                        "invalid-worker-page", "invalid PC OCR character metadata", status=400
+                    )
+            if "conf" in char and char["conf"] is not None:
+                try:
+                    confidence = float(char["conf"])
+                except (TypeError, ValueError) as exc:
+                    raise ReaderBookOcrError(
+                        "invalid-worker-page", "invalid PC OCR character confidence", status=400
+                    ) from exc
+                if not math.isfinite(confidence):
+                    raise ReaderBookOcrError(
+                        "invalid-worker-page", "invalid PC OCR character confidence", status=400
+                    )
+        if any(not isinstance(item, dict) for item in furigana):
+            raise ReaderBookOcrError(
+                "invalid-worker-page", "invalid PC OCR furigana", status=400
+            )
+        normalized = dict(page)
+        normalized["page_w"] = page_w
+        normalized["page_h"] = page_h
+        normalized["executor"] = "pc"
+        normalized["processingProfile"] = job["processingProfile"]
+        encoded = self._bounded_json_bytes(
+            normalized, self.max_pc_page_bytes, "worker-page-too-large"
+        )
+        return normalized, encoded
+
+    def upload_pc_page(self, page_number: int, payload: dict) -> dict:
+        allowed = set(PC_IDENTITY_FIELDS) | {"page", "progress"}
+        if not isinstance(payload, dict) or set(payload) - allowed or not PC_IDENTITY_FIELDS <= set(payload):
+            raise ReaderBookOcrError(
+                "invalid-request", "invalid PC OCR page upload fields", status=400
+            )
+        self._bounded_json_bytes(
+            payload, self.max_pc_page_bytes + MAX_PC_PROGRESS_BYTES_DEFAULT,
+            "worker-page-too-large",
+        )
+        self.resolve(str(payload.get("bookId") or ""), str(payload.get("contentSha256") or ""))
+        with exclusive_lock(self.lock_path):
+            _version_dir, job_dir, job, desired = self._pc_identity_job_locked(payload)
+            total_pages = int(job.get("totalPages") or 0)
+            if page_number < 1 or page_number > total_pages:
+                raise ReaderBookOcrError(
+                    "invalid-worker-page", "PC OCR page is outside the book", status=400
+                )
+            self._validate_pc_progress(payload.get("progress"), total_pages)
+            normalized, _encoded = self._normalize_pc_page(payload.get("page"), page_number, job)
+            page_path = job_dir / "pages" / f"p{page_number:06d}.json"
+            existing_page = self._read_optional(page_path)
+            already = existing_page == normalized
+            was_done = self._page_for_pc_done(job_dir, page_number, job)
+            old_recognized = bool((existing_page or {}).get("chars")) if was_done else False
+            atomic_write_json(page_path, normalized, indent=None, mode=0o600)
+            completed = min(total_pages, int(job.get("successfulPages") or 0) + (0 if was_done else 1))
+            recognized = max(
+                0,
+                int(job.get("recognizedPages") or 0)
+                - (1 if old_recognized else 0)
+                + (1 if normalized.get("chars") else 0),
+            )
+            state = job.get("state")
+            if desired == "running":
+                state = "running"
+            job = {
+                **job,
+                "state": state,
+                "processedPages": completed,
+                "successfulPages": completed,
+                "recognizedPages": recognized,
+                "currentPage": None,
+                "textState": "succeeded" if completed == total_pages else "running",
+                "textProgress": {
+                    "total": total_pages, "completed": completed,
+                    "pending": total_pages - completed, "failed": 0, "unavailable": 0,
+                },
+                "wordProgress": {
+                    "total": total_pages, "completed": completed,
+                    "pending": total_pages - completed, "failed": 0, "unavailable": 0,
+                },
+                "percent": round(completed * 75 / max(1, total_pages), 1),
+                "message": f"PC 已上传文字页 {completed}/{total_pages}",
+                "updatedAtEpochMs": _now_ms(),
+            }
+            atomic_write_json(job_dir / "job.json", job, indent=2, mode=0o600)
+            response = self._pc_lease_wire(job, desired)
+            response.update({"accepted": True, "already": already, "page": page_number})
+            response["job"] = _safe_public_job(job)
+            return response
+
+    def upload_pc_formulas(self, payload: dict) -> dict:
+        allowed = set(PC_IDENTITY_FIELDS) | {
+            "formula", "formulaState", "formulaReason", "progress"
+        }
+        if not isinstance(payload, dict) or set(payload) - allowed or not PC_IDENTITY_FIELDS <= set(payload):
+            raise ReaderBookOcrError(
+                "invalid-request", "invalid PC OCR formula upload fields", status=400
+            )
+        self._bounded_json_bytes(payload, self.max_pc_formula_bytes, "worker-formula-too-large")
+        self.resolve(str(payload.get("bookId") or ""), str(payload.get("contentSha256") or ""))
+        with exclusive_lock(self.lock_path):
+            _version_dir, job_dir, job, desired = self._pc_identity_job_locked(payload)
+            total_pages = int(job.get("totalPages") or 0)
+            self._validate_pc_progress(payload.get("progress"), total_pages)
+            formula = payload.get("formula")
+            if (
+                not isinstance(formula, dict)
+                or set(formula) - {"schema", "bookId", "contentSha256", "formulas"}
+                or formula.get("schema") != "reader-formula-regions/1"
+                or formula.get("bookId") != job.get("bookId")
+                or formula.get("contentSha256") != job.get("contentSha256")
+                or not isinstance(formula.get("formulas"), list)
+                or len(formula.get("formulas")) > 200_000
+            ):
+                raise ReaderBookOcrError(
+                    "invalid-worker-formula", "invalid PC OCR formula schema", status=400
+                )
+            normalized = []
+            recognized = 0
+            for item in formula["formulas"]:
+                if not isinstance(item, dict) or set(item) - {
+                    "page", "bbox", "conf", "latex", "multiline", "latexEngine", "latex_engine"
+                }:
+                    raise ReaderBookOcrError(
+                        "invalid-worker-formula", "invalid PC OCR formula record", status=400
+                    )
+                try:
+                    formula_page = int(item.get("page"))
+                    bbox = [float(number) for number in item.get("bbox")]
+                except (TypeError, ValueError) as exc:
+                    raise ReaderBookOcrError(
+                        "invalid-worker-formula", "invalid PC OCR formula geometry", status=400
+                    ) from exc
+                latex = item.get("latex")
+                if latex is not None and (not isinstance(latex, str) or len(latex) > 10_000):
+                    raise ReaderBookOcrError(
+                        "invalid-worker-formula", "invalid PC OCR formula text", status=400
+                    )
+                confidence = item.get("conf")
+                if confidence is not None:
+                    try:
+                        confidence = float(confidence)
+                    except (TypeError, ValueError) as exc:
+                        raise ReaderBookOcrError(
+                            "invalid-worker-formula", "invalid PC OCR formula confidence", status=400
+                        ) from exc
+                    if not math.isfinite(confidence) or confidence < 0 or confidence > 1:
+                        raise ReaderBookOcrError(
+                            "invalid-worker-formula", "invalid PC OCR formula confidence", status=400
+                        )
+                if "multiline" in item and not isinstance(item["multiline"], bool):
+                    raise ReaderBookOcrError(
+                        "invalid-worker-formula", "invalid PC OCR multiline state", status=400
+                    )
+                if (
+                    formula_page < 1 or formula_page > total_pages
+                    or len(bbox) != 4
+                    or not all(math.isfinite(number) and 0 <= number <= 1 for number in bbox)
+                    or bbox[0] >= bbox[2] or bbox[1] >= bbox[3]
+                ):
+                    raise ReaderBookOcrError(
+                        "invalid-worker-formula", "invalid PC OCR formula geometry", status=400
+                    )
+                value = {
+                    "page": formula_page,
+                    "bbox": bbox,
+                    "conf": confidence,
+                    "latex": latex,
+                }
+                if item.get("multiline") is not None:
+                    value["multiline"] = bool(item.get("multiline"))
+                latex_engine = item.get("latexEngine", item.get("latex_engine"))
+                if latex_engine is not None:
+                    if not isinstance(latex_engine, str) or len(latex_engine) > 80:
+                        raise ReaderBookOcrError(
+                            "invalid-worker-formula", "invalid PC OCR formula engine", status=400
+                        )
+                    value["latex_engine"] = latex_engine
+                if latex:
+                    recognized += 1
+                normalized.append(value)
+            formula_state = str(payload.get("formulaState") or "")
+            if formula_state not in PC_PUBLISHABLE_FORMULA_STATES:
+                raise ReaderBookOcrError(
+                    "worker-formula-not-publishable",
+                    "PC OCR formula state is not publishable",
+                    status=409,
+                )
+            raw_formula_reason = payload.get("formulaReason")
+            if raw_formula_reason is not None and not re.fullmatch(
+                r"[a-z][a-z0-9-]{0,63}", str(raw_formula_reason)
+            ):
+                raise ReaderBookOcrError(
+                    "invalid-worker-formula", "invalid PC OCR formula reason", status=400
+                )
+            formula_reason = str(raw_formula_reason) if raw_formula_reason is not None else None
+            formula_count = len(normalized)
+            formula_identity_valid = (
+                (
+                    formula_state == "succeeded"
+                    and recognized == formula_count
+                    and formula_reason is None
+                )
+                or (
+                    formula_state == "partial"
+                    and formula_count > 0
+                    and recognized < formula_count
+                    and bool(formula_reason)
+                )
+                or (
+                    formula_state == "unavailable"
+                    and recognized == 0
+                    and bool(formula_reason)
+                )
+            )
+            if not formula_identity_valid:
+                raise ReaderBookOcrError(
+                    "worker-formula-inconsistent",
+                    "PC OCR formula state, reason, and recognized count disagree",
+                    status=409,
+                )
+            formula_path = job_dir / "pc-formulas.json"
+            atomic_write_json(formula_path, {"formulas": normalized}, indent=None, mode=0o600)
+            formula_unavailable = formula_state == "unavailable"
+            job = {
+                **job,
+                "phase": "finalizing",
+                "formulaState": formula_state,
+                "formulaReason": formula_reason,
+                "formulaTotal": len(normalized),
+                "formulaRecognized": recognized,
+                "formulaPendingRegions": 0,
+                "formulaFailedRegions": max(0, len(normalized) - recognized),
+                "formulaProgress": {
+                    "total": total_pages,
+                    "completed": (0 if formula_unavailable else total_pages),
+                    "pending": 0,
+                    "failed": 0,
+                    "unavailable": (total_pages if formula_unavailable else 0),
+                },
+                "percent": 95,
+                "message": (
+                    f"PC 公式不可用（{formula_reason}）；文字层仍可发布"
+                    if formula_unavailable
+                    else f"PC 已上传公式结果 {recognized}/{len(normalized)}"
+                ),
+                "updatedAtEpochMs": _now_ms(),
+            }
+            atomic_write_json(job_dir / "job.json", job, indent=2, mode=0o600)
+            response = self._pc_lease_wire(job, desired)
+            response.update({"accepted": True, "formulaCount": len(normalized)})
+            response["job"] = _safe_public_job(job)
+            return response
+
+    def complete_pc_worker(self, payload: dict) -> dict:
+        allowed = set(PC_IDENTITY_FIELDS) | {"totalPages", "progress"}
+        if not isinstance(payload, dict) or set(payload) - allowed or not PC_IDENTITY_FIELDS <= set(payload):
+            raise ReaderBookOcrError(
+                "invalid-request", "invalid PC OCR completion fields", status=400
+            )
+        self._bounded_json_bytes(payload, MAX_PC_PROGRESS_BYTES_DEFAULT, "worker-progress-too-large")
+        resolved = self.resolve(
+            str(payload.get("bookId") or ""), str(payload.get("contentSha256") or "")
+        )
+        with exclusive_lock(self.lock_path):
+            version_dir, job_dir, job, desired = self._pc_identity_job_locked(payload)
+            if desired != "running":
+                raise ReaderBookOcrError(
+                    "ocr-worker-stop-requested", "PC OCR must stop before publication", status=409
+                )
+            total_pages = int(job.get("totalPages") or 0)
+            try:
+                reported_total = int(payload.get("totalPages"))
+            except (TypeError, ValueError) as exc:
+                raise ReaderBookOcrError(
+                    "invalid-worker-page", "PC OCR completion page count is invalid", status=400
+                ) from exc
+            if reported_total != total_pages:
+                raise ReaderBookOcrError(
+                    "worker-page-count-changed", "PC OCR page count disagrees with Pi", status=409
+                )
+            self._validate_pc_progress(payload.get("progress"), total_pages)
+            missing = [
+                page_number
+                for page_number in range(1, total_pages + 1)
+                if not self._page_for_pc_done(job_dir, page_number, job)
+            ]
+            if missing:
+                raise ReaderBookOcrError(
+                    "worker-pages-incomplete", "PC OCR pages are incomplete", status=409
+                )
+            formula_path = job_dir / "pc-formulas.json"
+            if not formula_path.is_file():
+                raise ReaderBookOcrError(
+                    "worker-formulas-incomplete", "PC OCR formula result is missing", status=409
+                )
+            formula_payload = self._read_optional(formula_path) or {}
+            formula_records = formula_payload.get("formulas")
+            if not isinstance(formula_records, list):
+                raise ReaderBookOcrError(
+                    "worker-formulas-incomplete", "PC OCR formula result is invalid", status=409
+                )
+            formula_count = len(formula_records)
+            formula_recognized = sum(
+                1 for item in formula_records
+                if isinstance(item, dict) and bool(item.get("latex"))
+            )
+            formula_state = str(job.get("formulaState") or "")
+            formula_reason = job.get("formulaReason")
+            formula_identity_valid = (
+                int(job.get("formulaTotal") or 0) == formula_count
+                and int(job.get("formulaRecognized") or 0) == formula_recognized
+                and (
+                    (
+                        formula_state == "succeeded"
+                        and formula_recognized == formula_count
+                        and formula_reason is None
+                    )
+                    or (
+                        formula_state == "partial"
+                        and formula_count > 0
+                        and formula_recognized < formula_count
+                        and bool(formula_reason)
+                    )
+                    or (
+                        formula_state == "unavailable"
+                        and formula_recognized == 0
+                        and bool(formula_reason)
+                    )
+                )
+            )
+            if not formula_identity_valid:
+                raise ReaderBookOcrError(
+                    "worker-formula-not-publishable",
+                    "PC OCR formula result is not in a publishable terminal state",
+                    status=409,
+                )
+            now = _now_ms()
+            final_job = {
+                key: value
+                for key, value in job.items()
+                if key not in ("leaseId", "leaseWorkerId", "leaseExpiresAtEpochMs")
+            }
+            final_job.update({
+                "state": "succeeded", "phase": "finalizing",
+                "textState": "succeeded", "processedPages": total_pages,
+                "successfulPages": total_pages, "failedPages": 0,
+                "textProgress": {
+                    "total": total_pages, "completed": total_pages,
+                    "pending": 0, "failed": 0, "unavailable": 0,
+                },
+                "wordProgress": {
+                    "total": total_pages, "completed": total_pages,
+                    "pending": 0, "failed": 0, "unavailable": 0,
+                },
+                "formulaProgress": ({
+                    "total": total_pages, "completed": 0,
+                    "pending": 0, "failed": 0, "unavailable": total_pages,
+                } if job.get("formulaState") == "unavailable" else {
+                    "total": total_pages, "completed": total_pages,
+                    "pending": 0, "failed": 0, "unavailable": 0,
+                }),
+                "currentPage": None, "percent": 100, "etaSeconds": 0,
+                "message": (
+                    f"PC 预处理完成：文字 {total_pages} 页；公式不可用（{job.get('formulaReason')}）"
+                    if job.get("formulaState") == "unavailable"
+                    else (
+                        f"PC 预处理完成：文字 {total_pages} 页，公式 "
+                        f"{int(job.get('formulaRecognized') or 0)}/{int(job.get('formulaTotal') or 0)}"
+                    )
+                ),
+                "canPause": False, "canResume": False, "canCancel": False,
+                "canRetry": False, "resultAvailable": True,
+                "pageCharsRevision": None, "updatedAtEpochMs": now,
+            })
+            atomic_write_json(job_dir / "job.json", {**job, "phase": "finalizing"}, indent=2, mode=0o600)
+            from reader_book_ocr_worker import _publish_release
+
+            args = SimpleNamespace(
+                book_id=job["bookId"], content_sha256=job["contentSha256"],
+                engine=job["engine"], max_bytes=self.max_pdf_bytes,
+            )
+            try:
+                revision = _publish_release(
+                    args,
+                    job_dir,
+                    formula_path,
+                    final_job,
+                    source_path=resolved.path,
+                )
+            except Exception as exc:
+                failed = {
+                    **job,
+                    "state": "failed", "phase": "finalizing",
+                    "errorCode": "ocr-publication-failed",
+                    "error": self._sanitize_worker_error(exc),
+                    "message": "PC 结果发布失败；完成页保留，可重试",
+                    "canPause": False, "canResume": False, "canCancel": False,
+                    "canRetry": True, "resultAvailable": False,
+                    "leaseId": None, "leaseWorkerId": None, "leaseExpiresAtEpochMs": None,
+                    "updatedAtEpochMs": _now_ms(),
+                }
+                atomic_write_json(job_dir / "job.json", failed, indent=2, mode=0o600)
+                raise ReaderBookOcrError(
+                    "ocr-publication-failed", "PC OCR publication failed", status=500
+                ) from exc
+            final_job["pageCharsRevision"] = revision
+            final_job["updatedAtEpochMs"] = _now_ms()
+            atomic_write_json(job_dir / "job.json", final_job, indent=2, mode=0o600)
+            # The common publication path writes the immutable release and fence.
+            published = self._published_snapshot(job["bookId"], job["contentSha256"])
+            if published is None or published["revision"] != revision:
+                raise ReaderBookOcrError(
+                    "ocr-publication-incomplete", "PC OCR publication did not commit", status=500
+                )
+            self._activate_published_locked(version_dir, published)
+            return {"published": True, "revision": revision, "job": _safe_public_job(published["job"])}
+
     def _pointer_engine(self, version_dir: Path, name: str) -> str | None:
         pointer = self._read_optional(version_dir / name)
         engine = pointer.get("engine") if pointer else None
@@ -785,6 +1941,30 @@ class ReaderBookOcrService:
     def _normalize_dead_job(self, job_dir: Path, job: dict) -> dict:
         if job.get("state") not in ACTIVE_STATES:
             return job
+        if job.get("executor") == "pc":
+            try:
+                lease_expires = int(job.get("leaseExpiresAtEpochMs") or 0)
+            except (TypeError, ValueError):
+                lease_expires = 0
+            if lease_expires > _now_ms():
+                return job
+            desired = self._pc_desired_state(job_dir)
+            if desired == "paused":
+                state, message = "paused", "PC 租约已结束，任务已暂停"
+            elif desired == "cancelled":
+                state, message = "cancelled", "PC 租约已结束，任务已取消"
+            else:
+                state, message = "queued", "等待 PC 重新领取预处理任务"
+            next_job = {
+                **job, "state": state, "message": message,
+                "leaseId": None, "leaseWorkerId": None, "leaseExpiresAtEpochMs": None,
+                "executorOnline": self._pc_online_summary_locked(job.get("engine"))["online"],
+                "canPause": state == "queued", "canResume": state == "paused",
+                "canCancel": state in ("queued", "paused"),
+                "canRetry": state == "cancelled", "updatedAtEpochMs": _now_ms(),
+            }
+            atomic_write_json(job_dir / "job.json", next_job, indent=2, mode=0o600)
+            return next_job
         if not job.get("workerPid") and not job.get("pid"):
             # start() holds the global lock through the spawn handshake.  A
             # missing owner cannot be declared dead from elapsed time alone.
@@ -943,6 +2123,7 @@ class ReaderBookOcrService:
         """Repair mutable status pointers from one already-validated release."""
         engine = published["engine"]
         revision = published["revision"]
+        executor, processing_profile = self._processing_identity(published["job"])
         if engine in ENGINES:
             atomic_write_json(
                 version_dir / engine / "job.json",
@@ -955,23 +2136,43 @@ class ReaderBookOcrService:
         )
         atomic_write_json(
             version_dir / "current.json",
-            {"engine": engine, "revision": revision},
+            {
+                "engine": engine,
+                "executor": executor,
+                "processingProfile": processing_profile,
+                "revision": revision,
+            },
             indent=2,
             mode=0o600,
         )
 
-    def start(self, book_id: str, content_sha256: str, engine: str = "vision") -> tuple[dict, bool]:
+    def start(
+        self,
+        book_id: str,
+        content_sha256: str,
+        engine: str = "vision",
+        executor: str = "pi",
+        processing_profile: str | None = None,
+    ) -> tuple[dict, bool]:
         resolved = self.resolve(book_id, content_sha256)
         engine = str(engine or "vision").strip().lower()
         if engine not in ENGINES:
             raise ReaderBookOcrError("invalid-engine", "unsupported OCR engine", status=400)
+        executor = self._validate_executor(executor)
+        processing_profile = self._validate_processing_profile(
+            executor, processing_profile
+        )
+        requested_identity = (executor, processing_profile)
         version_dir = self._version_dir(book_id, content_sha256)
         job_dir = self._job_dir(book_id, content_sha256, engine)
         with exclusive_lock(self.lock_path):
             version_dir.mkdir(parents=True, exist_ok=True)
             current_engine, current = self._current_job_locked(version_dir)
             if current and current.get("state") in ACTIVE_STATES:
-                if current_engine == engine:
+                if (
+                    current_engine == engine
+                    and self._processing_identity(current) == requested_identity
+                ):
                     return _safe_public_job(current), True
                 raise ReaderBookOcrError(
                     "book-ocr-busy", "another engine is already preprocessing this book", status=409
@@ -979,14 +2180,31 @@ class ReaderBookOcrService:
             active = self._active_jobs_locked()
             if active:
                 raise ReaderBookOcrError(
-                    "ocr-capacity-busy", "Pi is already preprocessing another book", status=429
+                    "ocr-capacity-busy", "another executor is already preprocessing a book", status=429
                 )
             existing = self._job_for_engine(version_dir, engine)
             published = self._published_snapshot(book_id, content_sha256)
-            if published is not None and published["engine"] == engine:
+            if (
+                published is not None
+                and published["engine"] == engine
+                and self._processing_identity(published["job"]) == requested_identity
+            ):
                 self._activate_published_locked(version_dir, published)
                 return _safe_public_job(published["job"]), True
+            if job_dir.exists() and (
+                existing is None
+                or self._processing_identity(existing) != requested_identity
+            ):
+                self._archive_mutable_staging_locked(
+                    version_dir, job_dir, existing
+                )
+                existing = None
             now = _now_ms()
+            total_pages = (
+                self._legacy_page_count(resolved.path)
+                if executor == "pc"
+                else int((existing or {}).get("totalPages") or 0)
+            )
             job = {
                 "contract": CONTRACT,
                 "jobId": "ocrjob_" + uuid.uuid4().hex,
@@ -994,16 +2212,21 @@ class ReaderBookOcrService:
                 "bookId": book_id,
                 "contentSha256": content_sha256,
                 "engine": engine,
+                "executor": executor,
+                "processingProfile": processing_profile,
                 "state": "queued",
                 "phase": "preparing",
                 "processedPages": int((existing or {}).get("successfulPages") or 0),
-                "totalPages": int((existing or {}).get("totalPages") or 0),
+                "totalPages": total_pages,
                 "successfulPages": int((existing or {}).get("successfulPages") or 0),
                 "failedPages": 0,
                 "recognizedPages": int((existing or {}).get("recognizedPages") or 0),
                 "percent": 0,
                 "etaSeconds": None,
-                "message": "等待 Pi 预处理进程启动",
+                "message": (
+                    "等待 PC 出站执行器领取任务"
+                    if executor == "pc" else "等待 Pi 预处理进程启动"
+                ),
                 "canPause": True,
                 "canResume": False,
                 "canCancel": True,
@@ -1021,25 +2244,25 @@ class ReaderBookOcrService:
                 "formulaFailedRegions": int((existing or {}).get("formulaFailedRegions") or 0),
                 "currentPage": None,
                 "textProgress": {
-                    "total": int((existing or {}).get("totalPages") or 0),
+                    "total": total_pages,
                     "completed": int((existing or {}).get("successfulPages") or 0),
                     "pending": max(
                         0,
-                        int((existing or {}).get("totalPages") or 0)
+                        total_pages
                         - int((existing or {}).get("successfulPages") or 0),
                     ),
                     "failed": 0,
                     "unavailable": 0,
                 },
                 "wordProgress": {
-                    "total": int((existing or {}).get("totalPages") or 0),
+                    "total": total_pages,
                     "completed": (
                         int((existing or {}).get("successfulPages") or 0)
                         if engine == "vision" else 0
                     ),
                     "pending": max(
                         0,
-                        int((existing or {}).get("totalPages") or 0)
+                        total_pages
                         - (
                             int((existing or {}).get("successfulPages") or 0)
                             if engine == "vision" else 0
@@ -1049,9 +2272,9 @@ class ReaderBookOcrService:
                     "unavailable": 0,
                 },
                 "formulaProgress": {
-                    "total": int((existing or {}).get("totalPages") or 0),
+                    "total": total_pages,
                     "completed": 0,
-                    "pending": int((existing or {}).get("totalPages") or 0),
+                    "pending": total_pages,
                     "failed": 0,
                     "unavailable": 0,
                 },
@@ -1059,9 +2282,29 @@ class ReaderBookOcrService:
             job_dir.mkdir(parents=True, exist_ok=True)
             atomic_write_json(job_dir / "control.json", {"desiredState": "running"}, indent=2, mode=0o600)
             atomic_write_json(job_dir / "job.json", job, indent=2, mode=0o600)
-            atomic_write_json(version_dir / "current.json", {"engine": engine}, indent=2, mode=0o600)
-            self._spawn(job_dir, resolved.path, job)
+            atomic_write_json(
+                version_dir / "current.json",
+                {
+                    "engine": engine,
+                    "executor": executor,
+                    "processingProfile": processing_profile,
+                },
+                indent=2,
+                mode=0o600,
+            )
+            if executor == "pi":
+                self._spawn(job_dir, resolved.path, job)
             return _safe_public_job(job), False
+
+    def _decorate_executor_status_locked(self, job: dict, engine: str | None = None) -> dict:
+        if job.get("executor") != "pc":
+            return job
+        pc = self._pc_online_summary_locked(engine or job.get("engine"))
+        return {
+            **job,
+            "executorOnline": pc["online"],
+            "executorLastSeenAtEpochMs": pc["lastSeenAtEpochMs"],
+        }
 
     def status(self, book_id: str, content_sha256: str) -> dict:
         self.resolve(book_id, content_sha256)
@@ -1072,16 +2315,21 @@ class ReaderBookOcrService:
             if not job:
                 if published is not None:
                     self._activate_published_locked(version_dir, published)
-                    return _safe_public_job(published["job"])
+                    return _safe_public_job(self._decorate_executor_status_locked(
+                        published["job"], published["engine"]
+                    ))
                 return _safe_public_job({
                     "bookId": book_id,
                     "contentSha256": content_sha256,
                     "state": "idle",
                     "phase": "idle",
                 })
+            job = self._decorate_executor_status_locked(job, engine)
             publication_matches_job = (
                 published is not None
                 and published["engine"] == engine
+                and self._processing_identity(published["job"])
+                    == self._processing_identity(job)
                 and (
                     published["job"].get("jobId") == job.get("jobId")
                     or (
@@ -1092,7 +2340,9 @@ class ReaderBookOcrService:
             )
             if publication_matches_job:
                 self._activate_published_locked(version_dir, published)
-                return _safe_public_job(published["job"])
+                return _safe_public_job(self._decorate_executor_status_locked(
+                    published["job"], published["engine"]
+                ))
             if job.get("state") == "succeeded":
                 if engine == LEGACY_ENGINE:
                     raise ReaderBookOcrError(
@@ -1132,14 +2382,16 @@ class ReaderBookOcrService:
                 if state not in ("queued", "running", "pause-requested"):
                     raise ReaderBookOcrError("ocr-cannot-pause", "OCR job cannot be paused", status=409)
                 atomic_write_json(job_dir / "control.json", {"desiredState": "paused"}, indent=2, mode=0o600)
-                job = {**job, "state": "pause-requested", "message": "保存已完成页后暂停；当前页可能在继续时重做", "canPause": False, "canCancel": True, "updatedAtEpochMs": _now_ms()}
+                unleased_pc = job.get("executor") == "pc" and not job.get("leaseId")
+                job = {**job, "state": ("paused" if unleased_pc else "pause-requested"), "message": ("PC 任务已暂停" if unleased_pc else "保存已完成页后暂停；当前页可能在继续时重做"), "canPause": False, "canResume": unleased_pc, "canCancel": True, "updatedAtEpochMs": _now_ms()}
             elif action == "cancel":
                 if state in ("cancelled", "succeeded"):
                     return _safe_public_job(job)
                 if state not in ACTIVE_STATES and state != "paused":
                     raise ReaderBookOcrError("ocr-cannot-cancel", "OCR job cannot be cancelled", status=409)
                 atomic_write_json(job_dir / "control.json", {"desiredState": "cancelled"}, indent=2, mode=0o600)
-                job = {**job, "state": "cancel-requested", "message": "正在停止；已完成页面会保留", "canPause": False, "canResume": False, "canCancel": False, "updatedAtEpochMs": _now_ms()}
+                unleased_pc = job.get("executor") == "pc" and not job.get("leaseId")
+                job = {**job, "state": ("cancelled" if unleased_pc else "cancel-requested"), "message": ("PC 任务已取消；已完成页面会保留" if unleased_pc else "正在停止；已完成页面会保留"), "canPause": False, "canResume": False, "canCancel": False, "canRetry": unleased_pc, "updatedAtEpochMs": _now_ms()}
             elif action in ("resume", "retry"):
                 allowed = ("paused",) if action == "resume" else ("failed", "cancelled")
                 if state not in allowed:
@@ -1166,6 +2418,9 @@ class ReaderBookOcrService:
                     "processGroupId": None,
                     "processStartToken": None,
                     "workerStartedAtEpochMs": None,
+                    "leaseId": None,
+                    "leaseWorkerId": None,
+                    "leaseExpiresAtEpochMs": None,
                     "state": "queued",
                     "phase": "preparing",
                     "message": "从已保存页面继续",
@@ -1179,7 +2434,8 @@ class ReaderBookOcrService:
                 }
                 atomic_write_json(job_dir / "control.json", {"desiredState": "running"}, indent=2, mode=0o600)
                 atomic_write_json(job_dir / "job.json", job, indent=2, mode=0o600)
-                self._spawn(job_dir, resolved.path, job)
+                if job.get("executor", "pi") == "pi":
+                    self._spawn(job_dir, resolved.path, job)
                 return _safe_public_job(job)
             else:
                 raise ValueError(action)
@@ -1279,12 +2535,18 @@ class ReaderBookOcrService:
         self._verify_current_source_content(
             self.resolve(book_id, content_sha256), content_sha256
         )
+        publication_identity = self._processing_identity(job)
         identity_values = (current, result, job, manifest)
         if any(
             not isinstance(value, dict)
+            or not self._processing_identity_valid(value)
             or value.get("engine") != engine
             or value.get("revision", value.get("pageCharsRevision")) != revision
+            or self._processing_identity(value) != publication_identity
             for value in identity_values
+        ) or (
+            not self._processing_identity_valid(fence)
+            or self._processing_identity(fence) != publication_identity
         ):
             raise ReaderBookOcrError(
                 "ocr-publication-invalid", "OCR publication pointers disagree", status=500
@@ -1295,8 +2557,12 @@ class ReaderBookOcrService:
             )
         formula_state = str(job.get("formulaState") or "")
         if (
-            formula_state not in ("pending", "succeeded", "partial", "failed")
+            formula_state not in FORMULA_STATES
             or manifest.get("formulaState") != formula_state
+            or (
+                publication_identity[0] == "pc"
+                and formula_state not in PC_PUBLISHABLE_FORMULA_STATES
+            )
         ):
             raise ReaderBookOcrError(
                 "ocr-publication-invalid", "OCR formula publication state disagrees", status=500
@@ -1400,10 +2666,12 @@ class ReaderBookOcrService:
             if page_match:
                 if (
                     not isinstance(derived, dict)
+                    or not self._processing_identity_valid(derived)
                     or derived.get("schema") != "reader-page-chars/1"
                     or derived.get("bookId") != book_id
                     or derived.get("contentSha256") != content_sha256
                     or derived.get("engine") != engine
+                    or self._processing_identity(derived) != publication_identity
                     or derived.get("pageNumber") != page_number
                     or not isinstance(derived.get("chars"), list)
                     or len(derived.get("chars")) > 2_000_000
@@ -1444,6 +2712,7 @@ class ReaderBookOcrService:
             raise ReaderBookOcrError(
                 "ocr-publication-invalid", "OCR formula count is inconsistent", status=500
             )
+        published_formula_recognized = 0
         for formula in formula_records:
             try:
                 formula_page = int(formula.get("page"))
@@ -1462,6 +2731,40 @@ class ReaderBookOcrService:
             ):
                 raise ReaderBookOcrError(
                     "ocr-publication-invalid", "OCR formula record is invalid", status=500
+                )
+            if formula.get("latex"):
+                published_formula_recognized += 1
+        if publication_identity[0] == "pc":
+            formula_reason = job.get("formulaReason")
+            formula_consistent = (
+                int(job.get("formulaTotal") or 0) == len(formula_records)
+                and int(job.get("formulaRecognized") or 0)
+                    == published_formula_recognized
+                and manifest.get("formulaReason") == formula_reason
+                and (
+                    (
+                        formula_state == "succeeded"
+                        and published_formula_recognized == len(formula_records)
+                        and formula_reason is None
+                    )
+                    or (
+                        formula_state == "partial"
+                        and len(formula_records) > 0
+                        and published_formula_recognized < len(formula_records)
+                        and bool(formula_reason)
+                    )
+                    or (
+                        formula_state == "unavailable"
+                        and published_formula_recognized == 0
+                        and bool(formula_reason)
+                    )
+                )
+            )
+            if not formula_consistent:
+                raise ReaderBookOcrError(
+                    "ocr-publication-invalid",
+                    "PC OCR formula publication is inconsistent",
+                    status=500,
                 )
         from reader_book_ocr_worker import _manifest_revision
 
@@ -1502,6 +2805,7 @@ class ReaderBookOcrService:
         try:
             manifest = read_json(manifest_path)
             engine = str(manifest.get("engine") or "")
+            executor, processing_profile = self._processing_identity(manifest)
             manifest_sha256 = hashlib.sha256(manifest_path.read_bytes()).hexdigest()
             source_identity = (read_json(release_dir / "result.json") or {}).get(
                 "sourceIdentity"
@@ -1524,6 +2828,8 @@ class ReaderBookOcrService:
                 "bookId": book_id,
                 "contentSha256": content_sha256,
                 "engine": engine,
+                "executor": executor,
+                "processingProfile": processing_profile,
                 "revision": revision,
                 "release": (
                     f"legacy/releases/{revision}"

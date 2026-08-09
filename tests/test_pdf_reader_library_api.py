@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import patch
 
 from flask import Flask
+from werkzeug.test import EnvironBuilder
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -131,6 +132,31 @@ class PdfReaderLibraryApiTest(unittest.TestCase):
             401,
         )
         self.assertEqual(
+            self.client.get("/pdf/api/library/ocr/executors").status_code, 401
+        )
+        self.assertEqual(
+            self.client.post(
+                "/pdf/api/library/ocr/worker/claim",
+                json={
+                    "contract": "reader-library-ocr-worker/1",
+                    "workerId": "pc_denied",
+                    "capabilities": {
+                        "engines": ["vision"],
+                        "processingProfile": "quality-first-v1",
+                    },
+                },
+            ).status_code,
+            401,
+        )
+        for method, route in (
+            (self.client.get, "/pdf/api/library/ocr/worker/source"),
+            (self.client.post, "/pdf/api/library/ocr/worker/heartbeat"),
+            (self.client.put, "/pdf/api/library/ocr/worker/pages/1"),
+            (self.client.put, "/pdf/api/library/ocr/worker/formulas"),
+            (self.client.post, "/pdf/api/library/ocr/worker/complete"),
+        ):
+            self.assertEqual(method(route).status_code, 401)
+        self.assertEqual(
             self.client.get(
                 "/pdf/api/library/ocr/adoption-preview",
                 query_string={"bookId": "book_" + "a" * 32, "contentSha256": "b" * 64},
@@ -235,6 +261,178 @@ class PdfReaderLibraryApiTest(unittest.TestCase):
         )
         self.assertEqual(stale.status_code, 409)
         self.assertEqual(stale.get_json()["code"], "book-version-changed")
+
+    def test_pc_worker_http_contract_is_outbound_leased_and_publishes_common_attachments(self) -> None:
+        (self.vault / "A.pdf").write_bytes(PDF_A)
+        entry = self.client.get("/pdf/api/library/catalog").get_json()["books"][0]
+        pdf_reader._READER_BOOK_OCR = ReaderBookOcrService(
+            self.library,
+            self.base / "pc-http-ocr",
+            ROOT,
+            launcher=lambda *_args: self.fail("PC start must not spawn a Pi worker"),
+            max_pdf_bytes=1024 * 1024,
+            max_pages=100,
+            legacy_page_count_reader=lambda _path: 1,
+            pc_lease_seconds=60,
+            pc_online_seconds=60,
+        )
+        before = self.client.get("/pdf/api/library/ocr/executors")
+        self.assertEqual(before.status_code, 200)
+        self.assertFalse(next(
+            item for item in before.get_json()["executors"] if item["executor"] == "pc"
+        )["online"])
+
+        started = self.client.post(
+            "/pdf/api/library/ocr/start",
+            json={
+                "bookId": entry["bookId"],
+                "contentSha256": entry["contentSha256"],
+                "engine": "vision",
+                "executor": "pc",
+            },
+        )
+        self.assertEqual(started.status_code, 200)
+        self.assertEqual(started.get_json()["job"]["executor"], "pc")
+        self.assertEqual(
+            started.get_json()["job"]["processingProfile"], "quality-first-v1"
+        )
+
+        claimed = self.client.post(
+            "/pdf/api/library/ocr/worker/claim",
+            json={
+                "contract": "reader-library-ocr-worker/1",
+                "workerId": "pc_http",
+                "capabilities": {
+                    "engines": ["vision"],
+                    "maxPdfBytes": 1024 * 1024,
+                    "maxPageBytes": 1024 * 1024,
+                    "processingProfile": "quality-first-v1",
+                },
+            },
+        )
+        self.assertEqual(claimed.status_code, 200)
+        claim = claimed.get_json()
+        self.assertEqual(claim["contract"], "reader-library-ocr-worker/1")
+        self.assertEqual(
+            claim["job"]["processingProfile"], "quality-first-v1"
+        )
+        identity = {
+            "contract": claim["contract"],
+            "workerId": "pc_http",
+            "bookId": claim["job"]["bookId"],
+            "contentSha256": claim["job"]["contentSha256"],
+            "jobId": claim["job"]["jobId"],
+            "generation": claim["job"]["generation"],
+            "leaseId": claim["lease"]["leaseId"],
+        }
+        source = self.client.get(
+            claim["job"]["sourceUrl"], headers={"Range": "bytes=0-3"}
+        )
+        self.assertEqual(source.status_code, 206)
+        self.assertEqual(source.data, PDF_A[:4])
+        source.close()
+
+        heartbeat = self.client.post(
+            "/pdf/api/library/ocr/worker/heartbeat",
+            json={
+                **identity,
+                "phase": "text-ocr",
+                "state": "running",
+                "currentPage": None,
+                "progress": {"totalPages": 1, "textCompleted": 0},
+            },
+        )
+        self.assertEqual(heartbeat.status_code, 200)
+        self.assertEqual(heartbeat.get_json()["desiredState"], "running")
+
+        page = {
+            "schema": "reader-page-chars/1",
+            "bookId": entry["bookId"],
+            "contentSha256": entry["contentSha256"],
+            "engine": "vision",
+            "pageNumber": 1,
+            "page_w": 10,
+            "page_h": 20,
+            "chars": [{
+                "c": "A", "x0": 1, "y0": 1, "x1": 2, "y1": 2,
+                "w": 1, "bk": 0, "b": 0,
+            }],
+            "furigana": [],
+            "tokenized": True,
+        }
+        uploaded = self.client.put(
+            "/pdf/api/library/ocr/worker/pages/1",
+            json={**identity, "page": page},
+        )
+        self.assertEqual(uploaded.status_code, 200)
+        formulas = self.client.put(
+            "/pdf/api/library/ocr/worker/formulas",
+            json={
+                **identity,
+                "formula": {
+                    "schema": "reader-formula-regions/1",
+                    "bookId": entry["bookId"],
+                    "contentSha256": entry["contentSha256"],
+                    "formulas": [],
+                },
+                "formulaState": "unavailable",
+                "formulaReason": "formula-model-unavailable",
+            },
+        )
+        self.assertEqual(formulas.status_code, 200)
+        self.assertEqual(
+            formulas.get_json()["job"]["formulaProgress"]["unavailable"], 1
+        )
+        completed = self.client.post(
+            "/pdf/api/library/ocr/worker/complete",
+            json={**identity, "totalPages": 1},
+        )
+        self.assertEqual(completed.status_code, 200)
+        self.assertTrue(completed.get_json()["published"])
+        manifest = self.client.get(
+            f"/pdf/api/library/attachments/{entry['bookId']}",
+            query_string={"contentSha256": entry["contentSha256"]},
+        )
+        self.assertEqual(manifest.status_code, 200)
+        self.assertEqual(manifest.get_json()["formulaState"], "unavailable")
+        self.assertEqual(
+            manifest.get_json()["formulaReason"], "formula-model-unavailable"
+        )
+
+    def test_worker_json_without_content_length_is_stream_bounded(self) -> None:
+        def open_chunked(body: bytes):
+            builder = EnvironBuilder(
+                path="/pdf/api/library/ocr/worker/claim",
+                method="POST",
+                input_stream=BytesIO(body),
+                content_type="application/json",
+            )
+            environ = builder.get_environ()
+            environ.pop("CONTENT_LENGTH", None)
+            environ["wsgi.input_terminated"] = True
+            return self.client.open(environ)
+
+        valid = json.dumps({
+            "contract": "reader-library-ocr-worker/1",
+            "workerId": "pc_chunked",
+            "capabilities": {
+                "engines": ["vision"],
+                "maxPdfBytes": 1024 * 1024,
+                "maxPageBytes": 1024 * 1024,
+                "processingProfile": "quality-first-v1",
+            },
+        }).encode("utf-8")
+        accepted = open_chunked(valid)
+        self.assertEqual(accepted.status_code, 204)
+
+        oversized = (
+            b'{"contract":"reader-library-ocr-worker/1","workerId":"pc_chunked",'
+            b'"capabilities":{"engines":["vision"],"processingProfile":"quality-first-v1"},'
+            b'"padding":"' + (b"x" * (64 * 1024)) + b'"}'
+        )
+        rejected = open_chunked(oversized)
+        self.assertEqual(rejected.status_code, 413)
+        self.assertEqual(rejected.get_json()["code"], "worker-payload-too-large")
 
     def test_legacy_adoption_routes_are_authenticated_path_free_and_idempotent(self) -> None:
         (self.vault / "A.pdf").write_bytes(PDF_A)

@@ -201,6 +201,21 @@ collection 就自动上传。无扩展真书 PWA 使用自己的本地 fallback�
   合同成熟后再恢复。不得以 PDFKit/另一套 EPUB renderer 取代现有 `DocumentHost`，也不得把
   本地壳重新命名为 PWA。
 
+### PDF 预处理执行器与派生附件
+
+- App 的本机 Apple 识别、Pi 识别和 PC 识别是三个显式入口；任何失败都不能自动改派到另一端。
+  Pi 始终负责书库身份、任务协调和不可变附件发布，Windows worker 只建立出站 HTTPS 连接，
+  不开放入站端口，也不取得可写书库路径。
+- 派生结果身份至少包含书籍内容摘要、引擎、执行器与 `processingProfile`。切换 Pi/PC 或质量档时
+  必须使用干净的可变 staging，不能复用另一档的残页；已发布 release 保持不可变并可按 revision
+  审计。原 PDF 永不因 OCR 被覆盖。
+- PC 默认使用 `quality-first-v1`：要求 CUDA，模型按任务惰性加载并在结束后释放，进程保持低优先级；
+  空闲轮询不得占用 GPU。质量模型不可用时要显示明确原因，不能静默退回 CPU 或较轻模型。
+- PC worker 一次只持有一个短租约；页、公式和完成请求都绑定 worker instance、job、generation、
+  lease 与源摘要。租约失效、源文件变化、协议回执不完整或重复进程身份冲突时均 fail closed。
+- 公式识别为 `unavailable` 时仍可发布完整文字层，但 `pending` / `failed` 等非终态不得伪装成整书成功；
+  文字、分词和公式进度分别报告。
+
 ### 属于书籍 DocumentHost 的数据
 
 - PDF/EPUB/HTML/Markdown 文件身份与渲染缓存（文件字节可位于 Pi 或用户授权的本机目录）；

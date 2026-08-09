@@ -32,7 +32,9 @@ import requests
 
 PROJECT = Path(os.environ.get("CLAUDE_PROJECT", "/home/bwicarus/claude"))
 STATE_DIR = PROJECT / "state" / "google-vision-ocr"
-KEY_FILE = Path("/home/bwicarus/.config/gcp-vision-key")
+KEY_FILE = Path(
+    os.environ.get("GOOGLE_VISION_API_KEY_FILE", "~/.config/gcp-vision-key")
+).expanduser()
 
 
 def _load_key() -> str:
@@ -41,7 +43,9 @@ def _load_key() -> str:
         return k.strip()
     if KEY_FILE.exists():
         return KEY_FILE.read_text().strip()
-    raise SystemExit("缺 GOOGLE_VISION_API_KEY env 或 /home/bwicarus/.config/gcp-vision-key")
+    raise SystemExit(
+        "缺 GOOGLE_VISION_API_KEY env 或 GOOGLE_VISION_API_KEY_FILE"
+    )
 
 
 def pdf_sha(pdf_path: Path) -> str:
@@ -64,11 +68,15 @@ def ocr_one_page(api_key: str, png_bytes: bytes, lang_hints=None) -> dict:
             "imageContext": image_context,
         }]
     }
-    url = f"https://vision.googleapis.com/v1/images:annotate?key={api_key}"
+    # Keep the credential out of the URL.  HTTP client exceptions commonly
+    # include the request URL, which would otherwise copy the API key into
+    # worker status, stderr, and the Pi job error record.
+    url = "https://vision.googleapis.com/v1/images:annotate"
+    headers = {"X-Goog-Api-Key": api_key}
     last_exc = None
     for attempt in range(3):
         try:
-            resp = requests.post(url, json=payload, timeout=60)
+            resp = requests.post(url, headers=headers, json=payload, timeout=60)
             break
         except (requests.exceptions.ConnectionError,
                 requests.exceptions.Timeout,

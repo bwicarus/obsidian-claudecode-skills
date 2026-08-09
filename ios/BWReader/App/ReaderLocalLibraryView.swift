@@ -532,7 +532,7 @@ struct ReaderLocalLibraryView: View {
         localBook: ReaderLocalBookRecord?
     ) -> some View {
         HStack {
-            Label("Pi 预处理", systemImage: "server.rack")
+            Label("Pi / PC 预处理", systemImage: "server.rack")
                 .font(.caption.weight(.semibold))
             Spacer()
             if let remoteBook,
@@ -546,7 +546,7 @@ struct ReaderLocalLibraryView: View {
             } else if let remoteBook,
                let job = piOCR.job(for: remoteBook),
                job.state != "idle" {
-                Text(piStateTitle(job.state))
+                Text("\(executorTitle(job.executor)) · \(piStateTitle(job.state))")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
             } else if let remoteBook,
@@ -559,6 +559,27 @@ struct ReaderLocalLibraryView: View {
                 Text("未开始")
                     .font(.caption2)
                     .foregroundStyle(.secondary)
+            }
+        }
+
+        HStack {
+            Label("此电脑 GPU", systemImage: "desktopcomputer")
+                .font(.caption2)
+            Spacer()
+            if piOCR.refreshingExecutors {
+                HStack(spacing: 4) {
+                    ProgressView().controlSize(.mini)
+                    Text("正在确认")
+                }
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+            } else {
+                Text(pcExecutorTitle)
+                    .font(.caption2)
+                    .foregroundStyle(
+                        pcExecutorIsOnline
+                            ? Color.green : Color.secondary
+                    )
             }
         }
 
@@ -598,7 +619,10 @@ struct ReaderLocalLibraryView: View {
                     }
                 }
                 if !job.isActive && !job.canResume && !job.canRetry {
-                    piStartMenu(remoteBook: remoteBook, localBook: localBook)
+                    preprocessingStartMenus(
+                        remoteBook: remoteBook,
+                        localBook: localBook
+                    )
                 }
             }
             .buttonStyle(.bordered)
@@ -625,7 +649,10 @@ struct ReaderLocalLibraryView: View {
                         )
                     }
                 }
-                piStartMenu(remoteBook: remoteBook, localBook: localBook)
+                preprocessingStartMenus(
+                    remoteBook: remoteBook,
+                    localBook: localBook
+                )
             }
             .buttonStyle(.bordered)
             .controlSize(.small)
@@ -635,7 +662,10 @@ struct ReaderLocalLibraryView: View {
                     || piOCR.previewingBookID != nil
             )
         } else {
-            piStartMenu(remoteBook: remoteBook, localBook: localBook)
+            preprocessingStartMenus(
+                remoteBook: remoteBook,
+                localBook: localBook
+            )
         }
 
         if let remoteBook,
@@ -702,17 +732,37 @@ struct ReaderLocalLibraryView: View {
         }
     }
 
-    private func piStartMenu(
+    private func preprocessingStartMenus(
         remoteBook: ReaderRemoteBook?,
         localBook: ReaderLocalBookRecord?
     ) -> some View {
-        Menu("Pi 预处理") {
+        HStack {
+            piStartMenu(
+                remoteBook: remoteBook,
+                localBook: localBook,
+                executor: "pi"
+            )
+            piStartMenu(
+                remoteBook: remoteBook,
+                localBook: localBook,
+                executor: "pc"
+            )
+        }
+    }
+
+    private func piStartMenu(
+        remoteBook: ReaderRemoteBook?,
+        localBook: ReaderLocalBookRecord?,
+        executor: String
+    ) -> some View {
+        Menu(executor == "pc" ? "PC 预处理" : "Pi 预处理") {
             Button("通用 PDF（Vision）") {
                 Task {
                     await startPiOCR(
                         remoteBook: remoteBook,
                         localBook: localBook,
-                        engine: "vision"
+                        engine: "vision",
+                        executor: executor
                     )
                 }
             }
@@ -721,7 +771,8 @@ struct ReaderLocalLibraryView: View {
                     await startPiOCR(
                         remoteBook: remoteBook,
                         localBook: localBook,
-                        engine: "manga"
+                        engine: "manga",
+                        executor: executor
                     )
                 }
             }
@@ -732,6 +783,7 @@ struct ReaderLocalLibraryView: View {
             ocrActionBookID != nil
                 || piOCR.activeBookID != nil
                 || piOCR.previewingBookID != nil
+                || (executor == "pc" && !pcExecutorAcceptingJobs)
         )
     }
 
@@ -882,17 +934,19 @@ struct ReaderLocalLibraryView: View {
     ) async {
         guard book.kind.lowercased() == "pdf" else { return }
         let cookies = await reader.remoteLibraryCookies()
+        async let executorRefresh: Void = piOCR.refreshExecutors(cookies: cookies)
         let localIdentity = await matchingLocalIdentity(
             for: book,
             localBook: localBook
         )
-        await piOCR.refresh(
+        async let bookRefresh: Void = piOCR.refresh(
             book: book,
             cookies: cookies,
             localBookID: localIdentity?.bookID,
             localContentSHA256: localIdentity?.contentSHA256,
             previewsLegacyResults: previewsLegacyResults
         )
+        _ = await (executorRefresh, bookRefresh)
     }
 
     private func upload(_ book: ReaderLocalBookRecord) async {
@@ -1058,7 +1112,8 @@ struct ReaderLocalLibraryView: View {
     private func startPiOCR(
         remoteBook: ReaderRemoteBook?,
         localBook: ReaderLocalBookRecord?,
-        engine: String
+        engine: String,
+        executor: String
     ) async {
         guard recognitionPreferences.isEnabled else {
             ocrErrorMessage = "请先在设置中启用书籍文字识别"
@@ -1114,6 +1169,7 @@ struct ReaderLocalLibraryView: View {
         await piOCR.start(
             book: target,
             engine: engine,
+            executor: executor,
             cookies: cookies,
             localBookID: currentLocalBook?.id,
             localContentSHA256: localDigest
@@ -1299,12 +1355,38 @@ struct ReaderLocalLibraryView: View {
         if piOCR.previewingBookID == book.bookId { return "检查现有结果中" }
         if piOCR.error(for: book) != nil { return "失败" }
         if let job = piOCR.job(for: book), job.state != "idle" {
-            return piStateTitle(job.state)
+            return "\(executorTitle(job.executor)) \(piStateTitle(job.state))"
         }
         if piOCR.adoption(for: book)?.available == true {
             return "已有结果，可采用"
         }
         return "未开始"
+    }
+
+    private var pcExecutorTitle: String {
+        guard let status = piOCR.executorStatus("pc") else {
+            return "状态未知"
+        }
+        if !pcExecutorIsOnline { return "离线" }
+        if !status.acceptingJobs { return "在线 · 忙碌" }
+        return "在线 · 可用"
+    }
+
+    private var pcExecutorIsOnline: Bool {
+        guard let status = piOCR.executorStatus("pc"), status.online,
+              let lastSeen = status.lastSeenAtEpochMs else { return false }
+        let ageMilliseconds = Date().timeIntervalSince1970 * 1_000
+            - Double(lastSeen)
+        return ageMilliseconds >= 0 && ageMilliseconds <= 35_000
+    }
+
+    private var pcExecutorAcceptingJobs: Bool {
+        pcExecutorIsOnline
+            && piOCR.executorStatus("pc")?.acceptingJobs == true
+    }
+
+    private func executorTitle(_ executor: String?) -> String {
+        executor == "pc" ? "PC" : "Pi"
     }
 
     private func nativeStateTitle(_ state: NativeBookOCRJobState) -> String {

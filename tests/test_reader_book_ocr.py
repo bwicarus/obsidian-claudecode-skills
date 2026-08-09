@@ -301,6 +301,226 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         self.assertEqual(repeated["jobId"], job["jobId"])
         self.assertEqual(len(self.launches), 1)
 
+    def test_pc_executor_claim_upload_and_common_publication(self) -> None:
+        service = ReaderBookOcrService(
+            self.library,
+            self.base / "pc-ocr",
+            ROOT,
+            launcher=lambda *_args: self.fail("PC executor must not spawn a Pi worker"),
+            max_pdf_bytes=1024 * 1024,
+            max_pages=100,
+            legacy_page_count_reader=lambda _path: 1,
+            pc_lease_seconds=60,
+            pc_online_seconds=60,
+        )
+        job, already = service.start(
+            self.entry["bookId"], self.entry["contentSha256"], "manga", "pc"
+        )
+        self.assertFalse(already)
+        self.assertEqual(job["executor"], "pc")
+        self.assertEqual(job["totalPages"], 1)
+
+        claimed = service.claim_pc_worker("pc_test", {
+            "engines": ["manga"],
+            "maxPdfBytes": 1024 * 1024,
+            "maxPageBytes": 1024 * 1024,
+            "processingProfile": "quality-first-v1",
+        })
+        self.assertIsNotNone(claimed)
+        self.assertEqual(claimed["job"]["completedPages"], [])
+        pc_status = next(
+            item for item in service.executor_status() if item["executor"] == "pc"
+        )
+        self.assertTrue(pc_status["online"])
+        identity = {
+            "contract": reader_book_ocr.WORKER_CONTRACT,
+            "workerId": "pc_test",
+            "bookId": claimed["job"]["bookId"],
+            "contentSha256": claimed["job"]["contentSha256"],
+            "jobId": claimed["job"]["jobId"],
+            "generation": claimed["job"]["generation"],
+            "leaseId": claimed["lease"]["leaseId"],
+        }
+        _entry, source, lease = service.pc_worker_source(identity)
+        self.assertEqual(source, self.vault / "A.pdf")
+        self.assertEqual(lease["desiredState"], "running")
+
+        page = {
+            "schema": "reader-page-chars/1",
+            "bookId": self.entry["bookId"],
+            "contentSha256": self.entry["contentSha256"],
+            "engine": "manga",
+            "pageNumber": 1,
+            "page_w": 10,
+            "page_h": 20,
+            "imageWidth": 100,
+            "imageHeight": 200,
+            "chars": [{
+                "c": "A", "x0": 1, "y0": 1, "x1": 2, "y1": 2,
+                "w": 1, "bk": 0, "b": 0, "line": 0,
+            }],
+            "furigana": [],
+            "textCharCount": 1,
+            "tokenized": True,
+        }
+        uploaded = service.upload_pc_page(1, {**identity, "page": page})
+        self.assertTrue(uploaded["accepted"])
+        self.assertEqual(uploaded["job"]["successfulPages"], 1)
+
+        formula = {
+            "schema": "reader-formula-regions/1",
+            "bookId": self.entry["bookId"],
+            "contentSha256": self.entry["contentSha256"],
+            "formulas": [],
+        }
+        with self.assertRaises(ReaderBookOcrError) as pending_formula:
+            service.upload_pc_formulas({
+                **identity,
+                "formula": formula,
+                "formulaState": "pending",
+                "formulaReason": "formula-model-unavailable",
+            })
+        self.assertEqual(
+            pending_formula.exception.code, "worker-formula-not-publishable"
+        )
+        inconsistent_formula = {
+            **formula,
+            "formulas": [{
+                "page": 1,
+                "bbox": [0.1, 0.1, 0.2, 0.2],
+                "latex": "x",
+            }],
+        }
+        with self.assertRaises(ReaderBookOcrError) as inconsistent:
+            service.upload_pc_formulas({
+                **identity,
+                "formula": inconsistent_formula,
+                "formulaState": "unavailable",
+                "formulaReason": "formula-model-unavailable",
+            })
+        self.assertEqual(
+            inconsistent.exception.code, "worker-formula-inconsistent"
+        )
+        formula_result = service.upload_pc_formulas({
+            **identity,
+            "formula": formula,
+            "formulaState": "unavailable",
+            "formulaReason": "formula-model-unavailable",
+        })
+        self.assertEqual(formula_result["job"]["formulaState"], "unavailable")
+        self.assertEqual(
+            formula_result["job"]["formulaReason"], "formula-model-unavailable"
+        )
+        self.assertEqual(formula_result["job"]["formulaProgress"]["completed"], 0)
+        self.assertEqual(formula_result["job"]["formulaProgress"]["unavailable"], 1)
+
+        job_path = service._job_dir(
+            self.entry["bookId"], self.entry["contentSha256"], "manga"
+        ) / "job.json"
+        publishable_job = json.loads(job_path.read_text("utf-8"))
+        tampered_job = {**publishable_job, "formulaState": "failed"}
+        job_path.write_text(json.dumps(tampered_job), "utf-8")
+        with self.assertRaises(ReaderBookOcrError) as failed_completion:
+            service.complete_pc_worker({**identity, "totalPages": 1})
+        self.assertEqual(
+            failed_completion.exception.code, "worker-formula-not-publishable"
+        )
+        job_path.write_text(json.dumps(publishable_job), "utf-8")
+
+        completed = service.complete_pc_worker({
+            **identity,
+            "totalPages": 1,
+        })
+        self.assertTrue(completed["published"])
+        self.assertRegex(completed["revision"], r"^ocr_[0-9a-f]{20}$")
+        status = service.status(self.entry["bookId"], self.entry["contentSha256"])
+        self.assertEqual(status["state"], "succeeded")
+        self.assertEqual(status["executor"], "pc")
+        self.assertEqual(status["formulaState"], "unavailable")
+        self.assertEqual(status["formulaProgress"]["completed"], 0)
+        self.assertEqual(status["formulaProgress"]["unavailable"], 1)
+        self.assertIn("公式不可用", status["message"])
+        manifest = service.attachment_manifest(
+            self.entry["bookId"], self.entry["contentSha256"]
+        )
+        self.assertEqual(manifest["revision"], completed["revision"])
+        self.assertEqual(manifest["formulaReason"], "formula-model-unavailable")
+        self.assertEqual(manifest["executor"], "pc")
+        self.assertEqual(manifest["processingProfile"], "quality-first-v1")
+        snapshot = service._published_snapshot(
+            self.entry["bookId"], self.entry["contentSha256"]
+        )
+        self.assertEqual(snapshot["result"]["executor"], "pc")
+        self.assertEqual(
+            snapshot["result"]["processingProfile"], "quality-first-v1"
+        )
+
+    def test_pc_expired_lease_is_reclaimable_and_old_upload_is_rejected(self) -> None:
+        service = ReaderBookOcrService(
+            self.library,
+            self.base / "pc-lease-ocr",
+            ROOT,
+            launcher=lambda *_args: self.fail("PC executor must not spawn a Pi worker"),
+            max_pdf_bytes=1024 * 1024,
+            max_pages=100,
+            legacy_page_count_reader=lambda _path: 1,
+            pc_lease_seconds=60,
+        )
+        service.start(
+            self.entry["bookId"], self.entry["contentSha256"], "vision", "pc"
+        )
+        capabilities = {
+            "engines": ["vision"],
+            "maxPdfBytes": 1024 * 1024,
+            "maxPageBytes": 1024 * 1024,
+            "processingProfile": "quality-first-v1",
+        }
+        first = service.claim_pc_worker("pc_first", capabilities)
+        version_dir = service._version_dir(
+            self.entry["bookId"], self.entry["contentSha256"]
+        )
+        job_path = version_dir / "vision" / "job.json"
+        stored = json.loads(job_path.read_text("utf-8"))
+        stored["leaseExpiresAtEpochMs"] = 1
+        job_path.write_text(json.dumps(stored), "utf-8")
+
+        second = service.claim_pc_worker("pc_second", capabilities)
+        self.assertIsNotNone(second)
+        self.assertNotEqual(first["lease"]["leaseId"], second["lease"]["leaseId"])
+        old_identity = {
+            "contract": reader_book_ocr.WORKER_CONTRACT,
+            "workerId": "pc_first",
+            "bookId": first["job"]["bookId"],
+            "contentSha256": first["job"]["contentSha256"],
+            "jobId": first["job"]["jobId"],
+            "generation": first["job"]["generation"],
+            "leaseId": first["lease"]["leaseId"],
+        }
+        with self.assertRaises(ReaderBookOcrError) as stale:
+            service.pc_worker_heartbeat(old_identity)
+        self.assertEqual(stale.exception.code, "ocr-worker-lease-stale")
+        second_identity = {
+            "contract": reader_book_ocr.WORKER_CONTRACT,
+            "workerId": "pc_second",
+            "bookId": second["job"]["bookId"],
+            "contentSha256": second["job"]["contentSha256"],
+            "jobId": second["job"]["jobId"],
+            "generation": second["job"]["generation"],
+            "leaseId": second["lease"]["leaseId"],
+        }
+        requested = service.pause(
+            self.entry["bookId"], self.entry["contentSha256"]
+        )
+        self.assertEqual(requested["state"], "pause-requested")
+        stopping = service.pc_worker_heartbeat({
+            **second_identity, "state": "running", "currentPage": None,
+        })
+        self.assertEqual(stopping["desiredState"], "paused")
+        stopped = service.pc_worker_heartbeat({
+            **second_identity, "state": "paused", "currentPage": None,
+        })
+        self.assertEqual(stopped["job"]["state"], "paused")
+
     def test_source_fingerprint_ignores_windows_ctime_rounding_only(self) -> None:
         common = {
             "st_dev": 7,
@@ -315,6 +535,126 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             self.service._source_fingerprint(path_stat),
         )
 
+    def test_worker_errors_redact_sensitive_url_query_values(self) -> None:
+        raw = (
+            "fetch failed https://pc.invalid/run?token=token-secret"
+            "&api_key=api-secret&key=key-secret&safe=visible"
+        )
+        public = reader_book_ocr._safe_public_job({"error": raw})["error"]
+        stored = self.service._sanitize_worker_error(raw)
+        for value in (public, stored):
+            self.assertNotIn("token-secret", value)
+            self.assertNotIn("api-secret", value)
+            self.assertNotIn("key-secret", value)
+            self.assertIn("safe=visible", value)
+            self.assertGreaterEqual(value.count("<redacted>"), 3)
+
+    def test_switching_pi_publication_to_pc_archives_only_mutable_staging(self) -> None:
+        launches = []
+        service = ReaderBookOcrService(
+            self.library,
+            self.base / "identity-ocr",
+            ROOT,
+            launcher=lambda job_dir, source_path, job: (
+                launches.append((job_dir, source_path, dict(job)))
+                or _FakeProcess(self.fake_worker_pid)
+            ),
+            max_pdf_bytes=1024 * 1024,
+            max_pages=100,
+            legacy_page_count_reader=lambda _path: 1,
+            pc_lease_seconds=60,
+        )
+        pi_job, _already = service.start(
+            self.entry["bookId"], self.entry["contentSha256"], "vision", "pi"
+        )
+        self.assertEqual(pi_job["processingProfile"], "pi-default-v1")
+        job_dir = launches[0][0]
+        page = {
+            "schema": "reader-page-chars/1",
+            "bookId": self.entry["bookId"],
+            "contentSha256": self.entry["contentSha256"],
+            "engine": "vision",
+            "executor": "pi",
+            "processingProfile": "pi-default-v1",
+            "pageNumber": 1,
+            "page_w": 10,
+            "page_h": 20,
+            "chars": [{
+                "c": "P", "x0": 1, "y0": 1, "x1": 2, "y1": 2,
+                "w": 1, "bk": 0, "b": 0,
+            }],
+            "furigana": [],
+        }
+        (job_dir / "pages").mkdir(parents=True, exist_ok=True)
+        (job_dir / "pages" / "p000001.json").write_text(
+            json.dumps(page), "utf-8"
+        )
+        formula_path = job_dir / "formula-source.json"
+        formula_path.write_text(json.dumps({"formulas": []}), "utf-8")
+        stored = json.loads((job_dir / "job.json").read_text("utf-8"))
+        final_job = {
+            **stored,
+            "state": "succeeded",
+            "totalPages": 1,
+            "processedPages": 1,
+            "successfulPages": 1,
+            "recognizedPages": 1,
+            "formulaState": "succeeded",
+            "formulaReason": None,
+            "formulaTotal": 0,
+            "formulaRecognized": 0,
+            "resultAvailable": True,
+            "updatedAtEpochMs": 1,
+        }
+        (job_dir / "job.json").write_text(json.dumps(final_job), "utf-8")
+        args = SimpleNamespace(
+            book_id=self.entry["bookId"],
+            content_sha256=self.entry["contentSha256"],
+            engine="vision",
+            max_bytes=1024 * 1024,
+        )
+        reader_book_ocr_worker._set_worker_identity(None, None)
+        revision = _publish_release(
+            args,
+            job_dir,
+            formula_path,
+            final_job,
+            source_path=self.vault / "A.pdf",
+        )
+        final_job["pageCharsRevision"] = revision
+        (job_dir / "job.json").write_text(json.dumps(final_job), "utf-8")
+        version_dir = service._version_dir(
+            self.entry["bookId"], self.entry["contentSha256"]
+        )
+        release_dir = version_dir / "releases" / revision
+        self.assertTrue(release_dir.is_dir())
+        manifest = json.loads((release_dir / "attachments.json").read_text("utf-8"))
+        self.assertEqual(manifest["executor"], "pi")
+        self.assertEqual(manifest["processingProfile"], "pi-default-v1")
+
+        pc_job, already = service.start(
+            self.entry["bookId"], self.entry["contentSha256"], "vision", "pc"
+        )
+        self.assertFalse(already)
+        self.assertEqual(pc_job["executor"], "pc")
+        self.assertEqual(pc_job["processingProfile"], "quality-first-v1")
+        self.assertEqual(pc_job["successfulPages"], 0)
+        self.assertTrue(release_dir.is_dir(), "immutable Pi release must remain")
+        self.assertFalse((job_dir / "pages" / "p000001.json").exists())
+        archives = list((version_dir / "staging-archive").glob("*"))
+        self.assertEqual(len(archives), 1)
+        self.assertTrue(archives[0].is_dir())
+        claimed = service.claim_pc_worker("pc_identity", {
+            "engines": ["vision"],
+            "maxPdfBytes": 1024 * 1024,
+            "maxPageBytes": 1024 * 1024,
+            "processingProfile": "quality-first-v1",
+        })
+        self.assertEqual(claimed["job"]["completedPages"], [])
+        self.assertEqual(
+            claimed["job"]["processingProfile"], "quality-first-v1"
+        )
+
     def test_version_kind_and_unknown_fields_fail_closed(self) -> None:
         with self.assertRaises(ReaderBookOcrError) as changed:
             self.service.start(self.entry["bookId"], "0" * 64, "vision")
@@ -322,6 +662,15 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         with self.assertRaises(ReaderBookOcrError) as engine:
             self.service.start(self.entry["bookId"], self.entry["contentSha256"], "other")
         self.assertEqual(engine.exception.code, "invalid-engine")
+        with self.assertRaises(ReaderBookOcrError) as profile:
+            self.service.start(
+                self.entry["bookId"],
+                self.entry["contentSha256"],
+                "vision",
+                "pc",
+                "pi-default-v1",
+            )
+        self.assertEqual(profile.exception.code, "invalid-processing-profile")
 
         epub = self.vault / "B.epub"
         epub.write_bytes(b"not-needed-for-catalog")

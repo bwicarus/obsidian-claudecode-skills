@@ -21,6 +21,9 @@ struct ReaderPiOCRJob: Codable, Hashable, Identifiable, Sendable {
     let contentSha256: String
     // The idle status deliberately has no engine yet.
     let engine: String?
+    // Older Pi releases omit this field; treat them as the original Pi
+    // executor until the coordinated server update is deployed.
+    let executor: String?
     let state: String
     let phase: String
     let processedPages: Int
@@ -56,6 +59,23 @@ private struct ReaderPiOCRWireResponse: Decodable {
     let ok: Bool
     let contract: String
     let job: ReaderPiOCRJob
+}
+
+struct ReaderOCRExecutorStatus: Codable, Hashable, Identifiable, Sendable {
+    let executor: String
+    let online: Bool
+    let acceptingJobs: Bool
+    let engines: [String]
+    let lastSeenAtEpochMs: Int64?
+    let workerCount: Int?
+
+    var id: String { executor }
+}
+
+private struct ReaderOCRExecutorsWireResponse: Decodable {
+    let ok: Bool
+    let contract: String
+    let executors: [ReaderOCRExecutorStatus]
 }
 
 struct ReaderPiOCRAdoption: Codable, Hashable, Sendable {
@@ -209,20 +229,71 @@ final class ReaderPiOCRClient {
     func start(
         book: ReaderRemoteBook,
         engine: String,
+        executor: String,
         cookies: [HTTPCookie]
     ) async throws -> ReaderPiOCRJob {
-        guard ["vision", "manga"].contains(engine) else {
+        guard ["vision", "manga"].contains(engine),
+              ["pi", "pc"].contains(executor) else {
             throw ReaderPiOCRError.invalidResponse
+        }
+        var body = [
+            "bookId": book.bookId,
+            "contentSha256": book.contentSha256,
+            "engine": engine,
+        ]
+        // The original Pi executor is the wire default.  Omitting this field
+        // keeps a newly installed App able to start Pi work while the server
+        // is rolling back or has not yet received the coordinated update.
+        if executor == "pc" {
+            body["executor"] = executor
         }
         return try await command(
             path: "pdf/api/library/ocr/start",
-            body: [
-                "bookId": book.bookId,
-                "contentSha256": book.contentSha256,
-                "engine": engine,
-            ],
+            body: body,
             cookies: cookies
         )
+    }
+
+    func executors(
+        cookies: [HTTPCookie]
+    ) async throws -> [ReaderOCRExecutorStatus] {
+        var request = URLRequest(
+            url: try canonicalURL(path: "pdf/api/library/ocr/executors")
+        )
+        request.httpMethod = "GET"
+        // Availability is advisory and must never leave the row saying
+        // “正在确认” for the long OCR transfer timeout.
+        request.timeoutInterval = 5
+        request.setValue("application/json", forHTTPHeaderField: "Accept")
+        apply(cookies: cookies, to: &request)
+        let (data, response) = try await session.data(for: request)
+        try validate(
+            response,
+            data: data,
+            expectedPathPrefix: "/pdf/api/library/ocr/executors"
+        )
+        let payload: ReaderOCRExecutorsWireResponse
+        do {
+            payload = try JSONDecoder().decode(
+                ReaderOCRExecutorsWireResponse.self,
+                from: data
+            )
+        } catch {
+            throw ReaderPiOCRError.invalidResponse
+        }
+        guard payload.ok, payload.contract == Self.contract else {
+            throw ReaderPiOCRError.invalidResponse
+        }
+        var names = Set<String>()
+        for status in payload.executors {
+            guard ["pi", "pc"].contains(status.executor),
+                  names.insert(status.executor).inserted,
+                  Set(status.engines).isSubset(of: Set(["vision", "manga"])),
+                  (status.workerCount ?? 0) >= 0 else {
+                throw ReaderPiOCRError.invalidResponse
+            }
+        }
+        return payload.executors
     }
 
     func status(
@@ -685,6 +756,8 @@ final class ReaderPiOCRClient {
 final class ReaderPiOCRCoordinator: ObservableObject {
     @Published private(set) var jobs: [String: ReaderPiOCRJob] = [:]
     @Published private(set) var adoptions: [String: ReaderPiOCRAdoption] = [:]
+    @Published private(set) var executorStatuses: [String: ReaderOCRExecutorStatus] = [:]
+    @Published private(set) var refreshingExecutors = false
     @Published private(set) var activeBookID: String?
     @Published private(set) var previewingBookID: String?
     @Published private(set) var notice: String?
@@ -732,9 +805,31 @@ final class ReaderPiOCRCoordinator: ObservableObject {
         return error.message
     }
 
+    func executorStatus(_ executor: String) -> ReaderOCRExecutorStatus? {
+        executorStatuses[executor]
+    }
+
+    func refreshExecutors(cookies: [HTTPCookie]) async {
+        guard !refreshingExecutors else { return }
+        refreshingExecutors = true
+        defer { refreshingExecutors = false }
+        do {
+            let values = try await client.executors(cookies: cookies)
+            guard !Task.isCancelled else { return }
+            executorStatuses = Dictionary(
+                uniqueKeysWithValues: values.map { ($0.executor, $0) }
+            )
+        } catch {
+            guard !isCancellation(error) else { return }
+            // Availability is advisory. Keep the last verified status instead
+            // of turning a transient status request into a book-level failure.
+        }
+    }
+
     func start(
         book: ReaderRemoteBook,
         engine: String,
+        executor: String,
         cookies: [HTTPCookie],
         localBookID: String? = nil,
         localContentSHA256: String? = nil
@@ -745,7 +840,12 @@ final class ReaderPiOCRCoordinator: ObservableObject {
             for: book
         )
         await perform(book: book, cookies: cookies) {
-            try await self.client.start(book: book, engine: engine, cookies: cookies)
+            try await self.client.start(
+                book: book,
+                engine: engine,
+                executor: executor,
+                cookies: cookies
+            )
         }
     }
 
