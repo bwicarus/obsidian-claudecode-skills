@@ -104,6 +104,13 @@ ROUTE_POLICY = {
     'pdf_reader.pdf_api_library_ocr_cancel': 'GLOBAL',
     'pdf_reader.pdf_api_library_ocr_retry': 'GLOBAL',
     'pdf_reader.pdf_api_library_ocr_page_chars': 'GLOBAL',
+    'pdf_reader.pdf_api_library_ocr_executors': 'GLOBAL',   # executor presence, not a book merge route
+    'pdf_reader.pdf_api_library_ocr_worker_claim': 'GLOBAL',   # authenticated opaque worker task
+    'pdf_reader.pdf_api_library_ocr_worker_complete': 'GLOBAL',
+    'pdf_reader.pdf_api_library_ocr_worker_formulas': 'GLOBAL',
+    'pdf_reader.pdf_api_library_ocr_worker_heartbeat': 'GLOBAL',
+    'pdf_reader.pdf_api_library_ocr_worker_page': 'GLOBAL',
+    'pdf_reader.pdf_api_library_ocr_worker_source': 'GLOBAL',
     'pdf_reader.pdf_api_library_attachments': 'GLOBAL',
     'pdf_reader.pdf_api_library_attachment_download': 'GLOBAL',
     'pdf_reader.pdf_api_library_user_state': 'GLOBAL',
