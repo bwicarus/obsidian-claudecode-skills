@@ -2639,13 +2639,31 @@
     value = Number(value);
     return Number.isFinite(value) && value > 0 && value <= 100000 ? value : 0;
   }
+  // Drops the characters it cannot read, not the page they came from.
+  //
+  // Every rejection here used to return null for the whole page, so a single
+  // malformed glyph -- one unexpected key, one out-of-range box -- erased the
+  // entire text layer. And the text layer is what selection is built on: with
+  // it gone there is nothing to select, so no highlight, no lookup, no
+  // sentence. The reader then falls back to OCR, whose lower quality shows up
+  // as characters recognised a line apart. One bad glyph, three symptoms, none
+  // of them pointing at the glyph.
+  //
+  // A page of prose does not become unreadable because one box is wrong. Bad
+  // characters are skipped and counted; the page survives. Only a page with
+  // nothing usable left is refused, and the count is reported so a page that
+  // silently lost half its glyphs can be told from one that lost none.
   function normalizePageTextChars(raw) {
     if (!Array.isArray(raw) || raw.length > 250000) return null;
     var out = [];
+    var dropped = 0;
     for (var index = 0; index < raw.length; index += 1) {
       var item = raw[index];
       if (!item || typeof item !== 'object' || Array.isArray(item) ||
-          Object.keys(item).some(function (key) { return !PAGE_TEXT_CHAR_KEYS.has(key); })) return null;
+          Object.keys(item).some(function (key) { return !PAGE_TEXT_CHAR_KEYS.has(key); })) {
+        dropped += 1;
+        continue;
+      }
       var c = String(item.c == null ? '' : item.c);
       var x0 = Number(item.x0), y0 = Number(item.y0);
       var x1 = Number(item.x1), y1 = Number(item.y1);
@@ -2654,7 +2672,10 @@
           x1 > 100000 || y1 > 100000 ||
           (item.w != null && !Number.isInteger(Number(item.w))) ||
           (item.bk != null && !Number.isInteger(Number(item.bk))) ||
-          (item.flx != null && typeof item.flx !== 'string')) return null;
+          (item.flx != null && typeof item.flx !== 'string')) {
+        dropped += 1;
+        continue;
+      }
       out.push({
         c: c,
         x0: x0, y0: y0, x1: x1, y1: y1,
@@ -2665,8 +2686,20 @@
         flx: item.fml ? String(item.flx || '').slice(0, 4000) : ''
       });
     }
+    if (!out.length) return null;
+    if (dropped) {
+      try {
+        if (window.__bwProbe) {
+          window.__bwProbe.probe(
+            'page-chars',
+            '跳过 ' + dropped + ' 个无法解析的字符，保留 ' + out.length + ' 个'
+          );
+        }
+      } catch (_) {}
+    }
     return out;
   }
+
   function normalizePageTextFurigana(raw) {
     if (raw == null) return [];
     if (!Array.isArray(raw) || raw.length > 50000) return null;
