@@ -3904,3 +3904,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：Reader 合同 937 项、离线 ReaderBundle 构建/复验、Pi handoff READY；macOS 完成模拟器编译、签名设备归档与三目标校验。全仓 Python 的电脑语音运行态测试另有既存环境失败，与本次文件无交集。
 - **发布**：提交 `82a3f8ac` 经 Actions run `31314908879` 上传 TestFlight `1.1.7 (143)`；Pi 只快进源码并验证，未重启或部署生产服务。
 - **下一步**：iPad 验收打开速度、连续滚动、捏合与叠层对齐；下一小阶段再评估 PDFView 原生手势接管，不与 ReaderPC 托盘总控混改。
+
+## Codex：PDFKit 快路径恢复文字选中 1.1.8 发布（2026-08-09 JST）
+- **根因/修复**：1.1.7 跳过 PDF.js 后也跳过了它登记内嵌字符层的副作用；现由当前书的 PDFKit processor 按需读取可见页字符并按书缓存，既有 Pi/PC/Apple 显式文字层仍优先。
+- **边界**：本次只恢复 PDF 选中，不启动 Vision OCR、不切换用户选择的文字层，也不回退整本 PDF.js 解析；1.1.7 的打开速度路径保留。
+- **怎么验的**：针对合同 103 项、Reader 全量 938 项、离线 ReaderBundle 与 macOS 模拟器/签名真机归档、App/扩展/Widget 校验均通过；Pi handoff READY。
+- **发布**：提交 `45ab1f99` 经 Actions run `31317974166` 获 Apple `UPLOAD SUCCEEDED`，TestFlight 为 `1.1.8 (144)`；Pi 仅安全快进源码，未部署或重启生产服务，下一步由 iPad 验收真实拖选与高亮。
