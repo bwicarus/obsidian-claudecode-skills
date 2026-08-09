@@ -3930,3 +3930,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：Reader Node 全量 940 项、发布管线、macOS 模拟器编译、签名设备归档及 App/扩展/Widget 校验通过；Windows handoff 仅保留既有 `fcntl` 平台基线。
 - **发布**：Claude 提交 `e89492a9`，候选 `d13295e2` 经 Actions run `31330789791` 上传 TestFlight `1.1.10 (151)`；状态 run `31331119662` 确认 `COMPLETE / VALID / IN_BETA_TESTING`。
 - **下一步**：用户开启“显示调试日志”并翻页，回传带具体后缀的 `chars unavailable` 行；Claude 按实际失败项修根因。
+
+## Claude/Codex：PDF 字符桥信任路径修复 1.1.11（2026-08-10 JST）
+- **根因/改动**：`URL.path` 会剥掉能力基址尾斜杠，旧分支因此退化为路径完全相等并拒绝全部页面；现统一为“基址本身或以基址加 `/` 开头”，诊断与判定共用同一函数。
+- **安全边界**：相似但不同的令牌路径仍拒绝；未放宽 scheme/host/port、主框或 WebView 身份检查，PDFKit 快速页图路径不变。
+- **怎么验的**：新增五类路径边界合同；专项 15 项、Reader 全量 941 项、发布管线、macOS 模拟器编译、签名设备归档及三目标校验通过。
+- **发布**：Claude 根因提交 `a1d3be5a`，候选 `8678dd67` 经 Actions run `31331437787` 上传 TestFlight `1.1.11 (154)`；状态 run `31331820423` 确认 `COMPLETE / VALID / IN_BETA_TESTING`。
+- **下一步**：用户在同一本本机 PDF 验收拖选、创建高亮和删除高亮；真机通过前不宣称交互验收完成。
