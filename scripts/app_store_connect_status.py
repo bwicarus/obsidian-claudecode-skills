@@ -9,6 +9,7 @@ actually install.
 from __future__ import annotations
 
 import argparse
+import collections
 import json
 import os
 import time
@@ -149,6 +150,15 @@ def main() -> int:
     app_groups = []
     for group in app_groups_payload.get("data", []):
         attrs = group.get("attributes", {})
+        testers_payload = api_get(
+            token,
+            f"/v1/betaGroups/{group.get('id')}/betaTesters",
+            {"fields[betaTesters]": "state,inviteType", "limit": "200"},
+        )
+        tester_states = collections.Counter(
+            str(tester.get("attributes", {}).get("state") or "UNKNOWN")
+            for tester in testers_payload.get("data", [])
+        )
         app_groups.append(
             {
                 "id": group.get("id"),
@@ -158,6 +168,8 @@ def main() -> int:
                 "public_link_enabled": attrs.get("publicLinkEnabled"),
                 "public_link_limit_enabled": attrs.get("publicLinkLimitEnabled"),
                 "public_link_limit": attrs.get("publicLinkLimit"),
+                "tester_count": sum(tester_states.values()),
+                "tester_states": dict(sorted(tester_states.items())),
             }
         )
 
@@ -180,8 +192,12 @@ def main() -> int:
     build_summary: dict[str, Any] | None = None
     if build:
         included = included_index(builds)
-        detail_ids = relationship_ids(build, "buildBetaDetail")
-        detail = included.get(("buildBetaDetails", detail_ids[0])) if detail_ids else None
+        detail_payload = api_get(
+            token,
+            f"/v1/builds/{build.get('id')}/buildBetaDetail",
+            {"fields[buildBetaDetails]": "autoNotifyEnabled,internalBuildState,externalBuildState"},
+        )
+        detail = detail_payload.get("data")
         detail_attrs = detail.get("attributes", {}) if detail else {}
         group_ids = relationship_ids(build, "betaGroups")
         groups = []
