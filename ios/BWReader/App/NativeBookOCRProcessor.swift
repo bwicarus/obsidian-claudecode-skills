@@ -423,44 +423,60 @@ actor NativeBookOCRProcessor {
                 nextWordID += 1
             }
             var allExact = true
-            var graphemeIndex = 0
+
+            // Two passes, because a line may mix exact and estimated boxes.
+            //
+            // Vision returns per-character boxes for some glyphs and refuses
+            // others, especially in dense CJK. Filling the refusals by dividing
+            // the line into equal widths put those characters somewhere the
+            // text is not, while their neighbours stayed correct -- so a
+            // selection swept across the line caught only the accurate ones and
+            // skipped the rest. That is the "every few characters" selection:
+            // not missing text, misplaced text.
+            //
+            // The first pass records what Vision actually knows. The second
+            // fills each gap by interpolating between the nearest known boxes
+            // on either side, which keeps positions ordered and non-overlapping
+            // within the line. Equal division survives only for a line Vision
+            // could not place at all, where there is nothing better to infer
+            // from.
+            var pieces: [(text: String, range: Range<String.Index>, rect: CGRect?)] = []
             text.enumerateSubstrings(
                 in: text.startIndex..<text.endIndex,
                 options: .byComposedCharacterSequences
             ) { substring, range, _, _ in
                 guard let substring, !substring.isEmpty else { return }
-                let normalizedRect: CGRect
-                if let characterBox = try? candidate.boundingBox(for: range) {
-                    normalizedRect = characterBox.boundingBox
-                } else {
-                    allExact = false
-                    normalizedRect = Self.estimatedCharacterRect(
-                        observation: observation.boundingBox,
-                        index: graphemeIndex,
-                        count: max(1, text.count)
-                    )
-                }
+                let exact = (try? candidate.boundingBox(for: range))?.boundingBox
+                if exact == nil { allExact = false }
+                pieces.append((substring, range, exact))
+            }
+
+            let resolved = Self.resolvedCharacterRects(
+                pieces: pieces.map { $0.rect },
+                observation: observation.boundingBox
+            )
+
+            for (offset, piece) in pieces.enumerated() {
                 let rect = Self.pageRect(
-                    normalized: normalizedRect,
+                    normalized: resolved[offset],
                     geometry: geometry
                 )
-                let localWord = Self.wordID(for: range, tokens: tokenRanges)
+                let localWord = Self.wordID(for: piece.range, tokens: tokenRanges)
                 let wordID = localWordIDs[localWord] ?? -1
-                if !substring.allSatisfy(\.isWhitespace) && wordID < 0 {
+                if !piece.text.allSatisfy(\.isWhitespace) && wordID < 0 {
                     segmentationPartial = true
                 }
                 blockCharacters.append(NativeBookOCRCharacter(
-                    c: substring,
+                    c: piece.text,
                     x0: Self.rounded(rect.minX),
                     y0: Self.rounded(rect.minY),
                     x1: Self.rounded(rect.maxX),
                     y1: Self.rounded(rect.maxY),
-                    sp: substring.allSatisfy(\.isWhitespace) ? 1 : 0,
-                    w: substring.allSatisfy(\.isWhitespace) ? -1 : wordID,
+                    sp: piece.text.allSatisfy(\.isWhitespace) ? 1 : 0,
+                    w: piece.text.allSatisfy(\.isWhitespace) ? -1 : wordID,
                     b: 0,
                     bk: blockID
                 ))
-                graphemeIndex += 1
             }
             if !allExact { estimatedGeometry = true }
             characters.append(contentsOf: blockCharacters)
@@ -567,6 +583,91 @@ actor NativeBookOCRProcessor {
             return true
         }
         return false
+    }
+
+    /// Fills in the characters Vision could not place, using the ones it could.
+    ///
+    /// Vision returns a box for some glyphs in a line and declines others. The
+    /// declined ones used to be spread evenly across the whole line, which put
+    /// them at coordinates the text does not occupy while their neighbours
+    /// stayed correct. A selection dragged across such a line then matched only
+    /// the accurate characters and stepped over the rest.
+    ///
+    /// Known boxes are kept exactly as reported. Each run of unknowns is spread
+    /// between the last known box before it and the first known box after it,
+    /// so order and spacing stay plausible and no two characters overlap. A run
+    /// at either end extends from the single neighbour it has. Only a line with
+    /// no known box at all falls back to equal division, where nothing better
+    /// can be inferred.
+    private static func resolvedCharacterRects(
+        pieces: [CGRect?],
+        observation: CGRect
+    ) -> [CGRect] {
+        let count = pieces.count
+        guard count > 0 else { return [] }
+        let vertical = observation.height > observation.width * 1.4
+        var output = [CGRect](repeating: .zero, count: count)
+        let knownIndexes = (0..<count).filter { pieces[$0] != nil }
+        guard !knownIndexes.isEmpty else {
+            for index in 0..<count {
+                output[index] = estimatedCharacterRect(
+                    observation: observation,
+                    index: index,
+                    count: count
+                )
+            }
+            return output
+        }
+        for index in knownIndexes { output[index] = pieces[index]! }
+
+        // Spans the gap between two placed characters, or off the end of one.
+        func fill(from lower: Int?, to upper: Int?) {
+            let start = (lower.map { $0 + 1 }) ?? 0
+            let end = (upper ?? count) - 1
+            guard start <= end else { return }
+            let span = end - start + 1
+            let leading = lower.map { output[$0] }
+            let trailing = upper.map { output[$0] }
+            let origin: CGFloat
+            let extent: CGFloat
+            if vertical {
+                let top = leading.map { $0.minY } ?? observation.maxY
+                let bottom = trailing.map { $0.maxY } ?? observation.minY
+                origin = min(top, bottom)
+                extent = max(0, abs(top - bottom))
+            } else {
+                let left = leading.map { $0.maxX } ?? observation.minX
+                let right = trailing.map { $0.minX } ?? observation.maxX
+                origin = min(left, right)
+                extent = max(0, abs(right - left))
+            }
+            let step = extent / CGFloat(span)
+            for offset in 0..<span {
+                let index = start + offset
+                if vertical {
+                    output[index] = CGRect(
+                        x: observation.minX,
+                        y: origin + CGFloat(span - offset - 1) * step,
+                        width: observation.width,
+                        height: step
+                    )
+                } else {
+                    output[index] = CGRect(
+                        x: origin + CGFloat(offset) * step,
+                        y: observation.minY,
+                        width: step,
+                        height: observation.height
+                    )
+                }
+            }
+        }
+
+        fill(from: nil, to: knownIndexes.first)
+        for pair in zip(knownIndexes, knownIndexes.dropFirst()) {
+            fill(from: pair.0, to: pair.1)
+        }
+        fill(from: knownIndexes.last, to: nil)
+        return output
     }
 
     private static func estimatedCharacterRect(
