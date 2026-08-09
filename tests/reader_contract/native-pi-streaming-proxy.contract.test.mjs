@@ -88,6 +88,22 @@ test("native PDF metadata is real, capability-scoped and keeps the old response 
   assert.match(SERVER, /let modifiedAt = access\.record\.modifiedAt[\s\S]*"mtime": Int\(modifiedAt\.timeIntervalSince1970\)/);
 });
 
+test("local PDF page pixels are rendered and bounded by PDFKit without Pi", () => {
+  const route = MANIFEST.routes.find((candidate) => candidate.path === "/pdf/api/page-image");
+  assert.equal(route?.owner, "local");
+  assert.deepEqual(route?.surfaces, ["pdf"]);
+  assert.equal(route?.remoteBook, null);
+  assert.match(SERVER, /private actor ReaderNativePDFPageRenderer/);
+  assert.match(SERVER, /page\.thumbnail\(of: targetSize, for: \.cropBox\)/);
+  assert.match(SERVER, /format\.opaque = true/);
+  assert.match(SERVER, /setFillColor\(UIColor\.white\.cgColor\)/);
+  assert.match(SERVER, /image\.jpegData\(compressionQuality: 0\.9\)/);
+  assert.match(SERVER, /imageCache\.totalCostLimit = 96 \* 1_024 \* 1_024/);
+  assert.match(SERVER, /let pixelWidth = min\(3_000, max\(400, requestedWidth\)\)/);
+  assert.match(SERVER, /"X-BW-PDF-Renderer"\): "pdfkit"/);
+  assert.match(SERVER, /cacheControl: "private, max-age=31536000, immutable"/);
+});
+
 test("PDFKit serves the legacy TOC shape locally without a Pi book dependency", () => {
   const route = MANIFEST.routes.find((candidate) => candidate.path === "/pdf/api/toc");
   assert.equal(route?.owner, "native");

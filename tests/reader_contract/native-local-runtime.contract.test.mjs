@@ -1546,24 +1546,34 @@ test("native book-meta delegates to the capability-scoped PDFKit endpoint", asyn
   assert.equal(result.originalFetchCalls.length, 1);
 });
 
-test("native Pi bridge preserves a verified-book rejection as a visible conflict", async () => {
-  const { context, gatewayMessages } = await harness({
-    gatewayReply() {
-      throw new Error(
-        "BW_PI_GATEWAY_REMOTE_BOOK：这本本机书尚未与 Pi 的同摘要版本关联",
-      );
+test("native PDF page images use the loopback PDFKit renderer without Pi", async () => {
+  const jpeg = new Uint8Array([0xff, 0xd8, 0xff, 0xd9]);
+  const result = await harness({
+    originalFetch(input) {
+      const url = new URL(typeof input === "string" ? input : input.url,
+        "http://127.0.0.1:43129");
+      assert.equal(url.pathname, "/pdf/api/page-image");
+      assert.equal(url.searchParams.get("file"), DEFAULT_LOCAL_FILE);
+      assert.equal(url.searchParams.get("page"), "7");
+      assert.equal(url.searchParams.get("w"), "1400");
+      return Promise.resolve(new Response(jpeg, {
+        status: 200,
+        headers: {
+          "Content-Type": "image/jpeg",
+          "X-BW-PDF-Renderer": "pdfkit",
+        },
+      }));
     },
   });
-  const book = "localbook:" + "localbook-" + "b".repeat(64);
-  const response = await context.fetch(
-    `/pdf/api/page-image?file=${encodeURIComponent(book)}&page=1`,
+  const response = await result.context.fetch(
+    `/pdf/api/page-image?file=${encodeURIComponent(DEFAULT_LOCAL_FILE)}` +
+      "&page=7&w=1400&v=1800000000",
   );
-  const payload = await response.json();
-  assert.equal(response.status, 409);
-  assert.equal(payload.ok, false);
-  assert.equal(payload.code, "BW_PI_GATEWAY_REMOTE_BOOK");
-  assert.match(payload.error, /尚未与 Pi 的同摘要版本关联/);
-  assert.equal(gatewayMessages.length, 1);
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get("X-BW-PDF-Renderer"), "pdfkit");
+  assert.deepEqual(new Uint8Array(await response.arrayBuffer()), jpeg);
+  assert.equal(result.originalFetchCalls.length, 1);
+  assert.equal(result.gatewayMessages.length, 0);
 });
 
 test("native-owned interfaces delegate only to the captured App bridge and never Pi", async () => {

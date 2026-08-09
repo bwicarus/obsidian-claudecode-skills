@@ -311,6 +311,9 @@ NATIVE_RUNTIME_INTERFACE_ENTRIES = {
     "/pdf/api/page-chars": (
         "local", ("GET",), ("pdf",), "handleLocalState"
     ),
+    "/pdf/api/page-image": (
+        "local", ("GET",), ("pdf",), "localFetch"
+    ),
     "/pdf/api/page-overlay": (
         "pi", ("GET",), ("pdf",), "handleLocalState"
     ),

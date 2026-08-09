@@ -4,6 +4,7 @@ import FlyingSocks
 import Foundation
 import PDFKit
 import Security
+import UIKit
 
 enum ReaderLocalRuntimeError: LocalizedError {
     case bundleUnavailable
@@ -63,6 +64,113 @@ private actor ReaderLocalRuntimeState {
     }
 }
 
+private enum ReaderNativePDFPageRenderError: LocalizedError {
+    case documentUnavailable
+    case pageUnavailable
+    case imageUnavailable
+
+    var errorDescription: String? {
+        switch self {
+        case .documentUnavailable:
+            return "PDFKit 无法打开这本书"
+        case .pageUnavailable:
+            return "PDF 页码不可用"
+        case .imageUnavailable:
+            return "PDFKit 无法渲染这一页"
+        }
+    }
+}
+
+/// Serializes PDFKit access and keeps only the active document plus a bounded
+/// near-page JPEG cache. WebKit remains the DocumentHost/overlay owner; this
+/// actor replaces only PDF.js page-pixel work for native local PDFs.
+private actor ReaderNativePDFPageRenderer {
+    private var documentIdentity: String?
+    private var document: PDFDocument?
+    private let imageCache = NSCache<NSString, NSData>()
+
+    init() {
+        imageCache.countLimit = 24
+        imageCache.totalCostLimit = 96 * 1_024 * 1_024
+    }
+
+    func jpegData(
+        for access: ReaderLocalBookAccess,
+        pageNumber: Int,
+        pixelWidth: Int
+    ) throws -> Data {
+        let record = access.record
+        let identity = [
+            record.id,
+            record.contentFingerprint,
+            String(record.byteCount),
+            String(record.modifiedAt?.timeIntervalSince1970 ?? 0),
+        ].joined(separator: ":")
+        if documentIdentity != identity {
+            guard let opened = PDFDocument(url: access.url),
+                  opened.pageCount > 0 else {
+                throw ReaderNativePDFPageRenderError.documentUnavailable
+            }
+            documentIdentity = identity
+            document = opened
+            imageCache.removeAllObjects()
+        }
+        guard let document,
+              pageNumber >= 1,
+              pageNumber <= document.pageCount,
+              let page = document.page(at: pageNumber - 1) else {
+            throw ReaderNativePDFPageRenderError.pageUnavailable
+        }
+
+        let cacheKey = "\(identity):p\(pageNumber):w\(pixelWidth)" as NSString
+        if let cached = imageCache.object(forKey: cacheKey) {
+            return cached as Data
+        }
+
+        let bounds = page.bounds(for: .cropBox)
+        guard bounds.width > 0, bounds.height > 0 else {
+            throw ReaderNativePDFPageRenderError.imageUnavailable
+        }
+        let requestedWidth = CGFloat(pixelWidth)
+        let requestedHeight = requestedWidth * bounds.height / bounds.width
+        let maximumDimension: CGFloat = 4_096
+        let maximumPixels: CGFloat = 12 * 1_024 * 1_024
+        let dimensionScale = min(
+            1,
+            maximumDimension / max(requestedWidth, requestedHeight)
+        )
+        let pixelScale = min(
+            dimensionScale,
+            (maximumPixels / (requestedWidth * requestedHeight)).squareRoot()
+        )
+        let targetSize = CGSize(
+            width: max(1, floor(requestedWidth * pixelScale)),
+            height: max(1, floor(requestedHeight * pixelScale))
+        )
+        let thumbnail = page.thumbnail(of: targetSize, for: .cropBox)
+        guard thumbnail.size.width > 0, thumbnail.size.height > 0 else {
+            throw ReaderNativePDFPageRenderError.imageUnavailable
+        }
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let canvasBounds = CGRect(origin: .zero, size: targetSize)
+        let image = UIGraphicsImageRenderer(
+            size: targetSize,
+            format: format
+        ).image { context in
+            context.cgContext.setFillColor(UIColor.white.cgColor)
+            context.cgContext.fill(canvasBounds)
+            thumbnail.draw(in: canvasBounds)
+        }
+        guard let data = image.jpegData(compressionQuality: 0.9) else {
+            throw ReaderNativePDFPageRenderError.imageUnavailable
+        }
+        imageCache.setObject(data as NSData, forKey: cacheKey, cost: data.count)
+        return data
+    }
+}
+
 private struct ReaderLocalBundleVerificationInput: Sendable {
     let bundleRoot: URL
     let files: [String: String]
@@ -115,6 +223,7 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
     let staticRevision: String
     let state: ReaderLocalRuntimeState
     let piProxyBroker: ReaderNativePiProxyBroker
+    let pageRenderer: ReaderNativePDFPageRenderer
 
     func handleRequest(_ request: HTTPRequest) async throws -> HTTPResponse {
         guard request.method == .GET || request.method == .HEAD else {
@@ -145,6 +254,22 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                 return response(status: .forbidden, text: "invalid referer")
             }
             return await serveNativeTOC(request)
+        }
+
+        if decodedPath == "/pdf/api/page-image",
+           trustedResourceSurface(
+                referer: request.headers[HTTPHeader("Referer")]
+           ) == .pdf {
+            guard let fileIdentity = request.query["file"],
+                  let opaqueBookID = Self.opaqueBookID(
+                    fromLocalFileIdentity: fileIdentity
+                  ) else {
+                return response(status: .badRequest, text: "invalid local book")
+            }
+            return await serveNativePageImage(
+                request,
+                opaqueBookID: opaqueBookID
+            )
         }
 
         if Self.isDirectPiResourcePath(decodedPath) {
@@ -342,6 +467,53 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                 "mtime": Int(modifiedAt.timeIntervalSince1970),
             ]
         )
+    }
+
+    private func serveNativePageImage(
+        _ request: HTTPRequest,
+        opaqueBookID: String
+    ) async -> HTTPResponse {
+        guard request.method == .GET || request.method == .HEAD else {
+            return response(
+                status: .methodNotAllowed,
+                text: "method not allowed",
+                headers: [HTTPHeader("Allow"): "GET, HEAD"]
+            )
+        }
+        guard Self.isOpaqueBookID(opaqueBookID),
+              let access = await state.access(for: opaqueBookID),
+              access.record.format == .pdf else {
+            return response(status: .notFound, text: "book unavailable")
+        }
+        guard let pageNumber = Int(request.query["page"] ?? "1"),
+              let requestedWidth = Int(request.query["w"] ?? "1400") else {
+            return response(status: .badRequest, text: "invalid page image query")
+        }
+        let pixelWidth = min(3_000, max(400, requestedWidth))
+        do {
+            try access.validateCurrentFile(
+                maximumEPUBBytes: ReaderLocalRuntimeServer.maximumEPUBBytes
+            )
+            let data = try await pageRenderer.jpegData(
+                for: access,
+                pageNumber: pageNumber,
+                pixelWidth: pixelWidth
+            )
+            return dataResponse(
+                request,
+                data: data,
+                contentType: "image/jpeg",
+                cacheControl: "private, max-age=31536000, immutable",
+                additionalHeaders: [
+                    HTTPHeader("X-BW-PDF-Renderer"): "pdfkit"
+                ]
+            )
+        } catch {
+            return response(
+                status: .badRequest,
+                text: error.localizedDescription
+            )
+        }
     }
 
     private func serveNativeTOC(_ request: HTTPRequest) async -> HTTPResponse {
@@ -886,7 +1058,8 @@ final class ReaderLocalRuntimeServer {
             allowedStaticFiles: staticFiles,
             staticRevision: String(manifestDigest.prefix(24)),
             state: state,
-            piProxyBroker: piProxyBroker
+            piProxyBroker: piProxyBroker,
+            pageRenderer: ReaderNativePDFPageRenderer()
         )
         server = HTTPServer(
             address: address,

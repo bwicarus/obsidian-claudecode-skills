@@ -8823,6 +8823,22 @@
           );
         }, 'BW_LOCAL_BOOK_META_FAILED');
       }
+      if (url.pathname === '/pdf/api/page-image') {
+        try {
+          localFileQuery(
+            url,
+            ['file', 'page', 'w', 'v', 'sharp'],
+            ['file'],
+            'BW_LOCAL_PAGE_IMAGE_REQUEST'
+          );
+          // Keep the original same-origin URL so direct <img> loads and fetch
+          // prewarming share one browser-cache key. The loopback server verifies
+          // the shell Referer/current opaque book and renders with PDFKit.
+          return originalFetch(input, init);
+        } catch (error) {
+          return Promise.resolve(nativeInterfaceErrorResponse(error));
+        }
+      }
       var epub = handleEPUB(url);
       if (epub) return epub;
       var state = handleLocalState(

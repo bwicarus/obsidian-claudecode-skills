@@ -2114,34 +2114,16 @@
     {
       "path": "/pdf/api/page-image",
       "match": "exact",
-      "owner": "pi",
+      "owner": "local",
       "methods": [
         "GET"
       ],
       "surfaces": [
-        "epub",
         "pdf"
       ],
       "status": "supported",
-      "remoteBook": {
-        "mode": "required",
-        "scope": "catalog",
-        "requiredMethods": [
-          "GET"
-        ],
-        "identities": [
-          {
-            "methods": [
-              "GET"
-            ],
-            "location": "query",
-            "pointer": "/file",
-            "transform": "exact"
-          }
-        ],
-        "continuation": null
-      },
-      "description": "Read a rendered page image from a verified Pi book copy."
+      "remoteBook": null,
+      "description": "Render the current local PDF page with device PDFKit."
     },
     {
       "path": "/pdf/api/page-nodes",
@@ -3019,6 +3001,12 @@
       "resource": "static/reader-runtime/interaction-policy.js",
       "path": "/pdf/api/page-chars",
       "reason": "Shared policy declaration for the other native document surface, not a request from this shell."
+    },
+    {
+      "surface": "epub",
+      "resource": "static/reader-runtime/interaction-policy.js",
+      "path": "/pdf/api/page-image",
+      "reason": "Shared policy declaration for the PDF surface, not a request from the EPUB shell."
     },
     {
       "surface": "epub",

@@ -53,9 +53,11 @@ localStorage.setItem = function (k, v) {
 };
 // cache buster：避开浏览器/代理的 mime 缓存（之前 nginx 错把 .mjs 当 octet-stream，已修但缓存还在）
 const PDFJS_V = '20260526a';
-// 图片模式(成熟方案:服务端按页出图,只取看到的页,不下载整本 PDF、且不加载 PDF.js 库)。默认开;localStorage 关作安全阀。
+// 图片模式(成熟方案:按页出图,只取看到的页,不下载整本 PDF、且不加载 PDF.js 库)。
+// App 本机 PDF 的页像素由设备端 PDFKit 提供；Web DocumentHost 继续负责叠层与交互。
+// 线上 Reader 默认开，仍可用 localStorage 安全阀关闭。
 let _imgMode = window.__BW_NATIVE_LOCAL_READER__ === true
-  ? false
+  ? true
   : (() => { try { return localStorage.getItem('pdf-img-mode') !== '0'; } catch (_) { return true; } })();
 let pdfjsLib;
 if (!_imgMode) {   // 仅经典(PDF.js canvas)模式才下载 2.8MB 库;图片模式跳过 → 省库下载 + 那 5 秒 import 等待

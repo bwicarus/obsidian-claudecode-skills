@@ -114,8 +114,8 @@ test("local renderer uses a stable loopback origin with signed static assets and
   assert.doesNotMatch(LOCAL_SERVER, /connect-src[^"\n]*https:\/\/bwicarus/);
 });
 
-test("native PDF mode bypasses PWA ownership and duplicate whole-book caching", () => {
-  assert.match(PDF_BOOT, /window\.__BW_NATIVE_LOCAL_READER__ === true\s*\? false/);
+test("native PDF mode uses PDFKit page images without PWA or whole-book caching", () => {
+  assert.match(PDF_BOOT, /window\.__BW_NATIVE_LOCAL_READER__ === true\s*\? true/);
   assert.match(PDF_BOOT, /window\.__BW_NATIVE_LOCAL_READER__ !== true && 'serviceWorker' in navigator/);
   assert.match(PDF_LOADER, /const _NATIVE_LOCAL_PDF = window\.__BW_NATIVE_LOCAL_READER__ === true/);
   assert.match(PDF_LOADER, /_NATIVE_LOCAL_PDF \? null : await _idbGet/);
