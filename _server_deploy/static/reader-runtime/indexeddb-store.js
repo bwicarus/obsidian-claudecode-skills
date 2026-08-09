@@ -25,6 +25,7 @@
   var STORE_META = 'meta';
   var ALL_STORES = [STORE_RECORDS, STORE_JOURNAL, STORE_MUTATIONS, STORE_META];
   var INSTANCE_EPOCH_CONTRACT = 'data-store-instance-v1';
+  var TRANSACTION_KEEPALIVE_KEY = '__bw_reader_transaction_keepalive__';
 
   var DataStoreError = dataStoreSpec.DataStoreError;
   var ConflictError = dataStoreSpec.ConflictError;
@@ -143,6 +144,12 @@
     var idFactory = typeof options.idFactory === 'function' ? options.idFactory : defaultIdFactory;
     var maxJournal = Math.max(100, Number(options.maxJournal) || 10000);
     var maxMutations = Math.max(200, Number(options.maxMutations) || 20000);
+    var userAgent = String(root.navigator && root.navigator.userAgent || '');
+    var keepWebKitReadwriteTransactionsAlive =
+      options.webkitTransactionKeepalive === true ||
+      (options.webkitTransactionKeepalive !== false &&
+       /AppleWebKit\//.test(userAgent) &&
+       !/(?:Chrome|Chromium|Edg|OPR)\//.test(userAgent));
     var causalCollections = new Set(
       (Array.isArray(options.causalCollections)
         ? options.causalCollections
@@ -279,7 +286,34 @@
           var result;
           var workerError = null;
           var workerDone = false;
+          var keepaliveStopped = false;
+
+          // WebKit can auto-commit a readwrite transaction between an IDB
+          // success callback and the Promise continuation that queues the next
+          // request.  A missing-key read keeps one request pending across that
+          // gap without changing stored data.  Stop as soon as the worker
+          // settles so ordinary transaction completion semantics remain intact.
+          function keepTransactionAlive() {
+            if (keepaliveStopped || workerDone || workerError ||
+                mode !== 'readwrite' || !keepWebKitReadwriteTransactionsAlive) return;
+            var request;
+            try {
+              request = transaction.objectStore(storeNames[0]).get(
+                TRANSACTION_KEEPALIVE_KEY
+              );
+            } catch (error) {
+              keepaliveStopped = true;
+              workerError = error;
+              try { transaction.abort(); } catch (_) { reject(error); }
+              return;
+            }
+            request.onsuccess = keepTransactionAlive;
+            // A request error aborts the transaction by default. onabort below
+            // converts it to the store's stable backend error contract.
+            request.onerror = function () { keepaliveStopped = true; };
+          }
           transaction.oncomplete = function () {
+            keepaliveStopped = true;
             if (!workerDone) {
               reject(new DataStoreError('IndexedDB transaction 提前完成', 'BW_DATA_BACKEND'));
               return;
@@ -288,6 +322,7 @@
           };
           transaction.onerror = function () {};
           transaction.onabort = function () {
+            keepaliveStopped = true;
             reject(workerError || backendError(transaction.error, 'IndexedDB transaction 已回滚'));
           };
           var work;
@@ -297,11 +332,14 @@
             try { transaction.abort(); } catch (_) { reject(error); }
             return;
           }
+          if (work && typeof work.then === 'function') keepTransactionAlive();
           Promise.resolve(work).then(function (value) {
             result = value;
             workerDone = true;
+            keepaliveStopped = true;
           }).catch(function (error) {
             workerError = error;
+            keepaliveStopped = true;
             try { transaction.abort(); } catch (_) { reject(error); }
           });
         });
