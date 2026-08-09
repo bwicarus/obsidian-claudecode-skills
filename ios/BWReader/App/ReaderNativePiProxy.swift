@@ -424,7 +424,7 @@ private struct ReaderNativePiDataByteSequence:
         }
 
         mutating func nextBuffer(suggested count: Int) async throws -> Data? {
-            let desired = max(1, count)
+            let desired = Swift.max(1, count)
             while pending == nil || pendingOffset >= pending!.count {
                 pending = try await iterator.next()
                 pendingOffset = 0
@@ -432,7 +432,7 @@ private struct ReaderNativePiDataByteSequence:
                 if pending.isEmpty { continue }
             }
             guard let pending else { return nil }
-            let end = min(pending.count, pendingOffset + desired)
+            let end = Swift.min(pending.count, pendingOffset + desired)
             let result = Data(pending[pendingOffset..<end])
             pendingOffset = end
             return result
