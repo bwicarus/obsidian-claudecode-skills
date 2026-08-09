@@ -7,6 +7,7 @@ const ROOT = new URL("../../", import.meta.url);
 const read = (path) => readFileSync(new URL(path, ROOT), "utf8");
 const WEB = read("ios/BWReader/App/ReaderWebView.swift");
 const EPUB = read("_server_deploy/static/pdf/epub-html.js");
+const PDF_HIGHLIGHT = read("_server_deploy/static/pdf/reader.src/19-dict.js");
 
 function functionSource(source, name) {
   const start = source.indexOf(`function ${name}(`);
@@ -30,6 +31,14 @@ test("native reader presents JavaScript alert, confirm and prompt dialogs", () =
   assert.match(WEB, /UIAlertAction\(title: "确定", style: \.destructive/);
   assert.match(WEB, /completionHandler\(false\)/);
   assert.match(WEB, /completionHandler\(nil\)/);
+});
+
+test("PDF highlight popover delete is the sole confirmation step", () => {
+  const deletion = functionSource(PDF_HIGHLIGHT, "_hlDelete");
+  assert.doesNotMatch(deletion, /\bconfirm\s*\(/);
+  assert.match(deletion, /method: 'DELETE'/);
+  assert.match(deletion, /_allHighlights = _allHighlights\.filter/);
+  assert.match(deletion, /closeHlPopover\(\)/);
 });
 
 test("EPUB visible decoration scans only the current viewport neighbourhood", () => {

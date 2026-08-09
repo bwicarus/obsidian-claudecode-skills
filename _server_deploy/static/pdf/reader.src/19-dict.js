@@ -343,7 +343,6 @@ async function _hlUpdate(h, pw, patch) {
   } catch (e) { alert('保存异常：' + e.message); }
 }
 async function _hlDelete(h, pw) {
-  if (!confirm('删除这条高亮？')) return false;   // 取消 → 返回 false，让 rc-highlight 编辑浮层保持打开(M6)
   try {
     const r = await fetch('/pdf/api/highlights', {
       method: 'DELETE', headers: {'Content-Type':'application/json'},
