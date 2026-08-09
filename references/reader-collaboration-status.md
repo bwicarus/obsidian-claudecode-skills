@@ -3910,3 +3910,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **边界**：本次只恢复 PDF 选中，不启动 Vision OCR、不切换用户选择的文字层，也不回退整本 PDF.js 解析；1.1.7 的打开速度路径保留。
 - **怎么验的**：针对合同 103 项、Reader 全量 938 项、离线 ReaderBundle 与 macOS 模拟器/签名真机归档、App/扩展/Widget 校验均通过；Pi handoff READY。
 - **发布**：提交 `45ab1f99` 经 Actions run `31317974166` 获 Apple `UPLOAD SUCCEEDED`，TestFlight 为 `1.1.8 (144)`；Pi 仅安全快进源码，未部署或重启生产服务，下一步由 iPad 验收真实拖选与高亮。
+
+## Codex：TestFlight 1.1.8 可见性核验（2026-08-10 JST）
+- **改了什么**：发布工作流新增独立只读状态模式，按版本/构建号查询 upload、processing、beta readiness、测试组与匿名状态计数；不会构建、上传或改分发。
+- **实况**：Actions run `31320948949` 确认 `1.1.8 (144)` 为 `COMPLETE / VALID / IN_BETA_TESTING`，无错误/警告且无需出口合规；内部组 `me` 对全部构建开放，唯一测试者状态为 `INSTALLED`。
+- **结论**：Apple 服务端已可测试，不需重复上传或补测试组；用户在 TestFlight 强制刷新/重开即可，仍不显示再核对设备 Apple ID 与 TestFlight 页面。
+- **边界/下一步**：未读取测试者身份字段、未修改 App Store Connect；后续上传应以状态检查而非仅 `UPLOAD SUCCEEDED` 作为可见性证据。
