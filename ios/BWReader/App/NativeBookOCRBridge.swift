@@ -78,15 +78,56 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
         didReceive message: WKScriptMessage,
         replyHandler: @escaping (Any?, String?) -> Void
     ) {
-        guard message.name == Self.messageName,
-              message.frameInfo.isMainFrame,
-              let webView,
-              message.webView === webView,
-              let frameURL = message.frameInfo.request.url,
-              isTrusted(frameURL),
-              let documentURL = webView.url,
-              isTrusted(documentURL) else {
-            replyHandler(nil, "BW_NATIVE_PAGE_TEXT_UNTRUSTED")
+        // Each condition answers separately.
+        //
+        // These were one guard, so every rejection arrived as a bare
+        // BW_NATIVE_PAGE_TEXT_UNTRUSTED: a released web view, a message from
+        // another one, a sub-frame, a path outside the capability base -- six
+        // unrelated causes wearing the same name. On a device with no debugger
+        // that difference cannot be recovered afterwards, and the reader simply
+        // reports that every page is untrusted.
+        //
+        // The reasons are appended to the code rather than replacing it, so
+        // existing handling of the prefix keeps working while the detail is
+        // finally readable.
+        guard message.name == Self.messageName else {
+            replyHandler(nil, "BW_NATIVE_PAGE_TEXT_UNTRUSTED:message-name")
+            return
+        }
+        guard message.frameInfo.isMainFrame else {
+            replyHandler(nil, "BW_NATIVE_PAGE_TEXT_UNTRUSTED:sub-frame")
+            return
+        }
+        guard let webView else {
+            replyHandler(nil, "BW_NATIVE_PAGE_TEXT_UNTRUSTED:no-webview")
+            return
+        }
+        guard message.webView === webView else {
+            replyHandler(nil, "BW_NATIVE_PAGE_TEXT_UNTRUSTED:other-webview")
+            return
+        }
+        guard let frameURL = message.frameInfo.request.url else {
+            replyHandler(nil, "BW_NATIVE_PAGE_TEXT_UNTRUSTED:no-frame-url")
+            return
+        }
+        guard isTrusted(frameURL) else {
+            replyHandler(
+                nil,
+                "BW_NATIVE_PAGE_TEXT_UNTRUSTED:frame-path "
+                    + Self.trustMismatchDetail(frameURL, trustedBaseURL)
+            )
+            return
+        }
+        guard let documentURL = webView.url else {
+            replyHandler(nil, "BW_NATIVE_PAGE_TEXT_UNTRUSTED:no-document-url")
+            return
+        }
+        guard isTrusted(documentURL) else {
+            replyHandler(
+                nil,
+                "BW_NATIVE_PAGE_TEXT_UNTRUSTED:document-path "
+                    + Self.trustMismatchDetail(documentURL, trustedBaseURL)
+            )
             return
         }
         let request: Request
@@ -911,6 +952,35 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
 
     private static func jsonNullable<T>(_ value: T?) -> Any {
         value.map { $0 as Any } ?? NSNull()
+    }
+
+    /// Names the part that did not match, without leaking the capability token.
+    ///
+    /// The token is a bearer secret for the local server; a diagnostic that
+    /// prints it would turn a log screenshot into a credential. Comparing
+    /// lengths and prefixes is enough to tell a stale token from a wrong host
+    /// or a path that never had the prefix at all.
+    private static func trustMismatchDetail(
+        _ url: URL,
+        _ base: URL
+    ) -> String {
+        var parts: [String] = []
+        if url.scheme?.lowercased() != base.scheme?.lowercased() {
+            parts.append("scheme=\(url.scheme ?? "nil")")
+        }
+        if url.host?.lowercased() != base.host?.lowercased() {
+            parts.append("host=\(url.host ?? "nil")")
+        }
+        if Self.effectivePort(url) != Self.effectivePort(base) {
+            parts.append("port=\(url.port.map(String.init) ?? "nil")")
+        }
+        if !url.path.hasPrefix(base.path) {
+            let head = url.path.split(separator: "/").first.map(String.init) ?? ""
+            parts.append(
+                "path=/\(head)/… baseLen=\(base.path.count) urlLen=\(url.path.count)"
+            )
+        }
+        return parts.isEmpty ? "(no field differs)" : parts.joined(separator: " ")
     }
 
     private func isTrusted(_ url: URL) -> Bool {
