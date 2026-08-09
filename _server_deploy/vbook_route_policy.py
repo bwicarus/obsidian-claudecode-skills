@@ -96,6 +96,8 @@ ROUTE_POLICY = {
     'pdf_reader.pdf_api_library_download': 'GLOBAL',   # /pdf/api/library/download/<book_id>
     'pdf_reader.pdf_api_library_upload': 'GLOBAL',   # /pdf/api/library/upload
     'pdf_reader.pdf_api_library_ocr_start': 'GLOBAL',   # authenticated opaque library identity
+    'pdf_reader.pdf_api_library_ocr_adoption_preview': 'GLOBAL',
+    'pdf_reader.pdf_api_library_ocr_adopt': 'GLOBAL',
     'pdf_reader.pdf_api_library_ocr_status': 'GLOBAL',
     'pdf_reader.pdf_api_library_ocr_pause': 'GLOBAL',
     'pdf_reader.pdf_api_library_ocr_resume': 'GLOBAL',
