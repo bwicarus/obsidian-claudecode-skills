@@ -1364,11 +1364,15 @@ def _lower_process_priority() -> None:
             import ctypes
 
             BELOW_NORMAL_PRIORITY_CLASS = 0x00004000
-            handle = ctypes.windll.kernel32.GetCurrentProcess()
-            if not ctypes.windll.kernel32.SetPriorityClass(
-                handle, BELOW_NORMAL_PRIORITY_CLASS
-            ):
-                raise OSError("SetPriorityClass failed")
+            kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+            kernel32.GetCurrentProcess.argtypes = []
+            kernel32.GetCurrentProcess.restype = ctypes.c_void_p
+            kernel32.SetPriorityClass.argtypes = [ctypes.c_void_p, ctypes.c_uint32]
+            kernel32.SetPriorityClass.restype = ctypes.c_int
+            handle = kernel32.GetCurrentProcess()
+            if not kernel32.SetPriorityClass(handle, BELOW_NORMAL_PRIORITY_CLASS):
+                error = ctypes.get_last_error()
+                raise OSError(error, "SetPriorityClass failed")
         else:
             os.nice(10)
     except Exception as exc:

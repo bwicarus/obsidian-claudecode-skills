@@ -54,6 +54,18 @@ class FakeTransport:
         return self.responses.pop(0)
 
 
+class FakeCFunction:
+    def __init__(self, result):
+        self.result = result
+        self.argtypes = None
+        self.restype = None
+        self.calls = []
+
+    def __call__(self, *args):
+        self.calls.append(args)
+        return self.result
+
+
 def claim_payload(digest, *, completed=None):
     return {
         "ok": True,
@@ -664,6 +676,38 @@ class WorkerRunnerTest(unittest.TestCase):
                 self.unrelated = ExplosiveProxy()
 
         worker.QualityPipeline._assert_model_cuda(Model(), "formula OCR")
+
+
+class WindowsPriorityTest(unittest.TestCase):
+    def test_windows_handle_is_not_truncated_before_lowering_priority(self):
+        pseudo_handle = 0x123456789ABCDEF0
+        get_current = FakeCFunction(pseudo_handle)
+        set_priority = FakeCFunction(1)
+        kernel32 = SimpleNamespace(
+            GetCurrentProcess=get_current,
+            SetPriorityClass=set_priority,
+        )
+        fake_ctypes = SimpleNamespace(
+            WinDLL=lambda name, use_last_error: kernel32,
+            c_void_p=object(),
+            c_uint32=object(),
+            c_int=object(),
+            get_last_error=lambda: 0,
+        )
+
+        with patch.object(worker.os, "name", "nt"), patch.dict(
+            sys.modules, {"ctypes": fake_ctypes}
+        ):
+            worker._lower_process_priority()
+
+        self.assertEqual(get_current.argtypes, [])
+        self.assertIs(get_current.restype, fake_ctypes.c_void_p)
+        self.assertEqual(
+            set_priority.argtypes,
+            [fake_ctypes.c_void_p, fake_ctypes.c_uint32],
+        )
+        self.assertIs(set_priority.restype, fake_ctypes.c_int)
+        self.assertEqual(set_priority.calls, [(pseudo_handle, 0x00004000)])
 
 
 if __name__ == "__main__":
