@@ -2097,8 +2097,14 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             Task { @MainActor [weak self, localRuntimeServer] in
                 guard let self else { return }
                 do {
-                    try await localRuntimeServer.restartAfterForeground()
-                    self.webView.reload()
+                    // Reloaded only when the server really was rebuilt: a
+                    // reload discards the rendered page, the reading position
+                    // and every warmed page image, which is exactly what made
+                    // returning from the background feel like reopening the
+                    // book.
+                    let restarted = try await localRuntimeServer
+                        .restartAfterForeground()
+                    if restarted { self.webView.reload() }
                 } catch {
                     self.loadError = error.localizedDescription
                 }

@@ -929,8 +929,20 @@ final class ReaderLocalRuntimeServer {
         }
     }
 
-    func restartAfterForeground() async throws {
-        if try await joinLifecycleTaskIfPresent() { return }
+    /// Restarts only if the server actually stopped while backgrounded.
+    ///
+    /// Returns whether a restart happened, because the caller reloads the web
+    /// view afterwards and a reload throws away the rendered page, the scroll
+    /// position and every warmed page image. Doing that on each return to the
+    /// foreground made a glance at the notification centre cost a full reload.
+    ///
+    /// iOS does not always tear the listener down -- a brief switch usually
+    /// leaves it intact -- so the cheap check comes first and the expensive
+    /// restart only follows when it is genuinely gone.
+    @discardableResult
+    func restartAfterForeground() async throws -> Bool {
+        if await server.isListening, runTask != nil { return false }
+        if try await joinLifecycleTaskIfPresent() { return false }
 
         let token = UUID()
         let transition = Task<Void, Error> { @MainActor [weak self] in
@@ -945,6 +957,7 @@ final class ReaderLocalRuntimeServer {
         do {
             try await transition.value
             clearLifecycleTask(ifMatching: token)
+            return true
         } catch {
             clearLifecycleTask(ifMatching: token)
             throw error
