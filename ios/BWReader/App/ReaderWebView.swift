@@ -2371,6 +2371,34 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         try? store.appendAgentEvent(event: event, payload: payload)
     }
 
+    /// Maps a prefix-less local URL onto the running server's capability base.
+    ///
+    /// Only for this server's own origin, and only for paths that belong to the
+    /// reader; anything else stays external. Returns nil when the URL already
+    /// carries the prefix or the server is not running, so the ordinary trust
+    /// path keeps handling those.
+    private func localRuntimeRebasedURL(_ url: URL) -> URL? {
+        guard let localRuntimeServer,
+              url.scheme?.lowercased() == "http",
+              url.host?.lowercased() == ReaderLocalRuntimeServer.host,
+              url.port == Int(ReaderLocalRuntimeServer.port) else { return nil }
+        let base = localRuntimeServer.baseURL
+        if url.path.hasPrefix(base.path) { return nil }
+        let readerPrefixes = ["/pdf/", "/api/", "/static/"]
+        guard readerPrefixes.contains(where: { url.path.hasPrefix($0) }) else {
+            return nil
+        }
+        var components = URLComponents(
+            url: base,
+            resolvingAgainstBaseURL: false
+        )
+        components?.path = base.path
+            + String(url.path.dropFirst())
+        components?.query = url.query
+        components?.fragment = url.fragment
+        return components?.url
+    }
+
     private func isTrustedReaderURL(_ url: URL?) -> Bool {
         guard let url else { return false }
         let scheme = url.scheme?.lowercased()
@@ -3189,6 +3217,22 @@ extension ReaderWebViewModel: WKNavigationDelegate {
             }
             if isTrustedReaderURL(url) {
                 decisionHandler(.allow)
+                return
+            }
+            // Same server, missing the capability prefix.
+            //
+            // The local runtime is served under /r/<token>/, but the reader's
+            // own markup links to absolute reader paths like /pdf/ -- correct
+            // on the Pi, prefix-less here. Those URLs failed the trust check
+            // and were treated as external links, so tapping one handed the
+            // App's private address to Safari, which cannot reach it at all.
+            //
+            // Rewritten onto the current base rather than fixed at every link
+            // site: the prefix is a property of this runtime, not of the
+            // documents, and they are shared with hosts that have no prefix.
+            if let rebased = localRuntimeRebasedURL(url) {
+                decisionHandler(.cancel)
+                webView.load(URLRequest(url: rebased))
                 return
             }
             // The App-owned WebView is a book renderer, not a general PWA or
