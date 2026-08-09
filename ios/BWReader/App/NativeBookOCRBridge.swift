@@ -974,7 +974,10 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
         if Self.effectivePort(url) != Self.effectivePort(base) {
             parts.append("port=\(url.port.map(String.init) ?? "nil")")
         }
-        if !url.path.hasPrefix(base.path) {
+        // Same rule as the check itself. Two different notions of "within"
+        // are what produced "(no field differs)" on a rejected path -- the
+        // report and the decision must not be able to disagree.
+        if !pathIsWithin(url, base: base) {
             let head = url.path.split(separator: "/").first.map(String.init) ?? ""
             parts.append(
                 "path=/\(head)/… baseLen=\(base.path.count) urlLen=\(url.path.count)"
@@ -989,11 +992,30 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
               Self.effectivePort(url) == Self.effectivePort(trustedBaseURL) else {
             return false
         }
-        let basePath = trustedBaseURL.path
-        if basePath.hasSuffix("/") {
-            return url.path.hasPrefix(basePath)
-        }
-        return url.path == basePath
+        return Self.pathIsWithin(url, base: trustedBaseURL)
+    }
+
+    /// Whether a URL sits at or under the capability base path.
+    ///
+    /// The base is built as ".../r/<token>/" with a trailing slash, but
+    /// URL.path drops it -- so a check written as "has trailing slash ? prefix
+    /// : exact match" silently took the exact-match branch and rejected every
+    /// page below the base. Every page of every book therefore reported
+    /// BW_NATIVE_PAGE_TEXT_UNTRUSTED and no text could be selected at all.
+    ///
+    /// The sibling bridge (ReaderBookUserStateWebAdapter) compares by prefix
+    /// only and was unaffected, which is why books opened and user state worked
+    /// while the text layer alone was refused.
+    ///
+    /// Normalising the separator explicitly keeps the boundary honest: matching
+    /// on "/r/<token>/" rather than "/r/<token>" prevents a different token
+    /// that merely starts with the same characters from being accepted.
+    private static func pathIsWithin(_ url: URL, base: URL) -> Bool {
+        let basePath = base.path
+        guard !basePath.isEmpty else { return true }
+        let exact = basePath.hasSuffix("/") ? String(basePath.dropLast()) : basePath
+        let withSeparator = exact + "/"
+        return url.path == exact || url.path.hasPrefix(withSeparator)
     }
 
     private static func effectivePort(_ url: URL) -> Int? {
