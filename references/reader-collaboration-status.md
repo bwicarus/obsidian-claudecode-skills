@@ -3916,3 +3916,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **实况**：Actions run `31320948949` 确认 `1.1.8 (144)` 为 `COMPLETE / VALID / IN_BETA_TESTING`，无错误/警告且无需出口合规；内部组 `me` 对全部构建开放，唯一测试者状态为 `INSTALLED`。
 - **结论**：Apple 服务端已可测试，不需重复上传或补测试组；用户在 TestFlight 强制刷新/重开即可，仍不显示再核对设备 Apple ID 与 TestFlight 页面。
 - **边界/下一步**：未读取测试者身份字段、未修改 App Store Connect；后续上传应以状态检查而非仅 `UPLOAD SUCCEEDED` 作为可见性证据。
+
+## Codex：PDFKit 选择层身份竞态 1.1.9 发布（2026-08-10 JST）
+- **根因/改动**：1.1.8 只覆盖已有完整摘要；普通本机 PDF 首次页文字请求会先得到 idle 且不再重试。现复用已验证 Pi 摘要；其余书在首屏完成后后台建立摘要，并让所有已请求页重建字符层。
+- **性能边界**：不回退 PDF.js、不在打开前整本哈希；PDFKit 页图快路径保留，只有缺少身份时后台一次性补齐。
+- **怎么验的**：新增真实 idle→whole update→ready 页字符合同；Reader Node 全量 940 项、ReaderBundle、macOS 模拟器/签名归档及三目标校验通过；Windows Python 仍为既有 `fcntl`/环境基线。
+- **发布**：提交 `996408ae` 经 Actions run `31323387138` 上传 TestFlight `1.1.9 (148)`；状态 run `31323673268` 确认 `VALID / IN_BETA_TESTING`，无处理错误或警告。
+- **下一步**：用户安装 1.1.9 后在同一本 PDF 拖选并创建/删除一次高亮；真机通过前不宣称交互验收完成。
