@@ -3923,3 +3923,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：新增真实 idle→whole update→ready 页字符合同；Reader Node 全量 940 项、ReaderBundle、macOS 模拟器/签名归档及三目标校验通过；Windows Python 仍为既有 `fcntl`/环境基线。
 - **发布**：提交 `996408ae` 经 Actions run `31323387138` 上传 TestFlight `1.1.9 (148)`；状态 run `31323673268` 确认 `VALID / IN_BETA_TESTING`，无处理错误或警告。
 - **下一步**：用户安装 1.1.9 后在同一本 PDF 拖选并创建/删除一次高亮；真机通过前不宣称交互验收完成。
+
+## Claude/Codex：PDF 字符桥信任拒绝诊断 1.1.10（2026-08-10 JST）
+- **设备证据**：1.1.9 每页均报 `BW_NATIVE_PAGE_TEXT_UNTRUSTED`；文字层在 App→网页信任门被整体拒绝，并非 OCR 质量或字符重试问题。
+- **改了什么**：六项信任检查逐项返回安全错误后缀，只报告 scheme/host/port/path 类别与长度，不记录 capability token，也不放宽任何权限。
+- **怎么验的**：Reader Node 全量 940 项、发布管线、macOS 模拟器编译、签名设备归档及 App/扩展/Widget 校验通过；Windows handoff 仅保留既有 `fcntl` 平台基线。
+- **发布**：Claude 提交 `e89492a9`，候选 `d13295e2` 经 Actions run `31330789791` 上传 TestFlight `1.1.10 (151)`；状态 run `31331119662` 确认 `COMPLETE / VALID / IN_BETA_TESTING`。
+- **下一步**：用户开启“显示调试日志”并翻页，回传带具体后缀的 `chars unavailable` 行；Claude 按实际失败项修根因。
