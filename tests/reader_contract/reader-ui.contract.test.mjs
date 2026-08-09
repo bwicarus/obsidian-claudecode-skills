@@ -21,6 +21,17 @@ const PDF_SELECTION_SOURCE = readFileSync(
   "utf8",
 );
 
+test("EPUB image diagnostics tolerate sanitized images without src", () => {
+  assert.match(
+    EPUB_SOURCE,
+    /var src0 = imgs\[0\] \? \(imgs\[0\]\.getAttribute\('src'\) \|\| ''\) : ''/,
+  );
+  assert.doesNotMatch(
+    EPUB_SOURCE,
+    /getAttribute\('src'\)\.slice/,
+  );
+});
+
 function loadUi() {
   const document = {
     readyState: "loading",

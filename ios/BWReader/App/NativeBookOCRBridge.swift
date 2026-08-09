@@ -180,15 +180,15 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
         }
     }
 
-    /// Emits the exact passive update event expected by the local Reader. It
-    /// reads an already persisted page only; it never starts or resumes OCR.
+    /// Emits the exact passive update event expected by the local Reader. A
+    /// nil page is an explicit whole-layer switch and invalidates every loaded
+    /// page without starting or resuming OCR.
     func sendUpdate(
         _ update: NativeBookOCRUpdate,
         to webView: WKWebView
     ) async {
         guard update.bookID == localBookID,
-              let page = update.page,
-              page >= 1,
+              update.page.map({ $0 >= 1 }) ?? true,
               let registeredWebView = self.webView,
               webView === registeredWebView,
               let documentURL = webView.url,
@@ -198,20 +198,26 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
         guard !rejectsContentIdentity,
               let expectedContentSHA256 = self.expectedContentSHA256
                 ?? manager.activatedContentSHA256(for: update.bookID),
-              update.status.contentSHA256.caseInsensitiveCompare(
-                expectedContentSHA256
-              ) == .orderedSame else {
+              update.status.contentSHA256.isEmpty
+                || update.status.contentSHA256.caseInsensitiveCompare(
+                    expectedContentSHA256
+                ) == .orderedSame else {
             return
         }
-        let pageValue = try? await manager.pageCharacters(
-            bookID: update.bookID,
-            expectedContentSHA256: expectedContentSHA256,
-            page: page
-        )
+        let pageValue: NativeBookOCRPageCharacters?
+        if let page = update.page {
+            pageValue = try? await manager.pageCharacters(
+                bookID: update.bookID,
+                expectedContentSHA256: expectedContentSHA256,
+                page: page
+            )
+        } else {
+            pageValue = nil
+        }
         let payload: [String: Any] = [
             "contract": NativeBookOCRUpdate.contract,
             "localBookId": update.bookID,
-            "page": page,
+            "page": Self.jsonNullable(update.page),
             "state": pageValue?.status.rawValue ?? Self.passiveState(
                 update.status
             ).rawValue,
@@ -784,12 +790,19 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
         let encoder = JSONEncoder()
         encoder.dateEncodingStrategy = .millisecondsSince1970
         encoder.outputFormatting = [.sortedKeys]
-        guard let data = try? encoder.encode(value) else {
-            return value.geometryDigest
+        let digest: String
+        if let data = try? encoder.encode(value) {
+            digest = SHA256.hash(data: data).map {
+                String(format: "%02x", $0)
+            }.joined()
+        } else {
+            digest = value.geometryDigest
         }
-        return SHA256.hash(data: data).map {
-            String(format: "%02x", $0)
-        }.joined()
+        // Keep the content digest for cache identity, while exposing the
+        // bounded engine revision so the shared selector can distinguish
+        // ordinary reading order from manga bubble/column layout.
+        let engine = String(value.engineRevision.prefix(72))
+        return "\(engine):\(String(digest.prefix(72)))"
     }
 
     private static func stageObject(

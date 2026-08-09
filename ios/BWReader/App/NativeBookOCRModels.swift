@@ -5,6 +5,66 @@ enum NativeBookOCRSource: String, Codable, Sendable {
     case pi
 }
 
+/// A user-selectable base text/analysis layer. `legacy` is the pre-layered
+/// `content/<digest>/pages` directory and remains in place so upgrades never
+/// rewrite or discard an existing result. `embedded` is normally served by
+/// PDF.js; the native store only materializes an embedded page when a manual
+/// selection correction needs a base to overlay.
+enum NativeBookOCRLayerID: String, Codable, CaseIterable, Hashable, Identifiable, Sendable {
+    case embedded
+    case legacy
+    case appleVision = "apple-vision"
+    case pi
+    case pc
+
+    var id: String { rawValue }
+
+    var title: String {
+        switch self {
+        case .embedded: return "PDF 原文字层"
+        case .legacy: return "现有兼容结果"
+        case .appleVision: return "本机 Vision"
+        case .pi: return "Pi 预处理"
+        case .pc: return "PC 高质量预处理"
+        }
+    }
+}
+
+struct NativeBookOCRLayerMetadata: Codable, Equatable, Identifiable, Sendable {
+    static let schema = "reader-native-book-ocr-layer/1"
+
+    let schema: String
+    let contentSHA256: String
+    let layer: NativeBookOCRLayerID
+    let engine: String
+    let executor: String?
+    let processingProfile: String?
+    let revision: String
+    let pageCount: Int
+    let updatedAt: Date
+
+    var id: NativeBookOCRLayerID { layer }
+}
+
+struct NativeBookOCRLayerSelection: Codable, Equatable, Sendable {
+    static let schema = "reader-native-book-ocr-layer-selection/1"
+
+    let schema: String
+    let contentSHA256: String
+    let selected: NativeBookOCRLayerID
+    let updatedAt: Date
+}
+
+struct NativeBookOCRLayerState: Equatable, Sendable {
+    let contentSHA256: String
+    let selected: NativeBookOCRLayerID
+    let available: [NativeBookOCRLayerMetadata]
+
+    func metadata(for layer: NativeBookOCRLayerID) -> NativeBookOCRLayerMetadata? {
+        available.first(where: { $0.layer == layer })
+    }
+}
+
 enum NativeBookOCRJobState: String, Codable, Sendable {
     case idle
     case running
@@ -465,6 +525,9 @@ struct NativeBookOCRDerivedAttachmentManifest: Codable, Sendable {
     let bookId: String
     let contentSha256: String
     let revision: String
+    let engine: String?
+    let executor: String?
+    let processingProfile: String?
     let category: String
     let mergePolicy: String
     let files: [File]
@@ -475,6 +538,9 @@ struct NativeBookOCRDerivedAttachmentManifest: Codable, Sendable {
         bookId: String,
         contentSha256: String,
         revision: String,
+        engine: String? = nil,
+        executor: String? = nil,
+        processingProfile: String? = nil,
         category: String = "derived",
         mergePolicy: String = "immutable",
         files: [File]
@@ -484,6 +550,9 @@ struct NativeBookOCRDerivedAttachmentManifest: Codable, Sendable {
         self.bookId = bookId
         self.contentSha256 = contentSha256
         self.revision = revision
+        self.engine = engine
+        self.executor = executor
+        self.processingProfile = processingProfile
         self.category = category
         self.mergePolicy = mergePolicy
         self.files = files
@@ -504,6 +573,7 @@ struct NativeBookOCRDerivedAttachmentManifest: Codable, Sendable {
 
 struct NativeBookOCRImportResult: Equatable, Sendable {
     let contentSHA256: String
+    let layer: NativeBookOCRLayerID
     let importedPages: [Int]
     let importedFormulaPages: [Int]
 }

@@ -267,35 +267,169 @@ actor NativeBookOCRSidecarStore {
             pdfMutationTargetLeaseByDigest.filter { $0.value != lease }
     }
 
+    func layerState(
+        contentSHA256: String
+    ) throws -> NativeBookOCRLayerState {
+        try validateContentSHA256(contentSHA256)
+        let digest = contentSHA256.lowercased()
+        var available = [NativeBookOCRLayerMetadata(
+            schema: NativeBookOCRLayerMetadata.schema,
+            contentSHA256: digest,
+            layer: .embedded,
+            engine: "pdf-embedded",
+            executor: nil,
+            processingProfile: nil,
+            revision: "pdfjs-embedded/1",
+            pageCount: 0,
+            updatedAt: .distantPast
+        )]
+        let legacyPages = try pages(contentSHA256: digest, layer: .legacy)
+        if !legacyPages.isEmpty {
+            available.append(NativeBookOCRLayerMetadata(
+                schema: NativeBookOCRLayerMetadata.schema,
+                contentSHA256: digest,
+                layer: .legacy,
+                engine: "mixed",
+                executor: nil,
+                processingProfile: nil,
+                revision: "legacy-pages/1",
+                pageCount: legacyPages.count,
+                updatedAt: legacyPages.map(\.createdAt).max() ?? .distantPast
+            ))
+        }
+        for layer in [
+            NativeBookOCRLayerID.appleVision,
+            NativeBookOCRLayerID.pi,
+            NativeBookOCRLayerID.pc,
+        ] {
+            guard let metadata = try storedLayerMetadata(
+                contentSHA256: digest,
+                layer: layer
+            ) else { continue }
+            let stored = try pages(contentSHA256: digest, layer: layer)
+            guard !stored.isEmpty, metadata.pageCount == stored.count else {
+                throw NativeBookOCRError.storage("文字层页数与元数据不匹配")
+            }
+            available.append(metadata)
+        }
+        let selected: NativeBookOCRLayerID
+        if let persisted = try loadLayerSelection(contentSHA256: digest) {
+            selected = persisted.selected
+        } else {
+            selected = legacyPages.isEmpty ? .embedded : .legacy
+        }
+        guard available.contains(where: { $0.layer == selected }) else {
+            throw NativeBookOCRError.storage("当前选择的文字层不可用")
+        }
+        return NativeBookOCRLayerState(
+            contentSHA256: digest,
+            selected: selected,
+            available: available
+        )
+    }
+
+    func selectLayer(
+        bookID: String,
+        contentSHA256: String,
+        layer: NativeBookOCRLayerID
+    ) throws -> NativeBookOCRLayerState {
+        try assertPDFMutationWriteAllowed(
+            bookID: bookID,
+            contentSHA256: contentSHA256
+        )
+        let current = try layerState(contentSHA256: contentSHA256)
+        guard current.available.contains(where: { $0.layer == layer }) else {
+            throw NativeBookOCRError.storage("选择的文字层尚无可用结果")
+        }
+        let selection = NativeBookOCRLayerSelection(
+            schema: NativeBookOCRLayerSelection.schema,
+            contentSHA256: contentSHA256.lowercased(),
+            selected: layer,
+            updatedAt: Date()
+        )
+        let url = layerSelectionURL(contentSHA256)
+        do {
+            try fileManager.createDirectory(
+                at: url.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try encoder().encode(selection).write(to: url, options: .atomic)
+        } catch {
+            throw NativeBookOCRError.storage(error.localizedDescription)
+        }
+        return NativeBookOCRLayerState(
+            contentSHA256: current.contentSHA256,
+            selected: layer,
+            available: current.available
+        )
+    }
+
     func page(
         contentSHA256: String,
         page: Int
     ) throws -> NativeBookOCRPageCharacters? {
         try validateContentSHA256(contentSHA256)
         guard page >= 1 else { return nil }
-        let base = try basePage(contentSHA256: contentSHA256, page: page)
+        let selectedLayer = try layerState(
+            contentSHA256: contentSHA256
+        ).selected
         let manual = try manualPage(contentSHA256: contentSHA256, page: page)
         let corrections = try selectionCorrections(
             contentSHA256: contentSHA256,
             page: page
         )
+        let base: NativeBookOCRPageCharacters?
+        if selectedLayer == .embedded, corrections.isEmpty {
+            base = nil
+        } else {
+            base = try basePage(
+                contentSHA256: contentSHA256,
+                page: page,
+                layer: selectedLayer
+            ) ?? (corrections.isEmpty ? nil : try basePage(
+                contentSHA256: contentSHA256,
+                page: page,
+                layer: .embedded
+            ))
+        }
         guard let selected = manual ?? base else {
             if !corrections.isEmpty {
                 throw NativeBookOCRError.storage("选区校正缺少基础文字页")
             }
             return nil
         }
-        return Self.applyingSelectionCorrections(corrections, to: selected)
+        let effective = Self.applyingSelectionCorrections(corrections, to: selected)
+        if manual == nil, corrections.isEmpty,
+           [.legacy, .appleVision, .pi, .pc].contains(selectedLayer) {
+            // Existing Reader runtimes already treat local-override as the
+            // explicit instruction to prefer native text over PDF.js. This is
+            // an ephemeral authority marker; the stored base remains reusable.
+            return effective.replacingTextAuthority(.localOverride)
+        }
+        return effective
     }
 
     func basePage(
         contentSHA256: String,
-        page: Int
+        page: Int,
+        layer: NativeBookOCRLayerID? = nil
     ) throws -> NativeBookOCRPageCharacters? {
+        try validateContentSHA256(contentSHA256)
+        let resolvedLayer: NativeBookOCRLayerID
+        if let layer {
+            resolvedLayer = layer
+        } else {
+            resolvedLayer = try layerState(
+                contentSHA256: contentSHA256
+            ).selected
+        }
         let url = pageURL(
             contentSHA256: contentSHA256,
             page: page,
-            beneath: contentDirectory(contentSHA256)
+            beneath: layerDirectory(
+                contentSHA256: contentSHA256,
+                layer: resolvedLayer
+            )
         )
         guard fileManager.fileExists(atPath: url.path) else { return nil }
         do {
@@ -534,7 +668,7 @@ actor NativeBookOCRSidecarStore {
             geometryDigest: initial.geometryDigest,
             engineRevision: revisionParts.joined(separator: "+"),
             status: meaningful.isEmpty ? .readyEmpty : .ready,
-            source: .apple,
+            source: initial.source,
             chars: chars,
             furigana: furigana,
             wordSegmentation: initial.wordSegmentation,
@@ -548,9 +682,23 @@ actor NativeBookOCRSidecarStore {
         )
     }
 
-    func pages(contentSHA256: String) throws -> [NativeBookOCRPageCharacters] {
+    func pages(
+        contentSHA256: String,
+        layer: NativeBookOCRLayerID? = nil
+    ) throws -> [NativeBookOCRPageCharacters] {
         try validateContentSHA256(contentSHA256)
-        let directory = contentDirectory(contentSHA256)
+        let resolvedLayer: NativeBookOCRLayerID
+        if let layer {
+            resolvedLayer = layer
+        } else {
+            resolvedLayer = try layerState(
+                contentSHA256: contentSHA256
+            ).selected
+        }
+        let directory = layerDirectory(
+            contentSHA256: contentSHA256,
+            layer: resolvedLayer
+        )
             .appendingPathComponent("pages", isDirectory: true)
         guard fileManager.fileExists(atPath: directory.path) else { return [] }
         do {
@@ -584,14 +732,15 @@ actor NativeBookOCRSidecarStore {
     func effectivePages(
         contentSHA256: String
     ) throws -> [NativeBookOCRPageCharacters] {
-        try pages(contentSHA256: contentSHA256).map { base in
+        try pages(contentSHA256: contentSHA256, layer: nil).map { base in
             try page(contentSHA256: contentSHA256, page: base.page) ?? base
         }
     }
 
     func writePage(
         _ value: NativeBookOCRPageCharacters,
-        bookID: String
+        bookID: String,
+        layer: NativeBookOCRLayerID = .appleVision
     ) throws {
         try assertPDFMutationWriteAllowed(
             bookID: bookID,
@@ -601,10 +750,14 @@ actor NativeBookOCRSidecarStore {
         guard value.schema == NativeBookOCRPageCharacters.schema,
               value.page >= 1,
               value.pageWidth > 0,
-              value.pageHeight > 0 else {
+              value.pageHeight > 0,
+              layer == .appleVision || layer == .embedded else {
             throw NativeBookOCRError.storage("页 sidecar 结构无效")
         }
-        let contentDirectory = contentDirectory(value.contentSHA256)
+        let contentDirectory = layerDirectory(
+            contentSHA256: value.contentSHA256,
+            layer: layer
+        )
         let url = pageURL(
             contentSHA256: value.contentSHA256,
             page: value.page,
@@ -616,6 +769,26 @@ actor NativeBookOCRSidecarStore {
                 withIntermediateDirectories: true
             )
             try encoder().encode(value).write(to: url, options: .atomic)
+            if layer == .appleVision {
+                let storedCount = try pages(
+                    contentSHA256: value.contentSHA256,
+                    layer: layer
+                ).count
+                try writeLayerMetadata(
+                    NativeBookOCRLayerMetadata(
+                        schema: NativeBookOCRLayerMetadata.schema,
+                        contentSHA256: value.contentSHA256.lowercased(),
+                        layer: layer,
+                        engine: "vision",
+                        executor: "device",
+                        processingProfile: NativeBookOCRConfiguration.engineRevision,
+                        revision: NativeBookOCRConfiguration.engineRevision,
+                        pageCount: storedCount,
+                        updatedAt: Date()
+                    ),
+                    beneath: contentDirectory
+                )
+            }
         } catch {
             throw NativeBookOCRError.storage(error.localizedDescription)
         }
@@ -729,6 +902,14 @@ actor NativeBookOCRSidecarStore {
                   receipt.revision == revision else {
                 throw NativeBookOCRError.storage("导入回执身份不匹配")
             }
+            if let layer = receipt.layer {
+                guard let metadata = try storedLayerMetadata(
+                    contentSHA256: contentSHA256,
+                    layer: layer
+                ), metadata.revision == revision else {
+                    throw NativeBookOCRError.storage("导入回执缺少对应文字层")
+                }
+            }
             return true
         } catch let error as NativeBookOCRError {
             throw error
@@ -760,6 +941,16 @@ actor NativeBookOCRSidecarStore {
         }
         try validate(manifest: manifest, files: files)
         let contentSHA256 = manifest.contentSha256.lowercased()
+        let executor = (manifest.executor ?? "pi").lowercased()
+        guard ["pi", "pc"].contains(executor) else {
+            throw NativeBookOCRError.invalidAttachment("预处理执行器无效")
+        }
+        guard executor != "pc"
+            || manifest.processingProfile == "quality-first-v1" else {
+            throw NativeBookOCRError.invalidAttachment("PC 预处理配置无效")
+        }
+        let processingProfile = manifest.processingProfile ?? "pi-default-v1"
+        let targetLayer: NativeBookOCRLayerID = executor == "pc" ? .pc : .pi
         let target = contentDirectory(contentSHA256)
         var importedPages: [Int] = []
         var importedFormulaPages: [Int] = []
@@ -788,7 +979,8 @@ actor NativeBookOCRSidecarStore {
                 let converted = try convertPiPage(
                     value,
                     expectedContentSHA256: contentSHA256,
-                    expectedBookID: manifest.bookId
+                    expectedBookID: manifest.bookId,
+                    executor: executor
                 )
                 guard incomingPages.updateValue(
                     converted,
@@ -812,15 +1004,7 @@ actor NativeBookOCRSidecarStore {
             }
         }
 
-        var mergedPages: [Int: NativeBookOCRPageCharacters] = [:]
-        for value in try pages(contentSHA256: contentSHA256) {
-            guard mergedPages.updateValue(value, forKey: value.page) == nil else {
-                throw NativeBookOCRError.invalidAttachment("本机页 sidecar 重复")
-            }
-        }
-        for (page, value) in incomingPages {
-            mergedPages[page] = value
-        }
+        var layerPages = incomingPages
         if let formulaEnvelope {
             guard formulaEnvelope.schema == PiFormulaEnvelope.schema,
                   formulaEnvelope.bookId == manifest.bookId,
@@ -829,7 +1013,7 @@ actor NativeBookOCRSidecarStore {
             }
             let grouped = Dictionary(grouping: formulaEnvelope.formulas, by: \.page)
             for (pageNumber, formulas) in grouped {
-                guard let page = mergedPages[pageNumber] else {
+                guard let page = layerPages[pageNumber] else {
                     throw NativeBookOCRError.invalidAttachment(
                         "公式页 \(pageNumber) 没有对应文字页几何"
                     )
@@ -851,7 +1035,7 @@ actor NativeBookOCRSidecarStore {
                     formulaRegions: regions,
                     createdAt: Date()
                 )
-                mergedPages[pageNumber] = page.replacingFormulaAttachment(
+                layerPages[pageNumber] = page.replacingFormulaAttachment(
                     attachment,
                     source: .pi
                 )
@@ -861,7 +1045,7 @@ actor NativeBookOCRSidecarStore {
             // revision. Imported text pages absent from its region list were
             // examined and contain no detected formulas.
             for pageNumber in incomingPages.keys where grouped[pageNumber] == nil {
-                guard let page = mergedPages[pageNumber] else { continue }
+                guard let page = layerPages[pageNumber] else { continue }
                 let attachment = NativeBookOCRFormulaAttachment(
                     schema: NativeBookOCRFormulaAttachment.schema,
                     contentSHA256: contentSHA256,
@@ -872,7 +1056,7 @@ actor NativeBookOCRSidecarStore {
                     formulaRegions: [],
                     createdAt: Date()
                 )
-                mergedPages[pageNumber] = page.replacingFormulaAttachment(
+                layerPages[pageNumber] = page.replacingFormulaAttachment(
                     attachment,
                     source: .pi
                 )
@@ -897,7 +1081,12 @@ actor NativeBookOCRSidecarStore {
                     withIntermediateDirectories: true
                 )
             }
-            let stagingPages = stagingRoot.appendingPathComponent(
+            let stagingLayer = layerDirectory(
+                contentSHA256: contentSHA256,
+                layer: targetLayer,
+                beneath: stagingRoot
+            )
+            let stagingPages = stagingLayer.appendingPathComponent(
                 "pages",
                 isDirectory: true
             )
@@ -908,11 +1097,11 @@ actor NativeBookOCRSidecarStore {
                 at: stagingPages,
                 withIntermediateDirectories: true
             )
-            for value in mergedPages.values {
+            for value in layerPages.values {
                 let url = pageURL(
                     contentSHA256: contentSHA256,
                     page: value.page,
-                    beneath: stagingRoot
+                    beneath: stagingLayer
                 )
                 try fileManager.createDirectory(
                     at: url.deletingLastPathComponent(),
@@ -920,10 +1109,29 @@ actor NativeBookOCRSidecarStore {
                 )
                 try encoder().encode(value).write(to: url, options: .atomic)
             }
+            let importedEngine = manifest.engine
+                ?? Set(layerPages.values.map(\.engineRevision)).sorted().joined(
+                    separator: "+"
+                )
+            try writeLayerMetadata(
+                NativeBookOCRLayerMetadata(
+                    schema: NativeBookOCRLayerMetadata.schema,
+                    contentSHA256: contentSHA256,
+                    layer: targetLayer,
+                    engine: importedEngine,
+                    executor: executor,
+                    processingProfile: processingProfile,
+                    revision: manifest.revision,
+                    pageCount: layerPages.count,
+                    updatedAt: Date()
+                ),
+                beneath: stagingLayer
+            )
             let receipt = ImportedRevisionReceipt(
                 schema: ImportedRevisionReceipt.schema,
                 contentSHA256: contentSHA256,
                 revision: manifest.revision,
+                layer: targetLayer,
                 importedAt: Date()
             )
             let receiptURL = importReceiptURL(
@@ -958,6 +1166,7 @@ actor NativeBookOCRSidecarStore {
         }
         return NativeBookOCRImportResult(
             contentSHA256: contentSHA256,
+            layer: targetLayer,
             importedPages: importedPages.sorted(),
             importedFormulaPages: Array(Set(importedFormulaPages)).sorted()
         )
@@ -969,6 +1178,7 @@ actor NativeBookOCRSidecarStore {
         let schema: String
         let contentSHA256: String
         let revision: String
+        let layer: NativeBookOCRLayerID?
         let importedAt: Date
     }
 
@@ -1017,7 +1227,8 @@ actor NativeBookOCRSidecarStore {
     private func convertPiPage(
         _ value: PiPageCharacters,
         expectedContentSHA256: String,
-        expectedBookID: String
+        expectedBookID: String,
+        executor: String
     ) throws -> NativeBookOCRPageCharacters {
         guard value.schema == PiPageCharacters.schema,
               value.bookId == expectedBookID,
@@ -1063,7 +1274,7 @@ actor NativeBookOCRSidecarStore {
         } else {
             segmentation = .ready
         }
-        let revision = "pi-\(value.engine)/1"
+        let revision = "\(executor)-\(value.engine)/1"
         return NativeBookOCRPageCharacters(
             schema: NativeBookOCRPageCharacters.schema,
             contentSHA256: expectedContentSHA256,
@@ -1136,6 +1347,11 @@ actor NativeBookOCRSidecarStore {
                 of: #"^ocr_[0-9a-f]{20}$"#,
                 options: .regularExpression
               ) != nil,
+              manifest.executor.map({ ["pi", "pc"].contains($0) }) ?? true,
+              manifest.engine.map({ ["vision", "manga", "legacy"].contains($0) })
+                ?? true,
+              manifest.processingProfile.map({ !$0.isEmpty && $0.count <= 80 })
+                ?? true,
               !manifest.files.isEmpty,
               manifest.files.count <= Self.maximumAttachments,
               files.count == manifest.files.count else {
@@ -1175,9 +1391,100 @@ actor NativeBookOCRSidecarStore {
         }
     }
 
+    private func storedLayerMetadata(
+        contentSHA256: String,
+        layer: NativeBookOCRLayerID
+    ) throws -> NativeBookOCRLayerMetadata? {
+        guard [.appleVision, .pi, .pc].contains(layer) else { return nil }
+        let url = layerDirectory(
+            contentSHA256: contentSHA256,
+            layer: layer
+        ).appendingPathComponent("metadata.json", isDirectory: false)
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
+        do {
+            let values = try url.resourceValues(forKeys: [
+                .isRegularFileKey, .isSymbolicLinkKey,
+            ])
+            guard values.isRegularFile == true,
+                  values.isSymbolicLink != true else {
+                throw NativeBookOCRError.storage("文字层元数据文件无效")
+            }
+            let value = try decoder().decode(
+                NativeBookOCRLayerMetadata.self,
+                from: Data(contentsOf: url)
+            )
+            guard value.schema == NativeBookOCRLayerMetadata.schema,
+                  value.contentSHA256 == contentSHA256.lowercased(),
+                  value.layer == layer,
+                  value.pageCount > 0,
+                  !value.engine.isEmpty,
+                  !value.revision.isEmpty else {
+                throw NativeBookOCRError.storage("文字层元数据身份不匹配")
+            }
+            return value
+        } catch let error as NativeBookOCRError {
+            throw error
+        } catch {
+            throw NativeBookOCRError.storage(error.localizedDescription)
+        }
+    }
+
+    private func writeLayerMetadata(
+        _ value: NativeBookOCRLayerMetadata,
+        beneath layerDirectory: URL
+    ) throws {
+        guard value.schema == NativeBookOCRLayerMetadata.schema,
+              value.pageCount > 0,
+              [.appleVision, .pi, .pc].contains(value.layer) else {
+            throw NativeBookOCRError.storage("文字层元数据无效")
+        }
+        let url = layerDirectory.appendingPathComponent(
+            "metadata.json",
+            isDirectory: false
+        )
+        try fileManager.createDirectory(
+            at: layerDirectory,
+            withIntermediateDirectories: true
+        )
+        try encoder().encode(value).write(to: url, options: .atomic)
+    }
+
+    private func loadLayerSelection(
+        contentSHA256: String
+    ) throws -> NativeBookOCRLayerSelection? {
+        let url = layerSelectionURL(contentSHA256)
+        guard fileManager.fileExists(atPath: url.path) else { return nil }
+        do {
+            let value = try decoder().decode(
+                NativeBookOCRLayerSelection.self,
+                from: Data(contentsOf: url)
+            )
+            guard value.schema == NativeBookOCRLayerSelection.schema,
+                  value.contentSHA256 == contentSHA256.lowercased() else {
+                throw NativeBookOCRError.storage("文字层选择身份不匹配")
+            }
+            return value
+        } catch let error as NativeBookOCRError {
+            throw error
+        } catch {
+            throw NativeBookOCRError.storage(error.localizedDescription)
+        }
+    }
+
     private func contentDirectory(_ contentSHA256: String) -> URL {
         rootURL.appendingPathComponent("content", isDirectory: true)
             .appendingPathComponent(contentSHA256.lowercased(), isDirectory: true)
+    }
+
+    private func layerDirectory(
+        contentSHA256: String,
+        layer: NativeBookOCRLayerID,
+        beneath directory: URL? = nil
+    ) -> URL {
+        let base = directory ?? contentDirectory(contentSHA256)
+        if layer == .legacy { return base }
+        return base.appendingPathComponent("layers", isDirectory: true)
+            .appendingPathComponent(layer.rawValue, isDirectory: true)
     }
 
     private func pageURL(
@@ -1220,6 +1527,13 @@ actor NativeBookOCRSidecarStore {
         let digest = Self.sha256(Data(bookID.utf8))
         return rootURL.appendingPathComponent("jobs", isDirectory: true)
             .appendingPathComponent("\(digest).json", isDirectory: false)
+    }
+
+    private func layerSelectionURL(_ contentSHA256: String) -> URL {
+        contentDirectory(contentSHA256).appendingPathComponent(
+            "active-layer.json",
+            isDirectory: false
+        )
     }
 
     private func importReceiptURL(

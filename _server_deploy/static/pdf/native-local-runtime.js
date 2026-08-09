@@ -567,32 +567,37 @@
   }
 
   function gateIndexedDB() {
-    var probeId = 'native-idb-gate-' + randomHex(8);
-    var value = { id: probeId, marker: randomHex(12), at: Date.now() };
-    return stores.device.put('ui-session', value, {
+    function probeStore(store, scope) {
+      var probeId = 'native-idb-gate-' + scope + '-' + randomHex(8);
+      var value = { id: probeId, marker: randomHex(12), at: Date.now() };
+      return store.put('ui-session', value, {
       mutationId: 'native-idb-put-' + randomHex(8)
-    }).then(function () {
-      return stores.device.get('ui-session', probeId);
-    }).then(function (record) {
-      if (!record || !record.value || record.value.marker !== value.marker) {
-        throw new RuntimeError(
-          'IndexedDB 写入后无法读回',
-          'BW_LOCAL_STORE_UNAVAILABLE'
-        );
-      }
-      return stores.device.remove('ui-session', probeId, {
-        mutationId: 'native-idb-delete-' + randomHex(8)
+      }).then(function () {
+        return store.get('ui-session', probeId);
+      }).then(function (record) {
+        if (!record || !record.value || record.value.marker !== value.marker) {
+          throw new RuntimeError(
+            scope + ' IndexedDB 写入后无法读回',
+            'BW_LOCAL_STORE_UNAVAILABLE'
+          );
+        }
+        return store.remove('ui-session', probeId, {
+          mutationId: 'native-idb-delete-' + randomHex(8)
+        });
+      }).then(function () {
+        return store.get('ui-session', probeId);
+      }).then(function (record) {
+        if (record !== null) {
+          throw new RuntimeError(
+            scope + ' IndexedDB 删除后记录仍可见',
+            'BW_LOCAL_STORE_UNAVAILABLE'
+          );
+        }
+        return true;
       });
-    }).then(function () {
-      return stores.device.get('ui-session', probeId);
-    }).then(function (record) {
-      if (record !== null) {
-        throw new RuntimeError(
-          'IndexedDB 删除后记录仍可见',
-          'BW_LOCAL_STORE_UNAVAILABLE'
-        );
-      }
-      return true;
+    }
+    return probeStore(stores.document, '文档').then(function () {
+      return probeStore(stores.device, '设备');
     }).catch(function (error) {
       if (error && error.code === 'BW_LOCAL_STORE_UNAVAILABLE') throw error;
       throw new RuntimeError(
@@ -3040,6 +3045,12 @@
       if (result && (nativePageTextGeneration[page] || 0) === generation) {
         if (result.textAuthority === 'local-override') {
           nativeTextOverridePages[page] = true;
+        } else {
+          // A whole-layer switch uses this flag once to force an authoritative
+          // native read even when PDF.js already has embedded text. If the
+          // selected layer is embedded/supplemental, release that temporary
+          // force after the reply so later reads stay on the fast embedded path.
+          delete nativeTextOverridePages[page];
         }
         // idle/pending describe a moment, not immutable page content. In
         // particular, the first bridge request may race native status restore;
@@ -3655,14 +3666,58 @@
     nativeSearchPending.clear();
     dispatchPageTextUpdated(page, state, source, revision);
   }
+  function invalidateAllNativePageText(state, source, revision) {
+    var pages = Object.create(null);
+    [
+      embeddedPageText,
+      nativePageTextCache,
+      nativePageTextPending,
+      nativeFormulaPrefetchPending,
+      nativeTextOverridePages
+    ].forEach(function (values) {
+      Object.keys(values || {}).forEach(function (key) {
+        var page = Number(key);
+        if (validPage(page)) pages[page] = true;
+      });
+    });
+    Object.keys(pages).forEach(function (key) {
+      var page = Number(key);
+      nativePageTextGeneration[page] =
+        (nativePageTextGeneration[page] || 0) + 1;
+    });
+    nativePageTextCache = Object.create(null);
+    nativePageTextPending = Object.create(null);
+    nativeFormulaPrefetchPending = Object.create(null);
+    nativeTextOverridePages = Object.create(null);
+    // The selected layer is native state, not inferable from the previous JS
+    // cache. Force exactly one native read for each page already known to this
+    // document; nativePageForPage keeps the flag only when the reply declares
+    // local-override (Pi/PC/Vision/legacy) and drops it for embedded text.
+    Object.keys(pages).forEach(function (key) {
+      nativeTextOverridePages[Number(key)] = true;
+    });
+    nativeSearchGeneration += 1;
+    nativeSearchCache.clear();
+    nativeSearchPending.clear();
+    Object.keys(pages).forEach(function (key) {
+      dispatchPageTextUpdated(Number(key), state, source, revision);
+    });
+  }
   function pageTextUpdate(event) {
     var detail = event && event.detail;
     if (!detail || typeof detail !== 'object' || Array.isArray(detail) ||
         Object.keys(detail).some(function (key) { return !PAGE_TEXT_UPDATE_KEYS.has(key); }) ||
         detail.contract !== PAGE_TEXT_UPDATE_CONTRACT ||
-        detail.localBookId !== bookId || !validPage(detail.page) ||
+        detail.localBookId !== bookId ||
+        (detail.page !== null && !validPage(detail.page)) ||
         !PAGE_TEXT_STATES.has(detail.state) ||
         (detail.source != null && !PAGE_TEXT_NATIVE_SOURCES.has(detail.source))) return;
+    if (detail.page === null) {
+      invalidateAllNativePageText(
+        detail.state, detail.source, detail.revision
+      );
+      return;
+    }
     invalidateNativePageText(
       detail.page, detail.state, detail.source, detail.revision
     );

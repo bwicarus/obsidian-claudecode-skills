@@ -90,7 +90,7 @@ test("Apple Vision cache revision refresh is narrow, layered, and fail-safe", ()
   );
   const failureGate = MANAGER.indexOf("if refreshingStaleVision,");
   const writePage = MANAGER.indexOf(
-    "try await store.writePage(value, bookID: bookID)",
+    "try await store.writePage(",
     failureGate,
   );
   assert.ok(failureGate >= 0 && writePage > failureGate);
@@ -393,7 +393,11 @@ test("native update event and page formula reply keep the exact public shape", (
   assert.match(BRIDGE, /"retryable": retryable/);
   assert.match(BRIDGE, /private static func pageRevision/);
   assert.match(BRIDGE, /SHA256\.hash\(data: data\)/);
-  assert.match(MANAGER, /result\.importedPages \+ result\.importedFormulaPages/);
+  assert.match(BRIDGE, /value\.engineRevision\.prefix\(72\)/);
+  assert.match(BRIDGE, /return "\\\(engine\):\\\(String\(digest\.prefix\(72\)\)\)"/);
+  assert.match(MANAGER, /layerStates\[bookID\] = try await store\.layerState/);
+  assert.match(MANAGER, /当前文字层未自动切换/);
+  assert.match(BRIDGE, /Self\.jsonNullable\(update\.page\)/);
   assert.match(BRIDGE, /Dictionary\(grouping: value\.matches/);
   assert.match(BRIDGE, /"count": hits\.count/);
   assert.match(BRIDGE, /"pages": status\.textProgress\.completed/);

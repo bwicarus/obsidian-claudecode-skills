@@ -407,6 +407,9 @@ struct ReaderLocalLibraryView: View {
                     nativeControls(book: localBook, status: status)
 
                     Divider()
+                    textLayerPicker(book: localBook)
+
+                    Divider()
                     piControls(
                         remoteBook: remoteBook,
                         localBook: localBook
@@ -414,6 +417,9 @@ struct ReaderLocalLibraryView: View {
                 }
             } label: {
                 Label("文字、分词与公式", systemImage: "text.viewfinder")
+            }
+            .task(id: "text-layers:\(localBook.id):\(localBook.contentSha256 ?? "pending")") {
+                await refreshTextLayers(localBook)
             }
         } else {
             Text("EPUB 使用其可重排文字层；整页图片型 EPUB 暂不支持这套 PDF 页图预处理。")
@@ -524,6 +530,78 @@ struct ReaderLocalLibraryView: View {
         .buttonStyle(.bordered)
         .controlSize(.small)
         .disabled(ocrActionBookID != nil)
+    }
+
+    @ViewBuilder
+    private func textLayerPicker(book: ReaderLocalBookRecord) -> some View {
+        HStack(spacing: 8) {
+            Label("当前使用", systemImage: "text.page")
+                .font(.caption.weight(.semibold))
+            Spacer()
+            if let state = nativeOCR.layerState(
+                for: book.id,
+                expectedContentSHA256: book.contentSha256
+            ) {
+                Picker(
+                    "当前使用的文字层",
+                    selection: Binding(
+                        get: { state.selected },
+                        set: { layer in
+                            Task { await selectTextLayer(layer, for: book) }
+                        }
+                    )
+                ) {
+                    ForEach(state.available) { metadata in
+                        Text(textLayerOptionTitle(metadata)).tag(metadata.layer)
+                    }
+                }
+                .labelsHidden()
+                .disabled(ocrActionBookID != nil)
+            } else {
+                ProgressView().controlSize(.mini)
+            }
+        }
+        Text("导入或预处理不会自动覆盖当前选择；切换后正在阅读的页面会立即重载文字层。")
+            .font(.caption2)
+            .foregroundStyle(.secondary)
+    }
+
+    private func textLayerOptionTitle(
+        _ metadata: NativeBookOCRLayerMetadata
+    ) -> String {
+        if metadata.layer == .embedded { return metadata.layer.title }
+        return "\(metadata.layer.title) · \(metadata.pageCount) 页"
+    }
+
+    private func refreshTextLayers(_ book: ReaderLocalBookRecord) async {
+        do {
+            let digest = try await library.ensureContentSHA256(for: book)
+            _ = try await nativeOCR.refreshLayerState(
+                bookID: book.id,
+                expectedContentSHA256: digest
+            )
+        } catch {
+            ocrErrorMessage = "文字层状态读取失败：\(error.localizedDescription)"
+        }
+    }
+
+    private func selectTextLayer(
+        _ layer: NativeBookOCRLayerID,
+        for book: ReaderLocalBookRecord
+    ) async {
+        guard ocrActionBookID == nil else { return }
+        ocrActionBookID = book.id
+        defer { if ocrActionBookID == book.id { ocrActionBookID = nil } }
+        do {
+            let digest = try await library.ensureContentSHA256(for: book)
+            _ = try await nativeOCR.selectTextLayer(
+                bookID: book.id,
+                expectedContentSHA256: digest,
+                layer: layer
+            )
+        } catch {
+            ocrErrorMessage = "文字层切换失败：\(error.localizedDescription)"
+        }
     }
 
     @ViewBuilder

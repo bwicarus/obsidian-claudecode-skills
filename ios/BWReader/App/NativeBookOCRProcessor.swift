@@ -174,6 +174,62 @@ actor NativeBookOCRProcessor {
         )
     }
 
+    /// Materializes only the PDF's own text layer for use beneath a manual
+    /// selection correction. It never falls through to Vision: choosing the
+    /// embedded layer must not silently substitute a different OCR engine.
+    func processEmbeddedPage(
+        pageNumber: Int,
+        contentSHA256: String,
+        configuration: NativeBookOCRConfiguration
+    ) throws -> NativeBookOCRPageCharacters {
+        try Task.checkCancellation()
+        guard pageNumber >= 1,
+              let page = document.page(at: pageNumber - 1) else {
+            throw NativeBookOCRError.pageUnavailable
+        }
+        let geometry = try geometry(
+            pageNumber: pageNumber,
+            configuration: configuration
+        )
+        let embedded = geometry.rotation == 0
+            ? embeddedCharacters(
+                page: page,
+                geometry: geometry,
+                minimumCharacters: 0
+              )
+            : nil
+        let extraction = embedded ?? PageExtraction(
+            characters: [],
+            wordSegmentation: .unavailable,
+            characterGeometry: .unavailable
+        )
+        let digest = Self.geometryDigest(
+            contentSHA256: contentSHA256,
+            geometry: geometry,
+            engineRevision: Self.embeddedEngineRevision
+        )
+        return NativeBookOCRPageCharacters(
+            schema: NativeBookOCRPageCharacters.schema,
+            contentSHA256: contentSHA256,
+            page: pageNumber,
+            pageWidth: geometry.pageWidth,
+            pageHeight: geometry.pageHeight,
+            rotation: geometry.rotation,
+            geometryDigest: digest,
+            engineRevision: Self.embeddedEngineRevision,
+            status: extraction.characters.isEmpty ? .readyEmpty : .ready,
+            source: .apple,
+            chars: extraction.characters,
+            furigana: [],
+            wordSegmentation: extraction.wordSegmentation,
+            characterGeometry: extraction.characterGeometry,
+            formulaCoverage: .unavailable,
+            formulaRegions: [],
+            createdAt: Date(),
+            error: nil
+        )
+    }
+
     static func failurePage(
         contentSHA256: String,
         geometry: NativeBookOCRPageGeometry,

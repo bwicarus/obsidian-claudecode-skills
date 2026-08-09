@@ -145,6 +145,9 @@ struct ReaderPiOCRAttachmentManifest: Codable, Hashable, Sendable {
     let bookId: String
     let contentSha256: String
     let revision: String
+    let engine: String?
+    let executor: String?
+    let processingProfile: String?
     let category: String
     let mergePolicy: String
     let files: [ReaderPiOCRAttachmentFile]
@@ -648,6 +651,11 @@ final class ReaderPiOCRClient {
                 == .orderedSame,
               manifest.category == "derived",
               manifest.mergePolicy == "immutable",
+              manifest.engine.map({ ["vision", "manga", "legacy"].contains($0) }) ?? true,
+              manifest.executor.map({ ["pi", "pc"].contains($0) }) ?? true,
+              manifest.processingProfile.map({ !$0.isEmpty && $0.count <= 80 }) ?? true,
+              manifest.executor != "pc"
+                || manifest.processingProfile == "quality-first-v1",
               manifest.files.count <= 5_001 else {
             throw ReaderPiOCRError.invalidManifest
         }
@@ -1043,6 +1051,9 @@ final class ReaderPiOCRCoordinator: ObservableObject {
                 bookId: bundle.manifest.bookId,
                 contentSha256: bundle.manifest.contentSha256,
                 revision: bundle.manifest.revision,
+                engine: bundle.manifest.engine,
+                executor: bundle.manifest.executor,
+                processingProfile: bundle.manifest.processingProfile,
                 files: bundle.manifest.files.map { entry in
                     NativeBookOCRDerivedAttachmentManifest.File(
                         attachmentId: entry.attachmentId,
@@ -1064,7 +1075,9 @@ final class ReaderPiOCRCoordinator: ObservableObject {
                 files: bundle.files
             )
             clearPassiveError(for: book.bookId)
-            notice = "已导入 Pi 预处理结果"
+            notice = bundle.manifest.executor == "pc"
+                ? "已导入 PC 高质量预处理结果，可在文字层中选择"
+                : "已导入 Pi 预处理结果，可在文字层中选择"
             return true
         } catch {
             guard !isCancellation(error) else { return false }

@@ -283,8 +283,8 @@ if (document.readyState !== 'loading') _setupPageScrub();
 else window.addEventListener('DOMContentLoaded', _setupPageScrub);
 window.zoomChange = async (delta) => {
   scale = Math.max(_ZOOM_MIN, Math.min(_scaleMax, scale + delta));
-  // +/- 缩放跟双指缩放(_applyZoom)一致:三模式都原地重排(单页=唯一 wrap),原地失败才按模式重建
-  if (!(await _rescaleContinuousInPlace())) { if (readMode === 'single') await renderPage(currentPage); else await setupContinuousMode(); }
+  // +/- 缩放跟双指缩放(_applyZoom)一致:先更新全书廉价 CSS 几何，只高清化视口/邻页。
+  if (!(await _rescaleContinuousInPlace({ rasterScope: 'visible-near' }))) { if (readMode === 'single') await renderPage(currentPage); else await setupContinuousMode(); }
 };
 // 宽适应：按 #main 可用宽度重算 scale（取消 ＋/－ 或双指缩放，回到一页刚好铺满宽度）
 window.fitWidth = async () => { window._atFitWidth = true; await _refitToWidth(true); window._rememberOrientLayout?.(); };   // 点「适应」= 回到宽度适应态(旋转保持适应);也记进当前方向

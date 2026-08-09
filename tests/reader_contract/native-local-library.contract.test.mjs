@@ -148,7 +148,7 @@ test("legacy Reader shelf navigation opens the App-owned local library", () => {
   );
   assert.match(
     WEB_VIEW,
-    /let sourceURL = navigationAction\.sourceFrame\.request\.url[\s\S]*navigationAction\.targetFrame\?\.isMainFrame != false,[\s\S]*takeOverLibraryNavigation\(url, sourceURL: sourceURL\)[\s\S]*decisionHandler\(\.cancel\)/,
+    /let sourceURL = navigationAction\.sourceFrame\.isMainFrame[\s\S]*\? webView\.url[\s\S]*: navigationAction\.sourceFrame\.request\.url[\s\S]*navigationAction\.targetFrame\?\.isMainFrame != false,[\s\S]*takeOverLibraryNavigation\(url, sourceURL: sourceURL\)[\s\S]*decisionHandler\(\.cancel\)/,
   );
   assert.match(
     APP_ROOT,
@@ -157,6 +157,10 @@ test("legacy Reader shelf navigation opens the App-owned local library", () => {
 });
 
 test("legacy local navigation trusts the initiating frame and never fabricates capability routes", () => {
+  assert.match(
+    WEB_VIEW,
+    /navigationAction\.sourceFrame\.isMainFrame[\s\S]*\? webView\.url[\s\S]*: navigationAction\.sourceFrame\.request\.url/,
+  );
   assert.match(
     WEB_VIEW,
     /private func takeOverRemoteBookNavigation\([\s\S]*sourceURL: URL\?[\s\S]*isTrustedReaderURL\(sourceURL\)/,

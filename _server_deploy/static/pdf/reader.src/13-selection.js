@@ -178,6 +178,9 @@ function _charConnectedBlockPath(blocks, startId, endId) {
 // 只取端点之间的几何连通路径。若端点不连通，宁可只保留两个端点块，也不把
 // 视觉上夹在中间、语义上属于别的气泡/栏的块吞进来。
 function _charRangeBlockFilter(chars, sIdx, eIdx) {
+  if (chars[sIdx] && chars[eIdx]
+      && chars[sIdx]._selectionBlockFilter === false
+      && chars[eIdx]._selectionBlockFilter === false) return () => true;
   const sb = _charBlockId(chars[sIdx]), eb = _charBlockId(chars[eIdx]);
   if (sb < 0 || eb < 0) return () => true;
   if (sb === eb) return (c) => _charBlockId(c) === sb || (_charBlockId(c) < 0 && !!c.sp);

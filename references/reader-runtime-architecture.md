@@ -50,7 +50,8 @@
              ├── iOS App 本机真书
              │     ├─ Swift 文件/安全作用域/系统能力/同步入口
              │     ├─ App-owned local store（权威）
-             │     └─ 内置 Reader renderer + DocumentHost
+             │     ├─ PDFKit 基础页面 + PDF DocumentHost / 共享网页叠层
+             │     └─ EPUB 内置网页 renderer + EPUB DocumentHost
              │
              ├── 真书 PWA + 扩展
              │     ├─ Extension shared UI（唯一可见共享 UI）
@@ -91,10 +92,16 @@
 
 ### iOS App 本机真书
 
-- App 从安装包内加载固定版本的 Reader 壳、共享组件和 PDF/EPUB renderer，不请求远程首页。
+- App 从安装包内加载固定版本的 Reader 壳与共享组件，不请求远程首页。PDF 的目标基础页面由
+  `PDFView`/PDFKit 承担原生渲染、滚动、缩放和自带文字层选择；EPUB 继续使用安装包内网页
+  renderer。
 - Swift 只向页面提供不透明本机书 ID；bookmark、绝对路径和 security-scoped URL 永不进入 JS。
-- PDF 由本机字节流提供 Range，继续复用 PDF.js 与 PDF `DocumentHost`；EPUB 由本机容器提供
-  manifest、section 与资源等价接口，继续复用 EPUB `DocumentHost`。本地首版不注入书籍自带
+- PDF `DocumentHost` 继续作为页码、字符/OCR 层、稳定锚点、搜索和页几何的语义权威；PDFKit
+  只替换基础页图与原生选择表面，不能另造第二套身份或坐标真源。共享网页层以透明叠层同步当前页、
+  zoom 与 viewport，仅绘制笔迹、卡片、便签、AI 工具和其他跨端组件，不再重复绘制整张 PDF 页。
+- 迁移期间仍允许现有 PDF.js 基础页面作为兼容回退，但新增本机 PDF 能力优先接入 PDFKit 路径，
+  回退不得成为长期双实现。EPUB 由本机容器提供 manifest、section 与资源等价接口，继续复用 EPUB
+  `DocumentHost`。本地首版不注入书籍自带
   CSS，只使用 Reader 的受信默认样式；恢复书内 CSS 的前提是先完成可靠的作用域隔离与协议净化，
   不能让不受信书籍样式覆盖 App 的可信 UI。
 - 共享网页组件负责卡片、便签、选区、侧栏和阅读交互；App 本机存储负责它们的数据真值，
@@ -196,10 +203,11 @@ collection 就自动上传。无扩展真书 PWA 使用自己的本地 fallback�
   可用相对路径区分内容完全相同的副本，随后以索引继承身份，不能把路径当成跨端书籍身份。
 - 本地书直接由 App 内置 Reader 打开，绝不以“上传到 Pi”作为阅读前置；Pi 下载后的书也立即
   进入同一本机打开路径。
-- App 从同一 Reader 源码打包本地壳，并由原生本地资源接口提供 PDF Range 与 EPUB
+- App 从同一 Reader 源码打包本地壳，并由原生本地资源接口提供 PDF 与 EPUB
   manifest/section/resource 等价能力；本地首版的书籍自带 CSS 处于明确禁用状态，待作用域隔离
-  合同成熟后再恢复。不得以 PDFKit/另一套 EPUB renderer 取代现有 `DocumentHost`，也不得把
-  本地壳重新命名为 PWA。
+  合同成熟后再恢复。PDFKit 可以取代 PDF.js 的基础渲染与原生选择表面，但不得取代 PDF
+  `DocumentHost` 的身份、锚点、状态与共享功能合同；EPUB renderer 不在这次替换范围内，也不得
+  把本地壳重新命名为 PWA。
 
 ### PDF 预处理执行器与派生附件
 

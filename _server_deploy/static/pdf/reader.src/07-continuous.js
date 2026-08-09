@@ -134,8 +134,8 @@ window._auditScales = function (tag) {
 //      布局即刻正确(focal 复位/滚动读到的 offsetHeight 立即准)、无白闪、不 snap 回旧大小;暂时由旧栅格放缩→略软。
 //   ② 后台(不 await):并发重栅格化到新 scale 高清图,各自 decode-first 换入(缩小走缓存秒回;放大并发一次 fetch ≈300ms)。
 //      重入由 _renderPageImg 的 __imgGen 守卫(最后发起的赢),所以期间用户再捏合也安全。
-// options.rasterScope==='visible-near' 仅供侧栏稳定提交：所有页仍同步得到正确 CSS 几何，只有视口/近邻
-// 已加载页立即高清化；远页标成待 IO 清晰化。用户主动缩放不传 options，保留原来的全量一致性语义。
+// options.rasterScope==='visible-near' 供侧栏稳定提交和用户缩放：所有页仍同步得到正确 CSS 几何，只有视口/近邻
+// 已加载页立即高清化；远页标成待 IO 清晰化。无 scope 仅保留给确实需要马上重绘全部已加载页的内部调用。
 // 返回 false(没建过列表 / 结构不符)→ 调用方回退 setupContinuousMode。global scale 已由调用方设好。
 async function _rescaleContinuousInPlace(options) {
   const container = document.getElementById('page-container');

@@ -256,7 +256,7 @@
       // 高亮/图徽标/装饰整体 try/catch:任一抛错都不能让本章退回未加载(内容已 innerHTML 上屏);错误异步抛给横幅诊断
       try {
         var imgs = el.querySelectorAll('img');
-        if (imgs.length && idx < 60) setTimeout(function () { var ok = 0; imgs.forEach(function (im) { if (im.naturalWidth > 0) ok++; }); dbg('sec' + idx + ' imgs=' + imgs.length + ' loaded=' + ok + ' src0=' + (imgs[0] ? imgs[0].getAttribute('src').slice(-46) : '')); }, 1800);
+        if (imgs.length && idx < 60) setTimeout(function () { var ok = 0; imgs.forEach(function (im) { if (im.naturalWidth > 0) ok++; }); var src0 = imgs[0] ? (imgs[0].getAttribute('src') || '') : ''; dbg('sec' + idx + ' imgs=' + imgs.length + ' loaded=' + ok + ' src0=' + src0.slice(-46)); }, 1800);
         // 所有装饰(高亮/图徽标/生词/振假名)全推迟到空闲帧 → loadSection 同步部分只剩 innerHTML,不阻塞侧边栏点击/滚动
         // (根因:多章同时加载时,applyHl + decorateFigures 同步跑占满主线程,侧边栏按钮的 tap 排不进事件循环)
         (window.requestIdleCallback || function (f) { return setTimeout(f, 0); })(function () {

@@ -3197,7 +3197,13 @@ extension ReaderWebViewModel: WKNavigationDelegate {
             decisionHandler(.allow)
             return
         }
-        let sourceURL = navigationAction.sourceFrame.request.url
+        // WKFrameInfo.request is not a stable committed-document identity for
+        // same-main-frame location.href navigations. Trust the WebView's
+        // committed URL for a main-frame initiator, while subframes must still
+        // prove their own origin and may never borrow main-frame authority.
+        let sourceURL = navigationAction.sourceFrame.isMainFrame
+            ? webView.url
+            : navigationAction.sourceFrame.request.url
 
         if nativePencilInk.hasPendingOperations,
            navigationAction.targetFrame?.isMainFrame != false

@@ -612,17 +612,26 @@
       var changes = [];
       return transact(ALL_STORES, 'readwrite', function (transaction) {
         var results = [];
-        return mutations.reduce(function (chain, mutation) {
-          return chain.then(function () {
-            var work = mutation.operation === 'remove'
-              ? removeWithin(transaction, mutation.collection, mutation.id, mutation.options)
-              : putWithin(transaction, mutation.collection, mutation.value, mutation.options);
-            return work.then(function (outcome) {
-              results.push(outcome.result);
-              if (outcome.change) changes.push(outcome.change);
-            });
+        function applyMutation(mutation) {
+          var work = mutation.operation === 'remove'
+            ? removeWithin(transaction, mutation.collection, mutation.id, mutation.options)
+            : putWithin(transaction, mutation.collection, mutation.value, mutation.options);
+          return work.then(function (outcome) {
+            results.push(outcome.result);
+            if (outcome.change) changes.push(outcome.change);
           });
-        }, Promise.resolve()).then(function () {
+        }
+
+        // Queue the first IndexedDB request synchronously while the transaction
+        // is unquestionably active. WebKit may auto-commit a readwrite
+        // transaction when its callback returns without a pending request; a
+        // Promise.resolve().then(...) seed therefore made every one-item batch
+        // (including PDF/EPUB highlights) fail with TransactionInactiveError.
+        var work = applyMutation(mutations[0]);
+        mutations.slice(1).forEach(function (mutation) {
+          work = work.then(function () { return applyMutation(mutation); });
+        });
+        return work.then(function () {
           return Promise.all([
             trimOldest(transaction.objectStore(STORE_JOURNAL), maxJournal),
             trimOldest(transaction.objectStore(STORE_MUTATIONS), maxMutations, 'rememberedAt')

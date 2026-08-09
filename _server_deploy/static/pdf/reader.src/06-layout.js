@@ -332,8 +332,10 @@ async function _applyZoom(newScale, focal) {
     scale = newScale;
     _lastFitWidth = _mainContentWidth();   // 占住 fit 宽，避免 ResizeObserver 把 scale 拉回自适应
     window._atFitWidth = false;            // 手动缩放 → 离开宽度适应态(旋转不再强制适应,还原各方向记忆)
-    // 统一:三模式都走 wrap 原地重标尺(单页=唯一 wrap,跟连续同一套 CSS-zoom 瞬时缩放 + 后台重栅格化);失败按模式重建
-    if (!(await _rescaleContinuousInPlace())) { if (readMode === 'single') await renderPage(currentPage); else await setupContinuousMode(); }
+    // 统一:三模式都走 wrap 原地重标尺(单页=唯一 wrap,跟连续同一套 CSS-zoom 瞬时缩放 + 后台重栅格化)。
+    // 只立即高清化视口和邻页；远页保留正确 CSS 几何，进入 IO 预取区时再重绘。大书不再一次缩放同时
+    // 启动所有已加载页的 PDF.js canvas/text-layer 工作，避免 iPad 主线程与 GPU 瞬时过载。
+    if (!(await _rescaleContinuousInPlace({ rasterScope: 'visible-near' }))) { if (readMode === 'single') await renderPage(currentPage); else await setupContinuousMode(); }
     requestAnimationFrame(() => {
       if (focal && focal.s0 > 0) {
         const mr = main.getBoundingClientRect();
@@ -392,8 +394,21 @@ function _setupPinchZoom() {
         cx, cy,
         anchor: _focalAnchor(cx, cy),   // 焦点页锚(布局无关);缩放不跳
       };
-      const pc = document.getElementById('page-container');
-      pc.style.transformOrigin = _pinch.fx + 'px ' + _pinch.fy + 'px';   // 整个手势固定不变 → 焦点视觉锁定
+      const anchorWrap = _pinch.anchor && _pinch.anchor.pn != null
+        ? document.querySelector('.page-wrap[data-page-num="' + _pinch.anchor.pn + '"]')
+        : null;
+      // WebKit 对整本 page-container 做 transform 时，会尝试把数百页提升成一个巨型合成层。
+      // 手势预览只提升当前页（双页模式提升当前 row）；松手后的真实布局仍由 _applyZoom 一次提交。
+      const previewNode = anchorWrap
+        ? ((readMode === 'spread' && anchorWrap.closest('.spread-row')) || anchorWrap)
+        : null;
+      if (previewNode) {
+        const pr = previewNode.getBoundingClientRect();
+        previewNode.style.transformOrigin = (cx - pr.left) + 'px ' + (cy - pr.top) + 'px';
+        previewNode.style.willChange = 'transform';
+      }
+      _pinch.previewNode = previewNode;
+      _pinch.previewRAF = 0;
       e.preventDefault();
     }
   }, { passive: false });
@@ -403,15 +418,26 @@ function _setupPinchZoom() {
       const [a, b] = e.touches;
       const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
       _pinch.target = Math.max(_ZOOM_MIN, Math.min(_scaleMax, _pinch.s0 * (d / _pinch.d0)));
-      // 实时预览:只改 scale(origin 起始已定),焦点点视觉不动;松手后按新倍率重渲染→清晰
-      document.getElementById('page-container').style.transform = 'scale(' + (_pinch.target / _pinch.s0) + ')';
+      // 每帧最多提交一次 compositor 更新；高频 touchmove 不再反复写样式。
+      const p = _pinch;
+      if (p.previewNode && !p.previewRAF) {
+        p.previewRAF = requestAnimationFrame(() => {
+          p.previewRAF = 0;
+          if (_pinch !== p || !p.previewNode) return;
+          p.previewNode.style.transform = 'scale(' + (p.target / p.s0) + ')';
+        });
+      }
     }
   }, { passive: false });
   const endPinch = () => {
     if (!_pinch) return;
     const p = _pinch; _pinch = null;
-    const pc = document.getElementById('page-container');
-    pc.style.transform = ''; pc.style.transformOrigin = '';
+    if (p.previewRAF) cancelAnimationFrame(p.previewRAF);
+    if (p.previewNode) {
+      p.previewNode.style.transform = '';
+      p.previewNode.style.transformOrigin = '';
+      p.previewNode.style.willChange = '';
+    }
     if (Math.abs(p.target - scale) > 0.01) {
       // 焦点保持:把起始焦点内容点放回起始屏幕位置(cx,cy),缩放不跳
       _applyZoom(p.target, { fx: p.fx, fy: p.fy, cx: p.cx, cy: p.cy, s0: p.s0, anchor: p.anchor });

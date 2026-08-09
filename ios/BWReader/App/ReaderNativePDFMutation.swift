@@ -1091,6 +1091,121 @@ actor ReaderNativePDFMutationActor {
             pivotPage: pivotPage,
             selectionCorrections: true
         )
+        var availableLayers = Set<NativeBookOCRLayerID>([.embedded])
+        if try ocrPageCount(
+            staging.appendingPathComponent("pages", isDirectory: true)
+        ) > 0 {
+            availableLayers.insert(.legacy)
+        }
+        for layer in NativeBookOCRLayerID.allCases where layer != .legacy {
+            let layerDirectory = staging
+                .appendingPathComponent("layers", isDirectory: true)
+                .appendingPathComponent(layer.rawValue, isDirectory: true)
+            let pagesDirectory = layerDirectory.appendingPathComponent(
+                "pages",
+                isDirectory: true
+            )
+            try migrateOCRPageDirectory(
+                pagesDirectory,
+                stagedContentSHA256: stagedContentSHA256,
+                operation: operation,
+                pivotPage: pivotPage,
+                selectionCorrections: false
+            )
+            let pageCount = try ocrPageCount(pagesDirectory)
+            if layer == .embedded {
+                continue
+            }
+            let metadataURL = layerDirectory.appendingPathComponent(
+                "metadata.json",
+                isDirectory: false
+            )
+            if pageCount == 0 {
+                try? FileManager.default.removeItem(at: layerDirectory)
+                continue
+            }
+            guard FileManager.default.fileExists(atPath: metadataURL.path) else {
+                throw ReaderNativePDFMutationError.stagingFailed(
+                    "本机 OCR 文字层缺少元数据"
+                )
+            }
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .millisecondsSince1970
+            let metadata = try decoder.decode(
+                NativeBookOCRLayerMetadata.self,
+                from: Data(contentsOf: metadataURL)
+            )
+            guard metadata.schema == NativeBookOCRLayerMetadata.schema,
+                  metadata.layer == layer else {
+                throw ReaderNativePDFMutationError.stagingFailed(
+                    "本机 OCR 文字层元数据身份不匹配"
+                )
+            }
+            let migratedMetadata = NativeBookOCRLayerMetadata(
+                schema: metadata.schema,
+                contentSHA256: stagedContentSHA256.lowercased(),
+                layer: layer,
+                engine: metadata.engine,
+                executor: metadata.executor,
+                processingProfile: metadata.processingProfile,
+                revision: metadata.revision + "+pdf-page-anchor/1",
+                pageCount: pageCount,
+                updatedAt: Date()
+            )
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .millisecondsSince1970
+            encoder.outputFormatting = [.sortedKeys]
+            try encoder.encode(migratedMetadata).write(
+                to: metadataURL,
+                options: .atomic
+            )
+            availableLayers.insert(layer)
+        }
+        let selectionURL = staging.appendingPathComponent(
+            "active-layer.json",
+            isDirectory: false
+        )
+        if FileManager.default.fileExists(atPath: selectionURL.path) {
+            let decoder = JSONDecoder()
+            decoder.dateDecodingStrategy = .millisecondsSince1970
+            let selection = try decoder.decode(
+                NativeBookOCRLayerSelection.self,
+                from: Data(contentsOf: selectionURL)
+            )
+            guard selection.schema == NativeBookOCRLayerSelection.schema else {
+                throw ReaderNativePDFMutationError.stagingFailed(
+                    "本机 OCR 文字层选择记录无效"
+                )
+            }
+            let migratedSelection = NativeBookOCRLayerSelection(
+                schema: selection.schema,
+                contentSHA256: stagedContentSHA256.lowercased(),
+                selected: availableLayers.contains(selection.selected)
+                    ? selection.selected : .embedded,
+                updatedAt: Date()
+            )
+            let encoder = JSONEncoder()
+            encoder.dateEncodingStrategy = .millisecondsSince1970
+            encoder.outputFormatting = [.sortedKeys]
+            try encoder.encode(migratedSelection).write(
+                to: selectionURL,
+                options: .atomic
+            )
+        }
+    }
+
+    private static func ocrPageCount(_ directory: URL) throws -> Int {
+        guard FileManager.default.fileExists(atPath: directory.path) else {
+            return 0
+        }
+        return try FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        ).filter {
+            $0.pathExtension == "json"
+                && ocrPageNumber($0.lastPathComponent) != nil
+        }.count
     }
 
     private static func migrateOCRPageDirectory(

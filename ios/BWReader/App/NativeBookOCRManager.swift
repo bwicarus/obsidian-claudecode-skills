@@ -6,6 +6,7 @@ final class NativeBookOCRManager: ObservableObject {
     static let shared = NativeBookOCRManager()
 
     @Published private(set) var bookStatuses: [String: NativeBookOCRBookStatus] = [:]
+    @Published private(set) var layerStates: [String: NativeBookOCRLayerState] = [:]
     @Published private(set) var lastUpdate: NativeBookOCRUpdate?
 
     private let store: NativeBookOCRSidecarStore
@@ -236,6 +237,77 @@ final class NativeBookOCRManager: ObservableObject {
             return .idle(bookID: bookID)
         }
         return status
+    }
+
+    func layerState(
+        for bookID: String,
+        expectedContentSHA256: String? = nil
+    ) -> NativeBookOCRLayerState? {
+        guard let state = layerStates[bookID] else { return nil }
+        if let expectedContentSHA256 {
+            guard Self.isSHA256(expectedContentSHA256),
+                  state.contentSHA256.caseInsensitiveCompare(
+                    expectedContentSHA256
+                  ) == .orderedSame else { return nil }
+        }
+        return state
+    }
+
+    @discardableResult
+    func refreshLayerState(
+        bookID: String,
+        expectedContentSHA256: String
+    ) async throws -> NativeBookOCRLayerState {
+        await waitUntilReady()
+        guard Self.isSHA256(expectedContentSHA256) else {
+            throw NativeBookOCRError.invalidContentSHA256
+        }
+        try activate(
+            bookID: bookID,
+            expectedContentSHA256: expectedContentSHA256
+        )
+        let state = try await store.layerState(
+            contentSHA256: expectedContentSHA256
+        )
+        guard activeContentSHA256[bookID] == expectedContentSHA256.lowercased()
+        else { throw NativeBookOCRError.invalidContentSHA256 }
+        layerStates[bookID] = state
+        return state
+    }
+
+    @discardableResult
+    func selectTextLayer(
+        bookID: String,
+        expectedContentSHA256: String,
+        layer: NativeBookOCRLayerID
+    ) async throws -> NativeBookOCRLayerState {
+        try beginWriteOperation(bookID: bookID)
+        defer { endWriteOperation(bookID: bookID) }
+        await waitUntilReady()
+        guard Self.isSHA256(expectedContentSHA256) else {
+            throw NativeBookOCRError.invalidContentSHA256
+        }
+        try activate(
+            bookID: bookID,
+            expectedContentSHA256: expectedContentSHA256
+        )
+        let state = try await store.selectLayer(
+            bookID: bookID,
+            contentSHA256: expectedContentSHA256,
+            layer: layer
+        )
+        layerStates[bookID] = state
+        let current = status(
+            for: bookID,
+            expectedContentSHA256: expectedContentSHA256
+        )
+        lastUpdate = NativeBookOCRUpdate(
+            contract: NativeBookOCRUpdate.contract,
+            bookID: bookID,
+            page: nil,
+            status: current
+        )
+        return state
     }
 
     func readyStatus(
@@ -592,24 +664,48 @@ final class NativeBookOCRManager: ObservableObject {
         page: Int,
         configuration: NativeBookOCRConfiguration
     ) async throws -> NativeBookOCRPageCharacters {
+        let selectedLayer = try await store.layerState(
+            contentSHA256: contentSHA256
+        ).selected
         let previous = try await store.basePage(
             contentSHA256: contentSHA256,
-            page: page
+            page: page,
+            layer: selectedLayer
         )
         if let previous,
-           !Self.shouldRefreshCachedAppleVisionBase(previous) {
+           (selectedLayer != .appleVision
+            || !Self.shouldRefreshCachedAppleVisionBase(previous)) {
             return previous
         }
-        let recognized = try await processor.processPage(
-            pageNumber: page,
-            contentSHA256: contentSHA256,
-            configuration: configuration
-        )
+        guard selectedLayer == .embedded || selectedLayer == .appleVision else {
+            throw NativeBookOCRError.storage(
+                "当前文字层缺少第 \(page) 页，不能建立选区校正"
+            )
+        }
+        let recognized: NativeBookOCRPageCharacters
+        if selectedLayer == .embedded {
+            recognized = try await processor.processEmbeddedPage(
+                pageNumber: page,
+                contentSHA256: contentSHA256,
+                configuration: configuration
+            )
+        } else {
+            recognized = try await processor.processPage(
+                pageNumber: page,
+                contentSHA256: contentSHA256,
+                configuration: configuration,
+                forceVision: true
+            )
+        }
         let value = recognized.preservingPiFormulaAttachment(from: previous)
         guard value.status == .ready || value.status == .readyEmpty else {
             throw NativeBookOCRError.noRecognizedText
         }
-        try await store.writePage(value, bookID: bookID)
+        try await store.writePage(
+            value,
+            bookID: bookID,
+            layer: selectedLayer
+        )
         return value
     }
 
@@ -737,7 +833,10 @@ final class NativeBookOCRManager: ObservableObject {
             files: files
         )
         guard generations[bookID] == importGeneration else { return result }
-        let pages = try await store.pages(contentSHA256: result.contentSHA256)
+        let pages = try await store.pages(
+            contentSHA256: result.contentSHA256,
+            layer: result.layer
+        )
         guard generations[bookID] == importGeneration else { return result }
         let previous = status(
             for: bookID,
@@ -757,19 +856,12 @@ final class NativeBookOCRManager: ObservableObject {
             totalPages: totalPages,
             currentPage: nil,
             pages: pages,
-            message: "已导入 Pi 预处理附件"
+            message: "已导入 \(result.layer.title)附件；当前文字层未自动切换"
         )
         publish(status: status)
-        for page in Set(
-            result.importedPages + result.importedFormulaPages
-        ).sorted() {
-            lastUpdate = NativeBookOCRUpdate(
-                contract: NativeBookOCRUpdate.contract,
-                bookID: bookID,
-                page: page,
-                status: status
-            )
-        }
+        layerStates[bookID] = try await store.layerState(
+            contentSHA256: result.contentSHA256
+        )
         return result
     }
 
@@ -824,7 +916,8 @@ final class NativeBookOCRManager: ObservableObject {
         }
         guard pageCount > 0 else { throw NativeBookOCRError.unreadableBook }
         let existing = try await store.pages(
-            contentSHA256: contentSHA256.lowercased()
+            contentSHA256: contentSHA256.lowercased(),
+            layer: .appleVision
         )
         guard generations[bookID] == generation else { return }
         let starting = Self.makeStatus(
@@ -865,7 +958,8 @@ final class NativeBookOCRManager: ObservableObject {
             let totalPages = await processor.numberOfPages()
             guard generations[bookID] == generation else { return }
             let storedPages = try await store.pages(
-                contentSHA256: contentSHA256
+                contentSHA256: contentSHA256,
+                layer: .appleVision
             )
             guard generations[bookID] == generation else { return }
             var cached = Dictionary(
@@ -909,7 +1003,8 @@ final class NativeBookOCRManager: ObservableObject {
                     let recognized = try await processor.processPage(
                         pageNumber: pageNumber,
                         contentSHA256: contentSHA256,
-                        configuration: configuration
+                        configuration: configuration,
+                        forceVision: true
                     )
                     value = recognized.preservingPiFormulaAttachment(
                         from: previous
@@ -941,7 +1036,11 @@ final class NativeBookOCRManager: ObservableObject {
                     publish(status: retained, page: pageNumber)
                     continue
                 }
-                try await store.writePage(value, bookID: bookID)
+                try await store.writePage(
+                    value,
+                    bookID: bookID,
+                    layer: .appleVision
+                )
                 try Self.validateCurrentBook(book)
                 cached[pageNumber] = value
                 guard generations[bookID] == generation else { return }
@@ -960,7 +1059,10 @@ final class NativeBookOCRManager: ObservableObject {
             }
             guard generations[bookID] == generation else { return }
             try Self.validateCurrentBook(book)
-            let pages = try await store.pages(contentSHA256: contentSHA256)
+            let pages = try await store.pages(
+                contentSHA256: contentSHA256,
+                layer: .appleVision
+            )
             guard generations[bookID] == generation else { return }
             let failed = !refreshFailures.isEmpty
                 || pages.contains { $0.status == .failed }
@@ -975,6 +1077,9 @@ final class NativeBookOCRManager: ObservableObject {
                     ? "本机预处理已结束，部分页面失败；旧版可用文字与公式均已保留，可重试或手动选择 Pi 预处理"
                     : "本机预处理完成"
             ))
+            layerStates[bookID] = try await store.layerState(
+                contentSHA256: contentSHA256
+            )
         } catch is CancellationError {
             // pause/cancel publishes its explicit state before cancellation;
             // a stale task must not overwrite it.

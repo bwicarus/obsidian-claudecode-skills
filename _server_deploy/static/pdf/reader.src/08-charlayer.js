@@ -107,13 +107,36 @@ if (!window.__bwPageTextRefreshBound) {
   });
 }
 
+function _selectionUsesBlockFilter(source, revision, characterGeometry) {
+  const src = String(source || '').toLowerCase();
+  const rev = String(revision || '').toLowerCase();
+  const geometry = String(characterGeometry || '').toLowerCase();
+  // Native embedded text and ordinary Pi OCR already have a continuous
+  // reading order. Applying the manga block graph to them punches holes in a
+  // drag range whenever PDF items/words happen to carry different bk values.
+  if (src === 'embedded' || rev.startsWith('embedded-')
+      || rev.includes('pdfkit-embedded-text/')) return false;
+  if (src === 'pi') {
+    if (rev.startsWith('pi-manga/')) return true;
+    if (rev.startsWith('pi-vision/')) return false;
+    // Compatibility with app builds whose revision was an opaque digest.
+    if (geometry === 'exact') return false;
+    if (geometry === 'estimated') return true;
+  }
+  // Apple Vision and legacy web/PWA responses have no explicit layout mode.
+  // Preserve their existing bubble/column isolation until they do.
+  return true;
+}
+
 // chars → charBoxes(坐标映射 + reading-order 排序)。初次建层 + cv 校正重取 都用它。
 // PyMuPDF rawdict bbox 已是 image coordinate(y 向下,原点左上),不做 y 翻转(翻了会上下颠倒)。
-function _mapCharBoxes(chars, scale) {
+function _mapCharBoxes(chars, scale, source, revision, characterGeometry) {
+  const useBlockFilter = _selectionUsesBlockFilter(source, revision, characterGeometry);
   const cb = chars.map((ch, _oi) => ({
     c: ch.c, _oi,
     w: (ch.w == null ? -1 : ch.w),
     bk: (ch.bk == null ? -1 : ch.bk),
+    _selectionBlockFilter: useBlockFilter,
     left: ch.x0 * scale, top: ch.y0 * scale,
     width: (ch.x1 - ch.x0) * scale, height: (ch.y1 - ch.y0) * scale,
     sp: !!ch.sp,
@@ -167,7 +190,8 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
     window.dlog?.('chars api fail: ' + ((d && d.error) || 'fetch') + ' (retry ' + _retry + ')', '#ff6b6b');
     return;
   }
-  const charBoxes = _mapCharBoxes(d.chars, scale);
+  const charBoxes = _mapCharBoxes(
+    d.chars, scale, d.source, d.revision, d.character_geometry);
   wrap.__pageTextState = d.state || (charBoxes.length ? 'ready' : 'readyEmpty');
   wrap.__pageTextSource = d.source || null;
   wrap.__pageTextRevision = d.revision || '';
@@ -228,7 +252,8 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
         try {
           const d2 = await (await fetch(charsUrl(ov.cv))).json();
           if (d2 && d2.ok && wrap.isConnected && wrap.__pageTextLoadSeq === loadSeq) {
-            wrap.__charBoxes = _mapCharBoxes(d2.chars, viewport.scale);
+            wrap.__charBoxes = _mapCharBoxes(
+              d2.chars, viewport.scale, d2.source, d2.revision, d2.character_geometry);
             wrap.__charsBaseW = wrap.classList.contains('crop-on') ? (parseFloat(wrap.style.getPropertyValue('--full-w')) || wrap.clientWidth || 0) : (wrap.clientWidth || 0);   // #51:cv 校正重建同步基准宽(整页布局宽)
             wrap.__pageWPt = d2.page_w; wrap.__pageHPt = d2.page_h;
             wrap.__furigana = d2.furigana || [];

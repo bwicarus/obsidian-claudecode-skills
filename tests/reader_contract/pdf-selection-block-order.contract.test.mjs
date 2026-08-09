@@ -18,7 +18,7 @@ function section(source, start, end) {
 
 const sandbox = vm.createContext({ Map, Math, Set });
 vm.runInContext(
-  `${section(CHAR_LAYER, "function _mapCharBoxes", "async function loadCharsAndBindLayer")}
+  `${section(CHAR_LAYER, "function _selectionUsesBlockFilter", "async function loadCharsAndBindLayer")}
    ${section(SELECTION, "function _charBlockId", "// 找选中范围所在的句子")}
    ${section(SELECTION, "function _lineExpandFromChar", "// 段扩展（三击）")}
    globalThis.readerSelectionContract = {
@@ -55,7 +55,7 @@ test("Apple 每行独立 bk 时横排拖选沿 X 重叠的行块连通", () => {
     rawChar("下", 4, 10, 18, { width: 40 }),
     rawChar("央", 5, 110, 18, { width: 40 }),
     rawChar("方", 6, 210, 18, { width: 40 }),
-  ], 1);
+  ], 1, "apple", "apple-vision-structured/2:hash", "exact");
 
   assert.equal(mapped.map((c) => c.c).join(""), "左中右下央方");
   const onlyLeft = api.blockFilter(mapped, 0, 3);
@@ -64,6 +64,42 @@ test("Apple 每行独立 bk 时横排拖选沿 X 重叠的行块连通", () => {
     ["左", "下"],
   );
   assert.equal(api.text(mapped, 0, 3), "左下");
+});
+
+test("内嵌文字层不用 bk 挖掉拖选范围中的字符", () => {
+  // PDF item 身份不是语义选区：端点恰好同 bk 时，中间 item 也必须保留。
+  const mapped = api.map([
+    rawChar("我", 7, 0, 0),
+    rawChar("坚", 7, 9, 0),
+    rawChar("通", 20, 0, 18),
+    rawChar("过", 20, 9, 18),
+    rawChar("协", 7, 0, 36),
+    rawChar("议", 7, 9, 36),
+  ], 1, "embedded", "embedded-v1-test", "estimated");
+
+  const passThrough = api.blockFilter(mapped, 0, 5);
+  assert.equal(mapped.every(passThrough), true);
+  assert.equal(api.text(mapped, 0, 5), "我坚通过协议");
+});
+
+test("Pi vision 普通文字连续选取，Pi manga 仍隔离气泡和分栏", () => {
+  const input = [
+    rawChar("左", 1, 10, 0, { width: 40 }),
+    rawChar("中", 2, 110, 0, { width: 40 }),
+    rawChar("右", 3, 210, 0, { width: 40 }),
+    rawChar("下", 4, 10, 18, { width: 40 }),
+    rawChar("央", 5, 110, 18, { width: 40 }),
+    rawChar("方", 6, 210, 18, { width: 40 }),
+  ];
+  const vision = api.map(input, 1, "pi", "pi-vision/1:digest", "exact");
+  const manga = api.map(input, 1, "pi", "pi-manga/1:digest", "estimated");
+
+  assert.equal(vision.every(api.blockFilter(vision, 0, 3)), true);
+  assert.equal(api.text(vision, 0, 3), "左中右下");
+  assert.deepEqual(
+    manga.filter(api.blockFilter(manga, 0, 3)).map((c) => c.c),
+    ["左", "下"],
+  );
 });
 
 test("竖排拖选沿 Y 重叠且 X 间距小的列块连通", () => {

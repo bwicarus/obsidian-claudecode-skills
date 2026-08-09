@@ -6,6 +6,7 @@ import vm from "node:vm";
 const ROOT = new URL("../../", import.meta.url);
 const read = (path) => readFileSync(new URL(path, ROOT), "utf8");
 const DRAWER = read("_server_deploy/static/pdf/rc-sidedrawer.js");
+const NAV = read("_server_deploy/static/pdf/reader.src/05-nav.js");
 const LAYOUT = read("_server_deploy/static/pdf/reader.src/06-layout.js");
 const CONTINUOUS = read("_server_deploy/static/pdf/reader.src/07-continuous.js");
 
@@ -190,10 +191,13 @@ test("侧栏 stable refit 只高清化可见/近邻页，且每页至多一次",
   assert.equal(wraps[0].style.zoom, 0.8, "far page keeps correct cheap CSS geometry");
 });
 
-test("用户主动缩放未传 scope，仍按原语义重栅格全部已加载/在途页", async () => {
-  const { renders } = await runRescale(undefined);
-  assert.deepEqual(renders, [1, 2, 3, 4, 5, 6, 7]);
-  assert.match(LAYOUT, /_applyZoom[\s\S]*?_rescaleContinuousInPlace\(\)/);
+test("用户主动缩放只高清化视口与邻页，远页留给 IntersectionObserver", async () => {
+  const { renders } = await runRescale({ rasterScope: "visible-near" });
+  assert.deepEqual(renders, [3, 4, 5]);
+  assert.match(LAYOUT, /_applyZoom[\s\S]*?_rescaleContinuousInPlace\(\{ rasterScope: 'visible-near' \}\)/);
+  assert.match(LAYOUT, /previewNode[\s\S]*?requestAnimationFrame/);
+  assert.doesNotMatch(LAYOUT, /page-container'\)\.style\.transform = 'scale/);
+  assert.match(NAV, /zoomChange[\s\S]*?_rescaleContinuousInPlace\(\{ rasterScope: 'visible-near' \}\)/);
   assert.match(DRAWER, /addEventListener\('input',[\s\S]*?setWidth\(this\.value, false\)/);
   assert.match(DRAWER, /addEventListener\('change',[\s\S]*?setWidth\(this\.value, true\)/);
 });

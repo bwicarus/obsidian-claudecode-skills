@@ -349,7 +349,7 @@ async function harness(options = {}) {
     device: { values: new Map(), revision: 0 },
   };
   const globalStore = makeDataStore([], dataStoresState.global);
-  const documentStore = makeDataStore([], dataStoresState.document);
+  const documentStore = makeDataStore(gateEvents, dataStoresState.document);
   const deviceStore = makeDataStore(gateEvents, dataStoresState.device);
   const pendingStores = [globalStore, documentStore, deviceStore];
   const router = {
@@ -542,10 +542,25 @@ async function harness(options = {}) {
   };
 }
 
-test("native local runtime performs a real put/get/delete/get store gate before ready", async () => {
+test("native local runtime gates both document and device IndexedDB stores before ready", async () => {
   const { context, gateEvents } = await harness();
   assert.equal(context.BWReaderRuntime.nativeLocalRuntime.status().state, "ready");
-  assert.deepEqual(gateEvents, ["put", "get", "remove", "get"]);
+  assert.deepEqual(gateEvents, [
+    "put", "get", "remove", "get",
+    "put", "get", "remove", "get",
+  ]);
+});
+
+test("IndexedDB batch queues its first request before yielding to a Promise", () => {
+  const source = readFileSync(
+    new URL("_server_deploy/static/reader-runtime/indexeddb-store.js", ROOT),
+    "utf8",
+  );
+  const start = source.indexOf("function batch(mutations)");
+  const end = source.indexOf("function changes(query)", start);
+  const batch = source.slice(start, end);
+  assert.match(batch, /var work = applyMutation\(mutations\[0\]\)/);
+  assert.doesNotMatch(batch, /Promise\.resolve\(\)\)\.then\(function \(\) \{\s*var work/);
 });
 
 test("native local runtime hydrates PreferenceStore into user-settings before ready", async () => {
@@ -3374,6 +3389,80 @@ test("native page text update invalidates passive cache and emits a char-layer r
   assert.equal(pageTextMessages.length, 2);
   assert.equal(refreshes.length, 1);
   assert.equal(refreshes[0].page, 5);
+});
+
+test("whole text-layer switch invalidates every loaded native page and reloads it", async () => {
+  let character = "旧";
+  const { context, pageTextMessages } = await harness({
+    pageTextReply(message) {
+      return {
+        contract: "reader-native-page-text-response/1",
+        action: message.action,
+        requestId: message.requestId,
+        ok: true,
+        state: "ready",
+        source: "pi",
+        revision: `layer-${character}`,
+        page: message.page,
+        pageWidth: 600,
+        pageHeight: 800,
+        textAuthority: "local-override",
+        chars: [{ c: character, x0: 10, y0: 10, x1: 20, y1: 25, w: 4, bk: 1, sp: false }],
+        formulaRegions: [],
+        error: null,
+      };
+    },
+  });
+  context.BWReaderRuntime.pageTextProvider.registerEmbeddedPage(6, {
+    pageWidth: 600,
+    pageHeight: 800,
+    chars: [],
+  });
+  const first = await (await context.fetch("/pdf/api/page-chars?page=6")).json();
+  assert.equal(first.chars[0].c, "旧");
+
+  character = "新";
+  context.dispatchEvent(new context.CustomEvent("bw:native-page-text-updated", {
+    detail: {
+      contract: "reader-native-page-text-update/1",
+      localBookId: "localbook-" + "b".repeat(64),
+      page: null,
+      state: "ready",
+      source: "pi",
+      revision: "selected-layer-new",
+    },
+  }));
+  const second = await (await context.fetch("/pdf/api/page-chars?page=6")).json();
+  assert.equal(second.chars[0].c, "新");
+  assert.equal(pageTextMessages.length, 2);
+});
+
+test("whole text-layer switch can replace a populated embedded PDF layer", async () => {
+  const { context, pageTextMessages } = await harness({
+    pageTextReply(message) {
+      return nativePageReply(message, { text: "PC 文字层" });
+    },
+  });
+  context.BWReaderRuntime.pageTextProvider.registerEmbeddedPage(7, {
+    pageWidth: 600,
+    pageHeight: 800,
+    revision: "embedded-original",
+    chars: [{ c: "PDF 原文字层", x0: 10, y0: 10, x1: 90, y1: 25, w: 4, bk: 1 }],
+  });
+  context.dispatchEvent(new context.CustomEvent("bw:native-page-text-updated", {
+    detail: {
+      contract: "reader-native-page-text-update/1",
+      localBookId: "localbook-" + "b".repeat(64),
+      page: null,
+      state: "ready",
+      source: "pi",
+      revision: "selected-pc-layer",
+    },
+  }));
+  const selected = await (await context.fetch("/pdf/api/page-chars?page=7")).json();
+  assert.equal(selected.chars[0].c, "PC 文字层");
+  assert.equal(selected.revision, "native-page-revision");
+  assert.equal(pageTextMessages.length, 1);
 });
 
 test("a late pre-update page reply cannot overwrite the refreshed native cache", async () => {
