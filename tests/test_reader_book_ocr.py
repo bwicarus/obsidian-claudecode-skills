@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
 import os
 from pathlib import Path
 import sys
 import tempfile
+import time
 from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
@@ -31,6 +33,203 @@ PDF_A = b"%PDF-1.4\n1 0 obj<</Type/Catalog>>endobj\n%%EOF\n"
 class _FakeProcess:
     def __init__(self, pid: int | None = None) -> None:
         self.pid = int(pid or os.getpid())
+
+
+class ReaderBookOcrFormulaWorkerTest(unittest.TestCase):
+    def setUp(self) -> None:
+        self.temp = tempfile.TemporaryDirectory()
+        self.project = Path(self.temp.name)
+        (self.project / "scripts").mkdir()
+        (self.project / "scripts" / "yolo_figures.py").write_text("", "utf-8")
+        self.pdf = self.project / "book.pdf"
+        self.pdf.write_bytes(PDF_A)
+        self.job_path = self.project / "job.json"
+        self.job_path.write_text(json.dumps({
+            "jobId": "ocrjob_formula_test",
+            "workerGeneration": "ocrgen_formula_test",
+            "totalPages": 588,
+        }), "utf-8")
+        self.control_path = self.project / "control.json"
+        self.control_path.write_text(
+            json.dumps({"desiredState": "running"}), "utf-8"
+        )
+        self.args = SimpleNamespace(
+            project=str(self.project),
+            pdf=str(self.pdf),
+        )
+        reader_book_ocr_worker._set_worker_identity(None, None)
+
+    def tearDown(self) -> None:
+        reader_book_ocr_worker._set_worker_identity(None, None)
+        self.temp.cleanup()
+
+    @staticmethod
+    def _completed_child():
+        class Child:
+            returncode = 0
+
+            @staticmethod
+            def poll():
+                return 0
+
+        return Child()
+
+    def _rewrite_formula_sidecar(self) -> None:
+        formula_path = reader_book_ocr_worker._formula_path(
+            self.project, self.pdf
+        )
+        value = json.loads(formula_path.read_text("utf-8"))
+        value["geom_at"] = int(time.time())
+        reader_book_ocr_worker._atomic_json(formula_path, value)
+
+    def test_formula_detector_success_requires_this_run_to_rewrite_target(self) -> None:
+        captured = {}
+
+        def launch(_cmd, **kwargs):
+            captured.update(kwargs)
+            kwargs["stdout"].write(b"processing 1 sidecar(s)...\ndone\n")
+            kwargs["stdout"].flush()
+            self._rewrite_formula_sidecar()
+            return self._completed_child()
+
+        with patch.object(
+            reader_book_ocr_worker.subprocess, "Popen", side_effect=launch
+        ):
+            result = reader_book_ocr_worker._run_formula_pipeline(
+                self.args, self.job_path, self.control_path
+            )
+
+        self.assertEqual(result, 0)
+        self.assertIs(captured["stderr"], reader_book_ocr_worker.subprocess.STDOUT)
+        self.assertTrue(captured["stdout"].closed)
+        logs = list(
+            (self.project / "state" / "pdf-figures" / "formula-detect-logs")
+            .glob("*.log")
+        )
+        self.assertEqual(len(logs), 1)
+        self.assertIn("ocrjob_formula_test", logs[0].name)
+        self.assertIn("processing 1 sidecar", logs[0].read_text("utf-8"))
+        if os.name == "posix":
+            self.assertEqual(logs[0].stat().st_mode & 0o777, 0o600)
+
+    def test_formula_detector_stdout_error_cannot_be_reported_as_success(self) -> None:
+        captured_handle = None
+
+        def launch(_cmd, **kwargs):
+            nonlocal captured_handle
+            captured_handle = kwargs["stdout"]
+            captured_handle.write(
+                b"processing 1 sidecar(s)...\n"
+                b"  ERROR fake-sidecar.json: missing doclayout_yolo\n"
+                b"done\n"
+            )
+            captured_handle.flush()
+            self._rewrite_formula_sidecar()
+            return self._completed_child()
+
+        with patch.object(
+            reader_book_ocr_worker.subprocess, "Popen", side_effect=launch
+        ):
+            with self.assertRaisesRegex(RuntimeError, "reported ERROR"):
+                reader_book_ocr_worker._run_formula_pipeline(
+                    self.args, self.job_path, self.control_path
+                )
+        self.assertTrue(captured_handle.closed)
+
+    def test_formula_detector_zero_match_and_unchanged_target_fail_closed(self) -> None:
+        for output, expected in (
+            (b"processing 0 sidecar(s)...\ndone\n", "matched no target sidecar"),
+            (b"processing 1 sidecar(s)...\ndone\n", "did not update the target"),
+        ):
+            with self.subTest(expected=expected):
+                def launch(_cmd, **kwargs):
+                    kwargs["stdout"].write(output)
+                    kwargs["stdout"].flush()
+                    return self._completed_child()
+
+                with patch.object(
+                    reader_book_ocr_worker.subprocess, "Popen", side_effect=launch
+                ):
+                    with self.assertRaisesRegex(RuntimeError, expected):
+                        reader_book_ocr_worker._run_formula_pipeline(
+                            self.args, self.job_path, self.control_path
+                        )
+
+    def test_formula_log_open_failure_is_visible_and_does_not_launch(self) -> None:
+        with patch.object(
+            reader_book_ocr_worker,
+            "_open_formula_detect_log",
+            side_effect=PermissionError("log path denied"),
+        ), patch.object(reader_book_ocr_worker.subprocess, "Popen") as launch:
+            with self.assertRaisesRegex(RuntimeError, "log could not open"):
+                reader_book_ocr_worker._run_formula_pipeline(
+                    self.args, self.job_path, self.control_path
+                )
+        launch.assert_not_called()
+
+    def test_formula_log_handle_closes_when_detector_cannot_start(self) -> None:
+        log_handle = io.BytesIO()
+        with patch.object(
+            reader_book_ocr_worker,
+            "_open_formula_detect_log",
+            return_value=log_handle,
+        ), patch.object(
+            reader_book_ocr_worker.subprocess,
+            "Popen",
+            side_effect=FileNotFoundError("detector missing"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "could not start"):
+                reader_book_ocr_worker._run_formula_pipeline(
+                    self.args, self.job_path, self.control_path
+                )
+        self.assertTrue(log_handle.closed)
+
+    def test_formula_log_handle_closes_and_child_stops_on_monitor_failure(self) -> None:
+        log_handle = io.BytesIO()
+
+        class Child:
+            returncode = None
+            terminated = False
+
+            def poll(self):
+                return self.returncode
+
+            def terminate(self):
+                self.terminated = True
+                self.returncode = -15
+
+            def wait(self, timeout):
+                return self.returncode
+
+            def kill(self):
+                raise AssertionError("terminate should have stopped the child")
+
+        child = Child()
+        with patch.object(
+            reader_book_ocr_worker,
+            "_open_formula_detect_log",
+            return_value=log_handle,
+        ), patch.object(
+            reader_book_ocr_worker.subprocess, "Popen", return_value=child
+        ), patch.object(
+            reader_book_ocr_worker,
+            "_run_controlled",
+            side_effect=RuntimeError("job update failed"),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "job update failed"):
+                reader_book_ocr_worker._run_formula_pipeline(
+                    self.args, self.job_path, self.control_path
+                )
+        self.assertTrue(child.terminated)
+        self.assertTrue(log_handle.closed)
+
+    def test_formula_log_tail_read_is_bounded(self) -> None:
+        path = self.project / "large.log"
+        path.write_bytes(b"x" * 100_000 + b"TAIL")
+        self.assertEqual(
+            reader_book_ocr_worker._read_formula_detect_log_tail(path, 8),
+            "xxxxTAIL",
+        )
 
 
 class ReaderBookOcrServiceTest(unittest.TestCase):

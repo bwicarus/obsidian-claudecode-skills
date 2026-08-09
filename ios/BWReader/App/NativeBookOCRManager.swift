@@ -501,7 +501,7 @@ final class NativeBookOCRManager: ObservableObject {
         try Self.validateCurrentBook(book)
         let manual = recognized.replacingTextAuthority(
             .localOverride,
-            engineRevision: "apple-vision-manual/1"
+            engineRevision: NativeBookOCRConfiguration.manualEngineRevision
         )
         try await store.writeManualPageOverride(
             manual,
@@ -592,17 +592,20 @@ final class NativeBookOCRManager: ObservableObject {
         page: Int,
         configuration: NativeBookOCRConfiguration
     ) async throws -> NativeBookOCRPageCharacters {
-        if let existing = try await store.basePage(
+        let previous = try await store.basePage(
             contentSHA256: contentSHA256,
             page: page
-        ) {
-            return existing
+        )
+        if let previous,
+           !Self.shouldRefreshCachedAppleVisionBase(previous) {
+            return previous
         }
-        let value = try await processor.processPage(
+        let recognized = try await processor.processPage(
             pageNumber: page,
             contentSHA256: contentSHA256,
             configuration: configuration
         )
+        let value = recognized.preservingPiFormulaAttachment(from: previous)
         guard value.status == .ready || value.status == .readyEmpty else {
             throw NativeBookOCRError.noRecognizedText
         }
@@ -869,11 +872,17 @@ final class NativeBookOCRManager: ObservableObject {
                 storedPages.map { ($0.page, $0) },
                 uniquingKeysWith: { current, _ in current }
             )
+            var refreshFailures = Set<Int>()
             for pageNumber in 1...totalPages {
                 try Task.checkCancellation()
                 guard generations[bookID] == generation else { return }
                 try Self.validateCurrentBook(book)
-                if let current = cached[pageNumber],
+                let previous = cached[pageNumber]
+                let refreshingStaleVision = previous.map(
+                    Self.shouldRefreshCachedAppleVisionBase
+                ) ?? false
+                if let current = previous,
+                   !Self.shouldRefreshCachedAppleVisionBase(current),
                    current.status == .ready || current.status == .readyEmpty
                     || (!retryFailed && current.status == .failed) {
                     continue
@@ -897,10 +906,13 @@ final class NativeBookOCRManager: ObservableObject {
 
                 let value: NativeBookOCRPageCharacters
                 do {
-                    value = try await processor.processPage(
+                    let recognized = try await processor.processPage(
                         pageNumber: pageNumber,
                         contentSHA256: contentSHA256,
                         configuration: configuration
+                    )
+                    value = recognized.preservingPiFormulaAttachment(
+                        from: previous
                     )
                 } catch is CancellationError {
                     throw CancellationError()
@@ -909,10 +921,26 @@ final class NativeBookOCRManager: ObservableObject {
                         contentSHA256: contentSHA256,
                         geometry: geometry,
                         message: error.localizedDescription
-                    )
+                    ).preservingPiFormulaAttachment(from: previous)
                 }
                 guard generations[bookID] == generation else { return }
                 try Self.validateCurrentBook(book)
+                if refreshingStaleVision,
+                   value.status != .ready,
+                   value.status != .readyEmpty {
+                    refreshFailures.insert(pageNumber)
+                    let retained = Self.makeStatus(
+                        bookID: bookID,
+                        contentSHA256: contentSHA256,
+                        state: .running,
+                        totalPages: totalPages,
+                        currentPage: nil,
+                        pages: Array(cached.values),
+                        message: "第 \(pageNumber) 页新版重算失败；已保留旧文字与公式"
+                    )
+                    publish(status: retained, page: pageNumber)
+                    continue
+                }
                 try await store.writePage(value, bookID: bookID)
                 try Self.validateCurrentBook(book)
                 cached[pageNumber] = value
@@ -934,7 +962,8 @@ final class NativeBookOCRManager: ObservableObject {
             try Self.validateCurrentBook(book)
             let pages = try await store.pages(contentSHA256: contentSHA256)
             guard generations[bookID] == generation else { return }
-            let failed = pages.contains { $0.status == .failed }
+            let failed = !refreshFailures.isEmpty
+                || pages.contains { $0.status == .failed }
             publish(status: Self.makeStatus(
                 bookID: bookID,
                 contentSHA256: contentSHA256,
@@ -943,7 +972,7 @@ final class NativeBookOCRManager: ObservableObject {
                 currentPage: nil,
                 pages: pages,
                 message: failed
-                    ? "本机预处理已结束，部分页面失败；可重试或手动选择 Pi 预处理"
+                    ? "本机预处理已结束，部分页面失败；旧版可用文字与公式均已保留，可重试或手动选择 Pi 预处理"
                     : "本机预处理完成"
             ))
         } catch is CancellationError {
@@ -969,6 +998,17 @@ final class NativeBookOCRManager: ObservableObject {
         if generations[bookID] == generation {
             tasks[bookID] = nil
         }
+    }
+
+    /// Only the replaceable Apple Vision base is revised automatically.
+    /// Embedded PDF text and Pi text have distinct engine namespaces; manual
+    /// page overrides and selection corrections live in separate store layers.
+    private static func shouldRefreshCachedAppleVisionBase(
+        _ page: NativeBookOCRPageCharacters
+    ) -> Bool {
+        page.textAuthority != .localOverride
+            && page.engineRevision.hasPrefix("apple-vision-structured/")
+            && page.engineRevision != NativeBookOCRConfiguration.engineRevision
     }
 
     private func publish(

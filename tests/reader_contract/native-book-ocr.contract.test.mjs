@@ -51,6 +51,164 @@ test("Apple pass uses structured Vision boxes and real NaturalLanguage words", (
   assert.match(MODELS, /case ready\s*\n\s*case partial\s*\n\s*case unavailable/);
 });
 
+test("Apple Vision cache revision refresh is narrow, layered, and fail-safe", () => {
+  assert.match(MODELS, /engineRevision = "apple-vision-structured\/2"/);
+  assert.match(MODELS, /manualEngineRevision = "apple-vision-manual\/2"/);
+  assert.match(
+    MANAGER,
+    /page\.textAuthority != \.localOverride[\s\S]*page\.engineRevision\.hasPrefix\("apple-vision-structured\/"\)[\s\S]*page\.engineRevision != NativeBookOCRConfiguration\.engineRevision/,
+  );
+
+  const shouldRefresh = (page, currentRevision) => (
+    page.textAuthority !== "local-override"
+      && page.engineRevision.startsWith("apple-vision-structured/")
+      && page.engineRevision !== currentRevision
+  );
+  const current = "apple-vision-structured/2";
+  assert.equal(shouldRefresh({
+    source: "apple", engineRevision: "apple-vision-structured/1",
+    textAuthority: "supplemental",
+  }, current), true, "an old Apple base must refresh");
+  assert.equal(shouldRefresh({
+    source: "pi", engineRevision: "apple-vision-structured/1",
+    textAuthority: "supplemental", formulaCoverage: "complete",
+  }, current), true, "a Pi formula attachment must not hide a stale Apple base");
+  for (const protectedPage of [
+    { source: "apple", engineRevision: current, textAuthority: "supplemental" },
+    { source: "apple", engineRevision: "pdfkit-embedded-text/1", textAuthority: "supplemental" },
+    { source: "pi", engineRevision: "pi-vision/1", textAuthority: "supplemental" },
+    { source: "apple", engineRevision: "apple-vision-manual/1", textAuthority: "local-override" },
+    { source: "apple", engineRevision: "apple-vision-structured/1+selection:ocrfix-1", textAuthority: "local-override" },
+  ]) {
+    assert.equal(shouldRefresh(protectedPage, current), false);
+  }
+
+  assert.match(MODELS, /func preservingPiFormulaAttachment\(/);
+  assert.match(
+    MODELS,
+    /previous\.source == \.pi,[\s\S]*previous\.formulaCoverage == \.complete[\s\S]*formulaCoverage: previous\.formulaCoverage,[\s\S]*formulaRegions: previous\.formulaRegions/,
+  );
+  const failureGate = MANAGER.indexOf("if refreshingStaleVision,");
+  const writePage = MANAGER.indexOf(
+    "try await store.writePage(value, bookID: bookID)",
+    failureGate,
+  );
+  assert.ok(failureGate >= 0 && writePage > failureGate);
+  assert.match(
+    MANAGER.slice(failureGate, writePage),
+    /value\.status != \.ready,[\s\S]*value\.status != \.readyEmpty[\s\S]*已保留旧文字与公式[\s\S]*continue/,
+    "a failed revision migration must not overwrite the last usable base",
+  );
+  assert.match(MANAGER, /var refreshFailures = Set<Int>\(\)/);
+  assert.match(MANAGER, /let failed = !refreshFailures\.isEmpty/);
+});
+
+test("character interpolation publishes only positive non-overlapping estimates", () => {
+  assert.match(
+    PROCESSOR,
+    /private static func resolvedCharacterRects\([\s\S]*\) -> \[CGRect\?\]/,
+  );
+  assert.match(PROCESSOR, /func strictlyOverlaps\(/);
+  assert.match(PROCESSOR, /guard origin\.isFinite, extent\.isFinite, extent > 0/);
+  assert.match(PROCESSOR, /guard isSafeEstimate\(estimate, at: index\) else \{ continue \}/);
+  assert.match(PROCESSOR, /guard let normalizedRect = resolved\[offset\] else \{[\s\S]*continue/);
+  assert.match(PROCESSOR, /guard x1 > x0, y1 > y0 else \{/);
+
+  const overlap = (a, b) => (
+    a.x < b.x + b.w && a.x + a.w > b.x
+      && a.y < b.y + b.h && a.y + a.h > b.y
+  );
+  const resolveHorizontal = (pieces, observation) => {
+    const output = pieces.map((item) => item && { ...item });
+    const known = pieces.map((item, index) => item ? index : -1)
+      .filter((index) => index >= 0);
+    if (!known.length) {
+      if (!(observation.w > 0 && observation.h > 0)) return output;
+      return pieces.map((_, index) => ({
+        x: observation.x + index * observation.w / pieces.length,
+        y: observation.y,
+        w: observation.w / pieces.length,
+        h: observation.h,
+      }));
+    }
+    const exact = known.map((index) => pieces[index]);
+    const estimates = [];
+    const nearestBefore = (index) => {
+      for (let at = index - 1; at >= 0; at -= 1) if (output[at]) return output[at];
+      return null;
+    };
+    const nearestAfter = (index) => {
+      for (let at = index + 1; at < output.length; at += 1) if (output[at]) return output[at];
+      return null;
+    };
+    const fill = (lower, upper) => {
+      const start = lower === null ? 0 : lower + 1;
+      const end = (upper === null ? pieces.length : upper) - 1;
+      if (start > end) return;
+      const span = end - start + 1;
+      const left = lower === null ? observation.x : output[lower].x + output[lower].w;
+      const right = upper === null ? observation.x + observation.w : output[upper].x;
+      const extent = right - left;
+      if (!(extent > 0)) return;
+      const step = extent / span;
+      for (let offset = 0; offset < span; offset += 1) {
+        const index = start + offset;
+        const estimate = {
+          x: left + offset * step, y: observation.y, w: step, h: observation.h,
+        };
+        const before = nearestBefore(index);
+        const after = nearestAfter(index);
+        if (!(estimate.w > 0 && estimate.h > 0)
+            || exact.some((item) => overlap(estimate, item))
+            || estimates.some((item) => overlap(estimate, item))
+            || (before && estimate.x + estimate.w / 2 <= before.x + before.w / 2)
+            || (after && estimate.x + estimate.w / 2 >= after.x + after.w / 2)) {
+          continue;
+        }
+        output[index] = estimate;
+        estimates.push(estimate);
+      }
+    };
+    fill(null, known[0]);
+    for (let index = 1; index < known.length; index += 1) {
+      fill(known[index - 1], known[index]);
+    }
+    fill(known.at(-1), null);
+    return output;
+  };
+
+  const observation = { x: 0, y: 0, w: 1, h: 0.1 };
+  const first = { x: 0.2, y: 0, w: 0.1, h: 0.1 };
+  const second = { x: 0.6, y: 0, w: 0.1, h: 0.1 };
+  const normal = resolveHorizontal([null, first, null, second, null], observation);
+  assert.deepEqual(normal[1], first);
+  assert.deepEqual(normal[3], second);
+  assert.equal(normal.every((item) => item && item.w > 0 && item.h > 0), true);
+  for (let index = 1; index < normal.length; index += 1) {
+    assert.ok(
+      normal[index - 1].x + normal[index - 1].w / 2
+        < normal[index].x + normal[index].w / 2,
+      "horizontal reading-axis centers must stay monotonic",
+    );
+  }
+  for (let left = 0; left < normal.length; left += 1) {
+    for (let right = left + 1; right < normal.length; right += 1) {
+      assert.equal(overlap(normal[left], normal[right]), false);
+    }
+  }
+
+  for (const [left, right] of [
+    [{ x: 0.2, y: 0, w: 0.3, h: 0.1 }, { x: 0.4, y: 0, w: 0.3, h: 0.1 }],
+    [{ x: 0.2, y: 0, w: 0.2, h: 0.1 }, { x: 0.4, y: 0, w: 0.2, h: 0.1 }],
+    [{ x: 0.65, y: 0, w: 0.1, h: 0.1 }, { x: 0.25, y: 0, w: 0.1, h: 0.1 }],
+  ]) {
+    const conflicted = resolveHorizontal([left, null, right], observation);
+    assert.deepEqual(conflicted[0], left, "the first exact box must remain unchanged");
+    assert.deepEqual(conflicted[2], right, "the second exact box must remain unchanged");
+    assert.equal(conflicted[1], null, "an impossible gap must remain unresolved");
+  }
+});
+
 test("rotated and cropped PDF geometry maps to the displayed Reader viewport", () => {
   assert.match(PROCESSOR, /cropBoxX: Double\(bounds\.minX\)/);
   assert.match(PROCESSOR, /cropBoxY: Double\(bounds\.minY\)/);

@@ -316,6 +316,42 @@ struct NativeBookOCRPageCharacters: Codable, Equatable, Sendable {
             textAuthority: authority
         )
     }
+
+    /// Carries the independently imported Pi formula result across a refresh
+    /// of the Apple Vision base text. The new text and geometry identity stay
+    /// authoritative; only the formula attachment is retained.
+    func preservingPiFormulaAttachment(
+        from previous: NativeBookOCRPageCharacters?
+    ) -> NativeBookOCRPageCharacters {
+        guard let previous,
+              previous.contentSHA256 == contentSHA256,
+              previous.page == page,
+              previous.source == .pi,
+              previous.formulaCoverage == .complete else {
+            return self
+        }
+        return NativeBookOCRPageCharacters(
+            schema: schema,
+            contentSHA256: contentSHA256,
+            page: page,
+            pageWidth: pageWidth,
+            pageHeight: pageHeight,
+            rotation: rotation,
+            geometryDigest: geometryDigest,
+            engineRevision: engineRevision,
+            status: status,
+            source: .pi,
+            chars: chars,
+            furigana: furigana,
+            wordSegmentation: wordSegmentation,
+            characterGeometry: characterGeometry,
+            formulaCoverage: previous.formulaCoverage,
+            formulaRegions: previous.formulaRegions,
+            createdAt: max(createdAt, previous.createdAt),
+            error: error,
+            textAuthority: textAuthority
+        )
+    }
 }
 
 struct NativeBookOCRSelectionCorrection: Codable, Equatable, Sendable {
@@ -473,7 +509,8 @@ struct NativeBookOCRImportResult: Equatable, Sendable {
 }
 
 struct NativeBookOCRConfiguration: Equatable, Sendable {
-    static let engineRevision = "apple-vision-structured/1"
+    static let engineRevision = "apple-vision-structured/2"
+    static let manualEngineRevision = "apple-vision-manual/2"
 
     var renderLongEdgePixels = 3_200
     var minimumEmbeddedCharacters = 24

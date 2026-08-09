@@ -110,7 +110,7 @@ test("disabled native notes return an explicit conflict instead of falling throu
 });
 
 test("legacy cross-book navigation stays inside the native local-library lifecycle", () => {
-  assert.match(WEB_VIEW, /takeOverRemoteBookNavigation\(url\)/);
+  assert.match(WEB_VIEW, /takeOverRemoteBookNavigation\(url, sourceURL: sourceURL\)/);
   assert.match(WEB_VIEW, /\["\/pdf\/view", "\/pdf\/epub\/view"\]\.contains\(url\.path\)/);
   assert.match(WEB_VIEW, /decisionHandler\(\.cancel\)[\s\S]*takeOverRemoteBookNavigation|takeOverRemoteBookNavigation[\s\S]*decisionHandler\(\.cancel\)/);
   assert.match(WEB_VIEW, /Self\.isSafeRemoteLibraryRelativePath\(fileValues\[0\]\)/);

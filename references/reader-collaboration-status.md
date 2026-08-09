@@ -3870,3 +3870,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **预检修复**：首次准确拦截两条 OCR adoption 路由漏登记并补为 GLOBAL；macOS 又拦截缺失 no-redirect delegate 与 Swift `min/max` 遮蔽，均局部修复后重跑通过。
 - **边界**：Windows 语音后台源码随集成提交保存但未在本轮重装；TestFlight 处理完成后仍需 iPad 验收本机 PDF/EPUB、Pi 显式同步、OCR/公式、改页持久化与原有手写/语音/快照功能。
 - **下一步**：以实机结果继续修正，不再为同一发布额外拆临时候选流程。
+
+## Codex：Reader P0 文字选中、恢复与公式诊断候选（2026-08-09 JST）
+- **改了什么**：坏字符不再抹掉整页文字层；Apple Vision 字框插值升级并让旧缓存按版本重算；书架链接按真实导航来源接管，前后台恢复同时覆盖 WebKit 内容进程终止。
+- **公式门禁**：Pi worker 合并捕获检测器输出，只有唯一目标 sidecar 在本次运行中有效更新才报成功；零匹配、`ERROR`、陈旧或未更新结果全部显式失败。
+- **怎么验的**：Reader Node 全量、OCR/书库 Python 专项、确定性离线 ReaderBundle、发布管线与差异检查通过；Windows handoff 仅保留既有 Linux `fcntl` 环境阻断。
+- **发布边界/下一步**：尚未上传 TestFlight 或部署 Pi；先以 macOS 编译门禁验证 Swift，再从同一代码候选走 Pi 原子预检，真机选字、书架返回和后台恢复仍需实机验收。

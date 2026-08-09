@@ -477,6 +477,91 @@ def _formula_counts(path: Path) -> tuple[int, int]:
     return len(formulas), have
 
 
+def _formula_detect_log_path(formula_path: Path, job_path: Path) -> Path:
+    job = _load(job_path, {}) or {}
+    task_id = str(
+        job.get("jobId")
+        or _EXPECTED_JOB_ID
+        or job.get("workerGeneration")
+        or _EXPECTED_WORKER_GENERATION
+        or f"pid-{os.getpid()}"
+    )
+    safe_task_id = re.sub(r"[^A-Za-z0-9_.-]+", "_", task_id).strip("._")[:96]
+    if not safe_task_id:
+        safe_task_id = f"pid-{os.getpid()}"
+    return (
+        formula_path.parent
+        / "formula-detect-logs"
+        / f"{formula_path.stem}--{safe_task_id}.log"
+    )
+
+
+def _open_formula_detect_log(path: Path):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_TRUNC
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    fd = os.open(str(path), flags, 0o600)
+    try:
+        os.chmod(path, 0o600)
+        return os.fdopen(fd, "wb")
+    except BaseException:
+        os.close(fd)
+        raise
+
+
+def _read_formula_detect_log_tail(path: Path, max_bytes: int = 64 * 1024) -> str:
+    limit = max(1, int(max_bytes))
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        size = handle.tell()
+        handle.seek(max(0, size - limit), os.SEEK_SET)
+        payload = handle.read(limit)
+    return payload.decode("utf-8", "replace")
+
+
+def _formula_sidecar_fingerprint(path: Path) -> tuple[dict, str]:
+    return _source_identity(path.stat()), _sha256(path)
+
+
+def _assert_formula_detection_output(
+    formula_path: Path,
+    pdf: Path,
+    expected_mtime: int,
+    baseline: tuple[dict, str],
+    started_at_epoch: int,
+) -> None:
+    try:
+        current = json.loads(formula_path.read_text("utf-8"))
+        fingerprint = _formula_sidecar_fingerprint(formula_path)
+    except (OSError, ValueError, json.JSONDecodeError) as exc:
+        raise RuntimeError(
+            "formula detector did not leave a valid target sidecar"
+        ) from exc
+    if not isinstance(current, dict):
+        raise RuntimeError("formula detector did not leave a valid target sidecar")
+    if current.get("pdf") != str(pdf):
+        raise RuntimeError("formula detector updated the wrong target sidecar")
+    try:
+        book_mtime = int(current.get("book_mtime"))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError("formula detector left a stale target sidecar") from exc
+    if book_mtime != expected_mtime:
+        raise RuntimeError("formula detector left a stale target sidecar")
+    if fingerprint == baseline:
+        raise RuntimeError("formula detector did not update the target sidecar")
+    try:
+        geom_at = int(current.get("geom_at"))
+    except (TypeError, ValueError) as exc:
+        raise RuntimeError(
+            "formula detector did not leave a success marker"
+        ) from exc
+    if geom_at < started_at_epoch - 1:
+        raise RuntimeError("formula detector left a stale success marker")
+
+
 def _terminate(child: subprocess.Popen) -> None:
     if child.poll() is not None:
         return
@@ -561,38 +646,45 @@ def _run_formula_pipeline(args, job_path: Path, control_path: Path) -> int:
     # missing interpreter, an unimportable model, a CUDA error -- left the job
     # sitting at "检测公式区域…" with nothing to read anywhere. The phase looked
     # slow when it had already failed.
-    detect_log = formula_path.parent / "formula-detect.log"
+    baseline = _formula_sidecar_fingerprint(formula_path)
+    started_at_epoch = int(time.time())
+    detect_log = _formula_detect_log_path(formula_path, job_path)
     try:
-        log_handle = open(detect_log, "wb")
-    except OSError:
-        log_handle = None
-    try:
-        child = subprocess.Popen(
-            cmd,
-            cwd=str(project),
-            stdout=subprocess.DEVNULL,
-            stderr=log_handle or subprocess.DEVNULL,
-        )
+        log_handle = _open_formula_detect_log(detect_log)
     except OSError as exc:
-        if log_handle:
-            log_handle.close()
-        # Names the missing piece. "detection did not start" would send the
-        # next reader looking at the wrong layer.
         raise RuntimeError(
-            f"formula detection could not start: {exc} (cmd={cmd[0]})"
+            f"formula detection log could not open: {exc}"
         ) from exc
-    stopped = _run_controlled(child, control_path, job_path, "formula-detect", formula_path)
-    if log_handle:
+    child = None
+    try:
         try:
-            log_handle.close()
-        except OSError:
-            pass
+            child = subprocess.Popen(
+                cmd,
+                cwd=str(project),
+                stdout=log_handle,
+                stderr=subprocess.STDOUT,
+            )
+        except OSError as exc:
+            # Names the missing piece. "detection did not start" would send the
+            # next reader looking at the wrong layer.
+            raise RuntimeError(
+                f"formula detection could not start: {exc} (cmd={cmd[0]})"
+            ) from exc
+        try:
+            stopped = _run_controlled(
+                child, control_path, job_path, "formula-detect", formula_path
+            )
+        except BaseException:
+            _terminate(child)
+            raise
+    finally:
+        log_handle.close()
     if stopped is not None:
         if stopped in (20, 21):
             return stopped
         detail = ""
         try:
-            tail = detect_log.read_bytes()[-800:].decode("utf-8", "replace").strip()
+            tail = _read_formula_detect_log_tail(detect_log, 800).strip()
             if tail:
                 detail = " | " + " ".join(tail.split())[-400:]
         except OSError:
@@ -600,6 +692,35 @@ def _run_formula_pipeline(args, job_path: Path, control_path: Path) -> int:
         raise RuntimeError(
             f"formula detection exited with {stopped}{detail}"
         )
+    try:
+        detect_output = _read_formula_detect_log_tail(detect_log)
+    except OSError as exc:
+        raise RuntimeError(
+            f"formula detection log could not be read: {exc}"
+        ) from exc
+    if re.search(r"(?im)^\s*\[?ERROR(?:\]|\s|:)", detect_output):
+        detail = " ".join(detect_output.strip().split())[-400:]
+        raise RuntimeError(f"formula detector reported ERROR | {detail}")
+    match = re.search(
+        r"(?im)^processing\s+(\d+)\s+sidecar\(s\)\.\.\.\s*$",
+        detect_output,
+    )
+    if match is None:
+        raise RuntimeError("formula detector did not report its target match count")
+    matched_sidecars = int(match.group(1))
+    if matched_sidecars == 0:
+        raise RuntimeError("formula detector matched no target sidecar")
+    if matched_sidecars != 1:
+        raise RuntimeError(
+            f"formula detector matched an unexpected number of sidecars: {matched_sidecars}"
+        )
+    _assert_formula_detection_output(
+        formula_path,
+        pdf,
+        expected_mtime,
+        baseline,
+        started_at_epoch,
+    )
     total, have = _formula_counts(formula_path)
     current = _load(job_path, {}) or {}
     total_pages = int(current.get("totalPages") or 0)

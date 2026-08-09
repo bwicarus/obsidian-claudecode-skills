@@ -217,6 +217,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     let nativePencilInk = NativePencilInkController()
     private var readerForeground = true
     private var readerWasBackgrounded = false
+    private var webContentProcessNeedsReload = false
 
     override init() {
         do {
@@ -742,9 +743,12 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// the exact catalog identity, reusing a digest-verified local copy when
     /// possible, otherwise downloading it, then opening the native shell at the
     /// requested location.
-    private func takeOverRemoteBookNavigation(_ url: URL) -> Bool {
+    private func takeOverRemoteBookNavigation(
+        _ url: URL,
+        sourceURL: URL?
+    ) -> Bool {
         guard currentLocalBook != nil,
-              isTrustedReaderURL(webView.url),
+              isTrustedReaderURL(sourceURL),
               url.scheme?.lowercased() == "http",
               url.host?.lowercased() == ReaderLocalRuntimeServer.host,
               url.port == Int(ReaderLocalRuntimeServer.port),
@@ -888,9 +892,12 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     /// In the native product the shelf is SwiftUI, not a loopback web route.
     /// Consume that legacy navigation here so it cannot escape to Safari or a
     /// loopback 404 while preserving the button's original user-visible action.
-    private func takeOverLibraryNavigation(_ url: URL) -> Bool {
+    private func takeOverLibraryNavigation(
+        _ url: URL,
+        sourceURL: URL?
+    ) -> Bool {
         guard currentLocalBook != nil,
-              isTrustedReaderURL(webView.url),
+              isTrustedReaderURL(sourceURL),
               url.scheme?.lowercased() == "http",
               url.host?.lowercased() == ReaderLocalRuntimeServer.host,
               url.port == Int(ReaderLocalRuntimeServer.port),
@@ -2091,23 +2098,26 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     ) {
         let wasForeground = readerForeground
         readerForeground = foreground
-        if foreground, !wasForeground, restartLocalRuntime,
-           let localRuntimeServer,
-           isLocalRuntimeURL(webView.url) {
-            Task { @MainActor [weak self, localRuntimeServer] in
-                guard let self else { return }
-                do {
-                    // Reloaded only when the server really was rebuilt: a
-                    // reload discards the rendered page, the reading position
-                    // and every warmed page image, which is exactly what made
-                    // returning from the background feel like reopening the
-                    // book.
-                    let restarted = try await localRuntimeServer
-                        .restartAfterForeground()
-                    if restarted { self.webView.reload() }
-                } catch {
-                    self.loadError = error.localizedDescription
+        if foreground, !wasForeground, isLocalRuntimeURL(webView.url) {
+            if restartLocalRuntime, let localRuntimeServer {
+                Task { @MainActor [weak self, localRuntimeServer] in
+                    guard let self else { return }
+                    do {
+                        // Reload only for an actual server rebuild or a dead
+                        // WebKit content process. A brief inactive transition
+                        // leaves both intact and must preserve the rendered
+                        // page, scroll position and warmed page images.
+                        let restarted = try await localRuntimeServer
+                            .restartAfterForeground()
+                        self.reloadLocalRuntimeAfterRecoveryIfNeeded(
+                            serverRebuilt: restarted
+                        )
+                    } catch {
+                        self.loadError = error.localizedDescription
+                    }
                 }
+            } else {
+                reloadLocalRuntimeAfterRecoveryIfNeeded(serverRebuilt: false)
             }
         }
         guard webView.url != nil else {
@@ -2126,6 +2136,17 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             })();
             """
         )
+    }
+
+    private func reloadLocalRuntimeAfterRecoveryIfNeeded(
+        serverRebuilt: Bool
+    ) {
+        guard serverRebuilt || webContentProcessNeedsReload else { return }
+        // Keep the recovery request set until didFinish. A native-ink save
+        // guard can cancel this navigation, and a provisional load can fail;
+        // clearing here would make either failure permanently suppress retry.
+        webContentProcessNeedsReload = true
+        webView.reload()
     }
 
     func prepareForNativeVoice() async throws {
@@ -2375,34 +2396,6 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     ) {
         let store = ReaderNativeBridgeStore()
         try? store.appendAgentEvent(event: event, payload: payload)
-    }
-
-    /// Maps a prefix-less local URL onto the running server's capability base.
-    ///
-    /// Only for this server's own origin, and only for paths that belong to the
-    /// reader; anything else stays external. Returns nil when the URL already
-    /// carries the prefix or the server is not running, so the ordinary trust
-    /// path keeps handling those.
-    private func localRuntimeRebasedURL(_ url: URL) -> URL? {
-        guard let localRuntimeServer,
-              url.scheme?.lowercased() == "http",
-              url.host?.lowercased() == ReaderLocalRuntimeServer.host,
-              url.port == Int(ReaderLocalRuntimeServer.port) else { return nil }
-        let base = localRuntimeServer.baseURL
-        if url.path.hasPrefix(base.path) { return nil }
-        let readerPrefixes = ["/pdf/", "/api/", "/static/"]
-        guard readerPrefixes.contains(where: { url.path.hasPrefix($0) }) else {
-            return nil
-        }
-        var components = URLComponents(
-            url: base,
-            resolvingAgainstBaseURL: false
-        )
-        components?.path = base.path
-            + String(url.path.dropFirst())
-        components?.query = url.query
-        components?.fragment = url.fragment
-        return components?.url
     }
 
     private func isTrustedReaderURL(_ url: URL?) -> Bool {
@@ -3114,6 +3107,13 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
 }
 
 extension ReaderWebViewModel: WKNavigationDelegate {
+    func webViewWebContentProcessDidTerminate(_ webView: WKWebView) {
+        webContentProcessNeedsReload = true
+        isLoading = false
+        guard readerForeground, isLocalRuntimeURL(webView.url) else { return }
+        reloadLocalRuntimeAfterRecoveryIfNeeded(serverRebuilt: false)
+    }
+
     func webView(
         _ webView: WKWebView,
         didStartProvisionalNavigation navigation: WKNavigation!
@@ -3130,6 +3130,7 @@ extension ReaderWebViewModel: WKNavigationDelegate {
         _ webView: WKWebView,
         didFinish navigation: WKNavigation!
     ) {
+        webContentProcessNeedsReload = false
         isLoading = false
         loadError = nil
         if let navigation,
@@ -3196,6 +3197,7 @@ extension ReaderWebViewModel: WKNavigationDelegate {
             decisionHandler(.allow)
             return
         }
+        let sourceURL = navigationAction.sourceFrame.request.url
 
         if nativePencilInk.hasPendingOperations,
            navigationAction.targetFrame?.isMainFrame != false
@@ -3212,33 +3214,17 @@ extension ReaderWebViewModel: WKNavigationDelegate {
 
         if scheme == "http" || scheme == "https" {
             if navigationAction.targetFrame?.isMainFrame != false,
-               takeOverLibraryNavigation(url) {
+               takeOverLibraryNavigation(url, sourceURL: sourceURL) {
                 decisionHandler(.cancel)
                 return
             }
             if navigationAction.targetFrame?.isMainFrame != false,
-               takeOverRemoteBookNavigation(url) {
+               takeOverRemoteBookNavigation(url, sourceURL: sourceURL) {
                 decisionHandler(.cancel)
                 return
             }
             if isTrustedReaderURL(url) {
                 decisionHandler(.allow)
-                return
-            }
-            // Same server, missing the capability prefix.
-            //
-            // The local runtime is served under /r/<token>/, but the reader's
-            // own markup links to absolute reader paths like /pdf/ -- correct
-            // on the Pi, prefix-less here. Those URLs failed the trust check
-            // and were treated as external links, so tapping one handed the
-            // App's private address to Safari, which cannot reach it at all.
-            //
-            // Rewritten onto the current base rather than fixed at every link
-            // site: the prefix is a property of this runtime, not of the
-            // documents, and they are shared with hosts that have no prefix.
-            if let rebased = localRuntimeRebasedURL(url) {
-                decisionHandler(.cancel)
-                webView.load(URLRequest(url: rebased))
                 return
             }
             // The App-owned WebView is a book renderer, not a general PWA or

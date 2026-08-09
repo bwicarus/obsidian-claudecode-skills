@@ -144,16 +144,29 @@ test("legacy Reader shelf navigation opens the App-owned local library", () => {
   assert.match(WEB_VIEW, /@Published private\(set\) var libraryPresentationRequestID: UUID\?/);
   assert.match(
     WEB_VIEW,
-    /private func takeOverLibraryNavigation\(_ url: URL\) -> Bool[\s\S]*url\.path == "\/pdf\/"[\s\S]*libraryPresentationRequestID = UUID\(\)/,
+    /private func takeOverLibraryNavigation\([\s\S]*sourceURL: URL\?[\s\S]*isTrustedReaderURL\(sourceURL\)[\s\S]*url\.path == "\/pdf\/"[\s\S]*libraryPresentationRequestID = UUID\(\)/,
   );
   assert.match(
     WEB_VIEW,
-    /navigationAction\.targetFrame\?\.isMainFrame != false,[\s\S]*takeOverLibraryNavigation\(url\)[\s\S]*decisionHandler\(\.cancel\)/,
+    /let sourceURL = navigationAction\.sourceFrame\.request\.url[\s\S]*navigationAction\.targetFrame\?\.isMainFrame != false,[\s\S]*takeOverLibraryNavigation\(url, sourceURL: sourceURL\)[\s\S]*decisionHandler\(\.cancel\)/,
   );
   assert.match(
     APP_ROOT,
     /\.onReceive\(reader\.\$libraryPresentationRequestID\)[\s\S]*guard requestID != nil[\s\S]*showsLibrary = true/,
   );
+});
+
+test("legacy local navigation trusts the initiating frame and never fabricates capability routes", () => {
+  assert.match(
+    WEB_VIEW,
+    /private func takeOverRemoteBookNavigation\([\s\S]*sourceURL: URL\?[\s\S]*isTrustedReaderURL\(sourceURL\)/,
+  );
+  assert.match(
+    WEB_VIEW,
+    /takeOverRemoteBookNavigation\(url, sourceURL: sourceURL\)/,
+  );
+  assert.doesNotMatch(WEB_VIEW, /localRuntimeRebasedURL/);
+  assert.doesNotMatch(WEB_VIEW, /webView\.load\(URLRequest\(url: rebased\)\)/);
 });
 
 test("local activity and snapshot identity expose only opaque book IDs", () => {
@@ -175,6 +188,34 @@ test("local activity and snapshot identity expose only opaque book IDs", () => {
   assert.match(WEB_VIEW, /case \.inactive:[\s\S]*restartLocalRuntime: false/);
   assert.match(WEB_VIEW, /case \.active:[\s\S]*restartLocalRuntime: shouldRestart/);
   assert.doesNotMatch(WEB_VIEW, /"currentURL": webView\.url\?\.absoluteString/);
+});
+
+test("native WebView reloads only after server rebuild or content-process termination", () => {
+  assert.match(WEB_VIEW, /private var webContentProcessNeedsReload = false/);
+  assert.match(
+    WEB_VIEW,
+    /func webViewWebContentProcessDidTerminate\(_ webView: WKWebView\)[\s\S]*webContentProcessNeedsReload = true[\s\S]*guard readerForeground, isLocalRuntimeURL\(webView\.url\)[\s\S]*reloadLocalRuntimeAfterRecoveryIfNeeded\(serverRebuilt: false\)/,
+  );
+  assert.match(
+    WEB_VIEW,
+    /let restarted = try await localRuntimeServer[\s\S]*\.restartAfterForeground\(\)[\s\S]*reloadLocalRuntimeAfterRecoveryIfNeeded\([\s\S]*serverRebuilt: restarted/,
+  );
+  assert.match(
+    WEB_VIEW,
+    /private func reloadLocalRuntimeAfterRecoveryIfNeeded\([\s\S]{0,220}guard serverRebuilt \|\| webContentProcessNeedsReload else \{ return \}[\s\S]{0,320}webContentProcessNeedsReload = true[\s\S]{0,80}webView\.reload\(\)/,
+  );
+  assert.doesNotMatch(
+    WEB_VIEW,
+    /private func reloadLocalRuntimeAfterRecoveryIfNeeded\([\s\S]{0,520}webContentProcessNeedsReload = false/,
+  );
+  assert.match(
+    WEB_VIEW,
+    /didFinish navigation: WKNavigation![\s\S]*webContentProcessNeedsReload = false/,
+  );
+  assert.doesNotMatch(
+    WEB_VIEW,
+    /case \.inactive:[\s\S]{0,180}webView\.reload\(\)/,
+  );
 });
 
 test("local WebView owns both bounded Pi gateway handlers on the main page world", () => {

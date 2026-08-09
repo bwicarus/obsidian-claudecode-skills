@@ -457,10 +457,26 @@ actor NativeBookOCRProcessor {
             )
 
             for (offset, piece) in pieces.enumerated() {
+                guard let normalizedRect = resolved[offset] else {
+                    if !piece.text.allSatisfy(\.isWhitespace) {
+                        segmentationPartial = true
+                    }
+                    continue
+                }
                 let rect = Self.pageRect(
-                    normalized: resolved[offset],
+                    normalized: normalizedRect,
                     geometry: geometry
                 )
+                let x0 = Self.rounded(rect.minX)
+                let y0 = Self.rounded(rect.minY)
+                let x1 = Self.rounded(rect.maxX)
+                let y1 = Self.rounded(rect.maxY)
+                guard x1 > x0, y1 > y0 else {
+                    if !piece.text.allSatisfy(\.isWhitespace) {
+                        segmentationPartial = true
+                    }
+                    continue
+                }
                 let localWord = Self.wordID(for: piece.range, tokens: tokenRanges)
                 let wordID = localWordIDs[localWord] ?? -1
                 if !piece.text.allSatisfy(\.isWhitespace) && wordID < 0 {
@@ -468,10 +484,10 @@ actor NativeBookOCRProcessor {
                 }
                 blockCharacters.append(NativeBookOCRCharacter(
                     c: piece.text,
-                    x0: Self.rounded(rect.minX),
-                    y0: Self.rounded(rect.minY),
-                    x1: Self.rounded(rect.maxX),
-                    y1: Self.rounded(rect.maxY),
+                    x0: x0,
+                    y0: y0,
+                    x1: x1,
+                    y1: y1,
                     sp: piece.text.allSatisfy(\.isWhitespace) ? 1 : 0,
                     w: piece.text.allSatisfy(\.isWhitespace) ? -1 : wordID,
                     b: 0,
@@ -594,31 +610,87 @@ actor NativeBookOCRProcessor {
     /// the accurate characters and stepped over the rest.
     ///
     /// Known boxes are kept exactly as reported. Each run of unknowns is spread
-    /// between the last known box before it and the first known box after it,
-    /// so order and spacing stay plausible and no two characters overlap. A run
-    /// at either end extends from the single neighbour it has. Only a line with
-    /// no known box at all falls back to equal division, where nothing better
-    /// can be inferred.
+    /// between the last known box before it and the first known box after it.
+    /// If Vision's exact boxes overlap, leave no gap, or arrive out of reading
+    /// order, there is no honest non-overlapping rectangle to invent between
+    /// them. Those unknowns remain unresolved instead of publishing zero-area
+    /// or overlapping hit targets. Only a line with no known box at all falls
+    /// back to equal division, where nothing better can be inferred.
     private static func resolvedCharacterRects(
         pieces: [CGRect?],
         observation: CGRect
-    ) -> [CGRect] {
+    ) -> [CGRect?] {
         let count = pieces.count
         guard count > 0 else { return [] }
-        let vertical = observation.height > observation.width * 1.4
-        var output = [CGRect](repeating: .zero, count: count)
+        let bounds = observation.standardized
+        let vertical = bounds.height > bounds.width * 1.4
+        var output = pieces
         let knownIndexes = (0..<count).filter { pieces[$0] != nil }
         guard !knownIndexes.isEmpty else {
+            guard bounds.width.isFinite, bounds.height.isFinite,
+                  bounds.width > 0, bounds.height > 0 else {
+                return output
+            }
             for index in 0..<count {
                 output[index] = estimatedCharacterRect(
-                    observation: observation,
+                    observation: bounds,
                     index: index,
                     count: count
                 )
             }
             return output
         }
-        for index in knownIndexes { output[index] = pieces[index]! }
+
+        let exactRects = knownIndexes.compactMap { pieces[$0] }
+        var estimatedRects: [CGRect] = []
+
+        func strictlyOverlaps(_ lhs: CGRect, _ rhs: CGRect) -> Bool {
+            lhs.minX < rhs.maxX && lhs.maxX > rhs.minX
+                && lhs.minY < rhs.maxY && lhs.maxY > rhs.minY
+        }
+
+        func nearestPlaced(before index: Int) -> CGRect? {
+            guard index > 0 else { return nil }
+            for position in stride(from: index - 1, through: 0, by: -1) {
+                if let value = output[position] { return value }
+            }
+            return nil
+        }
+
+        func nearestPlaced(after index: Int) -> CGRect? {
+            guard index + 1 < count else { return nil }
+            for position in (index + 1)..<count {
+                if let value = output[position] { return value }
+            }
+            return nil
+        }
+
+        func isSafeEstimate(_ rect: CGRect, at index: Int) -> Bool {
+            guard rect.minX.isFinite, rect.minY.isFinite,
+                  rect.width.isFinite, rect.height.isFinite,
+                  rect.width > 0, rect.height > 0,
+                  !exactRects.contains(where: { strictlyOverlaps(rect, $0) }),
+                  !estimatedRects.contains(where: { strictlyOverlaps(rect, $0) }) else {
+                return false
+            }
+            if let previous = nearestPlaced(before: index) {
+                let outOfOrder = vertical
+                    ? rect.midY >= previous.midY
+                    : rect.midX <= previous.midX
+                if outOfOrder {
+                    return false
+                }
+            }
+            if let next = nearestPlaced(after: index) {
+                let outOfOrder = vertical
+                    ? rect.midY <= next.midY
+                    : rect.midX >= next.midX
+                if outOfOrder {
+                    return false
+                }
+            }
+            return true
+        }
 
         // Spans the gap between two placed characters, or off the end of one.
         func fill(from lower: Int?, to upper: Int?) {
@@ -626,39 +698,45 @@ actor NativeBookOCRProcessor {
             let end = (upper ?? count) - 1
             guard start <= end else { return }
             let span = end - start + 1
-            let leading = lower.map { output[$0] }
-            let trailing = upper.map { output[$0] }
+            let leading = lower.flatMap { output[$0] }
+            let trailing = upper.flatMap { output[$0] }
             let origin: CGFloat
             let extent: CGFloat
             if vertical {
-                let top = leading.map { $0.minY } ?? observation.maxY
-                let bottom = trailing.map { $0.maxY } ?? observation.minY
-                origin = min(top, bottom)
-                extent = max(0, abs(top - bottom))
+                let top = leading?.minY ?? bounds.maxY
+                let bottom = trailing?.maxY ?? bounds.minY
+                origin = bottom
+                extent = top - bottom
             } else {
-                let left = leading.map { $0.maxX } ?? observation.minX
-                let right = trailing.map { $0.minX } ?? observation.maxX
-                origin = min(left, right)
-                extent = max(0, abs(right - left))
+                let left = leading?.maxX ?? bounds.minX
+                let right = trailing?.minX ?? bounds.maxX
+                origin = left
+                extent = right - left
             }
+            guard origin.isFinite, extent.isFinite, extent > 0 else { return }
             let step = extent / CGFloat(span)
+            guard step.isFinite, step > 0 else { return }
             for offset in 0..<span {
                 let index = start + offset
+                let estimate: CGRect
                 if vertical {
-                    output[index] = CGRect(
-                        x: observation.minX,
+                    estimate = CGRect(
+                        x: bounds.minX,
                         y: origin + CGFloat(span - offset - 1) * step,
-                        width: observation.width,
+                        width: bounds.width,
                         height: step
                     )
                 } else {
-                    output[index] = CGRect(
+                    estimate = CGRect(
                         x: origin + CGFloat(offset) * step,
-                        y: observation.minY,
+                        y: bounds.minY,
                         width: step,
-                        height: observation.height
+                        height: bounds.height
                     )
                 }
+                guard isSafeEstimate(estimate, at: index) else { continue }
+                output[index] = estimate
+                estimatedRects.append(estimate)
             }
         }
 

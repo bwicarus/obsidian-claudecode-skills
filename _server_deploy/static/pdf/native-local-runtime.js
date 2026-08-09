@@ -2686,7 +2686,12 @@
         flx: item.fml ? String(item.flx || '').slice(0, 4000) : ''
       });
     }
-    if (!out.length) return null;
+    // An originally empty page is a valid, selectable-text-free PDF page. It
+    // is different from a non-empty payload where every character failed
+    // validation: the former is readyEmpty, while the latter must stay an
+    // explicit invalid text layer instead of disguising corruption as a
+    // successfully empty page.
+    if (!out.length && raw.length) return null;
     if (dropped) {
       try {
         if (window.__bwProbe) {
@@ -2725,7 +2730,9 @@
   }
   function embeddedPageResult(page, input) {
     input = input || {};
-    var chars = normalizePageTextChars(input.chars || []);
+    // Only an explicitly supplied empty array means a genuinely empty text
+    // layer. Missing or non-array payloads are malformed, not readyEmpty.
+    var chars = normalizePageTextChars(input.chars);
     var furigana = normalizePageTextFurigana(input.furigana);
     var pageWidth = normalizedPageSize(input.pageWidth || input.page_w);
     var pageHeight = normalizedPageSize(input.pageHeight || input.page_h);

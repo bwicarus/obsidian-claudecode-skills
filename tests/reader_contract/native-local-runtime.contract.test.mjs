@@ -2933,6 +2933,60 @@ test("PageTextProvider feeds embedded PDF text into the existing page-chars rout
   assert.equal(pageTextMessages.length, 0);
 });
 
+test("embedded PDF text drops isolated bad glyphs but distinguishes corrupt and empty pages", async () => {
+  const { context } = await harness();
+  const provider = context.BWReaderRuntime.pageTextProvider;
+
+  const mixed = provider.registerEmbeddedPage(21, {
+    pageWidth: 600,
+    pageHeight: 800,
+    revision: "embedded-mixed-glyphs",
+    chars: [
+      { c: "保", x0: 10, y0: 20, x1: 20, y1: 32, w: 3, bk: 1, sp: false },
+      { c: "坏", x0: 30, y0: 20, x1: 10, y1: 32, w: 3, bk: 1, sp: false },
+      { c: "留", x0: 20, y0: 20, x1: 30, y1: 32, w: 3, bk: 1, sp: false },
+    ],
+  });
+  assert.equal(mixed.state, "ready");
+  assert.equal(mixed.chars.map((item) => item.c).join(""), "保留");
+
+  assert.throws(
+    () => provider.registerEmbeddedPage(22, {
+      pageWidth: 600,
+      pageHeight: 800,
+      revision: "embedded-all-corrupt",
+      chars: [
+        { c: "坏", x0: 30, y0: 20, x1: 10, y1: 32 },
+        { c: "", x0: 10, y0: 20, x1: 20, y1: 32 },
+      ],
+    }),
+    (error) => error?.code === "BW_PAGE_TEXT_EMBEDDED_INVALID",
+  );
+
+  const empty = provider.registerEmbeddedPage(23, {
+    pageWidth: 600,
+    pageHeight: 800,
+    revision: "embedded-genuinely-empty",
+    chars: [],
+  });
+  assert.equal(empty.state, "readyEmpty");
+  assert.equal(empty.chars.length, 0);
+
+  for (const [offset, malformedChars] of [undefined, null, false, {}].entries()) {
+    const candidate = {
+      pageWidth: 600,
+      pageHeight: 800,
+      revision: `embedded-malformed-chars-${offset}`,
+    };
+    if (malformedChars !== undefined) candidate.chars = malformedChars;
+    assert.throws(
+      () => provider.registerEmbeddedPage(24 + offset, candidate),
+      (error) => error?.code === "BW_PAGE_TEXT_EMBEDDED_INVALID",
+      "only an explicit empty array may become readyEmpty",
+    );
+  }
+});
+
 test("embedded PDF text returns immediately while native formula prefetch is hung", async () => {
   const { context, pageTextMessages, gatewayMessages, gateEvents } = await harness({
     pageTextReply() {
