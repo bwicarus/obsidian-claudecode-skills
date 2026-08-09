@@ -16,6 +16,12 @@ final class NativeBookOCRManager: ObservableObject {
     private var statusWriteTasks: [String: Task<Void, Never>] = [:]
     private var activeContentSHA256: [String: String] = [:]
     private var invalidatedContentSHA256: [String: String] = [:]
+    private struct ReaderEmbeddedProcessor {
+        let contentSHA256: String
+        let fileURL: URL
+        let processor: NativeBookOCRProcessor
+    }
+    private var readerEmbeddedProcessors: [String: ReaderEmbeddedProcessor] = [:]
     private var pdfMutationLeases: [String: NativeBookOCRPDFMutationLease] = [:]
     private var pdfMutationResolvedStatus: [String: NativeBookOCRBookStatus] = [:]
     private var activeWriteOperations: [String: Int] = [:]
@@ -189,12 +195,16 @@ final class NativeBookOCRManager: ObservableObject {
             throw NativeBookOCRError.storage("PDF 改页期间不能切换 OCR 摘要")
         }
         let normalized = expectedContentSHA256.lowercased()
+        if readerEmbeddedProcessors[bookID]?.contentSHA256 != normalized {
+            readerEmbeddedProcessors.removeValue(forKey: bookID)
+        }
         activeContentSHA256[bookID] = normalized
         invalidatedContentSHA256.removeValue(forKey: bookID)
     }
 
     func deactivate(bookID: String) {
         activeContentSHA256.removeValue(forKey: bookID)
+        readerEmbeddedProcessors.removeValue(forKey: bookID)
     }
 
     private func invalidate(
@@ -205,6 +215,7 @@ final class NativeBookOCRManager: ObservableObject {
         guard activeContentSHA256[bookID] == normalized else { return }
         activeContentSHA256.removeValue(forKey: bookID)
         invalidatedContentSHA256[bookID] = normalized
+        readerEmbeddedProcessors.removeValue(forKey: bookID)
     }
 
     func activatedContentSHA256(for bookID: String) -> String? {
@@ -429,6 +440,57 @@ final class NativeBookOCRManager: ObservableObject {
             contentSHA256: expectedContentSHA256,
             page: page
         )
+    }
+
+    /// The PDFKit page-image path deliberately skips PDF.js, so it cannot rely
+    /// on PDF.js to register the PDF's own text layer. Keep explicit Apple/Pi/PC
+    /// layers authoritative, but lazily materialize the selected embedded layer
+    /// with PDFKit for the currently visible page. This is text extraction only:
+    /// it never starts Vision OCR or changes the user's selected text layer.
+    func readerPageCharacters(
+        book: ReaderLocalBookAccess,
+        expectedContentSHA256: String,
+        page: Int
+    ) async throws -> NativeBookOCRPageCharacters? {
+        await waitUntilReady()
+        let bookID = book.record.id
+        let normalized = expectedContentSHA256.lowercased()
+        guard Self.isSHA256(expectedContentSHA256), page >= 1,
+              activeContentSHA256[bookID] == normalized,
+              invalidatedContentSHA256[bookID] != normalized else { return nil }
+        try Self.validateCurrentBook(book)
+        if let effective = try await store.page(
+            contentSHA256: normalized,
+            page: page
+        ) {
+            return effective
+        }
+        let layer = try await store.layerState(contentSHA256: normalized).selected
+        guard layer == .embedded else { return nil }
+
+        let fileURL = book.url.standardizedFileURL
+        let processor: NativeBookOCRProcessor
+        if let cached = readerEmbeddedProcessors[bookID],
+           cached.contentSHA256 == normalized,
+           cached.fileURL == fileURL {
+            processor = cached.processor
+        } else {
+            processor = try NativeBookOCRProcessor(fileURL: fileURL)
+            readerEmbeddedProcessors[bookID] = ReaderEmbeddedProcessor(
+                contentSHA256: normalized,
+                fileURL: fileURL,
+                processor: processor
+            )
+        }
+        let value = try await processor.processEmbeddedPage(
+            pageNumber: page,
+            contentSHA256: normalized,
+            configuration: NativeBookOCRConfiguration()
+        )
+        try Self.validateCurrentBook(book)
+        guard activeContentSHA256[bookID] == normalized,
+              invalidatedContentSHA256[bookID] != normalized else { return nil }
+        return value
     }
 
     func pageStatus(

@@ -376,6 +376,31 @@ test("native page text reply bridge is main-frame, trusted, strict, and passive"
   assert.doesNotMatch(BRIDGE, /startLocal|\.resume\(|\.retry\(|startPi/);
 });
 
+test("PDFKit image pages lazily recover the embedded selectable text layer", () => {
+  assert.match(
+    MANAGER,
+    /func readerPageCharacters\([\s\S]*book: ReaderLocalBookAccess[\s\S]*processEmbeddedPage\(/,
+  );
+  assert.match(
+    MANAGER,
+    /let layer = try await store\.layerState\([\s\S]*guard layer == \.embedded else \{ return nil \}/,
+  );
+  assert.match(MANAGER, /private var readerEmbeddedProcessors:/);
+  assert.match(
+    BRIDGE,
+    /case \.pageCharacters:[\s\S]*book: requestBookAccess[\s\S]*manager: manager/,
+  );
+  assert.match(
+    BRIDGE,
+    /func pageReply\([\s\S]*book: ReaderLocalBookAccess\?[\s\S]*manager\.readerPageCharacters\(/,
+  );
+  const readerFallback = MANAGER.slice(
+    MANAGER.indexOf("func readerPageCharacters("),
+    MANAGER.indexOf("func pageStatus("),
+  );
+  assert.doesNotMatch(readerFallback, /startLocal|forceVision:\s*true|startPi/);
+});
+
 test("native update event and page formula reply keep the exact public shape", () => {
   assert.match(BRIDGE, /'bw:native-page-text-updated'/);
   for (const key of [

@@ -124,6 +124,7 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
                         request: request,
                         expectedContentSHA256: expectedContentSHA256,
                         status: status,
+                        book: requestBookAccess,
                         manager: manager
                     )
                 case .status:
@@ -405,11 +406,21 @@ final class NativeBookOCRBridge: NSObject, WKScriptMessageHandlerWithReply {
         request: Request,
         expectedContentSHA256: String?,
         status: NativeBookOCRBookStatus,
+        book: ReaderLocalBookAccess?,
         manager: NativeBookOCRManager
     ) async throws -> [String: Any] {
         let pageNumber = request.page!
         let value: NativeBookOCRPageCharacters?
-        if let expectedContentSHA256 {
+        if let expectedContentSHA256,
+           let book,
+           book.record.id == request.localBookID,
+           book.record.format == .pdf {
+            value = try await manager.readerPageCharacters(
+                book: book,
+                expectedContentSHA256: expectedContentSHA256,
+                page: pageNumber
+            )
+        } else if let expectedContentSHA256 {
             value = try await manager.pageCharacters(
                 bookID: request.localBookID,
                 expectedContentSHA256: expectedContentSHA256,
