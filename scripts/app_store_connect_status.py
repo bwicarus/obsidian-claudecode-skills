@@ -135,6 +135,32 @@ def main() -> int:
             }
         )
 
+    app_groups_payload = api_get(
+        token,
+        f"/v1/apps/{app_id}/betaGroups",
+        {
+            "fields[betaGroups]": (
+                "name,isInternalGroup,hasAccessToAllBuilds,publicLinkEnabled,"
+                "publicLinkLimitEnabled,publicLinkLimit"
+            ),
+            "limit": "200",
+        },
+    )
+    app_groups = []
+    for group in app_groups_payload.get("data", []):
+        attrs = group.get("attributes", {})
+        app_groups.append(
+            {
+                "id": group.get("id"),
+                "name": attrs.get("name"),
+                "internal": attrs.get("isInternalGroup"),
+                "all_builds": attrs.get("hasAccessToAllBuilds"),
+                "public_link_enabled": attrs.get("publicLinkEnabled"),
+                "public_link_limit_enabled": attrs.get("publicLinkLimitEnabled"),
+                "public_link_limit": attrs.get("publicLinkLimit"),
+            }
+        )
+
     builds = api_get(
         token,
         "/v1/builds",
@@ -188,6 +214,7 @@ def main() -> int:
         "bundle_id": args.bundle_id,
         "version": args.version,
         "requested_build_number": args.build_number or None,
+        "app_beta_groups": app_groups,
         "build_uploads": upload_rows,
         "build": build_summary,
     }
