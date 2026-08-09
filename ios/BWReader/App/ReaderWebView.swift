@@ -3271,6 +3271,102 @@ extension ReaderWebViewModel: WKNavigationDelegate {
 }
 
 extension ReaderWebViewModel: WKUIDelegate {
+    private func readerDialogPresenter(for webView: WKWebView) -> UIViewController? {
+        func topViewController(from controller: UIViewController?) -> UIViewController? {
+            guard let controller else { return nil }
+            if let presented = controller.presentedViewController {
+                return topViewController(from: presented)
+            }
+            if let navigation = controller as? UINavigationController {
+                return topViewController(from: navigation.visibleViewController)
+            }
+            if let tab = controller as? UITabBarController {
+                return topViewController(from: tab.selectedViewController)
+            }
+            if let split = controller as? UISplitViewController,
+               let last = split.viewControllers.last {
+                return topViewController(from: last)
+            }
+            return controller
+        }
+
+        guard let root = webView.window?.rootViewController else { return nil }
+        return topViewController(from: root)
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptAlertPanelWithMessage message: String,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping () -> Void
+    ) {
+        guard let presenter = readerDialogPresenter(for: webView) else {
+            completionHandler()
+            return
+        }
+        let alert = UIAlertController(
+            title: "Reader",
+            message: message,
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "好", style: .default) { _ in
+            completionHandler()
+        })
+        presenter.present(alert, animated: true)
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptConfirmPanelWithMessage message: String,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping (Bool) -> Void
+    ) {
+        guard let presenter = readerDialogPresenter(for: webView) else {
+            completionHandler(false)
+            return
+        }
+        let alert = UIAlertController(
+            title: "Reader",
+            message: message,
+            preferredStyle: .alert
+        )
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel) { _ in
+            completionHandler(false)
+        })
+        alert.addAction(UIAlertAction(title: "确定", style: .destructive) { _ in
+            completionHandler(true)
+        })
+        presenter.present(alert, animated: true)
+    }
+
+    func webView(
+        _ webView: WKWebView,
+        runJavaScriptTextInputPanelWithPrompt prompt: String,
+        defaultText: String?,
+        initiatedByFrame frame: WKFrameInfo,
+        completionHandler: @escaping (String?) -> Void
+    ) {
+        guard let presenter = readerDialogPresenter(for: webView) else {
+            completionHandler(nil)
+            return
+        }
+        let alert = UIAlertController(
+            title: "Reader",
+            message: prompt,
+            preferredStyle: .alert
+        )
+        alert.addTextField { field in
+            field.text = defaultText
+        }
+        alert.addAction(UIAlertAction(title: "取消", style: .cancel) { _ in
+            completionHandler(nil)
+        })
+        alert.addAction(UIAlertAction(title: "确定", style: .default) { _ in
+            completionHandler(alert.textFields?.first?.text ?? "")
+        })
+        presenter.present(alert, animated: true)
+    }
+
     func webView(
         _ webView: WKWebView,
         createWebViewWith configuration: WKWebViewConfiguration,

@@ -3884,3 +3884,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：Reader Node 全量 932 项、OCR/书库/PC worker Python 专项、离线 ReaderBundle、macOS 模拟器/设备归档与 Pi 完整门禁均通过；Windows handoff 仅被既有 Linux `fcntl` 环境阻断。
 - **发布**：App 提交 `de58710c` 经 Actions run `31310652255` 上传 TestFlight `1.1.4 (140)`；Pi 最终提交 `5e52250d` 原子部署成功，回滚快照为 `20260809T113625Z-895412`；PC worker 已在线并接受任务。
 - **边界/下一步**：仍需 iPad 验收文字层切换、高亮、EPUB、返回书架和缩放；随后分阶段以 PDFKit 替换基础 PDF 页面，并实现名为“ReaderPC 服务器”的统一托盘总控。
+
+## Codex：PDF 高亮删除与 EPUB 滚动性能 1.1.5 候选（2026-08-09 JST）
+- **改了什么**：App 补齐 WKWebView 的系统提示、确认和输入对话框，PDF 高亮删除可在原确认语义下继续；无原生展示器时删除仍 fail closed。
+- **性能**：EPUB 停滚装饰从遍历全部历史已加载章节改为只量取当前视口邻域；没有可用装饰数据时不再创建延迟任务。
+- **怎么验的**：新增对话框与 1000 章有界扫描行为合同，Reader Node 全量 935 项通过；Windows 总门禁仅保留既有 Unix `fcntl` 环境阻断。
+- **边界/下一步**：PDFKit 基础渲染/缩放仍是后续独立阶段，本候选先经 macOS 编译与 Pi 原子门禁，再上传 TestFlight 并部署 EPUB 静态资源。

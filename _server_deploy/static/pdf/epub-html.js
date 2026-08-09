@@ -2743,10 +2743,27 @@
   }
   function _visibleLoadedSecs() {
     var vh = window.innerHeight || 800, M = 700, out = [];
-    for (var i = 0; i < secEls.length; i++) {
-      if (loaded[i] !== true) continue;
-      var r = secEls[i].getBoundingClientRect();
-      if (r.bottom > -M && r.top < vh + M) out.push(secEls[i]);
+    var n = secEls.length;
+    if (!n) return out;
+    // _curTopIdx is maintained by the O(1) neighbour walk in onScroll. Start
+    // there and stop as soon as each side leaves the viewport margin. A long
+    // reading session can leave hundreds of earlier sections loaded; scanning
+    // all of them here after every scroll forced a full layout walk and made
+    // EPUB progressively slower.
+    var anchor = Math.min(Math.max(_curTopIdx | 0, 0), n - 1);
+    for (var i = anchor; i < n; i++) {
+      var forward = secEls[i];
+      if (!forward) continue;
+      var fr = forward.getBoundingClientRect();
+      if (fr.top >= vh + M) break;
+      if (loaded[i] === true && fr.bottom > -M) out.push(forward);
+    }
+    for (var j = anchor - 1; j >= 0; j--) {
+      var backward = secEls[j];
+      if (!backward) continue;
+      var br = backward.getBoundingClientRect();
+      if (br.bottom <= -M) break;
+      if (loaded[j] === true && br.top < vh + M) out.unshift(backward);
     }
     return out;
   }
@@ -2757,7 +2774,13 @@
   }
   function _decorateVisible() { _visibleLoadedSecs().forEach(_decorateSection); }
   var _decoT;
-  function _decoSchedule() { clearTimeout(_decoT); _decoT = setTimeout(_decorateVisible, 250); }
+  function _decoSchedule() {
+    // The listener is always installed. Before the vocabulary map exists (or
+    // when underlines are disabled), no decoration mode means there is no
+    // useful layout work to schedule.
+    if ((!_vocabOn() || !_vocabMap) && !_deco.ruby && !_deco.pagetr) return;
+    clearTimeout(_decoT); _decoT = setTimeout(_decorateVisible, 250);
+  }
   function _wrapTokens(node, toks, makeWrap) {
     var sorted = toks.slice().filter(function (t) { return t.end > t.start; }).sort(function (a, b) { return a.start - b.start; });
     function appendExtra(wrap, t) { if (t.__rt != null) { var rt = document.createElement('rt'); rt.className = 'ep-rt'; rt.dataset.eph = '1'; rt.textContent = t.__rt; wrap.appendChild(rt); } }
