@@ -2,6 +2,19 @@ import CoreFoundation
 import Foundation
 import WebKit
 
+private final class ReaderNativeNoRedirectDelegate: NSObject,
+    URLSessionTaskDelegate {
+    func urlSession(
+        _ session: URLSession,
+        task: URLSessionTask,
+        willPerformHTTPRedirection response: HTTPURLResponse,
+        newRequest request: URLRequest,
+        completionHandler: @escaping (URLRequest?) -> Void
+    ) {
+        completionHandler(nil)
+    }
+}
+
 /// App-owned sync gateway. Account identity, namespace and owner credentials
 /// stay in Swift memory; the local Reader page can only submit sync-v3 payloads
 /// and receive the relay's business response.
