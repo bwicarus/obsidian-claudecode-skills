@@ -1519,6 +1519,14 @@ def parse_args(argv=None):
     parser.add_argument("--engines", default=os.environ.get("BW_READER_PC_OCR_ENGINES", "vision,manga"))
     parser.add_argument("--idle-poll-seconds", type=float, default=20.0)
     parser.add_argument("--once", action="store_true")
+    parser.add_argument(
+        "--recycle-after-job",
+        action="store_true",
+        help=(
+            "exit after a claimed job so the ReaderPC supervisor can restart "
+            "a lightweight process without retained model memory"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -1583,7 +1591,7 @@ def main(argv=None) -> int:
             except Exception as exc:
                 print("PC OCR worker error: " + safe_error(exc), file=sys.stderr, flush=True)
                 worked = True
-            if args.once:
+            if args.once or (args.recycle_after_job and worked):
                 return 0
             # Empty queues poll slowly.  Failures also back off so a broken Pi
             # or model does not consume CPU in a tight retry loop.

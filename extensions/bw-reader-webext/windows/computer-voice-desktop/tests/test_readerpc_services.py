@@ -135,6 +135,41 @@ class ReaderPCServicesTests(unittest.TestCase):
         self.assertNotIn(str(self.root), text)
         self.assertNotIn("token", text.casefold())
 
+    def test_supervised_worker_command_recycles_after_each_job(self) -> None:
+        captured: list[str] = []
+        probe = FakeProbe({})
+
+        class Process:
+            def poll(self):
+                return None
+
+        def popen(command, **_kwargs):
+            captured.extend(command)
+            probe.values[4242] = 9001
+            self.paths.status_file.parent.mkdir(parents=True, exist_ok=True)
+            self.paths.status_file.write_text(
+                json.dumps(
+                    {
+                        "contract": PC_OCR_STATUS_CONTRACT,
+                        "state": "idle",
+                        "phase": "preparing",
+                        "processId": 4242,
+                        "processStartFileTimeUtc": 9001,
+                    }
+                ),
+                "utf-8",
+            )
+            return Process()
+
+        status = PcOcrServiceController(
+            self.paths,
+            process_probe=probe,
+            popen=popen,
+        ).start()
+
+        self.assertTrue(status.running)
+        self.assertIn("--recycle-after-job", captured)
+
 
 if __name__ == "__main__":
     unittest.main()

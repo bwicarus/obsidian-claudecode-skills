@@ -513,6 +513,7 @@ class PcOcrServiceController:
                     str(worker),
                     "--project-root",
                     str(project_root),
+                    "--recycle-after-job",
                 ],
                 cwd=str(project_root),
                 env=self._environment(project_root),

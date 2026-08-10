@@ -36,7 +36,7 @@ from readerpc_services import (
 )
 
 
-APP_VERSION = "0.1.1"
+APP_VERSION = "0.1.3"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 POLL_INTERVAL_MS = 2_500
 STATUS_PUBLISH_INTERVAL_SECONDS = 10.0

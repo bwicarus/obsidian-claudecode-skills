@@ -679,6 +679,19 @@ class WorkerRunnerTest(unittest.TestCase):
 
 
 class WindowsPriorityTest(unittest.TestCase):
+    def test_supervised_worker_recycles_after_a_claimed_job(self):
+        runner = SimpleNamespace(run_once=lambda: True)
+        with patch.object(worker, "_lower_process_priority"), patch.object(
+            worker, "build_runner", return_value=runner
+        ), patch.object(
+            worker.time,
+            "sleep",
+            side_effect=AssertionError("recycled worker must not enter idle sleep"),
+        ):
+            result = worker.main(["--recycle-after-job"])
+
+        self.assertEqual(result, 0)
+
     def test_idle_gpu_probe_uses_nvidia_smi_without_importing_torch(self):
         calls = []
 
