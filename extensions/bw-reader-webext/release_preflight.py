@@ -143,13 +143,19 @@ WINDOWS_SOURCE_FILES = (
     "computer-voice-desktop/computer-voice-direct.config.example.json",
     "computer-voice-desktop/control_plane.py",
     "computer-voice-desktop/desktop_launcher.py",
+    "computer-voice-desktop/readerpc_launcher.py",
+    "computer-voice-desktop/readerpc_services.py",
     "computer-voice-desktop/sidebar_bridge_client.py",
     "computer-voice-desktop/tests/test_bridge_core.py",
     "computer-voice-desktop/tests/test_control_plane.py",
     "computer-voice-desktop/tests/test_desktop_launcher.py",
+    "computer-voice-desktop/tests/test_readerpc_launcher.py",
+    "computer-voice-desktop/tests/test_readerpc_services.py",
     "computer-voice-desktop/voice_history_sidebar_sync.py",
     "package_computer_voice_direct.py",
+    "package_readerpc_server.py",
     "test_computer_voice_direct_package.py",
+    "test_readerpc_server_package.py",
     "typist-runtime/typist_ipc.py",
     "typist-runtime/voice_typist.py",
     "typist-runtime/voice-typist-launcher.ps1",
@@ -426,13 +432,14 @@ def validate_source_layout(source_root: Path = HERE) -> None:
         # The direct C# self-test is required before release auditing and
         # creates only these two project-local build trees.  The standalone
         # direct-bridge packager likewise writes only beneath the fixed
-        # candidates root.  Keep every exemption path-exact so an unrelated
+        # candidates roots.  Keep every exemption path-exact so an unrelated
         # build or candidate directory still fails closed and no generated
         # file can enter the source snapshot.
         ignored_relative_directories=frozenset({
             "ComputerVoiceAudio/bin",
             "ComputerVoiceAudio/obj",
             "candidates",
+            "readerpc-candidates",
         }),
     )
     if any(not name.endswith(".js") for name in (*SRC_FILES, *expected_vendor_files(source_root))):

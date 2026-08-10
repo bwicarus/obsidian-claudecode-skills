@@ -3958,3 +3958,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：存储启动被故意挂起时 337 页元数据仍立即返回；Reader 全量 945 项、离线 ReaderBundle 311 文件、发布管线、macOS 模拟器/签名归档及 App/扩展/Widget 校验通过；Windows 仅既有 `fcntl` 基线。
 - **发布**：提交 `28a6eee3` 经 Actions run `31346818906` 上传 TestFlight `1.1.14 (163)`；状态 run `31347190443` 确认 `COMPLETE / VALID / IN_BETA_TESTING`，零错误、零警告。
 - **下一步**：用户安装后不重启 App 连续切换两本已本地化 PDF，确认页图先显示、文字可选，随后既有高亮与笔迹正常恢复。
+
+## Codex：ReaderPC 服务器 0.1.1 已安装（2026-08-10 JST）
+- **改了什么**：新增独立托盘总控、统一本机状态、PC OCR 精确 PID 代次启停及版本化原子安装；语音/上下文/OCR 仍为独立子进程。
+- **性能**：空闲 GPU 探测改为 `nvidia-smi`，worker 工作集由约 407 MB 降至约 31 MB；PyTorch、模型与显存只在真正任务开始时加载。
+- **怎么验的**：精确 payload/摘要和包内 EXE 自检通过；Pi 执行器实读 `online=true`，worker 已领取一本 391 页 Vision 任务并持续上报。
+- **安装/回退**：当前 release 为 `%LOCALAPPDATA%\BWReader\ReaderPC-Server\releases\0.1.1`，0.1.0 完整保留；未注册开机项、未替换现有 Windows 语音 0.1.99。
+- **下一步**：App 刷新后 PC 按钮应显示“在线·忙碌”；任务完成后采用 PC 派生文字层，再验收该图像型 PDF 的拖选。

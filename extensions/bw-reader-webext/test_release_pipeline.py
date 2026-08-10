@@ -316,6 +316,11 @@ class ReleasePipelineTests(unittest.TestCase):
             candidate_root = fixture / "windows" / "candidates" / "0.4.1"
             candidate_root.mkdir(parents=True, exist_ok=True)
             (candidate_root / "candidate.zip").write_bytes(b"generated")
+            readerpc_candidate = (
+                fixture / "windows" / "readerpc-candidates" / "0.1.1"
+            )
+            readerpc_candidate.mkdir(parents=True, exist_ok=True)
+            (readerpc_candidate / "candidate.zip").write_bytes(b"generated")
             release.validate_source_layout(fixture)
 
             (fixture / "windows" / "unexpected").mkdir()
