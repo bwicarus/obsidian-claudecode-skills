@@ -871,9 +871,10 @@ actor NativeBookOCRSidecarStore {
     }
 
     /// A content-addressed receipt survives view/model recreation and lets the
-    /// network coordinator skip downloading the same immutable Pi revision.
-    /// A corrupt receipt is an error rather than a cache miss: silently
-    /// re-importing bytes would hide local storage damage.
+    /// network coordinator skip downloading the same immutable Pi/PC revision.
+    /// Version 2 also records every page's character count. A legacy receipt or
+    /// a payload mismatch is a repairable cache miss: the verified immutable
+    /// attachment is downloaded again instead of trusting a stale empty layer.
     func hasImportedRevision(
         contentSHA256: String,
         revision: String
@@ -897,7 +898,10 @@ actor NativeBookOCRSidecarStore {
                 ImportedRevisionReceipt.self,
                 from: Data(contentsOf: url)
             )
-            guard receipt.schema == ImportedRevisionReceipt.schema,
+            guard [
+                ImportedRevisionReceipt.legacySchema,
+                ImportedRevisionReceipt.schema,
+            ].contains(receipt.schema),
                   receipt.contentSHA256 == contentSHA256.lowercased(),
                   receipt.revision == revision else {
                 throw NativeBookOCRError.storage("导入回执身份不匹配")
@@ -907,7 +911,39 @@ actor NativeBookOCRSidecarStore {
                     contentSHA256: contentSHA256,
                     layer: layer
                 ), metadata.revision == revision else {
-                    throw NativeBookOCRError.storage("导入回执缺少对应文字层")
+                    return false
+                }
+                if receipt.schema == ImportedRevisionReceipt.legacySchema {
+                    // PC layers shipped before count-bearing receipts are
+                    // re-imported once. Existing Pi layers keep their legacy
+                    // cache behavior and are not all redownloaded on upgrade.
+                    return layer != .pc
+                }
+                guard let expectedCounts = receipt.pageCharacterCounts,
+                      !expectedCounts.isEmpty,
+                      expectedCounts.keys.allSatisfy({ $0 >= 1 }),
+                      expectedCounts.values.allSatisfy({ $0 >= 0 }) else {
+                    return false
+                }
+                let orderedPages = expectedCounts.keys.sorted()
+                var probePages = Set([
+                    orderedPages.first!,
+                    orderedPages[orderedPages.count / 2],
+                    orderedPages.last!,
+                ])
+                if let densestPage = expectedCounts.max(by: {
+                    $0.value < $1.value
+                })?.key {
+                    probePages.insert(densestPage)
+                }
+                for pageNumber in probePages {
+                    guard let storedPage = try basePage(
+                        contentSHA256: contentSHA256,
+                        page: pageNumber,
+                        layer: layer
+                    ), storedPage.chars.count == expectedCounts[pageNumber] else {
+                        return false
+                    }
                 }
             }
             return true
@@ -951,6 +987,7 @@ actor NativeBookOCRSidecarStore {
         }
         let processingProfile = manifest.processingProfile ?? "pi-default-v1"
         let targetLayer: NativeBookOCRLayerID = executor == "pc" ? .pc : .pi
+        let targetSource: NativeBookOCRSource = executor == "pc" ? .pc : .pi
         let target = contentDirectory(contentSHA256)
         var importedPages: [Int] = []
         var importedFormulaPages: [Int] = []
@@ -1037,7 +1074,7 @@ actor NativeBookOCRSidecarStore {
                 )
                 layerPages[pageNumber] = page.replacingFormulaAttachment(
                     attachment,
-                    source: .pi
+                    source: targetSource
                 )
                 importedFormulaPages.append(pageNumber)
             }
@@ -1058,7 +1095,7 @@ actor NativeBookOCRSidecarStore {
                 )
                 layerPages[pageNumber] = page.replacingFormulaAttachment(
                     attachment,
-                    source: .pi
+                    source: targetSource
                 )
                 importedFormulaPages.append(pageNumber)
             }
@@ -1132,6 +1169,11 @@ actor NativeBookOCRSidecarStore {
                 contentSHA256: contentSHA256,
                 revision: manifest.revision,
                 layer: targetLayer,
+                pageCharacterCounts: Dictionary(
+                    uniqueKeysWithValues: layerPages.values.map {
+                        ($0.page, $0.chars.count)
+                    }
+                ),
                 importedAt: Date()
             )
             let receiptURL = importReceiptURL(
@@ -1173,12 +1215,14 @@ actor NativeBookOCRSidecarStore {
     }
 
     private struct ImportedRevisionReceipt: Codable {
-        static let schema = "reader-native-book-ocr-import-receipt/1"
+        static let legacySchema = "reader-native-book-ocr-import-receipt/1"
+        static let schema = "reader-native-book-ocr-import-receipt/2"
 
         let schema: String
         let contentSHA256: String
         let revision: String
         let layer: NativeBookOCRLayerID?
+        let pageCharacterCounts: [Int: Int]?
         let importedAt: Date
     }
 
@@ -1197,13 +1241,14 @@ actor NativeBookOCRSidecarStore {
         let chars: [NativeBookOCRCharacter]
         let furigana: [NativeBookOCRFurigana]
         let tokenized: Bool?
+        let textCharCount: Int?
         let generatedAtEpochMs: Int64
 
         enum CodingKeys: String, CodingKey {
             case schema, bookId, contentSha256, engine, pageNumber
             case pageWidth = "page_w"
             case pageHeight = "page_h"
-            case imageWidth, imageHeight, chars, furigana, tokenized
+            case imageWidth, imageHeight, chars, furigana, tokenized, textCharCount
             case generatedAtEpochMs
         }
     }
@@ -1241,6 +1286,7 @@ actor NativeBookOCRSidecarStore {
             throw NativeBookOCRError.invalidAttachment("文字页附件身份或几何无效")
         }
         guard value.chars.count <= 250_000,
+              value.textCharCount.map({ $0 == value.chars.count }) ?? true,
               value.chars.allSatisfy({ character in
                 !character.c.isEmpty
                     && character.c.count <= 16
@@ -1289,7 +1335,7 @@ actor NativeBookOCRSidecarStore {
             ),
             engineRevision: revision,
             status: meaningful == 0 ? .readyEmpty : .ready,
-            source: .pi,
+            source: executor == "pc" ? .pc : .pi,
             chars: value.chars,
             furigana: value.furigana,
             wordSegmentation: segmentation,

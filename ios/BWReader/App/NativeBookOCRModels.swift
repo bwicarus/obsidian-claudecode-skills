@@ -3,6 +3,7 @@ import Foundation
 enum NativeBookOCRSource: String, Codable, Sendable {
     case apple
     case pi
+    case pc
 }
 
 /// A user-selectable base text/analysis layer. `legacy` is the pre-layered

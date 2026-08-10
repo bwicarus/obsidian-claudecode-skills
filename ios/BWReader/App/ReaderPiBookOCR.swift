@@ -995,7 +995,8 @@ final class ReaderPiOCRCoordinator: ObservableObject {
         localContentSHA256: String,
         cookies: [HTTPCookie],
         requiresManifest: Bool = false,
-        reportsExplicitFailure: Bool = false
+        reportsExplicitFailure: Bool = false,
+        forceReimport: Bool = false
     ) async -> Bool {
         if reportsExplicitFailure {
             clearError(for: book.bookId)
@@ -1033,12 +1034,19 @@ final class ReaderPiOCRCoordinator: ObservableObject {
             ) == .orderedSame else {
                 throw ReaderPiOCRError.localContentMismatch
             }
-            if try await NativeBookOCRManager.shared.hasImportedRevision(
+            if !forceReimport,
+               try await NativeBookOCRManager.shared.hasImportedRevision(
                 expectedContentSHA256: localContentSHA256,
                 revision: attachmentManifest.revision
             ) {
+                _ = try await NativeBookOCRManager.shared.refreshLayerState(
+                    bookID: localBookID,
+                    expectedContentSHA256: localContentSHA256
+                )
                 clearPassiveError(for: book.bookId)
-                notice = "Pi 预处理结果已是最新"
+                notice = attachmentManifest.executor == "pc"
+                    ? "PC 高质量预处理结果已是最新"
+                    : "Pi 预处理结果已是最新"
                 return true
             }
             let bundle = try await client.downloadAttachments(

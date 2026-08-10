@@ -2535,7 +2535,7 @@
   var PAGE_TEXT_UPDATE_CONTRACT = 'reader-native-page-text-update/1';
   var PAGE_TEXT_PROVIDER_CONTRACT = 'reader-page-text-provider/1';
   var PAGE_TEXT_STATES = new Set(['idle', 'pending', 'ready', 'readyEmpty', 'failed']);
-  var PAGE_TEXT_NATIVE_SOURCES = new Set(['apple', 'pi']);
+  var PAGE_TEXT_NATIVE_SOURCES = new Set(['apple', 'pi', 'pc']);
   var PAGE_TEXT_AUTHORITIES = new Set(['supplemental', 'local-override']);
   var PAGE_TEXT_RESPONSE_COMMON_KEYS = new Set([
     'contract', 'action', 'requestId', 'ok', 'state', 'source', 'revision', 'error'

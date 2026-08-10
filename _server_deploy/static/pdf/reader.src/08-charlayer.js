@@ -116,9 +116,9 @@ function _selectionUsesBlockFilter(source, revision, characterGeometry) {
   // drag range whenever PDF items/words happen to carry different bk values.
   if (src === 'embedded' || rev.startsWith('embedded-')
       || rev.includes('pdfkit-embedded-text/')) return false;
-  if (src === 'pi') {
-    if (rev.startsWith('pi-manga/')) return true;
-    if (rev.startsWith('pi-vision/')) return false;
+  if (src === 'pi' || src === 'pc') {
+    if (rev.startsWith(src + '-manga/')) return true;
+    if (rev.startsWith(src + '-vision/')) return false;
     // Compatibility with app builds whose revision was an opaque digest.
     if (geometry === 'exact') return false;
     if (geometry === 'estimated') return true;
@@ -220,7 +220,12 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   wrap.__charBoxes = charBoxes;
   wrap.__charsBaseW = wrap.classList.contains('crop-on') ? (parseFloat(wrap.style.getPropertyValue('--full-w')) || wrap.clientWidth || 0) : (wrap.clientWidth || 0);   // #51:建层整页布局宽基准(去边=整页 --full-w,charBox 是整页坐标;非去边=clientWidth);重渲后按 char-layer 实时 BCR/baseW 换算
   try { window.__applyPhraseMergesLocal && window.__applyPhraseMergesLocal(wrap); } catch (_) {}   // 本地词组合并(收藏集驱动,教义:本地算)
-  window.dlog?.('chars: ' + charBoxes.length + ' on page ' + num);
+  const textLayerIdentity = String(d.source || 'unknown')
+    + (d.revision ? '/' + String(d.revision) : '');
+  window.dlog?.(
+    'chars: ' + charBoxes.length + ' on page ' + num
+      + ' [' + textLayerIdentity + ']'
+  );
   // 创建 char-layer（透明覆盖整个 page-wrap）→ 绑定后**选词此刻即可用**(不等 overlay)
   const cl = ensurePageLayer(wrap, 'char-layer');
   wrap.__charLayer = cl;

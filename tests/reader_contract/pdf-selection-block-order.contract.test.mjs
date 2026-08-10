@@ -102,6 +102,27 @@ test("Pi vision 普通文字连续选取，Pi manga 仍隔离气泡和分栏", (
   );
 });
 
+test("PC vision 连续选取，PC manga 仍按布局块隔离", () => {
+  const input = [
+    rawChar("左", 1, 10, 0, { width: 40 }),
+    rawChar("中", 2, 110, 0, { width: 40 }),
+    rawChar("下", 3, 10, 18, { width: 40 }),
+  ];
+  const vision = api.map(input, 1, "pc", "pc-vision/1", "exact");
+  const manga = api.map(input, 1, "pc", "pc-manga/1", "estimated");
+  assert.equal(vision.every(api.blockFilter(vision, 0, 2)), true);
+  assert.deepEqual(
+    manga.filter(api.blockFilter(manga, 0, 2)).map((c) => c.c),
+    ["左", "下"],
+  );
+});
+
+test("文字层调试行同时显示字符数、来源和修订", () => {
+  assert.match(CHAR_LAYER, /textLayerIdentity/);
+  assert.match(CHAR_LAYER, /d\.source/);
+  assert.match(CHAR_LAYER, /d\.revision/);
+});
+
 test("竖排拖选沿 Y 重叠且 X 间距小的列块连通", () => {
   const chars = [
     { c: "右", bk: 11, w: -1, left: 210, top: 10, width: 10, height: 60 },

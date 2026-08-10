@@ -327,8 +327,20 @@ test("Pi attachments import by opaque id as one immutable derived revision", () 
   assert.match(STORE, /importReceiptURL\(/);
   assert.match(MANAGER, /func hasImportedRevision\(/);
   assert.match(MANAGER, /expectedContentSHA256\.caseInsensitiveCompare\(/);
-  assert.match(STORE, /source: \.pi/);
+  assert.match(STORE, /let targetSource: NativeBookOCRSource = executor == "pc" \? \.pc : \.pi/);
   assert.doesNotMatch(MODELS, /absolutePath|fileURL|bookmark/);
+});
+
+test("Pi and PC attachment receipts verify durable per-page character counts", () => {
+  assert.match(MODELS, /enum NativeBookOCRSource[\s\S]*case pi[\s\S]*case pc/);
+  assert.match(STORE, /reader-native-book-ocr-import-receipt\/2/);
+  assert.match(STORE, /pageCharacterCounts: \[Int: Int\]\?/);
+  assert.match(
+    STORE,
+    /probePages[\s\S]*densestPage[\s\S]*storedPage\.chars\.count == expectedCounts\[pageNumber\]/,
+  );
+  assert.match(STORE, /executor == "pc" \? \.pc : \.pi/);
+  assert.match(STORE, /textCharCount\.map\(\{ \$0 == value\.chars\.count \}\) \?\? true/);
 });
 
 test("native page text bridge data is available without coupling the core to UI files", () => {

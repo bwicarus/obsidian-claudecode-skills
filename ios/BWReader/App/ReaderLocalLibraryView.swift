@@ -1317,7 +1317,8 @@ struct ReaderLocalLibraryView: View {
                 localContentSHA256: digest,
                 cookies: cookies,
                 requiresManifest: true,
-                reportsExplicitFailure: true
+                reportsExplicitFailure: true,
+                forceReimport: true
             )
             if !imported {
                 presentPiErrorIfNeeded(for: book)

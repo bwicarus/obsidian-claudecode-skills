@@ -292,6 +292,20 @@ test("Pi attachment import checks the durable receipt before downloading payload
   assert.doesNotMatch(PI, /importedAttachmentRevisions/);
 });
 
+test("explicit reimport bypasses a stale durable receipt while passive import stays cached", () => {
+  const imported = PI.slice(
+    PI.indexOf("func importAvailableAttachments("),
+    PI.indexOf("func dismissMessages", PI.indexOf("func importAvailableAttachments(")),
+  );
+  const explicit = VIEW.slice(
+    VIEW.indexOf("private func importPiAttachments("),
+    VIEW.indexOf("private func presentPiErrorIfNeeded", VIEW.indexOf("private func importPiAttachments(")),
+  );
+  assert.match(imported, /forceReimport: Bool = false/);
+  assert.match(imported, /if !forceReimport,[\s\S]*hasImportedRevision\(/);
+  assert.match(explicit, /forceReimport: true/);
+});
+
 test("every local Pi binding is content-identity-bound", () => {
   assert.match(PI, /localContentSHA256: String\?/);
   assert.match(
