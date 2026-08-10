@@ -4017,3 +4017,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验**：`pts`/`p` 同几何裁剪与 Pi 兼容裁图专项、Reader Node 全量 969 项、发布管线、Pi 全门禁/E2E、扩展真实浏览器矩阵及 macOS 模拟器/签名归档均通过。
 - **发布事实**：代码 `efc656db`、文档 `ead64fc3`；Reader `0.2.85`、KG `kg-0.2.85-534da6ae7f800dac0b02`，回滚目录 `20260810T180043Z-1107624`；扩展渠道备份 `webext-channel-20260810T180656Z-9q58kdva`；Actions `31417454942` 上传 TestFlight `1.1.25 (189)`，`31418113085` 确认 `VALID / IN_BETA_TESTING` 且零错误警告。
 - **边界/下一步**：本机 Realtime 图像路径不经 Pi；未代用户发起真实通话，Windows 快照在线状态与本次普通电话 `see_ink` 修复分开验收。安装后在 App 与 Safari 各画一笔并调用 `see_ink`，确认工具卡成功且模型能描述真实笔迹。
+
+## Claude / Codex：see_ink 阶段化失败已发布 0.2.86 / 1.1.26（2026-08-11 JST）
+- **改了什么**：Claude 提交 `c074957c` 将页面合成、call 身份、sideband、本地保存与传输逐阶段作答；原生前置条件不再把凭证、媒体类型、编码或存储问题统一误报为图像过大，Codex 以 `d44b7e91` 补版本、vendor 与合同。
+- **怎么验**：专项 13 项、Reader Node 全量 970 项、发布管线、ReaderBundle、Pi Linux 全门禁/E2E、扩展真实浏览器矩阵及 macOS 模拟器/签名归档均通过；Windows handoff 仅保留既有 `fcntl` 平台基线。
+- **发布事实**：Reader `0.2.86`、KG `kg-0.2.86-59eb78f835eb67daec41`，回滚目录 `20260810T185623Z-1127105`；扩展渠道备份 `webext-channel-20260810T190123Z-zlnko09f`；Actions `31422033498` 上传 TestFlight `1.1.26 (192)`，`31422736822` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
+- **边界/下一步**：本批只改善可见诊断，未声称修好原生覆盖层是否进入合成图；安装后在 App 与 Safari 各画一次并调用 `see_ink`，把完整阶段提示或 AI 实际描述交回 Claude，据此修真实断点。
