@@ -3944,3 +3944,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **发布**：提交 `560c73be` 经 Actions run `31332479072` 上传 TestFlight `1.1.12 (157)`，状态 run `31332957737` 确认 `COMPLETE / VALID / IN_BETA_TESTING`。
 - **Pi**：原子部署完成，E2E 全过；回滚与取证快照 `/home/bwicarus/deploy-backups/reader/20260809T195429Z-952395`。
 - **下一步**：用户不重启 App 连续切换多本 PDF/EPUB，确认不再长时间停在“打开 PDF”或出现 `BW_LOCAL_STORE_UNAVAILABLE`。
+
+## Codex：本机图片模式换书启动门修复 1.1.13（2026-08-10 JST）
+- **根因/改动**：干净 PDF 没有改页 journal 时，启动恢复仍会对整本文件重算 SHA-256，并把 `book-meta` 与 PDFKit 页图挡在后面；现先做常数时间 journal 探测，只有真实恢复或网页携带摘要证据时才读整本。
+- **可见性**：现有调试框补齐 IndexedDB、PDF 恢复与运行时 ready 三段启动读数；无事务响应可明确不给内容摘要，不伪造文件身份。
+- **怎么验的**：专项与 Reader 全量合同、离线 ReaderBundle、发布管线、macOS 模拟器编译、签名设备归档及 App/扩展/Widget 一致性校验通过；Windows handoff 仅保留既有 `fcntl` 平台基线。
+- **发布**：提交 `a5ac3d2f` 经 Actions run `31345268820` 上传 TestFlight `1.1.13 (160)`；状态 run `31345617187` 确认 `COMPLETE / VALID / IN_BETA_TESTING`，无处理错误或警告。
+- **下一步**：用户不重启 App 连续切换两本大 PDF；正常日志应依次出现“IndexedDB 已就绪 / PDF 恢复检查已完成 / 运行时已就绪”，随后立即显示页图。
