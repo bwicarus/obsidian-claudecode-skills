@@ -42,20 +42,21 @@
 
 ## 2. 当前版本和已经完成的主线
 
-当前生产 Reader/PWA 版本：**0.2.76**；当前已发布 Windows 扩展版本：**0.2.72**。
+当前生产 Reader/PWA 与 Windows 扩展测试渠道均为 **0.2.79**；产品名精确为
+**“BW网页伴读”**。App TestFlight 当前构建为 **1.1.17 (172)**，Apple 已确认
+`VALID / IN_BETA_TESTING`。
 
-**0.2.79 候选**：App 本机书与浏览器扩展的 `openai_rtc` 普通电话改为服务端签发短期
-`ek_` credential、设备直接连接 OpenAI Realtime calls；长期 key、预算与会话配置仍由 Pi
-持有。Pi `/voice-rt?mode=rtc` 只保留同一 call 的上下文/工具 sideband，页码、可见正文、
-选区、笔迹、截图、工具和重连补投合同不变。完成原子部署与渠道发布前，本段不代表生产事实。
+**0.2.79 已部署**：App 本机书与浏览器扩展的 `openai_rtc` 普通电话由服务端签发 90 秒短期
+`ek_` credential，设备随后直接连接 OpenAI Realtime calls；长期 key、预算与完整会话配置仍由
+Pi 持有。Pi `/voice-rt?mode=rtc` 只保留同一 call 的上下文/工具 sideband，页码、可见正文、
+选区、笔迹、合成图、工具和重连补投合同不变。Windows 不可变测试 ZIP 的 SHA-256 为
+`42bfd1ce874cccea8a96f2c0073db650be0aa880328af2ac6f5d9f2c1e49de0d`；发布与回滚证据见当前协作状态。
 
-**0.2.76** 已部署 Reader/PWA：原麦克风位置改为电脑图标，
-普通电话按钮继续只负责豆包、GPT 或 Grok；电脑桥状态、上下文同步与
-`legacy-inject` / `snapshot-mcp` 回退开关集中到新的“电脑客户端”设置标签。Windows
-扩展正式渠道仍停在 0.2.72，不能把 Reader/PWA 版本当作扩展渠道的发布事实。
+**0.2.76 起保留的产品边界**：原麦克风位置是独立电脑图标，普通电话按钮只负责豆包、GPT 或
+Grok；电脑桥状态、上下文同步与 `legacy-inject` / `snapshot-mcp` 回退开关集中在“电脑客户端”
+设置标签。普通电话 Realtime 与电脑/Codex 语音是两条独立功能，不能用其中一条的状态推断另一条。
 
-当前 PWA/服务端共享 runtime 为 **0.2.76**，已发布 Windows 扩展仍为 **0.2.72**，产品名精确为
-**“BW网页伴读”**。0.2.72 把“电脑客户端”通话收口为免配对 direct v2：书籍 PWA 只从精确
+历史上 0.2.72 把“电脑客户端”通话收口为免配对 direct v2：书籍 PWA 只从精确
 生产 Origin 连接固定 Windows WSS；普通网页只能经 isolated content runtime 与扩展
 background 的固定 relay 连接同一地址。Pi 不再中继配对、状态、启动、心跳、信令或音频；
 Windows 只捕获明确选择的活动麦克风与 Codex 目标进程树输出。Reader/扩展不再生成或输入
@@ -68,7 +69,7 @@ DevTools 执行 `chrome.runtime.reload()`、核对实际 worker 构建版本，�
 后台混合运行。launcher 为 v12；功能逻辑沿用已验收的 v10，v12 用于
 承认跨机换行契约使 Windows `.cmd` 真源与已部署 v11 ZIP 的字节发生变化，避免覆盖
 不可变的 v11 资产。
-0.2.72 Windows 测试 ZIP SHA-256 为
+历史 0.2.72 Windows 测试 ZIP SHA-256 为
 `b365fb2d8ba9d64dc622fd0dca66f4e67e999c168eaec715dba30cbd627b2960`；Safari/iOS ZIP
 SHA-256 为 `71b0242c35d7de4ac0ecfea7bbc971c7551285a1b966f43f3040998273ed80d0`。
 Reader/PWA 实际发布、Windows 安装、回滚与健康证据见当前协作状态。

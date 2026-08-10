@@ -3972,3 +3972,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：Realtime 专项 80 项、Reader Node 全量 949 项、相关 Python 60 项（1 跳过）、离线 ReaderBundle、扩展发布管线及 macOS 模拟器/签名设备归档与三目标校验通过；Windows handoff 仅既有 `fcntl` 平台阻断。
 - **发布**：提交 `9b410dbe` 经 Actions run `31361125845` 上传 TestFlight `1.1.16 (169)`；状态 run `31361659716` 确认 `COMPLETE / VALID / IN_BETA_TESTING`，零处理错误或警告。
 - **下一步**：iPad 分别在 App 书页与 Safari 网页点普通电话按钮验收采集、回复和挂断；电脑按钮是独立 Windows 语音功能，不作为本次 Realtime 结果。
+
+## Codex：普通电话直连 Realtime 0.2.79 / 1.1.17 发布（2026-08-10 JST）
+- **改了什么**：App 本机书与扩展普通电话以 Pi 签发的 90 秒临时凭据直连 OpenAI；长期 key/预算留在服务端，Pi 控制侧链继续承载页面、选区、笔迹、合成图、工具和重连补投。
+- **怎么验的**：上下文/直连专项 25 项、Reader Node 全量 954 项、凭据 Python 3 项、扩展发布管线及完整真实浏览器矩阵通过；原生 ReaderBundle、模拟器、签名归档与三目标校验通过。
+- **发布事实**：Pi Reader `0.2.79`、KG `kg-0.2.79-f36633bede5407c4d33c`，回滚目录 `20260810T074728Z-996878`；Windows 测试渠道 `0.2.79`，渠道回滚目录 `webext-channel-20260810T075211Z-4z_b5c0e`。
+- **App 状态**：Actions run `31367641743` 上传 TestFlight `1.1.17 (172)`；只读状态 run `31368231881` 确认 `COMPLETE / VALID / IN_BETA_TESTING`，已进入内部组且无处理错误或警告。
+- **没做/下一步**：未替用户主动开启麦克风或发起真实通话；安装 1.1.17 后分别验收普通电话的双向音频、当前页、选区与笔迹问答，电脑/Codex 语音按钮不属于本次链路。
