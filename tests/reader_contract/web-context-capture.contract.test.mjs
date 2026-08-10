@@ -42,6 +42,19 @@ test("web context only reports the focused page even on forced refresh", () => {
   assert.doesNotMatch(report, /!focused\s*&&\s*!force/);
 });
 
+test("optional Windows snapshot failure stays inside the diagnostic boundary", () => {
+  const reportStart = CONTENT.indexOf("function report(force)");
+  const reportEnd = CONTENT.indexOf("function schedule(force)", reportStart);
+  assert.ok(reportStart >= 0 && reportEnd > reportStart);
+  const report = CONTENT.slice(reportStart, reportEnd);
+  assert.match(
+    report,
+    /runtimeRequest\(\{ type: "BW_READER_CONTEXT_POST", snapshot: relaySnap \}, 15000\)[\s\S]*\.then\(function \(reply\)[\s\S]*throw new Error[\s\S]*\.catch\(function \(err\)/,
+  );
+  assert.match(report, /probeLine\("后台 POST 失败:/);
+  assert.match(report, /schedule\(true\)/);
+});
+
 test("focused web context has a bounded heartbeat that cannot bypass focus", () => {
   assert.match(CONTENT, /var ACTIVE_CONTEXT_HEARTBEAT_MS = 60000;/);
   assert.match(

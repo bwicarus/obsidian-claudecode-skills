@@ -1434,26 +1434,23 @@
       }
       probeLine("后台 POST: 开始");
       return runtimeRequest({ type: "BW_READER_CONTEXT_POST", snapshot: relaySnap }, 15000);
-    }).then(
-      function (reply) {
-        if (!reply || reply.ok !== true || !reply.data) {
-          throw new Error(String(reply && (reply.error || reply.code) || "后台拒绝快照"));
-        }
-        var snapshotRevision = Number(reply.data.snapshotRevision);
-        if (!Number.isSafeInteger(snapshotRevision) || snapshotRevision < 1) {
-          throw new Error("后台回执缺少有效 revision");
-        }
-        if (pendingSignature === signature) pendingSignature = "";
-        lastSignature = signature;
-        probeLine("后台 POST: 成功 revision=" + snapshotRevision);
-        claimCallFrame();
-      },
-      function (err) {
-        if (pendingSignature === signature) pendingSignature = "";
-        probeLine("后台 POST 失败: " + ((err && err.message) || "未知"));
-        schedule(true);
+    }).then(function (reply) {
+      if (!reply || reply.ok !== true || !reply.data) {
+        throw new Error(String(reply && (reply.error || reply.code) || "后台拒绝快照"));
       }
-    );
+      var snapshotRevision = Number(reply.data.snapshotRevision);
+      if (!Number.isSafeInteger(snapshotRevision) || snapshotRevision < 1) {
+        throw new Error("后台回执缺少有效 revision");
+      }
+      if (pendingSignature === signature) pendingSignature = "";
+      lastSignature = signature;
+      probeLine("后台 POST: 成功 revision=" + snapshotRevision);
+      claimCallFrame();
+    }).catch(function (err) {
+      if (pendingSignature === signature) pendingSignature = "";
+      probeLine("后台 POST 失败: " + ((err && err.message) || "未知"));
+      schedule(true);
+    });
   }
 
   function schedule(force) {
