@@ -180,6 +180,75 @@ final class ReaderRealtimeCredentialStore: @unchecked Sendable {
     }
 }
 
+/// App-created Realtime calls use the project credential without ever exposing
+/// it to page JavaScript. The page receives only this process-local capability;
+/// Safari-extension calls that were created with an ephemeral key are not
+/// registered here and keep using that same ephemeral identity.
+private actor ReaderRealtimeProjectCallRegistry {
+    static let shared = ReaderRealtimeProjectCallRegistry()
+
+    private struct Entry {
+        let capability: String
+        let authorizationKey: String
+        let createdAt: Date
+    }
+
+    private var entries = [String: Entry]()
+    private let maximumEntries = 8
+    private let maximumAge: TimeInterval = 12 * 60 * 60
+
+    func register(callID: String, authorizationKey: String) -> String {
+        prune()
+        let capability = "ek_bwreader_" + UUID().uuidString
+            .replacingOccurrences(of: "-", with: "")
+            .lowercased()
+        entries[callID] = Entry(
+            capability: capability,
+            authorizationKey: authorizationKey,
+            createdAt: Date()
+        )
+        if entries.count > maximumEntries,
+           let oldest = entries.min(by: {
+               $0.value.createdAt < $1.value.createdAt
+           })?.key {
+            entries.removeValue(forKey: oldest)
+        }
+        return capability
+    }
+
+    /// Returns the bound project key for a registered App call, the ephemeral
+    /// fallback for an extension-owned call, or nil for a forged capability.
+    func authorizationKey(
+        callID: String,
+        capability: String,
+        ephemeralFallback: String
+    ) -> String? {
+        prune()
+        guard let entry = entries[callID] else {
+            // An App capability whose registry entry expired or was evicted
+            // must fail closed; it is not a real OpenAI ephemeral credential.
+            return capability.hasPrefix("ek_bwreader_")
+                ? nil
+                : ephemeralFallback
+        }
+        guard entry.capability == capability else { return nil }
+        return entry.authorizationKey
+    }
+
+    func remove(callID: String, capability: String) -> Bool {
+        prune()
+        guard entries[callID]?.capability == capability else { return false }
+        entries.removeValue(forKey: callID)
+        return true
+    }
+
+    private func prune(now: Date = Date()) {
+        entries = entries.filter {
+            now.timeIntervalSince($0.value.createdAt) <= maximumAge
+        }
+    }
+}
+
 enum ReaderRealtimeOpenAIClient {
     struct MintedCredential: Sendable {
         let clientSecret: String
@@ -268,23 +337,33 @@ enum ReaderRealtimeOpenAIClient {
               (32...262_144).contains(sdp.utf8.count) else {
             throw ReaderRealtimeCredentialError.invalidRequest
         }
-        let minted = try await mintClientSecret()
+        let stored = try ReaderRealtimeCredentialStore.shared.load()
+        let sessionConfiguration = localSessionConfiguration()
         let url = openAIOrigin.appendingPathComponent("v1/realtime/calls")
+        let boundary = "BWReaderRealtime-" + UUID().uuidString
         var request = URLRequest(url: url)
         request.httpMethod = "POST"
         request.timeoutInterval = 30
         request.httpShouldHandleCookies = false
         request.setValue(
-            "Bearer \(minted.clientSecret)",
+            "Bearer \(stored.apiKey)",
             forHTTPHeaderField: "Authorization"
         )
         request.setValue(
-            "application/sdp",
+            "multipart/form-data; boundary=\(boundary)",
             forHTTPHeaderField: "Content-Type"
         )
         request.setValue("application/sdp", forHTTPHeaderField: "Accept")
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
-        request.httpBody = Data(sdp.utf8)
+        request.setValue(
+            stored.safetyIdentifier,
+            forHTTPHeaderField: "OpenAI-Safety-Identifier"
+        )
+        request.httpBody = try callRequestBody(
+            sdp: sdp,
+            session: sessionConfiguration,
+            boundary: boundary
+        )
         let (data, response) = try await ephemeralSession().data(for: request)
         guard let http = response as? HTTPURLResponse,
               http.url?.scheme == url.scheme,
@@ -307,24 +386,27 @@ enum ReaderRealtimeOpenAIClient {
               callURL?.host == openAIOrigin.host,
               callURL?.port == openAIOrigin.port,
               isValidCallID(callID),
+              callURL?.path == "/v1/realtime/calls/\(callID)",
               (64...262_144).contains(data.count),
               let answer = String(data: data, encoding: .utf8),
               answer.hasPrefix("v=0") else {
             if isValidCallID(callID) {
-                try? await hangup(
+                try? await hangupRequest(
                     callID: callID,
-                    clientSecret: minted.clientSecret
+                    authorizationKey: stored.apiKey
                 )
             }
             throw ReaderRealtimeCredentialError.invalidResponse
         }
+        let capability = await ReaderRealtimeProjectCallRegistry.shared
+            .register(callID: callID, authorizationKey: stored.apiKey)
         return OpenedCall(
             answerSDP: answer,
             callID: callID,
-            clientSecret: minted.clientSecret,
-            model: minted.model,
-            rtImage: minted.rtImage,
-            compactTokens: minted.compactTokens
+            clientSecret: capability,
+            model: model,
+            rtImage: rtImage,
+            compactTokens: compactTokens
         )
     }
 
@@ -602,6 +684,35 @@ enum ReaderRealtimeOpenAIClient {
         return data
     }
 
+    private static func callRequestBody(
+        sdp: String,
+        session: [String: Any],
+        boundary: String
+    ) throws -> Data {
+        let sessionData = try JSONSerialization.data(
+            withJSONObject: session,
+            options: [.sortedKeys]
+        )
+        guard let sessionJSON = String(data: sessionData, encoding: .utf8),
+              sessionJSON.contains(#""retention_ratio":0.8,"#) else {
+            throw ReaderRealtimeCredentialError.invalidConfiguration
+        }
+        var body = Data()
+        func append(_ value: String) {
+            body.append(Data(value.utf8))
+        }
+        append("--\(boundary)\r\n")
+        append("Content-Disposition: form-data; name=\"sdp\"\r\n")
+        append("Content-Type: application/sdp\r\n\r\n")
+        append(sdp)
+        append("\r\n--\(boundary)\r\n")
+        append("Content-Disposition: form-data; name=\"session\"\r\n")
+        append("Content-Type: application/json\r\n\r\n")
+        body.append(sessionData)
+        append("\r\n--\(boundary)--\r\n")
+        return body
+    }
+
     private static func localTool(
         _ name: String,
         _ description: String,
@@ -630,6 +741,10 @@ enum ReaderRealtimeOpenAIClient {
         else {
             throw ReaderRealtimeCredentialError.imageTooLarge
         }
+        let authorizationKey = try await realtimeAuthorizationKey(
+            callID: callID,
+            clientSecret: clientSecret
+        )
         guard var components = URLComponents(
             string: "wss://api.openai.com/v1/realtime"
         ) else {
@@ -642,7 +757,7 @@ enum ReaderRealtimeOpenAIClient {
         var request = URLRequest(url: url)
         request.timeoutInterval = 12
         request.setValue(
-            "Bearer \(clientSecret)",
+            "Bearer \(authorizationKey)",
             forHTTPHeaderField: "Authorization"
         )
         let configuration = URLSessionConfiguration.ephemeral
@@ -683,6 +798,24 @@ enum ReaderRealtimeOpenAIClient {
         guard isValidCallID(callID), isValidClientSecret(clientSecret) else {
             throw ReaderRealtimeCredentialError.invalidRequest
         }
+        let authorizationKey = try await realtimeAuthorizationKey(
+            callID: callID,
+            clientSecret: clientSecret
+        )
+        try await hangupRequest(
+            callID: callID,
+            authorizationKey: authorizationKey
+        )
+        _ = await ReaderRealtimeProjectCallRegistry.shared.remove(
+            callID: callID,
+            capability: clientSecret
+        )
+    }
+
+    private static func hangupRequest(
+        callID: String,
+        authorizationKey: String
+    ) async throws {
         let url = openAIOrigin
             .appendingPathComponent("v1/realtime/calls")
             .appendingPathComponent(callID)
@@ -692,7 +825,7 @@ enum ReaderRealtimeOpenAIClient {
         request.timeoutInterval = 10
         request.httpShouldHandleCookies = false
         request.setValue(
-            "Bearer \(clientSecret)",
+            "Bearer \(authorizationKey)",
             forHTTPHeaderField: "Authorization"
         )
         request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
@@ -706,6 +839,22 @@ enum ReaderRealtimeOpenAIClient {
                 "OpenAI 挂断请求失败"
             )
         }
+    }
+
+    private static func realtimeAuthorizationKey(
+        callID: String,
+        clientSecret: String
+    ) async throws -> String {
+        let authorizationKey = await ReaderRealtimeProjectCallRegistry.shared
+            .authorizationKey(
+                callID: callID,
+                capability: clientSecret,
+                ephemeralFallback: clientSecret
+            )
+        guard let authorizationKey else {
+            throw ReaderRealtimeCredentialError.invalidRequest
+        }
+        return authorizationKey
     }
 
     private static func waitForImageConfirmation(
@@ -734,12 +883,19 @@ enum ReaderRealtimeOpenAIClient {
                     if type == "conversation.item.created" { return }
                     if type == "error" {
                         let detail = event["error"] as? [String: Any]
-                        let code = (detail?["code"] as? String ?? "")
-                            .prefix(80)
+                        let code = String(
+                            (detail?["code"] as? String ?? "").prefix(80)
+                        )
+                        let message = String(
+                            (detail?["message"] as? String ?? "").prefix(200)
+                        )
+                        let reason = [code, message]
+                            .filter { !$0.isEmpty }
+                            .joined(separator: "：")
                         throw ReaderRealtimeCredentialError.imageRejected(
-                            code.isEmpty
+                            reason.isEmpty
                                 ? "OpenAI 未接受当前合成图"
-                                : "OpenAI 未接受当前合成图（\(code)）"
+                                : "OpenAI 未接受当前合成图（\(reason)）"
                         )
                     }
                 }

@@ -42,6 +42,9 @@ test("the App owns both the project key and the Realtime session without Pi", ()
   assert.doesNotMatch(CORE, /"retention_ratio": 0\.8,/);
   assert.match(CORE, /static func openCall\(sdp: String\) async throws/);
   assert.match(CORE, /appendingPathComponent\("v1\/realtime\/calls"\)/);
+  assert.match(CORE, /multipart\/form-data; boundary=/);
+  assert.match(CORE, /Content-Disposition: form-data; name=\\"sdp\\"/);
+  assert.match(CORE, /Content-Disposition: form-data; name=\\"session\\"/);
   assert.match(CORE, /value\(forHTTPHeaderField: "Location"\)/);
   assert.match(CORE, /"OpenAI-Safety-Identifier"/);
   assert.match(CORE, /"read_selection"/);
@@ -67,7 +70,7 @@ test("the App owns both the project key and the Realtime session without Pi", ()
   assert.doesNotMatch(MANIFEST, /native-realtime-config/);
 });
 
-test("the local Reader page receives only a short-lived native Realtime bridge", () => {
+test("the local Reader page receives only an opaque native Realtime capability", () => {
   assert.match(BRIDGE, /static let messageName = "bwNativeRealtime"/);
   assert.match(BRIDGE, /message\.frameInfo\.isMainFrame/);
   assert.match(BRIDGE, /message\.webView === webView/);
@@ -97,6 +100,41 @@ test("the local Reader page receives only a short-lived native Realtime bridge",
   );
   assert.match(WEB_VIEW, /location\.origin !== "http:\/\/127\.0\.0\.1:43129"/);
   assert.match(WEB_VIEW, /Object\.defineProperty\(window, "__bwNativeRealtime"/);
+});
+
+test("App-created calls keep one project credential domain for images and hangup", () => {
+  const openCall = CORE.slice(
+    CORE.indexOf("static func openCall"),
+    CORE.indexOf("private static func localSessionConfiguration"),
+  );
+  assert.match(openCall, /ReaderRealtimeCredentialStore\.shared\.load\(\)/);
+  assert.match(openCall, /"Bearer \\\(stored\.apiKey\)"/);
+  assert.match(openCall, /callRequestBody\(/);
+  assert.match(openCall, /ReaderRealtimeProjectCallRegistry\.shared/);
+  assert.match(openCall, /callURL\?\.path == "\/v1\/realtime\/calls\/\\\(callID\)"/);
+  assert.match(openCall, /clientSecret: capability/);
+  assert.doesNotMatch(openCall, /clientSecret: minted\.clientSecret/);
+
+  assert.match(CORE, /private actor ReaderRealtimeProjectCallRegistry/);
+  assert.match(CORE, /private let maximumEntries = 8/);
+  assert.match(CORE, /private let maximumAge: TimeInterval = 12 \* 60 \* 60/);
+  assert.match(CORE, /authorizationKey\([\s\S]*entry\.capability == capability/);
+  assert.match(CORE, /capability\.hasPrefix\("ek_bwreader_"\)[\s\S]*nil/);
+  assert.match(
+    CORE,
+    /realtimeAuthorizationKey\([\s\S]*ephemeralFallback: clientSecret/,
+  );
+  assert.match(
+    CORE,
+    /injectImage\([\s\S]*let authorizationKey = try await realtimeAuthorizationKey/,
+  );
+  assert.match(
+    CORE,
+    /hangup\([\s\S]*let authorizationKey = try await realtimeAuthorizationKey/,
+  );
+  assert.match(CORE, /"Bearer \\\(authorizationKey\)"/);
+  assert.doesNotMatch(BRIDGE, /"apiKey"\s*:/);
+  assert.doesNotMatch(FACADE, /"apiKey"\s*:/);
 });
 
 test("App opens the call natively while Safari mints and hangs up through native code", () => {
