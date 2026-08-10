@@ -112,6 +112,22 @@ test("local renderer uses a stable loopback origin with signed static assets and
   assert.match(LOCAL_SERVER, /form-action 'none'/);
   assert.doesNotMatch(LOCAL_SERVER, /script-src\s+[^;"\n]*'unsafe-inline'/);
   assert.doesNotMatch(LOCAL_SERVER, /connect-src[^"\n]*https:\/\/bwicarus/);
+  assert.match(
+    LOCAL_SERVER,
+    /private static let realtimeVoiceWebSocketOrigin\s*=\s*"wss:\/\/bwicarus\.taile44d0c\.ts\.net"/,
+  );
+  assert.match(LOCAL_SERVER, /Object\.defineProperty\(window,"__bwReaderWsUrl"/);
+  assert.match(LOCAL_SERVER, /value==="\/voice-rt"/);
+  assert.match(LOCAL_SERVER, /value\.startsWith\("\/voice-rt\?"\)/);
+  assert.match(LOCAL_SERVER, /BW_NATIVE_REALTIME_WS_PATH/);
+  assert.match(
+    LOCAL_SERVER,
+    /connect-src 'self' [^"\n]*realtimeVoiceWebSocketOrigin[^"\n]*wss:\/\/bwicarus-2\.taile44d0c\.ts\.net/,
+  );
+  assert.match(
+    WEB_VIEW,
+    /requestMediaCapturePermissionFor origin:[\s\S]*origin\.host\.lowercased\(\) == ReaderLocalRuntimeServer\.host[\s\S]*frame\.isMainFrame[\s\S]*type == \.microphone[\s\S]*\? \.grant[\s\S]*: \.deny/,
+  );
 });
 
 test("native PDF mode uses PDFKit page images without PWA or whole-book caching", () => {

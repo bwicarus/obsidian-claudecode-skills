@@ -3467,6 +3467,26 @@ extension ReaderWebViewModel: WKUIDelegate {
         presenter.present(alert, animated: true)
     }
 
+    @available(iOS 15.0, *)
+    func webView(
+        _ webView: WKWebView,
+        requestMediaCapturePermissionFor origin: WKSecurityOrigin,
+        initiatedByFrame frame: WKFrameInfo,
+        type: WKMediaCaptureType,
+        decisionHandler: @escaping (WKPermissionDecision) -> Void
+    ) {
+        let trustedOrigin = origin.protocol.lowercased() == "http"
+            && origin.host.lowercased() == ReaderLocalRuntimeServer.host
+            && origin.port == Int(ReaderLocalRuntimeServer.port)
+        let trustedFrame = frame.isMainFrame
+            && isTrustedReaderURL(frame.request.url)
+        decisionHandler(
+            trustedOrigin && trustedFrame && type == .microphone
+                ? .grant
+                : .deny
+        )
+    }
+
     func webView(
         _ webView: WKWebView,
         createWebViewWith configuration: WKWebViewConfiguration,
