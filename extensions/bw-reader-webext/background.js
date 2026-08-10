@@ -1,7 +1,7 @@
 // 扩展后台:唯一接触 token 和 Pi API 的地方。网页脚本永远拿不到 token,也不能传任意 URL(只认固定操作名)。
 // ⚠ ORIGIN 指向**当前主力的 Pi**(Tailscale,iPad 走 Tailscale 访问,和现有 QA browser 一样);
 //   不是暂停的 VPS bwicarus.space(代码停在 2026-05-28)。要换服务器只改这一行 + manifest host_permissions。
-globalThis.__BW_READER_BACKGROUND_BUILD_VERSION = "0.2.80";
+globalThis.__BW_READER_BACKGROUND_BUILD_VERSION = "0.2.81";
 if (typeof importScripts === "function") {
   importScripts(
     "vendor/reader-runtime-account-context.js",
@@ -77,7 +77,11 @@ const NATIVE_APP_ACTIONS = new Set([
   "notes.status",
   "notes.list",
   "notes.read",
-  "notes.create"
+  "notes.create",
+  "realtime.status",
+  "realtime.mint",
+  "realtime.image",
+  "realtime.hangup"
 ]);
 const NATIVE_APP_KINDS = new Set([
   "codex-desktop",
@@ -93,6 +97,16 @@ const NATIVE_APP_MAX_AGENT_MOOD_BYTES = 256;
 const NATIVE_APP_MAX_NOTE_NAME_BYTES = 512;
 const NATIVE_APP_MAX_NOTE_TEXT_BYTES = 262144;
 const NATIVE_APP_MAX_NOTE_SOURCE_BYTES = 8192;
+const NATIVE_APP_MAX_REALTIME_FILE_BYTES = 8192;
+const NATIVE_APP_MAX_REALTIME_IMAGE_BYTES = 2800000;
+const NATIVE_APP_REALTIME_CALL_ID_RE = /^rtc_[A-Za-z0-9_-]{8,156}$/;
+const NATIVE_APP_REALTIME_SECRET_RE = /^ek_[A-Za-z0-9_-]{8,4093}$/;
+const NATIVE_APP_REALTIME_TOOLS = new Set([
+  "see_ink", "see_page", "see_figure"
+]);
+const NATIVE_APP_REALTIME_MEDIA_TYPES = new Set([
+  "image/jpeg", "image/png", "image/webp"
+]);
 const NATIVE_APP_MAX_NOTE_PAGE = 10000000;
 const NATIVE_APP_WEB_REVISION_RE = /^[a-f0-9]{16}$/;
 const NATIVE_APP_AGENT_COMMANDS = new Set([
@@ -4755,6 +4769,15 @@ function nativeAppRequestPayload(message, sender) {
     required = [...base, "name", "text"];
     optional = ["file", "page"];
   }
+  if (action === "realtime.mint") required = [...base, "file", "page"];
+  if (action === "realtime.image") {
+    required = [
+      ...base, "callId", "clientSecret", "tool", "mediaType", "b64"
+    ];
+  }
+  if (action === "realtime.hangup") {
+    required = [...base, "callId", "clientSecret"];
+  }
   if (action === "agent.toggle" && message.command === "start") {
     required = [...required, "webContext"];
   }
@@ -4882,6 +4905,60 @@ function nativeAppRequestPayload(message, sender) {
       payload.file = canonicalSource;
       payload.page = 0;
     }
+  } else if (action === "realtime.mint") {
+    const file = message.file;
+    const page = message.page;
+    if (
+      typeof file !== "string" ||
+      nativeAppByteLength(file) > NATIVE_APP_MAX_REALTIME_FILE_BYTES ||
+      !Number.isSafeInteger(page) || page < 0 || page > NATIVE_APP_MAX_NOTE_PAGE
+    ) {
+      throw nativeAppPublicError(
+        "本机 Realtime 启动上下文无效",
+        "BW_NATIVE_REALTIME_REQUEST_INVALID"
+      );
+    }
+    payload.file = file;
+    payload.page = page;
+  } else if (action === "realtime.image") {
+    const callId = String(message.callId || "");
+    const clientSecret = String(message.clientSecret || "");
+    const tool = String(message.tool || "");
+    const mediaType = String(message.mediaType || "");
+    const b64 = message.b64;
+    if (
+      !NATIVE_APP_REALTIME_CALL_ID_RE.test(callId) ||
+      !NATIVE_APP_REALTIME_SECRET_RE.test(clientSecret) ||
+      !NATIVE_APP_REALTIME_TOOLS.has(tool) ||
+      !NATIVE_APP_REALTIME_MEDIA_TYPES.has(mediaType) ||
+      typeof b64 !== "string" ||
+      nativeAppByteLength(b64) < 3000 ||
+      nativeAppByteLength(b64) > NATIVE_APP_MAX_REALTIME_IMAGE_BYTES
+    ) {
+      throw nativeAppPublicError(
+        "本机 Realtime 合成图请求无效",
+        "BW_NATIVE_REALTIME_IMAGE_INVALID"
+      );
+    }
+    payload.callId = callId;
+    payload.clientSecret = clientSecret;
+    payload.tool = tool;
+    payload.mediaType = mediaType;
+    payload.b64 = b64;
+  } else if (action === "realtime.hangup") {
+    const callId = String(message.callId || "");
+    const clientSecret = String(message.clientSecret || "");
+    if (
+      !NATIVE_APP_REALTIME_CALL_ID_RE.test(callId) ||
+      !NATIVE_APP_REALTIME_SECRET_RE.test(clientSecret)
+    ) {
+      throw nativeAppPublicError(
+        "本机 Realtime 挂断请求无效",
+        "BW_NATIVE_REALTIME_REQUEST_INVALID"
+      );
+    }
+    payload.callId = callId;
+    payload.clientSecret = clientSecret;
   }
   return payload;
 }
@@ -5117,6 +5194,71 @@ function normalizeNativeAppResponse(response, payload) {
     normalized.actions = Array.from(new Set(actions));
     normalized.appKinds = Array.from(new Set(appKinds));
     normalized.launchScheme = "bwreader";
+    return normalized;
+  }
+  if (payload.action === "realtime.status") {
+    if (
+      !nativeAppExactKeys(response, [
+        "contract", "action", "requestId", "ok", "configured", "model",
+        "importedAt"
+      ]) ||
+      typeof response.configured !== "boolean" ||
+      typeof response.model !== "string" ||
+      nativeAppByteLength(response.model) > 160 ||
+      !Number.isSafeInteger(Number(response.importedAt)) ||
+      Number(response.importedAt) < 0
+    ) {
+      throw nativeAppPublicError(
+        "BWReader App Realtime 状态无效",
+        "BW_NATIVE_APP_RESPONSE_INVALID"
+      );
+    }
+    normalized.configured = response.configured;
+    normalized.model = response.model;
+    normalized.importedAt = Number(response.importedAt);
+    return normalized;
+  }
+  if (payload.action === "realtime.mint") {
+    if (
+      !nativeAppExactKeys(response, [
+        "contract", "action", "requestId", "ok", "clientSecret",
+        "expiresAt", "model", "rtImage", "compactTokens"
+      ]) ||
+      typeof response.clientSecret !== "string" ||
+      !NATIVE_APP_REALTIME_SECRET_RE.test(response.clientSecret) ||
+      !Number.isSafeInteger(Number(response.expiresAt)) ||
+      Number(response.expiresAt) < 0 ||
+      typeof response.model !== "string" ||
+      nativeAppByteLength(response.model) > 160 ||
+      typeof response.rtImage !== "boolean" ||
+      !Number.isSafeInteger(Number(response.compactTokens)) ||
+      Number(response.compactTokens) < 0 ||
+      Number(response.compactTokens) > 1000000
+    ) {
+      throw nativeAppPublicError(
+        "BWReader App Realtime 临时凭证无效",
+        "BW_NATIVE_APP_RESPONSE_INVALID"
+      );
+    }
+    normalized.clientSecret = response.clientSecret;
+    normalized.expiresAt = Number(response.expiresAt);
+    normalized.model = response.model;
+    normalized.rtImage = response.rtImage;
+    normalized.compactTokens = Number(response.compactTokens);
+    return normalized;
+  }
+  if (
+    payload.action === "realtime.image" ||
+    payload.action === "realtime.hangup"
+  ) {
+    if (!nativeAppExactKeys(response, [
+      "contract", "action", "requestId", "ok"
+    ])) {
+      throw nativeAppPublicError(
+        "BWReader App Realtime 响应无效",
+        "BW_NATIVE_APP_RESPONSE_INVALID"
+      );
+    }
     return normalized;
   }
   if (payload.action === "agent.events") {

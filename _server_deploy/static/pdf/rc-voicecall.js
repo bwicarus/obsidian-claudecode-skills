@@ -2819,7 +2819,7 @@
   //    (外放无回声+全双工随时插话,不再需要半双工妥协)。密钥不下发(SDP 经 /rtc-call 后端代理);
   //    工具循环在本地(dc 收 function_call → fetch /voice-tool → dc 回填),client_action 直接执行;
   //    全局 ws 指向 shim:既有 {type:page/ink/state/text} 同步消息被翻译成 dc 事件 → 同步/UI 代码零改。──
-  var _rtc = { pc: null, dc: null, el: null, mic: null, on: false, imgOn: false, callId: '',
+  var _rtc = { pc: null, dc: null, el: null, mic: null, on: false, imgOn: false, callId: '', nativeDirect: false,
                sidebandKey: '', ctxFile: '', ctxPage: 0, ink: null, sel: '', _inkFp: '', inkDirty: false,
                items: [], inTok: 0, compactTh: 0, lastCompact: 0 };   // ㊳:item 账本+每轮输入量+会话内压缩阈值
   function _dcSend(obj) { try { if (_rtc.dc && _rtc.dc.readyState === 'open') _rtc.dc.send(JSON.stringify(obj)); } catch (e) {} }
@@ -4505,11 +4505,18 @@
       var ikHint = (_rtc.ink && _rtc.ink.length)
         ? '。⚠ 他在本页**圈画**了内容——他说『这个/这里/圈的/画的』时指圈中内容;**先调 see_ink 看圈了什么**再回应,不要凭整页文本猜'
         : '';
-      var fp = _rtc.ctxPage + '/' + (_rtc.ctxTotal || 0) + ':' + vt.length + ':' + vt.slice(0, 30) + ':' + cre.length + ':' + cre.slice(0, 24) + ':' + ((_rtc.ink && _rtc.ink.length) || 0);
+      // 选中文字是用户此轮明确指向的对象。只在他开口/发文字时随同
+      // 当前视口注入，不因单纯拖选就让模型主动开口；App 本机直连与
+      // Pi 控制侧带因此保持同一语义。
+      var sel = String(_rtc.sel || '').trim();
+      var selHint = sel
+        ? '。他当前明确选中了这段文字:「' + sel.slice(0, 1000) + '」——他说『这个/这段/这里』时优先指这段'
+        : '';
+      var fp = _rtc.ctxPage + '/' + (_rtc.ctxTotal || 0) + ':' + vt.length + ':' + vt.slice(0, 30) + ':' + cre.length + ':' + cre.slice(0, 24) + ':' + ((_rtc.ink && _rtc.ink.length) || 0) + ':' + sel.length + ':' + sel.slice(0, 40);
       if (fp === _rtc._sentCtxFp) return;
       _rtc._sentCtxFp = fp;
       _rtcSys('(用户此刻在第 ' + _rtc.ctxPage + ' 页/章' + (_rtc.ctxTotal ? '(全书共 ' + _rtc.ctxTotal + ' 页)' : '') +
-              (vt ? ',当前可见内容:' + vt.slice(0, 1500) : ',需要页面内容就调 read_page') + ikHint + rcHint +
+              (vt ? ',当前可见内容:' + vt.slice(0, 1500) : ',需要页面内容就调 read_page') + selHint + ikHint + rcHint +
               '。回答以本条为准;状态记录,不要回应本条。)');
     } catch (e) {}
   }
@@ -5063,6 +5070,44 @@
     RC.capturePageComposite = _capturePageComposite;
     RC.selectionRegionsForPage = _selectionRegionsForPage;
   } catch (e) {}   // 共享截图:视口/指定元素/笔迹局部/**整页叠加合成图**。文字侧栏 EPUB 预拍;语音走 need_shot
+
+  async function _nativeRealtimeVisual(name, args) {
+    var target = Object.assign({ page: _rtc.ctxPage || 0 }, args || {});
+    var shot = null;
+    if (name === 'see_ink' && window.RC && RC.captureInkRegion) {
+      shot = await RC.captureInkRegion(target);
+    }
+    if (!shot && window.RC && RC.capturePageComposite) {
+      shot = await RC.capturePageComposite(name === 'see_ink'
+        ? target
+        : Object.assign({}, target, { scope: 'viewport-context' }));
+    }
+    if (!shot) shot = await _captureView();
+    if (!shot || !shot.b64) {
+      throw new Error(name === 'see_ink'
+        ? '当前笔迹合成图生成失败'
+        : '当前阅读画面生成失败');
+    }
+    await _nativeRealtimeRequest({
+      action: 'image', call_id: _rtc.callId,
+      client_secret: _rtc.sidebandKey || '', tool: name,
+      media_type: shot.media_type || 'image/jpeg', b64: shot.b64
+    });
+    return shot;
+  }
+
+  function _nativeRealtimePageText() {
+    var text = String(_rtc.pendText || '').trim();
+    if (!text) {
+      try {
+        var ctx = window.RC && RC.adapter && RC.adapter().getContext
+          ? RC.adapter().getContext() : null;
+        text = String((ctx && (ctx.visible_text || ctx.text)) || '').trim();
+      } catch (e) {}
+    }
+    return text.slice(0, 6000);
+  }
+
   async function _rtcTool(name, args, callId) {   // 工具循环(本地):与 relay WS 版同语义,tool_status 卡/client_action 全复用
     if (name === 'wait_for_user') {   // 静音 no-op:回空 output、不 response.create=安静
       _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: '{}' } });
@@ -5148,9 +5193,39 @@
     _rtc.toolN = (_rtc.toolN || 0) + 1;   // ㊷ 护栏:单会话工具调用异常多=可能循环失控,提醒但不硬断
     if (_rtc.toolN === 40) { try { threadMsg('asst-note', '⚠ 本次通话工具调用已达 40 次(异常偏多)——若感觉它在兜圈子,挂断重拨或点🗑清空。'); } catch (e) {} }
     onToolStatus({ status: 'running', label: name });
-    var out = '', ok = true, label = name, took = null, argsUsed = args;
+    var out = '', ok = true, label = name, took = null, argsUsed = args, vision = null, res;
     try {
-      if (name === 'deep_think') {
+      if (_rtc.nativeDirect && /^(see_ink|see_page|see_figure)$/.test(name)) {
+        var nativeShot = await _nativeRealtimeVisual(name, args);
+        vision = [nativeShot];
+        label = name === 'see_ink' ? '看笔迹标注'
+          : (name === 'see_page' ? '看当前页面' : '看当前图像');
+        _rtc.inkDirty = false;
+        res = { local_direct: true, image_supplied: true };
+        out = JSON.stringify({
+          ok: true,
+          result: '相关合成图已直接送入当前 Realtime 会话，请根据图像回答用户。'
+        });
+        try {
+          (_rtc.recentTools = _rtc.recentTools || []).push({
+            tool: name, label: label,
+            rag: '本机合成图已直接送入当前 Realtime 会话', images: []
+          });
+          if (_rtc.recentTools.length > 6) {
+            _rtc.recentTools.splice(0, _rtc.recentTools.length - 6);
+          }
+        } catch (e) {}
+      } else if (_rtc.nativeDirect && name === 'read_page' && _nativeRealtimePageText()) {
+        var localPageText = _nativeRealtimePageText();
+        label = '读取当前页';
+        res = { local_direct: true, page: _rtc.ctxPage, text: localPageText };
+        out = JSON.stringify({
+          page: _rtc.ctxPage,
+          total: _rtc.ctxTotal || 0,
+          text: localPageText,
+          source: 'app-current-visible-text'
+        }).slice(0, 6800);
+      } else if (name === 'deep_think') {
         out = await _rtcDeep(String(args.question || ''));
         label = '深度思考';
       } else {
@@ -5195,7 +5270,7 @@
         clearTimeout(_to);
         ok = !!d.ok; label = d.label || name; took = d.took_s; argsUsed = d.args || args;
         if (ok && (name === 'see_ink' || name === 'see_page' || name === 'see_figure')) _rtc.inkDirty = false;   // 重新看过了:边沿复位,下次变化再通知
-        var res = d.result || {};
+        res = d.result || {};
         _rtcTool._silent = !!res.silent && localStorage.getItem('rc-voice-toolreply') !== '1';   // 74/89:静默入库;「工具口头回报」开=放行
         var ca = res.client_action; delete res.client_action;
         var _resFeed = res;   // 喂回模型/recentTools 的精简版:有 cards_brief 时删 cards 全文——
@@ -5219,7 +5294,7 @@
     _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: out } });
     if (!_rtcTool._silent) _rtcRespCreate(name === 'deep_think' ? 'deep' : 'tool', ok && String(out || '').length > 800);   // 66c/74:silent=静默入库不发言
     _rtcTool._silent = false;
-    onToolStatus({ status: ok ? 'done' : 'error', tool: name, label: label, took_s: took, args: argsUsed, rag: out.slice(0, 1600), result: (typeof res === 'object' ? res : undefined) });   // result=完整体(UI 渲卡用;rag 是喂回模型的精简版)
+    onToolStatus({ status: ok ? 'done' : 'error', tool: name, label: label, took_s: took, args: argsUsed, rag: out.slice(0, 1600), result: (typeof res === 'object' ? res : undefined), vision: vision || undefined });   // result=完整体(UI 渲卡用;rag 是喂回模型的精简版)
   }
   // rtc 字幕队列:transcript delta 是文字生成速度(1-2s 内全到),远快于声音——直接 capStream 会瞬间跳到
   // 末句,且 response.done(生成完≠播完)后提前淡出(rtc 音频在 <audio> 元素,playing 队列看不见它)。
@@ -5498,6 +5573,15 @@
     setTimeout(function () { if (!_userHung && !_rtc.on && !_connecting) rtcStart(toggle._opts || {}); }, 800);   // 93:_connecting=有人在拨,别叠
   }
   function _ctlOpen() {   // ㊺P1/122(#290):控制 WS 连接(可恢复重连,见 references/rtc-controller-design.md)
+    // App 本机模式把短期凭证签发和大图 sideband 都放在原生层，
+    // 工具函数仍由当前页面执行；不再建立任何 Pi 控制 WebSocket。
+    if (_rtc.nativeDirect) {
+      _rtc.ctl = false;
+      _rtc.ctlWs = null;
+      _stateFp = null; _inkFp = '';
+      _requestSyncNow();
+      return;
+    }
     try {
       // fe=2 版本握手(59):声明"本前端有 P2 分工逻辑",relay 才接管工具;旧页面 JS 不带此参数
       // → relay 退回 P1 观察,防新旧换代窗口双执行(同一工具前端+relay 各跑一遍+create 撞车)
@@ -5610,6 +5694,18 @@
   function _rtcRequestHangup(callId, sidebandSecret) {
     if (!callId) return;
     try {
+      if (window.__BW_NATIVE_OPENAI_REALTIME__ === true &&
+          window.__bwNativeRealtime &&
+          typeof window.__bwNativeRealtime.request === 'function' &&
+          /^ek_[A-Za-z0-9_-]{8,4096}$/.test(String(sidebandSecret || ''))) {
+        window.__bwNativeRealtime.request({
+          action: 'hangup', call_id: callId,
+          client_secret: sidebandSecret || ''
+        }).catch(function () {});
+        return;
+      }
+    } catch (e) {}
+    try {
       fetch('/api/assistant/rtc-hangup', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         keepalive: true, body: JSON.stringify({ call_id: callId,
                                                 rtc_sideband_secret: sidebandSecret || '' }) }).catch(function () {});
@@ -5631,11 +5727,42 @@
       typeof window.__bwReaderFetch === 'function';
   }
 
+  function _nativeRealtimeRequest(payload) {
+    try {
+      var bridge = window.__bwNativeRealtime;
+      if (window.__BW_NATIVE_OPENAI_REALTIME__ !== true || !bridge ||
+          typeof bridge.request !== 'function') {
+        return Promise.reject(new Error('App 原生 Realtime 尚未就绪'));
+      }
+      return Promise.resolve(bridge.request(payload));
+    } catch (error) {
+      return Promise.reject(error);
+    }
+  }
+
   async function _openDirectRtcCall(sdp, file, page) {
-    var tokenRes = await (await fetch('/api/assistant/rtc-client-secret', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ file: file || '', page: page || 0 })
-    })).json();
+    var tokenRes = null, nativeDirect = false, nativeError = null;
+    if (window.__BW_NATIVE_OPENAI_REALTIME__ === true) {
+      try {
+        tokenRes = await _nativeRealtimeRequest({
+          action: 'mint', file: file || '', page: page || 0
+        });
+        nativeDirect = !!(tokenRes && tokenRes.ok);
+      } catch (error) {
+        nativeError = error;
+      }
+    }
+    if (!tokenRes || !tokenRes.ok) {
+      try {
+        tokenRes = await (await fetch('/api/assistant/rtc-client-secret', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ file: file || '', page: page || 0 })
+        })).json();
+      } catch (error) {
+        if (nativeError) throw nativeError;
+        throw error;
+      }
+    }
     if (!tokenRes || !tokenRes.ok || !/^ek_[A-Za-z0-9_-]{8,4096}$/.test(String(tokenRes.client_secret || ''))) {
       throw new Error((tokenRes && tokenRes.error) || 'Realtime 临时凭证签发失败');
     }
@@ -5661,17 +5788,21 @@
     }
     try {
       var answer = await direct.text();
-      var bind = await (await fetch('/api/assistant/rtc-bind', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ call_id: callId, bind_grant: tokenRes.bind_grant || '' })
-      })).json();
-      if (!bind || !bind.ok) {
-        throw new Error((bind && bind.error) || 'Realtime 控制通道绑定失败');
+      var bind = { ok: true, uid: '', ticket: '' };
+      if (!nativeDirect) {
+        bind = await (await fetch('/api/assistant/rtc-bind', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ call_id: callId, bind_grant: tokenRes.bind_grant || '' })
+        })).json();
+        if (!bind || !bind.ok) {
+          throw new Error((bind && bind.error) || 'Realtime 控制通道绑定失败');
+        }
       }
       return {
         ok: true, sdp: answer, call_id: callId,
         uid: bind.uid || '', ticket: bind.ticket || '',
         sideband_secret: tokenRes.client_secret,
+        native_direct: nativeDirect,
         model: tokenRes.model || '', rt_image: !!tokenRes.rt_image,
         compact_tokens: tokenRes.compact_tokens || 0
       };
@@ -5689,7 +5820,7 @@
     var g = ++_gen;
     var fresh = !!toggle._fresh; toggle._fresh = false;   // 新话题:不回放历史(WebRTC 每连接本就是新会话)
     _rtc.ctxFile = (opts && opts.file) || ''; _rtc.ctxPage = (opts && opts.page) || 0;
-    _rtc.ink = null; _rtc.sel = ''; _rtc._inkFp = ''; _rtc.inkDirty = false;
+    _rtc.ink = null; _rtc.sel = ''; _rtc._inkFp = ''; _rtc.inkDirty = false; _rtc.nativeDirect = false;
     // 133(用户实测"圈完问这是什么,它说看不到"):上面清的是 _rtc.* 的注入指纹,但**发不发**由 syncInk/syncState
     // 各自的模块级指纹(_inkFp/_stateFp)说了算——它们只在 WS 版 start()(:3104)清过,rtcStart 这条路一直漏。
     // 后果:同一页面第二通电话起,墨迹/选中的指纹跟上一通一样 → syncInk 直接 return → 新会话**永远收不到**
@@ -5785,6 +5916,7 @@
       startupCallId = cres.call_id || '';
       if (directRtc) {
         _rtc.imgOn = !!cres.rt_image;
+        _rtc.nativeDirect = !!cres.native_direct;
         startupSidebandKey = cres.sideband_secret || '';
         _rtc.sidebandKey = startupSidebandKey;
         _rtc.model = cres.model || '';
@@ -5859,7 +5991,7 @@
     try { if (_rtc.pc) _rtc.pc.close(); } catch (e) {}
     try { if (_rtc.el) _rtc.el.remove(); } catch (e) {}
     try { if (_rtc.mic) _rtc.mic.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
-    _rtc.pc = null; _rtc.dc = null; _rtc.el = null; _rtc.mic = null; _rtc.callId = ''; _rtc.sidebandKey = '';
+    _rtc.pc = null; _rtc.dc = null; _rtc.el = null; _rtc.mic = null; _rtc.callId = ''; _rtc.sidebandKey = ''; _rtc.nativeDirect = false;
     _rtcRequestHangup(retiringCallId, retiringSidebandKey);   // pc.close 不等于服务端挂断；正常挂断/意外重连都明确终止旧 call
     try { if (_rtc.statsT) { clearInterval(_rtc.statsT); _rtc.statsT = null; } } catch (e) {}   // 124:遥测随挂断走
     _connecting = false;   // 93:teardown 不经 teardown() 的路径(_rtcDead)也要解锁,否则单飞锁永久卡死

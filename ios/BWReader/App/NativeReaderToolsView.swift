@@ -163,6 +163,8 @@ struct NativeReaderToolsView: View {
     @StateObject private var localNotes = ReaderLocalNotesManager.shared
     @StateObject private var piSync = ReaderPiSyncCoordinator()
     @StateObject private var textRecognition = ReaderTextRecognitionPreferences.shared
+    @StateObject private var realtimeCredentials =
+        ReaderRealtimeCredentialManager.shared
     @State private var presentsAnnotation = false
     @State private var presentsTranslation = false
     @State private var presentsLocalLibrary = false
@@ -174,6 +176,7 @@ struct NativeReaderToolsView: View {
     @State private var touchDoubleTapAction = ReaderTouchDoubleTapAction.eraser
     @State private var touchDoubleTapLoaded = false
     @State private var touchDoubleTapError: String?
+    @State private var realtimeKeyDraft = ""
 
     let reader: ReaderWebViewModel
     let initialAction: ReaderNativeFeatureAction?
@@ -193,6 +196,7 @@ struct NativeReaderToolsView: View {
                 recognitionSection
                 textRecognitionSettingsSection
                 localLibrarySection
+                realtimeCredentialsSection
                 piSyncSection
                 localNotesSection
                 quickNotesSection
@@ -304,6 +308,91 @@ struct NativeReaderToolsView: View {
             Text("本机书籍会直接离线打开；Pi 只用于显式同步与备份，不是打开本机书籍的前置条件，也不会自动覆盖或删除任何书籍。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var realtimeCredentialsSection: some View {
+        Section("OpenAI Realtime（本机）") {
+            SecureField("输入现有 OpenAI Key（sk-…）", text: $realtimeKeyDraft)
+                .textInputAutocapitalization(.never)
+                .autocorrectionDisabled()
+                .font(.system(.body, design: .monospaced))
+
+            Button {
+                Task {
+                    let cookies = await reader.remoteLibraryCookies()
+                    await realtimeCredentials.saveExistingKey(
+                        realtimeKeyDraft,
+                        cookies: cookies
+                    )
+                    if realtimeCredentials.errorMessage == nil,
+                       realtimeCredentials.status.isConfigured {
+                        realtimeKeyDraft = ""
+                    }
+                }
+            } label: {
+                Label(
+                    realtimeCredentials.isRunning
+                        ? "正在保存并同步语音设置…"
+                        : (realtimeCredentials.status.isConfigured
+                            ? "替换 Key 并同步语音设置"
+                            : "保存 Key 并同步语音设置"),
+                    systemImage: "key.fill"
+                )
+            }
+            .disabled(
+                realtimeCredentials.isRunning ||
+                realtimeKeyDraft.trimmingCharacters(
+                    in: .whitespacesAndNewlines
+                ).isEmpty
+            )
+
+            if realtimeCredentials.status.isConfigured {
+                LabeledContent(
+                    "状态",
+                    value: "已存入 Apple Keychain"
+                )
+                if !realtimeCredentials.status.model.isEmpty {
+                    LabeledContent(
+                        "Realtime 模型",
+                        value: realtimeCredentials.status.model
+                    )
+                }
+                if let importedAt = realtimeCredentials.status.importedAt {
+                    LabeledContent(
+                        "保存时间",
+                        value: importedAt.formatted(
+                            date: .abbreviated,
+                            time: .shortened
+                        )
+                    )
+                }
+                Button("清除这台 iPad 中的 Key", role: .destructive) {
+                    realtimeCredentials.clear()
+                }
+                .disabled(realtimeCredentials.isRunning)
+            } else {
+                Text("未保存；请先在 App 中输入一次现有 Key，App 与 Safari 扩展才可脱离 Pi 使用普通 Realtime。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            }
+
+            Text("Key 只在这个 App 中输入并写入 Apple Keychain；Safari 扩展只由原生进程共享读取，Key 不会发送给 Pi，也不会进入 Reader 网页、扩展 JavaScript、代码、构建产物或日志。保存时 Pi 仅同步一次不含密钥的现有语音设置，之后语音、选区与笔迹合成图可脱离 Pi 直接连接 OpenAI。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if let notice = realtimeCredentials.notice {
+                Label(notice, systemImage: "checkmark.circle.fill")
+                    .font(.footnote)
+                    .foregroundStyle(.green)
+            }
+            if let error = realtimeCredentials.errorMessage {
+                Label(error, systemImage: "exclamationmark.triangle.fill")
+                    .font(.footnote)
+                    .foregroundStyle(.red)
+                    .textSelection(.enabled)
+            }
         }
     }
 

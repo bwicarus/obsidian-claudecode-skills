@@ -10201,6 +10201,44 @@ def _build_rtc_session(uid, file_rel, page):
     return sess, _cth, bool(cfg.get("rt_image"))
 
 
+@bp.route("/native-realtime-config", methods=["POST"])
+def assistant_native_realtime_config():
+    """Return the account's non-secret Realtime session template to the App.
+
+    The long-lived OpenAI key is entered only in the containing iOS App and is
+    never accepted or returned by this endpoint.  The App stores this bounded
+    template beside the key so later calls work while Pi is offline.
+    """
+    if not _logged_in():
+        result = jsonify({"ok": False, "error": "请先登录 Pi"})
+        result.headers["Cache-Control"] = "no-store"
+        result.headers["Pragma"] = "no-cache"
+        return result, 401
+    body = request.get_json(silent=True) or {}
+    if body != {"contract": "reader-native-realtime-config/1"}:
+        result = jsonify({"ok": False, "error": "Realtime 设置请求无效"})
+        result.headers["Cache-Control"] = "no-store"
+        result.headers["Pragma"] = "no-cache"
+        return result, 400
+    uid = session["user_id"]
+    # Dynamic book/page state is injected at the user's next speech turn.  The
+    # imported template therefore intentionally contains no current book name
+    # and stays reusable while the App is completely offline from Pi.
+    sess, compact_tokens, rt_image = _build_rtc_session(uid, "", 0)
+    result = jsonify({
+        "ok": True,
+        "contract": "reader-native-realtime-config/1",
+        "session": sess,
+        "model": sess.get("model") or "",
+        "rt_image": bool(rt_image),
+        "compact_tokens": compact_tokens,
+    })
+    result.headers["Cache-Control"] = "no-store"
+    result.headers["Pragma"] = "no-cache"
+    result.headers["X-Content-Type-Options"] = "nosniff"
+    return result
+
+
 @bp.route("/rtc-session", methods=["POST"])
 def assistant_rtc_session():
     """WebRTC 会话配置下发:预算闸 + 服务端自建 session(见 _build_rtc_session)。"""

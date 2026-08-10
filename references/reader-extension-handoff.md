@@ -46,6 +46,11 @@
 **“BW网页伴读”**。App TestFlight 当前构建为 **1.1.18 (174)**，Apple 已确认
 `VALID / IN_BETA_TESTING`。
 
+**0.2.81 / App 1.1.19 候选**：现有 OpenAI Key 只在 App 安全输入框中输入并写入
+Apple Keychain；App 与 Safari 扩展原生进程经签名 access group 共享读取，网页和扩展
+JavaScript 仅得到 90 秒 `ek_`。Pi 只同步不含 Key 的会话设置，之后普通 Realtime、选区与
+合成图注入可脱离 Pi；发布事实以当前协作状态中的正式登记为准。
+
 **0.2.80 / App 1.1.18 已发布**：直连 Realtime 会话复用设备建连时取得的短期 `ek_`
 credential 建立同一 call 的 sideband 与挂断请求；选区仍在有效语音轮次后注入，显式
 `see_ink` / `see_page` / `see_figure` 始终回传实际合成图，不受机会式图片开关影响。

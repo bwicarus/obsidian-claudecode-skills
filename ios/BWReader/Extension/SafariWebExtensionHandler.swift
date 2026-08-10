@@ -143,6 +143,160 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                 ))
             }
 
+        case "realtime.status":
+            guard exactKeys(
+                message,
+                required: ["contract", "action", "requestId"]
+            ) else {
+                complete(context, response: schemaFailure(
+                    action: action,
+                    requestID: requestID
+                ))
+                return
+            }
+            do {
+                let status = try ReaderRealtimeCredentialStore.shared.status()
+                var response = baseResponse(
+                    action: action,
+                    requestID: requestID
+                )
+                response["configured"] = status.isConfigured
+                response["model"] = status.model
+                response["importedAt"] = status.importedAt.map {
+                    Int64($0.timeIntervalSince1970 * 1_000)
+                } ?? 0
+                complete(context, response: response)
+            } catch {
+                complete(context, response: realtimeFailure(
+                    action: action,
+                    requestID: requestID,
+                    error: error
+                ))
+            }
+
+        case "realtime.mint":
+            guard exactKeys(
+                message,
+                required: [
+                    "contract", "action", "requestId", "file", "page",
+                ]
+            ),
+            let file = message["file"] as? String,
+            file.utf8.count <= 8_192,
+            let pageNumber = message["page"] as? NSNumber,
+            pageNumber.doubleValue.isFinite,
+            pageNumber.doubleValue.rounded() == pageNumber.doubleValue,
+            (0...10_000_000).contains(pageNumber.doubleValue)
+            else {
+                complete(context, response: schemaFailure(
+                    action: action,
+                    requestID: requestID
+                ))
+                return
+            }
+            Task {
+                do {
+                    let minted = try await ReaderRealtimeOpenAIClient
+                        .mintClientSecret()
+                    var response = baseResponse(
+                        action: action,
+                        requestID: requestID
+                    )
+                    response["clientSecret"] = minted.clientSecret
+                    response["expiresAt"] = minted.expiresAt
+                    response["model"] = minted.model
+                    response["rtImage"] = minted.rtImage
+                    response["compactTokens"] = minted.compactTokens
+                    complete(context, response: response)
+                } catch {
+                    complete(context, response: realtimeFailure(
+                        action: action,
+                        requestID: requestID,
+                        error: error
+                    ))
+                }
+            }
+
+        case "realtime.image":
+            guard exactKeys(
+                message,
+                required: [
+                    "contract", "action", "requestId", "callId",
+                    "clientSecret", "tool", "mediaType", "b64",
+                ]
+            ),
+            let callID = message["callId"] as? String,
+            let clientSecret = message["clientSecret"] as? String,
+            let tool = message["tool"] as? String,
+            ["see_ink", "see_page", "see_figure"].contains(tool),
+            let mediaType = message["mediaType"] as? String,
+            ["image/jpeg", "image/png", "image/webp"].contains(mediaType),
+            let base64 = message["b64"] as? String,
+            (3_000...2_800_000).contains(base64.utf8.count)
+            else {
+                complete(context, response: schemaFailure(
+                    action: action,
+                    requestID: requestID
+                ))
+                return
+            }
+            Task {
+                do {
+                    try await ReaderRealtimeOpenAIClient.injectImage(
+                        callID: callID,
+                        clientSecret: clientSecret,
+                        mediaType: mediaType,
+                        base64: base64
+                    )
+                    complete(context, response: baseResponse(
+                        action: action,
+                        requestID: requestID
+                    ))
+                } catch {
+                    complete(context, response: realtimeFailure(
+                        action: action,
+                        requestID: requestID,
+                        error: error
+                    ))
+                }
+            }
+
+        case "realtime.hangup":
+            guard exactKeys(
+                message,
+                required: [
+                    "contract", "action", "requestId", "callId",
+                    "clientSecret",
+                ]
+            ),
+            let callID = message["callId"] as? String,
+            let clientSecret = message["clientSecret"] as? String
+            else {
+                complete(context, response: schemaFailure(
+                    action: action,
+                    requestID: requestID
+                ))
+                return
+            }
+            Task {
+                do {
+                    try await ReaderRealtimeOpenAIClient.hangup(
+                        callID: callID,
+                        clientSecret: clientSecret
+                    )
+                    complete(context, response: baseResponse(
+                        action: action,
+                        requestID: requestID
+                    ))
+                } catch {
+                    complete(context, response: realtimeFailure(
+                        action: action,
+                        requestID: requestID,
+                        error: error
+                    ))
+                }
+            }
+
         case "agent.status":
             guard exactKeys(
                 message,
@@ -765,6 +919,22 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             action: action,
             requestID: requestID,
             code: "BW_NATIVE_BRIDGE_STORE_FAILED",
+            message: error.localizedDescription,
+            retryable: true
+        )
+    }
+
+    private func realtimeFailure(
+        action: String,
+        requestID: String,
+        error: Error
+    ) -> [String: Any] {
+        failure(
+            action: action,
+            requestID: requestID,
+            code: error is ReaderRealtimeCredentialError
+                ? "BW_NATIVE_REALTIME_UNAVAILABLE"
+                : "BW_NATIVE_REALTIME_FAILED",
             message: error.localizedDescription,
             retryable: true
         )

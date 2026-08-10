@@ -3,6 +3,8 @@ import Foundation
 enum ReaderNativeBridgeContract {
     static let name = "bw-reader-native/1"
     static let appGroupIdentifier = "group.space.bwicarus.bwreader2"
+    static let realtimeKeychainAccessGroup =
+        "7MDVSLPV8F.space.bwicarus.bwreader2.realtime"
     static let containingAppIdentifier = "space.bwicarus.bwreader2"
     static let launchScheme = "bwreader"
     static let pendingCommandLifetime: TimeInterval = 30
@@ -20,6 +22,10 @@ enum ReaderNativeBridgeContract {
         "notes.list",
         "notes.read",
         "notes.create",
+        "realtime.status",
+        "realtime.mint",
+        "realtime.image",
+        "realtime.hangup",
     ]
     static let supportedAppKinds = [
         "codex-desktop",

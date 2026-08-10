@@ -34,6 +34,7 @@ targets:
           - Info.plist
           - BWReader.entitlements
       - path: Shared/ReaderNativeBridgeContract.swift
+      - path: Shared/ReaderRealtimeCredentialCore.swift
       - path: Shared/ReaderSharedSnapshot.swift
       - path: Shared/ReaderLocalNoteBridge.swift
       # Generated deterministically before XcodeGen. It is a folder resource so
@@ -52,7 +53,7 @@ targets:
         CURRENT_PROJECT_VERSION: "2"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: App/Info.plist
-        MARKETING_VERSION: "1.1.18"
+        MARKETING_VERSION: "1.1.19"
         PRODUCT_BUNDLE_IDENTIFIER: space.bwicarus.bwreader2
         PRODUCT_NAME: bwicarus-test
         # Stated explicitly because XcodeGen's application preset overrides
@@ -82,6 +83,7 @@ targets:
     sources:
       - path: Extension/SafariWebExtensionHandler.swift
       - path: Shared/ReaderNativeBridgeContract.swift
+      - path: Shared/ReaderRealtimeCredentialCore.swift
       - path: Shared/ReaderSharedSnapshot.swift
       - path: Shared/ReaderLocalNoteBridge.swift
       # Keep the staging directory itself out of the bundle. Root files are
@@ -142,7 +144,7 @@ targets:
         CURRENT_PROJECT_VERSION: "2"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Extension/Info.plist
-        MARKETING_VERSION: "1.1.18"
+        MARKETING_VERSION: "1.1.19"
         PRODUCT_BUNDLE_IDENTIFIER: space.bwicarus.bwreader2.Extension
         PRODUCT_MODULE_NAME: BWReaderSafariExtension
         PRODUCT_NAME: BWReaderSafariExtension
@@ -168,7 +170,7 @@ targets:
         CURRENT_PROJECT_VERSION: "2"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Widget/Info.plist
-        MARKETING_VERSION: "1.1.18"
+        MARKETING_VERSION: "1.1.19"
         PRODUCT_BUNDLE_IDENTIFIER: space.bwicarus.bwreader2.Widget
         PRODUCT_MODULE_NAME: BWReaderWidget
         PRODUCT_NAME: BWReaderWidget

@@ -6,5 +6,9 @@
     <array>
         <string>group.space.bwicarus.bwreader2</string>
     </array>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)space.bwicarus.bwreader2.realtime</string>
+    </array>
 </dict>
 </plist>

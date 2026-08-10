@@ -366,6 +366,104 @@
   })();
   window.__bwNativeComputerVoiceExtensionBridge = nativeComputerVoiceBridge;
 
+  const nativeRealtimeBridge = (() => {
+    const CONTRACT = 'bw-reader-native/1';
+    const ACTIONS = new Set(['mint', 'image', 'hangup']);
+    let safariExtension = false;
+    try {
+      safariExtension = new URL(String(chrome.runtime.getURL(''))).protocol ===
+        'safari-web-extension:';
+    } catch (_) {}
+    const requestId = () => {
+      const bytes = new Uint8Array(18);
+      crypto.getRandomValues(bytes);
+      return Array.from(
+        bytes,
+        (value) => value.toString(16).padStart(2, '0')
+      ).join('');
+    };
+    const call = (action, details) => new Promise((resolve, reject) => {
+      chrome.runtime.sendMessage(Object.assign({
+        type: 'BW_NATIVE_APP_REQUEST',
+        action: 'realtime.' + action,
+        requestId: requestId()
+      }, details), (response) => {
+        const runtimeError = chrome.runtime.lastError;
+        const data = response?.data;
+        if (runtimeError || !response?.ok || !data?.ok) {
+          reject(Object.assign(new Error(
+            runtimeError?.message || data?.error || response?.error ||
+            '请先在 BWReader App 中导入现有 OpenAI Key'
+          ), {
+            code: data?.code || response?.code || 'BW_NATIVE_REALTIME_UNAVAILABLE'
+          }));
+          return;
+        }
+        if (
+          data.contract !== CONTRACT ||
+          data.action !== 'realtime.' + action
+        ) {
+          reject(Object.assign(new Error('BWReader App Realtime 响应无效'), {
+            code: 'BW_NATIVE_APP_RESPONSE_INVALID'
+          }));
+          return;
+        }
+        resolve(data);
+      });
+    });
+    const request = (payload) => {
+      const value = payload && typeof payload === 'object' &&
+        !Array.isArray(payload) ? payload : {};
+      const action = String(value.action || '');
+      if (!safariExtension || !ACTIONS.has(action)) {
+        return Promise.reject(Object.assign(new Error(
+          'BWReader App 原生 Realtime 尚未就绪'
+        ), { code: 'BW_NATIVE_REALTIME_UNAVAILABLE' }));
+      }
+      if (action === 'mint') {
+        return call(action, {
+          file: typeof value.file === 'string' ? value.file : '',
+          page: Number.isSafeInteger(value.page) ? value.page : 0
+        }).then((data) => ({
+          ok: true,
+          client_secret: data.clientSecret,
+          expires_at: data.expiresAt,
+          model: data.model,
+          rt_image: data.rtImage,
+          compact_tokens: data.compactTokens
+        }));
+      }
+      if (action === 'image') {
+        return call(action, {
+          callId: value.call_id,
+          clientSecret: value.client_secret,
+          tool: value.tool,
+          mediaType: value.media_type,
+          b64: value.b64
+        }).then(() => ({ ok: true }));
+      }
+      return call(action, {
+        callId: value.call_id,
+        clientSecret: value.client_secret
+      }).then(() => ({ ok: true }));
+    };
+    return Object.freeze({ available: safariExtension, request });
+  })();
+  if (nativeRealtimeBridge.available) {
+    Object.defineProperty(window, '__bwNativeRealtime', {
+      value: Object.freeze({ request: nativeRealtimeBridge.request }),
+      configurable: false,
+      enumerable: false,
+      writable: false
+    });
+    Object.defineProperty(window, '__BW_NATIVE_OPENAI_REALTIME__', {
+      value: true,
+      configurable: false,
+      enumerable: false,
+      writable: false
+    });
+  }
+
   const nativeAppDataBridge = (() => {
     const CONTRACT = 'bw-reader-native/1';
     const ACTIONS = new Set([

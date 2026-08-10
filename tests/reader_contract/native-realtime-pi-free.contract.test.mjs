@@ -1,0 +1,160 @@
+import test from "node:test";
+import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+
+const ROOT = new URL("../../", import.meta.url);
+const read = (path) => readFileSync(new URL(path, ROOT), "utf8");
+
+const SERVER = read("_server_deploy/assistant.py");
+const VOICE = read("_server_deploy/static/pdf/rc-voicecall.js");
+const BRIDGE = read("ios/BWReader/App/ReaderNativeRealtimeBridge.swift");
+const CORE = read("ios/BWReader/Shared/ReaderRealtimeCredentialCore.swift");
+const CONTRACT = read("ios/BWReader/Shared/ReaderNativeBridgeContract.swift");
+const HANDLER = read("ios/BWReader/Extension/SafariWebExtensionHandler.swift");
+const APP_ENTITLEMENTS = read("ios/BWReader/App/BWReader.entitlements");
+const EXT_ENTITLEMENTS = read(
+  "ios/BWReader/Extension/BWReaderSafariExtension.entitlements",
+);
+const BACKGROUND = read("extensions/bw-reader-webext/background.js");
+const FACADE = read("extensions/bw-reader-webext/src/facade.js");
+const WEB_VIEW = read("ios/BWReader/App/ReaderWebView.swift");
+const TOOLS = read("ios/BWReader/App/NativeReaderToolsView.swift");
+const MANIFEST = read("ios/BWReader/native_reader_interface_manifest.json");
+
+test("the project key is entered only in App and Pi returns non-secret config", () => {
+  assert.match(
+    SERVER,
+    /@bp\.route\("\/native-realtime-config", methods=\["POST"\]\)/,
+  );
+  assert.match(
+    SERVER,
+    /body != \{"contract": "reader-native-realtime-config\/1"\}/,
+  );
+  const configRoute = SERVER.slice(
+    SERVER.indexOf('@bp.route("/native-realtime-config"'),
+    SERVER.indexOf('@bp.route("/rtc-session"'),
+  );
+  assert.doesNotMatch(configRoute, /api_key|_openai_realtime_key/);
+  assert.match(SERVER, /Cache-Control"\] = "no-store"/);
+  assert.match(SERVER, /Pragma"\] = "no-cache"/);
+
+  assert.match(CORE, /kSecClassGenericPassword/);
+  assert.match(CORE, /kSecAttrAccessibleWhenUnlockedThisDeviceOnly/);
+  assert.match(CORE, /kSecAttrAccessGroup/);
+  assert.match(CORE, /reader-native-realtime-keychain\/2/);
+  assert.doesNotMatch(CORE, /UserDefaults/);
+  assert.match(
+    CORE,
+    /native-realtime-config[\s\S]*HTTPCookie\.requestHeaderFields/,
+  );
+  assert.match(TOOLS, /SecureField\("输入现有 OpenAI Key/);
+  assert.match(TOOLS, /Key 不会发送给 Pi/);
+  assert.match(TOOLS, /保存 Key 并同步语音设置/);
+  assert.match(TOOLS, /已存入 Apple Keychain/);
+  assert.match(TOOLS, /清除这台 iPad 中的 Key/);
+
+  // The credential export is intentionally unavailable to Reader JS and the
+  // Safari extension's Pi manifest. Only the native settings client owns it.
+  assert.doesNotMatch(MANIFEST, /native-realtime-config/);
+});
+
+test("the local Reader page receives only a short-lived native Realtime bridge", () => {
+  assert.match(BRIDGE, /static let messageName = "bwNativeRealtime"/);
+  assert.match(BRIDGE, /message\.frameInfo\.isMainFrame/);
+  assert.match(BRIDGE, /message\.webView === webView/);
+  assert.match(BRIDGE, /isTrustedLocalURL\(webView\.url\)/);
+  assert.match(BRIDGE, /case "mint"/);
+  assert.match(BRIDGE, /mintClientSecret\(\)/);
+  assert.match(
+    BRIDGE,
+    /"client_secret": minted\.clientSecret/,
+  );
+  assert.doesNotMatch(
+    BRIDGE.slice(BRIDGE.indexOf("case \"mint\"")),
+    /"api_key"\s*:/,
+  );
+
+  assert.match(
+    WEB_VIEW,
+    /ReaderNativeRealtimeBridge\(\s*webView: webView,\s*trustedBaseURL: localRuntimeServer\.baseURL/s,
+  );
+  assert.match(
+    WEB_VIEW,
+    /addScriptMessageHandler\(\s*nativeRealtimeBridge,\s*contentWorld: \.page,\s*name: ReaderNativeRealtimeBridge\.messageName/s,
+  );
+  assert.match(WEB_VIEW, /location\.origin !== "http:\/\/127\.0\.0\.1:43129"/);
+  assert.match(WEB_VIEW, /Object\.defineProperty\(window, "__bwNativeRealtime"/);
+});
+
+test("App and Safari extension call mint and hangup through native code", () => {
+  const direct = VOICE.slice(
+    VOICE.indexOf("async function _openDirectRtcCall"),
+    VOICE.indexOf("async function rtcStart"),
+  );
+  assert.match(direct, /action: 'mint'/);
+  assert.match(direct, /native_direct: nativeDirect/);
+  assert.match(direct, /if \(!nativeDirect\)[\s\S]*fetch\('\/api\/assistant\/rtc-bind'/);
+  assert.match(direct, /fetch\('\/api\/assistant\/rtc-client-secret'/);
+
+  const control = VOICE.slice(
+    VOICE.indexOf("function _ctlOpen"),
+    VOICE.indexOf("function _rtcRequestHangup"),
+  );
+  assert.match(
+    control,
+    /if \(_rtc\.nativeDirect\)[\s\S]*_rtc\.ctl = false;[\s\S]*return;/,
+  );
+  assert.match(VOICE, /action: 'hangup', call_id: callId/);
+  assert.match(VOICE, /_rtc\.nativeDirect = !!cres\.native_direct/);
+
+  assert.match(CONTRACT, /"realtime\.mint"/);
+  assert.match(CONTRACT, /"realtime\.image"/);
+  assert.match(CONTRACT, /"realtime\.hangup"/);
+  assert.match(APP_ENTITLEMENTS, /keychain-access-groups/);
+  assert.match(EXT_ENTITLEMENTS, /keychain-access-groups/);
+  assert.match(
+    APP_ENTITLEMENTS,
+    /\$\(AppIdentifierPrefix\)space\.bwicarus\.bwreader2\.realtime/,
+  );
+  assert.match(
+    EXT_ENTITLEMENTS,
+    /\$\(AppIdentifierPrefix\)space\.bwicarus\.bwreader2\.realtime/,
+  );
+  assert.match(HANDLER, /case "realtime\.mint"/);
+  assert.match(HANDLER, /ReaderRealtimeOpenAIClient[\s\S]*mintClientSecret/);
+  assert.match(HANDLER, /case "realtime\.image"/);
+  assert.match(HANDLER, /case "realtime\.hangup"/);
+  assert.doesNotMatch(HANDLER, /"apiKey"\s*:/);
+  assert.match(BACKGROUND, /"realtime\.mint"/);
+  assert.match(BACKGROUND, /NATIVE_APP_REALTIME_SECRET_RE/);
+  assert.match(FACADE, /Object\.defineProperty\(window, '__bwNativeRealtime'/);
+  assert.match(FACADE, /client_secret: data\.clientSecret/);
+  assert.doesNotMatch(FACADE, /sk-[A-Za-z0-9]/);
+});
+
+test("selection is injected on the user's turn and visual tools send the real composite", () => {
+  const flush = VOICE.slice(
+    VOICE.indexOf("function _rtcFlushCtx"),
+    VOICE.indexOf("async function _rtcDeep"),
+  );
+  assert.match(flush, /var sel = String\(_rtc\.sel \|\| ''\)\.trim\(\)/);
+  assert.match(flush, /他当前明确选中了这段文字/);
+  assert.match(flush, /sel\.length \+ ':' \+ sel\.slice\(0, 40\)/);
+
+  assert.match(VOICE, /async function _nativeRealtimeVisual/);
+  assert.match(VOICE, /RC\.captureInkRegion\(target\)/);
+  assert.match(VOICE, /RC\.capturePageComposite/);
+  assert.match(VOICE, /action: 'image', call_id: _rtc\.callId/);
+  assert.match(
+    VOICE,
+    /_rtc\.nativeDirect && \/\^\(see_ink\|see_page\|see_figure\)\$\//,
+  );
+  assert.match(VOICE, /vision: vision \|\| undefined/);
+
+  assert.match(BRIDGE, /case "image"/);
+  assert.match(CORE, /wss:\/\/api\.openai\.com\/v1\/realtime/);
+  assert.match(CORE, /"type": "input_image"/);
+  assert.match(CORE, /"detail": "high"/);
+  assert.match(CORE, /waitForImageConfirmation/);
+  assert.match(CORE, /conversation\.item\.created/);
+});

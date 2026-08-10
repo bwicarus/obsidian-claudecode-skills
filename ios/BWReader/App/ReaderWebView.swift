@@ -183,6 +183,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private weak var remoteLibraryCoordinator: ReaderRemoteLibraryCoordinator?
     private var nativePiRemoteLibraryCancellable: AnyCancellable?
     private var nativePiSyncBridge: ReaderNativePiSyncBridge?
+    private var nativeRealtimeBridge: ReaderNativeRealtimeBridge?
     private var nativeBookOCRBridge: NativeBookOCRBridge?
     private var nativePDFMutationBridge: ReaderNativePDFMutationBridge?
     private let nativePDFMutationActor = ReaderNativePDFMutationActor()
@@ -303,6 +304,16 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 nativePiSyncBridge,
                 contentWorld: .page,
                 name: ReaderNativePiSyncBridge.messageName
+            )
+            let nativeRealtimeBridge = ReaderNativeRealtimeBridge(
+                webView: webView,
+                trustedBaseURL: localRuntimeServer.baseURL
+            )
+            self.nativeRealtimeBridge = nativeRealtimeBridge
+            contentController.addScriptMessageHandler(
+                nativeRealtimeBridge,
+                contentWorld: .page,
+                name: ReaderNativeRealtimeBridge.messageName
             )
             let nativeBookOCRBridge = NativeBookOCRBridge(
                 webView: webView,
@@ -434,6 +445,31 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
               }).observe(document, { childList: true, subtree: true });
             })();
             """,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
+        contentController.addUserScript(WKUserScript(
+            source: #"""
+            (() => {
+              if (window.__bwNativeRealtime) return;
+              if (location.origin !== "http://127.0.0.1:43129") return;
+              const handler = window.webkit?.messageHandlers?.bwNativeRealtime;
+              if (!handler || typeof handler.postMessage !== "function") return;
+              const request = (payload) => handler.postMessage(payload);
+              Object.defineProperty(window, "__bwNativeRealtime", {
+                configurable: false,
+                enumerable: false,
+                writable: false,
+                value: Object.freeze({ request })
+              });
+              Object.defineProperty(window, "__BW_NATIVE_OPENAI_REALTIME__", {
+                configurable: false,
+                enumerable: false,
+                writable: false,
+                value: true
+              });
+            })();
+            """#,
             injectionTime: .atDocumentStart,
             forMainFrameOnly: true
         ))
