@@ -12,6 +12,20 @@ if str(DEPLOY) not in sys.path:
 
 import assistant  # noqa: E402
 
+# pdf_reader registers the Linux-only RBI transport at import time.  This test
+# exercises only deterministic stroke rendering, so keep the Windows contract
+# runnable with the same no-op advisory-lock shim used by the library tests.
+if sys.platform == "win32" and "fcntl" not in sys.modules:
+    fcntl_stub = types.ModuleType("fcntl")
+    fcntl_stub.LOCK_EX = 1
+    fcntl_stub.LOCK_SH = 2
+    fcntl_stub.LOCK_NB = 4
+    fcntl_stub.LOCK_UN = 8
+    fcntl_stub.flock = lambda *_args, **_kwargs: None
+    sys.modules["fcntl"] = fcntl_stub
+
+import pdf_reader  # noqa: E402
+
 
 LOCAL_FILE = "localbook:localbook-" + "a" * 64
 
@@ -143,6 +157,23 @@ class NativePDFAssistantSemanticsTests(unittest.TestCase):
         broken["native_local_state"] = dict(broken["native_local_state"], extra=True)
         with self.assertRaisesRegex(ValueError, "合同无效"):
             assistant._native_pdf_state(broken)
+
+    def test_native_pts_ink_can_render_the_same_visual_as_web_p_ink(self):
+        native_stroke = {"pts": [[0.1, 0.2], [0.3, 0.4]], "t": "pen"}
+        web_stroke = {"p": [[0.1, 0.2], [0.3, 0.4]], "t": "pen"}
+        self.assertEqual(
+            pdf_reader._stroke_points(native_stroke),
+            pdf_reader._stroke_points(web_stroke),
+        )
+
+        rendered = b"rendered-native-ink"
+        with patch.object(pdf_reader, "_safe_vault_path", return_value="demo.pdf"), \
+                patch.object(pdf_reader, "_figure_crop_png", return_value=rendered) as crop:
+            result = pdf_reader._ink_focus_image(
+                "books/demo.pdf", 2, [native_stroke], scale=2.6
+            )
+        self.assertEqual(result, rendered)
+        self.assertEqual(crop.call_args.kwargs["strokes"], [native_stroke])
 
     def test_native_highlight_returns_geometry_action_without_pi_sidecar_write(self):
         class Rect:

@@ -30,6 +30,7 @@ enum ReaderRealtimeCredentialError: LocalizedError {
     case invalidConfiguration
     case imageTooLarge
     case imageRejected(String)
+    case visualCacheUnavailable
 
     var errorDescription: String? {
         switch self {
@@ -51,6 +52,73 @@ enum ReaderRealtimeCredentialError: LocalizedError {
             return "当前合成图超过 App 的安全大小上限"
         case .imageRejected(let message):
             return message
+        case .visualCacheUnavailable:
+            return "无法把当前合成图保存到 BWReader 本地缓存"
+        }
+    }
+}
+
+/// A bounded App Group cache for the exact composite handed to Realtime.
+/// App and Safari Extension both write here before transmission, so a failed
+/// network injection never turns the locally generated visual into a Pi-owned
+/// artifact.  File names are opaque and contain no book, page, call or key.
+private enum ReaderRealtimeVisualCache {
+    private static let directoryName = "RealtimeVisuals"
+    private static let filePrefix = "reader-visual-"
+    private static let maximumFiles = 12
+
+    static func store(_ data: Data, mediaType: String) throws {
+        guard let root = FileManager.default.containerURL(
+            forSecurityApplicationGroupIdentifier:
+                ReaderNativeBridgeContract.appGroupIdentifier
+        ) else {
+            throw ReaderRealtimeCredentialError.visualCacheUnavailable
+        }
+        let directory = root
+            .appendingPathComponent("NativeFeatures", isDirectory: true)
+            .appendingPathComponent(directoryName, isDirectory: true)
+        do {
+            try FileManager.default.createDirectory(
+                at: directory,
+                withIntermediateDirectories: true
+            )
+            let ext: String
+            switch mediaType {
+            case "image/png": ext = "png"
+            case "image/webp": ext = "webp"
+            default: ext = "jpg"
+            }
+            let timestamp = Int64(Date().timeIntervalSince1970 * 1_000)
+            let name = filePrefix + String(timestamp) + "-" +
+                UUID().uuidString.lowercased() + "." + ext
+            try data.write(
+                to: directory.appendingPathComponent(name, isDirectory: false),
+                options: [.atomic]
+            )
+            prune(directory)
+        } catch {
+            throw ReaderRealtimeCredentialError.visualCacheUnavailable
+        }
+    }
+
+    private static func prune(_ directory: URL) {
+        let keys: Set<URLResourceKey> = [
+            .contentModificationDateKey,
+            .isRegularFileKey,
+        ]
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: Array(keys),
+            options: [.skipsHiddenFiles]
+        ) else { return }
+        let candidates = files.compactMap { url -> (URL, Date)? in
+            guard url.lastPathComponent.hasPrefix(filePrefix),
+                  let values = try? url.resourceValues(forKeys: keys),
+                  values.isRegularFile == true else { return nil }
+            return (url, values.contentModificationDate ?? .distantPast)
+        }.sorted { $0.1 > $1.1 }
+        for (url, _) in candidates.dropFirst(maximumFiles) {
+            try? FileManager.default.removeItem(at: url)
         }
     }
 }
@@ -745,6 +813,10 @@ enum ReaderRealtimeOpenAIClient {
             callID: callID,
             clientSecret: clientSecret
         )
+        // The composite is generated in the page, persisted in the shared
+        // device-local cache, then injected by this native API. Pi is not a
+        // renderer, file store or transport hop for this path.
+        try ReaderRealtimeVisualCache.store(decoded, mediaType: mediaType)
         guard var components = URLComponents(
             string: "wss://api.openai.com/v1/realtime"
         ) else {

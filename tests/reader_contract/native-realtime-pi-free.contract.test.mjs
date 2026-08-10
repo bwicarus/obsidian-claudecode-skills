@@ -246,6 +246,13 @@ test("selection is injected on the user's turn and visual tools send the real co
   assert.match(CORE, /"detail": "high"/);
   assert.match(CORE, /waitForImageConfirmation/);
   assert.match(CORE, /conversation\.item\.created/);
+  assert.match(CORE, /private enum ReaderRealtimeVisualCache/);
+  assert.match(CORE, /ReaderNativeBridgeContract\.appGroupIdentifier/);
+  assert.match(
+    CORE,
+    /ReaderRealtimeVisualCache\.store\(decoded, mediaType: mediaType\)[\s\S]*wss:\/\/api\.openai\.com\/v1\/realtime/,
+  );
+  assert.match(CORE, /private static let maximumFiles = 12/);
 });
 
 test("native direct keeps local work in App and exposes only explicit Pi AI tools", () => {

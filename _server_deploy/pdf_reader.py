@@ -16118,6 +16118,19 @@ def _fig_badge_topright(fbox):
         return None
 
 
+def _stroke_points(stroke):
+    """Return canonical page points from web (`p`) or App-native (`pts`) ink."""
+    if not isinstance(stroke, dict):
+        return []
+    points = stroke.get("p")
+    if isinstance(points, list) and points:
+        return points
+    native_points = stroke.get("pts")
+    if isinstance(native_points, list):
+        return native_points
+    return points if isinstance(points, list) else []
+
+
 def _draw_ink(im, strokes, mp, scale):
     """共享画笔循环:把 strokes 逐笔画到 PIL 图 im 上,每点经 mp(point)->(px,py) 映射到图像素;scale=线宽放大(w*scale)。
     三处合成(figure 裁图 _figure_crop_png / epub 图 _epub_figure_ink_png / 整页 _overlay_ink_on_page_png)共用同一套 pen/line/arrow/rect 绘制。
@@ -16127,7 +16140,7 @@ def _draw_ink(im, strokes, mp, scale):
     d = ImageDraw.Draw(im); cw, ch = im.width, im.height
     for s in (strokes or []):
         try:
-            pts = s.get("p") or []
+            pts = _stroke_points(s)
             if not pts: continue
             col = s.get("c") or "#e74c3c"
             if isinstance(col, str) and col.startswith("rgb"): col = "#e74c3c"
@@ -16243,7 +16256,7 @@ def _overlay_ink_on_page_png(png_bytes, strokes, scale=2.0):
         def mp(p): return (p[0] * cw, p[1] * ch)
         for s in strokes:
             try:
-                pts = s.get("p") or []
+                pts = _stroke_points(s)
                 if not pts:
                     continue
                 col = s.get("c") or "#e74c3c"
@@ -16299,7 +16312,7 @@ def _text_under_ink(rel, page, strokes=None):
         return ""
     picked = {}
     for s in strokes:
-        pts = s.get("p") or []
+        pts = _stroke_points(s)
         if not pts:
             continue
         xs = [p[0] * pw for p in pts]; ys = [p[1] * ph for p in pts]
@@ -16331,7 +16344,7 @@ def _ink_focus_image(rel, page, strokes, scale=None):
             return None
         xs, ys = [], []
         for s in strokes:
-            for p in (s.get("p") or []):
+            for p in _stroke_points(s):
                 if len(p) >= 2:
                     xs.append(float(p[0])); ys.append(float(p[1]))
         if not xs:

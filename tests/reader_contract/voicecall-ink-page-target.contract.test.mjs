@@ -170,6 +170,36 @@ test("selection-near 只按精确 region id 取归一化外接框并保留上下
   assert.equal(helper.crop(surface, "r-missing"), null);
 });
 
+test("App 原生 pts 笔迹与网页 p 笔迹使用同一合成图裁剪合同", () => {
+  const helper = loadRealScopedCropHelpers();
+  const nativeSurface = {
+    width: 1000,
+    height: 500,
+    viewport: { width: 420, height: 280 },
+    strokes: [{
+      t: "pen",
+      pts: [[0.2, 0.3], [0.3, 0.4], [0.25, 0.45]],
+    }],
+  };
+  const webSurface = {
+    ...nativeSurface,
+    strokes: [{ t: "pen", p: nativeSurface.strokes[0].pts }],
+  };
+
+  assert.deepEqual(
+    { ...helper.crop(nativeSurface, null) },
+    { ...helper.crop(webSurface, null) },
+  );
+  assert.match(SOURCE, /function _visualStrokePoints\(stroke\)/);
+  assert.doesNotMatch(
+    SOURCE.slice(
+      SOURCE.indexOf("  function _visualStrokePoints("),
+      SOURCE.indexOf("  try {\n    window.RC = window.RC || {};"),
+    ),
+    /\(st\.p \|\| \[\]\)/,
+  );
+});
+
 test("capturePageComposite 对 PDF、EPUB 与插入页使用同一精确页身份", () => {
   const matcher = loadRealCompositePageMatcher();
   assert.equal(matcher.target({ page: 22 }), "22");
