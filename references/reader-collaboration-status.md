@@ -4005,3 +4005,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **设备证据/根因**：1.1.22 已走到 OpenAI，但服务端明确拒绝 17 位小数的 `session.truncation.retention_ratio`；Swift `Double(0.8)` 在 Darwin JSON 中被展开为 `0.80000000000000004`。
 - **改了什么**：保留官方语义 0.8，改用精确 `NSDecimalNumber(8×10^-1)`；请求发出前对排序后的 JSON 强制断言字面量恰为 `0.8`，否则本机失败并显示精度错误。
 - **验证/发布**：Reader Node 全量 967 项及 macOS 模拟器、签名设备归档、三目标/IPA 校验均通过；提交 `02e50ef0`，Actions `31408803077` 上传 TestFlight `1.1.23 (183)`，`31409766301` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。未改 Key、模型、工具、麦克风或 Pi，也未重复部署 Reader/扩展通道。
+
+## Codex：App Realtime 合成图工具修复已发布 1.1.24（2026-08-11 JST）
+- **根因/改动**：App 用 90 秒 `ek_` 创建 call，却在每次 `see_page/see_ink` 时才用它新建 sideband，过期后必然失败；现 App 原生以 Keychain project key + 官方 multipart `sdp/session` 创建 call，并让图像 sideband 与 hangup 始终复用同一身份域。
+- **安全边界**：网页只拿进程内随机 capability；call/key 绑定登记有 12 小时 TTL、8 条上限、精确 Location 路径和错误 capability fail-closed，项目 key 不进入 JS、日志或构建物。
+- **验证/发布**：专项 6 项、Reader Node 全量 968 项、macOS 模拟器、签名归档、三目标与 IPA 校验均通过；提交 `416bf0ab`，Actions `31411761841` 上传 TestFlight `1.1.24 (186)`，`31412715670` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
+- **未做/下一步**：未改 Reader/扩展通道或 Pi；Safari 扩展仍是既有 ephemeral 建连路径，不能据此宣称扩展同故障已修。安装后在 App 普通电话中依次验收 `see_page`、圈画后的 `see_ink`、挂断再拨后再次看图。
