@@ -10,9 +10,14 @@
   `https://api.openai.com/v1/realtime/calls`；长期项目 key 永远留在 Pi。
 - 直连不等于删除 Pi：`/voice-rt?mode=rtc` 仍是同一个 `call_id` 的控制 sideband，只承载
   页码、选区、笔迹、截图请求、工具执行、单通话接管和 VAD 真伪裁决，不转发媒体。
+- App/扩展用 `ek_` 创建的 call 必须用同一短期身份加入 sideband 和执行 hangup；长期项目 key
+  对这类 call 会返回 404。前端只在 `fe=5` 控制 WSS 的首个加密消息体及同源 HTTPS 工具体中
+  传递它，严禁放进 URL、日志或持久存储；服务端代理创建的 PWA call 仍使用项目 key。
 - `RC.voiceCtx` 的 `rtc` transport 仍绑定浏览器自己的 DataChannel；`dc.onopen` 必须先回放历史，
   再 `flushPending('rtc')`。用户开口边沿必须先 `_requestSyncNow()`，再 `_rtcFlushCtx()`，保证
   当前视口而非上一帧被注入。重连后仍由 control sideband 清同步指纹并重推状态。
+- `see_ink` / `see_page` / `see_figure` 是模型显式查看请求，必须把真实合成图注入同一 Realtime
+  会话；`rt_image` 只控制非显式、机会式图像输入，不能把显式查看降级为“存在笔迹”的文字说明。
 - PWA 无扩展路径暂保留服务端 SDP 代理作为兼容回退；不能据此把 App/扩展媒体重新绕回 Pi。
 
 ## 一、注入种类 × 路 对照表

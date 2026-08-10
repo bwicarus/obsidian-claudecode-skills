@@ -46,6 +46,10 @@
 **“BW网页伴读”**。App TestFlight 当前构建为 **1.1.17 (172)**，Apple 已确认
 `VALID / IN_BETA_TESTING`。
 
+**0.2.80 / App 1.1.18 发布候选**：直连 Realtime 会话复用设备建连时取得的短期 `ek_`
+credential 建立同一 call 的 sideband 与挂断请求；选区仍在有效语音轮次后注入，显式
+`see_ink` / `see_page` / `see_figure` 始终回传实际合成图，不受机会式图片开关影响。
+
 **0.2.79 已部署**：App 本机书与浏览器扩展的 `openai_rtc` 普通电话由服务端签发 90 秒短期
 `ek_` credential，设备随后直接连接 OpenAI Realtime calls；长期 key、预算与完整会话配置仍由
 Pi 持有。Pi `/voice-rt?mode=rtc` 只保留同一 call 的上下文/工具 sideband，页码、可见正文、

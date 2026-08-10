@@ -9914,12 +9914,19 @@ def assistant_voice_tool():
                         ")。本轮到此结束;用户下次说话时若相关直接参考,不要主动描述图片内容。")
     # WebRTC 通话(带 rtc_call_id)的图像走 sideband 服务端注入,绝不进响应让前端挤 data channel
     if isinstance(res, dict) and res.get("_vision") and body.get("rtc_call_id"):
-        if _rtc_sideband_images(str(body["rtc_call_id"]), res["_vision"]):
+        if _rtc_sideband_images(
+            str(body["rtc_call_id"]),
+            res["_vision"],
+            auth_key=str(body.get("rtc_sideband_secret") or ""),
+        ):
             res.pop("_vision", None)
             res["图像"] = "已直接发到对话里,请看图回答"
         else:
             res.pop("_vision", None)   # sideband 失败也不给前端(dc 发大图会把通道弄死),如实告知
             res["图像"] = "传输失败,这次没法看到图;请如实告诉用户图像传输出了问题"
+        # _fed_images 与 _vision 指向同一批 base64。图已由 sideband 送入同一
+        # Realtime 会话，不能再把数 MB 数据塞进 HTTP 结果（前端也不会经 dc 转发它）。
+        res.pop("_fed_images", None)
     return jsonify({"ok": "error" not in res, "tool": name, "args": targs,
                     "label": _tool_label(name, targs), "took_s": round(time.time() - t0, 1),
                     "cacheable": name in VOICE_CACHEABLE_TOOLS,
@@ -10354,13 +10361,18 @@ def assistant_rtc_hangup():
     """
     if not _logged_in():
         return jsonify({"ok": False}), 401
-    cid = ((request.get_json(silent=True) or {}).get("call_id") or "").strip()
-    if not cid:
-        return jsonify({"ok": False, "error": "缺 call_id"}), 400
-    try:
-        key = json.loads(_RTC_KEY_PATH.read_text("utf-8")).get("api_key") or ""
-    except Exception:
-        key = ""
+    body = request.get_json(silent=True) or {}
+    cid = (body.get("call_id") or "").strip()
+    if re.fullmatch(r"rtc_[A-Za-z0-9_-]{8,160}", cid) is None:
+        return jsonify({"ok": False, "error": "call_id 无效"}), 400
+    auth_key = str(body.get("rtc_sideband_secret") or "")
+    key = (auth_key if re.fullmatch(r"ek_[A-Za-z0-9_-]{8,4096}", auth_key)
+           else "")
+    if not key:
+        try:
+            key = json.loads(_RTC_KEY_PATH.read_text("utf-8")).get("api_key") or ""
+        except Exception:
+            key = ""
     if not key:
         return jsonify({"ok": False, "error": "缺 OpenAI 凭证"}), 400
     import requests as _rq
@@ -10450,12 +10462,18 @@ def assistant_route_text():
                     headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 
-def _rtc_sideband_images(call_id: str, images: list) -> bool:
+def _rtc_sideband_images(call_id: str, images: list, *, auth_key: str = "") -> bool:
     """经 sideband WS(官方服务端通道,wss://…/v1/realtime?call_id=X)把图像注入 WebRTC 会话。
     为什么不走前端 data channel:SCTP 单条消息上限(Safari≈64KB),base64 笔迹图几百 KB,
     超限发送按规范**直接关闭 dc**=通话哑死——图这种大 payload 必须从服务端边带进去。"""
     try:
-        key = json.loads(_RTC_KEY_PATH.read_text("utf-8")).get("api_key") or ""
+        # Direct WebRTC calls can require the same ek_ identity that created
+        # them. It arrives only in the authenticated HTTPS body and is never
+        # logged or persisted; server-created PWA calls keep the project key.
+        key = (auth_key if re.fullmatch(r"ek_[A-Za-z0-9_-]{8,4096}", auth_key or "")
+               else "")
+        if not key:
+            key = json.loads(_RTC_KEY_PATH.read_text("utf-8")).get("api_key") or ""
         if not key or not call_id:
             return False
         from websockets.sync.client import connect as _ws_connect

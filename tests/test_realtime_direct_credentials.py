@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from pathlib import Path
+import json
 import sys
 import tempfile
 import time
+import types
 import unittest
 from unittest.mock import patch
 
@@ -143,6 +145,99 @@ class RealtimeDirectCredentialTest(unittest.TestCase):
                 "/api/assistant/rtc-client-secret", json={}
             )
         self.assertEqual(limited.status_code, 429)
+
+    def test_image_sideband_uses_direct_calls_short_lived_identity(self):
+        calls = []
+
+        class FakeSocket:
+            def __init__(self):
+                self.sent = []
+
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+
+            def send(self, payload):
+                self.sent.append(json.loads(payload))
+
+            def recv(self, timeout=None):
+                return json.dumps({"type": "conversation.item.created"})
+
+        def fake_connect(url, **kwargs):
+            socket = FakeSocket()
+            calls.append((url, kwargs, socket))
+            return socket
+
+        websockets_module = types.ModuleType("websockets")
+        sync_module = types.ModuleType("websockets.sync")
+        client_module = types.ModuleType("websockets.sync.client")
+        client_module.connect = fake_connect
+        websockets_module.sync = sync_module
+        sync_module.client = client_module
+        ephemeral = "ek_" + "s" * 48
+
+        with patch.dict(
+            sys.modules,
+            {
+                "websockets": websockets_module,
+                "websockets.sync": sync_module,
+                "websockets.sync.client": client_module,
+            },
+        ):
+            ok = assistant._rtc_sideband_images(
+                "rtc_directcontract123",
+                [{"media_type": "image/png", "b64": "YWJj"}],
+                auth_key=ephemeral,
+            )
+
+        self.assertTrue(ok)
+        self.assertEqual(len(calls), 1)
+        url, kwargs, socket = calls[0]
+        self.assertEqual(
+            url,
+            "wss://api.openai.com/v1/realtime?call_id=rtc_directcontract123",
+        )
+        self.assertEqual(
+            kwargs["additional_headers"]["Authorization"],
+            f"Bearer {ephemeral}",
+        )
+        self.assertEqual(socket.sent[0]["type"], "conversation.item.create")
+        image = socket.sent[0]["item"]["content"][0]
+        self.assertEqual(image["type"], "input_image")
+        self.assertEqual(image["image_url"], "data:image/png;base64,YWJj")
+
+    def test_direct_call_hangup_uses_the_same_short_lived_identity(self):
+        ephemeral = "ek_" + "h" * 48
+        response = types.SimpleNamespace(status_code=200)
+        with (
+            patch.object(
+                assistant,
+                "_RTC_KEY_PATH",
+                Path(self.temp.name) / "must-not-be-read.json",
+            ),
+            patch("requests.post", return_value=response) as hangup,
+        ):
+            result = self.client.post(
+                "/api/assistant/rtc-hangup",
+                json={
+                    "call_id": "rtc_directcontract123",
+                    "rtc_sideband_secret": ephemeral,
+                },
+            )
+
+        self.assertEqual(result.status_code, 200)
+        self.assertTrue(result.get_json()["ok"])
+        request = hangup.call_args
+        self.assertEqual(
+            request.args[0],
+            "https://api.openai.com/v1/realtime/calls/rtc_directcontract123/hangup",
+        )
+        self.assertEqual(
+            request.kwargs["headers"]["Authorization"],
+            f"Bearer {ephemeral}",
+        )
 
 
 if __name__ == "__main__":

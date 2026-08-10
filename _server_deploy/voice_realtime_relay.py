@@ -1747,7 +1747,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
             else:
                 cmd = json.dumps({"tool": name, "args": args}, ensure_ascii=False)
                 ctx = {"file_rel": file_rel, "page": book.get("page") or page}
-                if _creds().get("rt_image") and engine != "grok":
+                if (_creds().get("rt_image") or name in ("see_ink", "see_page", "see_figure")) and engine != "grok":
                     ctx["_want_vision"] = 1   # ㉗:看图/看笔迹类工具跳过本地转述,原图穿透 → input_image 直喂 GPT(94:grok 无视觉,恒走文字转述)
                 if book.get("ink_strokes"):
                     ctx["ink"] = book["ink_strokes"]
@@ -1774,7 +1774,7 @@ async def handle_openai(bws, file_rel: str = "", page: int = 0, engine: str = "o
                 slim, slim_full, out = _prep_tool_result(res, d.get("tool") or name)   # 三引擎共用(见 _prep_tool_result)
                 # ㉕ 图像直喂(凭证 rt_image 开关,⚪格式按 GA conversation item 推定待实测):看图类工具返回的渲染图
                 # 直接给 GPT 自己看(2.1 原生视觉),不再经 Claude 文字转述;失败(模型不支持/格式不对)由 error 事件暴露,关掉开关即回文字链路
-                if vis and _creds().get("rt_image") and engine != "grok":
+                if vis and (_creds().get("rt_image") or name in ("see_ink", "see_page", "see_figure")) and engine != "grok":
                     try:
                         for _vi, v in enumerate(vis[:2]):
                             _iid2 = f"img{_turn['n']}x{len(_img_items)}{_vi}"   # 104:自带 id → 新话轮焚旧图省 token
@@ -2696,10 +2696,13 @@ def _ticket_uid(uid: str, call_id: str, tk: str) -> str:
     return uid if hmac.compare_digest(want, tk) else ""
 
 
-async def _openai_hangup(call_id: str):
+async def _openai_hangup(call_id: str, *, auth_key: str = ""):
     """官方 POST /v1/realtime/calls/{id}/hangup —— 从服务端真正终止一路通话。
     媒体是浏览器↔OpenAI 直连,relay 拆不了;但这个端点可以。用于接管旧通话。"""
-    key = _openai_key()
+    key = (auth_key if re.fullmatch(r"ek_[A-Za-z0-9_-]{8,4096}", auth_key or "")
+           else "")
+    if not key:
+        key = _openai_key()
     if not key or not call_id:
         return False
     try:
@@ -2734,7 +2737,9 @@ async def _supersede_others(uid: str, new_call: str):
                                             "payload": {"call_id": old, "by": new_call}}, ensure_ascii=False))
             except Exception:
                 pass
-        asyncio.create_task(_openai_hangup(old))   # ② 再真正终止服务端那路(否则它继续收音频、继续答、继续计费)
+        asyncio.create_task(_openai_hangup(
+            old, auth_key=str(rec.get("auth_key") or "")
+        ))   # ② 再真正终止服务端那路(否则它继续收音频、继续答、继续计费)
         live.pop(old, None)
         sys.stderr.write(f"[rtc-ctl] ⛔接管:旧 call={old[:14]} 被 {new_call[:14]} 取代\n")
         if obws is not None:
@@ -2774,11 +2779,53 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
             pass
         await bws.close()
         return
-    try:
-        ows = await websockets.connect(OPENAI_RT_CALL_URL + call_id,
-                                       additional_headers={"Authorization": f"Bearer {key}"},
-                                       max_size=16 * 1024 * 1024, open_timeout=10)
-    except Exception as ex:
+    # fe=5: installed clients create the WebRTC call with an ek_ credential.
+    # Join that same session with the same short-lived identity. On current
+    # production, using the long-lived project key for such a call returns
+    # call_id_not_found/404 even while its media connection is alive.
+    _uid_m = _ticket_uid(uid_q, call_id, tk_q)
+    _sideband_key = ""
+    if fe >= 5:
+        if not _uid_m:
+            try:
+                await bws.send(json.dumps({"event": "rtc_ctl", "payload": {
+                    "ok": False, "error": "RTC 控制票据无效"}}))
+            except Exception:
+                pass
+            await bws.close()
+            return
+        try:
+            _auth_raw = await asyncio.wait_for(bws.recv(), timeout=5.0)
+            _auth = json.loads(_auth_raw) if isinstance(_auth_raw, str) else {}
+            _candidate = (str(_auth.get("client_secret") or "")
+                          if _auth.get("type") == "rtc_auth" else "")
+            if re.fullmatch(r"ek_[A-Za-z0-9_-]{8,4096}", _candidate):
+                _sideband_key = _candidate
+        except Exception:
+            _sideband_key = ""
+    _keys = []
+    if _sideband_key:
+        _keys.append(("ephemeral", _sideband_key))
+    if key and key != _sideband_key:
+        _keys.append(("project", key))
+    ows = None
+    _connect_errors = []
+    for _auth_kind, _auth_key in _keys:
+        try:
+            ows = await websockets.connect(
+                OPENAI_RT_CALL_URL + call_id,
+                additional_headers={"Authorization": f"Bearer {_auth_key}"},
+                max_size=16 * 1024 * 1024,
+                open_timeout=10,
+            )
+            sys.stderr.write(
+                f"[rtc-ctl] sideband auth={_auth_kind} call={call_id[:12]}\n"
+            )
+            break
+        except Exception as ex:
+            _connect_errors.append(f"{_auth_kind}:{str(ex)[:100]}")
+    if ows is None:
+        ex = RuntimeError("; ".join(_connect_errors) or "无可用 sideband 凭证")
         sys.stderr.write(f"[rtc-ctl] sideband 连接失败 call={call_id[:12]}: {str(ex)[:100]}\n")
         try:
             await bws.send(json.dumps({"event": "rtc_ctl", "payload": {"ok": False, "error": str(ex)[:80]}}))
@@ -2789,7 +2836,6 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
     sys.stderr.write(f"[rtc-ctl] {'P2 已挂' if fe >= 2 else 'P1 观察(前端旧版 fe<2)'} call={call_id[:12]} file={file_rel[:30]} p{page}\n")
     # 93/133(双回答事故取证):登记到真并发注册表;**只有此刻别的 call 还挂着**才是真并存(前端双拨/多标签/多设备)。
     # 133:uid **只认票据**(见 _ticket_uid 的说明:从 call_id 猜会误踢别人的通话)
-    _uid_m = _ticket_uid(uid_q, call_id, tk_q)
     if not _uid_m:
         sys.stderr.write(f"[rtc-ctl] ⚠ 票据无效/缺失(uid={uid_q!r}) → 本路不参与单通话唯一性(不踢人)\n")
     try:
@@ -2800,7 +2846,8 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
         if _others:
             sys.stderr.write(f"[rtc-ctl] ⚠ 同 uid 多 call 并存({len(_others) + 1} 条): "
                              f"在挂={[c[:12] for c in _others]} 新={call_id[:12]} → 接管\n")
-        _live[call_id] = {"ts": time.time(), "bws": bws}
+        _live[call_id] = {"ts": time.time(), "bws": bws,
+                          "auth_key": _sideband_key}
         if _others:
             await _supersede_others(_uid_m, call_id)   # 133:最新通话独占 —— 旧的进终态 + 官方 hangup
     except Exception:
@@ -2973,7 +3020,7 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
             else:
                 cmd = json.dumps({"tool": name, "args": args}, ensure_ascii=False)
                 ctx = {"file_rel": file_rel, "page": book.get("page") or page}
-                if _creds().get("rt_image"):
+                if _creds().get("rt_image") or name in ("see_ink", "see_page", "see_figure"):
                     ctx["_want_vision"] = 1
                 if book.get("ink_strokes"):
                     ctx["ink"] = book["ink_strokes"]
@@ -3034,7 +3081,9 @@ async def handle_rtc_ctl(bws, call_id: str, file_rel: str = "", page: int = 0, f
                    "——若用户上一句其实是在等这个结果(或只是杂音/无关短语),直接据此回答;若确实换了新话题,忽略本条。)")
             vis = None
         try:
-            if vis and not stale and _creds().get("rt_image"):
+            if vis and not stale and (
+                _creds().get("rt_image") or name in ("see_ink", "see_page", "see_figure")
+            ):
                 for _vi, v in enumerate(vis[:2]):   # P2 视觉:经**本函数已持有的 sideband** 直喂(与 GPT-WS 版 ows 直喂同构)
                     _iid2 = f"img{epoch['n']}x{len(_img_items)}{_vi}"   # 104:自带 id(客户端可指定)→ 新话轮焚旧图省 token
                     _img_items.append((epoch["n"], _iid2))
