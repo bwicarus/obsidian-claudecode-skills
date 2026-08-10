@@ -3965,3 +3965,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：专项 42 项、Reader Node 全量 949 项、相关 Python 74 项（1 跳过）、离线 ReaderBundle、发布管线、macOS 模拟器/签名归档与三目标校验通过；Windows 全量 Python 仅保留既有 `fcntl`/平台基线。
 - **发布**：提交 `8ef1580a` 经 Actions run `31355330394` 上传 TestFlight `1.1.15 (167)`；状态 run `31355787793` 确认 `COMPLETE / VALID / IN_BETA_TESTING`，零处理错误或警告。
 - **下一步**：用户安装后可直接打开触发旧 PC 回执的一次性修复；若仍为零，在书库点“重新导入结果”并选“PC 高质量预处理”，无需重新运行 PC 识别。
+
+## Codex：App 本地阅读器 Realtime 2.1 恢复 1.1.16（2026-08-10 JST）
+- **根因/改动**：本机书页把共享 `/voice-rt` 错连到 `127.0.0.1`，且 CSP 未放行真实中继；现仅向可信本地主框暴露固定生产 WSS 路由并只准麦克风采集，其他媒体类型、子框与路径继续拒绝。
+- **扩展/服务**：扩展原有后台代理、账户围栏与严格 `/voice-rt` 路由保持不变；生产 WSS 以 App 的 loopback Origin 实测返回 `engine=openai / model=gpt-realtime-2.1-mini`，Pi 无需改动或重启。
+- **怎么验的**：Realtime 专项 80 项、Reader Node 全量 949 项、相关 Python 60 项（1 跳过）、离线 ReaderBundle、扩展发布管线及 macOS 模拟器/签名设备归档与三目标校验通过；Windows handoff 仅既有 `fcntl` 平台阻断。
+- **发布**：提交 `9b410dbe` 经 Actions run `31361125845` 上传 TestFlight `1.1.16 (169)`；状态 run `31361659716` 确认 `COMPLETE / VALID / IN_BETA_TESTING`，零处理错误或警告。
+- **下一步**：iPad 分别在 App 书页与 Safari 网页点普通电话按钮验收采集、回复和挂断；电脑按钮是独立 Windows 语音功能，不作为本次 Realtime 结果。
