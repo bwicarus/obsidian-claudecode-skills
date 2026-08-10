@@ -800,14 +800,42 @@ enum ReaderRealtimeOpenAIClient {
         mediaType: String,
         base64: String
     ) async throws {
-        guard isValidCallID(callID),
-              isValidClientSecret(clientSecret),
-              ["image/jpeg", "image/png", "image/webp"].contains(mediaType),
-              (3_000...2_800_000).contains(base64.utf8.count),
-              let decoded = Data(base64Encoded: base64),
-              (2_000...2_097_152).contains(decoded.count)
-        else {
-            throw ReaderRealtimeCredentialError.imageTooLarge
+        // Each precondition answers for itself.
+        //
+        // These were one guard reporting imageTooLarge, so an invalid call id
+        // or an unsupported media type both surfaced as "the image is too
+        // large" -- a sentence that sends the next person to shrink a picture
+        // that was never the problem. The visual path has six failure stages
+        // and the product requires them to stay distinguishable.
+        guard isValidCallID(callID) else {
+            throw ReaderRealtimeCredentialError.imageRejected(
+                "通话标识无效，无法把图归属到当前通话"
+            )
+        }
+        guard isValidClientSecret(clientSecret) else {
+            throw ReaderRealtimeCredentialError.imageRejected(
+                "旁路密钥无效，原生通道拒绝接收"
+            )
+        }
+        guard ["image/jpeg", "image/png", "image/webp"].contains(mediaType) else {
+            throw ReaderRealtimeCredentialError.imageRejected(
+                "不支持的图像类型：\(mediaType)"
+            )
+        }
+        guard (3_000...2_800_000).contains(base64.utf8.count) else {
+            throw ReaderRealtimeCredentialError.imageRejected(
+                "编码后体积越界：\(base64.utf8.count) 字节（允许 3KB–2.8MB）"
+            )
+        }
+        guard let decoded = Data(base64Encoded: base64) else {
+            throw ReaderRealtimeCredentialError.imageRejected(
+                "图像 base64 解码失败"
+            )
+        }
+        guard (2_000...2_097_152).contains(decoded.count) else {
+            throw ReaderRealtimeCredentialError.imageRejected(
+                "解码后体积越界：\(decoded.count) 字节（允许 2KB–2MB）"
+            )
         }
         let authorizationKey = try await realtimeAuthorizationKey(
             callID: callID,
@@ -816,7 +844,16 @@ enum ReaderRealtimeOpenAIClient {
         // The composite is generated in the page, persisted in the shared
         // device-local cache, then injected by this native API. Pi is not a
         // renderer, file store or transport hop for this path.
-        try ReaderRealtimeVisualCache.store(decoded, mediaType: mediaType)
+        // Local save is its own stage: a full disk or a missing App Group is
+        // not a transport problem, and reporting it as one would send the
+        // investigation to the network.
+        do {
+            try ReaderRealtimeVisualCache.store(decoded, mediaType: mediaType)
+        } catch {
+            throw ReaderRealtimeCredentialError.imageRejected(
+                "本地保存合成图失败：\(error.localizedDescription)"
+            )
+        }
         guard var components = URLComponents(
             string: "wss://api.openai.com/v1/realtime"
         ) else {
