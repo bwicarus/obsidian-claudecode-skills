@@ -4012,8 +4012,8 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **验证/发布**：专项 6 项、Reader Node 全量 968 项、macOS 模拟器、签名归档、三目标与 IPA 校验均通过；提交 `416bf0ab`，Actions `31411761841` 上传 TestFlight `1.1.24 (186)`，`31412715670` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
 - **未做/下一步**：未改 Reader/扩展通道或 Pi；Safari 扩展仍是既有 ephemeral 建连路径，不能据此宣称扩展同故障已修。安装后在 App 普通电话中依次验收 `see_page`、圈画后的 `see_ink`、挂断再拨后再次看图。
 
-## Codex：本机笔迹合成图格式与本地缓存候选（2026-08-11 JST）
+## Codex：本机笔迹合成图格式与本地缓存已发布 0.2.85 / 1.1.25（2026-08-11 JST）
 - **根因/改动**：App-owned 笔迹使用 `pts`，合成图与旧裁图只读网页 `p`，本机笔迹因此被当成空；现统一消费两种字段，App/扩展合成图先写有界 App Group 缓存再由原生 API 直送当前 Realtime 会话。
-- **怎么验**：`pts`/`p` 同几何裁剪与 Pi 兼容裁图专项通过；Reader Node 全量 969 项、发布管线 24 项及离线 ReaderBundle 复验通过。
-- **边界**：本机 Realtime 图像路径不经 Pi；未代用户发起通话，Windows 快照是否在线与本次普通电话 `see_ink` 修复分开验收。
-- **下一步**：macOS 编译/签名发布后，在 App 与 Safari 各画一笔并调用 `see_ink`，确认工具卡成功且模型能描述真实笔迹。
+- **怎么验**：`pts`/`p` 同几何裁剪与 Pi 兼容裁图专项、Reader Node 全量 969 项、发布管线、Pi 全门禁/E2E、扩展真实浏览器矩阵及 macOS 模拟器/签名归档均通过。
+- **发布事实**：代码 `efc656db`、文档 `ead64fc3`；Reader `0.2.85`、KG `kg-0.2.85-534da6ae7f800dac0b02`，回滚目录 `20260810T180043Z-1107624`；扩展渠道备份 `webext-channel-20260810T180656Z-9q58kdva`；Actions `31417454942` 上传 TestFlight `1.1.25 (189)`，`31418113085` 确认 `VALID / IN_BETA_TESTING` 且零错误警告。
+- **边界/下一步**：本机 Realtime 图像路径不经 Pi；未代用户发起真实通话，Windows 快照在线状态与本次普通电话 `see_ink` 修复分开验收。安装后在 App 与 Safari 各画一笔并调用 `see_ink`，确认工具卡成功且模型能描述真实笔迹。
