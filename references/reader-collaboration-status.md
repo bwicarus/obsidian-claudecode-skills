@@ -3986,3 +3986,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：真实 API 同 call 对照、相关 Node/Python 合同、Pi 原子门禁/E2E、扩展真实浏览器矩阵及 macOS 编译签名归档均通过；Windows handoff 仅保留既有 `fcntl` 平台基线。
 - **发布**：提交 `d513663f`；Pi Reader `0.2.80` 回滚目录 `20260810T101330Z-1016692`；扩展渠道回滚目录 `webext-channel-20260810T101643Z-35icjqy7`；Actions `31378457024` 上传 TestFlight `1.1.18 (174)`，状态 run `31379157070` 确认 `COMPLETE / VALID / IN_BETA_TESTING`。
 - **边界/下一步**：未替用户发起真实语音；安装后在选中文字与画笔迹两种场景分别提问，确认模型读到选区并能描述实际合成图；完全脱离 Pi 的本地 Realtime 架构另行设计。
+
+## Codex：App 本地优先与 Pi 可选 AI/API 化 0.2.83 / 1.1.21（2026-08-10 JST）
+- **改了什么**：OpenAI 项目 key 只由 App 写入 Apple 共享 Keychain，App/扩展原生进程直接签发短期 Realtime key；页面、选区、笔迹/页图、笔记与书库启动均本地运行，Pi 只保留显式备份/同步及固定 AI/CLI 工具白名单。
+- **发布阻断修复**：可选 Windows 快照 403/离线现在进入统一诊断与重试，不再从 Promise 成功回调逃成页面异常；没有放宽 Windows Origin、Tailscale 身份或扩展权限。
+- **怎么验的**：Reader Node 全量 967 项、发布管线 24 项、ReaderBundle 311 文件、Pi Linux 全门禁/E2E及扩展 10 组真实 Chromium 矩阵均通过；macOS 模拟器、签名设备归档和三目标校验通过。
+- **发布事实**：提交 `6b39bc55`；Pi Reader `0.2.83`、KG `kg-0.2.83-40c19fad934e83316576`，回滚目录 `20260810T140328Z-1059235`；扩展测试渠道 `0.2.83`，渠道备份 `webext-channel-20260810T140819Z-8dzikqzf`。
+- **App/下一步**：Actions `31396551594` 上传 TestFlight `1.1.21 (178)`，状态 run `31397435944` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告；未代用户录入长期 key、发起通话或执行 Pi AI 工具，安装后先在 App 设置录入既有 key，再断开 Pi 验收阅读、选区、笔迹、笔记与普通电话。
