@@ -120,6 +120,16 @@ test("native PDF mode uses PDFKit page images without PWA or whole-book caching"
   assert.match(PDF_LOADER, /const _NATIVE_LOCAL_PDF = window\.__BW_NATIVE_LOCAL_READER__ === true/);
   assert.match(PDF_LOADER, /_NATIVE_LOCAL_PDF \? null : await _idbGet/);
   assert.match(PDF_LOADER, /if \(!_NATIVE_LOCAL_PDF && !_haveBuf/);
+  assert.match(
+    PDF_LOADER,
+    /deferredNativeCrop = _NATIVE_LOCAL_PDF \? loadBookCrop\(\) : null/,
+  );
+  assert.match(PDF_LOADER, /if \(!deferredNativeCrop\) \{\s*await loadBookCrop\(\)/);
+  assert.ok(
+    PDF_LOADER.indexOf("pdfLoadHide();   // 首页已渲染") <
+      PDF_LOADER.indexOf("deferredNativeCrop.then"),
+    "native crop state may reflow after first paint but must not block it",
+  );
 });
 
 test("PDFKit selection identity never blocks first paint and refreshes transient pages", () => {

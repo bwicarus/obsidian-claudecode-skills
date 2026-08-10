@@ -505,6 +505,9 @@ async function harness(options = {}) {
             contract: "preference-store/1",
             attach(nextRouter, lease) {
               preferenceEvents.push({ phase: "attach", lease });
+              if (options.preferenceAttach) {
+                return options.preferenceAttach(nextRouter, lease);
+              }
               return Promise.resolve().then(() => nextRouter.put("user-settings", {
                 id: "setting:reader.theme",
                 value: "dark",
@@ -525,7 +528,8 @@ async function harness(options = {}) {
     });
   }
   vm.runInNewContext(SOURCE, context, { filename: "native-local-runtime.js" });
-  await context.BWReaderRuntime.nativeLocalRuntime.ready();
+  const readyPromise = context.BWReaderRuntime.nativeLocalRuntime.ready();
+  if (options.awaitReady !== false) await readyPromise;
   return {
     context,
     gateEvents,
@@ -539,16 +543,54 @@ async function harness(options = {}) {
     globalStore,
     documentStore,
     deviceStore,
+    readyPromise,
   };
 }
 
-test("native local runtime gates both document and device IndexedDB stores before ready", async () => {
+test("native local runtime does not mutate both stores merely to open a book", async () => {
   const { context, gateEvents } = await harness();
   assert.equal(context.BWReaderRuntime.nativeLocalRuntime.status().state, "ready");
-  assert.deepEqual(gateEvents, [
-    "put", "get", "remove", "get",
-    "put", "get", "remove", "get",
-  ]);
+  assert.deepEqual(gateEvents, []);
+});
+
+test("native PDF book metadata bypasses a pending annotation-store boot", async () => {
+  let releasePreferences;
+  const pendingPreferences = new Promise((resolve) => {
+    releasePreferences = resolve;
+  });
+  const result = await harness({
+    awaitReady: false,
+    preferenceAttach: () => pendingPreferences,
+    originalFetch(input) {
+      const url = new URL(typeof input === "string" ? input : input.url,
+        "http://127.0.0.1:43129");
+      assert.equal(
+        url.pathname,
+        "/r/" + "a".repeat(64) + "/native-api/book-meta",
+      );
+      return Promise.resolve(new Response(JSON.stringify({
+        ok: true, page_count: 337, page_w: 612, page_h: 792,
+      }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    },
+  });
+
+  assert.equal(
+    result.context.BWReaderRuntime.nativeLocalRuntime.status().state,
+    "starting",
+  );
+  const response = await result.context.fetch(
+    "/pdf/api/book-meta?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  );
+  assert.deepEqual(await response.json(), {
+    ok: true, page_count: 337, page_w: 612, page_h: 792,
+  });
+
+  releasePreferences();
+  await result.readyPromise;
+  assert.equal(
+    result.context.BWReaderRuntime.nativeLocalRuntime.status().state,
+    "ready",
+  );
 });
 
 test("clean native PDF boot accepts a no-mutation recovery receipt without a full-content digest", async () => {

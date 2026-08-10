@@ -132,6 +132,7 @@ async function loadPdf() {
       const b = document.getElementById('pdf-loading-switch'); if (b) b.style.display = '';
     }
   }, 13000);
+  let deferredNativeCrop = null;
   try {
     if (_imgMode || (window.__PDF_CFG && String(__PDF_CFG.file_rel||'').indexOf('vbook:')===0)) {   // 合并书强制图片模式(v2规格:classic 多文档门面后置)
       // 图片模式(成熟方案):不下载 PDF、不解析整本,只取书元数据建 pdfDoc shim(页数+尺寸),
@@ -199,7 +200,12 @@ async function loadPdf() {
       parseInt(currentPage, 10) || 1
     ));
     document.getElementById('page-total').textContent = '/ ' + (window.__GRP ? window.__GRP.total : pdfDoc.numPages);
-    await loadBookCrop();   // 先拉去边配置(_crop/_cropOn)→ 下面 fit-width scale 才能按可见宽算
+    // App 本地书的像素已经可读，不能为了批注数据库里的裁边偏好挡住
+    // 首屏。开关先从 localStorage 同步恢复；具体裁边值到达后再无闪屏重排。
+    deferredNativeCrop = _NATIVE_LOCAL_PDF ? loadBookCrop() : null;
+    if (!deferredNativeCrop) {
+      await loadBookCrop();
+    }
     // 旋转自动切换排版：开了的话,按当前横/竖屏套用该方向上次存的 {排版+去边开关+双页错位}
     if (typeof _autoOrientOn === 'function' && _autoOrientOn()) {
       const _lay = _loadOrientLayout(_orient());
@@ -239,6 +245,13 @@ async function loadPdf() {
     _attachScrollSaver();   // 滚动时持续保存位置
     requestAnimationFrame(() => window._updateMainOverflowX && window._updateMainOverflowX());   // 初始按内容宽锁横向滚动
     pdfLoadHide();   // 首页已渲染,撤加载层
+    if (deferredNativeCrop) {
+      deferredNativeCrop.then((changed) => {
+        if (changed) _refitToWidth(true);
+      }).catch((error) => {
+        window.dlog?.('本机裁边设置稍后加载失败: ' + (error && error.message), '#ffb454');
+      });
+    }
   } catch (e) {
     window.dlog('❌ getDocument FAILED: ' + e.message, '#ff6b6b');
     pdfLoadHide();
@@ -249,14 +262,17 @@ async function loadPdf() {
 
 // ── 去边阅读模式 ──
 async function loadBookCrop() {
+  const before = JSON.stringify(_crop || {});
+  _cropOn = localStorage.getItem(_cropKey()) === '1';
+  _updateCropBtn();
   try {
     const d = await (await fetch('/pdf/api/book-crop?file=' + encodeURIComponent(FILE_REL))).json();
     if (d && d.ok && d.crop) {
       _crop = {l: +d.crop.l || 0, r: +d.crop.r || 0, t: +d.crop.t || 0, b: +d.crop.b || 0};
     }
   } catch (_) {}
-  _cropOn = localStorage.getItem(_cropKey()) === '1';
   _updateCropBtn();
+  return before !== JSON.stringify(_crop || {});
 }
 function _updateCropBtn() {
   const b = document.getElementById('crop-toggle');

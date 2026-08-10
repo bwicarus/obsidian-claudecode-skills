@@ -566,47 +566,6 @@
     });
   }
 
-  function gateIndexedDB() {
-    function probeStore(store, scope) {
-      var probeId = 'native-idb-gate-' + scope + '-' + randomHex(8);
-      var value = { id: probeId, marker: randomHex(12), at: Date.now() };
-      return store.put('ui-session', value, {
-      mutationId: 'native-idb-put-' + randomHex(8)
-      }).then(function () {
-        return store.get('ui-session', probeId);
-      }).then(function (record) {
-        if (!record || !record.value || record.value.marker !== value.marker) {
-          throw new RuntimeError(
-            scope + ' IndexedDB 写入后无法读回',
-            'BW_LOCAL_STORE_UNAVAILABLE'
-          );
-        }
-        return store.remove('ui-session', probeId, {
-          mutationId: 'native-idb-delete-' + randomHex(8)
-        });
-      }).then(function () {
-        return store.get('ui-session', probeId);
-      }).then(function (record) {
-        if (record !== null) {
-          throw new RuntimeError(
-            scope + ' IndexedDB 删除后记录仍可见',
-            'BW_LOCAL_STORE_UNAVAILABLE'
-          );
-        }
-        return true;
-      });
-    }
-    return probeStore(stores.document, '文档').then(function () {
-      return probeStore(stores.device, '设备');
-    }).catch(function (error) {
-      if (error && error.code === 'BW_LOCAL_STORE_UNAVAILABLE') throw error;
-      throw new RuntimeError(
-        '本机 IndexedDB 不可用：' + String(error && error.message || error),
-        'BW_LOCAL_STORE_UNAVAILABLE'
-      );
-    });
-  }
-
   function attachPreferenceStore() {
     var module = required('preferenceStore', 'createPreferenceStore');
     var registry = required('dataRegistry', 'settingMigrations');
@@ -8893,8 +8852,30 @@
     return originalFetch(input, init);
   }
 
+  // Book pixels and native text already live behind the App's capability URL.
+  // They must remain readable while IndexedDB-backed annotations/preferences
+  // are opening or recovering.  Keep this list intentionally small: every
+  // route here is read-only and its handler does not touch stores/router.
+  var NATIVE_DOCUMENT_FAST_READS = new Set([
+    '/pdf/api/book-meta',
+    '/pdf/api/page-image',
+    '/pdf/api/page-chars',
+    '/pdf/api/page-text-status',
+    '/pdf/api/search'
+  ]);
+
+  function nativeDocumentFastFetch(input, init) {
+    var url = urlOf(input);
+    var method = methodOf(input, init);
+    if (!url || url.origin !== root.location.origin || method !== 'GET' ||
+        !NATIVE_DOCUMENT_FAST_READS.has(url.pathname)) return null;
+    return localFetch(input, init);
+  }
+
   function installFetchBridge() {
     root.fetch = function (input, init) {
+      var fast = nativeDocumentFastFetch(input, init);
+      if (fast) return fast;
       return bootPromise.then(function () { return localFetch(input, init); });
     };
     if (root.navigator) {
@@ -8990,8 +8971,9 @@
 
   // The shell deliberately loads this bootstrap before the legacy Reader
   // scripts. Its storage dependencies are later synchronous scripts, so the
-  // real boot begins only after parsing completes. Fetch is gated immediately:
-  // Reader requests cannot race ahead of the IndexedDB write/read/delete test.
+  // storage boot begins only after parsing completes. The immutable native
+  // document surface is classified now, allowing its bounded read-only routes
+  // to paint the book without waiting for annotation storage.
   var resolveBoot;
   var rejectBoot;
   var bootPromise = new Promise(function (resolve, reject) {
@@ -8999,18 +8981,25 @@
     rejectBoot = reject;
   });
   root.__BW_READER_RUNTIME__ = api;
+  try {
+    nativeInterfaceManifest = nativeInterfaceManifestFromRoot();
+    nativeInterfaceSurface = nativeInterfacePageSurface();
+  } catch (error) {
+    blockingFailure(error);
+    rejectBoot(error);
+  }
   installFetchBridge();
 
   function beginBoot() {
     if (bootState !== 'starting') return;
     try {
-      if (typeof root.dlog === 'function') root.dlog('本机启动:检查 IndexedDB');
-      nativeInterfaceManifest = nativeInterfaceManifestFromRoot();
-      nativeInterfaceSurface = nativeInterfacePageSurface();
+      if (typeof root.dlog === 'function') root.dlog('本机启动:连接本地状态');
       stores = createStores();
       router = createRouter(stores);
-      gateIndexedDB().then(function () {
-        if (typeof root.dlog === 'function') root.dlog('本机启动:IndexedDB 已就绪');
+      // Real state reads below are the readiness proof. A destructive
+      // write/read/delete probe on every book switch duplicated real work and
+      // could itself queue behind the page being replaced.
+      Promise.resolve().then(function () {
         return recoverNativePDFMutationOnBoot();
       }).then(function () {
         if (typeof root.dlog === 'function') root.dlog('本机启动:PDF 恢复检查已完成');
