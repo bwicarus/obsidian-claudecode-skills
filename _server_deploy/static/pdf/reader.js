@@ -98,9 +98,11 @@ localStorage.setItem = function (k, v) {
 };
 // cache buster：避开浏览器/代理的 mime 缓存（之前 nginx 错把 .mjs 当 octet-stream，已修但缓存还在）
 const PDFJS_V = '20260526a';
-// 图片模式(成熟方案:服务端按页出图,只取看到的页,不下载整本 PDF、且不加载 PDF.js 库)。默认开;localStorage 关作安全阀。
+// 图片模式(成熟方案:按页出图,只取看到的页,不下载整本 PDF、且不加载 PDF.js 库)。
+// App 本机 PDF 的页像素由设备端 PDFKit 提供；Web DocumentHost 继续负责叠层与交互。
+// 线上 Reader 默认开，仍可用 localStorage 安全阀关闭。
 let _imgMode = window.__BW_NATIVE_LOCAL_READER__ === true
-  ? false
+  ? true
   : (() => { try { return localStorage.getItem('pdf-img-mode') !== '0'; } catch (_) { return true; } })();
 let pdfjsLib;
 if (!_imgMode) {   // 仅经典(PDF.js canvas)模式才下载 2.8MB 库;图片模式跳过 → 省库下载 + 那 5 秒 import 等待
@@ -527,6 +529,7 @@ async function loadPdf() {
       const b = document.getElementById('pdf-loading-switch'); if (b) b.style.display = '';
     }
   }, 13000);
+  let deferredNativeCrop = null;
   try {
     if (_imgMode || (window.__PDF_CFG && String(__PDF_CFG.file_rel||'').indexOf('vbook:')===0)) {   // 合并书强制图片模式(v2规格:classic 多文档门面后置)
       // 图片模式(成熟方案):不下载 PDF、不解析整本,只取书元数据建 pdfDoc shim(页数+尺寸),
@@ -594,7 +597,12 @@ async function loadPdf() {
       parseInt(currentPage, 10) || 1
     ));
     document.getElementById('page-total').textContent = '/ ' + (window.__GRP ? window.__GRP.total : pdfDoc.numPages);
-    await loadBookCrop();   // 先拉去边配置(_crop/_cropOn)→ 下面 fit-width scale 才能按可见宽算
+    // App 本地书的像素已经可读，不能为了批注数据库里的裁边偏好挡住
+    // 首屏。开关先从 localStorage 同步恢复；具体裁边值到达后再无闪屏重排。
+    deferredNativeCrop = _NATIVE_LOCAL_PDF ? loadBookCrop() : null;
+    if (!deferredNativeCrop) {
+      await loadBookCrop();
+    }
     // 旋转自动切换排版：开了的话,按当前横/竖屏套用该方向上次存的 {排版+去边开关+双页错位}
     if (typeof _autoOrientOn === 'function' && _autoOrientOn()) {
       const _lay = _loadOrientLayout(_orient());
@@ -634,6 +642,13 @@ async function loadPdf() {
     _attachScrollSaver();   // 滚动时持续保存位置
     requestAnimationFrame(() => window._updateMainOverflowX && window._updateMainOverflowX());   // 初始按内容宽锁横向滚动
     pdfLoadHide();   // 首页已渲染,撤加载层
+    if (deferredNativeCrop) {
+      deferredNativeCrop.then((changed) => {
+        if (changed) _refitToWidth(true);
+      }).catch((error) => {
+        window.dlog?.('本机裁边设置稍后加载失败: ' + (error && error.message), '#ffb454');
+      });
+    }
   } catch (e) {
     window.dlog('❌ getDocument FAILED: ' + e.message, '#ff6b6b');
     pdfLoadHide();
@@ -644,14 +659,17 @@ async function loadPdf() {
 
 // ── 去边阅读模式 ──
 async function loadBookCrop() {
+  const before = JSON.stringify(_crop || {});
+  _cropOn = localStorage.getItem(_cropKey()) === '1';
+  _updateCropBtn();
   try {
     const d = await (await fetch('/pdf/api/book-crop?file=' + encodeURIComponent(FILE_REL))).json();
     if (d && d.ok && d.crop) {
       _crop = {l: +d.crop.l || 0, r: +d.crop.r || 0, t: +d.crop.t || 0, b: +d.crop.b || 0};
     }
   } catch (_) {}
-  _cropOn = localStorage.getItem(_cropKey()) === '1';
   _updateCropBtn();
+  return before !== JSON.stringify(_crop || {});
 }
 function _updateCropBtn() {
   const b = document.getElementById('crop-toggle');
@@ -1361,8 +1379,8 @@ if (document.readyState !== 'loading') _setupPageScrub();
 else window.addEventListener('DOMContentLoaded', _setupPageScrub);
 window.zoomChange = async (delta) => {
   scale = Math.max(_ZOOM_MIN, Math.min(_scaleMax, scale + delta));
-  // +/- 缩放跟双指缩放(_applyZoom)一致:三模式都原地重排(单页=唯一 wrap),原地失败才按模式重建
-  if (!(await _rescaleContinuousInPlace())) { if (readMode === 'single') await renderPage(currentPage); else await setupContinuousMode(); }
+  // +/- 缩放跟双指缩放(_applyZoom)一致:先更新全书廉价 CSS 几何，只高清化视口/邻页。
+  if (!(await _rescaleContinuousInPlace({ rasterScope: 'visible-near' }))) { if (readMode === 'single') await renderPage(currentPage); else await setupContinuousMode(); }
 };
 // 宽适应：按 #main 可用宽度重算 scale（取消 ＋/－ 或双指缩放，回到一页刚好铺满宽度）
 window.fitWidth = async () => { window._atFitWidth = true; await _refitToWidth(true); window._rememberOrientLayout?.(); };   // 点「适应」= 回到宽度适应态(旋转保持适应);也记进当前方向
@@ -1998,8 +2016,10 @@ async function _applyZoom(newScale, focal) {
     scale = newScale;
     _lastFitWidth = _mainContentWidth();   // 占住 fit 宽，避免 ResizeObserver 把 scale 拉回自适应
     window._atFitWidth = false;            // 手动缩放 → 离开宽度适应态(旋转不再强制适应,还原各方向记忆)
-    // 统一:三模式都走 wrap 原地重标尺(单页=唯一 wrap,跟连续同一套 CSS-zoom 瞬时缩放 + 后台重栅格化);失败按模式重建
-    if (!(await _rescaleContinuousInPlace())) { if (readMode === 'single') await renderPage(currentPage); else await setupContinuousMode(); }
+    // 统一:三模式都走 wrap 原地重标尺(单页=唯一 wrap,跟连续同一套 CSS-zoom 瞬时缩放 + 后台重栅格化)。
+    // 只立即高清化视口和邻页；远页保留正确 CSS 几何，进入 IO 预取区时再重绘。大书不再一次缩放同时
+    // 启动所有已加载页的 PDF.js canvas/text-layer 工作，避免 iPad 主线程与 GPU 瞬时过载。
+    if (!(await _rescaleContinuousInPlace({ rasterScope: 'visible-near' }))) { if (readMode === 'single') await renderPage(currentPage); else await setupContinuousMode(); }
     requestAnimationFrame(() => {
       if (focal && focal.s0 > 0) {
         const mr = main.getBoundingClientRect();
@@ -2058,8 +2078,21 @@ function _setupPinchZoom() {
         cx, cy,
         anchor: _focalAnchor(cx, cy),   // 焦点页锚(布局无关);缩放不跳
       };
-      const pc = document.getElementById('page-container');
-      pc.style.transformOrigin = _pinch.fx + 'px ' + _pinch.fy + 'px';   // 整个手势固定不变 → 焦点视觉锁定
+      const anchorWrap = _pinch.anchor && _pinch.anchor.pn != null
+        ? document.querySelector('.page-wrap[data-page-num="' + _pinch.anchor.pn + '"]')
+        : null;
+      // WebKit 对整本 page-container 做 transform 时，会尝试把数百页提升成一个巨型合成层。
+      // 手势预览只提升当前页（双页模式提升当前 row）；松手后的真实布局仍由 _applyZoom 一次提交。
+      const previewNode = anchorWrap
+        ? ((readMode === 'spread' && anchorWrap.closest('.spread-row')) || anchorWrap)
+        : null;
+      if (previewNode) {
+        const pr = previewNode.getBoundingClientRect();
+        previewNode.style.transformOrigin = (cx - pr.left) + 'px ' + (cy - pr.top) + 'px';
+        previewNode.style.willChange = 'transform';
+      }
+      _pinch.previewNode = previewNode;
+      _pinch.previewRAF = 0;
       e.preventDefault();
     }
   }, { passive: false });
@@ -2069,15 +2102,26 @@ function _setupPinchZoom() {
       const [a, b] = e.touches;
       const d = Math.hypot(a.clientX - b.clientX, a.clientY - b.clientY);
       _pinch.target = Math.max(_ZOOM_MIN, Math.min(_scaleMax, _pinch.s0 * (d / _pinch.d0)));
-      // 实时预览:只改 scale(origin 起始已定),焦点点视觉不动;松手后按新倍率重渲染→清晰
-      document.getElementById('page-container').style.transform = 'scale(' + (_pinch.target / _pinch.s0) + ')';
+      // 每帧最多提交一次 compositor 更新；高频 touchmove 不再反复写样式。
+      const p = _pinch;
+      if (p.previewNode && !p.previewRAF) {
+        p.previewRAF = requestAnimationFrame(() => {
+          p.previewRAF = 0;
+          if (_pinch !== p || !p.previewNode) return;
+          p.previewNode.style.transform = 'scale(' + (p.target / p.s0) + ')';
+        });
+      }
     }
   }, { passive: false });
   const endPinch = () => {
     if (!_pinch) return;
     const p = _pinch; _pinch = null;
-    const pc = document.getElementById('page-container');
-    pc.style.transform = ''; pc.style.transformOrigin = '';
+    if (p.previewRAF) cancelAnimationFrame(p.previewRAF);
+    if (p.previewNode) {
+      p.previewNode.style.transform = '';
+      p.previewNode.style.transformOrigin = '';
+      p.previewNode.style.willChange = '';
+    }
     if (Math.abs(p.target - scale) > 0.01) {
       // 焦点保持:把起始焦点内容点放回起始屏幕位置(cx,cy),缩放不跳
       _applyZoom(p.target, { fx: p.fx, fy: p.fy, cx: p.cx, cy: p.cy, s0: p.s0, anchor: p.anchor });
@@ -2277,8 +2321,8 @@ window._auditScales = function (tag) {
 //      布局即刻正确(focal 复位/滚动读到的 offsetHeight 立即准)、无白闪、不 snap 回旧大小;暂时由旧栅格放缩→略软。
 //   ② 后台(不 await):并发重栅格化到新 scale 高清图,各自 decode-first 换入(缩小走缓存秒回;放大并发一次 fetch ≈300ms)。
 //      重入由 _renderPageImg 的 __imgGen 守卫(最后发起的赢),所以期间用户再捏合也安全。
-// options.rasterScope==='visible-near' 仅供侧栏稳定提交：所有页仍同步得到正确 CSS 几何，只有视口/近邻
-// 已加载页立即高清化；远页标成待 IO 清晰化。用户主动缩放不传 options，保留原来的全量一致性语义。
+// options.rasterScope==='visible-near' 供侧栏稳定提交和用户缩放：所有页仍同步得到正确 CSS 几何，只有视口/近邻
+// 已加载页立即高清化；远页标成待 IO 清晰化。无 scope 仅保留给确实需要马上重绘全部已加载页的内部调用。
 // 返回 false(没建过列表 / 结构不符)→ 调用方回退 setupContinuousMode。global scale 已由调用方设好。
 async function _rescaleContinuousInPlace(options) {
   const container = document.getElementById('page-container');
@@ -2655,10 +2699,11 @@ function _selectionUsesBlockFilter(source, revision, characterGeometry) {
   // Native embedded text and ordinary Pi OCR already have a continuous
   // reading order. Applying the manga block graph to them punches holes in a
   // drag range whenever PDF items/words happen to carry different bk values.
-  if (src === 'embedded' || rev.startsWith('embedded-')) return false;
-  if (src === 'pi') {
-    if (rev.startsWith('pi-manga/')) return true;
-    if (rev.startsWith('pi-vision/')) return false;
+  if (src === 'embedded' || rev.startsWith('embedded-')
+      || rev.includes('pdfkit-embedded-text/')) return false;
+  if (src === 'pi' || src === 'pc') {
+    if (rev.startsWith(src + '-manga/')) return true;
+    if (rev.startsWith(src + '-vision/')) return false;
     // Compatibility with app builds whose revision was an opaque digest.
     if (geometry === 'exact') return false;
     if (geometry === 'estimated') return true;
@@ -2760,7 +2805,12 @@ async function loadCharsAndBindLayer(num, wrap, viewport, _retry) {
   wrap.__charBoxes = charBoxes;
   wrap.__charsBaseW = wrap.classList.contains('crop-on') ? (parseFloat(wrap.style.getPropertyValue('--full-w')) || wrap.clientWidth || 0) : (wrap.clientWidth || 0);   // #51:建层整页布局宽基准(去边=整页 --full-w,charBox 是整页坐标;非去边=clientWidth);重渲后按 char-layer 实时 BCR/baseW 换算
   try { window.__applyPhraseMergesLocal && window.__applyPhraseMergesLocal(wrap); } catch (_) {}   // 本地词组合并(收藏集驱动,教义:本地算)
-  window.dlog?.('chars: ' + charBoxes.length + ' on page ' + num);
+  const textLayerIdentity = String(d.source || 'unknown')
+    + (d.revision ? '/' + String(d.revision) : '');
+  window.dlog?.(
+    'chars: ' + charBoxes.length + ' on page ' + num
+      + ' [' + textLayerIdentity + ']'
+  );
   // 创建 char-layer（透明覆盖整个 page-wrap）→ 绑定后**选词此刻即可用**(不等 overlay)
   const cl = ensurePageLayer(wrap, 'char-layer');
   wrap.__charLayer = cl;
@@ -7887,7 +7937,6 @@ async function _hlUpdate(h, pw, patch) {
   } catch (e) { alert('保存异常：' + e.message); }
 }
 async function _hlDelete(h, pw) {
-  if (!confirm('删除这条高亮？')) return false;   // 取消 → 返回 false，让 rc-highlight 编辑浮层保持打开(M6)
   try {
     const r = await fetch('/pdf/api/highlights', {
       method: 'DELETE', headers: {'Content-Type':'application/json'},
