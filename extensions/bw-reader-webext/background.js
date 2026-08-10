@@ -1,7 +1,7 @@
 // 扩展后台:唯一接触 token 和 Pi API 的地方。网页脚本永远拿不到 token,也不能传任意 URL(只认固定操作名)。
 // ⚠ ORIGIN 指向**当前主力的 Pi**(Tailscale,iPad 走 Tailscale 访问,和现有 QA browser 一样);
 //   不是暂停的 VPS bwicarus.space(代码停在 2026-05-28)。要换服务器只改这一行 + manifest host_permissions。
-globalThis.__BW_READER_BACKGROUND_BUILD_VERSION = "0.2.76";
+globalThis.__BW_READER_BACKGROUND_BUILD_VERSION = "0.2.78";
 if (typeof importScripts === "function") {
   importScripts(
     "vendor/reader-runtime-account-context.js",
@@ -213,7 +213,9 @@ const BW_FETCH_ROUTE_METHODS = (() => {
     "/api/assistant/log",
     "/api/assistant/prewarm",
     "/api/assistant/route-text",
+    "/api/assistant/rtc-bind",
     "/api/assistant/rtc-call",
+    "/api/assistant/rtc-client-secret",
     "/api/assistant/rtc-hangup",
     "/api/assistant/rtc-session",
     "/api/assistant/rtc-usage",
@@ -254,10 +256,23 @@ function checkedBwFetchRequest(value, init) {
   let url;
   try { url = new URL(value); } catch (_) { url = null; }
   const method = String(init?.method || "GET").toUpperCase();
-  if (!url || url.origin !== ORIGIN || url.username || url.password) {
+  const directOpenAI = !!url &&
+    url.href === "https://api.openai.com/v1/realtime/calls" &&
+    !url.username && !url.password && !url.search && !url.hash;
+  if (!url || (url.origin !== ORIGIN && !directOpenAI) ||
+      url.username || url.password) {
     throw Object.assign(new Error("blocked: origin not allowed"), {
       code: "BW_FETCH_ORIGIN"
     });
+  }
+  if (directOpenAI) {
+    if (method !== "POST") {
+      throw Object.assign(new Error("blocked: network operation not allowed"), {
+        code: "BW_FETCH_OPERATION",
+        details: { path: url.pathname, method }
+      });
+    }
+    return { url, method, directOpenAI: true };
   }
   let methods = BW_FETCH_ROUTE_METHODS.get(url.pathname);
   if (!methods) {
@@ -281,6 +296,30 @@ function normalizedBwFetchInit(checked, value) {
     ? Object.assign({}, value)
     : {};
   init.method = checked.method;
+  if (checked.directOpenAI) {
+    const headers = new Headers(init.headers || {});
+    const authorization = headers.get("Authorization") || "";
+    const contentType = (headers.get("Content-Type") || "").toLowerCase();
+    if (
+      typeof init.body !== "string" ||
+      init.body.length < 32 ||
+      init.body.length > 256 * 1024 ||
+      !/^Bearer ek_[A-Za-z0-9_-]{8,4096}$/.test(authorization) ||
+      contentType !== "application/sdp"
+    ) {
+      throw Object.assign(new Error("blocked: invalid OpenAI Realtime call"), {
+        code: "BW_FETCH_BODY"
+      });
+    }
+    return {
+      method: "POST",
+      headers: {
+        "Authorization": authorization,
+        "Content-Type": "application/sdp"
+      },
+      body: init.body
+    };
+  }
   const hasBinary = Object.prototype.hasOwnProperty.call(init, "bodyB64");
   if (!hasBinary) {
     if (init.body != null && typeof init.body !== "string") {
@@ -6230,7 +6269,9 @@ async function handleMessage(message, captured) {
 }
 
 // ── bw-fetch 长连 port:content 门面(facade.js __bwReaderFetch)的服务端 ──
-// rc-* 共享层的所有请求(含 SSE 流式)经此转发:补 Bearer、只放行本服务 ORIGIN、流式分片回传。
+// rc-* 共享层的所有请求(含 SSE 流式)经此转发：Pi 请求补设备 Bearer；
+// OpenAI 只放行一个精确 Realtime 建连端点和本次服务端签发的 ek_ 临时凭证。
+// 两类响应都按原始流分片回传，页面永远拿不到长期项目密钥。
 chrome.runtime.onConnect.addListener((port) => {
   if (port.name !== "bw-fetch") return;
   if (!isTopLevelOwnContentSender(port.sender)) {
@@ -6281,8 +6322,9 @@ chrome.runtime.onConnect.addListener((port) => {
       } catch (_) {}
       return;
     }
+    let checked;
     try {
-      const checked = checkedBwFetchRequest(url, init);
+      checked = checkedBwFetchRequest(url, init);
       init = normalizedBwFetchInit(checked, init);
     } catch (error) {
       try {
@@ -6382,7 +6424,9 @@ chrome.runtime.onConnect.addListener((port) => {
         return;
       }
       const headers = new Headers((init && init.headers) || {});
-      headers.set("Authorization", `Bearer ${token}`);
+      if (!checked.directOpenAI) {
+        headers.set("Authorization", `Bearer ${token}`);
+      }
       if (trTexts && trBackend === "ai" && trMode === "session") {
         // 强制覆盖，页面无法自选、复用或跨导航猜测会话身份。
         headers.set("X-BW-Translate-Document", webTranslateDocumentKey);

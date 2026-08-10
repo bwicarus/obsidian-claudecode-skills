@@ -303,8 +303,13 @@ def audit_manifest(audit: Audit) -> str:
         )
     if manifest.get("optional_permissions"):
         policy_errors.append("不得声明 optional_permissions")
-    if manifest.get("host_permissions") != [f"{ACTIVE_PWA_ORIGIN}/*"]:
-        policy_errors.append("host_permissions 必须只覆盖当前 PWA 源")
+    if manifest.get("host_permissions") != [
+        f"{ACTIVE_PWA_ORIGIN}/*",
+        "https://api.openai.com/*",
+    ]:
+        policy_errors.append(
+            "host_permissions 必须只覆盖当前 PWA 源与 OpenAI Realtime"
+        )
     if manifest.get("optional_host_permissions"):
         policy_errors.append("不得声明 optional_host_permissions")
 

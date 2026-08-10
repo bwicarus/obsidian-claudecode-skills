@@ -369,7 +369,7 @@ test("电脑按钮按宿主分流，普通电话保持独立", () => {
   const connect = voicecall.slice(connectStart, connectEnd);
   assert.doesNotMatch(connect, /_computerVoiceStart\(|startFromUserGesture/);
   assert.match(connect, /if \(_computerVoiceStarting \|\| _computerVoiceActive\(\)\)[\s\S]*_stopComputerVoiceOnly\('ordinary-voice-start'\)/);
-  assert.match(connect, /if \(engine === 'openai_rtc'\) rtcStart\(opts\);\s*else start\(opts\)/);
+  assert.match(connect, /if \(engine === 'openai_rtc' \|\| engine === 'openai'\) rtcStart\(opts\);\s*else start\(opts\)/);
 
   const teardownStart = voicecall.indexOf(
     "function teardown(closeBox, preserveComputerGesture)",

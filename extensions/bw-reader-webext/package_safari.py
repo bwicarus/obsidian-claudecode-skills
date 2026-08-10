@@ -78,6 +78,7 @@ ACTIVE_ORIGIN = "https://bwicarus.taile44d0c.ts.net/"
 # reach the extension did not already have; it only makes the existing reach
 # usable by the one request that needs it.
 BRIDGE_ORIGIN = "https://bwicarus-2.taile44d0c.ts.net/"
+OPENAI_REALTIME_ORIGIN = "https://api.openai.com/"
 TRUSTED_PWA_MATCHES = {
     ACTIVE_ORIGIN + "pdf/view",
     ACTIVE_ORIGIN + "pdf/view?*",
@@ -143,7 +144,11 @@ def safari_manifest(*, compat: bool = False) -> dict:
             "scripting",
         ]
     )
-    manifest["host_permissions"] = [ACTIVE_ORIGIN + "*", BRIDGE_ORIGIN + "*"]
+    manifest["host_permissions"] = [
+        ACTIVE_ORIGIN + "*",
+        BRIDGE_ORIGIN + "*",
+        OPENAI_REALTIME_ORIGIN + "*",
+    ]
     manifest["background"] = (
         {"scripts": list(BACKGROUND_SCRIPTS), "persistent": False}
         if compat
@@ -224,10 +229,11 @@ def validate(manifest: dict, *, compat: bool = False) -> None:
     if manifest.get("host_permissions") != [
         ACTIVE_ORIGIN + "*",
         BRIDGE_ORIGIN + "*",
+        OPENAI_REALTIME_ORIGIN + "*",
     ]:
         raise SystemExit(
-            "Safari host permissions must remain exactly the active Pi and the "
-            "Windows bridge"
+            "Safari host permissions must remain exactly the active Pi, the "
+            "Windows bridge, and OpenAI Realtime"
         )
     if manifest.get("web_accessible_resources") != INLINE_COMPUTER_VOICE_RESOURCES:
         raise SystemExit(

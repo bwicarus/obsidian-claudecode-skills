@@ -9938,21 +9938,89 @@ _RTC_KEY_PATH = Path("~/.config/openai-realtime.json").expanduser()
 _VOICE_TICKET_KEY = Path("/home/bwicarus/claude/state/voice-ticket.key")
 
 
+def _voice_ticket_secret() -> bytes:
+    if not _VOICE_TICKET_KEY.exists():
+        _VOICE_TICKET_KEY.parent.mkdir(parents=True, exist_ok=True)
+        _VOICE_TICKET_KEY.write_text(os.urandom(32).hex(), "utf-8")
+        try:
+            _VOICE_TICKET_KEY.chmod(0o600)
+        except Exception:
+            pass
+    return _VOICE_TICKET_KEY.read_text("utf-8").strip().encode()
+
+
 def _voice_ticket(uid, call_id: str) -> str:
     try:
         import hmac as _hm
-        if not _VOICE_TICKET_KEY.exists():
-            _VOICE_TICKET_KEY.parent.mkdir(parents=True, exist_ok=True)
-            _VOICE_TICKET_KEY.write_text(os.urandom(32).hex(), "utf-8")
-            try:
-                _VOICE_TICKET_KEY.chmod(0o600)
-            except Exception:
-                pass
-        sec = _VOICE_TICKET_KEY.read_text("utf-8").strip().encode()
         import hashlib as _hl2
-        return _hm.new(sec, f"{uid}|{call_id}".encode(), _hl2.sha256).hexdigest()[:32]
+        return _hm.new(
+            _voice_ticket_secret(),
+            f"{uid}|{call_id}".encode(),
+            _hl2.sha256,
+        ).hexdigest()[:32]
     except Exception:
         return ""
+
+
+def _rtc_bind_grant(uid, *, lifetime_seconds: int = 180) -> str:
+    """Sign a short-lived grant used only to bind one direct WebRTC call ID.
+
+    The OpenAI client secret is never reused as our control-channel identity.
+    This grant carries no API credential and cannot be forged without the
+    server-only voice ticket secret.
+    """
+    import base64 as _b64
+    import hmac as _hm
+    import secrets as _secrets
+
+    exp = int(time.time()) + max(30, min(int(lifetime_seconds), 300))
+    raw = f"{uid}\n{exp}\n{_secrets.token_hex(16)}".encode()
+    encoded = _b64.urlsafe_b64encode(raw).decode().rstrip("=")
+    sig = _hm.new(
+        _voice_ticket_secret(),
+        ("rtc-bind|" + encoded).encode(),
+        hashlib.sha256,
+    ).hexdigest()[:32]
+    return f"{encoded}.{sig}"
+
+
+def _verify_rtc_bind_grant(uid, grant: str) -> bool:
+    import base64 as _b64
+    import hmac as _hm
+
+    try:
+        if not isinstance(grant, str) or not (20 <= len(grant) <= 512):
+            return False
+        encoded, supplied = grant.split(".", 1)
+        expected = _hm.new(
+            _voice_ticket_secret(),
+            ("rtc-bind|" + encoded).encode(),
+            hashlib.sha256,
+        ).hexdigest()[:32]
+        if not _hm.compare_digest(supplied, expected):
+            return False
+        raw = _b64.urlsafe_b64decode(encoded + "=" * (-len(encoded) % 4))
+        grant_uid, expires, nonce = raw.decode("utf-8").split("\n")
+        exp = int(expires)
+        now = int(time.time())
+        return (
+            grant_uid == str(uid)
+            and now <= exp <= now + 300
+            and re.fullmatch(r"[a-f0-9]{32}", nonce) is not None
+        )
+    except Exception:
+        return False
+
+
+def _openai_realtime_key() -> str:
+    try:
+        return json.loads(_RTC_KEY_PATH.read_text("utf-8")).get("api_key") or ""
+    except Exception:
+        return ""
+
+
+def _openai_safety_identifier(uid) -> str:
+    return hashlib.sha256(f"bw-{uid}".encode()).hexdigest()[:32]
 
 
 def _rtc_cfg() -> dict:
@@ -10146,6 +10214,90 @@ def assistant_rtc_session():
                     "compact_tokens": _cth})
 
 
+@bp.route("/rtc-client-secret", methods=["POST"])
+def assistant_rtc_client_secret():
+    """Mint a short-lived OpenAI credential for App/extension WebRTC.
+
+    The installed client sends media and SDP directly to OpenAI. This endpoint
+    keeps the long-lived project key, model/budget policy and complete Reader
+    tool/context configuration on the authenticated server boundary.
+    """
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    _bok, _bspent = _voice_budget_gate()
+    if not _bok:
+        return jsonify({"ok": False, "error":
+                        f"今日语音预算已用完(${_bspent:.2f})——设置里调 rt_budget_usd 或明天再聊"}), 429
+    body = request.get_json(silent=True) or {}
+    file_rel = (body.get("file") or "").strip()
+    try:
+        page = int(body.get("page") or 0)
+    except Exception:
+        page = 0
+    uid = session["user_id"]
+    sess, _cth, _rt_image = _build_rtc_session(uid, file_rel, page)
+    key = _openai_realtime_key()
+    if not key:
+        return jsonify({"ok": False, "error":
+                        "缺 OpenAI 凭证(~/.config/openai-realtime.json)"}), 400
+    import requests as _rq
+    try:
+        r = _rq.post(
+            "https://api.openai.com/v1/realtime/client_secrets",
+            headers={
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+                "OpenAI-Safety-Identifier": _openai_safety_identifier(uid),
+            },
+            json={
+                "expires_after": {"anchor": "created_at", "seconds": 90},
+                "session": sess,
+            },
+            timeout=25,
+        )
+        if r.status_code >= 300:
+            return jsonify({"ok": False,
+                            "error": f"OpenAI {r.status_code}: {r.text[:300]}"}), 502
+        payload = r.json()
+        secret = payload.get("value") or ""
+        expires_at = int(payload.get("expires_at") or 0)
+        if (not secret.startswith("ek_") or len(secret) > 4096
+                or (expires_at and expires_at <= int(time.time()))):
+            return jsonify({"ok": False, "error": "OpenAI 返回的临时凭证无效"}), 502
+        result = jsonify({
+            "ok": True,
+            "client_secret": secret,
+            "expires_at": expires_at,
+            "bind_grant": _rtc_bind_grant(uid),
+            "model": sess["model"],
+            "rt_image": _rt_image,
+            "compact_tokens": _cth,
+        })
+        result.headers["Cache-Control"] = "no-store"
+        return result
+    except Exception as ex:
+        return jsonify({"ok": False, "error": str(ex)[:200]}), 502
+
+
+@bp.route("/rtc-bind", methods=["POST"])
+def assistant_rtc_bind():
+    """Bind OpenAI's direct-call ID to the authenticated Reader control WS."""
+    if not _logged_in():
+        return jsonify({"ok": False}), 401
+    body = request.get_json(silent=True) or {}
+    call_id = (body.get("call_id") or "").strip()
+    grant = body.get("bind_grant") or ""
+    uid = session["user_id"]
+    if (re.fullmatch(r"rtc_[A-Za-z0-9_-]{8,160}", call_id) is None
+            or not _verify_rtc_bind_grant(uid, grant)):
+        return jsonify({"ok": False, "error": "RTC 直连绑定无效或已过期"}), 403
+    ticket = _voice_ticket(uid, call_id)
+    if not ticket:
+        return jsonify({"ok": False, "error": "RTC 控制票据签发失败"}), 500
+    return jsonify({"ok": True, "call_id": call_id,
+                    "uid": str(uid), "ticket": ticket})
+
+
 @bp.route("/rtc-call", methods=["POST"])
 def assistant_rtc_call():
     """SDP 代理:浏览器 offer → OpenAI POST /v1/realtime/calls(标准 key 只在服务端)→ answer SDP 回浏览器。
@@ -10169,18 +10321,14 @@ def assistant_rtc_call():
         page = 0
     sess, _cth, _rt_image = _build_rtc_session(uid, file_rel, page)   # 忽略 body["session"],服务端自建
     model = (sess.get("model") or "gpt-realtime-2.1-mini").strip()
-    try:
-        key = json.loads(_RTC_KEY_PATH.read_text("utf-8")).get("api_key") or ""
-    except Exception:
-        key = ""
+    key = _openai_realtime_key()
     if not key:
         return jsonify({"ok": False, "error": "缺 OpenAI 凭证(~/.config/openai-realtime.json)"}), 400
     import requests as _rq
     try:
-        import hashlib as _hl
-        _sid = _hl.sha256(f"bw-{session['user_id']}".encode()).hexdigest()[:32]   # ㊶ 指南§4.1:稳定且隐私保护的用户哈希
         r = _rq.post(f"https://api.openai.com/v1/realtime/calls?model={model}",
-                     headers={"Authorization": f"Bearer {key}", "OpenAI-Safety-Identifier": _sid},
+                     headers={"Authorization": f"Bearer {key}",
+                              "OpenAI-Safety-Identifier": _openai_safety_identifier(session["user_id"])},
                      files={"sdp": (None, sdp, "application/sdp"),
                             "session": (None, json.dumps(sess, ensure_ascii=False), "application/json")},
                      timeout=25)
@@ -11267,6 +11415,11 @@ def assistant_voice_config():
         cfg = {}
     if request.method == "POST":
         b = request.get_json(silent=True) or {}
+        # The installed App/extension use OpenAI's direct WebRTC transport.
+        # Treat the retired relay value as a migration alias instead of ever
+        # routing a normal phone-button call back through Pi audio.
+        if b.get("rt_engine") == "openai":
+            b["rt_engine"] = "openai_rtc"
         computer_target = b.get("rt_computer_target")
         if (
             "rt_computer_target" in b
@@ -11293,7 +11446,10 @@ def assistant_voice_config():
             _VOICE_CFG_PATH.write_text(json.dumps(cfg, ensure_ascii=False, indent=1), "utf-8")
         except Exception as ex:
             return jsonify({"ok": False, "error": str(ex)[:120]}), 500
-    return jsonify({"ok": True, "cfg": {k: cfg.get(k) for k in _VOICE_CFG_FIELDS}})
+    public_cfg = {k: cfg.get(k) for k in _VOICE_CFG_FIELDS}
+    if public_cfg.get("rt_engine") == "openai":
+        public_cfg["rt_engine"] = "openai_rtc"
+    return jsonify({"ok": True, "cfg": public_cfg})
 
 
 @bp.route("/creations-brief")

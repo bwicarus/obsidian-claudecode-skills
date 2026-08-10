@@ -44,6 +44,11 @@
 
 当前生产 Reader/PWA 版本：**0.2.76**；当前已发布 Windows 扩展版本：**0.2.72**。
 
+**0.2.78 候选**：App 本机书与浏览器扩展的 `openai_rtc` 普通电话改为服务端签发短期
+`ek_` credential、设备直接连接 OpenAI Realtime calls；长期 key、预算与会话配置仍由 Pi
+持有。Pi `/voice-rt?mode=rtc` 只保留同一 call 的上下文/工具 sideband，页码、可见正文、
+选区、笔迹、截图、工具和重连补投合同不变。完成原子部署与渠道发布前，本段不代表生产事实。
+
 **0.2.76** 已部署 Reader/PWA：原麦克风位置改为电脑图标，
 普通电话按钮继续只负责豆包、GPT 或 Grok；电脑桥状态、上下文同步与
 `legacy-inject` / `snapshot-mcp` 回退开关集中到新的“电脑客户端”设置标签。Windows

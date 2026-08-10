@@ -14,6 +14,7 @@
   if (window.__bwPwaProviderOnly) return;
   if (window.__bwReaderDoc) return;   // 幂等
   const ORIGIN = "https://bwicarus.taile44d0c.ts.net";
+  const OPENAI_REALTIME_CALL_URL = "https://api.openai.com/v1/realtime/calls";
 
   const localStoreCall = (type, key, value) => new Promise((resolve, reject) => {
     chrome.runtime.sendMessage({ type, key, value }, (response) => {
@@ -2007,7 +2008,9 @@
   // rc-* 全部用相对路径(/pdf/api/*、/api/assistant/*…)→ 重写到 Pi ORIGIN;
   // 跨源 + Bearer + SSE 统一走 background 长连 port(content script 的 fetch 受宿主页 CORS 限制,
   // background 有 host_permissions 才能带 Bearer 直连)。流式响应用 ReadableStream 原样重建,
-  // rc-assistant 的 getReader() 打字机 / rid 续传语义不变。非本服务的绝对 URL(如词典音频)走原生 fetch。
+  // rc-assistant 的 getReader() 打字机 / rid 续传语义不变。非本服务的绝对 URL(如词典音频)
+  // 走原生 fetch；唯一例外是 OpenAI Realtime 建连端点，它也必须经过 background 的
+  // 精确 URL/方法/临时密钥围栏。
   // 共享阅读器语音层仍按“同源 /voice-rt”组织；普通网页的同源是宿主网站，
   // 因此由宿主适配层只提供一次服务地址解析，rc-voicecall 继续保持唯一实现。
   // PWA 未提供这个 hook 时仍使用它自己的 location.host。
@@ -2305,7 +2308,9 @@
     init = init || {};
     let u = String(url);
     if (u.startsWith("/")) u = ORIGIN + u;
-    if (!u.startsWith(ORIGIN + "/")) return fetch(url, init);   // 外站资源走原生
+    if (!u.startsWith(ORIGIN + "/") && u !== OPENAI_REALTIME_CALL_URL) {
+      return fetch(url, init);   // 其余外站资源走原生
+    }
     if (init.signal?.aborted) throw new DOMException("aborted", "AbortError");
     const nativeNoteResponse = await nativeLocalNotesFetchInterceptor(u, init);
     if (nativeNoteResponse) return nativeNoteResponse;

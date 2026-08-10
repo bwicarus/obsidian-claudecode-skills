@@ -106,6 +106,10 @@
   不能让不受信书籍样式覆盖 App 的可信 UI。
 - 共享网页组件负责卡片、便签、选区、侧栏和阅读交互；App 本机存储负责它们的数据真值，
   原生层负责 Pencil、语音、后台、文件、分享和系统入口。
+- 普通电话选择 OpenAI Realtime 时，App/扩展只向 Pi 申请短期 client secret，媒体与
+  `oai-events` DataChannel 由设备直连 OpenAI；Pi 仍保留同一 `call_id` 的只控 sideband，负责
+  页码、当前可见内容、选区、笔迹、截图和工具状态。不得因媒体直连删掉 `RC.voiceCtx`、
+  `setPage/syncState/syncInk` 或 `/voice-rt?mode=rtc`，也不得向页面暴露长期项目 key。
 - 联网 AI、翻译或 Pi 同步失败只降级相应网络能力，不能令本机文档或本机修改不可用。
 
 ### PWA 真书

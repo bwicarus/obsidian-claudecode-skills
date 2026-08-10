@@ -114,7 +114,11 @@ test("local renderer uses a stable loopback origin with signed static assets and
   assert.doesNotMatch(LOCAL_SERVER, /connect-src[^"\n]*https:\/\/bwicarus/);
   assert.match(
     LOCAL_SERVER,
-    /private static let realtimeVoiceWebSocketOrigin\s*=\s*"wss:\/\/bwicarus\.taile44d0c\.ts\.net"/,
+    /private static let realtimeControlWebSocketOrigin\s*=\s*"wss:\/\/bwicarus\.taile44d0c\.ts\.net"/,
+  );
+  assert.match(
+    LOCAL_SERVER,
+    /private static let openAIRealtimeOrigin\s*=\s*"https:\/\/api\.openai\.com"/,
   );
   assert.match(LOCAL_SERVER, /Object\.defineProperty\(window,"__bwReaderWsUrl"/);
   assert.match(LOCAL_SERVER, /value==="\/voice-rt"/);
@@ -122,7 +126,7 @@ test("local renderer uses a stable loopback origin with signed static assets and
   assert.match(LOCAL_SERVER, /BW_NATIVE_REALTIME_WS_PATH/);
   assert.match(
     LOCAL_SERVER,
-    /connect-src 'self' [^"\n]*realtimeVoiceWebSocketOrigin[^"\n]*wss:\/\/bwicarus-2\.taile44d0c\.ts\.net/,
+    /connect-src 'self' [^"\n]*openAIRealtimeOrigin[^"\n]*realtimeControlWebSocketOrigin[^"\n]*wss:\/\/bwicarus-2\.taile44d0c\.ts\.net/,
   );
   assert.match(
     WEB_VIEW,

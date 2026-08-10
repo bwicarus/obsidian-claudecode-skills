@@ -287,6 +287,21 @@
       "description": "Route text with a verified current-book identity into the assistant."
     },
     {
+      "path": "/api/assistant/rtc-bind",
+      "match": "exact",
+      "owner": "pi",
+      "methods": [
+        "POST"
+      ],
+      "surfaces": [
+        "epub",
+        "pdf"
+      ],
+      "status": "supported",
+      "remoteBook": null,
+      "description": "Bind one direct OpenAI Realtime call to the authenticated Reader control channel."
+    },
+    {
       "path": "/api/assistant/rtc-call",
       "match": "exact",
       "owner": "pi",
@@ -315,6 +330,36 @@
         "continuation": null
       },
       "description": "Start an assistant real-time call."
+    },
+    {
+      "path": "/api/assistant/rtc-client-secret",
+      "match": "exact",
+      "owner": "pi",
+      "methods": [
+        "POST"
+      ],
+      "surfaces": [
+        "epub",
+        "pdf"
+      ],
+      "status": "supported",
+      "remoteBook": {
+        "mode": "conditional",
+        "scope": "current",
+        "requiredMethods": [],
+        "identities": [
+          {
+            "methods": [
+              "POST"
+            ],
+            "location": "json",
+            "pointer": "/file",
+            "transform": "exact"
+          }
+        ],
+        "continuation": null
+      },
+      "description": "Mint a short-lived OpenAI Realtime client credential using server-owned policy."
     },
     {
       "path": "/api/assistant/rtc-hangup",

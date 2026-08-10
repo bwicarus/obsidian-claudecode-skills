@@ -35,11 +35,14 @@ test("review mode gates every realtime voice entry before transport", () => {
     SOURCE,
     /RC\.assistant\.getMode\(\) === 'review'/
   );
-  assert.ok(
-    rtc.indexOf("_reviewVoiceGate(false)") <
-      rtc.indexOf("fetch('/api/assistant/rtc-session'"),
-    "RTC must stop before session creation"
-  );
+  const rtcGate = rtc.indexOf("_reviewVoiceGate(false)");
+  for (const endpoint of ["/api/assistant/rtc-client-secret", "/api/assistant/rtc-session"]) {
+    const networkStart = rtc.indexOf(endpoint);
+    assert.ok(
+      networkStart < 0 || rtcGate < networkStart,
+      `RTC must stop before ${endpoint}`,
+    );
+  }
   assert.ok(
     start.indexOf("_reviewVoiceGate(false)") <
       start.indexOf("_openWs('/voice-rt'"),

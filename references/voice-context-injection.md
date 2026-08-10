@@ -3,6 +3,18 @@
 > 的对照地图+设计稿。**实施前必读;加任何新注入只走 RC.voiceCtx,严禁直连某条传输。**
 # 语音助手上下文注入统一端口设计稿
 
+## 当前 Realtime 传输边界
+
+- iOS App 本机书与浏览器扩展的普通电话在选择 `openai_rtc` 时，先向已认证的 Pi 端点申请
+  短期 `ek_` client secret，再由设备把 SDP、麦克风和 `oai-events` DataChannel **直接连接**
+  `https://api.openai.com/v1/realtime/calls`；长期项目 key 永远留在 Pi。
+- 直连不等于删除 Pi：`/voice-rt?mode=rtc` 仍是同一个 `call_id` 的控制 sideband，只承载
+  页码、选区、笔迹、截图请求、工具执行、单通话接管和 VAD 真伪裁决，不转发媒体。
+- `RC.voiceCtx` 的 `rtc` transport 仍绑定浏览器自己的 DataChannel；`dc.onopen` 必须先回放历史，
+  再 `flushPending('rtc')`。用户开口边沿必须先 `_requestSyncNow()`，再 `_rtcFlushCtx()`，保证
+  当前视口而非上一帧被注入。重连后仍由 control sideband 清同步指纹并重推状态。
+- PWA 无扩展路径暂保留服务端 SDP 代理作为兼容回退；不能据此把 App/扩展媒体重新绕回 Pi。
+
 ## 一、注入种类 × 路 对照表
 
 路定义:**dc** = WebRTC 前端 data channel(rc-voicecall.js);**relay** = 豆包/openai-WS/grok 服务端(voice_realtime_relay.py);**文字** = 侧栏 send-ctx(rc-assistant.js → assistant.py)。✅=有,➖=设计上不需要,⚠=不对称/实测坑。

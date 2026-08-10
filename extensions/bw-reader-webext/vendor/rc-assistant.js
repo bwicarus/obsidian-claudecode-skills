@@ -379,13 +379,13 @@ if (window.__bwPwaProviderOnly) return;
       // 历史 computer_client 值只属于旧电话复用方案；独立电脑按钮上线后，
       // 普通电话把它按默认豆包显示，用户下次保存时自然覆盖。
       var voiceEngine = c.rt_engine === 'computer_client' ? '' : (c.rt_engine || '');
+      if (voiceEngine === 'openai') voiceEngine = 'openai_rtc';   // 旧值迁移：普通电话恒走官方 WebRTC 直连
       function esc2(x) { var e = document.createElement('div'); e.textContent = String(x == null ? '' : x); return e.innerHTML; }
       // ㉖b:按通话引擎分组渲染——选 GPT 就藏豆包 S2S 专属项、显示 GPT 专属项;朗读/ASR 与引擎无关恒显。
-      var isOA = (voiceEngine === 'openai' || voiceEngine === 'openai_rtc');
+      var isOA = (voiceEngine === 'openai_rtc');
       var H = '<div class="ams-row" style="margin-bottom:7px"><select class="ams-sel" data-k="rt_engine" style="flex:1 1 100%">' +
           '<option value=""' + (!voiceEngine ? ' selected' : '') + '>通话引擎:豆包 S2S(默认)</option>' +
-          '<option value="openai_rtc"' + (voiceEngine === 'openai_rtc' ? ' selected' : '') + '>通话引擎:GPT Realtime(WebRTC·推荐:外放无回声+可随时插话)</option>' +
-          '<option value="openai"' + (voiceEngine === 'openai' ? ' selected' : '') + '>通话引擎:GPT Realtime(WebSocket·外放半双工)</option>' +
+          '<option value="openai_rtc"' + (voiceEngine === 'openai_rtc' ? ' selected' : '') + '>通话引擎:GPT Realtime(WebRTC·App/扩展直连)</option>' +
           '<option value="grok"' + (voiceEngine === 'grok' ? ' selected' : '') + '>通话引擎:Grok Voice(WebSocket·耳机推荐)</option>' +
         '</select></div>';
       if (voiceEngine === 'grok') {   // ── 94 Grok 专属:音色 + 能力边界说明 ──

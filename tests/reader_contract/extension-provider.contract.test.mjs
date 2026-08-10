@@ -1246,7 +1246,10 @@ test("正式 manifest 在所有 http(s) 页面载入完整扩展，并只在四�
     `${ORIGIN}/pdf/view`,
     `${ORIGIN}/pdf/view?*`,
   ];
-  assert.deepEqual(MANIFEST.host_permissions, [`${ORIGIN}/*`]);
+  assert.deepEqual(MANIFEST.host_permissions, [
+    `${ORIGIN}/*`,
+    "https://api.openai.com/*",
+  ]);
   assert.deepEqual(
     [...MANIFEST.permissions].sort(),
     ["alarms", "nativeMessaging", "offscreen", "storage"],
@@ -4964,6 +4967,84 @@ test("普通网页 bw-fetch 使用已验证的持久账户，不依赖仍存活�
   });
   assert.equal(fetchPort.messages.at(-1).code, "BW_FETCH_OPERATION");
   assert.equal(h.state.networkRequests.length, 0);
+});
+
+test("普通网页 Realtime 只把短期 ek_ 凭证送到精确 OpenAI calls 端点", async () => {
+  const directURL = "https://api.openai.com/v1/realtime/calls";
+  const ephemeral = `ek_${"e".repeat(48)}`;
+  let directRequest = null;
+  const h = harness({
+    networkHandler: async (url, init) => {
+      if (url === `${ORIGIN}/api/reader/token-owner`) {
+        return jsonResponse({ ok: true, storage_namespace: NAMESPACE });
+      }
+      if (url === directURL) {
+        directRequest = { url, init };
+        return new Response("v=0\r\ns=BW direct answer\r\n", {
+          status: 201,
+          headers: {
+            "Content-Type": "application/sdp",
+            "Location": "https://api.openai.com/v1/realtime/calls/rtc_testdirect123",
+          },
+        });
+      }
+      throw new Error(`unexpected network request: ${url}`);
+    },
+  });
+  const provider = makePort("/pdf/view");
+  await authorizePort(h, provider);
+  await saveAccountToken(h, provider, "token-a");
+  const fetchPort = makeFetchPort(ordinaryContentSender());
+  h.connect(fetchPort);
+
+  const offer = "v=0\r\n" + "a=ice-ufrag:reader-direct\r\n" + "x".repeat(48);
+  await fetchPort.receive({
+    id: "direct-realtime",
+    url: directURL,
+    init: {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${ephemeral}`,
+        "Content-Type": "application/sdp",
+        "X-Untrusted": "must-be-stripped",
+      },
+      body: offer,
+    },
+  });
+
+  assert.equal(directRequest.url, directURL);
+  assert.equal(directRequest.init.method, "POST");
+  assert.equal(directRequest.init.body, offer);
+  assert.equal(
+    new Headers(directRequest.init.headers).get("Authorization"),
+    `Bearer ${ephemeral}`,
+    "设备 Bearer 不能覆盖 OpenAI 临时凭证",
+  );
+  assert.equal(
+    new Headers(directRequest.init.headers).get("X-Untrusted"),
+    null,
+    "OpenAI 直连只保留协议必需的两个请求头",
+  );
+  const head = fetchPort.messages.find((message) =>
+    message.id === "direct-realtime" && message.type === "head"
+  );
+  assert.equal(head.status, 201);
+  assert.equal(head.headers.location.endsWith("/rtc_testdirect123"), true);
+
+  const rejected = [
+    { id: "query", url: `${directURL}?model=blocked`, init: { method: "POST", body: offer, headers: { Authorization: `Bearer ${ephemeral}`, "Content-Type": "application/sdp" } } },
+    { id: "method", url: directURL, init: { method: "GET", body: offer, headers: { Authorization: `Bearer ${ephemeral}`, "Content-Type": "application/sdp" } } },
+    { id: "long-key", url: directURL, init: { method: "POST", body: offer, headers: { Authorization: "Bearer sk-project-secret", "Content-Type": "application/sdp" } } },
+  ];
+  for (const request of rejected) {
+    await fetchPort.receive(request);
+    assert.equal(
+      fetchPort.messages.some((message) =>
+        message.id === request.id && message.type === "error"
+      ),
+      true,
+    );
+  }
 });
 
 test("普通网页 dictionary-cache 使用持久账户 Vault 分区，账户 B 不会命中账户 A", async () => {

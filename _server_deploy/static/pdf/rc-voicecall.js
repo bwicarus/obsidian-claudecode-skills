@@ -5311,6 +5311,9 @@
       curAText += (e.delta || ''); setSub('a', curAText); _rtcCapFeed(curAText, false);
       if (_rtc.turnText && _turnFeed) { try { _turnFeed(curAText, false); } catch (_) {} }   // 61:文字轮边生成边代念
     } else if (t === 'input_audio_buffer.speech_started') {
+      // 先同步、后注入：刚滚动/翻页/选中/落笔后立刻开口时，pendText 与
+      // sideband 状态必须先刷新，不能把上一帧内容当成“用户此刻正在看”。
+      _requestSyncNow();
       _rtcFlushCtx();   // ㊵ 拉模式:用户开口瞬间注入最新位置/可见内容(VAD 判定说完前必然到达)
       var _clipH = _recFinish();   // 66:被打断的半截轮也把已播语音收下(官方事件模式下 .cleared 负责真停录)
       try { if (window.__asstVoiceLog && (curAText || _lastU)) { window.__asstVoiceLog(_lastU, curAText, _rtc.ctxFile, _rtc.ctxPage, _clipH ? { clip: _clipH } : null); _lastU = ''; } } catch (_) {}   // ㉛:被打断的半截轮落库
@@ -5319,7 +5322,6 @@
       _rtcCapReset(); capClear();   // 用户插话=打断:字幕清掉回"正在听"(对齐 WS 版 450 语义)
       if (_ttsOn()) { try { bargeIn(); } catch (_) {} }   // 61:抢话同时打断 TTS 代念残播
       _rtc.aEnd = 0; _rtc.aStart = 0;   // 67:打断=2.1 音频已被截,代念不用再等它
-      _requestSyncNow();
     } else if (t === 'output_audio_buffer.started') {   // WebRTC 专属:模型音频**真正开始播** → 此刻开录
       _rec.oab = true;
       if (!_rec.mr) _recStart();
@@ -5597,15 +5599,76 @@
   // 133:过期拨号的自我了断。**关键在最后一句**:媒体是浏览器↔OpenAI 直连,pc.close() 只切断本端,
   // /rtc-call 已经在 OpenAI 侧建起来的那路 call **依然活着**(继续收音频、继续计费、继续跟新通话抢答)。
   // 必须调官方 hangup 从服务端真正终止它,否则就是我们观测到的"两路通话都在答"的僵尸 call。
-  function _rtcAbandon(pc, mic, callId) {
-    try { if (pc) pc.close(); } catch (e) {}
-    try { if (mic) mic.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
+  function _rtcRequestHangup(callId) {
     if (!callId) return;
     try {
       fetch('/api/assistant/rtc-hangup', { method: 'POST', headers: { 'Content-Type': 'application/json' },
         keepalive: true, body: JSON.stringify({ call_id: callId }) }).catch(function () {});
-      console.warn('[vc] 过期拨号已弃用并挂断 call=' + String(callId).slice(0, 14));
     } catch (e) {}
+  }
+  function _rtcAbandon(pc, mic, callId) {
+    try { if (pc) pc.close(); } catch (e) {}
+    try { if (mic) mic.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
+    if (!callId) return;
+    _rtcRequestHangup(callId);
+    try { console.warn('[vc] 过期拨号已弃用并挂断 call=' + String(callId).slice(0, 14)); } catch (e) {}
+  }
+
+  function _installedDirectRtcClient() {
+    // App local books and the browser extension own their network stack and
+    // can call OpenAI with a short-lived ek_ credential. The server PWA keeps
+    // the legacy SDP proxy fallback until its CSP is migrated separately.
+    return window.__BW_NATIVE_LOCAL_READER__ === true ||
+      typeof window.__bwReaderFetch === 'function';
+  }
+
+  async function _openDirectRtcCall(sdp, file, page) {
+    var tokenRes = await (await fetch('/api/assistant/rtc-client-secret', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ file: file || '', page: page || 0 })
+    })).json();
+    if (!tokenRes || !tokenRes.ok || !/^ek_[A-Za-z0-9_-]{8,4096}$/.test(String(tokenRes.client_secret || ''))) {
+      throw new Error((tokenRes && tokenRes.error) || 'Realtime 临时凭证签发失败');
+    }
+    var direct = await fetch('https://api.openai.com/v1/realtime/calls', {
+      method: 'POST',
+      headers: {
+        'Authorization': 'Bearer ' + tokenRes.client_secret,
+        'Content-Type': 'application/sdp'
+      },
+      body: sdp,
+      credentials: 'omit',
+      cache: 'no-store'
+    });
+    if (!direct.ok) {
+      var detail = '';
+      try { detail = String(await direct.text()).slice(0, 300); } catch (e) {}
+      throw new Error('OpenAI Realtime ' + direct.status + (detail ? ': ' + detail : ''));
+    }
+    var callId = '';
+    try { callId = String(direct.headers.get('Location') || '').replace(/\/$/, '').split('/').pop(); } catch (e) {}
+    if (!/^rtc_[A-Za-z0-9_-]{8,160}$/.test(callId)) {
+      throw new Error('OpenAI Realtime 未返回 call_id');
+    }
+    try {
+      var answer = await direct.text();
+      var bind = await (await fetch('/api/assistant/rtc-bind', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ call_id: callId, bind_grant: tokenRes.bind_grant || '' })
+      })).json();
+      if (!bind || !bind.ok) {
+        throw new Error((bind && bind.error) || 'Realtime 控制通道绑定失败');
+      }
+      return {
+        ok: true, sdp: answer, call_id: callId,
+        uid: bind.uid || '', ticket: bind.ticket || '',
+        model: tokenRes.model || '', rt_image: !!tokenRes.rt_image,
+        compact_tokens: tokenRes.compact_tokens || 0
+      };
+    } catch (error) {
+      _rtcRequestHangup(callId);
+      throw error;
+    }
   }
 
   async function rtcStart(opts) {
@@ -5623,6 +5686,7 @@
     // 笔迹状态消息(relay 的 book.ink_strokes 也是空的)→ 模型不知道纸上有圈画,只能答"你把截图发一下"。
     _stateFp = null; _inkFp = '';
     if (toggle._opts) { toggle._opts._syncedPage = 0; toggle._opts._vtFp = ''; }   // 123:同款清零(RTC 重连同风险)
+    var startupPc = null, startupMic = null, startupCallId = '';
     try {
       setSt('连接中(WebRTC)…');
       callBtnConnecting(true);   // 96:按下即琥珀脉冲,"确实在等它开启"
@@ -5638,24 +5702,29 @@
       _audioSession('play-and-record');
       // ㊶ 指南§8.1:instructions 恒定(不含书页动态内容)→ 跨会话缓存可命中;开话视口进拉模式池,首次开口才注入
       try { _rtc.pendText = String(((window.RC && RC.adapter && RC.adapter().getContext()) || {}).visible_text || '').slice(0, 2000); } catch (e) {}
-      var sres = await (await fetch('/api/assistant/rtc-session', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ file: _rtc.ctxFile, page: _rtc.ctxPage }) })).json();
-      if (!sres || !sres.ok) throw new Error((sres && sres.error) || 'rtc-session 失败');
-      if (g !== _gen || _reviewVoiceGate(false)) {
-        if (g === _gen) { _connecting = false; callBtnConnecting(false); }
-        return;
+      var directRtc = _installedDirectRtcClient();
+      if (!directRtc) {
+        var sres = await (await fetch('/api/assistant/rtc-session', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ file: _rtc.ctxFile, page: _rtc.ctxPage }) })).json();
+        if (!sres || !sres.ok) throw new Error((sres && sres.error) || 'rtc-session 失败');
+        if (g !== _gen || _reviewVoiceGate(false)) {
+          if (g === _gen) { _connecting = false; callBtnConnecting(false); }
+          return;
+        }
+        _rtc.imgOn = !!sres.rt_image;
+        _rtc.model = sres.model || '';   // ㊶ 账本按模型分价表(mini vs 标准版差 6-8 倍)
+        _rtc.compactTh = sres.compact_tokens || 0;   // ㊳ 会话内压缩阈值(0=关)
       }
-      _rtc.imgOn = !!sres.rt_image;
-      _rtc.model = sres.model || '';   // ㊶ 账本按模型分价表(mini vs 标准版差 6-8 倍)
-      _rtc.compactTh = sres.compact_tokens || 0;   // ㊳ 会话内压缩阈值(0=关)
       _rtc.items = []; _rtc.inTok = 0; _rtc.lastCompact = 0;
       var mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+      startupMic = mic;
       if (g !== _gen || _reviewVoiceGate(false)) {
         mic.getTracks().forEach(function (t) { t.stop(); });
         if (g === _gen) { _connecting = false; callBtnConnecting(false); }
         return;
       }
       var pc = new RTCPeerConnection();
+      startupPc = pc;
       mic.getTracks().forEach(function (t) {
         pc.addTrack(t, mic);
         // ㊴ 后台"他听不到我":iOS 切到其他 app 时系统**静音网页麦克风**(下行 audio 可继续=你还听得到他),
@@ -5698,16 +5767,22 @@
       // 一律用 body 的 file/page **重建**会话——可这里以前根本没发 file/page → 真正建起来的 OpenAI 会话
       // 书名为空、page=0(日志实证:ASR prompt 里只有通用"学习伴读通话",没有书名)。
       // /rtc-session 那次辛苦算好的配置等于**被整个丢弃**。必须在这里也带上。
-      var cres = await (await fetch('/api/assistant/rtc-call', { method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sdp: offer.sdp, file: _rtc.ctxFile, page: _rtc.ctxPage }) })).json();
-      if (!cres || !cres.ok) throw new Error((cres && cres.error) || 'SDP 代理失败');
+      var cres = directRtc
+        ? await _openDirectRtcCall(offer.sdp, _rtc.ctxFile, _rtc.ctxPage)
+        : await (await fetch('/api/assistant/rtc-call', { method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ sdp: offer.sdp, file: _rtc.ctxFile, page: _rtc.ctxPage }) })).json();
+      if (!cres || !cres.ok) throw new Error((cres && cres.error) || 'Realtime 建连失败');
+      startupCallId = cres.call_id || '';
+      if (directRtc) {
+        _rtc.imgOn = !!cres.rt_image;
+        _rtc.model = cres.model || '';
+        _rtc.compactTh = cres.compact_tokens || 0;
+      }
       if (g !== _gen || _reviewVoiceGate(false)) {
         _rtcAbandon(pc, mic, cres.call_id);
         if (g === _gen) { _connecting = false; callBtnConnecting(false); }
         return;
       }
-      _rtc.callId = cres.call_id || '';   // sideband 注入(后端发大图)要用
-      _rtc.uid = cres.uid || ''; _rtc.tk = cres.ticket || '';   // 133:单通话唯一性票据(relay 验签后才敢接管旧通话)
       await pc.setRemoteDescription({ type: 'answer', sdp: cres.sdp });
       // 133(双通话真凶,外部评审揪出):setRemoteDescription **也是一个 await** —— 这期间用户完全可能
       // 挂断+重拨(teardown 会 ++_gen)。旧代码在此直接提交 _rtc.pc/_rtc.on,于是**过期的这一轮醒来后
@@ -5715,10 +5790,14 @@
       //  → 同一浏览器两路通话都听同一句话、各答一次(实测 17:48 那次 4 秒内两次拨号即此)。
       // 每个 await 之后都必须重新验世代;过期就把**自己建的**资源全收掉(含服务端已建的 call)。
       if (g !== _gen || _reviewVoiceGate(false)) {
-        _rtcAbandon(pc, mic, _rtc.callId);
+        _rtcAbandon(pc, mic, startupCallId);
         if (g === _gen) { _connecting = false; callBtnConnecting(false); }
         return;
       }
+      // 只有最后一个 await 之后仍属当前世代，才把 call 身份提交到共享状态；
+      // 迟到的旧拨号不能覆盖新通话的 callId/票据，更不能误挂断新通话。
+      _rtc.callId = startupCallId;   // sideband 注入(后端发大图)要用
+      _rtc.uid = cres.uid || ''; _rtc.tk = cres.ticket || '';   // 133:单通话唯一性票据(relay 验签后才敢接管旧通话)
       _rtc.pc = pc; _rtc.dc = dc; _rtc.mic = mic; _rtc.on = true;
       _rtc.t0 = Date.now(); _rtc.toolN = 0; _rtc.warned = 0;   // ㊷ §12/§13:会话时长与工具调用护栏计数
       _connecting = false;
@@ -5746,11 +5825,13 @@
     } catch (ex) {
       _connecting = false;
       setSt('WebRTC 启动失败: ' + String(ex.name || '') + ' ' + String(ex.message || ex).slice(0, 80));
+      _rtcAbandon(startupPc, startupMic, startupCallId);
       rtcTeardown();
       ws = null; callBtnOn(false); callBtnSpeaking(false);   // 状态复位:按钮/shim 不残留假活
     }
   }
   function rtcTeardown() {
+    var retiringCallId = _rtc.callId || '';
     _rtc.on = false;
     try { var _ai1 = document.getElementById('asst-input'); if (_ai1) _ai1.classList.remove('vc-live'); } catch (e) {}
     _recStop();   // 128:挂断时把还在录的那段**收下并上传**(别丢掉用户刚听到的最后一段)
@@ -5766,6 +5847,7 @@
     try { if (_rtc.el) _rtc.el.remove(); } catch (e) {}
     try { if (_rtc.mic) _rtc.mic.getTracks().forEach(function (t) { t.stop(); }); } catch (e) {}
     _rtc.pc = null; _rtc.dc = null; _rtc.el = null; _rtc.mic = null; _rtc.callId = '';
+    _rtcRequestHangup(retiringCallId);   // pc.close 不等于服务端挂断；正常挂断/意外重连都明确终止旧 call
     try { if (_rtc.statsT) { clearInterval(_rtc.statsT); _rtc.statsT = null; } } catch (e) {}   // 124:遥测随挂断走
     _connecting = false;   // 93:teardown 不经 teardown() 的路径(_rtcDead)也要解锁,否则单飞锁永久卡死
   }
@@ -6216,7 +6298,7 @@
       if (g0 !== _gen || _reviewVoiceGate(false)) { try { console.warn('[vc] voice-config 迟到或已进入复习模式,拨号已取消'); } catch (e) {} return; }
       var engine = (((d || {}).cfg) || {}).rt_engine;
       _connecting = false;
-      if (engine === 'openai_rtc') rtcStart(opts);
+      if (engine === 'openai_rtc' || engine === 'openai') rtcStart(opts);
       else start(opts);   // 历史 computer_client 值按默认豆包处理，不再控制电脑桥。
     }).catch(function () {
       if (g0 !== _gen) return;
