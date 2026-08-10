@@ -33,6 +33,13 @@ test("the App owns both the project key and the Realtime session without Pi", ()
   assert.match(CORE, /static let model = "gpt-realtime-2\.1-mini"/);
   assert.match(CORE, /private static func localSessionConfiguration\(\)/);
   assert.match(CORE, /v1\/realtime\/client_secrets/);
+  assert.match(
+    CORE,
+    /"retention_ratio": NSDecimalNumber\([\s\S]*mantissa: 8,[\s\S]*exponent: -1/,
+  );
+  assert.match(CORE, /options: \[\.sortedKeys\]/);
+  assert.match(CORE, /json\.contains\(#""retention_ratio":0\.8,"#/);
+  assert.doesNotMatch(CORE, /"retention_ratio": 0\.8,/);
   assert.match(CORE, /static func openCall\(sdp: String\) async throws/);
   assert.match(CORE, /appendingPathComponent\("v1\/realtime\/calls"\)/);
   assert.match(CORE, /value\(forHTTPHeaderField: "Location"\)/);

@@ -50,7 +50,7 @@
 Safari 扩展原生进程经签名 access group 共享读取，网页和扩展 JavaScript 仅得到 90 秒 `ek_`。
 普通 Realtime、选区、可见正文与合成图注入均不经过 Pi；Pi 只保留显式备份/同步和 AI API 能力。
 
-**0.2.84 / App 1.1.22 候选**：App 内普通电话由原生层验证 Key、提交 SDP 并读取 call ID；
+**0.2.84 / App 1.1.23 候选**：App 内普通电话由原生层验证 Key、提交 SDP 并读取 call ID；
 启动失败会按麦克风权限、凭证、OpenAI 建连与应答阶段直接显示。普通电话仍优先于旧 `agent`
 模式进入本机 Realtime，移除
 Pi 凭证、上下文、历史、用量、任意工具和挂断回退；页面、选区、笔迹、合成图与笔记只走 App。

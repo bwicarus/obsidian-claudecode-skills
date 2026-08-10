@@ -27,6 +27,7 @@ enum ReaderRealtimeCredentialError: LocalizedError {
     case invalidResponse
     case openAI(String)
     case invalidRequest
+    case invalidConfiguration
     case imageTooLarge
     case imageRejected(String)
 
@@ -44,6 +45,8 @@ enum ReaderRealtimeCredentialError: LocalizedError {
             return message
         case .invalidRequest:
             return "Realtime 原生请求无效"
+        case .invalidConfiguration:
+            return "Realtime 本机配置序列化精度无效"
         case .imageTooLarge:
             return "当前合成图超过 App 的安全大小上限"
         case .imageRejected(let message):
@@ -224,10 +227,7 @@ enum ReaderRealtimeOpenAIClient {
             stored.safetyIdentifier,
             forHTTPHeaderField: "OpenAI-Safety-Identifier"
         )
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "expires_after": ["anchor": "created_at", "seconds": 90],
-            "session": session,
-        ])
+        request.httpBody = try clientSecretRequestBody(session: session)
         let (data, response) = try await ephemeralSession().data(for: request)
         guard let http = response as? HTTPURLResponse,
               http.url?.scheme == url.scheme,
@@ -572,10 +572,34 @@ enum ReaderRealtimeOpenAIClient {
             "parallel_tool_calls": false,
             "truncation": [
                 "type": "retention_ratio",
-                "retention_ratio": 0.8,
+                // Keep the documented 0.8 as an exact base-10 value. A Swift
+                // Double can become 0.80000000000000004 in Darwin JSON and the
+                // Realtime API rejects values with more than 16 decimal places.
+                "retention_ratio": NSDecimalNumber(
+                    mantissa: 8,
+                    exponent: -1,
+                    isNegative: false
+                ),
                 "token_limits": ["post_instructions": 24_000],
             ],
         ]
+    }
+
+    private static func clientSecretRequestBody(
+        session: [String: Any]
+    ) throws -> Data {
+        let data = try JSONSerialization.data(
+            withJSONObject: [
+                "expires_after": ["anchor": "created_at", "seconds": 90],
+                "session": session,
+            ],
+            options: [.sortedKeys]
+        )
+        guard let json = String(data: data, encoding: .utf8),
+              json.contains(#""retention_ratio":0.8,"#) else {
+            throw ReaderRealtimeCredentialError.invalidConfiguration
+        }
+        return data
     }
 
     private static func localTool(
