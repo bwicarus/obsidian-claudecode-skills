@@ -42,11 +42,11 @@
 
 ## 2. 当前版本和已经完成的主线
 
-当前生产 Reader/PWA 与 Windows 扩展测试渠道均为 **0.2.79**；产品名精确为
-**“BW网页伴读”**。App TestFlight 当前构建为 **1.1.17 (172)**，Apple 已确认
+当前生产 Reader/PWA 与 Windows 扩展测试渠道均为 **0.2.80**；产品名精确为
+**“BW网页伴读”**。App TestFlight 当前构建为 **1.1.18 (174)**，Apple 已确认
 `VALID / IN_BETA_TESTING`。
 
-**0.2.80 / App 1.1.18 发布候选**：直连 Realtime 会话复用设备建连时取得的短期 `ek_`
+**0.2.80 / App 1.1.18 已发布**：直连 Realtime 会话复用设备建连时取得的短期 `ek_`
 credential 建立同一 call 的 sideband 与挂断请求；选区仍在有效语音轮次后注入，显式
 `see_ink` / `see_page` / `see_figure` 始终回传实际合成图，不受机会式图片开关影响。
 
