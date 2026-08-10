@@ -288,6 +288,23 @@ test("native PDF actor isolates books and navigation distinguishes outgoing roll
     "incoming startup recovery must finish before open/JS");
 });
 
+test("clean PDF boot proves no native journal before returning without hashing the whole book", () => {
+  const recoverCase = WEB_VIEW.slice(
+    WEB_VIEW.indexOf("case .recover("),
+    WEB_VIEW.indexOf("private func refreshLocalBookAfterPDFMutation("),
+  );
+  const journalProbe = recoverCase.indexOf("hasUnfinishedMutation(book: access)");
+  const cleanReturn = recoverCase.indexOf("if !hasExpectedIdentity, !hasUnfinishedMutation");
+  const verifiedRecovery = recoverCase.indexOf("settleNativePDFMutation(");
+
+  assert.ok(journalProbe >= 0 && journalProbe < cleanReturn);
+  assert.ok(cleanReturn >= 0 && cleanReturn < verifiedRecovery,
+    "clean open must return before the verified recovery path can hash PDF bytes");
+  assert.match(recoverCase, /"outcome": ReaderNativePDFMutationRecoveryReceipt[\s\S]*\.Outcome\.none\.rawValue/);
+  assert.match(recoverCase, /"contentSHA256": currentLocalBookContentSHA256[\s\S]*NSNull\(\)/);
+  assert.match(recoverCase, /let hasExpectedIdentity = ticket != nil[\s\S]*oldContentSHA256 != nil[\s\S]*stagedContentSHA256 != nil/);
+});
+
 test("the strict main-frame bridge and host keep replacement inside the current local book lifecycle", () => {
   assert.match(MUTATION, /reader-native-pdf-mutation-request\/1/);
   assert.match(MUTATION, /reader-native-pdf-mutation-response\/1/);

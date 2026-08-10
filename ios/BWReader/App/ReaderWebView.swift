@@ -1689,6 +1689,33 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                     "恢复时当前本机 PDF 上下文已经变化"
                 )
             }
+            let hasExpectedIdentity = ticket != nil
+                || oldContentSHA256 != nil
+                || stagedContentSHA256 != nil
+            let hasUnfinishedMutation = try await nativePDFMutationActor
+                .hasUnfinishedMutation(book: access)
+            if !hasExpectedIdentity, !hasUnfinishedMutation {
+                // A clean open is a probe, not a recovery operation. Hashing
+                // the entire PDF here made every cold book switch read a
+                // multi-hundred-megabyte file before book-meta/page images
+                // could start. A real native journal, or a web journal carrying
+                // expected identities, still takes the fully verified path.
+                return [
+                    "contract": ReaderNativePDFMutationBridge.responseContract,
+                    "action": "recovered",
+                    "requestId": requestID,
+                    "ok": true,
+                    "localBookId": localBookID,
+                    "ticket": NSNull(),
+                    "outcome": ReaderNativePDFMutationRecoveryReceipt
+                        .Outcome.none.rawValue,
+                    "contentSHA256": currentLocalBookContentSHA256
+                        .map { $0 as Any } ?? NSNull(),
+                    "mtime": Int((originalBook.modifiedAt
+                        ?? Date(timeIntervalSince1970: 0)).timeIntervalSince1970),
+                    "byteCount": originalBook.byteCount,
+                ]
+            }
             guard let settlement = try await settleNativePDFMutation(
                 book: originalBook,
                 access: access,

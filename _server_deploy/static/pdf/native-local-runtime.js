@@ -4891,7 +4891,8 @@
           (raw.ticket === null ||
             /^npmt_[a-f0-9]{32}$/.test(String(raw.ticket || ''))) &&
           ['none', 'committed', 'rolled-back'].indexOf(raw.outcome) >= 0 &&
-          /^[a-f0-9]{64}$/.test(String(raw.contentSHA256 || '')) &&
+          ((raw.outcome === 'none' && raw.contentSHA256 === null) ||
+            /^[a-f0-9]{64}$/.test(String(raw.contentSHA256 || ''))) &&
           Number.isInteger(raw.mtime) && raw.mtime >= 0 &&
           Number.isInteger(raw.byteCount) && raw.byteCount > 0;
       }
@@ -9003,16 +9004,20 @@
   function beginBoot() {
     if (bootState !== 'starting') return;
     try {
+      if (typeof root.dlog === 'function') root.dlog('本机启动:检查 IndexedDB');
       nativeInterfaceManifest = nativeInterfaceManifestFromRoot();
       nativeInterfaceSurface = nativeInterfacePageSurface();
       stores = createStores();
       router = createRouter(stores);
       gateIndexedDB().then(function () {
+        if (typeof root.dlog === 'function') root.dlog('本机启动:IndexedDB 已就绪');
         return recoverNativePDFMutationOnBoot();
       }).then(function () {
+        if (typeof root.dlog === 'function') root.dlog('本机启动:PDF 恢复检查已完成');
         return attachPreferenceStore();
       }).then(function () {
         bootState = 'ready';
+        if (typeof root.dlog === 'function') root.dlog('本机启动:运行时已就绪');
         try {
           root.dispatchEvent(new CustomEvent('bw:native-local-runtime-ready', {
             detail: api.status()
@@ -9020,6 +9025,9 @@
         } catch (_) {}
         resolveBoot(api);
       }).catch(function (error) {
+        if (typeof root.dlog === 'function') {
+          root.dlog('本机启动失败:' + String(error && error.code || error), '#ff6b6b');
+        }
         blockingFailure(error);
         rejectBoot(error);
       });

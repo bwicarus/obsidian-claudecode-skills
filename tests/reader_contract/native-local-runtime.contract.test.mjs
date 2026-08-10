@@ -551,6 +551,35 @@ test("native local runtime gates both document and device IndexedDB stores befor
   ]);
 });
 
+test("clean native PDF boot accepts a no-mutation recovery receipt without a full-content digest", async () => {
+  const result = await harness({
+    pdfMutationReply(message) {
+      assert.equal(message.action, "recover");
+      assert.equal(message.ticket, null);
+      assert.equal(message.oldContentSHA256, null);
+      assert.equal(message.stagedContentSHA256, null);
+      return {
+        contract: "reader-native-pdf-mutation-response/1",
+        action: "recovered",
+        requestId: message.requestId,
+        ok: true,
+        localBookId: message.localBookId,
+        ticket: null,
+        outcome: "none",
+        contentSHA256: null,
+        mtime: 1_800_000_000,
+        byteCount: 626_900_000,
+      };
+    },
+  });
+
+  assert.equal(result.context.BWReaderRuntime.nativeLocalRuntime.status().state, "ready");
+  assert.deepEqual(
+    result.pdfMutationMessages.map((message) => message.action),
+    ["recover"],
+  );
+});
+
 test("IndexedDB batch queues its first request before yielding to a Promise", () => {
   const source = readFileSync(
     new URL("_server_deploy/static/reader-runtime/indexeddb-store.js", ROOT),
