@@ -170,7 +170,7 @@ test("local renderer uses a stable loopback origin with signed static assets and
   assert.doesNotMatch(LOCAL_SERVER, /connect-src[^"\n]*wss:\/\/bwicarus\.taile44d0c\.ts\.net/);
   assert.match(
     WEB_VIEW,
-    /requestMediaCapturePermissionFor origin:[\s\S]*origin\.host\.lowercased\(\) == ReaderLocalRuntimeServer\.host[\s\S]*frame\.isMainFrame[\s\S]*type == \.microphone[\s\S]*\? \.grant[\s\S]*: \.deny/,
+    /requestMediaCapturePermissionFor origin:[\s\S]*origin\.host\.lowercased\(\) == ReaderLocalRuntimeServer\.host[\s\S]*frame\.isMainFrame[\s\S]*frame\.webView === webView[\s\S]*isTrustedReaderURL\(webView\.url\)[\s\S]*type == \.microphone[\s\S]*\? \.grant[\s\S]*: \.deny/,
   );
 });
 

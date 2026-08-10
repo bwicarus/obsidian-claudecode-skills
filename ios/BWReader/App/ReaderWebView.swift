@@ -3515,7 +3515,8 @@ extension ReaderWebViewModel: WKUIDelegate {
             && origin.host.lowercased() == ReaderLocalRuntimeServer.host
             && origin.port == Int(ReaderLocalRuntimeServer.port)
         let trustedFrame = frame.isMainFrame
-            && isTrustedReaderURL(frame.request.url)
+            && frame.webView === webView
+            && isTrustedReaderURL(webView.url)
         decisionHandler(
             trustedOrigin && trustedFrame && type == .microphone
                 ? .grant

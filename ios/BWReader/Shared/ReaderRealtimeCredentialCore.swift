@@ -186,6 +186,15 @@ enum ReaderRealtimeOpenAIClient {
         let compactTokens: Int
     }
 
+    struct OpenedCall: Sendable {
+        let answerSDP: String
+        let callID: String
+        let clientSecret: String
+        let model: String
+        let rtImage: Bool
+        let compactTokens: Int
+    }
+
     static let model = "gpt-realtime-2.1-mini"
     static let rtImage = true
     static let compactTokens = 0
@@ -247,6 +256,75 @@ enum ReaderRealtimeOpenAIClient {
             model: model,
             rtImage: rtImage,
             compactTokens: compactTokens
+        )
+    }
+
+    /// WKWebView keeps the microphone and peer connection, while the signed
+    /// App performs the credentialed SDP exchange. This avoids depending on
+    /// Safari's cross-origin response-header behavior and keeps the complete
+    /// Realtime startup failure visible to native code.
+    static func openCall(sdp: String) async throws -> OpenedCall {
+        guard sdp.hasPrefix("v=0"),
+              (32...262_144).contains(sdp.utf8.count) else {
+            throw ReaderRealtimeCredentialError.invalidRequest
+        }
+        let minted = try await mintClientSecret()
+        let url = openAIOrigin.appendingPathComponent("v1/realtime/calls")
+        var request = URLRequest(url: url)
+        request.httpMethod = "POST"
+        request.timeoutInterval = 30
+        request.httpShouldHandleCookies = false
+        request.setValue(
+            "Bearer \(minted.clientSecret)",
+            forHTTPHeaderField: "Authorization"
+        )
+        request.setValue(
+            "application/sdp",
+            forHTTPHeaderField: "Content-Type"
+        )
+        request.setValue("application/sdp", forHTTPHeaderField: "Accept")
+        request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
+        request.httpBody = Data(sdp.utf8)
+        let (data, response) = try await ephemeralSession().data(for: request)
+        guard let http = response as? HTTPURLResponse,
+              http.url?.scheme == url.scheme,
+              http.url?.host == url.host,
+              http.url?.port == url.port else {
+            throw ReaderRealtimeCredentialError.invalidResponse
+        }
+        guard (200..<300).contains(http.statusCode) else {
+            throw ReaderRealtimeCredentialError.openAI(
+                safeErrorMessage(
+                    from: data,
+                    fallback: "OpenAI Realtime 建连失败（HTTP \(http.statusCode)）"
+                )
+            )
+        }
+        let location = http.value(forHTTPHeaderField: "Location") ?? ""
+        let callURL = URL(string: location, relativeTo: url)?.absoluteURL
+        let callID = callURL?.lastPathComponent ?? ""
+        guard callURL?.scheme == openAIOrigin.scheme,
+              callURL?.host == openAIOrigin.host,
+              callURL?.port == openAIOrigin.port,
+              isValidCallID(callID),
+              (64...262_144).contains(data.count),
+              let answer = String(data: data, encoding: .utf8),
+              answer.hasPrefix("v=0") else {
+            if isValidCallID(callID) {
+                try? await hangup(
+                    callID: callID,
+                    clientSecret: minted.clientSecret
+                )
+            }
+            throw ReaderRealtimeCredentialError.invalidResponse
+        }
+        return OpenedCall(
+            answerSDP: answer,
+            callID: callID,
+            clientSecret: minted.clientSecret,
+            model: minted.model,
+            rtImage: minted.rtImage,
+            compactTokens: minted.compactTokens
         )
     }
 

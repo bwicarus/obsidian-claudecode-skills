@@ -5805,6 +5805,27 @@ if (window.__bwPwaProviderOnly) return;
   async function _openDirectRtcCall(sdp, file, page) {
     var tokenRes = null, nativeDirect = false;
     var appRequiresNative = window.__BW_NATIVE_LOCAL_READER__ === true;
+    if (appRequiresNative) {
+      if (window.__BW_NATIVE_OPENAI_REALTIME__ !== true) {
+        throw new Error('App 原生 Realtime 桥尚未就绪');
+      }
+      var nativeCall = await _nativeRealtimeRequest({
+        action: 'call', sdp: sdp, file: file || '', page: page || 0
+      });
+      if (!nativeCall || !nativeCall.ok ||
+          !/^rtc_[A-Za-z0-9_-]{8,160}$/.test(String(nativeCall.call_id || '')) ||
+          !/^ek_[A-Za-z0-9_-]{8,4096}$/.test(String(nativeCall.client_secret || '')) ||
+          !/^v=0(?:\r?\n|$)/.test(String(nativeCall.sdp || ''))) {
+        throw new Error((nativeCall && nativeCall.error) || 'App 原生 Realtime 建连响应无效');
+      }
+      return {
+        ok: true, sdp: nativeCall.sdp, call_id: nativeCall.call_id,
+        uid: '', ticket: '', sideband_secret: nativeCall.client_secret,
+        native_direct: true, model: nativeCall.model || '',
+        rt_image: !!nativeCall.rt_image,
+        compact_tokens: nativeCall.compact_tokens || 0
+      };
+    }
     if (window.__BW_NATIVE_OPENAI_REALTIME__ === true) {
       tokenRes = await _nativeRealtimeRequest({
         action: 'mint', file: file || '', page: page || 0
@@ -5813,8 +5834,6 @@ if (window.__bwPwaProviderOnly) return;
       if (!nativeDirect) {
         throw new Error((tokenRes && tokenRes.error) || 'App 原生 Realtime 临时凭证签发失败');
       }
-    } else if (appRequiresNative) {
-      throw new Error('App 原生 Realtime 桥尚未就绪');
     } else {
       tokenRes = await (await fetch('/api/assistant/rtc-client-secret', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -5840,11 +5859,11 @@ if (window.__bwPwaProviderOnly) return;
       throw new Error('OpenAI Realtime ' + direct.status + (detail ? ': ' + detail : ''));
     }
     var callId = '';
-    try { callId = String(direct.headers.get('Location') || '').replace(/\/$/, '').split('/').pop(); } catch (e) {}
-    if (!/^rtc_[A-Za-z0-9_-]{8,160}$/.test(callId)) {
-      throw new Error('OpenAI Realtime 未返回 call_id');
-    }
     try {
+      try { callId = String(direct.headers.get('Location') || '').replace(/\/$/, '').split('/').pop(); } catch (e) {}
+      if (!/^rtc_[A-Za-z0-9_-]{8,160}$/.test(callId)) {
+        throw new Error('OpenAI Realtime 未返回 call_id');
+      }
       var answer = await direct.text();
       var bind = { ok: true, uid: '', ticket: '' };
       if (!nativeDirect) {
@@ -5886,6 +5905,7 @@ if (window.__bwPwaProviderOnly) return;
     _stateFp = null; _inkFp = '';
     if (toggle._opts) { toggle._opts._syncedPage = 0; toggle._opts._vtFp = ''; }   // 123:同款清零(RTC 重连同风险)
     var startupPc = null, startupMic = null, startupCallId = '', startupSidebandKey = '';
+    var startupStage = '准备音频';
     try {
       setSt('连接中(WebRTC)…');
       callBtnConnecting(true);   // 96:按下即琥珀脉冲,"确实在等它开启"
@@ -5915,6 +5935,7 @@ if (window.__bwPwaProviderOnly) return;
         _rtc.compactTh = sres.compact_tokens || 0;   // ㊳ 会话内压缩阈值(0=关)
       }
       _rtc.items = []; _rtc.inTok = 0; _rtc.lastCompact = 0;
+      startupStage = '申请麦克风权限';
       var mic = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
       startupMic = mic;
       if (g !== _gen || _reviewVoiceGate(false)) {
@@ -5923,6 +5944,7 @@ if (window.__bwPwaProviderOnly) return;
         return;
       }
       var pc = new RTCPeerConnection();
+      startupStage = '创建 WebRTC 连接';
       startupPc = pc;
       mic.getTracks().forEach(function (t) {
         pc.addTrack(t, mic);
@@ -5966,6 +5988,7 @@ if (window.__bwPwaProviderOnly) return;
       // 一律用 body 的 file/page **重建**会话——可这里以前根本没发 file/page → 真正建起来的 OpenAI 会话
       // 书名为空、page=0(日志实证:ASR prompt 里只有通用"学习伴读通话",没有书名)。
       // /rtc-session 那次辛苦算好的配置等于**被整个丢弃**。必须在这里也带上。
+      startupStage = directRtc ? '连接 OpenAI Realtime' : '连接语音服务';
       var cres = directRtc
         ? await _openDirectRtcCall(offer.sdp, _rtc.ctxFile, _rtc.ctxPage)
         : await (await fetch('/api/assistant/rtc-call', { method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -5985,6 +6008,7 @@ if (window.__bwPwaProviderOnly) return;
         if (g === _gen) { _connecting = false; callBtnConnecting(false); }
         return;
       }
+      startupStage = '应用 OpenAI 应答';
       await pc.setRemoteDescription({ type: 'answer', sdp: cres.sdp });
       // 133(双通话真凶,外部评审揪出):setRemoteDescription **也是一个 await** —— 这期间用户完全可能
       // 挂断+重拨(teardown 会 ++_gen)。旧代码在此直接提交 _rtc.pc/_rtc.on,于是**过期的这一轮醒来后
@@ -6001,6 +6025,7 @@ if (window.__bwPwaProviderOnly) return;
       _rtc.callId = startupCallId;   // sideband 注入(后端发大图)要用
       _rtc.uid = cres.uid || ''; _rtc.tk = cres.ticket || '';   // 133:单通话唯一性票据(relay 验签后才敢接管旧通话)
       _rtc.pc = pc; _rtc.dc = dc; _rtc.mic = mic; _rtc.on = true;
+      startupStage = '完成';
       _rtc.t0 = Date.now(); _rtc.toolN = 0; _rtc.warned = 0;   // ㊷ §12/§13:会话时长与工具调用护栏计数
       _connecting = false;
       ws = _rtcShimWs();   // 顶替全局 ws:同步轮询/输入框发送等全部现有代码照常工作
@@ -6026,7 +6051,20 @@ if (window.__bwPwaProviderOnly) return;
       _refreshSpeakTg();
     } catch (ex) {
       _connecting = false;
-      setSt('WebRTC 启动失败: ' + String(ex.name || '') + ' ' + String(ex.message || ex).slice(0, 80));
+      var errorName = String(ex && ex.name || '');
+      var errorDetail = String(ex && ex.message || ex || '未知错误');
+      if (startupStage === '申请麦克风权限' && errorName === 'NotAllowedError') {
+        errorDetail = '麦克风权限未授予，请在 iPad“设置 → BWReader → 麦克风”中开启';
+      }
+      var startupMessage = '语音启动失败（' + startupStage + '）：' +
+        (errorName && errorName !== 'Error' ? errorName + ' ' : '') +
+        errorDetail.slice(0, 220);
+      setSt(startupMessage);
+      try { if (window.dlog) window.dlog('[voice] ' + startupMessage, '#ff6961'); } catch (e) {}
+      try { if (window.RC && RC.toast) RC.toast(startupMessage); } catch (e) {}
+      try { window.dispatchEvent(new CustomEvent('bw-native-realtime-start-error', {
+        detail: { stage: startupStage, name: errorName, message: errorDetail.slice(0, 300) }
+      })); } catch (e) {}
       _rtcAbandon(startupPc, startupMic, startupCallId, startupSidebandKey);
       rtcTeardown();
       ws = null; callBtnOn(false); callBtnSpeaking(false);   // 状态复位:按钮/shim 不残留假活

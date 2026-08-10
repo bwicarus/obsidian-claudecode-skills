@@ -320,15 +320,19 @@ struct NativeReaderToolsView: View {
                 .font(.system(.body, design: .monospaced))
 
             Button {
-                realtimeCredentials.saveExistingKey(realtimeKeyDraft)
-                if realtimeCredentials.errorMessage == nil,
-                   realtimeCredentials.status.isConfigured {
-                    realtimeKeyDraft = ""
+                Task {
+                    await realtimeCredentials.saveExistingKey(
+                        realtimeKeyDraft
+                    )
+                    if realtimeCredentials.errorMessage == nil,
+                       realtimeCredentials.status.isConfigured {
+                        realtimeKeyDraft = ""
+                    }
                 }
             } label: {
                 Label(
                     realtimeCredentials.isRunning
-                        ? "正在保存…"
+                        ? "正在保存并验证…"
                         : (realtimeCredentials.status.isConfigured
                             ? "替换 App Key"
                             : "保存 App Key"),
@@ -345,7 +349,9 @@ struct NativeReaderToolsView: View {
             if realtimeCredentials.status.isConfigured {
                 LabeledContent(
                     "状态",
-                    value: "已存入 Apple Keychain"
+                    value: realtimeCredentials.notice == nil
+                        ? "已存入 Apple Keychain（尚未验证）"
+                        : "Keychain 与 OpenAI 均已验证"
                 )
                 if !realtimeCredentials.status.model.isEmpty {
                     LabeledContent(

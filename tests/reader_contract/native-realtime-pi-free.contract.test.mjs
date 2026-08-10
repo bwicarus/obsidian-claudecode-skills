@@ -33,6 +33,9 @@ test("the App owns both the project key and the Realtime session without Pi", ()
   assert.match(CORE, /static let model = "gpt-realtime-2\.1-mini"/);
   assert.match(CORE, /private static func localSessionConfiguration\(\)/);
   assert.match(CORE, /v1\/realtime\/client_secrets/);
+  assert.match(CORE, /static func openCall\(sdp: String\) async throws/);
+  assert.match(CORE, /appendingPathComponent\("v1\/realtime\/calls"\)/);
+  assert.match(CORE, /value\(forHTTPHeaderField: "Location"\)/);
   assert.match(CORE, /"OpenAI-Safety-Identifier"/);
   assert.match(CORE, /"read_selection"/);
   assert.match(CORE, /"see_ink"/);
@@ -45,8 +48,12 @@ test("the App owns both the project key and the Realtime session without Pi", ()
   assert.match(TOOLS, /SecureField\("输入现有 OpenAI Key/);
   assert.match(TOOLS, /保存 App Key/);
   assert.match(TOOLS, /App 保存、启动通话、注入选区与发送笔迹\/视口合成图都不连接 Pi/);
-  assert.match(TOOLS, /已存入 Apple Keychain/);
+  assert.match(TOOLS, /已存入 Apple Keychain（尚未验证）/);
+  assert.match(TOOLS, /Keychain 与 OpenAI 均已验证/);
   assert.match(TOOLS, /清除这台 iPad 中的 Key/);
+  assert.match(BRIDGE, /func saveExistingKey\(_ apiKey: String\) async/);
+  assert.match(BRIDGE, /try await ReaderRealtimeOpenAIClient\.mintClientSecret\(\)/);
+  assert.match(BRIDGE, /OpenAI Realtime 联通验证/);
 
   // The credential export is intentionally unavailable to Reader JS and the
   // Safari extension's Pi manifest. Only the native settings client owns it.
@@ -58,6 +65,10 @@ test("the local Reader page receives only a short-lived native Realtime bridge",
   assert.match(BRIDGE, /message\.frameInfo\.isMainFrame/);
   assert.match(BRIDGE, /message\.webView === webView/);
   assert.match(BRIDGE, /isTrustedLocalURL\(webView\.url\)/);
+  assert.match(BRIDGE, /case "call"/);
+  assert.match(BRIDGE, /ReaderRealtimeOpenAIClient\.openCall/);
+  assert.match(BRIDGE, /"sdp": call\.answerSDP/);
+  assert.match(BRIDGE, /"call_id": call\.callID/);
   assert.match(BRIDGE, /case "mint"/);
   assert.match(BRIDGE, /mintClientSecret\(\)/);
   assert.match(
@@ -81,22 +92,36 @@ test("the local Reader page receives only a short-lived native Realtime bridge",
   assert.match(WEB_VIEW, /Object\.defineProperty\(window, "__bwNativeRealtime"/);
 });
 
-test("App and Safari extension call mint and hangup through native code", () => {
+test("App opens the call natively while Safari mints and hangs up through native code", () => {
   const direct = VOICE.slice(
     VOICE.indexOf("async function _openDirectRtcCall"),
     VOICE.indexOf("async function rtcStart"),
   );
+  assert.match(direct, /action: 'call', sdp: sdp/);
   assert.match(direct, /action: 'mint'/);
   assert.match(direct, /native_direct: nativeDirect/);
   assert.match(direct, /if \(!nativeDirect\)[\s\S]*fetch\('\/api\/assistant\/rtc-bind'/);
   assert.match(direct, /var appRequiresNative = window\.__BW_NATIVE_LOCAL_READER__ === true/);
-  assert.match(direct, /else if \(appRequiresNative\)[\s\S]*App 原生 Realtime 桥尚未就绪/);
+  assert.match(direct, /if \(appRequiresNative\)[\s\S]*App 原生 Realtime 桥尚未就绪/);
   assert.match(direct, /fetch\('\/api\/assistant\/rtc-client-secret'/);
+  const nativeMintStart = direct.indexOf(
+    "if (window.__BW_NATIVE_OPENAI_REALTIME__ === true)",
+    direct.indexOf("action: 'call'"),
+  );
   const nativeMintBranch = direct.slice(
-    direct.indexOf("if (window.__BW_NATIVE_OPENAI_REALTIME__ === true)"),
-    direct.indexOf("} else if (appRequiresNative)"),
+    nativeMintStart,
+    direct.indexOf("    } else {", nativeMintStart),
   );
   assert.doesNotMatch(nativeMintBranch, /rtc-client-secret|rtc-bind/);
+  const appNativeBranch = direct.slice(
+    direct.indexOf("if (appRequiresNative)"),
+    direct.indexOf(
+      "if (window.__BW_NATIVE_OPENAI_REALTIME__ === true)",
+      direct.indexOf("action: 'call'"),
+    ),
+  );
+  assert.match(appNativeBranch, /action: 'call'/);
+  assert.doesNotMatch(appNativeBranch, /fetch\(|headers\.get\('Location'\)/);
 
   const connect = VOICE.slice(
     VOICE.indexOf("toggle._connect = function"),
@@ -121,6 +146,10 @@ test("App and Safari extension call mint and hangup through native code", () => 
   );
   assert.match(VOICE, /action: 'hangup', call_id: callId/);
   assert.match(VOICE, /_rtc\.nativeDirect = !!cres\.native_direct/);
+  assert.match(VOICE, /语音启动失败（' \+ startupStage/);
+  assert.match(VOICE, /RC\.toast\(startupMessage\)/);
+  assert.match(VOICE, /startupStage = '申请麦克风权限'/);
+  assert.match(VOICE, /startupStage = directRtc \? '连接 OpenAI Realtime'/);
 
   assert.match(CONTRACT, /"realtime\.mint"/);
   assert.match(CONTRACT, /"realtime\.image"/);

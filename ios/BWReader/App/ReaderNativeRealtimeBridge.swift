@@ -27,21 +27,30 @@ final class ReaderRealtimeCredentialManager: ObservableObject {
         }
     }
 
-    func saveExistingKey(_ apiKey: String) {
+    func saveExistingKey(_ apiKey: String) async {
         guard !isRunning else { return }
         isRunning = true
         notice = nil
         errorMessage = nil
         defer { isRunning = false }
+        var savedToKeychain = false
         do {
             try store.save(
                 apiKey: apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
             )
+            savedToKeychain = true
+            _ = try await ReaderRealtimeOpenAIClient.mintClientSecret()
             status = try store.status()
-            notice = "现有 Key 已存入 Apple Keychain；App 可独立直连 OpenAI，Safari 扩展由 App 共享授权"
+            notice = "Key 已存入 Apple Keychain，并已通过 OpenAI Realtime 联通验证"
         } catch {
-            refresh()
-            errorMessage = error.localizedDescription
+            do {
+                status = try store.status()
+            } catch {
+                status = .missing
+            }
+            errorMessage = savedToKeychain
+                ? "Key 已保存，但 OpenAI 验证失败：\(error.localizedDescription)"
+                : error.localizedDescription
         }
     }
 
@@ -93,6 +102,25 @@ final class ReaderNativeRealtimeBridge:
         Task { @MainActor in
             do {
                 switch action {
+                case "call":
+                    guard Set(body.keys).isSubset(
+                        of: ["action", "sdp", "file", "page"]
+                    ),
+                    let sdp = body["sdp"] as? String else {
+                        throw ReaderRealtimeCredentialError.invalidRequest
+                    }
+                    let call = try await ReaderRealtimeOpenAIClient.openCall(
+                        sdp: sdp
+                    )
+                    replyHandler([
+                        "ok": true,
+                        "sdp": call.answerSDP,
+                        "call_id": call.callID,
+                        "client_secret": call.clientSecret,
+                        "model": call.model,
+                        "rt_image": call.rtImage,
+                        "compact_tokens": call.compactTokens,
+                    ], nil)
                 case "mint":
                     guard Set(body.keys).isSubset(of: ["action", "file", "page"])
                     else {
