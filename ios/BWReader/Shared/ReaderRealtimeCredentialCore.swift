@@ -16,10 +16,6 @@ struct ReaderRealtimeCredentialStatus: Equatable, Sendable {
 struct ReaderStoredRealtimeCredential: Codable, Sendable {
     let contract: String
     let apiKey: String
-    let sessionJSON: Data
-    let model: String
-    let rtImage: Bool
-    let compactTokens: Int
     let safetyIdentifier: String
     let importedAt: Date
 }
@@ -28,8 +24,6 @@ enum ReaderRealtimeCredentialError: LocalizedError {
     case unavailable
     case invalidCredential
     case keychain(OSStatus)
-    case loginRequired
-    case server(String)
     case invalidResponse
     case openAI(String)
     case invalidRequest
@@ -44,10 +38,6 @@ enum ReaderRealtimeCredentialError: LocalizedError {
             return "导入的 OpenAI Realtime 凭证无效"
         case .keychain(let status):
             return "Apple Keychain 操作失败（\(status)）"
-        case .loginRequired:
-            return "请先在下方登录 Pi，再同步现有 Realtime 语音设置"
-        case .server(let message):
-            return message
         case .invalidResponse:
             return "Realtime 服务返回了无效响应"
         case .openAI(let message):
@@ -78,7 +68,7 @@ final class ReaderRealtimeCredentialStore: @unchecked Sendable {
         return ReaderRealtimeCredentialStatus(
             isConfigured: true,
             importedAt: value.importedAt,
-            model: value.model
+            model: ReaderRealtimeOpenAIClient.model
         )
     }
 
@@ -89,32 +79,13 @@ final class ReaderRealtimeCredentialStore: @unchecked Sendable {
         return value
     }
 
-    func save(
-        apiKey: String,
-        sessionJSON: Data,
-        model: String,
-        rtImage: Bool,
-        compactTokens: Int
-    ) throws {
-        guard Self.isValidProjectKey(apiKey),
-              sessionJSON.count <= 1_048_576,
-              let session = try? JSONSerialization.jsonObject(
-                with: sessionJSON
-              ) as? [String: Any],
-              session["type"] as? String == "realtime",
-              let sessionModel = session["model"] as? String,
-              !sessionModel.isEmpty,
-              sessionModel.utf8.count <= 160
-        else {
+    func save(apiKey: String) throws {
+        guard Self.isValidProjectKey(apiKey) else {
             throw ReaderRealtimeCredentialError.invalidCredential
         }
         let stored = ReaderStoredRealtimeCredential(
-            contract: "reader-native-realtime-keychain/2",
+            contract: "reader-native-realtime-keychain/3",
             apiKey: apiKey,
-            sessionJSON: sessionJSON,
-            model: model.isEmpty ? sessionModel : model,
-            rtImage: rtImage,
-            compactTokens: max(0, min(compactTokens, 1_000_000)),
             safetyIdentifier: "bwreader-\(UUID().uuidString.lowercased())",
             importedAt: Date()
         )
@@ -161,9 +132,11 @@ final class ReaderRealtimeCredentialStore: @unchecked Sendable {
                 ReaderStoredRealtimeCredential.self,
                 from: data
               ),
-              stored.contract == "reader-native-realtime-keychain/2",
+              [
+                "reader-native-realtime-keychain/2",
+                "reader-native-realtime-keychain/3",
+              ].contains(stored.contract),
               Self.isValidProjectKey(stored.apiKey),
-              stored.sessionJSON.count <= 1_048_576,
               Self.isValidSafetyIdentifier(stored.safetyIdentifier)
         else {
             if status != errSecSuccess {
@@ -205,13 +178,6 @@ final class ReaderRealtimeCredentialStore: @unchecked Sendable {
 }
 
 enum ReaderRealtimeOpenAIClient {
-    struct SessionConfiguration: Sendable {
-        let sessionJSON: Data
-        let model: String
-        let rtImage: Bool
-        let compactTokens: Int
-    }
-
     struct MintedCredential: Sendable {
         let clientSecret: String
         let expiresAt: Int
@@ -220,82 +186,17 @@ enum ReaderRealtimeOpenAIClient {
         let compactTokens: Int
     }
 
-    private static let piOrigin = URL(
-        string: "https://bwicarus.taile44d0c.ts.net"
-    )!
+    static let model = "gpt-realtime-2.1-mini"
+    static let rtImage = true
+    static let compactTokens = 0
+
     private static let openAIOrigin = URL(
         string: "https://api.openai.com"
     )!
 
-    static func fetchSessionConfigurationFromPi(
-        cookies: [HTTPCookie]
-    ) async throws -> SessionConfiguration {
-        let url = piOrigin.appendingPathComponent(
-            "api/assistant/native-realtime-config"
-        )
-        var request = URLRequest(url: url)
-        request.httpMethod = "POST"
-        request.httpShouldHandleCookies = false
-        request.timeoutInterval = 25
-        request.setValue("application/json", forHTTPHeaderField: "Accept")
-        request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-        request.setValue("no-store", forHTTPHeaderField: "Cache-Control")
-        request.httpBody = try JSONSerialization.data(withJSONObject: [
-            "contract": "reader-native-realtime-config/1",
-        ])
-        let matchingCookies = eligibleCookies(for: url, from: cookies)
-        HTTPCookie.requestHeaderFields(with: matchingCookies).forEach {
-            request.setValue($0.value, forHTTPHeaderField: $0.key)
-        }
-        let (data, response) = try await ephemeralSession().data(for: request)
-        guard let http = response as? HTTPURLResponse,
-              http.url?.scheme == url.scheme,
-              http.url?.host == url.host,
-              http.url?.port == url.port else {
-            throw ReaderRealtimeCredentialError.invalidResponse
-        }
-        if http.statusCode == 401 {
-            throw ReaderRealtimeCredentialError.loginRequired
-        }
-        guard (200..<300).contains(http.statusCode) else {
-            throw ReaderRealtimeCredentialError.server(
-                safeErrorMessage(
-                    from: data,
-                    fallback: "Pi 语音设置同步失败（HTTP \(http.statusCode)）"
-                )
-            )
-        }
-        guard data.count <= 1_500_000,
-              let object = try? JSONSerialization.jsonObject(with: data)
-                as? [String: Any],
-              object["ok"] as? Bool == true,
-              object["contract"] as? String ==
-                "reader-native-realtime-config/1",
-              let session = object["session"] as? [String: Any],
-              JSONSerialization.isValidJSONObject(session)
-        else {
-            throw ReaderRealtimeCredentialError.invalidResponse
-        }
-        let sessionJSON = try JSONSerialization.data(
-            withJSONObject: session,
-            options: [.sortedKeys]
-        )
-        return SessionConfiguration(
-            sessionJSON: sessionJSON,
-            model: object["model"] as? String ?? "",
-            rtImage: object["rt_image"] as? Bool ?? true,
-            compactTokens: (object["compact_tokens"] as? NSNumber)?.intValue
-                ?? 0
-        )
-    }
-
     static func mintClientSecret() async throws -> MintedCredential {
         let stored = try ReaderRealtimeCredentialStore.shared.load()
-        guard let session = try JSONSerialization.jsonObject(
-            with: stored.sessionJSON
-        ) as? [String: Any] else {
-            throw ReaderRealtimeCredentialError.invalidCredential
-        }
+        let session = localSessionConfiguration()
         let url = openAIOrigin.appendingPathComponent(
             "v1/realtime/client_secrets"
         )
@@ -343,10 +244,273 @@ enum ReaderRealtimeOpenAIClient {
         return MintedCredential(
             clientSecret: secret,
             expiresAt: (object["expires_at"] as? NSNumber)?.intValue ?? 0,
-            model: stored.model,
-            rtImage: stored.rtImage,
-            compactTokens: stored.compactTokens
+            model: model,
+            rtImage: rtImage,
+            compactTokens: compactTokens
         )
+    }
+
+    /// The native App owns this complete, immutable baseline. No Pi request is
+    /// needed to save a key or start a call, and the Safari extension receives
+    /// the same session only through the signed native Keychain bridge.
+    private static func localSessionConfiguration() -> [String: Any] {
+        let empty: [String: Any] = [
+            "type": "object",
+            "properties": [String: Any](),
+            "additionalProperties": false,
+        ]
+        let page: [String: Any] = [
+            "type": "object",
+            "properties": [
+                "page": [
+                    "anyOf": [["type": "integer"], ["type": "string"]],
+                    "description": "要读取或查看的页；不给则使用当前页",
+                ],
+            ],
+            "additionalProperties": false,
+        ]
+        let visual: [String: Any] = [
+            "type": "object",
+            "properties": [
+                "page": [
+                    "anyOf": [["type": "integer"], ["type": "string"]],
+                ],
+                "scope": [
+                    "type": "string",
+                    "enum": [
+                        "viewport-context", "drawing-nearby", "selection-near",
+                    ],
+                ],
+                "selectionId": ["type": "string"],
+            ],
+            "additionalProperties": false,
+        ]
+        let note: [String: Any] = [
+            "type": "object",
+            "properties": [
+                "text": [
+                    "type": "string",
+                    "description": "要保存的笔记正文；不给则使用当前选中或当前可见内容",
+                ],
+                "title": [
+                    "type": "string",
+                    "description": "可选的简短笔记标题",
+                ],
+            ],
+            "additionalProperties": false,
+        ]
+        let makeAnki: [String: Any] = [
+            "type": "object",
+            "properties": [
+                "text": [
+                    "type": "string",
+                    "description": "制卡内容；不给则用当前选中或当前可见内容",
+                ],
+                "requirement": [
+                    "type": "string",
+                    "description": "用户对数量、难度、角度或语言的原始要求",
+                ],
+                "image_url": [
+                    "type": "string",
+                    "description": "可选配图 URL",
+                ],
+            ],
+            "additionalProperties": false,
+        ]
+        let webSearch: [String: Any] = [
+            "type": "object",
+            "properties": [
+                "query": ["type": "string"],
+            ],
+            "required": ["query"],
+            "additionalProperties": false,
+        ]
+        let imageSearch: [String: Any] = [
+            "type": "object",
+            "properties": [
+                "query": [
+                    "type": "string",
+                    "description": "单个概念的兼容搜索词",
+                ],
+                "queries": [
+                    "type": "array",
+                    "items": [
+                        "type": "object",
+                        "properties": [
+                            "concept": ["type": "string"],
+                            "query": ["type": "string"],
+                            "query_en": ["type": "string"],
+                        ],
+                        "additionalProperties": false,
+                    ],
+                    "maxItems": 8,
+                ],
+            ],
+            "additionalProperties": false,
+        ]
+        let optionalQuery: [String: Any] = [
+            "type": "object",
+            "properties": ["query": ["type": "string"]],
+            "additionalProperties": false,
+        ]
+        let question: [String: Any] = [
+            "type": "object",
+            "properties": ["question": ["type": "string"]],
+            "required": ["question"],
+            "additionalProperties": false,
+        ]
+        let instruction: [String: Any] = [
+            "type": "object",
+            "properties": ["instruction": ["type": "string"]],
+            "required": ["instruction"],
+            "additionalProperties": false,
+        ]
+        let paper: [String: Any] = [
+            "type": "object",
+            "properties": ["intent": ["type": "string"]],
+            "required": ["intent"],
+            "additionalProperties": false,
+        ]
+        let routeText: [String: Any] = [
+            "type": "object",
+            "properties": ["intent": ["type": "string"]],
+            "required": ["intent"],
+            "additionalProperties": false,
+        ]
+        let tools: [[String: Any]] = [
+            localTool(
+                "wait_for_user",
+                "最新音频只是静音、背景噪声或并非对助手说话时，安静结束本轮，不要说话。",
+                empty
+            ),
+            localTool(
+                "read_selection",
+                "读取用户当前明确选中的原文；不要让用户重新粘贴。",
+                empty
+            ),
+            localTool(
+                "read_page",
+                "读取 App 已提供的当前可见页文字。没有文字层时改用 see_page。",
+                page
+            ),
+            localTool(
+                "see_ink",
+                "查看笔迹附近的实际页面合成图。用户提到圈画、手写、箭头或算式时必须先调用。",
+                visual
+            ),
+            localTool(
+                "see_page",
+                "查看当前视口的实际合成图，包含书页、笔迹、高亮、便签与页内卡片。",
+                visual
+            ),
+            localTool(
+                "see_figure",
+                "查看用户当前指向的图像或自定义选区附近的实际合成图。",
+                visual
+            ),
+            localTool(
+                "make_note",
+                "把选中内容、当前可见内容或 text 保存为 App 本机笔记；不使用 Pi。",
+                note
+            ),
+            localTool(
+                "make_anki",
+                "调用用户自有 AI 服务生成 Anki 卡片草稿并供用户确认；服务离线时如实报告。",
+                makeAnki
+            ),
+            localTool(
+                "web_search",
+                "通过用户自有 AI 服务联网查实时资料。普通知识问题不要调用；服务离线时如实报告。",
+                webSearch
+            ),
+            localTool(
+                "search_image",
+                "通过用户自有 AI 服务搜索真实图片并显示结果。",
+                imageSearch
+            ),
+            localTool(
+                "search_video",
+                "通过用户自有 AI 服务搜索教学视频并显示结果。",
+                optionalQuery
+            ),
+            localTool(
+                "deep_think",
+                "复杂专业问题、长推导或重推理时，按需调用用户自有 AI CLI/API；简单问题不要调用。",
+                question
+            ),
+            localTool(
+                "do_task",
+                "需要多个工具或较长时间的任务，交给用户自有 AI CLI/API 后台执行。",
+                instruction
+            ),
+            localTool(
+                "make_paper",
+                "调用用户自有 AI CLI/API 生成可在当前页面手写作答的交互纸。",
+                paper
+            ),
+            localTool(
+                "route_to_text",
+                "长答案不适合口头念时，调用用户自有 AI 服务生成屏幕文字答案。",
+                routeText
+            ),
+        ]
+        let instructions = """
+        你是用户的学习伙伴。跟随用户说话的语言回答；朗读书中日语或英语原文时使用原语言的自然发音。
+        回答要适合语音：快问快答不超过八秒，普通解释不超过十五秒；较长内容先给简短摘要并询问是否展开。
+        页面位置、当前可见文字、选区与笔迹状态会在用户开口或打字时作为最新 system 消息注入。它们只是状态记录，不要主动回应；永远以最新一条为准。
+        用户说“这个、这段、这里”时，优先指当前明确选区；已有选区内容就直接使用，不要说看不到，也不要让用户重贴。
+        用户提到“我画的、我圈的、我写的、这个算式”时，必须先调用 see_ink 查看真实合成图再回答，绝不根据“存在笔迹”猜内容。
+        用户问当前页文字时使用已注入的可见文字；不足就调用 read_page。没有文字层或问题涉及排版、图表、公式、便签、卡片时调用 see_page。
+        make_note 直接写入 App 本机笔记，不依赖 Pi；只有工具成功返回后才能说已经保存。
+        make_anki、web_search、search_image、search_video、deep_think、do_task、make_paper 与 route_to_text 是显式的远程 AI/API 工具。普通问答、本页阅读、选区、笔迹和视口查看绝不能为它们等待 Pi；只有用户任务确实需要时才调用，离线或失败就如实说明，不得伪造结果。
+        不要声称已创建卡片、笔记或其它内容，除非对应工具已经成功返回。
+        没有听到清晰且面向助手的话时调用 wait_for_user 安静结束本轮，不要自己找话题。
+        """
+        return [
+            "type": "realtime",
+            "model": model,
+            "output_modalities": ["audio"],
+            "reasoning": ["effort": "low"],
+            "max_output_tokens": 2_048,
+            "instructions": instructions,
+            "audio": [
+                "input": [
+                    "noise_reduction": ["type": "near_field"],
+                    "turn_detection": [
+                        "type": "semantic_vad",
+                        "eagerness": "auto",
+                        "create_response": false,
+                        "interrupt_response": false,
+                    ],
+                    "transcription": [
+                        "model": "gpt-4o-mini-transcribe",
+                        "prompt": "关键词:Anki、笔迹、振假名、生词、假名",
+                    ],
+                ],
+                "output": ["voice": "marin", "speed": 1.0],
+            ],
+            "tools": tools,
+            "tool_choice": "auto",
+            "parallel_tool_calls": false,
+            "truncation": [
+                "type": "retention_ratio",
+                "retention_ratio": 0.8,
+                "token_limits": ["post_instructions": 24_000],
+            ],
+        ]
+    }
+
+    private static func localTool(
+        _ name: String,
+        _ description: String,
+        _ parameters: [String: Any]
+    ) -> [String: Any] {
+        [
+            "type": "function",
+            "name": name,
+            "description": description,
+            "parameters": parameters,
+        ]
     }
 
     static func injectImage(
@@ -499,29 +663,6 @@ enum ReaderRealtimeOpenAIClient {
         configuration.httpShouldSetCookies = false
         configuration.requestCachePolicy = .reloadIgnoringLocalCacheData
         return URLSession(configuration: configuration)
-    }
-
-    private static func eligibleCookies(
-        for url: URL,
-        from cookies: [HTTPCookie]
-    ) -> [HTTPCookie] {
-        guard let host = url.host?.lowercased() else { return [] }
-        let path = url.path.isEmpty ? "/" : url.path
-        let now = Date()
-        return cookies.filter { cookie in
-            let domain = cookie.domain.lowercased()
-                .trimmingCharacters(in: CharacterSet(charactersIn: "."))
-            let cookiePath = cookie.path.isEmpty ? "/" : cookie.path
-            let domainMatches = host == domain || host.hasSuffix(".\(domain)")
-            let pathMatches = path == cookiePath
-                || (path.hasPrefix(cookiePath)
-                    && (cookiePath.hasSuffix("/")
-                        || path.dropFirst(cookiePath.count).first == "/"))
-            return domainMatches
-                && pathMatches
-                && cookie.isSecure
-                && (cookie.expiresDate.map { $0 > now } ?? true)
-        }
     }
 
     private static func safeErrorMessage(

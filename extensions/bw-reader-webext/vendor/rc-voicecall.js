@@ -2825,6 +2825,16 @@ if (window.__bwPwaProviderOnly) return;
   var _rtc = { pc: null, dc: null, el: null, mic: null, on: false, imgOn: false, callId: '', nativeDirect: false,
                sidebandKey: '', ctxFile: '', ctxPage: 0, ink: null, sel: '', _inkFp: '', inkDirty: false,
                items: [], inTok: 0, compactTh: 0, lastCompact: 0 };   // ㊳:item 账本+每轮输入量+会话内压缩阈值
+  // App Realtime 的普通会话完全本机运行。只有这些明确需要联网模型、搜索
+  // 或现有 Anki/CLI 后端的工具，才允许按需调用用户自己的 Pi AI API；Pi
+  // 离线不会影响通话建立、选区、页面、笔迹、视口图或本机笔记。
+  var NATIVE_REALTIME_PI_AI_TOOLS = new Set([
+    'make_anki', 'web_search', 'search_image', 'search_video',
+    'deep_think', 'do_task', 'make_paper', 'route_to_text'
+  ]);
+  function _nativeRealtimePiAITool(name) {
+    return NATIVE_REALTIME_PI_AI_TOOLS.has(String(name || ''));
+  }
   function _dcSend(obj) { try { if (_rtc.dc && _rtc.dc.readyState === 'open') _rtc.dc.send(JSON.stringify(obj)); } catch (e) {} }
   function _rtcSys(text) {
     _dcSend({ type: 'conversation.item.create', item: { type: 'message', role: 'system', content: [{ type: 'input_text', text: text }] } });
@@ -4467,6 +4477,7 @@ if (window.__bwPwaProviderOnly) return;
   // 创造物库清单(与文字侧同源:/api/assistant/creations-brief → _creations_recent_line)。
   //   stale-while-revalidate:开口时用缓存注入,距上次拉取 >15s 就后台刷新;工具完成(_chipEnd)也刷新。
   function _rtcCreFetch() {
+    if (_rtc.nativeDirect) return;
     var now = Date.now();
     if (now - (_rtcCreFetch._t || 0) < 15000) return;
     _rtcCreFetch._t = now;
@@ -4474,6 +4485,7 @@ if (window.__bwPwaProviderOnly) return;
       .then(function (d) { if (d && d.ok) _rtc.creLine = d.line || ''; }).catch(function () {});
   }
   function _rtcFetchPageText(pk) {   // 页文本兜底拉取(去重:同 key 只飞一发)
+    if (_rtc.nativeDirect) return;
     if (_rtc._ptBusy === pk) return;
     _rtc._ptBusy = pk;
     var _f = pk.slice(0, pk.lastIndexOf(':')), _p = pk.slice(pk.lastIndexOf(':') + 1);
@@ -4487,6 +4499,7 @@ if (window.__bwPwaProviderOnly) return;
     //   跨海往返,短问题时注入常赶不上 VAD 判完,模型只好凭空答(截图里"谁"那次就是)。
     try {
       var vt = _rtc.pendText || '';
+      if (!vt && _rtc.nativeDirect) vt = _nativeRealtimePageText();
       if (!vt && _rtc.ctxFile && _rtc.ctxPage) {   // 扫描书/图片模式:前端可见文本采不到 → 服务端 _page_text 兜底(OCR+钉入便签/卡片注入)
         // 用户注入策略(2026-07-20):翻到页后停留 ≥8s(在读)且 ≤12min(话题还新鲜)→ 开口注入;窗外不注入省 token(模型可 read_page)
         var _dwell = Date.now() - (_rtc.pageTs || 0);
@@ -5218,16 +5231,60 @@ if (window.__bwPwaProviderOnly) return;
             _rtc.recentTools.splice(0, _rtc.recentTools.length - 6);
           }
         } catch (e) {}
-      } else if (_rtc.nativeDirect && name === 'read_page' && _nativeRealtimePageText()) {
+      } else if (_rtc.nativeDirect && name === 'read_page') {
         var localPageText = _nativeRealtimePageText();
         label = '读取当前页';
         res = { local_direct: true, page: _rtc.ctxPage, text: localPageText };
         out = JSON.stringify({
           page: _rtc.ctxPage,
           total: _rtc.ctxTotal || 0,
-          text: localPageText,
+          text: localPageText || '',
+          note: localPageText ? '' : '当前视口没有可用文字层；如需查看页面，请调用 see_page。',
           source: 'app-current-visible-text'
         }).slice(0, 6800);
+      } else if (_rtc.nativeDirect && name === 'read_selection') {
+        label = '读取选中';
+        res = { local_direct: true, selection: '' };
+        out = JSON.stringify({
+          selection: '',
+          note: '当前没有选中文字。'
+        });
+      } else if (_rtc.nativeDirect && name === 'make_note') {
+        var noteText = String(args.text || _rtc.sel || _nativeRealtimePageText() || '').trim();
+        if (!noteText) throw new Error('当前没有可保存的选中内容或可见文字');
+        var noteTitle = String(args.title || '').trim();
+        if (!noteTitle) {
+          var noteBook = String(_rtc.ctxFile || '').split(/[\\/]/).pop()
+            .replace(/\.[^.]+$/, '').trim();
+          var noteTime = new Date().toISOString().slice(0, 16)
+            .replace('T', ' ').replace(':', '-');
+          noteTitle = '语音笔记 · ' + (noteBook || '当前页面') + ' · ' + noteTime;
+        }
+        var notePage = Number(_rtc.ctxPage);
+        if (!Number.isFinite(notePage) || notePage < 0) notePage = 0;
+        var noteResponse = await fetch('/pdf/api/to-note', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            name: noteTitle.slice(0, 240), text: noteText.slice(0, 240000),
+            file: String(_rtc.ctxFile || '').slice(0, 8000), page: Math.trunc(notePage)
+          })
+        });
+        var noteRaw = await noteResponse.text();
+        var noteResult = {};
+        try { noteResult = noteRaw ? JSON.parse(noteRaw) : {}; } catch (e) {}
+        if (!noteResponse.ok || !noteResult || noteResult.ok !== true) {
+          throw new Error((noteResult && noteResult.error) ||
+            ('本机笔记保存失败 (HTTP ' + noteResponse.status + ')'));
+        }
+        label = '保存本机笔记';
+        res = Object.assign({ local_direct: true }, noteResult);
+        out = JSON.stringify({
+          ok: true, saved: true, owner: 'native-app',
+          note_path: noteResult.note_path || '',
+          message: '笔记已保存到 App 配置的本机笔记目录。'
+        });
+      } else if (_rtc.nativeDirect && !_nativeRealtimePiAITool(name)) {
+        throw new Error('App 本机直连模式未开放该工具: ' + name);
       } else if (name === 'deep_think') {
         out = await _rtcDeep(String(args.question || ''));
         label = '深度思考';
@@ -5348,6 +5405,7 @@ if (window.__bwPwaProviderOnly) return;
   //   触发判据=每轮 input_tokens(usage 实时监控,cached 也要按 cached 价反复付)超过阈值——
   //   此时"历史携带成本×剩余轮次"必然超过一次性缓存失效(摘要+近几轮全价),压缩更便宜。
   async function _rtcCompactNow(urgent) {
+    if (_rtc.nativeDirect) return;
     if (!urgent && Date.now() - (_rtc.lastCompact || 0) < 90000) return;   // 低频保护(cookbook:低频批量>高频零碎;紧急线豁免)
     if (_rtc.items.length < 12) return;
     _rtc.lastCompact = Date.now();
@@ -5502,7 +5560,7 @@ if (window.__bwPwaProviderOnly) return;
       // ㊸b 承诺核查(用户设计:语音模型只是扳机、不产卡片内容——察觉"说了做卡却没调工具"时,
       // **程序直接替它把工具真调了**,种子=本轮对话上下文,后台制卡模型自己判断做什么卡;
       // 不再让语音模型多走一轮(那只是白烧一轮音频输出费),只留一条零成本 system 记录让它知道)
-      if (!_rtc.turnTool && !_rtc.turnToolAny && /已经?[^。]{0,14}(整理成|做成|放进|加进|做好)[^。]{0,10}(卡片|カード|笔记|ノート)|(卡片|笔记)[^。]{0,4}(做好了|已做好|已生成|已入库|放进后台)/.test(curAText)   // 155b:裸'卡片…已'误伤'天气卡片里已经给出'(用户截图)——收紧为明确制作动作
+      if (!_rtc.nativeDirect && !_rtc.turnTool && !_rtc.turnToolAny && /已经?[^。]{0,14}(整理成|做成|放进|加进|做好)[^。]{0,10}(卡片|カード|笔记|ノート)|(卡片|笔记)[^。]{0,4}(做好了|已做好|已生成|已入库|放进后台)/.test(curAText)   // 155b:裸'卡片…已'误伤'天气卡片里已经给出'(用户截图)——收紧为明确制作动作
           && Date.now() - (_rtc.scoldT || 0) > 60000) {
         _rtc.scoldT = Date.now();
         (function () {
@@ -5537,7 +5595,7 @@ if (window.__bwPwaProviderOnly) return;
       try { var u = e.response && e.response.usage;
             if (u) {
               u._model = _rtc.model || 'mini';   // ㊶:记账按模型选价表
-              fetch('/api/assistant/rtc-usage', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(u), keepalive: true });
+              if (!_rtc.nativeDirect) fetch('/api/assistant/rtc-usage', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(u), keepalive: true });
               // ㊷ §12 告警:会话接近 60 分钟硬上限(到点 OpenAI 断线,_rtcDead 会自动重连+摘要回放,但提前知会更体面)
               if (!_rtc.warned && _rtc.t0 && Date.now() - _rtc.t0 > 55 * 60000) {
                 _rtc.warned = 1;
@@ -5552,6 +5610,7 @@ if (window.__bwPwaProviderOnly) return;
     }
   }
   async function _rtcInjectHistory() {   // ㉞ 重连历史回放 → ㊲ 压缩视图:摘要(旧轮次的滚动压缩)+近几轮原文,
+    if (_rtc.nativeDirect) return;
     try {                                //   替代全量原文灌注(官方指南 8.4 形态,省上下文)
       var hu = (window.__asstHistUrl && window.__asstHistUrl()) || '/api/assistant/history';   // ㉟:经侧栏同一端点(EPUB=本书 epub-convo)
       hu += (hu.indexOf('?') >= 0 ? '&' : '?') + 'compact=1';
@@ -5744,27 +5803,23 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   async function _openDirectRtcCall(sdp, file, page) {
-    var tokenRes = null, nativeDirect = false, nativeError = null;
+    var tokenRes = null, nativeDirect = false;
+    var appRequiresNative = window.__BW_NATIVE_LOCAL_READER__ === true;
     if (window.__BW_NATIVE_OPENAI_REALTIME__ === true) {
-      try {
-        tokenRes = await _nativeRealtimeRequest({
-          action: 'mint', file: file || '', page: page || 0
-        });
-        nativeDirect = !!(tokenRes && tokenRes.ok);
-      } catch (error) {
-        nativeError = error;
+      tokenRes = await _nativeRealtimeRequest({
+        action: 'mint', file: file || '', page: page || 0
+      });
+      nativeDirect = !!(tokenRes && tokenRes.ok);
+      if (!nativeDirect) {
+        throw new Error((tokenRes && tokenRes.error) || 'App 原生 Realtime 临时凭证签发失败');
       }
-    }
-    if (!tokenRes || !tokenRes.ok) {
-      try {
-        tokenRes = await (await fetch('/api/assistant/rtc-client-secret', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ file: file || '', page: page || 0 })
-        })).json();
-      } catch (error) {
-        if (nativeError) throw nativeError;
-        throw error;
-      }
+    } else if (appRequiresNative) {
+      throw new Error('App 原生 Realtime 桥尚未就绪');
+    } else {
+      tokenRes = await (await fetch('/api/assistant/rtc-client-secret', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file: file || '', page: page || 0 })
+      })).json();
     }
     if (!tokenRes || !tokenRes.ok || !/^ek_[A-Za-z0-9_-]{8,4096}$/.test(String(tokenRes.client_secret || ''))) {
       throw new Error((tokenRes && tokenRes.error) || 'Realtime 临时凭证签发失败');
@@ -6128,6 +6183,7 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   function teardown(closeBox, preserveComputerGesture) {
+    var wasNativeRealtime = !!_rtc.nativeDirect;
     // 从普通电话切到电脑按钮时，捕获阶段刚取得的 iOS 可信手势必须原样保留；
     // setDialPending(false) 本身也会释放 prepared surface，不能只跳过 cancel。
     if (!preserveComputerGesture) {
@@ -6163,10 +6219,12 @@ if (window.__bwPwaProviderOnly) return;
     _lastU = ''; try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (e) {}   // ㉛:挂断断轮,下次通话开新气泡
     // ㊲ 挂断=空闲期做功:后台触发历史压缩(fire-and-forget;后端幂等——轮次不够/已清空都会跳过,
     //    竞态守卫防"清空后压缩把记忆复活");下次开话回放"摘要+近几轮"而非全量原文
-    try {
-      fetch('/api/assistant/compact-history', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
-        body: JSON.stringify({ file: (toggle._opts || {}).file || '' }) }).catch(function () {});
-    } catch (e) {}
+    if (!wasNativeRealtime) {
+      try {
+        fetch('/api/assistant/compact-history', { method: 'POST', headers: { 'Content-Type': 'application/json' }, keepalive: true,
+          body: JSON.stringify({ file: (toggle._opts || {}).file || '' }) }).catch(function () {});
+      } catch (e) {}
+    }
     vt.sent = 0; vt.tail = ''; vt.pref = ''; pendingUtter = null; activeUtter = '';
     capClear();   // 挂断:字幕/等待指示一并收掉
     callBtnOn(false); callBtnSpeaking(false);
@@ -6430,6 +6488,17 @@ if (window.__bwPwaProviderOnly) return;
   }
   toggle._connect = function (opts) {
     if (_reviewVoiceGate(false)) return;
+    // Installed App/Safari always use the App-owned OpenAI Realtime path for
+    // the ordinary phone button. This check must precede the legacy `mode`
+    // branch, whose default `agent` value otherwise diverts the App to Pi.
+    if (window.__BW_NATIVE_LOCAL_READER__ === true ||
+        window.__BW_NATIVE_OPENAI_REALTIME__ === true) {
+      if (_computerVoiceStarting || _computerVoiceActive()) {
+        _stopComputerVoiceOnly('ordinary-voice-start');
+      }
+      rtcStart(opts);
+      return;
+    }
     if (mode !== 's2s') {
       if (mode === 'agent' && _nativeAgentAvailable()) _nativeAgentStart(opts);
       else start(opts);

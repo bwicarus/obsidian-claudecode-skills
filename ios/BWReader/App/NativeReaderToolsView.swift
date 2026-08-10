@@ -320,24 +320,18 @@ struct NativeReaderToolsView: View {
                 .font(.system(.body, design: .monospaced))
 
             Button {
-                Task {
-                    let cookies = await reader.remoteLibraryCookies()
-                    await realtimeCredentials.saveExistingKey(
-                        realtimeKeyDraft,
-                        cookies: cookies
-                    )
-                    if realtimeCredentials.errorMessage == nil,
-                       realtimeCredentials.status.isConfigured {
-                        realtimeKeyDraft = ""
-                    }
+                realtimeCredentials.saveExistingKey(realtimeKeyDraft)
+                if realtimeCredentials.errorMessage == nil,
+                   realtimeCredentials.status.isConfigured {
+                    realtimeKeyDraft = ""
                 }
             } label: {
                 Label(
                     realtimeCredentials.isRunning
-                        ? "正在保存并同步语音设置…"
+                        ? "正在保存…"
                         : (realtimeCredentials.status.isConfigured
-                            ? "替换 Key 并同步语音设置"
-                            : "保存 Key 并同步语音设置"),
+                            ? "替换 App Key"
+                            : "保存 App Key"),
                     systemImage: "key.fill"
                 )
             }
@@ -373,12 +367,12 @@ struct NativeReaderToolsView: View {
                 }
                 .disabled(realtimeCredentials.isRunning)
             } else {
-                Text("未保存；请先在 App 中输入一次现有 Key，App 与 Safari 扩展才可脱离 Pi 使用普通 Realtime。")
+                Text("未保存；请先在 App 中输入一次现有 Key。App 会独立直连 OpenAI，Safari 扩展只使用 App 共享的授权。")
                     .font(.caption)
                     .foregroundStyle(.secondary)
             }
 
-            Text("Key 只在这个 App 中输入并写入 Apple Keychain；Safari 扩展只由原生进程共享读取，Key 不会发送给 Pi，也不会进入 Reader 网页、扩展 JavaScript、代码、构建产物或日志。保存时 Pi 仅同步一次不含密钥的现有语音设置，之后语音、选区与笔迹合成图可脱离 Pi 直接连接 OpenAI。")
+            Text("Key 只在这个 App 中输入并写入 Apple Keychain；Safari 扩展只由签名的原生进程共享读取。App 保存、启动通话、注入选区与发送笔迹/视口合成图都不连接 Pi；Key 也不会进入 Reader 网页、扩展 JavaScript、代码、构建产物或日志。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
@@ -738,7 +732,7 @@ struct NativeReaderToolsView: View {
                 }
             }
 
-            Text("关闭时继续使用原有 Pi 笔记线路；开启后，App 与 Safari 扩展共享创建、查看和读取能力。扩展创建的内容会先安全排队，再由 App 自动写入所选 Vault。请选择 Vault 根目录，以便 Obsidian 链接能够正确打开。")
+            Text("App 与 Safari 扩展只使用本机笔记线路，不会回落 Pi。开启后两端共享创建、查看和读取能力；扩展创建的内容会先安全排队，再由 App 自动写入所选 Vault。请选择 Vault 根目录，以便 Obsidian 链接能够正确打开。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
 

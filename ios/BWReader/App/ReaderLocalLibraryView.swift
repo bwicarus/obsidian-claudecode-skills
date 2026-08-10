@@ -29,7 +29,10 @@ struct ReaderLocalLibraryView: View {
     @StateObject private var nativeOCR = NativeBookOCRManager.shared
     @StateObject private var piOCR = ReaderPiOCRCoordinator()
     @StateObject private var recognitionPreferences = ReaderTextRecognitionPreferences.shared
-    @State private var selectedSource = ReaderLibrarySource.all
+    // The shelf opens on the App-owned library. Pi is an explicit backup and
+    // processing source, so merely opening the shelf must not start a network
+    // request or make local books wait for remote status.
+    @State private var selectedSource = ReaderLibrarySource.local
     @State private var presentsFolderPicker = false
     @State private var searchText = ""
     @State private var ocrActionBookID: String?
@@ -116,7 +119,6 @@ struct ReaderLocalLibraryView: View {
                 case .success(let url):
                     Task {
                         await library.configureFolder(url)
-                        await refreshRemote()
                     }
                 case .failure(let error):
                     if (error as? CocoaError)?.code != .userCancelled {
@@ -125,6 +127,10 @@ struct ReaderLocalLibraryView: View {
                 }
             }
             .task { await refreshIfStale() }
+            .onChange(of: selectedSource) { _, source in
+                guard source != .local else { return }
+                Task { await refreshRemoteIfStale() }
+            }
             .onChange(of: nativeOCR.lastUpdate) { _, update in
                 guard update?.status.state == .failed else { return }
                 ocrErrorMessage = update?.status.message ?? "本机预处理失败"
@@ -972,18 +978,23 @@ struct ReaderLocalLibraryView: View {
     private func refreshIfStale() async {
         let now = Date()
         let localTTL: TimeInterval = 15 * 60
-        let remoteTTL: TimeInterval = 5 * 60
         if library.isConfigured,
            library.lastScannedAt.map({
              now.timeIntervalSince($0) >= localTTL
            }) ?? true {
             await library.rescan()
         }
-        if ReaderLibraryRefreshClock.lastAutomaticRemoteRefreshAt.map({
+        if selectedSource != .local { await refreshRemoteIfStale() }
+    }
+
+    @MainActor
+    private func refreshRemoteIfStale() async {
+        let now = Date()
+        let remoteTTL: TimeInterval = 5 * 60
+        guard ReaderLibraryRefreshClock.lastAutomaticRemoteRefreshAt.map({
             now.timeIntervalSince($0) >= remoteTTL
-        }) ?? true {
-            await refreshRemote()
-        }
+        }) ?? true else { return }
+        await refreshRemote()
     }
 
     @MainActor
@@ -992,10 +1003,10 @@ struct ReaderLocalLibraryView: View {
             await refreshIfStale()
             return
         }
-        if library.isConfigured {
+        if selectedSource != .pi, library.isConfigured {
             await library.rescan()
         }
-        await refreshRemote()
+        if selectedSource != .local { await refreshRemote() }
     }
 
     @MainActor

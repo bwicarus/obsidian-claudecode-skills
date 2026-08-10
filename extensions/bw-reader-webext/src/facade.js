@@ -596,9 +596,6 @@
         throw invalid('本机笔记请求正文无效');
       }
       const result = await bridge.createNote(body);
-      if (result?.handled === false && result.disposition === 'pi') {
-        return null;
-      }
       if (
         result?.handled !== true ||
         (result.disposition !== 'queued' && result.disposition !== 'committed') ||

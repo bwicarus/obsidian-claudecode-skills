@@ -1,7 +1,7 @@
 // 扩展后台:唯一接触 token 和 Pi API 的地方。网页脚本永远拿不到 token,也不能传任意 URL(只认固定操作名)。
 // ⚠ ORIGIN 指向**当前主力的 Pi**(Tailscale,iPad 走 Tailscale 访问,和现有 QA browser 一样);
 //   不是暂停的 VPS bwicarus.space(代码停在 2026-05-28)。要换服务器只改这一行 + manifest host_permissions。
-globalThis.__BW_READER_BACKGROUND_BUILD_VERSION = "0.2.81";
+globalThis.__BW_READER_BACKGROUND_BUILD_VERSION = "0.2.82";
 if (typeof importScripts === "function") {
   importScripts(
     "vendor/reader-runtime-account-context.js",
@@ -5309,21 +5309,6 @@ function normalizeNativeAppResponse(response, payload) {
     return normalized;
   }
   if (payload.action === "notes.create") {
-    if (response.handled === false) {
-      if (
-        !nativeAppExactKeys(response, [
-          "contract", "action", "requestId", "ok", "handled", "disposition"
-        ]) || response.disposition !== "pi"
-      ) {
-        throw nativeAppPublicError(
-          "BWReader App 本机笔记回落响应无效",
-          "BW_NATIVE_APP_RESPONSE_INVALID"
-        );
-      }
-      normalized.handled = false;
-      normalized.disposition = "pi";
-      return normalized;
-    }
     const queued = response.disposition === "queued";
     const committed = response.disposition === "committed";
     const pathKey = queued ? "plannedFileName" : "notePath";

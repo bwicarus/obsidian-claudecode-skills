@@ -146,49 +146,6 @@ class RealtimeDirectCredentialTest(unittest.TestCase):
             )
         self.assertEqual(limited.status_code, 429)
 
-    def test_native_config_returns_no_key_after_explicit_authenticated_post(self):
-        with patch.object(
-            assistant,
-            "_build_rtc_session",
-            return_value=(self.session_config(), 24000, True),
-        ):
-            rejected = self.client.post(
-                "/api/assistant/native-realtime-config",
-                json={},
-            )
-            response = self.client.post(
-                "/api/assistant/native-realtime-config",
-                json={"contract": "reader-native-realtime-config/1"},
-            )
-
-        self.assertEqual(rejected.status_code, 400)
-        self.assertEqual(response.status_code, 200)
-        self.assertEqual(response.headers.get("Cache-Control"), "no-store")
-        self.assertEqual(response.headers.get("Pragma"), "no-cache")
-        payload = response.get_json()
-        self.assertEqual(
-            payload["contract"],
-            "reader-native-realtime-config/1",
-        )
-        self.assertNotIn("api_key", payload)
-        self.assertEqual(payload["session"], self.session_config())
-        self.assertEqual(payload["compact_tokens"], 24000)
-        self.assertTrue(payload["rt_image"])
-
-        anonymous_app = Flask("native-realtime-config-anonymous")
-        anonymous_app.secret_key = "realtime-direct-contract"
-        anonymous_app.register_blueprint(assistant.bp)
-        anonymous = anonymous_app.test_client()
-        unauthenticated = anonymous.post(
-            "/api/assistant/native-realtime-config",
-            json={"contract": "reader-native-realtime-config/1"},
-        )
-        self.assertEqual(unauthenticated.status_code, 401)
-        self.assertEqual(
-            unauthenticated.headers.get("Cache-Control"),
-            "no-store",
-        )
-
     def test_image_sideband_uses_direct_calls_short_lived_identity(self):
         calls = []
 

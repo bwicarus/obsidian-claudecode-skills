@@ -106,10 +106,16 @@
   不能让不受信书籍样式覆盖 App 的可信 UI。
 - 共享网页组件负责卡片、便签、选区、侧栏和阅读交互；App 本机存储负责它们的数据真值，
   原生层负责 Pencil、语音、后台、文件、分享和系统入口。
-- 普通电话选择 OpenAI Realtime 时，App/扩展只向 Pi 申请短期 client secret，媒体与
-  `oai-events` DataChannel 由设备直连 OpenAI；Pi 仍保留同一 `call_id` 的只控 sideband，负责
-  页码、当前可见内容、选区、笔迹、截图和工具状态。不得因媒体直连删掉 `RC.voiceCtx`、
-  `setPage/syncState/syncInk` 或 `/voice-rt?mode=rtc`，也不得向页面暴露长期项目 key。
+- 普通电话选择 OpenAI Realtime 时，长期项目 key 只保存在 App 与 Safari 扩展共享的 Apple
+  Keychain access group。App/扩展原生进程用它向 OpenAI 申请短期 `ek_` client secret；页面只拿
+  短期凭证，SDP、麦克风和 `oai-events` DataChannel 由设备直连 OpenAI，禁止把长期 key 注入 JS、
+  URL、日志或快照。
+- App 本机书与 Safari 扩展的 Realtime 上下文也不经过 Pi：当前页文字、可见窗口、选区和笔迹状态
+  由本机 `RC.voiceCtx` 注入，`see_ink` / `see_page` / `see_figure` 的真实合成图由 App 原生桥送入
+  同一通话。App 或原生桥不可用时失败可见，禁止静默回落 `/rtc-client-secret`、`/voice-rt` 或其他
+  Pi 控制 sideband。本机 `make_note` 也只写 App；制卡、联网搜索、深度思考、后台 CLI、造纸和
+  长文路由可作为明示工具按需调用 Pi AI API，但不能反向成为 App 通话或本地工具的前置。
+  PWA/非 Safari 客户端可继续把 Pi 当显式 AI API。
 - 联网 AI、翻译或 Pi 同步失败只降级相应网络能力，不能令本机文档或本机修改不可用。
 
 ### PWA 真书
@@ -185,11 +191,10 @@ collection 就自动上传。无扩展真书 PWA 使用自己的本地 fallback�
 
 ### iOS App 的可选 Obsidian 笔记线路
 
-- 默认继续使用 Pi 的 `/pdf/api/to-note`；本地线路是每台设备单独开启的设置，不进入
-  `user-settings` 或 `sync-v3`。
+- `/pdf/api/to-note` 在 App 与 Safari 扩展中始终由 App 原生桥接管；用户选择 Vault 并开启后才写入，
+  未配置或关闭时明确失败，禁止回落 Pi。此设备级设置不进入 `user-settings` 或 `sync-v3`。
 - 开启后，BWReader App 接管其 WKWebView 中精确的 `/pdf/api/to-note` 请求；Safari 扩展
-  对同一路由使用严格的 `notes.create` 原生消息。两端共享创建、列表与读取能力，关闭时
-  原请求继续交给 Pi。
+  对同一路由使用严格的 `notes.create` 原生消息。两端共享创建、列表与读取能力。
 - 安全作用域 bookmark 只保存在 App 容器并只由 App 解析。Safari 扩展不得取得 bookmark
   或直接访问 Vault；扩展创建的笔记先原子写入 App Group outbox，并立即进入两端共享投影，
   再由持有目录权限的 App 自动落盘。相同 request ID 与相同正文均保持幂等，禁止失败时
@@ -216,8 +221,8 @@ collection 就自动上传。无扩展真书 PWA 使用自己的本地 fallback�
 ### PDF 预处理执行器与派生附件
 
 - App 的本机 Apple 识别、Pi 识别和 PC 识别是三个显式入口；任何失败都不能自动改派到另一端。
-  Pi 始终负责书库身份、任务协调和不可变附件发布，Windows worker 只建立出站 HTTPS 连接，
-  不开放入站端口，也不取得可写书库路径。
+  App 本机书 ID 与附件是本机真源；Pi 只协调用户明确提交到 Pi 的远端任务、备份及跨端同步，不能
+  成为本机/PC 识别结果被采用的必经中转。Windows worker 不开放公网入站，也不取得可写 Pi 书库路径。
 - Windows 侧统一托盘总控的正式产品名为“ReaderPC 服务器”。它只统一展示和控制语音、Reader
   上下文桥与 PC 预处理等独立子进程，不把故障域合并成一个进程；App 与扩展只查询一个本机状态
   入口。开机启动必须由用户显式开启，空闲时不得加载 OCR 模型或占用 GPU。

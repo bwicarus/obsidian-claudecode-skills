@@ -5,17 +5,21 @@
 
 ## 当前 Realtime 传输边界
 
-- iOS App 本机书与浏览器扩展的普通电话在选择 `openai_rtc` 时，先向已认证的 Pi 端点申请
-  短期 `ek_` client secret，再由设备把 SDP、麦克风和 `oai-events` DataChannel **直接连接**
-  `https://api.openai.com/v1/realtime/calls`；长期项目 key 永远留在 Pi。
-- 直连不等于删除 Pi：`/voice-rt?mode=rtc` 仍是同一个 `call_id` 的控制 sideband，只承载
-  页码、选区、笔迹、截图请求、工具执行、单通话接管和 VAD 真伪裁决，不转发媒体。
-- App/扩展用 `ek_` 创建的 call 必须用同一短期身份加入 sideband 和执行 hangup；长期项目 key
-  对这类 call 会返回 404。前端只在 `fe=5` 控制 WSS 的首个加密消息体及同源 HTTPS 工具体中
-  传递它，严禁放进 URL、日志或持久存储；服务端代理创建的 PWA call 仍使用项目 key。
-- `RC.voiceCtx` 的 `rtc` transport 仍绑定浏览器自己的 DataChannel；`dc.onopen` 必须先回放历史，
-  再 `flushPending('rtc')`。用户开口边沿必须先 `_requestSyncNow()`，再 `_rtcFlushCtx()`，保证
-  当前视口而非上一帧被注入。重连后仍由 control sideband 清同步指纹并重推状态。
+- iOS App 本机书与 Safari 扩展的普通电话在选择 `openai_rtc` 时，由 App/扩展原生进程读取共享
+  Apple Keychain 中的项目 key，并直接向 OpenAI 申请短期 `ek_` client secret。页面只接收短期
+  凭证，SDP、麦克风和 `oai-events` DataChannel **直接连接**
+  `https://api.openai.com/v1/realtime/calls`；长期 key 不进入 JS、URL、日志、快照或 Pi。
+- App/扩展的上下文 sideband 同样本机化：页码、选区、可见正文与笔迹状态直接进 DataChannel，
+  合成图由 App 原生桥用同一短期 call 身份注入。原生桥不可用时明确失败，禁止静默回落
+  `/voice-rt?mode=rtc`、`/rtc-client-secret` 或把本地工具改走 Pi。
+- `make_note` 写 App 本机笔记；`make_anki`、联网搜索、深度思考、后台 CLI、造纸和长文路由是
+  明示的可选 AI/API 工具，可以在调用时访问 Pi。它们不是通话或上下文的依赖，Pi 离线只让本次
+  工具失败，普通回答、选区、页面、笔迹和合成图仍须正常工作。
+- PWA/其他没有 App 原生桥的客户端可继续显式使用 Pi 提供的 AI API/兼容传输；这条兼容路径不是
+  App 或 Safari 扩展的回退，也不得取得 App Keychain 中的长期 key。
+- `RC.voiceCtx` 的 `rtc` transport 绑定浏览器自己的 DataChannel；`dc.onopen` 后
+  `flushPending('rtc')`。用户开口边沿必须先 `_requestSyncNow()`，再 `_rtcFlushCtx()`，保证
+  当前视口而非上一帧被注入；重连时本机清同步指纹并重推状态。
 - `see_ink` / `see_page` / `see_figure` 是模型显式查看请求，必须把真实合成图注入同一 Realtime
   会话；`rt_image` 只控制非显式、机会式图像输入，不能把显式查看降级为“存在笔迹”的文字说明。
 - PWA 无扩展路径暂保留服务端 SDP 代理作为兼容回退；不能据此把 App/扩展媒体重新绕回 Pi。

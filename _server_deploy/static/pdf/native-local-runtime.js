@@ -4476,6 +4476,81 @@
     }, code);
   }
 
+  var LOCAL_VIDEO_PREFERENCE_KEYS = new Set([
+    'x', 'y', 'w', 'h', 'showEn', 'subOut'
+  ]);
+  function validVideoPlayerPreferences(value, code) {
+    value = validPreferenceMap(value, code);
+    Object.keys(value).forEach(function (key) {
+      if (!LOCAL_VIDEO_PREFERENCE_KEYS.has(key)) {
+        throw outgoingRequestError('视频浮窗设置含未知字段', code, 500);
+      }
+      var item = value[key];
+      if ((key === 'showEn' || key === 'subOut') && typeof item !== 'boolean') {
+        throw outgoingRequestError('视频浮窗开关状态损坏', code, 500);
+      }
+      if (key !== 'showEn' && key !== 'subOut' &&
+          (!Number.isFinite(item) || item < -100000 || item > 100000)) {
+        throw outgoingRequestError('视频浮窗尺寸状态损坏', code, 500);
+      }
+    });
+    return value;
+  }
+
+  function localVideoPlayerPreferences(input, init, url, method) {
+    var code = 'BW_LOCAL_VIDEO_PLAYER_PREFS';
+    if (method === 'GET') {
+      return localJSONRoute(function () {
+        strictQuery(url, [], [], code);
+        return readDeviceState('video-player-prefs', {}).then(function (prefs) {
+          return {
+            ok: true,
+            prefs: validVideoPlayerPreferences(prefs, code)
+          };
+        });
+      }, code);
+    }
+    return localJSONRoute(function () {
+      strictQuery(url, [], [], code);
+      return requestObject(input, init, ['patch'], ['patch'], code, 64 * 1024)
+        .then(function (body) {
+          if (!body.patch || typeof body.patch !== 'object' ||
+              Array.isArray(body.patch)) {
+            throw outgoingRequestError('视频浮窗设置 patch 无效', code, 400);
+          }
+          var patch = boundedCanonicalJSON(
+            body.patch, 64 * 1024, code, '视频浮窗设置 patch'
+          );
+          Object.keys(patch).forEach(function (key) {
+            if (!LOCAL_VIDEO_PREFERENCE_KEYS.has(key)) {
+              throw outgoingRequestError('视频浮窗设置字段无效', code, 400);
+            }
+            var item = patch[key];
+            if (item === null) return;
+            if ((key === 'showEn' || key === 'subOut') &&
+                typeof item !== 'boolean') {
+              throw outgoingRequestError('视频浮窗开关无效', code, 400);
+            }
+            if (key !== 'showEn' && key !== 'subOut' &&
+                (!Number.isFinite(item) || item < -100000 || item > 100000)) {
+              throw outgoingRequestError('视频浮窗尺寸无效', code, 400);
+            }
+          });
+          return mutateDeviceState('video-player-prefs', {}, function (prefs) {
+            prefs = validVideoPlayerPreferences(prefs, code);
+            Object.keys(patch).forEach(function (key) {
+              if (patch[key] === null) delete prefs[key];
+              else prefs[key] = patch[key];
+            });
+            return localStateMutationResult(prefs, {
+              ok: true,
+              prefs: prefs
+            });
+          });
+        });
+    }, code);
+  }
+
   function validReadingPositions(value, code) {
     if (!value || typeof value !== 'object' || Array.isArray(value)) {
       throw outgoingRequestError('本机续读位置状态损坏', code, 500);
@@ -5962,6 +6037,9 @@
     }
     if (path === '/pdf/api/prefs') {
       return localPreferences(input, init, url, method);
+    }
+    if (path === '/pdf/api/video-player-prefs') {
+      return localVideoPlayerPreferences(input, init, url, method);
     }
     if (path === '/pdf/api/book-langs') {
       return localBookLanguages(input, init, url, method);

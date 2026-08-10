@@ -84,9 +84,25 @@ test("shells use normal navigation caching and bundle-revisioned immutable asset
 });
 
 test("library shows its persisted index before TTL refresh and collapsed OCR is passive", () => {
+  assert.match(
+    LIBRARY_VIEW,
+    /@State private var selectedSource = ReaderLibrarySource\.local/,
+  );
   assert.match(LIBRARY_VIEW, /\.task \{ await refreshIfStale\(\) \}/);
+  assert.match(
+    LIBRARY_VIEW,
+    /\.onChange\(of: selectedSource\)[\s\S]*source != \.local[\s\S]*refreshRemoteIfStale\(\)/,
+  );
   assert.match(LIBRARY_VIEW, /let localTTL: TimeInterval = 15 \* 60/);
   assert.match(LIBRARY_VIEW, /let remoteTTL: TimeInterval = 5 \* 60/);
+  assert.match(
+    LIBRARY_VIEW,
+    /if selectedSource != \.local \{ await refreshRemoteIfStale\(\) \}/,
+  );
+  assert.doesNotMatch(
+    section(LIBRARY_VIEW, "case .success(let url):", "case .failure(let error):"),
+    /refreshRemote/,
+  );
   assert.match(LIBRARY_VIEW, /await refresh\(force: true\)/);
 
   const localRow = section(

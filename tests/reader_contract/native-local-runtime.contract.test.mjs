@@ -1805,6 +1805,60 @@ test("preferences are device-global with null deletion and reading positions agg
   assert.equal(refused.status, 400);
 });
 
+test("video player geometry is App-owned and survives books without contacting Pi", async () => {
+  const sharedStores = {
+    global: { values: new Map(), revision: 0 },
+    document: { values: new Map(), revision: 0 },
+    device: { values: new Map(), revision: 0 },
+  };
+  const sharedLocalStorage = new Map();
+  const first = await harness({
+    dataStoresState: sharedStores,
+    localStorageState: sharedLocalStorage,
+  });
+  const saved = await first.context.fetch("/pdf/api/video-player-prefs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      patch: { x: 120, y: 48, w: 640, h: 420, showEn: false, subOut: true },
+    }),
+  });
+  assert.equal(saved.status, 200);
+  assert.equal(first.gatewayMessages.length, 0);
+
+  const secondBookId = "localbook-" + "d".repeat(64);
+  const second = await harness({
+    bookId: secondBookId,
+    dataStoresState: sharedStores,
+    localStorageState: sharedLocalStorage,
+  });
+  const loaded = await (await second.context.fetch(
+    "/pdf/api/video-player-prefs",
+  )).json();
+  assert.deepEqual(loaded.prefs, {
+    x: 120, y: 48, w: 640, h: 420, showEn: false, subOut: true,
+  });
+  assert.equal(second.gatewayMessages.length, 0);
+
+  const deleted = await second.context.fetch("/pdf/api/video-player-prefs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ patch: { h: null } }),
+  });
+  assert.equal(deleted.status, 200);
+  const afterDelete = await (await second.context.fetch(
+    "/pdf/api/video-player-prefs",
+  )).json();
+  assert.equal(Object.hasOwn(afterDelete.prefs, "h"), false);
+
+  const refused = await second.context.fetch("/pdf/api/video-player-prefs", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ patch: { unknown: 1 } }),
+  });
+  assert.equal(refused.status, 400);
+});
+
 test("book language preferences use the established whitelist and stay document-scoped", async () => {
   const { context } = await harness();
   const saved = await context.fetch("/pdf/api/book-langs", {

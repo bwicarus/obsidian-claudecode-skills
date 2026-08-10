@@ -21,35 +21,30 @@ const WEB_VIEW = read("ios/BWReader/App/ReaderWebView.swift");
 const TOOLS = read("ios/BWReader/App/NativeReaderToolsView.swift");
 const MANIFEST = read("ios/BWReader/native_reader_interface_manifest.json");
 
-test("the project key is entered only in App and Pi returns non-secret config", () => {
-  assert.match(
-    SERVER,
-    /@bp\.route\("\/native-realtime-config", methods=\["POST"\]\)/,
-  );
-  assert.match(
-    SERVER,
-    /body != \{"contract": "reader-native-realtime-config\/1"\}/,
-  );
-  const configRoute = SERVER.slice(
-    SERVER.indexOf('@bp.route("/native-realtime-config"'),
-    SERVER.indexOf('@bp.route("/rtc-session"'),
-  );
-  assert.doesNotMatch(configRoute, /api_key|_openai_realtime_key/);
-  assert.match(SERVER, /Cache-Control"\] = "no-store"/);
-  assert.match(SERVER, /Pragma"\] = "no-cache"/);
-
+test("the App owns both the project key and the Realtime session without Pi", () => {
+  assert.doesNotMatch(SERVER, /native-realtime-config/);
   assert.match(CORE, /kSecClassGenericPassword/);
   assert.match(CORE, /kSecAttrAccessibleWhenUnlockedThisDeviceOnly/);
   assert.match(CORE, /kSecAttrAccessGroup/);
+  assert.match(CORE, /reader-native-realtime-keychain\/3/);
   assert.match(CORE, /reader-native-realtime-keychain\/2/);
   assert.doesNotMatch(CORE, /UserDefaults/);
-  assert.match(
-    CORE,
-    /native-realtime-config[\s\S]*HTTPCookie\.requestHeaderFields/,
-  );
+  assert.doesNotMatch(CORE, /native-realtime-config|HTTPCookie|taile44d0c/);
+  assert.match(CORE, /static let model = "gpt-realtime-2\.1-mini"/);
+  assert.match(CORE, /private static func localSessionConfiguration\(\)/);
+  assert.match(CORE, /v1\/realtime\/client_secrets/);
+  assert.match(CORE, /"OpenAI-Safety-Identifier"/);
+  assert.match(CORE, /"read_selection"/);
+  assert.match(CORE, /"see_ink"/);
+  assert.match(CORE, /"see_page"/);
+  assert.match(CORE, /"make_note"/);
+  assert.match(CORE, /"make_anki"/);
+  assert.match(CORE, /"web_search"/);
+  assert.match(CORE, /"deep_think"/);
+  assert.match(CORE, /"do_task"/);
   assert.match(TOOLS, /SecureField\("输入现有 OpenAI Key/);
-  assert.match(TOOLS, /Key 不会发送给 Pi/);
-  assert.match(TOOLS, /保存 Key 并同步语音设置/);
+  assert.match(TOOLS, /保存 App Key/);
+  assert.match(TOOLS, /App 保存、启动通话、注入选区与发送笔迹\/视口合成图都不连接 Pi/);
   assert.match(TOOLS, /已存入 Apple Keychain/);
   assert.match(TOOLS, /清除这台 iPad 中的 Key/);
 
@@ -94,7 +89,27 @@ test("App and Safari extension call mint and hangup through native code", () => 
   assert.match(direct, /action: 'mint'/);
   assert.match(direct, /native_direct: nativeDirect/);
   assert.match(direct, /if \(!nativeDirect\)[\s\S]*fetch\('\/api\/assistant\/rtc-bind'/);
+  assert.match(direct, /var appRequiresNative = window\.__BW_NATIVE_LOCAL_READER__ === true/);
+  assert.match(direct, /else if \(appRequiresNative\)[\s\S]*App 原生 Realtime 桥尚未就绪/);
   assert.match(direct, /fetch\('\/api\/assistant\/rtc-client-secret'/);
+  const nativeMintBranch = direct.slice(
+    direct.indexOf("if (window.__BW_NATIVE_OPENAI_REALTIME__ === true)"),
+    direct.indexOf("} else if (appRequiresNative)"),
+  );
+  assert.doesNotMatch(nativeMintBranch, /rtc-client-secret|rtc-bind/);
+
+  const connect = VOICE.slice(
+    VOICE.indexOf("toggle._connect = function"),
+    VOICE.indexOf("function toggle(opts)"),
+  );
+  assert.match(
+    connect,
+    /__BW_NATIVE_LOCAL_READER__[\s\S]*__BW_NATIVE_OPENAI_REALTIME__[\s\S]*rtcStart\(opts\);[\s\S]*return;/,
+  );
+  assert.ok(
+    connect.indexOf("__BW_NATIVE_LOCAL_READER__") <
+      connect.indexOf("fetch('/api/assistant/voice-config')"),
+  );
 
   const control = VOICE.slice(
     VOICE.indexOf("function _ctlOpen"),
@@ -157,4 +172,38 @@ test("selection is injected on the user's turn and visual tools send the real co
   assert.match(CORE, /"detail": "high"/);
   assert.match(CORE, /waitForImageConfirmation/);
   assert.match(CORE, /conversation\.item\.created/);
+});
+
+test("native direct keeps local work in App and exposes only explicit Pi AI tools", () => {
+  assert.match(VOICE, /function _rtcCreFetch\(\) \{\s*if \(_rtc\.nativeDirect\) return;/);
+  assert.match(VOICE, /function _rtcFetchPageText\(pk\)[\s\S]{0,180}if \(_rtc\.nativeDirect\) return;/);
+  assert.match(VOICE, /async function _rtcCompactNow\(urgent\) \{\s*if \(_rtc\.nativeDirect\) return;/);
+  assert.match(VOICE, /async function _rtcInjectHistory\(\)[\s\S]{0,220}if \(_rtc\.nativeDirect\) return;/);
+  assert.match(VOICE, /if \(!_rtc\.nativeDirect\) fetch\('\/api\/assistant\/rtc-usage'/);
+  assert.match(VOICE, /if \(!wasNativeRealtime\)[\s\S]*fetch\('\/api\/assistant\/compact-history'/);
+  assert.match(VOICE, /_rtc\.nativeDirect && name === 'read_page'/);
+  assert.match(VOICE, /_rtc\.nativeDirect && name === 'make_note'/);
+  assert.match(VOICE, /fetch\('\/pdf\/api\/to-note'/);
+  assert.match(VOICE, /owner: 'native-app'/);
+  assert.match(VOICE, /_rtc\.nativeDirect && !_nativeRealtimePiAITool\(name\)/);
+  assert.match(VOICE, /App 本机直连模式未开放该工具/);
+  assert.match(VOICE, /!_rtc\.nativeDirect && !_rtc\.turnTool/);
+
+  const allowlistBlock = VOICE.slice(
+    VOICE.indexOf("var NATIVE_REALTIME_PI_AI_TOOLS"),
+    VOICE.indexOf("function _nativeRealtimePiAITool"),
+  );
+  assert.deepEqual(
+    [...allowlistBlock.matchAll(/'([a-z_]+)'/g)].map((match) => match[1]),
+    [
+      "make_anki", "web_search", "search_image", "search_video",
+      "deep_think", "do_task", "make_paper", "route_to_text",
+    ],
+  );
+
+  const routeToText = VOICE.slice(
+    VOICE.indexOf("if (name === 'route_to_text')"),
+    VOICE.indexOf("_rtc.turnTool = true", VOICE.indexOf("if (name === 'route_to_text')")),
+  );
+  assert.doesNotMatch(routeToText, /本机直连模式不提供服务器文字路由/);
 });

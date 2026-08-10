@@ -85,9 +85,8 @@ test("direct media keeps the existing Reader context and tool sideband intact", 
   assert.match(VOICE_CONTEXT, /function flushPending\(ch\)/);
   assert.match(VOICE_CONTEXT, /bindTransport: function \(ch, tr\)/);
 
-  assert.match(LOCAL_SERVER, /Object\.defineProperty\(window,"__bwReaderWsUrl"/);
-  assert.match(LOCAL_SERVER, /value:\(path\)=>[\s\S]*\/voice-rt/);
-  assert.match(LOCAL_SERVER, /openAIRealtimeOrigin[\s\S]*realtimeControlWebSocketOrigin/);
+  assert.match(LOCAL_SERVER, /openAIRealtimeOrigin/);
+  assert.doesNotMatch(LOCAL_SERVER, /realtimeControlWebSocketOrigin|__bwReaderWsUrl/);
 });
 
 test("direct-call control sideband reuses the short-lived call identity without leaking it in URLs or storage", () => {

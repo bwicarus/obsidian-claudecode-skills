@@ -27,27 +27,18 @@ final class ReaderRealtimeCredentialManager: ObservableObject {
         }
     }
 
-    func saveExistingKey(
-        _ apiKey: String,
-        cookies: [HTTPCookie]
-    ) async {
+    func saveExistingKey(_ apiKey: String) {
         guard !isRunning else { return }
         isRunning = true
         notice = nil
         errorMessage = nil
         defer { isRunning = false }
         do {
-            let configuration = try await ReaderRealtimeOpenAIClient
-                .fetchSessionConfigurationFromPi(cookies: cookies)
             try store.save(
-                apiKey: apiKey.trimmingCharacters(in: .whitespacesAndNewlines),
-                sessionJSON: configuration.sessionJSON,
-                model: configuration.model,
-                rtImage: configuration.rtImage,
-                compactTokens: configuration.compactTokens
+                apiKey: apiKey.trimmingCharacters(in: .whitespacesAndNewlines)
             )
             status = try store.status()
-            notice = "现有 Key 已存入 Apple Keychain；App 与 Safari 扩展的普通 Realtime 语音现在可脱离 Pi"
+            notice = "现有 Key 已存入 Apple Keychain；App 可独立直连 OpenAI，Safari 扩展由 App 共享授权"
         } catch {
             refresh()
             errorMessage = error.localizedDescription

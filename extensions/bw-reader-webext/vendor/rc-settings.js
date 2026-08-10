@@ -342,7 +342,7 @@ if (window.__bwPwaProviderOnly) return;
     }
     if (!storage.enabled) {
       return 'BWReader App 本机笔记线路已关闭' +
-        (folder ? '（' + folder + '）' : '') + '；扩展继续使用原有 Pi 线路，并可查看已索引的 ' + count + ' 条历史笔记。';
+        (folder ? '（' + folder + '）' : '') + '；扩展不会回落 Pi，仍可查看已索引的 ' + count + ' 条历史笔记。';
     }
     if (!count) {
       return '已连接' + (folder ? '“' + folder + '”' : '本机 Vault') + '，目前没有 App 本机 Markdown 笔记。';

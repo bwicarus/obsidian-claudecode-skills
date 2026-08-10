@@ -15,6 +15,9 @@ const NATIVE_PI_GATEWAY = read("ios/BWReader/App/ReaderNativePiGateway.swift");
 const NATIVE_INTERFACE_MANIFEST = read(
   "ios/BWReader/App/ReaderNativeInterfaceManifest.swift",
 );
+const NATIVE_INTERFACE_ROUTES = JSON.parse(read(
+  "ios/BWReader/native_reader_interface_manifest.json",
+)).routes;
 const WEB_VIEW = read("ios/BWReader/App/ReaderWebView.swift");
 const NATIVE_FEATURES = read("ios/BWReader/App/ReaderWebViewNativeFeatures.swift");
 const SPOTLIGHT = read("ios/BWReader/App/ReaderSpotlight.swift");
@@ -81,6 +84,49 @@ test("native shelf opens local bytes directly and keeps Pi transfer as an explic
   assert.match(APP_ROOT, /accessibilityLabel\("打开书库"\)/);
 });
 
+test("ordinary reading and local edits never require a Pi route", () => {
+  const ownerByPath = new Map(
+    NATIVE_INTERFACE_ROUTES.map((route) => [route.path, route.owner]),
+  );
+  const appOwned = [
+    "/pdf/api/book-meta",
+    "/pdf/api/page-image",
+    "/pdf/api/page-chars",
+    "/pdf/api/page-text-status",
+    "/pdf/api/search",
+    "/pdf/api/toc",
+    "/pdf/api/epub-manifest",
+    "/pdf/api/epub-section",
+    "/pdf/api/epub-resource",
+    "/pdf/api/epub-search",
+    "/pdf/api/reading-pos",
+    "/pdf/api/highlights",
+    "/pdf/api/epub-highlights",
+    "/pdf/api/ink",
+    "/pdf/api/epub-ink",
+    "/pdf/api/notes",
+    "/pdf/api/userpages",
+    "/pdf/api/prefs",
+    "/pdf/api/video-player-prefs",
+    "/pdf/api/book-langs",
+    "/pdf/api/book-crop",
+    "/pdf/api/ocr-selection",
+    "/pdf/api/reocr-page",
+    "/pdf/api/reocr-page/clear",
+    "/pdf/api/pdf-insert-page",
+    "/pdf/api/note-composite",
+    "/pdf/api/to-note",
+    "/pdf/api/outgoing/state",
+    "/pdf/api/outgoing/drawing",
+    "/pdf/api/outgoing/focus",
+    "/pdf/api/outgoing/journal",
+  ];
+  for (const path of appOwned) {
+    assert.ok(ownerByPath.has(path), `${path} is declared`);
+    assert.notEqual(ownerByPath.get(path), "pi", `${path} is App-owned`);
+  }
+});
+
 test("local renderer uses a stable loopback origin with signed static assets and scoped book bytes", () => {
   assert.match(LOCAL_SERVER, /import CryptoKit/);
   assert.match(LOCAL_SERVER, /import FlyingFox/);
@@ -114,20 +160,14 @@ test("local renderer uses a stable loopback origin with signed static assets and
   assert.doesNotMatch(LOCAL_SERVER, /connect-src[^"\n]*https:\/\/bwicarus/);
   assert.match(
     LOCAL_SERVER,
-    /private static let realtimeControlWebSocketOrigin\s*=\s*"wss:\/\/bwicarus\.taile44d0c\.ts\.net"/,
-  );
-  assert.match(
-    LOCAL_SERVER,
     /private static let openAIRealtimeOrigin\s*=\s*"https:\/\/api\.openai\.com"/,
   );
-  assert.match(LOCAL_SERVER, /Object\.defineProperty\(window,"__bwReaderWsUrl"/);
-  assert.match(LOCAL_SERVER, /value==="\/voice-rt"/);
-  assert.match(LOCAL_SERVER, /value\.startsWith\("\/voice-rt\?"\)/);
-  assert.match(LOCAL_SERVER, /BW_NATIVE_REALTIME_WS_PATH/);
+  assert.doesNotMatch(LOCAL_SERVER, /realtimeControlWebSocketOrigin|__bwReaderWsUrl/);
   assert.match(
     LOCAL_SERVER,
-    /connect-src 'self' [^"\n]*openAIRealtimeOrigin[^"\n]*realtimeControlWebSocketOrigin[^"\n]*wss:\/\/bwicarus-2\.taile44d0c\.ts\.net/,
+    /connect-src 'self' [^"\n]*openAIRealtimeOrigin[^"\n]*wss:\/\/bwicarus-2\.taile44d0c\.ts\.net/,
   );
+  assert.doesNotMatch(LOCAL_SERVER, /connect-src[^"\n]*wss:\/\/bwicarus\.taile44d0c\.ts\.net/);
   assert.match(
     WEB_VIEW,
     /requestMediaCapturePermissionFor origin:[\s\S]*origin\.host\.lowercased\(\) == ReaderLocalRuntimeServer\.host[\s\S]*frame\.isMainFrame[\s\S]*type == \.microphone[\s\S]*\? \.grant[\s\S]*: \.deny/,

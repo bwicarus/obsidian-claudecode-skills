@@ -216,8 +216,6 @@ private enum ReaderLocalBundleIntegrity {
 }
 
 private struct ReaderLocalHTTPHandler: HTTPHandler {
-    private static let realtimeControlWebSocketOrigin =
-        "wss://bwicarus.taile44d0c.ts.net"
     private static let openAIRealtimeOrigin = "https://api.openai.com"
 
     let capabilityToken: String
@@ -725,26 +723,9 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
             )
         }
         let tokenBase = "/r/\(capabilityToken)"
-        let realtimeControlOrigin = Self.jsonLiteral(
-            Self.realtimeControlWebSocketOrigin
-        )
         let bootstrap = """
         window.__BW_NATIVE_LOCAL_BOOK_ID__=\(Self.jsonLiteral(opaqueID));
         window.__BW_NATIVE_LOCAL_BASE_PATH__=\(Self.jsonLiteral(tokenBase));
-        // Media and the oai-events data channel connect directly to OpenAI.
-        // This separate Pi WebSocket carries only bounded Reader state/tool
-        // control, preserving selection, page, ink and reconnect injection.
-        Object.defineProperty(window,"__bwReaderWsUrl",{
-          configurable:false,enumerable:false,writable:false,
-          value:(path)=>{
-            const value=String(path||"/voice-rt");
-            if(!(
-              value==="/voice-rt"||
-              (value.startsWith("/voice-rt?")&&!value.includes("#"))
-            ))throw new TypeError("BW_NATIVE_REALTIME_WS_PATH");
-            return \(realtimeControlOrigin)+value;
-          }
-        });
         """
         shell = shell.replacingOccurrences(
             of: "window.__BW_NATIVE_LOCAL_READER__=true;",
@@ -756,7 +737,7 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
             contentType: "text/html; charset=utf-8",
             cacheControl: "no-store",
             additionalHeaders: [
-                HTTPHeader("Content-Security-Policy"): "default-src 'self'; script-src 'self' 'nonce-\(cspNonce)'; script-src-attr 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob: data:; font-src 'self' data:; worker-src 'self' blob:; connect-src 'self' \(Self.openAIRealtimeOrigin) \(Self.realtimeControlWebSocketOrigin) wss://bwicarus-2.taile44d0c.ts.net; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none'",
+                HTTPHeader("Content-Security-Policy"): "default-src 'self'; script-src 'self' 'nonce-\(cspNonce)'; script-src-attr 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob: data:; font-src 'self' data:; worker-src 'self' blob:; connect-src 'self' \(Self.openAIRealtimeOrigin) wss://bwicarus-2.taile44d0c.ts.net; object-src 'none'; base-uri 'none'; frame-src 'none'; form-action 'none'",
                 // Direct <img>/<audio> requests need the unguessable shell
                 // capability in their same-origin Referer. Cross-origin
                 // requests still receive no Referer under this policy.

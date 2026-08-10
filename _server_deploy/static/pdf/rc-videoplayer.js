@@ -1,7 +1,7 @@
 /* rc-videoplayer.js — 统一浮动视频播放器浮层(RC.videoPlayer)
  * 侧栏视频卡 / 视频便签 点播放都开这一个浮层。半透明、可长按顶栏拖动移动、右下角缩放改大小;
  * 内含:中文字幕轨(auto/hq,跟音频外推同步)+ 控制条(起/止时间钉 ⏱、循环、倍速、字幕)+ 关闭/(便签)移除。
- * 浮层的位置+大小全局通用,存服务器 /pdf/api/video-player-prefs(所有视频共用一份,per-user)。
+ * 浮层的位置+大小全局通用；App 把 /pdf/api/video-player-prefs 存入本机设备库，PWA 才使用服务端。
  * per-video 参数(起/止/循环/倍速)= 便签打开时经 onChange 回写 note.video(patchNote);侧栏视频不持久(临时)。
  * 铁律:iframe 从不 reparent/从不 innerHTML 重建(拖动改 left/top、缩放改宽、换片改 src)→ 免「reparent 强制重载丢进度」坑。
  */
@@ -24,7 +24,7 @@
   function _now() { return (window.performance && performance.now) ? performance.now() : Date.now(); }
   function esc(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : String(s)); return d.innerHTML; }
 
-  // ── 服务端全局位置/大小 ──
+  // ── 当前宿主的全局位置/大小（App 本机 / PWA 服务端）──
   function _loadPrefs(cb) {
     if (_prefsLoaded) { cb && cb(); return; }
     fetch(PREFS_URL).then(function (r) { return r.json(); }).then(function (d) {

@@ -47,8 +47,11 @@ function loadFacadeBridge() {
               action: message.action,
               requestId: message.requestId,
               ok: true,
-              handled: false,
-              disposition: "pi",
+              handled: true,
+              disposition: "queued",
+              plannedFileName: "摘录.md",
+              obsidianURL: "",
+              note: note(),
             },
           });
         },
@@ -208,7 +211,7 @@ test("facade notes.create validates input before native messaging", async () => 
     file: "web:https://example.com/",
     page: 0,
   });
-  assert.equal(result.handled, false);
+  assert.equal(result.handled, true);
   assert.equal(messages.length, 1);
   assert.deepEqual(
     Object.keys(messages[0]).sort(),
@@ -246,7 +249,7 @@ test("background binds ordinary notes to authenticated tab URL and preserves boo
   );
 });
 
-test("Safari /to-note uses local result, while disabled and Chromium continue Pi", async () => {
+test("Safari /to-note is App-owned and never falls back to Pi", async () => {
   const factory = loadFetchInterceptor();
   const target = "https://bwicarus.taile44d0c.ts.net/pdf/api/to-note";
   const init = { method: "POST", body: JSON.stringify({ name: "摘录", text: "正文" }) };
@@ -261,14 +264,17 @@ test("Safari /to-note uses local result, while disabled and Chromium continue Pi
   assert.equal(await chromium(target, init), null);
   assert.equal(calls, 0);
 
+  const disabledError = Object.assign(new Error("本机笔记未启用"), {
+    code: "BW_NATIVE_NOTES_DISABLED",
+  });
   const disabled = factory({
     origin: "https://bwicarus.taile44d0c.ts.net",
     runtime: { getURL: () => "safari-web-extension://unit/" },
-    bridge: { async createNote() { return { handled: false, disposition: "pi" }; } },
+    bridge: { async createNote() { throw disabledError; } },
     URL,
     Response,
   });
-  assert.equal(await disabled(target, init), null);
+  await assert.rejects(disabled(target, init), (error) => error === disabledError);
 
   const queued = factory({
     origin: "https://bwicarus.taile44d0c.ts.net",
@@ -325,13 +331,10 @@ test("background accepts pending fields and strictly validates create outcomes",
     requestId: "request_12345678",
     ok: true,
   };
-  assert.deepEqual(
-    clean(normalize({ ...base, handled: false, disposition: "pi" }, {
+  assert.throws(() => normalize({ ...base, handled: false, disposition: "pi" }, {
       action: "notes.create",
       requestId: "request_12345678",
-    })),
-    { ...base, handled: false, disposition: "pi" },
-  );
+    }));
 
   const queued = normalize({
     ...base,

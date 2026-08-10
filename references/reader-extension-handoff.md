@@ -42,14 +42,19 @@
 
 ## 2. 当前版本和已经完成的主线
 
-当前生产 Reader/PWA 与 Windows 扩展测试渠道均为 **0.2.80**；产品名精确为
-**“BW网页伴读”**。App TestFlight 当前构建为 **1.1.18 (174)**，Apple 已确认
-`VALID / IN_BETA_TESTING`。
+当前扩展版本用 `python3 extensions/bw-reader-webext/handoff_check.py` 现场查询；App/TestFlight
+发布事实只看 `references/reader-collaboration-status.md` 的最新登记和对应 GitHub Actions 运行，
+不得把本节历史数字当成当前值。产品名精确为 **“BW网页伴读”**。
 
-**0.2.81 / App 1.1.19 候选**：现有 OpenAI Key 只在 App 安全输入框中输入并写入
-Apple Keychain；App 与 Safari 扩展原生进程经签名 access group 共享读取，网页和扩展
-JavaScript 仅得到 90 秒 `ek_`。Pi 只同步不含 Key 的会话设置，之后普通 Realtime、选区与
-合成图注入可脱离 Pi；发布事实以当前协作状态中的正式登记为准。
+当前 App/Safari 设计：现有 OpenAI Key 只在 App 安全输入框中输入并写入 Apple Keychain；App 与
+Safari 扩展原生进程经签名 access group 共享读取，网页和扩展 JavaScript 仅得到 90 秒 `ek_`。
+普通 Realtime、选区、可见正文与合成图注入均不经过 Pi；Pi 只保留显式备份/同步和 AI API 能力。
+
+**0.2.82 / App 1.1.20 候选**：App 内普通电话优先于旧 `agent` 模式进入本机 Realtime，移除
+Pi 凭证、上下文、历史、用量、任意工具和挂断回退；页面、选区、笔迹、合成图与笔记只走 App。
+仅 `make_anki`、联网搜索、深度思考、后台 CLI、造纸和长文路由作为显式 AI/API 工具按需访问
+Pi，失败只影响该工具。本机书库默认只展示本地索引，视频浮窗设置与 Safari 笔记也由 App 持有；
+普通阅读与本机修改的 manifest 合同逐项禁止 `owner=pi`。
 
 **0.2.80 / App 1.1.18 已发布**：直连 Realtime 会话复用设备建连时取得的短期 `ek_`
 credential 建立同一 call 的 sideband 与挂断请求；选区仍在有效语音轮次后注入，显式

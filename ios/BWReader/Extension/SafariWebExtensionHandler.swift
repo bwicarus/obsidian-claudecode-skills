@@ -514,13 +514,12 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
                 let state = try ReaderNativeFeatureStore()
                     .loadLocalNotesState() ?? .unavailable
                 guard state.enabled else {
-                    var response = baseResponse(
+                    complete(context, response: failure(
                         action: action,
-                        requestID: requestID
-                    )
-                    response["handled"] = false
-                    response["disposition"] = "pi"
-                    complete(context, response: response)
+                        requestID: requestID,
+                        code: "BW_NATIVE_NOTES_DISABLED",
+                        message: "请先在 BWReader App 中开启本机笔记；不会回落到 Pi"
+                    ))
                     return
                 }
                 guard let request = ReaderLocalNoteCreateRequest(
