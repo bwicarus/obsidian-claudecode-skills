@@ -503,7 +503,8 @@ button{-webkit-appearance:none;appearance:none}
     ],
     onTab: (name) => { if(name==='vocab')loadVocab();else if(name==='kg')loadKg();else if(name==='hl')loadHighlights();else if(name==='toc')loadToc(); },
     onReflow: () => applyPageSideLayout(true),
-    onWidthChange: (width, committed) => applyPageSideLayout(!!committed, width),
+    onWidthPreview: (width) => applyPageSideLayout(false, width),
+    onWidthChange: (width) => applyPageSideLayout(true, width),
   });
   // 任意网页没有可挤压的正文 → 首次默认「悬浮显示」(用户改过则尊重持久化)
   if (lsGet("eph-gp-floating") === null) RC.sidedrawer.setFloating(true);

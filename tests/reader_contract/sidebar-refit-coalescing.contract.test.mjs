@@ -61,22 +61,27 @@ test("侧栏宽度与滑入过渡只预览 CSS，commit/transitionend 才各通�
   const source = section(DRAWER, "  var _layoutPreviewKinds", "  function setFloating");
   vm.runInNewContext(`
     var _opts = {
+      onWidthPreview: function (n) { previewCalls.push({ n, commit: _layoutCommitDepth > 0 }); },
       onWidthChange: function (n, persisted) { widthCalls.push({ n, persisted, commit: _layoutCommitDepth > 0 }); },
       onReflow: function () { reflowCalls.push({ commit: _layoutCommitDepth > 0 }); }
     };
-    var widthCalls = [], reflowCalls = [];
+    var previewCalls = [], widthCalls = [], reflowCalls = [];
     var LS_WIDTH = "width";
     function _akey() { return "width"; }
     function _lsSet() {}
     function _clampWidth(value) { return Number(value); }
     ${source}
-    this.api = { setWidth, reflow: _reflow, preview: _layoutPreviewActive, widthCalls, reflowCalls };
+    this.api = { setWidth, reflow: _reflow, preview: _layoutPreviewActive, previewCalls, widthCalls, reflowCalls };
   `, sandbox, { filename: "rc-sidedrawer-layout-harness.js" });
 
   sandbox.api.setWidth(400, false);
   sandbox.api.setWidth(440, false);
   assert.equal(sandbox.api.preview(), true);
   assert.equal(sandbox.api.widthCalls.length, 0, "pointer/input preview must not notify raster consumer");
+  assert.deepEqual(JSON.parse(JSON.stringify(sandbox.api.previewCalls)), [
+    { n: 400, commit: false },
+    { n: 440, commit: false },
+  ]);
   sandbox.api.setWidth(440, true);
   assert.equal(sandbox.api.preview(), false);
   assert.deepEqual(JSON.parse(JSON.stringify(sandbox.api.widthCalls)), [{ n: 440, persisted: true, commit: true }]);

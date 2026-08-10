@@ -234,6 +234,14 @@ if (window.__bwPwaProviderOnly) return;
     var r = document.getElementById('ep-gp-width'); if (r) r.value = String(n);
     var v = document.getElementById('ep-gp-width-val'); if (v) v.textContent = String(n);
     var handled = false;
+    if (!commit) {
+      // Preview consumers may mirror only cheap CSS geometry (for example an
+      // ordinary webpage reserving the same width).  Keep this separate from
+      // onWidthChange so PDF raster/refit work remains commit-only.
+      try {
+        if (typeof _opts.onWidthPreview === 'function') _opts.onWidthPreview(n);
+      } catch (e) {}
+    }
     if (commit) {
       _setLayoutPreview('width', false, true);
       try {
