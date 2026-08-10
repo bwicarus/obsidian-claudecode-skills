@@ -50,6 +50,10 @@
 Safari 扩展原生进程经签名 access group 共享读取，网页和扩展 JavaScript 仅得到 90 秒 `ek_`。
 普通 Realtime、选区、可见正文与合成图注入均不经过 Pi；Pi 只保留显式备份/同步和 AI API 能力。
 
+**0.2.85 / App 1.1.25 合成图修复**：网页旧笔迹 `p` 与 App 原生笔迹 `pts` 统一进入同一
+设备端合成器；App 在调用本机 Realtime 图像接口前先把实际合成图写入 App Group 有界缓存，
+再直接注入当前 OpenAI 会话。Pi 不参与 App 合成图的生成、保存或传输，仅保留旧链兼容。
+
 **当前本机 Realtime 设计**：App 内普通电话由原生层验证 Key、提交 SDP 并读取 call ID；
 启动失败会按麦克风权限、凭证、OpenAI 建连与应答阶段直接显示。普通电话仍优先于旧 `agent`
 模式进入本机 Realtime，移除
