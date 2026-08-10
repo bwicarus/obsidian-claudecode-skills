@@ -255,6 +255,34 @@ test("selection is injected on the user's turn and visual tools send the real co
   assert.match(CORE, /private static let maximumFiles = 12/);
 });
 
+test("see_ink failures preserve the actual composition, identity, storage, and transport stage", () => {
+  const visual = VOICE.slice(
+    VOICE.indexOf("function _visualStageError"),
+    VOICE.indexOf("function _nativeRealtimePageText"),
+  );
+  assert.match(visual, /看图失败\[' \+ stage \+ '\]/);
+  assert.match(visual, /attempted\.push\('笔迹裁图'\)/);
+  assert.match(visual, /attempted\.push\('整页合成'\)/);
+  assert.match(visual, /attempted\.push\('视口截图'\)/);
+  assert.match(visual, /_visualStageError\('call 身份'/);
+  assert.match(visual, /_visualStageError\('sideband'/);
+  assert.match(visual, /_visualStageError\('本地保存\/传输'/);
+  assert.match(visual, /reply && reply\.ok === false/);
+
+  const injection = CORE.slice(
+    CORE.indexOf("static func injectImage"),
+    CORE.indexOf("static func hangup", CORE.indexOf("static func injectImage")),
+  );
+  assert.match(injection, /通话标识无效/);
+  assert.match(injection, /旁路密钥无效/);
+  assert.match(injection, /不支持的图像类型/);
+  assert.match(injection, /编码后体积越界/);
+  assert.match(injection, /图像 base64 解码失败/);
+  assert.match(injection, /解码后体积越界/);
+  assert.match(injection, /本地保存合成图失败/);
+  assert.doesNotMatch(injection, /throw ReaderRealtimeCredentialError\.imageTooLarge/);
+});
+
 test("native direct keeps local work in App and exposes only explicit Pi AI tools", () => {
   assert.match(VOICE, /function _rtcCreFetch\(\) \{\s*if \(_rtc\.nativeDirect\) return;/);
   assert.match(VOICE, /function _rtcFetchPageText\(pk\)[\s\S]{0,180}if \(_rtc\.nativeDirect\) return;/);

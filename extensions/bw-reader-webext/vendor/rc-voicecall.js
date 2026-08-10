@@ -5097,28 +5097,85 @@ if (window.__bwPwaProviderOnly) return;
     RC.selectionRegionsForPage = _selectionRegionsForPage;
   } catch (e) {}   // 共享截图:视口/指定元素/笔迹局部/**整页叠加合成图**。文字侧栏 EPUB 预拍;语音走 need_shot
 
+  // Each stage of the visual path answers for itself.
+  //
+  // Composing the page, saving it locally, holding a valid call identity,
+  // handing it to the sideband and getting it across the network are five
+  // different things that can fail, and they used to arrive as one sentence:
+  // "当前笔迹合成图生成失败". That sentence is wrong for four of the five, and
+  // on a device with no console it is the only thing anyone ever sees -- so a
+  // network refusal and an empty canvas were indistinguishable.
+  //
+  // The stage is carried in the message rather than replacing it, so existing
+  // handling keeps working while the detail becomes readable.
+  function _visualStageError(stage, detail) {
+    var text = '看图失败[' + stage + ']';
+    if (detail) text += ': ' + detail;
+    var error = new Error(text);
+    error.bwVisualStage = stage;
+    return error;
+  }
+
   async function _nativeRealtimeVisual(name, args) {
     var target = Object.assign({ page: _rtc.ctxPage || 0 }, args || {});
     var shot = null;
+    var attempted = [];
     if (name === 'see_ink' && window.RC && RC.captureInkRegion) {
-      shot = await RC.captureInkRegion(target);
+      attempted.push('笔迹裁图');
+      try {
+        shot = await RC.captureInkRegion(target);
+      } catch (error) {
+        throw _visualStageError('页面合成/笔迹裁图', error && error.message);
+      }
     }
     if (!shot && window.RC && RC.capturePageComposite) {
-      shot = await RC.capturePageComposite(name === 'see_ink'
-        ? target
-        : Object.assign({}, target, { scope: 'viewport-context' }));
+      attempted.push('整页合成');
+      try {
+        shot = await RC.capturePageComposite(name === 'see_ink'
+          ? target
+          : Object.assign({}, target, { scope: 'viewport-context' }));
+      } catch (error) {
+        throw _visualStageError('页面合成/整页合成', error && error.message);
+      }
     }
-    if (!shot) shot = await _captureView();
+    if (!shot) {
+      attempted.push('视口截图');
+      try {
+        shot = await _captureView();
+      } catch (error) {
+        throw _visualStageError('页面合成/视口截图', error && error.message);
+      }
+    }
     if (!shot || !shot.b64) {
-      throw new Error(name === 'see_ink'
-        ? '当前笔迹合成图生成失败'
-        : '当前阅读画面生成失败');
+      // Names what was tried. "composition failed" without the list cannot
+      // distinguish "there was no ink to crop" from "the canvas came back
+      // blank", and those are opposite problems.
+      throw _visualStageError(
+        '页面合成',
+        '已尝试 ' + (attempted.join('→') || '无可用途径') + '，均未产出图像'
+      );
     }
-    await _nativeRealtimeRequest({
-      action: 'image', call_id: _rtc.callId,
-      client_secret: _rtc.sidebandKey || '', tool: name,
-      media_type: shot.media_type || 'image/jpeg', b64: shot.b64
-    });
+    if (!_rtc.callId) {
+      throw _visualStageError('call 身份', '当前通话标识为空');
+    }
+    if (!_rtc.sidebandKey) {
+      throw _visualStageError('sideband', '旁路密钥缺失，无法把图交给原生通道');
+    }
+    var reply;
+    try {
+      reply = await _nativeRealtimeRequest({
+        action: 'image', call_id: _rtc.callId,
+        client_secret: _rtc.sidebandKey || '', tool: name,
+        media_type: shot.media_type || 'image/jpeg', b64: shot.b64
+      });
+    } catch (error) {
+      // The native side covers local save, reference read and network send;
+      // it reports which one, and that detail is passed through unchanged.
+      throw _visualStageError('本地保存/传输', error && error.message);
+    }
+    if (reply && reply.ok === false) {
+      throw _visualStageError('本地保存/传输', reply.error || '原生通道未接受该图');
+    }
     return shot;
   }
 
