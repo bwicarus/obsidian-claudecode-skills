@@ -939,9 +939,21 @@ enum ReaderRealtimeOpenAIClient {
             socket.cancel(with: .normalClosure, reason: nil)
             session.invalidateAndCancel()
         }
+        // Current Realtime GA acknowledges a client-created item with
+        // `conversation.item.added` (and later `conversation.item.done`).
+        // Give this delivery its own IDs so the monitoring socket cannot
+        // mistake an unrelated conversation event for our image receipt.
+        let eventID = "event_bwreader_" + UUID().uuidString
+            .replacingOccurrences(of: "-", with: "")
+            .lowercased()
+        let itemID = "item_bwreader_" + UUID().uuidString
+            .replacingOccurrences(of: "-", with: "")
+            .lowercased()
         let payload: [String: Any] = [
+            "event_id": eventID,
             "type": "conversation.item.create",
             "item": [
+                "id": itemID,
                 "type": "message",
                 "role": "user",
                 "content": [[
@@ -956,7 +968,11 @@ enum ReaderRealtimeOpenAIClient {
             throw ReaderRealtimeCredentialError.invalidRequest
         }
         try await socket.send(.string(text))
-        try await waitForImageConfirmation(socket)
+        try await waitForImageConfirmation(
+            socket,
+            eventID: eventID,
+            itemID: itemID
+        )
     }
 
     static func hangup(
@@ -1026,7 +1042,9 @@ enum ReaderRealtimeOpenAIClient {
     }
 
     private static func waitForImageConfirmation(
-        _ socket: URLSessionWebSocketTask
+        _ socket: URLSessionWebSocketTask,
+        eventID: String,
+        itemID: String
     ) async throws {
         try await withThrowingTaskGroup(of: Void.self) { group in
             group.addTask {
@@ -1048,9 +1066,22 @@ enum ReaderRealtimeOpenAIClient {
                           let type = event["type"] as? String else {
                         continue
                     }
-                    if type == "conversation.item.created" { return }
+                    if [
+                        "conversation.item.added",
+                        "conversation.item.done",
+                        "conversation.item.created",
+                    ].contains(type) {
+                        let item = event["item"] as? [String: Any]
+                        if item?["id"] as? String == itemID { return }
+                        continue
+                    }
                     if type == "error" {
                         let detail = event["error"] as? [String: Any]
+                        let causingEventID = detail?["event_id"] as? String ?? ""
+                        if !causingEventID.isEmpty,
+                           causingEventID != eventID {
+                            continue
+                        }
                         let code = String(
                             (detail?["code"] as? String ?? "").prefix(80)
                         )

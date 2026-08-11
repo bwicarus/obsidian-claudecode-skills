@@ -248,7 +248,13 @@ test("selection is injected on the user's turn and visual tools send the real co
   assert.match(CORE, /"type": "input_image"/);
   assert.match(CORE, /"detail": "high"/);
   assert.match(CORE, /waitForImageConfirmation/);
+  assert.match(CORE, /"event_id": eventID/);
+  assert.match(CORE, /"id": itemID/);
+  assert.match(CORE, /conversation\.item\.added/);
+  assert.match(CORE, /conversation\.item\.done/);
   assert.match(CORE, /conversation\.item\.created/);
+  assert.match(CORE, /item\?\["id"\] as\? String == itemID/);
+  assert.match(CORE, /causingEventID != eventID/);
   assert.match(CORE, /private enum ReaderRealtimeVisualCache/);
   assert.match(CORE, /ReaderNativeBridgeContract\.appGroupIdentifier/);
   assert.match(
