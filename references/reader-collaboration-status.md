@@ -4023,3 +4023,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验**：专项 13 项、Reader Node 全量 970 项、发布管线、ReaderBundle、Pi Linux 全门禁/E2E、扩展真实浏览器矩阵及 macOS 模拟器/签名归档均通过；Windows handoff 仅保留既有 `fcntl` 平台基线。
 - **发布事实**：Reader `0.2.86`、KG `kg-0.2.86-59eb78f835eb67daec41`，回滚目录 `20260810T185623Z-1127105`；扩展渠道备份 `webext-channel-20260810T190123Z-zlnko09f`；Actions `31422033498` 上传 TestFlight `1.1.26 (192)`，`31422736822` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
 - **边界/下一步**：本批只改善可见诊断，未声称修好原生覆盖层是否进入合成图；安装后在 App 与 Safari 各画一次并调用 `see_ink`，把完整阶段提示或 AI 实际描述交回 Claude，据此修真实断点。
+
+## Claude / Codex：see_ink 路由与失败详情已发布 0.2.87 / 1.1.27（2026-08-11 JST）
+- **根因/改动**：1.1.26 的失败详情其实被语音轮次卡丢弃，不能据“没有额外内容”推断走了 Pi；现失败也持久化完整结果，并报告 route/stage/call/sideband 与三个无凭据原生桥状态，非本机视觉路由直接拒绝。
+- **核对/验证**：App 原生 handler 先于 document-start 脚本注册，成功的本机建连只会返回 `native_direct=true`；专项合同、Reader Node 全量 971 项、Pi Linux 原子预检/114 项/E2E、macOS 模拟器/签名归档与 IPA 校验通过。
+- **发布事实**：代码 `522aee6e` + `fc6be004`；Reader `0.2.87`、KG `kg-0.2.87-321d5a230216b642f0ac`，事务 `/home/bwicarus/deploy-backups/reader/20260811T012606Z-1156381`；Actions `31449978738` 上传 TestFlight `1.1.27 (195)`，`31450447983` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
+- **边界/下一步**：Windows 扩展 channel 因独立的网页便签刷新回归超时而保持 `0.2.86`，无半发布；TestFlight 已含 Safari 扩展。用户复现后展开 `see_ink(失败)` 流程并提交完整 JSON，再按真实 route/stage 修合成或传输。
