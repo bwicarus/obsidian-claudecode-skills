@@ -18,6 +18,7 @@ import pystray
 from bridge_core import (
     BridgeError,
     BridgePaths,
+    WindowsShortcutBroker,
     WindowsProcessRunner,
     disable_and_stop_direct_service,
     read_direct_status,
@@ -36,7 +37,7 @@ from readerpc_services import (
 )
 
 
-APP_VERSION = "0.1.8"
+APP_VERSION = "0.1.9"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 POLL_INTERVAL_MS = 2_500
@@ -752,9 +753,13 @@ def main(argv: list[str] | None = None) -> int:
     instance = SingleInstance()
     if not instance.acquire():
         return 0
-    root = tk.Tk()
-    ReaderPCWindow(root)
-    root.mainloop()
+    # The native direct service deliberately cannot inject keyboard input.
+    # ReaderPC is the interactive desktop owner, so keep the authenticated F24
+    # broker alive for exactly the same lifetime as its tray process.
+    with WindowsShortcutBroker():
+        root = tk.Tk()
+        ReaderPCWindow(root)
+        root.mainloop()
     return 0
 
 

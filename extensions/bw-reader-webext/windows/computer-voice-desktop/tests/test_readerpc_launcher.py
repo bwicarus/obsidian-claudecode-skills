@@ -17,6 +17,7 @@ from readerpc_launcher import (  # noqa: E402
     ReaderPCWindow,
     disable_readerpc_voice,
     load_preferences,
+    main,
     save_preferences,
     set_codex_voice_keep_active,
     start_readerpc_voice,
@@ -304,6 +305,22 @@ class ReaderPCLauncherTests(unittest.TestCase):
         show_error.assert_called_once()
         self.assertFalse(window.closed)
         self.assertFalse(window.closing)
+
+    def test_gui_owns_shortcut_broker_for_entire_window_lifetime(self) -> None:
+        with (
+            patch("readerpc_launcher.SingleInstance") as instance,
+            patch("readerpc_launcher.WindowsShortcutBroker") as broker,
+            patch("readerpc_launcher.tk.Tk") as make_root,
+            patch("readerpc_launcher.ReaderPCWindow") as make_window,
+        ):
+            instance.return_value.acquire.return_value = True
+            self.assertEqual(main([]), 0)
+
+        broker.assert_called_once_with()
+        broker.return_value.__enter__.assert_called_once_with()
+        broker.return_value.__exit__.assert_called_once()
+        make_window.assert_called_once_with(make_root.return_value)
+        make_root.return_value.mainloop.assert_called_once_with()
 
 
 if __name__ == "__main__":
