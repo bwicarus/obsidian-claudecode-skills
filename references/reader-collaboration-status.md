@@ -4063,3 +4063,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验**：专项 17 项、Reader Node 全量 982 项、发布管线、macOS 模拟器/签名归档/IPA 校验通过；Windows handoff 仅剩既有 `fcntl`/Linux fixture 基线。
 - **发布事实**：提交 `ceeb68f8`；Actions `31479675109` 上传 TestFlight `1.1.33 (219)`，`31480548173` 确认 `COMPLETE / VALID / IN_BETA_TESTING`。
 - **未做/下一步**：未部署 Pi 或浏览器正式渠道；下一步复用 App 本机合成图缓存，为 PC 实时快照提供短期引用和按需 GET，不持续推送大图。
+
+## Codex：App 合成图已开放给 PC 实时快照 MCP（2026-08-11 JST）
+- **根因/改动**：App→Windows 的原生取图/WSS/视觉 RPC 已存在，真正阻塞是 Codex 全局 `enabled_tools` 只允许文字快照且保留旧工具名；现本机开放 `reader_visual_image`，并更新 `reader-live-context` 为一次只选最窄视觉 scope。
+- **怎么验**：已装 Windows direct `0.1.99` 的 MCP `tools/list` 返回快照/视觉/浏览控制三工具；`codex mcp get reader_snapshot` 确认视觉白名单生效，离线探针按合同返回 `visual-source-not-ready` 而非未知工具。
+- **边界**：图片仅在 AI 调用时由精确在线 source 生成并分块回传，不进入文字快照、不暴露 App 路径或 capability、也不经过 Pi；当前支持视口、笔迹附近和闭合选区附近。
+- **下一步**：新 Codex 会话刷新工具发现后，在 App 前台开启实时快照做真机图像验收；无需重发 1.1.33，也不修复旧主动推图缓存。

@@ -4,9 +4,10 @@
 前半段保留了最初配对设计的历史推演；当前生产直连已经改为固定 Tailnet
 identity、无需配对码，权威媒体合同见 `reader-computer-audio-bridge.md`。
 
-2026-07-30 的上下文实验只替换最终文字末端：PWA 复用已验收的 Windows WSS 直连，
-把 Pi active/journal 事件写成 Windows 本地快照，再由常驻 MCP 的
-`reader_context_snapshot` 按需读取。旧 voice-typist 注入代码保留为
+2026-07-30 起的上下文末端复用已验收的 Windows WSS 直连，把 Reader 事件写成 Windows
+本地快照，再由常驻 MCP 的 `reader_context_snapshot` 按需读取；
+`reader_visual_image` 则向快照标识的当前在线来源临时请求合成图，不把大图常驻写入快照。
+App 本机 Reader 的原生合成图沿同一视觉合同回传 Windows，不经过 Pi。旧 voice-typist 注入代码保留为
 `legacy-inject` 回滚模式；当前实验为 `snapshot-mcp`，两条互斥。该实验不改已经通过
 用户实测的麦克风、虚拟扬声器、快捷键或 PCM 链路。
 

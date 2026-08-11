@@ -155,11 +155,13 @@ background 的固定 relay，不能把 URL、设备 ID、AUMID、进程、路径
   C:\Users\bwica\bw-computer-voice-bridge\runtime\reader-context-snapshot.json
 ```
 
-它只注册 `reader_context_snapshot`，不接受 mutation。服务进程在同一 MCP
+它注册只读 `reader_context_snapshot`、按需 `reader_visual_image`，以及受限的
+`reader_browser_control`；客户端可用 `enabled_tools` 进一步收窄。服务进程在同一 MCP
 连接中保持 instance/call sequence，逐次读取原子快照；最新文件损坏时保留上一次有效
-revision。`active-reading` 超过三分钟则返回 `contextStatus=stale`，正文与选区不会作为
-当前内容返回。选区状态严格区分 `active`、`cleared`、`unknown`，取消选择或换页时不会
-沿用旧文本；新鲜度使用 Windows 收到心跳的时间，不信任 iPad 的墙上时钟。
+revision。`active-reading` 超过三分钟则返回 `contextStatus=stale`，正文、选区和视觉请求都
+不会继续使用旧页面。`reader_visual_image` 只向快照中精确匹配且在线的 source 请求当前
+视口、笔迹附近或闭合选区附近 JPEG，取图前后页/笔迹版本任一变化都会丢弃结果；图片不写入
+快照，也不暴露 App 本地路径或能力令牌。
 
 START 期间始终只有一个并发 `ReceiveAsync`。peer 在 START 回执前关闭会取消应用等待和
 媒体链；若预取到一条非 close 消息，只做单条有界缓存，START 结算后按原顺序处理。

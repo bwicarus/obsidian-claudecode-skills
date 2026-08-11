@@ -229,10 +229,12 @@ bw-computer-voice-audio.exe --reader-context-mcp --state `
   C:\Users\bwica\bw-computer-voice-bridge\runtime\reader-context-snapshot.json
 ```
 
-工具面只有 `reader_context_snapshot`。快照超过三分钟未收到 PWA
-`active-reading` 心跳时，工具返回 `contextStatus=stale`，并清空可供回答的正文与选区；
-活动心跳还会明确区分有选区、已清空和未上报，不能沿用旧选择。关闭同步或切回旧注入时，
-PWA 会先用无音频副作用的 `context-clear` 清空快照，再停止实验末端。
+工具面包含 `reader_context_snapshot`、按需 `reader_visual_image` 和受限的
+`reader_browser_control`，实际暴露范围由 Codex 的 `enabled_tools` 白名单决定。快照超过
+三分钟未收到 Reader `active-reading` 心跳时返回 `contextStatus=stale`，并清空可供回答的
+正文与选区；视觉工具也会拒绝旧 source。图像仅在工具调用时由当前 Reader 生成并经既有
+WSS 分块返回，不持续写入快照。关闭同步或切回旧注入时，Reader 会先用无音频副作用的
+`context-clear` 清空快照，再停止实验末端。
 
 安装后的 Codex CLI 注册形式如下（这是安装/配置动作，候选验收前不执行）：
 

@@ -191,10 +191,12 @@ Windows WSS、固定文本合同和固定长度 PCM，不读取配对记录，�
 
 `snapshot-mcp` 在没有通话时用 `context-open` 保持一条纯上下文连接，不启动 Codex、采音或
 快捷键；通话前先释放它，再由同一条 Active WSS 继续更新。Windows 的 `--direct-serve`
-常驻 EXE 在同一 `127.0.0.1:43128` 监听器提供 `/mcp`，只注册
-`reader_context_snapshot`；Codex 使用 Streamable HTTP 连接，因此不同会话不会各自拉起
-stdio MCP 子进程。`--reader-context-mcp --state <absolute-path>` 仅保留为回滚与隔离诊断
-入口。活动心跳同时携带选区三态（有选区 / 已清空 / 未上报），
+常驻 EXE 在同一 `127.0.0.1:43128` 监听器提供 `/mcp`，注册
+`reader_context_snapshot`、按需 `reader_visual_image` 与受限的
+`reader_browser_control`；Codex 使用 Streamable HTTP 连接，因此不同会话不会各自拉起
+stdio MCP 子进程。App 本机 Reader 也复用相同的 context WSS 与视觉合同，原生合成图按需
+回传 Windows，不经过 Pi、不进入文字快照。`--reader-context-mcp --state <absolute-path>`
+仅保留为回滚与隔离诊断入口。活动心跳同时携带选区三态（有选区 / 已清空 / 未上报），
 换页、取消选择或超过三分钟时都不会把旧正文、旧选区继续当作当前内容；新鲜度按 Windows
 实际收到心跳的时间计算。关闭同步或切回旧注入时，`context-clear` 先清本地页与选区，
 再停止实验末端或恢复 Pi 旧推送。旧代码与 `/4` 回滚入口保留，但两条路径不得并跑。
