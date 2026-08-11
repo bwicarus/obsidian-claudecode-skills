@@ -4608,6 +4608,96 @@
     _visualStep(where + ' 放弃: ' + why);
     return null;
   }
+
+  // App 本机的原生层级合成图。
+  //
+  // html2canvas 只画得到 WKWebView 内部,而 PencilKit 与 PDFKit 的笔迹在 WebView
+  // **之外**的视图层 —— see_ink 要的"底页+笔迹+卡片",在任何纯 web 截图路径下都
+  // 不可能产出,修好 html2canvas 也不行。原生 drawHierarchy 截的是整个视图层级,
+  // 合成是天然的:它就是屏幕上那一张。
+  //
+  // 基址里带能力令牌,所以这里只判存在性,任何分支都不把它写进日志。
+  function _nativeCaptureBase() {
+    try {
+      var v = String(window.__BW_NATIVE_LOCAL_BASE_PATH__ || '');
+      return /^\/r\/[a-f0-9]{64}$/.test(v) ? v : null;
+    } catch (e) { return null; }
+  }
+  async function _nativeCapture(scope, rect) {
+    var base = _nativeCaptureBase();
+    // 非 App 本机(Safari/PWA)不是故障,是预期路径:静默回落 html2canvas。
+    if (!base) return null;
+    var q = 'scope=' + encodeURIComponent(scope);
+    if (rect) {
+      q += '&x=' + rect.x.toFixed(6) + '&y=' + rect.y.toFixed(6) +
+           '&w=' + rect.w.toFixed(6) + '&h=' + rect.h.toFixed(6);
+    }
+    var resp;
+    try {
+      resp = await fetch(base + '/native-api/visual-capture?' + q, { cache: 'no-store' });
+    } catch (e) {
+      return _visualNull('原生合成图', '请求失败 ' + _visualErrText(e));
+    }
+    if (!resp.ok) {
+      var code = '';
+      try { code = resp.headers.get('X-BW-Reader-Error') || ''; } catch (e2) {}
+      if (!code) { try { code = String(await resp.text()).slice(0, 120); } catch (e3) {} }
+      return _visualNull('原生合成图', 'HTTP ' + resp.status + (code ? ' ' + code : ''));
+    }
+    var b64 = '';
+    try {
+      var buf = new Uint8Array(await resp.arrayBuffer());
+      var step = 0x8000, parts = [];
+      for (var i = 0; i < buf.length; i += step) {
+        parts.push(String.fromCharCode.apply(null, buf.subarray(i, i + step)));
+      }
+      b64 = btoa(parts.join(''));
+    } catch (e4) {
+      return _visualNull('原生合成图', '编码失败 ' + _visualErrText(e4));
+    }
+    if (b64.length <= 3000) {
+      return _visualNull('原生合成图', '图过小 ' + b64.length + 'B(疑空白)');
+    }
+    _visualStep('原生合成图 ' + scope + ' 得到 ' + Math.round(b64.length / 1024) + 'KB');
+    return { media_type: 'image/jpeg', b64: b64 };
+  }
+
+  // 页内归一化框 → 视口归一化框,并说明有多少落在屏幕内。
+  //
+  // 原生 region 的坐标系是**视口**,而笔迹外接框算在**页元素**内 —— 两者只有该页
+  // 完全可见时才重合。不换算就会请求到错误位置;而原生侧会把越界部分 intersect 掉,
+  // 于是返回一张构图错误却看起来正常的图。安静的错图比失败更糟,所以越界要说出来。
+  //
+  // 滚出视口的笔迹需要离屏合成(PDFKit 渲页 + PKDrawing 渲笔迹),那是 scope=page
+  // 的职责;在它可用前,这里如实报告而不是交付一张裁错的图。
+  function _viewportRectFromPageRect(el, x0, y0, x1, y1) {
+    try {
+      var r = el.getBoundingClientRect();
+      var vw = window.innerWidth || 0, vh = window.innerHeight || 0;
+      if (!(r.width > 0 && r.height > 0 && vw > 0 && vh > 0)) return null;
+      var out = {
+        x: (r.left + x0 * r.width) / vw,
+        y: (r.top + y0 * r.height) / vh,
+        w: ((x1 - x0) * r.width) / vw,
+        h: ((y1 - y0) * r.height) / vh
+      };
+      var visW = Math.max(0, Math.min(1, out.x + out.w) - Math.max(0, out.x));
+      var visH = Math.max(0, Math.min(1, out.y + out.h) - Math.max(0, out.y));
+      var area = out.w * out.h;
+      out.visible = area > 0 ? (visW * visH) / area : 0;
+      return out;
+    } catch (e) { return null; }
+  }
+  async function _nativeInkRegion(el, x0, y0, x1, y1) {
+    if (!_nativeCaptureBase()) return null;
+    var rect = _viewportRectFromPageRect(el, x0, y0, x1, y1);
+    if (!rect) return _visualNull('原生合成图', '无法换算到视口坐标');
+    if (rect.visible < 0.9) {
+      return _visualNull('原生合成图',
+        '笔迹仅 ' + Math.round(rect.visible * 100) + '% 在视口内(其余已滚出屏幕,需按页离屏合成)');
+    }
+    return await _nativeCapture('region', rect);
+  }
   // 可选 DocumentHost 视觉表面。PDF/EPUB 没实现时原路径完全不变；普通网页只在 adapter
   // 提供真实正文元素、布局尺寸和 canonical strokes，不复制截图/绘制算法。
   function _visualSurface() {
@@ -4759,6 +4849,8 @@
   }
   async function _captureView() {
     try {
+      var nat = await _nativeCapture('viewport');
+      if (nat) return nat;
       var surface = _visualSurface();
       if (surface) {
         var vp = surface.viewport || {};
@@ -4892,6 +4984,9 @@
     ) || await _captureSurface(surface, crop, selectionId);
   }
   async function _captureViewportComposite() {
+    // 语义与原生 scope=viewport 完全对应:屏幕上那一块。
+    var nat = await _nativeCapture('viewport');
+    if (nat) return nat;
     var surface = _visualSurface();
     if (surface) {
       var vp = surface.viewport || {};
@@ -5125,6 +5220,8 @@
       var m = 0.08; x0 = Math.max(0, x0 - m); y0 = Math.max(0, y0 - m); x1 = Math.min(1, x1 + m); y1 = Math.min(1, y1 + m);   // 留白带上下文
       if (x1 - x0 < 0.28) { var cx = (x0 + x1) / 2; x0 = Math.max(0, cx - 0.14); x1 = Math.min(1, cx + 0.14); }   // 太窄→给最小宽(别只裁个点)
       if (y1 - y0 < 0.18) { var cy = (y0 + y1) / 2; y0 = Math.max(0, cy - 0.09); y1 = Math.min(1, cy + 0.09); }
+      var natInk = await _nativeInkRegion(el, x0, y0, x1, y1);
+      if (natInk) return natInk;
       await _loadH2C();
       var W = el.offsetWidth || el.getBoundingClientRect().width, H = el.offsetHeight || el.getBoundingClientRect().height;
       var canvas = await window.html2canvas(el, {
