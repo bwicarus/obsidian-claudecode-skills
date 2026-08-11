@@ -4037,7 +4037,8 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **边界/下一步**：本批消除无限“处理中”并暴露真实断点，不等于已修未知根因；安装后开“显示调试日志”，复现 `see_ink` 并提交从 `tool→` 到最后一行的左下角截图。
 
 ## Codex：App 原生层级合成图接口候选（2026-08-11 JST，未发布）
-- **改了什么**：以 WKWebView 与 PencilKit 画布最低公共父视图执行主线程 `drawHierarchy`，按网页视口或归一化局部区域裁剪；JPEG 最长边 1600，质量/尺寸阶梯后原始数据上限 675 KB，空白与过大分开报错。
-- **接口/安全**：可信本机壳通过能力基址请求 `GET native-api/visual-capture?scope=viewport`，或 `scope=region&x=&y=&w=&h=`；仅返回 `image/jpeg`、`no-store` 与稳定 `X-BW-Reader-Error`，不暴露或记录 capability token。
-- **验证/候选**：分支 `codex/native-visual-capture-20260811`，代码 `d4c4815d` + `4262b863`；Reader 全量 977 项通过，Actions `31459224057` 与 `31459466554` 的模拟器、签名设备归档及 IPA 导出均成功，均 `upload=false`。
-- **边界/下一步**：尚未接共享 web 调用且未部署；Claude 接入时先取本机 JPEG，失败原文写 `dlog`，App 以外仍保留现有 html2canvas 路径，随后再发 TestFlight 做实机笔迹验收。
+- **改了什么**：视口路径以 WKWebView/PencilKit 公共父视图执行 `drawHierarchy`；新增 PDF 离屏路径，以 PDFKit 渲染任意页并叠加本机权威 `ink` 状态，不依赖目标页当前是否可见。
+- **接口/语义**：可信本机壳可请求 `scope=viewport`、视口归一化 `scope=region&x=&y=&w=&h=`，或 `scope=page&page=N` 加可选页内归一化裁剪；无笔迹仍成功并返回 `X-BW-Visual-Ink: none`。
+- **安全/诊断**：只接受当前能力壳、当前本机 PDF 与同书笔迹；JPEG `no-store`、最长边/大小有界，每个提前返回均有稳定 `X-BW-Reader-Error`，不输出 capability token。
+- **验证/候选**：分支 `codex/native-visual-capture-20260811`，代码至 `cd7e51e2`；Reader 全量 978 项通过，Actions `31460687702` 的模拟器、签名设备归档、三目标校验和 IPA 导出成功，`upload=false`；Windows handoff 仅余既有 `fcntl` 平台阻断。
+- **边界/下一步**：尚未接共享 web 调用且未部署；离屏页当前合成 PDF 底页与笔迹/选区，完整可见 UI/卡片仍走视口层级图；Claude 接 web 后再发 TestFlight 实机验收。
