@@ -71,6 +71,13 @@ Safari 扩展原生进程经签名 access group 共享读取，网页和扩展 J
 App 回传的 OpenAI item ID 会用于精确删除。图已入会话但 HTTP 回执尚未返回的极短窗口，只能在
 回执抵达后删除，因而不会再产生旧轮第二个回答，但图条目可能短暂存在于新轮上下文中。
 
+**0.2.94 / App 1.1.34 候选 Realtime 图文合并**：本机 PDF 的 `read_page` 不再把 adapter
+漏掉 `visible_text` 误报成没有文字层；它直接读取已渲染字符盒或原生/PC 预处理 page-text
+provider，并把前页、当前页、后页、选区和书名作为同一页上下文返回。`see_ink`、`see_page`
+与 `see_figure` 在取图前冻结相同上下文，图像直投成功后随同一个 function output 交给模型，
+最终回答必须综合文字语义与图像空间证据。同一用户轮即使已并发排出多个视觉 function call，
+也只允许一次取图和一次最终回答；新通话会清掉旧上下文指纹，不能因同页重拨跳过首轮注入。
+
 **0.2.89 / App 1.1.29 原生合成图**：App 内 `see_page` 优先截取 WKWebView、PencilKit
 与可见卡片的公共原生视图层级；`see_ink` 在笔迹仍位于视口时按区域截取同一层级，滚出视口的
 PDF 笔迹则由 PDFKit 离屏渲染目标页并叠加本机权威墨迹。三条路径均走能力前缀本地 API，

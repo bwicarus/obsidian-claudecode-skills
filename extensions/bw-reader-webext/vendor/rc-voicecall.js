@@ -2836,6 +2836,7 @@ if (window.__bwPwaProviderOnly) return;
                hasInk: false, inkVer: 0, inkSeenVer: 0,
                inkPages: null, activeInkPage: null,
                inkResponseAcks: null, inkAckSeq: 0, turnEpoch: 0,
+               visualTurnEpoch: -1,
                items: [], inTok: 0, compactTh: 0, lastCompact: 0 };   // ㊳:item 账本+每轮输入量+会话内压缩阈值
   function _rtcInkFingerprint(page, strokes) {
     strokes = strokes || [];
@@ -2984,6 +2985,7 @@ if (window.__bwPwaProviderOnly) return;
   }
   function _rtcBeginUserTurn() {
     _rtc.turnEpoch = (_rtc.turnEpoch || 0) + 1;
+    _rtc.visualTurnEpoch = -1;
     // 旧轮尚未确认的回答即使迟到也不能消费笔迹；fresh 留给新轮重新判断。
     _rtc.inkResponseAcks = Object.create(null);
     return _rtc.turnEpoch;
@@ -3115,6 +3117,7 @@ if (window.__bwPwaProviderOnly) return;
       }
       if (j.total) _rtc.ctxTotal = j.total | 0;   // 131:总页数(用户实测 AI 上下文里没有,答不出"这本书多少页/还剩多少")
       if (j.text != null) _rtc.pendText = String(j.text || '');
+      else if (pageChanged) _rtc.pendText = '';   // PDF 只推页码时不能沿用上一页文字；随后由当前页 char/provider 补齐
     } else if (t === 'ink') {
       var inkPage = Number(j.page) || Number(_rtc.ctxPage) || 0;
       var strokes = j.strokes || [];
@@ -5781,6 +5784,19 @@ if (window.__bwPwaProviderOnly) return;
     return shot;
   }
 
+  function _nativeRealtimeDOMPageText(page) {
+    try {
+      page = Number(page) || 0;
+      if (!page) return '';
+      var wrap = document.querySelector('.page-wrap[data-page-num="' + page + '"]');
+      var chars = wrap && wrap.__charBoxes;
+      if (!Array.isArray(chars) || !chars.length) return '';
+      return chars.map(function (item) {
+        return item && item.c != null ? String(item.c) : '';
+      }).join('').replace(/\u0000/g, '').trim().slice(0, 12000);
+    } catch (e) { return ''; }
+  }
+
   function _nativeRealtimePageText() {
     var text = String(_rtc.pendText || '').trim();
     if (!text) {
@@ -5790,7 +5806,117 @@ if (window.__bwPwaProviderOnly) return;
         text = String((ctx && (ctx.visible_text || ctx.text)) || '').trim();
       } catch (e) {}
     }
+    // 本机 PDF 的 adapter 过去没有公开 visible_text，但屏幕上的可选字符
+    // 已经在 __charBoxes 中。不要把“adapter 漏字段”误报成“没有文字层”。
+    if (!text) text = _nativeRealtimeDOMPageText(_rtc.ctxPage);
     return text.slice(0, 6000);
+  }
+
+  function _nativeRealtimeContextSnapshot(page) {
+    var ctx = null;
+    try {
+      ctx = window.RC && RC.adapter && RC.adapter().getContext
+        ? RC.adapter().getContext() : null;
+    } catch (e) {}
+    ctx = ctx || {};
+    page = Number(page) || Number(ctx.page) || Number(_rtc.ctxPage) || 0;
+    var title = String(ctx.book_name || ctx.title || '').trim();
+    if (!title) {
+      title = String(ctx.file_rel || ctx.file || _rtc.ctxFile || '').split(/[\\/]/).pop()
+        .replace(/\.[^.]+$/, '').trim();
+    }
+    var visible = page === (Number(_rtc.ctxPage) || page)
+      ? _nativeRealtimePageText() : _nativeRealtimeDOMPageText(page);
+    return {
+      title: title.slice(0, 300),
+      file: String(ctx.file_rel || ctx.file || _rtc.ctxFile || '').slice(0, 800),
+      page: page,
+      total: Number(ctx.total || _rtc.ctxTotal) || 0,
+      visible_text: String(visible || '').slice(0, 2400),
+      selection: String(_rtc.sel || ctx.selection || '').trim().slice(0, 1000),
+      selection_context: String(ctx.selection_sentence || '').trim().slice(0, 1200),
+      user_question: String(_lastU || '').trim().slice(0, 1200)
+    };
+  }
+
+  function _nativeRealtimeBounded(task, ms, fallback) {
+    return new Promise(function (resolve) {
+      var done = false;
+      var finish = function (value) {
+        if (done) return;
+        done = true;
+        try { clearTimeout(timer); } catch (e) {}
+        resolve(value);
+      };
+      var timer = setTimeout(function () { finish(fallback); }, ms);
+      Promise.resolve(task).then(finish, function () { finish(fallback); });
+    });
+  }
+
+  function _nativeRealtimePageRecord(page, fallbackText) {
+    page = Number(page) || 0;
+    var fallback = {
+      page: page,
+      text: String(fallbackText || _nativeRealtimeDOMPageText(page) || '').trim(),
+      source: fallbackText ? 'app-current-visible-text' : 'app-rendered-char-layer',
+      revision: '', state: fallbackText ? 'ready' : 'idle'
+    };
+    if (!page) return Promise.resolve(fallback);
+    try {
+      var provider = window.BWReaderRuntime && window.BWReaderRuntime.pageTextProvider;
+      if (!provider || provider.contract !== 'reader-page-text-provider/1' ||
+          typeof provider.pageChars !== 'function') return Promise.resolve(fallback);
+      return _nativeRealtimeBounded(provider.pageChars(page), 3500, fallback)
+        .then(function (result) {
+          var chars = result && Array.isArray(result.chars) ? result.chars : [];
+          var text = chars.map(function (item) {
+            return item && item.c != null ? String(item.c) : '';
+          }).join('').replace(/\u0000/g, '').trim();
+          if (!text) return fallback;
+          return {
+            page: page, text: text,
+            source: String(result.source || 'native-page-text'),
+            revision: String(result.revision || '').slice(0, 160),
+            state: String(result.state || 'ready')
+          };
+        });
+    } catch (e) { return Promise.resolve(fallback); }
+  }
+
+  async function _nativeRealtimePageContext(page, snapshot) {
+    snapshot = snapshot || _nativeRealtimeContextSnapshot(page);
+    page = Number(page) || Number(snapshot.page) || 0;
+    var total = Number(snapshot.total) || 0;
+    var previousPage = page > 1 ? page - 1 : 0;
+    var nextPage = (!total || page < total) ? page + 1 : 0;
+    var records = await Promise.all([
+      previousPage ? _nativeRealtimePageRecord(previousPage, '') : Promise.resolve(null),
+      _nativeRealtimePageRecord(page, snapshot.visible_text),
+      nextPage ? _nativeRealtimePageRecord(nextPage, '') : Promise.resolve(null)
+    ]);
+    var current = records[1] || { text: '', source: 'none', revision: '', state: 'idle' };
+    var beforeText = records[0] && records[0].text ? String(records[0].text) : '';
+    var afterText = records[2] && records[2].text ? String(records[2].text) : '';
+    var currentText = String(current.text || snapshot.visible_text || '');
+    return {
+      contract: 'reader-realtime-page-context/1',
+      title: snapshot.title || '',
+      file: snapshot.file || '',
+      page: page,
+      total: total,
+      before_page: previousPage || null,
+      before: beforeText.length > 700 ? ('…' + beforeText.slice(-700)) : beforeText,
+      visible_text: String(snapshot.visible_text || currentText).slice(0, 2400),
+      current_page_text: currentText.slice(0, 3200),
+      after_page: nextPage || null,
+      after: afterText.slice(0, 700),
+      selection: snapshot.selection || '',
+      selection_context: snapshot.selection_context || '',
+      source: current.source || 'none',
+      revision: current.revision || '',
+      state: current.state || 'idle',
+      truncated: beforeText.length > 700 || currentText.length > 3200 || afterText.length > 700
+    };
   }
 
   async function _rtcTool(name, args, callId) {   // 工具循环(本地):与 relay WS 版同语义,tool_status 卡/client_action 全复用
@@ -5886,7 +6012,41 @@ if (window.__bwPwaProviderOnly) return;
     var inkPageAtStart = name === 'see_ink'
       ? (Number(args && args.page) || currentPageAtStart) : currentPageAtStart;
     var inkVersionForDelivery = 0;
+    var visualTargetAtStart = /^(see_ink|see_page|see_figure)$/.test(name);
+    var visualPageAtStart = name === 'see_ink'
+      ? inkPageAtStart : (Number(args && args.page) || currentPageAtStart);
+    var visualContextSnapshot = visualTargetAtStart
+      ? _nativeRealtimeContextSnapshot(visualPageAtStart) : null;
+    var visualContextPromise = null;
     _rtc.turnTool = true; _rtc.turnToolAny = true;   // ㊸:本轮真调了工具(承诺核查放行;turnToolAny 用户轮作用域,不随 response 复位)
+    // OpenAI 可在原始 response 中一次排出多个 function_call；tool_choice:none
+    // 只能阻止工具结果后的下一轮再调用，挡不住这些已排队的并发调用。
+    // 在任何 await 之前认领本用户轮，第二个视觉调用只闭合、不取第二张图也不再答一次。
+    if (visualTargetAtStart && _rtc.visualTurnEpoch === toolEpochAtStart) {
+      var suppressedOutput = JSON.stringify({
+        ok: true,
+        suppressed: true,
+        no_additional_answer: true,
+        requested_tool: requestedName,
+        resolved_as: name,
+        reason: '同一用户轮已有一个视觉目标正在处理；本调用仅闭合，沿用该图与该次最终回答。'
+      });
+      _dcSend({
+        type: 'conversation.item.create',
+        item: { type: 'function_call_output', call_id: callId, output: suppressedOutput }
+      });
+      onToolStatus({
+        status: 'done', tool: name, label: '已合并到本轮视觉查看',
+        args: args, rag: suppressedOutput
+      });
+      return;
+    }
+    if (visualTargetAtStart) {
+      _rtc.visualTurnEpoch = toolEpochAtStart;
+      visualContextPromise = _nativeRealtimePageContext(
+        visualPageAtStart, visualContextSnapshot
+      );
+    }
     if (name === 'read_selection' && _rtc.sel && _rtc.sel.trim()) {   // 74:选中在手=短路闪回(fallback 路径与 relay 同构)
       onToolStatus({ status: 'done', tool: name, label: '读取选中(免调用)', rag: _rtc.sel.slice(0, 300) });
       _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId,
@@ -5958,12 +6118,26 @@ if (window.__bwPwaProviderOnly) return;
         vision = nativeShot && nativeShot.native_delivered ? null : [nativeShot];
         label = name === 'see_ink' ? '看笔迹标注'
           : (name === 'see_page' ? '看当前页面' : '看当前图像');
-        res = { local_direct: true, image_supplied: true };
+        var visualPageContext = await visualContextPromise;
+        if (toolEpochAtStart !== (_rtc.turnEpoch || 0)) {
+          if (/^bwi_[a-f0-9]{28}$/.test(visualItemID)) {
+            _dcSend({ type: 'conversation.item.delete', item_id: visualItemID });
+            visualItemID = '';
+          }
+          throw new Error('工具所属用户轮已被新问题取代');
+        }
+        res = {
+          local_direct: true, image_supplied: true,
+          page_context: visualPageContext
+        };
         out = JSON.stringify({
           ok: true,
           requested_tool: requestedName,
           resolved_as: name,
-          result: '相关合成图已直接送入当前 Realtime 会话，请根据图像回答用户。'
+          user_question: visualContextSnapshot.user_question || '',
+          page_context: visualPageContext,
+          result: '相关合成图与同页文字上下文已一起送入当前 Realtime 会话。',
+          instruction: '只生成一次最终回答。必须综合当前用户问题、此前对话、page_context 中标明的前页/当前页/后页文字、当前选区与刚送入的合成图；图像用于圈画、外观与空间关系，文字用于人物身份、台词与语义。不得只描述图片，也不要再调用 read_page、see_page 或第二个视觉工具。'
         });
         try {
           (_rtc.recentTools = _rtc.recentTools || []).push({
@@ -5975,16 +6149,28 @@ if (window.__bwPwaProviderOnly) return;
           }
         } catch (e) {}
       } else if (_rtc.nativeDirect && name === 'read_page') {
-        var localPageText = _nativeRealtimePageText();
+        var readPageSnapshot = _nativeRealtimeContextSnapshot(_rtc.ctxPage);
+        var localPageContext = await _nativeRealtimePageContext(
+          readPageSnapshot.page, readPageSnapshot
+        );
+        var localPageText = String(
+          localPageContext.current_page_text || localPageContext.visible_text || ''
+        );
         label = '读取当前页';
-        res = { local_direct: true, page: _rtc.ctxPage, text: localPageText };
+        res = {
+          local_direct: true, page: readPageSnapshot.page,
+          text: localPageText, page_context: localPageContext
+        };
         out = JSON.stringify({
-          page: _rtc.ctxPage,
-          total: _rtc.ctxTotal || 0,
+          page: readPageSnapshot.page,
+          total: readPageSnapshot.total || 0,
+          title: readPageSnapshot.title || '',
           text: localPageText || '',
-          note: localPageText ? '' : '当前视口没有可用文字层；如需查看页面，请调用 see_page。',
-          source: 'app-current-visible-text'
-        }).slice(0, 6800);
+          page_context: localPageContext,
+          note: localPageText ? '当前页文字来自 App 原生/预处理字符层；结合前后页与当前选区回答。'
+            : '当前页字符层确实未返回文字；只有在问题需要版面或图像证据时才调用 see_page。',
+          source: localPageContext.source || 'app-current-visible-text'
+        });
       } else if (_rtc.nativeDirect && name === 'read_selection') {
         label = '读取选中';
         res = { local_direct: true, selection: '' };
@@ -6712,6 +6898,8 @@ if (window.__bwPwaProviderOnly) return;
     _rtc.ink = null; _rtc.sel = ''; _rtc._inkFp = ''; _rtc.inkDirty = false;
     _rtc.hasInk = false; _rtc.inkVer = 0; _rtc.inkSeenVer = 0;
     _rtc.inkResponseAcks = Object.create(null); _rtc.inkAckSeq = 0; _rtc.turnEpoch = 0;
+    _rtc.visualTurnEpoch = -1;
+    _rtc._pageFp = ''; _rtc._sentCtxFp = '';
     _rtc.relayInkCapture = null; _rtc.nativeDirect = false;
     _rtcUseInkPage(_rtc.ctxPage);
     // 133(用户实测"圈完问这是什么,它说看不到"):上面清的是 _rtc.* 的注入指纹,但**发不发**由 syncInk/syncState

@@ -27,6 +27,183 @@ const PDF_READER = read("_server_deploy/static/pdf/pdf-tail.js");
 const EPUB_READER = read("_server_deploy/static/pdf/epub-html.js");
 const PENCIL_OVERLAY = read("ios/BWReader/App/NativePencilLiveOverlay.swift");
 
+function nativeRealtimeToolHarness(options = {}) {
+  const routing = VOICE.slice(
+    VOICE.indexOf("function _rtcInkFingerprint"),
+    VOICE.indexOf("var NATIVE_REALTIME_PI_AI_TOOLS"),
+  );
+  const responseCreate = VOICE.slice(
+    VOICE.indexOf("function _rtcRespCreate"),
+    VOICE.indexOf("// 创造物库清单"),
+  );
+  const pageTextHelpers = VOICE.slice(
+    VOICE.indexOf("function _nativeRealtimeDOMPageText"),
+    VOICE.indexOf("async function _rtcTool"),
+  );
+  const toolRun = VOICE.slice(
+    VOICE.indexOf("async function _rtcTool"),
+    VOICE.indexOf("// rtc 字幕队列", VOICE.indexOf("async function _rtcTool")),
+  );
+  const initial = {
+    page: Number(options.page) || 7,
+    total: Number(options.total) || 53,
+    title: String(options.title || "料理师 part1"),
+    visibleText: String(options.visibleText || ""),
+    selection: String(options.selection || ""),
+    question: String(options.question || ""),
+    providerPages: options.providerPages || {},
+  };
+  const sandbox = {};
+  vm.runInNewContext(`
+    var initial = ${JSON.stringify(initial)};
+    var snapshot = {
+      page: initial.page,
+      total: initial.total,
+      title: initial.title,
+      visible_text: initial.visibleText,
+      selection: initial.selection
+    };
+    var providerCalls = [];
+    var providerPages = initial.providerPages;
+    var provider = {
+      contract: 'reader-page-text-provider/1',
+      pageChars: function (page) {
+        page = Number(page) || 0;
+        providerCalls.push(page);
+        var text = String(providerPages[String(page)] || '');
+        return Promise.resolve({
+          state: text ? 'ready' : 'readyEmpty',
+          source: 'pc-preprocess',
+          revision: 'provider-rev-' + page,
+          page: page,
+          chars: Array.from(text).map(function (c) { return { c: c }; })
+        });
+      }
+    };
+    var BWReaderRuntime = { pageTextProvider: provider };
+    var _rtc = {
+      hasInk: false, inkVer: 0, inkSeenVer: 0, inkDirty: false,
+      ctxFile: 'localbook:context-contract', ctxPage: initial.page,
+      ctxTotal: initial.total, pendText: initial.visibleText,
+      inkPages: Object.create(null), turnText: false, nativeDirect: true,
+      activeInkPage: null, inkResponseAcks: Object.create(null), inkAckSeq: 0,
+      turnEpoch: 0, visualTurnEpoch: null,
+      callId: 'call', sidebandKey: 'sideband', recentTools: [],
+      sel: initial.selection
+    };
+    var sent = [];
+    var visualCalls = [];
+    var visualResolvers = [];
+    var holdVisual = false;
+    var statuses = [];
+    var _lastU = initial.question;
+    function _voiceMode() { return 'sts'; }
+    function _dcSend(value) { sent.push(value); return true; }
+    function _rtcFetchPageText() {}
+    function _rtcInterrupt() {}
+    function _rtcFlushCtx() {}
+    function capUser() {}
+    function onToolStatus(value) { statuses.push(value); }
+    function dispatch() {}
+    function _nativeRealtimePiAITool() { return false; }
+    function _visualStageError(stage, message) {
+      var error = new Error(message); error.bwVisualStage = stage; return error;
+    }
+    function _captureView() { return Promise.resolve(null); }
+    function _nativeRealtimeVisual(name, args) {
+      visualCalls.push({ name: name, args: args });
+      if (!holdVisual) return Promise.resolve({ native_delivered: true });
+      return new Promise(function (resolve) { visualResolvers.push(resolve); });
+    }
+    var adapter = { getContext: function () { return Object.assign({}, snapshot); } };
+    var RC = { adapter: function () { return adapter; } };
+    var document = {
+      title: initial.title,
+      querySelector: function () { return null; },
+      querySelectorAll: function () { return []; }
+    };
+    var window = {
+      RC: RC,
+      BWReaderRuntime: BWReaderRuntime,
+      __BW_NATIVE_LOCAL_READER__: true,
+      __BW_NATIVE_OPENAI_REALTIME__: true,
+      __bwNativeRealtime: { request: function () {} }
+    };
+    var localStorage = { getItem: function () { return null; } };
+    function setTimeout() { return 0; }
+    function clearTimeout() {}
+    ${routing}
+    ${responseCreate}
+    ${pageTextHelpers}
+    ${toolRun}
+    this.api = {
+      tool: _rtcTool,
+      beginTurn: _rtcBeginUserTurn,
+      state: _rtc,
+      sent: sent,
+      statuses: statuses,
+      visualCalls: visualCalls,
+      providerCalls: providerCalls,
+      holdVisual: function () { holdVisual = true; },
+      releaseVisuals: function (value) {
+        holdVisual = false;
+        var pending = visualResolvers.splice(0);
+        pending.forEach(function (resolve) {
+          resolve(value || { native_delivered: true });
+        });
+      },
+      visualWaiting: function () { return visualResolvers.length; },
+      mutate: function (value) {
+        value = value || {};
+        if (Object.prototype.hasOwnProperty.call(value, 'page')) {
+          snapshot.page = value.page; _rtc.ctxPage = value.page;
+        }
+        if (Object.prototype.hasOwnProperty.call(value, 'total')) {
+          snapshot.total = value.total; _rtc.ctxTotal = value.total;
+        }
+        if (Object.prototype.hasOwnProperty.call(value, 'title')) {
+          snapshot.title = value.title; document.title = value.title;
+        }
+        if (Object.prototype.hasOwnProperty.call(value, 'visibleText')) {
+          snapshot.visible_text = value.visibleText; _rtc.pendText = value.visibleText;
+        }
+        if (Object.prototype.hasOwnProperty.call(value, 'selection')) {
+          snapshot.selection = value.selection; _rtc.sel = value.selection;
+        }
+        if (Object.prototype.hasOwnProperty.call(value, 'question')) _lastU = value.question;
+      },
+      makeFresh: function (page) {
+        var state = _rtcInkPageState(page, true);
+        state.initialized = true;
+        state.fp = 'fresh-' + page;
+        state.strokes = [{ t: 'pen', p: [[0.1, 0.1], [0.2, 0.2]] }];
+        state.hasInk = true;
+        state.ver = 1;
+        state.seenVer = 0;
+        state.pending = false;
+        state.pendingCount = 0;
+        _rtc.activeInkPage = Number(page);
+        _rtcUseInkPage(page);
+      },
+      clear: function () { sent.length = 0; visualCalls.length = 0; statuses.length = 0; }
+    };
+  `, sandbox);
+  return sandbox.api;
+}
+
+function realtimeToolOutputs(api) {
+  return api.sent
+    .filter((message) => message.type === "conversation.item.create" &&
+      message.item && message.item.type === "function_call_output")
+    .map((message) => JSON.parse(message.item.output));
+}
+
+async function waitForVisual(api) {
+  for (let i = 0; i < 8 && !api.visualWaiting(); i += 1) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+}
+
 test("the App owns both the project key and the Realtime session without Pi", () => {
   assert.doesNotMatch(SERVER, /native-realtime-config/);
   assert.match(CORE, /kSecClassGenericPassword/);
@@ -294,7 +471,9 @@ test("fresh ink is page-versioned, immediate, and consumed only after one delive
       hasInk: false, inkVer: 0, inkSeenVer: 0, inkDirty: false, ctxPage: 1,
       inkPages: Object.create(null), turnText: false, nativeDirect: true,
       activeInkPage: null, inkResponseAcks: Object.create(null), inkAckSeq: 0,
-      turnEpoch: 0, callId: 'call', sidebandKey: 'sideband', recentTools: []
+      turnEpoch: 0, visualTurnEpoch: -1,
+      callId: 'call', sidebandKey: 'sideband', recentTools: [],
+      ctxTotal: 53, pendText: 'existing sandbox page text', sel: ''
     };
     var sent = [];
     var sendResults = [];
@@ -315,7 +494,26 @@ test("fresh ink is page-versioned, immediate, and consumed only after one delive
     function onToolStatus(value) { statuses.push(value); }
     function dispatch() {}
     function _nativeRealtimePiAITool() { return false; }
-    function _nativeRealtimePageText() { return ''; }
+    function _nativeRealtimePageText() { return String(_rtc.pendText || ''); }
+    function _nativeRealtimeContextSnapshot(page) {
+      return {
+        title: 'sandbox book', file: 'sandbox.pdf',
+        page: Number(page) || _rtc.ctxPage, total: _rtc.ctxTotal,
+        visible_text: String(_rtc.pendText || ''), selection: String(_rtc.sel || ''),
+        selection_context: '', user_question: String(_lastU || '')
+      };
+    }
+    function _nativeRealtimePageContext(page, snapshot) {
+      snapshot = snapshot || _nativeRealtimeContextSnapshot(page);
+      return Promise.resolve({
+        contract: 'reader-realtime-page-context/1',
+        title: snapshot.title, page: snapshot.page, total: snapshot.total,
+        before: '', visible_text: snapshot.visible_text,
+        current_page_text: snapshot.visible_text, after: '',
+        selection: snapshot.selection, selection_context: snapshot.selection_context,
+        source: 'sandbox'
+      });
+    }
     function _visualStageError(stage, message) {
       var error = new Error(message); error.bwVisualStage = stage; return error;
     }
@@ -442,6 +640,7 @@ test("fresh ink is page-versioned, immediate, and consumed only after one delive
   sandbox.api.complete("see_ink", false, 1, 1, "failed-ink", "{}", false, false);
   assert.equal(sandbox.api.pageState(1).seenVer, 0, "failed see_ink must not consume ink");
 
+  sandbox.api.beginTurn();
   sandbox.api.clearSent();
   sandbox.api.holdVisual();
   const toolPromise = sandbox.api.tool(
@@ -814,6 +1013,178 @@ test("fresh ink is page-versioned, immediate, and consumed only after one delive
 
   assert.match(CORE, /指代优先级固定为：当前显示页在本次通话中尚未看过的新笔迹变化 > 当前明确选区 > 当前可见文字 > 整页图像/);
   assert.match(CORE, /同一用户轮只选择一个视觉目标/);
+});
+
+test("native read_page awaits the App page-text provider and returns real nearby text", async () => {
+  const before = "CTX_BEFORE_食物禁忌的来历";
+  const current = "CTX_CURRENT_和尚正在吃饭并说明肉食禁忌";
+  const after = "CTX_AFTER_下一格继续解释规则";
+  const api = nativeRealtimeToolHarness({
+    page: 7,
+    total: 53,
+    title: "料理师 part1",
+    providerPages: { 6: before, 7: current, 8: after },
+  });
+
+  await api.tool("read_page", {}, "read-native-page");
+
+  assert.deepEqual(
+    [...new Set(Array.from(api.providerCalls))].sort((a, b) => a - b),
+    [6, 7, 8],
+    "read_page must ask the native provider for the current page and its neighbors",
+  );
+  const outputs = realtimeToolOutputs(api);
+  assert.equal(outputs.length, 1);
+  assert.equal(outputs[0].text, current);
+  assert.equal(outputs[0].page_context.contract, "reader-realtime-page-context/1");
+  assert.equal(outputs[0].page_context.title, "料理师 part1");
+  assert.equal(outputs[0].page_context.page, 7);
+  assert.equal(outputs[0].page_context.total, 53);
+  assert.equal(outputs[0].page_context.before, before);
+  assert.equal(outputs[0].page_context.current_page_text, current);
+  assert.equal(outputs[0].page_context.after, after);
+  assert.equal(outputs[0].page_context.source, "pc-preprocess");
+  assert.equal(
+    api.sent.filter((message) => message.type === "response.create").length,
+    1,
+  );
+});
+
+test("visual tool output freezes page text, selection, and question before one final answer", async () => {
+  const original = {
+    before: "VISUAL_BEFORE_前一页人物背景",
+    current: "VISUAL_CURRENT_当前页台词说明人物身份",
+    after: "VISUAL_AFTER_后一页继续情节",
+    visible: "VISUAL_VISIBLE_当前视口文字",
+    selection: "VISUAL_SELECTION_圈内人物",
+    question: "VISUAL_QUESTION_他是什么人？",
+  };
+
+  for (const tool of ["see_ink", "see_page"]) {
+    const api = nativeRealtimeToolHarness({
+      page: 7,
+      total: 53,
+      title: "料理师 part1",
+      visibleText: original.visible,
+      selection: original.selection,
+      question: original.question,
+      providerPages: {
+        6: original.before,
+        7: original.current,
+        8: original.after,
+      },
+    });
+    api.holdVisual();
+    const pending = api.tool(tool, { page: 7 }, `context-${tool}`);
+    await waitForVisual(api);
+    assert.equal(api.visualWaiting(), 1, `${tool} must reach exactly one native capture`);
+
+    api.mutate({
+      page: 8,
+      total: 99,
+      title: "MUTATED_TITLE",
+      visibleText: "MUTATED_VISIBLE",
+      selection: "MUTATED_SELECTION",
+      question: "MUTATED_QUESTION",
+    });
+    api.releaseVisuals();
+    await pending;
+
+    const outputs = realtimeToolOutputs(api);
+    assert.equal(outputs.length, 1);
+    const output = outputs[0];
+    assert.equal(output.user_question, original.question);
+    assert.equal(output.page_context.contract, "reader-realtime-page-context/1");
+    assert.equal(output.page_context.title, "料理师 part1");
+    assert.equal(output.page_context.page, 7);
+    assert.equal(output.page_context.total, 53);
+    assert.equal(output.page_context.before, original.before);
+    assert.equal(output.page_context.visible_text, original.visible);
+    assert.equal(output.page_context.current_page_text, original.current);
+    assert.equal(output.page_context.after, original.after);
+    assert.equal(output.page_context.selection, original.selection);
+    assert.doesNotMatch(JSON.stringify(output), /MUTATED_/);
+    assert.match(output.instruction, /当前用户问题/);
+    assert.match(output.instruction, /此前对话/);
+    assert.match(output.instruction, /page_context/);
+    assert.match(output.instruction, /合成图/);
+    assert.match(output.instruction, /综合/);
+    assert.match(output.instruction, /不得只描述图片/);
+
+    const outputIndex = api.sent.findIndex((message) =>
+      message.type === "conversation.item.create" &&
+      message.item && message.item.type === "function_call_output"
+    );
+    const responses = api.sent.filter((message) => message.type === "response.create");
+    const responseIndex = api.sent.findIndex((message) => message.type === "response.create");
+    assert.equal(responses.length, 1, `${tool} may request only one final answer`);
+    assert.equal(responses[0].response.tool_choice, "none");
+    assert.ok(outputIndex >= 0 && outputIndex < responseIndex,
+      "the frozen page context must arrive before the final answer request");
+  }
+});
+
+test("one turn admits only one concurrent visual capture and one answer", async () => {
+  const api = nativeRealtimeToolHarness({
+    page: 7,
+    total: 53,
+    visibleText: "并发视觉上下文",
+    selection: "当前圈选",
+    question: "这里是什么？",
+    providerPages: {
+      6: "前页",
+      7: "当前页",
+      8: "后页",
+    },
+  });
+  api.makeFresh(7);
+  api.holdVisual();
+
+  const first = api.tool("see_page", { page: 99 }, "queued-page");
+  const second = api.tool("see_ink", { page: 7 }, "queued-ink");
+  await waitForVisual(api);
+  const capturesBeforeRelease = api.visualCalls.length;
+  api.releaseVisuals();
+  await Promise.all([first, second]);
+
+  assert.equal(capturesBeforeRelease, 1,
+    "the visual turn must be claimed before the first await");
+  assert.equal(api.visualCalls.length, 1);
+  assert.equal(api.visualCalls[0].name, "see_ink",
+    "fresh ink upgrades the first queued page request to the sole visual target");
+  assert.equal(api.visualCalls[0].args.page, 7);
+  assert.equal(api.visualCalls[0].args.scope, "drawing-nearby");
+
+  const outputs = realtimeToolOutputs(api);
+  assert.equal(outputs.length, 2, "both model function calls must be closed");
+  const suppressed = outputs.filter((output) =>
+    output.suppressed === true && output.no_additional_answer === true
+  );
+  assert.equal(suppressed.length, 1,
+    "the duplicate visual call is closed explicitly without another answer");
+  assert.equal(outputs.filter((output) => output.page_context).length, 1);
+  const responses = api.sent.filter((message) => message.type === "response.create");
+  assert.equal(responses.length, 1);
+  assert.equal(responses[0].response.tool_choice, "none");
+
+  api.clear();
+  api.beginTurn();
+  await api.tool("see_page", {}, "next-turn-page");
+  assert.equal(api.visualCalls.length, 1,
+    "a new user turn may claim a new visual target");
+  assert.equal(
+    api.sent.filter((message) => message.type === "response.create").length,
+    1,
+  );
+});
+
+test("every new native Realtime call invalidates the injected-context fingerprint", () => {
+  const start = VOICE.slice(
+    VOICE.indexOf("async function rtcStart"),
+    VOICE.indexOf("function toggle(opts)", VOICE.indexOf("async function rtcStart")),
+  );
+  assert.match(start, /_rtc\.visualTurnEpoch = -1/);
+  assert.match(start, /_rtc\._pageFp = ''; _rtc\._sentCtxFp = ''/);
 });
 
 test("see_ink failures preserve the actual composition, identity, storage, and transport stage", () => {
