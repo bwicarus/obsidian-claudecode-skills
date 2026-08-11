@@ -4623,11 +4623,12 @@
       return /^\/r\/[a-f0-9]{64}$/.test(v) ? v : null;
     } catch (e) { return null; }
   }
-  async function _nativeCapture(scope, rect) {
+  async function _nativeCapture(scope, rect, page) {
     var base = _nativeCaptureBase();
     // 非 App 本机(Safari/PWA)不是故障,是预期路径:静默回落 html2canvas。
     if (!base) return null;
     var q = 'scope=' + encodeURIComponent(scope);
+    if (page != null) q += '&page=' + encodeURIComponent(String(page));
     if (rect) {
       q += '&x=' + rect.x.toFixed(6) + '&y=' + rect.y.toFixed(6) +
            '&w=' + rect.w.toFixed(6) + '&h=' + rect.h.toFixed(6);
@@ -4658,7 +4659,12 @@
     if (b64.length <= 3000) {
       return _visualNull('原生合成图', '图过小 ' + b64.length + 'B(疑空白)');
     }
-    _visualStep('原生合成图 ' + scope + ' 得到 ' + Math.round(b64.length / 1024) + 'KB');
+    // 「这页本来就没画过」是有效答案,不是故障 —— 图照常返回,但要说出来,
+    // 否则模型会把一张干净的底页当成"笔迹看不清"。
+    var inkState = '';
+    try { inkState = resp.headers.get('X-BW-Visual-Ink') || ''; } catch (e5) {}
+    _visualStep('原生合成图 ' + scope + ' 得到 ' + Math.round(b64.length / 1024) + 'KB' +
+      (inkState === 'none' ? '(该页无笔迹)' : ''));
     return { media_type: 'image/jpeg', b64: b64 };
   }
 
@@ -4691,12 +4697,22 @@
   async function _nativeInkRegion(el, x0, y0, x1, y1) {
     if (!_nativeCaptureBase()) return null;
     var rect = _viewportRectFromPageRect(el, x0, y0, x1, y1);
-    if (!rect) return _visualNull('原生合成图', '无法换算到视口坐标');
-    if (rect.visible < 0.9) {
-      return _visualNull('原生合成图',
-        '笔迹仅 ' + Math.round(rect.visible * 100) + '% 在视口内(其余已滚出屏幕,需按页离屏合成)');
+    // 视口内:走 region —— 那是屏幕层级合成,卡片、高亮等可见 UI 都在图里。
+    if (rect && rect.visible >= 0.9) {
+      var shot = await _nativeCapture('region', rect);
+      if (shot) return shot;
     }
-    return await _nativeCapture('region', rect);
+    // 屏外:改按页离屏合成。x0..y1 本就是页内归一化,正好是 scope=page 要的坐标系。
+    // 该路径只有 PDF 底页与笔迹/选区,没有卡片 —— 取舍写在日志里,免得看图的人以为丢了东西。
+    var pageNo = _inkPageNumber(el);
+    var offRatio = rect ? Math.round(rect.visible * 100) : 0;
+    if (pageNo) {
+      _visualStep('笔迹 ' + offRatio + '% 在视口内,改按第 ' + pageNo + ' 页离屏合成(无卡片层)');
+      return await _nativeCapture('page', { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, pageNo);
+    }
+    if (!rect) return _visualNull('原生合成图', '无法换算到视口坐标');
+    return _visualNull('原生合成图',
+      '笔迹仅 ' + offRatio + '% 在视口内,且该页无 PDF 页号(插入页/EPUB),无法离屏合成');
   }
   // 可选 DocumentHost 视觉表面。PDF/EPUB 没实现时原路径完全不变；普通网页只在 adapter
   // 提供真实正文元素、布局尺寸和 canonical strokes，不复制截图/绘制算法。
@@ -5095,18 +5111,35 @@
   }
   // 当前视口里**带手写**的页(page-wrap 或 pdf-upage);target 可选。
   // 快照 MCP 会传精确页码,双页同时可见时不能把相邻页的墨迹图冒充当前 revision。
-  function _curInkPageEl(target) {
+  function _curInkPageEl(target, allowOffscreen) {
     var targetPage = _inkTargetPage(target);
     var els = document.querySelectorAll(
       '.page-wrap[data-page-num], .pdf-upage, ' +
       '.ep-sec[data-idx], .ep-usec[data-uid]'
     );
+    // 视口内的优先(那条路能连卡片一起合成);找不到时才回退到屏外的那一页。
+    //
+    // 此前这里只认视口内的元素,屏外直接返回 null —— 于是"笔迹滚出屏幕"在最上游
+    // 就被静默丢弃,离屏合成再怎么就绪也永远走不到。
+    var offscreen = null;
     for (var i = 0; i < els.length; i++) {
       var el = els[i], r = el.getBoundingClientRect();
-      if (r.bottom > 0 && r.top < (window.innerHeight || 0) &&
-          _inkPageMatchesTarget(el, targetPage) &&
-          el.__inkStrokes && el.__inkStrokes.length) return el;
+      if (!(_inkPageMatchesTarget(el, targetPage) &&
+            el.__inkStrokes && el.__inkStrokes.length)) continue;
+      if (r.bottom > 0 && r.top < (window.innerHeight || 0)) return el;
+      if (!offscreen) offscreen = el;
     }
+    if (allowOffscreen && offscreen) return offscreen;
+    return null;
+  }
+  // PDF 页号;插入页与 EPUB 段落没有,离屏按页合成对它们不适用。
+  function _inkPageNumber(el) {
+    try {
+      if (el && el.dataset && el.dataset.pageNum != null) {
+        var n = parseInt(el.dataset.pageNum, 10);
+        if (n > 0) return n;
+      }
+    } catch (e) {}
     return null;
   }
   // Small, AI-readable index of closed custom regions on the exact current
@@ -5190,7 +5223,7 @@
           ? await _captureSurfaceCompositeCrop(surface, surfaceCrop, selectionId)
           : await _captureSurface(surface, surfaceCrop);
       }
-      var el = _curInkPageEl(target);
+      var el = _curInkPageEl(target, true);
       var strokes = el && el.__inkStrokes;
       if (!el || !strokes || !strokes.length) return null;
       if (scope) {
