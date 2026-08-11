@@ -6,9 +6,9 @@ internal sealed record DirectAppTargetProfile(
     string PackagePathMarker,
     string MicrophoneConsentPackageKey,
     bool UsesCodexGlobalShortcut,
-    // 本机实测:Codex 的进程/映像名是 ChatGPT / ChatGPT.exe,GPT Classic 的是
-    // ChatGPT Classic / ChatGPT Classic.exe —— 两者并不同名。探测器过去硬编码
-    // "ChatGPT",会把 Classic 的全部进程滤掉,导致它的窗口永远不被发现。
+    // 本机实测:当前 Codex Beta 的进程/映像名是 ChatGPT (Beta) /
+    // ChatGPT (Beta).exe,GPT Classic 的是 ChatGPT Classic /
+    // ChatGPT Classic.exe —— 两者并不同名，必须与固定包身份一并精确匹配。
     string ProcessName,
     string ExecutableSuffix);
 
@@ -20,11 +20,11 @@ internal static class DirectAppTargets
     private static readonly DirectAppTargetProfile Codex = new(
         CodexDesktop,
         DirectBridgeContract.CodexAppUserModelId,
-        @"\WindowsApps\OpenAI.Codex_",
-        "OpenAI.Codex_2p2nqsd0c76g0",
+        @"\WindowsApps\OpenAI.CodexBeta_",
+        "OpenAI.CodexBeta_2p2nqsd0c76g0",
         UsesCodexGlobalShortcut: true,
-        ProcessName: "ChatGPT",
-        ExecutableSuffix: @"\ChatGPT.exe");
+        ProcessName: "ChatGPT (Beta)",
+        ExecutableSuffix: @"\ChatGPT (Beta).exe");
 
     private static readonly DirectAppTargetProfile Classic = new(
         ChatGptClassic,

@@ -299,7 +299,7 @@ class ShortcutBrokerRequestProcessor:
 # These identifiers are local constants.  Reader input is never accepted as an
 # application path, command, or AUMID.
 LOCAL_PACKAGED_APP_IDS = {
-    "codex-desktop": "OpenAI.Codex_2p2nqsd0c76g0!App",
+    "codex-desktop": "OpenAI.CodexBeta_2p2nqsd0c76g0!App",
     "chatgpt-classic": (
         "OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0!ChatGPT"
     ),
@@ -1053,15 +1053,21 @@ def save_enabled_config(
     return value
 
 
-def disable_config(paths: BridgePaths) -> bool:
+def set_direct_config_enabled(paths: BridgePaths, enabled: bool) -> bool:
+    """Atomically toggle an already-valid direct configuration in place."""
+
+    if not isinstance(enabled, bool):
+        raise BridgeError("直连配置启用状态无效。")
     previous = load_direct_config(paths)
     if previous is None:
         if paths.direct_config.exists():
             raise BridgeError("现有直连配置无效；拒绝静默改写。")
         return False
+    if previous.get("localOptIn") is enabled:
+        return False
     value = {
         **previous,
-        "localOptIn": False,
+        "localOptIn": enabled,
     }
     _atomic_write_json(
         paths.direct_config,
@@ -1071,6 +1077,10 @@ def disable_config(paths: BridgePaths) -> bool:
         ),
     )
     return True
+
+
+def disable_config(paths: BridgePaths) -> bool:
+    return set_direct_config_enabled(paths, False)
 
 
 def _require_exact_native_paths(paths: BridgePaths) -> tuple[Path, Path]:

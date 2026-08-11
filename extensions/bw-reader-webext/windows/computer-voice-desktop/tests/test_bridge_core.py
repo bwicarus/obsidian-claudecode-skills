@@ -50,6 +50,7 @@ from bridge_core import (  # noqa: E402
     run_idle_bootstrap,
     run_tailscale_read_only_preflight,
     save_enabled_config,
+    set_direct_config_enabled,
     start_direct_service,
     stop_direct_service,
     validate_direct_config,
@@ -131,6 +132,20 @@ class DirectDesktopCoreTests(unittest.TestCase):
                 VIRTUAL_SPEAKER,
             ],
         )
+
+    def test_existing_valid_config_can_be_toggled_without_changing_endpoints(self) -> None:
+        original = self.enable_config()
+        self.assertTrue(set_direct_config_enabled(self.paths, False))
+        disabled = load_direct_config(self.paths)
+        self.assertIsNotNone(disabled)
+        self.assertFalse(disabled["localOptIn"])
+        self.assertEqual(
+            disabled["virtualMicrophoneRenderEndpointId"],
+            original["virtualMicrophoneRenderEndpointId"],
+        )
+        self.assertTrue(set_direct_config_enabled(self.paths, True))
+        self.assertTrue(load_direct_config(self.paths)["localOptIn"])
+        self.assertFalse(set_direct_config_enabled(self.paths, True))
 
     def test_shortcut_broker_is_strict_and_idempotent(self) -> None:
         sends: list[str] = []

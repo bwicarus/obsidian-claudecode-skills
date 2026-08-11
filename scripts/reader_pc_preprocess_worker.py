@@ -11,6 +11,7 @@ the command line.
 from __future__ import annotations
 
 import argparse
+import csv
 import gc
 import hashlib
 import importlib
@@ -19,7 +20,9 @@ import os
 from pathlib import Path
 import re
 import secrets
+import shutil
 import socket
+import subprocess
 import sys
 import threading
 import time
@@ -95,6 +98,54 @@ class LeaseStopped(WorkerError):
 
 def _now_ms() -> int:
     return int(time.time() * 1000)
+
+
+def _current_process_identity() -> dict[str, int]:
+    """Return the exact Windows PID generation used by ReaderPC controls."""
+
+    pid = os.getpid()
+    if os.name != "nt":
+        return {
+            "pid": pid,
+            "startFileTimeUtc": int(time.time_ns() // 100),
+        }
+
+    import ctypes
+    from ctypes import wintypes
+
+    kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel32.GetCurrentProcess.argtypes = []
+    kernel32.GetCurrentProcess.restype = wintypes.HANDLE
+    kernel32.GetProcessTimes.argtypes = [
+        wintypes.HANDLE,
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+        ctypes.POINTER(wintypes.FILETIME),
+    ]
+    kernel32.GetProcessTimes.restype = wintypes.BOOL
+    creation = wintypes.FILETIME()
+    exit_time = wintypes.FILETIME()
+    kernel = wintypes.FILETIME()
+    user = wintypes.FILETIME()
+    if not kernel32.GetProcessTimes(
+        kernel32.GetCurrentProcess(),
+        ctypes.byref(creation),
+        ctypes.byref(exit_time),
+        ctypes.byref(kernel),
+        ctypes.byref(user),
+    ):
+        raise WorkerError(
+            "could not read PC worker process generation "
+            f"(win32={ctypes.get_last_error()})"
+        )
+    return {
+        "pid": pid,
+        "startFileTimeUtc": (
+            (int(creation.dwHighDateTime) << 32)
+            | int(creation.dwLowDateTime)
+        ),
+    }
 
 
 def _atomic_json(path: Path, value: dict) -> None:
@@ -1379,6 +1430,60 @@ def _lower_process_priority() -> None:
         raise WorkerError("could not lower PC worker process priority") from exc
 
 
+def _lightweight_cuda_status(
+    *,
+    executable: str | None = None,
+    command_runner: Callable[..., Any] = subprocess.run,
+) -> dict:
+    """Inspect the NVIDIA adapter without importing PyTorch while idle."""
+
+    command = executable or os.environ.get("BW_READER_PC_NVIDIA_SMI")
+    command = str(command or shutil.which("nvidia-smi.exe") or shutil.which("nvidia-smi") or "")
+    if not command:
+        raise WorkerError("quality-first profile requires nvidia-smi for the idle GPU probe")
+    try:
+        completed = command_runner(
+            [
+                command,
+                "--query-gpu=index,name,driver_version",
+                "--format=csv,noheader,nounits",
+            ],
+            check=False,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=8,
+            creationflags=(
+                getattr(subprocess, "CREATE_NO_WINDOW", 0)
+                if os.name == "nt"
+                else 0
+            ),
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise WorkerError("quality-first idle GPU probe failed") from exc
+    if completed.returncode != 0:
+        raise WorkerError("quality-first idle GPU probe returned an error")
+    try:
+        rows = list(csv.reader(str(completed.stdout or "").splitlines()))
+        row = rows[0]
+        index = int(row[0].strip())
+        name = row[1].strip()
+        driver = row[2].strip()
+    except (IndexError, TypeError, ValueError) as exc:
+        raise WorkerError("quality-first idle GPU probe returned invalid data") from exc
+    if index < 0 or not name:
+        raise WorkerError("quality-first idle GPU probe found no usable adapter")
+    return {
+        "available": True,
+        "deviceIndex": index,
+        "deviceName": name,
+        "driverVersion": driver,
+        "cudaVersion": "validated-on-job-start",
+        "probe": "nvidia-smi-idle",
+    }
+
+
 def _default_worker_id() -> str:
     identity = (
         f"{socket.gethostname()}\0{os.environ.get('USERNAME') or ''}\0"
@@ -1414,6 +1519,14 @@ def parse_args(argv=None):
     parser.add_argument("--engines", default=os.environ.get("BW_READER_PC_OCR_ENGINES", "vision,manga"))
     parser.add_argument("--idle-poll-seconds", type=float, default=20.0)
     parser.add_argument("--once", action="store_true")
+    parser.add_argument(
+        "--recycle-after-job",
+        action="store_true",
+        help=(
+            "exit after a claimed job so the ReaderPC supervisor can restart "
+            "a lightweight process without retained model memory"
+        ),
+    )
     return parser.parse_args(argv)
 
 
@@ -1431,12 +1544,16 @@ def build_runner(args) -> WorkerRunner:
     engines = QualityPipeline.supported_engines(requested)
     if not engines or len(engines) != len(requested):
         raise WorkerError("configured PC OCR engines must be vision and/or manga")
-    cuda = QualityPipeline.cuda_status()
+    cuda = _lightweight_cuda_status()
     cache = ContentCache(cache_root)
+    process_identity = _current_process_identity()
     cache.status(
         state="idle",
         phase="preparing",
         workerId=worker_id,
+        processId=process_identity["pid"],
+        processStartFileTimeUtc=process_identity["startFileTimeUtc"],
+        startedAtEpochMs=_now_ms(),
         gpu=cuda,
         formulaBackendConfigured=str(
             os.environ.get("BW_READER_PC_FORMULA_BACKEND") or "unimernet-base"
@@ -1474,7 +1591,7 @@ def main(argv=None) -> int:
             except Exception as exc:
                 print("PC OCR worker error: " + safe_error(exc), file=sys.stderr, flush=True)
                 worked = True
-            if args.once:
+            if args.once or (args.recycle_after_job and worked):
                 return 0
             # Empty queues poll slowly.  Failures also back off so a broken Pi
             # or model does not consume CPU in a tight retry loop.

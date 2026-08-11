@@ -221,6 +221,33 @@ Codex Desktop 自身的进程监控实现。
 
 ## 代码入口
 
+### ReaderPC 服务器托盘总控
+
+`ReaderPC 服务器`是 Windows 上的独立托盘总控，不替换或重打包已验收的
+`BW-Computer-Voice-Bridge.exe`。它统一展示电脑语音、Reader 上下文快照和
+PC 预处理，但三者仍是独立故障域。PC worker 只向 Pi 发起出站 HTTPS；
+空闲只用 `nvidia-smi` 读取显卡信息，真正任务开始后才导入 PyTorch、模型和显存。
+
+统一的无凭据本机状态写入
+`%LOCALAPPDATA%\BWReader\readerpc-server.status.json`。安装器使用版本化
+`%LOCALAPPDATA%\BWReader\ReaderPC-Server\releases\<version>`，新版只切换
+`current.json`、开始菜单和桌面快捷方式，旧 release 保留为回退点。最小化仅隐藏到
+托盘；关闭窗口或从托盘退出会先停止 PC 预处理与电脑语音/上下文直连。安装与运行不会
+自动创建开机项；开机启动仍是用户显式选项。
+
+```powershell
+$py = 'C:\Users\bwica\AppData\Local\Programs\Python\Python313\python.exe'
+& $py extensions\bw-reader-webext\windows\package_readerpc_server.py --build <version>
+& $py extensions\bw-reader-webext\windows\package_readerpc_server.py `
+  --self-test extensions\bw-reader-webext\windows\readerpc-candidates\<version>\readerpc-server-<version>-windows-x64.zip
+& $py extensions\bw-reader-webext\windows\package_readerpc_server.py `
+  --install extensions\bw-reader-webext\windows\readerpc-candidates\<version>\readerpc-server-<version>-windows-x64.zip --launch
+```
+
+图像型 PDF 没有可供拖选的原始字符；必须先显式选择 Apple、Pi 或 PC
+预处理，再在 App 中采用/切换对应派生文字层。ReaderPC 只解决 PC 执行器
+在线与任务运行，不会伪造 PDF 自带文字层，也不覆盖原 PDF。
+
 - Reader 直连、麦克风上行与 context journal：
   `_server_deploy/static/pdf/rc-computer-voice.js`
 - 电话按钮与引擎同步：

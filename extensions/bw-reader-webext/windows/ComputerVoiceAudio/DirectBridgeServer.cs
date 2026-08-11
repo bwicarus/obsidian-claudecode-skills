@@ -45,6 +45,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     private readonly ReaderBrowserControlBroker _readerBrowserControlBroker;
     private readonly NamedPipeReaderBrowserControlRpcServer
         _readerBrowserControlRpcServer;
+    private readonly DirectCodexVoiceControl _codexVoiceControl;
     private readonly object _runtimeStateGate = new();
     private string _runtimeState = "starting";
     private bool _runtimeReaderConnected;
@@ -63,6 +64,12 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         _configStore = configStore;
         _snapshotContextAdapter = snapshotContextAdapter;
         DirectBridgeConfig config = configStore.Load();
+        string runtimeDirectory = Path.GetDirectoryName(
+            config.RuntimeStatusPath)
+            ?? Path.Combine(configStore.InstallationRoot, "runtime");
+        _codexVoiceControl = DirectCodexVoiceControl.CreateProduction(
+            Path.Combine(runtimeDirectory, "codex-voice-keepalive.json"),
+            appLauncher);
         _coordinator = new DirectBridgeCoordinator(
             configStore,
             appLauncher,
@@ -82,9 +89,6 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 "runtime",
                 FileDirectSnapshotContextAdapter.SnapshotFileName),
             config.ListenPort);
-        string runtimeDirectory = Path.GetDirectoryName(
-            config.RuntimeStatusPath)
-            ?? Path.Combine(configStore.InstallationRoot, "runtime");
         _documentCorpus = new ReaderDocumentCorpusStore(
             Path.Combine(
                 runtimeDirectory,
@@ -807,6 +811,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             origin,
             _configStore,
             _coordinator,
+            codexVoiceControl: _codexVoiceControl,
             registerReaderSource: sourceInstanceId =>
             {
                 sourceLease = _readerSourceRouter.Attach(
@@ -964,7 +969,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             connectionId,
             origin,
             _configStore,
-            _coordinator);
+            _coordinator,
+            codexVoiceControl: _codexVoiceControl);
         Task<DirectClientMessage?>? prefetchedReceiveTask = null;
 
         while (
@@ -1975,6 +1981,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             finally
             {
                 _snapshotViewer.Dispose();
+                await _codexVoiceControl.DisposeAsync()
+                    .ConfigureAwait(false);
             }
             await _connectionOwnership.DisposeAsync()
                 .ConfigureAwait(false);

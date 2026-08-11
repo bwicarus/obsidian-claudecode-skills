@@ -29,7 +29,7 @@ internal static class DirectBridgeContract
     internal const int ClientHeartbeatIntervalMilliseconds = 5_000;
     internal const int ClientHeartbeatTimeoutMilliseconds = 15_000;
     internal const string CodexAppUserModelId =
-        "OpenAI.Codex_2p2nqsd0c76g0!App";
+        "OpenAI.CodexBeta_2p2nqsd0c76g0!App";
     internal const string ChatGptClassicAppUserModelId =
         "OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0!ChatGPT";
     internal static readonly TimeSpan RuntimeStatusHeartbeatInterval =

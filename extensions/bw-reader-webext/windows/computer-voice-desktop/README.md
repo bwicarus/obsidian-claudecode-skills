@@ -188,7 +188,7 @@ GUI 不再提供会被 supervisor 立即抵消的单独“停止”按钮。“�
   只能明确迁移为无自动路由的 `/4`。
 - `appKind` 固定 `codex-desktop`。Reader 不能提交路径、命令或 AUMID。
 - 本机应用 allowlist 只在代码内维护：
-  - Codex：`OpenAI.Codex_2p2nqsd0c76g0!App`
+  - Codex：`OpenAI.CodexBeta_2p2nqsd0c76g0!App`
   - Classic：`OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0!ChatGPT`
 
 当前 strict config 只选择 Codex；Classic ID 仅作为本机枚举预留，不能由

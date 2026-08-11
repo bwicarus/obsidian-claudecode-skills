@@ -23,14 +23,22 @@ internal sealed record DirectCodexVoiceSetResult(
 
 internal interface IDirectCodexVoiceControl
 {
+    bool KeepActive { get; }
+
     DirectCodexVoiceState ReadState();
 
     Task<DirectCodexVoiceSetResult> SetActiveAsync(
         bool active,
         CancellationToken cancellationToken);
+
+    Task<DirectCodexVoiceSetResult> SetKeepActiveAsync(
+        bool enabled,
+        CancellationToken cancellationToken);
 }
 
-internal sealed class DirectCodexVoiceControl : IDirectCodexVoiceControl
+internal sealed class DirectCodexVoiceControl :
+    IDirectCodexVoiceControl,
+    IAsyncDisposable
 {
     internal const string StateSource =
         "windows-microphone-capability-ledger";
@@ -45,6 +53,12 @@ internal sealed class DirectCodexVoiceControl : IDirectCodexVoiceControl
         CancellationToken,
         Task<CodexVoiceActivitySnapshot>> _transitionAsync;
     private readonly SemaphoreSlim _transitionGate;
+    private readonly string? _keepActivePath;
+    private readonly TimeSpan _keepActivePollInterval;
+    private readonly CancellationTokenSource? _keepActiveLifetime;
+    private readonly Task? _keepActiveMonitor;
+    private int _keepActive;
+    private int _disposeStarted;
 
     internal DirectCodexVoiceControl(
         Func<CodexVoiceActivitySnapshot> readSnapshot,
@@ -53,14 +67,35 @@ internal sealed class DirectCodexVoiceControl : IDirectCodexVoiceControl
             CodexVoiceActivitySnapshot,
             CancellationToken,
             Task<CodexVoiceActivitySnapshot>> transitionAsync,
-        SemaphoreSlim? transitionGate = null)
+        SemaphoreSlim? transitionGate = null,
+        string? keepActivePath = null,
+        TimeSpan? keepActivePollInterval = null)
     {
         _readSnapshot = readSnapshot
             ?? throw new ArgumentNullException(nameof(readSnapshot));
         _transitionAsync = transitionAsync
             ?? throw new ArgumentNullException(nameof(transitionAsync));
         _transitionGate = transitionGate ?? new SemaphoreSlim(1, 1);
+        _keepActivePath = string.IsNullOrWhiteSpace(keepActivePath)
+            ? null
+            : System.IO.Path.GetFullPath(keepActivePath);
+        _keepActivePollInterval = keepActivePollInterval
+            ?? TimeSpan.FromSeconds(5);
+        if (_keepActivePollInterval < TimeSpan.FromSeconds(1))
+        {
+            throw new ArgumentOutOfRangeException(
+                nameof(keepActivePollInterval));
+        }
+        _keepActive = LoadKeepActive(_keepActivePath) ? 1 : 0;
+        if (_keepActivePath is not null)
+        {
+            _keepActiveLifetime = new CancellationTokenSource();
+            _keepActiveMonitor = MonitorKeepActiveAsync(
+                _keepActiveLifetime.Token);
+        }
     }
+
+    public bool KeepActive => Volatile.Read(ref _keepActive) == 1;
 
     public DirectCodexVoiceState ReadState()
     {
@@ -87,39 +122,74 @@ internal sealed class DirectCodexVoiceControl : IDirectCodexVoiceControl
             .ConfigureAwait(false);
         try
         {
-            CodexVoiceActivitySnapshot before = ReadRequired();
-            if (before.Active == active)
-            {
-                return new DirectCodexVoiceSetResult(
-                    ToState(before),
-                    ShortcutSent: false);
-            }
-
-            CodexVoiceActivitySnapshot confirmed =
-                await _transitionAsync(
-                    active,
-                    before,
-                    cancellationToken).ConfigureAwait(false);
-            RequireAvailable(confirmed);
-            if (confirmed.Active != active)
-            {
-                throw new DirectProtocolException(
-                    active
-                        ? CodexVoiceActivityController.StartNotConfirmedCode
-                        : CodexVoiceActivityController.StopNotConfirmedCode,
-                    active
-                        ? "未确认 Codex 语音已开启"
-                        : "未确认 Codex 语音已关闭",
-                    retryable: true);
-            }
-            return new DirectCodexVoiceSetResult(
-                ToState(confirmed),
-                ShortcutSent: true);
+            return await SetActiveWithinGateAsync(
+                active,
+                cancellationToken).ConfigureAwait(false);
         }
         finally
         {
             _transitionGate.Release();
         }
+    }
+
+    public async Task<DirectCodexVoiceSetResult> SetKeepActiveAsync(
+        bool enabled,
+        CancellationToken cancellationToken)
+    {
+        await _transitionGate.WaitAsync(cancellationToken)
+            .ConfigureAwait(false);
+        try
+        {
+            SaveKeepActive(_keepActivePath, enabled);
+            Volatile.Write(ref _keepActive, enabled ? 1 : 0);
+            if (!enabled)
+            {
+                return new DirectCodexVoiceSetResult(
+                    ReadState(),
+                    ShortcutSent: false);
+            }
+            return await SetActiveWithinGateAsync(
+                active: true,
+                cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            _transitionGate.Release();
+        }
+    }
+
+    private async Task<DirectCodexVoiceSetResult> SetActiveWithinGateAsync(
+        bool active,
+        CancellationToken cancellationToken)
+    {
+        CodexVoiceActivitySnapshot before = ReadRequired();
+        if (before.Active == active)
+        {
+            return new DirectCodexVoiceSetResult(
+                ToState(before),
+                ShortcutSent: false);
+        }
+
+        CodexVoiceActivitySnapshot confirmed =
+            await _transitionAsync(
+                active,
+                before,
+                cancellationToken).ConfigureAwait(false);
+        RequireAvailable(confirmed);
+        if (confirmed.Active != active)
+        {
+            throw new DirectProtocolException(
+                active
+                    ? CodexVoiceActivityController.StartNotConfirmedCode
+                    : CodexVoiceActivityController.StopNotConfirmedCode,
+                active
+                    ? "未确认 Codex 语音已开启"
+                    : "未确认 Codex 语音已关闭",
+                retryable: true);
+        }
+        return new DirectCodexVoiceSetResult(
+            ToState(confirmed),
+            ShortcutSent: true);
     }
 
     private CodexVoiceActivitySnapshot ReadRequired()
@@ -181,7 +251,9 @@ internal sealed class DirectCodexVoiceControl : IDirectCodexVoiceControl
                 StateSource),
         };
 
-    private static DirectCodexVoiceControl CreateProduction()
+    internal static DirectCodexVoiceControl CreateProduction(
+        string? keepActivePath = null,
+        IDirectAppLauncher? appLauncher = null)
     {
         WindowsRegistryCodexVoiceActivitySource source = new(
             DirectAppTargets.CodexDesktop);
@@ -189,10 +261,26 @@ internal sealed class DirectCodexVoiceControl : IDirectCodexVoiceControl
             source,
             new SystemCodexVoiceActivityClock());
         WindowsCodexVoiceShortcutSender shortcutSender = new();
+        IDirectAppLauncher launcher = appLauncher
+            ?? new WindowsDirectAppLauncher();
         return new DirectCodexVoiceControl(
             source.Read,
             async (active, before, cancellationToken) =>
             {
+                if (active)
+                {
+                    DirectAppTargetProfile profile = DirectAppTargets.Require(
+                        DirectAppTargets.CodexDesktop);
+                    await launcher.EnsureRunningAsync(
+                        profile.AppKind,
+                        profile.AppUserModelId,
+                        cancellationToken).ConfigureAwait(false);
+                    _ = await launcher.WaitForUniqueReadyAsync(
+                        profile.AppKind,
+                        profile.AppUserModelId,
+                        TimeSpan.FromSeconds(20),
+                        cancellationToken).ConfigureAwait(false);
+                }
                 CodexAppTarget target = RequireCodexTarget();
                 if (active)
                 {
@@ -216,7 +304,133 @@ internal sealed class DirectCodexVoiceControl : IDirectCodexVoiceControl
                     CodexVoiceActivityController.TransitionTimeout,
                     CodexVoiceActivityController.MonitorInterval,
                     cancellationToken).ConfigureAwait(false);
-            });
+            },
+            keepActivePath: keepActivePath);
+    }
+
+    private async Task MonitorKeepActiveAsync(
+        CancellationToken cancellationToken)
+    {
+        using PeriodicTimer timer = new(_keepActivePollInterval);
+        try
+        {
+            while (await timer.WaitForNextTickAsync(cancellationToken)
+                .ConfigureAwait(false))
+            {
+                if (!KeepActive)
+                {
+                    continue;
+                }
+                try
+                {
+                    DirectCodexVoiceState state = ReadState();
+                    if (state.Status == "available" && state.Active == true)
+                    {
+                        continue;
+                    }
+                    _ = await SetActiveAsync(
+                        active: true,
+                        cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                    when (cancellationToken.IsCancellationRequested)
+                {
+                    return;
+                }
+                catch
+                {
+                    // A sleeping/offline machine or an app still starting is
+                    // expected. The next bounded poll retries without spinning.
+                }
+            }
+        }
+        catch (OperationCanceledException)
+            when (cancellationToken.IsCancellationRequested)
+        {
+        }
+    }
+
+    private static bool LoadKeepActive(string? path)
+    {
+        if (path is null || !File.Exists(path))
+        {
+            return false;
+        }
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(
+                File.ReadAllText(path, Encoding.UTF8));
+            JsonElement root = document.RootElement;
+            if (
+                root.ValueKind != JsonValueKind.Object
+                || root.GetRawText().Length > 1024
+                || root.EnumerateObject().Count() != 2
+                || !root.TryGetProperty("contract", out JsonElement contract)
+                || contract.GetString()
+                    != "reader-codex-voice-keepalive/1"
+                || !root.TryGetProperty("enabled", out JsonElement enabled)
+                || enabled.ValueKind is not (
+                    JsonValueKind.True or JsonValueKind.False)
+            )
+            {
+                return false;
+            }
+            return enabled.GetBoolean();
+        }
+        catch
+        {
+            return false;
+        }
+    }
+
+    private static void SaveKeepActive(string? path, bool enabled)
+    {
+        if (path is null)
+        {
+            return;
+        }
+        string directory = System.IO.Path.GetDirectoryName(path)
+            ?? throw new InvalidOperationException(
+                "Codex 语音持续运行配置目录无效");
+        Directory.CreateDirectory(directory);
+        string temporary = path + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        try
+        {
+            File.WriteAllText(
+                temporary,
+                JsonSerializer.Serialize(new
+                {
+                    contract = "reader-codex-voice-keepalive/1",
+                    enabled,
+                }),
+                new UTF8Encoding(encoderShouldEmitUTF8Identifier: false));
+            File.Move(temporary, path, overwrite: true);
+        }
+        finally
+        {
+            try { File.Delete(temporary); } catch { }
+        }
+    }
+
+    public async ValueTask DisposeAsync()
+    {
+        if (Interlocked.Exchange(ref _disposeStarted, 1) != 0)
+        {
+            return;
+        }
+        if (_keepActiveLifetime is null || _keepActiveMonitor is null)
+        {
+            return;
+        }
+        _keepActiveLifetime.Cancel();
+        try
+        {
+            await _keepActiveMonitor.ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+        {
+        }
+        _keepActiveLifetime.Dispose();
     }
 
     private static CodexAppTarget RequireCodexTarget()
@@ -367,6 +581,11 @@ internal sealed class DirectBridgeProtocolSession
                     break;
                 case "codex-voice-set":
                     payload = await HandleCodexVoiceSetAsync(
+                        message,
+                        cancellationToken).ConfigureAwait(false);
+                    break;
+                case "codex-voice-keepalive-set":
+                    payload = await HandleCodexVoiceKeepAliveSetAsync(
                         message,
                         cancellationToken).ConfigureAwait(false);
                     break;
@@ -854,7 +1073,36 @@ internal sealed class DirectBridgeProtocolSession
             result.ShortcutSent);
     }
 
-    private static object CodexVoicePayload(
+    private async Task<object> HandleCodexVoiceKeepAliveSetAsync(
+        JsonElement message,
+        CancellationToken cancellationToken)
+    {
+        RequireExactKeys(
+            message,
+            "contract",
+            "type",
+            "requestId",
+            "enabled");
+        RequireAuthenticated();
+        if (_phase is not (
+            DirectProtocolPhase.AwaitingStart
+            or DirectProtocolPhase.ContextOnly
+            or DirectProtocolPhase.Active))
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_PHASE_INVALID",
+                "当前连接阶段不能设置 Codex 语音持续运行");
+        }
+        DirectCodexVoiceSetResult result =
+            await _codexVoiceControl.SetKeepActiveAsync(
+                RequireBoolean(message, "enabled"),
+                cancellationToken).ConfigureAwait(false);
+        return CodexVoicePayload(
+            result.State,
+            result.ShortcutSent);
+    }
+
+    private object CodexVoicePayload(
         DirectCodexVoiceState state,
         bool shortcutSent) =>
         new
@@ -863,6 +1111,7 @@ internal sealed class DirectBridgeProtocolSession
             active = state.Active,
             source = state.Source,
             shortcutSent,
+            keepActive = _codexVoiceControl.KeepActive,
         };
 
     private async Task<DirectStartActionResult> HandleStartAsync(

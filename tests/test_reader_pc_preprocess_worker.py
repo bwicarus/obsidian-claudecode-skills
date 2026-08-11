@@ -679,6 +679,42 @@ class WorkerRunnerTest(unittest.TestCase):
 
 
 class WindowsPriorityTest(unittest.TestCase):
+    def test_supervised_worker_recycles_after_a_claimed_job(self):
+        runner = SimpleNamespace(run_once=lambda: True)
+        with patch.object(worker, "_lower_process_priority"), patch.object(
+            worker, "build_runner", return_value=runner
+        ), patch.object(
+            worker.time,
+            "sleep",
+            side_effect=AssertionError("recycled worker must not enter idle sleep"),
+        ):
+            result = worker.main(["--recycle-after-job"])
+
+        self.assertEqual(result, 0)
+
+    def test_idle_gpu_probe_uses_nvidia_smi_without_importing_torch(self):
+        calls = []
+
+        def run(command, **kwargs):
+            calls.append((command, kwargs))
+            return SimpleNamespace(
+                returncode=0,
+                stdout="0, NVIDIA GeForce RTX 4090 Laptop GPU, 999.1\n",
+            )
+
+        with patch.object(
+            worker.importlib,
+            "import_module",
+            side_effect=AssertionError("idle probe must not import PyTorch"),
+        ):
+            status = worker._lightweight_cuda_status(
+                executable="nvidia-smi.exe",
+                command_runner=run,
+            )
+        self.assertEqual(status["deviceIndex"], 0)
+        self.assertEqual(status["probe"], "nvidia-smi-idle")
+        self.assertEqual(calls[0][0][0], "nvidia-smi.exe")
+
     def test_windows_handle_is_not_truncated_before_lowering_priority(self):
         pseudo_handle = 0x123456789ABCDEF0
         get_current = FakeCFunction(pseudo_handle)
