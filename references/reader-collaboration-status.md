@@ -4100,3 +4100,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **入口/安装**：安装器同时原子更新开始菜单与桌面 `ReaderPC 服务器.lnk`；当前 release 为 `%LOCALAPPDATA%\BWReader\ReaderPC-Server\releases\0.1.4`，旧版本完整保留。
 - **验证**：关闭/失败/竞态遗留 service record 与双快捷方式专项 15 项通过，候选 verify/包内 self-test 通过；真实 WM_CLOSE 后 ReaderPC/OCR 均为 0、43128 无监听且 service record 不存在，随后已从桌面快捷方式重开 0.1.4。
 - **边界**：未按进程名清理 Codex 自有 `--reader-context-mcp`，未部署 Pi、App 或扩展；退出会停本次运行服务，PC 用户偏好保留供下次启动恢复。
+
+## Codex：Codex 语音失效代次恢复已发布 0.2.97 / 1.1.37（2026-08-12 JST）
+- **根因/改动**：同一 Codex 失效进程内重复 F24 不会恢复；首轮启动未确认时现精确重启该代次、等待新代次后只再启动一次，二次失败锁住自动恢复；设置页离线不再抹掉持续运行勾选。
+- **Windows/验证**：原生桥 `0.1.103` 已原子安装，安装后 294 项自检、Reader Node 990 项、发布管线与 ReaderBundle 通过；服务状态新鲜且无错误，回退目录 `install-0.1.103-20260811T233355362Z`。Windows 全量 Python/handoff 仍仅保留既有 `fcntl`、Unix fixture 与项目基线失败。
+- **发布事实**：提交 `ddfbd199`；Actions `31546858430` 上传 TestFlight `1.1.37 (233)`，`31547369807` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
+- **边界/下一步**：未部署 Pi 或浏览器正式渠道；用户安装 1.1.37 后，以真实“Codex 语音启动失败”验收一次自动重启恢复及设置重开仍保留勾选。
