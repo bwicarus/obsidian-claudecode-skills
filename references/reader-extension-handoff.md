@@ -50,6 +50,10 @@
 Safari 扩展原生进程经签名 access group 共享读取，网页和扩展 JavaScript 仅得到 90 秒 `ek_`。
 普通 Realtime、选区、可见正文与合成图注入均不经过 Pi；Pi 只保留显式备份/同步和 AI API 能力。
 
+**0.2.96 / App 1.1.36 可选视觉能力诊断修复**：PDF/EPUB 未实现可选的
+`getVisualSurface` 时，实时快照的高频选区查询只在能力状态首次出现或真正变化时报告一次，
+不再每次轮询重复写“原生取图面 放弃”；既有 App 原生 `see_page` / `see_ink` 取图路径不变。
+
 **0.2.95 / App 1.1.35 本机阅读上下文与电脑语音候选**：App 本机 PDF/EPUB 以 1.5 秒有界轮询
 写入“显示区域之前 / 当前显示区域（重点）/ 显示区域之后”的同一 `page.context` journal；App 与
 扩展设置可切换 Windows 的 Codex 语音持续运行。调试日志仍在阅读内容之上，但统一低于设置遮罩，

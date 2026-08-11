@@ -5040,12 +5040,30 @@
   }
   // 可选 DocumentHost 视觉表面。PDF/EPUB 没实现时原路径完全不变；普通网页只在 adapter
   // 提供真实正文元素、布局尺寸和 canonical strokes，不复制截图/绘制算法。
+  //
+  // 实时快照会高频查询选区索引。缺少这个可选能力是一个稳定状态,不是每次查询都新发生的
+  // 故障；只在能力状态变化时报告一次。若 adapter 稍后补上/撤下方法,下一次查询仍会重新
+  // 探测并报告新的状态,不会把真正的运行时变化永久缓存掉。
+  var _visualSurfaceCapabilityState = '';
+  function _visualSurfaceGetter(ad) {
+    var getter = ad && typeof ad.getVisualSurface === 'function'
+      ? ad.getVisualSurface : null;
+    var state = !ad ? 'no-adapter' : (getter ? 'available' : 'unsupported');
+    if (state !== _visualSurfaceCapabilityState) {
+      _visualSurfaceCapabilityState = state;
+      if (state === 'no-adapter') _visualNull('原生取图面', '无 adapter');
+      if (state === 'unsupported') {
+        _visualNull('原生取图面', 'adapter 未实现 getVisualSurface');
+      }
+    }
+    return getter;
+  }
   function _visualSurface() {
     try {
       var ad = window.RC && RC.adapter ? RC.adapter() : null;
-      if (!ad) return _visualNull('原生取图面', '无 adapter');
-      if (!ad.getVisualSurface) return _visualNull('原生取图面', 'adapter 未实现 getVisualSurface');
-      var s = ad.getVisualSurface();
+      var getter = _visualSurfaceGetter(ad);
+      if (!getter) return null;
+      var s = getter.call(ad);
       if (!s) return _visualNull('原生取图面', 'getVisualSurface 返回空');
       if (!s.element) return _visualNull('原生取图面', '缺 element');
       if (!(s.width > 0) || !(s.height > 0)) {
