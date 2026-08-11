@@ -20,10 +20,10 @@ from bridge_core import (
     BridgePaths,
     WindowsProcessRunner,
     disable_and_stop_direct_service,
-    load_direct_config,
     read_direct_status,
     set_direct_config_enabled,
     start_direct_service,
+    stop_direct_service,
 )
 from readerpc_services import (
     PRODUCT_NAME,
@@ -36,7 +36,7 @@ from readerpc_services import (
 )
 
 
-APP_VERSION = "0.1.3"
+APP_VERSION = "0.1.4"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 POLL_INTERVAL_MS = 2_500
 STATUS_PUBLISH_INTERVAL_SECONDS = 10.0
@@ -93,6 +93,32 @@ def _tray_image() -> Image.Image:
     return image
 
 
+def stop_readerpc_services(
+    bridge_paths: BridgePaths,
+    process_runner: WindowsProcessRunner,
+    pc_ocr: PcOcrServiceController,
+) -> None:
+    """Stop every service owned by ReaderPC without touching Codex MCP clients."""
+
+    failures: list[str] = []
+    try:
+        pc_ocr.stop()
+    except Exception as exc:
+        failures.append(f"PC 预处理：{exc}")
+
+    try:
+        voice = read_direct_status(bridge_paths, process_runner)
+        if voice.configuration_enabled:
+            disable_and_stop_direct_service(bridge_paths, process_runner)
+        elif voice.service_online or bridge_paths.service_record.exists():
+            stop_direct_service(bridge_paths, process_runner)
+    except Exception as exc:
+        failures.append(f"电脑语音与上下文直连：{exc}")
+
+    if failures:
+        raise ReaderPCServiceError("；".join(failures))
+
+
 class ReaderPCWindow:
     def __init__(
         self,
@@ -111,6 +137,8 @@ class ReaderPCWindow:
         self.events: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.busy = False
         self.closed = False
+        self.closing = False
+        self.service_lock = threading.Lock()
         self.last_pc_start_attempt = 0.0
         self.last_status_publish = 0.0
         preferences = load_preferences(self.readerpc_paths.preferences_file)
@@ -121,7 +149,8 @@ class ReaderPCWindow:
         root.title(PRODUCT_NAME)
         root.geometry("620x500")
         root.minsize(560, 450)
-        root.protocol("WM_DELETE_WINDOW", self.hide_window)
+        root.protocol("WM_DELETE_WINDOW", self.request_exit)
+        root.bind("<Unmap>", self._on_unmap, add="+")
 
         style = ttk.Style(root)
         if "vista" in style.theme_names():
@@ -136,7 +165,7 @@ class ReaderPCWindow:
             outer,
             text=(
                 "统一显示电脑语音、Reader 上下文与 PC 预处理。"
-                "关闭窗口后仍驻留托盘；空闲不会加载 OCR 模型。"
+                "最小化后驻留托盘；关闭时停止全部相关服务。"
             ),
             foreground="#596579",
             wraplength=570,
@@ -193,7 +222,7 @@ class ReaderPCWindow:
                 pystray.MenuItem("启动 PC 预处理", self._tray_start_pc),
                 pystray.MenuItem("停止 PC 预处理", self._tray_stop_pc),
                 pystray.Menu.SEPARATOR,
-                pystray.MenuItem("退出界面（服务继续）", self._tray_exit),
+                pystray.MenuItem("退出并停止全部服务", self._tray_exit),
             ),
         )
         threading.Thread(target=self._run_tray, name="readerpc-tray", daemon=True).start()
@@ -239,7 +268,7 @@ class ReaderPCWindow:
         self.root.after(0, lambda: self._set_pc_running(False))
 
     def _tray_exit(self, _icon=None, _item=None) -> None:
-        self.root.after(0, self.exit_ui)
+        self.root.after(0, self.request_exit)
 
     def show_window(self) -> None:
         self.root.deiconify()
@@ -252,7 +281,54 @@ class ReaderPCWindow:
     def hide_window(self) -> None:
         self.root.withdraw()
 
-    def exit_ui(self) -> None:
+    def _on_unmap(self, event=None) -> None:
+        if self.closed or self.closing:
+            return
+        if event is not None and getattr(event, "widget", self.root) is not self.root:
+            return
+        self.root.after(0, self._hide_if_minimized)
+
+    def _hide_if_minimized(self) -> None:
+        if self.closed or self.closing:
+            return
+        try:
+            if self.root.state() == "iconic":
+                self.hide_window()
+        except tk.TclError:
+            pass
+
+    def request_exit(self) -> None:
+        if self.closed or self.closing:
+            return
+        self.closing = True
+        self.busy = True
+        self.show_window()
+        self._set_buttons_enabled(False)
+        self.footer.configure(
+            text="正在停止 PC 预处理、电脑语音与 Reader 上下文直连…",
+            foreground="#596579",
+        )
+
+        def worker() -> None:
+            try:
+                with self.service_lock:
+                    stop_readerpc_services(
+                        self.bridge_paths,
+                        self.process_runner,
+                        self.pc_ocr,
+                    )
+            except Exception as exc:
+                self.events.put(("shutdown-error", exc))
+            else:
+                self.events.put(("shutdown-success", None))
+
+        threading.Thread(
+            target=worker,
+            name="readerpc-shutdown",
+            daemon=False,
+        ).start()
+
+    def _finish_exit(self) -> None:
         self.closed = True
         try:
             self.tray.stop()
@@ -265,7 +341,7 @@ class ReaderPCWindow:
         action: Callable[[], Any],
         success: str,
     ) -> None:
-        if self.busy:
+        if self.busy or self.closing:
             return
         self.busy = True
         self.footer.configure(text=label)
@@ -273,7 +349,10 @@ class ReaderPCWindow:
 
         def worker() -> None:
             try:
-                result = action()
+                with self.service_lock:
+                    if self.closing:
+                        raise ReaderPCServiceError("ReaderPC 正在退出。")
+                    result = action()
             except Exception as exc:
                 self.events.put(("task-error", exc))
             else:
@@ -287,6 +366,20 @@ class ReaderPCWindow:
         try:
             while True:
                 kind, value = self.events.get_nowait()
+                if kind == "shutdown-success":
+                    self._finish_exit()
+                    return
+                if kind == "shutdown-error":
+                    self.closing = False
+                    self.busy = False
+                    self._set_buttons_enabled(True)
+                    self.show_window()
+                    detail = f"无法安全退出：{value}"
+                    self.footer.configure(text=detail, foreground="#c62828")
+                    messagebox.showerror(PRODUCT_NAME, detail)
+                    continue
+                if self.closing and kind in {"task-error", "task-success"}:
+                    continue
                 if kind == "task-error":
                     self.busy = False
                     self._set_buttons_enabled(True)
@@ -366,7 +459,7 @@ class ReaderPCWindow:
         self._set_pc_running(bool(self.keep_pc_online.get()))
 
     def _ensure_pc_online(self) -> None:
-        if self.closed:
+        if self.closed or self.closing:
             return
         if (
             self.keep_pc_online.get()

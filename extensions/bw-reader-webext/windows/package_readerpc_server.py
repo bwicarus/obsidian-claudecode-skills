@@ -327,9 +327,7 @@ def _default_install_root() -> Path:
     return Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "BWReader" / "ReaderPC-Server"
 
 
-def _write_start_menu_shortcut(executable: Path) -> Path:
-    appdata = Path(os.environ.get("APPDATA") or Path.home())
-    shortcut = appdata / "Microsoft" / "Windows" / "Start Menu" / "Programs" / "ReaderPC 服务器.lnk"
+def _write_shortcut(shortcut: Path, executable: Path) -> Path:
     shortcut.parent.mkdir(parents=True, exist_ok=True)
     temporary = shortcut.with_name(shortcut.name + f".tmp-{uuid.uuid4().hex}.lnk")
     def quote(value: str) -> str:
@@ -351,8 +349,28 @@ def _write_start_menu_shortcut(executable: Path) -> Path:
         timeout=30,
     )
     if result.returncode != 0 or not shortcut.is_file():
-        _fail(f"创建开始菜单快捷方式失败: {(result.stderr or result.stdout)[-500:]}")
+        _fail(f"创建快捷方式失败: {(result.stderr or result.stdout)[-500:]}")
     return shortcut
+
+
+def _write_shortcuts(executable: Path) -> dict[str, Path]:
+    appdata = Path(os.environ.get("APPDATA") or Path.home())
+    profile = Path(os.environ.get("USERPROFILE") or Path.home())
+    return {
+        "startMenu": _write_shortcut(
+            appdata
+            / "Microsoft"
+            / "Windows"
+            / "Start Menu"
+            / "Programs"
+            / "ReaderPC 服务器.lnk",
+            executable,
+        ),
+        "desktop": _write_shortcut(
+            profile / "Desktop" / "ReaderPC 服务器.lnk",
+            executable,
+        ),
+    }
 
 
 def install_archive(path: Path, *, launch: bool = False, install_root: Path | None = None) -> Path:
@@ -378,14 +396,15 @@ def install_archive(path: Path, *, launch: bool = False, install_root: Path | No
             if _sha256(installed.read_bytes()) != item["sha256"]:
                 _fail(f"安装 staging 摘要不匹配: {item['path']}")
         staging.replace(release)
-        shortcut = _write_start_menu_shortcut(release / EXE_REL)
+        shortcuts = _write_shortcuts(release / EXE_REL)
         _atomic_json(
             root / "current.json",
             {
                 "contract": "readerpc-server-install/1",
                 "version": version,
                 "release": str(release),
-                "shortcut": str(shortcut),
+                "shortcut": str(shortcuts["startMenu"]),
+                "desktopShortcut": str(shortcuts["desktop"]),
                 "manifestSha256": _sha256(_manifest_bytes(manifest)),
             },
         )

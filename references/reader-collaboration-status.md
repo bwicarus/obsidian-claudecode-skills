@@ -3965,3 +3965,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：定向测试、精确 payload/摘要和包内 EXE 自检通过；PC 实际完成一本 391 页 Vision 任务，服务端确认文字 391 页、公式 4/4、392 个不可变附件可下载。
 - **安装/回退**：当前 release 为 `%LOCALAPPDATA%\BWReader\ReaderPC-Server\releases\0.1.3`，0.1.2/0.1.1/0.1.0 完整保留；未注册开机项、未替换现有 Windows 语音 0.1.99。
 - **下一步**：App 刷新后自动导入附件，用户在该书“当前使用”中选择 PC 高质量文字层，再验收拖选。
+
+## Codex：ReaderPC 服务器 0.1.4 已安装（2026-08-11 JST）
+- **根因/改动**：0.1.3 的窗口 X 只隐藏、托盘退出只销毁界面；现最小化仍驻托盘，X 与托盘退出统一先停止 PC OCR 和电脑语音/上下文直连，停止失败则保留窗口报错。
+- **入口/安装**：安装器同时原子更新开始菜单与桌面 `ReaderPC 服务器.lnk`；当前 release 为 `%LOCALAPPDATA%\BWReader\ReaderPC-Server\releases\0.1.4`，旧版本完整保留。
+- **验证**：关闭/失败/竞态遗留 service record 与双快捷方式专项 15 项通过，候选 verify/包内 self-test 通过；真实 WM_CLOSE 后 ReaderPC/OCR 均为 0、43128 无监听且 service record 不存在，随后已从桌面快捷方式重开 0.1.4。
+- **边界**：未按进程名清理 Codex 自有 `--reader-context-mcp`，未部署 Pi、App 或扩展；退出会停本次运行服务，PC 用户偏好保留供下次启动恢复。

@@ -48,15 +48,22 @@ class ReaderPCPackageTests(unittest.TestCase):
             root = Path(raw)
             archive = self.synthetic_archive(root)
             install_root = root / "install"
-            shortcut = root / "ReaderPC.lnk"
-            with patch.object(package, "_write_start_menu_shortcut", return_value=shortcut):
+            shortcuts = {
+                "startMenu": root / "StartMenu-ReaderPC.lnk",
+                "desktop": root / "Desktop-ReaderPC.lnk",
+            }
+            with patch.object(package, "_write_shortcuts", return_value=shortcuts):
                 release = package.install_archive(
                     archive,
                     install_root=install_root,
                 )
             self.assertEqual(release, install_root.resolve() / "releases" / "0.1.0")
             self.assertTrue((release / package.EXE_REL).is_file())
-            self.assertTrue((install_root / "current.json").is_file())
+            current = __import__("json").loads(
+                (install_root / "current.json").read_text("utf-8")
+            )
+            self.assertEqual(current["shortcut"], str(shortcuts["startMenu"]))
+            self.assertEqual(current["desktopShortcut"], str(shortcuts["desktop"]))
             with self.assertRaises(package.PackageError):
                 package.install_archive(archive, install_root=install_root)
 

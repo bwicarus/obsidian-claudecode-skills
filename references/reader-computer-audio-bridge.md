@@ -229,7 +229,8 @@ PC 预处理，但三者仍是独立故障域。PC worker 只向 Pi 发起出站
 统一的无凭据本机状态写入
 `%LOCALAPPDATA%\BWReader\readerpc-server.status.json`。安装器使用版本化
 `%LOCALAPPDATA%\BWReader\ReaderPC-Server\releases\<version>`，新版只切换
-`current.json` 和开始菜单快捷方式，旧 release 保留为回退点。安装与运行不会
+`current.json`、开始菜单和桌面快捷方式，旧 release 保留为回退点。最小化仅隐藏到
+托盘；关闭窗口或从托盘退出会先停止 PC 预处理与电脑语音/上下文直连。安装与运行不会
 自动创建开机项；开机启动仍是用户显式选项。
 
 ```powershell
