@@ -4057,3 +4057,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **根因/改动**：原生直投把 14 字符前缀与 32 位 UUID 拼成 46 字符 `item.id`，超过 OpenAI 的 32 字符上限；现将 `event_id/item.id` 都固定为 4 字符类型前缀加 28 位随机值。
 - **验证/发布**：专项 18 项、Reader Node 全量 981 项与发布管线通过；Windows 全量 Python/handoff 仍为既有平台与 fixture 基线。提交 `e7e58735`，Actions `31473624439` 上传 TestFlight `1.1.32 (216)`，`31474158807` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
 - **未做/下一步**：未部署 Pi 或浏览器正式渠道；用户更新后在 App 普通电话调用 `see_ink/see_page`，应不再出现 `string_above_max_length`，并由模型实际描述合成图。
+
+## Codex：Realtime 新笔迹按页单答已发布 0.2.93 / 1.1.33（2026-08-11 JST）
+- **改了什么**：按通话、按页记录笔迹基线/fresh/seen；当前页新笔迹只调用一次 `see_ink`，别页状态保留，首次旧批注不冒充新笔迹；用户插话会取消旧回答并按回传 item ID 删除旧图。
+- **怎么验**：专项 17 项、Reader Node 全量 982 项、发布管线、macOS 模拟器/签名归档/IPA 校验通过；Windows handoff 仅剩既有 `fcntl`/Linux fixture 基线。
+- **发布事实**：提交 `ceeb68f8`；Actions `31479675109` 上传 TestFlight `1.1.33 (219)`，`31480548173` 确认 `COMPLETE / VALID / IN_BETA_TESTING`。
+- **未做/下一步**：未部署 Pi 或浏览器正式渠道；下一步复用 App 本机合成图缓存，为 PC 实时快照提供短期引用和按需 GET，不持续推送大图。
