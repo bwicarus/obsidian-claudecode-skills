@@ -119,7 +119,8 @@ test("captureInkRegion 页目标在双页可见时精确选页，无参保持旧
     },
   };
   const epub24 = {
-    dataset: { idx: "24" },
+    // EPUB data-idx is zero-based while every voice/page tool uses one-based pages.
+    dataset: { idx: "23" },
     __inkStrokes: [{ p: [[0.3, 0.3], [0.4, 0.4]] }],
     getBoundingClientRect() {
       return { top: 120, bottom: 820 };
@@ -210,8 +211,12 @@ test("capturePageComposite 对 PDF、EPUB 与插入页使用同一精确页身�
     true,
   );
   assert.equal(
-    matcher.matches({ dataset: { idx: "7" } }, "7"),
+    matcher.matches({ dataset: { idx: "7" } }, "8"),
     true,
+  );
+  assert.equal(
+    matcher.matches({ dataset: { idx: "7" } }, "7"),
+    false,
   );
   assert.equal(
     matcher.matches({ dataset: { uid: "sec-3" } }, "sec-3"),

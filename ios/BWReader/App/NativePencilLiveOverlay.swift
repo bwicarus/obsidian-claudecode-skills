@@ -953,6 +953,7 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
         }
 
         private func enqueue(_ operation: NativeInkOperation) {
+            reader.signalNativePencilOperationPending(operation)
             pending.append(operation)
             controller.updatePendingOperationCount(pending.count)
             pump()
@@ -967,8 +968,12 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
                 return
             }
             appliedDocumentGeneration = controller.documentGeneration
-            let abandoned = pending.count
+            let abandonedOperations = pending
+            let abandoned = abandonedOperations.count
             pending.removeAll()
+            abandonedOperations.forEach {
+                reader.signalNativePencilOperationCancelled($0)
+            }
             pumpTask?.cancel()
             queuedStrokeCount = 0
             confirmedStrokeCount = 0
@@ -1051,6 +1056,7 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
                         {
                             break
                         }
+                        self.reader.signalNativePencilOperationCancelled(operation)
                         self.controller.report(error)
                         break
                     }
@@ -1184,6 +1190,44 @@ fileprivate extension ReaderWebViewModel {
                 );
               });
             })();
+            """,
+            completionHandler: nil
+        )
+    }
+
+    func signalNativePencilOperationPending(_ operation: NativeInkOperation) {
+        signalNativePencilOperation(
+            event: "rc:inkpending",
+            operation: operation
+        )
+    }
+
+    func signalNativePencilOperationCancelled(_ operation: NativeInkOperation) {
+        signalNativePencilOperation(
+            event: "rc:inkcancel",
+            operation: operation
+        )
+    }
+
+    private func signalNativePencilOperation(
+        event: String,
+        operation: NativeInkOperation
+    ) {
+        let surfaceIds = Array(Set(operation.segments.map(\.surfaceId))).sorted()
+        guard
+            JSONSerialization.isValidJSONObject(surfaceIds),
+            let data = try? JSONSerialization.data(withJSONObject: surfaceIds),
+            let surfaceLiteral = String(data: data, encoding: .utf8)
+        else { return }
+        webView.evaluateJavaScript(
+            """
+            window.dispatchEvent(new CustomEvent(\(String(reflecting: event)), {
+              detail: {
+                source: 'native-pencil',
+                opId: \(String(reflecting: operation.id)),
+                surfaceIds: \(surfaceLiteral)
+              }
+            }));
             """,
             completionHandler: nil
         )

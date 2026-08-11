@@ -3323,6 +3323,18 @@
     if (el && el.dataset && el.dataset.favpdfFile) return 'pdf|' + el.dataset.favpdfFile + '|' + el.dataset.favpdfPage;   // 收藏夹 PDF 页:键=pdf|原书|页号 → 存取路由原书 /api/ink(同一张纸)
     return (el && el.dataset && el.dataset.uid) ? el.dataset.uid : parseInt(el.dataset.idx, 10);
   }
+  function _voicePageOfInkEl(el, idx) {
+    try {
+      var section = el && el.matches && el.matches('.ep-sec[data-idx]')
+        ? el : (el && el.closest ? el.closest('.ep-sec[data-idx]') : null);
+      if (section) {
+        var sectionIdx = parseInt(section.dataset.idx, 10);
+        if (Number.isFinite(sectionIdx)) return sectionIdx + 1;
+      }
+    } catch (e) {}
+    if (typeof idx === 'number' && Number.isFinite(idx)) return idx + 1;
+    return (_curTopIdx | 0) + 1;
+  }
   // 插入页存档墨迹复原(onRender 时调):建 canvas + 重绘(_inkLoadAll 若还没回来,_inkApplyVisibleSaved 兜底)
   function _epUpApplyInk(usecEl, uid) {
     var d = _epInk.data[uid];
@@ -3678,6 +3690,17 @@
     if (d.pageTouched && d.el) {
       _inkRedraw(d.el);   // 最终平滑全量重绘到本章主 canvas(pen/shape:含刚提交的新笔画;eraser:擦除后最终态)
       _inkScheduleSave(d.el, d.idx);
+      try {
+        var voicePage = _voicePageOfInkEl(d.el, d.idx);
+        window.dispatchEvent(new CustomEvent('rc:inkchange', {
+          detail: {
+            source: 'web-ink',
+            page: voicePage,
+            pages: [voicePage],
+            changes: [{ page: voicePage, strokes: _inkStrokesOf(d.el) }]
+          }
+        }));
+      } catch (_) {}
     }
     _inkLiveHide();       // 再清隐视口叠加层(顺序:先主 canvas 后叠加层 → 无 1 帧空档;eraser 未用到叠加层也无妨)
     if (wasEraser && _epInk.quickErase) _inkArmRevert(900);   // 临时橡皮:擦完抬笔,停 0.9s 没再擦 → 自动回笔
@@ -3813,14 +3836,35 @@
       return operation;
     }
     function finishOperation(operation) {
+      var voiceChangesByPage = Object.create(null);
       Object.keys(operation.touched).forEach(function (key) {
         var segment = operation.touched[key];
+        var voicePage = _voicePageOfInkEl(segment.el, segment.idx);
         _epInk.lastEl = segment.el;
         _inkRedraw(segment.el);
         _inkScheduleSave(segment.el, segment.idx);
+        voiceChangesByPage[String(voicePage)] = {
+          page: voicePage,
+          strokes: _inkStrokesOf(segment.el)
+        };
       });
       operation.state = 'applied';
       scheduleReport();
+      // Match PDF: make native PencilKit changes visible to Realtime at pen-up,
+      // without waiting for the periodic adapter poll.
+      try {
+        var voiceChanges = Object.keys(voiceChangesByPage).map(function (key) {
+          return voiceChangesByPage[key];
+        });
+        window.dispatchEvent(new CustomEvent('rc:inkchange', {
+          detail: {
+            source: 'native-pencil',
+            opId: operation.opId,
+            pages: voiceChanges.map(function (change) { return change.page; }),
+            changes: voiceChanges
+          }
+        }));
+      } catch (e) {}
       return operation.kind === 'commit' || operation.kind === 'createRegion'
         ? { ok: true, written: operation.written, sections: Object.keys(operation.touched) }
         : { ok: true, removed: operation.removed, sections: Object.keys(operation.touched) };
@@ -3887,7 +3931,7 @@
         var segments = parsedSegments(input, 2, 4096);
         if (!segments) return { ok: false, error: 'native_surface_stale' };
         var operation = rememberOperation(opId, {
-          kind: 'commit', state: 'mutating', touched: Object.create(null),
+          kind: 'commit', state: 'mutating', touched: Object.create(null), opId: opId,
           segments: segments, nextSegment: 0, written: 0
         });
         return resumeCommit(operation);
@@ -3931,7 +3975,7 @@
           });
         });
         var operation = rememberOperation(opId, {
-          kind: 'erase', state: 'mutated', touched: touched, removed: removed
+          kind: 'erase', state: 'mutated', touched: touched, removed: removed, opId: opId
         });
         return finishOperation(operation);
       }
@@ -4816,6 +4860,38 @@
           return { id: n.id, text: String(n.text || '').slice(0, 2000), near: String(n.near || '').slice(0, 1200), section: n.section };
         })
       };
+    },
+    // 语音专用的当前页墨迹接口。完整 strokes 不混入通用 getContext，避免每次
+    // 位置/选区同步都复制大数组；rc-voicecall 只在自己的 2s/事件同步中读取。
+    getVoiceInk: function (pageHint) {
+      var requestedPage = parseInt(pageHint, 10);
+      var exactPage = Number.isFinite(requestedPage) && requestedPage > 0;
+      var el = null;
+      if (exactPage) {
+        var requestedSection = secEls[requestedPage - 1];
+        el = (requestedSection && _favUpElIn(requestedSection)) || requestedSection || null;
+      } else {
+        el = _epInk.lastEl;
+      }
+      try {
+        if (el && document.body.contains(el)) {
+          var rect = el.getBoundingClientRect();
+          if (!exactPage && (rect.bottom <= 0 || rect.top >= (window.innerHeight || 0))) el = null;
+        } else el = null;
+      } catch (e) { el = null; }
+      if (!el) {
+        var section = secEls[_curTopIdx];
+        el = (section && _favUpElIn(section)) || section || null;
+      }
+      var strokes = [];
+      if (el) {
+        if (Array.isArray(el.__inkStrokes)) strokes = el.__inkStrokes;
+        else {
+          var idx = _inkIdxOf(el);
+          if (Array.isArray(_epInk.data[idx])) strokes = _epInk.data[idx];
+        }
+      }
+      return { page: _voicePageOfInkEl(el), strokes: strokes || [] };
     },
     // 图 + 用户手写圈点采集(reader-agnostic 目标;当前返回 epub-html 现有形状,后续增量再归一化成统一 Figure DTO)
     collectFigures: function () { return _epCollectFigures(); },

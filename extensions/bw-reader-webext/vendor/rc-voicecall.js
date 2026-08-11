@@ -2833,7 +2833,161 @@ if (window.__bwPwaProviderOnly) return;
   //    全局 ws 指向 shim:既有 {type:page/ink/state/text} 同步消息被翻译成 dc 事件 → 同步/UI 代码零改。──
   var _rtc = { pc: null, dc: null, el: null, mic: null, on: false, imgOn: false, callId: '', nativeDirect: false,
                sidebandKey: '', ctxFile: '', ctxPage: 0, ink: null, sel: '', _inkFp: '', inkDirty: false,
+               hasInk: false, inkVer: 0, inkSeenVer: 0,
+               inkPages: null, activeInkPage: null,
+               inkResponseAcks: null, inkAckSeq: 0, turnEpoch: 0,
                items: [], inTok: 0, compactTh: 0, lastCompact: 0 };   // ㊳:item 账本+每轮输入量+会话内压缩阈值
+  function _rtcInkFingerprint(page, strokes) {
+    strokes = strokes || [];
+    var raw = '';
+    try { raw = JSON.stringify(strokes); } catch (e) { raw = String(strokes.length); }
+    var hash = 2166136261;
+    for (var i = 0; i < raw.length; i++) {
+      hash ^= raw.charCodeAt(i);
+      hash = Math.imul(hash, 16777619);
+    }
+    return String(page || 0) + ':' + strokes.length + ':' + raw.length + ':' + (hash >>> 0).toString(16);
+  }
+  function _rtcInkPageState(page, create) {
+    var key = String(Number(page) || 0);
+    if (!_rtc.inkPages && create !== false) _rtc.inkPages = Object.create(null);
+    var state = _rtc.inkPages && _rtc.inkPages[key];
+    if (!state && create !== false) {
+      state = {
+        initialized: false, fp: '', strokes: [], hasInk: false,
+        ver: 0, seenVer: 0, pending: false, pendingCount: 0,
+        pendingOps: Object.create(null), waiters: [],
+        signal: 0, signalSent: 0
+      };
+      _rtc.inkPages[key] = state;
+    }
+    return state || null;
+  }
+  function _rtcUseInkPage(page) {
+    var state = _rtcInkPageState(page, true);
+    _rtc.ink = state.strokes;
+    _rtc._inkFp = state.fp;
+    _rtc.hasInk = state.hasInk;
+    _rtc.inkVer = state.ver;
+    _rtc.inkSeenVer = state.seenVer;
+    _rtc.inkDirty = !!(state.pending || (state.hasInk && state.ver > state.seenVer));
+    return state;
+  }
+  function _rtcFreshInkPage() {
+    var active = Number(_rtc.activeInkPage) || 0;
+    if (active) {
+      var activeState = _rtcInkPageState(active, false);
+      if (activeState && (activeState.pending || (activeState.hasInk && activeState.ver > activeState.seenVer))) return active;
+    }
+    var current = Number(_rtc.ctxPage) || 0;
+    if (current) {
+      var currentState = _rtcInkPageState(current, false);
+      if (currentState && (currentState.pending || (currentState.hasInk && currentState.ver > currentState.seenVer))) return current;
+    }
+    return 0;
+  }
+  function _rtcHasFreshInk(page) {
+    if (page == null) return _rtcFreshInkPage() > 0;
+    var state = _rtcInkPageState(page, false);
+    return !!(state && (state.pending || (state.hasInk && state.ver > state.seenVer)));
+  }
+  function _rtcEffectiveTool(name, freshInk) {
+    if (freshInk && /^(read_selection|read_page|see_page|see_figure)$/.test(String(name || ''))) return 'see_ink';
+    return name;
+  }
+  function _rtcMarkInkSeen(name, ok, versionAtStart, pageAtStart) {
+    if (!ok || name !== 'see_ink') return;
+    var state = _rtcInkPageState(pageAtStart, false);
+    if (!state) return;
+    var version = Math.min(
+      Math.max(0, state.ver || 0),
+      Math.max(0, Number(versionAtStart) || 0)
+    );
+    if (version > (state.seenVer || 0)) state.seenVer = version;
+    if (Number(_rtc.activeInkPage) === Number(pageAtStart) && !_rtcHasFreshInk(pageAtStart)) {
+      _rtc.activeInkPage = null;
+    }
+    if (Number(pageAtStart) === Number(_rtc.ctxPage)) _rtcUseInkPage(pageAtStart);
+  }
+  function _rtcSetInkPending(page, opId) {
+    var state = _rtcInkPageState(page, true);
+    opId = String(opId || '');
+    if (opId && state.pendingOps[opId]) return;
+    if (opId) state.pendingOps[opId] = true;
+    state.pendingCount = (state.pendingCount || 0) + 1;
+    state.pending = true;
+    if (Number(page) === Number(_rtc.ctxPage)) _rtcUseInkPage(page);
+  }
+  function _rtcDecreaseInkPending(page, opId) {
+    var state = _rtcInkPageState(page, false);
+    if (!state) return null;
+    opId = String(opId || '');
+    if (opId) {
+      if (state.pendingOps[opId]) {
+        delete state.pendingOps[opId];
+        state.pendingCount = Math.max(0, (state.pendingCount || 0) - 1);
+      }
+    } else if ((state.pendingCount || 0) > 0) {
+      state.pendingCount -= 1;
+    }
+    state.pending = (state.pendingCount || 0) > 0;
+    if (Number(page) === Number(_rtc.ctxPage)) _rtcUseInkPage(page);
+    return state;
+  }
+  function _rtcResolveInkPending(page) {
+    var state = _rtcInkPageState(page, false);
+    if (!state) return;
+    if ((state.pendingCount || 0) > 0) {
+      state.pending = true;
+      if (Number(page) === Number(_rtc.ctxPage)) _rtcUseInkPage(page);
+      return;
+    }
+    state.pending = false;
+    var waiters = state.waiters.splice(0);
+    waiters.forEach(function (resolve) { try { resolve(true); } catch (e) {} });
+    if (Number(page) === Number(_rtc.ctxPage)) _rtcUseInkPage(page);
+  }
+  function _rtcCancelInkPending(page, opId) {
+    var state = _rtcDecreaseInkPending(page, opId);
+    if (!state) return;
+    if (!state.pending) {
+      var waiters = state.waiters.splice(0);
+      waiters.forEach(function (resolve) { try { resolve(false); } catch (e) {} });
+    }
+  }
+  function _rtcAwaitInkCommit(page, ms) {
+    var state = _rtcInkPageState(page, false);
+    if (!state || (!state.pending && !(state.pendingCount > 0))) return Promise.resolve(true);
+    return new Promise(function (resolve) {
+      var done = false;
+      var finish = function (value) {
+        if (done) return;
+        done = true;
+        clearTimeout(timer);
+        var index = state.waiters.indexOf(finish);
+        if (index >= 0) state.waiters.splice(index, 1);
+        resolve(value);
+      };
+      var timer = setTimeout(function () { finish(false); }, ms);
+      state.waiters.push(finish);
+    });
+  }
+  function _rtcResetInkPages() {
+    if (_rtc.inkPages) {
+      Object.keys(_rtc.inkPages).forEach(function (key) {
+        var state = _rtc.inkPages[key];
+        var waiters = state && state.waiters ? state.waiters.splice(0) : [];
+        waiters.forEach(function (resolve) { try { resolve(false); } catch (e) {} });
+      });
+    }
+    _rtc.inkPages = Object.create(null);
+  }
+  function _rtcBeginUserTurn() {
+    _rtc.turnEpoch = (_rtc.turnEpoch || 0) + 1;
+    // 旧轮尚未确认的回答即使迟到也不能消费笔迹；fresh 留给新轮重新判断。
+    _rtc.inkResponseAcks = Object.create(null);
+    return _rtc.turnEpoch;
+  }
   // App Realtime 的普通会话完全本机运行。只有这些明确需要联网模型、搜索
   // 或现有 Anki/CLI 后端的工具，才允许按需调用用户自己的 Pi AI API；Pi
   // 离线不会影响通话建立、选区、页面、笔迹、视口图或本机笔记。
@@ -2844,7 +2998,15 @@ if (window.__bwPwaProviderOnly) return;
   function _nativeRealtimePiAITool(name) {
     return NATIVE_REALTIME_PI_AI_TOOLS.has(String(name || ''));
   }
-  function _dcSend(obj) { try { if (_rtc.dc && _rtc.dc.readyState === 'open') _rtc.dc.send(JSON.stringify(obj)); } catch (e) {} }
+  function _dcSend(obj) {
+    try {
+      if (_rtc.dc && _rtc.dc.readyState === 'open') {
+        _rtc.dc.send(JSON.stringify(obj));
+        return true;
+      }
+    } catch (e) {}
+    return false;
+  }
   function _rtcSys(text) {
     _dcSend({ type: 'conversation.item.create', item: { type: 'message', role: 'system', content: [{ type: 'input_text', text: text }] } });
   }
@@ -2938,36 +3100,70 @@ if (window.__bwPwaProviderOnly) return;
       // ㊵ 拉模式(用户拍板"只在需要时读取"):翻页/滚动**只更新本地状态,一个字都不发**——
       // 内容在用户开口/发文字的瞬间经 _rtcFlushCtx 注入(不问=零注入);模型要更多内容自己调 read_page
       var np = j.page;
-      if (np && np !== _rtc.ctxPage) {
-        _rtc._inkFp = ''; _rtc.inkDirty = false;
+      var pageChanged = !!(np && np !== _rtc.ctxPage);
+      if (pageChanged) {
         _rtc.pageTs = Date.now();   // 用户注入策略:翻页时刻(停留 8s~12min 内开口才注入页面内容,省 token)
         clearTimeout(_rtc._ptPreT);   // 停留 8s(确认在读,不是快速翻过)→ **预拉**页文本填 cache:首问就有,不再'开口才拉赶不上'
         _rtc._ptPreT = setTimeout(function () {
           if (_rtc.ctxPage === np && !_rtc.pendText && _rtc.ctxFile) _rtcFetchPageText(_rtc.ctxFile + ':' + np);
         }, 8000);
       }
-      if (np) _rtc.ctxPage = np;
+      if (np) {
+        _rtc.ctxPage = np;
+        _rtcUseInkPage(np);
+        if (pageChanged) _rtc.activeInkPage = _rtcHasFreshInk(np) ? Number(np) : null;
+      }
       if (j.total) _rtc.ctxTotal = j.total | 0;   // 131:总页数(用户实测 AI 上下文里没有,答不出"这本书多少页/还剩多少")
       if (j.text != null) _rtc.pendText = String(j.text || '');
     } else if (t === 'ink') {
+      var inkPage = Number(j.page) || Number(_rtc.ctxPage) || 0;
       var strokes = j.strokes || [];
-      _rtc.ink = strokes;
-      var fp = (j.page || 0) + ':' + strokes.length;
-      if (fp === _rtc._inkFp) return;
-      _rtc._inkFp = fp;
+      var state = _rtcInkPageState(inkPage, true);
+      var fp = String(j.revision || _rtcInkFingerprint(inkPage, strokes));
+      if (fp === state.fp) {
+        // 无有效几何变化的抬笔（例如过短的选区线）不能留下永久 pending，
+        // 也不能凭一次事件把旧批注升级成“新笔迹”。
+        _rtcResolveInkPending(inkPage);
+        return;
+      }
+      // pending 只表示原生操作仍在提交，不能把轮询到的旧几何误当成新版本；
+      // 真正的首个变化由完成事件携带 changed=true。
+      var explicitChange = j.changed === true;
+      state.fp = fp;
+      state.strokes = strokes;
+      state.hasInk = !!strokes.length;
       // 133:笔迹/选中的**系统消息注入已收归 relay**(它在 speech_started 上注入,见 voice_realtime_relay.py)。
       // 这里曾用 _rtcSys 经 data channel 直发(127 为省一个 Pi 往返),但实测**从没落地过**:
       // 探针证实墨迹推到了 relay(⇡ink),却没有任何 role=system 的 item 进过对话——_dcSend 在 dc 未 open 时
       // 是静默丢弃的,失败无声无息,于是 bca7bb7 的措辞等于从没生效。别再往这条哑路上加东西。
-      // 本地状态(_rtc.ink/inkDirty)仍要维护:见 see_ink 成功后的边沿复位。
-      if (!strokes.length) { _rtc.inkDirty = false; return; }
-      if (_rtc.inkDirty) return;
-      _rtc.inkDirty = true;
+      // 本地以版本而不是布尔值记录「模型尚未看过的新笔迹」。截图期间再落一笔时，
+      // see_ink 只能消费调用开始前的版本，新版本会留到下一用户轮，不能被旧截图误清。
+      // 每页首帧只建立旧批注基线；只有落笔事件或已建基线后的内容变化才是“新”。
+      // 因而多页未读版本彼此独立，切页不会清掉其它页的待看状态。
+      var baselineOnly = !state.initialized && !explicitChange;
+      state.initialized = true;
+      state.pending = (state.pendingCount || 0) > 0;
+      if (!state.pending) {
+        var waiters = state.waiters.splice(0);
+        waiters.forEach(function (resolve) { try { resolve(true); } catch (e) {} });
+      }
+      if (baselineOnly) {
+        if (inkPage === Number(_rtc.ctxPage)) _rtcUseInkPage(inkPage);
+        return;
+      }
+      state.ver = (state.ver || 0) + 1;
+      if (!strokes.length) {
+        state.seenVer = state.ver;
+        if (inkPage === Number(_rtc.ctxPage)) _rtcUseInkPage(inkPage);
+        return;
+      }
+      if (inkPage === Number(_rtc.ctxPage)) _rtcUseInkPage(inkPage);
     } else if (t === 'state') {
       var sel = (j.sel || '').trim();
       if (sel === _rtc.sel) return;
       _rtc.sel = sel;   // 133:同上,注入归 relay(本地只记状态)
     } else if (t === 'text' && j.content) {
+      _rtcBeginUserTurn();
       _rtcInterrupt();   // AI 正说话时打字发消息:不先打断会撞 conversation_already_has_active_response,这条 item 进了上下文却永远没 response(官方参考实现 handleSendTextMessage 第一行也是 interrupt)
       _rtcFlushCtx();   // ㊵ 拉模式:提问瞬间注入他正看着的内容
       _lastU = String(j.content).slice(0, 2000);   // ㉛:打字输入的问题也随轮次落库
@@ -4473,15 +4669,74 @@ if (window.__bwPwaProviderOnly) return;
       }
     }, 400);
   }
-  function _rtcRespCreate(src, longTool) {   // ㊿b 手动挡:按四态模式+来源选输出模态(每轮读当前档=通话中热切)
+  function _rtcRespCreate(src, longTool, options) {   // ㊿b 手动挡:按四态模式+来源选输出模态(每轮读当前档=通话中热切)
     var m = _voiceMode();
     // 61/66c:sts=全语音;half=提问语音·工具/深度文字;stt=全文字;route=语音,但**长工具结果轮程序切文字**
     // (0/4 实锤 mini 拿到资料+音频模态必念,prompt 治不了——短结果口头说,长结果它自己文字写,无截断)
     var wantAudio = (m === 'sts') || (m === 'route' && !longTool) || (m === 'half' && src === 'user');
     _rtc.turnText = !wantAudio;   // 本轮是文字输出:TTS 开关开着就流式代念
     // 64 用户拍板:全档 2048(≈100s 音频保险丝,正常轮碰不到)——不搞小预算硬截断,时长靠 prompt+route 自觉
-    _dcSend({ type: 'response.create', response: { output_modalities: [wantAudio ? 'audio' : 'text'],
-                                                   max_output_tokens: 2048 } });
+    var response = { output_modalities: [wantAudio ? 'audio' : 'text'], max_output_tokens: 2048 };
+    // 新笔迹是本轮唯一视觉目标：首个 response 直接锁定 see_ink，避免模型先读文字、
+    // 再看整页、最后才看笔迹。工具结果后的 response 则由调用方传 toolChoice:'none'，
+    // 保证只生成一次最终回答，不再串行调第二个视觉工具。
+    if (options && Object.prototype.hasOwnProperty.call(options, 'toolChoice')) {
+      response.tool_choice = options.toolChoice;
+    } else if (src === 'user' && _rtcHasFreshInk()) {
+      response.tool_choice = { type: 'function', name: 'see_ink' };
+    }
+    if (options && options.metadata) response.metadata = options.metadata;
+    return _dcSend({ type: 'response.create', response: response });
+  }
+  function _rtcNewInkAck() {
+    _rtc.inkAckSeq = (_rtc.inkAckSeq || 0) + 1;
+    return 'ink_' + Date.now().toString(36) + '_' + _rtc.inkAckSeq.toString(36);
+  }
+  function _rtcCompleteToolTurn(name, ok, versionAtStart, pageAtStart, callId, out, longTool, silent, turnEpochAtStart) {
+    var stale = turnEpochAtStart != null && turnEpochAtStart !== (_rtc.turnEpoch || 0);
+    var toolOutput = stale ? JSON.stringify({
+      error: '该工具属于已被新问题取代的旧用户轮；调用已闭合，结果已丢弃',
+      stale_turn: true
+    }) : out;
+    var outputSent = _dcSend({
+      type: 'conversation.item.create',
+      item: { type: 'function_call_output', call_id: callId, output: toolOutput }
+    });
+    var visualTarget = /^(see_ink|see_page|see_figure)$/.test(name);
+    var responseSent = !!silent || stale;
+    var ack = '';
+    if (!silent && !stale && outputSent) {
+      var responseOptions = visualTarget ? { toolChoice: 'none' } : {};
+      if (name === 'see_ink' && ok) {
+        ack = _rtcNewInkAck();
+        responseOptions.metadata = { bw_ink_ack: ack };
+        _rtc.inkResponseAcks = _rtc.inkResponseAcks || Object.create(null);
+        _rtc.inkResponseAcks[ack] = {
+          name: name, ok: ok, ver: versionAtStart, page: pageAtStart,
+          epoch: turnEpochAtStart
+        };
+      }
+      responseSent = _rtcRespCreate(
+        name === 'deep_think' ? 'deep' : 'tool',
+        ok && String(out || '').length > 800,
+        responseOptions
+      );
+      if (!responseSent && ack) delete _rtc.inkResponseAcks[ack];
+    }
+    var complete = !!(outputSent && responseSent);
+    // see_ink 不在本地 send() 后消费；response.done(status=completed) 会用 metadata
+    // 关联服务端真正接受并完成的那一条最终回答。拒绝/断线/新用户轮都保留 fresh。
+    return { outputSent: outputSent, responseSent: responseSent, complete: complete, stale: stale, ack: ack };
+  }
+  function _rtcFinishInkAck(event) {
+    var response = event && event.response;
+    var marker = response && response.metadata && response.metadata.bw_ink_ack;
+    var pending = marker && _rtc.inkResponseAcks && _rtc.inkResponseAcks[marker];
+    if (!pending) return;
+    delete _rtc.inkResponseAcks[marker];
+    if (response.status === 'completed' && pending.epoch === (_rtc.turnEpoch || 0)) {
+      _rtcMarkInkSeen(pending.name, pending.ok, pending.ver, pending.page);
+    }
   }
   // 创造物库清单(与文字侧同源:/api/assistant/creations-brief → _creations_recent_line)。
   //   stale-while-revalidate:开口时用缓存注入,距上次拉取 >15s 就后台刷新;工具完成(_chipEnd)也刷新。
@@ -4527,17 +4782,22 @@ if (window.__bwPwaProviderOnly) return;
            + '题目是纸上自制的,书里没有逐字题目,别去 search_book 找题目原文')
         : '';
       // 圈画告知(用户拍板 2026-07-20:有笔迹**一律 see_ink** 看真实圈画——几何提取的'圈中文字'不可靠,不喂 AI)
-      var ikHint = (_rtc.ink && _rtc.ink.length)
-        ? '。⚠ 他在本页**圈画**了内容——他说『这个/这里/圈的/画的』时指圈中内容;**先调 see_ink 看圈了什么**再回应,不要凭整页文本猜'
-        : '';
+      var freshInk = _rtcHasFreshInk();
+      var ikHint = freshInk
+        ? '。⚠ 本页有模型尚未看过的**新笔迹**；这是本轮最高优先级对象，直接且只调用 see_ink。其合成图已包含笔迹附近页面，不要先 read_selection/read_page，也不要随后 see_page'
+        : ((_rtc.ink && _rtc.ink.length)
+          ? '。本页有既存笔迹；用户明确提到圈画、手写、箭头或算式时调用 see_ink'
+          : '');
       // 选中文字是用户此轮明确指向的对象。只在他开口/发文字时随同
       // 当前视口注入，不因单纯拖选就让模型主动开口；App 本机直连与
       // Pi 控制侧带因此保持同一语义。
       var sel = String(_rtc.sel || '').trim();
       var selHint = sel
-        ? '。他当前明确选中了这段文字:「' + sel.slice(0, 1000) + '」——他说『这个/这段/这里』时优先指这段'
+        ? (freshInk
+          ? '。他当前也有选区「' + sel.slice(0, 1000) + '」，但本轮新笔迹优先；see_ink 完成后再依据用户问题决定是否引用选区'
+          : '。他当前明确选中了这段文字:「' + sel.slice(0, 1000) + '」——他说『这个/这段/这里』时优先指这段')
         : '';
-      var fp = _rtc.ctxPage + '/' + (_rtc.ctxTotal || 0) + ':' + vt.length + ':' + vt.slice(0, 30) + ':' + cre.length + ':' + cre.slice(0, 24) + ':' + ((_rtc.ink && _rtc.ink.length) || 0) + ':' + sel.length + ':' + sel.slice(0, 40);
+      var fp = _rtc.ctxPage + '/' + (_rtc.ctxTotal || 0) + ':' + vt.length + ':' + vt.slice(0, 30) + ':' + cre.length + ':' + cre.slice(0, 24) + ':' + ((_rtc.ink && _rtc.ink.length) || 0) + ':' + (_rtc.inkVer || 0) + '/' + (_rtc.inkSeenVer || 0) + ':' + sel.length + ':' + sel.slice(0, 40);
       if (fp === _rtc._sentCtxFp) return;
       _rtc._sentCtxFp = fp;
       _rtcSys('(用户此刻在第 ' + _rtc.ctxPage + ' 页/章' + (_rtc.ctxTotal ? '(全书共 ' + _rtc.ctxTotal + ' 页)' : '') +
@@ -4694,11 +4954,14 @@ if (window.__bwPwaProviderOnly) return;
         };
       }
       var directBytes = Number(delivered.bytes) || 0;
+      var directItemID = /^bwi_[a-f0-9]{28}$/.test(String(delivered.item_id || ''))
+        ? String(delivered.item_id) : '';
       _visualStep('原生直投完成 ' + Math.round(directBytes / 1024) + 'KB' +
         (delivered.ink === 'none' ? '(该页无笔迹)' : ''));
       return {
         media_type: 'image/jpeg',
         native_delivered: true,
+        item_id: directItemID,
         byte_count: directBytes,
         ink: String(delivered.ink || 'unknown'),
         capture: String(delivered.capture || '')
@@ -4997,7 +5260,10 @@ if (window.__bwPwaProviderOnly) return;
     var page = null;
     if (el && el.dataset) {
       if (el.dataset.pageNum != null) page = el.dataset.pageNum;
-      else if (el.dataset.idx != null) page = el.dataset.idx;
+      else if (el.dataset.idx != null) {
+        var sectionIdx = parseInt(el.dataset.idx, 10);
+        page = Number.isFinite(sectionIdx) ? sectionIdx + 1 : el.dataset.idx;
+      }
       else if (el.dataset.uid != null) page = el.dataset.uid;
     }
     if (page == null && el && el.__upRec && el.__upRec.page != null) {
@@ -5165,7 +5431,10 @@ if (window.__bwPwaProviderOnly) return;
     var page = null;
     if (el && el.dataset) {
       if (el.dataset.pageNum != null) page = el.dataset.pageNum;
-      else if (el.dataset.idx != null) page = el.dataset.idx;
+      else if (el.dataset.idx != null) {
+        var sectionIdx = parseInt(el.dataset.idx, 10);
+        page = Number.isFinite(sectionIdx) ? sectionIdx + 1 : el.dataset.idx;
+      }
       else if (el.dataset.uid != null) page = el.dataset.uid;
     }
     if (page == null && el && el.__upRec && el.__upRec.page != null) page = el.__upRec.page;
@@ -5598,6 +5867,25 @@ if (window.__bwPwaProviderOnly) return;
       })();
       return;
     }
+    var requestedName = name;
+    var toolEpochAtStart = _rtc.turnEpoch || 0;
+    var currentPageAtStart = _rtcFreshInkPage() || _rtc.ctxPage;
+    var freshInkAtStart = _rtcHasFreshInk(currentPageAtStart);
+    name = _rtcEffectiveTool(name, freshInkAtStart);
+    var explicitSeeInkTarget = requestedName === 'see_ink' && !!(
+      Number(args && args.page) ||
+      String((args && args.selectionId) || '').trim() ||
+      String((args && args.scope) || '').trim()
+    );
+    var forceCurrentInk = name === 'see_ink' && freshInkAtStart && !explicitSeeInkTarget;
+    if (forceCurrentInk) {
+      // 当前页 fresh 强占（包括低优先级工具被提升）时不能继承旧页码或
+      // selectionId；普通显式 see_ink 没有 fresh 时仍保留用户指定页/选区。
+      args = { page: currentPageAtStart, scope: 'drawing-nearby' };
+    }
+    var inkPageAtStart = name === 'see_ink'
+      ? (Number(args && args.page) || currentPageAtStart) : currentPageAtStart;
+    var inkVersionForDelivery = 0;
     _rtc.turnTool = true; _rtc.turnToolAny = true;   // ㊸:本轮真调了工具(承诺核查放行;turnToolAny 用户轮作用域,不随 response 复位)
     if (name === 'read_selection' && _rtc.sel && _rtc.sel.trim()) {   // 74:选中在手=短路闪回(fallback 路径与 relay 同构)
       onToolStatus({ status: 'done', tool: name, label: '读取选中(免调用)', rag: _rtc.sel.slice(0, 300) });
@@ -5622,8 +5910,25 @@ if (window.__bwPwaProviderOnly) return;
         );
       }
     } catch (_) {}
-    var out = '', ok = true, label = name, took = null, argsUsed = args, vision = null, res;
+    var out = '', ok = true, label = name, took = null, argsUsed = args, vision = null,
+        visualItemID = '', res;
     try {
+      if (toolEpochAtStart !== (_rtc.turnEpoch || 0)) {
+        throw new Error('工具所属用户轮已被新问题取代');
+      }
+      if (name === 'see_ink') {
+        if (!(await _rtcAwaitInkCommit(inkPageAtStart, 1500))) {
+          throw _visualStageError('笔迹提交', '落笔尚未写入当前页面，已保留为未查看，请重试');
+        }
+        if (forceCurrentInk && Number(_rtcFreshInkPage()) !== Number(inkPageAtStart)) {
+          throw _visualStageError('页面定位', '查看笔迹前页面已切换，原页笔迹仍保留为未查看');
+        }
+        var inkStateForDelivery = _rtcInkPageState(inkPageAtStart, false);
+        inkVersionForDelivery = (inkStateForDelivery && inkStateForDelivery.ver) || 0;
+        if (toolEpochAtStart !== (_rtc.turnEpoch || 0)) {
+          throw new Error('工具所属用户轮已被新问题取代');
+        }
+      }
       if (!_rtc.nativeDirect && /^(see_ink|see_page|see_figure)$/.test(name)) {
         // Refused rather than attempted.
         //
@@ -5639,16 +5944,25 @@ if (window.__bwPwaProviderOnly) return;
       }
       if (_rtc.nativeDirect && /^(see_ink|see_page|see_figure)$/.test(name)) {
         var nativeShot = await _nativeRealtimeVisual(name, args);
+        visualItemID = String((nativeShot && nativeShot.item_id) || '');
+        if (toolEpochAtStart !== (_rtc.turnEpoch || 0)) {
+          if (/^bwi_[a-f0-9]{28}$/.test(visualItemID)) {
+            _dcSend({ type: 'conversation.item.delete', item_id: visualItemID });
+            visualItemID = '';
+          }
+          throw new Error('工具所属用户轮已被新问题取代');
+        }
         // Native delivery leaves the JPEG inside Swift. Only the legacy web
         // fallback returns b64 for the tool chip; passing a delivery receipt
         // to setVision would make the UI try to render an image with no bytes.
         vision = nativeShot && nativeShot.native_delivered ? null : [nativeShot];
         label = name === 'see_ink' ? '看笔迹标注'
           : (name === 'see_page' ? '看当前页面' : '看当前图像');
-        _rtc.inkDirty = false;
         res = { local_direct: true, image_supplied: true };
         out = JSON.stringify({
           ok: true,
+          requested_tool: requestedName,
+          resolved_as: name,
           result: '相关合成图已直接送入当前 Realtime 会话，请根据图像回答用户。'
         });
         try {
@@ -5758,7 +6072,6 @@ if (window.__bwPwaProviderOnly) return;
         }
         clearTimeout(_to);
         ok = !!d.ok; label = d.label || name; took = d.took_s; argsUsed = d.args || args;
-        if (ok && (name === 'see_ink' || name === 'see_page' || name === 'see_figure')) _rtc.inkDirty = false;   // 重新看过了:边沿复位,下次变化再通知
         res = d.result || {};
         _rtcTool._silent = !!res.silent && localStorage.getItem('rc-voice-toolreply') !== '1';   // 74/89:静默入库;「工具口头回报」开=放行
         var ca = res.client_action; delete res.client_action;
@@ -5809,8 +6122,30 @@ if (window.__bwPwaProviderOnly) return;
           (ok ? '' : String(out || '').slice(0, 160)), ok ? '#7be096' : '#ff6b6b');
       }
     } catch (_) {}
-    _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: out } });
-    if (!_rtcTool._silent) _rtcRespCreate(name === 'deep_think' ? 'deep' : 'tool', ok && String(out || '').length > 800);   // 66c/74:silent=静默入库不发言
+    if (toolEpochAtStart !== (_rtc.turnEpoch || 0) && /^bwi_[a-f0-9]{28}$/.test(visualItemID)) {
+      _dcSend({ type: 'conversation.item.delete', item_id: visualItemID });
+      visualItemID = '';
+    }
+    var completion = _rtcCompleteToolTurn(
+      name, ok, inkVersionForDelivery, inkPageAtStart,
+      callId, out, ok && String(out || '').length > 800, _rtcTool._silent,
+      toolEpochAtStart
+    );
+    if (completion.stale) {
+      ok = false;
+      out = JSON.stringify({
+        error: '该工具属于已被新问题取代的旧用户轮；已闭合调用但未再生成回答',
+        stale_turn: true
+      });
+    } else if (!completion.complete) {
+      ok = false;
+      out = JSON.stringify({
+        error: '工具结果未能送入当前 Realtime 会话；当前页笔迹仍保留为未查看',
+        output_sent: completion.outputSent,
+        response_sent: completion.responseSent
+      });
+      try { if (window.dlog) window.dlog('tool← ' + name + ' FAIL data-channel delivery', '#ff6b6b'); } catch (_) {}
+    }
     _rtcTool._silent = false;
     onToolStatus({ status: ok ? 'done' : 'error', tool: name, label: label, took_s: took, args: argsUsed, rag: out.slice(0, 1600), result: (typeof res === 'object' ? res : undefined), vision: vision || undefined });   // result=完整体(UI 渲卡用;rag 是喂回模型的精简版)
   }
@@ -5908,6 +6243,11 @@ if (window.__bwPwaProviderOnly) return;
       curAText += (e.delta || ''); setSub('a', curAText); _rtcCapFeed(curAText, false);
       if (_rtc.turnText && _turnFeed) { try { _turnFeed(curAText, false); } catch (_) {} }   // 61:文字轮边生成边代念
     } else if (t === 'input_audio_buffer.speech_started') {
+      _rtcBeginUserTurn();
+      // Native Realtime uses interrupt_response=false: the App owns the turn
+      // boundary, so a new utterance must cancel the old response and clear
+      // audio that WebRTC has already buffered.
+      _rtcInterrupt();
       // 先同步、后注入：刚滚动/翻页/选中/落笔后立刻开口时，pendText 与
       // sideband 状态必须先刷新，不能把上一帧内容当成“用户此刻正在看”。
       _requestSyncNow();
@@ -6004,6 +6344,7 @@ if (window.__bwPwaProviderOnly) return;
       _rtcCapReset();                 // fed 计数跟 curAText 同步归零(不清的话新一轮切句从错误偏移入队)
       callBtnSpeaking(true);
     } else if (t === 'response.done') {
+      _rtcFinishInkAck(e);
       callBtnSpeaking(false);
       if (_rtc.turnText && _turnFeed && curAText) { try { _turnFeed(curAText, true); } catch (e) {} }   // 61:残句代念收尾(通道韧性+禁麦在 _speakSafe/_ttsMicGuard)
       if (_rtc.turnText && curAText) {
@@ -6153,8 +6494,19 @@ if (window.__bwPwaProviderOnly) return;
           else if (m0.event === 'tool_status') {
             var tp = m0.payload || {};
             _rtc.turnTool = true; _rtc.turnToolAny = true;   // relay 执行了工具:承诺核查放行
-            // 边沿复位镜像:ctl 模式下 see_* 在 relay 跑,前端 _rtcTool 不经过——在这里复位
-            if (tp.status === 'done' && /^(see_ink|see_page|see_figure)/.test(tp.tool || '')) _rtc.inkDirty = false;
+            // Relay 路径也在开始时钉住页码+版本；结束时只消费那一版，截图期间
+            // 新增笔迹或切到别页都不会被迟到回执误清。
+            if (tp.status === 'running' && tp.tool === 'see_ink') {
+              var relayInkState = _rtcInkPageState(_rtc.ctxPage, false);
+              _rtc.relayInkCapture = {
+                page: _rtc.ctxPage,
+                ver: (relayInkState && relayInkState.ver) || 0
+              };
+            } else if (tp.tool === 'see_ink' && (tp.status === 'done' || tp.status === 'error' || tp.status === 'aborted')) {
+              var relayInkCapture = _rtc.relayInkCapture || { page: _rtc.ctxPage, ver: 0 };
+              if (tp.status === 'done') _rtcMarkInkSeen('see_ink', true, relayInkCapture.ver, relayInkCapture.page);
+              _rtc.relayInkCapture = null;
+            }
             onToolStatus(tp);
           }
           else if (m0.event === 'need_shot') {   // ㊺P2:relay 执行 see_ink/see_page 要截图(只有浏览器能拍)
@@ -6355,7 +6707,13 @@ if (window.__bwPwaProviderOnly) return;
     var g = ++_gen;
     var fresh = !!toggle._fresh; toggle._fresh = false;   // 新话题:不回放历史(WebRTC 每连接本就是新会话)
     _rtc.ctxFile = (opts && opts.file) || ''; _rtc.ctxPage = (opts && opts.page) || 0;
-    _rtc.ink = null; _rtc.sel = ''; _rtc._inkFp = ''; _rtc.inkDirty = false; _rtc.nativeDirect = false;
+    _rtcResetInkPages();
+    _rtc.activeInkPage = null;
+    _rtc.ink = null; _rtc.sel = ''; _rtc._inkFp = ''; _rtc.inkDirty = false;
+    _rtc.hasInk = false; _rtc.inkVer = 0; _rtc.inkSeenVer = 0;
+    _rtc.inkResponseAcks = Object.create(null); _rtc.inkAckSeq = 0; _rtc.turnEpoch = 0;
+    _rtc.relayInkCapture = null; _rtc.nativeDirect = false;
+    _rtcUseInkPage(_rtc.ctxPage);
     // 133(用户实测"圈完问这是什么,它说看不到"):上面清的是 _rtc.* 的注入指纹,但**发不发**由 syncInk/syncState
     // 各自的模块级指纹(_inkFp/_stateFp)说了算——它们只在 WS 版 start()(:3104)清过,rtcStart 这条路一直漏。
     // 后果:同一页面第二通电话起,墨迹/选中的指纹跟上一通一样 → syncInk 直接 return → 新会话**永远收不到**
@@ -7199,11 +7557,39 @@ if (window.__bwPwaProviderOnly) return;
   function syncInk(page, strokes) {
     if (mode !== 's2s' || !ws || ws.readyState !== 1 || !page) return;
     strokes = strokes || [];
-    var fp; try { fp = page + ':' + strokes.length + ':' + JSON.stringify(strokes).length; } catch (e) { fp = page + ':' + strokes.length; }
-    if (fp === _inkFp) return;
+    var fp = _rtcInkFingerprint(page, strokes);
+    var pageState = _rtcInkPageState(page, true);
+    var signalAtSend = pageState.signal || 0;
+    var changed = signalAtSend > (pageState.signalSent || 0);
+    if (fp === _inkFp) {
+      // 事件发生但几何没变（例如无效短线）只结束 pending，不制造新版本。
+      _rtcResolveInkPending(page);
+      pageState.signalSent = Math.max(pageState.signalSent || 0, signalAtSend);
+      return;
+    }
     var first = (_inkFp === '');
     _inkFp = fp;
-    if (first && !strokes.length) return;   // 首次空态只记指纹(没圈过东西不必更新 SP)
+    if (first && !strokes.length && !changed) return;   // 首次空态只记指纹(没圈过东西不必更新 SP)
+    var sendStrokes = strokes.slice(0, 60);
+    try { sendStrokes = JSON.parse(JSON.stringify(sendStrokes)); } catch (e) {}
+    function sendCurrent(shot) {
+      // EPUB 截图异步返回时，若已有更新的笔迹指纹，旧快照绝不能反向覆盖新状态。
+      if (fp !== _inkFp) return false;
+      try {
+        var payload = {
+          type: 'ink', page: page, strokes: sendStrokes,
+          revision: fp, changed: changed
+        };
+        if (shot && shot.b64) payload.shot = { media_type: shot.media_type, b64: shot.b64 };
+        ws.send(JSON.stringify(payload));
+        pageState.signalSent = Math.max(pageState.signalSent || 0, signalAtSend);
+        setSt('通话中 · 已同步你的圈画');
+        return true;
+      } catch (e) { return false; }
+    }
+    // App 原生直连的视觉工具会在被调用时直接从当前页面取合成图；状态同步无需等待
+    // EPUB 的 JS 截图，这样落笔后立即开口也能先锁定 see_ink。
+    if (_rtc.nativeDirect) { sendCurrent(null); return; }
     // EPUB/HTML(reflow):后端拿到的是归一化 strokes,没有章节宽高无法无失真渲染合成图 → 由前端(唯一知道布局的中间层)
     // 产出笔迹合成图(视口截图)随 ink 消息发给 relay,存 book.view_shot 供 WS 引擎(豆包/Grok 不能直接看图,
     // 靠 see_ink 让视觉模型描述那张合成图)。PDF 走服务端裁图不需要;空笔迹不带 shot(relay view_shot=None 自动清陈旧)。
@@ -7213,13 +7599,12 @@ if (window.__bwPwaProviderOnly) return;
         var _shotP = RC.captureInkRegion
           ? RC.captureInkRegion().then(function (shot0) { return shot0 || (RC.captureView ? RC.captureView() : null); })
           : RC.captureView();
-        _shotP.then(function (shot) {
-          try { ws.send(JSON.stringify({ type: 'ink', page: page, strokes: strokes.slice(0, 60), shot: (shot && shot.b64) ? { media_type: shot.media_type, b64: shot.b64 } : null })); setSt('通话中 · 已同步你的圈画'); } catch (e) {}
-        }).catch(function () { try { ws.send(JSON.stringify({ type: 'ink', page: page, strokes: strokes.slice(0, 60) })); } catch (e) {} });
+        _shotP.then(function (shot) { sendCurrent(shot); })
+          .catch(function () { sendCurrent(null); });
         return;
       }
     } catch (e) {}
-    try { ws.send(JSON.stringify({ type: 'ink', page: page, strokes: strokes.slice(0, 60) })); setSt('通话中 · 已同步你的圈画'); } catch (e) {}
+    sendCurrent(null);
   }
 
   // ── 入口按钮：电脑客户端占原麦克风位置；普通电话保留在它右侧。──
@@ -7543,13 +7928,20 @@ if (window.__bwPwaProviderOnly) return;
   function _syncAdapterNow() {
     if (!ws || ws.readyState !== 1) return;
     try {
-      var c = (window.RC && RC.adapter && RC.adapter().getContext()) || {};
+      var adapter = window.RC && RC.adapter ? RC.adapter() : null;
+      var c = (adapter && adapter.getContext ? adapter.getContext() : null) || {};
       var pg = c.page || (c.current_section_idx != null ? (c.current_section_idx + 1) : 0);
       // ㊵ 拉模式下 setPage 经 shim 只更新本地状态(零网络/token 成本),恒推保持 pendText 最新即可;
       // 豆包(真 WS,SP 前缀架构)只在翻页时推、不带视口流(滚动流会打它的 dialog 缓存)
       if (pg) setPage(pg, _rtc.on ? String(c.visible_text || '').slice(0, 2000) : undefined);
       syncState({ sel: String(c.selection || '').slice(0, 500), focus: '', figs: 0 });
-      if (pg && Object.prototype.hasOwnProperty.call(c, 'ink')) syncInk(pg, c.ink || []);
+      var inkState = null;
+      if (pg && Object.prototype.hasOwnProperty.call(c, 'ink')) {
+        inkState = { page: pg, strokes: c.ink || [] };
+      } else if (adapter && typeof adapter.getVoiceInk === 'function') {
+        inkState = adapter.getVoiceInk();
+      }
+      if (inkState && inkState.page) syncInk(inkState.page, inkState.strokes || []);
     } catch (e) {}
   }
   function _requestSyncNow() {
@@ -7558,7 +7950,79 @@ if (window.__bwPwaProviderOnly) return;
       else _syncAdapterNow();
     } catch (e) {}
   }
-  try { window.addEventListener('rc:inkchange', _requestSyncNow); } catch (e) {}
+  function _rtcPagesFromInkEvent(event) {
+    var detail = (event && event.detail) || {};
+    var raw = [];
+    if (Array.isArray(detail.pages)) raw = raw.concat(detail.pages);
+    if (detail.page != null) raw.push(detail.page);
+    (Array.isArray(detail.changes) ? detail.changes : []).forEach(function (change) {
+      if (change && change.page != null) raw.push(change.page);
+    });
+    (Array.isArray(detail.surfaceIds) ? detail.surfaceIds : []).forEach(function (id) {
+      var match = /^page:(\d+)$/.exec(String(id || ''));
+      if (match) { raw.push(parseInt(match[1], 10)); return; }
+      match = /^section:(\d+)$/.exec(String(id || ''));
+      if (match) raw.push(parseInt(match[1], 10) + 1);
+    });
+    if (!raw.length && _rtc.ctxPage) raw.push(_rtc.ctxPage);
+    var seen = Object.create(null), pages = [];
+    raw.forEach(function (value) {
+      var page = Number(value);
+      if (!(page > 0) || seen[String(page)]) return;
+      seen[String(page)] = true;
+      pages.push(page);
+    });
+    return pages;
+  }
+  function _onInkPending(event) {
+    if (mode !== 's2s' || !(_rtc.on || _connecting || ws)) return;
+    var opId = event && event.detail && event.detail.opId;
+    var pages = _rtcPagesFromInkEvent(event);
+    pages.forEach(function (page) {
+      _rtcSetInkPending(page, opId);
+    });
+    if (pages.length) _rtc.activeInkPage = pages[pages.length - 1];
+  }
+  function _onInkChange(event) {
+    if (mode === 's2s' && (_rtc.on || _connecting || ws)) {
+      var source = event && event.detail && event.detail.source;
+      var opId = event && event.detail && event.detail.opId;
+      var changes = (event && event.detail && Array.isArray(event.detail.changes))
+        ? event.detail.changes : [];
+      var changesByPage = Object.create(null);
+      changes.forEach(function (change) {
+        var page = Number(change && change.page);
+        if (page > 0) changesByPage[String(page)] = change;
+      });
+      var pages = _rtcPagesFromInkEvent(event);
+      pages.forEach(function (page) {
+        var state = _rtcInkPageState(page, true);
+        // 每个完成事件才代表一个已经进入页面权威层的变化。pendingCount 让连续
+        // 多笔必须全部提交后才放行 see_ink；首笔完成不能提前截掉仍在队列里的后续笔画。
+        if (source === 'native-pencil') state = _rtcDecreaseInkPending(page, opId) || state;
+        state.signal = (state.signal || 0) + 1;
+        if (Number(page) === Number(_rtc.ctxPage)) _rtcUseInkPage(page);
+        var change = changesByPage[String(page)];
+        if (change) syncInk(page, change.strokes || []);
+      });
+      if (pages.length) _rtc.activeInkPage = pages[pages.length - 1];
+    }
+    _requestSyncNow();
+  }
+  function _onInkCancel(event) {
+    if (mode !== 's2s' || !(_rtc.on || _connecting || ws)) return;
+    var opId = event && event.detail && event.detail.opId;
+    var pages = _rtcPagesFromInkEvent(event);
+    pages.forEach(function (page) {
+      _rtcCancelInkPending(page, opId);
+    });
+    if (_rtc.activeInkPage && !_rtcHasFreshInk(_rtc.activeInkPage)) _rtc.activeInkPage = null;
+  }
+  try {
+    window.addEventListener('rc:inkpending', _onInkPending);
+    window.addEventListener('rc:inkchange', _onInkChange);
+    window.addEventListener('rc:inkcancel', _onInkCancel);
+  } catch (e) {}
   setInterval(function () {
     if (window.__vcSyncNow || !ws || ws.readyState !== 1) return;
     _syncAdapterNow();

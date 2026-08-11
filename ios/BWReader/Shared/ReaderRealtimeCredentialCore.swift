@@ -613,22 +613,22 @@ enum ReaderRealtimeOpenAIClient {
             ),
             localTool(
                 "read_selection",
-                "读取用户当前明确选中的原文；不要让用户重新粘贴。",
+                "当前显示页没有本次通话中尚未看过的新笔迹变化时，读取用户当前明确选中的原文；不要让用户重新粘贴。",
                 empty
             ),
             localTool(
                 "read_page",
-                "读取 App 已提供的当前可见页文字。没有文字层时改用 see_page。",
+                "当前显示页没有本次通话中尚未看过的新笔迹变化时，读取 App 已提供的当前可见页文字。没有文字层或文字不足时才改用 see_page。",
                 page
             ),
             localTool(
                 "see_ink",
-                "查看笔迹附近的实际页面合成图。用户提到圈画、手写、箭头或算式时必须先调用。",
+                "查看当前显示页新笔迹附近的实际页面合成图；图中已包含附近页面背景。当前页存在本次通话中尚未看过的新笔迹变化，或用户提到当前页圈画、手写、箭头、算式时，本轮直接且只调用此工具，不要再组合 read_page 或 see_page；不要自动追逐其它页面的未读笔迹。",
                 visual
             ),
             localTool(
                 "see_page",
-                "查看当前视口的实际合成图，包含书页、笔迹、高亮、便签与页内卡片。",
+                "最后手段：仅在当前显示页没有新笔迹，且当前文字不足、没有文字层或问题明确涉及版面/图像时，查看当前视口的实际合成图。",
                 visual
             ),
             localTool(
@@ -686,9 +686,11 @@ enum ReaderRealtimeOpenAIClient {
         你是用户的学习伙伴。跟随用户说话的语言回答；朗读书中日语或英语原文时使用原语言的自然发音。
         回答要适合语音：快问快答不超过八秒，普通解释不超过十五秒；较长内容先给简短摘要并询问是否展开。
         页面位置、当前可见文字、选区与笔迹状态会在用户开口或打字时作为最新 system 消息注入。它们只是状态记录，不要主动回应；永远以最新一条为准。
-        用户说“这个、这段、这里”时，优先指当前明确选区；已有选区内容就直接使用，不要说看不到，也不要让用户重贴。
-        用户提到“我画的、我圈的、我写的、这个算式”时，必须先调用 see_ink 查看真实合成图再回答，绝不根据“存在笔迹”猜内容。
-        用户问当前页文字时使用已注入的可见文字；不足就调用 read_page。没有文字层或问题涉及排版、图表、公式、便签、卡片时调用 see_page。
+        指代优先级固定为：当前显示页在本次通话中尚未看过的新笔迹变化 > 当前明确选区 > 当前可见文字 > 整页图像。当前页存在新笔迹时，本轮直接且只调用 see_ink；它已包含笔迹附近页面，不要先读选区/文字，也不要随后调用 see_page。其它页面各自保留未读版本，切到那一页后再处理，绝不自动跨页追逐。
+        当前显示页没有新笔迹时，用户说“这个、这段、这里”优先指当前明确选区；已有选区内容就直接使用，不要说看不到，也不要让用户重贴。
+        用户提到“我画的、我圈的、我写的、这个算式”时，必须调用 see_ink 查看真实合成图再回答，绝不根据“存在笔迹”猜内容。
+        当前显示页没有新笔迹时先使用已注入的可见文字，不足才调用 read_page；只有仍无文字、文字不足，或问题明确涉及排版、图表、公式、便签、卡片时才调用 see_page。
+        一旦调用视觉工具，同一用户轮只选择一个视觉目标；等待工具结果后只生成一次最终回答，不要在工具前先回答，也不要再调用第二个视觉工具。
         make_note 直接写入 App 本机笔记，不依赖 Pi；只有工具成功返回后才能说已经保存。
         make_anki、web_search、search_image、search_video、deep_think、do_task、make_paper 与 route_to_text 是显式的远程 AI/API 工具。普通问答、本页阅读、选区、笔迹和视口查看绝不能为它们等待 Pi；只有用户任务确实需要时才调用，离线或失败就如实说明，不得伪造结果。
         不要声称已创建卡片、笔记或其它内容，除非对应工具已经成功返回。
@@ -837,7 +839,7 @@ enum ReaderRealtimeOpenAIClient {
                 "解码后体积越界：\(decoded.count) 字节（允许 2KB–2MB）"
             )
         }
-        try await injectPreparedImage(
+        _ = try await injectPreparedImage(
             callID: callID,
             clientSecret: clientSecret,
             mediaType: mediaType,
@@ -851,7 +853,7 @@ enum ReaderRealtimeOpenAIClient {
         clientSecret: String,
         mediaType: String,
         imageData: Data
-    ) async throws {
+    ) async throws -> String {
         guard isValidCallID(callID) else {
             throw ReaderRealtimeCredentialError.imageRejected(
                 "通话标识无效，无法把图归属到当前通话"
@@ -879,7 +881,7 @@ enum ReaderRealtimeOpenAIClient {
                 "编码后体积越界：\(base64.utf8.count) 字节（允许 3KB–2.8MB）"
             )
         }
-        try await injectPreparedImage(
+        return try await injectPreparedImage(
             callID: callID,
             clientSecret: clientSecret,
             mediaType: mediaType,
@@ -894,7 +896,7 @@ enum ReaderRealtimeOpenAIClient {
         mediaType: String,
         imageData: Data,
         base64: String
-    ) async throws {
+    ) async throws -> String {
         let authorizationKey = try await realtimeAuthorizationKey(
             callID: callID,
             clientSecret: clientSecret
@@ -978,6 +980,7 @@ enum ReaderRealtimeOpenAIClient {
             eventID: eventID,
             itemID: itemID
         )
+        return itemID
     }
 
     static func hangup(

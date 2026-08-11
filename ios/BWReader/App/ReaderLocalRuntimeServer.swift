@@ -806,7 +806,7 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
             )
         }
         do {
-            try await ReaderRealtimeOpenAIClient.injectImage(
+            let itemID = try await ReaderRealtimeOpenAIClient.injectImage(
                 callID: delivery.callID,
                 clientSecret: delivery.clientSecret,
                 mediaType: "image/jpeg",
@@ -818,6 +818,7 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                 object: [
                     "ok": true,
                     "delivered": true,
+                    "item_id": itemID,
                     "bytes": capture.jpegData.count,
                     "ink": ink ?? "unknown",
                     "capture": captureContract,

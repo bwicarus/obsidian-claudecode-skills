@@ -347,6 +347,16 @@ function _inkPointerUp(e) {
   if (d.pageTouched && d.pw) {
     _inkRedraw(d.pw);              // 最终全量平滑重绘
     _inkScheduleSave(d.pw, d.num);
+    try {
+      window.dispatchEvent(new CustomEvent('rc:inkchange', {
+        detail: {
+          source: 'web-ink',
+          page: d.num,
+          pages: [d.num],
+          changes: [{ page: d.num, strokes: _inkStrokesOf(d.pw) }]
+        }
+      }));
+    } catch (_) {}
   }
   if (wasEraser && _ink.quickErase) _inkArmRevert(900);   // 临时橡皮:擦完抬笔,停 0.9s 没再擦 → 自动回笔
 }
@@ -473,15 +483,40 @@ document.addEventListener('pointermove', e => {
     return operation;
   }
   function finishOperation(operation) {
+    var voiceChangesByPage = Object.create(null);
     Object.keys(operation.touched).forEach(function (key) {
       var segment = operation.touched[key];
       var page = parseInt(segment.pw.dataset && segment.pw.dataset.pageNum, 10);
+      var voicePage = Number.isFinite(page) && page > 0
+        ? page : ((typeof currentPage !== 'undefined' && currentPage) || 0);
       _ink.lastPw = segment.pw;
       _inkRedraw(segment.pw);
       _inkScheduleSave(segment.pw, Number.isFinite(page) ? page : 0);
+      if (voicePage > 0) {
+        voiceChangesByPage[String(voicePage)] = {
+          page: voicePage,
+          strokes: _inkStrokesOf(segment.pw)
+        };
+      }
     });
     operation.state = 'applied';
     scheduleReport();
+    // Native PencilKit commits arrive asynchronously. Tell Realtime immediately
+    // so a question asked right after pen-up sees the new ink instead of waiting
+    // for the two-second polling fallback.
+    try {
+      var voiceChanges = Object.keys(voiceChangesByPage).map(function (key) {
+        return voiceChangesByPage[key];
+      });
+      window.dispatchEvent(new CustomEvent('rc:inkchange', {
+        detail: {
+          source: 'native-pencil',
+          opId: operation.opId,
+          pages: voiceChanges.map(function (change) { return change.page; }),
+          changes: voiceChanges
+        }
+      }));
+    } catch (e) {}
     return operation.kind === 'commit' || operation.kind === 'createRegion'
       ? { ok: true, written: operation.written, surfaces: Object.keys(operation.touched) }
       : { ok: true, removed: operation.removed, surfaces: Object.keys(operation.touched) };
@@ -548,7 +583,7 @@ document.addEventListener('pointermove', e => {
       var segments = parsedSegments(input, 2, 4096);
       if (!segments) return { ok: false, error: 'native_surface_stale' };
       var operation = rememberOperation(opId, {
-        kind: 'commit', state: 'mutating', touched: Object.create(null),
+        kind: 'commit', state: 'mutating', touched: Object.create(null), opId: opId,
         segments: segments, nextSegment: 0, written: 0
       });
       return resumeCommit(operation);
@@ -592,7 +627,7 @@ document.addEventListener('pointermove', e => {
           });
       });
       var operation = rememberOperation(opId, {
-        kind: 'erase', state: 'mutated', touched: touched, removed: removed
+        kind: 'erase', state: 'mutated', touched: touched, removed: removed, opId: opId
       });
       return finishOperation(operation);
     }
