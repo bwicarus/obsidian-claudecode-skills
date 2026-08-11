@@ -5275,6 +5275,19 @@
     onToolStatus({ status: 'running', label: name });
     var out = '', ok = true, label = name, took = null, argsUsed = args, vision = null, res;
     try {
+      if (!_rtc.nativeDirect && /^(see_ink|see_page|see_figure)$/.test(name)) {
+        // Refused rather than attempted.
+        //
+        // Without the native route the request would go to Pi, which has no
+        // access to ink drawn on this device: it can only ever come back with
+        // an image that lacks the very thing the user asked about, or with a
+        // generic failure. Saying so plainly beats letting it look like a
+        // compositor bug.
+        throw _visualStageError(
+          '模型工具触发/路由',
+          '本机直连未启用（native_direct 未置位），视觉工具无法看到本机笔迹'
+        );
+      }
       if (_rtc.nativeDirect && /^(see_ink|see_page|see_figure)$/.test(name)) {
         var nativeShot = await _nativeRealtimeVisual(name, args);
         vision = [nativeShot];
@@ -5414,7 +5427,26 @@
         var slim = JSON.stringify(_resFeed);
         out = (slim && slim.length > 2) ? slim.slice(0, 1800) : '(无文本结果,界面元素已显示在用户屏幕上)';
       }
-    } catch (e) { ok = false; out = JSON.stringify({ error: String(e).slice(0, 200) }); }
+    } catch (e) {
+      ok = false;
+      // Says which route ran, not just what went wrong.
+      //
+      // Visual tools take one of two paths: local composition inside the App
+      // (nativeDirect) or a round trip to Pi. Pi cannot see ink drawn on this
+      // device, so that route fails by construction -- yet both routes reported
+      // the same bare sentence, and the tool card showed "no extra content".
+      // Knowing the route is the difference between "fix the compositor" and
+      // "find out why the native route was not taken".
+      var route = _rtc.nativeDirect ? 'local' : 'server';
+      var stage = e && e.bwVisualStage ? e.bwVisualStage : '';
+      out = JSON.stringify({
+        error: String((e && e.message) || e).slice(0, 200),
+        route: route,
+        stage: stage || undefined,
+        call: _rtc.callId ? 'present' : 'missing',
+        sideband: _rtc.sidebandKey ? 'present' : 'missing'
+      });
+    }
     _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: out } });
     if (!_rtcTool._silent) _rtcRespCreate(name === 'deep_think' ? 'deep' : 'tool', ok && String(out || '').length > 800);   // 66c/74:silent=静默入库不发言
     _rtcTool._silent = false;
