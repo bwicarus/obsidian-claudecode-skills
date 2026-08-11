@@ -120,6 +120,153 @@ internal sealed class WindowsDirectAppLauncher : IDirectAppLauncher
         }
     }
 
+    public async Task<DirectAppTarget> RestartAsync(
+        string appKind,
+        string appUserModelId,
+        DirectAppTarget expected,
+        TimeSpan timeout,
+        CancellationToken cancellationToken)
+    {
+        DirectAppTargetProfile profile =
+            ValidateTarget(appKind, appUserModelId);
+        ArgumentNullException.ThrowIfNull(expected);
+        if (timeout <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(timeout));
+        }
+        if (
+            expected.AppKind != appKind
+            || expected.AppUserModelId != appUserModelId
+            || expected.RootProcessId == 0
+            || expected.RootProcessStartFileTimeUtc <= 0
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_APP_RESTART_TARGET_INVALID",
+                "Codex 重启目标无效");
+        }
+        cancellationToken.ThrowIfCancellationRequested();
+        if (!OperatingSystem.IsWindows())
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_WINDOWS_REQUIRED",
+                "Codex packaged app 只能在 Windows 重启");
+        }
+
+        CodexAppProbeState current = WindowsCodexAppProbe.Probe(appKind);
+        CodexAppTarget? currentTarget = current.ReadyTarget;
+        if (
+            current.RootCount != 1
+            || currentTarget is null
+            || currentTarget.RootProcessId != expected.RootProcessId
+            || currentTarget.RootProcessStartFileTimeUtc
+                != expected.RootProcessStartFileTimeUtc
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_APP_RESTART_TARGET_CHANGED",
+                "Codex 进程已变化，拒绝重启非预期实例",
+                retryable: true);
+        }
+
+        long deadline = Stopwatch.GetTimestamp()
+            + checked((long)(timeout.TotalSeconds * Stopwatch.Frequency));
+        try
+        {
+            using Process process = Process.GetProcessById(
+                checked((int)expected.RootProcessId));
+            long actualStart = process.StartTime
+                .ToUniversalTime()
+                .ToFileTimeUtc();
+            if (actualStart != expected.RootProcessStartFileTimeUtc)
+            {
+                throw new DirectProtocolException(
+                    "BW_COMPUTER_VOICE_DIRECT_APP_RESTART_TARGET_CHANGED",
+                    "Codex 进程代次已变化，拒绝重启",
+                    retryable: true);
+            }
+            process.Kill(entireProcessTree: true);
+            await process.WaitForExitAsync(cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (DirectProtocolException)
+        {
+            throw;
+        }
+        catch (Exception exception) when (
+            exception is ArgumentException
+            or InvalidOperationException
+            or System.ComponentModel.Win32Exception)
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_APP_RESTART_FAILED",
+                "无法完整退出失效的 Codex 实例",
+                retryable: true,
+                innerException: exception);
+        }
+
+        while (true)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            CodexAppProbeState state = WindowsCodexAppProbe.Probe(appKind);
+            if (state.RootCount > 1)
+            {
+                throw new DirectProtocolException(
+                    "BW_COMPUTER_VOICE_DIRECT_APP_AMBIGUOUS",
+                    "Codex 重启后出现多个进程树",
+                    retryable: true);
+            }
+            if (state.ReadyTarget is CodexAppTarget ready)
+            {
+                if (
+                    ready.RootProcessId == expected.RootProcessId
+                    && ready.RootProcessStartFileTimeUtc
+                        == expected.RootProcessStartFileTimeUtc
+                )
+                {
+                    // The old packaged-app generation has not exited yet.
+                }
+                else
+                {
+                    return new DirectAppTarget(
+                        ready.RootProcessId,
+                        ready.RootProcessStartFileTimeUtc,
+                        appKind,
+                        appUserModelId);
+                }
+            }
+            else if (state.RootCount == 0)
+            {
+                break;
+            }
+            if (Stopwatch.GetTimestamp() >= deadline)
+            {
+                throw new DirectProtocolException(
+                    "BW_COMPUTER_VOICE_DIRECT_APP_RESTART_TIMEOUT",
+                    "等待旧 Codex 实例退出超时",
+                    retryable: true);
+            }
+            await Task.Delay(
+                TimeSpan.FromMilliseconds(200),
+                cancellationToken).ConfigureAwait(false);
+        }
+
+        await EnsureRunningAsync(
+            profile.AppKind,
+            profile.AppUserModelId,
+            cancellationToken).ConfigureAwait(false);
+        TimeSpan remaining = TimeSpan.FromSeconds(
+            Math.Max(
+                0.2,
+                (deadline - Stopwatch.GetTimestamp())
+                    / (double)Stopwatch.Frequency));
+        return await WaitForUniqueReadyAsync(
+            profile.AppKind,
+            profile.AppUserModelId,
+            remaining,
+            cancellationToken).ConfigureAwait(false);
+    }
+
     internal static DirectAppTargetProfile ValidateTarget(
         string appKind,
         string appUserModelId) =>

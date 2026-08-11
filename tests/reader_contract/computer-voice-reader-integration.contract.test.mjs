@@ -333,6 +333,11 @@ test("电脑客户端设置读取真实 Codex 语音状态并按目标状态控�
     setBody,
     /function setCodexVoiceKeepActive\(enabled\)[\s\S]*"codex-voice-keepalive-set"[\s\S]*\{ enabled: enabled \}/,
   );
+  assert.match(
+    setBody,
+    /"codex-voice-set"[\s\S]*\{ active: desiredActive \},[\s\S]*45000/,
+    "a bounded Codex restart and fresh F24 attempt must fit inside the control request",
+  );
 
   const borrowStart = runtime.indexOf(
     "function borrowSnapshotChannelForStatus(attempt)",
@@ -354,6 +359,16 @@ test("电脑客户端设置读取真实 Codex 语音状态并按目标状态控�
   assert.match(settingsBody, /data-role="codex-voice-keepalive"/);
   assert.match(settingsBody, /● Codex 正在使用麦克风（通常表示语音已开启）/);
   assert.match(settingsBody, /○ Codex 当前未使用麦克风（通常表示语音已关闭）/);
+  assert.match(
+    settingsBody,
+    /lastKnownCodexVoiceKeepActive = value\.keepActive[\s\S]*Windows 桥接器暂时离线；已保存的持续运行设置仍然有效/,
+    "a transient bridge outage must not visually erase the persisted keep-alive preference",
+  );
+  assert.doesNotMatch(
+    settingsBody,
+    /当前 Windows 桥版本尚未提供 Codex 语音状态/,
+    "offline status must not be misreported as an unsupported Windows version",
+  );
   assert.match(
     settingsBody,
     /var desiredActive = !latestCodexVoice\.active;[\s\S]*setCodexVoiceActive\(desiredActive\)/,

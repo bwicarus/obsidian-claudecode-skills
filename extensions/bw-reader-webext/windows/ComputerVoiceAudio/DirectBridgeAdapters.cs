@@ -20,6 +20,13 @@ internal interface IDirectAppLauncher
         string appUserModelId,
         TimeSpan timeout,
         CancellationToken cancellationToken);
+
+    Task<DirectAppTarget> RestartAsync(
+        string appKind,
+        string appUserModelId,
+        DirectAppTarget expected,
+        TimeSpan timeout,
+        CancellationToken cancellationToken);
 }
 
 internal sealed class UnwiredDirectAppLauncher : IDirectAppLauncher
@@ -44,6 +51,17 @@ internal sealed class UnwiredDirectAppLauncher : IDirectAppLauncher
             new DirectProtocolException(
                 "BW_COMPUTER_VOICE_DIRECT_APP_LAUNCHER_NOT_WIRED",
                 "Windows 直连的 Codex 启动适配器尚未接线"));
+
+    public Task<DirectAppTarget> RestartAsync(
+        string appKind,
+        string appUserModelId,
+        DirectAppTarget expected,
+        TimeSpan timeout,
+        CancellationToken cancellationToken) =>
+        Task.FromException<DirectAppTarget>(
+            new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_APP_LAUNCHER_NOT_WIRED",
+                "Windows 直连的 Codex 重启适配器尚未接线"));
 }
 
 internal sealed record DirectMediaStartRequest(

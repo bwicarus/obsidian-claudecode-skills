@@ -102,6 +102,7 @@
   var statusListeners = [];
   var availabilityAttempt = null;
   var codexVoiceSetPromise = null;
+  var lastKnownCodexVoiceKeepActive = null;
   var lastClientFailure = null;
   var computerTarget = COMPUTER_TARGET_CODEX;
   var computerTargetLoaded = false;
@@ -3230,7 +3231,7 @@
       return opened.request(
         "codex-voice-set",
         { active: desiredActive },
-        12000
+        45000
       );
     }).then(function (value) {
       return normalizeCodexVoicePayload(value, "Codex 语音控制响应");
@@ -3262,7 +3263,7 @@
       return opened.request(
         "codex-voice-keepalive-set",
         { enabled: enabled },
-        25000
+        45000
       );
     }).then(function (value) {
       return normalizeCodexVoicePayload(value, "Codex 语音持续运行响应");
@@ -6368,6 +6369,7 @@
     var latestCodexVoiceValue = null;
     var latestCodexVoiceKeepActive = null;
     var codexVoiceControlError = "";
+    var refreshRetryTimer = null;
 
     function renderTarget() {
       var target = getComputerTarget();
@@ -6381,12 +6383,15 @@
           "音频回传和已有上下文工具/文字接力仍以 Codex 为目标。";
     }
 
-    function renderCodexVoice(value) {
+    function renderCodexVoice(value, connectionState) {
       latestCodexVoiceValue = value || null;
+      if (value && typeof value.keepActive === "boolean") {
+        lastKnownCodexVoiceKeepActive = value.keepActive;
+      }
       latestCodexVoiceKeepActive = value &&
-        typeof value.keepActive === "boolean"
+          typeof value.keepActive === "boolean"
         ? value.keepActive
-        : null;
+        : lastKnownCodexVoiceKeepActive;
       latestCodexVoice = value && value.status === "available"
         ? value
         : null;
@@ -6400,8 +6405,9 @@
           : "开启 Codex 语音";
         codexVoiceKeepAlive.disabled =
           typeof latestCodexVoice.keepActive !== "boolean";
-        codexVoiceKeepAlive.checked = latestCodexVoice.keepActive === true;
-        if (latestCodexVoice.keepActive === true) {
+        codexVoiceKeepAlive.checked =
+          latestCodexVoiceKeepActive === true;
+        if (latestCodexVoiceKeepActive === true) {
           codexVoiceStatus.textContent +=
             " Windows 持续运行已开启，异常关闭后会自动恢复。";
         }
@@ -6410,22 +6416,26 @@
         codexVoiceToggle.disabled = true;
         codexVoiceToggle.textContent = "Codex 语音状态不可用";
         codexVoiceKeepAlive.disabled = true;
-        codexVoiceKeepAlive.checked = false;
+        codexVoiceKeepAlive.checked =
+          latestCodexVoiceKeepActive === true;
       } else if (value && value.status === "unavailable") {
         codexVoiceStatus.textContent =
           "○ Codex 语音状态不可读取（Codex 可能尚未运行）。";
         codexVoiceToggle.disabled = true;
         codexVoiceToggle.textContent = "Codex 语音状态不可用";
         codexVoiceKeepAlive.disabled =
-          typeof value.keepActive !== "boolean";
-        codexVoiceKeepAlive.checked = value.keepActive === true;
+          typeof latestCodexVoiceKeepActive !== "boolean";
+        codexVoiceKeepAlive.checked =
+          latestCodexVoiceKeepActive === true;
       } else {
-        codexVoiceStatus.textContent =
-          "○ 当前 Windows 桥版本尚未提供 Codex 语音状态。";
+        codexVoiceStatus.textContent = connectionState === "offline"
+          ? "○ Windows 桥接器暂时离线；已保存的持续运行设置仍然有效，连接恢复后会自动继续。"
+          : "○ 暂未取得 Codex 语音状态；不会清除已保存的持续运行设置。";
         codexVoiceToggle.disabled = true;
         codexVoiceToggle.textContent = "Codex 语音状态不可用";
         codexVoiceKeepAlive.disabled = true;
-        codexVoiceKeepAlive.checked = false;
+        codexVoiceKeepAlive.checked =
+          latestCodexVoiceKeepActive === true;
       }
       if (codexVoiceControlError) {
         codexVoiceError.style.display = "";
@@ -6457,7 +6467,19 @@
         "切换目标或刷新状态不会启动应用或采音。" +
         "通话中不能切换目标；挂断只停止音频桥接，不会自动切换 Codex 语音；" +
         "上方按钮可独立控制 Codex 语音。";
-      renderCodexVoice(value.status && value.status.codexVoice);
+      renderCodexVoice(
+        value.status && value.status.codexVoice,
+        value.state
+      );
+      if (value.state === "offline" && !refreshRetryTimer) {
+        refreshRetryTimer = setTimeout(function () {
+          refreshRetryTimer = null;
+          if (root.isConnected) refresh();
+        }, 1800);
+      } else if (value.state !== "offline" && refreshRetryTimer) {
+        clearTimeout(refreshRetryTimer);
+        refreshRetryTimer = null;
+      }
       var remoteError = value.status && value.status.lastError;
       if (remoteError) {
         errorDetail.style.display = "";

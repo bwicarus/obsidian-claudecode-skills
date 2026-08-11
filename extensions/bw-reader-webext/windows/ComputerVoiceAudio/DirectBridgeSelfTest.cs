@@ -3629,6 +3629,95 @@ internal static class DirectBridgeSelfTest
             "direct-codex-voice-keepalive-persists-explicit-state",
             checks);
 
+        CodexVoiceActivitySnapshot recoveryState =
+            CodexVoiceActivitySnapshot.Available(300, 400);
+        int recoveryTransitions = 0;
+        int restartCount = 0;
+        await using DirectCodexVoiceControl recoveryControl = new(
+            () => recoveryState,
+            (active, before, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                recoveryTransitions++;
+                if (recoveryTransitions == 1)
+                {
+                    throw new DirectProtocolException(
+                        CodexVoiceActivityController.StartNotConfirmedCode,
+                        "first Codex generation failed",
+                        retryable: true);
+                }
+                recoveryState = CodexVoiceActivitySnapshot.Available(
+                    Math.Max(
+                        before.LastUsedTimeStart,
+                        before.LastUsedTimeStop) + 1,
+                    before.LastUsedTimeStop);
+                return Task.FromResult(recoveryState);
+            },
+            recoverStartFailureAsync: cancellationToken =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                restartCount++;
+                return Task.CompletedTask;
+            });
+        DirectCodexVoiceSetResult recovered =
+            await recoveryControl.SetActiveAsync(
+                active: true,
+                CancellationToken.None).ConfigureAwait(false);
+        Require(
+            recovered.State.Active == true
+            && recovered.ShortcutSent
+            && recoveryTransitions == 2
+            && restartCount == 1,
+            "direct-codex-voice-restarts-once-before-fresh-start",
+            checks);
+
+        string failedKeepActivePath = System.IO.Path.Combine(
+            installationRoot,
+            "runtime",
+            "codex-voice-keepalive-failed.json");
+        int failedTransitions = 0;
+        int failedRestarts = 0;
+        await using DirectCodexVoiceControl failedRecoveryControl = new(
+            () => CodexVoiceActivitySnapshot.Available(500, 600),
+            (active, before, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                failedTransitions++;
+                throw new DirectProtocolException(
+                    CodexVoiceActivityController.StartNotConfirmedCode,
+                    "Codex generation still failed",
+                    retryable: true);
+            },
+            keepActivePath: failedKeepActivePath,
+            keepActivePollInterval: TimeSpan.FromSeconds(1),
+            recoverStartFailureAsync: cancellationToken =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                failedRestarts++;
+                return Task.CompletedTask;
+            });
+        try
+        {
+            _ = await failedRecoveryControl.SetKeepActiveAsync(
+                enabled: true,
+                CancellationToken.None).ConfigureAwait(false);
+            throw new InvalidOperationException(
+                "failed recovery unexpectedly succeeded");
+        }
+        catch (DirectProtocolException exception) when (
+            exception.Code
+                == CodexVoiceActivityController.StartNotConfirmedCode)
+        {
+        }
+        await Task.Delay(TimeSpan.FromMilliseconds(1200))
+            .ConfigureAwait(false);
+        Require(
+            failedRecoveryControl.KeepActive
+            && failedTransitions == 2
+            && failedRestarts == 1,
+            "direct-codex-voice-failed-restart-does-not-loop",
+            checks);
+
         JsonElement invalidType = await SendAsync(
             session,
             new
@@ -8995,6 +9084,8 @@ internal static class DirectBridgeSelfTest
 
         internal int WaitReadyCount { get; private set; }
 
+        internal int RestartCount { get; private set; }
+
         internal bool ThrowReadyTimeout { get; init; }
 
         internal bool WaitUntilCanceled { get; init; }
@@ -9055,6 +9146,34 @@ internal static class DirectBridgeSelfTest
                 133700000000000000,
                 appKind,
                 appUserModelId);
+        }
+
+        public Task<DirectAppTarget> RestartAsync(
+            string appKind,
+            string appUserModelId,
+            DirectAppTarget expected,
+            TimeSpan timeout,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            RestartCount++;
+            if (
+                appKind != DirectAppTargets.CodexDesktop
+                || appUserModelId
+                    != DirectBridgeContract.CodexAppUserModelId
+                || expected.AppKind != appKind
+                || expected.AppUserModelId != appUserModelId
+                || timeout <= TimeSpan.Zero
+            )
+            {
+                throw new InvalidOperationException(
+                    "fake received an unsafe restart target");
+            }
+            return Task.FromResult(new DirectAppTarget(
+                expected.RootProcessId + 1,
+                expected.RootProcessStartFileTimeUtc + 1,
+                appKind,
+                appUserModelId));
         }
     }
 
