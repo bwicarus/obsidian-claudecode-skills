@@ -4052,3 +4052,8 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **根因/改动**：1.1.30 实际收到当前 GA 的 `conversation.item.added/done`，Swift 却只等待旧 `created`，成功图像被误报为确认超时；现发送独立 `event_id/item.id`，按本次图片精确接受新旧回执并关联错误。
 - **验证/发布**：专项与 Reader Node 全量、发布管线通过；Windows Python 仍只有既有 `fcntl` 基线。提交 `113883ec`，Actions `31472374708` 上传 TestFlight `1.1.31 (213)`，`31472948994` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
 - **未做/下一步**：未部署 Pi 或浏览器正式渠道；用户更新后在 App 普通电话调用 `see_ink/see_page`，应出现“原生直投完成”且 Realtime 能实际描述合成图。
+
+## Codex：修复 Realtime 图像条目 ID 超长并发布 0.2.92 / 1.1.32（2026-08-11 JST）
+- **根因/改动**：原生直投把 14 字符前缀与 32 位 UUID 拼成 46 字符 `item.id`，超过 OpenAI 的 32 字符上限；现将 `event_id/item.id` 都固定为 4 字符类型前缀加 28 位随机值。
+- **验证/发布**：专项 18 项、Reader Node 全量 981 项与发布管线通过；Windows 全量 Python/handoff 仍为既有平台与 fixture 基线。提交 `e7e58735`，Actions `31473624439` 上传 TestFlight `1.1.32 (216)`，`31474158807` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
+- **未做/下一步**：未部署 Pi 或浏览器正式渠道；用户更新后在 App 普通电话调用 `see_ink/see_page`，应不再出现 `string_above_max_length`，并由模型实际描述合成图。
