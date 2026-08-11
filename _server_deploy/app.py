@@ -1619,6 +1619,9 @@ register_computer_voice(app, root=DATA_DIR)
 from pdf_reader import register_pdf_reader
 register_pdf_reader(app)
 
+from reader_context_public import register_reader_context_public
+register_reader_context_public(app)
+
 # 健身页(/private/fitness)
 from fitness import register as register_fitness
 register_fitness(app)
