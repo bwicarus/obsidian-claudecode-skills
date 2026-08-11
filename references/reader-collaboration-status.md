@@ -4041,3 +4041,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **接口/安全**：共享前端已接 `scope=viewport/region/page`，空笔迹仍返回有效图；能力前缀、同书校验、JPEG 上限与 `X-BW-Reader-Error` 保持 fail closed，令牌不入日志。
 - **验证/发布**：Reader 合同全量 979 项与发布管线通过；提交 `c7f0cfc4`，Actions `31466443968` 上传 TestFlight `1.1.29 (205)`，`31466889652` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
 - **未做/下一步**：本轮 App 前端随 IPA 构建，未部署 Pi；用户安装后分别验收屏内笔迹（含卡片）、翻页后的屏外 PDF 笔迹（无卡片层）及失败日志的具体错误码。
+
+## Claude / Codex：App 原生合成图直投已发布 0.2.90 / 1.1.30（2026-08-11 JST）
+- **根因/改动**：1.1.29 已生成原生合成图，却仍把约 800KB JPEG 经 HTTP/base64/JS/WKWebView 桥送回 Swift 后才进 Realtime；现 `scope=viewport/region/page&deliver=realtime` 在原生层完成合成、本地保存与 Realtime 注入，网页只收小型完成收据。
+- **兼容/安全**：直投 POST 只允许精确能力前缀路由、可信同书主框和三个视觉工具，正文只含 call 与进程内 capability 且不入日志；Safari/PWA 与非直投调用保留二进制 GET、网页合成和旧桥回退。
+- **验证/发布**：专项 24 项、Reader Node 全量 981 项与发布管线通过；Windows Python 门禁仍仅有既有 Linux `fcntl`/机器环境基线，macOS 模拟器、签名归档、三目标与 IPA 校验通过；提交 `4019287f`，Actions `31468766372` 上传 TestFlight `1.1.30 (210)`，`31469324720` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
+- **未做/下一步**：未部署 Pi 或浏览器正式渠道；安装后在 App 普通电话分别调用 `see_ink` 与 `see_page`，调试日志应出现“原生直投完成”，不再停在“图已就绪…送往原生通道”。
