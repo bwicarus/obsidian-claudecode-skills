@@ -63,7 +63,9 @@ test("the loopback route is capability-prefixed, trusted-shell-only, and diagnos
     SERVER.indexOf("private func serveNativePageImage"),
   );
   assert.match(handler, /request\.method == \.GET/);
-  assert.match(handler, /trustedResourceSurface\([\s\S]*Referer/);
+  assert.match(handler, /request\.headers\[HTTPHeader\("Referer"\)\]/);
+  assert.match(handler, /trustedResourceURL\(referer: referer\)/);
+  assert.match(handler, /trustedResourceSurface\(referer: referer\)/);
   assert.match(handler, /scope == "viewport"/);
   assert.match(handler, /scope == "region"/);
   for (const key of ["x", "y", "w", "h"]) {
@@ -76,14 +78,48 @@ test("the loopback route is capability-prefixed, trusted-shell-only, and diagnos
   assert.match(handler, /nativeVisualErrorResponse/);
 });
 
+test("offscreen PDF capture composes PDFKit pixels with authoritative page ink", () => {
+  const broker = CAPTURE.slice(
+    CAPTURE.indexOf("@MainActor\nfinal class ReaderNativeVisualCaptureBroker"),
+    CAPTURE.indexOf("private struct NativeReaderJavaScriptSnapshot"),
+  );
+  const handler = SERVER.slice(
+    SERVER.indexOf("private func serveNativeVisualCapture"),
+    SERVER.indexOf("private func serveNativePageImage"),
+  );
+  assert.match(handler, /scope == "page"/);
+  assert.match(handler, /trustedSurface == \.pdf/);
+  assert.match(handler, /pageRenderer\.jpegData\(/);
+  assert.match(handler, /visualCaptureBroker\.capturePDFPage\(/);
+  assert.match(handler, /"X-BW-Visual-Capture"\): "native-pdf-page\/1"/);
+  assert.match(handler, /"X-BW-Visual-Ink"/);
+  assert.match(handler, /strokeCount > 0 \? "present" : "none"/);
+
+  assert.match(broker, /func capturePDFPage\(/);
+  assert.match(broker, /fetch\([\s\S]*"\/pdf\/api\/ink\?file="/);
+  assert.match(broker, /window\._ink && window\._ink\.dirty/);
+  assert.match(broker, /baseImage\.draw\(in: pageBounds\)/);
+  assert.match(broker, /Self\.drawInk\(strokes/);
+  assert.match(broker, /inkStrokeCount: strokes\.count/);
+  assert.doesNotMatch(broker, /capabilityToken/);
+});
+
 test("every native visual early exit has a stable visible error code", () => {
   for (const code of [
     "BW_NATIVE_VISUAL_INVALID_REGION",
+    "BW_NATIVE_VISUAL_INVALID_PAGE",
+    "BW_NATIVE_VISUAL_PAGE_SCOPE_UNSUPPORTED",
+    "BW_NATIVE_VISUAL_BOOK_UNAVAILABLE",
     "BW_NATIVE_VISUAL_PAGE_UNAVAILABLE",
     "BW_NATIVE_VISUAL_PENCIL_OVERLAY_UNAVAILABLE",
     "BW_NATIVE_VISUAL_HIERARCHY_UNAVAILABLE",
     "BW_NATIVE_VISUAL_EMPTY_VIEWPORT",
     "BW_NATIVE_VISUAL_RENDER_FAILED",
+    "BW_NATIVE_VISUAL_PDF_RENDER_FAILED",
+    "BW_NATIVE_VISUAL_INK_UNAVAILABLE",
+    "BW_NATIVE_VISUAL_INK_INVALID",
+    "BW_NATIVE_VISUAL_INK_TOO_LARGE",
+    "BW_NATIVE_VISUAL_PAGE_COMPOSITE_FAILED",
     "BW_NATIVE_VISUAL_JPEG_FAILED",
     "BW_NATIVE_VISUAL_IMAGE_TOO_SMALL",
     "BW_NATIVE_VISUAL_IMAGE_TOO_LARGE",

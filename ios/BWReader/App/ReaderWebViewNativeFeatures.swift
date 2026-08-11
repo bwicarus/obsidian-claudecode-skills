@@ -33,15 +33,69 @@ struct ReaderNativeVisualCaptureResult: Sendable {
     let jpegData: Data
     let pixelWidth: Int
     let pixelHeight: Int
+    let inkStrokeCount: Int?
+
+    init(
+        jpegData: Data,
+        pixelWidth: Int,
+        pixelHeight: Int,
+        inkStrokeCount: Int? = nil
+    ) {
+        self.jpegData = jpegData
+        self.pixelWidth = pixelWidth
+        self.pixelHeight = pixelHeight
+        self.inkStrokeCount = inkStrokeCount
+    }
+}
+
+private struct ReaderNativeVisualInkReply: Decodable {
+    let ok: Bool
+    let error: String?
+    let byteCount: Int?
+    let strokes: [ReaderNativeVisualInkStroke]?
+}
+
+private struct ReaderNativeVisualInkStroke: Decodable {
+    let type: String?
+    let color: String?
+    let width: Double?
+    let points: [[Double]]?
+    let legacyPoints: [[Double]]?
+    let id: String?
+    let createdAtEpochMs: Double?
+    let ordinal: Int?
+
+    enum CodingKeys: String, CodingKey {
+        case type = "t"
+        case color = "c"
+        case width = "w"
+        case points = "p"
+        case legacyPoints = "pts"
+        case id
+        case createdAtEpochMs
+        case ordinal
+    }
+
+    var canonicalPoints: [[Double]] {
+        points ?? legacyPoints ?? []
+    }
 }
 
 enum ReaderNativeVisualCaptureError: LocalizedError, Sendable {
     case invalidRegion
+    case invalidPage
+    case pageScopeUnsupported
+    case bookUnavailable
     case pageUnavailable
     case pencilOverlayUnavailable
     case hierarchyUnavailable
     case emptyViewport
     case hierarchyRenderFailed
+    case pdfPageRenderFailed
+    case inkStateUnavailable(String)
+    case inkPayloadInvalid
+    case inkPayloadTooLarge(Int)
+    case pageCompositeFailed
     case jpegEncodingFailed
     case imageTooSmall(Int)
     case imageTooLarge(Int)
@@ -50,6 +104,12 @@ enum ReaderNativeVisualCaptureError: LocalizedError, Sendable {
         switch self {
         case .invalidRegion:
             return "BW_NATIVE_VISUAL_INVALID_REGION"
+        case .invalidPage:
+            return "BW_NATIVE_VISUAL_INVALID_PAGE"
+        case .pageScopeUnsupported:
+            return "BW_NATIVE_VISUAL_PAGE_SCOPE_UNSUPPORTED"
+        case .bookUnavailable:
+            return "BW_NATIVE_VISUAL_BOOK_UNAVAILABLE"
         case .pageUnavailable:
             return "BW_NATIVE_VISUAL_PAGE_UNAVAILABLE"
         case .pencilOverlayUnavailable:
@@ -60,6 +120,16 @@ enum ReaderNativeVisualCaptureError: LocalizedError, Sendable {
             return "BW_NATIVE_VISUAL_EMPTY_VIEWPORT"
         case .hierarchyRenderFailed:
             return "BW_NATIVE_VISUAL_RENDER_FAILED"
+        case .pdfPageRenderFailed:
+            return "BW_NATIVE_VISUAL_PDF_RENDER_FAILED"
+        case .inkStateUnavailable:
+            return "BW_NATIVE_VISUAL_INK_UNAVAILABLE"
+        case .inkPayloadInvalid:
+            return "BW_NATIVE_VISUAL_INK_INVALID"
+        case .inkPayloadTooLarge:
+            return "BW_NATIVE_VISUAL_INK_TOO_LARGE"
+        case .pageCompositeFailed:
+            return "BW_NATIVE_VISUAL_PAGE_COMPOSITE_FAILED"
         case .jpegEncodingFailed:
             return "BW_NATIVE_VISUAL_JPEG_FAILED"
         case .imageTooSmall:
@@ -73,6 +143,12 @@ enum ReaderNativeVisualCaptureError: LocalizedError, Sendable {
         switch self {
         case .invalidRegion:
             return "原生合成图区域无效"
+        case .invalidPage:
+            return "原生合成图页码无效"
+        case .pageScopeUnsupported:
+            return "原生离屏合成目前只支持 PDF"
+        case .bookUnavailable:
+            return "原生离屏合成：当前本机 PDF 不可用"
         case .pageUnavailable:
             return "原生合成图：阅读器页面当前不在屏幕上"
         case .pencilOverlayUnavailable:
@@ -83,6 +159,16 @@ enum ReaderNativeVisualCaptureError: LocalizedError, Sendable {
             return "原生合成图：当前阅读视口为空"
         case .hierarchyRenderFailed:
             return "原生合成图：Apple 视图层级渲染失败"
+        case .pdfPageRenderFailed:
+            return "原生离屏合成：PDFKit 无法渲染目标页"
+        case .inkStateUnavailable(let reason):
+            return "原生离屏合成：本机笔迹状态不可用（\(reason)）"
+        case .inkPayloadInvalid:
+            return "原生离屏合成：本机笔迹数据无效"
+        case .inkPayloadTooLarge(let byteCount):
+            return "原生离屏合成：本机笔迹数据过大（\(byteCount) 字节）"
+        case .pageCompositeFailed:
+            return "原生离屏合成：PDF 与笔迹叠加失败"
         case .jpegEncodingFailed:
             return "原生合成图：JPEG 编码失败"
         case .imageTooSmall(let byteCount):
@@ -107,6 +193,9 @@ final class ReaderNativeVisualCaptureBroker {
     private static let minimumJPEGBytes = 3_000
     private static let compressionQualities: [CGFloat] = [0.85, 0.70, 0.50]
     private static let fallbackLongEdges: [CGFloat] = [1_280, 1_024, 800]
+    private static let maximumInkPayloadBytes = 8 * 1_024 * 1_024
+    private static let maximumInkStrokeCount = 4_096
+    private static let maximumInkPointCount = 131_072
 
     private weak var webView: WKWebView?
     private weak var pencilCanvas: UIView?
@@ -181,11 +270,489 @@ final class ReaderNativeVisualCaptureBroker {
         return try Self.encode(image)
     }
 
+    /// Reconstructs an arbitrary PDF page without scrolling the live reader.
+    /// PDFKit provides the page pixels; the trusted reader page provides its
+    /// authoritative persisted ink JSON because the PencilKit canvas is only
+    /// an input buffer and intentionally drops strokes after web persistence.
+    func capturePDFPage(
+        baseJPEGData: Data,
+        pageNumber: Int,
+        region: ReaderNativeVisualCaptureRegion?,
+        expectedBookID: String,
+        expectedDocumentURL: URL
+    ) async throws -> ReaderNativeVisualCaptureResult {
+        guard pageNumber >= 1 else {
+            throw ReaderNativeVisualCaptureError.invalidPage
+        }
+        let strokes = try await loadPDFPageInk(
+            pageNumber: pageNumber,
+            expectedBookID: expectedBookID,
+            expectedDocumentURL: expectedDocumentURL
+        )
+        guard let baseImage = UIImage(data: baseJPEGData),
+              let baseCGImage = baseImage.cgImage else {
+            throw ReaderNativeVisualCaptureError.pdfPageRenderFailed
+        }
+        let pageBounds = CGRect(
+            x: 0,
+            y: 0,
+            width: CGFloat(baseCGImage.width),
+            height: CGFloat(baseCGImage.height)
+        )
+        let cropBounds = try Self.pageCaptureBounds(
+            pageBounds: pageBounds,
+            region: region
+        ).integral.intersection(pageBounds)
+        guard cropBounds.width >= 8, cropBounds.height >= 8 else {
+            throw ReaderNativeVisualCaptureError.invalidRegion
+        }
+
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        let image = UIGraphicsImageRenderer(
+            size: cropBounds.size,
+            format: format
+        ).image { rendererContext in
+            let context = rendererContext.cgContext
+            context.setFillColor(UIColor.white.cgColor)
+            context.fill(CGRect(origin: .zero, size: cropBounds.size))
+            context.translateBy(x: -cropBounds.minX, y: -cropBounds.minY)
+            baseImage.draw(in: pageBounds)
+            Self.drawInk(strokes, in: context, pageBounds: pageBounds)
+        }
+        guard image.cgImage != nil else {
+            throw ReaderNativeVisualCaptureError.pageCompositeFailed
+        }
+        let encoded = try Self.encode(image)
+        return ReaderNativeVisualCaptureResult(
+            jpegData: encoded.jpegData,
+            pixelWidth: encoded.pixelWidth,
+            pixelHeight: encoded.pixelHeight,
+            inkStrokeCount: strokes.count
+        )
+    }
+
+    private func loadPDFPageInk(
+        pageNumber: Int,
+        expectedBookID: String,
+        expectedDocumentURL: URL
+    ) async throws -> [ReaderNativeVisualInkStroke] {
+        guard let webView,
+              Self.sameReaderDocument(
+                webView.url,
+                expectedDocumentURL,
+                bookID: expectedBookID
+              ) else {
+            throw ReaderNativeVisualCaptureError.inkStateUnavailable(
+                "document-mismatch"
+            )
+        }
+
+        let raw: Any?
+        do {
+            raw = try await webView.callAsyncJavaScript(
+                """
+                const fail = (error, byteCount) => JSON.stringify({
+                  ok: false,
+                  error,
+                  byteCount: Number.isSafeInteger(byteCount) ? byteCount : null
+                });
+                if (window.top !== window) return fail("sub-frame");
+                if (window.__BW_NATIVE_LOCAL_READER__ !== true) {
+                  return fail("local-runtime-disabled");
+                }
+                if (String(window.__BW_NATIVE_LOCAL_BOOK_ID__ || "") !== expectedBookID) {
+                  return fail("book-mismatch");
+                }
+                const file = String(window.__PDF_CFG?.file_rel || "");
+                if (file !== "localbook:" + expectedBookID) {
+                  return fail("file-mismatch");
+                }
+                try {
+                  const response = await fetch(
+                    "/pdf/api/ink?file=" + encodeURIComponent(file),
+                    { cache: "no-store" }
+                  );
+                  if (!response || !response.ok) {
+                    return fail("ink-http-" + String(response?.status || 0));
+                  }
+                  const value = await response.json();
+                  if (!value || value.ok !== true || !value.pages ||
+                      typeof value.pages !== "object" || Array.isArray(value.pages)) {
+                    return fail("ink-response-invalid");
+                  }
+                  const key = String(pageNumber);
+                  const persisted = Object.prototype.hasOwnProperty.call(value.pages, key)
+                    ? value.pages[key] : [];
+                  const live = window._ink && window._ink.byPage;
+                  const dirty = window._ink && window._ink.dirty &&
+                    window._ink.dirty[pageNumber];
+                  const strokes = dirty && live && Array.isArray(live[pageNumber])
+                    ? live[pageNumber] : persisted;
+                  if (!Array.isArray(strokes)) return fail("ink-page-invalid");
+                  if (strokes.length > 4096) return fail("ink-too-large");
+                  let points = 0;
+                  for (const stroke of strokes) {
+                    if (!stroke || typeof stroke !== "object" || Array.isArray(stroke)) {
+                      return fail("ink-page-invalid");
+                    }
+                    const list = Array.isArray(stroke.p) ? stroke.p : stroke.pts;
+                    if (!Array.isArray(list) || list.length > 4096) {
+                      return fail("ink-page-invalid");
+                    }
+                    points += list.length;
+                    if (points > 131072) return fail("ink-too-large");
+                  }
+                  const payload = JSON.stringify({ ok: true, strokes });
+                  const byteCount = typeof TextEncoder === "function"
+                    ? new TextEncoder().encode(payload).byteLength : payload.length * 2;
+                  if (byteCount > 8388608) return fail("ink-too-large", byteCount);
+                  return payload;
+                } catch (_) {
+                  return fail("ink-fetch-failed");
+                }
+                """,
+                arguments: [
+                    "pageNumber": pageNumber,
+                    "expectedBookID": expectedBookID,
+                ],
+                in: nil,
+                contentWorld: .page
+            )
+        } catch {
+            throw ReaderNativeVisualCaptureError.inkStateUnavailable(
+                "bridge-call-failed"
+            )
+        }
+        guard Self.sameReaderDocument(
+            webView.url,
+            expectedDocumentURL,
+            bookID: expectedBookID
+        ) else {
+            throw ReaderNativeVisualCaptureError.inkStateUnavailable(
+                "document-changed"
+            )
+        }
+        guard let json = raw as? String,
+              let data = json.data(using: .utf8) else {
+            throw ReaderNativeVisualCaptureError.inkPayloadInvalid
+        }
+        guard data.count <= Self.maximumInkPayloadBytes else {
+            throw ReaderNativeVisualCaptureError.inkPayloadTooLarge(data.count)
+        }
+        let reply: ReaderNativeVisualInkReply
+        do {
+            reply = try JSONDecoder().decode(
+                ReaderNativeVisualInkReply.self,
+                from: data
+            )
+        } catch {
+            throw ReaderNativeVisualCaptureError.inkPayloadInvalid
+        }
+        guard reply.ok else {
+            if reply.error == "ink-too-large" {
+                throw ReaderNativeVisualCaptureError.inkPayloadTooLarge(
+                    reply.byteCount ?? Self.maximumInkPayloadBytes + 1
+                )
+            }
+            throw ReaderNativeVisualCaptureError.inkStateUnavailable(
+                Self.safeInkFailure(reply.error)
+            )
+        }
+        let strokes = reply.strokes ?? []
+        guard strokes.count <= Self.maximumInkStrokeCount else {
+            throw ReaderNativeVisualCaptureError.inkPayloadTooLarge(data.count)
+        }
+        var pointCount = 0
+        for stroke in strokes {
+            let points = stroke.canonicalPoints
+            guard !points.isEmpty, points.count <= 4_096 else {
+                throw ReaderNativeVisualCaptureError.inkPayloadInvalid
+            }
+            pointCount += points.count
+            guard pointCount <= Self.maximumInkPointCount,
+                  points.allSatisfy({ point in
+                    point.count >= 2
+                        && point[0].isFinite
+                        && point[1].isFinite
+                  }) else {
+                throw ReaderNativeVisualCaptureError.inkPayloadInvalid
+            }
+        }
+        return strokes
+    }
+
+    private static func sameReaderDocument(
+        _ current: URL?,
+        _ expected: URL,
+        bookID: String
+    ) -> Bool {
+        guard let current,
+              current.scheme?.lowercased() == expected.scheme?.lowercased(),
+              current.host?.lowercased() == expected.host?.lowercased(),
+              current.port == expected.port,
+              current.path == expected.path else {
+            return false
+        }
+        func bookValues(_ url: URL) -> [String] {
+            URLComponents(url: url, resolvingAgainstBaseURL: false)?
+                .queryItems?
+                .filter { $0.name == "book" }
+                .compactMap(\.value) ?? []
+        }
+        return bookValues(current) == [bookID]
+            && bookValues(expected) == [bookID]
+    }
+
+    private static func safeInkFailure(_ value: String?) -> String {
+        let known: Set<String> = [
+            "sub-frame", "local-runtime-disabled", "book-mismatch",
+            "file-mismatch", "ink-http-0", "ink-http-400", "ink-http-404",
+            "ink-http-409", "ink-http-500", "ink-response-invalid",
+            "ink-page-invalid", "ink-fetch-failed",
+        ]
+        guard let value, known.contains(value) else { return "unknown" }
+        return value
+    }
+
+    private static func pageCaptureBounds(
+        pageBounds: CGRect,
+        region: ReaderNativeVisualCaptureRegion?
+    ) throws -> CGRect {
+        guard let region else { return pageBounds }
+        let unit = try validatedUnitRegion(region)
+        return CGRect(
+            x: pageBounds.minX + unit.minX * pageBounds.width,
+            y: pageBounds.minY + unit.minY * pageBounds.height,
+            width: unit.width * pageBounds.width,
+            height: unit.height * pageBounds.height
+        )
+    }
+
+    private static func drawInk(
+        _ strokes: [ReaderNativeVisualInkStroke],
+        in context: CGContext,
+        pageBounds: CGRect
+    ) {
+        let regionOrdinals = regionOrdinalMap(strokes)
+        for (index, stroke) in strokes.enumerated() {
+            let cap = stroke.type == "region" ? 512 : 4_096
+            let points = stroke.canonicalPoints.prefix(cap).map { raw in
+                CGPoint(
+                    x: pageBounds.minX
+                        + CGFloat(min(1, max(0, raw[0]))) * pageBounds.width,
+                    y: pageBounds.minY
+                        + CGFloat(min(1, max(0, raw[1]))) * pageBounds.height
+                )
+            }
+            guard let first = points.first else { continue }
+            let type = stroke.type ?? "pen"
+            let widthValue = stroke.width.flatMap { $0.isFinite ? $0 : nil }
+            let lineWidth = CGFloat(max(0.6, min(20, widthValue ?? 2.5)))
+            let color = UIColor(bwHex: normalizedInkColor(stroke.color))
+
+            context.saveGState()
+            context.setStrokeColor(color.cgColor)
+            context.setLineWidth(lineWidth)
+            context.setLineCap(.round)
+            context.setLineJoin(.round)
+            switch type {
+            case "region" where points.count >= 3:
+                let path = CGMutablePath()
+                path.move(to: first)
+                for point in points.dropFirst() { path.addLine(to: point) }
+                path.closeSubpath()
+                context.addPath(path)
+                context.setFillColor(color.withAlphaComponent(0.18).cgColor)
+                context.drawPath(using: .eoFill)
+                context.addPath(path)
+                context.setStrokeColor(color.withAlphaComponent(0.92).cgColor)
+                context.strokePath()
+                drawRegionLabel(
+                    stroke,
+                    points: points,
+                    ordinal: regionOrdinals[index] ?? 0,
+                    pageBounds: pageBounds
+                )
+            case "pen":
+                context.beginPath()
+                context.move(to: first)
+                if points.count == 1 {
+                    context.addLine(to: CGPoint(x: first.x + 0.1, y: first.y))
+                } else if let last = points.last {
+                    if points.count > 2 {
+                        for offset in 1..<(points.count - 1) {
+                            let control = points[offset]
+                            let next = points[offset + 1]
+                            context.addQuadCurve(
+                                to: CGPoint(
+                                    x: (control.x + next.x) / 2,
+                                    y: (control.y + next.y) / 2
+                                ),
+                                control: control
+                            )
+                        }
+                    }
+                    context.addLine(to: last)
+                }
+                context.strokePath()
+            case "line" where points.count >= 2:
+                context.beginPath()
+                context.move(to: first)
+                context.addLine(to: points[1])
+                context.strokePath()
+            case "arrow" where points.count >= 2:
+                let end = points[1]
+                context.beginPath()
+                context.move(to: first)
+                context.addLine(to: end)
+                context.strokePath()
+                let angle = atan2(end.y - first.y, end.x - first.x)
+                let head = max(9, lineWidth * 3.5)
+                context.beginPath()
+                context.move(to: end)
+                context.addLine(to: CGPoint(
+                    x: end.x - head * cos(angle - 0.42),
+                    y: end.y - head * sin(angle - 0.42)
+                ))
+                context.move(to: end)
+                context.addLine(to: CGPoint(
+                    x: end.x - head * cos(angle + 0.42),
+                    y: end.y - head * sin(angle + 0.42)
+                ))
+                context.strokePath()
+            case "rect" where points.count >= 2:
+                context.stroke(CGRect(
+                    x: min(first.x, points[1].x),
+                    y: min(first.y, points[1].y),
+                    width: abs(points[1].x - first.x),
+                    height: abs(points[1].y - first.y)
+                ))
+            default:
+                break
+            }
+            context.restoreGState()
+        }
+    }
+
+    private static func normalizedInkColor(_ value: String?) -> String {
+        guard let value, value.count == 7, value.first == "#",
+              value.dropFirst().allSatisfy(\.isHexDigit) else {
+            return "#e74c3c"
+        }
+        return value
+    }
+
+    private static func regionOrdinalMap(
+        _ strokes: [ReaderNativeVisualInkStroke]
+    ) -> [Int: Int] {
+        let indices = strokes.indices.filter { strokes[$0].type == "region" }
+            .sorted { left, right in
+                let lhs = strokes[left]
+                let rhs = strokes[right]
+                let timeOrder = (lhs.createdAtEpochMs ?? 0)
+                    - (rhs.createdAtEpochMs ?? 0)
+                if timeOrder != 0 { return timeOrder < 0 }
+                return (lhs.id ?? "") < (rhs.id ?? "")
+            }
+        var result = [Int: Int]()
+        var used = Set<Int>()
+        var missing = [Int]()
+        var maximum = 0
+        for index in indices {
+            let ordinal = strokes[index].ordinal ?? 0
+            if ordinal <= 0 || used.contains(ordinal) {
+                missing.append(index)
+                continue
+            }
+            result[index] = ordinal
+            used.insert(ordinal)
+            maximum = max(maximum, ordinal)
+        }
+        for index in missing {
+            repeat { maximum += 1 } while used.contains(maximum)
+            result[index] = maximum
+            used.insert(maximum)
+        }
+        return result
+    }
+
+    private static func drawRegionLabel(
+        _ stroke: ReaderNativeVisualInkStroke,
+        points: [CGPoint],
+        ordinal: Int,
+        pageBounds: CGRect
+    ) {
+        guard let first = points.first else { return }
+        let minimum = points.dropFirst().reduce(first) { current, point in
+            CGPoint(x: min(current.x, point.x), y: min(current.y, point.y))
+        }
+        let timestamp = stroke.createdAtEpochMs ?? 0
+        let timeLabel: String
+        if timestamp.isFinite, timestamp > 0 {
+            let components = Calendar.current.dateComponents(
+                [.hour, .minute],
+                from: Date(timeIntervalSince1970: timestamp / 1_000)
+            )
+            timeLabel = String(
+                format: "%02d:%02d",
+                components.hour ?? 0,
+                components.minute ?? 0
+            )
+        } else {
+            timeLabel = "--:--"
+        }
+        let label = "#\(ordinal > 0 ? String(ordinal) : "?") \(timeLabel)" as NSString
+        let font = UIFont.systemFont(ofSize: 11, weight: .semibold)
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: font,
+            .foregroundColor: UIColor.white,
+        ]
+        let padding: CGFloat = 3
+        let textSize = label.size(withAttributes: attributes)
+        let labelSize = CGSize(
+            width: textSize.width + padding * 2,
+            height: textSize.height + padding * 2
+        )
+        let origin = CGPoint(
+            x: max(
+                pageBounds.minX,
+                min(pageBounds.maxX - labelSize.width, minimum.x)
+            ),
+            y: max(
+                pageBounds.minY,
+                min(
+                    pageBounds.maxY - labelSize.height,
+                    minimum.y - labelSize.height - 2
+                )
+            )
+        )
+        UIColor.black.withAlphaComponent(0.82).setFill()
+        UIRectFill(CGRect(origin: origin, size: labelSize))
+        label.draw(
+            at: CGPoint(x: origin.x + padding, y: origin.y + padding),
+            withAttributes: attributes
+        )
+    }
+
     private static func captureBounds(
         viewport: CGRect,
         region: ReaderNativeVisualCaptureRegion?
     ) throws -> CGRect {
         guard let region else { return viewport }
+        let unit = try validatedUnitRegion(region)
+        return CGRect(
+            x: viewport.minX + unit.minX * viewport.width,
+            y: viewport.minY + unit.minY * viewport.height,
+            width: unit.width * viewport.width,
+            height: unit.height * viewport.height
+        ).intersection(viewport)
+    }
+
+    private static func validatedUnitRegion(
+        _ region: ReaderNativeVisualCaptureRegion
+    ) throws -> CGRect {
         let values = [region.x, region.y, region.width, region.height]
         guard values.allSatisfy(\.isFinite),
               region.width > 0, region.height > 0 else {
@@ -200,12 +767,7 @@ final class ReaderNativeVisualCaptureBroker {
         guard !unit.isNull, unit.width > 0, unit.height > 0 else {
             throw ReaderNativeVisualCaptureError.invalidRegion
         }
-        return CGRect(
-            x: viewport.minX + unit.minX * viewport.width,
-            y: viewport.minY + unit.minY * viewport.height,
-            width: unit.width * viewport.width,
-            height: unit.height * viewport.height
-        ).intersection(viewport)
+        return unit
     }
 
     private static func lowestCommonAncestor(

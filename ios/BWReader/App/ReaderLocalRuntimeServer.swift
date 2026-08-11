@@ -385,6 +385,16 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
     private func trustedResourceSurface(
         referer: String?
     ) -> ReaderNativeInterfaceSurface? {
+        guard let url = trustedResourceURL(referer: referer) else {
+            return nil
+        }
+        let prefix = "/r/\(capabilityToken)/shells/"
+        if url.path == "\(prefix)pdf.html" { return .pdf }
+        if url.path == "\(prefix)epub.html" { return .epub }
+        return nil
+    }
+
+    private func trustedResourceURL(referer: String?) -> URL? {
         guard let referer, referer.utf8.count <= 4_096,
               let url = URL(string: referer),
               url.scheme?.lowercased() == "http",
@@ -395,9 +405,11 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
             return nil
         }
         let prefix = "/r/\(capabilityToken)/shells/"
-        if url.path == "\(prefix)pdf.html" { return .pdf }
-        if url.path == "\(prefix)epub.html" { return .epub }
-        return nil
+        guard url.path == "\(prefix)pdf.html"
+                || url.path == "\(prefix)epub.html" else {
+            return nil
+        }
+        return url
     }
 
     private static func isDirectPiResourcePath(_ path: String) -> Bool {
@@ -484,9 +496,9 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                 headers: [HTTPHeader("Allow"): "GET"]
             )
         }
-        guard trustedResourceSurface(
-            referer: request.headers[HTTPHeader("Referer")]
-        ) != nil else {
+        let referer = request.headers[HTTPHeader("Referer")]
+        guard let trustedDocumentURL = trustedResourceURL(referer: referer),
+              let trustedSurface = trustedResourceSurface(referer: referer) else {
             return response(
                 status: .forbidden,
                 text: "native visual capture requires a trusted reader shell",
@@ -520,6 +532,48 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                 width: width,
                 height: height
             )
+        } else if scope == "page" {
+            guard trustedSurface == .pdf else {
+                return nativeVisualErrorResponse(
+                    .pageScopeUnsupported,
+                    status: .badRequest
+                )
+            }
+            guard let pageNumber = Int(request.query["page"] ?? ""),
+                  pageNumber >= 1 else {
+                return nativeVisualErrorResponse(
+                    .invalidPage,
+                    status: .badRequest
+                )
+            }
+            let cropValues = ["x", "y", "w", "h"].map {
+                request.query[$0]
+            }
+            let pageRegion: ReaderNativeVisualCaptureRegion?
+            if cropValues.allSatisfy({ $0 == nil }) {
+                pageRegion = nil
+            } else if let x = Double(request.query["x"] ?? ""),
+                      let y = Double(request.query["y"] ?? ""),
+                      let width = Double(request.query["w"] ?? ""),
+                      let height = Double(request.query["h"] ?? "") {
+                pageRegion = ReaderNativeVisualCaptureRegion(
+                    x: x,
+                    y: y,
+                    width: width,
+                    height: height
+                )
+            } else {
+                return nativeVisualErrorResponse(
+                    .invalidRegion,
+                    status: .badRequest
+                )
+            }
+            return await serveNativePDFPageVisualCapture(
+                request,
+                pageNumber: pageNumber,
+                region: pageRegion,
+                trustedDocumentURL: trustedDocumentURL
+            )
         } else {
             return nativeVisualErrorResponse(
                 .invalidRegion,
@@ -544,18 +598,10 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                 ]
             )
         } catch let error as ReaderNativeVisualCaptureError {
-            let status: HTTPStatusCode
-            switch error {
-            case .invalidRegion:
-                status = .badRequest
-            case .pageUnavailable, .pencilOverlayUnavailable,
-                 .hierarchyUnavailable, .emptyViewport:
-                status = .conflict
-            case .hierarchyRenderFailed, .jpegEncodingFailed, .imageTooSmall,
-                 .imageTooLarge:
-                status = .internalServerError
-            }
-            return nativeVisualErrorResponse(error, status: status)
+            return nativeVisualErrorResponse(
+                error,
+                status: nativeVisualStatus(for: error)
+            )
         } catch {
             return response(
                 status: .internalServerError,
@@ -565,6 +611,105 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                         "BW_NATIVE_VISUAL_UNKNOWN"
                 ]
             )
+        }
+    }
+
+    private func serveNativePDFPageVisualCapture(
+        _ request: HTTPRequest,
+        pageNumber: Int,
+        region: ReaderNativeVisualCaptureRegion?,
+        trustedDocumentURL: URL
+    ) async -> HTTPResponse {
+        let bookValues = URLComponents(
+            url: trustedDocumentURL,
+            resolvingAgainstBaseURL: false
+        )?.queryItems?
+            .filter { $0.name == "book" }
+            .compactMap(\.value) ?? []
+        guard bookValues.count == 1,
+              let opaqueBookID = bookValues.first,
+              Self.isOpaqueBookID(opaqueBookID),
+              let access = await state.access(for: opaqueBookID),
+              access.record.format == .pdf else {
+            return nativeVisualErrorResponse(
+                .bookUnavailable,
+                status: .conflict
+            )
+        }
+
+        let baseJPEGData: Data
+        do {
+            try access.validateCurrentFile(
+                maximumEPUBBytes: ReaderLocalRuntimeServer.maximumEPUBBytes
+            )
+            baseJPEGData = try await pageRenderer.jpegData(
+                for: access,
+                pageNumber: pageNumber,
+                pixelWidth: region == nil ? 2_000 : 3_000
+            )
+        } catch {
+            return nativeVisualErrorResponse(
+                .pdfPageRenderFailed,
+                status: .conflict
+            )
+        }
+
+        do {
+            let capture = try await visualCaptureBroker.capturePDFPage(
+                baseJPEGData: baseJPEGData,
+                pageNumber: pageNumber,
+                region: region,
+                expectedBookID: opaqueBookID,
+                expectedDocumentURL: trustedDocumentURL
+            )
+            let strokeCount = capture.inkStrokeCount ?? 0
+            return dataResponse(
+                request,
+                data: capture.jpegData,
+                contentType: "image/jpeg",
+                cacheControl: "no-store",
+                additionalHeaders: [
+                    HTTPHeader("X-BW-Visual-Capture"): "native-pdf-page/1",
+                    HTTPHeader("X-BW-Visual-Width"):
+                        String(capture.pixelWidth),
+                    HTTPHeader("X-BW-Visual-Height"):
+                        String(capture.pixelHeight),
+                    HTTPHeader("X-BW-Visual-Page"): String(pageNumber),
+                    HTTPHeader("X-BW-Visual-Ink"):
+                        strokeCount > 0 ? "present" : "none",
+                    HTTPHeader("X-BW-Visual-Ink-Strokes"):
+                        String(strokeCount),
+                ]
+            )
+        } catch let error as ReaderNativeVisualCaptureError {
+            return nativeVisualErrorResponse(
+                error,
+                status: nativeVisualStatus(for: error)
+            )
+        } catch {
+            return nativeVisualErrorResponse(
+                .pageCompositeFailed,
+                status: .internalServerError
+            )
+        }
+    }
+
+    private func nativeVisualStatus(
+        for error: ReaderNativeVisualCaptureError
+    ) -> HTTPStatusCode {
+        switch error {
+        case .invalidRegion, .invalidPage, .pageScopeUnsupported:
+            return .badRequest
+        case .bookUnavailable, .pageUnavailable,
+             .pencilOverlayUnavailable, .hierarchyUnavailable,
+             .emptyViewport, .pdfPageRenderFailed:
+            return .conflict
+        case .inkStateUnavailable:
+            return .badGateway
+        case .hierarchyRenderFailed, .inkPayloadInvalid,
+             .inkPayloadTooLarge, .pageCompositeFailed,
+             .jpegEncodingFailed, .imageTooSmall, .imageTooLarge:
+            return .internalServerError
         }
     }
 
