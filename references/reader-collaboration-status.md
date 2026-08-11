@@ -4035,3 +4035,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验**：Reader Node 全量 972 项、发布管线、Pi 原子预检/114 项/E2E、macOS 模拟器/签名归档与 IPA 校验均通过；未改合成算法、信任路径或 `p/pts` 兼容。
 - **发布事实**：代码 `85d4166a` + `0422d27c`；Reader `0.2.88`、KG `kg-0.2.88-600cb0ca5a6558b56e17`，事务 `/home/bwicarus/deploy-backups/reader/20260811T040740Z-1185177`；Actions `31457579351` 上传 TestFlight `1.1.28 (198)`，`31458055710` 确认 `VALID / IN_BETA_TESTING`。
 - **边界/下一步**：本批消除无限“处理中”并暴露真实断点，不等于已修未知根因；安装后开“显示调试日志”，复现 `see_ink` 并提交从 `tool→` 到最后一行的左下角截图。
+
+## Codex：App 原生层级合成图接口候选（2026-08-11 JST，未发布）
+- **改了什么**：以 WKWebView 与 PencilKit 画布最低公共父视图执行主线程 `drawHierarchy`，按网页视口或归一化局部区域裁剪；JPEG 最长边 1600，质量/尺寸阶梯后原始数据上限 675 KB，空白与过大分开报错。
+- **接口/安全**：可信本机壳通过能力基址请求 `GET native-api/visual-capture?scope=viewport`，或 `scope=region&x=&y=&w=&h=`；仅返回 `image/jpeg`、`no-store` 与稳定 `X-BW-Reader-Error`，不暴露或记录 capability token。
+- **验证/候选**：分支 `codex/native-visual-capture-20260811`，代码 `d4c4815d` + `4262b863`；Reader 全量 977 项通过，Actions `31459224057` 与 `31459466554` 的模拟器、签名设备归档及 IPA 导出均成功，均 `upload=false`。
+- **边界/下一步**：尚未接共享 web 调用且未部署；Claude 接入时先取本机 JPEG，失败原文写 `dlog`，App 以外仍保留现有 html2canvas 路径，随后再发 TestFlight 做实机笔迹验收。
