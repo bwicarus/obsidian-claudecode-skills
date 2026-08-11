@@ -36,11 +36,14 @@ from readerpc_services import (
 )
 
 
-APP_VERSION = "0.1.4"
+APP_VERSION = "0.1.6"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 POLL_INTERVAL_MS = 2_500
 STATUS_PUBLISH_INTERVAL_SECONDS = 10.0
 PC_RESTART_BACKOFF_SECONDS = 30.0
+VOICE_RESTART_BACKOFF_SECONDS = 30.0
+VOICE_START_TIMEOUT_SECONDS = 8.0
+VOICE_START_POLL_SECONDS = 0.1
 
 
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
@@ -119,6 +122,47 @@ def stop_readerpc_services(
         raise ReaderPCServiceError("；".join(failures))
 
 
+def start_readerpc_voice(
+    bridge_paths: BridgePaths,
+    process_runner: WindowsProcessRunner,
+    *,
+    timeout_seconds: float = VOICE_START_TIMEOUT_SECONDS,
+    clock: Callable[[], float] = time.monotonic,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> int:
+    """Start the direct service and require a matching fresh runtime heartbeat."""
+
+    if timeout_seconds <= 0 or timeout_seconds > 30:
+        raise ReaderPCServiceError("电脑语音启动确认时限无效。")
+    current = read_direct_status(bridge_paths, process_runner)
+    if not current.service_online and bridge_paths.service_record.exists():
+        # A faulted/stale owned generation cannot be healed by starting a
+        # second listener.  Stop only the PID authenticated by the strict
+        # service record, then start one replacement generation.
+        stop_direct_service(bridge_paths, process_runner)
+    pid = start_direct_service(bridge_paths, process_runner)
+    deadline = clock() + timeout_seconds
+    last_reason = "runtime-status-offline-or-stale"
+    while True:
+        status = read_direct_status(bridge_paths, process_runner)
+        last_reason = status.reason or last_reason
+        if status.service_online and status.pid == pid:
+            return pid
+        if process_runner.executable_for_pid(pid) is None:
+            stop_direct_service(bridge_paths, process_runner)
+            raise ReaderPCServiceError(
+                "电脑语音进程启动后立即退出"
+                f"（{last_reason}）。电脑语音组件与当前配置可能不兼容。"
+            )
+        if clock() >= deadline:
+            stop_direct_service(bridge_paths, process_runner)
+            raise ReaderPCServiceError(
+                "电脑语音进程已启动，但未在限定时间内写出有效状态"
+                f"（{last_reason}）。"
+            )
+        sleeper(VOICE_START_POLL_SECONDS)
+
+
 class ReaderPCWindow:
     def __init__(
         self,
@@ -140,6 +184,8 @@ class ReaderPCWindow:
         self.closing = False
         self.service_lock = threading.Lock()
         self.last_pc_start_attempt = 0.0
+        self.last_voice_start_attempt = 0.0
+        self.voice_recovery_in_progress = False
         self.last_status_publish = 0.0
         preferences = load_preferences(self.readerpc_paths.preferences_file)
         self.keep_pc_online = tk.BooleanVar(
@@ -229,6 +275,7 @@ class ReaderPCWindow:
         root.after(100, self._drain_events)
         root.after(250, self.refresh)
         root.after(600, self._ensure_pc_online)
+        root.after(800, self._ensure_voice_online)
 
     def _service_row(
         self,
@@ -381,11 +428,13 @@ class ReaderPCWindow:
                 if self.closing and kind in {"task-error", "task-success"}:
                     continue
                 if kind == "task-error":
+                    self.voice_recovery_in_progress = False
                     self.busy = False
                     self._set_buttons_enabled(True)
                     self.footer.configure(text=f"操作失败：{value}", foreground="#c62828")
                     self.refresh()
                 elif kind == "task-success":
+                    self.voice_recovery_in_progress = False
                     self.busy = False
                     self._set_buttons_enabled(True)
                     self.footer.configure(text=value[0], foreground="#167347")
@@ -421,16 +470,31 @@ class ReaderPCWindow:
             )
             return
 
+        self._start_voice_task(recovery=False)
+
+    def _start_voice_task(self, *, recovery: bool) -> None:
+        if self.busy or self.closing:
+            return
+        self.last_voice_start_attempt = time.monotonic()
+        self.voice_recovery_in_progress = recovery
+
         def start() -> int:
             changed = set_direct_config_enabled(self.bridge_paths, True)
             try:
-                return start_direct_service(self.bridge_paths, self.process_runner)
+                return start_readerpc_voice(
+                    self.bridge_paths,
+                    self.process_runner,
+                )
             except Exception:
                 if changed:
                     set_direct_config_enabled(self.bridge_paths, False)
                 raise
 
-        self._run_task("正在启用电脑语音服务…", start, "电脑语音已启用。")
+        self._run_task(
+            "正在恢复电脑语音服务…" if recovery else "正在启用电脑语音服务…",
+            start,
+            "电脑语音已恢复在线。" if recovery else "电脑语音已启用。",
+        )
 
     def toggle_pc(self) -> None:
         self._set_pc_running(not self.pc_ocr.status().running)
@@ -475,6 +539,20 @@ class ReaderPCWindow:
             )
         self.root.after(5_000, self._ensure_pc_online)
 
+    def _ensure_voice_online(self) -> None:
+        if self.closed or self.closing:
+            return
+        if not self.busy:
+            status = self._voice_status()
+            if (
+                status.configuration_enabled
+                and not status.service_online
+                and time.monotonic() - self.last_voice_start_attempt
+                >= VOICE_RESTART_BACKOFF_SECONDS
+            ):
+                self._start_voice_task(recovery=True)
+        self.root.after(5_000, self._ensure_voice_online)
+
     def open_legacy_voice_settings(self) -> None:
         executable = self.bridge_paths.desktop_launcher
         if not executable.is_file():
@@ -509,9 +587,13 @@ class ReaderPCWindow:
                 voice_color = "#167347"
                 voice_action = "停用"
             elif voice.configuration_enabled:
-                voice_label = "正在恢复" if voice.reason else "已启用 · 离线"
+                voice_label = (
+                    "正在恢复"
+                    if self.voice_recovery_in_progress
+                    else "离线 · 等待重试"
+                )
                 voice_color = "#b26a00"
-                voice_action = "重启"
+                voice_action = "立即重试"
             else:
                 voice_label = "已停用"
                 voice_color = "#6b7280"
