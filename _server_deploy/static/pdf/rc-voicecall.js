@@ -4622,7 +4622,7 @@
       return /^\/r\/[a-f0-9]{64}$/.test(v) ? v : null;
     } catch (e) { return null; }
   }
-  async function _nativeCapture(scope, rect, page) {
+  async function _nativeCapture(scope, rect, page, delivery) {
     var base = _nativeCaptureBase();
     // 非 App 本机(Safari/PWA)不是故障,是预期路径:静默回落 html2canvas。
     if (!base) return null;
@@ -4632,17 +4632,74 @@
       q += '&x=' + rect.x.toFixed(6) + '&y=' + rect.y.toFixed(6) +
            '&w=' + rect.w.toFixed(6) + '&h=' + rect.h.toFixed(6);
     }
+    var request = { cache: 'no-store' };
+    if (delivery) {
+      q += '&deliver=realtime';
+      request.method = 'POST';
+      request.headers = { 'Content-Type': 'application/json' };
+      request.body = JSON.stringify({
+        call_id: delivery.call_id,
+        client_secret: delivery.client_secret,
+        tool: delivery.tool
+      });
+      _visualStep('原生直投 ' + scope + ' 开始(图像不经过 JS)');
+    }
     var resp;
     try {
-      resp = await fetch(base + '/native-api/visual-capture?' + q, { cache: 'no-store' });
+      resp = await fetch(base + '/native-api/visual-capture?' + q, request);
     } catch (e) {
+      if (delivery) {
+        return {
+          native_delivery_failed: true,
+          error: '原生直投请求失败 ' + _visualErrText(e)
+        };
+      }
       return _visualNull('原生合成图', '请求失败 ' + _visualErrText(e));
     }
     if (!resp.ok) {
       var code = '';
       try { code = resp.headers.get('X-BW-Reader-Error') || ''; } catch (e2) {}
-      if (!code) { try { code = String(await resp.text()).slice(0, 120); } catch (e3) {} }
+      var detail = '';
+      try {
+        var errorText = await resp.text();
+        var errorBody = errorText ? JSON.parse(errorText) : null;
+        detail = String((errorBody && errorBody.error) || '').slice(0, 160);
+      } catch (e3) {
+        detail = String(errorText || '').slice(0, 160);
+      }
+      if (delivery) {
+        var directError = 'HTTP ' + resp.status + (code ? ' ' + code : '') +
+          (detail ? ' ' + detail : '');
+        _visualStep('原生直投失败 ' + directError);
+        return { native_delivery_failed: true, error: directError };
+      }
+      if (!code) code = detail;
       return _visualNull('原生合成图', 'HTTP ' + resp.status + (code ? ' ' + code : ''));
+    }
+    if (delivery) {
+      var delivered;
+      try { delivered = await resp.json(); } catch (e5) {
+        return {
+          native_delivery_failed: true,
+          error: '原生直投返回了无效 JSON'
+        };
+      }
+      if (!delivered || delivered.ok !== true || delivered.delivered !== true) {
+        return {
+          native_delivery_failed: true,
+          error: String((delivered && delivered.error) || '原生直投未确认完成').slice(0, 180)
+        };
+      }
+      var directBytes = Number(delivered.bytes) || 0;
+      _visualStep('原生直投完成 ' + Math.round(directBytes / 1024) + 'KB' +
+        (delivered.ink === 'none' ? '(该页无笔迹)' : ''));
+      return {
+        media_type: 'image/jpeg',
+        native_delivered: true,
+        byte_count: directBytes,
+        ink: String(delivered.ink || 'unknown'),
+        capture: String(delivered.capture || '')
+      };
     }
     var b64 = '';
     try {
@@ -4693,12 +4750,12 @@
       return out;
     } catch (e) { return null; }
   }
-  async function _nativeInkRegion(el, x0, y0, x1, y1) {
+  async function _nativeInkRegion(el, x0, y0, x1, y1, delivery) {
     if (!_nativeCaptureBase()) return null;
     var rect = _viewportRectFromPageRect(el, x0, y0, x1, y1);
     // 视口内:走 region —— 那是屏幕层级合成,卡片、高亮等可见 UI 都在图里。
     if (rect && rect.visible >= 0.9) {
-      var shot = await _nativeCapture('region', rect);
+      var shot = await _nativeCapture('region', rect, null, delivery);
       if (shot) return shot;
     }
     // 屏外:改按页离屏合成。x0..y1 本就是页内归一化,正好是 scope=page 要的坐标系。
@@ -4707,7 +4764,9 @@
     var offRatio = rect ? Math.round(rect.visible * 100) : 0;
     if (pageNo) {
       _visualStep('笔迹 ' + offRatio + '% 在视口内,改按第 ' + pageNo + ' 页离屏合成(无卡片层)');
-      return await _nativeCapture('page', { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, pageNo);
+      return await _nativeCapture(
+        'page', { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, pageNo, delivery
+      );
     }
     if (!rect) return _visualNull('原生合成图', '无法换算到视口坐标');
     return _visualNull('原生合成图',
@@ -4862,9 +4921,9 @@
     }
     return b64.length > 3000 ? { media_type: 'image/jpeg', b64: b64 } : null;
   }
-  async function _captureView() {
+  async function _captureView(delivery) {
     try {
-      var nat = await _nativeCapture('viewport');
+      var nat = await _nativeCapture('viewport', null, null, delivery);
       if (nat) return nat;
       var surface = _visualSurface();
       if (surface) {
@@ -4998,9 +5057,9 @@
       selectionId
     ) || await _captureSurface(surface, crop, selectionId);
   }
-  async function _captureViewportComposite() {
+  async function _captureViewportComposite(delivery) {
     // 语义与原生 scope=viewport 完全对应:屏幕上那一块。
-    var nat = await _nativeCapture('viewport');
+    var nat = await _nativeCapture('viewport', null, null, delivery);
     if (nat) return nat;
     var surface = _visualSurface();
     if (surface) {
@@ -5026,7 +5085,7 @@
       top: 0,
       width: window.innerWidth,
       height: window.innerHeight
-    }) || await _captureView();
+    }) || await _captureView(delivery);
   }
   // 当前逻辑页的完整“正文 + 墨迹 + 页内卡片/便签/高亮”合成图。
   // 只复用本文件已有 html2canvas/_captureSurface/_captureEl，不另造渲染器：
@@ -5035,9 +5094,10 @@
   // - 宿主尚未装载目标元素时回退当前视口，保持旧语音链可用。
   async function _capturePageComposite(target) {
     try {
+      var delivery = target && target.__native_delivery;
       var requestedScope = _visualCaptureScope(target);
       if (requestedScope === 'viewport-context') {
-        return await _captureViewportComposite();
+        return await _captureViewportComposite(delivery);
       }
       if (requestedScope === 'drawing-nearby' || requestedScope === 'selection-near') {
         return await _captureInkRegion(target);
@@ -5087,9 +5147,9 @@
         if (composite) return composite;
         if (surface.strokes.length) return await _captureSurface(surface, crop);
       }
-      return await _captureView();
+      return await _captureView(delivery);
     } catch (e) {
-      return _captureView();
+      return _captureView(target && target.__native_delivery);
     }
   }
   function _inkTargetPage(target) {
@@ -5213,6 +5273,7 @@
     try {
       var scope = _visualCaptureScope(target);
       var selectionId = _visualCaptureSelectionId(target);
+      var delivery = target && target.__native_delivery;
       if (scope === 'selection-near' && !selectionId) return null;
       var surface = _visualSurface();
       if (surface && surface.strokes.length) {
@@ -5250,7 +5311,8 @@
             scopedCrop.x / W0,
             scopedCrop.y / H0,
             (scopedCrop.x + scopedCrop.width) / W0,
-            (scopedCrop.y + scopedCrop.height) / H0
+            (scopedCrop.y + scopedCrop.height) / H0,
+            delivery
           );
           if (natScoped) return natScoped;
         }
@@ -5266,7 +5328,7 @@
       var m = 0.08; x0 = Math.max(0, x0 - m); y0 = Math.max(0, y0 - m); x1 = Math.min(1, x1 + m); y1 = Math.min(1, y1 + m);   // 留白带上下文
       if (x1 - x0 < 0.28) { var cx = (x0 + x1) / 2; x0 = Math.max(0, cx - 0.14); x1 = Math.min(1, cx + 0.14); }   // 太窄→给最小宽(别只裁个点)
       if (y1 - y0 < 0.18) { var cy = (y0 + y1) / 2; y0 = Math.max(0, cy - 0.09); y1 = Math.min(1, cy + 0.09); }
-      var natInk = await _nativeInkRegion(el, x0, y0, x1, y1);
+      var natInk = await _nativeInkRegion(el, x0, y0, x1, y1, delivery);
       if (natInk) return natInk;
       await _loadH2C();
       var W = el.offsetWidth || el.getBoundingClientRect().width, H = el.offsetHeight || el.getBoundingClientRect().height;
@@ -5347,8 +5409,25 @@
     });
   }
 
+  function _rethrowVisualStage(fallbackStage, error) {
+    if (error && error.bwVisualStage) throw error;
+    throw _visualStageError(fallbackStage, error && error.message);
+  }
+
   async function _nativeRealtimeVisual(name, args) {
     var target = Object.assign({ page: _rtc.ctxPage || 0 }, args || {});
+    if (!_rtc.callId) {
+      throw _visualStageError('call 身份', '当前通话标识为空');
+    }
+    if (!_rtc.sidebandKey) {
+      throw _visualStageError('sideband', '旁路密钥缺失，无法把图交给原生通道');
+    }
+    var delivery = {
+      call_id: _rtc.callId,
+      client_secret: _rtc.sidebandKey,
+      tool: name
+    };
+    target.__native_delivery = delivery;
     var shot = null;
     var attempted = [];
     if (name === 'see_ink' && window.RC && RC.captureInkRegion) {
@@ -5356,11 +5435,14 @@
       _visualStep('笔迹裁图 开始');
       try {
         shot = await _withVisualTimeout(
-          RC.captureInkRegion(target), 8000, '页面合成/笔迹裁图'
+          RC.captureInkRegion(target), 26000, '原生取图并直投/笔迹裁图'
         );
+        if (shot && shot.native_delivery_failed) {
+          throw _visualStageError('原生直投', shot.error || '原生直投失败');
+        }
         _visualStep('笔迹裁图 ' + (shot ? '得到图' : '无图'));
       } catch (error) {
-        throw _visualStageError('页面合成/笔迹裁图', error && error.message);
+        _rethrowVisualStage('页面合成/笔迹裁图', error);
       }
     }
     if (!shot && window.RC && RC.capturePageComposite) {
@@ -5370,23 +5452,31 @@
         shot = await _withVisualTimeout(RC.capturePageComposite(name === 'see_ink'
           ? target
           : Object.assign({}, target, { scope: 'viewport-context' })),
-          10000, '页面合成/整页合成');
+          26000, '原生取图并直投/整页合成');
+        if (shot && shot.native_delivery_failed) {
+          throw _visualStageError('原生直投', shot.error || '原生直投失败');
+        }
         _visualStep('整页合成 ' + (shot ? '得到图' : '无图'));
       } catch (error) {
-        throw _visualStageError('页面合成/整页合成', error && error.message);
+        _rethrowVisualStage('页面合成/整页合成', error);
       }
     }
     if (!shot) {
       attempted.push('视口截图');
       _visualStep('视口截图 开始');
       try {
-        shot = await _withVisualTimeout(_captureView(), 8000, '页面合成/视口截图');
+        shot = await _withVisualTimeout(
+          _captureView(delivery), 26000, '原生取图并直投/视口截图'
+        );
+        if (shot && shot.native_delivery_failed) {
+          throw _visualStageError('原生直投', shot.error || '原生直投失败');
+        }
         _visualStep('视口截图 ' + (shot ? '得到图' : '无图'));
       } catch (error) {
-        throw _visualStageError('页面合成/视口截图', error && error.message);
+        _rethrowVisualStage('页面合成/视口截图', error);
       }
     }
-    if (!shot || !shot.b64) {
+    if (!shot || (!shot.b64 && !shot.native_delivered)) {
       // Names what was tried. "composition failed" without the list cannot
       // distinguish "there was no ink to crop" from "the canvas came back
       // blank", and those are opposite problems.
@@ -5395,11 +5485,9 @@
         '已尝试 ' + (attempted.join('→') || '无可用途径') + '，均未产出图像'
       );
     }
-    if (!_rtc.callId) {
-      throw _visualStageError('call 身份', '当前通话标识为空');
-    }
-    if (!_rtc.sidebandKey) {
-      throw _visualStageError('sideband', '旁路密钥缺失，无法把图交给原生通道');
+    if (shot.native_delivered) {
+      _visualStep('图像已在原生层直接送入当前 Realtime 会话');
+      return shot;
     }
     _visualStep('图已就绪 ' + Math.round(String(shot.b64 || '').length / 1024) + 'KB，送往原生通道');
     var reply;
@@ -5548,7 +5636,10 @@
       }
       if (_rtc.nativeDirect && /^(see_ink|see_page|see_figure)$/.test(name)) {
         var nativeShot = await _nativeRealtimeVisual(name, args);
-        vision = [nativeShot];
+        // Native delivery leaves the JPEG inside Swift. Only the legacy web
+        // fallback returns b64 for the tool chip; passing a delivery receipt
+        // to setVision would make the UI try to render an image with no bytes.
+        vision = nativeShot && nativeShot.native_delivered ? null : [nativeShot];
         label = name === 'see_ink' ? '看笔迹标注'
           : (name === 'see_page' ? '看当前页面' : '看当前图像');
         _rtc.inkDirty = false;

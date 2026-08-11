@@ -837,18 +837,77 @@ enum ReaderRealtimeOpenAIClient {
                 "解码后体积越界：\(decoded.count) 字节（允许 2KB–2MB）"
             )
         }
+        try await injectPreparedImage(
+            callID: callID,
+            clientSecret: clientSecret,
+            mediaType: mediaType,
+            imageData: decoded,
+            base64: base64
+        )
+    }
+
+    static func injectImage(
+        callID: String,
+        clientSecret: String,
+        mediaType: String,
+        imageData: Data
+    ) async throws {
+        guard isValidCallID(callID) else {
+            throw ReaderRealtimeCredentialError.imageRejected(
+                "通话标识无效，无法把图归属到当前通话"
+            )
+        }
+        guard isValidClientSecret(clientSecret) else {
+            throw ReaderRealtimeCredentialError.imageRejected(
+                "旁路密钥无效，原生通道拒绝接收"
+            )
+        }
+        guard ["image/jpeg", "image/png", "image/webp"].contains(mediaType)
+        else {
+            throw ReaderRealtimeCredentialError.imageRejected(
+                "不支持的图像类型：\(mediaType)"
+            )
+        }
+        guard (2_000...2_097_152).contains(imageData.count) else {
+            throw ReaderRealtimeCredentialError.imageRejected(
+                "原生图像体积越界：\(imageData.count) 字节（允许 2KB–2MB）"
+            )
+        }
+        let base64 = imageData.base64EncodedString()
+        guard (3_000...2_800_000).contains(base64.utf8.count) else {
+            throw ReaderRealtimeCredentialError.imageRejected(
+                "编码后体积越界：\(base64.utf8.count) 字节（允许 3KB–2.8MB）"
+            )
+        }
+        try await injectPreparedImage(
+            callID: callID,
+            clientSecret: clientSecret,
+            mediaType: mediaType,
+            imageData: imageData,
+            base64: base64
+        )
+    }
+
+    private static func injectPreparedImage(
+        callID: String,
+        clientSecret: String,
+        mediaType: String,
+        imageData: Data,
+        base64: String
+    ) async throws {
         let authorizationKey = try await realtimeAuthorizationKey(
             callID: callID,
             clientSecret: clientSecret
         )
-        // The composite is generated in the page, persisted in the shared
+        // The composite is already native for App captures (the web fallback
+        // enters through the base64 overload), is persisted in the shared
         // device-local cache, then injected by this native API. Pi is not a
         // renderer, file store or transport hop for this path.
         // Local save is its own stage: a full disk or a missing App Group is
         // not a transport problem, and reporting it as one would send the
         // investigation to the network.
         do {
-            try ReaderRealtimeVisualCache.store(decoded, mediaType: mediaType)
+            try ReaderRealtimeVisualCache.store(imageData, mediaType: mediaType)
         } catch {
             throw ReaderRealtimeCredentialError.imageRejected(
                 "本地保存合成图失败：\(error.localizedDescription)"

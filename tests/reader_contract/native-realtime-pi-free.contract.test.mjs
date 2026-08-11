@@ -22,6 +22,7 @@ const WEB_VIEW = read("ios/BWReader/App/ReaderWebView.swift");
 const TOOLS = read("ios/BWReader/App/NativeReaderToolsView.swift");
 const MANIFEST = read("ios/BWReader/native_reader_interface_manifest.json");
 const SETTINGS = read("_server_deploy/static/pdf/rc-settings.js");
+const LOCAL_SERVER = read("ios/BWReader/App/ReaderLocalRuntimeServer.swift");
 
 test("the App owns both the project key and the Realtime session without Pi", () => {
   assert.doesNotMatch(SERVER, /native-realtime-config/);
@@ -252,7 +253,7 @@ test("selection is injected on the user's turn and visual tools send the real co
   assert.match(CORE, /ReaderNativeBridgeContract\.appGroupIdentifier/);
   assert.match(
     CORE,
-    /ReaderRealtimeVisualCache\.store\(decoded, mediaType: mediaType\)[\s\S]*wss:\/\/api\.openai\.com\/v1\/realtime/,
+    /ReaderRealtimeVisualCache\.store\(imageData, mediaType: mediaType\)[\s\S]*wss:\/\/api\.openai\.com\/v1\/realtime/,
   );
   assert.match(CORE, /private static let maximumFiles = 12/);
 });
@@ -268,6 +269,8 @@ test("see_ink failures preserve the actual composition, identity, storage, and t
   assert.match(visual, /attempted\.push\('视口截图'\)/);
   assert.match(visual, /_visualStageError\('call 身份'/);
   assert.match(visual, /_visualStageError\('sideband'/);
+  assert.match(visual, /_visualStageError\('原生直投'/);
+  assert.match(visual, /_rethrowVisualStage/);
   assert.match(visual, /_visualStageError\('本地保存\/传输'/);
   assert.match(visual, /reply && reply\.ok === false/);
 
@@ -320,9 +323,9 @@ test("visual-tool waits are bounded and every host exposes the visible step log 
     VOICE.indexOf("function _nativeRealtimePageText"),
   );
   assert.match(visual, /window\.dlog\('see: ' \+ text/);
-  assert.match(visual, /RC\.captureInkRegion\(target\), 8000/);
-  assert.match(visual, /RC\.capturePageComposite[\s\S]*10000, '页面合成\/整页合成'/);
-  assert.match(visual, /_captureView\(\), 8000, '页面合成\/视口截图'/);
+  assert.match(visual, /RC\.captureInkRegion\(target\), 26000/);
+  assert.match(visual, /RC\.capturePageComposite[\s\S]*26000, '原生取图并直投\/整页合成'/);
+  assert.match(visual, /_captureView\(delivery\), 26000, '原生取图并直投\/视口截图'/);
   assert.match(visual, /_nativeRealtimeRequest\([\s\S]*15000, '本地保存\/传输'/);
   assert.ok(
     visual.indexOf("if (reply && reply.ok === false)") <
@@ -377,6 +380,65 @@ test("visual-tool waits are bounded and every host exposes the visible step log 
     /等待 5ms 无响应/,
   );
   await new Promise((resolve) => setTimeout(resolve, 30));
+});
+
+test("App-native visuals stay native and are delivered to Realtime without a JPEG round trip through JS", () => {
+  const capture = VOICE.slice(
+    VOICE.indexOf("async function _nativeCapture"),
+    VOICE.indexOf("function _viewportRectFromPageRect"),
+  );
+  assert.match(capture, /q \+= '&deliver=realtime'/);
+  assert.match(capture, /request\.method = 'POST'/);
+  assert.match(capture, /call_id: delivery\.call_id/);
+  assert.match(capture, /client_secret: delivery\.client_secret/);
+  assert.match(capture, /native_delivered: true/);
+  assert.match(capture, /resp\.arrayBuffer\(\)/);
+  assert.ok(
+    capture.indexOf("if (delivery)") < capture.indexOf("resp.arrayBuffer()"),
+    "direct delivery must return its small receipt before reading image bytes",
+  );
+
+  const visual = VOICE.slice(
+    VOICE.indexOf("async function _nativeRealtimeVisual"),
+    VOICE.indexOf("function _nativeRealtimePageText"),
+  );
+  assert.match(visual, /if \(shot\.native_delivered\)/);
+  assert.match(visual, /图像已在原生层直接送入当前 Realtime 会话/);
+  assert.ok(
+    visual.indexOf("if (shot.native_delivered)") <
+      visual.indexOf("action: 'image'"),
+    "a native delivery receipt must bypass the legacy b64 bridge request",
+  );
+
+  const tool = VOICE.slice(
+    VOICE.indexOf("async function _rtcTool"),
+    VOICE.indexOf("function _rtcCapReset"),
+  );
+  assert.match(
+    tool,
+    /vision = nativeShot && nativeShot\.native_delivered \? null : \[nativeShot\]/,
+  );
+
+  const route = LOCAL_SERVER.slice(
+    LOCAL_SERVER.indexOf("private func serveNativeVisualCapture"),
+    LOCAL_SERVER.indexOf("private func serveNativePageImage"),
+  );
+  assert.match(route, /request\.query\["deliver"\] == "realtime"/);
+  assert.match(route, /request\.method == \.POST/);
+  assert.match(route, /request\.bodyData/);
+  assert.match(route, /Set\(object\.keys\) == \["call_id", "client_secret", "tool"\]/);
+  assert.match(route, /imageData: capture\.jpegData/);
+  assert.match(route, /"delivered": true/);
+  assert.match(route, /"bytes": capture\.jpegData\.count/);
+  assert.match(route, /BW_NATIVE_VISUAL_DELIVERY_FAILED/);
+
+  const rawInjection = CORE.slice(
+    CORE.indexOf("static func injectImage(\n        callID: String,\n        clientSecret: String,\n        mediaType: String,\n        imageData: Data"),
+    CORE.indexOf("private static func injectPreparedImage"),
+  );
+  assert.match(rawInjection, /imageData\.base64EncodedString\(\)/);
+  assert.match(rawInjection, /imageData: imageData/);
+  assert.doesNotMatch(rawInjection, /Data\(base64Encoded:/);
 });
 
 test("native direct keeps local work in App and exposes only explicit Pi AI tools", () => {

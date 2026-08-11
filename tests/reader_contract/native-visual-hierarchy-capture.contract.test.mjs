@@ -74,7 +74,7 @@ test("the loopback route is capability-prefixed, trusted-shell-only, and diagnos
   }
   assert.match(handler, /contentType: "image\/jpeg"/);
   assert.match(handler, /cacheControl: "no-store"/);
-  assert.match(handler, /"X-BW-Visual-Capture"[\s\S]*"native-hierarchy\/1"/);
+  assert.match(handler, /captureContract: "native-hierarchy\/1"/);
   assert.match(handler, /"X-BW-Reader-Error"/);
   assert.match(handler, /nativeVisualErrorResponse/);
 });
@@ -92,8 +92,8 @@ test("offscreen PDF capture composes PDFKit pixels with authoritative page ink",
   assert.match(handler, /trustedSurface == \.pdf/);
   assert.match(handler, /pageRenderer\.jpegData\(/);
   assert.match(handler, /visualCaptureBroker\.capturePDFPage\(/);
-  assert.match(handler, /"X-BW-Visual-Capture"\): "native-pdf-page\/1"/);
-  assert.match(handler, /"X-BW-Visual-Ink"/);
+  assert.match(handler, /captureContract: "native-pdf-page\/1"/);
+  assert.match(handler, /ink: strokeCount > 0 \? "present" : "none"/);
   assert.match(handler, /strokeCount > 0 \? "present" : "none"/);
 
   assert.match(broker, /func capturePDFPage\(/);
@@ -119,7 +119,7 @@ test("shared visual tools consume the native viewport, region, and offscreen pag
   assert.match(native, /rect\.visible >= 0\.9[\s\S]*_nativeCapture\('region'/);
   assert.match(
     native,
-    /_nativeCapture\('page', \{ x: x0, y: y0, w: x1 - x0, h: y1 - y0 \}, pageNo\)/,
+    /'page', \{ x: x0, y: y0, w: x1 - x0, h: y1 - y0 \}, pageNo, delivery/,
   );
   assert.doesNotMatch(native, /dlog\([^\n]*__BW_NATIVE_LOCAL_BASE_PATH__/);
 
@@ -128,12 +128,38 @@ test("shared visual tools consume the native viewport, region, and offscreen pag
     VOICE.indexOf("try {\n    window.RC = window.RC || {}"),
   );
   assert.match(ink, /_curInkPageEl\(target, true\)/);
-  assert.match(ink, /var natInk = await _nativeInkRegion\(el, x0, y0, x1, y1\)/);
+  assert.match(ink, /var natInk = await _nativeInkRegion\(el, x0, y0, x1, y1, delivery\)/);
   assert.ok(
     ink.indexOf("var natInk = await _nativeInkRegion") <
       ink.indexOf("await _loadH2C()"),
     "the App native route must run before the web fallback",
   );
+});
+
+test("native Realtime delivery returns only a receipt while preserving binary GET fallback", () => {
+  const globalHandler = SERVER.slice(
+    SERVER.indexOf("func handleRequest"),
+    SERVER.indexOf("private func serveNativeContext"),
+  );
+  assert.match(globalHandler, /request\.method == \.POST/);
+  assert.match(globalHandler, /decodedPath != nativeVisualPath/);
+
+  const handler = SERVER.slice(
+    SERVER.indexOf("private func serveNativeVisualCapture"),
+    SERVER.indexOf("private func serveNativePageImage"),
+  );
+  assert.match(handler, /deliver"\] == "realtime"/);
+  assert.match(handler, /nativeVisualDeliveryRequest\(request\)/);
+  assert.match(handler, /contentType == "application\/json"/);
+  assert.match(handler, /\(2\.\.\.8_192\)\.contains\(data\.count\)/);
+  assert.match(handler, /Set\(object\.keys\) == \["call_id", "client_secret", "tool"\]/);
+  assert.match(handler, /ReaderRealtimeOpenAIClient\.injectImage\(/);
+  assert.match(handler, /imageData: capture\.jpegData/);
+  assert.match(handler, /"delivered": true/);
+  assert.match(handler, /"bytes": capture\.jpegData\.count/);
+  assert.match(handler, /guard let delivery else \{[\s\S]*dataResponse\(/);
+  assert.doesNotMatch(handler, /capture\.jpegData\.base64EncodedString/);
+  assert.doesNotMatch(handler, /capabilityToken[^\n]*print|print[^\n]*capabilityToken/);
 });
 
 test("every native visual early exit has a stable visible error code", () => {

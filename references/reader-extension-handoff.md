@@ -50,6 +50,11 @@
 Safari 扩展原生进程经签名 access group 共享读取，网页和扩展 JavaScript 仅得到 90 秒 `ek_`。
 普通 Realtime、选区、可见正文与合成图注入均不经过 Pi；Pi 只保留显式备份/同步和 AI API 能力。
 
+**0.2.90 / App 1.1.30 原生合成图直投**：App 原生生成的视口、笔迹区域与离屏 PDF
+合成图不再经 HTTP 返回 JPEG、转 base64、穿过 WKWebView 消息桥后再送回 Swift；本机能力
+路由只接收通话标识与进程内旁路 capability，原生完成合成、本地有界保存和 Realtime 注入后
+仅向网页返回小型收据。Safari/PWA 与非直投调用仍保留原二进制 GET 和网页合成回退。
+
 **0.2.89 / App 1.1.29 原生合成图**：App 内 `see_page` 优先截取 WKWebView、PencilKit
 与可见卡片的公共原生视图层级；`see_ink` 在笔迹仍位于视口时按区域截取同一层级，滚出视口的
 PDF 笔迹则由 PDFKit 离屏渲染目标页并叠加本机权威墨迹。三条路径均走能力前缀本地 API，

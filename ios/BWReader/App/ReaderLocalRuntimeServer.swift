@@ -177,6 +177,12 @@ private struct ReaderLocalBundleVerificationInput: Sendable {
     let validatesDigests: Bool
 }
 
+private struct ReaderNativeVisualDeliveryRequest: Sendable {
+    let callID: String
+    let clientSecret: String
+    let tool: String
+}
+
 private enum ReaderLocalBundleIntegrity {
     static func sha256Hex(_ data: Data) -> String {
         SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
@@ -229,11 +235,13 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
     let visualCaptureBroker: ReaderNativeVisualCaptureBroker
 
     func handleRequest(_ request: HTTPRequest) async throws -> HTTPResponse {
-        guard request.method == .GET || request.method == .HEAD else {
+        guard request.method == .GET
+                || request.method == .HEAD
+                || request.method == .POST else {
             return response(
                 status: .methodNotAllowed,
                 text: "method not allowed",
-                headers: [HTTPHeader("Allow"): "GET, HEAD"]
+                headers: [HTTPHeader("Allow"): "GET, HEAD, POST"]
             )
         }
         guard request.headers[.host]?.lowercased()
@@ -248,6 +256,14 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
               let decodedPath = encodedPath.removingPercentEncoding,
               !decodedPath.contains("\\"), !decodedPath.contains("\0") else {
             return response(status: .badRequest, text: "invalid path")
+        }
+        let nativeVisualPath = "/r/\(capabilityToken)/native-api/visual-capture"
+        if request.method == .POST, decodedPath != nativeVisualPath {
+            return response(
+                status: .methodNotAllowed,
+                text: "POST is restricted to native visual delivery",
+                headers: [HTTPHeader("Allow"): "GET, HEAD"]
+            )
         }
 
         if decodedPath == "/pdf/api/toc" {
@@ -489,11 +505,68 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
     private func serveNativeVisualCapture(
         _ request: HTTPRequest
     ) async -> HTTPResponse {
-        guard request.method == .GET else {
+        let delivery: ReaderNativeVisualDeliveryRequest?
+        if request.query["deliver"] == "realtime" {
+            guard request.method == .POST else {
+                return response(
+                    status: .methodNotAllowed,
+                    text: "native visual delivery requires POST",
+                    headers: [HTTPHeader("Allow"): "POST"]
+                )
+            }
+            guard let parsed = await nativeVisualDeliveryRequest(request) else {
+                return jsonResponse(
+                    request,
+                    status: .badRequest,
+                    object: [
+                        "ok": false,
+                        "error": "原生合成图直投请求无效",
+                        "stage": "delivery-request",
+                    ],
+                    additionalHeaders: [
+                        HTTPHeader("X-BW-Reader-Error"):
+                            "BW_NATIVE_VISUAL_DELIVERY_REQUEST_INVALID"
+                    ]
+                )
+            }
+            delivery = parsed
+        } else if request.query["deliver"] == nil {
+            guard request.method == .GET || request.method == .HEAD else {
+                return response(
+                    status: .methodNotAllowed,
+                    text: "native visual capture requires GET",
+                    headers: [HTTPHeader("Allow"): "GET, HEAD"]
+                )
+            }
+            delivery = nil
+        } else {
+            return jsonResponse(
+                request,
+                status: .badRequest,
+                object: [
+                    "ok": false,
+                    "error": "原生合成图投递模式无效",
+                    "stage": "delivery-request",
+                ],
+                additionalHeaders: [
+                    HTTPHeader("X-BW-Reader-Error"):
+                        "BW_NATIVE_VISUAL_DELIVERY_REQUEST_INVALID"
+                ]
+            )
+        }
+        let queryNames = request.query.map(\.name)
+        guard Set(queryNames).count == queryNames.count,
+              queryNames.allSatisfy({
+                  ["scope", "deliver", "page", "x", "y", "w", "h"]
+                      .contains($0)
+              }) else {
             return response(
-                status: .methodNotAllowed,
-                text: "native visual capture requires GET",
-                headers: [HTTPHeader("Allow"): "GET"]
+                status: .badRequest,
+                text: "native visual capture query is invalid",
+                headers: [
+                    HTTPHeader("X-BW-Reader-Error"):
+                        "BW_NATIVE_VISUAL_QUERY_INVALID"
+                ]
             )
         }
         let referer = request.headers[HTTPHeader("Referer")]
@@ -572,7 +645,8 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                 request,
                 pageNumber: pageNumber,
                 region: pageRegion,
-                trustedDocumentURL: trustedDocumentURL
+                trustedDocumentURL: trustedDocumentURL,
+                delivery: delivery
             )
         } else {
             return nativeVisualErrorResponse(
@@ -583,19 +657,12 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
 
         do {
             let capture = try await visualCaptureBroker.capture(region: region)
-            return dataResponse(
+            return await nativeVisualCaptureResponse(
                 request,
-                data: capture.jpegData,
-                contentType: "image/jpeg",
-                cacheControl: "no-store",
-                additionalHeaders: [
-                    HTTPHeader("X-BW-Visual-Capture"):
-                        "native-hierarchy/1",
-                    HTTPHeader("X-BW-Visual-Width"):
-                        String(capture.pixelWidth),
-                    HTTPHeader("X-BW-Visual-Height"):
-                        String(capture.pixelHeight),
-                ]
+                capture: capture,
+                captureContract: "native-hierarchy/1",
+                ink: nil,
+                delivery: delivery
             )
         } catch let error as ReaderNativeVisualCaptureError {
             return nativeVisualErrorResponse(
@@ -618,7 +685,8 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
         _ request: HTTPRequest,
         pageNumber: Int,
         region: ReaderNativeVisualCaptureRegion?,
-        trustedDocumentURL: URL
+        trustedDocumentURL: URL,
+        delivery: ReaderNativeVisualDeliveryRequest?
     ) async -> HTTPResponse {
         let bookValues = URLComponents(
             url: trustedDocumentURL,
@@ -663,22 +731,15 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                 expectedDocumentURL: trustedDocumentURL
             )
             let strokeCount = capture.inkStrokeCount ?? 0
-            return dataResponse(
+            return await nativeVisualCaptureResponse(
                 request,
-                data: capture.jpegData,
-                contentType: "image/jpeg",
-                cacheControl: "no-store",
-                additionalHeaders: [
-                    HTTPHeader("X-BW-Visual-Capture"): "native-pdf-page/1",
-                    HTTPHeader("X-BW-Visual-Width"):
-                        String(capture.pixelWidth),
-                    HTTPHeader("X-BW-Visual-Height"):
-                        String(capture.pixelHeight),
+                capture: capture,
+                captureContract: "native-pdf-page/1",
+                ink: strokeCount > 0 ? "present" : "none",
+                delivery: delivery,
+                extraHeaders: [
                     HTTPHeader("X-BW-Visual-Page"): String(pageNumber),
-                    HTTPHeader("X-BW-Visual-Ink"):
-                        strokeCount > 0 ? "present" : "none",
-                    HTTPHeader("X-BW-Visual-Ink-Strokes"):
-                        String(strokeCount),
+                    HTTPHeader("X-BW-Visual-Ink-Strokes"): String(strokeCount),
                 ]
             )
         } catch let error as ReaderNativeVisualCaptureError {
@@ -690,6 +751,92 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
             return nativeVisualErrorResponse(
                 .pageCompositeFailed,
                 status: .internalServerError
+            )
+        }
+    }
+
+    private func nativeVisualDeliveryRequest(
+        _ request: HTTPRequest
+    ) async -> ReaderNativeVisualDeliveryRequest? {
+        let contentType = String(
+            (request.headers[.contentType] ?? "").split(separator: ";").first ?? ""
+        ).trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+        guard contentType == "application/json",
+              (Int(request.headers[.contentLength] ?? "") ?? 0) <= 8_192,
+              let data = try? await request.bodyData,
+              (2...8_192).contains(data.count),
+              let object = try? JSONSerialization.jsonObject(with: data)
+                as? [String: Any],
+              Set(object.keys) == ["call_id", "client_secret", "tool"],
+              let callID = object["call_id"] as? String,
+              let clientSecret = object["client_secret"] as? String,
+              let tool = object["tool"] as? String,
+              ["see_ink", "see_page", "see_figure"].contains(tool) else {
+            return nil
+        }
+        return ReaderNativeVisualDeliveryRequest(
+            callID: callID,
+            clientSecret: clientSecret,
+            tool: tool
+        )
+    }
+
+    private func nativeVisualCaptureResponse(
+        _ request: HTTPRequest,
+        capture: ReaderNativeVisualCaptureResult,
+        captureContract: String,
+        ink: String?,
+        delivery: ReaderNativeVisualDeliveryRequest?,
+        extraHeaders: HTTPHeaders = [:]
+    ) async -> HTTPResponse {
+        var headers = extraHeaders
+        headers[HTTPHeader("X-BW-Visual-Capture")] = captureContract
+        headers[HTTPHeader("X-BW-Visual-Width")] = String(capture.pixelWidth)
+        headers[HTTPHeader("X-BW-Visual-Height")] = String(capture.pixelHeight)
+        if let ink {
+            headers[HTTPHeader("X-BW-Visual-Ink")] = ink
+        }
+        guard let delivery else {
+            return dataResponse(
+                request,
+                data: capture.jpegData,
+                contentType: "image/jpeg",
+                cacheControl: "no-store",
+                additionalHeaders: headers
+            )
+        }
+        do {
+            try await ReaderRealtimeOpenAIClient.injectImage(
+                callID: delivery.callID,
+                clientSecret: delivery.clientSecret,
+                mediaType: "image/jpeg",
+                imageData: capture.jpegData
+            )
+            return jsonResponse(
+                request,
+                status: .ok,
+                object: [
+                    "ok": true,
+                    "delivered": true,
+                    "bytes": capture.jpegData.count,
+                    "ink": ink ?? "unknown",
+                    "capture": captureContract,
+                ],
+                additionalHeaders: headers
+            )
+        } catch {
+            let message = String(error.localizedDescription.prefix(240))
+            headers[HTTPHeader("X-BW-Reader-Error")] =
+                "BW_NATIVE_VISUAL_DELIVERY_FAILED"
+            return jsonResponse(
+                request,
+                status: .badGateway,
+                object: [
+                    "ok": false,
+                    "error": message,
+                    "stage": "realtime-delivery",
+                ],
+                additionalHeaders: headers
             )
         }
     }

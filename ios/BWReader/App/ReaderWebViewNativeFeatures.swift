@@ -1006,7 +1006,9 @@ extension ReaderWebViewModel {
     }
 
     /// Takes a pixel-accurate image of only the currently visible WKWebView.
-    /// It intentionally does not capture the full scrollable document.
+    /// It intentionally does not capture the full scrollable document. App
+    /// Realtime delivery keeps this JPEG in native code; the binary response
+    /// remains available for non-delivery callers and web fallbacks.
     func captureNativeViewportImage() async throws -> UIImage {
         guard webView.url != nil else {
             throw NativeReaderCaptureError.pageUnavailable
