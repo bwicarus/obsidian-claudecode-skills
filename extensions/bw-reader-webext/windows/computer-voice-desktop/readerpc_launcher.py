@@ -36,7 +36,7 @@ from readerpc_services import (
 )
 
 
-APP_VERSION = "0.1.7"
+APP_VERSION = "0.1.8"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 POLL_INTERVAL_MS = 2_500

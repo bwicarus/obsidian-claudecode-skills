@@ -299,7 +299,7 @@ class ShortcutBrokerRequestProcessor:
 # These identifiers are local constants.  Reader input is never accepted as an
 # application path, command, or AUMID.
 LOCAL_PACKAGED_APP_IDS = {
-    "codex-desktop": "OpenAI.Codex_2p2nqsd0c76g0!App",
+    "codex-desktop": "OpenAI.CodexBeta_2p2nqsd0c76g0!App",
     "chatgpt-classic": (
         "OpenAI.ChatGPT-Desktop_2p2nqsd0c76g0!ChatGPT"
     ),
