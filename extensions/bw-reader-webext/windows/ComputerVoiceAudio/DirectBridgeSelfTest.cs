@@ -3423,6 +3423,10 @@ internal static class DirectBridgeSelfTest
             installationRoot,
             "runtime",
             "computer-voice-direct.status.json");
+        string keepActivePath = System.IO.Path.Combine(
+            installationRoot,
+            "runtime",
+            "codex-voice-keepalive.json");
         await WriteConfigAsync(
             configPath,
             statusPath,
@@ -3442,7 +3446,7 @@ internal static class DirectBridgeSelfTest
                 lastUsedTimeStart: 100,
                 lastUsedTimeStop: 200);
         int transitionCount = 0;
-        DirectCodexVoiceControl control = new(
+        await using DirectCodexVoiceControl control = new(
             () => current,
             (active, before, cancellationToken) =>
             {
@@ -3460,7 +3464,9 @@ internal static class DirectBridgeSelfTest
                             before.LastUsedTimeStart,
                             before.LastUsedTimeStop) + 1);
                 return Task.FromResult(current);
-            });
+            },
+            keepActivePath: keepActivePath,
+            keepActivePollInterval: TimeSpan.FromSeconds(1));
         DirectBridgeProtocolSession session = new(
             "connection-codex-voice-control",
             origin,
@@ -3525,6 +3531,7 @@ internal static class DirectBridgeSelfTest
             && statusVoice.GetProperty("source").GetString()
                 == DirectCodexVoiceControl.StateSource
             && !statusVoice.GetProperty("shortcutSent").GetBoolean()
+            && !statusVoice.GetProperty("keepActive").GetBoolean()
             && transitionCount == 0
             && app.EnsureRunningCount == 0
             && app.WaitReadyCount == 0
@@ -3558,6 +3565,19 @@ internal static class DirectBridgeSelfTest
                 events,
                 frames).ConfigureAwait(false),
             "codex-voice-set");
+        JsonElement keepEnabled = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "codex-voice-keepalive-set",
+                    requestId = "codex-voice-keepalive-enable",
+                    enabled = true,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "codex-voice-keepalive-set");
         Require(
             HasExactCodexVoiceKeys(idempotent)
             && !idempotent.GetProperty("active").GetBoolean()
@@ -3565,11 +3585,48 @@ internal static class DirectBridgeSelfTest
             && HasExactCodexVoiceKeys(changed)
             && changed.GetProperty("active").GetBoolean()
             && changed.GetProperty("shortcutSent").GetBoolean()
+            && keepEnabled.GetProperty("active").GetBoolean()
+            && keepEnabled.GetProperty("keepActive").GetBoolean()
+            && control.KeepActive
+            && JsonDocument.Parse(File.ReadAllText(keepActivePath))
+                .RootElement.GetProperty("enabled").GetBoolean()
             && transitionCount == 1
             && coordinator.ActiveSessionId is null
             && media.StartCount == 0
             && media.StopCount == 0,
             "direct-codex-voice-set-is-idempotent-and-owner-neutral",
+            checks);
+
+        current = CodexVoiceActivitySnapshot.Available(
+            lastUsedTimeStart: current.LastUsedTimeStart,
+            lastUsedTimeStop: current.LastUsedTimeStart + 10);
+        await Task.Delay(TimeSpan.FromMilliseconds(1200))
+            .ConfigureAwait(false);
+        Require(
+            current.Active
+            && transitionCount == 2,
+            "direct-codex-voice-keepalive-recovers-a-later-local-close",
+            checks);
+
+        JsonElement keepDisabled = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "codex-voice-keepalive-set",
+                    requestId = "codex-voice-keepalive-disable",
+                    enabled = false,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "codex-voice-keepalive-set");
+        Require(
+            !keepDisabled.GetProperty("keepActive").GetBoolean()
+            && !control.KeepActive
+            && !JsonDocument.Parse(File.ReadAllText(keepActivePath))
+                .RootElement.GetProperty("enabled").GetBoolean(),
+            "direct-codex-voice-keepalive-persists-explicit-state",
             checks);
 
         JsonElement invalidType = await SendAsync(
@@ -3602,7 +3659,7 @@ internal static class DirectBridgeSelfTest
             && !unexpectedField.GetProperty("ok").GetBoolean()
             && unexpectedField.GetProperty("error").GetProperty("code")
                 .GetString() == "BW_COMPUTER_VOICE_DIRECT_MESSAGE_INVALID"
-            && transitionCount == 1,
+            && transitionCount == 2,
             "direct-codex-voice-set-requires-exact-boolean-payload",
             checks);
 
@@ -4068,6 +4125,7 @@ internal static class DirectBridgeSelfTest
             "active",
             "source",
             "shortcutSent",
+            "keepActive",
         });
     }
 
