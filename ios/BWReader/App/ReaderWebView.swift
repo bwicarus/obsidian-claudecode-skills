@@ -221,6 +221,19 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var readerWasBackgrounded = false
     private var webContentProcessNeedsReload = false
 
+    func bindNativeVisualCaptureCanvas(_ canvas: UIView) {
+        localRuntimeServer?.visualCaptureBroker.bind(
+            webView: webView,
+            pencilCanvas: canvas
+        )
+    }
+
+    func unbindNativeVisualCaptureCanvas(_ canvas: UIView) {
+        localRuntimeServer?.visualCaptureBroker.unbind(
+            pencilCanvas: canvas
+        )
+    }
+
     override init() {
         do {
             localRuntimeServer = try ReaderLocalRuntimeServer()

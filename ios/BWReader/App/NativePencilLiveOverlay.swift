@@ -473,6 +473,7 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
         canvas.addGestureRecognizer(pencilHover)
         context.coordinator.canvas = canvas
         context.coordinator.pathGesture = pencilPath
+        reader.bindNativeVisualCaptureCanvas(canvas)
         context.coordinator.installSelectionPreview(on: canvas)
         context.coordinator.applyState(
             to: canvas,
@@ -487,6 +488,7 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
         _ canvas: NativePencilPassthroughCanvas,
         context: Context
     ) {
+        reader.bindNativeVisualCaptureCanvas(canvas)
         context.coordinator.controller = controller
         context.coordinator.applyState(
             to: canvas,
@@ -495,6 +497,13 @@ private struct NativePencilCanvasRepresentable: UIViewRepresentable {
             width: selectedWidth
         )
         context.coordinator.retryIfRequested()
+    }
+
+    static func dismantleUIView(
+        _ canvas: NativePencilPassthroughCanvas,
+        coordinator: Coordinator
+    ) {
+        coordinator.reader.unbindNativeVisualCaptureCanvas(canvas)
     }
 
     @MainActor

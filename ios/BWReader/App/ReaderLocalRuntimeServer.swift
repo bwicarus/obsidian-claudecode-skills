@@ -226,6 +226,7 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
     let state: ReaderLocalRuntimeState
     let piProxyBroker: ReaderNativePiProxyBroker
     let pageRenderer: ReaderNativePDFPageRenderer
+    let visualCaptureBroker: ReaderNativeVisualCaptureBroker
 
     func handleRequest(_ request: HTTPRequest) async throws -> HTTPResponse {
         guard request.method == .GET || request.method == .HEAD else {
@@ -334,6 +335,8 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
             return await serveShell(request, relative: relative)
         case "native-api/book-meta":
             return await serveBookMeta(request)
+        case "native-api/visual-capture":
+            return await serveNativeVisualCapture(request)
         default:
             break
         }
@@ -468,6 +471,111 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                 "page_h": Double(bounds.height),
                 "mtime": Int(modifiedAt.timeIntervalSince1970),
             ]
+        )
+    }
+
+    private func serveNativeVisualCapture(
+        _ request: HTTPRequest
+    ) async -> HTTPResponse {
+        guard request.method == .GET else {
+            return response(
+                status: .methodNotAllowed,
+                text: "native visual capture requires GET",
+                headers: [HTTPHeader("Allow"): "GET"]
+            )
+        }
+        guard trustedResourceSurface(
+            referer: request.headers[HTTPHeader("Referer")]
+        ) != nil else {
+            return response(
+                status: .forbidden,
+                text: "native visual capture requires a trusted reader shell",
+                headers: [
+                    HTTPHeader("X-BW-Reader-Error"):
+                        "BW_NATIVE_VISUAL_UNTRUSTED"
+                ]
+            )
+        }
+        let scope = request.query["scope"] ?? "viewport"
+        let region: ReaderNativeVisualCaptureRegion?
+        if scope == "viewport" {
+            guard request.query["x"] == nil,
+                  request.query["y"] == nil,
+                  request.query["w"] == nil,
+                  request.query["h"] == nil else {
+                return nativeVisualErrorResponse(
+                    .invalidRegion,
+                    status: .badRequest
+                )
+            }
+            region = nil
+        } else if scope == "region",
+                  let x = Double(request.query["x"] ?? ""),
+                  let y = Double(request.query["y"] ?? ""),
+                  let width = Double(request.query["w"] ?? ""),
+                  let height = Double(request.query["h"] ?? "") {
+            region = ReaderNativeVisualCaptureRegion(
+                x: x,
+                y: y,
+                width: width,
+                height: height
+            )
+        } else {
+            return nativeVisualErrorResponse(
+                .invalidRegion,
+                status: .badRequest
+            )
+        }
+
+        do {
+            let capture = try await visualCaptureBroker.capture(region: region)
+            return dataResponse(
+                request,
+                data: capture.jpegData,
+                contentType: "image/jpeg",
+                cacheControl: "no-store",
+                additionalHeaders: [
+                    HTTPHeader("X-BW-Visual-Capture"):
+                        "native-hierarchy/1",
+                    HTTPHeader("X-BW-Visual-Width"):
+                        String(capture.pixelWidth),
+                    HTTPHeader("X-BW-Visual-Height"):
+                        String(capture.pixelHeight),
+                ]
+            )
+        } catch let error as ReaderNativeVisualCaptureError {
+            let status: HTTPStatusCode
+            switch error {
+            case .invalidRegion:
+                status = .badRequest
+            case .pageUnavailable, .pencilOverlayUnavailable,
+                 .hierarchyUnavailable, .emptyViewport:
+                status = .conflict
+            case .hierarchyRenderFailed, .jpegEncodingFailed,
+                 .imageTooLarge:
+                status = .internalServerError
+            }
+            return nativeVisualErrorResponse(error, status: status)
+        } catch {
+            return response(
+                status: .internalServerError,
+                text: "原生合成图：未分类失败",
+                headers: [
+                    HTTPHeader("X-BW-Reader-Error"):
+                        "BW_NATIVE_VISUAL_UNKNOWN"
+                ]
+            )
+        }
+    }
+
+    private func nativeVisualErrorResponse(
+        _ error: ReaderNativeVisualCaptureError,
+        status: HTTPStatusCode
+    ) -> HTTPResponse {
+        response(
+            status: status,
+            text: error.localizedDescription,
+            headers: [HTTPHeader("X-BW-Reader-Error"): error.code]
         )
     }
 
@@ -977,6 +1085,7 @@ final class ReaderLocalRuntimeServer {
     private let cspNonce: String
     private let state: ReaderLocalRuntimeState
     let piProxyBroker: ReaderNativePiProxyBroker
+    let visualCaptureBroker: ReaderNativeVisualCaptureBroker
     private let server: HTTPServer
     private let bundleVerificationTask: Task<Void, Error>
     private let bundleVerificationCacheToken: String
@@ -1055,6 +1164,7 @@ final class ReaderLocalRuntimeServer {
         cspNonce = try Self.makeRandomHex(byteCount: 32)
         state = ReaderLocalRuntimeState()
         piProxyBroker = ReaderNativePiProxyBroker()
+        visualCaptureBroker = ReaderNativeVisualCaptureBroker()
         let address = try sockaddr_in.inet(ip4: Self.host, port: Self.port)
         let handler = ReaderLocalHTTPHandler(
             capabilityToken: capabilityToken,
@@ -1064,7 +1174,8 @@ final class ReaderLocalRuntimeServer {
             staticRevision: String(manifestDigest.prefix(24)),
             state: state,
             piProxyBroker: piProxyBroker,
-            pageRenderer: ReaderNativePDFPageRenderer()
+            pageRenderer: ReaderNativePDFPageRenderer(),
+            visualCaptureBroker: visualCaptureBroker
         )
         server = HTTPServer(
             address: address,

@@ -22,6 +22,272 @@ enum NativeReaderCaptureError: LocalizedError {
     }
 }
 
+struct ReaderNativeVisualCaptureRegion: Sendable {
+    let x: Double
+    let y: Double
+    let width: Double
+    let height: Double
+}
+
+struct ReaderNativeVisualCaptureResult: Sendable {
+    let jpegData: Data
+    let pixelWidth: Int
+    let pixelHeight: Int
+}
+
+enum ReaderNativeVisualCaptureError: LocalizedError, Sendable {
+    case invalidRegion
+    case pageUnavailable
+    case pencilOverlayUnavailable
+    case hierarchyUnavailable
+    case emptyViewport
+    case hierarchyRenderFailed
+    case jpegEncodingFailed
+    case imageTooLarge(Int)
+
+    var code: String {
+        switch self {
+        case .invalidRegion:
+            return "BW_NATIVE_VISUAL_INVALID_REGION"
+        case .pageUnavailable:
+            return "BW_NATIVE_VISUAL_PAGE_UNAVAILABLE"
+        case .pencilOverlayUnavailable:
+            return "BW_NATIVE_VISUAL_PENCIL_OVERLAY_UNAVAILABLE"
+        case .hierarchyUnavailable:
+            return "BW_NATIVE_VISUAL_HIERARCHY_UNAVAILABLE"
+        case .emptyViewport:
+            return "BW_NATIVE_VISUAL_EMPTY_VIEWPORT"
+        case .hierarchyRenderFailed:
+            return "BW_NATIVE_VISUAL_RENDER_FAILED"
+        case .jpegEncodingFailed:
+            return "BW_NATIVE_VISUAL_JPEG_FAILED"
+        case .imageTooLarge:
+            return "BW_NATIVE_VISUAL_IMAGE_TOO_LARGE"
+        }
+    }
+
+    var errorDescription: String? {
+        switch self {
+        case .invalidRegion:
+            return "原生合成图区域无效"
+        case .pageUnavailable:
+            return "原生合成图：阅读器页面当前不在屏幕上"
+        case .pencilOverlayUnavailable:
+            return "原生合成图：PencilKit 笔迹层尚未挂载"
+        case .hierarchyUnavailable:
+            return "原生合成图：网页与笔迹层没有公共视图层级"
+        case .emptyViewport:
+            return "原生合成图：当前阅读视口为空"
+        case .hierarchyRenderFailed:
+            return "原生合成图：Apple 视图层级渲染失败"
+        case .jpegEncodingFailed:
+            return "原生合成图：JPEG 编码失败"
+        case .imageTooLarge(let byteCount):
+            return "原生合成图：压缩后仍过大（\(byteCount) 字节）"
+        }
+    }
+}
+
+/// Captures exactly what the App renders: the WKWebView plus every native
+/// overlay above it, including PencilKit. The broker is main-actor isolated
+/// because `drawHierarchy` and view-tree traversal are UIKit operations.
+///
+/// The HTTP route returns binary JPEG rather than base64. The page converts it
+/// only once at the final Realtime boundary, avoiding a second 4/3 expansion in
+/// the loopback server.
+@MainActor
+final class ReaderNativeVisualCaptureBroker {
+    private static let maximumLongEdge: CGFloat = 1_600
+    private static let maximumJPEGBytes = 675_000
+    private static let minimumJPEGBytes = 3_000
+    private static let compressionQualities: [CGFloat] = [0.85, 0.70, 0.50]
+    private static let fallbackLongEdges: [CGFloat] = [1_280, 1_024, 800]
+
+    private weak var webView: WKWebView?
+    private weak var pencilCanvas: UIView?
+
+    func bind(webView: WKWebView, pencilCanvas: UIView) {
+        self.webView = webView
+        self.pencilCanvas = pencilCanvas
+    }
+
+    func unbind(pencilCanvas: UIView) {
+        guard self.pencilCanvas === pencilCanvas else { return }
+        self.pencilCanvas = nil
+    }
+
+    func capture(
+        region: ReaderNativeVisualCaptureRegion?
+    ) throws -> ReaderNativeVisualCaptureResult {
+        guard let webView, webView.window != nil else {
+            throw ReaderNativeVisualCaptureError.pageUnavailable
+        }
+        guard let pencilCanvas, pencilCanvas.window != nil else {
+            throw ReaderNativeVisualCaptureError.pencilOverlayUnavailable
+        }
+        guard let host = Self.lowestCommonAncestor(webView, pencilCanvas) else {
+            throw ReaderNativeVisualCaptureError.hierarchyUnavailable
+        }
+
+        host.layoutIfNeeded()
+        let viewport = webView.convert(webView.bounds, to: host)
+            .intersection(host.bounds)
+        guard viewport.width >= 8, viewport.height >= 8 else {
+            throw ReaderNativeVisualCaptureError.emptyViewport
+        }
+        let captureBounds = try Self.captureBounds(
+            viewport: viewport,
+            region: region
+        ).integral
+        guard captureBounds.width >= 8, captureBounds.height >= 8 else {
+            throw ReaderNativeVisualCaptureError.emptyViewport
+        }
+
+        let displayScale = webView.window?.screen.scale ?? UIScreen.main.scale
+        let boundedScale = max(
+            0.5,
+            min(
+                displayScale,
+                Self.maximumLongEdge /
+                    max(captureBounds.width, captureBounds.height)
+            )
+        )
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = boundedScale
+        format.opaque = true
+        var hierarchyRendered = false
+        let image = UIGraphicsImageRenderer(
+            size: captureBounds.size,
+            format: format
+        ).image { context in
+            context.cgContext.setFillColor(UIColor.black.cgColor)
+            context.cgContext.fill(
+                CGRect(origin: .zero, size: captureBounds.size)
+            )
+            context.cgContext.translateBy(
+                x: -captureBounds.minX,
+                y: -captureBounds.minY
+            )
+            hierarchyRendered = host.drawHierarchy(
+                in: host.bounds,
+                afterScreenUpdates: true
+            )
+        }
+        guard hierarchyRendered else {
+            throw ReaderNativeVisualCaptureError.hierarchyRenderFailed
+        }
+        return try Self.encode(image)
+    }
+
+    private static func captureBounds(
+        viewport: CGRect,
+        region: ReaderNativeVisualCaptureRegion?
+    ) throws -> CGRect {
+        guard let region else { return viewport }
+        let values = [region.x, region.y, region.width, region.height]
+        guard values.allSatisfy(\.isFinite),
+              region.width > 0, region.height > 0 else {
+            throw ReaderNativeVisualCaptureError.invalidRegion
+        }
+        let unit = CGRect(
+            x: CGFloat(region.x),
+            y: CGFloat(region.y),
+            width: CGFloat(region.width),
+            height: CGFloat(region.height)
+        ).intersection(CGRect(x: 0, y: 0, width: 1, height: 1))
+        guard !unit.isNull, unit.width > 0, unit.height > 0 else {
+            throw ReaderNativeVisualCaptureError.invalidRegion
+        }
+        return CGRect(
+            x: viewport.minX + unit.minX * viewport.width,
+            y: viewport.minY + unit.minY * viewport.height,
+            width: unit.width * viewport.width,
+            height: unit.height * viewport.height
+        ).intersection(viewport)
+    }
+
+    private static func lowestCommonAncestor(
+        _ first: UIView,
+        _ second: UIView
+    ) -> UIView? {
+        var secondAncestors = Set<ObjectIdentifier>()
+        var candidate: UIView? = second
+        while let view = candidate {
+            secondAncestors.insert(ObjectIdentifier(view))
+            candidate = view.superview
+        }
+        candidate = first
+        while let view = candidate {
+            if secondAncestors.contains(ObjectIdentifier(view)) {
+                return view
+            }
+            candidate = view.superview
+        }
+        return nil
+    }
+
+    private static func encode(
+        _ image: UIImage
+    ) throws -> ReaderNativeVisualCaptureResult {
+        guard image.cgImage != nil else {
+            throw ReaderNativeVisualCaptureError.jpegEncodingFailed
+        }
+        var candidate = image
+        var lastByteCount = 0
+        let longEdges = [maximumLongEdge] + fallbackLongEdges
+        for (index, longEdge) in longEdges.enumerated() {
+            if index > 0 {
+                candidate = try resized(candidate, maximumLongEdge: longEdge)
+            }
+            for quality in compressionQualities {
+                guard let data = candidate.jpegData(
+                    compressionQuality: quality
+                ) else {
+                    throw ReaderNativeVisualCaptureError.jpegEncodingFailed
+                }
+                lastByteCount = data.count
+                guard data.count >= minimumJPEGBytes else { continue }
+                if data.count <= maximumJPEGBytes,
+                   let cgImage = candidate.cgImage {
+                    return ReaderNativeVisualCaptureResult(
+                        jpegData: data,
+                        pixelWidth: cgImage.width,
+                        pixelHeight: cgImage.height
+                    )
+                }
+            }
+        }
+        throw ReaderNativeVisualCaptureError.imageTooLarge(lastByteCount)
+    }
+
+    private static func resized(
+        _ image: UIImage,
+        maximumLongEdge: CGFloat
+    ) throws -> UIImage {
+        guard let cgImage = image.cgImage else {
+            throw ReaderNativeVisualCaptureError.jpegEncodingFailed
+        }
+        let source = CGSize(
+            width: CGFloat(cgImage.width),
+            height: CGFloat(cgImage.height)
+        )
+        let scale = min(1, maximumLongEdge / max(source.width, source.height))
+        let target = CGSize(
+            width: max(1, floor(source.width * scale)),
+            height: max(1, floor(source.height * scale))
+        )
+        let format = UIGraphicsImageRendererFormat()
+        format.scale = 1
+        format.opaque = true
+        return UIGraphicsImageRenderer(size: target, format: format).image {
+            context in
+            context.cgContext.setFillColor(UIColor.black.cgColor)
+            context.cgContext.fill(CGRect(origin: .zero, size: target))
+            image.draw(in: CGRect(origin: .zero, size: target))
+        }
+    }
+}
+
 private struct NativeReaderJavaScriptSnapshot: Decodable {
     let title: String
     let url: String
