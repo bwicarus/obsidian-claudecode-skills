@@ -964,8 +964,17 @@
     RC.toolChip.setMeta(c, _chipMeta(p));
     if (p.status === 'error') {
       RC.toolChip.fail(c, p.label || '失败');
-      try { if (RC.turnCard && window.__asstVoiceTid) RC.turnCard.addPart(window.__asstVoiceTid(),
-        { kind: 'tool', tool: p.tool || '', label: (p.label || '工具') + '(失败)', error: p.label || '失败' }); } catch (e) {}
+      try {
+        if (RC.turnCard && window.__asstVoiceTid) {
+          var errorDetail = String(p.rag || p.result_brief || p.label || '失败').slice(0, 6000);
+          RC.turnCard.addPart(window.__asstVoiceTid(), {
+            kind: 'tool', tool: p.tool || '', label: (p.label || '工具') + '(失败)',
+            args: p.args || {}, steps: p.sub_steps || [], result: errorDetail,
+            vision: p.vision || [], took_s: p.took_s, model: p.model,
+            error: errorDetail
+          });
+        }
+      } catch (e) {}
       return;
     }
     // ④ 同步制卡(2026-07-21 用户拍板:工具等做完才返回,rag 直接带 cards)→ 不轮询,直接双宿主显示卡片
@@ -5444,7 +5453,11 @@
         route: route,
         stage: stage || undefined,
         call: _rtc.callId ? 'present' : 'missing',
-        sideband: _rtc.sidebandKey ? 'present' : 'missing'
+        sideband: _rtc.sidebandKey ? 'present' : 'missing',
+        native_local: window.__BW_NATIVE_LOCAL_READER__ === true,
+        native_flag: window.__BW_NATIVE_OPENAI_REALTIME__ === true,
+        native_bridge: !!(window.__bwNativeRealtime &&
+          typeof window.__bwNativeRealtime.request === 'function')
       });
     }
     _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: out } });

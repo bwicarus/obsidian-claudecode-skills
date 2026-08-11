@@ -967,8 +967,17 @@ if (window.__bwPwaProviderOnly) return;
     RC.toolChip.setMeta(c, _chipMeta(p));
     if (p.status === 'error') {
       RC.toolChip.fail(c, p.label || '失败');
-      try { if (RC.turnCard && window.__asstVoiceTid) RC.turnCard.addPart(window.__asstVoiceTid(),
-        { kind: 'tool', tool: p.tool || '', label: (p.label || '工具') + '(失败)', error: p.label || '失败' }); } catch (e) {}
+      try {
+        if (RC.turnCard && window.__asstVoiceTid) {
+          var errorDetail = String(p.rag || p.result_brief || p.label || '失败').slice(0, 6000);
+          RC.turnCard.addPart(window.__asstVoiceTid(), {
+            kind: 'tool', tool: p.tool || '', label: (p.label || '工具') + '(失败)',
+            args: p.args || {}, steps: p.sub_steps || [], result: errorDetail,
+            vision: p.vision || [], took_s: p.took_s, model: p.model,
+            error: errorDetail
+          });
+        }
+      } catch (e) {}
       return;
     }
     // ④ 同步制卡(2026-07-21 用户拍板:工具等做完才返回,rag 直接带 cards)→ 不轮询,直接双宿主显示卡片
@@ -5278,6 +5287,19 @@ if (window.__bwPwaProviderOnly) return;
     onToolStatus({ status: 'running', label: name });
     var out = '', ok = true, label = name, took = null, argsUsed = args, vision = null, res;
     try {
+      if (!_rtc.nativeDirect && /^(see_ink|see_page|see_figure)$/.test(name)) {
+        // Refused rather than attempted.
+        //
+        // Without the native route the request would go to Pi, which has no
+        // access to ink drawn on this device: it can only ever come back with
+        // an image that lacks the very thing the user asked about, or with a
+        // generic failure. Saying so plainly beats letting it look like a
+        // compositor bug.
+        throw _visualStageError(
+          '模型工具触发/路由',
+          '本机直连未启用（native_direct 未置位），视觉工具无法看到本机笔迹'
+        );
+      }
       if (_rtc.nativeDirect && /^(see_ink|see_page|see_figure)$/.test(name)) {
         var nativeShot = await _nativeRealtimeVisual(name, args);
         vision = [nativeShot];
@@ -5417,7 +5439,30 @@ if (window.__bwPwaProviderOnly) return;
         var slim = JSON.stringify(_resFeed);
         out = (slim && slim.length > 2) ? slim.slice(0, 1800) : '(无文本结果,界面元素已显示在用户屏幕上)';
       }
-    } catch (e) { ok = false; out = JSON.stringify({ error: String(e).slice(0, 200) }); }
+    } catch (e) {
+      ok = false;
+      // Says which route ran, not just what went wrong.
+      //
+      // Visual tools take one of two paths: local composition inside the App
+      // (nativeDirect) or a round trip to Pi. Pi cannot see ink drawn on this
+      // device, so that route fails by construction -- yet both routes reported
+      // the same bare sentence, and the tool card showed "no extra content".
+      // Knowing the route is the difference between "fix the compositor" and
+      // "find out why the native route was not taken".
+      var route = _rtc.nativeDirect ? 'local' : 'server';
+      var stage = e && e.bwVisualStage ? e.bwVisualStage : '';
+      out = JSON.stringify({
+        error: String((e && e.message) || e).slice(0, 200),
+        route: route,
+        stage: stage || undefined,
+        call: _rtc.callId ? 'present' : 'missing',
+        sideband: _rtc.sidebandKey ? 'present' : 'missing',
+        native_local: window.__BW_NATIVE_LOCAL_READER__ === true,
+        native_flag: window.__BW_NATIVE_OPENAI_REALTIME__ === true,
+        native_bridge: !!(window.__bwNativeRealtime &&
+          typeof window.__bwNativeRealtime.request === 'function')
+      });
+    }
     _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: out } });
     if (!_rtcTool._silent) _rtcRespCreate(name === 'deep_think' ? 'deep' : 'tool', ok && String(out || '').length > 800);   // 66c/74:silent=静默入库不发言
     _rtcTool._silent = false;

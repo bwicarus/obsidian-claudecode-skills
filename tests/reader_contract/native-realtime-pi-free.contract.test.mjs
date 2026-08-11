@@ -283,6 +283,35 @@ test("see_ink failures preserve the actual composition, identity, storage, and t
   assert.doesNotMatch(injection, /throw ReaderRealtimeCredentialError\.imageTooLarge/);
 });
 
+test("visual-tool failures keep their route and stage visible in the rendered tool flow", () => {
+  const toolRun = VOICE.slice(
+    VOICE.indexOf("async function _rtcTool"),
+    VOICE.indexOf("function _rtcCapReset"),
+  );
+  assert.match(
+    toolRun,
+    /!_rtc\.nativeDirect && \/\^\(see_ink\|see_page\|see_figure\)\$\//,
+  );
+  assert.match(toolRun, /'模型工具触发\/路由'/);
+  assert.match(toolRun, /route: route/);
+  assert.match(toolRun, /stage: stage \|\| undefined/);
+  assert.match(toolRun, /native_local: window\.__BW_NATIVE_LOCAL_READER__ === true/);
+  assert.match(toolRun, /native_flag: window\.__BW_NATIVE_OPENAI_REALTIME__ === true/);
+  assert.match(toolRun, /native_bridge: !!\(window\.__bwNativeRealtime/);
+
+  const chipEnd = VOICE.slice(
+    VOICE.indexOf("function _chipEnd"),
+    VOICE.indexOf("function onToolStatus"),
+  );
+  const errorBranch = chipEnd.slice(
+    chipEnd.indexOf("if (p.status === 'error')"),
+    chipEnd.indexOf("// ④", chipEnd.indexOf("if (p.status === 'error')")),
+  );
+  assert.match(errorBranch, /errorDetail = String\(p\.rag \|\| p\.result_brief/);
+  assert.match(errorBranch, /result: errorDetail/);
+  assert.match(errorBranch, /error: errorDetail/);
+});
+
 test("native direct keeps local work in App and exposes only explicit Pi AI tools", () => {
   assert.match(VOICE, /function _rtcCreFetch\(\) \{\s*if \(_rtc\.nativeDirect\) return;/);
   assert.match(VOICE, /function _rtcFetchPageText\(pk\)[\s\S]{0,180}if \(_rtc\.nativeDirect\) return;/);
