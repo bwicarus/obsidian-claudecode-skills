@@ -55,6 +55,8 @@ if (window.__bwPwaProviderOnly) return;
   var COMPUTER_TARGET_CLASSIC = "chatgpt-classic";
   var ACTIVE_READING_POLL_MS = 250;
   var ACTIVE_READING_HEARTBEAT_MS = 60000;
+  var LOCAL_PAGE_CONTEXT_POLL_MS = 1500;
+  var LOCAL_PAGE_TEXT_WAIT_MS = 1200;
   var SNAPSHOT_RECONNECT_MS = 1000;
   var CONTEXT_BOOTSTRAP_LIMIT = 500;
   var CONTEXT_LIVE_LIMIT = 32;
@@ -1041,7 +1043,7 @@ if (window.__bwPwaProviderOnly) return;
     exactObject(
       value,
       ["status", "active", "source", "shortcutSent"],
-      [],
+      ["keepActive"],
       label || "Codex 语音响应"
     );
     var status = safeText(
@@ -1085,6 +1087,19 @@ if (window.__bwPwaProviderOnly) return;
         "BW_COMPUTER_VOICE_DIRECT_SCHEMA",
         false
       );
+    }
+    if (Object.prototype.hasOwnProperty.call(value, "keepActive")) {
+      if (typeof value.keepActive !== "boolean") {
+        throw directError(
+          "Codex 语音 keepActive 字段无效",
+          "BW_COMPUTER_VOICE_DIRECT_SCHEMA",
+          false
+        );
+      }
+    } else {
+      // Older Windows services remain readable, but the new setting stays
+      // visibly unavailable until the service that can enforce it is online.
+      value.keepActive = null;
     }
     return value;
   }
@@ -3234,6 +3249,38 @@ if (window.__bwPwaProviderOnly) return;
     });
   }
 
+  function setCodexVoiceKeepActive(enabled) {
+    if (typeof enabled !== "boolean") {
+      return Promise.reject(directError(
+        "Codex 语音持续运行目标状态无效",
+        "BW_COMPUTER_VOICE_DIRECT_SCHEMA",
+        false
+      ));
+    }
+    if (codexVoiceSetPromise) return codexVoiceSetPromise;
+    var channel = null;
+    var work = openDirect(null, function (created) {
+      channel = created;
+    }).then(function (opened) {
+      return opened.request(
+        "codex-voice-keepalive-set",
+        { enabled: enabled },
+        25000
+      );
+    }).then(function (value) {
+      return normalizeCodexVoicePayload(value, "Codex 语音持续运行响应");
+    });
+    var tracked = work.finally(function () {
+      var closePromise = channel ? channel.close() : Promise.resolve();
+      channel = null;
+      return closePromise;
+    });
+    codexVoiceSetPromise = tracked;
+    return tracked.finally(function () {
+      if (codexVoiceSetPromise === tracked) codexVoiceSetPromise = null;
+    });
+  }
+
   function makeAudioSurface() {
     var AudioContextCtor = window.AudioContext || window.webkitAudioContext;
     if (typeof AudioContextCtor !== "function") {
@@ -4510,6 +4557,202 @@ if (window.__bwPwaProviderOnly) return;
     return String(left) === String(right);
   }
 
+  function cleanLocalPageText(value, maximum) {
+    value = String(value == null ? "" : value)
+      .replace(/\u0000/g, "")
+      .replace(/\r\n?/g, "\n")
+      .replace(/[ \t]+/g, " ")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+    return value.slice(0, maximum);
+  }
+
+  function localNativePageRuntime() {
+    try {
+      var runtime = window.BWReaderRuntime &&
+        window.BWReaderRuntime.nativeLocalRuntime;
+      return runtime && typeof runtime.publishPageContext === "function"
+        ? runtime : null;
+    } catch (_) { return null; }
+  }
+
+  function boundedLocalPageTask(task, fallback) {
+    return new Promise(function (resolve) {
+      var settled = false;
+      var finish = function (value) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      };
+      var timer = setTimeout(function () {
+        finish(fallback);
+      }, LOCAL_PAGE_TEXT_WAIT_MS);
+      Promise.resolve(task).then(finish, function () { finish(fallback); });
+    });
+  }
+
+  function localDOMPageText(page, visibleOnly) {
+    try {
+      if (!document || typeof document.querySelector !== "function") return "";
+      var wrap = document.querySelector(
+        '.page-wrap[data-page-num="' + String(page) + '"]'
+      );
+      var chars = wrap && wrap.__charBoxes;
+      if (!Array.isArray(chars) || !chars.length) return "";
+      if (!visibleOnly) {
+        return cleanLocalPageText(chars.map(function (item) {
+          return item && item.c != null ? String(item.c) : "";
+        }).join(""), 12000);
+      }
+      var main = document.getElementById && document.getElementById("main");
+      var layer = wrap.__charLayer;
+      if (!main || !layer || typeof main.getBoundingClientRect !== "function" ||
+          typeof layer.getBoundingClientRect !== "function") return "";
+      var viewport = main.getBoundingClientRect();
+      var bounds = layer.getBoundingClientRect();
+      var layoutWidth = Number(layer.clientWidth || wrap.clientWidth) || 0;
+      var layoutHeight = Number(layer.clientHeight || wrap.clientHeight) || 0;
+      if (!bounds.width || !bounds.height || !layoutWidth || !layoutHeight) return "";
+      var sx = bounds.width / layoutWidth;
+      var sy = bounds.height / layoutHeight;
+      var visible = chars.filter(function (item) {
+        if (!item || item.c == null) return false;
+        var left = bounds.left + Number(item.left || 0) * sx;
+        var top = bounds.top + Number(item.top || 0) * sy;
+        var right = left + Math.max(1, Number(item.width || 0) * sx);
+        var bottom = top + Math.max(1, Number(item.height || 0) * sy);
+        return right > viewport.left && left < viewport.right &&
+          bottom > viewport.top && top < viewport.bottom;
+      }).map(function (item) { return String(item.c); }).join("");
+      return cleanLocalPageText(visible, 5000);
+    } catch (_) { return ""; }
+  }
+
+  function localAdapterVisibleText() {
+    try {
+      var adapter = RC && typeof RC.adapter === "function" ? RC.adapter() : null;
+      var context = adapter && typeof adapter.getContext === "function"
+        ? adapter.getContext() : null;
+      return cleanLocalPageText(
+        context && (context.visible_text || context.visibleText) || "",
+        5000
+      );
+    } catch (_) { return ""; }
+  }
+
+  function localPageRecord(page, fallbackText) {
+    page = Number(page) || 0;
+    var fallback = cleanLocalPageText(
+      fallbackText || localDOMPageText(page, false),
+      12000
+    );
+    if (!page) return Promise.resolve(fallback);
+    try {
+      var provider = window.BWReaderRuntime &&
+        window.BWReaderRuntime.pageTextProvider;
+      if (!provider || provider.contract !== "reader-page-text-provider/1" ||
+          typeof provider.pageChars !== "function") {
+        return Promise.resolve(fallback);
+      }
+      return boundedLocalPageTask(provider.pageChars(page), null).then(
+        function (result) {
+          var chars = result && Array.isArray(result.chars) ? result.chars : [];
+          var text = cleanLocalPageText(chars.map(function (item) {
+            return item && item.c != null ? String(item.c) : "";
+          }).join(""), 12000);
+          return text || fallback;
+        }
+      );
+    } catch (_) { return Promise.resolve(fallback); }
+  }
+
+  function buildLocalPageContext(current) {
+    var page = Number(current.page) || 0;
+    var visible = localAdapterVisibleText() || localDOMPageText(page, true);
+    var previousPage = page > 1 ? page - 1 : 0;
+    var nextPage = page ? page + 1 : 0;
+    return Promise.all([
+      previousPage ? localPageRecord(previousPage, "") : Promise.resolve(""),
+      localPageRecord(page, visible),
+      nextPage ? localPageRecord(nextPage, "") : Promise.resolve("")
+    ]).then(function (records) {
+      var currentText = records[1] || visible;
+      if (!visible) visible = currentText.slice(0, 5000);
+      var before = records[0] ? records[0].slice(-2200) : "";
+      var after = records[2] ? records[2].slice(0, 2200) : "";
+      var exactIndex = visible ? currentText.indexOf(visible) : -1;
+      if (exactIndex >= 0) {
+        before = cleanLocalPageText(
+          (before ? before + "\n" : "") +
+          currentText.slice(Math.max(0, exactIndex - 1800), exactIndex),
+          4000
+        );
+        after = cleanLocalPageText(
+          currentText.slice(exactIndex + visible.length, exactIndex + visible.length + 1800) +
+          (after ? "\n" + after : ""),
+          4000
+        );
+      }
+      var sections = [];
+      if (before) sections.push("【当前显示区域之前】\n" + before);
+      if (visible) {
+        sections.push("【当前显示区域（重点）】\n" + visible);
+      } else if (currentText) {
+        sections.push("【当前页文字（视口范围暂不可精确定位）】\n" + currentText);
+      }
+      if (after) sections.push("【当前显示区域之后】\n" + after);
+      var text = sections.join("\n\n");
+      var truncated = text.length > 12000 ||
+        currentText.length >= 12000 || records[0].length >= 12000 ||
+        records[2].length >= 12000;
+      text = text.slice(0, 12000);
+      return {
+        kind: current.kind,
+        file: current.file,
+        page: current.page,
+        title: current.title || "",
+        text: text,
+        textAvailable: !!text.trim(),
+        textSource: "app-local-visible-window",
+        fallbackReason: text ? null : "本机文字层尚未提供当前页文字",
+        truncated: truncated
+      };
+    });
+  }
+
+  function maybePublishLocalPageContext(state, pump, current) {
+    var runtime = localNativePageRuntime();
+    var now = Date.now();
+    if (!runtime || (current.kind !== "pdf" && current.kind !== "epub") ||
+        pump.pageContextInFlight ||
+        now - pump.lastPageContextCheckAt < LOCAL_PAGE_CONTEXT_POLL_MS) return;
+    pump.lastPageContextCheckAt = now;
+    pump.pageContextInFlight = true;
+    Promise.resolve(typeof runtime.ready === "function" ? runtime.ready() : null)
+      .then(function () { return buildLocalPageContext(current); })
+      .then(function (payload) {
+        if (!activeReadingPumpAlive(state)) return null;
+        var latest = localActiveReadingSnapshot();
+        if (!latest || latest.file !== current.file ||
+            !sameActiveScalar(latest.page, current.page)) return null;
+        var signature = JSON.stringify(payload);
+        if (signature === pump.lastPageContextSignature) return null;
+        return Promise.resolve(runtime.publishPageContext(payload)).then(function () {
+          pump.lastPageContextSignature = signature;
+          pump.lastPageContextError = "";
+        });
+      }).catch(function (error) {
+        var message = String(error && error.message || error || "本机正文上报失败");
+        if (message !== pump.lastPageContextError) {
+          pump.lastPageContextError = message;
+          try { if (window.dlog) window.dlog("本机快照正文失败: " + message); } catch (_) {}
+        }
+      }).finally(function () {
+        pump.pageContextInFlight = false;
+      });
+  }
+
   function activeReadingPumpAlive(state) {
     return !!(
       state &&
@@ -4576,6 +4819,7 @@ if (window.__bwPwaProviderOnly) return;
       return;
     }
     observeReaderVisualPage(current);
+    maybePublishLocalPageContext(state, pump, current);
     var signature = JSON.stringify(current);
     var now = Date.now();
     if (
@@ -4631,6 +4875,10 @@ if (window.__bwPwaProviderOnly) return;
       inFlight: false,
       lastSignature: null,
       lastSentAt: 0,
+      pageContextInFlight: false,
+      lastPageContextCheckAt: 0,
+      lastPageContextSignature: null,
+      lastPageContextError: "",
     };
     runActiveReadingPump(state);
   }
@@ -6088,6 +6336,11 @@ if (window.__bwPwaProviderOnly) return;
       '<button type="button" class="ams-btn" data-role="codex-voice-toggle" ' +
       'disabled>Codex 语音状态不可用</button>' +
       '</div>' +
+      '<label class="ams-tdef" style="display:flex;align-items:center;' +
+      'gap:8px;margin-top:9px">' +
+      '<input type="checkbox" data-role="codex-voice-keepalive" disabled>' +
+      '<span>保持 Codex 语音开启（自动关闭后由 Windows 恢复）</span>' +
+      '</label>' +
       '<div class="ams-tdef" data-role="codex-voice-error" ' +
       'style="display:none;margin-top:7px;white-space:pre-wrap;' +
       'user-select:text;color:#ffb4a8"></div>' +
@@ -6106,12 +6359,17 @@ if (window.__bwPwaProviderOnly) return;
     var codexVoiceToggle = root.querySelector(
       '[data-role="codex-voice-toggle"]'
     );
+    var codexVoiceKeepAlive = root.querySelector(
+      '[data-role="codex-voice-keepalive"]'
+    );
     var codexVoiceError = root.querySelector(
       '[data-role="codex-voice-error"]'
     );
     var detail = root.querySelector('[data-role="detail"]');
     var errorDetail = root.querySelector('[data-role="error"]');
     var latestCodexVoice = null;
+    var latestCodexVoiceValue = null;
+    var latestCodexVoiceKeepActive = null;
     var codexVoiceControlError = "";
 
     function renderTarget() {
@@ -6127,6 +6385,11 @@ if (window.__bwPwaProviderOnly) return;
     }
 
     function renderCodexVoice(value) {
+      latestCodexVoiceValue = value || null;
+      latestCodexVoiceKeepActive = value &&
+        typeof value.keepActive === "boolean"
+        ? value.keepActive
+        : null;
       latestCodexVoice = value && value.status === "available"
         ? value
         : null;
@@ -6138,20 +6401,34 @@ if (window.__bwPwaProviderOnly) return;
         codexVoiceToggle.textContent = latestCodexVoice.active
           ? "关闭 Codex 语音"
           : "开启 Codex 语音";
+        codexVoiceKeepAlive.disabled =
+          typeof latestCodexVoice.keepActive !== "boolean";
+        codexVoiceKeepAlive.checked = latestCodexVoice.keepActive === true;
+        if (latestCodexVoice.keepActive === true) {
+          codexVoiceStatus.textContent +=
+            " Windows 持续运行已开启，异常关闭后会自动恢复。";
+        }
       } else if (value && value.status === "error") {
         codexVoiceStatus.textContent = "○ Codex 语音状态读取失败。";
         codexVoiceToggle.disabled = true;
         codexVoiceToggle.textContent = "Codex 语音状态不可用";
+        codexVoiceKeepAlive.disabled = true;
+        codexVoiceKeepAlive.checked = false;
       } else if (value && value.status === "unavailable") {
         codexVoiceStatus.textContent =
           "○ Codex 语音状态不可读取（Codex 可能尚未运行）。";
         codexVoiceToggle.disabled = true;
         codexVoiceToggle.textContent = "Codex 语音状态不可用";
+        codexVoiceKeepAlive.disabled =
+          typeof value.keepActive !== "boolean";
+        codexVoiceKeepAlive.checked = value.keepActive === true;
       } else {
         codexVoiceStatus.textContent =
           "○ 当前 Windows 桥版本尚未提供 Codex 语音状态。";
         codexVoiceToggle.disabled = true;
         codexVoiceToggle.textContent = "Codex 语音状态不可用";
+        codexVoiceKeepAlive.disabled = true;
+        codexVoiceKeepAlive.checked = false;
       }
       if (codexVoiceControlError) {
         codexVoiceError.style.display = "";
@@ -6212,6 +6489,7 @@ if (window.__bwPwaProviderOnly) return;
       codexVoiceStatus.textContent = "正在读取 Codex 语音状态…";
       codexVoiceToggle.disabled = true;
       codexVoiceToggle.textContent = "正在读取…";
+      codexVoiceKeepAlive.disabled = true;
       return availability().then(render).catch(function (error) {
         status.textContent = "直连状态读取失败：" +
           (error.message || "未知错误");
@@ -6255,7 +6533,12 @@ if (window.__bwPwaProviderOnly) return;
       codexVoiceToggle.textContent = desiredActive
         ? "正在开启 Codex 语音…"
         : "正在关闭 Codex 语音…";
-      setCodexVoiceActive(desiredActive).then(function (value) {
+      var update = desiredActive || latestCodexVoice.keepActive !== true
+        ? setCodexVoiceActive(desiredActive)
+        : setCodexVoiceKeepActive(false).then(function () {
+            return setCodexVoiceActive(false);
+          });
+      update.then(function (value) {
         renderCodexVoice(value);
         if (RC && typeof RC.toast === "function") {
           RC.toast(value.active ? "Codex 语音已开启" : "Codex 语音已关闭");
@@ -6265,6 +6548,37 @@ if (window.__bwPwaProviderOnly) return;
           "Codex 语音控制失败\n" +
           String(error && (error.code || error.message) || "未知错误");
         renderCodexVoice(latestCodexVoice);
+      }).finally(function () {
+        refreshButton.disabled = false;
+      });
+    });
+    codexVoiceKeepAlive.addEventListener("change", function (event) {
+      if (!event || event.isTrusted !== true) {
+        renderCodexVoice(latestCodexVoiceValue);
+        return;
+      }
+      if (codexVoiceSetPromise ||
+          typeof latestCodexVoiceKeepActive !== "boolean") {
+        renderCodexVoice(latestCodexVoiceValue);
+        return;
+      }
+      var enabled = codexVoiceKeepAlive.checked === true;
+      codexVoiceControlError = "";
+      refreshButton.disabled = true;
+      codexVoiceToggle.disabled = true;
+      codexVoiceKeepAlive.disabled = true;
+      setCodexVoiceKeepActive(enabled).then(function (value) {
+        renderCodexVoice(value);
+        if (RC && typeof RC.toast === "function") {
+          RC.toast(enabled
+            ? "Windows 将保持 Codex 语音开启"
+            : "已停止自动恢复 Codex 语音");
+        }
+      }).catch(function (error) {
+        codexVoiceControlError =
+          "Codex 语音持续运行设置失败\n" +
+          String(error && (error.code || error.message) || "未知错误");
+        renderCodexVoice(latestCodexVoiceValue);
       }).finally(function () {
         refreshButton.disabled = false;
       });

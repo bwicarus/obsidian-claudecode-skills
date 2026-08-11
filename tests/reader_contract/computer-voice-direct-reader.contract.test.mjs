@@ -959,6 +959,10 @@ function createHarness(overrides = {}) {
     uiOwner: "",
     extensionWorld: false,
     nativeComputerVoice: false,
+    nativeLocalPageContext: false,
+    nativePageContextPublishes: [],
+    nativePageTexts: {},
+    readerAdapterContext: null,
     ...overrides,
   };
   const server = createServer(scenario);
@@ -1066,6 +1070,14 @@ function createHarness(overrides = {}) {
           };
         },
       },
+      adapter() {
+        if (!scenario.readerAdapterContext) return null;
+        return {
+          getContext() {
+            return structuredClone(scenario.readerAdapterContext);
+          },
+        };
+      },
       assistant: {
         acceptDirectResult(delivery) {
           scenario.readerResultDeliveries.push(
@@ -1131,6 +1143,26 @@ function createHarness(overrides = {}) {
     AbortController,
     document,
   };
+  if (scenario.nativeLocalPageContext) {
+    window.BWReaderRuntime = {
+      nativeLocalRuntime: {
+        ready() { return Promise.resolve(); },
+        publishPageContext(payload) {
+          scenario.nativePageContextPublishes.push(structuredClone(payload));
+          return Promise.resolve({ ok: true, seq: scenario.nativePageContextPublishes.length });
+        },
+      },
+      pageTextProvider: {
+        contract: "reader-page-text-provider/1",
+        pageChars(page) {
+          const text = String(scenario.nativePageTexts[page] || "");
+          return Promise.resolve({
+            chars: Array.from(text, (character) => ({ c: character })),
+          });
+        },
+      },
+    };
+  }
   window.__bwReaderFetch = createJournalFetch(scenario);
   if (scenario.nativeComputerVoice) {
     window.__BW_NATIVE_COMPUTER_VOICE__ = true;
@@ -2994,6 +3026,49 @@ test("原生 App 的 eph-ctx-sync=1 完成 context 握手并启动快照泵", as
     enabled: true,
     deliveryMode: "snapshot-mcp",
   });
+
+  contextSyncStorage.set("eph-ctx-sync", "0");
+  await harness.api.contextSyncChanged();
+});
+
+test("原生 App 本地书把当前视口前后正文写进本地 page.context", async () => {
+  const contextSyncStorage = new Map([["eph-ctx-sync", "1"]]);
+  const harness = createHarness({
+    origin: NATIVE_APP_ORIGIN,
+    nativeComputerVoice: true,
+    nativeLocalPageContext: true,
+    contextSyncStorage,
+    contextDeliveryMode: "snapshot-mcp",
+    nativePageTexts: {
+      6: "上一页结尾",
+      7: "当前页完整文字，包含当前窗口重点内容。",
+      8: "下一页开头",
+    },
+    readerAdapterContext: {
+      visible_text: "当前窗口重点内容",
+    },
+    activeReading: {
+      kind: "pdf",
+      file: "localbook:app-snapshot",
+      title: "Native App Snapshot",
+      pos: 7,
+      selection: "",
+    },
+  });
+
+  await waitForRequest(harness, "context-open");
+  await waitForCondition(
+    () => harness.scenario.nativePageContextPublishes.length >= 1,
+    "native App local page context",
+  );
+  const payload = harness.scenario.nativePageContextPublishes[0];
+  assert.equal(payload.kind, "pdf");
+  assert.equal(payload.file, "localbook:app-snapshot");
+  assert.equal(payload.page, 7);
+  assert.equal(payload.textSource, "app-local-visible-window");
+  assert.match(payload.text, /【当前显示区域之前】[\s\S]*上一页结尾/);
+  assert.match(payload.text, /【当前显示区域（重点）】[\s\S]*当前窗口重点内容/);
+  assert.match(payload.text, /【当前显示区域之后】[\s\S]*下一页开头/);
 
   contextSyncStorage.set("eph-ctx-sync", "0");
   await harness.api.contextSyncChanged();

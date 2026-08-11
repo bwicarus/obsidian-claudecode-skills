@@ -314,6 +314,10 @@ test("电脑客户端设置读取真实 Codex 语音状态并按目标状态控�
     runtime,
     /function normalizeCodexVoicePayload[\s\S]*"available"[\s\S]*"unavailable"[\s\S]*"error"/,
   );
+  assert.match(
+    runtime,
+    /function normalizeCodexVoicePayload[\s\S]*\["keepActive"\][\s\S]*typeof value\.keepActive !== "boolean"/,
+  );
 
   const setStart = runtime.indexOf("function setCodexVoiceActive(desiredActive)");
   const setEnd = runtime.indexOf("function makeAudioSurface()", setStart);
@@ -325,6 +329,10 @@ test("电脑客户端设置读取真实 Codex 语音状态并按目标状态控�
   );
   assert.match(setBody, /if \(codexVoiceSetPromise\) return codexVoiceSetPromise/);
   assert.doesNotMatch(setBody, /request\(\s*"(?:start|stop)"/);
+  assert.match(
+    setBody,
+    /function setCodexVoiceKeepActive\(enabled\)[\s\S]*"codex-voice-keepalive-set"[\s\S]*\{ enabled: enabled \}/,
+  );
 
   const borrowStart = runtime.indexOf(
     "function borrowSnapshotChannelForStatus(attempt)",
@@ -343,6 +351,7 @@ test("电脑客户端设置读取真实 Codex 语音状态并按目标状态控�
   const settingsBody = runtime.slice(settingsStart, settingsEnd);
   assert.match(settingsBody, /data-role="codex-voice-status"/);
   assert.match(settingsBody, /data-role="codex-voice-toggle"/);
+  assert.match(settingsBody, /data-role="codex-voice-keepalive"/);
   assert.match(settingsBody, /● Codex 正在使用麦克风（通常表示语音已开启）/);
   assert.match(settingsBody, /○ Codex 当前未使用麦克风（通常表示语音已关闭）/);
   assert.match(
@@ -353,6 +362,11 @@ test("电脑客户端设置读取真实 Codex 语音状态并按目标状态控�
     settingsBody,
     /codexVoiceToggle\.addEventListener\("click", function \(event\)[\s\S]*event\.isTrusted !== true[\s\S]*setCodexVoiceActive\(desiredActive\)/,
     "a third-party host must not synthesize the privileged Windows shortcut click",
+  );
+  assert.match(
+    settingsBody,
+    /codexVoiceKeepAlive\.addEventListener\("change", function \(event\)[\s\S]*event\.isTrusted !== true[\s\S]*setCodexVoiceKeepActive\(enabled\)/,
+    "persistent Windows voice recovery must also require a real user action",
   );
 
   const refreshStart = settingsBody.indexOf("function refresh()");

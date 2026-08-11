@@ -565,7 +565,7 @@ if (window.__bwPwaProviderOnly) return;
     if (!el) {
       if (lsGet(LS.debug) !== '1') return;   // 不需显示且没建过 → 不建
       el = document.createElement('div'); el.id = 'ep-debug-log';
-      el.style.cssText = 'position:fixed;left:10px;bottom:10px;background:rgba(0,0,0,.85);color:#7be096;font-family:monospace;font-size:11px;padding:8px 12px;border-radius:6px;max-width:600px;max-height:200px;overflow:auto;z-index:9999';
+      el.style.cssText = 'position:fixed;left:10px;bottom:10px;background:rgba(0,0,0,.85);color:#7be096;font-family:monospace;font-size:11px;padding:8px 12px;border-radius:6px;max-width:600px;max-height:200px;overflow:auto;z-index:240';
       (document.body || document.documentElement).appendChild(el);
     }
     el.style.display = (lsGet(LS.debug) === '1') ? '' : 'none';

@@ -2120,6 +2120,82 @@
       event: event
     };
   }
+
+  // App-local books never pass through the Pi page-context producer.  Give
+  // the shared Reader bridge one local writer that joins the same monotonic
+  // journal as focus/drawing instead of inventing a second sequence stream.
+  // The caller supplies already-bounded display context; this layer owns
+  // identity validation and the durable sequence number.
+  function publishLocalPageContext(value) {
+    requireContextSyncEnabled();
+    var code = 'BW_LOCAL_OUTGOING_PAGE_CONTEXT';
+    assertObjectFields(value, [
+      'kind', 'file', 'page', 'title', 'text', 'textAvailable',
+      'textSource', 'fallbackReason', 'truncated'
+    ], [
+      'kind', 'file', 'page', 'title', 'text', 'textAvailable',
+      'textSource', 'fallbackReason', 'truncated'
+    ], code);
+    if (value.kind !== 'pdf' && value.kind !== 'epub') {
+      throw outgoingRequestError('kind 必须是 pdf 或 epub', code, 400);
+    }
+    var file = localFileIdentity(value.file, code);
+    var page = optionalPageScalar(value.page, 'page', code);
+    if (page == null) {
+      throw outgoingRequestError('page 不能为空', code, 400);
+    }
+    if (typeof value.title !== 'string' || value.title.length > 1024 ||
+        /[\u0000-\u001f\u007f]/.test(value.title)) {
+      throw outgoingRequestError('title 无效或过长', code, 400);
+    }
+    if (typeof value.text !== 'string' || value.text.length > 12000 ||
+        /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/.test(value.text)) {
+      throw outgoingRequestError('text 无效或过长', code, 400);
+    }
+    if (typeof value.textAvailable !== 'boolean' ||
+        value.textAvailable !== !!value.text.trim() ||
+        typeof value.textSource !== 'string' ||
+        !/^[a-z][a-z0-9._-]{0,95}$/.test(value.textSource) ||
+        typeof value.truncated !== 'boolean' ||
+        (value.fallbackReason != null &&
+          (typeof value.fallbackReason !== 'string' ||
+           value.fallbackReason.length > 400 ||
+           /[\u0000-\u001f\u007f]/.test(value.fallbackReason)))) {
+      throw outgoingRequestError('页面文字元数据无效', code, 400);
+    }
+    return serializeOutgoingMutation(function () {
+      return readOutgoingJournalState().then(function (journal) {
+        var appended = journalWithEvent(journal, 'page.context', {
+          event: 'page.context',
+          stable: true,
+          book_id: file,
+          file: file,
+          kind: value.kind,
+          page: page,
+          title: value.title,
+          text_available: value.textAvailable,
+          page_context: {
+            reason: 'app-local-visible-window',
+            text: value.text,
+            text_available: value.textAvailable,
+            text_source: value.textSource,
+            fallback_reason: value.fallbackReason,
+            truncated: value.truncated,
+            visual: null,
+            embeds: { highlights: 0, blocks: 0, unanchored: [] }
+          }
+        });
+        return writeDeviceState('outgoing-journal', appended.journal).then(function () {
+          return {
+            ok: true,
+            contract: OUTGOING_CONTEXT_CONTRACT,
+            seq: appended.event.seq,
+            eventId: appended.event.id
+          };
+        });
+      });
+    });
+  }
   function outgoingJournal(url) {
     requireContextSyncEnabled();
     strictQuery(
@@ -9012,6 +9088,7 @@
     storage: function () { return router; },
     preferenceStore: function () { return preferences; },
     bookUserState: bookUserStateAPI,
+    publishPageContext: publishLocalPageContext,
     documentHost: function () {
       return root.RC && root.RC.documentHost && root.RC.documentHost.current
         ? root.RC.documentHost.current() : null;

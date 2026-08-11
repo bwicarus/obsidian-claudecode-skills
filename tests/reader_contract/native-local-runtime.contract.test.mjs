@@ -2243,6 +2243,69 @@ test("native focus and bounded journal keep monotonic cursors across reload with
   assert.equal(reloaded.gatewayMessages.length, 0);
 });
 
+test("native local page context joins the same monotonic journal without Pi", async () => {
+  const result = await harness();
+  await enableNativeContext(result);
+  const runtime = result.context.BWReaderRuntime.nativeLocalRuntime;
+  const file = "localbook-" + "b".repeat(64);
+  const published = await runtime.publishPageContext({
+    kind: "pdf",
+    file,
+    page: 12,
+    title: "Local PDF",
+    text: "【当前显示区域之前】\n前文\n\n【当前显示区域（重点）】\n当前文字\n\n【当前显示区域之后】\n后文",
+    textAvailable: true,
+    textSource: "app-local-visible-window",
+    fallbackReason: null,
+    truncated: false,
+  });
+  assert.equal(published.ok, true);
+  assert.equal(published.seq, 1);
+
+  const focus = await result.context.fetch("/pdf/api/outgoing/focus", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      kind: "text",
+      ref: { file, page: 12, text: "当前文字" },
+      task: "selection",
+    }),
+  });
+  assert.equal(focus.status, 200);
+  const journal = await (await result.context.fetch(
+    "/pdf/api/outgoing/journal?since=0&limit=20&wait=0",
+  )).json();
+  assert.deepEqual(journal.events.map((event) => event.seq), [1, 2]);
+  assert.deepEqual(journal.events.map((event) => event.type), [
+    "page.context",
+    "focus",
+  ]);
+  assert.equal(journal.events[0].file, file);
+  assert.equal(journal.events[0].page, 12);
+  assert.equal(
+    journal.events[0].page_context.text_source,
+    "app-local-visible-window",
+  );
+  assert.match(journal.events[0].page_context.text, /当前显示区域（重点）/);
+  assert.equal(result.gatewayMessages.length, 1);
+  assert.equal(result.gatewayMessages[0].path, "/pdf/api/context-sync");
+
+  assert.throws(
+    () => runtime.publishPageContext({
+      kind: "pdf",
+      file: "localbook-foreign",
+      page: 12,
+      title: "Foreign",
+      text: "x",
+      textAvailable: true,
+      textSource: "app-local-visible-window",
+      fallbackReason: null,
+      truncated: false,
+    }),
+    (error) => error?.code === "BW_LOCAL_OUTGOING_PAGE_CONTEXT",
+  );
+});
+
 test("native drawing derives a revision-only stable edge from local PDF and EPUB ink", async () => {
   const clock = fakeClock();
   const first = await harness({ Date: clock.Date });
