@@ -85,6 +85,7 @@ test("every native visual early exit has a stable visible error code", () => {
     "BW_NATIVE_VISUAL_EMPTY_VIEWPORT",
     "BW_NATIVE_VISUAL_RENDER_FAILED",
     "BW_NATIVE_VISUAL_JPEG_FAILED",
+    "BW_NATIVE_VISUAL_IMAGE_TOO_SMALL",
     "BW_NATIVE_VISUAL_IMAGE_TOO_LARGE",
   ]) {
     assert.match(CAPTURE, new RegExp(code));

@@ -43,6 +43,7 @@ enum ReaderNativeVisualCaptureError: LocalizedError, Sendable {
     case emptyViewport
     case hierarchyRenderFailed
     case jpegEncodingFailed
+    case imageTooSmall(Int)
     case imageTooLarge(Int)
 
     var code: String {
@@ -61,6 +62,8 @@ enum ReaderNativeVisualCaptureError: LocalizedError, Sendable {
             return "BW_NATIVE_VISUAL_RENDER_FAILED"
         case .jpegEncodingFailed:
             return "BW_NATIVE_VISUAL_JPEG_FAILED"
+        case .imageTooSmall:
+            return "BW_NATIVE_VISUAL_IMAGE_TOO_SMALL"
         case .imageTooLarge:
             return "BW_NATIVE_VISUAL_IMAGE_TOO_LARGE"
         }
@@ -82,6 +85,8 @@ enum ReaderNativeVisualCaptureError: LocalizedError, Sendable {
             return "原生合成图：Apple 视图层级渲染失败"
         case .jpegEncodingFailed:
             return "原生合成图：JPEG 编码失败"
+        case .imageTooSmall(let byteCount):
+            return "原生合成图：画面疑似空白（仅 \(byteCount) 字节）"
         case .imageTooLarge(let byteCount):
             return "原生合成图：压缩后仍过大（\(byteCount) 字节）"
         }
@@ -144,13 +149,10 @@ final class ReaderNativeVisualCaptureBroker {
         }
 
         let displayScale = webView.window?.screen.scale ?? UIScreen.main.scale
-        let boundedScale = max(
-            0.5,
-            min(
-                displayScale,
-                Self.maximumLongEdge /
-                    max(captureBounds.width, captureBounds.height)
-            )
+        let boundedScale = min(
+            displayScale,
+            Self.maximumLongEdge /
+                max(captureBounds.width, captureBounds.height)
         )
         let format = UIGraphicsImageRendererFormat()
         format.scale = boundedScale
@@ -256,6 +258,9 @@ final class ReaderNativeVisualCaptureBroker {
                     )
                 }
             }
+        }
+        if lastByteCount < minimumJPEGBytes {
+            throw ReaderNativeVisualCaptureError.imageTooSmall(lastByteCount)
         }
         throw ReaderNativeVisualCaptureError.imageTooLarge(lastByteCount)
     }

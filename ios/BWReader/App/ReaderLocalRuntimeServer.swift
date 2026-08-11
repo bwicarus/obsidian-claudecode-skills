@@ -551,7 +551,7 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
             case .pageUnavailable, .pencilOverlayUnavailable,
                  .hierarchyUnavailable, .emptyViewport:
                 status = .conflict
-            case .hierarchyRenderFailed, .jpegEncodingFailed,
+            case .hierarchyRenderFailed, .jpegEncodingFailed, .imageTooSmall,
                  .imageTooLarge:
                 status = .internalServerError
             }
