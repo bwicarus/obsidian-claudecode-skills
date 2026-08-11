@@ -4029,3 +4029,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **核对/验证**：App 原生 handler 先于 document-start 脚本注册，成功的本机建连只会返回 `native_direct=true`；专项合同、Reader Node 全量 971 项、Pi Linux 原子预检/114 项/E2E、macOS 模拟器/签名归档与 IPA 校验通过。
 - **发布事实**：代码 `522aee6e` + `fc6be004`；Reader `0.2.87`、KG `kg-0.2.87-321d5a230216b642f0ac`，事务 `/home/bwicarus/deploy-backups/reader/20260811T012606Z-1156381`；Actions `31449978738` 上传 TestFlight `1.1.27 (195)`，`31450447983` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
 - **边界/下一步**：Windows 扩展 channel 因独立的网页便签刷新回归超时而保持 `0.2.86`，无半发布；TestFlight 已含 Safari 扩展。用户复现后展开 `see_ink(失败)` 流程并提交完整 JSON，再按真实 route/stage 修合成或传输。
+
+## Claude / Codex：see_ink 可见步骤与有界等待已发布 0.2.88 / 1.1.28（2026-08-11 JST）
+- **改了什么**：Claude 将 route、合成三条路径、图像大小、原生接收和最终结果逐步写入既有 `dlog`，并为裁图/视口、整页合成、原生请求设置 8/10/15 秒上界；Codex 修正“失败也报已接受”和 bridge 误判并补动态超时合同。
+- **怎么验**：Reader Node 全量 972 项、发布管线、Pi 原子预检/114 项/E2E、macOS 模拟器/签名归档与 IPA 校验均通过；未改合成算法、信任路径或 `p/pts` 兼容。
+- **发布事实**：代码 `85d4166a` + `0422d27c`；Reader `0.2.88`、KG `kg-0.2.88-600cb0ca5a6558b56e17`，事务 `/home/bwicarus/deploy-backups/reader/20260811T040740Z-1185177`；Actions `31457579351` 上传 TestFlight `1.1.28 (198)`，`31458055710` 确认 `VALID / IN_BETA_TESTING`。
+- **边界/下一步**：本批消除无限“处理中”并暴露真实断点，不等于已修未知根因；安装后开“显示调试日志”，复现 `see_ink` 并提交从 `tool→` 到最后一行的左下角截图。
