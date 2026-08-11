@@ -4047,3 +4047,8 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **兼容/安全**：直投 POST 只允许精确能力前缀路由、可信同书主框和三个视觉工具，正文只含 call 与进程内 capability 且不入日志；Safari/PWA 与非直投调用保留二进制 GET、网页合成和旧桥回退。
 - **验证/发布**：专项 24 项、Reader Node 全量 981 项与发布管线通过；Windows Python 门禁仍仅有既有 Linux `fcntl`/机器环境基线，macOS 模拟器、签名归档、三目标与 IPA 校验通过；提交 `4019287f`，Actions `31468766372` 上传 TestFlight `1.1.30 (210)`，`31469324720` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
 - **未做/下一步**：未部署 Pi 或浏览器正式渠道；安装后在 App 普通电话分别调用 `see_ink` 与 `see_page`，调试日志应出现“原生直投完成”，不再停在“图已就绪…送往原生通道”。
+
+## Codex：修复原生 Realtime 图像回执并发布 0.2.91 / 1.1.31（2026-08-11 JST）
+- **根因/改动**：1.1.30 实际收到当前 GA 的 `conversation.item.added/done`，Swift 却只等待旧 `created`，成功图像被误报为确认超时；现发送独立 `event_id/item.id`，按本次图片精确接受新旧回执并关联错误。
+- **验证/发布**：专项与 Reader Node 全量、发布管线通过；Windows Python 仍只有既有 `fcntl` 基线。提交 `113883ec`，Actions `31472374708` 上传 TestFlight `1.1.31 (213)`，`31472948994` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
+- **未做/下一步**：未部署 Pi 或浏览器正式渠道；用户更新后在 App 普通电话调用 `see_ink/see_page`，应出现“原生直投完成”且 Realtime 能实际描述合成图。
