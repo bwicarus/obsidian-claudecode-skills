@@ -4082,6 +4082,12 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验**：Reader Node 全量 989 项、ReaderBundle 打包/复验、扩展发布管线、ReaderPC 20 项与包验证通过；Windows 全量 Python/handoff 仍只保留既有 `fcntl` 与 fixture 基线，未混入本批修复。
 - **发布事实**：App/扩展提交 `2ec30973`；Actions `31518783808` 上传 TestFlight `1.1.35 (227)`，只读状态 `31519443838` 确认 `COMPLETE / VALID / IN_BETA_TESTING`。
 - **边界/下一步**：本批 App/Safari 前端随 IPA 发布，未部署 Pi 或浏览器正式渠道；安装后验收本机书籍快照正文、设置中的持续运行开关和调试日志与设置并开时的触摸。
+
+## Codex：可选视觉能力诊断去重已发布 0.2.96 / 1.1.36（2026-08-12 JST）
+- **改了什么**：PDF/EPUB 缺少可选 `getVisualSurface` 时只在能力状态首次出现或真正变化时报告一次，不再被实时快照轮询反复刷屏；既有原生 `see_page` / `see_ink` 路径未改。
+- **怎么验**：新增能力变化回归，Reader Node 全量 990 项与扩展发布管线通过；Windows handoff/Python 只重现既有 `fcntl`、fixture 与编码基线。
+- **发布事实**：提交 `20cae364`；Actions `31543994114` 上传 TestFlight `1.1.36 (230)`，`31544550284` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
+- **边界/下一步**：未部署 Pi、Windows 服务或浏览器正式渠道；安装后开启调试日志停留数秒，预期同一“adapter 未实现”最多一行，能力恢复仍可重新探测。
 ## Codex：ReaderPC 服务器 0.1.3 已安装（2026-08-10 JST）
 - **改了什么**：新增独立托盘总控、统一本机状态、PC OCR 精确 PID 代次启停及版本化原子安装；语音/上下文/OCR 仍为独立子进程。
 - **性能**：空闲只用 `nvidia-smi` 探测 GPU；每项重任务完成后 worker 退出并由托盘拉起轻量代次，实测由约 4.2 GB 私有内存回落至约 18 MB。
