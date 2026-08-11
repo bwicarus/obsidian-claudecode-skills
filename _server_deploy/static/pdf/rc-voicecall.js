@@ -5240,6 +5240,20 @@
         };
         var scopedCrop = _surfaceInkCrop(scopedSurface, selectionId);
         if (!scopedCrop) return null;
+        // see_ink 带 scope,走的是这一条 —— 原生取图必须接在这里。
+        // 只接在下面的裸 strokes 分支时,笔迹路径永远退到 html2canvas,而后者在本机
+        // 阅读器上必然失败(页面用了 CSS color() 现代色彩语法,html2canvas 不认)。
+        // _surfaceInkCrop 给的是相对元素的像素框,原生要的是归一化,这里换算。
+        if (W0 > 0 && H0 > 0) {
+          var natScoped = await _nativeInkRegion(
+            el,
+            scopedCrop.x / W0,
+            scopedCrop.y / H0,
+            (scopedCrop.x + scopedCrop.width) / W0,
+            (scopedCrop.y + scopedCrop.height) / H0
+          );
+          if (natScoped) return natScoped;
+        }
         return await _captureSurfaceCompositeCrop(
           scopedSurface,
           scopedCrop,
