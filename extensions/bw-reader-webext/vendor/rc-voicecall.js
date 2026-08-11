@@ -4567,27 +4567,171 @@ if (window.__bwPwaProviderOnly) return;
   //    截当前可见区域(正文+手写笔迹+插入页 overlay 所见即所得);EPUB 看图/看笔迹恒用,
   //    PDF 在服务端渲不出时(插入页未写回等)兜底。排除侧栏/通话条/字幕等悬浮 UI。
   var _h2cP = null;
+  // 回退截图库的地址必须相对于**本文档实际的加载基址**,不能写死站点根。
+  //
+  // App 的本机运行时把阅读器挂在带能力令牌的前缀下(/r/<token>/...),于是写死的
+  // '/static/pdf/html2canvas.min.js' 在 App 内 404 —— 加载失败 → reject → 上游 catch
+  // → null,对外只剩一句"无图"。本文件自己是被成功加载进来的,它的 src 必然可达,
+  // 所以以它的同目录为基准。
+  function _h2cSrc() {
+    try {
+      var tag = document.querySelector('script[src*="rc-voicecall"]');
+      var src = tag && tag.getAttribute('src');
+      if (src) return new URL(src, document.baseURI).href
+        .replace(/rc-voicecall[^/]*$/, 'html2canvas.min.js');
+    } catch (e) {}
+    return '/static/pdf/html2canvas.min.js';
+  }
   function _loadH2C() {
     if (window.html2canvas) return Promise.resolve();
     if (_h2cP) return _h2cP;
+    var url = _h2cSrc();
     _h2cP = new Promise(function (res, rej) {
       var s = document.createElement('script');
-      s.src = '/static/pdf/html2canvas.min.js';
-      s.onload = res; s.onerror = function () { _h2cP = null; rej(new Error('h2c load fail')); };
+      s.src = url;
+      s.onload = function () {
+        // onload 只保证脚本执行完毕,不保证它导出了全局。两者要的修法不同,分开报。
+        if (window.html2canvas) { res(); return; }
+        _h2cP = null;
+        rej(new Error('截图库已加载但未导出 html2canvas'));
+      };
+      s.onerror = function () { _h2cP = null; rej(new Error('截图库加载失败 ' + url)); };
       document.head.appendChild(s);
     });
     return _h2cP;
+  }
+  // 规则一/二(silent-failure-lessons):每个提前返回都要出声;折成 null 之前先说清原始情形。
+  // 这条路径此前一律 catch→return null,于是"库没加载""画布被跨源污染""截出来是空白"
+  // 这些要求完全不同修法的死因,对外是同一句"无图"。
+  function _visualErrText(e) {
+    if (!e) return '未知';
+    return String((e && (e.message || e.name)) || e).slice(0, 160);
+  }
+  function _visualNull(where, why) {
+    _visualStep(where + ' 放弃: ' + why);
+    return null;
+  }
+
+  // App 本机的原生层级合成图。
+  //
+  // html2canvas 只画得到 WKWebView 内部,拿不到独立的 PencilKit 原生覆盖层,也无法
+  // 离屏复现 PDFKit 底页与本机权威墨迹。原生 drawHierarchy 截的是整个可见视图层级,
+  // 因而屏内的"底页+笔迹+卡片"天然就是同一张图。
+  //
+  // 基址里带能力令牌,所以这里只判存在性,任何分支都不把它写进日志。
+  function _nativeCaptureBase() {
+    try {
+      var v = String(window.__BW_NATIVE_LOCAL_BASE_PATH__ || '');
+      return /^\/r\/[a-f0-9]{64}$/.test(v) ? v : null;
+    } catch (e) { return null; }
+  }
+  async function _nativeCapture(scope, rect, page) {
+    var base = _nativeCaptureBase();
+    // 非 App 本机(Safari/PWA)不是故障,是预期路径:静默回落 html2canvas。
+    if (!base) return null;
+    var q = 'scope=' + encodeURIComponent(scope);
+    if (page != null) q += '&page=' + encodeURIComponent(String(page));
+    if (rect) {
+      q += '&x=' + rect.x.toFixed(6) + '&y=' + rect.y.toFixed(6) +
+           '&w=' + rect.w.toFixed(6) + '&h=' + rect.h.toFixed(6);
+    }
+    var resp;
+    try {
+      resp = await fetch(base + '/native-api/visual-capture?' + q, { cache: 'no-store' });
+    } catch (e) {
+      return _visualNull('原生合成图', '请求失败 ' + _visualErrText(e));
+    }
+    if (!resp.ok) {
+      var code = '';
+      try { code = resp.headers.get('X-BW-Reader-Error') || ''; } catch (e2) {}
+      if (!code) { try { code = String(await resp.text()).slice(0, 120); } catch (e3) {} }
+      return _visualNull('原生合成图', 'HTTP ' + resp.status + (code ? ' ' + code : ''));
+    }
+    var b64 = '';
+    try {
+      var buf = new Uint8Array(await resp.arrayBuffer());
+      var step = 0x8000, parts = [];
+      for (var i = 0; i < buf.length; i += step) {
+        parts.push(String.fromCharCode.apply(null, buf.subarray(i, i + step)));
+      }
+      b64 = btoa(parts.join(''));
+    } catch (e4) {
+      return _visualNull('原生合成图', '编码失败 ' + _visualErrText(e4));
+    }
+    if (b64.length <= 3000) {
+      return _visualNull('原生合成图', '图过小 ' + b64.length + 'B(疑空白)');
+    }
+    // 「这页本来就没画过」是有效答案,不是故障 —— 图照常返回,但要说出来,
+    // 否则模型会把一张干净的底页当成"笔迹看不清"。
+    var inkState = '';
+    try { inkState = resp.headers.get('X-BW-Visual-Ink') || ''; } catch (e5) {}
+    _visualStep('原生合成图 ' + scope + ' 得到 ' + Math.round(b64.length / 1024) + 'KB' +
+      (inkState === 'none' ? '(该页无笔迹)' : ''));
+    return { media_type: 'image/jpeg', b64: b64 };
+  }
+
+  // 页内归一化框 → 视口归一化框,并说明有多少落在屏幕内。
+  //
+  // 原生 region 的坐标系是**视口**,而笔迹外接框算在**页元素**内 —— 两者只有该页
+  // 完全可见时才重合。不换算就会请求到错误位置;而原生侧会把越界部分 intersect 掉,
+  // 于是返回一张构图错误却看起来正常的图。安静的错图比失败更糟,所以越界要说出来。
+  //
+  // 滚出视口的笔迹需要离屏合成(PDFKit 渲页 + 本机权威墨迹重绘),那是 scope=page
+  // 的职责;目标没有可用 PDF 页号时如实报告,而不是交付一张裁错的图。
+  function _viewportRectFromPageRect(el, x0, y0, x1, y1) {
+    try {
+      var r = el.getBoundingClientRect();
+      var vw = window.innerWidth || 0, vh = window.innerHeight || 0;
+      if (!(r.width > 0 && r.height > 0 && vw > 0 && vh > 0)) return null;
+      var out = {
+        x: (r.left + x0 * r.width) / vw,
+        y: (r.top + y0 * r.height) / vh,
+        w: ((x1 - x0) * r.width) / vw,
+        h: ((y1 - y0) * r.height) / vh
+      };
+      var visW = Math.max(0, Math.min(1, out.x + out.w) - Math.max(0, out.x));
+      var visH = Math.max(0, Math.min(1, out.y + out.h) - Math.max(0, out.y));
+      var area = out.w * out.h;
+      out.visible = area > 0 ? (visW * visH) / area : 0;
+      return out;
+    } catch (e) { return null; }
+  }
+  async function _nativeInkRegion(el, x0, y0, x1, y1) {
+    if (!_nativeCaptureBase()) return null;
+    var rect = _viewportRectFromPageRect(el, x0, y0, x1, y1);
+    // 视口内:走 region —— 那是屏幕层级合成,卡片、高亮等可见 UI 都在图里。
+    if (rect && rect.visible >= 0.9) {
+      var shot = await _nativeCapture('region', rect);
+      if (shot) return shot;
+    }
+    // 屏外:改按页离屏合成。x0..y1 本就是页内归一化,正好是 scope=page 要的坐标系。
+    // 该路径只有 PDF 底页与笔迹/选区,没有卡片 —— 取舍写在日志里,免得看图的人以为丢了东西。
+    var pageNo = _inkPageNumber(el);
+    var offRatio = rect ? Math.round(rect.visible * 100) : 0;
+    if (pageNo) {
+      _visualStep('笔迹 ' + offRatio + '% 在视口内,改按第 ' + pageNo + ' 页离屏合成(无卡片层)');
+      return await _nativeCapture('page', { x: x0, y: y0, w: x1 - x0, h: y1 - y0 }, pageNo);
+    }
+    if (!rect) return _visualNull('原生合成图', '无法换算到视口坐标');
+    return _visualNull('原生合成图',
+      '笔迹仅 ' + offRatio + '% 在视口内,且该页无 PDF 页号(插入页/EPUB),无法离屏合成');
   }
   // 可选 DocumentHost 视觉表面。PDF/EPUB 没实现时原路径完全不变；普通网页只在 adapter
   // 提供真实正文元素、布局尺寸和 canonical strokes，不复制截图/绘制算法。
   function _visualSurface() {
     try {
       var ad = window.RC && RC.adapter ? RC.adapter() : null;
-      var s = ad && ad.getVisualSurface ? ad.getVisualSurface() : null;
-      if (!s || !s.element || !(s.width > 0) || !(s.height > 0)) return null;
+      if (!ad) return _visualNull('原生取图面', '无 adapter');
+      if (!ad.getVisualSurface) return _visualNull('原生取图面', 'adapter 未实现 getVisualSurface');
+      var s = ad.getVisualSurface();
+      if (!s) return _visualNull('原生取图面', 'getVisualSurface 返回空');
+      if (!s.element) return _visualNull('原生取图面', '缺 element');
+      if (!(s.width > 0) || !(s.height > 0)) {
+        return _visualNull('原生取图面', '尺寸非法 ' + s.width + 'x' + s.height);
+      }
       s.strokes = Array.isArray(s.strokes) ? s.strokes : [];
       return s;
-    } catch (e) { return null; }
+    } catch (e) { return _visualNull('原生取图面', _visualErrText(e)); }
   }
   function _visualCaptureScope(target) {
     var scope = target && typeof target === 'object' ? target.scope : null;
@@ -4723,6 +4867,8 @@ if (window.__bwPwaProviderOnly) return;
   }
   async function _captureView() {
     try {
+      var nat = await _nativeCapture('viewport');
+      if (nat) return nat;
       var surface = _visualSurface();
       if (surface) {
         var vp = surface.viewport || {};
@@ -4759,8 +4905,10 @@ if (window.__bwPwaProviderOnly) return;
         b64 = (canvas.toDataURL('image/jpeg', qs[qi]).split(',')[1]) || '';
         if (b64.length <= 900000) break;
       }
-      return b64.length > 5000 ? { media_type: 'image/jpeg', b64: b64 } : null;   // 太小=截了个寂寞(空白/失败)
-    } catch (e) { return null; }
+      // 太小=截了个寂寞(空白/失败)。这跟"截图库没加载"是两回事,分开说。
+      if (b64.length <= 5000) return _visualNull('视口截图', '图过小 ' + b64.length + 'B(疑空白)');
+      return { media_type: 'image/jpeg', b64: b64 };
+    } catch (e) { return _visualNull('视口截图', _visualErrText(e)); }
   }
   // 通用原语(用户点子:前端渲染截图通用性强,统一覆盖各种取图):截**任意元素**为图(所见即所得)。
   //   检查纸(pdf-uishared)、笔迹查看(see_ink 插入页/覆盖层)、以后别处都走这一条,不再各写各的。
@@ -4776,8 +4924,9 @@ if (window.__bwPwaProviderOnly) return;
       });
       var b64 = '', qs = [0.85, 0.7, 0.5];
       for (var qi = 0; qi < qs.length; qi++) { b64 = (canvas.toDataURL('image/jpeg', qs[qi]).split(',')[1]) || ''; if (b64.length <= 900000) break; }
-      return b64.length > 3000 ? { media_type: 'image/jpeg', b64: b64 } : null;
-    } catch (e) { return null; }
+      if (b64.length <= 3000) return _visualNull('元素截图', '图过小 ' + b64.length + 'B(疑空白)');
+      return { media_type: 'image/jpeg', b64: b64 };
+    } catch (e) { return _visualNull('元素截图', _visualErrText(e)); }
   }
   function _compositeTargetPage(target) {
     if (target == null) return null;
@@ -4832,8 +4981,9 @@ if (window.__bwPwaProviderOnly) return;
         b64 = (canvas.toDataURL('image/jpeg', qs[qi]).split(',')[1]) || '';
         if (b64.length <= 900000) break;
       }
-      return b64.length > 3000 ? { media_type: 'image/jpeg', b64: b64 } : null;
-    } catch (e) { return null; }
+      if (b64.length <= 3000) return _visualNull('页区域截图', '图过小 ' + b64.length + 'B(疑空白)');
+      return { media_type: 'image/jpeg', b64: b64 };
+    } catch (e) { return _visualNull('页区域截图', _visualErrText(e)); }
   }
   async function _captureSurfaceCompositeCrop(surface, crop, selectionId) {
     if (!surface || !surface.element || !crop) return null;
@@ -4852,6 +5002,9 @@ if (window.__bwPwaProviderOnly) return;
     ) || await _captureSurface(surface, crop, selectionId);
   }
   async function _captureViewportComposite() {
+    // 语义与原生 scope=viewport 完全对应:屏幕上那一块。
+    var nat = await _nativeCapture('viewport');
+    if (nat) return nat;
     var surface = _visualSurface();
     if (surface) {
       var vp = surface.viewport || {};
@@ -4960,18 +5113,35 @@ if (window.__bwPwaProviderOnly) return;
   }
   // 当前视口里**带手写**的页(page-wrap 或 pdf-upage);target 可选。
   // 快照 MCP 会传精确页码,双页同时可见时不能把相邻页的墨迹图冒充当前 revision。
-  function _curInkPageEl(target) {
+  function _curInkPageEl(target, allowOffscreen) {
     var targetPage = _inkTargetPage(target);
     var els = document.querySelectorAll(
       '.page-wrap[data-page-num], .pdf-upage, ' +
       '.ep-sec[data-idx], .ep-usec[data-uid]'
     );
+    // 视口内的优先(那条路能连卡片一起合成);找不到时才回退到屏外的那一页。
+    //
+    // 此前这里只认视口内的元素,屏外直接返回 null —— 于是"笔迹滚出屏幕"在最上游
+    // 就被静默丢弃,离屏合成再怎么就绪也永远走不到。
+    var offscreen = null;
     for (var i = 0; i < els.length; i++) {
       var el = els[i], r = el.getBoundingClientRect();
-      if (r.bottom > 0 && r.top < (window.innerHeight || 0) &&
-          _inkPageMatchesTarget(el, targetPage) &&
-          el.__inkStrokes && el.__inkStrokes.length) return el;
+      if (!(_inkPageMatchesTarget(el, targetPage) &&
+            el.__inkStrokes && el.__inkStrokes.length)) continue;
+      if (r.bottom > 0 && r.top < (window.innerHeight || 0)) return el;
+      if (!offscreen) offscreen = el;
     }
+    if (allowOffscreen && offscreen) return offscreen;
+    return null;
+  }
+  // PDF 页号;插入页与 EPUB 段落没有,离屏按页合成对它们不适用。
+  function _inkPageNumber(el) {
+    try {
+      if (el && el.dataset && el.dataset.pageNum != null) {
+        var n = parseInt(el.dataset.pageNum, 10);
+        if (n > 0) return n;
+      }
+    } catch (e) {}
     return null;
   }
   // Small, AI-readable index of closed custom regions on the exact current
@@ -5055,7 +5225,7 @@ if (window.__bwPwaProviderOnly) return;
           ? await _captureSurfaceCompositeCrop(surface, surfaceCrop, selectionId)
           : await _captureSurface(surface, surfaceCrop);
       }
-      var el = _curInkPageEl(target);
+      var el = _curInkPageEl(target, true);
       var strokes = el && el.__inkStrokes;
       if (!el || !strokes || !strokes.length) return null;
       if (scope) {
@@ -5085,6 +5255,8 @@ if (window.__bwPwaProviderOnly) return;
       var m = 0.08; x0 = Math.max(0, x0 - m); y0 = Math.max(0, y0 - m); x1 = Math.min(1, x1 + m); y1 = Math.min(1, y1 + m);   // 留白带上下文
       if (x1 - x0 < 0.28) { var cx = (x0 + x1) / 2; x0 = Math.max(0, cx - 0.14); x1 = Math.min(1, cx + 0.14); }   // 太窄→给最小宽(别只裁个点)
       if (y1 - y0 < 0.18) { var cy = (y0 + y1) / 2; y0 = Math.max(0, cy - 0.09); y1 = Math.min(1, cy + 0.09); }
+      var natInk = await _nativeInkRegion(el, x0, y0, x1, y1);
+      if (natInk) return natInk;
       await _loadH2C();
       var W = el.offsetWidth || el.getBoundingClientRect().width, H = el.offsetHeight || el.getBoundingClientRect().height;
       var canvas = await window.html2canvas(el, {
@@ -5094,8 +5266,9 @@ if (window.__bwPwaProviderOnly) return;
       });
       var b64 = '', qs = [0.85, 0.7, 0.5];
       for (var q = 0; q < qs.length; q++) { b64 = (canvas.toDataURL('image/jpeg', qs[q]).split(',')[1]) || ''; if (b64.length <= 900000) break; }
-      return b64.length > 3000 ? { media_type: 'image/jpeg', b64: b64 } : null;
-    } catch (e) { return null; }
+      if (b64.length <= 3000) return _visualNull('笔迹裁图', '图过小 ' + b64.length + 'B(疑空白)');
+      return { media_type: 'image/jpeg', b64: b64 };
+    } catch (e) { return _visualNull('笔迹裁图', _visualErrText(e)); }
   }
   try {
     window.RC = window.RC || {};

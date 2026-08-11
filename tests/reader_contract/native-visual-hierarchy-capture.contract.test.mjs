@@ -9,6 +9,7 @@ const CAPTURE = read("ios/BWReader/App/ReaderWebViewNativeFeatures.swift");
 const SERVER = read("ios/BWReader/App/ReaderLocalRuntimeServer.swift");
 const WEBVIEW = read("ios/BWReader/App/ReaderWebView.swift");
 const PENCIL = read("ios/BWReader/App/NativePencilLiveOverlay.swift");
+const VOICE = read("_server_deploy/static/pdf/rc-voicecall.js");
 
 test("App visual capture renders the shared WKWebView and PencilKit hierarchy", () => {
   const broker = CAPTURE.slice(
@@ -102,6 +103,37 @@ test("offscreen PDF capture composes PDFKit pixels with authoritative page ink",
   assert.match(broker, /Self\.drawInk\(strokes/);
   assert.match(broker, /inkStrokeCount: strokes\.count/);
   assert.doesNotMatch(broker, /capabilityToken/);
+});
+
+test("shared visual tools consume the native viewport, region, and offscreen page routes", () => {
+  const native = VOICE.slice(
+    VOICE.indexOf("function _nativeCaptureBase"),
+    VOICE.indexOf("function _visualSurface"),
+  );
+  assert.match(native, /__BW_NATIVE_LOCAL_BASE_PATH__/);
+  assert.match(native, /\/native-api\/visual-capture\?/);
+  assert.match(native, /scope=' \+ encodeURIComponent\(scope\)/);
+  assert.match(native, /q \+= '&page=' \+ encodeURIComponent\(String\(page\)\)/);
+  assert.match(native, /X-BW-Reader-Error/);
+  assert.match(native, /X-BW-Visual-Ink/);
+  assert.match(native, /rect\.visible >= 0\.9[\s\S]*_nativeCapture\('region'/);
+  assert.match(
+    native,
+    /_nativeCapture\('page', \{ x: x0, y: y0, w: x1 - x0, h: y1 - y0 \}, pageNo\)/,
+  );
+  assert.doesNotMatch(native, /dlog\([^\n]*__BW_NATIVE_LOCAL_BASE_PATH__/);
+
+  const ink = VOICE.slice(
+    VOICE.indexOf("function _curInkPageEl"),
+    VOICE.indexOf("try {\n    window.RC = window.RC || {}"),
+  );
+  assert.match(ink, /_curInkPageEl\(target, true\)/);
+  assert.match(ink, /var natInk = await _nativeInkRegion\(el, x0, y0, x1, y1\)/);
+  assert.ok(
+    ink.indexOf("var natInk = await _nativeInkRegion") <
+      ink.indexOf("await _loadH2C()"),
+    "the App native route must run before the web fallback",
+  );
 });
 
 test("every native visual early exit has a stable visible error code", () => {

@@ -4611,10 +4611,9 @@
 
   // App 本机的原生层级合成图。
   //
-  // html2canvas 只画得到 WKWebView 内部,而 PencilKit 与 PDFKit 的笔迹在 WebView
-  // **之外**的视图层 —— see_ink 要的"底页+笔迹+卡片",在任何纯 web 截图路径下都
-  // 不可能产出,修好 html2canvas 也不行。原生 drawHierarchy 截的是整个视图层级,
-  // 合成是天然的:它就是屏幕上那一张。
+  // html2canvas 只画得到 WKWebView 内部,拿不到独立的 PencilKit 原生覆盖层,也无法
+  // 离屏复现 PDFKit 底页与本机权威墨迹。原生 drawHierarchy 截的是整个可见视图层级,
+  // 因而屏内的"底页+笔迹+卡片"天然就是同一张图。
   //
   // 基址里带能力令牌,所以这里只判存在性,任何分支都不把它写进日志。
   function _nativeCaptureBase() {
@@ -4674,8 +4673,8 @@
   // 完全可见时才重合。不换算就会请求到错误位置;而原生侧会把越界部分 intersect 掉,
   // 于是返回一张构图错误却看起来正常的图。安静的错图比失败更糟,所以越界要说出来。
   //
-  // 滚出视口的笔迹需要离屏合成(PDFKit 渲页 + PKDrawing 渲笔迹),那是 scope=page
-  // 的职责;在它可用前,这里如实报告而不是交付一张裁错的图。
+  // 滚出视口的笔迹需要离屏合成(PDFKit 渲页 + 本机权威墨迹重绘),那是 scope=page
+  // 的职责;目标没有可用 PDF 页号时如实报告,而不是交付一张裁错的图。
   function _viewportRectFromPageRect(el, x0, y0, x1, y1) {
     try {
       var r = el.getBoundingClientRect();
