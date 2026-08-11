@@ -36,8 +36,9 @@ from readerpc_services import (
 )
 
 
-APP_VERSION = "0.1.6"
+APP_VERSION = "0.1.7"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
+CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 POLL_INTERVAL_MS = 2_500
 STATUS_PUBLISH_INTERVAL_SECONDS = 10.0
 PC_RESTART_BACKOFF_SECONDS = 30.0
@@ -83,6 +84,36 @@ def save_preferences(path: Path, *, keep_pc_online: bool) -> None:
     )
 
 
+def set_codex_voice_keep_active(
+    bridge_paths: BridgePaths,
+    enabled: bool,
+) -> None:
+    _atomic_json(
+        bridge_paths.runtime_status.parent / "codex-voice-keepalive.json",
+        {
+            "contract": CODEX_VOICE_KEEPALIVE_CONTRACT,
+            "enabled": bool(enabled),
+        },
+    )
+
+
+def disable_readerpc_voice(
+    bridge_paths: BridgePaths,
+    process_runner: WindowsProcessRunner,
+) -> None:
+    failures: list[str] = []
+    try:
+        set_codex_voice_keep_active(bridge_paths, False)
+    except Exception as exc:
+        failures.append(f"取消 Codex 语音持续运行：{exc}")
+    try:
+        disable_and_stop_direct_service(bridge_paths, process_runner)
+    except Exception as exc:
+        failures.append(f"停止电脑语音服务：{exc}")
+    if failures:
+        raise ReaderPCServiceError("；".join(failures))
+
+
 def _tray_image() -> Image.Image:
     image = Image.new("RGBA", (64, 64), (0, 0, 0, 0))
     draw = ImageDraw.Draw(image)
@@ -112,9 +143,11 @@ def stop_readerpc_services(
     try:
         voice = read_direct_status(bridge_paths, process_runner)
         if voice.configuration_enabled:
-            disable_and_stop_direct_service(bridge_paths, process_runner)
-        elif voice.service_online or bridge_paths.service_record.exists():
-            stop_direct_service(bridge_paths, process_runner)
+            disable_readerpc_voice(bridge_paths, process_runner)
+        else:
+            set_codex_voice_keep_active(bridge_paths, False)
+            if voice.service_online or bridge_paths.service_record.exists():
+                stop_direct_service(bridge_paths, process_runner)
     except Exception as exc:
         failures.append(f"电脑语音与上下文直连：{exc}")
 
@@ -220,7 +253,7 @@ class ReaderPCWindow:
         self.voice_status, self.voice_detail, self.voice_button = self._service_row(
             outer,
             "电脑语音",
-            "Windows 直连语音服务",
+            "启用后启动 Windows 直连并保持 Codex 语音开启",
             self.toggle_voice,
         )
         self.context_status, self.context_detail, _ = self._service_row(
@@ -462,7 +495,7 @@ class ReaderPCWindow:
         if current.service_online:
             self._run_task(
                 "正在停用电脑语音服务…",
-                lambda: disable_and_stop_direct_service(
+                lambda: disable_readerpc_voice(
                     self.bridge_paths,
                     self.process_runner,
                 ),
@@ -479,13 +512,16 @@ class ReaderPCWindow:
         self.voice_recovery_in_progress = recovery
 
         def start() -> int:
-            changed = set_direct_config_enabled(self.bridge_paths, True)
+            set_codex_voice_keep_active(self.bridge_paths, True)
+            changed = False
             try:
+                changed = set_direct_config_enabled(self.bridge_paths, True)
                 return start_readerpc_voice(
                     self.bridge_paths,
                     self.process_runner,
                 )
             except Exception:
+                set_codex_voice_keep_active(self.bridge_paths, False)
                 if changed:
                     set_direct_config_enabled(self.bridge_paths, False)
                 raise
@@ -493,7 +529,11 @@ class ReaderPCWindow:
         self._run_task(
             "正在恢复电脑语音服务…" if recovery else "正在启用电脑语音服务…",
             start,
-            "电脑语音已恢复在线。" if recovery else "电脑语音已启用。",
+            (
+                "电脑语音与 Codex 语音持续运行已恢复。"
+                if recovery
+                else "电脑语音已启用，Codex 语音会自动开启并保持运行。"
+            ),
         )
 
     def toggle_pc(self) -> None:
