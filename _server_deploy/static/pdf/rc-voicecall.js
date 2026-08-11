@@ -5222,7 +5222,6 @@
         client_secret: _rtc.sidebandKey || '', tool: name,
         media_type: shot.media_type || 'image/jpeg', b64: shot.b64
       }), 15000, '本地保存/传输');
-      _visualStep('原生通道已接受');
     } catch (error) {
       // The native side covers local save, reference read and network send;
       // it reports which one, and that detail is passed through unchanged.
@@ -5231,6 +5230,7 @@
     if (reply && reply.ok === false) {
       throw _visualStageError('本地保存/传输', reply.error || '原生通道未接受该图');
     }
+    _visualStep('原生通道已接受');
     return shot;
   }
 
@@ -5338,7 +5338,8 @@
         window.dlog(
           'tool→ ' + name + ' route=' + (_rtc.nativeDirect ? 'local' : 'server')
             + ' flag=' + String(window.__BW_NATIVE_OPENAI_REALTIME__ === true)
-            + ' bridge=' + String(!!window.__bwNativeRealtime),
+            + ' bridge=' + String(!!(window.__bwNativeRealtime &&
+              typeof window.__bwNativeRealtime.request === 'function')),
           '#9ad'
         );
       }

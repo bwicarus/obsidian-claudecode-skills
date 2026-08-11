@@ -5125,32 +5125,79 @@ if (window.__bwPwaProviderOnly) return;
     return error;
   }
 
+  // Writes each step to the on-screen debug log.
+  //
+  // A tool that stays at "处理中" reports nothing at all: no error is thrown,
+  // so neither the tool card nor the model has anything to show, and the one
+  // fact worth knowing -- which step stopped -- exists only inside a pending
+  // promise. The reader already has a visible log; every step of this path
+  // goes there so a stall names itself.
+  function _visualStep(text) {
+    try { if (window.dlog) window.dlog('see: ' + text, '#7bd0ff'); } catch (_) {}
+  }
+
+  // Fails loudly instead of hanging.
+  //
+  // The native bridge is a message round trip to Swift; if the other side never
+  // answers, this await never settles and the call sits at "处理中" forever.
+  // A bounded wait turns silence into a reportable stage.
+  function _withVisualTimeout(promise, ms, stage) {
+    return new Promise(function (resolve, reject) {
+      var settled = false;
+      var timer = setTimeout(function () {
+        if (settled) return;
+        settled = true;
+        reject(_visualStageError(stage, '等待 ' + ms + 'ms 无响应'));
+      }, ms);
+      Promise.resolve(promise).then(function (value) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        resolve(value);
+      }, function (error) {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        reject(error);
+      });
+    });
+  }
+
   async function _nativeRealtimeVisual(name, args) {
     var target = Object.assign({ page: _rtc.ctxPage || 0 }, args || {});
     var shot = null;
     var attempted = [];
     if (name === 'see_ink' && window.RC && RC.captureInkRegion) {
       attempted.push('笔迹裁图');
+      _visualStep('笔迹裁图 开始');
       try {
-        shot = await RC.captureInkRegion(target);
+        shot = await _withVisualTimeout(
+          RC.captureInkRegion(target), 8000, '页面合成/笔迹裁图'
+        );
+        _visualStep('笔迹裁图 ' + (shot ? '得到图' : '无图'));
       } catch (error) {
         throw _visualStageError('页面合成/笔迹裁图', error && error.message);
       }
     }
     if (!shot && window.RC && RC.capturePageComposite) {
       attempted.push('整页合成');
+      _visualStep('整页合成 开始');
       try {
-        shot = await RC.capturePageComposite(name === 'see_ink'
+        shot = await _withVisualTimeout(RC.capturePageComposite(name === 'see_ink'
           ? target
-          : Object.assign({}, target, { scope: 'viewport-context' }));
+          : Object.assign({}, target, { scope: 'viewport-context' })),
+          10000, '页面合成/整页合成');
+        _visualStep('整页合成 ' + (shot ? '得到图' : '无图'));
       } catch (error) {
         throw _visualStageError('页面合成/整页合成', error && error.message);
       }
     }
     if (!shot) {
       attempted.push('视口截图');
+      _visualStep('视口截图 开始');
       try {
-        shot = await _captureView();
+        shot = await _withVisualTimeout(_captureView(), 8000, '页面合成/视口截图');
+        _visualStep('视口截图 ' + (shot ? '得到图' : '无图'));
       } catch (error) {
         throw _visualStageError('页面合成/视口截图', error && error.message);
       }
@@ -5170,13 +5217,14 @@ if (window.__bwPwaProviderOnly) return;
     if (!_rtc.sidebandKey) {
       throw _visualStageError('sideband', '旁路密钥缺失，无法把图交给原生通道');
     }
+    _visualStep('图已就绪 ' + Math.round(String(shot.b64 || '').length / 1024) + 'KB，送往原生通道');
     var reply;
     try {
-      reply = await _nativeRealtimeRequest({
+      reply = await _withVisualTimeout(_nativeRealtimeRequest({
         action: 'image', call_id: _rtc.callId,
         client_secret: _rtc.sidebandKey || '', tool: name,
         media_type: shot.media_type || 'image/jpeg', b64: shot.b64
-      });
+      }), 15000, '本地保存/传输');
     } catch (error) {
       // The native side covers local save, reference read and network send;
       // it reports which one, and that detail is passed through unchanged.
@@ -5185,6 +5233,7 @@ if (window.__bwPwaProviderOnly) return;
     if (reply && reply.ok === false) {
       throw _visualStageError('本地保存/传输', reply.error || '原生通道未接受该图');
     }
+    _visualStep('原生通道已接受');
     return shot;
   }
 
@@ -5285,6 +5334,19 @@ if (window.__bwPwaProviderOnly) return;
     _rtc.toolN = (_rtc.toolN || 0) + 1;   // ㊷ 护栏:单会话工具调用异常多=可能循环失控,提醒但不硬断
     if (_rtc.toolN === 40) { try { threadMsg('asst-note', '⚠ 本次通话工具调用已达 40 次(异常偏多)——若感觉它在兜圈子,挂断重拨或点🗑清空。'); } catch (e) {} }
     onToolStatus({ status: 'running', label: name });
+    // Entry point of every tool, with the route decided by nativeDirect.
+    // A call that never returns leaves no other trace of having started.
+    try {
+      if (window.dlog) {
+        window.dlog(
+          'tool→ ' + name + ' route=' + (_rtc.nativeDirect ? 'local' : 'server')
+            + ' flag=' + String(window.__BW_NATIVE_OPENAI_REALTIME__ === true)
+            + ' bridge=' + String(!!(window.__bwNativeRealtime &&
+              typeof window.__bwNativeRealtime.request === 'function')),
+          '#9ad'
+        );
+      }
+    } catch (_) {}
     var out = '', ok = true, label = name, took = null, argsUsed = args, vision = null, res;
     try {
       if (!_rtc.nativeDirect && /^(see_ink|see_page|see_figure)$/.test(name)) {
@@ -5463,6 +5525,12 @@ if (window.__bwPwaProviderOnly) return;
           typeof window.__bwNativeRealtime.request === 'function')
       });
     }
+    try {
+      if (window.dlog) {
+        window.dlog('tool← ' + name + ' ' + (ok ? 'ok' : 'FAIL ') +
+          (ok ? '' : String(out || '').slice(0, 160)), ok ? '#7be096' : '#ff6b6b');
+      }
+    } catch (_) {}
     _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId, output: out } });
     if (!_rtcTool._silent) _rtcRespCreate(name === 'deep_think' ? 'deep' : 'tool', ok && String(out || '').length > 800);   // 66c/74:silent=静默入库不发言
     _rtcTool._silent = false;

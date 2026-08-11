@@ -1,6 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import vm from "node:vm";
 
 const ROOT = new URL("../../", import.meta.url);
 const read = (path) => readFileSync(new URL(path, ROOT), "utf8");
@@ -20,6 +21,7 @@ const FACADE = read("extensions/bw-reader-webext/src/facade.js");
 const WEB_VIEW = read("ios/BWReader/App/ReaderWebView.swift");
 const TOOLS = read("ios/BWReader/App/NativeReaderToolsView.swift");
 const MANIFEST = read("ios/BWReader/native_reader_interface_manifest.json");
+const SETTINGS = read("_server_deploy/static/pdf/rc-settings.js");
 
 test("the App owns both the project key and the Realtime session without Pi", () => {
   assert.doesNotMatch(SERVER, /native-realtime-config/);
@@ -310,6 +312,71 @@ test("visual-tool failures keep their route and stage visible in the rendered to
   assert.match(errorBranch, /errorDetail = String\(p\.rag \|\| p\.result_brief/);
   assert.match(errorBranch, /result: errorDetail/);
   assert.match(errorBranch, /error: errorDetail/);
+});
+
+test("visual-tool waits are bounded and every host exposes the visible step log first", async () => {
+  const visual = VOICE.slice(
+    VOICE.indexOf("function _visualStageError"),
+    VOICE.indexOf("function _nativeRealtimePageText"),
+  );
+  assert.match(visual, /window\.dlog\('see: ' \+ text/);
+  assert.match(visual, /RC\.captureInkRegion\(target\), 8000/);
+  assert.match(visual, /RC\.capturePageComposite[\s\S]*10000, '页面合成\/整页合成'/);
+  assert.match(visual, /_captureView\(\), 8000, '页面合成\/视口截图'/);
+  assert.match(visual, /_nativeRealtimeRequest\([\s\S]*15000, '本地保存\/传输'/);
+  assert.ok(
+    visual.indexOf("if (reply && reply.ok === false)") <
+      visual.indexOf("_visualStep('原生通道已接受')"),
+    "the log must not claim acceptance before checking the native reply",
+  );
+  assert.match(
+    VOICE,
+    /bridge=' \+ String\(!!\(window\.__bwNativeRealtime &&[\s\S]*typeof window\.__bwNativeRealtime\.request === 'function'\)\)/,
+  );
+
+  assert.match(SETTINGS, /if \(typeof window\.dlog !== 'function'\)/);
+  for (const template of [
+    "_server_deploy/templates/pdf_reader.html",
+    "_server_deploy/templates/epub_html_reader.html",
+    "_server_deploy/templates/html_reader.html",
+  ]) {
+    const html = read(template);
+    assert.ok(
+      html.indexOf('<script src="/static/pdf/rc-settings.js') <
+        html.indexOf('<script src="/static/pdf/rc-voicecall.js'),
+      `${template} must install the visible log before Realtime tools`,
+    );
+  }
+
+  const definitions = VOICE.slice(
+    VOICE.indexOf("function _visualStageError"),
+    VOICE.indexOf("async function _nativeRealtimeVisual"),
+  );
+  const sandbox = { setTimeout, clearTimeout, Promise, Error };
+  vm.runInNewContext(
+    `${definitions}; this.withVisualTimeout = _withVisualTimeout;`,
+    sandbox,
+  );
+  await assert.rejects(
+    sandbox.withVisualTimeout(new Promise(() => {}), 5, "probe-stage"),
+    (error) => {
+      assert.equal(error.bwVisualStage, "probe-stage");
+      assert.match(error.message, /等待 5ms 无响应/);
+      return true;
+    },
+  );
+  assert.equal(
+    await sandbox.withVisualTimeout(Promise.resolve("ok"), 50, "fast"),
+    "ok",
+  );
+  const lateRejection = new Promise((resolve, reject) => {
+    setTimeout(() => reject(new Error("late")), 20);
+  });
+  await assert.rejects(
+    sandbox.withVisualTimeout(lateRejection, 5, "late-stage"),
+    /等待 5ms 无响应/,
+  );
+  await new Promise((resolve) => setTimeout(resolve, 30));
 });
 
 test("native direct keeps local work in App and exposes only explicit Pi AI tools", () => {
