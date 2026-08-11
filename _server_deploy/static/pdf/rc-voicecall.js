@@ -4564,27 +4564,66 @@
   //    截当前可见区域(正文+手写笔迹+插入页 overlay 所见即所得);EPUB 看图/看笔迹恒用,
   //    PDF 在服务端渲不出时(插入页未写回等)兜底。排除侧栏/通话条/字幕等悬浮 UI。
   var _h2cP = null;
+  // 回退截图库的地址必须相对于**本文档实际的加载基址**,不能写死站点根。
+  //
+  // App 的本机运行时把阅读器挂在带能力令牌的前缀下(/r/<token>/...),于是写死的
+  // '/static/pdf/html2canvas.min.js' 在 App 内 404 —— 加载失败 → reject → 上游 catch
+  // → null,对外只剩一句"无图"。本文件自己是被成功加载进来的,它的 src 必然可达,
+  // 所以以它的同目录为基准。
+  function _h2cSrc() {
+    try {
+      var tag = document.querySelector('script[src*="rc-voicecall"]');
+      var src = tag && tag.getAttribute('src');
+      if (src) return new URL(src, document.baseURI).href
+        .replace(/rc-voicecall[^/]*$/, 'html2canvas.min.js');
+    } catch (e) {}
+    return '/static/pdf/html2canvas.min.js';
+  }
   function _loadH2C() {
     if (window.html2canvas) return Promise.resolve();
     if (_h2cP) return _h2cP;
+    var url = _h2cSrc();
     _h2cP = new Promise(function (res, rej) {
       var s = document.createElement('script');
-      s.src = '/static/pdf/html2canvas.min.js';
-      s.onload = res; s.onerror = function () { _h2cP = null; rej(new Error('h2c load fail')); };
+      s.src = url;
+      s.onload = function () {
+        // onload 只保证脚本执行完毕,不保证它导出了全局。两者要的修法不同,分开报。
+        if (window.html2canvas) { res(); return; }
+        _h2cP = null;
+        rej(new Error('截图库已加载但未导出 html2canvas'));
+      };
+      s.onerror = function () { _h2cP = null; rej(new Error('截图库加载失败 ' + url)); };
       document.head.appendChild(s);
     });
     return _h2cP;
+  }
+  // 规则一/二(silent-failure-lessons):每个提前返回都要出声;折成 null 之前先说清原始情形。
+  // 这条路径此前一律 catch→return null,于是"库没加载""画布被跨源污染""截出来是空白"
+  // 这些要求完全不同修法的死因,对外是同一句"无图"。
+  function _visualErrText(e) {
+    if (!e) return '未知';
+    return String((e && (e.message || e.name)) || e).slice(0, 160);
+  }
+  function _visualNull(where, why) {
+    _visualStep(where + ' 放弃: ' + why);
+    return null;
   }
   // 可选 DocumentHost 视觉表面。PDF/EPUB 没实现时原路径完全不变；普通网页只在 adapter
   // 提供真实正文元素、布局尺寸和 canonical strokes，不复制截图/绘制算法。
   function _visualSurface() {
     try {
       var ad = window.RC && RC.adapter ? RC.adapter() : null;
-      var s = ad && ad.getVisualSurface ? ad.getVisualSurface() : null;
-      if (!s || !s.element || !(s.width > 0) || !(s.height > 0)) return null;
+      if (!ad) return _visualNull('原生取图面', '无 adapter');
+      if (!ad.getVisualSurface) return _visualNull('原生取图面', 'adapter 未实现 getVisualSurface');
+      var s = ad.getVisualSurface();
+      if (!s) return _visualNull('原生取图面', 'getVisualSurface 返回空');
+      if (!s.element) return _visualNull('原生取图面', '缺 element');
+      if (!(s.width > 0) || !(s.height > 0)) {
+        return _visualNull('原生取图面', '尺寸非法 ' + s.width + 'x' + s.height);
+      }
       s.strokes = Array.isArray(s.strokes) ? s.strokes : [];
       return s;
-    } catch (e) { return null; }
+    } catch (e) { return _visualNull('原生取图面', _visualErrText(e)); }
   }
   function _visualCaptureScope(target) {
     var scope = target && typeof target === 'object' ? target.scope : null;
@@ -4756,8 +4795,10 @@
         b64 = (canvas.toDataURL('image/jpeg', qs[qi]).split(',')[1]) || '';
         if (b64.length <= 900000) break;
       }
-      return b64.length > 5000 ? { media_type: 'image/jpeg', b64: b64 } : null;   // 太小=截了个寂寞(空白/失败)
-    } catch (e) { return null; }
+      // 太小=截了个寂寞(空白/失败)。这跟"截图库没加载"是两回事,分开说。
+      if (b64.length <= 5000) return _visualNull('视口截图', '图过小 ' + b64.length + 'B(疑空白)');
+      return { media_type: 'image/jpeg', b64: b64 };
+    } catch (e) { return _visualNull('视口截图', _visualErrText(e)); }
   }
   // 通用原语(用户点子:前端渲染截图通用性强,统一覆盖各种取图):截**任意元素**为图(所见即所得)。
   //   检查纸(pdf-uishared)、笔迹查看(see_ink 插入页/覆盖层)、以后别处都走这一条,不再各写各的。
@@ -4773,8 +4814,9 @@
       });
       var b64 = '', qs = [0.85, 0.7, 0.5];
       for (var qi = 0; qi < qs.length; qi++) { b64 = (canvas.toDataURL('image/jpeg', qs[qi]).split(',')[1]) || ''; if (b64.length <= 900000) break; }
-      return b64.length > 3000 ? { media_type: 'image/jpeg', b64: b64 } : null;
-    } catch (e) { return null; }
+      if (b64.length <= 3000) return _visualNull('元素截图', '图过小 ' + b64.length + 'B(疑空白)');
+      return { media_type: 'image/jpeg', b64: b64 };
+    } catch (e) { return _visualNull('元素截图', _visualErrText(e)); }
   }
   function _compositeTargetPage(target) {
     if (target == null) return null;
@@ -4829,8 +4871,9 @@
         b64 = (canvas.toDataURL('image/jpeg', qs[qi]).split(',')[1]) || '';
         if (b64.length <= 900000) break;
       }
-      return b64.length > 3000 ? { media_type: 'image/jpeg', b64: b64 } : null;
-    } catch (e) { return null; }
+      if (b64.length <= 3000) return _visualNull('页区域截图', '图过小 ' + b64.length + 'B(疑空白)');
+      return { media_type: 'image/jpeg', b64: b64 };
+    } catch (e) { return _visualNull('页区域截图', _visualErrText(e)); }
   }
   async function _captureSurfaceCompositeCrop(surface, crop, selectionId) {
     if (!surface || !surface.element || !crop) return null;
@@ -5091,8 +5134,9 @@
       });
       var b64 = '', qs = [0.85, 0.7, 0.5];
       for (var q = 0; q < qs.length; q++) { b64 = (canvas.toDataURL('image/jpeg', qs[q]).split(',')[1]) || ''; if (b64.length <= 900000) break; }
-      return b64.length > 3000 ? { media_type: 'image/jpeg', b64: b64 } : null;
-    } catch (e) { return null; }
+      if (b64.length <= 3000) return _visualNull('笔迹裁图', '图过小 ' + b64.length + 'B(疑空白)');
+      return { media_type: 'image/jpeg', b64: b64 };
+    } catch (e) { return _visualNull('笔迹裁图', _visualErrText(e)); }
   }
   try {
     window.RC = window.RC || {};
