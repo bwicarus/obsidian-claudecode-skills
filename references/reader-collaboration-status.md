@@ -4036,9 +4036,8 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **发布事实**：代码 `85d4166a` + `0422d27c`；Reader `0.2.88`、KG `kg-0.2.88-600cb0ca5a6558b56e17`，事务 `/home/bwicarus/deploy-backups/reader/20260811T040740Z-1185177`；Actions `31457579351` 上传 TestFlight `1.1.28 (198)`，`31458055710` 确认 `VALID / IN_BETA_TESTING`。
 - **边界/下一步**：本批消除无限“处理中”并暴露真实断点，不等于已修未知根因；安装后开“显示调试日志”，复现 `see_ink` 并提交从 `tool→` 到最后一行的左下角截图。
 
-## Codex：App 原生层级合成图接口候选（2026-08-11 JST，未发布）
-- **改了什么**：视口路径以 WKWebView/PencilKit 公共父视图执行 `drawHierarchy`；新增 PDF 离屏路径，以 PDFKit 渲染任意页并叠加本机权威 `ink` 状态，不依赖目标页当前是否可见。
-- **接口/语义**：可信本机壳可请求 `scope=viewport`、视口归一化 `scope=region&x=&y=&w=&h=`，或 `scope=page&page=N` 加可选页内归一化裁剪；无笔迹仍成功并返回 `X-BW-Visual-Ink: none`。
-- **安全/诊断**：只接受当前能力壳、当前本机 PDF 与同书笔迹；JPEG `no-store`、最长边/大小有界，每个提前返回均有稳定 `X-BW-Reader-Error`，不输出 capability token。
-- **验证/候选**：分支 `codex/native-visual-capture-20260811`，代码至 `cd7e51e2`；Reader 全量 978 项通过，Actions `31460687702` 的模拟器、签名设备归档、三目标校验和 IPA 导出成功，`upload=false`；Windows handoff 仅余既有 `fcntl` 平台阻断。
-- **边界/下一步**：尚未接共享 web 调用且未部署；离屏页当前合成 PDF 底页与笔迹/选区，完整可见 UI/卡片仍走视口层级图；Claude 接 web 后再发 TestFlight 实机验收。
+## Claude / Codex：App 原生合成图已发布 0.2.89 / 1.1.29（2026-08-11 JST）
+- **改了什么**：屏内 `see_page/see_ink` 通过 WKWebView/PencilKit 公共父视图原生截取底页、笔迹与可见卡片；滚出视口的 PDF 笔迹改由 PDFKit 离屏渲页并叠加本机权威墨迹。
+- **接口/安全**：共享前端已接 `scope=viewport/region/page`，空笔迹仍返回有效图；能力前缀、同书校验、JPEG 上限与 `X-BW-Reader-Error` 保持 fail closed，令牌不入日志。
+- **验证/发布**：Reader 合同全量 979 项与发布管线通过；提交 `c7f0cfc4`，Actions `31466443968` 上传 TestFlight `1.1.29 (205)`，`31466889652` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
+- **未做/下一步**：本轮 App 前端随 IPA 构建，未部署 Pi；用户安装后分别验收屏内笔迹（含卡片）、翻页后的屏外 PDF 笔迹（无卡片层）及失败日志的具体错误码。
