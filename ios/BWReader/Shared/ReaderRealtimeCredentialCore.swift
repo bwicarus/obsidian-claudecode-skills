@@ -943,12 +943,17 @@ enum ReaderRealtimeOpenAIClient {
         // `conversation.item.added` (and later `conversation.item.done`).
         // Give this delivery its own IDs so the monitoring socket cannot
         // mistake an unrelated conversation event for our image receipt.
-        let eventID = "event_bwreader_" + UUID().uuidString
+        // Realtime limits client-supplied item IDs to 32 characters. Keep both
+        // correlated IDs within the same bound so a later schema check cannot
+        // reject the event after the item ID has been fixed.
+        let eventNonce = UUID().uuidString
             .replacingOccurrences(of: "-", with: "")
             .lowercased()
-        let itemID = "item_bwreader_" + UUID().uuidString
+        let itemNonce = UUID().uuidString
             .replacingOccurrences(of: "-", with: "")
             .lowercased()
+        let eventID = "bwe_" + String(eventNonce.prefix(28))
+        let itemID = "bwi_" + String(itemNonce.prefix(28))
         let payload: [String: Any] = [
             "event_id": eventID,
             "type": "conversation.item.create",

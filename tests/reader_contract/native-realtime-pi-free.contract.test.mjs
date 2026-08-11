@@ -250,6 +250,10 @@ test("selection is injected on the user's turn and visual tools send the real co
   assert.match(CORE, /waitForImageConfirmation/);
   assert.match(CORE, /"event_id": eventID/);
   assert.match(CORE, /"id": itemID/);
+  assert.match(CORE, /let eventID = "bwe_" \+ String\(eventNonce\.prefix\(28\)\)/);
+  assert.match(CORE, /let itemID = "bwi_" \+ String\(itemNonce\.prefix\(28\)\)/);
+  assert.equal("bwe_".length + 28, 32);
+  assert.equal("bwi_".length + 28, 32);
   assert.match(CORE, /conversation\.item\.added/);
   assert.match(CORE, /conversation\.item\.done/);
   assert.match(CORE, /conversation\.item\.created/);

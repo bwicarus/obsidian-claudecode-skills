@@ -59,6 +59,10 @@ Safari 扩展原生进程经签名 access group 共享读取，网页和扩展 J
 `event_id` 与 `item.id`，并按图片 ID 接受当前 GA 的 `conversation.item.added` / `done`
 回执；旧 `created` 仅作兼容。错误按本次 client event 关联，无关会话事件不能误报成功或失败。
 
+**0.2.92 / App 1.1.32 Realtime 图像 ID 边界**：原生直投生成的 `event_id` 与
+`item.id` 都限制为 32 字符，避免 OpenAI 在接收合成图前以 `string_above_max_length`
+拒绝客户端条目；ID 仍保留类型前缀和足够的随机位用于精确匹配回执。
+
 **0.2.89 / App 1.1.29 原生合成图**：App 内 `see_page` 优先截取 WKWebView、PencilKit
 与可见卡片的公共原生视图层级；`see_ink` 在笔迹仍位于视口时按区域截取同一层级，滚出视口的
 PDF 笔迹则由 PDFKit 离屏渲染目标页并叠加本机权威墨迹。三条路径均走能力前缀本地 API，
