@@ -155,8 +155,9 @@ background 的固定 relay，不能把 URL、设备 ID、AUMID、进程、路径
   C:\Users\bwica\bw-computer-voice-bridge\runtime\reader-context-snapshot.json
 ```
 
-它注册只读 `reader_context_snapshot`、按需 `reader_visual_image`，以及受限的
-`reader_browser_control`；客户端可用 `enabled_tools` 进一步收窄。服务进程在同一 MCP
+它注册只读 `reader_context_snapshot`、按需 `reader_visual_image`、受限的
+`reader_browser_control`、严格 `reader_command`，以及只为复杂任务读取一个工作流文件的
+`reader_capability_guide`；客户端可用 `enabled_tools` 进一步收窄。服务进程在同一 MCP
 连接中保持 instance/call sequence，逐次读取原子快照；最新文件损坏时保留上一次有效
 revision。`active-reading` 超过三分钟则返回 `contextStatus=stale`，正文、选区和视觉请求都
 不会继续使用旧页面。`reader_visual_image` 只向快照中精确匹配且在线的 source 请求当前

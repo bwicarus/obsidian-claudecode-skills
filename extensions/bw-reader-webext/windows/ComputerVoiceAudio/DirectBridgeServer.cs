@@ -32,6 +32,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     private readonly DirectBridgeConfigStore _configStore;
     private readonly DirectBridgeCoordinator _coordinator;
     private readonly DirectConnectionOwnership _connectionOwnership = new();
+    private readonly DirectContextConnectionHealth _contextConnectionHealth =
+        new();
     private readonly SemaphoreSlim _startPromotionGate = new(1, 1);
     private readonly SemaphoreSlim _disposeGate = new(1, 1);
     private readonly string _serviceInstanceId;
@@ -355,6 +357,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         }
         context.Response.Headers.CacheControl = "no-store";
         context.Response.ContentType = "application/json";
+        DirectContextConnectionHealthSnapshot contextHealth =
+            _contextConnectionHealth.Snapshot();
         await context.Response.WriteAsJsonAsync(new
         {
             contract = "reader-computer-voice-direct-health/1",
@@ -362,6 +366,9 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             serviceInstanceId = _serviceInstanceId,
             state = _coordinator.CaptureActive ? "active" : "idle",
             captureActive = _coordinator.CaptureActive,
+            contextConnected = contextHealth.ConnectionCount > 0,
+            contextConnectionCount = contextHealth.ConnectionCount,
+            contextLastSeenAtUtc = contextHealth.LastSeenAtUtc,
         }, DirectBridgeContract.JsonOptions, serviceCancellationToken)
             .ConfigureAwait(false);
     }
@@ -882,6 +889,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 _readerRealtimeOutputBroker.Accept(lease, ack);
             });
 
+        _contextConnectionHealth.Connected();
         try
         {
             while (
@@ -896,6 +904,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 {
                     break;
                 }
+                _contextConnectionHealth.MessageSeen();
                 if (incoming.MessageType != WebSocketMessageType.Text)
                 {
                     await socket.CloseAsync(
@@ -952,6 +961,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         }
         finally
         {
+            _contextConnectionHealth.Disconnected();
             if (sourceLease is not null)
             {
                 _readerSourceRouter.Detach(sourceLease);
@@ -2064,6 +2074,65 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 new AggregateException(failures));
         }
         throw new AggregateException(failures);
+    }
+}
+
+internal sealed record DirectContextConnectionHealthSnapshot(
+    int ConnectionCount,
+    DateTimeOffset? LastSeenAtUtc);
+
+internal sealed class DirectContextConnectionHealth
+{
+    private readonly object _gate = new();
+    private readonly Func<DateTimeOffset> _utcNow;
+    private int _connectionCount;
+    private DateTimeOffset? _lastSeenAtUtc;
+
+    internal DirectContextConnectionHealth(
+        Func<DateTimeOffset>? utcNow = null)
+    {
+        _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
+    }
+
+    internal void Connected()
+    {
+        lock (_gate)
+        {
+            _connectionCount += 1;
+            _lastSeenAtUtc = _utcNow().ToUniversalTime();
+        }
+    }
+
+    internal void MessageSeen()
+    {
+        lock (_gate)
+        {
+            if (_connectionCount > 0)
+            {
+                _lastSeenAtUtc = _utcNow().ToUniversalTime();
+            }
+        }
+    }
+
+    internal void Disconnected()
+    {
+        lock (_gate)
+        {
+            if (_connectionCount > 0)
+            {
+                _connectionCount -= 1;
+            }
+        }
+    }
+
+    internal DirectContextConnectionHealthSnapshot Snapshot()
+    {
+        lock (_gate)
+        {
+            return new DirectContextConnectionHealthSnapshot(
+                _connectionCount,
+                _lastSeenAtUtc);
+        }
     }
 }
 

@@ -1,0 +1,4 @@
+interface:
+  display_name: "Reader 原生任务编排"
+  short_description: "用 Codex 原生工具低延迟编排 Reader 研究与操作"
+  default_prompt: "Use $orchestrate-reader-tasks to complete this Reader task through native Codex tools with minimum latency."

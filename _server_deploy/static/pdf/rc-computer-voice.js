@@ -59,6 +59,7 @@
   var LOCAL_PAGE_CONTEXT_POLL_MS = 1500;
   var LOCAL_PAGE_TEXT_WAIT_MS = 1200;
   var SNAPSHOT_RECONNECT_MS = 1000;
+  var SNAPSHOT_RECONNECT_MAX_MS = 15000;
   var CONTEXT_BOOTSTRAP_LIMIT = 500;
   var CONTEXT_LIVE_LIMIT = 32;
   var CONTEXT_LIVE_WAIT_S = 20;
@@ -134,6 +135,13 @@
   var snapshotLink = null;
   var snapshotLinkGeneration = 0;
   var snapshotReconnectTimer = null;
+  // `contextDeliveryMode` is the confirmed user/server configuration.  These
+  // fields describe only the disposable WSS which carries that configuration.
+  // A transport failure must never turn a configured snapshot mode into an
+  // unknown mode: in the App that would make the native voice owner suppress
+  // the dedicated context link forever.
+  var snapshotTransportState = "idle";
+  var snapshotReconnectAttempt = 0;
   var nativeContextState = null;
   var nativeContextHandoffPending = false;
   var nativeContextRequestSequence = 0;
@@ -4374,14 +4382,13 @@
     if (!contextPumpAlive(state, pump)) return;
     stopContextPump(state);
     if (state.contextOnly === true) {
-      contextDeliveryMode = null;
       if (snapshotLink === state) snapshotLink = null;
       state.stopped = true;
+      snapshotTransportState = "failed";
       var contextOnlyChannel = state.channel;
       state.channel = null;
-      closeChannelThenScheduleSnapshotReconnect(
-        contextOnlyChannel,
-        SNAPSHOT_RECONNECT_MS
+      closeChannelThenScheduleSnapshotReconnectAfterFailure(
+        contextOnlyChannel
       );
     }
     emitStatus({
@@ -5276,6 +5283,8 @@
     var state = snapshotLink;
     snapshotLink = null;
     snapshotLinkGeneration += 1;
+    snapshotTransportState = "idle";
+    snapshotReconnectAttempt = 0;
     if (!state) return Promise.resolve();
     state.stopped = true;
     stopContextPump(state);
@@ -5395,10 +5404,26 @@
 
   function scheduleSnapshotReconnect(delay) {
     if (snapshotReconnectTimer || !snapshotLinkWanted()) return;
+    snapshotTransportState = "backoff";
     snapshotReconnectTimer = setTimeout(function () {
       snapshotReconnectTimer = null;
       reconcileSnapshotLink();
     }, delay);
+  }
+
+  function nextSnapshotReconnectDelay() {
+    var exponent = Math.min(snapshotReconnectAttempt, 4);
+    var delay = Math.min(
+      SNAPSHOT_RECONNECT_MS * Math.pow(2, exponent),
+      SNAPSHOT_RECONNECT_MAX_MS
+    );
+    snapshotReconnectAttempt += 1;
+    return delay;
+  }
+
+  function scheduleSnapshotReconnectAfterFailure() {
+    if (snapshotReconnectTimer || !snapshotLinkWanted()) return;
+    scheduleSnapshotReconnect(nextSnapshotReconnectDelay());
   }
 
   function closeChannelThenScheduleSnapshotReconnect(channel, delay) {
@@ -5416,6 +5441,18 @@
     });
   }
 
+  function closeChannelThenScheduleSnapshotReconnectAfterFailure(channel) {
+    var closing = Promise.resolve();
+    if (channel) {
+      try {
+        closing = Promise.resolve(channel.close());
+      } catch (_) {}
+    }
+    return closing.catch(function () {}).then(function () {
+      scheduleSnapshotReconnectAfterFailure();
+    });
+  }
+
   function resumeSnapshotLinkFromForeground(event) {
     if (!snapshotLinkWanted()) return reconcileSnapshotLink();
     // iOS may suspend this one-second timer while the PWA is backgrounded.
@@ -5426,7 +5463,59 @@
       clearTimeout(snapshotReconnectTimer);
       snapshotReconnectTimer = null;
     }
-    reconcileSnapshotLink();
+    var state = snapshotLink;
+    if (!state) return reconcileSnapshotLink();
+    if (state.foregroundProbePromise) return state.foregroundProbePromise;
+    // An OPEN readyState can survive an iOS background suspension after its
+    // peer has gone away.  CONTEXT-MODE is read-only and DirectSocket gives it
+    // the normal bounded request timeout, so foregrounding can prove the link
+    // before trusting it without replaying any mutation.
+    state.foregroundProbePromise = Promise.resolve(state.promise).then(
+      function (resolved) {
+        if (
+          resolved !== state ||
+          snapshotLink !== state ||
+          state.stopped ||
+          !directChannelLive(state.channel)
+        ) {
+          throw directError(
+            "Windows 本地 Reader 快照连接需要重建",
+            "BW_READER_CONTEXT_SNAPSHOT_STALE",
+            true
+          );
+        }
+        return queryContextMode(state.channel);
+      }
+    ).then(function (mode) {
+      if (snapshotLink !== state || state.stopped) return null;
+      if (mode !== CONTEXT_DELIVERY_SNAPSHOT) {
+        return stopSnapshotLink();
+      }
+      snapshotTransportState = "open";
+      snapshotReconnectAttempt = 0;
+      return state;
+    }).catch(function (error) {
+      if (snapshotLink !== state || state.stopped) return null;
+      snapshotLink = null;
+      state.stopped = true;
+      snapshotTransportState = "failed";
+      stopContextPump(state);
+      var failedChannel = state.channel;
+      state.channel = null;
+      emitStatus({
+        state: "warning",
+        message: error && error.message ||
+          "Windows 本地 Reader 快照前台验活失败",
+        code: error && error.code ||
+          "BW_READER_CONTEXT_SNAPSHOT_STALE",
+      });
+      return closeChannelThenScheduleSnapshotReconnectAfterFailure(
+        failedChannel
+      ).then(function () { return null; });
+    }).finally(function () {
+      state.foregroundProbePromise = null;
+    });
+    return state.foregroundProbePromise;
   }
 
   function reconcileSnapshotLink() {
@@ -5457,7 +5546,9 @@
       contextPump: null,
       activeReadingPump: null,
       generation: generation,
+      foregroundProbePromise: null,
     };
+    snapshotTransportState = "connecting";
     snapshotLink = state;
     var work = openDirect({
       // Inside the App, Swift owns the voice link end to end. This snapshot
@@ -5484,9 +5575,9 @@
       endpoint: snapshotEndpoint,
       onFatal: function (error) {
         if (snapshotLink !== state || state.stopped) return;
-        contextDeliveryMode = null;
         state.stopped = true;
         snapshotLink = null;
+        snapshotTransportState = "failed";
         stopContextPump(state);
         emitStatus({
           state: "warning",
@@ -5495,7 +5586,7 @@
           code: error && error.code ||
             "BW_READER_CONTEXT_SNAPSHOT_DISCONNECTED",
         });
-        scheduleSnapshotReconnect(SNAPSHOT_RECONNECT_MS);
+        scheduleSnapshotReconnectAfterFailure();
       },
     }, function (channel) {
       state.channel = channel;
@@ -5568,6 +5659,8 @@
           }
           state.channel.readerVisualSourceId = sourceInstanceId;
           if (snapshotLink !== state || state.stopped) return null;
+          snapshotTransportState = "open";
+          snapshotReconnectAttempt = 0;
           startContextPump(state);
           startActiveReadingPump(state);
           emitStatus({
@@ -5580,12 +5673,12 @@
     }).catch(function (error) {
       if (snapshotLink === state) snapshotLink = null;
       state.stopped = true;
+      snapshotTransportState = "failed";
       stopContextPump(state);
       var failedChannel = state.channel;
       state.channel = null;
-      return closeChannelThenScheduleSnapshotReconnect(
-        failedChannel,
-        SNAPSHOT_RECONNECT_MS
+      return closeChannelThenScheduleSnapshotReconnectAfterFailure(
+        failedChannel
       ).then(function () { return null; });
     });
     state.promise = work;

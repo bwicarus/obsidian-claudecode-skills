@@ -50,6 +50,11 @@
 Safari 扩展原生进程经签名 access group 共享读取，网页和扩展 JavaScript 仅得到 90 秒 `ek_`。
 普通 Realtime、选区、可见正文与合成图注入均不经过 Pi；Pi 只保留显式备份/同步和 AI API 能力。
 
+**0.2.101 / App 1.1.41 快照与电脑语音恢复候选**：专用快照传输故障保留已确认配置并
+有界重连，App 回前台先用只读请求验活；Windows 服务重启后的新快照代次可被常驻 MCP 接受。
+App 电脑语音对心跳断线与 Windows 媒体清理竞态持续退避恢复，但未知 START 结果仍 fail closed。
+Windows Codex 原生任务只按需读取一个工作流指南，旧 Realtime 与 CLI 路径保持不变。
+
 **0.2.100 / App 1.1.40 Reader 输出与渐进能力说明**：Windows 电脑语音的已完成聊天轮次
 经本机私有管道送入最新快照精确指向的 App/扩展，并复用既有对话流；卡片、导航、高亮和工具
 状态复用同一 Reader WSS 与现有 UI/action，不开放任意函数执行。`snapshot-mcp` 提供短索引和

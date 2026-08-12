@@ -7,4 +7,5 @@ Windows 电脑语音的相邻用户/助手消息由本机历史同步器直接�
 模型不需要手工发聊天命令。相同 turn ID 会得到 `replay`，不会出现重复气泡。
 只有最新快照所指的在线 Reader 会接收；来源已切换或离线时保持待重试，不投给别页。
 
-现有 Realtime 和 CLI 的调用、工具循环及委托方式不变。
+现有 Realtime 调用方式和旧 CLI 实现保持不变。Windows Codex 语音的复杂任务由当前
+Codex 会话直接编排，不为此再启动一个 CLI worker。

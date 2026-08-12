@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""Build and verify an immutable Windows direct-voice bridge candidate.
+"""Build, verify, install, or roll back a Windows direct-voice candidate.
 
-This is deliberately a *candidate* builder, not an installer.  It never
-starts ``--direct-serve``, touches Scheduled Tasks or Tailscale Serve, opens
-audio devices, or writes outside ``windows/candidates/<version>``.  The ZIP is
-also intentionally tiny: two self-contained executables, their fixed local
-bridge modules, the canonical voice-typist runtime, and a manifest.
+Build and verification remain side-effect free. Installation is transactional:
+it validates both sides, backs up only the fixed payload, stops only the exact
+owned Direct service, and restores the old payload/service after any failure.
+Configuration, runtime state, bundled .NET, and all other install files are
+outside the payload whitelist and are never replaced.
 """
 from __future__ import annotations
 
 import argparse
 from dataclasses import dataclass
+from datetime import datetime, timezone
 import hashlib
+import importlib.util
 import io
 import json
 import os
@@ -22,7 +24,9 @@ import stat
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Any, Mapping, Protocol, Sequence
+import uuid
 import zipfile
 
 
@@ -37,6 +41,8 @@ TYPIST_SCRIPT_SOURCE = TYPIST_RUNTIME_SOURCE / "voice_typist.py"
 TYPIST_IPC_SOURCE = TYPIST_RUNTIME_SOURCE / "typist_ipc.py"
 TYPIST_LAUNCHER_SOURCE = TYPIST_RUNTIME_SOURCE / "voice-typist-launcher.ps1"
 CANDIDATES = HERE / "candidates"
+DEFAULT_INSTALL_ROOT = Path.home() / "bw-computer-voice-bridge"
+DEFAULT_BACKUP_ROOT = Path.home() / "bw-computer-voice-bridge-backups"
 
 PACKAGE_CONTRACT = "reader-computer-voice-direct-package/1"
 MANIFEST_SCHEMA = 1
@@ -45,7 +51,10 @@ RID = "win-x64"
 VERSION_RE = re.compile(r"(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*)){0,3}\Z")
 SHA256_RE = re.compile(r"[0-9a-f]{64}\Z")
 SOURCE_EXCLUDED_PARTS = frozenset({"bin", "obj", "tests", "__pycache__"})
-SOURCE_INPUT_SUFFIXES = frozenset({".cs", ".csproj", ".py"})
+# Every file capable of changing a packaged executable must be content-
+# addressed. The C# project embeds ReaderCapabilities/*.md, so those guides
+# are build inputs just as surely as the .cs files which read them.
+SOURCE_INPUT_SUFFIXES = frozenset({".cs", ".csproj", ".md", ".py"})
 BUILD_COMMAND_TIMEOUT_SECONDS = 600
 SELF_TEST_TIMEOUT_SECONDS = 30
 DETERMINISTIC_BUILD_ENV = {
@@ -100,6 +109,14 @@ class CommandRunner(Protocol):
     def run(self, args: Sequence[str], *, cwd: Path) -> CommandResult: ...
 
 
+class InstallServiceController(Protocol):
+    def is_running(self, install_root: Path) -> bool: ...
+
+    def stop(self, install_root: Path) -> None: ...
+
+    def start(self, install_root: Path) -> None: ...
+
+
 class SubprocessRunner:
     def __init__(
         self,
@@ -143,6 +160,58 @@ class SubprocessRunner:
             completed.stdout,
             completed.stderr,
         )
+
+
+class BridgeCoreInstallServiceController:
+    """Use bridge_core's exact PID + executable ownership checks."""
+
+    def __init__(self) -> None:
+        source = DESKTOP_SOURCE / "bridge_core.py"
+        spec = importlib.util.spec_from_file_location(
+            "bw_direct_install_bridge_core",
+            source,
+        )
+        if spec is None or spec.loader is None:
+            _fail("无法加载 Direct 服务控制模块")
+        module = importlib.util.module_from_spec(spec)
+        sys.modules[spec.name] = module
+        spec.loader.exec_module(module)
+        self._module = module
+        self._runner = module.WindowsProcessRunner()
+
+    def _paths(self, install_root: Path) -> Any:
+        return self._module.BridgePaths.for_root(install_root)
+
+    def is_running(self, install_root: Path) -> bool:
+        paths = self._paths(install_root)
+        record = self._module._load_service_record(paths)
+        if record is None:
+            if paths.service_record.exists():
+                _fail("Direct 服务记录合同无效；拒绝安装时猜测进程身份")
+            return False
+        executable = self._runner.executable_for_pid(record["pid"])
+        if executable is None:
+            return False
+        if not self._module._same_path(executable, paths.native_host):
+            _fail("Direct 服务记录 PID 属于陌生进程；拒绝停止")
+        return True
+
+    def stop(self, install_root: Path) -> None:
+        if not self._module.stop_direct_service(
+            self._paths(install_root),
+            self._runner,
+        ):
+            _fail("Direct 服务在安装前未确认停止")
+
+    def start(self, install_root: Path) -> None:
+        paths = self._paths(install_root)
+        self._module.start_direct_service(paths, self._runner)
+        deadline = time.monotonic() + 10.0
+        while time.monotonic() < deadline:
+            if self._module.read_direct_status(paths, self._runner).service_online:
+                return
+            time.sleep(0.1)
+        _fail("Direct 服务重启后 10 秒内未进入在线状态")
 
 
 def _fail(message: str) -> None:
@@ -1042,6 +1111,271 @@ def run_packaged_self_tests(path: Path, *, runner: CommandRunner | None = None) 
                 _fail(f"包内 Python runtime 语法无效: {relative}: {exc}")
 
 
+def _verified_install_directory(
+    root: Path,
+    *,
+    label: str,
+) -> tuple[dict[str, Any], dict[str, bytes]]:
+    root = _require_plain_directory(root, label=label)
+
+    def checked(relative: str) -> Path:
+        target = root.joinpath(*PurePosixPath(relative).parts)
+        current = target.parent
+        while current != root:
+            try:
+                status = current.lstat()
+            except OSError as exc:
+                _fail(f"{label} payload 父目录不可读取: {relative}: {exc}")
+            if _is_reparse_path(current, status) or not stat.S_ISDIR(status.st_mode):
+                _fail(f"{label} payload 父目录不是普通目录: {relative}")
+            current = current.parent
+        try:
+            resolved = target.resolve(strict=True)
+        except OSError as exc:
+            _fail(f"{label} payload 不存在或不可读取: {relative}: {exc}")
+        if not resolved.is_relative_to(root):
+            _fail(f"{label} payload 越出安装根: {relative}")
+        return target
+
+    manifest_bytes = _read_regular(checked(MANIFEST_REL))
+    manifest = _strict_json(manifest_bytes, label=f"{label} manifest")
+    if manifest_bytes != _manifest_bytes(manifest):
+        _fail(f"{label} manifest 不是规范化 JSON")
+    version = manifest.get("version")
+    if not isinstance(version, str):
+        _fail(f"{label} manifest 缺少版本")
+    payload = {
+        relative: _read_regular(checked(relative))
+        for relative in PAYLOAD_RELATIVE_PATHS
+    }
+    _validate_manifest(manifest, version=version, payload=payload)
+    return manifest, payload
+
+
+def _prepare_backup_root(path: Path) -> Path:
+    lexical = _lexical_absolute(path)
+    parent = _require_plain_directory(lexical.parent, label="安装备份根父目录")
+    if lexical.parent != parent:
+        _fail("安装备份根父目录解析后偏离固定路径")
+    if not lexical.exists():
+        lexical.mkdir()
+    return _require_plain_directory(lexical, label="安装备份根")
+
+
+def _write_payload_tree(
+    root: Path,
+    manifest: dict[str, Any],
+    payload: Mapping[str, bytes],
+) -> None:
+    for relative in PAYLOAD_RELATIVE_PATHS:
+        target = root.joinpath(*PurePosixPath(relative).parts)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(payload[relative])
+    (root / MANIFEST_REL).write_bytes(_manifest_bytes(manifest))
+
+
+def _replace_install_payload(
+    install_root: Path,
+    manifest: dict[str, Any],
+    payload: Mapping[str, bytes],
+    *,
+    replace_file: Any = os.replace,
+) -> None:
+    transaction_id = uuid.uuid4().hex
+    for relative in (*PAYLOAD_RELATIVE_PATHS, MANIFEST_REL):
+        target = install_root.joinpath(*PurePosixPath(relative).parts)
+        current = target.parent
+        while current != install_root:
+            try:
+                status = current.lstat()
+            except OSError as exc:
+                _fail(f"安装目标父目录不存在: {relative}: {exc}")
+            if _is_reparse_path(current, status) or not stat.S_ISDIR(status.st_mode):
+                _fail(f"安装目标父目录不是普通目录: {relative}")
+            current = current.parent
+        try:
+            resolved = target.resolve(strict=True)
+        except OSError as exc:
+            _fail(f"安装目标不存在或不可读取: {relative}: {exc}")
+        if not resolved.is_relative_to(install_root):
+            _fail(f"安装目标越出安装根: {relative}")
+        temporary = target.with_name(f".{target.name}.bw-install-{transaction_id}.tmp")
+        content = (
+            _manifest_bytes(manifest)
+            if relative == MANIFEST_REL
+            else payload[relative]
+        )
+        try:
+            temporary.write_bytes(content)
+            replace_file(temporary, target)
+        finally:
+            try:
+                temporary.unlink()
+            except FileNotFoundError:
+                pass
+
+
+def _run_installed_self_tests(
+    install_root: Path,
+    payload: Mapping[str, bytes],
+    *,
+    runner: CommandRunner,
+) -> None:
+    for relative in EXECUTABLE_RELATIVE_PATHS:
+        executable = install_root.joinpath(*PurePosixPath(relative).parts)
+        _require_success(
+            runner.run((str(executable), "--self-test"), cwd=install_root),
+            label=f"安装后自检 {relative}",
+        )
+    for relative in PYTHON_RUNTIME_RELATIVE_PATHS:
+        try:
+            compile(payload[relative].decode("utf-8"), relative, "exec")
+        except (UnicodeDecodeError, SyntaxError) as exc:
+            _fail(f"安装后 Python runtime 语法无效: {relative}: {exc}")
+
+
+def _install_verified_payload(
+    manifest: dict[str, Any],
+    payload: dict[str, bytes],
+    *,
+    install_root: Path,
+    backup_root: Path,
+    service_controller: InstallServiceController,
+    runner: CommandRunner,
+    replace_file: Any = os.replace,
+) -> dict[str, Any]:
+    install_root = _require_plain_directory(install_root, label="Direct 安装根")
+    current_manifest, current_payload = _verified_install_directory(
+        install_root,
+        label="当前 Direct 安装",
+    )
+    backup_root = _prepare_backup_root(backup_root)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+    backup = backup_root / (
+        f"install-{manifest['version']}-{stamp}-{uuid.uuid4().hex[:8]}"
+    )
+    backup.mkdir()
+    _write_payload_tree(backup, current_manifest, current_payload)
+    _verified_install_directory(backup, label="新建安装备份")
+
+    was_running = service_controller.is_running(install_root)
+    stopped = False
+    try:
+        if was_running:
+            service_controller.stop(install_root)
+            stopped = True
+        _replace_install_payload(
+            install_root,
+            manifest,
+            payload,
+            replace_file=replace_file,
+        )
+        installed_manifest, installed_payload = _verified_install_directory(
+            install_root,
+            label="安装后 Direct",
+        )
+        _run_installed_self_tests(
+            install_root,
+            installed_payload,
+            runner=runner,
+        )
+        if was_running:
+            service_controller.start(install_root)
+        receipt = {
+            "backup": str(backup),
+            "installedVersion": installed_manifest["version"],
+            "previousVersion": current_manifest["version"],
+            "serviceRestored": was_running,
+        }
+        (backup / "install-receipt.json").write_text(
+            json.dumps(receipt, ensure_ascii=False, sort_keys=True) + "\n",
+            encoding="utf-8",
+        )
+        return receipt
+    except Exception as install_error:
+        recovery_errors: list[str] = []
+        if stopped:
+            try:
+                if service_controller.is_running(install_root):
+                    service_controller.stop(install_root)
+            except Exception as exc:
+                recovery_errors.append(f"停止失败候选服务失败: {exc}")
+        try:
+            _replace_install_payload(
+                install_root,
+                current_manifest,
+                current_payload,
+            )
+            _verified_install_directory(install_root, label="自动回滚后的 Direct")
+        except Exception as exc:
+            recovery_errors.append(f"恢复旧 payload 失败: {exc}")
+        if was_running:
+            try:
+                service_controller.start(install_root)
+            except Exception as exc:
+                recovery_errors.append(f"恢复旧 Direct 服务失败: {exc}")
+        detail = f"安装失败，已自动回滚: {install_error}"
+        if recovery_errors:
+            detail += "; " + "; ".join(recovery_errors)
+        raise PackageError(detail) from install_error
+
+
+def install_archive(
+    archive: Path,
+    *,
+    install_root: Path = DEFAULT_INSTALL_ROOT,
+    backup_root: Path = DEFAULT_BACKUP_ROOT,
+    service_controller: InstallServiceController | None = None,
+    runner: CommandRunner | None = None,
+    replace_file: Any = os.replace,
+) -> dict[str, Any]:
+    """Atomically install a validated candidate and preserve non-payload data."""
+
+    manifest, archive_payload = _verified_archive_contents(archive)
+    prefix = bundle_name(str(manifest["version"]))
+    payload = {
+        relative: archive_payload[f"{prefix}/{relative}"]
+        for relative in PAYLOAD_RELATIVE_PATHS
+    }
+    return _install_verified_payload(
+        manifest,
+        payload,
+        install_root=install_root,
+        backup_root=backup_root,
+        service_controller=(
+            service_controller or BridgeCoreInstallServiceController()
+        ),
+        runner=runner or SubprocessRunner(timeout_seconds=SELF_TEST_TIMEOUT_SECONDS),
+        replace_file=replace_file,
+    )
+
+
+def rollback_install(
+    backup: Path,
+    *,
+    install_root: Path = DEFAULT_INSTALL_ROOT,
+    backup_root: Path = DEFAULT_BACKUP_ROOT,
+    service_controller: InstallServiceController | None = None,
+    runner: CommandRunner | None = None,
+) -> dict[str, Any]:
+    """Install a previously validated backup using the same transaction."""
+
+    manifest, payload = _verified_install_directory(
+        backup,
+        label="指定回滚备份",
+    )
+    return _install_verified_payload(
+        manifest,
+        payload,
+        install_root=install_root,
+        backup_root=backup_root,
+        service_controller=(
+            service_controller or BridgeCoreInstallServiceController()
+        ),
+        runner=runner or SubprocessRunner(timeout_seconds=SELF_TEST_TIMEOUT_SECONDS),
+    )
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--build", metavar="VERSION", help="构建新的版本化候选 ZIP")
@@ -1052,15 +1386,52 @@ def main(argv: Sequence[str] | None = None) -> int:
         metavar="ZIP",
         help="校验后只运行两个 EXE --self-test，并静态编译 Python runtime",
     )
+    parser.add_argument("--install", type=Path, metavar="ZIP", help="原子安装候选 ZIP")
+    parser.add_argument(
+        "--rollback",
+        type=Path,
+        metavar="BACKUP_DIR",
+        help="以同一原子流程恢复指定备份",
+    )
+    parser.add_argument(
+        "--install-root",
+        type=Path,
+        default=DEFAULT_INSTALL_ROOT,
+        help=argparse.SUPPRESS,
+    )
+    parser.add_argument(
+        "--backup-root",
+        type=Path,
+        default=DEFAULT_BACKUP_ROOT,
+        help=argparse.SUPPRESS,
+    )
     args = parser.parse_args(argv)
-    actions = [args.build is not None, args.verify is not None, args.self_test is not None]
+    actions = [
+        args.build is not None,
+        args.verify is not None,
+        args.self_test is not None,
+        args.install is not None,
+        args.rollback is not None,
+    ]
     if sum(actions) != 1:
-        parser.error("必须且只能指定 --build、--verify 或 --self-test")
+        parser.error("必须且只能指定一个 build/verify/self-test/install/rollback 动作")
     try:
         if args.build:
             print(build_candidate(args.build))
         elif args.verify:
             print(json.dumps(verify_archive(args.verify), ensure_ascii=False, sort_keys=True))
+        elif args.install:
+            print(json.dumps(install_archive(
+                args.install,
+                install_root=args.install_root,
+                backup_root=args.backup_root,
+            ), ensure_ascii=False, sort_keys=True))
+        elif args.rollback:
+            print(json.dumps(rollback_install(
+                args.rollback,
+                install_root=args.install_root,
+                backup_root=args.backup_root,
+            ), ensure_ascii=False, sort_keys=True))
         else:
             run_packaged_self_tests(args.self_test)
             print("OK: packaged self-tests passed")

@@ -471,7 +471,11 @@ actor DirectVoiceSocket {
             action == "start"
                 ? "Windows 启动结果未知；连接已关闭，不会自动重试"
                 : "Windows 桥接器请求超时",
-            retryable: false
+            // A heartbeat is read-only and its timeout proves only that the
+            // current transport is unhealthy, so rebuilding the session is
+            // safe. Other requests may carry mutations whose outcome is
+            // unknown after a timeout and must remain fail-closed.
+            retryable: action == "heartbeat"
         )
         entry.continuation.resume(throwing: timedOut)
         await failConnection(timedOut)

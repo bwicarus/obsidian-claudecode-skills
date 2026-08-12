@@ -16,7 +16,7 @@ internal sealed class ReaderCapabilityCatalog
 
     private static readonly Entry[] Entries =
     [
-        new("index", "Reader 能力索引", "先读此文件，再按任务读取一个能力文件"),
+        new("index", "Reader 能力索引", "仅在无法判断精确 topic 时用于发现"),
         new("get", "GET Reader 信息", "读取页文、窗口、选区、全文与合成图"),
         new("conversation", "对话同步", "Windows 电脑语音聊天同步语义"),
         new("cards", "卡片输出", "发送现有 Realtime 卡片"),
@@ -24,7 +24,16 @@ internal sealed class ReaderCapabilityCatalog
         new("highlight", "高亮输出", "保存当前稳定选区"),
         new("tool-status", "工具状态输出", "发送现有 Realtime 工具状态"),
         new("command-format", "统一命令格式", "命令外壳、回执、去重和失败规则"),
+        new("task-routing", "Codex 原生任务路由", "按延迟和副作用选择直接工具或原生子代理"),
+        new("research-task", "多步研究任务", "替代旧 CLI worker prompt 的原生研究合同"),
+        new("interactive-paper", "交互练习纸", "原生编排出题、纸面元素和检查按钮"),
+        new("check-report", "检查报告核实", "直接回答报告或按需查书核实"),
+        new("saved-task", "已保存任务", "重生成型任务与机械回放的不同语义"),
+        new("capability-matrix", "工具能力矩阵", "本机 MCP、服务 MCP、Skill 与子代理的职责"),
     ];
+
+    internal static JsonArray TopicEnum() => new(
+        Entries.Select(entry => (JsonNode)entry.Slug).ToArray());
 
     private const string ResourcePrefix =
         "BwReader.ComputerVoiceAudio.ReaderCapabilities.";
@@ -63,16 +72,8 @@ internal sealed class ReaderCapabilityCatalog
                 uri,
                 StringComparison.Ordinal))
             ?? throw new KeyNotFoundException("Unknown Reader capability URI");
-        string text = _directory is null
-            ? await ReadEmbeddedAsync(entry, cancellationToken)
-                .ConfigureAwait(false)
-            : await ReadFileAsync(entry, cancellationToken)
-                .ConfigureAwait(false);
-        if (Encoding.UTF8.GetByteCount(text) > MaximumGuideBytes)
-        {
-            throw new InvalidDataException(
-                "Reader capability guide exceeds size limit");
-        }
+        string text = await ReadEntryTextAsync(entry, cancellationToken)
+            .ConfigureAwait(false);
         return new JsonObject
         {
             ["contents"] = new JsonArray
@@ -85,6 +86,39 @@ internal sealed class ReaderCapabilityCatalog
                 },
             },
         };
+    }
+
+    internal async Task<(string Uri, string Text)> ReadTopicTextAsync(
+        string topic,
+        CancellationToken cancellationToken)
+    {
+        Entry entry = Entries.SingleOrDefault(candidate => string.Equals(
+            candidate.Slug,
+            topic,
+            StringComparison.Ordinal))
+            ?? throw new KeyNotFoundException(
+                "Unknown Reader capability topic");
+        return (
+            Uri(entry),
+            await ReadEntryTextAsync(entry, cancellationToken)
+                .ConfigureAwait(false));
+    }
+
+    private async Task<string> ReadEntryTextAsync(
+        Entry entry,
+        CancellationToken cancellationToken)
+    {
+        string text = _directory is null
+            ? await ReadEmbeddedAsync(entry, cancellationToken)
+                .ConfigureAwait(false)
+            : await ReadFileAsync(entry, cancellationToken)
+                .ConfigureAwait(false);
+        if (Encoding.UTF8.GetByteCount(text) > MaximumGuideBytes)
+        {
+            throw new InvalidDataException(
+                "Reader capability guide exceeds size limit");
+        }
+        return text;
     }
 
     private static string Uri(Entry entry) =>

@@ -10,8 +10,10 @@ internal sealed class ReaderContextMcpServer
     internal const string VisualToolName = "reader_visual_image";
     internal const string BrowserControlToolName = "reader_browser_control";
     internal const string CommandToolName = "reader_command";
+    internal const string CapabilityGuideToolName =
+        "reader_capability_guide";
     internal const string ServerName = "bw-reader-context-snapshot";
-    internal const string ServerVersion = "1.0.0";
+    internal const string ServerVersion = "1.1.0";
     internal static readonly TimeSpan FreshnessWindow =
         TimeSpan.FromMinutes(3);
 
@@ -45,6 +47,7 @@ internal sealed class ReaderContextMcpServer
         Task<ReaderRealtimeOutputAck>>? _sendOutputAsync;
     private JsonObject? _latestSnapshot;
     private long _latestRevision = -1;
+    private string? _latestProducerInstanceId;
     private long _loadSequence;
     private long _loadErrors;
     private long _callSequence;
@@ -360,11 +363,14 @@ internal sealed class ReaderContextMcpServer
                     + "not mean the App image is unavailable: when "
                     + "visualAccess.available is true, call the named "
                     + "reader_visual_image tool to receive a fresh inline "
-                    + "composite image. For progressive disclosure, read "
-                    + ReaderCapabilityCatalog.IndexUri
-                    + " first and then only the capability file needed for "
-                    + "the current task. Existing Realtime and CLI flows "
-                    + "remain unchanged.",
+                    + "composite image. For a complex Reader task, use "
+                    + CapabilityGuideToolName
+                    + " to read exactly one task guide; read topic=index "
+                    + "only when the correct topic is unknown. In Windows "
+                    + "Codex voice, use native Codex tools and native "
+                    + "subagents instead of starting a nested CLI worker. "
+                    + "Keep the existing Realtime and legacy CLI "
+                    + "implementations unchanged as compatibility paths.",
             },
             cancellationToken).ConfigureAwait(false);
     }
@@ -424,6 +430,33 @@ internal sealed class ReaderContextMcpServer
                     ["type"] = "object",
                     ["additionalProperties"] = false,
                     ["properties"] = new JsonObject(),
+                },
+                ["annotations"] = ReadOnlyAnnotations(),
+            },
+            new JsonObject
+            {
+                ["name"] = CapabilityGuideToolName,
+                ["description"] =
+                    "Read one allowlisted Reader workflow guide by topic. "
+                    + "Use this only for complex Reader tasks or when the "
+                    + "Reader orchestration Skill is unavailable; ordinary "
+                    + "snapshot, image, navigation, or highlight requests "
+                    + "should call their direct tool without this extra "
+                    + "round trip. Request the exact task topic when known, "
+                    + "and use index only to discover an unknown topic.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["additionalProperties"] = false,
+                    ["required"] = new JsonArray("topic"),
+                    ["properties"] = new JsonObject
+                    {
+                        ["topic"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["enum"] = ReaderCapabilityCatalog.TopicEnum(),
+                        },
+                    },
                 },
                 ["annotations"] = ReadOnlyAnnotations(),
             },
@@ -530,8 +563,9 @@ internal sealed class ReaderContextMcpServer
                 ["description"] =
                     "Send one bounded structured output to the exact App or "
                     + "extension instance named by the current Reader snapshot. "
-                    + "Read reader://capabilities/index first, then the one "
-                    + "capability resource needed for this task. This is an "
+                    + "Use the exact BWREADER/1 command schema already known "
+                    + "for the requested action; only complex or unknown "
+                    + "workflows should read one capability guide. This is an "
                     + "additive Reader output path; it does not replace or "
                     + "change existing Realtime or CLI invocation flows.",
                 ["inputSchema"] = new JsonObject
@@ -603,6 +637,14 @@ internal sealed class ReaderContextMcpServer
             ? argumentValue
             : default;
         _callSequence = checked(_callSequence + 1);
+        if (toolName == CapabilityGuideToolName)
+        {
+            await HandleCapabilityGuideToolCallAsync(
+                id,
+                arguments,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
         if (toolName == VisualToolName && _fetchVisualAsync is not null)
         {
             await HandleVisualToolCallAsync(
@@ -776,6 +818,104 @@ internal sealed class ReaderContextMcpServer
                 },
             },
             cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task HandleCapabilityGuideToolCallAsync(
+        JsonNode id,
+        JsonElement arguments,
+        CancellationToken cancellationToken)
+    {
+        if (!TryReadCapabilityTopic(arguments, out string topic))
+        {
+            await WriteErrorAsync(
+                id,
+                -32602,
+                "Invalid Reader capability topic",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        (string uri, string text) guide;
+        try
+        {
+            guide = await _capabilityCatalog.ReadTopicTextAsync(
+                topic,
+                cancellationToken).ConfigureAwait(false);
+        }
+        catch (KeyNotFoundException)
+        {
+            await WriteErrorAsync(
+                id,
+                -32602,
+                "Invalid Reader capability topic",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        catch (Exception exception) when (
+            exception is IOException
+            or UnauthorizedAccessException
+            or DecoderFallbackException
+            or InvalidDataException)
+        {
+            await WriteErrorAsync(
+                id,
+                -32004,
+                "Reader capability guide unavailable",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await WriteResultAsync(
+            id,
+            new JsonObject
+            {
+                ["content"] = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["type"] = "text",
+                        ["text"] = guide.text,
+                    },
+                },
+                ["structuredContent"] = new JsonObject
+                {
+                    ["topic"] = topic,
+                    ["uri"] = guide.uri,
+                },
+            },
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private static bool TryReadCapabilityTopic(
+        JsonElement arguments,
+        out string topic)
+    {
+        topic = string.Empty;
+        if (arguments.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+        try
+        {
+            DirectJsonValidation.RequireNoDuplicateKeys(arguments);
+        }
+        catch (DirectProtocolException)
+        {
+            return false;
+        }
+        JsonProperty[] fields = arguments.EnumerateObject().ToArray();
+        if (
+            fields.Length != 1
+            || fields[0].Name != "topic"
+            || fields[0].Value.ValueKind != JsonValueKind.String
+            || fields[0].Value.GetString() is not string value
+            || value.Length is < 1 or > 80
+        )
+        {
+            return false;
+        }
+        topic = value;
+        return true;
     }
 
     internal static ReaderRealtimeOutputRequest? BuildRealtimeOutputRequest(
@@ -1990,10 +2130,28 @@ internal sealed class ReaderContextMcpServer
                 _loadErrors = checked(_loadErrors + 1);
                 return;
             }
-            if (revision >= _latestRevision)
+            string? producerInstanceId = null;
+            if (parsed["producerInstanceId"] is JsonNode producerNode)
+            {
+                producerInstanceId = producerNode.GetValue<string>();
+                if (!Guid.TryParseExact(
+                    producerInstanceId,
+                    "N",
+                    out _))
+                {
+                    _loadErrors = checked(_loadErrors + 1);
+                    return;
+                }
+            }
+            if (ShouldAdoptSnapshot(
+                _latestRevision,
+                _latestProducerInstanceId,
+                revision,
+                producerInstanceId))
             {
                 _latestSnapshot = parsed;
                 _latestRevision = revision;
+                _latestProducerInstanceId = producerInstanceId;
                 _loadSequence = checked(_loadSequence + 1);
             }
         }
@@ -2013,6 +2171,20 @@ internal sealed class ReaderContextMcpServer
             _loadErrors = checked(_loadErrors + 1);
         }
     }
+
+    internal static bool ShouldAdoptSnapshot(
+        long latestRevision,
+        string? latestProducerInstanceId,
+        long candidateRevision,
+        string? candidateProducerInstanceId) =>
+        candidateRevision >= latestRevision
+        || (
+            candidateProducerInstanceId is not null
+            && !string.Equals(
+                candidateProducerInstanceId,
+                latestProducerInstanceId,
+                StringComparison.Ordinal)
+        );
 
     private static long? LongValue(JsonNode? value)
     {

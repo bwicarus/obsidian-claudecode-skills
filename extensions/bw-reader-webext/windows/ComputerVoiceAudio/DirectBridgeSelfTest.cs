@@ -159,6 +159,32 @@ internal static class DirectBridgeSelfTest
                 == TimeSpan.FromSeconds(5),
             "direct-runtime-status-heartbeat-is-five-seconds",
             checks);
+        DateTimeOffset contextHealthNow = now;
+        DirectContextConnectionHealth contextHealth = new(
+            () => contextHealthNow);
+        contextHealth.Connected();
+        contextHealthNow = contextHealthNow.AddSeconds(1);
+        contextHealth.Connected();
+        DirectContextConnectionHealthSnapshot twoContexts =
+            contextHealth.Snapshot();
+        contextHealthNow = contextHealthNow.AddSeconds(1);
+        contextHealth.MessageSeen();
+        contextHealth.Disconnected();
+        DirectContextConnectionHealthSnapshot oneContext =
+            contextHealth.Snapshot();
+        contextHealth.Disconnected();
+        contextHealth.Disconnected();
+        DirectContextConnectionHealthSnapshot noContexts =
+            contextHealth.Snapshot();
+        Require(
+            twoContexts.ConnectionCount == 2
+            && twoContexts.LastSeenAtUtc == now.AddSeconds(1)
+            && oneContext.ConnectionCount == 1
+            && oneContext.LastSeenAtUtc == now.AddSeconds(2)
+            && noContexts.ConnectionCount == 0
+            && noContexts.LastSeenAtUtc == now.AddSeconds(2),
+            "direct-context-health-counts-multiple-links-and-retains-last-seen",
+            checks);
         CheckDirectOutputRouteEvidence(initial, checks);
         await CheckServiceLeaseAsync(
             installationRoot,
@@ -5999,6 +6025,41 @@ internal static class DirectBridgeSelfTest
             FileDirectSnapshotContextAdapter.ValidateActiveReading(
                 activeValue),
             CancellationToken.None).ConfigureAwait(false);
+        using (JsonDocument producerSnapshot = JsonDocument.Parse(
+            File.ReadAllText(snapshotPath, Encoding.UTF8)))
+        {
+            string? producerInstanceId = producerSnapshot.RootElement
+                .GetProperty("producerInstanceId")
+                .GetString();
+            Require(
+                producerInstanceId is { Length: 32 }
+                && Guid.TryParseExact(producerInstanceId, "N", out _),
+                "direct-snapshot-identifies-writer-instance",
+                checks);
+        }
+
+        const string firstProducer =
+            "00112233445566778899aabbccddeeff";
+        const string restartedProducer =
+            "ffeeddccbbaa99887766554433221100";
+        Require(
+            ReaderContextMcpServer.ShouldAdoptSnapshot(
+                216,
+                firstProducer,
+                20,
+                restartedProducer)
+            && !ReaderContextMcpServer.ShouldAdoptSnapshot(
+                216,
+                firstProducer,
+                20,
+                firstProducer)
+            && ReaderContextMcpServer.ShouldAdoptSnapshot(
+                216,
+                firstProducer,
+                217,
+                firstProducer),
+            "direct-reader-context-mcp-accepts-revision-reset-only-after-writer-restart",
+            checks);
 
         string input = string.Join(
             "\n",
@@ -6093,9 +6154,11 @@ internal static class DirectBridgeSelfTest
                     .GetProperty("serverInfo")
                     .GetProperty("name").GetString()
                     == ReaderContextMcpServer.ServerName
-                && tools.GetArrayLength() == 1
+                && tools.GetArrayLength() == 2
                 && tools[0].GetProperty("name").GetString()
                     == ReaderContextMcpServer.ToolName
+                && tools[1].GetProperty("name").GetString()
+                    == ReaderContextMcpServer.CapabilityGuideToolName
                 && first.RootElement.GetProperty("schema").GetString()
                     == FileDirectSnapshotContextAdapter.SnapshotContract
                 && first.RootElement.GetProperty("contextStatus")
@@ -6110,7 +6173,7 @@ internal static class DirectBridgeSelfTest
                     .GetProperty("callSequence").GetInt64() == 1
                 && second.RootElement.GetProperty("mcp")
                     .GetProperty("callSequence").GetInt64() == 2,
-                "direct-reader-context-mcp-is-persistent-read-only-single-tool",
+                "direct-reader-context-mcp-is-persistent-with-read-only-guide",
                 checks);
         }
         finally
@@ -6471,12 +6534,10 @@ internal static class DirectBridgeSelfTest
                 method = "tools/call",
                 @params = new
                 {
-                    name = ReaderContextMcpServer.CommandToolName,
+                    name = ReaderContextMcpServer.CapabilityGuideToolName,
                     arguments = new
                     {
-                        command = "BWREADER/1 tool-status "
-                            + "{\"status\":\"done\",\"tool\":\"reader_test\","
-                            + "\"label\":\"完成\",\"detail\":null}",
+                        topic = "research-task",
                     },
                 },
             }),
@@ -6490,7 +6551,37 @@ internal static class DirectBridgeSelfTest
                     name = ReaderContextMcpServer.CommandToolName,
                     arguments = new
                     {
+                        command = "BWREADER/1 tool-status "
+                            + "{\"status\":\"done\",\"tool\":\"reader_test\","
+                            + "\"label\":\"完成\",\"detail\":null}",
+                    },
+                },
+            }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 7,
+                method = "tools/call",
+                @params = new
+                {
+                    name = ReaderContextMcpServer.CommandToolName,
+                    arguments = new
+                    {
                         command = "BWREADER/1 assistant-turn {}",
+                    },
+                },
+            }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 8,
+                method = "tools/call",
+                @params = new
+                {
+                    name = ReaderContextMcpServer.CapabilityGuideToolName,
+                    arguments = new
+                    {
+                        topic = "unknown-topic",
                     },
                 },
             }),
@@ -6531,29 +6622,37 @@ internal static class DirectBridgeSelfTest
                 .GetProperty("result").GetProperty("contents");
             JsonElement tools = responses[3].RootElement
                 .GetProperty("result").GetProperty("tools");
-            string resultText = responses[4].RootElement
+            string guideText = responses[4].RootElement
+                .GetProperty("result").GetProperty("content")[0]
+                .GetProperty("text").GetString()!;
+            string resultText = responses[5].RootElement
                 .GetProperty("result").GetProperty("content")[0]
                 .GetProperty("text").GetString()!;
             using JsonDocument result = JsonDocument.Parse(resultText);
             Require(
-                responses.Length == 6
+                responses.Length == 8
                 && initialize.GetProperty("capabilities")
                     .TryGetProperty("resources", out _)
                 && initialize.GetProperty("instructions").GetString()!
                     .Contains(
-                        "Existing Realtime and CLI flows remain unchanged",
+                        "instead of starting a nested CLI worker",
                         StringComparison.Ordinal)
-                && resources.GetArrayLength() == 8
+                && resources.GetArrayLength() == 14
                 && resources[0].GetProperty("uri").GetString()
                     == ReaderCapabilityCatalog.IndexUri
                 && contents.GetArrayLength() == 1
                 && contents[0].GetProperty("text").GetString()!
                     .Contains(
-                        "现有 Realtime 与 CLI 委托链路保持不变",
+                        "Windows Codex 语音主路由",
                         StringComparison.Ordinal)
-                && tools.GetArrayLength() == 2
+                && tools.GetArrayLength() == 3
                 && tools[1].GetProperty("name").GetString()
+                    == ReaderContextMcpServer.CapabilityGuideToolName
+                && tools[2].GetProperty("name").GetString()
                     == ReaderContextMcpServer.CommandToolName
+                && guideText.Contains(
+                    "旧 `do_task` CLI worker",
+                    StringComparison.Ordinal)
                 && result.RootElement.GetProperty("ok").GetBoolean()
                 && result.RootElement.GetProperty("kind").GetString()
                     == "tool-status"
@@ -6563,7 +6662,9 @@ internal static class DirectBridgeSelfTest
                 && sent[0].File == "library/output-book.pdf"
                 && sent[0].Page.GetValue<int>() == 4
                 && sent[0].Kind == "tool-status"
-                && responses[5].RootElement.GetProperty("error")
+                && responses[6].RootElement.GetProperty("error")
+                    .GetProperty("code").GetInt32() == -32602
+                && responses[7].RootElement.GetProperty("error")
                     .GetProperty("code").GetInt32() == -32602,
                 "direct-reader-output-progressive-resources-and-command-are-exact",
                 checks);
@@ -7573,8 +7674,10 @@ internal static class DirectBridgeSelfTest
                     .GetProperty("content")[1]
                     .GetProperty("type").GetString() == "image";
             Require(
-                tools.GetArrayLength() == 2
+                tools.GetArrayLength() == 3
                 && tools[1].GetProperty("name").GetString()
+                    == ReaderContextMcpServer.CapabilityGuideToolName
+                && tools[2].GetProperty("name").GetString()
                     == ReaderContextMcpServer.VisualToolName
                 && content.GetArrayLength() == 2
                 && content[1].GetProperty("type").GetString()

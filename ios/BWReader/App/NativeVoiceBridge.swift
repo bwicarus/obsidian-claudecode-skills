@@ -69,6 +69,19 @@ struct NativeVoiceBridgeState: Equatable {
 
 @MainActor
 final class NativeVoiceBridge: ObservableObject {
+    private static let reconnectDelayNanoseconds: [UInt64] = [
+        650_000_000,
+        2_000_000_000,
+        4_000_000_000,
+        8_000_000_000,
+        15_000_000_000,
+    ]
+    private static let confirmedRecoveryRejectionCodes: Set<String> = [
+        "BW_COMPUTER_VOICE_DIRECT_BUSY",
+        "BW_COMPUTER_VOICE_DIRECT_MEDIA_CLEANUP_PENDING",
+        "BW_COMPUTER_VOICE_DIRECT_MEDIA_STOP_UNCONFIRMED",
+    ]
+
     private enum BridgeFailure: LocalizedError {
         case readerNotReady
         case microphoneDenied
@@ -120,6 +133,8 @@ final class NativeVoiceBridge: ObservableObject {
     private var intentGeneration: UInt64 = 0
     private var resumeArmed = false
     private var reconnectTask: Task<Void, Never>?
+    private var reconnectAttempt = 0
+    private var appForeground = true
     private var audioInterrupted = false
     private var currentNetworkPath: NativeVoiceNetworkPath?
     private var recoveryInProgress = false
@@ -193,6 +208,27 @@ final class NativeVoiceBridge: ObservableObject {
         reader.bind(nativeVoiceBridge: self)
     }
 
+    func setAppForeground(_ foreground: Bool) {
+        guard appForeground != foreground else { return }
+        appForeground = foreground
+        recordDiagnostic(
+            category: "app",
+            message: foreground ? "App 回到前台" : "App 进入后台"
+        )
+        guard foreground,
+              desiredActive,
+              resumeArmed,
+              state.phase == .suspended else {
+            return
+        }
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        scheduleReconnect(
+            trigger: "app-foreground",
+            immediate: true
+        )
+    }
+
     private func publishSharedStatus() {
         let phase: String
         switch state.phase {
@@ -238,6 +274,7 @@ final class NativeVoiceBridge: ObservableObject {
         reconnectTask = nil
         cleanupInProgress = false
         recoveryInProgress = false
+        reconnectAttempt = 0
         desiredActive = true
         resumeArmed = false
         activeAppKind = appKind
@@ -311,6 +348,7 @@ final class NativeVoiceBridge: ObservableObject {
                 detail: "锁屏或切到后台后仍由原生音频会话保持",
                 sessionId: session.id
             )
+            reconnectAttempt = 0
             resumeArmed = true
             if let context = safariWebContext {
                 try await forwardSafariWebContext(
@@ -342,6 +380,7 @@ final class NativeVoiceBridge: ObservableObject {
         resumeArmed = false
         audioInterrupted = false
         recoveryInProgress = false
+        reconnectAttempt = 0
         stopSafariContextPump(clearContext: true)
         cleanupInProgress = true
         recordDiagnostic(category: "control", message: "用户挂断")
@@ -684,6 +723,7 @@ final class NativeVoiceBridge: ObservableObject {
         }
         desiredActive = false
         resumeArmed = false
+        reconnectAttempt = 0
         reconnectTask?.cancel()
         reconnectTask = nil
         stopSafariContextPump(clearContext: true)
@@ -719,6 +759,7 @@ final class NativeVoiceBridge: ObservableObject {
         let cleanupGeneration = operationGeneration
         desiredActive = false
         resumeArmed = false
+        reconnectAttempt = 0
         reconnectTask?.cancel()
         reconnectTask = nil
         stopSafariContextPump(clearContext: true)
@@ -889,7 +930,10 @@ final class NativeVoiceBridge: ObservableObject {
         recoveryDisconnectTask = disconnectTask
     }
 
-    private func scheduleReconnect(trigger: String) {
+    private func scheduleReconnect(
+        trigger: String,
+        immediate: Bool = false
+    ) {
         guard desiredActive,
               resumeArmed,
               state.phase == .suspended,
@@ -902,15 +946,24 @@ final class NativeVoiceBridge: ObservableObject {
         }
 
         let intent = intentGeneration
+        let attempt = reconnectAttempt + 1
+        let delay = immediate ? 0 : Self.reconnectDelayNanoseconds[
+            min(
+                reconnectAttempt,
+                Self.reconnectDelayNanoseconds.count - 1
+            )
+        ]
         recordDiagnostic(
             category: "recovery",
-            message: "已安排单次续接：\(trigger)"
+            message: "已安排第 \(attempt) 次续接：\(trigger)"
         )
         reconnectTask = Task { @MainActor [weak self] in
-            do {
-                try await Task.sleep(nanoseconds: 650_000_000)
-            } catch {
-                return
+            if delay > 0 {
+                do {
+                    try await Task.sleep(nanoseconds: delay)
+                } catch {
+                    return
+                }
             }
             guard let self else {
                 return
@@ -956,6 +1009,7 @@ final class NativeVoiceBridge: ObservableObject {
         recoveryDisconnectTask = nil
         await pendingDisconnect?.value
 
+        var startRequestSent = false
         do {
             try requireRecoveryCurrent(
                 intent: intent,
@@ -987,8 +1041,11 @@ final class NativeVoiceBridge: ObservableObject {
                 detail: "正在续接 \(activeAppKind.displayName) 语音…"
             )
             // From this point a new START has been sent. Never loop another
-            // automatic START if its result becomes unknown.
+            // automatic START if its result becomes unknown. Explicit
+            // pre-start server rejections (busy/cleanup pending) are safe to
+            // retry because Windows has confirmed that no new session began.
             resumeArmed = false
+            startRequestSent = true
             recordDiagnostic(
                 category: "protocol",
                 message: "→ START \(activeAppKind.rawValue) (recovery)"
@@ -1003,6 +1060,7 @@ final class NativeVoiceBridge: ObservableObject {
                 generation: generation
             )
             recoveryInProgress = false
+            reconnectAttempt = 0
             resumeArmed = true
             state = NativeVoiceBridgeState(
                 phase: .active,
@@ -1023,8 +1081,53 @@ final class NativeVoiceBridge: ObservableObject {
                   intent == intentGeneration else {
                 return
             }
+            if recoveryCanRetry(
+                error,
+                startRequestSent: startRequestSent
+            ) {
+                let failedSocket = socket
+                socket = nil
+                await failedSocket?.disconnect()
+                guard generation == operationGeneration,
+                      intent == intentGeneration,
+                      desiredActive else {
+                    return
+                }
+                socketState = .disconnected
+                resumeArmed = true
+                reconnectAttempt = min(
+                    reconnectAttempt + 1,
+                    Int.max - 1
+                )
+                let code = (error as? DirectVoiceFailure)?.code
+                    ?? "retryable-recovery-failure"
+                state = NativeVoiceBridgeState(
+                    phase: .suspended,
+                    detail: "Windows 音频尚未释放，继续自动续接…"
+                )
+                recordDiagnostic(
+                    category: "recovery",
+                    message: "第 \(reconnectAttempt) 次续接未完成：\(code)"
+                )
+                scheduleReconnect(trigger: code)
+                return
+            }
             await failActiveSession(error, generation: generation)
         }
+    }
+
+    private func recoveryCanRetry(
+        _ error: Error,
+        startRequestSent: Bool
+    ) -> Bool {
+        guard let failure = error as? DirectVoiceFailure,
+              failure.retryable else {
+            return false
+        }
+        if !startRequestSent {
+            return true
+        }
+        return Self.confirmedRecoveryRejectionCodes.contains(failure.code)
     }
 
     private func requireRecoveryCurrent(

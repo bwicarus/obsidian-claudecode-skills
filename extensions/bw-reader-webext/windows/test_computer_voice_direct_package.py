@@ -47,6 +47,26 @@ class FakeRunner:
         return package.CommandResult(1, stderr="unexpected fake command")
 
 
+class FakeInstallService:
+    def __init__(self, *, running: bool = True) -> None:
+        self.running = running
+        self.events: list[str] = []
+
+    def is_running(self, install_root: Path) -> bool:
+        self.events.append("is-running")
+        return self.running
+
+    def stop(self, install_root: Path) -> None:
+        self.events.append("stop")
+        if not self.running:
+            raise AssertionError("service was not running")
+        self.running = False
+
+    def start(self, install_root: Path) -> None:
+        self.events.append("start")
+        self.running = True
+
+
 class DirectPackageTests(unittest.TestCase):
     def _sources(self, root: Path) -> tuple[Path, Path]:
         audio = root / "ComputerVoiceAudio"
@@ -55,6 +75,11 @@ class DirectPackageTests(unittest.TestCase):
         desktop.mkdir()
         (audio / "ComputerVoiceAudio.csproj").write_text("<Project />", encoding="utf-8")
         (audio / "Program.cs").write_text("class Program {}", encoding="utf-8")
+        (audio / "ReaderCapabilities").mkdir()
+        (audio / "ReaderCapabilities" / "index.md").write_text(
+            "# Reader capability index",
+            encoding="utf-8",
+        )
         (audio / "obj").mkdir()
         (audio / "obj" / "Generated.cs").write_text("generated", encoding="utf-8")
         (desktop / "desktop_launcher.py").write_text("print('desktop')", encoding="utf-8")
@@ -97,6 +122,173 @@ class DirectPackageTests(unittest.TestCase):
             encoding="utf-8",
         )
         return script, ipc, launcher
+
+    def _candidate(self, root: Path, version: str = "0.4.1") -> Path:
+        audio, desktop = self._sources(root)
+        typist_script, typist_ipc, typist_launcher = self._runtime_sources(root)
+        dotnet = root / "dotnet.exe"
+        pyinstaller = root / "pyinstaller.exe"
+        dotnet.write_bytes(b"tool")
+        pyinstaller.write_bytes(b"tool")
+        return package.build_candidate(
+            version,
+            runner=FakeRunner(),
+            candidates=root / "candidates",
+            dotnet=dotnet,
+            pyinstaller=pyinstaller,
+            audio_source=audio,
+            desktop_source=desktop,
+            typist_script_source=typist_script,
+            typist_ipc_source=typist_ipc,
+            typist_launcher_source=typist_launcher,
+        )
+
+    def _installed_old_payload(
+        self,
+        archive: Path,
+        install_root: Path,
+    ) -> tuple[dict, dict[str, bytes]]:
+        manifest, archive_payload = package._verified_archive_contents(archive)
+        prefix = package.bundle_name(manifest["version"])
+        payload = {
+            relative: archive_payload[f"{prefix}/{relative}"]
+            for relative in package.PAYLOAD_RELATIVE_PATHS
+        }
+        old_payload = dict(payload)
+        old_payload[package.NATIVE_REL] = b"old-native"
+        old_payload[package.DESKTOP_REL] = b"old-desktop"
+        old_manifest = copy.deepcopy(manifest)
+        old_manifest["version"] = "0.4.0"
+        for entry in old_manifest["files"]:
+            content = old_payload[entry["path"]]
+            entry["sha256"] = package._sha256(content)
+            entry["size"] = len(content)
+        install_root.mkdir()
+        package._write_payload_tree(install_root, old_manifest, old_payload)
+        (install_root / "native-host" / "computer-voice-direct.config.json").write_text(
+            "config-must-survive", encoding="utf-8"
+        )
+        (install_root / "runtime").mkdir()
+        (install_root / "runtime" / "state.json").write_text(
+            "runtime-must-survive", encoding="utf-8"
+        )
+        (install_root / "dotnet8").mkdir()
+        (install_root / "dotnet8" / "dotnet.exe").write_bytes(b"dotnet-must-survive")
+        return old_manifest, old_payload
+
+    def test_atomic_install_backs_up_payload_preserves_state_and_restores_service(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            archive = self._candidate(root)
+            install_root = root / "install"
+            backup_root = root / "backups"
+            old_manifest, old_payload = self._installed_old_payload(
+                archive, install_root
+            )
+            service = FakeInstallService()
+
+            receipt = package.install_archive(
+                archive,
+                install_root=install_root,
+                backup_root=backup_root,
+                service_controller=service,
+                runner=FakeRunner(),
+            )
+
+            self.assertEqual(receipt["installedVersion"], "0.4.1")
+            self.assertEqual(receipt["previousVersion"], "0.4.0")
+            self.assertEqual(service.events, ["is-running", "stop", "start"])
+            self.assertTrue(service.running)
+            installed, _ = package._verified_install_directory(
+                install_root, label="test installed"
+            )
+            self.assertEqual(installed["version"], "0.4.1")
+            self.assertEqual(
+                (install_root / "native-host" / "computer-voice-direct.config.json").read_text(),
+                "config-must-survive",
+            )
+            self.assertEqual(
+                (install_root / "runtime" / "state.json").read_text(),
+                "runtime-must-survive",
+            )
+            self.assertEqual(
+                (install_root / "dotnet8" / "dotnet.exe").read_bytes(),
+                b"dotnet-must-survive",
+            )
+            backup = Path(receipt["backup"])
+            backed_manifest, backed_payload = package._verified_install_directory(
+                backup, label="test backup"
+            )
+            self.assertEqual(backed_manifest, old_manifest)
+            self.assertEqual(backed_payload, old_payload)
+
+            rollback_receipt = package.rollback_install(
+                backup,
+                install_root=install_root,
+                backup_root=backup_root,
+                service_controller=service,
+                runner=FakeRunner(),
+            )
+            self.assertEqual(rollback_receipt["installedVersion"], "0.4.0")
+            rolled_back, rolled_back_payload = package._verified_install_directory(
+                install_root, label="test explicit rollback"
+            )
+            self.assertEqual(rolled_back, old_manifest)
+            self.assertEqual(rolled_back_payload, old_payload)
+            self.assertEqual(
+                service.events,
+                [
+                    "is-running", "stop", "start",
+                    "is-running", "stop", "start",
+                ],
+            )
+
+    def test_partial_install_failure_restores_old_payload_and_service(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            archive = self._candidate(root)
+            install_root = root / "install"
+            backup_root = root / "backups"
+            old_manifest, old_payload = self._installed_old_payload(
+                archive, install_root
+            )
+            service = FakeInstallService()
+            calls = 0
+
+            def fail_once(source: Path, target: Path) -> None:
+                nonlocal calls
+                calls += 1
+                if calls == 2:
+                    raise OSError("simulated replace failure")
+                package.os.replace(source, target)
+
+            with self.assertRaisesRegex(
+                package.PackageError,
+                "安装失败，已自动回滚",
+            ):
+                package.install_archive(
+                    archive,
+                    install_root=install_root,
+                    backup_root=backup_root,
+                    service_controller=service,
+                    runner=FakeRunner(),
+                    replace_file=fail_once,
+                )
+
+            restored_manifest, restored_payload = package._verified_install_directory(
+                install_root, label="test restored"
+            )
+            self.assertEqual(restored_manifest, old_manifest)
+            self.assertEqual(restored_payload, old_payload)
+            self.assertTrue(service.running)
+            self.assertEqual(
+                service.events,
+                ["is-running", "stop", "is-running", "start"],
+            )
+            self.assertEqual(
+                (install_root / "runtime" / "state.json").read_text(),
+                "runtime-must-survive",
+            )
 
     def test_build_is_versioned_deterministic_and_exact(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -147,6 +339,10 @@ class DirectPackageTests(unittest.TestCase):
                 source_paths,
             )
             self.assertIn("input/ComputerVoiceAudio/Program.cs", source_paths)
+            self.assertIn(
+                "input/ComputerVoiceAudio/ReaderCapabilities/index.md",
+                source_paths,
+            )
             self.assertIn(
                 "input/computer-voice-desktop/desktop_launcher.py",
                 source_paths,

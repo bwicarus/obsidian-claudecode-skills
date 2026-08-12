@@ -116,6 +116,8 @@ internal sealed class FileDirectSnapshotContextAdapter :
 
     private readonly string _statePath;
     private readonly Func<DateTimeOffset> _utcNow;
+    private readonly string _producerInstanceId =
+        Guid.NewGuid().ToString("N");
     private readonly SemaphoreSlim _gate = new(1, 1);
     private readonly Queue<string> _recentEventOrder = new();
     private readonly HashSet<string> _recentEventIds =
@@ -2118,6 +2120,10 @@ internal sealed class FileDirectSnapshotContextAdapter :
         return new JsonObject
         {
             ["schema"] = SnapshotContract,
+            // revision is monotonic only for one running writer.  A stable
+            // producer identity lets long-lived MCP clients distinguish a
+            // service restart from an out-of-order write.
+            ["producerInstanceId"] = _producerInstanceId,
             ["revision"] = _revision,
             ["updatedAtUtc"] = _utcNow()
                 .ToString("O"),

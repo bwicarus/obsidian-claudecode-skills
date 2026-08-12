@@ -9,6 +9,13 @@
 - 把当前选区保存为高亮：`highlight.md`
 - 展示工具进行中、完成、失败或中止状态：`tool-status.md`
 - 统一命令外壳、回执和失败规则：`command-format.md`
+- 判断直接调用、原生子代理和兼容回退：`task-routing.md`
+- 多步研究、跨书或联网核实：`research-task.md`
+- 生成可手写作答的交互练习纸：`interactive-paper.md`
+- 读取练习纸检查报告或查书核实：`check-report.md`
+- 重新运行已保存的生成型任务：`saved-task.md`
+- 确认本机 MCP、服务 MCP、Skill、插件和 CLI 的职责：`capability-matrix.md`
 
-现有 Realtime 与 CLI 委托链路保持不变。这些能力是 Reader 本机通道的补充，
-不要求也不允许经 Pi PWA 中转。
+Windows Codex 语音主路由由当前 Codex 会话直接使用 Skill 与 MCP，不再为复杂任务启动
+另一个 CLI 进程。现有 Realtime 调用方式和旧 CLI 实现保持不变，只作为兼容路径；
+Reader 本机通道不经 Pi PWA 中转。

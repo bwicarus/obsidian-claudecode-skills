@@ -189,6 +189,7 @@ private struct ReaderRootView: View {
         }
         .onChange(of: scenePhase, initial: true) { _, phase in
             reader.setReaderScenePhase(phase)
+            voiceBridge.setAppForeground(phase == .active)
         }
         .onReceive(reader.$libraryPresentationRequestID) { requestID in
             guard requestID != nil else { return }

@@ -985,6 +985,7 @@ function createHarness(overrides = {}) {
     uiOwner: "",
     extensionWorld: false,
     nativeComputerVoice: false,
+    nativeComputerVoiceState: null,
     nativeLocalPageContext: false,
     nativePageContextPublishes: [],
     nativePageTexts: {},
@@ -1198,6 +1199,11 @@ function createHarness(overrides = {}) {
   window.__bwReaderFetch = createJournalFetch(scenario);
   if (scenario.nativeComputerVoice) {
     window.__BW_NATIVE_COMPUTER_VOICE__ = true;
+  }
+  if (scenario.nativeComputerVoiceState) {
+    window.__BW_NATIVE_COMPUTER_VOICE_STATE__ = structuredClone(
+      scenario.nativeComputerVoiceState,
+    );
   }
   if (scenario.extensionRelay) {
     window.chrome = {
@@ -3153,6 +3159,129 @@ test("原生 App 的 eph-ctx-sync=1 完成 context 握手并启动快照泵", as
     enabled: true,
     deliveryMode: "snapshot-mcp",
   });
+
+  contextSyncStorage.set("eph-ctx-sync", "0");
+  await harness.api.contextSyncChanged();
+});
+
+test("原生语音占用主 WSS 时专用快照断线保留配置并有界退避重连", async () => {
+  const timers = createManualTimers();
+  const contextSyncStorage = new Map([["eph-ctx-sync", "1"]]);
+  const harness = createHarness({
+    origin: NATIVE_APP_ORIGIN,
+    nativeComputerVoice: true,
+    nativeComputerVoiceState: {
+      active: true,
+      busy: true,
+      sessionId: "native-voice-session",
+    },
+    contextSyncStorage,
+    contextDeliveryMode: "snapshot-mcp",
+    timers,
+  });
+
+  await waitForRequest(harness, "context-open");
+  const firstSocket = harness.server.sockets[0];
+  firstSocket.readyState = 3;
+  firstSocket.onclose?.();
+  await waitForCondition(
+    () => timers.count(1000) === 1,
+    "first dedicated snapshot reconnect",
+  );
+  timers.runOne(1000);
+  await waitForCondition(
+    () => harness.server.requests.filter(
+      (request) => request.type === "context-open",
+    ).length === 2,
+    "dedicated snapshot reconnect while native voice remains active",
+  );
+  assert.equal(
+    harness.server.requests.some((request) => request.type === "start"),
+    false,
+  );
+  assert.equal(harness.scenario.microphoneRequests.length, 0);
+
+  contextSyncStorage.set("eph-ctx-sync", "0");
+  await harness.api.contextSyncChanged();
+});
+
+test("原生专用快照连续建链失败按 1/2/4/8/15 秒封顶退避", async () => {
+  const timers = createManualTimers();
+  const harness = createHarness({
+    origin: NATIVE_APP_ORIGIN,
+    nativeComputerVoice: true,
+    nativeComputerVoiceState: {
+      active: true,
+      busy: true,
+      sessionId: "native-voice-session",
+    },
+    contextSyncStorage: new Map([["eph-ctx-sync", "1"]]),
+    contextDeliveryMode: "snapshot-mcp",
+    offline: true,
+    timers,
+  });
+
+  for (const delay of [1000, 2000, 4000, 8000, 15000, 15000]) {
+    await waitForCondition(
+      () => timers.count(delay) === 1,
+      `snapshot reconnect delay ${delay}`,
+    );
+    timers.runOne(delay);
+  }
+  await waitForCondition(
+    () => timers.count(15000) === 1,
+    "bounded snapshot reconnect delay remains capped",
+  );
+  assert.equal(harness.server.sockets.length, 7);
+  assert.equal(
+    harness.server.requests.some((request) => request.type === "start"),
+    false,
+  );
+});
+
+test("原生专用快照前台唤醒先用只读 CONTEXT-MODE 验活并重建 stale OPEN", async () => {
+  const timers = createManualTimers();
+  const contextSyncStorage = new Map([["eph-ctx-sync", "1"]]);
+  const harness = createHarness({
+    origin: NATIVE_APP_ORIGIN,
+    nativeComputerVoice: true,
+    nativeComputerVoiceState: {
+      active: true,
+      busy: true,
+      sessionId: "native-voice-session",
+    },
+    contextSyncStorage,
+    contextDeliveryMode: "snapshot-mcp",
+    dropSecondContextModeOnFirstSocket: true,
+    timers,
+  });
+
+  await waitForRequest(harness, "context-open");
+  harness.dispatchWindowEvent("bw-native-reader-foreground");
+  await waitForCondition(
+    () => harness.server.requests.filter(
+      (request) => request.type === "context-mode",
+    ).length === 2,
+    "foreground read-only context-mode probe",
+  );
+  assert.equal(timers.count(7000), 1);
+  timers.runOne(7000);
+  await waitForCondition(
+    () => timers.count(1000) === 1,
+    "stale foreground link reconnect",
+  );
+  timers.runOne(1000);
+  await waitForCondition(
+    () => harness.server.requests.filter(
+      (request) => request.type === "context-open",
+    ).length === 2,
+    "fresh context-open after foreground probe timeout",
+  );
+  assert.equal(
+    harness.server.requests.some((request) => request.type === "start"),
+    false,
+  );
+  assert.equal(harness.scenario.microphoneRequests.length, 0);
 
   contextSyncStorage.set("eph-ctx-sync", "0");
   await harness.api.contextSyncChanged();

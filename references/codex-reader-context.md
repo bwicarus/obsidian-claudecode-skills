@@ -125,11 +125,13 @@ PDF `reader.js` 也是生成物，唯一源码在 `_server_deploy/static/pdf/rea
   URL、CSS selector 和脚本。三者与
   旧 voice-typist 注入互斥。入口与回滚合同见
   [电脑直连音频桥](reader-computer-audio-bridge.md#实验上下文末端2026-07-30)。
-- Windows `snapshot-mcp` 同时公布 `reader://capabilities/index` 及按功能拆分的只读说明；调用方
-  先读索引，再只读当前任务所需的 GET、卡片、导航、高亮或工具状态文件。结构化写回统一使用
-  `reader_command` 的 `BWREADER/1 <kind> <JSON>`，只投递给最新快照精确指向的 App/扩展实例；
-  Windows 电脑语音的聊天轮次则由本机历史同步器进入既有 Reader 对话流。以上均为旁路增强，
-  **不得替换或改变现有 Realtime 调用方式、CLI 启动方式、工具循环或委托链路**。
+- Windows `snapshot-mcp` 同时公布 `reader_capability_guide` 与按功能拆分的只读资源。普通快照、
+  取图、滚动或输出直接调用对应工具，不先读文档；复杂研究、交互纸、报告核实或已保存任务只
+  读取一个精确 topic，确实不知道 topic 时才读索引。结构化写回统一使用 `reader_command` 的
+  `BWREADER/1 <kind> <JSON>`，只投递给最新快照精确指向的 App/扩展实例；Windows 电脑语音的
+  聊天轮次由本机历史同步器进入既有 Reader 对话流。Windows 原生路径由当前 Codex 会话使用
+  Skill、MCP、原生工具与必要的原生子代理组织任务，不再额外启动 CLI worker；现有 Realtime
+  与旧 CLI 实现完整保留为兼容入口，不修改其调用方式、工具循环或委托语义。
 - 内容脚本和页面只能调用固定 operation/schema 的桥；不得退化成任意
   URL/method/body fetch proxy。
 - `reader_bridge.py` 的 `open_page` 当前只写续读位置，不会驱动已经打开的页面实时跳转；
