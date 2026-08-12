@@ -656,6 +656,96 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             claimed["job"]["processingProfile"], "quality-first-v2"
         )
 
+    def test_historical_pc_v1_publication_remains_readable_and_can_restart_as_v2(self) -> None:
+        service = ReaderBookOcrService(
+            self.library,
+            self.base / "pc-profile-upgrade-ocr",
+            ROOT,
+            launcher=lambda *_args: self.fail("PC executor must not spawn a Pi worker"),
+            max_pdf_bytes=1024 * 1024,
+            max_pages=100,
+            legacy_page_count_reader=lambda _path: 1,
+        )
+        _job, _already = service.start(
+            self.entry["bookId"], self.entry["contentSha256"], "manga", "pc"
+        )
+        version_dir = service._version_dir(
+            self.entry["bookId"], self.entry["contentSha256"]
+        )
+        job_dir = version_dir / "manga"
+        stored = json.loads((job_dir / "job.json").read_text("utf-8"))
+        historical_profile = "quality-first-v1"
+        stored["processingProfile"] = historical_profile
+        page = {
+            "schema": "reader-page-chars/1",
+            "bookId": self.entry["bookId"],
+            "contentSha256": self.entry["contentSha256"],
+            "engine": "manga",
+            "executor": "pc",
+            "processingProfile": historical_profile,
+            "pageNumber": 1,
+            "page_w": 10,
+            "page_h": 20,
+            "imageWidth": 100,
+            "imageHeight": 200,
+            "chars": [{
+                "c": "旧", "x0": 1, "y0": 1, "x1": 2, "y1": 2,
+                "w": 1, "bk": 0, "b": 0, "line": 0,
+            }],
+            "furigana": [],
+        }
+        (job_dir / "pages").mkdir(parents=True, exist_ok=True)
+        (job_dir / "pages" / "p000001.json").write_text(
+            json.dumps(page), "utf-8"
+        )
+        formula_path = job_dir / "pc-formulas.json"
+        formula_path.write_text(json.dumps({"formulas": []}), "utf-8")
+        final_job = {
+            **stored,
+            "state": "succeeded",
+            "totalPages": 1,
+            "processedPages": 1,
+            "successfulPages": 1,
+            "recognizedPages": 1,
+            "formulaState": "succeeded",
+            "formulaReason": None,
+            "formulaTotal": 0,
+            "formulaRecognized": 0,
+            "resultAvailable": True,
+            "updatedAtEpochMs": 1,
+        }
+        (job_dir / "job.json").write_text(json.dumps(final_job), "utf-8")
+        args = SimpleNamespace(
+            book_id=self.entry["bookId"],
+            content_sha256=self.entry["contentSha256"],
+            engine="manga",
+            max_bytes=1024 * 1024,
+        )
+        reader_book_ocr_worker._set_worker_identity(None, None)
+        revision = _publish_release(
+            args,
+            job_dir,
+            formula_path,
+            final_job,
+            source_path=self.vault / "A.pdf",
+        )
+
+        manifest = service.attachment_manifest(
+            self.entry["bookId"], self.entry["contentSha256"]
+        )
+        self.assertEqual(manifest["processingProfile"], historical_profile)
+        self.assertTrue((version_dir / "releases" / revision).is_dir())
+
+        restarted, already = service.start(
+            self.entry["bookId"], self.entry["contentSha256"], "manga", "pc"
+        )
+        self.assertFalse(already)
+        self.assertEqual(restarted["executor"], "pc")
+        self.assertEqual(restarted["processingProfile"], "quality-first-v2")
+        self.assertEqual(restarted["state"], "queued")
+        self.assertTrue((version_dir / "releases" / revision).is_dir())
+        self.assertEqual(len(list((version_dir / "staging-archive").glob("*"))), 1)
+
     def test_version_kind_and_unknown_fields_fail_closed(self) -> None:
         with self.assertRaises(ReaderBookOcrError) as changed:
             self.service.start(self.entry["bookId"], "0" * 64, "vision")

@@ -40,6 +40,13 @@ PROCESSING_PROFILES = {
     "pi": "pi-default-v1",
     "pc": "quality-first-v2",
 }
+# Immutable releases outlive the worker profile that produced them.  Keep the
+# current profile above strict for newly requested/claimed work, while allowing
+# already-published profiles that the App still knows how to import.
+READABLE_PROCESSING_PROFILES = {
+    "pi": frozenset(("pi-default-v1",)),
+    "pc": frozenset(("quality-first-v1", "quality-first-v2")),
+}
 LEGACY_ENGINE = "legacy"
 RESULT_ENGINES = ENGINES | frozenset((LEGACY_ENGINE,))
 ACTIVE_STATES = frozenset(("queued", "running", "pause-requested", "cancel-requested"))
@@ -392,7 +399,7 @@ class ReaderBookOcrService:
         profile = str(
             item.get("processingProfile") or PROCESSING_PROFILES[executor]
         ).strip().lower()
-        return profile == PROCESSING_PROFILES[executor]
+        return profile in READABLE_PROCESSING_PROFILES[executor]
 
     @staticmethod
     def _validate_worker_id(worker_id: str) -> str:
