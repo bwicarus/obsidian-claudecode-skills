@@ -4157,8 +4157,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **App/扩展发布**：TestFlight `1.1.44 (257)` 已确认 `VALID / READY_FOR_BETA_TESTING`；Windows 扩展测试通道 `0.2.103`，SHA `6385e460…1453`，备份 `webext-channel-20260812T102543Z-g21hr3xc`。
 - **边界/下一步**：服务端均在线，但登记时 App 未连接且快照陈旧；安装并打开 1.1.44 后真机验收快照恢复、聊天/天气卡片入流、离线日语释义及对已处理书重新运行 PC v2。
 
-## Codex：离线日语词典改为 App 按需下载候选（2026-08-12 JST）
-- **改动**：`1.1.45 / 0.2.104` 候选不再把 JMdict 数据打入 ReaderBundle 或 Safari/桌面扩展；原生设置提供手动下载、进度、失败说明与删除。
+## Codex：离线日语词典改为 App 按需下载并发布（2026-08-12 JST）
+- **改动**：`1.1.45 / 0.2.104` 不再把 JMdict 数据打入 ReaderBundle 或 Safari/桌面扩展；原生设置提供手动下载、进度、失败说明与删除。
 - **存储**：下载后仅落在 App 私有 Application Support 并排除 iCloud 备份，不进入书籍附件、App Group、Pi、扩展或设置同步；运行时只从令牌保护的本机接口读取。
-- **验证**：ReaderBundle 与 Safari 候选均为零词典文件，固定版本清单与抽样分片摘要匹配；专项 Node/Python、离线打包复验与发布管线通过。
-- **边界/下一步**：未部署 Pi 或浏览器正式渠道；待全量合同与 macOS 编译门禁通过后按既有原子流程上传 TestFlight。
+- **验证**：Xcode 模拟器/设备归档、Reader Node、专项 Python、ReaderBundle/Safari 打包与 Pi E2E 通过；实际 IPA/Safari 归档词典数据文件均为零。
+- **发布**：提交 `cbf090e4`；Actions `31596830125` 上传 TestFlight `1.1.45 (259)`，`31597573036` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
+- **Pi/扩展**：Reader `0.2.104` 回滚目录 `20260812T124208Z-1338793`；Windows 测试通道 `0.2.104` SHA `f99d51f7…6c03`，备份 `webext-channel-20260812T124516Z-b_1p5mcq`。
