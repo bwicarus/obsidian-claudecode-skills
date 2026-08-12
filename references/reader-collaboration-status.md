@@ -4118,3 +4118,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **验证**：实时快照已确认 activeReading/currentPage 使用同一 `sourceInstanceId`；Windows 295 项自检、Reader Node 990 项与发布管线通过，Windows handoff 只剩既有 `fcntl` 平台基线。
 - **发布事实**：提交 `14fb8bbd`；Actions `31552100884` 上传 TestFlight `1.1.38 (239)`，`31552582367` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
 - **边界/下一步**：未部署 Pi 或浏览器正式渠道；安装 build 239 后分别验收 `see_ink` 与 `see_page`，前者应绑定当前 App 页，后者应得到整张逻辑 PDF 页。
+
+## Codex：Reader 本机输出与渐进能力说明已发布（2026-08-12 JST）
+- **改了什么**：电脑语音聊天轮次进入最新快照精确指向的 App/扩展既有对话流；同一 WSS 新增严格的卡片、导航、高亮、工具状态输出，MCP 以短索引和八个按需资源说明 GET/命令。
+- **边界**：现有 Realtime 与 CLI 调用、工具循环和委托完全不变；陈旧 source/revision/file/page 拒绝投递，Pi PWA 暂停新增且本批未部署 Pi，也未发布桌面浏览器正式渠道。
+- **验证/Windows**：Reader Node 992 项、C# 297 项、聊天同步/打包/发布管线及 Safari/ReaderBundle 复验通过；Windows direct `0.1.107` 已原子安装，回退目录 `install-0.1.107-20260812T024527175Z`，服务 `idle / lastError=null`。
+- **发布事实**：提交 `176d14d8`；Actions `31558051746` 上传 App `1.1.40 (244)` 与 Safari `0.2.100`，只读检查 `31558497053` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。

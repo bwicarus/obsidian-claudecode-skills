@@ -50,7 +50,7 @@
 Safari 扩展原生进程经签名 access group 共享读取，网页和扩展 JavaScript 仅得到 90 秒 `ek_`。
 普通 Realtime、选区、可见正文与合成图注入均不经过 Pi；Pi 只保留显式备份/同步和 AI API 能力。
 
-**0.2.100 / App 1.1.40 Reader 输出与渐进能力说明候选**：Windows 电脑语音的已完成聊天轮次
+**0.2.100 / App 1.1.40 Reader 输出与渐进能力说明**：Windows 电脑语音的已完成聊天轮次
 经本机私有管道送入最新快照精确指向的 App/扩展，并复用既有对话流；卡片、导航、高亮和工具
 状态复用同一 Reader WSS 与现有 UI/action，不开放任意函数执行。`snapshot-mcp` 提供短索引和
 按功能拆分的只读资源，以及统一 `BWREADER/1 <kind> <JSON>` 命令。来源、快照版本、书页任一
