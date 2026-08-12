@@ -4188,3 +4188,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **验证/Windows**：专项 13 项、Reader Node 全量 1035 项、ReaderBundle 312 文件、Direct 候选与包内自检通过；Windows Direct `0.1.118` 已原子安装，当前 `idle / lastError=null`，ReaderPC 语音与预处理恢复在线。
 - **发布事实**：提交 `b9f790ce`；Actions `31622294013` 上传 TestFlight `1.1.47 (265)`，`31622963634` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
 - **边界/下一步**：Windows 全量/handoff 仍只命中已登记的 `fcntl`/Linux fixture 基线；未部署 Pi 或桌面扩展正式渠道。旧高亮请求不会重放，安装后须在新 Codex 会话对同一文字重新调用，并以页面实际出现色块为唯一验收。
+
+## Codex：原生工具回合与侧栏实时历史收口已发布（2026-08-13 JST）
+- **根因/改动**：本机工具过快返回时会在前导回复仍活跃期间错误创建下一回复，发送仅入队却被当成成功；现等待原回复结束与同批工具全部完成后只创建一次最终回复，并保持同一用户回合，前导“等待”不再冒充最终回答。
+- **侧栏/学习工具**：语音用户转写与助手最终转写实时进入侧栏；本机书可创建来源校验后的 Anki 草稿；JMdict 仍负责词条结构，App 仅按需调用 Apple Translation 显示中文释义，不随包附带字典数据。
+- **验证**：Reader Node 全量、专项合同、ReaderBundle 打包、发布管线及 macOS 模拟器/设备签名归档通过；Windows 全量/handoff 仅命中已登记的 `fcntl`/Linux fixture 环境基线。
+- **发布/边界**：提交 `009310f6`；Actions `31627903071` 上传 TestFlight `1.1.48 (267)`，`31628698667` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告；未部署 Pi 或桌面扩展正式渠道，需真机验收工具最终回答、侧栏记录、Anki 确认与首次系统翻译资源下载。
