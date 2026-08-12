@@ -374,7 +374,11 @@ internal sealed class ReaderContextMcpServer
                     + "weather/news/images/videos/fact/general result, call "
                     + CardToolName
                     + " in the same turn to mirror it to the exact App or "
-                    + "extension. Do not infer a card from final assistant "
+                    + "extension. If a client allowlist hides that dedicated "
+                    + "tool, call "
+                    + CommandToolName
+                    + " with the same typed {card:{kind,title,data}} input. "
+                    + "Do not infer a card from final assistant "
                     + "text. Text chat-history synchronization carries only "
                     + "user/assistant text and never carries cards. "
                     + "Keep the existing Realtime and legacy CLI "
@@ -583,60 +587,7 @@ internal sealed class ReaderContextMcpServer
                     + "fact={answer,detail?}, or general={text?}. The server "
                     + "strictly revalidates the existing Realtime card "
                     + "protocol and waits for the same delivery receipt.",
-                ["inputSchema"] = new JsonObject
-                {
-                    ["type"] = "object",
-                    ["additionalProperties"] = false,
-                    ["required"] = new JsonArray("card"),
-                    ["properties"] = new JsonObject
-                    {
-                        ["card"] = new JsonObject
-                        {
-                            ["type"] = "object",
-                            ["additionalProperties"] = false,
-                            ["required"] = new JsonArray(
-                                "kind",
-                                "title",
-                                "data"),
-                            ["properties"] = new JsonObject
-                            {
-                                ["kind"] = new JsonObject
-                                {
-                                    ["type"] = "string",
-                                    ["enum"] = new JsonArray(
-                                        "weather",
-                                        "news",
-                                        "images",
-                                        "videos",
-                                        "fact",
-                                        "general"),
-                                },
-                                ["title"] = new JsonObject
-                                {
-                                    ["anyOf"] = new JsonArray
-                                    {
-                                        new JsonObject
-                                        {
-                                            ["type"] = "string",
-                                            ["maxLength"] = 320,
-                                        },
-                                        new JsonObject
-                                        {
-                                            ["type"] = "null",
-                                        },
-                                    },
-                                },
-                                ["data"] = new JsonObject
-                                {
-                                    ["type"] = "object",
-                                    ["description"] =
-                                        "Kind-specific exact object; see the "
-                                        + "reader://capabilities/cards guide.",
-                                },
-                            },
-                        },
-                    },
-                },
+                ["inputSchema"] = BuildTypedCardArgumentsSchema(),
                 ["annotations"] = new JsonObject
                 {
                     ["readOnlyHint"] = false,
@@ -656,26 +607,35 @@ internal sealed class ReaderContextMcpServer
                     + "workflows should read one capability guide. This is an "
                     + "additive Reader output path; it does not replace or "
                     + "change existing Realtime or CLI invocation flows. For "
-                    + "weather/news/images/videos/fact/general results, prefer "
-                    + CardToolName
-                    + " in the same turn; text history never carries cards. "
+                    + "weather/news/images/videos/fact/general results, pass "
+                    + "the same typed {card:{kind,title,data}} envelope here "
+                    + "when the dedicated reader_card tool is filtered by a "
+                    + "client allowlist; text history never carries cards. "
                     + "The BWREADER/1 card form remains compatible.",
                 ["inputSchema"] = new JsonObject
                 {
-                    ["type"] = "object",
-                    ["additionalProperties"] = false,
-                    ["required"] = new JsonArray("command"),
-                    ["properties"] = new JsonObject
+                    ["oneOf"] = new JsonArray
                     {
-                        ["command"] = new JsonObject
+                        new JsonObject
                         {
-                            ["type"] = "string",
-                            ["minLength"] = 1,
-                            ["maxLength"] =
-                                ReaderRealtimeOutputProtocol.MaximumPayloadBytes,
-                            ["description"] =
-                                "BWREADER/1 <kind> <single JSON object>",
+                            ["type"] = "object",
+                            ["additionalProperties"] = false,
+                            ["required"] = new JsonArray("command"),
+                            ["properties"] = new JsonObject
+                            {
+                                ["command"] = new JsonObject
+                                {
+                                    ["type"] = "string",
+                                    ["minLength"] = 1,
+                                    ["maxLength"] =
+                                        ReaderRealtimeOutputProtocol
+                                            .MaximumPayloadBytes,
+                                    ["description"] =
+                                        "BWREADER/1 <kind> <single JSON object>",
+                                },
+                            },
                         },
+                        BuildTypedCardArgumentsSchema(),
                     },
                 },
                 ["annotations"] = new JsonObject
@@ -692,6 +652,61 @@ internal sealed class ReaderContextMcpServer
             ["tools"] = tools,
         };
     }
+
+    private static JsonObject BuildTypedCardArgumentsSchema() => new()
+    {
+        ["type"] = "object",
+        ["additionalProperties"] = false,
+        ["required"] = new JsonArray("card"),
+        ["properties"] = new JsonObject
+        {
+            ["card"] = new JsonObject
+            {
+                ["type"] = "object",
+                ["additionalProperties"] = false,
+                ["required"] = new JsonArray(
+                    "kind",
+                    "title",
+                    "data"),
+                ["properties"] = new JsonObject
+                {
+                    ["kind"] = new JsonObject
+                    {
+                        ["type"] = "string",
+                        ["enum"] = new JsonArray(
+                            "weather",
+                            "news",
+                            "images",
+                            "videos",
+                            "fact",
+                            "general"),
+                    },
+                    ["title"] = new JsonObject
+                    {
+                        ["anyOf"] = new JsonArray
+                        {
+                            new JsonObject
+                            {
+                                ["type"] = "string",
+                                ["maxLength"] = 320,
+                            },
+                            new JsonObject
+                            {
+                                ["type"] = "null",
+                            },
+                        },
+                    },
+                    ["data"] = new JsonObject
+                    {
+                        ["type"] = "object",
+                        ["description"] =
+                            "Kind-specific exact object; see the "
+                            + "reader://capabilities/cards guide.",
+                    },
+                },
+            },
+        },
+    };
 
     private static JsonObject ReadOnlyAnnotations() => new()
     {
@@ -852,6 +867,15 @@ internal sealed class ReaderContextMcpServer
         JsonElement arguments,
         CancellationToken cancellationToken)
     {
+        if (TryReadReaderCard(arguments, out JsonNode cardPayload))
+        {
+            await SendReaderOutputAsync(
+                id,
+                "card",
+                cardPayload,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
         if (!TryReadReaderCommand(
             arguments,
             out string kind,

@@ -923,12 +923,14 @@ class CaptureBoundHistorySynchronizer:
         self.tail_polls = 0
         self._lease_thread_id: str | None = None
         self._minimum_assistant_index: int | None = None
+        self._lease_source_instance_id: str | None = None
         self._failure_backoff_polls = 0
         self.last_result: dict[str, Any] | None = None
 
     def _release_lease(self) -> None:
         self._lease_thread_id = None
         self._minimum_assistant_index = None
+        self._lease_source_instance_id = None
         self._failure_backoff_polls = 0
 
     def cancel(self) -> None:
@@ -963,6 +965,11 @@ class CaptureBoundHistorySynchronizer:
         # ensures that both sides of an adjacent user/assistant pair were
         # appended after a baseline containing N items.
         self._minimum_assistant_index = items + 1
+        identity = snapshot_output_identity(self.snapshot_path)
+        if identity is not None:
+            self._lease_source_instance_id = identity[
+                "source_instance_id"
+            ]
         return self.last_result
 
     def _sync(self) -> dict[str, Any] | None:
@@ -975,6 +982,41 @@ class CaptureBoundHistorySynchronizer:
             self._failure_backoff_polls -= 1
             return self.last_result
         identity = snapshot_output_identity(self.snapshot_path)
+        if identity is not None and self._lease_source_instance_id is None:
+            self._lease_source_instance_id = identity[
+                "source_instance_id"
+            ]
+        source_matches_lease = (
+            identity is None and self._lease_source_instance_id is None
+            or identity is not None
+            and identity.get("source_instance_id")
+                == self._lease_source_instance_id
+        )
+        if not source_matches_lease:
+            self.last_result = sync_once(
+                global_state_path=self.global_state_path,
+                continuity_path=self.continuity_path,
+                state_path=self.state_path,
+                archive_path=self.archive_path,
+                publish=False,
+                expected_thread_id=self._lease_thread_id,
+                minimum_assistant_index=self._minimum_assistant_index,
+                allow_last_good=False,
+            )
+            route_error = (
+                "Reader output source unavailable during capture lease"
+                if identity is None
+                else "active Reader source changed during capture lease"
+            )
+            prior_error = self.last_result.get("error")
+            self.last_result["stale"] = True
+            self.last_result["error"] = (
+                f"{prior_error}; {route_error}"
+                if prior_error
+                else route_error
+            )
+            self._failure_backoff_polls = 0
+            return self.last_result
         file = identity.get("file") if identity else None
         page = identity.get("page") if identity else None
         self.last_result = sync_once(

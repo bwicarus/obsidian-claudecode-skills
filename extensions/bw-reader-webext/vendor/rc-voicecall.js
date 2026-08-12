@@ -1463,16 +1463,22 @@ if (window.__bwPwaProviderOnly) return;
             typeof window.__asstVoiceLog !== 'function') {
           throw new Error('BW_READER_CONVERSATION_RECEIVER_UNAVAILABLE');
         }
-        window.__asstVoiceMsg('reset');
-        window.__asstVoiceMsg('u', p.user);
-        window.__asstVoiceMsg('a', p.assistant, { md: true });
-        work = window.__asstVoiceLog(
+        var _resetRendered = window.__asstVoiceMsg('reset');
+        var _userRendered = window.__asstVoiceMsg('u', p.user);
+        var _assistantRendered = window.__asstVoiceMsg(
+          'a', p.assistant, { md: true }
+        );
+        if (!_resetRendered || !_userRendered || !_assistantRendered) {
+          throw new Error('BW_READER_CONVERSATION_RENDER_FAILED');
+        }
+        window.__asstVoiceLog(
           p.user,
           p.assistant,
           delivery.file,
           delivery.page,
           { external_thread_id: p.threadId || null, via: 'windows-reader-output' }
         );
+        work = true;
       } else if (delivery.kind === 'tool-status') {
         onToolStatus({
           status: p.status,
@@ -2428,13 +2434,14 @@ if (window.__bwPwaProviderOnly) return;
     var _tcOk = false;
     try {
       if (RC.turnCard && window.__asstVoiceTid) {
-        _tcOk = !!RC.turnCard.addPart(
+        var _tcPart = RC.turnCard.addPart(
           window.__asstVoiceTid(),
           { kind: 'card', card: card }
         );
+        _tcOk = !!(_tcPart && _tcPart.isConnected);
       }
     } catch (e) {}
-    if (th && !_tcOk) { var d = _infoCardEl(card); th.appendChild(d); th.scrollTop = th.scrollHeight; _hosts.push(d); }
+    if (th && !_tcOk) { var d = _infoCardEl(card); th.appendChild(d); th.scrollTop = th.scrollHeight; if (d.isConnected) _hosts.push(d); }
     if (!_sideOpen()) {
       // ⚠ 浮层镜像**不要再套一层 vc-if-hd**:_cardPush 自己就有卡头(标题+按钮)——套了就是两条标题栏(用户实测)
       // 132(用户):结果卡(天气/图/视频/新闻)也要有**同一套三态** —— 标记 / 长条 / 方块,单击循环。
@@ -2451,7 +2458,7 @@ if (window.__bwPwaProviderOnly) return;
         ['.vc-card-p', '.vc-card-x'].forEach(function (q) { var b = c.el.querySelector(q); if (b) b.remove(); });
         _pinBind(c.el, label, function () { return _infoText(card); });
         try { _igWire(c.el, card); } catch (e) {}
-        _hosts.push(c.el);
+        if (c.el.isConnected) _hosts.push(c.el);
       }
     }
     // 用户设计:这类工具**本来就有自己的结果卡** → 别再让工具指示器另造一张(字幕模式曾一次弹两张)。

@@ -6618,7 +6618,16 @@ internal static class DirectBridgeSelfTest
                     name = ReaderContextMcpServer.CommandToolName,
                     arguments = new
                     {
-                        command = "BWREADER/1 assistant-turn {}",
+                        card = new
+                        {
+                            kind = "fact",
+                            title = "白名单回退",
+                            data = new
+                            {
+                                answer = "卡片已送达",
+                                detail = "reader_command typed card",
+                            },
+                        },
                     },
                 },
             }),
@@ -6626,6 +6635,40 @@ internal static class DirectBridgeSelfTest
             {
                 jsonrpc = "2.0",
                 id = 10,
+                method = "tools/call",
+                @params = new
+                {
+                    name = ReaderContextMcpServer.CommandToolName,
+                    arguments = new
+                    {
+                        command = "BWREADER/1 card {}",
+                        card = new
+                        {
+                            kind = "general",
+                            title = "ambiguous",
+                            data = new { },
+                        },
+                    },
+                },
+            }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 11,
+                method = "tools/call",
+                @params = new
+                {
+                    name = ReaderContextMcpServer.CommandToolName,
+                    arguments = new
+                    {
+                        command = "BWREADER/1 assistant-turn {}",
+                    },
+                },
+            }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 12,
                 method = "tools/call",
                 @params = new
                 {
@@ -6688,6 +6731,10 @@ internal static class DirectBridgeSelfTest
             JsonElement cardInput = cardTool.GetProperty("inputSchema");
             JsonElement cardSchema = cardInput.GetProperty("properties")
                 .GetProperty("card");
+            JsonElement commandInput = tools[3].GetProperty("inputSchema");
+            JsonElement commandVariants = commandInput.GetProperty("oneOf");
+            JsonElement commandCardSchema = commandVariants[1]
+                .GetProperty("properties").GetProperty("card");
             HashSet<string> cardKinds = cardSchema
                 .GetProperty("properties")
                 .GetProperty("kind")
@@ -6707,13 +6754,18 @@ internal static class DirectBridgeSelfTest
             string resultText = responses[7].RootElement
                 .GetProperty("result").GetProperty("content")[0]
                 .GetProperty("text").GetString()!;
+            string fallbackCardText = responses[8].RootElement
+                .GetProperty("result").GetProperty("content")[0]
+                .GetProperty("text").GetString()!;
             using JsonDocument weatherResult = JsonDocument.Parse(
                 weatherText);
             using JsonDocument offlineResult = JsonDocument.Parse(
                 offlineText);
             using JsonDocument result = JsonDocument.Parse(resultText);
+            using JsonDocument fallbackCardResult = JsonDocument.Parse(
+                fallbackCardText);
             Require(
-                responses.Length == 10
+                responses.Length == 12
                 && initialize.GetProperty("capabilities")
                     .TryGetProperty("resources", out _)
                 && initialize.GetProperty("instructions").GetString()!
@@ -6723,6 +6775,10 @@ internal static class DirectBridgeSelfTest
                 && initialize.GetProperty("instructions").GetString()!
                     .Contains(
                         "reader_card in the same turn",
+                        StringComparison.Ordinal)
+                && initialize.GetProperty("instructions").GetString()!
+                    .Contains(
+                        "reader_command with the same typed",
                         StringComparison.Ordinal)
                 && initialize.GetProperty("instructions").GetString()!
                     .Contains(
@@ -6768,6 +6824,13 @@ internal static class DirectBridgeSelfTest
                     .Contains(
                         "text history never carries cards",
                         StringComparison.Ordinal)
+                && commandVariants.GetArrayLength() == 2
+                && commandVariants[0].GetProperty("required")[0]
+                    .GetString() == "command"
+                && commandVariants[1].GetProperty("required")[0]
+                    .GetString() == "card"
+                && !commandCardSchema.GetProperty("additionalProperties")
+                    .GetBoolean()
                 && guideText.Contains(
                     "旧 `do_task` CLI worker",
                     StringComparison.Ordinal)
@@ -6782,7 +6845,11 @@ internal static class DirectBridgeSelfTest
                 && result.RootElement.GetProperty("ok").GetBoolean()
                 && result.RootElement.GetProperty("kind").GetString()
                     == "tool-status"
-                && sent.Count == 2
+                && fallbackCardResult.RootElement.GetProperty("ok")
+                    .GetBoolean()
+                && fallbackCardResult.RootElement.GetProperty("kind")
+                    .GetString() == "card"
+                && sent.Count == 3
                 && sent[0].SourceInstanceId == "source-output"
                 && sent[0].SnapshotRevision == 42
                 && sent[0].File == "library/output-book.pdf"
@@ -6793,9 +6860,18 @@ internal static class DirectBridgeSelfTest
                 && sent[0].Payload["card"]?["data"]?["loc"]
                     ?.GetValue<string>() == "东京"
                 && sent[1].Kind == "tool-status"
-                && responses[8].RootElement.GetProperty("error")
-                    .GetProperty("code").GetInt32() == -32602
+                && sent[2].Kind == "card"
+                && sent[2].SourceInstanceId == "source-output"
+                && sent[2].SnapshotRevision == 42
+                && sent[2].Payload["card"]?["kind"]
+                    ?.GetValue<string>() == "fact"
+                && sent[2].Payload["card"]?["data"]?["answer"]
+                    ?.GetValue<string>() == "卡片已送达"
                 && responses[9].RootElement.GetProperty("error")
+                    .GetProperty("code").GetInt32() == -32602
+                && responses[10].RootElement.GetProperty("error")
+                    .GetProperty("code").GetInt32() == -32602
+                && responses[11].RootElement.GetProperty("error")
                     .GetProperty("code").GetInt32() == -32602,
                 "direct-reader-output-typed-card-command-and-disclosure-are-exact",
                 checks);

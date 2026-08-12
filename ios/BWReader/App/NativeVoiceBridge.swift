@@ -136,6 +136,11 @@ final class NativeVoiceBridge: ObservableObject {
     private var reconnectAttempt = 0
     private var appForeground = true
     private var audioInterrupted = false
+    private var localAudioSuspended = false
+    private var localAudioRecoveryTask: Task<Void, Never>?
+    private var localAudioRecoveryAttempt = 0
+    private var audioHealthTask: Task<Void, Never>?
+    private var ignoreAudioRecoverySignalsUntil = Date.distantPast
     private var currentNetworkPath: NativeVoiceNetworkPath?
     private var recoveryInProgress = false
     private var recoveryDisconnectTask: Task<Void, Never>?
@@ -148,15 +153,17 @@ final class NativeVoiceBridge: ObservableObject {
         audio.onFailure = { [weak self] error in
             Task { @MainActor [weak self] in
                 guard let self else { return }
-                await self.failActiveSession(
-                    error,
-                    generation: self.operationGeneration
-                )
+                await self.handleLocalAudioFailure(error)
             }
         }
         audio.onInterruption = { [weak self] interruption in
             Task { @MainActor [weak self] in
                 await self?.handleAudioInterruption(interruption)
+            }
+        }
+        audio.onRecoveryNeeded = { [weak self] reason in
+            Task { @MainActor [weak self] in
+                self?.handleLocalAudioRecoverySignal(reason)
             }
         }
         audio.onInputMuteChanged = { [weak self] muted in
@@ -215,6 +222,16 @@ final class NativeVoiceBridge: ObservableObject {
             category: "app",
             message: foreground ? "App 回到前台" : "App 进入后台"
         )
+        if foreground,
+           desiredActive,
+           localAudioSuspended,
+           !audioInterrupted {
+            scheduleLocalAudioRecovery(
+                trigger: "app-foreground",
+                immediate: true
+            )
+            return
+        }
         guard foreground,
               desiredActive,
               resumeArmed,
@@ -272,6 +289,11 @@ final class NativeVoiceBridge: ObservableObject {
         let generation = operationGeneration
         reconnectTask?.cancel()
         reconnectTask = nil
+        localAudioRecoveryTask?.cancel()
+        localAudioRecoveryTask = nil
+        localAudioRecoveryAttempt = 0
+        audioHealthTask?.cancel()
+        audioHealthTask = nil
         cleanupInProgress = false
         recoveryInProgress = false
         reconnectAttempt = 0
@@ -279,6 +301,7 @@ final class NativeVoiceBridge: ObservableObject {
         resumeArmed = false
         activeAppKind = appKind
         audioInterrupted = false
+        localAudioSuspended = false
         self.safariWebContext = safariWebContext
         safariContextRevision = ""
         safariContextSequence = 0
@@ -309,6 +332,7 @@ final class NativeVoiceBridge: ObservableObject {
                 try requireCurrent(generation)
             }
 
+            ignoreAudioRecoverySignalsUntil = Date().addingTimeInterval(2)
             try audio.start()
             try requireCurrent(generation)
 
@@ -350,6 +374,7 @@ final class NativeVoiceBridge: ObservableObject {
             )
             reconnectAttempt = 0
             resumeArmed = true
+            startAudioHealthWatchdog(generation: generation)
             if let context = safariWebContext {
                 try await forwardSafariWebContext(
                     context,
@@ -376,9 +401,15 @@ final class NativeVoiceBridge: ObservableObject {
         let generation = operationGeneration
         reconnectTask?.cancel()
         reconnectTask = nil
+        localAudioRecoveryTask?.cancel()
+        localAudioRecoveryTask = nil
+        localAudioRecoveryAttempt = 0
+        audioHealthTask?.cancel()
+        audioHealthTask = nil
         desiredActive = false
         resumeArmed = false
         audioInterrupted = false
+        localAudioSuspended = false
         recoveryInProgress = false
         reconnectAttempt = 0
         stopSafariContextPump(clearContext: true)
@@ -417,7 +448,7 @@ final class NativeVoiceBridge: ObservableObject {
         action: String,
         fields: [String: DirectJSONValue]
     ) async throws -> DirectJSONValue {
-        guard state.phase == .active,
+        guard (state.phase == .active || localAudioSuspended),
               let sessionId = state.sessionId,
               fields["sessionId"] == .string(sessionId),
               let socket else {
@@ -514,6 +545,187 @@ final class NativeVoiceBridge: ObservableObject {
         microphoneContinuation = nil
         microphoneConsumer?.cancel()
         microphoneConsumer = nil
+    }
+
+    private func startAudioHealthWatchdog(generation: UInt64) {
+        audioHealthTask?.cancel()
+        audioHealthTask = Task { @MainActor [weak self] in
+            while !Task.isCancelled {
+                do {
+                    try await Task.sleep(nanoseconds: 5_000_000_000)
+                } catch {
+                    return
+                }
+                guard let self,
+                      generation == self.operationGeneration,
+                      self.desiredActive else {
+                    return
+                }
+                if self.state.phase == .active,
+                   !self.audioInterrupted,
+                   !self.audio.isOperational {
+                    self.handleLocalAudioRecoverySignal(
+                        "App 音频健康检查发现引擎已停止"
+                    )
+                }
+            }
+        }
+    }
+
+    private func handleLocalAudioRecoverySignal(_ reason: String) {
+        guard desiredActive,
+              !cleanupInProgress,
+              Date() >= ignoreAudioRecoverySignalsUntil else {
+            return
+        }
+        if localAudioSuspended {
+            if !audioInterrupted {
+                scheduleLocalAudioRecovery(trigger: reason)
+            }
+            return
+        }
+        guard state.phase == .active else { return }
+        recordDiagnostic(category: "audio", message: reason)
+        suspendLocalAudio(
+            detail: "iPad 音频暂时中断，Windows 通话保持连接并等待本地恢复…"
+        )
+        if !audioInterrupted {
+            scheduleLocalAudioRecovery(trigger: reason)
+        }
+    }
+
+    private func handleLocalAudioFailure(_ error: Error) async {
+        if let failure = error as? NativeAudioEngine.AudioFailure,
+           case .invalidPlaybackFrame = failure {
+            await failActiveSession(
+                error,
+                generation: operationGeneration
+            )
+            return
+        }
+        guard desiredActive,
+              state.phase == .active || localAudioSuspended else {
+            await failActiveSession(
+                error,
+                generation: operationGeneration
+            )
+            return
+        }
+        handleLocalAudioRecoverySignal(
+            "App 本地音频失败：\(error.localizedDescription)"
+        )
+    }
+
+    private func suspendLocalAudio(detail: String) {
+        guard desiredActive, state.phase == .active else { return }
+        let sessionID = state.sessionId
+        localAudioSuspended = true
+        stopMicrophonePipeline()
+        audio.stop()
+        state = NativeVoiceBridgeState(
+            phase: .suspended,
+            detail: detail,
+            sessionId: sessionID
+        )
+    }
+
+    private func scheduleLocalAudioRecovery(
+        trigger: String,
+        immediate: Bool = false
+    ) {
+        guard desiredActive,
+              localAudioSuspended,
+              !audioInterrupted,
+              !cleanupInProgress,
+              !recoveryInProgress,
+              socket != nil,
+              socketState == .active,
+              localAudioRecoveryTask == nil else {
+            return
+        }
+        let generation = operationGeneration
+        let delay: UInt64 = immediate ? 0 : Self.reconnectDelayNanoseconds[
+            min(
+                localAudioRecoveryAttempt,
+                Self.reconnectDelayNanoseconds.count - 1
+            )
+        ]
+        recordDiagnostic(
+            category: "audio",
+            message: "已安排 App 本地音频恢复：\(trigger)"
+        )
+        localAudioRecoveryTask = Task { @MainActor [weak self] in
+            if delay > 0 {
+                do {
+                    try await Task.sleep(nanoseconds: delay)
+                } catch {
+                    return
+                }
+            }
+            guard let self else { return }
+            self.localAudioRecoveryTask = nil
+            await self.performLocalAudioRecovery(
+                trigger: trigger,
+                generation: generation
+            )
+        }
+    }
+
+    private func performLocalAudioRecovery(
+        trigger: String,
+        generation: UInt64
+    ) async {
+        guard generation == operationGeneration,
+              desiredActive,
+              localAudioSuspended,
+              !audioInterrupted,
+              let socket,
+              let sessionID = state.sessionId,
+              socketState == .active else {
+            return
+        }
+        do {
+            ignoreAudioRecoverySignalsUntil = Date().addingTimeInterval(2)
+            try audio.restart()
+            guard generation == operationGeneration,
+                  desiredActive,
+                  localAudioSuspended,
+                  !audioInterrupted else {
+                audio.stop()
+                return
+            }
+            try startMicrophonePipeline(
+                socket: socket,
+                generation: generation
+            )
+            localAudioSuspended = false
+            localAudioRecoveryAttempt = 0
+            state = NativeVoiceBridgeState(
+                phase: .active,
+                detail: "App 本地音频已自动恢复：\(trigger)",
+                sessionId: sessionID
+            )
+            startAudioHealthWatchdog(generation: generation)
+            recordDiagnostic(
+                category: "audio",
+                message: "复用现有 Windows 会话完成本地音频恢复"
+            )
+        } catch {
+            localAudioRecoveryAttempt = min(
+                localAudioRecoveryAttempt + 1,
+                Int.max - 1
+            )
+            recordDiagnostic(
+                category: "audio",
+                message: "本地音频恢复失败，保持 WSS 并继续重试：\(error.localizedDescription)"
+            )
+            state = NativeVoiceBridgeState(
+                phase: .suspended,
+                detail: "iPad 音频仍在恢复；Windows 通话保持连接…",
+                sessionId: sessionID
+            )
+            scheduleLocalAudioRecovery(trigger: "local-audio-recovery-failed")
+        }
     }
 
     private func startSafariContextPump(generation: UInt64) {
@@ -696,7 +908,7 @@ final class NativeVoiceBridge: ObservableObject {
             do {
                 try audio.enqueuePlayback(frame.samples)
             } catch {
-                await failActiveSession(error, generation: generation)
+                await handleLocalAudioFailure(error)
             }
         case .error(let failure):
             // connect()/start() propagate their own failure to the awaiting
@@ -705,7 +917,7 @@ final class NativeVoiceBridge: ObservableObject {
                 category: "error",
                 message: "\(failure.code): \(failure.message)"
             )
-            if state.phase == .active {
+            if state.phase == .active || localAudioSuspended {
                 await handleSessionFailure(
                     failure,
                     generation: generation
@@ -726,8 +938,14 @@ final class NativeVoiceBridge: ObservableObject {
         reconnectAttempt = 0
         reconnectTask?.cancel()
         reconnectTask = nil
+        localAudioRecoveryTask?.cancel()
+        localAudioRecoveryTask = nil
+        localAudioRecoveryAttempt = 0
+        audioHealthTask?.cancel()
+        audioHealthTask = nil
         stopSafariContextPump(clearContext: true)
         audioInterrupted = false
+        localAudioSuspended = false
         recoveryInProgress = false
         cleanupInProgress = true
         stopMicrophonePipeline()
@@ -762,8 +980,14 @@ final class NativeVoiceBridge: ObservableObject {
         reconnectAttempt = 0
         reconnectTask?.cancel()
         reconnectTask = nil
+        localAudioRecoveryTask?.cancel()
+        localAudioRecoveryTask = nil
+        localAudioRecoveryAttempt = 0
+        audioHealthTask?.cancel()
+        audioHealthTask = nil
         stopSafariContextPump(clearContext: true)
         audioInterrupted = false
+        localAudioSuspended = false
         recoveryInProgress = false
         cleanupInProgress = true
         stopMicrophonePipeline()
@@ -791,7 +1015,8 @@ final class NativeVoiceBridge: ObservableObject {
     ) async {
         switch interruption {
         case .began:
-            guard desiredActive, state.phase == .active else {
+            guard desiredActive,
+                  state.phase == .active || localAudioSuspended else {
                 return
             }
             audioInterrupted = true
@@ -799,9 +1024,13 @@ final class NativeVoiceBridge: ObservableObject {
                 category: "audio",
                 message: "系统音频中断开始"
             )
-            await suspendActiveSession(
-                detail: "来电、闹钟或其他 App 暂时占用音频，等待系统允许恢复…",
-                stopAudio: true
+            if localAudioSuspended {
+                localAudioRecoveryTask?.cancel()
+                localAudioRecoveryTask = nil
+                return
+            }
+            suspendLocalAudio(
+                detail: "来电、闹钟或其他 App 暂时占用音频，等待系统允许恢复…"
             )
         case .ended(let shouldResume):
             guard audioInterrupted else {
@@ -814,14 +1043,12 @@ final class NativeVoiceBridge: ObservableObject {
                     ? "系统允许恢复音频"
                     : "系统未允许自动恢复音频"
             )
-            guard shouldResume else {
-                await failActiveSession(
-                    DirectVoiceFailure(
-                        code: "BW_NATIVE_AUDIO_INTERRUPTION_NOT_RESUMABLE",
-                        message: "系统音频中断结束，但未允许自动恢复",
-                        retryable: true
-                    ),
-                    generation: operationGeneration
+            if localAudioSuspended {
+                scheduleLocalAudioRecovery(
+                    trigger: shouldResume
+                        ? "audio-interruption-ended"
+                        : "audio-interruption-ended-without-resume-hint",
+                    immediate: shouldResume
                 )
                 return
             }
@@ -869,11 +1096,15 @@ final class NativeVoiceBridge: ObservableObject {
            recoverableCodes.contains(failure.code),
            desiredActive,
            resumeArmed,
-           state.phase == .active {
+           (state.phase == .active || localAudioSuspended) {
             recordDiagnostic(
                 category: "recovery",
                 message: "可恢复连接故障：\(failure.code)"
             )
+            if localAudioSuspended {
+                localAudioRecoveryTask?.cancel()
+                localAudioRecoveryTask = nil
+            }
             await suspendActiveSession(
                 detail: "网络连接中断，等待可用路径后自动续接…",
                 stopAudio: false
@@ -891,7 +1122,9 @@ final class NativeVoiceBridge: ObservableObject {
         guard desiredActive else {
             return
         }
-        if state.phase == .suspended {
+        let replacingLocalAudioSuspension =
+            state.phase == .suspended && localAudioSuspended
+        if state.phase == .suspended && !replacingLocalAudioSuspension {
             if stopAudio {
                 audio.stop()
             }
@@ -901,11 +1134,15 @@ final class NativeVoiceBridge: ObservableObject {
             )
             return
         }
-        guard state.phase == .active else {
+        guard state.phase == .active || replacingLocalAudioSuspension else {
             return
         }
 
         operationGeneration &+= 1
+        localAudioRecoveryTask?.cancel()
+        localAudioRecoveryTask = nil
+        localAudioRecoveryAttempt = 0
+        localAudioSuspended = false
         recoveryInProgress = false
         reconnectTask?.cancel()
         reconnectTask = nil

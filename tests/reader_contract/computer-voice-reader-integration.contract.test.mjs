@@ -32,15 +32,44 @@ test("Reader structured cards acknowledge only an actual render", () => {
   const render = voicecall.slice(renderStart, renderEnd);
   assert.match(
     render,
-    /_tcOk = !!RC\.turnCard\.addPart\(/,
+    /var _tcPart = RC\.turnCard\.addPart\([\s\S]*_tcOk = !!\(_tcPart && _tcPart\.isConnected\)/,
     "a missing turn or renderer must not be reported as a rendered card",
   );
+  assert.match(render, /if \(d\.isConnected\) _hosts\.push\(d\)/);
+  assert.match(render, /if \(c\.el\.isConnected\) _hosts\.push\(c\.el\)/);
   assert.match(render, /var _rendered = _tcOk \|\| _hosts\.length > 0/);
   assert.match(render, /return _rendered/);
   assert.doesNotMatch(
     render,
     /RC\.turnCard\.addPart\([^;]+;\s*_tcOk = true/,
     "calling addPart alone is not proof that a card reached the DOM",
+  );
+});
+
+test("Windows conversation delivery acknowledges only connected Reader bubbles", () => {
+  const msgStart = assistant.indexOf("window.__asstVoiceMsg = function");
+  const msgEnd = assistant.indexOf("window.__asstVoiceLog = function", msgStart);
+  assert.ok(msgStart >= 0 && msgEnd > msgStart);
+  const msg = assistant.slice(msgStart, msgEnd);
+  assert.match(msg, /if \(!_tc \|\| !_tc\.el \|\| !_tc\.el\.isConnected\) return false/);
+  assert.match(
+    msg,
+    /return !!\(_vTurnEl && _vTurnEl\.isConnected && _tgt && _tgt\.isConnected\)/,
+  );
+  assert.match(msg, /return !!\(d\.isConnected && d\.parentNode === thread\)/);
+
+  const acceptStart = voicecall.indexOf("function _acceptReaderRealtimeOutput(delivery)");
+  const acceptEnd = voicecall.indexOf("RC.voicecall = RC.voicecall || {}", acceptStart);
+  assert.ok(acceptStart >= 0 && acceptEnd > acceptStart);
+  const accept = voicecall.slice(acceptStart, acceptEnd);
+  assert.match(
+    accept,
+    /_resetRendered[\s\S]*_userRendered[\s\S]*_assistantRendered[\s\S]*BW_READER_CONVERSATION_RENDER_FAILED/,
+  );
+  assert.match(
+    accept,
+    /window\.__asstVoiceLog\([\s\S]*work = true/,
+    "history persistence is scheduled only after the current Reader actually rendered both bubbles",
   );
 });
 

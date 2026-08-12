@@ -1534,6 +1534,26 @@ def _validate_mcp_smoke_output(result: CommandResult) -> None:
         ) != expected_tools
     ):
         _fail("包内 stdio MCP 未暴露精确 6 工具合同")
+    command_schema = tools[-1].get("inputSchema")
+    command_variants = (
+        command_schema.get("oneOf")
+        if isinstance(command_schema, dict)
+        else None
+    )
+    if (
+        not isinstance(command_variants, list)
+        or len(command_variants) != 2
+        or command_variants[0].get("required") != ["command"]
+        or command_variants[1].get("required") != ["card"]
+        or not isinstance(command_variants[1].get("properties"), dict)
+        or not isinstance(
+            command_variants[1]["properties"].get("card"),
+            dict,
+        )
+        or command_variants[1]["properties"]["card"].get("required")
+        != ["kind", "title", "data"]
+    ):
+        _fail("包内 reader_command 未保留白名单可见的 typed card 回退")
 
     snapshot_text = _mcp_response_text(by_id[3], label="快照工具")
     try:

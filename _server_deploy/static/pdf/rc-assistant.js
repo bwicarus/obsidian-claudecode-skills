@@ -2450,7 +2450,7 @@
         var _o2 = arguments[2] || {};
         if (_o2.utterId && _vUEl && _vUEl.iid === _o2.utterId && _vUEl.el && _vUEl.el.parentNode === thread) {
           _vUEl.el.textContent = text;   // 112(用户规范):同 item 的修订=覆盖同一气泡,不追加
-          scrollDown(); return true;
+          scrollDown(); return !!_vUEl.el.isConnected;
         }
         var d = document.createElement('div'); d.className = 'asst-msg asst-u'; d.textContent = text;
         if (_o2.utterId) _vUEl = { iid: _o2.utterId, el: d };
@@ -2463,13 +2463,13 @@
         if (_vAnswered) { _vTurnEl = null; _vSlot = null; _vTid = 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6); _vAnswered = false; }
         if (_vTurnEl && _vTurnEl.parentNode === thread) thread.insertBefore(d, _vTurnEl);
         else { thread.appendChild(d); _vTurnEl = null; }
-        scrollDown(); return true;
+        scrollDown(); return !!(d.isConnected && d.parentNode === thread);
       }
       // 141:AI 文字一律写进**轮次容器**的草稿段落(md 渲染在唯一渲染器里做)。
       if (!_vTid) _vTid = 't' + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
       var _tc = null;
       try { RC.turnCard.draftText(_vTid, text); _tc = RC.turnCard.open(_vTid); } catch (e) {}
-      if (!_tc) return true;
+      if (!_tc || !_tc.el || !_tc.el.isConnected) return false;
       _vTurnEl = _tc.el; _vAnswered = true;   // #53:本轮已出 AI 答案 → 下一句用户转写开新轮(而非 insertBefore 到本轮之上)
       var _tgt = (_tc.draft && _tc.draft._el) || _tc.bd;
       if (arguments[2] && arguments[2].md) {   // 67:文字轮/路由长文的**终态**用 Markdown 渲染(流式期间纯文本省性能)
@@ -2493,7 +2493,7 @@
         try { if (arguments[2].pin && window.__vcPinBind) window.__vcPinBind(_vTurnEl, arguments[2].pin.label, arguments[2].pin.textFn); } catch (e) {}   // 79:长按=全文带入
         try { _bubDecor(_vTurnEl, arguments[2].pin && arguments[2].pin.label, arguments[2].pin && arguments[2].pin.textFn); } catch (e) {}   // 86/87:标题把手条
       } else _tgt.textContent = text;
-      scrollDown(); return true;
+      scrollDown(); return !!(_vTurnEl && _vTurnEl.isConnected && _tgt && _tgt.isConnected);
     } catch (e) { return false; }
   };
   // 141:容器内容一变就同步落库(防抖)。见 rc-turncard 的注释:展示型工具之后不再有 response,

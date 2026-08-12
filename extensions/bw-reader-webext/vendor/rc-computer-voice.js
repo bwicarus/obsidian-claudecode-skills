@@ -5459,6 +5459,41 @@ if (window.__bwPwaProviderOnly) return;
     });
   }
 
+  function proveSnapshotPublication(state) {
+    if (
+      !contextPumpAlive(state, state && state.contextPump) ||
+      !activeReadingPumpAlive(state)
+    ) {
+      return Promise.reject(directError(
+        "Windows 本地 Reader 快照发送泵需要重建",
+        "BW_READER_CONTEXT_SNAPSHOT_PUMP_STALE",
+        true
+      ));
+    }
+    var current = localActiveReadingSnapshot();
+    if (!current) return Promise.resolve(null);
+    var signature = JSON.stringify(current);
+    return state.channel.request("active-reading", {
+      sessionId: state.sessionId,
+      activeContract: ACTIVE_READING_CONTRACT,
+      active: Object.assign({}, current, {
+        observedAtEpochMs: Date.now(),
+      }),
+    }).then(function (value) {
+      normalizeActiveReadingAck(value, state);
+      if (snapshotLink !== state || state.stopped) return null;
+      // This proves the exact context session can still update Windows' live
+      // snapshot. CONTEXT-MODE alone only proves that the WSS parser answers;
+      // it cannot distinguish a working publisher from an old cached view.
+      var pump = state.activeReadingPump;
+      if (pump && !pump.stopped) {
+        pump.lastSignature = signature;
+        pump.lastSentAt = Date.now();
+      }
+      return value;
+    });
+  }
+
   function resumeSnapshotLinkFromForeground(event) {
     if (!snapshotLinkWanted()) return reconcileSnapshotLink();
     // iOS may suspend this one-second timer while the PWA is backgrounded.
@@ -5473,9 +5508,12 @@ if (window.__bwPwaProviderOnly) return;
     if (!state) return reconcileSnapshotLink();
     if (state.foregroundProbePromise) return state.foregroundProbePromise;
     // An OPEN readyState can survive an iOS background suspension after its
-    // peer has gone away.  CONTEXT-MODE is read-only and DirectSocket gives it
-    // the normal bounded request timeout, so foregrounding can prove the link
-    // before trusting it without replaying any mutation.
+    // peer has gone away. CONTEXT-MODE proves the transport. The native 12 s
+    // watchdog additionally refreshes active-reading and requires its exact
+    // ACK, so a responsive parser backed only by old cache is not trusted.
+    var provePublication = !!(
+      event && event.detail && event.detail.probe === true
+    );
     state.foregroundProbePromise = Promise.resolve(state.promise).then(
       function (resolved) {
         if (
@@ -5497,6 +5535,14 @@ if (window.__bwPwaProviderOnly) return;
       if (mode !== CONTEXT_DELIVERY_SNAPSHOT) {
         return stopSnapshotLink();
       }
+      if (provePublication) {
+        return proveSnapshotPublication(state).then(function () {
+          return state;
+        });
+      }
+      return state;
+    }).then(function (proven) {
+      if (!proven || snapshotLink !== state || state.stopped) return proven;
       snapshotTransportState = "open";
       snapshotReconnectAttempt = 0;
       return state;

@@ -44,7 +44,7 @@ from voice_history_sidebar_sync import (
 )
 
 
-APP_VERSION = "0.1.10"
+APP_VERSION = "0.1.13"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 POLL_INTERVAL_MS = 2_500
@@ -293,7 +293,7 @@ class ReaderPCWindow:
         self.pc_status, self.pc_detail, self.pc_button = self._service_row(
             outer,
             "PC 预处理",
-            "文字、分词与公式 · quality-first-v1",
+            "文字、分词与公式 · quality-first-v2",
             self.toggle_pc,
         )
 

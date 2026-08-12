@@ -34,6 +34,7 @@ final class NativeAudioEngine {
     var onMicrophoneFrame: (([Int16]) -> Void)?
     var onFailure: ((Error) -> Void)?
     var onInterruption: ((Interruption) -> Void)?
+    var onRecoveryNeeded: ((String) -> Void)?
     var onInputMuteChanged: ((Bool) -> Void)?
 
     private let engine = AVAudioEngine()
@@ -54,6 +55,9 @@ final class NativeAudioEngine {
     private var scheduledFrames = 0
     private var playbackGeneration: UInt64 = 0
     private var interruptionObserver: NSObjectProtocol?
+    private var configurationChangeObserver: NSObjectProtocol?
+    private var routeChangeObserver: NSObjectProtocol?
+    private var mediaServicesResetObserver: NSObjectProtocol?
     private var inputMuteObserver: NSObjectProtocol?
 
     init() {
@@ -63,6 +67,27 @@ final class NativeAudioEngine {
             queue: nil
         ) { [weak self] notification in
             self?.handleInterruption(notification)
+        }
+        configurationChangeObserver = NotificationCenter.default.addObserver(
+            forName: .AVAudioEngineConfigurationChange,
+            object: engine,
+            queue: nil
+        ) { [weak self] _ in
+            self?.reportRecoveryNeeded("AVAudioEngine 配置已变化")
+        }
+        routeChangeObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.routeChangeNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: nil
+        ) { [weak self] _ in
+            self?.reportRecoveryNeeded("系统音频路由已变化")
+        }
+        mediaServicesResetObserver = NotificationCenter.default.addObserver(
+            forName: AVAudioSession.mediaServicesWereResetNotification,
+            object: AVAudioSession.sharedInstance(),
+            queue: nil
+        ) { [weak self] _ in
+            self?.reportRecoveryNeeded("系统音频服务已重置")
         }
         inputMuteObserver = NotificationCenter.default.addObserver(
             forName: AVAudioApplication.inputMuteStateChangeNotification,
@@ -76,6 +101,19 @@ final class NativeAudioEngine {
     deinit {
         if let interruptionObserver {
             NotificationCenter.default.removeObserver(interruptionObserver)
+        }
+        if let configurationChangeObserver {
+            NotificationCenter.default.removeObserver(
+                configurationChangeObserver
+            )
+        }
+        if let routeChangeObserver {
+            NotificationCenter.default.removeObserver(routeChangeObserver)
+        }
+        if let mediaServicesResetObserver {
+            NotificationCenter.default.removeObserver(
+                mediaServicesResetObserver
+            )
         }
         if let inputMuteObserver {
             NotificationCenter.default.removeObserver(inputMuteObserver)
@@ -104,6 +142,25 @@ final class NativeAudioEngine {
     func start() throws {
         try controlQueue.sync {
             try startOnControlQueue()
+        }
+    }
+
+    /// Rebuilds only the App-local audio graph. The caller keeps the existing
+    /// Windows WSS/session, so a transient iOS route/configuration loss does
+    /// not issue another START or request microphone permission again.
+    func restart() throws {
+        try controlQueue.sync {
+            stopOnControlQueue()
+            try startOnControlQueue()
+        }
+    }
+
+    var isOperational: Bool {
+        controlQueue.sync {
+            stateLock.lock()
+            let markedRunning = running
+            stateLock.unlock()
+            return markedRunning && engine.isRunning && player.isPlaying
         }
     }
 
@@ -404,5 +461,9 @@ final class NativeAudioEngine {
         @unknown default:
             break
         }
+    }
+
+    private func reportRecoveryNeeded(_ reason: String) {
+        onRecoveryNeeded?(reason)
     }
 }

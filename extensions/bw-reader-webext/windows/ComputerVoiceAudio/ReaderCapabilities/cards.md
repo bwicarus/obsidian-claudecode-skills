@@ -113,5 +113,8 @@ userinfo 或反斜杠。图片 `url` 及视频 `thumb`/`url` 受此规则约束�
 BWREADER/1 card {"card":{"kind":"fact","title":"标题","data":{"answer":"结论"}}}
 ```
 
-新调用应优先使用 typed `reader_card`。两条路径都复用现有 Realtime 卡片校验、精确 source
-路由和回执；卡片进入当前轮次的既有容器，不创建另一套 UI，也不改变 Realtime 或 CLI 流程。
+新调用应优先使用 typed `reader_card`。若 Codex 客户端的 `enabled_tools` 白名单尚未暴露它，
+可直接调用始终保留的 `reader_command`，并传入与上文完全相同的 `{ "card": ... }` typed
+对象；不要把对象重新拼成自由文本。`reader_command` 也继续接受上述 `BWREADER/1 card ...`
+兼容字符串。三条入口都复用现有 Realtime 卡片校验、精确 source 路由和实际渲染回执；卡片
+进入当前轮次的既有容器，不创建另一套 UI，也不改变 Realtime 或 CLI 流程。

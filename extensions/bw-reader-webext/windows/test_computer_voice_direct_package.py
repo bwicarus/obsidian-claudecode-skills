@@ -80,7 +80,26 @@ class FakeStdioRunner:
                         {"name": "reader_visual_image"},
                         {"name": "reader_browser_control"},
                         {"name": "reader_card"},
-                        {"name": "reader_command"},
+                        {
+                            "name": "reader_command",
+                            "inputSchema": {
+                                "oneOf": [
+                                    {"required": ["command"]},
+                                    {
+                                        "required": ["card"],
+                                        "properties": {
+                                            "card": {
+                                                "required": [
+                                                    "kind",
+                                                    "title",
+                                                    "data",
+                                                ]
+                                            }
+                                        },
+                                    },
+                                ]
+                            },
+                        },
                     ],
                 },
             },

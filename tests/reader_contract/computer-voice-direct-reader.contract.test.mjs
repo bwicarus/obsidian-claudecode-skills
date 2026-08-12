@@ -304,6 +304,7 @@ function createServer(scenario) {
       this.binaryType = "";
       this.bufferedAmount = 0;
       this.contextModeRequests = 0;
+      this.activeReadingRequests = 0;
       server.sockets.push(this);
       queueMicrotask(() => {
         if (scenario.offline) {
@@ -424,7 +425,15 @@ function createServer(scenario) {
         return;
       }
       if (request.type === "active-reading") {
+        this.activeReadingRequests += 1;
         scenario.activeReadingRequests.push(structuredClone(request));
+        if (
+          scenario.dropSecondActiveReadingOnFirstSocket === true &&
+          this === server.sockets[0] &&
+          this.activeReadingRequests === 2
+        ) {
+          return;
+        }
         result(this, request, {
           sessionId: request.sessionId,
           revision: scenario.activeReadingRequests.length,
@@ -938,6 +947,7 @@ function createHarness(overrides = {}) {
     dropFirstBorrowedStatus: false,
     droppedFirstBorrowedStatus: false,
     dropSecondContextModeOnFirstSocket: false,
+    dropSecondActiveReadingOnFirstSocket: false,
     deferSocketClose: false,
     lastError: null,
     relayLifecycle: [],
@@ -1293,9 +1303,9 @@ function createHarness(overrides = {}) {
         handler({ type, detail });
       }
     },
-    dispatchWindowEvent(type) {
+    dispatchWindowEvent(type, detail) {
       for (const handler of windowEventHandlers.get(type) || []) {
-        handler({ type });
+        handler({ type, detail });
       }
     },
     setVisibilityState(value) {
@@ -3311,6 +3321,69 @@ test("原生专用快照前台唤醒先用只读 CONTEXT-MODE 验活并重建 st
       (request) => request.type === "context-open",
     ).length === 2,
     "fresh context-open after foreground probe timeout",
+  );
+  assert.equal(
+    harness.server.requests.some((request) => request.type === "start"),
+    false,
+  );
+  assert.equal(harness.scenario.microphoneRequests.length, 0);
+
+  contextSyncStorage.set("eph-ctx-sync", "0");
+  await harness.api.contextSyncChanged();
+});
+
+test("原生 12 秒巡检必须证明当前页写入而不能只接受可读旧缓存", async () => {
+  const timers = createManualTimers();
+  const contextSyncStorage = new Map([["eph-ctx-sync", "1"]]);
+  const harness = createHarness({
+    origin: NATIVE_APP_ORIGIN,
+    nativeComputerVoice: true,
+    nativeReaderForeground: true,
+    contextSyncStorage,
+    contextDeliveryMode: "snapshot-mcp",
+    activeReading: {
+      kind: "pdf",
+      file: "localbook:watchdog-current-page",
+      title: "Watchdog Current Page",
+      pos: 19,
+      selection: "",
+    },
+    dropSecondActiveReadingOnFirstSocket: true,
+    timers,
+  });
+
+  await waitForRequest(harness, "context-open");
+  await waitForCondition(
+    () => harness.scenario.activeReadingRequests.length === 1,
+    "initial active-reading publish",
+  );
+  harness.dispatchWindowEvent("bw-native-reader-foreground", {
+    active: true,
+    probe: true,
+  });
+  await waitForCondition(
+    () => harness.scenario.activeReadingRequests.length === 2,
+    "watchdog active-reading proof",
+  );
+  assert.equal(
+    harness.server.requests.filter(
+      (request) => request.type === "context-mode",
+    ).length,
+    2,
+    "transport probe still precedes the current-page proof",
+  );
+  assert.equal(timers.count(7000), 1);
+  timers.runOne(7000);
+  await waitForCondition(
+    () => timers.count(1000) === 1,
+    "publication timeout reconnect",
+  );
+  timers.runOne(1000);
+  await waitForCondition(
+    () => harness.server.requests.filter(
+      (request) => request.type === "context-open",
+    ).length === 2,
+    "fresh snapshot session after publication timeout",
   );
   assert.equal(
     harness.server.requests.some((request) => request.type === "start"),

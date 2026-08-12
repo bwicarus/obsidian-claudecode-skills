@@ -982,7 +982,9 @@ actor NativeBookOCRSidecarStore {
             throw NativeBookOCRError.invalidAttachment("预处理执行器无效")
         }
         guard executor != "pc"
-            || manifest.processingProfile == "quality-first-v1" else {
+            || ["quality-first-v1", "quality-first-v2"].contains(
+                manifest.processingProfile
+            ) else {
             throw NativeBookOCRError.invalidAttachment("PC 预处理配置无效")
         }
         let processingProfile = manifest.processingProfile ?? "pi-default-v1"

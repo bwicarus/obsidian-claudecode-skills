@@ -442,6 +442,82 @@ class VoiceHistorySidebarSyncTest(unittest.TestCase):
             ),
         )
 
+    def test_capture_lease_never_sends_pending_turn_to_another_reader_source(self):
+        self.recent([msg("user", "old-u"), msg("assistant", "old-a")])
+        snapshot = self.root / "reader-context-snapshot.json"
+
+        def write_snapshot(source, revision, page):
+            self.write(
+                snapshot,
+                {
+                    "schema": "reader-context-snapshot/1",
+                    "revision": revision,
+                    "updatedAtUtc": datetime.now(timezone.utc).isoformat(),
+                    "activeReading": {
+                        "fresh": True,
+                        "ageSec": 0,
+                        "sourceInstanceId": source,
+                    },
+                    "contextStatus": "ready",
+                    "currentPage": {
+                        "file": "Books/book.pdf",
+                        "page": page,
+                        "stable": True,
+                        "sourceInstanceId": source,
+                    },
+                },
+            )
+
+        write_snapshot("app-reader-a", 30, 4)
+        calls = []
+        syncer = SYNC.CaptureBoundHistorySynchronizer(
+            root=self.root,
+            publisher=lambda *args, **kwargs: (
+                calls.append((args, kwargs)) or {"ok": True}
+            ),
+            global_state_path=self.global_state,
+            continuity_path=self.continuity,
+            state_path=self.state,
+            archive_path=self.archive,
+            snapshot_path=snapshot,
+        )
+        syncer.observe(
+            service_online=True,
+            capture_active=True,
+            snapshot_mode=True,
+        )
+        self.recent(
+            [
+                msg("user", "old-u"),
+                msg("assistant", "old-a"),
+                msg("user", "new-u"),
+                msg("assistant", "new-a"),
+            ]
+        )
+
+        write_snapshot("extension-reader-b", 31, 0)
+        withheld = syncer.observe(
+            service_online=True,
+            capture_active=True,
+            snapshot_mode=True,
+        )
+        self.assertEqual(calls, [])
+        self.assertEqual(withheld["pending"], 1)
+        self.assertTrue(withheld["stale"])
+        self.assertIn("source changed", withheld["error"])
+
+        write_snapshot("app-reader-a", 32, 5)
+        delivered = syncer.observe(
+            service_online=True,
+            capture_active=True,
+            snapshot_mode=True,
+        )
+        self.assertEqual(delivered["published"], 1)
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0][1]["source_instance_id"], "app-reader-a")
+        self.assertEqual(calls[0][1]["snapshot_revision"], 32)
+        self.assertEqual(calls[0][1]["page"], 5)
+
     def test_activation_watermark_handles_non_alternating_existing_roles(self):
         baseline = [
             msg("user", "u0"),
