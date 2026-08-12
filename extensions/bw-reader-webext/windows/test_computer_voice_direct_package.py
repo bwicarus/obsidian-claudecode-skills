@@ -67,6 +67,32 @@ class FakeInstallService:
         self.running = True
 
 
+class FakeMcpController:
+    def __init__(self, *, stopped: int = 0) -> None:
+        self.stopped = stopped
+        self.events: list[str] = []
+
+    def quiesce(self, install_root: Path) -> int:
+        self.events.append("quiesce")
+        return self.stopped
+
+
+class FakeInstalledProcessBackend:
+    def __init__(self, processes) -> None:
+        self.processes = list(processes)
+        self.terminated: list[int] = []
+
+    def list_exact_executable(self, executable: Path):
+        return tuple(self.processes)
+
+    def terminate_exact(self, process) -> bool:
+        if process not in self.processes:
+            return False
+        self.terminated.append(process.pid)
+        self.processes.remove(process)
+        return True
+
+
 class DirectPackageTests(unittest.TestCase):
     def _sources(self, root: Path) -> tuple[Path, Path]:
         audio = root / "ComputerVoiceAudio"
@@ -186,18 +212,25 @@ class DirectPackageTests(unittest.TestCase):
                 archive, install_root
             )
             service = FakeInstallService()
+            mcp = FakeMcpController(stopped=2)
 
             receipt = package.install_archive(
                 archive,
                 install_root=install_root,
                 backup_root=backup_root,
                 service_controller=service,
+                mcp_controller=mcp,
                 runner=FakeRunner(),
             )
 
             self.assertEqual(receipt["installedVersion"], "0.4.1")
             self.assertEqual(receipt["previousVersion"], "0.4.0")
-            self.assertEqual(service.events, ["is-running", "stop", "start"])
+            self.assertEqual(receipt["mcpProcessesStopped"], 2)
+            self.assertEqual(mcp.events, ["quiesce"])
+            self.assertEqual(
+                service.events,
+                ["is-running", "stop", "start"],
+            )
             self.assertTrue(service.running)
             installed, _ = package._verified_install_directory(
                 install_root, label="test installed"
@@ -227,9 +260,11 @@ class DirectPackageTests(unittest.TestCase):
                 install_root=install_root,
                 backup_root=backup_root,
                 service_controller=service,
+                mcp_controller=mcp,
                 runner=FakeRunner(),
             )
             self.assertEqual(rollback_receipt["installedVersion"], "0.4.0")
+            self.assertEqual(mcp.events, ["quiesce", "quiesce"])
             rolled_back, rolled_back_payload = package._verified_install_directory(
                 install_root, label="test explicit rollback"
             )
@@ -253,6 +288,7 @@ class DirectPackageTests(unittest.TestCase):
                 archive, install_root
             )
             service = FakeInstallService()
+            mcp = FakeMcpController(stopped=1)
             calls = 0
 
             def fail_once(source: Path, target: Path) -> None:
@@ -271,6 +307,7 @@ class DirectPackageTests(unittest.TestCase):
                     install_root=install_root,
                     backup_root=backup_root,
                     service_controller=service,
+                    mcp_controller=mcp,
                     runner=FakeRunner(),
                     replace_file=fail_once,
                 )
@@ -281,6 +318,7 @@ class DirectPackageTests(unittest.TestCase):
             self.assertEqual(restored_manifest, old_manifest)
             self.assertEqual(restored_payload, old_payload)
             self.assertTrue(service.running)
+            self.assertEqual(mcp.events, ["quiesce", "quiesce"])
             self.assertEqual(
                 service.events,
                 ["is-running", "stop", "is-running", "start"],
@@ -289,6 +327,76 @@ class DirectPackageTests(unittest.TestCase):
                 (install_root / "runtime" / "state.json").read_text(),
                 "runtime-must-survive",
             )
+
+    def test_mcp_quiesce_stops_only_exact_state_bound_mode(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            install_root = Path(raw) / "install root"
+            executable = install_root / package.NATIVE_REL
+            executable.parent.mkdir(parents=True)
+            executable.write_bytes(b"installed-native")
+            executable = executable.resolve(strict=True)
+            state = (
+                install_root / "runtime" / "reader-context-snapshot.json"
+            ).resolve(strict=False)
+            process = package.InstalledProcess(
+                pid=101,
+                executable=executable,
+                command_line=(
+                    f'"{executable}" --reader-context-mcp --state "{state}"'
+                ),
+                creation_date="20260812123456.000000+540",
+            )
+            backend = FakeInstalledProcessBackend([process])
+
+            stopped = package.ExactReaderContextMcpController(backend).quiesce(
+                install_root
+            )
+
+            self.assertEqual(stopped, 1)
+            self.assertEqual(backend.terminated, [101])
+
+    def test_install_refuses_unfamiliar_same_executable_without_terminating(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            archive = self._candidate(root)
+            install_root = root / "install"
+            backup_root = root / "backups"
+            old_manifest, old_payload = self._installed_old_payload(
+                archive, install_root
+            )
+            executable = (install_root / package.NATIVE_REL).resolve(strict=True)
+            process = package.InstalledProcess(
+                pid=202,
+                executable=executable,
+                command_line=f'"{executable}" --describe',
+                creation_date="20260812123556.000000+540",
+            )
+            backend = FakeInstalledProcessBackend([process])
+            service = FakeInstallService()
+
+            with self.assertRaisesRegex(
+                package.PackageError,
+                "非 MCP 模式占用",
+            ):
+                package.install_archive(
+                    archive,
+                    install_root=install_root,
+                    backup_root=backup_root,
+                    service_controller=service,
+                    mcp_controller=package.ExactReaderContextMcpController(backend),
+                    runner=FakeRunner(),
+                )
+
+            self.assertEqual(backend.terminated, [])
+            self.assertEqual(
+                service.events,
+                ["is-running", "stop", "is-running", "start"],
+            )
+            restored_manifest, restored_payload = package._verified_install_directory(
+                install_root, label="test unfamiliar owner unchanged"
+            )
+            self.assertEqual(restored_manifest, old_manifest)
+            self.assertEqual(restored_payload, old_payload)
 
     def test_build_is_versioned_deterministic_and_exact(self) -> None:
         with tempfile.TemporaryDirectory() as raw:

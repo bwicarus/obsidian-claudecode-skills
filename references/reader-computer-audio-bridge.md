@@ -260,8 +260,13 @@ $py = 'C:\Users\bwica\AppData\Local\Programs\Python\Python313\python.exe'
   `extensions/bw-reader-webext/windows/computer-voice-desktop/`
 - typist 候选真源：
   `extensions/bw-reader-webext/windows/typist-runtime/`
-- 可复现候选打包：
+- 可复现候选打包、事务安装与显式回退：
   `extensions/bw-reader-webext/windows/package_computer_voice_direct.py`
+
+Direct 发布只使用该脚本的 `--build` / `--verify` / `--self-test` / `--install` /
+`--rollback`。安装前脚本验证候选和现有安装、备份固定 payload，精确停止 owned
+`direct-serve` 与同一安装路径下、参数严格匹配的 Reader MCP 进程；安装、自检或服务恢复
+任一步失败都会恢复旧 payload。配置、`runtime/`、`dotnet8/` 与其它本地数据不在替换范围。
 
 ## 验证与尚未完成
 

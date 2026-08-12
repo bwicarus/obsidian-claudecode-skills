@@ -107,8 +107,11 @@ PCM 只在 Tailscale 加密直连中出现，不写 Pi、磁盘、日志或浏�
 - 新 Reader 设置已配置时只显示真实直连状态与刷新/断开，不显示“生成一次性配对码”。
 - Windows 隔离测试使用 mock capture 与 loopback WSS，不启动真实音频或快捷键。
 - Windows 候选由 `windows/package_computer_voice_direct.py` 在仓库忽略的
-  `windows/candidates/<version>` 下构建；ZIP 只允许 manifest、单文件自包含音频服务 EXE 和
-  单文件无控制台桌面 EXE。构建、只读校验和包内 `--self-test` 都不是安装动作。
+  `windows/candidates/<version>` 下构建；ZIP 只允许 manifest 与固定 payload 白名单。
+  `--build`、`--verify` 和包内 `--self-test` 都不是安装动作；实际替换只走同一脚本的
+  `--install`，它会先验证并备份当前 payload，精确静默 owned 服务与同路径 Reader MCP，
+  再替换、自检和恢复服务，失败自动回滚。人工回退使用 `--rollback <backup-dir>`，不得手工
+  覆盖运行中的 EXE；配置、运行状态与 bundled .NET 不属于 payload。
 - 登录 bootstrap 的安装必须显式 opt-in、可查询、可精确卸载；开发与测试只验证任务定义和命令
   构造，不在本轮创建计划任务或开机项。
 - 真机验收顺序：Windows 服务可见启用 → PWA 配对 → idle 状态 → 用户点击电话按钮 →

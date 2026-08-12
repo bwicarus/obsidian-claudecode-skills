@@ -10,6 +10,7 @@ outside the payload whitelist and are never replaced.
 from __future__ import annotations
 
 import argparse
+import base64
 from dataclasses import dataclass
 from datetime import datetime, timezone
 import hashlib
@@ -117,6 +118,24 @@ class InstallServiceController(Protocol):
     def start(self, install_root: Path) -> None: ...
 
 
+class InstallMcpController(Protocol):
+    def quiesce(self, install_root: Path) -> int: ...
+
+
+@dataclass(frozen=True)
+class InstalledProcess:
+    pid: int
+    executable: Path
+    command_line: str
+    creation_date: str
+
+
+class InstalledProcessBackend(Protocol):
+    def list_exact_executable(self, executable: Path) -> Sequence[InstalledProcess]: ...
+
+    def terminate_exact(self, process: InstalledProcess) -> bool: ...
+
+
 class SubprocessRunner:
     def __init__(
         self,
@@ -212,6 +231,234 @@ class BridgeCoreInstallServiceController:
                 return
             time.sleep(0.1)
         _fail("Direct 服务重启后 10 秒内未进入在线状态")
+
+
+def _same_windows_path(left: Path | str, right: Path | str) -> bool:
+    def normalized(value: Path | str) -> str:
+        return str(Path(value).resolve(strict=False)).replace("/", "\\").rstrip("\\").casefold()
+
+    return normalized(left) == normalized(right)
+
+
+def _strict_windows_command_tokens(command_line: str) -> tuple[str, ...] | None:
+    text = command_line.strip()
+    if not text:
+        return None
+    tokens: list[str] = []
+    offset = 0
+    while offset < len(text):
+        while offset < len(text) and text[offset].isspace():
+            offset += 1
+        if offset >= len(text):
+            break
+        if text[offset] == '"':
+            closing = text.find('"', offset + 1)
+            if closing < 0:
+                return None
+            tokens.append(text[offset + 1:closing])
+            offset = closing + 1
+            if offset < len(text) and not text[offset].isspace():
+                return None
+        else:
+            end = offset
+            while end < len(text) and not text[end].isspace():
+                if text[end] == '"':
+                    return None
+                end += 1
+            tokens.append(text[offset:end])
+            offset = end
+    return tuple(tokens)
+
+
+def _exact_reader_context_mcp_command(
+    command_line: str,
+    executable: Path,
+) -> bool:
+    tokens = _strict_windows_command_tokens(command_line)
+    expected_state = (
+        executable.parent.parent / "runtime" / "reader-context-snapshot.json"
+    ).resolve(strict=False)
+    return (
+        tokens is not None
+        and len(tokens) == 4
+        and _same_windows_path(tokens[0], executable)
+        and tokens[1:3] == ("--reader-context-mcp", "--state")
+        and _same_windows_path(tokens[3], expected_state)
+    )
+
+
+class PowerShellInstalledProcessBackend:
+    """Inventory and terminate only an unchanged Win32 process identity."""
+
+    _LIST_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+$target = [Environment]::GetEnvironmentVariable('BW_DIRECT_INSTALL_PROCESS_TARGET')
+$items = @(
+  Get-CimInstance Win32_Process |
+    Where-Object {
+      $_.ExecutablePath -and
+      [StringComparer]::OrdinalIgnoreCase.Equals([string]$_.ExecutablePath, $target)
+    } |
+    ForEach-Object {
+      [pscustomobject]@{
+        processId = [int]$_.ProcessId
+        executablePath = [string]$_.ExecutablePath
+        commandLine = if ($null -eq $_.CommandLine) { '' } else { [string]$_.CommandLine }
+        creationDate = if ($null -eq $_.CreationDate) { '' } else { [string]$_.CreationDate }
+      }
+    }
+)
+ConvertTo-Json -Compress -InputObject $items
+"""
+    _TERMINATE_SCRIPT = r"""
+$ErrorActionPreference = 'Stop'
+$target = [Environment]::GetEnvironmentVariable('BW_DIRECT_INSTALL_PROCESS_TARGET')
+$expectedCommand = [Environment]::GetEnvironmentVariable('BW_DIRECT_INSTALL_PROCESS_COMMAND')
+$expectedCreated = [Environment]::GetEnvironmentVariable('BW_DIRECT_INSTALL_PROCESS_CREATED')
+$pidValue = [int][Environment]::GetEnvironmentVariable('BW_DIRECT_INSTALL_PROCESS_PID')
+$current = Get-CimInstance Win32_Process -Filter ("ProcessId = " + $pidValue)
+if ($null -eq $current) { exit 0 }
+$actualCommand = if ($null -eq $current.CommandLine) { '' } else { [string]$current.CommandLine }
+$actualCreated = if ($null -eq $current.CreationDate) { '' } else { [string]$current.CreationDate }
+if (-not [StringComparer]::OrdinalIgnoreCase.Equals([string]$current.ExecutablePath, $target) -or
+    $actualCommand -cne $expectedCommand -or
+    $actualCreated -cne $expectedCreated) {
+  exit 3
+}
+$result = Invoke-CimMethod -InputObject $current -MethodName Terminate
+if ($null -eq $result -or [int]$result.ReturnValue -ne 0) { exit 4 }
+$deadline = [DateTime]::UtcNow.AddSeconds(5)
+do {
+  Start-Sleep -Milliseconds 50
+  $remaining = Get-CimInstance Win32_Process -Filter ("ProcessId = " + $pidValue)
+} while ($null -ne $remaining -and [DateTime]::UtcNow -lt $deadline)
+if ($null -ne $remaining) { exit 5 }
+"""
+
+    def __init__(self) -> None:
+        if os.name != "nt":
+            _fail("Direct MCP 进程静默只支持 Windows")
+        system_root = Path(os.environ.get("SystemRoot", r"C:\Windows"))
+        self._powershell = (
+            system_root / "System32" / "WindowsPowerShell" / "v1.0" / "powershell.exe"
+        ).resolve(strict=False)
+        if not self._powershell.is_file():
+            _fail("找不到固定 Windows PowerShell，无法安全识别 Direct MCP 进程")
+
+    def _run(self, script: str, environment: Mapping[str, str]) -> CommandResult:
+        encoded = base64.b64encode(script.encode("utf-16-le")).decode("ascii")
+        process_environment = os.environ.copy()
+        process_environment.update(environment)
+        try:
+            completed = subprocess.run(
+                (
+                    str(self._powershell),
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-EncodedCommand",
+                    encoded,
+                ),
+                cwd=str(HERE),
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                check=False,
+                timeout=15,
+                env=process_environment,
+            )
+        except subprocess.TimeoutExpired:
+            return CommandResult(124, stderr="process query timed out")
+        return CommandResult(completed.returncode, completed.stdout, completed.stderr)
+
+    def list_exact_executable(self, executable: Path) -> Sequence[InstalledProcess]:
+        result = self._run(
+            self._LIST_SCRIPT,
+            {"BW_DIRECT_INSTALL_PROCESS_TARGET": str(executable)},
+        )
+        if result.returncode != 0:
+            _fail("无法安全枚举已安装 Direct 进程")
+        try:
+            raw = json.loads(result.stdout or "[]")
+        except json.JSONDecodeError:
+            _fail("Direct 进程枚举返回了无效 JSON")
+        if not isinstance(raw, list):
+            _fail("Direct 进程枚举结果不是数组")
+        processes: list[InstalledProcess] = []
+        for item in raw:
+            if not isinstance(item, dict) or set(item) != {
+                "processId", "executablePath", "commandLine", "creationDate"
+            }:
+                _fail("Direct 进程枚举记录合同无效")
+            pid = item["processId"]
+            executable_path = item["executablePath"]
+            command_line = item["commandLine"]
+            creation_date = item["creationDate"]
+            if (
+                not isinstance(pid, int)
+                or pid <= 0
+                or not isinstance(executable_path, str)
+                or not isinstance(command_line, str)
+                or not isinstance(creation_date, str)
+                or not creation_date
+            ):
+                _fail("Direct 进程枚举记录字段无效")
+            process = InstalledProcess(
+                pid=pid,
+                executable=Path(executable_path),
+                command_line=command_line,
+                creation_date=creation_date,
+            )
+            if not _same_windows_path(process.executable, executable):
+                _fail("Direct 进程枚举越出固定可执行文件")
+            processes.append(process)
+        return tuple(processes)
+
+    def terminate_exact(self, process: InstalledProcess) -> bool:
+        result = self._run(
+            self._TERMINATE_SCRIPT,
+            {
+                "BW_DIRECT_INSTALL_PROCESS_TARGET": str(process.executable),
+                "BW_DIRECT_INSTALL_PROCESS_COMMAND": process.command_line,
+                "BW_DIRECT_INSTALL_PROCESS_CREATED": process.creation_date,
+                "BW_DIRECT_INSTALL_PROCESS_PID": str(process.pid),
+            },
+        )
+        return result.returncode == 0
+
+
+class ExactReaderContextMcpController:
+    """Stop only installed native-host processes in the exact MCP mode."""
+
+    def __init__(self, backend: InstalledProcessBackend | None = None) -> None:
+        self._backend = backend or PowerShellInstalledProcessBackend()
+
+    def quiesce(self, install_root: Path) -> int:
+        executable = (install_root / NATIVE_REL).resolve(strict=True)
+        processes = tuple(self._backend.list_exact_executable(executable))
+        unfamiliar = tuple(
+            process
+            for process in processes
+            if not _same_windows_path(process.executable, executable)
+            or not _exact_reader_context_mcp_command(
+                process.command_line,
+                executable,
+            )
+        )
+        if unfamiliar:
+            pids = ",".join(str(process.pid) for process in unfamiliar)
+            _fail(
+                "已安装 native-host 正被非 MCP 模式占用；拒绝猜测终止 "
+                f"(pid={pids})"
+            )
+        for process in processes:
+            if not self._backend.terminate_exact(process):
+                _fail(f"未能确认停止旧 Reader MCP 进程 (pid={process.pid})")
+        remaining = tuple(self._backend.list_exact_executable(executable))
+        if remaining:
+            _fail("停止旧 Reader MCP 后仍有已安装 native-host 进程；拒绝替换")
+        return len(processes)
 
 
 def _fail(message: str) -> None:
@@ -1241,6 +1488,7 @@ def _install_verified_payload(
     install_root: Path,
     backup_root: Path,
     service_controller: InstallServiceController,
+    mcp_controller: InstallMcpController,
     runner: CommandRunner,
     replace_file: Any = os.replace,
 ) -> dict[str, Any]:
@@ -1260,10 +1508,14 @@ def _install_verified_payload(
 
     was_running = service_controller.is_running(install_root)
     stopped = False
+    payload_mutation_started = False
+    mcp_processes_stopped = 0
     try:
         if was_running:
             service_controller.stop(install_root)
             stopped = True
+        mcp_processes_stopped = mcp_controller.quiesce(install_root)
+        payload_mutation_started = True
         _replace_install_payload(
             install_root,
             manifest,
@@ -1286,6 +1538,7 @@ def _install_verified_payload(
             "installedVersion": installed_manifest["version"],
             "previousVersion": current_manifest["version"],
             "serviceRestored": was_running,
+            "mcpProcessesStopped": mcp_processes_stopped,
         }
         (backup / "install-receipt.json").write_text(
             json.dumps(receipt, ensure_ascii=False, sort_keys=True) + "\n",
@@ -1300,15 +1553,17 @@ def _install_verified_payload(
                     service_controller.stop(install_root)
             except Exception as exc:
                 recovery_errors.append(f"停止失败候选服务失败: {exc}")
-        try:
-            _replace_install_payload(
-                install_root,
-                current_manifest,
-                current_payload,
-            )
-            _verified_install_directory(install_root, label="自动回滚后的 Direct")
-        except Exception as exc:
-            recovery_errors.append(f"恢复旧 payload 失败: {exc}")
+        if payload_mutation_started:
+            try:
+                mcp_controller.quiesce(install_root)
+                _replace_install_payload(
+                    install_root,
+                    current_manifest,
+                    current_payload,
+                )
+                _verified_install_directory(install_root, label="自动回滚后的 Direct")
+            except Exception as exc:
+                recovery_errors.append(f"恢复旧 payload 失败: {exc}")
         if was_running:
             try:
                 service_controller.start(install_root)
@@ -1326,6 +1581,7 @@ def install_archive(
     install_root: Path = DEFAULT_INSTALL_ROOT,
     backup_root: Path = DEFAULT_BACKUP_ROOT,
     service_controller: InstallServiceController | None = None,
+    mcp_controller: InstallMcpController | None = None,
     runner: CommandRunner | None = None,
     replace_file: Any = os.replace,
 ) -> dict[str, Any]:
@@ -1345,6 +1601,7 @@ def install_archive(
         service_controller=(
             service_controller or BridgeCoreInstallServiceController()
         ),
+        mcp_controller=(mcp_controller or ExactReaderContextMcpController()),
         runner=runner or SubprocessRunner(timeout_seconds=SELF_TEST_TIMEOUT_SECONDS),
         replace_file=replace_file,
     )
@@ -1356,6 +1613,7 @@ def rollback_install(
     install_root: Path = DEFAULT_INSTALL_ROOT,
     backup_root: Path = DEFAULT_BACKUP_ROOT,
     service_controller: InstallServiceController | None = None,
+    mcp_controller: InstallMcpController | None = None,
     runner: CommandRunner | None = None,
 ) -> dict[str, Any]:
     """Install a previously validated backup using the same transaction."""
@@ -1372,6 +1630,7 @@ def rollback_install(
         service_controller=(
             service_controller or BridgeCoreInstallServiceController()
         ),
+        mcp_controller=(mcp_controller or ExactReaderContextMcpController()),
         runner=runner or SubprocessRunner(timeout_seconds=SELF_TEST_TIMEOUT_SECONDS),
     )
 
