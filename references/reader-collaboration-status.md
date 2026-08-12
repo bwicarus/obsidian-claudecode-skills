@@ -4143,3 +4143,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **验证**：失败合同先复现 hidden WebView 无法 `context-open`，修复后目标合同与全量 Reader Node、离线 ReaderBundle、发布管线均通过；公网 WSS `hello/context-mode=snapshot-mcp` 现场正常。
 - **发布事实**：提交 `20aa6d7f`；Actions `31568868875` 上传 App `1.1.42 (249)` 与 Safari `0.2.102`，`31569264560` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
 - **边界/下一步**：未部署 Pi PWA 或桌面浏览器正式渠道；安装 build 249 后需在电脑语音 active 时连续翻页，验收 `captureActive=true` 与 `contextConnected=true` 同时保持。
+
+## Codex：原生快照跨 Windows 服务换代自动恢复（2026-08-12 JST）
+- **证据/改动**：现场 Direct 新实例连接数为零而 MCP 仅剩旧缓存；App 前台现每 12 秒复用既有只读 `context-mode` 验活，stale OPEN 在 7 秒上界后关闭并退避重连。
+- **验证**：专项 82 项、Reader Node 全量、离线 ReaderBundle、模拟器编译、签名归档与三目标/IPA 校验通过；Windows Python 仍仅有既有 `fcntl` 平台基线。
+- **发布事实**：提交 `a29f3980`；Actions `31571872283` 上传 App `1.1.43 (252)`，`31572376316` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
+- **边界/下一步**：未部署 Pi PWA 或桌面浏览器渠道；巡检仅在原生 scene active 时运行，不发 START、不申请麦克风，安装后验收翻页与按需取图均更新。
