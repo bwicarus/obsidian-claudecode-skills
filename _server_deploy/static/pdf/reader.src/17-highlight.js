@@ -299,13 +299,44 @@ function _pdfExactTextRange(chars, sourceText) {
 async function _pdfExactTextPage(targetPage) {
   const page = Number(targetPage);
   if (!Number.isInteger(page) || page < 1 || !pdfDoc || page > pdfDoc.numPages) throw new Error('BW_READER_HIGHLIGHT_PAGE_INVALID');
-  await window.goToPage(page);
-  for (let tries = 0; tries < 40; tries++) {
+  const readyPage = () => {
     const pw = document.querySelector('.page-wrap[data-page-num="' + page + '"]');
-    if (pw && pw.dataset.loaded === '1' && Array.isArray(pw.__charBoxes) && pw.__charBoxes.length) return pw;
+    return pw && pw.dataset.loaded === '1' && Array.isArray(pw.__charBoxes) && pw.__charBoxes.length
+      ? pw : null;
+  };
+  // 精确高亮最常见的目标就是用户眼前这一页。旧实现无条件重新 goToPage，
+  // 一旦 PDF 重渲染或原生文字层请求卡住，当前已经可用的文字层也被一起
+  // 阻塞，Windows 最终只能得到回执超时。先消费现成页面，不做多余导航。
+  const current = Number(currentPage) === page ? readyPage() : null;
+  if (current) return current;
+  let navigationError = null;
+  try {
+    Promise.resolve(window.goToPage(page)).catch((error) => { navigationError = error; });
+  } catch (error) {
+    navigationError = error;
+  }
+  // 不 await goToPage：页面是否真正可用由同一个 DOM/文字层条件判定；这样
+  // 即使导航 Promise 本身失联，也会在有界时间内明确失败而不是永久处理中。
+  for (let tries = 0; tries < 80; tries++) {
+    const pw = readyPage();
+    if (pw) return pw;
+    if (navigationError) throw navigationError;
     await new Promise((resolve) => setTimeout(resolve, 120));
   }
   throw new Error('BW_READER_HIGHLIGHT_TEXT_LAYER_UNAVAILABLE');
+}
+
+async function _pdfWaitForHighlightVisible(pw, page, id) {
+  for (let tries = 0; tries < 40; tries++) {
+    renderHighlightsOnPage(pw, page);
+    const rendered = Array.from(pw.querySelectorAll('.hl-saved')).find((node) =>
+      node.dataset.id === id && parseFloat(node.style.width || '0') > 0 &&
+      parseFloat(node.style.height || '0') > 0
+    );
+    if (rendered) return rendered;
+    await new Promise((resolve) => setTimeout(resolve, 50));
+  }
+  throw new Error('BW_READER_HIGHLIGHT_NOT_RENDERED');
 }
 
 window.__bwReaderHighlightExactText = async function (request) {
@@ -321,6 +352,9 @@ window.__bwReaderHighlightExactText = async function (request) {
     pw, sIdx: range.start, eIdx: range.end, color: colors[request.color],
     note: request.note || '', id: request.mutationId, silent: true
   });
+  await _pdfWaitForHighlightVisible(
+    pw, Number(request.target.page), highlight.id
+  );
   return { ok: true, status: 'highlight_saved', id: highlight.id, page: Number(request.target.page), text: highlight.text };
 };
 

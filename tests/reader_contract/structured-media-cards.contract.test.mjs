@@ -14,8 +14,12 @@ const EXTENSION_BACKGROUND = fs.readFileSync(
   new URL("../../extensions/bw-reader-webext/background.js", import.meta.url),
   "utf8",
 );
+const APP_RUNTIME = fs.readFileSync(
+  new URL("../../ios/BWReader/App/ReaderLocalRuntimeServer.swift", import.meta.url),
+  "utf8",
+);
 
-function mediaHelpers() {
+function mediaHelpers(windowOverride = {}) {
   const start = SOURCE.indexOf("function _cardHttpsURL(value)");
   const end = SOURCE.indexOf("function _infoText(card)", start);
   assert.ok(start >= 0 && end > start);
@@ -24,12 +28,19 @@ function mediaHelpers() {
     "URL",
     "encodeURIComponent",
     "esc",
+    "document",
     `${SOURCE.slice(start, end)}
      return { _cardHttpsURL, _cardMediaURL, _videoCardRef,
-       _videoCardThumb, _videoCardThumbSource, _infoHtml };`,
+       _videoCardThumb, _videoCardThumbSource, _videoButtonRef,
+       _openVideoRef, _infoHtml };`,
   );
+  const browserWindow = {
+    location: { href: "https://reader.example/pdf/view" },
+    open() {},
+    ...windowOverride,
+  };
   return factory(
-    { location: { href: "https://reader.example/pdf/view" } },
+    browserWindow,
     URL,
     encodeURIComponent,
     (value) => String(value)
@@ -37,6 +48,7 @@ function mediaHelpers() {
       .replaceAll('"', "&quot;")
       .replaceAll("<", "&lt;")
       .replaceAll(">", "&gt;"),
+    { addEventListener() {} },
   );
 }
 
@@ -128,19 +140,50 @@ test("URL-only YouTube cards derive the player id and a proxied thumbnail", () =
   const html = helpers._infoHtml({ kind: "videos", data: { items: [item] } });
   assert.match(html, /YouTube/);
   assert.match(html, /i\.ytimg\.com%2Fvi%2FYXb87xE5PVk%2Fmqdefault\.jpg/);
+  assert.match(html, /data-video-id="YXb87xE5PVk"/);
+  assert.match(html, /data-video-src="yt"/);
+  assert.match(html, /data-video-url="https:\/\/www\.youtube\.com\/watch\?v=YXb87xE5PVk"/);
 });
 
-test("video play consumes the allowed url instead of requiring schema-forbidden id", () => {
+test("video play prefers the shared internal player on every Reader host", () => {
   const start = SOURCE.indexOf("function _igWire(root, card)");
   const end = SOURCE.indexOf("function renderInfo(card)", start);
   assert.ok(start >= 0 && end > start);
   const wire = SOURCE.slice(start, end);
-  assert.match(wire, /var ref = _videoCardRef\(vt\)/);
-  assert.match(wire, /RC\.videoPlayer\.open\(\{ id: ref\.id/);
+  assert.match(wire, /_openVideoRef\(_videoButtonRef\(pb\), vt\.title \|\| ''\)/);
   assert.doesNotMatch(wire, /id:\s*vt\.id/);
+  assert.doesNotMatch(wire, /__BW_NATIVE_LOCAL_READER__[\s\S]*window\.open/);
+
+  const playerCalls = [];
+  let externalCalls = 0;
+  const helpers = mediaHelpers({
+    RC: { videoPlayer: { open(value) { playerCalls.push(value); } } },
+    open() { externalCalls += 1; },
+  });
+  assert.equal(helpers._openVideoRef({
+    id: "YXb87xE5PVk",
+    src: "yt",
+    url: "https://www.youtube.com/watch?v=YXb87xE5PVk",
+  }, "Tokyo Tower"), true);
+  assert.deepEqual(playerCalls, [{
+    id: "YXb87xE5PVk",
+    src: "yt",
+    title: "Tokyo Tower",
+  }]);
+  assert.equal(externalCalls, 0);
+});
+
+test("pinned video cards keep a delegated play route and recover legacy YouTube ids", () => {
+  assert.match(SOURCE, /closest\('\.rc-note \.vc-vg-play'\)/);
+  assert.match(SOURCE, /_videoButtonRef\(button\)/);
+  assert.match(SOURCE, /host === 'i\.ytimg\.com' \|\| host === 'img\.youtube\.com'/);
+  assert.match(SOURCE, /outer\.pathname === '\/pdf\/api\/img-proxy'/);
+});
+
+test("the App CSP permits only the two official embedded-player origins", () => {
   assert.match(
-    wire,
-    /__BW_NATIVE_LOCAL_READER__ === true && ref\.url\) window\.open\(ref\.url, '_blank'\)/,
-    "the App keeps frame-src none and hands external video to the system browser",
+    APP_RUNTIME,
+    /frame-src https:\/\/www\.youtube-nocookie\.com https:\/\/player\.bilibili\.com;/,
   );
+  assert.doesNotMatch(APP_RUNTIME, /frame-src 'none'/);
 });

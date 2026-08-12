@@ -1906,7 +1906,8 @@ if (window.__bwPwaProviderOnly) return;
     return true;
   }
 
-  // 通用卡便签:天气/搜索/图/文字等 vc-card 的 HTML 快照 → 钉页(不含交互,只留内容)
+  // 通用卡便签:天气/搜索/图/文字等 vc-card 的 HTML 快照 → 钉页。
+  // 允许的交互由共享模块按自描述 data-* 属性做全局委托；便签不持久化闭包。
   function createHtmlAt(clientX, clientY, htmlObj) {
     if (!O || !O.anchorFromPoint || !htmlObj || !htmlObj.content) return false;
     var cands = [[clientX, clientY], [clientX, clientY - 22], [clientX, clientY + 22], [clientX - 30, clientY], [clientX + 30, clientY]];

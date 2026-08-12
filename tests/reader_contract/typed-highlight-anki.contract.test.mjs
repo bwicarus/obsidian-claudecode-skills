@@ -8,6 +8,9 @@ const PDF = read("_server_deploy/static/pdf/reader.src/17-highlight.js");
 const EPUB = read("_server_deploy/static/pdf/epub-html.js");
 const VOICE = read("_server_deploy/static/pdf/rc-voicecall.js");
 const FLASH = read("_server_deploy/static/pdf/rc-flashcard.js");
+const WINDOWS_OUTPUT = read(
+  "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderRealtimeOutput.cs",
+);
 const MANIFEST = JSON.parse(read("ios/BWReader/native_reader_interface_manifest.json"));
 
 test("PDF and EPUB exact-text helpers reject wrong or ambiguous source", () => {
@@ -19,6 +22,61 @@ test("PDF and EPUB exact-text helpers reject wrong or ambiguous source", () => {
   }
   assert.match(PDF, /id:\s*request\.mutationId/);
   assert.match(EPUB, /id:\s*request\.mutationId/);
+});
+
+test("PDF exact-text highlight reuses a ready page and bounds a stalled navigation", async () => {
+  const start = PDF.indexOf("async function _pdfExactTextPage(targetPage)");
+  const end = PDF.indexOf("window.__bwReaderHighlightExactText", start);
+  assert.ok(start >= 0 && end > start);
+  const factory = new Function(
+    "window",
+    "document",
+    "pdfDoc",
+    "currentPage",
+    "setTimeout",
+    `${PDF.slice(start, end)}; return _pdfExactTextPage;`,
+  );
+
+  const ready = { dataset: { loaded: "1" }, __charBoxes: [{ c: "A" }] };
+  let navigationCalls = 0;
+  const currentPage = factory(
+    { goToPage() { navigationCalls += 1; return new Promise(() => {}); } },
+    { querySelector() { return ready; } },
+    { numPages: 3 },
+    1,
+    globalThis.setTimeout,
+  );
+  assert.equal(await currentPage(1), ready);
+  assert.equal(navigationCalls, 0, "a ready current page must not be re-rendered");
+
+  let probes = 0;
+  const delayedPage = factory(
+    { goToPage() { navigationCalls += 1; return new Promise(() => {}); } },
+    { querySelector() { probes += 1; return probes >= 3 ? ready : null; } },
+    { numPages: 3 },
+    1,
+    (callback) => { callback(); },
+  );
+  assert.equal(await delayedPage(2), ready);
+  assert.equal(navigationCalls, 1);
+  assert.ok(probes >= 3, "DOM readiness, not a hanging navigation promise, decides success");
+});
+
+test("PDF exact-text success waits until its saved rectangle is rendered", () => {
+  const start = PDF.indexOf("async function _pdfWaitForHighlightVisible");
+  const end = PDF.indexOf("window.__bwReaderHighlightExactText", start);
+  assert.ok(start >= 0 && end > start);
+  const body = PDF.slice(start, end);
+  assert.match(body, /renderHighlightsOnPage\(pw, page\)/);
+  assert.match(body, /querySelectorAll\('\.hl-saved'\)/);
+  assert.match(body, /node\.dataset\.id === id/);
+  assert.match(body, /BW_READER_HIGHLIGHT_NOT_RENDERED/);
+  assert.match(PDF, /await _pdfWaitForHighlightVisible\(/);
+  assert.match(
+    WINDOWS_OUTPUT,
+    /DeliveryTimeout = TimeSpan\.FromSeconds\(20\)/,
+    "the broker deadline must cover the bounded page and render waits",
+  );
 });
 
 test("Realtime output waits for exact highlight and rendered Anki draft", () => {

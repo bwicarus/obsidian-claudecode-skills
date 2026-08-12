@@ -53,7 +53,7 @@ targets:
         CURRENT_PROJECT_VERSION: "2"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: App/Info.plist
-        MARKETING_VERSION: "1.1.46"
+        MARKETING_VERSION: "1.1.47"
         PRODUCT_BUNDLE_IDENTIFIER: space.bwicarus.bwreader2
         PRODUCT_NAME: bwicarus-test
         # Stated explicitly because XcodeGen's application preset overrides
@@ -144,7 +144,7 @@ targets:
         CURRENT_PROJECT_VERSION: "2"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Extension/Info.plist
-        MARKETING_VERSION: "1.1.46"
+        MARKETING_VERSION: "1.1.47"
         PRODUCT_BUNDLE_IDENTIFIER: space.bwicarus.bwreader2.Extension
         PRODUCT_MODULE_NAME: BWReaderSafariExtension
         PRODUCT_NAME: BWReaderSafariExtension
@@ -170,7 +170,7 @@ targets:
         CURRENT_PROJECT_VERSION: "2"
         GENERATE_INFOPLIST_FILE: NO
         INFOPLIST_FILE: Widget/Info.plist
-        MARKETING_VERSION: "1.1.46"
+        MARKETING_VERSION: "1.1.47"
         PRODUCT_BUNDLE_IDENTIFIER: space.bwicarus.bwreader2.Widget
         PRODUCT_MODULE_NAME: BWReaderWidget
         PRODUCT_NAME: BWReaderWidget

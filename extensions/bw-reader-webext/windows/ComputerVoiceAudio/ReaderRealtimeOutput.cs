@@ -663,7 +663,12 @@ internal static class ReaderRealtimeOutputProtocol
 
 internal sealed class ReaderRealtimeOutputBroker
 {
-    private static readonly TimeSpan DeliveryTimeout = TimeSpan.FromSeconds(10);
+    // An exact-text mutation may have to bring an off-screen PDF page into the
+    // virtualized DOM and wait for its native text layer before it can produce
+    // an applied/rejected receipt. Keep the broker deadline above the bounded
+    // 9.6 second page wait plus persistence/ACK overhead. The page side remains
+    // bounded, so this does not turn a lost receiver into an endless wait.
+    private static readonly TimeSpan DeliveryTimeout = TimeSpan.FromSeconds(20);
     private const int MaximumPendingOutputs = 16;
 
     private sealed record PendingOutput(

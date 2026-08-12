@@ -1630,6 +1630,73 @@
     }
     return '';
   }
+  function _videoButtonRef(button) {
+    if (!button) return { id: '', src: '', url: '' };
+    var direct = _videoCardRef({
+      id: button.getAttribute('data-video-id') || '',
+      src: button.getAttribute('data-video-src') || '',
+      url: button.getAttribute('data-video-url') || ''
+    });
+    if (direct.id || direct.url) return direct;
+    // 旧的已固定 YouTube 卡没有在按钮上保存播放身份，但缩略图仍保存
+    // i.ytimg.com/vi/<id>/... 的稳定来源；从它恢复，不要求用户重新生成卡片。
+    try {
+      var cell = button.closest && button.closest('.vc-ig-cell');
+      var image = cell && cell.querySelector('.vc-ig-img');
+      var raw = String(image && (image.getAttribute('data-source-url') || image.getAttribute('src')) || '');
+      var outer = new URL(raw, window.location.href);
+      if (outer.pathname === '/pdf/api/img-proxy') raw = outer.searchParams.get('url') || '';
+      var parsed = new URL(raw, window.location.href);
+      var host = parsed.hostname.toLowerCase();
+      var parts = parsed.pathname.split('/').filter(Boolean);
+      if ((host === 'i.ytimg.com' || host === 'img.youtube.com') &&
+          parts[0] === 'vi' && /^[A-Za-z0-9_-]{11}$/.test(parts[1] || '')) {
+        return _videoCardRef({ id: parts[1], src: 'yt' });
+      }
+    } catch (e) {}
+    return direct;
+  }
+  function _openVideoRef(ref, title) {
+    ref = ref || {};
+    try {
+      if (ref.id && window.RC && window.RC.videoPlayer &&
+          typeof window.RC.videoPlayer.open === 'function') {
+        window.RC.videoPlayer.open({
+          id: ref.id,
+          src: ref.src === 'bili' ? 'bili' : 'yt',
+          title: String(title || '')
+        });
+        return true;
+      }
+      if (ref.url) {
+        window.open(ref.url, '_blank');
+        return true;
+      }
+      if (typeof _toast === 'function') _toast('视频地址无效');
+    } catch (e) {
+      try { if (typeof _toast === 'function') _toast('视频无法打开'); } catch (_) {}
+    }
+    return false;
+  }
+  var _pinnedVideoClickBound = false;
+  function _bindPinnedVideoClicks() {
+    if (_pinnedVideoClickBound) return;
+    _pinnedVideoClickBound = true;
+    // HTML 便签会在重开/同步时重建 DOM。把播放行为委托到 document，固定后的
+    // 视频卡无需保存闭包，也不会因为便签重挂而丢失点击能力。
+    document.addEventListener('click', function (event) {
+      var button = event.target && event.target.closest &&
+        event.target.closest('.rc-note .vc-vg-play');
+      if (!button) return;
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      _openVideoRef(
+        _videoButtonRef(button),
+        button.getAttribute('data-video-title') || ''
+      );
+    }, true);
+  }
+  _bindPinnedVideoClicks();
   function _infoHtml(card) {
     var k = card.kind, d = card.data || {}, h = '';
     function e0(x) { return esc(String(x == null ? '' : x)); }
@@ -1663,7 +1730,11 @@
           '<button type="button" class="vc-ig-x" data-i="' + i + '" aria-label="移除">✕</button>' +
           '<span class="vc-vg-tag' + (isBili ? ' bili' : '') + '">' + (isBili ? 'B站' : (ref.src === 'yt' ? 'YouTube' : esc(it.src || '视频'))) + '</span>' +
           '<div class="vc-vg-wrap">' + (thumb ? '<img class="vc-ig-img" data-i="' + i + '" loading="lazy" referrerpolicy="no-referrer" data-source-url="' + esc(thumbSource) + '" src="' + esc(thumb) + '" alt="">' : '<div class="vc-vg-empty">无预览图</div>') +
-          '<button type="button" class="vc-vg-play" data-i="' + i + '" aria-label="播放">▶</button></div>' +
+          '<button type="button" class="vc-vg-play" data-i="' + i + '"' +
+          ' data-video-id="' + esc(ref.id || '') + '"' +
+          ' data-video-src="' + esc(ref.src || '') + '"' +
+          ' data-video-url="' + esc(ref.url || '') + '"' +
+          ' data-video-title="' + esc(it.title || '') + '" aria-label="播放">▶</button></div>' +
           '<div class="vc-ig-t">' + esc(it.title || '') + (it.channel ? '<br><span class="vc-vg-ch">' + esc(it.channel) + '</span>' : '') + '</div></div>';
       }).join('') + '</div>';
     } else if (k === 'fact') {
@@ -2456,17 +2527,11 @@
     root.addEventListener('click', function (ev) {
       var pb = ev.target.closest && ev.target.closest('.vc-vg-play');
       if (pb) {   // 98:播放钮=原播放行为(浮动播放器/新窗),不参与选中
+        ev.preventDefault();
         ev.stopPropagation();
         var ip = +pb.getAttribute('data-i');
         var vt = ((card.data || {}).items || [])[ip] || {};
-        var ref = _videoCardRef(vt);
-        try {
-          // App 的本机阅读器刻意保持 frame-src 'none'；外部视频交给系统浏览器。
-          if (window.__BW_NATIVE_LOCAL_READER__ === true && ref.url) window.open(ref.url, '_blank');
-          else if (ref.id && window.RC && RC.videoPlayer) RC.videoPlayer.open({ id: ref.id, src: ref.src === 'bili' ? 'bili' : 'yt', title: vt.title });
-          else if (ref.url) window.open(ref.url, '_blank');
-          else if (typeof _toast === 'function') _toast('视频地址无效');
-        } catch (e) { try { if (typeof _toast === 'function') _toast('视频无法打开'); } catch (_) {} }
+        _openVideoRef(_videoButtonRef(pb), vt.title || '');
       }
     });
     root.addEventListener('click', function (ev) {
