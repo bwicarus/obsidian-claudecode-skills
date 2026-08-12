@@ -475,7 +475,8 @@ if (window.__bwPwaProviderOnly) return;
   //   entity states 为空(新制卡)=保持草稿;有 learn/done=恢复已入库/已复习态。fire-and-forget,失败静默不影响首屏。
   function _restoreStates(container) {
     var st = container.__fc;
-    if (!st || !/^card_/.test(st.gid || '')) return;   // 本地 fcg_ 卡无服务端状态,跳过
+    if (!st || st.opts.entityRegistered === false ||
+        !/^card_/.test(st.gid || '')) return;   // 未注册本地草稿/本地 fcg_ 卡无服务端状态,跳过
     fetch('/pdf/api/entity/' + encodeURIComponent(st.gid))
       .then(function (r) { return r.json(); })
       .then(function (d) {
@@ -592,7 +593,8 @@ if (window.__bwPwaProviderOnly) return;
     // entity_id 时仍保持原协议。这样其它设备上的 Anki footer 才能反查来源并
     // 打开同一张 card_xxxxxx 的改进页。
     var payload = { aid: aid, cards: [{ type: c.type, front: c.front, back: c.back, cloze: c.cloze }] };
-    if (/^card_[a-f0-9]{4,12}$/.test(st.gid || '')) {
+    if (st.opts.entityRegistered !== false &&
+        /^card_[a-f0-9]{4,12}$/.test(st.gid || '')) {
       payload.entity_id = st.gid;
       payload.card_index = i;
     }
@@ -710,7 +712,8 @@ if (window.__bwPwaProviderOnly) return;
   function _stateSync(st, i) {
     // 统一编号协议(用户设计 2026-07-21):gid 是全局卡编号(card_)时把卡状态回写服务端注册表——
     //   刷新/#id 引用/其它宿主 mountState 时还原,"一张卡两种状态"跨会话也消失。fire-and-forget+outbox 兜。
-    if (!st || !/^card_/.test(st.gid || '')) return;
+    if (!st || st.opts.entityRegistered === false ||
+        !/^card_/.test(st.gid || '')) return;
     var c = st.cards[i]; if (!c) return;
     var body = {
       idx: i,
@@ -918,6 +921,7 @@ if (window.__bwPwaProviderOnly) return;
     var mode = spec.mode || 'state';
     var mountOpts = {
       gid: gid,
+      entityRegistered: spec.entityRegistered !== false,
       bare: true,
       nopin: true,
       showBack: spec.showBack,
@@ -1062,13 +1066,15 @@ if (window.__bwPwaProviderOnly) return;
     }
     return result;
   }
-  function presentDraft(cards, gid) {
+  function presentDraft(cards, gid, options) {
     if (!/^card_[a-f0-9]{4,12}$/.test(String(gid || ''))) return null;
+    options = options || {};
     var result = renderEntity(null, {
       surface: 'float',
       mode: 'draft',
       cards: cards,
       gid: gid,
+      entityRegistered: options.entityRegistered !== false,
       label: 'Anki 草稿',
       tool: 'reader_anki_draft'
     });

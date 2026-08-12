@@ -8,7 +8,7 @@ const ROOT = new URL("../../", import.meta.url);
 const read = (path) => readFileSync(new URL(path, ROOT), "utf8");
 const source = read("_server_deploy/static/pdf/rc-offline-dictionary.js");
 
-function harness(resources, { local = true } = {}) {
+function harness(resources, { local = true, translate = null } = {}) {
   const requests = [];
   const sandbox = {
     TextEncoder,
@@ -34,6 +34,17 @@ function harness(resources, { local = true } = {}) {
   };
   sandbox.window = sandbox;
   sandbox.RC = {};
+  if (translate) {
+    sandbox.webkit = {
+      messageHandlers: {
+        bwNativeDictionaryTranslation: {
+          async postMessage(request) {
+            return translate(request);
+          },
+        },
+      },
+    };
+  }
   if (local) {
     sandbox.__BW_NATIVE_LOCAL_BASE_PATH__ = "/r/fixture";
   }
@@ -132,6 +143,53 @@ test("legacy AI overlay cannot replace JMdict reading, part of speech, or meanin
   assert.deepEqual(requests, ["manifest.json", "shards/e689.json"]);
 });
 
+test("App word popup localizes the authoritative JMdict gloss through Apple Translation", async () => {
+  const resources = {
+    "manifest.json": {
+      contract: "bw-jmdict-manifest/1",
+      shardAlgorithm: "utf8-prefix-2-kana-3/1",
+      source: { release: "fixture" },
+      posLabels: { n: "noun" },
+      shards: { e689: { path: "shards/e689.json" } },
+    },
+    "shards/e689.json": {
+      contract: "bw-jmdict-shard/1",
+      key: "e689",
+      entries: [{
+        id: "2",
+        lemma: "手法",
+        readings: ["しゅほう"],
+        pos: ["n"],
+        glosses: ["technique", "method"],
+      }],
+      exact: { "手法": [0] },
+    },
+  };
+  const calls = [];
+  const { dictionary } = harness(resources, {
+    translate(request) {
+      calls.push(request);
+      return {
+        contract: "bw-native-dictionary-translation-response/1",
+        ok: true,
+        translation: "手法；方法",
+      };
+    },
+  });
+  const result = await dictionary.lookupJapaneseLegacy("手法");
+  assert.equal(result.zh, "手法；方法");
+  assert.equal(result.translation, "手法；方法");
+  assert.equal(result.definition_en, "technique; method");
+  assert.equal(result.local_zh, true);
+  assert.equal(result.zh_source, "apple-translation");
+  assert.deepEqual(JSON.parse(JSON.stringify(calls)), [{
+    contract: "bw-native-dictionary-translation-request/1",
+    text: "technique; method",
+    source: "en",
+    target: "zh-Hans",
+  }]);
+});
+
 test("non-local PWA reports unavailable instead of silently contacting Pi", async () => {
   const { dictionary, requests } = harness({}, { local: false });
   const result = await dictionary.lookupJapanese("取り寄せ");
@@ -207,6 +265,20 @@ test("App download stays in private Application Support and outside backup/sync"
   assert.match(localServer, /native-api\/offline-dictionary\//);
   assert.match(settings, /下载离线日语词典/);
   assert.match(settings, /不进入书籍附件、Pi、Safari 扩展或设置同步/);
+});
+
+test("App-only Apple Translation bridge localizes JMdict glosses without Pi", () => {
+  const nativeTool = read("ios/BWReader/App/NativeTranslationTool.swift");
+  const webView = read("ios/BWReader/App/ReaderWebView.swift");
+  const rootView = read("ios/BWReader/App/BWReaderNativeApp.swift");
+  assert.match(source, /bwNativeDictionaryTranslation/);
+  assert.match(source, /bw-native-dictionary-translation-request\/1/);
+  assert.match(nativeTool, /TranslationSession\.Configuration/);
+  assert.match(nativeTool, /session\.translate\(request\.text\)/);
+  assert.match(webView, /nativeDictionaryTranslationMessageName/);
+  assert.match(webView, /isTrustedDictionaryTranslationURL/);
+  assert.match(webView, /BW_NATIVE_DICTIONARY_TRANSLATION_UNTRUSTED/);
+  assert.match(rootView, /ReaderDictionaryTranslationHost\(\)/);
 });
 
 test("Japanese UI keeps Pi AI as an explicit action", () => {

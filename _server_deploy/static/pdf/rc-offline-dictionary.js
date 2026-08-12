@@ -189,7 +189,30 @@
     };
   }
 
-  function asLegacy(result, original) {
+  function nativeChineseGloss(value) {
+    var text = String(value || '').trim();
+    if (!localMode || !text) return Promise.resolve('');
+    try {
+      var handler = window.webkit && window.webkit.messageHandlers &&
+        window.webkit.messageHandlers.bwNativeDictionaryTranslation;
+      if (!handler || typeof handler.postMessage !== 'function') return Promise.resolve('');
+      return Promise.resolve(handler.postMessage({
+        contract: 'bw-native-dictionary-translation-request/1',
+        text: text.slice(0, 2048),
+        source: 'en',
+        target: 'zh-Hans'
+      })).then(function (response) {
+        if (!response ||
+            response.contract !== 'bw-native-dictionary-translation-response/1' ||
+            response.ok !== true) return '';
+        return String(response.translation || '').trim().slice(0, 2048);
+      }).catch(function () { return ''; });
+    } catch (_) {
+      return Promise.resolve('');
+    }
+  }
+
+  async function asLegacy(result, original) {
     if (!result || !result.ok) return result || { ok: false, source: 'local-jmdict' };
     var entry = result.entry || {};
     var glosses = Array.isArray(entry.glosses) ? entry.glosses.filter(Boolean) : [];
@@ -200,6 +223,12 @@
       ? entry.pos.map(function (code) { return labels[code] || code; }).join(' / ')
       : String(entry.pos || '');
     var lemma = entry.lemma || result.matchedTerm || original;
+    var englishTranslation = glosses.slice(0, 3).join('; ');
+    var englishDefinition = glosses.slice(0, 6).join('; ');
+    // JMdict remains authoritative for the entry, reading and part of speech.
+    // Apple Translation only localizes that short authoritative English gloss
+    // for display; bridge absence/failure deliberately falls back to English.
+    var chineseGloss = await nativeChineseGloss(englishDefinition);
     return {
       ok: true,
       jp: true,
@@ -208,15 +237,17 @@
       forms: forms,
       reading: readings[0] || '',
       pos: pos,
-      zh: '',
-      translation: glosses.slice(0, 3).join('; '),
-      definition: glosses.slice(0, 6).join('; '),
+      zh: chineseGloss,
+      translation: chineseGloss || englishTranslation,
+      definition: chineseGloss || englishDefinition,
+      definition_en: englishDefinition,
       examples: [],
       inflect: result.inflectionMark ? { base: lemma, marks: [result.inflectionMark] } : null,
       local_candidates: result.candidates || [],
       source: 'local-jmdict',
       source_version: result.sourceVersion || '',
-      local_zh: false
+      local_zh: !!chineseGloss,
+      zh_source: chineseGloss ? 'apple-translation' : ''
     };
   }
 

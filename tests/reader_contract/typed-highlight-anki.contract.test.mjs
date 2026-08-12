@@ -87,6 +87,9 @@ test("Realtime output waits for exact highlight and rendered Anki draft", () => 
   assert.match(receiver, /__bwReaderHighlightExactText\(p\)/);
   assert.match(receiver, /delivery\.kind === 'anki-draft'/);
   assert.match(receiver, /__bwReaderValidateExactSource\(p\)/);
+  assert.match(receiver, /window\.__BW_NATIVE_LOCAL_READER__ === true/);
+  assert.match(receiver, /'card_' \+ draftId\.slice\(6, 18\)/);
+  assert.match(receiver, /entityRegistered:\s*false/);
   assert.match(receiver, /fetch\('\/pdf\/api\/anki-draft'/);
   assert.match(receiver, /data\.anki_written !== false/);
   assert.match(receiver, /RC\.flashcard\.presentDraft\(p\.cards, data\.gid\)/);
@@ -94,13 +97,28 @@ test("Realtime output waits for exact highlight and rendered Anki draft", () => 
 });
 
 test("Anki MCP delivery reuses the existing confirmation-only UI", () => {
-  const start = FLASH.indexOf("function presentDraft(cards, gid)");
+  const start = FLASH.indexOf("function presentDraft(cards, gid, options)");
   const end = FLASH.indexOf("RC.flashcard =", start);
   const present = FLASH.slice(start, end);
   assert.match(present, /mode:\s*'draft'/);
   assert.match(present, /surface:\s*'float'/);
   assert.match(present, /querySelector\('\.fc-add'\)/);
   assert.doesNotMatch(present, /anki-add-cards/);
+});
+
+test("native-local drafts never pretend that a Pi card entity exists", () => {
+  assert.match(
+    FLASH,
+    /st\.opts\.entityRegistered === false \|\|\s*!\/\^card_\//,
+    "state restore and sync must skip a locally verified, unregistered draft",
+  );
+  assert.match(
+    FLASH,
+    /st\.opts\.entityRegistered !== false &&\s*\/\^card_\[a-f0-9\]\{4,12\}\$\//,
+    "Anki add must omit entity_id when the local draft was not registered on Pi",
+  );
+  assert.match(FLASH, /entityRegistered:\s*spec\.entityRegistered !== false/);
+  assert.match(FLASH, /entityRegistered:\s*options\.entityRegistered !== false/);
 });
 
 test("native App proxies only the current verified book for draft registration", () => {

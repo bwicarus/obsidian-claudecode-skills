@@ -1157,7 +1157,8 @@
     }
     if (d.source === 'local-jmdict') {
       html += '<div style="margin-top:4px;color:#6f7e96;font-size:10.5px">App 本地 JMdict' +
-        (d.local_zh ? ' · 本地中文覆盖' : ' · 英文释义') + '</div>';
+        (d.zh_source === 'apple-translation' ? ' · Apple 中文释义' :
+          (d.local_zh ? ' · 本地中文覆盖' : ' · 英文释义')) + '</div>';
     }
     html += _jpInflectHtml(d.inflect, word);   // 变形分析:原形 + 语法标签
     _jpKanjiData = d.kanji || [];

@@ -1515,6 +1515,29 @@ if (window.__bwPwaProviderOnly) return;
         }
         work = Promise.resolve(window.__bwReaderValidateExactSource(p))
           .then(function () {
+            if (window.__BW_NATIVE_LOCAL_READER__ === true) {
+              var draftId = String(p.draftId || '');
+              if (!/^draft-[a-f0-9]{32}$/.test(draftId)) {
+                throw new Error('BW_READER_ANKI_DRAFT_ID_INVALID');
+              }
+              // The renderer has already verified the exact source against the
+              // open local book.  Do not require a second Pi-side book identity
+              // merely to display an editable confirmation draft.
+              var localGid = 'card_' + draftId.slice(6, 18);
+              var localRendered = RC.flashcard.presentDraft(
+                p.cards,
+                localGid,
+                { entityRegistered: false }
+              );
+              if (!localRendered) {
+                throw new Error('BW_READER_ANKI_DRAFT_RENDER_FAILED');
+              }
+              return {
+                status: 'draft_delivered',
+                anki_written: false,
+                gid: localGid
+              };
+            }
             // @interaction anki.draft.verify
             return fetch('/pdf/api/anki-draft', {
               method: 'POST',
@@ -1523,6 +1546,7 @@ if (window.__bwPwaProviderOnly) return;
             });
           })
           .then(function (response) {
+            if (response && response.status === 'draft_delivered') return response;
             return response.text().then(function (raw) {
               var data;
               try { data = JSON.parse(raw); }
@@ -3319,6 +3343,12 @@ if (window.__bwPwaProviderOnly) return;
   function _rtcBeginUserTurn() {
     _rtc.turnEpoch = (_rtc.turnEpoch || 0) + 1;
     _rtc.visualTurnEpoch = -1;
+    // App nativeDirect has no Pi control event to establish a user-turn
+    // boundary. Without doing it here, the tool preamble and final answer are
+    // split into different history turns.
+    _rtc._newTurn = true;
+    _rtc.pendingToolCalls = Object.create(null);
+    _rtc.pendingToolResponse = null;
     // 旧轮尚未确认的回答即使迟到也不能消费笔迹；fresh 留给新轮重新判断。
     _rtc.inkResponseAcks = Object.create(null);
     return _rtc.turnEpoch;
@@ -5038,6 +5068,58 @@ if (window.__bwPwaProviderOnly) return;
     if (options && options.metadata) response.metadata = options.metadata;
     return _dcSend({ type: 'response.create', response: response });
   }
+  function _rtcPendingToolCount() {
+    return Object.keys(_rtc.pendingToolCalls || {}).length;
+  }
+  function _rtcFlushToolResponse() {
+    var pending = _rtc.pendingToolResponse;
+    if (!pending || _rtc.responseActive || _rtcPendingToolCount()) return false;
+    _rtc.pendingToolResponse = null;
+    var sent = _rtcRespCreate(pending.src, pending.longTool, pending.options);
+    if (!sent) {
+      _rtc.pendingToolResponse = pending;
+      try { if (window.dlog) window.dlog('tool← 正式回答创建失败:data channel 未就绪', '#ff6b6b'); } catch (e) {}
+    } else {
+      try { if (window.dlog) window.dlog('tool← 工具结果已回填，开始生成正式回答', '#7be096'); } catch (e) {}
+    }
+    return sent;
+  }
+  function _rtcQueueToolResponse(src, longTool, options) {
+    var old = _rtc.pendingToolResponse;
+    var merged = Object.assign({}, (old && old.options) || {}, options || {});
+    // Any visual result's tool_choice:none must survive aggregation with a
+    // concurrently completed ordinary tool.
+    if ((old && old.options && old.options.toolChoice === 'none') ||
+        (options && options.toolChoice === 'none')) merged.toolChoice = 'none';
+    if (options && options.metadata) merged.metadata = options.metadata;
+    _rtc.pendingToolResponse = {
+      src: src === 'deep' || (old && old.src === 'deep') ? 'deep' : 'tool',
+      longTool: !!(longTool || (old && old.longTool)),
+      options: merged
+    };
+    // function_call_arguments.done can precede its response.done. Creating a
+    // response now races the still-active preamble and is rejected by Realtime.
+    if (!_rtc.responseActive && !_rtcPendingToolCount()) {
+      return _rtcFlushToolResponse();
+    }
+    return true;
+  }
+  function _rtcTrackToolCall(callId) {
+    if (!callId) return;
+    _rtc.pendingToolCalls = _rtc.pendingToolCalls || Object.create(null);
+    _rtc.pendingToolCalls[callId] = true;
+  }
+  function _rtcFinishToolCall(callId) {
+    if (callId && _rtc.pendingToolCalls) delete _rtc.pendingToolCalls[callId];
+    _rtcFlushToolResponse();
+  }
+  function _rtcResponseHasFunctionCall(event) {
+    if (_rtc.responseToolCalls > 0) return true;
+    var output = event && event.response && event.response.output;
+    return Array.isArray(output) && output.some(function (item) {
+      return item && item.type === 'function_call';
+    });
+  }
   function _rtcNewInkAck() {
     _rtc.inkAckSeq = (_rtc.inkAckSeq || 0) + 1;
     return 'ink_' + Date.now().toString(36) + '_' + _rtc.inkAckSeq.toString(36);
@@ -5066,7 +5148,7 @@ if (window.__bwPwaProviderOnly) return;
           epoch: turnEpochAtStart
         };
       }
-      responseSent = _rtcRespCreate(
+      responseSent = _rtcQueueToolResponse(
         name === 'deep_think' ? 'deep' : 'tool',
         ok && String(out || '').length > 800,
         responseOptions
@@ -6330,7 +6412,7 @@ if (window.__bwPwaProviderOnly) return;
       if (_voiceMode() !== 'route') {
         _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId,
                   output: '(当前输出模式未启用文字路由:请直接口头简要回答重点;想看长文可让用户切到「路由」模式)' } });
-        _rtcRespCreate('tool');
+        _rtcQueueToolResponse('tool');
         return;
       }
       onToolStatus({ status: 'running', label: '路由详答·生成中' });
@@ -6377,7 +6459,7 @@ if (window.__bwPwaProviderOnly) return;
         _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId,
                   output: okR ? ('(文字详答已显示在用户屏幕上,本轮到此结束。内容简介:' + (_rtcTool._rbrief || full.slice(0, 200)) + '。用户下次说话时若相关直接运用;想让你看全文他会长按卡片带入。)') : ('(文字生成失败:' + err + ';请口头简要回答)') } });
         _rtcTool._rbrief = '';
-        if (!okR) _rtcRespCreate('tool');   // 成功=长文已显示,不再花一轮输出音频;失败=让它口头补救
+        if (!okR) _rtcQueueToolResponse('tool');   // 成功=长文已显示,不再花一轮输出音频;失败=等原 response 结束后口头补救
       })();
       return;
     }
@@ -6442,7 +6524,7 @@ if (window.__bwPwaProviderOnly) return;
       onToolStatus({ status: 'done', tool: name, label: '读取选中(免调用)', rag: _rtc.sel.slice(0, 300) });
       _dcSend({ type: 'conversation.item.create', item: { type: 'function_call_output', call_id: callId,
                 output: '(选中内容就在这里,无需再查:「' + _rtc.sel.slice(0, 800) + '」——直接使用)' } });
-      _rtcRespCreate('tool');
+      _rtcQueueToolResponse('tool');
       return;
     }
     _rtc.toolN = (_rtc.toolN || 0) + 1;   // ㊷ 护栏:单会话工具调用异常多=可能循环失控,提醒但不硬断
@@ -6889,6 +6971,14 @@ if (window.__bwPwaProviderOnly) return;
       if (tx) {
         _lastU = tx;
         setSub('u', tx);
+        // Audio transcription previously reached only the floating subtitle.
+        // __asstVoiceLog then marked the SSE echo as locally rendered, so the
+        // user's spoken sentence never appeared in the open side drawer.
+        try {
+          window.__asstVoiceMsg && window.__asstVoiceMsg(
+            'u', tx, { utterId: e.item_id || '' }
+          );
+        } catch (_) {}
         if (!_rtcCap.t && !_rtcCap.q.length) capUser(tx);   // whisper 迟到:AI 字幕在放就别插队打乱滚动(对话窗已有)
       }
     } else if (t === 'response.function_call_arguments.done') {
@@ -6909,7 +6999,23 @@ if (window.__bwPwaProviderOnly) return;
           a = { text: rescued + '\n\n(⚠ 回复超出输出长度被截断——想看完整内容请再问一次,或让我分段讲)' };
         }
       }
-      if (e.name) _rtcTool(e.name, (a && typeof a === 'object') ? a : {}, e.call_id || '');
+      if (e.name) {
+        var toolCallId = e.call_id || '';
+        _rtc.responseToolCalls = (_rtc.responseToolCalls || 0) + 1;
+        _rtcTrackToolCall(toolCallId);
+        Promise.resolve(_rtcTool(
+          e.name,
+          (a && typeof a === 'object') ? a : {},
+          toolCallId
+        )).then(function () {
+          _rtcFinishToolCall(toolCallId);
+        }, function (error) {
+          // _rtcTool should close its own failures. This guard prevents an
+          // unexpected rejection from leaving the visible tool card spinning.
+          try { if (window.dlog) window.dlog('tool← ' + e.name + ' 未捕获异常 ' + String(error || '').slice(0, 120), '#ff6b6b'); } catch (_) {}
+          _rtcFinishToolCall(toolCallId);
+        });
+      }
     } else if (t === 'response.created') {
       try { clearTimeout(_rtc._createT); _rtc._createT = null; } catch (e) {}   // B1:回答已开始 → 撤销哑火兜底
       curAText = ''; curAEl = null;   // 每个 response 独立气泡(text 输入触发的响应没有 speech_started,不重置会续写上一轮)
@@ -6918,11 +7024,13 @@ if (window.__bwPwaProviderOnly) return;
       _recAbort();   // 82:created 时 turnText 还是上一轮旧值(66c delta 驱动的缝隙)——不再赌预期,等首个音频 delta 定性再开录
       _turnFeed = _mkTtsFeeder();     // 61:新回复轮=新代念流(TTS 开关开且本轮文字输出时工作)
       _rtc.turnTool = false;          // ㊸ 承诺核查:本轮是否真调过工具
+      _rtc.responseActive = true;
+      _rtc.responseToolCalls = 0;
       // 141:气泡改按**用户轮**断,不再按 response 断 —— 一次工具调用天然是两个 response
       //   (前置语+function_call / 工具结果+正答),按 response 断必然把它俩切成两条气泡,
       //   工具卡又夹在中间 = 三块散的。现在同一用户轮内续用同一张卡(见 __asstVoiceCard)。
       //   轮次边界由 relay 的裁决回执(event:'turn')给出;ctl 断线时退回按 response 断(老行为)。
-      if (_rtc._newTurn || !_rtc.ctl) {
+      if (_rtc._newTurn || (!_rtc.ctl && !_rtc.nativeDirect)) {
         _rtc._newTurn = false;
         try { window.__asstVoiceMsg && window.__asstVoiceMsg('reset'); } catch (_) {}
       } else {
@@ -6934,16 +7042,20 @@ if (window.__bwPwaProviderOnly) return;
       callBtnSpeaking(true);
     } else if (t === 'response.done') {
       _rtcFinishInkAck(e);
+      var responseHadToolCall = _rtcResponseHasFunctionCall(e);
+      _rtc.responseActive = false;
       callBtnSpeaking(false);
       if (_rtc.turnText && _turnFeed && curAText) { try { _turnFeed(curAText, true); } catch (e) {} }   // 61:残句代念收尾(通道韧性+禁麦在 _speakSafe/_ttsMicGuard)
-      if (_rtc.turnText && curAText) {
-        // 132(用户):字幕已经在显示 AI 的文字输出 → 文字输出档**不再另弹一张卡**(重复且挡内容)
+      if (curAText) {
+        // Both text and spoken Realtime responses belong in the side drawer.
+        // The audio path used to update only the floating subtitle while its
+        // history SSE echo was suppressed as a duplicate, leaving no record.
 
-        try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', curAText, { md: true, info: { mode: '文字回复(' + (_VM_TXT[_voiceMode()] || '') + '档)',
+        try { window.__asstVoiceMsg && window.__asstVoiceMsg('a', curAText, { md: true, info: { mode: _rtc.turnText ? ('文字回复(' + (_VM_TXT[_voiceMode()] || '') + '档)') : '语音回复(GPT Realtime)',
           tools: (_rtc.recentTools || []).slice(-3).map(function (t) { return t.label || t.tool; }),
           actions: ['deep'], voiceTab: true, note: '本轮主模型=GPT Realtime(见语音 Tab);下面是它可能调用的环节' },
           pin: { label: 'AI 回答', textFn: (function (txt) { return function () { return txt; }; })(curAText) },
-          speak: true }); } catch (e) {}   // 67/77b/79/83(☆撤,+TTS念钮)
+          speak: !!_rtc.turnText }); } catch (e) {}   // 67/77b/79/83(☆撤,+TTS念钮)
       }
       // ㊸b 承诺核查(用户设计:语音模型只是扳机、不产卡片内容——察觉"说了做卡却没调工具"时,
       // **程序直接替它把工具真调了**,种子=本轮对话上下文,后台制卡模型自己判断做什么卡;
@@ -6978,8 +7090,14 @@ if (window.__bwPwaProviderOnly) return;
           if (_rec.mr && _rec.id === _wid) { try { console.warn('[voice] output_audio_buffer.stopped 没来,看门狗收尾'); } catch (e) {} _recStop(); }
         }, Math.min(_cap, 180000));
       }
+      // A response containing a function call is only the preamble, not the
+      // completed user turn. Do not log it or clear the user's question.
+      if (!responseHadToolCall)
       try { if (window.__asstVoiceLog) { window.__asstVoiceLog(_lastU, curAText, _rtc.ctxFile, _rtc.ctxPage, _clip0 ? { clip: _clip0 } : null); _lastU = ''; } } catch (_) {}   // ㉛:轮次落库(+66 语音)
       _rtcCapFeed(curAText, true);    // 残句入队;淡出由队列放完时收尾(_capMaybeHide),不在这直接藏
+      // Fast native tools may already be complete. The originating response
+      // has now ended, so one consolidated final response can safely begin.
+      _rtcFlushToolResponse();
       try { var u = e.response && e.response.usage;
             if (u) {
               u._model = _rtc.model || 'mini';   // ㊶:记账按模型选价表

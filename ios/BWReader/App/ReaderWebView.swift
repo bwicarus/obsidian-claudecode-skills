@@ -8,6 +8,8 @@ private let nativeComputerContextMessageName = "bwNativeComputerContext"
 private let nativeAgentVoiceMessageName = "bwNativeAgentVoice"
 private let nativePencilInkMessageName = "bwNativePencilInk"
 private let nativeLocalNotesMessageName = "bwNativeLocalNotes"
+private let nativeDictionaryTranslationMessageName =
+    "bwNativeDictionaryTranslation"
 
 struct ReaderLastLocalBookReference: Codable, Equatable, Sendable {
     let libraryID: String
@@ -179,6 +181,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativeAgentVoiceMessageProxy: WeakScriptMessageHandler?
     private var nativePencilInkMessageProxy: WeakScriptMessageHandler?
     private var nativeLocalNotesMessageProxy: WeakScriptMessageHandlerWithReply?
+    private var nativeDictionaryTranslationMessageProxy:
+        WeakScriptMessageHandlerWithReply?
     private var nativePiGateway: ReaderNativePiGateway?
     private weak var remoteLibraryCoordinator: ReaderRemoteLibraryCoordinator?
     private var nativePiRemoteLibraryCancellable: AnyCancellable?
@@ -295,6 +299,15 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             nativeLocalNotesMessageProxy,
             contentWorld: .page,
             name: nativeLocalNotesMessageName
+        )
+        let nativeDictionaryTranslationMessageProxy =
+            WeakScriptMessageHandlerWithReply(delegate: self)
+        self.nativeDictionaryTranslationMessageProxy =
+            nativeDictionaryTranslationMessageProxy
+        contentController.addScriptMessageHandler(
+            nativeDictionaryTranslationMessageProxy,
+            contentWorld: .page,
+            name: nativeDictionaryTranslationMessageName
         )
         if let localRuntimeServer {
             let nativePiGateway = ReaderNativePiGateway(
@@ -2585,6 +2598,24 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             } == true
     }
 
+    /// Uses an exact capability-path boundary for the native dictionary
+    /// translator. A different token that merely shares the same characters
+    /// must never gain access to this App-only bridge.
+    private func isTrustedDictionaryTranslationURL(_ url: URL?) -> Bool {
+        guard let url, let localRuntimeServer else { return false }
+        let base = localRuntimeServer.baseURL
+        guard url.scheme?.lowercased() == base.scheme?.lowercased(),
+              url.host?.lowercased() == base.host?.lowercased(),
+              url.port == base.port else {
+            return false
+        }
+        let rawBasePath = base.path
+        let basePath = rawBasePath.hasSuffix("/")
+            ? String(rawBasePath.dropLast())
+            : rawBasePath
+        return url.path == basePath || url.path.hasPrefix(basePath + "/")
+    }
+
     private func isFinishedLocalBookURL(
         _ url: URL?,
         bookID: String
@@ -3146,6 +3177,13 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
         didReceive message: WKScriptMessage,
         replyHandler: @escaping (Any?, String?) -> Void
     ) {
+        if message.name == nativeDictionaryTranslationMessageName {
+            handleNativeDictionaryTranslation(
+                message,
+                replyHandler: replyHandler
+            )
+            return
+        }
         guard message.name == nativeLocalNotesMessageName else {
             replyHandler(nil, "不支持的本机笔记消息")
             return
@@ -3263,6 +3301,79 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
                         "ok": false,
                         "error": error.localizedDescription,
                     ],
+                ], nil)
+            }
+        }
+    }
+
+    private func handleNativeDictionaryTranslation(
+        _ message: WKScriptMessage,
+        replyHandler: @escaping (Any?, String?) -> Void
+    ) {
+        guard
+            message.frameInfo.isMainFrame,
+            message.webView === webView,
+            isTrustedDictionaryTranslationURL(webView.url),
+            isTrustedDictionaryTranslationURL(message.frameInfo.request.url)
+        else {
+            replyHandler([
+                "contract": "bw-native-dictionary-translation-response/1",
+                "ok": false,
+                "code": "BW_NATIVE_DICTIONARY_TRANSLATION_UNTRUSTED",
+                "error": "本机中文释义来源无效",
+            ], nil)
+            return
+        }
+        guard
+            let body = message.body as? [String: Any],
+            Set(body.keys) == ["contract", "text", "source", "target"],
+            body["contract"] as? String ==
+                "bw-native-dictionary-translation-request/1",
+            body["source"] as? String == "en",
+            body["target"] as? String == "zh-Hans",
+            let text = body["text"] as? String,
+            !text.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty,
+            text.utf8.count <= 2_048
+        else {
+            replyHandler([
+                "contract": "bw-native-dictionary-translation-response/1",
+                "ok": false,
+                "code": "BW_NATIVE_DICTIONARY_TRANSLATION_INVALID",
+                "error": "本机中文释义请求无效",
+            ], nil)
+            return
+        }
+        guard #available(iOS 18.0, *) else {
+            replyHandler([
+                "contract": "bw-native-dictionary-translation-response/1",
+                "ok": false,
+                "code": "BW_NATIVE_DICTIONARY_TRANSLATION_UNSUPPORTED",
+                "error": "设备需要 iPadOS 18 才能生成本机中文释义",
+            ], nil)
+            return
+        }
+
+        Task { @MainActor in
+            do {
+                let translation = try await
+                    ReaderDictionaryTranslationBroker.shared
+                        .translateEnglishGloss(text)
+                replyHandler([
+                    "contract":
+                        "bw-native-dictionary-translation-response/1",
+                    "ok": true,
+                    "translation": translation,
+                    "source": "apple-translation",
+                ], nil)
+            } catch {
+                let typed = error as? ReaderDictionaryTranslationError
+                replyHandler([
+                    "contract":
+                        "bw-native-dictionary-translation-response/1",
+                    "ok": false,
+                    "code": typed?.code ??
+                        "BW_NATIVE_DICTIONARY_TRANSLATION_FAILED",
+                    "error": String(error.localizedDescription.prefix(240)),
                 ], nil)
             }
         }

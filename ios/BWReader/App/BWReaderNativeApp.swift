@@ -45,6 +45,11 @@ private struct ReaderRootView: View {
             )
             .ignoresSafeArea(edges: .bottom)
 
+            ReaderDictionaryTranslationHost()
+                .frame(width: 1, height: 1)
+                .allowsHitTesting(false)
+                .accessibilityHidden(true)
+
             if reader.isLoading {
                 ProgressView()
                     .tint(.white)
