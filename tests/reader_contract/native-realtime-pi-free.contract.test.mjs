@@ -688,8 +688,7 @@ test("fresh ink is page-versioned, immediate, and consumed only after one delive
   const completedAck = responses[0].response.metadata.bw_ink_ack;
   assert.match(completedAck, /^ink_/);
   const output = JSON.parse(outputs[0].item.output);
-  assert.equal(output.requested_tool, "see_page");
-  assert.equal(output.resolved_as, "see_ink");
+  assert.deepEqual(output, {}, "see_ink closes with no duplicate text payload");
   assert.equal(
     sandbox.api.pageState(1).seenVer,
     0,
@@ -1050,7 +1049,7 @@ test("native read_page awaits the App page-text provider and returns real nearby
   );
 });
 
-test("visual tool output freezes page text, selection, and question before one final answer", async () => {
+test("see_ink sends only its image while other visual tools freeze page context", async () => {
   const original = {
     before: "VISUAL_BEFORE_前一页人物背景",
     current: "VISUAL_CURRENT_当前页台词说明人物身份",
@@ -1093,23 +1092,29 @@ test("visual tool output freezes page text, selection, and question before one f
     const outputs = realtimeToolOutputs(api);
     assert.equal(outputs.length, 1);
     const output = outputs[0];
-    assert.equal(output.user_question, original.question);
-    assert.equal(output.page_context.contract, "reader-realtime-page-context/1");
-    assert.equal(output.page_context.title, "料理师 part1");
-    assert.equal(output.page_context.page, 7);
-    assert.equal(output.page_context.total, 53);
-    assert.equal(output.page_context.before, original.before);
-    assert.equal(output.page_context.visible_text, original.visible);
-    assert.equal(output.page_context.current_page_text, original.current);
-    assert.equal(output.page_context.after, original.after);
-    assert.equal(output.page_context.selection, original.selection);
-    assert.doesNotMatch(JSON.stringify(output), /MUTATED_/);
-    assert.match(output.instruction, /当前用户问题/);
-    assert.match(output.instruction, /此前对话/);
-    assert.match(output.instruction, /page_context/);
-    assert.match(output.instruction, /合成图/);
-    assert.match(output.instruction, /综合/);
-    assert.match(output.instruction, /不得只描述图片/);
+    if (tool === "see_ink") {
+      assert.deepEqual(output, {}, "see_ink must not duplicate any page text");
+      assert.equal(api.providerCalls.length, 0,
+        "see_ink must not fetch current or neighboring page text");
+    } else {
+      assert.equal(output.user_question, original.question);
+      assert.equal(output.page_context.contract, "reader-realtime-page-context/1");
+      assert.equal(output.page_context.title, "料理师 part1");
+      assert.equal(output.page_context.page, 7);
+      assert.equal(output.page_context.total, 53);
+      assert.equal(output.page_context.before, original.before);
+      assert.equal(output.page_context.visible_text, original.visible);
+      assert.equal(output.page_context.current_page_text, original.current);
+      assert.equal(output.page_context.after, original.after);
+      assert.equal(output.page_context.selection, original.selection);
+      assert.doesNotMatch(JSON.stringify(output), /MUTATED_/);
+      assert.match(output.instruction, /当前用户问题/);
+      assert.match(output.instruction, /此前对话/);
+      assert.match(output.instruction, /page_context/);
+      assert.match(output.instruction, /合成图/);
+      assert.match(output.instruction, /综合/);
+      assert.match(output.instruction, /不得只描述图片/);
+    }
 
     const outputIndex = api.sent.findIndex((message) =>
       message.type === "conversation.item.create" &&
@@ -1120,7 +1125,7 @@ test("visual tool output freezes page text, selection, and question before one f
     assert.equal(responses.length, 1, `${tool} may request only one final answer`);
     assert.equal(responses[0].response.tool_choice, "none");
     assert.ok(outputIndex >= 0 && outputIndex < responseIndex,
-      "the frozen page context must arrive before the final answer request");
+      "the tool call must close before the final answer request");
   }
 });
 
@@ -1162,7 +1167,8 @@ test("one turn admits only one concurrent visual capture and one answer", async 
   );
   assert.equal(suppressed.length, 1,
     "the duplicate visual call is closed explicitly without another answer");
-  assert.equal(outputs.filter((output) => output.page_context).length, 1);
+  assert.equal(outputs.filter((output) => output.page_context).length, 0,
+    "an effective see_ink call must not duplicate page context");
   const responses = api.sent.filter((message) => message.type === "response.create");
   assert.equal(responses.length, 1);
   assert.equal(responses[0].response.tool_choice, "none");

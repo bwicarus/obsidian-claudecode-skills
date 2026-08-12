@@ -282,7 +282,11 @@ internal sealed class ReaderContextMcpServer
                     "Use reader_context_snapshot only when the user asks "
                     + "about the current Reader page or selection. Respect "
                     + "contextStatus; pending or stale means the current "
-                    + "page text is unavailable.",
+                    + "page text is unavailable. page_image being null does "
+                    + "not mean the App image is unavailable: when "
+                    + "visualAccess.available is true, call the named "
+                    + "reader_visual_image tool to receive a fresh inline "
+                    + "composite image.",
             },
             cancellationToken).ConfigureAwait(false);
     }
@@ -298,7 +302,10 @@ internal sealed class ReaderContextMcpServer
                     "Read the newest Windows-local Reader page and "
                     + "selection snapshot. The tool is read-only. "
                     + "Check contextStatus before using currentPage; "
-                    + "never reuse text when it is pending or stale.",
+                    + "never reuse text when it is pending or stale. Read "
+                    + "visualAccess to discover whether the exact App "
+                    + "surface can be requested on demand; page_image=null "
+                    + "alone does not mean that no image is available.",
                 ["inputSchema"] = new JsonObject
                 {
                     ["type"] = "object",
@@ -1333,6 +1340,9 @@ internal sealed class ReaderContextMcpServer
                 ["loadSequence"] = _loadSequence,
                 ["loadErrors"] = _loadErrors,
             };
+            snapshot["visualAccess"] = BuildVisualAccess(
+                snapshot,
+                _fetchVisualAsync is not null);
             return snapshot;
         }
         return new JsonObject
@@ -1361,7 +1371,81 @@ internal sealed class ReaderContextMcpServer
                 ["loadSequence"] = _loadSequence,
                 ["loadErrors"] = _loadErrors,
             },
+            ["visualAccess"] = BuildVisualAccess(
+                new JsonObject
+                {
+                    ["schema"] = FileDirectSnapshotContextAdapter
+                        .SnapshotContract,
+                    ["revision"] = 0,
+                    ["contextStatus"] = "pending",
+                    ["activeReading"] = null,
+                    ["currentPage"] = null,
+                },
+                _fetchVisualAsync is not null),
         };
+    }
+
+    internal static JsonObject BuildVisualAccess(
+        JsonObject payload,
+        bool toolConfigured)
+    {
+        JsonArray scopes = [];
+        if (toolConfigured)
+        {
+            if (BuildVisualRequest(
+                payload,
+                "viewport-context",
+                null) is not null)
+            {
+                scopes.Add("viewport-context");
+            }
+            if (BuildVisualRequest(
+                payload,
+                "drawing-nearby",
+                null) is not null)
+            {
+                scopes.Add("drawing-nearby");
+            }
+            if (
+                payload["currentPage"] is JsonObject page
+                && page["selectionRegions"] is JsonObject regions
+                && regions["items"] is JsonArray items
+            )
+            {
+                foreach (JsonNode? item in items)
+                {
+                    if (
+                        item is JsonObject region
+                        && StringValue(region["selectionId"])
+                            is string selectionId
+                        && BuildVisualRequest(
+                            payload,
+                            "selection-near",
+                            selectionId) is not null
+                    )
+                    {
+                        scopes.Add("selection-near");
+                        break;
+                    }
+                }
+            }
+        }
+        bool available = scopes.Count > 0;
+        JsonObject access = new()
+        {
+            ["available"] = available,
+            ["mode"] = "on-demand-mcp",
+            ["tool"] = VisualToolName,
+            ["returns"] = "inline-image",
+            ["scopes"] = scopes,
+        };
+        if (!available)
+        {
+            access["reason"] = toolConfigured
+                ? "source-not-ready"
+                : "tool-not-configured";
+        }
+        return access;
     }
 
     internal static void ApplyFreshness(

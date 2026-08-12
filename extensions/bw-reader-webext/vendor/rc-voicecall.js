@@ -6056,7 +6056,8 @@ if (window.__bwPwaProviderOnly) return;
     var visualTargetAtStart = /^(see_ink|see_page|see_figure)$/.test(name);
     var visualPageAtStart = name === 'see_ink'
       ? inkPageAtStart : (Number(args && args.page) || currentPageAtStart);
-    var visualContextSnapshot = visualTargetAtStart
+    var visualNeedsTextContext = visualTargetAtStart && name !== 'see_ink';
+    var visualContextSnapshot = visualNeedsTextContext
       ? _nativeRealtimeContextSnapshot(visualPageAtStart) : null;
     var visualContextPromise = null;
     _rtc.turnTool = true; _rtc.turnToolAny = true;   // ㊸:本轮真调了工具(承诺核查放行;turnToolAny 用户轮作用域,不随 response 复位)
@@ -6084,9 +6085,11 @@ if (window.__bwPwaProviderOnly) return;
     }
     if (visualTargetAtStart) {
       _rtc.visualTurnEpoch = toolEpochAtStart;
-      visualContextPromise = _nativeRealtimePageContext(
-        visualPageAtStart, visualContextSnapshot
-      );
+      if (visualNeedsTextContext) {
+        visualContextPromise = _nativeRealtimePageContext(
+          visualPageAtStart, visualContextSnapshot
+        );
+      }
     }
     if (name === 'read_selection' && _rtc.sel && _rtc.sel.trim()) {   // 74:选中在手=短路闪回(fallback 路径与 relay 同构)
       onToolStatus({ status: 'done', tool: name, label: '读取选中(免调用)', rag: _rtc.sel.slice(0, 300) });
@@ -6159,27 +6162,39 @@ if (window.__bwPwaProviderOnly) return;
         vision = nativeShot && nativeShot.native_delivered ? null : [nativeShot];
         label = name === 'see_ink' ? '看笔迹标注'
           : (name === 'see_page' ? '看当前页面' : '看当前图像');
-        var visualPageContext = await visualContextPromise;
-        if (toolEpochAtStart !== (_rtc.turnEpoch || 0)) {
-          if (/^bwi_[a-f0-9]{28}$/.test(visualItemID)) {
-            _dcSend({ type: 'conversation.item.delete', item_id: visualItemID });
-            visualItemID = '';
+        if (name === 'see_ink') {
+          // The image item is already present in the Realtime conversation.
+          // Do not repeat the current page, adjacent pages, selection or the
+          // user question in function_call_output: that wasted tokens and
+          // could make the model privilege duplicated text over the drawing.
+          // A function call still needs one output item to close, so keep it
+          // deliberately empty and let the following response consume the
+          // image plus the conversation that was already in the session.
+          res = { local_direct: true, image_supplied: true };
+          out = '{}';
+        } else {
+          var visualPageContext = await visualContextPromise;
+          if (toolEpochAtStart !== (_rtc.turnEpoch || 0)) {
+            if (/^bwi_[a-f0-9]{28}$/.test(visualItemID)) {
+              _dcSend({ type: 'conversation.item.delete', item_id: visualItemID });
+              visualItemID = '';
+            }
+            throw new Error('工具所属用户轮已被新问题取代');
           }
-          throw new Error('工具所属用户轮已被新问题取代');
+          res = {
+            local_direct: true, image_supplied: true,
+            page_context: visualPageContext
+          };
+          out = JSON.stringify({
+            ok: true,
+            requested_tool: requestedName,
+            resolved_as: name,
+            user_question: visualContextSnapshot.user_question || '',
+            page_context: visualPageContext,
+            result: '相关合成图与同页文字上下文已一起送入当前 Realtime 会话。',
+            instruction: '只生成一次最终回答。必须综合当前用户问题、此前对话、page_context 中标明的前页/当前页/后页文字、当前选区与刚送入的合成图；图像用于外观与空间关系，文字用于人物身份、台词与语义。不得只描述图片，也不要再调用 read_page、see_page 或第二个视觉工具。'
+          });
         }
-        res = {
-          local_direct: true, image_supplied: true,
-          page_context: visualPageContext
-        };
-        out = JSON.stringify({
-          ok: true,
-          requested_tool: requestedName,
-          resolved_as: name,
-          user_question: visualContextSnapshot.user_question || '',
-          page_context: visualPageContext,
-          result: '相关合成图与同页文字上下文已一起送入当前 Realtime 会话。',
-          instruction: '只生成一次最终回答。必须综合当前用户问题、此前对话、page_context 中标明的前页/当前页/后页文字、当前选区与刚送入的合成图；图像用于圈画、外观与空间关系，文字用于人物身份、台词与语义。不得只描述图片，也不要再调用 read_page、see_page 或第二个视觉工具。'
-        });
         try {
           (_rtc.recentTools = _rtc.recentTools || []).push({
             tool: name, label: label,

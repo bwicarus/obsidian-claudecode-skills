@@ -7046,6 +7046,10 @@ internal static class DirectBridgeSelfTest
                 stableDrawing,
                 "drawing-nearby",
                 null);
+        JsonObject drawingAccess = ReaderContextMcpServer
+            .BuildVisualAccess(stableDrawing, toolConfigured: true);
+        JsonObject disabledAccess = ReaderContextMcpServer
+            .BuildVisualAccess(stableDrawing, toolConfigured: false);
         Require(
             ReaderContextMcpServer.BuildVisualRequest(
                 Snapshot(30),
@@ -7076,7 +7080,13 @@ internal static class DirectBridgeSelfTest
                     "drawing-unstable",
                     stable: false),
                 "drawing-nearby",
-                null) is null,
+                null) is null
+            && drawingAccess["available"]?.GetValue<bool>() == true
+            && drawingAccess["scopes"]!.AsArray().Any(scope =>
+                scope?.GetValue<string>() == "drawing-nearby")
+            && disabledAccess["available"]?.GetValue<bool>() == false
+            && disabledAccess["reason"]?.GetValue<string>()
+                == "tool-not-configured",
             "direct-reader-visual-scopes-require-stable-current-identity",
             checks);
         await File.WriteAllTextAsync(
@@ -7141,6 +7151,17 @@ internal static class DirectBridgeSelfTest
             }),
             includeDuplicate ? duplicateVisualCall : string.Empty,
             includeDuplicate ? recoveryVisualCall : string.Empty,
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 6,
+                method = "tools/call",
+                @params = new
+                {
+                    name = ReaderContextMcpServer.ToolName,
+                    arguments = new { },
+                },
+            }),
             "");
         StringWriter visualOutput = new();
         ReaderContextMcpServer visualMcp = new(
@@ -7168,6 +7189,14 @@ internal static class DirectBridgeSelfTest
                 .GetProperty("result").GetProperty("tools");
             JsonElement content = visualResponses[2].RootElement
                 .GetProperty("result").GetProperty("content");
+            string snapshotText = visualResponses[^1].RootElement
+                .GetProperty("result").GetProperty("content")[0]
+                .GetProperty("text").GetString()!;
+            using JsonDocument snapshotResponse = JsonDocument.Parse(
+                snapshotText);
+            JsonElement visualAccess = snapshotResponse.RootElement
+                .GetProperty("visualAccess");
+            JsonElement visualScopes = visualAccess.GetProperty("scopes");
             bool duplicateRejectedAndRecovered =
                 visualResponses[3].RootElement.GetProperty("error")
                     .GetProperty("code").GetInt32() == -32602
@@ -7184,8 +7213,21 @@ internal static class DirectBridgeSelfTest
                 && content[1].GetProperty("_meta")
                     .GetProperty("codex/imageDetail").GetString()
                     == "original"
+                && visualAccess.GetProperty("available").GetBoolean()
+                && visualAccess.GetProperty("mode").GetString()
+                    == "on-demand-mcp"
+                && visualAccess.GetProperty("tool").GetString()
+                    == ReaderContextMcpServer.VisualToolName
+                && visualAccess.GetProperty("returns").GetString()
+                    == "inline-image"
+                && visualScopes.EnumerateArray().Any(scope =>
+                    scope.GetString() == "viewport-context")
+                && visualScopes.EnumerateArray().Any(scope =>
+                    scope.GetString() == "selection-near")
+                && !visualScopes.EnumerateArray().Any(scope =>
+                    scope.GetString() == "drawing-nearby")
                 && duplicateRejectedAndRecovered,
-                "direct-reader-visual-mcp-returns-inline-original-image",
+                "direct-reader-visual-mcp-advertises-and-returns-inline-image",
                 checks);
         }
         finally

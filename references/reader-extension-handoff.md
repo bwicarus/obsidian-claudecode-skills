@@ -50,6 +50,12 @@
 Safari 扩展原生进程经签名 access group 共享读取，网页和扩展 JavaScript 仅得到 90 秒 `ek_`。
 普通 Realtime、选区、可见正文与合成图注入均不经过 Pi；Pi 只保留显式备份/同步和 AI API 能力。
 
+**0.2.99 / App 1.1.39 快照视觉发现与 see_ink 单图输入**：Windows 快照返回
+`visualAccess`，明确说明当前 App 页面可通过 `reader_visual_image` 按需取得内联合成图；
+`page_image=null` 不再被误读为“没有图片来源”，同时不暴露本机路径或能力令牌。App 的
+`see_ink` 只向 Realtime 送入原生合成图，不再查询或重复附带当前页全文、前后页文字及选区；
+`see_page` / `see_figure` 原有页面上下文语义保持不变。
+
 **0.2.98 / App 1.1.38 语音就绪与按需视觉来源修复**：Windows 启动 Codex 语音时只发送一次
 F24，先观察语音浮标代次再等待其稳定可用；首次失败只允许精确重启一次并在新进程就绪后重试，
 不会连续按键。实时快照在同一规范页上合并在线 `sourceInstanceId`，使按需 `see_ink` 能绑定
