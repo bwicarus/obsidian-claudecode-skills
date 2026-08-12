@@ -207,12 +207,14 @@ internal static class Program
                 NamedPipeReaderVisualRpcClient visualClient = new();
                 NamedPipeReaderBrowserControlRpcClient browserControlClient =
                     new();
+                NamedPipeReaderRealtimeOutputRpcClient outputClient = new();
                 ReaderContextMcpServer server = new(
                     Path.GetFullPath(args[2]),
                     Console.In,
                     Console.Out,
                     fetchVisualAsync: visualClient.RequestAsync,
-                    controlBrowserAsync: browserControlClient.RequestAsync);
+                    controlBrowserAsync: browserControlClient.RequestAsync,
+                    sendOutputAsync: outputClient.SendAsync);
                 return await server.RunAsync(CancellationToken.None)
                     .ConfigureAwait(false);
             }

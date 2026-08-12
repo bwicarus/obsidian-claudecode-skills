@@ -9,6 +9,7 @@ internal sealed class ReaderContextMcpServer
     internal const string ToolName = "reader_context_snapshot";
     internal const string VisualToolName = "reader_visual_image";
     internal const string BrowserControlToolName = "reader_browser_control";
+    internal const string CommandToolName = "reader_command";
     internal const string ServerName = "bw-reader-context-snapshot";
     internal const string ServerVersion = "1.0.0";
     internal static readonly TimeSpan FreshnessWindow =
@@ -27,6 +28,7 @@ internal sealed class ReaderContextMcpServer
     private readonly string _startedAt;
     private readonly ReaderDocumentCorpusStore _documentCorpus;
     private readonly ReaderContextReadLedger _readLedger;
+    private readonly ReaderCapabilityCatalog _capabilityCatalog;
     private readonly HashSet<string> _unscopedDocumentReads =
         new(StringComparer.Ordinal);
     private readonly Func<
@@ -37,6 +39,10 @@ internal sealed class ReaderContextMcpServer
         ReaderBrowserControlRequest,
         CancellationToken,
         Task<ReaderBrowserControlResponse>>? _controlBrowserAsync;
+    private readonly Func<
+        ReaderRealtimeOutputRequest,
+        CancellationToken,
+        Task<ReaderRealtimeOutputAck>>? _sendOutputAsync;
     private JsonObject? _latestSnapshot;
     private long _latestRevision = -1;
     private long _loadSequence;
@@ -57,7 +63,12 @@ internal sealed class ReaderContextMcpServer
         Func<
             ReaderBrowserControlRequest,
             CancellationToken,
-            Task<ReaderBrowserControlResponse>>? controlBrowserAsync = null)
+            Task<ReaderBrowserControlResponse>>? controlBrowserAsync = null,
+        Func<
+            ReaderRealtimeOutputRequest,
+            CancellationToken,
+            Task<ReaderRealtimeOutputAck>>? sendOutputAsync = null,
+        ReaderCapabilityCatalog? capabilityCatalog = null)
     {
         if (!Path.IsPathFullyQualified(statePath))
         {
@@ -72,6 +83,8 @@ internal sealed class ReaderContextMcpServer
         _instanceId = instanceId ?? Guid.NewGuid().ToString();
         _fetchVisualAsync = fetchVisualAsync;
         _controlBrowserAsync = controlBrowserAsync;
+        _sendOutputAsync = sendOutputAsync;
+        _capabilityCatalog = capabilityCatalog ?? new ReaderCapabilityCatalog();
         _startedAt = _utcNow().ToString("O");
         string directory = Path.GetDirectoryName(_statePath)
             ?? throw new ArgumentException(
@@ -228,6 +241,62 @@ internal sealed class ReaderContextMcpServer
                         parameters,
                         cancellationToken).ConfigureAwait(false);
                     return;
+                case "resources/list":
+                    if (!RequireInitialized())
+                    {
+                        await WriteErrorAsync(
+                            id,
+                            -32002,
+                            "Server not initialized",
+                            cancellationToken).ConfigureAwait(false);
+                        return;
+                    }
+                    await WriteResultAsync(
+                        requestId,
+                        _capabilityCatalog.List(),
+                        cancellationToken).ConfigureAwait(false);
+                    return;
+                case "resources/read":
+                    if (!RequireInitialized())
+                    {
+                        await WriteErrorAsync(
+                            id,
+                            -32002,
+                            "Server not initialized",
+                            cancellationToken).ConfigureAwait(false);
+                        return;
+                    }
+                    if (!TryReadResourceUri(parameters, out string resourceUri))
+                    {
+                        await WriteErrorAsync(
+                            id,
+                            -32602,
+                            "Invalid resource read",
+                            cancellationToken).ConfigureAwait(false);
+                        return;
+                    }
+                    try
+                    {
+                        await WriteResultAsync(
+                            requestId,
+                            await _capabilityCatalog.ReadAsync(
+                                resourceUri,
+                                cancellationToken).ConfigureAwait(false),
+                            cancellationToken).ConfigureAwait(false);
+                    }
+                    catch (Exception exception) when (
+                        exception is IOException
+                        or UnauthorizedAccessException
+                        or KeyNotFoundException
+                        or DecoderFallbackException)
+                    {
+                        await WriteErrorAsync(
+                            id,
+                            -32004,
+                            "Reader capability resource unavailable",
+                            cancellationToken).ConfigureAwait(false);
+                    }
+                    return;
                 default:
                     await WriteErrorAsync(
                         id,
@@ -272,6 +341,11 @@ internal sealed class ReaderContextMcpServer
                     {
                         ["listChanged"] = false,
                     },
+                    ["resources"] = new JsonObject
+                    {
+                        ["subscribe"] = false,
+                        ["listChanged"] = false,
+                    },
                 },
                 ["serverInfo"] = new JsonObject
                 {
@@ -286,9 +360,48 @@ internal sealed class ReaderContextMcpServer
                     + "not mean the App image is unavailable: when "
                     + "visualAccess.available is true, call the named "
                     + "reader_visual_image tool to receive a fresh inline "
-                    + "composite image.",
+                    + "composite image. For progressive disclosure, read "
+                    + ReaderCapabilityCatalog.IndexUri
+                    + " first and then only the capability file needed for "
+                    + "the current task. Existing Realtime and CLI flows "
+                    + "remain unchanged.",
             },
             cancellationToken).ConfigureAwait(false);
+    }
+
+    private static bool TryReadResourceUri(
+        JsonElement parameters,
+        out string uri)
+    {
+        uri = string.Empty;
+        if (parameters.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+        try
+        {
+            DirectJsonValidation.RequireNoDuplicateKeys(parameters);
+        }
+        catch (DirectProtocolException)
+        {
+            return false;
+        }
+        JsonProperty[] fields = parameters.EnumerateObject().ToArray();
+        if (
+            fields.Length != 1
+            || fields[0].Name != "uri"
+            || fields[0].Value.ValueKind != JsonValueKind.String
+            || fields[0].Value.GetString() is not string value
+            || value.Length is < 1 or > 256
+            || !value.StartsWith(
+                "reader://capabilities/",
+                StringComparison.Ordinal)
+        )
+        {
+            return false;
+        }
+        uri = value;
+        return true;
     }
 
     private JsonObject BuildToolList()
@@ -409,6 +522,45 @@ internal sealed class ReaderContextMcpServer
                 },
             });
         }
+        if (_sendOutputAsync is not null)
+        {
+            tools.Add(new JsonObject
+            {
+                ["name"] = CommandToolName,
+                ["description"] =
+                    "Send one bounded structured output to the exact App or "
+                    + "extension instance named by the current Reader snapshot. "
+                    + "Read reader://capabilities/index first, then the one "
+                    + "capability resource needed for this task. This is an "
+                    + "additive Reader output path; it does not replace or "
+                    + "change existing Realtime or CLI invocation flows.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["additionalProperties"] = false,
+                    ["required"] = new JsonArray("command"),
+                    ["properties"] = new JsonObject
+                    {
+                        ["command"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["minLength"] = 1,
+                            ["maxLength"] =
+                                ReaderRealtimeOutputProtocol.MaximumPayloadBytes,
+                            ["description"] =
+                                "BWREADER/1 <kind> <single JSON object>",
+                        },
+                    },
+                },
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = false,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = false,
+                    ["openWorldHint"] = false,
+                },
+            });
+        }
         return new JsonObject
         {
             ["tools"] = tools,
@@ -465,6 +617,17 @@ internal sealed class ReaderContextMcpServer
         )
         {
             await HandleBrowserControlToolCallAsync(
+                id,
+                arguments,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (
+            toolName == CommandToolName
+            && _sendOutputAsync is not null
+        )
+        {
+            await HandleReaderCommandToolCallAsync(
                 id,
                 arguments,
                 cancellationToken).ConfigureAwait(false);
@@ -537,6 +700,222 @@ internal sealed class ReaderContextMcpServer
                 }
             }
         }
+    }
+
+    private async Task HandleReaderCommandToolCallAsync(
+        JsonNode id,
+        JsonElement arguments,
+        CancellationToken cancellationToken)
+    {
+        if (!TryReadReaderCommand(
+            arguments,
+            out string kind,
+            out JsonNode payload))
+        {
+            await WriteErrorAsync(
+                id,
+                -32602,
+                "Invalid Reader command",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await TryLoadLatestAsync(cancellationToken).ConfigureAwait(false);
+        JsonObject current = BuildToolPayload();
+        ReaderRealtimeOutputRequest? request = BuildRealtimeOutputRequest(
+            current,
+            kind,
+            payload);
+        if (request is null)
+        {
+            await WriteReaderCommandToolErrorAsync(
+                id,
+                "BW_READER_REALTIME_OUTPUT_SOURCE_NOT_READY",
+                "当前快照没有可精确定位的在线 App 或扩展来源。请先重新读取 Reader 上下文。",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        ReaderRealtimeOutputAck ack;
+        try
+        {
+            ack = await _sendOutputAsync!(request, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (ReaderRealtimeOutputException exception)
+        {
+            await WriteReaderCommandToolErrorAsync(
+                id,
+                exception.Code,
+                exception.Message,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await WriteResultAsync(
+            id,
+            new JsonObject
+            {
+                ["content"] = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["type"] = "text",
+                        ["text"] = new JsonObject
+                        {
+                            ["contract"] =
+                                ReaderRealtimeOutputProtocol.OutputContract,
+                            ["ok"] = true,
+                            ["kind"] = request.Kind,
+                            ["outcome"] = ack.Outcome,
+                            ["sourceInstanceId"] = request.SourceInstanceId,
+                            ["snapshotRevision"] = request.SnapshotRevision,
+                        }.ToJsonString(
+                            DirectBridgeContract.JsonOptions),
+                    },
+                },
+            },
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    internal static ReaderRealtimeOutputRequest? BuildRealtimeOutputRequest(
+        JsonObject payload,
+        string kind,
+        JsonNode outputPayload)
+    {
+        ReaderVisualDeliveryRequest? identity = BuildVisualRequest(
+            payload,
+            "viewport-context",
+            null);
+        if (identity is null)
+        {
+            return null;
+        }
+        try
+        {
+            return ReaderRealtimeOutputProtocol.Create(
+                "output-" + Guid.NewGuid().ToString("N"),
+                identity.SourceInstanceId,
+                identity.SnapshotRevision,
+                identity.File,
+                identity.Page,
+                kind,
+                outputPayload);
+        }
+        catch (ReaderRealtimeOutputException)
+        {
+            return null;
+        }
+    }
+
+    private static bool TryReadReaderCommand(
+        JsonElement arguments,
+        out string kind,
+        out JsonNode payload)
+    {
+        kind = string.Empty;
+        payload = new JsonObject();
+        if (arguments.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+        try
+        {
+            DirectJsonValidation.RequireNoDuplicateKeys(arguments);
+        }
+        catch (DirectProtocolException)
+        {
+            return false;
+        }
+        JsonProperty[] fields = arguments.EnumerateObject().ToArray();
+        if (
+            fields.Length != 1
+            || fields[0].Name != "command"
+            || fields[0].Value.ValueKind != JsonValueKind.String
+            || fields[0].Value.GetString() is not string command
+            || command.Length is < 1
+                or > ReaderRealtimeOutputProtocol.MaximumPayloadBytes
+            || command.Any(character => character == '\0')
+        )
+        {
+            return false;
+        }
+        const string prefix = "BWREADER/1 ";
+        if (!command.StartsWith(prefix, StringComparison.Ordinal))
+        {
+            return false;
+        }
+        int separator = command.IndexOf(' ', prefix.Length);
+        if (separator <= prefix.Length || separator + 1 >= command.Length)
+        {
+            return false;
+        }
+        string requestedKind = command[prefix.Length..separator];
+        if (requestedKind is not (
+            "card" or "navigate" or "highlight" or "tool-status"))
+        {
+            return false;
+        }
+        try
+        {
+            using JsonDocument document = JsonDocument.Parse(
+                command[(separator + 1)..],
+                new JsonDocumentOptions
+                {
+                    AllowTrailingCommas = false,
+                    CommentHandling = JsonCommentHandling.Disallow,
+                    MaxDepth = 12,
+                });
+            DirectJsonValidation.RequireNoDuplicateKeys(document.RootElement);
+            if (document.RootElement.ValueKind != JsonValueKind.Object)
+            {
+                return false;
+            }
+            JsonNode parsed = JsonNode.Parse(document.RootElement.GetRawText())
+                ?? new JsonObject();
+            _ = ReaderRealtimeOutputProtocol.ValidatePayload(
+                requestedKind,
+                parsed);
+            kind = requestedKind;
+            payload = parsed;
+            return true;
+        }
+        catch (Exception exception) when (
+            exception is JsonException
+            or DirectProtocolException
+            or ReaderRealtimeOutputException)
+        {
+            return false;
+        }
+    }
+
+    private async Task WriteReaderCommandToolErrorAsync(
+        JsonNode id,
+        string code,
+        string message,
+        CancellationToken cancellationToken)
+    {
+        await WriteResultAsync(
+            id,
+            new JsonObject
+            {
+                ["content"] = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["type"] = "text",
+                        ["text"] = new JsonObject
+                        {
+                            ["ok"] = false,
+                            ["code"] = code,
+                            ["message"] = message,
+                        }.ToJsonString(
+                            DirectBridgeContract.JsonOptions),
+                    },
+                },
+                ["isError"] = true,
+            },
+            cancellationToken).ConfigureAwait(false);
     }
 
     private async Task HandleBrowserControlToolCallAsync(

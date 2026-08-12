@@ -557,6 +557,8 @@ internal sealed class DirectBridgeProtocolSession
         ReaderVisualDeliveryAck> _acceptReaderVisual;
     private readonly Action<ReaderBrowserControlResponse>
         _acceptReaderBrowserControl;
+    private readonly Action<ReaderRealtimeOutputAck>
+        _acceptReaderRealtimeOutput;
     private readonly Func<DateTimeOffset> _utcNow;
     private bool _helloSeen;
     private bool _authenticated;
@@ -581,7 +583,9 @@ internal sealed class DirectBridgeProtocolSession
             ReaderVisualDeliveryChunk,
             ReaderVisualDeliveryAck>? acceptReaderVisual = null,
         Action<ReaderBrowserControlResponse>?
-            acceptReaderBrowserControl = null)
+            acceptReaderBrowserControl = null,
+        Action<ReaderRealtimeOutputAck>?
+            acceptReaderRealtimeOutput = null)
     {
         if (!DirectBridgeContract.IsSafeId(connectionId))
         {
@@ -608,6 +612,11 @@ internal sealed class DirectBridgeProtocolSession
             ?? (_ => throw new DirectProtocolException(
                 "BW_READER_BROWSER_CONTROL_UNAVAILABLE",
                 "Reader 浏览控制接收器尚未接线",
+                retryable: true));
+        _acceptReaderRealtimeOutput = acceptReaderRealtimeOutput
+            ?? (_ => throw new DirectProtocolException(
+                "BW_READER_REALTIME_OUTPUT_UNAVAILABLE",
+                "Reader 输出接收器尚未接线",
                 retryable: true));
         _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
     }
@@ -695,6 +704,9 @@ internal sealed class DirectBridgeProtocolSession
                     break;
                 case ReaderBrowserControlProtocol.ResponseType:
                     payload = HandleReaderBrowserControl(message);
+                    break;
+                case ReaderRealtimeOutputProtocol.AckType:
+                    payload = HandleReaderRealtimeOutput(message);
                     break;
                 case "start":
                     DirectStartActionResult start =
@@ -1045,6 +1057,63 @@ internal sealed class DirectBridgeProtocolSession
         {
             correlation = response.Correlation,
             accepted = true,
+        };
+    }
+
+    private object HandleReaderRealtimeOutput(JsonElement message)
+    {
+        RequireAuthenticated();
+        if (
+            RequireContextDeliveryMode()
+                != DirectContextDeliveryMode.SnapshotMcp
+            || _phase != DirectProtocolPhase.ContextOnly
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_READER_REALTIME_OUTPUT_CONTEXT_ONLY_REQUIRED",
+                "Reader 输出回执只允许在纯上下文连接中回传");
+        }
+        ReaderRealtimeOutputAck ack;
+        try
+        {
+            ack = ReaderRealtimeOutputProtocol.ValidateAck(message);
+        }
+        catch (ReaderRealtimeOutputException exception)
+        {
+            throw new DirectProtocolException(
+                exception.Code,
+                exception.Message,
+                exception.Retryable);
+        }
+        RequireContextOnlySession(ack.SessionId);
+        if (
+            _registeredSourceInstanceId is null
+            || !string.Equals(
+                _registeredSourceInstanceId,
+                ack.SourceInstanceId,
+                StringComparison.Ordinal)
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_READER_REALTIME_OUTPUT_SOURCE_MISMATCH",
+                "Reader 输出回执来源与当前连接不匹配");
+        }
+        try
+        {
+            _acceptReaderRealtimeOutput(ack);
+        }
+        catch (ReaderRealtimeOutputException exception)
+        {
+            throw new DirectProtocolException(
+                exception.Code,
+                exception.Message,
+                exception.Retryable);
+        }
+        return new
+        {
+            correlation = ack.Correlation,
+            outcome = ack.Outcome,
+            matched = true,
         };
     }
 

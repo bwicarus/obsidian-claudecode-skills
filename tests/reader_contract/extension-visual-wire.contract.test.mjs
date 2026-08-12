@@ -256,6 +256,42 @@ test("browser control uses only the fixed local executor and returns the strict 
   assert.doesNotMatch(CALL, /\beval\s*\(|\bnew\s+Function\b|location\.(?:assign|replace)/);
 });
 
+test("structured output stays on the claimed context frame and returns one bounded receipt", () => {
+  assert.match(CALL, /REALTIME_OUTPUT_CONTRACT = "reader-realtime-output\/1"/);
+  assert.match(
+    CALL,
+    /function normalizeRealtimeOutputEvent\(message\)[\s\S]*exactKeys\(message, \["contract", "type", "event", "payload"\]\)[\s\S]*"assistant-turn", "tool-status", "card", "navigate", "highlight"/,
+  );
+  assert.match(
+    CALL,
+    /output\.sourceInstanceId !== visualSourceInstanceId[\s\S]*deliverRealtimeOutput\(output\)/,
+    "an output must stay bound to the exact source claimed by this call frame",
+  );
+  assert.match(
+    CALL,
+    /delivery\.snapshotRevision !== committed\.snapshotRevision[\s\S]*delivery\.file !== committed\.file[\s\S]*BW_READER_REALTIME_OUTPUT_STALE/,
+    "queued output must be rejected after the exact snapshot page changes",
+  );
+  assert.match(
+    CALL,
+    /event\.source !== window\.parent[\s\S]*type !== "reader-output-receipt"[\s\S]*realtimeOutputReceipts\.delete\(correlation\)/,
+  );
+  assert.match(
+    CALL,
+    /sendRequest\(REALTIME_OUTPUT_ACK, \{[\s\S]*sessionId:[\s\S]*correlation:[\s\S]*sourceInstanceId:[\s\S]*outcome:[\s\S]*error:/,
+  );
+  assert.match(
+    FACADE,
+    /event\.source !== frame\.contentWindow[\s\S]*data\.type === 'reader-output'[\s\S]*RC\.voicecall\.acceptRealtimeOutput/,
+    "the host must accept output only from the extension-owned iframe",
+  );
+  assert.match(
+    FACADE,
+    /data\.type === 'reader-output'[\s\S]*type: 'reader-output-receipt'[\s\S]*correlation,[\s\S]*outcome:/,
+  );
+  assert.doesNotMatch(CALL, /reader-output[\s\S]{0,200}\beval\s*\(/);
+});
+
 test("visual sources are isolated by claimed tab and cannot be inherited by another iframe", () => {
   assert.match(CONTENT, /__bwInlineComputerVoiceSurface[\s\S]*surface\.frameForClaim\(\)[\s\S]*BW_READER_CALL_CLAIM_CREATE[\s\S]*sourceInstanceId: sourceInstanceId[\s\S]*appKind: appKind/);
   assert.doesNotMatch(CONTENT, /querySelector\([^\n]*call\.html/);

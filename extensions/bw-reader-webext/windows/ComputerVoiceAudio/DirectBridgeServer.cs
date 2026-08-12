@@ -45,6 +45,9 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     private readonly ReaderBrowserControlBroker _readerBrowserControlBroker;
     private readonly NamedPipeReaderBrowserControlRpcServer
         _readerBrowserControlRpcServer;
+    private readonly ReaderRealtimeOutputBroker _readerRealtimeOutputBroker;
+    private readonly NamedPipeReaderRealtimeOutputRpcServer
+        _readerRealtimeOutputRpcServer;
     private readonly DirectCodexVoiceControl _codexVoiceControl;
     private readonly object _runtimeStateGate = new();
     private string _runtimeState = "starting";
@@ -102,6 +105,11 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         _readerBrowserControlRpcServer =
             new NamedPipeReaderBrowserControlRpcServer(
                 _readerBrowserControlBroker);
+        _readerRealtimeOutputBroker = new ReaderRealtimeOutputBroker(
+            _readerSourceRouter);
+        _readerRealtimeOutputRpcServer =
+            new NamedPipeReaderRealtimeOutputRpcServer(
+                _readerRealtimeOutputBroker);
     }
 
     internal async Task<int> RunAsync(CancellationToken cancellationToken)
@@ -198,6 +206,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         Task? visualRpcTask = null;
         CancellationTokenSource? browserControlRpcLifetime = null;
         Task? browserControlRpcTask = null;
+        CancellationTokenSource? realtimeOutputRpcLifetime = null;
+        Task? realtimeOutputRpcTask = null;
         try
         {
             await app.StartAsync(cancellationToken).ConfigureAwait(false);
@@ -211,6 +221,11 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                     cancellationToken);
             browserControlRpcTask = _readerBrowserControlRpcServer.RunAsync(
                 browserControlRpcLifetime.Token);
+            realtimeOutputRpcLifetime =
+                CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken);
+            realtimeOutputRpcTask = _readerRealtimeOutputRpcServer.RunAsync(
+                realtimeOutputRpcLifetime.Token);
             await _serviceLease.WriteAsync(cancellationToken)
                 .ConfigureAwait(false);
             await WriteRuntimeStatusAsync(
@@ -238,6 +253,21 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         }
         finally
         {
+            if (realtimeOutputRpcLifetime is not null)
+            {
+                realtimeOutputRpcLifetime.Cancel();
+            }
+            if (realtimeOutputRpcTask is not null)
+            {
+                try
+                {
+                    await realtimeOutputRpcTask.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                }
+            }
+            realtimeOutputRpcLifetime?.Dispose();
             if (browserControlRpcLifetime is not null)
             {
                 browserControlRpcLifetime.Cancel();
@@ -841,6 +871,15 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                         "Reader 浏览控制来源尚未注册",
                         retryable: true);
                 _readerBrowserControlBroker.Accept(lease, response);
+            },
+            acceptReaderRealtimeOutput: ack =>
+            {
+                ReaderContextSourceLease lease = sourceLease
+                    ?? throw new DirectProtocolException(
+                        "BW_READER_REALTIME_OUTPUT_SOURCE_NOT_REGISTERED",
+                        "Reader 输出来源尚未注册",
+                        retryable: true);
+                _readerRealtimeOutputBroker.Accept(lease, ack);
             });
 
         try
@@ -946,7 +985,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 "log" or
                 ReaderVisualDeliveryProtocol.RegisterType or
                 ReaderVisualDeliveryProtocol.ChunkType or
-                ReaderBrowserControlProtocol.ResponseType;
+                ReaderBrowserControlProtocol.ResponseType or
+                ReaderRealtimeOutputProtocol.AckType;
         }
         catch (JsonException)
         {

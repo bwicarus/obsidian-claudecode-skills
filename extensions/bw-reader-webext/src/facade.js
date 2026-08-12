@@ -798,6 +798,47 @@
         }
         return;
       }
+      if (data.type === 'reader-output') {
+        const delivery = data.value && data.value.delivery;
+        const correlation = delivery && typeof delivery.correlation === 'string'
+          ? delivery.correlation : '';
+        const reply = (receipt) => {
+          try {
+            frame.contentWindow.postMessage({
+              contract: CONTRACT,
+              type: 'reader-output-receipt',
+              value: {
+                correlation,
+                outcome: receipt.outcome,
+                error: receipt.outcome === 'rejected'
+                  ? String(receipt.error || 'BW_READER_REALTIME_OUTPUT_REJECTED').slice(0, 500)
+                  : null
+              }
+            }, '*');
+          } catch (_) {}
+        };
+        if (!correlation || !delivery || delivery.contract !== 'reader-realtime-output/1') {
+          reply({ outcome: 'rejected', error: 'BW_READER_REALTIME_OUTPUT_FRAME_INVALID' });
+          return;
+        }
+        const receiver = window.RC && RC.voicecall && RC.voicecall.acceptRealtimeOutput;
+        if (typeof receiver !== 'function') {
+          reply({ outcome: 'rejected', error: 'BW_READER_REALTIME_OUTPUT_RECEIVER_UNAVAILABLE' });
+          return;
+        }
+        Promise.resolve(receiver(delivery)).then((receipt) => {
+          if (!receipt || !['applied', 'replay', 'rejected'].includes(receipt.outcome)) {
+            reply({ outcome: 'rejected', error: 'BW_READER_REALTIME_OUTPUT_RECEIPT_INVALID' });
+            return;
+          }
+          reply(receipt);
+        }, (error) => reply({
+          outcome: 'rejected',
+          error: String(error && (error.code || error.message) ||
+            'BW_READER_REALTIME_OUTPUT_RECEIVER_FAILED').slice(0, 500)
+        }));
+        return;
+      }
       if (data.type !== 'state' || !data.value) return;
       lastState = String(data.value.state || 'idle');
       const message = String(data.value.message || '');

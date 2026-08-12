@@ -499,7 +499,9 @@ def sync_once(
     publish: bool = False,
     publisher: Publisher | None = None,
     file: str | None = None,
-    page: int | None = None,
+    page: int | str | None = None,
+    source_instance_id: str | None = None,
+    snapshot_revision: int | None = None,
     expected_thread_id: str | None = None,
     minimum_assistant_index: int = 1,
     allow_last_good: bool = True,
@@ -666,12 +668,20 @@ def sync_once(
                     "user_utterance": pair["user"],
                 }
                 try:
+                    publish_kwargs: dict[str, Any] = {
+                        "request_id": pair["requestId"],
+                        "file": file,
+                        "page": page,
+                    }
+                    if source_instance_id is not None:
+                        publish_kwargs["source_instance_id"] = source_instance_id
+                        publish_kwargs["thread_id"] = thread_id
+                    if snapshot_revision is not None:
+                        publish_kwargs["snapshot_revision"] = snapshot_revision
                     result = publisher(
                         "assistant_turn",
                         payload,
-                        request_id=pair["requestId"],
-                        file=file,
-                        page=page,
+                        **publish_kwargs,
                     )
                     if not isinstance(result, dict) or result.get("ok") is not True:
                         publish_error = "publisher rejected assistant_turn"
@@ -734,9 +744,9 @@ def snapshot_anchor(
 ) -> tuple[str | None, int | None]:
     """Read only a safe current-page anchor from the Windows snapshot.
 
-    Failure is intentionally non-fatal: ``assistant_turn`` can let the Pi
-    resolve the current Reader anchor.  No text, drawing, selection, or other
-    snapshot content is forwarded through this path.
+    Failure is intentionally non-fatal for archival-only callers. No text,
+    drawing, selection, or other snapshot content is forwarded through this
+    path.
     """
     try:
         root = _read_bounded_json(
@@ -799,6 +809,85 @@ def snapshot_anchor(
     ):
         return None, None
     return file, page
+
+
+def snapshot_output_identity(
+    snapshot_path: Path,
+    *,
+    now: datetime | None = None,
+) -> dict[str, Any] | None:
+    """Return the exact online Reader source used by the local WSS router.
+
+    Unlike the historical Pi anchor, ``file`` may be an HTTPS URL and page 0
+    is valid for an ordinary browser tab.  No page text or drawing data leaves
+    the snapshot file through this helper.
+    """
+    try:
+        root = _read_bounded_json(
+            snapshot_path,
+            MAX_SNAPSHOT_BYTES,
+            "reader-snapshot",
+        )
+    except SyncDataError:
+        return None
+    if (
+        not isinstance(root, dict)
+        or root.get("schema") != "reader-context-snapshot/1"
+        or root.get("contextStatus") != "ready"
+    ):
+        return None
+    raw_updated = root.get("updatedAtUtc")
+    if not isinstance(raw_updated, str):
+        return None
+    try:
+        updated = datetime.fromisoformat(raw_updated)
+    except ValueError:
+        return None
+    checked_at = now or datetime.now(timezone.utc)
+    if updated.tzinfo is None or checked_at.tzinfo is None:
+        return None
+    age = checked_at.astimezone(timezone.utc) - updated.astimezone(timezone.utc)
+    if age < timedelta(0) or age > SNAPSHOT_ANCHOR_MAX_AGE:
+        return None
+    active = root.get("activeReading")
+    current = root.get("currentPage")
+    revision = root.get("revision")
+    if (
+        not isinstance(active, dict)
+        or active.get("fresh") is not True
+        or not isinstance(current, dict)
+        or current.get("stable") is not True
+        or isinstance(revision, bool)
+        or not isinstance(revision, int)
+        or revision < 0
+    ):
+        return None
+    source = current.get("sourceInstanceId")
+    active_source = active.get("sourceInstanceId")
+    file = current.get("file")
+    page = current.get("page")
+    if (
+        not isinstance(source, str)
+        or source != active_source
+        or not 1 <= len(source) <= 160
+        or any(ch not in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-" for ch in source)
+        or not isinstance(file, str)
+        or not file
+        or len(file) > 4096
+        or "\x00" in file
+        or isinstance(page, bool)
+        or not (
+            isinstance(page, int) and page >= 0
+            or isinstance(page, str) and 1 <= len(page) <= 256 and "\x00" not in page
+        )
+    ):
+        return None
+    return {
+        "source_instance_id": source,
+        "snapshot_revision": revision,
+        "file": file,
+        "page": page,
+    }
 
 
 class CaptureBoundHistorySynchronizer:
@@ -885,7 +974,9 @@ class CaptureBoundHistorySynchronizer:
         if self._failure_backoff_polls > 0:
             self._failure_backoff_polls -= 1
             return self.last_result
-        file, page = snapshot_anchor(self.snapshot_path)
+        identity = snapshot_output_identity(self.snapshot_path)
+        file = identity.get("file") if identity else None
+        page = identity.get("page") if identity else None
         self.last_result = sync_once(
             global_state_path=self.global_state_path,
             continuity_path=self.continuity_path,
@@ -895,6 +986,12 @@ class CaptureBoundHistorySynchronizer:
             publisher=self.publisher,
             file=file,
             page=page,
+            source_instance_id=(
+                identity.get("source_instance_id") if identity else None
+            ),
+            snapshot_revision=(
+                identity.get("snapshot_revision") if identity else None
+            ),
             expected_thread_id=self._lease_thread_id,
             minimum_assistant_index=self._minimum_assistant_index,
             allow_last_good=False,

@@ -36,6 +36,8 @@ git -C . log --oneline -5
 
 - iOS App：安装包内置同一 Reader renderer/共享组件；Swift 拥有本机文件、数据、生命周期与
   系统能力，Pi 仅作显式同步、备份和联网服务，App 内不运行 PWA/扩展接管协议。
+- 当前产品开发优先级是 iOS App 与浏览器扩展；Pi PWA 保留既有可用能力与兼容边界，但暂停新增
+  功能。除非用户另行恢复该主线，不得把 App/扩展改动附带部署到 Pi PWA。
 - 普通网页无扩展：无 BW 功能。
 - 普通网页有扩展：扩展提供全部网页阅读功能。
 - 真书 PWA 无扩展：PWA 提供完整 fallback。
@@ -123,6 +125,11 @@ PDF `reader.js` 也是生成物，唯一源码在 `_server_deploy/static/pdf/rea
   URL、CSS selector 和脚本。三者与
   旧 voice-typist 注入互斥。入口与回滚合同见
   [电脑直连音频桥](reader-computer-audio-bridge.md#实验上下文末端2026-07-30)。
+- Windows `snapshot-mcp` 同时公布 `reader://capabilities/index` 及按功能拆分的只读说明；调用方
+  先读索引，再只读当前任务所需的 GET、卡片、导航、高亮或工具状态文件。结构化写回统一使用
+  `reader_command` 的 `BWREADER/1 <kind> <JSON>`，只投递给最新快照精确指向的 App/扩展实例；
+  Windows 电脑语音的聊天轮次则由本机历史同步器进入既有 Reader 对话流。以上均为旁路增强，
+  **不得替换或改变现有 Realtime 调用方式、CLI 启动方式、工具循环或委托链路**。
 - 内容脚本和页面只能调用固定 operation/schema 的桥；不得退化成任意
   URL/method/body fetch proxy。
 - `reader_bridge.py` 的 `open_page` 当前只写续读位置，不会驱动已经打开的页面实时跳转；

@@ -39,6 +39,9 @@ if (window.__bwPwaProviderOnly) return;
   var READER_RESULT_DELIVERY_CONTRACT = "reader-result-delivery/1";
   var READER_RESULT_EVENT = "reader-result";
   var READER_RESULT_ACK = "reader-result-ack";
+  var READER_REALTIME_OUTPUT_CONTRACT = "reader-realtime-output/1";
+  var READER_REALTIME_OUTPUT_EVENT = "reader-realtime-output";
+  var READER_REALTIME_OUTPUT_ACK = "reader-realtime-output-ack";
   var READER_VISUAL_DELIVERY_CONTRACT = "reader-visual-delivery/2";
   var READER_VISUAL_EVENT = "reader-visual-request";
   var READER_VISUAL_CHUNK = "reader-visual";
@@ -674,6 +677,145 @@ if (window.__bwPwaProviderOnly) return;
         page: value.anchor.page,
       },
       parts: [part],
+    };
+  }
+
+  function normalizeReaderRealtimeOutput(value) {
+    exactObject(
+      value,
+      [
+        "contract", "commandKind", "correlation", "sourceInstanceId",
+        "snapshotRevision", "file", "page", "kind", "payload",
+      ],
+      [],
+      "Reader 实时输出"
+    );
+    if (
+      value.contract !== READER_REALTIME_OUTPUT_CONTRACT ||
+      value.commandKind !== "realtime-output"
+    ) {
+      throw directError(
+        "Reader 实时输出合同无效",
+        "BW_READER_REALTIME_OUTPUT_SCHEMA",
+        false
+      );
+    }
+    var correlation = safeId(value.correlation, "Reader 输出 correlation");
+    var sourceInstanceId = safeId(
+      value.sourceInstanceId,
+      "Reader 输出 sourceInstanceId"
+    );
+    if (!Number.isSafeInteger(value.snapshotRevision) || value.snapshotRevision < 0) {
+      throw directError(
+        "Reader 输出 snapshotRevision 无效",
+        "BW_READER_REALTIME_OUTPUT_SCHEMA",
+        false
+      );
+    }
+    var file = safeText(value.file, "Reader 输出 file", 4096, false);
+    if (/[\u0000-\u001f\u007f-\u009f]/.test(file)) {
+      throw directError(
+        "Reader 输出 file 无效",
+        "BW_READER_REALTIME_OUTPUT_SCHEMA",
+        false
+      );
+    }
+    var page = value.page;
+    if (
+      (typeof page === "number" && (!Number.isSafeInteger(page) || page < 0)) ||
+      (typeof page === "string" && (!page || page.length > 256 || /[\u0000-\u001f\u007f]/.test(page))) ||
+      (typeof page !== "number" && typeof page !== "string")
+    ) {
+      throw directError(
+        "Reader 输出 page 无效",
+        "BW_READER_REALTIME_OUTPUT_SCHEMA",
+        false
+      );
+    }
+    var kind = safeText(value.kind, "Reader 输出 kind", 32, false);
+    var p = value.payload;
+    if (!plainObject(p)) {
+      throw directError(
+        "Reader 输出 payload 无效",
+        "BW_READER_REALTIME_OUTPUT_SCHEMA",
+        false
+      );
+    }
+    var payload;
+    if (kind === "assistant-turn") {
+      exactObject(p, ["threadId", "user", "assistant"], [], "Reader 对话轮");
+      payload = {
+        threadId: p.threadId === null ? null : safeId(p.threadId, "Reader 对话 threadId"),
+        user: safeText(p.user, "Reader 对话 user", 8000, false),
+        assistant: safeText(p.assistant, "Reader 对话 assistant", 8000, false),
+      };
+    } else if (kind === "tool-status") {
+      exactObject(p, ["status", "tool", "label", "detail"], [], "Reader 工具状态");
+      var status = safeText(p.status, "Reader 工具 status", 16, false);
+      if (["running", "done", "error", "aborted"].indexOf(status) < 0) {
+        throw directError("Reader 工具状态无效", "BW_READER_REALTIME_OUTPUT_SCHEMA", false);
+      }
+      payload = {
+        status: status,
+        tool: safeText(p.tool, "Reader 工具 tool", 160, false),
+        label: safeText(p.label, "Reader 工具 label", 320, false),
+        detail: p.detail === null ? null : safeText(p.detail, "Reader 工具 detail", 6000, true),
+      };
+    } else if (kind === "card") {
+      exactObject(p, ["card"], [], "Reader 卡片输出");
+      var rawCard = p.card;
+      exactObject(rawCard, ["kind", "title", "data"], [], "Reader 卡片");
+      var cardValue = { kind: rawCard.kind, data: rawCard.data };
+      if (rawCard.title !== null) cardValue.title = rawCard.title;
+      payload = { card: normalizeResultCard(cardValue) };
+    } else if (kind === "navigate") {
+      exactObject(p, ["action", "target", "selectionId"], [], "Reader 导航输出");
+      var action = safeText(p.action, "Reader 导航 action", 32, false);
+      var actions = [
+        "next-viewport", "previous-viewport", "scroll-to-text",
+        "scroll-to-heading", "scroll-to-selection", "go-to-page", "go-to-section",
+      ];
+      if (actions.indexOf(action) < 0) {
+        throw directError("Reader 导航动作无效", "BW_READER_REALTIME_OUTPUT_SCHEMA", false);
+      }
+      var target = p.target;
+      var selectionId = p.selectionId;
+      if (action === "scroll-to-text" || action === "scroll-to-heading") {
+        target = safeText(target, "Reader 导航 target", 320, false);
+        if (selectionId !== null) throw directError("Reader 导航 selectionId 多余", "BW_READER_REALTIME_OUTPUT_SCHEMA", false);
+      } else if (action === "scroll-to-selection") {
+        if (target !== null) throw directError("Reader 导航 target 多余", "BW_READER_REALTIME_OUTPUT_SCHEMA", false);
+        selectionId = safeId(selectionId, "Reader 导航 selectionId");
+      } else if (action === "go-to-page" || action === "go-to-section") {
+        if (!Number.isSafeInteger(target) || target < 0 || target > 10000000 || selectionId !== null) {
+          throw directError("Reader 导航位置无效", "BW_READER_REALTIME_OUTPUT_SCHEMA", false);
+        }
+      } else if (target !== null || selectionId !== null) {
+        throw directError("Reader 导航参数多余", "BW_READER_REALTIME_OUTPUT_SCHEMA", false);
+      }
+      payload = { action: action, target: target, selectionId: selectionId };
+    } else if (kind === "highlight") {
+      exactObject(p, ["color", "note"], [], "Reader 高亮输出");
+      var color = safeText(p.color, "Reader 高亮 color", 16, false);
+      if (["yellow", "green", "blue", "pink"].indexOf(color) < 0) {
+        throw directError("Reader 高亮颜色无效", "BW_READER_REALTIME_OUTPUT_SCHEMA", false);
+      }
+      payload = {
+        color: color,
+        note: p.note === null ? null : safeText(p.note, "Reader 高亮 note", 2000, true),
+      };
+    } else {
+      throw directError("Reader 输出类型不受支持", "BW_READER_REALTIME_OUTPUT_SCHEMA", false);
+    }
+    return {
+      contract: READER_REALTIME_OUTPUT_CONTRACT,
+      correlation: correlation,
+      sourceInstanceId: sourceInstanceId,
+      snapshotRevision: value.snapshotRevision,
+      file: file,
+      page: page,
+      kind: kind,
+      payload: payload,
     };
   }
 
@@ -1911,6 +2053,70 @@ if (window.__bwPwaProviderOnly) return;
     });
   };
 
+  DirectSocket.prototype._handleReaderRealtimeOutput = function (rawPayload) {
+    var self = this;
+    var delivery;
+    try {
+      delivery = normalizeReaderRealtimeOutput(rawPayload);
+    } catch (error) {
+      return;
+    }
+    var receiver = RC.voicecall && RC.voicecall.acceptRealtimeOutput;
+    Promise.resolve().then(function () {
+      if (!readerRealtimeOutputMatchesLive(delivery, self)) {
+        throw directError(
+          "Reader 实时输出对应页面已经变化",
+          "BW_READER_REALTIME_OUTPUT_STALE",
+          true
+        );
+      }
+      if (typeof receiver !== "function") {
+        throw directError(
+          "Reader 实时输出接收器尚未挂载",
+          "BW_READER_REALTIME_OUTPUT_RECEIVER_UNAVAILABLE",
+          true
+        );
+      }
+      return receiver(delivery);
+    }).then(function (receipt) {
+      exactObject(receipt, ["outcome"], ["error"], "Reader 输出回执");
+      if (["applied", "replay", "rejected"].indexOf(receipt.outcome) < 0) {
+        throw directError(
+          "Reader 输出回执 outcome 无效",
+          "BW_READER_REALTIME_OUTPUT_RECEIVER_INVALID",
+          false
+        );
+      }
+      if ((receipt.outcome === "rejected") !== Object.prototype.hasOwnProperty.call(receipt, "error")) {
+        throw directError(
+          "Reader 输出拒绝回执必须且只能携带 error",
+          "BW_READER_REALTIME_OUTPUT_RECEIVER_INVALID",
+          false
+        );
+      }
+      return receipt;
+    }).catch(function (error) {
+      return {
+        outcome: "rejected",
+        error: String(
+          (error && (error.code || error.message)) ||
+          "BW_READER_REALTIME_OUTPUT_RECEIVER_FAILED"
+        ).slice(0, 500),
+      };
+    }).then(function (receipt) {
+      if (!self.readerVisualSessionId) return null;
+      return self.request(READER_REALTIME_OUTPUT_ACK, {
+        sessionId: self.readerVisualSessionId,
+        correlation: delivery.correlation,
+        sourceInstanceId: delivery.sourceInstanceId,
+        outcome: receipt.outcome,
+        error: receipt.outcome === "rejected" ? receipt.error : null,
+      }, REQUEST_TIMEOUT_MS);
+    }).catch(function () {
+      // The Windows broker owns retry/reporting. Never render or execute twice.
+    });
+  };
+
   DirectSocket.prototype._sendReaderVisualPart = function (
     request,
     fields
@@ -2052,6 +2258,20 @@ if (window.__bwPwaProviderOnly) return;
     if (request.scope === "viewport-context") return true;
     return request.drawingRevision !== null &&
       readerVisualDrawingMatches(request);
+  }
+
+  function readerRealtimeOutputMatchesLive(delivery, channel) {
+    var current = localActiveReadingSnapshot();
+    return !!(
+      contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT &&
+      channel &&
+      channel.readerVisualSessionId &&
+      channel.readerVisualSourceId === delivery.sourceInstanceId &&
+      current &&
+      current.sourceInstanceId === delivery.sourceInstanceId &&
+      current.file === delivery.file &&
+      sameActiveScalar(current.page, delivery.page)
+    );
   }
 
   function captureReaderVisual(request) {
@@ -2469,6 +2689,10 @@ if (window.__bwPwaProviderOnly) return;
         }
         if (message.event === READER_VISUAL_EVENT) {
           this._handleReaderVisual(message.payload);
+          return;
+        }
+        if (message.event === READER_REALTIME_OUTPUT_EVENT) {
+          this._handleReaderRealtimeOutput(message.payload);
           return;
         }
         if (message.event !== "status") {

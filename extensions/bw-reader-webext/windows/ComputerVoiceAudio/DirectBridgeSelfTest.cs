@@ -702,6 +702,9 @@ internal static class DirectBridgeSelfTest
         await CheckReaderContextMcpProtocolAsync(
             root,
             checks).ConfigureAwait(false);
+        await CheckReaderRealtimeOutputMcpAsync(
+            root,
+            checks).ConfigureAwait(false);
         await CheckReaderDocumentAndViewportAsync(
             root,
             checks).ConfigureAwait(false);
@@ -6206,6 +6209,372 @@ internal static class DirectBridgeSelfTest
                 ?.GetValue<string>() == "stale",
             "direct-reader-context-mcp-recomputes-drawing-freshness",
             checks);
+    }
+
+    private static async Task CheckReaderRealtimeOutputMcpAsync(
+        string root,
+        ICollection<string> checks)
+    {
+        ReaderRealtimeOutputRequest generalCard =
+            ReaderRealtimeOutputProtocol.Create(
+                "output-general-card",
+                "source-output",
+                42,
+                "library/output-book.pdf",
+                JsonValue.Create(4)!,
+                "card",
+                new JsonObject
+                {
+                    ["card"] = new JsonObject
+                    {
+                        ["kind"] = "general",
+                        ["title"] = "概览",
+                        ["data"] = new JsonObject
+                        {
+                            ["text"] = "Reader 卡片内容",
+                        },
+                    },
+                });
+        bool unsafeCardRejected = false;
+        try
+        {
+            _ = ReaderRealtimeOutputProtocol.Create(
+                "output-unsafe-card",
+                "source-output",
+                42,
+                "library/output-book.pdf",
+                JsonValue.Create(4)!,
+                "card",
+                new JsonObject
+                {
+                    ["card"] = new JsonObject
+                    {
+                        ["kind"] = "images",
+                        ["title"] = null,
+                        ["data"] = new JsonObject
+                        {
+                            ["items"] = new JsonArray
+                            {
+                                new JsonObject
+                                {
+                                    ["url"] = "http://example.test/image.jpg",
+                                },
+                            },
+                        },
+                    },
+                });
+        }
+        catch (ReaderRealtimeOutputException)
+        {
+            unsafeCardRejected = true;
+        }
+        ReaderRealtimeOutputRequest routeRequest =
+            ReaderRealtimeOutputProtocol.Create(
+                "output-route",
+                "source-output",
+                42,
+                "library/output-book.pdf",
+                JsonValue.Create(4)!,
+                "tool-status",
+                new JsonObject
+                {
+                    ["status"] = "done",
+                    ["tool"] = "reader_test",
+                    ["label"] = "完成",
+                    ["detail"] = null,
+                });
+        ReaderContextSourceRouter router = new();
+        ReaderRealtimeOutputBroker broker = new(router);
+        int sentToA = 0;
+        int sentToB = 0;
+        TaskCompletionSource<bool> outputSentSignal = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        ReaderContextSourceLease leaseA = router.Attach(
+            "source-other",
+            "output-connection-A",
+            (_, _) =>
+            {
+                sentToA += 1;
+                return Task.CompletedTask;
+            });
+        ReaderContextSourceLease leaseB = router.Attach(
+            routeRequest.SourceInstanceId,
+            "output-connection-B",
+            (_, _) =>
+            {
+                sentToB += 1;
+                outputSentSignal.TrySetResult(true);
+                return Task.CompletedTask;
+            });
+        Task<ReaderRealtimeOutputAck> routed = broker.SendAsync(
+            routeRequest,
+            CancellationToken.None);
+        await outputSentSignal.Task.WaitAsync(TimeSpan.FromSeconds(1))
+            .ConfigureAwait(false);
+        broker.Accept(
+            leaseB,
+            new ReaderRealtimeOutputAck(
+                "session-AAAAAAAAAAAAAAAAAAAAAA",
+                routeRequest.Correlation,
+                routeRequest.SourceInstanceId,
+                "applied",
+                null));
+        ReaderRealtimeOutputAck routedAck = await routed.ConfigureAwait(false);
+        router.Detach(leaseB);
+        bool noFallback = false;
+        try
+        {
+            _ = await broker.SendAsync(
+                routeRequest with { Correlation = "output-offline" },
+                CancellationToken.None).ConfigureAwait(false);
+        }
+        catch (ReaderRealtimeOutputException exception)
+        {
+            noFallback = exception.Code ==
+                "BW_READER_REALTIME_OUTPUT_SOURCE_OFFLINE";
+        }
+        router.Detach(leaseA);
+
+        JsonElement ackElement = JsonSerializer.SerializeToElement(new
+        {
+            contract = DirectBridgeContract.Contract,
+            type = ReaderRealtimeOutputProtocol.AckType,
+            requestId = "output-ack",
+            sessionId = "session-AAAAAAAAAAAAAAAAAAAAAA",
+            correlation = routeRequest.Correlation,
+            sourceInstanceId = routeRequest.SourceInstanceId,
+            outcome = "applied",
+            error = (string?)null,
+        });
+        ReaderRealtimeOutputAck validatedAck =
+            ReaderRealtimeOutputProtocol.ValidateAck(ackElement);
+        JsonObject rpcRequest = ReaderRealtimeOutputRpcProtocol.Request(
+            routeRequest);
+        using JsonDocument rpcDocument = JsonDocument.Parse(
+            rpcRequest.ToJsonString(DirectBridgeContract.JsonOptions));
+        ReaderRealtimeOutputRequest validatedRequest =
+            ReaderRealtimeOutputRpcProtocol.ValidateRequest(
+                rpcDocument.RootElement);
+        JsonObject rpcResponse = ReaderRealtimeOutputRpcProtocol.Success(
+            routeRequest,
+            validatedAck);
+        using JsonDocument responseDocument = JsonDocument.Parse(
+            rpcResponse.ToJsonString(DirectBridgeContract.JsonOptions));
+        ReaderRealtimeOutputAck validatedResponse =
+            ReaderRealtimeOutputRpcProtocol.ValidateResponse(
+                responseDocument.RootElement,
+                routeRequest);
+        Require(
+            generalCard.Kind == "card"
+            && unsafeCardRejected
+            && sentToA == 0
+            && sentToB == 1
+            && routedAck.Outcome == "applied"
+            && noFallback
+            && validatedRequest.Kind == "tool-status"
+            && validatedResponse.Outcome == "applied"
+            && NamedPipeReaderRealtimeOutputRpcClient.RequiredPipeOptions
+                == (
+                    System.IO.Pipes.PipeOptions.Asynchronous
+                    | System.IO.Pipes.PipeOptions.CurrentUserOnly)
+            && NamedPipeReaderRealtimeOutputRpcServer.RequiredPipeOptions
+                == (
+                    System.IO.Pipes.PipeOptions.Asynchronous
+                    | System.IO.Pipes.PipeOptions.CurrentUserOnly),
+            "direct-reader-output-routes-exact-source-and-pipe-is-private",
+            checks);
+
+        string directory = System.IO.Path.Combine(root, "mcp-output");
+        Directory.CreateDirectory(directory);
+        string snapshotPath = System.IO.Path.Combine(
+            directory,
+            FileDirectSnapshotContextAdapter.SnapshotFileName);
+        const long observedAt = 1_788_000_000_000L;
+        JsonObject snapshot = new()
+        {
+            ["schema"] = FileDirectSnapshotContextAdapter.SnapshotContract,
+            ["revision"] = 42,
+            ["updatedAtUtc"] = DateTimeOffset.FromUnixTimeMilliseconds(
+                observedAt).ToString("O"),
+            ["activeReading"] = new JsonObject
+            {
+                ["kind"] = "pdf",
+                ["file"] = "library/output-book.pdf",
+                ["title"] = "Output Book",
+                ["page"] = 4,
+                ["sourceInstanceId"] = "source-output",
+                ["receivedAtEpochMs"] = observedAt,
+                ["fresh"] = true,
+            },
+            ["contextStatus"] = "ready",
+            ["currentPage"] = new JsonObject
+            {
+                ["kind"] = "pdf",
+                ["file"] = "library/output-book.pdf",
+                ["title"] = "Output Book",
+                ["page"] = 4,
+                ["sourceInstanceId"] = "source-output",
+                ["stable"] = true,
+                ["text"] = "current reading window",
+                ["textAvailable"] = true,
+            },
+            ["selection"] = new JsonObject
+            {
+                ["state"] = "unknown",
+                ["text"] = null,
+                ["ref"] = null,
+                ["reason"] = "none",
+            },
+        };
+        await File.WriteAllTextAsync(
+            snapshotPath,
+            snapshot.ToJsonString(DirectBridgeContract.JsonOptions),
+            new UTF8Encoding(false)).ConfigureAwait(false);
+
+        string input = string.Join(
+            Environment.NewLine,
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 1,
+                method = "initialize",
+                @params = new { protocolVersion = "2025-06-18" },
+            }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 2,
+                method = "resources/list",
+                @params = new { },
+            }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 3,
+                method = "resources/read",
+                @params = new
+                {
+                    uri = ReaderCapabilityCatalog.IndexUri,
+                },
+            }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 4,
+                method = "tools/list",
+                @params = new { },
+            }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 5,
+                method = "tools/call",
+                @params = new
+                {
+                    name = ReaderContextMcpServer.CommandToolName,
+                    arguments = new
+                    {
+                        command = "BWREADER/1 tool-status "
+                            + "{\"status\":\"done\",\"tool\":\"reader_test\","
+                            + "\"label\":\"完成\",\"detail\":null}",
+                    },
+                },
+            }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 6,
+                method = "tools/call",
+                @params = new
+                {
+                    name = ReaderContextMcpServer.CommandToolName,
+                    arguments = new
+                    {
+                        command = "BWREADER/1 assistant-turn {}",
+                    },
+                },
+            }),
+            "");
+        List<ReaderRealtimeOutputRequest> sent = [];
+        StringWriter output = new();
+        ReaderContextMcpServer server = new(
+            snapshotPath,
+            new StringReader(input),
+            output,
+            utcNow: () => DateTimeOffset.FromUnixTimeMilliseconds(
+                observedAt + 1_000),
+            sendOutputAsync: (request, _) =>
+            {
+                sent.Add(request);
+                return Task.FromResult(new ReaderRealtimeOutputAck(
+                    "session-output",
+                    request.Correlation,
+                    request.SourceInstanceId,
+                    "applied",
+                    null));
+            });
+        _ = await server.RunAsync(CancellationToken.None)
+            .ConfigureAwait(false);
+        JsonDocument[] responses = output.ToString()
+            .Split(
+                new[] { "\r\n", "\n" },
+                StringSplitOptions.RemoveEmptyEntries)
+            .Select(value => JsonDocument.Parse(value))
+            .ToArray();
+        try
+        {
+            JsonElement initialize = responses[0].RootElement
+                .GetProperty("result");
+            JsonElement resources = responses[1].RootElement
+                .GetProperty("result").GetProperty("resources");
+            JsonElement contents = responses[2].RootElement
+                .GetProperty("result").GetProperty("contents");
+            JsonElement tools = responses[3].RootElement
+                .GetProperty("result").GetProperty("tools");
+            string resultText = responses[4].RootElement
+                .GetProperty("result").GetProperty("content")[0]
+                .GetProperty("text").GetString()!;
+            using JsonDocument result = JsonDocument.Parse(resultText);
+            Require(
+                responses.Length == 6
+                && initialize.GetProperty("capabilities")
+                    .TryGetProperty("resources", out _)
+                && initialize.GetProperty("instructions").GetString()!
+                    .Contains(
+                        "Existing Realtime and CLI flows remain unchanged",
+                        StringComparison.Ordinal)
+                && resources.GetArrayLength() == 8
+                && resources[0].GetProperty("uri").GetString()
+                    == ReaderCapabilityCatalog.IndexUri
+                && contents.GetArrayLength() == 1
+                && contents[0].GetProperty("text").GetString()!
+                    .Contains(
+                        "现有 Realtime 与 CLI 委托链路保持不变",
+                        StringComparison.Ordinal)
+                && tools.GetArrayLength() == 2
+                && tools[1].GetProperty("name").GetString()
+                    == ReaderContextMcpServer.CommandToolName
+                && result.RootElement.GetProperty("ok").GetBoolean()
+                && result.RootElement.GetProperty("kind").GetString()
+                    == "tool-status"
+                && sent.Count == 1
+                && sent[0].SourceInstanceId == "source-output"
+                && sent[0].SnapshotRevision == 42
+                && sent[0].File == "library/output-book.pdf"
+                && sent[0].Page.GetValue<int>() == 4
+                && sent[0].Kind == "tool-status"
+                && responses[5].RootElement.GetProperty("error")
+                    .GetProperty("code").GetInt32() == -32602,
+                "direct-reader-output-progressive-resources-and-command-are-exact",
+                checks);
+        }
+        finally
+        {
+            foreach (JsonDocument response in responses)
+            {
+                response.Dispose();
+            }
+        }
     }
 
     private static async Task CheckReaderDocumentAndViewportAsync(

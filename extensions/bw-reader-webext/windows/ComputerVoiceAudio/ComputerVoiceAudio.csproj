@@ -13,4 +13,9 @@
     <FrameworkReference Include="Microsoft.AspNetCore.App" />
     <FrameworkReference Include="Microsoft.WindowsDesktop.App.WPF" />
   </ItemGroup>
+  <ItemGroup>
+    <EmbeddedResource Include="ReaderCapabilities\*.md">
+      <LogicalName>BwReader.ComputerVoiceAudio.ReaderCapabilities.%(Filename)%(Extension)</LogicalName>
+    </EmbeddedResource>
+  </ItemGroup>
 </Project>

@@ -1376,6 +1376,136 @@
     try { if (typeof window[fn] === 'function') window[fn].apply(null, args || []); } catch (e) {}
   }
   window.__vcDispatch = dispatch;   // 测试/共享层可直接派发结果卡(与 relay client_action 同一条路)
+
+  // Windows Reader 输出与 Realtime 使用同一批渲染/动作入口，但不接受任意函数名。
+  // 外部只交语义化 kind；这里是唯一白名单，避免把旧 dispatch 的 window[fn]
+  // 兼容分支扩大成远程脚本入口。
+  var _readerOutputSeen = Object.create(null);
+  var _readerOutputOrder = [];
+  function _rememberReaderOutput(id) {
+    _readerOutputSeen[id] = 1;
+    _readerOutputOrder.push(id);
+    while (_readerOutputOrder.length > 256) {
+      delete _readerOutputSeen[_readerOutputOrder.shift()];
+    }
+  }
+  function _readerOutputReject(error) {
+    return {
+      outcome: 'rejected',
+      error: String((error && (error.code || error.message)) || error ||
+        'BW_READER_REALTIME_OUTPUT_FAILED').slice(0, 500)
+    };
+  }
+  function _readerOutputScroller() {
+    return document.getElementById('main') ||
+      document.getElementById('content') ||
+      document.scrollingElement || document.documentElement;
+  }
+  function _readerOutputNavigate(delivery) {
+    var p = delivery.payload || {}, action = p.action;
+    var browser = window.__bwBrowserControl;
+    if (browser && typeof browser.execute === 'function' &&
+        action !== 'go-to-page' && action !== 'go-to-section') {
+      var req = {
+        contract: 'bw-browser-control/1',
+        type: 'request',
+        requestId: delivery.correlation,
+        sourceInstanceId: delivery.sourceInstanceId,
+        action: action
+      };
+      if (p.target !== null) req.target = p.target;
+      if (p.selectionId !== null) req.selectionId = p.selectionId;
+      var response = browser.execute(req);
+      if (!response || response.ok !== true) {
+        throw new Error(response && response.error &&
+          (response.error.code || response.error.message) ||
+          'BW_READER_NAVIGATION_FAILED');
+      }
+      return response.state || true;
+    }
+    if (action === 'next-viewport' || action === 'previous-viewport') {
+      var scroller = _readerOutputScroller();
+      var height = scroller.clientHeight || window.innerHeight || 600;
+      var delta = Math.max(120, Math.round(height * 0.82)) *
+        (action === 'next-viewport' ? 1 : -1);
+      if (typeof scroller.scrollBy === 'function') {
+        scroller.scrollBy({ top: delta, left: 0, behavior: 'smooth' });
+      } else scroller.scrollTop += delta;
+      return true;
+    }
+    if (action === 'go-to-page' || action === 'go-to-section') {
+      var host = RC.documentHost && RC.documentHost.current &&
+        RC.documentHost.current();
+      if (!host || typeof host.navigate !== 'function') {
+        throw new Error('BW_READER_NAVIGATION_UNAVAILABLE');
+      }
+      var data = action === 'go-to-page'
+        ? { page: p.target, index: p.target }
+        : { section: p.target, index: p.target };
+      return host.navigate({ data: data }, { source: 'reader-realtime-output' });
+    }
+    throw new Error('BW_READER_NAVIGATION_UNAVAILABLE');
+  }
+  function _acceptReaderRealtimeOutput(delivery) {
+    try {
+      if (!delivery || !delivery.correlation || !delivery.kind) {
+        return Promise.resolve(_readerOutputReject('BW_READER_REALTIME_OUTPUT_INVALID'));
+      }
+      if (_readerOutputSeen[delivery.correlation]) {
+        return Promise.resolve({ outcome: 'replay' });
+      }
+      var p = delivery.payload || {}, work;
+      if (delivery.kind === 'assistant-turn') {
+        if (typeof window.__asstVoiceMsg !== 'function' ||
+            typeof window.__asstVoiceLog !== 'function') {
+          throw new Error('BW_READER_CONVERSATION_RECEIVER_UNAVAILABLE');
+        }
+        window.__asstVoiceMsg('reset');
+        window.__asstVoiceMsg('u', p.user);
+        window.__asstVoiceMsg('a', p.assistant, { md: true });
+        work = window.__asstVoiceLog(
+          p.user,
+          p.assistant,
+          delivery.file,
+          delivery.page,
+          { external_thread_id: p.threadId || null, via: 'windows-reader-output' }
+        );
+      } else if (delivery.kind === 'tool-status') {
+        onToolStatus({
+          status: p.status,
+          tool: p.tool,
+          label: p.label,
+          result_brief: p.detail || ''
+        });
+        work = true;
+      } else if (delivery.kind === 'card') {
+        renderInfo(p.card);
+        work = true;
+      } else if (delivery.kind === 'navigate') {
+        work = _readerOutputNavigate(delivery);
+      } else if (delivery.kind === 'highlight') {
+        if (!(RC.actions && RC.actions.has && RC.actions.has('highlight.save'))) {
+          throw new Error('BW_READER_HIGHLIGHT_UNAVAILABLE');
+        }
+        work = RC.actions.run('highlight.save', {
+          color: p.color,
+          note: p.note || ''
+        });
+      } else {
+        throw new Error('BW_READER_REALTIME_OUTPUT_KIND_UNSUPPORTED');
+      }
+      return Promise.resolve(work).then(function () {
+        _rememberReaderOutput(delivery.correlation);
+        return { outcome: 'applied' };
+      }, function (error) {
+        return _readerOutputReject(error);
+      });
+    } catch (error) {
+      return Promise.resolve(_readerOutputReject(error));
+    }
+  }
+  RC.voicecall = RC.voicecall || {};
+  RC.voicecall.acceptRealtimeOutput = _acceptReaderRealtimeOutput;
   // ── 70 结构化结果卡(用户设计):web_search 的 Gemini 综合直接给 kind/data/brief——
   //    系统按类型渲染(天气/新闻/事实/综合),2.1 只口头一句概况;双击卡=内容带入 2.1 上下文(再双击=移出) ──
   function _infoHtml(card) {
@@ -8270,6 +8400,7 @@
   }, 2000);
 
   RC.voicecall = { toggle: toggle,
+    acceptRealtimeOutput: _acceptReaderRealtimeOutput,
     canCaptureComputerVoiceGesture: function () { return !_assistantInReview(); },
     isOpen: function () {
     try { return !!ws || _nativeAgentEngaged() || !!(RC.computerVoice && RC.computerVoice.isActive && RC.computerVoice.isActive()); }

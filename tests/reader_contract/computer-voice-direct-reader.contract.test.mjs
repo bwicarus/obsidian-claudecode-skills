@@ -17,6 +17,7 @@ const NATIVE_APP_ORIGIN = "http://127.0.0.1:43129";
 const RELAY_PORT = "BW_COMPUTER_VOICE_DIRECT_V3";
 const DIRECT_CONTRACT = "reader-computer-voice-direct/1";
 const RESULT_DELIVERY_CONTRACT = "reader-result-delivery/1";
+const REALTIME_OUTPUT_CONTRACT = "reader-realtime-output/1";
 const VISUAL_DELIVERY_CONTRACT = "reader-visual-delivery/2";
 
 function createAudioContextClass(scenario) {
@@ -198,6 +199,19 @@ function createServer(scenario) {
         contract: DIRECT_CONTRACT,
         type: "event",
         event: "reader-visual-request",
+        payload,
+      }),
+    }));
+  };
+
+  server.emitReaderRealtimeOutput = (payload, socket = null) => {
+    const target = socket || server.sockets.at(-1);
+    assert.ok(target, "missing Reader realtime output socket");
+    queueMicrotask(() => target.onmessage?.({
+      data: JSON.stringify({
+        contract: DIRECT_CONTRACT,
+        type: "event",
+        event: "reader-realtime-output",
         payload,
       }),
     }));
@@ -512,6 +526,15 @@ function createServer(scenario) {
       }
       if (request.type === "reader-result-ack") {
         scenario.readerResultAcks.push(structuredClone(request));
+        result(this, request, {
+          correlation: request.correlation,
+          outcome: request.outcome,
+          matched: true,
+        });
+        return;
+      }
+      if (request.type === "reader-realtime-output-ack") {
+        scenario.readerRealtimeOutputAcks.push(structuredClone(request));
         result(this, request, {
           correlation: request.correlation,
           outcome: request.outcome,
@@ -942,6 +965,9 @@ function createHarness(overrides = {}) {
     readerResultDeliveries: [],
     readerResultAcks: [],
     readerResultReceipt: { outcome: "rendered" },
+    readerRealtimeOutputDeliveries: [],
+    readerRealtimeOutputAcks: [],
+    readerRealtimeOutputReceipt: { outcome: "applied" },
     readerVisualChunks: [],
     readerVisualRegistrations: [],
     readerVisualCaptureCalls: 0,
@@ -1044,6 +1070,12 @@ function createHarness(overrides = {}) {
       voicecall: {
         canCaptureComputerVoiceGesture() {
           return scenario.realtimeVoiceAllowed === true;
+        },
+        acceptRealtimeOutput(delivery) {
+          scenario.readerRealtimeOutputDeliveries.push(
+            structuredClone(delivery),
+          );
+          return structuredClone(scenario.readerRealtimeOutputReceipt);
         },
       },
       ctxSync: {
@@ -1702,6 +1734,101 @@ test("snapshot-mcp 常驻 WSS 接收严格结果卡并回 rendered ACK，不发�
   );
   assert.equal(harness.scenario.microphoneRequests.length, 0);
   assert.equal(harness.api.isActive(), false);
+  await disableSnapshot(harness);
+});
+
+test("snapshot-mcp 将结构化输出交给现有 Realtime 渲染入口并回精确 ACK", async () => {
+  const harness = createHarness({
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncEnabled: true,
+    activeReading: {
+      kind: "pdf",
+      file: "book.pdf",
+      title: "Snapshot Book",
+      pos: 24,
+    },
+  });
+  harness.api.setSelectedEngine("computer_client");
+  await waitForRequest(harness, "context-open");
+  await waitForRequest(harness, "visual-register");
+  const sourceInstanceId =
+    harness.scenario.readerVisualRegistrations[0].sourceInstanceId;
+  const delivery = {
+    contract: REALTIME_OUTPUT_CONTRACT,
+    commandKind: "realtime-output",
+    correlation: "output-tool-24",
+    sourceInstanceId,
+    snapshotRevision: 1,
+    file: "book.pdf",
+    page: 24,
+    kind: "tool-status",
+    payload: {
+      status: "done",
+      tool: "reader_task",
+      label: "完成",
+      detail: "结果已经写入当前 Reader",
+    },
+  };
+
+  harness.server.emitReaderRealtimeOutput(
+    delivery,
+    harness.server.sockets[0],
+  );
+  await waitForCondition(
+    () => harness.scenario.readerRealtimeOutputAcks.length === 1,
+    "Reader realtime output ACK",
+  );
+
+  assert.deepEqual(
+    harness.scenario.readerRealtimeOutputDeliveries,
+    [{
+      contract: delivery.contract,
+      correlation: delivery.correlation,
+      sourceInstanceId: delivery.sourceInstanceId,
+      snapshotRevision: delivery.snapshotRevision,
+      file: delivery.file,
+      page: delivery.page,
+      kind: delivery.kind,
+      payload: delivery.payload,
+    }],
+  );
+  const ack = harness.scenario.readerRealtimeOutputAcks[0];
+  assert.deepEqual(
+    Object.keys(ack).sort(),
+    [
+      "contract", "type", "requestId", "sessionId", "correlation",
+      "sourceInstanceId", "outcome", "error",
+    ].sort(),
+  );
+  assert.equal(ack.type, "reader-realtime-output-ack");
+  assert.equal(ack.correlation, delivery.correlation);
+  assert.equal(ack.sourceInstanceId, sourceInstanceId);
+  assert.equal(ack.outcome, "applied");
+  assert.equal(ack.error, null);
+  assert.equal(
+    harness.server.requests.some((request) => request.type === "start"),
+    false,
+  );
+  assert.equal(harness.scenario.microphoneRequests.length, 0);
+
+  harness.server.emitReaderRealtimeOutput(
+    {
+      ...delivery,
+      correlation: "output-stale-25",
+      page: 25,
+    },
+    harness.server.sockets[0],
+  );
+  await waitForCondition(
+    () => harness.scenario.readerRealtimeOutputAcks.length === 2,
+    "stale Reader realtime output ACK",
+  );
+  assert.equal(harness.scenario.readerRealtimeOutputDeliveries.length, 1);
+  assert.equal(harness.scenario.readerRealtimeOutputAcks[1].outcome, "rejected");
+  assert.equal(
+    harness.scenario.readerRealtimeOutputAcks[1].error,
+    "BW_READER_REALTIME_OUTPUT_STALE",
+  );
   await disableSnapshot(harness);
 });
 

@@ -1,7 +1,7 @@
 """Isolated contracts for the packaged voice-history sidebar synchronizer.
 
 All inputs and durable files are temporary. Publishers are fakes, so this test
-module cannot contact SSH, Pi, or a Reader service.
+module cannot contact a Reader service or any external machine.
 """
 from __future__ import annotations
 
@@ -241,13 +241,19 @@ class VoiceHistorySidebarSyncTest(unittest.TestCase):
             snapshot,
             {
                 "schema": "reader-context-snapshot/1",
+                "revision": 17,
                 "updatedAtUtc": datetime.now(timezone.utc).isoformat(),
-                "activeReading": {"fresh": True, "ageSec": 0},
+                "activeReading": {
+                    "fresh": True,
+                    "ageSec": 0,
+                    "sourceInstanceId": "app-reader-1",
+                },
                 "contextStatus": "ready",
                 "currentPage": {
                     "file": "Books/book.pdf",
                     "page": 7,
                     "stable": True,
+                    "sourceInstanceId": "app-reader-1",
                 },
             },
         )
@@ -310,6 +316,9 @@ class VoiceHistorySidebarSyncTest(unittest.TestCase):
         )
         self.assertEqual(calls[0][1]["file"], "Books/book.pdf")
         self.assertEqual(calls[0][1]["page"], 7)
+        self.assertEqual(calls[0][1]["source_instance_id"], "app-reader-1")
+        self.assertEqual(calls[0][1]["snapshot_revision"], 17)
+        self.assertEqual(calls[0][1]["thread_id"], THREAD)
 
         # Binding changes mid-call cannot publish another thread.
         self.bind(OTHER)
@@ -622,49 +631,115 @@ class VoiceHistorySidebarSyncTest(unittest.TestCase):
                 )
         run_once.assert_not_called()
 
-    def test_sidebar_ssh_uses_verified_alias_without_mux_and_hides_window(self):
-        completed = type(
-            "Completed",
-            (),
-            {
-                "returncode": 0,
-                "stdout": '{"ok":true}',
-                "stderr": "",
-            },
-        )()
-        with patch.object(
-            SIDEBAR.subprocess,
-            "run",
-            return_value=completed,
-        ) as run:
-            self.assertEqual(
-                SIDEBAR._run_once(
-                    {
-                        "version": 1,
-                        "kind": "assistant_turn",
-                        "request_id": "req-hide-window",
-                        "payload": {
-                            "text": "a",
-                            "user_utterance": "u",
-                        },
-                    }
-                ),
-                {"ok": True},
+    def test_sidebar_uses_exact_local_reader_output_contract(self):
+        captured = []
+
+        def send(envelope):
+            captured.append(envelope)
+            return {
+                "contract": "reader-realtime-output/1",
+                "type": "output-response",
+                "ok": True,
+            }
+
+        with patch.object(SIDEBAR, "_run_once", side_effect=send):
+            result = SIDEBAR.call(
+                "assistant_turn",
+                {"text": "answer", "user_utterance": "question"},
+                request_id="vh:turn-1",
+                file="https://example.test/article",
+                page=0,
+                source_instance_id="source-1",
+                snapshot_revision=12,
+                thread_id=THREAD,
             )
-        command = run.call_args.args[0]
-        self.assertIn("pi", command)
-        self.assertNotIn("ControlMaster=auto", command)
-        self.assertFalse(
-            any(str(part).startswith("ControlPath=") for part in command)
-        )
+        self.assertTrue(result["ok"])
         self.assertEqual(
-            run.call_args.kwargs["creationflags"],
-            (
-                SIDEBAR.CREATE_NO_WINDOW
-                if SIDEBAR.os.name == "nt"
-                else 0
-            ),
+            captured,
+            [
+                {
+                    "contract": "reader-realtime-output/1",
+                    "type": "output-request",
+                    "correlation": "vh:turn-1",
+                    "sourceInstanceId": "source-1",
+                    "snapshotRevision": 12,
+                    "file": "https://example.test/article",
+                    "page": 0,
+                    "kind": "assistant-turn",
+                    "payload": {
+                        "threadId": THREAD,
+                        "user": "question",
+                        "assistant": "answer",
+                    },
+                }
+            ],
         )
+
+        with patch.object(SIDEBAR, "_run_once") as run_once:
+            with self.assertRaises(SIDEBAR.SidebarBridgeError):
+                SIDEBAR.call(
+                    "assistant_turn",
+                    {"text": "a", "user_utterance": "u"},
+                    request_id="请求-1",
+                    file="book.pdf",
+                    page=1,
+                    source_instance_id="source-1",
+                    snapshot_revision=12,
+                    thread_id=THREAD,
+                )
+        run_once.assert_not_called()
+
+    def test_snapshot_output_identity_supports_app_and_web_pages(self):
+        snapshot = self.root / "output-snapshot.json"
+        now = datetime(2026, 8, 12, 8, 0, tzinfo=timezone.utc)
+        value = {
+            "schema": "reader-context-snapshot/1",
+            "revision": 8,
+            "updatedAtUtc": (now - timedelta(seconds=1)).isoformat(),
+            "contextStatus": "ready",
+            "activeReading": {
+                "fresh": True,
+                "sourceInstanceId": "web-source",
+            },
+            "currentPage": {
+                "stable": True,
+                "sourceInstanceId": "web-source",
+                "file": "https://example.test/article",
+                "page": 0,
+            },
+        }
+        self.write(snapshot, value)
+        self.assertEqual(
+            SYNC.snapshot_output_identity(snapshot, now=now),
+            {
+                "source_instance_id": "web-source",
+                "snapshot_revision": 8,
+                "file": "https://example.test/article",
+                "page": 0,
+            },
+        )
+        value["revision"] = 9
+        value["activeReading"]["sourceInstanceId"] = "app-source"
+        value["currentPage"].update(
+            {
+                "sourceInstanceId": "app-source",
+                "file": "Books/book.pdf",
+                "page": 12,
+            }
+        )
+        self.write(snapshot, value)
+        self.assertEqual(
+            SYNC.snapshot_output_identity(snapshot, now=now),
+            {
+                "source_instance_id": "app-source",
+                "snapshot_revision": 9,
+                "file": "Books/book.pdf",
+                "page": 12,
+            },
+        )
+        value["activeReading"]["sourceInstanceId"] = "other-source"
+        self.write(snapshot, value)
+        self.assertIsNone(SYNC.snapshot_output_identity(snapshot, now=now))
 
     def test_capture_publish_failure_is_bounded_by_poll_backoff(self):
         self.recent([msg("user", "old-u"), msg("assistant", "old-a")])

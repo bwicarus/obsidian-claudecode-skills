@@ -15,6 +15,9 @@ const VISUAL_DELIVERY_CONTRACT = "reader-visual-delivery/2";
 const LOCAL_VISUAL_CONTRACT = "bw-reader-visual-local/1";
 const BROWSER_CONTROL_CONTRACT = "reader-browser-control/1";
 const LOCAL_BROWSER_CONTROL_CONTRACT = "bw-browser-control/1";
+const REALTIME_OUTPUT_CONTRACT = "reader-realtime-output/1";
+const REALTIME_OUTPUT_EVENT = "reader-realtime-output";
+const REALTIME_OUTPUT_ACK = "reader-realtime-output-ack";
 const VISUAL_CHUNK_CHARACTERS = 48000;
 const VISUAL_MAX_BYTES = 786432;
 const VISUAL_MAX_CHUNKS = 24;
@@ -336,6 +339,8 @@ let visualCommitted = null;
 let activeVisualContext = null;
 let visualQueue = Promise.resolve();
 let browserControlQueue = Promise.resolve();
+let realtimeOutputQueue = Promise.resolve();
+const realtimeOutputReceipts = new Map();
 
 function closeVisualLink() {
   const current = visualLink;
@@ -612,9 +617,143 @@ async function deliverBrowserControlRequest(request) {
   });
 }
 
+function normalizeRealtimeOutputEvent(message) {
+  if (!exactKeys(message, ["contract", "type", "event", "payload"])) return null;
+  if (
+    message.contract !== "reader-computer-voice-direct/1" ||
+    message.type !== "event" || message.event !== REALTIME_OUTPUT_EVENT
+  ) return null;
+  const value = message.payload;
+  if (!exactKeys(value, [
+    "contract", "commandKind", "correlation", "sourceInstanceId",
+    "snapshotRevision", "file", "page", "kind", "payload",
+  ])) return null;
+  const correlation = safeVisualId(value.correlation, false);
+  const sourceInstanceId = safeVisualId(value.sourceInstanceId, false);
+  if (
+    value.contract !== REALTIME_OUTPUT_CONTRACT ||
+    value.commandKind !== "realtime-output" ||
+    !correlation || !sourceInstanceId ||
+    !Number.isSafeInteger(value.snapshotRevision) || value.snapshotRevision < 0 ||
+    typeof value.file !== "string" || value.file.length < 1 || value.file.length > 4096 ||
+    /[\u0000-\u001f\u007f]/.test(value.file) ||
+    !validVisualPage(value.page) ||
+    !["assistant-turn", "tool-status", "card", "navigate", "highlight"].includes(value.kind) ||
+    !value.payload || typeof value.payload !== "object" || Array.isArray(value.payload)
+  ) return null;
+  let encoded = "";
+  try { encoded = JSON.stringify(value.payload); } catch (_) { return null; }
+  if (new TextEncoder().encode(encoded).length > 32768) return null;
+  const p = value.payload;
+  if (value.kind === "assistant-turn") {
+    if (!exactKeys(p, ["threadId", "user", "assistant"]) ||
+        (p.threadId !== null && !safeVisualId(p.threadId, false)) ||
+        typeof p.user !== "string" || !p.user.trim() || p.user.length > 8000 ||
+        typeof p.assistant !== "string" || !p.assistant.trim() || p.assistant.length > 8000) return null;
+  } else if (value.kind === "tool-status") {
+    if (!exactKeys(p, ["status", "tool", "label", "detail"]) ||
+        !["running", "done", "error", "aborted"].includes(p.status) ||
+        typeof p.tool !== "string" || !p.tool || p.tool.length > 160 ||
+        typeof p.label !== "string" || !p.label || p.label.length > 320 ||
+        (p.detail !== null && (typeof p.detail !== "string" || p.detail.length > 6000))) return null;
+  } else if (value.kind === "card") {
+    if (!exactKeys(p, ["card"]) || !exactKeys(p.card, ["kind", "title", "data"]) ||
+        !["weather", "news", "images", "videos", "fact", "general"].includes(p.card.kind) ||
+        (p.card.title !== null && (typeof p.card.title !== "string" || p.card.title.length > 320)) ||
+        !p.card.data || typeof p.card.data !== "object" || Array.isArray(p.card.data)) return null;
+  } else if (value.kind === "navigate") {
+    if (!exactKeys(p, ["action", "target", "selectionId"]) ||
+        !["next-viewport", "previous-viewport", "scroll-to-text", "scroll-to-heading",
+          "scroll-to-selection", "go-to-page", "go-to-section"].includes(p.action)) return null;
+  } else if (value.kind === "highlight") {
+    if (!exactKeys(p, ["color", "note"]) ||
+        !["yellow", "green", "blue", "pink"].includes(p.color) ||
+        (p.note !== null && (typeof p.note !== "string" || p.note.length > 2000))) return null;
+  }
+  return {
+    contract: REALTIME_OUTPUT_CONTRACT,
+    correlation,
+    sourceInstanceId,
+    snapshotRevision: value.snapshotRevision,
+    file: value.file,
+    page: value.page,
+    kind: value.kind,
+    payload: p,
+  };
+}
+
+function waitForRealtimeOutputReceipt(delivery) {
+  return new Promise((resolve) => {
+    const timer = setTimeout(() => {
+      realtimeOutputReceipts.delete(delivery.correlation);
+      resolve({ outcome: "rejected", error: "BW_READER_REALTIME_OUTPUT_FRAME_TIMEOUT" });
+    }, 8000);
+    realtimeOutputReceipts.set(delivery.correlation, (receipt) => {
+      clearTimeout(timer);
+      resolve(receipt);
+    });
+    frameTell("reader-output", { delivery });
+  });
+}
+
+async function deliverRealtimeOutput(delivery) {
+  const link = visualLink;
+  if (!link || !link.sessionId) return;
+  const committed = visualCommitted;
+  if (
+    !committed ||
+    delivery.snapshotRevision !== committed.snapshotRevision ||
+    delivery.sourceInstanceId !== committed.sourceInstanceId ||
+    delivery.file !== committed.file ||
+    delivery.page !== committed.page ||
+    delivery.sourceInstanceId !== String(visualPage?.document?.sourceInstanceId || "") ||
+    delivery.file !== String(visualPage?.url || "")
+  ) {
+    await link.sendRequest(REALTIME_OUTPUT_ACK, {
+      sessionId: link.sessionId,
+      correlation: delivery.correlation,
+      sourceInstanceId: delivery.sourceInstanceId,
+      outcome: "rejected",
+      error: "BW_READER_REALTIME_OUTPUT_STALE",
+    });
+    return;
+  }
+  const receipt = await waitForRealtimeOutputReceipt(delivery);
+  await link.sendRequest(REALTIME_OUTPUT_ACK, {
+    sessionId: link.sessionId,
+    correlation: delivery.correlation,
+    sourceInstanceId: delivery.sourceInstanceId,
+    outcome: receipt.outcome,
+    error: receipt.outcome === "rejected" ? String(receipt.error || "BW_READER_REALTIME_OUTPUT_REJECTED").slice(0, 500) : null,
+  });
+}
+
+window.addEventListener("message", (event) => {
+  if (event.source !== window.parent) return;
+  const data = event.data;
+  if (!data || data.contract !== "bw-extension-computer-voice-frame/1" ||
+      data.type !== "reader-output-receipt" || !data.value) return;
+  const value = data.value;
+  const correlation = safeVisualId(value.correlation, false);
+  if (!correlation || !["applied", "replay", "rejected"].includes(value.outcome) ||
+      (value.outcome === "rejected") !== (typeof value.error === "string" && !!value.error)) return;
+  const resolve = realtimeOutputReceipts.get(correlation);
+  if (!resolve) return;
+  realtimeOutputReceipts.delete(correlation);
+  resolve({ outcome: value.outcome, error: value.error || null });
+});
+
 function handleContextBridgeEvent(message) {
   if (message?.event === "reader-visual-request") {
     handleVisualBridgeEvent(message);
+    return;
+  }
+  if (message?.event === REALTIME_OUTPUT_EVENT) {
+    const output = normalizeRealtimeOutputEvent(message);
+    if (!output || output.sourceInstanceId !== visualSourceInstanceId) return;
+    realtimeOutputQueue = realtimeOutputQueue
+      .then(() => deliverRealtimeOutput(output))
+      .catch((err) => frameProbe("Reader 输出回传失败: " + describe(err)));
     return;
   }
   const request = normalizeBrowserControlEvent(message);
