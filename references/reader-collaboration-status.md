@@ -4124,3 +4124,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **边界**：现有 Realtime 与 CLI 调用、工具循环和委托完全不变；陈旧 source/revision/file/page 拒绝投递，Pi PWA 暂停新增且本批未部署 Pi，也未发布桌面浏览器正式渠道。
 - **验证/Windows**：Reader Node 992 项、C# 297 项、聊天同步/打包/发布管线及 Safari/ReaderBundle 复验通过；Windows direct `0.1.107` 已原子安装，回退目录 `install-0.1.107-20260812T024527175Z`，服务 `idle / lastError=null`。
 - **发布事实**：提交 `176d14d8`；Actions `31558051746` 上传 App `1.1.40 (244)` 与 Safari `0.2.100`，只读检查 `31558497053` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
+
+## Codex：ReaderPC 聊天同步常驻入口已接通（2026-08-12 JST）
+- **改了什么**：把既有 capture-bound 历史同步器接入 ReaderPC 托盘生命周期；仅显式 `snapshot-mcp` 模式启用，单实例租约防止重复 worker，退出时完成收尾。
+- **验证/安装**：相关 Python 39 项、候选摘要与包内自检通过；ReaderPC `0.1.10` 已切换运行，现场确认 worker 租约被托盘持有，电脑语音直连仍在线且未开启音频。
+- **边界**：未改 Realtime、CLI、工具调用或语音建连；未部署 Pi PWA、App、Safari 或桌面浏览器渠道，旧 ReaderPC release 仍保留可回退。
+- **下一步**：下次真实电脑语音通话后，App/扩展当前会话应出现新增的用户/助手轮次；路由仍由当前快照的 source/revision/file/page 严格限定。
