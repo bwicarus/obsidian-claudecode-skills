@@ -14,6 +14,10 @@ const SOCKET = readFileSync(
   "ios/BWReader/App/DirectVoiceSocket.swift",
   "utf8",
 );
+const WEB = readFileSync(
+  "ios/BWReader/App/ReaderWebView.swift",
+  "utf8",
+);
 
 test("App 电脑语音用封顶退避恢复明确的 Windows 清理中响应", () => {
   assert.match(BRIDGE, /reconnectDelayNanoseconds:[\s\S]*15_000_000_000/);
@@ -35,6 +39,17 @@ test("App 回到前台会重新唤醒仍有用户意图的 suspended 会话", ()
   assert.match(
     BRIDGE,
     /func setAppForeground[\s\S]*desiredActive[\s\S]*resumeArmed[\s\S]*state\.phase == \.suspended[\s\S]*immediate: true/,
+  );
+});
+
+test("App 前台原生巡检会主动验活并恢复 Reader 快照专线", () => {
+  assert.match(
+    APP,
+    /guard scenePhase == \.active[\s\S]*reader\.probeReaderSnapshotLink\(\)[\s\S]*secondsUntilSnapshotRefresh = 12[\s\S]*reader\.probeReaderSnapshotLink\(\)/,
+  );
+  assert.match(
+    WEB,
+    /func probeReaderSnapshotLink\(\)[\s\S]*guard readerForeground, webView\.url != nil[\s\S]*"bw-native-reader-foreground"[\s\S]*probe: true/,
   );
 });
 

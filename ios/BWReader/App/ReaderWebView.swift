@@ -2284,6 +2284,23 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         )
     }
 
+    /// Proves the dedicated Reader snapshot socket while the native scene is
+    /// active. WebKit can keep a dead WebSocket in OPEN after the Windows
+    /// service restarts, so waiting for `onclose` alone can leave the App on a
+    /// stale snapshot indefinitely. The existing foreground handler performs
+    /// a bounded read-only probe and rebuilds the link when that probe fails.
+    func probeReaderSnapshotLink() {
+        guard readerForeground, webView.url != nil else { return }
+        webView.evaluateJavaScript(
+            """
+            window.dispatchEvent(new CustomEvent(
+              "bw-native-reader-foreground",
+              { detail: { active: true, probe: true } }
+            ));
+            """
+        )
+    }
+
     private func reloadLocalRuntimeAfterRecoveryIfNeeded(
         serverRebuilt: Bool
     ) {

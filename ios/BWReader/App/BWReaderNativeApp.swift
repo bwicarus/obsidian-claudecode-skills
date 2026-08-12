@@ -212,6 +212,7 @@ private struct ReaderRootView: View {
             guard scenePhase == .active else { return }
             consumePendingNativeFeatureRequest()
             await refreshNativeFeatureSnapshot()
+            reader.probeReaderSnapshotLink()
             var secondsUntilSnapshotRefresh = 12
             while !Task.isCancelled {
                 do {
@@ -223,6 +224,7 @@ private struct ReaderRootView: View {
                 secondsUntilSnapshotRefresh -= 1
                 if secondsUntilSnapshotRefresh <= 0 {
                     await refreshNativeFeatureSnapshot()
+                    reader.probeReaderSnapshotLink()
                     secondsUntilSnapshotRefresh = 12
                 }
             }
