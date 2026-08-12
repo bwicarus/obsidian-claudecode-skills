@@ -5668,8 +5668,26 @@ internal static class DirectBridgeSelfTest
             && clearedDocument.RootElement.GetProperty("selection")
                 .GetProperty("state").GetString() == "cleared"
             && clearedDocument.RootElement.GetProperty("selection")
-                .GetProperty("text").ValueKind == JsonValueKind.Null,
-            "direct-snapshot-active-reading-clears-stale-selection",
+                .GetProperty("text").ValueKind == JsonValueKind.Null
+            && clearedDocument.RootElement.GetProperty("contextStatus")
+                .GetString() == "ready"
+            && clearedDocument.RootElement.GetProperty("activeReading")
+                .GetProperty("sourceInstanceId").GetString()
+                == "source-selection-test"
+            && clearedDocument.RootElement.GetProperty("activeReading")
+                .GetProperty("viewFile").GetString()
+                == "vbook:g_test"
+            && clearedDocument.RootElement.GetProperty("activeReading")
+                .GetProperty("viewPage").GetInt32() == 105
+            && clearedDocument.RootElement.GetProperty("activeReading")
+                .GetProperty("selectionRegions")
+                .GetProperty("items")[0]
+                .GetProperty("selectionId").GetString()
+                == "selection-1"
+            && clearedDocument.RootElement.GetProperty("currentPage")
+                .GetProperty("sourceInstanceId").GetString()
+                == "source-selection-test",
+            "direct-snapshot-source-survives-same-page-content-only-update",
             checks);
 
         DirectBridgeProtocolSession voiceSession = new(

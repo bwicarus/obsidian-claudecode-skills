@@ -245,6 +245,12 @@ internal sealed class FileDirectSnapshotContextAdapter :
                     next["selectionRegions"] = JsonNode.Parse(
                         regions.GetRawText());
                 }
+                if (_activeReading is JsonObject priorActive)
+                {
+                    PreserveActiveReadingContinuity(
+                        priorActive,
+                        next);
+                }
                 bool changedPage = _activeReading is not null
                     && !SameActiveReadingIdentity(_activeReading, next);
                 _activeReading = next;
@@ -977,31 +983,9 @@ internal sealed class FileDirectSnapshotContextAdapter :
                 && SamePageEquivalent(priorActive, activeReading)
             )
             {
-                if (
-                    HasViewBinding(priorActive)
-                    && StringValue(priorActive["viewFile"])
-                        is string priorViewFile
-                )
-                {
-                    activeReading["viewFile"] = priorViewFile;
-                    activeReading["viewPage"] =
-                        priorActive["viewPage"]?.DeepClone();
-                }
-                if (
-                    StringValue(priorActive["sourceInstanceId"])
-                        is string priorSource
-                )
-                {
-                    activeReading["sourceInstanceId"] = priorSource;
-                }
-                if (
-                    priorActive["selectionRegions"]
-                        is JsonObject priorRegions
-                )
-                {
-                    activeReading["selectionRegions"] =
-                        priorRegions.DeepClone();
-                }
+                PreserveActiveReadingContinuity(
+                    priorActive,
+                    activeReading);
             }
             _stablePage = stablePage;
             _activeReading = activeReading;
@@ -2632,6 +2616,50 @@ internal sealed class FileDirectSnapshotContextAdapter :
             StringValue(right["file"]),
             StringComparison.Ordinal)
         && PageEquivalent(left["page"], right["page"]);
+
+    // Content and location updates are allowed to omit live-source metadata.
+    // On the same canonical page, omission means "unchanged", not "clear".
+    // Dropping the source here leaves a readable snapshot with no route for
+    // highlighter, browser-control, or on-demand visual commands.
+    private static void PreserveActiveReadingContinuity(
+        JsonObject prior,
+        JsonObject next)
+    {
+        if (!SamePageEquivalent(prior, next))
+        {
+            return;
+        }
+        string? priorSource = StringValue(
+            prior["sourceInstanceId"]);
+        string? nextSource = StringValue(
+            next["sourceInstanceId"]);
+        if (
+            nextSource is not null
+            && !string.Equals(
+                nextSource,
+                priorSource,
+                StringComparison.Ordinal)
+        )
+        {
+            return;
+        }
+        if (!HasViewBinding(next) && HasViewBinding(prior))
+        {
+            next["viewFile"] = prior["viewFile"]?.DeepClone();
+            next["viewPage"] = prior["viewPage"]?.DeepClone();
+        }
+        if (nextSource is null && priorSource is not null)
+        {
+            next["sourceInstanceId"] = priorSource;
+        }
+        if (
+            next["selectionRegions"] is null
+            && prior["selectionRegions"] is JsonObject priorRegions
+        )
+        {
+            next["selectionRegions"] = priorRegions.DeepClone();
+        }
+    }
 
     private static bool WebSourceDiffers(
         JsonObject stablePage,

@@ -4176,3 +4176,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：Reader 合同 1031 项、发布管线 24 项、桌面端 124 项、Direct 构建/自检与 ReaderBundle 312 文件校验通过；网络审计新增债务为零。
 - **边界**：Windows 全量/handoff 仍只有已登记的 POSIX `fcntl`、Linux fixture/环境基线；纯本地未同步 Pi 的书可精确高亮，但 Anki 来源核验继续 fail closed。
 - **下一步**：提交推送后按原子流程发布 App `1.1.46`、扩展 `0.2.105`、Direct `0.1.116` 与 ReaderPC `0.1.16`，再核对健康、路由与 TestFlight 状态。
+
+## Codex：修复同页更新丢失高亮投递目标（2026-08-13 JST）
+- **根因/改动**：带正文但省略实时来源的同页 `active-reading` 会覆盖 `sourceInstanceId`、卷视图绑定与选区区域；现仅在同一规范页且未显式换来源时延续这些投递元数据，换页/换来源仍 fail closed。
+- **验证/安装**：C# Release 与完整无音频 self-test、打包器 20 项、0.1.117 包内/MCP 自检均通过；Windows Direct 已按原子流程从 0.1.116 升至 0.1.117。
+- **健康/回滚**：服务恢复 `idle / readerConnected=false / captureActive=false / lastError=null`；回滚点 `C:\Users\bwica\bw-computer-voice-bridge-backups\install-0.1.117-20260812T165052Z-3ec32a0b`。
+- **边界/下一步**：未改 App、Pi、扩展或语音链；handoff 仅命中既有 Windows `fcntl` 基线。App 当时未在前台，需下次前台上报后实测指定文字高亮与快照计数。
