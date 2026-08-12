@@ -21,6 +21,7 @@ import reader_book_ocr  # noqa: E402
 import reader_book_ocr_worker  # noqa: E402
 from reader_book_ocr import ReaderBookOcrError, ReaderBookOcrService  # noqa: E402
 from reader_book_ocr_worker import (  # noqa: E402
+    _manga_line_char_boxes,
     _publish_attachments,
     _publish_release,
     _tokenize_chars,
@@ -324,7 +325,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             "engines": ["manga"],
             "maxPdfBytes": 1024 * 1024,
             "maxPageBytes": 1024 * 1024,
-            "processingProfile": "quality-first-v1",
+            "processingProfile": "quality-first-v2",
         })
         self.assertIsNotNone(claimed)
         self.assertEqual(claimed["job"]["completedPages"], [])
@@ -446,13 +447,13 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         self.assertEqual(manifest["revision"], completed["revision"])
         self.assertEqual(manifest["formulaReason"], "formula-model-unavailable")
         self.assertEqual(manifest["executor"], "pc")
-        self.assertEqual(manifest["processingProfile"], "quality-first-v1")
+        self.assertEqual(manifest["processingProfile"], "quality-first-v2")
         snapshot = service._published_snapshot(
             self.entry["bookId"], self.entry["contentSha256"]
         )
         self.assertEqual(snapshot["result"]["executor"], "pc")
         self.assertEqual(
-            snapshot["result"]["processingProfile"], "quality-first-v1"
+            snapshot["result"]["processingProfile"], "quality-first-v2"
         )
 
     def test_pc_expired_lease_is_reclaimable_and_old_upload_is_rejected(self) -> None:
@@ -473,7 +474,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             "engines": ["vision"],
             "maxPdfBytes": 1024 * 1024,
             "maxPageBytes": 1024 * 1024,
-            "processingProfile": "quality-first-v1",
+            "processingProfile": "quality-first-v2",
         }
         first = service.claim_pc_worker("pc_first", capabilities)
         version_dir = service._version_dir(
@@ -637,7 +638,7 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
         )
         self.assertFalse(already)
         self.assertEqual(pc_job["executor"], "pc")
-        self.assertEqual(pc_job["processingProfile"], "quality-first-v1")
+        self.assertEqual(pc_job["processingProfile"], "quality-first-v2")
         self.assertEqual(pc_job["successfulPages"], 0)
         self.assertTrue(release_dir.is_dir(), "immutable Pi release must remain")
         self.assertFalse((job_dir / "pages" / "p000001.json").exists())
@@ -648,11 +649,11 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
             "engines": ["vision"],
             "maxPdfBytes": 1024 * 1024,
             "maxPageBytes": 1024 * 1024,
-            "processingProfile": "quality-first-v1",
+            "processingProfile": "quality-first-v2",
         })
         self.assertEqual(claimed["job"]["completedPages"], [])
         self.assertEqual(
-            claimed["job"]["processingProfile"], "quality-first-v1"
+            claimed["job"]["processingProfile"], "quality-first-v2"
         )
 
     def test_version_kind_and_unknown_fields_fail_closed(self) -> None:
@@ -1442,6 +1443,53 @@ class ReaderBookOcrServiceTest(unittest.TestCase):
 
 
 class ReaderBookOcrWorkerContractTest(unittest.TestCase):
+    def test_manga_line_geometry_follows_vertical_japanese_writing(self) -> None:
+        boxes = _manga_line_char_boxes(
+            "取り寄せ",
+            [[100, 20], [120, 20], [120, 180], [100, 180]],
+            vertical=True,
+        )
+        self.assertEqual([item[0] for item in boxes], list("取り寄せ"))
+        self.assertTrue(all(item[1] == 100 and item[3] == 120 for item in boxes))
+        self.assertEqual([item[2] for item in boxes], [20, 60, 100, 140])
+        self.assertEqual([item[4] for item in boxes], [60, 100, 140, 180])
+
+    def test_manga_line_geometry_keeps_horizontal_text_on_x_axis(self) -> None:
+        boxes = _manga_line_char_boxes(
+            "HTTP",
+            [[10, 30], [210, 30], [210, 50], [10, 50]],
+            vertical=False,
+        )
+        self.assertEqual([item[1] for item in boxes], [10, 60, 110, 160])
+        self.assertTrue(all(item[2] == 30 and item[4] == 50 for item in boxes))
+
+    def test_manga_line_geometry_uses_authoritative_direction_for_square_box(self) -> None:
+        boxes = _manga_line_char_boxes(
+            "縦書",
+            [[10, 10], [50, 10], [50, 50], [10, 50]],
+            vertical=True,
+        )
+        self.assertEqual([(item[2], item[4]) for item in boxes], [(10, 30), (30, 50)])
+        self.assertTrue(all(item[1] == 10 and item[3] == 50 for item in boxes))
+
+    def test_manga_line_geometry_follows_skewed_polygon(self) -> None:
+        boxes = _manga_line_char_boxes(
+            "AB",
+            [[10, 10], [50, 20], [46, 40], [6, 30]],
+            vertical=False,
+        )
+        self.assertEqual(boxes[0][1:], ("A", 6.0, 10.0, 30.0, 35.0)[1:])
+        self.assertEqual(boxes[1][1:], (26.0, 15.0, 50.0, 40.0))
+
+    def test_manga_line_geometry_never_inverts_dense_character_boxes(self) -> None:
+        boxes = _manga_line_char_boxes(
+            "1234567890",
+            [[0, 0], [2, 0], [2, 1], [0, 1]],
+            vertical=False,
+        )
+        self.assertEqual(len(boxes), 10)
+        self.assertTrue(all(item[1] < item[3] and item[2] < item[4] for item in boxes))
+
     def test_non_japanese_tokenization_uses_real_boundaries(self) -> None:
         chars = [
             {"c": "A", "w": -1, "bk": 0, "line": 0},

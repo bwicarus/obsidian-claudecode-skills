@@ -38,7 +38,7 @@ ENGINES = frozenset(("vision", "manga"))
 EXECUTORS = frozenset(("pi", "pc"))
 PROCESSING_PROFILES = {
     "pi": "pi-default-v1",
-    "pc": "quality-first-v1",
+    "pc": "quality-first-v2",
 }
 LEGACY_ENGINE = "legacy"
 RESULT_ENGINES = ENGINES | frozenset((LEGACY_ENGINE,))
@@ -457,7 +457,7 @@ class ReaderBookOcrService:
             if capabilities.get("processingProfile") != PROCESSING_PROFILES["pc"]:
                 raise ReaderBookOcrError(
                     "invalid-processing-profile",
-                    "PC OCR worker requires processingProfile=quality-first-v1",
+                    "PC OCR worker requires processingProfile=quality-first-v2",
                     status=400,
                 )
             try:

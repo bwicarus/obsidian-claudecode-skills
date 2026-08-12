@@ -27,7 +27,7 @@ import uuid
 CONTRACT = "reader-library-ocr/1"
 PAGE_SCHEMA = "reader-page-chars/1"
 PUBLICATION_CONTRACT = "reader-book-ocr-publication/1"
-PROCESSING_PROFILES = {"pi": "pi-default-v1", "pc": "quality-first-v1"}
+PROCESSING_PROFILES = {"pi": "pi-default-v1", "pc": "quality-first-v2"}
 _EXPECTED_JOB_ID: str | None = None
 _EXPECTED_WORKER_GENERATION: str | None = None
 
@@ -299,6 +299,80 @@ def _vision_page(page, project: Path) -> tuple[list[dict], str, int, int]:
     return chars, str(raw.get("text") or ""), image_w, image_h
 
 
+def _manga_line_char_boxes(
+    text: str,
+    points: list,
+    *,
+    vertical: bool | None = None,
+) -> list[tuple[str, float, float, float, float]]:
+    """Approximate character geometry in the detector's actual writing direction.
+
+    MangaPageOcr exposes a four-point polygon per recognized line, not symbol
+    polygons.  Preserve its authoritative writing-direction flag and split the
+    actual quadrilateral rather than its axis-aligned bounding rectangle.  Each
+    slice is returned as an AABB because ``reader-page-chars/1`` stores boxes,
+    but the slice boundaries still follow a rotated/skewed line.  Exact symbol
+    geometry from Google Vision remains untouched and stays the highest-
+    fidelity option.
+    """
+    visible = [character for character in text if not character.isspace()]
+    try:
+        valid_points = [
+            (float(point[0]), float(point[1]))
+            for point in points
+            if isinstance(point, (list, tuple)) and len(point) >= 2
+        ]
+    except (TypeError, ValueError, OverflowError):
+        return []
+    if not visible or len(valid_points) != 4:
+        return []
+    if not all(math.isfinite(value) for point in valid_points for value in point):
+        return []
+    xs = [point[0] for point in valid_points]
+    ys = [point[1] for point in valid_points]
+    x0, x1 = min(xs), max(xs)
+    y0, y1 = min(ys), max(ys)
+    width = max(0.0, x1 - x0)
+    height = max(0.0, y1 - y0)
+    if width <= 0 or height <= 0:
+        return []
+    is_vertical = bool(vertical) if isinstance(vertical, bool) else height > width * 1.2
+
+    def between(start: tuple[float, float], end: tuple[float, float], ratio: float):
+        return (
+            start[0] + (end[0] - start[0]) * ratio,
+            start[1] + (end[1] - start[1]) * ratio,
+        )
+
+    top_left, top_right, bottom_right, bottom_left = valid_points
+    cells: list[tuple[str, float, float, float, float]] = []
+    for offset, character in enumerate(visible):
+        start_ratio = offset / len(visible)
+        end_ratio = (offset + 1) / len(visible)
+        if is_vertical:
+            slice_points = (
+                between(top_left, bottom_left, start_ratio),
+                between(top_right, bottom_right, start_ratio),
+                between(top_right, bottom_right, end_ratio),
+                between(top_left, bottom_left, end_ratio),
+            )
+        else:
+            slice_points = (
+                between(top_left, top_right, start_ratio),
+                between(top_left, top_right, end_ratio),
+                between(bottom_left, bottom_right, end_ratio),
+                between(bottom_left, bottom_right, start_ratio),
+            )
+        slice_x = [point[0] for point in slice_points]
+        slice_y = [point[1] for point in slice_points]
+        cell_x0, cell_x1 = min(slice_x), max(slice_x)
+        cell_y0, cell_y1 = min(slice_y), max(slice_y)
+        if cell_x1 <= cell_x0 or cell_y1 <= cell_y0:
+            return []
+        cells.append((character, cell_x0, cell_y0, cell_x1, cell_y1))
+    return cells
+
+
 def _manga_page(page, engine) -> tuple[list[dict], str, int, int]:
     pix = page.get_pixmap(dpi=300, alpha=False)
     image_w, image_h = pix.width, pix.height
@@ -330,30 +404,27 @@ def _manga_page(page, engine) -> tuple[list[dict], str, int, int]:
             points = coords[index] or []
             if not text.strip() or not points:
                 continue
-            xs = [float(point[0]) for point in points if len(point) >= 2]
-            ys = [float(point[1]) for point in points if len(point) >= 2]
-            if not xs or not ys:
-                continue
-            x0, x1 = min(xs), max(xs)
-            y0, y1 = min(ys), max(ys)
-            visible = [character for character in text if not character.isspace()]
-            if not visible:
-                continue
-            cell = max(1.0, (x1 - x0) / len(visible))
-            for offset, character in enumerate(visible):
+            block_vertical = block.get("vertical")
+            cells = _manga_line_char_boxes(
+                text,
+                points,
+                vertical=(block_vertical if isinstance(block_vertical, bool) else None),
+            )
+            for character, x0, y0, x1, y1 in cells:
                 chars.append({
                     "c": character,
-                    "x0": round((x0 + offset * cell) * sx, 3),
+                    "x0": round(x0 * sx, 3),
                     "y0": round(y0 * sy, 3),
-                    "x1": round((x0 + (offset + 1) * cell) * sx, 3),
+                    "x1": round(x1 * sx, 3),
                     "y1": round(y1 * sy, 3),
                     "w": -1,
                     "bk": block_no,
                     "line": line_no,
                     "b": 0,
                 })
-            text_lines.append(text)
-            line_no += 1
+            if cells:
+                text_lines.append(text)
+                line_no += 1
     return chars, "\n".join(text_lines), image_w, image_h
 
 

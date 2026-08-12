@@ -34,7 +34,7 @@ import urllib.request
 
 
 WORKER_CONTRACT = "reader-library-ocr-worker/1"
-PROCESSING_PROFILE = "quality-first-v1"
+PROCESSING_PROFILE = "quality-first-v2"
 PAGE_SCHEMA = "reader-page-chars/1"
 FORMULA_SCHEMA = "reader-formula-regions/1"
 WORKER_PREFIX = "/pdf/api/library/ocr/worker"
@@ -60,7 +60,8 @@ PATH_RE = re.compile(r"(?:[A-Za-z]:\\|/(?:home|tmp|var|opt|srv)/)[^\r\n]*")
 PROCESS_INSTANCE_NONCE = secrets.token_hex(16)
 
 QUALITY_PROFILE = {
-    "name": "quality-first",
+    "name": "quality-first-v2",
+    "textGeometry": "mokuro-polygon-direction-v2",
     "gpuRequired": True,
     "ocrRenderDpi": 400,
     "maxImageLongEdge": 6000,
