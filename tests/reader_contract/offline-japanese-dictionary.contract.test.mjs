@@ -158,6 +158,14 @@ test("App and extension load the offline module before lookup UI", () => {
     scripts.indexOf("vendor/rc-offline-dictionary.js") <
       scripts.indexOf("vendor/rc-wordpop.js"),
   );
+
+  const project = read("ios/BWReader/project.yml");
+  assert.match(project, /path: Extension\/Resources\/dictionary-data[\s\S]*?type: folder/);
+
+  const pdfReader = read("_server_deploy/pdf_reader.py");
+  const htmlReader = read("_server_deploy/html_reader.py");
+  assert.equal((pdfReader.match(/"pdf\/rc-offline-dictionary\.js"/g) || []).length, 2);
+  assert.equal((htmlReader.match(/"pdf\/rc-offline-dictionary\.js"/g) || []).length, 1);
 });
 
 test("Japanese UI keeps Pi AI as an explicit action", () => {

@@ -259,6 +259,7 @@ _HTML_CACHE_ASSETS = (
     "pdf/rc-highlight.js",
     "pdf/rc-snippets.js",
     "pdf/rc-result.js",
+    "pdf/rc-offline-dictionary.js",
     "pdf/rc-wordpop.js",
     "pdf/rc-assistant.js",
     "pdf/rc-settings.js",

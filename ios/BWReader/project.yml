@@ -87,8 +87,8 @@ targets:
       - path: Shared/ReaderSharedSnapshot.swift
       - path: Shared/ReaderLocalNoteBridge.swift
       # Keep the staging directory itself out of the bundle. Root files are
-      # copied one by one, while the three referenced directories preserve the
-      # paths used by manifest.json (src/..., vendor/..., and icons/...).
+      # copied one by one, while the referenced directories preserve the paths
+      # used by manifest.json and extension-owned packaged data.
       - path: Extension/Resources/manifest.json
         buildPhase: resources
         optional: true
@@ -131,6 +131,10 @@ targets:
         buildPhase: resources
         optional: true
       - path: Extension/Resources/icons
+        type: folder
+        buildPhase: resources
+        optional: true
+      - path: Extension/Resources/dictionary-data
         type: folder
         buildPhase: resources
         optional: true

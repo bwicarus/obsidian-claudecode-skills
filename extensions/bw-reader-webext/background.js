@@ -6166,6 +6166,7 @@ async function handleOfflineDictionaryMessage(message) {
       code: "BW_OFFLINE_DICTIONARY_PATH"
     });
   }
+  // @interaction reader.shell.read
   const response = await fetch(chrome.runtime.getURL(`dictionary-data/${path}`), {
     cache: "force-cache"
   });

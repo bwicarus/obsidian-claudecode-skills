@@ -46,6 +46,7 @@
   async function loadJson(relativePath) {
     var path = safeRelativePath(relativePath);
     if (bridge && typeof bridge.fetchJson === 'function') return bridge.fetchJson(path);
+    // @interaction reader.shell.read
     var response = await fetch(BASE + path, { cache: 'force-cache', credentials: 'same-origin' });
     if (!response.ok) throw new Error('离线词典资源 HTTP ' + response.status);
     return response.json();

@@ -180,6 +180,7 @@ class LocalReaderPackagerTests(unittest.TestCase):
         self.assertIn("url: https://github.com/swhitty/FlyingFox.git", project)
         self.assertIn("exactVersion: 0.27.1", project)
         self.assertIn("- path: Generated/ReaderBundle", project)
+        self.assertIn("- path: Extension/Resources/dictionary-data", project)
         self.assertIn("product: FlyingFox", project)
         self.assertIn("product: FlyingSocks", project)
         build_at = workflow.index("Build deterministic native ReaderBundle")
