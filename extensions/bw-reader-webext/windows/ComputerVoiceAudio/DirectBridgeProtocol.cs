@@ -42,6 +42,8 @@ internal sealed class DirectCodexVoiceControl :
 {
     internal const string StateSource =
         "windows-microphone-capability-ledger";
+    internal static readonly TimeSpan RestartReadySettleDelay =
+        TimeSpan.FromSeconds(5);
 
     internal static DirectCodexVoiceControl Shared { get; } =
         CreateProduction();
@@ -347,16 +349,20 @@ internal sealed class DirectCodexVoiceControl :
                         await controller.ConfirmStartedAsync(
                             baseline,
                             receipt,
-                            CodexVoiceActivityController.TransitionTimeout,
+                            CodexVoiceActivityController.StartObservationTimeout,
                             CodexVoiceActivityController.MonitorInterval,
                             cancellationToken).ConfigureAwait(false);
+                    confirmation = await controller.ConfirmUsableAsync(
+                        confirmation,
+                        CodexVoiceActivityController.StartUsableSettleDelay,
+                        cancellationToken).ConfigureAwait(false);
                     return confirmation.Snapshot;
                 }
 
                 shortcutSender.Send(target, DirectVoiceCommand.Stop);
                 return await controller.ConfirmStoppedAsync(
                     before,
-                    CodexVoiceActivityController.TransitionTimeout,
+                    CodexVoiceActivityController.StopTransitionTimeout,
                     CodexVoiceActivityController.MonitorInterval,
                     cancellationToken).ConfigureAwait(false);
             },
@@ -375,6 +381,12 @@ internal sealed class DirectCodexVoiceControl :
                         profile.AppKind,
                         profile.AppUserModelId),
                     TimeSpan.FromSeconds(30),
+                    cancellationToken).ConfigureAwait(false);
+                // A window can be discoverable before Codex finishes wiring
+                // its voice UI. Let the fresh generation settle, then the
+                // caller sends exactly one F24 for the retry.
+                await Task.Delay(
+                    RestartReadySettleDelay,
                     cancellationToken).ConfigureAwait(false);
             });
     }
@@ -415,8 +427,9 @@ internal sealed class DirectCodexVoiceControl :
                 }
                 catch
                 {
-                    // A sleeping/offline machine or an app still starting is
-                    // expected. The next bounded poll retries without spinning.
+                    // One failed start attempt already performs its single
+                    // restart/retry and then latches automatic recovery. The
+                    // monitor never turns the failure into repeated F24 input.
                 }
             }
         }

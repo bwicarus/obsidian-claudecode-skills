@@ -283,7 +283,11 @@ internal sealed record CodexVoiceStopPlan(
 
 internal sealed class CodexVoiceActivityController
 {
-    internal static readonly TimeSpan TransitionTimeout =
+    internal static readonly TimeSpan StartObservationTimeout =
+        TimeSpan.FromSeconds(20);
+    internal static readonly TimeSpan StartUsableSettleDelay =
+        TimeSpan.FromSeconds(8);
+    internal static readonly TimeSpan StopTransitionTimeout =
         TimeSpan.FromSeconds(5);
     internal static readonly TimeSpan MonitorInterval =
         TimeSpan.FromMilliseconds(250);
@@ -467,6 +471,42 @@ internal sealed class CodexVoiceActivityController
                 Min(pollInterval, remaining),
                 cancellationToken).ConfigureAwait(false);
         }
+    }
+
+    internal async Task<CodexVoiceStartConfirmation>
+        ConfirmUsableAsync(
+            CodexVoiceStartConfirmation confirmation,
+            TimeSpan settleDelay,
+            CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(confirmation);
+        RequireAvailable(confirmation.Snapshot);
+        if (!confirmation.Snapshot.Active)
+        {
+            throw new ArgumentException(
+                "BW_COMPUTER_VOICE_ACTIVITY_SETTLE_REQUIRES_ACTIVE",
+                nameof(confirmation));
+        }
+        if (settleDelay <= TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(settleDelay));
+        }
+
+        await _clock.DelayAsync(settleDelay, cancellationToken)
+            .ConfigureAwait(false);
+        CodexVoiceActivitySnapshot current = ReadRequired();
+        if (
+            !current.Active
+            || current.LastUsedTimeStart
+                != confirmation.Snapshot.LastUsedTimeStart
+        )
+        {
+            throw new DirectProtocolException(
+                StartNotConfirmedCode,
+                "Codex 语音浮标已出现，但等待后未保持为同一可用语音会话",
+                retryable: true);
+        }
+        return confirmation with { Snapshot = current };
     }
 
     internal async Task<CodexVoiceActivitySnapshot>

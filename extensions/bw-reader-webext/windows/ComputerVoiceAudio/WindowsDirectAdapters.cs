@@ -1590,9 +1590,13 @@ internal sealed class WindowsDirectMediaAdapter : IDirectMediaAdapter
                             "BW_COMPUTER_VOICE_DIRECT_VOICE_BASELINE_MISSING",
                             "Codex 语音状态基线不存在"),
                         shortcutReceipt,
-                        CodexVoiceActivityController.TransitionTimeout,
+                        CodexVoiceActivityController.StartObservationTimeout,
                         CodexVoiceActivityController.MonitorInterval,
                         CancellationToken.None).ConfigureAwait(false);
+                voiceConfirmation = await VoiceActivity.ConfirmUsableAsync(
+                    voiceConfirmation,
+                    CodexVoiceActivityController.StartUsableSettleDelay,
+                    CancellationToken.None).ConfigureAwait(false);
                 _voiceConfirmation = voiceConfirmation;
                 _voiceStartBaseline = null;
                 CancellationTokenSource voiceMonitorLifetime = new();

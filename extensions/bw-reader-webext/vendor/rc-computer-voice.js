@@ -27,6 +27,7 @@ if (window.__bwPwaProviderOnly) return;
   var CLOSE_TIMEOUT_MS = 1500;
   var REQUEST_TIMEOUT_MS = 7000;
   var START_TIMEOUT_MS = 45000;
+  var CODEX_VOICE_CONTROL_TIMEOUT_MS = 120000;
   var HEARTBEAT_INTERVAL_MS = 5000;
   var HEARTBEAT_TIMEOUT_MS = 15000;
   var START_GESTURE_LEASE_TTL_MS = 5000;
@@ -3234,7 +3235,7 @@ if (window.__bwPwaProviderOnly) return;
       return opened.request(
         "codex-voice-set",
         { active: desiredActive },
-        45000
+        CODEX_VOICE_CONTROL_TIMEOUT_MS
       );
     }).then(function (value) {
       return normalizeCodexVoicePayload(value, "Codex 语音控制响应");
@@ -3266,7 +3267,7 @@ if (window.__bwPwaProviderOnly) return;
       return opened.request(
         "codex-voice-keepalive-set",
         { enabled: enabled },
-        45000
+        CODEX_VOICE_CONTROL_TIMEOUT_MS
       );
     }).then(function (value) {
       return normalizeCodexVoicePayload(value, "Codex 语音持续运行响应");

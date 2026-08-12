@@ -335,9 +335,10 @@ test("电脑客户端设置读取真实 Codex 语音状态并按目标状态控�
   );
   assert.match(
     setBody,
-    /"codex-voice-set"[\s\S]*\{ active: desiredActive \},[\s\S]*45000/,
+    /"codex-voice-set"[\s\S]*\{ active: desiredActive \},[\s\S]*CODEX_VOICE_CONTROL_TIMEOUT_MS/,
     "a bounded Codex restart and fresh F24 attempt must fit inside the control request",
   );
+  assert.match(runtime, /CODEX_VOICE_CONTROL_TIMEOUT_MS = 120000/);
 
   const borrowStart = runtime.indexOf(
     "function borrowSnapshotChannelForStatus(attempt)",

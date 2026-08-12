@@ -8,6 +8,7 @@ internal static class CodexVoiceActivitySelfTest
         CheckActivityRule(checks);
         CheckPreexistingVoiceIsNotOwned(checks);
         CheckNewVoiceIsOwned(checks);
+        CheckStartedVoiceMustSettle(checks);
         CheckUnattestedTransitionFailsClosed(checks);
         CheckStartTimeoutAndReadError(checks);
         CheckStopConfirmation(checks);
@@ -224,6 +225,52 @@ internal static class CodexVoiceActivitySelfTest
             && stopFailure.Code
                 == "BW_COMPUTER_VOICE_DIRECT_VOICE_OWNERSHIP_UNCONFIRMED",
             "codex-voice-unattested-transition-is-never-auto-closed",
+            checks);
+    }
+
+    private static void CheckStartedVoiceMustSettle(
+        ICollection<string> checks)
+    {
+        CodexVoiceActivitySnapshot active =
+            CodexVoiceActivitySnapshot.Available(300, 0);
+        FakeCodexVoiceActivityClock stableClock = new();
+        CodexVoiceActivityController stableController = new(
+            new FakeCodexVoiceActivitySource(active),
+            stableClock);
+        CodexVoiceStartConfirmation stable =
+            stableController.ConfirmUsableAsync(
+                new CodexVoiceStartConfirmation(
+                    active,
+                    ObservedAfterShortcut: true,
+                    OwnershipToken: Token(300)),
+                TimeSpan.FromSeconds(8),
+                CancellationToken.None).GetAwaiter().GetResult();
+
+        FakeCodexVoiceActivityClock closedClock = new();
+        CodexVoiceActivityController closedController = new(
+            new FakeCodexVoiceActivitySource(
+                CodexVoiceActivitySnapshot.Available(300, 400)),
+            closedClock);
+        DirectProtocolException closedFailure = Capture(
+            () => closedController.ConfirmUsableAsync(
+                new CodexVoiceStartConfirmation(
+                    active,
+                    ObservedAfterShortcut: true,
+                    OwnershipToken: Token(300)),
+                TimeSpan.FromSeconds(8),
+                CancellationToken.None));
+
+        Require(
+            stable.Snapshot.Active
+            && stableClock.UtcNow
+                == FakeCodexVoiceActivityClock.Start
+                    + TimeSpan.FromSeconds(8)
+            && stableClock.DelayCount == 1
+            && closedFailure.Code
+                == CodexVoiceActivityController.StartNotConfirmedCode
+            && closedFailure.Retryable
+            && closedClock.DelayCount == 1,
+            "codex-voice-start-waits-for-usable-stable-generation",
             checks);
     }
 
