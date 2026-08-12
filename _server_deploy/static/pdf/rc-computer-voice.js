@@ -5172,11 +5172,14 @@
   }
 
   function readerContextSurfaceVisible() {
-    if (
-      nativeReaderUsesDedicatedContextLink() &&
-      window.__BW_NATIVE_READER_FOREGROUND__ === false
-    ) {
-      return false;
+    if (nativeReaderUsesDedicatedContextLink()) {
+      // In the native App, Swift owns the actual scene lifecycle.  WKWebView's
+      // document.visibilityState can become hidden while a native voice sheet
+      // or overlay is presented even though the Reader scene is still active.
+      // Treating that implementation detail as background used to close the
+      // independent snapshot WSS a few seconds after voice started.  The
+      // native foreground flag is the single authority for this path.
+      return window.__BW_NATIVE_READER_FOREGROUND__ !== false;
     }
     return !document || document.visibilityState !== "hidden";
   }

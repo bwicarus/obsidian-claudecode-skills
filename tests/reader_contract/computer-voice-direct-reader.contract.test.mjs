@@ -986,6 +986,7 @@ function createHarness(overrides = {}) {
     extensionWorld: false,
     nativeComputerVoice: false,
     nativeComputerVoiceState: null,
+    nativeReaderForeground: null,
     nativeLocalPageContext: false,
     nativePageContextPublishes: [],
     nativePageTexts: {},
@@ -1204,6 +1205,10 @@ function createHarness(overrides = {}) {
     window.__BW_NATIVE_COMPUTER_VOICE_STATE__ = structuredClone(
       scenario.nativeComputerVoiceState,
     );
+  }
+  if (typeof scenario.nativeReaderForeground === "boolean") {
+    window.__BW_NATIVE_READER_FOREGROUND__ =
+      scenario.nativeReaderForeground;
   }
   if (scenario.extensionRelay) {
     window.chrome = {
@@ -3162,6 +3167,36 @@ test("原生 App 的 eph-ctx-sync=1 完成 context 握手并启动快照泵", as
 
   contextSyncStorage.set("eph-ctx-sync", "0");
   await harness.api.contextSyncChanged();
+});
+
+test("原生 App 前台标志是专用快照可见性的权威而不受隐藏 WebView 误杀", async () => {
+  const contextSyncStorage = new Map([["eph-ctx-sync", "1"]]);
+  const foreground = createHarness({
+    origin: NATIVE_APP_ORIGIN,
+    nativeComputerVoice: true,
+    nativeReaderForeground: true,
+    visibilityState: "hidden",
+    contextSyncStorage,
+    contextDeliveryMode: "snapshot-mcp",
+  });
+
+  await waitForRequest(foreground, "context-open");
+  assert.equal(foreground.server.sockets.length, 1);
+  assert.equal(foreground.scenario.socketUrls[0], CONTEXT_ENDPOINT);
+
+  const background = createHarness({
+    origin: NATIVE_APP_ORIGIN,
+    nativeComputerVoice: true,
+    nativeReaderForeground: false,
+    visibilityState: "visible",
+    contextSyncStorage: new Map([["eph-ctx-sync", "1"]]),
+    contextDeliveryMode: "snapshot-mcp",
+  });
+  await new Promise((resolve) => setTimeout(resolve, 25));
+  assert.equal(background.server.sockets.length, 0);
+
+  contextSyncStorage.set("eph-ctx-sync", "0");
+  await foreground.api.contextSyncChanged();
 });
 
 test("原生语音占用主 WSS 时专用快照断线保留配置并有界退避重连", async () => {
