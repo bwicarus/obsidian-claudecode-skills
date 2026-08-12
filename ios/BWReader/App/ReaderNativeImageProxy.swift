@@ -144,7 +144,7 @@ private enum ReaderNativeImageProxyPolicy {
         var hints = addrinfo()
         hints.ai_flags = AI_ADDRCONFIG
         hints.ai_family = AF_UNSPEC
-        hints.ai_socktype = Int32(SOCK_STREAM.rawValue)
+        hints.ai_socktype = SOCK_STREAM
         hints.ai_protocol = IPPROTO_TCP
         var result: UnsafeMutablePointer<addrinfo>?
         let status = hostname.withCString { hostCString in
