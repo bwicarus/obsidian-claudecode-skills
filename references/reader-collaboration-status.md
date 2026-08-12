@@ -4182,3 +4182,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **验证/安装**：C# Release 与完整无音频 self-test、打包器 20 项、0.1.117 包内/MCP 自检均通过；Windows Direct 已按原子流程从 0.1.116 升至 0.1.117。
 - **健康/回滚**：服务恢复 `idle / readerConnected=false / captureActive=false / lastError=null`；回滚点 `C:\Users\bwica\bw-computer-voice-bridge-backups\install-0.1.117-20260812T165052Z-3ec32a0b`。
 - **边界/下一步**：未改 App、Pi、扩展或语音链；handoff 仅命中既有 Windows `fcntl` 基线。App 当时未在前台，需下次前台上报后实测指定文字高亮与快照计数。
+
+## Codex：精确高亮可见回执与固定视频卡恢复已发布（2026-08-13 JST）
+- **根因/改动**：PDF 精确高亮会无条件等待可能失联的翻页 Promise，且保存后未确认色块渲染；现复用已就绪当前页、有界等待目标文字层，并只在匹配 ID 的非零矩形出现后回成功。固定/重载视频卡恢复共享内置播放器与旧卡身份。
+- **验证/Windows**：专项 13 项、Reader Node 全量 1035 项、ReaderBundle 312 文件、Direct 候选与包内自检通过；Windows Direct `0.1.118` 已原子安装，当前 `idle / lastError=null`，ReaderPC 语音与预处理恢复在线。
+- **发布事实**：提交 `b9f790ce`；Actions `31622294013` 上传 TestFlight `1.1.47 (265)`，`31622963634` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
+- **边界/下一步**：Windows 全量/handoff 仍只命中已登记的 `fcntl`/Linux fixture 基线；未部署 Pi 或桌面扩展正式渠道。旧高亮请求不会重放，安装后须在新 Codex 会话对同一文字重新调用，并以页面实际出现色块为唯一验收。
