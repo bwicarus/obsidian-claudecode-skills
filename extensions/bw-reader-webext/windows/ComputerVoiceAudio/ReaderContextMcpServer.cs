@@ -9,12 +9,14 @@ internal sealed class ReaderContextMcpServer
     internal const string ToolName = "reader_context_snapshot";
     internal const string VisualToolName = "reader_visual_image";
     internal const string BrowserControlToolName = "reader_browser_control";
+    internal const string HighlightTextToolName = "reader_highlight_text";
+    internal const string AnkiDraftToolName = "reader_anki_draft";
     internal const string CardToolName = "reader_card";
     internal const string CommandToolName = "reader_command";
     internal const string CapabilityGuideToolName =
         "reader_capability_guide";
     internal const string ServerName = "bw-reader-context-snapshot";
-    internal const string ServerVersion = "1.2.0";
+    internal const string ServerVersion = "1.4.0";
     internal static readonly TimeSpan FreshnessWindow =
         TimeSpan.FromMinutes(3);
 
@@ -357,8 +359,17 @@ internal sealed class ReaderContextMcpServer
                     ["version"] = ServerVersion,
                 },
                 ["instructions"] =
-                    "Use reader_context_snapshot only when the user asks "
-                    + "about the current Reader page or selection. Respect "
+                    "Before answering any request whose meaning depends on "
+                    + "the live Reader state, call reader_context_snapshot "
+                    + "first. This includes indirect references such as "
+                    + "this, here, this page or paragraph, what is visible, "
+                    + "selected, highlighted, drawn, or circled, even when "
+                    + "the user does not say Reader or snapshot. Do not call "
+                    + "it for unrelated requests. After obtaining any "
+                    + "structured weather/news/images/videos/fact/general "
+                    + "result, immediately call reader_card in the same turn "
+                    + "or reader_command when reader_card is filtered; do not "
+                    + "stop after promising to research it. Respect "
                     + "contextStatus; pending or stale means the current "
                     + "page text is unavailable. page_image being null does "
                     + "not mean the App image is unavailable: when "
@@ -370,14 +381,16 @@ internal sealed class ReaderContextMcpServer
                     + "only when the correct topic is unknown. In Windows "
                     + "Codex voice, use native Codex tools and native "
                     + "subagents instead of starting a nested CLI worker. "
-                    + "After a native Codex tool produces a structured "
-                    + "weather/news/images/videos/fact/general result, call "
-                    + CardToolName
-                    + " in the same turn to mirror it to the exact App or "
-                    + "extension. If a client allowlist hides that dedicated "
-                    + "tool, call "
-                    + CommandToolName
-                    + " with the same typed {card:{kind,title,data}} input. "
+                    + "Use reader_card or reader_command with the same typed "
+                    + "{card:{kind,title,data}} input. "
+                    + "For an exact source-text highlight or an editable "
+                    + "Anki draft, call reader_context_snapshot first, copy "
+                    + "the exact current file identity and verbatim source "
+                    + "text, then use reader_highlight_text or "
+                    + "reader_anki_draft. Those tools reject a wrong book, "
+                    + "wrong page or section, missing text, or text that is "
+                    + "not unique. reader_anki_draft only displays the "
+                    + "existing confirmation UI; it never writes Anki. "
                     + "Do not infer a card from final assistant "
                     + "text. Text chat-history synchronization carries only "
                     + "user/assistant text and never carries cards. "
@@ -430,8 +443,12 @@ internal sealed class ReaderContextMcpServer
             {
                 ["name"] = ToolName,
                 ["description"] =
-                    "Read the newest Windows-local Reader page and "
-                    + "selection snapshot. The tool is read-only. "
+                    "Call this first whenever the request depends on the "
+                    + "live Reader state, including implicit references to "
+                    + "this/here, the visible page or paragraph, a selection, "
+                    + "highlight, drawing, or circle. It reads the newest "
+                    + "Windows-local Reader page and selection snapshot and "
+                    + "is read-only. "
                     + "Check contextStatus before using currentPage; "
                     + "never reuse text when it is pending or stale. Read "
                     + "visualAccess to discover whether the exact App "
@@ -571,6 +588,47 @@ internal sealed class ReaderContextMcpServer
         {
             tools.Add(new JsonObject
             {
+                ["name"] = HighlightTextToolName,
+                ["description"] =
+                    "Persist one highlight on an exact verbatim source span "
+                    + "in the currently open book, including a specified PDF "
+                    + "page or EPUB section that is not the current selection. "
+                    + "Call reader_context_snapshot first and copy its exact "
+                    + "file identity. The Reader rejects a wrong book, wrong "
+                    + "page or section, missing text, or more than one match. "
+                    + "Do not retry a timeout or unknown outcome blindly.",
+                ["inputSchema"] = BuildExactSourceArgumentsSchema(false),
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = false,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = false,
+                    ["openWorldHint"] = false,
+                },
+            });
+            tools.Add(new JsonObject
+            {
+                ["name"] = AnkiDraftToolName,
+                ["description"] =
+                    "Deliver editable Anki card drafts for an exact verbatim "
+                    + "source span in the currently open book. Call "
+                    + "reader_context_snapshot first and copy its exact file "
+                    + "identity. The Reader requires exactly one match on the "
+                    + "specified PDF page or EPUB section before showing its "
+                    + "existing confirmation UI. This tool never writes "
+                    + "Anki: success means only draft_delivered. The user "
+                    + "must click the existing Add to Anki button.",
+                ["inputSchema"] = BuildExactSourceArgumentsSchema(true),
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = false,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = false,
+                    ["openWorldHint"] = false,
+                },
+            });
+            tools.Add(new JsonObject
+            {
                 ["name"] = CardToolName,
                 ["description"] =
                     "Mirror one structured weather/news/images/videos/fact/"
@@ -582,8 +640,12 @@ internal sealed class ReaderContextMcpServer
                     + "exact card envelope is {kind,title,data}; data shapes "
                     + "are weather={lo,hi,cond,loc?,date?,precip?,tip?}, "
                     + "news={items:[{t,s?,src?}]}, "
-                    + "images={items:[{url,title?,aid?,src?}]}, "
-                    + "videos={items:[{title,thumb?,url?,channel?,src?}]}, "
+                    + "images={items:[{url,title?,aid?,src?}]} where url is "
+                    + "a public HTTPS address that directly returns image/* "
+                    + "bytes, never the webpage containing the image, "
+                    + "videos={items:[{title,thumb?,url?,channel?,src?}]} "
+                    + "where url is a complete YouTube or Bilibili HTTPS "
+                    + "watch/share URL (do not fabricate a video id), "
                     + "fact={answer,detail?}, or general={text?}. The server "
                     + "strictly revalidates the existing Realtime card "
                     + "protocol and waits for the same delivery receipt.",
@@ -708,6 +770,169 @@ internal sealed class ReaderContextMcpServer
         },
     };
 
+    private static JsonObject BuildExactSourceArgumentsSchema(
+        bool includeCards)
+    {
+        JsonObject properties = new()
+        {
+            ["file"] = new JsonObject
+            {
+                ["type"] = "string",
+                ["minLength"] = 1,
+                ["maxLength"] = 4_096,
+            },
+            ["target"] = new JsonObject
+            {
+                ["oneOf"] = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["type"] = "object",
+                        ["additionalProperties"] = false,
+                        ["required"] = new JsonArray("kind", "page"),
+                        ["properties"] = new JsonObject
+                        {
+                            ["kind"] = new JsonObject
+                            {
+                                ["const"] = "pdf",
+                            },
+                            ["page"] = new JsonObject
+                            {
+                                ["type"] = "integer",
+                                ["minimum"] = 1,
+                            },
+                        },
+                    },
+                    new JsonObject
+                    {
+                        ["type"] = "object",
+                        ["additionalProperties"] = false,
+                        ["required"] = new JsonArray(
+                            "kind",
+                            "section"),
+                        ["properties"] = new JsonObject
+                        {
+                            ["kind"] = new JsonObject
+                            {
+                                ["const"] = "epub",
+                            },
+                            ["section"] = new JsonObject
+                            {
+                                ["type"] = "integer",
+                                ["minimum"] = 0,
+                            },
+                        },
+                    },
+                },
+            },
+        };
+        JsonArray required = new("file", "target");
+        if (includeCards)
+        {
+            required.Add("sourceText");
+            required.Add("cards");
+            properties["sourceText"] = SourceTextSchema();
+            properties["cards"] = new JsonObject
+            {
+                ["type"] = "array",
+                ["minItems"] = 1,
+                ["maxItems"] = 12,
+                ["items"] = new JsonObject
+                {
+                    ["oneOf"] = new JsonArray
+                    {
+                        new JsonObject
+                        {
+                            ["type"] = "object",
+                            ["additionalProperties"] = false,
+                            ["required"] = new JsonArray(
+                                "type",
+                                "front",
+                                "back"),
+                            ["properties"] = new JsonObject
+                            {
+                                ["type"] = new JsonObject
+                                {
+                                    ["const"] = "basic",
+                                },
+                                ["front"] = CardFaceSchema(),
+                                ["back"] = CardFaceSchema(true),
+                            },
+                        },
+                        new JsonObject
+                        {
+                            ["type"] = "object",
+                            ["additionalProperties"] = false,
+                            ["required"] = new JsonArray(
+                                "type",
+                                "cloze"),
+                            ["properties"] = new JsonObject
+                            {
+                                ["type"] = new JsonObject
+                                {
+                                    ["const"] = "cloze",
+                                },
+                                ["cloze"] = CardFaceSchema(),
+                            },
+                        },
+                    },
+                },
+            };
+        }
+        else
+        {
+            required.Add("text");
+            required.Add("color");
+            required.Add("note");
+            properties["text"] = SourceTextSchema();
+            properties["color"] = new JsonObject
+            {
+                ["type"] = "string",
+                ["enum"] = new JsonArray(
+                    "yellow",
+                    "green",
+                    "blue",
+                    "pink"),
+            };
+            properties["note"] = new JsonObject
+            {
+                ["anyOf"] = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["type"] = "string",
+                        ["maxLength"] = 2_000,
+                    },
+                    new JsonObject
+                    {
+                        ["type"] = "null",
+                    },
+                },
+            };
+        }
+        return new JsonObject
+        {
+            ["type"] = "object",
+            ["additionalProperties"] = false,
+            ["required"] = required,
+            ["properties"] = properties,
+        };
+    }
+
+    private static JsonObject SourceTextSchema() => new()
+    {
+        ["type"] = "string",
+        ["minLength"] = 1,
+        ["maxLength"] = 2_000,
+    };
+
+    private static JsonObject CardFaceSchema(bool allowEmpty = false) => new()
+    {
+        ["type"] = "string",
+        ["minLength"] = allowEmpty ? 0 : 1,
+        ["maxLength"] = 8_000,
+    };
+
     private static JsonObject ReadOnlyAnnotations() => new()
     {
         ["readOnlyHint"] = true,
@@ -768,6 +993,30 @@ internal sealed class ReaderContextMcpServer
             await HandleBrowserControlToolCallAsync(
                 id,
                 arguments,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (
+            toolName == HighlightTextToolName
+            && _sendOutputAsync is not null
+        )
+        {
+            await HandleExactSourceOutputToolCallAsync(
+                id,
+                arguments,
+                "highlight-text",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (
+            toolName == AnkiDraftToolName
+            && _sendOutputAsync is not null
+        )
+        {
+            await HandleExactSourceOutputToolCallAsync(
+                id,
+                arguments,
+                "anki-draft",
                 cancellationToken).ConfigureAwait(false);
             return;
         }
@@ -918,6 +1167,30 @@ internal sealed class ReaderContextMcpServer
             cancellationToken).ConfigureAwait(false);
     }
 
+    private async Task HandleExactSourceOutputToolCallAsync(
+        JsonNode id,
+        JsonElement arguments,
+        string kind,
+        CancellationToken cancellationToken)
+    {
+        if (!TryReadExactSourceOutput(arguments, kind, out JsonNode payload))
+        {
+            await WriteErrorAsync(
+                id,
+                -32602,
+                kind == "anki-draft"
+                    ? "Invalid Reader Anki draft"
+                    : "Invalid Reader exact-text highlight",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        await SendReaderOutputAsync(
+            id,
+            kind,
+            payload,
+            cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task SendReaderOutputAsync(
         JsonNode id,
         string kind,
@@ -974,6 +1247,15 @@ internal sealed class ReaderContextMcpServer
                             ["outcome"] = ack.Outcome,
                             ["sourceInstanceId"] = request.SourceInstanceId,
                             ["snapshotRevision"] = request.SnapshotRevision,
+                            ["status"] = request.Kind switch
+                            {
+                                "anki-draft" => "draft_delivered",
+                                "highlight-text" => "highlight_saved",
+                                _ => "delivered",
+                            },
+                            ["anki_written"] = request.Kind == "anki-draft"
+                                ? false
+                                : null,
                         }.ToJsonString(
                             DirectBridgeContract.JsonOptions),
                     },
@@ -1107,6 +1389,63 @@ internal sealed class ReaderContextMcpServer
         catch (ReaderRealtimeOutputException)
         {
             return null;
+        }
+    }
+
+    private static bool TryReadExactSourceOutput(
+        JsonElement arguments,
+        string kind,
+        out JsonNode payload)
+    {
+        payload = new JsonObject();
+        if (
+            arguments.ValueKind != JsonValueKind.Object
+            || kind is not ("highlight-text" or "anki-draft")
+        )
+        {
+            return false;
+        }
+        try
+        {
+            DirectJsonValidation.RequireNoDuplicateKeys(arguments);
+            HashSet<string> actual = arguments.EnumerateObject()
+                .Select(property => property.Name)
+                .ToHashSet(StringComparer.Ordinal);
+            HashSet<string> expected = kind == "highlight-text"
+                ? new HashSet<string>(
+                    ["file", "target", "text", "color", "note"],
+                    StringComparer.Ordinal)
+                : new HashSet<string>(
+                    ["file", "target", "sourceText", "cards"],
+                    StringComparer.Ordinal);
+            if (!actual.SetEquals(expected))
+            {
+                return false;
+            }
+            JsonObject normalized = JsonNode.Parse(arguments.GetRawText())
+                as JsonObject
+                ?? throw new JsonException("Reader exact source is empty");
+            if (kind == "highlight-text")
+            {
+                normalized["mutationId"] =
+                    "c_" + Guid.NewGuid().ToString("N");
+            }
+            else
+            {
+                normalized["draftId"] =
+                    "draft-" + Guid.NewGuid().ToString("N");
+            }
+            payload = ReaderRealtimeOutputProtocol.ValidatePayload(
+                kind,
+                normalized);
+            return true;
+        }
+        catch (Exception exception) when (
+            exception is JsonException
+            or DirectProtocolException
+            or ReaderRealtimeOutputException)
+        {
+            return false;
         }
     }
 

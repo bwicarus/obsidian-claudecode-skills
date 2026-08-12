@@ -6679,6 +6679,49 @@ internal static class DirectBridgeSelfTest
                     },
                 },
             }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 13,
+                method = "tools/call",
+                @params = new
+                {
+                    name = ReaderContextMcpServer.HighlightTextToolName,
+                    arguments = new
+                    {
+                        file = "library/output-book.pdf",
+                        target = new { kind = "pdf", page = 4 },
+                        text = "current reading window",
+                        color = "yellow",
+                        note = "",
+                    },
+                },
+            }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 14,
+                method = "tools/call",
+                @params = new
+                {
+                    name = ReaderContextMcpServer.AnkiDraftToolName,
+                    arguments = new
+                    {
+                        file = "library/output-book.pdf",
+                        target = new { kind = "pdf", page = 4 },
+                        sourceText = "current reading window",
+                        cards = new[]
+                        {
+                            new
+                            {
+                                type = "basic",
+                                front = "Question",
+                                back = "Answer",
+                            },
+                        },
+                    },
+                },
+            }),
             "");
         List<ReaderRealtimeOutputRequest> sent = [];
         StringWriter output = new();
@@ -6727,11 +6770,13 @@ internal static class DirectBridgeSelfTest
                 .GetProperty("result").GetProperty("contents");
             JsonElement tools = responses[3].RootElement
                 .GetProperty("result").GetProperty("tools");
-            JsonElement cardTool = tools[2];
+            JsonElement highlightTextTool = tools[2];
+            JsonElement ankiDraftTool = tools[3];
+            JsonElement cardTool = tools[4];
             JsonElement cardInput = cardTool.GetProperty("inputSchema");
             JsonElement cardSchema = cardInput.GetProperty("properties")
                 .GetProperty("card");
-            JsonElement commandInput = tools[3].GetProperty("inputSchema");
+            JsonElement commandInput = tools[5].GetProperty("inputSchema");
             JsonElement commandVariants = commandInput.GetProperty("oneOf");
             JsonElement commandCardSchema = commandVariants[1]
                 .GetProperty("properties").GetProperty("card");
@@ -6764,8 +6809,16 @@ internal static class DirectBridgeSelfTest
             using JsonDocument result = JsonDocument.Parse(resultText);
             using JsonDocument fallbackCardResult = JsonDocument.Parse(
                 fallbackCardText);
+            using JsonDocument highlightResult = JsonDocument.Parse(
+                responses[12].RootElement.GetProperty("result")
+                    .GetProperty("content")[0].GetProperty("text")
+                    .GetString()!);
+            using JsonDocument ankiDraftResult = JsonDocument.Parse(
+                responses[13].RootElement.GetProperty("result")
+                    .GetProperty("content")[0].GetProperty("text")
+                    .GetString()!);
             Require(
-                responses.Length == 12
+                responses.Length == 14
                 && initialize.GetProperty("capabilities")
                     .TryGetProperty("resources", out _)
                 && initialize.GetProperty("instructions").GetString()!
@@ -6774,7 +6827,15 @@ internal static class DirectBridgeSelfTest
                         StringComparison.Ordinal)
                 && initialize.GetProperty("instructions").GetString()!
                     .Contains(
-                        "reader_card in the same turn",
+                        "call reader_context_snapshot first",
+                        StringComparison.Ordinal)
+                && initialize.GetProperty("instructions").GetString()!
+                    .Contains(
+                        "selected, highlighted, drawn, or circled",
+                        StringComparison.Ordinal)
+                && initialize.GetProperty("instructions").GetString()!
+                    .Contains(
+                        "immediately call reader_card in the same turn",
                         StringComparison.Ordinal)
                 && initialize.GetProperty("instructions").GetString()!
                     .Contains(
@@ -6796,12 +6857,16 @@ internal static class DirectBridgeSelfTest
                     .Contains(
                         "Windows Codex 语音主路由",
                         StringComparison.Ordinal)
-                && tools.GetArrayLength() == 4
+                && tools.GetArrayLength() == 6
                 && tools[1].GetProperty("name").GetString()
                     == ReaderContextMcpServer.CapabilityGuideToolName
-                && tools[2].GetProperty("name").GetString()
+                && highlightTextTool.GetProperty("name").GetString()
+                    == ReaderContextMcpServer.HighlightTextToolName
+                && ankiDraftTool.GetProperty("name").GetString()
+                    == ReaderContextMcpServer.AnkiDraftToolName
+                && tools[4].GetProperty("name").GetString()
                     == ReaderContextMcpServer.CardToolName
-                && tools[3].GetProperty("name").GetString()
+                && tools[5].GetProperty("name").GetString()
                     == ReaderContextMcpServer.CommandToolName
                 && !cardInput.GetProperty("additionalProperties")
                     .GetBoolean()
@@ -6820,7 +6885,7 @@ internal static class DirectBridgeSelfTest
                     .Contains(
                         "same Windows Codex voice turn",
                         StringComparison.Ordinal)
-                && tools[3].GetProperty("description").GetString()!
+                && tools[5].GetProperty("description").GetString()!
                     .Contains(
                         "text history never carries cards",
                         StringComparison.Ordinal)
@@ -6849,7 +6914,13 @@ internal static class DirectBridgeSelfTest
                     .GetBoolean()
                 && fallbackCardResult.RootElement.GetProperty("kind")
                     .GetString() == "card"
-                && sent.Count == 3
+                && highlightResult.RootElement.GetProperty("status")
+                    .GetString() == "highlight_saved"
+                && ankiDraftResult.RootElement.GetProperty("status")
+                    .GetString() == "draft_delivered"
+                && !ankiDraftResult.RootElement.GetProperty("anki_written")
+                    .GetBoolean()
+                && sent.Count == 5
                 && sent[0].SourceInstanceId == "source-output"
                 && sent[0].SnapshotRevision == 42
                 && sent[0].File == "library/output-book.pdf"
@@ -6867,6 +6938,14 @@ internal static class DirectBridgeSelfTest
                     ?.GetValue<string>() == "fact"
                 && sent[2].Payload["card"]?["data"]?["answer"]
                     ?.GetValue<string>() == "卡片已送达"
+                && sent[3].Kind == "highlight-text"
+                && sent[3].Payload["mutationId"]?.GetValue<string>()
+                    .StartsWith("c_", StringComparison.Ordinal) == true
+                && sent[4].Kind == "anki-draft"
+                && sent[4].Payload["draftId"]?.GetValue<string>()
+                    .StartsWith("draft-", StringComparison.Ordinal) == true
+                && sent[4].Payload["sourceText"]?.GetValue<string>()
+                    == "current reading window"
                 && responses[9].RootElement.GetProperty("error")
                     .GetProperty("code").GetInt32() == -32602
                 && responses[10].RootElement.GetProperty("error")

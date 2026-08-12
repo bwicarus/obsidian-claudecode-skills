@@ -711,6 +711,7 @@
       '.vc-ig-img{width:100%;display:block;border-radius:10px 10px 0 0;cursor:pointer}' +
       '.vc-ig-t{font-size:10.5px;color:#9fb0cf;padding:3px 6px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}' +
       '.vc-vg-wrap{position:relative}' +
+      '.vc-vg-empty{display:flex;align-items:center;justify-content:center;min-height:84px;color:#7d8db0;font-size:11px;background:#10182b}' +
       '.vc-vg-play{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:34px;height:34px;border-radius:50%;border:none;' +
       'background:rgba(0,0,0,.6);color:#fff;font-size:13px;display:flex;align-items:center;justify-content:center;cursor:pointer;z-index:2}' +
       '.vc-vg-tag{position:absolute;top:4px;left:4px;z-index:2;font-size:9px;padding:1px 5px;border-radius:5px;background:#c00;color:#fff}' +
@@ -1499,6 +1500,47 @@
           color: p.color,
           note: p.note || ''
         });
+      } else if (delivery.kind === 'highlight-text') {
+        if (typeof window.__bwReaderHighlightExactText !== 'function') {
+          throw new Error('BW_READER_HIGHLIGHT_TEXT_UNAVAILABLE');
+        }
+        work = window.__bwReaderHighlightExactText(p);
+      } else if (delivery.kind === 'anki-draft') {
+        if (typeof window.__bwReaderValidateExactSource !== 'function' ||
+            !(RC.flashcard && typeof RC.flashcard.presentDraft === 'function')) {
+          throw new Error('BW_READER_ANKI_DRAFT_UNAVAILABLE');
+        }
+        work = Promise.resolve(window.__bwReaderValidateExactSource(p))
+          .then(function () {
+            // @interaction anki.draft.verify
+            return fetch('/pdf/api/anki-draft', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify(p)
+            });
+          })
+          .then(function (response) {
+            return response.text().then(function (raw) {
+              var data;
+              try { data = JSON.parse(raw); }
+              catch (_) {
+                throw new Error(String(raw ||
+                  'BW_READER_ANKI_DRAFT_RESPONSE_INVALID').slice(0, 500));
+              }
+              if (!response.ok || !data || data.ok !== true ||
+                  data.draft !== true || data.anki_written !== false ||
+                  !/^card_[a-f0-9]{4,12}$/.test(data.gid || '')) {
+                var reason = data && [data.code, data.error]
+                  .filter(function (part) { return typeof part === 'string' && part; })
+                  .join(': ');
+                throw new Error(String(reason ||
+                  'BW_READER_ANKI_DRAFT_REJECTED').slice(0, 500));
+              }
+              var rendered = RC.flashcard.presentDraft(p.cards, data.gid);
+              if (!rendered) throw new Error('BW_READER_ANKI_DRAFT_RENDER_FAILED');
+              return { status: 'draft_delivered', anki_written: false, gid: data.gid };
+            });
+          });
       } else {
         throw new Error('BW_READER_REALTIME_OUTPUT_KIND_UNSUPPORTED');
       }
@@ -1516,6 +1558,78 @@
   RC.voicecall.acceptRealtimeOutput = _acceptReaderRealtimeOutput;
   // ── 70 结构化结果卡(用户设计):web_search 的 Gemini 综合直接给 kind/data/brief——
   //    系统按类型渲染(天气/新闻/事实/综合),2.1 只口头一句概况;双击卡=内容带入 2.1 上下文(再双击=移出) ──
+  function _cardHttpsURL(value) {
+    var raw = String(value == null ? '' : value);
+    if (!raw || raw !== raw.trim()) return '';
+    try {
+      var parsed = new URL(raw);
+      if (parsed.protocol !== 'https:' || !parsed.hostname || parsed.username || parsed.password || parsed.hash) return '';
+      return parsed.href;
+    } catch (e) { return ''; }
+  }
+  function _cardMediaURL(value) {
+    var raw = String(value == null ? '' : value).trim();
+    if (!raw) return '';
+    // 这些地址已由 Reader 自己签发或持有；外部 card 合同只额外允许 HTTPS。
+    if (/^(?:blob:|data:image\/)/i.test(raw) ||
+        /^\/pdf\/api\/(?:page-image(?:\?|$)|asset\/|img-proxy(?:\?|$))/.test(raw)) return raw;
+    var remote = _cardHttpsURL(raw);
+    return remote ? '/pdf/api/img-proxy?url=' + encodeURIComponent(remote) : '';
+  }
+  function _videoCardRef(item) {
+    item = item || {};
+    var url = _cardHttpsURL(item.url);
+    var id = '', source = '';
+    var hint = String(item.src || '').toLowerCase();
+    try {
+      if (url) {
+        var parsed = new URL(url);
+        var host = parsed.hostname.toLowerCase();
+        var parts = parsed.pathname.split('/').filter(Boolean);
+        if (host === 'youtu.be') {
+          source = 'yt'; id = parts[0] || '';
+        } else if (host === 'youtube.com' || host === 'www.youtube.com' ||
+                   host === 'm.youtube.com' || host === 'music.youtube.com' ||
+                   host === 'youtube-nocookie.com' || host === 'www.youtube-nocookie.com') {
+          source = 'yt';
+          if (parsed.pathname === '/watch') id = parsed.searchParams.get('v') || '';
+          else if (/^(?:embed|shorts|live)$/.test(parts[0] || '')) id = parts[1] || '';
+        } else if (host === 'bilibili.com' || /\.bilibili\.com$/.test(host) || host === 'b23.tv') {
+          source = 'bili';
+          if ((parts[0] || '').toLowerCase() === 'video') id = parts[1] || '';
+        }
+      }
+    } catch (e) {}
+    if (!source && /bili|b站|哔哩/.test(hint)) source = 'bili';
+    if (!source && /youtube|\byt\b/.test(hint)) source = 'yt';
+    if (source === 'bili') {
+      if (!/^(?:BV[0-9A-Za-z]{10}|av\d{1,16})$/.test(id)) id = '';
+      if (!id && /^(?:BV[0-9A-Za-z]{10}|av\d{1,16})$/.test(String(item.id || ''))) id = String(item.id);
+    } else {
+      if (!/^[A-Za-z0-9_-]{11}$/.test(id)) id = '';
+      if (!id && /^[A-Za-z0-9_-]{11}$/.test(String(item.id || ''))) id = String(item.id);
+      if (id) source = 'yt';
+    }
+    if (!url && id) {
+      url = source === 'bili'
+        ? 'https://www.bilibili.com/video/' + encodeURIComponent(id)
+        : 'https://www.youtube.com/watch?v=' + encodeURIComponent(id);
+    }
+    return { id: id, src: source, url: url };
+  }
+  function _videoCardThumb(item, ref) {
+    var direct = _cardMediaURL(_videoCardThumbSource(item, ref));
+    if (direct) return direct;
+    return '';
+  }
+  function _videoCardThumbSource(item, ref) {
+    var raw = String((item || {}).thumb || '').trim();
+    if (_cardMediaURL(raw)) return raw;
+    if (ref && ref.src === 'yt' && ref.id) {
+      return 'https://i.ytimg.com/vi/' + encodeURIComponent(ref.id) + '/mqdefault.jpg';
+    }
+    return '';
+  }
   function _infoHtml(card) {
     var k = card.kind, d = card.data || {}, h = '';
     function e0(x) { return esc(String(x == null ? '' : x)); }
@@ -1532,18 +1646,23 @@
     } else if (k === 'images') {
       h = '<div class="vc-ig">' + (d.items || []).map(function (it, i) {
         if (it._gone) return '';   // ✕删除的图不再渲染(拖整框/回放/三态重渲都不带回;data-i 保原索引供 ✕ 定位)
+        var media = _cardMediaURL(it.url);
         return '<div class="vc-ig-cell" data-i="' + i + '">' +
           '<button type="button" class="vc-ig-x" data-i="' + i + '" aria-label="移除">✕</button>' +
-          '<img class="vc-ig-img" data-i="' + i + '"' + (it.aid ? ' data-aid="' + esc(it.aid) + '"' : '') + ' src="' + esc(it.url || '') + '" alt="' + esc(it.title || '') + '">' +
+          (media ? '<img class="vc-ig-img" data-i="' + i + '"' + (it.aid ? ' data-aid="' + esc(it.aid) + '"' : '') +
+            ' data-source-url="' + esc(it.url || '') + '" src="' + esc(media) + '" alt="' + esc(it.title || '') + '">' :
+            '<span class="rc-img-broken">🖼 图片地址无效</span>') +
           (it.title ? '<div class="vc-ig-t">' + esc(it.title) + '</div>' : '') + '</div>';
       }).join('') + '</div>';
     } else if (k === 'videos') {
       h = '<div class="vc-ig">' + (d.items || []).map(function (it, i) {
         if (it._gone) return '';   // ✕删除的视频不再渲染(同图卡)
+        var ref = _videoCardRef(it), thumbSource = _videoCardThumbSource(it, ref), thumb = _videoCardThumb(it, ref);
+        var isBili = ref.src === 'bili';
         return '<div class="vc-ig-cell" data-i="' + i + '">' +
           '<button type="button" class="vc-ig-x" data-i="' + i + '" aria-label="移除">✕</button>' +
-          '<span class="vc-vg-tag' + (it.src === 'bili' ? ' bili' : '') + '">' + (it.src === 'bili' ? 'B站' : 'YouTube') + '</span>' +
-          '<div class="vc-vg-wrap"><img class="vc-ig-img" data-i="' + i + '" loading="lazy" referrerpolicy="no-referrer" src="' + esc(it.thumb || '') + '" alt="">' +
+          '<span class="vc-vg-tag' + (isBili ? ' bili' : '') + '">' + (isBili ? 'B站' : (ref.src === 'yt' ? 'YouTube' : esc(it.src || '视频'))) + '</span>' +
+          '<div class="vc-vg-wrap">' + (thumb ? '<img class="vc-ig-img" data-i="' + i + '" loading="lazy" referrerpolicy="no-referrer" data-source-url="' + esc(thumbSource) + '" src="' + esc(thumb) + '" alt="">' : '<div class="vc-vg-empty">无预览图</div>') +
           '<button type="button" class="vc-vg-play" data-i="' + i + '" aria-label="播放">▶</button></div>' +
           '<div class="vc-ig-t">' + esc(it.title || '') + (it.channel ? '<br><span class="vc-vg-ch">' + esc(it.channel) + '</span>' : '') + '</div></div>';
       }).join('') + '</div>';
@@ -2340,10 +2459,14 @@
         ev.stopPropagation();
         var ip = +pb.getAttribute('data-i');
         var vt = ((card.data || {}).items || [])[ip] || {};
+        var ref = _videoCardRef(vt);
         try {
-          if (window.RC && RC.videoPlayer) RC.videoPlayer.open({ id: vt.id, src: vt.src === 'bili' ? 'bili' : 'yt', title: vt.title });
-          else window.open(vt.url || '', '_blank');
-        } catch (e) {}
+          // App 的本机阅读器刻意保持 frame-src 'none'；外部视频交给系统浏览器。
+          if (window.__BW_NATIVE_LOCAL_READER__ === true && ref.url) window.open(ref.url, '_blank');
+          else if (ref.id && window.RC && RC.videoPlayer) RC.videoPlayer.open({ id: ref.id, src: ref.src === 'bili' ? 'bili' : 'yt', title: vt.title });
+          else if (ref.url) window.open(ref.url, '_blank');
+          else if (typeof _toast === 'function') _toast('视频地址无效');
+        } catch (e) { try { if (typeof _toast === 'function') _toast('视频无法打开'); } catch (_) {} }
       }
     });
     root.addEventListener('click', function (ev) {
@@ -3990,8 +4113,22 @@
       // 元数据(用户拍板:图的元数据跟着进卡):alt + 图网格标题(.vc-ig-t)
       var _cap = was.img.alt || '';
       try { var _cell = was.img.closest('.vc-ig-cell'); var _t = _cell && _cell.querySelector('.vc-ig-t'); if (_t && _t.textContent.trim()) _cap = _t.textContent.trim(); } catch (e) {}
-      var _asrc = (was.img.dataset && was.img.dataset.aid) ? ('/pdf/api/asset/' + was.img.dataset.aid) : String(was.img.src).replace(/"/g, '&quot;');   // 编号内链:贴页即触发后端本地化,重开不拉外链
-      var _ih = '<div class="vc-imgdrop"><img src="' + _asrc + '">' + (_cap ? '<div class="vc-imgdrop-t">' + esc(_cap) + '</div>' : '') + '</div>';
+      var _sourceUrl = (was.img.dataset && was.img.dataset.sourceUrl) || '';
+      var _persistentSource = _cardHttpsURL(_sourceUrl) ||
+        (/^(?:data:image\/|\/pdf\/api\/(?:asset\/|page-image(?:\?|$)|img-proxy(?:\?|$)))/i.test(_sourceUrl) ? _sourceUrl : '');
+      var _currentAttr = String(was.img.getAttribute && was.img.getAttribute('src') || '');
+      var _stableCurrent = /^(?:data:image\/|\/pdf\/api\/(?:asset\/|page-image(?:\?|$)|img-proxy(?:\?|$)))/i.test(_currentAttr)
+        ? _currentAttr : '';
+      var _asrcRaw = (was.img.dataset && was.img.dataset.aid)
+        ? ('/pdf/api/asset/' + was.img.dataset.aid)
+        : (_cardMediaURL(_persistentSource) || _stableCurrent);
+      if (!_asrcRaw) {
+        try { if (typeof _toast === 'function') _toast('图片来源无效，未粘贴'); } catch (e0) {}
+        return;
+      }
+      var _asrc = esc(_asrcRaw);   // 持久化稳定 asset/proxy 地址，不能保存 App loopback 或扩展 blob 临时 URL
+      var _sourceAttr = _persistentSource ? ' data-source-url="' + esc(_persistentSource) + '"' : '';
+      var _ih = '<div class="vc-imgdrop"><img' + _sourceAttr + ' src="' + _asrc + '">' + (_cap ? '<div class="vc-imgdrop-t">' + esc(_cap) + '</div>' : '') + '</div>';
       // ① 落在另一张卡上 → 图进那张卡的**数据层**(元数据跟进,非 DOM-only:三态重渲/回放/上下文/拖整框都带);同编号(cid)所有实例同步;收藏夹持久
       try {
         var _tgt = document.elementFromPoint(ev.clientX, ev.clientY);
@@ -4002,14 +4139,14 @@
           try { _els = (_cid2 && _pins.byCid[_cid2] || []).filter(function (x) { return x.isConnected; }); } catch (e) {}
           if (!_els.length) _els = [_tc];
           var _tcard = _tc.__vcCard || null;   // #img:目标卡数据对象(建卡时挂;同 cid 浮层/侧栏共享同一对象)
-          var _dImg = { url: was.img.src, aid: (was.img.dataset && was.img.dataset.aid) || '', title: _cap, src: 'dragged', _added: 1 };   // 元数据跟进(用户拍板)
+          var _dImg = { url: _persistentSource || _asrcRaw, aid: (was.img.dataset && was.img.dataset.aid) || '', title: _cap, src: 'dragged', _added: 1 };   // 只保存稳定原始来源或 Reader 资产地址;绝不落 App loopback/blob 临时 URL
           if (_tcard && _tcard.kind === 'images' && _tcard.data) {   // 图卡 → push data.items(持久) + 各实例 append 标准 vc-ig-cell(即时;_igWire 委托自动接管 ✕/单选)
             _tcard.data.items = _tcard.data.items || [];
             _tcard.data.items.push(_dImg);
             var _ni = _tcard.data.items.length - 1;
             var _cellH = '<div class="vc-ig-cell" data-i="' + _ni + '">' +
               '<button type="button" class="vc-ig-x" data-i="' + _ni + '" aria-label="移除">✕</button>' +
-              '<img class="vc-ig-img" data-i="' + _ni + '"' + (_dImg.aid ? ' data-aid="' + esc(_dImg.aid) + '"' : '') + ' src="' + _asrc + '" alt="' + esc(_cap) + '">' +
+              '<img class="vc-ig-img" data-i="' + _ni + '"' + (_dImg.aid ? ' data-aid="' + esc(_dImg.aid) + '"' : '') + _sourceAttr + ' src="' + _asrc + '" alt="' + esc(_cap) + '">' +
               (_cap ? '<div class="vc-ig-t">' + esc(_cap) + '</div>' : '') + '</div>';
             _els.forEach(function (el2) { var ig = el2.querySelector('.vc-ig'); if (ig) ig.insertAdjacentHTML('beforeend', _cellH); else { var bd0 = el2.querySelector('.vc-card-bd') || el2; bd0.insertAdjacentHTML('beforeend', _ih); } });
           } else {   // 非图卡/无 card 对象 → DOM 塞入兜底(视觉即时,不落 data)

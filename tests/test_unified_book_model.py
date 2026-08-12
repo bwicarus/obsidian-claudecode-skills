@@ -55,7 +55,8 @@ class TestUnifiedBookModel(unittest.TestCase):
         """pdf_reader 的形态判断只允许留在转换层边界函数里。"""
         src = (ROOT / "_server_deploy" / "pdf_reader.py").read_text("utf-8")
         allowed = {"_vbook_gate", "_vb_parts", "pdf_api_book_meta", "pdf_view",
-                   "pdf_api_notes", "pdf_api_userpages", "pdf_api_pdf_insert_page"}
+                   "pdf_api_notes", "pdf_api_userpages", "pdf_api_pdf_insert_page",
+                   "pdf_api_active_reading"}
         cur, offenders = "", []
         for line in src.splitlines():
             m = re.match(r"def (\w+)\(", line)

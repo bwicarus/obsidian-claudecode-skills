@@ -50,7 +50,9 @@ internal static class ReaderRealtimeOutputProtocol
         or "tool-status"
         or "card"
         or "navigate"
-        or "highlight";
+        or "highlight"
+        or "highlight-text"
+        or "anki-draft";
 
     internal static object Event(ReaderRealtimeOutputRequest request) =>
         new
@@ -168,6 +170,41 @@ internal static class ReaderRealtimeOutputProtocol
                     throw Invalid("Reader 高亮颜色无效");
                 }
                 NullableText(root, "note", 2_000);
+                break;
+            case "highlight-text":
+                Exact(
+                    root,
+                    "mutationId",
+                    "file",
+                    "target",
+                    "text",
+                    "color",
+                    "note");
+                ValidateClientMutationId(root, "mutationId");
+                Text(root, "file", 4_096);
+                ValidateDocumentTarget(root.GetProperty("target"));
+                Text(root, "text", 2_000);
+                string exactColor = Text(root, "color", 16);
+                if (exactColor is not (
+                    "yellow" or "green" or "blue" or "pink"))
+                {
+                    throw Invalid("Reader 高亮颜色无效");
+                }
+                NullableText(root, "note", 2_000);
+                break;
+            case "anki-draft":
+                Exact(
+                    root,
+                    "draftId",
+                    "file",
+                    "target",
+                    "sourceText",
+                    "cards");
+                SafeId(root, "draftId");
+                Text(root, "file", 4_096);
+                ValidateDocumentTarget(root.GetProperty("target"));
+                Text(root, "sourceText", 2_000);
+                ValidateAnkiDraftCards(root.GetProperty("cards"));
                 break;
             default:
                 throw Invalid("Reader 输出类型无效");
@@ -438,6 +475,98 @@ internal static class ReaderRealtimeOutputProtocol
                 return;
             default:
                 throw Invalid("Reader 导航动作无效");
+        }
+    }
+
+    private static void ValidateDocumentTarget(JsonElement target)
+    {
+        if (target.ValueKind != JsonValueKind.Object)
+        {
+            throw Invalid("Reader 文档目标无效");
+        }
+        DirectJsonValidation.RequireNoDuplicateKeys(target);
+        if (!target.TryGetProperty("kind", out JsonElement kindValue))
+        {
+            throw Invalid("Reader 文档目标无效");
+        }
+        string kind = Text(target, "kind", 16);
+        string locationName;
+        long minimum;
+        switch (kind)
+        {
+            case "pdf":
+                Exact(target, "kind", "page");
+                locationName = "page";
+                minimum = 1;
+                break;
+            case "epub":
+                Exact(target, "kind", "section");
+                locationName = "section";
+                minimum = 0;
+                break;
+            default:
+                throw Invalid("Reader 文档目标类型无效");
+        }
+        JsonElement location = target.GetProperty(locationName);
+        if (
+            location.ValueKind != JsonValueKind.Number
+            || !location.TryGetInt64(out long value)
+            || value < minimum
+            || value > 10_000_000
+        )
+        {
+            throw Invalid("Reader 文档目标位置无效");
+        }
+    }
+
+    private static void ValidateClientMutationId(
+        JsonElement root,
+        string name)
+    {
+        string value = Text(root, name, 34);
+        if (
+            !value.StartsWith("c_", StringComparison.Ordinal)
+            || value.Length is < 10 or > 34
+            || value[2..].Any(character =>
+                !char.IsAsciiHexDigit(character)
+                || char.IsUpper(character))
+        )
+        {
+            throw Invalid($"Reader 输出 {name} 无效");
+        }
+    }
+
+    private static void ValidateAnkiDraftCards(JsonElement cards)
+    {
+        if (
+            cards.ValueKind != JsonValueKind.Array
+            || cards.GetArrayLength() is < 1 or > 12
+        )
+        {
+            throw Invalid("Reader Anki 草稿卡片数量无效");
+        }
+        foreach (JsonElement card in cards.EnumerateArray())
+        {
+            if (card.ValueKind != JsonValueKind.Object)
+            {
+                throw Invalid("Reader Anki 草稿卡片无效");
+            }
+            DirectJsonValidation.RequireNoDuplicateKeys(card);
+            string type = Text(card, "type", 16);
+            switch (type)
+            {
+                case "basic":
+                    Exact(card, "type", "front", "back");
+                    Text(card, "front", 8_000);
+                    Text(card, "back", 8_000, allowEmpty: true);
+                    break;
+                case "cloze":
+                    Exact(card, "type", "cloze");
+                    Text(card, "cloze", 8_000);
+                    break;
+                default:
+                    throw Invalid("Reader Anki 草稿卡片类型无效");
+            }
         }
     }
 

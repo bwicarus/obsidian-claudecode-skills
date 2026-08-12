@@ -623,6 +623,38 @@
       "description": "Add reviewed cards through the Pi service."
     },
     {
+      "path": "/pdf/api/anki-draft",
+      "match": "exact",
+      "owner": "pi",
+      "methods": [
+        "POST"
+      ],
+      "surfaces": [
+        "epub",
+        "pdf"
+      ],
+      "status": "supported",
+      "remoteBook": {
+        "mode": "required",
+        "scope": "current",
+        "requiredMethods": [
+          "POST"
+        ],
+        "identities": [
+          {
+            "methods": [
+              "POST"
+            ],
+            "location": "json",
+            "pointer": "/file",
+            "transform": "exact"
+          }
+        ],
+        "continuation": null
+      },
+      "description": "Verify exact source text and register a private source-bound draft without writing Anki."
+    },
+    {
       "path": "/pdf/api/asset/",
       "match": "segment",
       "owner": "pi",
@@ -1915,7 +1947,7 @@
     {
       "path": "/pdf/api/img-proxy",
       "match": "exact",
-      "owner": "pi",
+      "owner": "native",
       "methods": [
         "GET"
       ],
@@ -1925,7 +1957,7 @@
       ],
       "status": "supported",
       "remoteBook": null,
-      "description": "Fetch a remote image through the bounded Pi proxy."
+      "description": "Fetch a public HTTPS image through the bounded on-device proxy."
     },
     {
       "path": "/pdf/api/ink",

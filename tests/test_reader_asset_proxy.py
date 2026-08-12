@@ -3,16 +3,19 @@
 from __future__ import annotations
 
 import os
+import socket
 from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import textwrap
 import unittest
+from urllib.parse import quote
 from unittest.mock import patch
 
 from flask import Flask
 import requests
+from werkzeug.exceptions import BadGateway, Forbidden
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -54,6 +57,11 @@ class FakeSession:
         self.outcomes = list(outcomes)
         self.calls = []
         self.closed = False
+        self.mounted = {}
+        self.trust_env = True
+
+    def mount(self, prefix, adapter):
+        self.mounted[prefix] = adapter
 
     def get(self, url, **kwargs):
         self.calls.append((url, kwargs))
@@ -67,8 +75,26 @@ class FakeSession:
 
 
 class PublicImageTransportTest(unittest.TestCase):
-    def fetch_with(self, session, guard=lambda _url: ""):
-        with patch("requests.Session", return_value=session), patch(
+    def fetch_with(
+        self,
+        session,
+        guard=lambda _url, **_kwargs: "",
+        *,
+        allowed_schemes=("http", "https"),
+        dns_results=None,
+    ):
+        sessions = session if isinstance(session, list) else [session]
+        answers = [
+            (socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (
+                "93.184.216.34", 443,
+            )),
+        ]
+        resolver = (
+            patch("socket.getaddrinfo", side_effect=dns_results)
+            if dns_results is not None
+            else patch("socket.getaddrinfo", return_value=answers)
+        )
+        with patch("requests.Session", side_effect=sessions), resolver, patch(
             "rbi_access.public_network_url_error",
             side_effect=guard,
         ):
@@ -76,6 +102,7 @@ class PublicImageTransportTest(unittest.TestCase):
                 "https://public.example/start",
                 max_bytes=16,
                 total_timeout=5,
+                allowed_schemes=allowed_schemes,
             )
 
     def test_checks_every_redirect_and_returns_only_supported_image(self):
@@ -89,20 +116,43 @@ class PublicImageTransportTest(unittest.TestCase):
             chunks=[b"pi", b"ng"],
             url="https://cdn.example/final.png",
         )
-        session = FakeSession([first, final])
+        sessions = [FakeSession([first]), FakeSession([final])]
         checked = []
         value = self.fetch_with(
-            session,
-            guard=lambda url: checked.append(url) or "",
+            sessions,
+            guard=lambda url, **_kwargs: checked.append(url) or "",
+            dns_results=[
+                [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (
+                    "93.184.216.34", 443,
+                ))],
+                [(socket.AF_INET, socket.SOCK_STREAM, socket.IPPROTO_TCP, "", (
+                    "142.250.72.14", 443,
+                ))],
+            ],
         )
         self.assertEqual(value, (b"ping", "image/png", "https://cdn.example/final.png"))
         self.assertIn("https://public.example/start", checked)
         self.assertIn("https://cdn.example/final.png", checked)
-        self.assertFalse(session.calls[0][1]["allow_redirects"])
-        self.assertTrue(session.calls[0][1]["stream"])
+        self.assertFalse(sessions[0].calls[0][1]["allow_redirects"])
+        self.assertTrue(sessions[0].calls[0][1]["stream"])
+        self.assertFalse(sessions[0].trust_env)
+        adapter = sessions[0].mounted["https://"]
+        self.assertEqual(adapter.pinned_ip, "93.184.216.34")
+        self.assertEqual(adapter.hostname, "public.example")
+        self.assertEqual(
+            adapter._pinned_pool.conn_kw["server_hostname"],
+            "public.example",
+        )
+        self.assertEqual(
+            adapter._pinned_pool.assert_hostname,
+            "public.example",
+        )
+        final_adapter = sessions[1].mounted["https://"]
+        self.assertEqual(final_adapter.pinned_ip, "142.250.72.14")
+        self.assertEqual(final_adapter.hostname, "cdn.example")
         self.assertTrue(first.closed)
         self.assertTrue(final.closed)
-        self.assertTrue(session.closed)
+        self.assertTrue(all(item.closed for item in sessions))
 
     def test_blocks_private_redirect_before_following_it(self):
         first = FakeResponse(
@@ -112,11 +162,33 @@ class PublicImageTransportTest(unittest.TestCase):
         )
         session = FakeSession([first])
 
-        def guard(url):
+        def guard(url, **_kwargs):
             return "不允许本机或内网地址" if "127.0.0.1" in url else ""
 
         with self.assertRaises(pdf_reader._PublicImageFetchError) as raised:
             self.fetch_with(session, guard=guard)
+        self.assertEqual(raised.exception.http_status, 403)
+        self.assertEqual(len(session.calls), 1)
+
+    def test_https_only_transport_rejects_redirect_downgrade(self):
+        first = FakeResponse(
+            302,
+            headers={"Location": "http://cdn.example/final.png"},
+            url="https://public.example/start",
+        )
+        session = FakeSession([first])
+
+        def guard(url, *, allowed_schemes, **_kwargs):
+            if url.startswith("http://") and "http" not in allowed_schemes:
+                return "只允许公网 https"
+            return ""
+
+        with self.assertRaises(pdf_reader._PublicImageFetchError) as raised:
+            self.fetch_with(
+                session,
+                guard=guard,
+                allowed_schemes=("https",),
+            )
         self.assertEqual(raised.exception.http_status, 403)
         self.assertEqual(len(session.calls), 1)
 
@@ -150,6 +222,77 @@ class PublicImageTransportTest(unittest.TestCase):
         with self.assertRaises(pdf_reader._PublicImageFetchError) as raised:
             self.fetch_with(timed_out)
         self.assertEqual(raised.exception.http_status, 504)
+
+    def test_tcp_socket_uses_the_validated_ip_not_the_hostname(self):
+        connection = pdf_reader._PinnedPublicImageHTTPSConnection(
+            "images.example.test",
+            443,
+            pinned_ip="93.184.216.34",
+        )
+        sentinel = object()
+        with patch(
+            "urllib3.util.connection.create_connection",
+            return_value=sentinel,
+        ) as create_connection:
+            self.assertIs(connection._new_conn(), sentinel)
+        self.assertEqual(
+            create_connection.call_args.args[0],
+            ("93.184.216.34", 443),
+        )
+        self.assertEqual(connection.host, "images.example.test")
+        self.assertEqual(connection._dns_host, "images.example.test")
+
+
+class PublicImageDisplayProxyTest(unittest.TestCase):
+    def invoke(self, url, *, fetch_result=None, fetch_error=None):
+        app = Flask(__name__)
+        with tempfile.TemporaryDirectory(prefix="bw-img-proxy-") as temp, \
+                patch.object(pdf_reader, "CLAUDE_DIR", Path(temp)), \
+                patch.object(pdf_reader, "_fetch_public_image") as fetch:
+            if fetch_error is not None:
+                fetch.side_effect = fetch_error
+            else:
+                fetch.return_value = fetch_result or (
+                    b"png",
+                    "image/png",
+                    url,
+                )
+            with app.test_request_context(
+                "/pdf/api/img-proxy?url=" + quote(url, safe="")
+            ):
+                response = pdf_reader.pdf_api_img_proxy()
+            return response, fetch
+
+    def test_accepts_public_https_through_bounded_transport(self):
+        url = "https://images.example.test/photo.jpg?size=large"
+        response, fetch = self.invoke(url)
+        self.assertEqual(response.get_data(), b"png")
+        self.assertEqual(response.mimetype, "image/png")
+        self.assertEqual(response.headers["X-Content-Type-Options"], "nosniff")
+        fetch.assert_called_once_with(url, allowed_schemes=("https",))
+
+    def test_rejects_non_https_credentials_and_fragments_before_fetch(self):
+        for url in (
+            "http://images.example.test/photo.jpg",
+            "https://user:pass@images.example.test/photo.jpg",
+            "https://images.example.test/photo.jpg#fragment",
+        ):
+            with self.subTest(url=url), self.assertRaises(Forbidden):
+                self.invoke(url)
+
+    def test_non_wikimedia_404_does_not_enter_wikimedia_repair(self):
+        error = pdf_reader._PublicImageFetchError(
+            "missing",
+            http_status=502,
+            upstream_status=404,
+        )
+        with patch("requests.get") as repair:
+            with self.assertRaises(BadGateway):
+                self.invoke(
+                    "https://images.example.test/missing.jpg",
+                    fetch_error=error,
+                )
+        repair.assert_not_called()
 
 
 class AccountOwnedAssetProxyTest(unittest.TestCase):

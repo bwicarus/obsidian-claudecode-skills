@@ -1062,12 +1062,27 @@ if (window.__bwPwaProviderOnly) return;
     }
     return result;
   }
+  function presentDraft(cards, gid) {
+    if (!/^card_[a-f0-9]{4,12}$/.test(String(gid || ''))) return null;
+    var result = renderEntity(null, {
+      surface: 'float',
+      mode: 'draft',
+      cards: cards,
+      gid: gid,
+      label: 'Anki 草稿',
+      tool: 'reader_anki_draft'
+    });
+    if (!result || !result.el || !result.el.isConnected ||
+        !result.el.querySelector('.fc-add')) return null;
+    return result;
+  }
   RC.flashcard = {
     mountDrafts: mountDrafts,
     mountPreview: mountPreview,
     mountReview: mountReview,
     mountState: mountState,
     renderEntity: renderEntity,
+    presentDraft: presentDraft,
     bindPager: bindPager,
     snapshot: snapshot,
     cardsText: cardsText,

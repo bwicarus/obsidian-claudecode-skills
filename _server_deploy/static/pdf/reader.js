@@ -6584,12 +6584,21 @@ function _charsRangeToRects(chars, sIdx, eIdx) {
   return rects;
 }
 
-async function saveHighlight({pw, sIdx, eIdx, color, kind='note', sentence='', body='', note=''}) {
-  if (!pw || !pw.__charBoxes) { alert('请先在 PDF 上选中再标记'); return null; }
+async function saveHighlight({pw, sIdx, eIdx, color, kind='note', sentence='', body='', note='', id='', silent=false}) {
+  if (!pw || !pw.__charBoxes) {
+    if (silent) throw new Error('BW_READER_HIGHLIGHT_TEXT_LAYER_UNAVAILABLE');
+    alert('请先在 PDF 上选中再标记'); return null;
+  }
   const chars = pw.__charBoxes;
-  if (sIdx < 0 || eIdx >= chars.length) return null;
+  if (sIdx < 0 || eIdx >= chars.length) {
+    if (silent) throw new Error('BW_READER_HIGHLIGHT_TEXT_RANGE_INVALID');
+    return null;
+  }
   const rects = _charsRangeToRects(chars, sIdx, eIdx);
-  if (!rects.length) return null;
+  if (!rects.length) {
+    if (silent) throw new Error('BW_READER_HIGHLIGHT_TEXT_RECTS_EMPTY');
+    return null;
+  }
   const pageNum = parseInt(pw.dataset.pageNum || '0');
   const text = _charsRangeToText(chars, Math.min(sIdx,eIdx), Math.max(sIdx,eIdx));
   const payload = {
@@ -6597,13 +6606,21 @@ async function saveHighlight({pw, sIdx, eIdx, color, kind='note', sentence='', b
     kind, sentence, body, note,
     page_w: pw.__pageWPt, page_h: pw.__pageHPt,
   };
+  if (/^c_[a-f0-9]{8,32}$/.test(id || '')) payload.id = id;
   try {
     const r = await fetch('/pdf/api/highlights', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify(payload),
     });
     const d = await r.json();
-    if (!d.ok) { alert('保存高亮失败：' + (d.error || '?')); return null; }
+    if (!d.ok) {
+      if (silent) throw new Error('BW_READER_HIGHLIGHT_SAVE_REJECTED:' + (d.error || '?'));
+      alert('保存高亮失败：' + (d.error || '?')); return null;
+    }
+    if (d.highlight && d.highlight.id) {
+      _allHighlights = _allHighlights.filter((h) => h && h.id !== d.highlight.id);
+      _hlByPage[pageNum] = (_hlByPage[pageNum] || []).filter((h) => h && h.id !== d.highlight.id);
+    }
     _allHighlights.push(d.highlight);
     (_hlByPage[pageNum] ||= []).push(d.highlight);
     renderHighlightsOnPage(pw, pageNum);
@@ -6614,8 +6631,10 @@ async function saveHighlight({pw, sIdx, eIdx, color, kind='note', sentence='', b
     // 网络不通 + outbox → local-first:客户端生成 id(c_ 前缀),本地即时渲染,
     // 入队恢复后补投(服务端 POST 幂等 upsert 同 id,重放安全)。2026-07-20 outbox 第二批。
     if (window.RC && RC.outbox && e && e.name === 'TypeError') {
-      const cid = 'c_' + Array.from(crypto.getRandomValues(new Uint8Array(8))).map(b => b.toString(16).padStart(2, '0')).join('');
+      const cid = /^c_[a-f0-9]{8,32}$/.test(id || '') ? id : ('c_' + Array.from(crypto.getRandomValues(new Uint8Array(8))).map(b => b.toString(16).padStart(2, '0')).join(''));
       const h = Object.assign({ id: cid, time: Math.floor(Date.now() / 1000) }, payload);
+      _allHighlights = _allHighlights.filter((item) => item && item.id !== cid);
+      _hlByPage[pageNum] = (_hlByPage[pageNum] || []).filter((item) => item && item.id !== cid);
       _allHighlights.push(h);
       (_hlByPage[pageNum] ||= []).push(h);
       renderHighlightsOnPage(pw, pageNum);
@@ -6625,10 +6644,95 @@ async function saveHighlight({pw, sIdx, eIdx, color, kind='note', sentence='', b
       if (RC.toast) RC.toast('已高亮(离线,恢复后自动同步)');
       return h;
     }
+    if (silent) throw e;
     alert('保存高亮异常：' + e.message);
     return null;
   }
 }
+
+function _pdfExactTextProjection(chars) {
+  let text = '', map = [], last = null;
+  const cjk = (value) => /[぀-ヿ㐀-鿿　-〿＀-￯]/.test(value || '');
+  const append = (value, index) => {
+    for (let k = 0; k < value.length; k++) { text += value[k]; map.push(index); }
+  };
+  for (let i = 0; i < (chars || []).length; i++) {
+    const ch = chars[i] || {};
+    if (last) {
+      const cjkPair = cjk(ch.c) && cjk(last.c);
+      const dy = Math.abs(Number(ch.top || 0) - Number(last.top || 0));
+      if (dy > Number(ch.height || 0) * 0.5) {
+        if (!cjkPair) append(' ', i);
+      } else {
+        const gap = Number(ch.left || 0) - (Number(last.left || 0) + Number(last.width || 0));
+        const ref = Math.min(Number(ch.height || 0), Number(last.height || 0));
+        if (!cjkPair && gap > ref * ((/[A-Za-z]/.test(ch.c || '') && /[A-Za-z]/.test(last.c || '')) ? 1.3 : 0.6) && !last.sp && !ch.sp) append(' ', i);
+      }
+    }
+    append(ch.sp ? ' ' : String(ch.c || ''), i);
+    last = ch;
+  }
+  let folded = '', foldedMap = [], space = false;
+  for (let i = 0; i < text.length; i++) {
+    if (/\s/.test(text[i])) {
+      if (space) continue;
+      folded += ' '; foldedMap.push(map[i]); space = true;
+    } else {
+      folded += text[i]; foldedMap.push(map[i]); space = false;
+    }
+  }
+  return { text: folded.trim(), map: foldedMap.slice(folded.length - folded.trimStart().length) };
+}
+
+function _pdfExactTextRange(chars, sourceText) {
+  const projected = _pdfExactTextProjection(chars);
+  const query = String(sourceText || '').replace(/\s+/g, ' ').trim();
+  if (!query) throw new Error('BW_READER_HIGHLIGHT_TEXT_EMPTY');
+  const first = projected.text.indexOf(query);
+  if (first < 0) throw new Error('BW_READER_HIGHLIGHT_TEXT_NOT_FOUND');
+  if (projected.text.indexOf(query, first + 1) >= 0) throw new Error('BW_READER_HIGHLIGHT_TEXT_AMBIGUOUS');
+  const start = projected.map[first];
+  const end = projected.map[first + query.length - 1];
+  if (!Number.isInteger(start) || !Number.isInteger(end)) throw new Error('BW_READER_HIGHLIGHT_TEXT_RANGE_INVALID');
+  return { start, end };
+}
+
+async function _pdfExactTextPage(targetPage) {
+  const page = Number(targetPage);
+  if (!Number.isInteger(page) || page < 1 || !pdfDoc || page > pdfDoc.numPages) throw new Error('BW_READER_HIGHLIGHT_PAGE_INVALID');
+  await window.goToPage(page);
+  for (let tries = 0; tries < 40; tries++) {
+    const pw = document.querySelector('.page-wrap[data-page-num="' + page + '"]');
+    if (pw && pw.dataset.loaded === '1' && Array.isArray(pw.__charBoxes) && pw.__charBoxes.length) return pw;
+    await new Promise((resolve) => setTimeout(resolve, 120));
+  }
+  throw new Error('BW_READER_HIGHLIGHT_TEXT_LAYER_UNAVAILABLE');
+}
+
+window.__bwReaderHighlightExactText = async function (request) {
+  request = request || {};
+  if (request.file !== FILE_REL) throw new Error('BW_READER_HIGHLIGHT_WRONG_BOOK');
+  if (!request.target || request.target.kind !== 'pdf') throw new Error('BW_READER_HIGHLIGHT_TARGET_KIND');
+  const colors = { yellow:'#fff59d', green:'#a7f3d0', blue:'#a3d4ff', pink:'#fda4af' };
+  if (!colors[request.color]) throw new Error('BW_READER_HIGHLIGHT_COLOR_INVALID');
+  if (!/^c_[a-f0-9]{8,32}$/.test(request.mutationId || '')) throw new Error('BW_READER_HIGHLIGHT_MUTATION_ID');
+  const pw = await _pdfExactTextPage(request.target.page);
+  const range = _pdfExactTextRange(pw.__charBoxes, request.text);
+  const highlight = await saveHighlight({
+    pw, sIdx: range.start, eIdx: range.end, color: colors[request.color],
+    note: request.note || '', id: request.mutationId, silent: true
+  });
+  return { ok: true, status: 'highlight_saved', id: highlight.id, page: Number(request.target.page), text: highlight.text };
+};
+
+window.__bwReaderValidateExactSource = async function (request) {
+  request = request || {};
+  if (request.file !== FILE_REL) throw new Error('BW_READER_SOURCE_WRONG_BOOK');
+  if (!request.target || request.target.kind !== 'pdf') throw new Error('BW_READER_SOURCE_TARGET_KIND');
+  const pw = await _pdfExactTextPage(request.target.page);
+  const range = _pdfExactTextRange(pw.__charBoxes, request.sourceText);
+  return { ok: true, page: Number(request.target.page), start: range.start, end: range.end };
+};
 
 // 当前激活颜色（互斥单选；持久化）。空 = 没激活 → 「🖌 标记」按钮禁用
 let _activeHlColor = localStorage.getItem('pdf-hl-active') || '';

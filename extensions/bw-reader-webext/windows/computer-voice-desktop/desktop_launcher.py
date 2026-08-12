@@ -66,6 +66,75 @@ APP_VERSION = "0.7.0-snapshot-mcp-source"
 LEGACY_CAPTURE_OPTION = "不启用自动路由（兼容 /4）"
 
 
+def history_sync_enabled(paths: BridgePaths) -> bool:
+    """Enable history return only for strict opted-in snapshot mode."""
+
+    config = load_direct_config(paths)
+    return bool(
+        config is not None
+        and config.get("localOptIn") is True
+        and config.get("contextDeliveryMode") == CONTEXT_DELIVERY_SNAPSHOT
+    )
+
+
+def start_history_sync_worker(paths: BridgePaths) -> int:
+    """Start the exact installed desktop binary in headless worker mode."""
+
+    executable = paths.desktop_launcher.resolve()
+    root = paths.root.resolve()
+    if (
+        not executable.is_file()
+        or executable.parent.parent.resolve() != root
+    ):
+        raise BridgeError("历史同步 worker 不属于当前固定安装根。")
+    process = subprocess.Popen(
+        [str(executable), "--history-sync-worker"],
+        cwd=str(root),
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        shell=False,
+        close_fds=True,
+        creationflags=(
+            subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+        ),
+    )
+    return process.pid
+
+
+def run_bootstrap_with_history_sync(
+    paths: BridgePaths,
+    runner: ProcessRunner,
+) -> int:
+    """Keep one leased history synchronizer beside the direct supervisor."""
+
+    stop_event = threading.Event()
+    synchronizer = CaptureBoundHistorySynchronizer(root=paths.root)
+
+    def monitor() -> None:
+        with history_worker_lease(paths.root) as owned:
+            if not owned:
+                return
+            monitor_capture_history(
+                stop_event=stop_event,
+                status_provider=lambda: read_direct_status(paths, runner),
+                enabled_provider=lambda: history_sync_enabled(paths),
+                synchronizer=synchronizer,
+            )
+
+    thread = threading.Thread(
+        target=monitor,
+        name="reader-sidebar-history",
+        daemon=True,
+    )
+    thread.start()
+    try:
+        return run_idle_bootstrap(paths, runner)
+    finally:
+        stop_event.set()
+        thread.join(timeout=3)
+
+
 class BridgeWindow:
     _ACTION_BUTTON_NAMES = (
         "enable_button",
@@ -1329,10 +1398,17 @@ def main() -> int:
         # injection surface.  Do not start the native direct child until its
         # authenticated local pipe is already accepting requests.
         with WindowsShortcutBroker():
-            return run_idle_bootstrap(
-                BridgePaths.discover(),
-                WindowsProcessRunner(),
+            return run_bootstrap_with_history_sync(
+                BridgePaths.discover(), WindowsProcessRunner()
             )
+    if sys.argv[1:] == ["--history-sync-worker"]:
+        paths = BridgePaths.discover()
+        runner = WindowsProcessRunner()
+        return run_service_bound_history_worker(
+            root=paths.root,
+            status_provider=lambda: read_direct_status(paths, runner),
+            enabled_provider=lambda: history_sync_enabled(paths),
+        )
     if sys.argv[1:]:
         raise SystemExit("此源码入口不接受 Reader 提交的参数或命令。")
     root = tk.Tk()

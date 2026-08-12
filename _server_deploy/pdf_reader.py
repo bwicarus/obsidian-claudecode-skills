@@ -1245,65 +1245,250 @@ def _public_image_content_type(value):
     return str(value or "").split(";", 1)[0].strip().lower()
 
 
+class _PinnedPublicImageHTTPSConnection:
+    """Marker replaced below after urllib3 is imported lazily."""
+
+
+def _pinned_public_image_transport():
+    """Build urllib3/requests classes whose socket target is a verified IP.
+
+    The connection keeps the original hostname in ``self.host`` for Host,
+    SNI, and certificate verification.  Only urllib3's private DNS target is
+    temporarily replaced while the TCP socket is created, so the request can
+    never perform a second hostname lookup after the public-address check.
+    """
+    import requests as _rq
+    from requests.adapters import HTTPAdapter as _HTTPAdapter
+    from urllib3.connection import HTTPConnection as _HTTPConnection
+    from urllib3.connection import HTTPSConnection as _HTTPSConnection
+    from urllib3.connectionpool import HTTPConnectionPool as _HTTPPool
+    from urllib3.connectionpool import HTTPSConnectionPool as _HTTPSPool
+
+    class _PinnedConnectionMixin:
+        def __init__(self, *args, pinned_ip, **kwargs):
+            self._pinned_ip = str(pinned_ip)
+            super().__init__(*args, **kwargs)
+
+        def _new_conn(self):
+            original_dns_host = self._dns_host
+            self._dns_host = self._pinned_ip
+            try:
+                return super()._new_conn()
+            finally:
+                self._dns_host = original_dns_host
+
+    class _PinnedHTTPConnection(_PinnedConnectionMixin, _HTTPConnection):
+        pass
+
+    class _PinnedHTTPSConnection(_PinnedConnectionMixin, _HTTPSConnection):
+        pass
+
+    class _PinnedHTTPPool(_HTTPPool):
+        ConnectionCls = _PinnedHTTPConnection
+
+    class _PinnedHTTPSPool(_HTTPSPool):
+        ConnectionCls = _PinnedHTTPSConnection
+
+    class _PinnedHTTPSAdapter(_HTTPAdapter):
+        def __init__(self, *, scheme, hostname, port, pinned_ip):
+            super().__init__(max_retries=0)
+            self.scheme = str(scheme).lower()
+            self.hostname = str(hostname)
+            self.port = int(port)
+            self.pinned_ip = str(pinned_ip)
+            if self.scheme == "https":
+                self._pinned_pool = _PinnedHTTPSPool(
+                    self.hostname,
+                    self.port,
+                    maxsize=1,
+                    block=True,
+                    pinned_ip=self.pinned_ip,
+                    # The TCP endpoint is an IP, but TLS identity remains the
+                    # original URL host. urllib3 supplies this as SNI and
+                    # checks the peer certificate against the same name.
+                    server_hostname=self.hostname,
+                    assert_hostname=self.hostname,
+                )
+            elif self.scheme == "http":
+                self._pinned_pool = _PinnedHTTPPool(
+                    self.hostname,
+                    self.port,
+                    maxsize=1,
+                    block=True,
+                    pinned_ip=self.pinned_ip,
+                )
+            else:
+                raise _rq.exceptions.InvalidURL(
+                    "pinned image adapter scheme mismatch"
+                )
+
+        def get_connection_with_tls_context(
+            self,
+            request,
+            verify,
+            proxies=None,
+            cert=None,
+        ):
+            del verify, proxies, cert
+            parsed = urllib.parse.urlsplit(str(request.url or ""))
+            request_port = parsed.port or (
+                443 if parsed.scheme.lower() == "https" else 80
+            )
+            if (
+                parsed.scheme.lower() != self.scheme
+                or (parsed.hostname or "").lower() != self.hostname.lower()
+                or request_port != self.port
+            ):
+                raise _rq.exceptions.InvalidURL(
+                    "pinned image adapter host mismatch"
+                )
+            return self._pinned_pool
+
+        def close(self):
+            self._pinned_pool.close()
+            super().close()
+
+    return _PinnedHTTPSConnection, _PinnedHTTPSAdapter
+
+
+_PinnedPublicImageHTTPSConnection, _PinnedPublicImageHTTPSAdapter = (
+    _pinned_public_image_transport()
+)
+
+
+def _resolve_public_image_hop(url, *, allowed_schemes):
+    """Resolve once, reject any non-public answer, and return that same set."""
+    import socket
+    from rbi_access import public_network_url_error
+
+    try:
+        parsed = urllib.parse.urlsplit(str(url or ""))
+        host = (parsed.hostname or "").strip().rstrip(".").lower()
+        port = parsed.port or (443 if parsed.scheme.lower() == "https" else 80)
+        answers = list(socket.getaddrinfo(
+            host,
+            port,
+            type=socket.SOCK_STREAM,
+        ))
+    except Exception as error:
+        raise _PublicImageFetchError(
+            "blocked public image URL: 域名解析失败",
+            http_status=403,
+        ) from error
+
+    # Feed the already-resolved answers to the shared policy.  Passing a
+    # capturing resolver is deliberate: policy validation and the actual
+    # socket pin are derived from one DNS result, not two raceable lookups.
+    blocked = public_network_url_error(
+        str(url or ""),
+        allowed_schemes=allowed_schemes,
+        resolver=lambda *_args, **_kwargs: answers,
+    )
+    if blocked:
+        raise _PublicImageFetchError(
+            "blocked public image URL: " + blocked,
+            http_status=403,
+        )
+    addresses = []
+    for answer in answers:
+        try:
+            address = str(answer[4][0]).split("%", 1)[0]
+        except (IndexError, TypeError):
+            continue
+        if address and address not in addresses:
+            addresses.append(address)
+    if not addresses:
+        raise _PublicImageFetchError(
+            "blocked public image URL: 域名解析失败",
+            http_status=403,
+        )
+    return parsed.scheme.lower(), host, port, tuple(addresses)
+
+
 def _fetch_public_image(
     url,
     *,
     max_bytes=_PUBLIC_IMAGE_MAX_BYTES,
     total_timeout=_PUBLIC_IMAGE_TOTAL_TIMEOUT,
+    allowed_schemes=("http", "https"),
 ):
     """Fetch one public image with an SSRF check on every redirect hop.
 
-    The target is always taken from a server-owned asset registry (or the
-    Wikimedia-only image proxy), never from an extension-supplied arbitrary
-    fetch request.  ``requests`` redirects stay disabled so a public URL cannot
-    bounce to loopback/private metadata services after the first check.
+    The target is taken from a server-owned asset registry or from the strict
+    display-only image proxy.  The latter accepts only HTTPS URLs already
+    validated by the Reader card contract.  ``requests`` redirects stay
+    disabled so a public URL cannot bounce to loopback/private metadata
+    services after the first check.
     """
     import requests as _rq
-    from rbi_access import public_network_url_error
 
     current = str(url or "").strip()
     deadline = time.monotonic() + max(1.0, float(total_timeout))
-    session = _rq.Session()
     response = None
+    session = None
     try:
         for hop in range(6):
-            blocked = public_network_url_error(current)
-            if blocked:
-                raise _PublicImageFetchError(
-                    "blocked public image URL: " + blocked,
-                    http_status=403,
-                )
+            scheme, host, port, pinned_addresses = _resolve_public_image_hop(
+                current,
+                allowed_schemes=allowed_schemes,
+            )
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise _PublicImageFetchError(
                     "public image request timed out",
                     http_status=504,
                 )
-            try:
-                response = session.get(
-                    current,
-                    timeout=(
-                        min(3.05, remaining),
-                        min(5.0, max(0.1, remaining)),
+            last_error = None
+            for pinned_ip in pinned_addresses:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    last_error = _rq.Timeout("public image deadline elapsed")
+                    break
+                session = _rq.Session()
+                # Environment HTTP(S)_PROXY would replace the peer endpoint
+                # and invalidate the pin, so the display-only fetch is always
+                # direct.  The original host remains in the URL and Host/TLS.
+                session.trust_env = False
+                session.mount(
+                    scheme + "://",
+                    _PinnedPublicImageHTTPSAdapter(
+                        scheme=scheme,
+                        hostname=host,
+                        port=port,
+                        pinned_ip=pinned_ip,
                     ),
-                    stream=True,
-                    allow_redirects=False,
-                    headers={
-                        "User-Agent": "Mozilla/5.0 (BW reader image proxy)",
-                        "Accept": "image/avif,image/webp,image/png,image/jpeg,"
-                                  "image/gif,image/svg+xml;q=0.8,*/*;q=0.1",
-                    },
                 )
-            except _rq.Timeout as error:
-                raise _PublicImageFetchError(
-                    "public image request timed out",
-                    http_status=504,
-                ) from error
-            except _rq.RequestException as error:
+                try:
+                    response = session.get(
+                        current,
+                        timeout=(
+                            min(3.05, remaining),
+                            min(5.0, max(0.1, remaining)),
+                        ),
+                        stream=True,
+                        allow_redirects=False,
+                        headers={
+                            "User-Agent": "Mozilla/5.0 (BW reader image proxy)",
+                            "Accept": "image/avif,image/webp,image/png,image/jpeg,"
+                                      "image/gif,image/svg+xml;q=0.8,*/*;q=0.1",
+                            "Accept-Encoding": "identity",
+                        },
+                    )
+                    break
+                except _rq.RequestException as error:
+                    last_error = error
+                    session.close()
+                    session = None
+            if response is None:
+                if isinstance(last_error, _rq.Timeout):
+                    raise _PublicImageFetchError(
+                        "public image request timed out",
+                        http_status=504,
+                    ) from last_error
                 raise _PublicImageFetchError(
                     "public image request failed",
                     http_status=502,
-                ) from error
+                ) from last_error
 
             location = str(response.headers.get("Location") or "").strip()
             if (
@@ -1319,14 +1504,10 @@ def _fetch_public_image(
                     str(getattr(response, "url", "") or current),
                     location,
                 )
-                blocked = public_network_url_error(next_url)
-                if blocked:
-                    raise _PublicImageFetchError(
-                        "blocked public image redirect: " + blocked,
-                        http_status=403,
-                    )
                 response.close()
                 response = None
+                session.close()
+                session = None
                 current = next_url
                 continue
 
@@ -1395,18 +1576,46 @@ def _fetch_public_image(
     finally:
         if response is not None:
             response.close()
-        session.close()
+        if session is not None:
+            session.close()
 
 
 @bp.route("/api/img-proxy")
 def pdf_api_img_proxy():
-    """图片代理:服务器下载维基图转发给 iPad(经 Tailscale 稳定)。限 wikimedia 域(防 SSRF)。
-    ★关键:AI 拼维基 thumb URL 时常**文件名对但 hash 目录算错**(hash=文件名 MD5 前缀,LLM 算不了)→ 404。
-      本代理在 404 时从文件名查 Wikimedia API 拿**正确 thumburl** 重取 → 自动修好 AI 的 hash 错误。前端 img onerror fallback 到这。"""
-    url = (request.args.get("url") or "").strip()
-    if not url.startswith(("https://upload.wikimedia.org/", "https://commons.wikimedia.org/",
-                           "https://upload.wikipedia.org/")):
+    """受控图片代理:只取公网 HTTPS 图片并以受限 MIME/体积转发给 Reader。
+
+    每一跳的公网地址校验、超时、图片 MIME 白名单和体积上限都由
+    ``_fetch_public_image`` 执行。Wikimedia 仍额外保留错误 hash 路径修复。
+    """
+    raw_url = request.args.get("url") or ""
+    url = raw_url.strip()
+    if (
+        not url
+        or raw_url != url
+        or len(url.encode("utf-8")) > 4_096
+        or re.search(r"[\x00-\x1f\x7f]", url)
+    ):
         abort(403)
+    try:
+        parsed = urllib.parse.urlsplit(url)
+        _ = parsed.port
+    except ValueError:
+        abort(403)
+    if (
+        parsed.scheme.lower() != "https"
+        or not parsed.netloc
+        or parsed.hostname is None
+        or parsed.username is not None
+        or parsed.password is not None
+        or parsed.fragment
+    ):
+        abort(403)
+    host = parsed.hostname.lower()
+    is_wikimedia = host in {
+        "upload.wikimedia.org",
+        "commons.wikimedia.org",
+        "upload.wikipedia.org",
+    }
     import requests as _rq
     import urllib.parse as _up
     import re as _re
@@ -1450,7 +1659,7 @@ def pdf_api_img_proxy():
 
     def _fetch(u):
         try:
-            return _fetch_public_image(u)
+            return _fetch_public_image(u, allowed_schemes=("https",))
         except _PublicImageFetchError as error:
             return error
 
@@ -1462,6 +1671,7 @@ def pdf_api_img_proxy():
         if (
             isinstance(rr, _PublicImageFetchError)
             and rr.upstream_status == 404
+            and is_wikimedia
         ):
             # hash 目录修复:thumb URL(带 px 宽)和**原图 URL**都要管——上次只修了 thumb,
             # AI 这次编的是原图路径的错 hash(写 1/1f 真实 0/0b)→ 404 直穿 502。
@@ -10144,7 +10354,10 @@ def pdf_api_epub_highlights():
         if not cfi and not anchor:
             return jsonify({"ok": False, "error": "缺少 cfi/anchor"}), 400
         import uuid as _u
-        h = {"id": "e" + _u.uuid4().hex[:11], "cfi": cfi, "anchor": anchor,
+        client_id = str(body.get("id") or "").strip()
+        if not re.fullmatch(r"c_[a-f0-9]{8,32}", client_id):
+            client_id = ""
+        h = {"id": client_id or ("e" + _u.uuid4().hex[:11]), "cfi": cfi, "anchor": anchor,
              "text": (body.get("text") or "")[:2000], "color": (body.get("color") or "#ffd54a"),
              "note": (body.get("note") or "")[:2000],
              "sentence": (body.get("sentence") or "")[:2000],   # epub.js 版高亮存所在句(编辑浮层只读预览;HTML 版不传则空)
@@ -10152,6 +10365,8 @@ def pdf_api_epub_highlights():
              "kind": (body.get("kind") or "")[:32],     # 类型标签:译文/解释/笔记
              "time": int(__import__("time").time())}
         with _epub_hl_edit(rel) as items:
+            if client_id:
+                items[:] = [item for item in items if item.get("id") != client_id]
             items.append(h)
         return jsonify({"ok": True, "id": h["id"], "highlight": h})
     # PATCH
@@ -10521,7 +10736,12 @@ def pdf_api_asset(aid):
     return jsonify({"ok": False}), 404
 
 
-def _entity_reg_cards(cards: list, meta: dict | None = None) -> str:
+def _entity_reg_cards(
+    cards: list,
+    meta: dict | None = None,
+    *,
+    entity_id: str = "",
+) -> str:
     """卡片批 → 全局编号 card_xxxxxx(用户设计 2026-07-21 统一编号协议:一张卡永远一个编号,
     浮层/侧栏/便签/收藏夹/#id 引用全按编号取同一状态对象——"一张卡两种状态"从根上消失)。
     存进同一 registry(kind='cards',data=卡数组,states=各卡 {_st,_nid,_next} 由前端回写)。"""
@@ -10531,16 +10751,180 @@ def _entity_reg_cards(cards: list, meta: dict | None = None) -> str:
     ):
         d = _asset_load(identity)
         import uuid as _u3
-        aid = "card_" + _u3.uuid4().hex[:6]
+        aid = str(entity_id or "").strip()
+        if not re.fullmatch(r"card_[a-f0-9]{4,12}", aid):
+            aid = "card_" + _u3.uuid4().hex[:6]
         e = {"kind": "cards", "url": "", "ts": int(__import__("time").time()), "local": "",
              "data": [{k: c.get(k) for k in ("type", "front", "back", "cloze")} for c in (cards or [])],
              "states": {}}
         for k, v in (meta or {}).items():
             if v:
                 e[k] = v
+        previous = d.get(aid)
+        if previous:
+            # Idempotency is defined by the immutable draft payload.  The
+            # existing confirmation UI is allowed to update ``states`` after
+            # delivery; replaying the same deterministic draft id must retain
+            # that user state instead of turning a successful prior delivery
+            # into a false payload conflict.
+            if (
+                previous.get("kind") != e.get("kind")
+                or previous.get("data") != e.get("data")
+                or previous.get("source_ref") != e.get("source_ref")
+            ):
+                raise ValueError("card draft id reused with different payload")
+            return aid
         d[aid] = e
         _asset_save(d, identity)
         return aid
+
+
+def _exact_source_text_count(source: str, requested: str) -> int:
+    """Count an exact source after only layout-whitespace folding."""
+    source = re.sub(r"\s+", " ", str(source or "")).strip()
+    requested = re.sub(r"\s+", " ", str(requested or "")).strip()
+    if not source or not requested:
+        return 0
+    count = 0
+    offset = 0
+    while True:
+        found = source.find(requested, offset)
+        if found < 0:
+            return count
+        count += 1
+        if count > 1:
+            return count
+        offset = found + 1
+
+
+def _anki_draft_cards(value) -> list | None:
+    if not isinstance(value, list) or not (1 <= len(value) <= 12):
+        return None
+    cards = []
+    for raw in value:
+        if not isinstance(raw, dict) or set(raw) not in (
+            {"type", "front", "back"},
+            {"type", "cloze"},
+        ):
+            return None
+        kind = raw.get("type")
+        if kind == "basic" and set(raw) == {"type", "front", "back"}:
+            front = raw.get("front")
+            back = raw.get("back")
+            if (
+                not isinstance(front, str)
+                or not front.strip()
+                or len(front) > 8000
+                or not isinstance(back, str)
+                or len(back) > 8000
+                or "\x00" in front + back
+            ):
+                return None
+            cards.append({"type": "basic", "front": front, "back": back})
+        elif kind == "cloze" and set(raw) == {"type", "cloze"}:
+            cloze = raw.get("cloze")
+            if (
+                not isinstance(cloze, str)
+                or not cloze.strip()
+                or len(cloze) > 8000
+                or "\x00" in cloze
+            ):
+                return None
+            cards.append({"type": "cloze", "cloze": cloze})
+        else:
+            return None
+    return cards
+
+
+@bp.route("/api/anki-draft", methods=["POST"])
+def pdf_api_anki_draft():
+    """Register a source-bound card draft; never write to Anki here."""
+    body = request.get_json(silent=True)
+    if not isinstance(body, dict) or set(body) != {
+        "draftId", "file", "target", "sourceText", "cards"
+    }:
+        return jsonify({"ok": False, "error": "bad draft payload"}), 400
+    rel = str(body.get("file") or "").strip()
+    abs_path = _safe_vault_path(rel)
+    target = body.get("target")
+    source_text = body.get("sourceText")
+    cards = _anki_draft_cards(body.get("cards"))
+    draft_id = str(body.get("draftId") or "").strip()
+    if (
+        not rel
+        or abs_path is None
+        or not isinstance(target, dict)
+        or not isinstance(source_text, str)
+        or not source_text.strip()
+        or len(source_text) > 2000
+        or "\x00" in source_text
+        or cards is None
+        or not re.fullmatch(r"draft-[a-f0-9]{32}", draft_id)
+    ):
+        return jsonify({"ok": False, "error": "bad draft payload"}), 400
+    kind = target.get("kind")
+    source_ref = ""
+    if kind == "pdf" and set(target) == {"kind", "page"}:
+        page = target.get("page")
+        if isinstance(page, bool) or not isinstance(page, int) or page < 1:
+            return jsonify({"ok": False, "error": "bad PDF page"}), 400
+        try:
+            import fitz
+            with fitz.open(str(abs_path)) as document:
+                if page > document.page_count:
+                    return jsonify({"ok": False, "error": "PDF page out of range"}), 400
+            source = _page_text_clean(
+                abs_path,
+                rel,
+                page,
+                limit=2_000_000,
+            )
+        except Exception:
+            current_app.logger.exception("Anki draft PDF source verification failed")
+            return jsonify({"ok": False, "error": "PDF source unavailable"}), 503
+        source_ref = "book:%s#p%d" % (rel, page)
+    elif kind == "epub" and set(target) == {"kind", "section"}:
+        section = target.get("section")
+        if (
+            isinstance(section, bool)
+            or not isinstance(section, int)
+            or section < 0
+            or abs_path.suffix.lower() != ".epub"
+        ):
+            return jsonify({"ok": False, "error": "bad EPUB section"}), 400
+        paragraphs = _epub_section_paragraphs(rel, section)
+        if not paragraphs:
+            return jsonify({"ok": False, "error": "EPUB section unavailable"}), 400
+        source = "\n".join(paragraphs)
+        source_ref = "book:%s#section=%d" % (rel, section)
+    else:
+        return jsonify({"ok": False, "error": "bad source target"}), 400
+    matches = _exact_source_text_count(source, source_text)
+    if matches != 1:
+        return jsonify({
+            "ok": False,
+            "error": "source text not found" if matches == 0 else "source text is ambiguous",
+            "code": "source_not_found" if matches == 0 else "source_ambiguous",
+        }), 409
+    entity_id = "card_" + __import__("hashlib").sha256(
+        draft_id.encode("utf-8")
+    ).hexdigest()[:12]
+    try:
+        gid = _entity_reg_cards(
+            cards,
+            {"source_ref": source_ref},
+            entity_id=entity_id,
+        )
+    except ValueError as error:
+        return jsonify({"ok": False, "error": str(error)}), 409
+    return jsonify({
+        "ok": True,
+        "draft": True,
+        "status": "draft_registered",
+        "gid": gid,
+        "source_ref": source_ref,
+        "anki_written": False,
+    })
 
 
 def _entity_reg_data(kind: str, data: dict, meta: dict | None = None) -> str:

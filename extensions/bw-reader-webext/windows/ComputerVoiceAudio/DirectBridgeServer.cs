@@ -18,6 +18,8 @@ namespace BwReader.ComputerVoiceAudio;
 internal sealed class DirectBridgeServer : IAsyncDisposable
 {
     private const int CoordinatorDisposeAttemptLimit = 2;
+    internal static readonly TimeSpan DisconnectCleanupWatchdogDelay =
+        TimeSpan.FromSeconds(30);
     private const string SingleUserReaderOrigin =
         "https://bwicarus.taile44d0c.ts.net";
     private const string SingleUserChromeExtensionOrigin =
@@ -453,25 +455,137 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         {
             if (connection is not null)
             {
+                bool stoppedOwnedConnection = false;
                 try
                 {
-                    await _coordinator.StopForConnectionAsync(connectionId)
-                        .ConfigureAwait(false);
+                    stoppedOwnedConnection =
+                        await _coordinator.StopForConnectionAsync(connectionId)
+                            .ConfigureAwait(false);
                 }
                 finally
                 {
                     _snapshotViewer.CloseForConnection(connectionId);
                 }
                 bool cleanupPending = _coordinator.CleanupPending;
-                await _connectionOwnership.CompleteAsync(
-                    connection,
-                    () => WriteRuntimeStatusAsync(
-                        cleanupPending ? "faulted" : "idle",
-                        readerConnected: false,
-                        captureActive: false,
-                        CancellationToken.None)).ConfigureAwait(false);
+                await CompleteConnectionAndArmDisconnectWatchdogAsync(
+                    () => _connectionOwnership.CompleteAsync(
+                        connection,
+                        () => WriteRuntimeStatusAsync(
+                            cleanupPending ? "faulted" : "idle",
+                            readerConnected: false,
+                            captureActive: false,
+                            CancellationToken.None)),
+                    stoppedOwnedConnection && cleanupPending,
+                    () =>
+                    {
+                        // A remote transport can vanish before STOP reaches
+                        // us. Immediate teardown above remains the fast path;
+                        // this is one delayed retry only, never a polling loop.
+                        // The exact connection id remains the generation fence,
+                        // so a later START makes this retired watchdog a no-op.
+                        _ = ObserveDisconnectCleanupWatchdogAsync(
+                            connectionId,
+                            serviceCancellationToken);
+                    }).ConfigureAwait(false);
             }
         }
+    }
+
+    internal static async Task
+        CompleteConnectionAndArmDisconnectWatchdogAsync(
+        Func<Task> completeConnectionAsync,
+        bool cleanupWatchdogRequired,
+        Action armCleanupWatchdog)
+    {
+        ArgumentNullException.ThrowIfNull(completeConnectionAsync);
+        ArgumentNullException.ThrowIfNull(armCleanupWatchdog);
+        try
+        {
+            await completeConnectionAsync().ConfigureAwait(false);
+        }
+        finally
+        {
+            // Runtime status publication is diagnostic, while releasing an
+            // owned per-app audio-route lease is correctness. A transient
+            // status-file failure must therefore never suppress the sole
+            // delayed cleanup retry.
+            if (cleanupWatchdogRequired)
+            {
+                armCleanupWatchdog();
+            }
+        }
+    }
+
+    private async Task ObserveDisconnectCleanupWatchdogAsync(
+        string connectionId,
+        CancellationToken serviceCancellationToken)
+    {
+        try
+        {
+            bool cleanupSettled = false;
+            bool retried = await RunDisconnectCleanupWatchdogAsync(
+                _coordinator,
+                connectionId,
+                DisconnectCleanupWatchdogDelay,
+                async () =>
+                {
+                    cleanupSettled = true;
+                    await WriteRuntimeStatusAsync(
+                        "idle",
+                        readerConnected: false,
+                        captureActive: false,
+                        CancellationToken.None).ConfigureAwait(false);
+                },
+                serviceCancellationToken).ConfigureAwait(false);
+            if (retried)
+            {
+                DirectSecurityLog.Write(
+                    _serviceInstanceId,
+                    "disconnect-cleanup-watchdog",
+                    cleanupSettled
+                        ? "BW_COMPUTER_VOICE_DIRECT_DISCONNECT_CLEANUP_RESTORED"
+                        : "BW_COMPUTER_VOICE_DIRECT_MEDIA_CLEANUP_PENDING",
+                    ok: cleanupSettled);
+            }
+        }
+        catch (OperationCanceledException)
+            when (serviceCancellationToken.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            // This task has no awaiting peer.  Observe every failure so it can
+            // never become an unobserved task exception, but do not replace the
+            // runtime's existing media failure or cleanup ownership state.
+            string code = exception is DirectProtocolException protocol
+                ? protocol.Code
+                : "BW_COMPUTER_VOICE_DIRECT_DISCONNECT_CLEANUP_FAILED";
+            DirectSecurityLog.Write(
+                _serviceInstanceId,
+                "disconnect-cleanup-watchdog",
+                code,
+                ok: false);
+        }
+    }
+
+    internal static async Task<bool> RunDisconnectCleanupWatchdogAsync(
+        DirectBridgeCoordinator coordinator,
+        string connectionId,
+        TimeSpan delay,
+        Func<Task>? onCleanupSettled,
+        CancellationToken cancellationToken,
+        Func<TimeSpan, CancellationToken, Task>? delayAsync = null)
+    {
+        ArgumentNullException.ThrowIfNull(coordinator);
+        if (delay < TimeSpan.Zero)
+        {
+            throw new ArgumentOutOfRangeException(nameof(delay));
+        }
+        await (delayAsync ?? Task.Delay)(delay, cancellationToken)
+            .ConfigureAwait(false);
+        return await coordinator.StopForConnectionAsync(
+            connectionId,
+            onCleanupSettled).ConfigureAwait(false);
     }
 
     // Accepts a whole snapshot in one request: page context, active reading, or

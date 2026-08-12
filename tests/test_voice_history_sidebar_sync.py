@@ -880,7 +880,17 @@ class VoiceHistorySidebarSyncTest(unittest.TestCase):
                                     "type": "userMessage",
                                     "id": "user-1",
                                     "content": [
-                                        {"type": "text", "text": "查一下天气"}
+                                        {
+                                            "type": "text",
+                                            "text": (
+                                                "<realtime_delegation>"
+                                                "<input>查一下天气</input>"
+                                                "<transcript_delta>"
+                                                "assistant: 我现在去研究一下"
+                                                "</transcript_delta>"
+                                                "</realtime_delegation>"
+                                            ),
+                                        }
                                     ],
                                 },
                                 {
@@ -951,6 +961,318 @@ class VoiceHistorySidebarSyncTest(unittest.TestCase):
         )
         self.assertNotIn("must not be copied", str(segment))
         self.assertNotIn("CAPABILITY_SECRET", str(segment))
+
+    def test_structured_restart_recovers_unacked_finals_and_tools_once(self):
+        # The continuity-era worker acknowledged a short commentary response
+        # and then died before the authoritative final answer was mirrored.
+        self.recent(
+            [
+                msg("user", "old-u"),
+                msg("assistant", "old-final"),
+                msg("user", "crash-u"),
+                msg("assistant", "我去研究一下"),
+            ]
+        )
+        legacy_calls = []
+        seeded = self.sync(
+            publish=True,
+            publisher=lambda *args, **kwargs: (
+                legacy_calls.append((args, kwargs)) or {"ok": True}
+            ),
+        )
+        self.assertEqual(seeded["published"], 2)
+
+        snapshot = self.root / "reader-context-snapshot.json"
+        self.write(
+            snapshot,
+            {
+                "schema": "reader-context-snapshot/1",
+                "revision": 91,
+                "updatedAtUtc": datetime.now(timezone.utc).isoformat(),
+                "contextStatus": "ready",
+                "activeReading": {
+                    "fresh": True,
+                    "sourceInstanceId": "app-reader-recovery",
+                },
+                "currentPage": {
+                    "stable": True,
+                    "sourceInstanceId": "app-reader-recovery",
+                    "file": "Books/recovery.pdf",
+                    "page": 19,
+                },
+            },
+        )
+
+        def user_item(item_id, text):
+            return {
+                "type": "userMessage",
+                "id": item_id,
+                "content": [{"type": "text", "text": text}],
+            }
+
+        class FakeHistoryClient:
+            def __init__(self, value):
+                self.value = value
+
+            def read_thread(self, thread_id):
+                return self.value
+
+            def close(self):
+                pass
+
+        later_turns = [
+            {
+                "id": f"later-turn-{index}",
+                "items": [
+                    user_item(f"later-user-{index}", f"later-u-{index}"),
+                    {
+                        "type": "agentMessage",
+                        "phase": "final_answer",
+                        "text": f"later-final-{index}",
+                    },
+                ],
+            }
+            for index in range(SYNC.MAX_STRUCTURED_PUBLISH_PER_POLL + 1)
+        ]
+        history_value = {
+            "thread": {
+                "id": THREAD,
+                "turns": [
+                    {
+                        "id": "old-turn",
+                        "items": [
+                            user_item("old-user", "old-u"),
+                            {
+                                "type": "agentMessage",
+                                "phase": "final_answer",
+                                "text": "old-final",
+                            },
+                        ],
+                    },
+                    {
+                        "id": "crash-turn",
+                        "items": [
+                            user_item(
+                                "crash-user",
+                                "<realtime_delegation><input>crash-u</input>"
+                                "<transcript_delta>assistant: 我去研究一下"
+                                "</transcript_delta></realtime_delegation>",
+                            ),
+                            {
+                                "type": "agentMessage",
+                                "phase": "commentary",
+                                "text": "我去研究一下",
+                            },
+                            {
+                                "type": "mcpToolCall",
+                                "server": "reader",
+                                "tool": "current_page",
+                                "status": "completed",
+                            },
+                            {
+                                "type": "agentMessage",
+                                "phase": "final_answer",
+                                "text": "[COMPLETE] crash-final",
+                            },
+                        ],
+                    },
+                ] + later_turns,
+            }
+        }
+        calls = []
+        syncer = SYNC.CaptureBoundHistorySynchronizer(
+            root=self.root,
+            publisher=lambda *args, **kwargs: (
+                calls.append((args, kwargs)) or {"ok": True}
+            ),
+            global_state_path=self.global_state,
+            continuity_path=self.continuity,
+            state_path=self.state,
+            archive_path=self.archive,
+            snapshot_path=snapshot,
+            structured_history_client=FakeHistoryClient(history_value),
+        )
+        armed = syncer.observe(
+            service_online=True,
+            capture_active=True,
+            snapshot_mode=True,
+        )
+        expected = 1 + len(later_turns)
+        self.assertEqual(armed["pending"], expected)
+        delivered = syncer.observe(
+            service_online=True,
+            capture_active=True,
+            snapshot_mode=True,
+        )
+        self.assertEqual(
+            delivered["published"],
+            SYNC.MAX_STRUCTURED_PUBLISH_PER_POLL,
+        )
+        self.assertEqual(delivered["pending"], expected - delivered["published"])
+        drained = syncer.observe(
+            service_online=True,
+            capture_active=True,
+            snapshot_mode=True,
+        )
+        self.assertEqual(drained["published"], expected - delivered["published"])
+        self.assertEqual(drained["pending"], 0)
+        self.assertEqual(
+            [call[0][0] for call in calls].count("assistant_turn"),
+            expected,
+        )
+        self.assertEqual(
+            [call[0][0] for call in calls].count("tool_status"),
+            1,
+        )
+        self.assertEqual(calls[0][0][1]["text"], "[COMPLETE] crash-final")
+        self.assertEqual(calls[0][0][1]["user_utterance"], "crash-u")
+        self.assertEqual(calls[-1][0][1]["text"], "later-final-8")
+        self.assertNotIn(
+            "我去研究一下",
+            [
+                call[0][1]["text"]
+                for call in calls
+                if call[0][0] == "assistant_turn"
+            ],
+        )
+        self.assertEqual(calls[1][0][1]["tool"], "reader.current_page")
+
+        # A second ReaderPC process starts on the same still-active capture.
+        # Durable structured request ids prevent any already ACKed turn from
+        # being sent again.
+        replay_calls = []
+        restarted = SYNC.CaptureBoundHistorySynchronizer(
+            root=self.root,
+            publisher=lambda *args, **kwargs: (
+                replay_calls.append((args, kwargs)) or {"ok": True}
+            ),
+            global_state_path=self.global_state,
+            continuity_path=self.continuity,
+            state_path=self.state,
+            archive_path=self.archive,
+            snapshot_path=snapshot,
+            structured_history_client=FakeHistoryClient(history_value),
+        )
+        rearmed = restarted.observe(
+            service_online=True,
+            capture_active=True,
+            snapshot_mode=True,
+        )
+        self.assertEqual(rearmed["pending"], 0)
+        restarted.observe(
+            service_online=True,
+            capture_active=True,
+            snapshot_mode=True,
+        )
+        self.assertEqual(replay_calls, [])
+
+    def test_structured_restart_recovery_window_is_bounded(self):
+        limit = SYNC.MAX_STRUCTURED_RECOVERY_REQUESTS
+        ids = [f"vh2:11111111:{index:024x}" for index in range(limit + 6)]
+        segments = [
+            {
+                "requestId": request_id,
+                "user": f"u-{index}",
+                "assistant": f"a-{index}",
+                "tools": [],
+            }
+            for index, request_id in enumerate(ids)
+        ]
+        baseline, pending = SYNC._structured_recovery_baseline(
+            projection={
+                "threadId": THREAD,
+                "seenRequestIds": ids,
+                "segments": segments,
+            },
+            state={
+                "version": SYNC.VERSION,
+                "lastGood": None,
+                "published": {ids[0]: True},
+            },
+            archive={"version": SYNC.VERSION, "threads": {}},
+            thread_id=THREAD,
+        )
+        self.assertEqual(pending, limit)
+        self.assertIn(ids[0], baseline)
+        self.assertIn(ids[5], baseline)
+        self.assertNotIn(ids[6], baseline)
+        self.assertNotIn(ids[-1], baseline)
+
+    def test_published_ack_window_prunes_oldest_and_self_heals_old_state(self):
+        overflow = {
+            f"vh2:11111111:{index:024x}": True
+            for index in range(SYNC.MAX_PUBLISHED + 1)
+        }
+        state = SYNC._validate_state({
+            "version": SYNC.VERSION,
+            "lastGood": None,
+            "published": overflow,
+        })
+        self.assertEqual(len(state["published"]), SYNC.MAX_PUBLISHED)
+        self.assertNotIn(next(iter(overflow)), state["published"])
+        newest = "vh2:22222222:" + "f" * 24
+        SYNC._remember_published(state, newest)
+        self.assertEqual(len(state["published"]), SYNC.MAX_PUBLISHED)
+        self.assertIn(newest, state["published"])
+        self.assertNotIn(list(overflow)[1], state["published"])
+
+    def test_structured_fuzzy_recovery_does_not_skip_repeated_prompt(self):
+        repeated = "同じ質問"
+        self.recent(
+            [
+                msg("user", repeated),
+                msg("assistant", "調べてみるね"),
+            ]
+        )
+        seeded = self.sync(
+            publish=True,
+            publisher=lambda *args, **kwargs: {"ok": True},
+        )
+        self.assertEqual(seeded["published"], 1)
+        state = SYNC._validate_state(
+            json.loads(self.state.read_text(encoding="utf-8"))
+        )
+        archive = SYNC._validate_archive(
+            json.loads(self.archive.read_text(encoding="utf-8"))
+        )
+        ids = [
+            f"vh2:11111111:{index:024x}"
+            for index in range(3)
+        ]
+        segments = [
+            {
+                "requestId": ids[0],
+                "user": repeated,
+                "assistant": "最初の完全回答",
+                "tools": [],
+            },
+            {
+                "requestId": ids[1],
+                "user": "間に落ちた質問",
+                "assistant": "間に落ちた回答",
+                "tools": [],
+            },
+            {
+                "requestId": ids[2],
+                "user": repeated,
+                "assistant": "二回目の完全回答",
+                "tools": [],
+            },
+        ]
+        baseline, pending = SYNC._structured_recovery_baseline(
+            projection={
+                "threadId": THREAD,
+                "seenRequestIds": ids,
+                "segments": segments,
+            },
+            state=state,
+            archive=archive,
+            thread_id=THREAD,
+        )
+        self.assertEqual(pending, 3)
+        self.assertNotIn(ids[0], baseline)
+        self.assertNotIn(ids[1], baseline)
+        self.assertNotIn(ids[2], baseline)
 
     def test_structured_capture_skips_pre_activation_user_and_publishes_parts(self):
         self.recent([msg("user", "old-u"), msg("assistant", "old-a")])

@@ -261,6 +261,9 @@ NATIVE_RUNTIME_INTERFACE_ENTRIES = {
         "local", ("GET", "POST", "PATCH", "DELETE"),
         ("epub",), "handleLocalState"
     ),
+    "/pdf/api/img-proxy": (
+        "native", ("GET",), ("epub", "pdf"), "__native_owner__"
+    ),
     "/pdf/api/epub-ink": (
         "local", ("GET", "POST"), ("epub",), "handleLocalState"
     ),

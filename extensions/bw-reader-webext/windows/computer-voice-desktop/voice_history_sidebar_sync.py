@@ -19,6 +19,7 @@ from __future__ import annotations
 import argparse
 import ctypes
 import hashlib
+import html
 import json
 import os
 import queue
@@ -49,6 +50,8 @@ MAX_CODEX_RESPONSE_BYTES = 32 * 1024 * 1024
 MAX_CODEX_TURNS = 5_000
 MAX_CODEX_ITEMS_PER_TURN = 2_000
 MAX_PROJECTED_TOOLS = 64
+MAX_STRUCTURED_RECOVERY_REQUESTS = 32
+MAX_STRUCTURED_PUBLISH_PER_POLL = 8
 MAX_PUBLISHED = MAX_ARCHIVE_ITEMS // 2
 MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024
 SNAPSHOT_ANCHOR_MAX_AGE = timedelta(minutes=3)
@@ -379,6 +382,21 @@ def _bounded_codex_text(value: Any, *, limit: int) -> str | None:
     return value
 
 
+def _extract_realtime_input(value: str) -> str | None:
+    """Return the user utterance from the local realtime delegation shell."""
+    stripped = value.strip()
+    if not stripped.startswith("<realtime_delegation>"):
+        return stripped
+    start = stripped.find("<input>")
+    if start < 0:
+        return None
+    start += len("<input>")
+    end = stripped.find("</input>", start)
+    if end < start:
+        return None
+    return html.unescape(stripped[start:end]).strip()
+
+
 def _codex_user_text(item: dict[str, Any]) -> str | None:
     content = item.get("content")
     if not isinstance(content, list) or len(content) > 256:
@@ -393,7 +411,9 @@ def _codex_user_text(item: dict[str, Any]) -> str | None:
         )
         if text is not None:
             parts.append(text)
-    combined = "\n".join(parts).strip()
+    combined = _extract_realtime_input("\n".join(parts))
+    if combined is None:
+        return None
     return _bounded_codex_text(combined, limit=MAX_CODEX_TEXT_CHARS)
 
 
@@ -595,6 +615,124 @@ def _project_codex_thread(
     }
 
 
+def _history_match_text(value: str, *, user: bool) -> str:
+    """Normalize only enough text to align old Voice and Codex records.
+
+    The old continuity file stores the spoken user text while ``thread/read``
+    stores the enclosing realtime delegation.  Likewise, the authoritative
+    final answer can carry the transport-only ``[COMPLETE]`` marker.  This
+    helper is used solely to locate an acknowledged recovery boundary; the
+    original strings are always what gets published.
+    """
+    text = value.strip()
+    if user:
+        extracted = _extract_realtime_input(text)
+        if extracted is not None:
+            text = extracted
+    elif text.casefold().startswith("[complete]"):
+        text = text[len("[COMPLETE]") :]
+    return " ".join(text.split())
+
+
+def _structured_recovery_baseline(
+    *,
+    projection: dict[str, Any],
+    state: dict[str, Any],
+    archive: dict[str, Any],
+    thread_id: str,
+) -> tuple[set[str], int]:
+    """Choose a bounded, fail-closed replay window for one active thread.
+
+    Exact ``vh2`` acknowledgements are the strongest cursor.  Installations
+    upgraded from the continuity-based synchronizer only have ``vh`` ids, so
+    the acknowledged archive pair supplies a one-time content boundary.  No
+    durable acknowledgement means no recovery replay: the current thread is
+    treated as the activation baseline exactly as before.
+    """
+    seen_ids = list(projection["seenRequestIds"])
+    segments = list(projection["segments"])
+    published = state["published"]
+    seen_indexes = {
+        request_id: index for index, request_id in enumerate(seen_ids)
+    }
+    recovery_starts: list[int] = []
+
+    exact_indexes = [
+        seen_indexes[request_id]
+        for request_id in seen_ids
+        if request_id in published
+    ]
+    if exact_indexes:
+        recovery_starts.append(max(exact_indexes) + 1)
+
+    archived_thread = archive["threads"].get(thread_id)
+    if archived_thread is not None:
+        acknowledged_pairs = [
+            pair
+            for pair in _pairs(thread_id, archived_thread)
+            if pair["requestId"] in published
+        ]
+        segment_by_id = {
+            segment["requestId"]: segment for segment in segments
+        }
+        # Prefer a strong user+final-answer boundary.  The newest exact match
+        # is safe because both halves were acknowledged by the old worker.
+        for pair in reversed(acknowledged_pairs):
+            user_key = _history_match_text(pair["user"], user=True)
+            assistant_key = _history_match_text(
+                pair["assistant"], user=False
+            )
+            exact = [
+                request_id
+                for request_id in reversed(seen_ids)
+                if request_id in segment_by_id
+                and _history_match_text(
+                    segment_by_id[request_id]["user"], user=True
+                ) == user_key
+                and _history_match_text(
+                    segment_by_id[request_id]["assistant"], user=False
+                ) == assistant_key
+            ]
+            if exact:
+                recovery_starts.append(seen_indexes[exact[0]] + 1)
+                break
+        else:
+            # A legacy commentary answer ("I will check") has no exact
+            # authoritative final.  Repeated user prompts make the newest
+            # user-only match unsafe: it could be a later unacknowledged turn.
+            # Start at the earliest matching occurrence, accepting bounded
+            # duplication rather than skipping a completed answer.
+            for pair in reversed(acknowledged_pairs):
+                user_key = _history_match_text(pair["user"], user=True)
+                fuzzy = [
+                    request_id
+                    for request_id in seen_ids
+                    if request_id in segment_by_id
+                    and _history_match_text(
+                        segment_by_id[request_id]["user"], user=True
+                    ) == user_key
+                ]
+                if fuzzy:
+                    recovery_starts.append(seen_indexes[fuzzy[0]])
+                    break
+
+    if not recovery_starts:
+        return set(seen_ids), 0
+
+    recovery_start = max(recovery_starts)
+    recovery_ids = [
+        request_id
+        for request_id in seen_ids[recovery_start:]
+        if request_id not in published
+    ][-MAX_STRUCTURED_RECOVERY_REQUESTS:]
+    recovery_set = set(recovery_ids)
+    completed = sum(
+        segment["requestId"] in recovery_set
+        for segment in segments
+    )
+    return set(seen_ids) - recovery_set, completed
+
+
 def _normalize_item(value: Any, label: str) -> dict[str, str]:
     if not isinstance(value, dict):
         raise SyncDataError(f"{label}: item must be an object")
@@ -753,7 +891,7 @@ def _validate_state(value: Any) -> dict[str, Any]:
     if value["version"] != VERSION:
         raise SyncDataError("state: unsupported version")
     published = value["published"]
-    if not isinstance(published, dict) or len(published) > MAX_PUBLISHED:
+    if not isinstance(published, dict):
         raise SyncDataError("state.published: invalid object")
     clean_published: dict[str, bool] = {}
     for request_id, marker in published.items():
@@ -765,11 +903,29 @@ def _validate_state(value: Any) -> dict[str, Any]:
         ):
             raise SyncDataError("state.published: invalid entry")
         clean_published[request_id] = True
+    # Older workers could write the (MAX_PUBLISHED + 1)th acknowledgement and
+    # then reject their own state forever on the next poll.  The file itself is
+    # already bounded by MAX_STATE_BYTES, so validate every entry first and
+    # retain only the newest bounded window to self-heal that state.
+    if len(clean_published) > MAX_PUBLISHED:
+        clean_published = dict(
+            list(clean_published.items())[-MAX_PUBLISHED:]
+        )
     return {
         "version": VERSION,
         "lastGood": _validate_last_good(value["lastGood"]),
         "published": clean_published,
     }
+
+
+def _remember_published(state: dict[str, Any], request_id: str) -> None:
+    """Append one ACK while keeping the durable dedupe window bounded."""
+    published = state["published"]
+    if request_id in published:
+        return
+    while len(published) >= MAX_PUBLISHED:
+        del published[next(iter(published))]
+    published[request_id] = True
 
 
 def _validate_archive(value: Any) -> dict[str, Any]:
@@ -1155,7 +1311,7 @@ def sync_once(
                 except Exception as exc:  # publisher defines its own error type
                     publish_error = f"publisher failed: {type(exc).__name__}"
                     break
-                state["published"][pair["requestId"]] = True
+                _remember_published(state, pair["requestId"])
                 published_count += 1
                 try:
                     _atomic_write_json(state_path, state, MAX_STATE_BYTES)
@@ -1456,8 +1612,28 @@ class CaptureBoundHistorySynchronizer:
                     self.structured_history_client.read_thread(thread_id),
                     thread_id,
                 )
-                self._structured_baseline = set(
-                    projection["seenRequestIds"]
+                state = _load_durable(
+                    self.state_path,
+                    MAX_STATE_BYTES,
+                    "state",
+                    _default_state(),
+                    _validate_state,
+                )
+                archive = _load_durable(
+                    self.archive_path,
+                    MAX_ARCHIVE_BYTES,
+                    "archive",
+                    _default_archive(),
+                    _validate_archive,
+                )
+                (
+                    self._structured_baseline,
+                    recovery_pending,
+                ) = _structured_recovery_baseline(
+                    projection=projection,
+                    state=state,
+                    archive=archive,
+                    thread_id=thread_id,
                 )
                 self.last_result["items"] = len(
                     projection["seenRequestIds"]
@@ -1465,6 +1641,12 @@ class CaptureBoundHistorySynchronizer:
                 self.last_result["pairs"] = len(
                     projection["segments"]
                 )
+                self.last_result["pending"] = recovery_pending
+                if recovery_pending > 0:
+                    self._structured_followup_polls = max(
+                        self._structured_followup_polls,
+                        1,
+                    )
             except Exception as exc:
                 self._structured_baseline = None
                 self.last_result["stale"] = True
@@ -1598,12 +1780,13 @@ class CaptureBoundHistorySynchronizer:
                 and segment["requestId"] not in state["published"]
             )
         ]
+        publish_batch = pending[:MAX_STRUCTURED_PUBLISH_PER_POLL]
         published_count = 0
         publish_error: str | None = None
         if identity is None and pending:
             publish_error = "Reader output source unavailable"
         else:
-            for segment in pending:
+            for segment in publish_batch:
                 request_id = segment["requestId"]
                 common = {
                     "file": identity["file"] if identity else None,
@@ -1650,7 +1833,7 @@ class CaptureBoundHistorySynchronizer:
                 except Exception as exc:
                     publish_error = f"publisher failed: {type(exc).__name__}"
                     break
-                state["published"][request_id] = True
+                _remember_published(state, request_id)
                 try:
                     _atomic_write_json(
                         self.state_path,
@@ -1669,6 +1852,11 @@ class CaptureBoundHistorySynchronizer:
         )
         self.last_result["pending"] = remaining
         self.last_result["published"] = published_count
+        if remaining > 0:
+            self._structured_followup_polls = max(
+                self._structured_followup_polls,
+                1,
+            )
         if publish_error:
             self.last_result["error"] = publish_error
             if published_count == 0 and remaining > 0:

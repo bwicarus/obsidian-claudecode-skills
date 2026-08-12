@@ -231,6 +231,7 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
     let staticRevision: String
     let state: ReaderLocalRuntimeState
     let piProxyBroker: ReaderNativePiProxyBroker
+    let imageProxyBroker: ReaderNativeImageProxyBroker
     let pageRenderer: ReaderNativePDFPageRenderer
     let visualCaptureBroker: ReaderNativeVisualCaptureBroker
 
@@ -289,6 +290,22 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                 request,
                 opaqueBookID: opaqueBookID
             )
+        }
+
+        if decodedPath == "/pdf/api/img-proxy" {
+            guard request.method == .GET else {
+                return response(
+                    status: .methodNotAllowed,
+                    text: "method not allowed",
+                    headers: [HTTPHeader("Allow"): "GET"]
+                )
+            }
+            guard trustedResourceSurface(
+                referer: request.headers[HTTPHeader("Referer")]
+            ) != nil else {
+                return response(status: .forbidden, text: "invalid referer")
+            }
+            return await serveNativeImageProxy(request)
         }
 
         if Self.isDirectPiResourcePath(decodedPath) {
@@ -442,7 +459,6 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
         if [
             "/pdf/api/page-image",
             "/pdf/api/figure-crop",
-            "/pdf/api/img-proxy",
             "/pdf/api/reader-events",
             "/pdf/api/vocab-audio",
         ].contains(path) {
@@ -452,6 +468,51 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
             && path.count > "/pdf/api/asset/".count
             || path.hasPrefix("/api/assistant/voice-clip/")
             && path.count > "/api/assistant/voice-clip/".count
+    }
+
+    private func serveNativeImageProxy(
+        _ request: HTTPRequest
+    ) async -> HTTPResponse {
+        guard let rawURL = request.query["url"] else {
+            return response(
+                status: .forbidden,
+                text: "BW_NATIVE_IMAGE_URL：缺少图片地址",
+                headers: [
+                    HTTPHeader("X-BW-Reader-Error"): "invalid-url"
+                ]
+            )
+        }
+        do {
+            let payload = try await imageProxyBroker.fetch(rawURL: rawURL)
+            return dataResponse(
+                request,
+                data: payload.data,
+                contentType: payload.contentType,
+                cacheControl: "private, max-age=604800, immutable",
+                additionalHeaders: [
+                    HTTPHeader("X-BW-Native-Image-Proxy"): "local/1"
+                ]
+            )
+        } catch let error as ReaderNativeImageProxyError {
+            let phrase = HTTPURLResponse.localizedString(
+                forStatusCode: error.httpStatus
+            ).capitalized
+            return response(
+                status: HTTPStatusCode(error.httpStatus, phrase: phrase),
+                text: error.localizedDescription,
+                headers: [
+                    HTTPHeader("X-BW-Reader-Error"): error.diagnosticCode
+                ]
+            )
+        } catch {
+            return response(
+                status: .badGateway,
+                text: "BW_NATIVE_IMAGE_TRANSPORT：图片请求失败",
+                headers: [
+                    HTTPHeader("X-BW-Reader-Error"): "transport"
+                ]
+            )
+        }
     }
 
     private func serveBookMeta(_ request: HTTPRequest) async -> HTTPResponse {
@@ -1517,6 +1578,7 @@ final class ReaderLocalRuntimeServer {
         cspNonce = try Self.makeRandomHex(byteCount: 32)
         state = ReaderLocalRuntimeState()
         piProxyBroker = ReaderNativePiProxyBroker()
+        let imageProxyBroker = ReaderNativeImageProxyBroker()
         visualCaptureBroker = ReaderNativeVisualCaptureBroker()
         let address = try sockaddr_in.inet(ip4: Self.host, port: Self.port)
         let handler = ReaderLocalHTTPHandler(
@@ -1527,6 +1589,7 @@ final class ReaderLocalRuntimeServer {
             staticRevision: String(manifestDigest.prefix(24)),
             state: state,
             piProxyBroker: piProxyBroker,
+            imageProxyBroker: imageProxyBroker,
             pageRenderer: ReaderNativePDFPageRenderer(),
             visualCaptureBroker: visualCaptureBroker
         )

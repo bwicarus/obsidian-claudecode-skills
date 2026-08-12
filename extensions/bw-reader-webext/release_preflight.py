@@ -102,6 +102,7 @@ WINDOWS_SOURCE_FILES = (
     "ComputerVoiceAudio/DirectBridgeSelfTest.cs",
     "ComputerVoiceAudio/DirectBridgeServer.cs",
     "ComputerVoiceAudio/DirectConnectionPhaseDeadline.cs",
+    "ComputerVoiceAudio/DisconnectCleanupWatchdogSelfTest.cs",
     "ComputerVoiceAudio/DirectContextBridge.cs",
     "ComputerVoiceAudio/DirectContextSnapshot.cs",
     "ComputerVoiceAudio/DirectMicrophoneDiscovery.cs",

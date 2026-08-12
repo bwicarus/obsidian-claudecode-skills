@@ -28,6 +28,12 @@ from bridge_core import (
     start_direct_service,
     stop_direct_service,
 )
+from control_plane import (
+    ControlPaths,
+    SubprocessExactCommandRunner,
+    inspect_bootstrap_task,
+    run_bootstrap_task_if_owned,
+)
 from readerpc_services import (
     PRODUCT_NAME,
     PcOcrServiceController,
@@ -45,7 +51,7 @@ from voice_history_sidebar_sync import (
 )
 
 
-APP_VERSION = "0.1.15"
+APP_VERSION = "0.1.16"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 POLL_INTERVAL_MS = 2_500
@@ -54,6 +60,33 @@ PC_RESTART_BACKOFF_SECONDS = 30.0
 VOICE_RESTART_BACKOFF_SECONDS = 30.0
 VOICE_START_TIMEOUT_SECONDS = 8.0
 VOICE_START_POLL_SECONDS = 0.1
+
+
+def prepare_readerpc_shortcut_broker() -> WindowsShortcutBroker | None:
+    """Reuse the strictly owned logon broker, or become its sole owner."""
+
+    bridge_paths = BridgePaths.discover()
+    control_paths = ControlPaths.discover()
+    runner = SubprocessExactCommandRunner()
+    inspection = inspect_bootstrap_task(
+        bridge_paths,
+        control_paths,
+        runner,
+    )
+    if inspection.exists:
+        if not inspection.owned:
+            raise BridgeError(
+                "同名后台引导器不属于 Reader；拒绝共用快捷键通道。"
+            )
+        run_bootstrap_task_if_owned(
+            bridge_paths,
+            control_paths,
+            runner,
+        )
+        return None
+    broker = WindowsShortcutBroker()
+    broker.start()
+    return broker
 
 
 def readerpc_history_sync_enabled(paths: BridgePaths) -> bool:
@@ -804,13 +837,17 @@ def main(argv: list[str] | None = None) -> int:
     instance = SingleInstance()
     if not instance.acquire():
         return 0
-    # The native direct service deliberately cannot inject keyboard input.
-    # ReaderPC is the interactive desktop owner, so keep the authenticated F24
-    # broker alive for exactly the same lifetime as its tray process.
-    with WindowsShortcutBroker():
+    # Reuse the already installed, strictly attested logon broker when present;
+    # otherwise ReaderPC owns one for its tray lifetime. This prevents two
+    # project components from competing for the one F24 pipe.
+    broker = prepare_readerpc_shortcut_broker()
+    try:
         root = tk.Tk()
         ReaderPCWindow(root)
         root.mainloop()
+    finally:
+        if broker is not None:
+            broker.close()
     return 0
 
 

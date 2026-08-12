@@ -1854,6 +1854,34 @@
     var s = map[j], lastM = j + q.length - 1;
     return { start: s, end: lastM < map.length ? map[lastM] + 1 : raw.length };
   }
+  function _findUniqueOffset(raw, query) {
+    query = String(query || '');
+    if (!query.trim()) throw new Error('BW_READER_SOURCE_TEXT_EMPTY');
+    var first = raw.indexOf(query);
+    if (first >= 0) {
+      if (raw.indexOf(query, first + 1) >= 0) throw new Error('BW_READER_SOURCE_TEXT_AMBIGUOUS');
+      return { start: first, end: first + query.length };
+    }
+    var q = query.replace(/\s+/g, ' ').trim();
+    var comp = '', map = [], prevSp = false;
+    for (var k = 0; k < raw.length; k++) {
+      var c = raw[k];
+      if (/\s/.test(c)) {
+        if (prevSp) continue;
+        comp += ' '; map.push(k); prevSp = true;
+      } else {
+        comp += c; map.push(k); prevSp = false;
+      }
+    }
+    var lead = comp.length - comp.replace(/^\s+/, '').length;
+    comp = comp.trim(); map = map.slice(lead, lead + comp.length);
+    var pos = comp.indexOf(q);
+    if (pos < 0) throw new Error('BW_READER_SOURCE_TEXT_NOT_FOUND');
+    if (comp.indexOf(q, pos + 1) >= 0) throw new Error('BW_READER_SOURCE_TEXT_AMBIGUOUS');
+    var rawStart = map[pos], rawEndAt = map[pos + q.length - 1];
+    if (!Number.isInteger(rawStart) || !Number.isInteger(rawEndAt)) throw new Error('BW_READER_SOURCE_TEXT_RANGE_INVALID');
+    return { start: rawStart, end: rawEndAt + 1 };
+  }
   // 确保某 section 已渲染(没渲染就 loadSection 再轮询)→ resolve(loaded?)。
   function _ensureLoaded(section) {
     return new Promise(function (resolve) {
@@ -1961,6 +1989,53 @@
     var task = _epubHighlightTransaction(arg);
     task.catch(function () {});   // old action dispatchers intentionally ignore returns
     return task;
+  };
+
+  function _epubExactSource(request) {
+    request = request || {};
+    if (request.file !== FREL) return Promise.reject(new Error('BW_READER_SOURCE_WRONG_BOOK'));
+    if (!request.target || request.target.kind !== 'epub') return Promise.reject(new Error('BW_READER_SOURCE_TARGET_KIND'));
+    var section = Number(request.target.section);
+    if (!Number.isInteger(section) || section < 0 || section >= COUNT) return Promise.reject(new Error('BW_READER_SOURCE_SECTION_INVALID'));
+    return _ensureLoaded(section).then(function (ok) {
+      var el = secEls[section];
+      if (!ok || !el) throw new Error('BW_READER_SOURCE_SECTION_UNAVAILABLE');
+      var offset = _findUniqueOffset(_sectionRawText(el), request.sourceText != null ? request.sourceText : request.text);
+      return { section: section, offset: offset, element: el };
+    });
+  }
+
+  window.__bwReaderValidateExactSource = function (request) {
+    return _epubExactSource(request).then(function (found) {
+      return { ok: true, section: found.section, start: found.offset.start, end: found.offset.end };
+    });
+  };
+
+  window.__bwReaderHighlightExactText = function (request) {
+    request = request || {};
+    var colors = { yellow:'#fff59d', green:'#a7f3d0', blue:'#a3d4ff', pink:'#fda4af' };
+    if (!colors[request.color]) return Promise.reject(new Error('BW_READER_HIGHLIGHT_COLOR_INVALID'));
+    if (!/^c_[a-f0-9]{8,32}$/.test(request.mutationId || '')) return Promise.reject(new Error('BW_READER_HIGHLIGHT_MUTATION_ID'));
+    return _epubExactSource(request).then(function (found) {
+      var body = {
+        file: FREL,
+        id: request.mutationId,
+        anchor: { section: found.section, start: found.offset.start, end: found.offset.end },
+        text: String(request.text || '').trim(),
+        color: colors[request.color],
+        note: request.note || '',
+        kind: 'note'
+      };
+      return new Promise(function (resolve, reject) {
+        reqJson('POST', '/pdf/api/epub-highlights', body, function (data) {
+          var h = data.highlight;
+          if (!h || !h.id) { reject(new Error('BW_READER_HIGHLIGHT_SAVE_INVALID')); return; }
+          _hls[h.id] = h;
+          if (found.element) applyHl(found.element, h);
+          resolve({ ok: true, status: 'highlight_saved', id: h.id, section: found.section, text: h.text });
+        }, function (error) { reject(new Error('BW_READER_HIGHLIGHT_SAVE_REJECTED:' + error)); });
+      });
+    });
   };
 
   // ── 「第N章」→ section idx 换算(④ off-by-one 修复)──

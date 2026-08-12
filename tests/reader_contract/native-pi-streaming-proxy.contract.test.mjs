@@ -55,7 +55,6 @@ test("direct media/image resources require the capability shell referer and mani
   for (const route of [
     "/pdf/api/page-image",
     "/pdf/api/figure-crop",
-    "/pdf/api/img-proxy",
     "/pdf/api/reader-events",
     "/pdf/api/vocab-audio",
     "/pdf/api/asset/",

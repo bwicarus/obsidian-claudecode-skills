@@ -375,6 +375,13 @@
         reason: '本地先显示 pending；真正写入 AnkiConnect 仍需服务器执行'
       }
     ),
+    remoteRequired(
+      'anki.draft.verify',
+      ['/pdf/api/anki-draft'],
+      ['POST'],
+      '精确来源与当前书身份必须由服务端验证；成功只交付可编辑草稿，不写入 Anki',
+      { kind: 'command' }
+    ),
     localMutation(
       'entity.state.update',
       '/pdf/api/entity/{id}',

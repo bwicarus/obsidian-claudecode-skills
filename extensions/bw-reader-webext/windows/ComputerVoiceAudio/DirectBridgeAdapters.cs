@@ -885,7 +885,12 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
         }
     }
 
-    internal async Task<bool> StopForConnectionAsync(string connectionId)
+    internal Task<bool> StopForConnectionAsync(string connectionId) =>
+        StopForConnectionAsync(connectionId, onCleanupSettled: null);
+
+    internal async Task<bool> StopForConnectionAsync(
+        string connectionId,
+        Func<Task>? onCleanupSettled)
     {
         await _stateGate.WaitAsync().ConfigureAwait(false);
         try
@@ -912,6 +917,13 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
             if (!_mediaAdapter.CleanupPending)
             {
                 ClearActiveSession();
+                if (onCleanupSettled is not null)
+                {
+                    // Keep the idle publication in the same owner-serialized
+                    // transaction.  A replacement START cannot become active
+                    // between clearing the retired lease and publishing idle.
+                    await onCleanupSettled().ConfigureAwait(false);
+                }
             }
             return true;
         }

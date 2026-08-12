@@ -1970,9 +1970,13 @@ class WindowsShortcutBroker:
         try:
             kernel32 = self._configure_kernel32()
             security, descriptor = self._current_user_security(kernel32)
+            # Keep the sole named-pipe instance for the broker lifetime.
+            # Closing and recreating a FILE_FLAG_FIRST_PIPE_INSTANCE pipe for
+            # every request races with a client handle that has not finished
+            # releasing yet and can terminate the broker with WinError 231.
+            pipe = self._new_pipe(kernel32, security)
+            self._ready.set()
             while not self._stop.is_set():
-                pipe = self._new_pipe(kernel32, security)
-                self._ready.set()
                 connected = bool(kernel32.ConnectNamedPipe(pipe, None))
                 if (
                     not connected
@@ -1991,8 +1995,6 @@ class WindowsShortcutBroker:
                     pass
                 finally:
                     kernel32.DisconnectNamedPipe(pipe)
-                    kernel32.CloseHandle(pipe)
-                    pipe = None
         except BaseException as error:
             if not self._ready.is_set():
                 self._startup_error = error

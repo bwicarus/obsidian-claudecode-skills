@@ -19,6 +19,7 @@ from readerpc_launcher import (  # noqa: E402
     load_preferences,
     main,
     readerpc_history_sync_enabled,
+    prepare_readerpc_shortcut_broker,
     save_preferences,
     set_codex_voice_keep_active,
     start_readerpc_voice,
@@ -378,18 +379,66 @@ class ReaderPCLauncherTests(unittest.TestCase):
     def test_gui_owns_shortcut_broker_for_entire_window_lifetime(self) -> None:
         with (
             patch("readerpc_launcher.SingleInstance") as instance,
-            patch("readerpc_launcher.WindowsShortcutBroker") as broker,
+            patch(
+                "readerpc_launcher.prepare_readerpc_shortcut_broker"
+            ) as prepare_broker,
             patch("readerpc_launcher.tk.Tk") as make_root,
             patch("readerpc_launcher.ReaderPCWindow") as make_window,
         ):
             instance.return_value.acquire.return_value = True
             self.assertEqual(main([]), 0)
 
-        broker.assert_called_once_with()
-        broker.return_value.__enter__.assert_called_once_with()
-        broker.return_value.__exit__.assert_called_once()
+        prepare_broker.assert_called_once_with()
+        prepare_broker.return_value.close.assert_called_once_with()
         make_window.assert_called_once_with(make_root.return_value)
         make_root.return_value.mainloop.assert_called_once_with()
+
+    def test_readerpc_reuses_strictly_owned_logon_broker(self) -> None:
+        inspection = SimpleNamespace(exists=True, owned=True)
+        with (
+            patch(
+                "readerpc_launcher.inspect_bootstrap_task",
+                return_value=inspection,
+            ),
+            patch(
+                "readerpc_launcher.run_bootstrap_task_if_owned",
+                return_value=True,
+            ) as run_task,
+            patch(
+                "readerpc_launcher.WindowsShortcutBroker",
+            ) as broker,
+        ):
+            self.assertIsNone(prepare_readerpc_shortcut_broker())
+        run_task.assert_called_once()
+        broker.assert_not_called()
+
+    def test_readerpc_rejects_unowned_logon_broker(self) -> None:
+        with (
+            patch(
+                "readerpc_launcher.inspect_bootstrap_task",
+                return_value=SimpleNamespace(exists=True, owned=False),
+            ),
+            patch("readerpc_launcher.run_bootstrap_task_if_owned") as run_task,
+            patch("readerpc_launcher.WindowsShortcutBroker") as broker,
+        ):
+            with self.assertRaisesRegex(Exception, "不属于 Reader"):
+                prepare_readerpc_shortcut_broker()
+        run_task.assert_not_called()
+        broker.assert_not_called()
+
+    def test_readerpc_owns_broker_when_logon_task_is_absent(self) -> None:
+        with (
+            patch(
+                "readerpc_launcher.inspect_bootstrap_task",
+                return_value=SimpleNamespace(exists=False, owned=False),
+            ),
+            patch("readerpc_launcher.WindowsShortcutBroker") as broker,
+        ):
+            self.assertIs(
+                prepare_readerpc_shortcut_broker(),
+                broker.return_value,
+            )
+        broker.return_value.start.assert_called_once_with()
 
 
 if __name__ == "__main__":
