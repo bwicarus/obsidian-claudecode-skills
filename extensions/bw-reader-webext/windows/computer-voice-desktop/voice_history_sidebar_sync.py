@@ -21,8 +21,11 @@ import ctypes
 import hashlib
 import json
 import os
+import queue
+import subprocess
 import sys
 import threading
+import time
 import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -41,6 +44,11 @@ MAX_THREADS = 128
 MAX_RECENT_ITEMS = 20
 MAX_ARCHIVE_ITEMS = 10_000
 MAX_TEXT_CHARS = 4_000
+MAX_CODEX_TEXT_CHARS = 8_000
+MAX_CODEX_RESPONSE_BYTES = 32 * 1024 * 1024
+MAX_CODEX_TURNS = 5_000
+MAX_CODEX_ITEMS_PER_TURN = 2_000
+MAX_PROJECTED_TOOLS = 64
 MAX_PUBLISHED = MAX_ARCHIVE_ITEMS // 2
 MAX_SNAPSHOT_BYTES = 8 * 1024 * 1024
 SNAPSHOT_ANCHOR_MAX_AGE = timedelta(minutes=3)
@@ -48,11 +56,239 @@ HISTORY_POLL_SECONDS = 0.75
 FINAL_TAIL_POLLS = 3
 OFFLINE_EXIT_POLLS = 40
 PUBLISH_FAILURE_BACKOFF_POLLS = 20
+STRUCTURED_HISTORY_FOLLOWUP_POLLS = 2
+CODEX_APP_SERVER_TIMEOUT_SECONDS = 6.0
 ERROR_ALREADY_EXISTS = 183
 READER_SYNC_MARKERS = ("[[READER_SYNC]]", "[[/READER_SYNC]]")
 
 Publisher = Callable[..., dict[str, Any]]
 StatusProvider = Callable[[], Any]
+
+
+class CodexAppServerError(RuntimeError):
+    """The local read-only Codex app-server request could not complete."""
+
+
+class CodexAppServerHistoryClient:
+    """Small persistent read-only client for ``thread/read``.
+
+    The child exists only during an owned capture lease.  Its stderr is
+    discarded because it may contain private thread data, and no response
+    content is written to ReaderPC logs.
+    """
+
+    def __init__(
+        self,
+        *,
+        executable: Path | None = None,
+        timeout_seconds: float = CODEX_APP_SERVER_TIMEOUT_SECONDS,
+    ) -> None:
+        self.executable = executable
+        self.timeout_seconds = timeout_seconds
+        self._process: subprocess.Popen[str] | None = None
+        self._stdout: queue.Queue[str | None] = queue.Queue()
+        self._next_id = 0
+        self._initialized = False
+
+    @staticmethod
+    def find_executable() -> Path | None:
+        override = os.environ.get("BW_CODEX_APP_SERVER_EXECUTABLE")
+        if override:
+            candidate = Path(override)
+            if candidate.is_absolute() and candidate.is_file():
+                return candidate
+            return None
+        appdata = Path(os.environ.get("APPDATA") or "")
+        package_root = (
+            appdata
+            / "npm"
+            / "node_modules"
+            / "@openai"
+            / "codex"
+            / "node_modules"
+        )
+        candidates = (
+            package_root
+            / "@openai"
+            / "codex-win32-x64"
+            / "vendor"
+            / "x86_64-pc-windows-msvc"
+            / "bin"
+            / "codex.exe",
+            package_root
+            / "@openai"
+            / "codex-win32-arm64"
+            / "vendor"
+            / "aarch64-pc-windows-msvc"
+            / "bin"
+            / "codex.exe",
+        )
+        return next((path for path in candidates if path.is_file()), None)
+
+    def read_thread(self, thread_id: str) -> dict[str, Any]:
+        thread_id = _canonical_uuid(thread_id, "app-server.threadId")
+        self._ensure_started()
+        return self._request(
+            "thread/read",
+            {"threadId": thread_id, "includeTurns": True},
+        )
+
+    def close(self) -> None:
+        process = self._process
+        self._process = None
+        self._initialized = False
+        self._stdout = queue.Queue()
+        if process is None:
+            return
+        try:
+            if process.stdin is not None:
+                process.stdin.close()
+        except OSError:
+            pass
+        try:
+            process.wait(timeout=2)
+        except subprocess.TimeoutExpired:
+            process.terminate()
+            try:
+                process.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                process.kill()
+                process.wait(timeout=2)
+
+    def _ensure_started(self) -> None:
+        if (
+            self._process is not None
+            and self._process.poll() is None
+            and self._initialized
+        ):
+            return
+        self.close()
+        executable = self.executable or self.find_executable()
+        if executable is None:
+            raise CodexAppServerError("Codex app-server executable unavailable")
+        creationflags = (
+            getattr(subprocess, "CREATE_NO_WINDOW", 0)
+            if os.name == "nt"
+            else 0
+        )
+        try:
+            self._process = subprocess.Popen(
+                [str(executable), "app-server", "--stdio"],
+                stdin=subprocess.PIPE,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+                encoding="utf-8",
+                errors="strict",
+                bufsize=1,
+                creationflags=creationflags,
+            )
+        except OSError as exc:
+            raise CodexAppServerError("Codex app-server start failed") from exc
+        assert self._process.stdout is not None
+        assert self._process.stderr is not None
+        threading.Thread(
+            target=self._drain_stdout,
+            args=(self._process.stdout, self._stdout),
+            name="readerpc-codex-history-out",
+            daemon=True,
+        ).start()
+        threading.Thread(
+            target=self._drain_stderr,
+            args=(self._process.stderr,),
+            name="readerpc-codex-history-err",
+            daemon=True,
+        ).start()
+        self._request(
+            "initialize",
+            {
+                "clientInfo": {
+                    "name": "bw_reader_voice_history",
+                    "title": "BW Reader Voice History",
+                    "version": "2.0.0",
+                }
+            },
+        )
+        self._write({"method": "initialized"})
+        self._initialized = True
+
+    @staticmethod
+    def _drain_stdout(
+        stream: Any,
+        destination: queue.Queue[str | None],
+    ) -> None:
+        try:
+            for line in stream:
+                destination.put(line)
+        except (OSError, UnicodeError):
+            pass
+        finally:
+            destination.put(None)
+
+    @staticmethod
+    def _drain_stderr(stream: Any) -> None:
+        try:
+            for _ in stream:
+                pass
+        except (OSError, UnicodeError):
+            pass
+
+    def _write(self, value: dict[str, Any]) -> None:
+        process = self._process
+        if process is None or process.poll() is not None or process.stdin is None:
+            raise CodexAppServerError("Codex app-server is not running")
+        raw = json.dumps(
+            value,
+            ensure_ascii=False,
+            allow_nan=False,
+            separators=(",", ":"),
+        )
+        try:
+            process.stdin.write(raw + "\n")
+            process.stdin.flush()
+        except (OSError, UnicodeError) as exc:
+            raise CodexAppServerError("Codex app-server write failed") from exc
+
+    def _request(self, method: str, params: dict[str, Any]) -> dict[str, Any]:
+        self._next_id += 1
+        request_id = self._next_id
+        self._write({"method": method, "id": request_id, "params": params})
+        deadline = time.monotonic() + self.timeout_seconds
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self.close()
+                raise CodexAppServerError("Codex app-server response timed out")
+            try:
+                line = self._stdout.get(timeout=remaining)
+            except queue.Empty as exc:
+                self.close()
+                raise CodexAppServerError(
+                    "Codex app-server response timed out"
+                ) from exc
+            if line is None:
+                self.close()
+                raise CodexAppServerError("Codex app-server closed")
+            raw = line.encode("utf-8")
+            if not raw.strip() or len(raw) > MAX_CODEX_RESPONSE_BYTES:
+                self.close()
+                raise CodexAppServerError("Codex app-server response invalid")
+            try:
+                response = _decode_json(raw, "app-server-response")
+            except SyncDataError as exc:
+                self.close()
+                raise CodexAppServerError(
+                    "Codex app-server response invalid"
+                ) from exc
+            if not isinstance(response, dict) or "id" not in response:
+                continue
+            if response.get("id") != request_id:
+                self.close()
+                raise CodexAppServerError("Codex app-server response mismatch")
+            if "error" in response or not isinstance(response.get("result"), dict):
+                self.close()
+                raise CodexAppServerError("Codex app-server request failed")
+            return response["result"]
 
 
 class SyncDataError(ValueError):
@@ -127,6 +363,236 @@ def _canonical_uuid(value: Any, label: str) -> str:
     if parsed.int == 0 or value != canonical:
         raise SyncDataError(f"{label}: UUID must be canonical and non-zero")
     return canonical
+
+
+def _bounded_codex_text(value: Any, *, limit: int) -> str | None:
+    if not isinstance(value, str):
+        return None
+    value = value.strip()
+    if (
+        not value
+        or len(value) > limit
+        or "\x00" in value
+        or _contains_reader_sync_marker(value)
+    ):
+        return None
+    return value
+
+
+def _codex_user_text(item: dict[str, Any]) -> str | None:
+    content = item.get("content")
+    if not isinstance(content, list) or len(content) > 256:
+        return None
+    parts: list[str] = []
+    for part in content:
+        if not isinstance(part, dict) or part.get("type") != "text":
+            continue
+        text = _bounded_codex_text(
+            part.get("text"),
+            limit=MAX_CODEX_TEXT_CHARS,
+        )
+        if text is not None:
+            parts.append(text)
+    combined = "\n".join(parts).strip()
+    return _bounded_codex_text(combined, limit=MAX_CODEX_TEXT_CHARS)
+
+
+def _codex_request_id(
+    thread_id: str,
+    turn_id: str,
+    item_id: str,
+    item_index: int,
+    user_text: str,
+) -> str:
+    digest = hashlib.sha256(
+        (
+            thread_id
+            + "\x00"
+            + turn_id
+            + "\x00"
+            + item_id
+            + "\x00"
+            + str(item_index)
+            + "\x00"
+            + user_text
+        ).encode("utf-8")
+    ).hexdigest()[:24]
+    return f"vh2:{thread_id[:8]}:{digest}"
+
+
+def _tool_status(value: Any) -> str:
+    if value in {"completed", "complete", "done", "success", "succeeded"}:
+        return "done"
+    if value in {"failed", "error"}:
+        return "error"
+    if value in {"cancelled", "canceled", "aborted"}:
+        return "aborted"
+    return "running"
+
+
+def _safe_tool_name(value: Any, fallback: str) -> str:
+    text = _bounded_codex_text(value, limit=160)
+    if text is None:
+        return fallback
+    return "".join(
+        char if char.isalnum() or char in "._:-" else "-"
+        for char in text
+    )[:160]
+
+
+def _project_tool(item: dict[str, Any]) -> dict[str, str | None] | None:
+    item_type = item.get("type")
+    if item_type == "mcpToolCall":
+        server = _safe_tool_name(item.get("server"), "mcp")
+        tool = _safe_tool_name(item.get("tool"), "tool")
+        name = f"{server}.{tool}"[:160]
+        status = _tool_status(item.get("status"))
+        duration = item.get("durationMs")
+        detail = (
+            "完成" if status == "done" else
+            "已取消" if status == "aborted" else
+            "执行失败" if status == "error" else
+            "执行中"
+        )
+        if (
+            not isinstance(duration, bool)
+            and isinstance(duration, (int, float))
+            and 0 <= duration <= 86_400_000
+        ):
+            detail += f" · {round(duration)} ms"
+        return {
+            "status": status,
+            "tool": name,
+            "label": f"工具：{name}"[:320],
+            "detail": detail,
+        }
+    if item_type == "webSearch":
+        query_text = _bounded_codex_text(item.get("query"), limit=240)
+        results = item.get("results")
+        count = len(results) if isinstance(results, list) else None
+        detail = "搜索完成"
+        if count is not None:
+            detail += f" · {count} 个结果"
+        return {
+            "status": "done",
+            "tool": "web.search",
+            "label": (
+                f"网页搜索：{query_text}" if query_text else "网页搜索"
+            )[:320],
+            "detail": detail,
+        }
+    if item_type == "commandExecution":
+        status = _tool_status(item.get("status"))
+        return {
+            "status": status,
+            "tool": "local.command",
+            "label": "本地命令",
+            "detail": (
+                "完成" if status == "done" else
+                "已取消" if status == "aborted" else
+                "执行失败" if status == "error" else
+                "执行中"
+            ),
+        }
+    return None
+
+
+def _project_codex_thread(
+    result: Any,
+    expected_thread_id: str,
+) -> dict[str, Any]:
+    """Project one authoritative Codex thread into completed user turns.
+
+    Commentary and reasoning are intentionally ignored.  A segment becomes
+    publishable only after an ``agentMessage`` explicitly declares
+    ``phase=final_answer``.
+    """
+    expected_thread_id = _canonical_uuid(
+        expected_thread_id,
+        "app-server.expectedThreadId",
+    )
+    if not isinstance(result, dict) or not isinstance(result.get("thread"), dict):
+        raise SyncDataError("app-server: thread result missing")
+    thread = result["thread"]
+    if thread.get("id") != expected_thread_id:
+        raise SyncDataError("app-server: thread identity mismatch")
+    turns = thread.get("turns")
+    if not isinstance(turns, list) or len(turns) > MAX_CODEX_TURNS:
+        raise SyncDataError("app-server: turns invalid")
+
+    seen_request_ids: list[str] = []
+    segments: list[dict[str, Any]] = []
+    for turn_index, turn in enumerate(turns):
+        if not isinstance(turn, dict):
+            continue
+        items = turn.get("items")
+        if (
+            not isinstance(items, list)
+            or len(items) > MAX_CODEX_ITEMS_PER_TURN
+        ):
+            continue
+        raw_turn_id = turn.get("id")
+        turn_id = (
+            raw_turn_id
+            if isinstance(raw_turn_id, str) and 0 < len(raw_turn_id) <= 256
+            else f"turn-{turn_index}"
+        )
+        current: dict[str, Any] | None = None
+        for item_index, item in enumerate(items):
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type")
+            if item_type == "userMessage":
+                user_text = _codex_user_text(item)
+                if user_text is None:
+                    current = None
+                    continue
+                raw_item_id = item.get("id")
+                item_id = (
+                    raw_item_id
+                    if isinstance(raw_item_id, str) and 0 < len(raw_item_id) <= 256
+                    else f"user-{item_index}"
+                )
+                request_id = _codex_request_id(
+                    expected_thread_id,
+                    turn_id,
+                    item_id,
+                    item_index,
+                    user_text,
+                )
+                seen_request_ids.append(request_id)
+                current = {
+                    "requestId": request_id,
+                    "user": user_text,
+                    "tools": [],
+                }
+                continue
+            if current is None:
+                continue
+            projected_tool = _project_tool(item)
+            if projected_tool is not None:
+                if len(current["tools"]) < MAX_PROJECTED_TOOLS:
+                    current["tools"].append(projected_tool)
+                continue
+            if item_type != "agentMessage" or item.get("phase") != "final_answer":
+                continue
+            assistant = _bounded_codex_text(
+                item.get("text"),
+                limit=MAX_CODEX_TEXT_CHARS,
+            )
+            if assistant is not None:
+                segments.append(
+                    {
+                        **current,
+                        "assistant": assistant,
+                    }
+                )
+            current = None
+    return {
+        "threadId": expected_thread_id,
+        "seenRequestIds": seen_request_ids,
+        "segments": segments,
+    }
 
 
 def _normalize_item(value: Any, label: str) -> dict[str, str]:
@@ -908,6 +1374,7 @@ class CaptureBoundHistorySynchronizer:
         state_path: Path | None = None,
         archive_path: Path | None = None,
         snapshot_path: Path | None = None,
+        structured_history_client: Any | None = None,
     ) -> None:
         defaults = _default_paths()
         self.global_state_path = global_state_path or defaults[0]
@@ -919,19 +1386,31 @@ class CaptureBoundHistorySynchronizer:
             or root / "runtime" / "reader-context-snapshot.json"
         )
         self.publisher = publisher
+        self.structured_history_client = structured_history_client
         self.was_active = False
         self.tail_polls = 0
         self._lease_thread_id: str | None = None
         self._minimum_assistant_index: int | None = None
         self._lease_source_instance_id: str | None = None
         self._failure_backoff_polls = 0
+        self._structured_baseline: set[str] | None = None
+        self._structured_signature: tuple[int, int] | None = None
+        self._structured_followup_polls = 0
         self.last_result: dict[str, Any] | None = None
 
     def _release_lease(self) -> None:
+        if self.structured_history_client is not None:
+            try:
+                self.structured_history_client.close()
+            except Exception:
+                pass
         self._lease_thread_id = None
         self._minimum_assistant_index = None
         self._lease_source_instance_id = None
         self._failure_backoff_polls = 0
+        self._structured_baseline = None
+        self._structured_signature = None
+        self._structured_followup_polls = 0
 
     def cancel(self) -> None:
         """Drop the in-memory capture lease without publishing a final turn."""
@@ -970,9 +1449,242 @@ class CaptureBoundHistorySynchronizer:
             self._lease_source_instance_id = identity[
                 "source_instance_id"
             ]
+        if self.structured_history_client is not None:
+            self._structured_signature = self._continuity_signature()
+            try:
+                projection = _project_codex_thread(
+                    self.structured_history_client.read_thread(thread_id),
+                    thread_id,
+                )
+                self._structured_baseline = set(
+                    projection["seenRequestIds"]
+                )
+                self.last_result["items"] = len(
+                    projection["seenRequestIds"]
+                )
+                self.last_result["pairs"] = len(
+                    projection["segments"]
+                )
+            except Exception as exc:
+                self._structured_baseline = None
+                self.last_result["stale"] = True
+                self.last_result["error"] = (
+                    "structured history unavailable: "
+                    + type(exc).__name__
+                )
+                self._failure_backoff_polls = (
+                    PUBLISH_FAILURE_BACKOFF_POLLS
+                )
         return self.last_result
 
-    def _sync(self) -> dict[str, Any] | None:
+    def _continuity_signature(self) -> tuple[int, int] | None:
+        try:
+            stat = self.continuity_path.stat()
+        except OSError:
+            return None
+        return stat.st_mtime_ns, stat.st_size
+
+    def _structured_route_identity(self) -> dict[str, Any] | None:
+        identity = snapshot_output_identity(self.snapshot_path)
+        if identity is not None and self._lease_source_instance_id is None:
+            self._lease_source_instance_id = identity[
+                "source_instance_id"
+            ]
+        return identity
+
+    def _structured_sync(
+        self,
+        *,
+        force_history_read: bool,
+    ) -> dict[str, Any] | None:
+        assert self._lease_thread_id is not None
+        assert self._minimum_assistant_index is not None
+        identity = self._structured_route_identity()
+        source_matches_lease = (
+            identity is None and self._lease_source_instance_id is None
+            or identity is not None
+            and identity.get("source_instance_id")
+                == self._lease_source_instance_id
+        )
+        self.last_result = sync_once(
+            global_state_path=self.global_state_path,
+            continuity_path=self.continuity_path,
+            state_path=self.state_path,
+            archive_path=self.archive_path,
+            publish=False,
+            expected_thread_id=self._lease_thread_id,
+            minimum_assistant_index=self._minimum_assistant_index,
+            allow_last_good=False,
+        )
+        if not source_matches_lease:
+            route_error = (
+                "Reader output source unavailable during capture lease"
+                if identity is None
+                else "active Reader source changed during capture lease"
+            )
+            prior_error = self.last_result.get("error")
+            self.last_result["stale"] = True
+            self.last_result["error"] = (
+                f"{prior_error}; {route_error}"
+                if prior_error
+                else route_error
+            )
+            return self.last_result
+        if self.last_result.get("stale") is not False:
+            return self.last_result
+
+        signature = self._continuity_signature()
+        changed = signature != self._structured_signature
+        if changed:
+            self._structured_signature = signature
+            self._structured_followup_polls = (
+                STRUCTURED_HISTORY_FOLLOWUP_POLLS
+            )
+        should_read = (
+            force_history_read
+            or changed
+            or self._structured_followup_polls > 0
+            or self._structured_baseline is None
+        )
+        if self._structured_followup_polls > 0:
+            self._structured_followup_polls -= 1
+        if not should_read:
+            return self.last_result
+
+        try:
+            projection = _project_codex_thread(
+                self.structured_history_client.read_thread(
+                    self._lease_thread_id
+                ),
+                self._lease_thread_id,
+            )
+        except Exception as exc:
+            self.last_result["stale"] = True
+            self.last_result["error"] = (
+                "structured history unavailable: "
+                + type(exc).__name__
+            )
+            self._failure_backoff_polls = PUBLISH_FAILURE_BACKOFF_POLLS
+            return self.last_result
+
+        seen_ids = projection["seenRequestIds"]
+        segments = projection["segments"]
+        self.last_result["items"] = len(seen_ids)
+        self.last_result["pairs"] = len(segments)
+        if self._structured_baseline is None:
+            # If the authoritative source was unavailable while arming, the
+            # first successful read becomes the fail-closed activation line.
+            self._structured_baseline = set(seen_ids)
+            self.last_result["pending"] = 0
+            return self.last_result
+
+        try:
+            state = _load_durable(
+                self.state_path,
+                MAX_STATE_BYTES,
+                "state",
+                _default_state(),
+                _validate_state,
+            )
+        except SyncDataError as exc:
+            self.last_result["stale"] = True
+            self.last_result["error"] = f"state: {exc}"
+            return self.last_result
+        pending = [
+            segment
+            for segment in segments
+            if (
+                segment["requestId"] not in self._structured_baseline
+                and segment["requestId"] not in state["published"]
+            )
+        ]
+        published_count = 0
+        publish_error: str | None = None
+        if identity is None and pending:
+            publish_error = "Reader output source unavailable"
+        else:
+            for segment in pending:
+                request_id = segment["requestId"]
+                common = {
+                    "file": identity["file"] if identity else None,
+                    "page": identity["page"] if identity else None,
+                    "source_instance_id": (
+                        identity["source_instance_id"] if identity else None
+                    ),
+                    "snapshot_revision": (
+                        identity["snapshot_revision"] if identity else None
+                    ),
+                    "thread_id": self._lease_thread_id,
+                }
+                try:
+                    response = self.publisher(
+                        "assistant_turn",
+                        {
+                            "text": segment["assistant"],
+                            "user_utterance": segment["user"],
+                        },
+                        request_id=request_id,
+                        **common,
+                    )
+                    if (
+                        not isinstance(response, dict)
+                        or response.get("ok") is not True
+                    ):
+                        publish_error = "publisher rejected assistant_turn"
+                        break
+                    for tool_index, tool in enumerate(segment["tools"]):
+                        response = self.publisher(
+                            "tool_status",
+                            tool,
+                            request_id=f"{request_id}:t{tool_index}",
+                            **common,
+                        )
+                        if (
+                            not isinstance(response, dict)
+                            or response.get("ok") is not True
+                        ):
+                            publish_error = "publisher rejected tool_status"
+                            break
+                    if publish_error:
+                        break
+                except Exception as exc:
+                    publish_error = f"publisher failed: {type(exc).__name__}"
+                    break
+                state["published"][request_id] = True
+                try:
+                    _atomic_write_json(
+                        self.state_path,
+                        state,
+                        MAX_STATE_BYTES,
+                    )
+                except (OSError, SyncDataError) as exc:
+                    publish_error = f"state-write-after-publish: {exc}"
+                    break
+                published_count += 1
+
+        remaining = sum(
+            segment["requestId"] not in self._structured_baseline
+            and segment["requestId"] not in state["published"]
+            for segment in segments
+        )
+        self.last_result["pending"] = remaining
+        self.last_result["published"] = published_count
+        if publish_error:
+            self.last_result["error"] = publish_error
+            if published_count == 0 and remaining > 0:
+                self._failure_backoff_polls = (
+                    PUBLISH_FAILURE_BACKOFF_POLLS
+                )
+        else:
+            self.last_result.pop("error", None)
+            self._failure_backoff_polls = 0
+        return self.last_result
+
+    def _sync(
+        self,
+        *,
+        force_history_read: bool = False,
+    ) -> dict[str, Any] | None:
         if (
             self._lease_thread_id is None
             or self._minimum_assistant_index is None
@@ -981,6 +1693,10 @@ class CaptureBoundHistorySynchronizer:
         if self._failure_backoff_polls > 0:
             self._failure_backoff_polls -= 1
             return self.last_result
+        if self.structured_history_client is not None:
+            return self._structured_sync(
+                force_history_read=force_history_read
+            )
         identity = snapshot_output_identity(self.snapshot_path)
         if identity is not None and self._lease_source_instance_id is None:
             self._lease_source_instance_id = identity[
@@ -1079,7 +1795,7 @@ class CaptureBoundHistorySynchronizer:
                 self.tail_polls = FINAL_TAIL_POLLS
         if self.tail_polls > 0:
             self.tail_polls -= 1
-            result = self._sync()
+            result = self._sync(force_history_read=True)
             if self.tail_polls == 0:
                 self._release_lease()
             return result
@@ -1092,7 +1808,7 @@ class CaptureBoundHistorySynchronizer:
         ):
             self.was_active = False
             self.tail_polls = 0
-            result = self._sync()
+            result = self._sync(force_history_read=True)
             self._release_lease()
             return result
         self.cancel()

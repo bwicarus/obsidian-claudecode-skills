@@ -3,8 +3,8 @@
 The old implementation SSHed to the Pi and hoped that the Pi-side bridge could
 resolve the current Reader.  The snapshot already names the exact live WSS
 source, so the local ReaderPC service is now the only hop.  This module remains
-deliberately narrow: history sync can publish assistant turns, not arbitrary
-Reader actions.
+deliberately narrow: history sync can publish completed assistant turns and
+their explicit tool statuses, not arbitrary Reader actions.
 """
 from __future__ import annotations
 
@@ -19,7 +19,8 @@ PIPE_NAME = "bw-reader-realtime-output-rpc-v1"
 PIPE_PATH = r"\\.\pipe" + "\\" + PIPE_NAME
 CONNECT_TIMEOUT_SECONDS = 3.0
 MAX_FRAME_BYTES = 1024 * 1024
-MAX_TEXT_CHARS = 4_000
+MAX_TEXT_CHARS = 8_000
+MAX_TOOL_DETAIL_CHARS = 6_000
 READER_SYNC_MARKERS = ("[[READER_SYNC]]", "[[/READER_SYNC]]")
 
 
@@ -47,6 +48,42 @@ def _validate_turn_payload(payload: Any) -> dict[str, str]:
         ):
             raise SidebarBridgeError(f"assistant_turn.{field} 文本无效")
         normalized[field] = value
+    return normalized
+
+
+def _contains_reader_sync_marker(text: str) -> bool:
+    return any(marker in text for marker in READER_SYNC_MARKERS)
+
+
+def _validate_tool_payload(payload: Any) -> dict[str, str | None]:
+    if not isinstance(payload, dict) or set(payload) != {
+        "status", "tool", "label", "detail",
+    }:
+        raise SidebarBridgeError("tool_status payload 字段无效")
+    status = payload["status"]
+    if status not in {"running", "done", "error", "aborted"}:
+        raise SidebarBridgeError("tool_status.status 无效")
+    normalized: dict[str, str | None] = {"status": status}
+    for field, limit in (("tool", 160), ("label", 320)):
+        value = payload[field]
+        if (
+            not isinstance(value, str)
+            or not value.strip()
+            or len(value) > limit
+            or "\x00" in value
+            or _contains_reader_sync_marker(value)
+        ):
+            raise SidebarBridgeError(f"tool_status.{field} 无效")
+        normalized[field] = value.strip()
+    detail = payload["detail"]
+    if detail is not None and (
+        not isinstance(detail, str)
+        or len(detail) > MAX_TOOL_DETAIL_CHARS
+        or "\x00" in detail
+        or _contains_reader_sync_marker(detail)
+    ):
+        raise SidebarBridgeError("tool_status.detail 无效")
+    normalized["detail"] = detail.strip() if isinstance(detail, str) else None
     return normalized
 
 
@@ -113,10 +150,17 @@ def call(
     snapshot_revision: int | None = None,
     thread_id: str | None = None,
 ) -> dict[str, Any]:
-    """Send one fixed assistant turn to the exact live Reader source."""
-    if kind != "assistant_turn":
-        raise SidebarBridgeError("历史同步只允许 assistant_turn")
-    turn_payload = _validate_turn_payload(payload)
+    """Send one bounded history part to the exact live Reader source."""
+    if kind == "assistant_turn":
+        normalized_payload: dict[str, Any] = _validate_turn_payload(payload)
+        wire_kind = "assistant-turn"
+    elif kind == "tool_status":
+        normalized_payload = _validate_tool_payload(payload)
+        wire_kind = "tool-status"
+    else:
+        raise SidebarBridgeError(
+            "历史同步只允许 assistant_turn 或 tool_status"
+        )
     correlation = request_id or ""
     if (
         not correlation
@@ -143,12 +187,17 @@ def call(
             isinstance(page, int) and page >= 0
             or isinstance(page, str) and 1 <= len(page) <= 256 and "\x00" not in page
         )
-        or not isinstance(thread_id, str)
-        or not thread_id
-        or len(thread_id) > 160
-        or not all(
-            ch in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-"
-            for ch in thread_id
+        or (
+            kind == "assistant_turn"
+            and (
+                not isinstance(thread_id, str)
+                or not thread_id
+                or len(thread_id) > 160
+                or not all(
+                    ch in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789._:-"
+                    for ch in thread_id
+                )
+            )
         )
     ):
         raise SidebarBridgeError("当前 Reader 本地输出身份无效或已过期")
@@ -160,12 +209,16 @@ def call(
         "snapshotRevision": snapshot_revision,
         "file": file,
         "page": page,
-        "kind": "assistant-turn",
-        "payload": {
-            "threadId": thread_id,
-            "user": turn_payload["user_utterance"],
-            "assistant": turn_payload["text"],
-        },
+        "kind": wire_kind,
+        "payload": (
+            {
+                "threadId": thread_id,
+                "user": normalized_payload["user_utterance"],
+                "assistant": normalized_payload["text"],
+            }
+            if kind == "assistant_turn"
+            else normalized_payload
+        ),
     }
     try:
         result = _run_once(envelope)

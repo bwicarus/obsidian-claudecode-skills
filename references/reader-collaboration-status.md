@@ -4163,3 +4163,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **验证**：Xcode 模拟器/设备归档、Reader Node、专项 Python、ReaderBundle/Safari 打包与 Pi E2E 通过；实际 IPA/Safari 归档词典数据文件均为零。
 - **发布**：提交 `cbf090e4`；Actions `31596830125` 上传 TestFlight `1.1.45 (259)`，`31597573036` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
 - **Pi/扩展**：Reader `0.2.104` 回滚目录 `20260812T124208Z-1338793`；Windows 测试通道 `0.2.104` SHA `f99d51f7…6c03`，备份 `webext-channel-20260812T124516Z-b_1p5mcq`。
+
+## Codex：ReaderPC 完整回答与工具历史已接通（2026-08-12 JST）
+- **改动**：历史发布改读本机 Codex `thread/read` 权威轮次，只接受 `final_answer`，忽略“稍等/正在查”等 commentary；同轮 MCP、网页搜索与本地命令以工具 part 回写。
+- **边界**：激活前未完成问题仍不补发，原始工具结果不外泄；卡片继续只接受显式 `reader_card`/`reader_command`/`reader-result`，不从回答文本猜测。
+- **验证/安装**：专项 35 项、ReaderPC 19 项、Reader Node 全量与真实 app-server 只读投影通过；ReaderPC `0.1.15` 已原子安装，旧 release 保留。
+- **已知门禁**：包摘要与包内自检通过；Windows 全量/handoff 仍受既有 `fcntl`、生产夹具/密钥与测试数据基线阻断，未部署 App、Pi 或扩展。
+- **下一步**：下一次真实电脑语音提问后验收历史显示最终回答与工具流程；若调用显式卡片，确认其仍随原工具回执进入当前 Reader。

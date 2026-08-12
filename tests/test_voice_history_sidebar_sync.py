@@ -867,6 +867,321 @@ class VoiceHistorySidebarSyncTest(unittest.TestCase):
         )
         self.assertEqual(len(attempts), 2)
 
+    def test_structured_projection_uses_only_final_answer_and_real_tools(self):
+        projected = SYNC._project_codex_thread(
+            {
+                "thread": {
+                    "id": THREAD,
+                    "turns": [
+                        {
+                            "id": "turn-1",
+                            "items": [
+                                {
+                                    "type": "userMessage",
+                                    "id": "user-1",
+                                    "content": [
+                                        {"type": "text", "text": "查一下天气"}
+                                    ],
+                                },
+                                {
+                                    "type": "agentMessage",
+                                    "phase": "commentary",
+                                    "text": "我现在去研究一下",
+                                },
+                                {
+                                    "type": "mcpToolCall",
+                                    "server": "reader",
+                                    "tool": "current_page",
+                                    "status": "completed",
+                                    "durationMs": 42,
+                                    "result": {"private": "must not be copied"},
+                                },
+                                {
+                                    "type": "webSearch",
+                                    "query": "东京天气",
+                                    "results": [{"title": "天气"}],
+                                },
+                                {
+                                    "type": "mcpToolCall",
+                                    "server": "reader",
+                                    "tool": "private_action",
+                                    "status": "failed",
+                                    "error": "CAPABILITY_SECRET must stay local",
+                                },
+                                {
+                                    "type": "agentMessage",
+                                    "phase": "final_answer",
+                                    "text": "东京明天晴，最高 28 度。",
+                                },
+                            ],
+                        }
+                    ],
+                }
+            },
+            THREAD,
+        )
+        self.assertEqual(len(projected["seenRequestIds"]), 1)
+        self.assertEqual(len(projected["segments"]), 1)
+        segment = projected["segments"][0]
+        self.assertEqual(segment["user"], "查一下天气")
+        self.assertEqual(segment["assistant"], "东京明天晴，最高 28 度。")
+        self.assertNotIn("我现在去研究一下", str(segment))
+        self.assertEqual(
+            segment["tools"],
+            [
+                {
+                    "status": "done",
+                    "tool": "reader.current_page",
+                    "label": "工具：reader.current_page",
+                    "detail": "完成 · 42 ms",
+                },
+                {
+                    "status": "done",
+                    "tool": "web.search",
+                    "label": "网页搜索：东京天气",
+                    "detail": "搜索完成 · 1 个结果",
+                },
+                {
+                    "status": "error",
+                    "tool": "reader.private_action",
+                    "label": "工具：reader.private_action",
+                    "detail": "执行失败",
+                },
+            ],
+        )
+        self.assertNotIn("must not be copied", str(segment))
+        self.assertNotIn("CAPABILITY_SECRET", str(segment))
+
+    def test_structured_capture_skips_pre_activation_user_and_publishes_parts(self):
+        self.recent([msg("user", "old-u"), msg("assistant", "old-a")])
+        snapshot = self.root / "reader-context-snapshot.json"
+        self.write(
+            snapshot,
+            {
+                "schema": "reader-context-snapshot/1",
+                "revision": 71,
+                "updatedAtUtc": datetime.now(timezone.utc).isoformat(),
+                "contextStatus": "ready",
+                "activeReading": {
+                    "fresh": True,
+                    "sourceInstanceId": "app-reader-1",
+                },
+                "currentPage": {
+                    "stable": True,
+                    "sourceInstanceId": "app-reader-1",
+                    "file": "Books/book.pdf",
+                    "page": 8,
+                },
+            },
+        )
+
+        def user_item(item_id, text):
+            return {
+                "type": "userMessage",
+                "id": item_id,
+                "content": [{"type": "text", "text": text}],
+            }
+
+        class FakeHistoryClient:
+            def __init__(self, value):
+                self.value = value
+                self.reads = 0
+                self.closes = 0
+
+            def read_thread(self, thread_id):
+                self.reads += 1
+                return self.value
+
+            def close(self):
+                self.closes += 1
+
+        initial = {
+            "thread": {
+                "id": THREAD,
+                "turns": [
+                    {
+                        "id": "old-turn",
+                        "items": [
+                            user_item("old-user", "old-u"),
+                            {
+                                "type": "agentMessage",
+                                "phase": "final_answer",
+                                "text": "old-a",
+                            },
+                        ],
+                    },
+                    {
+                        "id": "pending-turn",
+                        "items": [
+                            user_item("pending-user", "激活前已经提问"),
+                            {
+                                "type": "agentMessage",
+                                "phase": "commentary",
+                                "text": "我去研究一下",
+                            },
+                        ],
+                    },
+                ],
+            }
+        }
+        history = FakeHistoryClient(initial)
+        calls = []
+        syncer = SYNC.CaptureBoundHistorySynchronizer(
+            root=self.root,
+            publisher=lambda *args, **kwargs: (
+                calls.append((args, kwargs)) or {"ok": True}
+            ),
+            global_state_path=self.global_state,
+            continuity_path=self.continuity,
+            state_path=self.state,
+            archive_path=self.archive,
+            snapshot_path=snapshot,
+            structured_history_client=history,
+        )
+        armed = syncer.observe(
+            service_online=True,
+            capture_active=True,
+            snapshot_mode=True,
+        )
+        self.assertEqual(armed["published"], 0)
+        self.assertEqual(calls, [])
+
+        history.value = {
+            "thread": {
+                "id": THREAD,
+                "turns": initial["thread"]["turns"][:-1]
+                + [
+                    {
+                        "id": "pending-turn",
+                        "items": [
+                            user_item("pending-user", "激活前已经提问"),
+                            {
+                                "type": "agentMessage",
+                                "phase": "commentary",
+                                "text": "我去研究一下",
+                            },
+                            {
+                                "type": "agentMessage",
+                                "phase": "final_answer",
+                                "text": "激活前问题的完整答案",
+                            },
+                        ],
+                    },
+                    {
+                        "id": "new-turn",
+                        "items": [
+                            user_item("new-user", "新问题"),
+                            {
+                                "type": "agentMessage",
+                                "phase": "commentary",
+                                "text": "请稍等",
+                            },
+                            {
+                                "type": "mcpToolCall",
+                                "server": "reader",
+                                "tool": "selection",
+                                "status": "completed",
+                            },
+                            {
+                                "type": "agentMessage",
+                                "phase": "final_answer",
+                                "text": "这是新问题的完整答案",
+                            },
+                        ],
+                    },
+                ],
+            }
+        }
+        self.recent(
+            [
+                msg("user", "old-u"),
+                msg("assistant", "old-a"),
+                msg("user", "新问题"),
+                msg("assistant", "这是新问题的完整答案"),
+            ]
+        )
+        delivered = syncer.observe(
+            service_online=True,
+            capture_active=True,
+            snapshot_mode=True,
+        )
+        self.assertEqual(delivered["published"], 1)
+        self.assertEqual([call[0][0] for call in calls], [
+            "assistant_turn", "tool_status",
+        ])
+        self.assertEqual(
+            calls[0][0][1],
+            {
+                "text": "这是新问题的完整答案",
+                "user_utterance": "新问题",
+            },
+        )
+        self.assertEqual(calls[1][0][1]["tool"], "reader.selection")
+        self.assertEqual(calls[0][1]["source_instance_id"], "app-reader-1")
+        self.assertEqual(calls[0][1]["snapshot_revision"], 71)
+        self.assertTrue(calls[1][1]["request_id"].endswith(":t0"))
+        self.assertNotIn("激活前问题的完整答案", str(calls))
+
+        syncer.observe(
+            service_online=True,
+            capture_active=True,
+            snapshot_mode=True,
+        )
+        self.assertEqual(len(calls), 2)
+
+    def test_sidebar_tool_status_uses_exact_local_output_contract(self):
+        captured = []
+        with patch.object(
+            SIDEBAR,
+            "_run_once",
+            side_effect=lambda envelope: (
+                captured.append(envelope)
+                or {"ok": True}
+            ),
+        ):
+            result = SIDEBAR.call(
+                "tool_status",
+                {
+                    "status": "done",
+                    "tool": "reader.selection",
+                    "label": "工具：reader.selection",
+                    "detail": "完成 · 42 ms",
+                },
+                request_id="vh2:11111111:abc:t0",
+                file="Books/book.pdf",
+                page=8,
+                source_instance_id="app-reader-1",
+                snapshot_revision=71,
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual(captured[0]["kind"], "tool-status")
+        self.assertEqual(
+            captured[0]["payload"],
+            {
+                "status": "done",
+                "tool": "reader.selection",
+                "label": "工具：reader.selection",
+                "detail": "完成 · 42 ms",
+            },
+        )
+        with patch.object(SIDEBAR, "_run_once") as run_once:
+            with self.assertRaises(SIDEBAR.SidebarBridgeError):
+                SIDEBAR.call(
+                    "tool_status",
+                    {
+                        "status": "done",
+                        "tool": "reader.selection",
+                        "label": "[[READER_SYNC]]",
+                        "detail": None,
+                    },
+                    request_id="vh2:11111111:abc:t0",
+                    file="Books/book.pdf",
+                    page=8,
+                    source_instance_id="app-reader-1",
+                    snapshot_revision=71,
+                )
+        run_once.assert_not_called()
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -38,13 +38,14 @@ from readerpc_services import (
     write_readerpc_status,
 )
 from voice_history_sidebar_sync import (
+    CodexAppServerHistoryClient,
     CaptureBoundHistorySynchronizer,
     history_worker_lease,
     monitor_capture_history,
 )
 
 
-APP_VERSION = "0.1.13"
+APP_VERSION = "0.1.15"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 POLL_INTERVAL_MS = 2_500
@@ -241,7 +242,8 @@ class ReaderPCWindow:
         self.last_status_publish = 0.0
         self.history_stop_event = threading.Event()
         self.history_synchronizer = CaptureBoundHistorySynchronizer(
-            root=self.bridge_paths.root
+            root=self.bridge_paths.root,
+            structured_history_client=CodexAppServerHistoryClient(),
         )
         self.history_thread = threading.Thread(
             target=self._run_history_sync,
