@@ -32,6 +32,23 @@
     remove: (key) => localStoreCall('BW_LOCAL_STORAGE_REMOVE', key)
   });
 
+  // Bundled JMdict data stays inside the extension package.  Reading goes
+  // through the service worker so third-party pages never need access to a
+  // chrome-extension:// resource and no Pi request is involved.
+  const offlineDictionaryCall = (path) => new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage({ type: 'BW_OFFLINE_DICTIONARY_JSON', path }, (response) => {
+      const runtimeError = chrome.runtime.lastError;
+      if (runtimeError || !response?.ok) {
+        reject(new Error(runtimeError?.message || response?.error || '扩展内置词典不可用'));
+      } else {
+        resolve(response.data);
+      }
+    });
+  });
+  window.__bwOfflineJapaneseDictionaryBridge = Object.freeze({
+    fetchJson: offlineDictionaryCall
+  });
+
   const nativeBridgeEncoder = new TextEncoder();
   const nativeBridgeTrimUtf8 = (value, maximumBytes) => {
     const text = String(value || '');

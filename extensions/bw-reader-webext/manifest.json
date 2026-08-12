@@ -55,6 +55,7 @@
         "vendor/reader-runtime-computer-voice-webrtc.js",
         "vendor/rc-core.js",
         "vendor/reader-runtime-card-improvement-actions.js",
+        "vendor/rc-offline-dictionary.js",
         "vendor/rc-ui.js",
         "vendor/rc-flashcard.js",
         "vendor/rc-snippets.js",

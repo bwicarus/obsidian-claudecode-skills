@@ -175,8 +175,12 @@
       if (!w || _dictCache.has(w)) continue;
       _prewarmActive++;
       (function (ww) {
-        fetch('/pdf/api/dict-quick?word=' + encodeURIComponent(ww) + '&prewarm=1')
-          .then(function (r) { return r.json(); })
+        var offline = RC.offlineDictionary;
+        var operation = (_isJaWord(ww) && offline && offline.isLocalMode && offline.isLocalMode())
+          ? offline.lookupJapaneseLegacy(ww)
+          : fetch('/pdf/api/dict-quick?word=' + encodeURIComponent(ww) + '&prewarm=1')
+              .then(function (r) { return r.json(); });
+        operation
           .then(function (d) { if (d && d.ok) { _dictCache.set(ww, d); if (_dictCache.size > _DICT_CACHE_MAX) _dictCache.delete(_dictCache.keys().next().value); } })
           .catch(function () {})
           .then(function () { _prewarmActive--; if (_prewarmQ.length) _schedPump(); });
@@ -560,7 +564,15 @@
   }, true);
 
   // ─────────────────────────── 核心小框 ───────────────────────────
+  function _offlineJapaneseDictionary() {
+    var dictionary = RC.offlineDictionary;
+    return dictionary && dictionary.CONTRACT === 'bw-offline-dictionary/1' &&
+      dictionary.isLocalMode && dictionary.isLocalMode() ? dictionary : null;
+  }
+
   function _lookupFetch(word) {
+    var local = _isJaWord(word) && _offlineJapaneseDictionary();
+    if (local) return local.lookupJapaneseLegacy(word);
     var url = '/pdf/api/dict-quick?word=' + encodeURIComponent(word) +
       '&file=' + encodeURIComponent(_ctx.file || '') +
       '&page=' + (_ctx.page || 0) +
@@ -578,7 +590,8 @@
         // 词典无此词(常见=复合词/专有名词,2026-07-21 用户实锤「豆腐汁」):不再自动糊 AI 大框——
         // 合成兜底词条走标准小框(掌握/语法/发音/定位全套白拿);「展开完整字典」→ AI 讲解成为用户主动动作
         d = { ok: true, jp: true, word: word, lemma: word, forms: [],
-              translation: '', definition: '暂无词典释义(可能是复合词/专有名词)。点此展开,让 AI 结合上下文讲解', mastered: false };
+              translation: '', definition: '内置离线词典暂无释义。点此展开后可手动使用 Pi AI 精释',
+              source: 'local-jmdict', mastered: false };
       } else { pop.style.display = 'none'; window._expandWordFull(word, ctx); return; }   // 英文 ecdict 没有 → 三源完整(原行为)
     }
     try { _dictCache.set(word, d); if (_dictCache.size > 600) _dictCache.delete(_dictCache.keys().next().value); } catch (_) {}
@@ -1099,12 +1112,17 @@
     var contentEl = document.getElementById('result-content');
     var d;
     try {
-      var r = await fetch('/pdf/api/dict-jp?word=' + encodeURIComponent(word) +
-        '&context=' + encodeURIComponent(ctx || '') +
-        '&file=' + encodeURIComponent(_ctx.file || '') +
-        '&page=' + encodeURIComponent(_ctx.page || 0) +
-        '&langs=' + encodeURIComponent((_ctx.langs || []).join(',')));
-      d = await r.json();
+      var local = _offlineJapaneseDictionary();
+      if (local) {
+        d = await local.lookupJapaneseLegacy(word);
+      } else {
+        var r = await fetch('/pdf/api/dict-jp?word=' + encodeURIComponent(word) +
+          '&context=' + encodeURIComponent(ctx || '') +
+          '&file=' + encodeURIComponent(_ctx.file || '') +
+          '&page=' + encodeURIComponent(_ctx.page || 0) +
+          '&langs=' + encodeURIComponent((_ctx.langs || []).join(',')));
+        d = await r.json();
+      }
     } catch (e) {
       if (myReq === _resReqId()) contentEl.innerHTML = '<div style="color:#c00;padding:14px">查词失败：' + e.message + '</div>';
       return false;
@@ -1112,11 +1130,12 @@
     if (myReq !== _resReqId()) return false;
     if (!d.ok) {
       if (_isJaWord(word)) {
-        // 日语词查不到(典型=人名/专有名词):给终态 + ✨AI 深入讲解直接顶上。
-        // 此前落进英文三源框 → 日文进英文管道永远「查询中」空转(2026-07-20 用户实锤「伊部」)。
-        contentEl.innerHTML = '<div style="padding:6px 2px 10px;color:#8a9bb4">「' + esc(word) + '」暂无词典释义（可能是人名/专有名词），已请 AI 讲解：</div>' +
-          '<button id="jp-ai-btn" style="display:none"></button><div id="jp-ai-out" class="jp-ai-out"></div>';
-        try { jpAiDeep(word); } catch (e) {}
+        // 本地词典无命中是一个完整结果。Pi 只在用户明确点击后参与，不能把
+        // 本地 miss 偷偷升级成远端 AI 请求。
+        contentEl.innerHTML = '<div style="padding:6px 2px 10px;color:#8a9bb4">「' + esc(word) + '」内置离线词典暂无释义（可能是人名或专有名词）。</div>' +
+          '<button id="jp-ai-btn" class="jp-ai-btn">Pi AI 精释（结合当前句境）</button><div id="jp-ai-out" class="jp-ai-out"></div>';
+        var missAiButton = contentEl.querySelector('#jp-ai-btn');
+        if (missAiButton) missAiButton.addEventListener('click', function () { jpAiDeep(word); });
         return false;
       }
       return dictStream(word, ctx);   // 也许其实是英文词 → 回退三源框
@@ -1129,6 +1148,13 @@
       (d.romaji ? '<span class="jp-romaji">' + esc(d.romaji) + '</span>' : '') +
       (d.pos ? '<span class="jp-pos">' + esc(d.pos) + '</span>' : '') + '</div>';
     if (d.zh) html += '<div class="jp-zh">' + esc(d.zh) + '</div>';
+    else if (d.definition || d.translation) {
+      html += '<div class="jp-zh">' + esc(d.definition || d.translation) + '</div>';
+    }
+    if (d.source === 'local-jmdict') {
+      html += '<div style="margin-top:4px;color:#6f7e96;font-size:10.5px">内置离线 JMdict' +
+        (d.local_zh ? ' · 本地中文覆盖' : ' · 英文释义') + '</div>';
+    }
     html += _jpInflectHtml(d.inflect, word);   // 变形分析:原形 + 语法标签
     _jpKanjiData = d.kanji || [];
     if (_jpKanjiData.length) {
@@ -1146,7 +1172,7 @@
       });
       html += '</div>';
     }
-    html += '<button id="jp-ai-btn" class="jp-ai-btn">✨ AI 深入讲解（用法 / 语感 / 近义辨析）</button>' +
+    html += '<button id="jp-ai-btn" class="jp-ai-btn">Pi AI 精释（句境 / 用法 / 语感 / 近义辨析）</button>' +
             '<div id="jp-ai-out" class="jp-ai-out"></div>';
     contentEl.innerHTML = html;
     contentEl.scrollTop = 0;
@@ -1159,7 +1185,9 @@
     if (_aiBtn) _aiBtn.addEventListener('click', function () { jpAiDeep(word); });
     if (_jpKanjiData.length) jpKanjiTap(0);   // 默认展开第一个汉字(本模块局部)
     // 有未翻的例句/汉字字义 → 后台翻 + 轮询替换英文(不增加等待)
-    if ((d.examples || []).some(function (e) { return !e.zh; }) || _jpKanjiData.some(function (k) { return !k.meanings_zh; })) _jpPollZh(word);
+    if (d.source !== 'local-jmdict' &&
+        ((d.examples || []).some(function (e) { return !e.zh; }) ||
+         _jpKanjiData.some(function (k) { return !k.meanings_zh; }))) _jpPollZh(word);
     var va = document.getElementById('vocab-actions');
     if (va) {
       va.className = 'show';
@@ -1194,7 +1222,7 @@
     var out = document.getElementById('jp-ai-out');
     if (!out) return;
     var myReq = _resReqId();
-    if (btn) { btn.disabled = true; btn.textContent = '✨ 生成中…'; }
+    if (btn) { btn.disabled = true; btn.textContent = 'Pi AI 精释中…'; }
     var ctx = (_wordPopState && _wordPopState.ctx) || '';
     try {
       var render = function (text) {

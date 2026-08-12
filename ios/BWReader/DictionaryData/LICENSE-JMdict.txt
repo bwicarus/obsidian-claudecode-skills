@@ -1,0 +1,42 @@
+JMdict attribution and licence
+================================
+
+This product includes a compact, English-only derived form of JMdict, the
+Japanese-Multilingual Dictionary. JMdict is owned by the Electronic Dictionary
+Research and Development Group (EDRDG):
+
+  https://www.edrdg.org/wiki/index.php/JMdict-EDICT_Dictionary_Project
+
+The dictionary files and files derived from them are made available under the
+Creative Commons Attribution-ShareAlike 4.0 International licence (CC BY-SA
+4.0). The licence deed and legal code are available at:
+
+  https://creativecommons.org/licenses/by-sa/4.0/
+  https://creativecommons.org/licenses/by-sa/4.0/legalcode
+
+The EDRDG dictionary licence statement is available at:
+
+  https://www.edrdg.org/edrdg/licence.html
+
+Changes made for BWReader
+-------------------------
+
+The pinned English JMdict release was converted into deterministic JSON shards.
+Only written forms, readings, part-of-speech tags, English gloss text, common
+flags, and JMdict sequence identifiers are retained. The data is normalized to
+Unicode NFC and indexed by exact Japanese form or reading. No new dictionary
+definitions were added, and EDRDG does not endorse BWReader or this conversion.
+
+Conversion source
+-----------------
+
+The pinned source archive is the English JSON conversion published by the
+jmdict-simplified project. Its immutable release URL and SHA-256 digest are
+recorded in DictionaryData/manifest.json and in build_jmdict_dictionary.py:
+
+  https://github.com/scriptin/jmdict-simplified
+
+This attribution file must remain with copies or substantial extracts of the
+generated DictionaryData directory. Smartphone and tablet applications should
+also expose this acknowledgement from a Sources, About, or equivalent screen,
+as required by the EDRDG licence statement.

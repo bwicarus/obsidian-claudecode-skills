@@ -482,7 +482,7 @@ if (window.__bwPwaProviderOnly) return;
         (fav ? '★ 已收藏' : '☆ 收藏为词组') + '</button>' +
         '<button id="ep-phrase-master-btn" class="' + (_state.mastered ? 'wp-anki' : '') + '" onclick="_epPhraseMaster(this)" title="' + (_state.mastered ? '点击取消掌握（恢复词组下划线）' : '标记掌握 100（该词组不再标生词下划线）') + '">' +
         (_state.mastered ? '✓ 已掌握 100' : '☆ 标记掌握') + '</button>' +
-        '<button onclick="_epPhraseExplain()" title="详细解释这个词组">💡 解释</button>' +
+        '<button onclick="_epPhraseExplain()" title="让 Pi AI 结合当前句境详细解释">Pi AI 精释</button>' +
         '</div>';
       _position(pop, opts.rect);   // 内容定型后再夹一次进视口
     };
@@ -495,13 +495,25 @@ if (window.__bwPwaProviderOnly) return;
       var zh = '', reading = '', accent = null;
       try {
         if (isJa) {
-          // @interaction dictionary.quick.read
-          var dj = await (await fetch('/pdf/api/dict-jp?word=' + encodeURIComponent(text) +
-            '&file=' + encodeURIComponent(opts.file || '') +
-            '&page=' + encodeURIComponent(opts.page || 0) +
-            '&langs=' + encodeURIComponent((opts.langs || []).join(',')) +
-            '&context=' + encodeURIComponent(context))).json();
-          if (dj && dj.ok) { zh = dj.zh || ''; reading = dj.reading || ''; accent = (dj.accent != null ? dj.accent : null); }
+          var offline = RC.offlineDictionary;
+          var useLocal = offline && offline.CONTRACT === 'bw-offline-dictionary/1' &&
+            offline.isLocalMode && offline.isLocalMode();
+          var dj;
+          if (useLocal) {
+            dj = await offline.lookupJapaneseLegacy(text);
+          } else {
+            // Legacy PWA fallback; App and extension never use this automatic Pi path.
+            dj = await (await fetch('/pdf/api/dict-jp?word=' + encodeURIComponent(text) +
+              '&file=' + encodeURIComponent(opts.file || '') +
+              '&page=' + encodeURIComponent(opts.page || 0) +
+              '&langs=' + encodeURIComponent((opts.langs || []).join(',')) +
+              '&context=' + encodeURIComponent(context))).json();
+          }
+          if (dj && dj.ok) {
+            zh = dj.zh || dj.translation || dj.definition || '';
+            reading = dj.reading || '';
+            accent = (dj.accent != null ? dj.accent : null);
+          }
         }
         // 日语词组只接受结构化日中词典结果。词典后端失败时显示“无翻译”，不再把无句境
         // Google 结果（例如把 取り寄せ 译成“命令”）当作权威答案并写入长期缓存。

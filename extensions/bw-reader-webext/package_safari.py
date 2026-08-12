@@ -49,7 +49,7 @@ INLINE_COMPUTER_VOICE_RESOURCES = [{
     "resources": ["call.html", "inline-computer-voice.html"],
     "matches": ["https://*/*", "http://*/*"],
 }]
-ROOT_DIRS = ("src", "vendor", "icons")
+ROOT_DIRS = ("src", "vendor", "icons", "dictionary-data")
 BACKGROUND_SCRIPTS = (
     "vendor/reader-runtime-account-context.js",
     "vendor/reader-runtime-extension-account-storage.js",

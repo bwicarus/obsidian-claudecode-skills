@@ -45,6 +45,35 @@ class LocalReaderPackagerTests(unittest.TestCase):
         self.assertEqual(len(self.packager.EXPECTED_MATHJAX_FONTS), 23)
         self.assertEqual(self.packager.EXPECTED_PDFJS_CMAP_COUNT, 169)
         self.assertEqual(self.packager.EXPECTED_PDFJS_STANDARD_FONT_COUNT, 16)
+        self.assertEqual(
+            self.packager.DICTIONARY_SOURCE_RELEASE,
+            "3.6.2+20260810124713",
+        )
+        self.assertRegex(self.packager.DICTIONARY_SOURCE_SHA256, r"^[0-9a-f]{64}$")
+        self.assertEqual(
+            self.packager.EXTERNAL_LICENSES["JMdict"],
+            "static/pdf/dictionary-data/LICENSE-JMdict.txt",
+        )
+
+    def test_generated_dictionary_source_is_complete_and_exact_lookup_works(self) -> None:
+        manifest = self.packager.validate_dictionary_data(
+            self.packager.DICTIONARY_SOURCE
+        )
+        self.assertEqual(manifest["contract"], "bw-jmdict-manifest/1")
+        self.assertFalse(manifest["zhOverlay"]["complete"])
+        self.assertFalse(manifest["zhOverlay"]["authoritative"])
+        key = self.packager._dictionary_shard_key("取り寄せる")
+        shard = json.loads(
+            (
+                self.packager.DICTIONARY_SOURCE
+                / manifest["shards"][key]["path"]
+            ).read_text(encoding="utf-8")
+        )
+        candidates = [
+            shard["entries"][index]
+            for index in shard["exact"]["取り寄せる"]
+        ]
+        self.assertTrue(any(item["lemma"] == "取り寄せる" for item in candidates))
 
     def test_pdf_shell_contract(self) -> None:
         shell = self.packager.build_pdf_shell()

@@ -10,16 +10,20 @@
 用法: python3 build.py        # 生成 + 校验(包装体与源逐字节一致)
 """
 import pathlib
+import shutil
 import sys
 
 HERE = pathlib.Path(__file__).resolve().parent
 ROOT = HERE.parents[1]
 SRC = ROOT / "_server_deploy" / "static" / "pdf"
 DST = HERE / "vendor"
+DICTIONARY_SRC = ROOT / "ios" / "BWReader" / "DictionaryData"
+DICTIONARY_DST = HERE / "dictionary-data"
 
 # 按加载顺序列出(manifest content_scripts 同序)。里程碑推进时往后追加。
 FILES = [
     "rc-core.js",        # window.RC 地基:use/adapter/config/endpoints + esc/debounce/reqJson/toast
+    "rc-offline-dictionary.js", # App/扩展内置 JMdict；Pi AI 仅显式精释
     "rc-ui.js",          # Reader UI Kit:共享视觉令牌 + 基础按钮/输入/卡片/弹层/拖动态
     "rc-flashcard.js",   # 草稿卡/复习状态机/钉到页面
     "rc-snippets.js",    # 选段 → 笔记 / Anki
@@ -103,6 +107,15 @@ def write_text_lf(path: pathlib.Path, text: str) -> None:
 
 def main() -> int:
     DST.mkdir(exist_ok=True)
+    dictionary_manifest = DICTIONARY_SRC / "manifest.json"
+    if not dictionary_manifest.is_file():
+        raise FileNotFoundError(
+            f"{dictionary_manifest} (先运行 ios/BWReader/build_jmdict_dictionary.py)"
+        )
+    if DICTIONARY_DST.exists():
+        shutil.rmtree(DICTIONARY_DST)
+    shutil.copytree(DICTIONARY_SRC, DICTIONARY_DST)
+    print(f"✓ dictionary-data: {sum(1 for path in DICTIONARY_DST.rglob('*') if path.is_file())} files → extension/(内置离线词典)")
     for rel, name in LIBS.items():
         rp = pathlib.Path(rel)
         # A POSIX absolute path is not considered absolute by WindowsPath.
