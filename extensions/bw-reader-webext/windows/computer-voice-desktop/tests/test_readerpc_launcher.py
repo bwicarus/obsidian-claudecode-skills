@@ -18,6 +18,7 @@ from readerpc_launcher import (  # noqa: E402
     disable_readerpc_voice,
     load_preferences,
     main,
+    readerpc_history_sync_enabled,
     save_preferences,
     set_codex_voice_keep_active,
     start_readerpc_voice,
@@ -68,6 +69,69 @@ class ReaderPCLauncherTests(unittest.TestCase):
             path = Path(raw) / "readerpc.json"
             path.write_text('{"keepPcPreprocessingOnline":"yes"}', "utf-8")
             self.assertTrue(load_preferences(path)["keepPcPreprocessingOnline"])
+
+    def test_history_sync_requires_explicit_snapshot_mode(self) -> None:
+        paths = object()
+        with patch(
+            "readerpc_launcher.load_direct_config",
+            side_effect=(
+                None,
+                {
+                    "localOptIn": True,
+                    "contextDeliveryMode": "legacy-inject",
+                },
+                {
+                    "localOptIn": False,
+                    "contextDeliveryMode": "snapshot-mcp",
+                },
+                {
+                    "localOptIn": True,
+                    "contextDeliveryMode": "snapshot-mcp",
+                },
+            ),
+        ):
+            self.assertFalse(readerpc_history_sync_enabled(paths))
+            self.assertFalse(readerpc_history_sync_enabled(paths))
+            self.assertFalse(readerpc_history_sync_enabled(paths))
+            self.assertTrue(readerpc_history_sync_enabled(paths))
+
+    def test_history_sync_runs_under_single_owner_lease(self) -> None:
+        window = self.window_without_tk()
+        window.bridge_paths.root = Path("C:/fixed")
+        window.history_stop_event = Mock()
+        window.history_synchronizer = Mock()
+        lease = Mock()
+        lease.__enter__ = Mock(return_value=True)
+        lease.__exit__ = Mock(return_value=False)
+        with (
+            patch("readerpc_launcher.history_worker_lease", return_value=lease),
+            patch("readerpc_launcher.monitor_capture_history") as monitor,
+        ):
+            window._run_history_sync()
+        monitor.assert_called_once()
+        self.assertIs(
+            monitor.call_args.kwargs["stop_event"],
+            window.history_stop_event,
+        )
+        self.assertIs(
+            monitor.call_args.kwargs["synchronizer"],
+            window.history_synchronizer,
+        )
+
+    def test_history_sync_skips_when_another_owner_holds_lease(self) -> None:
+        window = self.window_without_tk()
+        window.bridge_paths.root = Path("C:/fixed")
+        window.history_stop_event = Mock()
+        window.history_synchronizer = Mock()
+        lease = Mock()
+        lease.__enter__ = Mock(return_value=False)
+        lease.__exit__ = Mock(return_value=False)
+        with (
+            patch("readerpc_launcher.history_worker_lease", return_value=lease),
+            patch("readerpc_launcher.monitor_capture_history") as monitor,
+        ):
+            window._run_history_sync()
+        monitor.assert_not_called()
 
     def test_codex_voice_keepalive_round_trip(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -265,6 +329,9 @@ class ReaderPCLauncherTests(unittest.TestCase):
 
     def test_request_exit_stops_services_before_destroying_window(self) -> None:
         window = self.window_without_tk()
+        window.history_stop_event = Mock()
+        window.history_thread = Mock()
+        window.history_thread.is_alive.return_value = True
 
         def immediate_thread(*, target, **_kwargs):
             return SimpleNamespace(start=target)
@@ -282,6 +349,8 @@ class ReaderPCLauncherTests(unittest.TestCase):
             window.pc_ocr,
         )
         window.tray.stop.assert_called_once_with()
+        window.history_stop_event.set.assert_called_once_with()
+        window.history_thread.join.assert_called_once_with(timeout=3)
         window.root.destroy.assert_called_once_with()
         self.assertTrue(window.closed)
 

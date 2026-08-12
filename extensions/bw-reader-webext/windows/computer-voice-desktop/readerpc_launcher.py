@@ -18,9 +18,11 @@ import pystray
 from bridge_core import (
     BridgeError,
     BridgePaths,
+    CONTEXT_DELIVERY_SNAPSHOT,
     WindowsShortcutBroker,
     WindowsProcessRunner,
     disable_and_stop_direct_service,
+    load_direct_config,
     read_direct_status,
     set_direct_config_enabled,
     start_direct_service,
@@ -35,9 +37,14 @@ from readerpc_services import (
     read_reader_context_status,
     write_readerpc_status,
 )
+from voice_history_sidebar_sync import (
+    CaptureBoundHistorySynchronizer,
+    history_worker_lease,
+    monitor_capture_history,
+)
 
 
-APP_VERSION = "0.1.9"
+APP_VERSION = "0.1.10"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 POLL_INTERVAL_MS = 2_500
@@ -46,6 +53,17 @@ PC_RESTART_BACKOFF_SECONDS = 30.0
 VOICE_RESTART_BACKOFF_SECONDS = 30.0
 VOICE_START_TIMEOUT_SECONDS = 8.0
 VOICE_START_POLL_SECONDS = 0.1
+
+
+def readerpc_history_sync_enabled(paths: BridgePaths) -> bool:
+    """Enable Reader chat return only for the explicit snapshot mode."""
+
+    config = load_direct_config(paths)
+    return bool(
+        config is not None
+        and config.get("localOptIn") is True
+        and config.get("contextDeliveryMode") == CONTEXT_DELIVERY_SNAPSHOT
+    )
 
 
 def _atomic_json(path: Path, value: dict[str, Any]) -> None:
@@ -221,6 +239,15 @@ class ReaderPCWindow:
         self.last_voice_start_attempt = 0.0
         self.voice_recovery_in_progress = False
         self.last_status_publish = 0.0
+        self.history_stop_event = threading.Event()
+        self.history_synchronizer = CaptureBoundHistorySynchronizer(
+            root=self.bridge_paths.root
+        )
+        self.history_thread = threading.Thread(
+            target=self._run_history_sync,
+            name="readerpc-voice-history",
+            daemon=True,
+        )
         preferences = load_preferences(self.readerpc_paths.preferences_file)
         self.keep_pc_online = tk.BooleanVar(
             value=preferences["keepPcPreprocessingOnline"]
@@ -306,6 +333,7 @@ class ReaderPCWindow:
             ),
         )
         threading.Thread(target=self._run_tray, name="readerpc-tray", daemon=True).start()
+        self.history_thread.start()
         root.after(100, self._drain_events)
         root.after(250, self.refresh)
         root.after(600, self._ensure_pc_online)
@@ -338,6 +366,21 @@ class ReaderPCWindow:
             self.tray.run()
         except Exception as exc:
             self.events.put(("tray-error", str(exc)))
+
+    def _run_history_sync(self) -> None:
+        """Keep capture-bound voice turns beside ReaderPC's owned service."""
+
+        with history_worker_lease(self.bridge_paths.root) as owned:
+            if not owned:
+                return
+            monitor_capture_history(
+                stop_event=self.history_stop_event,
+                status_provider=self._voice_status,
+                enabled_provider=lambda: readerpc_history_sync_enabled(
+                    self.bridge_paths
+                ),
+                synchronizer=self.history_synchronizer,
+            )
 
     def _tray_show(self, _icon=None, _item=None) -> None:
         self.root.after(0, self.show_window)
@@ -411,6 +454,12 @@ class ReaderPCWindow:
 
     def _finish_exit(self) -> None:
         self.closed = True
+        history_stop_event = getattr(self, "history_stop_event", None)
+        if history_stop_event is not None:
+            history_stop_event.set()
+        history_thread = getattr(self, "history_thread", None)
+        if history_thread is not None and history_thread.is_alive():
+            history_thread.join(timeout=3)
         try:
             self.tray.stop()
         finally:
