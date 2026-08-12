@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Text.Json.Serialization.Metadata;
 
 namespace BwReader.ComputerVoiceAudio;
 
@@ -39,6 +40,11 @@ internal static class DirectBridgeContract
     {
         PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
         WriteIndented = false,
+        // JsonNode.ToJsonString makes the options read-only.  A published
+        // single-file host cannot rely on the implicit reflection resolver
+        // being installed before that happens, so make the resolver part of
+        // the contract explicitly.
+        TypeInfoResolver = new DefaultJsonTypeInfoResolver(),
     };
 
     internal static bool IsSafeId(string value) =>

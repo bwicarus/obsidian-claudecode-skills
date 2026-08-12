@@ -110,6 +110,16 @@ class CommandRunner(Protocol):
     def run(self, args: Sequence[str], *, cwd: Path) -> CommandResult: ...
 
 
+class StdioCommandRunner(Protocol):
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        cwd: Path,
+        stdin: str,
+    ) -> CommandResult: ...
+
+
 class InstallServiceController(Protocol):
     def is_running(self, install_root: Path) -> bool: ...
 
@@ -172,6 +182,50 @@ class SubprocessRunner:
                 (
                     stderr
                     + f"\ncommand timed out after {self._timeout_seconds}s"
+                ).strip(),
+            )
+        return CommandResult(
+            completed.returncode,
+            completed.stdout,
+            completed.stderr,
+        )
+
+
+class SubprocessStdioRunner:
+    def __init__(self, *, timeout_seconds: int) -> None:
+        if timeout_seconds <= 0:
+            raise ValueError("timeout_seconds must be positive")
+        self._timeout_seconds = timeout_seconds
+
+    def run(
+        self,
+        args: Sequence[str],
+        *,
+        cwd: Path,
+        stdin: str,
+    ) -> CommandResult:
+        try:
+            completed = subprocess.run(
+                list(args),
+                cwd=str(cwd),
+                input=stdin,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                capture_output=True,
+                check=False,
+                timeout=self._timeout_seconds,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = exc.stdout if isinstance(exc.stdout, str) else ""
+            stderr = exc.stderr if isinstance(exc.stderr, str) else ""
+            return CommandResult(
+                124,
+                stdout,
+                (
+                    stderr
+                    + "\nstdio MCP smoke test timed out after "
+                    + f"{self._timeout_seconds}s"
                 ).strip(),
             )
         return CommandResult(
@@ -1323,10 +1377,193 @@ def verify_archive(path: Path, *, expected_version: str | None = None) -> dict[s
     return manifest
 
 
-def run_packaged_self_tests(path: Path, *, runner: CommandRunner | None = None) -> None:
-    """Run only each package's documented self-test after read-only validation."""
+def _mcp_smoke_snapshot() -> dict[str, Any]:
+    observed_at = int(time.time() * 1000)
+    return {
+        "schema": "reader-context-snapshot/1",
+        "producerInstanceId": "00112233445566778899aabbccddeeff",
+        "revision": 1,
+        "updatedAtUtc": datetime.now(timezone.utc).isoformat(),
+        "activeReading": {
+            "kind": "pdf",
+            "file": "package-self-test.pdf",
+            "title": "Package MCP self-test",
+            "page": 3,
+            "sourceInstanceId": "package-self-test-source",
+            "receivedAtEpochMs": observed_at,
+            "fresh": True,
+        },
+        "contextStatus": "ready",
+        "currentPage": {
+            "kind": "pdf",
+            "file": "package-self-test.pdf",
+            "title": "Package MCP self-test",
+            "page": 3,
+            "sourceInstanceId": "package-self-test-source",
+            "stable": True,
+            "text": "packaged stdio MCP snapshot",
+            "textAvailable": True,
+        },
+        "selection": {
+            "state": "unknown",
+            "text": None,
+            "ref": None,
+            "reason": "none",
+        },
+    }
+
+
+def _mcp_smoke_input() -> str:
+    requests = (
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {
+                    "name": "package-self-test",
+                    "version": "1",
+                },
+            },
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "notifications/initialized",
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": 2,
+            "method": "tools/list",
+            "params": {},
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {
+                "name": "reader_context_snapshot",
+                "arguments": {},
+            },
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": 4,
+            "method": "tools/call",
+            "params": {
+                "name": "reader_capability_guide",
+                "arguments": {"topic": "index"},
+            },
+        },
+    )
+    return "\n".join(
+        json.dumps(item, ensure_ascii=False, separators=(",", ":"))
+        for item in requests
+    ) + "\n"
+
+
+def _mcp_response_text(response: Mapping[str, Any], *, label: str) -> str:
+    result = response.get("result")
+    if not isinstance(result, dict):
+        _fail(f"包内 stdio MCP {label} 未返回 result")
+    content = result.get("content")
+    if (
+        not isinstance(content, list)
+        or len(content) != 1
+        or not isinstance(content[0], dict)
+        or content[0].get("type") != "text"
+        or not isinstance(content[0].get("text"), str)
+    ):
+        _fail(f"包内 stdio MCP {label} 文本合同无效")
+    return content[0]["text"]
+
+
+def _validate_mcp_smoke_output(result: CommandResult) -> None:
+    if result.returncode != 0:
+        detail = result.stderr.strip()[:1000]
+        _fail(
+            "包内 stdio MCP 前向测试退出失败"
+            + (f": {detail}" if detail else "")
+        )
+    try:
+        responses = [
+            json.loads(line)
+            for line in result.stdout.splitlines()
+            if line.strip()
+        ]
+    except json.JSONDecodeError as exc:
+        _fail(f"包内 stdio MCP 返回无效 JSONL: {exc}")
+    if len(responses) != 4 or any(not isinstance(item, dict) for item in responses):
+        _fail("包内 stdio MCP 响应数量或类型无效")
+    by_id: dict[int, dict[str, Any]] = {}
+    for response in responses:
+        if response.get("jsonrpc") != "2.0":
+            _fail("包内 stdio MCP 响应协议无效")
+        response_id = response.get("id")
+        if not isinstance(response_id, int) or response_id in by_id:
+            _fail("包内 stdio MCP 响应 id 无效")
+        by_id[response_id] = response
+    if set(by_id) != {1, 2, 3, 4}:
+        _fail("包内 stdio MCP 响应 id 不完整")
+
+    initialize = by_id[1].get("result")
+    server_info = initialize.get("serverInfo") if isinstance(initialize, dict) else None
+    if (
+        not isinstance(server_info, dict)
+        or server_info.get("name") != "bw-reader-context-snapshot"
+        or server_info.get("version") != "1.1.0"
+    ):
+        _fail("包内 stdio MCP serverInfo 不是 1.1.0 合同")
+
+    list_result = by_id[2].get("result")
+    tools = list_result.get("tools") if isinstance(list_result, dict) else None
+    expected_tools = (
+        "reader_context_snapshot",
+        "reader_capability_guide",
+        "reader_visual_image",
+        "reader_browser_control",
+        "reader_command",
+    )
+    if (
+        not isinstance(tools, list)
+        or tuple(
+            item.get("name") if isinstance(item, dict) else None
+            for item in tools
+        ) != expected_tools
+    ):
+        _fail("包内 stdio MCP 未暴露精确 5 工具合同")
+
+    snapshot_text = _mcp_response_text(by_id[3], label="快照工具")
+    try:
+        snapshot = json.loads(snapshot_text)
+    except json.JSONDecodeError as exc:
+        _fail(f"包内 stdio MCP 快照文本不是 JSON: {exc}")
+    if (
+        not isinstance(snapshot, dict)
+        or snapshot.get("schema") != "reader-context-snapshot/1"
+        or snapshot.get("revision") != 1
+        or not isinstance(snapshot.get("mcp"), dict)
+    ):
+        _fail("包内 stdio MCP 快照工具未读回临时快照")
+
+    guide_text = _mcp_response_text(by_id[4], label="能力指南工具")
+    if len(guide_text.strip()) < 32 or "Reader" not in guide_text:
+        _fail("包内 stdio MCP 能力指南为空或不完整")
+
+
+def run_packaged_self_tests(
+    path: Path,
+    *,
+    runner: CommandRunner | None = None,
+    stdio_runner: StdioCommandRunner | None = None,
+) -> None:
+    """Exercise packaged binaries, including the real stdio MCP boundary."""
 
     runner = runner or SubprocessRunner(
+        timeout_seconds=SELF_TEST_TIMEOUT_SECONDS,
+    )
+    stdio_runner = stdio_runner or SubprocessStdioRunner(
         timeout_seconds=SELF_TEST_TIMEOUT_SECONDS,
     )
     manifest, payload = _verified_archive_contents(path)
@@ -1350,6 +1587,28 @@ def run_packaged_self_tests(path: Path, *, runner: CommandRunner | None = None) 
                 _fail(f"包内自检执行路径不在临时根: {relative}")
             result = runner.run((str(executable), "--self-test"), cwd=root)
             _require_success(result, label=f"包内自检 {relative}")
+        state_path = root / prefix / "runtime" / "reader-context-snapshot.json"
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(
+            json.dumps(
+                _mcp_smoke_snapshot(),
+                ensure_ascii=False,
+                separators=(",", ":"),
+            ),
+            encoding="utf-8",
+        )
+        native_executable = root / prefix / NATIVE_REL
+        mcp_result = stdio_runner.run(
+            (
+                str(native_executable),
+                "--reader-context-mcp",
+                "--state",
+                str(state_path.resolve()),
+            ),
+            cwd=root,
+            stdin=_mcp_smoke_input(),
+        )
+        _validate_mcp_smoke_output(mcp_result)
         for relative in PYTHON_RUNTIME_RELATIVE_PATHS:
             source = payload[f"{prefix}/{relative}"]
             try:
@@ -1643,7 +1902,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         "--self-test",
         type=Path,
         metavar="ZIP",
-        help="校验后只运行两个 EXE --self-test，并静态编译 Python runtime",
+        help="校验后运行两个 EXE 自检、真实 stdio MCP 前向调用，并静态编译 Python runtime",
     )
     parser.add_argument("--install", type=Path, metavar="ZIP", help="原子安装候选 ZIP")
     parser.add_argument(

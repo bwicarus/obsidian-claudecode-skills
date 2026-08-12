@@ -47,6 +47,80 @@ class FakeRunner:
         return package.CommandResult(1, stderr="unexpected fake command")
 
 
+class FakeStdioRunner:
+    def __init__(self, *, result: package.CommandResult | None = None) -> None:
+        self.calls: list[tuple[tuple[str, ...], Path, str]] = []
+        self.result = result
+
+    def run(self, args, *, cwd, stdin):
+        command = tuple(args)
+        self.calls.append((command, Path(cwd), stdin))
+        state_path = Path(command[-1])
+        snapshot = json.loads(state_path.read_text(encoding="utf-8"))
+        if self.result is not None:
+            return self.result
+        responses = (
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {
+                    "serverInfo": {
+                        "name": "bw-reader-context-snapshot",
+                        "version": "1.1.0",
+                    },
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 2,
+                "result": {
+                    "tools": [
+                        {"name": "reader_context_snapshot"},
+                        {"name": "reader_capability_guide"},
+                        {"name": "reader_visual_image"},
+                        {"name": "reader_browser_control"},
+                        {"name": "reader_command"},
+                    ],
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "result": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": json.dumps(
+                                {
+                                    **snapshot,
+                                    "mcp": {"instanceId": "fake"},
+                                },
+                                separators=(",", ":"),
+                            ),
+                        },
+                    ],
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": 4,
+                "result": {
+                    "content": [
+                        {
+                            "type": "text",
+                            "text": "# Reader capability index\n"
+                            "Reader progressive disclosure guide is ready.",
+                        },
+                    ],
+                },
+            },
+        )
+        return package.CommandResult(
+            0,
+            "\n".join(json.dumps(item) for item in responses) + "\n",
+        )
+
+
 class FakeInstallService:
     def __init__(self, *, running: bool = True) -> None:
         self.running = running
@@ -549,7 +623,7 @@ class DirectPackageTests(unittest.TestCase):
             with self.assertRaises(package.PackageError):
                 package.verify_archive(archive)
 
-    def test_packaged_self_tests_only_use_self_test_arguments(self) -> None:
+    def test_packaged_self_tests_exercise_self_tests_and_real_mcp_contract(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             audio, desktop = self._sources(root)
@@ -569,12 +643,17 @@ class DirectPackageTests(unittest.TestCase):
             )
             runner.calls.clear()
             runner.cwds.clear()
+            stdio_runner = FakeStdioRunner()
             with patch.object(
                 package,
                 "_read_archive",
                 wraps=package._read_archive,
             ) as read_archive:
-                package.run_packaged_self_tests(archive, runner=runner)
+                package.run_packaged_self_tests(
+                    archive,
+                    runner=runner,
+                    stdio_runner=stdio_runner,
+                )
             self.assertEqual(read_archive.call_count, 1)
             self.assertEqual(len(runner.calls), 2)
             self.assertTrue(all(call[-1:] == ("--self-test",) for call in runner.calls))
@@ -592,6 +671,37 @@ class DirectPackageTests(unittest.TestCase):
                     executable.relative_to(cwd).parts[0],
                     prefix,
                 )
+            self.assertEqual(len(stdio_runner.calls), 1)
+            mcp_command, mcp_cwd, mcp_input = stdio_runner.calls[0]
+            self.assertEqual(mcp_cwd, temporary_root)
+            self.assertEqual(
+                mcp_command[1:3],
+                ("--reader-context-mcp", "--state"),
+            )
+            self.assertTrue(Path(mcp_command[0]).is_relative_to(mcp_cwd))
+            self.assertTrue(Path(mcp_command[3]).is_relative_to(mcp_cwd))
+            requests = [json.loads(line) for line in mcp_input.splitlines()]
+            self.assertEqual(
+                [item.get("method") for item in requests],
+                [
+                    "initialize",
+                    "notifications/initialized",
+                    "tools/list",
+                    "tools/call",
+                    "tools/call",
+                ],
+            )
+            self.assertEqual(
+                requests[3]["params"]["name"],
+                "reader_context_snapshot",
+            )
+            self.assertEqual(
+                requests[4]["params"],
+                {
+                    "name": "reader_capability_guide",
+                    "arguments": {"topic": "index"},
+                },
+            )
 
     def test_packaged_self_test_uses_one_verified_archive_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -627,14 +737,20 @@ class DirectPackageTests(unittest.TestCase):
                 return content
 
             runner = FakeRunner()
+            stdio_runner = FakeStdioRunner()
             with patch.object(
                 package,
                 "_read_regular",
                 side_effect=replace_after_read,
             ):
-                package.run_packaged_self_tests(archive, runner=runner)
+                package.run_packaged_self_tests(
+                    archive,
+                    runner=runner,
+                    stdio_runner=stdio_runner,
+                )
             self.assertEqual(archive_reads, 1)
             self.assertEqual(len(runner.calls), 2)
+            self.assertEqual(len(stdio_runner.calls), 1)
 
     def test_packaged_self_test_compiles_python_runtime_without_running_it(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -665,6 +781,7 @@ class DirectPackageTests(unittest.TestCase):
                 typist_launcher_source=typist_launcher,
             )
             runner = FakeRunner()
+            stdio_runner = FakeStdioRunner()
             with self.assertRaisesRegex(
                 package.PackageError,
                 "Python runtime 语法无效",
@@ -672,10 +789,27 @@ class DirectPackageTests(unittest.TestCase):
                 package.run_packaged_self_tests(
                     archive,
                     runner=runner,
+                    stdio_runner=stdio_runner,
                 )
             self.assertEqual(len(runner.calls), 2)
             self.assertTrue(
                 all(call[-1:] == ("--self-test",) for call in runner.calls)
+            )
+            self.assertEqual(len(stdio_runner.calls), 1)
+
+    def test_stdio_mcp_smoke_rejects_single_file_process_crash(self) -> None:
+        with self.assertRaisesRegex(
+            package.PackageError,
+            "stdio MCP 前向测试退出失败.*TypeInfoResolver",
+        ):
+            package._validate_mcp_smoke_output(
+                package.CommandResult(
+                    1,
+                    stderr=(
+                        "InvalidOperationException: JsonSerializerOptions must "
+                        "specify a TypeInfoResolver"
+                    ),
+                )
             )
 
     def test_existing_candidate_is_never_overwritten(self) -> None:
