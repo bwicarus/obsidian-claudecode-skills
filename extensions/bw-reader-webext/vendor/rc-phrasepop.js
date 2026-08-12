@@ -503,6 +503,7 @@ if (window.__bwPwaProviderOnly) return;
             dj = await offline.lookupJapaneseLegacy(text);
           } else {
             // Legacy PWA fallback; App and extension never use this automatic Pi path.
+            // @interaction dictionary.jp.read
             dj = await (await fetch('/pdf/api/dict-jp?word=' + encodeURIComponent(text) +
               '&file=' + encodeURIComponent(opts.file || '') +
               '&page=' + encodeURIComponent(opts.page || 0) +
