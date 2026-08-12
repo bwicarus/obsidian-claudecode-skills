@@ -4112,3 +4112,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **Windows/验证**：原生桥 `0.1.104` 已原子安装，随后同源 `0.1.105` 叠加视觉修复且本批四个语音源码摘要未变；当前 295 项自检通过、`lastError=null`，麦克风代次跨观察窗口未变化且持续运行偏好仍开启；回退目录 `install-0.1.105-20260812T005319025Z` 内是完整 0.1.104。
 - **发布事实**：提交 `8637aec8`；Actions `31551459703` 上传 TestFlight `1.1.38 (236)`，`31552022269` 确认 `COMPLETE / VALID / IN_BETA_TESTING`。
 - **边界**：未部署 Pi 或浏览器正式渠道；Windows 全量 Python/handoff 仍只有既有 `fcntl` 平台阻断，工作树同期出现的 see_ink/快照在制改动未纳入本次提交。
+
+## Codex：按需视觉来源与 PDF 整页图已发布 0.2.98 / 1.1.38（2026-08-12 JST）
+- **根因/改动**：本机 `page.context` 没有单独 viewport 包，快照只在 active-reading 保留在线 source，导致 `see_ink` 报“图像来源没准备好”；现同规范页合并 source，且 `see_page` 对 PDF 走 PDFKit 离屏整页合成而非当前视口。
+- **验证**：实时快照已确认 activeReading/currentPage 使用同一 `sourceInstanceId`；Windows 295 项自检、Reader Node 990 项与发布管线通过，Windows handoff 只剩既有 `fcntl` 平台基线。
+- **发布事实**：提交 `14fb8bbd`；Actions `31552100884` 上传 TestFlight `1.1.38 (239)`，`31552582367` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
+- **边界/下一步**：未部署 Pi 或浏览器正式渠道；安装 build 239 后分别验收 `see_ink` 与 `see_page`，前者应绑定当前 App 页，后者应得到整张逻辑 PDF 页。
