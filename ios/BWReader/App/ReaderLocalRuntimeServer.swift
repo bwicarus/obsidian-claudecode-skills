@@ -354,6 +354,16 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
         case "native-api/visual-capture":
             return await serveNativeVisualCapture(request)
         default:
+            if relative.hasPrefix("native-api/offline-dictionary/") {
+                return serveOfflineDictionary(
+                    request,
+                    relative: String(
+                        relative.dropFirst(
+                            "native-api/offline-dictionary/".count
+                        )
+                    )
+                )
+            }
             break
         }
 
@@ -500,6 +510,56 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
                 "mtime": Int(modifiedAt.timeIntervalSince1970),
             ]
         )
+    }
+
+    private func serveOfflineDictionary(
+        _ request: HTTPRequest,
+        relative: String
+    ) -> HTTPResponse {
+        guard request.method == .GET || request.method == .HEAD else {
+            return response(
+                status: .methodNotAllowed,
+                text: "method not allowed",
+                headers: [HTTPHeader("Allow"): "GET, HEAD"]
+            )
+        }
+        guard trustedResourceSurface(
+            referer: request.headers[HTTPHeader("Referer")]
+        ) != nil else {
+            return response(status: .forbidden, text: "invalid referer")
+        }
+        do {
+            let data = try ReaderOfflineDictionaryStore.readRuntimeResource(
+                relative: relative
+            )
+            return dataResponse(
+                request,
+                data: data,
+                contentType: "application/json; charset=utf-8",
+                cacheControl: "no-store",
+                additionalHeaders: [
+                    HTTPHeader("X-BW-Dictionary-Storage"): "app-private"
+                ]
+            )
+        } catch ReaderOfflineDictionaryError.notInstalled {
+            return response(
+                status: .notFound,
+                text: "BW_OFFLINE_DICTIONARY_NOT_INSTALLED",
+                headers: [
+                    HTTPHeader("X-BW-Reader-Error"):
+                        "BW_OFFLINE_DICTIONARY_NOT_INSTALLED"
+                ]
+            )
+        } catch {
+            return response(
+                status: .conflict,
+                text: error.localizedDescription,
+                headers: [
+                    HTTPHeader("X-BW-Reader-Error"):
+                        "BW_OFFLINE_DICTIONARY_INVALID"
+                ]
+            )
+        }
     }
 
     private func serveNativeVisualCapture(

@@ -163,6 +163,8 @@ struct NativeReaderToolsView: View {
     @StateObject private var localNotes = ReaderLocalNotesManager.shared
     @StateObject private var piSync = ReaderPiSyncCoordinator()
     @StateObject private var textRecognition = ReaderTextRecognitionPreferences.shared
+    @StateObject private var offlineDictionary =
+        ReaderOfflineDictionaryManager.shared
     @StateObject private var realtimeCredentials =
         ReaderRealtimeCredentialManager.shared
     @State private var presentsAnnotation = false
@@ -177,6 +179,7 @@ struct NativeReaderToolsView: View {
     @State private var touchDoubleTapLoaded = false
     @State private var touchDoubleTapError: String?
     @State private var realtimeKeyDraft = ""
+    @State private var confirmsDictionaryRemoval = false
 
     let reader: ReaderWebViewModel
     let initialAction: ReaderNativeFeatureAction?
@@ -195,6 +198,7 @@ struct NativeReaderToolsView: View {
                 nativeActionsSection
                 recognitionSection
                 textRecognitionSettingsSection
+                offlineDictionarySection
                 localLibrarySection
                 realtimeCredentialsSection
                 piSyncSection
@@ -222,7 +226,20 @@ struct NativeReaderToolsView: View {
                     await coordinator.refresh(using: reader)
                 }
                 await loadTouchDoubleTapAction()
+                offlineDictionary.refresh()
                 await performInitialActionIfNeeded()
+            }
+            .confirmationDialog(
+                "删除 App 内已下载的离线词典？",
+                isPresented: $confirmsDictionaryRemoval,
+                titleVisibility: .visible
+            ) {
+                Button("删除本地词典", role: .destructive) {
+                    offlineDictionary.removeDownloadedDictionary()
+                }
+                Button("取消", role: .cancel) {}
+            } message: {
+                Text("只会删除 App 私有目录中的词典，不会改动书籍、笔记或同步数据。")
             }
             .sheet(isPresented: $presentsTranslation) {
                 NativeTranslationToolView(initialText: translationText)
@@ -291,6 +308,41 @@ struct NativeReaderToolsView: View {
                 .foregroundStyle(.secondary)
 
             Text("本机处理失败或效果不理想时，可在书库中为该书手动选择“Pi 预处理”。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    @ViewBuilder
+    private var offlineDictionarySection: some View {
+        Section("离线日语词典") {
+            LabeledContent("状态", value: offlineDictionary.statusText)
+
+            if offlineDictionary.isDownloading {
+                ProgressView(value: offlineDictionary.progress)
+                Text("请保持 App 在前台；若中断，再次点击下载会复用已经校验完成的文件。")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else if offlineDictionary.isInstalled {
+                Button("删除 App 内词典", role: .destructive) {
+                    confirmsDictionaryRemoval = true
+                }
+            } else {
+                Button {
+                    offlineDictionary.download()
+                } label: {
+                    Label(
+                        "下载离线日语词典（约 85 MB）",
+                        systemImage: "arrow.down.circle"
+                    )
+                }
+            }
+
+            Text("词典不随 App 安装包提供。只有你在这里主动下载后，数据才会进入本 App 的 Application Support；它已排除 iCloud 备份，不进入书籍附件、Pi、Safari 扩展或设置同步。")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            Text("数据来源：JMdict（CC BY-SA 4.0）。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

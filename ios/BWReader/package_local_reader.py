@@ -23,7 +23,6 @@ import shutil
 import sys
 import tarfile
 import tempfile
-import unicodedata
 import urllib.request
 
 from jinja2 import Environment, StrictUndefined, select_autoescape
@@ -34,17 +33,6 @@ ROOT = HERE.parents[1]
 STATIC = ROOT / "_server_deploy" / "static"
 TEMPLATES = ROOT / "_server_deploy" / "templates"
 DEFAULT_OUTPUT = HERE / "Generated" / "ReaderBundle"
-DICTIONARY_SOURCE = HERE / "DictionaryData"
-DICTIONARY_BUNDLE_RELATIVE = PurePosixPath("static/pdf/dictionary-data")
-DICTIONARY_MANIFEST_SOURCE = DICTIONARY_SOURCE / "manifest.json"
-DICTIONARY_MANIFEST_CONTRACT = "bw-jmdict-manifest/1"
-DICTIONARY_SHARD_CONTRACT = "bw-jmdict-shard/1"
-DICTIONARY_SHARD_ALGORITHM = "utf8-prefix-2-kana-3/1"
-DICTIONARY_KANA_SPLIT_PREFIXES = {"e381", "e382", "e383"}
-DICTIONARY_ZH_OVERLAY_CONTRACT = "bw-japanese-zh-overlay/1"
-DICTIONARY_SOURCE_RELEASE = "3.6.2+20260810124713"
-DICTIONARY_SOURCE_SHA256 = "e6802135b445627a8f09c544bf8c32c3d344515f6e95a473e8bd39e09ad00109"
-DICTIONARY_LICENSE_PATH = "static/pdf/dictionary-data/LICENSE-JMdict.txt"
 DEFAULT_CACHE = Path(
     os.environ.get(
         "BW_LOCAL_READER_SOURCE_CACHE",
@@ -135,7 +123,6 @@ EXTERNAL_LICENSES = {
     HTML2CANVAS.name: "licenses/html2canvas-LICENSE",
     JSZIP.name: "licenses/jszip-LICENSE.markdown",
     DOMPURIFY.name: "licenses/dompurify-LICENSE",
-    "JMdict": DICTIONARY_LICENSE_PATH,
 }
 
 EXPECTED_PDFJS_FILES = {
@@ -788,175 +775,6 @@ def _native_interface_bootstrap(manifest: dict[str, object]) -> str:
     return f"<script>window.{NATIVE_INTERFACE_GLOBAL}={encoded};</script>\n"
 
 
-def _dictionary_shard_key(term: str) -> str:
-    normalized = unicodedata.normalize("NFC", term)
-    if not normalized:
-        raise SystemExit("JMdict exact index contains an empty term")
-    encoded = normalized.encode("utf-8")
-    prefix = encoded[:2].hex()
-    return (
-        encoded[:3].hex()
-        if prefix in DICTIONARY_KANA_SPLIT_PREFIXES
-        else prefix
-    )
-
-
-def validate_dictionary_data(root: Path) -> dict[str, object]:
-    manifest_path = root / "manifest.json"
-    if not manifest_path.is_file():
-        raise SystemExit("JMdict data manifest is missing")
-    try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, ValueError) as exc:
-        raise SystemExit(f"JMdict data manifest cannot be read: {exc}") from exc
-    if not isinstance(manifest, dict) or manifest.get("contract") != DICTIONARY_MANIFEST_CONTRACT:
-        raise SystemExit("JMdict data manifest contract mismatch")
-    if manifest.get("normalization") != "NFC" or manifest.get("shardAlgorithm") != DICTIONARY_SHARD_ALGORITHM:
-        raise SystemExit("JMdict data lookup contract mismatch")
-    source = manifest.get("source")
-    if (
-        not isinstance(source, dict)
-        or source.get("release") != DICTIONARY_SOURCE_RELEASE
-        or source.get("sha256") != DICTIONARY_SOURCE_SHA256
-    ):
-        raise SystemExit("JMdict data source pin mismatch")
-
-    license_value = manifest.get("license")
-    if not isinstance(license_value, dict) or license_value.get("path") != "LICENSE-JMdict.txt":
-        raise SystemExit("JMdict data license declaration mismatch")
-    license_path = root / "LICENSE-JMdict.txt"
-    if not license_path.is_file() or sha256_file(license_path) != license_value.get("sha256"):
-        raise SystemExit("JMdict data license file mismatch")
-
-    overlay_value = manifest.get("zhOverlay")
-    if (
-        not isinstance(overlay_value, dict)
-        or overlay_value.get("path") != "zh-overlay.json"
-        or overlay_value.get("complete") is not False
-        or overlay_value.get("authoritative") is not False
-        or overlay_value.get("source") != "user-existing-dict-cache"
-    ):
-        raise SystemExit("JMdict Chinese overlay declaration mismatch")
-    overlay_path = root / "zh-overlay.json"
-    if (
-        not overlay_path.is_file()
-        or overlay_path.stat().st_size != overlay_value.get("bytes")
-        or sha256_file(overlay_path) != overlay_value.get("sha256")
-    ):
-        raise SystemExit("JMdict Chinese overlay file mismatch")
-    try:
-        overlay = json.loads(overlay_path.read_text(encoding="utf-8"))
-    except (OSError, UnicodeError, ValueError) as exc:
-        raise SystemExit(f"JMdict Chinese overlay cannot be read: {exc}") from exc
-    if (
-        not isinstance(overlay, dict)
-        or overlay.get("contract") != DICTIONARY_ZH_OVERLAY_CONTRACT
-        or overlay.get("normalization") != "NFC"
-        or overlay.get("complete") is not False
-        or overlay.get("authoritative") is not False
-        or not isinstance(overlay.get("entries"), dict)
-    ):
-        raise SystemExit("JMdict Chinese overlay contract mismatch")
-
-    shards = manifest.get("shards")
-    if not isinstance(shards, dict) or not shards:
-        raise SystemExit("JMdict data shards must be a non-empty object")
-    declared_files = {"manifest.json", "LICENSE-JMdict.txt", "zh-overlay.json"}
-    candidate_keys = {"id", "lemma", "forms", "readings", "pos", "glosses", "common"}
-    for key, metadata in sorted(shards.items()):
-        if (
-            not isinstance(key, str)
-            or len(key) not in {2, 4, 6}
-            or any(character not in "0123456789abcdef" for character in key)
-            or not isinstance(metadata, dict)
-        ):
-            raise SystemExit("JMdict data contains invalid shard metadata")
-        relative = f"shards/{key}.json"
-        if metadata.get("path") != relative:
-            raise SystemExit(f"JMdict shard path mismatch: {key}")
-        path = root / PurePosixPath(relative)
-        if (
-            not path.is_file()
-            or path.stat().st_size != metadata.get("bytes")
-            or sha256_file(path) != metadata.get("sha256")
-        ):
-            raise SystemExit(f"JMdict shard integrity mismatch: {key}")
-        try:
-            shard = json.loads(path.read_text(encoding="utf-8"))
-        except (OSError, UnicodeError, ValueError) as exc:
-            raise SystemExit(f"JMdict shard cannot be read ({key}): {exc}") from exc
-        if (
-            not isinstance(shard, dict)
-            or shard.get("contract") != DICTIONARY_SHARD_CONTRACT
-            or shard.get("key") != key
-            or not isinstance(shard.get("entries"), list)
-            or not isinstance(shard.get("exact"), dict)
-        ):
-            raise SystemExit(f"JMdict shard contract mismatch: {key}")
-        entries = shard["entries"]
-        exact = shard["exact"]
-        if len(entries) != metadata.get("entries") or len(exact) != metadata.get("terms"):
-            raise SystemExit(f"JMdict shard count mismatch: {key}")
-        for candidate in entries:
-            if not isinstance(candidate, dict) or set(candidate) != candidate_keys:
-                raise SystemExit(f"JMdict candidate shape mismatch: {key}")
-            if (
-                not isinstance(candidate["id"], str)
-                or not candidate["id"].isdecimal()
-                or not isinstance(candidate["lemma"], str)
-                or not candidate["lemma"]
-                or not isinstance(candidate["common"], bool)
-                or any(
-                    not isinstance(candidate[field], list)
-                    or any(not isinstance(value, str) or not value for value in candidate[field])
-                    for field in ("forms", "readings", "pos", "glosses")
-                )
-            ):
-                raise SystemExit(f"JMdict candidate value mismatch: {key}")
-        for term, indices in exact.items():
-            if (
-                not isinstance(term, str)
-                or unicodedata.normalize("NFC", term) != term
-                or _dictionary_shard_key(term) != key
-                or not isinstance(indices, list)
-                or not indices
-                or any(
-                    not isinstance(index, int)
-                    or isinstance(index, bool)
-                    or index < 0
-                    or index >= len(entries)
-                    for index in indices
-                )
-            ):
-                raise SystemExit(f"JMdict exact index mismatch: {key}/{term!r}")
-        declared_files.add(relative)
-
-    actual_files = {
-        path.relative_to(root).as_posix()
-        for path in root.rglob("*")
-        if path.is_file()
-    }
-    if actual_files != declared_files:
-        raise SystemExit(
-            "JMdict data file set mismatch: "
-            f"missing={sorted(declared_files - actual_files)!r}, "
-            f"extra={sorted(actual_files - declared_files)!r}"
-        )
-    return manifest
-
-
-def copy_dictionary_data(root: Path) -> None:
-    validate_dictionary_data(DICTIONARY_SOURCE)
-    destination = root / DICTIONARY_BUNDLE_RELATIVE
-    for source in sorted(DICTIONARY_SOURCE.rglob("*")):
-        if not source.is_file():
-            continue
-        relative = source.relative_to(DICTIONARY_SOURCE)
-        target = destination / relative
-        target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source, target)
-
-
 def copy_raw_static(root: Path) -> None:
     native_runtime = STATIC / "pdf" / "native-local-runtime.js"
     if not native_runtime.is_file():
@@ -1007,14 +825,12 @@ def require_raw_sources() -> None:
         STATIC / "pdf" / "epub-html.js",
         STATIC / "pdf" / "vendor" / "jszip.min.js",
         NATIVE_INTERFACE_SOURCE,
-        DICTIONARY_MANIFEST_SOURCE,
     )
     missing = [path.relative_to(ROOT).as_posix() for path in required if not path.is_file()]
     if missing:
         raise SystemExit(f"local Reader raw source closure is incomplete: {missing!r}")
     if not any((STATIC / "pdf" / "reader.src").glob("*.js")):
         raise SystemExit("local Reader raw source closure has no reader.src parts")
-    validate_dictionary_data(DICTIONARY_SOURCE)
 
 
 def install_external_assets(root: Path, archives: dict[str, Path]) -> None:
@@ -1940,7 +1756,6 @@ def validate_bundle(root: Path, *, require_manifest: bool = True) -> dict[str, o
         raise SystemExit("ReaderBundle must not contain a web manifest or service worker")
 
     interface_manifest = load_native_interface_manifest(root / NATIVE_INTERFACE_NAME)
-    validate_dictionary_data(root / DICTIONARY_BUNDLE_RELATIVE)
     validate_shell(root, PDF_SHELL, PDF_PLACEHOLDERS, epub=False)
     validate_shell(root, EPUB_SHELL, EPUB_PLACEHOLDERS, epub=True)
     validate_native_interface_coverage(root, interface_manifest)
@@ -2001,9 +1816,6 @@ def source_input_manifest() -> dict[str, str]:
         "ios/BWReader/App/NativeFormulaRecognition.swift": sha256_file(
             NATIVE_FORMULA_RECOGNITION_SOURCE
         ),
-        "ios/BWReader/DictionaryData/manifest.json": sha256_file(
-            DICTIONARY_MANIFEST_SOURCE
-        ),
     }
     for part in sorted((STATIC / "pdf" / "reader.src").glob("*.js")):
         inputs[part.relative_to(ROOT).as_posix()] = sha256_file(part)
@@ -2040,18 +1852,6 @@ def write_manifest(root: Path) -> dict[str, object]:
                 "licensePath": EXTERNAL_LICENSES[package.name],
             }
             for package in EXTERNAL_PACKAGES
-        ] + [
-            {
-                "name": "JMdict",
-                "version": DICTIONARY_SOURCE_RELEASE,
-                "url": (
-                    "https://github.com/scriptin/jmdict-simplified/releases/download/"
-                    "3.6.2%2B20260810124713/"
-                    "jmdict-eng-3.6.2+20260810124713.json.tgz"
-                ),
-                "sha256": DICTIONARY_SOURCE_SHA256,
-                "licensePath": DICTIONARY_LICENSE_PATH,
-            }
         ],
         "sourceInputs": source_input_manifest(),
         "files": dict(sorted(files.items())),
@@ -2095,7 +1895,6 @@ def build(output: Path, cache_dir: Path, *, offline: bool) -> dict[str, object]:
     staging = Path(tempfile.mkdtemp(prefix=".ReaderBundle-", dir=output.parent))
     try:
         copy_raw_static(staging)
-        copy_dictionary_data(staging)
         install_external_assets(staging, archives)
         shutil.copyfile(
             NATIVE_INTERFACE_SOURCE, staging / NATIVE_INTERFACE_NAME

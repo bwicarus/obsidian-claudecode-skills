@@ -1,7 +1,7 @@
 // 扩展后台:唯一接触 token 和 Pi API 的地方。网页脚本永远拿不到 token,也不能传任意 URL(只认固定操作名)。
 // ⚠ ORIGIN 指向**当前主力的 Pi**(Tailscale,iPad 走 Tailscale 访问,和现有 QA browser 一样);
 //   不是暂停的 VPS bwicarus.space(代码停在 2026-05-28)。要换服务器只改这一行 + manifest host_permissions。
-globalThis.__BW_READER_BACKGROUND_BUILD_VERSION = "0.2.103";
+globalThis.__BW_READER_BACKGROUND_BUILD_VERSION = "0.2.104";
 if (typeof importScripts === "function") {
   importScripts(
     "vendor/reader-runtime-account-context.js",
@@ -37,9 +37,6 @@ const LOCAL_STORAGE_MESSAGES = new Set([
   "BW_LOCAL_STORAGE_GET",
   "BW_LOCAL_STORAGE_SET",
   "BW_LOCAL_STORAGE_REMOVE"
-]);
-const OFFLINE_DICTIONARY_MESSAGES = new Set([
-  "BW_OFFLINE_DICTIONARY_JSON"
 ]);
 const PAGE_CARD_PRESENTATION_MESSAGES = new Set([
   "BW_PAGE_CARD_PRESENTATION_GET",
@@ -6112,7 +6109,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     !ALLOWED_MESSAGES.has(message?.type) &&
     !ACCOUNT_MESSAGES.has(message?.type) &&
     !LOCAL_STORAGE_MESSAGES.has(message?.type) &&
-    !OFFLINE_DICTIONARY_MESSAGES.has(message?.type) &&
     !PAGE_CARD_PRESENTATION_MESSAGES.has(message?.type) &&
     !TRANSLATION_CACHE_MESSAGES.has(message?.type) &&
     !NATIVE_APP_MESSAGES.has(message?.type) &&
@@ -6126,8 +6122,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     ? handleNativeAppMessage(message, sender)
     : LOCAL_STORAGE_MESSAGES.has(message.type)
     ? handleLocalStorageMessage(message, sender)
-    : OFFLINE_DICTIONARY_MESSAGES.has(message.type)
-    ? handleOfflineDictionaryMessage(message)
     : PAGE_CARD_PRESENTATION_MESSAGES.has(message.type)
       ? handlePageCardPresentationMessage(message, sender)
     : TRANSLATION_CACHE_MESSAGES.has(message.type)
@@ -6158,31 +6152,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     });
   return true;   // 异步 sendResponse
 });
-
-async function handleOfflineDictionaryMessage(message) {
-  const path = String(message?.path || "").replace(/^\/+/, "");
-  if (!/^(?:manifest\.json|shards\/[a-f0-9]{1,6}\.json)$/.test(path)) {
-    throw Object.assign(new Error("离线词典资源路径无效"), {
-      code: "BW_OFFLINE_DICTIONARY_PATH"
-    });
-  }
-  // @interaction reader.shell.read
-  const response = await fetch(chrome.runtime.getURL(`dictionary-data/${path}`), {
-    cache: "force-cache"
-  });
-  if (!response.ok) {
-    throw Object.assign(new Error(`离线词典资源 HTTP ${response.status}`), {
-      code: "BW_OFFLINE_DICTIONARY_HTTP"
-    });
-  }
-  const data = await response.json();
-  if (!data || typeof data !== "object") {
-    throw Object.assign(new Error("离线词典资源格式无效"), {
-      code: "BW_OFFLINE_DICTIONARY_FORMAT"
-    });
-  }
-  return data;
-}
 
 async function verifyTokenOwner(captured, token) {
   token = String(token || "").trim();

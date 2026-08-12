@@ -72,10 +72,6 @@ ICON_FILES = (
     "icon-512-opaque.png",
     "icon-1024-safari.png",
 )
-DICTIONARY_DIR = "dictionary-data"
-DICTIONARY_MANIFEST_CONTRACT = "bw-jmdict-manifest/1"
-DICTIONARY_SHARD_CONTRACT = "bw-jmdict-shard/1"
-DICTIONARY_SHARD_ALGORITHM = "utf8-prefix-2-kana-3/1"
 LAUNCHER_FILES = ("BW扩展测试.cmd", "BW扩展测试.ps1")
 WINDOWS_SOURCE_FILES = (
     *LAUNCHER_FILES,
@@ -429,65 +425,6 @@ def _audit_exact_directory(
         fail(f"{label} 不等于精确白名单：" + "；".join(detail))
 
 
-def expected_dictionary_files(source_root: Path = HERE) -> tuple[str, ...]:
-    root = source_root / DICTIONARY_DIR
-    manifest_path = root / "manifest.json"
-    manifest = read_json(manifest_path)
-    if (
-        manifest.get("contract") != DICTIONARY_MANIFEST_CONTRACT
-        or manifest.get("normalization") != "NFC"
-        or manifest.get("shardAlgorithm") != DICTIONARY_SHARD_ALGORITHM
-    ):
-        fail("扩展内置词典 manifest 合同无效")
-    license_value = manifest.get("license")
-    overlay_value = manifest.get("zhOverlay")
-    shards = manifest.get("shards")
-    if (
-        not isinstance(license_value, dict)
-        or license_value.get("path") != "LICENSE-JMdict.txt"
-        or not isinstance(overlay_value, dict)
-        or overlay_value.get("path") != "zh-overlay.json"
-        or overlay_value.get("complete") is not False
-        or overlay_value.get("authoritative") is not False
-        or not isinstance(shards, dict)
-        or not shards
-    ):
-        fail("扩展内置词典许可、中文覆盖或分片声明无效")
-    names = ["manifest.json", "LICENSE-JMdict.txt", "zh-overlay.json"]
-    digest_items = [
-        ("LICENSE-JMdict.txt", license_value),
-        ("zh-overlay.json", overlay_value),
-    ]
-    for key, item in sorted(shards.items()):
-        if (
-            not isinstance(key, str)
-            or not re.fullmatch(r"[a-f0-9]{1,6}", key)
-            or not isinstance(item, dict)
-            or item.get("path") != f"shards/{key}.json"
-        ):
-            fail(f"扩展内置词典分片声明无效: {key}")
-        names.append(item["path"])
-        digest_items.append((item["path"], item))
-    for name, item in digest_items:
-        path = root / PurePosixPath(name)
-        payload = read_regular_file(path)
-        expected_digest = item.get("sha256")
-        if (
-            not isinstance(expected_digest, str)
-            or hashlib.sha256(payload).hexdigest() != expected_digest
-            or ("bytes" in item and item.get("bytes") != len(payload))
-        ):
-            fail(f"扩展内置词典资源摘要不一致: {name}")
-        if name.startswith("shards/"):
-            try:
-                shard = json.loads(payload)
-            except Exception as exc:
-                fail(f"扩展内置词典分片无法解析: {name}: {exc}")
-            if shard.get("contract") != DICTIONARY_SHARD_CONTRACT:
-                fail(f"扩展内置词典分片合同无效: {name}")
-    return tuple(names)
-
-
 def validate_source_layout(source_root: Path = HERE) -> None:
     for name in ROOT_FILES:
         path = source_root / name
@@ -501,11 +438,6 @@ def validate_source_layout(source_root: Path = HERE) -> None:
         label="vendor",
     )
     _audit_exact_directory(source_root / "icons", ICON_FILES, label="icons")
-    _audit_exact_directory(
-        source_root / DICTIONARY_DIR,
-        expected_dictionary_files(source_root),
-        label="dictionary-data",
-    )
     _audit_exact_directory(
         source_root / "windows",
         WINDOWS_SOURCE_FILES,
@@ -540,7 +472,6 @@ def package_source_snapshot(source_root: Path = HERE) -> dict[str, bytes]:
         *(f"src/{name}" for name in SRC_FILES),
         *(f"vendor/{name}" for name in expected_vendor_files(source_root)),
         *(f"icons/{name}" for name in ICON_FILES),
-        *(f"{DICTIONARY_DIR}/{name}" for name in expected_dictionary_files(source_root)),
     ]
     return {
         name: read_regular_file(source_root / PurePosixPath(name))

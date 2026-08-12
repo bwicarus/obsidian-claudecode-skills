@@ -6,7 +6,7 @@ temporary Safari/iOS manifest without modifying the installed Windows build:
 
 - MV3 service worker only (no cross-browser background.scripts fallback)
 - nativeMessaging for the containing BWReader app bridge
-- unlimitedStorage for the cross-site dictionary/translation/card caches
+- unlimitedStorage for the cross-site translation/card caches
 - active Pi backend only
 - opaque 1024 px App Store icon
 """
@@ -49,7 +49,7 @@ INLINE_COMPUTER_VOICE_RESOURCES = [{
     "resources": ["call.html", "inline-computer-voice.html"],
     "matches": ["https://*/*", "http://*/*"],
 }]
-ROOT_DIRS = ("src", "vendor", "icons", "dictionary-data")
+ROOT_DIRS = ("src", "vendor", "icons")
 BACKGROUND_SCRIPTS = (
     "vendor/reader-runtime-account-context.js",
     "vendor/reader-runtime-extension-account-storage.js",

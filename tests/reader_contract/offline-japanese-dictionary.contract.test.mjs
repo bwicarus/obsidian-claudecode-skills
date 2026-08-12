@@ -16,17 +16,26 @@ function harness(resources, { local = true } = {}) {
     Set,
     Promise,
     console,
+    async fetch(url) {
+      const prefix = "/r/fixture/native-api/offline-dictionary/";
+      const path = String(url).startsWith(prefix)
+        ? String(url).slice(prefix.length)
+        : String(url);
+      requests.push(path);
+      if (!(path in resources)) {
+        return { ok: false, status: 404, async json() { return {}; } };
+      }
+      return {
+        ok: true,
+        status: 200,
+        async json() { return structuredClone(resources[path]); },
+      };
+    },
   };
   sandbox.window = sandbox;
   sandbox.RC = {};
   if (local) {
-    sandbox.__bwOfflineJapaneseDictionaryBridge = {
-      async fetchJson(path) {
-        requests.push(path);
-        if (!(path in resources)) throw new Error(`missing ${path}`);
-        return structuredClone(resources[path]);
-      },
-    };
+    sandbox.__BW_NATIVE_LOCAL_BASE_PATH__ = "/r/fixture";
   }
   vm.runInNewContext(source, sandbox, { filename: "rc-offline-dictionary.js" });
   return { dictionary: sandbox.RC.offlineDictionary, requests };
@@ -131,13 +140,22 @@ test("non-local PWA reports unavailable instead of silently contacting Pi", asyn
   assert.deepEqual(requests, []);
 });
 
+test("App without a downloaded dictionary reports the install state", async () => {
+  const { dictionary, requests } = harness({});
+  const result = await dictionary.lookupJapanese("取り寄せ");
+  assert.equal(result.ok, false);
+  assert.equal(result.unavailable, true);
+  assert.equal(result.code, "BW_OFFLINE_DICTIONARY_NOT_INSTALLED");
+  assert.deepEqual(requests, ["manifest.json"]);
+});
+
 test("kana shards use the complete first kana while kanji keeps two bytes", () => {
   const { dictionary } = harness({});
   assert.equal(dictionary._shardKey("あう"), "e38182");
   assert.equal(dictionary._shardKey("取り寄せ"), "e58f");
 });
 
-test("App and extension load the offline module before lookup UI", () => {
+test("lookup code ships everywhere but dictionary bytes ship nowhere", () => {
   for (const path of [
     "_server_deploy/templates/pdf_reader.html",
     "_server_deploy/templates/epub_html_reader.html",
@@ -160,12 +178,35 @@ test("App and extension load the offline module before lookup UI", () => {
   );
 
   const project = read("ios/BWReader/project.yml");
-  assert.match(project, /path: Extension\/Resources\/dictionary-data[\s\S]*?type: folder/);
+  assert.doesNotMatch(project, /Extension\/Resources\/dictionary-data/);
+
+  const safariPackager = read("extensions/bw-reader-webext/package_safari.py");
+  assert.match(safariPackager, /ROOT_DIRS = \("src", "vendor", "icons"\)/);
+  assert.doesNotMatch(safariPackager, /ROOT_DIRS = .*dictionary-data/);
+
+  const facade = read("extensions/bw-reader-webext/src/facade.js");
+  const background = read("extensions/bw-reader-webext/background.js");
+  assert.doesNotMatch(facade, /__bwOfflineJapaneseDictionaryBridge/);
+  assert.doesNotMatch(background, /BW_OFFLINE_DICTIONARY_JSON/);
 
   const pdfReader = read("_server_deploy/pdf_reader.py");
   const htmlReader = read("_server_deploy/html_reader.py");
   assert.equal((pdfReader.match(/"pdf\/rc-offline-dictionary\.js"/g) || []).length, 2);
   assert.equal((htmlReader.match(/"pdf\/rc-offline-dictionary\.js"/g) || []).length, 1);
+});
+
+test("App download stays in private Application Support and outside backup/sync", () => {
+  const nativeStore = read("ios/BWReader/App/ReaderOfflineDictionary.swift");
+  const localServer = read("ios/BWReader/App/ReaderLocalRuntimeServer.swift");
+  const settings = read("ios/BWReader/App/NativeReaderToolsView.swift");
+  assert.match(nativeStore, /\.applicationSupportDirectory/);
+  assert.match(nativeStore, /OfflineJapaneseDictionary/);
+  assert.match(nativeStore, /isExcludedFromBackup = true/);
+  assert.match(nativeStore, /raw\.githubusercontent\.com/);
+  assert.doesNotMatch(nativeStore, /containerURL\(forSecurityApplicationGroupIdentifier/);
+  assert.match(localServer, /native-api\/offline-dictionary\//);
+  assert.match(settings, /下载离线日语词典/);
+  assert.match(settings, /不进入书籍附件、Pi、Safari 扩展或设置同步/);
 });
 
 test("Japanese UI keeps Pi AI as an explicit action", () => {

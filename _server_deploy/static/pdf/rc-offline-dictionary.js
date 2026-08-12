@@ -1,9 +1,9 @@
-/* rc-offline-dictionary.js — App / extension bundled Japanese dictionary.
+/* rc-offline-dictionary.js — App-private, user-downloaded Japanese dictionary.
  *
- * The dictionary is intentionally independent from Pi.  App pages read the
- * immutable ReaderBundle files through the local runtime; the extension asks
- * its service worker for the same packaged JSON.  Pi AI is a separate,
- * explicitly-invoked refinement action owned by rc-wordpop/rc-phrasepop.
+ * Dictionary bytes are deliberately absent from ReaderBundle and every
+ * extension package. App pages read the user-installed, digest-checked files
+ * through the token-scoped loopback API. Pi AI remains a separate, explicit
+ * refinement action owned by rc-wordpop/rc-phrasepop.
  */
 (function () {
   if (!window.RC) window.RC = {};
@@ -11,11 +11,9 @@
 
   var MANIFEST_CONTRACT = 'bw-jmdict-manifest/1';
   var SHARD_CONTRACT = 'bw-jmdict-shard/1';
-  var BASE = '/static/pdf/dictionary-data/';
-  var bridge = window.__bwOfflineJapaneseDictionaryBridge || null;
-  var localMode = !!(bridge && typeof bridge.fetchJson === 'function') ||
-    !!window.__BW_NATIVE_LOCAL_BASE_PATH__ ||
-    window.__BW_NATIVE_OPENAI_REALTIME__ === true;
+  var nativeBase = String(window.__BW_NATIVE_LOCAL_BASE_PATH__ || '').replace(/\/+$/, '');
+  var BASE = nativeBase + '/native-api/offline-dictionary/';
+  var localMode = !!nativeBase;
   var manifestPromise = null;
   var shardPromises = new Map();
   var encoder = new TextEncoder();
@@ -45,10 +43,17 @@
 
   async function loadJson(relativePath) {
     var path = safeRelativePath(relativePath);
-    if (bridge && typeof bridge.fetchJson === 'function') return bridge.fetchJson(path);
     // @interaction reader.shell.read
-    var response = await fetch(BASE + path, { cache: 'force-cache', credentials: 'same-origin' });
-    if (!response.ok) throw new Error('离线词典资源 HTTP ' + response.status);
+    var response = await fetch(BASE + path, { cache: 'no-store', credentials: 'same-origin' });
+    if (!response.ok) {
+      var error = new Error(response.status === 404
+        ? '本机离线词典尚未下载'
+        : '离线词典资源 HTTP ' + response.status);
+      error.code = response.status === 404
+        ? 'BW_OFFLINE_DICTIONARY_NOT_INSTALLED'
+        : 'BW_OFFLINE_DICTIONARY_HTTP';
+      throw error;
+    }
     return response.json();
   }
 
@@ -137,7 +142,20 @@
     var query = normalize(term);
     if (!query) return { ok: false, code: 'BW_OFFLINE_DICTIONARY_EMPTY', source: 'local-jmdict' };
     if (!localMode) return { ok: false, unavailable: true, code: 'BW_OFFLINE_DICTIONARY_NOT_LOCAL' };
-    var manifest = await loadManifest();
+    var manifest;
+    try {
+      manifest = await loadManifest();
+    } catch (error) {
+      if (error && error.code === 'BW_OFFLINE_DICTIONARY_NOT_INSTALLED') {
+        return {
+          ok: false,
+          unavailable: true,
+          code: error.code,
+          source: 'local-jmdict'
+        };
+      }
+      throw error;
+    }
     var forms = candidateForms(query);
     var found = [];
     var matched = '';

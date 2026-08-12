@@ -1130,9 +1130,13 @@
     if (myReq !== _resReqId()) return false;
     if (!d.ok) {
       if (_isJaWord(word)) {
+        var localUnavailable = d.unavailable === true;
+        var localMessage = localUnavailable
+          ? 'App 离线词典尚未下载；可在“原生阅读工具 → 离线日语词典”中选择下载。'
+          : '「' + esc(word) + '」App 本地词典暂无释义（可能是人名或专有名词）。';
         // 本地词典无命中是一个完整结果。Pi 只在用户明确点击后参与，不能把
         // 本地 miss 偷偷升级成远端 AI 请求。
-        contentEl.innerHTML = '<div style="padding:6px 2px 10px;color:#8a9bb4">「' + esc(word) + '」内置离线词典暂无释义（可能是人名或专有名词）。</div>' +
+        contentEl.innerHTML = '<div style="padding:6px 2px 10px;color:#8a9bb4">' + localMessage + '</div>' +
           '<button id="jp-ai-btn" class="jp-ai-btn">Pi AI 精释（结合当前句境）</button><div id="jp-ai-out" class="jp-ai-out"></div>';
         var missAiButton = contentEl.querySelector('#jp-ai-btn');
         if (missAiButton) missAiButton.addEventListener('click', function () { jpAiDeep(word); });
@@ -1152,7 +1156,7 @@
       html += '<div class="jp-zh">' + esc(d.definition || d.translation) + '</div>';
     }
     if (d.source === 'local-jmdict') {
-      html += '<div style="margin-top:4px;color:#6f7e96;font-size:10.5px">内置离线 JMdict' +
+      html += '<div style="margin-top:4px;color:#6f7e96;font-size:10.5px">App 本地 JMdict' +
         (d.local_zh ? ' · 本地中文覆盖' : ' · 英文释义') + '</div>';
     }
     html += _jpInflectHtml(d.inflect, word);   // 变形分析:原形 + 语法标签

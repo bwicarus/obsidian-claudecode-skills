@@ -4156,3 +4156,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **Windows/Pi**：Direct `0.1.115`、ReaderPC `0.1.13` 已原子安装；Pi Reader `0.2.103` 部署及 E2E 通过，回退备份 `/home/bwicarus/deploy-backups/reader/20260812T095830Z-1296197`。
 - **App/扩展发布**：TestFlight `1.1.44 (257)` 已确认 `VALID / READY_FOR_BETA_TESTING`；Windows 扩展测试通道 `0.2.103`，SHA `6385e460…1453`，备份 `webext-channel-20260812T102543Z-g21hr3xc`。
 - **边界/下一步**：服务端均在线，但登记时 App 未连接且快照陈旧；安装并打开 1.1.44 后真机验收快照恢复、聊天/天气卡片入流、离线日语释义及对已处理书重新运行 PC v2。
+
+## Codex：离线日语词典改为 App 按需下载候选（2026-08-12 JST）
+- **改动**：`1.1.45 / 0.2.104` 候选不再把 JMdict 数据打入 ReaderBundle 或 Safari/桌面扩展；原生设置提供手动下载、进度、失败说明与删除。
+- **存储**：下载后仅落在 App 私有 Application Support 并排除 iCloud 备份，不进入书籍附件、App Group、Pi、扩展或设置同步；运行时只从令牌保护的本机接口读取。
+- **验证**：ReaderBundle 与 Safari 候选均为零词典文件，固定版本清单与抽样分片摘要匹配；专项 Node/Python、离线打包复验与发布管线通过。
+- **边界/下一步**：未部署 Pi 或浏览器正式渠道；待全量合同与 macOS 编译门禁通过后按既有原子流程上传 TestFlight。
