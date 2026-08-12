@@ -9,11 +9,12 @@ internal sealed class ReaderContextMcpServer
     internal const string ToolName = "reader_context_snapshot";
     internal const string VisualToolName = "reader_visual_image";
     internal const string BrowserControlToolName = "reader_browser_control";
+    internal const string CardToolName = "reader_card";
     internal const string CommandToolName = "reader_command";
     internal const string CapabilityGuideToolName =
         "reader_capability_guide";
     internal const string ServerName = "bw-reader-context-snapshot";
-    internal const string ServerVersion = "1.1.0";
+    internal const string ServerVersion = "1.2.0";
     internal static readonly TimeSpan FreshnessWindow =
         TimeSpan.FromMinutes(3);
 
@@ -369,6 +370,13 @@ internal sealed class ReaderContextMcpServer
                     + "only when the correct topic is unknown. In Windows "
                     + "Codex voice, use native Codex tools and native "
                     + "subagents instead of starting a nested CLI worker. "
+                    + "After a native Codex tool produces a structured "
+                    + "weather/news/images/videos/fact/general result, call "
+                    + CardToolName
+                    + " in the same turn to mirror it to the exact App or "
+                    + "extension. Do not infer a card from final assistant "
+                    + "text. Text chat-history synchronization carries only "
+                    + "user/assistant text and never carries cards. "
                     + "Keep the existing Realtime and legacy CLI "
                     + "implementations unchanged as compatibility paths.",
             },
@@ -559,6 +567,86 @@ internal sealed class ReaderContextMcpServer
         {
             tools.Add(new JsonObject
             {
+                ["name"] = CardToolName,
+                ["description"] =
+                    "Mirror one structured weather/news/images/videos/fact/"
+                    + "general result to the exact App or extension named by "
+                    + "the current Reader snapshot. Call this in the same "
+                    + "Windows Codex voice turn that produced the native tool "
+                    + "result; never infer a card from final assistant text or "
+                    + "expect text history synchronization to carry it. The "
+                    + "exact card envelope is {kind,title,data}; data shapes "
+                    + "are weather={lo,hi,cond,loc?,date?,precip?,tip?}, "
+                    + "news={items:[{t,s?,src?}]}, "
+                    + "images={items:[{url,title?,aid?,src?}]}, "
+                    + "videos={items:[{title,thumb?,url?,channel?,src?}]}, "
+                    + "fact={answer,detail?}, or general={text?}. The server "
+                    + "strictly revalidates the existing Realtime card "
+                    + "protocol and waits for the same delivery receipt.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["additionalProperties"] = false,
+                    ["required"] = new JsonArray("card"),
+                    ["properties"] = new JsonObject
+                    {
+                        ["card"] = new JsonObject
+                        {
+                            ["type"] = "object",
+                            ["additionalProperties"] = false,
+                            ["required"] = new JsonArray(
+                                "kind",
+                                "title",
+                                "data"),
+                            ["properties"] = new JsonObject
+                            {
+                                ["kind"] = new JsonObject
+                                {
+                                    ["type"] = "string",
+                                    ["enum"] = new JsonArray(
+                                        "weather",
+                                        "news",
+                                        "images",
+                                        "videos",
+                                        "fact",
+                                        "general"),
+                                },
+                                ["title"] = new JsonObject
+                                {
+                                    ["anyOf"] = new JsonArray
+                                    {
+                                        new JsonObject
+                                        {
+                                            ["type"] = "string",
+                                            ["maxLength"] = 320,
+                                        },
+                                        new JsonObject
+                                        {
+                                            ["type"] = "null",
+                                        },
+                                    },
+                                },
+                                ["data"] = new JsonObject
+                                {
+                                    ["type"] = "object",
+                                    ["description"] =
+                                        "Kind-specific exact object; see the "
+                                        + "reader://capabilities/cards guide.",
+                                },
+                            },
+                        },
+                    },
+                },
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = false,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = false,
+                    ["openWorldHint"] = false,
+                },
+            });
+            tools.Add(new JsonObject
+            {
                 ["name"] = CommandToolName,
                 ["description"] =
                     "Send one bounded structured output to the exact App or "
@@ -567,7 +655,11 @@ internal sealed class ReaderContextMcpServer
                     + "for the requested action; only complex or unknown "
                     + "workflows should read one capability guide. This is an "
                     + "additive Reader output path; it does not replace or "
-                    + "change existing Realtime or CLI invocation flows.",
+                    + "change existing Realtime or CLI invocation flows. For "
+                    + "weather/news/images/videos/fact/general results, prefer "
+                    + CardToolName
+                    + " in the same turn; text history never carries cards. "
+                    + "The BWREADER/1 card form remains compatible.",
                 ["inputSchema"] = new JsonObject
                 {
                     ["type"] = "object",
@@ -659,6 +751,17 @@ internal sealed class ReaderContextMcpServer
         )
         {
             await HandleBrowserControlToolCallAsync(
+                id,
+                arguments,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (
+            toolName == CardToolName
+            && _sendOutputAsync is not null
+        )
+        {
+            await HandleReaderCardToolCallAsync(
                 id,
                 arguments,
                 cancellationToken).ConfigureAwait(false);
@@ -762,6 +865,41 @@ internal sealed class ReaderContextMcpServer
             return;
         }
 
+        await SendReaderOutputAsync(
+            id,
+            kind,
+            payload,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task HandleReaderCardToolCallAsync(
+        JsonNode id,
+        JsonElement arguments,
+        CancellationToken cancellationToken)
+    {
+        if (!TryReadReaderCard(arguments, out JsonNode payload))
+        {
+            await WriteErrorAsync(
+                id,
+                -32602,
+                "Invalid Reader card",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await SendReaderOutputAsync(
+            id,
+            "card",
+            payload,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task SendReaderOutputAsync(
+        JsonNode id,
+        string kind,
+        JsonNode payload,
+        CancellationToken cancellationToken)
+    {
         await TryLoadLatestAsync(cancellationToken).ConfigureAwait(false);
         JsonObject current = BuildToolPayload();
         ReaderRealtimeOutputRequest? request = BuildRealtimeOutputRequest(
@@ -770,7 +908,7 @@ internal sealed class ReaderContextMcpServer
             payload);
         if (request is null)
         {
-            await WriteReaderCommandToolErrorAsync(
+            await WriteReaderOutputToolErrorAsync(
                 id,
                 "BW_READER_REALTIME_OUTPUT_SOURCE_NOT_READY",
                 "当前快照没有可精确定位的在线 App 或扩展来源。请先重新读取 Reader 上下文。",
@@ -786,7 +924,7 @@ internal sealed class ReaderContextMcpServer
         }
         catch (ReaderRealtimeOutputException exception)
         {
-            await WriteReaderCommandToolErrorAsync(
+            await WriteReaderOutputToolErrorAsync(
                 id,
                 exception.Code,
                 exception.Message,
@@ -948,6 +1086,46 @@ internal sealed class ReaderContextMcpServer
         }
     }
 
+    private static bool TryReadReaderCard(
+        JsonElement arguments,
+        out JsonNode payload)
+    {
+        payload = new JsonObject();
+        if (arguments.ValueKind != JsonValueKind.Object)
+        {
+            return false;
+        }
+        try
+        {
+            DirectJsonValidation.RequireNoDuplicateKeys(arguments);
+            JsonProperty[] fields = arguments.EnumerateObject().ToArray();
+            if (
+                fields.Length != 1
+                || fields[0].Name != "card"
+                || fields[0].Value.ValueKind != JsonValueKind.Object
+            )
+            {
+                return false;
+            }
+            JsonNode card = JsonNode.Parse(fields[0].Value.GetRawText())
+                ?? throw new JsonException("Reader card is empty");
+            payload = ReaderRealtimeOutputProtocol.ValidatePayload(
+                "card",
+                new JsonObject
+                {
+                    ["card"] = card,
+                });
+            return true;
+        }
+        catch (Exception exception) when (
+            exception is JsonException
+            or DirectProtocolException
+            or ReaderRealtimeOutputException)
+        {
+            return false;
+        }
+    }
+
     private static bool TryReadReaderCommand(
         JsonElement arguments,
         out string kind,
@@ -1029,7 +1207,7 @@ internal sealed class ReaderContextMcpServer
         }
     }
 
-    private async Task WriteReaderCommandToolErrorAsync(
+    private async Task WriteReaderOutputToolErrorAsync(
         JsonNode id,
         string code,
         string message,

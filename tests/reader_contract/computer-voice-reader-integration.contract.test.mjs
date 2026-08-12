@@ -21,6 +21,29 @@ const nativeVoiceSystem = read(
   "ios/BWReader/App/NativeVoiceSystemIntegration.swift",
 );
 
+test("Reader structured cards acknowledge only an actual render", () => {
+  assert.match(
+    voicecall,
+    /delivery\.kind === 'card'[\s\S]*if \(!renderInfo\(p\.card\)\)[\s\S]*BW_READER_CARD_RENDER_FAILED/,
+  );
+  const renderStart = voicecall.indexOf("function renderInfo(card)");
+  const renderEnd = voicecall.indexOf("function renderImgs(imgs)", renderStart);
+  assert.ok(renderStart >= 0 && renderEnd > renderStart);
+  const render = voicecall.slice(renderStart, renderEnd);
+  assert.match(
+    render,
+    /_tcOk = !!RC\.turnCard\.addPart\(/,
+    "a missing turn or renderer must not be reported as a rendered card",
+  );
+  assert.match(render, /var _rendered = _tcOk \|\| _hosts\.length > 0/);
+  assert.match(render, /return _rendered/);
+  assert.doesNotMatch(
+    render,
+    /RC\.turnCard\.addPart\([^;]+;\s*_tcOk = true/,
+    "calling addPart alone is not proof that a card reached the DOM",
+  );
+});
+
 test("background helpers hash normalized full text and enforce UTF-8 bounds", async () => {
   const start = background.indexOf("function readerNormalizeText(value, max, side = \"start\")");
   const end = background.indexOf("function readerRandomHex(length)", start);

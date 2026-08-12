@@ -1512,9 +1512,9 @@ def _validate_mcp_smoke_output(result: CommandResult) -> None:
     if (
         not isinstance(server_info, dict)
         or server_info.get("name") != "bw-reader-context-snapshot"
-        or server_info.get("version") != "1.1.0"
+        or server_info.get("version") != "1.2.0"
     ):
-        _fail("包内 stdio MCP serverInfo 不是 1.1.0 合同")
+        _fail("包内 stdio MCP serverInfo 不是 1.2.0 合同")
 
     list_result = by_id[2].get("result")
     tools = list_result.get("tools") if isinstance(list_result, dict) else None
@@ -1523,6 +1523,7 @@ def _validate_mcp_smoke_output(result: CommandResult) -> None:
         "reader_capability_guide",
         "reader_visual_image",
         "reader_browser_control",
+        "reader_card",
         "reader_command",
     )
     if (
@@ -1532,7 +1533,7 @@ def _validate_mcp_smoke_output(result: CommandResult) -> None:
             for item in tools
         ) != expected_tools
     ):
-        _fail("包内 stdio MCP 未暴露精确 5 工具合同")
+        _fail("包内 stdio MCP 未暴露精确 6 工具合同")
 
     snapshot_text = _mcp_response_text(by_id[3], label="快照工具")
     try:

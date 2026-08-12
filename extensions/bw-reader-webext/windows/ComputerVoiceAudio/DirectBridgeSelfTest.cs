@@ -6548,6 +6548,57 @@ internal static class DirectBridgeSelfTest
                 method = "tools/call",
                 @params = new
                 {
+                    name = ReaderContextMcpServer.CardToolName,
+                    arguments = new
+                    {
+                        card = new
+                        {
+                            kind = "weather",
+                            title = "东京天气",
+                            data = new
+                            {
+                                lo = 24,
+                                hi = 31,
+                                cond = "晴",
+                                loc = "东京",
+                                precip = 10,
+                                tip = "注意补水",
+                            },
+                        },
+                    },
+                },
+            }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 7,
+                method = "tools/call",
+                @params = new
+                {
+                    name = ReaderContextMcpServer.CardToolName,
+                    arguments = new
+                    {
+                        card = new
+                        {
+                            kind = "weather",
+                            title = "离线天气",
+                            data = new
+                            {
+                                lo = 24,
+                                hi = 31,
+                                cond = "晴",
+                            },
+                        },
+                    },
+                },
+            }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 8,
+                method = "tools/call",
+                @params = new
+                {
                     name = ReaderContextMcpServer.CommandToolName,
                     arguments = new
                     {
@@ -6560,7 +6611,7 @@ internal static class DirectBridgeSelfTest
             JsonSerializer.Serialize(new
             {
                 jsonrpc = "2.0",
-                id = 7,
+                id = 9,
                 method = "tools/call",
                 @params = new
                 {
@@ -6574,7 +6625,7 @@ internal static class DirectBridgeSelfTest
             JsonSerializer.Serialize(new
             {
                 jsonrpc = "2.0",
-                id = 8,
+                id = 10,
                 method = "tools/call",
                 @params = new
                 {
@@ -6596,6 +6647,17 @@ internal static class DirectBridgeSelfTest
                 observedAt + 1_000),
             sendOutputAsync: (request, _) =>
             {
+                if (
+                    request.Kind == "card"
+                    && request.Payload["card"]?["title"]
+                        ?.GetValue<string>() == "离线天气"
+                )
+                {
+                    throw new ReaderRealtimeOutputException(
+                        "BW_READER_REALTIME_OUTPUT_SOURCE_OFFLINE",
+                        "指定 Reader 页面来源当前不在线",
+                        retryable: true);
+                }
                 sent.Add(request);
                 return Task.FromResult(new ReaderRealtimeOutputAck(
                     "session-output",
@@ -6622,20 +6684,53 @@ internal static class DirectBridgeSelfTest
                 .GetProperty("result").GetProperty("contents");
             JsonElement tools = responses[3].RootElement
                 .GetProperty("result").GetProperty("tools");
+            JsonElement cardTool = tools[2];
+            JsonElement cardInput = cardTool.GetProperty("inputSchema");
+            JsonElement cardSchema = cardInput.GetProperty("properties")
+                .GetProperty("card");
+            HashSet<string> cardKinds = cardSchema
+                .GetProperty("properties")
+                .GetProperty("kind")
+                .GetProperty("enum")
+                .EnumerateArray()
+                .Select(value => value.GetString()!)
+                .ToHashSet(StringComparer.Ordinal);
             string guideText = responses[4].RootElement
                 .GetProperty("result").GetProperty("content")[0]
                 .GetProperty("text").GetString()!;
-            string resultText = responses[5].RootElement
+            string weatherText = responses[5].RootElement
                 .GetProperty("result").GetProperty("content")[0]
                 .GetProperty("text").GetString()!;
+            string offlineText = responses[6].RootElement
+                .GetProperty("result").GetProperty("content")[0]
+                .GetProperty("text").GetString()!;
+            string resultText = responses[7].RootElement
+                .GetProperty("result").GetProperty("content")[0]
+                .GetProperty("text").GetString()!;
+            using JsonDocument weatherResult = JsonDocument.Parse(
+                weatherText);
+            using JsonDocument offlineResult = JsonDocument.Parse(
+                offlineText);
             using JsonDocument result = JsonDocument.Parse(resultText);
             Require(
-                responses.Length == 8
+                responses.Length == 10
                 && initialize.GetProperty("capabilities")
                     .TryGetProperty("resources", out _)
                 && initialize.GetProperty("instructions").GetString()!
                     .Contains(
                         "instead of starting a nested CLI worker",
+                        StringComparison.Ordinal)
+                && initialize.GetProperty("instructions").GetString()!
+                    .Contains(
+                        "reader_card in the same turn",
+                        StringComparison.Ordinal)
+                && initialize.GetProperty("instructions").GetString()!
+                    .Contains(
+                        "never carries cards",
+                        StringComparison.Ordinal)
+                && initialize.GetProperty("instructions").GetString()!
+                    .Contains(
+                        "Do not infer a card from final assistant text",
                         StringComparison.Ordinal)
                 && resources.GetArrayLength() == 14
                 && resources[0].GetProperty("uri").GetString()
@@ -6645,28 +6740,64 @@ internal static class DirectBridgeSelfTest
                     .Contains(
                         "Windows Codex 语音主路由",
                         StringComparison.Ordinal)
-                && tools.GetArrayLength() == 3
+                && tools.GetArrayLength() == 4
                 && tools[1].GetProperty("name").GetString()
                     == ReaderContextMcpServer.CapabilityGuideToolName
                 && tools[2].GetProperty("name").GetString()
+                    == ReaderContextMcpServer.CardToolName
+                && tools[3].GetProperty("name").GetString()
                     == ReaderContextMcpServer.CommandToolName
+                && !cardInput.GetProperty("additionalProperties")
+                    .GetBoolean()
+                && !cardSchema.GetProperty("additionalProperties")
+                    .GetBoolean()
+                && cardKinds.SetEquals(new[]
+                {
+                    "weather",
+                    "news",
+                    "images",
+                    "videos",
+                    "fact",
+                    "general",
+                })
+                && cardTool.GetProperty("description").GetString()!
+                    .Contains(
+                        "same Windows Codex voice turn",
+                        StringComparison.Ordinal)
+                && tools[3].GetProperty("description").GetString()!
+                    .Contains(
+                        "text history never carries cards",
+                        StringComparison.Ordinal)
                 && guideText.Contains(
                     "旧 `do_task` CLI worker",
                     StringComparison.Ordinal)
+                && weatherResult.RootElement.GetProperty("ok")
+                    .GetBoolean()
+                && weatherResult.RootElement.GetProperty("kind")
+                    .GetString() == "card"
+                && responses[6].RootElement.GetProperty("result")
+                    .GetProperty("isError").GetBoolean()
+                && offlineResult.RootElement.GetProperty("code").GetString()
+                    == "BW_READER_REALTIME_OUTPUT_SOURCE_OFFLINE"
                 && result.RootElement.GetProperty("ok").GetBoolean()
                 && result.RootElement.GetProperty("kind").GetString()
                     == "tool-status"
-                && sent.Count == 1
+                && sent.Count == 2
                 && sent[0].SourceInstanceId == "source-output"
                 && sent[0].SnapshotRevision == 42
                 && sent[0].File == "library/output-book.pdf"
                 && sent[0].Page.GetValue<int>() == 4
-                && sent[0].Kind == "tool-status"
-                && responses[6].RootElement.GetProperty("error")
+                && sent[0].Kind == "card"
+                && sent[0].Payload["card"]?["kind"]
+                    ?.GetValue<string>() == "weather"
+                && sent[0].Payload["card"]?["data"]?["loc"]
+                    ?.GetValue<string>() == "东京"
+                && sent[1].Kind == "tool-status"
+                && responses[8].RootElement.GetProperty("error")
                     .GetProperty("code").GetInt32() == -32602
-                && responses[7].RootElement.GetProperty("error")
+                && responses[9].RootElement.GetProperty("error")
                     .GetProperty("code").GetInt32() == -32602,
-                "direct-reader-output-progressive-resources-and-command-are-exact",
+                "direct-reader-output-typed-card-command-and-disclosure-are-exact",
                 checks);
         }
         finally

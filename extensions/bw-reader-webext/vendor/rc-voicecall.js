@@ -1482,7 +1482,9 @@ if (window.__bwPwaProviderOnly) return;
         });
         work = true;
       } else if (delivery.kind === 'card') {
-        renderInfo(p.card);
+        if (!renderInfo(p.card)) {
+          throw new Error('BW_READER_CARD_RENDER_FAILED');
+        }
         work = true;
       } else if (delivery.kind === 'navigate') {
         work = _readerOutputNavigate(delivery);
@@ -2417,8 +2419,7 @@ if (window.__bwPwaProviderOnly) return;
   }
   window.__vcCue = _cue;   // 供任务完成播报复用
   function renderInfo(card) {
-    if (!card || !card.kind) return;
-    _cue('搜索完成');   // 75:静默入库配听觉确认(受「任务完成预制语音」开关 + 口头回报互斥门控)
+    if (!card || !card.kind) return false;
     var label = card.title || '搜索结果';
     var th = document.getElementById('asst-thread');
     var _hosts = [];
@@ -2427,8 +2428,10 @@ if (window.__bwPwaProviderOnly) return;
     var _tcOk = false;
     try {
       if (RC.turnCard && window.__asstVoiceTid) {
-        RC.turnCard.addPart(window.__asstVoiceTid(), { kind: 'card', card: card });
-        _tcOk = true;
+        _tcOk = !!RC.turnCard.addPart(
+          window.__asstVoiceTid(),
+          { kind: 'card', card: card }
+        );
       }
     } catch (e) {}
     if (th && !_tcOk) { var d = _infoCardEl(card); th.appendChild(d); th.scrollTop = th.scrollHeight; _hosts.push(d); }
@@ -2466,6 +2469,11 @@ if (window.__bwPwaProviderOnly) return;
           body: JSON.stringify({ assistant: '', card: card, via: 'voice', file: _rtc.ctxFile || '', page: _rtc.ctxPage || 0 }) }).catch(function () {});
       } catch (e) {}
     }
+    var _rendered = _tcOk || _hosts.length > 0;
+    if (_rendered) {
+      _cue('搜索完成');   // 75:仅在卡片实际出现后播放确认音；拒绝回执不能伪装成功
+    }
+    return _rendered;
   }
   function renderImgs(imgs) {   // 88:图片结果升格为结构化卡(kind:'images')走 renderInfo 全管线——对话流+浮层同款、落库、回放、✕/单选/溯源
     if (!imgs || !imgs.length) return;

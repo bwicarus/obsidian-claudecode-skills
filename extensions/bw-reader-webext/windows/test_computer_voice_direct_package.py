@@ -66,7 +66,7 @@ class FakeStdioRunner:
                 "result": {
                     "serverInfo": {
                         "name": "bw-reader-context-snapshot",
-                        "version": "1.1.0",
+                        "version": "1.2.0",
                     },
                 },
             },
@@ -79,6 +79,7 @@ class FakeStdioRunner:
                         {"name": "reader_capability_guide"},
                         {"name": "reader_visual_image"},
                         {"name": "reader_browser_control"},
+                        {"name": "reader_card"},
                         {"name": "reader_command"},
                     ],
                 },
