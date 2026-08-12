@@ -4149,3 +4149,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **验证**：专项 82 项、Reader Node 全量、离线 ReaderBundle、模拟器编译、签名归档与三目标/IPA 校验通过；Windows Python 仍仅有既有 `fcntl` 平台基线。
 - **发布事实**：提交 `a29f3980`；Actions `31571872283` 上传 App `1.1.43 (252)`，`31572376316` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
 - **边界/下一步**：未部署 Pi PWA 或桌面浏览器渠道；巡检仅在原生 scene active 时运行，不发 START、不申请麦克风，安装后验收翻页与按需取图均更新。
+
+## Codex：本地词典、卡片投递、PC OCR 与恢复链统一发布（2026-08-12 JST）
+- **能力**：App/扩展内置完整 JMdict，Pi AI 只保留显式精释；PC manga OCR 几何升为 `quality-first-v2`，采用方向字段与四边形分割，旧 v1 不会冒充新结果。
+- **投递/恢复**：`reader_command` 可承载严格结构化卡片，聊天/卡片仅在真实入 DOM 后 ACK；来源租约防投错页，App 快照验活与本机音频代次可独立重建且不重启 Windows 会话。
+- **Windows/Pi**：Direct `0.1.115`、ReaderPC `0.1.13` 已原子安装；Pi Reader `0.2.103` 部署及 E2E 通过，回退备份 `/home/bwicarus/deploy-backups/reader/20260812T095830Z-1296197`。
+- **App/扩展发布**：TestFlight `1.1.44 (257)` 已确认 `VALID / READY_FOR_BETA_TESTING`；Windows 扩展测试通道 `0.2.103`，SHA `6385e460…1453`，备份 `webext-channel-20260812T102543Z-g21hr3xc`。
+- **边界/下一步**：服务端均在线，但登记时 App 未连接且快照陈旧；安装并打开 1.1.44 后真机验收快照恢复、聊天/天气卡片入流、离线日语释义及对已处理书重新运行 PC v2。
