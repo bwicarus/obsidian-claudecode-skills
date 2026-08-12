@@ -4137,3 +4137,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **验证/发布**：Reader Node、目标语音/快照合同、C# Release、包管理测试与真实包内/安装后 MCP 前向调用通过；TestFlight `1.1.41 (247)` 为 `VALID / IN_BETA_TESTING`，Windows Direct `0.1.112` 已原子安装并恢复服务。
 - **现场边界**：Windows 服务健康但 App 尚未重连（`contextConnected=false`，快照为 stale）；需安装/重开 App 1.1.41 后验收自动回连，当前 Codex 会话的已关闭 MCP transport 需新会话重建。
 - **未做**：未部署 Pi PWA 或浏览器正式渠道；交互式论文服务仍仅有能力说明，未配置可调用后端。
+
+## Codex：原生语音不再误杀快照专线（2026-08-12 JST）
+- **根因/改动**：App 前台开启原生语音时 WKWebView 可报告 hidden，旧门禁因此主动关闭独立快照 WSS；现以 Swift 注入的原生 scene 前后台状态为唯一权威，网页/扩展可见性规则不变。
+- **验证**：失败合同先复现 hidden WebView 无法 `context-open`，修复后目标合同与全量 Reader Node、离线 ReaderBundle、发布管线均通过；公网 WSS `hello/context-mode=snapshot-mcp` 现场正常。
+- **发布事实**：提交 `20aa6d7f`；Actions `31568868875` 上传 App `1.1.42 (249)` 与 Safari `0.2.102`，`31569264560` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
+- **边界/下一步**：未部署 Pi PWA 或桌面浏览器正式渠道；安装 build 249 后需在电脑语音 active 时连续翻页，验收 `captureActive=true` 与 `contextConnected=true` 同时保持。
