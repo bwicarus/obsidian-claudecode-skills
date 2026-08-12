@@ -218,6 +218,7 @@
       var _showOpts = function (rect, result, phl) {
         return {
           text: text, rect: rect, result: result || null, file: file,
+          context: opts.context || '',
           page: page, langs: langs, ignoreSelector: '#sel-toolbar',
           // 收藏时无需再删高亮:点击模式弹框前已 _removePhraseHighlight(a),快返回模式根本没建高亮 → 只刷新分词。
           //   (旧 removePhraseHighlight(phl||t) 里 phl 恒 null → 按文本删会误删并存的同文本高亮。)
@@ -255,6 +256,7 @@
       }, 400);
       RC.phrasepop.show({
         text: text, noDisplay: true, file: file, page: page, langs: langs,
+        context: opts.context || '',
         onResult: function (data) {
           resolved = true;
           if (hlTimer) { clearTimeout(hlTimer); hlTimer = null; }

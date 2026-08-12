@@ -172,7 +172,7 @@
   }
   function phrase(s) {
     s = normalize(s || snapshot); if (!s) return;
-    RC.phrasepop.show({ text: s.text, rect: s.rect, file: s.file, langs: s.langs,
+    RC.phrasepop.show({ text: s.text, rect: s.rect, context: s.context, file: s.file, langs: s.langs,
       onExplain: () => explain(s), onSolid: () => {}, onFav: () => {}, onMastered: () => {} });
     hide(false);
   }

@@ -446,7 +446,8 @@ if (window.__bwPwaProviderOnly) return;
         }
       } catch (_) {}
     }
-    context = context.slice(0, 1200);
+    // 服务端实际只需邻近句境。限制 GET 长度，避免日文百分号编码后触发代理 URL 上限。
+    context = context.slice(0, 320);
     var key = _norm(text);
     var noDisplay = !!opts.noDisplay;
     var pop = null;
@@ -502,12 +503,12 @@ if (window.__bwPwaProviderOnly) return;
             '&context=' + encodeURIComponent(context))).json();
           if (dj && dj.ok) { zh = dj.zh || ''; reading = dj.reading || ''; accent = (dj.accent != null ? dj.accent : null); }
         }
-        if (!zh) {
+        // 日语词组只接受结构化日中词典结果。词典后端失败时显示“无翻译”，不再把无句境
+        // Google 结果（例如把 取り寄せ 译成“命令”）当作权威答案并写入长期缓存。
+        if (!zh && !isJa) {
           // @interaction ai.translate.compute
           var dt = await (await fetch('/pdf/api/translate-sentence', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(isJa
-              ? { text: text, backend: 'ai', fresh: true }
-              : { text: text })
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: text })
           })).json();
           if (dt && dt.ok) zh = dt.zh || '';
         }

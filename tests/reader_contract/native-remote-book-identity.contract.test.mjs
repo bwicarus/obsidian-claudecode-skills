@@ -46,7 +46,7 @@ test("book-aware Japanese dictionary and snippet routes declare exact identities
   );
 });
 
-test("every first-party dict-jp request supplies book, page and languages", () => {
+test("every first-party dict-jp request supplies book, page, languages and sentence context", () => {
   const sources = [
     "_server_deploy/static/pdf/reader.src/15-phrase-wordpop.js",
     "_server_deploy/static/pdf/reader.src/19-dict.js",
@@ -59,9 +59,33 @@ test("every first-party dict-jp request supplies book, page and languages", () =
     assert.match(source, /&file=/, path);
     assert.match(source, /&page=/, path);
     assert.match(source, /&langs=/, path);
+    assert.match(source, /&context=/, path);
   }
   const adapter = read("_server_deploy/static/pdf/pdf-adapter.js");
   assert.match(adapter, /page:\s*page,\s*langs:\s*langs/);
+});
+
+test("PDF, EPUB and extension phrase entry points explicitly preserve sentence context", () => {
+  const pdfEntry = read("_server_deploy/static/pdf/reader.src/15-phrase-wordpop.js");
+  assert.match(pdfEntry, /showPhrasePopover\(t,\s*\{[\s\S]{0,180}context:/);
+  assert.match(pdfEntry, /adapter\.lookupPhrase\(\{[\s\S]{0,240}context:/);
+
+  const pdfAdapter = read("_server_deploy/static/pdf/pdf-adapter.js");
+  assert.ok(
+    (pdfAdapter.match(/context:\s*opts\.context\s*\|\|\s*''/g) || []).length >= 2,
+    "both cached popup and background dictionary lookup must keep context",
+  );
+
+  const epub = read("_server_deploy/static/pdf/epub-html.js");
+  assert.match(epub, /RC\.phrasepop\.show\(\{[\s\S]{0,140}context:\s*ctx\s*\|\|\s*''/);
+  assert.match(epub, /context:\s*ctx\s*\|\|\s*''\s*\}\s*:\s*null/);
+
+  const extension = read("extensions/bw-reader-webext/content.js");
+  assert.match(extension, /RC\.phrasepop\.show\(\{[^\n]*context:\s*s\.context/);
+
+  const dictionary = read("scripts/vocab/dict_sources.py");
+  assert.match(dictionary, /不可信引用文本/);
+  assert.match(dictionary, /json\.dumps\(str\(context\s+or\s+""\)\[:160\]/);
 });
 
 test("snippet clients send structured top-level source identity without loopback links", () => {

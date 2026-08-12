@@ -342,7 +342,7 @@ test("兼容服务器断网只进入 outbox，不回滚本地词组状态", asyn
   assert.equal(harness.outbox[0][0], "phrase");
 });
 
-test("日语词组把当前句境交给词典，词典失败时绕过通用机器翻译缓存", async () => {
+test("日语词组把当前句境交给词典，词典失败时不采用无句境机器翻译", async () => {
   const harness = createHarness();
   const results = [];
   harness.sandbox.__bwSelectionController = {
@@ -371,18 +371,11 @@ test("日语词组把当前句境交给词典，词典失败时绕过通用机�
 
   harness.settle(dictionary, { ok: false, error: "dictionary unavailable" });
   await flush();
-  const fallback = harness.requests.find((item) =>
-    item.method === "POST" && item.url === "/pdf/api/translate-sentence");
-  assert.ok(fallback);
-  assert.deepEqual(JSON.parse(fallback.options.body), {
-    text: "取り寄せ",
-    backend: "ai",
-    fresh: true,
-  });
-
-  harness.settle(fallback, { ok: true, zh: "订购；调货" });
-  await flush();
-  assert.equal(results[0].zh, "订购；调货");
+  assert.equal(
+    harness.requests.some((item) => item.url === "/pdf/api/translate-sentence"),
+    false,
+  );
+  assert.equal(results[0].zh, "");
 });
 
 test("日语结构化词典命中时不调用句子翻译", async () => {

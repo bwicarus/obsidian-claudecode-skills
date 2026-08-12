@@ -703,7 +703,7 @@
   function _openPhrasePopover(text, rect, ctx, snap) {
     if (!(window.RC && RC.phrasepop)) { RC.result && RC.result.aiCall('/pdf/api/translate', { text: text, target_lang: '中文' }, '🌐 翻译', { aiParams: function () { return (window.RC && RC.settings) ? RC.settings.aiParams() : {}; } }); return; }
     RC.phrasepop.show({
-      text: text, rect: rect, file: FREL, langs: bookLangsArr(),
+      text: text, rect: rect, context: ctx || '', file: FREL, langs: bookLangsArr(),
       onSolid: function () { _phraseSetSolid(); },                                  // 查询返回 → 停呼吸转常亮
       onFav: function (t, nowFav) { if (nowFav) _unwrapPhrase(); refreshVocabUnderlinesForAllPages(); },   // 收藏→变分词单元:去呼吸高亮 + 重画下划线
       onMastered: function () { refreshVocabUnderlinesForAllPages(); },             // 标掌握→刷新生词下划线
@@ -725,8 +725,8 @@
   // 工具栏「📘词组」:照搬 PDF onPhrase → 把当前选区变持久呼吸 mark(移交持久层,清原生蓝选区)+ 开词组浮层。
   window.onPhrase = function () {
     var t = (cur.text || '').trim(); if (!t) return;
-    var snap = cur.anchor ? { section: cur.anchor.section, start: cur.anchor.start, end: cur.anchor.end, text: t } : null;
     var rect = cur.rect, ctx = cur.ctx;
+    var snap = cur.anchor ? { section: cur.anchor.section, start: cur.anchor.start, end: cur.anchor.end, text: t, context: ctx || '' } : null;
     hideSel();
     if (snap && _wrapPhraseRange(snap.section, snap.start, snap.end, true)) {
       try { window.getSelection().removeAllRanges(); } catch (e) {}   // 移交持久 mark,避免双重高亮(照搬 PDF _showPhraseHighlight)
@@ -749,7 +749,7 @@
       var snap = _phraseSnap, rect = mk.getBoundingClientRect();
       var txt = (snap && snap.text) || (mk.textContent || '').trim();
       _unwrapPhrase();   // snap 已存 → 先去高亮再重弹(noHighlight:不再建新 mark)
-      _openPhrasePopover(txt, rect, '', snap);
+      _openPhrasePopover(txt, rect, (snap && snap.context) || '', snap);
     }, true);
   })();
 

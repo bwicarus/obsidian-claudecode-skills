@@ -409,6 +409,7 @@
         text: text,
         rect: opts.anchorRect || (_sel && _sel.clientRect) || null,
         result: opts.result || null,
+        context: opts.context || (_sel && _sel.ctx) || '',
         file: webFile(),
         langs: opts.langs || langs(),
         ignoreSelector: '#sel-toolbar',

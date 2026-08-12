@@ -5,7 +5,7 @@ ai_client.py — 统一 AI 调用模块
 提供一次性查询（ask）和多轮对话（AISession）两种接口。
 """
 
-import json, os, shutil, subprocess, sys, tempfile, threading
+import json, os, re, shutil, subprocess, sys, tempfile, threading
 from pathlib import Path
 
 # ── 路径常量（跨平台，复用 config.py 的 env-aware 路径） ────────────────────────
@@ -253,20 +253,33 @@ def is_backend_unavailable(response: str) -> bool:
     not cause a second model call.
     """
     low = (response or "").strip().lower()
+    if not low:
+        return True
     if is_rate_limited(low):
         return True
-    return any(marker in low for marker in [
-        "failed to authenticate:",
-        "oauth session expired",
-        "authentication failed:",
-        "authentication_error",
-        "invalid authentication credentials",
-        "could not be refreshed",
-        "please run /login",
-        "please log in to continue",
-        "login required:",
-        "401 unauthorized",
-    ])
+    # CLI failures appear as their own line (sometimes prefixed with ``Error:``).
+    # Do not substring-match the whole answer: a valid explanation can naturally
+    # discuss phrases such as "401 Unauthorized" or "authentication failed".
+    error_line = re.compile(
+        r"(?:error\s*:\s*)?(?:"
+        r"failed to authenticate:\s*oauth session expired and could not be refreshed\.?|"
+        r"oauth session expired(?: and could not be refreshed)?\.?|"
+        r"authentication failed:\s*(?:invalid authentication credentials|oauth session expired)\.?|"
+        r"authentication_error:\s*(?:invalid authentication credentials|oauth session expired)\.?|"
+        r"invalid authentication credentials\.?|"
+        r"could not refresh (?:the )?oauth session\.?|"
+        r"please run /login\.?|"
+        r"please log in to continue\.?|"
+        r"login required:\s*(?:please )?(?:run /login|log in to continue)\.?"
+        r")"
+    )
+    for line in low.splitlines():
+        line = line.strip()
+        if error_line.fullmatch(line):
+            return True
+        if re.fullmatch(r"(?:error\s*:\s*)?401 unauthorized(?:[.!:]\s*.*)?", line):
+            return True
+    return False
 
 def route(backend: str, try_claude, try_codex) -> str:
     """按 backend 路由；Auto 模式在首选限流时自动切换。"""

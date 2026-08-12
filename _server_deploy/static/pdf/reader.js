@@ -5209,7 +5209,10 @@ window.onPhrase = () => {
   // 词组查询前清掉残留的查词呼吸/常亮高亮:它们(.rc-wp-breathe z:190)会盖住词组高亮(z:6)截获点击 →
   //   「点词组高亮没反应」(尤其"某词先查过、其查词高亮被打断残留"时)。切到词组模式旧查词高亮已陈旧。
   try { if (window.RC && RC.wordpop && RC.wordpop.clearHls) RC.wordpop.clearHls(); } catch (_) {}
-  showPhrasePopover(t, { rect: selected && selected.rect || null });
+  showPhrasePopover(t, {
+    rect: selected && selected.rect || null,
+    context: selected && (selected.context || selected.ctx || selected.sentence) || ''
+  });
 };
 // 词组查询期间的呼吸高亮：**只在点「词组」按钮、查询进行中**出现（showPhrasePopover 开始时建、
 // 结果出来即移除）。状态驱动(存 pt 坐标到 _activePhraseHl)→ 查询那 1-2s 内即便发生重渲染也不丢、
@@ -5400,6 +5403,7 @@ window.showPhrasePopover = async (text, opts) => {
       noHighlight: opts && opts.noHighlight,
       anchorRect: opts && opts.rect,
       result: opts && opts.result,
+      context: opts && opts.context,
       fallback: () => _showPhrasePopoverNative(text, opts)
     });
     return;
@@ -5409,7 +5413,8 @@ window.showPhrasePopover = async (text, opts) => {
 async function _showPhrasePopoverNative(text, opts) {
   const pop = document.getElementById('word-pop');
   toolbar.classList.remove('open');
-  _wordPopState = {word: text, ctx: '', lemma: text, phrase: true, reading: '', jp: false,
+  const phraseContext = String(opts && opts.context || '').trim().slice(0, 320);
+  _wordPopState = {word: text, ctx: phraseContext, lemma: text, phrase: true, reading: '', jp: false,
                    mastered: _phraseMarkSet.has(_phraseNorm(text))};
   pop.style.display = 'block';
   window._wordPopOpenAt = Date.now();
@@ -5429,10 +5434,11 @@ async function _showPhrasePopoverNative(text, opts) {
       const d = await (await fetch('/pdf/api/dict-jp?word=' + encodeURIComponent(text) +
         '&file=' + encodeURIComponent(FILE_REL || '') +
         '&page=' + encodeURIComponent((typeof _selPageNum === 'function' ? _selPageNum() : currentPage) || 0) +
-        '&langs=' + encodeURIComponent((BOOK_LANGS || []).join(',')))).json();
+        '&langs=' + encodeURIComponent((BOOK_LANGS || []).join(',')) +
+        '&context=' + encodeURIComponent(phraseContext))).json();
       if (d.ok) { zh = d.zh || ''; reading = d.reading || ''; accent = (d.accent != null ? d.accent : null); }
     }
-    if (!zh) {
+    if (!zh && !isJa) {
       const d = await (await fetch('/pdf/api/translate-sentence', {
         method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text}),
       })).json();

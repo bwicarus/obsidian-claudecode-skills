@@ -31,7 +31,7 @@ class AIClientRoutingTests(unittest.TestCase):
 
         def claude():
             calls.append("claude")
-            return "The chapter discusses authentication failed attempts."
+            return "The chapter explains why 401 Unauthorized can mean authentication failed."
 
         def codex():
             calls.append("codex")
@@ -39,9 +39,38 @@ class AIClientRoutingTests(unittest.TestCase):
 
         self.assertEqual(
             ai_client.route("auto-claude", claude, codex),
-            "The chapter discusses authentication failed attempts.",
+            "The chapter explains why 401 Unauthorized can mean authentication failed.",
         )
         self.assertEqual(calls, ["claude"])
+
+    def test_auto_route_keeps_explanation_that_starts_with_an_error_phrase(self):
+        calls = []
+        answer = "OAuth session expired is a common reason users need to sign in again."
+
+        def claude():
+            calls.append("claude")
+            return answer
+
+        def codex():
+            calls.append("codex")
+            return "unexpected"
+
+        self.assertEqual(ai_client.route("auto-claude", claude, codex), answer)
+        self.assertEqual(calls, ["claude"])
+
+    def test_auto_route_falls_back_on_empty_provider_output(self):
+        calls = []
+
+        def claude():
+            calls.append("claude")
+            return "   "
+
+        def codex():
+            calls.append("codex")
+            return '{"zh":"订购；调货"}'
+
+        self.assertEqual(ai_client.route("auto-claude", claude, codex), '{"zh":"订购；调货"}')
+        self.assertEqual(calls, ["claude", "codex"])
 
     def test_explicit_provider_does_not_reroute(self):
         calls = []
