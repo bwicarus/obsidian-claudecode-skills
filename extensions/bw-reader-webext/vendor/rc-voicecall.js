@@ -5292,6 +5292,16 @@ if (window.__bwPwaProviderOnly) return;
     }
     return page != null && String(page) === targetPage;
   }
+  function _nativePDFCompositePage(targetPage) {
+    var pageNumber = Number(targetPage);
+    if (!Number.isSafeInteger(pageNumber) || pageNumber < 1) return null;
+    try {
+      var adapter = window.RC && typeof RC.adapter === 'function'
+        ? RC.adapter() : null;
+      return adapter && adapter.config && adapter.config.isPDF === true
+        ? pageNumber : null;
+    } catch (e) { return null; }
+  }
   async function _captureBodyPageRect(rect, surface, surfaceCrop, selectionId) {
     try {
       if (!rect || !(rect.width > 0) || !(rect.height > 0)) return null;
@@ -5393,6 +5403,16 @@ if (window.__bwPwaProviderOnly) return;
         return await _captureInkRegion(target);
       }
       var targetPage = _compositeTargetPage(target);
+      var nativePDFPage = _nativePDFCompositePage(targetPage);
+      if (nativePDFPage) {
+        // see_page means the complete logical PDF page, not the current
+        // viewport. PDFKit can render it off-screen and the native broker
+        // overlays persisted PencilKit ink before delivering it directly.
+        var nativePage = await _nativeCapture(
+          'page', null, nativePDFPage, delivery
+        );
+        if (nativePage) return nativePage;
+      }
       var els = document.querySelectorAll(
         '.page-wrap[data-page-num], .pdf-upage, ' +
         '.ep-sec[data-idx], .ep-usec[data-uid]'
@@ -5742,9 +5762,12 @@ if (window.__bwPwaProviderOnly) return;
       attempted.push('整页合成');
       _visualStep('整页合成 开始');
       try {
-        shot = await _withVisualTimeout(RC.capturePageComposite(name === 'see_ink'
+        var compositeTarget = name === 'see_page'
           ? target
-          : Object.assign({}, target, { scope: 'viewport-context' })),
+          : (name === 'see_ink'
+            ? target
+            : Object.assign({}, target, { scope: 'viewport-context' }));
+        shot = await _withVisualTimeout(RC.capturePageComposite(compositeTarget),
           26000, '原生取图并直投/整页合成');
         if (shot && shot.native_delivery_failed) {
           throw _visualStageError('原生直投', shot.error || '原生直投失败');

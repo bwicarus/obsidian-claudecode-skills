@@ -1254,6 +1254,11 @@ test("visual-tool waits are bounded and every host exposes the visible step log 
   assert.match(visual, /window\.dlog\('see: ' \+ text/);
   assert.match(visual, /RC\.captureInkRegion\(target\), 26000/);
   assert.match(visual, /RC\.capturePageComposite[\s\S]*26000, '原生取图并直投\/整页合成'/);
+  assert.match(
+    visual,
+    /compositeTarget = name === 'see_page'[\s\S]*\? target[\s\S]*scope: 'viewport-context'/,
+    "see_page must request the complete logical page while see_figure keeps viewport semantics",
+  );
   assert.match(visual, /_captureView\(delivery\), 26000, '原生取图并直投\/视口截图'/);
   assert.match(visual, /_nativeRealtimeRequest\([\s\S]*15000, '本地保存\/传输'/);
   assert.ok(

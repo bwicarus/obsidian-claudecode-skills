@@ -260,6 +260,13 @@ test("capturePageComposite 对 PDF、EPUB 与插入页使用同一精确页身�
     ),
     /_captureBodyPageRect\(r\)\s*\|\|\s*await _captureEl\(el\)/,
   );
+  assert.match(
+    SOURCE.slice(
+      SOURCE.indexOf("  function _nativePDFCompositePage("),
+      SOURCE.indexOf("  function _inkTargetPage("),
+    ),
+    /config\.isPDF === true[\s\S]*_nativeCapture\([\s\S]*'page', null, nativePDFPage, delivery/,
+  );
 });
 
 test("闭合选区 ordinal 创建后随笔画持久化，删除早期选区不重排后续编号", () => {

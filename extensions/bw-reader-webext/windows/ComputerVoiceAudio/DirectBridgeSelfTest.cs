@@ -5590,6 +5590,9 @@ internal static class DirectBridgeSelfTest
                 .GetProperty("text").GetString()
                 == "Windows local snapshot text"
             && snapshotRoot.GetProperty("currentPage")
+                .GetProperty("sourceInstanceId").GetString()
+                == "source-selection-test"
+            && snapshotRoot.GetProperty("currentPage")
                 .GetProperty("selectionRegions")
                 .GetProperty("items")[0]
                 .GetProperty("selectionId").GetString()

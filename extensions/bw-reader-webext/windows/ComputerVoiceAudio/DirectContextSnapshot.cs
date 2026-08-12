@@ -2092,10 +2092,28 @@ internal sealed class FileDirectSnapshotContextAdapter :
             && effectivePage is not null
             && _activeReading is not null
             && SamePageEquivalent(effectivePage, _activeReading)
-            && _activeReading["selectionRegions"] is JsonObject regions
         )
         {
-            effectivePage["selectionRegions"] = regions.DeepClone();
+            // page.context carries content, while active-reading carries the
+            // live source identity used by on-demand visual capture.  A local
+            // PDF/EPUB page does not send a separate viewport packet, so the
+            // two facts must be joined here once their canonical page matches.
+            // Without this, the snapshot is ready and has ink, but visual
+            // tools reject it because currentPage has no sourceInstanceId.
+            if (
+                StringValue(_activeReading["sourceInstanceId"])
+                    is string sourceInstanceId
+            )
+            {
+                effectivePage["sourceInstanceId"] = sourceInstanceId;
+            }
+            if (
+                _activeReading["selectionRegions"]
+                    is JsonObject regions
+            )
+            {
+                effectivePage["selectionRegions"] = regions.DeepClone();
+            }
         }
         return new JsonObject
         {
