@@ -4130,3 +4130,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **验证/安装**：相关 Python 39 项、候选摘要与包内自检通过；ReaderPC `0.1.10` 已切换运行，现场确认 worker 租约被托盘持有，电脑语音直连仍在线且未开启音频。
 - **边界**：未改 Realtime、CLI、工具调用或语音建连；未部署 Pi PWA、App、Safari 或桌面浏览器渠道，旧 ReaderPC release 仍保留可回退。
 - **下一步**：下次真实电脑语音通话后，App/扩展当前会话应出现新增的用户/助手轮次；路由仍由当前快照的 source/revision/file/page 严格限定。
+
+## Codex：快照/语音恢复与 Reader MCP 单文件修复已发布（2026-08-12 JST）
+- **改了什么**：App 快照专线保留用户意图并按 1/2/4/8/15 秒重连，电脑语音前后台恢复并重试明确可恢复错误；Windows 快照 revision 改为按 producer 实例仲裁，Direct 健康接口公开独立快照连接状态。
+- **渐进能力**：Windows MCP 增加按需能力指南及五工具白名单，保留既有 Realtime/CLI；发布自检现真实启动单文件 stdio MCP 并调用快照与指南，修复发布后缺少 `TypeInfoResolver` 即崩溃。
+- **验证/发布**：Reader Node、目标语音/快照合同、C# Release、包管理测试与真实包内/安装后 MCP 前向调用通过；TestFlight `1.1.41 (247)` 为 `VALID / IN_BETA_TESTING`，Windows Direct `0.1.112` 已原子安装并恢复服务。
+- **现场边界**：Windows 服务健康但 App 尚未重连（`contextConnected=false`，快照为 stale）；需安装/重开 App 1.1.41 后验收自动回连，当前 Codex 会话的已关闭 MCP transport 需新会话重建。
+- **未做**：未部署 Pi PWA 或浏览器正式渠道；交互式论文服务仍仅有能力说明，未配置可调用后端。
