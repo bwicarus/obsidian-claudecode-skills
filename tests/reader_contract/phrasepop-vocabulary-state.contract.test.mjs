@@ -341,3 +341,77 @@ test("兼容服务器断网只进入 outbox，不回滚本地词组状态", asyn
   assert.equal(harness.outbox.length, 1);
   assert.equal(harness.outbox[0][0], "phrase");
 });
+
+test("日语词组把当前句境交给词典，词典失败时绕过通用机器翻译缓存", async () => {
+  const harness = createHarness();
+  const results = [];
+  harness.sandbox.__bwSelectionController = {
+    current() {
+      return {
+        text: "取り寄せ",
+        context: "メインをお取り寄せの牛肉にしたりするわよね。",
+      };
+    },
+  };
+
+  harness.sandbox.RC.phrasepop.show({
+    text: "取り寄せ",
+    langs: ["ja"],
+    noDisplay: true,
+    onResult(value) { results.push(value); },
+  });
+
+  const dictionary = harness.requests.find((item) =>
+    item.method === "GET" && item.url.startsWith("/pdf/api/dict-jp?"));
+  assert.ok(dictionary);
+  assert.equal(
+    new URL(dictionary.url, "https://reader.invalid").searchParams.get("context"),
+    "メインをお取り寄せの牛肉にしたりするわよね。",
+  );
+
+  harness.settle(dictionary, { ok: false, error: "dictionary unavailable" });
+  await flush();
+  const fallback = harness.requests.find((item) =>
+    item.method === "POST" && item.url === "/pdf/api/translate-sentence");
+  assert.ok(fallback);
+  assert.deepEqual(JSON.parse(fallback.options.body), {
+    text: "取り寄せ",
+    backend: "ai",
+    fresh: true,
+  });
+
+  harness.settle(fallback, { ok: true, zh: "订购；调货" });
+  await flush();
+  assert.equal(results[0].zh, "订购；调货");
+});
+
+test("日语结构化词典命中时不调用句子翻译", async () => {
+  const harness = createHarness();
+  const results = [];
+  harness.sandbox.RC.phrasepop.show({
+    text: "取り寄せ",
+    context: "商品を取り寄せる。",
+    langs: ["ja"],
+    noDisplay: true,
+    onResult(value) { results.push(value); },
+  });
+
+  const dictionary = harness.requests.find((item) =>
+    item.method === "GET" && item.url.startsWith("/pdf/api/dict-jp?"));
+  harness.settle(dictionary, {
+    ok: true,
+    zh: "订购；调货",
+    reading: "とりよせ",
+    accent: 0,
+  });
+  await flush();
+
+  assert.equal(
+    harness.requests.some((item) => item.url === "/pdf/api/translate-sentence"),
+    false,
+  );
+  assert.equal(results[0].text, "取り寄せ");
+  assert.equal(results[0].zh, "订购；调货");
+  assert.equal(results[0].reading, "とりよせ");
+  assert.equal(results[0].accent, 0);
+});

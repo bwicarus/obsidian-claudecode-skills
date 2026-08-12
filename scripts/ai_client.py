@@ -241,21 +241,48 @@ def is_rate_limited(response: str) -> bool:
         "capacity exceeded", "quota", "usage limit",
     ])
 
+
+def is_backend_unavailable(response: str) -> bool:
+    """Return True only for explicit provider/session failures worth rerouting.
+
+    Auto routing used to switch providers only for rate limits.  A dead OAuth
+    session therefore leaked its error text back as if it were a model answer,
+    so callers such as the Japanese dictionary silently fell through to a
+    lower-quality machine translator.  Keep the match list deliberately tied
+    to infrastructure errors; ordinary content mentioning authentication must
+    not cause a second model call.
+    """
+    low = (response or "").strip().lower()
+    if is_rate_limited(low):
+        return True
+    return any(marker in low for marker in [
+        "failed to authenticate:",
+        "oauth session expired",
+        "authentication failed:",
+        "authentication_error",
+        "invalid authentication credentials",
+        "could not be refreshed",
+        "please run /login",
+        "please log in to continue",
+        "login required:",
+        "401 unauthorized",
+    ])
+
 def route(backend: str, try_claude, try_codex) -> str:
     """按 backend 路由；Auto 模式在首选限流时自动切换。"""
     if backend == "claude": return try_claude()
     if backend == "codex":  return try_codex()
     if backend == "auto-codex":
         r = try_codex()
-        if is_rate_limited(r):
+        if is_backend_unavailable(r):
             r2 = try_claude()
-            return r2 if r2 and not is_rate_limited(r2) else r
+            return r2 if r2 and not is_backend_unavailable(r2) else r
         return r
     # auto-claude（默认）
     r = try_claude()
-    if is_rate_limited(r):
+    if is_backend_unavailable(r):
         r2 = try_codex()
-        return r2 if r2 and not is_rate_limited(r2) else r
+        return r2 if r2 and not is_backend_unavailable(r2) else r
     return r
 
 # ── 高层接口 ──────────────────────────────────────────────────────────────────

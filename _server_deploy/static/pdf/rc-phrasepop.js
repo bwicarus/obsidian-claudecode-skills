@@ -433,6 +433,17 @@
     var text = String(opts.text == null ? '' : opts.text).trim();
     if (!text) return;
     var isJa = _isJaWord(text);
+    var context = String(opts.context || opts.ctx || opts.sentence || '').trim();
+    if (!context) {
+      try {
+        var controller = window.__bwSelectionController;
+        var selected = controller && controller.current && controller.current();
+        if (selected && _norm(selected.text) === _norm(text)) {
+          context = String(selected.context || selected.ctx || selected.sentence || '').trim();
+        }
+      } catch (_) {}
+    }
+    context = context.slice(0, 1200);
     var key = _norm(text);
     var noDisplay = !!opts.noDisplay;
     var pop = null;
@@ -484,13 +495,16 @@
           var dj = await (await fetch('/pdf/api/dict-jp?word=' + encodeURIComponent(text) +
             '&file=' + encodeURIComponent(opts.file || '') +
             '&page=' + encodeURIComponent(opts.page || 0) +
-            '&langs=' + encodeURIComponent((opts.langs || []).join(',')))).json();
+            '&langs=' + encodeURIComponent((opts.langs || []).join(',')) +
+            '&context=' + encodeURIComponent(context))).json();
           if (dj && dj.ok) { zh = dj.zh || ''; reading = dj.reading || ''; accent = (dj.accent != null ? dj.accent : null); }
         }
         if (!zh) {
           // @interaction ai.translate.compute
           var dt = await (await fetch('/pdf/api/translate-sentence', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: text })
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(isJa
+              ? { text: text, backend: 'ai', fresh: true }
+              : { text: text })
           })).json();
           if (dt && dt.ok) zh = dt.zh || '';
         }
