@@ -4215,6 +4215,50 @@
     return value;
   }
 
+  // 助手画完高亮后，让界面出现那张卡片条。
+  //
+  // 迁移前这条反馈由 Pi 的 client_actions 带回（runActions → _assistEdit → hlcard：
+  // 原文｜↗跳转｜↩撤销⇄↪重做）。App 本地化后写入不再经 Pi，反馈随之消失，
+  // 用户看到的是"功能没了"。这里在**本地确实落库之后**补发同一个调用，渲染器一行不改。
+  //
+  // 只覆盖助手路径：调用点在 savePDFHighlight(assistant-exact-highlight)，专供助手；
+  // 手动划线走 /pdf/api/highlights 的普通写入，不经这里。基线时手动高亮从不产生
+  // 卡片条，若一并覆盖，用户每划一次线就多一张卡 —— 那是新增噪声，不是恢复。
+  var announcedAssistantHighlights = new Set();
+  function announceAssistantHighlight(body, saved) {
+    try {
+      if (!saved || saved.ok !== true) return;
+      var id = String(
+        (saved.highlight && saved.highlight.id) || saved.id || body.id || ''
+      );
+      if (!id) return;
+      // 同一条只报一次：CAS 冲突会让写入重试，重试不该再刷出一张卡片条。
+      if (announcedAssistantHighlights.has(id)) return;
+      announcedAssistantHighlights.add(id);
+      if (typeof root._assistEdit !== 'function') return;
+      var page = Number(body.page) || 0;
+      var display = page;
+      try {
+        if (typeof root._dispPage === 'function') {
+          display = Number(root._dispPage(page)) || page;
+        }
+      } catch (e) {}
+      root._assistEdit({
+        type: 'highlight',
+        file: String(body.file || ''),
+        items: [{
+          id: id,
+          text: String(body.text || ''),
+          color: String(body.color || ''),
+          pdf_page: page,
+          disp_page: display
+        }]
+      });
+    } catch (e) {
+      // 反馈失败不能影响已经完成的写入：高亮已经存下了。
+    }
+  }
+
   function persistLocalPDFHighlight(body, code, independent) {
     requireLocalFile(body.file, code);
     var page = strictInteger(body.page, 1, 10000000, 'page', code);
@@ -9337,7 +9381,11 @@
           // 悬住并让每次语音高亮都只得到 20 秒回执超时。
           return persistLocalPDFHighlight(
             body, 'BW_LOCAL_HIGHLIGHT_DIRECT', true
-          );
+          ).then(function (saved) {
+            // 失败与未知走不到这里：它只挂在成功分支上。
+            announceAssistantHighlight(body, saved);
+            return saved;
+          });
         });
       });
     },
