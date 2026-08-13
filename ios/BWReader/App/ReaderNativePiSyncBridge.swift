@@ -1,4 +1,5 @@
 import CoreFoundation
+import CryptoKit
 import Foundation
 import WebKit
 
@@ -31,7 +32,7 @@ final class ReaderNativePiSyncBridge: NSObject, WKScriptMessageHandlerWithReply 
     private static let leaseContract = "owner-lease/1"
     private static let syncContract = "sync-v3"
     private static let changeContract = "record-parent-state/1"
-    private static let registryDigest = "sync-v3:record-parent-state/1|user-settings:explicit:0:1|vocabulary-state:explicit:0:1"
+    private static let registryDigest = "sync-v3:record-parent-state/1|card-entities:explicit:0:1|card-states:explicit:0:1|user-settings:explicit:0:1|vocabulary-state:explicit:0:1"
     private static let maximumRequestBytes = 2 * 1_024 * 1_024
     private static let maximumResponseBytes = 4 * 1_024 * 1_024
     private static let piOrigin = URL(
@@ -182,7 +183,12 @@ final class ReaderNativePiSyncBridge: NSObject, WKScriptMessageHandlerWithReply 
                     return Self.success(
                         requestID: input.requestID,
                         action: input.action,
-                        result: ["state": "ready"]
+                        result: [
+                            "state": "ready",
+                            "accountBinding": Self.accountBinding(
+                                namespace: current.namespace
+                            ),
+                        ]
                     )
                 }
                 do {
@@ -190,7 +196,12 @@ final class ReaderNativePiSyncBridge: NSObject, WKScriptMessageHandlerWithReply 
                     return Self.success(
                         requestID: input.requestID,
                         action: input.action,
-                        result: ["state": "ready"]
+                        result: [
+                            "state": "ready",
+                            "accountBinding": Self.accountBinding(
+                                namespace: current.namespace
+                            ),
+                        ]
                     )
                 } catch {
                     // A stale or uncertain capability must never be reused.
@@ -264,8 +275,21 @@ final class ReaderNativePiSyncBridge: NSObject, WKScriptMessageHandlerWithReply 
         return Self.success(
             requestID: input.requestID,
             action: input.action,
-            result: ["state": "ready"]
+            result: [
+                "state": "ready",
+                "accountBinding": Self.accountBinding(namespace: namespace),
+            ]
         )
+    }
+
+    /// Stable checkpoint fence for one authenticated Pi account. This digest
+    /// is compare-only: it does not reveal the namespace and grants no owner
+    /// capability to the page world.
+    private static func accountBinding(namespace: String) -> String {
+        let digest = SHA256.hash(
+            data: Data(("reader-sync-account-binding/1\0" + namespace).utf8)
+        ).map { String(format: "%02x", $0) }.joined()
+        return "sha256:" + digest
     }
 
     private func forward(_ input: Input) async throws -> [String: Any] {
@@ -633,6 +657,7 @@ final class ReaderNativePiSyncBridge: NSObject, WKScriptMessageHandlerWithReply 
     }
 
     private static let allowedCollections: Set<String> = [
+        "card-entities", "card-states",
         "user-settings", "vocabulary-state",
     ]
 

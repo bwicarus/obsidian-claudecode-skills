@@ -4194,3 +4194,16 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：词典逐片摘要、构建器 3 项、Reader Node 1040 项、发布管线 24 项、Direct 包内自检、macOS 模拟器/设备归档与签名校验均通过；日语预热与自定义词组合同均验证零 Pi，词典查询独立短连接不阻塞语音/快照。
 - **发布事实**：数据 `65a74087`、功能 `506780e8`；Direct `0.1.120` 从 `0.1.118` 原子安装，回滚点 `C:\Users\bwica\bw-computer-voice-bridge-backups\install-0.1.120-20260813T034350Z-b0502201`；Actions `31664974706` 上传 TestFlight `1.1.48 (272)`，`31665408052` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
 - **边界/下一步**：约 93 MB 字典不进入 IPA、扩展、书附件或 Pi；ReaderPC `0.1.16` 预处理在线，电脑语音保存的开关仍为关闭，未擅自启动 GPT。安装后真机验收“默认未下载→下载进度→中文本地义→无中文/自定义词组 CLI”。
+
+## Codex：补齐扩展 0.2.107 release/handoff 元数据门禁（2026-08-13 JST）
+- **改了什么**：把卡仓与移动 Anki runtime 纳入 manifest 精确顺序和三个模板缓存指纹，并把 `ReaderLocalAnki.cs` 纳入 Windows 发布源码白名单。
+- **怎么验的**：`build.py` 生成/逐字校验通过，发布管线 24 项通过；handoff 的 manifest、Windows 白名单、模板指纹和当前版本登记四项均通过。
+- **没做什么**：未改卡仓业务逻辑，未提交、推送、部署或发布任何渠道。
+- **下一步**：主任务继续处理同批功能验证；Windows `fcntl` 与网络审计既有基线不属于本次元数据修复。
+
+## Codex：Reader 本地卡库、同步与可选 Anki 投影候选（2026-08-13 JST）
+- **改了什么**：App/扩展以本机 `card-entities`+`card-states` 为权威，草稿/编辑/稳定序号删除/确认/本地复习先落库；桥接结果卡也先持久化，Pi/ReaderPC/AnkiMobile 仅同步或可选投影。
+- **迁移/隔离**：Pi relay 只做精确 registry 代际迁移，旧卡仅补本机缺失 gid；checkpoint 绑定账户，扩展未登录先用安装级私有 Vault，首次配对幂等迁移，冲突与未知结果 fail closed。
+- **同批修复**：恢复原生工具最终回答/本机草稿，固定视频卡走内置播放器，高亮等待真实色块；单词与词组均为本地中文优先、无中文走独立 ReaderPC CLI，Pi 仅显式旧版精释。
+- **验证**：共享源码/vendor build、Reader Node 全量、相关 Python、Windows Direct Release 构建/完整自检、发布管线与网络新增债务门禁通过；Windows handoff 仅余已登记的 POSIX `fcntl` 基线。
+- **未发布**：候选为 App `1.1.49`、扩展 `0.2.107`；新功能/同步迁移按分级规则等待一次真机人工验收，尚未提交、推送、TestFlight、Pi 或正式扩展部署。

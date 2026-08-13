@@ -276,7 +276,8 @@ function harness({
   fetchImpl,
   openImpl = null,
   dispatchImpl = null,
-  outboxImpl = null
+  outboxImpl = null,
+  cardRepository = null
 }) {
   const document = new FakeDocument();
   const pane = document.createElement("section");
@@ -439,7 +440,8 @@ function harness({
   const window = {
     RC,
     BWReaderRuntime: {
-      contextSelections: ContextSelection.createRegistry()
+      contextSelections: ContextSelection.createRegistry(),
+      ...(cardRepository ? { cardRepository } : {})
     },
     __bwExtensionStore: extensionStore,
     location,
@@ -1059,6 +1061,284 @@ test("standard Anki flow initially shows only front then reveals back and four e
       ["4", "简单"]
     ]
   );
+});
+
+test("local repository enumerates confirmed due cards before new cards without Pi", async () => {
+  const now = Date.now();
+  let fetchCount = 0;
+  const state = (overrides = {}) => ({
+    phase: "confirmed",
+    removed: false,
+    confirmedAt: now - 1000,
+    review: {
+      status: "new", dueAt: null, lastReviewedAt: null,
+      intervalDays: 0, ease: 0, reps: 0, lapses: 0,
+      ...(overrides.review || {})
+    },
+    flags: { favorite: false, archived: false, ...(overrides.flags || {}) },
+    projections: { anki: {} },
+    exactState: {},
+    ...Object.fromEntries(
+      Object.entries(overrides).filter(([key]) => !["review", "flags"].includes(key))
+    )
+  });
+  const repository = {
+    async snapshot() {
+      return [
+        {
+          id: "card_bbbb", stateRev: 2, deleted: false,
+          source: { kind: "reader", sourceId: "source-b" },
+          cards: [
+            { type: "basic", front: "NEW FRONT", back: "NEW BACK" },
+            { type: "basic", front: "ARCHIVED", back: "NO" },
+            { type: "basic", front: "REMOVED", back: "NO" }
+          ],
+          states: {
+            0: state(),
+            1: state({ flags: { archived: true } }),
+            2: state({ removed: true })
+          }
+        },
+        {
+          id: "card_aaaa", stateRev: 3, deleted: false,
+          source: { kind: "reader", sourceId: "source-a" },
+          cards: [
+            { type: "basic", front: "DUE LATER", back: "A2" },
+            { type: "basic", front: "DUE FIRST", back: "A1" },
+            { type: "basic", front: "FUTURE", back: "NO" }
+          ],
+          states: {
+            0: state({ review: { status: "review", dueAt: now - 1000 } }),
+            1: state({ review: { status: "learning", dueAt: now - 5000 } }),
+            2: state({ review: { status: "review", dueAt: now + 86400000 } })
+          }
+        }
+      ];
+    },
+    async patchState() { throw new Error("not used"); }
+  };
+  const h = harness({
+    context: { file: "book.pdf", page: 7 },
+    cardRepository: repository,
+    fetchImpl: async () => {
+      fetchCount += 1;
+      throw new Error("Pi must not be read while local cards exist");
+    }
+  });
+
+  await h.RC.review.reload();
+
+  assert.equal(fetchCount, 0);
+  assert.equal(h.RC.review.currentCard().question, "DUE FIRST");
+  assert.match(h.pane.innerHTML, /到期 2 · 本批 3/);
+  h.RC.review.next();
+  assert.equal(h.RC.review.currentCard().question, "DUE LATER");
+  h.RC.review.next();
+  assert.equal(h.RC.review.currentCard().question, "NEW FRONT");
+  assert.doesNotMatch(h.pane.innerHTML, /ARCHIVED|REMOVED|FUTURE/);
+});
+
+test("local rating persists deterministic review state before advancing UI", async () => {
+  const write = deferred();
+  const patchCalls = [];
+  let fetchCount = 0;
+  const repository = {
+    async snapshot() {
+      return [{
+        id: "card_abcd", stateRev: 7, deleted: false,
+        source: { kind: "reader", sourceId: "source-local" },
+        cards: [
+          { type: "basic", front: "LOCAL ONE", back: "ANSWER ONE" },
+          { type: "basic", front: "LOCAL TWO", back: "ANSWER TWO" }
+        ],
+        states: {
+          0: {
+            phase: "confirmed", removed: false, confirmedAt: 1,
+            review: {
+              status: "review", dueAt: 1, lastReviewedAt: 1,
+              intervalDays: 2, ease: 3, reps: 4, lapses: 1
+            },
+            flags: { archived: false }, projections: { anki: {} }, exactState: {}
+          },
+          1: {
+            phase: "confirmed", removed: false, confirmedAt: 2,
+            review: {
+              status: "new", dueAt: null, lastReviewedAt: null,
+              intervalDays: 0, ease: 0, reps: 0, lapses: 0
+            },
+            flags: { archived: false }, projections: { anki: {} }, exactState: {}
+          }
+        }
+      }];
+    },
+    patchState(...args) {
+      patchCalls.push(structuredClone(args));
+      return write.promise;
+    }
+  };
+  const h = harness({
+    context: {},
+    cardRepository: repository,
+    fetchImpl: async () => {
+      fetchCount += 1;
+      throw new Error("pure local rating must not call Pi");
+    }
+  });
+  await h.RC.review.reload();
+  h.clickAction("show-answer");
+  h.clickEase(3);
+
+  assert.equal(h.RC.review.currentCard().question, "LOCAL ONE",
+    "UI must not advance before patchState succeeds");
+  assert.match(h.pane.innerHTML, /ANSWER ONE/);
+  assert.equal(patchCalls.length, 1);
+  assert.equal(patchCalls[0][0], "card_abcd");
+  assert.equal(patchCalls[0][1], 0);
+  const review = patchCalls[0][2].review;
+  assert.equal(review.status, "review");
+  assert.equal(review.intervalDays, 5);
+  assert.equal(review.ease, 3);
+  assert.equal(review.reps, 5);
+  assert.equal(review.lapses, 1);
+  assert.equal(review.dueAt, review.lastReviewedAt + 5 * 86400000);
+
+  write.resolve({
+    states: {
+      0: { review },
+      1: { review: { status: "new" } }
+    }
+  });
+  await settleAsync();
+
+  assert.equal(h.RC.review.currentCard().question, "LOCAL TWO");
+  assert.equal(fetchCount, 0);
+});
+
+test("failed local patch leaves the revealed card and queue unchanged", async () => {
+  const repository = {
+    async snapshot() {
+      return [{
+        id: "card_dead", stateRev: 1, deleted: false,
+        source: { kind: "reader", sourceId: "source-dead" },
+        cards: [{ type: "basic", front: "KEEP FRONT", back: "KEEP BACK" }],
+        states: { 0: {
+          phase: "confirmed", removed: false, confirmedAt: 1,
+          review: {
+            status: "new", dueAt: null, lastReviewedAt: null,
+            intervalDays: 0, ease: 0, reps: 0, lapses: 0
+          },
+          flags: { archived: false }, projections: { anki: {} }, exactState: {}
+        } }
+      }];
+    },
+    async patchState() { throw new Error("disk unavailable"); }
+  };
+  const h = harness({
+    context: {}, cardRepository: repository,
+    fetchImpl: async () => { throw new Error("Pi must stay unused"); }
+  });
+  await h.RC.review.reload();
+  h.clickAction("show-answer");
+  h.clickEase(4);
+  await settleAsync();
+
+  assert.equal(h.RC.review.currentCard().question, "KEEP FRONT");
+  assert.match(h.pane.innerHTML, /KEEP BACK/);
+  assert.equal(h.getStored().cards.length, 1);
+  assert.ok(h.toasts.some((text) =>
+    text.includes("评分未保存") && text.includes("disk unavailable")
+  ));
+});
+
+test("legacy Anki projection runs only after local Again is durable and cannot roll it back", async () => {
+  const order = [];
+  let writtenReview;
+  const repository = {
+    async snapshot() {
+      return [{
+        id: "card_beef", stateRev: 4, deleted: false,
+        source: { kind: "legacy", sourceId: "legacy-entity" },
+        cards: [{ type: "basic", front: "LOCAL LEGACY", back: "ANSWER" }],
+        states: { 0: {
+          phase: "confirmed", removed: false, confirmedAt: 1,
+          review: {
+            status: "review", dueAt: 1, lastReviewedAt: 1,
+            intervalDays: 8, ease: 3, reps: 6, lapses: 2
+          },
+          flags: { archived: false },
+          projections: { anki: { "pi-legacy": {
+            status: "succeeded", cardIds: [9001]
+          } } },
+          exactState: {}
+        } }
+      }];
+    },
+    async patchState(_gid, _index, patch) {
+      order.push("patchState");
+      writtenReview = structuredClone(patch.review);
+      return { states: { 0: { review: patch.review } } };
+    }
+  };
+  const h = harness({
+    context: {}, cardRepository: repository,
+    fetchImpl: async (url, init) => {
+      order.push("fetch");
+      assert.equal(url, "/pdf/api/review-answer");
+      assert.deepEqual(JSON.parse(init.body), {
+        aid: JSON.parse(init.body).aid,
+        card_id: 9001,
+        ease: 1
+      });
+      return response({ ok: false, error: "Pi unavailable" }, { ok: false, status: 503 });
+    }
+  });
+  await h.RC.review.reload();
+  h.clickAction("show-answer");
+  h.clickEase(1);
+  await settleAsync();
+
+  assert.deepEqual(order, ["patchState", "fetch"]);
+  assert.equal(writtenReview.status, "relearning");
+  assert.equal(writtenReview.intervalDays, 0);
+  assert.equal(writtenReview.reps, 7);
+  assert.equal(writtenReview.lapses, 3);
+  assert.equal(writtenReview.dueAt, writtenReview.lastReviewedAt + 10 * 60000);
+  assert.equal(h.RC.review.currentCard(), null,
+    "projection rejection must not restore an already durable local result");
+  assert.ok(h.toasts.some((text) =>
+    text.includes("本地评分已保存") && text.includes("Pi unavailable")
+  ));
+});
+
+test("zero local cards retains the legacy external queue and answer path", async () => {
+  const calls = [];
+  const h = harness({
+    context: {},
+    cardRepository: {
+      async snapshot() { return []; },
+      async patchState() { throw new Error("not used"); }
+    },
+    fetchImpl: async (url, init) => {
+      calls.push([url, init && init.body]);
+      if (url === "/pdf/api/review-queue?limit=30") {
+        return response({
+          ok: true, due_total: 1, related_total: 0,
+          cards: [{ id: 7001, question: "LEGACY FRONT", answer: "LEGACY BACK" }]
+        });
+      }
+      return response({ ok: true, next: { due: "tomorrow" } });
+    }
+  });
+  await h.RC.review.reload();
+  h.clickAction("show-answer");
+  h.clickEase(3);
+  await settleAsync();
+
+  assert.deepEqual(calls.map(([url]) => url), [
+    "/pdf/api/review-queue?limit=30",
+    "/pdf/api/review-answer"
+  ]);
+  assert.deepEqual(JSON.parse(calls[1][1]).card_id, 7001);
 });
 
 test("sibling Anki cards never collide even when provenance entity metadata is identical", async () => {

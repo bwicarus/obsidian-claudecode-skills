@@ -95,8 +95,8 @@ PDF `reader.js` 也是生成物，唯一源码在 `_server_deploy/static/pdf/rea
 - 整卡长按选择导出 `anki-card-context/1`；同 ID 的所有投影同步高亮，整卡覆盖内部段落时
   registry 只导出最大节点。
 - 标准 Anki 流程是先正面、再翻面、再四级评分；不能重新变成正反面同时显示。
-- 评分和 Anki 添加使用 at-most-once receipt；如果外部 AnkiConnect 结果未知，保持 pending，
-  禁止盲重试。未来需要 revlog 对账恢复。
+- Reader 卡片确认与评分先写本地卡仓；Pi 只同步，ReaderPC AnkiConnect 与 AnkiMobile 只是
+  可选导出。外部添加使用 at-most-once receipt；结果未知保持 pending，禁止盲重试。
 
 详细行为和历史决定见 [复习合同](card-review-integration.md) 与
 [Anki 卡片格式](anki-card-format.md)。

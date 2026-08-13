@@ -722,6 +722,11 @@ internal static class DirectBridgeSelfTest
             configPath,
             origin,
             checks).ConfigureAwait(false);
+        await CheckLocalAnkiProtocolAsync(
+            root,
+            configPath,
+            origin,
+            checks).ConfigureAwait(false);
         await CheckSnapshotMcpModeAsync(
             root,
             origin,
@@ -846,6 +851,311 @@ internal static class DirectBridgeSelfTest
                 allowlistMessage),
             "direct-dictionary-fallback-supports-contextual-custom-phrases-fail-closed",
             checks);
+    }
+
+    private static async Task CheckLocalAnkiProtocolAsync(
+        string root,
+        string configPath,
+        string origin,
+        ICollection<string> checks)
+    {
+        string runtime = System.IO.Path.Combine(root, "local-anki");
+        Directory.CreateDirectory(runtime);
+        ReaderLocalAnkiRegistry registry = new(
+            System.IO.Path.Combine(
+                runtime,
+                ReaderLocalAnkiRegistry.RegistryFileName),
+            () => DateTimeOffset.Parse("2026-08-13T04:00:00Z"));
+        JsonObject draftPayload = new()
+        {
+            ["draftId"] = "draft-" + new string('a', 32),
+            ["file"] = "library/local-book.pdf",
+            ["target"] = new JsonObject
+            {
+                ["kind"] = "pdf",
+                ["page"] = 7,
+            },
+            ["sourceText"] = "原始页面文字",
+            ["cards"] = new JsonArray
+            {
+                new JsonObject
+                {
+                    ["type"] = "basic",
+                    ["front"] = "原问题",
+                    ["back"] = "原答案",
+                },
+            },
+        };
+        ReaderRealtimeOutputRequest draft =
+            ReaderRealtimeOutputProtocol.Create(
+                "output-local-anki-draft",
+                "source-local-anki",
+                3,
+                "library/local-book.pdf",
+                JsonValue.Create(7)!,
+                "anki-draft",
+                draftPayload);
+        await registry.RegisterDraftAsync(
+            draft,
+            CancellationToken.None).ConfigureAwait(false);
+        await registry.RegisterDraftAsync(
+            draft,
+            CancellationToken.None).ConfigureAwait(false);
+
+        FakeReaderAnkiConnectClient anki = new();
+        ReaderLocalAnkiWriter writer = new(registry, anki);
+        DirectBridgeConfigStore store = new(configPath);
+        _ = store.SetContextDeliveryMode(
+            DirectContextDeliveryMode.SnapshotMcp);
+        await using DirectBridgeCoordinator coordinator = new(
+            store,
+            new FakeDirectAppLauncher(),
+            new FakeDirectMediaAdapter());
+        DirectBridgeProtocolSession session = new(
+            "connection-local-anki",
+            origin,
+            store,
+            coordinator,
+            localAnkiWriter: writer);
+        List<object> events = [];
+        List<byte[]> frames = [];
+        _ = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "hello",
+                    requestId = "request-local-anki-hello",
+                    protocolVersion = 3,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "hello");
+        string sessionId = "session-" + DirectBase64Url.Encode(
+            Enumerable.Repeat((byte)0xA7, 16).ToArray());
+        object beforeOpenRequest = new
+        {
+            contract = DirectBridgeContract.Contract,
+            type = "anki-add-cards-local",
+            requestId = "request-local-anki-before-context",
+            sessionId,
+            sourceInstanceId = "source-local-anki",
+            draftId = "draft-" + new string('a', 32),
+            cardIndex = 0,
+            aid = "fc_" + new string('f', 32),
+            card = new
+            {
+                type = "basic",
+                front = "Q",
+                back = "A",
+            },
+        };
+        JsonElement beforeOpen = await SendAsync(
+            session,
+            beforeOpenRequest,
+            events,
+            frames).ConfigureAwait(false);
+        _ = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "context-open",
+                    requestId = "request-local-anki-context",
+                    sessionId,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "context-open");
+        JsonElement wrongSession = await SendAsync(
+            session,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "anki-add-cards-local",
+                requestId = "request-local-anki-wrong-session",
+                sessionId = "session-" + DirectBase64Url.Encode(
+                    Enumerable.Repeat((byte)0xA8, 16).ToArray()),
+                sourceInstanceId = "source-local-anki",
+                draftId = "draft-" + new string('a', 32),
+                cardIndex = 0,
+                aid = "fc_" + new string('f', 32),
+                card = new
+                {
+                    type = "basic",
+                    front = "Q",
+                    back = "A",
+                },
+            },
+            events,
+            frames).ConfigureAwait(false);
+        object addRequest = new
+        {
+            contract = DirectBridgeContract.Contract,
+            type = "anki-add-cards-local",
+            requestId = "request-local-anki-add",
+            sessionId,
+            sourceInstanceId = "source-local-anki",
+            draftId = "draft-" + new string('a', 32),
+            cardIndex = 0,
+            aid = "fc_" + new string('b', 32),
+            card = new
+            {
+                type = "basic",
+                front = "用户编辑后的问题",
+                back = "用户编辑后的答案",
+            },
+        };
+        JsonElement first = RequireSuccess(
+            await SendAsync(session, addRequest, events, frames)
+                .ConfigureAwait(false),
+            "anki-add-cards-local");
+        JsonElement replay = RequireSuccess(
+            await SendAsync(session, addRequest, events, frames)
+                .ConfigureAwait(false),
+            "anki-add-cards-local");
+        JsonElement mismatch = await SendAsync(
+            session,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "anki-add-cards-local",
+                requestId = "request-local-anki-mismatch",
+                sessionId,
+                sourceInstanceId = "source-wrong",
+                draftId = "draft-" + new string('a', 32),
+                cardIndex = 0,
+                aid = "fc_" + new string('c', 32),
+                card = new
+                {
+                    type = "basic",
+                    front = "Q",
+                    back = "A",
+                },
+            },
+            events,
+            frames).ConfigureAwait(false);
+        FakeReaderAnkiConnectClient preflightAnki = new()
+        {
+            FailAction = "modelNames",
+            Failure = ReaderAnkiConnectFailure.Unreachable,
+        };
+        ReaderLocalAnkiWriter preflightWriter = new(
+            registry, preflightAnki);
+        string preflightAid = "fc_" + new string('d', 32);
+        ReaderLocalAnkiException preflightFailure;
+        try
+        {
+            _ = await preflightWriter.AddAsync(
+                "source-local-anki",
+                "draft-" + new string('a', 32),
+                0,
+                preflightAid,
+                new JsonObject
+                {
+                    ["type"] = "basic",
+                    ["front"] = "预检失败可重试",
+                    ["back"] = "A",
+                },
+                CancellationToken.None).ConfigureAwait(false);
+            throw new InvalidOperationException(
+                "pre-add failure unexpectedly succeeded");
+        }
+        catch (ReaderLocalAnkiException exception)
+        {
+            preflightFailure = exception;
+        }
+        ReaderLocalAnkiReceipt? preflightReceipt =
+            await registry.ReadReceiptAsync(
+                preflightAid,
+                CancellationToken.None).ConfigureAwait(false);
+        FakeReaderAnkiConnectClient unknownAnki = new()
+        {
+            FailAction = "addNote",
+            Failure = ReaderAnkiConnectFailure.Unreachable,
+        };
+        ReaderLocalAnkiWriter unknownWriter = new(registry, unknownAnki);
+        string unknownAid = "fc_" + new string('e', 32);
+        ReaderLocalAnkiException unknownFailure;
+        try
+        {
+            _ = await unknownWriter.AddAsync(
+                "source-local-anki",
+                "draft-" + new string('a', 32),
+                0,
+                unknownAid,
+                new JsonObject
+                {
+                    ["type"] = "basic",
+                    ["front"] = "不可逆阶段失败",
+                    ["back"] = "A",
+                },
+                CancellationToken.None).ConfigureAwait(false);
+            throw new InvalidOperationException(
+                "addNote outcome unexpectedly succeeded");
+        }
+        catch (ReaderLocalAnkiException exception)
+        {
+            unknownFailure = exception;
+        }
+        ReaderLocalAnkiReceipt? unknownReceipt =
+            await registry.ReadReceiptAsync(
+                unknownAid,
+                CancellationToken.None).ConfigureAwait(false);
+        string allowlistMessage = JsonSerializer.Serialize(addRequest);
+        string localAnkiEvidence = JsonSerializer.Serialize(new
+        {
+            first = first.GetRawText(),
+            replay = replay.GetRawText(),
+            mismatch = mismatch.GetRawText(),
+            preflightFailure = preflightFailure.Code,
+            preflightReceipt = preflightReceipt?.State,
+            unknownFailure = unknownFailure.Code,
+            unknownReceipt = unknownReceipt?.State,
+            anki.AddNoteCount,
+            anki.LastAddedFront,
+            anki.Actions,
+        });
+        bool localAnkiOk =
+            first.GetProperty("ok").GetBoolean()
+            && !beforeOpen.GetProperty("ok").GetBoolean()
+            && beforeOpen.GetProperty("error").GetProperty("code")
+                .GetString() == "BW_READER_ANKI_CONTEXT_ONLY_REQUIRED"
+            && !wrongSession.GetProperty("ok").GetBoolean()
+            && wrongSession.GetProperty("error").GetProperty("code")
+                .GetString()
+                == "BW_READER_CONTEXT_SNAPSHOT_SESSION_MISMATCH"
+            && first.GetProperty("added").GetInt32() == 1
+            && !first.GetProperty("dedup").GetBoolean()
+            && first.GetProperty("note_ids")[0].GetInt64() == 101
+            && replay.GetProperty("dedup").GetBoolean()
+            && anki.AddNoteCount == 1
+            && anki.LastAddedFront == "用户编辑后的问题"
+            && !mismatch.GetProperty("ok").GetBoolean()
+            && mismatch.GetProperty("error").GetProperty("code")
+                .GetString() == "BW_READER_ANKI_DRAFT_SOURCE_MISMATCH"
+            && preflightFailure.Code
+                == "BW_READER_ANKI_CONNECT_UNREACHABLE"
+            && preflightFailure.Retryable
+            && preflightReceipt is null
+            && unknownFailure.Code
+                == "BW_READER_ANKI_ADD_OUTCOME_UNKNOWN"
+            && unknownReceipt?.State == "pending"
+            && DirectBridgeServer.IsContextEndpointActionAllowed(
+                allowlistMessage);
+        if (!localAnkiOk)
+        {
+            throw new InvalidOperationException(
+                "local Anki evidence: " + localAnkiEvidence);
+        }
+        Require(
+            localAnkiOk,
+            "direct-local-anki-is-provenance-bound-editable-and-idempotent",
+            checks);
+        _ = store.SetContextDeliveryMode(
+            DirectContextDeliveryMode.LegacyInject);
     }
 
     private static async Task CheckExplicitStopFailureAsync(
@@ -10294,6 +10604,89 @@ internal static class DirectBridgeSelfTest
                 CodexCliReaderDictionaryFallback.Source,
                 Cached: false));
         }
+    }
+
+    private sealed class FakeReaderAnkiConnectClient :
+        IReaderAnkiConnectClient
+    {
+        private bool _noteAdded;
+
+        internal int AddNoteCount { get; private set; }
+
+        internal string? LastAddedFront { get; private set; }
+
+        internal List<string> Actions { get; } = [];
+
+        internal string? FailAction { get; set; }
+
+        internal ReaderAnkiConnectFailure Failure {
+            get;
+            set;
+        } = ReaderAnkiConnectFailure.Unreachable;
+
+        public Task<JsonNode?> CallAsync(
+            string action,
+            JsonObject parameters,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            Actions.Add(action);
+            if (action == FailAction)
+            {
+                throw new ReaderAnkiConnectException(
+                    Failure,
+                    "fake Anki failure");
+            }
+            JsonNode? result = action switch
+            {
+                "findNotes" => _noteAdded
+                    ? new JsonArray(101)
+                    : new JsonArray(),
+                "modelNames" => new JsonArray("基础的", "填空题"),
+                "modelFieldNames" => parameters["modelName"]
+                    ?.GetValue<string>() == "填空题"
+                        ? new JsonArray("文字", "附加")
+                        : new JsonArray("正面", "背面"),
+                "createDeck" => JsonValue.Create(1),
+                "addNote" => AddNote(parameters),
+                "findCards" => new JsonArray(201),
+                "changeDeck" => JsonValue.Create(true),
+                "notesInfo" => new JsonArray(new JsonObject
+                {
+                    ["noteId"] = 101,
+                    ["tags"] = new JsonArray(
+                        "pdf-snippets",
+                        "card-lab",
+                        "bw_reader_aid_fc_" + new string('b', 32),
+                        _fingerprintTag),
+                }),
+                _ => throw new ReaderAnkiConnectException(
+                    ReaderAnkiConnectFailure.RemoteError,
+                    "unsupported fake action"),
+            };
+            return Task.FromResult<JsonNode?>(result);
+        }
+
+        private JsonNode AddNote(JsonObject parameters)
+        {
+            AddNoteCount++;
+            JsonObject note = parameters["note"]?.AsObject()
+                ?? throw new InvalidOperationException("missing note");
+            JsonObject fields = note["fields"]?.AsObject()
+                ?? throw new InvalidOperationException("missing fields");
+            LastAddedFront = fields.First().Value?.GetValue<string>();
+            _noteAdded = true;
+            _fingerprintTag = note["tags"]?.AsArray()
+                .Select(value => value?.GetValue<string>() ?? "")
+                .First(value => value.StartsWith(
+                    "bw_reader_payload_", StringComparison.Ordinal))
+                ?? throw new InvalidOperationException(
+                    "missing fingerprint tag");
+            return JsonValue.Create(101)!;
+        }
+
+        private string _fingerprintTag = "";
+
     }
 
     private sealed class FakeDirectMediaAdapter : IDirectMediaAdapter

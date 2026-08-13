@@ -27,6 +27,8 @@ from reader_sync_relay import (  # noqa: E402
 ACCOUNT_NAMESPACE = "acct-v1-" + "a" * 64
 REGISTRY_DIGEST = (
     "sync-v3:record-parent-state/1|"
+    "card-entities:explicit:0:1|"
+    "card-states:explicit:0:1|"
     "user-settings:explicit:0:1|"
     "vocabulary-state:explicit:0:1"
 )
@@ -342,7 +344,7 @@ const registryDigest = {json.dumps(REGISTRY_DIGEST)};
 const deviceFamilyId = {json.dumps(DEVICE_FAMILY_ID)};
 const deviceId = 'integration-causal-migration-device';
 const legacyDigest =
-  'sync-v2:user-settings:explicit:0:1|vocabulary-state:explicit:0:1';
+  'sync-v2:card-entities:explicit:0:1|card-states:explicit:0:1|user-settings:explicit:0:1|vocabulary-state:explicit:0:1';
 
 async function authenticatedRequest(path, body) {{
   const response = await fetch(origin + path, {{

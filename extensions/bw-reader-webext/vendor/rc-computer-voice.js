@@ -70,6 +70,7 @@ if (window.__bwPwaProviderOnly) return;
   var CONTEXT_WAIT_DENIED_RETRY_MS = 1000;
   var NATIVE_CONTEXT_REQUEST_TIMEOUT_MS = 8000;
   var DICTIONARY_LOOKUP_TIMEOUT_MS = 70000;
+  var LOCAL_ANKI_ADD_TIMEOUT_MS = 45000;
   var CONTEXT_EVENT_TYPES = Object.freeze({
     "page.context": true,
     focus: true,
@@ -3294,6 +3295,41 @@ if (window.__bwPwaProviderOnly) return;
     });
   }
 
+  function acquireFreshAnkiChannel() {
+    // The Anki mutation must not share the voice or snapshot receive loop, but
+    // unlike the read-only dictionary action it is admitted only after the
+    // dedicated socket has explicitly entered context-only phase.
+    var session = randomSession();
+    var channel = null;
+    return openDirect({ endpoint: CONTEXT_ENDPOINT }).then(function (opened) {
+      channel = opened;
+      return channel.request("context-open", {
+        sessionId: session.id,
+      });
+    }).then(function (value) {
+      exactObject(value, ["sessionId", "state", "mode"], [], "本机 Anki CONTEXT-OPEN 响应");
+      if (value.sessionId !== session.id ||
+          value.state !== "context-only" ||
+          value.mode !== CONTEXT_DELIVERY_SNAPSHOT) {
+        throw directError(
+          "本机 Anki 上下文连接响应无效",
+          "BW_READER_LOCAL_ANKI_CONTEXT_INVALID",
+          false
+        );
+      }
+      return {
+        channel: channel,
+        owned: true,
+        sessionId: session.id,
+      };
+    }).catch(function (error) {
+      var closed = channel ? channel.close() : Promise.resolve();
+      return Promise.resolve(closed).catch(function () {}).then(function () {
+        throw error;
+      });
+    });
+  }
+
   function lookupJapaneseFallback(value) {
     var request;
     try {
@@ -3312,6 +3348,143 @@ if (window.__bwPwaProviderOnly) return;
     }).then(function (result) {
       return normalizeDictionaryLookupResult(result, request);
     }).finally(function () {
+      if (lease && lease.owned) return lease.channel.close();
+    });
+  }
+
+  function normalizeLocalAnkiCard(value) {
+    if (!plainObject(value)) {
+      throw directError(
+        "本机 Anki 卡片无效",
+        "BW_READER_LOCAL_ANKI_SCHEMA",
+        false
+      );
+    }
+    var type = safeText(value.type, "Anki card type", 16, false);
+    var card;
+    if (type === "basic") {
+      exactObject(value, ["type", "front", "back"], [], "本机 Anki 基础卡");
+      card = {
+        type: type,
+        front: safeText(value.front, "Anki front", 8000, false),
+        back: safeText(value.back, "Anki back", 8000, true),
+      };
+      if (/\0/.test(card.front + card.back)) {
+        throw directError("本机 Anki 卡片包含 NUL", "BW_READER_LOCAL_ANKI_SCHEMA", false);
+      }
+      return card;
+    }
+    if (type === "cloze") {
+      exactObject(value, ["type", "cloze"], [], "本机 Anki 填空卡");
+      card = {
+        type: type,
+        cloze: safeText(value.cloze, "Anki cloze", 8000, false),
+      };
+      if (/\0/.test(card.cloze)) {
+        throw directError("本机 Anki 卡片包含 NUL", "BW_READER_LOCAL_ANKI_SCHEMA", false);
+      }
+      return card;
+    }
+    throw directError(
+      "本机 Anki 卡片类型无效",
+      "BW_READER_LOCAL_ANKI_SCHEMA",
+      false
+    );
+  }
+
+  function normalizeLocalAnkiAddRequest(value) {
+    exactObject(
+      value,
+      ["draftId", "sourceInstanceId", "cardIndex", "aid", "card"],
+      [],
+      "本机 Anki 入库请求"
+    );
+    var draftId = safeText(value.draftId, "Anki draftId", 64, false);
+    var aid = safeText(value.aid, "Anki aid", 64, false);
+    if (!/^draft-[a-f0-9]{32}$/.test(draftId) ||
+        !/^fc_[a-f0-9]{32}$/.test(aid) ||
+        !Number.isSafeInteger(value.cardIndex) || value.cardIndex < 0 ||
+        value.cardIndex > 19) {
+      throw directError(
+        "本机 Anki 入库身份无效",
+        "BW_READER_LOCAL_ANKI_SCHEMA",
+        false
+      );
+    }
+    return {
+      draftId: draftId,
+      sourceInstanceId: safeId(
+        value.sourceInstanceId,
+        "Anki sourceInstanceId"
+      ),
+      cardIndex: value.cardIndex,
+      aid: aid,
+      card: normalizeLocalAnkiCard(value.card),
+    };
+  }
+
+  function normalizeLocalAnkiAddResult(value) {
+    exactObject(
+      value,
+      ["ok", "added", "note_ids", "card_ids", "card_ids_by_note"],
+      ["dedup"],
+      "本机 Anki 入库响应"
+    );
+    if (value.ok !== true || !Number.isSafeInteger(value.added) ||
+        value.added < 1 || !Array.isArray(value.note_ids) ||
+        value.note_ids.length !== value.added ||
+        !Array.isArray(value.card_ids) || !plainObject(value.card_ids_by_note) ||
+        (Object.prototype.hasOwnProperty.call(value, "dedup") &&
+          typeof value.dedup !== "boolean")) {
+      throw directError(
+        "本机 Anki 入库响应无效",
+        "BW_READER_LOCAL_ANKI_RESPONSE_INVALID",
+        false
+      );
+    }
+    value.note_ids.forEach(function (id) {
+      if (!Number.isSafeInteger(id) || id <= 0) {
+        throw directError("本机 Anki note id 无效", "BW_READER_LOCAL_ANKI_RESPONSE_INVALID", false);
+      }
+    });
+    value.card_ids.forEach(function (id) {
+      if (!Number.isSafeInteger(id) || id <= 0) {
+        throw directError("本机 Anki card id 无效", "BW_READER_LOCAL_ANKI_RESPONSE_INVALID", false);
+      }
+    });
+    Object.keys(value.card_ids_by_note).forEach(function (noteId) {
+      var ids = value.card_ids_by_note[noteId];
+      if (!/^\d+$/.test(noteId) || !Array.isArray(ids) || ids.some(function (id) {
+        return !Number.isSafeInteger(id) || id <= 0;
+      })) {
+        throw directError("本机 Anki 卡号映射无效", "BW_READER_LOCAL_ANKI_RESPONSE_INVALID", false);
+      }
+    });
+    return value;
+  }
+
+  function addLocalAnkiCard(value) {
+    var request;
+    try {
+      request = normalizeLocalAnkiAddRequest(value);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    var lease = null;
+    return acquireFreshAnkiChannel().catch(function (error) {
+      throw directError(
+        "本机 Anki 通道不可用:" + String(error && error.message || error || "?").slice(0, 240),
+        "BW_READER_LOCAL_ANKI_CHANNEL_UNAVAILABLE",
+        true
+      );
+    }).then(function (acquired) {
+      lease = acquired;
+      return acquired.channel.request(
+        "anki-add-cards-local",
+        Object.assign({ sessionId: acquired.sessionId }, request),
+        LOCAL_ANKI_ADD_TIMEOUT_MS
+      );
+    }).then(normalizeLocalAnkiAddResult).finally(function () {
       if (lease && lease.owned) return lease.channel.close();
     });
   }
@@ -7210,6 +7383,7 @@ if (window.__bwPwaProviderOnly) return;
     loadTargetApp: loadComputerTarget,
     setTargetApp: setComputerTarget,
     lookupJapaneseFallback: lookupJapaneseFallback,
+    addLocalAnkiCard: addLocalAnkiCard,
     cancelPreparedGesture: cancelPreparedGesture,
     registerComputerButton: registerComputerButton,
     registerPhoneButton: registerPhoneButton,

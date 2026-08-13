@@ -16,7 +16,7 @@
  * 底座耦合全部走 opts(epub-html.js 在 onPhrase 传):
  *   opts.text         词组文本
  *   opts.rect         选区矩形(viewport,getBoundingClientRect 那种),用于定位
- *   opts.file         FREL,日语词组查 dict-jp 时带(本模块当前 dict-jp 按 word 全局查,file 预留)
+ *   opts.file         FREL,仅供收藏/掌握等兼容投影；词义查询不再自动访问 Pi
  *   opts.langs        本书语言数组(决定英/日分流);EPUB 传 bookLangsArr() 让模块按声明 + 字符判英/日
  *   opts.onSolid()    出结果回调(查询返回后);底座停呼吸转常亮保持
  *   opts.onFav(text, nowFav)        收藏 toggle 成功后回调(底座:收藏→去 mark + 刷新分词/下划线)
@@ -422,6 +422,118 @@
     if (_ctx.onExplain) { try { _ctx.onExplain(_state && _state.text); } catch (_) {} }
   };
 
+  // ── 词组中文释义：App 本地词典优先，未命中后走 ReaderPC 的独立 Codex CLI 通道。
+  // 与 rc-wordpop 的顺序一致；这里直接复用 RC.computerVoice 的公开桥和 runtime 缓存，
+  // 不另造传输。Pi 只保留在用户显式点击“旧版精释”的 host 回调里。
+  function _offlineJapaneseDictionary() {
+    var dictionary = RC.offlineDictionary;
+    return dictionary && dictionary.CONTRACT === 'bw-offline-dictionary/1' &&
+      dictionary.isLocalMode && dictionary.isLocalMode() ? dictionary : null;
+  }
+
+  function _dictionaryFallbackCache() {
+    var runtime = window.__BW_READER_RUNTIME__;
+    var cache = runtime && runtime.dictionaryFallbackCache;
+    return cache && typeof cache.get === 'function' &&
+      typeof cache.put === 'function' ? cache : null;
+  }
+
+  function _dictionaryFallbackDebug(message) {
+    try {
+      if (typeof window.dlog === 'function') {
+        window.dlog('词组释义回退: ' + String(message || '未知状态'));
+      }
+    } catch (_) {}
+  }
+
+  function _dictionaryFallbackRequest(text, context, localResult) {
+    localResult = localResult || {};
+    return {
+      mode: 'meaning',
+      term: String(text || '').slice(0, 256),
+      context: String(context || '').slice(0, 1200),
+      reading: String(localResult.reading || '').slice(0, 256),
+      english: String(localResult.local_zh ? '' :
+        (localResult.definition || localResult.translation || '')).slice(0, 1200)
+    };
+  }
+
+  async function _dictionaryFallbackLookup(request) {
+    var cache = _dictionaryFallbackCache();
+    if (cache) {
+      try {
+        var cached = await cache.get(request);
+        if (cached) return cached;
+      } catch (error) {
+        _dictionaryFallbackDebug('App 本地缓存读取失败 ' +
+          String(error && (error.code || error.message) || ''));
+      }
+    }
+    var bridge = RC.computerVoice;
+    if (!bridge || typeof bridge.lookupJapaneseFallback !== 'function') {
+      var unavailable = new Error('ReaderPC 本机 CLI 释义通道不可用');
+      unavailable.code = 'BW_READER_DICTIONARY_CLI_UNAVAILABLE';
+      throw unavailable;
+    }
+    var result = await bridge.lookupJapaneseFallback(request);
+    if (cache) {
+      try {
+        await cache.put(request, {
+          language: result.language,
+          text: result.text,
+          source: result.source
+        });
+      } catch (error) {
+        _dictionaryFallbackDebug('App 本地缓存写入失败 ' +
+          String(error && (error.code || error.message) || ''));
+      }
+    }
+    return result;
+  }
+
+  async function _lookupPhraseLocalFirst(text, context, isJa) {
+    var localResult = null;
+    if (isJa) {
+      var local = _offlineJapaneseDictionary();
+      if (local) {
+        try {
+          localResult = await local.lookupJapaneseLegacy(text);
+        } catch (error) {
+          _dictionaryFallbackDebug('App 本地词典读取失败 ' +
+            String(error && (error.code || error.message) || ''));
+        }
+      }
+      if (localResult && localResult.ok && localResult.local_zh && localResult.zh) {
+        return {
+          zh: localResult.zh,
+          reading: localResult.reading || '',
+          accent: localResult.accent != null ? localResult.accent : null,
+          source: 'local-jmdict'
+        };
+      }
+    }
+    try {
+      var fallback = await _dictionaryFallbackLookup(
+        _dictionaryFallbackRequest(text, context, localResult)
+      );
+      return {
+        zh: fallback.text || '',
+        reading: localResult && localResult.reading || '',
+        accent: localResult && localResult.accent != null ? localResult.accent : null,
+        source: fallback.source || 'pc-codex-cli',
+        cached: fallback.cached === true
+      };
+    } catch (error) {
+      return {
+        zh: '',
+        reading: localResult && localResult.reading || '',
+        accent: localResult && localResult.accent != null ? localResult.accent : null,
+        error: String(error && error.message || 'ReaderPC 本机 CLI 释义失败').slice(0, 500),
+        errorCode: String(error && error.code || 'BW_READER_DICTIONARY_CLI_FAILED').slice(0, 160)
+      };
+    }
+  }
+
   // ── 入口:RC.phrasepop.show(opts)。逐字照搬 15-phrase-wordpop.js::showPhrasePopover 的内容/字段/端点 ──
   // opts.noDisplay=true → 只 fetch + 回调 onResult/onSolid,不弹框(查询期:词组高亮呼吸,结果存起来等点击才弹)。
   // opts.result={zh,reading,accent} → 用已存结果,不重新 fetch,秒开(点常亮高亮时用)。
@@ -462,8 +574,13 @@
       pop.innerHTML = '<div style="padding:14px;color:#8a9bb4">⏳ 处理词组…</div>';
       _position(pop, opts.rect);
     }
-    var render = function (zh, reading, accent) {
-      try { if (opts.onResult) opts.onResult({ text: text, zh: zh, reading: reading, accent: accent }); } catch (_) {}   // 用局部 opts(闭包)不读共享 _ctx:并发查询/点击不会互相覆盖回调
+    var render = function (result) {
+      result = result || {};
+      var zh = result.zh || '', reading = result.reading || '', accent = result.accent;
+      try { if (opts.onResult) opts.onResult({
+        text: text, zh: zh, reading: reading, accent: accent,
+        source: result.source || '', error: result.error || '', errorCode: result.errorCode || ''
+      }); } catch (_) {}   // 用局部 opts(闭包)不读共享 _ctx:并发查询/点击不会互相覆盖回调
       try { if (opts.onSolid) opts.onSolid(); } catch (_) {}   // 出结果 → 底座停呼吸转常亮保持
       if (noDisplay || !pop) return;   // 查询模式:只回调,不渲染/不弹框
       _state.reading = reading;
@@ -473,57 +590,34 @@
       pop.innerHTML =
         '<div class="wp-head"><span class="wp-word">' + esc(text) + '</span>' + phon +
         (reading ? '<button class="wp-speak" onclick="_epPhraseSpeak()" title="发音">🔊</button>' : '') + '</div>' +
-        '<div class="wp-def">' + (zh ? esc(zh) : '<span style="color:#8a9bb4">（无翻译）</span>') + '</div>' +
+        '<div class="wp-def">' + (zh ? esc(zh) :
+          '<span style="color:#c66">ReaderPC 中文释义失败：' + esc(result.error || '本机 CLI 释义通道不可用') + '</span>') + '</div>' +
+        (result.source === 'pc-codex-cli'
+          ? '<div style="margin:-4px 12px 8px;color:#6f7e96;font-size:10.5px">电脑 ReaderPC · Codex CLI 句境释义' + (result.cached ? ' · 本地缓存' : '') + '</div>'
+          : result.source === 'local-jmdict'
+            ? '<div style="margin:-4px 12px 8px;color:#6f7e96;font-size:10.5px">App 本地中文词典</div>' : '') +
         '<div class="wp-actions">' +
         '<button id="ep-phrase-fav-btn" class="' + (fav ? 'wp-anki' : '') + '" onclick="_epPhraseFav(this)">' +
         (fav ? '★ 已收藏' : '☆ 收藏为词组') + '</button>' +
         '<button id="ep-phrase-master-btn" class="' + (_state.mastered ? 'wp-anki' : '') + '" onclick="_epPhraseMaster(this)" title="' + (_state.mastered ? '点击取消掌握（恢复词组下划线）' : '标记掌握 100（该词组不再标生词下划线）') + '">' +
         (_state.mastered ? '✓ 已掌握 100' : '☆ 标记掌握') + '</button>' +
-        '<button onclick="_epPhraseExplain()" title="让 Pi AI 结合当前句境详细解释">Pi AI 精释</button>' +
+        '<button onclick="_epPhraseExplain()" title="仅在你主动选择后使用 Pi 旧版服务">改用 Pi 旧版精释</button>' +
         '</div>';
       _position(pop, opts.rect);   // 内容定型后再夹一次进视口
     };
     if (opts.result) {   // 点击模式:用已存结果秒开,不重新 fetch
       var r = opts.result;
-      render(r.zh || '', r.reading || '', (r.accent != null ? r.accent : null));
-      return;
+      if (r.zh) {
+        render({
+          zh: r.zh || '', reading: r.reading || '',
+          accent: r.accent != null ? r.accent : null,
+          source: r.source || ''
+        });
+        return;
+      }
     }
     (async function () {
-      var zh = '', reading = '', accent = null;
-      try {
-        if (isJa) {
-          var offline = RC.offlineDictionary;
-          var useLocal = offline && offline.CONTRACT === 'bw-offline-dictionary/1' &&
-            offline.isLocalMode && offline.isLocalMode();
-          var dj;
-          if (useLocal) {
-            dj = await offline.lookupJapaneseLegacy(text);
-          } else {
-            // Legacy PWA fallback; App and extension never use this automatic Pi path.
-            // @interaction dictionary.jp.read
-            dj = await (await fetch('/pdf/api/dict-jp?word=' + encodeURIComponent(text) +
-              '&file=' + encodeURIComponent(opts.file || '') +
-              '&page=' + encodeURIComponent(opts.page || 0) +
-              '&langs=' + encodeURIComponent((opts.langs || []).join(',')) +
-              '&context=' + encodeURIComponent(context))).json();
-          }
-          if (dj && dj.ok) {
-            zh = dj.zh || dj.translation || dj.definition || '';
-            reading = dj.reading || '';
-            accent = (dj.accent != null ? dj.accent : null);
-          }
-        }
-        // 日语词组只接受结构化日中词典结果。词典后端失败时显示“无翻译”，不再把无句境
-        // Google 结果（例如把 取り寄せ 译成“命令”）当作权威答案并写入长期缓存。
-        if (!zh && !isJa) {
-          // @interaction ai.translate.compute
-          var dt = await (await fetch('/pdf/api/translate-sentence', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ text: text })
-          })).json();
-          if (dt && dt.ok) zh = dt.zh || '';
-        }
-      } catch (_) {}
-      render(zh, reading, accent);
+      render(await _lookupPhraseLocalFirst(text, context, isJa));
     })();
   }
 

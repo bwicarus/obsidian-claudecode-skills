@@ -1045,15 +1045,37 @@ def _task_anki(tid, params, ctx, base):
             _f = (c.get("cloze") or c.get("front") or "").strip().replace("\n", " ")[:60]
             _b = (c.get("back") or "").strip().replace("\n", " ")[:40]
             _brief.append(_f + ((" → " + _b) if _b else ""))
-        _cidg = ""
-        try:
-            _cidg = _pdf_mod()._entity_reg_cards(cards, {"src": link[:120]})   # 统一编号协议:全局卡编号
-        except Exception:
-            pass
+        result = {"kind": "anki", "deferred": True, "n": len(cards), "cards_brief": _brief,
+                  "deck": out.get("anki_deck") or "QA", "cards": cards, "source_ref": link[:4096]}
+        selected = str(ctx.get("selection") or "").strip()
+        if selected:
+            if ctx.get("current_section_idx") is not None:
+                try:
+                    section = int(ctx.get("current_section_idx"))
+                except (TypeError, ValueError):
+                    section = -1
+                if section >= 0:
+                    result["source_highlight"] = {
+                        "file": str(ctx.get("file_rel") or ""),
+                        "target": {"kind": "epub", "section": section},
+                        "text": selected[:8000], "color": "green",
+                        "note": "Reader 卡片来源",
+                    }
+            else:
+                try:
+                    page = int(ctx.get("page") or 0)
+                except (TypeError, ValueError):
+                    page = 0
+                if page >= 1:
+                    result["source_highlight"] = {
+                        "file": str(ctx.get("file_rel") or ""),
+                        "target": {"kind": "pdf", "page": page},
+                        "text": selected[:8000], "color": "green",
+                        "note": "Reader 卡片来源",
+                    }
         _vtask_set(tid, status="done", speak=f"做好了{len(cards)}张卡片草稿，在卡片上确认后入库",
                    steps=list(_steps),
-                   result={"kind": "anki", "deferred": True, "id": _cidg, "n": len(cards), "cards_brief": _brief,
-                           "deck": out.get("anki_deck") or "QA", "cards": cards})
+                   result=result)
     elif out.get("ok"):
         _vtask_set(tid, status="error", error="AI 没生成卡片(内容可能不适合制卡)")
     else:

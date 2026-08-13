@@ -32,6 +32,467 @@
     remove: (key) => localStoreCall('BW_LOCAL_STORAGE_REMOVE', key)
   });
 
+  // Reader 卡片实体不能落到任意网页 origin 的 IndexedDB。这里在共享
+  // card-repository 加载前提供一个 DataStore/1 形状的窄门面；真正的 Vault、
+  // 已验证账户和 namespace 全部只存在于扩展后台。content script 运行在浏览器
+  // 隔离世界，本门面不经 DOM/window.postMessage 暴露给页面主世界。
+  function createCardStoreTransport(environment) {
+    const targetWindow = environment.window;
+    const runtime = environment.chrome.runtime;
+    const protocol = 'bw-card-store/1';
+    const portName = 'bw-card-store';
+    const collections = new Set(['card-entities', 'card-states']);
+    const operations = Object.freeze([
+      'batch', 'get', 'list', 'put', 'remove', 'subscribe'
+    ]);
+    const requestTimeoutMs = Math.max(
+      1000,
+      Number(environment.requestTimeoutMs) || 15_000
+    );
+    const pending = new Map();
+    const listeners = new Map();
+    const remoteSubscriptions = new Set();
+    const pendingSubscriptions = new Set();
+    let subscriptionBarrier = Promise.resolve();
+    let port = null;
+    let readyPromise = null;
+    let readyResolve = null;
+    let readyReject = null;
+    let readyTimer = null;
+    let reconnectTimer = null;
+    let reconnectAttempt = 0;
+    let restorePromise = null;
+    let generation = 1;
+    let sequence = 0;
+    let staleCause = null;
+
+    const error = (message, code, details) => Object.assign(
+      new Error(String(message || '扩展卡片仓库不可用')),
+      {
+        code: String(code || 'BW_CARD_STORE_TRANSPORT'),
+        details: details || null
+      }
+    );
+    const collection = (value) => {
+      value = String(value || '');
+      if (!collections.has(value)) {
+        throw error(
+          '卡片仓库 collection 不在白名单',
+          'BW_CARD_STORE_COLLECTION'
+        );
+      }
+      return value;
+    };
+    const cloneValue = (value) => {
+      if (typeof targetWindow.structuredClone === 'function') {
+        return targetWindow.structuredClone(value);
+      }
+      return value == null ? value : JSON.parse(JSON.stringify(value));
+    };
+    const mutationIdsFor = (operation, args) => {
+      const ids = [];
+      const seen = new Set();
+      const add = (value) => {
+        if (typeof value !== 'string' || !value || seen.has(value)) return;
+        seen.add(value);
+        ids.push(value);
+      };
+      if (operation === 'put' || operation === 'remove') {
+        add(args?.options?.mutationId);
+      } else if (operation === 'batch') {
+        for (const mutation of args?.mutations || []) {
+          add(mutation?.options?.mutationId);
+        }
+      }
+      return ids;
+    };
+    const withUnknownOutcome = (cause, request) => {
+      if (!request?.mutationIds?.length) return cause;
+      const details = Object.assign({}, cause?.details || {}, {
+        outcomeUnknown: true,
+        mutationIds: request.mutationIds.slice()
+      });
+      if (request.mutationIds.length === 1) {
+        details.mutationId = request.mutationIds[0];
+      }
+      return error(cause?.message, cause?.code, details);
+    };
+    const clearReadyTimer = () => {
+      if (readyTimer == null) return;
+      targetWindow.clearTimeout(readyTimer);
+      readyTimer = null;
+    };
+    const clearReconnectTimer = () => {
+      if (reconnectTimer == null) return;
+      targetWindow.clearTimeout(reconnectTimer);
+      reconnectTimer = null;
+    };
+    const closePort = () => {
+      const previous = port;
+      port = null;
+      try { previous?.disconnect(); } catch (_) {}
+    };
+    const announce = (type, reason, cause) => {
+      const event = Object.freeze({
+        type,
+        code: String(cause?.code || 'BW_CARD_STORE_DISCONNECTED'),
+        reason: String(reason || 'disconnected'),
+        error: cause
+      });
+      for (const entries of listeners.values()) {
+        for (const listener of [...entries]) {
+          try { listener(event); } catch (_) {}
+        }
+      }
+    };
+    let scheduleReconnect = () => {};
+    const invalidate = (reason, cause, permanent = true) => {
+      if (permanent && staleCause) return;
+      const source = cause || error(
+        '扩展卡片仓库连接已经失效',
+        'BW_CARD_STORE_DISCONNECTED'
+      );
+      const invalidation = error(
+          source.message,
+          permanent ? 'BW_CARD_STORE_STALE' : String(
+            source.code || 'BW_CARD_STORE_DISCONNECTED'
+          ),
+          Object.assign({}, source.details || {}, {
+            reason: String(reason || source.code || 'disconnected'),
+            sourceCode: String(source.code || '')
+          })
+        );
+      if (permanent) staleCause = invalidation;
+      generation += 1;
+      clearReadyTimer();
+      if (permanent) clearReconnectTimer();
+      const rejectReady = readyReject;
+      readyPromise = null;
+      readyResolve = null;
+      readyReject = null;
+      if (rejectReady) rejectReady(source);
+      for (const request of pending.values()) {
+        targetWindow.clearTimeout(request.timer);
+        request.reject(withUnknownOutcome(invalidation, request));
+      }
+      pending.clear();
+      remoteSubscriptions.clear();
+      pendingSubscriptions.clear();
+      restorePromise = null;
+      subscriptionBarrier = Promise.resolve();
+      closePort();
+      announce(permanent ? 'INVALIDATED' : 'RECONNECTING', reason, invalidation);
+      if (!permanent) scheduleReconnect();
+    };
+    const validReady = (message) => {
+      const advertisedCollections = message?.capabilities?.collections;
+      const advertisedOperations = message?.capabilities?.operations;
+      return JSON.stringify(Object.keys(message || {}).sort()) ===
+          JSON.stringify(['capabilities', 'protocol', 'type']) &&
+        JSON.stringify(Object.keys(message?.capabilities || {}).sort()) ===
+          JSON.stringify(['collections', 'operations']) &&
+        Array.isArray(advertisedCollections) &&
+        Array.isArray(advertisedOperations) &&
+        JSON.stringify(advertisedCollections) ===
+          JSON.stringify([...collections].sort()) &&
+        JSON.stringify(advertisedOperations) === JSON.stringify(operations);
+    };
+    const connect = () => {
+      if (staleCause) return Promise.reject(staleCause);
+      if (readyPromise) return readyPromise;
+      let candidate;
+      try { candidate = runtime.connect({ name: portName }); }
+      catch (cause) {
+        const failure = error(
+          cause?.message || '无法连接扩展卡片仓库',
+          'BW_CARD_STORE_DISCONNECTED'
+        );
+        invalidate('connect-failed', failure, false);
+        return Promise.reject(failure);
+      }
+      const capturedGeneration = generation;
+      port = candidate;
+      readyPromise = new Promise((resolve, reject) => {
+        readyResolve = resolve;
+        readyReject = reject;
+      });
+      readyTimer = targetWindow.setTimeout(() => {
+        if (port !== candidate || generation !== capturedGeneration) return;
+        invalidate('ready-timeout', error(
+          '等待扩展卡片仓库 READY 超时',
+          'BW_CARD_STORE_READY_TIMEOUT'
+        ), false);
+      }, requestTimeoutMs);
+      candidate.onMessage.addListener((message) => {
+        if (
+          port !== candidate ||
+          generation !== capturedGeneration ||
+          !message ||
+          message.protocol !== protocol
+        ) return;
+        if (message.type === 'READY') {
+          if (!validReady(message)) {
+            invalidate('ready-contract-mismatch', error(
+              '扩展卡片仓库能力合同不匹配',
+              'BW_CARD_STORE_READY_CONTRACT'
+            ));
+            return;
+          }
+          clearReadyTimer();
+          clearReconnectTimer();
+          reconnectAttempt = 0;
+          const resolveReady = readyResolve;
+          readyResolve = null;
+          readyReject = null;
+          if (resolveReady) resolveReady(true);
+          return;
+        }
+        if (message.type === 'CHANGE') {
+          const change = message.data;
+          const name = String(
+            change?.collection || change?.record?.collection || ''
+          );
+          if (!collections.has(name)) {
+            invalidate('change-collection-mismatch', error(
+              '扩展卡片仓库返回了越权 collection',
+              'BW_CARD_STORE_COLLECTION'
+            ));
+            return;
+          }
+          for (const listener of [...(listeners.get(name) || [])]) {
+            try { listener(change); } catch (_) {}
+          }
+          return;
+        }
+        if (message.type === 'INVALIDATED' || message.type === 'ERROR') {
+          const reason = String(message.reason || message.type.toLowerCase());
+          const recoverable = message.type === 'INVALIDATED' && [
+            'account-context-changed',
+            'BW_ACCOUNT_CONTEXT_STALE',
+            'BW_ACCOUNT_CONTEXT_UNAVAILABLE'
+          ].includes(reason);
+          invalidate(
+            reason,
+            error(message.error || message.reason, message.code, message.details),
+            !recoverable
+          );
+          return;
+        }
+        if (message.type !== 'RESULT' || !message.id) return;
+        const id = String(message.id);
+        const request = pending.get(id);
+        if (!request) return;
+        pending.delete(id);
+        targetWindow.clearTimeout(request.timer);
+        if (request.generation !== generation) {
+          request.reject(withUnknownOutcome(staleCause || error(
+            '卡片仓库结果属于已失效连接',
+            'BW_CARD_STORE_STALE'
+          ), request));
+        } else if (message.ok === true) {
+          request.resolve(message.data);
+        } else {
+          request.reject(error(message.error, message.code, message.details));
+        }
+      });
+      candidate.onDisconnect.addListener(() => {
+        if (port !== candidate || generation !== capturedGeneration) return;
+        const runtimeError = runtime.lastError;
+        invalidate('port-disconnected', error(
+          runtimeError?.message || '扩展卡片仓库连接已断开',
+          'BW_CARD_STORE_DISCONNECTED'
+        ), false);
+      });
+      return readyPromise;
+    };
+    const sendCall = (operation, args) => {
+      if (staleCause) return Promise.reject(staleCause);
+      const capturedGeneration = generation;
+      if (!port) {
+        return Promise.reject(error(
+          '扩展卡片仓库连接尚未建立',
+          'BW_CARD_STORE_DISCONNECTED'
+        ));
+      }
+      return new Promise((resolve, reject) => {
+        const id = `card-store-call-${capturedGeneration}-${++sequence}`;
+        const request = {
+          generation: capturedGeneration,
+          mutationIds: mutationIdsFor(operation, args),
+          resolve,
+          reject,
+          timer: null
+        };
+        request.timer = targetWindow.setTimeout(() => {
+          if (pending.get(id) !== request) return;
+          pending.delete(id);
+          const failure = error(
+            '等待扩展卡片仓库响应超时',
+            'BW_CARD_STORE_RESULT_TIMEOUT'
+          );
+          request.reject(withUnknownOutcome(failure, request));
+          invalidate('result-timeout', failure, false);
+        }, requestTimeoutMs);
+        pending.set(id, request);
+        try {
+          port.postMessage({
+            protocol,
+            type: 'CALL',
+            id,
+            operation,
+            args: cloneValue(args || {})
+          });
+        } catch (cause) {
+          pending.delete(id);
+          targetWindow.clearTimeout(request.timer);
+          const failure = error(
+            cause?.message || '扩展卡片仓库连接已断开',
+            'BW_CARD_STORE_DISCONNECTED'
+          );
+          request.reject(withUnknownOutcome(failure, request));
+          invalidate('post-message-failed', failure, false);
+        }
+      });
+    };
+    const restoreSubscriptions = () => {
+      if (staleCause) return Promise.reject(staleCause);
+      if (restorePromise) return restorePromise;
+      const names = [...listeners.entries()]
+        .filter(([, entries]) => entries.size > 0)
+        .map(([name]) => name)
+        .filter((name) => !remoteSubscriptions.has(name));
+      if (!names.length) return Promise.resolve();
+      restorePromise = names.reduce((chain, name) => chain.then(() => {
+        if (!listeners.get(name)?.size || remoteSubscriptions.has(name)) return;
+        pendingSubscriptions.add(name);
+        return sendCall('subscribe', {
+          query: { collection: name }
+        }).then(() => {
+          remoteSubscriptions.add(name);
+        }).finally(() => {
+          pendingSubscriptions.delete(name);
+        });
+      }), Promise.resolve()).finally(() => {
+        restorePromise = null;
+      });
+      return restorePromise;
+    };
+    const callRaw = (operation, args, skipRestore = false) => connect()
+      .then(() => (
+        skipRestore || operation === 'subscribe'
+          ? undefined
+          : restoreSubscriptions()
+      ))
+      .then(() => sendCall(operation, args));
+    scheduleReconnect = () => {
+      if (staleCause || reconnectTimer != null) return;
+      const hasListeners = [...listeners.values()].some((entries) => entries.size);
+      if (!hasListeners) return;
+      const base = Math.max(10, Number(environment.reconnectBaseMs) || 50);
+      const delay = Math.min(1000, base * (2 ** Math.min(reconnectAttempt, 4)));
+      reconnectAttempt += 1;
+      reconnectTimer = targetWindow.setTimeout(() => {
+        reconnectTimer = null;
+        connect().then(() => restoreSubscriptions()).then(() => {
+          reconnectAttempt = 0;
+          announce('RECONNECTED', 'port-reconnected', null);
+        }).catch(() => {
+          scheduleReconnect();
+        });
+      }, delay);
+      if (typeof reconnectTimer?.unref === 'function') reconnectTimer.unref();
+    };
+    const call = (operation, args) => subscriptionBarrier.then(() => {
+      if (staleCause) throw staleCause;
+      return callRaw(operation, args);
+    });
+    const api = {
+      contract: 'data-store/1',
+      get: (name, id, options) => call('get', {
+        collection: collection(name),
+        id: String(id || ''),
+        options: cloneValue(options || {})
+      }),
+      list: (name, query) => call('list', {
+        collection: collection(name),
+        query: cloneValue(query || {})
+      }),
+      put: (name, value, options) => call('put', {
+        collection: collection(name),
+        value: cloneValue(value),
+        options: cloneValue(options || {})
+      }),
+      remove: (name, id, options) => call('remove', {
+        collection: collection(name),
+        id: String(id || ''),
+        options: cloneValue(options || {})
+      }),
+      batch: (mutations) => call('batch', {
+        mutations: cloneValue(mutations || [])
+      }),
+      subscribe(query, listener) {
+        const name = collection(query?.collection);
+        if (typeof listener !== 'function') {
+          throw error(
+            '卡片仓库 listener 必须是函数',
+            'BW_CARD_STORE_LISTENER'
+          );
+        }
+        let entries = listeners.get(name);
+        if (!entries) {
+          entries = new Set();
+          listeners.set(name, entries);
+        }
+        entries.add(listener);
+        if (
+          !remoteSubscriptions.has(name) &&
+          !pendingSubscriptions.has(name)
+        ) {
+          pendingSubscriptions.add(name);
+          subscriptionBarrier = subscriptionBarrier.then(() => callRaw(
+            'subscribe',
+            { query: { collection: name } },
+            true
+          )).then(
+            () => { remoteSubscriptions.add(name); },
+            (cause) => {
+              if (![
+                'BW_CARD_STORE_DISCONNECTED',
+                'BW_CARD_STORE_READY_TIMEOUT',
+                'BW_CARD_STORE_RESULT_TIMEOUT'
+              ].includes(String(cause?.code || ''))) {
+                invalidate('subscribe-failed', cause, true);
+              }
+              return undefined;
+            }
+          ).finally(() => {
+            pendingSubscriptions.delete(name);
+          });
+        }
+        return () => {
+          entries.delete(listener);
+          if (!entries.size) listeners.delete(name);
+        };
+      }
+    };
+    return Object.freeze(api);
+  }
+  const cardStoreTransport = createCardStoreTransport({ window, chrome });
+  const extensionReaderRuntime = (
+    window.__BW_READER_RUNTIME__ &&
+    typeof window.__BW_READER_RUNTIME__ === 'object'
+  ) ? window.__BW_READER_RUNTIME__ : {};
+  if (Object.prototype.hasOwnProperty.call(extensionReaderRuntime, 'storage')) {
+    throw new Error('扩展卡片仓库 storage 已被其它运行时占用');
+  }
+  Object.defineProperty(extensionReaderRuntime, 'storage', {
+    configurable: false,
+    enumerable: true,
+    writable: false,
+    value: () => cardStoreTransport
+  });
+  window.__BW_READER_RUNTIME__ = extensionReaderRuntime;
+
   const nativeBridgeEncoder = new TextEncoder();
   const nativeBridgeTrimUtf8 = (value, maximumBytes) => {
     const text = String(value || '');

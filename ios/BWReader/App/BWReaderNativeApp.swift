@@ -176,7 +176,9 @@ private struct ReaderRootView: View {
             await restoreInitialLocalBook()
         }
         .onOpenURL { url in
-            if let route = ReaderNativeActivityRoute.parse(url) {
+            if reader.handleAnkiMobileCallback(url) {
+                return
+            } else if let route = ReaderNativeActivityRoute.parse(url) {
                 handleNativeFeatureRoute(route)
             } else {
                 nativeCommandReceiver.receive(url)

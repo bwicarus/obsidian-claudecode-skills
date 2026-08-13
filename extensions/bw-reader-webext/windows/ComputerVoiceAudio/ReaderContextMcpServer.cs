@@ -33,6 +33,7 @@ internal sealed class ReaderContextMcpServer
     private readonly string _startedAt;
     private readonly ReaderDocumentCorpusStore _documentCorpus;
     private readonly ReaderContextReadLedger _readLedger;
+    private readonly ReaderLocalAnkiRegistry _localAnkiRegistry;
     private readonly ReaderCapabilityCatalog _capabilityCatalog;
     private readonly HashSet<string> _unscopedDocumentReads =
         new(StringComparer.Ordinal);
@@ -115,6 +116,11 @@ internal sealed class ReaderContextMcpServer
             Path.Combine(
                 directory,
                 ReaderContextReadLedger.LedgerFileName),
+            _utcNow);
+        _localAnkiRegistry = new ReaderLocalAnkiRegistry(
+            Path.Combine(
+                directory,
+                ReaderLocalAnkiRegistry.RegistryFileName),
             _utcNow);
     }
 
@@ -1255,6 +1261,25 @@ internal sealed class ReaderContextMcpServer
                     id,
                     "BW_READER_REALTIME_OUTPUT_SOURCE_OFFLINE",
                     "当前 Reader 页面仍可读取缓存，但实时来源已离线；请重新打开或唤醒该页面后再试。",
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+        }
+
+        if (request.Kind == "anki-draft")
+        {
+            try
+            {
+                await _localAnkiRegistry.RegisterDraftAsync(
+                    request,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (ReaderLocalAnkiException exception)
+            {
+                await WriteReaderOutputToolErrorAsync(
+                    id,
+                    exception.Code,
+                    exception.Message,
                     cancellationToken).ConfigureAwait(false);
                 return;
             }

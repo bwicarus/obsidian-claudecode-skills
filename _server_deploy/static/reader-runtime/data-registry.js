@@ -15,6 +15,11 @@
   var CONTRACT = 'data-registry/1';
   var SYNC_CONTRACT = 'sync-v3';
   var SYNC_CHANGE_CONTRACT = 'record-parent-state/1';
+  var SYNC_REGISTRY_MIGRATION_CONTRACT = 'sync-registry-migration/1';
+  var PREVIOUS_CARDLESS_SYNC_DIGESTS = [
+    'sync-v2:user-settings:explicit:0:1|vocabulary-state:explicit:0:1',
+    'sync-v3:record-parent-state/1|user-settings:explicit:0:1|vocabulary-state:explicit:0:1'
+  ];
   var COLLECTIONS = {
     'user-settings': {
       scope: 'global', status: 'ready', provider: true, sync: true,
@@ -78,12 +83,16 @@
       reason: '必须先绑定稳定 threadId'
     },
     'card-entities': {
-      scope: 'global', status: 'pending', provider: false,
-      reason: '现有卡片已用 cid/gid 保持唯一身份和跨宿主共享；待把 card_、c_、fcg_ 等有效旧编号无损映射到统一实体记录'
+      scope: 'global', status: 'ready', provider: true, sync: true,
+      recordSchema: 1,
+      conflictPolicy: 'explicit',
+      reason: 'Reader 本地卡片仓库的稳定实体；id/cid/gid 使用同一语义身份，旧服务端卡片不在此门禁中伪装成已迁移'
     },
     'card-states': {
-      scope: 'global', status: 'pending', provider: false,
-      reason: '状态已按 cid/gid 跨宿主联动，但现有数组状态与 entity PATCH 尚未映射到带 revision/tombstone 的统一记录'
+      scope: 'global', status: 'ready', provider: true, sync: true,
+      recordSchema: 1,
+      conflictPolicy: 'explicit',
+      reason: 'Reader 本地卡片仓库的可变学习状态；每条记录带 revision、墓碑与显式父状态，旧 entity PATCH 不视为已迁移'
     },
     'card-favorites': {
       scope: 'global', status: 'pending', provider: false,
@@ -324,6 +333,18 @@
       ].join(':');
     }).join('|');
   }
+  function syncCheckpointMigration(fromDigest) {
+    fromDigest = String(fromDigest || '');
+    var toDigest = syncDigest();
+    if (fromDigest === toDigest) return null;
+    if (PREVIOUS_CARDLESS_SYNC_DIGESTS.indexOf(fromDigest) < 0) return null;
+    return {
+      contract: SYNC_REGISTRY_MIGRATION_CONTRACT,
+      from: fromDigest,
+      to: toDigest,
+      strategy: 'reset-checkpoint'
+    };
+  }
   function isProviderCollection(name) {
     var item = COLLECTIONS[String(name || '')];
     return !!(
@@ -352,6 +373,7 @@
     CONTRACT: CONTRACT,
     SYNC_CONTRACT: SYNC_CONTRACT,
     SYNC_CHANGE_CONTRACT: SYNC_CHANGE_CONTRACT,
+    SYNC_REGISTRY_MIGRATION_CONTRACT: SYNC_REGISTRY_MIGRATION_CONTRACT,
     collections: function () { return clone(COLLECTIONS); },
     collection: collection,
     scopes: scopes,
@@ -361,6 +383,7 @@
     isSyncCollection: isSyncCollection,
     syncDescriptor: syncDescriptor,
     syncDigest: syncDigest,
+    syncCheckpointMigration: syncCheckpointMigration,
     settingMigrations: function () { return clone(SETTING_MIGRATIONS); }
   };
 });

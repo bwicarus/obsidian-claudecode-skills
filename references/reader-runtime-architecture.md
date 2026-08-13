@@ -184,10 +184,16 @@ python3 extensions/bw-reader-webext/build.py
 - 通用标注元数据和同步 journal。
 
 服务器只中转带稳定 ID、revision、mutation ID、tombstone 和父业务状态证明的变化，
-不自动裁决冲突。当前真正进入跨设备 `sync-v3` 白名单的只有 `user-settings` 与
-`vocabulary-state`；翻译/查询等派生缓存只保留在本机，不能因为 DataRegistry 中存在
-collection 就自动上传。无扩展真书 PWA 使用自己的本地 fallback；逐 collection 接线前，
-旧数据源继续保留。
+不自动裁决冲突。当前进入跨设备 `sync-v3` 白名单的是 `card-entities`、`card-states`、
+`user-settings` 与 `vocabulary-state`；翻译/查询等派生缓存只保留在本机，不能因为
+DataRegistry 中存在 collection 就自动上传。无扩展真书 PWA 使用自己的本地 fallback；
+逐 collection 接线前，旧数据源继续保留。
+
+Reader 卡库以本机 `card-entities` + `card-states` 为权威：一个 `card_*` gid 表示整批
+cards，批内 index 永不因删除而重编号；草稿、编辑、确认、复习评分都先原子写本地，成功后
+才能显示为已保存或已评分。Pi 只同步这两个 collection 并兼容导入旧 registry；Pi/ReaderPC
+AnkiConnect 与 AnkiMobile 都是可选投影，外部 note/card ID 只能写入对应 index 的 receipt，
+不得成为 Reader 卡片身份或阻断本机复习。
 
 ### iOS App 的可选 Obsidian 笔记线路
 
@@ -308,6 +314,10 @@ document store 保存；两端都只通过对应 `DocumentHost` 解释书籍坐�
 - API token 保存在扩展后台私有 IndexedDB；内容脚本和页面脚本不能读取明文。
 - 跨站设置由扩展本地 store 统一；进入 PWA 时只补齐缺失值，不用 PWA 旧值覆盖扩展权威。
 - `DataRegistry` 仍是可同步 collection 的唯一白名单；未迁移 collection 继续使用旧读取源。
+- registry 从仅设置/词汇升级到含卡片的代际，只允许 relay 在无活跃 owner 时执行精确的
+  旧摘要→新摘要原子迁移。App 在领取新代 owner 前先分页校验并只导入本机缺失的 Pi 旧卡；
+  本机已存在或已 tombstone 的 gid 绝不被旧 Pi 数据覆盖。checkpoint 绑定 relay 返回的
+  不透明账户摘要，换账户或旧 schema 时从空游标重新核对，但不删除 App 本地仓。
 - 当前线框固定为 `sync-v3` + `record-parent-state/1` + `sync-gateway/2`。客户端、PWA、
   直连 peer 与 HTTP relay 任一版本或 registry digest 不一致时，必须在读写前 fail closed。
 - 每次同步写入携带它实际看到的父业务状态，而不是只带设备本地 revision。远端只有在父状态

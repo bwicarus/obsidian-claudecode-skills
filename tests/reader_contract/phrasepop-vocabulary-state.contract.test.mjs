@@ -342,9 +342,35 @@ test("兼容服务器断网只进入 outbox，不回滚本地词组状态", asyn
   assert.equal(harness.outbox[0][0], "phrase");
 });
 
-test("日语词组把当前句境交给词典，词典失败时不采用无句境机器翻译", async () => {
+test("日语词组本地中文未命中后把当前句境交给 ReaderPC，且不静默访问 Pi", async () => {
   const harness = createHarness();
   const results = [];
+  const lookups = [];
+  harness.sandbox.RC.offlineDictionary = {
+    CONTRACT: "bw-offline-dictionary/1",
+    isLocalMode() { return true; },
+    async lookupJapaneseLegacy() {
+      return {
+        ok: true,
+        local_zh: false,
+        reading: "とりよせ",
+        definition: "order; obtain",
+      };
+    },
+  };
+  harness.sandbox.RC.computerVoice = {
+    async lookupJapaneseFallback(request) {
+      lookups.push(request);
+      return {
+        term: request.term,
+        mode: request.mode,
+        language: "zh-CN",
+        text: "调货；订购",
+        source: "pc-codex-cli",
+        cached: false,
+      };
+    },
+  };
   harness.sandbox.__bwSelectionController = {
     current() {
       return {
@@ -361,26 +387,46 @@ test("日语词组把当前句境交给词典，词典失败时不采用无句�
     onResult(value) { results.push(value); },
   });
 
-  const dictionary = harness.requests.find((item) =>
-    item.method === "GET" && item.url.startsWith("/pdf/api/dict-jp?"));
-  assert.ok(dictionary);
-  assert.equal(
-    new URL(dictionary.url, "https://reader.invalid").searchParams.get("context"),
+  await flush();
+  assert.equal(lookups.length, 1);
+  assert.equal(lookups[0].context,
     "メインをお取り寄せの牛肉にしたりするわよね。",
   );
-
-  harness.settle(dictionary, { ok: false, error: "dictionary unavailable" });
-  await flush();
+  assert.equal(lookups[0].english, "order; obtain");
   assert.equal(
-    harness.requests.some((item) => item.url === "/pdf/api/translate-sentence"),
+    harness.requests.some((item) =>
+      item.url.startsWith("/pdf/api/dict-jp?") ||
+      item.url === "/pdf/api/translate-sentence"),
     false,
   );
-  assert.equal(results[0].zh, "");
+  assert.equal(results[0].zh, "调货；订购");
+  assert.equal(results[0].reading, "とりよせ");
+  assert.equal(results[0].source, "pc-codex-cli");
 });
 
-test("日语结构化词典命中时不调用句子翻译", async () => {
+test("App 本地中文词典命中时不调用 ReaderPC 或 Pi", async () => {
   const harness = createHarness();
   const results = [];
+  let computerCalls = 0;
+  harness.sandbox.RC.offlineDictionary = {
+    CONTRACT: "bw-offline-dictionary/1",
+    isLocalMode() { return true; },
+    async lookupJapaneseLegacy() {
+      return {
+        ok: true,
+        local_zh: true,
+        zh: "订购；调货",
+        reading: "とりよせ",
+        accent: 0,
+      };
+    },
+  };
+  harness.sandbox.RC.computerVoice = {
+    async lookupJapaneseFallback() {
+      computerCalls += 1;
+      throw new Error("must not run");
+    },
+  };
   harness.sandbox.RC.phrasepop.show({
     text: "取り寄せ",
     context: "商品を取り寄せる。",
@@ -389,22 +435,46 @@ test("日语结构化词典命中时不调用句子翻译", async () => {
     onResult(value) { results.push(value); },
   });
 
-  const dictionary = harness.requests.find((item) =>
-    item.method === "GET" && item.url.startsWith("/pdf/api/dict-jp?"));
-  harness.settle(dictionary, {
-    ok: true,
-    zh: "订购；调货",
-    reading: "とりよせ",
-    accent: 0,
-  });
   await flush();
 
+  assert.equal(computerCalls, 0);
   assert.equal(
-    harness.requests.some((item) => item.url === "/pdf/api/translate-sentence"),
+    harness.requests.some((item) =>
+      item.url.startsWith("/pdf/api/dict-jp?") ||
+      item.url === "/pdf/api/translate-sentence"),
     false,
   );
   assert.equal(results[0].text, "取り寄せ");
   assert.equal(results[0].zh, "订购；调货");
   assert.equal(results[0].reading, "とりよせ");
   assert.equal(results[0].accent, 0);
+  assert.equal(results[0].source, "local-jmdict");
+});
+
+test("扩展和自定义词组直接走 ReaderPC；不可用时明确失败且 Pi 仅保留显式按钮", async () => {
+  const harness = createHarness();
+  const results = [];
+  harness.sandbox.RC.offlineDictionary = {
+    CONTRACT: "bw-offline-dictionary/1",
+    isLocalMode() { return false; },
+  };
+
+  harness.sandbox.RC.phrasepop.show({
+    text: "それどころではない",
+    context: "今はそれどころではない。",
+    langs: ["ja"],
+    onResult(value) { results.push(value); },
+  });
+  await flush();
+
+  assert.equal(results[0].zh, "");
+  assert.equal(results[0].errorCode, "BW_READER_DICTIONARY_CLI_UNAVAILABLE");
+  assert.match(harness.pop.innerHTML, /ReaderPC 中文释义失败/);
+  assert.match(harness.pop.innerHTML, /改用 Pi 旧版精释/);
+  assert.equal(
+    harness.requests.some((item) =>
+      item.url.startsWith("/pdf/api/dict-jp?") ||
+      item.url === "/pdf/api/translate-sentence"),
+    false,
+  );
 });

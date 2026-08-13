@@ -2719,6 +2719,7 @@ def _bg_task(kind, params, ctx):
             for k in (
                 "file_rel",
                 "page",
+                "current_section_idx",
                 "book_name",
                 "selection",
                 "_uid",
@@ -2854,7 +2855,6 @@ def _t_make_anki(args, ctx):
                                                  image_url=img or None, defer_add=True, requirement=fullreq)
     except Exception as e:
         return {"error": "制卡失败:" + str(e)[:120]}
-    _mark_source_highlight(ctx, "#b9f6ca")   # 双向回链:原文留绿色高亮"这段做过卡"
     if not out.get("ok"):
         return {"error": out.get("error") or out.get("anki_error") or "制卡失败"}
     cards = out.get("anki_cards") or []
@@ -2867,13 +2867,33 @@ def _t_make_anki(args, ctx):
         _f = (c.get("cloze") or c.get("front") or "").strip().replace("\n", " ")[:60]
         _b = (c.get("back") or "").strip().replace("\n", " ")[:40]
         brief.append(_f + ((" → " + _b) if _b else ""))
-    cid_g = ""
-    try:   # 统一编号协议(用户设计):卡片批发全局编号 card_xxx——所有宿主同编号取同一状态;AI 之后可 #编号 引用(前端渲活卡)
-        cid_g = _pdf()._entity_reg_cards(cards, {"src": src, "req": (req or "")[:120]})
-    except Exception:
-        pass
-    return {"ok": True, "id": cid_g, "n": n, "cards_brief": brief, "cards": cards, "deferred": True,
-            "speak": f"做好了{n}张卡片草稿，你在卡片上确认后入库", "note": f"生成了{n}张卡片草稿(编号 {cid_g},等你确认入库;之后可用 #{cid_g} 引用这批卡)"}
+    # 本地卡仓是权威源。服务端只返回纯草稿与来源意图；前端先把同一批卡
+    # 持久化到 Reader 本地仓，成功后才显示，并把源高亮作为可选投影执行。
+    # 这里若先写 Pi registry/高亮，本地落库失败时会留下幽灵卡和幽灵高亮。
+    result = {
+        "ok": True,
+        "n": n,
+        "cards_brief": brief,
+        "cards": cards,
+        "deferred": True,
+        "source_ref": src,
+        "speak": f"做好了{n}张卡片草稿，你在卡片上确认后保存到 Reader 卡库",
+        "note": f"生成了{n}张卡片草稿，等你确认后保存到 Reader 本地卡库",
+    }
+    selected = (ctx.get("selection") or "").strip()
+    try:
+        page = int(ctx.get("page") or 0)
+    except (TypeError, ValueError):
+        page = 0
+    if selected and page >= 1:
+        result["source_highlight"] = {
+            "file": ctx.get("file_rel") or "",
+            "target": {"kind": "pdf", "page": page},
+            "text": selected[:8000],
+            "color": "green",
+            "note": "Reader 卡片来源",
+        }
+    return result
 
 
 def _t_make_note(args, ctx):
@@ -10573,7 +10593,9 @@ def assistant_rtc_usage():
 def _sanitize_ext_parts(parts) -> list:
     """校验并规范化外部写入的 parts。不合规**抛 ValueError**(带具体字段),不再静默丢弃。
 
-    契约之外本函数只做两件服务端语义:制卡条目规范化、gid 由服务端签发(外部不得伪造他人编号)。
+    契约之外本函数只做两件服务端语义:制卡条目规范化、为这次展示签发稳定落库的
+    Reader gid。这里只签发身份，不再提前写 Pi 旧卡仓；App/扩展先把草稿写入本地
+    Reader 卡库，之后 Pi 同步只是副本。
     """
     import reader_card_contract as _CC
     out = _CC.validate_parts(parts)
@@ -10592,11 +10614,9 @@ def _sanitize_ext_parts(parts) -> list:
                 norm.append(item)
             clean["cards"] = norm
             clean["draft"] = bool(clean.get("draft", True))
-            try:   # gid 服务端签发:接上既有实体状态机(入库/评分/刷新恢复)
-                import pdf_reader as _P
-                clean["gid"] = _P._entity_reg_cards(norm, {})
-            except Exception:
-                clean.pop("gid", None)
+            # gid 随 assistant turn 一起持久化，刷新后仍是同一批卡；这里不能调用
+            # _entity_reg_cards，否则前端本地入库失败时 Pi 已先产生不可回滚副作用。
+            clean["gid"] = "card_" + __import__("uuid").uuid4().hex
         clean["seq"] = i
     return out
 

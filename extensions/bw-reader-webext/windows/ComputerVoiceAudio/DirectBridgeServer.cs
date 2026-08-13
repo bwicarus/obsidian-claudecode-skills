@@ -54,6 +54,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         _readerRealtimeOutputRpcServer;
     private readonly DirectCodexVoiceControl _codexVoiceControl;
     private readonly CodexCliReaderDictionaryFallback _dictionaryFallback;
+    private readonly ReaderLocalAnkiRegistry _localAnkiRegistry;
+    private readonly ReaderLocalAnkiWriter _localAnkiWriter;
     private readonly object _runtimeStateGate = new();
     private string _runtimeState = "starting";
     private bool _runtimeReaderConnected;
@@ -79,6 +81,12 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             Path.Combine(runtimeDirectory, "codex-voice-keepalive.json"),
             appLauncher);
         _dictionaryFallback = new CodexCliReaderDictionaryFallback();
+        _localAnkiRegistry = new ReaderLocalAnkiRegistry(
+            Path.Combine(
+                runtimeDirectory,
+                ReaderLocalAnkiRegistry.RegistryFileName));
+        _localAnkiWriter = new ReaderLocalAnkiWriter(
+            _localAnkiRegistry);
         _coordinator = new DirectBridgeCoordinator(
             configStore,
             appLauncher,
@@ -1004,7 +1012,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                         retryable: true);
                 _readerRealtimeOutputBroker.Accept(lease, ack);
             },
-            dictionaryFallback: _dictionaryFallback);
+            dictionaryFallback: _dictionaryFallback,
+            localAnkiWriter: _localAnkiWriter);
 
         _contextConnectionHealth.Connected();
         try
@@ -1110,6 +1119,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 "active-reading" or
                 "context-clear" or
                 "dictionary-lookup" or
+                "anki-add-cards-local" or
                 "log" or
                 ReaderVisualDeliveryProtocol.RegisterType or
                 ReaderVisualDeliveryProtocol.ChunkType or
@@ -1139,7 +1149,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             _configStore,
             _coordinator,
             codexVoiceControl: _codexVoiceControl,
-            dictionaryFallback: _dictionaryFallback);
+            dictionaryFallback: _dictionaryFallback,
+            localAnkiWriter: _localAnkiWriter);
         Task<DirectClientMessage?>? prefetchedReceiveTask = null;
 
         while (

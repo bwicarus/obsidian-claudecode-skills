@@ -18,6 +18,7 @@ import hashlib
 import contextvars
 import threading
 import json
+import math
 import os
 import re
 import statistics
@@ -1012,6 +1013,8 @@ _EPUB_CACHE_ASSETS = (
     "reader-runtime/data-store.js",
     "reader-runtime/indexeddb-store.js",
     "reader-runtime/data-registry.js",
+    "reader-runtime/card-repository.js",
+    "reader-runtime/anki-mobile-export.js",
     "reader-runtime/sync-owner-lease.js",
     "reader-runtime/sync-gateway.js",
     "reader-runtime/server-sync-transport.js",
@@ -1074,6 +1077,8 @@ _PDF_SHARED_CACHE_ASSETS = (
     "reader-runtime/data-store.js",
     "reader-runtime/indexeddb-store.js",
     "reader-runtime/data-registry.js",
+    "reader-runtime/card-repository.js",
+    "reader-runtime/anki-mobile-export.js",
     "reader-runtime/sync-owner-lease.js",
     "reader-runtime/sync-gateway.js",
     "reader-runtime/server-sync-transport.js",
@@ -10577,6 +10582,38 @@ _ASSET_DIR = CLAUDE_DIR / "state" / "assets"
 _ASSET_REG_PATH = _ASSET_DIR / "registry.json"
 _ASSET_LOCK = __import__("threading").Lock()
 
+_CARD_BOOTSTRAP_CONTRACT = "reader-card-repository-bootstrap/1"
+_CARD_BOOTSTRAP_DEFAULT_LIMIT = 50
+_CARD_BOOTSTRAP_MAX_LIMIT = 100
+_CARD_BOOTSTRAP_MAX_RESPONSE_BYTES = 1_000_000
+_CARD_BOOTSTRAP_MAX_CURSOR_BYTES = 512
+_CARD_BOOTSTRAP_ENTRY_FIELDS = {
+    "kind",
+    "data",
+    "states",
+    "source_ref",
+    "req",
+}
+_CARD_BOOTSTRAP_META_BLOCKED_KEYS = {
+    "access_token",
+    "authorization",
+    "cache_path",
+    "content_length",
+    "content_type",
+    "cookie",
+    "cookies",
+    "download_url",
+    "file_path",
+    "local",
+    "local_path",
+    "password",
+    "proxy_url",
+    "refresh_token",
+    "secret",
+    "token",
+    "url",
+}
+
 
 def _asset_dir(identity=None) -> Path:
     return _reader_sidecar_path("assets", identity=identity)
@@ -10605,6 +10642,159 @@ def _asset_save(d: dict, identity=None):
         d,
         indent=1,
     )
+
+
+def _card_bootstrap_clone_json(value, *, filter_meta=False, depth=0):
+    """Copy one bounded JSON value without leaking transport credentials.
+
+    The registry is JSON on disk, but this explicit copier also rejects NaN,
+    non-string object keys and pathological nesting.  Metadata is the only
+    surface where transport-only fields are filtered; cards and review state
+    remain byte-for-byte JSON-equivalent for the one-time import.
+    """
+    if depth > 32:
+        raise ValueError("card registry JSON is too deeply nested")
+    if value is None or isinstance(value, (str, bool, int)):
+        return value
+    if isinstance(value, float):
+        if not math.isfinite(value):
+            raise ValueError("card registry JSON contains a non-finite number")
+        return value
+    if isinstance(value, list):
+        return [
+            _card_bootstrap_clone_json(
+                item,
+                filter_meta=filter_meta,
+                depth=depth + 1,
+            )
+            for item in value
+        ]
+    if isinstance(value, dict):
+        copied = {}
+        for key in sorted(value):
+            if not isinstance(key, str):
+                raise ValueError("card registry JSON contains a non-string key")
+            normalized = key.strip().lower().replace("-", "_")
+            if filter_meta and normalized in _CARD_BOOTSTRAP_META_BLOCKED_KEYS:
+                continue
+            copied[key] = _card_bootstrap_clone_json(
+                value[key],
+                filter_meta=filter_meta,
+                depth=depth + 1,
+            )
+        return copied
+    raise ValueError("card registry contains a non-JSON value")
+
+
+def _card_bootstrap_item(aid, entry):
+    if (
+        not isinstance(aid, str)
+        or not re.fullmatch(r"card_[a-f0-9]{4,12}", aid)
+        or not isinstance(entry, dict)
+        or entry.get("kind") != "cards"
+        or not isinstance(entry.get("data"), list)
+        or not isinstance(entry.get("states", {}), dict)
+    ):
+        raise ValueError("invalid card registry entry")
+    source_ref = entry.get("source_ref")
+    if source_ref in (None, ""):
+        source_ref = entry.get("src", "")
+    requirement = entry.get("req", "")
+    if not isinstance(source_ref, str) or not isinstance(requirement, str):
+        raise ValueError("invalid card source metadata")
+    metadata = {}
+    for key in sorted(entry):
+        normalized = str(key).strip().lower().replace("-", "_")
+        if (
+            key in _CARD_BOOTSTRAP_ENTRY_FIELDS
+            or normalized in _CARD_BOOTSTRAP_META_BLOCKED_KEYS
+        ):
+            continue
+        metadata[key] = _card_bootstrap_clone_json(
+            entry[key],
+            filter_meta=True,
+        )
+    return {
+        "id": aid,
+        "cards": _card_bootstrap_clone_json(entry["data"]),
+        "states": _card_bootstrap_clone_json(entry.get("states", {})),
+        "source_ref": source_ref,
+        "req": requirement,
+        "meta": metadata,
+    }
+
+
+def _card_bootstrap_json_bytes(value) -> bytes:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+
+
+def _card_bootstrap_digest(items) -> str:
+    digest = hashlib.sha256()
+    digest.update(_CARD_BOOTSTRAP_CONTRACT.encode("ascii"))
+    digest.update(b"\0")
+    digest.update(_card_bootstrap_json_bytes(items))
+    return digest.hexdigest()
+
+
+def _card_bootstrap_cursor_encode(after_id: str, digest: str) -> str:
+    raw = _card_bootstrap_json_bytes({
+        "after": after_id,
+        "digest": digest,
+        "v": 1,
+    })
+    return base64.urlsafe_b64encode(raw).decode("ascii").rstrip("=")
+
+
+def _card_bootstrap_cursor_decode(raw_cursor: str):
+    if (
+        not isinstance(raw_cursor, str)
+        or not raw_cursor
+        or len(raw_cursor.encode("utf-8")) > _CARD_BOOTSTRAP_MAX_CURSOR_BYTES
+        or not re.fullmatch(r"[A-Za-z0-9_-]+", raw_cursor)
+    ):
+        raise ValueError("invalid cursor")
+    encoded = raw_cursor.encode("ascii")
+    padding = b"=" * ((4 - len(encoded) % 4) % 4)
+    try:
+        decoded = base64.b64decode(
+            encoded + padding,
+            altchars=b"-_",
+            validate=True,
+        )
+        value = json.loads(decoded.decode("utf-8"))
+    except (binascii.Error, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise ValueError("invalid cursor") from error
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"after", "digest", "v"}
+        or type(value.get("v")) is not int
+        or value.get("v") != 1
+        or not isinstance(value.get("after"), str)
+        or not re.fullmatch(r"card_[a-f0-9]{4,12}", value["after"])
+        or not isinstance(value.get("digest"), str)
+        or not re.fullmatch(r"[a-f0-9]{64}", value["digest"])
+        or _card_bootstrap_cursor_encode(
+            value["after"],
+            value["digest"],
+        ) != raw_cursor
+    ):
+        raise ValueError("invalid cursor")
+    return value
+
+
+def _card_bootstrap_response(payload, status=200):
+    body = _card_bootstrap_json_bytes(payload)
+    response = Response(body, status=status, mimetype="application/json")
+    response.headers["Cache-Control"] = "private, no-store"
+    response.headers["Vary"] = "Authorization, Cookie"
+    response.headers["X-Content-Type-Options"] = "nosniff"
+    return response
 
 
 def _asset_reg(kind: str, url: str, meta: dict | None = None) -> str:
@@ -10734,6 +10924,139 @@ def pdf_api_asset(aid):
             )
         return _asset_response_headers(redirect(e["url"], code=302))
     return jsonify({"ok": False}), 404
+
+
+@bp.route("/api/card-repository/bootstrap", methods=["GET"])
+def pdf_api_card_repository_bootstrap():
+    """Export this account's legacy Reader cards for one local-first import.
+
+    The endpoint is deliberately read-only.  A cursor binds continuation to
+    the digest of the complete sorted card snapshot, so a concurrent registry
+    change is reported instead of silently mixing two generations.
+    """
+    allowed_args = {"cursor", "limit"}
+    if set(request.args) - allowed_args or any(
+        len(request.args.getlist(key)) > 1 for key in allowed_args
+    ):
+        return _card_bootstrap_response({
+            "ok": False,
+            "code": "bad_request",
+            "error": "invalid card bootstrap query",
+        }, 400)
+
+    raw_limit = request.args.get("limit")
+    if raw_limit is None:
+        limit = _CARD_BOOTSTRAP_DEFAULT_LIMIT
+    elif (
+        not re.fullmatch(r"[1-9][0-9]{0,2}", raw_limit)
+        or int(raw_limit) > _CARD_BOOTSTRAP_MAX_LIMIT
+    ):
+        return _card_bootstrap_response({
+            "ok": False,
+            "code": "bad_request",
+            "error": "invalid card bootstrap limit",
+        }, 400)
+    else:
+        limit = int(raw_limit)
+
+    raw_cursor = request.args.get("cursor", "")
+    cursor = None
+    if raw_cursor:
+        try:
+            cursor = _card_bootstrap_cursor_decode(raw_cursor)
+        except ValueError:
+            return _card_bootstrap_response({
+                "ok": False,
+                "code": "bad_request",
+                "error": "invalid card bootstrap cursor",
+            }, 400)
+
+    identity = _reader_storage_identity_current()
+    if identity is None:
+        return _card_bootstrap_response({
+            "ok": False,
+            "code": "authentication_required",
+            "error": "authentication required",
+        }, 401)
+    try:
+        with _ASSET_LOCK, _reader_sidecar_store().lock(
+            identity,
+            "assets-registry",
+        ):
+            registry = _asset_load(identity)
+        items = [
+            _card_bootstrap_item(aid, registry[aid])
+            for aid in sorted(registry)
+            if isinstance(registry.get(aid), dict)
+            and registry[aid].get("kind") == "cards"
+        ]
+        digest = _card_bootstrap_digest(items)
+    except (OSError, TypeError, ValueError, OverflowError):
+        current_app.logger.exception("Reader card bootstrap registry read failed")
+        return _card_bootstrap_response({
+            "ok": False,
+            "code": "invalid_card_registry",
+            "error": "card registry unavailable",
+        }, 500)
+
+    item_ids = [item["id"] for item in items]
+    start = 0
+    if cursor is not None:
+        if cursor["digest"] != digest:
+            return _card_bootstrap_response({
+                "ok": False,
+                "code": "snapshot_changed",
+                "error": "card bootstrap snapshot changed; restart pagination",
+                "contract": _CARD_BOOTSTRAP_CONTRACT,
+                "snapshotDigest": "sha256:" + digest,
+            }, 409)
+        try:
+            start = item_ids.index(cursor["after"]) + 1
+        except ValueError:
+            return _card_bootstrap_response({
+                "ok": False,
+                "code": "bad_request",
+                "error": "card bootstrap cursor does not name this snapshot",
+            }, 400)
+
+    selected = []
+    payload = None
+    for item in items[start:start + limit]:
+        candidate = selected + [item]
+        end = start + len(candidate)
+        complete = end >= len(items)
+        candidate_payload = {
+            "contract": _CARD_BOOTSTRAP_CONTRACT,
+            "items": candidate,
+            "nextCursor": (
+                None
+                if complete
+                else _card_bootstrap_cursor_encode(candidate[-1]["id"], digest)
+            ),
+            "complete": complete,
+            "snapshotDigest": "sha256:" + digest,
+        }
+        if len(_card_bootstrap_json_bytes(candidate_payload)) > _CARD_BOOTSTRAP_MAX_RESPONSE_BYTES:
+            break
+        selected = candidate
+        payload = candidate_payload
+
+    if payload is None:
+        if start < len(items):
+            return _card_bootstrap_response({
+                "ok": False,
+                "code": "card_record_too_large",
+                "error": "one card record exceeds the bootstrap response limit",
+                "id": items[start]["id"],
+            }, 413)
+        payload = {
+            "contract": _CARD_BOOTSTRAP_CONTRACT,
+            "items": [],
+            "nextCursor": None,
+            "complete": True,
+            "snapshotDigest": "sha256:" + digest,
+        }
+    return _card_bootstrap_response(payload)
 
 
 def _entity_reg_cards(

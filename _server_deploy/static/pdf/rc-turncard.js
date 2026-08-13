@@ -85,6 +85,22 @@
 
   // 141:ICON_FLOW 已删 —— 图标随 rc-toolchip 的 flowBtn 一起来(单一来源)。
 
+  function _localCardGid(seed) {
+    // 旧历史可能没有服务端签发的 gid；用轮次+序号生成稳定本地身份，避免每次
+    // 回放都复制一批新卡。四个独立 FNV-1a 段只用于身份，不作为安全摘要。
+    seed = String(seed || 'reader-card');
+    var hex = '';
+    for (var lane = 0; lane < 4; lane++) {
+      var h = (2166136261 ^ (lane * 2654435761)) >>> 0;
+      for (var i = 0; i < seed.length; i++) {
+        h ^= seed.charCodeAt(i);
+        h = Math.imul(h, 16777619) >>> 0;
+      }
+      hex += h.toString(16).padStart(8, '0');
+    }
+    return 'card_' + hex;
+  }
+
   // ── ★ 唯一渲染器:实时与历史回放都走这里(不变式①)──────────────────────
   function renderPart(t, p) {
     var d = document.createElement('div');
@@ -115,8 +131,29 @@
       try {
         if (!(window.RC && RC.flashcard)) return null;
         var _fcards = p.cards || []; if (!_fcards.length) return null;
-        if (!p.gid) p.gid = 'fcg_tc_' + String(t.tid || 'turn') + '_' + String(p.seq == null ? t.parts.length : p.seq);
-        if (RC.flashcard.renderEntity) {
+        var _cardSeq = p.seq == null ? t.parts.length : p.seq;
+        if (!/^card_[a-f0-9]{4,64}$/.test(String(p.gid || ''))) {
+          p.gid = _localCardGid(String(t.tid || 'turn') + ':' + String(_cardSeq));
+        }
+        if (p.draft && RC.flashcard.presentDraft) {
+          var _turnCardSourceId = 'assistant-turn:' +
+            String(t.tid || 'turn') + ':' + String(_cardSeq);
+          RC.flashcard.presentDraft(_fcards, p.gid, {
+            host: d,
+            entityRegistered: false,
+            repositorySource: {
+              kind: 'assistant-turn',
+              sourceId: _turnCardSourceId,
+              draftId: _turnCardSourceId,
+              tool: 'result.present'
+            }
+          }).then(function (result) {
+            if (!result) d.textContent = '卡片草稿未能写入 Reader 本地卡库';
+          }).catch(function (error) {
+            d.textContent = '卡片草稿本地保存失败：' +
+              String(error && (error.code || error.message) || error || '?').slice(0, 160);
+          });
+        } else if (RC.flashcard.renderEntity) {
           RC.flashcard.renderEntity(d, {
             label: '🎴 制卡' + (_fcards.length > 1 ? ' × ' + _fcards.length : ''),
             cards: _fcards,

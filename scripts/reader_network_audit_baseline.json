@@ -4,9 +4,9 @@
   "note": "Existing debt only. Retired allowances must be removed in the same change; new fingerprints or higher counts fail --check.",
   "summary": {
     "cache-first-unannotated": 3,
-    "dynamic-unannotated": 134,
-    "local-immediate-unannotated": 7,
-    "unclassified-literal": 87
+    "dynamic-unannotated": 130,
+    "local-immediate-unannotated": 6,
+    "unclassified-literal": 80
   },
   "allowances": {
     "cache-first-unannotated|_server_deploy/static/pdf/reader.src/15-phrase-wordpop.js|fetch|fetch('/pdf/api/phrase-mark')|phrase.state.read must prove cached/local read before network": 1,
@@ -133,7 +133,6 @@
     "dynamic-unannotated|extensions/bw-reader-webext/background.js|new WebSocket|new WebSocket(url)|dynamic endpoint/method needs @interaction <id>": 1,
     "dynamic-unannotated|extensions/bw-reader-webext/src/facade.js|__bwReaderFetch|__bwReaderFetch(requestPath)|dynamic endpoint/method needs @interaction <id>": 1,
     "dynamic-unannotated|extensions/bw-reader-webext/src/facade.js|fetch|fetch(url, init)|dynamic endpoint/method needs @interaction <id>": 1,
-    "local-immediate-unannotated|_server_deploy/static/pdf/rc-flashcard.js|fetch|fetch('/pdf/api/anki-add-cards', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })|anki.cards.enqueue must prove local effect before network": 1,
     "local-immediate-unannotated|_server_deploy/static/pdf/rc-flashcard.js|fetch|fetch('/pdf/api/review-answer', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })|review.answer.submit must prove local effect before network": 1,
     "local-immediate-unannotated|_server_deploy/static/pdf/rc-turncard.js|RC.reqJson|RC.reqJson('POST', '/pdf/api/highlights', { file: file, page: it.pdf_page, rects: it.rects, color: it.color, text: it.text || '' })|document.highlight.create must prove local effect before network": 1,
     "local-immediate-unannotated|_server_deploy/static/pdf/reader.src/15-phrase-wordpop.js|fetch|fetch('/pdf/api/phrase-mark', { method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({text: t, mark: next ? 'mastered' : ''}), })|phrase.mastery.set must prove local effect before network": 1,

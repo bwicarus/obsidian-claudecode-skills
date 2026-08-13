@@ -145,6 +145,14 @@ function createProviderRegistry(overrides = {}) {
       scope: "global", status: "ready", provider: true, sync: true,
       recordSchema: 1, conflictPolicy: "explicit",
     },
+    "card-entities": {
+      scope: "global", status: "ready", provider: true, sync: true,
+      recordSchema: 1, conflictPolicy: "explicit",
+    },
+    "card-states": {
+      scope: "global", status: "ready", provider: true, sync: true,
+      recordSchema: 1, conflictPolicy: "explicit",
+    },
     "document-notes": {
       scope: "document", status: "ready", provider: false, conflictPolicy: "explicit",
     },
@@ -153,6 +161,18 @@ function createProviderRegistry(overrides = {}) {
     },
   };
   const syncDescriptor = () => [
+    {
+      name: "card-entities",
+      conflictPolicy: "explicit",
+      derived: false,
+      recordSchema: 1,
+    },
+    {
+      name: "card-states",
+      conflictPolicy: "explicit",
+      derived: false,
+      recordSchema: 1,
+    },
     {
       name: "user-settings",
       conflictPolicy: "explicit",
@@ -183,6 +203,8 @@ function createProviderRegistry(overrides = {}) {
       ? structuredClone(scopes[String(name || "")])
       : null,
     providerCollections: () => [
+      "card-entities",
+      "card-states",
       "dictionary-cache",
       "query-cache",
       "translation-cache",
@@ -190,10 +212,14 @@ function createProviderRegistry(overrides = {}) {
       "vocabulary-state",
     ],
     syncCollections: () => [
+      "card-entities",
+      "card-states",
       "user-settings",
       "vocabulary-state",
     ],
     isSyncCollection: (name) => [
+      "card-entities",
+      "card-states",
       "user-settings",
       "vocabulary-state",
     ].includes(String(name || "")),
@@ -407,6 +433,17 @@ function createFakeStore(state, records = new Map(), storeOptions = {}) {
     },
     async applyChanges(changes, options = {}) {
       await beforeOperation("applyChanges", { changes, options });
+      if (state.applyChangesConflict && changes?.length) {
+        return {
+          applied: [],
+          skipped: [],
+          conflicts: [{
+            collection: changes[0].collection,
+            id: changes[0].record?.id,
+            reason: "causal-parent-mismatch",
+          }],
+        };
+      }
       const applied = [];
       for (const change of changes || []) {
         const record = change?.record;
@@ -594,6 +631,12 @@ function makeVocabularyPort(sender) {
 function makeDocumentNotePort(sender) {
   const port = makeFetchPort(sender);
   port.name = "bw-document-notes";
+  return port;
+}
+
+function makeCardStorePort(sender) {
+  const port = makeFetchPort(sender);
+  port.name = "bw-card-store";
   return port;
 }
 
@@ -1200,6 +1243,61 @@ function pageMessage(type, payload, id = null) {
     type,
     id,
     payload,
+  };
+}
+
+function cardStoreCall(operation, args, id) {
+  return {
+    protocol: "bw-card-store/1",
+    type: "CALL",
+    id,
+    operation,
+    args,
+  };
+}
+
+function cardEntity(id, front = "Q") {
+  return {
+    contract: "card-entity/1",
+    schema: 1,
+    id,
+    cid: id,
+    gid: id,
+    cards: [{ type: "basic", front, back: "A" }],
+    source: {
+      kind: "reader-selection",
+      sourceId: "web:https://example.com/article#selection-1",
+    },
+    createdAt: 1_800_000_000_000,
+    contentUpdatedAt: 1_800_000_000_000,
+  };
+}
+
+function cardState(id) {
+  return {
+    contract: "card-state/1",
+    schema: 1,
+    id,
+    cid: id,
+    gid: id,
+    states: {
+      0: {
+        phase: "draft",
+        confirmedAt: null,
+        review: {
+          status: "unavailable",
+          dueAt: null,
+          lastReviewedAt: null,
+          intervalDays: 0,
+          ease: 0,
+          reps: 0,
+          lapses: 0,
+        },
+        flags: { favorite: false, archived: false },
+        projections: { anki: {} },
+        exactState: {},
+      },
+    },
   };
 }
 
@@ -2534,6 +2632,396 @@ test("文档便签写入途中切号会丢弃迟到成功响应，记录只落�
   );
 });
 
+test("普通网页卡片仓 fresh install 先用安装级 Vault，首次验证账户前幂等迁移且非法 sender 不开仓", async () => {
+  const h = harness({ enableSyncRuntime: false });
+  const unverified = makeCardStorePort(ordinaryContentSender());
+  h.connect(unverified);
+  const localReady = await waitForPortMessage(
+    unverified,
+    (message) => message.type === "READY",
+    "unverified local card store READY",
+  );
+  assert.deepEqual(localReady.capabilities.collections, [
+    "card-entities",
+    "card-states",
+  ]);
+  assert.equal(unverified.disconnected, false);
+  const localDb = h.state.storeOptions.find((options) =>
+    /^bw-reader-extension-vault-v1-acct-v1-[a-f0-9]{64}$/.test(
+      String(options.dbName || ""),
+    ) && !String(options.dbName).endsWith(NAMESPACE)
+  )?.dbName;
+  assert.ok(localDb);
+  assert.equal(
+    h.state.storageState.readerLocalCardStoreCreatedV1?.schema,
+    1,
+  );
+  assert.equal(
+    Object.hasOwn(h.state.storageState, "readerCardStoreAssociationV1"),
+    false,
+  );
+
+  const id = `card_${"a".repeat(32)}`;
+  await unverified.receive(cardStoreCall("put", {
+    collection: "card-entities",
+    value: cardEntity(id, "local-first"),
+    options: { id, ifRev: 0, mutationId: "local-card-before-pairing" },
+  }, "local-card-put"));
+  assert.equal(
+    unverified.messages.find((message) => message.id === "local-card-put").ok,
+    true,
+  );
+
+  await authorizePersistentAccount(h, NAMESPACE, TICKET);
+  await settleBackground();
+  assert.equal(unverified.disconnected, true);
+  assert.equal(
+    unverified.messages.some((message) =>
+      message.type === "INVALIDATED" &&
+      message.reason === "account-context-changed"
+    ),
+    true,
+  );
+  const association = h.state.storageState.readerCardStoreAssociationV1;
+  assert.equal(association.schema, 1);
+  assert.equal(association.state, "associated");
+  assert.equal(association.accountNamespace, NAMESPACE);
+  assert.equal(association.installId, h.state.storageState.readerExtensionInstallIdV1);
+  const accountDb = `bw-reader-extension-vault-v1-${NAMESPACE}`;
+  assert.equal(
+    h.state.storeRecords.get(accountDb).get(`card-entities/${id}`).value.front,
+    undefined,
+  );
+  assert.equal(
+    h.state.storeRecords.get(accountDb).get(`card-entities/${id}`).value.cards[0].front,
+    "local-first",
+  );
+  const migrationCalls = () => h.state.storeOperations.filter((item) =>
+    item.dbName === accountDb && item.operation === "applyChanges"
+  ).length;
+  const migrationCount = migrationCalls();
+  assert.equal(migrationCount, 1);
+
+  await authorizePersistentAccount(h, NAMESPACE, TICKET, "/pdf/html/view");
+  assert.equal(migrationCalls(), migrationCount, "关联标记令重连不重复迁移");
+
+  const restored = makeCardStorePort(ordinaryContentSender());
+  h.connect(restored);
+  await waitForPortMessage(
+    restored,
+    (message) => message.type === "READY",
+    "associated account card store READY",
+  );
+  await restored.receive(cardStoreCall("get", {
+    collection: "card-entities",
+    id,
+    options: { includeDeleted: true },
+  }, "migrated-card-get"));
+  assert.equal(
+    restored.messages.find((message) => message.id === "migrated-card-get")
+      .data.value.cards[0].front,
+    "local-first",
+  );
+
+  const storesBeforeInvalidSender = h.state.storeOptions.length;
+  const childFrame = makeCardStorePort(ordinaryContentSender(
+    "https://example.com/article",
+    { frameId: 1 },
+  ));
+  h.connect(childFrame);
+  assert.equal(childFrame.disconnected, true);
+  assert.equal(childFrame.messages.at(-1).code, "BW_CARD_STORE_SENDER");
+  assert.equal(h.state.storeOptions.length, storesBeforeInvalidSender);
+  assert.equal(
+    JSON.stringify([...unverified.messages, ...childFrame.messages]).includes(
+      "namespace",
+    ),
+    false,
+  );
+});
+
+test("本地卡仓关联冲突保留安装级原件、不落关联标记且不混入账户 Vault", async () => {
+  const h = harness({ enableSyncRuntime: false });
+  const local = makeCardStorePort(ordinaryContentSender());
+  h.connect(local);
+  await waitForPortMessage(
+    local,
+    (message) => message.type === "READY",
+    "conflict local card store READY",
+  );
+  const id = `card_${"c".repeat(32)}`;
+  await local.receive(cardStoreCall("put", {
+    collection: "card-entities",
+    value: cardEntity(id, "must survive conflict"),
+    options: { id, ifRev: 0, mutationId: "local-before-conflict" },
+  }, "local-before-conflict"));
+
+  h.state.applyChangesConflict = true;
+  const provider = makePort("/pdf/view");
+  h.connect(provider);
+  await provider.receive(pageMessage("HELLO", {
+    namespace: NAMESPACE,
+    ticket: TICKET,
+    page: "/pdf/view",
+  }, "associate-conflict"));
+  const conflict = provider.messages.find((message) => message.type === "ERROR");
+  assert.equal(conflict.payload.code, "BW_CARD_STORE_ASSOCIATION_CONFLICT");
+  assert.equal(
+    Object.hasOwn(h.state.storageState, "readerCardStoreAssociationV1"),
+    false,
+  );
+  const accountDb = `bw-reader-extension-vault-v1-${NAMESPACE}`;
+  assert.equal(
+    h.state.storeRecords.get(accountDb)?.has(`card-entities/${id}`) || false,
+    false,
+  );
+
+  const preserved = makeCardStorePort(ordinaryContentSender());
+  h.connect(preserved);
+  await waitForPortMessage(
+    preserved,
+    (message) => message.type === "READY",
+    "conflicted local card store remains READY",
+  );
+  await preserved.receive(cardStoreCall("get", {
+    collection: "card-entities",
+    id,
+    options: { includeDeleted: true },
+  }, "preserved-after-conflict"));
+  assert.equal(
+    preserved.messages.find((message) => message.id === "preserved-after-conflict")
+      .data.value.cards[0].front,
+    "must survive conflict",
+  );
+});
+
+test("普通网页卡片仓只映射两个 collection 与六个操作，并复用已验证账户 provider DataStore", async () => {
+  const h = harness({ enableSyncRuntime: false });
+  await authorizePersistentAccount(h, NAMESPACE, TICKET);
+  const port = makeCardStorePort(ordinaryContentSender());
+  h.connect(port);
+  const ready = await waitForPortMessage(
+    port,
+    (message) => message.type === "READY",
+    "card store READY",
+  );
+  assert.deepEqual(ready.capabilities, {
+    collections: ["card-entities", "card-states"],
+    operations: ["batch", "get", "list", "put", "remove", "subscribe"],
+  });
+  assert.equal(JSON.stringify(ready).includes(NAMESPACE), false);
+  assert.equal(Object.hasOwn(ready, "namespace"), false);
+  assert.equal(Object.hasOwn(ready, "scope"), false);
+
+  const id = `card_${"1".repeat(32)}`;
+  await port.receive(cardStoreCall("subscribe", {
+    query: { collection: "card-entities" },
+  }, "card-subscribe"));
+  assert.deepEqual(
+    port.messages.find((message) => message.id === "card-subscribe").data,
+    { collection: "card-entities", subscribed: true },
+  );
+
+  await port.receive(cardStoreCall("put", {
+    collection: "card-entities",
+    value: cardEntity(id),
+    options: { id, ifRev: 0, mutationId: "card-put:entity:1" },
+  }, "card-put"));
+  const put = port.messages.find((message) => message.id === "card-put");
+  assert.equal(put.ok, true);
+  assert.equal(put.data.collection, "card-entities");
+  assert.equal(put.data.id, id);
+  assert.equal(
+    port.messages.some((message) =>
+      message.type === "CHANGE" &&
+      message.data?.collection === "card-entities" &&
+      message.data?.record?.id === id,
+    ),
+    true,
+  );
+
+  await port.receive(cardStoreCall("get", {
+    collection: "card-entities",
+    id,
+    options: { includeDeleted: true },
+  }, "card-get"));
+  assert.equal(
+    port.messages.find((message) => message.id === "card-get").data.value.id,
+    id,
+  );
+  await port.receive(cardStoreCall("list", {
+    collection: "card-entities",
+    query: { includeDeleted: false, offset: 0, limit: 200 },
+  }, "card-list"));
+  assert.deepEqual(
+    port.messages.find((message) => message.id === "card-list")
+      .data.map((record) => record.id),
+    [id],
+  );
+
+  await port.receive(cardStoreCall("batch", {
+    mutations: [{
+      collection: "card-states",
+      value: cardState(id),
+      options: {
+        id,
+        ifRev: 0,
+        mutationId: "card-batch:state:1",
+      },
+    }],
+  }, "card-batch"));
+  assert.equal(
+    port.messages.find((message) => message.id === "card-batch").ok,
+    true,
+  );
+
+  for (const attempt of [
+    cardStoreCall("status", {}, "card-forbidden-operation"),
+    cardStoreCall("get", {
+      collection: "user-settings",
+      id,
+      options: {},
+    }, "card-forbidden-collection"),
+    cardStoreCall("get", {
+      collection: "card-entities",
+      id,
+      options: {},
+      namespace: NAMESPACE,
+    }, "card-forged-namespace"),
+    cardStoreCall("put", {
+      collection: "card-entities",
+      value: cardEntity(`card_${"2".repeat(32)}`),
+      options: { id, ifRev: 0, mutationId: "card-wrong-identity" },
+    }, "card-wrong-identity"),
+  ]) {
+    await port.receive(attempt);
+  }
+  assert.equal(
+    port.messages.find(
+      (message) => message.id === "card-forbidden-operation",
+    ).code,
+    "BW_CARD_STORE_OPERATION",
+  );
+  assert.equal(
+    port.messages.find(
+      (message) => message.id === "card-forbidden-collection",
+    ).code,
+    "BW_CARD_STORE_COLLECTION",
+  );
+  assert.equal(
+    port.messages.find(
+      (message) => message.id === "card-forged-namespace",
+    ).code,
+    "BW_CARD_STORE_PAYLOAD",
+  );
+  assert.equal(
+    port.messages.find((message) => message.id === "card-wrong-identity").code,
+    "BW_CARD_STORE_ID",
+  );
+
+  await port.receive(cardStoreCall("remove", {
+    collection: "card-entities",
+    id,
+    options: { ifRev: 1, mutationId: "card-remove:entity:1" },
+  }, "card-remove"));
+  assert.equal(
+    port.messages.find((message) => message.id === "card-remove").data.deleted,
+    true,
+  );
+  assert.equal(
+    h.state.storeOptions.filter(
+      (options) => options.dbName === `bw-reader-extension-vault-v1-${NAMESPACE}`,
+    ).length,
+    1,
+  );
+  assert.equal(JSON.stringify(port.messages).includes(NAMESPACE), false);
+  assert.equal(JSON.stringify(port.messages).includes(TICKET), false);
+});
+
+test("卡片仓切换账户或断线会失效旧订阅与在途写，迟到成功不能跨租约返回", async () => {
+  const h = harness({ enableSyncRuntime: false });
+  await authorizePersistentAccount(h, NAMESPACE, TICKET);
+  const accountA = makeCardStorePort(ordinaryContentSender());
+  h.connect(accountA);
+  await waitForPortMessage(
+    accountA,
+    (message) => message.type === "READY",
+    "card account A READY",
+  );
+  await accountA.receive(cardStoreCall("subscribe", {
+    query: { collection: "card-entities" },
+  }, "card-account-a-subscribe"));
+
+  let releaseWrite;
+  let markWriteStarted;
+  const writeGate = new Promise((resolve) => { releaseWrite = resolve; });
+  const writeStarted = new Promise((resolve) => { markWriteStarted = resolve; });
+  h.state.beforeStoreOperation = async (operation) => {
+    if (operation !== "put") return;
+    markWriteStarted();
+    await writeGate;
+  };
+  const id = `card_${"3".repeat(32)}`;
+  const pendingWrite = accountA.receive(cardStoreCall("put", {
+    collection: "card-entities",
+    value: cardEntity(id, "account A"),
+    options: { id, ifRev: 0, mutationId: "card-account-a:late-put" },
+  }, "card-account-a-put"));
+  await writeStarted;
+
+  await authorizePersistentAccount(
+    h,
+    OTHER_NAMESPACE,
+    OTHER_TICKET,
+    "/pdf/epub/view",
+  );
+  const invalidated = await waitForPortMessage(
+    accountA,
+    (message) => message.type === "INVALIDATED",
+    "card account A invalidated",
+  );
+  assert.equal(invalidated.reason, "account-context-changed");
+  assert.equal(invalidated.details.outcomeUnknown, true);
+  assert.equal(invalidated.details.mutationId, "card-account-a:late-put");
+  assert.deepEqual(
+    invalidated.details.mutationIds,
+    ["card-account-a:late-put"],
+  );
+  assert.equal(accountA.disconnected, true);
+
+  releaseWrite();
+  await pendingWrite;
+  await settleBackground();
+  assert.equal(
+    accountA.messages.some(
+      (message) => message.type === "RESULT" &&
+        message.id === "card-account-a-put" &&
+        message.ok === true,
+    ),
+    false,
+  );
+
+  h.state.beforeStoreOperation = null;
+  const accountB = makeCardStorePort(ordinaryContentSender());
+  h.connect(accountB);
+  await waitForPortMessage(
+    accountB,
+    (message) => message.type === "READY",
+    "card account B READY",
+  );
+  await accountB.receive(cardStoreCall("get", {
+    collection: "card-entities",
+    id,
+    options: { includeDeleted: true },
+  }, "card-account-b-get"));
+  assert.equal(
+    accountB.messages.find((message) => message.id === "card-account-b-get")
+      .data,
+    null,
+  );
+  assert.equal(JSON.stringify(accountB.messages).includes(OTHER_NAMESPACE), false);
+});
+
 test("provider 只接受四个正式书籍 PWA 入口，明确拒绝退役网页壳和第三方代理页", () => {
   const h = harness();
   for (const path of [
@@ -2645,16 +3133,29 @@ test("握手绑定真实页面与不透明账户编号，Safari/Chrome Vault 不
   assert.equal(ready.payload.dataStore.contract, "data-store/1");
   assert.deepEqual(
     ready.payload.capabilities.providerCollections,
-    ["dictionary-cache", "query-cache", "translation-cache", "user-settings", "vocabulary-state"],
+    [
+      "card-entities", "card-states", "dictionary-cache", "query-cache",
+      "translation-cache", "user-settings", "vocabulary-state",
+    ],
   );
   assert.equal(ready.payload.capabilities.networkOperations, false);
   assert.deepEqual(
     ready.payload.capabilities.syncCollections,
-    ["user-settings", "vocabulary-state"],
+    ["card-entities", "card-states", "user-settings", "vocabulary-state"],
   );
   assert.deepEqual(
     ready.payload.capabilities.syncDescriptor,
     [{
+      name: "card-entities",
+      conflictPolicy: "explicit",
+      derived: false,
+      recordSchema: 1,
+    }, {
+      name: "card-states",
+      conflictPolicy: "explicit",
+      derived: false,
+      recordSchema: 1,
+    }, {
       name: "user-settings",
       conflictPolicy: "explicit",
       derived: false,
@@ -2669,6 +3170,7 @@ test("握手绑定真实页面与不透明账户编号，Safari/Chrome Vault 不
   assert.equal(
     ready.payload.capabilities.syncDigest,
     "sync-v3:record-parent-state/1|" +
+      "card-entities:explicit:0:1|card-states:explicit:0:1|" +
       "user-settings:explicit:0:1|vocabulary-state:explicit:0:1",
   );
   assert.equal(ready.payload.capabilities.syncContract, "sync-v3");
@@ -3200,7 +3702,10 @@ test("旧 Vault 中未知 collection 不能经 status、changes 或 CHANGE 广�
   assert.deepEqual(status.payload.result.collections, ["user-settings"]);
   assert.deepEqual(
     status.payload.result.providerCollections,
-    ["dictionary-cache", "query-cache", "translation-cache", "user-settings", "vocabulary-state"],
+    [
+      "card-entities", "card-states", "dictionary-cache", "query-cache",
+      "translation-cache", "user-settings", "vocabulary-state",
+    ],
   );
 
   h.state.providerChanges = {
@@ -3513,6 +4018,7 @@ test("扩展后台以固定端点、账户租约和私有 token 完成 server sy
       assert.equal(
         request.registryDigest,
         "sync-v3:record-parent-state/1|" +
+          "card-entities:explicit:0:1|card-states:explicit:0:1|" +
           "user-settings:explicit:0:1|vocabulary-state:explicit:0:1",
       );
       assert.equal(request.ownerNamespace, NAMESPACE);
@@ -3567,6 +4073,8 @@ test("扩展后台以固定端点、账户租约和私有 token 完成 server sy
   assert.deepEqual(
     ready.payload.capabilities.syncCollections,
     [
+      "card-entities",
+      "card-states",
       "user-settings",
       "vocabulary-state",
     ],

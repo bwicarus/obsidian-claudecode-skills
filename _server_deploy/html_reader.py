@@ -234,6 +234,8 @@ _HTML_CACHE_ASSETS = (
     "reader-runtime/data-store.js",
     "reader-runtime/indexeddb-store.js",
     "reader-runtime/data-registry.js",
+    "reader-runtime/card-repository.js",
+    "reader-runtime/anki-mobile-export.js",
     "reader-runtime/sync-owner-lease.js",
     "reader-runtime/sync-gateway.js",
     "reader-runtime/server-sync-transport.js",

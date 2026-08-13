@@ -50,7 +50,6 @@ test("every first-party dict-jp request supplies book, page, languages and sente
   const sources = [
     "_server_deploy/static/pdf/reader.src/15-phrase-wordpop.js",
     "_server_deploy/static/pdf/reader.src/19-dict.js",
-    "_server_deploy/static/pdf/rc-phrasepop.js",
     "_server_deploy/static/pdf/rc-wordpop.js",
   ];
   for (const path of sources) {
@@ -63,6 +62,15 @@ test("every first-party dict-jp request supplies book, page, languages and sente
   }
   const adapter = read("_server_deploy/static/pdf/pdf-adapter.js");
   assert.match(adapter, /page:\s*page,\s*langs:\s*langs/);
+
+  const phrasepop = read("_server_deploy/static/pdf/rc-phrasepop.js");
+  assert.doesNotMatch(
+    phrasepop,
+    /fetch\('\/pdf\/api\/dict-jp\?word=/,
+    "shared phrase lookup is local/ReaderPC first and must not silently contact Pi",
+  );
+  assert.match(phrasepop, /lookupJapaneseFallback/);
+  assert.match(phrasepop, /context:\s*String\(context\s*\|\|\s*''\)\.slice/);
 });
 
 test("PDF, EPUB and extension phrase entry points explicitly preserve sentence context", () => {

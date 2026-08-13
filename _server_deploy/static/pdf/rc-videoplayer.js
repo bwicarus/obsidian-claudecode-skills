@@ -158,7 +158,7 @@
     if (document.getElementById('rc-vplayer-css')) return;
     var s = document.createElement('style'); s.id = 'rc-vplayer-css';
     s.textContent =
-      '#rc-vplayer{position:fixed;z-index:2147483000;background:rgba(12,16,26,.86);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid #2a3a63;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.6);display:flex;flex-direction:column;overflow:hidden;user-select:none;-webkit-user-select:none}' +
+      '#rc-vplayer{position:fixed;z-index:2147483000;pointer-events:auto;background:rgba(12,16,26,.86);backdrop-filter:blur(8px);-webkit-backdrop-filter:blur(8px);border:1px solid #2a3a63;border-radius:12px;box-shadow:0 12px 40px rgba(0,0,0,.6);display:flex;flex-direction:column;overflow:hidden;user-select:none;-webkit-user-select:none}' +
       '.rcvp-bar{flex:0 0 auto;display:flex;align-items:center;gap:6px;padding:6px 8px;background:rgba(0,0,0,.3);cursor:grab;touch-action:none;-webkit-touch-callout:none}' +
       '.rcvp-bar.drag{cursor:grabbing}' +
       '.rcvp-grip{color:#6b7da0;font-size:14px;flex:none}' +

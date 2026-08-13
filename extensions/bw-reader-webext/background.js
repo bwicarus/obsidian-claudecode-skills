@@ -1,7 +1,7 @@
 // 扩展后台:唯一接触 token 和 Pi API 的地方。网页脚本永远拿不到 token,也不能传任意 URL(只认固定操作名)。
 // ⚠ ORIGIN 指向**当前主力的 Pi**(Tailscale,iPad 走 Tailscale 访问,和现有 QA browser 一样);
 //   不是暂停的 VPS bwicarus.space(代码停在 2026-05-28)。要换服务器只改这一行 + manifest host_permissions。
-globalThis.__BW_READER_BACKGROUND_BUILD_VERSION = "0.2.106";
+globalThis.__BW_READER_BACKGROUND_BUILD_VERSION = "0.2.107";
 if (typeof importScripts === "function") {
   importScripts(
     "vendor/reader-runtime-account-context.js",
@@ -711,6 +711,7 @@ const PROVIDER_SYNC_OPS = new Set([
   "syncStatus", "syncNow"
 ]);
 const providerPorts = new Set();
+const cardStorePorts = new Set();
 const vocabularyStatePorts = new Set();
 const documentNotePorts = new Set();
 const providerVaults = new Map();
@@ -726,6 +727,25 @@ let directRpcSequence = 0;
 const documentNoteVaults = new Map();
 const VOCABULARY_STATE_PROTOCOL = "bw-vocabulary-state/1";
 const DOCUMENT_NOTES_PROTOCOL = "bw-document-notes/1";
+const CARD_STORE_PROTOCOL = "bw-card-store/1";
+const CARD_STORE_PORT = "bw-card-store";
+const CARD_STORE_ASSOCIATION_KEY = "readerCardStoreAssociationV1";
+const CARD_STORE_LOCAL_CREATED_KEY = "readerLocalCardStoreCreatedV1";
+const CARD_STORE_ASSOCIATION_SCHEMA = 1;
+const CARD_STORE_COLLECTIONS = new Set([
+  "card-entities",
+  "card-states"
+]);
+const CARD_STORE_OPERATIONS = Object.freeze([
+  "batch",
+  "get",
+  "list",
+  "put",
+  "remove",
+  "subscribe"
+]);
+const CARD_STORE_OPERATION_SET = new Set(CARD_STORE_OPERATIONS);
+const CARD_STORE_ID_RE = /^card_[a-f0-9]{4,64}$/;
 const PROVIDER_AUTH_KEY = "providerNamespaceAuthorizationsV2";
 const EXTENSION_INSTALL_ID_KEY = "readerExtensionInstallIdV1";
 const ACTIVE_VERIFIED_ACCOUNT_KEY = "readerActiveVerifiedAccountV1";
@@ -745,7 +765,12 @@ const MAX_PROVIDER_PAGE = 200;
 const MAX_DOCUMENT_NOTE_REQUEST_BYTES = 512 * 1024;
 const MAX_DOCUMENT_NOTE_RESPONSE_BYTES = 2 * 1024 * 1024;
 const MAX_DOCUMENT_NOTE_PAGE = 200;
+const MAX_CARD_STORE_REQUEST_BYTES = 8 * 1024 * 1024;
+const MAX_CARD_STORE_RESPONSE_BYTES = 8 * 1024 * 1024;
+const MAX_CARD_STORE_MUTATIONS = 1000;
 let providerInstallIdPromise = null;
+let cardStoreLocalNamespacePromise = null;
+let cardStoreAssociationTransition = Promise.resolve();
 let providerPortSequence = 0;
 const persistentAccountContext = newProviderAccountContext();
 // 普通网页沿用最后一次经 PWA ticket 验证的账户，但仍必须受同一份生产
@@ -894,6 +919,9 @@ async function rememberVerifiedAccount(namespace, deviceFamilyId = "") {
       });
     }
     if (accountChanged) pruneDocumentNoteVaults();
+    // 卡片先在安装级 Vault 可用；第一次拿到服务器证明后，必须在启动任何
+    // account sync 之前完成一次可重放的本地→账户关联。失败时源 Vault 保留。
+    await ensureCardStoreAssociation(namespace);
     if (accountChanged || familyChanged) {
       void startActiveProviderSync("active-account-paired", { runNow: true });
       void promoteDirectHost("active-account-changed");
@@ -1060,6 +1088,85 @@ async function capturePersistentAccountForContentSender(sender) {
     });
   }
   return capturePersistentAccount();
+}
+async function captureCardStoreScopeForContentSender(sender) {
+  if (!isTopLevelOwnContentSender(sender)) {
+    throw cardStoreError(
+      "卡片仓库只允许扩展的顶层网页脚本使用",
+      "BW_CARD_STORE_SENDER"
+    );
+  }
+  await privateCredentialReady;
+  try {
+    await ensurePersistentAccount();
+  } catch (error) {
+    if (error?.code !== "BW_ACCOUNT_CONTEXT_UNAVAILABLE") throw error;
+  }
+  const account = persistentAccountContext.snapshot();
+  if (account.active) {
+    try {
+      await ensureCardStoreAssociation(account.namespace);
+      const captured = await capturePersistentAccount();
+      return Object.freeze({
+        kind: "account",
+        namespace: captured.lease.namespace,
+        captured,
+        accountGeneration: captured.lease.generation,
+        associationPending: false
+      });
+    } catch (error) {
+      if (error?.code !== "BW_CARD_STORE_ASSOCIATION_CONFLICT") throw error;
+      // 冲突时不把安装级卡片混入账户 Vault。源 Vault 保留并继续可读写，
+      // 同时 provider sync 会被 ensureCardStoreAssociation 拦住。
+      return Object.freeze({
+        kind: "install-local",
+        namespace: await localCardStoreNamespace(),
+        captured: null,
+        accountGeneration: account.generation,
+        accountNamespace: account.namespace,
+        associationPending: true
+      });
+    }
+  }
+  return Object.freeze({
+    kind: "install-local",
+    namespace: await localCardStoreNamespace(),
+    captured: null,
+    accountGeneration: account.generation,
+    accountNamespace: "",
+    associationPending: false
+  });
+}
+function fenceCardStoreScope(scope) {
+  if (!scope || !scope.namespace) {
+    throw cardStoreError(
+      "卡片仓库作用域不可用",
+      "BW_CARD_STORE_STALE"
+    );
+  }
+  if (scope.kind === "account") {
+    fenceCapturedAccount(scope.captured);
+    if (scope.captured.lease.namespace !== scope.namespace) {
+      throw cardStoreError(
+        "卡片仓库账户已经变化",
+        "BW_ACCOUNT_CONTEXT_STALE"
+      );
+    }
+    return true;
+  }
+  const current = persistentAccountContext.snapshot();
+  if (
+    scope.kind !== "install-local" ||
+    Number(current.generation) !== Number(scope.accountGeneration) ||
+    current.active !== !!scope.accountNamespace ||
+    (current.active && current.namespace !== scope.accountNamespace)
+  ) {
+    throw cardStoreError(
+      "卡片仓库账户关联状态已经变化",
+      "BW_ACCOUNT_CONTEXT_STALE"
+    );
+  }
+  return true;
 }
 function providerSenderBinding(sender) {
   const url = senderUrl(sender);
@@ -1491,6 +1598,224 @@ async function extensionInstallId() {
     throw error;
   });
   return providerInstallIdPromise;
+}
+function serializeCardStoreAssociation(operation) {
+  const current = cardStoreAssociationTransition
+    .catch(() => {})
+    .then(operation);
+  cardStoreAssociationTransition = current.catch(() => {});
+  return current;
+}
+async function localCardStoreNamespace() {
+  if (cardStoreLocalNamespacePromise) return cardStoreLocalNamespacePromise;
+  cardStoreLocalNamespacePromise = (async () => {
+    const installId = await extensionInstallId();
+    const digest = await sha256Hex(
+      "bw-reader-extension-local-card-v1\u0000" + installId
+    );
+    return safeNamespace("acct-v1-" + digest);
+  })().catch((error) => {
+    cardStoreLocalNamespacePromise = null;
+    throw error;
+  });
+  return cardStoreLocalNamespacePromise;
+}
+async function readCardStoreAssociation(installId) {
+  const stored = await chrome.storage.local.get(CARD_STORE_ASSOCIATION_KEY);
+  const record = stored?.[CARD_STORE_ASSOCIATION_KEY];
+  if (record == null) return null;
+  if (
+    !cardStorePlainObject(record) ||
+    Number(record.schema) !== CARD_STORE_ASSOCIATION_SCHEMA ||
+    record.state !== "associated" ||
+    String(record.installId || "") !== installId ||
+    !Number.isFinite(Number(record.associatedAt)) ||
+    Number(record.associatedAt) <= 0
+  ) {
+    throw cardStoreError(
+      "扩展本地卡仓的账户关联记录无效",
+      "BW_CARD_STORE_ASSOCIATION_STATE"
+    );
+  }
+  return Object.freeze({
+    schema: CARD_STORE_ASSOCIATION_SCHEMA,
+    state: "associated",
+    installId,
+    accountNamespace: safeNamespace(record.accountNamespace),
+    associatedAt: Number(record.associatedAt)
+  });
+}
+async function localCardStoreWasCreated(installId) {
+  const stored = await chrome.storage.local.get(CARD_STORE_LOCAL_CREATED_KEY);
+  const record = stored?.[CARD_STORE_LOCAL_CREATED_KEY];
+  if (record == null) return false;
+  if (
+    !cardStorePlainObject(record) ||
+    Number(record.schema) !== 1 ||
+    String(record.installId || "") !== installId ||
+    !Number.isFinite(Number(record.createdAt)) ||
+    Number(record.createdAt) <= 0
+  ) {
+    throw cardStoreError(
+      "扩展本地卡仓的安装记录无效",
+      "BW_CARD_STORE_ASSOCIATION_STATE"
+    );
+  }
+  return true;
+}
+async function markLocalCardStoreCreated() {
+  const installId = await extensionInstallId();
+  if (await localCardStoreWasCreated(installId)) return;
+  const record = { schema: 1, installId, createdAt: Date.now() };
+  await chrome.storage.local.set({ [CARD_STORE_LOCAL_CREATED_KEY]: record });
+  if (!(await localCardStoreWasCreated(installId))) {
+    throw cardStoreError(
+      "无法持久化扩展本地卡仓的安装记录",
+      "BW_CARD_STORE_ASSOCIATION_STORAGE"
+    );
+  }
+}
+async function listAllCardStoreRecords(store, collection) {
+  const records = [];
+  let offset = 0;
+  while (true) {
+    const page = await store.list(collection, {
+      includeDeleted: true,
+      offset,
+      limit: MAX_PROVIDER_PAGE
+    });
+    if (!Array.isArray(page)) {
+      throw cardStoreError(
+        "扩展本地卡仓迁移读取结果无效",
+        "BW_CARD_STORE_ASSOCIATION_READ"
+      );
+    }
+    records.push(...page);
+    if (page.length < MAX_PROVIDER_PAGE) return records;
+    offset += page.length;
+  }
+}
+function cardStoreAssociationChange(installId, collection, record) {
+  const id = cardStoreId(record?.id, "association.record.id");
+  if (String(record?.collection || "") !== collection) {
+    throw cardStoreError(
+      "扩展本地卡仓迁移记录的 collection 不一致",
+      "BW_CARD_STORE_ASSOCIATION_READ"
+    );
+  }
+  const revision = cardStoreInteger(
+    record?.rev,
+    "association.record.rev",
+    1
+  );
+  return {
+    mutationId: [
+      "card-associate-v1",
+      installId.slice(-32),
+      collection,
+      id,
+      String(revision),
+      record.deleted === true ? "deleted" : "live"
+    ].join(":"),
+    operation: record.deleted === true ? "remove" : "put",
+    collection,
+    record: structuredClone(record)
+  };
+}
+async function migrateLocalCardStoreToAccount(
+  installId,
+  localNamespace,
+  accountNamespace
+) {
+  const source = await vaultFor(localNamespace);
+  const target = await vaultFor(accountNamespace);
+  const conflicts = [];
+  let migrated = 0;
+  let skipped = 0;
+  for (const collection of CARD_STORE_COLLECTIONS) {
+    const records = await listAllCardStoreRecords(source, collection);
+    for (let offset = 0; offset < records.length; offset += MAX_PROVIDER_PAGE) {
+      const changes = records
+        .slice(offset, offset + MAX_PROVIDER_PAGE)
+        .map((record) => cardStoreAssociationChange(
+          installId,
+          collection,
+          record
+        ));
+      if (!changes.length) continue;
+      const result = await target.applyChanges(changes, {
+        journal: true,
+        snapshotBaseline: true,
+        tombstoneDominates: true
+      });
+      migrated += Array.isArray(result?.applied) ? result.applied.length : 0;
+      skipped += Array.isArray(result?.skipped) ? result.skipped.length : 0;
+      if (Array.isArray(result?.conflicts)) {
+        conflicts.push(...result.conflicts.map((conflict) => ({
+          collection: String(conflict?.collection || collection),
+          id: String(conflict?.id || ""),
+          reason: String(conflict?.reason || "conflict")
+        })));
+      }
+    }
+  }
+  if (conflicts.length) {
+    throw cardStoreError(
+      "本地卡仓与已验证账户中存在同身份的不同卡片，已保留本地原件并停止关联",
+      "BW_CARD_STORE_ASSOCIATION_CONFLICT",
+      {
+        size: conflicts.length,
+        conflicts: conflicts.slice(0, 20)
+      }
+    );
+  }
+  return { migrated, skipped };
+}
+async function ensureCardStoreAssociation(accountNamespace) {
+  accountNamespace = safeNamespace(accountNamespace);
+  return serializeCardStoreAssociation(async () => {
+    const installId = await extensionInstallId();
+    const existing = await readCardStoreAssociation(installId);
+    if (existing) {
+      return Object.freeze({
+        namespace: accountNamespace,
+        associated: existing.accountNamespace === accountNamespace,
+        ownerNamespace: existing.accountNamespace,
+        migrated: 0,
+        skipped: 0
+      });
+    }
+    const hadLocalStore = await localCardStoreWasCreated(installId);
+    const result = hadLocalStore
+      ? await migrateLocalCardStoreToAccount(
+        installId,
+        await localCardStoreNamespace(),
+        accountNamespace
+      )
+      : { migrated: 0, skipped: 0 };
+    const record = {
+      schema: CARD_STORE_ASSOCIATION_SCHEMA,
+      state: "associated",
+      installId,
+      accountNamespace,
+      associatedAt: Date.now()
+    };
+    await chrome.storage.local.set({ [CARD_STORE_ASSOCIATION_KEY]: record });
+    const verified = await readCardStoreAssociation(installId);
+    if (!verified || verified.accountNamespace !== accountNamespace) {
+      throw cardStoreError(
+        "无法持久化扩展本地卡仓的账户关联",
+        "BW_CARD_STORE_ASSOCIATION_STORAGE"
+      );
+    }
+    return Object.freeze({
+      namespace: accountNamespace,
+      associated: true,
+      ownerNamespace: accountNamespace,
+      migrated: result.migrated,
+      skipped: result.skipped
+    });
+  });
 }
 function providerRegistrySnapshot() {
   const registry = globalThis.BWReaderRuntime?.dataRegistry;
@@ -1952,6 +2277,11 @@ async function providerSyncRuntimeFor(requestCaptured) {
     });
   }
   const namespace = captured.lease.namespace;
+  await ensureCardStoreAssociation(namespace);
+  fenceCapturedAccount(requestCaptured);
+  fenceCapturedAccount(captured);
+  assertProviderSyncOwnerClaim(requestCaptured);
+  assertProviderSyncOwnerClaim(captured);
   const existing = providerSyncRuntimes.get(namespace);
   if (existing) {
     try {
@@ -3239,6 +3569,610 @@ chrome.runtime.onConnect.addListener((port) => {
     entry.transportGeneration += 1;
     revokeProviderEntry(entry, "provider-port-disconnected");
     providerPorts.delete(entry);
+  });
+});
+
+function cardStoreError(message, code, details = null) {
+  return Object.assign(new Error(String(message || "扩展卡片仓库不可用")), {
+    code: String(code || "BW_CARD_STORE"),
+    details: details || null
+  });
+}
+function cardStorePlainObject(value) {
+  return !!(
+    value &&
+    Object.prototype.toString.call(value) === "[object Object]"
+  );
+}
+function cardStoreExactKeys(value, required, optional, label) {
+  if (!cardStorePlainObject(value)) {
+    throw cardStoreError(label + " 必须是普通对象", "BW_CARD_STORE_PAYLOAD");
+  }
+  const allowed = new Set([...required, ...optional]);
+  const keys = Object.keys(value);
+  if (
+    required.some((key) => !Object.prototype.hasOwnProperty.call(value, key)) ||
+    keys.some((key) => !allowed.has(key))
+  ) {
+    throw cardStoreError(label + " 字段不符合合同", "BW_CARD_STORE_PAYLOAD");
+  }
+  return value;
+}
+function cardStoreCollection(value) {
+  value = String(value || "");
+  if (!CARD_STORE_COLLECTIONS.has(value)) {
+    throw cardStoreError(
+      "卡片仓库 collection 不在白名单",
+      "BW_CARD_STORE_COLLECTION"
+    );
+  }
+  return value;
+}
+function cardStoreId(value, label = "id") {
+  value = String(value || "").trim().toLowerCase();
+  if (!CARD_STORE_ID_RE.test(value)) {
+    throw cardStoreError(label + " 必须是稳定 card_* 编号", "BW_CARD_STORE_ID");
+  }
+  return value;
+}
+function cardStoreInteger(value, label, minimum = 0) {
+  const number = Number(value);
+  if (!Number.isSafeInteger(number) || number < minimum) {
+    throw cardStoreError(label + " 无效", "BW_CARD_STORE_PAYLOAD");
+  }
+  return number;
+}
+function cardStoreMutationId(value) {
+  value = String(value || "");
+  if (!value || value.length > 512 || value.includes("\u0000")) {
+    throw cardStoreError(
+      "卡片仓库写入缺少稳定 mutationId",
+      "BW_CARD_STORE_MUTATION"
+    );
+  }
+  return value;
+}
+function cardStoreReadOptions(value, label) {
+  value = value == null ? {} : value;
+  cardStoreExactKeys(value, [], ["includeDeleted"], label);
+  if (
+    Object.prototype.hasOwnProperty.call(value, "includeDeleted") &&
+    typeof value.includeDeleted !== "boolean"
+  ) {
+    throw cardStoreError(
+      label + ".includeDeleted 必须是布尔值",
+      "BW_CARD_STORE_PAYLOAD"
+    );
+  }
+  return value;
+}
+function cardStoreListQuery(value) {
+  value = value == null ? {} : value;
+  cardStoreExactKeys(
+    value,
+    [],
+    ["includeDeleted", "limit", "offset"],
+    "list.query"
+  );
+  if (
+    Object.prototype.hasOwnProperty.call(value, "includeDeleted") &&
+    typeof value.includeDeleted !== "boolean"
+  ) {
+    throw cardStoreError(
+      "list.query.includeDeleted 必须是布尔值",
+      "BW_CARD_STORE_PAYLOAD"
+    );
+  }
+  if (Object.prototype.hasOwnProperty.call(value, "limit")) {
+    const limit = cardStoreInteger(value.limit, "list.query.limit", 1);
+    if (limit > MAX_PROVIDER_PAGE) {
+      throw cardStoreError(
+        "list.query.limit 超出上限",
+        "BW_CARD_STORE_PAYLOAD"
+      );
+    }
+  }
+  if (Object.prototype.hasOwnProperty.call(value, "offset")) {
+    cardStoreInteger(value.offset, "list.query.offset", 0);
+  }
+  return value;
+}
+function cardStoreWriteOptions(value, id, label) {
+  cardStoreExactKeys(
+    value,
+    ["ifRev", "mutationId"],
+    id ? ["id"] : [],
+    label
+  );
+  if (id) {
+    if (!Object.prototype.hasOwnProperty.call(value, "id")) {
+      throw cardStoreError(label + ".id 不能为空", "BW_CARD_STORE_PAYLOAD");
+    }
+    if (cardStoreId(value.id, label + ".id") !== id) {
+      throw cardStoreError(
+        label + ".id 与记录身份不一致",
+        "BW_CARD_STORE_ID"
+      );
+    }
+  }
+  cardStoreInteger(value.ifRev, label + ".ifRev", 0);
+  cardStoreMutationId(value.mutationId);
+  return value;
+}
+function cardStoreRecordIdentity(collection, value, expectedId = "") {
+  if (!cardStorePlainObject(value)) {
+    throw cardStoreError("卡片记录必须是普通对象", "BW_CARD_STORE_PAYLOAD");
+  }
+  const id = cardStoreId(value.id, "record.id");
+  for (const key of ["cid", "gid"]) {
+    if (cardStoreId(value[key], "record." + key) !== id) {
+      throw cardStoreError(
+        "卡片记录 id/cid/gid 必须一致",
+        "BW_CARD_STORE_ID"
+      );
+    }
+  }
+  if (expectedId && id !== expectedId) {
+    throw cardStoreError(
+      "卡片记录身份与写入选项不一致",
+      "BW_CARD_STORE_ID"
+    );
+  }
+  const expectedContract = collection === "card-entities"
+    ? "card-entity/1"
+    : "card-state/1";
+  if (value.contract !== expectedContract || Number(value.schema) !== 1) {
+    throw cardStoreError(
+      "卡片记录 schema 与 collection 不匹配",
+      "BW_CARD_STORE_SCHEMA"
+    );
+  }
+  return id;
+}
+function validateCardStoreMutation(value, index) {
+  const label = "batch.mutations[" + index + "]";
+  cardStoreExactKeys(
+    value,
+    ["collection", "options"],
+    ["id", "operation", "value"],
+    label
+  );
+  const collection = cardStoreCollection(value.collection);
+  const operation = String(value.operation || "put");
+  if (operation === "put") {
+    if (!Object.prototype.hasOwnProperty.call(value, "value") ||
+        Object.prototype.hasOwnProperty.call(value, "id")) {
+      throw cardStoreError(label + " put 形状无效", "BW_CARD_STORE_PAYLOAD");
+    }
+    const id = cardStoreRecordIdentity(collection, value.value);
+    cardStoreWriteOptions(value.options, id, label + ".options");
+    return { operation, mutationId: value.options.mutationId };
+  }
+  if (operation === "remove") {
+    if (!Object.prototype.hasOwnProperty.call(value, "id") ||
+        Object.prototype.hasOwnProperty.call(value, "value")) {
+      throw cardStoreError(label + " remove 形状无效", "BW_CARD_STORE_PAYLOAD");
+    }
+    cardStoreId(value.id, label + ".id");
+    cardStoreWriteOptions(value.options, "", label + ".options");
+    return { operation, mutationId: value.options.mutationId };
+  }
+  throw cardStoreError(
+    label + " 只允许 put/remove",
+    "BW_CARD_STORE_OPERATION"
+  );
+}
+function validateCardStoreCall(operation, args) {
+  if (!CARD_STORE_OPERATION_SET.has(operation)) {
+    throw cardStoreError("不允许的卡片仓库操作", "BW_CARD_STORE_OPERATION");
+  }
+  if (jsonByteLength(args) > MAX_CARD_STORE_REQUEST_BYTES) {
+    throw cardStoreError(
+      "卡片仓库请求超出大小限制",
+      "BW_CARD_STORE_PAYLOAD",
+      { limit: MAX_CARD_STORE_REQUEST_BYTES }
+    );
+  }
+  if (operation === "get") {
+    cardStoreExactKeys(args, ["collection", "id", "options"], [], "get.args");
+    cardStoreCollection(args.collection);
+    cardStoreId(args.id);
+    cardStoreReadOptions(args.options, "get.options");
+    return;
+  }
+  if (operation === "list") {
+    cardStoreExactKeys(args, ["collection", "query"], [], "list.args");
+    cardStoreCollection(args.collection);
+    cardStoreListQuery(args.query);
+    return;
+  }
+  if (operation === "put") {
+    cardStoreExactKeys(
+      args,
+      ["collection", "value", "options"],
+      [],
+      "put.args"
+    );
+    const collection = cardStoreCollection(args.collection);
+    const id = cardStoreRecordIdentity(collection, args.value);
+    cardStoreWriteOptions(args.options, id, "put.options");
+    return;
+  }
+  if (operation === "remove") {
+    cardStoreExactKeys(
+      args,
+      ["collection", "id", "options"],
+      [],
+      "remove.args"
+    );
+    cardStoreCollection(args.collection);
+    cardStoreId(args.id);
+    cardStoreWriteOptions(args.options, "", "remove.options");
+    return;
+  }
+  if (operation === "batch") {
+    cardStoreExactKeys(args, ["mutations"], [], "batch.args");
+    if (
+      !Array.isArray(args.mutations) ||
+      !args.mutations.length ||
+      args.mutations.length > MAX_CARD_STORE_MUTATIONS
+    ) {
+      throw cardStoreError(
+        "卡片仓库 batch 数量无效",
+        "BW_CARD_STORE_PAYLOAD"
+      );
+    }
+    const mutationIds = new Set();
+    args.mutations.forEach((mutation, index) => {
+      const checked = validateCardStoreMutation(mutation, index);
+      if (mutationIds.has(checked.mutationId)) {
+        throw cardStoreError(
+          "卡片仓库 batch 含重复 mutationId",
+          "BW_CARD_STORE_MUTATION"
+        );
+      }
+      mutationIds.add(checked.mutationId);
+    });
+    return;
+  }
+  cardStoreExactKeys(args, ["query"], [], "subscribe.args");
+  cardStoreExactKeys(args.query, ["collection"], [], "subscribe.query");
+  cardStoreCollection(args.query.collection);
+}
+function cardStoreMutationIds(operation, args) {
+  const values = [];
+  if (operation === "put" || operation === "remove") {
+    values.push(args?.options?.mutationId);
+  } else if (operation === "batch") {
+    for (const mutation of args?.mutations || []) {
+      values.push(mutation?.options?.mutationId);
+    }
+  }
+  return [...new Set(values.filter((value) => (
+    typeof value === "string" && value && value.length <= 512
+  )))];
+}
+function cardStorePublicDetails(value) {
+  if (!cardStorePlainObject(value)) return null;
+  const output = {};
+  for (const key of [
+    "actualRev",
+    "expectedRev",
+    "limit",
+    "mutationId",
+    "outcomeUnknown",
+    "size"
+  ]) {
+    if (Object.prototype.hasOwnProperty.call(value, key)) output[key] = value[key];
+  }
+  if (Array.isArray(value.mutationIds)) {
+    output.mutationIds = value.mutationIds.filter((item) => (
+      typeof item === "string" && item && item.length <= 512
+    )).slice(0, MAX_CARD_STORE_MUTATIONS);
+  }
+  return Object.keys(output).length ? output : null;
+}
+function cardStoreUnknownOutcome(entry, details = null) {
+  const mutationIds = [];
+  const seen = new Set();
+  const add = (value) => {
+    if (typeof value !== "string" || !value || seen.has(value)) return;
+    seen.add(value);
+    mutationIds.push(value);
+  };
+  for (const request of entry.inFlightRequests.values()) {
+    for (const mutationId of request.mutationIds || []) add(mutationId);
+  }
+  for (const mutationId of details?.mutationIds || []) add(mutationId);
+  add(details?.mutationId);
+  const output = cardStorePublicDetails(details) || {};
+  delete output.mutationId;
+  delete output.mutationIds;
+  if (mutationIds.length) {
+    output.outcomeUnknown = true;
+    output.mutationIds = mutationIds;
+    if (mutationIds.length === 1) output.mutationId = mutationIds[0];
+  }
+  return Object.keys(output).length ? output : null;
+}
+async function runCardStoreCall(entry, operation, args, fence) {
+  validateCardStoreCall(operation, args);
+  fence();
+  const store = entry.store;
+  if (operation === "get") {
+    return store.get(args.collection, args.id, args.options);
+  }
+  if (operation === "list") {
+    return store.list(args.collection, args.query);
+  }
+  if (operation === "put") {
+    return store.put(args.collection, args.value, args.options);
+  }
+  if (operation === "remove") {
+    return store.remove(args.collection, args.id, args.options);
+  }
+  if (operation === "batch") return store.batch(args.mutations);
+  const collection = args.query.collection;
+  if (!entry.subscriptions.has(collection)) {
+    const unsubscribe = store.subscribe({ collection }, (change) => {
+      if (entry.closed || !entry.ready) return;
+      try {
+        fence();
+        const changedCollection = String(
+          change?.collection || change?.record?.collection || ""
+        );
+        if (changedCollection !== collection) return;
+        if (jsonByteLength(change) > MAX_CARD_STORE_RESPONSE_BYTES) {
+          throw cardStoreError(
+            "卡片仓库变更超出大小限制",
+            "BW_CARD_STORE_RESPONSE"
+          );
+        }
+        entry.send({ type: "CHANGE", data: change });
+      } catch (error) {
+        entry.invalidate("subscription-fence", error?.details || null);
+      }
+    });
+    entry.subscriptions.set(collection, unsubscribe);
+  }
+  return { collection, subscribed: true };
+}
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== CARD_STORE_PORT) return;
+  let binding;
+  try { binding = contentSenderBinding(port.sender); }
+  catch (error) {
+    try {
+      port.postMessage({
+        protocol: CARD_STORE_PROTOCOL,
+        type: "ERROR",
+        code: "BW_CARD_STORE_SENDER",
+        error: "卡片仓库只允许扩展顶层网页脚本连接"
+      });
+    } catch (_) {}
+    try { port.disconnect(); } catch (_) {}
+    return;
+  }
+  const entry = {
+    port,
+    binding,
+    scope: null,
+    namespace: "",
+    store: null,
+    ready: false,
+    closed: false,
+    generation: 1,
+    inFlightRequests: new Map(),
+    subscriptions: new Map(),
+    unsubscribeAccount: null,
+    send: null,
+    invalidate: null
+  };
+  entry.send = (message) => {
+    if (entry.closed) return;
+    port.postMessage(Object.assign({ protocol: CARD_STORE_PROTOCOL }, message));
+  };
+  const close = () => {
+    if (entry.closed) return;
+    entry.closed = true;
+    entry.ready = false;
+    entry.generation += 1;
+    cardStorePorts.delete(entry);
+    try { entry.unsubscribeAccount?.(); } catch (_) {}
+    entry.unsubscribeAccount = null;
+    for (const unsubscribe of entry.subscriptions.values()) {
+      try { unsubscribe?.(); } catch (_) {}
+    }
+    entry.subscriptions.clear();
+  };
+  entry.invalidate = (reason, details = null) => {
+    if (entry.closed) return;
+    try {
+      entry.send({
+        type: "INVALIDATED",
+        code: "BW_CARD_STORE_STALE",
+        reason: String(reason || "account-context-stale"),
+        details: cardStoreUnknownOutcome(entry, details)
+      });
+    } catch (_) {}
+    close();
+    try { port.disconnect(); } catch (_) {}
+  };
+  const fence = (generation, scope) => {
+    if (
+      entry.closed ||
+      !cardStorePorts.has(entry) ||
+      entry.generation !== generation ||
+      !entry.ready ||
+      !entry.store
+    ) {
+      throw cardStoreError(
+        "卡片仓库连接已经失效",
+        "BW_CARD_STORE_STALE"
+      );
+    }
+    if (!providerBindingMatchesSender(binding, port.sender)) {
+      throw cardStoreError(
+        "卡片仓库页面身份已经变化",
+        "BW_CARD_STORE_SENDER"
+      );
+    }
+    fenceCardStoreScope(scope);
+    if (scope.namespace !== entry.namespace) {
+      throw cardStoreError(
+        "卡片仓库账户已经变化",
+        "BW_ACCOUNT_CONTEXT_STALE"
+      );
+    }
+  };
+  cardStorePorts.add(entry);
+  port.onDisconnect.addListener(close);
+  port.onMessage.addListener(async (message) => {
+    if (
+      entry.closed ||
+      !message ||
+      message.protocol !== CARD_STORE_PROTOCOL ||
+      message.type !== "CALL" ||
+      !/^[A-Za-z0-9._:-]{1,120}$/.test(String(message.id || ""))
+    ) return;
+    const requestId = String(message.id);
+    if (entry.inFlightRequests.has(requestId)) {
+      entry.invalidate("duplicate-request-id", {
+        mutationIds: cardStoreMutationIds(
+          String(message.operation || ""),
+          message.args || {}
+        )
+      });
+      return;
+    }
+    if (!providerBindingMatchesSender(binding, port.sender)) {
+      entry.invalidate("sender-document-changed");
+      return;
+    }
+    if (!entry.ready || !entry.scope || !entry.store) {
+      entry.send({
+        type: "RESULT",
+        id: requestId,
+        ok: false,
+        code: "BW_CARD_STORE_NOT_READY",
+        error: "卡片仓库尚未就绪"
+      });
+      return;
+    }
+    const operation = String(message.operation || "");
+    const args = message.args || {};
+    const request = {
+      operation,
+      mutationIds: cardStoreMutationIds(operation, args)
+    };
+    entry.inFlightRequests.set(requestId, request);
+    const generation = entry.generation;
+    const scope = entry.scope;
+    try {
+      const assertCurrent = () => fence(generation, scope);
+      assertCurrent();
+      const data = await runCardStoreCall(
+        entry,
+        operation,
+        args,
+        assertCurrent
+      );
+      assertCurrent();
+      if (jsonByteLength(data) > MAX_CARD_STORE_RESPONSE_BYTES) {
+        throw cardStoreError(
+          "卡片仓库响应超出大小限制",
+          "BW_CARD_STORE_RESPONSE",
+          { limit: MAX_CARD_STORE_RESPONSE_BYTES }
+        );
+      }
+      entry.send({ type: "RESULT", id: requestId, ok: true, data });
+    } catch (error) {
+      const code = String(error?.code || "BW_CARD_STORE_OPERATION");
+      if ([
+        "BW_ACCOUNT_CONTEXT_STALE",
+        "BW_ACCOUNT_CONTEXT_UNAVAILABLE",
+        "BW_CARD_STORE_SENDER",
+        "BW_CARD_STORE_STALE"
+      ].includes(code)) {
+        entry.invalidate(code, {
+          mutationIds: request.mutationIds
+        });
+        return;
+      }
+      entry.send({
+        type: "RESULT",
+        id: requestId,
+        ok: false,
+        code,
+        error: error instanceof Error ? error.message : String(error),
+        details: cardStorePublicDetails(error?.details)
+      });
+    } finally {
+      if (entry.inFlightRequests.get(requestId) === request) {
+        entry.inFlightRequests.delete(requestId);
+      }
+    }
+  });
+  Promise.resolve().then(async () => {
+    if (!providerBindingMatchesSender(binding, port.sender)) {
+      throw cardStoreError(
+        "卡片仓库页面身份已经变化",
+        "BW_CARD_STORE_SENDER"
+      );
+    }
+    for (const collection of CARD_STORE_COLLECTIONS) {
+      if (!persistentProviderRegistry.collections.has(collection)) {
+        throw cardStoreError(
+          "DataRegistry 尚未开放卡片 collection",
+          "BW_CARD_STORE_REGISTRY"
+        );
+      }
+    }
+    const scope = await captureCardStoreScopeForContentSender(port.sender);
+    const store = await vaultFor(scope.namespace);
+    if (scope.kind === "install-local") await markLocalCardStoreCreated();
+    fenceCardStoreScope(scope);
+    if (
+      entry.closed ||
+      !providerBindingMatchesSender(binding, port.sender)
+    ) {
+      throw cardStoreError(
+        "卡片仓库页面身份已经变化",
+        "BW_CARD_STORE_SENDER"
+      );
+    }
+    entry.scope = scope;
+    entry.namespace = scope.namespace;
+    entry.store = store;
+    entry.unsubscribeAccount = persistentAccountContext.subscribe(() => {
+      if (entry.closed || !entry.scope) return;
+      try {
+        fenceCardStoreScope(entry.scope);
+      } catch (_) {
+        entry.invalidate("account-context-changed");
+      }
+    });
+    entry.ready = true;
+    entry.send({
+      type: "READY",
+      capabilities: {
+        collections: [...CARD_STORE_COLLECTIONS].sort(),
+        operations: CARD_STORE_OPERATIONS.slice()
+      }
+    });
+  }).catch((error) => {
+    if (entry.closed) return;
+    try {
+      entry.send({
+        type: "ERROR",
+        code: String(error?.code || "BW_CARD_STORE_UNAVAILABLE"),
+        error: error instanceof Error ? error.message : String(error),
+        details: cardStorePublicDetails(error?.details)
+      });
+    } catch (_) {}
+    close();
+    try { port.disconnect(); } catch (_) {}
   });
 });
 

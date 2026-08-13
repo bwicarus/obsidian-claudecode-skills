@@ -328,7 +328,13 @@ internal sealed class NamedPipeReaderRealtimeOutputRpcClient
     internal static readonly PipeOptions RequiredPipeOptions =
         PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly;
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(3);
-    private static readonly TimeSpan ExchangeTimeout = TimeSpan.FromSeconds(14);
+    // The broker deliberately allows up to 20 seconds for an exact-text
+    // highlight to materialize an off-screen page, persist the idempotent
+    // mutation, and confirm the rendered rectangle.  The pipe client must
+    // outlive that owner deadline; otherwise it closes the RPC at 14 seconds
+    // while the broker is still validly working and reports a false timeout
+    // even when the Reader applies the highlight moments later.
+    private static readonly TimeSpan ExchangeTimeout = TimeSpan.FromSeconds(24);
     private static readonly TimeSpan StatusConnectTimeout =
         TimeSpan.FromSeconds(1);
     private static readonly TimeSpan StatusExchangeTimeout =

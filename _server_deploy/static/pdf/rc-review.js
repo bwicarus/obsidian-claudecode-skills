@@ -725,6 +725,140 @@
       contextKey === _contextCacheKey;
   }
 
+  function _cardRepository() {
+    try {
+      var repository = window.BWReaderRuntime &&
+        window.BWReaderRuntime.cardRepository;
+      return repository && typeof repository.snapshot === 'function' &&
+        typeof repository.patchState === 'function'
+        ? repository
+        : null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function _localClozeFace(value, reveal) {
+    var html = String(value == null ? '' : value).replace(
+      /[&<>"']/g,
+      function (character) {
+        return {
+          '&': '&amp;', '<': '&lt;', '>': '&gt;',
+          '"': '&quot;', "'": '&#39;'
+        }[character];
+      }
+    );
+    html = html.replace(
+      /\{\{c\d+::([\s\S]*?)(?:::[\s\S]*?)?\}\}/g,
+      reveal ? '<b>$1</b>' : '<b>[…]</b>'
+    );
+    return html.replace(/\r?\n/g, '<br>');
+  }
+
+  function _legacyProjectionCardId(state) {
+    var receipt = state && state.projections && state.projections.anki &&
+      state.projections.anki['pi-legacy'];
+    var ids = receipt && receipt.cardIds;
+    if (!receipt || receipt.status !== 'succeeded' ||
+        !Array.isArray(ids) || ids.length !== 1) return null;
+    var cardId = Number(ids[0]);
+    return Number.isSafeInteger(cardId) && cardId > 0 ? cardId : null;
+  }
+
+  function _localReviewCard(record, card, state, cardIndex, due) {
+    var source = record.source || {};
+    var mapped = Object.assign({}, card, {
+      question: card.type === 'cloze'
+        ? _localClozeFace(card.cloze || card.text || '', false)
+        : String(card.front || ''),
+      answer: card.type === 'cloze'
+        ? _localClozeFace(card.cloze || card.text || '', true)
+        : String(card.back || ''),
+      deck: String(card.deck || ''),
+      reason: String(card.reason || ''),
+      local_id: record.id + ':' + cardIndex,
+      entity_id: record.id,
+      entity_index: cardIndex,
+      source_ref: String(
+        source.sourceId || source.documentId || source.bookId ||
+        source.url || ''
+      ),
+      source_url: String(source.url || ''),
+      _localReview: {
+        gid: record.id,
+        cardIndex: cardIndex,
+        stateRev: Number(record.stateRev || 0),
+        review: Object.assign({}, state.review || {}),
+        wasDue: due === true
+      }
+    });
+    var externalCardId = _legacyProjectionCardId(state);
+    if (externalCardId != null) mapped._legacyExternalCardId = externalCardId;
+    return mapped;
+  }
+
+  async function _loadLocalReviewQueue(limit) {
+    var repository = _cardRepository();
+    if (!repository) return null;
+    var records = await repository.snapshot();
+    if (!Array.isArray(records)) {
+      throw new Error('本地卡库返回了无效快照');
+    }
+    var now = Date.now();
+    var available = 0;
+    var dueCards = [];
+    var newCards = [];
+    records.forEach(function (record) {
+      if (!record || record.deleted || !Array.isArray(record.cards) ||
+          !record.states) return;
+      record.cards.forEach(function (card, cardIndex) {
+        var state = record.states[String(cardIndex)];
+        if (!state || state.phase !== 'confirmed' || state.removed === true ||
+            (state.flags && state.flags.archived === true)) return;
+        available += 1;
+        var review = state.review || {};
+        var status = String(review.status || 'new').toLowerCase();
+        if (status === 'unavailable' || status === 'suspended' ||
+            status === 'buried') return;
+        if (status === 'new') {
+          newCards.push({ record: record, card: card, state: state,
+            cardIndex: cardIndex });
+          return;
+        }
+        var dueAt = Number(review.dueAt);
+        if (Number.isFinite(dueAt) && dueAt > now) return;
+        dueCards.push({ record: record, card: card, state: state,
+          cardIndex: cardIndex, dueAt: Number.isFinite(dueAt) ? dueAt : 0 });
+      });
+    });
+    function stable(left, right) {
+      var idOrder = String(left.record.id).localeCompare(String(right.record.id));
+      return idOrder || left.cardIndex - right.cardIndex;
+    }
+    dueCards.sort(function (left, right) {
+      return left.dueAt - right.dueAt || stable(left, right);
+    });
+    newCards.sort(function (left, right) {
+      var created = Number(left.state.confirmedAt || 0) -
+        Number(right.state.confirmedAt || 0);
+      return created || stable(left, right);
+    });
+    return {
+      hasLocalCards: available > 0,
+      dueTotal: dueCards.length,
+      cards: dueCards.concat(newCards).slice(0, Math.max(1, limit || 30))
+        .map(function (item) {
+          return _localReviewCard(
+            item.record,
+            item.card,
+            item.state,
+            item.cardIndex,
+            Object.prototype.hasOwnProperty.call(item, 'dueAt')
+          );
+        })
+    };
+  }
+
   function _cardRequestCurrent(epoch, cardKey, kind) {
     var expected = kind === 'commit'
       ? _commitRequestEpoch
@@ -908,6 +1042,45 @@
     var requestEpoch = ++_queueRequestEpoch;
     _contextCacheKey = contextKey;
     _queueBusy = true;
+    _setBusy('⏳ 读取本机复习卡…');
+    try {
+      var localQueue = await _loadLocalReviewQueue(30);
+      if (!_queueRequestCurrent(requestEpoch, contextKey)) return;
+      if (localQueue && localQueue.hasLocalCards) {
+        var localSnapshot = _queueSnapshot(
+          contextKey,
+          localQueue.cards,
+          0,
+          localQueue.dueTotal,
+          0,
+          []
+        );
+        _applyQueueSnapshot(localSnapshot);
+        await _saveLocal(localSnapshot, function () {
+          return _queueRequestCurrent(requestEpoch, contextKey);
+        });
+        if (!_queueRequestCurrent(requestEpoch, contextKey)) return;
+        _queueBusy = false;
+        render();
+        _activateCurrentSelections();
+        _notifyAssistant('queue-local');
+        return;
+      }
+    } catch (localError) {
+      if (!_queueRequestCurrent(requestEpoch, contextKey)) return;
+      _queueBusy = false;
+      body.innerHTML = '';
+      var localFail = document.createElement('div');
+      localFail.className = 'rv-dim';
+      localFail.appendChild(document.createTextNode(
+        '读取本地卡库失败：' +
+        String(localError && localError.message || '未知错误')
+      ));
+      localFail.appendChild(document.createElement('br'));
+      localFail.appendChild(_button('reload', '重试', 'rv-btn'));
+      body.appendChild(localFail);
+      return;
+    }
     var cached = await _cacheGet();
     if (!_queueRequestCurrent(requestEpoch, contextKey)) return;
     var exactCache = cached &&
@@ -1517,6 +1690,120 @@
     }
   }
 
+  function _scheduledLocalReview(previous, ease, reviewedAt) {
+    previous = previous || {};
+    var priorInterval = Math.max(0, Number(previous.intervalDays || 0));
+    var intervalDays = 0;
+    var status = 'review';
+    if (ease === 1) {
+      status = 'relearning';
+    } else if (ease === 2) {
+      intervalDays = Math.max(1, priorInterval > 0
+        ? priorInterval * 1.2
+        : 1);
+    } else if (ease === 3) {
+      intervalDays = Math.max(1, priorInterval > 0
+        ? priorInterval * 2.5
+        : 1);
+    } else {
+      intervalDays = Math.max(4, priorInterval > 0
+        ? priorInterval * 3.5
+        : 4);
+    }
+    intervalDays = Math.round(intervalDays * 100) / 100;
+    return {
+      status: status,
+      dueAt: ease === 1
+        ? reviewedAt + 10 * 60 * 1000
+        : reviewedAt + Math.round(intervalDays * 24 * 60 * 60 * 1000),
+      lastReviewedAt: reviewedAt,
+      intervalDays: intervalDays,
+      ease: ease,
+      reps: Math.max(0, Number(previous.reps || 0)) + 1,
+      lapses: Math.max(0, Number(previous.lapses || 0)) +
+        (ease === 1 ? 1 : 0)
+    };
+  }
+
+  function _projectLegacyLocalAnswer(card, ease, aid) {
+    var cardId = Number(card && card._legacyExternalCardId || 0);
+    if (!Number.isSafeInteger(cardId) || cardId <= 0) return;
+    var payload = { aid: aid, card_id: cardId, ease: ease };
+    // This is a best-effort projection only. The repository write above is the
+    // authoritative review result and is never reverted by a Pi/Anki failure.
+    // @interaction review.answer.submit
+    fetch('/pdf/api/review-answer', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload)
+    }).then(function (response) {
+      return response.json().catch(function () { return {}; }).then(function (data) {
+        if (!response.ok || !data || data.ok === false) {
+          throw new Error(String(data && data.error || ('HTTP ' + response.status)));
+        }
+      });
+    }).catch(function (error) {
+      if (error && error.name === 'TypeError' && RC.outbox &&
+          typeof RC.outbox.send === 'function') {
+        try {
+          RC.outbox.send('rev', aid, '/pdf/api/review-answer', payload);
+          _toast('本地评分已保存；外部 Anki 更新将在联网后投递');
+          return;
+        } catch (_) {}
+      }
+      _toast('本地评分已保存；外部 Anki 更新失败：' +
+        String(error && error.message || '未知错误'));
+    });
+  }
+
+  function _answerLocalCurrent(card, ease, pendingKey, originalIndex,
+      answerContextKey) {
+    var repository = _cardRepository();
+    var local = card && card._localReview;
+    if (!repository || !local) {
+      delete _ratingPending[pendingKey];
+      _toast('本地卡库尚未就绪，评分未保存');
+      return;
+    }
+    var aid = _answerAid();
+    var reviewedAt = Date.now();
+    var nextReview = _scheduledLocalReview(local.review, ease, reviewedAt);
+    repository.patchState(local.gid, local.cardIndex, {
+      review: nextReview
+    }, {
+      mutationId: 'review:' + local.gid + ':' + local.cardIndex + ':' + aid
+    }).then(function (patched) {
+      var patchedState = patched && patched.states &&
+        patched.states[String(local.cardIndex)];
+      if (!patchedState || !patchedState.review) {
+        throw new Error('本地卡库未返回已保存的复习状态');
+      }
+      if (answerContextKey === _contextCacheKey) {
+        _rememberAndDeactivateSelections();
+        _invalidateCardRequests(true);
+        _queue.splice(originalIndex, 1);
+        if (local.wasDue) _dueTotal = Math.max(0, _dueTotal - 1);
+        _idx = Math.max(0, Math.min(originalIndex, _queue.length - 1));
+        _showingAnswer = false;
+        _improveExpanded = false;
+        var snapshot = _currentQueueSnapshot();
+        _saveLocal(snapshot, function () {
+          return snapshot.client_context_key === _contextCacheKey;
+        });
+        render();
+        _activateCurrentSelections();
+        _scheduleDecorate();
+        _notifyAssistant('card-rated-local');
+      }
+      delete _ratingPending[pendingKey];
+      _projectLegacyLocalAnswer(card, ease, aid);
+    }).catch(function (error) {
+      delete _ratingPending[pendingKey];
+      _toast('评分未保存，卡片仍在当前队列：' +
+        String(error && error.message || '未知错误'));
+    });
+  }
+
   function _restoreRejectedAnswer(card, originalIndex, ease, pendingKey,
       answerContextKey) {
     _patchSharedCard(card, {
@@ -1578,6 +1865,16 @@
       originalIndex;
     if (_ratingPending[pendingKey]) return;
     _ratingPending[pendingKey] = true;
+    if (card._localReview) {
+      _answerLocalCurrent(
+        card,
+        ease,
+        pendingKey,
+        originalIndex,
+        answerContextKey
+      );
+      return;
+    }
     _patchSharedCard(card, {
       _st: 'done',
       _showBack: true,

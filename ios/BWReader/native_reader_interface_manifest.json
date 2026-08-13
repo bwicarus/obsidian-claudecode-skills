@@ -801,6 +801,21 @@
       "description": "Read a Pi table-of-contents job status."
     },
     {
+      "path": "/pdf/api/card-repository/bootstrap",
+      "match": "exact",
+      "owner": "pi",
+      "methods": [
+        "GET"
+      ],
+      "surfaces": [
+        "epub",
+        "pdf"
+      ],
+      "status": "supported",
+      "remoteBook": null,
+      "description": "Read a private paginated legacy card snapshot for the App-local repository bootstrap."
+    },
+    {
       "path": "/pdf/api/char-offset",
       "match": "exact",
       "owner": "pi",

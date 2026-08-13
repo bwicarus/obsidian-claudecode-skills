@@ -80,14 +80,30 @@ function syncedChange({
 }
 
 const LEGACY_SYNC_DIGEST =
-  "sync-v2:user-settings:explicit:0:1|vocabulary-state:explicit:0:1";
+  "sync-v2:card-entities:explicit:0:1|card-states:explicit:0:1|user-settings:explicit:0:1|vocabulary-state:explicit:0:1";
+const PREVIOUS_CARDLESS_DIGEST =
+  "sync-v3:record-parent-state/1|user-settings:explicit:0:1|vocabulary-state:explicit:0:1";
 
 test("DataRegistry 的同步白名单唯一且不含 device/document/pending", () => {
   assert.deepEqual(DataRegistry.syncCollections(), [
+    "card-entities",
+    "card-states",
     "user-settings",
     "vocabulary-state",
   ]);
   assert.deepEqual(DataRegistry.syncDescriptor(), [
+    {
+      name: "card-entities",
+      conflictPolicy: "explicit",
+      derived: false,
+      recordSchema: 1,
+    },
+    {
+      name: "card-states",
+      conflictPolicy: "explicit",
+      derived: false,
+      recordSchema: 1,
+    },
     {
       name: "user-settings",
       conflictPolicy: "explicit",
@@ -103,7 +119,7 @@ test("DataRegistry 的同步白名单唯一且不含 device/document/pending", (
   ]);
   assert.equal(
     DataRegistry.syncDigest(),
-    "sync-v3:record-parent-state/1|user-settings:explicit:0:1|vocabulary-state:explicit:0:1",
+    "sync-v3:record-parent-state/1|card-entities:explicit:0:1|card-states:explicit:0:1|user-settings:explicit:0:1|vocabulary-state:explicit:0:1",
   );
   for (const name of DataRegistry.syncCollections()) {
     assert.equal(DataRegistry.isProviderCollection(name), true);
@@ -117,6 +133,16 @@ test("DataRegistry 的同步白名单唯一且不含 device/document/pending", (
   for (const name of ["cards", "document-notes", "device-preferences", "ui-session"]) {
     assert.equal(DataRegistry.isSyncCollection(name), false);
   }
+  assert.deepEqual(
+    DataRegistry.syncCheckpointMigration(PREVIOUS_CARDLESS_DIGEST),
+    {
+      contract: "sync-registry-migration/1",
+      from: PREVIOUS_CARDLESS_DIGEST,
+      to: DataRegistry.syncDigest(),
+      strategy: "reset-checkpoint",
+    },
+  );
+  assert.equal(DataRegistry.syncCheckpointMigration("sync-v3:unknown"), null);
 });
 
 test("协调器对缺失或自相矛盾的 sync-v3 描述 fail closed", () => {

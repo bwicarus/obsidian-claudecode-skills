@@ -344,6 +344,13 @@
       '读取双向上下文同步与交付模式的服务端真值',
       { kind: 'query' }
     ),
+    networkRead(
+      'card.repository.bootstrap',
+      ['/pdf/api/card-repository/bootstrap'],
+      {
+        reason: '用户显式执行 Pi 同步时，一次性读取账户旧卡快照并原子导入 App 本地卡库'
+      }
+    ),
     /*
      * 电脑客户端的设备状态、一次性配对、启动命令和短期 WebRTC 信令均为
      * 易失远端状态：禁止离线排队或本地乐观成功，任一请求失败即明确不可用。

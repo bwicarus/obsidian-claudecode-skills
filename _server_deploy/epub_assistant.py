@@ -645,7 +645,11 @@ def _t_native_notes_edit(args, ctx):
 
 
 def _t_make_anki(args, ctx):
-    """把内容做成 Anki 卡(后台,完成发通知)。复用 assistant 后台任务框架;M5:选中源文在当前章标**绿色回链高亮**(前端按文本定位,和 PDF 制卡回链一致)。"""
+    """把内容做成 Reader 卡片草稿(后台,完成发通知)。
+
+    服务端不提前写 Pi 卡库或页面高亮；后台结果携带来源意图，前端先把
+    草稿落进本地权威卡仓，再执行绿色来源高亮投影。
+    """
     text = (args.get("text") or "").strip() or (ctx.get("selection") or "").strip()
     if not text:
         return {"error": "缺要做卡的内容(给 text 或先选中)"}
@@ -653,11 +657,7 @@ def _t_make_anki(args, ctx):
     img = (args.get("image_url") or "").strip()
     if img:
         params["image_url"] = img   # 刚 search_image 过、这张图也该进卡片 → 透传到 _run_snippets_to 真下载存进 Anki 媒体库
-    res = _A()._bg_task("anki", params, ctx)
-    sel = (ctx.get("selection") or "").strip()   # M5:回链高亮源文=选中原文(可定位);AI 改写后的 text 不一定在正文里,不用它
-    if isinstance(res, dict) and not res.get("error") and sel:
-        res["client_action"] = {"fn": "epubHighlight", "args": [{"section": _cur_idx(ctx, args, key="section"), "texts": [sel[:400]], "color": "#a5d6a7"}]}
-    return res
+    return _A()._bg_task("anki", params, ctx)
 
 
 def _t_make_note(args, ctx):

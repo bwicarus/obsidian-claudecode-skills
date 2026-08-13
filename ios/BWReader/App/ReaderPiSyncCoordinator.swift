@@ -68,36 +68,44 @@ struct ReaderPiDataSyncReport: Equatable, Sendable {
     var summary: String {
         switch state {
         case .complete:
-            return "设置与词汇状态已同步"
+            return "设置、词汇与卡片仓库已同步"
         case .partial:
             return pendingLocal
-                ? "设置与词汇状态仍有待同步变更"
-                : "设置与词汇状态仅部分同步"
+                ? "设置、词汇或卡片仓库仍有待同步变更"
+                : "设置、词汇与卡片仓库仅部分同步"
         case .blocked:
             if errorCode == "BW_NATIVE_SYNC_BOOTSTRAP_UNAVAILABLE" {
-                return "设置与词汇状态尚未接通 Pi；本机数据未受影响"
+                return "设置、词汇与卡片仓库尚未接通 Pi；本机数据未受影响"
+            }
+            if errorCode == "BW_SYNC_REGISTRY_MISMATCH" {
+                return "Pi 尚未完成卡片仓库同步升级；本机数据未受影响"
             }
             return conflictCount > 0
-                ? "设置或词汇状态存在 \(conflictCount) 个冲突，未覆盖"
+                ? "设置、词汇或卡片仓库存在 \(conflictCount) 个冲突，未覆盖"
                 : "数据同步 owner 当前暂停"
         case .unknown:
-            return "无法确认设置与词汇状态的同步结果"
+            return "无法确认设置、词汇与卡片仓库的同步结果"
         case .error:
             return errorCode.isEmpty
-                ? "设置与词汇状态同步失败"
-                : "设置与词汇状态同步失败（\(errorCode)）"
+                ? "设置、词汇与卡片仓库同步失败"
+                : "设置、词汇与卡片仓库同步失败（\(errorCode)）"
         }
     }
 }
 
 struct ReaderPiSyncReport: Identifiable, Equatable, Sendable {
+    static let syncedDataCollections = [
+        "card-entities",
+        "card-states",
+        "user-settings",
+        "vocabulary-state",
+    ]
+
     static let unsupportedDomains = [
         "阅读进度",
         "高亮",
         "笔迹",
         "便签",
-        "卡片实体",
-        "卡片状态",
         "卡片位置",
     ]
 
@@ -130,7 +138,7 @@ private enum ReaderPiSyncError: LocalizedError {
     var errorDescription: String? {
         switch self {
         case .pageUnavailable:
-            return "Reader 页面尚未准备好，无法同步设置与词汇状态"
+            return "Reader 页面尚未准备好，无法同步设置、词汇与卡片仓库"
         case .dataContractUnavailable:
             return "当前 Reader 版本尚未提供安全的数据同步入口"
         case .invalidDataResult:
@@ -175,7 +183,7 @@ final class ReaderPiSyncCoordinator: ObservableObject {
             case .readingPiCatalog: return "正在核对 Pi 书库…"
             case .uploading(let current, let total, let title):
                 return "正在上传 \(current)/\(total)：\(title)"
-            case .syncingData: return "正在同步设置与词汇状态…"
+            case .syncingData: return "正在同步设置、词汇与卡片仓库…"
             }
         }
     }
@@ -236,7 +244,7 @@ final class ReaderPiSyncCoordinator: ObservableObject {
             dataReport = ReaderPiDataSyncReport(
                 state: .unknown,
                 owner: "unknown",
-                collections: ["user-settings", "vocabulary-state"],
+                collections: ReaderPiSyncReport.syncedDataCollections,
                 applied: 0,
                 pendingLocal: true,
                 conflictCount: 0,
@@ -386,9 +394,31 @@ private extension ReaderWebViewModel {
               }
             }
             if (!syncNow) return "";
-            return JSON.stringify(await syncNow(request));
+            try {
+              return JSON.stringify(await syncNow(request));
+            } catch (error) {
+              const rawCode = String(error && error.code || "");
+              const errorCode = /^[A-Z][A-Z0-9_]{0,79}$/.test(rawCode)
+                ? rawCode : "BW_NATIVE_SYNC";
+              return JSON.stringify({
+                contract: "reader-pi-data-sync-result/1",
+                requestId,
+                owner: "native-app",
+                state: errorCode === "BW_SYNC_REGISTRY_MISMATCH"
+                  ? "blocked" : "error",
+                collections,
+                applied: 0,
+                pendingLocal: true,
+                conflictCount: 0,
+                errorCode,
+                retryable: error && error.retryable === true
+              });
+            }
             """,
-            arguments: ["requestId": requestID],
+            arguments: [
+                "requestId": requestID,
+                "collections": ReaderPiSyncReport.syncedDataCollections,
+            ],
             in: nil,
             contentWorld: .page
         )
@@ -409,6 +439,7 @@ private extension ReaderWebViewModel {
               decoded.requestId == requestID,
               safeOwners.contains(decoded.owner),
               safeCollections.count == decoded.collections.count,
+              safeCollections == ReaderPiSyncReport.syncedDataCollections,
               decoded.applied >= 0,
               decoded.conflictCount >= 0,
               decoded.errorCode.isEmpty ||

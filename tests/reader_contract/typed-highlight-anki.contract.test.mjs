@@ -8,8 +8,12 @@ const PDF = read("_server_deploy/static/pdf/reader.src/17-highlight.js");
 const EPUB = read("_server_deploy/static/pdf/epub-html.js");
 const VOICE = read("_server_deploy/static/pdf/rc-voicecall.js");
 const FLASH = read("_server_deploy/static/pdf/rc-flashcard.js");
+const COMPUTER = read("_server_deploy/static/pdf/rc-computer-voice.js");
 const WINDOWS_OUTPUT = read(
   "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderRealtimeOutput.cs",
+);
+const WINDOWS_OUTPUT_RPC = read(
+  "extensions/bw-reader-webext/windows/ComputerVoiceAudio/ReaderRealtimeOutputRpc.cs",
 );
 const MANIFEST = JSON.parse(read("ios/BWReader/native_reader_interface_manifest.json"));
 
@@ -77,6 +81,17 @@ test("PDF exact-text success waits until its saved rectangle is rendered", () =>
     /DeliveryTimeout = TimeSpan\.FromSeconds\(20\)/,
     "the broker deadline must cover the bounded page and render waits",
   );
+  const brokerSeconds = Number(
+    WINDOWS_OUTPUT.match(/DeliveryTimeout = TimeSpan\.FromSeconds\((\d+)\)/)?.[1],
+  );
+  const rpcSeconds = Number(
+    WINDOWS_OUTPUT_RPC.match(/ExchangeTimeout = TimeSpan\.FromSeconds\((\d+)\)/)?.[1],
+  );
+  assert.ok(Number.isFinite(brokerSeconds) && Number.isFinite(rpcSeconds));
+  assert.ok(
+    rpcSeconds > brokerSeconds,
+    "the named-pipe caller must not abandon a still-valid broker operation",
+  );
 });
 
 test("Realtime output waits for exact highlight and rendered Anki draft", () => {
@@ -87,20 +102,111 @@ test("Realtime output waits for exact highlight and rendered Anki draft", () => 
   assert.match(receiver, /__bwReaderHighlightExactText\(p\)/);
   assert.match(receiver, /delivery\.kind === 'anki-draft'/);
   assert.match(receiver, /__bwReaderValidateExactSource\(p\)/);
-  assert.match(receiver, /fetch\('\/pdf\/api\/anki-draft'/);
-  assert.match(receiver, /data\.anki_written !== false/);
-  assert.match(receiver, /RC\.flashcard\.presentDraft\(p\.cards, data\.gid\)/);
+  assert.match(receiver, /_readerDraftGid\(p\.draftId\)/);
+  assert.match(VOICE, /crypto\.subtle\.digest\(\s*'SHA-256'/);
+  assert.match(receiver, /repositorySource:\s*_readerDraftSource\(/);
+  assert.match(receiver, /entityRegistered:\s*false/);
+  assert.match(receiver, /localDraft:\s*\{/);
+  assert.match(receiver, /sourceInstanceId:\s*delivery\.sourceInstanceId/);
+  assert.match(receiver, /RC\.flashcard\.presentDraft\(\s*p\.cards,\s*gid,/);
+  assert.match(receiver, /repository:\s*'local'/);
+  assert.doesNotMatch(receiver, /fetch\('\/pdf\/api\/anki-draft'/);
+  assert.doesNotMatch(receiver, /addLocalAnkiCard/);
   assert.ok(receiver.indexOf("_rememberReaderOutput") > receiver.indexOf("Promise.resolve(work)"));
 });
 
-test("Anki MCP delivery reuses the existing confirmation-only UI", () => {
-  const start = FLASH.indexOf("function presentDraft(cards, gid)");
+test("Anki MCP delivery registers the draft before rendering confirmation UI", () => {
+  const start = FLASH.indexOf("function presentDraft(cards, gid, options)");
   const end = FLASH.indexOf("RC.flashcard =", start);
   const present = FLASH.slice(start, end);
+  assert.match(present, /repo\.registerDraft\(\{/);
+  assert.match(present, /source:\s*options\.repositorySource/);
+  assert.match(present, /requireDraftIdForReplay:\s*true/);
   assert.match(present, /mode:\s*'draft'/);
-  assert.match(present, /surface:\s*'float'/);
-  assert.match(present, /querySelector\('\.fc-add'\)/);
+  assert.match(present, /surface:\s*options\.host \? 'inflow' : 'float'/);
+  assert.match(present, /querySelector\('\.fc-card'\)/);
   assert.doesNotMatch(present, /anki-add-cards/);
+});
+
+test("local repository is authoritative while the Pi entity remains a legacy fallback", () => {
+  assert.match(
+    FLASH,
+    /repo\.load\(st\.gid\)[\s\S]*if \(record\) return applyRepositoryRecord/,
+    "state restore must consult the local repository first",
+  );
+  assert.match(
+    FLASH,
+    /if \(!st \|\| st\.opts\.entityRegistered === false\) return Promise\.resolve\(false\)/,
+    "a local-only entity must never be patched into the legacy Pi registry",
+  );
+  assert.match(FLASH, /saveConfirmedCard\(request, \{ mutationId: mutationId \}\)/);
+  assert.match(FLASH, /id:\s*st\.gid,[\s\S]*cid:\s*st\.gid,[\s\S]*gid:\s*st\.gid/);
+  assert.match(FLASH, /recordAnkiReceipt\(/);
+});
+
+test("draft confirmation is local-first and ReaderPC is an optional projection", () => {
+  const add = FLASH.slice(
+    FLASH.indexOf("function addToAnki"),
+    FLASH.indexOf("function _recordExternalReceipt"),
+  );
+  assert.match(add, /var request\s*=\s*\{/);
+  assert.match(add, /repo\.saveConfirmedCard\(request, \{ mutationId: mutationId \}\)/);
+  assert.match(add, /cardIndex:\s*i/);
+  assert.match(add, /cards:\s*repositoryCards\(st\.cards\)/);
+  assert.match(FLASH, /✓ 已保存到 Reader 本地卡库/);
+  assert.doesNotMatch(add, /addLocalAnkiCard|anki-add-cards/);
+
+  const optionalExport = FLASH.slice(
+    FLASH.indexOf("function exportToComputerAnki"),
+    FLASH.indexOf("function exportToMobileAnki"),
+  );
+  const durablePending = optionalExport.indexOf("_recordExternalReceipt(st, i, 'readerpc', pending");
+  const externalWrite = optionalExport.indexOf("RC.computerVoice.addLocalAnkiCard({");
+  assert.ok(durablePending >= 0 && externalWrite > durablePending);
+  assert.match(optionalExport, /draftId:\s*draft\.draftId/);
+  assert.match(optionalExport, /sourceInstanceId:\s*draft\.sourceInstanceId/);
+  assert.match(optionalExport, /cardIndex:\s*i/);
+  assert.match(optionalExport, /repositoryCard\(c\)/);
+  assert.match(optionalExport, /c\._pcExportStatus === 'unknown'/);
+  assert.match(optionalExport, /电脑 Anki 接收结果未知，已阻止重复发送/);
+
+  const local = COMPUTER.slice(
+    COMPUTER.indexOf("function normalizeLocalAnkiCard"),
+    COMPUTER.indexOf("function offlineAvailability"),
+  );
+  const channel = COMPUTER.slice(
+    COMPUTER.indexOf("function acquireFreshAnkiChannel"),
+    COMPUTER.indexOf("function lookupJapaneseFallback"),
+  );
+  assert.match(local, /acquireFreshAnkiChannel\(\)/);
+  assert.match(channel, /channel\.request\("context-open"/);
+  assert.match(channel, /value\.state !== "context-only"/);
+  assert.match(local, /sessionId:\s*acquired\.sessionId/);
+  assert.match(local, /BW_READER_LOCAL_ANKI_CHANNEL_UNAVAILABLE/);
+  assert.match(local, /"anki-add-cards-local"/);
+  assert.match(local, /LOCAL_ANKI_ADD_TIMEOUT_MS/);
+  assert.doesNotMatch(local, /\/pdf\/api\/anki-add-cards/);
+  assert.match(COMPUTER, /addLocalAnkiCard:\s*addLocalAnkiCard/);
+});
+
+test("generic make_anki does not expose a saveable card before local draft persistence", () => {
+  const immediate = VOICE.slice(
+    VOICE.indexOf("if (_sc) {"),
+    VOICE.indexOf("// 后台任务", VOICE.indexOf("if (_sc) {")),
+  );
+  const immediatePersist = immediate.indexOf("RC.flashcard.presentDraft(_sc, _gid");
+  const immediatePart = immediate.indexOf("RC.turnCard.addPart(_stid", immediatePersist);
+  assert.ok(immediatePersist >= 0 && immediatePart > immediatePersist);
+  assert.match(immediate, /卡片草稿未写入本地仓库，未显示可保存卡片/);
+
+  const background = VOICE.slice(
+    VOICE.indexOf("if (stt === 'done'"),
+    VOICE.indexOf("} else if (stt === 'error')"),
+  );
+  const backgroundPersist = background.indexOf("RC.flashcard.presentDraft(_cds, _gid2");
+  const backgroundPart = background.indexOf("RC.turnCard.addPart(_turnTid", backgroundPersist);
+  assert.ok(backgroundPersist >= 0 && backgroundPart > backgroundPersist);
+  assert.match(background, /卡片草稿未写入本地仓库，未显示可保存卡片/);
 });
 
 test("native App proxies only the current verified book for draft registration", () => {

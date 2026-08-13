@@ -1323,9 +1323,14 @@ test("StorageRouter 只按已登记归属分流，未知和 pending 均报错", 
 test("生产注册表只开放已确认 collection，冲突数据保持 pending", () => {
   assert.deepEqual(
     DataRegistry.providerCollections(),
-    ["dictionary-cache", "query-cache", "translation-cache", "user-settings", "vocabulary-state"],
+    [
+      "card-entities", "card-states", "dictionary-cache", "query-cache",
+      "translation-cache", "user-settings", "vocabulary-state",
+    ],
   );
   assert.equal(DataRegistry.collection("user-settings").status, "ready");
+  assert.equal(DataRegistry.collection("card-entities").status, "ready");
+  assert.equal(DataRegistry.collection("card-states").status, "ready");
   for (const name of ["cards", "favorites", "anchors", "vocabulary", "conversation-threads"]) {
     assert.equal(DataRegistry.collection(name).status, "pending", `${name} 不得被静默开放`);
   }

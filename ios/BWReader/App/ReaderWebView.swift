@@ -1,4 +1,5 @@
 import Combine
+import CoreFoundation
 import SwiftUI
 import UIKit
 import WebKit
@@ -8,6 +9,7 @@ private let nativeComputerContextMessageName = "bwNativeComputerContext"
 private let nativeAgentVoiceMessageName = "bwNativeAgentVoice"
 private let nativePencilInkMessageName = "bwNativePencilInk"
 private let nativeLocalNotesMessageName = "bwNativeLocalNotes"
+private let nativeAnkiMobileMessageName = "bwNativeAnkiMobile"
 
 struct ReaderLastLocalBookReference: Codable, Equatable, Sendable {
     let libraryID: String
@@ -56,6 +58,141 @@ struct ReaderLastLocalBookStore {
 
     func clear() {
         defaults.removeObject(forKey: key)
+    }
+}
+
+private struct ReaderAnkiMobilePendingRecord {
+    let gid: String
+    let index: Int
+    let nonce: String
+    let documentIdentity: String
+    let expiresAt: Date
+    let callbackReceived: Bool
+}
+
+private struct ReaderAnkiMobilePendingStore {
+    static let shared = ReaderAnkiMobilePendingStore()
+
+    private let defaults: UserDefaults
+    private let key = "reader.ankiMobile.pending.v1"
+
+    init(defaults: UserDefaults = .standard) {
+        self.defaults = defaults
+    }
+
+    func load(now: Date = Date()) -> [ReaderAnkiMobilePendingRecord] {
+        guard let data = defaults.data(forKey: key) else { return [] }
+        guard
+            let object = try? JSONSerialization.jsonObject(with: data),
+            let envelope = object as? [String: Any],
+            Set(envelope.keys) == Set(["version", "records"]),
+            let version = envelope["version"] as? NSNumber,
+            CFGetTypeID(version) != CFBooleanGetTypeID(),
+            version.doubleValue == 1,
+            let rows = envelope["records"] as? [[String: Any]],
+            rows.count <= 256
+        else {
+            defaults.removeObject(forKey: key)
+            return []
+        }
+
+        var records = [ReaderAnkiMobilePendingRecord]()
+        var nonces = Set<String>()
+        var cards = Set<String>()
+        for row in rows {
+            guard
+                Set(row.keys) == Set([
+                    "gid", "index", "nonce", "documentIdentity",
+                    "expiresAt", "callbackReceived",
+                ]),
+                let gid = row["gid"] as? String,
+                Self.isValidGID(gid),
+                let index = row["index"] as? NSNumber,
+                CFGetTypeID(index) != CFBooleanGetTypeID(),
+                index.doubleValue == Double(index.intValue),
+                (0...255).contains(index.intValue),
+                let nonce = row["nonce"] as? String,
+                Self.isValidNonce(nonce),
+                let documentIdentity = row["documentIdentity"] as? String,
+                Self.isValidDocumentIdentity(documentIdentity),
+                let expiry = row["expiresAt"] as? NSNumber,
+                CFGetTypeID(expiry) != CFBooleanGetTypeID(),
+                expiry.doubleValue == Double(expiry.int64Value),
+                expiry.int64Value >= 0,
+                let callbackReceivedValue = row["callbackReceived"] as? NSNumber,
+                CFGetTypeID(callbackReceivedValue) == CFBooleanGetTypeID(),
+                nonces.insert(nonce).inserted,
+                cards.insert("\(gid):\(index.intValue)").inserted
+            else {
+                defaults.removeObject(forKey: key)
+                return []
+            }
+            let expiresAt = Date(
+                timeIntervalSince1970: Double(expiry.int64Value) / 1_000
+            )
+            if expiresAt <= now { continue }
+            records.append(ReaderAnkiMobilePendingRecord(
+                gid: gid,
+                index: index.intValue,
+                nonce: nonce,
+                documentIdentity: documentIdentity,
+                expiresAt: expiresAt,
+                callbackReceived: callbackReceivedValue.boolValue
+            ))
+        }
+        if records.count != rows.count {
+            save(records)
+        }
+        return records
+    }
+
+    func save(_ records: [ReaderAnkiMobilePendingRecord]) {
+        guard !records.isEmpty else {
+            defaults.removeObject(forKey: key)
+            return
+        }
+        let rows: [[String: Any]] = records.map { record in
+            [
+                "gid": record.gid,
+                "index": record.index,
+                "nonce": record.nonce,
+                "documentIdentity": record.documentIdentity,
+                "expiresAt": Int64(
+                    (record.expiresAt.timeIntervalSince1970 * 1_000).rounded()
+                ),
+                "callbackReceived": record.callbackReceived,
+            ]
+        }
+        let envelope: [String: Any] = ["version": 1, "records": rows]
+        guard JSONSerialization.isValidJSONObject(envelope),
+              let data = try? JSONSerialization.data(withJSONObject: envelope)
+        else { return }
+        defaults.set(data, forKey: key)
+    }
+
+    private static func isValidGID(_ value: String) -> Bool {
+        let suffix = value.dropFirst("card_".count)
+        let allowed = CharacterSet(charactersIn: "0123456789abcdef")
+        return value == value.lowercased()
+            && value.hasPrefix("card_")
+            && (4...64).contains(suffix.count)
+            && suffix.unicodeScalars.allSatisfy { allowed.contains($0) }
+    }
+
+    private static func isValidNonce(_ value: String) -> Bool {
+        let allowed = CharacterSet(charactersIn: "0123456789abcdef")
+        return value.count == 32
+            && value == value.lowercased()
+            && value.unicodeScalars.allSatisfy { allowed.contains($0) }
+    }
+
+    private static func isValidDocumentIdentity(_ value: String) -> Bool {
+        let prefix = "local-book:localbook-"
+        guard value.hasPrefix(prefix) else { return false }
+        let suffix = value.dropFirst(prefix.count)
+        let allowed = CharacterSet(charactersIn: "0123456789abcdef")
+        return suffix.count == 64
+            && suffix.unicodeScalars.allSatisfy { allowed.contains($0) }
     }
 }
 
@@ -120,6 +257,16 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         let recovery: ReaderNativePDFMutationRecoveryReceipt
     }
 
+    private struct PendingAnkiMobileExport {
+        let gid: String
+        let index: Int
+        let nonce: String
+        let documentIdentity: String
+        let expiresAt: Date
+        var callbackReceived: Bool
+        var delivering: Bool
+    }
+
     private enum NativeAgentVoiceCommand {
         case start(NativeAgentVoiceContext)
         case stop
@@ -179,6 +326,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var nativeAgentVoiceMessageProxy: WeakScriptMessageHandler?
     private var nativePencilInkMessageProxy: WeakScriptMessageHandler?
     private var nativeLocalNotesMessageProxy: WeakScriptMessageHandlerWithReply?
+    private var nativeAnkiMobileMessageProxy:
+        WeakScriptMessageHandlerWithReply?
     private var nativePiGateway: ReaderNativePiGateway?
     private weak var remoteLibraryCoordinator: ReaderRemoteLibraryCoordinator?
     private var nativePiRemoteLibraryCancellable: AnyCancellable?
@@ -220,6 +369,8 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     private var readerForeground = true
     private var readerWasBackgrounded = false
     private var webContentProcessNeedsReload = false
+    private let ankiMobilePendingStore = ReaderAnkiMobilePendingStore.shared
+    private var pendingAnkiMobileExports = [String: PendingAnkiMobileExport]()
 
     func bindNativeVisualCaptureCanvas(_ canvas: UIView) {
         localRuntimeServer?.visualCaptureBroker.bind(
@@ -256,6 +407,7 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             configuration: configuration
         )
         super.init()
+        restorePendingAnkiMobileExports()
 
         let contentController = webView.configuration.userContentController
         let nativeComputerVoiceMessageProxy =
@@ -295,6 +447,14 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             nativeLocalNotesMessageProxy,
             contentWorld: .page,
             name: nativeLocalNotesMessageName
+        )
+        let nativeAnkiMobileMessageProxy =
+            WeakScriptMessageHandlerWithReply(delegate: self)
+        self.nativeAnkiMobileMessageProxy = nativeAnkiMobileMessageProxy
+        contentController.addScriptMessageHandler(
+            nativeAnkiMobileMessageProxy,
+            contentWorld: .page,
+            name: nativeAnkiMobileMessageName
         )
         if let localRuntimeServer {
             let nativePiGateway = ReaderNativePiGateway(
@@ -481,6 +641,29 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
                 writable: false,
                 value: true
               });
+            })();
+            """#,
+            injectionTime: .atDocumentStart,
+            forMainFrameOnly: true
+        ))
+        contentController.addUserScript(WKUserScript(
+            source: #"""
+            (() => {
+              if (window.__bwNativeAnkiMobile) return;
+              if (location.origin !== "http://127.0.0.1:43129") return;
+              const handler = window.webkit?.messageHandlers?.bwNativeAnkiMobile;
+              if (!handler || typeof handler.postMessage !== "function") return;
+              const request = (payload) => handler.postMessage(payload);
+              Object.defineProperty(window, "__bwNativeAnkiMobile", {
+                configurable: false,
+                enumerable: false,
+                writable: false,
+                value: Object.freeze({ request })
+              });
+              window.dispatchEvent(new CustomEvent(
+                "bw-native-anki-mobile-capability",
+                { detail: { available: true } }
+              ));
             })();
             """#,
             injectionTime: .atDocumentStart,
@@ -2282,6 +2465,9 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
             })();
             """
         )
+        if foreground {
+            deliverPendingAnkiMobileCallbacks()
+        }
     }
 
     /// Proves the dedicated Reader snapshot socket while the native scene is
@@ -2559,6 +2745,384 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
     ) {
         let store = ReaderNativeBridgeStore()
         try? store.appendAgentEvent(event: event, payload: payload)
+    }
+
+    private func isValidAnkiMobileGID(_ value: String) -> Bool {
+        guard value == value.lowercased(), value.hasPrefix("card_") else {
+            return false
+        }
+        let suffix = value.dropFirst("card_".count)
+        let allowed = CharacterSet(charactersIn: "0123456789abcdef")
+        return (4...64).contains(suffix.count)
+            && suffix.unicodeScalars.allSatisfy { allowed.contains($0) }
+    }
+
+    private func isValidAnkiMobileNonce(_ value: String) -> Bool {
+        let allowed = CharacterSet(charactersIn: "0123456789abcdef")
+        return value.count == 32
+            && value == value.lowercased()
+            && value.unicodeScalars.allSatisfy { allowed.contains($0) }
+    }
+
+    private func ankiMobileQuery(_ url: URL) -> [String: String]? {
+        guard let components = URLComponents(
+            url: url,
+            resolvingAgainstBaseURL: false
+        ) else { return nil }
+        var result = [String: String]()
+        for item in components.queryItems ?? [] {
+            guard
+                result[item.name] == nil,
+                !item.name.contains("\0"),
+                let value = item.value,
+                !value.contains("\0")
+            else { return nil }
+            result[item.name] = value
+        }
+        return result
+    }
+
+    private func isValidAnkiMobileCallbackURL(
+        _ url: URL,
+        gid: String,
+        index: Int,
+        nonce: String
+    ) -> Bool {
+        guard
+            url.scheme?.lowercased() == "bwreader",
+            url.host?.lowercased() == "anki-export-success",
+            url.user == nil,
+            url.password == nil,
+            url.port == nil,
+            url.path.isEmpty,
+            url.fragment == nil,
+            let query = ankiMobileQuery(url),
+            Set(query.keys) == Set(["gid", "index", "nonce"])
+        else { return false }
+        return query["gid"] == gid
+            && query["index"] == String(index)
+            && query["nonce"] == nonce
+    }
+
+    private func isValidAnkiMobileAddNoteURL(
+        _ url: URL,
+        gid: String,
+        index: Int,
+        nonce: String
+    ) -> Bool {
+        guard
+            url.scheme?.lowercased() == "anki",
+            url.host?.lowercased() == "x-callback-url",
+            url.user == nil,
+            url.password == nil,
+            url.port == nil,
+            url.path == "/addnote",
+            url.fragment == nil,
+            let query = ankiMobileQuery(url),
+            let type = query["type"],
+            query["deck"] == "BW Reader",
+            let tags = query["tags"],
+            let callbackValue = query["x-success"],
+            let callbackURL = URL(string: callbackValue),
+            isValidAnkiMobileCallbackURL(
+                callbackURL,
+                gid: gid,
+                index: index,
+                nonce: nonce
+            )
+        else { return false }
+
+        let requiredFields: Set<String>
+        if type == "Basic" {
+            requiredFields = Set([
+                "type", "deck", "fldFront", "fldBack", "tags", "x-success",
+            ])
+            guard
+                query["fldFront"]?.isEmpty == false,
+                query["fldBack"]?.isEmpty == false
+            else { return false }
+        } else if type == "Cloze" {
+            requiredFields = Set([
+                "type", "deck", "fldText", "tags", "x-success",
+            ])
+            guard
+                let text = query["fldText"],
+                !text.isEmpty,
+                text.range(
+                    of: #"\{\{c[1-9][0-9]*::[\s\S]+?\}\}"#,
+                    options: .regularExpression
+                ) != nil
+            else { return false }
+        } else {
+            return false
+        }
+        guard Set(query.keys) == requiredFields else { return false }
+        let tagSet = Set(
+            tags.split(whereSeparator: { $0.isWhitespace }).map(String.init)
+        )
+        return tagSet.contains("bwreader")
+            && tagSet.contains("bwgid_\(gid)")
+            && tagSet.contains("bwindex_\(index)")
+            && query.values.allSatisfy { !$0.contains("\0") }
+    }
+
+    private func ankiMobileDocumentIdentity() -> String? {
+        // Never persist the loopback capability path: it contains a bearer
+        // token. A stable local book id is sufficient to bind delivery to the
+        // same Reader document across WebKit and App restarts.
+        guard let currentLocalBook else { return nil }
+        return "local-book:\(currentLocalBook.id)"
+    }
+
+    private func restorePendingAnkiMobileExports() {
+        for record in ankiMobilePendingStore.load() {
+            guard pendingAnkiMobileExports[record.nonce] == nil,
+                  !pendingAnkiMobileExports.values.contains(where: {
+                    $0.gid == record.gid && $0.index == record.index
+                  }) else { continue }
+            pendingAnkiMobileExports[record.nonce] = PendingAnkiMobileExport(
+                gid: record.gid,
+                index: record.index,
+                nonce: record.nonce,
+                documentIdentity: record.documentIdentity,
+                expiresAt: record.expiresAt,
+                callbackReceived: record.callbackReceived,
+                delivering: false
+            )
+        }
+    }
+
+    private func persistPendingAnkiMobileExports() {
+        let records = pendingAnkiMobileExports.values.map { pending in
+            ReaderAnkiMobilePendingRecord(
+                gid: pending.gid,
+                index: pending.index,
+                nonce: pending.nonce,
+                documentIdentity: pending.documentIdentity,
+                expiresAt: pending.expiresAt,
+                callbackReceived: pending.callbackReceived
+            )
+        }
+        ankiMobilePendingStore.save(records)
+    }
+
+    private func prunePendingAnkiMobileExports() {
+        let now = Date()
+        let previousCount = pendingAnkiMobileExports.count
+        pendingAnkiMobileExports = pendingAnkiMobileExports.filter {
+            $0.value.expiresAt > now
+        }
+        if pendingAnkiMobileExports.count != previousCount {
+            persistPendingAnkiMobileExports()
+        }
+    }
+
+    private func handleNativeAnkiMobileRequest(
+        _ body: [String: Any],
+        replyHandler: @escaping (Any?, String?) -> Void
+    ) {
+        prunePendingAnkiMobileExports()
+        guard let action = body["action"] as? String else {
+            replyHandler(nil, "AnkiMobile 投影缺少 action")
+            return
+        }
+        if action == "sync" {
+            guard
+                Set(body.keys) == Set(["action", "url"]),
+                let rawURL = body["url"] as? String,
+                rawURL == "anki://x-callback-url/sync",
+                let url = URL(string: rawURL)
+            else {
+                replyHandler(nil, "AnkiMobile 同步请求无效")
+                return
+            }
+            UIApplication.shared.open(url, options: [:]) { opened in
+                Task { @MainActor in
+                    replyHandler([
+                        "ok": opened,
+                        "opened": opened,
+                        "status": opened ? "requested" : "failed",
+                        "error": opened ? "" : "AnkiMobile 未安装或无法打开",
+                    ], nil)
+                }
+            }
+            return
+        }
+
+        guard
+            action == "open",
+            Set(body.keys) == Set([
+                "action", "gid", "index", "nonce", "expiresAt", "url",
+            ]),
+            let gid = body["gid"] as? String,
+            isValidAnkiMobileGID(gid),
+            let indexNumber = body["index"] as? NSNumber,
+            CFGetTypeID(indexNumber) != CFBooleanGetTypeID(),
+            indexNumber.doubleValue == Double(indexNumber.intValue),
+            (0...255).contains(indexNumber.intValue),
+            let nonce = body["nonce"] as? String,
+            isValidAnkiMobileNonce(nonce),
+            let expiresAtNumber = body["expiresAt"] as? NSNumber,
+            CFGetTypeID(expiresAtNumber) != CFBooleanGetTypeID(),
+            expiresAtNumber.doubleValue
+                == Double(expiresAtNumber.int64Value),
+            expiresAtNumber.int64Value >= 0,
+            let rawURL = body["url"] as? String,
+            !rawURL.contains("\0"),
+            rawURL.utf8.count <= 32 * 1024,
+            let url = URL(string: rawURL),
+            isValidAnkiMobileAddNoteURL(
+                url,
+                gid: gid,
+                index: indexNumber.intValue,
+                nonce: nonce
+            ),
+            let documentIdentity = ankiMobileDocumentIdentity()
+        else {
+            replyHandler(nil, "AnkiMobile 加卡请求无效")
+            return
+        }
+        let index = indexNumber.intValue
+        let expiresAt = Date(
+            timeIntervalSince1970:
+                Double(expiresAtNumber.int64Value) / 1_000
+        )
+        let now = Date()
+        guard expiresAt > now,
+              expiresAt <= now.addingTimeInterval(10 * 60 + 30) else {
+            replyHandler(nil, "AnkiMobile 加卡过期时间无效")
+            return
+        }
+        guard pendingAnkiMobileExports[nonce] == nil,
+              !pendingAnkiMobileExports.values.contains(where: {
+                $0.gid == gid && $0.index == index
+              }) else {
+            replyHandler(nil, "这张卡已有等待中的 AnkiMobile 投影")
+            return
+        }
+
+        pendingAnkiMobileExports[nonce] = PendingAnkiMobileExport(
+            gid: gid,
+            index: index,
+            nonce: nonce,
+            documentIdentity: documentIdentity,
+            expiresAt: expiresAt,
+            callbackReceived: false,
+            delivering: false
+        )
+        persistPendingAnkiMobileExports()
+        UIApplication.shared.open(url, options: [:]) { [weak self] opened in
+            Task { @MainActor in
+                if !opened {
+                    self?.pendingAnkiMobileExports.removeValue(forKey: nonce)
+                    self?.persistPendingAnkiMobileExports()
+                }
+                replyHandler([
+                    "ok": opened,
+                    "opened": opened,
+                    "status": opened ? "pending" : "failed",
+                    "error": opened ? "" : "AnkiMobile 未安装或无法打开",
+                ], nil)
+            }
+        }
+    }
+
+    @discardableResult
+    func handleAnkiMobileCallback(_ url: URL) -> Bool {
+        guard
+            url.scheme?.lowercased() == "bwreader",
+            url.host?.lowercased() == "anki-export-success"
+        else { return false }
+        restorePendingAnkiMobileExports()
+        prunePendingAnkiMobileExports()
+        guard
+            let query = ankiMobileQuery(url),
+            Set(query.keys) == Set(["gid", "index", "nonce"]),
+            let gid = query["gid"],
+            isValidAnkiMobileGID(gid),
+            let indexValue = query["index"],
+            let index = Int(indexValue),
+            String(index) == indexValue,
+            (0...255).contains(index),
+            let nonce = query["nonce"],
+            isValidAnkiMobileNonce(nonce),
+            var pending = pendingAnkiMobileExports[nonce],
+            pending.gid == gid,
+            pending.index == index,
+            isValidAnkiMobileCallbackURL(
+                url,
+                gid: gid,
+                index: index,
+                nonce: nonce
+            )
+        else {
+            // It is our callback namespace, but not a callback issued by the
+            // current App process. Never forward it as a general command URL.
+            return true
+        }
+        pending.callbackReceived = true
+        pending.delivering = false
+        pendingAnkiMobileExports[nonce] = pending
+        persistPendingAnkiMobileExports()
+        deliverPendingAnkiMobileCallbacks()
+        return true
+    }
+
+    private func deliverPendingAnkiMobileCallbacks() {
+        prunePendingAnkiMobileExports()
+        guard let documentIdentity = ankiMobileDocumentIdentity(),
+              isTrustedReaderURL(webView.url) else { return }
+        let ready = pendingAnkiMobileExports.filter {
+            $0.value.callbackReceived
+                && !$0.value.delivering
+                && $0.value.documentIdentity == documentIdentity
+        }
+        for (nonce, var pending) in ready {
+            let detail: [String: Any] = [
+                "status": "succeeded",
+                "gid": pending.gid,
+                "index": pending.index,
+                "nonce": pending.nonce,
+            ]
+            pending.delivering = true
+            pendingAnkiMobileExports[nonce] = pending
+            Task { @MainActor [weak self] in
+                guard let self else { return }
+                var durable = false
+                do {
+                    let value = try await self.webView.callAsyncJavaScript(
+                        """
+                        const api = window.BWReaderRuntime?.ankiMobileExport;
+                        if (!api || api.CONTRACT !== "anki-mobile-export/1" ||
+                            typeof api.handleNativeCallback !== "function") {
+                          return { ok: false, durable: false };
+                        }
+                        return await api.handleNativeCallback(detail);
+                        """,
+                        arguments: ["detail": detail],
+                        in: nil,
+                        contentWorld: .page
+                    )
+                    if let ack = value as? [String: Any],
+                       Set(ack.keys) == Set(["ok", "durable"]),
+                       ack["ok"] as? Bool == true,
+                       ack["durable"] as? Bool == true {
+                        durable = true
+                    }
+                } catch {
+                    durable = false
+                }
+                guard var current = self.pendingAnkiMobileExports[nonce],
+                      current.nonce == nonce else { return }
+                if durable {
+                    self.pendingAnkiMobileExports.removeValue(forKey: nonce)
+                } else {
+                    current.delivering = false
+                    self.pendingAnkiMobileExports[nonce] = current
+                }
+                self.persistPendingAnkiMobileExports()
+            }
+        }
     }
 
     private func isTrustedReaderURL(_ url: URL?) -> Bool {
@@ -3146,6 +3710,20 @@ extension ReaderWebViewModel: WKScriptMessageHandlerWithReply {
         didReceive message: WKScriptMessage,
         replyHandler: @escaping (Any?, String?) -> Void
     ) {
+        if message.name == nativeAnkiMobileMessageName {
+            guard
+                message.frameInfo.isMainFrame,
+                message.webView === webView,
+                isTrustedReaderURL(webView.url),
+                isTrustedReaderURL(message.frameInfo.request.url),
+                let body = message.body as? [String: Any]
+            else {
+                replyHandler(nil, "AnkiMobile 投影来源无效")
+                return
+            }
+            handleNativeAnkiMobileRequest(body, replyHandler: replyHandler)
+            return
+        }
         guard message.name == nativeLocalNotesMessageName else {
             replyHandler(nil, "不支持的本机笔记消息")
             return
@@ -3333,6 +3911,7 @@ extension ReaderWebViewModel: WKNavigationDelegate {
             scheduleLocalPDFContentIdentity()
             schedulePendingBookUserStateImport()
         }
+        deliverPendingAnkiMobileCallbacks()
     }
 
     func webView(

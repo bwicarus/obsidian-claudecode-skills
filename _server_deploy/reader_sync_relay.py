@@ -31,6 +31,18 @@ SYNC_CHANGE_CONTRACT = "record-parent-state/1"
 REGISTRY_DIGEST_PREFIX = (
     f"{SYNC_CONTRACT}:{SYNC_CHANGE_CONTRACT}|"
 )
+LEGACY_REGISTRY_DIGEST = (
+    REGISTRY_DIGEST_PREFIX
+    + "user-settings:explicit:0:1|"
+    + "vocabulary-state:explicit:0:1"
+)
+CARD_REGISTRY_DIGEST = (
+    REGISTRY_DIGEST_PREFIX
+    + "card-entities:explicit:0:1|"
+    + "card-states:explicit:0:1|"
+    + "user-settings:explicit:0:1|"
+    + "vocabulary-state:explicit:0:1"
+)
 SIGNAL_CONTRACT = "direct-signal/1"
 OWNER_LEASE_CONTRACT = "owner-lease/1"
 NATIVE_SYNC_BOOTSTRAP_CONTRACT = "native-sync-bootstrap/1"
@@ -764,9 +776,12 @@ def _state(connection: sqlite3.Connection) -> tuple[int, int]:
 def _pin_registry_digest_locked(
     connection: sqlite3.Connection,
     registry_digest: str,
+    *,
+    allow_legacy_upgrade: bool = False,
+    now: int | None = None,
 ) -> None:
     row = connection.execute(
-        "SELECT registry_digest FROM relay_state WHERE singleton=1"
+        "SELECT current_cursor,registry_digest FROM relay_state WHERE singleton=1"
     ).fetchone()
     if row is None:
         raise RelayRequestError(
@@ -780,12 +795,63 @@ def _pin_registry_digest_locked(
             "UPDATE relay_state SET registry_digest=? WHERE singleton=1",
             (registry_digest,),
         )
-    elif pinned != registry_digest:
+        return
+    if pinned == registry_digest:
+        return
+    if not (
+        allow_legacy_upgrade
+        and pinned == LEGACY_REGISTRY_DIGEST
+        and registry_digest == CARD_REGISTRY_DIGEST
+        and now is not None
+    ):
         raise RelayRequestError(
             "当前账户的 DataRegistry 摘要与中继不一致",
             "BW_SYNC_REGISTRY_MISMATCH",
             409,
         )
+
+    # Registry generations salt direct account proofs and define which
+    # collections a checkpoint represents.  The only supported transition is
+    # the exact settings/vocabulary generation to the card-enabled generation.
+    # It is entered only from owner/claim while holding BEGIN IMMEDIATE, so two
+    # first clients serialize and the cleanup below runs exactly once.
+    current_cursor = int(row["current_cursor"])
+    updated = connection.execute(
+        "UPDATE relay_state SET registry_digest=?,causal_contract=?,"
+        "causal_start_cursor=? WHERE singleton=1 AND registry_digest=?",
+        (
+            registry_digest,
+            SYNC_CHANGE_CONTRACT,
+            current_cursor,
+            LEGACY_REGISTRY_DIGEST,
+        ),
+    )
+    if updated.rowcount != 1:  # pragma: no cover - BEGIN IMMEDIATE serializes it
+        raise RelayRequestError(
+            "当前账户的 DataRegistry 摘要与中继不一致",
+            "BW_SYNC_REGISTRY_MISMATCH",
+            409,
+        )
+
+    # Durable business heads, events and mutation receipts stay intact.  Old
+    # direct/snapshot state is generation-bound and must never cross the fence.
+    connection.execute("DELETE FROM relay_snapshot_items")
+    connection.execute("DELETE FROM relay_snapshots")
+    connection.execute("DELETE FROM direct_presence")
+    connection.execute("DELETE FROM direct_signals")
+    connection.execute("DELETE FROM direct_signal_dedupe")
+    connection.execute(
+        "UPDATE direct_signal_state SET current_cursor=0,expired_through=0 "
+        "WHERE singleton=1"
+    )
+    # Keep per-family generation counters monotonic while making every old
+    # credential unusable.  owner/claim runs after this and replaces only its
+    # own row with a fresh token hash; plaintext tokens are never persisted.
+    connection.execute(
+        "UPDATE sync_owner_leases SET token_sha256=NULL,released_at=?,"
+        "expires_at=0,handoff_role=NULL,handoff_requested_at=NULL",
+        (now,),
+    )
 
 
 def _verify_owner_lease_locked(
@@ -1395,7 +1461,12 @@ def owner_claim():
         with _connection(identity["storage_namespace"]) as connection:
             connection.execute("BEGIN IMMEDIATE")
             try:
-                _pin_registry_digest_locked(connection, registry_digest)
+                _pin_registry_digest_locked(
+                    connection,
+                    registry_digest,
+                    allow_legacy_upgrade=True,
+                    now=now,
+                )
                 row = connection.execute(
                     "SELECT generation,owner_role,expires_at,released_at "
                     "FROM sync_owner_leases WHERE device_family_id=?",

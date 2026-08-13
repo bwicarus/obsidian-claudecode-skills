@@ -14,7 +14,16 @@
   var BRIDGE_RESPONSE = 'reader-native-pi-sync-response/1';
   var ERROR_CODE = 'BW_NATIVE_SYNC_BOOTSTRAP_UNAVAILABLE';
   var CHECKPOINT_ID = 'native-sync-checkpoint-v1';
-  var CHECKPOINT_CONTRACT = 'native-sync-checkpoint/2';
+  var CHECKPOINT_CONTRACT = 'native-sync-checkpoint/3';
+  var CARD_BOOTSTRAP_CONTRACT = 'reader-card-repository-bootstrap/1';
+  var CARD_BOOTSTRAP_PATH = '/pdf/api/card-repository/bootstrap';
+  var CARD_BOOTSTRAP_PAGE_LIMIT = 100;
+  var CARD_BOOTSTRAP_MAX_ITEMS = 500;
+  var CARD_BOOTSTRAP_MAX_PAGES = 500;
+  var CARD_BOOTSTRAP_MAX_CURSOR_BYTES = 512;
+  var SYNC_COLLECTIONS = [
+    'card-entities', 'card-states', 'user-settings', 'vocabulary-state'
+  ];
   var MAX_RECEIPTS = 64;
   var receipts = Object.create(null);
   var receiptOrder = [];
@@ -87,7 +96,7 @@
       owner: 'native-app',
       state: 'blocked',
       at: Date.now(),
-      collections: ['user-settings', 'vocabulary-state'],
+      collections: SYNC_COLLECTIONS.slice(),
       applied: 0,
       pendingLocal: true,
       conflictCount: 0,
@@ -156,6 +165,273 @@
     });
   }
 
+  function checkedStartResult(value) {
+    if (
+      !exactKeys(value, ['state', 'accountBinding']) ||
+      value.state !== 'ready' ||
+      typeof value.accountBinding !== 'string' ||
+      !/^sha256:[a-f0-9]{64}$/.test(value.accountBinding)
+    ) {
+      throw runtimeError(
+        'App 同步 owner 启动响应无效',
+        'BW_NATIVE_SYNC_START_RESPONSE',
+        false
+      );
+    }
+    return value.accountBinding;
+  }
+  function plainObject(value) {
+    return !!value && typeof value === 'object' && !Array.isArray(value);
+  }
+  function checkedBootstrapItem(value) {
+    if (
+      !exactKeys(value, ['id', 'cards', 'states', 'source_ref', 'req', 'meta']) ||
+      typeof value.id !== 'string' ||
+      !/^card_[a-f0-9]{4,12}$/.test(value.id) ||
+      !Array.isArray(value.cards) ||
+      value.cards.length < 1 || value.cards.length > 256 ||
+      !plainObject(value.states) ||
+      typeof value.source_ref !== 'string' || value.source_ref.length > 8192 ||
+      typeof value.req !== 'string' || value.req.length > 32768 ||
+      !plainObject(value.meta)
+    ) {
+      throw runtimeError(
+        'Pi 旧卡片 bootstrap item 无效',
+        'BW_CARD_BOOTSTRAP_ITEM',
+        false
+      );
+    }
+    Object.keys(value.states).forEach(function (key) {
+      if (!/^(?:0|[1-9]\d*)$/.test(key) || Number(key) >= value.cards.length) {
+        throw runtimeError(
+          'Pi 旧卡片 bootstrap state index 无效',
+          'BW_CARD_BOOTSTRAP_ITEM',
+          false
+        );
+      }
+    });
+    return clone(value);
+  }
+  function checkedBootstrapPage(value, expectedDigest) {
+    if (
+      !exactKeys(
+        value,
+        ['contract', 'items', 'nextCursor', 'complete', 'snapshotDigest']
+      ) ||
+      value.contract !== CARD_BOOTSTRAP_CONTRACT ||
+      !Array.isArray(value.items) ||
+      value.items.length > CARD_BOOTSTRAP_PAGE_LIMIT ||
+      typeof value.complete !== 'boolean' ||
+      typeof value.snapshotDigest !== 'string' ||
+      !/^sha256:[a-f0-9]{64}$/.test(value.snapshotDigest)
+    ) {
+      throw runtimeError(
+        'Pi 旧卡片 bootstrap page 合同无效',
+        'BW_CARD_BOOTSTRAP_CONTRACT',
+        false
+      );
+    }
+    if (expectedDigest && value.snapshotDigest !== expectedDigest) {
+      throw runtimeError(
+        'Pi 旧卡片 bootstrap 快照在分页中发生变化',
+        'BW_CARD_BOOTSTRAP_SNAPSHOT_CHANGED',
+        true
+      );
+    }
+    if (value.complete) {
+      if (value.nextCursor !== null) {
+        throw runtimeError(
+          'Pi 旧卡片 bootstrap 完成页仍包含 cursor',
+          'BW_CARD_BOOTSTRAP_CURSOR',
+          false
+        );
+      }
+    } else if (
+      !value.items.length ||
+      typeof value.nextCursor !== 'string' ||
+      !/^[A-Za-z0-9_-]+$/.test(value.nextCursor) ||
+      value.nextCursor.length > CARD_BOOTSTRAP_MAX_CURSOR_BYTES
+    ) {
+      throw runtimeError(
+        'Pi 旧卡片 bootstrap cursor 无效',
+        'BW_CARD_BOOTSTRAP_CURSOR',
+        false
+      );
+    }
+    return {
+      items: value.items.map(checkedBootstrapItem),
+      nextCursor: value.nextCursor,
+      complete: value.complete,
+      snapshotDigest: value.snapshotDigest
+    };
+  }
+  function bootstrapHTTPError(response) {
+    var status = Math.max(0, Number(response && response.status) || 0);
+    var body = response && typeof response.json === 'function'
+      ? Promise.resolve().then(function () { return response.json(); })
+      : Promise.resolve(null);
+    return body.catch(function () { return null; }).then(function (value) {
+      var serverCode = plainObject(value) ? String(value.code || '') : '';
+      var code = status === 401
+        ? 'BW_PI_AUTH_REQUIRED'
+        : (status === 409 && serverCode === 'snapshot_changed'
+          ? 'BW_CARD_BOOTSTRAP_SNAPSHOT_CHANGED'
+          : 'BW_CARD_BOOTSTRAP_HTTP');
+      var message = plainObject(value) && typeof value.error === 'string'
+        ? value.error.slice(0, 512)
+        : ('Pi 旧卡片 bootstrap 请求失败（HTTP ' + status + '）');
+      throw runtimeError(
+        message,
+        code,
+        status === 409 || status === 429 || status >= 500
+      );
+    });
+  }
+  function fetchBootstrapPage(cursor) {
+    if (typeof root.fetch !== 'function') {
+      return Promise.reject(runtimeError(
+        'App Pi 网关 fetch 不可用',
+        'BW_CARD_BOOTSTRAP_GATEWAY',
+        false
+      ));
+    }
+    var path = CARD_BOOTSTRAP_PATH + '?limit=' + CARD_BOOTSTRAP_PAGE_LIMIT;
+    if (cursor) path += '&cursor=' + encodeURIComponent(cursor);
+    // @interaction card.repository.bootstrap
+    return Promise.resolve(root.fetch(path, {
+      method: 'GET',
+      cache: 'no-store',
+      credentials: 'same-origin',
+      headers: { 'Accept': 'application/json' }
+    })).then(function (response) {
+      if (!response || response.ok !== true) return bootstrapHTTPError(response);
+      if (typeof response.json !== 'function') {
+        throw runtimeError(
+          'Pi 旧卡片 bootstrap 响应不可解析',
+          'BW_CARD_BOOTSTRAP_RESPONSE',
+          false
+        );
+      }
+      return Promise.resolve().then(function () {
+        return response.json();
+      }).catch(function () {
+        throw runtimeError(
+          'Pi 旧卡片 bootstrap JSON 无效',
+          'BW_CARD_BOOTSTRAP_RESPONSE',
+          false
+        );
+      });
+    });
+  }
+  function legacyImportRecord(item) {
+    var record = {
+      id: item.id,
+      kind: 'cards',
+      cards: clone(item.cards),
+      states: clone(item.states),
+      source_ref: item.source_ref,
+      req: item.req,
+      meta: clone(item.meta)
+    };
+    if (Object.prototype.hasOwnProperty.call(item.meta, 'ts')) {
+      record.ts = clone(item.meta.ts);
+    }
+    return record;
+  }
+  function importLegacySnapshot(repository, items, requestId) {
+    if (!items.length) return Promise.resolve(0);
+    return Promise.all(items.map(function (item) {
+      return repository.load(item.id, { includeDeleted: true });
+    })).then(function (existing) {
+      var records = [];
+      items.forEach(function (item, index) {
+        /* A local gid, including a tombstone, is authoritative as a whole.
+         * Do not send any older Pi cards, source metadata, or review state to
+         * the repository for comparison or merge. */
+        if (!existing[index]) records.push(legacyImportRecord(item));
+      });
+      if (!records.length) return 0;
+      return repository.importLegacyBatch(records, {
+        mutationId: 'native-card-bootstrap:' + requestId,
+        missingOnly: true
+      }).then(function (result) {
+        if (!Array.isArray(result) || result.length !== records.length) {
+          throw runtimeError(
+            '本机卡片仓返回了无效的 bootstrap 结果',
+            'BW_CARD_BOOTSTRAP_IMPORT_RESPONSE',
+            false
+          );
+        }
+        return result.length;
+      });
+    });
+  }
+  function bootstrapLegacyCards(requestId) {
+    var repository = requireApi('cardRepository', 'importLegacyBatch');
+    if (
+      repository.CONTRACT !== 'card-repository/1' ||
+      typeof repository.load !== 'function'
+    ) {
+      return Promise.reject(runtimeError(
+        '本机卡片仓 bootstrap 接口不可用',
+        'BW_CARD_BOOTSTRAP_REPOSITORY',
+        false
+      ));
+    }
+    var items = [];
+    var seenIds = Object.create(null);
+    var seenCursors = Object.create(null);
+    var snapshotDigest = '';
+    var previousId = '';
+    var pages = 0;
+    function page(cursor) {
+      if (pages >= CARD_BOOTSTRAP_MAX_PAGES) {
+        return Promise.reject(runtimeError(
+          'Pi 旧卡片 bootstrap 分页超过上限',
+          'BW_CARD_BOOTSTRAP_LIMIT',
+          false
+        ));
+      }
+      pages += 1;
+      return fetchBootstrapPage(cursor).then(function (value) {
+        var checked = checkedBootstrapPage(value, snapshotDigest);
+        if (!snapshotDigest) snapshotDigest = checked.snapshotDigest;
+        if (items.length + checked.items.length > CARD_BOOTSTRAP_MAX_ITEMS) {
+          throw runtimeError(
+            'Pi 旧卡片 bootstrap 记录超过原子导入上限',
+            'BW_CARD_BOOTSTRAP_LIMIT',
+            false
+          );
+        }
+        checked.items.forEach(function (item) {
+          if (seenIds[item.id] || previousId && item.id <= previousId) {
+            throw runtimeError(
+              'Pi 旧卡片 bootstrap item 顺序或身份重复',
+              'BW_CARD_BOOTSTRAP_ITEMS',
+              false
+            );
+          }
+          seenIds[item.id] = true;
+          previousId = item.id;
+          items.push(item);
+        });
+        if (checked.complete) return items;
+        if (seenCursors[checked.nextCursor]) {
+          throw runtimeError(
+            'Pi 旧卡片 bootstrap cursor 形成循环',
+            'BW_CARD_BOOTSTRAP_CURSOR_LOOP',
+            false
+          );
+        }
+        seenCursors[checked.nextCursor] = true;
+        return page(checked.nextCursor);
+      });
+    }
+    return page(null).then(function (completeItems) {
+      return importLegacySnapshot(repository, completeItems, requestId);
+    });
+  }
+
   function checkedCheckpoint(value) {
     if (
       !value || typeof value !== 'object' || Array.isArray(value) ||
@@ -168,6 +444,30 @@
       );
     }
     return clone(value);
+  }
+  function checkpointForRegistry(value, registry) {
+    var checkpoint = checkedCheckpoint(value);
+    var currentDigest = String(registry.syncDigest() || '');
+    if (checkpoint.registryDigest === currentDigest) return checkpoint;
+    var migration = typeof registry.syncCheckpointMigration === 'function'
+      ? registry.syncCheckpointMigration(checkpoint.registryDigest)
+      : null;
+    if (
+      migration &&
+      migration.contract === 'sync-registry-migration/1' &&
+      migration.from === checkpoint.registryDigest &&
+      migration.to === currentDigest &&
+      migration.strategy === 'reset-checkpoint'
+    ) {
+      /* Adding a synchronized collection invalidates every shared cursor.
+       * Return an empty checkpoint to the coordinator, but do not persist an
+       * upgraded envelope here: only a completed reconciliation may do that.
+       * Existing user-settings/vocabulary/card records stay in DataStore. */
+      return null;
+    }
+    // Unknown historical digests retain the coordinator's existing safe-reset
+    // behavior. They never inherit cursors from an unrecognized registry.
+    return checkpoint;
   }
   function checkedEpoch(value) {
     value = String(value || '');
@@ -210,7 +510,9 @@
     merged.peers = {};
     return merged;
   }
-  function createCheckpointStore(deviceStore, globalStore, deviceId) {
+  function createCheckpointStore(
+    deviceStore, globalStore, deviceId, registry, accountBinding
+  ) {
     var queue = Promise.resolve();
     var observedEpoch = '';
     function epoch() {
@@ -228,28 +530,50 @@
         'ui-session', CHECKPOINT_ID, { includeDeleted: true }
       ).then(function (value) { return value || null; });
     }
-    function decode(value, vaultEpoch) {
+    function binding() {
+      var value = String(accountBinding() || '');
+      if (!/^sha256:[a-f0-9]{64}$/.test(value)) {
+        throw runtimeError(
+          'App 同步账户绑定尚未建立',
+          'BW_SYNC_ACCOUNT_BINDING',
+          false
+        );
+      }
+      return value;
+    }
+    function decode(value, vaultEpoch, currentBinding) {
       if (!value || value.deleted) return null;
       value = value.value;
+      /* v2 checkpoints predate account binding and can never authorize a
+       * remote cursor.  Treat them as absent without touching local data. */
+      if (
+        value && value.contract === 'native-sync-checkpoint/2' &&
+        value.schema === 2
+      ) return null;
       if (
         !value || value.contract !== CHECKPOINT_CONTRACT ||
-        value.schema !== 2 || typeof value.vaultEpoch !== 'string'
+        value.schema !== 3 || typeof value.vaultEpoch !== 'string' ||
+        typeof value.accountBinding !== 'string' ||
+        !/^sha256:[a-f0-9]{64}$/.test(value.accountBinding)
       ) {
         throw runtimeError(
           '本机同步游标 envelope 损坏', 'BW_SYNC_CHECKPOINT', false
         );
       }
       if (value.vaultEpoch !== vaultEpoch) return null;
-      return checkedCheckpoint(value.checkpoint);
+      if (value.accountBinding !== currentBinding) return null;
+      return checkpointForRegistry(value.checkpoint, registry);
     }
     return {
       load: function () {
         return queue.catch(function () {}).then(function () {
+          var currentBinding = binding();
           return epoch().then(function (first) {
             return record().then(function (stored) {
               return epoch().then(function (confirmed) {
                 observedEpoch = confirmed;
-                return confirmed === first ? decode(stored, first) : null;
+                return confirmed === first
+                  ? decode(stored, first, currentBinding) : null;
               });
             });
           });
@@ -260,6 +584,7 @@
           var attempts = 0;
           function write() {
             attempts += 1;
+            var currentBinding = binding();
             return epoch().then(function (vaultEpoch) {
               if (observedEpoch && observedEpoch !== vaultEpoch) {
                 throw runtimeError(
@@ -270,21 +595,22 @@
               }
               observedEpoch = vaultEpoch;
               return record().then(function (stored) {
-                var current = decode(stored, vaultEpoch);
+                var current = decode(stored, vaultEpoch, currentBinding);
                 var checkpoint = mergeCheckpoint(
                   current, checkedCheckpoint(incoming)
                 );
                 return deviceStore.put('ui-session', {
                   id: CHECKPOINT_ID,
                   contract: CHECKPOINT_CONTRACT,
-                  schema: 2,
+                  schema: 3,
                   vaultEpoch: vaultEpoch,
+                  accountBinding: currentBinding,
                   checkpoint: checkpoint
                 }, {
                   id: CHECKPOINT_ID,
                   ifRev: Number(stored && stored.rev) || 0,
                   mutationId: [
-                    'native-sync-checkpoint-v2', deviceId,
+                    'native-sync-checkpoint-v3', deviceId,
                     Date.now(), ++sequence
                   ].join(':')
                 }).then(function () {
@@ -294,6 +620,13 @@
                     throw runtimeError(
                       '本机数据 Vault 在保存游标时已重建',
                       'BW_SYNC_CHECKPOINT_EPOCH',
+                      true
+                    );
+                  }
+                  if (binding() !== currentBinding) {
+                    throw runtimeError(
+                      'App 同步账户在保存游标时已变化',
+                      'BW_SYNC_ACCOUNT_BINDING',
                       true
                     );
                   }
@@ -327,13 +660,15 @@
       deviceId: runtime.deviceId,
       syncContract: registry.SYNC_CONTRACT,
       syncChangeContract: registry.SYNC_CHANGE_CONTRACT,
-      registryDigest: registry.syncDigest()
+      registryDigest: registry.syncDigest(),
+      accountBinding: ''
     };
     if (
       context.syncContract !== 'sync-v3' ||
       context.syncChangeContract !== 'record-parent-state/1' ||
       registry.syncCollections().join('|') !==
-        ['user-settings', 'vocabulary-state'].join('|')
+        SYNC_COLLECTIONS.join('|') ||
+      typeof registry.syncCheckpointMigration !== 'function'
     ) {
       throw runtimeError(
         '本机同步 registry 超出已启用集合',
@@ -372,7 +707,11 @@
       registry: registry,
       serverGateway: gateway,
       checkpointStore: createCheckpointStore(
-        stores.device, stores.global, context.deviceId
+        stores.device,
+        stores.global,
+        context.deviceId,
+        registry,
+        function () { return context.accountBinding; }
       ),
       manualOnly: true,
       onlineTarget: root,
@@ -413,9 +752,16 @@
           ));
         }
         var releaseId = bridgeRequestId('release');
-        var operation = bridgeRequest(
-          'start', bridgeRequestId('start'), context
-        ).then(function () {
+        var startAttempted = false;
+        /* Validate and atomically import the complete legacy card snapshot
+         * before asking the relay to advance its registry generation.  A
+         * failed import must not permanently fence still-installed clients
+         * that legitimately use the previous cardless digest. */
+        var operation = bootstrapLegacyCards(requestId).then(function () {
+          startAttempted = true;
+          return bridgeRequest('start', bridgeRequestId('start'), context);
+        }).then(function (startResult) {
+          context.accountBinding = checkedStartResult(startResult);
           active = true;
           syncRuntime.start('native-manual:' + requestId);
           return rawControl.syncNow(request);
@@ -423,14 +769,22 @@
           syncRuntime.pause('native-manual-complete');
           active = false;
           return bridgeRequest('release', releaseId, context).then(function () {
+            context.accountBinding = '';
             return result;
+          }, function (error) {
+            context.accountBinding = '';
+            throw error;
           });
         }, function (error) {
           syncRuntime.pause('native-manual-failed');
           active = false;
+          if (!startAttempted) throw error;
           return bridgeRequest('release', releaseId, context).catch(
             function () {}
-          ).then(function () { throw error; });
+          ).then(function () {
+            context.accountBinding = '';
+            throw error;
+          });
         });
         var entry = { promise: operation, settled: false };
         receipts[requestId] = entry;

@@ -18,8 +18,12 @@ const APP_RUNTIME = fs.readFileSync(
   new URL("../../ios/BWReader/App/ReaderLocalRuntimeServer.swift", import.meta.url),
   "utf8",
 );
+const VIDEO_PLAYER = fs.readFileSync(
+  new URL("../../_server_deploy/static/pdf/rc-videoplayer.js", import.meta.url),
+  "utf8",
+);
 
-function mediaHelpers(windowOverride = {}) {
+function mediaHelpers(windowOverride = {}, documentOverride = {}) {
   const start = SOURCE.indexOf("function _cardHttpsURL(value)");
   const end = SOURCE.indexOf("function _infoText(card)", start);
   assert.ok(start >= 0 && end > start);
@@ -48,7 +52,7 @@ function mediaHelpers(windowOverride = {}) {
       .replaceAll('"', "&quot;")
       .replaceAll("<", "&lt;")
       .replaceAll(">", "&gt;"),
-    { addEventListener() {} },
+    { addEventListener() {}, ...documentOverride },
   );
 }
 
@@ -173,11 +177,58 @@ test("video play prefers the shared internal player on every Reader host", () =>
   assert.equal(externalCalls, 0);
 });
 
-test("pinned video cards keep a delegated play route and recover legacy YouTube ids", () => {
-  assert.match(SOURCE, /closest\('\.rc-note \.vc-vg-play'\)/);
+test("pinned video cards dispatch from both Reader notes and extension page pins", () => {
+  let delegatedClick = null;
+  const playerCalls = [];
+  let prevented = 0;
+  let stopped = 0;
+  mediaHelpers({
+    RC: { videoPlayer: { open(value) { playerCalls.push(value); } } },
+  }, {
+    addEventListener(type, listener, options) {
+      if (type === "click" && options === true) delegatedClick = listener;
+    },
+  });
+  assert.equal(typeof delegatedClick, "function");
+
+  const attrs = {
+    "data-video-id": "YXb87xE5PVk",
+    "data-video-src": "yt",
+    "data-video-url": "https://www.youtube.com/watch?v=YXb87xE5PVk",
+    "data-video-title": "Tokyo Tower",
+  };
+  const button = {
+    getAttribute(name) { return attrs[name] || ""; },
+    closest() { return null; },
+  };
+  delegatedClick({
+    target: {
+      closest(selector) {
+        assert.equal(selector, ".rc-note .vc-vg-play,.bw-page-pin .vc-vg-play");
+        return button;
+      },
+    },
+    preventDefault() { prevented += 1; },
+    stopImmediatePropagation() { stopped += 1; },
+  });
+
+  assert.deepEqual(playerCalls, [{
+    id: "YXb87xE5PVk",
+    src: "yt",
+    title: "Tokyo Tower",
+  }]);
+  assert.equal(prevented, 1);
+  assert.equal(stopped, 1);
+});
+
+test("pinned video cards recover legacy YouTube ids", () => {
   assert.match(SOURCE, /_videoButtonRef\(button\)/);
   assert.match(SOURCE, /host === 'i\.ytimg\.com' \|\| host === 'img\.youtube\.com'/);
   assert.match(SOURCE, /outer\.pathname === '\/pdf\/api\/img-proxy'/);
+});
+
+test("the shared video player restores hit testing inside the extension overlay", () => {
+  assert.match(VIDEO_PLAYER, /#rc-vplayer\{[^}]*pointer-events:auto/);
 });
 
 test("the App CSP permits only the two official embedded-player origins", () => {

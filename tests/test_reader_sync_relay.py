@@ -41,6 +41,13 @@ REGISTRY_DIGEST = (
     "user-settings:explicit:0:1|"
     "vocabulary-state:explicit:0:1"
 )
+CARD_REGISTRY_DIGEST = (
+    "sync-v3:record-parent-state/1|"
+    "card-entities:explicit:0:1|"
+    "card-states:explicit:0:1|"
+    "user-settings:explicit:0:1|"
+    "vocabulary-state:explicit:0:1"
+)
 OTHER_REGISTRY_DIGEST = (
     "sync-v3:record-parent-state/1|"
     "user-settings:explicit:0:2|"
@@ -447,6 +454,469 @@ class ReaderSyncRelayTest(unittest.TestCase):
             account="b",
         )
         self.assertEqual(other_account.status_code, 200)
+
+    def test_exact_registry_upgrade_preserves_heads_and_invalidates_old_state(self):
+        primary = self._lease_holder(
+            account="a",
+            namespace=NS_A,
+            device_id="upgrade-old-primary",
+            family_label="upgrade-primary-family",
+            owner_instance_id="upgrade-old-primary-owner",
+        )
+        peer = self._lease_holder(
+            account="a",
+            namespace=NS_A,
+            device_id="upgrade-old-peer",
+            family_label="upgrade-peer-family",
+            owner_instance_id="upgrade-old-peer-owner",
+        )
+        primary_lease = self._claim(primary)
+        peer_lease = self._claim(peer)
+        self.assertEqual(primary_lease.status_code, 200)
+        self.assertEqual(peer_lease.status_code, 200)
+
+        def lease_fields(holder: dict, lease) -> dict:
+            return {
+                "deviceFamilyId": holder["deviceFamilyId"],
+                "ownerRole": holder["ownerRole"],
+                "ownerInstanceId": holder["ownerInstanceId"],
+                "ownerGeneration": lease.json["ownerGeneration"],
+                "ownerToken": lease.json["ownerToken"],
+            }
+
+        setting = _change(
+            1,
+            record_id="upgrade-setting",
+            mutation_id="upgrade-setting-mutation",
+            value={"id": "upgrade-setting", "theme": "dark"},
+        )
+        vocabulary = _change(
+            2,
+            record_id="upgrade-word",
+            mutation_id="upgrade-word-mutation",
+            value={"id": "upgrade-word", "term": "猫"},
+        )
+        vocabulary["collection"] = "vocabulary-state"
+        vocabulary["record"]["collection"] = "vocabulary-state"
+        pushed = self.client.post(
+            "/api/reader/sync/exchange",
+            json={
+                **self._body(
+                    deviceId=primary["deviceId"],
+                    changes=[setting, vocabulary],
+                ),
+                **lease_fields(primary, primary_lease),
+            },
+            headers={"X-Test-Account": "a"},
+        )
+        self.assertEqual(pushed.status_code, 200)
+        self.assertEqual(
+            pushed.json["ackedMutationIds"],
+            ["upgrade-setting-mutation", "upgrade-word-mutation"],
+        )
+        self.assertEqual(pushed.json["headCursor"], 2)
+
+        for holder, lease in ((primary, primary_lease), (peer, peer_lease)):
+            present = self.client.post(
+                "/api/reader/sync/signal",
+                json={
+                    **self._signal_body(
+                        deviceId=holder["deviceId"],
+                        serverCursor=2,
+                        localCursor=2,
+                    ),
+                    **lease_fields(holder, lease),
+                },
+                headers={"X-Test-Account": "a"},
+            )
+            self.assertEqual(present.status_code, 200)
+        signalled = self.client.post(
+            "/api/reader/sync/signal",
+            json={
+                **self._signal_body(
+                    deviceId=primary["deviceId"],
+                    serverCursor=2,
+                    localCursor=2,
+                    signals=[self._signal("upgrade-offer", peer["deviceId"])],
+                ),
+                **lease_fields(primary, primary_lease),
+            },
+            headers={"X-Test-Account": "a"},
+        )
+        self.assertEqual(signalled.status_code, 200)
+        self.assertEqual(signalled.json["ackedSignalIds"], ["upgrade-offer"])
+
+        old_snapshot = self.client.post(
+            "/api/reader/sync/snapshot",
+            json={
+                "contract": CONTRACT,
+                "syncContract": "sync-v3",
+                "syncChangeContract": "record-parent-state/1",
+                "registryDigest": REGISTRY_DIGEST,
+                "ownerNamespace": NS_A,
+                "deviceId": primary["deviceId"],
+                "limit": 10,
+                **lease_fields(primary, primary_lease),
+            },
+            headers={"X-Test-Account": "a"},
+        )
+        self.assertEqual(old_snapshot.status_code, 200)
+
+        unknown_holder = self._lease_holder(
+            account="a",
+            namespace=NS_A,
+            device_id="upgrade-unknown",
+            family_label="upgrade-unknown-family",
+        )
+        unknown = self._claim(
+            unknown_holder,
+            registry_digest=OTHER_REGISTRY_DIGEST,
+        )
+        self.assertEqual(unknown.status_code, 409)
+        self.assertEqual(unknown.json["code"], "BW_SYNC_REGISTRY_MISMATCH")
+
+        upgraded_holder = self._lease_holder(
+            account="a",
+            namespace=NS_A,
+            device_id="upgrade-new-primary",
+            family_label="upgrade-primary-family",
+            owner_instance_id="upgrade-new-primary-owner",
+        )
+        upgraded_lease = self._claim(
+            upgraded_holder,
+            registry_digest=CARD_REGISTRY_DIGEST,
+        )
+        self.assertEqual(upgraded_lease.status_code, 200)
+        self.assertEqual(upgraded_lease.json["ownerGeneration"], 2)
+
+        db_path = self.root / NS_A / "relay.sqlite3"
+        with contextlib.closing(sqlite3.connect(db_path)) as connection:
+            state = connection.execute(
+                "SELECT registry_digest,current_cursor,causal_contract,"
+                "causal_start_cursor FROM relay_state WHERE singleton=1"
+            ).fetchone()
+            preserved = connection.execute(
+                "SELECT collection,record_id,change_json FROM relay_heads "
+                "ORDER BY collection,record_id"
+            ).fetchall()
+            counts = {
+                table: connection.execute(
+                    f"SELECT COUNT(*) FROM {table}"
+                ).fetchone()[0]
+                for table in (
+                    "relay_events",
+                    "relay_mutations",
+                    "relay_heads",
+                    "relay_snapshots",
+                    "relay_snapshot_items",
+                    "direct_presence",
+                    "direct_signals",
+                    "direct_signal_dedupe",
+                )
+            }
+            signal_state = connection.execute(
+                "SELECT current_cursor,expired_through "
+                "FROM direct_signal_state WHERE singleton=1"
+            ).fetchone()
+            leases = connection.execute(
+                "SELECT device_family_id,generation,token_sha256,released_at,"
+                "expires_at FROM sync_owner_leases ORDER BY device_family_id"
+            ).fetchall()
+
+        self.assertEqual(
+            state,
+            (
+                CARD_REGISTRY_DIGEST,
+                2,
+                "record-parent-state/1",
+                2,
+            ),
+        )
+        self.assertEqual(
+            [(row[0], row[1]) for row in preserved],
+            [
+                ("user-settings", "upgrade-setting"),
+                ("vocabulary-state", "upgrade-word"),
+            ],
+        )
+        self.assertEqual(
+            {
+                row[0]: json.loads(row[2])["record"]["value"]
+                for row in preserved
+            },
+            {
+                "user-settings": {"id": "upgrade-setting", "theme": "dark"},
+                "vocabulary-state": {"id": "upgrade-word", "term": "猫"},
+            },
+        )
+        self.assertEqual(
+            counts,
+            {
+                "relay_events": 2,
+                "relay_mutations": 2,
+                "relay_heads": 2,
+                "relay_snapshots": 0,
+                "relay_snapshot_items": 0,
+                "direct_presence": 0,
+                "direct_signals": 0,
+                "direct_signal_dedupe": 0,
+            },
+        )
+        self.assertEqual(signal_state, (0, 0))
+        lease_by_family = {row[0]: row for row in leases}
+        active = lease_by_family[upgraded_holder["deviceFamilyId"]]
+        invalidated = lease_by_family[peer["deviceFamilyId"]]
+        self.assertEqual(active[1], 2)
+        self.assertIsNotNone(active[2])
+        self.assertIsNone(active[3])
+        self.assertGreater(active[4], 0)
+        self.assertEqual(invalidated[1], 1)
+        self.assertIsNone(invalidated[2])
+        self.assertIsNotNone(invalidated[3])
+        self.assertEqual(invalidated[4], 0)
+        for token in (
+            primary_lease.json["ownerToken"],
+            peer_lease.json["ownerToken"],
+            upgraded_lease.json["ownerToken"],
+        ):
+            self.assertNotIn(token, {row[2] for row in leases})
+
+        old_renew = self.client.post(
+            "/api/reader/sync/owner/renew",
+            json=self._owner_request(
+                primary,
+                credentials={
+                    "ownerGeneration": primary_lease.json["ownerGeneration"],
+                    "ownerToken": primary_lease.json["ownerToken"],
+                },
+            ),
+            headers={"X-Test-Account": "a"},
+        )
+        self.assertEqual(old_renew.status_code, 409)
+        self.assertEqual(old_renew.json["code"], "BW_SYNC_OWNER_INACTIVE")
+
+        downgrade_holder = self._lease_holder(
+            account="a",
+            namespace=NS_A,
+            device_id="upgrade-downgrade",
+            family_label="upgrade-downgrade-family",
+        )
+        downgrade = self._claim(downgrade_holder)
+        self.assertEqual(downgrade.status_code, 409)
+        self.assertEqual(downgrade.json["code"], "BW_SYNC_REGISTRY_MISMATCH")
+
+        upgraded_fields = lease_fields(upgraded_holder, upgraded_lease)
+        reset = self.client.post(
+            "/api/reader/sync/exchange",
+            json={
+                **self._body(
+                    registryDigest=CARD_REGISTRY_DIGEST,
+                    deviceId=upgraded_holder["deviceId"],
+                    direction="pull",
+                    cursor=0,
+                    changes=[],
+                ),
+                **upgraded_fields,
+            },
+            headers={"X-Test-Account": "a"},
+        )
+        self.assertEqual(reset.status_code, 200)
+        self.assertIs(reset.json["resetRequired"], True)
+        self.assertEqual(reset.json["headCursor"], 2)
+
+        expired_snapshot = self.client.post(
+            "/api/reader/sync/snapshot",
+            json={
+                "contract": CONTRACT,
+                "syncContract": "sync-v3",
+                "syncChangeContract": "record-parent-state/1",
+                "registryDigest": CARD_REGISTRY_DIGEST,
+                "ownerNamespace": NS_A,
+                "deviceId": upgraded_holder["deviceId"],
+                "snapshotId": old_snapshot.json["snapshotId"],
+                "limit": 10,
+                **upgraded_fields,
+            },
+            headers={"X-Test-Account": "a"},
+        )
+        self.assertEqual(expired_snapshot.status_code, 409)
+        self.assertEqual(
+            expired_snapshot.json["code"],
+            "BW_SYNC_SNAPSHOT_EXPIRED",
+        )
+
+        recovered = self.client.post(
+            "/api/reader/sync/snapshot",
+            json={
+                "contract": CONTRACT,
+                "syncContract": "sync-v3",
+                "syncChangeContract": "record-parent-state/1",
+                "registryDigest": CARD_REGISTRY_DIGEST,
+                "ownerNamespace": NS_A,
+                "deviceId": upgraded_holder["deviceId"],
+                "limit": 10,
+                **upgraded_fields,
+            },
+            headers={"X-Test-Account": "a"},
+        )
+        self.assertEqual(recovered.status_code, 200)
+        self.assertEqual(recovered.json["snapshotCursor"], 2)
+        self.assertEqual(
+            {
+                item["collection"]: item["record"]["value"]
+                for item in recovered.json["changes"]
+            },
+            {
+                "user-settings": {"id": "upgrade-setting", "theme": "dark"},
+                "vocabulary-state": {"id": "upgrade-word", "term": "猫"},
+            },
+        )
+        caught_up = self.client.post(
+            "/api/reader/sync/exchange",
+            json={
+                **self._body(
+                    registryDigest=CARD_REGISTRY_DIGEST,
+                    deviceId=upgraded_holder["deviceId"],
+                    direction="pull",
+                    cursor=recovered.json["snapshotCursor"],
+                    changes=[],
+                ),
+                **upgraded_fields,
+            },
+            headers={"X-Test-Account": "a"},
+        )
+        self.assertEqual(caught_up.status_code, 200)
+        self.assertIs(caught_up.json["resetRequired"], False)
+        self.assertEqual(caught_up.json["changes"], [])
+
+    def test_concurrent_new_registry_claims_upgrade_once_without_data_loss(self):
+        legacy_holder = self._lease_holder(
+            account="a",
+            namespace=NS_A,
+            device_id="concurrent-legacy",
+            family_label="concurrent-legacy-family",
+        )
+        legacy_lease = self._claim(legacy_holder)
+        self.assertEqual(legacy_lease.status_code, 200)
+        seeded = self.client.post(
+            "/api/reader/sync/exchange",
+            json={
+                **self._body(
+                    deviceId=legacy_holder["deviceId"],
+                    changes=[_change(
+                        1,
+                        record_id="concurrent-preserved",
+                        mutation_id="concurrent-preserved-mutation",
+                    )],
+                ),
+                "deviceFamilyId": legacy_holder["deviceFamilyId"],
+                "ownerRole": legacy_holder["ownerRole"],
+                "ownerInstanceId": legacy_holder["ownerInstanceId"],
+                "ownerGeneration": legacy_lease.json["ownerGeneration"],
+                "ownerToken": legacy_lease.json["ownerToken"],
+            },
+            headers={"X-Test-Account": "a"},
+        )
+        self.assertEqual(seeded.status_code, 200)
+
+        new_holders = [
+            self._lease_holder(
+                account="a",
+                namespace=NS_A,
+                device_id=f"concurrent-new-{index}",
+                family_label=f"concurrent-new-family-{index}",
+                owner_instance_id=f"concurrent-new-owner-{index}",
+            )
+            for index in range(2)
+        ]
+
+        def claim(holder: dict):
+            with self.app.test_client() as client:
+                return client.post(
+                    "/api/reader/sync/owner/claim",
+                    json=self._owner_request(
+                        holder,
+                        registry_digest=CARD_REGISTRY_DIGEST,
+                    ),
+                    headers={"X-Test-Account": "a"},
+                )
+
+        with ThreadPoolExecutor(max_workers=2) as pool:
+            claims = list(pool.map(claim, new_holders))
+        self.assertEqual([response.status_code for response in claims], [200, 200])
+
+        claim_by_owner = {
+            response.json["ownerInstanceId"]: response
+            for response in claims
+        }
+        for holder in new_holders:
+            lease = claim_by_owner[holder["ownerInstanceId"]]
+            renewed = self.client.post(
+                "/api/reader/sync/owner/renew",
+                json=self._owner_request(
+                    holder,
+                    registry_digest=CARD_REGISTRY_DIGEST,
+                    credentials={
+                        "ownerGeneration": lease.json["ownerGeneration"],
+                        "ownerToken": lease.json["ownerToken"],
+                    },
+                ),
+                headers={"X-Test-Account": "a"},
+            )
+            self.assertEqual(renewed.status_code, 200)
+
+        db_path = self.root / NS_A / "relay.sqlite3"
+        with contextlib.closing(sqlite3.connect(db_path)) as connection:
+            state = connection.execute(
+                "SELECT registry_digest,current_cursor,causal_start_cursor "
+                "FROM relay_state WHERE singleton=1"
+            ).fetchone()
+            counts = connection.execute(
+                "SELECT "
+                "(SELECT COUNT(*) FROM relay_events),"
+                "(SELECT COUNT(*) FROM relay_heads),"
+                "(SELECT COUNT(*) FROM relay_mutations),"
+                "(SELECT COUNT(*) FROM sync_owner_leases "
+                " WHERE token_sha256 IS NOT NULL AND released_at IS NULL "
+                " AND expires_at>0)"
+            ).fetchone()
+            legacy_row = connection.execute(
+                "SELECT token_sha256,released_at,expires_at "
+                "FROM sync_owner_leases WHERE device_family_id=?",
+                (legacy_holder["deviceFamilyId"],),
+            ).fetchone()
+        self.assertEqual(state, (CARD_REGISTRY_DIGEST, 1, 1))
+        self.assertEqual(counts, (1, 1, 1, 2))
+        self.assertEqual(legacy_row[0], None)
+        self.assertIsNotNone(legacy_row[1])
+        self.assertEqual(legacy_row[2], 0)
+
+        winner_holder = new_holders[0]
+        winner_lease = claim_by_owner[winner_holder["ownerInstanceId"]]
+        recovered = self.client.post(
+            "/api/reader/sync/snapshot",
+            json={
+                "contract": CONTRACT,
+                "syncContract": "sync-v3",
+                "syncChangeContract": "record-parent-state/1",
+                "registryDigest": CARD_REGISTRY_DIGEST,
+                "ownerNamespace": NS_A,
+                "deviceId": winner_holder["deviceId"],
+                "deviceFamilyId": winner_holder["deviceFamilyId"],
+                "ownerRole": winner_holder["ownerRole"],
+                "ownerInstanceId": winner_holder["ownerInstanceId"],
+                "ownerGeneration": winner_lease.json["ownerGeneration"],
+                "ownerToken": winner_lease.json["ownerToken"],
+                "limit": 10,
+            },
+            headers={"X-Test-Account": "a"},
+        )
+        self.assertEqual(recovered.status_code, 200)
+        self.assertEqual(recovered.json["snapshotCursor"], 1)
+        self.assertEqual(
+            recovered.json["changes"][0]["record"]["id"],
+            "concurrent-preserved",
+        )
 
     def test_owner_lease_claim_is_linearized_and_scoped_by_device_family(self):
         first = self._lease_holder(

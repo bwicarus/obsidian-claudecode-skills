@@ -1,5 +1,20 @@
 # 融合复习卡系统(用户设计定稿 2026-07-21)
 
+## 当前权威合同（2026-08-13，覆盖下文旧 Pi/Anki 真源描述）
+
+- Reader 自己的卡库是本机 `card-entities` + `card-states`，不是 Pi 上的 AnkiConnect。
+  一个 `card_*` gid 表示一次生成的整批 cards，批内稳定 index 保存草稿/确认/删除/复习状态；
+  `id === cid === gid`，placement 另行编号。
+- 草稿展示前必须先 `registerDraft`；编辑、删除、确认与四档评分都先写本地仓，失败或结果未知
+  时保留原界面并 fail closed。`rc-review` 直接枚举本地已确认卡，按到期后新卡确定性排队；
+  只有本地仓为空才保留旧外部队列兼容路径。
+- Pi `sync-v3` 同步 `card-entities`/`card-states`；首次升级只导入本机缺失的旧 Pi registry gid，
+  不覆盖本机同 gid。下文 `/api/entity`、`/anki-add-cards` 与 Pi 复习接口是旧兼容/投影说明，
+  不再是 App 卡库权威。
+- ReaderPC AnkiConnect 与 AnkiMobile `addnote` 都是用户触发的可选导出。外部写入使用
+  pending/succeeded/failed/unknown receipt；结果未知禁止盲重试，外部 ID 只存在投影 receipt。
+
+
 > Anki 卡片以**工具结果卡**为载体,贯穿"制卡→编辑→确认→学习→收纳→钉到页面"全生命周期;
 > 字幕模式与侧边栏共用同一张卡。美术与现有工具卡(rc-turncard/voiceCard 形态)完全一致化。
 

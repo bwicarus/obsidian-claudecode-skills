@@ -1,5 +1,6 @@
 using System.Text;
 using System.Text.Json;
+using System.Text.Json.Nodes;
 
 namespace BwReader.ComputerVoiceAudio;
 
@@ -551,6 +552,7 @@ internal sealed class DirectBridgeProtocolSession
     private readonly DirectBridgeCoordinator _coordinator;
     private readonly IDirectCodexVoiceControl _codexVoiceControl;
     private readonly IReaderDictionaryFallback? _dictionaryFallback;
+    private readonly IReaderLocalAnkiWriter? _localAnkiWriter;
     private readonly Func<string, ReaderContextSourceLease>
         _registerReaderSource;
     private readonly Func<
@@ -587,7 +589,8 @@ internal sealed class DirectBridgeProtocolSession
             acceptReaderBrowserControl = null,
         Action<ReaderRealtimeOutputAck>?
             acceptReaderRealtimeOutput = null,
-        IReaderDictionaryFallback? dictionaryFallback = null)
+        IReaderDictionaryFallback? dictionaryFallback = null,
+        IReaderLocalAnkiWriter? localAnkiWriter = null)
     {
         if (!DirectBridgeContract.IsSafeId(connectionId))
         {
@@ -601,6 +604,7 @@ internal sealed class DirectBridgeProtocolSession
         _codexVoiceControl = codexVoiceControl
             ?? DirectCodexVoiceControl.Shared;
         _dictionaryFallback = dictionaryFallback;
+        _localAnkiWriter = localAnkiWriter;
         _registerReaderSource = registerReaderSource
             ?? (_ => throw new DirectProtocolException(
                 "BW_READER_VISUAL_UNAVAILABLE",
@@ -692,6 +696,11 @@ internal sealed class DirectBridgeProtocolSession
                     break;
                 case "dictionary-lookup":
                     payload = await HandleDictionaryLookupAsync(
+                        message,
+                        cancellationToken).ConfigureAwait(false);
+                    break;
+                case "anki-add-cards-local":
+                    payload = await HandleLocalAnkiAddAsync(
                         message,
                         cancellationToken).ConfigureAwait(false);
                     break;
@@ -1322,6 +1331,79 @@ internal sealed class DirectBridgeProtocolSession
             };
         }
         catch (ReaderDictionaryFallbackException exception)
+        {
+            throw new DirectProtocolException(
+                exception.Code,
+                exception.Message,
+                exception.Retryable,
+                exception);
+        }
+    }
+
+    private async Task<object> HandleLocalAnkiAddAsync(
+        JsonElement message,
+        CancellationToken cancellationToken)
+    {
+        RequireExactKeys(
+            message,
+            "contract",
+            "type",
+            "requestId",
+            "sessionId",
+            "sourceInstanceId",
+            "draftId",
+            "cardIndex",
+            "aid",
+            "card");
+        RequireAuthenticated();
+        if (_phase != DirectProtocolPhase.ContextOnly)
+        {
+            throw new DirectProtocolException(
+                "BW_READER_ANKI_CONTEXT_ONLY_REQUIRED",
+                "Reader 本地 Anki 写入只允许在纯上下文连接中执行");
+        }
+        string sessionId = RequireSafeId(message, "sessionId");
+        _ = DirectPcmFrameCodec.ParseSessionId(sessionId);
+        RequireContextOnlySession(sessionId);
+        if (_localAnkiWriter is null)
+        {
+            throw new DirectProtocolException(
+                "BW_READER_ANKI_LOCAL_UNAVAILABLE",
+                "ReaderPC 本地 Anki 写入尚未接线",
+                retryable: true);
+        }
+        string sourceInstanceId = RequireSafeId(
+            message,
+            "sourceInstanceId");
+        string draftId = RequireString(message, "draftId", 64);
+        string aid = RequireString(message, "aid", 64);
+        if (!message.TryGetProperty("cardIndex", out JsonElement indexValue)
+            || indexValue.ValueKind != JsonValueKind.Number
+            || !indexValue.TryGetInt32(out int cardIndex)
+            || cardIndex is < 0 or >= 20
+            || !message.TryGetProperty("card", out JsonElement cardValue)
+            || cardValue.ValueKind != JsonValueKind.Object)
+        {
+            throw new DirectProtocolException(
+                "BW_READER_ANKI_REQUEST_INVALID",
+                "Reader 本地 Anki 卡片请求无效");
+        }
+        try
+        {
+            JsonObject card = JsonNode.Parse(cardValue.GetRawText())
+                as JsonObject
+                ?? throw new JsonException("card is empty");
+            ReaderLocalAnkiWriteOutcome outcome =
+                await _localAnkiWriter.AddAsync(
+                    sourceInstanceId,
+                    draftId,
+                    cardIndex,
+                    aid,
+                    card,
+                    cancellationToken).ConfigureAwait(false);
+            return outcome.Result.ToPayload(outcome.Dedup);
+        }
+        catch (ReaderLocalAnkiException exception)
         {
             throw new DirectProtocolException(
                 exception.Code,

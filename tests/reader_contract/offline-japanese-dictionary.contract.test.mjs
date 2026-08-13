@@ -209,10 +209,14 @@ test("Japanese UI uses ReaderPC CLI first and keeps Pi only as an explicit legac
   assert.match(wordpop, /电脑 CLI 精释/);
   assert.match(wordpop, /改用 Pi 旧版精释/);
   assert.match(wordpop, /_lookupJapaneseLocalFirst/);
+  assert.match(phrasepop, /_lookupPhraseLocalFirst/);
+  assert.match(phrasepop, /lookupJapaneseFallback/);
+  assert.doesNotMatch(phrasepop, /fetch\('\/pdf\/api\/dict-jp\?word=/);
+  assert.doesNotMatch(phrasepop, /fetch\('\/pdf\/api\/translate-sentence/);
   assert.match(computerVoice, /lookupJapaneseFallback/);
   assert.match(computerVoice, /"dictionary-lookup"/);
   assert.match(nativeRuntime, /dictionaryFallbackCache/);
   assert.match(protocol, /HandleDictionaryLookupAsync/);
   assert.doesNotMatch(wordpop, /暂无词典释义（可能是人名\/专有名词），已请 AI 讲解/);
-  assert.match(phrasepop, /Pi AI 精释/);
+  assert.match(phrasepop, /改用 Pi 旧版精释/);
 });

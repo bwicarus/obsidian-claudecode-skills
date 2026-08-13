@@ -2,8 +2,8 @@
 ;(function(document, fetch){
 if (window.__bwPwaProviderOnly) return;
 /* rc-flashcard.js — 融合复习卡(用户设计定稿 2026-07-21,references/card-review-integration.md)。
- * 状态机:draft 草稿[🗑删除][✓入库到Anki](入库=直接进Anki拿note_id)→ learn 普通Anki(正面→点击显答案→四档
- *   再来/困难/良好/简单→answerCards真FSRS)→ collapsed 收起长条+距下次复习倒计时。
+ * 状态机:draft 草稿[🗑删除][✓保存到Reader卡库]→ learn 本地卡库实体。外部 Anki 是可选投影，
+ *   只有取得对应后端的精确卡号时才开放该后端的评分；外部投影永远不能替代 Reader 身份。
  * 多卡(B2 用户拍板):**CSS scroll-snap 左右滑动、中线吸附**(替代 ‹› 前后按钮);底部圆点指示当前张。
  *   字幕浮层与侧边栏共用同一渲染(bare 模式套进 vc-card 天气卡壳)。操作后只就地重渲当前 slide→滑动位置不跳。 */
 (function () {
@@ -42,6 +42,152 @@ if (window.__bwPwaProviderOnly) return;
     } catch (_) {
       return '';
     }
+  }
+  var _EXACT_STATE_FIELDS = [
+    'front', 'back', 'cloze',
+    '_st', '_nid', '_next', '_showBack', 'id', 'card_id',
+    '_ratingUnavailable', '_ratingUnavailableReason',
+    '_ratingPending', '_syncPending', '_ratingAid', '_ratingEase',
+    '_ratingCardId', '_addPending', '_addQueued', '_addAid',
+    '_pcExportAid', '_pcExportStatus', '_mobileExportStatus'
+  ];
+  var _repositorySubscription = null;
+  function ensureRepositorySubscription(api) {
+    if (_repositorySubscription || !api || typeof api.subscribe !== 'function') return;
+    try {
+      _repositorySubscription = api.subscribe(function (event) {
+        var gid = event && event.cardId;
+        var group = gid && _groups[gid];
+        if (!group || !event.record) return;
+        group.conts.slice().forEach(function (container) {
+          if (container && container.__fc) applyRepositoryRecord(container, event.record);
+        });
+      });
+    } catch (_) {}
+  }
+  function repositoryApi() {
+    var api = window.BWReaderRuntime && window.BWReaderRuntime.cardRepository;
+    if (!api || typeof api.status !== 'function') return null;
+    try {
+      var status = api.status();
+      if (status && status.available === true) {
+        ensureRepositorySubscription(api);
+        return api;
+      }
+      return null;
+    } catch (_) { return null; }
+  }
+  function repositoryCard(card) {
+    card = card || {};
+    var output = card.type === 'cloze'
+      ? { type: 'cloze', cloze: String(card.cloze || card.text || '') }
+      : {
+          type: 'basic',
+          front: String(card.front != null ? card.front : (card.question || '')),
+          back: String(card.back != null ? card.back : (card.answer || ''))
+        };
+    ['deck', 'reason'].forEach(function (key) {
+      if (card[key] != null && String(card[key])) output[key] = String(card[key]);
+    });
+    if (Array.isArray(card.tags)) output.tags = card.tags.slice();
+    return output;
+  }
+  function repositoryCards(cards) {
+    return (cards || []).map(repositoryCard);
+  }
+  function repositorySource(st) {
+    var source = st && st.opts && st.opts.repositorySource;
+    if (source && typeof source === 'object') return source;
+    return {
+      kind: 'reader-card-entity',
+      sourceId: String(st && st.gid || ''),
+      tool: 'rc-flashcard',
+      legacy: { piEntityRegistered: !(st && st.opts && st.opts.entityRegistered === false) }
+    };
+  }
+  function repositoryMutation(prefix, gid, index) {
+    var bytes = new Uint8Array(12);
+    if (!window.crypto || typeof window.crypto.getRandomValues !== 'function') {
+      throw new Error('BW_CARD_REPOSITORY_RANDOM');
+    }
+    window.crypto.getRandomValues(bytes);
+    var hex = Array.prototype.map.call(bytes, function (value) {
+      return value.toString(16).padStart(2, '0');
+    }).join('');
+    return 'rcfc:' + prefix + ':' + String(gid || '') + ':' +
+      String(index == null ? 'all' : index) + ':' + hex;
+  }
+  function exactState(card) {
+    var output = {};
+    _EXACT_STATE_FIELDS.forEach(function (field) {
+      if (card && card[field] !== undefined) output[field] = card[field];
+    });
+    return output;
+  }
+  function applyExactState(card, state) {
+    if (!card || !state || typeof state !== 'object') return;
+    _EXACT_STATE_FIELDS.forEach(function (field) {
+      if (state[field] !== undefined) card[field] = state[field];
+    });
+  }
+  function applyRepositoryRecord(container, record) {
+    var st = container && container.__fc;
+    if (!st || !record || record.deleted || !record.states) return false;
+    var changed = false;
+    Object.keys(record.states).forEach(function (key) {
+      var index = Number(key), saved = record.states[key], card = st.cards[index];
+      if (!Number.isInteger(index) || !card || !saved) return;
+      var before = JSON.stringify(exactState(card));
+      var beforeRemoved = card._removed === true;
+      card._removed = saved.removed === true;
+      applyExactState(card, saved.exactState || {});
+      if (saved.phase === 'confirmed' && card._st === 'draft') {
+        card._st = 'learn';
+        card._ratingUnavailable = true;
+        card._ratingUnavailableReason = 'not-exported';
+      }
+      if (saved.phase === 'confirmed' && card._addPending) {
+        card._addPending = false;
+        card._addQueued = false;
+        card._addAid = null;
+      }
+      var projections = saved.projections && saved.projections.anki || {};
+      var externalStatus = {
+        pending: false,
+        unknown: false,
+        succeeded: false,
+        failed: false
+      };
+      Object.keys(projections).forEach(function (target) {
+        var receipt = projections[target] || {};
+        var isExternal = target === 'readerpc' || target.indexOf('ankimobile') === 0;
+        if (!isExternal) return;
+        if (target === 'readerpc') card._pcExportStatus = receipt.status;
+        if (target.indexOf('ankimobile') === 0) card._mobileExportStatus = receipt.status;
+        if (Object.prototype.hasOwnProperty.call(externalStatus, receipt.status)) {
+          externalStatus[receipt.status] = true;
+        }
+      });
+      // 多个可选导出器可能处于不同状态。顺序不能由对象插入顺序决定：未知结果
+      // 永远最保守，其次是正在发送；成功只表示卡在外部存在，不改变 Reader 身份。
+      if (externalStatus.unknown) card._ratingUnavailableReason = 'export-unknown';
+      else if (externalStatus.pending) card._ratingUnavailableReason = 'export-pending';
+      else if (externalStatus.succeeded) card._ratingUnavailableReason = 'external';
+      else if (externalStatus.failed && saved.phase === 'confirmed') {
+        card._ratingUnavailableReason = 'not-exported';
+      }
+      if (externalStatus.unknown || externalStatus.pending ||
+          externalStatus.succeeded || externalStatus.failed) {
+        card._ratingUnavailable = true;
+      }
+      if (JSON.stringify(exactState(card)) !== before ||
+          beforeRemoved !== card._removed) changed = true;
+    });
+    if (changed) {
+      renderTrack(container);
+      broadcast(st.gid, null, container);
+    }
+    return changed;
   }
   function faceHtml(st, card, side) {
     var html = '';
@@ -92,6 +238,7 @@ if (window.__bwPwaProviderOnly) return;
       '.fc-btns button{flex:1;border-radius:9px;padding:10px 0;font-size:13px;cursor:pointer;border:1px solid #2a3550;background:#1a2540;color:#cfe6ff;-webkit-tap-highlight-color:transparent}' +
       '.fc-del{border-color:#7f1d1d!important;color:#fca5a5!important;flex:0 0 42%!important}' +
       '.fc-add{border-color:#14532d!important;color:#86efac!important}' +
+      '.fc-export{border-color:#1e3a8a!important;color:#93c5fd!important}' +
       '.fc-face{cursor:pointer;min-height:44px}.fc-face .fc-hint{font-size:12px;color:var(--rc-text-muted,#8a9bb4);margin-top:10px}' +
       '.fc-back{border-top:1px solid rgba(255,255,255,.10);margin-top:12px;padding-top:12px}' +
       '.fc-eases{display:flex;gap:6px;margin-top:12px}' +
@@ -135,7 +282,7 @@ if (window.__bwPwaProviderOnly) return;
       var b = c.type === 'cloze'
         ? '<div class="fc-lbl">填空(cloze,答案用 {{c1::…}} 包住)</div><textarea class="fc-ed" data-f="cloze">' + esc(c.cloze) + '</textarea>'
         : '<div class="fc-lbl">正面</div><textarea class="fc-ed" data-f="front">' + esc(c.front) + '</textarea><div class="fc-lbl">背面</div><textarea class="fc-ed" data-f="back">' + esc(c.back) + '</textarea>';
-      b += '<div class="fc-btns"><button class="fc-del" data-fc="del">🗑 删除</button><button class="fc-add" data-fc="add">✓ 入库到 Anki</button></div>';
+      b += '<div class="fc-btns"><button class="fc-del" data-fc="del">🗑 删除</button><button class="fc-add" data-fc="add">✓ 保存到 Reader 卡库</button></div>';
       return '<div class="fc-card">' + b + '</div>';
     }
     if (c._st === 'preview') {
@@ -149,16 +296,38 @@ if (window.__bwPwaProviderOnly) return;
       return '<div class="fc-card"><div class="fc-lbl">正面</div>' + front +
         '<div class="fc-pending">' +
         (c._addQueued
-          ? '已保存到本地同步队列，等待确认 Anki 入库结果'
-          : '正在确认 Anki 入库结果，请勿重复提交') +
+          ? '本地保存结果待核对，正在用原写入编号确认；请勿重复提交'
+          : '正在确认 Reader 本地卡库保存结果，请勿重复提交') +
         '</div></div>';
+    }
+    var exportControls = '';
+    if (c._ratingUnavailableReason === 'not-exported') {
+      var canDesktop = !!(st && st.opts && st.opts.localDraft &&
+        RC.computerVoice && typeof RC.computerVoice.addLocalAnkiCard === 'function');
+      var mobileApi = window.BWReaderRuntime && window.BWReaderRuntime.ankiMobileExport;
+      var canMobile = !!(mobileApi && typeof mobileApi.available === 'function' &&
+        mobileApi.available());
+      if (canDesktop || canMobile) {
+        exportControls = '<div class="fc-btns">' +
+          (canDesktop ? '<button class="fc-export" data-fc="export-pc">发送到电脑 Anki</button>' : '') +
+          (canMobile ? '<button class="fc-export" data-fc="export-mobile">发送到 iPad Anki</button>' : '') +
+          '</div>';
+      }
     }
     var answerControls = c._ratingUnavailable
       ? '<div class="fc-unavailable">' +
-        (c._ratingUnavailableReason === 'missing'
-          ? '暂未取得唯一 Anki 卡号，请在 Anki 中复习。'
-          : '这条 Anki 笔记生成了多张卡，请在 Anki 中选择具体卡片复习。') +
-        '</div>'
+        (c._ratingUnavailableReason === 'not-exported'
+          ? '已保存在 Reader 本地卡库；外部 Anki 只是可选副本。'
+          : (c._ratingUnavailableReason === 'external'
+            ? '已发送到外部 Anki；请在对应 Anki 中复习。'
+            : (c._ratingUnavailableReason === 'export-pending'
+              ? '已打开外部 Anki，正在等待回到 Reader 的确认。'
+              : (c._ratingUnavailableReason === 'export-unknown'
+                ? '外部 Anki 接收结果未知，已阻止重复发送。'
+                : (c._ratingUnavailableReason === 'missing'
+                  ? '暂未取得唯一 Anki 卡号，请在 Anki 中复习。'
+                  : '这条 Anki 笔记生成了多张卡，请在 Anki 中选择具体卡片复习。'))))) +
+        '</div>' + exportControls
       : '<div class="fc-eases">' + _EASE.map(function (e) { return '<button class="fc-e ' + e[2] + '" data-ease="' + e[0] + '">' + e[1] + '</button>'; }).join('') + '</div>';
     var reviewFace = !c._showBack
       ? '<div class="fc-face" data-fc="reveal">' + front + '</div>'
@@ -177,8 +346,10 @@ if (window.__bwPwaProviderOnly) return;
     slide.querySelectorAll('[data-fc]').forEach(function (el) {
       el.addEventListener('click', function (ev) {
         ev.stopPropagation(); var act = el.dataset.fc, cc = st.cards[i];
-        if (act === 'del') { st.cards.splice(i, 1); renderTrack(container); broadcast(st.gid, null, container); notifyGroup(st.gid, 'draft-delete', i); RC.toast && RC.toast('草稿已删除(未入库)'); }
+        if (act === 'del') { removeDraft(container, i); }
         else if (act === 'add') { addToAnki(container, i); }
+        else if (act === 'export-pc') { exportToComputerAnki(container, i); }
+        else if (act === 'export-mobile') { exportToMobileAnki(container, i); }
         else if (act === 'reveal') {
           cc._showBack = true;
           updateSlide(container, i);
@@ -191,7 +362,14 @@ if (window.__bwPwaProviderOnly) return;
         }
       });
     });
-    slide.querySelectorAll('.fc-ed').forEach(function (ta) { ta.addEventListener('input', function () { st.cards[i][ta.dataset.f] = ta.value; broadcast(st.gid, i, container); notifyGroup(st.gid, 'draft-edit', i); }); });
+    slide.querySelectorAll('.fc-ed').forEach(function (ta) { ta.addEventListener('input', function () {
+      st.cards[i][ta.dataset.f] = ta.value;
+      broadcast(st.gid, i, container);
+      notifyGroup(st.gid, 'draft-edit', i);
+      // 草稿正文跟状态一起按稳定 batch index 写入本地权威仓。每次 input 都立刻
+      // 入串行队列，避免用户刚编辑就刷新时只剩 DOM 内存副本。
+      _stateSync(st, i);
+    }); });
     slide.querySelectorAll('.fc-e').forEach(function (el) { el.addEventListener('click', function (ev) {
       ev.stopPropagation();
       var ease = parseInt(el.dataset.ease, 10);
@@ -355,12 +533,24 @@ if (window.__bwPwaProviderOnly) return;
       container.__fcPager.destroy();
     }
     container.__fcPager = null;
-    var n = st.cards.length;
+    var activeIndices = [];
+    st.cards.forEach(function (card, index) {
+      if (!card._removed) activeIndices.push(index);
+    });
+    var n = activeIndices.length;
     if (!n) { container.innerHTML = '<div class="fc-collapsed">（草稿已全部删除）</div>'; return; }
-    if (st.idx >= n) st.idx = n - 1;
+    var activePosition = activeIndices.indexOf(st.idx);
+    if (activePosition < 0) {
+      activePosition = activeIndices.findIndex(function (index) { return index > st.idx; });
+      if (activePosition < 0) activePosition = n - 1;
+      st.idx = activeIndices[activePosition];
+    }
     var slides = '';
-    for (var i = 0; i < n; i++) slides += '<div class="fc-slide" data-i="' + i + '">' + cardHtml(st, st.cards[i], i) + '</div>';
-    var dots = n > 1 ? '<div class="fc-dots">' + st.cards.map(function (_, j) { return '<span class="fc-dot' + (j === st.idx ? ' on' : '') + '" data-goto="' + j + '"></span>'; }).join('') + '</div>' : '';
+    activeIndices.forEach(function (cardIndex) {
+      slides += '<div class="fc-slide" data-i="' + cardIndex + '">' +
+        cardHtml(st, st.cards[cardIndex], cardIndex) + '</div>';
+    });
+    var dots = n > 1 ? '<div class="fc-dots">' + activeIndices.map(function (_, position) { return '<span class="fc-dot' + (position === activePosition ? ' on' : '') + '" data-goto="' + position + '"></span>'; }).join('') + '</div>' : '';
     var pin = (window.RC && RC.stickynote && RC.stickynote.createCardAt && !(st.opts && st.opts.nopin)) ? '<button class="fc-pin" title="钉到书页"><svg viewBox="0 0 16 16" width="11" height="11" fill="none" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round"><path d="M9.9 2.1l4 4-2.9 1-1.5 4.4-5-5L8.9 5z"/><path d="M6 10L2.5 13.5"/></svg></button>' : '';
     var trackHtml = st.opts && st.opts.pager === false && n === 1
       ? slides
@@ -369,15 +559,17 @@ if (window.__bwPwaProviderOnly) return;
     var _pinBtn = container.querySelector('.fc-pin');
     if (_pinBtn) _pinBtn.addEventListener('click', function (ev) { ev.stopPropagation(); pinToPage(container); });
     var track = container.querySelector('.fc-track');
-    container.querySelectorAll('.fc-slide').forEach(function (sl, j) { bindSlide(container, sl, st, j); });
+    container.querySelectorAll('.fc-slide').forEach(function (sl) {
+      bindSlide(container, sl, st, Number(sl.dataset.i));
+    });
     try { RC.typeset && RC.typeset(container); } catch (e) {}
     if (track) {
       container.__fcPager = bindPager(container, {
         track: track,
         slides: container.querySelectorAll('.fc-slide'),
         dots: container.querySelectorAll('.fc-dot'),
-        index: st.idx,
-        onChange: function (next) { st.idx = next; }
+        index: activePosition,
+        onChange: function (next) { st.idx = activeIndices[next]; }
       });
     }
   }
@@ -415,7 +607,8 @@ if (window.__bwPwaProviderOnly) return;
         [
           '_st', '_showBack', '_next', '_ratingPending', '_syncPending',
           '_ratingAid', '_ratingEase', '_ratingCardId',
-          '_addPending', '_addQueued', '_addAid'
+          '_addPending', '_addQueued', '_addAid',
+          '_pcExportAid', '_pcExportStatus', '_mobileExportStatus'
         ].forEach(function (field) {
           if (old[field] != null) card[field] = old[field];
         });
@@ -470,50 +663,61 @@ if (window.__bwPwaProviderOnly) return;
     if (reason) notifyGroup(gid, reason, i);
     return true;
   }
-  // 统一编号协议(用户设计 2026-07-21):card_ 编号卡 mount 后从服务端注册表拉最新状态覆盖——
-  //   根治"入库/评分后刷新变回草稿"(_stateSync 把 learn/_nid PATCH 上去了,但回放 mount 无条件 draft 盖掉它)。
-  //   entity states 为空(新制卡)=保持草稿;有 learn/done=恢复已入库/已复习态。fire-and-forget,失败静默不影响首屏。
-  function _restoreStates(container) {
-    var st = container.__fc;
-    if (!st || !/^card_/.test(st.gid || '')) return;   // 本地 fcg_ 卡无服务端状态,跳过
-    fetch('/pdf/api/entity/' + encodeURIComponent(st.gid))
-      .then(function (r) { return r.json(); })
-      .then(function (d) {
-        if (!d || !d.ok || !d.states || !container.__fc || container.__fc !== st || !st.cards) return;
+  function _restoreLegacyStates(container, st) {
+    if (!st || st.opts.entityRegistered === false) return Promise.resolve(false);
+    return fetch('/pdf/api/entity/' + encodeURIComponent(st.gid))
+      .then(function (response) { return response.json(); })
+      .then(function (data) {
+        if (!data || !data.ok || !data.states || !container.__fc ||
+            container.__fc !== st || !st.cards) return false;
         var changed = false;
-        Object.keys(d.states).forEach(function (k) {
-          var i = parseInt(k, 10), s = d.states[k];
-          if (!s || !st.cards[i]) return;
-          var localPending = !!(
-            st.cards[i]._ratingPending ||
-            st.cards[i]._syncPending ||
-            st.cards[i]._addPending
-          );
-          var remotePending = !!(
-            s._ratingPending || s._syncPending || s._addPending
-          );
-          [
-            '_st', '_nid', '_next', '_showBack', 'id', 'card_id',
-            '_ratingUnavailable', '_ratingUnavailableReason',
-            '_ratingPending', '_syncPending',
-            '_ratingAid', '_ratingEase', '_ratingCardId',
-            '_addPending', '_addQueued', '_addAid'
-          ].forEach(function (f) {
-            // 没有 revision/receipt 证明时，旧服务端 learn 不得覆盖本地
-            // outcome-unknown。明确的当前请求回调会直接写 accepted/reverted。
+        Object.keys(data.states).forEach(function (key) {
+          var index = Number(key), saved = data.states[key], card = st.cards[index];
+          if (!Number.isInteger(index) || !saved || !card) return;
+          var localPending = !!(card._ratingPending || card._syncPending || card._addPending);
+          var remotePending = !!(saved._ratingPending || saved._syncPending || saved._addPending);
+          _EXACT_STATE_FIELDS.forEach(function (field) {
             if (localPending && !remotePending && [
               '_st', '_next', '_showBack', '_ratingUnavailable',
-              '_ratingUnavailableReason',
-              '_ratingPending', '_syncPending', '_ratingAid',
-              '_ratingEase', '_ratingCardId', '_addPending',
+              '_ratingUnavailableReason', '_ratingPending', '_syncPending',
+              '_ratingAid', '_ratingEase', '_ratingCardId', '_addPending',
               '_addQueued', '_addAid'
-            ].indexOf(f) >= 0) return;
-            if (s[f] != null && st.cards[i][f] !== s[f]) { st.cards[i][f] = s[f]; changed = true; }
+            ].indexOf(field) >= 0) return;
+            if (saved[field] !== undefined && card[field] !== saved[field]) {
+              card[field] = saved[field];
+              changed = true;
+            }
           });
         });
-        if (changed) { renderTrack(container); broadcast(st.gid, null, container); }   // 覆盖后重渲 + 同 gid 其它宿主同步
-      })
-      .catch(function () {});
+        if (changed) {
+          renderTrack(container);
+          broadcast(st.gid, null, container);
+        }
+        return changed;
+      });
+  }
+  // card_* 首先从 App/扩展本地权威仓库恢复；只有尚未迁入本地仓的历史实体
+  // 才读取 Pi 旧 registry。旧 registry 不能覆盖已经存在的本地 revision。
+  function _restoreStates(container) {
+    var st = container && container.__fc;
+    if (!st || !/^card_/.test(st.gid || '')) return;
+    var repo = repositoryApi();
+    if (!repo) {
+      _restoreLegacyStates(container, st).catch(function () {});
+      return;
+    }
+    repo.load(st.gid).then(function (record) {
+      if (!container.__fc || container.__fc !== st) return false;
+      if (record) return applyRepositoryRecord(container, record);
+      return _restoreLegacyStates(container, st);
+    }).catch(function (error) {
+      try {
+        if (window.dlog) window.dlog(
+          '卡仓恢复失败 ' + String(error && (error.code || error.message) || error).slice(0, 160),
+          '#ff6b6b'
+        );
+      } catch (_) {}
+    });
   }
   function mountState(container, cards, opts) {
     // 保留每张卡的 _st/_nid/_next 的 mount(便签/收藏夹宿主用:钉出去的卡保持草稿/学习/已复习态)
@@ -584,156 +788,337 @@ if (window.__bwPwaProviderOnly) return;
     renderTrack(container);
     broadcast(container.__fc.gid, null, container);
   }
+  function repositoryOutcomeUnknown(error) {
+    var current = error;
+    for (var depth = 0; current && depth < 5; depth += 1) {
+      if (current.outcomeUnknown === true ||
+          current.details && current.details.outcomeUnknown === true) return true;
+      current = current.cause;
+    }
+    return false;
+  }
+  function repositoryConfirmation(record, index) {
+    var state = record && record.states && record.states[String(index)];
+    return !!(state && !state.removed && state.phase === 'confirmed');
+  }
+  function finishRepositoryConfirmation(container, st, c, i, record) {
+    if (record) applyRepositoryRecord(container, record);
+    c._st = 'learn';
+    c._showBack = false;
+    c._addPending = false;
+    c._addQueued = false;
+    c._addAid = null;
+    c._ratingUnavailable = true;
+    c._ratingUnavailableReason = 'not-exported';
+    updateSlide(container, i);
+    broadcast(st.gid, i, container);
+    notifyGroup(st.gid, 'card-repository-confirmed', i);
+    return _stateSync(st, i).then(function () {
+      RC.toast && RC.toast('✓ 已保存到 Reader 本地卡库');
+      return record;
+    });
+  }
+  function failRepositoryConfirmation(container, st, c, i, previous, error) {
+    Object.keys(previous).forEach(function (field) { c[field] = previous[field]; });
+    updateSlide(container, i);
+    broadcast(st.gid, i, container);
+    notifyGroup(st.gid, 'card-repository-reverted', i);
+    RC.toast && RC.toast(
+      '本地卡库保存失败：' +
+      String(error && (error.code || error.message) || error || '?').slice(0, 180)
+    );
+    return null;
+  }
+  function holdUnknownRepositoryConfirmation(container, st, c, i, mutationId) {
+    c._addPending = true;
+    c._addQueued = true;
+    c._addAid = mutationId;
+    updateSlide(container, i);
+    broadcast(st.gid, i, container);
+    notifyGroup(st.gid, 'card-repository-unknown', i);
+    RC.toast && RC.toast('本地卡库保存结果待核对，已阻止重复确认');
+  }
+  function reconcileRepositoryConfirmation(
+    container, st, c, i, repo, request, mutationId, previous
+  ) {
+    var replayRecord = null;
+    var replayError = null;
+    // outcome unknown 只允许用原 mutationId 重放。随后 load 当前本地权威记录；
+    // 任一证据确认 phase=confirmed 即收口，否则只有明确失败才恢复草稿。
+    return repo.saveConfirmedCard(request, { mutationId: mutationId })
+      .then(function (record) { replayRecord = record; })
+      .catch(function (error) { replayError = error; })
+      .then(function () {
+        return repo.load(st.gid).then(function (record) {
+          return { record: record, loadError: null };
+        }, function (error) {
+          return { record: null, loadError: error };
+        });
+      }).then(function (checked) {
+        var confirmed = repositoryConfirmation(replayRecord, i)
+          ? replayRecord
+          : (repositoryConfirmation(checked.record, i) ? checked.record : null);
+        if (confirmed) {
+          return finishRepositoryConfirmation(container, st, c, i, confirmed);
+        }
+        if (repositoryOutcomeUnknown(replayError) ||
+            repositoryOutcomeUnknown(checked.loadError)) {
+          holdUnknownRepositoryConfirmation(container, st, c, i, mutationId);
+          return null;
+        }
+        var explicitError = replayError || checked.loadError || new Error(
+          'BW_CARD_REPOSITORY_CONFIRM_NOT_APPLIED'
+        );
+        return failRepositoryConfirmation(
+          container, st, c, i, previous, explicitError
+        );
+      });
+  }
   function addToAnki(container, i) {
-    var st = container.__fc, c = st.cards[i];
-    var aid = 'fc_' + Array.from(crypto.getRandomValues(new Uint8Array(8))).map(function (b) { return b.toString(16).padStart(2, '0'); }).join('');
-    // 来源与全局卡号必须随“草稿确认”继续进入 Anki。来源文本不信任客户端，
-    // 服务端会用 entity_id + card_index 回查私有 entity registry；旧 fcg_ 卡没有
-    // entity_id 时仍保持原协议。这样其它设备上的 Anki footer 才能反查来源并
-    // 打开同一张 card_xxxxxx 的改进页。
-    var payload = { aid: aid, cards: [{ type: c.type, front: c.front, back: c.back, cloze: c.cloze }] };
-    if (/^card_[a-f0-9]{4,12}$/.test(st.gid || '')) {
-      payload.entity_id = st.gid;
-      payload.card_index = i;
+    var st = container && container.__fc, c = st && st.cards[i];
+    var repo = repositoryApi();
+    if (!st || !c || c._addPending) return;
+    if (!repo || !/^card_[a-f0-9]{4,64}$/.test(st.gid || '')) {
+      RC.toast && RC.toast('Reader 本地卡库不可用，未保存');
+      return;
+    }
+    var previous = {
+      _st: c._st,
+      _showBack: c._showBack,
+      _addPending: c._addPending,
+      _addQueued: c._addQueued,
+      _addAid: c._addAid,
+      _ratingUnavailable: c._ratingUnavailable,
+      _ratingUnavailableReason: c._ratingUnavailableReason
+    };
+    var mutationId;
+    try { mutationId = repositoryMutation('confirm', st.gid, i); }
+    catch (error) {
+      RC.toast && RC.toast('Reader 本地卡库无法生成写入编号');
+      return;
     }
     c._st = 'learn';
     c._showBack = false;
     c._addPending = true;
     c._addQueued = false;
-    c._addAid = aid;
+    c._addAid = mutationId;
     c._ratingUnavailable = true;
+    c._ratingUnavailableReason = 'not-exported';
+    var request = {
+      id: st.gid,
+      cid: st.gid,
+      gid: st.gid,
+      cardIndex: i,
+      card: repositoryCard(c),
+      cards: repositoryCards(st.cards),
+      source: repositorySource(st)
+    };
     updateSlide(container, i);
     broadcast(st.gid, i, container);
-    notifyGroup(st.gid, 'anki-add-pending', i);
-    _stateSync(st, i);
-    fetch('/pdf/api/anki-add-cards', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) })
-      .then(function (r) {
-        return r.json().then(function (d) {
-          return { ok: r.ok, status: r.status, data: d };
-        });
-      })
-      .then(function (response) {
-        var d = response.data;
-        if (!response.ok || !d || d.ok === false) {
-          var unknown = d && (
-            d.code === 'anki_add_outcome_unknown' ||
-            d.code === 'anki_add_idempotency_unavailable'
-          );
-          if (unknown || response.status >= 503) {
-            c._addPending = true;
-            c._ratingUnavailable = true;
-            updateSlide(container, i);
-            broadcast(st.gid, i, container);
-            notifyGroup(st.gid, 'anki-add-pending', i);
-            _stateSync(st, i);
-            RC.toast && RC.toast('入库结果待确认，已阻止重复提交');
-            return;
-          }
-          c._st = 'draft';
-          c._addPending = false;
-          c._addQueued = false;
-          c._addAid = null;
-          c._ratingUnavailable = false;
-          updateSlide(container, i);
-          broadcast(st.gid, i, container);
-          notifyGroup(st.gid, 'anki-add-reverted', i);
-          _stateSync(st, i);
-          RC.toast && RC.toast('入库失败:' + ((d && d.error) || '?'));
-        }
-        else {
-          c._addPending = false;
-          c._addQueued = false;
-          c._addAid = null;
-          c._nid = (d.note_ids || [])[0];
-          var exactIds = (
-            d.card_ids_by_note &&
-            d.card_ids_by_note[String(c._nid)]
-          ) || d.card_ids || [];
-          if (exactIds.length === 1) {
-            c.id = exactIds[0];
-            c.card_id = exactIds[0];
-            c._ratingUnavailable = false;
-            c._ratingUnavailableReason = null;
-          } else if (exactIds.length > 1) {
-            c._ratingUnavailable = true;
-            c._ratingUnavailableReason = 'multiple';
-          } else {
-            c._ratingUnavailable = true;
-            c._ratingUnavailableReason = 'missing';
-          }
-          broadcast(st.gid, i, container);
-          notifyGroup(st.gid, 'anki-added', i);
-          _stateSync(st, i);
-          RC.toast && RC.toast(
-            exactIds.length === 1
-              ? '✓ 已入 Anki，可直接复习这张'
-              : (exactIds.length > 1
-                ? '✓ 已入 Anki；该笔记包含多张卡，请在 Anki 中复习'
-                : '✓ 已入 Anki；暂未取得唯一卡号，请在 Anki 中复习')
-          );
-        }
-      })
-      .catch(function (e) {
-        if (RC.outbox && e && e.name === 'TypeError') {
-          try {
-            var mutationId = RC.outbox.send(
-              'fcadd', aid, '/pdf/api/anki-add-cards', payload
-            );
-            if (
-              typeof mutationId !== 'string' ||
-              !/^mut-v2-[a-f0-9]{32}$/.test(mutationId)
-            ) {
-              throw new Error('outbox rejected Anki mutation');
-            }
-            c._addPending = true;
-            c._addQueued = true;
-            c._ratingUnavailable = true;
-            updateSlide(container, i);
-            broadcast(st.gid, i, container);
-            notifyGroup(st.gid, 'anki-add-queued', i);
-            _stateSync(st, i);
-            RC.toast && RC.toast('离线:入库已入队,恢复后自动同步');
-            return;
-          } catch (_) {}
-        }
-        // 非网络异常发生在请求结果解析阶段时，服务器是否完成入库并不
-        // 可知；保持 pending 比用新 aid 重复建卡安全。
-        c._addPending = true;
-        c._ratingUnavailable = true;
-        updateSlide(container, i);
-        broadcast(st.gid, i, container);
-        notifyGroup(st.gid, 'anki-add-pending', i);
-        _stateSync(st, i);
-        RC.toast && RC.toast('入库结果未知，已阻止重复提交');
-      });
+    notifyGroup(st.gid, 'card-repository-pending', i);
+    repo.saveConfirmedCard(request, { mutationId: mutationId }).then(function (record) {
+      if (!repositoryConfirmation(record, i)) {
+        return failRepositoryConfirmation(
+          container, st, c, i, previous,
+          new Error('BW_CARD_REPOSITORY_CONFIRM_NOT_APPLIED')
+        );
+      }
+      return finishRepositoryConfirmation(container, st, c, i, record);
+    }, function (error) {
+      if (!repositoryOutcomeUnknown(error)) {
+        return failRepositoryConfirmation(container, st, c, i, previous, error);
+      }
+      holdUnknownRepositoryConfirmation(container, st, c, i, mutationId);
+      return reconcileRepositoryConfirmation(
+        container, st, c, i, repo, request, mutationId, previous
+      );
+    });
   }
-  function _stateSync(st, i) {
-    // 统一编号协议(用户设计 2026-07-21):gid 是全局卡编号(card_)时把卡状态回写服务端注册表——
-    //   刷新/#id 引用/其它宿主 mountState 时还原,"一张卡两种状态"跨会话也消失。fire-and-forget+outbox 兜。
-    if (!st || !/^card_/.test(st.gid || '')) return;
-    var c = st.cards[i]; if (!c) return;
+
+  function removeDraft(container, i) {
+    var st = container && container.__fc, card = st && st.cards[i];
+    var repo = repositoryApi();
+    if (!st || !card || card._removed || card._removePending) return;
+    if (card._st !== 'draft') {
+      RC.toast && RC.toast('已保存的卡片不能按草稿删除');
+      return;
+    }
+    if (!repo || typeof repo.removeDraftCard !== 'function' ||
+        !/^card_[a-f0-9]{4,64}$/.test(st.gid || '')) {
+      RC.toast && RC.toast('Reader 本地卡库不可用，未删除');
+      return;
+    }
+    var mutationId;
+    try { mutationId = repositoryMutation('remove-draft', st.gid, i); }
+    catch (error) {
+      RC.toast && RC.toast('Reader 本地卡库无法生成删除编号');
+      return;
+    }
+    card._removePending = true;
+    repo.removeDraftCard(st.gid, i, { mutationId: mutationId }).then(function (record) {
+      card._removePending = false;
+      card._removed = true;
+      if (record) applyRepositoryRecord(container, record);
+      renderTrack(container);
+      broadcast(st.gid, null, container);
+      notifyGroup(st.gid, 'draft-delete', i);
+      RC.toast && RC.toast('草稿已删除');
+    }).catch(function (error) {
+      card._removePending = false;
+      RC.toast && RC.toast(
+        '草稿删除失败：' +
+        String(error && (error.code || error.message) || error || '?').slice(0, 180)
+      );
+    });
+  }
+
+  function _recordExternalReceipt(st, i, target, receipt, prefix) {
+    var repo = repositoryApi();
+    if (!repo) return Promise.reject(new Error('BW_CARD_REPOSITORY_UNAVAILABLE'));
+    return repo.recordAnkiReceipt(
+      st.gid,
+      i,
+      target,
+      receipt,
+      { mutationId: repositoryMutation(prefix, st.gid, i) }
+    );
+  }
+  function exportToComputerAnki(container, i) {
+    var st = container && container.__fc, c = st && st.cards[i];
+    var draft = st && st.opts && st.opts.localDraft;
+    if (!c || !draft || c._pcExportStatus === 'pending' ||
+        c._pcExportStatus === 'unknown' || !(RC.computerVoice &&
+        typeof RC.computerVoice.addLocalAnkiCard === 'function')) {
+      RC.toast && RC.toast('电脑 Anki 导出当前不可用');
+      return;
+    }
+    var aid = c._pcExportAid;
+    if (!/^fc_[a-f0-9]{32}$/.test(String(aid || ''))) {
+      aid = 'fc_' + Array.from(crypto.getRandomValues(new Uint8Array(16))).map(function (b) {
+        return b.toString(16).padStart(2, '0');
+      }).join('');
+    }
+    c._pcExportAid = aid;
+    c._pcExportStatus = 'pending';
+    updateSlide(container, i);
+    var pending = {
+      status: 'pending', mutationId: aid, updatedAt: Date.now()
+    };
+    _recordExternalReceipt(st, i, 'readerpc', pending, 'pc-pending').then(function () {
+      return RC.computerVoice.addLocalAnkiCard({
+        draftId: draft.draftId,
+        sourceInstanceId: draft.sourceInstanceId,
+        cardIndex: i,
+        aid: aid,
+        card: repositoryCard(c)
+      });
+    }).then(function (data) {
+      var noteIds = data.note_ids || [], cardIds = data.card_ids || [];
+      c._pcExportStatus = 'succeeded';
+      c._ratingUnavailable = true;
+      c._ratingUnavailableReason = 'external';
+      updateSlide(container, i);
+      broadcast(st.gid, i, container);
+      return _recordExternalReceipt(st, i, 'readerpc', {
+        status: 'succeeded', mutationId: aid,
+        noteIds: noteIds, cardIds: cardIds,
+        exportedAt: Date.now(), updatedAt: Date.now()
+      }, 'pc-success').then(function () { return _stateSync(st, i); });
+    }).then(function () {
+      RC.toast && RC.toast('✓ 已发送到电脑 Anki');
+    }).catch(function (error) {
+      var code = String(error && error.code || '');
+      var safeToRetry = /^(?:BW_READER_LOCAL_ANKI_(?:SCHEMA|CHANNEL_UNAVAILABLE|CONTEXT_INVALID)|BW_READER_ANKI_(?:LOCAL_UNAVAILABLE|CONTEXT_ONLY_REQUIRED|REQUEST_INVALID|DRAFT_NOT_REGISTERED|DRAFT_SOURCE_MISMATCH|DRAFT_CARD_INDEX_INVALID|AID_REUSED|AID_AMBIGUOUS|CONNECT_UNREACHABLE|CONNECT_RESPONSE_INVALID|CONNECT_ERROR))$/.test(code);
+      c._pcExportStatus = safeToRetry ? 'failed' : 'unknown';
+      c._ratingUnavailable = true;
+      c._ratingUnavailableReason = safeToRetry ? 'not-exported' : 'export-unknown';
+      updateSlide(container, i);
+      broadcast(st.gid, i, container);
+      _recordExternalReceipt(st, i, 'readerpc', {
+        status: safeToRetry ? 'failed' : 'unknown',
+        mutationId: aid,
+        updatedAt: Date.now(),
+        error: String(error && (error.code || error.message) || error || '?').slice(0, 1000)
+      }, safeToRetry ? 'pc-failed' : 'pc-unknown').catch(function () {});
+      _stateSync(st, i);
+      RC.toast && RC.toast(safeToRetry
+        ? '电脑 Anki 导出失败，可稍后重试'
+        : '电脑 Anki 接收结果未知，已阻止重复发送');
+    });
+  }
+  function exportToMobileAnki(container, i) {
+    var st = container && container.__fc, c = st && st.cards[i];
+    var api = window.BWReaderRuntime && window.BWReaderRuntime.ankiMobileExport;
+    if (!c || !api || typeof api.exportCard !== 'function' ||
+        typeof api.available !== 'function' || !api.available()) {
+      RC.toast && RC.toast('iPad Anki 导出当前不可用');
+      return;
+    }
+    c._mobileExportStatus = 'pending';
+    updateSlide(container, i);
+    Promise.resolve(api.exportCard(st.gid, i)).then(function (result) {
+      c._mobileExportStatus = result && result.status || 'pending';
+      c._ratingUnavailable = true;
+      c._ratingUnavailableReason = 'export-pending';
+      updateSlide(container, i);
+      broadcast(st.gid, i, container);
+      return _stateSync(st, i);
+    }).then(function () {
+      RC.toast && RC.toast('已交给 iPad Anki；返回 Reader 后会确认结果');
+    }).catch(function (error) {
+      c._mobileExportStatus = 'failed';
+      c._ratingUnavailableReason = 'not-exported';
+      updateSlide(container, i);
+      RC.toast && RC.toast(
+        'iPad Anki 导出失败：' +
+        String(error && (error.code || error.message) || error || '?').slice(0, 160)
+      );
+    });
+  }
+  function _legacyStateSync(st, i, state) {
+    if (!st || st.opts.entityRegistered === false) return Promise.resolve(false);
     var body = {
       idx: i,
-      state: {
-        _st: c._st,
-        _nid: c._nid,
-        _next: c._next,
-        id: c.id,
-        card_id: c.card_id,
-        _ratingUnavailable: c._ratingUnavailable,
-        _ratingUnavailableReason: c._ratingUnavailableReason,
-        _ratingPending: c._ratingPending,
-        _syncPending: c._syncPending,
-        _addPending: c._addPending,
-        _addQueued: c._addQueued,
-        _addAid: c._addAid,
-        _ratingAid: c._ratingAid,
-        _ratingEase: c._ratingEase,
-        _ratingCardId: c._ratingCardId
-      }
+      state: state
     };
-    fetch('/pdf/api/entity/' + st.gid, { method: 'PATCH', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
-      .catch(function (e) { try { if (RC.outbox && e && e.name === 'TypeError') RC.outbox.send('entst', st.gid + ':' + i, '/pdf/api/entity/' + st.gid, body, 'PATCH'); } catch (e2) {} });
+    return fetch('/pdf/api/entity/' + st.gid, {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body)
+    }).catch(function (error) {
+      try {
+        if (RC.outbox && error && error.name === 'TypeError') {
+          RC.outbox.send(
+            'entst', st.gid + ':' + i,
+            '/pdf/api/entity/' + st.gid, body, 'PATCH'
+          );
+        }
+      } catch (_) {}
+      return false;
+    });
+  }
+  function _stateSync(st, i) {
+    if (!st || !/^card_/.test(st.gid || '')) return Promise.resolve(false);
+    var card = st.cards[i];
+    if (!card) return Promise.resolve(false);
+    var state = exactState(card);
+    var repo = repositoryApi();
+    if (!repo) return _legacyStateSync(st, i, state);
+    return repo.load(st.gid).then(function (record) {
+      if (!record) return _legacyStateSync(st, i, state);
+      return repo.patchState(st.gid, i, { exactState: state }, {
+        mutationId: repositoryMutation('state', st.gid, i)
+      });
+    }).catch(function (error) {
+      try {
+        if (window.dlog) window.dlog(
+          '卡仓状态保存失败 ' +
+          String(error && (error.code || error.message) || error).slice(0, 160),
+          '#ff6b6b'
+        );
+      } catch (_) {}
+      return false;
+    });
   }
   function dockToShell(container, st, c) {
     // ★ 复用 vc-card 外壳三态(圆/长条/方块):评分后把倒计时写进长条摘要 .vc-card-sum,单卡自动收成长条;
@@ -900,7 +1285,9 @@ if (window.__bwPwaProviderOnly) return;
       });
   }
   function cardsText(cards) {
-    return (cards || []).map(function (card) {
+    return (cards || []).filter(function (card) {
+      return card && !card._removed;
+    }).map(function (card) {
       var front = card.front || card.question || card.cloze || card.text || '';
       var back = card.back || card.answer || '';
       return String(front) + (back ? ' / ' + String(back) : '');
@@ -918,6 +1305,9 @@ if (window.__bwPwaProviderOnly) return;
     var mode = spec.mode || 'state';
     var mountOpts = {
       gid: gid,
+      entityRegistered: spec.entityRegistered !== false,
+      localDraft: spec.localDraft || null,
+      repositorySource: spec.repositorySource || null,
       bare: true,
       nopin: true,
       showBack: spec.showBack,
@@ -1062,19 +1452,43 @@ if (window.__bwPwaProviderOnly) return;
     }
     return result;
   }
-  function presentDraft(cards, gid) {
-    if (!/^card_[a-f0-9]{4,12}$/.test(String(gid || ''))) return null;
-    var result = renderEntity(null, {
-      surface: 'float',
-      mode: 'draft',
-      cards: cards,
+  function presentDraft(cards, gid, options) {
+    if (!/^card_[a-f0-9]{4,64}$/.test(String(gid || ''))) {
+      return Promise.resolve(null);
+    }
+    options = options || {};
+    var repo = repositoryApi();
+    if (!repo || !options.repositorySource) {
+      return Promise.reject(new Error('BW_CARD_REPOSITORY_UNAVAILABLE'));
+    }
+    return repo.registerDraft({
+      id: gid,
+      cid: gid,
       gid: gid,
-      label: 'Anki 草稿',
-      tool: 'reader_anki_draft'
+      cards: repositoryCards(cards),
+      source: options.repositorySource
+    }, {
+      mutationId: repositoryMutation('draft', gid, null),
+      // gid 已存在时必须由 repository 同时核对规范化 cards/source；draftId
+      // 缺失也不能把碰巧同 gid 的旧实体当成当前草稿。
+      requireDraftIdForReplay: true
+    }).then(function (record) {
+      var liveCards = record && record.cards ? record.cards : cards;
+      var result = renderEntity(options.host || null, {
+        surface: options.host ? 'inflow' : 'float',
+        mode: 'draft',
+        cards: liveCards,
+        gid: gid,
+        entityRegistered: options.entityRegistered !== false,
+        localDraft: options.localDraft || null,
+        repositorySource: options.repositorySource,
+        label: 'Reader 卡片草稿',
+        tool: 'reader_anki_draft'
+      });
+      if (result && result.bd) applyRepositoryRecord(result.bd, record);
+      if (!result || !result.el || !result.el.querySelector('.fc-card')) return null;
+      return result;
     });
-    if (!result || !result.el || !result.el.isConnected ||
-        !result.el.querySelector('.fc-add')) return null;
-    return result;
   }
   RC.flashcard = {
     mountDrafts: mountDrafts,
