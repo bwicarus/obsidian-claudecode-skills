@@ -241,7 +241,14 @@
       list: function (collection, query) { return storeFor(collection).list(collection, query); },
       put: function (collection, value, opts) { return storeFor(collection).put(collection, value, opts); },
       remove: function (collection, id, opts) { return storeFor(collection).remove(collection, id, opts); },
-      batch: function (mutations) {
+      // batchOptions 必须透传到底层 store。
+      //
+      // 同一对象里 get/put/remove 都带着 opts 往下走,唯独 batch 把第二个参数
+      // 丢在这里 —— 而 IndexedDBStore.batch(mutations, batchOptions) 是接受它的。
+      // 于是精确高亮传下来的 transactionTimeoutMs 到不了底层,4 秒 abort 那道
+      // 保护从未生效:事务不 settle,writer lease 永不释放,此后每次高亮都超时。
+      // 修复在包里、路径也对,却因为中间少了一个参数而全程空转。
+      batch: function (mutations, batchOptions) {
         if (!Array.isArray(mutations)) {
           return Promise.reject(new RouterError(
             'batch mutations 必须是数组', 'BW_ROUTER_BATCH'
@@ -283,7 +290,7 @@
         } catch (error) {
           return Promise.reject(error);
         }
-        return target.batch(mutations);
+        return target.batch(mutations, batchOptions);
       },
       subscribe: function (collection, listener) {
         if (typeof listener !== 'function') {

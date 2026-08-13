@@ -574,6 +574,108 @@
     });
   }
 
+  function normalizeReaderOutputTarget(target) {
+    if (!plainObject(target)) {
+      throw directError(
+        "Reader 文档目标无效",
+        "BW_READER_REALTIME_OUTPUT_SCHEMA",
+        false
+      );
+    }
+    var targetKind = safeText(
+      target.kind,
+      "Reader 文档目标 kind",
+      16,
+      false
+    );
+    var locationName;
+    var minimum;
+    if (targetKind === "pdf") {
+      exactObject(target, ["kind", "page"], [], "Reader PDF 文档目标");
+      locationName = "page";
+      minimum = 1;
+    } else if (targetKind === "epub") {
+      exactObject(target, ["kind", "section"], [], "Reader EPUB 文档目标");
+      locationName = "section";
+      minimum = 0;
+    } else {
+      throw directError(
+        "Reader 文档目标类型无效",
+        "BW_READER_REALTIME_OUTPUT_SCHEMA",
+        false
+      );
+    }
+    var location = target[locationName];
+    if (
+      !Number.isSafeInteger(location) ||
+      location < minimum ||
+      location > 10000000
+    ) {
+      throw directError(
+        "Reader 文档目标位置无效",
+        "BW_READER_REALTIME_OUTPUT_SCHEMA",
+        false
+      );
+    }
+    var normalized = { kind: targetKind };
+    normalized[locationName] = location;
+    return normalized;
+  }
+
+  function normalizeReaderAnkiDraftCards(cards) {
+    if (!Array.isArray(cards) || cards.length < 1 || cards.length > 12) {
+      throw directError(
+        "Reader Anki 草稿卡片数量无效",
+        "BW_READER_REALTIME_OUTPUT_SCHEMA",
+        false
+      );
+    }
+    return cards.map(function (card, index) {
+      var label = "Reader Anki 草稿 cards[" + index + "]";
+      if (!plainObject(card)) {
+        throw directError(
+          label + " 无效",
+          "BW_READER_REALTIME_OUTPUT_SCHEMA",
+          false
+        );
+      }
+      var type = safeText(card.type, label + ".type", 16, false);
+      if (type === "basic") {
+        exactObject(card, ["type", "front", "back"], [], label);
+        var front = safeText(card.front, label + ".front", 8000, false);
+        if (!front.trim()) {
+          throw directError(
+            label + ".front 不能为空",
+            "BW_READER_REALTIME_OUTPUT_SCHEMA",
+            false
+          );
+        }
+        return {
+          type: type,
+          front: front,
+          back: safeText(card.back, label + ".back", 8000, true),
+        };
+      }
+      if (type === "cloze") {
+        exactObject(card, ["type", "cloze"], [], label);
+        var cloze = safeText(card.cloze, label + ".cloze", 8000, false);
+        if (!cloze.trim()) {
+          throw directError(
+            label + ".cloze 不能为空",
+            "BW_READER_REALTIME_OUTPUT_SCHEMA",
+            false
+          );
+        }
+        return { type: type, cloze: cloze };
+      }
+      throw directError(
+        label + ".type 无效",
+        "BW_READER_REALTIME_OUTPUT_SCHEMA",
+        false
+      );
+    });
+  }
+
   function normalizeReaderResultDelivery(value) {
     exactObject(
       value,
@@ -811,6 +913,127 @@
         color: color,
         note: p.note === null ? null : safeText(p.note, "Reader 高亮 note", 2000, true),
       };
+    } else if (kind === "highlight-text") {
+      exactObject(
+        p,
+        ["mutationId", "file", "target", "text", "color", "note"],
+        [],
+        "Reader 精确高亮输出"
+      );
+      var mutationId = safeText(
+        p.mutationId,
+        "Reader 精确高亮 mutationId",
+        34,
+        false
+      );
+      if (!/^c_[a-f0-9]{8,32}$/.test(mutationId)) {
+        throw directError(
+          "Reader 精确高亮 mutationId 无效",
+          "BW_READER_REALTIME_OUTPUT_SCHEMA",
+          false
+        );
+      }
+      var highlightFile = safeText(
+        p.file,
+        "Reader 精确高亮 file",
+        4096,
+        false
+      );
+      var highlightText = safeText(
+        p.text,
+        "Reader 精确高亮 text",
+        2000,
+        false
+      );
+      if (
+        !highlightFile.trim() ||
+        /[\u0000-\u001f\u007f-\u009f]/.test(highlightFile) ||
+        !highlightText.trim()
+      ) {
+        throw directError(
+          "Reader 精确高亮来源无效",
+          "BW_READER_REALTIME_OUTPUT_SCHEMA",
+          false
+        );
+      }
+      var exactColor = safeText(
+        p.color,
+        "Reader 精确高亮 color",
+        16,
+        false
+      );
+      if (["yellow", "green", "blue", "pink"].indexOf(exactColor) < 0) {
+        throw directError(
+          "Reader 精确高亮颜色无效",
+          "BW_READER_REALTIME_OUTPUT_SCHEMA",
+          false
+        );
+      }
+      payload = {
+        mutationId: mutationId,
+        file: highlightFile,
+        target: normalizeReaderOutputTarget(p.target),
+        text: highlightText,
+        color: exactColor,
+        note: p.note === null
+          ? null
+          : safeText(p.note, "Reader 精确高亮 note", 2000, true),
+      };
+    } else if (kind === "anki-draft") {
+      var hasDraftFile = Object.prototype.hasOwnProperty.call(p, "file");
+      var hasDraftTarget = Object.prototype.hasOwnProperty.call(p, "target");
+      var hasDraftSource = Object.prototype.hasOwnProperty.call(p, "sourceText");
+      var exactDraftSource = hasDraftFile && hasDraftTarget && hasDraftSource;
+      if ((hasDraftFile || hasDraftTarget || hasDraftSource) && !exactDraftSource) {
+        throw directError(
+          "Reader Anki 引用来源必须同时提供 file/target/sourceText",
+          "BW_READER_REALTIME_OUTPUT_SCHEMA",
+          false
+        );
+      }
+      exactObject(
+        p,
+        exactDraftSource
+          ? ["draftId", "file", "target", "sourceText", "cards"]
+          : ["draftId", "cards"],
+        [],
+        "Reader Anki 草稿输出"
+      );
+      var draftId = safeText(p.draftId, "Reader Anki draftId", 160, false);
+      if (!/^draft-[a-f0-9]{32}$/.test(draftId)) {
+        throw directError(
+          "Reader Anki draftId 无效",
+          "BW_READER_REALTIME_OUTPUT_SCHEMA",
+          false
+        );
+      }
+      payload = {
+        draftId: draftId,
+        cards: normalizeReaderAnkiDraftCards(p.cards),
+      };
+      if (exactDraftSource) {
+        var draftFile = safeText(p.file, "Reader Anki file", 4096, false);
+        var sourceText = safeText(
+          p.sourceText,
+          "Reader Anki sourceText",
+          2000,
+          false
+        );
+        if (
+          !draftFile.trim() ||
+          /[\u0000-\u001f\u007f-\u009f]/.test(draftFile) ||
+          !sourceText.trim()
+        ) {
+          throw directError(
+            "Reader Anki 引用来源无效",
+            "BW_READER_REALTIME_OUTPUT_SCHEMA",
+            false
+          );
+        }
+        payload.file = draftFile;
+        payload.target = normalizeReaderOutputTarget(p.target);
+        payload.sourceText = sourceText;
+      }
     } else {
       throw directError("Reader 输出类型不受支持", "BW_READER_REALTIME_OUTPUT_SCHEMA", false);
     }
@@ -824,6 +1047,36 @@
       kind: kind,
       payload: payload,
     };
+  }
+
+  function readerRealtimeOutputCorrelation(value) {
+    if (!plainObject(value)) return null;
+    try {
+      return {
+        correlation: safeId(
+          value.correlation,
+          "Reader 输出 correlation"
+        ),
+        sourceInstanceId: safeId(
+          value.sourceInstanceId,
+          "Reader 输出 sourceInstanceId"
+        ),
+      };
+    } catch (_) {
+      return null;
+    }
+  }
+
+  function reportReaderRealtimeOutputSchemaFailure(status) {
+    try {
+      if (typeof window.dlog === "function") {
+        window.dlog(
+          "Reader 实时输出拒绝: BW_READER_REALTIME_OUTPUT_SCHEMA (" +
+          status +
+          ")"
+        );
+      }
+    } catch (_) {}
   }
 
   function normalizeReaderVisualRequest(value) {
@@ -2066,6 +2319,57 @@
     try {
       delivery = normalizeReaderRealtimeOutput(rawPayload);
     } catch (error) {
+      var correlation = readerRealtimeOutputCorrelation(rawPayload);
+      var sourceMatches = !!(
+        correlation &&
+        self.readerVisualSourceId &&
+        self.readerVisualSourceId === correlation.sourceInstanceId
+      );
+      var canReply = !!(sourceMatches && self.readerVisualSessionId);
+      reportReaderRealtimeOutputSchemaFailure(
+        canReply
+          ? "正在回关联拒绝回执"
+          : (correlation
+            ? (sourceMatches
+              ? "当前 Reader 会话不存在,未回执"
+              : "当前 Reader 来源不匹配,未回执")
+            : "身份不可安全关联,未回执")
+      );
+      if (canReply) {
+        self.request(READER_REALTIME_OUTPUT_ACK, {
+          sessionId: self.readerVisualSessionId,
+          correlation: correlation.correlation,
+          sourceInstanceId: correlation.sourceInstanceId,
+          outcome: "rejected",
+          error: "BW_READER_REALTIME_OUTPUT_SCHEMA",
+        }, REQUEST_TIMEOUT_MS).then(function (value) {
+          exactObject(
+            value,
+            ["correlation", "outcome", "matched"],
+            [],
+            "Reader 非法输出拒绝 ACK 响应"
+          );
+          if (
+            value.correlation !== correlation.correlation ||
+            value.outcome !== "rejected" ||
+            value.matched !== true
+          ) {
+            throw directError(
+              "Reader 非法输出拒绝 ACK 响应错配",
+              "BW_READER_REALTIME_OUTPUT_ACK_INVALID",
+              false
+            );
+          }
+          reportReaderRealtimeOutputSchemaFailure("已回关联拒绝回执");
+        }).catch(function () {
+          // The malformed output was never executed. Make an ACK transport
+          // failure visible, while Windows remains the owner of timeout and
+          // retry policy. Never execute or resend the mutation from here.
+          reportReaderRealtimeOutputSchemaFailure(
+            "关联拒绝回执失败 BW_READER_REALTIME_OUTPUT_ACK_FAILED"
+          );
+        });
+      }
       return;
     }
     var receiver = RC.voicecall && RC.voicecall.acceptRealtimeOutput;

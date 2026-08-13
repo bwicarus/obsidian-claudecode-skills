@@ -978,6 +978,7 @@ function createHarness(overrides = {}) {
     readerRealtimeOutputDeliveries: [],
     readerRealtimeOutputAcks: [],
     readerRealtimeOutputReceipt: { outcome: "applied" },
+    readerRealtimeOutputDiagnostics: [],
     readerVisualChunks: [],
     readerVisualRegistrations: [],
     readerVisualCaptureCalls: 0,
@@ -1078,6 +1079,9 @@ function createHarness(overrides = {}) {
   });
   const navigator = createNavigator(scenario);
   const window = {
+    dlog(message) {
+      scenario.readerRealtimeOutputDiagnostics.push(String(message));
+    },
     RC: {
       voicecall: {
         canCaptureComputerVoiceGesture() {
@@ -1849,6 +1853,211 @@ test("snapshot-mcp 将结构化输出交给现有 Realtime 渲染入口并回精
   assert.equal(
     harness.scenario.readerRealtimeOutputAcks[1].error,
     "BW_READER_REALTIME_OUTPUT_STALE",
+  );
+  await disableSnapshot(harness);
+});
+
+test("snapshot-mcp 将精确高亮和 Anki 草稿送进 Reader 接收器并逐条回 ACK", async () => {
+  const harness = createHarness({
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncEnabled: true,
+    activeReading: {
+      kind: "pdf",
+      file: "book.pdf",
+      title: "Snapshot Book",
+      pos: 24,
+    },
+  });
+  harness.api.setSelectedEngine("computer_client");
+  await waitForRequest(harness, "context-open");
+  await waitForRequest(harness, "visual-register");
+  const sourceInstanceId =
+    harness.scenario.readerVisualRegistrations[0].sourceInstanceId;
+  const base = {
+    contract: REALTIME_OUTPUT_CONTRACT,
+    commandKind: "realtime-output",
+    sourceInstanceId,
+    snapshotRevision: 1,
+    file: "book.pdf",
+    page: 24,
+  };
+  const deliveries = [{
+    ...base,
+    correlation: "output-highlight-text-24",
+    kind: "highlight-text",
+    payload: {
+      mutationId: "c_0123456789abcdef0123456789abcdef",
+      file: "book.pdf",
+      target: { kind: "pdf", page: 24 },
+      text: "精确选中的原文",
+      color: "yellow",
+      note: null,
+    },
+  }, {
+    ...base,
+    correlation: "output-anki-draft-24",
+    kind: "anki-draft",
+    payload: {
+      draftId: "draft-0123456789abcdef0123456789abcdef",
+      file: "book.pdf",
+      target: { kind: "pdf", page: 24 },
+      sourceText: "制作卡片所依据的原文",
+      cards: [{
+        type: "basic",
+        front: "问题",
+        back: "答案",
+      }],
+    },
+  }, {
+    ...base,
+    correlation: "output-generic-anki-draft-24",
+    kind: "anki-draft",
+    payload: {
+      draftId: "draft-fedcba9876543210fedcba9876543210",
+      cards: [{
+        type: "cloze",
+        cloze: "普通卡不需要绑定当前页：{{c1::本地卡库}}先保存。",
+      }],
+    },
+  }];
+
+  for (const delivery of deliveries) {
+    harness.server.emitReaderRealtimeOutput(
+      delivery,
+      harness.server.sockets[0],
+    );
+  }
+  await waitForCondition(
+    () => harness.scenario.readerRealtimeOutputAcks.length === 3,
+    "Reader exact highlight and Anki draft ACKs",
+  );
+
+  assert.deepEqual(
+    harness.scenario.readerRealtimeOutputDeliveries,
+    deliveries.map(({ commandKind, ...delivery }) => delivery),
+  );
+  assert.deepEqual(
+    harness.scenario.readerRealtimeOutputAcks.map((ack) => ({
+      correlation: ack.correlation,
+      sourceInstanceId: ack.sourceInstanceId,
+      outcome: ack.outcome,
+      error: ack.error,
+    })),
+    deliveries.map((delivery) => ({
+      correlation: delivery.correlation,
+      sourceInstanceId,
+      outcome: "applied",
+      error: null,
+    })),
+  );
+  assert.equal(
+    harness.server.requests.some((request) => request.type === "start"),
+    false,
+  );
+  assert.equal(harness.scenario.microphoneRequests.length, 0);
+  await disableSnapshot(harness);
+});
+
+test("snapshot-mcp 对可关联的非法精确输出立即回 rejected ACK且绝不执行", async () => {
+  const harness = createHarness({
+    contextDeliveryMode: "snapshot-mcp",
+    contextSyncEnabled: true,
+    activeReading: {
+      kind: "pdf",
+      file: "book.pdf",
+      title: "Snapshot Book",
+      pos: 24,
+    },
+  });
+  harness.api.setSelectedEngine("computer_client");
+  await waitForRequest(harness, "context-open");
+  await waitForRequest(harness, "visual-register");
+  const sourceInstanceId =
+    harness.scenario.readerVisualRegistrations[0].sourceInstanceId;
+  const base = {
+    contract: REALTIME_OUTPUT_CONTRACT,
+    commandKind: "realtime-output",
+    sourceInstanceId,
+    snapshotRevision: 1,
+    file: "book.pdf",
+    page: 24,
+  };
+  const malformed = [{
+    ...base,
+    correlation: "invalid-highlight-text-24",
+    kind: "highlight-text",
+    payload: {
+      mutationId: "c_0123456789abcdef0123456789abcdef",
+      file: "book.pdf",
+      target: { kind: "pdf", page: 24 },
+      text: "精确选中的原文",
+      color: "red",
+      note: null,
+    },
+  }, {
+    ...base,
+    correlation: "invalid-anki-draft-24",
+    kind: "anki-draft",
+    payload: {
+      draftId: "draft-0123456789abcdef0123456789abcdef",
+      cards: [],
+    },
+  }];
+
+  malformed.forEach((delivery) => {
+    harness.server.emitReaderRealtimeOutput(
+      delivery,
+      harness.server.sockets[0],
+    );
+  });
+  harness.server.emitReaderRealtimeOutput({
+    ...malformed[0],
+    correlation: "unsafe correlation",
+  }, harness.server.sockets[0]);
+  harness.server.emitReaderRealtimeOutput({
+    ...malformed[0],
+    correlation: "wrong-source-highlight-24",
+    sourceInstanceId: "source-0123456789abcdef0123456789abcdef",
+  }, harness.server.sockets[0]);
+  await waitForCondition(
+    () => harness.scenario.readerRealtimeOutputAcks.length === 2,
+    "malformed Reader output rejected ACKs",
+  );
+  await waitForCondition(
+    () => harness.scenario.readerRealtimeOutputDiagnostics.length === 6,
+    "malformed Reader output diagnostics",
+  );
+
+  assert.deepEqual(harness.scenario.readerRealtimeOutputDeliveries, []);
+  assert.deepEqual(
+    harness.scenario.readerRealtimeOutputAcks.map((ack) => ({
+      correlation: ack.correlation,
+      sourceInstanceId: ack.sourceInstanceId,
+      outcome: ack.outcome,
+      error: ack.error,
+    })),
+    malformed.map((delivery) => ({
+      correlation: delivery.correlation,
+      sourceInstanceId,
+      outcome: "rejected",
+      error: "BW_READER_REALTIME_OUTPUT_SCHEMA",
+    })),
+  );
+  assert.deepEqual(
+    harness.scenario.readerRealtimeOutputDiagnostics.slice(0, 4),
+    [
+      "Reader 实时输出拒绝: BW_READER_REALTIME_OUTPUT_SCHEMA (正在回关联拒绝回执)",
+      "Reader 实时输出拒绝: BW_READER_REALTIME_OUTPUT_SCHEMA (正在回关联拒绝回执)",
+      "Reader 实时输出拒绝: BW_READER_REALTIME_OUTPUT_SCHEMA (身份不可安全关联,未回执)",
+      "Reader 实时输出拒绝: BW_READER_REALTIME_OUTPUT_SCHEMA (当前 Reader 来源不匹配,未回执)",
+    ],
+  );
+  assert.deepEqual(
+    harness.scenario.readerRealtimeOutputDiagnostics.slice(4),
+    [
+      "Reader 实时输出拒绝: BW_READER_REALTIME_OUTPUT_SCHEMA (已回关联拒绝回执)",
+      "Reader 实时输出拒绝: BW_READER_REALTIME_OUTPUT_SCHEMA (已回关联拒绝回执)",
+    ],
   );
   await disableSnapshot(harness);
 });

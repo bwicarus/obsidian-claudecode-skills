@@ -6760,6 +6760,55 @@ internal static class DirectBridgeSelfTest
         {
             unsafeCardRejected = true;
         }
+        bool invalidDraftIdRejected = false;
+        try
+        {
+            _ = ReaderRealtimeOutputProtocol.ValidatePayload(
+                "anki-draft",
+                new JsonObject
+                {
+                    ["draftId"] = "draft-safe-but-not-canonical",
+                    ["cards"] = new JsonArray
+                    {
+                        new JsonObject
+                        {
+                            ["type"] = "basic",
+                            ["front"] = "问题",
+                            ["back"] = "答案",
+                        },
+                    },
+                });
+        }
+        catch (ReaderRealtimeOutputException)
+        {
+            invalidDraftIdRejected = true;
+        }
+        bool controlledPayloadFilesRejected = true;
+        foreach (char control in new[] { '\u001f', '\u0085' })
+        {
+            try
+            {
+                _ = ReaderRealtimeOutputProtocol.ValidatePayload(
+                    "highlight-text",
+                    new JsonObject
+                    {
+                        ["mutationId"] = "c_01234567",
+                        ["file"] = $"library/output{control}book.pdf",
+                        ["target"] = new JsonObject
+                        {
+                            ["kind"] = "pdf",
+                            ["page"] = 4,
+                        },
+                        ["text"] = "精确文字",
+                        ["color"] = "yellow",
+                        ["note"] = null,
+                    });
+                controlledPayloadFilesRejected = false;
+            }
+            catch (ReaderRealtimeOutputException)
+            {
+            }
+        }
         ReaderRealtimeOutputRequest routeRequest =
             ReaderRealtimeOutputProtocol.Create(
                 "output-route",
@@ -6875,6 +6924,8 @@ internal static class DirectBridgeSelfTest
         Require(
             generalCard.Kind == "card"
             && unsafeCardRejected
+            && invalidDraftIdRejected
+            && controlledPayloadFilesRejected
             && sentToA == 0
             && sentToB == 1
             && routedAck.Outcome == "applied"

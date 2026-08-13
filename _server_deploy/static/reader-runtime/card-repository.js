@@ -753,6 +753,12 @@
 
   function createCardRepository(options) {
     options = options || {};
+    // 本地卡片写入的事务上界。
+    //
+    // 与精确高亮同一量级、同一理由:IndexedDB 事务若不 settle,调用方的超时只是
+    // 自己放弃,底层事务仍占着 object store,之后每一次写入都排在它后面。用户确认
+    // 一张卡必须先在本地落定并立刻可见,所以这条路径尤其不能悬着。
+    var CARD_WRITE_TIMEOUT_MS = 4000;
     var store = options.store;
     if (!store && root.__BW_READER_RUNTIME__ &&
         typeof root.__BW_READER_RUNTIME__.storage === 'function') {
@@ -872,7 +878,7 @@
             mutationId: base + ':state'
           }
         }
-      ]).then(function (written) {
+      ], { transactionTimeoutMs: CARD_WRITE_TIMEOUT_MS }).then(function (written) {
         return project({
           entity: verifyWrite(written[0], entity, ENTITY_COLLECTION),
           state: verifyWrite(written[1], state, STATE_COLLECTION)
@@ -1370,7 +1376,9 @@
               });
               return plans.map(function (plan) { return project(plan.records, false); });
             }
-            return mutations.length ? store.batch(mutations).then(finish) : finish([]);
+            return mutations.length
+              ? store.batch(mutations, { transactionTimeoutMs: CARD_WRITE_TIMEOUT_MS }).then(finish)
+              : finish([]);
           });
       });
     }
@@ -1451,7 +1459,7 @@
                 mutationId: base + ':state'
               }
             }
-          ]).then(function (written) {
+          ], { transactionTimeoutMs: CARD_WRITE_TIMEOUT_MS }).then(function (written) {
             if (!written[0] || !written[0].deleted || !written[1] || !written[1].deleted) {
               throw new CardRepositoryError(
                 '删除 mutationId 已被不同操作使用',

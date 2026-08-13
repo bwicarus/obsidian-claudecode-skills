@@ -89,7 +89,7 @@ internal static class ReaderRealtimeOutputProtocol
             || snapshotRevision < 0
             || string.IsNullOrWhiteSpace(file)
             || file.Length > 4096
-            || file.Any(char.IsControl)
+            || ContainsC0OrC1(file)
             || !IsKind(kind)
         )
         {
@@ -181,7 +181,7 @@ internal static class ReaderRealtimeOutputProtocol
                     "color",
                     "note");
                 ValidateClientMutationId(root, "mutationId");
-                Text(root, "file", 4_096);
+                FileText(root, "file", 4_096);
                 ValidateDocumentTarget(root.GetProperty("target"));
                 Text(root, "text", 2_000);
                 string exactColor = Text(root, "color", 16);
@@ -218,10 +218,10 @@ internal static class ReaderRealtimeOutputProtocol
                 {
                     Exact(root, "draftId", "cards");
                 }
-                SafeId(root, "draftId");
+                ValidateAnkiDraftId(root, "draftId");
                 if (exactSource)
                 {
-                    Text(root, "file", 4_096);
+                    FileText(root, "file", 4_096);
                     ValidateDocumentTarget(root.GetProperty("target"));
                     Text(root, "sourceText", 2_000);
                 }
@@ -557,6 +557,23 @@ internal static class ReaderRealtimeOutputProtocol
         }
     }
 
+    private static void ValidateAnkiDraftId(
+        JsonElement root,
+        string name)
+    {
+        string value = Text(root, name, 38);
+        if (
+            value.Length != 38
+            || !value.StartsWith("draft-", StringComparison.Ordinal)
+            || value[6..].Any(character =>
+                character is not (>= '0' and <= '9'
+                    or >= 'a' and <= 'f'))
+        )
+        {
+            throw Invalid($"Reader 输出 {name} 无效");
+        }
+    }
+
     private static void ValidateAnkiDraftCards(JsonElement cards)
     {
         if (
@@ -636,6 +653,23 @@ internal static class ReaderRealtimeOutputProtocol
         }
         return text;
     }
+
+    private static string FileText(
+        JsonElement root,
+        string name,
+        int maximum)
+    {
+        string text = Text(root, name, maximum);
+        if (ContainsC0OrC1(text))
+        {
+            throw Invalid($"Reader 输出 {name} 无效");
+        }
+        return text;
+    }
+
+    private static bool ContainsC0OrC1(string value) => value.Any(
+        character => character is >= '\u0000' and <= '\u001f'
+            or >= '\u007f' and <= '\u009f');
 
     private static string? NullableText(
         JsonElement root,

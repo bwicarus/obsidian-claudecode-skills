@@ -205,6 +205,75 @@ test("PWA 预置 word-pop 的掌握按钮通过真实 click 委托调用 late-bo
   assert.equal(pop.listeners.get("click")?.length, 1);
 });
 
+test("App v3 日语词典小框恢复旧版读音声调、多义项、例句和双操作布局", async () => {
+  const { sandbox, pop } = makeHarness();
+  sandbox.RC.offlineDictionary = {
+    CONTRACT: "bw-offline-dictionary/1",
+    isLocalMode: () => true,
+    lookupJapaneseLegacy: async () => ({
+      ok: true,
+      jp: true,
+      word: "纏め",
+      lemma: "纏める",
+      forms: ["纏める"],
+      reading: "まとめる",
+      accent: 0,
+      pos: "一段动词 / 及物动词",
+      // Prove the renderer uses structured v3 senses rather than this flattened
+      // compatibility field.
+      translation: "基本翻译",
+      definition: "基本翻译",
+      zh_senses: [
+        { glosses: ["收集，集中"], examples: [{ ja: "意見を纏める", zh: "集中意見" }] },
+        { glosses: ["組織，協調"] },
+        { glosses: ["結合，混合，融合，合併"], examples: [{ ja: "三つの組織を纏める", zh: "合併三個組織" }] },
+        { glosses: ["概括，總結"] },
+      ],
+      examples: [
+        { ja: "意見を纏める", zh: "集中意見" },
+        { ja: "三つの組織を纏める", zh: "合併三個組織" },
+      ],
+      inflect: { base: "纏める", marks: ["活用→原形"] },
+      source: "local-jmdict",
+      local_zh: true,
+      mastered: false,
+    }),
+  };
+  vm.runInContext(WORDPOP, vm.createContext(sandbox), {
+    filename: "rc-wordpop.js",
+  });
+
+  sandbox.RC.wordpop.show({
+    word: "纏め",
+    ctx: "意見を纏める",
+    langs: ["ja"],
+    showAnki: false,
+    noBreathe: true,
+    rect: { left: 20, top: 30, right: 80, bottom: 50 },
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  const visibleText = pop.innerHTML.replace(/<[^>]+>/g, "");
+  assert.match(pop.innerHTML, /纏める/);
+  assert.match(visibleText, /まとめる/);
+  assert.match(pop.innerHTML, /平板/);
+  assert.match(pop.innerHTML, /原形 <b>纏める<\/b>/);
+  assert.match(pop.innerHTML, /活用→原形/);
+  assert.match(pop.innerHTML, /收集，集中；組織，協調；結合，混合，融合，合併；概括，總結/);
+  assert.doesNotMatch(pop.innerHTML, /基本翻译/);
+  assert.match(pop.innerHTML, /意見を纏める/);
+  assert.match(pop.innerHTML, /集中意見/);
+  assert.match(pop.innerHTML, /三つの組織を纏める/);
+  assert.match(pop.innerHTML, /合併三個組織/);
+  assert.match(pop.innerHTML, /点这里展开完整字典/);
+  assert.match(pop.innerHTML, /☆ 标记掌握/);
+  assert.match(pop.innerHTML, /📊 语法/);
+  assert.doesNotMatch(pop.innerHTML, /wp-pos-tag|一段动词 \/ 及物动词/);
+  assert.doesNotMatch(pop.innerHTML, /🎴 Anki|🖌 标记/);
+});
+
 test("App 本地词典未命中的自定义日语词组不自动交给 ReaderPC 或 Pi", async () => {
   const { sandbox, pop } = makeHarness();
   const lookupRequests = [];
