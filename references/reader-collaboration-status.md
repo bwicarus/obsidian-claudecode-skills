@@ -4226,3 +4226,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：共享源码/vendor 重建、Reader Node 全量、C# Release、ReaderBundle 314 文件与发布管线通过；网络审计零新增并移除退役基线。
 - **已知门禁**：Windows 全量/handoff 仍命中既有 POSIX `fcntl`、Linux fixture/本机测试数据基线，不冒充通过；本批行为合同均通过。
 - **发布事实/下一步**：功能提交 `b47fdc84`；Actions `31718234564` 上传 TestFlight `1.1.52 (288)`，`31719057335` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。未部署 Pi 或桌面扩展正式渠道；下一步按卡片双宿主、高亮取消/删除与复习卡布局清单做真机验收。
+
+## Codex：ReaderPC 语音与实时快照统一生命周期（2026-08-14 JST）
+- **改了什么**：ReaderPC 启用原子写入 `localOptIn=true + snapshot-mcp`，失败恢复完整旧配置；停用以 pre/post tombstone 夹住精确进程停止，配置已关但 owned listener 残留也会清理。
+- **App/Reader 边界**：原生语音按钮不再等待或启动快照；快照只读取 ReaderPC 模式，旧页面开关仅控制 legacy 文字注入且 App 内隐藏。
+- **怎么验的**：Windows desktop 单测、Reader 直连与集成合同、包内 self-test 全通过；独立复核确认两项停机竞态闭合。
+- **发布事实/边界**：提交 `328f4c3f`、`6a216fbc`；ReaderPC `0.1.18` 已原子安装并实际接管托盘，43128 listener 与 active 语音保持在线。未部署 Pi、扩展正式渠道或 TestFlight；App/Reader 源码待后续候选发布。
