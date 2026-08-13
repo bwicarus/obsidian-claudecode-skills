@@ -18,6 +18,22 @@ SCRIPT_PATH = ROOT / "scripts" / "deploy_reader.sh"
 SCRIPT = SCRIPT_PATH.read_text("utf-8")
 
 
+def _portable_bash() -> str:
+    if os.name != "nt":
+        return "bash"
+    candidates = (
+        Path.home() / "scoop" / "apps" / "git" / "current" / "bin" / "bash.exe",
+        Path(os.environ.get("ProgramFiles", "C:/Program Files"))
+        / "Git"
+        / "bin"
+        / "bash.exe",
+    )
+    for candidate in candidates:
+        if candidate.is_file():
+            return str(candidate)
+    return "bash"
+
+
 def _function_source(name: str) -> str:
     match = re.search(
         rf"^{re.escape(name)}\(\) \{{\n.*?^\}}\n",
@@ -313,7 +329,7 @@ exit 0
         env = os.environ.copy()
         env["PATH"] = f"{ROOT / 'tests'}:{env['PATH']}"
         result = subprocess.run(
-            ["C:/Users/bwica/scoop/apps/git/2.54.0/bin/bash.exe", "-c", harness],
+            [_portable_bash(), "-c", harness],
             cwd=ROOT,
             env=env,
             text=True,
