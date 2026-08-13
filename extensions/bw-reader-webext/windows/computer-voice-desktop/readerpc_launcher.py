@@ -21,10 +21,8 @@ from bridge_core import (
     CONTEXT_DELIVERY_SNAPSHOT,
     WindowsShortcutBroker,
     WindowsProcessRunner,
-    disable_and_stop_direct_service,
     load_direct_config,
     read_direct_status,
-    restore_direct_config,
     set_direct_config_enabled,
     start_direct_service,
     stop_direct_service,
@@ -41,6 +39,7 @@ from readerpc_services import (
     ReaderPCPaths,
     ReaderPCServiceError,
     format_pc_progress,
+    read_codex_voice_activity,
     read_reader_context_status,
     write_disabled_reader_context_snapshot as write_offline_snapshot,
     write_readerpc_status,
@@ -53,7 +52,7 @@ from voice_history_sidebar_sync import (
 )
 
 
-APP_VERSION = "0.1.19"
+APP_VERSION = "0.1.21"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
 POLL_INTERVAL_MS = 2_500
@@ -108,6 +107,7 @@ def readerpc_history_sync_enabled(paths: BridgePaths) -> bool:
         config is not None
         and config.get("localOptIn") is True
         and config.get("contextDeliveryMode") == CONTEXT_DELIVERY_SNAPSHOT
+        and read_codex_voice_keep_active(paths) is True
     )
 
 
@@ -152,6 +152,8 @@ def set_codex_voice_keep_active(
     bridge_paths: BridgePaths,
     enabled: bool,
 ) -> None:
+    """Persist one explicit user choice from the shared master-switch UI."""
+
     _atomic_json(
         bridge_paths.runtime_status.parent / "codex-voice-keepalive.json",
         {
@@ -161,11 +163,29 @@ def set_codex_voice_keep_active(
     )
 
 
+def read_codex_voice_keep_active(
+    bridge_paths: BridgePaths,
+) -> bool | None:
+    path = bridge_paths.runtime_status.parent / "codex-voice-keepalive.json"
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeError, json.JSONDecodeError):
+        return None
+    if (
+        not isinstance(value, dict)
+        or set(value) != {"contract", "enabled"}
+        or value.get("contract") != CODEX_VOICE_KEEPALIVE_CONTRACT
+        or not isinstance(value.get("enabled"), bool)
+    ):
+        return None
+    return value["enabled"]
+
+
 def enable_readerpc_voice(
     bridge_paths: BridgePaths,
     process_runner: WindowsProcessRunner,
 ) -> int:
-    """Enable the ReaderPC voice/context service as one rollback-safe action."""
+    """Start Direct only while the shared persistent intent remains true."""
 
     previous = load_direct_config(bridge_paths)
     if previous is None:
@@ -181,58 +201,73 @@ def enable_readerpc_voice(
                 f"{message} 同时无法撤销旧实时快照：{exc}"
             ) from exc
         raise ReaderPCServiceError(message)
+
+    def require_shared_intent() -> None:
+        if read_codex_voice_keep_active(bridge_paths) is True:
+            return
+        stop_readerpc_voice(
+            bridge_paths,
+            process_runner,
+            disable_configuration=True,
+        )
+        raise ReaderPCServiceError(
+            "电脑语音总开关已关闭；已取消后台启动。"
+        )
+
+    require_shared_intent()
     try:
         set_direct_config_enabled(
             bridge_paths,
             True,
             context_delivery_mode=CONTEXT_DELIVERY_SNAPSHOT,
         )
-        set_codex_voice_keep_active(bridge_paths, True)
-        return start_readerpc_voice(bridge_paths, process_runner)
+        # The App may turn the switch off while ReaderPC is preparing the
+        # derived Direct configuration. Never start after that transition.
+        require_shared_intent()
+        pid = start_readerpc_voice(bridge_paths, process_runner)
+        # Fence the second race: an App disable can arrive while the process is
+        # starting and waiting for its first heartbeat.
+        require_shared_intent()
+        return pid
     except Exception as exc:
-        rollback_failures: list[str] = []
         try:
             write_disabled_reader_context_snapshot(bridge_paths)
         except Exception as rollback_exc:
-            rollback_failures.append(f"撤销实时快照：{rollback_exc}")
-        try:
-            set_codex_voice_keep_active(bridge_paths, False)
-        except Exception as rollback_exc:
-            rollback_failures.append(f"关闭 Codex 语音守护：{rollback_exc}")
-        try:
-            restore_direct_config(bridge_paths, previous)
-        except Exception as rollback_exc:
-            rollback_failures.append(f"恢复电脑语音配置：{rollback_exc}")
-        if rollback_failures:
             raise ReaderPCServiceError(
-                f"电脑语音与实时快照启用失败：{exc}；"
-                "回滚未完整完成：" + "；".join(rollback_failures)
+                f"电脑语音启动失败：{exc}；同时无法撤销旧实时快照："
+                f"{rollback_exc}"
             ) from exc
         raise
 
 
-def disable_readerpc_voice(
+def stop_readerpc_voice(
     bridge_paths: BridgePaths,
     process_runner: WindowsProcessRunner,
+    *,
+    disable_configuration: bool = False,
 ) -> None:
+    """Stop the owned Direct generation without changing shared intent."""
+
     failures: list[str] = []
+    if disable_configuration:
+        try:
+            set_direct_config_enabled(bridge_paths, False)
+        except Exception as exc:
+            failures.append(f"关闭派生的电脑语音配置：{exc}")
     try:
-        set_codex_voice_keep_active(bridge_paths, False)
+        write_disabled_reader_context_snapshot(bridge_paths)
     except Exception as exc:
-        failures.append(f"取消 Codex 语音持续运行：{exc}")
+        failures.append(f"撤销旧实时快照：{exc}")
     try:
-        disable_and_stop_direct_service(
-            bridge_paths,
-            process_runner,
-            after_disable=lambda: write_disabled_reader_context_snapshot(
-                bridge_paths
-            ),
-            after_stop=lambda: write_disabled_reader_context_snapshot(
-                bridge_paths
-            ),
-        )
+        status = read_direct_status(bridge_paths, process_runner)
+        if status.service_online or bridge_paths.service_record.exists():
+            stop_direct_service(bridge_paths, process_runner)
     except Exception as exc:
-        failures.append(f"停止电脑语音与实时快照服务：{exc}")
+        failures.append(f"停止电脑语音服务：{exc}")
+    try:
+        write_disabled_reader_context_snapshot(bridge_paths)
+    except Exception as exc:
+        failures.append(f"确认实时快照已撤销：{exc}")
     if failures:
         raise ReaderPCServiceError("；".join(failures))
 
@@ -264,15 +299,13 @@ def stop_readerpc_services(
         failures.append(f"PC 预处理：{exc}")
 
     try:
-        voice = read_direct_status(bridge_paths, process_runner)
-        if voice.configuration_enabled:
-            disable_readerpc_voice(bridge_paths, process_runner)
-        else:
-            set_codex_voice_keep_active(bridge_paths, False)
-            write_disabled_reader_context_snapshot(bridge_paths)
-            if voice.service_online or bridge_paths.service_record.exists():
-                stop_direct_service(bridge_paths, process_runner)
-            write_disabled_reader_context_snapshot(bridge_paths)
+        stop_readerpc_voice(
+            bridge_paths,
+            process_runner,
+            disable_configuration=(
+                read_codex_voice_keep_active(bridge_paths) is not True
+            ),
+        )
     except Exception as exc:
         failures.append(f"电脑语音与上下文直连：{exc}")
 
@@ -345,6 +378,7 @@ class ReaderPCWindow:
         self.last_voice_start_attempt = 0.0
         self.voice_recovery_in_progress = False
         self.voice_start_in_progress = False
+        self.voice_stop_in_progress = False
         self.voice_snapshot_offline_marked = False
         self.last_status_publish = 0.0
         self.history_stop_event = threading.Event()
@@ -390,7 +424,7 @@ class ReaderPCWindow:
         self.voice_status, self.voice_detail, self.voice_button = self._service_row(
             outer,
             "电脑语音",
-            "启用后启动 Windows 直连并保持 Codex 语音开启",
+            "与 App 共用同一总开关；后台恢复不会改变用户设置",
             self.toggle_voice,
         )
         self.context_status, self.context_detail, _ = self._service_row(
@@ -651,28 +685,32 @@ class ReaderPCWindow:
 
     def toggle_voice(self) -> None:
         current = self._voice_status()
-        if current.service_online:
-            self._run_task(
-                "正在停用电脑语音服务…",
-                lambda: disable_readerpc_voice(
-                    self.bridge_paths,
-                    self.process_runner,
-                ),
-                "电脑语音已停用。",
+        keep_active = read_codex_voice_keep_active(self.bridge_paths)
+        if keep_active is None:
+            messagebox.showerror(
+                PRODUCT_NAME,
+                "电脑语音总开关状态不可读；请先在 App 设置中确认。",
             )
             return
+        if keep_active is False:
+            self._start_voice_task(explicit_enable=True)
+            return
+        if current.service_online:
+            self._stop_voice_task(explicit_disable=True)
+            return
+        self._start_voice_task(explicit_enable=False)
 
-        self._start_voice_task(recovery=False)
-
-    def _start_voice_task(self, *, recovery: bool) -> None:
+    def _start_voice_task(self, *, explicit_enable: bool = False) -> None:
         if self.busy or self.closing:
             return
         self.last_voice_start_attempt = time.monotonic()
-        self.voice_recovery_in_progress = recovery
+        self.voice_recovery_in_progress = True
         self.voice_start_in_progress = True
 
         def start() -> int:
             try:
+                if explicit_enable:
+                    set_codex_voice_keep_active(self.bridge_paths, True)
                 pid = enable_readerpc_voice(
                     self.bridge_paths,
                     self.process_runner,
@@ -683,17 +721,33 @@ class ReaderPCWindow:
                 self.voice_start_in_progress = False
 
         self._run_task(
-            (
-                "正在恢复电脑语音与实时快照服务…"
-                if recovery
-                else "正在启用电脑语音与实时快照服务…"
-            ),
+            "正在恢复电脑语音与实时快照服务…",
             start,
-            (
-                "电脑语音、实时快照与 Codex 语音持续运行已恢复。"
-                if recovery
-                else "电脑语音与实时快照已启用，Codex 语音会自动开启并保持运行。"
-            ),
+            "电脑语音与实时快照服务已恢复；正在确认 Codex 语音。",
+        )
+
+    def _stop_voice_task(self, *, explicit_disable: bool = False) -> None:
+        if self.busy or self.closing or self.voice_stop_in_progress:
+            return
+        self.voice_stop_in_progress = True
+
+        def stop() -> None:
+            try:
+                if explicit_disable:
+                    set_codex_voice_keep_active(self.bridge_paths, False)
+                stop_readerpc_voice(
+                    self.bridge_paths,
+                    self.process_runner,
+                    disable_configuration=True,
+                )
+                self.voice_snapshot_offline_marked = True
+            finally:
+                self.voice_stop_in_progress = False
+
+        self._run_task(
+            "电脑语音总开关已关闭；正在停止 Windows 服务…",
+            stop,
+            "电脑语音已按总开关设置停用。",
         )
 
     def toggle_pc(self) -> None:
@@ -748,7 +802,29 @@ class ReaderPCWindow:
             # example PC preprocessing) must not leave a stale ready snapshot.
             if not self.voice_start_in_progress:
                 status = self._voice_status()
-                if status.service_online:
+                keep_active = read_codex_voice_keep_active(
+                    self.bridge_paths
+                )
+                if keep_active is None:
+                    self.footer.configure(
+                        text=(
+                            "电脑语音总开关状态暂时不可读；"
+                            "保留上次有效运行状态并继续轮询。"
+                        ),
+                        foreground="#c62828",
+                    )
+                elif keep_active is False:
+                    if not self.voice_snapshot_offline_marked:
+                        write_disabled_reader_context_snapshot(
+                            self.bridge_paths
+                        )
+                        self.voice_snapshot_offline_marked = True
+                    if (
+                        status.service_online
+                        or self.bridge_paths.service_record.exists()
+                    ):
+                        self._stop_voice_task()
+                elif status.service_online:
                     self.voice_snapshot_offline_marked = False
                 else:
                     if not self.voice_snapshot_offline_marked:
@@ -758,11 +834,11 @@ class ReaderPCWindow:
                         self.voice_snapshot_offline_marked = True
                     if (
                         not self.busy
-                        and status.configuration_enabled
+                        and keep_active is True
                         and time.monotonic() - self.last_voice_start_attempt
                         >= VOICE_RESTART_BACKOFF_SECONDS
                     ):
-                        self._start_voice_task(recovery=True)
+                        self._start_voice_task()
         except (BridgeError, ReaderPCServiceError, OSError, ValueError) as exc:
             self.footer.configure(
                 text=f"电脑语音离线状态确认失败：{exc}",
@@ -796,15 +872,21 @@ class ReaderPCWindow:
             return
         try:
             voice = self._voice_status()
+            keep_active = read_codex_voice_keep_active(self.bridge_paths)
+            codex_voice = read_codex_voice_activity()
             pc = self.pc_ocr.status()
             context = read_reader_context_status(
                 self.bridge_paths.root / "runtime" / "reader-context-snapshot.json"
             )
-            if voice.service_online:
-                voice_label = "在线 · 通话中" if voice.capture_active else "在线 · 空闲"
-                voice_color = "#167347"
-                voice_action = "停用"
-            elif voice.configuration_enabled:
+            if keep_active is not True:
+                voice_label = (
+                    "已停用"
+                    if keep_active is False
+                    else "总开关状态不可读"
+                )
+                voice_color = "#6b7280" if keep_active is False else "#c62828"
+                voice_action = "启用" if keep_active is False else "在 App 确认"
+            elif not voice.service_online:
                 voice_label = (
                     "正在恢复"
                     if self.voice_recovery_in_progress
@@ -812,10 +894,18 @@ class ReaderPCWindow:
                 )
                 voice_color = "#b26a00"
                 voice_action = "立即重试"
+            elif codex_voice.active is True:
+                voice_label = "在线 · Codex 语音工作中"
+                voice_color = "#167347"
+                voice_action = "停用"
             else:
-                voice_label = "已停用"
-                voice_color = "#6b7280"
-                voice_action = "启用"
+                voice_label = (
+                    "直连在线 · 等待 Codex 语音"
+                    if codex_voice.status == "available"
+                    else "直连在线 · 无法确认 Codex 语音"
+                )
+                voice_color = "#b26a00"
+                voice_action = "停用"
             self.voice_status.configure(text=voice_label, foreground=voice_color)
             self.voice_detail.configure(
                 text=(
@@ -826,7 +916,7 @@ class ReaderPCWindow:
             )
             self.voice_button.configure(text=voice_action)
 
-            if not voice.configuration_enabled:
+            if keep_active is not True:
                 context_label = "已停用 · 随电脑语音服务"
                 context_color = "#6b7280"
                 context_detail = "启用电脑语音服务后，Reader 实时快照会同时开启。"
@@ -871,6 +961,9 @@ class ReaderPCWindow:
                     voice={
                         "online": voice.service_online,
                         "configured": voice.configuration_enabled,
+                        "intentEnabled": keep_active,
+                        "codexVoiceStatus": codex_voice.status,
+                        "codexVoiceActive": codex_voice.active,
                         "readerConnected": voice.reader_connected,
                         "captureActive": voice.capture_active,
                         "reason": voice.reason,

@@ -3886,6 +3886,7 @@ internal static class DirectBridgeSelfTest
                 lastUsedTimeStart: 100,
                 lastUsedTimeStop: 200);
         int transitionCount = 0;
+        List<bool> keepActiveChanges = [];
         await using DirectCodexVoiceControl control = new(
             () => current,
             (active, before, cancellationToken) =>
@@ -3906,7 +3907,9 @@ internal static class DirectBridgeSelfTest
                 return Task.FromResult(current);
             },
             keepActivePath: keepActivePath,
-            keepActivePollInterval: TimeSpan.FromSeconds(1));
+            keepActivePollInterval: TimeSpan.FromSeconds(1),
+            keepActiveChanged: enabled =>
+                keepActiveChanges.Add(enabled));
         DirectBridgeProtocolSession session = new(
             "connection-codex-voice-control",
             origin,
@@ -4030,6 +4033,7 @@ internal static class DirectBridgeSelfTest
             && control.KeepActive
             && JsonDocument.Parse(File.ReadAllText(keepActivePath))
                 .RootElement.GetProperty("enabled").GetBoolean()
+            && keepActiveChanges.SequenceEqual(new[] { true })
             && transitionCount == 1
             && coordinator.ActiveSessionId is null
             && media.StartCount == 0
@@ -4063,29 +4067,83 @@ internal static class DirectBridgeSelfTest
             "codex-voice-keepalive-set");
         Require(
             !keepDisabled.GetProperty("keepActive").GetBoolean()
+            && !keepDisabled.GetProperty("active").GetBoolean()
+            && keepDisabled.GetProperty("shortcutSent").GetBoolean()
             && !control.KeepActive
             && !JsonDocument.Parse(File.ReadAllText(keepActivePath))
-                .RootElement.GetProperty("enabled").GetBoolean(),
-            "direct-codex-voice-keepalive-persists-explicit-state",
+                .RootElement.GetProperty("enabled").GetBoolean()
+            && keepActiveChanges.SequenceEqual(new[] { true, false })
+            && transitionCount == 3,
+            "direct-codex-voice-keepalive-disable-stops-and-persists",
+            checks);
+
+        CodexVoiceActivitySnapshot firstAttemptState =
+            CodexVoiceActivitySnapshot.Available(300, 400);
+        int firstAttemptPreparations = 0;
+        int firstAttemptRestarts = 0;
+        int firstAttemptF24Count = 0;
+        await using DirectCodexVoiceControl firstAttemptControl = new(
+            () => firstAttemptState,
+            (active, before, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                firstAttemptF24Count++;
+                firstAttemptState = CodexVoiceActivitySnapshot.Available(
+                    Math.Max(
+                        before.LastUsedTimeStart,
+                        before.LastUsedTimeStop) + 1,
+                        before.LastUsedTimeStop);
+                return Task.FromResult(firstAttemptState);
+            },
+            prepareStartAsync: (initial, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                Require(
+                    initial is { Active: false },
+                    "direct-codex-voice-first-attempt-prepares-inactive-state",
+                    checks);
+                firstAttemptPreparations++;
+                return Task.CompletedTask;
+            },
+            recoverStartFailureAsync: cancellationToken =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                firstAttemptRestarts++;
+                return Task.CompletedTask;
+            });
+        DirectCodexVoiceSetResult firstAttemptStarted =
+            await firstAttemptControl.SetActiveAsync(
+                active: true,
+                CancellationToken.None).ConfigureAwait(false);
+        Require(
+            firstAttemptStarted.State.Active == true
+            && firstAttemptStarted.ShortcutSent
+            && firstAttemptPreparations == 1
+            && firstAttemptRestarts == 0
+            && firstAttemptF24Count == 1,
+            "direct-codex-voice-first-success-never-restarts",
             checks);
 
         CodexVoiceActivitySnapshot recoveryState =
-            CodexVoiceActivitySnapshot.Available(300, 400);
+            CodexVoiceActivitySnapshot.Available(500, 600);
         int recoveryTransitions = 0;
-        int restartCount = 0;
+        int recoveryRestarts = 0;
+        List<string> recoverySequence = [];
         await using DirectCodexVoiceControl recoveryControl = new(
             () => recoveryState,
             (active, before, cancellationToken) =>
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 recoveryTransitions++;
+                recoverySequence.Add("f24");
                 if (recoveryTransitions == 1)
                 {
                     throw new DirectProtocolException(
                         CodexVoiceActivityController.StartNotConfirmedCode,
-                        "first Codex generation failed",
+                        "first start was not confirmed",
                         retryable: true);
                 }
+                recoverySequence.Add("wait-usable");
                 recoveryState = CodexVoiceActivitySnapshot.Available(
                     Math.Max(
                         before.LastUsedTimeStart,
@@ -4093,10 +4151,19 @@ internal static class DirectBridgeSelfTest
                     before.LastUsedTimeStop);
                 return Task.FromResult(recoveryState);
             },
+            prepareStartAsync: (initial, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                recoverySequence.Add("ensure-running");
+                return Task.CompletedTask;
+            },
             recoverStartFailureAsync: cancellationToken =>
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                restartCount++;
+                recoveryRestarts++;
+                recoverySequence.Add("restart");
+                recoverySequence.Add("wait-5s");
+                recoveryState = CodexVoiceActivitySnapshot.Available(700, 800);
                 return Task.CompletedTask;
             });
         DirectCodexVoiceSetResult recovered =
@@ -4107,8 +4174,187 @@ internal static class DirectBridgeSelfTest
             recovered.State.Active == true
             && recovered.ShortcutSent
             && recoveryTransitions == 2
-            && restartCount == 1,
-            "direct-codex-voice-restarts-once-before-fresh-start",
+            && recoveryRestarts == 1
+            && recoverySequence.SequenceEqual(
+                new[] {
+                    "ensure-running",
+                    "f24",
+                    "restart",
+                    "wait-5s",
+                    "f24",
+                    "wait-usable",
+                }),
+            "direct-codex-voice-first-failure-restarts-once-and-retries-once",
+            checks);
+
+        CodexVoiceActivitySnapshot preparedState =
+            CodexVoiceActivitySnapshot.Unavailable();
+        int prepareCount = 0;
+        int preparedTransitionCount = 0;
+        await using DirectCodexVoiceControl preparedControl = new(
+            () => preparedState,
+            (active, before, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                preparedTransitionCount++;
+                preparedState = CodexVoiceActivitySnapshot.Available(
+                    lastUsedTimeStart: 701,
+                    lastUsedTimeStop: before.LastUsedTimeStop);
+                return Task.FromResult(preparedState);
+            },
+            prepareStartAsync: (_, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                prepareCount++;
+                preparedState = CodexVoiceActivitySnapshot.Available(
+                    lastUsedTimeStart: 600,
+                    lastUsedTimeStop: 700);
+                return Task.CompletedTask;
+            });
+        DirectCodexVoiceSetResult prepared =
+            await preparedControl.SetActiveAsync(
+                active: true,
+                CancellationToken.None).ConfigureAwait(false);
+        Require(
+            prepared.State.Active == true
+            && prepared.ShortcutSent
+            && prepareCount == 1
+            && preparedTransitionCount == 1,
+            "direct-codex-voice-starts-app-before-reading-voice-ledger",
+            checks);
+
+        string startupKeepActivePath = System.IO.Path.Combine(
+            installationRoot,
+            "runtime",
+            "codex-voice-keepalive-startup.json");
+        await File.WriteAllTextAsync(
+            startupKeepActivePath,
+            """{"contract":"reader-codex-voice-keepalive/1","enabled":true}""")
+            .ConfigureAwait(false);
+        CodexVoiceActivitySnapshot startupState =
+            CodexVoiceActivitySnapshot.Unavailable();
+        int startupPrepareCount = 0;
+        int startupTransitionCount = 0;
+        TaskCompletionSource<bool> startupActivated = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        await using DirectCodexVoiceControl startupControl = new(
+            () => startupState,
+            (active, before, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                startupTransitionCount++;
+                startupState = CodexVoiceActivitySnapshot.Available(
+                    lastUsedTimeStart: 901,
+                    lastUsedTimeStop: before.LastUsedTimeStop);
+                startupActivated.TrySetResult(true);
+                return Task.FromResult(startupState);
+            },
+            keepActivePath: startupKeepActivePath,
+            keepActivePollInterval: TimeSpan.FromSeconds(10),
+            prepareStartAsync: (_, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                startupPrepareCount++;
+                startupState = CodexVoiceActivitySnapshot.Available(
+                    lastUsedTimeStart: 800,
+                    lastUsedTimeStop: 900);
+                return Task.CompletedTask;
+            });
+        _ = await startupActivated.Task.WaitAsync(
+            TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+        Require(
+            startupControl.KeepActive
+            && startupState.Active
+            && startupPrepareCount == 1
+            && startupTransitionCount == 1,
+            "direct-codex-voice-persisted-intent-starts-immediately",
+            checks);
+
+        string liveIntentPath = System.IO.Path.Combine(
+            installationRoot,
+            "runtime",
+            "codex-voice-keepalive-live.json");
+        await WriteKeepActiveIntentAsync(liveIntentPath, enabled: false)
+            .ConfigureAwait(false);
+        CodexVoiceActivitySnapshot liveIntentState =
+            CodexVoiceActivitySnapshot.Available(1200, 1300);
+        int liveIntentTransitions = 0;
+        List<bool> liveIntentChanges = [];
+        TaskCompletionSource<bool> liveIntentStarted = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource<bool> liveIntentStopped = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        await using DirectCodexVoiceControl liveIntentControl = new(
+            () => liveIntentState,
+            (active, before, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                liveIntentTransitions++;
+                liveIntentState = active
+                    ? CodexVoiceActivitySnapshot.Available(
+                        lastUsedTimeStart: 1400,
+                        lastUsedTimeStop: before.LastUsedTimeStop)
+                    : CodexVoiceActivitySnapshot.Available(
+                        lastUsedTimeStart: before.LastUsedTimeStart,
+                        lastUsedTimeStop: 1500);
+                (active ? liveIntentStarted : liveIntentStopped)
+                    .TrySetResult(true);
+                return Task.FromResult(liveIntentState);
+            },
+            keepActivePath: liveIntentPath,
+            keepActivePollInterval: TimeSpan.FromSeconds(1),
+            keepActiveChanged: enabled =>
+                liveIntentChanges.Add(enabled));
+        await Task.Delay(TimeSpan.FromMilliseconds(150))
+            .ConfigureAwait(false);
+        Require(
+            !liveIntentControl.KeepActive
+            && liveIntentTransitions == 0
+            && liveIntentChanges.Count == 0,
+            "direct-codex-voice-live-intent-starts-disabled",
+            checks);
+
+        await WriteKeepActiveIntentAsync(liveIntentPath, enabled: true)
+            .ConfigureAwait(false);
+        _ = await liveIntentStarted.Task.WaitAsync(
+            TimeSpan.FromSeconds(3)).ConfigureAwait(false);
+        Require(
+            liveIntentControl.KeepActive
+            && liveIntentState.Active
+            && liveIntentTransitions == 1
+            && liveIntentChanges.SequenceEqual(new[] { true }),
+            "direct-codex-voice-live-false-to-true-starts-once",
+            checks);
+
+        string invalidIntentTemporary = liveIntentPath + ".invalid.tmp";
+        await File.WriteAllTextAsync(
+            invalidIntentTemporary,
+            """{"contract":"wrong","enabled":false}""")
+            .ConfigureAwait(false);
+        File.Move(
+            invalidIntentTemporary,
+            liveIntentPath,
+            overwrite: true);
+        await Task.Delay(TimeSpan.FromMilliseconds(1200))
+            .ConfigureAwait(false);
+        Require(
+            liveIntentControl.KeepActive
+            && liveIntentState.Active
+            && liveIntentTransitions == 1
+            && liveIntentChanges.SequenceEqual(new[] { true }),
+            "direct-codex-voice-invalid-live-intent-retains-last-valid",
+            checks);
+
+        await WriteKeepActiveIntentAsync(liveIntentPath, enabled: false)
+            .ConfigureAwait(false);
+        _ = await liveIntentStopped.Task.WaitAsync(
+            TimeSpan.FromSeconds(3)).ConfigureAwait(false);
+        Require(
+            !liveIntentControl.KeepActive
+            && !liveIntentState.Active
+            && liveIntentTransitions == 2
+            && liveIntentChanges.SequenceEqual(new[] { true, false }),
+            "direct-codex-voice-live-true-to-false-stops-once",
             checks);
 
         string failedKeepActivePath = System.IO.Path.Combine(
@@ -4116,6 +4362,7 @@ internal static class DirectBridgeSelfTest
             "runtime",
             "codex-voice-keepalive-failed.json");
         int failedTransitions = 0;
+        int failedPreparations = 0;
         int failedRestarts = 0;
         await using DirectCodexVoiceControl failedRecoveryControl = new(
             () => CodexVoiceActivitySnapshot.Available(500, 600),
@@ -4130,6 +4377,12 @@ internal static class DirectBridgeSelfTest
             },
             keepActivePath: failedKeepActivePath,
             keepActivePollInterval: TimeSpan.FromSeconds(1),
+            prepareStartAsync: (_, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                failedPreparations++;
+                return Task.CompletedTask;
+            },
             recoverStartFailureAsync: cancellationToken =>
             {
                 cancellationToken.ThrowIfCancellationRequested();
@@ -4149,13 +4402,170 @@ internal static class DirectBridgeSelfTest
                 == CodexVoiceActivityController.StartNotConfirmedCode)
         {
         }
+        DirectCodexVoiceSetResult repeatedTrue =
+            await failedRecoveryControl.SetKeepActiveAsync(
+                enabled: true,
+                CancellationToken.None).ConfigureAwait(false);
         await Task.Delay(TimeSpan.FromMilliseconds(1200))
             .ConfigureAwait(false);
         Require(
             failedRecoveryControl.KeepActive
+            && repeatedTrue.State.Active == false
+            && !repeatedTrue.ShortcutSent
             && failedTransitions == 2
+            && failedPreparations == 1
             && failedRestarts == 1,
-            "direct-codex-voice-failed-restart-does-not-loop",
+            "direct-codex-voice-second-failure-latches-without-more-f24",
+            checks);
+
+        _ = await failedRecoveryControl.SetKeepActiveAsync(
+            enabled: false,
+            CancellationToken.None).ConfigureAwait(false);
+        try
+        {
+            _ = await failedRecoveryControl.SetKeepActiveAsync(
+                enabled: true,
+                CancellationToken.None).ConfigureAwait(false);
+            throw new InvalidOperationException(
+                "re-armed failed recovery unexpectedly succeeded");
+        }
+        catch (DirectProtocolException exception) when (
+            exception.Code
+                == CodexVoiceActivityController.StartNotConfirmedCode)
+        {
+        }
+        Require(
+            failedTransitions == 4
+            && failedPreparations == 2
+            && failedRestarts == 2,
+            "direct-codex-voice-false-to-true-rearms-once",
+            checks);
+
+        string automaticFailurePath = System.IO.Path.Combine(
+            installationRoot,
+            "runtime",
+            "codex-voice-keepalive-automatic-failure.json");
+        await File.WriteAllTextAsync(
+            automaticFailurePath,
+            """{"contract":"reader-codex-voice-keepalive/1","enabled":true}""")
+            .ConfigureAwait(false);
+        int automaticFailureTransitions = 0;
+        int automaticFailurePreparations = 0;
+        int automaticFailureRestarts = 0;
+        TaskCompletionSource<Exception> automaticFailureSeen = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        await using DirectCodexVoiceControl automaticFailureControl = new(
+            () => CodexVoiceActivitySnapshot.Available(1000, 1100),
+            (active, before, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                automaticFailureTransitions++;
+                return Task.FromException<CodexVoiceActivitySnapshot>(
+                    new DirectProtocolException(
+                        CodexVoiceActivityController.StartNotConfirmedCode,
+                        "automatic start failed",
+                        retryable: true));
+            },
+            keepActivePath: automaticFailurePath,
+            keepActivePollInterval: TimeSpan.FromSeconds(1),
+            prepareStartAsync: (_, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                automaticFailurePreparations++;
+                return Task.CompletedTask;
+            },
+            recoverStartFailureAsync: cancellationToken =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                automaticFailureRestarts++;
+                return Task.CompletedTask;
+            },
+            automaticRecoveryFailed: exception =>
+                automaticFailureSeen.TrySetResult(exception));
+        Exception recordedAutomaticFailure =
+            await automaticFailureSeen.Task.WaitAsync(
+                TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+        await Task.Delay(TimeSpan.FromMilliseconds(1200))
+            .ConfigureAwait(false);
+        Require(
+            automaticFailureControl.KeepActive
+            && automaticFailureTransitions == 2
+            && automaticFailurePreparations == 1
+            && automaticFailureRestarts == 1
+            && recordedAutomaticFailure is DirectProtocolException
+            {
+                Code: CodexVoiceActivityController.StartNotConfirmedCode,
+            },
+            "direct-codex-voice-automatic-failure-is-bounded-and-visible",
+            checks);
+
+        CodexVoiceActivitySnapshot cancelState =
+            CodexVoiceActivitySnapshot.Available(2000, 2100);
+        TaskCompletionSource<bool> cancelRecoveryStarted = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource<bool> cancelRecoveryStopped = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        int canceledTransitions = 0;
+        int canceledRestarts = 0;
+        await using DirectCodexVoiceControl cancelControl = new(
+            () => cancelState,
+            (active, before, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                canceledTransitions++;
+                if (canceledTransitions == 1)
+                {
+                    throw new DirectProtocolException(
+                        CodexVoiceActivityController.StartNotConfirmedCode,
+                        "first start failed before intent cancellation",
+                        retryable: true);
+                }
+                return Task.FromResult(
+                    CodexVoiceActivitySnapshot.Available(2201, 2200));
+            },
+            prepareStartAsync: (_, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return Task.CompletedTask;
+            },
+            recoverStartFailureAsync: async cancellationToken =>
+            {
+                canceledRestarts++;
+                cancelRecoveryStarted.TrySetResult(true);
+                try
+                {
+                    await Task.Delay(
+                        Timeout.InfiniteTimeSpan,
+                        cancellationToken).ConfigureAwait(false);
+                }
+                catch (OperationCanceledException) when (
+                    cancellationToken.IsCancellationRequested)
+                {
+                    cancelRecoveryStopped.TrySetResult(true);
+                    throw;
+                }
+            });
+        Task<DirectCodexVoiceSetResult> enabling =
+            cancelControl.SetKeepActiveAsync(
+                enabled: true,
+                CancellationToken.None);
+        _ = await cancelRecoveryStarted.Task.WaitAsync(
+            TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+        DirectCodexVoiceSetResult canceledDisable =
+            await cancelControl.SetKeepActiveAsync(
+                enabled: false,
+                CancellationToken.None).WaitAsync(
+                    TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+        _ = await enabling.WaitAsync(TimeSpan.FromSeconds(2))
+            .ConfigureAwait(false);
+        _ = await cancelRecoveryStopped.Task.WaitAsync(
+            TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+        Require(
+            !cancelControl.KeepActive
+            && canceledDisable.State.Active == false
+            && canceledTransitions == 1
+            && canceledRestarts == 1,
+            "direct-codex-voice-disable-cancels-before-stale-second-f24",
             checks);
 
         JsonElement invalidType = await SendAsync(
@@ -4188,7 +4598,7 @@ internal static class DirectBridgeSelfTest
             && !unexpectedField.GetProperty("ok").GetBoolean()
             && unexpectedField.GetProperty("error").GetProperty("code")
                 .GetString() == "BW_COMPUTER_VOICE_DIRECT_MESSAGE_INVALID"
-            && transitionCount == 2,
+            && transitionCount == 3,
             "direct-codex-voice-set-requires-exact-boolean-payload",
             checks);
 
@@ -4225,7 +4635,7 @@ internal static class DirectBridgeSelfTest
             "codex-voice-set");
         Require(
             session.Phase == DirectProtocolPhase.Active
-            && activePhaseSet.GetProperty("shortcutSent").GetBoolean()
+            && !activePhaseSet.GetProperty("shortcutSent").GetBoolean()
             && coordinator.ActiveSessionId == ownerBeforeSet
             && media.StartCount == mediaStartBeforeSet
             && media.StopCount == mediaStopBeforeSet,
@@ -6221,6 +6631,7 @@ internal static class DirectBridgeSelfTest
             renderEndpointProbe: _ => null);
         List<object> events = [];
         List<byte[]> frames = [];
+        List<string> synchronizedModes = [];
         string modeSessionId =
             "session-" + DirectBase64Url.Encode(
                 Enumerable.Range(96, 16)
@@ -6231,7 +6642,9 @@ internal static class DirectBridgeSelfTest
             "connection-context-mode-set",
             origin,
             store,
-            coordinator);
+            coordinator,
+            contextDeliveryModeChanged: mode =>
+                synchronizedModes.Add(mode));
         _ = RequireSuccess(
             await SendAsync(
                 setter,
@@ -6275,8 +6688,10 @@ internal static class DirectBridgeSelfTest
                 initial.AllowedOrigins)
             && launcher.EnsureRunningCount == 0
             && launcher.WaitReadyCount == 0
-            && media.StartCount == 0,
-            "direct-context-mode-set-persists-atomically-without-side-effects",
+            && media.StartCount == 0
+            && synchronizedModes.SequenceEqual(
+                new[] { DirectContextDeliveryMode.SnapshotMcp }),
+            "direct-context-mode-set-persists-and-synchronizes-viewer",
             checks);
 
         DirectBridgeProtocolSession contextOnly = new(
@@ -9659,10 +10074,39 @@ internal static class DirectBridgeSelfTest
             && viewerArguments.Contains(
                 "--disable-sync",
                 StringComparer.Ordinal)
+            && DirectSnapshotViewer.ShouldOpenForServiceIntent(
+                DirectContextDeliveryMode.SnapshotMcp,
+                enabled: true)
+            && !DirectSnapshotViewer.ShouldOpenForServiceIntent(
+                DirectContextDeliveryMode.SnapshotMcp,
+                enabled: false)
+            && !DirectSnapshotViewer.ShouldOpenForServiceIntent(
+                DirectContextDeliveryMode.LegacyInject,
+                enabled: true)
+            && DirectSnapshotViewer.PlanServiceIntent(
+                DirectContextDeliveryMode.SnapshotMcp,
+                enabled: true,
+                viewerRunning: false)
+                == DirectSnapshotViewerIntentAction.Open
+            && DirectSnapshotViewer.PlanServiceIntent(
+                DirectContextDeliveryMode.SnapshotMcp,
+                enabled: true,
+                viewerRunning: true)
+                == DirectSnapshotViewerIntentAction.None
+            && DirectSnapshotViewer.PlanServiceIntent(
+                DirectContextDeliveryMode.LegacyInject,
+                enabled: true,
+                viewerRunning: true)
+                == DirectSnapshotViewerIntentAction.Close
+            && DirectSnapshotViewer.PlanServiceIntent(
+                DirectContextDeliveryMode.SnapshotMcp,
+                enabled: false,
+                viewerRunning: true)
+                == DirectSnapshotViewerIntentAction.Close
             && !viewerArguments.Contains(
                 "--reader-context-view",
                 StringComparer.Ordinal),
-            "direct-snapshot-loopback-viewer-is-local-fresh-and-honest",
+            "direct-snapshot-viewer-reopens-and-tracks-mode-intent",
             checks);
 
         adapter = new FileDirectSnapshotContextAdapter(
@@ -10214,6 +10658,28 @@ internal static class DirectBridgeSelfTest
         });
         await File.WriteAllTextAsync(configPath, json)
             .ConfigureAwait(false);
+    }
+
+    private static async Task WriteKeepActiveIntentAsync(
+        string path,
+        bool enabled)
+    {
+        string? directory = System.IO.Path.GetDirectoryName(path);
+        if (string.IsNullOrEmpty(directory))
+        {
+            throw new InvalidOperationException(
+                "self-test keepalive directory missing");
+        }
+        Directory.CreateDirectory(directory);
+        string temporary = path + ".self-test.tmp";
+        await File.WriteAllTextAsync(
+            temporary,
+            JsonSerializer.Serialize(new
+            {
+                contract = "reader-codex-voice-keepalive/1",
+                enabled,
+            })).ConfigureAwait(false);
+        File.Move(temporary, path, overwrite: true);
     }
 
     private static void Require(

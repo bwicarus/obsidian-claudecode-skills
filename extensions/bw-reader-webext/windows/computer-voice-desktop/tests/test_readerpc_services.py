@@ -14,6 +14,7 @@ from readerpc_services import (  # noqa: E402
     PC_OCR_STATUS_CONTRACT,
     PcOcrPaths,
     PcOcrServiceController,
+    read_codex_voice_activity,
     read_reader_context_status,
     write_readerpc_status,
 )
@@ -101,6 +102,27 @@ class ReaderPCServicesTests(unittest.TestCase):
         self.assertTrue(fresh.fresh)
         self.assertEqual(fresh.title, "book")
         self.assertFalse(stale.fresh)
+
+    def test_codex_voice_activity_uses_exact_microphone_ledger_semantics(self) -> None:
+        active = read_codex_voice_activity(lambda: (101, 100))
+        stopped = read_codex_voice_activity(lambda: (101, 102))
+        never_started = read_codex_voice_activity(lambda: (0, 0))
+        self.assertEqual((active.status, active.active), ("available", True))
+        self.assertEqual((stopped.status, stopped.active), ("available", False))
+        self.assertEqual(
+            (never_started.status, never_started.active),
+            ("available", False),
+        )
+
+    def test_codex_voice_activity_distinguishes_unavailable_and_invalid(self) -> None:
+        unavailable = read_codex_voice_activity(lambda: None)
+        invalid = read_codex_voice_activity(lambda: (True, 0))
+        denied = read_codex_voice_activity(
+            lambda: (_ for _ in ()).throw(PermissionError("denied"))
+        )
+        self.assertEqual((unavailable.status, unavailable.active), ("unavailable", None))
+        self.assertEqual((invalid.status, invalid.active), ("error", None))
+        self.assertEqual((denied.status, denied.active), ("error", None))
 
     def test_unified_status_contains_no_process_paths_or_tokens(self) -> None:
         self.paths.status_file.parent.mkdir(parents=True)

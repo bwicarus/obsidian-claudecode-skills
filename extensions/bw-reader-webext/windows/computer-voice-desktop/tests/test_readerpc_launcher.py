@@ -17,19 +17,23 @@ sys.path.insert(0, str(SOURCE_ROOT))
 
 from readerpc_launcher import (  # noqa: E402
     ReaderPCWindow,
-    disable_readerpc_voice,
     enable_readerpc_voice,
     load_preferences,
     main,
+    read_codex_voice_keep_active,
     readerpc_history_sync_enabled,
     prepare_readerpc_shortcut_broker,
     save_preferences,
     set_codex_voice_keep_active,
     start_readerpc_voice,
+    stop_readerpc_voice,
     stop_readerpc_services,
     write_disabled_reader_context_snapshot,
 )
 from readerpc_services import (  # noqa: E402
+    CodexVoiceActivityStatus,
+    PcOcrStatus,
+    ReaderContextStatus,
     read_reader_context_status,
     write_disabled_reader_context_snapshot as write_offline_snapshot,
 )
@@ -55,6 +59,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
         window.last_voice_start_attempt = 0.0
         window.voice_recovery_in_progress = False
         window.voice_start_in_progress = False
+        window.voice_stop_in_progress = False
         window.voice_snapshot_offline_marked = False
         return window
 
@@ -81,11 +86,45 @@ class ReaderPCLauncherTests(unittest.TestCase):
             path.write_text('{"keepPcPreprocessingOnline":"yes"}', "utf-8")
             self.assertTrue(load_preferences(path)["keepPcPreprocessingOnline"])
 
+    def test_codex_voice_master_switch_is_exact_and_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            runtime = Path(raw) / "runtime" / "direct.status.json"
+            paths = SimpleNamespace(runtime_status=runtime)
+            self.assertIsNone(read_codex_voice_keep_active(paths))
+            runtime.parent.mkdir(parents=True)
+            keepalive = runtime.parent / "codex-voice-keepalive.json"
+            keepalive.write_text(
+                json.dumps(
+                    {
+                        "contract": "reader-codex-voice-keepalive/1",
+                        "enabled": True,
+                    }
+                ),
+                "utf-8",
+            )
+            self.assertTrue(read_codex_voice_keep_active(paths))
+            keepalive.write_text(
+                '{"contract":"reader-codex-voice-keepalive/1",'
+                '"enabled":true,"extra":1}',
+                "utf-8",
+            )
+            self.assertIsNone(read_codex_voice_keep_active(paths))
+
+    def test_explicit_readerpc_choice_writes_shared_master_switch(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            runtime_status = Path(raw) / "runtime" / "status.json"
+            bridge_paths = SimpleNamespace(runtime_status=runtime_status)
+            set_codex_voice_keep_active(bridge_paths, True)
+            self.assertTrue(read_codex_voice_keep_active(bridge_paths))
+            set_codex_voice_keep_active(bridge_paths, False)
+            self.assertFalse(read_codex_voice_keep_active(bridge_paths))
+
     def test_history_sync_requires_explicit_snapshot_mode(self) -> None:
         paths = object()
-        with patch(
-            "readerpc_launcher.load_direct_config",
-            side_effect=(
+        with (
+            patch(
+                "readerpc_launcher.load_direct_config",
+                side_effect=(
                 None,
                 {
                     "localOptIn": True,
@@ -99,6 +138,11 @@ class ReaderPCLauncherTests(unittest.TestCase):
                     "localOptIn": True,
                     "contextDeliveryMode": "snapshot-mcp",
                 },
+                ),
+            ),
+            patch(
+                "readerpc_launcher.read_codex_voice_keep_active",
+                return_value=True,
             ),
         ):
             self.assertFalse(readerpc_history_sync_enabled(paths))
@@ -144,58 +188,56 @@ class ReaderPCLauncherTests(unittest.TestCase):
             window._run_history_sync()
         monitor.assert_not_called()
 
-    def test_codex_voice_keepalive_round_trip(self) -> None:
-        with tempfile.TemporaryDirectory() as raw:
-            runtime_status = Path(raw) / "runtime" / "status.json"
-            bridge_paths = SimpleNamespace(runtime_status=runtime_status)
-            set_codex_voice_keep_active(bridge_paths, True)
-            self.assertEqual(
-                (runtime_status.parent / "codex-voice-keepalive.json").read_text(
-                    "utf-8"
-                ),
-                '{\n  "contract": "reader-codex-voice-keepalive/1",\n'
-                '  "enabled": true\n}\n',
-            )
-
-    def test_disable_voice_clears_keepalive_and_stops_service(self) -> None:
+    def test_stop_voice_fences_snapshot_without_writing_app_intent(self) -> None:
         bridge_paths = Mock()
+        bridge_paths.service_record.exists.return_value = True
         process_runner = Mock()
-        calls: list[object] = []
+        calls: list[str] = []
         with (
             patch(
-                "readerpc_launcher.set_codex_voice_keep_active",
-                side_effect=lambda _paths, enabled: calls.append(enabled),
+                "readerpc_launcher.read_direct_status",
+                return_value=SimpleNamespace(service_online=True),
             ),
             patch(
-                "readerpc_launcher.disable_and_stop_direct_service",
-                side_effect=lambda *_args, **kwargs: (
-                    calls.append("opt-out"),
-                    kwargs["after_disable"](),
-                    calls.append("stop"),
-                    kwargs["after_stop"](),
-                ),
+                "readerpc_launcher.stop_direct_service",
+                side_effect=lambda *_args: calls.append("stop"),
+            ) as stop,
+            patch(
+                "readerpc_launcher.write_disabled_reader_context_snapshot",
+                side_effect=lambda _paths: calls.append("tombstone"),
+            ) as tombstone,
+        ):
+            stop_readerpc_voice(bridge_paths, process_runner)
+        self.assertEqual(calls, ["tombstone", "stop", "tombstone"])
+        stop.assert_called_once_with(bridge_paths, process_runner)
+        self.assertEqual(tombstone.call_count, 2)
+
+    def test_disabled_intent_derives_direct_config_off_before_stop(self) -> None:
+        bridge_paths = Mock()
+        bridge_paths.service_record.exists.return_value = False
+        process_runner = Mock()
+        calls: list[str] = []
+        with (
+            patch(
+                "readerpc_launcher.set_direct_config_enabled",
+                side_effect=lambda *_args, **_kwargs: calls.append("configure-off"),
+            ) as configure,
+            patch(
+                "readerpc_launcher.read_direct_status",
+                return_value=SimpleNamespace(service_online=False),
             ),
             patch(
                 "readerpc_launcher.write_disabled_reader_context_snapshot",
                 side_effect=lambda _paths: calls.append("tombstone"),
             ),
         ):
-            disable_readerpc_voice(bridge_paths, process_runner)
-        self.assertEqual(
-            calls,
-            [False, "opt-out", "tombstone", "stop", "tombstone"],
-        )
-
-    def test_disable_voice_passes_both_tombstone_fences_to_atomic_stop(self) -> None:
-        with (
-            patch("readerpc_launcher.set_codex_voice_keep_active"),
-            patch(
-                "readerpc_launcher.disable_and_stop_direct_service"
-            ) as disable,
-        ):
-            disable_readerpc_voice(Mock(), Mock())
-        self.assertTrue(callable(disable.call_args.kwargs["after_disable"]))
-        self.assertTrue(callable(disable.call_args.kwargs["after_stop"]))
+            stop_readerpc_voice(
+                bridge_paths,
+                process_runner,
+                disable_configuration=True,
+            )
+        configure.assert_called_once_with(bridge_paths, False)
+        self.assertEqual(calls, ["configure-off", "tombstone", "tombstone"])
 
     def test_disabled_snapshot_revokes_every_reader_target(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
@@ -241,7 +283,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
         self.assertFalse(status.available)
         self.assertFalse(status.fresh)
 
-    def test_enable_voice_switches_to_snapshot_before_keepalive_and_start(self) -> None:
+    def test_recovery_switches_to_snapshot_without_writing_app_intent(self) -> None:
         bridge_paths = Mock()
         bridge_paths.direct_config.exists.return_value = True
         process_runner = Mock()
@@ -253,15 +295,13 @@ class ReaderPCLauncherTests(unittest.TestCase):
         with (
             patch("readerpc_launcher.load_direct_config", return_value=previous),
             patch(
+                "readerpc_launcher.read_codex_voice_keep_active",
+                side_effect=(True, True, True),
+            ),
+            patch(
                 "readerpc_launcher.set_direct_config_enabled",
                 side_effect=lambda *_args, **kwargs: calls.append(
                     ("configure", kwargs)
-                ),
-            ),
-            patch(
-                "readerpc_launcher.set_codex_voice_keep_active",
-                side_effect=lambda _paths, enabled: calls.append(
-                    ("keepalive", enabled)
                 ),
             ),
             patch(
@@ -278,13 +318,17 @@ class ReaderPCLauncherTests(unittest.TestCase):
             calls[0][1]["context_delivery_mode"],
             "snapshot-mcp",
         )
-        self.assertEqual(calls[1:], [("keepalive", True), "start"])
+        self.assertEqual(calls[1:], ["start"])
 
     def test_enable_without_valid_config_revokes_stale_snapshot(self) -> None:
         bridge_paths = Mock()
         bridge_paths.direct_config.exists.return_value = True
         with (
             patch("readerpc_launcher.load_direct_config", return_value=None),
+            patch(
+                "readerpc_launcher.read_codex_voice_keep_active",
+                return_value=False,
+            ),
             patch(
                 "readerpc_launcher.write_disabled_reader_context_snapshot"
             ) as tombstone,
@@ -293,14 +337,9 @@ class ReaderPCLauncherTests(unittest.TestCase):
             enable_readerpc_voice(bridge_paths, Mock())
         tombstone.assert_called_once_with(bridge_paths)
 
-    def test_enable_failure_restores_entire_previous_config(self) -> None:
+    def test_start_failure_keeps_app_intent_and_revokes_snapshot(self) -> None:
         bridge_paths = Mock()
         bridge_paths.direct_config.exists.return_value = True
-        previous = {
-            "localOptIn": True,
-            "contextDeliveryMode": "legacy-inject",
-            "sentinel": "keep-me",
-        }
         events: list[str] = []
 
         def fail_start(*_args) -> int:
@@ -308,51 +347,36 @@ class ReaderPCLauncherTests(unittest.TestCase):
             raise RuntimeError("runtime-heartbeat-timeout")
 
         with (
-            patch("readerpc_launcher.load_direct_config", return_value=previous),
+            patch(
+                "readerpc_launcher.load_direct_config",
+                return_value={
+                    "localOptIn": True,
+                    "contextDeliveryMode": "snapshot-mcp",
+                },
+            ),
+            patch(
+                "readerpc_launcher.read_codex_voice_keep_active",
+                side_effect=(True, True),
+            ),
             patch(
                 "readerpc_launcher.set_direct_config_enabled",
                 side_effect=lambda *_args, **_kwargs: events.append("configure"),
             ),
-            patch(
-                "readerpc_launcher.set_codex_voice_keep_active",
-                side_effect=lambda _paths, enabled: events.append(
-                    f"keepalive:{enabled}"
-                ),
-            ) as keepalive,
             patch("readerpc_launcher.start_readerpc_voice", side_effect=fail_start),
             patch(
                 "readerpc_launcher.write_disabled_reader_context_snapshot",
                 side_effect=lambda _paths: events.append("tombstone"),
             ) as tombstone,
-            patch(
-                "readerpc_launcher.restore_direct_config",
-                side_effect=lambda *_args: events.append("restore"),
-            ) as restore,
             self.assertRaisesRegex(
                 RuntimeError,
                 "runtime-heartbeat-timeout",
             ),
         ):
             enable_readerpc_voice(bridge_paths, Mock())
-        self.assertEqual(
-            [call.args[1] for call in keepalive.call_args_list],
-            [True, False],
-        )
-        self.assertEqual(
-            events,
-            [
-                "configure",
-                "keepalive:True",
-                "start",
-                "tombstone",
-                "keepalive:False",
-                "restore",
-            ],
-        )
+        self.assertEqual(events, ["configure", "start", "tombstone"])
         tombstone.assert_called_once_with(bridge_paths)
-        restore.assert_called_once_with(bridge_paths, previous)
 
-    def test_enable_failure_reports_incomplete_rollback(self) -> None:
+    def test_recovery_refuses_false_app_intent_and_stops_only(self) -> None:
         bridge_paths = Mock()
         bridge_paths.direct_config.exists.return_value = True
         with (
@@ -363,30 +387,64 @@ class ReaderPCLauncherTests(unittest.TestCase):
                     "contextDeliveryMode": "legacy-inject",
                 },
             ),
-            patch("readerpc_launcher.set_direct_config_enabled"),
-            patch("readerpc_launcher.set_codex_voice_keep_active"),
             patch(
-                "readerpc_launcher.start_readerpc_voice",
-                side_effect=RuntimeError("start-failed"),
+                "readerpc_launcher.read_codex_voice_keep_active",
+                return_value=False,
             ),
+            patch("readerpc_launcher.set_direct_config_enabled") as configure,
+            patch("readerpc_launcher.start_readerpc_voice") as start,
+            patch("readerpc_launcher.stop_readerpc_voice") as stop,
             patch("readerpc_launcher.write_disabled_reader_context_snapshot"),
-            patch(
-                "readerpc_launcher.restore_direct_config",
-                side_effect=OSError("restore-denied"),
-            ),
             self.assertRaisesRegex(
                 RuntimeError,
-                "启用失败.*回滚未完整完成.*restore-denied",
+                "总开关已关闭.*取消后台启动",
             ),
         ):
             enable_readerpc_voice(bridge_paths, Mock())
+        stop.assert_called_once()
+        configure.assert_not_called()
+        start.assert_not_called()
+
+    def test_app_turning_off_mid_start_rolls_back_listener(self) -> None:
+        bridge_paths = Mock()
+        bridge_paths.direct_config.exists.return_value = True
+        with (
+            patch(
+                "readerpc_launcher.load_direct_config",
+                return_value={
+                    "localOptIn": True,
+                    "contextDeliveryMode": "snapshot-mcp",
+                },
+            ),
+            patch(
+                "readerpc_launcher.read_codex_voice_keep_active",
+                side_effect=(True, True, False),
+            ),
+            patch("readerpc_launcher.set_direct_config_enabled") as configure,
+            patch(
+                "readerpc_launcher.start_readerpc_voice",
+                return_value=1234,
+            ) as start,
+            patch("readerpc_launcher.stop_readerpc_voice") as stop,
+            patch(
+                "readerpc_launcher.write_disabled_reader_context_snapshot"
+            ) as tombstone,
+            self.assertRaisesRegex(RuntimeError, "总开关已关闭.*取消后台启动"),
+        ):
+            enable_readerpc_voice(bridge_paths, Mock())
+        configure.assert_called_once()
+        start.assert_called_once()
+        stop.assert_called_once()
+        tombstone.assert_called_once_with(bridge_paths)
 
     def test_shutdown_stops_pc_and_direct_services(self) -> None:
         pc_ocr = Mock()
-        status = SimpleNamespace(service_online=True, configuration_enabled=True)
         with (
-            patch("readerpc_launcher.read_direct_status", return_value=status),
-            patch("readerpc_launcher.disable_readerpc_voice") as stop_voice,
+            patch(
+                "readerpc_launcher.read_codex_voice_keep_active",
+                return_value=True,
+            ),
+            patch("readerpc_launcher.stop_readerpc_voice") as stop_voice,
         ):
             stop_readerpc_services(Mock(), Mock(), pc_ocr)
         pc_ocr.stop.assert_called_once_with()
@@ -395,11 +453,13 @@ class ReaderPCLauncherTests(unittest.TestCase):
     def test_shutdown_attempts_both_services_and_reports_failure(self) -> None:
         pc_ocr = Mock()
         pc_ocr.stop.side_effect = RuntimeError("pc-stop-failed")
-        status = SimpleNamespace(service_online=True, configuration_enabled=True)
         with (
-            patch("readerpc_launcher.read_direct_status", return_value=status),
             patch(
-                "readerpc_launcher.disable_readerpc_voice",
+                "readerpc_launcher.read_codex_voice_keep_active",
+                return_value=True,
+            ),
+            patch(
+                "readerpc_launcher.stop_readerpc_voice",
                 side_effect=RuntimeError("voice-stop-failed"),
             ) as stop_voice,
             self.assertRaisesRegex(
@@ -411,61 +471,85 @@ class ReaderPCLauncherTests(unittest.TestCase):
         pc_ocr.stop.assert_called_once_with()
         stop_voice.assert_called_once()
 
-    def test_shutdown_skips_direct_stop_when_already_disabled(self) -> None:
+    def test_shutdown_preserves_true_app_intent(self) -> None:
         pc_ocr = Mock()
-        status = SimpleNamespace(service_online=False, configuration_enabled=False)
         bridge_paths = Mock()
-        bridge_paths.service_record.exists.return_value = False
         with (
-            patch("readerpc_launcher.read_direct_status", return_value=status),
-            patch("readerpc_launcher.set_codex_voice_keep_active") as keep_voice,
-            patch("readerpc_launcher.disable_and_stop_direct_service") as stop_voice,
-            patch("readerpc_launcher.stop_direct_service") as stop_orphan,
             patch(
-                "readerpc_launcher.write_disabled_reader_context_snapshot"
-            ) as tombstone,
+                "readerpc_launcher.read_codex_voice_keep_active",
+                return_value=True,
+            ),
+            patch("readerpc_launcher.stop_readerpc_voice") as stop_voice,
+            patch("readerpc_launcher.set_codex_voice_keep_active") as write_intent,
         ):
             stop_readerpc_services(bridge_paths, Mock(), pc_ocr)
         pc_ocr.stop.assert_called_once_with()
-        keep_voice.assert_called_once_with(bridge_paths, False)
-        stop_voice.assert_not_called()
-        stop_orphan.assert_not_called()
-        self.assertEqual(tombstone.call_count, 2)
+        stop_voice.assert_called_once()
+        write_intent.assert_not_called()
 
-    def test_shutdown_stops_owned_direct_record_after_opt_out(self) -> None:
-        pc_ocr = Mock()
-        status = SimpleNamespace(service_online=False, configuration_enabled=False)
-        bridge_paths = Mock()
-        bridge_paths.service_record.exists.return_value = True
-        with (
-            patch("readerpc_launcher.read_direct_status", return_value=status),
-            patch("readerpc_launcher.set_codex_voice_keep_active") as keep_voice,
-            patch("readerpc_launcher.disable_and_stop_direct_service") as disable_voice,
-            patch("readerpc_launcher.stop_direct_service") as stop_orphan,
-            patch(
-                "readerpc_launcher.write_disabled_reader_context_snapshot"
-            ) as tombstone,
-        ):
-            stop_readerpc_services(bridge_paths, Mock(), pc_ocr)
-        disable_voice.assert_not_called()
-        keep_voice.assert_called_once_with(bridge_paths, False)
-        stop_orphan.assert_called_once()
-        self.assertEqual(tombstone.call_count, 2)
-
-    def test_start_voice_sets_keepalive_before_starting_service(self) -> None:
+    def test_explicit_readerpc_enable_writes_shared_intent_then_starts(self) -> None:
         window = self.window_without_tk()
         window.voice_snapshot_offline_marked = True
         window._run_task = Mock(side_effect=lambda _pending, action, _success: action())
-        with patch(
-            "readerpc_launcher.enable_readerpc_voice",
-            return_value=4321,
-        ) as enable:
-            window._start_voice_task(recovery=False)
-        enable.assert_called_once_with(
-            window.bridge_paths,
-            window.process_runner,
-        )
+        calls: list[object] = []
+        with (
+            patch(
+                "readerpc_launcher.set_codex_voice_keep_active",
+                side_effect=lambda _paths, enabled: calls.append(enabled),
+            ),
+            patch(
+                "readerpc_launcher.enable_readerpc_voice",
+                side_effect=lambda *_args: calls.append("start") or 4321,
+            ) as enable,
+        ):
+            window._start_voice_task(explicit_enable=True)
+        self.assertEqual(calls, [True, "start"])
+        enable.assert_called_once_with(window.bridge_paths, window.process_runner)
         self.assertFalse(window.voice_snapshot_offline_marked)
+
+    def test_offline_retry_does_not_rewrite_master_intent(self) -> None:
+        window = self.window_without_tk()
+        window._run_task = Mock(side_effect=lambda _pending, action, _success: action())
+        with (
+            patch("readerpc_launcher.set_codex_voice_keep_active") as write_intent,
+            patch(
+                "readerpc_launcher.enable_readerpc_voice",
+                return_value=4321,
+            ) as enable,
+        ):
+            window._start_voice_task(explicit_enable=False)
+        write_intent.assert_not_called()
+        enable.assert_called_once_with(window.bridge_paths, window.process_runner)
+
+    def test_toggle_false_intent_is_an_explicit_shared_enable(self) -> None:
+        window = self.window_without_tk()
+        window._voice_status = Mock(
+            return_value=SimpleNamespace(service_online=True)
+        )
+        window._start_voice_task = Mock()
+        with patch(
+            "readerpc_launcher.read_codex_voice_keep_active",
+            return_value=False,
+        ):
+            window.toggle_voice()
+        window._start_voice_task.assert_called_once_with(explicit_enable=True)
+
+    def test_explicit_readerpc_disable_writes_false_then_stops(self) -> None:
+        window = self.window_without_tk()
+        window._run_task = Mock(side_effect=lambda _pending, action, _success: action())
+        calls: list[object] = []
+        with (
+            patch(
+                "readerpc_launcher.set_codex_voice_keep_active",
+                side_effect=lambda _paths, enabled: calls.append(enabled),
+            ),
+            patch(
+                "readerpc_launcher.stop_readerpc_voice",
+                side_effect=lambda *_args, **_kwargs: calls.append("stop"),
+            ),
+        ):
+            window._stop_voice_task(explicit_disable=True)
+        self.assertEqual(calls, [False, "stop"])
 
     def test_offline_monitor_tombstones_before_retry_and_only_once(self) -> None:
         window = self.window_without_tk()
@@ -483,6 +567,10 @@ class ReaderPCLauncherTests(unittest.TestCase):
         window._start_voice_task = Mock(side_effect=retry)
         with (
             patch(
+                "readerpc_launcher.read_codex_voice_keep_active",
+                return_value=True,
+            ),
+            patch(
                 "readerpc_launcher.write_disabled_reader_context_snapshot",
                 side_effect=lambda _paths: calls.append("tombstone"),
             ) as tombstone,
@@ -494,19 +582,28 @@ class ReaderPCLauncherTests(unittest.TestCase):
         tombstone.assert_called_once_with(window.bridge_paths)
         self.assertEqual(window.root.after.call_count, 2)
 
-    def test_monitor_marks_each_new_online_to_offline_transition(self) -> None:
+    def test_master_switch_recovers_listener_even_if_direct_config_is_off(self) -> None:
         window = self.window_without_tk()
         window.voice_snapshot_offline_marked = True
         window._voice_status = Mock(side_effect=(
             SimpleNamespace(service_online=True, configuration_enabled=True),
             SimpleNamespace(service_online=False, configuration_enabled=False),
         ))
-        with patch(
-            "readerpc_launcher.write_disabled_reader_context_snapshot"
-        ) as tombstone:
+        window._start_voice_task = Mock()
+        with (
+            patch(
+                "readerpc_launcher.read_codex_voice_keep_active",
+                return_value=True,
+            ),
+            patch(
+                "readerpc_launcher.write_disabled_reader_context_snapshot"
+            ) as tombstone,
+            patch("readerpc_launcher.time.monotonic", return_value=31.0),
+        ):
             window._ensure_voice_online()
             window._ensure_voice_online()
         tombstone.assert_called_once_with(window.bridge_paths)
+        window._start_voice_task.assert_called_once_with()
         self.assertTrue(window.voice_snapshot_offline_marked)
 
     def test_busy_unrelated_work_still_revokes_without_starting_retry(self) -> None:
@@ -517,9 +614,15 @@ class ReaderPCLauncherTests(unittest.TestCase):
             configuration_enabled=True,
         ))
         window._start_voice_task = Mock()
-        with patch(
-            "readerpc_launcher.write_disabled_reader_context_snapshot"
-        ) as tombstone:
+        with (
+            patch(
+                "readerpc_launcher.read_codex_voice_keep_active",
+                return_value=True,
+            ),
+            patch(
+                "readerpc_launcher.write_disabled_reader_context_snapshot"
+            ) as tombstone,
+        ):
             window._ensure_voice_online()
         tombstone.assert_called_once_with(window.bridge_paths)
         window._start_voice_task.assert_not_called()
@@ -529,9 +632,15 @@ class ReaderPCLauncherTests(unittest.TestCase):
         window.busy = True
         window.voice_start_in_progress = True
         window._voice_status = Mock()
-        with patch(
-            "readerpc_launcher.write_disabled_reader_context_snapshot"
-        ) as tombstone:
+        with (
+            patch(
+                "readerpc_launcher.read_codex_voice_keep_active",
+                return_value=True,
+            ),
+            patch(
+                "readerpc_launcher.write_disabled_reader_context_snapshot"
+            ) as tombstone,
+        ):
             window._ensure_voice_online()
         window._voice_status.assert_not_called()
         tombstone.assert_not_called()
@@ -543,6 +652,9 @@ class ReaderPCLauncherTests(unittest.TestCase):
             configuration_enabled=False,
         ))
         with patch(
+            "readerpc_launcher.read_codex_voice_keep_active",
+            return_value=True,
+        ), patch(
             "readerpc_launcher.write_disabled_reader_context_snapshot",
             side_effect=OSError("snapshot-write-denied"),
         ):
@@ -556,6 +668,117 @@ class ReaderPCLauncherTests(unittest.TestCase):
             5_000,
             window._ensure_voice_online,
         )
+
+    def test_online_listener_is_stopped_when_master_switch_turns_false(self) -> None:
+        window = self.window_without_tk()
+        window._voice_status = Mock(return_value=SimpleNamespace(
+            service_online=True,
+            configuration_enabled=True,
+        ))
+        window._start_voice_task = Mock()
+        window._stop_voice_task = Mock()
+        with (
+            patch(
+                "readerpc_launcher.read_codex_voice_keep_active",
+                return_value=False,
+            ),
+            patch(
+                "readerpc_launcher.write_disabled_reader_context_snapshot"
+            ) as tombstone,
+        ):
+            window._ensure_voice_online()
+        window._stop_voice_task.assert_called_once_with()
+        tombstone.assert_called_once_with(window.bridge_paths)
+        window._start_voice_task.assert_not_called()
+
+    def test_unreadable_master_switch_preserves_last_running_state(self) -> None:
+        window = self.window_without_tk()
+        window._voice_status = Mock(return_value=SimpleNamespace(
+            service_online=True,
+            configuration_enabled=True,
+        ))
+        window._start_voice_task = Mock()
+        window._stop_voice_task = Mock()
+        with (
+            patch(
+                "readerpc_launcher.read_codex_voice_keep_active",
+                return_value=None,
+            ),
+            patch(
+                "readerpc_launcher.write_disabled_reader_context_snapshot"
+            ) as tombstone,
+        ):
+            window._ensure_voice_online()
+        window._stop_voice_task.assert_not_called()
+        window._start_voice_task.assert_not_called()
+        tombstone.assert_not_called()
+        self.assertIn(
+            "保留上次有效运行状态",
+            window.footer.configure.call_args.kwargs["text"],
+        )
+
+    def test_refresh_does_not_report_listener_online_as_voice_ready(self) -> None:
+        window = self.window_without_tk()
+        window.voice_status = Mock()
+        window.voice_detail = Mock()
+        window.context_status = Mock()
+        window.context_detail = Mock()
+        window.pc_status = Mock()
+        window.pc_detail = Mock()
+        window.readerpc_paths = SimpleNamespace(
+            status_file=Path("C:/readerpc.status.json")
+        )
+        window.last_status_publish = 0.0
+        window._voice_status = Mock(return_value=SimpleNamespace(
+            service_online=True,
+            configuration_enabled=True,
+            reader_connected=False,
+            capture_active=False,
+            reason="reader-not-connected",
+            pid=4321,
+        ))
+        window.pc_ocr.status.return_value = PcOcrStatus(
+            running=False,
+            state="stopped",
+            phase="",
+            pid=None,
+            start_file_time_utc=None,
+            worker_id=None,
+            gpu_name=None,
+            current_page=None,
+            progress={},
+            updated_at_epoch_ms=None,
+            error=None,
+            controllable=True,
+            source_ready=True,
+        )
+        window.bridge_paths.root = Path("C:/fixed")
+        context = ReaderContextStatus(False, False, "", "", None)
+        with (
+            patch(
+                "readerpc_launcher.read_codex_voice_keep_active",
+                return_value=True,
+            ),
+            patch(
+                "readerpc_launcher.read_codex_voice_activity",
+                return_value=CodexVoiceActivityStatus("available", False),
+            ),
+            patch(
+                "readerpc_launcher.read_reader_context_status",
+                return_value=context,
+            ),
+            patch("readerpc_launcher.write_readerpc_status") as publish,
+            patch("readerpc_launcher.time.monotonic", return_value=20.0),
+        ):
+            window.refresh()
+        self.assertEqual(
+            window.voice_status.configure.call_args.kwargs["text"],
+            "直连在线 · 等待 Codex 语音",
+        )
+        voice = publish.call_args.kwargs["voice"]
+        self.assertTrue(voice["online"])
+        self.assertTrue(voice["intentEnabled"])
+        self.assertFalse(voice["codexVoiceActive"])
 
     def test_voice_start_requires_matching_fresh_runtime(self) -> None:
         runner = Mock()

@@ -16,6 +16,10 @@ PRODUCT_NAME = "ReaderPC 服务器"
 PC_OCR_STATUS_CONTRACT = "reader-pc-ocr-status/1"
 READERPC_STATUS_CONTRACT = "readerpc-server-status/1"
 READER_CONTEXT_SNAPSHOT_CONTRACT = "reader-context-snapshot/1"
+CODEX_VOICE_REGISTRY_PATH = (
+    r"Software\Microsoft\Windows\CurrentVersion\CapabilityAccessManager"
+    r"\ConsentStore\microphone\OpenAI.CodexBeta_2p2nqsd0c76g0"
+)
 DEFAULT_PI_ORIGIN = "https://bwicarus.taile44d0c.ts.net"
 STATUS_LIMIT_BYTES = 128 * 1024
 
@@ -172,6 +176,68 @@ class ReaderContextStatus:
             return "等待 Reader 页面更新"
         return "暂无快照"
 
+
+@dataclass(frozen=True)
+class CodexVoiceActivityStatus:
+    status: str
+    active: bool | None
+
+
+def _nonnegative_filetime(value: object) -> int | None:
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, bytes) and len(value) == 8:
+        number = int.from_bytes(value, byteorder="little", signed=True)
+        return number if number >= 0 else None
+    return None
+
+
+def read_codex_voice_activity(
+    value_reader: Callable[[], tuple[object, object] | None] | None = None,
+) -> CodexVoiceActivityStatus:
+    """Read only the Windows microphone-use ledger used by Direct Voice.
+
+    The ledger contains two timestamps, never audio or transcript content.
+    Keeping this probe in-process avoids repeatedly launching the large native
+    host merely to render ReaderPC status.
+    """
+
+    if value_reader is None:
+        if os.name != "nt":
+            return CodexVoiceActivityStatus("unavailable", None)
+
+        def value_reader() -> tuple[object, object] | None:
+            import winreg
+
+            try:
+                with winreg.OpenKey(
+                    winreg.HKEY_CURRENT_USER,
+                    CODEX_VOICE_REGISTRY_PATH,
+                    0,
+                    winreg.KEY_READ,
+                ) as key:
+                    start, _ = winreg.QueryValueEx(key, "LastUsedTimeStart")
+                    stop, _ = winreg.QueryValueEx(key, "LastUsedTimeStop")
+                    return start, stop
+            except FileNotFoundError:
+                return None
+
+    try:
+        values = value_reader()
+    except (OSError, PermissionError, ValueError):
+        return CodexVoiceActivityStatus("error", None)
+    if values is None:
+        return CodexVoiceActivityStatus("unavailable", None)
+    start = _nonnegative_filetime(values[0])
+    stop = _nonnegative_filetime(values[1])
+    if start is None or stop is None:
+        return CodexVoiceActivityStatus("error", None)
+    return CodexVoiceActivityStatus(
+        "available",
+        start > 0 and (stop == 0 or start > stop),
+    )
 
 def read_reader_context_status(
     snapshot_path: Path,

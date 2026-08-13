@@ -77,9 +77,6 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         string runtimeDirectory = Path.GetDirectoryName(
             config.RuntimeStatusPath)
             ?? Path.Combine(configStore.InstallationRoot, "runtime");
-        _codexVoiceControl = DirectCodexVoiceControl.CreateProduction(
-            Path.Combine(runtimeDirectory, "codex-voice-keepalive.json"),
-            appLauncher);
         _dictionaryFallback = new CodexCliReaderDictionaryFallback();
         _localAnkiRegistry = new ReaderLocalAnkiRegistry(
             Path.Combine(
@@ -106,6 +103,17 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 "runtime",
                 FileDirectSnapshotContextAdapter.SnapshotFileName),
             config.ListenPort);
+        _codexVoiceControl = DirectCodexVoiceControl.CreateProduction(
+            Path.Combine(runtimeDirectory, "codex-voice-keepalive.json"),
+            appLauncher,
+            keepActiveChanged: enabled =>
+                _snapshotViewer.SynchronizeServiceIntent(
+                    _configStore.Load().ContextDeliveryMode,
+                    enabled),
+            automaticRecoveryFailed: exception =>
+                _ = _coordinator.RecordFailure(
+                    exception,
+                    "codex-voice-keepalive"));
         _documentCorpus = new ReaderDocumentCorpusStore(
             Path.Combine(
                 runtimeDirectory,
@@ -247,6 +255,9 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 readerConnected: false,
                 captureActive: false,
                 cancellationToken).ConfigureAwait(false);
+            _snapshotViewer.SynchronizeServiceIntent(
+                config.ContextDeliveryMode,
+                _codexVoiceControl.KeepActive);
             heartbeatLifetime =
                 CancellationTokenSource.CreateLinkedTokenSource(
                     cancellationToken);
@@ -465,17 +476,9 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         {
             if (connection is not null)
             {
-                bool stoppedOwnedConnection = false;
-                try
-                {
-                    stoppedOwnedConnection =
-                        await _coordinator.StopForConnectionAsync(connectionId)
-                            .ConfigureAwait(false);
-                }
-                finally
-                {
-                    _snapshotViewer.CloseForConnection(connectionId);
-                }
+                bool stoppedOwnedConnection =
+                    await _coordinator.StopForConnectionAsync(connectionId)
+                        .ConfigureAwait(false);
                 bool cleanupPending = _coordinator.CleanupPending;
                 await CompleteConnectionAndArmDisconnectWatchdogAsync(
                     () => _connectionOwnership.CompleteAsync(
@@ -1012,10 +1015,17 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                         retryable: true);
                 _readerRealtimeOutputBroker.Accept(lease, ack);
             },
+            contextDeliveryModeChanged: mode =>
+                _snapshotViewer.SynchronizeServiceIntent(
+                    mode,
+                    _codexVoiceControl.KeepActive),
             dictionaryFallback: _dictionaryFallback,
             localAnkiWriter: _localAnkiWriter);
 
         _contextConnectionHealth.Connected();
+        _snapshotViewer.SynchronizeServiceIntent(
+            _configStore.Load().ContextDeliveryMode,
+            _codexVoiceControl.KeepActive);
         try
         {
             while (
@@ -1149,6 +1159,10 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             _configStore,
             _coordinator,
             codexVoiceControl: _codexVoiceControl,
+            contextDeliveryModeChanged: mode =>
+                _snapshotViewer.SynchronizeServiceIntent(
+                    mode,
+                    _codexVoiceControl.KeepActive),
             dictionaryFallback: _dictionaryFallback,
             localAnkiWriter: _localAnkiWriter);
         Task<DirectClientMessage?>? prefetchedReceiveTask = null;
@@ -1499,25 +1513,19 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                     await reply.AfterSendAsync(replyLifetime.Token)
                         .ConfigureAwait(false);
                 }
-                if (
-                    becameActive
-                )
+                if (becameActive)
                 {
                     uplinkSequenceGuard.Begin(
                         _coordinator.ActiveSessionId
-                        ?? throw new DirectProtocolException(
-                            "BW_COMPUTER_VOICE_DIRECT_UPLINK_NOT_ACTIVE",
-                            "浏览器麦克风上行尚未启动"));
-                    _snapshotViewer.OpenIfSnapshotMode(
-                        _configStore.Load().ContextDeliveryMode,
-                        connectionId);
+                            ?? throw new DirectProtocolException(
+                                "BW_COMPUTER_VOICE_DIRECT_UPLINK_NOT_ACTIVE",
+                                "浏览器麦克风上行尚未启动"));
                 }
                 else if (
                     stoppedBeingActive
                 )
                 {
                     uplinkSequenceGuard.End();
-                    _snapshotViewer.CloseForConnection(connectionId);
                     await _connectionOwnership.ReleaseAsync(
                         connection,
                         () => WriteRuntimeStatusAsync(
@@ -1970,6 +1978,10 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         while (await timer.WaitForNextTickAsync(cancellationToken)
             .ConfigureAwait(false))
         {
+            DirectBridgeConfig config = _configStore.Load();
+            _snapshotViewer.SynchronizeServiceIntent(
+                config.ContextDeliveryMode,
+                _codexVoiceControl.KeepActive);
             string state;
             bool readerConnected;
             bool captureActive;

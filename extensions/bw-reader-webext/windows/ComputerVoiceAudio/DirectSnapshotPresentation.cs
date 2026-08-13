@@ -1459,9 +1459,18 @@ internal static class DirectSnapshotTerminal
     }
 }
 
+internal enum DirectSnapshotViewerIntentAction
+{
+    None,
+    Open,
+    Close,
+}
+
 internal sealed class DirectSnapshotViewer : IDisposable
 {
     private const string ViewerWindowTitle = "Reader 实时快照";
+    private const string ServiceIntentOwner =
+        "readerpc-snapshot-service-intent";
     private const int MaximumPresentationBytes = 2 * 1024 * 1024;
     internal const string ViewerPath = "/reader-context-view";
     internal const string SnapshotPath =
@@ -2129,6 +2138,43 @@ internal sealed class DirectSnapshotViewer : IDisposable
                 StopViewerProcessBestEffort();
             }
         }
+    }
+
+    internal void SynchronizeServiceIntent(
+        string contextDeliveryMode,
+        bool enabled)
+    {
+        if (!ShouldOpenForServiceIntent(contextDeliveryMode, enabled))
+        {
+            CloseForConnection(ServiceIntentOwner);
+            return;
+        }
+        OpenIfSnapshotMode(
+            contextDeliveryMode,
+            ServiceIntentOwner);
+    }
+
+    internal static bool ShouldOpenForServiceIntent(
+        string contextDeliveryMode,
+        bool enabled) =>
+        enabled
+        && contextDeliveryMode
+            == DirectContextDeliveryMode.SnapshotMcp;
+
+    internal static DirectSnapshotViewerIntentAction PlanServiceIntent(
+        string contextDeliveryMode,
+        bool enabled,
+        bool viewerRunning)
+    {
+        if (ShouldOpenForServiceIntent(contextDeliveryMode, enabled))
+        {
+            return viewerRunning
+                ? DirectSnapshotViewerIntentAction.None
+                : DirectSnapshotViewerIntentAction.Open;
+        }
+        return viewerRunning
+            ? DirectSnapshotViewerIntentAction.Close
+            : DirectSnapshotViewerIntentAction.None;
     }
 
     internal void CloseForConnection(string ownerId)

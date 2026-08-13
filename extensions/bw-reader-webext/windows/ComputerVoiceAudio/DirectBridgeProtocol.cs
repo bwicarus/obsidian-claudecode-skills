@@ -60,8 +60,22 @@ internal sealed class DirectCodexVoiceControl :
     private readonly TimeSpan _keepActivePollInterval;
     private readonly CancellationTokenSource? _keepActiveLifetime;
     private readonly Task? _keepActiveMonitor;
+    private readonly Func<
+        CodexVoiceActivitySnapshot?,
+        CancellationToken,
+        Task>?
+        _prepareStartAsync;
     private readonly Func<CancellationToken, Task>?
         _recoverStartFailureAsync;
+    private readonly Action<bool>? _keepActiveChanged;
+    private readonly Action<Exception>? _automaticRecoveryFailed;
+    private readonly object _keepActiveIntentGate = new();
+    private readonly object _automaticRecoveryTaskGate = new();
+    private readonly List<CancellationTokenSource>
+        _retiredIntentLifetimes = [];
+    private CancellationTokenSource _intentLifetime = new();
+    private Task? _automaticRecoveryTask;
+    private long _intentGeneration;
     private int _keepActive;
     private int _automaticRecoveryBlocked;
     private int _disposeStarted;
@@ -76,7 +90,13 @@ internal sealed class DirectCodexVoiceControl :
         SemaphoreSlim? transitionGate = null,
         string? keepActivePath = null,
         TimeSpan? keepActivePollInterval = null,
-        Func<CancellationToken, Task>? recoverStartFailureAsync = null)
+        Func<
+            CodexVoiceActivitySnapshot?,
+            CancellationToken,
+            Task>? prepareStartAsync = null,
+        Func<CancellationToken, Task>? recoverStartFailureAsync = null,
+        Action<bool>? keepActiveChanged = null,
+        Action<Exception>? automaticRecoveryFailed = null)
     {
         _readSnapshot = readSnapshot
             ?? throw new ArgumentNullException(nameof(readSnapshot));
@@ -88,13 +108,17 @@ internal sealed class DirectCodexVoiceControl :
             : System.IO.Path.GetFullPath(keepActivePath);
         _keepActivePollInterval = keepActivePollInterval
             ?? TimeSpan.FromSeconds(5);
+        _prepareStartAsync = prepareStartAsync;
         _recoverStartFailureAsync = recoverStartFailureAsync;
+        _keepActiveChanged = keepActiveChanged;
+        _automaticRecoveryFailed = automaticRecoveryFailed;
         if (_keepActivePollInterval < TimeSpan.FromSeconds(1))
         {
             throw new ArgumentOutOfRangeException(
                 nameof(keepActivePollInterval));
         }
         _keepActive = LoadKeepActive(_keepActivePath) ? 1 : 0;
+        _intentGeneration = _keepActive == 1 ? 1 : 0;
         if (_keepActivePath is not null)
         {
             _keepActiveLifetime = new CancellationTokenSource();
@@ -128,23 +152,17 @@ internal sealed class DirectCodexVoiceControl :
     {
         return await SetActiveSerializedAsync(
             active,
-            explicitRequest: true,
             cancellationToken).ConfigureAwait(false);
     }
 
     private async Task<DirectCodexVoiceSetResult> SetActiveSerializedAsync(
         bool active,
-        bool explicitRequest,
         CancellationToken cancellationToken)
     {
         await _transitionGate.WaitAsync(cancellationToken)
             .ConfigureAwait(false);
         try
         {
-            if (explicitRequest)
-            {
-                Volatile.Write(ref _automaticRecoveryBlocked, 0);
-            }
             return await SetActiveWithinGateAsync(
                 active,
                 cancellationToken).ConfigureAwait(false);
@@ -159,26 +177,49 @@ internal sealed class DirectCodexVoiceControl :
         bool enabled,
         CancellationToken cancellationToken)
     {
-        await _transitionGate.WaitAsync(cancellationToken)
-            .ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
+        SaveKeepActive(_keepActivePath, enabled);
+        bool changed = ApplyKeepActiveIntent(
+            enabled,
+            out long generation,
+            out CancellationToken intentToken);
+        if (enabled && !changed)
+        {
+            return new DirectCodexVoiceSetResult(
+                ReadState(),
+                ShortcutSent: false);
+        }
+
         try
         {
-            SaveKeepActive(_keepActivePath, enabled);
-            Volatile.Write(ref _keepActive, enabled ? 1 : 0);
-            Volatile.Write(ref _automaticRecoveryBlocked, 0);
             if (!enabled)
             {
+                DirectCodexVoiceState current = ReadState();
+                if (current.Status == "available" && current.Active == true)
+                {
+                    return await SetActiveSerializedAsync(
+                        active: false,
+                        intentToken).ConfigureAwait(false);
+                }
                 return new DirectCodexVoiceSetResult(
-                    ReadState(),
+                    current,
                     ShortcutSent: false);
             }
-            return await SetActiveWithinGateAsync(
+            return await SetActiveSerializedAsync(
                 active: true,
-                cancellationToken).ConfigureAwait(false);
+                intentToken).ConfigureAwait(false);
         }
-        finally
+        catch (OperationCanceledException) when (
+            intentToken.IsCancellationRequested)
         {
-            _transitionGate.Release();
+            return new DirectCodexVoiceSetResult(
+                ReadState(),
+                ShortcutSent: false);
+        }
+        catch (Exception exception) when (enabled)
+        {
+            BlockAutomaticRecovery(generation, exception);
+            throw;
         }
     }
 
@@ -186,7 +227,34 @@ internal sealed class DirectCodexVoiceControl :
         bool active,
         CancellationToken cancellationToken)
     {
+        if (active && _prepareStartAsync is not null)
+        {
+            CodexVoiceActivitySnapshot? initial = null;
+            try
+            {
+                initial = _readSnapshot();
+                if (
+                    initial.Status == CodexVoiceActivityReadStatus.Available
+                    && initial.Active
+                )
+                {
+                    return new DirectCodexVoiceSetResult(
+                        ToState(initial),
+                        ShortcutSent: false);
+                }
+            }
+            catch
+            {
+                // Starting the packaged app is the recovery path when its
+                // microphone ledger does not exist yet. The authoritative
+                // read below still fails closed if it remains unavailable.
+            }
+            await _prepareStartAsync(initial, cancellationToken)
+                .ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+        }
         CodexVoiceActivitySnapshot before = ReadRequired();
+        cancellationToken.ThrowIfCancellationRequested();
         if (before.Active == active)
         {
             return new DirectCodexVoiceSetResult(
@@ -197,7 +265,7 @@ internal sealed class DirectCodexVoiceControl :
         CodexVoiceActivitySnapshot confirmed;
         try
         {
-            confirmed = await _transitionAsync(
+            confirmed = await TransitionOnceAsync(
                 active,
                 before,
                 cancellationToken).ConfigureAwait(false);
@@ -208,30 +276,38 @@ internal sealed class DirectCodexVoiceControl :
                 == CodexVoiceActivityController.StartNotConfirmedCode
             && _recoverStartFailureAsync is not null)
         {
-            try
-            {
-                // Retrying F24 in the same failed Codex generation is known to
-                // be ineffective. Restart exactly once, wait for the new app
-                // generation, then make one fresh state-based start attempt.
-                await _recoverStartFailureAsync(cancellationToken)
-                    .ConfigureAwait(false);
-                CodexVoiceActivitySnapshot afterRestart = ReadRequired();
-                confirmed = afterRestart.Active
-                    ? afterRestart
-                    : await _transitionAsync(
-                        true,
-                        afterRestart,
-                        cancellationToken).ConfigureAwait(false);
-            }
-            catch
-            {
-                // The keep-alive monitor must not turn a persistent failure
-                // into an endless restart loop. A later explicit user action
-                // clears this latch and may try one new bounded recovery.
-                Volatile.Write(ref _automaticRecoveryBlocked, 1);
-                throw;
-            }
+            // The first F24 is allowed to finish its bounded observation. Only
+            // that explicit failure authorizes one restart of the same intent
+            // generation. The intent token cancels the restart/settle before a
+            // stale generation can send its second F24.
+            await _recoverStartFailureAsync(cancellationToken)
+                .ConfigureAwait(false);
+            cancellationToken.ThrowIfCancellationRequested();
+            CodexVoiceActivitySnapshot afterRestart = ReadRequired();
+            cancellationToken.ThrowIfCancellationRequested();
+            confirmed = afterRestart.Active
+                ? afterRestart
+                : await TransitionOnceAsync(
+                    active: true,
+                    afterRestart,
+                    cancellationToken).ConfigureAwait(false);
         }
+        return new DirectCodexVoiceSetResult(
+            ToState(confirmed),
+            ShortcutSent: true);
+    }
+
+    private async Task<CodexVoiceActivitySnapshot> TransitionOnceAsync(
+        bool active,
+        CodexVoiceActivitySnapshot before,
+        CancellationToken cancellationToken)
+    {
+        CodexVoiceActivitySnapshot confirmed =
+            await _transitionAsync(
+                active,
+                before,
+                cancellationToken).ConfigureAwait(false);
+        cancellationToken.ThrowIfCancellationRequested();
         RequireAvailable(confirmed);
         if (confirmed.Active != active)
         {
@@ -244,10 +320,7 @@ internal sealed class DirectCodexVoiceControl :
                     : "未确认 Codex 语音已关闭",
                 retryable: true);
         }
-        Volatile.Write(ref _automaticRecoveryBlocked, 0);
-        return new DirectCodexVoiceSetResult(
-            ToState(confirmed),
-            ShortcutSent: true);
+        return confirmed;
     }
 
     private CodexVoiceActivitySnapshot ReadRequired()
@@ -311,7 +384,9 @@ internal sealed class DirectCodexVoiceControl :
 
     internal static DirectCodexVoiceControl CreateProduction(
         string? keepActivePath = null,
-        IDirectAppLauncher? appLauncher = null)
+        IDirectAppLauncher? appLauncher = null,
+        Action<bool>? keepActiveChanged = null,
+        Action<Exception>? automaticRecoveryFailed = null)
     {
         WindowsRegistryCodexVoiceActivitySource source = new(
             DirectAppTargets.CodexDesktop);
@@ -325,20 +400,6 @@ internal sealed class DirectCodexVoiceControl :
             source.Read,
             async (active, before, cancellationToken) =>
             {
-                if (active)
-                {
-                    DirectAppTargetProfile profile = DirectAppTargets.Require(
-                        DirectAppTargets.CodexDesktop);
-                    await launcher.EnsureRunningAsync(
-                        profile.AppKind,
-                        profile.AppUserModelId,
-                        cancellationToken).ConfigureAwait(false);
-                    _ = await launcher.WaitForUniqueReadyAsync(
-                        profile.AppKind,
-                        profile.AppUserModelId,
-                        TimeSpan.FromSeconds(20),
-                        cancellationToken).ConfigureAwait(false);
-                }
                 CodexAppTarget target = RequireCodexTarget();
                 if (active)
                 {
@@ -368,6 +429,34 @@ internal sealed class DirectCodexVoiceControl :
                     cancellationToken).ConfigureAwait(false);
             },
             keepActivePath: keepActivePath,
+            prepareStartAsync: async (initial, cancellationToken) =>
+            {
+                DirectAppTargetProfile profile = DirectAppTargets.Require(
+                    DirectAppTargets.CodexDesktop);
+                // The first attempt never restarts an already-running Codex
+                // generation. EnsureRunning is idempotent; only an unavailable
+                // ledger needs the app-ready wait and one startup settle.
+                await launcher.EnsureRunningAsync(
+                    profile.AppKind,
+                    profile.AppUserModelId,
+                    cancellationToken).ConfigureAwait(false);
+                if (initial is not
+                    {
+                        Status: CodexVoiceActivityReadStatus.Available,
+                    })
+                {
+                    _ = await launcher.WaitForUniqueReadyAsync(
+                        profile.AppKind,
+                        profile.AppUserModelId,
+                        TimeSpan.FromSeconds(20),
+                        cancellationToken).ConfigureAwait(false);
+                    // A newly launched packaged window can be discoverable
+                    // before its voice UI is ready.
+                    await Task.Delay(
+                        RestartReadySettleDelay,
+                        cancellationToken).ConfigureAwait(false);
+                }
+            },
             recoverStartFailureAsync: async cancellationToken =>
             {
                 DirectAppTargetProfile profile = DirectAppTargets.Require(
@@ -383,13 +472,14 @@ internal sealed class DirectCodexVoiceControl :
                         profile.AppUserModelId),
                     TimeSpan.FromSeconds(30),
                     cancellationToken).ConfigureAwait(false);
-                // A window can be discoverable before Codex finishes wiring
-                // its voice UI. Let the fresh generation settle, then the
-                // caller sends exactly one F24 for the retry.
+                // RestartAsync waits for the fresh generation to be ready. Let
+                // its voice UI settle once before the one permitted retry F24.
                 await Task.Delay(
                     RestartReadySettleDelay,
                     cancellationToken).ConfigureAwait(false);
-            });
+            },
+            keepActiveChanged: keepActiveChanged,
+            automaticRecoveryFailed: automaticRecoveryFailed);
     }
 
     private async Task MonitorKeepActiveAsync(
@@ -398,40 +488,17 @@ internal sealed class DirectCodexVoiceControl :
         using PeriodicTimer timer = new(_keepActivePollInterval);
         try
         {
+            await ReconcileKeepActiveAsync(
+                initialReconcile: true,
+                cancellationToken)
+                .ConfigureAwait(false);
             while (await timer.WaitForNextTickAsync(cancellationToken)
                 .ConfigureAwait(false))
             {
-                if (!KeepActive)
-                {
-                    continue;
-                }
-                if (Volatile.Read(ref _automaticRecoveryBlocked) != 0)
-                {
-                    continue;
-                }
-                try
-                {
-                    DirectCodexVoiceState state = ReadState();
-                    if (state.Status == "available" && state.Active == true)
-                    {
-                        continue;
-                    }
-                    _ = await SetActiveSerializedAsync(
-                        active: true,
-                        explicitRequest: false,
-                        cancellationToken).ConfigureAwait(false);
-                }
-                catch (OperationCanceledException)
-                    when (cancellationToken.IsCancellationRequested)
-                {
-                    return;
-                }
-                catch
-                {
-                    // One failed start attempt already performs its single
-                    // restart/retry and then latches automatic recovery. The
-                    // monitor never turns the failure into repeated F24 input.
-                }
+                await ReconcileKeepActiveAsync(
+                    initialReconcile: false,
+                    cancellationToken)
+                    .ConfigureAwait(false);
             }
         }
         catch (OperationCanceledException)
@@ -440,9 +507,249 @@ internal sealed class DirectCodexVoiceControl :
         }
     }
 
+    private async Task ReconcileKeepActiveAsync(
+        bool initialReconcile,
+        CancellationToken cancellationToken)
+    {
+        bool intentChanged = RefreshKeepActiveFromDisk(
+            out bool enabled,
+            out _,
+            out CancellationToken intentToken);
+        if (!enabled)
+        {
+            if (intentChanged || initialReconcile)
+            {
+                try
+                {
+                    DirectCodexVoiceState state = ReadState();
+                    if (state.Status == "available" && state.Active == true)
+                    {
+                        _ = await SetActiveSerializedAsync(
+                            active: false,
+                            intentToken).ConfigureAwait(false);
+                    }
+                }
+                catch (OperationCanceledException) when (
+                    intentToken.IsCancellationRequested
+                    || cancellationToken.IsCancellationRequested)
+                {
+                }
+                catch (Exception exception)
+                {
+                    NotifyAutomaticRecoveryFailed(exception);
+                }
+            }
+            return;
+        }
+        StartAutomaticRecoveryIfNeeded(cancellationToken);
+    }
+
+    private void StartAutomaticRecoveryIfNeeded(
+        CancellationToken serviceToken)
+    {
+        if (
+            Volatile.Read(ref _automaticRecoveryBlocked) != 0
+            || !TryCaptureActiveIntent(
+                out long generation,
+                out CancellationToken intentToken)
+        )
+        {
+            return;
+        }
+        lock (_automaticRecoveryTaskGate)
+        {
+            if (_automaticRecoveryTask is { IsCompleted: false })
+            {
+                return;
+            }
+            _automaticRecoveryTask = RunAutomaticRecoveryAsync(
+                generation,
+                intentToken,
+                serviceToken);
+        }
+    }
+
+    private async Task RunAutomaticRecoveryAsync(
+        long generation,
+        CancellationToken intentToken,
+        CancellationToken serviceToken)
+    {
+        using CancellationTokenSource lifetime =
+            CancellationTokenSource.CreateLinkedTokenSource(
+                intentToken,
+                serviceToken);
+        try
+        {
+            if (!IsCurrentActiveIntent(generation))
+            {
+                return;
+            }
+            DirectCodexVoiceState state = ReadState();
+            if (state.Status == "available" && state.Active == true)
+            {
+                return;
+            }
+            _ = await SetActiveSerializedAsync(
+                active: true,
+                lifetime.Token).ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+            when (lifetime.IsCancellationRequested)
+        {
+        }
+        catch (Exception exception)
+        {
+            BlockAutomaticRecovery(generation, exception);
+        }
+    }
+
+    private bool RefreshKeepActiveFromDisk(
+        out bool enabled,
+        out long generation,
+        out CancellationToken intentToken)
+    {
+        if (
+            _keepActivePath is null
+            || !TryLoadKeepActive(_keepActivePath, out enabled)
+        )
+        {
+            // An unreadable or partially replaced file must not invent a new
+            // user intent. Explicit writers use atomic replacement; the last
+            // fully validated value remains authoritative until the next poll.
+            return CaptureCurrentIntent(
+                out enabled,
+                out generation,
+                out intentToken,
+                changed: false);
+        }
+        return ApplyKeepActiveIntent(
+            enabled,
+            out generation,
+            out intentToken);
+    }
+
+    private bool ApplyKeepActiveIntent(
+        bool enabled,
+        out long generation,
+        out CancellationToken intentToken)
+    {
+        CancellationTokenSource? previousLifetime = null;
+        lock (_keepActiveIntentGate)
+        {
+            bool previous = _keepActive == 1;
+            if (previous == enabled)
+            {
+                generation = _intentGeneration;
+                intentToken = _intentLifetime.Token;
+                return false;
+            }
+            previousLifetime = _intentLifetime;
+            _retiredIntentLifetimes.Add(previousLifetime);
+            _intentLifetime = new CancellationTokenSource();
+            generation = ++_intentGeneration;
+            intentToken = _intentLifetime.Token;
+            Volatile.Write(ref _keepActive, enabled ? 1 : 0);
+            Volatile.Write(
+                ref _automaticRecoveryBlocked,
+                enabled ? 0 : 1);
+        }
+        previousLifetime.Cancel();
+        NotifyKeepActiveChanged(enabled);
+        return true;
+    }
+
+    private bool CaptureCurrentIntent(
+        out bool enabled,
+        out long generation,
+        out CancellationToken intentToken,
+        bool changed)
+    {
+        lock (_keepActiveIntentGate)
+        {
+            enabled = _keepActive == 1;
+            generation = _intentGeneration;
+            intentToken = _intentLifetime.Token;
+            return changed;
+        }
+    }
+
+    private bool TryCaptureActiveIntent(
+        out long generation,
+        out CancellationToken intentToken)
+    {
+        lock (_keepActiveIntentGate)
+        {
+            generation = _intentGeneration;
+            intentToken = _intentLifetime.Token;
+            return _keepActive == 1;
+        }
+    }
+
+    private bool IsCurrentActiveIntent(long generation)
+    {
+        lock (_keepActiveIntentGate)
+        {
+            return _keepActive == 1
+                && _intentGeneration == generation;
+        }
+    }
+
+    private void BlockAutomaticRecovery(
+        long generation,
+        Exception exception)
+    {
+        lock (_keepActiveIntentGate)
+        {
+            if (
+                _keepActive != 1
+                || _intentGeneration != generation
+            )
+            {
+                return;
+            }
+            Volatile.Write(ref _automaticRecoveryBlocked, 1);
+        }
+        NotifyAutomaticRecoveryFailed(exception);
+    }
+
+    private void NotifyAutomaticRecoveryFailed(Exception exception)
+    {
+        try
+        {
+            _automaticRecoveryFailed?.Invoke(exception);
+        }
+        catch
+        {
+            // Diagnostics must never create a second recovery loop.
+        }
+    }
+
+    private void NotifyKeepActiveChanged(bool enabled)
+    {
+        try
+        {
+            _keepActiveChanged?.Invoke(enabled);
+        }
+        catch
+        {
+            // The persisted intent remains authoritative even if its optional
+            // presentation callback cannot update immediately.
+        }
+    }
+
     private static bool LoadKeepActive(string? path)
     {
-        if (path is null || !File.Exists(path))
+        return path is not null
+            && TryLoadKeepActive(path, out bool enabled)
+            && enabled;
+    }
+
+    private static bool TryLoadKeepActive(
+        string path,
+        out bool enabled)
+    {
+        enabled = false;
+        if (!File.Exists(path))
         {
             return false;
         }
@@ -458,14 +765,17 @@ internal sealed class DirectCodexVoiceControl :
                 || !root.TryGetProperty("contract", out JsonElement contract)
                 || contract.GetString()
                     != "reader-codex-voice-keepalive/1"
-                || !root.TryGetProperty("enabled", out JsonElement enabled)
-                || enabled.ValueKind is not (
+                || !root.TryGetProperty(
+                    "enabled",
+                    out JsonElement enabledElement)
+                || enabledElement.ValueKind is not (
                     JsonValueKind.True or JsonValueKind.False)
             )
             {
                 return false;
             }
-            return enabled.GetBoolean();
+            enabled = enabledElement.GetBoolean();
+            return true;
         }
         catch
         {
@@ -508,19 +818,49 @@ internal sealed class DirectCodexVoiceControl :
         {
             return;
         }
-        if (_keepActiveLifetime is null || _keepActiveMonitor is null)
+        CancellationTokenSource currentIntent;
+        lock (_keepActiveIntentGate)
         {
-            return;
+            currentIntent = _intentLifetime;
         }
-        _keepActiveLifetime.Cancel();
+        currentIntent.Cancel();
+        _keepActiveLifetime?.Cancel();
         try
         {
-            await _keepActiveMonitor.ConfigureAwait(false);
+            if (_keepActiveMonitor is not null)
+            {
+                await _keepActiveMonitor.ConfigureAwait(false);
+            }
         }
         catch (OperationCanceledException)
         {
         }
-        _keepActiveLifetime.Dispose();
+        Task? automaticRecovery;
+        lock (_automaticRecoveryTaskGate)
+        {
+            automaticRecovery = _automaticRecoveryTask;
+        }
+        if (automaticRecovery is not null)
+        {
+            try
+            {
+                await automaticRecovery.ConfigureAwait(false);
+            }
+            catch (OperationCanceledException)
+            {
+            }
+        }
+        _keepActiveLifetime?.Dispose();
+        lock (_keepActiveIntentGate)
+        {
+            _intentLifetime.Dispose();
+            foreach (CancellationTokenSource retired in
+                _retiredIntentLifetimes)
+            {
+                retired.Dispose();
+            }
+            _retiredIntentLifetimes.Clear();
+        }
     }
 
     private static CodexAppTarget RequireCodexTarget()
@@ -562,6 +902,7 @@ internal sealed class DirectBridgeProtocolSession
         _acceptReaderBrowserControl;
     private readonly Action<ReaderRealtimeOutputAck>
         _acceptReaderRealtimeOutput;
+    private readonly Action<string> _contextDeliveryModeChanged;
     private readonly Func<DateTimeOffset> _utcNow;
     private bool _helloSeen;
     private bool _authenticated;
@@ -589,6 +930,7 @@ internal sealed class DirectBridgeProtocolSession
             acceptReaderBrowserControl = null,
         Action<ReaderRealtimeOutputAck>?
             acceptReaderRealtimeOutput = null,
+        Action<string>? contextDeliveryModeChanged = null,
         IReaderDictionaryFallback? dictionaryFallback = null,
         IReaderLocalAnkiWriter? localAnkiWriter = null)
     {
@@ -625,6 +967,8 @@ internal sealed class DirectBridgeProtocolSession
                 "BW_READER_REALTIME_OUTPUT_UNAVAILABLE",
                 "Reader 输出接收器尚未接线",
                 retryable: true));
+        _contextDeliveryModeChanged = contextDeliveryModeChanged
+            ?? (_ => { });
         _utcNow = utcNow ?? (() => DateTimeOffset.UtcNow);
     }
 
@@ -918,6 +1262,7 @@ internal sealed class DirectBridgeProtocolSession
         string previousMode =
             _configStore.SetContextDeliveryMode(mode);
         _contextDeliveryMode = mode;
+        _contextDeliveryModeChanged(mode);
         return new
         {
             mode,
