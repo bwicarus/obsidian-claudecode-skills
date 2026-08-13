@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import os
+from datetime import datetime, timezone
 from pathlib import Path
 import queue
 import subprocess
@@ -11,6 +12,7 @@ import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Any, Callable
+import uuid
 
 from PIL import Image, ImageDraw
 import pystray
@@ -24,6 +26,7 @@ from bridge_core import (
     disable_and_stop_direct_service,
     load_direct_config,
     read_direct_status,
+    restore_direct_config,
     set_direct_config_enabled,
     start_direct_service,
     stop_direct_service,
@@ -51,9 +54,10 @@ from voice_history_sidebar_sync import (
 )
 
 
-APP_VERSION = "0.1.16"
+APP_VERSION = "0.1.18"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
+READER_CONTEXT_SNAPSHOT_CONTRACT = "reader-context-snapshot/1"
 POLL_INTERVAL_MS = 2_500
 STATUS_PUBLISH_INTERVAL_SECONDS = 10.0
 PC_RESTART_BACKOFF_SECONDS = 30.0
@@ -150,6 +154,100 @@ def set_codex_voice_keep_active(
     )
 
 
+def write_disabled_reader_context_snapshot(
+    bridge_paths: BridgePaths,
+    *,
+    now: datetime | None = None,
+    producer_instance_id: str | None = None,
+) -> None:
+    """Atomically revoke every Reader action target when ReaderPC stops."""
+
+    instant = now or datetime.now(timezone.utc)
+    if instant.tzinfo is None:
+        instant = instant.replace(tzinfo=timezone.utc)
+    instant = instant.astimezone(timezone.utc)
+    producer = producer_instance_id or uuid.uuid4().hex
+    try:
+        uuid.UUID(hex=producer)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ReaderPCServiceError("停用快照 producer 标识无效。") from exc
+    if len(producer) != 32 or producer.casefold() != producer:
+        raise ReaderPCServiceError("停用快照 producer 标识无效。")
+    epoch_ms = int(instant.timestamp() * 1000)
+    _atomic_json(
+        bridge_paths.root / "runtime" / "reader-context-snapshot.json",
+        {
+            "schema": READER_CONTEXT_SNAPSHOT_CONTRACT,
+            "producerInstanceId": producer,
+            "revision": 0,
+            "updatedAtUtc": instant.isoformat().replace("+00:00", "Z"),
+            "latestEvent": {
+                "source": "readerpc-service",
+                "seq": None,
+                "id": f"readerpc-disabled-{producer}",
+                "type": "readerpc.disabled",
+                "ts": epoch_ms,
+            },
+            "activeReading": None,
+            "contextStatus": "disabled",
+            "currentPage": None,
+            "selection": {
+                "state": "unknown",
+                "text": None,
+                "ref": None,
+                "reason": "readerpc-service-disabled",
+            },
+            "focus": {
+                "state": "unknown",
+                "kind": None,
+                "ref": None,
+                "reason": "readerpc-service-disabled",
+            },
+        },
+    )
+
+
+def enable_readerpc_voice(
+    bridge_paths: BridgePaths,
+    process_runner: WindowsProcessRunner,
+) -> int:
+    """Enable the ReaderPC voice/context service as one rollback-safe action."""
+
+    previous = load_direct_config(bridge_paths)
+    if previous is None:
+        if bridge_paths.direct_config.exists():
+            raise ReaderPCServiceError(
+                "现有电脑语音配置无效；拒绝静默覆盖。"
+            )
+        raise ReaderPCServiceError(
+            "尚未完成电脑语音配置，请先打开详细设置。"
+        )
+    try:
+        set_direct_config_enabled(
+            bridge_paths,
+            True,
+            context_delivery_mode=CONTEXT_DELIVERY_SNAPSHOT,
+        )
+        set_codex_voice_keep_active(bridge_paths, True)
+        return start_readerpc_voice(bridge_paths, process_runner)
+    except Exception as exc:
+        rollback_failures: list[str] = []
+        try:
+            set_codex_voice_keep_active(bridge_paths, False)
+        except Exception as rollback_exc:
+            rollback_failures.append(f"关闭 Codex 语音守护：{rollback_exc}")
+        try:
+            restore_direct_config(bridge_paths, previous)
+        except Exception as rollback_exc:
+            rollback_failures.append(f"恢复电脑语音配置：{rollback_exc}")
+        if rollback_failures:
+            raise ReaderPCServiceError(
+                f"电脑语音与实时快照启用失败：{exc}；"
+                "回滚未完整完成：" + "；".join(rollback_failures)
+            ) from exc
+        raise
+
+
 def disable_readerpc_voice(
     bridge_paths: BridgePaths,
     process_runner: WindowsProcessRunner,
@@ -160,9 +258,18 @@ def disable_readerpc_voice(
     except Exception as exc:
         failures.append(f"取消 Codex 语音持续运行：{exc}")
     try:
-        disable_and_stop_direct_service(bridge_paths, process_runner)
+        disable_and_stop_direct_service(
+            bridge_paths,
+            process_runner,
+            after_disable=lambda: write_disabled_reader_context_snapshot(
+                bridge_paths
+            ),
+            after_stop=lambda: write_disabled_reader_context_snapshot(
+                bridge_paths
+            ),
+        )
     except Exception as exc:
-        failures.append(f"停止电脑语音服务：{exc}")
+        failures.append(f"停止电脑语音与实时快照服务：{exc}")
     if failures:
         raise ReaderPCServiceError("；".join(failures))
 
@@ -199,8 +306,10 @@ def stop_readerpc_services(
             disable_readerpc_voice(bridge_paths, process_runner)
         else:
             set_codex_voice_keep_active(bridge_paths, False)
+            write_disabled_reader_context_snapshot(bridge_paths)
             if voice.service_online or bridge_paths.service_record.exists():
                 stop_direct_service(bridge_paths, process_runner)
+            write_disabled_reader_context_snapshot(bridge_paths)
     except Exception as exc:
         failures.append(f"电脑语音与上下文直连：{exc}")
 
@@ -597,27 +706,22 @@ class ReaderPCWindow:
         self.voice_recovery_in_progress = recovery
 
         def start() -> int:
-            set_codex_voice_keep_active(self.bridge_paths, True)
-            changed = False
-            try:
-                changed = set_direct_config_enabled(self.bridge_paths, True)
-                return start_readerpc_voice(
-                    self.bridge_paths,
-                    self.process_runner,
-                )
-            except Exception:
-                set_codex_voice_keep_active(self.bridge_paths, False)
-                if changed:
-                    set_direct_config_enabled(self.bridge_paths, False)
-                raise
+            return enable_readerpc_voice(
+                self.bridge_paths,
+                self.process_runner,
+            )
 
         self._run_task(
-            "正在恢复电脑语音服务…" if recovery else "正在启用电脑语音服务…",
+            (
+                "正在恢复电脑语音与实时快照服务…"
+                if recovery
+                else "正在启用电脑语音与实时快照服务…"
+            ),
             start,
             (
-                "电脑语音与 Codex 语音持续运行已恢复。"
+                "电脑语音、实时快照与 Codex 语音持续运行已恢复。"
                 if recovery
-                else "电脑语音已启用，Codex 语音会自动开启并保持运行。"
+                else "电脑语音与实时快照已启用，Codex 语音会自动开启并保持运行。"
             ),
         )
 
@@ -733,17 +837,27 @@ class ReaderPCWindow:
             )
             self.voice_button.configure(text=voice_action)
 
-            self.context_status.configure(
-                text=context.state_label,
-                foreground="#167347" if context.fresh else "#6b7280",
-            )
-            self.context_detail.configure(
-                text=(
+            if not voice.configuration_enabled:
+                context_label = "已停用 · 随电脑语音服务"
+                context_color = "#6b7280"
+                context_detail = "启用电脑语音服务后，Reader 实时快照会同时开启。"
+            elif not voice.service_online:
+                context_label = "等待电脑语音服务恢复"
+                context_color = "#b26a00"
+                context_detail = "服务恢复后会自动重新接收 Reader 快照。"
+            else:
+                context_label = context.state_label
+                context_color = "#167347" if context.fresh else "#6b7280"
+                context_detail = (
                     f"{context.kind or '内容'} · {context.title}"
                     if context.title
                     else "打开 Reader App 或启用扩展后会在这里显示。"
                 )
+            self.context_status.configure(
+                text=context_label,
+                foreground=context_color,
             )
+            self.context_detail.configure(text=context_detail)
 
             self.pc_status.configure(
                 text=pc.state_label,

@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from datetime import datetime, timezone
+import json
 from pathlib import Path
 import queue
 import sys
@@ -16,6 +18,7 @@ sys.path.insert(0, str(SOURCE_ROOT))
 from readerpc_launcher import (  # noqa: E402
     ReaderPCWindow,
     disable_readerpc_voice,
+    enable_readerpc_voice,
     load_preferences,
     main,
     readerpc_history_sync_enabled,
@@ -24,6 +27,7 @@ from readerpc_launcher import (  # noqa: E402
     set_codex_voice_keep_active,
     start_readerpc_voice,
     stop_readerpc_services,
+    write_disabled_reader_context_snapshot,
 )
 
 
@@ -158,11 +162,152 @@ class ReaderPCLauncherTests(unittest.TestCase):
             ),
             patch(
                 "readerpc_launcher.disable_and_stop_direct_service",
-                side_effect=lambda *_args: calls.append("stop"),
+                side_effect=lambda *_args, **kwargs: (
+                    calls.append("opt-out"),
+                    kwargs["after_disable"](),
+                    calls.append("stop"),
+                    kwargs["after_stop"](),
+                ),
+            ),
+            patch(
+                "readerpc_launcher.write_disabled_reader_context_snapshot",
+                side_effect=lambda _paths: calls.append("tombstone"),
             ),
         ):
             disable_readerpc_voice(bridge_paths, process_runner)
-        self.assertEqual(calls, [False, "stop"])
+        self.assertEqual(
+            calls,
+            [False, "opt-out", "tombstone", "stop", "tombstone"],
+        )
+
+    def test_disable_voice_passes_both_tombstone_fences_to_atomic_stop(self) -> None:
+        with (
+            patch("readerpc_launcher.set_codex_voice_keep_active"),
+            patch(
+                "readerpc_launcher.disable_and_stop_direct_service"
+            ) as disable,
+        ):
+            disable_readerpc_voice(Mock(), Mock())
+        self.assertTrue(callable(disable.call_args.kwargs["after_disable"]))
+        self.assertTrue(callable(disable.call_args.kwargs["after_stop"]))
+
+    def test_disabled_snapshot_revokes_every_reader_target(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            bridge_paths = SimpleNamespace(root=Path(raw))
+            write_disabled_reader_context_snapshot(
+                bridge_paths,
+                now=datetime(2026, 8, 14, 1, 2, 3, tzinfo=timezone.utc),
+                producer_instance_id="a" * 32,
+            )
+            snapshot = json.loads(
+                (
+                    Path(raw)
+                    / "runtime"
+                    / "reader-context-snapshot.json"
+                ).read_text("utf-8")
+            )
+        self.assertEqual(snapshot["contextStatus"], "disabled")
+        self.assertIsNone(snapshot["activeReading"])
+        self.assertIsNone(snapshot["currentPage"])
+        self.assertEqual(
+            snapshot["selection"]["reason"],
+            "readerpc-service-disabled",
+        )
+        self.assertEqual(snapshot["producerInstanceId"], "a" * 32)
+        self.assertEqual(snapshot["revision"], 0)
+
+    def test_enable_voice_switches_to_snapshot_before_keepalive_and_start(self) -> None:
+        bridge_paths = Mock()
+        bridge_paths.direct_config.exists.return_value = True
+        process_runner = Mock()
+        previous = {
+            "localOptIn": False,
+            "contextDeliveryMode": "legacy-inject",
+        }
+        calls: list[object] = []
+        with (
+            patch("readerpc_launcher.load_direct_config", return_value=previous),
+            patch(
+                "readerpc_launcher.set_direct_config_enabled",
+                side_effect=lambda *_args, **kwargs: calls.append(
+                    ("configure", kwargs)
+                ),
+            ),
+            patch(
+                "readerpc_launcher.set_codex_voice_keep_active",
+                side_effect=lambda _paths, enabled: calls.append(
+                    ("keepalive", enabled)
+                ),
+            ),
+            patch(
+                "readerpc_launcher.start_readerpc_voice",
+                side_effect=lambda *_args: calls.append("start") or 4321,
+            ),
+        ):
+            self.assertEqual(
+                enable_readerpc_voice(bridge_paths, process_runner),
+                4321,
+            )
+        self.assertEqual(calls[0][0], "configure")
+        self.assertEqual(
+            calls[0][1]["context_delivery_mode"],
+            "snapshot-mcp",
+        )
+        self.assertEqual(calls[1:], [("keepalive", True), "start"])
+
+    def test_enable_failure_restores_entire_previous_config(self) -> None:
+        bridge_paths = Mock()
+        bridge_paths.direct_config.exists.return_value = True
+        previous = {
+            "localOptIn": True,
+            "contextDeliveryMode": "legacy-inject",
+            "sentinel": "keep-me",
+        }
+        with (
+            patch("readerpc_launcher.load_direct_config", return_value=previous),
+            patch("readerpc_launcher.set_direct_config_enabled"),
+            patch("readerpc_launcher.set_codex_voice_keep_active") as keepalive,
+            patch(
+                "readerpc_launcher.start_readerpc_voice",
+                side_effect=RuntimeError("runtime-heartbeat-timeout"),
+            ),
+            patch("readerpc_launcher.restore_direct_config") as restore,
+            self.assertRaisesRegex(RuntimeError, "runtime-heartbeat-timeout"),
+        ):
+            enable_readerpc_voice(bridge_paths, Mock())
+        self.assertEqual(
+            [call.args[1] for call in keepalive.call_args_list],
+            [True, False],
+        )
+        restore.assert_called_once_with(bridge_paths, previous)
+
+    def test_enable_failure_reports_incomplete_rollback(self) -> None:
+        bridge_paths = Mock()
+        bridge_paths.direct_config.exists.return_value = True
+        with (
+            patch(
+                "readerpc_launcher.load_direct_config",
+                return_value={
+                    "localOptIn": False,
+                    "contextDeliveryMode": "legacy-inject",
+                },
+            ),
+            patch("readerpc_launcher.set_direct_config_enabled"),
+            patch("readerpc_launcher.set_codex_voice_keep_active"),
+            patch(
+                "readerpc_launcher.start_readerpc_voice",
+                side_effect=RuntimeError("start-failed"),
+            ),
+            patch(
+                "readerpc_launcher.restore_direct_config",
+                side_effect=OSError("restore-denied"),
+            ),
+            self.assertRaisesRegex(
+                RuntimeError,
+                "启用失败.*回滚未完整完成.*restore-denied",
+            ),
+        ):
+            enable_readerpc_voice(bridge_paths, Mock())
 
     def test_shutdown_stops_pc_and_direct_services(self) -> None:
         pc_ocr = Mock()
@@ -204,12 +349,16 @@ class ReaderPCLauncherTests(unittest.TestCase):
             patch("readerpc_launcher.set_codex_voice_keep_active") as keep_voice,
             patch("readerpc_launcher.disable_and_stop_direct_service") as stop_voice,
             patch("readerpc_launcher.stop_direct_service") as stop_orphan,
+            patch(
+                "readerpc_launcher.write_disabled_reader_context_snapshot"
+            ) as tombstone,
         ):
             stop_readerpc_services(bridge_paths, Mock(), pc_ocr)
         pc_ocr.stop.assert_called_once_with()
         keep_voice.assert_called_once_with(bridge_paths, False)
         stop_voice.assert_not_called()
         stop_orphan.assert_not_called()
+        self.assertEqual(tombstone.call_count, 2)
 
     def test_shutdown_stops_owned_direct_record_after_opt_out(self) -> None:
         pc_ocr = Mock()
@@ -221,32 +370,28 @@ class ReaderPCLauncherTests(unittest.TestCase):
             patch("readerpc_launcher.set_codex_voice_keep_active") as keep_voice,
             patch("readerpc_launcher.disable_and_stop_direct_service") as disable_voice,
             patch("readerpc_launcher.stop_direct_service") as stop_orphan,
+            patch(
+                "readerpc_launcher.write_disabled_reader_context_snapshot"
+            ) as tombstone,
         ):
             stop_readerpc_services(bridge_paths, Mock(), pc_ocr)
         disable_voice.assert_not_called()
         keep_voice.assert_called_once_with(bridge_paths, False)
         stop_orphan.assert_called_once()
+        self.assertEqual(tombstone.call_count, 2)
 
     def test_start_voice_sets_keepalive_before_starting_service(self) -> None:
         window = self.window_without_tk()
-        calls: list[object] = []
         window._run_task = Mock(side_effect=lambda _pending, action, _success: action())
-        with (
-            patch(
-                "readerpc_launcher.set_codex_voice_keep_active",
-                side_effect=lambda _paths, enabled: calls.append(enabled),
-            ),
-            patch(
-                "readerpc_launcher.set_direct_config_enabled",
-                side_effect=lambda *_args: calls.append("configure") or True,
-            ),
-            patch(
-                "readerpc_launcher.start_readerpc_voice",
-                side_effect=lambda *_args: calls.append("start") or 4321,
-            ),
-        ):
+        with patch(
+            "readerpc_launcher.enable_readerpc_voice",
+            return_value=4321,
+        ) as enable:
             window._start_voice_task(recovery=False)
-        self.assertEqual(calls, [True, "configure", "start"])
+        enable.assert_called_once_with(
+            window.bridge_paths,
+            window.process_runner,
+        )
 
     def test_voice_start_requires_matching_fresh_runtime(self) -> None:
         runner = Mock()

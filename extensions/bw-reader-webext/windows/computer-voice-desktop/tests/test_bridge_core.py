@@ -18,6 +18,7 @@ from bridge_core import (  # noqa: E402
     BridgeError,
     BridgePaths,
     CaptureEndpoint,
+    CONTEXT_DELIVERY_SNAPSHOT,
     DIRECT_CONFIG_CONTRACT,
     DEFAULT_ALLOWED_ORIGINS,
     FIXED_ALLOWED_TAILSCALE_USER_LOGIN,
@@ -47,6 +48,7 @@ from bridge_core import (  # noqa: E402
     load_direct_config,
     migrate_native_app_origin,
     read_direct_status,
+    restore_direct_config,
     run_idle_bootstrap,
     run_tailscale_read_only_preflight,
     save_enabled_config,
@@ -146,6 +148,50 @@ class DirectDesktopCoreTests(unittest.TestCase):
         self.assertTrue(set_direct_config_enabled(self.paths, True))
         self.assertTrue(load_direct_config(self.paths)["localOptIn"])
         self.assertFalse(set_direct_config_enabled(self.paths, True))
+
+    def test_readerpc_enable_commits_opt_in_and_snapshot_mode_together(self) -> None:
+        original = self.enable_config()
+        self.assertEqual(original["contextDeliveryMode"], "legacy-inject")
+        self.assertTrue(
+            set_direct_config_enabled(
+                self.paths,
+                True,
+                context_delivery_mode=CONTEXT_DELIVERY_SNAPSHOT,
+            )
+        )
+        enabled = load_direct_config(self.paths)
+        self.assertTrue(enabled["localOptIn"])
+        self.assertEqual(
+            enabled["contextDeliveryMode"],
+            CONTEXT_DELIVERY_SNAPSHOT,
+        )
+        self.assertEqual(
+            enabled["virtualMicrophoneRenderEndpointId"],
+            original["virtualMicrophoneRenderEndpointId"],
+        )
+
+    def test_readerpc_enable_rejects_invalid_mode_without_rewriting_config(self) -> None:
+        original = self.enable_config()
+        raw_before = self.paths.direct_config.read_bytes()
+        with self.assertRaisesRegex(BridgeError, "上下文交付模式无效"):
+            set_direct_config_enabled(
+                self.paths,
+                True,
+                context_delivery_mode="nearby-mode",
+            )
+        self.assertEqual(self.paths.direct_config.read_bytes(), raw_before)
+        self.assertEqual(load_direct_config(self.paths), original)
+
+    def test_failed_readerpc_start_can_restore_exact_previous_config(self) -> None:
+        original = self.enable_config()
+        set_direct_config_enabled(
+            self.paths,
+            True,
+            context_delivery_mode=CONTEXT_DELIVERY_SNAPSHOT,
+        )
+        self.assertTrue(restore_direct_config(self.paths, original))
+        self.assertEqual(load_direct_config(self.paths), original)
+        self.assertFalse(restore_direct_config(self.paths, original))
 
     def test_shortcut_broker_is_strict_and_idempotent(self) -> None:
         sends: list[str] = []
@@ -1345,6 +1391,109 @@ class DirectDesktopCoreTests(unittest.TestCase):
         )
         self.assertFalse(load_direct_config(self.paths)["localOptIn"])
         self.assertFalse(self.paths.service_record.exists())
+
+    def test_disable_callback_runs_after_opt_out_and_before_exact_stop(self) -> None:
+        self.enable_config()
+        runner = FakeProcessRunner()
+        pid = start_direct_service(self.paths, runner, now=NOW)
+        observed: list[tuple[bool, bool]] = []
+
+        def publish_disabled_snapshot() -> None:
+            observed.append(
+                (
+                    load_direct_config(self.paths)["localOptIn"],
+                    runner.executable_for_pid(pid) is not None,
+                )
+            )
+
+        disabled, stopped = disable_and_stop_direct_service(
+            self.paths,
+            runner,
+            after_disable=publish_disabled_snapshot,
+        )
+        self.assertEqual((disabled, stopped), (True, True))
+        self.assertEqual(observed, [(False, True)])
+
+    def test_disable_already_opted_out_still_stops_exact_owned_service(self) -> None:
+        self.enable_config()
+        runner = FakeProcessRunner()
+        pid = start_direct_service(self.paths, runner, now=NOW)
+        set_direct_config_enabled(self.paths, False)
+
+        disabled, stopped = disable_and_stop_direct_service(
+            self.paths,
+            runner,
+        )
+
+        self.assertEqual((disabled, stopped), (False, True))
+        self.assertEqual(
+            runner.terminations,
+            [(pid, self.paths.native_host.resolve())],
+        )
+        self.assertFalse(self.paths.service_record.exists())
+
+    def test_disable_retries_snapshot_after_stop_if_pre_stop_write_failed(self) -> None:
+        self.enable_config()
+        runner = FakeProcessRunner()
+        start_direct_service(self.paths, runner, now=NOW)
+        calls: list[str] = []
+
+        def first_write() -> None:
+            calls.append("before")
+            raise OSError("temporary-denied")
+
+        disabled, stopped = disable_and_stop_direct_service(
+            self.paths,
+            runner,
+            after_disable=first_write,
+            after_stop=lambda: calls.append("after"),
+        )
+
+        self.assertEqual((disabled, stopped), (True, True))
+        self.assertEqual(calls, ["before", "after"])
+
+    def test_disable_reports_final_snapshot_failure_after_exact_stop(self) -> None:
+        self.enable_config()
+        runner = FakeProcessRunner()
+        pid = start_direct_service(self.paths, runner, now=NOW)
+        with self.assertRaisesRegex(
+            BridgeError,
+            "最终停用快照写入失败.*after-denied",
+        ):
+            disable_and_stop_direct_service(
+                self.paths,
+                runner,
+                after_disable=lambda: None,
+                after_stop=lambda: (_ for _ in ()).throw(
+                    OSError("after-denied")
+                ),
+            )
+        self.assertEqual(
+            runner.terminations,
+            [(pid, self.paths.native_host.resolve())],
+        )
+        self.assertFalse(self.paths.service_record.exists())
+
+    def test_disable_snapshot_failure_is_visible_but_exact_service_still_stops(self) -> None:
+        self.enable_config()
+        runner = FakeProcessRunner()
+        pid = start_direct_service(self.paths, runner, now=NOW)
+        with self.assertRaisesRegex(
+            BridgeError,
+            "停用快照写入失败.*snapshot-write-denied",
+        ):
+            disable_and_stop_direct_service(
+                self.paths,
+                runner,
+                after_disable=lambda: (_ for _ in ()).throw(
+                    OSError("snapshot-write-denied")
+                ),
+            )
+        self.assertEqual(
+            runner.terminations,
+            [(pid, self.paths.native_host.resolve())],
+        )
+        self.assertFalse(load_direct_config(self.paths)["localOptIn"])
 
     def test_disable_recheck_fails_closed_if_owned_record_remains(self) -> None:
         self.enable_config()
