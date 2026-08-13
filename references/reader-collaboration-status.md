@@ -4233,3 +4233,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **部署事实**：Pi 原子事务 `20260813T181157Z-1453802` 完成且服务/定时器健康；部署保护只放行严格 schema 的 `dwell.jsonl` 尾部追加，其他 KG 变化仍失败关闭。
 - **发布事实**：功能源 `ef8fb688`，TestFlight `1.1.53 (291)` 已确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告；Pi 当前部署提交 `00a065c9`。
 - **没做/下一步**：未混入尚无 C# 编译证据的 Windows `client-action` 反馈 WIP，也未发布桌面扩展；真机核对 Realtime 草稿落入 Reader 本地卡库及英文例句稍后回填为中文。
+
+## Codex：ReaderPC 统一持有快照页与 Codex 语音生命周期（2026-08-14 JST）
+- **改了什么**：App 总开关只保存持久意图；`true` 由 ReaderPC/Direct 自动维持 listener、实时快照页与 Codex 语音，`false` 才停止，App 语音按钮不再控制快照生命周期。
+- **怎么验的**：Reader Node、ReaderPC Python、Direct Release 编译/完整自检、两个不可变包的校验与包内自测均通过；独立审查确认无剩余 P0。
+- **发布事实**：TestFlight `1.1.54 (293)` 已确认 `VALID / IN_BETA_TESTING`；本机已安装 ReaderPC `0.1.22` 与 Direct `0.1.123`，现场为 viewer HTTP 200、Codex 麦克风 active、Direct `lastError=null`。
+- **边界/下一步**：无 App 页面连接时快照正文保持 disabled tombstone 属正常；未为验收改动用户当前 `true` 开关，`false` 停止路径由行为自测覆盖；死 PID 记录清理为非阻断 P1。
