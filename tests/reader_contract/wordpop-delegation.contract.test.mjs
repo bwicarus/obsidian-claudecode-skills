@@ -381,6 +381,106 @@ test("本地例句的迟到 Pi 中文回填不得覆盖后来打开的查词框"
   assert.equal(target.textContent, "新词的正确翻译");
 });
 
+test("快速切词只保留当前面板的 Pi 例句翻译且队列有界", async () => {
+  const { sandbox, pop } = makeHarness();
+  const target = new FakeElement("latest-example");
+  pop.jpExampleTarget = target;
+  const requested = [];
+  const pending = new Map();
+  sandbox.RC.reqJson = async (_method, _url, body) => {
+    requested.push(body.text);
+    return await new Promise((resolve) => pending.set(body.text, resolve));
+  };
+  sandbox.RC.offlineDictionary = {
+    CONTRACT: "bw-offline-dictionary/1",
+    isLocalMode: () => true,
+    lookupJapaneseLegacy: async (word) => ({
+      ok: true,
+      jp: true,
+      word,
+      lemma: word,
+      reading: "よみ",
+      accent: 0,
+      zh_senses: [{ glosses: ["中文义"] }],
+      examples: [{ ja: `${word}の例。`, en: `example for ${word}` }],
+      source: "local-jmdict",
+      local_zh: true,
+    }),
+  };
+  vm.runInContext(WORDPOP, vm.createContext(sandbox), { filename: "rc-wordpop.js" });
+
+  sandbox.RC.wordpop.show({ word: "最初", langs: ["ja"], noBreathe: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  for (const word of ["二", "三", "四", "五", "六", "七", "最後"]) {
+    sandbox.RC.wordpop.show({ word, langs: ["ja"], noBreathe: true });
+    await new Promise((resolve) => setImmediate(resolve));
+  }
+  assert.deepEqual(requested, ["最初の例。"], "运行中仅允许一个 Pi CLI 请求");
+
+  pending.get("最初の例。")({ ok: true, zh: "过期结果" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(
+    requested,
+    ["最初の例。", "最後の例。"],
+    "中间六个已经离开的面板不得继续占用 Pi CLI",
+  );
+  pending.get("最後の例。")({ ok: true, zh: "当前结果" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(target.textContent, "当前结果");
+});
+
+test("新词本地 lookup 尚未返回时也立即取消旧词待执行的 Pi 例句", async () => {
+  const { sandbox, pop } = makeHarness();
+  pop.jpExampleTarget = new FakeElement("slow-lookup-example");
+  const requested = [];
+  const pendingTranslations = new Map();
+  let resolveNewLookup;
+  sandbox.RC.reqJson = async (_method, _url, body) => {
+    requested.push(body.text);
+    return await new Promise((resolve) => pendingTranslations.set(body.text, resolve));
+  };
+  const entry = (word, examples) => ({
+    ok: true,
+    jp: true,
+    word,
+    lemma: word,
+    reading: "よみ",
+    accent: 0,
+    zh_senses: [{ glosses: ["中文义"] }],
+    examples,
+    source: "local-jmdict",
+    local_zh: true,
+  });
+  sandbox.RC.offlineDictionary = {
+    CONTRACT: "bw-offline-dictionary/1",
+    isLocalMode: () => true,
+    lookupJapaneseLegacy: async (word) => {
+      if (word === "新词") {
+        return await new Promise((resolve) => { resolveNewLookup = resolve; });
+      }
+      return entry(word, [
+        { ja: "旧词第一句。", en: "old one" },
+        { ja: "旧词第二句。", en: "old two" },
+      ]);
+    },
+  };
+  vm.runInContext(WORDPOP, vm.createContext(sandbox), { filename: "rc-wordpop.js" });
+
+  sandbox.RC.wordpop.show({ word: "旧词", langs: ["ja"], noBreathe: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(requested, ["旧词第一句。"]);
+
+  sandbox.RC.wordpop.show({ word: "新词", langs: ["ja"], noBreathe: true });
+  await Promise.resolve();
+  pendingTranslations.get("旧词第一句。")({ ok: true, zh: "旧词已缓存" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(requested, ["旧词第一句。"], "旧词第二句不得在新词慢 lookup 窗口启动");
+
+  resolveNewLookup(entry("新词", [{ ja: "新词例句。", en: "new" }]));
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(requested, ["旧词第一句。", "新词例句。"]);
+});
+
 test("App 本地词典未命中的自定义日语词组不自动交给 ReaderPC 或 Pi", async () => {
   const { sandbox, pop } = makeHarness();
   const lookupRequests = [];

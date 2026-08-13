@@ -205,7 +205,9 @@
     try {
       _dictCache.clear(); _prewarmSeen.clear(); _prewarmQ.length = 0;
       _jpExampleZhCache.clear(); _jpExampleZhInflight.clear();
-      _jpExampleZhQueue = Promise.resolve();
+      _jpExampleZhCacheEpoch++;
+      _jpExampleZhOwnerGeneration++;
+      _jpExampleZhPending.splice(0).forEach(function (item) { item.resolve(''); });
     } catch (_) {}
   }
   var _jpKanjiData = [];           // 当前日语词的汉字拆解,供 chip 点击展开
@@ -215,7 +217,11 @@
   // 这里的 Map 负责本页面复用与同句在途去重，不是第二份持久化真源。
   var _jpExampleZhCache = new Map();
   var _jpExampleZhInflight = new Map();
-  var _jpExampleZhQueue = Promise.resolve();  // Pi CLI 单并发：小框与完整框共用
+  var _jpExampleZhPending = [];
+  var _jpExampleZhActive = null;
+  var _jpExampleZhCacheEpoch = 0;
+  var _jpExampleZhOwnerGeneration = 0;
+  var _JP_EXAMPLE_ZH_PENDING_MAX = 4;  // 加上 1 个在跑，总 unresolved 硬上限为 5
   var _jpSmallExampleSeq = 0;
   var _jpFullExampleSeq = 0;
   // 底座耦合(每次 show 刷新)
@@ -704,33 +710,79 @@
     return result;
   }
 
-  function _requestJapaneseExampleZh(ja) {
+  function _pruneJapaneseExampleZhPending() {
+    var kept = [];
+    _jpExampleZhPending.forEach(function (item) {
+      if (item.ownerGeneration !== _jpExampleZhOwnerGeneration || !item.isCurrent()) {
+        if (_jpExampleZhInflight.get(item.ja) === item.promise) _jpExampleZhInflight.delete(item.ja);
+        item.resolve('');
+      } else {
+        kept.push(item);
+      }
+    });
+    _jpExampleZhPending = kept;
+  }
+
+  function _pumpJapaneseExampleZh() {
+    if (_jpExampleZhActive) return;
+    _pruneJapaneseExampleZhPending();
+    var item = _jpExampleZhPending.shift();
+    if (!item) return;
+    if (item.ownerGeneration !== _jpExampleZhOwnerGeneration || !item.isCurrent()) {
+      if (_jpExampleZhInflight.get(item.ja) === item.promise) _jpExampleZhInflight.delete(item.ja);
+      item.resolve('');
+      _pumpJapaneseExampleZh();
+      return;
+    }
+    _jpExampleZhActive = item;
+    // backend=ai 是 Pi 上受控的 AI/CLI 翻译入口；不经过 ReaderPC。服务端按 exact
+    // JA 文本持久缓存，App 这里只发送缺中文的句子，不上传整个词条或页面。
+    RC.reqJson('POST', '/pdf/api/translate-sentence', { text: item.ja, backend: 'ai' })
+      .then(function (reply) {
+        var zh = reply && reply.ok ? String(reply.zh || '').trim() : '';
+        if (zh && /[㐀-鿿]/.test(zh)) {
+          if (item.cacheEpoch === _jpExampleZhCacheEpoch) _jpExampleZhCache.set(item.ja, zh);
+          return zh;
+        }
+        _dictDiag('Pi 例句中译失败「' + item.ja.slice(0, 32) + '」' +
+          (reply && reply.error ? '：' + String(reply.error).slice(0, 80) : ''));
+        return '';
+      }).catch(function (error) {
+        _dictDiag('Pi 例句中译异常「' + item.ja.slice(0, 32) + '」：' +
+          String(error && error.message || error || '').slice(0, 80));
+        return '';
+      }).then(function (zh) {
+        if (_jpExampleZhInflight.get(item.ja) === item.promise) _jpExampleZhInflight.delete(item.ja);
+        _jpExampleZhActive = null;
+        item.resolve(zh);
+        _pumpJapaneseExampleZh();
+      });
+  }
+
+  function _requestJapaneseExampleZh(ja, isCurrent) {
     ja = String(ja || '').trim();
     if (!ja) return Promise.resolve('');
     if (_jpExampleZhCache.has(ja)) return Promise.resolve(_jpExampleZhCache.get(ja));
+    _pruneJapaneseExampleZhPending();
     if (_jpExampleZhInflight.has(ja)) return _jpExampleZhInflight.get(ja);
-    // backend=ai 是 Pi 上受控的 AI/CLI 翻译入口；不经过 ReaderPC。服务端按 exact
-    // JA 文本持久缓存，App 这里只发送缺中文的句子，不上传整个词条或页面。
-    var task = _jpExampleZhQueue.then(function () {
-      return RC.reqJson('POST', '/pdf/api/translate-sentence', { text: ja, backend: 'ai' });
-    }).then(function (reply) {
-      var zh = reply && reply.ok ? String(reply.zh || '').trim() : '';
-      if (zh && /[㐀-鿿]/.test(zh)) {
-        _jpExampleZhCache.set(ja, zh);
-        return zh;
-      }
-      _dictDiag('Pi 例句中译失败「' + ja.slice(0, 32) + '」' +
-        (reply && reply.error ? '：' + String(reply.error).slice(0, 80) : ''));
-      return '';
-    }).catch(function (error) {
-      _dictDiag('Pi 例句中译异常「' + ja.slice(0, 32) + '」：' +
-        String(error && error.message || error || '').slice(0, 80));
-      return '';
-    });
-    // 无论本句成功/失败都释放队列；完整框最多 5 句也不会并发拉起多份 Pi CLI。
-    _jpExampleZhQueue = task.then(function () {}, function () {});
+    var resolveTask;
+    var task = new Promise(function (resolve) { resolveTask = resolve; });
+    var item = {
+      ja: ja,
+      cacheEpoch: _jpExampleZhCacheEpoch,
+      ownerGeneration: _jpExampleZhOwnerGeneration,
+      isCurrent: typeof isCurrent === 'function' ? isCurrent : function () { return true; },
+      promise: task,
+      resolve: resolveTask
+    };
+    if (_jpExampleZhPending.length >= _JP_EXAMPLE_ZH_PENDING_MAX) {
+      _dictDiag('Pi 例句中译队列已满，跳过「' + ja.slice(0, 32) + '」');
+      resolveTask('');
+      return task;
+    }
     _jpExampleZhInflight.set(ja, task);
-    task.then(function () { _jpExampleZhInflight.delete(ja); }, function () { _jpExampleZhInflight.delete(ja); });
+    _jpExampleZhPending.push(item);
+    _pumpJapaneseExampleZh();
     return task;
   }
 
@@ -738,7 +790,7 @@
     if (!root || !Array.isArray(rows)) return;
     rows.forEach(function (example, index) {
       if (!example || example.zh || !example.ja) return;
-      _requestJapaneseExampleZh(example.ja).then(function (zh) {
+      _requestJapaneseExampleZh(example.ja, isCurrent).then(function (zh) {
         if (!isCurrent()) return;   // 切词/重开后迟到的结果只进缓存，不碰当前面板
         var node = root.querySelector('[data-jpex-id="' + panelKey + '-' + index + '"]');
         if (!node) return;
@@ -938,6 +990,10 @@
     // 注意:这里**不清**已有的呼吸高亮——原生语义是多个查词并存,"不清掉别的查词高亮"(15-phrase-wordpop.js:558)。
     var word = String(opts.word == null ? '' : opts.word).trim().toLowerCase();
     if (!word) return;
+    // 词一经点击就立刻取得例句翻译所有权；不能等本地 lookup 返回后再靠
+    // _wordPopState 判定，否则慢 lookup 窗口内旧词会继续启动下一条 Pi CLI。
+    _jpExampleZhOwnerGeneration++;
+    _pruneJapaneseExampleZhPending();
     // 同词去重:重查同一词先清掉它上一次残留的呼吸/常亮高亮(不动别词,保留多查词并存语义)。
     //   否则缓存秒弹路径不建也不清高亮 → 旧高亮(.rc-wp-breathe z:190)一直残留,盖住词组高亮(z:6)截获点击。
     try { _wordHls.filter(function (o) { return o.word === word; }).forEach(_hlRemove); } catch (_) {}

@@ -762,6 +762,14 @@ def _ai_call(prompt: str, action: str = "explain", uid=None) -> str:
     return A.reader_ask(prompt, action=action, uid=(_reader_uid() if uid is None else uid))
 
 
+def _ai_call_untrusted(prompt: str, action: str = "explain", uid=None) -> str:
+    """Reader 原文专用纯文本边界；不得落到拥有主机工具的 agent。"""
+    A = _assistant()
+    return A.reader_untrusted_ask(
+        prompt, action=action, uid=(_reader_uid() if uid is None else uid),
+    )
+
+
 def _ai_call_stream(prompt: str, action: str = "explain", uid=None):
     """流式版:按 action 预设选后端 yield 文本块(主后端失败→兜底另一边)。
     注意:后台线程(无请求上下文)必须显式传 uid,否则取不到用户预设只能用默认。"""
@@ -16198,7 +16206,7 @@ def _run_snippets_to(snippets, make_note, make_anki, note_name, action="explain"
             _step("AI 正在生成卡片")
             # 新卡与卡片改进共用明确的卡片模型档；不能把说明/编排 action
             # 当成制卡 action，也不能让 Realtime 的登录 uid 丢失后回落默认档。
-            raw = _ai_call(prompt, "card_improve", uid)
+            raw = _ai_call_untrusted(prompt, "card_improve", uid)
             cards = _parse_anki_cards_response(raw)
             _step(f"正在写入 Anki（{len(cards)} 张）" if cards else "AI 没生成卡片")
             if defer_add:   # B1 融合复习卡:草稿不入库(未经确认的卡不能进 Anki 库——用户规格)

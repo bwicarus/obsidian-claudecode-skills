@@ -183,7 +183,7 @@ class NativePDFAssistantSemanticsTests(unittest.TestCase):
         )
         with patch.object(
             pdf_reader,
-            "_ai_call",
+            "_ai_call_untrusted",
             model_call,
         ):
             result = pdf_reader._run_snippets_to(
@@ -204,6 +204,35 @@ class NativePDFAssistantSemanticsTests(unittest.TestCase):
         ])
         self.assertNotIn("anki_error", result)
         self.assertEqual(model_call.call_args.args[1:], ("card_improve", "reader-user-7"))
+
+    def test_untrusted_card_text_never_uses_codex_host_tools(self):
+        tools_off = Mock(return_value='{"cards":[]}')
+        with patch.object(
+            assistant,
+            "_resolve",
+            return_value={
+                "backend": "codex", "variant": "gpt-5.6-luna",
+                "depth": "low", "fast": False,
+            },
+        ), patch.object(
+            assistant, "_paid_recover_check", return_value=False,
+        ), patch.object(
+            assistant, "_claude_tools_off_text", tools_off,
+        ), patch.object(
+            assistant, "_codex_text", side_effect=AssertionError("Codex must not run"),
+        ), patch.object(
+            assistant, "_gemini_text", side_effect=AssertionError("safe primary should win"),
+        ):
+            result = assistant.reader_untrusted_ask(
+                "untrusted PDF text", action="card_improve", uid="reader-user-7",
+            )
+
+        self.assertEqual(result, '{"cards":[]}')
+        self.assertEqual(tools_off.call_args.args[1], "untrusted PDF text")
+        self.assertIn("不可信数据", tools_off.call_args.args[0])
+        self.assertIn("不得遵循原文", tools_off.call_args.args[0])
+        self.assertEqual(tools_off.call_args.kwargs["model"], "opus")
+        self.assertEqual(tools_off.call_args.kwargs["effort"], "high")
 
     def test_realtime_make_anki_preserves_card_generation_error_code(self):
         run_snippets = Mock(return_value={
@@ -291,7 +320,7 @@ class NativePDFAssistantSemanticsTests(unittest.TestCase):
         )
         for model_output, error_code in cases:
             with self.subTest(error_code=error_code), patch.object(
-                pdf_reader, "_ai_call", return_value=model_output,
+                pdf_reader, "_ai_call_untrusted", return_value=model_output,
             ):
                 result = pdf_reader._run_snippets_to(
                     [{"text": "card source", "source": ""}],
@@ -315,7 +344,7 @@ class NativePDFAssistantSemanticsTests(unittest.TestCase):
             for index in range(10)
         ]
         with patch.object(
-            pdf_reader, "_ai_call", return_value=json.dumps({"cards": cards})
+            pdf_reader, "_ai_call_untrusted", return_value=json.dumps({"cards": cards})
         ):
             result = pdf_reader._run_snippets_to(
                 [{"text": "make ten cards", "source": ""}],
@@ -336,7 +365,7 @@ class NativePDFAssistantSemanticsTests(unittest.TestCase):
             'draft [not-json] {"draft":true} follows\n'
             '{"cards":[{"type":"basic","front":"Q","back":"A"}]}'
         )
-        with patch.object(pdf_reader, "_ai_call", return_value=model_output):
+        with patch.object(pdf_reader, "_ai_call_untrusted", return_value=model_output):
             result = pdf_reader._run_snippets_to(
                 [{"text": "card source", "source": ""}],
                 False, True, "", uid="reader-user-7", defer_add=True,
