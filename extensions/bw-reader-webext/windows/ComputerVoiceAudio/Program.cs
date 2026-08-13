@@ -214,7 +214,8 @@ internal static class Program
                     Console.Out,
                     fetchVisualAsync: visualClient.RequestAsync,
                     controlBrowserAsync: browserControlClient.RequestAsync,
-                    sendOutputAsync: outputClient.SendAsync);
+                    sendOutputAsync: outputClient.SendAsync,
+                    probeOutputSourceAsync: outputClient.ProbeSourceAsync);
                 return await server.RunAsync(CancellationToken.None)
                     .ConfigureAwait(false);
             }

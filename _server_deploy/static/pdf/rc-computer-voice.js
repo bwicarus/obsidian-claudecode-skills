@@ -66,6 +66,7 @@
   var CONTEXT_RETRY_MS = 500;
   var CONTEXT_WAIT_DENIED_RETRY_MS = 1000;
   var NATIVE_CONTEXT_REQUEST_TIMEOUT_MS = 8000;
+  var DICTIONARY_LOOKUP_TIMEOUT_MS = 70000;
   var CONTEXT_EVENT_TYPES = Object.freeze({
     "page.context": true,
     focus: true,
@@ -3218,6 +3219,97 @@
     }).catch(function (error) {
       channel.close();
       throw error;
+    });
+  }
+
+  function normalizeDictionaryLookupRequest(value) {
+    exactObject(
+      value,
+      ["mode", "term"],
+      ["context", "reading", "english"],
+      "本机词义分析请求"
+    );
+    var mode = safeText(value.mode, "mode", 16, false);
+    if (mode !== "meaning" && mode !== "deep") {
+      throw directError(
+        "本机词义分析模式无效",
+        "BW_READER_DICTIONARY_REQUEST_INVALID",
+        false
+      );
+    }
+    return {
+      mode: mode,
+      term: safeText(value.term, "term", 256, false),
+      context: safeText(value.context || "", "context", 1200, true),
+      reading: safeText(value.reading || "", "reading", 256, true),
+      english: safeText(value.english || "", "english", 1200, true),
+    };
+  }
+
+  function normalizeDictionaryLookupResult(value, request) {
+    exactObject(
+      value,
+      ["term", "mode", "language", "text", "source", "cached"],
+      [],
+      "本机词义分析响应"
+    );
+    var result = {
+      term: safeText(value.term, "term", 256, false),
+      mode: safeText(value.mode, "mode", 16, false),
+      language: safeText(value.language, "language", 16, false),
+      text: safeText(value.text, "text", 6000, false),
+      source: safeText(value.source, "source", 64, false),
+      cached: value.cached,
+    };
+    if (
+      result.term !== request.term ||
+      result.mode !== request.mode ||
+      result.language !== "zh-CN" ||
+      result.source !== "pc-codex-cli" ||
+      typeof result.cached !== "boolean" ||
+      !result.text.trim()
+    ) {
+      throw directError(
+        "本机词义分析响应与请求不匹配",
+        "BW_READER_DICTIONARY_CLI_RESPONSE_INVALID",
+        false
+      );
+    }
+    return result;
+  }
+
+  function acquireDictionaryChannel() {
+    // Windows 按连接顺序处理请求。CLI 释义最长可等待 60 秒，若复用
+    // 语音/快照连接会把 PCM、heartbeat 和实时上下文一起堵住。
+    // 词典只使用一次性的独立连接，结束后由调用方关闭。
+    return acquireFreshDictionaryChannel();
+  }
+
+  function acquireFreshDictionaryChannel() {
+    return openDirect({ endpoint: CONTEXT_ENDPOINT }).then(function (channel) {
+      return { channel: channel, owned: true };
+    });
+  }
+
+  function lookupJapaneseFallback(value) {
+    var request;
+    try {
+      request = normalizeDictionaryLookupRequest(value);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    var lease = null;
+    return acquireDictionaryChannel().then(function (acquired) {
+      lease = acquired;
+      return acquired.channel.request(
+        "dictionary-lookup",
+        request,
+        DICTIONARY_LOOKUP_TIMEOUT_MS
+      );
+    }).then(function (result) {
+      return normalizeDictionaryLookupResult(result, request);
+    }).finally(function () {
+      if (lease && lease.owned) return lease.channel.close();
     });
   }
 
@@ -7114,6 +7206,7 @@
     getTargetApp: getComputerTarget,
     loadTargetApp: loadComputerTarget,
     setTargetApp: setComputerTarget,
+    lookupJapaneseFallback: lookupJapaneseFallback,
     cancelPreparedGesture: cancelPreparedGesture,
     registerComputerButton: registerComputerButton,
     registerPhoneButton: registerPhoneButton,

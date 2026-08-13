@@ -5,10 +5,98 @@ using System.Text.Json.Nodes;
 
 namespace BwReader.ComputerVoiceAudio;
 
+internal sealed record ReaderRealtimeOutputSourceStatus(
+    string SourceInstanceId,
+    bool Online);
+
 internal static class ReaderRealtimeOutputRpcProtocol
 {
     internal const string RequestType = "output-request";
     internal const string ResponseType = "output-response";
+    internal const string SourceStatusRequestType = "source-status-request";
+    internal const string SourceStatusResponseType = "source-status-response";
+
+    internal static JsonObject SourceStatusRequest(string sourceInstanceId)
+    {
+        if (!DirectBridgeContract.IsSafeId(sourceInstanceId))
+        {
+            throw Invalid("Reader 输出 RPC sourceInstanceId 无效");
+        }
+        return new JsonObject
+        {
+            ["contract"] = ReaderRealtimeOutputProtocol.OutputContract,
+            ["type"] = SourceStatusRequestType,
+            ["sourceInstanceId"] = sourceInstanceId,
+        };
+    }
+
+    internal static string ValidateSourceStatusRequest(JsonElement root)
+    {
+        RequireExact(root, "contract", "type", "sourceInstanceId");
+        if (
+            RequiredString(root, "contract", 128)
+                != ReaderRealtimeOutputProtocol.OutputContract
+            || RequiredString(root, "type", 64) != SourceStatusRequestType
+        )
+        {
+            throw Invalid("Reader 输出来源状态 RPC 合同无效");
+        }
+        string sourceInstanceId = RequiredString(
+            root,
+            "sourceInstanceId",
+            160);
+        if (!DirectBridgeContract.IsSafeId(sourceInstanceId))
+        {
+            throw Invalid("Reader 输出来源状态身份无效");
+        }
+        return sourceInstanceId;
+    }
+
+    internal static JsonObject SourceStatusResponse(
+        ReaderRealtimeOutputSourceStatus status) => new()
+    {
+        ["contract"] = ReaderRealtimeOutputProtocol.OutputContract,
+        ["type"] = SourceStatusResponseType,
+        ["sourceInstanceId"] = status.SourceInstanceId,
+        ["online"] = status.Online,
+    };
+
+    internal static ReaderRealtimeOutputSourceStatus
+        ValidateSourceStatusResponse(
+            JsonElement root,
+            string expectedSourceInstanceId)
+    {
+        RequireExact(
+            root,
+            "contract",
+            "type",
+            "sourceInstanceId",
+            "online");
+        if (
+            RequiredString(root, "contract", 128)
+                != ReaderRealtimeOutputProtocol.OutputContract
+            || RequiredString(root, "type", 64) != SourceStatusResponseType
+            || root.GetProperty("online").ValueKind
+                is not (JsonValueKind.True or JsonValueKind.False)
+        )
+        {
+            throw Invalid("Reader 输出来源状态 RPC 回执无效");
+        }
+        string sourceInstanceId = RequiredString(
+            root,
+            "sourceInstanceId",
+            160);
+        if (!string.Equals(
+            sourceInstanceId,
+            expectedSourceInstanceId,
+            StringComparison.Ordinal))
+        {
+            throw Invalid("Reader 输出来源状态 RPC 身份不匹配");
+        }
+        return new ReaderRealtimeOutputSourceStatus(
+            sourceInstanceId,
+            root.GetProperty("online").GetBoolean());
+    }
 
     internal static JsonObject Request(ReaderRealtimeOutputRequest request) =>
         new()
@@ -241,13 +329,46 @@ internal sealed class NamedPipeReaderRealtimeOutputRpcClient
         PipeOptions.Asynchronous | PipeOptions.CurrentUserOnly;
     private static readonly TimeSpan ConnectTimeout = TimeSpan.FromSeconds(3);
     private static readonly TimeSpan ExchangeTimeout = TimeSpan.FromSeconds(14);
+    private static readonly TimeSpan StatusConnectTimeout =
+        TimeSpan.FromSeconds(1);
+    private static readonly TimeSpan StatusExchangeTimeout =
+        TimeSpan.FromSeconds(2);
     private readonly SemaphoreSlim _exchangeGate = new(1, 1);
+    private readonly SemaphoreSlim _statusGate = new(1, 1);
 
-    internal async Task<ReaderRealtimeOutputAck> SendAsync(
+    internal Task<ReaderRealtimeOutputAck> SendAsync(
         ReaderRealtimeOutputRequest request,
+        CancellationToken cancellationToken) => ExchangeAsync(
+            ReaderRealtimeOutputRpcProtocol.Request(request),
+            root => ReaderRealtimeOutputRpcProtocol.ValidateResponse(
+                root,
+                request),
+            _exchangeGate,
+            ConnectTimeout,
+            ExchangeTimeout,
+            cancellationToken);
+
+    internal Task<ReaderRealtimeOutputSourceStatus> ProbeSourceAsync(
+        string sourceInstanceId,
+        CancellationToken cancellationToken) => ExchangeAsync(
+            ReaderRealtimeOutputRpcProtocol.SourceStatusRequest(
+                sourceInstanceId),
+            root => ReaderRealtimeOutputRpcProtocol
+                .ValidateSourceStatusResponse(root, sourceInstanceId),
+            _statusGate,
+            StatusConnectTimeout,
+            StatusExchangeTimeout,
+            cancellationToken);
+
+    private async Task<T> ExchangeAsync<T>(
+        JsonObject request,
+        Func<JsonElement, T> validateResponse,
+        SemaphoreSlim gate,
+        TimeSpan connectTimeout,
+        TimeSpan exchangeTimeout,
         CancellationToken cancellationToken)
     {
-        await _exchangeGate.WaitAsync(cancellationToken).ConfigureAwait(false);
+        await gate.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
         {
             await using NamedPipeClientStream pipe = new(
@@ -258,7 +379,7 @@ internal sealed class NamedPipeReaderRealtimeOutputRpcClient
             using CancellationTokenSource connect =
                 CancellationTokenSource.CreateLinkedTokenSource(
                     cancellationToken);
-            connect.CancelAfter(ConnectTimeout);
+            connect.CancelAfter(connectTimeout);
             try
             {
                 await pipe.ConnectAsync(connect.Token).ConfigureAwait(false);
@@ -272,12 +393,11 @@ internal sealed class NamedPipeReaderRealtimeOutputRpcClient
                     exception);
             }
             byte[] requestBytes = Encoding.UTF8.GetBytes(
-                ReaderRealtimeOutputRpcProtocol.Request(request)
-                    .ToJsonString(DirectBridgeContract.JsonOptions));
+                request.ToJsonString(DirectBridgeContract.JsonOptions));
             using CancellationTokenSource exchange =
                 CancellationTokenSource.CreateLinkedTokenSource(
                     cancellationToken);
-            exchange.CancelAfter(ExchangeTimeout);
+            exchange.CancelAfter(exchangeTimeout);
             try
             {
                 await ReaderVisualRpcFraming.WriteAsync(
@@ -291,9 +411,7 @@ internal sealed class NamedPipeReaderRealtimeOutputRpcClient
                 {
                     using JsonDocument document = JsonDocument.Parse(
                         responseBytes);
-                    return ReaderRealtimeOutputRpcProtocol.ValidateResponse(
-                        document.RootElement,
-                        request);
+                    return validateResponse(document.RootElement);
                 }
                 finally
                 {
@@ -330,7 +448,7 @@ internal sealed class NamedPipeReaderRealtimeOutputRpcClient
         }
         finally
         {
-            _exchangeGate.Release();
+            gate.Release();
         }
     }
 
@@ -392,6 +510,7 @@ internal sealed class NamedPipeReaderRealtimeOutputRpcServer
         CancellationToken cancellationToken)
     {
         ReaderRealtimeOutputRequest? request = null;
+        string? statusSourceInstanceId = null;
         JsonObject response;
         try
         {
@@ -401,17 +520,43 @@ internal sealed class NamedPipeReaderRealtimeOutputRpcServer
             try
             {
                 using JsonDocument document = JsonDocument.Parse(bytes);
-                request = ReaderRealtimeOutputRpcProtocol.ValidateRequest(
-                    document.RootElement);
+                JsonElement root = document.RootElement;
+                string type = root.ValueKind == JsonValueKind.Object
+                    && root.TryGetProperty("type", out JsonElement typeValue)
+                    && typeValue.ValueKind == JsonValueKind.String
+                        ? typeValue.GetString() ?? string.Empty
+                        : string.Empty;
+                if (type == ReaderRealtimeOutputRpcProtocol
+                    .SourceStatusRequestType)
+                {
+                    statusSourceInstanceId = ReaderRealtimeOutputRpcProtocol
+                        .ValidateSourceStatusRequest(root);
+                }
+                else
+                {
+                    request = ReaderRealtimeOutputRpcProtocol.ValidateRequest(
+                        root);
+                }
             }
             finally
             {
                 Array.Clear(bytes);
             }
-            ReaderRealtimeOutputAck result = await _broker.SendAsync(
-                request,
-                cancellationToken).ConfigureAwait(false);
-            response = ReaderRealtimeOutputRpcProtocol.Success(request, result);
+            if (statusSourceInstanceId is not null)
+            {
+                response = ReaderRealtimeOutputRpcProtocol
+                    .SourceStatusResponse(
+                        _broker.GetSourceStatus(statusSourceInstanceId));
+            }
+            else
+            {
+                ReaderRealtimeOutputAck result = await _broker.SendAsync(
+                    request!,
+                    cancellationToken).ConfigureAwait(false);
+                response = ReaderRealtimeOutputRpcProtocol.Success(
+                    request!,
+                    result);
+            }
         }
         catch (ReaderRealtimeOutputException exception)
         {

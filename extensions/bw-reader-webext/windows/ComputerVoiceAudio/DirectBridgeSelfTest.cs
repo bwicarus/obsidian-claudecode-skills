@@ -718,6 +718,10 @@ internal static class DirectBridgeSelfTest
             root,
             origin,
             checks).ConfigureAwait(false);
+        await CheckDictionaryFallbackProtocolAsync(
+            configPath,
+            origin,
+            checks).ConfigureAwait(false);
         await CheckSnapshotMcpModeAsync(
             root,
             origin,
@@ -745,6 +749,103 @@ internal static class DirectBridgeSelfTest
         await CheckReaderBrowserControlAsync(
             root,
             checks).ConfigureAwait(false);
+    }
+
+    private static async Task CheckDictionaryFallbackProtocolAsync(
+        string configPath,
+        string origin,
+        ICollection<string> checks)
+    {
+        DirectBridgeConfigStore store = new(configPath);
+        await using DirectBridgeCoordinator coordinator = new(
+            store,
+            new FakeDirectAppLauncher(),
+            new FakeDirectMediaAdapter());
+        FakeReaderDictionaryFallback fallback = new();
+        DirectBridgeProtocolSession session = new(
+            "connection-dictionary-fallback",
+            origin,
+            store,
+            coordinator,
+            dictionaryFallback: fallback);
+        List<object> events = [];
+        List<byte[]> frames = [];
+        object request = new
+        {
+            contract = DirectBridgeContract.Contract,
+            type = "dictionary-lookup",
+            requestId = "request-dictionary-custom-phrase",
+            mode = "meaning",
+            term = "それどころではない",
+            context = "締切が迫っていて、それどころではない。",
+            reading = "",
+            english = "",
+        };
+        JsonElement unauthenticated = await SendAsync(
+            session,
+            request,
+            events,
+            frames).ConfigureAwait(false);
+        _ = RequireSuccess(
+            await SendAsync(
+                session,
+                new
+                {
+                    contract = DirectBridgeContract.Contract,
+                    type = "hello",
+                    requestId = "request-dictionary-hello",
+                    protocolVersion = 3,
+                },
+                events,
+                frames).ConfigureAwait(false),
+            "hello");
+        JsonElement result = RequireSuccess(
+            await SendAsync(
+                session,
+                request,
+                events,
+                frames).ConfigureAwait(false),
+            "dictionary-lookup");
+        JsonElement extraField = await SendAsync(
+            session,
+            new
+            {
+                contract = DirectBridgeContract.Contract,
+                type = "dictionary-lookup",
+                requestId = "request-dictionary-extra",
+                mode = "meaning",
+                term = "語",
+                context = "",
+                reading = "",
+                english = "",
+                unexpected = true,
+            },
+            events,
+            frames).ConfigureAwait(false);
+        string allowlistMessage = JsonSerializer.Serialize(request);
+        Require(
+            !unauthenticated.GetProperty("ok").GetBoolean()
+            && unauthenticated.GetProperty("error")
+                .GetProperty("code").GetString()
+                == "BW_COMPUTER_VOICE_DIRECT_AUTH_REQUIRED"
+            && fallback.CallCount == 1
+            && fallback.LastRequest?.Term == "それどころではない"
+            && fallback.LastRequest?.Context
+                == "締切が迫っていて、それどころではない。"
+            && result.GetProperty("language").GetString() == "zh-CN"
+            && result.GetProperty("source").GetString()
+                == CodexCliReaderDictionaryFallback.Source
+            && result.GetProperty("text").GetString()
+                == "根本顾不上那件事"
+            && !result.GetProperty("cached").GetBoolean()
+            && !extraField.GetProperty("ok").GetBoolean()
+            && extraField.GetProperty("error")
+                .GetProperty("code").GetString()
+                == "BW_COMPUTER_VOICE_DIRECT_MESSAGE_INVALID"
+            && DirectBridgeServer.IsContextEndpointActionAllowed(
+                allowlistMessage),
+            "direct-dictionary-fallback-supports-contextual-custom-phrases-fail-closed",
+            checks);
     }
 
     private static async Task CheckExplicitStopFailureAsync(
@@ -6401,6 +6502,22 @@ internal static class DirectBridgeSelfTest
                 "applied",
                 null));
         ReaderRealtimeOutputAck routedAck = await routed.ConfigureAwait(false);
+        ReaderRealtimeOutputSourceStatus onlineStatus =
+            broker.GetSourceStatus(routeRequest.SourceInstanceId);
+        JsonObject statusRpcRequest = ReaderRealtimeOutputRpcProtocol
+            .SourceStatusRequest(routeRequest.SourceInstanceId);
+        using JsonDocument statusRequestDocument = JsonDocument.Parse(
+            statusRpcRequest.ToJsonString(DirectBridgeContract.JsonOptions));
+        string validatedStatusSource = ReaderRealtimeOutputRpcProtocol
+            .ValidateSourceStatusRequest(statusRequestDocument.RootElement);
+        JsonObject statusRpcResponse = ReaderRealtimeOutputRpcProtocol
+            .SourceStatusResponse(onlineStatus);
+        using JsonDocument statusResponseDocument = JsonDocument.Parse(
+            statusRpcResponse.ToJsonString(DirectBridgeContract.JsonOptions));
+        ReaderRealtimeOutputSourceStatus validatedStatus =
+            ReaderRealtimeOutputRpcProtocol.ValidateSourceStatusResponse(
+                statusResponseDocument.RootElement,
+                routeRequest.SourceInstanceId);
         router.Detach(leaseB);
         bool noFallback = false;
         try
@@ -6451,6 +6568,9 @@ internal static class DirectBridgeSelfTest
             && sentToA == 0
             && sentToB == 1
             && routedAck.Outcome == "applied"
+            && onlineStatus.Online
+            && validatedStatusSource == routeRequest.SourceInstanceId
+            && validatedStatus.Online
             && noFallback
             && validatedRequest.Kind == "tool-status"
             && validatedResponse.Outcome == "applied"
@@ -6740,8 +6860,20 @@ internal static class DirectBridgeSelfTest
                     },
                 },
             }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 15,
+                method = "tools/call",
+                @params = new
+                {
+                    name = ReaderContextMcpServer.ToolName,
+                    arguments = new { },
+                },
+            }),
             "");
         List<ReaderRealtimeOutputRequest> sent = [];
+        int probeCount = 0;
         StringWriter output = new();
         ReaderContextMcpServer server = new(
             snapshotPath,
@@ -6749,19 +6881,16 @@ internal static class DirectBridgeSelfTest
             output,
             utcNow: () => DateTimeOffset.FromUnixTimeMilliseconds(
                 observedAt + 1_000),
+            probeOutputSourceAsync: (sourceInstanceId, _) =>
+            {
+                probeCount += 1;
+                return Task.FromResult(
+                    new ReaderRealtimeOutputSourceStatus(
+                        sourceInstanceId,
+                        probeCount != 2));
+            },
             sendOutputAsync: (request, _) =>
             {
-                if (
-                    request.Kind == "card"
-                    && request.Payload["card"]?["title"]
-                        ?.GetValue<string>() == "离线天气"
-                )
-                {
-                    throw new ReaderRealtimeOutputException(
-                        "BW_READER_REALTIME_OUTPUT_SOURCE_OFFLINE",
-                        "指定 Reader 页面来源当前不在线",
-                        retryable: true);
-                }
                 sent.Add(request);
                 return Task.FromResult(new ReaderRealtimeOutputAck(
                     "session-output",
@@ -6835,8 +6964,12 @@ internal static class DirectBridgeSelfTest
                 responses[13].RootElement.GetProperty("result")
                     .GetProperty("content")[0].GetProperty("text")
                     .GetString()!);
+            using JsonDocument snapshotResult = JsonDocument.Parse(
+                responses[14].RootElement.GetProperty("result")
+                    .GetProperty("content")[0].GetProperty("text")
+                    .GetString()!);
             Require(
-                responses.Length == 14
+                responses.Length == 15
                 && initialize.GetProperty("capabilities")
                     .TryGetProperty("resources", out _)
                 && initialize.GetProperty("instructions").GetString()!
@@ -6938,6 +7071,14 @@ internal static class DirectBridgeSelfTest
                     .GetString() == "draft_delivered"
                 && !ankiDraftResult.RootElement.GetProperty("anki_written")
                     .GetBoolean()
+                && snapshotResult.RootElement.GetProperty("outputAccess")
+                    .GetProperty("available").GetBoolean()
+                && snapshotResult.RootElement.GetProperty("outputAccess")
+                    .GetProperty("verified").GetBoolean()
+                && snapshotResult.RootElement.GetProperty("outputAccess")
+                    .GetProperty("sourceInstanceId").GetString()
+                    == "source-output"
+                && probeCount == 7
                 && sent.Count == 5
                 && sent[0].SourceInstanceId == "source-output"
                 && sent[0].SnapshotRevision == 42
@@ -10128,6 +10269,30 @@ internal static class DirectBridgeSelfTest
             {
                 _onDispose();
             }
+        }
+    }
+
+    private sealed class FakeReaderDictionaryFallback :
+        IReaderDictionaryFallback
+    {
+        internal int CallCount { get; private set; }
+
+        internal ReaderDictionaryFallbackRequest? LastRequest { get; private set; }
+
+        public Task<ReaderDictionaryFallbackResult> LookupAsync(
+            ReaderDictionaryFallbackRequest request,
+            CancellationToken cancellationToken)
+        {
+            cancellationToken.ThrowIfCancellationRequested();
+            CallCount++;
+            LastRequest = request;
+            return Task.FromResult(new ReaderDictionaryFallbackResult(
+                request.Term,
+                request.Mode,
+                CodexCliReaderDictionaryFallback.Language,
+                "根本顾不上那件事",
+                CodexCliReaderDictionaryFallback.Source,
+                Cached: false));
         }
     }
 

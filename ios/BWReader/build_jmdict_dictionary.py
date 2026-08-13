@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-"""Build the pinned, compact JMdict exact-lookup data used by Reader clients.
+"""Build the pinned, App-downloadable Japanese dictionary.
 
-The generated directory is checked in and is the single source copied into the
-native ReaderBundle and the browser extension.  Updating the dictionary is an
-explicit operation: change the immutable release URL/version/digest together,
-run this script, and review the generated manifest before accepting the update.
+JMdict remains authoritative for spelling, readings, POS and inflection.  A
+digest-pinned Simplified-Chinese Wiktionary extract supplies display glosses.
+Neither source is bundled in the IPA, books, Pi sync or browser extensions.
 """
 from __future__ import annotations
 
 import argparse
 import hashlib
 import json
-import math
 import os
 from pathlib import Path, PurePosixPath
+import re
 import shutil
 import tarfile
 import tempfile
@@ -30,7 +29,7 @@ DEFAULT_CACHE = Path(
     )
 )
 LICENSE_SOURCE = HERE / "JMdict-LICENSE.txt"
-REPOSITORY_ROOT = HERE.parents[1]
+CHINESE_LICENSE_SOURCE = HERE / "ZhWiktionary-LICENSE.txt"
 
 SOURCE_NAME = "JMdict English via jmdict-simplified"
 SOURCE_RELEASE = "3.6.2+20260810124713"
@@ -45,14 +44,24 @@ SOURCE_URL = (
 )
 SOURCE_SHA256 = "e6802135b445627a8f09c544bf8c32c3d344515f6e95a473e8bd39e09ad00109"
 
-MANIFEST_CONTRACT = "bw-jmdict-manifest/1"
-SHARD_CONTRACT = "bw-jmdict-shard/1"
+CHINESE_SOURCE_NAME = "Chinese Wiktionary Japanese via Kaikki"
+CHINESE_SOURCE_RELEASE = "zhwiktionary-ja-605256f3b7fc"
+CHINESE_SOURCE_NAME_ON_DISK = "kaikki-zhwiktionary-ja.jsonl"
+CHINESE_SOURCE_URL = (
+    "https://kaikki.org/zhwiktionary/%E6%97%A5%E8%AF%AD/"
+    "kaikki.org-dictionary-%E6%97%A5%E8%AF%AD.jsonl"
+)
+CHINESE_SOURCE_SHA256 = (
+    "605256f3b7fc73337b9b9d47612ab27477cff92c230dfc2c900545d52de1c63c"
+)
+
+MANIFEST_CONTRACT = "bw-jmdict-manifest/2"
+SHARD_CONTRACT = "bw-jmdict-shard/2"
 SHARD_ALGORITHM = "utf8-prefix-2-kana-3/1"
 KANA_SPLIT_PREFIXES = {"e381", "e382", "e383"}
 MANIFEST_NAME = "manifest.json"
 LICENSE_NAME = "LICENSE-JMdict.txt"
-ZH_OVERLAY_NAME = "zh-overlay.json"
-ZH_OVERLAY_CONTRACT = "bw-japanese-zh-overlay/1"
+CHINESE_LICENSE_NAME = "LICENSE-ZhWiktionary.txt"
 SHARD_DIRECTORY = "shards"
 
 
@@ -218,110 +227,151 @@ def _validate_source(payload: object) -> tuple[list[object], dict[str, str]]:
     return words, clean_tags
 
 
-def find_overlay_cache(explicit: Path | None = None) -> Path | None:
-    if explicit is not None:
-        return explicit.resolve()
-    local = REPOSITORY_ROOT / "state" / "dict-cache"
-    if local.is_dir():
-        return local
-    windows_fallback = Path(r"C:\claude\state\dict-cache")
-    if windows_fallback.is_dir():
-        return windows_fallback
-    return None
-
-
-def _overlay_text(value: object) -> str:
-    return value.strip() if isinstance(value, str) else ""
-
-
-def _overlay_examples(value: object) -> list[dict[str, str]]:
-    if not isinstance(value, list):
-        return []
-    examples: list[dict[str, str]] = []
-    for raw in value:
-        if not isinstance(raw, dict):
-            continue
-        example = {
-            key: text
-            for key in ("ja", "zh")
-            if (text := _overlay_text(raw.get(key)))
-        }
-        if example:
-            examples.append(example)
-    return examples
-
-
-def build_zh_overlay(cache_dir: Path | None) -> tuple[dict[str, object], dict[str, int]]:
-    """Read the user's existing cache as a non-authoritative optional layer."""
-    selected: dict[str, tuple[tuple[float, int, int, str], dict[str, object]]] = {}
-    scanned = 0
-    rejected = 0
-    if cache_dir is not None and cache_dir.is_dir():
-        for path in sorted(cache_dir.glob("jp-*.json"), key=lambda item: item.name):
-            if not path.is_file():
-                continue
-            scanned += 1
+def load_chinese_records(path: Path):
+    """Yield the digest-checked Kaikki JSONL records without loading all at once."""
+    with path.open("r", encoding="utf-8") as stream:
+        for line_number, line in enumerate(stream, start=1):
             try:
-                raw = json.loads(path.read_text(encoding="utf-8"))
-            except (OSError, UnicodeError, ValueError):
-                rejected += 1
+                yield json.loads(line)
+            except ValueError as error:
+                raise ValueError(
+                    f"Chinese Wiktionary JSONL line {line_number} is invalid"
+                ) from error
+
+
+def _contains_han(value: str) -> bool:
+    return any("\u3400" <= character <= "\u9fff" for character in value)
+
+
+def _compact_chinese_record(raw: object) -> dict[str, object] | None:
+    if not isinstance(raw, dict) or raw.get("lang_code") != "ja":
+        return None
+    word = raw.get("word")
+    senses = raw.get("senses")
+    if not isinstance(word, str) or not word or not isinstance(senses, list):
+        return None
+    word = normalize_term(word)
+    readings: set[str] = set()
+    forms = raw.get("forms")
+    if isinstance(forms, list):
+        for form in forms:
+            if not isinstance(form, dict) or not isinstance(form.get("ruby"), list):
                 continue
-            if not isinstance(raw, dict):
-                rejected += 1
-                continue
-            word = _overlay_text(raw.get("word"))
-            zh = _overlay_text(raw.get("zh"))
-            if not word or not zh:
-                rejected += 1
-                continue
-            word = normalize_term(word)
-            reading = _overlay_text(raw.get("reading"))
-            pos = _overlay_text(raw.get("pos"))
-            source = _overlay_text(raw.get("source"))
-            raw_pv = raw.get("pv")
-            pv = (
-                float(raw_pv)
-                if isinstance(raw_pv, (int, float))
-                and not isinstance(raw_pv, bool)
-                and math.isfinite(float(raw_pv))
-                else 0.0
+            ruby = form["ruby"]
+            reading = "".join(
+                item[1]
+                for item in ruby
+                if isinstance(item, list)
+                and len(item) >= 2
+                and isinstance(item[1], str)
             )
-            if pv.is_integer():
-                pv_value: int | float = int(pv)
-            else:
-                pv_value = pv
-            examples = _overlay_examples(raw.get("examples"))
-            entry: dict[str, object] = {
-                "word": word,
-                "reading": reading,
-                "pos": pos,
-                "zh": zh,
-                "examples": examples,
-                "source": source,
-                "pv": pv_value,
-            }
-            # Higher pv wins.  At equal pv prefer records with populated
-            # optional display fields and examples; the filename is the final
-            # deterministic tie-breaker and is not exposed in the output.
-            rank = (pv, int(bool(reading)) + int(bool(pos)) + int(bool(source)), len(examples), path.name)
-            previous = selected.get(word)
-            if previous is None or rank > previous[0]:
-                selected[word] = (rank, entry)
-    overlay = {
-        "contract": ZH_OVERLAY_CONTRACT,
-        "normalization": "NFC",
-        "complete": False,
-        "authoritative": False,
-        "source": "user-existing-dict-cache",
-        "entries": {
-            word: selected[word][1]
-            for word in sorted(selected)
-        },
+            if reading:
+                readings.add(normalize_term(reading))
+    sounds = raw.get("sounds")
+    if isinstance(sounds, list):
+        for sound in sounds:
+            if isinstance(sound, dict) and isinstance(sound.get("other"), str):
+                reading = sound["other"].strip()
+                if reading:
+                    readings.add(normalize_term(reading))
+
+    glosses: list[str] = []
+    seen: set[str] = set()
+    for sense in senses:
+        if not isinstance(sense, dict) or not isinstance(sense.get("glosses"), list):
+            continue
+        for raw_gloss in sense["glosses"]:
+            if not isinstance(raw_gloss, str):
+                continue
+            text = unicodedata.normalize("NFC", raw_gloss).strip()
+            if text.startswith(word + "【"):
+                close = text.find("】", len(word) + 1)
+                if close >= 0:
+                    header_reading = text[len(word) + 1 : close].strip()
+                    if header_reading:
+                        readings.add(normalize_term(header_reading))
+                    text = text[close + 1 :].lstrip(" \t\r\n：:")
+            elif text.startswith(word + "\n"):
+                text = text[len(word) :].lstrip()
+            text = re.sub(r"\s+", " ", text).strip()
+            if (
+                not text
+                or text == word
+                or not _contains_han(text)
+                or text in seen
+            ):
+                continue
+            seen.add(text)
+            glosses.append(text[:600])
+            if len(glosses) >= 6:
+                break
+        if len(glosses) >= 6:
+            break
+    if not glosses:
+        return None
+    return {
+        "word": word,
+        "readings": sorted(readings),
+        "glosses": glosses,
     }
-    return overlay, {
-        "scannedFiles": scanned,
-        "acceptedTerms": len(selected),
-        "rejectedFiles": rejected,
+
+
+def attach_chinese_glosses(
+    entries_by_id: dict[str, dict[str, object]],
+    exact_ids: dict[str, dict[str, set[str]]],
+    records,
+) -> dict[str, int]:
+    source_records = 0
+    accepted_records = 0
+    ambiguous_skipped = 0
+    matched_entry_ids: set[str] = set()
+    gloss_count = 0
+    for raw in records:
+        source_records += 1
+        record = _compact_chinese_record(raw)
+        if record is None:
+            continue
+        accepted_records += 1
+        word = str(record["word"])
+        candidates = sorted(
+            exact_ids.get(shard_key(word), {}).get(word, set()),
+            key=int,
+        )
+        if not candidates:
+            continue
+        readings = set(str(value) for value in record["readings"])
+        if readings:
+            matching = [
+                entry_id
+                for entry_id in candidates
+                if readings.intersection(
+                    str(value) for value in entries_by_id[entry_id]["readings"]
+                )
+            ]
+            if not matching:
+                ambiguous_skipped += 1
+                continue
+            candidates = matching
+        elif len(candidates) != 1:
+            ambiguous_skipped += 1
+            continue
+        for entry_id in candidates:
+            entry = entries_by_id[entry_id]
+            target = entry.setdefault("zhGlosses", [])
+            if not isinstance(target, list):
+                raise ValueError("JMdict Chinese gloss target is invalid")
+            for gloss in record["glosses"]:
+                if gloss not in target and len(target) < 8:
+                    target.append(gloss)
+                    gloss_count += 1
+            if target:
+                matched_entry_ids.add(entry_id)
+    return {
+        "sourceRecords": source_records,
+        "acceptedRecords": accepted_records,
+        "matchedEntries": len(matched_entry_ids),
+        "glosses": gloss_count,
+        "ambiguousSkipped": ambiguous_skipped,
     }
 
 
@@ -329,7 +379,7 @@ def build_from_payload(
     payload: object,
     output: Path,
     *,
-    overlay_cache: Path | None = None,
+    chinese_records,
 ) -> dict[str, object]:
     words, tags = _validate_source(payload)
     entries_by_id: dict[str, dict[str, object]] = {}
@@ -354,15 +404,22 @@ def build_from_payload(
     if missing_tags:
         raise ValueError(f"JMdict POS tags have no labels: {missing_tags!r}")
 
+    chinese_counts = attach_chinese_glosses(
+        entries_by_id,
+        exact_ids,
+        chinese_records,
+    )
+    if chinese_counts["matchedEntries"] <= 0:
+        raise ValueError("Chinese Wiktionary source matched no JMdict entries")
+
     output = output.resolve()
     output.parent.mkdir(parents=True, exist_ok=True)
     staging = Path(tempfile.mkdtemp(prefix=".DictionaryData-", dir=output.parent))
     try:
         license_payload = LICENSE_SOURCE.read_bytes()
         (staging / LICENSE_NAME).write_bytes(license_payload)
-        overlay, overlay_counts = build_zh_overlay(find_overlay_cache(overlay_cache))
-        overlay_path = staging / ZH_OVERLAY_NAME
-        _write_json(overlay_path, overlay)
+        chinese_license_payload = CHINESE_LICENSE_SOURCE.read_bytes()
+        (staging / CHINESE_LICENSE_NAME).write_bytes(chinese_license_payload)
         shard_manifest: dict[str, dict[str, object]] = {}
         total_terms = 0
         total_entry_copies = 0
@@ -422,18 +479,25 @@ def build_from_payload(
                 "name": "Creative Commons Attribution-ShareAlike 4.0 International",
                 "path": LICENSE_NAME,
                 "sha256": sha256_bytes(license_payload),
+                "bytes": len(license_payload),
                 "attribution": "JMdict by the Electronic Dictionary Research and Development Group",
                 "projectUrl": "https://www.edrdg.org/wiki/index.php/JMdict-EDICT_Dictionary_Project",
                 "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
             },
-            "zhOverlay": {
-                "path": ZH_OVERLAY_NAME,
-                "sha256": sha256_file(overlay_path),
-                "bytes": overlay_path.stat().st_size,
-                "complete": False,
-                "authoritative": False,
-                "source": "user-existing-dict-cache",
-                **overlay_counts,
+            "chineseSource": {
+                "name": CHINESE_SOURCE_NAME,
+                "release": CHINESE_SOURCE_RELEASE,
+                "url": CHINESE_SOURCE_URL,
+                "sha256": CHINESE_SOURCE_SHA256,
+            },
+            "chineseLicense": {
+                "name": "CC BY-SA 4.0 and GNU Free Documentation License",
+                "path": CHINESE_LICENSE_NAME,
+                "sha256": sha256_bytes(chinese_license_payload),
+                "bytes": len(chinese_license_payload),
+                "attribution": "Chinese Wiktionary contributors; extracted by Kaikki",
+                "projectUrl": "https://kaikki.org/zhwiktionary/",
+                "licenseUrl": "https://creativecommons.org/licenses/by-sa/4.0/",
             },
             "posLabels": {code: tags[code] for code in sorted(used_pos)},
             "shards": shard_manifest,
@@ -442,6 +506,7 @@ def build_from_payload(
                 "exactTerms": total_terms,
                 "shards": len(shard_manifest),
                 "entryCopies": total_entry_copies,
+                "chinese": chinese_counts,
             },
         }
         _write_json(staging / MANIFEST_NAME, manifest)
@@ -456,7 +521,10 @@ def build_from_payload(
                 ).get("contract")
             except (OSError, ValueError):
                 existing_contract = None
-            if existing_contract != MANIFEST_CONTRACT:
+            if existing_contract not in {
+                "bw-jmdict-manifest/1",
+                MANIFEST_CONTRACT,
+            }:
                 raise ValueError(f"refusing to replace unknown directory: {output}")
             shutil.rmtree(output)
         os.replace(staging, output)
@@ -486,27 +554,26 @@ def validate_output(root: Path) -> dict[str, object]:
     license_path = root / LICENSE_NAME
     if not license_path.is_file() or sha256_file(license_path) != license_value.get("sha256"):
         raise ValueError("JMdict license file mismatch")
-    overlay_value = manifest.get("zhOverlay")
-    if not isinstance(overlay_value, dict) or overlay_value.get("path") != ZH_OVERLAY_NAME:
-        raise ValueError("JMdict Chinese overlay declaration mismatch")
-    if overlay_value.get("complete") is not False or overlay_value.get("authoritative") is not False:
-        raise ValueError("JMdict Chinese overlay must remain partial and non-authoritative")
-    overlay_path = root / ZH_OVERLAY_NAME
+    chinese_source = manifest.get("chineseSource")
     if (
-        not overlay_path.is_file()
-        or overlay_path.stat().st_size != overlay_value.get("bytes")
-        or sha256_file(overlay_path) != overlay_value.get("sha256")
+        not isinstance(chinese_source, dict)
+        or chinese_source.get("release") != CHINESE_SOURCE_RELEASE
+        or chinese_source.get("sha256") != CHINESE_SOURCE_SHA256
     ):
-        raise ValueError("JMdict Chinese overlay file mismatch")
-    overlay = json.loads(overlay_path.read_text(encoding="utf-8"))
+        raise ValueError("Chinese Wiktionary source digest mismatch")
+    chinese_license = manifest.get("chineseLicense")
     if (
-        overlay.get("contract") != ZH_OVERLAY_CONTRACT
-        or overlay.get("normalization") != "NFC"
-        or overlay.get("complete") is not False
-        or overlay.get("authoritative") is not False
-        or not isinstance(overlay.get("entries"), dict)
+        not isinstance(chinese_license, dict)
+        or chinese_license.get("path") != CHINESE_LICENSE_NAME
     ):
-        raise ValueError("JMdict Chinese overlay contract mismatch")
+        raise ValueError("Chinese Wiktionary license declaration mismatch")
+    chinese_license_path = root / CHINESE_LICENSE_NAME
+    if (
+        not chinese_license_path.is_file()
+        or chinese_license_path.stat().st_size != chinese_license.get("bytes")
+        or sha256_file(chinese_license_path) != chinese_license.get("sha256")
+    ):
+        raise ValueError("Chinese Wiktionary license file mismatch")
 
     shards = manifest.get("shards")
     if not isinstance(shards, dict) or not shards:
@@ -538,6 +605,22 @@ def validate_output(root: Path) -> dict[str, object]:
             raise ValueError(f"JMdict shard shape mismatch: {key}")
         if len(entries) != item.get("entries") or len(exact) != item.get("terms"):
             raise ValueError(f"JMdict shard count mismatch: {key}")
+        for entry in entries:
+            if not isinstance(entry, dict):
+                raise ValueError(f"JMdict shard entry is invalid: {key}")
+            glosses = entry.get("zhGlosses")
+            if glosses is not None and (
+                not isinstance(glosses, list)
+                or not glosses
+                or len(glosses) > 8
+                or any(
+                    not isinstance(gloss, str)
+                    or not gloss
+                    or len(gloss) > 600
+                    for gloss in glosses
+                )
+            ):
+                raise ValueError(f"JMdict Chinese glosses are invalid: {key}")
         for term, indices in exact.items():
             if not isinstance(term, str) or shard_key(term) != key:
                 raise ValueError(f"JMdict shard contains a misrouted term: {key}")
@@ -589,6 +672,38 @@ def obtain_source(cache_dir: Path, *, offline: bool) -> Path:
             temporary.unlink()
 
 
+def obtain_chinese_source(cache_dir: Path, *, offline: bool) -> Path:
+    cache_dir.mkdir(parents=True, exist_ok=True)
+    destination = cache_dir / CHINESE_SOURCE_NAME_ON_DISK
+    if destination.is_file() and sha256_file(destination) == CHINESE_SOURCE_SHA256:
+        return destination
+    if offline:
+        raise ValueError(
+            f"verified Chinese Wiktionary source is unavailable: {destination}"
+        )
+    temporary = destination.with_suffix(destination.suffix + ".part")
+    try:
+        request = urllib.request.Request(
+            CHINESE_SOURCE_URL,
+            headers={"User-Agent": "BWReader-Japanese-dictionary-builder/2"},
+        )
+        with urllib.request.urlopen(request, timeout=120) as response, temporary.open(
+            "wb"
+        ) as out:
+            shutil.copyfileobj(response, out, length=1024 * 1024)
+        actual = sha256_file(temporary)
+        if actual != CHINESE_SOURCE_SHA256:
+            raise ValueError(
+                "Chinese Wiktionary digest mismatch: "
+                f"{actual} != {CHINESE_SOURCE_SHA256}"
+            )
+        os.replace(temporary, destination)
+        return destination
+    finally:
+        if temporary.exists():
+            temporary.unlink()
+
+
 def load_source_archive(path: Path) -> object:
     with tarfile.open(path, "r:gz") as archive:
         members = [member for member in archive.getmembers() if member.isfile()]
@@ -606,9 +721,9 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--cache-dir", type=Path, default=DEFAULT_CACHE)
     parser.add_argument("--offline", action="store_true")
     parser.add_argument(
-        "--overlay-cache",
+        "--chinese-source",
         type=Path,
-        help="explicit jp-*.json cache directory (default: workspace, then C:\\claude)",
+        help="explicit digest-pinned Chinese Wiktionary JSONL source",
     )
     parser.add_argument(
         "--verify", type=Path, help="verify generated data without downloading"
@@ -622,15 +737,30 @@ def main(argv: list[str] | None = None) -> int:
         manifest = validate_output(args.verify.resolve())
     else:
         archive = obtain_source(args.cache_dir.resolve(), offline=args.offline)
+        chinese_source = (
+            args.chinese_source.resolve()
+            if args.chinese_source is not None
+            else obtain_chinese_source(
+                args.cache_dir.resolve(),
+                offline=args.offline,
+            )
+        )
+        actual_chinese_digest = sha256_file(chinese_source)
+        if actual_chinese_digest != CHINESE_SOURCE_SHA256:
+            raise ValueError(
+                "Chinese Wiktionary digest mismatch: "
+                f"{actual_chinese_digest} != {CHINESE_SOURCE_SHA256}"
+            )
         manifest = build_from_payload(
             load_source_archive(archive),
             args.output,
-            overlay_cache=args.overlay_cache,
+            chinese_records=load_chinese_records(chinese_source),
         )
     counts = manifest["counts"]
     print(f"entries={counts['sourceEntries']}")
     print(f"terms={counts['exactTerms']}")
     print(f"shards={counts['shards']}")
+    print(f"chinese_entries={counts['chinese']['matchedEntries']}")
     print(f"manifest_sha256={sha256_file((args.verify or args.output).resolve() / MANIFEST_NAME)}")
     return 0
 

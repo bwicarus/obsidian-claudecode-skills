@@ -686,6 +686,11 @@ internal sealed class ReaderRealtimeOutputBroker
         _router = router;
     }
 
+    internal ReaderRealtimeOutputSourceStatus GetSourceStatus(
+        string sourceInstanceId) => new(
+            sourceInstanceId,
+            _router.TryGetLease(sourceInstanceId, out _));
+
     internal async Task<ReaderRealtimeOutputAck> SendAsync(
         ReaderRealtimeOutputRequest request,
         CancellationToken cancellationToken)

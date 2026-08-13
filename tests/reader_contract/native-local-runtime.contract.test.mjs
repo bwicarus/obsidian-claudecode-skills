@@ -553,6 +553,49 @@ test("native local runtime does not mutate both stores merely to open a book", a
   assert.deepEqual(gateEvents, []);
 });
 
+test("ReaderPC contextual Chinese meanings persist only in the App device store", async () => {
+  const first = await harness();
+  const request = {
+    mode: "meaning",
+    term: "それどころではない",
+    context: "締切が迫っていて、それどころではない。",
+    reading: "",
+    english: "",
+  };
+  const cache = first.context.BWReaderRuntime.nativeLocalRuntime
+    .dictionaryFallbackCache;
+  assert.equal(await cache.get(request), null);
+  await cache.put(request, {
+    language: "zh-CN",
+    text: "根本顾不上那件事",
+    source: "pc-codex-cli",
+  });
+  assert.equal(first.gatewayMessages.length, 0);
+
+  const reopened = await harness({
+    dataStoresState: first.dataStoresState,
+    localStorageState: first.localStorageState,
+  });
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(
+      await reopened.context.BWReaderRuntime.nativeLocalRuntime
+        .dictionaryFallbackCache.get(request),
+    )),
+    {
+      language: "zh-CN",
+      text: "根本顾不上那件事",
+      source: "pc-codex-cli",
+      cached: true,
+    },
+  );
+  assert.equal(
+    await reopened.context.BWReaderRuntime.nativeLocalRuntime
+      .dictionaryFallbackCache.get({ ...request, context: "不同句境" }),
+    null,
+  );
+  assert.equal(reopened.gatewayMessages.length, 0);
+});
+
 test("native PDF book metadata bypasses a pending annotation-store boot", async () => {
   let releasePreferences;
   const pendingPreferences = new Promise((resolve) => {

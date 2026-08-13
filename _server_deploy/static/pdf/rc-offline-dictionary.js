@@ -2,15 +2,16 @@
  *
  * Dictionary bytes are deliberately absent from ReaderBundle and every
  * extension package. App pages read the user-installed, digest-checked files
- * through the token-scoped loopback API. Pi AI remains a separate, explicit
- * refinement action owned by rc-wordpop/rc-phrasepop.
+ * through the token-scoped loopback API. Missing Chinese meanings are handled
+ * by ReaderPC's authenticated local Codex CLI bridge; Pi remains only an
+ * explicit legacy deep-analysis fallback owned by rc-wordpop/rc-phrasepop.
  */
 (function () {
   if (!window.RC) window.RC = {};
   if (window.RC.offlineDictionary) return;
 
-  var MANIFEST_CONTRACT = 'bw-jmdict-manifest/1';
-  var SHARD_CONTRACT = 'bw-jmdict-shard/1';
+  var MANIFEST_CONTRACT = 'bw-jmdict-manifest/2';
+  var SHARD_CONTRACT = 'bw-jmdict-shard/2';
   var nativeBase = String(window.__BW_NATIVE_LOCAL_BASE_PATH__ || '').replace(/\/+$/, '');
   var BASE = nativeBase + '/native-api/offline-dictionary/';
   var localMode = !!nativeBase;
@@ -178,11 +179,6 @@
       inflectionMark: mark,
       entry: entry,
       candidates: found,
-      // The packaged overlay is a retained migration artifact from a small
-      // context-sensitive AI cache.  Its own manifest marks it incomplete and
-      // non-authoritative, so it must never override JMdict pronunciation,
-      // part of speech, or meaning in the automatic dictionary result.
-      zhRecord: null,
       posLabels: manifest.posLabels || {},
       sourceVersion: manifest.source &&
         (manifest.source.release || manifest.source.dictionaryVersion || manifest.source.version) || ''
@@ -193,6 +189,11 @@
     if (!result || !result.ok) return result || { ok: false, source: 'local-jmdict' };
     var entry = result.entry || {};
     var glosses = Array.isArray(entry.glosses) ? entry.glosses.filter(Boolean) : [];
+    var zhGlosses = Array.isArray(entry.zhGlosses)
+      ? entry.zhGlosses.filter(Boolean) : [];
+    var hasChinese = zhGlosses.length > 0;
+    var chineseText = zhGlosses.slice(0, 4).join('；');
+    var englishText = glosses.slice(0, 6).join('; ');
     var forms = Array.isArray(entry.forms) ? entry.forms.filter(Boolean) : [];
     var readings = Array.isArray(entry.readings) ? entry.readings.filter(Boolean) : [];
     var labels = result.posLabels || {};
@@ -208,15 +209,17 @@
       forms: forms,
       reading: readings[0] || '',
       pos: pos,
-      zh: '',
-      translation: glosses.slice(0, 3).join('; '),
-      definition: glosses.slice(0, 6).join('; '),
+      zh: chineseText,
+      translation: hasChinese ? chineseText : englishText,
+      definition: hasChinese ? chineseText : englishText,
       examples: [],
       inflect: result.inflectionMark ? { base: lemma, marks: [result.inflectionMark] } : null,
       local_candidates: result.candidates || [],
       source: 'local-jmdict',
       source_version: result.sourceVersion || '',
-      local_zh: false
+      local_zh: hasChinese,
+      meaning_language: hasChinese ? 'zh' : 'en',
+      english_fallback: !hasChinese
     };
   }
 

@@ -1,0 +1,21 @@
+Reader Japanese dictionary: Simplified-Chinese meaning layer
+
+Source project: Chinese Wiktionary contributors
+Source extraction: Kaikki machine-readable dictionaries
+Source page: https://kaikki.org/zhwiktionary/
+Pinned Japanese JSONL source and SHA-256 are recorded in
+build_jmdict_dictionary.py and the generated manifest.json.
+
+The extracted Wiktionary material is redistributed under the licenses used by
+Wiktionary: Creative Commons Attribution-ShareAlike 4.0 International and the
+GNU Free Documentation License. See:
+
+https://creativecommons.org/licenses/by-sa/4.0/
+https://www.gnu.org/licenses/fdl-1.3.html
+https://foundation.wikimedia.org/wiki/Policy:Terms_of_Use
+
+Reader keeps the Chinese meanings as an attributed display layer. JMdict
+remains the authority for Japanese spelling, reading, part of speech and
+inflection. The generated data is an optional App-private download and is not
+included in the IPA, browser extension, book attachments, Pi sync, or iCloud
+backup.

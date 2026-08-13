@@ -48,6 +48,10 @@ internal sealed class ReaderContextMcpServer
         ReaderRealtimeOutputRequest,
         CancellationToken,
         Task<ReaderRealtimeOutputAck>>? _sendOutputAsync;
+    private readonly Func<
+        string,
+        CancellationToken,
+        Task<ReaderRealtimeOutputSourceStatus>>? _probeOutputSourceAsync;
     private JsonObject? _latestSnapshot;
     private long _latestRevision = -1;
     private string? _latestProducerInstanceId;
@@ -74,6 +78,11 @@ internal sealed class ReaderContextMcpServer
             ReaderRealtimeOutputRequest,
             CancellationToken,
             Task<ReaderRealtimeOutputAck>>? sendOutputAsync = null,
+        Func<
+            string,
+            CancellationToken,
+            Task<ReaderRealtimeOutputSourceStatus>>?
+                probeOutputSourceAsync = null,
         ReaderCapabilityCatalog? capabilityCatalog = null)
     {
         if (!Path.IsPathFullyQualified(statePath))
@@ -90,6 +99,7 @@ internal sealed class ReaderContextMcpServer
         _fetchVisualAsync = fetchVisualAsync;
         _controlBrowserAsync = controlBrowserAsync;
         _sendOutputAsync = sendOutputAsync;
+        _probeOutputSourceAsync = probeOutputSourceAsync;
         _capabilityCatalog = capabilityCatalog ?? new ReaderCapabilityCatalog();
         _startedAt = _utcNow().ToString("O");
         string directory = Path.GetDirectoryName(_statePath)
@@ -386,7 +396,8 @@ internal sealed class ReaderContextMcpServer
                     + "For an exact source-text highlight or an editable "
                     + "Anki draft, call reader_context_snapshot first, copy "
                     + "the exact current file identity and verbatim source "
-                    + "text, then use reader_highlight_text or "
+                    + "text, confirm outputAccess.available is true, then "
+                    + "use reader_highlight_text or "
                     + "reader_anki_draft. Those tools reject a wrong book, "
                     + "wrong page or section, missing text, or text that is "
                     + "not unique. reader_anki_draft only displays the "
@@ -453,7 +464,10 @@ internal sealed class ReaderContextMcpServer
                     + "never reuse text when it is pending or stale. Read "
                     + "visualAccess to discover whether the exact App "
                     + "surface can be requested on demand; page_image=null "
-                    + "alone does not mean that no image is available.",
+                    + "alone does not mean that no image is available. Read "
+                    + "outputAccess before calling a mutating Reader tool: "
+                    + "a readable cached page can remain ready after its "
+                    + "live App or extension source has disconnected.",
                 ["inputSchema"] = new JsonObject
                 {
                     ["type"] = "object",
@@ -594,7 +608,8 @@ internal sealed class ReaderContextMcpServer
                     + "in the currently open book, including a specified PDF "
                     + "page or EPUB section that is not the current selection. "
                     + "Call reader_context_snapshot first and copy its exact "
-                    + "file identity. The Reader rejects a wrong book, wrong "
+                    + "file identity; proceed only when outputAccess.available "
+                    + "is true. The Reader rejects a wrong book, wrong "
                     + "page or section, missing text, or more than one match. "
                     + "Do not retry a timeout or unknown outcome blindly.",
                 ["inputSchema"] = BuildExactSourceArgumentsSchema(false),
@@ -613,7 +628,8 @@ internal sealed class ReaderContextMcpServer
                     "Deliver editable Anki card drafts for an exact verbatim "
                     + "source span in the currently open book. Call "
                     + "reader_context_snapshot first and copy its exact file "
-                    + "identity. The Reader requires exactly one match on the "
+                    + "identity; proceed only when outputAccess.available is "
+                    + "true. The Reader requires exactly one match on the "
                     + "specified PDF page or EPUB section before showing its "
                     + "existing confirmation UI. This tool never writes "
                     + "Anki: success means only draft_delivered. The user "
@@ -1057,6 +1073,8 @@ internal sealed class ReaderContextMcpServer
 
         await TryLoadLatestAsync(cancellationToken).ConfigureAwait(false);
         JsonObject payload = BuildToolPayload();
+        await AttachOutputAccessAsync(payload, cancellationToken)
+            .ConfigureAwait(false);
         DocumentReadReceipt? receipt = await AttachDocumentContextAsync(
             payload,
             parameters,
@@ -1211,6 +1229,35 @@ internal sealed class ReaderContextMcpServer
                 "当前快照没有可精确定位的在线 App 或扩展来源。请先重新读取 Reader 上下文。",
                 cancellationToken).ConfigureAwait(false);
             return;
+        }
+
+        if (_probeOutputSourceAsync is not null)
+        {
+            ReaderRealtimeOutputSourceStatus status;
+            try
+            {
+                status = await _probeOutputSourceAsync(
+                    request.SourceInstanceId,
+                    cancellationToken).ConfigureAwait(false);
+            }
+            catch (ReaderRealtimeOutputException exception)
+            {
+                await WriteReaderOutputToolErrorAsync(
+                    id,
+                    exception.Code,
+                    exception.Message,
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            if (!status.Online)
+            {
+                await WriteReaderOutputToolErrorAsync(
+                    id,
+                    "BW_READER_REALTIME_OUTPUT_SOURCE_OFFLINE",
+                    "当前 Reader 页面仍可读取缓存，但实时来源已离线；请重新打开或唤醒该页面后再试。",
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
         }
 
         ReaderRealtimeOutputAck ack;
@@ -2443,6 +2490,53 @@ internal sealed class ReaderContextMcpServer
                 },
                 _fetchVisualAsync is not null),
         };
+    }
+
+    private async Task AttachOutputAccessAsync(
+        JsonObject payload,
+        CancellationToken cancellationToken)
+    {
+        ReaderVisualDeliveryRequest? identity = BuildVisualRequest(
+            payload,
+            "viewport-context",
+            null);
+        JsonObject access = new()
+        {
+            ["configured"] = _sendOutputAsync is not null,
+            ["available"] = false,
+            ["verified"] = false,
+            ["sourceInstanceId"] = identity?.SourceInstanceId,
+            ["reason"] = identity is null
+                ? "snapshot-not-actionable"
+                : "status-probe-unavailable",
+        };
+        payload["outputAccess"] = access;
+        if (
+            _sendOutputAsync is null
+            || identity is null
+            || _probeOutputSourceAsync is null
+        )
+        {
+            return;
+        }
+        try
+        {
+            ReaderRealtimeOutputSourceStatus status =
+                await _probeOutputSourceAsync(
+                    identity.SourceInstanceId,
+                    cancellationToken).ConfigureAwait(false);
+            access["available"] = status.Online;
+            access["verified"] = true;
+            access["reason"] = status.Online
+                ? null
+                : "source-offline";
+        }
+        catch (ReaderRealtimeOutputException exception)
+        {
+            access["available"] = false;
+            access["verified"] = true;
+            access["reason"] = exception.Code;
+        }
     }
 
     internal static JsonObject BuildVisualAccess(

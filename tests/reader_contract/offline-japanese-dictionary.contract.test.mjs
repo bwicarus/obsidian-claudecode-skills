@@ -41,19 +41,18 @@ function harness(resources, { local = true } = {}) {
   return { dictionary: sandbox.RC.offlineDictionary, requests };
 }
 
-test("offline dictionary restores Japanese stem without trusting the legacy AI overlay", async () => {
+test("offline dictionary restores Japanese stem and prefers packaged Chinese gloss", async () => {
   const resources = {
     "manifest.json": {
-      contract: "bw-jmdict-manifest/1",
+      contract: "bw-jmdict-manifest/2",
       normalization: "NFC",
       shardAlgorithm: "utf8-prefix-2-kana-3/1",
       source: { release: "fixture" },
       posLabels: { v1: "Ichidan verb" },
-      zhOverlay: { path: "zh-overlay.json" },
       shards: { e58f: { path: "shards/e58f.json" } },
     },
     "shards/e58f.json": {
-      contract: "bw-jmdict-shard/1",
+      contract: "bw-jmdict-shard/2",
       key: "e58f",
       entries: [{
         id: "1",
@@ -62,21 +61,10 @@ test("offline dictionary restores Japanese stem without trusting the legacy AI o
         readings: ["とりよせる"],
         pos: ["v1"],
         glosses: ["to order", "to have something sent"],
+        zhGlosses: ["订购；调货；从外地寄来"],
         common: true,
       }],
       exact: { "取り寄せる": [0] },
-    },
-    "zh-overlay.json": {
-      contract: "bw-japanese-zh-overlay/1",
-      entries: {
-        "取り寄せる": {
-          word: "取り寄せる",
-          reading: "とりよせる",
-          zh: "订购；调货；从外地寄来",
-          pos: "一段动词",
-          examples: [],
-        },
-      },
     },
   };
   const { dictionary, requests } = harness(resources);
@@ -84,7 +72,11 @@ test("offline dictionary restores Japanese stem without trusting the legacy AI o
   assert.equal(result.ok, true);
   assert.equal(result.lemma, "取り寄せる");
   assert.equal(result.reading, "とりよせる");
-  assert.equal(result.translation, "to order; to have something sent");
+  assert.equal(result.zh, "订购；调货；从外地寄来");
+  assert.equal(result.translation, "订购；调货；从外地寄来");
+  assert.equal(result.local_zh, true);
+  assert.equal(result.meaning_language, "zh");
+  assert.equal(result.english_fallback, false);
   assert.equal(result.inflect.base, "取り寄せる");
   assert.equal(result.source, "local-jmdict");
   assert.deepEqual(requests, [
@@ -93,19 +85,18 @@ test("offline dictionary restores Japanese stem without trusting the legacy AI o
   ]);
 });
 
-test("legacy AI overlay cannot replace JMdict reading, part of speech, or meaning", async () => {
+test("English remains an explicit fallback when Chinese data has no safe match", async () => {
   const resources = {
     "manifest.json": {
-      contract: "bw-jmdict-manifest/1",
+      contract: "bw-jmdict-manifest/2",
       normalization: "NFC",
       shardAlgorithm: "utf8-prefix-2-kana-3/1",
       source: { release: "fixture" },
       posLabels: { n: "noun" },
-      zhOverlay: { path: "zh-overlay.json", complete: false, authoritative: false },
       shards: { e689: { path: "shards/e689.json" } },
     },
     "shards/e689.json": {
-      contract: "bw-jmdict-shard/1",
+      contract: "bw-jmdict-shard/2",
       key: "e689",
       entries: [{
         id: "2",
@@ -118,10 +109,6 @@ test("legacy AI overlay cannot replace JMdict reading, part of speech, or meanin
       }],
       exact: { "手法": [0] },
     },
-    "zh-overlay.json": {
-      contract: "bw-japanese-zh-overlay/1",
-      entries: { "手法": { reading: "てほう", pos: "wrong", zh: "wrong" } },
-    },
   };
   const { dictionary, requests } = harness(resources);
   const result = await dictionary.lookupJapaneseLegacy("手法");
@@ -129,6 +116,8 @@ test("legacy AI overlay cannot replace JMdict reading, part of speech, or meanin
   assert.equal(result.pos, "noun");
   assert.equal(result.translation, "technique; method");
   assert.equal(result.local_zh, false);
+  assert.equal(result.meaning_language, "en");
+  assert.equal(result.english_fallback, true);
   assert.deepEqual(requests, ["manifest.json", "shards/e689.json"]);
 });
 
@@ -209,10 +198,21 @@ test("App download stays in private Application Support and outside backup/sync"
   assert.match(settings, /不进入书籍附件、Pi、Safari 扩展或设置同步/);
 });
 
-test("Japanese UI keeps Pi AI as an explicit action", () => {
+test("Japanese UI uses ReaderPC CLI first and keeps Pi only as an explicit legacy fallback", () => {
   const wordpop = read("_server_deploy/static/pdf/rc-wordpop.js");
   const phrasepop = read("_server_deploy/static/pdf/rc-phrasepop.js");
-  assert.match(wordpop, /Pi AI 精释/);
+  const computerVoice = read("_server_deploy/static/pdf/rc-computer-voice.js");
+  const nativeRuntime = read("_server_deploy/static/pdf/native-local-runtime.js");
+  const protocol = read(
+    "extensions/bw-reader-webext/windows/ComputerVoiceAudio/DirectBridgeProtocol.cs",
+  );
+  assert.match(wordpop, /电脑 CLI 精释/);
+  assert.match(wordpop, /改用 Pi 旧版精释/);
+  assert.match(wordpop, /_lookupJapaneseLocalFirst/);
+  assert.match(computerVoice, /lookupJapaneseFallback/);
+  assert.match(computerVoice, /"dictionary-lookup"/);
+  assert.match(nativeRuntime, /dictionaryFallbackCache/);
+  assert.match(protocol, /HandleDictionaryLookupAsync/);
   assert.doesNotMatch(wordpop, /暂无词典释义（可能是人名\/专有名词），已请 AI 讲解/);
   assert.match(phrasepop, /Pi AI 精释/);
 });

@@ -24,6 +24,10 @@
   var NATIVE_INTERFACE_STATUSES = new Set(['supported', 'degraded', 'pending']);
   var NATIVE_INTERFACE_METHODS = new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']);
   var NATIVE_INTERFACE_SURFACES = new Set(['pdf', 'epub']);
+  var DICTIONARY_FALLBACK_CACHE_VERSION = 'reader-jp-zh/1';
+  var DICTIONARY_FALLBACK_CACHE_KIND = 'dictionary-fallback-cache';
+  var DICTIONARY_FALLBACK_CACHE_LIMIT = 128;
+  var DICTIONARY_FALLBACK_CACHE_TTL_MS = 365 * 24 * 60 * 60 * 1000;
   var NATIVE_REMOTE_BOOK_MODES = new Set(['required', 'conditional']);
   var NATIVE_REMOTE_BOOK_SCOPES = new Set(['current', 'catalog']);
   var NATIVE_REMOTE_BOOK_POINTERS = new Set([
@@ -786,6 +790,180 @@
       return attempt();
     });
   }
+
+  function dictionaryFallbackText(value, label, maximum, required) {
+    if (typeof value !== 'string' || value.length > maximum ||
+        (required && !value.trim()) || /\u0000/.test(value)) {
+      throw new RuntimeError(
+        (label || '本机词义缓存文字') + '无效',
+        'BW_READER_DICTIONARY_CACHE_INVALID'
+      );
+    }
+    return value;
+  }
+
+  function normalizeDictionaryFallbackRequest(value) {
+    if (!exactKeys(value, ['mode', 'term', 'context', 'reading', 'english'])) {
+      throw new RuntimeError(
+        '本机词义缓存请求字段无效',
+        'BW_READER_DICTIONARY_CACHE_INVALID'
+      );
+    }
+    var mode = dictionaryFallbackText(value.mode, '释义模式', 16, true);
+    if (mode !== 'meaning' && mode !== 'deep') {
+      throw new RuntimeError(
+        '本机词义缓存模式无效',
+        'BW_READER_DICTIONARY_CACHE_INVALID'
+      );
+    }
+    return {
+      mode: mode,
+      term: dictionaryFallbackText(value.term, '词或词组', 256, true),
+      context: dictionaryFallbackText(value.context, '句境', 1200, false),
+      reading: dictionaryFallbackText(value.reading, '读音', 256, false),
+      english: dictionaryFallbackText(value.english, '英文参考', 1200, false)
+    };
+  }
+
+  function dictionaryFallbackKey(request) {
+    return JSON.stringify([
+      DICTIONARY_FALLBACK_CACHE_VERSION,
+      request.mode,
+      request.term,
+      request.context,
+      request.reading,
+      request.english
+    ]);
+  }
+
+  function normalizeDictionaryFallbackResult(value) {
+    if (!exactKeys(value, ['language', 'text', 'source'])) {
+      throw new RuntimeError(
+        '本机词义缓存结果字段无效',
+        'BW_READER_DICTIONARY_CACHE_INVALID'
+      );
+    }
+    var language = dictionaryFallbackText(
+      value.language, '释义语言', 16, true
+    );
+    var source = dictionaryFallbackText(
+      value.source, '释义来源', 64, true
+    );
+    if (language !== 'zh-CN' || source !== 'pc-codex-cli') {
+      throw new RuntimeError(
+        '本机词义缓存结果来源无效',
+        'BW_READER_DICTIONARY_CACHE_INVALID'
+      );
+    }
+    return {
+      language: language,
+      text: dictionaryFallbackText(value.text, '中文释义', 6000, true),
+      source: source
+    };
+  }
+
+  function normalizeDictionaryFallbackCache(value) {
+    if (!exactKeys(value, ['version', 'entries']) ||
+        value.version !== DICTIONARY_FALLBACK_CACHE_VERSION ||
+        !Array.isArray(value.entries) ||
+        value.entries.length > DICTIONARY_FALLBACK_CACHE_LIMIT) {
+      throw new RuntimeError(
+        '本机词义缓存已损坏',
+        'BW_READER_DICTIONARY_CACHE_CORRUPT'
+      );
+    }
+    return {
+      version: value.version,
+      entries: value.entries.map(function (entry) {
+        if (!exactKeys(entry, ['key', 'language', 'text', 'source', 'updatedAt']) ||
+            typeof entry.key !== 'string' || entry.key.length > 4096 ||
+            !Number.isFinite(entry.updatedAt) || entry.updatedAt < 0) {
+          throw new RuntimeError(
+            '本机词义缓存条目已损坏',
+            'BW_READER_DICTIONARY_CACHE_CORRUPT'
+          );
+        }
+        var result = normalizeDictionaryFallbackResult({
+          language: entry.language,
+          text: entry.text,
+          source: entry.source
+        });
+        return {
+          key: entry.key,
+          language: result.language,
+          text: result.text,
+          source: result.source,
+          updatedAt: entry.updatedAt
+        };
+      })
+    };
+  }
+
+  var dictionaryFallbackCacheAPI = Object.freeze({
+    version: DICTIONARY_FALLBACK_CACHE_VERSION,
+    get: function (rawRequest) {
+      var request = normalizeDictionaryFallbackRequest(rawRequest);
+      var key = dictionaryFallbackKey(request);
+      return readDeviceState(DICTIONARY_FALLBACK_CACHE_KIND, {
+        version: DICTIONARY_FALLBACK_CACHE_VERSION,
+        entries: []
+      }).then(function (stored) {
+        var cache = normalizeDictionaryFallbackCache(stored);
+        var now = Date.now();
+        var entry = cache.entries.find(function (item) {
+          return item.key === key &&
+            now - item.updatedAt <= DICTIONARY_FALLBACK_CACHE_TTL_MS;
+        });
+        return entry ? {
+          language: entry.language,
+          text: entry.text,
+          source: entry.source,
+          cached: true
+        } : null;
+      });
+    },
+    put: function (rawRequest, rawResult) {
+      var request = normalizeDictionaryFallbackRequest(rawRequest);
+      var result = normalizeDictionaryFallbackResult(rawResult);
+      var key = dictionaryFallbackKey(request);
+      return mutateDeviceState(DICTIONARY_FALLBACK_CACHE_KIND, {
+        version: DICTIONARY_FALLBACK_CACHE_VERSION,
+        entries: []
+      }, function (stored) {
+        var cache = normalizeDictionaryFallbackCache(stored);
+        var now = Date.now();
+        var entries = cache.entries.filter(function (item) {
+          return item.key !== key &&
+            now - item.updatedAt <= DICTIONARY_FALLBACK_CACHE_TTL_MS;
+        });
+        entries.push({
+          key: key,
+          language: result.language,
+          text: result.text,
+          source: result.source,
+          updatedAt: now
+        });
+        entries.sort(function (left, right) {
+          return right.updatedAt - left.updatedAt;
+        });
+        if (entries.length > DICTIONARY_FALLBACK_CACHE_LIMIT) {
+          entries.length = DICTIONARY_FALLBACK_CACHE_LIMIT;
+        }
+        return {
+          payload: {
+            version: DICTIONARY_FALLBACK_CACHE_VERSION,
+            entries: entries
+          },
+          value: {
+            language: result.language,
+            text: result.text,
+            source: result.source,
+            cached: true
+          }
+        };
+      });
+    }
+  });
   function readDocumentOutgoingState(kind, fallback) {
     var id = stateId(kind);
     return stores.document.get('native-' + kind, id).then(function (record) {
@@ -9088,6 +9266,7 @@
     storage: function () { return router; },
     preferenceStore: function () { return preferences; },
     bookUserState: bookUserStateAPI,
+    dictionaryFallbackCache: dictionaryFallbackCacheAPI,
     publishPageContext: publishLocalPageContext,
     documentHost: function () {
       return root.RC && root.RC.documentHost && root.RC.documentHost.current

@@ -35,17 +35,17 @@ struct ReaderOfflineDictionaryInfo: Equatable, Sendable {
 /// ReaderBundle, Safari extension, books, App Group, Pi sync and registry data
 /// never point at this directory.
 enum ReaderOfflineDictionaryStore {
-    static let manifestContract = "bw-jmdict-manifest/1"
-    static let shardContract = "bw-jmdict-shard/1"
+    static let manifestContract = "bw-jmdict-manifest/2"
+    static let shardContract = "bw-jmdict-shard/2"
     static let shardAlgorithm = "utf8-prefix-2-kana-3/1"
     static let sourceRelease = "3.6.2+20260810124713"
     static let sourceDigest =
         "e6802135b445627a8f09c544bf8c32c3d344515f6e95a473e8bd39e09ad00109"
     static let sourceRevision =
-        "7a656eabc934fd9069e16181b64ac606cf43ee0c"
+        "65a740870120e673f386d7f38994a215f072ff51"
     static let manifestDigest =
-        "a68ac93fa582ec167c247291238e062e7a87a0df00f9e2da6e851b2082727e27"
-    static let datasetID = "jmdict-3.6.2-20260810124713-v1"
+        "c3a16cd3715a5a1d481cd9634bafd72e8011ad0f6336a847ab955720ddb75add"
+    static let datasetID = "jmdict-3.6.2-20260810124713-zhwiktionary-v2"
     static let installContract = "bw-offline-dictionary-install/1"
     static let sourceBaseURL = URL(
         string: "https://raw.githubusercontent.com/bwicarus/obsidian-claudecode-skills/\(sourceRevision)/ios/BWReader/DictionaryData/"
@@ -53,6 +53,11 @@ enum ReaderOfflineDictionaryStore {
 
     struct Manifest: Decodable, Sendable {
         struct Source: Decodable, Sendable {
+            let release: String
+            let sha256: String
+        }
+
+        struct ChineseSource: Decodable, Sendable {
             let release: String
             let sha256: String
         }
@@ -73,8 +78,9 @@ enum ReaderOfflineDictionaryStore {
         let normalization: String
         let shardAlgorithm: String
         let source: Source
+        let chineseSource: ChineseSource
         let license: Resource
-        let zhOverlay: Resource
+        let chineseLicense: Resource
         let shards: [String: Shard]
     }
 
@@ -138,8 +144,13 @@ enum ReaderOfflineDictionaryStore {
               manifest.shardAlgorithm == shardAlgorithm,
               manifest.source.release == sourceRelease,
               manifest.source.sha256 == sourceDigest,
+              manifest.chineseSource.release
+                == "zhwiktionary-ja-605256f3b7fc",
+              manifest.chineseSource.sha256
+                == "605256f3b7fc73337b9b9d47612ab27477cff92c230dfc2c900545d52de1c63c",
               manifest.license.path == "LICENSE-JMdict.txt",
-              manifest.zhOverlay.path == "zh-overlay.json",
+              manifest.chineseLicense.path
+                == "LICENSE-ZhWiktionary.txt",
               !manifest.shards.isEmpty else {
             throw ReaderOfflineDictionaryError.invalidManifest
         }
@@ -152,7 +163,7 @@ enum ReaderOfflineDictionaryStore {
             }
         }
         guard isLowercaseSHA256(manifest.license.sha256),
-              isLowercaseSHA256(manifest.zhOverlay.sha256) else {
+              isLowercaseSHA256(manifest.chineseLicense.sha256) else {
             throw ReaderOfflineDictionaryError.invalidManifest
         }
         return manifest
@@ -243,7 +254,7 @@ enum ReaderOfflineDictionaryStore {
     static func remoteURL(relative: String) throws -> URL {
         guard relative == "manifest.json"
                 || relative == "LICENSE-JMdict.txt"
-                || relative == "zh-overlay.json"
+                || relative == "LICENSE-ZhWiktionary.txt"
                 || relative.range(
                     of: #"^shards/[a-f0-9]{2,6}\.json$"#,
                     options: .regularExpression
@@ -306,8 +317,8 @@ private enum ReaderOfflineDictionaryInstaller {
             manifestData
         )
 
-        let licenseBytes: Int64 = 1_791
-        let overlayBytes = manifest.zhOverlay.bytes ?? 0
+        let licenseBytes = manifest.license.bytes ?? 0
+        let chineseLicenseBytes = manifest.chineseLicense.bytes ?? 0
         var assets = [
             Asset(
                 relative: manifest.license.path,
@@ -315,9 +326,9 @@ private enum ReaderOfflineDictionaryInstaller {
                 sha256: manifest.license.sha256
             ),
             Asset(
-                relative: manifest.zhOverlay.path,
-                bytes: overlayBytes,
-                sha256: manifest.zhOverlay.sha256
+                relative: manifest.chineseLicense.path,
+                bytes: chineseLicenseBytes,
+                sha256: manifest.chineseLicense.sha256
             ),
         ]
         assets.append(contentsOf: manifest.shards.sorted(by: { $0.key < $1.key }).map {

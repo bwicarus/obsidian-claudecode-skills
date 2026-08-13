@@ -53,6 +53,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     private readonly NamedPipeReaderRealtimeOutputRpcServer
         _readerRealtimeOutputRpcServer;
     private readonly DirectCodexVoiceControl _codexVoiceControl;
+    private readonly CodexCliReaderDictionaryFallback _dictionaryFallback;
     private readonly object _runtimeStateGate = new();
     private string _runtimeState = "starting";
     private bool _runtimeReaderConnected;
@@ -77,6 +78,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         _codexVoiceControl = DirectCodexVoiceControl.CreateProduction(
             Path.Combine(runtimeDirectory, "codex-voice-keepalive.json"),
             appLauncher);
+        _dictionaryFallback = new CodexCliReaderDictionaryFallback();
         _coordinator = new DirectBridgeCoordinator(
             configStore,
             appLauncher,
@@ -1001,7 +1003,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                         "Reader 输出来源尚未注册",
                         retryable: true);
                 _readerRealtimeOutputBroker.Accept(lease, ack);
-            });
+            },
+            dictionaryFallback: _dictionaryFallback);
 
         _contextConnectionHealth.Connected();
         try
@@ -1106,6 +1109,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 "context" or
                 "active-reading" or
                 "context-clear" or
+                "dictionary-lookup" or
                 "log" or
                 ReaderVisualDeliveryProtocol.RegisterType or
                 ReaderVisualDeliveryProtocol.ChunkType or
@@ -1134,7 +1138,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             origin,
             _configStore,
             _coordinator,
-            codexVoiceControl: _codexVoiceControl);
+            codexVoiceControl: _codexVoiceControl,
+            dictionaryFallback: _dictionaryFallback);
         Task<DirectClientMessage?>? prefetchedReceiveTask = null;
 
         while (
@@ -2145,6 +2150,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
             finally
             {
                 _snapshotViewer.Dispose();
+                _dictionaryFallback.Dispose();
                 await _codexVoiceControl.DisposeAsync()
                     .ConfigureAwait(false);
             }

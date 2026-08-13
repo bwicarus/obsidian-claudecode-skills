@@ -79,6 +79,28 @@ def source_fixture() -> dict[str, object]:
     }
 
 
+def chinese_fixture() -> list[dict[str, object]]:
+    return [
+        {
+            "word": "取り寄せる",
+            "lang_code": "ja",
+            "forms": [
+                {
+                    "form": "取り寄せる",
+                    "ruby": [["取り寄", "とりよ"], ["せる", "せる"]],
+                }
+            ],
+            "senses": [
+                {
+                    "glosses": [
+                        "取り寄せる【とりよせる】\n订购；调货；从外地寄来"
+                    ]
+                }
+            ],
+        }
+    ]
+
+
 class JMdictBuilderTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
@@ -88,56 +110,26 @@ class JMdictBuilderTests(unittest.TestCase):
         self.assertEqual(self.builder.SOURCE_RELEASE, "3.6.2+20260810124713")
         self.assertIn("releases/download/3.6.2%2B20260810124713/", self.builder.SOURCE_URL)
         self.assertRegex(self.builder.SOURCE_SHA256, r"^[0-9a-f]{64}$")
+        self.assertIn("kaikki.org/zhwiktionary/", self.builder.CHINESE_SOURCE_URL)
+        self.assertRegex(self.builder.CHINESE_SOURCE_SHA256, r"^[0-9a-f]{64}$")
 
-    def test_builds_exact_shards_and_partial_chinese_overlay(self) -> None:
+    def test_builds_exact_shards_with_chinese_first_glosses(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            cache = root / "cache"
-            cache.mkdir()
-            (cache / "jp-low.json").write_text(
-                json.dumps(
-                    {
-                        "word": "取り寄せる",
-                        "reading": "とりよせる",
-                        "pos": "動詞",
-                        "zh": "订购",
-                        "examples": [],
-                        "source": "jp_ai",
-                        "pv": 1,
-                    },
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
-            (cache / "jp-high.json").write_text(
-                json.dumps(
-                    {
-                        "word": "取り寄せる",
-                        "reading": "とりよせる",
-                        "pos": "一段动词",
-                        "zh": "订购；调货",
-                        "examples": [{"ja": "本を取り寄せる。", "zh": "订购书。"}],
-                        "source": "jp_ai",
-                        "pv": 4,
-                    },
-                    ensure_ascii=False,
-                ),
-                encoding="utf-8",
-            )
-            (cache / "jp-invalid.json").write_text("{", encoding="utf-8")
             output = root / "DictionaryData"
             manifest = self.builder.build_from_payload(
-                source_fixture(), output, overlay_cache=cache
+                source_fixture(), output, chinese_records=chinese_fixture()
             )
 
-            self.assertEqual(manifest["contract"], "bw-jmdict-manifest/1")
+            self.assertEqual(manifest["contract"], "bw-jmdict-manifest/2")
             self.assertEqual(
                 manifest["shardAlgorithm"], "utf8-prefix-2-kana-3/1"
             )
-            self.assertFalse(manifest["zhOverlay"]["complete"])
-            self.assertFalse(manifest["zhOverlay"]["authoritative"])
-            self.assertEqual(manifest["zhOverlay"]["acceptedTerms"], 1)
-            self.assertEqual(manifest["zhOverlay"]["rejectedFiles"], 1)
+            self.assertEqual(
+                manifest["chineseSource"]["sha256"],
+                self.builder.CHINESE_SOURCE_SHA256,
+            )
+            self.assertEqual(manifest["counts"]["chinese"]["matchedEntries"], 1)
 
             key = self.builder.shard_key("取り寄せる")
             self.assertEqual(key, "e58f")
@@ -149,6 +141,10 @@ class JMdictBuilderTests(unittest.TestCase):
             self.assertEqual(candidates[0]["readings"], ["とりよせる"])
             self.assertEqual(candidates[0]["pos"], ["v1", "vt"])
             self.assertEqual(candidates[0]["glosses"], ["to order", "to have sent"])
+            self.assertEqual(
+                candidates[0]["zhGlosses"],
+                ["订购；调货；从外地寄来"],
+            )
             self.assertTrue(candidates[0]["common"])
 
             normalized = "がく"
@@ -159,20 +155,16 @@ class JMdictBuilderTests(unittest.TestCase):
             )
             self.assertIn(normalized, normalized_shard["exact"])
 
-            overlay = json.loads((output / "zh-overlay.json").read_text(encoding="utf-8"))
-            self.assertFalse(overlay["authoritative"])
-            self.assertEqual(overlay["entries"]["取り寄せる"]["zh"], "订购；调货")
-            self.assertEqual(overlay["entries"]["取り寄せる"]["pv"], 4)
+            self.assertFalse((output / "zh-overlay.json").exists())
+            self.assertTrue((output / "LICENSE-ZhWiktionary.txt").is_file())
             self.builder.validate_output(output)
 
     def test_verifier_detects_shard_mutation(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
             root = Path(temporary)
-            cache = root / "empty-cache"
-            cache.mkdir()
             output = root / "DictionaryData"
             manifest = self.builder.build_from_payload(
-                source_fixture(), output, overlay_cache=cache
+                source_fixture(), output, chinese_records=chinese_fixture()
             )
             shard_path = output / next(iter(manifest["shards"].values()))["path"]
             shard_path.write_text("{}\n", encoding="utf-8")

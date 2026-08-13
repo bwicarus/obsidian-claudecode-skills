@@ -205,6 +205,149 @@ test("PWA 预置 word-pop 的掌握按钮通过真实 click 委托调用 late-bo
   assert.equal(pop.listeners.get("click")?.length, 1);
 });
 
+test("App 本地词典未命中的自定义日语词组自动交给 ReaderPC CLI 结合句境释义", async () => {
+  const { sandbox, pop } = makeHarness();
+  const lookupRequests = [];
+  const cachedResults = [];
+  sandbox.RC.offlineDictionary = {
+    CONTRACT: "bw-offline-dictionary/1",
+    isLocalMode: () => true,
+    lookupJapaneseLegacy: async (term) => ({
+      ok: false,
+      jp: true,
+      query: term,
+      source: "local-jmdict",
+      code: "BW_OFFLINE_DICTIONARY_NO_MATCH",
+    }),
+  };
+  sandbox.RC.computerVoice = {
+    async lookupJapaneseFallback(request) {
+      lookupRequests.push(structuredClone(request));
+      return {
+        term: request.term,
+        mode: request.mode,
+        language: "zh-CN",
+        text: "根本顾不上那件事",
+        source: "pc-codex-cli",
+        cached: false,
+      };
+    },
+  };
+  sandbox.__BW_READER_RUNTIME__ = {
+    dictionaryFallbackCache: {
+      async get() { return null; },
+      async put(request, result) {
+        cachedResults.push({
+          request: structuredClone(request),
+          result: structuredClone(result),
+        });
+        return { ...result, cached: true };
+      },
+    },
+  };
+  vm.runInContext(WORDPOP, vm.createContext(sandbox), {
+    filename: "rc-wordpop.js",
+  });
+
+  sandbox.RC.wordpop.show({
+    word: "それどころではない",
+    ctx: "締切が迫っていて、それどころではない。",
+    langs: ["ja"],
+    noBreathe: true,
+    rect: { left: 20, top: 30, right: 180, bottom: 50 },
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(lookupRequests.length, 1);
+  assert.deepEqual(lookupRequests[0], {
+    mode: "meaning",
+    term: "それどころではない",
+    context: "締切が迫っていて、それどころではない。",
+    reading: "",
+    english: "",
+  });
+  assert.match(pop.innerHTML, /根本顾不上那件事/);
+  assert.equal(cachedResults.length, 1);
+  assert.equal(cachedResults[0].result.source, "pc-codex-cli");
+});
+
+test("扩展没有 App 私有词典时自定义日语词组直接走 ReaderPC CLI 而非 Pi", async () => {
+  const { sandbox, pop } = makeHarness();
+  const lookupRequests = [];
+  let piRequests = 0;
+  sandbox.fetch = async () => {
+    piRequests += 1;
+    throw new Error("unexpected Pi dictionary request");
+  };
+  sandbox.RC.computerVoice = {
+    async lookupJapaneseFallback(request) {
+      lookupRequests.push(structuredClone(request));
+      return {
+        term: request.term,
+        mode: request.mode,
+        language: "zh-CN",
+        text: "并非无计可施",
+        source: "pc-codex-cli",
+        cached: false,
+      };
+    },
+  };
+  vm.runInContext(WORDPOP, vm.createContext(sandbox), {
+    filename: "rc-wordpop.js",
+  });
+
+  sandbox.RC.wordpop.show({
+    word: "手がないわけではない",
+    ctx: "まだ手がないわけではない。",
+    langs: ["ja"],
+    noBreathe: true,
+    rect: { left: 20, top: 30, right: 180, bottom: 50 },
+  });
+  await Promise.resolve();
+  await Promise.resolve();
+  await Promise.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(piRequests, 0);
+  assert.equal(lookupRequests.length, 1);
+  assert.equal(lookupRequests[0].term, "手がないわけではない");
+  assert.equal(lookupRequests[0].context, "まだ手がないわけではない。");
+  assert.match(pop.innerHTML, /并非无计可施/);
+});
+
+test("扩展日语预热既不静默访问 Pi 也不自动占用 ReaderPC CLI", async () => {
+  const { sandbox } = makeHarness();
+  let piRequests = 0;
+  let cliRequests = 0;
+  sandbox.requestIdleCallback = (callback) => {
+    callback();
+    return 1;
+  };
+  sandbox.fetch = async () => {
+    piRequests += 1;
+    throw new Error("unexpected Pi dictionary prewarm");
+  };
+  sandbox.RC.computerVoice = {
+    async lookupJapaneseFallback() {
+      cliRequests += 1;
+      throw new Error("unexpected ReaderPC CLI prewarm");
+    },
+  };
+  vm.runInContext(WORDPOP, vm.createContext(sandbox), {
+    filename: "rc-wordpop.js",
+  });
+
+  sandbox.RC.wordpop.prewarm(["それどころではない"]);
+  await Promise.resolve();
+  await Promise.resolve();
+
+  assert.equal(piRequests, 0);
+  assert.equal(cliRequests, 0);
+});
+
 test("掌握与取消掌握先提交本地仓库，服务器失败也不回滚或触发整页确认刷新", async () => {
   const { sandbox, pop } = makeHarness();
   const localChanges = [];

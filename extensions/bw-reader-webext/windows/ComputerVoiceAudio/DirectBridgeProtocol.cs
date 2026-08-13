@@ -550,6 +550,7 @@ internal sealed class DirectBridgeProtocolSession
     private readonly DirectBridgeConfigStore _configStore;
     private readonly DirectBridgeCoordinator _coordinator;
     private readonly IDirectCodexVoiceControl _codexVoiceControl;
+    private readonly IReaderDictionaryFallback? _dictionaryFallback;
     private readonly Func<string, ReaderContextSourceLease>
         _registerReaderSource;
     private readonly Func<
@@ -585,7 +586,8 @@ internal sealed class DirectBridgeProtocolSession
         Action<ReaderBrowserControlResponse>?
             acceptReaderBrowserControl = null,
         Action<ReaderRealtimeOutputAck>?
-            acceptReaderRealtimeOutput = null)
+            acceptReaderRealtimeOutput = null,
+        IReaderDictionaryFallback? dictionaryFallback = null)
     {
         if (!DirectBridgeContract.IsSafeId(connectionId))
         {
@@ -598,6 +600,7 @@ internal sealed class DirectBridgeProtocolSession
         _coordinator = coordinator;
         _codexVoiceControl = codexVoiceControl
             ?? DirectCodexVoiceControl.Shared;
+        _dictionaryFallback = dictionaryFallback;
         _registerReaderSource = registerReaderSource
             ?? (_ => throw new DirectProtocolException(
                 "BW_READER_VISUAL_UNAVAILABLE",
@@ -684,6 +687,11 @@ internal sealed class DirectBridgeProtocolSession
                     break;
                 case "codex-voice-keepalive-set":
                     payload = await HandleCodexVoiceKeepAliveSetAsync(
+                        message,
+                        cancellationToken).ConfigureAwait(false);
+                    break;
+                case "dictionary-lookup":
+                    payload = await HandleDictionaryLookupAsync(
                         message,
                         cancellationToken).ConfigureAwait(false);
                     break;
@@ -1258,6 +1266,69 @@ internal sealed class DirectBridgeProtocolSession
         return CodexVoicePayload(
             result.State,
             result.ShortcutSent);
+    }
+
+    private async Task<object> HandleDictionaryLookupAsync(
+        JsonElement message,
+        CancellationToken cancellationToken)
+    {
+        RequireExactKeys(
+            message,
+            "contract",
+            "type",
+            "requestId",
+            "mode",
+            "term",
+            "context",
+            "reading",
+            "english");
+        RequireAuthenticated();
+        if (_phase is not (
+            DirectProtocolPhase.AwaitingStart
+            or DirectProtocolPhase.ContextOnly
+            or DirectProtocolPhase.Active))
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_PHASE_INVALID",
+                "当前连接阶段不能执行本机词义分析");
+        }
+        if (_dictionaryFallback is null)
+        {
+            throw new DirectProtocolException(
+                "BW_READER_DICTIONARY_CLI_UNAVAILABLE",
+                "ReaderPC 本机词义分析尚未接线",
+                retryable: true);
+        }
+        ReaderDictionaryFallbackRequest request = new(
+            RequireString(message, "mode", 16),
+            RequireString(message, "term", 256),
+            RequireBoundedString(message, "context", 1200),
+            RequireBoundedString(message, "reading", 256),
+            RequireBoundedString(message, "english", 1200));
+        try
+        {
+            ReaderDictionaryFallbackResult result =
+                await _dictionaryFallback.LookupAsync(
+                    request,
+                    cancellationToken).ConfigureAwait(false);
+            return new
+            {
+                term = result.Term,
+                mode = result.Mode,
+                language = result.Language,
+                text = result.Text,
+                source = result.Source,
+                cached = result.Cached,
+            };
+        }
+        catch (ReaderDictionaryFallbackException exception)
+        {
+            throw new DirectProtocolException(
+                exception.Code,
+                exception.Message,
+                exception.Retryable,
+                exception);
+        }
     }
 
     private object CodexVoicePayload(
@@ -1871,6 +1942,25 @@ internal sealed class DirectBridgeProtocolSession
             || value.ValueKind != JsonValueKind.String
             || value.GetString() is not string result
             || result.Length is < 1
+            || result.Length > maximumLength
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_MESSAGE_INVALID",
+                $"{name} 字段无效");
+        }
+        return result;
+    }
+
+    private static string RequireBoundedString(
+        JsonElement message,
+        string name,
+        int maximumLength)
+    {
+        if (
+            !message.TryGetProperty(name, out JsonElement value)
+            || value.ValueKind != JsonValueKind.String
+            || value.GetString() is not string result
             || result.Length > maximumLength
         )
         {

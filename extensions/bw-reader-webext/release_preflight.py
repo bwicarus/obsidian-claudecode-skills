@@ -144,6 +144,7 @@ WINDOWS_SOURCE_FILES = (
     "ComputerVoiceAudio/ReaderBrowserControl.cs",
     "ComputerVoiceAudio/ReaderBrowserControlRpc.cs",
     "ComputerVoiceAudio/ReaderContextReadLedger.cs",
+    "ComputerVoiceAudio/ReaderDictionaryFallback.cs",
     "ComputerVoiceAudio/ReaderDocumentCorpus.cs",
     "ComputerVoiceAudio/ReaderRealtimeOutput.cs",
     "ComputerVoiceAudio/ReaderRealtimeOutputRpc.cs",

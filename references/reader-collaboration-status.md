@@ -4188,3 +4188,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **验证/Windows**：专项 13 项、Reader Node 全量 1035 项、ReaderBundle 312 文件、Direct 候选与包内自检通过；Windows Direct `0.1.118` 已原子安装，当前 `idle / lastError=null`，ReaderPC 语音与预处理恢复在线。
 - **发布事实**：提交 `b9f790ce`；Actions `31622294013` 上传 TestFlight `1.1.47 (265)`，`31622963634` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
 - **边界/下一步**：Windows 全量/handoff 仍只命中已登记的 `fcntl`/Linux fixture 基线；未部署 Pi 或桌面扩展正式渠道。旧高亮请求不会重放，安装后须在新 Codex 会话对同一文字重新调用，并以页面实际出现色块为唯一验收。
+
+## Codex：App 私有中日词典与 ReaderPC CLI 句境回退候选（2026-08-13 JST）
+- **改了什么**：App 设置按需下载 JMdict + 中文 Wiktionary 数据并仅存私有 Application Support；App/扩展本地无中文或自定义词组未命中时，把词组、句境、读音与英文参考交给隔离的 ReaderPC Codex CLI 返回中文。
+- **怎么验的**：词典摘要复验、构建器 3 项、Reader Node 1038 项、发布管线 24 项及 Windows Direct Release/完整自检通过；App 与扩展的自定义词组合同均验证句境请求、中文结果且零 Pi 请求，App 另验证私有缓存。
+- **边界**：约 93 MB 字典不进入 IPA、扩展、书籍附件或 Pi；Windows 全量/handoff 仍命中既有 POSIX `fcntl`、Linux fixture 与本机密钥基线，Swift 尚未在 macOS 编译。
+- **下一步**：先提交并推送不可变词典数据，再把 App 下载地址钉住该数据提交；完成真机设置下载、无中文词条和自定义词组三项人工验收后才发布。

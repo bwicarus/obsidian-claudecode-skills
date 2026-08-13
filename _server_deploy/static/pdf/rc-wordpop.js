@@ -176,8 +176,11 @@
       _prewarmActive++;
       (function (ww) {
         var offline = RC.offlineDictionary;
-        var operation = (_isJaWord(ww) && offline && offline.isLocalMode && offline.isLocalMode())
-          ? offline.lookupJapaneseLegacy(ww)
+        var japanese = _isJaWord(ww);
+        var operation = japanese
+          ? ((offline && offline.isLocalMode && offline.isLocalMode())
+              ? offline.lookupJapaneseLegacy(ww)
+              : Promise.resolve(null))
           : fetch('/pdf/api/dict-quick?word=' + encodeURIComponent(ww) + '&prewarm=1')
               .then(function (r) { return r.json(); });
         operation
@@ -570,9 +573,123 @@
       dictionary.isLocalMode && dictionary.isLocalMode() ? dictionary : null;
   }
 
+  function _dictionaryFallbackCache() {
+    var runtime = window.__BW_READER_RUNTIME__;
+    var cache = runtime && runtime.dictionaryFallbackCache;
+    return cache && typeof cache.get === 'function' &&
+      typeof cache.put === 'function' ? cache : null;
+  }
+
+  function _dictionaryFallbackDebug(message) {
+    try {
+      if (typeof window.dlog === 'function') {
+        window.dlog('词义回退: ' + String(message || '未知状态'));
+      }
+    } catch (_) {}
+  }
+
+  function _dictionaryFallbackRequest(mode, word, ctx, localResult) {
+    localResult = localResult || {};
+    var english = localResult.local_zh ? '' :
+      (localResult.definition || localResult.translation || '');
+    return {
+      mode: mode,
+      term: String(word || '').slice(0, 256),
+      context: String(ctx || '').slice(0, 1200),
+      reading: String(localResult.reading || '').slice(0, 256),
+      english: String(english || '').slice(0, 1200)
+    };
+  }
+
+  async function _dictionaryFallbackLookup(request) {
+    var cache = _dictionaryFallbackCache();
+    if (cache) {
+      try {
+        var cached = await cache.get(request);
+        if (cached) return cached;
+      } catch (error) {
+        _dictionaryFallbackDebug('App 本地缓存读取失败 ' +
+          String(error && (error.code || error.message) || ''));
+      }
+    }
+    var bridge = RC.computerVoice;
+    if (!bridge || typeof bridge.lookupJapaneseFallback !== 'function') {
+      var unavailable = new Error('ReaderPC 本机 CLI 释义通道尚未加载');
+      unavailable.code = 'BW_READER_DICTIONARY_CLI_UNAVAILABLE';
+      throw unavailable;
+    }
+    var result = await bridge.lookupJapaneseFallback(request);
+    if (cache) {
+      try {
+        await cache.put(request, {
+          language: result.language,
+          text: result.text,
+          source: result.source
+        });
+      } catch (error) {
+        _dictionaryFallbackDebug('App 本地缓存写入失败 ' +
+          String(error && (error.code || error.message) || ''));
+      }
+    }
+    return result;
+  }
+
+  function _mergeDictionaryFallback(word, localResult, fallback) {
+    var merged = localResult && localResult.ok
+      ? Object.assign({}, localResult)
+      : {
+          ok: true,
+          jp: true,
+          word: word,
+          lemma: word,
+          forms: [],
+          reading: '',
+          pos: '',
+          examples: [],
+          inflect: null,
+          source: 'pc-codex-cli',
+          mastered: false
+        };
+    merged.ok = true;
+    merged.jp = true;
+    merged.zh = fallback.text;
+    merged.translation = fallback.text;
+    merged.definition = fallback.text;
+    merged.local_zh = false;
+    merged.english_fallback = false;
+    merged.meaning_language = 'zh-Hans';
+    merged.meaning_source = 'pc-codex-cli';
+    merged.cli_cached = fallback.cached === true;
+    return merged;
+  }
+
+  async function _lookupJapaneseLocalFirst(word, ctx) {
+    var local = _offlineJapaneseDictionary();
+    var result = local ? await local.lookupJapaneseLegacy(word) : null;
+    if (result && result.ok && result.local_zh && result.zh) return result;
+    var request = _dictionaryFallbackRequest('meaning', word, ctx, result);
+    try {
+      return _mergeDictionaryFallback(
+        word,
+        result,
+        await _dictionaryFallbackLookup(request)
+      );
+    } catch (error) {
+      var failed = Object.assign({}, result || { ok: false, jp: true });
+      failed.chinese_fallback_error = String(
+        error && error.message || 'ReaderPC 本机 CLI 释义失败'
+      ).slice(0, 500);
+      failed.chinese_fallback_code = String(
+        error && error.code || 'BW_READER_DICTIONARY_CLI_FAILED'
+      ).slice(0, 160);
+      return failed;
+    }
+  }
+
   function _lookupFetch(word) {
-    var local = _isJaWord(word) && _offlineJapaneseDictionary();
-    if (local) return local.lookupJapaneseLegacy(word);
+    if (_isJaWord(word)) {
+      return _lookupJapaneseLocalFirst(word, _ctx.ctx || '');
+    }
     var url = '/pdf/api/dict-quick?word=' + encodeURIComponent(word) +
       '&file=' + encodeURIComponent(_ctx.file || '') +
       '&page=' + (_ctx.page || 0) +
@@ -589,9 +706,14 @@
       if (_isJaWord(word)) {
         // 词典无此词(常见=复合词/专有名词,2026-07-21 用户实锤「豆腐汁」):不再自动糊 AI 大框——
         // 合成兜底词条走标准小框(掌握/语法/发音/定位全套白拿);「展开完整字典」→ AI 讲解成为用户主动动作
+        var unavailableReason = d && d.chinese_fallback_error
+          ? 'ReaderPC 中文释义失败：' + d.chinese_fallback_error
+          : '本地中文词典未命中，ReaderPC 在线时会自动用 CLI 分析';
         d = { ok: true, jp: true, word: word, lemma: word, forms: [],
-              translation: '', definition: '内置离线词典暂无释义。点此展开后可手动使用 Pi AI 精释',
-              source: 'local-jmdict', mastered: false };
+              translation: '', definition: unavailableReason,
+              source: _offlineJapaneseDictionary()
+                ? 'local-jmdict' : 'readerpc-cli-unavailable', mastered: false,
+              chinese_fallback_error: d && d.chinese_fallback_error || '' };
       } else { pop.style.display = 'none'; window._expandWordFull(word, ctx); return; }   // 英文 ecdict 没有 → 三源完整(原行为)
     }
     try { _dictCache.set(word, d); if (_dictCache.size > 600) _dictCache.delete(_dictCache.keys().next().value); } catch (_) {}
@@ -1112,9 +1234,8 @@
     var contentEl = document.getElementById('result-content');
     var d;
     try {
-      var local = _offlineJapaneseDictionary();
-      if (local) {
-        d = await local.lookupJapaneseLegacy(word);
+      if (_isJaWord(word)) {
+        d = await _lookupJapaneseLocalFirst(word, ctx || '');
       } else {
         var r = await fetch('/pdf/api/dict-jp?word=' + encodeURIComponent(word) +
           '&context=' + encodeURIComponent(ctx || '') +
@@ -1133,11 +1254,13 @@
         var localUnavailable = d.unavailable === true;
         var localMessage = localUnavailable
           ? 'App 离线词典尚未下载；可在“原生阅读工具 → 离线日语词典”中选择下载。'
-          : '「' + esc(word) + '」App 本地词典暂无释义（可能是人名或专有名词）。';
-        // 本地词典无命中是一个完整结果。Pi 只在用户明确点击后参与，不能把
-        // 本地 miss 偷偷升级成远端 AI 请求。
+          : '「' + esc(word) + '」本地中文词典未命中或不可用。';
+        if (d.chinese_fallback_error) {
+          localMessage += '<br>ReaderPC 中文释义失败：' +
+            esc(d.chinese_fallback_error);
+        }
         contentEl.innerHTML = '<div style="padding:6px 2px 10px;color:#8a9bb4">' + localMessage + '</div>' +
-          '<button id="jp-ai-btn" class="jp-ai-btn">Pi AI 精释（结合当前句境）</button><div id="jp-ai-out" class="jp-ai-out"></div>';
+          '<button id="jp-ai-btn" class="jp-ai-btn">重试电脑 CLI 精释（结合当前句境）</button><div id="jp-ai-out" class="jp-ai-out"></div>';
         var missAiButton = contentEl.querySelector('#jp-ai-btn');
         if (missAiButton) missAiButton.addEventListener('click', function () { jpAiDeep(word); });
         return false;
@@ -1155,9 +1278,12 @@
     else if (d.definition || d.translation) {
       html += '<div class="jp-zh">' + esc(d.definition || d.translation) + '</div>';
     }
-    if (d.source === 'local-jmdict') {
+    if (d.meaning_source === 'pc-codex-cli') {
+      html += '<div style="margin-top:4px;color:#6f7e96;font-size:10.5px">电脑 ReaderPC · Codex CLI 上下文中文释义' +
+        (d.cli_cached ? ' · 本地缓存' : '') + '</div>';
+    } else if (d.source === 'local-jmdict') {
       html += '<div style="margin-top:4px;color:#6f7e96;font-size:10.5px">App 本地 JMdict' +
-        (d.local_zh ? ' · 本地中文覆盖' : ' · 英文释义') + '</div>';
+        (d.local_zh ? ' · 中文 Wiktionary 释义' : ' · 暂无中文，回退英文释义') + '</div>';
     }
     html += _jpInflectHtml(d.inflect, word);   // 变形分析:原形 + 语法标签
     _jpKanjiData = d.kanji || [];
@@ -1176,7 +1302,7 @@
       });
       html += '</div>';
     }
-    html += '<button id="jp-ai-btn" class="jp-ai-btn">Pi AI 精释（句境 / 用法 / 语感 / 近义辨析）</button>' +
+    html += '<button id="jp-ai-btn" class="jp-ai-btn">电脑 CLI 精释（句境 / 用法 / 语感 / 近义辨析）</button>' +
             '<div id="jp-ai-out" class="jp-ai-out"></div>';
     contentEl.innerHTML = html;
     contentEl.scrollTop = 0;
@@ -1226,7 +1352,7 @@
     var out = document.getElementById('jp-ai-out');
     if (!out) return;
     var myReq = _resReqId();
-    if (btn) { btn.disabled = true; btn.textContent = 'Pi AI 精释中…'; }
+    if (btn) { btn.disabled = true; btn.textContent = '电脑 CLI 精释中…'; }
     var ctx = (_wordPopState && _wordPopState.ctx) || '';
     try {
       var render = function (text) {
@@ -1235,16 +1361,45 @@
         RC.typeset(out);
         if (out.scrollIntoView) out.scrollIntoView({ block: 'nearest' });
       };
+      var localResult = _dictCache.get(word) || {};
+      var res = await _dictionaryFallbackLookup(
+        _dictionaryFallbackRequest('deep', word, ctx, localResult)
+      );
+      if (myReq !== _resReqId()) return;
+      render(res.text);
+      if (btn) btn.style.display = 'none';
+    } catch (e) {
+      out.innerHTML = '<span style="color:#c00">电脑 CLI 失败：' + esc(e.message) + '</span>' +
+        '<div><button id="jp-ai-pi-fallback" class="jp-ai-btn">改用 Pi 旧版精释</button></div>';
+      var piFallback = out.querySelector('#jp-ai-pi-fallback');
+      if (piFallback) piFallback.addEventListener('click', function () {
+        jpAiDeepPi(word, piFallback, out, myReq);
+      });
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent = '重试电脑 CLI 精释';
+      }
+    }
+  }
+  window._jpAiDeep = jpAiDeep;   // 仅兼容导出;本模块的 AI 按钮经 addEventListener 直接绑局部 jpAiDeep
+
+  async function jpAiDeepPi(word, btn, out, myReq) {
+    if (btn) { btn.disabled = true; btn.textContent = 'Pi 旧版精释中…'; }
+    var ctx = (_wordPopState && _wordPopState.ctx) || '';
+    try {
+      var render = function (text) {
+        if (myReq !== _resReqId()) return;
+        out.innerHTML = RC.md(text || ' ');
+        RC.typeset(out);
+      };
       var res = await _aiStream('/pdf/api/dict-jp-ai?word=' + encodeURIComponent(word) + '&context=' + encodeURIComponent(ctx), { method: 'GET', onText: render });
       if (myReq !== _resReqId()) return;
       if (res.ok) render(res.text);
-      else out.innerHTML = '<span style="color:#c00">AI 失败：' + (res.error || '') + '</span>';
-    } catch (e) {
-      out.innerHTML = '<span style="color:#c00">AI 失败：' + e.message + '</span>';
+      else out.innerHTML = '<span style="color:#c00">Pi AI 失败：' + esc(res.error || '') + '</span>';
+    } catch (error) {
+      out.innerHTML = '<span style="color:#c00">Pi AI 失败：' + esc(error.message || '') + '</span>';
     }
-    if (btn) btn.style.display = 'none';
   }
-  window._jpAiDeep = jpAiDeep;   // 仅兼容导出;本模块的 AI 按钮经 addEventListener 直接绑局部 jpAiDeep
 
   // ─────────────────────────── SSE 抗断连流(照搬 21-misc-ai.js::_aiStream)───────────────────────────
   // SSE 主路 + 切后台/网抖回退轮询(/pdf/api/ai-stream-result?id=rid,后台线程跑完结果不丢)。

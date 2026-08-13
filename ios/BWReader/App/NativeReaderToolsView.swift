@@ -332,7 +332,7 @@ struct NativeReaderToolsView: View {
                     offlineDictionary.download()
                 } label: {
                     Label(
-                        "下载离线日语词典（约 85 MB）",
+                        "下载离线日语词典（约 93 MB）",
                         systemImage: "arrow.down.circle"
                     )
                 }
@@ -342,7 +342,7 @@ struct NativeReaderToolsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
-            Text("数据来源：JMdict（CC BY-SA 4.0）。")
+            Text("数据来源：JMdict（读音、词形与词性）+ 中文 Wiktionary/Kaikki（中文释义）；词典无安全中文匹配时先由 ReaderPC CLI 结合句境补充，电脑不可用才显示英文。")
                 .font(.caption)
                 .foregroundStyle(.secondary)
         }

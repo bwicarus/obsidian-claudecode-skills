@@ -993,6 +993,18 @@ test("扩展版本与后台构建版本保持一致", () => {
   assert.equal(match?.[1], manifest.version);
 });
 
+test("ReaderPC 词典查询始终使用独立短连接而不阻塞语音或快照", () => {
+  const start = runtime.indexOf("function acquireDictionaryChannel()");
+  const end = runtime.indexOf(
+    "function acquireFreshDictionaryChannel()",
+    start,
+  );
+  assert.ok(start >= 0 && end > start);
+  const acquire = runtime.slice(start, end);
+  assert.match(acquire, /return acquireFreshDictionaryChannel\(\)/);
+  assert.doesNotMatch(acquire, /active|snapshotLink|owned:\s*false/);
+});
+
 for (const [template, version] of [
   ["_server_deploy/templates/pdf_reader.html", "shared_js_v"],
   ["_server_deploy/templates/epub_html_reader.html", "reader_js_v"],
