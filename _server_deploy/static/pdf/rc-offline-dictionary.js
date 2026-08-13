@@ -162,6 +162,47 @@
     return out;
   }
 
+  // 中文 Wiktionary 的词库导出里会夹带模板元数据，例如
+  // "alt-of"、"alternative kanji"、"non-lemma"、"onoma"。
+  // 它们不是释义，更不能因为字符串里恰好还有日语汉字就混入“含义”。
+  // 下载过的旧 v3 数据同样经过这层清洗，因此修复不要求用户重下 93 MB。
+  function cleanChineseGloss(value, lemma) {
+    var text = normalize(value).replace(/\s+/g, ' ').trim();
+    if (!text) return '';
+    var head = normalize(lemma);
+    if (head && text.indexOf(head + '【') === 0) {
+      var close = text.indexOf('】', head.length + 1);
+      if (close >= 0) text = text.slice(close + 1).replace(/^[\s：:、，。]+/, '');
+    }
+    // Kaikki/Yomitan 的关系型模板不是这个词的中文定义。
+    if (/(?:\balt-of\b|\balternative\s+(?:form|spelling|kanji)\b|\bredirected\s+from\b|\bromanization\b|\bnon-lemma\b|\b(?:stem|continuative|imperfective|attributive)\b)/i.test(text)) {
+      return '';
+    }
+    text = text.replace(/^onoma\s*/i, '').trim();
+    // 纯英语/罗马字不是中文释义。允许中文句中正常出现 HTTP、DNA 等拉丁缩写。
+    if (!/[㐀-鿿]/.test(text)) return '';
+    return text;
+  }
+
+  function cleanChineseSenses(senses, lemma) {
+    var result = [];
+    (Array.isArray(senses) ? senses : []).forEach(function (sense) {
+      if (!sense || typeof sense !== 'object' || /non-lemma/i.test(String(sense.pos || ''))) return;
+      var glosses = [];
+      (Array.isArray(sense.glosses) ? sense.glosses : []).forEach(function (value) {
+        var text = cleanChineseGloss(value, lemma);
+        if (text && glosses.indexOf(text) < 0) glosses.push(text);
+      });
+      if (!glosses.length) return;
+      var cleaned = { glosses: glosses };
+      if (Array.isArray(sense.examples) && sense.examples.length) {
+        cleaned.examples = sense.examples.slice(0, 5);
+      }
+      result.push(cleaned);
+    });
+    return result;
+  }
+
   async function wordKanji(word) {
     var chars = Array.from(String(word || '')).filter(function (c, i, all) {
       return /[㐀-鿿]/.test(c) && all.indexOf(c) === i;
@@ -260,8 +301,22 @@
     if (!result || !result.ok) return result || { ok: false, source: 'local-jmdict' };
     var entry = result.entry || {};
     var glosses = Array.isArray(entry.glosses) ? entry.glosses.filter(Boolean) : [];
-    var zhGlosses = Array.isArray(entry.zhGlosses)
-      ? entry.zhGlosses.filter(Boolean) : [];
+    var lemma = entry.lemma || result.matchedTerm || original;
+    var safeSenses = cleanChineseSenses(entry.zhSenses, lemma);
+    var zhGlosses = [];
+    (Array.isArray(entry.zhGlosses) ? entry.zhGlosses : []).forEach(function (value) {
+      var text = cleanChineseGloss(value, lemma);
+      if (text && zhGlosses.indexOf(text) < 0) zhGlosses.push(text);
+    });
+    // zhGlosses 是构建器提供的紧凑首屏义项；只有旧数据没有该字段时，
+    // 才从结构化 senses 回退，避免把“订购；调货”再拆开重复一遍。
+    if (!zhGlosses.length) {
+      safeSenses.forEach(function (sense) {
+        sense.glosses.forEach(function (text) {
+          if (zhGlosses.indexOf(text) < 0) zhGlosses.push(text);
+        });
+      });
+    }
     var hasChinese = zhGlosses.length > 0;
     var chineseText = zhGlosses.slice(0, 4).join('；');
     var englishText = glosses.slice(0, 6).join('; ');
@@ -271,8 +326,14 @@
     var pos = Array.isArray(entry.pos)
       ? entry.pos.map(function (code) { return labels[code] || code; }).join(' / ')
       : String(entry.pos || '');
-    var lemma = entry.lemma || result.matchedTerm || original;
     var reading = readings[0] || '';
+    var surface = normalize(original);
+    var inflectionMarks = result.inflectionMark ? [result.inflectionMark] : [];
+    if (lemma && surface && lemma !== surface && !inflectionMarks.length) {
+      // exact 索引也包含表层词形；直接命中不代表“没有活用”。旧逻辑只看
+      // inflectionMark，导致最常见的 exact-form 命中反而丢掉原形/当前形。
+      inflectionMarks.push('活用→原形');
+    }
     return {
       ok: true,
       jp: true,
@@ -289,12 +350,14 @@
       translation: hasChinese ? chineseText : englishText,
       definition: hasChinese ? chineseText : englishText,
       examples: Array.isArray(entry.examples) ? entry.examples.slice(0, 5) : [],
-      zh_senses: Array.isArray(entry.zhSenses) ? entry.zhSenses : [],
+      zh_senses: safeSenses,
       etymology: Array.isArray(entry.etymology) ? entry.etymology : [],
       synonyms: Array.isArray(entry.synonyms) ? entry.synonyms : [],
       source_urls: Array.isArray(entry.sourceUrls) ? entry.sourceUrls : [],
       kanji: await wordKanji(lemma),
-      inflect: result.inflectionMark ? { base: lemma, marks: [result.inflectionMark] } : null,
+      inflect: (lemma && surface && (lemma !== surface || inflectionMarks.length))
+        ? { base: lemma, surface: surface, marks: inflectionMarks }
+        : null,
       local_candidates: result.candidates || [],
       source: 'local-jmdict',
       source_version: result.sourceVersion || '',

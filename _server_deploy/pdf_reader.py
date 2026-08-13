@@ -16004,6 +16004,81 @@ def _validate_snippets_body(body):
 
 
 _ANKI_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\((https?://[^)]+)\)")
+
+
+class _AnkiCardsResponseError(ValueError):
+    def __init__(self, code, message):
+        super().__init__(message)
+        self.code = code
+
+
+def _parse_anki_cards_response(raw):
+    """Parse the card model's JSON and enforce the make_anki contract."""
+    text = str(raw or "").strip()
+    if not text:
+        raise _AnkiCardsResponseError(
+            "card_ai_empty_output", "制卡模型没有返回任何内容",
+        )
+    decoder = json.JSONDecoder()
+    payload = None
+    first_json = None
+    for start, char in enumerate(text):
+        if char not in "{[":
+            continue
+        try:
+            candidate, _end = decoder.raw_decode(text[start:])
+        except json.JSONDecodeError:
+            continue
+        if first_json is None:
+            first_json = candidate
+        if isinstance(candidate, dict) and isinstance(candidate.get("cards"), list):
+            payload = candidate
+            break
+    if payload is None and first_json is None:
+        raise _AnkiCardsResponseError(
+            "card_ai_invalid_json", "制卡模型没有返回可解析的 JSON",
+        )
+    if payload is None:
+        raise _AnkiCardsResponseError(
+            "card_ai_invalid_schema", "制卡模型返回结构必须是包含 cards 数组的对象",
+        )
+    raw_cards = payload["cards"]
+    if not raw_cards:
+        raise _AnkiCardsResponseError(
+            "card_ai_no_cards", "制卡模型返回了空 cards 数组",
+        )
+    cards = []
+    for index, value in enumerate(raw_cards):
+        if not isinstance(value, dict):
+            raise _AnkiCardsResponseError(
+                "card_ai_invalid_schema", f"第 {index + 1} 张卡片不是对象",
+            )
+        card = dict(value)
+        card_type = str(card.get("type") or "basic").strip().lower()
+        if card_type == "basic":
+            front = card.get("front")
+            back = card.get("back")
+            if (not isinstance(front, str) or not front.strip() or
+                    not isinstance(back, str) or not back.strip()):
+                raise _AnkiCardsResponseError(
+                    "card_ai_invalid_schema", f"第 {index + 1} 张 basic 卡缺少 front 或 back",
+                )
+        elif card_type == "cloze":
+            cloze = card.get("cloze") or card.get("text")
+            if (not isinstance(cloze, str) or not cloze.strip() or
+                    not re.search(r"\{\{c\d+::", cloze)):
+                raise _AnkiCardsResponseError(
+                    "card_ai_invalid_schema", f"第 {index + 1} 张 cloze 卡缺少有效挖空文本",
+                )
+        else:
+            raise _AnkiCardsResponseError(
+                "card_ai_invalid_schema", f"第 {index + 1} 张卡片 type 无效：{card_type}",
+            )
+        card["type"] = card_type
+        cards.append(card)
+    return cards
+
+
 def _anki_md_links(text):
     """Anki 卡按 HTML 渲染:AI 生成的 markdown 链接 [文本](url) 转成可点的 <a href>(否则整串显示成字面文本)。"""
     if not text:
@@ -16121,13 +16196,16 @@ def _run_snippets_to(snippets, make_note, make_anki, note_name, action="explain"
                 f"=== 学习内容 ===\n{snippets_text}"
             )
             _step("AI 正在生成卡片")
-            raw = _ai_call(prompt, action, uid)
-            # 提取 JSON
-            s_idx = raw.find("{"); e_idx = raw.rfind("}")
-            cards_data = json.loads(raw[s_idx:e_idx+1]) if s_idx >= 0 else {"cards": []}
-            cards = cards_data.get("cards") or []
+            # 新卡与卡片改进共用明确的卡片模型档；不能把说明/编排 action
+            # 当成制卡 action，也不能让 Realtime 的登录 uid 丢失后回落默认档。
+            raw = _ai_call(prompt, "card_improve", uid)
+            cards = _parse_anki_cards_response(raw)
             _step(f"正在写入 Anki（{len(cards)} 张）" if cards else "AI 没生成卡片")
             if defer_add:   # B1 融合复习卡:草稿不入库(未经确认的卡不能进 Anki 库——用户规格)
+                # 后续的注意力账本与 AnkiWeb sync 共用 added 判定。草稿路径
+                # 不会写 Anki，但仍必须给它明确的 0，不能让已生成的卡片
+                # 在投影完之后因 UnboundLocalError 被标成 anki_error。
+                added = 0
                 out["anki_deferred"] = True
                 out["anki_added"] = 0
                 out["anki_note_ids"] = []
@@ -16238,7 +16316,7 @@ def _run_snippets_to(snippets, make_note, make_anki, note_name, action="explain"
                 "front": (c.get("front") or "")[:2000],
                 "back": (c.get("back") or "")[:2000],
                 "cloze": (c.get("cloze") or c.get("text") or "")[:2000],
-            } for c in cards][:8]
+            } for c in cards]
             out["anki_deck"] = "QA"
             if added > 0:
                 try:   # 注意力账本:制卡=最强主动信号之一(用户拍板 2026-07-19)。
@@ -16278,7 +16356,13 @@ def _run_snippets_to(snippets, make_note, make_anki, note_name, action="explain"
                         timeout=5).read()
                 except Exception:
                     pass
+        except _AnkiCardsResponseError as ex:
+            out["ok"] = False
+            out["anki_error_code"] = ex.code
+            out["anki_error"] = str(ex)
         except Exception as ex:
+            out["ok"] = False
+            out["anki_error_code"] = "card_generation_failed"
             out["anki_error"] = str(ex)
     return out
 

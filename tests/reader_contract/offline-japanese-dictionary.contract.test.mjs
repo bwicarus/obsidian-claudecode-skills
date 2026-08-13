@@ -57,21 +57,34 @@ test("offline rich dictionary restores Japanese stem and exposes pronunciation, 
       entries: [{
         id: "1",
         lemma: "取り寄せる",
-        forms: ["取り寄せる"],
+        // The exact index legitimately contains surface forms.  Matching the
+        // selected surface first must not erase the lemma/current-form row.
+        forms: ["取り寄せ", "取り寄せる"],
         readings: ["とりよせる"],
         readingKata: "トリヨセル",
         accent: 0,
         pos: ["v1"],
         glosses: ["to order", "to have something sent"],
-        zhGlosses: ["订购；调货；从外地寄来"],
-        zhSenses: [{ glosses: ["订购", "调货"] }],
-        examples: [{ ja: "商品を取り寄せる。", zh: "订购商品。", source: "fixture" }],
+        zhGlosses: [
+          "订购；调货；从外地寄来",
+          "取り寄せる toriyoseru alt-of",
+          "取り寄せるcontinuative取り寄せるstem",
+          "to order",
+        ],
+        zhSenses: [
+          { glosses: ["订购", "调货"] },
+          { pos: "non-lemma", glosses: ["取り寄せる alternative form"] },
+        ],
+        examples: [
+          { ja: "商品を取り寄せた。", en: "I ordered the product.", source: "tanaka" },
+          { ja: "商品を取り寄せる。", zh: "订购商品。", source: "fixture" },
+        ],
         etymology: ["取る＋寄せる"],
         synonyms: ["注文する"],
         sourceUrls: ["https://example.invalid/取り寄せる"],
         common: true,
       }],
-      exact: { "取り寄せる": [0] },
+      exact: { "取り寄せ": [0], "取り寄せる": [0] },
     },
     "kanji.json": {
       "取": { kanji: "取", on: ["シュ"], kun: ["と.る"], meanings: ["take"], meanings_zh: "取；拿" },
@@ -93,11 +106,14 @@ test("offline rich dictionary restores Japanese stem and exposes pronunciation, 
   assert.equal(result.meaning_language, "zh");
   assert.equal(result.english_fallback, false);
   assert.equal(result.inflect.base, "取り寄せる");
+  assert.equal(result.inflect.surface, "取り寄せ");
+  assert.deepEqual(JSON.parse(JSON.stringify(result.inflect.marks)), ["活用→原形"]);
   assert.equal(result.source, "local-jmdict");
   assert.deepEqual(result.examples, [
+    { ja: "商品を取り寄せた。", en: "I ordered the product.", source: "tanaka" },
     { ja: "商品を取り寄せる。", zh: "订购商品。", source: "fixture" },
   ]);
-  assert.deepEqual(result.zh_senses, [{ glosses: ["订购", "调货"] }]);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.zh_senses)), [{ glosses: ["订购", "调货"] }]);
   assert.deepEqual(result.etymology, ["取る＋寄せる"]);
   assert.deepEqual(result.synonyms, ["注文する"]);
   assert.deepEqual(result.source_urls, ["https://example.invalid/取り寄せる"]);

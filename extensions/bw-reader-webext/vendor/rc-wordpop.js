@@ -111,8 +111,6 @@ if (window.__bwPwaProviderOnly) return;
       '#word-pop .wp-ex .wp-ex-zh{color:#8fb0d8;font-size:12px;line-height:1.45;margin-bottom:3px}',
       // 日语完整字典大页面(渲进 RC.result.openResult 的 #result-content)
       '#result-content .jp-head{display:flex;align-items:flex-end;gap:10px;flex-wrap:wrap;padding-bottom:4px}',
-      '#result-content .jp-romaji{color:#8fb0d8;font-style:italic;font-size:13px}',
-      '#result-content .jp-pos{color:#5a6680;font-size:11px;border:1px solid #2a3450;border-radius:4px;padding:0 5px;align-self:center}',
       '#result-content .jp-zh{margin-top:8px;color:#dff1ff;font-size:15px;line-height:1.6}',
       '#result-content .jp-sec-label{margin-top:14px;color:#7a8497;font-size:11px;border-top:1px solid #2a3550;padding-top:8px}',
       '#result-content .jp-kanji-row{display:flex;gap:10px;flex-wrap:wrap;margin-top:8px}',
@@ -206,9 +204,23 @@ if (window.__bwPwaProviderOnly) return;
     }
     if (_prewarmQ.length) _schedPump();
   }
-  function clearDictCache() { try { _dictCache.clear(); _prewarmSeen.clear(); _prewarmQ.length = 0; } catch (_) {} }
+  function clearDictCache() {
+    try {
+      _dictCache.clear(); _prewarmSeen.clear(); _prewarmQ.length = 0;
+      _jpExampleZhCache.clear(); _jpExampleZhInflight.clear();
+      _jpExampleZhQueue = Promise.resolve();
+    } catch (_) {}
+  }
   var _jpKanjiData = [];           // 当前日语词的汉字拆解,供 chip 点击展开
   var _jpPollTimer = null;         // 例句/汉字字义中译后台轮询替换的计时器
+  // 本地 v3 词典的 Tanaka 句对可能只有日文+英文。普通查词先纯 App 秒开；
+  // 缺中文的 exact JA 句再后台交给 Pi 的 AI 翻译端点并由服务端永久缓存。
+  // 这里的 Map 负责本页面复用与同句在途去重，不是第二份持久化真源。
+  var _jpExampleZhCache = new Map();
+  var _jpExampleZhInflight = new Map();
+  var _jpExampleZhQueue = Promise.resolve();  // Pi CLI 单并发：小框与完整框共用
+  var _jpSmallExampleSeq = 0;
+  var _jpFullExampleSeq = 0;
   // 底座耦合(每次 show 刷新)
   var _ctx = { file: '', page: 0, langs: [], ctx: '', rect: null, markHighlight: null, onMastered: null, onGrammar: null, onFallback: null, ignoreSelector: '' };
 
@@ -412,13 +424,18 @@ if (window.__bwPwaProviderOnly) return;
     return html;
   }
   // 日语变形分析 → HTML 行(原形 + 中文语法标签)。word-pop 和完整字典共用。
-  function _jpInflectHtml(inf, word) {
-    if (!inf) return '';
-    var showBase = inf.base && inf.base !== (word || '');
-    var b = showBase ? '原形 <b>' + esc(inf.base) + '</b>' : '';
-    var m = (inf.marks || []).length ? '<span class="jp-inflect-mark">' + inf.marks.map(esc).join('・') + '</span>' : '';
-    if (!b && !m) return '';
-    return '<div class="jp-inflect">🔀 ' + [b, m].filter(Boolean).join('　') + '</div>';
+  function _jpInflectHtml(inf, word, lemma) {
+    inf = inf || {};
+    var surface = String(inf.surface || word || '').trim();
+    var base = String(inf.base || lemma || '').trim();
+    var differs = !!(surface && base && surface !== base);
+    var marks = Array.isArray(inf.marks) ? inf.marks.filter(Boolean) : [];
+    if (differs && !marks.length) marks = ['活用→原形'];
+    var current = differs ? '当前形 <b>' + esc(surface) + '</b>' : '';
+    var original = differs ? '原形 <b>' + esc(base) + '</b>' : '';
+    var m = marks.length ? '<span class="jp-inflect-mark">' + marks.map(esc).join('・') + '</span>' : '';
+    if (!current && !original && !m) return '';
+    return '<div class="jp-inflect">🔀 ' + [current, original, m].filter(Boolean).join('　') + '</div>';
   }
   // 英语原型 + 变形 → HTML 行(跟日语变形行同款样式)。
   function _enFormsHtml(lemma, forms, clicked) {
@@ -640,20 +657,34 @@ if (window.__bwPwaProviderOnly) return;
   // v3 离线词典已经把中文义项和例句拆成结构化字段。小框若继续只读
   // translation，会把下载到本机的富数据再次压扁成一条“基本翻译”。这里直接
   // 消费 zh_senses，并在旧数据没有该字段时才回退旧字符串合同。
+  function _cleanJapaneseChineseMeaning(value) {
+    var text = String(value == null ? '' : value).replace(/\s+/g, ' ').trim();
+    if (!text) return '';
+    if (/(?:\balt-of\b|\balternative\s+(?:form|spelling|kanji)\b|\bredirected\s+from\b|\bromanization\b|\bnon-lemma\b|\b(?:stem|continuative|imperfective|attributive)\b)/i.test(text)) return '';
+    text = text.replace(/^onoma\s*/i, '').trim();
+    return /[㐀-鿿]/.test(text) ? text : '';
+  }
+
   function _jpMeaningText(d) {
     var meanings = [];
     var seen = Object.create(null);
     function add(value) {
-      var text = String(value == null ? '' : value).trim();
+        var text = _cleanJapaneseChineseMeaning(value);
       if (!text || seen[text]) return;
       seen[text] = true;
       meanings.push(text);
     }
     (Array.isArray(d && d.zh_senses) ? d.zh_senses : []).forEach(function (sense) {
+      if (sense && /non-lemma/i.test(String(sense.pos || ''))) return;
       (Array.isArray(sense && sense.glosses) ? sense.glosses : []).forEach(add);
     });
     if (meanings.length) return meanings.join('；');
-    return String(d && (d.zh || d.translation || d.definition) || '');
+    add(d && d.zh);
+    // 英文兼容字段仍可供显式 Pi 精释作参考，但普通 App 查词面板只显示中文。
+    if (!meanings.length && d && d.meaning_language !== 'en') {
+      add(d.translation || d.definition);
+    }
+    return meanings.join('；');
   }
 
   function _jpExamples(d) {
@@ -662,18 +693,66 @@ if (window.__bwPwaProviderOnly) return;
     function add(example) {
       if (!example || typeof example !== 'object') return;
       var ja = String(example.ja || '').trim();
-      var meaning = String(example.zh || example.en || '').trim();
-      if (!ja) return;
-      var key = ja + '\u0000' + meaning;
-      if (seen[key]) return;
-      seen[key] = true;
-      result.push(example);
+      if (!ja || seen[ja]) return;
+      seen[ja] = true;
+      // Tanaka 原始数据是日英句对。英文只作为数据来源保留，绝不进入中文行；
+      // exact JA 的 Pi 回填会写进会话缓存，随后小框/完整框都直接复用。
+      var meaning = String(example.zh || _jpExampleZhCache.get(ja) || '').trim();
+      result.push(Object.assign({}, example, { zh: meaning }));
     }
-    (Array.isArray(d && d.examples) ? d.examples : []).forEach(add);
     (Array.isArray(d && d.zh_senses) ? d.zh_senses : []).forEach(function (sense) {
       (Array.isArray(sense && sense.examples) ? sense.examples : []).forEach(add);
     });
+    (Array.isArray(d && d.examples) ? d.examples : []).forEach(add);
     return result;
+  }
+
+  function _requestJapaneseExampleZh(ja) {
+    ja = String(ja || '').trim();
+    if (!ja) return Promise.resolve('');
+    if (_jpExampleZhCache.has(ja)) return Promise.resolve(_jpExampleZhCache.get(ja));
+    if (_jpExampleZhInflight.has(ja)) return _jpExampleZhInflight.get(ja);
+    // backend=ai 是 Pi 上受控的 AI/CLI 翻译入口；不经过 ReaderPC。服务端按 exact
+    // JA 文本持久缓存，App 这里只发送缺中文的句子，不上传整个词条或页面。
+    var task = _jpExampleZhQueue.then(function () {
+      return RC.reqJson('POST', '/pdf/api/translate-sentence', { text: ja, backend: 'ai' });
+    }).then(function (reply) {
+      var zh = reply && reply.ok ? String(reply.zh || '').trim() : '';
+      if (zh && /[㐀-鿿]/.test(zh)) {
+        _jpExampleZhCache.set(ja, zh);
+        return zh;
+      }
+      _dictDiag('Pi 例句中译失败「' + ja.slice(0, 32) + '」' +
+        (reply && reply.error ? '：' + String(reply.error).slice(0, 80) : ''));
+      return '';
+    }).catch(function (error) {
+      _dictDiag('Pi 例句中译异常「' + ja.slice(0, 32) + '」：' +
+        String(error && error.message || error || '').slice(0, 80));
+      return '';
+    });
+    // 无论本句成功/失败都释放队列；完整框最多 5 句也不会并发拉起多份 Pi CLI。
+    _jpExampleZhQueue = task.then(function () {}, function () {});
+    _jpExampleZhInflight.set(ja, task);
+    task.then(function () { _jpExampleZhInflight.delete(ja); }, function () { _jpExampleZhInflight.delete(ja); });
+    return task;
+  }
+
+  function _fillJapaneseExampleZh(root, rows, panelKey, isCurrent) {
+    if (!root || !Array.isArray(rows)) return;
+    rows.forEach(function (example, index) {
+      if (!example || example.zh || !example.ja) return;
+      _requestJapaneseExampleZh(example.ja).then(function (zh) {
+        if (!isCurrent()) return;   // 切词/重开后迟到的结果只进缓存，不碰当前面板
+        var node = root.querySelector('[data-jpex-id="' + panelKey + '-' + index + '"]');
+        if (!node) return;
+        if (zh) {
+          node.textContent = zh;
+          if (node.dataset) node.dataset.zhdone = '1';
+        } else {
+          node.textContent = 'Pi 中文翻译暂不可用';
+        }
+      });
+    });
   }
 
   // 渲染单词小框(已拿到 dict-quick 结果 d)。rect=查词时捕获的选区矩形,用于定位。
@@ -728,28 +807,33 @@ if (window.__bwPwaProviderOnly) return;
       return !!d.mastered;
     })();
     var definition = d.jp ? _jpMeaningText(d) : (d.translation || d.definition || '');
+    if (d.jp && !definition) definition = '本地词典暂无中文释义；可展开后手动使用 Pi 深度解释';
     var defLines = (definition || '(无释义)').split('\n').filter(Boolean).slice(0, 3).map(esc).join('<br>');
-    // 用户给出的旧界面基准明确划掉了这一块：日语小框不恢复词性标签；
-    // 英语仍保留原有标签，完整字典页也继续提供日语词性。
+    // 用户给出的旧界面基准明确划掉了这一块：日语小框与完整字典页
+    // 都不恢复词性标签；英语仍保留原有标签。
     var posTag = (!d.jp && d.pos ? '<span class="wp-pos-tag">' + esc(d.pos) + '</span>' : '');
-    var inflectHtml = d.jp ? _jpInflectHtml(d.inflect, word) : _enFormsHtml(d.lemma || word, d.forms, word);
+    var inflectHtml = d.jp ? _jpInflectHtml(d.inflect, word, d.lemma) : _enFormsHtml(d.lemma || word, d.forms, word);
     var phonHtml = (d.jp && d.reading && d.accent != null)
       ? _renderPitch(d.reading, d.accent)
       : (d.jp && d.reading
           ? '<span class="wp-phon">' + esc(d.reading) + '</span>'
           : (d.phonetic ? '<span class="wp-phon">' + esc(d.phonetic) + '</span>' : ''));
-    var exHtml = '';   // 日语母语例句(Tanaka):直接展示;zh 未翻译则回退英文
+    var exHtml = '';   // 中文缺失时保留日文并后台向 Pi 请求 exact JA 中译；绝不以英文冒充
     var quickExamples = d.jp ? _jpExamples(d) : [];
-    if (quickExamples.length) {
-      exHtml = '<div class="wp-ex">' + quickExamples.slice(0, 2).map(function (e) {
+    var quickRows = quickExamples.slice(0, 2);
+    var smallExampleKey = 'small-' + (++_jpSmallExampleSeq);
+    if (quickRows.length) {
+      exHtml = '<div class="wp-ex">' + quickRows.map(function (e, index) {
         return '<div class="wp-ex-ja">' + esc(e.ja) + '</div>' +
-               '<div class="wp-ex-zh">' + esc(e.zh || e.en || '') + '</div>';
+               '<div class="wp-ex-zh" data-jpex-id="' + smallExampleKey + '-' + index + '"' +
+               (e.zh ? ' data-zhdone="1"' : '') + '>' +
+               esc(e.zh || 'Pi 中文翻译中…') + '</div>';
       }).join('') + '</div>';
     }
     pop.style.display = 'block';
     window._wordPopOpenAt = Date.now();   // 框外关闭监听据此忽略刚弹出时的余波事件
     pop.innerHTML =
-      '<div class="wp-head"><span class="wp-word">' + esc(d.lemma || word) + '</span>' +
+      '<div class="wp-head"><span class="wp-word">' + esc(word) + '</span>' +
       phonHtml +
       '<button class="wp-speak" data-wp-act="speak" title="发音">🔊</button>' +
       (d.freq_bnc ? '<span class="wp-freq">BNC#' + d.freq_bnc + '</span>' : '') + '</div>' +
@@ -764,6 +848,12 @@ if (window.__bwPwaProviderOnly) return;
       (_ctx.markHighlight ? '<button data-wp-act="mark" title="把该词标为高亮">🖌 标记</button>' : '') +
       '<button data-wp-act="grammar" title="对该词所在整句做语法分析（分词/结构/跟踪知识点）">📊 语法</button>' +
       '</div>';
+    if (d.jp && d.source === 'local-jmdict') {
+      _fillJapaneseExampleZh(pop, quickRows, smallExampleKey, function () {
+        return _wordPopState && _wordPopState.word === word &&
+          smallExampleKey === 'small-' + _jpSmallExampleSeq;
+      });
+    }
     _positionPop(pop, rect);
     _scheduleUnderlineRefresh(80);   // 查过即记入生词库；多次 SWR 渲染合并成一次无闪烁重扫
   }
@@ -1253,21 +1343,23 @@ if (window.__bwPwaProviderOnly) return;
     var rq = escAttr(d.reading || word);    // 发音念假名读音
     var phon = (d.reading && d.accent != null) ? _renderPitch(d.reading, d.accent)
       : (d.reading ? '<span class="wp-phon">' + esc(d.reading) + '</span>' : '');
-    var html = '<div class="jp-head">' + phon +
-      (d.romaji ? '<span class="jp-romaji">' + esc(d.romaji) + '</span>' : '') +
-      (d.pos ? '<span class="jp-pos">' + esc(d.pos) + '</span>' : '') + '</div>';
+    // 罗马字是由读音机械转写的兼容字段，不是中文含义；当前面板以假名+声调
+    // 为权威读音，不再把罗马字或用户已划掉的词性标签塞回视觉层。
+    var html = '<div class="jp-head">' + phon + '</div>';
     var fullMeaning = _jpMeaningText(d);
     if (fullMeaning) {
       html += '<div class="jp-zh">' + esc(fullMeaning) + '</div>';
+    } else {
+      html += '<div class="jp-zh">本地词典暂无中文释义；可手动使用 Pi 深度解释</div>';
     }
     if (d.meaning_source === 'pc-codex-cli') {
       html += '<div style="margin-top:4px;color:#6f7e96;font-size:10.5px">电脑 ReaderPC · Codex CLI 上下文中文释义' +
         (d.cli_cached ? ' · 本地缓存' : '') + '</div>';
     } else if (d.source === 'local-jmdict') {
       html += '<div style="margin-top:4px;color:#6f7e96;font-size:10.5px">App 本地 JMdict' +
-        (d.local_zh ? ' · 中文 Wiktionary 释义' : ' · 暂无中文，回退英文释义') + '</div>';
+        (d.local_zh ? ' · 中文 Wiktionary 释义' : ' · 暂无本地中文释义') + '</div>';
     }
-    html += _jpInflectHtml(d.inflect, word);   // 变形分析:原形 + 语法标签
+    html += _jpInflectHtml(d.inflect, word, d.lemma);   // 当前形 + 原形 + 语法标签
     _jpKanjiData = d.kanji || [];
     if (_jpKanjiData.length) {
       // chip 不用裸 onclick(共享模式下 window._jpKanjiTap 被后加载的 reader.js 夺走、数据为空 → no-op);改 data-ki + 下方 addEventListener 绑本模块 jpKanjiTap
@@ -1276,12 +1368,14 @@ if (window.__bwPwaProviderOnly) return;
         '</div><div id="jp-kanji-detail" class="jp-kanji-detail"></div>';
     }
     var fullExamples = _jpExamples(d);
+    var fullExampleKey = 'full-' + (++_jpFullExampleSeq);
     if (fullExamples.length) {
       html += '<div class="jp-sec-label">母语例句</div><div class="jp-ex">';
       fullExamples.forEach(function (e, ei) {
         html += '<div class="jp-ex-ja">' + esc(e.ja) + '</div>' +
-                '<div class="jp-ex-zh" data-exi="' + ei + '"' + (e.zh ? ' data-zhdone="1"' : '') + '>' +
-                esc(e.zh || e.en || '') + '</div>';   // 没中译先回退英文,后台翻好由 _jpPollZh 替换
+                '<div class="jp-ex-zh" data-exi="' + ei + '" data-jpex-id="' + fullExampleKey + '-' + ei + '"' +
+                (e.zh ? ' data-zhdone="1"' : '') + '>' +
+                esc(e.zh || (d.source === 'local-jmdict' ? 'Pi 中文翻译中…' : '')) + '</div>';
       });
       html += '</div>';
     }
@@ -1297,6 +1391,11 @@ if (window.__bwPwaProviderOnly) return;
     var _aiBtn = contentEl.querySelector('#jp-ai-btn');
     if (_aiBtn) _aiBtn.addEventListener('click', function () { jpAiDeep(word); });
     if (_jpKanjiData.length) jpKanjiTap(0);   // 默认展开第一个汉字(本模块局部)
+    if (d.source === 'local-jmdict') {
+      _fillJapaneseExampleZh(contentEl, fullExamples, fullExampleKey, function () {
+        return myReq === _resReqId() && fullExampleKey === 'full-' + _jpFullExampleSeq;
+      });
+    }
     // 有未翻的例句/汉字字义 → 后台翻 + 轮询替换英文(不增加等待)
     if (d.source !== 'local-jmdict' &&
         ((d.examples || []).some(function (e) { return !e.zh; }) ||
@@ -1323,8 +1422,8 @@ if (window.__bwPwaProviderOnly) return;
     if ((k.on || []).length) h += '<div><span class="jk-tag jk-on">音</span>' + k.on.map(esc).join('、') + '</div>';
     if ((k.kun || []).length) h += '<div><span class="jk-tag jk-kun">訓</span>' + k.kun.map(esc).join('、') + '</div>';
     // 字义优先显示中文(meanings_zh,后端 Google 翻译),缺失才回退英文
-    var _meanEn = (k.meanings || []).map(esc).join('; ');
-    if (k.meanings_zh || _meanEn) h += '<div class="jk-mean">' + (k.meanings_zh ? esc(k.meanings_zh) : _meanEn) + '</div>';
+    if (k.meanings_zh) h += '<div class="jk-mean">' + esc(k.meanings_zh) + '</div>';
+    else h += '<div class="jk-mean">暂无本地中文字义</div>';
     h += '</div>';
     det.innerHTML = h;
   }

@@ -24,7 +24,8 @@ test('synchronous make_anki returns a pure local-first draft', () => {
   const fn = sliceFunction(ASSISTANT, '_t_make_anki', '_t_make_note');
   assert.doesNotMatch(fn, /_entity_reg_cards\(/);
   assert.doesNotMatch(fn, /_mark_source_highlight\(/);
-  assert.match(fn, /"source_ref": src/);
+  assert.match(fn, /source_from_reader = not explicit_text/);
+  assert.match(fn, /if src:\s+result\["source_ref"\] = src/);
   assert.match(fn, /result\["source_highlight"\]/);
   assert.match(fn, /Reader 本地卡库/);
 });
@@ -32,8 +33,10 @@ test('synchronous make_anki returns a pure local-first draft', () => {
 test('background make_anki does not register a Pi card before local persistence', () => {
   const fn = sliceFunction(VOICE, '_task_anki', '_task_vocab');
   assert.doesNotMatch(fn, /_entity_reg_cards\(/);
-  assert.match(fn, /"source_ref": link\[:4096\]/);
+  assert.match(fn, /content_from_selection = bool\(selected\)/);
+  assert.match(fn, /if content_from_reader:\s+result\["source_ref"\] = link\[:4096\]/);
   assert.match(fn, /result\["source_highlight"\]/);
+  assert.match(fn, /action="card_improve", uid=str\(ctx\.get\("_uid"\) or ""\)/);
   const epub = sliceFunction(EPUB, '_t_make_anki', '_t_make_note');
   assert.doesNotMatch(epub, /client_action|epubHighlight/);
 });

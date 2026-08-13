@@ -1015,13 +1015,28 @@ def _task_note(tid, params, ctx, base):
 
 
 def _task_anki(tid, params, ctx, base):
+    explicit_text = (params.get("text") or "").strip()
+    selected = (ctx.get("selection") or "").strip()
+    scope = params.get("scope") or ("sel" if selected else "page")
+    explicit_collapses_to_selection = bool(
+        explicit_text and selected and
+        len(explicit_text) > max(400, len(selected) * 3) and
+        selected[:40] in explicit_text
+    )
+    content_from_selection = bool(selected) and (
+        explicit_text == selected or explicit_collapses_to_selection or
+        (not explicit_text and scope == "sel")
+    )
+    content_from_reader = not explicit_text or content_from_selection
     content = _content_for(params, ctx)
     if not content or len(content) < 6:
         _vtask_set(tid, status="error", error="没找到要做卡的内容(先选中文字)")
         return
     _vtask_set(tid, step="AI 制卡中")
     link = _deep_link(base, ctx.get("file_rel", ""), ctx.get("page", 1))
-    text = content + f"\n\n【原文出处链接(务必原样放进卡片背面,做成可点链接)】{link}"
+    text = content
+    if content_from_reader:
+        text += f"\n\n【原文出处链接(务必原样放进卡片背面,做成可点链接)】{link}"
     image_url = (params.get("image_url") or "").strip()   # 助手 search_image 找到的图,若也要放进卡片就一并透传
     # 工具指示器 v2:把制卡内部阶段实时吐给前端(长条态滚动;steps 累积供「!」面板逐步查看)
     _steps = []
@@ -1036,8 +1051,13 @@ def _task_anki(tid, params, ctx, base):
     _req = (params.get("requirement") or "").strip()
     _ex = (params.get("extra_ctx") or "").strip()   # 对话现场(含用户原话/要求)——此前没传进制卡=要求丢失(用户实锤)
     _fullreq = (_req + ("\n" + _ex if _ex else "")).strip()
-    out = _pdf_mod()._run_snippets_to([{"text": text, "source": link}], False, True, "", "opus", "high",
-                                      image_url=image_url or None, defer_add=True, requirement=_fullreq, on_step=_on_step)
+    snippet_source = link if content_from_reader else ""
+    out = _pdf_mod()._run_snippets_to(
+        [{"text": text, "source": snippet_source}], False, True, "",
+        action="card_improve", uid=str(ctx.get("_uid") or ""),
+        image_url=image_url or None, defer_add=True,
+        requirement=_fullreq, on_step=_on_step,
+    )
     cards = out.get("anki_cards") or []
     if out.get("ok") and cards:
         _brief = []
@@ -1046,9 +1066,10 @@ def _task_anki(tid, params, ctx, base):
             _b = (c.get("back") or "").strip().replace("\n", " ")[:40]
             _brief.append(_f + ((" → " + _b) if _b else ""))
         result = {"kind": "anki", "deferred": True, "n": len(cards), "cards_brief": _brief,
-                  "deck": out.get("anki_deck") or "QA", "cards": cards, "source_ref": link[:4096]}
-        selected = str(ctx.get("selection") or "").strip()
-        if selected:
+                  "deck": out.get("anki_deck") or "QA", "cards": cards}
+        if content_from_reader:
+            result["source_ref"] = link[:4096]
+        if content_from_selection:
             if ctx.get("current_section_idx") is not None:
                 try:
                     section = int(ctx.get("current_section_idx"))

@@ -2823,8 +2823,14 @@ def _t_make_anki(args, ctx):
     # 2026-07-21 用户拍板:制卡工具**同步等草稿做完**才返回(带"生成了N张"),不再派发即回报→
     #   AI 拿到真结果才口头汇报,不会过早说"已做好"(消除承诺核查幻影补交的源头)。
     #   且把**用户的具体要求**(数量/难度/角度,args.requirement + 对话现场)转述给制卡 AI。
-    text = (args.get("text") or "").strip() or (ctx.get("selection") or "").strip() \
-        or _page_text(ctx.get("file_rel", ""), ctx.get("page", 0))
+    explicit_text = (args.get("text") or "").strip()
+    selected = (ctx.get("selection") or "").strip()
+    content_from_selection = bool(selected) and (
+        not explicit_text or explicit_text == selected
+    )
+    text = explicit_text or selected or _page_text(
+        ctx.get("file_rel", ""), ctx.get("page", 0)
+    )
     if not text:
         return {"error": "缺要做卡的内容(给 text 或先选中)"}
     # Phase2 软 gate(据 page_type):内容取自整页兜底且本页判为『无关页』(目录/版权/空白)→ 软性确认,不硬拒。
@@ -2848,18 +2854,32 @@ def _t_make_anki(args, ctx):
     elif not img and imgs:
         extra = (extra or "") + "\n(对话配图候选,内容相关可参考:" + " ".join(imgs) + ")"
     fullreq = (req + ("\n" + extra if extra else "")).strip()
-    src = (ctx.get("file_rel") or "") + (("#p" + str(ctx.get("page"))) if ctx.get("page") else "")
+    # 模型显式给出的 text 属于普通对话素材，不能因为用户此刻碰巧打开一本书
+    # 就伪造为该书/页的来源。只有选区或整页兜底确实提供了正文时才绑定书页。
+    source_from_reader = not explicit_text or content_from_selection
+    src = ((ctx.get("file_rel") or "") +
+           (("#p" + str(ctx.get("page"))) if ctx.get("page") else "")) \
+        if source_from_reader else ""
     try:
         import voice as _voice
-        out = _voice._pdf_mod()._run_snippets_to([{"text": text, "source": src}], False, True, "", "opus", "high",
-                                                 image_url=img or None, defer_add=True, requirement=fullreq)
+        out = _voice._pdf_mod()._run_snippets_to(
+            [{"text": text, "source": src}], False, True, "",
+            action="card_improve", uid=str(ctx.get("_uid") or ""),
+            image_url=img or None, defer_add=True, requirement=fullreq,
+        )
     except Exception as e:
-        return {"error": "制卡失败:" + str(e)[:120]}
+        return {"error": "制卡失败:" + str(e)[:120], "code": "card_generation_failed"}
     if not out.get("ok"):
-        return {"error": out.get("error") or out.get("anki_error") or "制卡失败"}
+        return {
+            "error": out.get("error") or out.get("anki_error") or "制卡失败",
+            "code": out.get("anki_error_code") or "card_generation_failed",
+        }
     cards = out.get("anki_cards") or []
     if not cards:
-        return {"error": "AI 没生成卡片(内容可能不适合制卡)"}
+        return {
+            "error": "制卡模型没有生成卡片",
+            "code": "card_ai_no_cards",
+        }
     n = len(cards)
     brief = []   # 每张卡一行大意:喂回语音模型/recentTools/下一个制卡 CLI 都吃它(全文只给 UI;
     #   截断喂回残 JSON=「AI 不知道自己做过什么卡」的根因,用户 2026-07-20 实锤)
@@ -2876,16 +2896,16 @@ def _t_make_anki(args, ctx):
         "cards_brief": brief,
         "cards": cards,
         "deferred": True,
-        "source_ref": src,
         "speak": f"做好了{n}张卡片草稿，你在卡片上确认后保存到 Reader 卡库",
         "note": f"生成了{n}张卡片草稿，等你确认后保存到 Reader 本地卡库",
     }
-    selected = (ctx.get("selection") or "").strip()
+    if src:
+        result["source_ref"] = src
     try:
         page = int(ctx.get("page") or 0)
     except (TypeError, ValueError):
         page = 0
-    if selected and page >= 1:
+    if content_from_selection and page >= 1:
         result["source_highlight"] = {
             "file": ctx.get("file_rel") or "",
             "target": {"kind": "pdf", "page": page},

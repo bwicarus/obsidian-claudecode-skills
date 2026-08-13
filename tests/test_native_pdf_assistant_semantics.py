@@ -1,9 +1,10 @@
+import json
 import sys
 import tempfile
 import types
 import unittest
 from pathlib import Path
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 DEPLOY = Path(__file__).resolve().parents[1] / "_server_deploy"
@@ -25,6 +26,7 @@ if sys.platform == "win32" and "fcntl" not in sys.modules:
     sys.modules["fcntl"] = fcntl_stub
 
 import pdf_reader  # noqa: E402
+import voice  # noqa: E402
 
 
 LOCAL_FILE = "localbook:localbook-" + "a" * 64
@@ -93,6 +95,255 @@ def native_epub_context(**overrides):
 
 
 class NativePDFAssistantSemanticsTests(unittest.TestCase):
+    @staticmethod
+    def _run_realtime_make_anki(args, ctx):
+        generated = [{"type": "basic", "front": "Q", "back": "A"}]
+        run_snippets = Mock(return_value={
+            "ok": True,
+            "anki_cards": generated,
+            "anki_deferred": True,
+        })
+        fake_voice = types.SimpleNamespace(
+            _pdf_mod=lambda: types.SimpleNamespace(
+                _run_snippets_to=run_snippets,
+            )
+        )
+        with patch.dict(sys.modules, {"voice": fake_voice}), \
+                patch.object(assistant, "_card_extra", return_value=("", [])):
+            result = assistant._t_make_anki(args, ctx)
+        return result, run_snippets
+
+    def test_realtime_make_anki_uses_authenticated_reader_ai_profile(self):
+        generated = [{"type": "basic", "front": "Q", "back": "A"}]
+        run_snippets = Mock(return_value={
+            "ok": True,
+            "anki_cards": generated,
+            "anki_deferred": True,
+        })
+        fake_voice = types.SimpleNamespace(
+            _pdf_mod=lambda: types.SimpleNamespace(
+                _run_snippets_to=run_snippets,
+            )
+        )
+        fake_pdf = types.SimpleNamespace(
+            _entity_reg_cards=lambda *_args, **_kwargs: "card_abcdef123456",
+        )
+        ctx = {"_uid": "reader-user-7", "file_rel": "books/demo.pdf", "page": 2}
+
+        with patch.dict(sys.modules, {"voice": fake_voice}), \
+                patch.object(assistant, "_card_extra", return_value=("", [])), \
+                patch.object(assistant, "_mark_source_highlight"), \
+                patch.object(assistant, "_pdf", return_value=fake_pdf):
+            result = assistant._t_make_anki({"text": "card source"}, ctx)
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["cards"], generated)
+        self.assertNotIn("source_ref", result)
+        self.assertNotIn("source_highlight", result)
+        kwargs = run_snippets.call_args.kwargs
+        self.assertEqual(kwargs["action"], "card_improve")
+        self.assertEqual(kwargs["uid"], "reader-user-7")
+
+    def test_explicit_generic_text_ignores_a_stale_selection(self):
+        result, _run_snippets = self._run_realtime_make_anki(
+            {"text": "generic conversation material"},
+            {
+                "_uid": "reader-user-7", "file_rel": "books/demo.pdf",
+                "page": 2, "selection": "stale selected text",
+            },
+        )
+        self.assertNotIn("source_ref", result)
+        self.assertNotIn("source_highlight", result)
+
+    def test_explicit_text_equal_to_selection_keeps_exact_source(self):
+        result, _run_snippets = self._run_realtime_make_anki(
+            {"text": "selected material"},
+            {
+                "_uid": "reader-user-7", "file_rel": "books/demo.pdf",
+                "page": 2, "selection": "selected material",
+            },
+        )
+        self.assertEqual(result["source_ref"], "books/demo.pdf#p2")
+        self.assertEqual(result["source_highlight"]["text"], "selected material")
+
+    def test_selection_fallback_keeps_exact_source(self):
+        result, _run_snippets = self._run_realtime_make_anki(
+            {},
+            {
+                "_uid": "reader-user-7", "file_rel": "books/demo.pdf",
+                "page": 2, "selection": "selected material",
+            },
+        )
+        self.assertEqual(result["source_ref"], "books/demo.pdf#p2")
+        self.assertEqual(result["source_highlight"]["text"], "selected material")
+
+    def test_deferred_anki_generation_keeps_cards_without_post_add_error(self):
+        model_call = Mock(
+            return_value='{"cards":[{"type":"basic","front":"Q","back":"A"}]}',
+        )
+        with patch.object(
+            pdf_reader,
+            "_ai_call",
+            model_call,
+        ):
+            result = pdf_reader._run_snippets_to(
+                [{"text": "card source", "source": ""}],
+                False,
+                True,
+                "",
+                action="explain",
+                uid="reader-user-7",
+                defer_add=True,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["anki_deferred"])
+        self.assertEqual(result["anki_added"], 0)
+        self.assertEqual(result["anki_cards"], [
+            {"type": "basic", "front": "Q", "back": "A", "cloze": ""},
+        ])
+        self.assertNotIn("anki_error", result)
+        self.assertEqual(model_call.call_args.args[1:], ("card_improve", "reader-user-7"))
+
+    def test_realtime_make_anki_preserves_card_generation_error_code(self):
+        run_snippets = Mock(return_value={
+            "ok": False,
+            "anki_error_code": "card_ai_invalid_schema",
+            "anki_error": "制卡模型返回结构无效",
+        })
+        fake_voice = types.SimpleNamespace(
+            _pdf_mod=lambda: types.SimpleNamespace(
+                _run_snippets_to=run_snippets,
+            )
+        )
+        with patch.dict(sys.modules, {"voice": fake_voice}), \
+                patch.object(assistant, "_card_extra", return_value=("", [])):
+            result = assistant._t_make_anki(
+                {"text": "card source"}, {"_uid": "reader-user-7"}
+            )
+
+        self.assertEqual(result["code"], "card_ai_invalid_schema")
+        self.assertEqual(result["error"], "制卡模型返回结构无效")
+
+    def test_background_make_anki_uses_authenticated_card_profile(self):
+        run_snippets = Mock(return_value={
+            "ok": True,
+            "anki_deck": "QA",
+            "anki_cards": [{"type": "basic", "front": "Q", "back": "A"}],
+        })
+        updates = []
+        fake_pdf = types.SimpleNamespace(_run_snippets_to=run_snippets)
+        ctx = {
+            "_uid": "reader-user-9", "file_rel": "books/demo.pdf",
+            "page": 4, "selection": "selected source",
+        }
+        with patch.object(voice, "_content_for", return_value="selected source"), \
+                patch.object(voice, "_deep_link", return_value="reader://source"), \
+                patch.object(voice, "_pdf_mod", return_value=fake_pdf), \
+                patch.object(voice, "_vtask_set", side_effect=lambda *a, **k: updates.append((a, k))):
+            voice._task_anki("task-1", {"requirement": "one card"}, ctx, "base")
+
+        kwargs = run_snippets.call_args.kwargs
+        self.assertEqual(kwargs["action"], "card_improve")
+        self.assertEqual(kwargs["uid"], "reader-user-9")
+        self.assertTrue(any(
+            call_kwargs.get("status") == "done" for _args, call_kwargs in updates
+        ))
+
+    def test_background_generic_text_ignores_a_stale_selection(self):
+        run_snippets = Mock(return_value={
+            "ok": True,
+            "anki_deck": "QA",
+            "anki_cards": [{"type": "basic", "front": "Q", "back": "A"}],
+        })
+        updates = []
+        ctx = {
+            "_uid": "reader-user-9", "file_rel": "books/demo.pdf",
+            "page": 4, "selection": "stale selected source",
+        }
+        with patch.object(voice, "_content_for", return_value="generic material"), \
+                patch.object(voice, "_deep_link", return_value="reader://source"), \
+                patch.object(
+                    voice, "_pdf_mod",
+                    return_value=types.SimpleNamespace(_run_snippets_to=run_snippets),
+                ), \
+                patch.object(voice, "_vtask_set", side_effect=lambda *a, **k: updates.append((a, k))):
+            voice._task_anki(
+                "task-2", {"text": "generic material"}, ctx, "base"
+            )
+
+        done = next(
+            kwargs for _args, kwargs in updates if kwargs.get("status") == "done"
+        )
+        self.assertNotIn("source_ref", done["result"])
+        self.assertNotIn("source_highlight", done["result"])
+        sent_snippet = run_snippets.call_args.args[0][0]
+        sent_text = sent_snippet["text"]
+        self.assertNotIn("reader://source", sent_text)
+        self.assertEqual(sent_snippet["source"], "")
+
+    def test_anki_generation_distinguishes_empty_output_from_bad_schema(self):
+        cases = (
+            ("   ", "card_ai_empty_output"),
+            ("not json", "card_ai_invalid_json"),
+            ('{"cards":[]}', "card_ai_no_cards"),
+            ('{"cards":[{"type":"basic","front":"Q"}]}', "card_ai_invalid_schema"),
+        )
+        for model_output, error_code in cases:
+            with self.subTest(error_code=error_code), patch.object(
+                pdf_reader, "_ai_call", return_value=model_output,
+            ):
+                result = pdf_reader._run_snippets_to(
+                    [{"text": "card source", "source": ""}],
+                    False,
+                    True,
+                    "",
+                    uid="reader-user-7",
+                    defer_add=True,
+                )
+            self.assertFalse(result["ok"])
+            self.assertEqual(result["anki_error_code"], error_code)
+            self.assertNotIn("anki_cards", result)
+
+    def test_anki_generation_does_not_silently_truncate_requested_card_count(self):
+        cards = [
+            {
+                "type": "basic",
+                "front": f"front-{index}-" + "x" * 2100,
+                "back": f"back-{index}-" + "y" * 2100,
+            }
+            for index in range(10)
+        ]
+        with patch.object(
+            pdf_reader, "_ai_call", return_value=json.dumps({"cards": cards})
+        ):
+            result = pdf_reader._run_snippets_to(
+                [{"text": "make ten cards", "source": ""}],
+                False, True, "", uid="reader-user-7", defer_add=True,
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(result["anki_cards"]), 10)
+        self.assertTrue(all(
+            len(card["front"]) == 2000 for card in result["anki_cards"]
+        ))
+        self.assertTrue(all(
+            len(card["back"]) == 2000 for card in result["anki_cards"]
+        ))
+
+    def test_anki_json_scanner_skips_non_json_brackets_before_payload(self):
+        model_output = (
+            'draft [not-json] {"draft":true} follows\n'
+            '{"cards":[{"type":"basic","front":"Q","back":"A"}]}'
+        )
+        with patch.object(pdf_reader, "_ai_call", return_value=model_output):
+            result = pdf_reader._run_snippets_to(
+                [{"text": "card source", "source": ""}],
+                False, True, "", uid="reader-user-7", defer_add=True,
+            )
+        self.assertTrue(result["ok"])
+        self.assertEqual(len(result["anki_cards"]), 1)
+
     def test_generic_endpoints_route_epub_tools_to_the_app_snapshot(self):
         ctx = native_epub_context()
         state = assistant._native_reader_state(ctx)

@@ -54,6 +54,8 @@ class FakeElement {
     this.title = "";
     this.offsetWidth = 320;
     this.offsetHeight = 140;
+    this.dataset = {};
+    this.jpExampleTarget = null;
     this.listeners = new Map();
     this.attributes = new Map();
     this.classList = {
@@ -75,6 +77,12 @@ class FakeElement {
     this.listeners.get(type).push(listener);
   }
 
+  querySelector(selector) {
+    if (String(selector).startsWith('[data-jpex-id="')) return this.jpExampleTarget;
+    return null;
+  }
+  querySelectorAll() { return []; }
+
   dispatchClick(target) {
     for (const listener of this.listeners.get("click") || []) {
       listener({ type: "click", target });
@@ -91,6 +99,10 @@ function makeHarness() {
   // rc-wordpop loads; the shared module must still bind its delegated click.
   const pop = new FakeElement("word-pop");
   elements.set("word-pop", pop);
+  const resultContent = new FakeElement("result-content");
+  elements.set("result-content", resultContent);
+  const vocabActions = new FakeElement("vocab-actions");
+  elements.set("vocab-actions", vocabActions);
   const documentListeners = new Map();
 
   const document = {
@@ -160,9 +172,16 @@ function makeHarness() {
       typeset() {},
     },
   };
+  sandbox.RC.result = {
+    _resultReqId: 0,
+    openResult(title, src, body) {
+      this._resultReqId += 1;
+      resultContent.innerHTML = body;
+    },
+  };
   sandbox.window = sandbox;
   sandbox.globalThis = sandbox;
-  return { sandbox, pop };
+  return { sandbox, pop, resultContent, vocabActions };
 }
 
 test("PWA 预置 word-pop 的掌握按钮通过真实 click 委托调用 late-bound 动作", async () => {
@@ -205,19 +224,29 @@ test("PWA 预置 word-pop 的掌握按钮通过真实 click 委托调用 late-bo
   assert.equal(pop.listeners.get("click")?.length, 1);
 });
 
-test("App v3 日语词典小框恢复旧版读音声调、多义项、例句和双操作布局", async () => {
-  const { sandbox, pop } = makeHarness();
+test("App v3 日语词典小框恢复当前形/原形、中文富字段且不混入罗马字或英文例句", async () => {
+  const { sandbox, pop, resultContent } = makeHarness();
+  const translatedExample = new FakeElement("translated-example");
+  pop.jpExampleTarget = translatedExample;
+  const translationRequests = [];
+  let finishTranslation;
+  sandbox.RC.reqJson = async (method, url, body) => {
+    translationRequests.push({ method, url, body });
+    return await new Promise((resolve) => { finishTranslation = resolve; });
+  };
   sandbox.RC.offlineDictionary = {
     CONTRACT: "bw-offline-dictionary/1",
     isLocalMode: () => true,
     lookupJapaneseLegacy: async () => ({
       ok: true,
       jp: true,
-      word: "纏め",
+      word: "纏めた",
       lemma: "纏める",
       forms: ["纏める"],
       reading: "まとめる",
+      reading_kata: "マトメル",
       accent: 0,
+      romaji: "matomeru",
       pos: "一段动词 / 及物动词",
       // Prove the renderer uses structured v3 senses rather than this flattened
       // compatibility field.
@@ -225,15 +254,20 @@ test("App v3 日语词典小框恢复旧版读音声调、多义项、例句和�
       definition: "基本翻译",
       zh_senses: [
         { glosses: ["收集，集中"], examples: [{ ja: "意見を纏める", zh: "集中意見" }] },
+        { pos: "non-lemma", glosses: ["纏める matomeru alt-of"] },
+        { glosses: ["纏めるcontinuative纏めるstem"] },
         { glosses: ["組織，協調"] },
-        { glosses: ["結合，混合，融合，合併"], examples: [{ ja: "三つの組織を纏める", zh: "合併三個組織" }] },
+        { glosses: ["結合，混合，融合，合併"] },
         { glosses: ["概括，總結"] },
       ],
       examples: [
+        { ja: "意見を纏めた。", en: "The opinions were summarized." },
         { ja: "意見を纏める", zh: "集中意見" },
         { ja: "三つの組織を纏める", zh: "合併三個組織" },
       ],
-      inflect: { base: "纏める", marks: ["活用→原形"] },
+      // Exercise the renderer's semantic fallback too: old downloaded data
+      // can have lemma != surface while inflect is null.
+      inflect: null,
       source: "local-jmdict",
       local_zh: true,
       mastered: false,
@@ -244,8 +278,8 @@ test("App v3 日语词典小框恢复旧版读音声调、多义项、例句和�
   });
 
   sandbox.RC.wordpop.show({
-    word: "纏め",
-    ctx: "意見を纏める",
+    word: "纏めた",
+    ctx: "意見を纏めた",
     langs: ["ja"],
     showAnki: false,
     noBreathe: true,
@@ -259,19 +293,92 @@ test("App v3 日语词典小框恢复旧版读音声调、多义项、例句和�
   assert.match(pop.innerHTML, /纏める/);
   assert.match(visibleText, /まとめる/);
   assert.match(pop.innerHTML, /平板/);
+  assert.match(pop.innerHTML, /当前形 <b>纏めた<\/b>/);
   assert.match(pop.innerHTML, /原形 <b>纏める<\/b>/);
   assert.match(pop.innerHTML, /活用→原形/);
   assert.match(pop.innerHTML, /收集，集中；組織，協調；結合，混合，融合，合併；概括，總結/);
   assert.doesNotMatch(pop.innerHTML, /基本翻译/);
+  assert.doesNotMatch(pop.innerHTML, /matomeru|alt-of/);
+  assert.doesNotMatch(pop.innerHTML, /The opinions were summarized/);
   assert.match(pop.innerHTML, /意見を纏める/);
   assert.match(pop.innerHTML, /集中意見/);
-  assert.match(pop.innerHTML, /三つの組織を纏める/);
-  assert.match(pop.innerHTML, /合併三個組織/);
+  assert.match(pop.innerHTML, /意見を纏めた。/);
+  assert.match(pop.innerHTML, /Pi 中文翻译中/);
   assert.match(pop.innerHTML, /点这里展开完整字典/);
   assert.match(pop.innerHTML, /☆ 标记掌握/);
   assert.match(pop.innerHTML, /📊 语法/);
   assert.doesNotMatch(pop.innerHTML, /wp-pos-tag|一段动词 \/ 及物动词/);
   assert.doesNotMatch(pop.innerHTML, /🎴 Anki|🖌 标记/);
+
+  assert.deepEqual(JSON.parse(JSON.stringify(translationRequests)), [{
+    method: "POST",
+    url: "/pdf/api/translate-sentence",
+    body: { text: "意見を纏めた。", backend: "ai" },
+  }]);
+  finishTranslation({ ok: true, zh: "归纳了意见。" });
+  await Promise.resolve();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(translatedExample.textContent, "归纳了意见。");
+  assert.equal(translatedExample.dataset.zhdone, "1");
+
+  await sandbox.dictStreamJP("纏めた", "意見を纏めた");
+  assert.match(resultContent.innerHTML, /当前形 <b>纏めた<\/b>/);
+  assert.match(resultContent.innerHTML, /原形 <b>纏める<\/b>/);
+  assert.match(resultContent.innerHTML, /收集，集中/);
+  assert.match(resultContent.innerHTML, /集中意見/);
+  assert.match(resultContent.innerHTML, /意見を纏めた。/);
+  assert.match(resultContent.innerHTML, /归纳了意见。/);
+  assert.doesNotMatch(resultContent.innerHTML, /matomeru|alt-of/);
+  assert.doesNotMatch(resultContent.innerHTML, /The opinions were summarized/);
+  assert.doesNotMatch(resultContent.innerHTML, /一段动词|及物动词/);
+  assert.equal(translationRequests.length, 1, "完整框应复用 exact JA 的会话/Pi 缓存");
+});
+
+test("本地例句的迟到 Pi 中文回填不得覆盖后来打开的查词框", async () => {
+  const { sandbox, pop } = makeHarness();
+  const target = new FakeElement("current-example");
+  pop.jpExampleTarget = target;
+  const pending = new Map();
+  const requested = [];
+  sandbox.RC.reqJson = async (method, url, body) => {
+    assert.equal(method, "POST");
+    assert.equal(url, "/pdf/api/translate-sentence");
+    assert.equal(body.backend, "ai");
+    requested.push(body.text);
+    return await new Promise((resolve) => pending.set(body.text, resolve));
+  };
+  sandbox.RC.offlineDictionary = {
+    CONTRACT: "bw-offline-dictionary/1",
+    isLocalMode: () => true,
+    lookupJapaneseLegacy: async (word) => ({
+      ok: true,
+      jp: true,
+      word,
+      lemma: word,
+      reading: "よみ",
+      accent: 0,
+      translation: "中文义",
+      zh_senses: [{ glosses: ["中文义"] }],
+      examples: [{ ja: `${word}の例。`, en: `example for ${word}` }],
+      source: "local-jmdict",
+      local_zh: true,
+    }),
+  };
+  vm.runInContext(WORDPOP, vm.createContext(sandbox), { filename: "rc-wordpop.js" });
+
+  sandbox.RC.wordpop.show({ word: "古い", langs: ["ja"], noBreathe: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  sandbox.RC.wordpop.show({ word: "新しい", langs: ["ja"], noBreathe: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(requested, ["古いの例。"], "Pi 例句翻译必须全模块单并发");
+  target.textContent = "新词仍在等待";
+  pending.get("古いの例。")({ ok: true, zh: "旧词的迟到翻译" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(target.textContent, "新词仍在等待");
+  assert.deepEqual(requested, ["古いの例。", "新しいの例。"], "前一项落定后才启动下一句");
+  pending.get("新しいの例。")({ ok: true, zh: "新词的正确翻译" });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(target.textContent, "新词的正确翻译");
 });
 
 test("App 本地词典未命中的自定义日语词组不自动交给 ReaderPC 或 Pi", async () => {
