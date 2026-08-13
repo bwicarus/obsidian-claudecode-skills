@@ -4189,8 +4189,8 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **发布事实**：提交 `b9f790ce`；Actions `31622294013` 上传 TestFlight `1.1.47 (265)`，`31622963634` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
 - **边界/下一步**：Windows 全量/handoff 仍只命中已登记的 `fcntl`/Linux fixture 基线；未部署 Pi 或桌面扩展正式渠道。旧高亮请求不会重放，安装后须在新 Codex 会话对同一文字重新调用，并以页面实际出现色块为唯一验收。
 
-## Codex：App 私有中日词典与 ReaderPC CLI 句境回退候选（2026-08-13 JST）
+## Codex：App 私有中日词典与 ReaderPC CLI 句境回退已发布（2026-08-13 JST）
 - **改了什么**：App 设置按需下载 JMdict + 中文 Wiktionary 数据并仅存私有 Application Support；App/扩展本地无中文或自定义词组未命中时，把词组、句境、读音与英文参考交给隔离的 ReaderPC Codex CLI 返回中文。
-- **怎么验的**：词典摘要复验、构建器 3 项、Reader Node 1038 项、发布管线 24 项及 Windows Direct Release/完整自检通过；App 与扩展的自定义词组合同均验证句境请求、中文结果且零 Pi 请求，App 另验证私有缓存。
-- **边界**：约 93 MB 字典不进入 IPA、扩展、书籍附件或 Pi；Windows 全量/handoff 仍命中既有 POSIX `fcntl`、Linux fixture 与本机密钥基线，Swift 尚未在 macOS 编译。
-- **下一步**：先提交并推送不可变词典数据，再把 App 下载地址钉住该数据提交；完成真机设置下载、无中文词条和自定义词组三项人工验收后才发布。
+- **怎么验的**：词典逐片摘要、构建器 3 项、Reader Node 1040 项、发布管线 24 项、Direct 包内自检、macOS 模拟器/设备归档与签名校验均通过；日语预热与自定义词组合同均验证零 Pi，词典查询独立短连接不阻塞语音/快照。
+- **发布事实**：数据 `65a74087`、功能 `506780e8`；Direct `0.1.120` 从 `0.1.118` 原子安装，回滚点 `C:\Users\bwica\bw-computer-voice-bridge-backups\install-0.1.120-20260813T034350Z-b0502201`；Actions `31664974706` 上传 TestFlight `1.1.48 (272)`，`31665408052` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
+- **边界/下一步**：约 93 MB 字典不进入 IPA、扩展、书附件或 Pi；ReaderPC `0.1.16` 预处理在线，电脑语音保存的开关仍为关闭，未擅自启动 GPT。安装后真机验收“默认未下载→下载进度→中文本地义→无中文/自定义词组 CLI”。
