@@ -1,5 +1,7 @@
 import test from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
+import vm from "node:vm";
 import {
   DataRegistry,
   DataStore,
@@ -7,6 +9,149 @@ import {
   makeRegistry,
   makeStore,
 } from "./helpers.mjs";
+
+const ROOT = new URL("../../", import.meta.url);
+const DATA_STORE_SOURCE = readFileSync(
+  new URL("_server_deploy/static/reader-runtime/data-store.js", ROOT),
+  "utf8",
+);
+const INDEXEDDB_STORE_SOURCE = readFileSync(
+  new URL("_server_deploy/static/reader-runtime/indexeddb-store.js", ROOT),
+  "utf8",
+);
+
+function abortableBatchIndexedDB() {
+  const keyPaths = {
+    records: "pk",
+    journal: "cursor",
+    mutations: "mutationId",
+    meta: "key",
+  };
+  const values = Object.fromEntries(
+    Object.keys(keyPaths).map((name) => [name, new Map()]),
+  );
+  values.meta.set("schema", { key: "schema", value: "data-store-schema/1" });
+  values.meta.set("cursor", { key: "cursor", value: 0 });
+  values.meta.set("instanceEpoch", {
+    key: "instanceEpoch",
+    value: "data-store-instance-v1-" + "a".repeat(32),
+  });
+  let hangMutationRead = false;
+  let abortCount = 0;
+
+  class Transaction {
+    constructor(storeNames) {
+      this.storeNames = storeNames;
+      this.active = true;
+      this.pending = 0;
+      this.completionGeneration = 0;
+      this.error = null;
+      this.oncomplete = null;
+      this.onabort = null;
+      this.onerror = null;
+    }
+
+    maybeComplete() {
+      if (!this.active || this.pending !== 0) return;
+      const generation = ++this.completionGeneration;
+      setImmediate(() => {
+        if (!this.active || this.pending !== 0 ||
+            generation !== this.completionGeneration) return;
+        this.active = false;
+        this.oncomplete?.();
+      });
+    }
+
+    schedule(operation) {
+      if (!this.active) throw new Error("transaction inactive");
+      const request = { result: undefined, error: null, onsuccess: null, onerror: null };
+      this.pending += 1;
+      this.completionGeneration += 1;
+      setImmediate(() => {
+        if (!this.active) return;
+        try {
+          request.result = operation();
+        } catch (error) {
+          request.error = error;
+          this.error = error;
+        }
+        this.pending -= 1;
+        if (request.error) {
+          request.onerror?.();
+          this.abort();
+          return;
+        }
+        request.onsuccess?.();
+        this.maybeComplete();
+      });
+      return request;
+    }
+
+    objectStore(name) {
+      if (!this.active || !this.storeNames.includes(name)) {
+        throw new Error("transaction inactive");
+      }
+      const data = values[name];
+      const keyPath = keyPaths[name];
+      return {
+        get: (key) => {
+          if (name === "mutations" && hangMutationRead) {
+            hangMutationRead = false;
+            this.pending += 1;
+            this.completionGeneration += 1;
+            return { result: undefined, error: null, onsuccess: null, onerror: null };
+          }
+          return this.schedule(() => data.get(key));
+        },
+        put: (value) => this.schedule(() => {
+          const key = value[keyPath];
+          data.set(key, value);
+          return key;
+        }),
+        count: () => this.schedule(() => data.size),
+        index: () => ({
+          openCursor: () => this.schedule(() => null),
+        }),
+        openCursor: () => this.schedule(() => null),
+      };
+    }
+
+    abort() {
+      if (!this.active) throw new Error("transaction inactive");
+      this.active = false;
+      abortCount += 1;
+      setImmediate(() => this.onabort?.());
+    }
+  }
+
+  const database = {
+    objectStoreNames: { contains: (name) => Object.hasOwn(keyPaths, name) },
+    onversionchange: null,
+    close() {},
+    transaction(storeNames) {
+      return new Transaction(Array.from(storeNames));
+    },
+  };
+  return {
+    factory: {
+      open() {
+        const request = {
+          result: database,
+          transaction: null,
+          error: null,
+          onsuccess: null,
+          onerror: null,
+          onblocked: null,
+          onupgradeneeded: null,
+        };
+        setImmediate(() => request.onsuccess?.());
+        return request;
+      },
+    },
+    hangNextMutationRead() { hangMutationRead = true; },
+    abortCount: () => abortCount,
+  };
+}
 
 function makeWebStorageStore(name, options = {}) {
   const values = new Map();
@@ -89,6 +234,70 @@ function legacyMigrationBackends(name) {
     },
   ];
 }
+
+test("IndexedDB bounded batch aborts a hung transaction and later writes still settle", async () => {
+  const fake = abortableBatchIndexedDB();
+  const context = {
+    console,
+    indexedDB: fake.factory,
+    IDBKeyRange: {
+      only: (value) => value,
+      lowerBound: (value) => value,
+    },
+    navigator: { userAgent: "bounded-idb-contract" },
+    crypto: {
+      getRandomValues(bytes) {
+        bytes.fill(3);
+        return bytes;
+      },
+    },
+    structuredClone,
+    setTimeout,
+    clearTimeout,
+    setImmediate,
+  };
+  context.globalThis = context;
+  vm.runInNewContext(DATA_STORE_SOURCE, context, { filename: "data-store.js" });
+  vm.runInNewContext(INDEXEDDB_STORE_SOURCE, context, { filename: "indexeddb-store.js" });
+  const store = context.BWReaderRuntime.indexedDBStore.createIndexedDBDataStore({
+    dbName: "bounded-batch-timeout",
+    deviceId: "bounded-idb-test",
+    broadcast: false,
+    webkitTransactionKeepalive: false,
+  });
+
+  fake.hangNextMutationRead();
+  const hungMutations = vm.runInNewContext(`(${JSON.stringify([{
+    collection: "document-state",
+    value: { id: "hung", value: 1 },
+    mutationId: "hung-batch",
+  }])})`, context);
+  const timeoutOptions = vm.runInNewContext("({ transactionTimeoutMs: 10 })", context);
+  const hung = store.batch(hungMutations, timeoutOptions);
+  await assert.rejects(
+    Promise.race([
+      hung,
+      new Promise((_, reject) => setTimeout(
+        () => reject(new Error("bounded batch did not settle")),
+        500,
+      )),
+    ]),
+    (error) => error.code === "BW_DATA_TIMEOUT" &&
+      error.details?.timeoutMs === 10,
+  );
+  assert.equal(fake.abortCount(), 1, "timeout must abort the real IDB transaction");
+
+  const laterMutations = vm.runInNewContext(`(${JSON.stringify([{
+    collection: "document-state",
+    value: { id: "later", value: 2 },
+    mutationId: "later-batch",
+  }])})`, context);
+  const later = await store.batch(laterMutations);
+  assert.equal(later.length, 1);
+  assert.equal((await store.get("document-state", "later")).value.value, 2);
+  assert.equal(fake.abortCount(), 1, "ordinary batches keep their existing no-timeout behavior");
+  store.close();
+});
 
 test("DataStore 用稳定 ID 更新同一张卡，不创建视觉副本", async () => {
   const store = makeStore("stable");
@@ -1318,6 +1527,63 @@ test("StorageRouter 只按已登记归属分流，未知和 pending 均报错", 
     reason: "旧 HTML 与扩展高亮来源冲突",
   });
   assert.throws(() => router.storeFor("legacy-highlights"), (error) => error.code === "BW_ROUTER_PENDING");
+});
+
+test("StorageRouter 把同 scope batch 原子下推，并在跨 scope 前 fail closed", async () => {
+  const globalStore = makeStore("router-batch-global");
+  const documentStore = makeStore("router-batch-document");
+  const scopes = {
+    "card-entities": {
+      scope: "global", status: "ready", provider: true, conflictPolicy: "explicit",
+    },
+    "card-states": {
+      scope: "global", status: "ready", provider: true, conflictPolicy: "explicit",
+    },
+    "document-notes": {
+      scope: "document", status: "ready", provider: false, conflictPolicy: "explicit",
+    },
+  };
+  const router = StorageRouter.createStorageRouter({
+    globalStore,
+    documentStore,
+    deviceStore: documentStore,
+    scopes,
+    dataRegistryApi: makeRegistry(scopes),
+  });
+
+  const written = await router.batch([
+    {
+      collection: "card-entities",
+      value: { id: "card_abcd", side: "entity" },
+      options: { mutationId: "router-batch-entity" },
+    },
+    {
+      collection: "card-states",
+      value: { id: "card_abcd", side: "state" },
+      options: { mutationId: "router-batch-state" },
+    },
+  ]);
+  assert.equal(written.length, 2);
+  assert.equal((await globalStore.get("card-entities", "card_abcd")).value.side, "entity");
+  assert.equal((await globalStore.get("card-states", "card_abcd")).value.side, "state");
+
+  await assert.rejects(
+    router.batch([
+      {
+        collection: "card-entities",
+        value: { id: "card_beef" },
+        options: { mutationId: "router-cross-global" },
+      },
+      {
+        collection: "document-notes",
+        value: { id: "note-beef" },
+        options: { mutationId: "router-cross-document" },
+      },
+    ]),
+    (error) => error.code === "BW_ROUTER_BATCH_SCOPE",
+  );
+  assert.equal(await globalStore.get("card-entities", "card_beef"), null);
+  assert.equal(await documentStore.get("document-notes", "note-beef"), null);
 });
 
 test("生产注册表只开放已确认 collection，冲突数据保持 pending", () => {

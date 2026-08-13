@@ -17,6 +17,28 @@ if (window.__bwPwaProviderOnly) return;
   }
   function _esc(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : String(s)); return d.innerHTML; }
 
+  function _httpsURL(value) {
+    var raw = String(value == null ? '' : value);
+    if (!raw || raw !== raw.trim()) return '';
+    try {
+      var parsed = new URL(raw);
+      if (parsed.protocol !== 'https:' || !parsed.hostname || parsed.username || parsed.password || parsed.hash) return '';
+      return parsed.href;
+    } catch (e) { return ''; }
+  }
+  function _thumbSource(v) {
+    var direct = _httpsURL(v && v.thumb);
+    if (direct) return direct;
+    if (v && !_isBili(v) && /^[A-Za-z0-9_-]{11}$/.test(String(v.id || ''))) {
+      return 'https://i.ytimg.com/vi/' + encodeURIComponent(v.id) + '/mqdefault.jpg';
+    }
+    return '';
+  }
+  function _thumbURL(v) {
+    var source = _thumbSource(v);
+    return source ? '/pdf/api/img-proxy?url=' + encodeURIComponent(source) : '';
+  }
+
   // 来源识别:**显式 src 优先**(后端恒设 src);仅无 src(旧收藏/遗留)时按 bvid 兜底(BV+10 位=12 字符,
   //   不会误判 11 位 YouTube id 即便它碰巧以 BV 开头)。避免"src=yt 却被 /^BV/ 覆盖成 B站"整类 bug。
   function _isBili(v) { return !!(v && (v.src ? v.src === 'bili' : /^BV[0-9A-Za-z]{10}/.test(v.id || ''))); }
@@ -29,14 +51,23 @@ if (window.__bwPwaProviderOnly) return;
 
   function _card(v) {
     var bili = _isBili(v);
+    var thumbSource = _thumbSource(v), thumb = _thumbURL(v);
     var el = document.createElement('div'); el.className = 'rc-vid';
     el.innerHTML =
-      '<div class="rc-vid-thumb"><img loading="lazy" referrerpolicy="no-referrer" src="' + _esc(v.thumb) + '" alt="">' +   // no-referrer:B站图床防盗链,带我们域名 Referer 会 403;不发 Referer 才放行(对 ytimg 无副作用)
+      '<div class="rc-vid-thumb">' + (thumb ? '<img loading="lazy" referrerpolicy="same-origin" data-source-url="' + _esc(thumbSource) + '" src="' + _esc(thumb) + '" alt="">' : '<span class="rc-vid-thumb-empty">无预览图</span>') +
       '<button class="rc-vid-play" aria-label="播放">▶</button>' +
       '<span class="rc-vid-src ' + (bili ? 'is-bili' : 'is-yt') + '">' + (bili ? 'B站' : 'YouTube') + '</span>' +
       (v.dur ? '<span class="rc-vid-dur">' + _esc(v.dur) + '</span>' : '') + '</div>' +
       '<div class="rc-vid-meta"><div class="rc-vid-title">' + _esc(v.title) + '</div>' +
       '<div class="rc-vid-ch">' + _esc(v.channel) + '</div></div>';
+    var thumbImage = el.querySelector('.rc-vid-thumb img');
+    if (thumbImage) thumbImage.addEventListener('error', function () {
+      thumbImage.style.display = 'none';
+      if (!el.querySelector('.rc-vid-thumb-empty')) {
+        var empty = document.createElement('span'); empty.className = 'rc-vid-thumb-empty'; empty.textContent = '封面加载失败';
+        el.querySelector('.rc-vid-thumb').insertBefore(empty, el.querySelector('.rc-vid-play'));
+      }
+    });
     el.querySelector('.rc-vid-thumb').addEventListener('click', function () { _openPlayer(v); });   // 点播放 → 浮动播放器
     _bindDragToBook(el, v);   // 阶段 B:长按视频卡 → 拖到书页放置(建视频便签)。B站也支持(便签存 thumb+src,不再写死 ytimg)
     // 阶段 D:☆ 收藏 → 弹「⭐ 收藏到…」选择器(复用 RC.favorites.openPicker,跟页面/高亮收藏同一套 UI:选夹/多选/新建夹)
@@ -210,6 +241,7 @@ if (window.__bwPwaProviderOnly) return;
       '.rc-vid{background:#0d1322;border:1px solid #263255;border-radius:10px;overflow:hidden}' +
       '.rc-vid-thumb{position:relative;aspect-ratio:16/9;background:#000;cursor:pointer;-webkit-touch-callout:none}' +
       '.rc-vid-thumb img{width:100%;height:100%;object-fit:cover;display:block;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;pointer-events:none}' +
+      '.rc-vid-thumb-empty{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;color:#7d8db0;font-size:11px;background:#10182b}' +
       '.rc-vid-drag{position:absolute;left:6px;bottom:6px;z-index:4;width:30px;height:30px;border-radius:8px;border:none;background:rgba(0,0,0,.6);color:#fff;font-size:16px;line-height:1;cursor:grab;display:flex;align-items:center;justify-content:center;padding:0;touch-action:none;-webkit-touch-callout:none;-webkit-user-select:none;user-select:none;-webkit-tap-highlight-color:transparent}' +
       '.rc-vid-drag:active{cursor:grabbing;background:rgba(59,109,181,.92);transform:scale(1.08)}' +
       '.rc-vid-frame{width:100%;aspect-ratio:16/9;border:0;display:block}' +

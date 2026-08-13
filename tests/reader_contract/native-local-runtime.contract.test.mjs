@@ -670,8 +670,9 @@ test("IndexedDB batch queues its first request before yielding to a Promise", ()
     new URL("_server_deploy/static/reader-runtime/indexeddb-store.js", ROOT),
     "utf8",
   );
-  const start = source.indexOf("function batch(mutations)");
+  const start = source.indexOf("function batch(mutations");
   const end = source.indexOf("function changes(query)", start);
+  assert.ok(start >= 0 && end > start, "IndexedDB batch implementation must be present");
   const batch = source.slice(start, end);
   assert.match(batch, /var work = applyMutation\(mutations\[0\]\)/);
   assert.doesNotMatch(batch, /Promise\.resolve\(\)\)\.then\(function \(\) \{\s*var work/);

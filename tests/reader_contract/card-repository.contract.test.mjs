@@ -505,6 +505,44 @@ test("legacy batch 原子导入 gid+cards+states，缺失状态可补、真实�
   );
 });
 
+test("legacy 批次同时接受旧 data 与新 batch.cards 形状，但拒绝双形状分叉", async () => {
+  const oldRepository = repository().repo;
+  const [fromData] = await oldRepository.importLegacyBatch([{
+    id: "card_0bad01",
+    kind: "cards",
+    data: [basic("legacy data")],
+    states: { 0: { _st: "learn", _next: "1d" } },
+    source_ref: "book:legacy-data#p1",
+  }], { mutationId: "legacy-data-shape" });
+  assert.equal(fromData.cards[0].front, "legacy data");
+  assert.equal(fromData.states["0"].phase, "confirmed");
+
+  const newRepository = repository().repo;
+  const [fromBatch] = await newRepository.importLegacyBatch([{
+    id: "card_0bad02",
+    kind: "cards",
+    batch: {
+      cards: [basic("nested batch")],
+      states: { 0: { _st: "learn", _next: "2d" } },
+    },
+    source_ref: "book:nested-batch#p2",
+  }], { mutationId: "legacy-nested-batch-shape" });
+  assert.equal(fromBatch.cards[0].front, "nested batch");
+  assert.equal(fromBatch.states["0"].exactState._next, "2d");
+
+  await assert.rejects(
+    repository().repo.importLegacyBatch([{
+      id: "card_0bad03",
+      kind: "cards",
+      cards: [basic("top")],
+      batch: { cards: [basic("nested")], states: {} },
+      states: {},
+      source_ref: "book:forked#p3",
+    }], { mutationId: "legacy-shape-fork" }),
+    (error) => error.code === "BW_CARD_REPOSITORY_LEGACY",
+  );
+});
+
 test("legacy import 与同批其它记录任一冲突时全部不写", async () => {
   const { repo } = repository();
   await repo.saveConfirmedCard({

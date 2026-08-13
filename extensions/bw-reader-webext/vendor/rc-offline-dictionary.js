@@ -5,21 +5,22 @@ if (window.__bwPwaProviderOnly) return;
  *
  * Dictionary bytes are deliberately absent from ReaderBundle and every
  * extension package. App pages read the user-installed, digest-checked files
- * through the token-scoped loopback API. Missing Chinese meanings are handled
- * by ReaderPC's authenticated local Codex CLI bridge; Pi remains only an
- * explicit legacy deep-analysis fallback owned by rc-wordpop/rc-phrasepop.
+ * through the token-scoped loopback API. Ordinary lookup never leaves the App;
+ * Pi remains only an explicit user-invoked deep-analysis fallback owned by
+ * rc-wordpop/rc-phrasepop.
  */
 (function () {
   if (!window.RC) window.RC = {};
   if (window.RC.offlineDictionary) return;
 
-  var MANIFEST_CONTRACT = 'bw-jmdict-manifest/2';
-  var SHARD_CONTRACT = 'bw-jmdict-shard/2';
+  var MANIFEST_CONTRACT = 'bw-jmdict-manifest/3';
+  var SHARD_CONTRACT = 'bw-jmdict-shard/3';
   var nativeBase = String(window.__BW_NATIVE_LOCAL_BASE_PATH__ || '').replace(/\/+$/, '');
   var BASE = nativeBase + '/native-api/offline-dictionary/';
   var localMode = !!nativeBase;
   var manifestPromise = null;
   var shardPromises = new Map();
+  var kanjiPromise = null;
   var encoder = new TextEncoder();
 
   function normalize(value) {
@@ -39,7 +40,7 @@ if (window.__bwPwaProviderOnly) return;
 
   function safeRelativePath(value) {
     var path = String(value || '').replace(/^\/+/, '');
-    if (!/^(?:manifest\.json|shards\/[a-f0-9]{1,6}\.json)$/.test(path)) {
+    if (!/^(?:manifest\.json|kanji\.json|shards\/[a-f0-9]{1,6}\.json)$/.test(path)) {
       throw new Error('离线词典资源路径无效');
     }
     return path;
@@ -101,6 +102,76 @@ if (window.__bwPwaProviderOnly) return;
     var indexes = shard.exact[term];
     if (!Array.isArray(indexes)) return [];
     return indexes.map(function (index) { return shard.entries[index]; }).filter(Boolean);
+  }
+
+  function loadKanji() {
+    if (!kanjiPromise) {
+      kanjiPromise = loadJson('kanji.json').catch(function (error) {
+        kanjiPromise = null;
+        throw error;
+      });
+    }
+    return kanjiPromise;
+  }
+
+  function hira(value) {
+    return String(value || '').replace(/[ァ-ヶ]/g, function (c) {
+      return String.fromCharCode(c.charCodeAt(0) - 0x60);
+    });
+  }
+
+  function moraCount(value) {
+    return Array.from(hira(value)).filter(function (c) {
+      // A sokuon (っ) and a long-vowel mark (ー) each occupy one mora.
+      // Only small kana that combine with the preceding kana are excluded.
+      return !/[ゃゅょぁぃぅぇぉゎ]/.test(c);
+    }).length;
+  }
+
+  function romaji(value) {
+    var text = hira(value);
+    var table = {
+      'きゃ':'kya','きゅ':'kyu','きょ':'kyo','しゃ':'sha','しゅ':'shu','しょ':'sho',
+      'ちゃ':'cha','ちゅ':'chu','ちょ':'cho','にゃ':'nya','にゅ':'nyu','にょ':'nyo',
+      'ひゃ':'hya','ひゅ':'hyu','ひょ':'hyo','みゃ':'mya','みゅ':'myu','みょ':'myo',
+      'りゃ':'rya','りゅ':'ryu','りょ':'ryo','ぎゃ':'gya','ぎゅ':'gyu','ぎょ':'gyo',
+      'じゃ':'ja','じゅ':'ju','じょ':'jo','びゃ':'bya','びゅ':'byu','びょ':'byo',
+      'ぴゃ':'pya','ぴゅ':'pyu','ぴょ':'pyo',
+      'あ':'a','い':'i','う':'u','え':'e','お':'o','か':'ka','き':'ki','く':'ku','け':'ke','こ':'ko',
+      'さ':'sa','し':'shi','す':'su','せ':'se','そ':'so','た':'ta','ち':'chi','つ':'tsu','て':'te','と':'to',
+      'な':'na','に':'ni','ぬ':'nu','ね':'ne','の':'no','は':'ha','ひ':'hi','ふ':'fu','へ':'he','ほ':'ho',
+      'ま':'ma','み':'mi','む':'mu','め':'me','も':'mo','や':'ya','ゆ':'yu','よ':'yo',
+      'ら':'ra','り':'ri','る':'ru','れ':'re','ろ':'ro','わ':'wa','を':'o','ん':'n',
+      'が':'ga','ぎ':'gi','ぐ':'gu','げ':'ge','ご':'go','ざ':'za','じ':'ji','ず':'zu','ぜ':'ze','ぞ':'zo',
+      'だ':'da','ぢ':'ji','づ':'zu','で':'de','ど':'do','ば':'ba','び':'bi','ぶ':'bu','べ':'be','ぼ':'bo',
+      'ぱ':'pa','ぴ':'pi','ぷ':'pu','ぺ':'pe','ぽ':'po','ゔ':'vu'
+    };
+    var out = '', doubled = false;
+    for (var i = 0; i < text.length; i++) {
+      if (text[i] === 'っ') { doubled = true; continue; }
+      if (text[i] === 'ー') {
+        var vowel = (out.match(/[aeiou]$/) || [])[0];
+        if (vowel) out += vowel;
+        continue;
+      }
+      var pair = text.slice(i, i + 2);
+      var piece = table[pair];
+      if (piece) i += 1;
+      else piece = table[text[i]] || text[i];
+      if (doubled && /^[bcdfghjklmnpqrstvwxyz]/.test(piece)) out += piece[0];
+      doubled = false;
+      out += piece;
+    }
+    return out;
+  }
+
+  async function wordKanji(word) {
+    var chars = Array.from(String(word || '')).filter(function (c, i, all) {
+      return /[㐀-鿿]/.test(c) && all.indexOf(c) === i;
+    });
+    if (!chars.length) return [];
+    var source = await loadKanji();
+    return chars.map(function (c) { return source[c]; }).filter(Boolean);
   }
 
   function candidateForms(term) {
@@ -188,7 +259,7 @@ if (window.__bwPwaProviderOnly) return;
     };
   }
 
-  function asLegacy(result, original) {
+  async function asLegacy(result, original) {
     if (!result || !result.ok) return result || { ok: false, source: 'local-jmdict' };
     var entry = result.entry || {};
     var glosses = Array.isArray(entry.glosses) ? entry.glosses.filter(Boolean) : [];
@@ -204,18 +275,28 @@ if (window.__bwPwaProviderOnly) return;
       ? entry.pos.map(function (code) { return labels[code] || code; }).join(' / ')
       : String(entry.pos || '');
     var lemma = entry.lemma || result.matchedTerm || original;
+    var reading = readings[0] || '';
     return {
       ok: true,
       jp: true,
       word: original,
       lemma: lemma,
       forms: forms,
-      reading: readings[0] || '',
+      reading: reading,
+      reading_kata: entry.readingKata || '',
+      accent: Number.isInteger(entry.accent) ? entry.accent : null,
+      mora: moraCount(reading),
+      romaji: romaji(reading),
       pos: pos,
       zh: chineseText,
       translation: hasChinese ? chineseText : englishText,
       definition: hasChinese ? chineseText : englishText,
-      examples: [],
+      examples: Array.isArray(entry.examples) ? entry.examples.slice(0, 5) : [],
+      zh_senses: Array.isArray(entry.zhSenses) ? entry.zhSenses : [],
+      etymology: Array.isArray(entry.etymology) ? entry.etymology : [],
+      synonyms: Array.isArray(entry.synonyms) ? entry.synonyms : [],
+      source_urls: Array.isArray(entry.sourceUrls) ? entry.sourceUrls : [],
+      kanji: await wordKanji(lemma),
       inflect: result.inflectionMark ? { base: lemma, marks: [result.inflectionMark] } : null,
       local_candidates: result.candidates || [],
       source: 'local-jmdict',
@@ -234,7 +315,8 @@ if (window.__bwPwaProviderOnly) return;
       return lookupJapanese(term).then(function (result) { return asLegacy(result, term); });
     },
     _candidateForms: candidateForms,
-    _shardKey: shardKey
+    _shardKey: shardKey,
+    _moraCount: moraCount
   });
 })();
 

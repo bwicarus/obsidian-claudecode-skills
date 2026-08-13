@@ -101,7 +101,10 @@ test("Realtime output waits for exact highlight and rendered Anki draft", () => 
   assert.match(receiver, /delivery\.kind === 'highlight-text'/);
   assert.match(receiver, /__bwReaderHighlightExactText\(p\)/);
   assert.match(receiver, /delivery\.kind === 'anki-draft'/);
+  assert.match(receiver, /_readerDraftSourceMode\(p\)/);
+  assert.match(receiver, /_draftSourceMode === 'exact'/);
   assert.match(receiver, /__bwReaderValidateExactSource\(p\)/);
+  assert.match(receiver, /Promise\.resolve\(\{ ok: true, generic: true \}\)/);
   assert.match(receiver, /_readerDraftGid\(p\.draftId\)/);
   assert.match(VOICE, /crypto\.subtle\.digest\(\s*'SHA-256'/);
   assert.match(receiver, /repositorySource:\s*_readerDraftSource\(/);
@@ -115,12 +118,14 @@ test("Realtime output waits for exact highlight and rendered Anki draft", () => 
   assert.ok(receiver.indexOf("_rememberReaderOutput") > receiver.indexOf("Promise.resolve(work)"));
 });
 
-test("Anki MCP delivery registers the draft before rendering confirmation UI", () => {
+test("Anki MCP delivery registers exact or generic drafts before rendering confirmation UI", () => {
   const start = FLASH.indexOf("function presentDraft(cards, gid, options)");
   const end = FLASH.indexOf("RC.flashcard =", start);
   const present = FLASH.slice(start, end);
   assert.match(present, /repo\.registerDraft\(\{/);
-  assert.match(present, /source:\s*options\.repositorySource/);
+  assert.match(present, /var source = options\.repositorySource/);
+  assert.match(present, /kind:\s*'reader-generated-card-draft'/);
+  assert.match(present, /source:\s*source/);
   assert.match(present, /requireDraftIdForReplay:\s*true/);
   assert.match(present, /mode:\s*'draft'/);
   assert.match(present, /surface:\s*options\.host \? 'inflow' : 'float'/);

@@ -35,17 +35,17 @@ struct ReaderOfflineDictionaryInfo: Equatable, Sendable {
 /// ReaderBundle, Safari extension, books, App Group, Pi sync and registry data
 /// never point at this directory.
 enum ReaderOfflineDictionaryStore {
-    static let manifestContract = "bw-jmdict-manifest/2"
-    static let shardContract = "bw-jmdict-shard/2"
+    static let manifestContract = "bw-jmdict-manifest/3"
+    static let shardContract = "bw-jmdict-shard/3"
     static let shardAlgorithm = "utf8-prefix-2-kana-3/1"
     static let sourceRelease = "3.6.2+20260810124713"
     static let sourceDigest =
         "e6802135b445627a8f09c544bf8c32c3d344515f6e95a473e8bd39e09ad00109"
     static let sourceRevision =
-        "65a740870120e673f386d7f38994a215f072ff51"
+        "9ecb02ab0c302d59d71a5e86ffeb933c5f2aa0e2"
     static let manifestDigest =
-        "c3a16cd3715a5a1d481cd9634bafd72e8011ad0f6336a847ab955720ddb75add"
-    static let datasetID = "jmdict-3.6.2-20260810124713-zhwiktionary-v2"
+        "1c719097c9a3feb51b3bd088dbb009e40e98ba6dc097b9b60cb8b56a14b86825"
+    static let datasetID = "jmdict-3.6.2-20260810124713-rich-zh-v3"
     static let installContract = "bw-offline-dictionary-install/1"
     static let sourceBaseURL = URL(
         string: "https://raw.githubusercontent.com/bwicarus/obsidian-claudecode-skills/\(sourceRevision)/ios/BWReader/DictionaryData/"
@@ -79,8 +79,12 @@ enum ReaderOfflineDictionaryStore {
         let shardAlgorithm: String
         let source: Source
         let chineseSource: ChineseSource
+        let tanakaSource: ChineseSource
+        let kanjidicSource: ChineseSource
         let license: Resource
         let chineseLicense: Resource
+        let tanakaLicense: Resource
+        let resources: [String: Resource]
         let shards: [String: Shard]
     }
 
@@ -145,12 +149,18 @@ enum ReaderOfflineDictionaryStore {
               manifest.source.release == sourceRelease,
               manifest.source.sha256 == sourceDigest,
               manifest.chineseSource.release
-                == "zhwiktionary-ja-605256f3b7fc",
+                == "2026.07.15",
               manifest.chineseSource.sha256
-                == "605256f3b7fc73337b9b9d47612ab27477cff92c230dfc2c900545d52de1c63c",
+                == "3ef3022e6b9310c1bc8c82af5a27d273e73b60ae5a0e500d7bc424535ede8938",
+              manifest.tanakaSource.sha256
+                == "a5d50104737e9ab1ff40324c6d6f0bc9be32541942fd6119bea001c1b47570aa",
+              manifest.kanjidicSource.sha256
+                == "05c10cb87dc109e087f6e99c95a8fb8dd02705cbd0e86130ba0e80bf8db7fa26",
               manifest.license.path == "LICENSE-JMdict.txt",
               manifest.chineseLicense.path
                 == "LICENSE-ZhWiktionary.txt",
+              manifest.tanakaLicense.path == "LICENSE-Tanaka.txt",
+              manifest.resources["kanji.json"]?.path == "kanji.json",
               !manifest.shards.isEmpty else {
             throw ReaderOfflineDictionaryError.invalidManifest
         }
@@ -163,7 +173,10 @@ enum ReaderOfflineDictionaryStore {
             }
         }
         guard isLowercaseSHA256(manifest.license.sha256),
-              isLowercaseSHA256(manifest.chineseLicense.sha256) else {
+              isLowercaseSHA256(manifest.chineseLicense.sha256),
+              isLowercaseSHA256(manifest.tanakaLicense.sha256),
+              isLowercaseSHA256(manifest.resources["kanji.json"]?.sha256 ?? ""),
+              (manifest.resources["kanji.json"]?.bytes ?? 0) > 0 else {
             throw ReaderOfflineDictionaryError.invalidManifest
         }
         return manifest
@@ -196,7 +209,7 @@ enum ReaderOfflineDictionaryStore {
     }
 
     static func readRuntimeResource(relative: String) throws -> Data {
-        guard relative == "manifest.json"
+        guard relative == "manifest.json" || relative == "kanji.json"
                 || relative.range(
                     of: #"^shards/[a-f0-9]{2,6}\.json$"#,
                     options: .regularExpression
@@ -214,6 +227,18 @@ enum ReaderOfflineDictionaryStore {
         let manifest = try decodeAndValidateManifest(manifestData)
         if relative == "manifest.json" {
             return manifestData
+        }
+        if relative == "kanji.json" {
+            guard let metadata = manifest.resources[relative] else {
+                throw ReaderOfflineDictionaryError.invalidResource(relative)
+            }
+            let fileURL = root.appendingPathComponent(relative)
+            guard let data = try? Data(contentsOf: fileURL, options: .mappedIfSafe),
+                  data.count == Int(metadata.bytes ?? 0),
+                  sha256Hex(data) == metadata.sha256 else {
+                throw ReaderOfflineDictionaryError.invalidResource(relative)
+            }
+            return data
         }
         let key = String(relative.dropFirst("shards/".count).dropLast(".json".count))
         guard let metadata = manifest.shards[key] else {
@@ -255,6 +280,8 @@ enum ReaderOfflineDictionaryStore {
         guard relative == "manifest.json"
                 || relative == "LICENSE-JMdict.txt"
                 || relative == "LICENSE-ZhWiktionary.txt"
+                || relative == "LICENSE-Tanaka.txt"
+                || relative == "kanji.json"
                 || relative.range(
                     of: #"^shards/[a-f0-9]{2,6}\.json$"#,
                     options: .regularExpression
@@ -319,6 +346,7 @@ private enum ReaderOfflineDictionaryInstaller {
 
         let licenseBytes = manifest.license.bytes ?? 0
         let chineseLicenseBytes = manifest.chineseLicense.bytes ?? 0
+        let tanakaLicenseBytes = manifest.tanakaLicense.bytes ?? 0
         var assets = [
             Asset(
                 relative: manifest.license.path,
@@ -330,7 +358,19 @@ private enum ReaderOfflineDictionaryInstaller {
                 bytes: chineseLicenseBytes,
                 sha256: manifest.chineseLicense.sha256
             ),
+            Asset(
+                relative: manifest.tanakaLicense.path,
+                bytes: tanakaLicenseBytes,
+                sha256: manifest.tanakaLicense.sha256
+            ),
         ]
+        assets.append(contentsOf: manifest.resources.sorted(by: { $0.key < $1.key }).map {
+            Asset(
+                relative: $0.value.path,
+                bytes: $0.value.bytes ?? 0,
+                sha256: $0.value.sha256
+            )
+        })
         assets.append(contentsOf: manifest.shards.sorted(by: { $0.key < $1.key }).map {
             Asset(
                 relative: $0.value.path,

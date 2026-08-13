@@ -405,6 +405,7 @@
   var nativePDFWriterAccepting = true;
   var nativePDFActiveWriters = 0;
   var nativePDFWriterDrainWaiters = [];
+  var EXACT_HIGHLIGHT_IDB_TIMEOUT_MS = 4000;
   var PDF_MUTATION_DOCUMENT_KINDS = Object.freeze([
     'reading-position', 'document-highlights', 'ink',
     'document-notes-legacy', 'user-pages',
@@ -669,53 +670,57 @@
     return { payload: payload, value: value };
   }
 
+  function mutateDocumentStateNow(kind, fallback, mutator, batchOptions) {
+    var attempts = 0;
+    function attempt() {
+      attempts += 1;
+      var relatedKinds = kind === 'document-notes-legacy'
+        ? ['document-notes-legacy', 'card-placements', 'entity-references']
+        : [kind];
+      return Promise.all(relatedKinds.map(function (relatedKind) {
+        return storedStateRecord(
+          stores.document, relatedKind, 'documentId', bookId,
+          relatedKind === kind ? fallback : []
+        );
+      })).then(function (records) {
+        var outcome = mutator(clone(records[0].payload));
+        if (!outcome || !Object.prototype.hasOwnProperty.call(outcome, 'payload')) {
+          throw new RuntimeError(
+            '本机文档状态修改器响应无效', 'BW_LOCAL_STATE_MUTATION'
+          );
+        }
+        var suffix = randomHex(12);
+        var mutations;
+        if (kind === 'document-notes-legacy') {
+          var notes = Array.isArray(outcome.payload) ? clone(outcome.payload) : [];
+          var placements = deriveCardPlacements(notes);
+          var references = deriveEntityReferences(placements);
+          mutations = [
+            stateRecordMutation(kind, notes, suffix + '-notes', records[0].rev),
+            stateRecordMutation('card-placements', placements, suffix + '-cards', records[1].rev),
+            stateRecordMutation('entity-references', references, suffix + '-entities', records[2].rev)
+          ];
+        } else {
+          mutations = [stateRecordMutation(
+            kind, outcome.payload, suffix, records[0].rev
+          )];
+        }
+        return stores.document.batch(mutations, batchOptions).then(function () {
+          return clone(outcome.value);
+        });
+      }).catch(function (error) {
+        if (error && error.code === 'BW_DATA_CONFLICT' && attempts < 5) {
+          return attempt();
+        }
+        throw error;
+      });
+    }
+    return attempt();
+  }
+
   function mutateDocumentState(kind, fallback, mutator) {
     return serializeLocalStateMutation('document', kind, function () {
-      var attempts = 0;
-      function attempt() {
-        attempts += 1;
-        var relatedKinds = kind === 'document-notes-legacy'
-          ? ['document-notes-legacy', 'card-placements', 'entity-references']
-          : [kind];
-        return Promise.all(relatedKinds.map(function (relatedKind) {
-          return storedStateRecord(
-            stores.document, relatedKind, 'documentId', bookId,
-            relatedKind === kind ? fallback : []
-          );
-        })).then(function (records) {
-          var outcome = mutator(clone(records[0].payload));
-          if (!outcome || !Object.prototype.hasOwnProperty.call(outcome, 'payload')) {
-            throw new RuntimeError(
-              '本机文档状态修改器响应无效', 'BW_LOCAL_STATE_MUTATION'
-            );
-          }
-          var suffix = randomHex(12);
-          var mutations;
-          if (kind === 'document-notes-legacy') {
-            var notes = Array.isArray(outcome.payload) ? clone(outcome.payload) : [];
-            var placements = deriveCardPlacements(notes);
-            var references = deriveEntityReferences(placements);
-            mutations = [
-              stateRecordMutation(kind, notes, suffix + '-notes', records[0].rev),
-              stateRecordMutation('card-placements', placements, suffix + '-cards', records[1].rev),
-              stateRecordMutation('entity-references', references, suffix + '-entities', records[2].rev)
-            ];
-          } else {
-            mutations = [stateRecordMutation(
-              kind, outcome.payload, suffix, records[0].rev
-            )];
-          }
-          return stores.document.batch(mutations).then(function () {
-            return clone(outcome.value);
-          });
-        }).catch(function (error) {
-          if (error && error.code === 'BW_DATA_CONFLICT' && attempts < 5) {
-            return attempt();
-          }
-          throw error;
-        });
-      }
-      return attempt();
+      return mutateDocumentStateNow(kind, fallback, mutator);
     });
   }
 
@@ -4191,6 +4196,43 @@
     return value;
   }
 
+  function persistLocalPDFHighlight(body, code, independent) {
+    requireLocalFile(body.file, code);
+    var page = strictInteger(body.page, 1, 10000000, 'page', code);
+    var rects = normalizedRectangles(body.rects, code);
+    var clientId = typeof body.id === 'string' && /^c_[a-f0-9]{8,32}$/.test(body.id)
+      ? body.id : '';
+    var highlight = {
+      id: clientId || ('h_' + randomHex(6)),
+      page: page,
+      rects: rects,
+      color: normalizedHighlightColor(body.color, '#ffd54a', code),
+      text: boundedLocalString(body.text, 2000, '', code, '高亮文字', false),
+      note: boundedLocalString(body.note, 2000, '', code, '高亮备注', false),
+      kind: ['note', 'translate', 'explain'].indexOf(body.kind) >= 0
+        ? body.kind : 'note',
+      sentence: boundedLocalString(body.sentence, 2000, '', code, '高亮句子', false),
+      body: boundedLocalString(body.body, 8000, '', code, '高亮正文', false),
+      time: nowSeconds()
+    };
+    if (body.page_w != null && body.page_h != null) {
+      highlight.page_w = finiteLocalNumber(body.page_w, 1, 100000, null, code, 'page_w');
+      highlight.page_h = finiteLocalNumber(body.page_h, 1, 100000, null, code, 'page_h');
+    }
+    var mutate = independent ? mutateDocumentStateNow : mutateDocumentState;
+    return mutate('document-highlights', [], function (items) {
+      items = storedList(items, code).filter(function (item) {
+        return !item || item.id !== highlight.id;
+      });
+      items.push(highlight);
+      return localStateMutationResult(items, {
+        ok: true, id: highlight.id, highlight: highlight
+      });
+    }, independent ? {
+      transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS
+    } : undefined);
+  }
+
   function localPDFHighlights(input, init, url, method) {
     var code = 'BW_LOCAL_HIGHLIGHTS';
     if (method === 'GET') {
@@ -4230,36 +4272,7 @@
       return requestObject(input, init, allowed, required, code).then(function (body) {
         requireLocalFile(body.file, code);
         if (method === 'POST') {
-          var page = strictInteger(body.page, 1, 10000000, 'page', code);
-          var rects = normalizedRectangles(body.rects, code);
-          var clientId = typeof body.id === 'string' && /^c_[a-f0-9]{8,32}$/.test(body.id)
-            ? body.id : '';
-          var highlight = {
-            id: clientId || ('h_' + randomHex(6)),
-            page: page,
-            rects: rects,
-            color: normalizedHighlightColor(body.color, '#ffd54a', code),
-            text: boundedLocalString(body.text, 2000, '', code, '高亮文字', false),
-            note: boundedLocalString(body.note, 2000, '', code, '高亮备注', false),
-            kind: ['note', 'translate', 'explain'].indexOf(body.kind) >= 0
-              ? body.kind : 'note',
-            sentence: boundedLocalString(body.sentence, 2000, '', code, '高亮句子', false),
-            body: boundedLocalString(body.body, 8000, '', code, '高亮正文', false),
-            time: nowSeconds()
-          };
-          if (body.page_w != null && body.page_h != null) {
-            highlight.page_w = finiteLocalNumber(body.page_w, 1, 100000, null, code, 'page_w');
-            highlight.page_h = finiteLocalNumber(body.page_h, 1, 100000, null, code, 'page_h');
-          }
-          return mutateDocumentState('document-highlights', [], function (items) {
-            items = storedList(items, code).filter(function (item) {
-              return !item || item.id !== highlight.id;
-            });
-            items.push(highlight);
-            return localStateMutationResult(items, {
-              ok: true, id: highlight.id, highlight: highlight
-            });
-          });
+          return persistLocalPDFHighlight(body, code, false);
         }
         var id = localRecordId(body.id, code);
         return mutateDocumentState('document-highlights', [], function (items) {
@@ -9248,6 +9261,30 @@
     deviceFamilyId: deviceId,
     localBookId: bookId,
     ready: function () { return bootPromise; },
+    savePDFHighlight: function (payload) {
+      var allowed = new Set([
+        'file', 'id', 'page', 'rects', 'color', 'text', 'note', 'kind',
+        'sentence', 'body', 'page_w', 'page_h'
+      ]);
+      if (!payload || typeof payload !== 'object' || Array.isArray(payload) ||
+          Object.keys(payload).some(function (key) { return !allowed.has(key); })) {
+        return Promise.reject(new RuntimeError(
+          '本机精确高亮参数无效', 'BW_LOCAL_HIGHLIGHT_DIRECT'
+        ));
+      }
+      var body = clone(payload);
+      return bootPromise.then(function () {
+        return withNativePDFWriter('assistant-exact-highlight', function (lease) {
+          assertNativePDFWriterLease(lease);
+          // 精确工具携带稳定 mutation id，CAS 冲突可安全重试。不要排在普通
+          // 高亮的共享 Promise 队列之后：旧 WebKit 写入若失联，队列会永久
+          // 悬住并让每次语音高亮都只得到 20 秒回执超时。
+          return persistLocalPDFHighlight(
+            body, 'BW_LOCAL_HIGHLIGHT_DIRECT', true
+          );
+        });
+      });
+    },
     status: function () {
       return {
         contract: CONTRACT, owner: 'native-app', state: bootState,

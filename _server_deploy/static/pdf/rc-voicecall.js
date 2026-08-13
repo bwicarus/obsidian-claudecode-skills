@@ -947,23 +947,39 @@
   }
   function _toolCardRepositorySource(gid, payload, tool) {
     payload = payload || {};
-    var file = String((_rtc && _rtc.ctxFile) || '').slice(0, 4096);
-    var page = Number((_rtc && _rtc.ctxPage) || 0);
     var explicit = String(payload.source_ref || payload.src || '').slice(0, 4096);
     var quote = '';
     try {
       quote = String(payload.source_text || payload.text ||
         (payload.args && payload.args.text) || '').slice(0, 32768);
     } catch (_) {}
-    return {
+    var exact = payload.source_highlight &&
+      typeof payload.source_highlight === 'object'
+      ? payload.source_highlight : null;
+    var source = {
       kind: 'reader-tool-card-draft',
       sourceId: explicit || ('reader-card-tool:' + String(gid || '')),
-      documentId: file,
-      quote: quote,
       tool: String(tool || 'make_anki').slice(0, 160),
-      location: { unit: 'page', index: page },
       legacy: { piEntityRegistered: !!payload.id }
     };
+    // 普通制卡的 text 是用户/助手生成内容，不是当前页引用。
+    // 只有上游显式给出 source_ref 或精确高亮合同时，才把书页来源
+    // 写入卡仓；绝不用“用户此刻刚好打开的页”伪造 provenance。
+    if (exact) {
+      var file = String(exact.file || '').slice(0, 4096);
+      source.kind = 'reader-book-exact-card-draft';
+      source.documentId = file;
+      source.quote = String(exact.text || exact.sourceText || quote).slice(0, 32768);
+      source.location = exact.target && typeof exact.target === 'object'
+        ? exact.target : {};
+      if (!explicit && file) source.sourceId = 'reader-book:' + file;
+    } else if (explicit) {
+      source.kind = 'reader-book-reference-card-draft';
+      if (quote) source.quote = quote;
+    } else if (quote) {
+      source.context = quote;
+    }
+    return source;
   }
   function _applyCardSourceHighlight(payload, gid) {
     var request = payload && payload.source_highlight;
@@ -983,6 +999,18 @@
       note: String(request.note || '').slice(0, 1000),
       mutationId: 'c_' + hex.slice(0, 24)
     })).then(function () { return true; });
+  }
+  function _validateToolCardSource(payload) {
+    var request = payload && payload.source_highlight;
+    if (!request) return Promise.resolve({ generic: true });
+    if (typeof window.__bwReaderValidateExactSource !== 'function') {
+      return Promise.reject(new Error('BW_READER_CARD_SOURCE_VALIDATOR_UNAVAILABLE'));
+    }
+    return Promise.resolve(window.__bwReaderValidateExactSource({
+      file: String(request.file || ''),
+      target: request.target,
+      sourceText: String(request.text || request.sourceText || '')
+    }));
   }
   function _projectCardSourceHighlight(payload, gid) {
     return _applyCardSourceHighlight(payload, gid).catch(function (error) {
@@ -1047,11 +1075,13 @@
       var _stid = window.__asstVoiceTid && window.__asstVoiceTid();
       if (_sdrf && RC.flashcard &&
           typeof RC.flashcard.presentDraft === 'function') {
-        Promise.resolve(RC.flashcard.presentDraft(_sc, _gid, {
-          entityRegistered: !!_sr.id,
-          repositorySource: _toolCardRepositorySource(_gid, _sr, p.tool),
-          localDraft: null
-        })).then(function (rendered) {
+        _validateToolCardSource(_sr).then(function () {
+          return RC.flashcard.presentDraft(_sc, _gid, {
+            entityRegistered: !!_sr.id,
+            repositorySource: _toolCardRepositorySource(_gid, _sr, p.tool),
+            localDraft: null
+          });
+        }).then(function (rendered) {
           if (!rendered) throw new Error('BW_CARD_REPOSITORY_DRAFT_RENDER_FAILED');
           // 本地仓库先落稳，再把同一 gid 暴露到侧栏。否则用户在慢存储上
           // 立即点“保存”会先于 registerDraft，造成一张看得到却无法确认的卡。
@@ -1136,13 +1166,15 @@
             // ④ 字幕模式浮层镜像(天气卡双宿主:侧栏开→容器隐藏、关侧栏=字幕模式浮现)+ 长按独立选中
             if (_drf && RC.flashcard &&
                 typeof RC.flashcard.presentDraft === 'function') {
-              Promise.resolve(RC.flashcard.presentDraft(_cds, _gid2, {
-                entityRegistered: !!d.result.id,
-                repositorySource: _toolCardRepositorySource(
-                  _gid2, d.result, 'make_anki'
-                ),
-                localDraft: null
-              })).then(function (rendered) {
+              _validateToolCardSource(d.result).then(function () {
+                return RC.flashcard.presentDraft(_cds, _gid2, {
+                  entityRegistered: !!d.result.id,
+                  repositorySource: _toolCardRepositorySource(
+                    _gid2, d.result, 'make_anki'
+                  ),
+                  localDraft: null
+                });
+              }).then(function (rendered) {
                 if (!rendered) throw new Error('BW_CARD_REPOSITORY_DRAFT_RENDER_FAILED');
                 if (_turnTid && RC.turnCard) RC.turnCard.addPart(_turnTid, {
                   kind: 'cards', cards: _cds, draft: true, gid: _gid2
@@ -1567,18 +1599,34 @@
     });
   }
   function _readerDraftSource(delivery, payload, draftId) {
-    var file = String(payload && payload.file || delivery && delivery.file || '');
-    return {
-      kind: 'readerpc-verified-draft',
-      sourceId: 'reader-book:' + file,
-      documentId: file,
-      quote: String(payload && payload.sourceText || ''),
+    payload = payload || {};
+    var exact = _readerDraftSourceMode(payload) === 'exact';
+    var file = String(payload.file || delivery && delivery.file || '');
+    var source = {
+      kind: exact ? 'readerpc-verified-draft' : 'readerpc-generated-draft',
+      sourceId: exact ? ('reader-book:' + file) : ('reader-draft:' + draftId),
       tool: 'reader_anki_draft',
       draftId: draftId,
-      sourceInstanceId: String(delivery && delivery.sourceInstanceId || ''),
-      location: payload && payload.target && typeof payload.target === 'object'
-        ? payload.target : {}
+      sourceInstanceId: String(delivery && delivery.sourceInstanceId || '')
     };
+    if (exact) {
+      source.documentId = file;
+      source.quote = String(payload.sourceText || '');
+      source.location = payload.target;
+    }
+    return source;
+  }
+  function _readerDraftSourceMode(payload) {
+    payload = payload || {};
+    var present = [
+      typeof payload.file === 'string' && !!payload.file,
+      !!payload.target && typeof payload.target === 'object',
+      typeof payload.sourceText === 'string' && !!payload.sourceText
+    ];
+    var count = present.filter(Boolean).length;
+    if (count === 0) return 'generic';
+    if (count === present.length) return 'exact';
+    throw new Error('BW_READER_ANKI_DRAFT_SOURCE_PARTIAL');
   }
   function _readerOutputScroller() {
     return document.getElementById('main') ||
@@ -1689,11 +1737,17 @@
         }
         work = window.__bwReaderHighlightExactText(p);
       } else if (delivery.kind === 'anki-draft') {
-        if (typeof window.__bwReaderValidateExactSource !== 'function' ||
-            !(RC.flashcard && typeof RC.flashcard.presentDraft === 'function')) {
+        if (!(RC.flashcard && typeof RC.flashcard.presentDraft === 'function')) {
           throw new Error('BW_READER_ANKI_DRAFT_UNAVAILABLE');
         }
-        work = Promise.resolve(window.__bwReaderValidateExactSource(p))
+        var _draftSourceMode = _readerDraftSourceMode(p);
+        if (_draftSourceMode === 'exact' &&
+            typeof window.__bwReaderValidateExactSource !== 'function') {
+          throw new Error('BW_READER_ANKI_DRAFT_SOURCE_VALIDATOR_UNAVAILABLE');
+        }
+        work = (_draftSourceMode === 'exact'
+          ? Promise.resolve(window.__bwReaderValidateExactSource(p))
+          : Promise.resolve({ ok: true, generic: true }))
           .then(function () {
             return _readerDraftGid(p.draftId);
           })
@@ -1908,7 +1962,7 @@
         return '<div class="vc-ig-cell" data-i="' + i + '">' +
           '<button type="button" class="vc-ig-x" data-i="' + i + '" aria-label="移除">✕</button>' +
           '<span class="vc-vg-tag' + (isBili ? ' bili' : '') + '">' + (isBili ? 'B站' : (ref.src === 'yt' ? 'YouTube' : esc(it.src || '视频'))) + '</span>' +
-          '<div class="vc-vg-wrap">' + (thumb ? '<img class="vc-ig-img" data-i="' + i + '" loading="lazy" referrerpolicy="no-referrer" data-source-url="' + esc(thumbSource) + '" src="' + esc(thumb) + '" alt="">' : '<div class="vc-vg-empty">无预览图</div>') +
+          '<div class="vc-vg-wrap">' + (thumb ? '<img class="vc-ig-img" data-i="' + i + '" loading="lazy" referrerpolicy="same-origin" data-source-url="' + esc(thumbSource) + '" src="' + esc(thumb) + '" alt="">' : '<div class="vc-vg-empty">无预览图</div>') +
           '<button type="button" class="vc-vg-play" data-i="' + i + '"' +
           ' data-video-id="' + esc(ref.id || '') + '"' +
           ' data-video-src="' + esc(ref.src || '') + '"' +
@@ -2703,6 +2757,16 @@
   }
   function _igWire(root, card) {   // 88/98:图卡+视频卡交互——✕移除;点封面=只选中这一张(带入上下文,再点取消);视频▶=播放
     if (!card || (card.kind !== 'images' && card.kind !== 'videos')) return;
+    if (card.kind === 'videos') root.addEventListener('error', function (ev) {
+      var img = ev.target;
+      if (!img || !img.classList || !img.classList.contains('vc-ig-img')) return;
+      img.style.display = 'none';
+      var wrap = img.closest && img.closest('.vc-vg-wrap');
+      if (wrap && !wrap.querySelector('.vc-vg-empty')) {
+        var empty = document.createElement('div'); empty.className = 'vc-vg-empty'; empty.textContent = '封面加载失败';
+        wrap.insertBefore(empty, wrap.querySelector('.vc-vg-play'));
+      }
+    }, true);
     root.addEventListener('click', function (ev) {
       var pb = ev.target.closest && ev.target.closest('.vc-vg-play');
       if (pb) {   // 98:播放钮=原播放行为(浮动播放器/新窗),不参与选中

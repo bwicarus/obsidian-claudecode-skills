@@ -41,10 +41,10 @@ function harness(resources, { local = true } = {}) {
   return { dictionary: sandbox.RC.offlineDictionary, requests };
 }
 
-test("offline dictionary restores Japanese stem and prefers packaged Chinese gloss", async () => {
+test("offline rich dictionary restores Japanese stem and exposes pronunciation, examples and kanji", async () => {
   const resources = {
     "manifest.json": {
-      contract: "bw-jmdict-manifest/2",
+      contract: "bw-jmdict-manifest/3",
       normalization: "NFC",
       shardAlgorithm: "utf8-prefix-2-kana-3/1",
       source: { release: "fixture" },
@@ -52,19 +52,30 @@ test("offline dictionary restores Japanese stem and prefers packaged Chinese glo
       shards: { e58f: { path: "shards/e58f.json" } },
     },
     "shards/e58f.json": {
-      contract: "bw-jmdict-shard/2",
+      contract: "bw-jmdict-shard/3",
       key: "e58f",
       entries: [{
         id: "1",
         lemma: "取り寄せる",
         forms: ["取り寄せる"],
         readings: ["とりよせる"],
+        readingKata: "トリヨセル",
+        accent: 0,
         pos: ["v1"],
         glosses: ["to order", "to have something sent"],
         zhGlosses: ["订购；调货；从外地寄来"],
+        zhSenses: [{ glosses: ["订购", "调货"] }],
+        examples: [{ ja: "商品を取り寄せる。", zh: "订购商品。", source: "fixture" }],
+        etymology: ["取る＋寄せる"],
+        synonyms: ["注文する"],
+        sourceUrls: ["https://example.invalid/取り寄せる"],
         common: true,
       }],
       exact: { "取り寄せる": [0] },
+    },
+    "kanji.json": {
+      "取": { kanji: "取", on: ["シュ"], kun: ["と.る"], meanings: ["take"], meanings_zh: "取；拿" },
+      "寄": { kanji: "寄", on: ["キ"], kun: ["よ.る"], meanings: ["approach"], meanings_zh: "靠近" },
     },
   };
   const { dictionary, requests } = harness(resources);
@@ -72,6 +83,10 @@ test("offline dictionary restores Japanese stem and prefers packaged Chinese glo
   assert.equal(result.ok, true);
   assert.equal(result.lemma, "取り寄せる");
   assert.equal(result.reading, "とりよせる");
+  assert.equal(result.reading_kata, "トリヨセル");
+  assert.equal(result.accent, 0);
+  assert.equal(result.mora, 5);
+  assert.equal(result.romaji, "toriyoseru");
   assert.equal(result.zh, "订购；调货；从外地寄来");
   assert.equal(result.translation, "订购；调货；从外地寄来");
   assert.equal(result.local_zh, true);
@@ -79,16 +94,28 @@ test("offline dictionary restores Japanese stem and prefers packaged Chinese glo
   assert.equal(result.english_fallback, false);
   assert.equal(result.inflect.base, "取り寄せる");
   assert.equal(result.source, "local-jmdict");
+  assert.deepEqual(result.examples, [
+    { ja: "商品を取り寄せる。", zh: "订购商品。", source: "fixture" },
+  ]);
+  assert.deepEqual(result.zh_senses, [{ glosses: ["订购", "调货"] }]);
+  assert.deepEqual(result.etymology, ["取る＋寄せる"]);
+  assert.deepEqual(result.synonyms, ["注文する"]);
+  assert.deepEqual(result.source_urls, ["https://example.invalid/取り寄せる"]);
+  assert.deepEqual(JSON.parse(JSON.stringify(result.kanji)), [
+    { kanji: "取", on: ["シュ"], kun: ["と.る"], meanings: ["take"], meanings_zh: "取；拿" },
+    { kanji: "寄", on: ["キ"], kun: ["よ.る"], meanings: ["approach"], meanings_zh: "靠近" },
+  ]);
   assert.deepEqual(requests, [
     "manifest.json",
     "shards/e58f.json",
+    "kanji.json",
   ]);
 });
 
 test("English remains an explicit fallback when Chinese data has no safe match", async () => {
   const resources = {
     "manifest.json": {
-      contract: "bw-jmdict-manifest/2",
+      contract: "bw-jmdict-manifest/3",
       normalization: "NFC",
       shardAlgorithm: "utf8-prefix-2-kana-3/1",
       source: { release: "fixture" },
@@ -96,7 +123,7 @@ test("English remains an explicit fallback when Chinese data has no safe match",
       shards: { e689: { path: "shards/e689.json" } },
     },
     "shards/e689.json": {
-      contract: "bw-jmdict-shard/2",
+      contract: "bw-jmdict-shard/3",
       key: "e689",
       entries: [{
         id: "2",
@@ -109,6 +136,10 @@ test("English remains an explicit fallback when Chinese data has no safe match",
       }],
       exact: { "手法": [0] },
     },
+    "kanji.json": {
+      "手": { kanji: "手", on: ["シュ"], kun: ["て"], meanings: ["hand"] },
+      "法": { kanji: "法", on: ["ホウ"], kun: [], meanings: ["method"] },
+    },
   };
   const { dictionary, requests } = harness(resources);
   const result = await dictionary.lookupJapaneseLegacy("手法");
@@ -118,7 +149,7 @@ test("English remains an explicit fallback when Chinese data has no safe match",
   assert.equal(result.local_zh, false);
   assert.equal(result.meaning_language, "en");
   assert.equal(result.english_fallback, true);
-  assert.deepEqual(requests, ["manifest.json", "shards/e689.json"]);
+  assert.deepEqual(requests, ["manifest.json", "shards/e689.json", "kanji.json"]);
 });
 
 test("non-local PWA reports unavailable instead of silently contacting Pi", async () => {
@@ -142,6 +173,13 @@ test("kana shards use the complete first kana while kanji keeps two bytes", () =
   const { dictionary } = harness({});
   assert.equal(dictionary._shardKey("あう"), "e38182");
   assert.equal(dictionary._shardKey("取り寄せ"), "e58f");
+});
+
+test("mora counting keeps sokuon and long vowels as full morae", () => {
+  const { dictionary } = harness({});
+  assert.equal(dictionary._moraCount("がっこう"), 4);
+  assert.equal(dictionary._moraCount("コーヒー"), 4);
+  assert.equal(dictionary._moraCount("きょう"), 2);
 });
 
 test("lookup code ships everywhere but dictionary bytes ship nowhere", () => {
@@ -198,7 +236,7 @@ test("App download stays in private Application Support and outside backup/sync"
   assert.match(settings, /不进入书籍附件、Pi、Safari 扩展或设置同步/);
 });
 
-test("Japanese UI uses ReaderPC CLI first and keeps Pi only as an explicit legacy fallback", () => {
+test("Japanese UI stays on the App dictionary and exposes Pi only as an explicit fallback", () => {
   const wordpop = read("_server_deploy/static/pdf/rc-wordpop.js");
   const phrasepop = read("_server_deploy/static/pdf/rc-phrasepop.js");
   const computerVoice = read("_server_deploy/static/pdf/rc-computer-voice.js");
@@ -206,13 +244,15 @@ test("Japanese UI uses ReaderPC CLI first and keeps Pi only as an explicit legac
   const protocol = read(
     "extensions/bw-reader-webext/windows/ComputerVoiceAudio/DirectBridgeProtocol.cs",
   );
-  assert.match(wordpop, /电脑 CLI 精释/);
-  assert.match(wordpop, /改用 Pi 旧版精释/);
+  assert.match(wordpop, /改用 Pi 深度解释（可选）/);
   assert.match(wordpop, /_lookupJapaneseLocalFirst/);
   assert.match(phrasepop, /_lookupPhraseLocalFirst/);
-  assert.match(phrasepop, /lookupJapaneseFallback/);
+  assert.doesNotMatch(wordpop, /lookupJapaneseFallback\s*\(/);
+  assert.doesNotMatch(phrasepop, /lookupJapaneseFallback\s*\(/);
   assert.doesNotMatch(phrasepop, /fetch\('\/pdf\/api\/dict-jp\?word=/);
   assert.doesNotMatch(phrasepop, /fetch\('\/pdf\/api\/translate-sentence/);
+  assert.match(wordpop, /return local\.lookupJapaneseLegacy\(word\)/);
+  assert.match(phrasepop, /local\.lookupJapaneseLegacy\(text\)/);
   assert.match(computerVoice, /lookupJapaneseFallback/);
   assert.match(computerVoice, /"dictionary-lookup"/);
   assert.match(nativeRuntime, /dictionaryFallbackCache/);

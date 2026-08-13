@@ -207,11 +207,33 @@ async function saveHighlight({pw, sIdx, eIdx, color, kind='note', sentence='', b
   };
   if (/^c_[a-f0-9]{8,32}$/.test(id || '')) payload.id = id;
   try {
-    const r = await fetch('/pdf/api/highlights', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify(payload),
-    });
-    const d = await r.json();
+    let d;
+    const nativeRuntime = window.__BW_READER_RUNTIME__;
+    const directLocal = silent && payload.id && nativeRuntime &&
+      typeof nativeRuntime.savePDFHighlight === 'function';
+    if (directLocal) {
+      window.dlog?.('精确高亮: 本地独立写入开始');
+      let timer = 0;
+      try {
+        d = await Promise.race([
+          nativeRuntime.savePDFHighlight(payload),
+          new Promise((_, reject) => {
+            timer = setTimeout(() => reject(new Error(
+              'BW_READER_HIGHLIGHT_LOCAL_WRITE_TIMEOUT'
+            )), 6000);
+          })
+        ]);
+      } finally {
+        if (timer) clearTimeout(timer);
+      }
+      window.dlog?.('精确高亮: 本地写入完成');
+    } else {
+      const r = await fetch('/pdf/api/highlights', {
+        method: 'POST', headers: {'Content-Type':'application/json'},
+        body: JSON.stringify(payload),
+      });
+      d = await r.json();
+    }
     if (!d.ok) {
       if (silent) throw new Error('BW_READER_HIGHLIGHT_SAVE_REJECTED:' + (d.error || '?'));
       alert('保存高亮失败：' + (d.error || '?')); return null;

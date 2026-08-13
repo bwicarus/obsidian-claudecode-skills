@@ -267,6 +267,7 @@
       //   导致 height:100% 的图被便签比例拉变形。img/iframe 自己锁 16:9 → 任何便签宽高比都不变形,embed 高度跟随。
       '.rc-vid-embed{position:relative;width:100%;background:#000;cursor:pointer}',
       '.rc-vid-embed img{width:100%;height:auto;aspect-ratio:16/9;object-fit:cover;display:block}',
+      '.rc-vid-no-thumb{width:100%;aspect-ratio:16/9;display:flex;align-items:center;justify-content:center;color:#7d8db0;font-size:11px;background:#10182b}',
       '.rc-vid-if{width:100%;height:auto;aspect-ratio:16/9;border:0;display:block}',
       '.rc-vid-go{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:42px;height:42px;border-radius:50%;border:none;background:rgba(0,0,0,.55);color:#fff;font-size:15px;cursor:pointer;padding-left:2px}',
       '.rc-vid-embed:hover .rc-vid-go{background:rgba(220,40,40,.92)}',
@@ -637,6 +638,15 @@
   // 来源识别:显式 src 优先(拖放时存);无 src(旧便签)按 bvid 兜底(BV+10=12 字符,不误判 11 位 YT id)。
   function _isBili(v) { return !!(v && (v.src ? v.src === 'bili' : /^BV[0-9A-Za-z]{10}/.test(v.id || ''))); }
   function _ytThumb(id) { return 'https://i.ytimg.com/vi/' + id + '/mqdefault.jpg'; }   // 仅 YT 用;B站缩略图无 id→URL 规律,须存 v.thumb
+  function _videoThumbURL(v) {
+    var raw = String((v && v.thumb) || (!_isBili(v) && v && v.id ? _ytThumb(v.id) : '')).trim();
+    if (!raw) return '';
+    try {
+      var parsed = new URL(raw);
+      if (parsed.protocol !== 'https:' || !parsed.hostname || parsed.username || parsed.password || parsed.hash) return '';
+      return '/pdf/api/img-proxy?url=' + encodeURIComponent(parsed.href);
+    } catch (e) { return ''; }
+  }
   function vEmbedSrc(v) {
     if (_isBili(v)) {
       var bp = ['bvid=' + encodeURIComponent(v.id), 'autoplay=1', 'danmaku=0', 'high_quality=1', 'p=1'];
@@ -693,8 +703,8 @@
     // 便签视频区 = 纯缩略图 + ▶(点开共享浮层播放器 RC.videoPlayer;起止/循环/倍速/字幕等控制都在浮层里,内联控制条已退役)
     // 缩略图:B站存 v.thumb(bvid 无 URL 规律);YT 用 v.id 拼 ytimg。播放/兜底 URL 按来源分流。
     var _bili = _isBili(v);
-    var _thumb = v.thumb || (_bili ? '' : _ytThumb(v.id));
-    box.innerHTML = '<div class="rc-vid-embed"><img loading="lazy" referrerpolicy="no-referrer" src="' + _thumb + '" alt=""><button class="rc-vid-go" aria-label="播放">▶</button></div>';   // no-referrer:B站图床防盗链(带域名 Referer→403)
+    var _thumb = _videoThumbURL(v);
+    box.innerHTML = '<div class="rc-vid-embed">' + (_thumb ? '<img loading="lazy" referrerpolicy="same-origin" src="' + _thumb + '" alt="">' : '<span class="rc-vid-no-thumb">无预览图</span>') + '<button class="rc-vid-go" aria-label="播放">▶</button></div>';
     var openPlayer = function () {
       if (!(window.RC && RC.videoPlayer)) { window.open((_bili ? 'https://www.bilibili.com/video/' : 'https://www.youtube.com/watch?v=') + encodeURIComponent(v.id), '_blank'); return; }
       RC.videoPlayer.open({
@@ -709,6 +719,14 @@
         onRemove: function () { _removeNoteVideo(ctl); },
       });
     };
+    var _thumbImage = box.querySelector('.rc-vid-embed img');
+    if (_thumbImage) _thumbImage.addEventListener('error', function () {
+      _thumbImage.style.display = 'none';
+      if (!box.querySelector('.rc-vid-no-thumb')) {
+        var empty = document.createElement('span'); empty.className = 'rc-vid-no-thumb'; empty.textContent = '封面加载失败';
+        box.querySelector('.rc-vid-embed').insertBefore(empty, box.querySelector('.rc-vid-go'));
+      }
+    });
     box.querySelector('.rc-vid-embed').addEventListener('click', function (e) { e.stopPropagation(); openPlayer(); });
   }
   function cardContextText(cards) {

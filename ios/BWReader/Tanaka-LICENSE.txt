@@ -1,0 +1,16 @@
+Reader Japanese dictionary: Tanaka Corpus example sentences
+
+This optional App-private dictionary download contains a compact selection of
+Japanese-English sentence pairs derived from the Tanaka Corpus. The source is
+published by the Electronic Dictionary Research and Development Group:
+
+https://www.edrdg.org/wiki/index.php/Tanaka_Corpus
+
+The Tanaka Corpus is available under the Creative Commons Attribution 2.0
+France license. See:
+
+https://creativecommons.org/licenses/by/2.0/fr/
+
+BWReader keeps at most five deterministic examples per dictionary entry and
+records the source sentence identifier. The generated data is not included in
+the IPA, browser extension, book attachments, Pi sync, or iCloud backup.

@@ -1259,7 +1259,7 @@ private struct ReaderLocalHTTPHandler: HTTPHandler {
             contentType: "text/html; charset=utf-8",
             cacheControl: "no-store",
             additionalHeaders: [
-                HTTPHeader("Content-Security-Policy"): "default-src 'self'; script-src 'self' 'nonce-\(cspNonce)'; script-src-attr 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob: data:; font-src 'self' data:; worker-src 'self' blob:; connect-src 'self' \(Self.openAIRealtimeOrigin) wss://bwicarus-2.taile44d0c.ts.net; object-src 'none'; base-uri 'none'; frame-src https://www.youtube-nocookie.com https://player.bilibili.com; form-action 'none'",
+                HTTPHeader("Content-Security-Policy"): "default-src 'self'; script-src 'self' 'nonce-\(cspNonce)'; script-src-attr 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' blob: data:; media-src 'self' blob: data:; font-src 'self' data:; worker-src 'self' blob:; connect-src 'self' \(Self.openAIRealtimeOrigin) wss://bwicarus-2.taile44d0c.ts.net; object-src 'none'; base-uri 'none'; frame-src https://www.youtube-nocookie.com/embed/ https://player.bilibili.com/player.html https://www.bilibili.com/blackboard/webplayer/mbplayer.html; form-action 'none'",
                 // Direct <img>/<audio> requests need the unguessable shell
                 // capability in their same-origin Referer. Cross-origin
                 // requests still receive no Referer under this policy.

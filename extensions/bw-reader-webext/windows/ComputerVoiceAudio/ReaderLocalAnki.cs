@@ -392,17 +392,34 @@ internal sealed class ReaderLocalAnkiRegistry
             ?? throw Invalid("Reader 本地 Anki draftId 无效");
         RequireDraftId(draftId);
         RequireSafeSource(request.SourceInstanceId);
-        string file = payload["file"]?.GetValue<string>() ?? "";
-        string sourceText = payload["sourceText"]?.GetValue<string>() ?? "";
-        if (file.Length is < 1 or > 4096
-            || file.Any(char.IsControl)
-            || sourceText.Length is < 1 or > 8000
-            || sourceText.Contains('\0'))
+        bool hasFile = payload.ContainsKey("file");
+        bool hasTarget = payload.ContainsKey("target");
+        bool hasSourceText = payload.ContainsKey("sourceText");
+        bool exactSource = hasFile && hasTarget && hasSourceText;
+        if ((hasFile || hasTarget || hasSourceText) && !exactSource)
+        {
+            throw Invalid(
+                "Reader 本地 Anki 引用来源必须同时提供 file/target/sourceText");
+        }
+        string file = exactSource
+            ? payload["file"]?.GetValue<string>() ?? ""
+            : "";
+        string sourceText = exactSource
+            ? payload["sourceText"]?.GetValue<string>() ?? ""
+            : "";
+        JsonObject target = exactSource
+            ? payload["target"] as JsonObject
+                ?? throw Invalid("Reader 本地 Anki 来源无效")
+            : new JsonObject();
+        if (exactSource
+            && (file.Length is < 1 or > 4096
+                || file.Any(char.IsControl)
+                || sourceText.Length is < 1 or > 8000
+                || sourceText.Contains('\0')))
         {
             throw Invalid("Reader 本地 Anki 来源无效");
         }
-        if (payload["target"] is not JsonObject target
-            || payload["cards"] is not JsonArray cards
+        if (payload["cards"] is not JsonArray cards
             || cards.Count is < 1 or > 20)
         {
             throw Invalid("Reader 本地 Anki 草稿内容无效");
@@ -446,15 +463,22 @@ internal sealed class ReaderLocalAnkiRegistry
         string source = draft["sourceInstanceId"]?.GetValue<string>() ?? "";
         string file = draft["file"]?.GetValue<string>() ?? "";
         string sourceText = draft["sourceText"]?.GetValue<string>() ?? "";
+        JsonObject? target = draft["target"] as JsonObject;
+        bool hasFile = file.Length > 0;
+        bool hasSourceText = sourceText.Length > 0;
+        bool hasTarget = target is { Count: > 0 };
+        bool exactSource = hasFile && hasSourceText && hasTarget;
+        bool genericSource = !hasFile && !hasSourceText && !hasTarget;
         if (draftId != expectedDraftId
             || !DateTimeOffset.TryParse(
                 draft["registeredAtUtc"]?.GetValue<string>(),
                 out _)
-            || file.Length is < 1 or > 4096
-            || file.Any(char.IsControl)
-            || sourceText.Length is < 1 or > 8000
-            || sourceText.Contains('\0')
-            || draft["target"] is not JsonObject
+            || (!exactSource && !genericSource)
+            || (exactSource
+                && (file.Length > 4096
+                    || file.Any(char.IsControl)
+                    || sourceText.Length > 8000
+                    || sourceText.Contains('\0')))
             || draft["cards"] is not JsonArray cards
             || cards.Count is < 1 or > 20)
         {
@@ -1434,6 +1458,10 @@ internal sealed class ReaderLocalAnkiWriter : IReaderLocalAnkiWriter
     private static string ProvenanceFooter(
         ReaderLocalAnkiRegisteredCard registered)
     {
+        if (string.IsNullOrWhiteSpace(registered.File))
+        {
+            return "";
+        }
         string location = registered.Target["kind"]?.GetValue<string>() switch
         {
             "pdf" => "p" + registered.Target["page"]?.GetValue<long>(),

@@ -813,10 +813,12 @@ if (window.__bwPwaProviderOnly) return;
     updateSlide(container, i);
     broadcast(st.gid, i, container);
     notifyGroup(st.gid, 'card-repository-confirmed', i);
-    return _stateSync(st, i).then(function () {
-      RC.toast && RC.toast('✓ 已保存到 Reader 本地卡库');
-      return record;
-    });
+    // saveConfirmedCard 返回时，卡片内容和 confirmed 状态已在
+    // Reader 本地仓原子落稳。exactState 兼容投影可以继续异步补写，
+    // 但不能再把本地成功回执绑在它（或旧 Pi 投影）上。
+    _stateSync(st, i);
+    RC.toast && RC.toast('✓ 已保存到 Reader 本地卡库');
+    return record;
   }
   function failRepositoryConfirmation(container, st, c, i, previous, error) {
     Object.keys(previous).forEach(function (field) { c[field] = previous[field]; });
@@ -1458,15 +1460,30 @@ if (window.__bwPwaProviderOnly) return;
     }
     options = options || {};
     var repo = repositoryApi();
-    if (!repo || !options.repositorySource) {
+    if (!repo) {
       return Promise.reject(new Error('BW_CARD_REPOSITORY_UNAVAILABLE'));
+    }
+    var source = options.repositorySource;
+    if (!source || typeof source !== 'object') {
+      var localDraft = options.localDraft && typeof options.localDraft === 'object'
+        ? options.localDraft : {};
+      source = {
+        kind: 'reader-generated-card-draft',
+        sourceId: 'reader-card-draft:' + String(gid),
+        tool: 'reader_anki_draft',
+        legacy: { piEntityRegistered: options.entityRegistered !== false }
+      };
+      if (localDraft.draftId) source.draftId = String(localDraft.draftId);
+      if (localDraft.sourceInstanceId) {
+        source.sourceInstanceId = String(localDraft.sourceInstanceId);
+      }
     }
     return repo.registerDraft({
       id: gid,
       cid: gid,
       gid: gid,
       cards: repositoryCards(cards),
-      source: options.repositorySource
+      source: source
     }, {
       mutationId: repositoryMutation('draft', gid, null),
       // gid 已存在时必须由 repository 同时核对规范化 cards/source；draftId
@@ -1481,7 +1498,7 @@ if (window.__bwPwaProviderOnly) return;
         gid: gid,
         entityRegistered: options.entityRegistered !== false,
         localDraft: options.localDraft || null,
-        repositorySource: options.repositorySource,
+        repositorySource: source,
         label: 'Reader 卡片草稿',
         tool: 'reader_anki_draft'
       });

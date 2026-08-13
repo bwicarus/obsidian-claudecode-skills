@@ -67,10 +67,10 @@ test("every first-party dict-jp request supplies book, page, languages and sente
   assert.doesNotMatch(
     phrasepop,
     /fetch\('\/pdf\/api\/dict-jp\?word=/,
-    "shared phrase lookup is local/ReaderPC first and must not silently contact Pi",
+    "shared phrase lookup must stay on the downloaded App dictionary",
   );
-  assert.match(phrasepop, /lookupJapaneseFallback/);
-  assert.match(phrasepop, /context:\s*String\(context\s*\|\|\s*''\)\.slice/);
+  assert.doesNotMatch(phrasepop, /lookupJapaneseFallback\s*\(/);
+  assert.match(phrasepop, /local\.lookupJapaneseLegacy\(text\)/);
 });
 
 test("PDF, EPUB and extension phrase entry points explicitly preserve sentence context", () => {

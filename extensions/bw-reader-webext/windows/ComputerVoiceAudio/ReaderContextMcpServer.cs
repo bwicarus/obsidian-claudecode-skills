@@ -399,12 +399,14 @@ internal sealed class ReaderContextMcpServer
                     + "subagents instead of starting a nested CLI worker. "
                     + "Use reader_card or reader_command with the same typed "
                     + "{card:{kind,title,data}} input. "
-                    + "For an exact source-text highlight or an editable "
+                    + "For an exact source-text highlight or a book-referencing "
                     + "Anki draft, call reader_context_snapshot first, copy "
                     + "the exact current file identity and verbatim source "
                     + "text, confirm outputAccess.available is true, then "
                     + "use reader_highlight_text or "
-                    + "reader_anki_draft. Those tools reject a wrong book, "
+                    + "reader_anki_draft. A normal non-reference Anki draft "
+                    + "passes cards only and does not claim the current page "
+                    + "as its source. Source-bound calls reject a wrong book, "
                     + "wrong page or section, missing text, or text that is "
                     + "not unique. reader_anki_draft only displays the "
                     + "existing confirmation UI; it never writes Anki. "
@@ -631,13 +633,13 @@ internal sealed class ReaderContextMcpServer
             {
                 ["name"] = AnkiDraftToolName,
                 ["description"] =
-                    "Deliver editable Anki card drafts for an exact verbatim "
-                    + "source span in the currently open book. Call "
-                    + "reader_context_snapshot first and copy its exact file "
-                    + "identity; proceed only when outputAccess.available is "
-                    + "true. The Reader requires exactly one match on the "
-                    + "specified PDF page or EPUB section before showing its "
-                    + "existing confirmation UI. This tool never writes "
+                    "Deliver editable Anki card drafts. For a normal card that "
+                    + "does not quote the open book, pass cards only; the Reader "
+                    + "will not invent current-page provenance. When the card "
+                    + "does quote the book, also pass file, target and verbatim "
+                    + "sourceText after reader_context_snapshot; all three are "
+                    + "required together and the Reader requires exactly one "
+                    + "match before showing its confirmation UI. This tool never writes "
                     + "Anki: success means only draft_delivered. The user "
                     + "must click the existing Add to Anki button.",
                 ["inputSchema"] = BuildExactSourceArgumentsSchema(true),
@@ -848,11 +850,11 @@ internal sealed class ReaderContextMcpServer
                 },
             },
         };
-        JsonArray required = new("file", "target");
+        JsonArray required = includeCards
+            ? new JsonArray("cards")
+            : new JsonArray("file", "target");
         if (includeCards)
         {
-            required.Add("sourceText");
-            required.Add("cards");
             properties["sourceText"] = SourceTextSchema();
             properties["cards"] = new JsonObject
             {
@@ -932,13 +934,23 @@ internal sealed class ReaderContextMcpServer
                 },
             };
         }
-        return new JsonObject
+        JsonObject schema = new()
         {
             ["type"] = "object",
             ["additionalProperties"] = false,
             ["required"] = required,
             ["properties"] = properties,
         };
+        if (includeCards)
+        {
+            schema["dependentRequired"] = new JsonObject
+            {
+                ["file"] = new JsonArray("target", "sourceText"),
+                ["target"] = new JsonArray("file", "sourceText"),
+                ["sourceText"] = new JsonArray("file", "target"),
+            };
+        }
+        return schema;
     }
 
     private static JsonObject SourceTextSchema() => new()
@@ -1483,14 +1495,16 @@ internal sealed class ReaderContextMcpServer
             HashSet<string> actual = arguments.EnumerateObject()
                 .Select(property => property.Name)
                 .ToHashSet(StringComparer.Ordinal);
-            HashSet<string> expected = kind == "highlight-text"
+            HashSet<string> exactExpected = kind == "highlight-text"
                 ? new HashSet<string>(
                     ["file", "target", "text", "color", "note"],
                     StringComparer.Ordinal)
                 : new HashSet<string>(
                     ["file", "target", "sourceText", "cards"],
                     StringComparer.Ordinal);
-            if (!actual.SetEquals(expected))
+            bool genericAnki = kind == "anki-draft"
+                && actual.SetEquals(new[] { "cards" });
+            if (!actual.SetEquals(exactExpected) && !genericAnki)
             {
                 return false;
             }

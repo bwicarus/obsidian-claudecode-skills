@@ -193,17 +193,38 @@ internal static class ReaderRealtimeOutputProtocol
                 NullableText(root, "note", 2_000);
                 break;
             case "anki-draft":
-                Exact(
-                    root,
-                    "draftId",
-                    "file",
-                    "target",
+                bool hasFile = root.TryGetProperty("file", out _);
+                bool hasTarget = root.TryGetProperty("target", out _);
+                bool hasSourceText = root.TryGetProperty(
                     "sourceText",
-                    "cards");
+                    out _);
+                bool exactSource = hasFile && hasTarget && hasSourceText;
+                if ((hasFile || hasTarget || hasSourceText) && !exactSource)
+                {
+                    throw Invalid(
+                        "Reader Anki 引用来源必须同时提供 file/target/sourceText");
+                }
+                if (exactSource)
+                {
+                    Exact(
+                        root,
+                        "draftId",
+                        "file",
+                        "target",
+                        "sourceText",
+                        "cards");
+                }
+                else
+                {
+                    Exact(root, "draftId", "cards");
+                }
                 SafeId(root, "draftId");
-                Text(root, "file", 4_096);
-                ValidateDocumentTarget(root.GetProperty("target"));
-                Text(root, "sourceText", 2_000);
+                if (exactSource)
+                {
+                    Text(root, "file", 4_096);
+                    ValidateDocumentTarget(root.GetProperty("target"));
+                    Text(root, "sourceText", 2_000);
+                }
                 ValidateAnkiDraftCards(root.GetProperty("cards"));
                 break;
             default:

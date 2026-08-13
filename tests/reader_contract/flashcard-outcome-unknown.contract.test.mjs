@@ -97,14 +97,16 @@ test("Reader confirmation outcome-unknown keeps one mutation pending and reconci
   );
 });
 
-test("presentDraft validates existing cards/source and requires draftId for replay", () => {
+test("presentDraft validates existing cards/source and supplies a generic local source", () => {
   const start = SOURCE.indexOf("function presentDraft(cards, gid, options)");
   const present = SOURCE.slice(start, SOURCE.indexOf("RC.flashcard =", start));
 
   assert.doesNotMatch(present, /repo\.load\(gid\)[\s\S]*return record/);
   assert.match(present, /repo\.registerDraft\(\{/);
   assert.match(present, /cards:\s*repositoryCards\(cards\)/);
-  assert.match(present, /source:\s*options\.repositorySource/);
+  assert.match(present, /var source = options\.repositorySource/);
+  assert.match(present, /kind:\s*'reader-generated-card-draft'/);
+  assert.match(present, /source:\s*source/);
   assert.match(present, /requireDraftIdForReplay:\s*true/);
 });
 

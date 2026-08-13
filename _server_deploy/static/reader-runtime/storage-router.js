@@ -241,6 +241,50 @@
       list: function (collection, query) { return storeFor(collection).list(collection, query); },
       put: function (collection, value, opts) { return storeFor(collection).put(collection, value, opts); },
       remove: function (collection, id, opts) { return storeFor(collection).remove(collection, id, opts); },
+      batch: function (mutations) {
+        if (!Array.isArray(mutations)) {
+          return Promise.reject(new RouterError(
+            'batch mutations 必须是数组', 'BW_ROUTER_BATCH'
+          ));
+        }
+        if (!mutations.length) return Promise.resolve([]);
+        var scope = '';
+        var target = null;
+        try {
+          mutations.forEach(function (mutation, index) {
+            if (!mutation || typeof mutation !== 'object' || Array.isArray(mutation)) {
+              throw new RouterError(
+                'batch mutation 必须是对象', 'BW_ROUTER_BATCH', { index: index }
+              );
+            }
+            var collection = String(mutation.collection || '').trim();
+            if (!collection) {
+              throw new RouterError(
+                'batch mutation 缺少 collection', 'BW_ROUTER_COLLECTION', { index: index }
+              );
+            }
+            var entry = describe(collection);
+            if (!scope) {
+              scope = entry.scope;
+              target = stores[scope];
+            } else if (entry.scope !== scope) {
+              throw new RouterError(
+                'batch 不能跨存储范围；原子写入必须属于同一 scope',
+                'BW_ROUTER_BATCH_SCOPE',
+                { index: index, expected: scope, actual: entry.scope }
+              );
+            }
+          });
+          if (!target || typeof target.batch !== 'function') {
+            throw new RouterError(
+              scope + 'Store 缺少 DataStore.batch', 'BW_ROUTER_STORE'
+            );
+          }
+        } catch (error) {
+          return Promise.reject(error);
+        }
+        return target.batch(mutations);
+      },
       subscribe: function (collection, listener) {
         if (typeof listener !== 'function') {
           throw new RouterError('subscribe listener 必须是函数', 'BW_ROUTER_LISTENER');

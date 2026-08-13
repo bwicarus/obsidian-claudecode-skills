@@ -342,7 +342,7 @@ test("兼容服务器断网只进入 outbox，不回滚本地词组状态", asyn
   assert.equal(harness.outbox[0][0], "phrase");
 });
 
-test("日语词组本地中文未命中后把当前句境交给 ReaderPC，且不静默访问 Pi", async () => {
+test("日语词组只使用 App 本地词典，英文兜底也不自动调用 ReaderPC 或 Pi", async () => {
   const harness = createHarness();
   const results = [];
   const lookups = [];
@@ -388,20 +388,16 @@ test("日语词组本地中文未命中后把当前句境交给 ReaderPC，且�
   });
 
   await flush();
-  assert.equal(lookups.length, 1);
-  assert.equal(lookups[0].context,
-    "メインをお取り寄せの牛肉にしたりするわよね。",
-  );
-  assert.equal(lookups[0].english, "order; obtain");
+  assert.equal(lookups.length, 0);
   assert.equal(
     harness.requests.some((item) =>
       item.url.startsWith("/pdf/api/dict-jp?") ||
       item.url === "/pdf/api/translate-sentence"),
     false,
   );
-  assert.equal(results[0].zh, "调货；订购");
+  assert.equal(results[0].zh, "order; obtain");
   assert.equal(results[0].reading, "とりよせ");
-  assert.equal(results[0].source, "pc-codex-cli");
+  assert.equal(results[0].source, "local-jmdict");
 });
 
 test("App 本地中文词典命中时不调用 ReaderPC 或 Pi", async () => {
@@ -451,12 +447,19 @@ test("App 本地中文词典命中时不调用 ReaderPC 或 Pi", async () => {
   assert.equal(results[0].source, "local-jmdict");
 });
 
-test("扩展和自定义词组直接走 ReaderPC；不可用时明确失败且 Pi 仅保留显式按钮", async () => {
+test("扩展没有 App 私有词典时明确本地未命中，ReaderPC 和 Pi 都不自动调用", async () => {
   const harness = createHarness();
   const results = [];
+  let computerCalls = 0;
   harness.sandbox.RC.offlineDictionary = {
     CONTRACT: "bw-offline-dictionary/1",
     isLocalMode() { return false; },
+  };
+  harness.sandbox.RC.computerVoice = {
+    async lookupJapaneseFallback() {
+      computerCalls += 1;
+      throw new Error("must not run");
+    },
   };
 
   harness.sandbox.RC.phrasepop.show({
@@ -468,9 +471,10 @@ test("扩展和自定义词组直接走 ReaderPC；不可用时明确失败且 P
   await flush();
 
   assert.equal(results[0].zh, "");
-  assert.equal(results[0].errorCode, "BW_READER_DICTIONARY_CLI_UNAVAILABLE");
-  assert.match(harness.pop.innerHTML, /ReaderPC 中文释义失败/);
+  assert.equal(results[0].errorCode, "BW_OFFLINE_DICTIONARY_NO_MATCH");
+  assert.match(harness.pop.innerHTML, /App 本地日语词典未命中/);
   assert.match(harness.pop.innerHTML, /改用 Pi 旧版精释/);
+  assert.equal(computerCalls, 0);
   assert.equal(
     harness.requests.some((item) =>
       item.url.startsWith("/pdf/api/dict-jp?") ||

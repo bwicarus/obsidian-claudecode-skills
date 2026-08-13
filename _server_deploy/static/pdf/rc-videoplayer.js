@@ -10,7 +10,7 @@
   if (RC.videoPlayer) return;
 
   var PREFS_URL = '/pdf/api/video-player-prefs';
-  var box = null, bar = null, iframe = null, sub = null;
+  var box = null, bar = null, iframe = null, sub = null, fallback = null;
   var cur = null;   // {v:{id,start,end,loop,rate,cc}, noteId, onChange, onRemove, title}
   var _prefs = { x: null, y: null, w: 380, h: null };   // w=左列(视频)宽,h=整个浮层高(自由拖拽);缺省算 16:9
   var _prefsLoaded = false;
@@ -20,6 +20,7 @@
   var _vcur = 0, _vcurAt = 0, _vplaying = true, _vrate = 1;
   // 字幕
   var _sub = null, _subTimer = null, _subPoll = 0, _transCurIdx = -1, _userScrollAt = 0;
+  var _readyTimer = null;
 
   function _now() { return (window.performance && performance.now) ? performance.now() : Date.now(); }
   function esc(s) { var d = document.createElement('div'); d.textContent = (s == null ? '' : String(s)); return d.innerHTML; }
@@ -57,22 +58,65 @@
     if (_isBili(v)) {
       var bp = ['bvid=' + encodeURIComponent(v.id), 'autoplay=1', 'danmaku=0', 'high_quality=1', 'p=1'];
       if (v.start) bp.push('t=' + Math.max(0, v.start | 0));
-      return 'https://player.bilibili.com/player.html?' + bp.join('&');
+      // player.bilibili.com 会把 iPad/WebKit Mobile 重定向到这个官方移动播放器。
+      // App 直接使用实际目的地，避免在 iframe 内多一次可被 CSP/导航策略截断的跳转。
+      var biliBase = window.__BW_NATIVE_LOCAL_READER__
+        ? 'https://www.bilibili.com/blackboard/webplayer/mbplayer.html'
+        : 'https://player.bilibili.com/player.html';
+      return biliBase + '?' + bp.join('&');
     }
     var p = ['enablejsapi=1', 'playsinline=1', 'rel=0', 'autoplay=1', 'cc_lang_pref=zh-Hans', 'hl=zh-CN', 'cc_load_policy=0'];   // 我们有自己的中文字幕轨 → 不强制 YT 原生 CC(免双字幕)
+    try {
+      if (window.location && /^https?:$/.test(window.location.protocol || '') && window.location.origin) {
+        p.push('origin=' + encodeURIComponent(window.location.origin));
+      }
+    } catch (e) {}
     if (v.start) p.push('start=' + Math.max(0, v.start | 0));
     if (v.end) p.push('end=' + Math.max(0, v.end | 0));
     if (v.loop) { p.push('loop=1'); p.push('playlist=' + v.id); }   // 单视频循环必须 playlist=自己
     return 'https://www.youtube-nocookie.com/embed/' + encodeURIComponent(v.id) + '?' + p.join('&');
   }
+  function _externalURL(v) {
+    return _isBili(v)
+      ? 'https://www.bilibili.com/video/' + encodeURIComponent(v.id)
+      : 'https://www.youtube.com/watch?v=' + encodeURIComponent(v.id);
+  }
+  function _fallbackLabel(v) { return _isBili(v) ? '用 B站打开' : '用 YouTube 打开'; }
+  function _setFallback(state, message) {
+    if (!fallback || !cur) return;
+    fallback.classList.toggle('ready', state === 'ready');
+    fallback.classList.toggle('failed', state === 'failed');
+    var msg = fallback.querySelector('.rcvp-fallback-msg');
+    var open = fallback.querySelector('.rcvp-external');
+    if (msg) msg.textContent = message || '';
+    if (open) open.textContent = _fallbackLabel(cur.v);
+  }
+  function _armReadyTimeout() {
+    clearTimeout(_readyTimer);
+    _readyTimer = setTimeout(function () {
+      _setFallback('failed', '内置播放器未能确认加载');
+    }, 8000);
+  }
+  function _markReady() {
+    clearTimeout(_readyTimer); _readyTimer = null;
+    _setFallback('ready', '');
+  }
+  function _markFailed(message) {
+    clearTimeout(_readyTimer); _readyTimer = null;
+    _setFallback('failed', message || '内置播放器无法播放');
+  }
   function _hook() {   // 单例 infoDelivery 监听(浮层只一个 iframe)
     if (window.__rcvpHook) return; window.__rcvpHook = 1;
     window.addEventListener('message', function (e) {
       if (!iframe || e.source !== iframe.contentWindow) return;
-      if (typeof e.data !== 'string' || e.data.indexOf('"infoDelivery"') < 0) return;
-      var d; try { d = JSON.parse(e.data); } catch (_) { return; }
-      if (!d || d.event !== 'infoDelivery' || !d.info) return;
+      var d = e.data;
+      if (typeof d === 'string') { try { d = JSON.parse(d); } catch (_) { return; } }
+      if (!d || typeof d !== 'object') return;
+      if (d.event === 'onError') { _markFailed('YouTube 拒绝了内置播放'); return; }
+      if (d.event === 'onReady') { _markReady(); return; }
+      if ((d.event !== 'infoDelivery' && d.event !== 'initialDelivery') || !d.info) return;
       var info = d.info;
+      if (typeof info.playerState === 'number' || typeof info.duration === 'number' || info.videoData) _markReady();
       if (typeof info.currentTime === 'number') { _vcur = info.currentTime; _vcurAt = _now(); }
       if (typeof info.playerState === 'number') _vplaying = (info.playerState === 1);
       if (typeof info.playbackRate === 'number') _vrate = info.playbackRate;
@@ -90,6 +134,8 @@
   }
   function _reload() {   // 起/止/循环变了 → 重建 src(reload;进度会从新 start 开始,符合钉的语义)
     if (!iframe || !cur) return;
+    _setFallback('loading', '正在重新加载内置播放器…');
+    _armReadyTimeout();
     iframe.src = vEmbedSrc(cur.v);
     _vcur = cur.v.start || 0; _vcurAt = _now();
   }
@@ -167,6 +213,14 @@
       '.rcvp-x:active{color:#fff}' +
       '.rcvp-stage{position:relative;width:100%;background:#000;flex:1 1 auto;min-height:0}' +   // 占左列剩余高度;视频比例由 YouTube iframe 内部 letterbox 处理(浮层可自由改宽高)
       '.rcvp-if{width:100%;height:100%;border:0;display:block}' +
+      '.rcvp-fallback{position:absolute;inset:0;z-index:4;display:flex;flex-direction:column;align-items:center;justify-content:center;gap:9px;padding:16px;text-align:center;background:rgba(4,8,16,.76);pointer-events:none}' +
+      '.rcvp-fallback-msg{color:#d7e2f5;font-size:12px;line-height:1.45}' +
+      '.rcvp-external{pointer-events:auto;border:1px solid rgba(125,211,252,.7);border-radius:8px;background:rgba(10,132,255,.22);color:#dff5ff;padding:7px 12px;font-size:12.5px;cursor:pointer;-webkit-tap-highlight-color:transparent}' +
+      '.rcvp-external:active{transform:scale(.96)}' +
+      '.rcvp-fallback.ready{inset:8px 8px auto auto;padding:0;background:transparent;display:block}' +
+      '.rcvp-fallback.ready .rcvp-fallback-msg{display:none}' +
+      '.rcvp-fallback.ready .rcvp-external{padding:4px 8px;background:rgba(0,0,0,.58);border-color:rgba(255,255,255,.28);color:#fff;font-size:11px}' +
+      '.rcvp-fallback.failed{background:rgba(4,8,16,.88)}' +
       '.rcvp-sub{position:absolute;left:0;right:0;bottom:5%;padding:0 10px;text-align:center;pointer-events:none}' +
       '.rcvp-zh{color:#fff;font-size:clamp(14px,3.2vw,20px);line-height:1.35;text-shadow:0 2px 6px #000,0 0 3px #000;word-break:break-word}' +
       '.rcvp-en{color:#d3d9e0;font-size:clamp(11px,2.2vw,14px);line-height:1.3;text-shadow:0 2px 5px #000;margin-top:1px;word-break:break-word}' +
@@ -220,7 +274,7 @@
       '<div class="rcvp-bar"><span class="rcvp-grip">⠿</span><span class="rcvp-title"></span><button class="rcvp-list" title="字幕列表(按时间轴显示全文,点句子跳转)">📜</button><button class="rcvp-x" title="关闭">✕</button></div>' +
       '<div class="rcvp-body">' +
         '<div class="rcvp-left">' +
-          '<div class="rcvp-stage"><div class="rcvp-sub" style="display:none"><div class="rcvp-zh"></div><div class="rcvp-en"></div></div></div>' +
+          '<div class="rcvp-stage"><div class="rcvp-fallback"><div class="rcvp-fallback-msg">正在加载内置播放器…</div><button type="button" class="rcvp-external">在视频平台打开</button></div><div class="rcvp-sub" style="display:none"><div class="rcvp-zh"></div><div class="rcvp-en"></div></div></div>' +
           '<div class="rcvp-ctrls">' +
             '<span class="rcvp-grp">起<input class="rcvp-t rcvp-sm" inputmode="numeric" maxlength="3" placeholder="0"><span class="rcvp-cn">:</span><input class="rcvp-t rcvp-ss" inputmode="numeric" maxlength="2" placeholder="00"><button class="rcvp-now" data-w="start" title="设为当前播放位置">⏱</button></span>' +
             '<span class="rcvp-grp">止<input class="rcvp-t rcvp-em" inputmode="numeric" maxlength="3" placeholder="—"><span class="rcvp-cn">:</span><input class="rcvp-t rcvp-es" inputmode="numeric" maxlength="2" placeholder="00"><button class="rcvp-now" data-w="end" title="设为当前播放位置">⏱</button></span>' +
@@ -239,9 +293,26 @@
     document.body.appendChild(box);
     iframe = document.createElement('iframe'); iframe.className = 'rcvp-if';
     iframe.allow = 'autoplay; encrypted-media; picture-in-picture; fullscreen'; iframe.setAttribute('allowfullscreen', '');
-    iframe.addEventListener('load', function () { _setRate(cur ? (cur.v.rate || 1) : 1); try { iframe.contentWindow.postMessage('{"event":"listening"}', '*'); } catch (e) {} });
+    // App 页级 Referrer-Policy 保持 same-origin，只有两个精确 allowlist 的播放器 iframe
+    // 覆盖为 origin：YouTube 需要 embedder identity(error 153)，同时绝不泄露 /r/<capability>/ 路径。
+    iframe.referrerPolicy = 'origin'; iframe.setAttribute('referrerpolicy', 'origin');
+    iframe.addEventListener('load', function () {
+      _setRate(cur ? (cur.v.rate || 1) : 1);
+      try { iframe.contentWindow.postMessage('{"event":"listening"}', '*'); } catch (e) {}
+      // B站没有 YouTube 的 ready postMessage。load 后仍永久保留外部打开按钮；
+      // 这里只收起“正在加载”，后续脚本/地区策略失败时用户也不会困在黑屏。
+      if (cur && _isBili(cur.v)) setTimeout(_markReady, 700);
+    });
+    iframe.addEventListener('error', function () { _markFailed('内置播放器加载失败'); });
     box.querySelector('.rcvp-stage').insertBefore(iframe, box.querySelector('.rcvp-sub'));
+    fallback = box.querySelector('.rcvp-fallback');
     bar = box.querySelector('.rcvp-bar');
+    box.querySelector('.rcvp-external').addEventListener('click', function (event) {
+      event.preventDefault(); event.stopPropagation();
+      if (!cur) return;
+      try { window.open(_externalURL(cur.v), '_blank', 'noopener'); }
+      catch (e) { _markFailed('无法打开视频平台'); }
+    });
     box.querySelector('.rcvp-list').addEventListener('click', _transToggle);   // 📜 展开/收起字幕列表边栏
     // 用户主动滚字幕列表(滚轮/触摸/按下)→ 记时刻,暂停自动跟随;auto-scroll 用 scrollTo 不触发这些,故能区分
     var _tlEl = box.querySelector('.rcvp-tlist');
@@ -445,6 +516,8 @@
     box.querySelector('.rcvp-rate').value = String(cur.v.rate || 1);
     box.querySelector('.rcvp-loop').checked = !!cur.v.loop;
     box.querySelector('.rcvp-rm').style.display = cur.noteId ? '' : 'none';   // 移除视频仅便签来源
+    _setFallback('loading', '正在加载内置播放器…');
+    _armReadyTimeout();
     iframe.src = vEmbedSrc(cur.v);
     if (_bili) {
       // B 站:字幕/字幕列表是 YouTube-only(靠 YT postMessage + /api/video-subtitles)。开 B站 视频时
@@ -459,6 +532,7 @@
   }
   function close() {
     _subStop(); _sub = null;
+    clearTimeout(_readyTimer); _readyTimer = null;
     if (iframe) iframe.src = 'about:blank';   // 停播(不 reparent)
     if (box) box.style.display = 'none';
     cur = null;

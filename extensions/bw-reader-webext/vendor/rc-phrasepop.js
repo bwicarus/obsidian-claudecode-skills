@@ -425,73 +425,20 @@ if (window.__bwPwaProviderOnly) return;
     if (_ctx.onExplain) { try { _ctx.onExplain(_state && _state.text); } catch (_) {} }
   };
 
-  // ── 词组中文释义：App 本地词典优先，未命中后走 ReaderPC 的独立 Codex CLI 通道。
-  // 与 rc-wordpop 的顺序一致；这里直接复用 RC.computerVoice 的公开桥和 runtime 缓存，
-  // 不另造传输。Pi 只保留在用户显式点击“旧版精释”的 host 回调里。
+  // ── 词组中文释义：只读 App 私有下载词典。未命中也不自动离开设备；
+  // Pi 深度解释只由下方用户显式按钮触发。
   function _offlineJapaneseDictionary() {
     var dictionary = RC.offlineDictionary;
     return dictionary && dictionary.CONTRACT === 'bw-offline-dictionary/1' &&
       dictionary.isLocalMode && dictionary.isLocalMode() ? dictionary : null;
   }
 
-  function _dictionaryFallbackCache() {
-    var runtime = window.__BW_READER_RUNTIME__;
-    var cache = runtime && runtime.dictionaryFallbackCache;
-    return cache && typeof cache.get === 'function' &&
-      typeof cache.put === 'function' ? cache : null;
-  }
-
-  function _dictionaryFallbackDebug(message) {
+  function _dictionaryLocalDebug(message) {
     try {
       if (typeof window.dlog === 'function') {
-        window.dlog('词组释义回退: ' + String(message || '未知状态'));
+        window.dlog('本地词组释义: ' + String(message || '未知状态'));
       }
     } catch (_) {}
-  }
-
-  function _dictionaryFallbackRequest(text, context, localResult) {
-    localResult = localResult || {};
-    return {
-      mode: 'meaning',
-      term: String(text || '').slice(0, 256),
-      context: String(context || '').slice(0, 1200),
-      reading: String(localResult.reading || '').slice(0, 256),
-      english: String(localResult.local_zh ? '' :
-        (localResult.definition || localResult.translation || '')).slice(0, 1200)
-    };
-  }
-
-  async function _dictionaryFallbackLookup(request) {
-    var cache = _dictionaryFallbackCache();
-    if (cache) {
-      try {
-        var cached = await cache.get(request);
-        if (cached) return cached;
-      } catch (error) {
-        _dictionaryFallbackDebug('App 本地缓存读取失败 ' +
-          String(error && (error.code || error.message) || ''));
-      }
-    }
-    var bridge = RC.computerVoice;
-    if (!bridge || typeof bridge.lookupJapaneseFallback !== 'function') {
-      var unavailable = new Error('ReaderPC 本机 CLI 释义通道不可用');
-      unavailable.code = 'BW_READER_DICTIONARY_CLI_UNAVAILABLE';
-      throw unavailable;
-    }
-    var result = await bridge.lookupJapaneseFallback(request);
-    if (cache) {
-      try {
-        await cache.put(request, {
-          language: result.language,
-          text: result.text,
-          source: result.source
-        });
-      } catch (error) {
-        _dictionaryFallbackDebug('App 本地缓存写入失败 ' +
-          String(error && (error.code || error.message) || ''));
-      }
-    }
-    return result;
   }
 
   async function _lookupPhraseLocalFirst(text, context, isJa) {
@@ -502,39 +449,28 @@ if (window.__bwPwaProviderOnly) return;
         try {
           localResult = await local.lookupJapaneseLegacy(text);
         } catch (error) {
-          _dictionaryFallbackDebug('App 本地词典读取失败 ' +
+          _dictionaryLocalDebug('App 本地词典读取失败 ' +
             String(error && (error.code || error.message) || ''));
         }
       }
-      if (localResult && localResult.ok && localResult.local_zh && localResult.zh) {
+      if (localResult && localResult.ok) {
         return {
-          zh: localResult.zh,
+          zh: localResult.zh || localResult.definition || localResult.translation || '',
           reading: localResult.reading || '',
           accent: localResult.accent != null ? localResult.accent : null,
           source: 'local-jmdict'
         };
       }
     }
-    try {
-      var fallback = await _dictionaryFallbackLookup(
-        _dictionaryFallbackRequest(text, context, localResult)
-      );
-      return {
-        zh: fallback.text || '',
-        reading: localResult && localResult.reading || '',
-        accent: localResult && localResult.accent != null ? localResult.accent : null,
-        source: fallback.source || 'pc-codex-cli',
-        cached: fallback.cached === true
-      };
-    } catch (error) {
-      return {
-        zh: '',
-        reading: localResult && localResult.reading || '',
-        accent: localResult && localResult.accent != null ? localResult.accent : null,
-        error: String(error && error.message || 'ReaderPC 本机 CLI 释义失败').slice(0, 500),
-        errorCode: String(error && error.code || 'BW_READER_DICTIONARY_CLI_FAILED').slice(0, 160)
-      };
-    }
+    return {
+      zh: '',
+      reading: localResult && localResult.reading || '',
+      accent: localResult && localResult.accent != null ? localResult.accent : null,
+      error: localResult && localResult.unavailable
+        ? 'App 本地日语词典尚未下载'
+        : 'App 本地日语词典未命中',
+      errorCode: localResult && localResult.code || 'BW_OFFLINE_DICTIONARY_NO_MATCH'
+    };
   }
 
   // ── 入口:RC.phrasepop.show(opts)。逐字照搬 15-phrase-wordpop.js::showPhrasePopover 的内容/字段/端点 ──
@@ -594,7 +530,7 @@ if (window.__bwPwaProviderOnly) return;
         '<div class="wp-head"><span class="wp-word">' + esc(text) + '</span>' + phon +
         (reading ? '<button class="wp-speak" onclick="_epPhraseSpeak()" title="发音">🔊</button>' : '') + '</div>' +
         '<div class="wp-def">' + (zh ? esc(zh) :
-          '<span style="color:#c66">ReaderPC 中文释义失败：' + esc(result.error || '本机 CLI 释义通道不可用') + '</span>') + '</div>' +
+          '<span style="color:#c66">' + esc(result.error || 'App 本地日语词典未命中') + '</span>') + '</div>' +
         (result.source === 'pc-codex-cli'
           ? '<div style="margin:-4px 12px 8px;color:#6f7e96;font-size:10.5px">电脑 ReaderPC · Codex CLI 句境释义' + (result.cached ? ' · 本地缓存' : '') + '</div>'
           : result.source === 'local-jmdict'

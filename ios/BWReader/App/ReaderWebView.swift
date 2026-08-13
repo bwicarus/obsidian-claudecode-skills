@@ -3139,6 +3139,37 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         return local
     }
 
+    private func isAllowedEmbeddedVideoURL(_ url: URL?) -> Bool {
+        guard let url,
+              url.scheme?.lowercased() == "https",
+              url.user == nil,
+              url.password == nil,
+              url.port == nil || url.port == 443,
+              url.fragment == nil,
+              let host = url.host?.lowercased()
+        else { return false }
+        let path = url.path
+        if host == "www.youtube-nocookie.com" {
+            let parts = path.split(separator: "/", omittingEmptySubsequences: true)
+            guard parts.count == 2, parts[0] == "embed" else { return false }
+            let videoID = String(parts[1])
+            return videoID.utf8.count == 11
+                && videoID.utf8.allSatisfy { byte in
+                    (48...57).contains(byte)
+                        || (65...90).contains(byte)
+                        || (97...122).contains(byte)
+                        || byte == 95 || byte == 45
+                }
+        }
+        if host == "player.bilibili.com" {
+            return path == "/player.html"
+        }
+        if host == "www.bilibili.com" {
+            return path == "/blackboard/webplayer/mbplayer.html"
+        }
+        return false
+    }
+
     private func isLocalRuntimeURL(_ url: URL?) -> Bool {
         guard let url else { return false }
         return url.scheme?.lowercased() == "http"
@@ -3975,6 +4006,17 @@ extension ReaderWebViewModel: WKNavigationDelegate {
                 return
             }
             if isTrustedReaderURL(url) {
+                decisionHandler(.allow)
+                return
+            }
+            // Only the three fixed player documents may remain as subframes.
+            // Their own links cannot turn the book renderer into a browser,
+            // and an unrelated external frame cannot borrow the main page's
+            // authority to navigate into the allowlist.
+            if navigationAction.targetFrame?.isMainFrame == false,
+               isAllowedEmbeddedVideoURL(url),
+               (isTrustedReaderURL(sourceURL)
+                    || isAllowedEmbeddedVideoURL(sourceURL)) {
                 decisionHandler(.allow)
                 return
             }

@@ -205,10 +205,15 @@ test("PWA 预置 word-pop 的掌握按钮通过真实 click 委托调用 late-bo
   assert.equal(pop.listeners.get("click")?.length, 1);
 });
 
-test("App 本地词典未命中的自定义日语词组自动交给 ReaderPC CLI 结合句境释义", async () => {
+test("App 本地词典未命中的自定义日语词组不自动交给 ReaderPC 或 Pi", async () => {
   const { sandbox, pop } = makeHarness();
   const lookupRequests = [];
   const cachedResults = [];
+  let piRequests = 0;
+  sandbox.fetch = async () => {
+    piRequests += 1;
+    throw new Error("unexpected Pi dictionary request");
+  };
   sandbox.RC.offlineDictionary = {
     CONTRACT: "bw-offline-dictionary/1",
     isLocalMode: () => true,
@@ -261,20 +266,13 @@ test("App 本地词典未命中的自定义日语词组自动交给 ReaderPC CLI
   await Promise.resolve();
   await new Promise((resolve) => setImmediate(resolve));
 
-  assert.equal(lookupRequests.length, 1);
-  assert.deepEqual(lookupRequests[0], {
-    mode: "meaning",
-    term: "それどころではない",
-    context: "締切が迫っていて、それどころではない。",
-    reading: "",
-    english: "",
-  });
-  assert.match(pop.innerHTML, /根本顾不上那件事/);
-  assert.equal(cachedResults.length, 1);
-  assert.equal(cachedResults[0].result.source, "pc-codex-cli");
+  assert.equal(lookupRequests.length, 0);
+  assert.equal(cachedResults.length, 0);
+  assert.equal(piRequests, 0);
+  assert.match(pop.innerHTML, /未查到/);
 });
 
-test("扩展没有 App 私有词典时自定义日语词组直接走 ReaderPC CLI 而非 Pi", async () => {
+test("扩展没有 App 私有词典时不自动调用 ReaderPC 或 Pi", async () => {
   const { sandbox, pop } = makeHarness();
   const lookupRequests = [];
   let piRequests = 0;
@@ -312,10 +310,8 @@ test("扩展没有 App 私有词典时自定义日语词组直接走 ReaderPC CL
   await new Promise((resolve) => setImmediate(resolve));
 
   assert.equal(piRequests, 0);
-  assert.equal(lookupRequests.length, 1);
-  assert.equal(lookupRequests[0].term, "手がないわけではない");
-  assert.equal(lookupRequests[0].context, "まだ手がないわけではない。");
-  assert.match(pop.innerHTML, /并非无计可施/);
+  assert.equal(lookupRequests.length, 0);
+  assert.match(pop.innerHTML, /未查到/);
 });
 
 test("扩展日语预热既不静默访问 Pi 也不自动占用 ReaderPC CLI", async () => {

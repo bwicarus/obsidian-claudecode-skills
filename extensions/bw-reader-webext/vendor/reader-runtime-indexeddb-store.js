@@ -66,6 +66,28 @@
     });
   }
 
+  function normalizeBatchOptions(options) {
+    if (options == null) return { transactionTimeoutMs: 0 };
+    if (!isPlainObject(options) || Object.keys(options).some(function (key) {
+      return key !== 'transactionTimeoutMs';
+    })) {
+      throw new DataStoreError(
+        'IndexedDB batch 选项无效', 'BW_DATA_INVALID'
+      );
+    }
+    if (options.transactionTimeoutMs == null) {
+      return { transactionTimeoutMs: 0 };
+    }
+    var timeoutMs = Number(options.transactionTimeoutMs);
+    if (!Number.isInteger(timeoutMs) || timeoutMs < 1 || timeoutMs > 60000) {
+      throw new DataStoreError(
+        'IndexedDB transactionTimeoutMs 必须是 1 到 60000 的整数',
+        'BW_DATA_INVALID'
+      );
+    }
+    return { transactionTimeoutMs: timeoutMs };
+  }
+
   function physicalKey(collection, id) {
     return collection + '\u0000' + id;
   }
@@ -277,7 +299,8 @@
       return databasePromise;
     }
 
-    function transact(storeNames, mode, worker) {
+    function transact(storeNames, mode, worker, transactionOptions) {
+      transactionOptions = transactionOptions || {};
       return openDatabase().then(function (db) {
         return new Promise(function (resolve, reject) {
           var transaction;
@@ -287,6 +310,13 @@
           var workerError = null;
           var workerDone = false;
           var keepaliveStopped = false;
+          var timeoutId = null;
+
+          function clearTransactionTimeout() {
+            if (timeoutId == null) return;
+            root.clearTimeout(timeoutId);
+            timeoutId = null;
+          }
 
           // WebKit can auto-commit a readwrite transaction between an IDB
           // success callback and the Promise continuation that queues the next
@@ -313,6 +343,7 @@
             request.onerror = function () { keepaliveStopped = true; };
           }
           transaction.oncomplete = function () {
+            clearTransactionTimeout();
             keepaliveStopped = true;
             if (!workerDone) {
               reject(new DataStoreError('IndexedDB transaction 提前完成', 'BW_DATA_BACKEND'));
@@ -322,9 +353,25 @@
           };
           transaction.onerror = function () {};
           transaction.onabort = function () {
+            clearTransactionTimeout();
             keepaliveStopped = true;
             reject(workerError || backendError(transaction.error, 'IndexedDB transaction 已回滚'));
           };
+          if (transactionOptions.transactionTimeoutMs) {
+            timeoutId = root.setTimeout(function () {
+              workerError = new DataStoreError(
+                'IndexedDB transaction 超时，已请求回滚',
+                'BW_DATA_TIMEOUT',
+                { timeoutMs: transactionOptions.transactionTimeoutMs }
+              );
+              keepaliveStopped = true;
+              try { transaction.abort(); }
+              catch (_) {
+                clearTransactionTimeout();
+                reject(workerError);
+              }
+            }, transactionOptions.transactionTimeoutMs);
+          }
           var work;
           try { work = worker(transaction); }
           catch (error) {
@@ -640,9 +687,11 @@
       }).then(finishWrite);
     }
 
-    function batch(mutations) {
+    function batch(mutations, batchOptions) {
+      var transactionOptions;
       try {
         mutations = prepareBatch(mutations);
+        transactionOptions = normalizeBatchOptions(batchOptions);
       } catch (error) {
         return Promise.reject(error);
       }
@@ -675,7 +724,7 @@
             trimOldest(transaction.objectStore(STORE_MUTATIONS), maxMutations, 'rememberedAt')
           ]).then(function () { return { value: results, changes: changes }; });
         });
-      }).then(finishWrite);
+      }, transactionOptions).then(finishWrite);
     }
 
     function changes(query) {

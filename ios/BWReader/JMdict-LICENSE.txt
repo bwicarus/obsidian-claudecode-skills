@@ -1,9 +1,8 @@
 JMdict attribution and licence
 ================================
 
-This product includes a compact, English-only derived form of JMdict, the
-Japanese-Multilingual Dictionary. JMdict is owned by the Electronic Dictionary
-Research and Development Group (EDRDG):
+This product includes compact derived forms of JMdict and KANJIDIC2. Both are
+owned by the Electronic Dictionary Research and Development Group (EDRDG):
 
   https://www.edrdg.org/wiki/index.php/JMdict-EDICT_Dictionary_Project
 
@@ -22,10 +21,11 @@ Changes made for BWReader
 -------------------------
 
 The pinned English JMdict release was converted into deterministic JSON shards.
-Only written forms, readings, part-of-speech tags, English gloss text, common
-flags, and JMdict sequence identifiers are retained. The data is normalized to
-Unicode NFC and indexed by exact Japanese form or reading. No new dictionary
-definitions were added, and EDRDG does not endorse BWReader or this conversion.
+Written forms, readings, part-of-speech tags, English gloss text, common flags,
+JMdict sequence identifiers, and KANJIDIC readings/meanings are retained. The
+data is normalized to Unicode NFC and indexed by exact Japanese form or
+reading. No new EDRDG definitions were added, and EDRDG does not endorse
+BWReader or this conversion.
 
 Conversion source
 -----------------

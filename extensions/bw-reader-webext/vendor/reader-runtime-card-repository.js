@@ -306,6 +306,11 @@
   function cardsOf(input, required) {
     if (Array.isArray(input && input.cards)) return normalizeCards(input.cards);
     if (plain(input && input.card)) return [normalizeCard(input.card)];
+    if (Array.isArray(input && input.batch)) return normalizeCards(input.batch);
+    if (plain(input && input.batch)) {
+      if (Array.isArray(input.batch.cards)) return normalizeCards(input.batch.cards);
+      if (Array.isArray(input.batch.data)) return normalizeCards(input.batch.data);
+    }
     if (required) {
       throw new CardRepositoryError('缺少 cards', 'BW_CARD_REPOSITORY_CARD_SHAPE');
     }
@@ -610,7 +615,7 @@
     Object.keys(record).forEach(function (key) {
       if ({
         id: true, cid: true, gid: true, kind: true, cards: true,
-        data: true, states: true, source_ref: true, src: true, req: true
+        data: true, batch: true, states: true, source_ref: true, src: true, req: true
       }[key]) return;
       legacy[key] = clone(record[key]);
     });
@@ -636,8 +641,39 @@
     if (record.kind != null && String(record.kind) !== 'cards') {
       throw new CardRepositoryError('legacy record.kind 不是 cards', 'BW_CARD_REPOSITORY_LEGACY');
     }
-    var cards = normalizeCards(Array.isArray(record.cards) ? record.cards : record.data);
-    var rawStates = record.states == null ? {} : record.states;
+    var nestedBatch = plain(record.batch) ? record.batch : null;
+    var cardShapes = [];
+    if (Array.isArray(record.cards)) cardShapes.push(record.cards);
+    if (Array.isArray(record.data)) cardShapes.push(record.data);
+    if (Array.isArray(record.batch)) cardShapes.push(record.batch);
+    if (nestedBatch && Array.isArray(nestedBatch.cards)) cardShapes.push(nestedBatch.cards);
+    if (nestedBatch && Array.isArray(nestedBatch.data)) cardShapes.push(nestedBatch.data);
+    if (!cardShapes.length) {
+      throw new CardRepositoryError(
+        'legacy record 缺少 cards/data/batch',
+        'BW_CARD_REPOSITORY_LEGACY'
+      );
+    }
+    var cards = normalizeCards(cardShapes[0]);
+    for (var shapeIndex = 1; shapeIndex < cardShapes.length; shapeIndex += 1) {
+      if (!same(cards, normalizeCards(cardShapes[shapeIndex]))) {
+        throw new CardRepositoryError(
+          'legacy record 的 cards/data/batch 内容分叉',
+          'BW_CARD_REPOSITORY_LEGACY'
+        );
+      }
+    }
+    var topStates = record.states == null ? null : record.states;
+    var nestedStates = nestedBatch && nestedBatch.states != null
+      ? nestedBatch.states : null;
+    if (topStates != null && nestedStates != null && !same(topStates, nestedStates)) {
+      throw new CardRepositoryError(
+        'legacy record 的 states/batch.states 内容分叉',
+        'BW_CARD_REPOSITORY_LEGACY'
+      );
+    }
+    var rawStates = topStates != null
+      ? topStates : (nestedStates != null ? nestedStates : {});
     if (!plain(rawStates)) {
       throw new CardRepositoryError('legacy states 必须是对象', 'BW_CARD_REPOSITORY_LEGACY');
     }
