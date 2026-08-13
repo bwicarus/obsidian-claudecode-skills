@@ -4226,3 +4226,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **怎么验的**：共享源码/vendor 重建、Reader Node 全量、C# Release、ReaderBundle 314 文件与发布管线通过；网络审计零新增并移除退役基线。
 - **已知门禁**：Windows 全量/handoff 仍命中既有 POSIX `fcntl`、Linux fixture/本机测试数据基线，不冒充通过；本批行为合同均通过。
 - **发布事实/下一步**：功能提交 `b47fdc84`；Actions `31718234564` 上传 TestFlight `1.1.52 (288)`，`31719057335` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。未部署 Pi 或桌面扩展正式渠道；下一步按卡片双宿主、高亮取消/删除与复习卡布局清单做真机验收。
+
+## Codex：原生 Realtime 制卡与旧式富词典恢复（2026-08-14 JST）
+- **改了什么**：修正原生 Realtime `make_anki` 的模型参数、延期草稿与严格卡片解析；通用卡不再误绑旧选区，并恢复查词的当前形/原形/活用、读音声调、中文多义与中文例句，移除伪含义/罗马音展示。
+- **怎么验的**：共享构建与 Reader Node 全量通过；Pi 两次完整 Linux 预检通过，TestFlight 的模拟器、设备归档、签名与 IPA 上传门禁通过。
+- **部署事实**：Pi 原子事务 `20260813T181157Z-1453802` 完成且服务/定时器健康；部署保护只放行严格 schema 的 `dwell.jsonl` 尾部追加，其他 KG 变化仍失败关闭。
+- **发布事实**：功能源 `ef8fb688`，TestFlight `1.1.53 (291)` 已确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告；Pi 当前部署提交 `00a065c9`。
+- **没做/下一步**：未混入尚无 C# 编译证据的 Windows `client-action` 反馈 WIP，也未发布桌面扩展；真机核对 Realtime 草稿落入 Reader 本地卡库及英文例句稍后回填为中文。
