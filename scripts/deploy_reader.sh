@@ -85,6 +85,7 @@ KG_EXTERNAL_MUTABLE_PATHS=(
   # concept-graph.service may create/update generated concept notes here.
   "$OBSIDIAN_VAULT_ROOT/资源/概念"
 )
+KG_DWELL_REL="state/attention/dwell.jsonl"
 DEPLOY_STARTED=0
 DEPLOY_FINISHED=0
 CURRENT_SWITCHED=0
@@ -645,6 +646,178 @@ out.write_text(
 PY
 }
 
+verify_kg_state_change() {
+  local before_inventory="$1" after_inventory="$2" snapshot_tar="$3"
+  python3 -B - \
+    "$PROJECT_ROOT" "$before_inventory" "$after_inventory" \
+    "$snapshot_tar" "$KG_DWELL_REL" <<'PY'
+import hashlib
+import json
+from pathlib import Path
+import stat
+import sys
+import tarfile
+
+root = Path(sys.argv[1])
+before_path = Path(sys.argv[2])
+after_path = Path(sys.argv[3])
+snapshot_path = Path(sys.argv[4])
+dwell_relative = sys.argv[5]
+dwell_parent, dwell_name = dwell_relative.rsplit("/", 1)
+
+
+def fail(message):
+    raise SystemExit(message)
+
+
+def load_inventory(path):
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        fail(f"KG 状态清单无效: {path}: {exc}")
+    if not isinstance(value, dict):
+        fail(f"KG 状态清单顶层必须是对象: {path}")
+    return value
+
+
+def without_dwell(inventory):
+    # Only the App-owned dwell stream may move during the health window.  An
+    # absent state/attention directory and one containing only dwell.jsonl are
+    # equivalent after that single file is removed; every other entry remains
+    # byte-digest exact.
+    cloned = dict(inventory)
+    attention = cloned.get(dwell_parent)
+    if isinstance(attention, dict):
+        attention = dict(attention)
+        attention.pop(dwell_name, None)
+        cloned[dwell_parent] = attention or None
+    return cloned
+
+
+def snapshot_dwell_bytes(inventory):
+    attention = inventory.get(dwell_parent)
+    expected_digest = (
+        attention.get(dwell_name) if isinstance(attention, dict) else None
+    )
+    matches = []
+    try:
+        with tarfile.open(snapshot_path, mode="r:") as archive:
+            for member in archive.getmembers():
+                if member.name.lstrip("./") == dwell_relative:
+                    matches.append(member)
+            if len(matches) > 1:
+                fail(f"KG 状态快照含重复条目: {dwell_relative}")
+            if not matches:
+                if expected_digest is not None:
+                    fail(f"KG 状态快照缺失条目: {dwell_relative}")
+                return b""
+            member = matches[0]
+            if not member.isfile():
+                fail(f"KG 状态快照条目不是普通文件: {dwell_relative}")
+            stream = archive.extractfile(member)
+            if stream is None:
+                fail(f"KG 状态快照条目无法读取: {dwell_relative}")
+            data = stream.read()
+    except (OSError, tarfile.TarError) as exc:
+        fail(f"KG 状态快照无法读取: {snapshot_path}: {exc}")
+    actual_digest = hashlib.sha256(data).hexdigest()
+    if expected_digest != actual_digest:
+        fail(f"KG 状态快照与部署前清单不一致: {dwell_relative}")
+    return data
+
+
+def unique_object(pairs):
+    value = {}
+    for key, item in pairs:
+        if key in value:
+            fail(f"dwell JSON 含重复字段: {key}")
+        value[key] = item
+    return value
+
+
+def reject_constant(value):
+    fail(f"dwell JSON 含非标准数值: {value}")
+
+
+def integer(value):
+    return isinstance(value, int) and not isinstance(value, bool)
+
+
+def validate_record(line, line_number):
+    try:
+        record = json.loads(
+            line,
+            object_pairs_hook=unique_object,
+            parse_constant=reject_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        fail(f"dwell JSONL 第 {line_number} 行无效: {exc}")
+    if not isinstance(record, dict):
+        fail(f"dwell JSONL 第 {line_number} 行必须是对象")
+    required = {"ts", "secs", "file", "uid", "page"}
+    allowed = required | {"upage"}
+    fields = set(record)
+    if fields != required and fields != allowed:
+        fail(f"dwell JSONL 第 {line_number} 行字段与 read-dwell schema 不符")
+    if not integer(record["ts"]) or not (0 <= record["ts"] <= 2**63 - 1):
+        fail(f"dwell JSONL 第 {line_number} 行 ts 无效")
+    if not integer(record["secs"]) or not (0 <= record["secs"] <= 600):
+        fail(f"dwell JSONL 第 {line_number} 行 secs 无效")
+    file_value = record["file"]
+    if (
+        not isinstance(file_value, str)
+        or not file_value
+        or file_value != file_value.strip()
+        or "/.sandbox/" in file_value
+    ):
+        fail(f"dwell JSONL 第 {line_number} 行 file 无效")
+    if not isinstance(record["uid"], str):
+        fail(f"dwell JSONL 第 {line_number} 行 uid 无效")
+    if not integer(record["page"]):
+        fail(f"dwell JSONL 第 {line_number} 行 page 无效")
+    if "upage" in record:
+        upage = record["upage"]
+        if not isinstance(upage, str) or not upage or len(upage) > 40:
+            fail(f"dwell JSONL 第 {line_number} 行 upage 无效")
+        if record["page"] != 0:
+            fail(f"dwell JSONL 第 {line_number} 行虚拟页 page 必须为 0")
+
+
+before = load_inventory(before_path)
+after = load_inventory(after_path)
+if without_dwell(before) != without_dwell(after):
+    fail("部署/健康检查阶段意外写入 KG 状态（非 dwell append）")
+
+snapshot_data = snapshot_dwell_bytes(before)
+live_path = root / dwell_relative
+if not live_path.exists() and not live_path.is_symlink():
+    if snapshot_data:
+        fail(f"部署窗口内删除了 KG 状态: {dwell_relative}")
+    raise SystemExit(0)
+mode = live_path.lstat().st_mode
+if stat.S_ISLNK(mode) or not stat.S_ISREG(mode):
+    fail(f"KG 状态路径类型无效: {dwell_relative}")
+live_data = live_path.read_bytes()
+if live_data == snapshot_data:
+    raise SystemExit(0)
+if len(live_data) <= len(snapshot_data) or not live_data.startswith(snapshot_data):
+    fail(f"KG dwell 不是相对备份的严格字节前缀追加: {dwell_relative}")
+suffix_bytes = live_data[len(snapshot_data):]
+if not suffix_bytes.endswith(b"\n") or b"\r" in suffix_bytes:
+    fail("KG dwell 追加后缀不是完整 LF JSONL")
+try:
+    suffix = suffix_bytes.decode("utf-8", errors="strict")
+except UnicodeDecodeError as exc:
+    fail(f"KG dwell 追加后缀不是完整 UTF-8: {exc}")
+lines = suffix.split("\n")[:-1]
+if not lines or any(not line for line in lines):
+    fail("KG dwell 追加后缀含空行或没有 JSONL 记录")
+for index, line in enumerate(lines, start=1):
+    validate_record(line, index)
+print(f"保留部署窗口 read-dwell 追加: {len(lines)} 条")
+PY
+}
+
 restore_kg_pointer() {
   [ "$CURRENT_SWITCHED" = "1" ] || return 0
   local desired="${OLD_KG_ID:--}"
@@ -684,7 +857,8 @@ rollback_deploy() {
         "${KG_MUTABLE_PATHS[@]}" "${KG_EXTERNAL_MUTABLE_PATHS[@]}" \
         || rollback_failed=1
       if [ -f "$after_state" ] \
-          && ! cmp -s "$KG_STATE_BEFORE" "$after_state"; then
+          && ! verify_kg_state_change \
+            "$KG_STATE_BEFORE" "$after_state" "$BACKUP_DIR/kg-state.tar"; then
         echo "❌ 部署窗口内 KG 数据已变化；拒绝盲目覆盖数据快照。" >&2
         rollback_failed=1
       fi
@@ -1327,7 +1501,8 @@ verify_deploy_payload_digest
 KG_STATE_AFTER="$STAGE_DIR/kg-state-after.sha256"
 hash_kg_state "$KG_STATE_AFTER" \
   "${KG_MUTABLE_PATHS[@]}" "${KG_EXTERNAL_MUTABLE_PATHS[@]}"
-cmp -s "$KG_STATE_BEFORE" "$KG_STATE_AFTER" || {
+verify_kg_state_change \
+  "$KG_STATE_BEFORE" "$KG_STATE_AFTER" "$BACKUP_DIR/kg-state.tar" || {
   echo "部署/健康检查阶段意外写入 KG 状态" >&2
   false
 }

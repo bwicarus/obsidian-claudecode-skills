@@ -1,9 +1,13 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import os
 from pathlib import Path
 import re
 import subprocess
+import sys
+import tarfile
 import tempfile
 import textwrap
 import unittest
@@ -23,6 +27,14 @@ def _function_source(name: str) -> str:
     if not match:
         raise AssertionError(f"missing shell function: {name}")
     return match.group(0)
+
+
+def _function_python_source(name: str) -> str:
+    source = _function_source(name)
+    match = re.search(r"<<'PY'\n(.*?)\nPY\n", source, re.DOTALL)
+    if not match:
+        raise AssertionError(f"missing Python heredoc in shell function: {name}")
+    return match.group(1) + "\n"
 
 
 _STATE_FUNCTIONS = "\n".join(
@@ -158,6 +170,162 @@ def _state_harness(body: str) -> str:
 
 
 class ReaderDeployTransactionContractTest(unittest.TestCase):
+    def _run_kg_change_verifier(
+        self,
+        *,
+        before_dwell: bytes | None,
+        live_dwell: bytes | None,
+        before_extra: dict[str, object] | None = None,
+        after_extra: dict[str, object] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        attention = root / "state" / "attention"
+        attention.mkdir(parents=True)
+        dwell = attention / "dwell.jsonl"
+        if live_dwell is not None:
+            dwell.write_bytes(live_dwell)
+
+        before_inventory: dict[str, object] = {
+            "knowledge_graph": before_extra or {"nodes.json": "same"},
+            "state/attention": (
+                {
+                    "dwell.jsonl": hashlib.sha256(before_dwell).hexdigest(),
+                    "profile.json": "unchanged",
+                }
+                if before_dwell is not None
+                else {"profile.json": "unchanged"}
+            ),
+        }
+        after_inventory: dict[str, object] = {
+            "knowledge_graph": after_extra or {"nodes.json": "same"},
+            "state/attention": {
+                "profile.json": "unchanged",
+                **(
+                    {"dwell.jsonl": hashlib.sha256(live_dwell).hexdigest()}
+                    if live_dwell is not None
+                    else {}
+                ),
+            },
+        }
+        before_path = root / "before.json"
+        after_path = root / "after.json"
+        backup_dir = root / "backup"
+        backup_dir.mkdir()
+        snapshot = backup_dir / "kg-state.tar"
+        before_path.write_text(json.dumps(before_inventory), encoding="utf-8")
+        after_path.write_text(json.dumps(after_inventory), encoding="utf-8")
+        with tarfile.open(snapshot, "w") as archive:
+            if before_dwell is not None:
+                archived = root / "snapshot-dwell.jsonl"
+                archived.write_bytes(before_dwell)
+                archive.add(archived, arcname="state/attention/dwell.jsonl")
+
+        return subprocess.run(
+            [
+                sys.executable,
+                "-B",
+                "-",
+                str(root),
+                str(before_path),
+                str(after_path),
+                str(snapshot),
+                "state/attention/dwell.jsonl",
+            ],
+            input=_function_python_source("verify_kg_state_change"),
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def _run_rollback_with_dwell_change(
+        self, suffix_bytes: bytes
+    ) -> tuple[subprocess.CompletedProcess[str], list[str]]:
+        temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(temporary.cleanup)
+        root = Path(temporary.name)
+        attention = root / "state" / "attention"
+        attention.mkdir(parents=True)
+        original = (
+            b'{"ts":1,"secs":30,"file":"books/a.pdf","uid":"u","page":2}\n'
+        )
+        (attention / "dwell.jsonl").write_bytes(original + suffix_bytes)
+        before = root / "before.json"
+        after = root / "after.json"
+        backup_dir = root / "backup"
+        backup_dir.mkdir()
+        snapshot = backup_dir / "kg-state.tar"
+        digest_before = hashlib.sha256(original).hexdigest()
+        digest_after = hashlib.sha256(original + suffix_bytes).hexdigest()
+        base_inventory = {
+            "knowledge_graph": {"nodes.json": "same"},
+            "state/attention": {"profile.json": "same"},
+        }
+        before_inventory = json.loads(json.dumps(base_inventory))
+        after_inventory = json.loads(json.dumps(base_inventory))
+        before_inventory["state/attention"]["dwell.jsonl"] = digest_before
+        after_inventory["state/attention"]["dwell.jsonl"] = digest_after
+        before.write_text(json.dumps(before_inventory), encoding="utf-8")
+        after_fixture = root / "after-fixture.json"
+        after_fixture.write_text(json.dumps(after_inventory), encoding="utf-8")
+        archived = root / "snapshot-dwell.jsonl"
+        archived.write_bytes(original)
+        with tarfile.open(snapshot, "w") as archive:
+            archive.add(archived, arcname="state/attention/dwell.jsonl")
+        events = root / "events"
+        marker = root / "marker"
+        marker.write_text("{}\n", encoding="utf-8")
+        verifier_script = root / "verify_kg_state_change.py"
+        verifier_script.write_text(
+            _function_python_source("verify_kg_state_change"), encoding="utf-8"
+        )
+        verify_wrapper = f"""verify_kg_state_change() {{
+  {str(Path(sys.executable))!r} -B {str(verifier_script)!r} \\
+    "$PROJECT_ROOT" "$1" "$2" "$3" "$KG_DWELL_REL"
+}}
+"""
+        harness = f"""
+set -u
+PROJECT_ROOT={str(root)!r}
+STAGE_DIR={str(root)!r}
+BACKUP_DIR={str(backup_dir)!r}
+KG_STATE_BEFORE={str(before)!r}
+KG_DWELL_REL=state/attention/dwell.jsonl
+ACTIVE_MARKER={str(marker)!r}
+KG_MUTABLE_PATHS=(state/attention)
+KG_EXTERNAL_MUTABLE_PATHS=()
+freeze_writers() {{ return 0; }}
+confirm_units_still() {{ return 0; }}
+restore_kg_pointer() {{ echo pointer >> {str(events)!r}; }}
+restore_backup() {{ echo files >> {str(events)!r}; }}
+hash_kg_state() {{ cp {str(after_fixture)!r} "$1"; }}
+restore_active_units() {{ echo active >> {str(events)!r}; }}
+write_json_atomic() {{ echo "$2" >> {str(events)!r}; }}
+sudo() {{ if [ "$1" = systemctl ]; then return 0; fi; "$@"; }}
+{verify_wrapper}
+{_function_source("rollback_deploy")}
+set +e
+if rollback_deploy; then rc=0; else rc=$?; fi
+printf 'rc=%s marker=%s\n' "$rc" "$([ -f {str(marker)!r} ] && echo present || echo missing)"
+exit 0
+"""
+        env = os.environ.copy()
+        env["PATH"] = f"{ROOT / 'tests'}:{env['PATH']}"
+        result = subprocess.run(
+            ["C:/Users/bwica/scoop/apps/git/2.54.0/bin/bash.exe", "-c", harness],
+            cwd=ROOT,
+            env=env,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        # rollback_deploy deliberately returns non-zero when it blocks an
+        # unsafe rollback; the harness itself always reaches `exit 0`, but
+        # ERR may preserve that status under Git Bash.  The printed rc and
+        # durable event sequence are the behavioral oracle here.
+        return result, (events.read_text("utf-8").splitlines() if events.exists() else [])
+
     def test_preflight_builds_reader_only_in_temporary_stage(self):
         self.assertIn("--preflight-only", SCRIPT)
         self.assertIn(
@@ -658,6 +826,97 @@ class ReaderDeployTransactionContractTest(unittest.TestCase):
         self.assertIn('"$OBSIDIAN_VAULT_ROOT/资源/概念"', SCRIPT)
         self.assertIn("kg-vault-concepts.tar", SCRIPT)
         self.assertIn("KG 状态取证快照", SCRIPT)
+
+    def test_dwell_may_only_grow_by_valid_read_dwell_jsonl(self):
+        original = (
+            b'{"ts":1,"secs":30,"file":"books/a.pdf","uid":"u","page":2}\n'
+        )
+        appended = (
+            b'{"ts":2,"secs":600,"file":"books/a.pdf","uid":"u",'
+            b'"page":0,"upage":"insert-1"}\n'
+        )
+        result = self._run_kg_change_verifier(
+            before_dwell=original,
+            live_dwell=original + appended,
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("保留部署窗口 read-dwell 追加: 1 条", result.stdout)
+
+    def test_dwell_verifier_rejects_rewrite_invalid_suffix_and_other_kg_change(self):
+        original = (
+            b'{"ts":1,"secs":30,"file":"books/a.pdf","uid":"u","page":2}\n'
+        )
+        valid = (
+            b'{"ts":2,"secs":10,"file":"books/a.pdf","uid":"u","page":3}\n'
+        )
+        cases = (
+            ("rewrite", valid, None, None),
+            ("partial-line", original + valid.rstrip(b"\n"), None, None),
+            (
+                "out-of-range",
+                original
+                + b'{"ts":2,"secs":601,"file":"books/a.pdf","uid":"u","page":3}\n',
+                None,
+                None,
+            ),
+            (
+                "wrong-schema",
+                original
+                + b'{"ts":2,"secs":10,"file":"books/a.pdf","uid":"u","page":3,"x":1}\n',
+                None,
+                None,
+            ),
+            (
+                "other-kg-change",
+                original + valid,
+                {"nodes.json": "before"},
+                {"nodes.json": "after"},
+            ),
+        )
+        for label, live, before_extra, after_extra in cases:
+            with self.subTest(label=label):
+                result = self._run_kg_change_verifier(
+                    before_dwell=original,
+                    live_dwell=live,
+                    before_extra=before_extra,
+                    after_extra=after_extra,
+                )
+                self.assertNotEqual(result.returncode, 0, result.stdout)
+
+    def test_final_and_rollback_checks_reuse_the_same_dwell_verifier(self):
+        self.assertEqual(SCRIPT.count("verify_kg_state_change() {"), 1)
+        self.assertEqual(
+            SCRIPT.count(
+                'verify_kg_state_change \\\n  "$KG_STATE_BEFORE" "$KG_STATE_AFTER" "$BACKUP_DIR/kg-state.tar"'
+            ),
+            1,
+        )
+        rollback = _function_source("rollback_deploy")
+        self.assertIn(
+            'verify_kg_state_change \\\n            "$KG_STATE_BEFORE" "$after_state" "$BACKUP_DIR/kg-state.tar"',
+            rollback,
+        )
+
+    def test_rollback_accepts_valid_dwell_append_but_blocks_invalid_suffix(self):
+        valid = (
+            b'{"ts":2,"secs":10,"file":"books/a.pdf","uid":"u","page":3}\n'
+        )
+        result, events = self._run_rollback_with_dwell_change(valid)
+        self.assertEqual(
+            result.returncode,
+            0,
+            result.stderr + "\nstdout:\n" + (result.stdout or ""),
+        )
+        self.assertIn("rc=0 marker=missing", result.stdout)
+        self.assertIn("保留部署窗口 read-dwell 追加: 1 条", result.stdout)
+        self.assertEqual(events, ["pointer", "files", "active", "rolled_back"])
+
+        invalid_result, events = self._run_rollback_with_dwell_change(
+            b'{"ts":2,"secs":999,"file":"books/a.pdf","uid":"u","page":3}\n'
+        )
+        self.assertIn(invalid_result.returncode, (0, 1), invalid_result.stderr)
+        self.assertIn("rc=1 marker=present", invalid_result.stdout)
+        self.assertEqual(events, ["pointer", "files", "rollback_blocked"])
 
     def test_deploy_never_bulk_deletes_production_roots(self):
         forbidden = (
