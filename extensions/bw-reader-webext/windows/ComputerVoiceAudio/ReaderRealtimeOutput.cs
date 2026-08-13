@@ -52,7 +52,9 @@ internal static class ReaderRealtimeOutputProtocol
         or "navigate"
         or "highlight"
         or "highlight-text"
-        or "anki-draft";
+        or "anki-draft"
+        or "practice-page"
+        or "client-action";
 
     internal static object Event(ReaderRealtimeOutputRequest request) =>
         new
@@ -227,11 +229,146 @@ internal static class ReaderRealtimeOutputProtocol
                 }
                 ValidateAnkiDraftCards(root.GetProperty("cards"));
                 break;
+            case "practice-page":
+                ValidatePracticePage(root);
+                break;
+            case "client-action":
+                Exact(root, "fn", "args");
+                ValidateClientAction(root);
+                break;
             default:
                 throw Invalid("Reader 输出类型无效");
         }
         return JsonNode.Parse(root.GetRawText())
             ?? throw Invalid("Reader 输出 payload 无效");
+    }
+
+    // 可见反馈通道。
+    //
+    // 迁移前，AI 的改动经 Pi 返回 client_actions，前端 runActions 把 {fn,args} 分派到
+    // window[fn]，于是高亮完会出现那张「原文｜↗跳转｜↩撤销⇄↪重做」卡片条。桥接语音
+    // 绕开 Pi 之后，本地操作照样落库，却没有任何东西告诉界面「发生了什么」——用户看到的
+    // 就是"功能没了"。这里让桥接产出与 Pi 逐字段同形的 {fn,args}，前端渲染器一行不改。
+    //
+    // fn 必须白名单：runActions 是 window[fn].apply(...) 的动态分派。Pi 路径下由服务端
+    // 可信性兜底，换到桥接就必须显式限制，否则等于把「远程调用页面任意函数」开给桥接侧。
+    // 接收端（rc-computer-voice 的 normalizer）应当再卡一次，两端都卡，不靠单边。
+    private static void ValidateClientAction(JsonElement root)
+    {
+        string fn = Text(root, "fn", 64);
+        if (fn is not (
+            "_assistEdit"
+            or "notesReload"
+            or "jumpWithBack"
+            or "_nativePDFUndoLast"))
+        {
+            throw Invalid("Reader 客户端动作不在白名单内");
+        }
+        JsonElement args = root.GetProperty("args");
+        if (args.ValueKind != JsonValueKind.Array)
+        {
+            throw Invalid("Reader 客户端动作参数必须是数组");
+        }
+        if (fn is "notesReload")
+        {
+            if (args.GetArrayLength() != 0)
+            {
+                throw Invalid("notesReload 不接受参数");
+            }
+            return;
+        }
+        // 撤销复用 App 本机已有的撤销栈（native-local-runtime 里已实现 highlight-create /
+        // note-create / note-edit 三类，含修订冲突检测），桥接只负责发这条指令。
+        // 参数是一次性可信操作编号，本机据此拒绝重放；格式与 Pi 的 undo_last 下发一致。
+        if (fn is "_nativePDFUndoLast")
+        {
+            if (args.GetArrayLength() != 1
+                || args[0].ValueKind != JsonValueKind.String)
+            {
+                throw Invalid("_nativePDFUndoLast 需要一个操作编号");
+            }
+            // 与本文件既有的 id 校验同一写法，不额外引入正则依赖。
+            // 形状须与 native-local-runtime 的 npdf_[0-9a-f]{24} 完全一致。
+            string operationId = args[0].GetString() ?? string.Empty;
+            if (operationId.Length != 29
+                || !operationId.StartsWith("npdf_", StringComparison.Ordinal)
+                || operationId[5..].Any(character =>
+                    character is not (>= '0' and <= '9' or >= 'a' and <= 'f')))
+            {
+                throw Invalid("Reader 撤销操作编号无效");
+            }
+            return;
+        }
+        if (fn is "jumpWithBack")
+        {
+            if (args.GetArrayLength() != 1
+                || args[0].ValueKind != JsonValueKind.Number
+                || !args[0].TryGetInt32(out int page)
+                || page < 1
+                || page > 100_000)
+            {
+                throw Invalid("jumpWithBack 需要一个合法页码");
+            }
+            return;
+        }
+        if (args.GetArrayLength() != 1
+            || args[0].ValueKind != JsonValueKind.Object)
+        {
+            throw Invalid("_assistEdit 需要一个对象参数");
+        }
+        JsonElement edit = args[0];
+        DirectJsonValidation.RequireNoDuplicateKeys(edit);
+        Exact(edit, "type", "file", "items");
+        // 目前只放行高亮：便签走各自的既有通道，未经验证的类型不应从桥接侧引入。
+        if (Text(edit, "type", 16) is not "highlight")
+        {
+            throw Invalid("Reader 客户端动作类型无效");
+        }
+        FileText(edit, "file", 4_096);
+        ValidateClientActionItems(edit.GetProperty("items"));
+    }
+
+    // 卡片条逐条渲染这些字段（rc-turncard 的 _hlCardEl 消费 text/color/pdf_page/
+    // disp_page，撤销与重做则要靠 id 找回那条高亮）。字段集固定，避免桥接侧
+    // 塞进渲染器根本不认识的内容。
+    private static void ValidateClientActionItems(JsonElement items)
+    {
+        if (items.ValueKind != JsonValueKind.Array)
+        {
+            throw Invalid("Reader 客户端动作条目必须是数组");
+        }
+        int count = items.GetArrayLength();
+        if (count is 0 or > 64)
+        {
+            throw Invalid("Reader 客户端动作条目数量无效");
+        }
+        foreach (JsonElement item in items.EnumerateArray())
+        {
+            if (item.ValueKind != JsonValueKind.Object)
+            {
+                throw Invalid("Reader 客户端动作条目必须是对象");
+            }
+            DirectJsonValidation.RequireNoDuplicateKeys(item);
+            Exact(item, "id", "text", "color", "pdf_page", "disp_page");
+            Text(item, "id", 128);
+            Text(item, "text", 2_000);
+            string color = Text(item, "color", 16);
+            if (color is not ("yellow" or "green" or "blue" or "pink"))
+            {
+                throw Invalid("Reader 客户端动作条目颜色无效");
+            }
+            foreach (string key in new[] { "pdf_page", "disp_page" })
+            {
+                JsonElement page = item.GetProperty(key);
+                if (page.ValueKind != JsonValueKind.Number
+                    || !page.TryGetInt32(out int value)
+                    || value < 1
+                    || value > 100_000)
+                {
+                    throw Invalid("Reader 客户端动作条目页码无效");
+                }
+            }
+        }
     }
 
     internal static ReaderRealtimeOutputAck ValidateAck(JsonElement message)
@@ -608,6 +745,115 @@ internal static class ReaderRealtimeOutputProtocol
         }
     }
 
+    private static void ValidatePracticePage(JsonElement root)
+    {
+        Exact(root, "mutationId", "title", "paper", "blocks");
+        ValidateClientMutationId(root, "mutationId");
+        Text(root, "title", 120);
+        string paper = Text(root, "paper", 16);
+        if (paper is not ("dictation" or "exam" or "math" or "draw" or "note"))
+        {
+            throw Invalid("Reader 练习页纸张类型无效");
+        }
+
+        JsonElement blocks = root.GetProperty("blocks");
+        if (
+            blocks.ValueKind != JsonValueKind.Array
+            || blocks.GetArrayLength() is < 1 or > 80
+        )
+        {
+            throw Invalid("Reader 练习页元素数量无效");
+        }
+
+        HashSet<string> ids = new(StringComparer.Ordinal);
+        int answerBlocks = 0;
+        int checkButtons = 0;
+        foreach (JsonElement block in blocks.EnumerateArray())
+        {
+            if (block.ValueKind != JsonValueKind.Object)
+            {
+                throw Invalid("Reader 练习页元素无效");
+            }
+            DirectJsonValidation.RequireNoDuplicateKeys(block);
+            string id = SafeId(block, "id");
+            if (!ids.Add(id))
+            {
+                throw Invalid("Reader 练习页元素 id 重复");
+            }
+            string kind = Text(block, "kind", 16);
+            switch (kind)
+            {
+                case "text":
+                    Exact(block, "id", "kind", "text");
+                    Text(block, "text", 4_000);
+                    break;
+                case "blank":
+                    Exact(block, "id", "kind", "label", "answer");
+                    Text(block, "label", 320);
+                    NullableText(block, "answer", 2_000);
+                    answerBlocks += 1;
+                    break;
+                case "choice":
+                    Exact(
+                        block,
+                        "id",
+                        "kind",
+                        "text",
+                        "options",
+                        "answer");
+                    Text(block, "text", 4_000);
+                    JsonElement options = block.GetProperty("options");
+                    if (
+                        options.ValueKind != JsonValueKind.Array
+                        || options.GetArrayLength() is < 2 or > 6
+                    )
+                    {
+                        throw Invalid("Reader 练习页选择项数量无效");
+                    }
+                    HashSet<string> optionTexts = new(StringComparer.Ordinal);
+                    foreach (JsonElement option in options.EnumerateArray())
+                    {
+                        if (
+                            option.ValueKind != JsonValueKind.String
+                            || option.GetString() is not string optionText
+                            || string.IsNullOrWhiteSpace(optionText)
+                            || optionText.Length > 2_000
+                            || optionText.Any(character => character == '\0')
+                            || !optionTexts.Add(optionText)
+                        )
+                        {
+                            throw Invalid("Reader 练习页选择项无效");
+                        }
+                    }
+                    string answer = Text(block, "answer", 1);
+                    if (
+                        answer[0] is < 'A' or > 'F'
+                        || answer[0] - 'A' >= options.GetArrayLength()
+                    )
+                    {
+                        throw Invalid("Reader 练习页选择题答案无效");
+                    }
+                    answerBlocks += 1;
+                    break;
+                case "button":
+                    Exact(block, "id", "kind", "label", "event");
+                    Text(block, "label", 320);
+                    if (Text(block, "event", 16) != "check")
+                    {
+                        throw Invalid("Reader 练习页按钮事件无效");
+                    }
+                    checkButtons += 1;
+                    break;
+                default:
+                    throw Invalid("Reader 练习页元素类型无效");
+            }
+        }
+        if (answerBlocks < 1 || checkButtons != 1)
+        {
+            throw Invalid("Reader 练习页必须包含作答区和一个检查按钮");
+        }
+    }
+
     private static void Exact(JsonElement value, params string[] fields)
     {
         if (value.ValueKind != JsonValueKind.Object)
@@ -724,6 +970,11 @@ internal sealed class ReaderRealtimeOutputBroker
     // 9.6 second page wait plus persistence/ACK overhead. The page side remains
     // bounded, so this does not turn a lost receiver into an endless wait.
     private static readonly TimeSpan DeliveryTimeout = TimeSpan.FromSeconds(20);
+    // 插入真实 PDF 页后还要等本机 PDF 写入、页号重排和 blocks 持久化。
+    // 这条仍然有界，但不能套用精确高亮的 20 秒预算；否则 Reader 可能已经
+    // 落盘而 MCP 先报告未知，诱发用户或模型重复建页。
+    private static readonly TimeSpan PracticePageDeliveryTimeout =
+        TimeSpan.FromSeconds(50);
     private const int MaximumPendingOutputs = 16;
 
     private sealed record PendingOutput(
@@ -801,10 +1052,13 @@ internal sealed class ReaderRealtimeOutputBroker
                     retryable: true,
                     exception);
             }
+            TimeSpan deliveryTimeout = request.Kind == "practice-page"
+                ? PracticePageDeliveryTimeout
+                : DeliveryTimeout;
             Task winner = await Task.WhenAny(
                 pending.Completion.Task,
                 lease.LeaseRetired,
-                Task.Delay(DeliveryTimeout, cancellationToken))
+                Task.Delay(deliveryTimeout, cancellationToken))
                 .ConfigureAwait(false);
             cancellationToken.ThrowIfCancellationRequested();
             if (winner == pending.Completion.Task)
