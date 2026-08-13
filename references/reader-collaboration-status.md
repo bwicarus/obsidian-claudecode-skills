@@ -4207,3 +4207,9 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **同批修复**：恢复原生工具最终回答/本机草稿，固定视频卡走内置播放器，高亮等待真实色块；单词与词组均为本地中文优先、无中文走独立 ReaderPC CLI，Pi 仅显式旧版精释。
 - **验证**：共享源码/vendor build、Reader Node 全量、相关 Python、Windows Direct Release 构建/完整自检、发布管线与网络新增债务门禁通过；Windows handoff 仅余已登记的 POSIX `fcntl` 基线。
 - **候选发布**：提交 `99aab9f2`；Actions `31676797889` 上传 TestFlight `1.1.49 (276)`，`31677489224` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告；Pi 与扩展 `0.2.107` 正式 channel 等真机验收后再原子发布。
+
+## Codex：本地富词典、卡库、高亮与视频修复已发布（2026-08-13 JST）
+- **改了什么**：App 按需下载带读音/声调/中文义/例句/汉字信息的私有词典；修复卡仓 batch、普通无引用制卡、本地优先确认/复习、高亮挂起回滚、视频封面与 YouTube/Bilibili 内置播放。
+- **怎么验的**：Reader 合同全量、发布管线、ReaderBundle、词典逐片摘要均通过；Windows Direct Release 0 警告/0 错误且完整无音频自检通过，macOS 模拟器与设备归档/签名校验通过。
+- **发布事实**：数据 `9ecb02ab`、功能 `d7a4844d`；Actions `31684663043` 上传 TestFlight `1.1.50 (279)`，`31685324415` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
+- **边界/下一步**：词典不进 IPA/书附件/Pi，查词不自动使用 ReaderPC；Pi 与桌面扩展正式 channel 未部署，先真机验收连续高亮、本地卡库/复习及固定视频播放。
