@@ -33,6 +33,7 @@ ROUTE_POLICY = {
     'pdf_reader.pdf_api_build_toc_status': 'MEMBER_REQUIRED',   # /pdf/api/build-toc-status
     'pdf_reader.pdf_api_builtin_tools': 'JOB_OR_RANGE',   # /pdf/api/builtin-tools
     'pdf_reader.pdf_api_cache_stats': 'GLOBAL',   # /pdf/api/cache-stats
+    'pdf_reader.pdf_api_card_repository_bootstrap': 'GLOBAL',   # 账户级 Reader 卡仓首次导入，不属于单本/vbook
     'pdf_reader.pdf_api_context_sync': 'GLOBAL',   # /pdf/api/context-sync(全局开关,不涉及具体书)
     'pdf_reader.pdf_api_char_offset_get': 'PAGE',   # /pdf/api/char-offset
     'pdf_reader.pdf_api_char_offset_set': 'PAGE',   # /pdf/api/char-offset
