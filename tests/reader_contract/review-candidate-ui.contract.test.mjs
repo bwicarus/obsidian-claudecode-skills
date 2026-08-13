@@ -616,6 +616,39 @@ test("mounts the card workspace above the unchanged assistant thread", async () 
   assert.equal(workspace.hidden, true);
 });
 
+// 复习卡不再顶一行牌组与进度，但 deck 数据必须留着。
+//
+// b33fafc0 按用户拍板去掉过普通卡的顶部提示行（底部圆点已经说清进度，顶栏只是把
+// 卡面越挤越小）；后来 rv-meta 又把它加了回来。这里同时钉住两件事：那一行不能出现，
+// 而 deck 仍要在卡片数据里 —— 投影与导出都要用它，删展示不等于删数据。
+test("复习卡不显示牌组顶行，但 deck 数据保留", async () => {
+  const h = harness({
+    context: { file: "book.pdf", page: 3 },
+    fetchImpl: async () => response({
+      ok: true,
+      due_total: 1,
+      related_total: 1,
+      cards: [
+        { id: 41, question: "Q41", answer: "A41", deck: "Reader::Architecture" },
+      ],
+    }),
+  });
+  await h.RC.review.reload();
+
+  assert.doesNotMatch(h.pane.innerHTML, /rv-meta/, "顶栏容器不得出现在 DOM 里");
+  assert.doesNotMatch(
+    h.pane.innerHTML,
+    /Reader::Architecture/,
+    "牌组名不得占据卡面顶上那一行",
+  );
+  const rendered = h.learningCardRenders.at(-1);
+  assert.equal(
+    rendered.card.deck,
+    "Reader::Architecture",
+    "deck 只是不展示，数据必须仍在卡片上（投影与导出要用）",
+  );
+});
+
 test("review reuses the shared flashcard pager without visible arrow buttons", async () => {
   const h = harness({
     context: { file: "book.pdf", page: 3 },
@@ -652,7 +685,14 @@ test("review reuses the shared flashcard pager without visible arrow buttons", a
   await settleAsync();
   assert.equal(h.RC.review.currentCard().id, 33);
   assert.equal(h.getStored().index, 2);
-  assert.match(h.pane.innerHTML, /3 \/ 3/);
+  // 进度由底部圆点表达，不再在卡面顶上占一行文字：b33fafc0 已按用户拍板去掉
+  // 普通卡的顶部提示行，理由是圆点足够而顶栏把卡面越挤越小。这里守护的意图不变
+  // ——翻到第 3 张之后，界面必须反映出当前就在第 3 张。
+  assert.match(
+    h.pane.innerHTML,
+    /class="fc-dot on" data-goto="2" title="第 3 张"/,
+    "当前页码必须在分页圆点上体现",
+  );
 
   h.RC.review.previous();
   assert.equal(h.RC.review.currentCard().id, 32,

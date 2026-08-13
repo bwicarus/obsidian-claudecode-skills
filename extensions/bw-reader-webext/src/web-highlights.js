@@ -51,6 +51,19 @@
   }
   async function load(){const all=(await window.__bwExtensionStore.get(STORE))||{};records=Array.isArray(all[PAGE])?all[PAGE]:[];applyAll();}
   async function persist(){const all=(await window.__bwExtensionStore.get(STORE))||{};all[PAGE]=records.slice(-300);await window.__bwExtensionStore.set(STORE,all);}
+  async function patchRecord(rec,changes,afterPersist){
+    const before={};Object.keys(changes).forEach(k=>{before[k]=rec[k];rec[k]=changes[k];});
+    try{await persist();}
+    catch(e){Object.keys(before).forEach(k=>{rec[k]=before[k];});RC.toast?.('高亮保存失败：'+(e?.message||'本地存储不可用'));return false;}
+    try{afterPersist?.();}catch(_){}return true;
+  }
+  async function removeRecord(id){
+    const before=records.slice(),next=records.filter(x=>x.id!==id);if(next.length===before.length)return true;
+    records=next;
+    try{await persist();}
+    catch(_){records=before;applyAll();return false;}
+    try{applyAll();}catch(_){}return true;
+  }
 
   // CSS Highlight API 没有可点击 DOM；按 Range 的实时 client rect 做命中，触屏/鼠标双击都能打开原版编辑器。
   function hitAt(x,y){
@@ -68,9 +81,9 @@
     editAnchor.style.left=Math.max(0,q?.left||innerWidth/2)+'px';editAnchor.style.top=Math.max(0,q?.top||innerHeight/2)+'px';
     RC.highlight.closeEditor?.();
     RC.highlight.openEditor({colors:COLORS,current:rec.color||'',note:rec.note||'',preview:rec.text||rec.exact||'',sentence:rec.sentence||'',body:rec.body||'',kind:rec.kind||'note',anchorEl:editAnchor,placeBelow:true,silent:true,
-      onColor:async c=>{rec.color=c;await persist();applyAll();},
-      onNote:async t=>{rec.note=String(t||'');await persist();},
-      onDelete:async()=>{if(!confirm('删除这条网页高亮？'))return false;await window.__bwWebHighlights.remove(rec.id);RC.toast?.('已删除');return true;}
+      onColor:c=>patchRecord(rec,{color:c},applyAll),
+      onNote:t=>patchRecord(rec,{note:String(t||'')}),
+      onDelete:async()=>{if(!confirm('删除这条网页高亮？'))return false;const ok=await window.__bwWebHighlights.remove(rec.id);RC.toast?.(ok?'已删除':'删除失败：本地存储不可用');return ok;}
     });
   }
   document.addEventListener('selectionchange',()=>{try{const s=getSelection();if(s&&s.rangeCount&&!s.isCollapsed&&!window.__bwShadow.contains(s.anchorNode))currentRange=s.getRangeAt(0).cloneRange();}catch(_){}},{passive:true});
@@ -89,7 +102,7 @@
     },
     list(){return records.slice();},
     jump(id){const r=live.get(id)||locate(records.find(x=>x.id===id)||{});if(!r)return false;const el=r.startContainer.parentElement;el?.scrollIntoView?.({behavior:'smooth',block:'center'});return true;},
-    async remove(id){records=records.filter(x=>x.id!==id);await persist();applyAll();},
+    remove:removeRecord,
     refresh(){applyAll();}
   };
   window.RC?.actions?.bind?.('highlight.save',p=>window.__bwWebHighlights.save(p.color,p),{owner:'web-extension',runtime:'extension',storage:'extension-local-gateway'});

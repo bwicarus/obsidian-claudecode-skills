@@ -41,6 +41,20 @@
     return { unit: 'page', index: Math.max(0, (Number(currentPage) || 1) - 1), total };
   }
 
+  function _bookRemoveHighlightProjection(id) {
+    id = String(id || '');
+    if (!id) return { ok: false, error: '缺少高亮 id' };
+    const before = _allHighlights.length;
+    _allHighlights = _allHighlights.filter((item) => item && String(item.id) !== id);
+    Object.keys(_hlByPage).forEach((page) => {
+      _hlByPage[page] = (_hlByPage[page] || []).filter((item) => item && String(item.id) !== id);
+    });
+    document.querySelectorAll('.hl-saved[data-id]').forEach((node) => {
+      if (String(node.dataset.id || '') === id) node.remove();
+    });
+    return { ok: true, id, removed: before !== _allHighlights.length };
+  }
+
   async function action(name, payload) {
     payload = payload || {};
     switch (name) {
@@ -74,6 +88,8 @@
           highlight: h ? { id: h.id, page: h.page, color: h.color, text: h.text } : null,
         };
       }
+      case 'remove_highlight':
+        return _bookRemoveHighlightProjection(payload.id);
       case 'open_search':
         if (window.openSearch) window.openSearch();
         return { ok: true };
@@ -201,7 +217,7 @@
   }
 
   const names = [
-    'ocr', 'highlight', 'open_search', 'toggle_ruby', 'toggle_page_translate',
+    'ocr', 'highlight', 'remove_highlight', 'open_search', 'toggle_ruby', 'toggle_page_translate',
     'create_sticky', 'toggle_ink', 'anchor_fx', 'jump_page', 'jump_location',
     'change_page', 'fit_width', 'zoom_by', 'jump_context', 'flash_selection',
     'pin_card', 'pin_html', 'toggle_fullscreen', 'open_settings', 'open_favorite',

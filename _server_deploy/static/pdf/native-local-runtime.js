@@ -406,6 +406,9 @@
   var nativePDFActiveWriters = 0;
   var nativePDFWriterDrainWaiters = [];
   var EXACT_HIGHLIGHT_IDB_TIMEOUT_MS = 4000;
+  // Pi 镜像的等待上限。超过它就按 metadata_pending 返回：本地事实已经落定，
+  // 不该由一次远端往返决定用户看到的结果。
+  var NATIVE_EPUB_METADATA_TIMEOUT_MS = 8000;
   var PDF_MUTATION_DOCUMENT_KINDS = Object.freeze([
     'reading-position', 'document-highlights', 'ink',
     'document-notes-legacy', 'user-pages',
@@ -626,8 +629,8 @@
 
   function stateId(kind) { return bookId + ':' + kind; }
   function localFileRef() { return 'localbook:' + bookId; }
-  function readState(kind, fallback) {
-    return stores.document.get('native-' + kind, stateId(kind)).then(function (record) {
+  function readState(kind, fallback, queryOptions) {
+    return stores.document.get('native-' + kind, stateId(kind), queryOptions).then(function (record) {
       return record && record.value && record.value.payload != null
         ? clone(record.value.payload) : clone(fallback);
     });
@@ -655,9 +658,12 @@
     return result;
   }
 
-  function storedStateRecord(store, kind, ownerKey, ownerId, fallback) {
+  // queryOptions 让调用方给这次前置读设上界。
+  // 写入有界而读取无界时，一次挂住的 readonly 事务会把后面的写入一起堵在门外——
+  // 于是"有界的 batch"根本走不到。只有显式给出才生效，其余调用语义不变。
+  function storedStateRecord(store, kind, ownerKey, ownerId, fallback, queryOptions) {
     var id = ownerId + ':' + kind;
-    return store.get('native-' + kind, id).then(function (record) {
+    return store.get('native-' + kind, id, queryOptions).then(function (record) {
       var payload = validateStoredEnvelope(record, id, ownerKey, ownerId);
       return {
         payload: payload == null ? clone(fallback) : payload,
@@ -678,9 +684,11 @@
         ? ['document-notes-legacy', 'card-placements', 'entity-references']
         : [kind];
       return Promise.all(relatedKinds.map(function (relatedKind) {
+        // 前置读与随后的 batch 用同一个上界：这条链上任何一环无界，整条就仍会挂死。
         return storedStateRecord(
           stores.document, relatedKind, 'documentId', bookId,
-          relatedKind === kind ? fallback : []
+          relatedKind === kind ? fallback : [],
+          batchOptions
         );
       })).then(function (records) {
         var outcome = mutator(clone(records[0].payload));
@@ -718,9 +726,13 @@
     return attempt();
   }
 
-  function mutateDocumentState(kind, fallback, mutator) {
+  // batchOptions 必须一路交到 mutateDocumentStateNow。
+  //
+  // 这里少一个形参，调用方传的事务上界就被 JS 静默丢掉，与 StorageRouter 早先丢
+  // batchOptions 是同一个模式：上下游都对，中间少一个参数，于是保护全程空转。
+  function mutateDocumentState(kind, fallback, mutator, batchOptions) {
     return serializeLocalStateMutation('document', kind, function () {
-      return mutateDocumentStateNow(kind, fallback, mutator);
+      return mutateDocumentStateNow(kind, fallback, mutator, batchOptions);
     });
   }
 
@@ -4228,9 +4240,9 @@
       return localStateMutationResult(items, {
         ok: true, id: highlight.id, highlight: highlight
       });
-    }, independent ? {
-      transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS
-    } : undefined);
+      // 上界与 independent 无关：普通高亮写入同样会挂住 object store，
+      // 一旦挂住，后面连精确高亮也进不来。independent 只决定走哪个入口。
+    }, { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS });
   }
 
   function localPDFHighlights(input, init, url, method) {
@@ -4238,7 +4250,9 @@
     if (method === 'GET') {
       return localJSONRoute(function () {
         localFileQuery(url, ['file'], ['file'], code);
-        return readState('document-highlights', []).then(function (items) {
+        return readState('document-highlights', [], {
+          transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS
+        }).then(function (items) {
           items = storedList(items, code).slice().sort(function (a, b) {
             return Number(a.page || 0) - Number(b.page || 0) ||
               Number(a.time || 0) - Number(b.time || 0);
@@ -4250,6 +4264,8 @@
     if (method === 'DELETE') {
       return localJSONRoute(function () {
         return deleteRecordRequest(input, init, url, code).then(function (request) {
+          // 删除同样需要事务上界。一次不 settle 的删除会占住 object store,
+          // 之后每一次高亮读写都排在它后面 —— 挂起源只是从写入换到了删除。
           return mutateDocumentState('document-highlights', [], function (items) {
             items = storedList(items, code);
             var before = items.length;
@@ -4258,7 +4274,7 @@
               throw outgoingRequestError('未找到高亮', code, 404);
             }
             return localStateMutationResult(items, { ok: true });
-          });
+          }, { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS });
         });
       }, code);
     }
@@ -4297,7 +4313,7 @@
             found.kind = body.kind;
           }
           return localStateMutationResult(items, { ok: true, highlight: found });
-        });
+        }, { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS });
       });
     }, code);
   }
@@ -4307,7 +4323,9 @@
     if (method === 'GET') {
       return localJSONRoute(function () {
         localFileQuery(url, ['file'], ['file'], code);
-        return readState('epub-highlights', []).then(function (items) {
+        return readState('epub-highlights', [], {
+          transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS
+        }).then(function (items) {
           return { ok: true, highlights: storedList(items, code) };
         });
       }, code);
@@ -4321,7 +4339,7 @@
             items = items.filter(function (item) { return item && item.id !== request.id; });
             if (items.length === before) throw outgoingRequestError('未找到高亮', code, 404);
             return localStateMutationResult(items, { ok: true });
-          });
+          }, { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS });
         });
       }, code);
     }
@@ -4363,7 +4381,7 @@
             return localStateMutationResult(items, {
               ok: true, id: highlight.id, highlight: highlight
             });
-          });
+          }, { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS });
         }
         var id = localRecordId(body.id, code);
         return mutateDocumentState('epub-highlights', [], function (items) {
@@ -4385,7 +4403,7 @@
             found.kind = boundedLocalString(body.kind, 32, '', code, '高亮类型', true);
           }
           return localStateMutationResult(items, { ok: true, highlight: found });
-        });
+        }, { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS });
       });
     }, code);
   }
@@ -8500,14 +8518,15 @@
       invalidFile: payload.file !== localFileRef() } : null;
   }
 
-  function nativeEPUBRecordSet(kind) {
+  function nativeEPUBRecordSet(kind, queryOptions) {
     var kinds = kind === 'document-notes-legacy'
       ? ['document-notes-legacy', 'card-placements', 'entity-references']
       : [kind];
     return Promise.all(kinds.map(function (item) {
       return storedStateRecord(
         stores.document, item, 'documentId', bookId,
-        item === 'document-notes-legacy' || item === 'epub-highlights' ? [] : []
+        item === 'document-notes-legacy' || item === 'epub-highlights' ? [] : [],
+        queryOptions
       );
     })).then(function (records) { return { kinds: kinds, records: records }; });
   }
@@ -8646,8 +8665,14 @@
         '不是本机 EPUB action', 'BW_NATIVE_EPUB_ACTION_NOT_LOCAL'
       ));
     }
+    // 队列里只放本地的读与写，而且两者都有界。
+    //
+    // 这个队列与 epub-highlights 的 CRUD 是同一条：先前 Pi 的 metadataTask 也被
+    // 关在里面，于是一次网络往返期间，用户的每一次高亮增删改都排在它后面；网络
+    // 若不回应，整条队列就此不动。本地提交完成即释放队列，Pi 留到队列之外去等。
+    var bound = { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS };
     return serializeLocalStateMutation('document', descriptor.kind, function () {
-      return nativeEPUBRecordSet(descriptor.kind).then(function (recordSet) {
+      return nativeEPUBRecordSet(descriptor.kind, bound).then(function (recordSet) {
         var before = clone(recordSet.records[0].payload);
         var nextAction = clone(action);
         var next = nativeEPUBApplyActionPayload(
@@ -8656,27 +8681,51 @@
         nextAction.state = requestedOp === 'undo' ? 'undone' : 'done';
         var suffix = randomHex(12);
         return stores.document.batch(
-          nativeEPUBRecordMutations(recordSet, next, suffix + '-commit', 0)
-        ).then(function () {
-          return Promise.resolve().then(function () {
-            return metadataTask(nextAction);
-          }).then(function (metadata) {
-            return {
-              action: nextAction, metadata: metadata,
-              metadataSynced: true, metadataError: null
-            };
-          }).catch(function (metadataError) {
-            // Notes and highlights are App-owned facts. Pi only keeps the
-            // conversation/action-card mirror, so an unavailable matching Pi
-            // copy must not undo a local write the user already completed.
-            return {
-              action: nextAction, metadata: null,
-              metadataSynced: false,
-              metadataError: String(
-                metadataError && metadataError.message || metadataError || 'Pi 元数据未同步'
-              ).slice(0, 500)
-            };
-          });
+          nativeEPUBRecordMutations(recordSet, next, suffix + '-commit', 0),
+          bound
+        ).then(function () { return nextAction; });
+      });
+    }).then(function (nextAction) {
+      return nativeEPUBActionMetadata(nextAction, metadataTask);
+    });
+  }
+
+  // Pi 元数据：队列之外，有限等待。
+  //
+  // 笔记与高亮是 App 的事实，Pi 只留会话/动作卡的镜像，所以它没回应不能回滚用户
+  // 已经完成的本地写入 —— 也不能让用户一直等着。超时按 metadata_pending 返回，
+  // 说明"本地已写、镜像未确认"，而不是假称同步成功。
+  function nativeEPUBActionMetadata(nextAction, metadataTask) {
+    return new Promise(function (resolve) {
+      var settled = false;
+      var timer = root.setTimeout(function () {
+        if (settled) return;
+        settled = true;
+        resolve({
+          action: nextAction, metadata: null, metadataSynced: false,
+          metadataStatus: 'metadata_pending',
+          metadataError: 'Pi 元数据在 ' + NATIVE_EPUB_METADATA_TIMEOUT_MS +
+            'ms 内未回应；本地写入已完成'
+        });
+      }, NATIVE_EPUB_METADATA_TIMEOUT_MS);
+      Promise.resolve().then(function () {
+        return metadataTask(nextAction);
+      }).then(function (metadata) {
+        if (settled) return;
+        settled = true; root.clearTimeout(timer);
+        resolve({
+          action: nextAction, metadata: metadata,
+          metadataSynced: true, metadataStatus: 'ok', metadataError: null
+        });
+      }, function (metadataError) {
+        if (settled) return;
+        settled = true; root.clearTimeout(timer);
+        resolve({
+          action: nextAction, metadata: null, metadataSynced: false,
+          metadataStatus: 'metadata_error',
+          metadataError: String(
+            metadataError && metadataError.message || metadataError || 'Pi 元数据未同步'
+          ).slice(0, 500)
         });
       });
     });

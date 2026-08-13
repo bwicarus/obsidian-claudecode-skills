@@ -297,7 +297,9 @@
       RC.highlight.renderList(container, (h.allHighlights && h.allHighlights()) || [], {
         reverse: true,
         onJump: function (hl) { if (h.jumpToHl) h.jumpToHl(hl); },
-        onDelete: function (hl) { if (h.hlDelete) h.hlDelete(hl); }
+        // 必须把删除结果交回列表:列表要等到明确成功才移除该行。
+        // 没有 return 时新的 Promise 又被丢成 undefined,于是失败也照样假删。
+        onDelete: function (hl) { return h.hlDelete ? h.hlDelete(hl) : false; }
       });
       return true;
     },

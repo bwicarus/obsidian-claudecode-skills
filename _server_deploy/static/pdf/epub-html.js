@@ -2386,20 +2386,44 @@
       var eid = eb.getAttribute('data-eid'); var stt = _assistEdits[eid]; if (!stt) return;
       if (!stt.undone) {
         eb.disabled = true; eb.textContent = '撤销中…';
-        var n = stt.items.length, done0 = 0;
-        stt.items.forEach(function (it) {
+        var pending0 = (stt._pendingUndo || stt.items).slice(), n = pending0.length, done0 = 0, failed0 = [];
+        pending0.forEach(function (it) {
           reqJson('DELETE', '/pdf/api/epub-highlights?file=' + encodeURIComponent(FREL) + '&id=' + encodeURIComponent(it.id), null,
-            function () { unapplyHl({ id: it.id }); delete _hls[it.id]; if (++done0 === n) { stt.undone = true; eb.disabled = false; eb.textContent = '↪ 重做'; } },
-            function () { if (++done0 === n) { stt.undone = true; eb.disabled = false; eb.textContent = '↪ 重做'; } });
+            function () { unapplyHl({ id: it.id }); delete _hls[it.id]; finishUndo(); },
+            function (er) { failed0.push(it); finishUndo(er); });
         });
+        function finishUndo(er) {
+          if (++done0 !== n) return;
+          eb.disabled = false;
+          if (failed0.length) {
+            stt._pendingUndo = failed0; stt.undone = false; eb.textContent = '↩ 继续撤销';
+            toast('撤销未完成：' + (er || (failed0.length + ' 项未删除')));
+          } else {
+            delete stt._pendingUndo; stt.undone = true; eb.textContent = '↪ 重做';
+          }
+        }
       } else {
         eb.disabled = true; eb.textContent = '重做中…';
-        var n2 = stt.items.length, done2 = 0, fresh = [];
-        stt.items.forEach(function (it) {
+        var done2 = 0, fresh = [];
+        var pending2 = (stt._pendingRedo || stt.items).slice();
+        var n2 = pending2.length;
+        stt._redoFresh = stt._redoFresh || [];
+        pending2.forEach(function (it) {
           reqJson('POST', '/pdf/api/epub-highlights', { file: FREL, anchor: it.anchor, text: it.text, color: it.color },
-            function (d) { var h = d.highlight; _hls[h.id] = h; var el = secEls[it.anchor.section]; if (el) applyHl(el, h); fresh.push({ id: h.id, text: it.text, anchor: it.anchor, color: it.color }); if (++done2 === n2) { stt.items = fresh; stt.undone = false; eb.disabled = false; eb.textContent = '↩ 撤销'; } },
-            function () { if (++done2 === n2) { stt.undone = false; eb.disabled = false; eb.textContent = '↩ 撤销'; } });
+            function (d) { var h = d.highlight; _hls[h.id] = h; var el = secEls[it.anchor.section]; if (el) applyHl(el, h); stt._redoFresh.push({ id: h.id, text: it.text, anchor: it.anchor, color: it.color }); finishRedo(); },
+            function (er) { fresh.push(it); finishRedo(er); });
         });
+        function finishRedo(er) {
+          if (++done2 !== n2) return;
+          eb.disabled = false;
+          if (fresh.length) {
+            stt._pendingRedo = fresh; stt.undone = true; eb.textContent = '↪ 继续重做';
+            toast('重做未完成：' + (er || (fresh.length + ' 项未恢复')));
+          } else {
+            stt.items = stt._redoFresh; delete stt._redoFresh; delete stt._pendingRedo;
+            stt.undone = false; eb.textContent = '↩ 撤销';
+          }
+        }
       }
       return;
     }
@@ -2511,17 +2535,50 @@
       });
     });
   }
-  function delHl(h) { reqJson('DELETE', '/pdf/api/epub-highlights?file=' + encodeURIComponent(FREL) + '&id=' + encodeURIComponent(h.id), null, function () { unapplyHl(h); delete _hls[h.id]; toast('已删除'); }, function () {}); }
-  function patchHl(h, f) { reqJson('PATCH', '/pdf/api/epub-highlights', Object.assign({ file: FREL, id: h.id }, f), function (d) { if (f.color && f.color !== h.color) { unapplyHl(h); h.color = d.highlight.color; var el = _secElOf(h.anchor.section); if (el) applyHl(el, h); } h.note = d.highlight.note; if ('sentence' in f) h.sentence = d.highlight.sentence; if ('kind' in f) h.kind = d.highlight.kind; if ('body' in f) h.body = d.highlight.body; }, function () {}); }
+  // 删除必须给出明确结论:true=后端确认删掉,false=没删掉。
+  //
+  // 先前成功回调做事、失败回调是空函数,整个函数返回 undefined —— 调用方的
+  // `ok !== false` 一律判成成功,于是编辑框关闭、列表移除,而这条高亮还在,
+  // 刷新后又回来。reqJson 的失败回调本来就带着错误字符串,此前被丢掉了。
+  function delHl(h) {
+    return new Promise(function (resolve) {
+      reqJson(
+        'DELETE',
+        '/pdf/api/epub-highlights?file=' + encodeURIComponent(FREL) +
+          '&id=' + encodeURIComponent(h.id),
+        null,
+        function () { unapplyHl(h); delete _hls[h.id]; toast('已删除'); resolve(true); },
+        function (e) { toast('删除失败：' + (e || '未知原因')); resolve(false); }
+      );
+    });
+  }
+  function _bookRemoveHighlightProjection(id) {
+    id = String(id || '');
+    if (!id) return { ok: false, error: '缺少高亮 id' };
+    var removed = !!_hls[id];
+    unapplyHl({ id: id });
+    delete _hls[id];
+    return { ok: true, id: id, removed: removed };
+  }
+  function patchHl(h, f) {
+    return new Promise(function (resolve) {
+      reqJson('PATCH', '/pdf/api/epub-highlights', Object.assign({ file: FREL, id: h.id }, f), function (d) {
+        if (!d || !d.highlight) { toast('保存失败：响应缺少高亮'); resolve(false); return; }
+        if ('color' in f && f.color !== h.color) { unapplyHl(h); h.color = d.highlight.color; var el = _secElOf(h.anchor.section); if (el) applyHl(el, h); }
+        h.note = d.highlight.note; if ('sentence' in f) h.sentence = d.highlight.sentence; if ('kind' in f) h.kind = d.highlight.kind; if ('body' in f) h.body = d.highlight.body;
+        resolve(true);
+      }, function (er) { toast('保存失败：' + (er || '未知原因')); resolve(false); });
+    });
+  }
   // 高亮编辑浮层:用共享层 RC.highlight.openEditor;EPUB 适配器提供改色/备注/删除回调 + 锚元素
   function openHlEditor(h, anchorEl) {
     RC.highlight.openEditor({
       colors: hlColors(), current: h.color, note: h.note || '',
       preview: h.text || '', sentence: h.sentence || '',   // 只读预览:看到高亮的原文 / 所在句(H8)
       anchorEl: anchorEl, anchorSelector: 'mark.ep-hl',
-      onColor: function (c) { patchHl(h, { color: c }); },
-      onNote: function (t) { patchHl(h, { note: t }); },
-      onDelete: function () { delHl(h); }
+      onColor: function (c) { return patchHl(h, { color: c }); },
+      onNote: function (t) { return patchHl(h, { note: t }); },
+      onDelete: function () { return delHl(h); }
     });
   }
   function loadHls() { fetch('/pdf/api/epub-highlights?file=' + encodeURIComponent(FREL)).then(function (r) { return r.json(); }).then(function (d) { (d.highlights || []).forEach(function (h) { if (!h.anchor) return; _hls[h.id] = h; if (typeof h.anchor.section === 'string') { var ub = _secElOf(h.anchor.section); if (ub && ub.isConnected) applyHl(ub, h); } else { var el = secEls[h.anchor.section]; if (el && loaded[h.anchor.section] === true) applyHl(el, h); } }); _decorateVisible(); }).catch(function () {}); }
@@ -2582,16 +2639,23 @@
   function loadHlPane() {
     var box = $('ep-side-hl'); if (!box) return;
     box.innerHTML = '<div class="ep-empty"><span class="ep-spin"></span> 加载…</div>';
-    fetch('/pdf/api/epub-highlights?file=' + encodeURIComponent(FREL)).then(function (r) { return r.json(); }).then(function (d) {
-      var hs = (d && d.highlights || []).filter(function (h) { return h.anchor; });
+    fetch('/pdf/api/epub-highlights?file=' + encodeURIComponent(FREL)).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }).then(function (d) {
+      if (!d || d.ok === false || !Array.isArray(d.highlights)) throw new Error((d && d.error) || '响应无效');
+      var hs = d.highlights.filter(function (h) { return h.anchor; });
       hs.forEach(function (h) { _hls[h.id] = h; });
       RC.highlight.renderList(box, hs, {
         reverse: true,
         emptyHtml: '还没有高亮。<br>选中文字 → 底部「🖍 高亮」',
         onJump: function (h) { jumpTo(h.anchor.section, false); _drawerAfterJump(); },   // ⑥ 宽屏保持抽屉开,可连续点下一条
-        onDelete: function (h) { delHl(h); }
+        onDelete: function (h) { return delHl(h); }
       });
-    }).catch(function () { box.innerHTML = '<div class="ep-empty">加载失败</div>'; });
+    }).catch(function (er) {
+      box.innerHTML = '<div class="ep-empty">加载失败：' + esc((er && er.message) || '未知原因') + '<br><button type="button" class="ep-hl-retry">重试</button></div>';
+      var retry = box.querySelector('.ep-hl-retry'); if (retry) retry.onclick = loadHlPane;
+    });
   }
 
   // ── 搜索(照搬 PDF:居中浮层 + 防抖 oninput + 计数 + Esc 关)──
@@ -5110,6 +5174,7 @@
             return { ok: true, highlight: record };
           });
         }
+        if (name === 'remove_highlight') return _bookRemoveHighlightProjection(payload.id);
         if (name === 'open_search') {
           sp.classList.add('open');
           var input = $('ep-search-in'); if (input) input.focus();
@@ -5218,7 +5283,7 @@
         throw new Error('不允许的 EPUB 本地命令：' + name);
       }
       var _bookActionNames = [
-        'clear_selection', 'highlight', 'open_search', 'toggle_ruby', 'toggle_page_translate',
+        'clear_selection', 'highlight', 'remove_highlight', 'open_search', 'toggle_ruby', 'toggle_page_translate',
         'create_sticky', 'toggle_ink', 'anchor_fx', 'jump_page', 'jump_location',
         'change_page', 'jump_context', 'flash_selection', 'pin_card', 'pin_html',
         'toggle_fullscreen', 'open_settings', 'open_favorite', 'create_user_page'

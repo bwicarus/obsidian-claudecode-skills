@@ -139,12 +139,22 @@ if (window.__bwPwaProviderOnly) return;
           p.gid = _localCardGid(String(t.tid || 'turn') + ':' + String(_cardSeq));
         }
         if (p.draft && RC.flashcard.presentDraft) {
+          // 上游若已经把这张草稿登记进本地仓，就必须原样沿用它的身份。
+          //
+          // 这里曾一律自造 assistant-turn:<tid>:<seq> 作为 source 并把
+          // entityRegistered 写死为 false —— 于是浮层里那张卡和这里这张
+          // 在仓库中成了两个实体，同一份草稿被登记两次，编辑与确认各走各的。
+          // 双宿主的前提是"同一个实体的两个视图"，不是"两份拷贝"。
+          var _upstreamSource = p.repositorySource || null;
           var _turnCardSourceId = 'assistant-turn:' +
             String(t.tid || 'turn') + ':' + String(_cardSeq);
           RC.flashcard.presentDraft(_fcards, p.gid, {
             host: d,
-            entityRegistered: false,
-            repositorySource: {
+            // entityRegistered 是旧 Pi registry 的兼容标志，不代表本地已登记；
+            // 原样沿用上游给的值，缺省为 false。
+            entityRegistered: _upstreamSource ? !!p.entityRegistered : false,
+            localDraft: _upstreamSource ? (p.localDraft || null) : null,
+            repositorySource: _upstreamSource || {
               kind: 'assistant-turn',
               sourceId: _turnCardSourceId,
               draftId: _turnCardSourceId,

@@ -19,6 +19,8 @@
     clear_selection: 'selection',
     ocr: 'selectionOcr',
     highlight: 'highlight',
+    // projection-only:持久化由调用方先完成；宿主只清自己的内存与可见叠层。
+    remove_highlight: 'highlight',
     open_search: 'bookSearch',
     toggle_ruby: 'ruby',
     toggle_page_translate: 'pageTranslate',

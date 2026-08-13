@@ -88,6 +88,18 @@
     return { transactionTimeoutMs: timeoutMs };
   }
 
+  // 读取事务的上界。
+  //
+  // 写入有界还不够：一次挂住的 readonly 事务同样会占着 object store，后面的读写
+  // 都排在它后面，于是"有界的 batch"根本走不到。上界只在调用方显式给出时才生效，
+  // 不给就保持原语义（无界），以免改变无关集合的默认行为。
+  function readTransactionOptions(queryOptions) {
+    if (!queryOptions || queryOptions.transactionTimeoutMs == null) return undefined;
+    return normalizeBatchOptions({
+      transactionTimeoutMs: queryOptions.transactionTimeoutMs
+    });
+  }
+
   function physicalKey(collection, id) {
     return collection + '\u0000' + id;
   }
@@ -514,7 +526,7 @@
             if (record && record.deleted && !queryOptions.includeDeleted) return null;
             return record;
           });
-      });
+      }, readTransactionOptions(queryOptions));
     }
 
     /*
@@ -524,7 +536,7 @@
      * snapshot that never existed.  This intentionally exposes only bounded
      * exact-key reads, not the underlying IDB transaction.
      */
-    function getMany(requests) {
+    function getMany(requests, queryOptions) {
       if (!Array.isArray(requests) || requests.length > 64) {
         return Promise.reject(new DataStoreError(
           'IndexedDB 批量读取请求无效',
@@ -562,7 +574,7 @@
             return record;
           });
         }));
-      });
+      }, readTransactionOptions(queryOptions));
     }
 
     function list(collection, query) {

@@ -216,6 +216,7 @@
               return { ok: true, highlight: record };
             });
           }
+          if (name === 'remove_highlight') return _bookRemoveHighlightProjection(payload.id);
           if (name === 'jump_location') {
             var target = payload.location || payload || {};
             var anchor = target.anchor || target.data || target;
@@ -245,7 +246,7 @@
           throw new Error('不允许的 HTML 书籍本地命令：' + name);
         }
         var _bookActions = {};
-        ['clear_selection', 'highlight', 'jump_location', 'jump_context', 'flash_selection', 'open_settings']
+        ['clear_selection', 'highlight', 'remove_highlight', 'jump_location', 'jump_context', 'flash_selection', 'open_settings']
           .forEach(function (name) {
             _bookActions[name] = function (payload) { return _bookAction(name, payload); };
           });
@@ -502,21 +503,33 @@
         }).catch(function () { toast('高亮失败'); return null; });
     }
     function patchHl(h, f) {
-      RC.reqJson('PATCH', EP.highlights, Object.assign({ file: FREL, id: h.id }, f)).then(function (d) {
-        if (!d || !d.ok || !d.highlight) return;
+      return RC.reqJson('PATCH', EP.highlights, Object.assign({ file: FREL, id: h.id }, f)).then(function (d) {
+        if (!d || !d.ok || !d.highlight) { toast('高亮保存失败：' + ((d && d.error) || '服务未确认')); return false; }
         if ('color' in f) { h.color = d.highlight.color; Array.prototype.forEach.call(_marksOf(h.id), function (m) { m.style.background = h.color; }); }
         if ('note' in f) h.note = d.highlight.note;
-      }).catch(function () {});
+        return true;
+      }).catch(function (e) { toast('高亮保存失败：' + ((e && e.message) || '网络错误')); return false; });
     }
     function delHl(h) {
-      RC.reqJson('DELETE', EP.highlights + '?file=' + encodeURIComponent(FREL) + '&id=' + encodeURIComponent(h.id), null)
-        .then(function () { _unwrapMarks(h.id); _hls = _hls.filter(function (x) { return x.id !== h.id; }); toast('已删除'); }).catch(function () {});
+      return RC.reqJson('DELETE', EP.highlights + '?file=' + encodeURIComponent(FREL) + '&id=' + encodeURIComponent(h.id), null)
+        .then(function (d) {
+          if (!(d && d.ok)) { toast('删除失败：' + ((d && d.error) || '服务未确认')); return false; }
+          _unwrapMarks(h.id); _hls = _hls.filter(function (x) { return x.id !== h.id; }); toast('已删除'); return true;
+        }).catch(function (e) { toast('删除失败：' + ((e && e.message) || '网络错误')); return false; });
+    }
+    function _bookRemoveHighlightProjection(id) {
+      id = String(id || '');
+      if (!id) return { ok: false, error: '缺少高亮 id' };
+      var before = _hls.length;
+      _unwrapMarks(id);
+      _hls = _hls.filter(function (item) { return item && String(item.id) !== id; });
+      return { ok: true, id: id, removed: before !== _hls.length };
     }
     function openHlEditor(h) {
       if (!(window.RC && RC.highlight)) { toast('编辑层未就绪'); return; }
       RC.highlight.openEditor({
         colors: hlColors(), current: h.color, note: h.note || '', preview: h.text || '', sentence: h.sentence || '',
-        onColor: function (c) { patchHl(h, { color: c }); }, onNote: function (t) { patchHl(h, { note: t }); }, onDelete: function () { delHl(h); }
+        onColor: function (c) { return patchHl(h, { color: c }); }, onNote: function (t) { return patchHl(h, { note: t }); }, onDelete: function () { return delHl(h); }
       });
     }
     // 点高亮 → 编辑浮层
@@ -531,7 +544,7 @@
       RC.highlight.renderList(box, _hls.slice(), {
         reverse: true, emptyHtml: '还没有高亮。<br>选中文字 → 底部「🖍 高亮」',
         onJump: function (h) { var m = _marksOf(h.id)[0]; if (m && m.scrollIntoView) m.scrollIntoView({ block: 'center' }); if (window.RC && RC.sidedrawer) RC.sidedrawer.close(); },
-        onDelete: function (h) { delHl(h); }
+        onDelete: function (h) { return delHl(h); }
       });
     }
     function loadHighlights() {

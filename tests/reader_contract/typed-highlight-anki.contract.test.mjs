@@ -107,9 +107,13 @@ test("Realtime output waits for exact highlight and rendered Anki draft", () => 
   assert.match(receiver, /Promise\.resolve\(\{ ok: true, generic: true \}\)/);
   assert.match(receiver, /_readerDraftGid\(p\.draftId\)/);
   assert.match(VOICE, /crypto\.subtle\.digest\(\s*'SHA-256'/);
-  assert.match(receiver, /repositorySource:\s*_readerDraftSource\(/);
+  // source 现在只构造一次，浮层与对话流两个宿主共用同一份 —— 分别构造就可能
+  // 悄悄产生差异，而差异在仓库里表现为两个实体。
+  assert.match(receiver, /var draftSource = _readerDraftSource\(/);
+  assert.match(receiver, /repositorySource: draftSource/);
   assert.match(receiver, /entityRegistered:\s*false/);
-  assert.match(receiver, /localDraft:\s*\{/);
+  assert.match(receiver, /var draftLocal = \{/);
+  assert.match(receiver, /localDraft: draftLocal/);
   assert.match(receiver, /sourceInstanceId:\s*delivery\.sourceInstanceId/);
   assert.match(receiver, /RC\.flashcard\.presentDraft\(\s*p\.cards,\s*gid,/);
   assert.match(receiver, /repository:\s*'local'/);

@@ -121,33 +121,73 @@
     //   host 决定业务(onColor(''):PATCH color='' + toast),关浮层这件事 native 自己总是做,故这里
     //   照搬做;hasNote 为假则直接复用 onDelete(与 🗑 按钮同一个回调/同一条 confirm 文案),沿用它已有
     //   的「返回 false(用户取消删除确认)→ 不关浮层」协议,不再各自为政。
+    var colorWriteRevision = 0;
     pop.querySelectorAll('.rc-hl-sw-i').forEach(function (i) {
       i.onclick = function (e) {
         e.stopPropagation();
         if (i.classList.contains('on')) {
           var hasNote = (opts.note || '').trim() || (opts.body || '').trim() || (opts.sentence || '').trim();
           if (!hasNote) {
-            Promise.resolve(opts.onDelete ? opts.onDelete() : undefined).then(function (ok) { if (ok !== false) closeEditor(); }).catch(function () {});
+            if (!opts.onDelete) { toast('此处不支持删除'); return; }
+            Promise.resolve().then(function () { return opts.onDelete(); })
+              .then(function (ok) { if (ok === true) closeEditor(); })
+              .catch(function () {});
           } else {
-            if (opts.onColor) opts.onColor('');
-            closeEditor();
+            if (!opts.onColor) { toast('此处不支持取消颜色'); return; }
+            Promise.resolve().then(function () { return opts.onColor(''); })
+              .then(function (ok) { if (ok === true) closeEditor(); })
+              .catch(function () {});
           }
           return;
         }
-        pop.querySelectorAll('.rc-hl-sw-i').forEach(function (x) { x.classList.remove('on'); });
+        if (!opts.onColor) { toast('此处不支持修改颜色'); return; }
+        var palette = Array.prototype.slice.call(pop.querySelectorAll('.rc-hl-sw-i'));
+        var previous = palette.find(function (x) { return x.classList.contains('on'); }) || null;
+        var revision = ++colorWriteRevision;
+        palette.forEach(function (x) { x.classList.remove('on'); });
         i.classList.add('on');
-        if (opts.onColor) opts.onColor(i.dataset.c);
+        Promise.resolve().then(function () { return opts.onColor(i.dataset.c); })
+          .then(function (ok) {
+            if (revision !== colorWriteRevision || ok === true) return;
+            palette.forEach(function (x) { x.classList.remove('on'); });
+            if (previous) previous.classList.add('on');
+            toast('颜色修改未确认，已恢复原颜色');
+          })
+          .catch(function () {
+            if (revision !== colorWriteRevision) return;
+            palette.forEach(function (x) { x.classList.remove('on'); });
+            if (previous) previous.classList.add('on');
+            toast('颜色修改失败，已恢复原颜色');
+          });
       };
     });
-    // 删除:onDelete(底座删后端 + 自带 toast)。删成功才关浮层——onDelete 返回 false(如 confirm 取消)则**不**关,
-    //   让用户回到编辑态(修复:取消删除确认后浮层仍被关掉)。EPUB onDelete 返回 undefined → 照旧关,无回归。
+    // 删除:onDelete(底座删后端 + 自带 toast)。**只有严格 true 才关浮层**——
+    //   未确认(false / undefined / null / 真值对象 / 抛错)一律留在编辑态,
+    //   让用户看见这条高亮还在。PDF 与 EPUB 现在都返回真布尔;早先"EPUB 返回
+    //   undefined 就照旧关"的兼容口子已经去掉,那正是假删的来源。
     pop.querySelector('.rc-hl-del').onclick = function () {
-      if (!opts.onDelete) { closeEditor(); return; }
-      Promise.resolve(opts.onDelete()).then(function (ok) { if (ok !== false) closeEditor(); }).catch(function () {});
+      // 没有删除能力时不能装作删掉了：保持浮层，明确告诉用户这里删不了。
+      if (!opts.onDelete) { toast('此处不支持删除'); return; }
+      // 确认删除才关闭浮层，未确认时留在编辑态让用户看见它还在。
+      // 用 Promise.resolve().then(...) 而不是 Promise.resolve(onDelete())：
+      // 后者会在构造 Promise 之前同步调用，onDelete 若同步抛出就逃出了这条链。
+      Promise.resolve().then(function () { return opts.onDelete(); })
+        .then(function (ok) { if (ok === true) closeEditor(); })
+        .catch(function () {});
     };
     // 保存:onNote(底座 PATCH note) + 关浮层 + toast。opts.silent 时不 toast(PDF host 的 _hlUpdate 会弹「已保存」,避免双重);
     //   EPUB 不传 silent → 保留本层 toast(EPUB patchHl 有意不弹 note 的「已保存」,靠这里)。
-    pop.querySelector('.rc-hl-save').onclick = function () { if (opts.onNote) opts.onNote(pop.querySelector('.rc-hl-note').value); closeEditor(); if (!opts.silent) toast('已保存'); };
+    pop.querySelector('.rc-hl-save').onclick = function () {
+      if (!opts.onNote) { toast('此处不支持保存备注'); return; }
+      var value = pop.querySelector('.rc-hl-note').value;
+      Promise.resolve().then(function () { return opts.onNote(value); })
+        .then(function (ok) {
+          if (ok !== true) return;
+          closeEditor();
+          if (!opts.silent) toast('已保存');
+        })
+        .catch(function () {});
+    };
     positionPop(pop, anchorEl, opts.placeBelow);
     // 点外关(pointerdown capture):浮层内 / 锚元素(anchorSelector)上的点击都忽略,
     //   让锚的点击事件去触发再点关 / 切到另一条,避免按下时就先把自己关掉。
@@ -186,7 +226,27 @@
         '<button class="rc-hl-swipe-del" type="button" title="删除高亮">🗑</button>';
       var slide = row.querySelector('.rc-hl-slide');
       row.querySelector('.rc-hl-go').onclick = function (e) { e.stopPropagation(); if (opts.onJump) opts.onJump(h); };
-      row.querySelector('.rc-hl-swipe-del').onclick = function (e) { e.stopPropagation(); if (opts.onDelete) opts.onDelete(h); row.remove(); };
+      // 等删除有了明确结果再移除这一行。
+      //
+      // 先前是调用完就 row.remove():后端拒绝或根本没答,界面照样把它抹掉,刷新后
+      // 高亮又回来了 —— 这正是"删不掉"的观感。明确失败(false)与未知(异常)都保留
+      // 该行,不假删、不自动重试;返回 undefined 的旧底座(EPUB)沿用原行为不回归。
+      row.querySelector('.rc-hl-swipe-del').onclick = function (e) {
+        e.stopPropagation();
+        // 没有删除能力时保留该行,不做假删。
+        if (!opts.onDelete) { toast('此处不支持删除'); return; }
+        // 只有明确确认删除才移除该行。
+        //
+        // 曾经写作 `ok !== false`，为的是兼容返回 undefined 的旧底座 —— 但那等于让
+        // "没告诉我"继续代表成功，正是这条链反复假删的根源。PDF 与 EPUB 现在都给出
+        // 真布尔，这个兼容口子没有存在理由了。未确认时宁可留着让用户再点一次，
+        // 也不要抹掉一条实际还在的高亮。
+        Promise.resolve().then(function () { return opts.onDelete(h); })
+          .then(function (ok) {
+            if (ok !== true) return;
+            row.remove();
+          }).catch(function () {});
+      };
       // 色点 = 显/隐删除条把手(桌面单击切换;移动端配合触屏左滑)
       var dot = row.querySelector('.rc-hl-dot');
       if (dot) dot.onclick = function (e) { e.stopPropagation(); row.classList.toggle('swiped'); slide.style.transform = ''; };

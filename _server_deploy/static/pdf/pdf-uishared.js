@@ -597,28 +597,43 @@ window._favOpenPicker = function () {
     done();
   }
   function _ovPatchHl(rec, h, f) {
-    RC.reqJson('PATCH', '/pdf/api/html-highlights', Object.assign({ file: _ovHlKey(rec), id: h.id }, f)).then(function (d) {
-      if (!(d && d.ok && d.highlight)) return;
+    return RC.reqJson('PATCH', '/pdf/api/html-highlights', Object.assign({ file: _ovHlKey(rec), id: h.id }, f)).then(function (d) {
+      if (!(d && d.ok && d.highlight)) {
+        if (window.RC && RC.toast) RC.toast('高亮保存失败：' + ((d && d.error) || '服务未确认'));
+        return false;
+      }
       var body = _ovBodyOfRec(rec);
       if ('color' in f) { h.color = d.highlight.color; if (body) Array.prototype.forEach.call(_ovMarksOf(body, h.id), function (m) { m.style.background = h.color; }); }
       if ('note' in f) h.note = d.highlight.note;
-    }).catch(function () {});
+      return true;
+    }).catch(function (e) {
+      if (window.RC && RC.toast) RC.toast('高亮保存失败：' + ((e && e.message) || '网络错误'));
+      return false;
+    });
   }
   function _ovDelHl(rec, h) {
-    RC.reqJson('DELETE', '/pdf/api/html-highlights?file=' + encodeURIComponent(_ovHlKey(rec)) + '&id=' + encodeURIComponent(h.id), null)
-      .then(function () {
+    return RC.reqJson('DELETE', '/pdf/api/html-highlights?file=' + encodeURIComponent(_ovHlKey(rec)) + '&id=' + encodeURIComponent(h.id), null)
+      .then(function (d) {
+        if (!(d && d.ok)) {
+          if (window.RC && RC.toast) RC.toast('删除失败：' + ((d && d.error) || '服务未确认'));
+          return false;
+        }
         var body = _ovBodyOfRec(rec); if (body) _ovUnwrapMarks(body, h.id);
         _ovHlCache[rec.id] = (_ovHlCache[rec.id] || []).filter(function (x) { return x.id !== h.id; });
         if (window.RC && RC.toast) RC.toast('已删除');
-      }).catch(function () {});
+        return true;
+      }).catch(function (e) {
+        if (window.RC && RC.toast) RC.toast('删除失败：' + ((e && e.message) || '网络错误'));
+        return false;
+      });
   }
   function _ovOpenHlEditor(rec, h) {   // 点高亮 → RC.highlight.openEditor(改色/备注/删,host 无关)
     if (!(window.RC && RC.highlight)) { if (window.RC && RC.toast) RC.toast('编辑层未就绪'); return; }
     RC.highlight.openEditor({
       colors: _ovHlColors(), current: h.color, note: h.note || '', preview: h.text || '', sentence: h.sentence || '',
-      onColor: function (c) { _ovPatchHl(rec, h, { color: c }); },
-      onNote: function (t) { _ovPatchHl(rec, h, { note: t }); },
-      onDelete: function () { _ovDelHl(rec, h); }
+      onColor: function (c) { return _ovPatchHl(rec, h, { color: c }); },
+      onNote: function (t) { return _ovPatchHl(rec, h, { note: t }); },
+      onDelete: function () { return _ovDelHl(rec, h); }
     });
   }
   // 乐观新建绑真 id 时:临时期(tempId 键)的 offset 高亮迁到 realId 键(每 overlay 页独立 sidecar),重挂 mark。

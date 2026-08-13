@@ -4017,6 +4017,127 @@ test("embedded PDF text uses real word segmentation even without spaces", () => 
   assert.equal(page.chars.every((item) => Number.isInteger(item.w)), true);
 });
 
+// Pi 元数据挂住时，本地高亮读写仍须落定。
+//
+// epub-action 与 epub-highlights 的 CRUD 共用同一条 document:epub-highlights 队列。
+// 先前 Pi 的 metadataTask 被关在队列里：一次网络往返期间，用户的每一次高亮增删改都
+// 排在它后面；网络若永不回应，整条队列就此不动 —— 而用户看到的只是"高亮删不掉"。
+//
+// 现在队列里只剩有界的本地读与写，本地提交即释放，Pi 移到队列之外有限等待。
+// 这条测试让 Pi 永不回应，验证队列确实没有被它占住。
+function pendingPiHarnessOptions(extra = {}) {
+  return {
+    surface: "epub",
+    interfaceManifest: nativeEPUBAssistantManifest(),
+    // pi-proxy 永不落定；其余底层请求给一个最简响应。
+    originalFetch: (input) => {
+      const raw = String((input && input.url) || input || "");
+      const path = raw.startsWith("http") ? new URL(raw).pathname : raw;
+      if (/\/pi-proxy\/[0-9a-f]{32}$/.test(path)) return new Promise(() => {});
+      return Promise.resolve(new Response("{}", {
+        status: 200, headers: { "Content-Type": "application/json" },
+      }));
+    },
+    // metadata 定时器缩到 300ms —— 必须明显长于下面 CRUD 的 120ms watchdog。
+    // 缩得太短（先前是 50ms）会让对照失效：即使 Pi 等待留在队列内，队列也只被占
+    // 50ms 就释放，CRUD 照样在 500ms 内落定，于是旧形态也"通过"。
+    // 队列边界要能被测出来，占用时长就得盖过观察窗口。
+    setTimeout: (fn, ms, ...rest) => setTimeout(fn, ms === 8000 ? 300 : ms, ...rest),
+    ...extra,
+  };
+}
+
+function testWatchdog(promise, label, ms = 120) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(
+      () => reject(new Error(`${label} 未在 ${ms}ms 内落定`)), ms,
+    )),
+  ]);
+}
+
+test("Pi 元数据永不回应时，本地高亮写入与删除仍能落定", async () => {
+  const result = await harness(pendingPiHarnessOptions());
+  // 必须让 descriptor.kind 落在 epub-highlights 上：那才是与普通高亮 CRUD
+  // 共用的同一条队列。用 notes_create 的话 kind 是 document-notes-legacy，
+  // 两条队列根本不相干，退回旧实现也照样通过 —— 那样这条测试就是空的。
+  const action = {
+    id: "act_pending_pi", kind: "hl_create", title: "h", detail: "",
+    undo: {
+      op: "hl_delete", file: DEFAULT_LOCAL_FILE, ids: ["e00000000000"],
+    },
+    redo: {
+      op: "hl_create", file: DEFAULT_LOCAL_FILE,
+      items: [{
+        anchor: { section: 5, start: 2, end: 8 },
+        text: "queued highlight", color: "#ffd54a",
+      }],
+    },
+    state: "done", ts: 1_800_000_000,
+  };
+
+  // 发起 action：它的 Pi 那一跳永远不会回来。故意不等它。
+  const actionPending = result.context.fetch("/pdf/api/epub-action", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      op: "native_apply", contract: "reader-native-epub-action/1",
+      file: DEFAULT_LOCAL_FILE, action,
+    }),
+  });
+
+  // 先等到 Pi 请求真的发出：那才证明 metadataTask 已经开始、旧实现下队列正被占住。
+  // 不等就发 CRUD 是一场竞态 —— action 可能还没进队列，于是旧实现也会通过，
+  // 对照实验就此失去意义（这一点确实发生过）。
+  await testWatchdog((async () => {
+    for (;;) {
+      const hit = result.originalFetchCalls.some((call) => {
+        const raw = String((call.input && call.input.url) || call.input || "");
+        return /\/pi-proxy\//.test(raw);
+      });
+      if (hit) return true;
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  })(), "等待 metadataTask 发出 Pi 请求", 500);
+
+  // 同一条队列上的普通写入必须照常落定。
+  const created = await testWatchdog(result.context.fetch("/pdf/api/epub-highlights", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      file: DEFAULT_LOCAL_FILE, id: "c_2222222222222222",
+      anchor: { section: 3, start: 10, end: 18 }, text: "still writable",
+      color: "#ffd54a",
+    }),
+  }), "POST 高亮");
+  assert.equal(created.status, 200, "Pi 挂住不得阻塞本地高亮写入");
+
+  // 删除同样要能进来，并且随后仍可继续操作。
+  const deleted = await testWatchdog(result.context.fetch(
+    "/pdf/api/epub-highlights?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE) +
+    "&id=c_2222222222222222",
+    { method: "DELETE" },
+  ), "DELETE 高亮");
+  assert.equal(deleted.status, 200, "Pi 挂住不得阻塞本地高亮删除");
+
+  const listed = await testWatchdog(result.context.fetch(
+    "/pdf/api/epub-highlights?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  ), "列出高亮");
+  const payload = await listed.json();
+  assert.equal(
+    (payload.highlights || []).some((item) => item.id === "c_2222222222222222"),
+    false,
+    "删除已落库：队列在本地提交后就释放了，没有等 Pi",
+  );
+
+  // action 自己则以 metadata_pending 收尾：本地已写，镜像未确认，不假称成功。
+  const actionPayload = await testWatchdog(
+    actionPending.then((response) => response.json()), "action 收尾", 700,
+  );
+  assert.equal(actionPayload.ok, true, "本地写入已完成，不因 Pi 未回应而失败");
+  assert.equal(actionPayload.metadata_pending, true);
+  assert.equal(actionPayload.metadata_synced, false);
+  assert.match(String(actionPayload.warning || ""), /未回应|本地写入已完成/);
+});
+
 function nativeEPUBAssistantManifest() {
   const manifest = clone(NATIVE_INTERFACE_MANIFEST);
   for (const route of manifest.routes) {

@@ -394,6 +394,71 @@ button{-webkit-appearance:none;appearance:none}
       RC.knowledge.renderInto(box, d.nodes || []);
     } catch (e) { box.innerHTML = '<div class="bw-empty" style="color:#ef4444">加载失败</div>'; }
   }
+  function removePwaHighlightDom(mode, id) {
+    const highlightId = String(id || '');
+    if (!highlightId) return false;
+    const selector = mode === 'pdf'
+      ? '.hl-saved[data-id]'
+      : (mode === 'html' ? 'mark.rc-html-hl[data-hid]' : 'mark.ep-hl[data-id]');
+    let removed = false;
+    document.querySelectorAll(selector).forEach(node => {
+      const nodeId = mode === 'html' ? node.dataset.hid : node.dataset.id;
+      if (String(nodeId || '') !== highlightId) return;
+      removed = true;
+      if (mode === 'pdf') {
+        node.remove();
+        return;
+      }
+      // EPUB/HTML 的高亮是包住正文的 mark；只删节点会连正文一起删掉，
+      // 必须与各自宿主的 unapply/unwarp 语义一致，把子节点移回原父节点。
+      const parent = node.parentNode;
+      if (!parent) return;
+      while (node.firstChild) parent.insertBefore(node.firstChild, node);
+      parent.removeChild(node);
+      parent.normalize?.();
+    });
+    return removed;
+  }
+  async function syncPwaHighlightRemoval(mode, highlight) {
+    const id = String(highlight?.id || '');
+    if (!id) return false;
+    // DELETE 已由扩展完成；这个动作只让页面世界清自己的内存与叠层，绝不再次写后端。
+    try {
+      const result = await pwaBridge.local('remove_highlight', {id});
+      return !!(result && result.ok === true);
+    } catch (error) {
+      // 仅兼容尚未带 remove_highlight 白名单的旧 PWA bundle；其他宿主错误不能
+      // 冒充成功。旧宿主只能清当前可见 DOM，下一次完整加载仍以已删除的存档为准。
+      if (!/不允许.*(?:本地)?命令|不允许本地命令/.test(String(error?.message || ''))) return false;
+      return removePwaHighlightDom(mode, id);
+    }
+  }
+  async function deletePwaHighlight(endpoint, file, mode, highlight) {
+    try {
+      const response = await bwFetch(
+        endpoint + '?file=' + encodeURIComponent(file || '') +
+          '&id=' + encodeURIComponent(highlight?.id || ''),
+        {method:'DELETE'}
+      );
+      let payload = null;
+      try { payload = await response.json(); }
+      catch (_) { RC.toast('删除未确认：响应无法解析'); return false; }
+      if (!response.ok || !payload || payload.ok !== true) {
+        RC.toast('删除失败：' + (payload?.error || (response.ok ? '服务未确认' : ('HTTP ' + response.status))));
+        return false;
+      }
+      const projected = await syncPwaHighlightRemoval(mode, highlight);
+      if (projected !== true) {
+        RC.toast('删除已写入，但页面叠层未确认刷新');
+        return false;
+      }
+      RC.toast('已删除');
+      return true;
+    } catch (error) {
+      RC.toast('删除未确认：' + (error?.message || '无响应'));
+      return false;
+    }
+  }
   async function loadHighlights() {
     const box = shadowEl.getElementById('bw-hl-list'); if (!box) return;
     box.innerHTML = '<div class="bw-empty">加载中…</div>';
@@ -418,7 +483,7 @@ button{-webkit-appearance:none;appearance:none}
             : { section: h.section ?? h.page ?? 0 };
           return pwaBridge.local('jump_location', {location}).catch(e => RC.toast(e.message));
         },
-        onDelete:async h => { await bwFetch(endpoint + '?file=' + encodeURIComponent(f.file || '') + '&id=' + encodeURIComponent(h.id), {method:'DELETE'}); }
+        onDelete:h => deletePwaHighlight(endpoint, f.file || '', mode, h)
       });
     } catch (e) { box.innerHTML = '<div class="bw-empty" style="color:#ef4444">加载失败</div>'; }
   }

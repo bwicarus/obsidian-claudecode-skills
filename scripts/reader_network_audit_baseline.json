@@ -4,7 +4,7 @@
   "note": "Existing debt only. Retired allowances must be removed in the same change; new fingerprints or higher counts fail --check.",
   "summary": {
     "cache-first-unannotated": 3,
-    "dynamic-unannotated": 130,
+    "dynamic-unannotated": 128,
     "local-immediate-unannotated": 6,
     "unclassified-literal": 80
   },
@@ -112,9 +112,7 @@
     "dynamic-unannotated|_server_deploy/static/pdf/reader.src/22-prewarm.js|fetch|fetch('/pdf/api/prewarm-status?file=' + encodeURIComponent(FILE_REL) + '&width=' + w)|dynamic endpoint/method needs @interaction <id>": 2,
     "dynamic-unannotated|_server_deploy/static/pdf/reader.src/24-connquality.js|fetch|fetch('/pdf/api/ping?_=' + Date.now(), { cache: 'no-store' })|dynamic endpoint/method needs @interaction <id>": 1,
     "dynamic-unannotated|_server_deploy/static/pdf/reader.src/26-figures.js|fetch|fetch('/pdf/api/page-figures?file=' + encodeURIComponent(FILE_REL) + '&page=' + num)|dynamic endpoint/method needs @interaction <id>": 1,
-    "dynamic-unannotated|_server_deploy/static/pdf/reader.src/28-shared-drawer.js|fetch|fetch('/pdf/api/highlights?file=' + encodeURIComponent(FILE_REL) + '&id=' + encodeURIComponent(h.id), { method: 'DELETE' })|dynamic endpoint/method needs @interaction <id>": 1,
     "dynamic-unannotated|_server_deploy/static/pdf/reader.src/28-shared-drawer.js|fetch|fetch('/pdf/api/highlights?file=' + encodeURIComponent(FILE_REL))|dynamic endpoint/method needs @interaction <id>": 1,
-    "dynamic-unannotated|_server_deploy/static/pdf/reader.src/28-shared-drawer.js|fetch|fetch('/pdf/api/toc?file=' + encodeURIComponent(FILE_REL) + '&entries=1')|dynamic endpoint/method needs @interaction <id>": 1,
     "dynamic-unannotated|_server_deploy/static/pdf/reader.src/31-localbook.js|fetch|fetch(`/pdf/api/page-overlay?file=${encodeURIComponent(FILE_REL)}&page=${p}`)|dynamic endpoint/method needs @interaction <id>": 1,
     "dynamic-unannotated|_server_deploy/static/pdf/reader.src/31-localbook.js|fetch|fetch(u)|dynamic endpoint/method needs @interaction <id>": 1,
     "dynamic-unannotated|_server_deploy/static/pdf/reader.src/31-localbook.js|fetch|fetch(url)|dynamic endpoint/method needs @interaction <id>": 1,

@@ -950,6 +950,10 @@ if (window.__bwPwaProviderOnly) return;
   }
   function _toolCardRepositorySource(gid, payload, tool) {
     payload = payload || {};
+    // 普通 make_anki 没有上游 draftId，但浮层与流内宿主都会用
+    // requireDraftIdForReplay 再登记同一 gid。用 gid 派生本地重放身份，既稳定
+    // 非空，也不借用页面 placement 或外部 Anki/Pi 身份。
+    var localDraftId = 'reader-card-tool:' + String(gid || '');
     var explicit = String(payload.source_ref || payload.src || '').slice(0, 4096);
     var quote = '';
     try {
@@ -961,7 +965,8 @@ if (window.__bwPwaProviderOnly) return;
       ? payload.source_highlight : null;
     var source = {
       kind: 'reader-tool-card-draft',
-      sourceId: explicit || ('reader-card-tool:' + String(gid || '')),
+      sourceId: explicit || localDraftId,
+      draftId: localDraftId,
       tool: String(tool || 'make_anki').slice(0, 160),
       legacy: { piEntityRegistered: !!payload.id }
     };
@@ -1090,8 +1095,14 @@ if (window.__bwPwaProviderOnly) return;
           // 立即点“保存”会先于 registerDraft，造成一张看得到却无法确认的卡。
           if (_stid && RC.turnCard) {
             RC.turnCard.idle(_stid);
+            // 带上与浮层完全相同的身份：同 gid/cards/source 的再次 registerDraft
+            // 是幂等的，靠身份一致而不是靠跳过登记来避免第二个实体。
+            // entityRegistered 仍是 Pi 兼容标志，沿用上游的值，不在这里翻成 true。
             RC.turnCard.addPart(_stid, {
-              kind: 'cards', cards: _sc, draft: true, gid: _gid
+              kind: 'cards', cards: _sc, draft: true, gid: _gid,
+              entityRegistered: !!_sr.id,
+              repositorySource: _toolCardRepositorySource(_gid, _sr, p.tool),
+              localDraft: null
             });
           }
           _projectCardSourceHighlight(_sr, _gid);
@@ -1756,19 +1767,25 @@ if (window.__bwPwaProviderOnly) return;
           })
           .then(function (gid) {
             var draftId = String(p.draftId || '');
+            // 同一份身份构造一次、两个宿主共用：分别构造就可能悄悄产生差异，
+            // 而差异在仓库里表现为两个实体。
+            var draftSource = _readerDraftSource(delivery, p, draftId);
+            var draftLocal = {
+              draftId: draftId,
+              sourceInstanceId: delivery.sourceInstanceId
+            };
             return Promise.resolve(RC.flashcard.presentDraft(
               p.cards,
               gid,
               {
                 entityRegistered: false,
-                repositorySource: _readerDraftSource(delivery, p, draftId),
-                localDraft: {
-                  draftId: draftId,
-                  sourceInstanceId: delivery.sourceInstanceId
-                }
+                repositorySource: draftSource,
+                localDraft: draftLocal
               }
             )).then(function (rendered) {
               if (!rendered) throw new Error('BW_READER_ANKI_DRAFT_RENDER_FAILED');
+              // 本地仓已落稳，再把同一 gid 暴露到对话流。
+              _mirrorDraftIntoTurnFlow(p.cards, gid, draftSource, draftLocal);
               return {
                 status: 'draft_delivered',
                 anki_written: false,
@@ -1790,6 +1807,45 @@ if (window.__bwPwaProviderOnly) return;
       return Promise.resolve(_readerOutputReject(error));
     }
   }
+  // 把已登记的草稿镜像到当前对话流，与浮层构成同一实体的两个视图。
+  //
+  // 侧栏打开时浮层容器被让位，草稿就此完全不可见，也不进对话历史 —— 用户只知道
+  // "卡没了"。原设计是同 gid 双宿主：浮层与流内是同一张卡的两处显示。
+  // 所以这里传的 gid / cards / repositorySource / localDraft 必须与上游登记时
+  // 一模一样。
+  //
+  // entityRegistered 保持 false：它是旧 Pi entity registry 的兼容标志
+  // （rc-flashcard 的 legacy.piEntityRegistered 与 _stateSync 都据此判断），
+  // **不表示本地 card-repository 已 registerDraft**。相同 gid/cards/source 的
+  // 第二次 registerDraft 本身幂等，不会产生第二个实体；把它写成 true 反而会
+  // 让流内那张被当成"已在 Pi 注册过"，那是另一回事。
+  function _mirrorDraftIntoTurnFlow(cards, gid, repositorySource, localDraft) {
+    try {
+      if (!(RC.turnCard && typeof RC.turnCard.addPart === 'function')) return false;
+      // 始终用以 gid 命名的确定性轮次，既不读 current() 也不绑 __asstVoiceTid。
+      //
+      // 这条协议不带 threadId：__asstVoiceTid 可能是个陈旧的语音轮次，而
+      // RC.turnCard.current() 会被 loadHistory 的 renderTurn 改写 —— 两者都可能
+      // 把草稿挂到别人的轮次上。确定性 tid 没有这个歧义，重复投递也落在同一处。
+      //
+      // ⚠ 只承诺本轮侧栏可见，不承诺跨会话持久：rc-assistant 的 onChange 走
+      // upsert_only，没有既存 turn 记录时不会凭空建一条。草稿的持久化权威是
+      // 本地 card repository，不是这条对话流记录。
+      var tid = 'reader-draft:' + String(gid);
+      if (typeof RC.turnCard.idle === 'function') RC.turnCard.idle(tid);
+      RC.turnCard.addPart(tid, {
+        kind: 'cards',
+        cards: cards,
+        draft: true,
+        gid: gid,
+        entityRegistered: false,
+        repositorySource: repositorySource,
+        localDraft: localDraft || null
+      });
+      return true;
+    } catch (e) { return false; }
+  }
+
   RC.voicecall = RC.voicecall || {};
   RC.voicecall.acceptRealtimeOutput = _acceptReaderRealtimeOutput;
   // ── 70 结构化结果卡(用户设计):web_search 的 Gemini 综合直接给 kind/data/brief——

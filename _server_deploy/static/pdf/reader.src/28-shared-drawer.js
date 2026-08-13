@@ -46,19 +46,37 @@
   const _loadHlPane = () => {
     const box = document.getElementById('pdf-hl-list'); if (!box) return;
     box.innerHTML = '<div style="color:#5a6680;font-size:12px">加载…</div>';
-    fetch('/pdf/api/highlights?file=' + encodeURIComponent(FILE_REL)).then(r => r.json()).then(d => {
-      const hs = (d && d.highlights) || [];
+    fetch('/pdf/api/highlights?file=' + encodeURIComponent(FILE_REL)).then(r => {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }).then(d => {
+      if (!d || d.ok === false || !Array.isArray(d.highlights)) throw new Error((d && d.error) || '响应无效');
+      const hs = d.highlights;
       RC.highlight.renderList(box, hs, {
         reverse: true,
         emptyHtml: '还没有高亮。<br>选中文字 → 「🖍 高亮」',
         onJump: (h) => { try { jumpWithBack(h.page); RC.sidedrawer.afterJump(); } catch (_) {} },
+        // 专门的高亮管理页直接复用统一删除,不再自己发一套 fetch。
+        //
+        // 只把列表行删掉是不够的:_allHighlights / _hlByPage 与当前页的叠层都要跟着变。
+        // 而 shared 模式下 25-assistant.js 顶部提前 return,window._reloadHighlights
+        // 根本没有注册,所以"删完刷新一下"这条退路在这里是不存在的。
+        // _hlDelete 一次做完四件事:请求后端、更新内存、重绘该页、给出提示,
+        // 并返回 true/false 供列表决定要不要移除该行。
         onDelete: (h) => {
-          fetch('/pdf/api/highlights?file=' + encodeURIComponent(FILE_REL) + '&id=' + encodeURIComponent(h.id), { method: 'DELETE' })
-            .then(() => { try { window._reloadHighlights && window._reloadHighlights(); } catch (_) {} })
-            .catch(() => {});
+          const pw = document.querySelector(
+            '.page-wrap[data-page-num="' + (h && h.page) + '"]'
+          );
+          return _hlDelete(h, pw);
         },
+
       });
-    }).catch(() => { box.innerHTML = '<div style="color:#5a6680;font-size:12px">加载失败</div>'; });
+    }).catch(error => {
+      box.innerHTML = '<div style="color:#d88;font-size:12px">加载失败：' +
+        String((error && error.message) || '未知原因').replace(/[&<>"']/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[s])) +
+        '<br><button type="button" id="pdf-hl-retry">重试</button></div>';
+      document.getElementById('pdf-hl-retry')?.addEventListener('click', _loadHlPane);
+    });
   };
 
   // 目录 pane:GET /api/toc?entries=1(book_toc._effective_toc,page=印刷页)→ 简单列表(照 EPUB buildToc)

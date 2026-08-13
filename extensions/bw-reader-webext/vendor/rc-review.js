@@ -1517,15 +1517,9 @@ if (window.__bwPwaProviderOnly) return;
       if (rendered.el) {
         rendered.el.addEventListener('click', _workspaceClick);
       }
-      var meta = document.createElement('div');
-      meta.className = 'rv-meta';
-      var deck = document.createElement('span');
-      deck.textContent = String(card.deck || '未命名牌组');
-      var position = document.createElement('span');
-      position.textContent = (index + 1) + ' / ' + _queue.length;
-      meta.appendChild(deck);
-      meta.appendChild(position);
-      rendered.bd.insertBefore(meta, rendered.bd.firstChild);
+      // 卡面不再顶一行牌组与进度。b33fafc0 已按用户拍板去掉过普通卡的顶部提示行,
+      // 理由是底部圆点已经把进度说清楚,顶栏只是把卡面越挤越小。deck 仍在卡片数据里
+      // (投影与导出都要用),这里只是不展示。
       return rendered;
     }
 
@@ -2760,7 +2754,6 @@ if (window.__bwPwaProviderOnly) return;
       '.rv-review-card .fc-wrap>.fc-track{flex:1 1 auto;min-height:0}' +
       '.rv-review-card .fc-wrap>.fc-slide,.rv-review-card .fc-wrap>.fc-track>.fc-slide{height:100%;min-height:0;overflow:hidden}' +
       '.rv-review-card .fc-bare .fc-card{box-sizing:border-box;height:100%;max-height:none;overflow:hidden;background:transparent;border:0;padding:5px 0;box-shadow:none}' +
-      '.rv-meta{display:flex;flex:0 0 auto;justify-content:space-between;gap:10px;margin:0 0 8px;padding-bottom:7px;border-bottom:1px solid rgba(255,255,255,.08);font-size:12px;color:var(--rc-text-muted,#8a9bb4)}' +
       '.rv-reason{display:none!important}' +
       '.rv-card-provenance[hidden]{display:none!important}' +
       '.rv-card-extra{margin:10px 0 0;border:1px solid rgba(255,255,255,.10);border-radius:8px;padding:0 9px;background:rgba(14,21,37,.32);color:var(--rc-text-muted,#8a9bb4);font-size:12px}' +

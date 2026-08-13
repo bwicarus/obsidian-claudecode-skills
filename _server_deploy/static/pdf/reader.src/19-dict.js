@@ -237,9 +237,10 @@ function openHlPopover(h, anchorDiv, pw) {
       onColor: (c) => {
         if (!c) {                                       // 取消颜色:照搬下方 268-277 语义
           const hasNote = (h.note || '').trim() || (h.body || '').trim() || (h.sentence || '').trim();
-          if (!hasNote) _hlDelete(h, pw);
-          else { _hlUpdate(h, pw, { color: '' }); _toast('已取消颜色（备注保留）'); }
-        } else _hlUpdate(h, pw, { color: c });
+          if (!hasNote) return _hlDelete(h, pw);
+          return _hlUpdate(h, pw, { color: '' });
+        }
+        return _hlUpdate(h, pw, { color: c });
       },
       onNote: (t) => _hlUpdate(h, pw, { note: t }),
       onDelete: () => _hlDelete(h, pw),
@@ -336,12 +337,18 @@ async function _hlUpdate(h, pw, patch) {
       body: JSON.stringify({file: FILE_REL, id: h.id, ...patch}),
     });
     const d = await r.json();
-    if (!d.ok) { alert('保存失败：' + (d.error || '?')); return; }
+    if (!d.ok) { _toast('保存失败：' + (d.error || '?')); return false; }
     Object.assign(h, d.highlight);
     renderHighlightsOnPage(pw, h.page);
     _toast('已保存');
-  } catch (e) { alert('保存异常：' + e.message); }
+    return true;
+  } catch (e) { _toast('保存未确认：' + e.message); return false; }
 }
+// 删除必须给出明确结果:true=后端确认删掉,false=没删掉。
+//
+// 此前成功、失败、异常三条路都返回 undefined,于是调用方的 `ok !== false` 一律判成
+// 成功,界面把行移走而后端那条高亮还在 —— 刷新后它又回来了,这正是"删不掉"的观感。
+// 未知结果(网络中断、超时)按未删处理:不假删、不自动重试,让用户看见它还在。
 async function _hlDelete(h, pw) {
   try {
     const r = await fetch('/pdf/api/highlights', {
@@ -349,13 +356,18 @@ async function _hlDelete(h, pw) {
       body: JSON.stringify({file: FILE_REL, id: h.id}),
     });
     const d = await r.json();
-    if (!d.ok) { alert('删除失败：' + (d.error || '?')); return; }
+    if (!d.ok) { _toast('删除失败：' + (d.error || '未知原因')); return false; }
     _allHighlights = _allHighlights.filter(x => x.id !== h.id);
     _hlByPage[h.page] = (_hlByPage[h.page] || []).filter(x => x.id !== h.id);
     renderHighlightsOnPage(pw, h.page);
     closeHlPopover();
     _toast('已删除');
-  } catch (e) { alert('删除异常：' + e.message); }
+    return true;
+  } catch (e) {
+    // 用 toast 而非 alert:alert 会阻塞整个页面事件,在 iPad 上尤其难恢复。
+    _toast('删除未确认：' + ((e && e.message) || '无响应'));
+    return false;
+  }
 }
 
 // 预览块的交互：

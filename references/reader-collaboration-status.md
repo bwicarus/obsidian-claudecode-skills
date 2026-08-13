@@ -4219,3 +4219,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **查词**：普通日语查词小框直接消费 App 私有 v3 多义项与例句，保留读音/声调、原形/活用、完整字典、掌握与语法，并按用户旧图不恢复划掉的词性标签；视频未改。
 - **验证/Windows**：Reader 合同全量、发布管线与 ReaderBundle 314 文件校验通过；Direct `0.1.122` 已原子安装且完整无音频自检通过，回滚点 `C:\Users\bwica\bw-computer-voice-bridge-backups\install-0.1.122-20260813T114449Z-ebd66423`；handoff 仅命中已登记的 POSIX `fcntl` 基线。
 - **发布/下一步**：功能提交 `6b118b7e`；Actions `31696795661` 上传 TestFlight `1.1.51 (282)`，`31697485600` 确认 `COMPLETE / VALID / IN_BETA_TESTING`。未部署 Pi、未改视频；真机验证 App 草稿即时出现、实际色块持久化及旧版富词典布局。
+
+## Codex + Claude：卡片双宿主与高亮管理交互候选（2026-08-14 JST）
+- **改了什么**：普通制卡不绑定书页；浮层与对话流复用同一 gid/source/draft，保存权威仍是 Reader 本地卡库；电脑 Anki 仅为显式可选投影。
+- **高亮/复习**：PDF、EPUB、HTML 与网页高亮只在持久化明确成功后改 UI，恢复专用高亮页与取消/删除/批量撤销；复习卡移除顶部 `rv-meta`，deck 数据保留。
+- **怎么验的**：共享源码/vendor 重建、Reader Node 全量、C# Release、ReaderBundle 314 文件与发布管线通过；网络审计零新增并移除退役基线。
+- **已知门禁**：Windows 全量/handoff 仍命中既有 POSIX `fcntl`、Linux fixture/本机测试数据基线，不冒充通过；本批行为合同均通过。
+- **发布边界/下一步**：本提交不部署 Pi 或桌面扩展正式渠道；上传 TestFlight `1.1.52` 验收包后，按卡片双宿主、高亮取消/删除与复习卡布局清单做真机验收。

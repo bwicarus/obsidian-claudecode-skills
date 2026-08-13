@@ -192,6 +192,45 @@ test("an aborted exact-highlight batch releases its writer and a later write set
   assert.equal(record.value.payload[0].id, "c_2222222222222222");
 });
 
+// 删除也必须真的把事务上界交到底层。
+//
+// 这条曾经断在两处、都是同一个模式：调用处写了 transactionTimeoutMs，中间那层却少
+// 一个形参，于是 JS 把它静默丢掉，保护全程空转。第一次断在 StorageRouter.batch，
+// 第二次断在 mutateDocumentState —— 而当时的测试只静态检查调用处有没有那串字符，
+// 所以照样通过。这里必须走真实的 runtime 与真实的 mutateDocumentState，看底层收到什么。
+test("deleting a highlight hands the bounded timeout to the store", async () => {
+  const { context, batchOptions } = await exactHighlightRuntime();
+  const runtime = context.BWReaderRuntime.nativeLocalRuntime;
+  const payload = {
+    file: LOCAL_FILE,
+    id: "c_1111111111111111",
+    page: 4,
+    rects: [[10, 20, 30, 40]],
+    color: "#ffd54a",
+    text: "bounded local highlight",
+  };
+  // 夹具让第一次带上界的写入以 BW_DATA_TIMEOUT 中止，先把它用掉。
+  await assert.rejects(runtime.savePDFHighlight(payload));
+  await runtime.savePDFHighlight({ ...payload, id: "c_2222222222222222" });
+
+  const before = batchOptions.length;
+  const response = await context.fetch("/pdf/api/highlights", {
+    method: "DELETE",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ file: LOCAL_FILE, id: "c_2222222222222222" }),
+  });
+  assert.equal(response.status, 200);
+  const deleteOptions = batchOptions.slice(before);
+  assert.ok(deleteOptions.length > 0, "删除必须真的写了一次");
+  for (const options of deleteOptions) {
+    assert.equal(
+      options?.transactionTimeoutMs,
+      4000,
+      "删除事务的上界必须抵达底层；中间任何一层少一个形参都会让它静默失效",
+    );
+  }
+});
+
 test("exact highlight uses the bounded App-local persistence entrypoint", () => {
   const start = PDF.indexOf("async function saveHighlight");
   const end = PDF.indexOf("function _pdfExactTextProjection", start);

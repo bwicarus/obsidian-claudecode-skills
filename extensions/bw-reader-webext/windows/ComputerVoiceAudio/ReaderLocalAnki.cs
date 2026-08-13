@@ -185,9 +185,13 @@ internal sealed class ReaderLocalAnkiRegistry
                 sourceInstanceId,
                 StringComparison.Ordinal))
             {
+                // 这里比对的是 sourceInstanceId，即产生该草稿的那个 Reader 输出实例
+                // （页面模块的生命周期内有效，页面重载即换新），用来阻止串实例导出。
+                // 它与页码、锚点、placement 都无关；也不等同于用户会话，
+                // 所以文案不提"会话"，免得引出另一个同样错误的排查方向。
                 throw new ReaderLocalAnkiException(
                     "BW_READER_ANKI_DRAFT_SOURCE_MISMATCH",
-                    "Reader 本地 Anki 草稿不属于当前阅读页面");
+                    "该草稿来自另一个 Reader 输出实例（可能页面已重载），已阻止导出到电脑 Anki");
             }
             JsonArray cards = (JsonArray)draft["cards"]!;
             if (cardIndex >= cards.Count

@@ -37,6 +37,7 @@ function abortableBatchIndexedDB() {
     value: "data-store-instance-v1-" + "a".repeat(32),
   });
   let hangMutationRead = false;
+  let hangRecordRead = false;
   let abortCount = 0;
 
   class Transaction {
@@ -95,6 +96,14 @@ function abortableBatchIndexedDB() {
       const keyPath = keyPaths[name];
       return {
         get: (key) => {
+          // 按住一次 records 读，用来模拟真实 WebKit 上挂住不 settle 的 readonly
+          // 事务：它会一直占着 object store，后面的读写全排在它后面。
+          if (name === "records" && hangRecordRead) {
+            hangRecordRead = false;
+            this.pending += 1;
+            this.completionGeneration += 1;
+            return { result: undefined, error: null, onsuccess: null, onerror: null };
+          }
           if (name === "mutations" && hangMutationRead) {
             hangMutationRead = false;
             this.pending += 1;
@@ -149,6 +158,7 @@ function abortableBatchIndexedDB() {
       },
     },
     hangNextMutationRead() { hangMutationRead = true; },
+    hangNextRecordRead() { hangRecordRead = true; },
     abortCount: () => abortCount,
   };
 }
@@ -1790,4 +1800,97 @@ test("StorageRouter 从生产 registry 补全 provider、conflictPolicy 与 deri
   assert.equal(scopes["query-cache"].conflictPolicy, "regenerate");
   assert.equal(scopes["query-cache"].derived, true);
   assert.equal(scopes["device-preferences"].provider, false);
+});
+
+// ── 读取事务的上界 ───────────────────────────────────────────────────────
+//
+// 高亮写入反复超时，前两层是 StorageRouter 与 mutateDocumentState 各自把
+// batchOptions 丢掉；都修完之后仍有第三层：写入之前那次前置读走的是 readonly
+// 事务，而它没有上界。IndexedDB 事务按 object store 排队，一个挂住不 settle 的
+// 读会把后面的写一并堵住，于是那个写入上界永远没有机会生效。
+// 任何一步都不许把整组测试拖死：保护失效时应当是这条测试失败，而不是 node --test
+// 整体挂住。此前一次对照实验就因为没有看门狗而拖垮了整组并中断了恢复。
+function watchdog(promise, label, ms = 400) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(
+      () => reject(new Error(`${label} 未在 ${ms}ms 内落定`)), ms,
+    )),
+  ]);
+}
+
+function boundedReadRuntime() {
+  const fake = abortableBatchIndexedDB();
+  const context = {
+    console,
+    indexedDB: fake.factory,
+    IDBKeyRange: { only: (v) => v, lowerBound: (v) => v },
+    navigator: { userAgent: "bounded-read-contract" },
+    crypto: { getRandomValues(bytes) { bytes.fill(3); return bytes; } },
+    structuredClone, setTimeout, clearTimeout, setImmediate,
+  };
+  context.globalThis = context;
+  vm.runInNewContext(DATA_STORE_SOURCE, context, { filename: "data-store.js" });
+  vm.runInNewContext(INDEXEDDB_STORE_SOURCE, context, { filename: "indexeddb-store.js" });
+  const store = context.BWReaderRuntime.indexedDBStore.createIndexedDBDataStore({
+    dbName: "bounded-read-timeout",
+    deviceId: "bounded-read-test",
+    broadcast: false,
+    webkitTransactionKeepalive: false,
+  });
+  const options = (ms) => vm.runInNewContext(`({ transactionTimeoutMs: ${ms} })`, context);
+  // 值必须在 store 所在的 realm 里创建：跨 realm 的对象过不了 isPlainObject 检查。
+  const inRealm = (value) => vm.runInNewContext(`(${JSON.stringify(value)})`, context);
+  return { fake, store, options, inRealm };
+}
+
+test("a hung read with a bound aborts the real transaction", async () => {
+  const { fake, store, options } = boundedReadRuntime();
+  fake.hangNextRecordRead();
+  await assert.rejects(
+    watchdog(store.get("document-highlights", "book-1", options(20)), "bounded read"),
+    (error) => error.code === "BW_DATA_TIMEOUT",
+    "a bounded read must end as BW_DATA_TIMEOUT instead of hanging forever",
+  );
+  assert.equal(
+    fake.abortCount(),
+    1,
+    "the transaction itself must be aborted; walking away leaves it holding the store",
+  );
+});
+
+test("reads and writes continue once the hung read is aborted", async () => {
+  const { fake, store, options, inRealm } = boundedReadRuntime();
+  fake.hangNextRecordRead();
+  await assert.rejects(
+    watchdog(store.get("document-highlights", "book-1", options(20)), "bounded read"),
+  );
+
+  // 用户关心的是"后面还能不能记下新高亮"，所以这里必须真的写一次再读回，
+  // 只证明"还能读"是不够的：写走的是 readwrite，正是被挂起事务堵住的那一类。
+  await watchdog(
+    store.put("document-highlights",
+      inRealm({ id: "book-1", color: "#ffd54a" }),
+      inRealm({ mutationId: "m_after_abort" })),
+    "later write",
+  );
+  const readBack = await watchdog(
+    store.get("document-highlights", "book-1"), "later read",
+  );
+  assert.ok(readBack, "写入必须真的落库");
+  assert.equal(readBack.value.color, "#ffd54a", "读回的应当是刚写进去的那条");
+});
+
+test("an unbounded read keeps its previous semantics", async () => {
+  const { fake, store } = boundedReadRuntime();
+  fake.hangNextRecordRead();
+  const outcome = await Promise.race([
+    store.get("some-other-collection", "x").then(() => "settled", () => "rejected"),
+    new Promise((resolve) => setTimeout(() => resolve("still-pending"), 120)),
+  ]);
+  assert.equal(
+    outcome, "still-pending",
+    "no bound was asked for, so none is invented: unrelated collections keep their behaviour",
+  );
+  assert.equal(fake.abortCount(), 0, "nothing may be aborted without an explicit bound");
 });

@@ -229,7 +229,13 @@ if (window.PdfAdapter && PdfAdapter.bind) {
     //   PDF 暂无「高亮抽屉」UI → 这几个钩子目前无 live 调用方,先就位)。编辑/图描述浮层走 per-call opts,不依赖此 bind。
     allHighlights: () => (typeof _allHighlights !== 'undefined' ? _allHighlights : []),
     jumpToHl: (hl) => { try { if (hl && hl.page && window.goToPage) window.goToPage(hl.page); } catch (_) {} },
-    hlDelete: (hl) => { try { var pw = document.querySelector('.page-wrap[data-page-num="' + (hl && hl.page) + '"]'); if (typeof _hlDelete === 'function') _hlDelete(hl, pw); } catch (_) {} },
+    // 必须把删除的 Promise 交出去:调用方要等到后端确认才移除界面。
+    // 早先这里既不 return 也把异常吞掉,上层拿到 undefined 就当成功了。
+    hlDelete: (hl) => {
+      var pw = document.querySelector('.page-wrap[data-page-num="' + (hl && hl.page) + '"]');
+      if (typeof _hlDelete !== 'function') return Promise.resolve(false);
+      return Promise.resolve(_hlDelete(hl, pw)).then(function (ok) { return ok === true; });
+    },
     // ── 助手侧栏共享化(②a):把 25-assistant.js 依赖的**全部宿主符号**收进 asst host 袋,供未来搬进
     //    rc-assistant.js 的共享侧栏经 RC.adapter()._host.asst 取用(EPUB 提供同名袋 → 复用整份侧栏)。
     //    全是**纯转发**到 PDF 现有 window.* / reader.js 作用域符号(本文件同在 reader.js IIFE)→ PDF 行为零变化;
