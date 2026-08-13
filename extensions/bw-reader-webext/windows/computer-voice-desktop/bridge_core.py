@@ -1053,21 +1053,40 @@ def save_enabled_config(
     return value
 
 
-def set_direct_config_enabled(paths: BridgePaths, enabled: bool) -> bool:
-    """Atomically toggle an already-valid direct configuration in place."""
+def set_direct_config_enabled(
+    paths: BridgePaths,
+    enabled: bool,
+    *,
+    context_delivery_mode: str | None = None,
+) -> bool:
+    """Atomically update the ReaderPC master opt-in and delivery mode."""
 
     if not isinstance(enabled, bool):
         raise BridgeError("直连配置启用状态无效。")
+    if (
+        context_delivery_mode is not None
+        and context_delivery_mode not in CONTEXT_DELIVERY_MODES
+    ):
+        raise BridgeError("上下文交付模式无效。")
     previous = load_direct_config(paths)
     if previous is None:
         if paths.direct_config.exists():
             raise BridgeError("现有直连配置无效；拒绝静默改写。")
         return False
-    if previous.get("localOptIn") is enabled:
+    selected_mode = (
+        context_delivery_mode
+        if context_delivery_mode is not None
+        else previous.get("contextDeliveryMode")
+    )
+    if (
+        previous.get("localOptIn") is enabled
+        and previous.get("contextDeliveryMode") == selected_mode
+    ):
         return False
     value = {
         **previous,
         "localOptIn": enabled,
+        "contextDeliveryMode": selected_mode,
     }
     _atomic_write_json(
         paths.direct_config,
@@ -1076,6 +1095,23 @@ def set_direct_config_enabled(paths: BridgePaths, enabled: bool) -> bool:
             expected_runtime_status=paths.runtime_status,
         ),
     )
+    return True
+
+
+def restore_direct_config(
+    paths: BridgePaths,
+    previous: dict[str, Any],
+) -> bool:
+    """Atomically restore one previously validated configuration snapshot."""
+
+    validated = validate_direct_config(
+        previous,
+        expected_runtime_status=paths.runtime_status,
+    )
+    current = load_direct_config(paths)
+    if current == validated:
+        return False
+    _atomic_write_json(paths.direct_config, validated)
     return True
 
 
@@ -1440,33 +1476,75 @@ def disable_and_stop_direct_service(
     paths: BridgePaths,
     runner: ProcessRunner,
     *,
+    after_disable: Callable[[], None] | None = None,
+    after_stop: Callable[[], None] | None = None,
     sleeper: Callable[[float], None] = time.sleep,
     recheck_delays: Sequence[float] = DISABLE_STOP_RECHECK_SECONDS,
 ) -> tuple[bool, bool]:
     if any(delay < 0 or delay > 1 for delay in recheck_delays):
         raise BridgeError("停用后的服务重查间隔无效。")
-    disabled = disable_config(paths)
-    if not disabled:
+    previous = load_direct_config(paths)
+    if previous is None:
         raise BridgeError(
             "没有可原子停用的有效配置；拒绝先行停止服务。"
         )
+    disabled = False
+    if previous.get("localOptIn") is True:
+        disabled = disable_config(paths)
+        current = load_direct_config(paths)
+        if not disabled and (
+            current is None or current.get("localOptIn") is not False
+        ):
+            raise BridgeError(
+                "直连配置未能原子停用；拒绝停止服务。"
+            )
+    callback_error: Exception | None = None
+    if after_disable is not None:
+        try:
+            after_disable()
+        except Exception as exc:
+            # Opt-out has already committed. Still stop the exact owned
+            # listener; otherwise a snapshot write failure would leave a
+            # disabled but live process behind.
+            callback_error = exc
+
     stopped = stop_direct_service(paths, runner)
-    if stopped:
-        return True, True
 
     # A bootstrap may have passed its first config read but not published its
     # PID record yet.  Its own post-commit opt-out check is the final invariant;
     # these bounded rechecks let the foreground GUI also observe and stop the
     # PID as soon as that record becomes visible.
-    for delay in recheck_delays:
-        sleeper(float(delay))
-        if stop_direct_service(paths, runner):
-            return True, True
+    if not stopped:
+        for delay in recheck_delays:
+            sleeper(float(delay))
+            if stop_direct_service(paths, runner):
+                stopped = True
+                break
     if paths.service_record.exists():
         raise BridgeError(
             "停用后仍存在 owned 服务记录，无法确认 listener 已停止。"
         )
-    return True, False
+
+    final_callback_error: Exception | None = None
+    if after_stop is not None:
+        try:
+            after_stop()
+        except Exception as exc:
+            final_callback_error = exc
+    if final_callback_error is not None:
+        detail = str(final_callback_error)
+        if callback_error is not None:
+            detail = f"停用前：{callback_error}；停用后：{detail}"
+        raise BridgeError(
+            "直连配置已停用且服务已停止，但最终停用快照写入失败："
+            f"{detail}"
+        ) from final_callback_error
+    if callback_error is not None and after_stop is None:
+        raise BridgeError(
+            "直连配置已停用且服务已停止，但停用快照写入失败："
+            f"{callback_error}"
+        ) from callback_error
+    return disabled, stopped
 
 
 def enumerate_active_render_endpoints(
