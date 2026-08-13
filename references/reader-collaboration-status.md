@@ -4217,5 +4217,5 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 ## Codex + Claude：Anki/高亮静默投递与旧版富词典候选（2026-08-13 JST）
 - **改了什么**：补齐 `highlight-text`/`anki-draft` 严格下行合同与拒绝 ACK；StorageRouter 透传事务上界，卡仓草稿/确认/批量/删除均有界，避免 IndexedDB 挂起锁住后续写入。
 - **查词**：普通日语查词小框直接消费 App 私有 v3 多义项与例句，保留读音/声调、原形/活用、完整字典、掌握与语法，并按用户旧图不恢复划掉的词性标签；视频未改。
-- **验证**：Reader 合同全量、发布管线与 ReaderBundle 314 文件校验通过；Windows handoff 仅命中已登记的 POSIX `fcntl` 基线，功能与发布文件无新增失败。
-- **边界/下一步**：候选版本 `1.1.51`；提交推送后走唯一 iOS 原子工作流上传 TestFlight，再真机验证 App 草稿即时出现、实际色块持久化及旧版富词典布局。
+- **验证/Windows**：Reader 合同全量、发布管线与 ReaderBundle 314 文件校验通过；Direct `0.1.122` 已原子安装且完整无音频自检通过，回滚点 `C:\Users\bwica\bw-computer-voice-bridge-backups\install-0.1.122-20260813T114449Z-ebd66423`；handoff 仅命中已登记的 POSIX `fcntl` 基线。
+- **发布/下一步**：功能提交 `6b118b7e`；Actions `31696795661` 上传 TestFlight `1.1.51 (282)`，`31697485600` 确认 `COMPLETE / VALID / IN_BETA_TESTING`。未部署 Pi、未改视频；真机验证 App 草稿即时出现、实际色块持久化及旧版富词典布局。
