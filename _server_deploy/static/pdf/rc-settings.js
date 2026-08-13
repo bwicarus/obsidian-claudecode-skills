@@ -701,21 +701,15 @@
           '<div style="font-size:11px;color:#8a9bb4;line-height:1.6;margin-bottom:10px">电脑图标按钮是唯一启动入口；普通电话按钮只负责豆包、GPT 或 Grok。查看状态不会启动应用、采音或发送快捷键。</div>' +
           '<div id="rcset-computer-inline"></div>' +
         '</div>' +
-        '<div style="background:#11203a;border:1px solid #2a3550;border-radius:8px;padding:12px;margin:16px 0">' +
-          '<label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#cfe0ff;font-weight:600;cursor:pointer">' +
-            '<input type="checkbox" id="set-ctx-sync" style="width:16px;height:16px"> 🔁 双向上下文同步（默认关闭）' +
+        '<div id="set-ctx-sync-card" style="background:#11203a;border:1px solid #2a3550;border-radius:8px;padding:12px;margin:16px 0">' +
+          '<label id="set-ctx-sync-row" style="display:none;align-items:center;gap:8px;font-size:13px;color:#cfe0ff;font-weight:600;cursor:pointer">' +
+            '<input type="checkbox" id="set-ctx-sync" style="width:16px;height:16px"> 🔁 旧版文字注入同步' +
           '</label>' +
-          '<label style="display:flex;align-items:center;gap:8px;font-size:12px;color:#cfe0ff;cursor:pointer;margin-top:10px">' +
+          '<label id="set-ctx-legacy-row" style="display:flex;align-items:center;gap:8px;font-size:12px;color:#cfe0ff;cursor:pointer;margin-top:10px">' +
             '<input type="checkbox" id="set-ctx-legacy" style="width:16px;height:16px"> 测试旧版文字注入' +
           '</label>' +
-          '<div style="font-size:11px;color:#8a9bb4;line-height:1.6;margin-top:5px">' +
-            '关闭＝实时快照 MCP；开启＝旧版 Voice Typist 文字注入。切换时会先结束当前电脑语音并清理旧链路；下次通话按新模式启动。' +
-          '</div>' +
-          '<div style="font-size:11px;color:#8a9bb4;line-height:1.6;margin-top:8px">' +
-            '开启后允许本页上报当前书、页、选区和绘图；末端由上面的模式决定。<br>' +
-            '关闭时停止上下文上报与末端同步；电脑语音本身仍可单独使用。<br>' +
-            '连续翻页只在停手约 1 秒后发一次完整状态，不会因为滚动而刷请求。<br>' +
-            '<b>不受此开关影响</b>：电脑那边发回来的助手回复和卡片属于被动显示，到达即写入、侧栏自然出现，不需要本页为它轮询。' +
+          '<div id="set-ctx-mode-help" style="font-size:11px;color:#8a9bb4;line-height:1.6;margin-top:5px">' +
+            '实时快照 MCP 跟随 ReaderPC 电脑语音服务启停，不受旧版同步开关影响。只有测试旧版文字注入时才显示其同步开关。' +
           '</div>' +
           '<div id="set-ctx-sync-msg" style="font-size:11px;color:#e0b080;margin-top:6px;display:none"></div>' +
         '</div>' +
@@ -1273,13 +1267,35 @@
   //    PDF 宿主的保存走 opts.onSave 原生函数、根本不进 saveInternal,挂在「保存」里三宿主行为会不一致。
   function _fillCtxSync() {
     var cb = $('set-ctx-sync'), legacy = $('set-ctx-legacy');
-    var msg = $('set-ctx-sync-msg');
+    var msg = $('set-ctx-sync-msg'), card = $('set-ctx-sync-card');
+    var syncRow = $('set-ctx-sync-row'), help = $('set-ctx-mode-help');
     if (!cb || !window.RC || !RC.ctxSync) return;
+    // ReaderPC owns snapshot lifecycle for the native App. App-local legacy
+    // preferences must not silently stop the dedicated context transport.
+    if (window.__BW_NATIVE_COMPUTER_VOICE__ === true) {
+      if (card) card.style.display = 'none';
+      cb.disabled = true;
+      if (legacy) legacy.disabled = true;
+      return;
+    }
+    if (card) card.style.display = '';
+    function syncLegacyControls() {
+      var legacyMode = !!(legacy && legacy.checked);
+      if (syncRow) syncRow.style.display = legacyMode ? 'flex' : 'none';
+      cb.disabled = !legacyMode;
+      if (help) {
+        help.textContent = legacyMode
+          ? '此开关只控制旧版 Voice Typist 文字注入；实时快照不经过这里。'
+          : '实时快照 MCP 跟随 ReaderPC 电脑语音服务启停，不受旧版同步开关影响。';
+      }
+    }
     cb.checked = RC.ctxSync.enabled();
     if (legacy && typeof RC.ctxSync.getConfig === 'function') {
       legacy.disabled = true;
+      syncLegacyControls();
       RC.ctxSync.getConfig().then(function (cfg) {
         legacy.checked = cfg.deliveryMode === 'legacy-inject';
+        syncLegacyControls();
       }).catch(function (e) {
         if (msg) {
           msg.textContent = '无法读取当前上下文模式：' +
@@ -1288,6 +1304,7 @@
         }
       }).then(function () {
         legacy.disabled = false;
+        syncLegacyControls();
       });
       if (!legacy._ctxModeBound) {
         legacy._ctxModeBound = true;
@@ -1305,6 +1322,7 @@
             toast(requestedLegacy
               ? '已切换到旧版文字注入'
               : '已切换到实时快照 MCP');
+            syncLegacyControls();
           }).catch(function (e) {
             if (msg) {
               msg.textContent = '模式切换失败，正在读取实际状态：' +
@@ -1319,6 +1337,7 @@
             });
           }).then(function () {
             legacy.disabled = false;
+            syncLegacyControls();
           });
         });
       }
@@ -1326,6 +1345,10 @@
     if (cb._ctxBound) return;
     cb._ctxBound = true;
     cb.addEventListener('change', function () {
+      if (legacy && !legacy.checked) {
+        cb.checked = RC.ctxSync.enabled();
+        return;
+      }
       var on = cb.checked;
       if (msg) { msg.style.display = 'none'; msg.textContent = ''; }
       RC.ctxSync.setEnabled(on).then(function (r) {

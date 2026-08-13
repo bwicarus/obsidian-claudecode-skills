@@ -286,20 +286,6 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         case squeeze
     }
 
-    enum NativeVoiceHandoffError: LocalizedError {
-        case webVoiceAlreadyActive
-        case contextRelayUnavailable
-
-        var errorDescription: String? {
-            switch self {
-            case .webVoiceAlreadyActive:
-                return "网页电脑语音仍在通话，请先结束当前电脑语音"
-            case .contextRelayUnavailable:
-                return "Reader 原生上下文接力尚未准备好"
-            }
-        }
-    }
-
     enum NativeReaderSettingError: LocalizedError {
         case pageUnavailable
         case invalidTouchDoubleTapAction
@@ -2496,35 +2482,6 @@ final class ReaderWebViewModel: NSObject, ObservableObject {
         // clearing here would make either failure permanently suppress retry.
         webContentProcessNeedsReload = true
         webView.reload()
-    }
-
-    func prepareForNativeVoice() async throws {
-        guard webView.url != nil else {
-            throw NativeVoiceHandoffError.contextRelayUnavailable
-        }
-        let value = try await webView.callAsyncJavaScript(
-            """
-            const voice = window.RC && window.RC.computerVoice;
-            if (!voice || typeof voice.isActive !== "function") {
-              return "not-ready";
-            }
-            if (voice.isActive()) return "web-active";
-            if (typeof voice.prepareNativeContextHandoff !== "function") {
-              return "not-ready";
-            }
-            return await voice.prepareNativeContextHandoff();
-            """,
-            arguments: [:],
-            in: nil,
-            contentWorld: .page
-        )
-        let result = value as? String ?? "not-ready"
-        if result == "web-active" {
-            throw NativeVoiceHandoffError.webVoiceAlreadyActive
-        }
-        if result != "native-ready" {
-            throw NativeVoiceHandoffError.contextRelayUnavailable
-        }
     }
 
     func updateNativeVoiceButton(state: NativeVoiceBridgeState) {

@@ -1406,8 +1406,10 @@ function contextRequests(harness) {
 }
 
 async function disableSnapshot(harness) {
-  harness.scenario.contextSyncEnabled = false;
-  await harness.api.contextSyncChanged();
+  harness.setVisibilityState("hidden");
+  harness.dispatchDocumentEvent("visibilitychange");
+  harness.dispatchWindowEvent("pagehide");
+  await new Promise((resolve) => setTimeout(resolve, 0));
 }
 
 test("v3 HELLO 后直接 STATUS，固定 WSS 且不读取浏览器身份或麦克风", async () => {
@@ -1643,10 +1645,11 @@ test("snapshot-mcp 真实拨号顺序保留并原地升级常驻 WSS", async () 
     "selected words",
   );
   assert.equal(harness.scenario.microphoneRequests.length, 0);
-  assert.deepEqual(harness.scenario.contextModePosts[0], {
-    enabled: true,
-    deliveryMode: "snapshot-mcp",
-  });
+  assert.equal(
+    harness.scenario.contextModePosts.length,
+    0,
+    "voice start must not take ownership of ReaderPC snapshot mode",
+  );
   const backgroundSocket = harness.server.sockets[0];
   const available = await harness.api.availability();
   assert.equal(available.state, "idle");
@@ -1690,9 +1693,9 @@ test("snapshot-mcp 真实拨号顺序保留并原地升级常驻 WSS", async () 
     "selection clear heartbeat",
   );
 
-  await disableSnapshot(harness);
   await harness.api.stop("test");
   assert.equal(harness.api.isActive(), false);
+  await disableSnapshot(harness);
 });
 
 test("snapshot-mcp 常驻 WSS 接收严格结果卡并回 rendered ACK，不发送 START", async () => {
@@ -2390,8 +2393,8 @@ test("snapshot-mcp 对未触发 onclose 的 CLOSED 常驻 WSS 主动验活后只
     harness.server.requests.filter((request) => request.type === "start").length,
     1,
   );
-  await disableSnapshot(harness);
   await harness.api.stop("test");
+  await disableSnapshot(harness);
 });
 
 test("snapshot-mcp 借用 STATUS 静默超时后重建一次并恢复常驻快照", async () => {
@@ -2472,8 +2475,8 @@ test("snapshot-mcp 晋升链 stale-OPEN 的首个只读探测超时后重连但�
     1,
     "only the fresh, proven channel may send the single authorized START",
   );
-  await disableSnapshot(harness);
   await harness.api.stop("test");
+  await disableSnapshot(harness);
 });
 
 test("START 已发送但结果超时时绝不重发，并完整释放本地资源", async () => {
@@ -2771,7 +2774,7 @@ test("同源普通网页没有 book owner marker 时不被扩展门禁误吞", a
   assert.equal(extension.server.sockets.length, 1);
 });
 
-test("snapshot-mcp 前台唤醒独立于普通语音模型，关闭同步或活动通话不重复建链", async () => {
+test("snapshot-mcp 前台唤醒独立于普通语音模型、旧同步开关和活动通话", async () => {
   const otherEngine = createHarness({
     contextDeliveryMode: "snapshot-mcp",
     contextSyncEnabled: true,
@@ -2797,8 +2800,14 @@ test("snapshot-mcp 前台唤醒独立于普通语音模型，关闭同步或活�
   syncDisabled.dispatchDocumentEvent("visibilitychange");
   syncDisabled.dispatchWindowEvent("pageshow");
   syncDisabled.dispatchWindowEvent("online");
-  await new Promise((resolve) => setTimeout(resolve, 10));
-  assert.equal(syncDisabled.server.sockets.length, 0);
+  await waitForRequest(syncDisabled, "context-open");
+  assert.equal(syncDisabled.server.sockets.length, 1);
+  assert.equal(
+    syncDisabled.server.requests.some((request) => request.type === "start"),
+    false,
+  );
+  assert.equal(syncDisabled.scenario.microphoneRequests.length, 0);
+  await disableSnapshot(syncDisabled);
 
   const activeCall = createHarness({
     contextDeliveryMode: "snapshot-mcp",
@@ -2827,8 +2836,8 @@ test("snapshot-mcp 前台唤醒独立于普通语音模型，关闭同步或活�
     1,
   );
   assert.equal(activeCall.scenario.microphoneRequests.length, 1);
-  await disableSnapshot(activeCall);
   await activeCall.api.stop("test");
+  await disableSnapshot(activeCall);
 });
 
 test("snapshot-mcp 仅转发 Pi ACK 绑定的 vbook 真实卷页并拒绝跨页旧选区", async () => {
@@ -2933,8 +2942,8 @@ test("snapshot-mcp 仅转发 Pi ACK 绑定的 vbook 真实卷页并拒绝跨页�
     SOURCE,
     /now - pump\.lastSentAt < ACTIVE_READING_HEARTBEAT_MS/,
   );
-  await disableSnapshot(harness);
   await harness.api.stop("test");
+  await disableSnapshot(harness);
 });
 
 test("snapshot-mcp 跳过畸形 PWA pend 且后续合法状态可恢复实时发送", async () => {
@@ -2990,11 +2999,11 @@ test("snapshot-mcp 跳过畸形 PWA pend 且后续合法状态可恢复实时发
     "recovered selection",
   );
   assert.equal(harness.scenario.activeReadingRequests[0].active.title, null);
-  await disableSnapshot(harness);
   await harness.api.stop("test");
+  await disableSnapshot(harness);
 });
 
-test("切回 legacy-inject 前先清空 Windows 快照，再恢复 Pi 旧注入", async () => {
+test("legacy-inject 启动不建立 Windows 实时快照连接", async () => {
   const harness = createHarness({
     contextDeliveryMode: "legacy-inject",
     contextSyncEnabled: true,
@@ -3005,16 +3014,10 @@ test("切回 legacy-inject 前先清空 Windows 快照，再恢复 Pi 旧注入"
     },
   });
   harness.api.setSelectedEngine("computer_client");
-  await waitForRequest(harness, "context-clear");
-  await waitForCondition(
-    () => harness.scenario.contextModePosts.length >= 1,
-    "legacy context mode post",
-  );
-  assert.equal(harness.scenario.contextClearRequests.length, 1);
-  assert.deepEqual(harness.scenario.contextModePosts[0], {
-    enabled: true,
-    deliveryMode: "legacy-inject",
-  });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assert.equal(harness.server.sockets.length, 0);
+  assert.equal(harness.scenario.contextClearRequests.length, 0);
+  assert.equal(harness.scenario.contextModePosts.length, 0);
   assert.equal(
     harness.server.requests.some(
       (request) => request.type === "context-open",
@@ -3025,7 +3028,6 @@ test("切回 legacy-inject 前先清空 Windows 快照，再恢复 Pi 旧注入"
     harness.server.requests.some((request) => request.type === "start"),
     false,
   );
-  await disableSnapshot(harness);
 });
 
 test("设置页模式开关先清快照并关闭旧 WSS，再原子切到 legacy 且不发送 START", async () => {
@@ -3068,7 +3070,7 @@ test("设置页模式开关先清快照并关闭旧 WSS，再原子切到 legacy
   await disableSnapshot(harness);
 });
 
-test("关闭上下文同步会先清空 Windows 快照且不触发音频 START", async () => {
+test("snapshot-mcp 忽略旧同步开关且不清快照、不触发音频 START", async () => {
   const harness = createHarness({
     contextDeliveryMode: "snapshot-mcp",
     contextSyncEnabled: true,
@@ -3087,8 +3089,8 @@ test("关闭上下文同步会先清空 Windows 快照且不触发音频 START",
   const socket = harness.server.sockets[0];
   harness.scenario.contextSyncEnabled = false;
   await harness.api.contextSyncChanged();
-  assert.equal(harness.scenario.contextClearRequests.length, 1);
-  assert.equal(socket.readyState, 3);
+  assert.equal(harness.scenario.contextClearRequests.length, 0);
+  assert.equal(socket.readyState, 1);
   assert.equal(
     harness.server.requests.some((request) => request.type === "start"),
     false,
@@ -3345,8 +3347,8 @@ test("原生 App 只有精确 loopback origin 与原生标记同时成立才直�
   }
 });
 
-test("原生 App 的 eph-ctx-sync=1 完成 context 握手并启动快照泵", async () => {
-  const contextSyncStorage = new Map([["eph-ctx-sync", "1"]]);
+test("原生 App 即使 eph-ctx-sync=0 仍完成 context 握手并启动快照泵", async () => {
+  const contextSyncStorage = new Map([["eph-ctx-sync", "0"]]);
   const harness = createHarness({
     origin: NATIVE_APP_ORIGIN,
     nativeComputerVoice: true,
@@ -3379,13 +3381,9 @@ test("原生 App 的 eph-ctx-sync=1 完成 context 握手并启动快照泵", as
   assert.ok(
     actions.indexOf("visual-register") > actions.indexOf("context-open"),
   );
-  assert.deepEqual(harness.scenario.contextModePosts[0], {
-    enabled: true,
-    deliveryMode: "snapshot-mcp",
-  });
+  assert.equal(harness.scenario.contextModePosts.length, 0);
 
-  contextSyncStorage.set("eph-ctx-sync", "0");
-  await harness.api.contextSyncChanged();
+  await disableSnapshot(harness);
 });
 
 test("原生 App 前台标志是专用快照可见性的权威而不受隐藏 WebView 误杀", async () => {
@@ -3414,8 +3412,7 @@ test("原生 App 前台标志是专用快照可见性的权威而不受隐藏 We
   await new Promise((resolve) => setTimeout(resolve, 25));
   assert.equal(background.server.sockets.length, 0);
 
-  contextSyncStorage.set("eph-ctx-sync", "0");
-  await foreground.api.contextSyncChanged();
+  await disableSnapshot(foreground);
 });
 
 test("原生语音占用主 WSS 时专用快照断线保留配置并有界退避重连", async () => {
@@ -3455,8 +3452,7 @@ test("原生语音占用主 WSS 时专用快照断线保留配置并有界退避
   );
   assert.equal(harness.scenario.microphoneRequests.length, 0);
 
-  contextSyncStorage.set("eph-ctx-sync", "0");
-  await harness.api.contextSyncChanged();
+  await disableSnapshot(harness);
 });
 
 test("原生专用快照连续建链失败按 1/2/4/8/15 秒封顶退避", async () => {
@@ -3537,8 +3533,7 @@ test("原生专用快照前台唤醒先用只读 CONTEXT-MODE 验活并重建 st
   );
   assert.equal(harness.scenario.microphoneRequests.length, 0);
 
-  contextSyncStorage.set("eph-ctx-sync", "0");
-  await harness.api.contextSyncChanged();
+  await disableSnapshot(harness);
 });
 
 test("原生 12 秒巡检必须证明当前页写入而不能只接受可读旧缓存", async () => {
@@ -3600,8 +3595,7 @@ test("原生 12 秒巡检必须证明当前页写入而不能只接受可读旧�
   );
   assert.equal(harness.scenario.microphoneRequests.length, 0);
 
-  contextSyncStorage.set("eph-ctx-sync", "0");
-  await harness.api.contextSyncChanged();
+  await disableSnapshot(harness);
 });
 
 test("原生 App 本地书把当前视口前后正文写进本地 page.context", async () => {
@@ -3643,8 +3637,7 @@ test("原生 App 本地书把当前视口前后正文写进本地 page.context",
   assert.match(payload.text, /【当前显示区域（重点）】[\s\S]*当前窗口重点内容/);
   assert.match(payload.text, /【当前显示区域之后】[\s\S]*下一页开头/);
 
-  contextSyncStorage.set("eph-ctx-sync", "0");
-  await harness.api.contextSyncChanged();
+  await disableSnapshot(harness);
 });
 
 test("原生 App 未打开设置且未启动语音也会恢复开关并独立上报快照", async () => {
@@ -3686,8 +3679,7 @@ test("原生 App 未打开设置且未启动语音也会恢复开关并独立上
     11,
   );
 
-  contextSyncStorage.set("eph-ctx-sync", "0");
-  await harness.api.contextSyncChanged();
+  await disableSnapshot(harness);
 });
 
 test("状态刷新让位并释放单标签 relay 后才 START，通话中刷新不再开连接", async () => {
