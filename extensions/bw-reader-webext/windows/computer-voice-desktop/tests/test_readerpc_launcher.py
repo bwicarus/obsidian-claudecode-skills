@@ -29,6 +29,10 @@ from readerpc_launcher import (  # noqa: E402
     stop_readerpc_services,
     write_disabled_reader_context_snapshot,
 )
+from readerpc_services import (  # noqa: E402
+    read_reader_context_status,
+    write_disabled_reader_context_snapshot as write_offline_snapshot,
+)
 
 
 class ReaderPCLauncherTests(unittest.TestCase):
@@ -50,6 +54,8 @@ class ReaderPCLauncherTests(unittest.TestCase):
         window.pc_ocr = Mock()
         window.last_voice_start_attempt = 0.0
         window.voice_recovery_in_progress = False
+        window.voice_start_in_progress = False
+        window.voice_snapshot_offline_marked = False
         return window
 
     def test_preferences_default_to_keep_pc_online(self) -> None:
@@ -216,6 +222,25 @@ class ReaderPCLauncherTests(unittest.TestCase):
         self.assertEqual(snapshot["producerInstanceId"], "a" * 32)
         self.assertEqual(snapshot["revision"], 0)
 
+    def test_disabled_snapshot_is_not_reported_as_available_or_fresh(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            root = Path(raw)
+            write_offline_snapshot(
+                root,
+                now=datetime(2026, 8, 14, 1, 2, 3, tzinfo=timezone.utc),
+                producer_instance_id="b" * 32,
+            )
+            status = read_reader_context_status(
+                root / "runtime" / "reader-context-snapshot.json",
+                now_epoch_ms=int(
+                    datetime(
+                        2026, 8, 14, 1, 2, 4, tzinfo=timezone.utc
+                    ).timestamp() * 1000
+                ),
+            )
+        self.assertFalse(status.available)
+        self.assertFalse(status.fresh)
+
     def test_enable_voice_switches_to_snapshot_before_keepalive_and_start(self) -> None:
         bridge_paths = Mock()
         bridge_paths.direct_config.exists.return_value = True
@@ -255,6 +280,19 @@ class ReaderPCLauncherTests(unittest.TestCase):
         )
         self.assertEqual(calls[1:], [("keepalive", True), "start"])
 
+    def test_enable_without_valid_config_revokes_stale_snapshot(self) -> None:
+        bridge_paths = Mock()
+        bridge_paths.direct_config.exists.return_value = True
+        with (
+            patch("readerpc_launcher.load_direct_config", return_value=None),
+            patch(
+                "readerpc_launcher.write_disabled_reader_context_snapshot"
+            ) as tombstone,
+            self.assertRaisesRegex(RuntimeError, "现有电脑语音配置无效"),
+        ):
+            enable_readerpc_voice(bridge_paths, Mock())
+        tombstone.assert_called_once_with(bridge_paths)
+
     def test_enable_failure_restores_entire_previous_config(self) -> None:
         bridge_paths = Mock()
         bridge_paths.direct_config.exists.return_value = True
@@ -263,22 +301,55 @@ class ReaderPCLauncherTests(unittest.TestCase):
             "contextDeliveryMode": "legacy-inject",
             "sentinel": "keep-me",
         }
+        events: list[str] = []
+
+        def fail_start(*_args) -> int:
+            events.append("start")
+            raise RuntimeError("runtime-heartbeat-timeout")
+
         with (
             patch("readerpc_launcher.load_direct_config", return_value=previous),
-            patch("readerpc_launcher.set_direct_config_enabled"),
-            patch("readerpc_launcher.set_codex_voice_keep_active") as keepalive,
             patch(
-                "readerpc_launcher.start_readerpc_voice",
-                side_effect=RuntimeError("runtime-heartbeat-timeout"),
+                "readerpc_launcher.set_direct_config_enabled",
+                side_effect=lambda *_args, **_kwargs: events.append("configure"),
             ),
-            patch("readerpc_launcher.restore_direct_config") as restore,
-            self.assertRaisesRegex(RuntimeError, "runtime-heartbeat-timeout"),
+            patch(
+                "readerpc_launcher.set_codex_voice_keep_active",
+                side_effect=lambda _paths, enabled: events.append(
+                    f"keepalive:{enabled}"
+                ),
+            ) as keepalive,
+            patch("readerpc_launcher.start_readerpc_voice", side_effect=fail_start),
+            patch(
+                "readerpc_launcher.write_disabled_reader_context_snapshot",
+                side_effect=lambda _paths: events.append("tombstone"),
+            ) as tombstone,
+            patch(
+                "readerpc_launcher.restore_direct_config",
+                side_effect=lambda *_args: events.append("restore"),
+            ) as restore,
+            self.assertRaisesRegex(
+                RuntimeError,
+                "runtime-heartbeat-timeout",
+            ),
         ):
             enable_readerpc_voice(bridge_paths, Mock())
         self.assertEqual(
             [call.args[1] for call in keepalive.call_args_list],
             [True, False],
         )
+        self.assertEqual(
+            events,
+            [
+                "configure",
+                "keepalive:True",
+                "start",
+                "tombstone",
+                "keepalive:False",
+                "restore",
+            ],
+        )
+        tombstone.assert_called_once_with(bridge_paths)
         restore.assert_called_once_with(bridge_paths, previous)
 
     def test_enable_failure_reports_incomplete_rollback(self) -> None:
@@ -298,6 +369,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
                 "readerpc_launcher.start_readerpc_voice",
                 side_effect=RuntimeError("start-failed"),
             ),
+            patch("readerpc_launcher.write_disabled_reader_context_snapshot"),
             patch(
                 "readerpc_launcher.restore_direct_config",
                 side_effect=OSError("restore-denied"),
@@ -382,6 +454,7 @@ class ReaderPCLauncherTests(unittest.TestCase):
 
     def test_start_voice_sets_keepalive_before_starting_service(self) -> None:
         window = self.window_without_tk()
+        window.voice_snapshot_offline_marked = True
         window._run_task = Mock(side_effect=lambda _pending, action, _success: action())
         with patch(
             "readerpc_launcher.enable_readerpc_voice",
@@ -391,6 +464,97 @@ class ReaderPCLauncherTests(unittest.TestCase):
         enable.assert_called_once_with(
             window.bridge_paths,
             window.process_runner,
+        )
+        self.assertFalse(window.voice_snapshot_offline_marked)
+
+    def test_offline_monitor_tombstones_before_retry_and_only_once(self) -> None:
+        window = self.window_without_tk()
+        window.last_voice_start_attempt = 0.0
+        window._voice_status = Mock(return_value=SimpleNamespace(
+            service_online=False,
+            configuration_enabled=True,
+        ))
+        calls: list[str] = []
+
+        def retry(**_kwargs) -> None:
+            calls.append("retry")
+            window.last_voice_start_attempt = 31.0
+
+        window._start_voice_task = Mock(side_effect=retry)
+        with (
+            patch(
+                "readerpc_launcher.write_disabled_reader_context_snapshot",
+                side_effect=lambda _paths: calls.append("tombstone"),
+            ) as tombstone,
+            patch("readerpc_launcher.time.monotonic", return_value=31.0),
+        ):
+            window._ensure_voice_online()
+            window._ensure_voice_online()
+        self.assertEqual(calls, ["tombstone", "retry"])
+        tombstone.assert_called_once_with(window.bridge_paths)
+        self.assertEqual(window.root.after.call_count, 2)
+
+    def test_monitor_marks_each_new_online_to_offline_transition(self) -> None:
+        window = self.window_without_tk()
+        window.voice_snapshot_offline_marked = True
+        window._voice_status = Mock(side_effect=(
+            SimpleNamespace(service_online=True, configuration_enabled=True),
+            SimpleNamespace(service_online=False, configuration_enabled=False),
+        ))
+        with patch(
+            "readerpc_launcher.write_disabled_reader_context_snapshot"
+        ) as tombstone:
+            window._ensure_voice_online()
+            window._ensure_voice_online()
+        tombstone.assert_called_once_with(window.bridge_paths)
+        self.assertTrue(window.voice_snapshot_offline_marked)
+
+    def test_busy_unrelated_work_still_revokes_without_starting_retry(self) -> None:
+        window = self.window_without_tk()
+        window.busy = True
+        window._voice_status = Mock(return_value=SimpleNamespace(
+            service_online=False,
+            configuration_enabled=True,
+        ))
+        window._start_voice_task = Mock()
+        with patch(
+            "readerpc_launcher.write_disabled_reader_context_snapshot"
+        ) as tombstone:
+            window._ensure_voice_online()
+        tombstone.assert_called_once_with(window.bridge_paths)
+        window._start_voice_task.assert_not_called()
+
+    def test_monitor_does_not_clobber_snapshot_during_known_start(self) -> None:
+        window = self.window_without_tk()
+        window.busy = True
+        window.voice_start_in_progress = True
+        window._voice_status = Mock()
+        with patch(
+            "readerpc_launcher.write_disabled_reader_context_snapshot"
+        ) as tombstone:
+            window._ensure_voice_online()
+        window._voice_status.assert_not_called()
+        tombstone.assert_not_called()
+
+    def test_monitor_tombstone_failure_is_visible_and_polling_continues(self) -> None:
+        window = self.window_without_tk()
+        window._voice_status = Mock(return_value=SimpleNamespace(
+            service_online=False,
+            configuration_enabled=False,
+        ))
+        with patch(
+            "readerpc_launcher.write_disabled_reader_context_snapshot",
+            side_effect=OSError("snapshot-write-denied"),
+        ):
+            window._ensure_voice_online()
+        window.footer.configure.assert_called_once()
+        self.assertIn(
+            "snapshot-write-denied",
+            window.footer.configure.call_args.kwargs["text"],
+        )
+        window.root.after.assert_called_once_with(
+            5_000,
+            window._ensure_voice_online,
         )
 
     def test_voice_start_requires_matching_fresh_runtime(self) -> None:

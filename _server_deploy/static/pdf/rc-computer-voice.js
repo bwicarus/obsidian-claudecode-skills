@@ -3297,7 +3297,22 @@
       );
     }
     contextDeliveryMode = value.mode;
+    applyReaderPCSnapshotAuthority(value.mode);
     return value.mode;
+  }
+
+  function nativeReaderOwnsSnapshotLifecycle() {
+    return window.__BW_NATIVE_COMPUTER_VOICE__ === true;
+  }
+
+  function applyReaderPCSnapshotAuthority(mode) {
+    if (!nativeReaderOwnsSnapshotLifecycle()) return false;
+    try {
+      if (RC.ctxSync && typeof RC.ctxSync._applyServerMode === "function") {
+        return RC.ctxSync._applyServerMode(mode);
+      }
+    } catch (_) {}
+    return false;
   }
 
   function queryContextMode(channel) {
@@ -5746,7 +5761,7 @@
   }
 
   function readerContextSurfaceVisible() {
-    if (nativeReaderUsesDedicatedContextLink()) {
+    if (nativeReaderOwnsSnapshotLifecycle()) {
       // In the native App, Swift owns the actual scene lifecycle.  WKWebView's
       // document.visibilityState can become hidden while a native voice sheet
       // or overlay is presented even though the Reader scene is still active.
@@ -5762,7 +5777,7 @@
     // The App voice socket owns audio only. Reader context has its own
     // /reader-context/v1 connection and must stay alive whether this device,
     // another device, or no device currently owns the voice session.
-    if (nativeReaderUsesDedicatedContextLink()) {
+    if (nativeReaderOwnsSnapshotLifecycle()) {
       nativeContextHandoffPending = false;
       stopNativeContextRelay();
       return reconcileSnapshotLink();
@@ -5798,6 +5813,14 @@
   function prepareNativeContextHandoff() {
     nativeContextHandoffPending = true;
     stopNativeContextRelay();
+    if (nativeReaderOwnsSnapshotLifecycle()) {
+      return reconcileSnapshotLink().then(function () {
+        return "native-ready";
+      }).catch(function (error) {
+        nativeContextHandoffPending = false;
+        throw error;
+      });
+    }
     var modeReady = contextDeliveryMode
       ? Promise.resolve(contextDeliveryMode)
       : (
@@ -5838,10 +5861,13 @@
   }
 
   function snapshotLinkWanted() {
-    var independentOfVoice = nativeReaderUsesDedicatedContextLink();
+    var independentOfVoice = nativeReaderOwnsSnapshotLifecycle();
+    var modeAllowsSnapshot = independentOfVoice
+      ? contextDeliveryMode !== CONTEXT_DELIVERY_LEGACY
+      : contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT;
     return !!(
       ownsReaderUi() &&
-      contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT &&
+      modeAllowsSnapshot &&
       !contextModeChanging &&
       readerContextSurfaceVisible() &&
       (
@@ -5985,6 +6011,11 @@
       snapshotReconnectTimer = null;
       reconcileSnapshotLink();
     }, delay);
+    // Node 合同环境的 Timeout 会单独挂住进程;浏览器返回数字、无此方法。
+    // 这只改变测试进程生命期,不改变 App 中的有界退避。
+    if (snapshotReconnectTimer && typeof snapshotReconnectTimer.unref === "function") {
+      snapshotReconnectTimer.unref();
+    }
   }
 
   function nextSnapshotReconnectDelay() {
@@ -6065,6 +6096,16 @@
   }
 
   function resumeSnapshotLinkFromForeground(event) {
+    if (
+      nativeReaderOwnsSnapshotLifecycle() &&
+      !snapshotLink &&
+      event && event.detail && event.detail.probe === true
+    ) {
+      // ReaderPC 可以在 App 已经打开后启用快照。Swift 的有界前台巡检是重新
+      // 询问服务器的时机;先丢弃上次 legacy 结论,但不打开生产 gate,直到新回执到达。
+      contextDeliveryMode = null;
+      applyReaderPCSnapshotAuthority(null);
+    }
     if (!snapshotLinkWanted()) return reconcileSnapshotLink();
     // iOS may suspend this one-second timer while the PWA is backgrounded.
     // Foreground signals are an explicit wake-up: discard the suspended timer
@@ -6121,6 +6162,7 @@
       snapshotLink = null;
       state.stopped = true;
       snapshotTransportState = "failed";
+      applyReaderPCSnapshotAuthority(null);
       stopContextPump(state);
       var failedChannel = state.channel;
       state.channel = null;
@@ -6200,6 +6242,7 @@
         state.stopped = true;
         snapshotLink = null;
         snapshotTransportState = "failed";
+        applyReaderPCSnapshotAuthority(null);
         stopContextPump(state);
         emitStatus({
           state: "warning",
@@ -6294,6 +6337,7 @@
       if (snapshotLink === state) snapshotLink = null;
       state.stopped = true;
       snapshotTransportState = "failed";
+      applyReaderPCSnapshotAuthority(null);
       stopContextPump(state);
       var failedChannel = state.channel;
       state.channel = null;
@@ -7129,7 +7173,7 @@
   }
 
   function contextSyncChanged() {
-    if (nativeReaderUsesDedicatedContextLink()) {
+    if (nativeReaderOwnsSnapshotLifecycle()) {
       stopNativeContextRelay();
       return reconcileSnapshotLink();
     }
@@ -7163,6 +7207,20 @@
   }
 
   function bootstrapNativeSnapshotLink() {
+    if (nativeReaderOwnsSnapshotLifecycle()) {
+      // App 不读取、不确认、不改写旧 context-sync 偏好。先连 ReaderPC,
+      // 再以 CONTEXT-MODE 作为唯一权威;这也允许页面先开、服务后开。
+      contextDeliveryMode = null;
+      applyReaderPCSnapshotAuthority(null);
+      return reconcileSnapshotLink().catch(function (error) {
+        emitStatus({
+          state: "warning",
+          message: error && error.message || "ReaderPC 实时快照初始化失败",
+          code: error && error.code || "BW_READER_CONTEXT_BOOTSTRAP_FAILED",
+        });
+        return null;
+      });
+    }
     if (!RC.ctxSync || typeof RC.ctxSync.getConfig !== "function") {
       emitStatus({
         state: "warning",

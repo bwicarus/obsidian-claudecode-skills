@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import os
-from datetime import datetime, timezone
 from pathlib import Path
 import queue
 import subprocess
@@ -12,7 +11,6 @@ import time
 import tkinter as tk
 from tkinter import messagebox, ttk
 from typing import Any, Callable
-import uuid
 
 from PIL import Image, ImageDraw
 import pystray
@@ -44,6 +42,7 @@ from readerpc_services import (
     ReaderPCServiceError,
     format_pc_progress,
     read_reader_context_status,
+    write_disabled_reader_context_snapshot as write_offline_snapshot,
     write_readerpc_status,
 )
 from voice_history_sidebar_sync import (
@@ -54,16 +53,24 @@ from voice_history_sidebar_sync import (
 )
 
 
-APP_VERSION = "0.1.18"
+APP_VERSION = "0.1.19"
 PREFERENCES_CONTRACT = "readerpc-server-config/1"
 CODEX_VOICE_KEEPALIVE_CONTRACT = "reader-codex-voice-keepalive/1"
-READER_CONTEXT_SNAPSHOT_CONTRACT = "reader-context-snapshot/1"
 POLL_INTERVAL_MS = 2_500
 STATUS_PUBLISH_INTERVAL_SECONDS = 10.0
 PC_RESTART_BACKOFF_SECONDS = 30.0
 VOICE_RESTART_BACKOFF_SECONDS = 30.0
 VOICE_START_TIMEOUT_SECONDS = 8.0
 VOICE_START_POLL_SECONDS = 0.1
+
+
+def write_disabled_reader_context_snapshot(
+    bridge_paths: BridgePaths,
+    **kwargs: Any,
+) -> None:
+    """Compatibility wrapper around the shared ReaderPC lifecycle writer."""
+
+    write_offline_snapshot(bridge_paths.root, **kwargs)
 
 
 def prepare_readerpc_shortcut_broker() -> WindowsShortcutBroker | None:
@@ -154,59 +161,6 @@ def set_codex_voice_keep_active(
     )
 
 
-def write_disabled_reader_context_snapshot(
-    bridge_paths: BridgePaths,
-    *,
-    now: datetime | None = None,
-    producer_instance_id: str | None = None,
-) -> None:
-    """Atomically revoke every Reader action target when ReaderPC stops."""
-
-    instant = now or datetime.now(timezone.utc)
-    if instant.tzinfo is None:
-        instant = instant.replace(tzinfo=timezone.utc)
-    instant = instant.astimezone(timezone.utc)
-    producer = producer_instance_id or uuid.uuid4().hex
-    try:
-        uuid.UUID(hex=producer)
-    except (AttributeError, TypeError, ValueError) as exc:
-        raise ReaderPCServiceError("停用快照 producer 标识无效。") from exc
-    if len(producer) != 32 or producer.casefold() != producer:
-        raise ReaderPCServiceError("停用快照 producer 标识无效。")
-    epoch_ms = int(instant.timestamp() * 1000)
-    _atomic_json(
-        bridge_paths.root / "runtime" / "reader-context-snapshot.json",
-        {
-            "schema": READER_CONTEXT_SNAPSHOT_CONTRACT,
-            "producerInstanceId": producer,
-            "revision": 0,
-            "updatedAtUtc": instant.isoformat().replace("+00:00", "Z"),
-            "latestEvent": {
-                "source": "readerpc-service",
-                "seq": None,
-                "id": f"readerpc-disabled-{producer}",
-                "type": "readerpc.disabled",
-                "ts": epoch_ms,
-            },
-            "activeReading": None,
-            "contextStatus": "disabled",
-            "currentPage": None,
-            "selection": {
-                "state": "unknown",
-                "text": None,
-                "ref": None,
-                "reason": "readerpc-service-disabled",
-            },
-            "focus": {
-                "state": "unknown",
-                "kind": None,
-                "ref": None,
-                "reason": "readerpc-service-disabled",
-            },
-        },
-    )
-
-
 def enable_readerpc_voice(
     bridge_paths: BridgePaths,
     process_runner: WindowsProcessRunner,
@@ -215,13 +169,18 @@ def enable_readerpc_voice(
 
     previous = load_direct_config(bridge_paths)
     if previous is None:
-        if bridge_paths.direct_config.exists():
-            raise ReaderPCServiceError(
-                "现有电脑语音配置无效；拒绝静默覆盖。"
-            )
-        raise ReaderPCServiceError(
-            "尚未完成电脑语音配置，请先打开详细设置。"
+        message = (
+            "现有电脑语音配置无效；拒绝静默覆盖。"
+            if bridge_paths.direct_config.exists()
+            else "尚未完成电脑语音配置，请先打开详细设置。"
         )
+        try:
+            write_disabled_reader_context_snapshot(bridge_paths)
+        except Exception as exc:
+            raise ReaderPCServiceError(
+                f"{message} 同时无法撤销旧实时快照：{exc}"
+            ) from exc
+        raise ReaderPCServiceError(message)
     try:
         set_direct_config_enabled(
             bridge_paths,
@@ -232,6 +191,10 @@ def enable_readerpc_voice(
         return start_readerpc_voice(bridge_paths, process_runner)
     except Exception as exc:
         rollback_failures: list[str] = []
+        try:
+            write_disabled_reader_context_snapshot(bridge_paths)
+        except Exception as rollback_exc:
+            rollback_failures.append(f"撤销实时快照：{rollback_exc}")
         try:
             set_codex_voice_keep_active(bridge_paths, False)
         except Exception as rollback_exc:
@@ -381,6 +344,8 @@ class ReaderPCWindow:
         self.last_pc_start_attempt = 0.0
         self.last_voice_start_attempt = 0.0
         self.voice_recovery_in_progress = False
+        self.voice_start_in_progress = False
+        self.voice_snapshot_offline_marked = False
         self.last_status_publish = 0.0
         self.history_stop_event = threading.Event()
         self.history_synchronizer = CaptureBoundHistorySynchronizer(
@@ -704,12 +669,18 @@ class ReaderPCWindow:
             return
         self.last_voice_start_attempt = time.monotonic()
         self.voice_recovery_in_progress = recovery
+        self.voice_start_in_progress = True
 
         def start() -> int:
-            return enable_readerpc_voice(
-                self.bridge_paths,
-                self.process_runner,
-            )
+            try:
+                pid = enable_readerpc_voice(
+                    self.bridge_paths,
+                    self.process_runner,
+                )
+                self.voice_snapshot_offline_marked = False
+                return pid
+            finally:
+                self.voice_start_in_progress = False
 
         self._run_task(
             (
@@ -771,16 +742,34 @@ class ReaderPCWindow:
     def _ensure_voice_online(self) -> None:
         if self.closed or self.closing:
             return
-        if not self.busy:
-            status = self._voice_status()
-            if (
-                status.configuration_enabled
-                and not status.service_online
-                and time.monotonic() - self.last_voice_start_attempt
-                >= VOICE_RESTART_BACKOFF_SECONDS
-            ):
-                self._start_voice_task(recovery=True)
-        self.root.after(5_000, self._ensure_voice_online)
+        try:
+            # Do not race the known start transaction: it owns config, process
+            # and the first fresh runtime heartbeat. Other busy work (for
+            # example PC preprocessing) must not leave a stale ready snapshot.
+            if not self.voice_start_in_progress:
+                status = self._voice_status()
+                if status.service_online:
+                    self.voice_snapshot_offline_marked = False
+                else:
+                    if not self.voice_snapshot_offline_marked:
+                        write_disabled_reader_context_snapshot(
+                            self.bridge_paths
+                        )
+                        self.voice_snapshot_offline_marked = True
+                    if (
+                        not self.busy
+                        and status.configuration_enabled
+                        and time.monotonic() - self.last_voice_start_attempt
+                        >= VOICE_RESTART_BACKOFF_SECONDS
+                    ):
+                        self._start_voice_task(recovery=True)
+        except (BridgeError, ReaderPCServiceError, OSError, ValueError) as exc:
+            self.footer.configure(
+                text=f"电脑语音离线状态确认失败：{exc}",
+                foreground="#c62828",
+            )
+        finally:
+            self.root.after(5_000, self._ensure_voice_online)
 
     def open_legacy_voice_settings(self) -> None:
         executable = self.bridge_paths.desktop_launcher

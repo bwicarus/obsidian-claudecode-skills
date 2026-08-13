@@ -9,6 +9,7 @@ import subprocess
 import sys
 import time
 from typing import Any, Callable, Mapping, Protocol, Sequence
+import uuid
 
 
 PRODUCT_NAME = "ReaderPC 服务器"
@@ -181,6 +182,8 @@ def read_reader_context_status(
     value = _read_json(snapshot_path) or {}
     if value.get("schema") != READER_CONTEXT_SNAPSHOT_CONTRACT:
         return ReaderContextStatus(False, False, "", "", None)
+    if value.get("contextStatus") == "disabled":
+        return ReaderContextStatus(False, False, "", "", None)
     active = value.get("activeReading")
     active = active if isinstance(active, dict) else {}
     page = value.get("currentPage")
@@ -202,6 +205,59 @@ def read_reader_context_status(
         title=str(active.get("title") or page.get("title") or "")[:160],
         kind=str(active.get("kind") or page.get("kind") or "")[:40],
         updated_at_epoch_ms=updated if isinstance(updated, int) else None,
+    )
+
+
+def write_disabled_reader_context_snapshot(
+    bridge_root: Path,
+    *,
+    now: datetime | None = None,
+    producer_instance_id: str | None = None,
+) -> None:
+    """Atomically revoke every Reader action target while ReaderPC is offline."""
+
+    instant = now or datetime.now(timezone.utc)
+    if instant.tzinfo is None:
+        instant = instant.replace(tzinfo=timezone.utc)
+    instant = instant.astimezone(timezone.utc)
+    producer = producer_instance_id or uuid.uuid4().hex
+    try:
+        uuid.UUID(hex=producer)
+    except (AttributeError, TypeError, ValueError) as exc:
+        raise ReaderPCServiceError("停用快照 producer 标识无效。") from exc
+    if len(producer) != 32 or producer.casefold() != producer:
+        raise ReaderPCServiceError("停用快照 producer 标识无效。")
+    epoch_ms = int(instant.timestamp() * 1000)
+    _atomic_json(
+        bridge_root / "runtime" / "reader-context-snapshot.json",
+        {
+            "schema": READER_CONTEXT_SNAPSHOT_CONTRACT,
+            "producerInstanceId": producer,
+            "revision": 0,
+            "updatedAtUtc": instant.isoformat().replace("+00:00", "Z"),
+            "latestEvent": {
+                "source": "readerpc-service",
+                "seq": None,
+                "id": f"readerpc-disabled-{producer}",
+                "type": "readerpc.disabled",
+                "ts": epoch_ms,
+            },
+            "activeReading": None,
+            "contextStatus": "disabled",
+            "currentPage": None,
+            "selection": {
+                "state": "unknown",
+                "text": None,
+                "ref": None,
+                "reason": "readerpc-service-disabled",
+            },
+            "focus": {
+                "state": "unknown",
+                "kind": None,
+                "ref": None,
+                "reason": "readerpc-service-disabled",
+            },
+        },
     )
 
 

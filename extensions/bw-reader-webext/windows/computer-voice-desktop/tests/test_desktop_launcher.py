@@ -312,7 +312,11 @@ class DesktopLauncherTests(unittest.TestCase):
     def test_disable_and_stop_uses_atomic_bounded_helper(self) -> None:
         window = BridgeWindow.__new__(BridgeWindow)
         window.root = object()
-        window.paths = object()
+        window.paths = type(
+            "Paths",
+            (),
+            {"root": Path("C:/fixed-readerpc")},
+        )()
         window.process_runner = object()
         window.footer = FakeWidget()
         window.refresh_static = lambda: None
@@ -320,6 +324,13 @@ class DesktopLauncherTests(unittest.TestCase):
 
         def immediate(_label, action, success):
             success(action())
+
+        def disable_with_tombstones(*_args, **kwargs):
+            calls.append("opt-out")
+            kwargs["after_disable"]()
+            calls.append("stop")
+            kwargs["after_stop"]()
+            return True, True
 
         window.run_task = immediate
         with (
@@ -329,16 +340,29 @@ class DesktopLauncherTests(unittest.TestCase):
             ),
             patch(
                 "desktop_launcher.disable_and_stop_direct_service",
-                side_effect=lambda *_:
-                    calls.append("disable-stop") or (True, True),
+                side_effect=disable_with_tombstones,
             ) as disable_stop,
+            patch(
+                "desktop_launcher.write_disabled_reader_context_snapshot",
+                side_effect=lambda _paths: calls.append("tombstone"),
+            ),
         ):
             window.on_disable_config()
-        self.assertEqual(calls, ["disable-stop"])
-        disable_stop.assert_called_once_with(
-            window.paths,
-            window.process_runner,
+        self.assertEqual(
+            calls,
+            ["opt-out", "tombstone", "stop", "tombstone"],
         )
+        self.assertEqual(disable_stop.call_count, 1)
+        self.assertEqual(
+            disable_stop.call_args.args,
+            (window.paths, window.process_runner),
+        )
+        self.assertTrue(callable(
+            disable_stop.call_args.kwargs["after_disable"]
+        ))
+        self.assertTrue(callable(
+            disable_stop.call_args.kwargs["after_stop"]
+        ))
 
     def test_desktop_ui_has_no_pairing_action_or_pairing_copy(self) -> None:
         source = (SOURCE_ROOT / "desktop_launcher.py").read_text(

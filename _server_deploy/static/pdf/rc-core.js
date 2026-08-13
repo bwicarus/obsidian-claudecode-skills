@@ -80,8 +80,8 @@
   // ══ 双向上下文同步(2026-07-26):三宿主唯一上报器 ═══════════════════════════════
   // PDF/EPUB/HTML(以及扩展 web 宿主)各自只负责说一句「我现在在哪本、第几页」,
   // 合并/节流/单次在途/心跳/开关 gate 全都只有这一份实现——宿主侧不许再各写一套。
-  // 铁律:总开关默认关。关着的时候不 POST、不轮询、不挂任何监听器,localStorage 里
-  // 没有这把钥匙就一个字节都不发(所以全新浏览器开箱即零开销)。
+  // 普通网页/扩展仍由本地明示偏好控制。原生 App 是例外:它的快照服务由
+  // ReaderPC 拥有,App 只接受 Windows CONTEXT-MODE 的易失运行时授权,不保存也不反向改写。
   var _CTX_LS = 'eph-ctx-sync';
   // 时序合同(用户拍板 2026-07-27):**默认即时推**,不搞一刀切长防抖。
   // 唯一需要合并的是「连续翻页/快速滚动」这种临时位置——持续导航期间不推中间页,
@@ -98,7 +98,35 @@
     base: '', pend: null, canonical: null,
     timer: null, inflight: false, dirty: false, hb: null, bound: false
   };
-  function _ctxOn() { try { return localStorage.getItem(_CTX_LS) === '1'; } catch (e) { return false; } }
+  var _ctxServerMode = null;
+  function _ctxServerOwned() { return window.__BW_NATIVE_COMPUTER_VOICE__ === true; }
+  function _ctxOn() {
+    if (_ctxServerOwned()) return _ctxServerMode === 'snapshot-mcp';
+    try { return localStorage.getItem(_CTX_LS) === '1'; } catch (e) { return false; }
+  }
+  function _ctxApplyServerMode(mode) {
+    if (!_ctxServerOwned()) return false;
+    var wasOn = _ctxOn();
+    _ctxServerMode = mode === 'snapshot-mcp' ? mode : null;
+    var isOn = _ctxOn();
+    if (isOn) {
+      _ctxBind(true);
+      if (_ctxS.pend) {
+        _ctxSchedule(0);
+        _ctxArmDwell(_ctxS.pend);
+      }
+    } else if (wasOn || _ctxS.bound || _ctxS.timer) {
+      _ctxClear();
+      if (_dwellTimer) { clearTimeout(_dwellTimer); _dwellTimer = null; }
+      _ctxS.dirty = false;
+      _ctxS.canonical = null;
+      _ctxBind(false);
+      if (_og.drawTimer) { clearTimeout(_og.drawTimer); _og.drawTimer = null; }
+      _og.drawPend = null;
+      _og.focus = null;
+    }
+    return isOn;
+  }
   function _ctxU(p) { return (_ctxS.base || '') + p; }
   function _ctxClear() { if (_ctxS.timer) { clearTimeout(_ctxS.timer); _ctxS.timer = null; } }
   function _ctxSchedule(ms) { _ctxClear(); _ctxS.timer = setTimeout(_ctxSend, ms); }
@@ -261,7 +289,7 @@
   // ══ 出向上下文:焦点 + 绘图版本(2026-07-28,任务书 A5 前端接线)═════════════
   // 唯一实现放共享层,PDF/EPUB/HTML 三宿主都调同一份;没有该能力的宿主(如 HTML 无墨迹)
   // 不调 drawingTouched 即自然降级,不需要各自写分支。
-  // 与 ctxSync 共用同一把总开关:关着时一个字节都不发(用户已拍板的零开销约定)。
+  // 与 ctxSync 共用同一运行时 gate:普通网页由用户偏好开启,原生 App 只由 ReaderPC 授权。
   var _og = { focus: null, drawTimer: null, drawPend: null, inflight: false };
   var _OG_DRAW_MS = 1000;   // 绘图停手约 1s 才提交 —— 逐笔发送会把服务端和网络都打满
   var _OG_DRAW_EVENT = 'bw-reader-drawing-state';
@@ -503,10 +531,12 @@
     LS_KEY: _CTX_LS,
     navDebounceMs: _CTX_NAV_MS,
     enabled: _ctxOn,
+    _serverSnapshotEnabled: function () { return _ctxServerOwned() && _ctxOn(); },
+    _applyServerMode: _ctxApplyServerMode,
     setBase: function (origin) { _ctxS.base = origin || ''; },   // 扩展在别人的站上跑,要显式指向 Pi
     // 宿主调这一个入口。patch:{kind:'pdf'|'epub'|'html'|'web', file|url, pos, title, total, selection, reason}
     report: function (patch, opts) {
-      if (!_ctxOn() || !patch || !patch.kind) return false;
+      if (!patch || !patch.kind) return false;
       // 安全护栏:扩展在别人的站点里跑,相对路径会把书名/页码/标题 POST 到**第三方站点**。
       // 所以网页宿主必须先 setBase(Pi 源) 才允许上报;没设就干脆不发(宁可少一条上下文)。
       if (patch.kind === 'web' && !_ctxS.base) return false;
@@ -537,6 +567,9 @@
       }
       _ctxS.pend = next;
       if (!_ctxCanonicalMatches(next, _ctxS.canonical)) _ctxS.canonical = null;
+      // App 页面可能先打开、ReaderPC 后启动。当 Windows 尚未授权时保留最新页事实,
+      // 但不写本地/网络;收到 snapshot-mcp 后 _ctxApplyServerMode 会立即补发,无需再翻页。
+      if (!_ctxOn()) return false;
       _ctxBind(true);
       _ctxSchedule(navOnly ? _CTX_NAV_MS : _CTX_NOW_MS);
       _ctxArmDwell(next);
@@ -544,6 +577,14 @@
     },
     // 设置面板唯一入口:同时管两个方向(前端上报 + Pi→Windows 快照推送)
     setEnabled: function (on) {
+      if (_ctxServerOwned()) {
+        return Promise.resolve({
+          ok: true,
+          enabled: _ctxOn(),
+          deliveryMode: _ctxServerMode,
+          authority: 'readerpc'
+        });
+      }
       on = !!on;
       try { localStorage.setItem(_CTX_LS, on ? '1' : '0'); } catch (e) {}
       if (!on) {

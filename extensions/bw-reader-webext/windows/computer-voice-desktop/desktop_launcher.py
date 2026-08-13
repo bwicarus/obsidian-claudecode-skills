@@ -59,6 +59,7 @@ from voice_history_sidebar_sync import (
     monitor_capture_history,
     run_service_bound_history_worker,
 )
+from readerpc_services import write_disabled_reader_context_snapshot
 
 
 APP_TITLE = "电脑客户端桥接器"
@@ -997,6 +998,12 @@ class BridgeWindow:
             return disable_and_stop_direct_service(
                 self.paths,
                 self.process_runner,
+                after_disable=lambda: write_disabled_reader_context_snapshot(
+                    self.paths.root
+                ),
+                after_stop=lambda: write_disabled_reader_context_snapshot(
+                    self.paths.root
+                ),
             )
 
         def success(result: tuple[bool, bool]) -> None:

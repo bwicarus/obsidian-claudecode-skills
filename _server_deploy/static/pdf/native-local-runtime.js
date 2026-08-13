@@ -1690,6 +1690,13 @@
     }, error && error.httpStatus || fallbackStatus || 500);
   }
   function contextSyncEnabled() {
+    if (root.__BW_NATIVE_COMPUTER_VOICE__ === true) {
+      try {
+        return !!(root.RC && root.RC.ctxSync &&
+          typeof root.RC.ctxSync._serverSnapshotEnabled === 'function' &&
+          root.RC.ctxSync._serverSnapshotEnabled());
+      } catch (_) { return false; }
+    }
     return readLocalContextSync().enabled === true;
   }
   function requireContextSyncEnabled() {

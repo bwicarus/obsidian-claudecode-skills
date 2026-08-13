@@ -969,6 +969,8 @@ function createHarness(overrides = {}) {
     contextSyncEnabled: false,
     serverContextSyncEnabled: null,
     contextSyncStorage: null,
+    contextConfigReads: 0,
+    serverModeApplications: [],
     activeReading: null,
     serverActiveReading: null,
     contextModePosts: [],
@@ -1099,6 +1101,7 @@ function createHarness(overrides = {}) {
           return scenarioContextSyncEnabled(scenario);
         },
         getConfig() {
+          scenario.contextConfigReads += 1;
           const enabled = typeof scenario.serverContextSyncEnabled === "boolean"
             ? scenario.serverContextSyncEnabled
             : scenarioContextSyncEnabled(scenario);
@@ -1110,6 +1113,13 @@ function createHarness(overrides = {}) {
             enabled,
             deliveryMode: scenario.contextDeliveryMode,
           });
+        },
+        _serverSnapshotEnabled() {
+          return scenario.serverModeApplications.at(-1) === "snapshot-mcp";
+        },
+        _applyServerMode(mode) {
+          scenario.serverModeApplications.push(mode || null);
+          return mode === "snapshot-mcp";
         },
         _state() {
           return {
@@ -3328,8 +3338,8 @@ test("原生 App 只有精确 loopback origin 与原生标记同时成立才直�
   });
   const available = await nativeApp.api.availability();
   assert.equal(available.state, "idle");
-  assert.equal(nativeApp.server.sockets.length, 1);
-  assert.equal(nativeApp.scenario.socketUrls[0], ENDPOINT);
+  assert.equal(nativeApp.server.sockets.length, 2);
+  assert.deepEqual(nativeApp.scenario.socketUrls, [CONTEXT_ENDPOINT, ENDPOINT]);
 
   for (const candidate of [
     { origin: NATIVE_APP_ORIGIN, nativeComputerVoice: false },
@@ -3345,6 +3355,7 @@ test("原生 App 只有精确 loopback origin 与原生标记同时成立才直�
     );
     assert.equal(rejected.server.sockets.length, 0, candidate.origin);
   }
+  await disableSnapshot(nativeApp);
 });
 
 test("原生 App 即使 eph-ctx-sync=0 仍完成 context 握手并启动快照泵", async () => {
@@ -3382,8 +3393,39 @@ test("原生 App 即使 eph-ctx-sync=0 仍完成 context 握手并启动快照�
     actions.indexOf("visual-register") > actions.indexOf("context-open"),
   );
   assert.equal(harness.scenario.contextModePosts.length, 0);
+  assert.equal(harness.scenario.contextConfigReads, 0,
+    "native bootstrap must not read the App context-sync preference");
+  assert.equal(contextSyncStorage.get("eph-ctx-sync"), "0",
+    "ReaderPC authority must not rewrite the old App switch");
+  assert.ok(harness.scenario.serverModeApplications.includes("snapshot-mcp"));
 
   await disableSnapshot(harness);
+});
+
+test("原生 App 先探测 ReaderPC，legacy 回执会停用生产而不读取 App 开关", async () => {
+  const contextSyncStorage = new Map([["eph-ctx-sync", "1"]]);
+  const harness = createHarness({
+    origin: NATIVE_APP_ORIGIN,
+    nativeComputerVoice: true,
+    nativeReaderForeground: true,
+    contextSyncStorage,
+    contextDeliveryMode: "legacy-inject",
+  });
+
+  await waitForRequest(harness, "context-mode");
+  await waitForCondition(
+    () => harness.server.sockets[0]?.readyState === 3,
+    "native legacy probe close",
+  );
+  assert.equal(harness.scenario.contextConfigReads, 0);
+  assert.equal(contextSyncStorage.get("eph-ctx-sync"), "1");
+  assert.ok(harness.scenario.serverModeApplications.includes("legacy-inject"));
+  assert.notEqual(harness.scenario.serverModeApplications.at(-1), "snapshot-mcp");
+  assert.equal(
+    harness.server.requests.some((request) => request.type === "context-open"),
+    false,
+  );
+  assert.equal(harness.scenario.activeReadingRequests.length, 0);
 });
 
 test("原生 App 前台标志是专用快照可见性的权威而不受隐藏 WebView 误杀", async () => {
@@ -3640,7 +3682,7 @@ test("原生 App 本地书把当前视口前后正文写进本地 page.context",
   await disableSnapshot(harness);
 });
 
-test("原生 App 未打开设置且未启动语音也会恢复开关并独立上报快照", async () => {
+test("原生 App 未打开设置且未启动语音也按 ReaderPC 模式独立上报快照", async () => {
   const contextSyncStorage = new Map();
   const harness = createHarness({
     origin: NATIVE_APP_ORIGIN,
@@ -3667,7 +3709,9 @@ test("原生 App 未打开设置且未启动语音也会恢复开关并独立上
     "startup active-reading pump",
   );
 
-  assert.equal(contextSyncStorage.get("eph-ctx-sync"), "1");
+  assert.equal(contextSyncStorage.has("eph-ctx-sync"), false);
+  assert.equal(harness.scenario.contextConfigReads, 0);
+  assert.ok(harness.scenario.serverModeApplications.includes("snapshot-mcp"));
   assert.equal(harness.scenario.socketUrls[0], CONTEXT_ENDPOINT);
   assert.equal(
     harness.server.requests.some((request) => request.type === "start"),

@@ -393,6 +393,7 @@ async function harness(options = {}) {
       pathname: shellPath,
     },
     __BW_NATIVE_LOCAL_READER__: true,
+    __BW_NATIVE_COMPUTER_VOICE__: options.nativeComputerVoice === true,
     __BW_NATIVE_LOCAL_BOOK_ID__: options.bookId || DEFAULT_LOCAL_BOOK_ID,
     __BW_NATIVE_LOCAL_BASE_PATH__: "/r/" + "a".repeat(64),
     __BW_NATIVE_INTERFACE_MANIFEST__: clone(
@@ -425,6 +426,12 @@ async function harness(options = {}) {
       const list = eventListeners.get(type) || [];
       list.push(listener);
       eventListeners.set(type, list);
+    },
+    removeEventListener(type, listener) {
+      eventListeners.set(
+        type,
+        (eventListeners.get(type) || []).filter((item) => item !== listener),
+      );
     },
     dispatchEvent(event) {
       for (const listener of eventListeners.get(event.type) || []) listener(event);
@@ -2102,6 +2109,84 @@ test("shared Reader reporting reaches the native snapshot state end to end", asy
     ["/pdf/api/context-sync", "/pdf/api/active-reading"],
   );
   assert.equal(JSON.parse(result.gatewayMessages[1].body).pos, 17);
+});
+
+test("native Reader snapshot production follows ReaderPC authority instead of the App switch", async () => {
+  const localStorageState = new Map([["eph-ctx-sync", "0"]]);
+  const result = await harness({
+    nativeComputerVoice: true,
+    localStorageState,
+    setTimeout(callback, delay) {
+      if (delay === 0) queueMicrotask(callback);
+      return delay + 1;
+    },
+    clearTimeout() {},
+    setInterval() { return 1; },
+    clearInterval() {},
+  });
+  vm.runInContext(RC_CORE, result.context, { filename: "rc-core.js" });
+  const currentRecord = () => {
+    for (const [key, record] of result.dataStoresState.device.values.entries()) {
+      if (key.startsWith("native-outgoing-active-reading:")) {
+        return clone(record.value.payload);
+      }
+    }
+    return null;
+  };
+  const waitForPosition = async (position) => {
+    for (let attempt = 0; attempt < 30; attempt += 1) {
+      await new Promise((resolve) => setTimeout(resolve, 0));
+      if (currentRecord()?.pos === position) return;
+    }
+    assert.fail(`native active-reading did not reach page ${position}`);
+  };
+
+  assert.equal(result.context.RC.ctxSync.report({
+    kind: "pdf",
+    file: DEFAULT_LOCAL_FILE,
+    pos: 17,
+    title: "ReaderPC authority",
+    selection: "保留到服务器开启",
+  }, { immediate: true }), false);
+  assert.equal(currentRecord(), null, "server 未确认前不得写快照");
+  assert.equal(localStorageState.get("eph-ctx-sync"), "0");
+
+  assert.equal(
+    result.context.RC.ctxSync._applyServerMode("snapshot-mcp"),
+    true,
+  );
+  await waitForPosition(17);
+  assert.equal(currentRecord().selection, "保留到服务器开启");
+  assert.equal(localStorageState.get("eph-ctx-sync"), "0",
+    "ReaderPC 启用不得反写 App 旧开关");
+
+  localStorageState.set("eph-ctx-sync", "1");
+  localStorageState.set("eph-ctx-sync", "0");
+  assert.equal(result.context.RC.ctxSync.report({
+    kind: "pdf", file: DEFAULT_LOCAL_FILE, pos: 18,
+  }, { immediate: true }), true);
+  await waitForPosition(18);
+
+  assert.equal(
+    result.context.RC.ctxSync._applyServerMode("legacy-inject"),
+    false,
+  );
+  assert.equal(result.context.RC.ctxSync.report({
+    kind: "pdf", file: DEFAULT_LOCAL_FILE, pos: 19,
+  }, { immediate: true }), false);
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  assert.equal(currentRecord().pos, 18, "ReaderPC 停止后不得继续生产");
+  const disabled = await result.context.fetch("/pdf/api/active-reading");
+  assert.equal(disabled.status, 409);
+  assert.equal((await disabled.json()).code, "BW_LOCAL_CONTEXT_SYNC_DISABLED");
+
+  assert.equal(
+    result.context.RC.ctxSync._applyServerMode("snapshot-mcp"),
+    true,
+  );
+  await waitForPosition(19);
+  assert.equal(currentRecord().pos, 19,
+    "ReaderPC 后启动时必须立即补发已经保留的当前页");
 });
 
 test("native pagehide sends active-reading JSON synchronously so the last visible page is not stale", async () => {

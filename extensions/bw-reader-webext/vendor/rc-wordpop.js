@@ -208,7 +208,8 @@ if (window.__bwPwaProviderOnly) return;
     try {
       _dictCache.clear(); _prewarmSeen.clear(); _prewarmQ.length = 0;
       _jpExampleZhCache.clear(); _jpExampleZhInflight.clear();
-      _jpExampleZhEpoch++;
+      _jpExampleZhCacheEpoch++;
+      _jpExampleZhOwnerGeneration++;
       _jpExampleZhPending.splice(0).forEach(function (item) { item.resolve(''); });
     } catch (_) {}
   }
@@ -221,8 +222,9 @@ if (window.__bwPwaProviderOnly) return;
   var _jpExampleZhInflight = new Map();
   var _jpExampleZhPending = [];
   var _jpExampleZhActive = null;
-  var _jpExampleZhEpoch = 0;
-  var _JP_EXAMPLE_ZH_PENDING_MAX = 5;  // 1 个在跑 + 当前面板最多 5 句；旧面板排队项立即丢弃
+  var _jpExampleZhCacheEpoch = 0;
+  var _jpExampleZhOwnerGeneration = 0;
+  var _JP_EXAMPLE_ZH_PENDING_MAX = 4;  // 加上 1 个在跑，总 unresolved 硬上限为 5
   var _jpSmallExampleSeq = 0;
   var _jpFullExampleSeq = 0;
   // 底座耦合(每次 show 刷新)
@@ -714,7 +716,7 @@ if (window.__bwPwaProviderOnly) return;
   function _pruneJapaneseExampleZhPending() {
     var kept = [];
     _jpExampleZhPending.forEach(function (item) {
-      if (item.epoch !== _jpExampleZhEpoch || !item.isCurrent()) {
+      if (item.ownerGeneration !== _jpExampleZhOwnerGeneration || !item.isCurrent()) {
         if (_jpExampleZhInflight.get(item.ja) === item.promise) _jpExampleZhInflight.delete(item.ja);
         item.resolve('');
       } else {
@@ -729,7 +731,7 @@ if (window.__bwPwaProviderOnly) return;
     _pruneJapaneseExampleZhPending();
     var item = _jpExampleZhPending.shift();
     if (!item) return;
-    if (item.epoch !== _jpExampleZhEpoch || !item.isCurrent()) {
+    if (item.ownerGeneration !== _jpExampleZhOwnerGeneration || !item.isCurrent()) {
       if (_jpExampleZhInflight.get(item.ja) === item.promise) _jpExampleZhInflight.delete(item.ja);
       item.resolve('');
       _pumpJapaneseExampleZh();
@@ -742,7 +744,7 @@ if (window.__bwPwaProviderOnly) return;
       .then(function (reply) {
         var zh = reply && reply.ok ? String(reply.zh || '').trim() : '';
         if (zh && /[㐀-鿿]/.test(zh)) {
-          if (item.epoch === _jpExampleZhEpoch) _jpExampleZhCache.set(item.ja, zh);
+          if (item.cacheEpoch === _jpExampleZhCacheEpoch) _jpExampleZhCache.set(item.ja, zh);
           return zh;
         }
         _dictDiag('Pi 例句中译失败「' + item.ja.slice(0, 32) + '」' +
@@ -770,7 +772,8 @@ if (window.__bwPwaProviderOnly) return;
     var task = new Promise(function (resolve) { resolveTask = resolve; });
     var item = {
       ja: ja,
-      epoch: _jpExampleZhEpoch,
+      cacheEpoch: _jpExampleZhCacheEpoch,
+      ownerGeneration: _jpExampleZhOwnerGeneration,
       isCurrent: typeof isCurrent === 'function' ? isCurrent : function () { return true; },
       promise: task,
       resolve: resolveTask
@@ -990,6 +993,10 @@ if (window.__bwPwaProviderOnly) return;
     // 注意:这里**不清**已有的呼吸高亮——原生语义是多个查词并存,"不清掉别的查词高亮"(15-phrase-wordpop.js:558)。
     var word = String(opts.word == null ? '' : opts.word).trim().toLowerCase();
     if (!word) return;
+    // 词一经点击就立刻取得例句翻译所有权；不能等本地 lookup 返回后再靠
+    // _wordPopState 判定，否则慢 lookup 窗口内旧词会继续启动下一条 Pi CLI。
+    _jpExampleZhOwnerGeneration++;
+    _pruneJapaneseExampleZhPending();
     // 同词去重:重查同一词先清掉它上一次残留的呼吸/常亮高亮(不动别词,保留多查词并存语义)。
     //   否则缓存秒弹路径不建也不清高亮 → 旧高亮(.rc-wp-breathe z:190)一直残留,盖住词组高亮(z:6)截获点击。
     try { _wordHls.filter(function (o) { return o.word === word; }).forEach(_hlRemove); } catch (_) {}

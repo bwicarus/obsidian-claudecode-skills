@@ -3300,7 +3300,22 @@ if (window.__bwPwaProviderOnly) return;
       );
     }
     contextDeliveryMode = value.mode;
+    applyReaderPCSnapshotAuthority(value.mode);
     return value.mode;
+  }
+
+  function nativeReaderOwnsSnapshotLifecycle() {
+    return window.__BW_NATIVE_COMPUTER_VOICE__ === true;
+  }
+
+  function applyReaderPCSnapshotAuthority(mode) {
+    if (!nativeReaderOwnsSnapshotLifecycle()) return false;
+    try {
+      if (RC.ctxSync && typeof RC.ctxSync._applyServerMode === "function") {
+        return RC.ctxSync._applyServerMode(mode);
+      }
+    } catch (_) {}
+    return false;
   }
 
   function queryContextMode(channel) {
@@ -3463,7 +3478,9 @@ if (window.__bwPwaProviderOnly) return;
     }).then(function () {
       return setServerContextDeliveryMode(
         mode,
-        contextSyncEnabled()
+        mode === CONTEXT_DELIVERY_SNAPSHOT
+          ? true
+          : contextSyncEnabled()
       ).catch(function (error) {
         if (!changedOnWindows || !previousMode || !channel) {
           throw error;
@@ -3503,7 +3520,10 @@ if (window.__bwPwaProviderOnly) return;
       return Promise.resolve(closePromise).catch(function () {
       }).then(function () {
         contextModeChanging = false;
-        var reconcilePromise = contextSyncEnabled()
+        var reconcilePromise = (
+          contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT ||
+          contextSyncEnabled()
+        )
           ? reconcileSnapshotLink()
           : null;
         return Promise.resolve(reconcilePromise).finally(function () {
@@ -5744,7 +5764,7 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   function readerContextSurfaceVisible() {
-    if (nativeReaderUsesDedicatedContextLink()) {
+    if (nativeReaderOwnsSnapshotLifecycle()) {
       // In the native App, Swift owns the actual scene lifecycle.  WKWebView's
       // document.visibilityState can become hidden while a native voice sheet
       // or overlay is presented even though the Reader scene is still active.
@@ -5760,7 +5780,7 @@ if (window.__bwPwaProviderOnly) return;
     // The App voice socket owns audio only. Reader context has its own
     // /reader-context/v1 connection and must stay alive whether this device,
     // another device, or no device currently owns the voice session.
-    if (nativeReaderUsesDedicatedContextLink()) {
+    if (nativeReaderOwnsSnapshotLifecycle()) {
       nativeContextHandoffPending = false;
       stopNativeContextRelay();
       return reconcileSnapshotLink();
@@ -5796,6 +5816,14 @@ if (window.__bwPwaProviderOnly) return;
   function prepareNativeContextHandoff() {
     nativeContextHandoffPending = true;
     stopNativeContextRelay();
+    if (nativeReaderOwnsSnapshotLifecycle()) {
+      return reconcileSnapshotLink().then(function () {
+        return "native-ready";
+      }).catch(function (error) {
+        nativeContextHandoffPending = false;
+        throw error;
+      });
+    }
     var modeReady = contextDeliveryMode
       ? Promise.resolve(contextDeliveryMode)
       : (
@@ -5836,11 +5864,13 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   function snapshotLinkWanted() {
-    var independentOfVoice = nativeReaderUsesDedicatedContextLink();
+    var independentOfVoice = nativeReaderOwnsSnapshotLifecycle();
+    var modeAllowsSnapshot = independentOfVoice
+      ? contextDeliveryMode !== CONTEXT_DELIVERY_LEGACY
+      : contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT;
     return !!(
       ownsReaderUi() &&
-      contextSyncEnabled() &&
-      contextDeliveryMode !== CONTEXT_DELIVERY_LEGACY &&
+      modeAllowsSnapshot &&
       !contextModeChanging &&
       readerContextSurfaceVisible() &&
       (
@@ -5984,6 +6014,11 @@ if (window.__bwPwaProviderOnly) return;
       snapshotReconnectTimer = null;
       reconcileSnapshotLink();
     }, delay);
+    // Node 合同环境的 Timeout 会单独挂住进程;浏览器返回数字、无此方法。
+    // 这只改变测试进程生命期,不改变 App 中的有界退避。
+    if (snapshotReconnectTimer && typeof snapshotReconnectTimer.unref === "function") {
+      snapshotReconnectTimer.unref();
+    }
   }
 
   function nextSnapshotReconnectDelay() {
@@ -6064,6 +6099,16 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   function resumeSnapshotLinkFromForeground(event) {
+    if (
+      nativeReaderOwnsSnapshotLifecycle() &&
+      !snapshotLink &&
+      event && event.detail && event.detail.probe === true
+    ) {
+      // ReaderPC 可以在 App 已经打开后启用快照。Swift 的有界前台巡检是重新
+      // 询问服务器的时机;先丢弃上次 legacy 结论,但不打开生产 gate,直到新回执到达。
+      contextDeliveryMode = null;
+      applyReaderPCSnapshotAuthority(null);
+    }
     if (!snapshotLinkWanted()) return reconcileSnapshotLink();
     // iOS may suspend this one-second timer while the PWA is backgrounded.
     // Foreground signals are an explicit wake-up: discard the suspended timer
@@ -6120,6 +6165,7 @@ if (window.__bwPwaProviderOnly) return;
       snapshotLink = null;
       state.stopped = true;
       snapshotTransportState = "failed";
+      applyReaderPCSnapshotAuthority(null);
       stopContextPump(state);
       var failedChannel = state.channel;
       state.channel = null;
@@ -6199,6 +6245,7 @@ if (window.__bwPwaProviderOnly) return;
         state.stopped = true;
         snapshotLink = null;
         snapshotTransportState = "failed";
+        applyReaderPCSnapshotAuthority(null);
         stopContextPump(state);
         emitStatus({
           state: "warning",
@@ -6222,12 +6269,10 @@ if (window.__bwPwaProviderOnly) return;
       }
       state.channel = channel;
       return queryContextMode(channel).then(function (mode) {
-        var clearBeforeLegacy = mode === CONTEXT_DELIVERY_LEGACY
+        return mode === CONTEXT_DELIVERY_LEGACY
           ? clearSnapshotState(state)
-          : Promise.resolve(null);
-        return clearBeforeLegacy.then(function () {
-          return setServerContextDeliveryMode(mode);
-        }).then(function () { return mode; });
+              .then(function () { return mode; })
+          : mode;
       });
     }).then(function (mode) {
       if (mode === null) return null;
@@ -6295,6 +6340,7 @@ if (window.__bwPwaProviderOnly) return;
       if (snapshotLink === state) snapshotLink = null;
       state.stopped = true;
       snapshotTransportState = "failed";
+      applyReaderPCSnapshotAuthority(null);
       stopContextPump(state);
       var failedChannel = state.channel;
       state.channel = null;
@@ -6756,8 +6802,17 @@ if (window.__bwPwaProviderOnly) return;
       return queryStartChannel(state, channel).then(function (prepared) {
         state.channel = prepared.channel.setOptions(activeDirectOptions(state));
         state.contextDeliveryMode = prepared.mode;
-        if (!contextSyncEnabled()) return null;
-        return setServerContextDeliveryMode(prepared.mode);
+        if (
+          prepared.mode === CONTEXT_DELIVERY_LEGACY &&
+          !contextSyncEnabled()
+        ) return null;
+        // ReaderPC owns snapshot enable/disable. Starting voice may preserve
+        // the legacy injector preference, but must never turn snapshot mode on.
+        if (prepared.mode === CONTEXT_DELIVERY_SNAPSHOT) return null;
+        return setServerContextDeliveryMode(
+          prepared.mode,
+          contextSyncEnabled()
+        );
       }).then(function () {
         return state.channel;
       });
@@ -6828,12 +6883,12 @@ if (window.__bwPwaProviderOnly) return;
       }
       if (
         state.contextDeliveryMode === CONTEXT_DELIVERY_LEGACY ||
+        state.contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT ||
         contextSyncEnabled()
       ) {
         startContextPump(state);
         if (
-          state.contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT &&
-          contextSyncEnabled()
+          state.contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT
         ) {
           startActiveReadingPump(state);
           primeReaderVisualFromOutgoing();
@@ -7121,9 +7176,21 @@ if (window.__bwPwaProviderOnly) return;
   }
 
   function contextSyncChanged() {
-    if (nativeReaderUsesDedicatedContextLink()) {
+    if (nativeReaderOwnsSnapshotLifecycle()) {
       stopNativeContextRelay();
-      if (!contextSyncEnabled()) return clearSnapshotLink();
+      return reconcileSnapshotLink();
+    }
+    if (contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT) {
+      if (
+        active &&
+        active.started &&
+        active.contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT
+      ) {
+        startContextPump(active);
+        startActiveReadingPump(active);
+        primeReaderVisualFromOutgoing();
+        return Promise.resolve(active);
+      }
       return reconcileSnapshotLink();
     }
     if (nativeContextState && !nativeContextState.stopped) {
@@ -7138,40 +7205,37 @@ if (window.__bwPwaProviderOnly) return;
       }
       return Promise.resolve(nativeContextState);
     }
-    if (
-      active &&
-      active.started &&
-      active.contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT
-    ) {
-      if (contextSyncEnabled()) {
-        startContextPump(active);
-        startActiveReadingPump(active);
-        return Promise.resolve(active);
-      }
-      return clearActiveSnapshotState(active);
-    }
     if (!contextSyncEnabled()) return clearSnapshotLink();
     return reconcileSnapshotLink();
   }
 
   function bootstrapNativeSnapshotLink() {
-    if (window.__BW_NATIVE_COMPUTER_VOICE__ !== true) {
-      return Promise.resolve(null);
+    if (nativeReaderOwnsSnapshotLifecycle()) {
+      // App 不读取、不确认、不改写旧 context-sync 偏好。先连 ReaderPC,
+      // 再以 CONTEXT-MODE 作为唯一权威;这也允许页面先开、服务后开。
+      contextDeliveryMode = null;
+      applyReaderPCSnapshotAuthority(null);
+      return reconcileSnapshotLink().catch(function (error) {
+        emitStatus({
+          state: "warning",
+          message: error && error.message || "ReaderPC 实时快照初始化失败",
+          code: error && error.code || "BW_READER_CONTEXT_BOOTSTRAP_FAILED",
+        });
+        return null;
+      });
     }
     if (!RC.ctxSync || typeof RC.ctxSync.getConfig !== "function") {
       emitStatus({
         state: "warning",
-        message: "原生 Reader 上下文配置尚未就绪",
+        message: "Reader 上下文配置尚未就绪",
         code: "BW_READER_CONTEXT_BOOTSTRAP_UNAVAILABLE",
       });
       return Promise.resolve(null);
     }
-    // A fresh native-local origin has no eph-ctx-sync cache yet. Previously we
-    // only called getConfig() after the user opened Settings or started voice,
-    // so snapshotLinkWanted() stayed false forever. Bootstrap the preference
-    // and delivery mode at module load, then reconcile the dedicated
-    // /reader-context/v1 link. This path never requests microphone access and
-    // foreground fencing remains centralized in snapshotLinkWanted().
+    // ReaderPC owns the snapshot lifecycle. Bootstrap only the delivery mode;
+    // the old eph-ctx-sync preference gates legacy injection, never the
+    // dedicated /reader-context/v1 link. This path does not request a
+    // microphone and foreground fencing stays in snapshotLinkWanted().
     return RC.ctxSync.getConfig().then(function (value) {
       if (
         !plainObject(value) ||
@@ -7196,11 +7260,13 @@ if (window.__bwPwaProviderOnly) return;
             "BW_READER_CONTEXT_PI_COMPATIBILITY_UNCONFIRMED",
         });
       }
-      return reconcileNativeContextRelay();
+      return window.__BW_NATIVE_COMPUTER_VOICE__ === true
+        ? reconcileNativeContextRelay()
+        : reconcileSnapshotLink();
     }).catch(function (error) {
       emitStatus({
         state: "warning",
-        message: error && error.message || "原生 Reader 实时快照初始化失败",
+        message: error && error.message || "Reader 实时快照初始化失败",
         code: error && error.code || "BW_READER_CONTEXT_BOOTSTRAP_FAILED",
       });
       return null;
