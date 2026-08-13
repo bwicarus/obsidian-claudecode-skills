@@ -720,11 +720,16 @@ test("BWReader App 接管电脑按钮后，网页运行时不会预备麦克风�
   assert.match(runtime, /if \(!active\) \{[\s\S]*prepareSurfaceFromGesture\(\)/);
   assert.match(
     runtime,
-    /function snapshotLinkWanted\(\)[\s\S]*contextSyncEnabled\(\)[\s\S]*contextDeliveryMode !== CONTEXT_DELIVERY_LEGACY/,
+    /function snapshotLinkWanted\(\)[\s\S]*contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT/,
   );
   const snapshotWanted = runtime.slice(
     runtime.indexOf("function snapshotLinkWanted()"),
     runtime.indexOf("function stopSnapshotLink()", runtime.indexOf("function snapshotLinkWanted()")),
+  );
+  assert.doesNotMatch(
+    snapshotWanted,
+    /contextSyncEnabled\(\)/,
+    "snapshot lifecycle belongs to ReaderPC, not the legacy page preference",
   );
   assert.doesNotMatch(snapshotWanted, /selectedEngineKnown|computerVoiceSelected/);
   assert.match(
@@ -742,7 +747,7 @@ test("BWReader App 接管电脑按钮后，网页运行时不会预备麦克风�
   assert.doesNotMatch(runtime, /connectNative|RTCPeerConnection|signalTransport/);
 });
 
-test("App 原生语音与 Reader 上下文使用独立 WSS，语音启停不再切断快照", () => {
+test("App 原生语音零等待启动，Reader 上下文使用独立 WSS", () => {
   assert.match(
     runtime,
     /function nativeReaderUsesDedicatedContextLink\(\)[\s\S]*window\.__BW_NATIVE_COMPUTER_VOICE__ === true[\s\S]*contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT/,
@@ -754,10 +759,6 @@ test("App 原生语音与 Reader 上下文使用独立 WSS，语音启停不再�
   assert.match(
     runtime,
     /window\.__bwNativeComputerContextApplyResult = applyNativeContextResult/,
-  );
-  assert.match(
-    runtime,
-    /function prepareNativeContextHandoff\(\)[\s\S]*nativeContextHandoffPending = true[\s\S]*RC\.ctxSync\.getConfig\(\)[\s\S]*contextDeliveryMode = value\.deliveryMode[\s\S]*nativeReaderUsesDedicatedContextLink\(\)[\s\S]*return reconcileSnapshotLink\(\)/,
   );
   assert.match(
     runtime,
@@ -796,6 +797,45 @@ test("App 原生语音与 Reader 上下文使用独立 WSS，语音启停不再�
     runtime,
     /GPT Classic：[\s\S]*“测试旧版文字注入”[\s\S]*实时快照\/MCP 仍属于 Codex/,
   );
+  assert.doesNotMatch(
+    readerWebView,
+    /prepareForNativeVoice|NativeVoiceHandoffError|prepareNativeContextHandoff/,
+  );
+  const nativeToggle = readerWebView.slice(
+    readerWebView.indexOf("private func toggleNativeComputerVoice"),
+    readerWebView.indexOf("private func handleNativeAgentVoice"),
+  );
+  assert.match(nativeToggle, /await bridge\.start\(appKind: appKind\)/);
+  assert.doesNotMatch(
+    nativeToggle,
+    /callAsyncJavaScript|context|snapshot|handoff/i,
+  );
+});
+
+test("旧上下文开关只属于 legacy，原生 App 隐藏且 snapshot 不受其控制", () => {
+  assert.match(settings, /id="set-ctx-sync-card"/);
+  assert.match(settings, /id="set-ctx-sync-row" style="display:none/);
+  assert.match(
+    settings,
+    /window\.__BW_NATIVE_COMPUTER_VOICE__ === true[\s\S]*card\.style\.display = 'none'/,
+  );
+  assert.match(
+    settings,
+    /function syncLegacyControls\(\)[\s\S]*legacy\.checked[\s\S]*cb\.disabled = !legacyMode/,
+  );
+  const changed = runtime.slice(
+    runtime.indexOf("function contextSyncChanged()"),
+    runtime.indexOf("function bootstrapNativeSnapshotLink()"),
+  );
+  const snapshotBranch = changed.slice(
+    0,
+    changed.indexOf("if (nativeContextState"),
+  );
+  assert.match(
+    snapshotBranch,
+    /contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT[\s\S]*reconcileSnapshotLink\(\)/,
+  );
+  assert.doesNotMatch(snapshotBranch, /contextSyncEnabled\(\)/);
 });
 
 test("扩展上下文按设置和前台状态独立运行，不随语音停止", () => {

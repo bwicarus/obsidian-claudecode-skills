@@ -3460,7 +3460,9 @@
     }).then(function () {
       return setServerContextDeliveryMode(
         mode,
-        contextSyncEnabled()
+        mode === CONTEXT_DELIVERY_SNAPSHOT
+          ? true
+          : contextSyncEnabled()
       ).catch(function (error) {
         if (!changedOnWindows || !previousMode || !channel) {
           throw error;
@@ -3500,7 +3502,10 @@
       return Promise.resolve(closePromise).catch(function () {
       }).then(function () {
         contextModeChanging = false;
-        var reconcilePromise = contextSyncEnabled()
+        var reconcilePromise = (
+          contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT ||
+          contextSyncEnabled()
+        )
           ? reconcileSnapshotLink()
           : null;
         return Promise.resolve(reconcilePromise).finally(function () {
@@ -5836,8 +5841,7 @@
     var independentOfVoice = nativeReaderUsesDedicatedContextLink();
     return !!(
       ownsReaderUi() &&
-      contextSyncEnabled() &&
-      contextDeliveryMode !== CONTEXT_DELIVERY_LEGACY &&
+      contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT &&
       !contextModeChanging &&
       readerContextSurfaceVisible() &&
       (
@@ -6219,12 +6223,10 @@
       }
       state.channel = channel;
       return queryContextMode(channel).then(function (mode) {
-        var clearBeforeLegacy = mode === CONTEXT_DELIVERY_LEGACY
+        return mode === CONTEXT_DELIVERY_LEGACY
           ? clearSnapshotState(state)
-          : Promise.resolve(null);
-        return clearBeforeLegacy.then(function () {
-          return setServerContextDeliveryMode(mode);
-        }).then(function () { return mode; });
+              .then(function () { return mode; })
+          : mode;
       });
     }).then(function (mode) {
       if (mode === null) return null;
@@ -6753,8 +6755,17 @@
       return queryStartChannel(state, channel).then(function (prepared) {
         state.channel = prepared.channel.setOptions(activeDirectOptions(state));
         state.contextDeliveryMode = prepared.mode;
-        if (!contextSyncEnabled()) return null;
-        return setServerContextDeliveryMode(prepared.mode);
+        if (
+          prepared.mode === CONTEXT_DELIVERY_LEGACY &&
+          !contextSyncEnabled()
+        ) return null;
+        // ReaderPC owns snapshot enable/disable. Starting voice may preserve
+        // the legacy injector preference, but must never turn snapshot mode on.
+        if (prepared.mode === CONTEXT_DELIVERY_SNAPSHOT) return null;
+        return setServerContextDeliveryMode(
+          prepared.mode,
+          contextSyncEnabled()
+        );
       }).then(function () {
         return state.channel;
       });
@@ -6825,12 +6836,12 @@
       }
       if (
         state.contextDeliveryMode === CONTEXT_DELIVERY_LEGACY ||
+        state.contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT ||
         contextSyncEnabled()
       ) {
         startContextPump(state);
         if (
-          state.contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT &&
-          contextSyncEnabled()
+          state.contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT
         ) {
           startActiveReadingPump(state);
           primeReaderVisualFromOutgoing();
@@ -7120,7 +7131,19 @@
   function contextSyncChanged() {
     if (nativeReaderUsesDedicatedContextLink()) {
       stopNativeContextRelay();
-      if (!contextSyncEnabled()) return clearSnapshotLink();
+      return reconcileSnapshotLink();
+    }
+    if (contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT) {
+      if (
+        active &&
+        active.started &&
+        active.contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT
+      ) {
+        startContextPump(active);
+        startActiveReadingPump(active);
+        primeReaderVisualFromOutgoing();
+        return Promise.resolve(active);
+      }
       return reconcileSnapshotLink();
     }
     if (nativeContextState && !nativeContextState.stopped) {
@@ -7135,40 +7158,23 @@
       }
       return Promise.resolve(nativeContextState);
     }
-    if (
-      active &&
-      active.started &&
-      active.contextDeliveryMode === CONTEXT_DELIVERY_SNAPSHOT
-    ) {
-      if (contextSyncEnabled()) {
-        startContextPump(active);
-        startActiveReadingPump(active);
-        return Promise.resolve(active);
-      }
-      return clearActiveSnapshotState(active);
-    }
     if (!contextSyncEnabled()) return clearSnapshotLink();
     return reconcileSnapshotLink();
   }
 
   function bootstrapNativeSnapshotLink() {
-    if (window.__BW_NATIVE_COMPUTER_VOICE__ !== true) {
-      return Promise.resolve(null);
-    }
     if (!RC.ctxSync || typeof RC.ctxSync.getConfig !== "function") {
       emitStatus({
         state: "warning",
-        message: "原生 Reader 上下文配置尚未就绪",
+        message: "Reader 上下文配置尚未就绪",
         code: "BW_READER_CONTEXT_BOOTSTRAP_UNAVAILABLE",
       });
       return Promise.resolve(null);
     }
-    // A fresh native-local origin has no eph-ctx-sync cache yet. Previously we
-    // only called getConfig() after the user opened Settings or started voice,
-    // so snapshotLinkWanted() stayed false forever. Bootstrap the preference
-    // and delivery mode at module load, then reconcile the dedicated
-    // /reader-context/v1 link. This path never requests microphone access and
-    // foreground fencing remains centralized in snapshotLinkWanted().
+    // ReaderPC owns the snapshot lifecycle. Bootstrap only the delivery mode;
+    // the old eph-ctx-sync preference gates legacy injection, never the
+    // dedicated /reader-context/v1 link. This path does not request a
+    // microphone and foreground fencing stays in snapshotLinkWanted().
     return RC.ctxSync.getConfig().then(function (value) {
       if (
         !plainObject(value) ||
@@ -7193,11 +7199,13 @@
             "BW_READER_CONTEXT_PI_COMPATIBILITY_UNCONFIRMED",
         });
       }
-      return reconcileNativeContextRelay();
+      return window.__BW_NATIVE_COMPUTER_VOICE__ === true
+        ? reconcileNativeContextRelay()
+        : reconcileSnapshotLink();
     }).catch(function (error) {
       emitStatus({
         state: "warning",
-        message: error && error.message || "原生 Reader 实时快照初始化失败",
+        message: error && error.message || "Reader 实时快照初始化失败",
         code: error && error.code || "BW_READER_CONTEXT_BOOTSTRAP_FAILED",
       });
       return null;
