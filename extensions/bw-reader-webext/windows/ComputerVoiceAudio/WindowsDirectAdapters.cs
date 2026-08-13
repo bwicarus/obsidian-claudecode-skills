@@ -10,7 +10,7 @@ internal sealed class WindowsDirectAppLauncher : IDirectAppLauncher
 {
     public bool IsWired => true;
 
-    public Task EnsureRunningAsync(
+    public Task<bool> EnsureRunningAsync(
         string appKind,
         string appUserModelId,
         CancellationToken cancellationToken)
@@ -28,7 +28,7 @@ internal sealed class WindowsDirectAppLauncher : IDirectAppLauncher
             WindowsCodexAppProbe.Probe(profile.AppKind);
         if (current.ReadyTarget is not null || current.RootCount == 1)
         {
-            return Task.CompletedTask;
+            return Task.FromResult(false);
         }
         if (current.RootCount > 1)
         {
@@ -72,7 +72,7 @@ internal sealed class WindowsDirectAppLauncher : IDirectAppLauncher
             }
         }
         cancellationToken.ThrowIfCancellationRequested();
-        return Task.CompletedTask;
+        return Task.FromResult(true);
     }
 
     public async Task<DirectAppTarget> WaitForUniqueReadyAsync(
@@ -251,7 +251,7 @@ internal sealed class WindowsDirectAppLauncher : IDirectAppLauncher
                 cancellationToken).ConfigureAwait(false);
         }
 
-        await EnsureRunningAsync(
+        _ = await EnsureRunningAsync(
             profile.AppKind,
             profile.AppUserModelId,
             cancellationToken).ConfigureAwait(false);

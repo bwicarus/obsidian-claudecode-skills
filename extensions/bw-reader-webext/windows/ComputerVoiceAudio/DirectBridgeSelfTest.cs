@@ -4079,7 +4079,12 @@ internal static class DirectBridgeSelfTest
 
         CodexVoiceActivitySnapshot firstAttemptState =
             CodexVoiceActivitySnapshot.Available(300, 400);
-        int firstAttemptPreparations = 0;
+        FakeDirectAppLauncher coldStartLauncher = new()
+        {
+            StartedOnEnsure = true,
+        };
+        int firstAttemptSettleCount = 0;
+        bool firstAttemptSettled = false;
         int firstAttemptRestarts = 0;
         int firstAttemptF24Count = 0;
         await using DirectCodexVoiceControl firstAttemptControl = new(
@@ -4087,6 +4092,12 @@ internal static class DirectBridgeSelfTest
             (active, before, cancellationToken) =>
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                Require(
+                    coldStartLauncher.EnsureRunningCount == 1
+                    && coldStartLauncher.WaitReadyCount == 1
+                    && firstAttemptSettled,
+                    "direct-codex-voice-cold-start-is-ready-and-settled-before-f24",
+                    checks);
                 firstAttemptF24Count++;
                 firstAttemptState = CodexVoiceActivitySnapshot.Available(
                     Math.Max(
@@ -4099,11 +4110,30 @@ internal static class DirectBridgeSelfTest
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 Require(
-                    initial is { Active: false },
+                    initial is
+                    {
+                        Status: CodexVoiceActivityReadStatus.Available,
+                        Active: false,
+                    },
                     "direct-codex-voice-first-attempt-prepares-inactive-state",
                     checks);
-                firstAttemptPreparations++;
-                return Task.CompletedTask;
+                return DirectCodexVoiceControl.PrepareInitialStartAsync(
+                    coldStartLauncher,
+                    (delay, token) =>
+                    {
+                        token.ThrowIfCancellationRequested();
+                        Require(
+                            delay
+                                == DirectCodexVoiceControl
+                                    .RestartReadySettleDelay
+                            && coldStartLauncher.WaitReadyCount == 1,
+                            "direct-codex-voice-cold-start-settles-after-ready",
+                            checks);
+                        firstAttemptSettleCount++;
+                        firstAttemptSettled = true;
+                        return Task.CompletedTask;
+                    },
+                    cancellationToken);
             },
             recoverStartFailureAsync: cancellationToken =>
             {
@@ -4118,10 +4148,31 @@ internal static class DirectBridgeSelfTest
         Require(
             firstAttemptStarted.State.Active == true
             && firstAttemptStarted.ShortcutSent
-            && firstAttemptPreparations == 1
+            && coldStartLauncher.EnsureRunningCount == 1
+            && coldStartLauncher.WaitReadyCount == 1
+            && coldStartLauncher.RestartCount == 0
+            && firstAttemptSettleCount == 1
             && firstAttemptRestarts == 0
             && firstAttemptF24Count == 1,
-            "direct-codex-voice-first-success-never-restarts",
+            "direct-codex-voice-available-inactive-cold-starts-once-without-restart",
+            checks);
+
+        FakeDirectAppLauncher warmStartLauncher = new();
+        int warmStartSettleCount = 0;
+        await DirectCodexVoiceControl.PrepareInitialStartAsync(
+            warmStartLauncher,
+            (_, _) =>
+            {
+                warmStartSettleCount++;
+                return Task.CompletedTask;
+            },
+            CancellationToken.None).ConfigureAwait(false);
+        Require(
+            warmStartLauncher.EnsureRunningCount == 1
+            && warmStartLauncher.WaitReadyCount == 1
+            && warmStartLauncher.RestartCount == 0
+            && warmStartSettleCount == 0,
+            "direct-codex-voice-already-running-waits-ready-without-settle",
             checks);
 
         CodexVoiceActivitySnapshot recoveryState =
@@ -4189,6 +4240,10 @@ internal static class DirectBridgeSelfTest
 
         CodexVoiceActivitySnapshot preparedState =
             CodexVoiceActivitySnapshot.Unavailable();
+        FakeDirectAppLauncher unavailableStartLauncher = new()
+        {
+            StartedOnEnsure = true,
+        };
         int prepareCount = 0;
         int preparedTransitionCount = 0;
         await using DirectCodexVoiceControl preparedControl = new(
@@ -4202,14 +4257,21 @@ internal static class DirectBridgeSelfTest
                     lastUsedTimeStop: before.LastUsedTimeStop);
                 return Task.FromResult(preparedState);
             },
-            prepareStartAsync: (_, cancellationToken) =>
+            prepareStartAsync: async (_, cancellationToken) =>
             {
                 cancellationToken.ThrowIfCancellationRequested();
-                prepareCount++;
+                await DirectCodexVoiceControl.PrepareInitialStartAsync(
+                    unavailableStartLauncher,
+                    (delay, token) =>
+                    {
+                        token.ThrowIfCancellationRequested();
+                        prepareCount++;
+                        return Task.CompletedTask;
+                    },
+                    cancellationToken).ConfigureAwait(false);
                 preparedState = CodexVoiceActivitySnapshot.Available(
                     lastUsedTimeStart: 600,
                     lastUsedTimeStop: 700);
-                return Task.CompletedTask;
             });
         DirectCodexVoiceSetResult prepared =
             await preparedControl.SetActiveAsync(
@@ -4219,8 +4281,10 @@ internal static class DirectBridgeSelfTest
             prepared.State.Active == true
             && prepared.ShortcutSent
             && prepareCount == 1
+            && unavailableStartLauncher.EnsureRunningCount == 1
+            && unavailableStartLauncher.WaitReadyCount == 1
             && preparedTransitionCount == 1,
-            "direct-codex-voice-starts-app-before-reading-voice-ledger",
+            "direct-codex-voice-unavailable-ledger-cold-start-remains-supported",
             checks);
 
         string startupKeepActivePath = System.IO.Path.Combine(
@@ -10875,6 +10939,8 @@ internal static class DirectBridgeSelfTest
 
         internal int RestartCount { get; private set; }
 
+        internal bool StartedOnEnsure { get; init; }
+
         internal bool ThrowReadyTimeout { get; init; }
 
         internal bool WaitUntilCanceled { get; init; }
@@ -10886,7 +10952,7 @@ internal static class DirectBridgeSelfTest
 
         public bool IsWired => true;
 
-        public Task EnsureRunningAsync(
+        public Task<bool> EnsureRunningAsync(
             string appKind,
             string appUserModelId,
             CancellationToken cancellationToken)
@@ -10901,7 +10967,7 @@ internal static class DirectBridgeSelfTest
                 throw new InvalidOperationException(
                     "fake received an unsafe app target");
             }
-            return Task.CompletedTask;
+            return Task.FromResult(StartedOnEnsure);
         }
 
         public async Task<DirectAppTarget> WaitForUniqueReadyAsync(

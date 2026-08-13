@@ -233,10 +233,10 @@ internal static class DisconnectCleanupWatchdogSelfTest
     {
         public bool IsWired => true;
 
-        public Task EnsureRunningAsync(
+        public Task<bool> EnsureRunningAsync(
             string appKind,
             string appUserModelId,
-            CancellationToken cancellationToken) => Task.CompletedTask;
+            CancellationToken cancellationToken) => Task.FromResult(false);
 
         public Task<DirectAppTarget> WaitForUniqueReadyAsync(
             string appKind,

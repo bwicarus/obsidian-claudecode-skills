@@ -429,34 +429,11 @@ internal sealed class DirectCodexVoiceControl :
                     cancellationToken).ConfigureAwait(false);
             },
             keepActivePath: keepActivePath,
-            prepareStartAsync: async (initial, cancellationToken) =>
-            {
-                DirectAppTargetProfile profile = DirectAppTargets.Require(
-                    DirectAppTargets.CodexDesktop);
-                // The first attempt never restarts an already-running Codex
-                // generation. EnsureRunning is idempotent; only an unavailable
-                // ledger needs the app-ready wait and one startup settle.
-                await launcher.EnsureRunningAsync(
-                    profile.AppKind,
-                    profile.AppUserModelId,
-                    cancellationToken).ConfigureAwait(false);
-                if (initial is not
-                    {
-                        Status: CodexVoiceActivityReadStatus.Available,
-                    })
-                {
-                    _ = await launcher.WaitForUniqueReadyAsync(
-                        profile.AppKind,
-                        profile.AppUserModelId,
-                        TimeSpan.FromSeconds(20),
-                        cancellationToken).ConfigureAwait(false);
-                    // A newly launched packaged window can be discoverable
-                    // before its voice UI is ready.
-                    await Task.Delay(
-                        RestartReadySettleDelay,
-                        cancellationToken).ConfigureAwait(false);
-                }
-            },
+            prepareStartAsync: (_, cancellationToken) =>
+                PrepareInitialStartAsync(
+                    launcher,
+                    static (delay, token) => Task.Delay(delay, token),
+                    cancellationToken),
             recoverStartFailureAsync: async cancellationToken =>
             {
                 DirectAppTargetProfile profile = DirectAppTargets.Require(
@@ -480,6 +457,37 @@ internal sealed class DirectCodexVoiceControl :
             },
             keepActiveChanged: keepActiveChanged,
             automaticRecoveryFailed: automaticRecoveryFailed);
+    }
+
+    internal static async Task PrepareInitialStartAsync(
+        IDirectAppLauncher launcher,
+        Func<TimeSpan, CancellationToken, Task> delayAsync,
+        CancellationToken cancellationToken)
+    {
+        ArgumentNullException.ThrowIfNull(launcher);
+        ArgumentNullException.ThrowIfNull(delayAsync);
+        DirectAppTargetProfile profile = DirectAppTargets.Require(
+            DirectAppTargets.CodexDesktop);
+        // The capability ledger may remain Available/Inactive after the app has
+        // exited, so it cannot decide whether this is a cold launch. The
+        // launcher reports that fact directly; readiness is always confirmed.
+        bool started = await launcher.EnsureRunningAsync(
+            profile.AppKind,
+            profile.AppUserModelId,
+            cancellationToken).ConfigureAwait(false);
+        _ = await launcher.WaitForUniqueReadyAsync(
+            profile.AppKind,
+            profile.AppUserModelId,
+            TimeSpan.FromSeconds(20),
+            cancellationToken).ConfigureAwait(false);
+        if (started)
+        {
+            // A newly launched packaged window can be discoverable before its
+            // voice UI is ready. An already-running ready app skips this wait.
+            await delayAsync(
+                RestartReadySettleDelay,
+                cancellationToken).ConfigureAwait(false);
+        }
     }
 
     private async Task MonitorKeepActiveAsync(

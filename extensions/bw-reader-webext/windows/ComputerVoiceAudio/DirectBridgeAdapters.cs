@@ -10,7 +10,7 @@ internal interface IDirectAppLauncher
 {
     bool IsWired { get; }
 
-    Task EnsureRunningAsync(
+    Task<bool> EnsureRunningAsync(
         string appKind,
         string appUserModelId,
         CancellationToken cancellationToken);
@@ -33,11 +33,11 @@ internal sealed class UnwiredDirectAppLauncher : IDirectAppLauncher
 {
     public bool IsWired => false;
 
-    public Task EnsureRunningAsync(
+    public Task<bool> EnsureRunningAsync(
         string appKind,
         string appUserModelId,
         CancellationToken cancellationToken) =>
-        Task.FromException(
+        Task.FromException<bool>(
             new DirectProtocolException(
                 "BW_COMPUTER_VOICE_DIRECT_APP_LAUNCHER_NOT_WIRED",
                 "Windows 直连的 Codex 启动适配器尚未接线"));
@@ -511,7 +511,7 @@ internal sealed class DirectBridgeCoordinator : IAsyncDisposable
                 "starting-app",
                 "BW_COMPUTER_VOICE_DIRECT_STARTING_APP")
                 .ConfigureAwait(false);
-            await _appLauncher.EnsureRunningAsync(
+            _ = await _appLauncher.EnsureRunningAsync(
                 appKind,
                 appProfile.AppUserModelId,
                 cancellationToken).ConfigureAwait(false);
