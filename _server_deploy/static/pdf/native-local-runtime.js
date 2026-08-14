@@ -10418,6 +10418,101 @@
     });
   }
 
+  // 助手查词。词典在 Pi 上，本机没有 —— 离线时这里会明确失败，不会假装查过。
+  //
+  // 走 prewarm=1：助手代查不等于用户遇到了这个生词。不加这个参数，AI 每查一次
+  // 就会给这个词记一次曝光、建一篇生词笔记，用户的生词统计会被助手的动作污染。
+  function nativeReaderLookupWord(input) {
+    var payload = input && typeof input === 'object' && !Array.isArray(input)
+      ? input : {};
+    var surface = nativeInterfaceSurface;
+    if (surface !== 'pdf' && surface !== 'epub') {
+      return Promise.reject(new RuntimeError(
+        '当前阅读界面不支持查词', 'BW_READER_QUERY_SURFACE'
+      ));
+    }
+    var word = String(payload.word == null ? '' : payload.word).trim();
+    if (!word || word.length > 128) {
+      return Promise.reject(new RuntimeError(
+        '查询词无效', 'BW_READER_QUERY_PARAMS'
+      ));
+    }
+    return bootPromise.then(function () {
+      return root.fetch(
+        localBasePath() + '/pdf/api/dict-quick?word='
+          + encodeURIComponent(word)
+          + '&file=' + encodeURIComponent(localFileRef())
+          + '&prewarm=1'
+      );
+    }).then(function (response) {
+      return response.json().then(function (data) {
+        if (!response.ok || !data || data.ok !== true) {
+          throw new RuntimeError(
+            String((data && data.error) || '查词失败'),
+            String((data && data.code) || 'BW_READER_QUERY_LOOKUP')
+          );
+        }
+        var senses = Array.isArray(data.senses) ? data.senses : [];
+        return {
+          ok: true,
+          word: word,
+          lemma: String(data.lemma == null ? '' : data.lemma),
+          translation: String(data.translation == null ? '' : data.translation)
+            .slice(0, 2000),
+          phonetic: String(
+            data.phonetic_us == null ? (data.phonetic || '') : data.phonetic_us
+          ).slice(0, 120),
+          senses: senses.slice(0, 12).map(function (sense) {
+            return String(sense == null ? '' : sense).slice(0, 300);
+          }),
+          truncated: senses.length > 12
+        };
+      });
+    });
+  }
+
+  // 助手把一个词标成已掌握/生词。这条同样落在 Pi 的生词库上；离线时会失败，
+  // 不会静默丢掉 —— 一次没记上的"已掌握"，下次阅读还会被划成生词。
+  function nativeReaderMarkVocabulary(input) {
+    var payload = input && typeof input === 'object' && !Array.isArray(input)
+      ? input : {};
+    var surface = nativeInterfaceSurface;
+    if (surface !== 'pdf' && surface !== 'epub') {
+      return Promise.reject(new RuntimeError(
+        '当前阅读界面不支持标记生词', 'BW_READER_VOCAB_SURFACE'
+      ));
+    }
+    var word = String(payload.word == null ? '' : payload.word).trim();
+    if (!word || word.length > 128) {
+      return Promise.reject(new RuntimeError(
+        '生词无效', 'BW_READER_VOCAB_WORD'
+      ));
+    }
+    var mark = String(payload.mark == null ? '' : payload.mark);
+    if (mark !== 'known' && mark !== 'unknown') {
+      return Promise.reject(new RuntimeError(
+        '标记取值无效', 'BW_READER_VOCAB_MARK'
+      ));
+    }
+    return bootPromise.then(function () {
+      return root.fetch(localBasePath() + '/pdf/api/vocab-mark', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ word: word, mark: mark })
+      });
+    }).then(function (response) {
+      return response.json().then(function (data) {
+        if (!response.ok || !data || data.ok !== true) {
+          throw new RuntimeError(
+            String((data && data.error) || '生词标记未保存'),
+            String((data && data.code) || 'BW_READER_VOCAB_FAILED')
+          );
+        }
+        return { ok: true, word: word, mark: mark };
+      });
+    });
+  }
+
   function nativeReaderUndoLast(operationID) {
     operationID = String(operationID || '');
     if (!/^rundo_[0-9a-f]{24}$/.test(operationID)) {
@@ -10462,6 +10557,8 @@
     toc: nativeReaderTableOfContents,
     pageText: nativeReaderPageText,
     makeNote: nativeReaderMakeNote,
+    lookupWord: nativeReaderLookupWord,
+    markVocabulary: nativeReaderMarkVocabulary,
     savePDFHighlight: function (payload) {
       var allowed = new Set([
         'file', 'id', 'page', 'rects', 'color', 'text', 'note', 'kind',
@@ -10572,6 +10669,12 @@
   };
   root._nativeReaderMakeNote = function (input) {
     return api.makeNote(input);
+  };
+  root._nativeReaderLookupWord = function (input) {
+    return api.lookupWord(input);
+  };
+  root._nativeReaderMarkVocabulary = function (input) {
+    return api.markVocabulary(input);
   };
 
   // The shell deliberately loads this bootstrap before the legacy Reader

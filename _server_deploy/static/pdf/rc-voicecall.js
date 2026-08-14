@@ -1857,6 +1857,23 @@
               text: _caMakeText
             });
           };
+        } else if (_caFn === '_nativeReaderMarkVocabulary') {
+          var _caVocabArg = Array.isArray(p.args) ? p.args[0] : null;
+          var _caVocabWord = _caVocabArg && typeof _caVocabArg === 'object'
+            ? String(_caVocabArg.word == null ? '' : _caVocabArg.word) : '';
+          var _caVocabMark = _caVocabArg && typeof _caVocabArg === 'object'
+            ? String(_caVocabArg.mark == null ? '' : _caVocabArg.mark) : '';
+          if (!_caVocabWord.trim() || _caVocabWord.length > 128 ||
+              (_caVocabMark !== 'known' && _caVocabMark !== 'unknown')) {
+            throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
+          }
+          _caTarget = window._nativeReaderMarkVocabulary;
+          _caCall = function (target) {
+            return target.call(window, {
+              word: _caVocabWord,
+              mark: _caVocabMark
+            });
+          };
         } else {
           throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
         }

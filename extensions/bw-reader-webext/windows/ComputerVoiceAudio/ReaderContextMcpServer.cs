@@ -24,6 +24,8 @@ internal sealed class ReaderContextMcpServer
     internal const string TocToolName = "reader_toc";
     internal const string PageTextToolName = "reader_page_text";
     internal const string MakeNoteToolName = "reader_make_note";
+    internal const string LookupToolName = "reader_lookup_word";
+    internal const string MarkVocabToolName = "reader_mark_vocab";
     internal const string CapabilityGuideToolName =
         "reader_capability_guide";
     internal const string ServerName = "bw-reader-context-snapshot";
@@ -722,6 +724,85 @@ internal sealed class ReaderContextMcpServer
                 ["annotations"] = new JsonObject
                 {
                     ["readOnlyHint"] = true,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = true,
+                    ["openWorldHint"] = false,
+                },
+            });
+            tools.Add(new JsonObject
+            {
+                ["name"] = LookupToolName,
+                ["description"] =
+                    "Look a word up in the user's dictionary. This one needs "
+                    + "the Pi: the dictionary does not live on the device, so "
+                    + "with no connection it fails plainly rather than "
+                    + "answering from nothing. The lookup is not recorded "
+                    + "against the user's vocabulary - you looking a word up "
+                    + "is not the same as them meeting it while reading, and "
+                    + "counting it would skew their statistics. Safe to "
+                    + "retry.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["word"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["minLength"] = 1,
+                            ["maxLength"] = 128,
+                            ["description"] = "The word to look up.",
+                        },
+                    },
+                    ["required"] = new JsonArray { "word" },
+                    ["additionalProperties"] = false,
+                },
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = true,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = true,
+                    ["openWorldHint"] = false,
+                },
+            });
+            tools.Add(new JsonObject
+            {
+                ["name"] = MarkVocabToolName,
+                ["description"] =
+                    "Mark a word as known or unknown in the user's vocabulary. "
+                    + "Needs the Pi, where that vocabulary lives; offline it "
+                    + "fails rather than dropping the mark, because a 'known' "
+                    + "that never landed means the word gets underlined as "
+                    + "unfamiliar again next time. Ask before marking words "
+                    + "the user did not bring up - this changes what their "
+                    + "reader underlines and what Anki schedules.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["word"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["minLength"] = 1,
+                            ["maxLength"] = 128,
+                            ["description"] = "The word to mark.",
+                        },
+                        ["mark"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["enum"] = new JsonArray { "known", "unknown" },
+                            ["description"] =
+                                "known removes the underline; unknown "
+                                + "restores it.",
+                        },
+                    },
+                    ["required"] = new JsonArray { "word", "mark" },
+                    ["additionalProperties"] = false,
+                },
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = false,
                     ["destructiveHint"] = false,
                     ["idempotentHint"] = true,
                     ["openWorldHint"] = false,
@@ -1553,6 +1634,77 @@ internal sealed class ReaderContextMcpServer
                 id,
                 arguments,
                 "highlight-text",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (
+            toolName == LookupToolName
+            && _queryReaderAsync is not null
+        )
+        {
+            if (arguments.ValueKind != JsonValueKind.Object
+                || !arguments.TryGetProperty("word", out JsonElement wordValue)
+                || wordValue.ValueKind != JsonValueKind.String
+                || wordValue.GetString() is not string lookupWord
+                || lookupWord.Trim().Length == 0
+                || lookupWord.Length > 128)
+            {
+                await WriteErrorAsync(
+                    id,
+                    -32602,
+                    "Invalid Reader lookup word",
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            await RunReaderQueryAsync(
+                id,
+                "lookup",
+                new JsonObject { ["word"] = lookupWord },
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (
+            toolName == MarkVocabToolName
+            && _sendOutputAsync is not null
+        )
+        {
+            string vocabWord = arguments.ValueKind == JsonValueKind.Object
+                && arguments.TryGetProperty("word", out JsonElement vocabValue)
+                && vocabValue.ValueKind == JsonValueKind.String
+                ? vocabValue.GetString() ?? string.Empty
+                : string.Empty;
+            string vocabMark = arguments.ValueKind == JsonValueKind.Object
+                && arguments.TryGetProperty("mark", out JsonElement markValue)
+                && markValue.ValueKind == JsonValueKind.String
+                ? markValue.GetString() ?? string.Empty
+                : string.Empty;
+            if (string.IsNullOrWhiteSpace(vocabWord)
+                || vocabWord.Length > 128
+                || vocabMark is not ("known" or "unknown"))
+            {
+                await WriteErrorAsync(
+                    id,
+                    -32602,
+                    "Invalid Reader vocabulary mark",
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            JsonObject vocabPayload = new()
+            {
+                ["fn"] = "_nativeReaderMarkVocabulary",
+                ["args"] = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["word"] = vocabWord,
+                        ["mark"] = vocabMark,
+                    },
+                },
+            };
+            await SendReaderOutputAsync(
+                id,
+                "client-action",
+                vocabPayload,
                 cancellationToken).ConfigureAwait(false);
             return;
         }

@@ -3090,6 +3090,11 @@
       if (typeof target !== "function") return null;
       return target.call(window, { page: params.page });
     },
+    lookup: function (params) {
+      var target = window._nativeReaderLookupWord;
+      if (typeof target !== "function") return null;
+      return target.call(window, { word: params.word });
+    },
   };
 
   function normalizeReaderQueryRequest(rawPayload) {

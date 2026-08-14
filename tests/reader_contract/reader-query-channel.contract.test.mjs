@@ -562,3 +562,99 @@ test("五个查询名两端一致，且都显式映射", () => {
   }
   assert.doesNotMatch(table, /window\s*\[/, "仍不得动态分派");
 });
+
+// ── 查词与生词标记（这两条落在 Pi 上）──────────────────────────────
+test("查词走 prewarm，不把助手的动作记成用户遇到了生词", async () => {
+  const { result, sent } = callFetching("nativeReaderLookupWord", {
+    input: { word: "ephemeral" },
+    data: { ok: true, lemma: "ephemeral", translation: "短暂的", senses: ["a", "b"] },
+  });
+  const value = await result;
+  assert.match(sent[0], /prewarm=1/,
+    "不加这个参数，AI 每查一次就给用户记一次曝光、建一篇生词笔记");
+  assert.match(sent[0], /word=ephemeral/);
+  assert.equal(value.translation, "短暂的");
+  assert.equal(value.truncated, false);
+});
+
+test("查词义项过多时截断并标注", async () => {
+  const { result } = callFetching("nativeReaderLookupWord", {
+    input: { word: "set" },
+    data: {
+      ok: true, lemma: "set",
+      senses: Array.from({ length: 30 }, (_, index) => `义项${index}`),
+    },
+  });
+  const value = await result;
+  assert.equal(value.senses.length, 12);
+  assert.equal(value.truncated, true);
+});
+
+test("查词失败如实报错，不返回空词条", async () => {
+  const { result } = callFetching("nativeReaderLookupWord", {
+    input: { word: "x" }, status: 503, data: { ok: false, error: "网关不可用" },
+  });
+  await assert.rejects(
+    result,
+    (error) => error.code === "BW_READER_QUERY_LOOKUP",
+    "空词条会被读成「这个词不存在」",
+  );
+});
+
+test("查词参数非法时拒绝，不发请求", async () => {
+  for (const word of ["", "   ", "x".repeat(129)]) {
+    const { result, sent } = callFetching("nativeReaderLookupWord", {
+      input: { word }, data: { ok: true },
+    });
+    await assert.rejects(result, (error) => error.code === "BW_READER_QUERY_PARAMS");
+    assert.deepEqual(sent, []);
+  }
+});
+
+test("生词标记只接受 known/unknown", async () => {
+  const ok = callFetching("nativeReaderMarkVocabulary", {
+    input: { word: "w", mark: "known" }, data: { ok: true },
+  });
+  const value = await ok.result;
+  assert.equal(value.mark, "known");
+  assert.equal(value.word, "w");
+  assert.equal(ok.sent.length, 1, "合法取值必须真的发出去");
+
+  for (const mark of ["", "yes", "KNOWN", null]) {
+    const { result } = callFetching("nativeReaderMarkVocabulary", {
+      input: { word: "w", mark }, data: { ok: true },
+    });
+    await assert.rejects(result, (error) => error.code === "BW_READER_VOCAB_MARK");
+  }
+});
+
+test("生词标记未确认成功时如实报错，不当作已记上", async () => {
+  const { result } = callFetching("nativeReaderMarkVocabulary", {
+    input: { word: "w", mark: "known" },
+    status: 503, data: { ok: false, error: "网关不可用" },
+  });
+  await assert.rejects(
+    result,
+    (error) => error.code === "BW_READER_VOCAB_FAILED",
+    "一次没记上的「已掌握」，下次阅读还会被划成生词",
+  );
+});
+
+test("查词与生词标记的工具描述交代了对 Pi 的依赖", () => {
+  const lookup = MCP.slice(
+    MCP.indexOf('["name"] = LookupToolName'),
+    MCP.indexOf('["name"] = LookupToolName') + 2600,
+  ).replace(/"\s*\+\s*"/g, "");
+  assert.match(lookup, /needs the Pi/i, "离线即失效，必须说清楚");
+  assert.match(lookup, /not recorded against the user's vocabulary/i);
+
+  const mark = MCP.slice(
+    MCP.indexOf('["name"] = MarkVocabToolName'),
+    MCP.indexOf('["name"] = MarkVocabToolName') + 2600,
+  ).replace(/"\s*\+\s*"/g, "");
+  assert.match(mark, /Needs the Pi/i);
+  assert.match(
+    mark, /Ask before marking words the user did not bring up/i,
+    "这会改变用户阅读器里的下划线和 Anki 的排程",
+  );
+});

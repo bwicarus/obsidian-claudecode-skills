@@ -339,7 +339,8 @@ internal static class ReaderRealtimeOutputProtocol
             "_nativeReaderUndoLast"
             or "_nativeReaderCreateNote"
             or "_nativeReaderEditNote"
-            or "_nativeReaderMakeNote"))
+            or "_nativeReaderMakeNote"
+            or "_nativeReaderMarkVocabulary"))
         {
             throw Invalid("Reader 客户端动作不在白名单内");
         }
@@ -347,6 +348,28 @@ internal static class ReaderRealtimeOutputProtocol
         if (args.ValueKind != JsonValueKind.Array)
         {
             throw Invalid("Reader 客户端动作参数必须是数组");
+        }
+        if (fn is "_nativeReaderMarkVocabulary")
+        {
+            if (args.GetArrayLength() != 1
+                || args[0].ValueKind != JsonValueKind.Object)
+            {
+                throw Invalid("Reader 生词标记需要一个对象");
+            }
+            JsonElement vocabulary = args[0];
+            DirectJsonValidation.RequireNoDuplicateKeys(vocabulary);
+            Exact(vocabulary, "word", "mark");
+            string vocabularyWord = Text(vocabulary, "word", 128);
+            if (string.IsNullOrWhiteSpace(vocabularyWord))
+            {
+                throw Invalid("Reader 生词为空");
+            }
+            string vocabularyMark = Text(vocabulary, "mark", 16);
+            if (vocabularyMark is not ("known" or "unknown"))
+            {
+                throw Invalid("Reader 生词标记取值无效");
+            }
+            return;
         }
         if (fn is "_nativeReaderMakeNote")
         {
