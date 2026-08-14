@@ -358,6 +358,17 @@ def _vb_err(e):
     return jsonify({"ok": False, "error": "vbook_error:%s" % str(e)[:60]}), 500
 
 
+# PWA 阅读器页面下线（产品边界：完整阅读由 App 与扩展提供）。
+# 只拦页面入口，/pdf/api/* 照常服务 —— App 和扩展还要用。
+# 放在最前：已下线的入口不必再过 vbook gate 与后续任何处理。
+try:
+    import reader_pwa_retirement as _PWA_RETIRED
+except Exception:
+    _PWA_RETIRED = None
+else:
+    _PWA_RETIRED.register(bp)
+
+
 @bp.before_request
 def _vbook_gate():
     if VB is None:
