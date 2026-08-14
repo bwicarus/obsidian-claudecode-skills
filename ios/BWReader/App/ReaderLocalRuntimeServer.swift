@@ -1496,6 +1496,9 @@ final class ReaderLocalRuntimeServer {
     static let maximumEPUBBytes: Int64 = 512 * 1_024 * 1_024
 
     private let capabilityToken: String
+    private let endpointShareStore = ReaderLocalEndpointShareStore()
+    /// 落点发布失败的原因。为空表示扩展应该能找到本机服务。
+    private(set) var lastEndpointShareError: String?
     private let cspNonce: String
     private let state: ReaderLocalRuntimeState
     let piProxyBroker: ReaderNativePiProxyBroker
@@ -1602,6 +1605,9 @@ final class ReaderLocalRuntimeServer {
     }
 
     deinit {
+        // 进程走了，落点就该消失 —— 否则下次扩展读到的是上一条命的端口与
+        // token，请求会被 403 挡掉，而 403 看起来像"权限配错了"。
+        endpointShareStore.clear()
         piProxyBroker.cancelAll()
         bundleVerificationTask.cancel()
         lifecycleTask?.cancel()
@@ -1689,9 +1695,35 @@ final class ReaderLocalRuntimeServer {
         } catch {
             runTask?.cancel()
             await server.stop(timeout: 0)
+            // 起不来就把落点抹掉。留着一份指向死端口的记录，扩展会一直往
+            // 一个没人应答的地方打，而那种失败长得跟"网络不好"一模一样。
+            endpointShareStore.clear()
             let detail = lastRunError?.localizedDescription
                 ?? error.localizedDescription
             throw ReaderLocalRuntimeError.serverUnavailable(detail)
+        }
+        publishEndpointShare()
+    }
+
+    /// 把本机服务的落点写进 App Group，供 Safari 扩展读取。
+    ///
+    /// 扩展现在把高亮、便签写去 Pi，而 App 的那份在自己的 IndexedDB 里 ——
+    /// 同一件东西两份数据，用户在扩展里划的线 App 看不见。让扩展改打这里，
+    /// 两边才是同一份。
+    ///
+    /// 写失败只记不抛：本机阅读不依赖这份记录，为了扩展的便利而让 App 起不来
+    /// 是本末倒置。但也不能静默 —— 没有它扩展会一路回落到 Pi，
+    /// 那正是我们要消除的割裂，得留下可查的痕迹。
+    private func publishEndpointShare() {
+        do {
+            try endpointShareStore.write(
+                ReaderLocalEndpointShare(
+                    port: Self.port,
+                    capabilityToken: capabilityToken
+                )
+            )
+        } catch {
+            lastEndpointShareError = error.localizedDescription
         }
     }
 

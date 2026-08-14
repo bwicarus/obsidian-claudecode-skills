@@ -18,7 +18,10 @@ if (typeof importScripts === "function") {
     "vendor/reader-runtime-sync-conflict-control.js",
     "vendor/reader-runtime-document-note-repository.js",
     "vendor/reader-runtime-interaction-policy.js",
-    "vendor/reader-runtime-vocabulary-state.js"
+    "vendor/reader-runtime-vocabulary-state.js",
+    // 路由分流：哪些打宿主 App、哪些仍打 Pi，以及 App 落点的解析。
+    "src/route-destination.js",
+    "src/local-endpoint.js"
   );
 }
 
@@ -300,7 +303,50 @@ function checkedBwFetchRequest(value, init) {
       details: { path: url.pathname, method }
     });
   }
-  return { url, method };
+  // 路径归属决定打给谁。App 已有本地实现的那些必须打 App —— 打 Pi 会写出
+  // 第二份数据，用户在扩展里划的线 App 里看不见，且要等他自己发现。
+  //
+  // origin 白名单保持不变：调用方仍然传 Pi 的 URL，重写发生在校验之后。
+  // 这样一处调用点都不用改，"允许哪些 origin 进来"这条边界也没被放宽。
+  // 取分流表时容忍它不存在：这个函数是纯校验，被多处以沙箱方式单独取用。
+  // 让它硬依赖一个外部全局，等于把「校验」和「路由」两件事绑死 ——
+  // 缺表时按 Pi 处理，与未列举路径的默认一致，不会静默改变去向。
+  const destination =
+    typeof BWRouteDestination === "object" && BWRouteDestination
+      ? BWRouteDestination.destinationFor(url.pathname)
+      : "pi";
+  return { url, method, destination };
+}
+
+/* 取宿主 App 的本机服务落点。
+ *
+ * 走 native message 的 capabilities。这里不能复用 handleNativeAppRequest ——
+ * 那个要求 sender 是网页或扩展页，而这是 background 自己发起的。
+ *
+ * 每次请求都重新问一次：App 重启会换端口与 capability token，缓存住旧值会让
+ * 请求一路 403，而 403 看起来像"权限配错了"，排查方向完全错。native message
+ * 是本机 IPC，这点开销远小于查错的代价。 */
+async function appLocalEndpointCapabilities() {
+  return sendSafariNativeMessage({
+    contract: NATIVE_APP_CONTRACT,
+    action: "capabilities",
+    requestId: "local-endpoint-" + Math.random().toString(36).slice(2, 12)
+  });
+}
+
+/* 把一条 App-owned 请求改指向宿主 App。
+ *
+ * 硬失败，不回落 Pi：回落看起来友好，实际是把割裂藏起来 —— 用户以为存上了，
+ * 换个入口就不见了。宁可当场说"请先打开 BW Reader"。
+ * 抛出的错误带 BW_LOCAL_ENDPOINT_* 码，调用侧据此给出可操作的提示。 */
+async function resolvedAppRequestURL(checked) {
+  const capabilities = await appLocalEndpointCapabilities();
+  const resolved = BWLocalEndpoint.parse(capabilities);
+  const base = BWLocalEndpoint.requireBase(resolved);
+  return new URL(BWLocalEndpoint.localURL(
+    base,
+    checked.url.pathname + checked.url.search
+  ));
 }
 const MAX_BW_FETCH_BINARY_BODY_BYTES = 8 * 1024 * 1024;
 const MAX_BW_FETCH_BINARY_BODY_B64_CHARS =
@@ -7386,6 +7432,14 @@ chrome.runtime.onConnect.addListener((port) => {
     let checked;
     try {
       checked = checkedBwFetchRequest(url, init);
+      // 比较字面量而不是 BWRouteDestination.DESTINATION.APP：destination 的取值
+      // 本来就是协议的一部分（跟 method 是 "GET" 同理），而这个文件被大量测试
+      // 以沙箱方式逐段提取，多一处模块级依赖就多一处"在别处炸掉"的可能。
+      if (checked.destination === "app") {
+        checked = Object.assign({}, checked, {
+          url: await resolvedAppRequestURL(checked)
+        });
+      }
       init = normalizedBwFetchInit(checked, init);
     } catch (error) {
       try {

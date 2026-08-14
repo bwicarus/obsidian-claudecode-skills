@@ -37,6 +37,7 @@ targets:
       - path: Shared/ReaderRealtimeCredentialCore.swift
       - path: Shared/ReaderSharedSnapshot.swift
       - path: Shared/ReaderLocalNoteBridge.swift
+      - path: Shared/ReaderLocalEndpointShare.swift
       # Generated deterministically before XcodeGen. It is a folder resource so
       # the loopback host receives a stable ReaderBundle document root rather
       # than hundreds of flattened files.
@@ -86,6 +87,7 @@ targets:
       - path: Shared/ReaderRealtimeCredentialCore.swift
       - path: Shared/ReaderSharedSnapshot.swift
       - path: Shared/ReaderLocalNoteBridge.swift
+      - path: Shared/ReaderLocalEndpointShare.swift
       # Keep the staging directory itself out of the bundle. Root files are
       # copied one by one, while the referenced directories preserve the paths
       # used by manifest.json and extension-owned packaged data.

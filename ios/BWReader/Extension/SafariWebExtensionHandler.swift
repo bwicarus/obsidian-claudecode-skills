@@ -72,6 +72,29 @@ final class SafariWebExtensionHandler: NSObject, NSExtensionRequestHandling {
             response["containingApp"] =
                 ReaderNativeBridgeContract.containingAppIdentifier
             response["requiresForegroundLaunch"] = true
+            // 本机 Reader 服务的落点。有它，扩展就能直接读写 App 的数据，
+            // 而不是绕去 Pi ——「扩展里划的高亮 App 看不见」正是绕过去的后果。
+            //
+            // 三种情况必须分开报，因为处理方式完全不同：
+            //   · 有落点         → 扩展直连
+            //   · App 没在跑     → 扩展该提示打开 App，而不是回落 Pi
+            //   · 容器读不到     → 配置问题（App Group），该让人看见
+            // 折成一个「没有」，第二种会被当成第三种，排查方向直接歪掉。
+            do {
+                if let share = try ReaderLocalEndpointShareStore().read() {
+                    response["localEndpoint"] = [
+                        "base": share.baseURLString,
+                        "port": Int(share.port),
+                        "startedAtEpochSeconds": share.startedAtEpochSeconds,
+                    ]
+                    response["localEndpointStatus"] = "ready"
+                } else {
+                    response["localEndpointStatus"] = "app-not-running"
+                }
+            } catch {
+                response["localEndpointStatus"] = "unavailable"
+                response["localEndpointError"] = error.localizedDescription
+            }
             complete(context, response: response)
 
         case "voice.status":
