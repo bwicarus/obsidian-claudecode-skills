@@ -8,16 +8,20 @@ const ROOT = new URL("../../", import.meta.url);
 const read = (path) => fs.readFileSync(new URL(path, ROOT), "utf8");
 const PDF = read("_server_deploy/static/pdf/reader.src/17-highlight.js");
 const RUNTIME = read("_server_deploy/static/pdf/native-local-runtime.js");
+const VOICECALL = read("_server_deploy/static/pdf/rc-voicecall.js");
+const DOCUMENT_HOST = read("_server_deploy/static/reader-runtime/document-host.js");
+const LEGACY_RC_BRIDGE = read("_server_deploy/static/reader-runtime/legacy-rc-bridge.js");
 const NATIVE_INTERFACE_MANIFEST = JSON.parse(read(
   "ios/BWReader/native_reader_interface_manifest.json",
 ));
 const BOOK_ID = "localbook-" + "b".repeat(64);
 const LOCAL_FILE = "localbook:" + BOOK_ID;
 
-async function exactHighlightRuntime() {
+async function exactHighlightRuntime(options = {}) {
   const records = new Map();
   const batchOptions = [];
-  let failFirstExactBatch = true;
+  const batchMutations = [];
+  let failFirstExactBatch = options.failFirstExactBatch !== false;
   function makeStore(documentStore = false) {
     return {
       get(collection, id) {
@@ -32,6 +36,7 @@ async function exactHighlightRuntime() {
       batch(mutations, options) {
         if (!documentStore) return Promise.resolve(mutations.map(() => ({ ok: true })));
         batchOptions.push(options == null ? null : JSON.parse(JSON.stringify(options)));
+        batchMutations.push(mutations.map((mutation) => mutation.collection));
         if (options?.transactionTimeoutMs && failFirstExactBatch) {
           failFirstExactBatch = false;
           const error = new Error("bounded IndexedDB transaction aborted");
@@ -139,14 +144,64 @@ async function exactHighlightRuntime() {
   context.window = context;
   vm.runInNewContext(RUNTIME, context, { filename: "native-local-runtime.js" });
   await context.BWReaderRuntime.nativeLocalRuntime.ready();
-  return { context, batchOptions, records };
+  return { context, batchOptions, batchMutations, records };
+}
+
+function documentState(records, kind) {
+  const record = [...records.values()].find(
+    (item) => item?.value?.id?.endsWith(`:${kind}`),
+  );
+  return record?.value?.payload;
+}
+
+function executeUndoThroughRealtimeReceiver(context, operationId) {
+  const start = VOICECALL.indexOf("} else if (delivery.kind === 'client-action') {");
+  const end = VOICECALL.indexOf(
+    "} else {\n        throw new Error('BW_READER_REALTIME_OUTPUT_KIND_UNSUPPORTED')",
+    start,
+  );
+  assert.ok(start >= 0 && end > start, "missing client-action receiver branch");
+  context.delivery = { kind: "client-action" };
+  context.p = { fn: "_nativeReaderUndoLast", args: [operationId] };
+  context.work = null;
+  vm.runInContext(
+    `if (false) { ${VOICECALL.slice(start, end)} }`,
+    context,
+    { filename: "rc-voicecall-client-action.js" },
+  );
+  return context.work;
+}
+
+function installLegacyAdapterHost(context, kind, assistant) {
+  const adapter = {
+    kind,
+    fileInfo: () => ({ file: LOCAL_FILE }),
+    _host: { asst: assistant },
+  };
+  context.RC = {
+    _adapter: adapter,
+    adapter() { return this._adapter; },
+    use(next) { this._adapter = next || {}; return this; },
+  };
+  vm.runInContext(DOCUMENT_HOST, context, { filename: "document-host.js" });
+  vm.runInContext(LEGACY_RC_BRIDGE, context, { filename: "legacy-rc-bridge.js" });
+  assert.equal(
+    typeof context.RC.documentHost.current().reloadHighlights,
+    "undefined",
+    "legacy DocumentHost itself intentionally does not expose projection reload",
+  );
+  return adapter;
 }
 
 test("App exact highlights bypass a poisoned ordinary highlight queue", () => {
   assert.match(RUNTIME, /function mutateDocumentStateNow\(/);
   assert.match(
     RUNTIME,
-    /savePDFHighlight:[\s\S]*withNativePDFWriter\('assistant-exact-highlight'[\s\S]*persistLocalPDFHighlight\([\s\S]*true/,
+    /savePDFHighlight:[\s\S]*withNativePDFWriter\('assistant-exact-highlight'[\s\S]*persistAssistantPDFHighlight\(/,
+  );
+  assert.match(
+    RUNTIME,
+    /function persistAssistantPDFHighlight[\s\S]*'document-highlights'[\s\S]*'pdf-assistant-undo'[\s\S]*'pdf-assistant-ops'[\s\S]*stores\.document\.batch\(/,
   );
   assert.match(
     RUNTIME,
@@ -190,6 +245,141 @@ test("an aborted exact-highlight batch releases its writer and a later write set
   );
   assert.equal(record.value.payload.length, 1);
   assert.equal(record.value.payload[0].id, "c_2222222222222222");
+});
+
+test("Direct PDF highlight and undo are one replay-safe local authority chain", async () => {
+  const { context, batchMutations, batchOptions, records } = await exactHighlightRuntime({
+    failFirstExactBatch: false,
+  });
+  const runtime = context.BWReaderRuntime.nativeLocalRuntime;
+  const payload = {
+    file: LOCAL_FILE,
+    id: "c_3333333333333333",
+    page: 8,
+    rects: [[11, 22, 33, 44]],
+    color: "#ffd54a",
+    text: "undo this exact highlight",
+  };
+  await runtime.savePDFHighlight(payload);
+  context._allHighlights = [{ id: payload.id }];
+  context._hlByPage = { 8: [{ id: payload.id }] };
+  let refreshes = 0;
+  installLegacyAdapterHost(context, "pdf", {
+    reloadHighlights: async () => {
+      refreshes += 1;
+      const persisted = documentState(records, "document-highlights") || [];
+      context._allHighlights = JSON.parse(JSON.stringify(persisted));
+      context._hlByPage = persisted.reduce((pages, highlight) => {
+        (pages[highlight.page] ||= []).push(highlight);
+        return pages;
+      }, {});
+    },
+  });
+  assert.deepEqual(JSON.parse(JSON.stringify(batchMutations[0])), [
+    "native-document-highlights",
+    "native-pdf-assistant-undo",
+    "native-pdf-assistant-ops",
+  ]);
+  assert.equal(batchOptions[0]?.transactionTimeoutMs, 4000);
+  assert.equal(documentState(records, "document-highlights").length, 1);
+  assert.equal(documentState(records, "pdf-assistant-undo").length, 1);
+
+  const operationId = "rundo_" + "3".repeat(24);
+  const first = await executeUndoThroughRealtimeReceiver(context, operationId);
+  assert.deepEqual(
+    {
+      contract: first.contract,
+      ok: first.ok,
+      surface: first.surface,
+      operationId: first.operationId,
+      replayed: first.replayed,
+      remaining: first.remaining,
+    },
+    {
+      contract: "reader-native-undo-result/1",
+      ok: true,
+      surface: "pdf",
+      operationId,
+      replayed: false,
+      remaining: 0,
+    },
+  );
+  assert.equal(documentState(records, "document-highlights").length, 0);
+  assert.equal(documentState(records, "pdf-assistant-undo").length, 0);
+  assert.equal(refreshes, 1, "undo must reload the visible PDF highlight projection");
+  assert.deepEqual(context._allHighlights, []);
+  assert.deepEqual(JSON.parse(JSON.stringify(context._hlByPage)), {});
+
+  const replay = await context._nativeReaderUndoLast(operationId);
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.remaining, 0);
+  assert.equal(documentState(records, "document-highlights").length, 0);
+});
+
+test("Direct PDF mutation IDs reject changed payloads and later edits block undo", async () => {
+  const { context, records } = await exactHighlightRuntime({
+    failFirstExactBatch: false,
+  });
+  const runtime = context.BWReaderRuntime.nativeLocalRuntime;
+  const payload = {
+    file: LOCAL_FILE,
+    id: "c_4444444444444444",
+    page: 9,
+    rects: [[1, 2, 3, 4]],
+    color: "#ffd54a",
+    text: "original payload",
+  };
+  await runtime.savePDFHighlight(payload);
+  await assert.rejects(
+    runtime.savePDFHighlight({ ...payload, text: "different payload" }),
+    (error) => error.code === "BW_NATIVE_PDF_ASSISTANT_CONFLICT",
+  );
+  assert.equal(documentState(records, "document-highlights")[0].text, "original payload");
+  assert.equal(documentState(records, "pdf-assistant-undo").length, 1);
+
+  const patched = await context.fetch("/pdf/api/highlights", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      file: LOCAL_FILE,
+      id: payload.id,
+      note: "edited after creation",
+    }),
+  });
+  assert.equal(patched.status, 200);
+  await assert.rejects(
+    context._nativeReaderUndoLast("rundo_" + "4".repeat(24)),
+    (error) => error.code === "BW_NATIVE_PDF_ASSISTANT_CONFLICT",
+  );
+  assert.equal(documentState(records, "document-highlights").length, 1);
+  assert.equal(documentState(records, "pdf-assistant-undo").length, 1);
+});
+
+test("Direct PDF undo fails closed when the authoritative stack is empty", async () => {
+  const { context } = await exactHighlightRuntime({ failFirstExactBatch: false });
+  await assert.rejects(
+    context._nativeReaderUndoLast("rundo_" + "5".repeat(24)),
+    (error) => error.code === "BW_NATIVE_PDF_UNDO_EMPTY",
+  );
+});
+
+test("a failed PDF projection refresh cannot turn a committed undo into failure", async () => {
+  const { context, records } = await exactHighlightRuntime({ failFirstExactBatch: false });
+  await context.BWReaderRuntime.nativeLocalRuntime.savePDFHighlight({
+    file: LOCAL_FILE,
+    id: "c_5555555555555555",
+    page: 10,
+    rects: [[5, 6, 7, 8]],
+    color: "#ffd54a",
+    text: "refresh failure stays post-commit",
+  });
+  installLegacyAdapterHost(context, "pdf", {
+    reloadHighlights: () => Promise.reject(new Error("renderer unavailable")),
+  });
+  const result = await context._nativeReaderUndoLast("rundo_" + "6".repeat(24));
+  assert.equal(result.ok, true);
+  assert.equal(documentState(records, "document-highlights").length, 0);
+  assert.equal(documentState(records, "pdf-assistant-undo").length, 0);
 });
 
 // 删除也必须真的把事务上界交到底层。

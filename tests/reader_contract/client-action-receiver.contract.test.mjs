@@ -77,7 +77,7 @@ test("受信 Reader 撤销入口存在时只传入受校验的一次性编号", 
   assert.deepEqual(seen, ["rundo_" + "b".repeat(24)]);
 });
 
-test("宿主缺少该函数时明确报错，绝不静默跳过", () => {
+test("HTML/普通网页宿主没有本机书籍事务时明确拒绝，绝不静默跳过", () => {
   const { thrown } = runBranch({
     fn: "_nativeReaderUndoLast",
     args: ["rundo_" + "a".repeat(24)],

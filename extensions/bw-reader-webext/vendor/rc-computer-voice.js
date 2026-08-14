@@ -1037,6 +1037,36 @@ if (window.__bwPwaProviderOnly) return;
         payload.target = normalizeReaderOutputTarget(p.target);
         payload.sourceText = sourceText;
       }
+    } else if (kind === "client-action") {
+      // 桥接只允许调用一个受信语义入口。助手高亮的可见卡片
+      // 在本地落库成功后直接产生，不需要也不允许穿过这个动态动作通道。
+      exactObject(p, ["fn", "args"], [], "Reader 客户端动作");
+      var actionFn = safeText(p.fn, "Reader 客户端动作 fn", 64, false);
+      if (actionFn !== "_nativeReaderUndoLast") {
+        throw directError(
+          "Reader 客户端动作不在白名单内",
+          "BW_READER_REALTIME_OUTPUT_SCHEMA",
+          false
+        );
+      }
+      if (!Array.isArray(p.args)) {
+        throw directError(
+          "Reader 客户端动作参数必须是数组",
+          "BW_READER_REALTIME_OUTPUT_SCHEMA",
+          false
+        );
+      }
+      var undoId = p.args.length === 1
+        ? safeText(p.args[0], "Reader 撤销操作编号", 32, false)
+        : "";
+      if (!/^rundo_[0-9a-f]{24}$/.test(undoId)) {
+        throw directError(
+          "Reader 撤销操作编号无效",
+          "BW_READER_REALTIME_OUTPUT_SCHEMA",
+          false
+        );
+      }
+      payload = { fn: actionFn, args: [undoId] };
     } else {
       throw directError("Reader 输出类型不受支持", "BW_READER_REALTIME_OUTPUT_SCHEMA", false);
     }

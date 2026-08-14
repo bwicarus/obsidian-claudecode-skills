@@ -21,6 +21,14 @@ const ACCOUNT_CONTEXT = readFileSync(
   new URL("_server_deploy/static/reader-runtime/account-context.js", ROOT),
   "utf8",
 );
+const DOCUMENT_HOST = readFileSync(
+  new URL("_server_deploy/static/reader-runtime/document-host.js", ROOT),
+  "utf8",
+);
+const LEGACY_RC_BRIDGE = readFileSync(
+  new URL("_server_deploy/static/reader-runtime/legacy-rc-bridge.js", ROOT),
+  "utf8",
+);
 const PDF_AI = readFileSync(
   new URL("_server_deploy/static/pdf/reader.src/21-misc-ai.js", ROOT),
   "utf8",
@@ -34,6 +42,27 @@ const DEFAULT_LOCAL_FILE = "localbook:" + DEFAULT_LOCAL_BOOK_ID;
 
 function clone(value) {
   return value == null ? value : JSON.parse(JSON.stringify(value));
+}
+
+function installLegacyAdapterHost(context, kind, assistant) {
+  const adapter = {
+    kind,
+    fileInfo: () => ({ file: DEFAULT_LOCAL_FILE }),
+    _host: { asst: assistant },
+  };
+  context.RC = {
+    _adapter: adapter,
+    adapter() { return this._adapter; },
+    use(next) { this._adapter = next || {}; return this; },
+  };
+  vm.runInContext(DOCUMENT_HOST, context, { filename: "document-host.js" });
+  vm.runInContext(LEGACY_RC_BRIDGE, context, { filename: "legacy-rc-bridge.js" });
+  assert.equal(
+    typeof context.RC.documentHost.current().reloadHighlights,
+    "undefined",
+    "legacy DocumentHost itself intentionally does not expose projection reload",
+  );
+  return adapter;
 }
 
 function fakeClock(start = 1_800_000_000_000) {
@@ -4104,8 +4133,8 @@ test("embedded PDF text uses real word segmentation even without spaces", () => 
 
 // Pi 元数据挂住时，本地高亮读写仍须落定。
 //
-// epub-action 与 epub-highlights 的 CRUD 共用同一条 document:epub-highlights 队列。
-// 先前 Pi 的 metadataTask 被关在队列里：一次网络往返期间，用户的每一次高亮增删改都
+// 旧实现里 epub-action 与 epub-highlights 的 CRUD 共用 document:epub-highlights 队列。
+// 当时 Pi 的 metadataTask 被关在队列里：一次网络往返期间，用户的每一次高亮增删改都
 // 排在它后面；网络若永不回应，整条队列就此不动 —— 而用户看到的只是"高亮删不掉"。
 //
 // 现在队列里只剩有界的本地读与写，本地提交即释放，Pi 移到队列之外有限等待。
@@ -4143,8 +4172,8 @@ function testWatchdog(promise, label, ms = 120) {
 
 test("Pi 元数据永不回应时，本地高亮写入与删除仍能落定", async () => {
   const result = await harness(pendingPiHarnessOptions());
-  // 必须让 descriptor.kind 落在 epub-highlights 上：那才是与普通高亮 CRUD
-  // 共用的同一条队列。用 notes_create 的话 kind 是 document-notes-legacy，
+  // 必须让 descriptor.kind 落在 epub-highlights 上：旧结构下它才会与普通高亮 CRUD
+  // 共用同一条队列。用 notes_create 的话 kind 是 document-notes-legacy，
   // 两条队列根本不相干，退回旧实现也照样通过 —— 那样这条测试就是空的。
   const action = {
     id: "act_pending_pi", kind: "hl_create", title: "h", detail: "",
@@ -4221,6 +4250,315 @@ test("Pi 元数据永不回应时，本地高亮写入与删除仍能落定", as
   assert.equal(actionPayload.metadata_pending, true);
   assert.equal(actionPayload.metadata_synced, false);
   assert.match(String(actionPayload.warning || ""), /未回应|本地写入已完成/);
+});
+
+test("Direct EPUB highlight and generic undo share one replay-safe App transaction", async () => {
+  const result = await harness({
+    surface: "epub",
+    interfaceManifest: nativeEPUBAssistantManifest(),
+  });
+  const body = {
+    file: DEFAULT_LOCAL_FILE,
+    id: "c_7777777777777777",
+    anchor: { section: 6, start: 12, end: 24 },
+    text: "direct EPUB highlight",
+    color: "#ffd54a",
+  };
+  const batches = [];
+  const originalBatch = result.documentStore.batch.bind(result.documentStore);
+  result.documentStore.batch = (mutations, options) => {
+    batches.push({
+      kinds: mutations.map((mutation) => mutation.collection),
+      timeout: options?.transactionTimeoutMs,
+    });
+    return originalBatch(mutations, options);
+  };
+  const created = await result.context.fetch("/pdf/api/epub-highlights", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  });
+  assert.equal(created.status, 200);
+  const createdPayload = await created.json();
+  assert.equal(createdPayload.replayed, false);
+  assert.equal(createdPayload.action.kind, "epub_highlight");
+  assert.equal(createdPayload.action.id, "direct-highlight:" + body.id);
+  assert.deepEqual(createdPayload.action.redo.items[0].anchor, body.anchor);
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(batches[0])),
+    {
+      kinds: [
+        "native-epub-highlights",
+        "native-epub-assistant-undo",
+        "native-epub-assistant-ops",
+      ],
+      timeout: 4000,
+    },
+    "highlight, stack and operation receipt must be one bounded batch",
+  );
+  const stackKey =
+    `native-epub-assistant-undo:${DEFAULT_LOCAL_BOOK_ID}:epub-assistant-undo`;
+  assert.equal(
+    result.dataStoresState.document.values.get(stackKey).value.payload.length,
+    1,
+    "highlight and undo entry must land in the same committed batch",
+  );
+  const visible = {
+    hls: { [body.id]: clone(body) },
+    marks: new Set([body.id]),
+    refreshes: 0,
+  };
+  installLegacyAdapterHost(result.context, "epub", {
+    reloadHighlights: async () => {
+      visible.refreshes += 1;
+      const response = await result.context.fetch(
+        "/pdf/api/epub-highlights?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+      );
+      const payload = await response.json();
+      visible.hls = Object.fromEntries(
+        payload.highlights.map((highlight) => [highlight.id, highlight]),
+      );
+      visible.marks = new Set(payload.highlights.map((highlight) => highlight.id));
+    },
+  });
+
+  const operationId = "rundo_" + "7".repeat(24);
+  const undone = await result.context._nativeReaderUndoLast(operationId);
+  assert.deepEqual(
+    {
+      contract: undone.contract,
+      ok: undone.ok,
+      surface: undone.surface,
+      operationId: undone.operationId,
+      replayed: undone.replayed,
+      remaining: undone.remaining,
+    },
+    {
+      contract: "reader-native-undo-result/1",
+      ok: true,
+      surface: "epub",
+      operationId,
+      replayed: false,
+      remaining: 0,
+    },
+  );
+  let listed = await (await result.context.fetch(
+    "/pdf/api/epub-highlights?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  assert.equal(listed.highlights.length, 0);
+  assert.equal(
+    result.dataStoresState.document.values.get(stackKey).value.payload.length,
+    0,
+    "successful undo must pop the authoritative stack",
+  );
+  assert.equal(visible.refreshes, 1, "undo must reload the active EPUB host projection");
+  assert.deepEqual(visible.hls, {});
+  assert.deepEqual([...visible.marks], []);
+
+  const replay = await result.context._nativeReaderUndoLast(operationId);
+  assert.equal(replay.replayed, true);
+  assert.equal(replay.remaining, 0);
+  listed = await (await result.context.fetch(
+    "/pdf/api/epub-highlights?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  assert.equal(listed.highlights.length, 0, "replay must not undo an older action");
+});
+
+test("Direct EPUB mutation IDs reject changed payloads and later edits preserve the stack", async () => {
+  const result = await harness({
+    surface: "epub",
+    interfaceManifest: nativeEPUBAssistantManifest(),
+  });
+  const body = {
+    file: DEFAULT_LOCAL_FILE,
+    id: "c_8888888888888888",
+    anchor: { section: 2, start: 1, end: 9 },
+    text: "original EPUB payload",
+    color: "#ffd54a",
+  };
+  assert.equal((await result.context.fetch("/pdf/api/epub-highlights", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body),
+  })).status, 200);
+
+  const changedReplay = await result.context.fetch("/pdf/api/epub-highlights", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...body, text: "different EPUB payload" }),
+  });
+  const changedPayload = await changedReplay.json();
+  assert.equal(changedReplay.ok, false);
+  assert.equal(changedPayload.code, "BW_NATIVE_EPUB_UNDO_CONFLICT");
+
+  const patched = await result.context.fetch("/pdf/api/epub-highlights", {
+    method: "PATCH",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      file: DEFAULT_LOCAL_FILE,
+      id: body.id,
+      note: "edited after creation",
+    }),
+  });
+  assert.equal(patched.status, 200);
+  await assert.rejects(
+    result.context._nativeReaderUndoLast("rundo_" + "8".repeat(24)),
+    (error) => error.code === "BW_NATIVE_EPUB_UNDO_CONFLICT",
+  );
+  const stackKey =
+    `native-epub-assistant-undo:${DEFAULT_LOCAL_BOOK_ID}:epub-assistant-undo`;
+  assert.equal(
+    result.dataStoresState.document.values.get(stackKey).value.payload.length,
+    1,
+    "a conflict must not pop the authoritative stack",
+  );
+  const listed = await (await result.context.fetch(
+    "/pdf/api/epub-highlights?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  assert.equal(listed.highlights.length, 1);
+  assert.equal(listed.highlights[0].note, "edited after creation");
+});
+
+test("Direct EPUB undo fails closed on an empty authoritative stack", async () => {
+  const result = await harness({
+    surface: "epub",
+    interfaceManifest: nativeEPUBAssistantManifest(),
+  });
+  await assert.rejects(
+    result.context._nativeReaderUndoLast("rundo_" + "9".repeat(24)),
+    (error) => error.code === "BW_NATIVE_EPUB_UNDO_EMPTY",
+  );
+});
+
+test("EPUB authoritative undo history is bounded to the newest 80 actions", async () => {
+  const result = await harness({
+    surface: "epub",
+    interfaceManifest: nativeEPUBAssistantManifest(),
+  });
+  for (let index = 0; index < 82; index += 1) {
+    const response = await result.context.fetch("/pdf/api/epub-highlights", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        file: DEFAULT_LOCAL_FILE,
+        id: "c_" + index.toString(16).padStart(16, "0"),
+        anchor: { section: index, start: 0, end: 1 },
+        text: `bounded-${index}`,
+        color: "#ffd54a",
+      }),
+    });
+    assert.equal(response.status, 200);
+  }
+  const stackKey =
+    `native-epub-assistant-undo:${DEFAULT_LOCAL_BOOK_ID}:epub-assistant-undo`;
+  const stack = result.dataStoresState.document.values.get(stackKey).value.payload;
+  assert.equal(stack.length, 80);
+  assert.equal(stack[0].action.redo.items[0].text, "bounded-2");
+  assert.equal(stack[79].action.redo.items[0].text, "bounded-81");
+});
+
+test("EPUB undo timeout is outcome-unknown, does not pop, and is never auto-retried", async () => {
+  const result = await harness({
+    surface: "epub",
+    interfaceManifest: nativeEPUBAssistantManifest(),
+  });
+  const create = await result.context.fetch("/pdf/api/epub-highlights", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      file: DEFAULT_LOCAL_FILE,
+      id: "c_aaaaaaaaaaaaaaaa",
+      anchor: { section: 1, start: 2, end: 5 },
+      text: "must remain after timeout",
+      color: "#ffd54a",
+    }),
+  });
+  assert.equal(create.status, 200);
+  const originalBatch = result.documentStore.batch.bind(result.documentStore);
+  let undoBatchCalls = 0;
+  result.documentStore.batch = (mutations, options) => {
+    if (mutations.some((mutation) =>
+      mutation.value?.id?.endsWith(":epub-assistant-ops") &&
+      mutation.value?.payload?.some((item) =>
+        item.id === "epub_" + "b".repeat(24)))) {
+      undoBatchCalls += 1;
+      const error = new Error("bounded transaction outcome unknown");
+      error.code = "BW_DATA_TIMEOUT";
+      return Promise.reject(error);
+    }
+    return originalBatch(mutations, options);
+  };
+  await assert.rejects(
+    result.context._nativeReaderUndoLast("rundo_" + "b".repeat(24)),
+    (error) => error.code === "BW_DATA_TIMEOUT",
+  );
+  assert.equal(undoBatchCalls, 1, "runtime must not retry an unknown mutation outcome");
+  const stackKey =
+    `native-epub-assistant-undo:${DEFAULT_LOCAL_BOOK_ID}:epub-assistant-undo`;
+  assert.equal(result.dataStoresState.document.values.get(stackKey).value.payload.length, 1);
+  const listed = await (await result.context.fetch(
+    "/pdf/api/epub-highlights?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  assert.equal(listed.highlights.length, 1);
+});
+
+test("a hung Pi metadata mirror cannot delay or erase EPUB local undo", async () => {
+  const result = await harness(pendingPiHarnessOptions());
+  const action = {
+    id: "act_pending_undo", kind: "hl_create", title: "h", detail: "",
+    undo: {
+      op: "hl_delete", file: DEFAULT_LOCAL_FILE, ids: ["unused_before_redo"],
+    },
+    redo: {
+      op: "hl_create", file: DEFAULT_LOCAL_FILE,
+      items: [{
+        anchor: { section: 7, start: 3, end: 15 },
+        text: "locally undoable while Pi hangs", color: "#ffd54a",
+      }],
+    },
+    state: "done", ts: 1_800_000_000,
+  };
+  const pending = result.context.fetch("/pdf/api/epub-action", {
+    method: "POST", headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      op: "native_apply", contract: "reader-native-epub-action/1",
+      file: DEFAULT_LOCAL_FILE, action,
+    }),
+  });
+  await testWatchdog((async () => {
+    for (;;) {
+      if (result.originalFetchCalls.some((call) =>
+        /\/pi-proxy\//.test(String((call.input && call.input.url) || call.input || "")))) {
+        return;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 5));
+    }
+  })(), "等待 Pi metadata 请求", 500);
+  const stackKey =
+    `native-epub-assistant-undo:${DEFAULT_LOCAL_BOOK_ID}:epub-assistant-undo`;
+  assert.equal(
+    result.dataStoresState.document.values.get(stackKey).value.payload.length,
+    1,
+    "the local action must be undoable before Pi metadata settles",
+  );
+
+  const undone = await testWatchdog(
+    result.context._nativeReaderUndoLast("rundo_" + "a".repeat(24)),
+    "EPUB 本地撤销",
+  );
+  assert.equal(undone.ok, true);
+  assert.equal(undone.remaining, 0);
+  const listed = await (await result.context.fetch(
+    "/pdf/api/epub-highlights?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  assert.equal(listed.highlights.length, 0);
+
+  const pendingResult = await testWatchdog(
+    pending.then((response) => response.json()),
+    "Pi metadata 有界收尾",
+    700,
+  );
+  assert.equal(pendingResult.metadata_pending, true);
 });
 
 function nativeEPUBAssistantManifest() {

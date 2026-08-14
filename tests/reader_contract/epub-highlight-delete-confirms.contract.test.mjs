@@ -87,6 +87,58 @@ function runDelete({ outcome = "ok", error = "server said no" } = {}) {
   }));
 }
 
+function runReload({ status = 200 } = {}) {
+  const start = EPUB.indexOf("function loadHls(replace) {");
+  assert.notEqual(start, -1, "找不到可替换式 loadHls");
+  const unapplied = [];
+  const applied = [];
+  const old = {
+    h1: { id: "h1", anchor: { section: 1 } },
+    h2: { id: "h2", anchor: { section: 2 } },
+  };
+  const authoritative = [{
+    id: "h2",
+    anchor: { section: 2 },
+    text: "kept by repository",
+    color: "#ffd54a",
+  }];
+  const context = {
+    FREL: "book.epub",
+    encodeURIComponent,
+    Promise,
+    Object,
+    Array,
+    Error,
+    _hls: JSON.parse(JSON.stringify(old)),
+    fetch: async () => new Response(JSON.stringify({ highlights: authoritative }), {
+      status,
+      headers: { "Content-Type": "application/json" },
+    }),
+    unapplyHl: (highlight) => { unapplied.push(highlight.id); },
+    _secElOf: (section) => ({ section, isConnected: true }),
+    secEls: { 1: { section: 1 }, 2: { section: 2 } },
+    loaded: { 1: true, 2: true },
+    applyHl: (_element, highlight) => { applied.push(highlight.id); },
+    _decorateVisible() {},
+    out: null,
+  };
+  context.globalThis = context;
+  vm.runInNewContext(
+    `${balanced(EPUB, start)}\nout = loadHls(true);`,
+    context,
+  );
+  return context.out.then(() => ({
+    remaining: JSON.parse(JSON.stringify(context._hls)),
+    unapplied,
+    applied,
+  }), (error) => ({
+    error,
+    remaining: JSON.parse(JSON.stringify(context._hls)),
+    unapplied,
+    applied,
+  }));
+}
+
 test("确认删除后回报成功，并从内存与页面上移除", async () => {
   const { result, remaining, unapplied, toasts } = await runDelete();
   assert.equal(result, true, "后端确认删除必须回报 true");
@@ -142,4 +194,26 @@ test("取消颜色写入失败时保留原色并给出原因", async () => {
 test("EPUB 编辑器把改色与备注的 Promise 结果交给共享浮层", () => {
   assert.match(EPUB, /onColor: function \(c\) \{ return patchHl\(h, \{ color: c \}\); \}/);
   assert.match(EPUB, /onNote: function \(t\) \{ return patchHl\(h, \{ note: t \}\); \}/);
+});
+
+test("仓库刷新会替换 _hls 并移除已撤销高亮的页面 mark", async () => {
+  const { remaining, unapplied, applied } = await runReload();
+  assert.deepEqual(Object.keys(remaining), ["h2"]);
+  assert.equal(remaining.h2.text, "kept by repository");
+  assert.deepEqual(unapplied.sort(), ["h1", "h2"]);
+  assert.deepEqual(applied, ["h2"]);
+});
+
+test("仓库刷新失败时保留现有投影并交出错误", async () => {
+  const { error, remaining, unapplied } = await runReload({ status: 503 });
+  assert.match(String(error && error.message), /HTTP 503/);
+  assert.deepEqual(Object.keys(remaining).sort(), ["h1", "h2"]);
+  assert.deepEqual(unapplied, []);
+});
+
+test("EPUB DocumentHost reload 会等待可替换式仓库刷新", () => {
+  assert.match(
+    EPUB,
+    /reloadHighlights: function \(\) \{ try \{ return \(typeof loadHls === 'function'\) \? loadHls\(true\)/,
+  );
 });

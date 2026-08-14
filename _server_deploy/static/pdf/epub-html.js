@@ -2032,6 +2032,18 @@
           if (!h || !h.id) { reject(new Error('BW_READER_HIGHLIGHT_SAVE_INVALID')); return; }
           _hls[h.id] = h;
           if (found.element) applyHl(found.element, h);
+          // EPUB keeps its existing action-card UI and offset-anchor undo/redo
+          // semantics.  Do not route this through the PDF rect/turnCard path.
+          var action = data.action || {
+            id: 'direct-highlight:' + h.id,
+            kind: 'epub_highlight',
+            title: '高亮:1处',
+            detail: '· ' + String(h.text || '').slice(0, 120),
+            undo: { op: 'hl_delete', file: FREL, ids: [h.id] },
+            redo: { op: 'hl_create', file: FREL, items: [h] },
+            state: 'done', ts: Number(h.time) || Math.floor(Date.now() / 1000)
+          };
+          _epShowAction(action);
           resolve({ ok: true, status: 'highlight_saved', id: h.id, section: found.section, text: h.text });
         }, function (error) { reject(new Error('BW_READER_HIGHLIGHT_SAVE_REJECTED:' + error)); });
       });
@@ -2581,7 +2593,37 @@
       onDelete: function () { return delHl(h); }
     });
   }
-  function loadHls() { fetch('/pdf/api/epub-highlights?file=' + encodeURIComponent(FREL)).then(function (r) { return r.json(); }).then(function (d) { (d.highlights || []).forEach(function (h) { if (!h.anchor) return; _hls[h.id] = h; if (typeof h.anchor.section === 'string') { var ub = _secElOf(h.anchor.section); if (ub && ub.isConnected) applyHl(ub, h); } else { var el = secEls[h.anchor.section]; if (el && loaded[h.anchor.section] === true) applyHl(el, h); } }); _decorateVisible(); }).catch(function () {}); }
+  function loadHls(replace) {
+    return fetch('/pdf/api/epub-highlights?file=' + encodeURIComponent(FREL))
+      .then(function (r) { if (!r.ok) throw new Error('HTTP ' + r.status); return r.json(); })
+      .then(function (d) {
+        var highlights = d && Array.isArray(d.highlights) ? d.highlights : [];
+        // A repository reload is a replacement, not an additive merge.  Undo
+        // has already removed the record, so stale _hls entries and their mark
+        // nodes must be removed before the authoritative list is projected.
+        if (replace === true) {
+          Object.keys(_hls).forEach(function (id) { unapplyHl({ id: id }); });
+          _hls = {};
+        }
+        highlights.forEach(function (h) {
+          if (!h.anchor) return;
+          _hls[h.id] = h;
+          if (typeof h.anchor.section === 'string') {
+            var ub = _secElOf(h.anchor.section);
+            if (ub && ub.isConnected) applyHl(ub, h);
+          } else {
+            var el = secEls[h.anchor.section];
+            if (el && loaded[h.anchor.section] === true) applyHl(el, h);
+          }
+        });
+        _decorateVisible();
+        return highlights;
+      })
+      .catch(function (error) {
+        if (replace === true) throw error;
+        return [];
+      });
+  }
   // 高亮列表:渲进抽屉「高亮」pane(由 RC.sidedrawer 的 onTab('hl') 触发)
   // ── 查询结果历史(镜像 PDF 21-misc-ai;统一抽屉「历史」tab 对等)──
   //   rc-result 的 beforeOpen 钩子(共享层早就位,此前 EPUB 没传)每次开结果框前把上一条快照进
@@ -5103,8 +5145,8 @@
         renderNoteChips: function () { try { if (typeof renderNoteChips === 'function') renderNoteChips(); } catch (_) {} },
         notesReload: function () { try { window.notesReload && window.notesReload(); } catch (_) {} },
         noteInject: function () { return false; },
-        reloadHighlights: function () { try { if (typeof loadHls === 'function') loadHls(); } catch (_) {} },
-        loadAllHighlights: function () { try { if (typeof loadHls === 'function') loadHls(); } catch (_) {} },
+        reloadHighlights: function () { try { return (typeof loadHls === 'function') ? loadHls(true) : Promise.resolve([]); } catch (e) { return Promise.reject(e); } },
+        loadAllHighlights: function () { try { return (typeof loadHls === 'function') ? loadHls(true) : Promise.resolve([]); } catch (e) { return Promise.reject(e); } },
         renderHighlightsOnPage: function () {},
         showHlPicker: function (d) { try { window._showHlPicker && window._showHlPicker(d); } catch (_) {} },
         assistEdit: function (d) { try { if (typeof _epAssistEdit === 'function') _epAssistEdit(d); } catch (_) {} },

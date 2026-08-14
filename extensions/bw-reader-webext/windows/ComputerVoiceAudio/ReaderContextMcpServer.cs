@@ -13,8 +13,6 @@ internal sealed class ReaderContextMcpServer
     internal const string AnkiDraftToolName = "reader_anki_draft";
     internal const string CardToolName = "reader_card";
     internal const string CommandToolName = "reader_command";
-    // 尚未注册为 MCP 工具，见下方 tools 列表处的说明。保留常量是为了让
-    // "为什么没有这个工具" 有一处可查，而不是让人以为漏加了。
     internal const string UndoLastToolName = "reader_undo_last";
     internal const string CapabilityGuideToolName =
         "reader_capability_guide";
@@ -632,19 +630,31 @@ internal sealed class ReaderContextMcpServer
                     ["openWorldHint"] = false,
                 },
             });
-            // reader_undo_last 暂不注册。
-            //
-            // 它下发的 _nativePDFUndoLast 只有 PDF 宿主实现；EPUB 宿主没有该函数，
-            // 而 EPUB 的等价能力要求给出具体 action 记录（POST /pdf/api/epub-action
-            // {op:'undo',...}），目前没有"撤销最近一次"的无参入口。
-            //
-            // 以 PDF 专用的形式发布会让同一句"撤销刚才那个"在 EPUB 上失效 ——
-            // 那正是本地化不得降低可见效果这一条要防的事。等 App 本地的 EPUB
-            // 最近动作权威栈、无参取最后可撤销 action、强类型回执与冲突/未知
-            // fail-closed 都就位后，再在此处注册。
-            //
-            // 注意：Pi 经 client_action 下发的 _nativePDFUndoLast 不受影响 ——
-            // 那条路属于原生 Realtime，白名单仍然放行。
+            tools.Add(new JsonObject
+            {
+                ["name"] = UndoLastToolName,
+                ["description"] =
+                    "Undo the most recent undoable assistant change recorded "
+                    + "by the App in the "
+                    + "currently focused PDF or EPUB. The App chooses the "
+                    + "trusted current surface; this tool accepts no surface, "
+                    + "file, page or action parameters. HTML and ordinary web "
+                    + "hosts are rejected. A timeout or unknown outcome must "
+                    + "not be retried blindly.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["additionalProperties"] = false,
+                    ["properties"] = new JsonObject(),
+                },
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = false,
+                    ["destructiveHint"] = true,
+                    ["idempotentHint"] = false,
+                    ["openWorldHint"] = false,
+                },
+            });
             tools.Add(new JsonObject
             {
                 ["name"] = AnkiDraftToolName,
@@ -1059,6 +1069,17 @@ internal sealed class ReaderContextMcpServer
             return;
         }
         if (
+            toolName == UndoLastToolName
+            && _sendOutputAsync is not null
+        )
+        {
+            await HandleUndoLastToolCallAsync(
+                id,
+                arguments,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (
             toolName == AnkiDraftToolName
             && _sendOutputAsync is not null
         )
@@ -1239,6 +1260,36 @@ internal sealed class ReaderContextMcpServer
         await SendReaderOutputAsync(
             id,
             kind,
+            payload,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task HandleUndoLastToolCallAsync(
+        JsonNode id,
+        JsonElement arguments,
+        CancellationToken cancellationToken)
+    {
+        if (!HasNoArguments(arguments))
+        {
+            await WriteErrorAsync(
+                id,
+                -32602,
+                "Invalid Reader undo request",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        string operationId =
+            "rundo_" + Guid.NewGuid().ToString("N")[..24];
+        JsonNode payload = ReaderRealtimeOutputProtocol.ValidatePayload(
+            "client-action",
+            new JsonObject
+            {
+                ["fn"] = "_nativeReaderUndoLast",
+                ["args"] = new JsonArray(operationId),
+            });
+        await SendReaderOutputAsync(
+            id,
+            "client-action",
             payload,
             cancellationToken).ConfigureAwait(false);
     }

@@ -7288,6 +7288,45 @@ internal static class DirectBridgeSelfTest
             {
             }
         }
+        JsonNode validUndoPayload = ReaderRealtimeOutputProtocol
+            .ValidatePayload(
+                "client-action",
+                new JsonObject
+                {
+                    ["fn"] = "_nativeReaderUndoLast",
+                    ["args"] = new JsonArray(
+                        "rundo_" + new string('a', 24)),
+                });
+        bool arbitraryClientActionRejected = false;
+        try
+        {
+            _ = ReaderRealtimeOutputProtocol.ValidatePayload(
+                "client-action",
+                new JsonObject
+                {
+                    ["fn"] = "fetch",
+                    ["args"] = new JsonArray(),
+                });
+        }
+        catch (ReaderRealtimeOutputException)
+        {
+            arbitraryClientActionRejected = true;
+        }
+        bool invalidUndoOperationRejected = false;
+        try
+        {
+            _ = ReaderRealtimeOutputProtocol.ValidatePayload(
+                "client-action",
+                new JsonObject
+                {
+                    ["fn"] = "_nativeReaderUndoLast",
+                    ["args"] = new JsonArray("npdf_" + new string('b', 24)),
+                });
+        }
+        catch (ReaderRealtimeOutputException)
+        {
+            invalidUndoOperationRejected = true;
+        }
         ReaderRealtimeOutputRequest routeRequest =
             ReaderRealtimeOutputProtocol.Create(
                 "output-route",
@@ -7405,6 +7444,10 @@ internal static class DirectBridgeSelfTest
             && unsafeCardRejected
             && invalidDraftIdRejected
             && controlledPayloadFilesRejected
+            && validUndoPayload["fn"]?.GetValue<string>()
+                == "_nativeReaderUndoLast"
+            && arbitraryClientActionRejected
+            && invalidUndoOperationRejected
             && sentToA == 0
             && sentToB == 1
             && routedAck.Outcome == "applied"
@@ -7711,6 +7754,28 @@ internal static class DirectBridgeSelfTest
                     arguments = new { },
                 },
             }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 16,
+                method = "tools/call",
+                @params = new
+                {
+                    name = ReaderContextMcpServer.UndoLastToolName,
+                    arguments = new { },
+                },
+            }),
+            JsonSerializer.Serialize(new
+            {
+                jsonrpc = "2.0",
+                id = 17,
+                method = "tools/call",
+                @params = new
+                {
+                    name = ReaderContextMcpServer.UndoLastToolName,
+                    arguments = new { surface = "epub" },
+                },
+            }),
             "");
         List<ReaderRealtimeOutputRequest> sent = [];
         int probeCount = 0;
@@ -7757,13 +7822,25 @@ internal static class DirectBridgeSelfTest
                 .GetProperty("result").GetProperty("contents");
             JsonElement tools = responses[3].RootElement
                 .GetProperty("result").GetProperty("tools");
-            JsonElement highlightTextTool = tools[2];
-            JsonElement ankiDraftTool = tools[3];
-            JsonElement cardTool = tools[4];
+            JsonElement highlightTextTool = tools.EnumerateArray().Single(
+                tool => tool.GetProperty("name").GetString()
+                    == ReaderContextMcpServer.HighlightTextToolName);
+            JsonElement undoLastTool = tools.EnumerateArray().Single(
+                tool => tool.GetProperty("name").GetString()
+                    == ReaderContextMcpServer.UndoLastToolName);
+            JsonElement ankiDraftTool = tools.EnumerateArray().Single(
+                tool => tool.GetProperty("name").GetString()
+                    == ReaderContextMcpServer.AnkiDraftToolName);
+            JsonElement cardTool = tools.EnumerateArray().Single(
+                tool => tool.GetProperty("name").GetString()
+                    == ReaderContextMcpServer.CardToolName);
+            JsonElement commandTool = tools.EnumerateArray().Single(
+                tool => tool.GetProperty("name").GetString()
+                    == ReaderContextMcpServer.CommandToolName);
             JsonElement cardInput = cardTool.GetProperty("inputSchema");
             JsonElement cardSchema = cardInput.GetProperty("properties")
                 .GetProperty("card");
-            JsonElement commandInput = tools[5].GetProperty("inputSchema");
+            JsonElement commandInput = commandTool.GetProperty("inputSchema");
             JsonElement commandVariants = commandInput.GetProperty("oneOf");
             JsonElement commandCardSchema = commandVariants[1]
                 .GetProperty("properties").GetProperty("card");
@@ -7808,8 +7885,12 @@ internal static class DirectBridgeSelfTest
                 responses[14].RootElement.GetProperty("result")
                     .GetProperty("content")[0].GetProperty("text")
                     .GetString()!);
+            using JsonDocument undoResult = JsonDocument.Parse(
+                responses[15].RootElement.GetProperty("result")
+                    .GetProperty("content")[0].GetProperty("text")
+                    .GetString()!);
             Require(
-                responses.Length == 15
+                responses.Length == 17
                 && initialize.GetProperty("capabilities")
                     .TryGetProperty("resources", out _)
                 && initialize.GetProperty("instructions").GetString()!
@@ -7848,17 +7929,23 @@ internal static class DirectBridgeSelfTest
                     .Contains(
                         "Windows Codex 语音主路由",
                         StringComparison.Ordinal)
-                && tools.GetArrayLength() == 6
+                && tools.GetArrayLength() == 7
                 && tools[1].GetProperty("name").GetString()
                     == ReaderContextMcpServer.CapabilityGuideToolName
                 && highlightTextTool.GetProperty("name").GetString()
                     == ReaderContextMcpServer.HighlightTextToolName
                 && ankiDraftTool.GetProperty("name").GetString()
                     == ReaderContextMcpServer.AnkiDraftToolName
-                && tools[4].GetProperty("name").GetString()
-                    == ReaderContextMcpServer.CardToolName
-                && tools[5].GetProperty("name").GetString()
-                    == ReaderContextMcpServer.CommandToolName
+                && undoLastTool.GetProperty("name").GetString()
+                    == ReaderContextMcpServer.UndoLastToolName
+                && !undoLastTool.GetProperty("inputSchema")
+                    .GetProperty("additionalProperties").GetBoolean()
+                && undoLastTool.GetProperty("inputSchema")
+                    .GetProperty("properties").EnumerateObject().Any() == false
+                && undoLastTool.GetProperty("annotations")
+                    .GetProperty("destructiveHint").GetBoolean()
+                && !undoLastTool.GetProperty("annotations")
+                    .GetProperty("idempotentHint").GetBoolean()
                 && !cardInput.GetProperty("additionalProperties")
                     .GetBoolean()
                 && !cardSchema.GetProperty("additionalProperties")
@@ -7876,7 +7963,7 @@ internal static class DirectBridgeSelfTest
                     .Contains(
                         "same Windows Codex voice turn",
                         StringComparison.Ordinal)
-                && tools[5].GetProperty("description").GetString()!
+                && commandTool.GetProperty("description").GetString()!
                     .Contains(
                         "text history never carries cards",
                         StringComparison.Ordinal)
@@ -7918,8 +8005,12 @@ internal static class DirectBridgeSelfTest
                 && snapshotResult.RootElement.GetProperty("outputAccess")
                     .GetProperty("sourceInstanceId").GetString()
                     == "source-output"
-                && probeCount == 7
-                && sent.Count == 5
+                && undoResult.RootElement.GetProperty("status")
+                    .GetString() == "delivered"
+                && undoResult.RootElement.GetProperty("kind")
+                    .GetString() == "client-action"
+                && probeCount == 8
+                && sent.Count == 6
                 && sent[0].SourceInstanceId == "source-output"
                 && sent[0].SnapshotRevision == 42
                 && sent[0].File == "library/output-book.pdf"
@@ -7945,11 +8036,28 @@ internal static class DirectBridgeSelfTest
                     .StartsWith("draft-", StringComparison.Ordinal) == true
                 && sent[4].Payload["sourceText"]?.GetValue<string>()
                     == "current reading window"
+                && sent[5].Kind == "client-action"
+                && sent[5].Payload["fn"]?.GetValue<string>()
+                    == "_nativeReaderUndoLast"
+                && sent[5].Payload["args"] is JsonArray undoArguments
+                && undoArguments.Count == 1
+                && undoArguments[0]?.GetValue<string>() is string undoId
+                && undoId.StartsWith("rundo_", StringComparison.Ordinal)
+                && undoId.Length == 30
+                && undoId[6..].All(character =>
+                    character is >= '0' and <= '9'
+                    or >= 'a' and <= 'f')
+                && sent[5].Payload["file"] is null
+                && sent[5].Payload["page"] is null
+                && sent[5].Payload["surface"] is null
+                && sent[5].Payload["action"] is null
                 && responses[9].RootElement.GetProperty("error")
                     .GetProperty("code").GetInt32() == -32602
                 && responses[10].RootElement.GetProperty("error")
                     .GetProperty("code").GetInt32() == -32602
                 && responses[11].RootElement.GetProperty("error")
+                    .GetProperty("code").GetInt32() == -32602
+                && responses[16].RootElement.GetProperty("error")
                     .GetProperty("code").GetInt32() == -32602,
                 "direct-reader-output-typed-card-command-and-disclosure-are-exact",
                 checks);

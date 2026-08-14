@@ -268,7 +268,7 @@ if (window.PdfAdapter && PdfAdapter.bind) {
       renderNoteChips: () => { try { window.__renderNoteChips && window.__renderNoteChips(); } catch (_) {} },
       notesReload: () => { try { window.notesReload && window.notesReload(); } catch (_) {} },
       noteInject: (n) => { try { return !!(window.__noteInject && window.__noteInject(n)); } catch (_) { return false; } },
-      reloadHighlights: () => { try { window._reloadHighlights && window._reloadHighlights(); } catch (_) {} },
+      reloadHighlights: () => { try { return window._reloadHighlights ? window._reloadHighlights() : Promise.resolve(); } catch (e) { return Promise.reject(e); } },
       loadAllHighlights: () => { try { if (typeof loadAllHighlights === 'function') loadAllHighlights(); } catch (_) {} },
       renderHighlightsOnPage: (pw, n) => { try { if (typeof renderHighlightsOnPage === 'function') renderHighlightsOnPage(pw, n); } catch (_) {} },
       showHlPicker: (d) => { try { window._showHlPicker && window._showHlPicker(d); } catch (_) {} },

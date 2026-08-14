@@ -18,6 +18,7 @@
   var NATIVE_PDF_ASSISTANT_STATE_CONTRACT = 'reader-native-pdf-assistant-state/1';
   var NATIVE_EPUB_ASSISTANT_STATE_CONTRACT = 'reader-native-epub-assistant-state/1';
   var NATIVE_EPUB_ACTION_CONTRACT = 'reader-native-epub-action/1';
+  var NATIVE_READER_UNDO_RESULT_CONTRACT = 'reader-native-undo-result/1';
   var NATIVE_INTERFACE_CONTRACT = 'reader-native-interface-manifest/2';
   var NATIVE_INTERFACE_OWNERS = new Set(['local', 'pi', 'native']);
   var NATIVE_INTERFACE_MATCHES = new Set(['exact', 'segment']);
@@ -4267,7 +4268,7 @@
     }
   }
 
-  function persistLocalPDFHighlight(body, code, independent) {
+  function normalizedLocalPDFHighlight(body, code) {
     requireLocalFile(body.file, code);
     var page = strictInteger(body.page, 1, 10000000, 'page', code);
     var rects = normalizedRectangles(body.rects, code);
@@ -4290,6 +4291,25 @@
       highlight.page_w = finiteLocalNumber(body.page_w, 1, 100000, null, code, 'page_w');
       highlight.page_h = finiteLocalNumber(body.page_h, 1, 100000, null, code, 'page_h');
     }
+    return highlight;
+  }
+
+  function assistantHighlightFingerprint(surface, highlight) {
+    var fields = surface === 'epub'
+      ? ['id', 'cfi', 'anchor', 'text', 'color', 'note', 'sentence', 'body', 'kind']
+      : ['id', 'page', 'rects', 'color', 'text', 'note', 'kind', 'sentence',
+        'body', 'page_w', 'page_h'];
+    var value = { surface: surface };
+    fields.forEach(function (key) {
+      if (Object.prototype.hasOwnProperty.call(highlight, key)) {
+        value[key] = clone(highlight[key]);
+      }
+    });
+    return canonicalJSONString(value);
+  }
+
+  function persistLocalPDFHighlight(body, code, independent) {
+    var highlight = normalizedLocalPDFHighlight(body, code);
     var mutate = independent ? mutateDocumentStateNow : mutateDocumentState;
     return mutate('document-highlights', [], function (items) {
       items = storedList(items, code).filter(function (item) {
@@ -4302,6 +4322,89 @@
       // 上界与 independent 无关：普通高亮写入同样会挂住 object store，
       // 一旦挂住，后面连精确高亮也进不来。independent 只决定走哪个入口。
     }, { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS });
+  }
+
+  // Direct reader_highlight_text must create the highlight and its undo entry in
+  // the same bounded IndexedDB transaction. Writing the highlight first and the
+  // stack second would leave a visible-but-not-undoable mutation after a crash.
+  function persistAssistantPDFHighlight(body, code) {
+    if (typeof body.id !== 'string' || !/^c_[a-f0-9]{8,32}$/.test(body.id)) {
+      return Promise.reject(outgoingRequestError(
+        '助手高亮缺少稳定 mutation id', code, 400
+      ));
+    }
+    var highlight = normalizedLocalPDFHighlight(body, code);
+    var creationID = 'direct-highlight:' + highlight.id;
+    var fingerprint = assistantHighlightFingerprint('pdf', highlight);
+    var bound = { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS };
+    return serializeLocalStateMutation('document', 'pdf-assistant-bundle', function () {
+      return Promise.all([
+        storedStateRecord(
+          stores.document, 'document-highlights', 'documentId', bookId, [], bound
+        ),
+        storedStateRecord(
+          stores.document, 'pdf-assistant-undo', 'documentId', bookId, [], bound
+        ),
+        storedStateRecord(
+          stores.document, 'pdf-assistant-ops', 'documentId', bookId, [], bound
+        )
+      ]).then(function (records) {
+        var highlights = storedList(clone(records[0].payload), code);
+        var undo = storedList(clone(records[1].payload), code);
+        var receipts = storedList(clone(records[2].payload), code);
+        var priorReceipt = receipts.find(function (item) {
+          return item && String(item.id || '') === creationID;
+        });
+        var existing = highlights.find(function (item) {
+          return item && String(item.id || '') === highlight.id;
+        });
+        if (priorReceipt) {
+          if (!existing || priorReceipt.fingerprint !== fingerprint ||
+              assistantHighlightFingerprint('pdf', existing) !== fingerprint) {
+            throw new RuntimeError(
+              '助手高亮 mutation id 已用于不同内容',
+              'BW_NATIVE_PDF_ASSISTANT_CONFLICT'
+            );
+          }
+          return { ok: true, id: existing.id, highlight: clone(existing), replayed: true };
+        }
+        if (existing) {
+          throw new RuntimeError(
+            '助手高亮 id 已存在但没有匹配回执',
+            'BW_NATIVE_PDF_ASSISTANT_CONFLICT'
+          );
+        }
+        highlights.push(highlight);
+        undo.push({
+          id: creationID,
+          kind: 'highlight-create',
+          targetKind: 'document-highlights',
+          expectedRevision: records[0].rev + 1,
+          ids: [highlight.id],
+          ts: nowSeconds()
+        });
+        receipts.push({
+          id: creationID, kind: 'highlight', fingerprint: fingerprint,
+          ts: nowSeconds()
+        });
+        undo = undo.slice(-80);
+        receipts = receipts.slice(-160);
+        var suffix = randomHex(12);
+        return stores.document.batch([
+          stateRecordMutation(
+            'document-highlights', highlights, suffix + '-highlights', records[0].rev
+          ),
+          stateRecordMutation(
+            'pdf-assistant-undo', undo, suffix + '-undo', records[1].rev
+          ),
+          stateRecordMutation(
+            'pdf-assistant-ops', receipts, suffix + '-ops', records[2].rev
+          )
+        ], bound).then(function () {
+          return { ok: true, id: highlight.id, highlight: clone(highlight), replayed: false };
+        });
+      });
+    });
   }
 
   function localPDFHighlights(input, init, url, method) {
@@ -4411,27 +4514,10 @@
       return requestObject(input, init, allowed, required, code).then(function (body) {
         requireLocalFile(body.file, code);
         if (method === 'POST') {
-          var cfi = boundedLocalString(body.cfi, 8192, '', code, 'EPUB CFI', true);
-          var anchor = body.anchor == null ? null : boundedCanonicalJSON(
-            body.anchor, 64 * 1024, code, 'EPUB 高亮锚点'
-          );
-          if (!cfi && (!anchor || typeof anchor !== 'object' || Array.isArray(anchor))) {
-            throw outgoingRequestError('缺少 cfi/anchor', code, 400);
+          var highlight = normalizedLocalEPUBHighlight(body, code);
+          if (typeof body.id === 'string' && /^c_[a-f0-9]{8,32}$/.test(body.id)) {
+            return persistAssistantEPUBHighlight(highlight, code);
           }
-          var clientId = typeof body.id === 'string' && /^c_[a-f0-9]{8,32}$/.test(body.id)
-            ? body.id : '';
-          var highlight = {
-            id: clientId || ('e' + randomHex(6).slice(0, 11)),
-            cfi: cfi,
-            anchor: anchor,
-            text: boundedLocalString(body.text, 2000, '', code, '高亮文字', false),
-            color: normalizedHighlightColor(body.color, '#ffd54a', code),
-            note: boundedLocalString(body.note, 2000, '', code, '高亮备注', false),
-            sentence: boundedLocalString(body.sentence, 2000, '', code, '高亮句子', false),
-            body: boundedLocalString(body.body, 8000, '', code, '高亮正文', false),
-            kind: boundedLocalString(body.kind, 32, '', code, '高亮类型', true),
-            time: nowSeconds()
-          };
           return mutateDocumentState('epub-highlights', [], function (items) {
             items = storedList(items, code).filter(function (item) {
               return !item || item.id !== highlight.id;
@@ -4465,6 +4551,131 @@
         }, { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS });
       });
     }, code);
+  }
+
+  function normalizedLocalEPUBHighlight(body, code) {
+    var cfi = boundedLocalString(body.cfi, 8192, '', code, 'EPUB CFI', true);
+    var anchor = body.anchor == null ? null : boundedCanonicalJSON(
+      body.anchor, 64 * 1024, code, 'EPUB 高亮锚点'
+    );
+    if (!cfi && (!anchor || typeof anchor !== 'object' || Array.isArray(anchor))) {
+      throw outgoingRequestError('缺少 cfi/anchor', code, 400);
+    }
+    var clientId = typeof body.id === 'string' && /^c_[a-f0-9]{8,32}$/.test(body.id)
+      ? body.id : '';
+    return {
+      id: clientId || ('e' + randomHex(6).slice(0, 11)),
+      cfi: cfi,
+      anchor: anchor,
+      text: boundedLocalString(body.text, 2000, '', code, '高亮文字', false),
+      color: normalizedHighlightColor(body.color, '#ffd54a', code),
+      note: boundedLocalString(body.note, 2000, '', code, '高亮备注', false),
+      sentence: boundedLocalString(body.sentence, 2000, '', code, '高亮句子', false),
+      body: boundedLocalString(body.body, 8000, '', code, '高亮正文', false),
+      kind: boundedLocalString(body.kind, 32, '', code, '高亮类型', true),
+      time: nowSeconds()
+    };
+  }
+
+  function nativeEPUBDirectHighlightAction(highlight, creationID) {
+    return {
+      id: creationID,
+      kind: 'epub_highlight',
+      title: '高亮:1处',
+      detail: '· ' + String(highlight.text || '').slice(0, 120),
+      undo: {
+        op: 'hl_delete', file: localFileRef(), ids: [highlight.id]
+      },
+      redo: {
+        op: 'hl_create', file: localFileRef(), items: [clone(highlight)]
+      },
+      state: 'done',
+      ts: Number(highlight.time) || nowSeconds()
+    };
+  }
+
+  function persistAssistantEPUBHighlight(highlight, code) {
+    var creationID = 'direct-highlight:' + highlight.id;
+    var fingerprint = assistantHighlightFingerprint('epub', highlight);
+    var bound = { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS };
+    return serializeLocalStateMutation('document', 'epub-assistant-bundle', function () {
+      return Promise.all([
+        storedStateRecord(
+          stores.document, 'epub-highlights', 'documentId', bookId, [], bound
+        ),
+        storedStateRecord(
+          stores.document, 'epub-assistant-undo', 'documentId', bookId, [], bound
+        ),
+        storedStateRecord(
+          stores.document, 'epub-assistant-ops', 'documentId', bookId, [], bound
+        )
+      ]).then(function (records) {
+        var highlights = storedList(clone(records[0].payload), code);
+        var stack = storedList(clone(records[1].payload), code);
+        var receipts = storedList(clone(records[2].payload), code);
+        var priorReceipt = receipts.find(function (item) {
+          return item && String(item.id || '') === creationID;
+        });
+        var existing = highlights.find(function (item) {
+          return item && String(item.id || '') === highlight.id;
+        });
+        if (priorReceipt) {
+          if (!existing || priorReceipt.fingerprint !== fingerprint ||
+              assistantHighlightFingerprint('epub', existing) !== fingerprint) {
+            throw new RuntimeError(
+              '助手 EPUB 高亮 mutation id 已用于不同内容',
+              'BW_NATIVE_EPUB_UNDO_CONFLICT'
+            );
+          }
+          return {
+            ok: true,
+            id: existing.id,
+            highlight: clone(existing),
+            action: nativeEPUBDirectHighlightAction(existing, creationID),
+            replayed: true
+          };
+        }
+        if (existing) {
+          throw new RuntimeError(
+            '助手 EPUB 高亮 id 已存在但没有匹配回执',
+            'BW_NATIVE_EPUB_UNDO_CONFLICT'
+          );
+        }
+        highlights.push(highlight);
+        var action = nativeEPUBDirectHighlightAction(highlight, creationID);
+        stack.push(nativeEPUBStackEntry(
+          action,
+          { kind: 'epub-highlights', operation: 'hl_create' },
+          records[0].rev + 1
+        ));
+        stack = stack.slice(-80);
+        receipts.push({
+          id: creationID, kind: 'highlight', fingerprint: fingerprint,
+          ts: nowSeconds()
+        });
+        receipts = receipts.slice(-160);
+        var suffix = randomHex(12);
+        return stores.document.batch([
+          stateRecordMutation(
+            'epub-highlights', highlights, suffix + '-highlights', records[0].rev
+          ),
+          stateRecordMutation(
+            'epub-assistant-undo', stack, suffix + '-undo', records[1].rev
+          ),
+          stateRecordMutation(
+            'epub-assistant-ops', receipts, suffix + '-ops', records[2].rev
+          )
+        ], bound).then(function () {
+          return {
+            ok: true,
+            id: highlight.id,
+            highlight: clone(highlight),
+            action: clone(action),
+            replayed: false
+          };
+        });
+      });
+    });
   }
 
   function normalizedNoteAnchor(value, code) {
@@ -7751,7 +7962,7 @@
     return highlight;
   }
 
-  function nativePDFRecordSet() {
+  function nativePDFRecordSet(queryOptions) {
     var specs = [
       ['document-highlights', []],
       ['document-notes-legacy', []],
@@ -7762,7 +7973,7 @@
     ];
     return Promise.all(specs.map(function (spec) {
       return storedStateRecord(
-        stores.document, spec[0], 'documentId', bookId, spec[1]
+        stores.document, spec[0], 'documentId', bookId, spec[1], queryOptions
       );
     })).then(function (records) {
       return { specs: specs, records: records };
@@ -7789,9 +8000,10 @@
     if (!hasLocal) {
       return Promise.resolve({ actions: clone(actions), revisions: clone(expectedRevisions) });
     }
+    var bound = { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS };
     return serializeLocalStateMutation('document', 'pdf-assistant-bundle', function () {
       assertNativePDFWriterLease(writerLease);
-      return nativePDFRecordSet().then(function (recordSet) {
+      return nativePDFRecordSet(bound).then(function (recordSet) {
         assertNativePDFWriterLease(writerLease);
         var code = 'BW_NATIVE_PDF_ASSISTANT_ACTION';
         var highlights = storedList(clone(recordSet.records[0].payload), code);
@@ -7806,6 +8018,8 @@
         var touchedNotes = false;
         var touchedUndo = false;
         var touchedReceipts = false;
+        var replayed = false;
+        var lastReceipt = null;
 
         function assertRevision(kind, index, label) {
           if (!expectedRevisions || !Number.isInteger(Number(expectedRevisions[kind])) ||
@@ -7822,6 +8036,8 @@
           }
           var operationID = nativePDFOperationID(action, descriptor);
           if (received.has(operationID)) {
+            replayed = true;
+            lastReceipt = clone(received.get(operationID));
             output.push(nativePDFRefreshAction());
             return;
           }
@@ -7844,6 +8060,8 @@
             highlights = highlights.concat(highlightItems);
             undo.push({
               id: operationID, kind: 'highlight-create',
+              targetKind: 'document-highlights',
+              expectedRevision: recordSet.records[0].rev + 1,
               ids: highlightItems.map(function (item) { return item.id; }),
               ts: nowSeconds()
             });
@@ -7867,6 +8085,8 @@
             notes = notes.concat(createdNotes);
             undo.push({
               id: operationID, kind: 'note-create',
+              targetKind: 'document-notes-legacy',
+              expectedRevision: recordSet.records[1].rev + 1,
               ids: createdNotes.map(function (item) { return item.id; }),
               ts: nowSeconds()
             });
@@ -7897,6 +8117,8 @@
             });
             undo.push({
               id: operationID, kind: 'note-edit', items: undoItems,
+              targetKind: 'document-notes-legacy',
+              expectedRevision: recordSet.records[1].rev + 1,
               ts: nowSeconds()
             });
             touchedNotes = true;
@@ -7904,7 +8126,18 @@
           } else if (descriptor.kind === 'undo') {
             var last = undo.length ? undo[undo.length - 1] : null;
             if (!last || typeof last !== 'object') {
-              throw outgoingRequestError('没有可撤销的本机书籍改动', code, 409);
+              throw new RuntimeError(
+                '没有可撤销的 PDF 本机书籍改动',
+                'BW_NATIVE_PDF_UNDO_EMPTY'
+              );
+            }
+            var currentTargetRevision = last.targetKind === 'document-highlights'
+              ? recordSet.records[0].rev
+              : (last.targetKind === 'document-notes-legacy'
+                ? recordSet.records[1].rev : null);
+            if (last.expectedRevision != null &&
+                Number(last.expectedRevision) !== Number(currentTargetRevision)) {
+              nativePDFRevisionConflict('最近的本机改动');
             }
             var ids = new Set((last.ids || []).map(String));
             if (last.kind === 'highlight-create') {
@@ -7943,12 +8176,30 @@
               throw outgoingRequestError('最近的本机改动无法安全撤销', code, 409);
             }
             undo.pop();
+            var previousTarget = null;
+            for (var undoIndex = undo.length - 1; undoIndex >= 0; undoIndex -= 1) {
+              if (undo[undoIndex] && undo[undoIndex].targetKind === last.targetKind) {
+                previousTarget = undo[undoIndex];
+                break;
+              }
+            }
+            if (previousTarget && currentTargetRevision != null) {
+              previousTarget.expectedRevision = currentTargetRevision + 1;
+            }
             touchedUndo = true;
           }
 
           var receipt = { id: operationID, kind: descriptor.kind, ts: nowSeconds() };
+          if (descriptor.kind === 'undo' && last) {
+            receipt.undone = {
+              kind: String(last.kind || ''),
+              id: String(last.id || '')
+            };
+            receipt.remaining = undo.length;
+          }
           receipts.push(receipt);
           received.set(operationID, receipt);
+          lastReceipt = clone(receipt);
           touchedReceipts = true;
           output.push(nativePDFSanitizeAction(action, descriptor));
         });
@@ -7983,23 +8234,82 @@
           ));
         }
         if (!mutations.length) {
-          return { actions: output, revisions: clone(expectedRevisions) };
+          return {
+            actions: output,
+            revisions: clone(expectedRevisions),
+            replayed: replayed,
+            receipt: lastReceipt
+          };
         }
         assertNativePDFWriterLease(writerLease);
-        return stores.document.batch(mutations).then(function () {
+        return stores.document.batch(mutations, bound).then(function () {
           assertNativePDFWriterLease(writerLease);
           return Promise.all([
-            storedStateRecord(stores.document, 'document-highlights', 'documentId', bookId, []),
-            storedStateRecord(stores.document, 'document-notes-legacy', 'documentId', bookId, [])
+            storedStateRecord(
+              stores.document, 'document-highlights', 'documentId', bookId, [], bound
+            ),
+            storedStateRecord(
+              stores.document, 'document-notes-legacy', 'documentId', bookId, [], bound
+            )
           ]).then(function (updated) {
             return {
               actions: output,
+              replayed: replayed,
+              receipt: lastReceipt,
               revisions: Object.assign({}, expectedRevisions, {
                 highlights: updated[0].rev,
                 notes: updated[1].rev
               })
             };
           });
+        });
+      });
+    });
+  }
+
+  function nativePDFUndoLast(operationID) {
+    operationID = String(operationID || '');
+    if (!/^npdf_[0-9a-f]{24}$/.test(operationID)) {
+      return Promise.reject(new RuntimeError(
+        'PDF 撤销操作编号无效', 'BW_NATIVE_PDF_ASSISTANT_ACTION'
+      ));
+    }
+    var bound = { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS };
+    return withNativePDFWriter('assistant-undo-last', function (lease) {
+      return Promise.all([
+        storedStateRecord(
+          stores.document, 'document-highlights', 'documentId', bookId, [], bound
+        ),
+        storedStateRecord(
+          stores.document, 'document-notes-legacy', 'documentId', bookId, [], bound
+        ),
+        storedStateRecord(
+          stores.document, 'pdf-assistant-undo', 'documentId', bookId, [], bound
+        )
+      ]).then(function (records) {
+        var stack = storedList(
+          clone(records[2].payload), 'BW_NATIVE_PDF_ASSISTANT_ACTION'
+        );
+        return nativePDFCommitActions([{
+          fn: '_nativePDFUndoLast', args: [operationID]
+        }], {
+          highlights: records[0].rev,
+          notes: records[1].rev
+        }, lease).then(function (committed) {
+          return {
+            contract: NATIVE_READER_UNDO_RESULT_CONTRACT,
+            ok: true,
+            surface: 'pdf',
+            operationId: operationID,
+            replayed: committed.replayed === true,
+            undone: committed.receipt && committed.receipt.undone
+              ? clone(committed.receipt.undone) : null,
+            remaining: Number(
+              committed.receipt && committed.receipt.remaining != null
+                ? committed.receipt.remaining
+                : Math.max(0, stack.length - 1)
+            )
+          };
         });
       });
     });
@@ -8577,21 +8887,27 @@
       invalidFile: payload.file !== localFileRef() } : null;
   }
 
-  function nativeEPUBRecordSet(kind, queryOptions) {
+  function nativeEPUBRecordSet(kind, queryOptions, includeAssistant) {
     var kinds = kind === 'document-notes-legacy'
       ? ['document-notes-legacy', 'card-placements', 'entity-references']
       : [kind];
+    var targetCount = kinds.length;
+    if (includeAssistant) {
+      kinds = kinds.concat(['epub-assistant-undo']);
+    }
     return Promise.all(kinds.map(function (item) {
       return storedStateRecord(
         stores.document, item, 'documentId', bookId,
         item === 'document-notes-legacy' || item === 'epub-highlights' ? [] : [],
         queryOptions
       );
-    })).then(function (records) { return { kinds: kinds, records: records }; });
+    })).then(function (records) {
+      return { kinds: kinds, records: records, targetCount: targetCount };
+    });
   }
 
   function nativeEPUBRecordMutations(recordSet, payload, suffix, revisionDelta) {
-    return recordSet.kinds.map(function (kind, index) {
+    return recordSet.kinds.slice(0, recordSet.targetCount).map(function (kind, index) {
       var value;
       if (kind === recordSet.kinds[0]) value = payload;
       else if (kind === 'card-placements') value = deriveCardPlacements(payload);
@@ -8717,6 +9033,56 @@
     throw new RuntimeError('本机 EPUB action 操作不受支持', 'BW_NATIVE_EPUB_ACTION_BODY');
   }
 
+  function nativeEPUBStackEntry(action, descriptor, expectedRevision) {
+    return {
+      id: String(action && action.id || ''),
+      kind: String(action && action.kind || descriptor.operation || ''),
+      targetKind: descriptor.kind,
+      action: clone(action),
+      expectedRevision: expectedRevision,
+      ts: nowSeconds()
+    };
+  }
+
+  function nativeEPUBPreviousTarget(stack, targetKind) {
+    for (var index = stack.length - 1; index >= 0; index -= 1) {
+      if (stack[index] && stack[index].targetKind === targetKind) return stack[index];
+    }
+    return null;
+  }
+
+  function nativeEPUBStackAfterAction(
+    stack, nextAction, descriptor, requestedOp, currentRevision
+  ) {
+    stack = storedList(clone(stack), 'BW_NATIVE_EPUB_ACTION_STATE');
+    var actionID = String(nextAction && nextAction.id || '');
+    var existingIndex = -1;
+    stack.forEach(function (item, index) {
+      if (item && String(item.id || '') === actionID) existingIndex = index;
+    });
+    if (requestedOp === 'undo') {
+      if (existingIndex >= 0) {
+        var existing = stack[existingIndex];
+        if (existing.targetKind !== descriptor.kind ||
+            Number(existing.expectedRevision) !== Number(currentRevision)) {
+          throw new RuntimeError(
+            'EPUB 最近动作之后的内容已经变化',
+            'BW_NATIVE_EPUB_UNDO_CONFLICT'
+          );
+        }
+        stack.splice(existingIndex, 1);
+        var previous = nativeEPUBPreviousTarget(stack, descriptor.kind);
+        if (previous) previous.expectedRevision = currentRevision + 1;
+      }
+      return stack.slice(-80);
+    }
+    if (existingIndex >= 0) stack.splice(existingIndex, 1);
+    stack.push(nativeEPUBStackEntry(
+      nextAction, descriptor, currentRevision + 1
+    ));
+    return stack.slice(-80);
+  }
+
   function nativeEPUBActionTransaction(action, requestedOp, metadataTask) {
     var descriptor = nativeEPUBActionOperation(action, requestedOp);
     if (!descriptor) {
@@ -8726,26 +9092,166 @@
     }
     // 队列里只放本地的读与写，而且两者都有界。
     //
-    // 这个队列与 epub-highlights 的 CRUD 是同一条：先前 Pi 的 metadataTask 也被
-    // 关在里面，于是一次网络往返期间，用户的每一次高亮增删改都排在它后面；网络
-    // 若不回应，整条队列就此不动。本地提交完成即释放队列，Pi 留到队列之外去等。
+    // 所有 EPUB assistant action 与无参撤销共享一个本机 bundle 队列；普通 CRUD
+    // 依靠同批 CAS 冲突保护。Pi metadata 永远在队列外等待。
     var bound = { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS };
-    return serializeLocalStateMutation('document', descriptor.kind, function () {
-      return nativeEPUBRecordSet(descriptor.kind, bound).then(function (recordSet) {
+    return serializeLocalStateMutation('document', 'epub-assistant-bundle', function () {
+      return nativeEPUBRecordSet(descriptor.kind, bound, true).then(function (recordSet) {
         var before = clone(recordSet.records[0].payload);
         var nextAction = clone(action);
+        var nextDescriptor = nativeEPUBActionOperation(nextAction, requestedOp);
+        var stackRecord = recordSet.records[recordSet.targetCount];
+        var stack = storedList(
+          clone(stackRecord.payload), 'BW_NATIVE_EPUB_ACTION_STATE'
+        );
         var next = nativeEPUBApplyActionPayload(
-          before, nativeEPUBActionOperation(nextAction, requestedOp), nextAction, requestedOp
+          before, nextDescriptor, nextAction, requestedOp
         );
         nextAction.state = requestedOp === 'undo' ? 'undone' : 'done';
+        stack = nativeEPUBStackAfterAction(
+          stack, nextAction, nextDescriptor, requestedOp,
+          recordSet.records[0].rev
+        );
         var suffix = randomHex(12);
+        var mutations = nativeEPUBRecordMutations(
+          recordSet, next, suffix + '-commit', 0
+        );
+        mutations.push(stateRecordMutation(
+          'epub-assistant-undo', stack, suffix + '-undo', stackRecord.rev
+        ));
         return stores.document.batch(
-          nativeEPUBRecordMutations(recordSet, next, suffix + '-commit', 0),
+          mutations,
           bound
         ).then(function () { return nextAction; });
       });
     }).then(function (nextAction) {
       return nativeEPUBActionMetadata(nextAction, metadataTask);
+    });
+  }
+
+  function nativeEPUBUndoLast(operationID) {
+    operationID = String(operationID || '');
+    if (!/^epub_[0-9a-f]{24}$/.test(operationID)) {
+      return Promise.reject(new RuntimeError(
+        'EPUB 撤销操作编号无效', 'BW_NATIVE_EPUB_UNDO_OPERATION'
+      ));
+    }
+    var bound = { transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS };
+    return serializeLocalStateMutation(
+      'document', 'epub-assistant-bundle', function () {
+        return Promise.all([
+          storedStateRecord(
+            stores.document, 'epub-assistant-undo',
+            'documentId', bookId, [], bound
+          ),
+          storedStateRecord(
+            stores.document, 'epub-assistant-ops',
+            'documentId', bookId, [], bound
+          )
+        ]).then(function (assistantRecords) {
+          var stackRecord = assistantRecords[0];
+          var opsRecord = assistantRecords[1];
+          var stack = storedList(
+            clone(stackRecord.payload), 'BW_NATIVE_EPUB_UNDO_STATE'
+          );
+          var receipts = storedList(
+            clone(opsRecord.payload), 'BW_NATIVE_EPUB_UNDO_STATE'
+          );
+          var replay = receipts.find(function (item) {
+            return item && String(item.id || '') === operationID;
+          });
+          if (replay) {
+            return {
+              contract: NATIVE_READER_UNDO_RESULT_CONTRACT,
+              ok: true,
+              surface: 'epub',
+              operationId: operationID,
+              replayed: true,
+              undone: clone(replay.undone),
+              remaining: Number(replay.remaining || 0)
+            };
+          }
+          var last = stack.length ? stack[stack.length - 1] : null;
+          if (!last || typeof last !== 'object' || Array.isArray(last)) {
+            throw new RuntimeError(
+              '没有可撤销的 EPUB 本机书籍改动',
+              'BW_NATIVE_EPUB_UNDO_EMPTY'
+            );
+          }
+          var action = clone(last.action);
+          var descriptor = nativeEPUBActionOperation(action, 'undo');
+          if (!descriptor || descriptor.kind !== last.targetKind) {
+            throw new RuntimeError(
+              'EPUB 最近动作记录损坏', 'BW_NATIVE_EPUB_UNDO_STATE'
+            );
+          }
+          return nativeEPUBRecordSet(descriptor.kind, bound, false)
+            .then(function (recordSet) {
+              if (Number(recordSet.records[0].rev) !== Number(last.expectedRevision)) {
+                throw new RuntimeError(
+                  'EPUB 最近动作之后的内容已经变化',
+                  'BW_NATIVE_EPUB_UNDO_CONFLICT'
+                );
+              }
+              var next = nativeEPUBApplyActionPayload(
+                clone(recordSet.records[0].payload),
+                descriptor,
+                action,
+                'undo'
+              );
+              stack.pop();
+              var previous = nativeEPUBPreviousTarget(stack, descriptor.kind);
+              if (previous) {
+                previous.expectedRevision = recordSet.records[0].rev + 1;
+              }
+              var undone = {
+                kind: String(last.kind || ''),
+                id: String(last.id || '')
+              };
+              var receipt = {
+                id: operationID,
+                undone: clone(undone),
+                remaining: stack.length,
+                ts: nowSeconds()
+              };
+              receipts.push(receipt);
+              receipts = receipts.slice(-160);
+              var suffix = randomHex(12);
+              var mutations = nativeEPUBRecordMutations(
+                recordSet, next, suffix + '-target', 0
+              );
+              mutations.push(
+                stateRecordMutation(
+                  'epub-assistant-undo', stack.slice(-80),
+                  suffix + '-undo', stackRecord.rev
+                ),
+                stateRecordMutation(
+                  'epub-assistant-ops', receipts,
+                  suffix + '-ops', opsRecord.rev
+                )
+              );
+              return stores.document.batch(mutations, bound).then(function () {
+                return {
+                  contract: NATIVE_READER_UNDO_RESULT_CONTRACT,
+                  ok: true,
+                  surface: 'epub',
+                  operationId: operationID,
+                  replayed: false,
+                  undone: undone,
+                  remaining: stack.length
+                };
+              });
+            });
+        });
+      }
+    ).catch(function (error) {
+      if (error && error.code === 'BW_DATA_CONFLICT') {
+        throw new RuntimeError(
+          'EPUB 最近动作在提交前发生变化',
+          'BW_NATIVE_EPUB_UNDO_CONFLICT'
+        );
+      }
+      throw error;
     });
   }
 
@@ -8787,6 +9293,59 @@
           ).slice(0, 500)
         });
       });
+    });
+  }
+
+  // The authoritative mutation has already committed before this helper runs.
+  // Refreshing the projection must therefore be best-effort: a renderer bug or
+  // a page that is still mounting must never turn a completed undo into an
+  // outcome-unknown mutation that the caller might retry.
+  function nativeReaderRefreshAfterUndo(result) {
+    var refresh = null;
+    var assistant = null;
+    var lookupError = null;
+    try {
+      var adapter = root.RC && typeof root.RC.adapter === 'function'
+        ? root.RC.adapter() : null;
+      assistant = adapter && adapter._host && adapter._host.asst
+        ? adapter._host.asst : null;
+      if (assistant && typeof assistant.reloadHighlights === 'function') {
+        refresh = function () { return assistant.reloadHighlights(); };
+      } else if (result && result.surface === 'pdf' &&
+          typeof root._reloadHighlights === 'function') {
+        // PDF boots the legacy renderer before every shared adapter path is
+        // guaranteed to be mounted.  Its long-standing window hook is the
+        // narrow fallback; EPUB has no equivalent global.
+        refresh = function () { return root._reloadHighlights(); };
+      }
+    } catch (error) {
+      lookupError = error;
+    }
+    var work = lookupError
+      ? Promise.reject(lookupError)
+      : (refresh ? Promise.resolve().then(refresh) : Promise.resolve());
+    var notesRefresh = assistant && typeof assistant.notesReload === 'function'
+      ? function () { return assistant.notesReload(); }
+      : (result && result.surface === 'pdf' && typeof root.notesReload === 'function'
+        ? function () { return root.notesReload(); } : null);
+    if (notesRefresh) {
+      work = Promise.all([
+        work,
+        Promise.resolve().then(notesRefresh)
+      ]);
+    }
+    return work.then(function () {
+      return result;
+    }, function (error) {
+      if (typeof root.dlog === 'function') {
+        try {
+          root.dlog(
+            '本机撤销已完成，但页面刷新失败: ' +
+            String(error && error.message || error || 'unknown')
+          );
+        } catch (_) {}
+      }
+      return result;
     });
   }
 
@@ -9362,6 +9921,34 @@
     }
   }
 
+  function nativeReaderUndoLast(operationID) {
+    operationID = String(operationID || '');
+    if (!/^rundo_[0-9a-f]{24}$/.test(operationID)) {
+      return Promise.reject(new RuntimeError(
+        'Reader 撤销操作编号无效', 'BW_NATIVE_READER_UNDO_OPERATION'
+      ));
+    }
+    var suffix = operationID.slice(6);
+    return bootPromise.then(function () {
+      var task;
+      if (nativeInterfaceSurface === 'pdf') {
+        task = nativePDFUndoLast('npdf_' + suffix);
+      } else if (nativeInterfaceSurface === 'epub') {
+        task = nativeEPUBUndoLast('epub_' + suffix);
+      } else {
+        throw new RuntimeError(
+          '当前宿主不支持本机书籍撤销',
+          'BW_NATIVE_READER_UNDO_SURFACE'
+        );
+      }
+      return Promise.resolve(task).then(function (result) {
+        result = clone(result);
+        result.operationId = operationID;
+        return nativeReaderRefreshAfterUndo(result);
+      });
+    });
+  }
+
   var api = {
     contract: CONTRACT,
     owner: 'native-app',
@@ -9369,6 +9956,7 @@
     deviceFamilyId: deviceId,
     localBookId: bookId,
     ready: function () { return bootPromise; },
+    undoLast: nativeReaderUndoLast,
     savePDFHighlight: function (payload) {
       var allowed = new Set([
         'file', 'id', 'page', 'rects', 'color', 'text', 'note', 'kind',
@@ -9387,8 +9975,8 @@
           // 精确工具携带稳定 mutation id，CAS 冲突可安全重试。不要排在普通
           // 高亮的共享 Promise 队列之后：旧 WebKit 写入若失联，队列会永久
           // 悬住并让每次语音高亮都只得到 20 秒回执超时。
-          return persistLocalPDFHighlight(
-            body, 'BW_LOCAL_HIGHLIGHT_DIRECT', true
+          return persistAssistantPDFHighlight(
+            body, 'BW_LOCAL_HIGHLIGHT_DIRECT'
           ).then(function (saved) {
             // 失败与未知走不到这里：它只挂在成功分支上。
             announceAssistantHighlight(body, saved);
@@ -9451,6 +10039,9 @@
     }
   };
   runtimeRoot.nativeLocalRuntime = api;
+  root._nativeReaderUndoLast = function (operationID) {
+    return api.undoLast(operationID);
+  };
 
   // The shell deliberately loads this bootstrap before the legacy Reader
   // scripts. Its storage dependencies are later synchronous scripts, so the

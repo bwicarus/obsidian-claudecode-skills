@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import fs from "node:fs";
 import test from "node:test";
+import vm from "node:vm";
 
 const ROOT = new URL("../../", import.meta.url);
 const read = (path) => fs.readFileSync(new URL(path, ROOT), "utf8");
@@ -26,6 +27,67 @@ test("PDF and EPUB exact-text helpers reject wrong or ambiguous source", () => {
   }
   assert.match(PDF, /id:\s*request\.mutationId/);
   assert.match(EPUB, /id:\s*request\.mutationId/);
+});
+
+test("EPUB exact-text bridge highlight shows the existing offset-action card after persistence", async () => {
+  const start = EPUB.indexOf("window.__bwReaderHighlightExactText = function (request) {");
+  const end = EPUB.indexOf("\n\n  // ── 「第N章」", start);
+  assert.ok(start >= 0 && end > start);
+  const shown = [];
+  const applied = [];
+  const highlight = {
+    id: "c_1234567890abcdef",
+    anchor: { section: 3, start: 4, end: 12 },
+    text: "橋接高亮",
+    color: "#fff59d",
+    time: 123,
+  };
+  const action = {
+    id: "direct-highlight:" + highlight.id,
+    kind: "epub_highlight",
+    title: "高亮:1处",
+    detail: "· 橋接高亮",
+    undo: { op: "hl_delete", file: "book.epub", ids: [highlight.id] },
+    redo: { op: "hl_create", file: "book.epub", items: [highlight] },
+    state: "done",
+    ts: 123,
+  };
+  const context = vm.createContext({
+    window: null,
+    Promise,
+    String,
+    Number,
+    Math,
+    Date,
+    FREL: "book.epub",
+    _hls: {},
+    _epubExactSource: () => Promise.resolve({
+      section: 3,
+      offset: { start: 4, end: 12 },
+      element: { id: "section-3" },
+    }),
+    reqJson: (_method, _url, _body, ok) => ok({ highlight, action }),
+    applyHl: (_element, value) => { applied.push(value.id); },
+    _epShowAction: (value) => { shown.push(JSON.parse(JSON.stringify(value))); },
+    out: null,
+  });
+  context.window = context;
+  vm.runInContext(EPUB.slice(start, end), context, { filename: "epub-exact-highlight.js" });
+  context.out = context.window.__bwReaderHighlightExactText({
+    file: "book.epub",
+    target: { kind: "epub", section: 3 },
+    text: "橋接高亮",
+    color: "yellow",
+    note: "",
+    mutationId: highlight.id,
+  });
+  const result = await context.out;
+  assert.equal(result.status, "highlight_saved");
+  assert.deepEqual(applied, [highlight.id]);
+  assert.deepEqual(shown, [action]);
+  assert.equal(shown[0].kind, "epub_highlight");
+  assert.deepEqual(shown[0].redo.items[0].anchor, highlight.anchor);
+  assert.equal(JSON.stringify(shown[0]).includes("rects"), false);
 });
 
 test("PDF exact-text highlight reuses a ready page and bounds a stalled navigation", async () => {

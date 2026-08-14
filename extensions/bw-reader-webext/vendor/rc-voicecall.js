@@ -1794,6 +1794,23 @@ if (window.__bwPwaProviderOnly) return;
               };
             });
           });
+      } else if (delivery.kind === 'client-action') {
+        // normalizer 可能被 facade 绕过，所以执行侧不能再动态 window[fn]。
+        // 这里只调用 native-local-runtime 的单一语义入口；由它依据受信
+        // nativeInterfaceSurface 分流 PDF/EPUB，并再次校验一次性编号。
+        var _caFn = String(p.fn || '');
+        var _caArgs = Array.isArray(p.args) ? p.args : [];
+        var _caId = _caArgs.length === 1 ? String(_caArgs[0] || '') : '';
+        if (_caFn !== '_nativeReaderUndoLast' || !/^rundo_[0-9a-f]{24}$/.test(_caId)) {
+          throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
+        }
+        var _caTarget = window._nativeReaderUndoLast;
+        if (typeof _caTarget !== 'function') {
+          throw new Error(
+            'BW_READER_CLIENT_ACTION_UNAVAILABLE:' + _caFn
+          );
+        }
+        work = Promise.resolve(_caTarget.call(window, _caId));
       } else {
         throw new Error('BW_READER_REALTIME_OUTPUT_KIND_UNSUPPORTED');
       }

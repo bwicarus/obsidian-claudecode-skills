@@ -7,6 +7,7 @@ const read = (path) => readFileSync(new URL(path, ROOT), "utf8");
 const RUNTIME = read("_server_deploy/static/pdf/native-local-runtime.js");
 const ASSISTANT = read("_server_deploy/assistant.py");
 const ASSISTANT_UI = read("_server_deploy/static/pdf/reader.src/25-assistant.js");
+const PDF_ADAPTER = read("_server_deploy/static/pdf/reader.src/27-rc-adapter.js");
 const EPUB_UI = read("_server_deploy/static/pdf/epub-html.js");
 
 function functionBody(source, name, nextName) {
@@ -47,7 +48,7 @@ test("SSE and voice actions must commit locally before old UI can observe succes
   assert.match(commit, /serializeLocalStateMutation\('document', 'pdf-assistant-bundle'/);
   assert.match(commit, /assertRevision\('highlights'/);
   assert.match(commit, /assertRevision\('notes'/);
-  assert.match(commit, /stores\.document\.batch\(mutations\)/);
+  assert.match(commit, /stores\.document\.batch\(mutations, bound\)/);
   assert.match(commit, /stateRecordMutation\(\s*'pdf-assistant-undo'/);
   assert.match(commit, /stateRecordMutation\(\s*'pdf-assistant-ops'/);
   assert.match(commit, /received\.has\(operationID\)/);
@@ -87,6 +88,10 @@ test("Pi only proposes native PDF document mutations and keeps legacy/PWA sideca
   assert.match(ASSISTANT_UI, /window\._nativePDFRefreshAnnotations/);
   assert.match(ASSISTANT_UI, /window\._reloadHighlights/);
   assert.match(ASSISTANT_UI, /window\.notesReload/);
+  assert.match(
+    PDF_ADAPTER,
+    /reloadHighlights: \(\) => \{ try \{ return window\._reloadHighlights \? window\._reloadHighlights\(\)/,
+  );
 });
 
 test("generic assistant routes select the matching PDF or EPUB native transaction", () => {
