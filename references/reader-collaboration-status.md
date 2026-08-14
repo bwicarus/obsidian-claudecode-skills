@@ -4261,4 +4261,4 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **查词**：本地缺中文时恢复旧版原文呼吸查询并原位填回；两级 miss 展开后自动深度解释，例句中文自动回填，不再显示“手动使用 Pi”或“Pi 中文翻译暂不可用”。
 - **怎么验的**：Reader 合同全量、ReaderPC/安装事务专项、Direct Release 0 警告 0 错误与完整自检、ReaderBundle 及不可变候选 verify/self-test 均通过。
 - **Windows 安装**：Direct `0.1.132`、ReaderPC `0.1.26` 已原子安装但保持停机；相关进程与 43128 监听均为零，旧计划任务不存在，keepalive=false、Codex 麦克风 inactive；Direct 回滚点 `install-0.1.132-20260814T123432Z-dc46bd66`。
-- **边界/下一步**：未部署 Pi 或桌面扩展正式渠道；App `1.1.57` 待本提交推送后由既有 iOS workflow 上传，用户手动启动 ReaderPC 后再验收唯一生命周期与查词动画。
+- **发布/边界**：功能提交 `fb4d7f2a`；Actions `31801099327` 上传 TestFlight `1.1.57 (306)`，`31802039561` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。未部署 Pi 或桌面扩展正式渠道；用户手动启动 ReaderPC 后再验收唯一生命周期与查词动画。
