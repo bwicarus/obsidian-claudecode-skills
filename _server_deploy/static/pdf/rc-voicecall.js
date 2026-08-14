@@ -1791,6 +1791,42 @@
               };
             });
           });
+      } else if (delivery.kind === 'practice-page') {
+        if (typeof window.__upCreatePracticePage !== 'function') {
+          throw new Error('BW_READER_PRACTICE_PAGE_UNAVAILABLE');
+        }
+        if (!Number.isInteger(delivery.page) || delivery.page < 1) {
+          throw new Error('BW_READER_PRACTICE_PAGE_REQUIRES_PDF_PAGE');
+        }
+        work = window.__upCreatePracticePage({
+          mutationId: p.mutationId,
+          title: p.title,
+          paper: p.paper,
+          blocks: p.blocks,
+          after: delivery.page
+        });
+      } else if (delivery.kind === 'client-action') {
+        // 可见反馈：把与 Pi 同形的 {fn,args} 交给既有的 runActions。
+        //
+        // normalizer 只负责校验，真正执行在这里 —— 先前只加了前者，于是这条
+        // 通道两端都"通"，中间却在此处以 KIND_UNSUPPORTED 落地，永远到不了
+        // runActions。校验与执行是两件事，缺一条链就是断的。
+        //
+        // runActions 找不到函数时会静默跳过（EPUB 宿主就没有
+        // window._nativePDFUndoLast）。静默跳过意味着用户说了"撤销"却什么都
+        // 没发生、也没有任何提示，所以这里先自己检查一次并明确报错。
+        var _caFn = String(p.fn || '');
+        if (typeof window[_caFn] !== 'function') {
+          throw new Error(
+            'BW_READER_CLIENT_ACTION_UNAVAILABLE:' + _caFn
+          );
+        }
+        // 直接按 runActions 的语义调用：它在 rc-assistant.js 里是局部函数、
+        // 未对外导出，所以这里不能转调它。分派规则就是 window[fn].apply(args)，
+        // 与 Pi 路径逐字一致；fn 已在两端白名单内校验过。
+        work = Promise.resolve(
+          window[_caFn].apply(null, Array.isArray(p.args) ? p.args : [])
+        );
       } else {
         throw new Error('BW_READER_REALTIME_OUTPUT_KIND_UNSUPPORTED');
       }
