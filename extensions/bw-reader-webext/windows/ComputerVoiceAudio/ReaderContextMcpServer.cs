@@ -19,6 +19,8 @@ internal sealed class ReaderContextMcpServer
     internal const string NoteCreateToolName = "reader_note_create";
     internal const string NoteEditToolName = "reader_note_edit";
     internal const string HighlightsToolName = "reader_highlights";
+    internal const string NotesToolName = "reader_notes";
+    internal const string SearchToolName = "reader_search";
     internal const string CapabilityGuideToolName =
         "reader_capability_guide";
     internal const string ServerName = "bw-reader-context-snapshot";
@@ -652,6 +654,94 @@ internal sealed class ReaderContextMcpServer
                     ["readOnlyHint"] = false,
                     ["destructiveHint"] = false,
                     ["idempotentHint"] = false,
+                    ["openWorldHint"] = false,
+                },
+            });
+            tools.Add(new JsonObject
+            {
+                ["name"] = NotesToolName,
+                ["description"] =
+                    "Read the sticky notes in the book that is open, from the "
+                    + "Reader's own store. Optionally narrow to one page or "
+                    + "to notes containing a phrase. Returns each note's id, "
+                    + "page and text; the id is what reader_note_edit takes. "
+                    + "If truncated is true the list is a prefix, not the "
+                    + "whole set. Works only while a PDF or EPUB is open. "
+                    + "Safe to retry.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["page"] = new JsonObject
+                        {
+                            ["type"] = "integer",
+                            ["minimum"] = 1,
+                            ["description"] =
+                                "Restrict to this page (PDF) or section "
+                                + "(EPUB). Omit for the whole book.",
+                        },
+                        ["contains"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["minLength"] = 1,
+                            ["maxLength"] = 256,
+                            ["description"] =
+                                "Restrict to notes containing this phrase.",
+                        },
+                    },
+                    ["additionalProperties"] = false,
+                },
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = true,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = true,
+                    ["openWorldHint"] = false,
+                },
+            });
+            tools.Add(new JsonObject
+            {
+                ["name"] = SearchToolName,
+                ["description"] =
+                    "Search the full text of the book that is open, using the "
+                    + "Reader's own index. Returns matching pages with a "
+                    + "snippet. Two different caveats come back separately "
+                    + "and both matter: truncated means too many matches to "
+                    + "fit, incomplete means some pages could not be searched "
+                    + "at all - with incomplete true, absence of a match is "
+                    + "not evidence the book lacks the phrase, so do not say "
+                    + "it is not there. Works only while a PDF or EPUB is "
+                    + "open. Safe to retry.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["query"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["minLength"] = 1,
+                            ["maxLength"] = 256,
+                            ["description"] = "The text to look for.",
+                        },
+                        ["limit"] = new JsonObject
+                        {
+                            ["type"] = "integer",
+                            ["minimum"] = 1,
+                            ["maximum"] = 200,
+                            ["description"] =
+                                "Maximum matches to return. Defaults to 50.",
+                        },
+                    },
+                    ["required"] = new JsonArray { "query" },
+                    ["additionalProperties"] = false,
+                },
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = true,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = true,
                     ["openWorldHint"] = false,
                 },
             });
@@ -1362,7 +1452,51 @@ internal sealed class ReaderContextMcpServer
             return;
         }
         if (
-            toolName == HighlightsToolName
+            toolName == SearchToolName
+            && _queryReaderAsync is not null
+        )
+        {
+            if (arguments.ValueKind != JsonValueKind.Object
+                || !arguments.TryGetProperty("query", out JsonElement queryText)
+                || queryText.ValueKind != JsonValueKind.String
+                || queryText.GetString() is not string searchText
+                || searchText.Trim().Length == 0
+                || searchText.Length
+                    > ReaderQueryProtocol.MaximumQueryTextCharacters)
+            {
+                await WriteErrorAsync(
+                    id,
+                    -32602,
+                    "Invalid Reader search text",
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            JsonObject searchParameters = new() { ["query"] = searchText };
+            if (arguments.TryGetProperty("limit", out JsonElement limitValue))
+            {
+                if (limitValue.ValueKind != JsonValueKind.Number
+                    || !limitValue.TryGetInt64(out long limit)
+                    || limit < 1
+                    || limit > 200)
+                {
+                    await WriteErrorAsync(
+                        id,
+                        -32602,
+                        "Invalid Reader search limit",
+                        cancellationToken).ConfigureAwait(false);
+                    return;
+                }
+                searchParameters["limit"] = limit;
+            }
+            await RunReaderQueryAsync(
+                id,
+                "search",
+                searchParameters,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (
+            (toolName == HighlightsToolName || toolName == NotesToolName)
             && _queryReaderAsync is not null
         )
         {
@@ -1407,7 +1541,7 @@ internal sealed class ReaderContextMcpServer
             }
             await RunReaderQueryAsync(
                 id,
-                HighlightsToolName,
+                toolName == NotesToolName ? "notes" : "highlights",
                 queryParameters,
                 cancellationToken).ConfigureAwait(false);
             return;

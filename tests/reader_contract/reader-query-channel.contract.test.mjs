@@ -303,3 +303,130 @@ test("回执必须与提问对得上", () => {
     );
   }
 });
+
+// ── 便签与搜索 ──────────────────────────────────────────────────────
+function callEntry(name, { input = {}, surface = "pdf", stored = [], search } = {}) {
+  const start = RUNTIME.indexOf(`function ${name}(`);
+  assert.notEqual(start, -1, `找不到 ${name}`);
+  const context = {
+    String, Number, Array, Promise, JSON,
+    nativeInterfaceSurface: surface,
+    bootPromise: Promise.resolve(),
+    EXACT_HIGHLIGHT_IDB_TIMEOUT_MS: 4000,
+    readState: () => Promise.resolve(stored),
+    searchPageText: search || (() => Promise.resolve({ matches: [], incomplete: false })),
+    RuntimeError: class RuntimeError extends Error {
+      constructor(message, code) { super(message); this.code = code; }
+    },
+    out: null,
+  };
+  context.globalThis = context;
+  vm.runInNewContext(
+    `${balanced(RUNTIME, start)}
+     out = ${name}(${JSON.stringify(input)});`,
+    context,
+  );
+  return context.out;
+}
+
+test("便签按页与文字过滤，锚点里的页码是真相", async () => {
+  const stored = [
+    { id: "n1", anchor: { kind: "pdf", page: 4 }, text: "alpha" },
+    { id: "n2", anchor: { kind: "pdf", page: 2 }, text: "beta" },
+    { id: "n3", anchor: { kind: "epub", section: 4 }, text: "ALPHA again" },
+  ];
+  const all = await callEntry("nativeReaderNotes", { stored });
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(all.notes.map((n) => n.id))),
+    ["n2", "n1", "n3"],
+  );
+  const page4 = await callEntry("nativeReaderNotes", { input: { page: 4 }, stored });
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(page4.notes.map((n) => n.id))), ["n1", "n3"],
+  );
+  const alpha = await callEntry("nativeReaderNotes", {
+    input: { contains: "alpha" }, stored,
+  });
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(alpha.notes.map((n) => n.id))), ["n1", "n3"],
+  );
+});
+
+test("便签不返回笔迹与几何", async () => {
+  const value = await callEntry("nativeReaderNotes", {
+    stored: [{
+      id: "n1", anchor: { page: 1 }, text: "x",
+      strokes: [[1, 2]], w: 260, h: 180, card: { big: "payload" },
+    }],
+  });
+  assert.deepEqual(Object.keys(value.notes[0]).sort(), ["id", "page", "text"]);
+});
+
+test("搜索把「装不下」和「没搜全」分开报", async () => {
+  const value = await callEntry("nativeReaderSearch", {
+    input: { query: "x" },
+    search: () => Promise.resolve({
+      matches: [{ page: 1, text: "hit" }], incomplete: true,
+    }),
+  });
+  assert.equal(value.incomplete, true, "有些页没能搜到，必须说出来");
+  assert.equal(value.truncated, false, "这跟「太多装不下」是两回事");
+  assert.equal(
+    value.matched, 1,
+    "incomplete 时的零命中不等于书里没有，助手不能据此下结论",
+  );
+});
+
+test("搜索结果过多时截断，且不与 incomplete 混淆", async () => {
+  const many = Array.from({ length: 400 }, (_, index) => ({
+    page: index + 1, text: "y".repeat(280),
+  }));
+  const value = await callEntry("nativeReaderSearch", {
+    input: { query: "y" },
+    search: () => Promise.resolve({ matches: many, incomplete: false }),
+  });
+  assert.equal(value.truncated, true);
+  assert.equal(value.incomplete, false);
+  assert.ok(value.returned < value.matched);
+});
+
+test("搜索参数非法时拒绝", async () => {
+  for (const input of [{ query: "" }, { query: "x".repeat(257) },
+                       { query: "x", limit: 0 }, { query: "x", limit: 201 }]) {
+    await assert.rejects(
+      callEntry("nativeReaderSearch", { input }),
+      (error) => error.code === "BW_READER_QUERY_PARAMS",
+    );
+  }
+});
+
+test("便签与搜索在不支持的界面上拒绝，而不是回空", async () => {
+  for (const name of ["nativeReaderNotes", "nativeReaderSearch"]) {
+    await assert.rejects(
+      callEntry(name, { surface: "html", input: { query: "x" } }),
+      (error) => error.code === "BW_READER_QUERY_SURFACE",
+    );
+  }
+});
+
+test("三个查询名都在两端的名单里，且各自显式映射", () => {
+  const table = VOICE.slice(
+    VOICE.indexOf("var READER_QUERY_HANDLERS = {"),
+    VOICE.indexOf("function normalizeReaderQueryRequest("),
+  );
+  for (const name of ["highlights", "notes", "search"]) {
+    assert.match(table, new RegExp(`\n    ${name}: function`), `执行侧缺 ${name}`);
+    assert.match(QUERY, new RegExp(`"${name}"`), `桥接名单缺 ${name}`);
+  }
+  assert.doesNotMatch(table, /window\s*\[/, "仍不得动态分派");
+});
+
+test("搜索工具描述交代 incomplete 的含义", () => {
+  const start = MCP.indexOf('["name"] = SearchToolName');
+  const spec = MCP.slice(start, start + 3000);
+  assert.match(spec, /incomplete/);
+  assert.match(
+    spec, /absence of a match is/,
+    "不写清楚，助手会把「半本书里没搜到」说成「这本书里没有」",
+  );
+});

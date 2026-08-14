@@ -3064,6 +3064,22 @@
         contains: params.contains,
       });
     },
+    notes: function (params) {
+      var target = window._nativeReaderNotes;
+      if (typeof target !== "function") return null;
+      return target.call(window, {
+        page: params.page,
+        contains: params.contains,
+      });
+    },
+    search: function (params) {
+      var target = window._nativeReaderSearch;
+      if (typeof target !== "function") return null;
+      return target.call(window, {
+        query: params.query,
+        limit: params.limit,
+      });
+    },
   };
 
   function normalizeReaderQueryRequest(rawPayload) {

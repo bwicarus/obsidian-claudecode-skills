@@ -70,7 +70,8 @@ internal static class ReaderQueryProtocol
 
     // 每个名字都对应执行侧一个显式分支。这里不做前缀匹配也不接受通配：
     // 名单之外的名字只可能是错误或攻击，两种都该当场拒绝。
-    internal static bool IsQuery(string value) => value is "highlights";
+    internal static bool IsQuery(string value) =>
+        value is "highlights" or "notes" or "search";
 
     internal static object Event(ReaderQueryRequest request) =>
         new

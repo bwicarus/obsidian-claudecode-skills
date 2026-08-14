@@ -10131,6 +10131,129 @@
     });
   }
 
+  // 助手读便签。跟高亮同一套取舍：只回内容与位置，几何和笔迹不回。
+  function nativeReaderNotes(input) {
+    var payload = input && typeof input === 'object' && !Array.isArray(input)
+      ? input : {};
+    var surface = nativeInterfaceSurface;
+    if (surface !== 'pdf' && surface !== 'epub') {
+      return Promise.reject(new RuntimeError(
+        '当前阅读界面没有本机便签', 'BW_READER_QUERY_SURFACE'
+      ));
+    }
+    var wantPage = null;
+    if (payload.page !== undefined && payload.page !== null) {
+      wantPage = Number(payload.page);
+      if (!Number.isInteger(wantPage) || wantPage < 1) {
+        return Promise.reject(new RuntimeError(
+          '页码无效', 'BW_READER_QUERY_PARAMS'
+        ));
+      }
+    }
+    var contains = payload.contains == null ? '' : String(payload.contains);
+    if (contains.length > 256) {
+      return Promise.reject(new RuntimeError(
+        '过滤文字过长', 'BW_READER_QUERY_PARAMS'
+      ));
+    }
+    var needle = contains.trim().toLowerCase();
+    return bootPromise.then(function () {
+      return readState('document-notes-legacy', []);
+    }).then(function (stored) {
+      var items = Array.isArray(stored) ? stored : [];
+      var matched = [];
+      for (var index = 0; index < items.length; index += 1) {
+        var item = items[index];
+        if (!item || typeof item !== 'object') continue;
+        var anchor = item.anchor && typeof item.anchor === 'object'
+          ? item.anchor : {};
+        var page = Number(
+          anchor.page != null ? anchor.page : anchor.section
+        );
+        if (!Number.isFinite(page)) page = null;
+        if (wantPage !== null && page !== wantPage) continue;
+        var text = String(item.text == null ? '' : item.text);
+        if (needle && text.toLowerCase().indexOf(needle) < 0) continue;
+        matched.push({
+          id: String(item.id == null ? '' : item.id),
+          page: page,
+          text: text.length > 1000 ? text.slice(0, 1000) : text
+        });
+      }
+      matched.sort(function (a, b) { return (a.page || 0) - (b.page || 0); });
+      var budget = 32 * 1024;
+      var used = 0;
+      var kept = [];
+      var truncated = false;
+      for (var m = 0; m < matched.length; m += 1) {
+        var size = JSON.stringify(matched[m]).length + 1;
+        if (used + size > budget) { truncated = true; break; }
+        used += size;
+        kept.push(matched[m]);
+      }
+      return {
+        ok: true, surface: surface, notes: kept,
+        matched: matched.length, returned: kept.length, truncated: truncated
+      };
+    });
+  }
+
+  // 助手在这本书里搜。复用本机既有的全文检索，不另起一套。
+  //
+  // incomplete 与 truncated 是两件事，都要报：前者是"有些页没能搜到"（文本层
+  // 还没就绪、原生检索没答上），后者是"搜到的太多装不下"。合并成一个标志，
+  // 助手就会把"半本书里没有"说成"这本书里没有"。
+  function nativeReaderSearch(input) {
+    var payload = input && typeof input === 'object' && !Array.isArray(input)
+      ? input : {};
+    var surface = nativeInterfaceSurface;
+    if (surface !== 'pdf' && surface !== 'epub') {
+      return Promise.reject(new RuntimeError(
+        '当前阅读界面不支持全文搜索', 'BW_READER_QUERY_SURFACE'
+      ));
+    }
+    var query = String(payload.query == null ? '' : payload.query).trim();
+    if (!query || query.length > 256) {
+      return Promise.reject(new RuntimeError(
+        '搜索文字无效', 'BW_READER_QUERY_PARAMS'
+      ));
+    }
+    var limit = payload.limit == null ? 50 : Number(payload.limit);
+    if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+      return Promise.reject(new RuntimeError(
+        '搜索条数无效', 'BW_READER_QUERY_PARAMS'
+      ));
+    }
+    return bootPromise.then(function () {
+      return searchPageText(query, limit);
+    }).then(function (found) {
+      var matches = found && Array.isArray(found.matches) ? found.matches : [];
+      var budget = 32 * 1024;
+      var used = 0;
+      var kept = [];
+      var truncated = false;
+      for (var m = 0; m < matches.length; m += 1) {
+        var item = matches[m] && typeof matches[m] === 'object'
+          ? matches[m] : {};
+        var snippet = String(item.text == null ? '' : item.text);
+        var row = {
+          page: Number.isFinite(Number(item.page)) ? Number(item.page) : null,
+          text: snippet.length > 300 ? snippet.slice(0, 300) : snippet
+        };
+        var size = JSON.stringify(row).length + 1;
+        if (used + size > budget) { truncated = true; break; }
+        used += size;
+        kept.push(row);
+      }
+      return {
+        ok: true, surface: surface, query: query, matches: kept,
+        matched: matches.length, returned: kept.length,
+        truncated: truncated,
+        incomplete: found && found.incomplete === true
+      };
+    });
+  }
+
   function nativeReaderUndoLast(operationID) {
     operationID = String(operationID || '');
     if (!/^rundo_[0-9a-f]{24}$/.test(operationID)) {
@@ -10170,6 +10293,8 @@
     createNote: nativeReaderCreateNote,
     editNote: nativeReaderEditNote,
     highlights: nativeReaderHighlights,
+    notes: nativeReaderNotes,
+    search: nativeReaderSearch,
     savePDFHighlight: function (payload) {
       var allowed = new Set([
         'file', 'id', 'page', 'rects', 'color', 'text', 'note', 'kind',
@@ -10265,6 +10390,12 @@
   };
   root._nativeReaderHighlights = function (input) {
     return api.highlights(input);
+  };
+  root._nativeReaderNotes = function (input) {
+    return api.notes(input);
+  };
+  root._nativeReaderSearch = function (input) {
+    return api.search(input);
   };
 
   // The shell deliberately loads this bootstrap before the legacy Reader
