@@ -9994,6 +9994,59 @@
     });
   }
 
+  // 改的是已有便签的内容，不是它的位置。助手能重写一段文字，但不该把用户
+  // 贴在某处的便签挪走或改色 —— 那是用户对页面的布置，不在"帮我改写"的语义里。
+  // 所以这里只发 text；PATCH 未提及的字段本地会原样保留。
+  function nativeReaderEditNote(input) {
+    var payload = input && typeof input === 'object' && !Array.isArray(input)
+      ? input : {};
+    var id = String(payload.id == null ? '' : payload.id);
+    if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) {
+      return Promise.reject(new RuntimeError(
+        '便签编号无效', 'BW_READER_NOTE_ID'
+      ));
+    }
+    var text = String(payload.text == null ? '' : payload.text);
+    if (!text.trim()) {
+      return Promise.reject(new RuntimeError(
+        '便签内容为空', 'BW_READER_NOTE_TEXT'
+      ));
+    }
+    if (text.length > 4000) {
+      return Promise.reject(new RuntimeError(
+        '便签内容过长', 'BW_READER_NOTE_TEXT'
+      ));
+    }
+    var surface = nativeInterfaceSurface;
+    if (surface !== 'pdf' && surface !== 'epub') {
+      return Promise.reject(new RuntimeError(
+        '当前阅读界面不支持便签', 'BW_READER_NOTE_SURFACE'
+      ));
+    }
+    return bootPromise.then(function () {
+      return root.fetch(localBasePath() + '/pdf/api/notes', {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ file: localFileRef(), id: id, text: text })
+      });
+    }).then(function (response) {
+      return response.json().then(function (data) {
+        // 便签不存在时本地回 404。这跟"写失败"是两回事：前者重试多少次都
+        // 一样，后者可能只是这一刻不成。不合并，调用方才知道该不该再来。
+        if (response.status === 404) {
+          throw new RuntimeError('未找到该便签', 'BW_READER_NOTE_MISSING');
+        }
+        if (!response.ok || !data || data.ok !== true) {
+          throw new RuntimeError(
+            String((data && data.error) || '便签未能保存'),
+            String((data && data.code) || 'BW_READER_NOTE_FAILED')
+          );
+        }
+        return { ok: true, surface: surface, id: id };
+      });
+    });
+  }
+
   function nativeReaderUndoLast(operationID) {
     operationID = String(operationID || '');
     if (!/^rundo_[0-9a-f]{24}$/.test(operationID)) {
@@ -10031,6 +10084,7 @@
     ready: function () { return bootPromise; },
     undoLast: nativeReaderUndoLast,
     createNote: nativeReaderCreateNote,
+    editNote: nativeReaderEditNote,
     savePDFHighlight: function (payload) {
       var allowed = new Set([
         'file', 'id', 'page', 'rects', 'color', 'text', 'note', 'kind',
@@ -10120,6 +10174,9 @@
   // 也无法绕过其中的界面与内容校验。
   root._nativeReaderCreateNote = function (input) {
     return api.createNote(input);
+  };
+  root._nativeReaderEditNote = function (input) {
+    return api.editNote(input);
   };
 
   // The shell deliberately loads this bootstrap before the legacy Reader

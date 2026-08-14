@@ -335,7 +335,10 @@ internal static class ReaderRealtimeOutputProtocol
     private static void ValidateClientAction(JsonElement root)
     {
         string fn = Text(root, "fn", 64);
-        if (fn is not ("_nativeReaderUndoLast" or "_nativeReaderCreateNote"))
+        if (fn is not (
+            "_nativeReaderUndoLast"
+            or "_nativeReaderCreateNote"
+            or "_nativeReaderEditNote"))
         {
             throw Invalid("Reader 客户端动作不在白名单内");
         }
@@ -343,6 +346,36 @@ internal static class ReaderRealtimeOutputProtocol
         if (args.ValueKind != JsonValueKind.Array)
         {
             throw Invalid("Reader 客户端动作参数必须是数组");
+        }
+        if (fn is "_nativeReaderEditNote")
+        {
+            // 只改内容。位置、颜色、尺寸是用户对页面的布置，助手改写一段文字
+            // 不该顺手把便签挪走 —— 所以协议里根本没有这些字段可填。
+            if (args.GetArrayLength() != 1
+                || args[0].ValueKind != JsonValueKind.Object)
+            {
+                throw Invalid("Reader 便签修改需要一个对象");
+            }
+            JsonElement edit = args[0];
+            DirectJsonValidation.RequireNoDuplicateKeys(edit);
+            Exact(edit, "id", "text");
+            string editId = Text(edit, "id", 64);
+            if (editId.Length == 0
+                || editId.Any(character =>
+                    character is not (
+                        >= '0' and <= '9'
+                        or >= 'a' and <= 'z'
+                        or >= 'A' and <= 'Z'
+                        or '_' or '-')))
+            {
+                throw Invalid("Reader 便签编号无效");
+            }
+            string editText = Text(edit, "text", 4_000);
+            if (string.IsNullOrWhiteSpace(editText))
+            {
+                throw Invalid("Reader 便签内容为空");
+            }
+            return;
         }
         if (fn is "_nativeReaderCreateNote")
         {

@@ -17,6 +17,7 @@ internal sealed class ReaderContextMcpServer
     internal const string CommandToolName = "reader_command";
     internal const string UndoLastToolName = "reader_undo_last";
     internal const string NoteCreateToolName = "reader_note_create";
+    internal const string NoteEditToolName = "reader_note_edit";
     internal const string CapabilityGuideToolName =
         "reader_capability_guide";
     internal const string ServerName = "bw-reader-context-snapshot";
@@ -646,6 +647,48 @@ internal sealed class ReaderContextMcpServer
             });
             tools.Add(new JsonObject
             {
+                ["name"] = NoteEditToolName,
+                ["description"] =
+                    "Rewrite the text of a sticky note that already exists in "
+                    + "the open book. Only the text changes: where the user "
+                    + "put the note, and how big it is, stay as they left "
+                    + "them. Needs the note's id. Reports a missing note "
+                    + "separately from a failed write, because retrying helps "
+                    + "only in the second case. Do not retry an unknown "
+                    + "outcome.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["id"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["minLength"] = 1,
+                            ["maxLength"] = 64,
+                            ["description"] = "The note's id.",
+                        },
+                        ["text"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["minLength"] = 1,
+                            ["maxLength"] = 4000,
+                            ["description"] = "The replacement contents.",
+                        },
+                    },
+                    ["required"] = new JsonArray { "id", "text" },
+                    ["additionalProperties"] = false,
+                },
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = false,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = true,
+                    ["openWorldHint"] = false,
+                },
+            });
+            tools.Add(new JsonObject
+            {
                 ["name"] = NoteCreateToolName,
                 ["description"] =
                     "Write a sticky note into the open book, stored locally by "
@@ -1259,6 +1302,48 @@ internal sealed class ReaderContextMcpServer
                 id,
                 arguments,
                 "highlight-text",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (
+            toolName == NoteEditToolName
+            && _sendOutputAsync is not null
+        )
+        {
+            string editId = arguments.ValueKind == JsonValueKind.Object
+                && arguments.TryGetProperty("id", out JsonElement editIdValue)
+                && editIdValue.ValueKind == JsonValueKind.String
+                ? editIdValue.GetString() ?? string.Empty
+                : string.Empty;
+            string editText = arguments.ValueKind == JsonValueKind.Object
+                && arguments.TryGetProperty("text", out JsonElement editValue)
+                && editValue.ValueKind == JsonValueKind.String
+                ? editValue.GetString() ?? string.Empty
+                : string.Empty;
+            if (editId.Length == 0
+                || editId.Length > 64
+                || string.IsNullOrWhiteSpace(editText)
+                || editText.Length > 4_000)
+            {
+                await WriteErrorAsync(
+                    id,
+                    -32602,
+                    "Invalid Reader note edit",
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            JsonObject editPayload = new()
+            {
+                ["fn"] = "_nativeReaderEditNote",
+                ["args"] = new JsonArray
+                {
+                    new JsonObject { ["id"] = editId, ["text"] = editText },
+                },
+            };
+            await SendReaderOutputAsync(
+                id,
+                "client-action",
+                editPayload,
                 cancellationToken).ConfigureAwait(false);
             return;
         }

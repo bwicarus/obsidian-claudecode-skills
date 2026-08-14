@@ -185,7 +185,14 @@ test("仍未使用动态分派", () => {
 
 // ── 桥接与工具面 ────────────────────────────────────────────────────
 test("桥接侧只允许名单内入口，便签只接受 text", () => {
-  assert.match(BRIDGE, /"_nativeReaderUndoLast" or "_nativeReaderCreateNote"/);
+  // 断言白名单的内容，不是它的排版：换行方式变了不该让测试红，
+  // 少了一个入口才该红。
+  const whitelist = BRIDGE.slice(
+    BRIDGE.indexOf("string fn = Text(root"),
+    BRIDGE.indexOf("Reader 客户端动作不在白名单内"),
+  );
+  assert.match(whitelist, /"_nativeReaderCreateNote"/);
+  assert.match(whitelist, /"_nativeReaderUndoLast"/);
   assert.match(BRIDGE, /Exact\(note, "text"\)/, "多传字段应被拒绝");
 });
 
@@ -197,4 +204,133 @@ test("工具已注册且声明为非只读、非幂等", () => {
   assert.match(spec, /\["additionalProperties"\] = false/, "位置字段不得由调用方传入");
   assert.match(spec, /\["readOnlyHint"\] = false/);
   assert.match(spec, /\["idempotentHint"\] = false/, "重复调用会写出第二条便签");
+});
+
+// ── 改写已有便签 ────────────────────────────────────────────────────
+// 助手能重写一段文字，但不该顺手把便签挪走或改色：那是用户对页面的布置。
+// 另一条同样要紧 —— 便签不存在和写入失败必须分开报：前者重试多少次都一样，
+// 后者可能只是这一刻不成。合并成一个错误，调用方就只能靠猜要不要再来。
+function editNote({ input, surface = "pdf", status = 200, data } = {}) {
+  const start = RUNTIME.indexOf("function nativeReaderEditNote(");
+  assert.notEqual(start, -1, "找不到改写入口");
+  const sent = [];
+  const context = {
+    String, Number, Array, Promise, JSON, RegExp,
+    nativeInterfaceSurface: surface,
+    bootPromise: Promise.resolve(),
+    localFileRef: () => "localbook:abc",
+    localBasePath: () => "/r/" + "a".repeat(64),
+    RuntimeError: class RuntimeError extends Error {
+      constructor(message, code) { super(message); this.code = code; }
+    },
+    root: {
+      fetch: (url, init) => {
+        sent.push({ url, method: init.method, body: JSON.parse(init.body) });
+        return Promise.resolve({
+          ok: status >= 200 && status < 300,
+          status,
+          json: () => Promise.resolve(
+            data === undefined ? { ok: status < 300, id: "n_1" } : data,
+          ),
+        });
+      },
+    },
+    out: null,
+  };
+  context.globalThis = context;
+  vm.runInNewContext(
+    `${balanced(RUNTIME, start)}
+     out = nativeReaderEditNote(${JSON.stringify(input)});`,
+    context,
+  );
+  return { result: context.out, sent };
+}
+
+test("改写只发内容，位置与外观一律不带", async () => {
+  const { result, sent } = editNote({
+    input: {
+      id: "n_abc123", text: "改好的",
+      // 全是"顺手改一下"会波及的字段：一个都不该出现在请求里
+      anchor: { kind: "pdf", page: 99 }, color: "#ff0000",
+      w: 999, h: 999, collapsed: true, file: "other.pdf",
+    },
+  });
+  await result;
+  assert.equal(sent[0].method, "PATCH");
+  assert.deepEqual(
+    Object.keys(JSON.parse(JSON.stringify(sent[0].body))).sort(),
+    ["file", "id", "text"],
+    "PATCH 只提及 text；未提及的字段本地原样保留，等于位置动不了",
+  );
+  assert.equal(sent[0].body.file, "localbook:abc", "书由 App 决定");
+  assert.equal(sent[0].body.text, "改好的");
+});
+
+test("便签不存在与写入失败是两个错误", async () => {
+  const missing = editNote({
+    input: { id: "n_abc123", text: "x" },
+    status: 404, data: { ok: false, error: "未找到便签" },
+  });
+  await assert.rejects(
+    missing.result,
+    (error) => error.code === "BW_READER_NOTE_MISSING",
+    "重试解决不了「不存在」，必须与「这次没写成」分开",
+  );
+
+  const failed = editNote({
+    input: { id: "n_abc123", text: "x" },
+    status: 409, data: { ok: false, error: "冲突", code: "BW_LOCAL_NOTES" },
+  });
+  await assert.rejects(failed.result, (error) => error.code === "BW_LOCAL_NOTES");
+});
+
+test("编号非法时拒绝，不发出请求", async () => {
+  for (const id of ["", "n/../x", "a".repeat(65), "n abc", null]) {
+    const { result, sent } = editNote({ input: { id, text: "x" } });
+    await assert.rejects(result, (error) => error.code === "BW_READER_NOTE_ID");
+    assert.deepEqual(sent, []);
+  }
+});
+
+test("改写同样拒绝空内容与不支持的界面", async () => {
+  const empty = editNote({ input: { id: "n_a", text: "   " } });
+  await assert.rejects(empty.result, (error) => error.code === "BW_READER_NOTE_TEXT");
+  assert.deepEqual(empty.sent, []);
+
+  const wrongSurface = editNote({ input: { id: "n_a", text: "x" }, surface: "html" });
+  await assert.rejects(
+    wrongSurface.result,
+    (error) => error.code === "BW_READER_NOTE_SURFACE",
+  );
+  assert.deepEqual(wrongSurface.sent, []);
+});
+
+test("改写动作只把编号与文本交给受信入口", async () => {
+  const seen = [];
+  const context = dispatch({
+    fn: "_nativeReaderEditNote",
+    args: [{ id: "n_abc123", text: "改好的", color: "#f00", page: 99 }],
+    host: { _nativeReaderEditNote: (input) => { seen.push(input); return "ok"; } },
+  });
+  assert.equal(context.thrown, null);
+  await context.work;
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(seen)),
+    [{ id: "n_abc123", text: "改好的" }],
+    "夹带的外观字段必须被丢弃",
+  );
+});
+
+test("改写工具已注册：只收 id 与 text，声明为幂等", () => {
+  assert.match(BRIDGE, /"_nativeReaderEditNote"/);
+  assert.match(BRIDGE, /Exact\(edit, "id", "text"\)/, "多传字段应被拒绝");
+  assert.match(MCP, /"reader_note_edit"/);
+  const start = MCP.indexOf('["name"] = NoteEditToolName');
+  const spec = MCP.slice(start, start + 2000);
+  assert.match(spec, /\["required"\] = new JsonArray \{ "id", "text" \}/);
+  assert.match(spec, /\["additionalProperties"\] = false/, "位置与外观不得由调用方传入");
+  assert.match(
+    spec, /\["idempotentHint"\] = true/,
+    "改写成同样的内容重复执行结果一致，与新建不同",
+  );
 });

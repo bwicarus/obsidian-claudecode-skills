@@ -1826,6 +1826,20 @@
           _caCall = function (target) {
             return target.call(window, { text: _caText });
           };
+        } else if (_caFn === '_nativeReaderEditNote') {
+          var _caEditArg = Array.isArray(p.args) ? p.args[0] : null;
+          var _caEditId = _caEditArg && typeof _caEditArg === 'object'
+            ? String(_caEditArg.id == null ? '' : _caEditArg.id) : '';
+          var _caEditText = _caEditArg && typeof _caEditArg === 'object'
+            ? String(_caEditArg.text == null ? '' : _caEditArg.text) : '';
+          if (!/^[A-Za-z0-9_-]{1,64}$/.test(_caEditId) ||
+              !_caEditText.trim() || _caEditText.length > 4000) {
+            throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
+          }
+          _caTarget = window._nativeReaderEditNote;
+          _caCall = function (target) {
+            return target.call(window, { id: _caEditId, text: _caEditText });
+          };
         } else {
           throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
         }
