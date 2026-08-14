@@ -9090,6 +9090,21 @@
         '不是本机 EPUB action', 'BW_NATIVE_EPUB_ACTION_NOT_LOCAL'
       ));
     }
+    // A forward assistant action is allowed into the authoritative recent-action
+    // stack only when it already carries a usable inverse snapshot.  Applying a
+    // redo-only action and merely omitting it from the stack would leave a local
+    // mutation that the promised no-argument undo can never reverse; storing the
+    // malformed entry is worse because it permanently poisons the stack head.
+    if (requestedOp !== 'undo') {
+      var undoDescriptor = nativeEPUBActionOperation(action, 'undo');
+      if (!undoDescriptor || undoDescriptor.invalidFile ||
+          undoDescriptor.kind !== descriptor.kind) {
+        return Promise.reject(new RuntimeError(
+          'EPUB action 缺少同书同类型的撤销快照',
+          'BW_NATIVE_EPUB_ACTION_BODY'
+        ));
+      }
+    }
     // 队列里只放本地的读与写，而且两者都有界。
     //
     // 所有 EPUB assistant action 与无参撤销共享一个本机 bundle 队列；普通 CRUD

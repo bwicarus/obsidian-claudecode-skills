@@ -4419,6 +4419,83 @@ test("Direct EPUB mutation IDs reject changed payloads and later edits preserve 
   assert.equal(listed.highlights[0].note, "edited after creation");
 });
 
+test("EPUB assistant actions without an inverse snapshot commit nothing and cannot poison undo", async () => {
+  const result = await harness({
+    surface: "epub",
+    interfaceManifest: nativeEPUBAssistantManifest(),
+  });
+  const existing = {
+    file: DEFAULT_LOCAL_FILE,
+    id: "c_9898989898989898",
+    anchor: { section: 4, start: 2, end: 10 },
+    text: "still undoable after a malformed action",
+    color: "#ffd54a",
+  };
+  assert.equal((await result.context.fetch("/pdf/api/epub-highlights", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(existing),
+  })).status, 200);
+
+  const stackKey =
+    `native-epub-assistant-undo:${DEFAULT_LOCAL_BOOK_ID}:epub-assistant-undo`;
+  const beforeStack = clone(
+    result.dataStoresState.document.values.get(stackKey).value.payload,
+  );
+  const beforeList = await (await result.context.fetch(
+    "/pdf/api/epub-highlights?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  const malformed = await result.context.fetch("/pdf/api/epub-action", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      op: "native_apply",
+      contract: "reader-native-epub-action/1",
+      file: DEFAULT_LOCAL_FILE,
+      action: {
+        id: "act_missing_undo",
+        kind: "hl_create",
+        title: "must not commit",
+        detail: "",
+        redo: {
+          op: "hl_create",
+          file: DEFAULT_LOCAL_FILE,
+          items: [{
+            anchor: { section: 9, start: 1, end: 3 },
+            text: "redo-only action",
+            color: "#ffd54a",
+          }],
+        },
+        state: "done",
+        ts: 1_800_000_000,
+      },
+    }),
+  });
+  const malformedPayload = await malformed.json();
+  assert.equal(malformed.status, 400);
+  assert.equal(malformedPayload.code, "BW_NATIVE_EPUB_ACTION_BODY");
+
+  const afterList = await (await result.context.fetch(
+    "/pdf/api/epub-highlights?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  assert.deepEqual(afterList.highlights, beforeList.highlights);
+  assert.deepEqual(
+    result.dataStoresState.document.values.get(stackKey).value.payload,
+    beforeStack,
+    "a malformed action must not cover or corrupt the previous undoable entry",
+  );
+
+  const undone = await result.context._nativeReaderUndoLast(
+    "rundo_" + "c".repeat(24),
+  );
+  assert.equal(undone.ok, true);
+  assert.equal(undone.undone.id, "direct-highlight:" + existing.id);
+  const finalList = await (await result.context.fetch(
+    "/pdf/api/epub-highlights?file=" + encodeURIComponent(DEFAULT_LOCAL_FILE),
+  )).json();
+  assert.equal(finalList.highlights.length, 0);
+});
+
 test("Direct EPUB undo fails closed on an empty authoritative stack", async () => {
   const result = await harness({
     surface: "epub",
