@@ -47,7 +47,7 @@ DEFAULT_BACKUP_ROOT = Path.home() / "bw-computer-voice-bridge-backups"
 
 PACKAGE_CONTRACT = "reader-computer-voice-direct-package/1"
 MANIFEST_SCHEMA = 1
-READER_CONTEXT_MCP_SERVER_VERSION = "1.5.0"
+READER_CONTEXT_MCP_SERVER_VERSION = "1.6.0"
 ARCHIVE_STAMP = (1980, 1, 1, 0, 0, 0)
 RID = "win-x64"
 VERSION_RE = re.compile(r"(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*)){0,3}\Z")
@@ -1528,7 +1528,7 @@ def _validate_mcp_smoke_output(result: CommandResult) -> None:
         "reader_capability_guide",
         "reader_visual_image",
         "reader_browser_control",
-        "reader_highlight_text",
+        "reader_highlight_range",
         "reader_undo_last",
         "reader_anki_draft",
         "reader_card",

@@ -66,7 +66,7 @@ class FakeStdioRunner:
                 "result": {
                     "serverInfo": {
                         "name": "bw-reader-context-snapshot",
-                        "version": "1.5.0",
+                        "version": "1.6.0",
                     },
                 },
             },
@@ -79,7 +79,7 @@ class FakeStdioRunner:
                         {"name": "reader_capability_guide"},
                         {"name": "reader_visual_image"},
                         {"name": "reader_browser_control"},
-                        {"name": "reader_highlight_text"},
+                        {"name": "reader_highlight_range"},
                         {"name": "reader_undo_last"},
                         {"name": "reader_anki_draft"},
                         {"name": "reader_card"},
@@ -864,10 +864,10 @@ class DirectPackageTests(unittest.TestCase):
     def test_stdio_mcp_smoke_rejects_previous_server_version(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             responses = self._fake_stdio_smoke_responses(Path(raw))
-            responses[0]["result"]["serverInfo"]["version"] = "1.4.0"
+            responses[0]["result"]["serverInfo"]["version"] = "1.5.0"
             with self.assertRaisesRegex(
                 package.PackageError,
-                "serverInfo 不是 1.5.0 合同",
+                "serverInfo 不是 1.6.0 合同",
             ):
                 package._validate_mcp_smoke_output(
                     self._stdio_result(responses)
@@ -881,6 +881,21 @@ class DirectPackageTests(unittest.TestCase):
                 item for item in tools
                 if item.get("name") != "reader_undo_last"
             ]
+            with self.assertRaisesRegex(
+                package.PackageError,
+                "精确 9 工具合同",
+            ):
+                package._validate_mcp_smoke_output(
+                    self._stdio_result(responses)
+                )
+
+    def test_stdio_mcp_smoke_rejects_legacy_text_highlight_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            responses = self._fake_stdio_smoke_responses(Path(raw))
+            tools = responses[1]["result"]["tools"]
+            for item in tools:
+                if item.get("name") == "reader_highlight_range":
+                    item["name"] = "reader_highlight_text"
             with self.assertRaisesRegex(
                 package.PackageError,
                 "精确 9 工具合同",
