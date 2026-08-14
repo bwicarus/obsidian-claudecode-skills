@@ -1,3 +1,4 @@
+using System.Net;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -673,10 +674,60 @@ internal static class ReaderRealtimeOutputProtocol
             || !string.IsNullOrEmpty(parsed.UserInfo)
             || text != text.Trim()
             || text.Contains('\\')
+            || IsPrivateCardHost(parsed)
         )
         {
             throw Invalid("Reader 卡片 URL 无效");
         }
+    }
+
+    // 卡片图片和缩略图由 App 直接去请求。一张卡片没有任何理由指向本机或内网 ——
+    // 而助手读的是网页和书里的内容，被注入的内容诱导它产出这样一张卡，就成了一次
+    // 借 App 之手的内网探测。
+    //
+    // 这道闸只拦得住 IP 字面量和几个已知的本地后缀。内部 DNS 名（比如
+    // https://intranet.example/）解析出来才知道指向哪，这里看不出来，因此**不是**
+    // 完整的 SSRF 防护，只是把最直接的一类拿掉。真要做全，得在 App 发起请求前按
+    // 解析结果再判一次。
+    private static bool IsPrivateCardHost(Uri parsed)
+    {
+        string host = parsed.Host.Trim('[', ']');
+        if (IPAddress.TryParse(host, out IPAddress? address))
+        {
+            if (IPAddress.IsLoopback(address)
+                || address.IsIPv6LinkLocal
+                || address.IsIPv6SiteLocal
+                || address.IsIPv6UniqueLocal
+                || address.Equals(IPAddress.Any)
+                || address.Equals(IPAddress.IPv6Any))
+            {
+                return true;
+            }
+            if (address.AddressFamily
+                == System.Net.Sockets.AddressFamily.InterNetwork)
+            {
+                byte[] octets = address.GetAddressBytes();
+                return octets[0] switch
+                {
+                    0 or 10 or 127 => true,
+                    // CGNAT 段，也就是 Tailscale 用的 100.64.0.0/10。卡片指向
+                    // tailnet 只可能是异常；真要显示自建服务上的图，该走
+                    // /pdf/api/img-proxy 或本机路由，而不是让卡片直连。
+                    100 => octets[1] >= 64 && octets[1] <= 127,
+                    169 => octets[1] == 254,
+                    172 => octets[1] >= 16 && octets[1] <= 31,
+                    192 => octets[1] == 168,
+                    _ => false,
+                };
+            }
+            return false;
+        }
+        string name = host.TrimEnd('.').ToLowerInvariant();
+        return name == "localhost"
+            || name.EndsWith(".localhost", StringComparison.Ordinal)
+            || name.EndsWith(".local", StringComparison.Ordinal)
+            || name.EndsWith(".internal", StringComparison.Ordinal)
+            || name.EndsWith(".ts.net", StringComparison.Ordinal);
     }
 
     private static void OptionalCardUrl(JsonElement value, string name)

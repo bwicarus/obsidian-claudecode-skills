@@ -706,6 +706,7 @@ internal static class DirectBridgeSelfTest
         CheckUplinkPcmContract(checks);
         await CheckPcmStartGateAbortRaceAsync(
             checks).ConfigureAwait(false);
+        CheckCardUrlTargets(checks);
         CheckProductionAdapterBoundaries(root, checks);
         CheckStrictOriginConfig(root, checks);
         await CheckRuntimeErrorLifecycleAsync(
@@ -8662,7 +8663,15 @@ internal static class DirectBridgeSelfTest
                     .Contains(
                         "Windows Codex 语音主路由",
                         StringComparison.Ordinal)
-                && tools.GetArrayLength() == 7
+                // 这个 server 只注入了 sendOutput，没注入查询客户端:因此
+                // 只该看到基线 7 个加上四个 client-action 类新工具。查询工具
+                // 一个都不该出现 —— 列出一个调不动的工具，比不列更坏。
+                && tools.GetArrayLength() == 11
+                && !tools.EnumerateArray().Any(tool =>
+                    tool.GetProperty("name").GetString() is
+                        "reader_highlights" or "reader_notes"
+                        or "reader_search" or "reader_toc"
+                        or "reader_page_text" or "reader_lookup_word")
                 && tools[1].GetProperty("name").GetString()
                     == ReaderContextMcpServer.CapabilityGuideToolName
                 && !tools.EnumerateArray().Any(
@@ -11624,6 +11633,133 @@ internal static class DirectBridgeSelfTest
             })).ConfigureAwait(false);
         File.Move(temporary, path, overwrite: true);
     }
+
+    // 卡片图片和缩略图由 App 直接去请求，所以一张指向本机或内网的卡片就是一次
+    // 借 App 之手的探测。助手读的是网页和书里的内容，被注入的内容完全可能诱导它
+    // 产出这样一张卡。
+    //
+    // 边界两侧都要测：把 172.32 或 100.128 这类公网段一起拦掉，等于悄悄让正常
+    // 图片显示不出来，而且报出来的原因会是「URL 无效」，排查时看不出是被误伤的。
+    private static void CheckCardUrlTargets(ICollection<string> checks)
+    {
+        string[] refused =
+        [
+            "https://127.0.0.1/a.png",
+            "https://127.9.9.9/a.png",
+            "https://[::1]/a.png",
+            "https://0.0.0.0/a.png",
+            "https://10.1.2.3/a.png",
+            "https://172.16.0.1/a.png",
+            "https://172.31.255.254/a.png",
+            "https://192.168.1.7/a.png",
+            "https://169.254.169.254/a.png",
+            "https://100.101.15.57/a.png",
+            "https://localhost/a.png",
+            "https://LocalHost./a.png",
+            "https://printer.local/a.png",
+            "https://svc.internal/a.png",
+            "https://bwicarus.taile44d0c.ts.net/a.png",
+        ];
+        foreach (string url in refused)
+        {
+            bool rejected = false;
+            try
+            {
+                _ = ReaderRealtimeOutputProtocol.ValidatePayload(
+                    "card",
+                    CardWithImageUrl(url));
+            }
+            catch (ReaderRealtimeOutputException)
+            {
+                rejected = true;
+            }
+            Require(
+                rejected,
+                "reader-card-url-refuses-" + url,
+                checks);
+        }
+
+        string[] allowed =
+        [
+            "https://upload.wikimedia.org/a.png",
+            "https://172.15.0.1/a.png",
+            "https://172.32.0.1/a.png",
+            "https://192.169.0.1/a.png",
+            "https://100.63.0.1/a.png",
+            "https://100.128.0.1/a.png",
+            "https://11.0.0.1/a.png",
+            "https://example.localdomain/a.png",
+        ];
+        foreach (string url in allowed)
+        {
+            bool accepted = true;
+            try
+            {
+                _ = ReaderRealtimeOutputProtocol.ValidatePayload(
+                    "card",
+                    CardWithImageUrl(url));
+            }
+            catch (ReaderRealtimeOutputException)
+            {
+                accepted = false;
+            }
+            Require(
+                accepted,
+                "reader-card-url-allows-" + url,
+                checks);
+        }
+
+        bool thumbnailRejected = false;
+        try
+        {
+            _ = ReaderRealtimeOutputProtocol.ValidatePayload(
+                "card",
+                new JsonObject
+                {
+                    ["card"] = new JsonObject
+                    {
+                        ["kind"] = "videos",
+                        ["title"] = "视频",
+                        ["data"] = new JsonObject
+                        {
+                            ["items"] = new JsonArray
+                            {
+                                new JsonObject
+                                {
+                                    ["title"] = "讲解",
+                                    ["thumb"] = "https://192.168.1.7/t.jpg",
+                                },
+                            },
+                        },
+                    },
+                });
+        }
+        catch (ReaderRealtimeOutputException)
+        {
+            thumbnailRejected = true;
+        }
+        Require(
+            thumbnailRejected,
+            "reader-card-video-thumbnail-refuses-private-target",
+            checks);
+    }
+
+    private static JsonObject CardWithImageUrl(string url) =>
+        new()
+        {
+            ["card"] = new JsonObject
+            {
+                ["kind"] = "images",
+                ["title"] = "配图",
+                ["data"] = new JsonObject
+                {
+                    ["items"] = new JsonArray
+                    {
+                        new JsonObject { ["url"] = url },
+                    },
+                },
+            },
+        };
 
     private static void Require(
         bool condition,

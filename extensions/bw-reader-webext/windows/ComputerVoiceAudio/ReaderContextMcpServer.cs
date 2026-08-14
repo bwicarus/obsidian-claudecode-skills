@@ -664,109 +664,6 @@ internal sealed class ReaderContextMcpServer
             });
             tools.Add(new JsonObject
             {
-                ["name"] = NotesToolName,
-                ["description"] =
-                    "Read the sticky notes in the book that is open, from the "
-                    + "Reader's own store. Optionally narrow to one page or "
-                    + "to notes containing a phrase. Returns each note's id, "
-                    + "page and text; the id is what reader_note_edit takes. "
-                    + "If truncated is true the list is a prefix, not the "
-                    + "whole set. Works only while a PDF or EPUB is open. "
-                    + "Safe to retry.",
-                ["inputSchema"] = new JsonObject
-                {
-                    ["type"] = "object",
-                    ["properties"] = new JsonObject
-                    {
-                        ["page"] = new JsonObject
-                        {
-                            ["type"] = "integer",
-                            ["minimum"] = 1,
-                            ["description"] =
-                                "Restrict to this page (PDF) or section "
-                                + "(EPUB). Omit for the whole book.",
-                        },
-                        ["contains"] = new JsonObject
-                        {
-                            ["type"] = "string",
-                            ["minLength"] = 1,
-                            ["maxLength"] = 256,
-                            ["description"] =
-                                "Restrict to notes containing this phrase.",
-                        },
-                    },
-                    ["additionalProperties"] = false,
-                },
-                ["annotations"] = new JsonObject
-                {
-                    ["readOnlyHint"] = true,
-                    ["destructiveHint"] = false,
-                    ["idempotentHint"] = true,
-                    ["openWorldHint"] = false,
-                },
-            });
-            tools.Add(new JsonObject
-            {
-                ["name"] = TocToolName,
-                ["description"] =
-                    "Read the table of contents of the open PDF, with each "
-                    + "entry's title, page and nesting level. An empty list "
-                    + "is a real answer - the book may simply have no "
-                    + "contents built yet - and is not the same as being "
-                    + "unable to read it. PDF only; EPUB structure comes from "
-                    + "its own manifest. Works offline. Safe to retry.",
-                ["inputSchema"] = new JsonObject
-                {
-                    ["type"] = "object",
-                    ["properties"] = new JsonObject(),
-                    ["additionalProperties"] = false,
-                },
-                ["annotations"] = new JsonObject
-                {
-                    ["readOnlyHint"] = true,
-                    ["destructiveHint"] = false,
-                    ["idempotentHint"] = true,
-                    ["openWorldHint"] = false,
-                },
-            });
-            tools.Add(new JsonObject
-            {
-                ["name"] = LookupToolName,
-                ["description"] =
-                    "Look a word up in the user's dictionary. This one needs "
-                    + "the Pi: the dictionary does not live on the device, so "
-                    + "with no connection it fails plainly rather than "
-                    + "answering from nothing. The lookup is not recorded "
-                    + "against the user's vocabulary - you looking a word up "
-                    + "is not the same as them meeting it while reading, and "
-                    + "counting it would skew their statistics. Safe to "
-                    + "retry.",
-                ["inputSchema"] = new JsonObject
-                {
-                    ["type"] = "object",
-                    ["properties"] = new JsonObject
-                    {
-                        ["word"] = new JsonObject
-                        {
-                            ["type"] = "string",
-                            ["minLength"] = 1,
-                            ["maxLength"] = 128,
-                            ["description"] = "The word to look up.",
-                        },
-                    },
-                    ["required"] = new JsonArray { "word" },
-                    ["additionalProperties"] = false,
-                },
-                ["annotations"] = new JsonObject
-                {
-                    ["readOnlyHint"] = true,
-                    ["destructiveHint"] = false,
-                    ["idempotentHint"] = true,
-                    ["openWorldHint"] = false,
-                },
-            });
-            tools.Add(new JsonObject
-            {
                 ["name"] = MarkVocabToolName,
                 ["description"] =
                     "Mark a word as known or unknown in the user's vocabulary. "
@@ -850,130 +747,6 @@ internal sealed class ReaderContextMcpServer
                     ["readOnlyHint"] = false,
                     ["destructiveHint"] = false,
                     ["idempotentHint"] = false,
-                    ["openWorldHint"] = false,
-                },
-            });
-            tools.Add(new JsonObject
-            {
-                ["name"] = PageTextToolName,
-                ["description"] =
-                    "Read the text of one page (PDF) or section (EPUB) of the "
-                    + "open book, from the Reader's own extraction. The text "
-                    + "is capped, and truncated says whether it hit that cap "
-                    + "- with truncated true you are looking at the start of "
-                    + "the page, not all of it. Works offline. Safe to retry.",
-                ["inputSchema"] = new JsonObject
-                {
-                    ["type"] = "object",
-                    ["properties"] = new JsonObject
-                    {
-                        ["page"] = new JsonObject
-                        {
-                            ["type"] = "integer",
-                            ["minimum"] = 1,
-                            ["description"] =
-                                "The page (PDF) or section index (EPUB).",
-                        },
-                    },
-                    ["required"] = new JsonArray { "page" },
-                    ["additionalProperties"] = false,
-                },
-                ["annotations"] = new JsonObject
-                {
-                    ["readOnlyHint"] = true,
-                    ["destructiveHint"] = false,
-                    ["idempotentHint"] = true,
-                    ["openWorldHint"] = false,
-                },
-            });
-            tools.Add(new JsonObject
-            {
-                ["name"] = SearchToolName,
-                ["description"] =
-                    "Search the full text of the book that is open, using the "
-                    + "Reader's own index. Returns matching pages with a "
-                    + "snippet. Two different caveats come back separately "
-                    + "and both matter: truncated means too many matches to "
-                    + "fit, incomplete means some pages could not be searched "
-                    + "at all - with incomplete true, absence of a match is "
-                    + "not evidence the book lacks the phrase, so do not say "
-                    + "it is not there. Works only while a PDF or EPUB is "
-                    + "open. Safe to retry.",
-                ["inputSchema"] = new JsonObject
-                {
-                    ["type"] = "object",
-                    ["properties"] = new JsonObject
-                    {
-                        ["query"] = new JsonObject
-                        {
-                            ["type"] = "string",
-                            ["minLength"] = 1,
-                            ["maxLength"] = 256,
-                            ["description"] = "The text to look for.",
-                        },
-                        ["limit"] = new JsonObject
-                        {
-                            ["type"] = "integer",
-                            ["minimum"] = 1,
-                            ["maximum"] = 200,
-                            ["description"] =
-                                "Maximum matches to return. Defaults to 50.",
-                        },
-                    },
-                    ["required"] = new JsonArray { "query" },
-                    ["additionalProperties"] = false,
-                },
-                ["annotations"] = new JsonObject
-                {
-                    ["readOnlyHint"] = true,
-                    ["destructiveHint"] = false,
-                    ["idempotentHint"] = true,
-                    ["openWorldHint"] = false,
-                },
-            });
-            tools.Add(new JsonObject
-            {
-                ["name"] = HighlightsToolName,
-                ["description"] =
-                    "Read the highlights the user has made in the book that "
-                    + "is open, straight from the Reader's own store. "
-                    + "Optionally narrow to one page, or to highlights whose "
-                    + "text contains a phrase. Returns each highlight's id, "
-                    + "page, colour and quoted text; the id is what "
-                    + "reader_undo_last takes. If the result did not fit, "
-                    + "truncated is true and the list is a prefix, not the "
-                    + "whole set - say so rather than concluding from it. "
-                    + "Works only while a PDF or EPUB is open. Safe to retry.",
-                ["inputSchema"] = new JsonObject
-                {
-                    ["type"] = "object",
-                    ["properties"] = new JsonObject
-                    {
-                        ["page"] = new JsonObject
-                        {
-                            ["type"] = "integer",
-                            ["minimum"] = 1,
-                            ["description"] =
-                                "Restrict to this page (PDF) or section "
-                                + "(EPUB). Omit for the whole book.",
-                        },
-                        ["contains"] = new JsonObject
-                        {
-                            ["type"] = "string",
-                            ["minLength"] = 1,
-                            ["maxLength"] = 256,
-                            ["description"] =
-                                "Restrict to highlights whose quoted text "
-                                + "contains this phrase.",
-                        },
-                    },
-                    ["additionalProperties"] = false,
-                },
-                ["annotations"] = new JsonObject
-                {
-                    ["readOnlyHint"] = true,
-                    ["destructiveHint"] = false,
-                    ["idempotentHint"] = true,
                     ["openWorldHint"] = false,
                 },
             });
@@ -1179,6 +952,245 @@ internal sealed class ReaderContextMcpServer
                     ["readOnlyHint"] = false,
                     ["destructiveHint"] = false,
                     ["idempotentHint"] = false,
+                    ["openWorldHint"] = false,
+                },
+            });
+        }
+
+        // 这些工具的实现走查询通道，因此可见性必须跟着同一个依赖。挂在
+        // _sendOutputAsync 上曾让声明与分发各用一个条件：只配其中一个时，
+        // 工具要么列得出来却调不动，要么能调却不出现在清单里。
+        if (_queryReaderAsync is not null)
+        {
+            tools.Add(new JsonObject
+            {
+                ["name"] = NotesToolName,
+                ["description"] =
+                    "Read the sticky notes in the book that is open, from the "
+                    + "Reader's own store. Optionally narrow to one page or "
+                    + "to notes containing a phrase. Returns each note's id, "
+                    + "page and text; the id is what reader_note_edit takes. "
+                    + "If truncated is true the list is a prefix, not the "
+                    + "whole set. Works only while a PDF or EPUB is open. "
+                    + "Safe to retry.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["page"] = new JsonObject
+                        {
+                            ["type"] = "integer",
+                            ["minimum"] = 1,
+                            ["description"] =
+                                "Restrict to this page (PDF) or section "
+                                + "(EPUB). Omit for the whole book.",
+                        },
+                        ["contains"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["minLength"] = 1,
+                            ["maxLength"] = 256,
+                            ["description"] =
+                                "Restrict to notes containing this phrase.",
+                        },
+                    },
+                    ["additionalProperties"] = false,
+                },
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = true,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = true,
+                    ["openWorldHint"] = false,
+                },
+            });
+            tools.Add(new JsonObject
+            {
+                ["name"] = TocToolName,
+                ["description"] =
+                    "Read the table of contents of the open PDF, with each "
+                    + "entry's title, page and nesting level. An empty list "
+                    + "is a real answer - the book may simply have no "
+                    + "contents built yet - and is not the same as being "
+                    + "unable to read it. PDF only; EPUB structure comes from "
+                    + "its own manifest. Works offline. Safe to retry.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject(),
+                    ["additionalProperties"] = false,
+                },
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = true,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = true,
+                    ["openWorldHint"] = false,
+                },
+            });
+            tools.Add(new JsonObject
+            {
+                ["name"] = LookupToolName,
+                ["description"] =
+                    "Look a word up in the user's dictionary. This one needs "
+                    + "the Pi: the dictionary does not live on the device, so "
+                    + "with no connection it fails plainly rather than "
+                    + "answering from nothing. The lookup is not recorded "
+                    + "against the user's vocabulary - you looking a word up "
+                    + "is not the same as them meeting it while reading, and "
+                    + "counting it would skew their statistics. Safe to "
+                    + "retry.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["word"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["minLength"] = 1,
+                            ["maxLength"] = 128,
+                            ["description"] = "The word to look up.",
+                        },
+                    },
+                    ["required"] = new JsonArray { "word" },
+                    ["additionalProperties"] = false,
+                },
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = true,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = true,
+                    ["openWorldHint"] = false,
+                },
+            });
+            tools.Add(new JsonObject
+            {
+                ["name"] = PageTextToolName,
+                ["description"] =
+                    "Read the text of one page (PDF) or section (EPUB) of the "
+                    + "open book, from the Reader's own extraction. The text "
+                    + "is capped, and truncated says whether it hit that cap "
+                    + "- with truncated true you are looking at the start of "
+                    + "the page, not all of it. Works offline. Safe to retry.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["page"] = new JsonObject
+                        {
+                            ["type"] = "integer",
+                            ["minimum"] = 1,
+                            ["description"] =
+                                "The page (PDF) or section index (EPUB).",
+                        },
+                    },
+                    ["required"] = new JsonArray { "page" },
+                    ["additionalProperties"] = false,
+                },
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = true,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = true,
+                    ["openWorldHint"] = false,
+                },
+            });
+            tools.Add(new JsonObject
+            {
+                ["name"] = SearchToolName,
+                ["description"] =
+                    "Search the full text of the book that is open, using the "
+                    + "Reader's own index. Returns matching pages with a "
+                    + "snippet. Two different caveats come back separately "
+                    + "and both matter: truncated means too many matches to "
+                    + "fit, incomplete means some pages could not be searched "
+                    + "at all - with incomplete true, absence of a match is "
+                    + "not evidence the book lacks the phrase, so do not say "
+                    + "it is not there. Works only while a PDF or EPUB is "
+                    + "open. Safe to retry.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["query"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["minLength"] = 1,
+                            ["maxLength"] = 256,
+                            ["description"] = "The text to look for.",
+                        },
+                        ["limit"] = new JsonObject
+                        {
+                            ["type"] = "integer",
+                            ["minimum"] = 1,
+                            ["maximum"] = 200,
+                            ["description"] =
+                                "Maximum matches to return. Defaults to 50.",
+                        },
+                    },
+                    ["required"] = new JsonArray { "query" },
+                    ["additionalProperties"] = false,
+                },
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = true,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = true,
+                    ["openWorldHint"] = false,
+                },
+            });
+            tools.Add(new JsonObject
+            {
+                ["name"] = HighlightsToolName,
+                ["description"] =
+                    "Read the highlights the user has made in the book that "
+                    + "is open, straight from the Reader's own store. "
+                    + "Optionally narrow to one page, or to highlights whose "
+                    + "text contains a phrase. Returns each highlight's id, "
+                    + "page, colour and quoted text; the id is what "
+                    + "reader_undo_last takes. This is everything in the "
+                    + "store, including highlights the page text you were "
+                    + "given could not mark inline - a highlight can fail to "
+                    + "anchor there on a line-break difference or an overlap, "
+                    + "so seeing one here that is not marked in the text is "
+                    + "expected, not a contradiction. If the result did not fit, "
+                    + "truncated is true and the list is a prefix, not the "
+                    + "whole set - say so rather than concluding from it. "
+                    + "Works only while a PDF or EPUB is open. Safe to retry.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["page"] = new JsonObject
+                        {
+                            ["type"] = "integer",
+                            ["minimum"] = 1,
+                            ["description"] =
+                                "Restrict to this page (PDF) or section "
+                                + "(EPUB). Omit for the whole book.",
+                        },
+                        ["contains"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["minLength"] = 1,
+                            ["maxLength"] = 256,
+                            ["description"] =
+                                "Restrict to highlights whose quoted text "
+                                + "contains this phrase.",
+                        },
+                    },
+                    ["additionalProperties"] = false,
+                },
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = true,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = true,
                     ["openWorldHint"] = false,
                 },
             });
