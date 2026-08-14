@@ -3080,6 +3080,16 @@
         limit: params.limit,
       });
     },
+    toc: function () {
+      var target = window._nativeReaderToc;
+      if (typeof target !== "function") return null;
+      return target.call(window);
+    },
+    "page-text": function (params) {
+      var target = window._nativeReaderPageText;
+      if (typeof target !== "function") return null;
+      return target.call(window, { page: params.page });
+    },
   };
 
   function normalizeReaderQueryRequest(rawPayload) {

@@ -21,6 +21,8 @@ internal sealed class ReaderContextMcpServer
     internal const string HighlightsToolName = "reader_highlights";
     internal const string NotesToolName = "reader_notes";
     internal const string SearchToolName = "reader_search";
+    internal const string TocToolName = "reader_toc";
+    internal const string PageTextToolName = "reader_page_text";
     internal const string CapabilityGuideToolName =
         "reader_capability_guide";
     internal const string ServerName = "bw-reader-context-snapshot";
@@ -690,6 +692,63 @@ internal sealed class ReaderContextMcpServer
                                 "Restrict to notes containing this phrase.",
                         },
                     },
+                    ["additionalProperties"] = false,
+                },
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = true,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = true,
+                    ["openWorldHint"] = false,
+                },
+            });
+            tools.Add(new JsonObject
+            {
+                ["name"] = TocToolName,
+                ["description"] =
+                    "Read the table of contents of the open PDF, with each "
+                    + "entry's title, page and nesting level. An empty list "
+                    + "is a real answer - the book may simply have no "
+                    + "contents built yet - and is not the same as being "
+                    + "unable to read it. PDF only; EPUB structure comes from "
+                    + "its own manifest. Works offline. Safe to retry.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject(),
+                    ["additionalProperties"] = false,
+                },
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = true,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = true,
+                    ["openWorldHint"] = false,
+                },
+            });
+            tools.Add(new JsonObject
+            {
+                ["name"] = PageTextToolName,
+                ["description"] =
+                    "Read the text of one page (PDF) or section (EPUB) of the "
+                    + "open book, from the Reader's own extraction. The text "
+                    + "is capped, and truncated says whether it hit that cap "
+                    + "- with truncated true you are looking at the start of "
+                    + "the page, not all of it. Works offline. Safe to retry.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["page"] = new JsonObject
+                        {
+                            ["type"] = "integer",
+                            ["minimum"] = 1,
+                            ["description"] =
+                                "The page (PDF) or section index (EPUB).",
+                        },
+                    },
+                    ["required"] = new JsonArray { "page" },
                     ["additionalProperties"] = false,
                 },
                 ["annotations"] = new JsonObject
@@ -1448,6 +1507,44 @@ internal sealed class ReaderContextMcpServer
                 id,
                 arguments,
                 "highlight-text",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (
+            toolName == TocToolName
+            && _queryReaderAsync is not null
+        )
+        {
+            await RunReaderQueryAsync(
+                id,
+                "toc",
+                new JsonObject(),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (
+            toolName == PageTextToolName
+            && _queryReaderAsync is not null
+        )
+        {
+            if (arguments.ValueKind != JsonValueKind.Object
+                || !arguments.TryGetProperty("page", out JsonElement pageOnly)
+                || pageOnly.ValueKind != JsonValueKind.Number
+                || !pageOnly.TryGetInt64(out long pageIndex)
+                || pageIndex < 1
+                || pageIndex > int.MaxValue)
+            {
+                await WriteErrorAsync(
+                    id,
+                    -32602,
+                    "Invalid Reader page",
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            await RunReaderQueryAsync(
+                id,
+                "page-text",
+                new JsonObject { ["page"] = pageIndex },
                 cancellationToken).ConfigureAwait(false);
             return;
         }

@@ -144,7 +144,9 @@ test("界面没有本机高亮时拒绝，而不是回空列表", async () => {
 });
 
 test("参数非法时拒绝", async () => {
-  for (const input of [{ page: 0 }, { page: 1.5 }, { contains: "x".repeat(257) }]) {
+  for (const input of [
+    { page: 0 }, { page: 1.5 }, { page: "3" }, { contains: "x".repeat(257) },
+  ]) {
     const { result } = readHighlights({ input, stored: [] });
     await assert.rejects(result, (error) => error.code === "BW_READER_QUERY_PARAMS");
   }
@@ -392,7 +394,8 @@ test("搜索结果过多时截断，且不与 incomplete 混淆", async () => {
 
 test("搜索参数非法时拒绝", async () => {
   for (const input of [{ query: "" }, { query: "x".repeat(257) },
-                       { query: "x", limit: 0 }, { query: "x", limit: 201 }]) {
+                       { query: "x", limit: 0 }, { query: "x", limit: 201 },
+                       { query: "x", limit: "5" }]) {
     await assert.rejects(
       callEntry("nativeReaderSearch", { input }),
       (error) => error.code === "BW_READER_QUERY_PARAMS",
@@ -429,4 +432,133 @@ test("搜索工具描述交代 incomplete 的含义", () => {
     spec, /absence of a match is/,
     "不写清楚，助手会把「半本书里没搜到」说成「这本书里没有」",
   );
+});
+
+// ── 目录与页文本 ────────────────────────────────────────────────────
+function callFetching(name, { input, surface = "pdf", status = 200, data } = {}) {
+  const start = RUNTIME.indexOf(`function ${name}(`);
+  assert.notEqual(start, -1, `找不到 ${name}`);
+  const sent = [];
+  const context = {
+    String, Number, Array, Promise, JSON, encodeURIComponent,
+    nativeInterfaceSurface: surface,
+    bootPromise: Promise.resolve(),
+    localFileRef: () => "localbook:abc",
+    localBasePath: () => "/r/" + "a".repeat(64),
+    RuntimeError: class RuntimeError extends Error {
+      constructor(message, code) { super(message); this.code = code; }
+    },
+    root: {
+      fetch: (url) => {
+        sent.push(url);
+        return Promise.resolve({
+          ok: status >= 200 && status < 300,
+          status,
+          json: () => Promise.resolve(data),
+        });
+      },
+    },
+    out: null,
+  };
+  context.globalThis = context;
+  const call = input === undefined ? `${name}()` : `${name}(${JSON.stringify(input)})`;
+  vm.runInNewContext(
+    `${balanced(RUNTIME, start)}
+     out = ${call};`,
+    context,
+  );
+  return { result: context.out, sent };
+}
+
+test("目录返回标题、页码与层级", async () => {
+  const { result, sent } = callFetching("nativeReaderTableOfContents", {
+    data: {
+      entries: [
+        { title: "第一章", page: 1, level: 1 },
+        { title: "第一节", page: 3, level: 2 },
+      ],
+    },
+  });
+  const value = await result;
+  assert.match(sent[0], /entries=1/, "要的是条目列表");
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(value.entries)),
+    [
+      { title: "第一章", page: 1, level: 1 },
+      { title: "第一节", page: 3, level: 2 },
+    ],
+  );
+  assert.equal(value.truncated, false);
+});
+
+test("空目录是答案，不是失败", async () => {
+  const { result } = callFetching("nativeReaderTableOfContents", {
+    data: { entries: [] },
+  });
+  const value = await result;
+  assert.equal(value.ok, true, "这本书可能就没建过目录，该照实说");
+  assert.equal(value.matched, 0);
+});
+
+test("目录只对 PDF，EPUB 上明确拒绝而不猜一个等价物", async () => {
+  const { result, sent } = callFetching("nativeReaderTableOfContents", {
+    surface: "epub", data: { entries: [] },
+  });
+  await assert.rejects(result, (error) => error.code === "BW_READER_QUERY_SURFACE");
+  assert.deepEqual(sent, []);
+});
+
+test("页文本复用本机取文接口，不另起一套", async () => {
+  const { result, sent } = callFetching("nativeReaderPageText", {
+    input: { page: 12 }, data: { ok: true, text: "正文" },
+  });
+  const value = await result;
+  assert.match(
+    sent[0], /\/api\/assistant\/voice-page-text\?file=[^&]+&page=12/,
+    "两份取文迟早会在振假名、栏序或 OCR 回退上各走各的",
+  );
+  assert.equal(value.text, "正文");
+  assert.equal(value.truncated, false);
+});
+
+test("页文本触顶时标注截断", async () => {
+  const { result } = callFetching("nativeReaderPageText", {
+    input: { page: 1 }, data: { ok: true, text: "x".repeat(1500) },
+  });
+  const value = await result;
+  assert.equal(
+    value.truncated, true,
+    "不说出来，助手会把半页当整页读",
+  );
+});
+
+test("页文本页码非法或界面不支持时拒绝", async () => {
+  for (const page of [0, -1, 1.5, "3"]) {
+    const { result, sent } = callFetching("nativeReaderPageText", {
+      input: { page }, data: { ok: true, text: "" },
+    });
+    await assert.rejects(result, (error) => error.code === "BW_READER_QUERY_PARAMS");
+    assert.deepEqual(sent, []);
+  }
+  const wrong = callFetching("nativeReaderPageText", {
+    input: { page: 1 }, surface: "html", data: { ok: true, text: "" },
+  });
+  await assert.rejects(
+    wrong.result, (error) => error.code === "BW_READER_QUERY_SURFACE",
+  );
+});
+
+test("五个查询名两端一致，且都显式映射", () => {
+  const table = VOICE.slice(
+    VOICE.indexOf("var READER_QUERY_HANDLERS = {"),
+    VOICE.indexOf("function normalizeReaderQueryRequest("),
+  );
+  for (const name of ["highlights", "notes", "search", "toc", "page-text"]) {
+    assert.match(QUERY, new RegExp(`"${name}"`), `桥接名单缺 ${name}`);
+    assert.ok(
+      table.includes(`${name}: function`) || table.includes(`"${name}": function`),
+      `执行侧缺 ${name}`,
+    );
+  }
+  assert.doesNotMatch(table, /window\s*\[/, "仍不得动态分派");
 });

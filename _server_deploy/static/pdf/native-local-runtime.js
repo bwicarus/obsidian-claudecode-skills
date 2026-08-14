@@ -10066,8 +10066,9 @@
     }
     var wantPage = null;
     if (payload.page !== undefined && payload.page !== null) {
-      wantPage = Number(payload.page);
-      if (!Number.isInteger(wantPage) || wantPage < 1) {
+      wantPage = payload.page;
+      if (typeof wantPage !== 'number' ||
+          !Number.isInteger(wantPage) || wantPage < 1) {
         return Promise.reject(new RuntimeError(
           '页码无效', 'BW_READER_QUERY_PARAMS'
         ));
@@ -10143,8 +10144,9 @@
     }
     var wantPage = null;
     if (payload.page !== undefined && payload.page !== null) {
-      wantPage = Number(payload.page);
-      if (!Number.isInteger(wantPage) || wantPage < 1) {
+      wantPage = payload.page;
+      if (typeof wantPage !== 'number' ||
+          !Number.isInteger(wantPage) || wantPage < 1) {
         return Promise.reject(new RuntimeError(
           '页码无效', 'BW_READER_QUERY_PARAMS'
         ));
@@ -10218,8 +10220,9 @@
         '搜索文字无效', 'BW_READER_QUERY_PARAMS'
       ));
     }
-    var limit = payload.limit == null ? 50 : Number(payload.limit);
-    if (!Number.isInteger(limit) || limit < 1 || limit > 200) {
+    var limit = payload.limit == null ? 50 : payload.limit;
+    if (typeof limit !== 'number' || !Number.isInteger(limit) ||
+        limit < 1 || limit > 200) {
       return Promise.reject(new RuntimeError(
         '搜索条数无效', 'BW_READER_QUERY_PARAMS'
       ));
@@ -10251,6 +10254,99 @@
         truncated: truncated,
         incomplete: found && found.incomplete === true
       };
+    });
+  }
+
+  // 助手读目录。/pdf/api/toc 由 App 原生提供，离线一样在 —— 走 originalFetch
+  // 那条既有路径，不在这里另抄一份解析。
+  //
+  // 只对 PDF：EPUB 的章节结构走它自己的 manifest，这里不去猜一个等价物。
+  function nativeReaderTableOfContents() {
+    if (nativeInterfaceSurface !== 'pdf') {
+      return Promise.reject(new RuntimeError(
+        '当前阅读界面没有本机目录', 'BW_READER_QUERY_SURFACE'
+      ));
+    }
+    return bootPromise.then(function () {
+      return root.fetch(
+        localBasePath() + '/pdf/api/toc?file='
+          + encodeURIComponent(localFileRef()) + '&entries=1'
+      );
+    }).then(function (response) {
+      return response.json().then(function (data) {
+        if (!response.ok || !data) {
+          throw new RuntimeError('目录读取失败', 'BW_READER_QUERY_TOC');
+        }
+        var entries = Array.isArray(data.entries) ? data.entries : [];
+        var budget = 32 * 1024;
+        var used = 0;
+        var kept = [];
+        var truncated = false;
+        for (var index = 0; index < entries.length; index += 1) {
+          var entry = entries[index] && typeof entries[index] === 'object'
+            ? entries[index] : {};
+          var title = String(entry.title == null ? '' : entry.title);
+          var row = {
+            title: title.length > 200 ? title.slice(0, 200) : title,
+            page: Number.isFinite(Number(entry.page))
+              ? Number(entry.page) : null,
+            level: Number.isFinite(Number(entry.level))
+              ? Number(entry.level) : 1
+          };
+          var size = JSON.stringify(row).length + 1;
+          if (used + size > budget) { truncated = true; break; }
+          used += size;
+          kept.push(row);
+        }
+        // 空目录是真事实，不是失败：这本书可能就没建过目录。助手该照实说，
+        // 而不是当成读不到。
+        return {
+          ok: true, entries: kept, matched: entries.length,
+          returned: kept.length, truncated: truncated
+        };
+      });
+    });
+  }
+
+  // 助手读某一页的正文。复用给语音助手用的那条本机接口，不重复实现取文逻辑
+  // —— 两份取文迟早会在振假名、栏序或 OCR 回退上各走各的。
+  function nativeReaderPageText(input) {
+    var payload = input && typeof input === 'object' && !Array.isArray(input)
+      ? input : {};
+    var surface = nativeInterfaceSurface;
+    if (surface !== 'pdf' && surface !== 'epub') {
+      return Promise.reject(new RuntimeError(
+        '当前阅读界面没有本机正文', 'BW_READER_QUERY_SURFACE'
+      ));
+    }
+    // 只认真正的数字。放行 '3' 这样的字符串等于替上游把类型错误吞掉 ——
+    // 受信入口的价值正在于它不依赖上游校验过。
+    var page = payload.page;
+    if (typeof page !== 'number' || !Number.isInteger(page) || page < 1) {
+      return Promise.reject(new RuntimeError(
+        '页码无效', 'BW_READER_QUERY_PARAMS'
+      ));
+    }
+    return bootPromise.then(function () {
+      return root.fetch(
+        localBasePath() + '/api/assistant/voice-page-text?file='
+          + encodeURIComponent(localFileRef()) + '&page=' + page
+      );
+    }).then(function (response) {
+      return response.json().then(function (data) {
+        if (!response.ok || !data || data.ok !== true) {
+          throw new RuntimeError(
+            String((data && data.error) || '正文读取失败'),
+            String((data && data.code) || 'BW_READER_QUERY_PAGE_TEXT')
+          );
+        }
+        var text = String(data.text == null ? '' : data.text);
+        return {
+          ok: true, surface: surface, page: page, text: text,
+          // 这条接口本身就截到 1500 字符。不说出来，助手会把半页当整页读。
+          truncated: text.length >= 1500
+        };
+      });
     });
   }
 
@@ -10295,6 +10391,8 @@
     highlights: nativeReaderHighlights,
     notes: nativeReaderNotes,
     search: nativeReaderSearch,
+    toc: nativeReaderTableOfContents,
+    pageText: nativeReaderPageText,
     savePDFHighlight: function (payload) {
       var allowed = new Set([
         'file', 'id', 'page', 'rects', 'color', 'text', 'note', 'kind',
@@ -10396,6 +10494,12 @@
   };
   root._nativeReaderSearch = function (input) {
     return api.search(input);
+  };
+  root._nativeReaderToc = function () {
+    return api.toc();
+  };
+  root._nativeReaderPageText = function (input) {
+    return api.pageText(input);
   };
 
   // The shell deliberately loads this bootstrap before the legacy Reader
