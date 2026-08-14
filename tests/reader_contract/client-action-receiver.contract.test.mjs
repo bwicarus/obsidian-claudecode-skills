@@ -23,12 +23,19 @@ const VOICECALL = readFileSync(
 function clientActionBranch() {
   const start = VOICECALL.indexOf("} else if (delivery.kind === 'client-action') {");
   assert.notEqual(start, -1, "执行侧没有 client-action 分支");
-  const end = VOICECALL.indexOf("} else {", start);
+  const end = VOICECALL.indexOf(
+    "} else {\n        throw new Error('BW_READER_REALTIME_OUTPUT_KIND_UNSUPPORTED')",
+    start,
+  );
   assert.notEqual(end, -1, "分支未闭合");
   return VOICECALL.slice(start, end);
 }
 
-function runBranch({ fn = "_assistEdit", args = [{ type: "highlight" }], host = {} } = {}) {
+function runBranch({
+  fn = "_nativeReaderUndoLast",
+  args = ["rundo_" + "a".repeat(24)],
+  host = {},
+} = {}) {
   const branch = clientActionBranch();
   const context = {
     window: host,
@@ -57,24 +64,23 @@ test("执行侧确实有 client-action 分支，不再落到不支持", () => {
   );
 });
 
-test("宿主具备该函数时按同一语义调用，参数原样传入", async () => {
+test("受信 Reader 撤销入口存在时只传入受校验的一次性编号", async () => {
   const seen = [];
   const { work, thrown } = runBranch({
-    fn: "_assistEdit",
-    args: [{ type: "highlight", file: "book.pdf" }],
-    host: { _assistEdit: (payload) => { seen.push(payload); return "done"; } },
+    args: ["rundo_" + "b".repeat(24)],
+    host: {
+      _nativeReaderUndoLast: (operationId) => { seen.push(operationId); return "done"; },
+    },
   });
   assert.equal(thrown, null);
   assert.equal(await work, "done");
-  assert.equal(seen.length, 1);
-  assert.equal(seen[0].file, "book.pdf", "参数须原样送达，与 Pi 路径一致");
+  assert.deepEqual(seen, ["rundo_" + "b".repeat(24)]);
 });
 
 test("宿主缺少该函数时明确报错，绝不静默跳过", () => {
-  // EPUB 宿主没有 window._nativePDFUndoLast，这正是要防的情形。
   const { thrown } = runBranch({
-    fn: "_nativePDFUndoLast",
-    args: ["npdf_" + "a".repeat(24)],
+    fn: "_nativeReaderUndoLast",
+    args: ["rundo_" + "a".repeat(24)],
     host: {},
   });
   assert.notEqual(thrown, null, "静默跳过等于用户说了撤销却什么都没发生");
@@ -85,17 +91,23 @@ test("宿主缺少该函数时明确报错，绝不静默跳过", () => {
   );
   assert.match(
     String(thrown.message),
-    /_nativePDFUndoLast/,
+    /_nativeReaderUndoLast/,
     "错误须带上具体是哪个动作，否则排查只能靠猜",
   );
 });
 
-test("不转调未导出的 runActions", () => {
-  // runActions 是 rc-assistant.js 的局部函数，从未挂到 RC 上。
-  // 写一个永远不成立的分支只会误导下一个人。
+test("facade 绕过 normalizer 也不能把任意 window 函数变成调用面", () => {
+  let called = false;
+  const { thrown } = runBranch({
+    fn: "fetch",
+    args: ["https://example.invalid/"],
+    host: { fetch() { called = true; } },
+  });
+  assert.equal(called, false, "动态 window[fn] 会把跨进程消息升级为任意页面函数调用");
+  assert.match(String(thrown && thrown.message), /BW_READER_CLIENT_ACTION_INVALID:fetch/);
   assert.doesNotMatch(
     clientActionBranch(),
-    /RC\.assistant\.runActions/,
-    "该分派器未导出，不能假装可以转调",
+    /window\s*\[\s*_caFn\s*\]|\.apply\s*\(/,
+    "执行侧必须显式映射，不得动态分派",
   );
 });

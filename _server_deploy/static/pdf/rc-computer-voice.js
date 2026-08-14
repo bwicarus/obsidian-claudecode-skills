@@ -1035,25 +1035,11 @@
         payload.sourceText = sourceText;
       }
     } else if (kind === "client-action") {
-      // 可见反馈通道。
-      //
-      // 迁移前，AI 的改动经 Pi 返回 client_actions，前端 runActions 把 {fn,args}
-      // 分派到 window[fn]，于是高亮完会出现「原文｜↗跳转｜↩撤销⇄↪重做」那张卡片条。
-      // 桥接语音绕开 Pi 之后本地照样落库，却没有任何东西告诉界面「发生了什么」，
-      // 用户看到的就是"功能没了"。这里收下与 Pi 逐字段同形的 {fn,args}，
-      // 交给既有的 runActions，渲染器一行不改。
-      //
-      // fn 在接收端**再卡一次**白名单：runActions 是 window[fn].apply(...) 动态分派，
-      // 而这条消息来自进程外——发送端卡过不等于这一端可以不卡。
-      // args 逐字段重建而非整体透传，避免未经校验的内容进入被调用函数。
+      // 桥接只允许调用一个受信语义入口。助手高亮的可见卡片
+      // 在本地落库成功后直接产生，不需要也不允许穿过这个动态动作通道。
       exactObject(p, ["fn", "args"], [], "Reader 客户端动作");
       var actionFn = safeText(p.fn, "Reader 客户端动作 fn", 64, false);
-      if (
-        actionFn !== "_assistEdit" &&
-        actionFn !== "notesReload" &&
-        actionFn !== "jumpWithBack" &&
-        actionFn !== "_nativePDFUndoLast"
-      ) {
+      if (actionFn !== "_nativeReaderUndoLast") {
         throw directError(
           "Reader 客户端动作不在白名单内",
           "BW_READER_REALTIME_OUTPUT_SCHEMA",
@@ -1067,120 +1053,17 @@
           false
         );
       }
-      var actionArgs = [];
-      if (actionFn === "notesReload") {
-        if (p.args.length !== 0) {
-          throw directError(
-            "notesReload 不接受参数",
-            "BW_READER_REALTIME_OUTPUT_SCHEMA",
-            false
-          );
-        }
-      } else if (actionFn === "jumpWithBack") {
-        if (
-          p.args.length !== 1 ||
-          !Number.isSafeInteger(p.args[0]) ||
-          p.args[0] < 1 ||
-          p.args[0] > 100000
-        ) {
-          throw directError(
-            "jumpWithBack 需要一个合法页码",
-            "BW_READER_REALTIME_OUTPUT_SCHEMA",
-            false
-          );
-        }
-        actionArgs = [p.args[0]];
-      } else if (actionFn === "_nativePDFUndoLast") {
-        // 撤销复用 App 本机已有的撤销栈；这里只转达一次性操作编号，
-        // 形状与 native-local-runtime 的校验一致，本机据此拒绝重放。
-        var undoId = p.args.length === 1
-          ? safeText(p.args[0], "Reader 撤销操作编号", 32, false)
-          : "";
-        if (!/^npdf_[0-9a-f]{24}$/.test(undoId)) {
-          throw directError(
-            "Reader 撤销操作编号无效",
-            "BW_READER_REALTIME_OUTPUT_SCHEMA",
-            false
-          );
-        }
-        actionArgs = [undoId];
-      } else {
-        if (p.args.length !== 1 || !plainObject(p.args[0])) {
-          throw directError(
-            "_assistEdit 需要一个对象参数",
-            "BW_READER_REALTIME_OUTPUT_SCHEMA",
-            false
-          );
-        }
-        var edit = p.args[0];
-        exactObject(edit, ["type", "file", "items"], [], "Reader 客户端动作参数");
-        if (safeText(edit.type, "Reader 客户端动作 type", 16, false) !== "highlight") {
-          throw directError(
-            "Reader 客户端动作类型无效",
-            "BW_READER_REALTIME_OUTPUT_SCHEMA",
-            false
-          );
-        }
-        var editFile = safeText(edit.file, "Reader 客户端动作 file", 4096, false);
-        if (!editFile.trim() || /[ --]/.test(editFile)) {
-          throw directError(
-            "Reader 客户端动作 file 无效",
-            "BW_READER_REALTIME_OUTPUT_SCHEMA",
-            false
-          );
-        }
-        if (!Array.isArray(edit.items) || !edit.items.length || edit.items.length > 64) {
-          throw directError(
-            "Reader 客户端动作条目数量无效",
-            "BW_READER_REALTIME_OUTPUT_SCHEMA",
-            false
-          );
-        }
-        var items = edit.items.map(function (item) {
-          if (!plainObject(item)) {
-            throw directError(
-              "Reader 客户端动作条目无效",
-              "BW_READER_REALTIME_OUTPUT_SCHEMA",
-              false
-            );
-          }
-          exactObject(
-            item,
-            ["id", "text", "color", "pdf_page", "disp_page"],
-            [],
-            "Reader 客户端动作条目"
-          );
-          var itemColor = safeText(item.color, "Reader 客户端动作条目 color", 16, false);
-          if (
-            itemColor !== "yellow" && itemColor !== "green" &&
-            itemColor !== "blue" && itemColor !== "pink"
-          ) {
-            throw directError(
-              "Reader 客户端动作条目颜色无效",
-              "BW_READER_REALTIME_OUTPUT_SCHEMA",
-              false
-            );
-          }
-          [item.pdf_page, item.disp_page].forEach(function (pageValue) {
-            if (!Number.isSafeInteger(pageValue) || pageValue < 1 || pageValue > 100000) {
-              throw directError(
-                "Reader 客户端动作条目页码无效",
-                "BW_READER_REALTIME_OUTPUT_SCHEMA",
-                false
-              );
-            }
-          });
-          return {
-            id: safeText(item.id, "Reader 客户端动作条目 id", 128, false),
-            text: safeText(item.text, "Reader 客户端动作条目 text", 2000, false),
-            color: itemColor,
-            pdf_page: item.pdf_page,
-            disp_page: item.disp_page,
-          };
-        });
-        actionArgs = [{ type: "highlight", file: editFile, items: items }];
+      var undoId = p.args.length === 1
+        ? safeText(p.args[0], "Reader 撤销操作编号", 32, false)
+        : "";
+      if (!/^rundo_[0-9a-f]{24}$/.test(undoId)) {
+        throw directError(
+          "Reader 撤销操作编号无效",
+          "BW_READER_REALTIME_OUTPUT_SCHEMA",
+          false
+        );
       }
-      payload = { fn: actionFn, args: actionArgs };
+      payload = { fn: actionFn, args: [undoId] };
     } else {
       throw directError("Reader 输出类型不受支持", "BW_READER_REALTIME_OUTPUT_SCHEMA", false);
     }

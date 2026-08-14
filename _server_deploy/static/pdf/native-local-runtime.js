@@ -4243,6 +4243,13 @@
           display = Number(root._dispPage(page)) || page;
         }
       } catch (e) {}
+      var savedHighlight = saved.highlight && typeof saved.highlight === 'object'
+        ? saved.highlight : null;
+      var sourceRects = savedHighlight && savedHighlight.rects != null
+        ? savedHighlight.rects : body.rects;
+      var rects = Array.isArray(sourceRects) ? sourceRects.map(function (rect) {
+        return Array.isArray(rect) ? rect.slice() : rect;
+      }) : [];
       root._assistEdit({
         type: 'highlight',
         file: String(body.file || ''),
@@ -4251,7 +4258,8 @@
           text: String(body.text || ''),
           color: String(body.color || ''),
           pdf_page: page,
-          disp_page: display
+          disp_page: display,
+          rects: rects
         }]
       });
     } catch (e) {

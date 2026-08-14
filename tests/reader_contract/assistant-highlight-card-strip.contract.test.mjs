@@ -19,6 +19,10 @@ const RUNTIME = readFileSync(
   new URL("_server_deploy/static/pdf/native-local-runtime.js", ROOT),
   "utf8",
 );
+const TURNCARD = readFileSync(
+  new URL("_server_deploy/static/pdf/rc-turncard.js", ROOT),
+  "utf8",
+);
 
 function balanced(source, start) {
   const open = source.indexOf("{", start);
@@ -61,6 +65,7 @@ function makeAnnouncer({ dispPage } = {}) {
 const BODY = {
   file: "book.pdf", id: "c_1111111111111111", page: 12,
   text: "quoted span", color: "yellow",
+  rects: [[0.12, 0.34, 0.44, 0.08]],
 };
 
 test("助手高亮落库成功后出现卡片条，字段供渲染器与撤销使用", () => {
@@ -76,7 +81,96 @@ test("助手高亮落库成功后出现卡片条，字段供渲染器与撤销�
     color: "yellow",
     pdf_page: 12,
     disp_page: 12,
-  }], "渲染器要 text/color/页码，撤销要 id");
+    rects: [[0.12, 0.34, 0.44, 0.08]],
+  }], "渲染器要 text/color/页码，撤销要 id，重做要真实 rects");
+});
+
+test("卡片条撤销后用落库反馈里的真实 rects 重做", async () => {
+  const { announce, calls } = makeAnnouncer();
+  announce(BODY, {
+    ok: true,
+    id: "c_1111111111111111",
+    highlight: {
+      id: "c_1111111111111111",
+      rects: [[0.2, 0.3, 0.4, 0.1]],
+    },
+  });
+
+  class FakeClassList {
+    constructor(owner) { this.owner = owner; }
+    add(name) {
+      if (!this.owner.className.split(/\s+/).includes(name)) {
+        this.owner.className = `${this.owner.className} ${name}`.trim();
+      }
+    }
+    remove(name) {
+      this.owner.className = this.owner.className
+        .split(/\s+/).filter((part) => part && part !== name).join(" ");
+    }
+    contains(name) { return this.owner.className.split(/\s+/).includes(name); }
+    toggle(name) { this.contains(name) ? this.remove(name) : this.add(name); }
+  }
+  class FakeElement {
+    constructor(tag) {
+      this.tagName = tag;
+      this.children = [];
+      this.className = "";
+      this.classList = new FakeClassList(this);
+      this.listeners = {};
+      this.style = {};
+      this.attributes = {};
+      this.disabled = false;
+      this.textContent = "";
+    }
+    appendChild(child) { this.children.push(child); return child; }
+    addEventListener(name, handler) { this.listeners[name] = handler; }
+    getAttribute(name) { return this.attributes[name] || null; }
+  }
+
+  const requests = [];
+  const context = {
+    document: { createElement: (tag) => new FakeElement(tag) },
+    window: {},
+    encodeURIComponent,
+    Promise,
+    RC: {
+      toast() {},
+      turnCard: { onChange() {} },
+      reqJson(method, url, body) {
+        requests.push({ method, url, body });
+        return Promise.resolve(method === "DELETE"
+          ? { ok: true }
+          : { ok: true, id: "h_redone" });
+      },
+    },
+    make: null,
+  };
+  context.globalThis = context;
+  const start = TURNCARD.indexOf("function _hlCardEl(");
+  assert.notEqual(start, -1, "找不到高亮卡片渲染器");
+  vm.runInNewContext(
+    `function _hlCss() {}
+     ${balanced(TURNCARD, start)}
+     make = _hlCardEl;`,
+    context,
+  );
+  const turn = { el: new FakeElement("div") };
+  const card = context.make(turn, { file: "book.pdf", items: calls[0].items });
+  const button = card.children[1].children[0].children[3];
+  button.listeners.click({ stopPropagation() {} });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(calls[0].items[0].undone, true, "撤销成功后进入可重做状态");
+
+  button.listeners.click({ stopPropagation() {} });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.equal(requests[1].method, "POST");
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(requests[1].body.rects)),
+    [[0.2, 0.3, 0.4, 0.1]],
+    "重做必须使用本地落库确认返回的真实几何",
+  );
+  assert.equal(calls[0].items[0].id, "h_redone");
+  assert.equal(calls[0].items[0].undone, false);
 });
 
 test("印刷页码可用时按印刷页显示", () => {

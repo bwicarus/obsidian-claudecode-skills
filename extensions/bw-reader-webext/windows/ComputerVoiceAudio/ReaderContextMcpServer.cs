@@ -11,7 +11,6 @@ internal sealed class ReaderContextMcpServer
     internal const string BrowserControlToolName = "reader_browser_control";
     internal const string HighlightTextToolName = "reader_highlight_text";
     internal const string AnkiDraftToolName = "reader_anki_draft";
-    internal const string PracticePageToolName = "reader_practice_page";
     internal const string CardToolName = "reader_card";
     internal const string CommandToolName = "reader_command";
     // 尚未注册为 MCP 工具，见下方 tools 列表处的说明。保留常量是为了让
@@ -414,10 +413,6 @@ internal sealed class ReaderContextMcpServer
                     + "wrong page or section, missing text, or text that is "
                     + "not unique. reader_anki_draft only displays the "
                     + "existing confirmation UI; it never writes Anki. "
-                    + "For a new PDF exercise sheet, call "
-                    + PracticePageToolName
-                    + " directly with the complete page in one call; do not "
-                    + "start a CLI worker or split it across draft calls. "
                     + "Do not infer a card from final assistant "
                     + "text. Text chat-history synchronization carries only "
                     + "user/assistant text and never carries cards. "
@@ -753,201 +748,12 @@ internal sealed class ReaderContextMcpServer
                     ["openWorldHint"] = false,
                 },
             });
-            tools.Add(new JsonObject
-            {
-                ["name"] = PracticePageToolName,
-                ["description"] =
-                    "Create one complete exercise sheet immediately after "
-                    + "the exact current PDF page. Call reader_context_snapshot "
-                    + "first when the questions depend on the visible book "
-                    + "content, then submit the entire sheet once; the server "
-                    + "binds the live document, source instance and snapshot "
-                    + "revision automatically. Blocks are strictly limited to "
-                    + "text, blank, choice and one button whose event is check. "
-                    + "Do not retry a timeout or unknown outcome and do not "
-                    + "start a CLI worker.",
-                ["inputSchema"] = BuildPracticePageArgumentsSchema(),
-                ["annotations"] = new JsonObject
-                {
-                    ["readOnlyHint"] = false,
-                    ["destructiveHint"] = false,
-                    ["idempotentHint"] = false,
-                    ["openWorldHint"] = false,
-                },
-            });
         }
         return new JsonObject
         {
             ["tools"] = tools,
         };
     }
-
-    private static JsonObject BuildPracticePageArgumentsSchema() => new()
-    {
-        ["type"] = "object",
-        ["additionalProperties"] = false,
-        ["required"] = new JsonArray("title", "paper", "blocks"),
-        ["properties"] = new JsonObject
-        {
-            ["title"] = new JsonObject
-            {
-                ["type"] = "string",
-                ["minLength"] = 1,
-                ["maxLength"] = 120,
-            },
-            ["paper"] = new JsonObject
-            {
-                ["type"] = "string",
-                ["enum"] = new JsonArray(
-                    "dictation",
-                    "exam",
-                    "math",
-                    "draw",
-                    "note"),
-            },
-            ["blocks"] = new JsonObject
-            {
-                ["type"] = "array",
-                ["minItems"] = 1,
-                ["maxItems"] = 80,
-                ["items"] = new JsonObject
-                {
-                    ["oneOf"] = new JsonArray
-                    {
-                        new JsonObject
-                        {
-                            ["type"] = "object",
-                            ["additionalProperties"] = false,
-                            ["required"] = new JsonArray("kind", "text"),
-                            ["properties"] = new JsonObject
-                            {
-                                ["kind"] = new JsonObject
-                                {
-                                    ["const"] = "text",
-                                },
-                                ["text"] = new JsonObject
-                                {
-                                    ["type"] = "string",
-                                    ["minLength"] = 1,
-                                    ["maxLength"] = 4_000,
-                                },
-                            },
-                        },
-                        new JsonObject
-                        {
-                            ["type"] = "object",
-                            ["additionalProperties"] = false,
-                            ["required"] = new JsonArray(
-                                "kind",
-                                "label",
-                                "answer"),
-                            ["properties"] = new JsonObject
-                            {
-                                ["kind"] = new JsonObject
-                                {
-                                    ["const"] = "blank",
-                                },
-                                ["label"] = new JsonObject
-                                {
-                                    ["type"] = "string",
-                                    ["minLength"] = 1,
-                                    ["maxLength"] = 320,
-                                },
-                                ["answer"] = new JsonObject
-                                {
-                                    ["anyOf"] = new JsonArray
-                                    {
-                                        new JsonObject
-                                        {
-                                            ["type"] = "string",
-                                            ["maxLength"] = 2_000,
-                                        },
-                                        new JsonObject
-                                        {
-                                            ["type"] = "null",
-                                        },
-                                    },
-                                },
-                            },
-                        },
-                        new JsonObject
-                        {
-                            ["type"] = "object",
-                            ["additionalProperties"] = false,
-                            ["required"] = new JsonArray(
-                                "kind",
-                                "text",
-                                "options",
-                                "answer"),
-                            ["properties"] = new JsonObject
-                            {
-                                ["kind"] = new JsonObject
-                                {
-                                    ["const"] = "choice",
-                                },
-                                ["text"] = new JsonObject
-                                {
-                                    ["type"] = "string",
-                                    ["minLength"] = 1,
-                                    ["maxLength"] = 4_000,
-                                },
-                                ["options"] = new JsonObject
-                                {
-                                    ["type"] = "array",
-                                    ["minItems"] = 2,
-                                    ["maxItems"] = 6,
-                                    ["uniqueItems"] = true,
-                                    ["items"] = new JsonObject
-                                    {
-                                        ["type"] = "string",
-                                        ["minLength"] = 1,
-                                        ["maxLength"] = 2_000,
-                                    },
-                                },
-                                ["answer"] = new JsonObject
-                                {
-                                    ["type"] = "string",
-                                    ["enum"] = new JsonArray(
-                                        "A",
-                                        "B",
-                                        "C",
-                                        "D",
-                                        "E",
-                                        "F"),
-                                },
-                            },
-                        },
-                        new JsonObject
-                        {
-                            ["type"] = "object",
-                            ["additionalProperties"] = false,
-                            ["required"] = new JsonArray(
-                                "kind",
-                                "label",
-                                "event"),
-                            ["properties"] = new JsonObject
-                            {
-                                ["kind"] = new JsonObject
-                                {
-                                    ["const"] = "button",
-                                },
-                                ["label"] = new JsonObject
-                                {
-                                    ["type"] = "string",
-                                    ["minLength"] = 1,
-                                    ["maxLength"] = 320,
-                                },
-                                ["event"] = new JsonObject
-                                {
-                                    ["const"] = "check",
-                                },
-                            },
-                        },
-                    },
-                },
-            },
-        },
-    };
 
     private static JsonObject BuildTypedCardArgumentsSchema() => new()
     {
@@ -1265,17 +1071,6 @@ internal sealed class ReaderContextMcpServer
             return;
         }
         if (
-            toolName == PracticePageToolName
-            && _sendOutputAsync is not null
-        )
-        {
-            await HandlePracticePageToolCallAsync(
-                id,
-                arguments,
-                cancellationToken).ConfigureAwait(false);
-            return;
-        }
-        if (
             toolName == CardToolName
             && _sendOutputAsync is not null
         )
@@ -1424,28 +1219,6 @@ internal sealed class ReaderContextMcpServer
             cancellationToken).ConfigureAwait(false);
     }
 
-    private async Task HandlePracticePageToolCallAsync(
-        JsonNode id,
-        JsonElement arguments,
-        CancellationToken cancellationToken)
-    {
-        if (!TryReadPracticePage(arguments, out JsonNode payload))
-        {
-            await WriteErrorAsync(
-                id,
-                -32602,
-                "Invalid Reader practice page",
-                cancellationToken).ConfigureAwait(false);
-            return;
-        }
-
-        await SendReaderOutputAsync(
-            id,
-            "practice-page",
-            payload,
-            cancellationToken).ConfigureAwait(false);
-    }
-
     private async Task HandleExactSourceOutputToolCallAsync(
         JsonNode id,
         JsonElement arguments,
@@ -1578,7 +1351,6 @@ internal sealed class ReaderContextMcpServer
                             {
                                 "anki-draft" => "draft_delivered",
                                 "highlight-text" => "highlight_saved",
-                                "practice-page" => "practice_page_delivered",
                                 _ => "delivered",
                             },
                             ["anki_written"] = request.Kind == "anki-draft"
@@ -1767,93 +1539,6 @@ internal sealed class ReaderContextMcpServer
             }
             payload = ReaderRealtimeOutputProtocol.ValidatePayload(
                 kind,
-                normalized);
-            return true;
-        }
-        catch (Exception exception) when (
-            exception is JsonException
-            or DirectProtocolException
-            or ReaderRealtimeOutputException)
-        {
-            return false;
-        }
-    }
-
-    private static bool TryReadPracticePage(
-        JsonElement arguments,
-        out JsonNode payload)
-    {
-        payload = new JsonObject();
-        if (arguments.ValueKind != JsonValueKind.Object)
-        {
-            return false;
-        }
-        try
-        {
-            DirectJsonValidation.RequireNoDuplicateKeys(arguments);
-            HashSet<string> rootFields = arguments.EnumerateObject()
-                .Select(property => property.Name)
-                .ToHashSet(StringComparer.Ordinal);
-            if (
-                !rootFields.SetEquals(new[] { "title", "paper", "blocks" })
-                || !arguments.TryGetProperty(
-                    "blocks",
-                    out JsonElement sourceBlocks)
-                || sourceBlocks.ValueKind != JsonValueKind.Array
-            )
-            {
-                return false;
-            }
-
-            foreach (JsonElement block in sourceBlocks.EnumerateArray())
-            {
-                if (block.ValueKind != JsonValueKind.Object)
-                {
-                    return false;
-                }
-                DirectJsonValidation.RequireNoDuplicateKeys(block);
-                if (
-                    !block.TryGetProperty("kind", out JsonElement kindValue)
-                    || kindValue.ValueKind != JsonValueKind.String
-                    || kindValue.GetString() is not string blockKind
-                )
-                {
-                    return false;
-                }
-                string[] expected = blockKind switch
-                {
-                    "text" => ["kind", "text"],
-                    "blank" => ["kind", "label", "answer"],
-                    "choice" => ["kind", "text", "options", "answer"],
-                    "button" => ["kind", "label", "event"],
-                    _ => [],
-                };
-                HashSet<string> actual = block.EnumerateObject()
-                    .Select(property => property.Name)
-                    .ToHashSet(StringComparer.Ordinal);
-                if (expected.Length == 0 || !actual.SetEquals(expected))
-                {
-                    return false;
-                }
-            }
-
-            JsonObject normalized = JsonNode.Parse(arguments.GetRawText())
-                as JsonObject
-                ?? throw new JsonException("Reader practice page is empty");
-            JsonArray normalizedBlocks = normalized["blocks"] as JsonArray
-                ?? throw new JsonException("Reader practice page blocks are empty");
-            for (int index = 0; index < normalizedBlocks.Count; index += 1)
-            {
-                JsonObject block = normalizedBlocks[index] as JsonObject
-                    ?? throw new JsonException(
-                        "Reader practice page block is invalid");
-                block["id"] = "b" + (index + 1).ToString(
-                    System.Globalization.CultureInfo.InvariantCulture);
-            }
-            normalized["mutationId"] =
-                "c_" + Guid.NewGuid().ToString("N");
-            payload = ReaderRealtimeOutputProtocol.ValidatePayload(
-                "practice-page",
                 normalized);
             return true;
         }
