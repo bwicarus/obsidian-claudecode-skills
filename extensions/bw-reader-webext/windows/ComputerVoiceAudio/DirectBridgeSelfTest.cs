@@ -7062,6 +7062,10 @@ internal static class DirectBridgeSelfTest
                     .GetProperty("serverInfo")
                     .GetProperty("name").GetString()
                     == ReaderContextMcpServer.ServerName
+                && responses[0].RootElement.GetProperty("result")
+                    .GetProperty("serverInfo")
+                    .GetProperty("version").GetString()
+                    == "1.5.0"
                 && tools.GetArrayLength() == 2
                 && tools[0].GetProperty("name").GetString()
                     == ReaderContextMcpServer.ToolName

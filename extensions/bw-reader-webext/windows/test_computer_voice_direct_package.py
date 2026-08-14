@@ -191,6 +191,32 @@ class FakeInstalledProcessBackend:
 
 
 class DirectPackageTests(unittest.TestCase):
+    def _fake_stdio_smoke_responses(self, root: Path) -> list[dict]:
+        state_path = root / "reader-context-snapshot.json"
+        state_path.write_text(
+            json.dumps(
+                {
+                    "schema": "reader-context-snapshot/1",
+                    "revision": 1,
+                }
+            ),
+            encoding="utf-8",
+        )
+        result = FakeStdioRunner().run(
+            ("fake.exe", "--reader-context-mcp", "--state", str(state_path)),
+            cwd=root,
+            stdin="",
+        )
+        self.assertEqual(result.returncode, 0)
+        return [json.loads(line) for line in result.stdout.splitlines()]
+
+    @staticmethod
+    def _stdio_result(responses: list[dict]) -> package.CommandResult:
+        return package.CommandResult(
+            0,
+            "\n".join(json.dumps(item) for item in responses) + "\n",
+        )
+
     def _sources(self, root: Path) -> tuple[Path, Path]:
         audio = root / "ComputerVoiceAudio"
         desktop = root / "computer-voice-desktop"
@@ -834,6 +860,34 @@ class DirectPackageTests(unittest.TestCase):
                     ),
                 )
             )
+
+    def test_stdio_mcp_smoke_rejects_previous_server_version(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            responses = self._fake_stdio_smoke_responses(Path(raw))
+            responses[0]["result"]["serverInfo"]["version"] = "1.4.0"
+            with self.assertRaisesRegex(
+                package.PackageError,
+                "serverInfo 不是 1.5.0 合同",
+            ):
+                package._validate_mcp_smoke_output(
+                    self._stdio_result(responses)
+                )
+
+    def test_stdio_mcp_smoke_rejects_missing_undo_tool(self) -> None:
+        with tempfile.TemporaryDirectory() as raw:
+            responses = self._fake_stdio_smoke_responses(Path(raw))
+            tools = responses[1]["result"]["tools"]
+            responses[1]["result"]["tools"] = [
+                item for item in tools
+                if item.get("name") != "reader_undo_last"
+            ]
+            with self.assertRaisesRegex(
+                package.PackageError,
+                "精确 9 工具合同",
+            ):
+                package._validate_mcp_smoke_output(
+                    self._stdio_result(responses)
+                )
 
     def test_existing_candidate_is_never_overwritten(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
