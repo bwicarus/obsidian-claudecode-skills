@@ -4253,4 +4253,5 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **长内容边界**：PDF 合成空格使用边界映射；EPUB 超长章节按当前视口生成私有 baseOffset 窗口，视口、正文、revision、书页或 TTL 变化均拒绝旧范围，不泄露真实 offset。
 - **怎么验的**：Reader Node 全量、Python 定向、Direct Release 0 警告/0 错误及完整自检、扩展 vendor、ReaderBundle 与发布管线通过；Windows handoff/全量 Python 仍仅命中既有 `fcntl`/fixture 环境基线。
 - **安装事实**：Direct `0.1.130` 已原子安装，7 个 payload 哈希一致；总开关恢复 `true`，viewer HTTP 200、Codex 麦克风 active、`lastError=null`，回滚点 `install-0.1.130-20260814T103727Z-e8f113b9`。
-- **没做/下一步**：未推送、上传 TestFlight、部署 Pi 或桌面扩展正式渠道；当前 Reader 未连接，待 App 前台后真机验收 PDF 长跨行重复段、EPUB 长章后半与翻页后旧 marker 拒绝。
+- **发布事实**：功能源 `a5e8aa7d`、App 版本提交 `c35cdf54`；Actions `31794113201` 上传 TestFlight `1.1.56 (303)`，`31794724008` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
+- **边界/下一步**：未部署 Pi 或桌面扩展正式渠道；Claude 的 ReaderQuery 工具批次未混入。待 App 前台后真机验收 PDF 长跨行重复段、EPUB 长章后半与翻页后旧 marker 拒绝。
