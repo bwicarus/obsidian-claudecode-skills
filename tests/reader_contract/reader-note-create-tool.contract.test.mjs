@@ -334,3 +334,115 @@ test("改写工具已注册：只收 id 与 text，声明为幂等", () => {
     "改写成同样的内容重复执行结果一致，与新建不同",
   );
 });
+
+// ── 存成一篇笔记 ────────────────────────────────────────────────────
+// 跟贴在页面上的便签是两回事：这个写的是一份文件。书和页仍由 App 填，
+// 标题可以不给 —— 让助手编一个标题，出来的会是它以为用户在读的那本书。
+function makeNote({ input, surface = "pdf", page = 7, data } = {}) {
+  const start = RUNTIME.indexOf("function nativeReaderMakeNote(");
+  assert.notEqual(start, -1, "找不到存笔记入口");
+  const sent = [];
+  const context = {
+    String, Number, Array, Promise, JSON, Math, RegExp,
+    nativeInterfaceSurface: surface,
+    bootPromise: Promise.resolve(),
+    readState: () => Promise.resolve({ page }),
+    localFileRef: () => "localbook:小さな本.pdf",
+    localBasePath: () => "/r/" + "a".repeat(64),
+    RuntimeError: class RuntimeError extends Error {
+      constructor(message, code) { super(message); this.code = code; }
+    },
+    root: {
+      fetch: (url, init) => {
+        sent.push(JSON.parse(init.body));
+        return Promise.resolve({
+          ok: true,
+          json: () => Promise.resolve(
+            data === undefined ? { ok: true, note_path: "/notes/a.md" } : data,
+          ),
+        });
+      },
+    },
+    out: null,
+  };
+  context.globalThis = context;
+  vm.runInNewContext(
+    `${balanced(RUNTIME, start)}
+     out = nativeReaderMakeNote(${JSON.stringify(input)});`,
+    context,
+  );
+  return { result: context.out, sent };
+}
+
+test("书与页由 App 填，调用方给的被忽略", async () => {
+  const { result, sent } = makeNote({
+    input: { text: "正文", title: "我的标题", file: "other.pdf", page: 999 },
+    page: 42,
+  });
+  const value = await result;
+  assert.equal(sent[0].file, "localbook:小さな本.pdf");
+  assert.equal(sent[0].page, 42);
+  assert.equal(sent[0].name, "我的标题");
+  assert.equal(value.note_path, "/notes/a.md");
+});
+
+test("不给标题时由 Reader 按书名与页码命名", async () => {
+  const { result, sent } = makeNote({ input: { text: "正文" }, page: 42 });
+  await result;
+  assert.match(
+    sent[0].name, /小さな本/,
+    "名字取自 App 真正打开的那本书，不由助手猜",
+  );
+  assert.match(sent[0].name, /42/);
+});
+
+test("空内容与超长拒绝，且不写出任何文件", async () => {
+  for (const input of [{ text: "" }, { text: "  " }, { text: "a".repeat(240001) }]) {
+    const { result, sent } = makeNote({ input });
+    await assert.rejects(result, (error) => error.code === "BW_READER_NOTE_TEXT");
+    assert.deepEqual(sent, []);
+  }
+  const longTitle = makeNote({ input: { text: "x", title: "t".repeat(241) } });
+  await assert.rejects(
+    longTitle.result, (error) => error.code === "BW_READER_NOTE_TITLE",
+  );
+  assert.deepEqual(longTitle.sent, []);
+});
+
+test("写入未确认成功时如实报错", async () => {
+  const { result } = makeNote({
+    input: { text: "x" }, data: { ok: false, error: "磁盘满" },
+  });
+  await assert.rejects(result, (error) => error.code === "BW_READER_NOTE_FAILED");
+});
+
+test("存笔记动作只把标题与正文交给受信入口", async () => {
+  const seen = [];
+  const context = dispatch({
+    fn: "_nativeReaderMakeNote",
+    args: [{ title: "T", text: "正文", file: "other.pdf", page: 999 }],
+    host: { _nativeReaderMakeNote: (input) => { seen.push(input); return "ok"; } },
+  });
+  assert.equal(context.thrown, null);
+  await context.work;
+  assert.deepEqual(
+    JSON.parse(JSON.stringify(seen)), [{ title: "T", text: "正文" }],
+  );
+});
+
+test("存笔记工具声明为非幂等：重试会写出第二份文件", () => {
+  assert.match(BRIDGE, /"_nativeReaderMakeNote"/);
+  assert.match(BRIDGE, /Exact\(made, "title", "text"\)/);
+  assert.match(MCP, /"reader_make_note"/);
+  const start = MCP.indexOf('["name"] = MakeNoteToolName');
+  const spec = MCP.slice(start, start + 2600);
+  assert.match(spec, /\["idempotentHint"\] = false/);
+  assert.match(spec, /\["additionalProperties"\] = false/);
+  // 描述在 C# 里是跨行拼接的，先还原成一句话再匹配语义，
+  // 免得换个折行位置就红。
+  const prose = spec.replace(/"\s*\+\s*"/g, "");
+  assert.match(
+    prose, /second attempt writes a second file/,
+    "不写清楚，一次超时会变成两份笔记",
+  );
+});

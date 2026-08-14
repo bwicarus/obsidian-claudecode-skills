@@ -10350,6 +10350,74 @@
     });
   }
 
+  // 助手把一段内容存成一篇本机笔记（区别于贴在页面上的便签）。
+  //
+  // 书和页仍由 App 自己填 —— 桥接不知道你在读什么。标题给了就用，没给就由
+  // App 按书名和时间生成：让助手编一个标题，出来的会是它以为你在读的那本书。
+  function nativeReaderMakeNote(input) {
+    var payload = input && typeof input === 'object' && !Array.isArray(input)
+      ? input : {};
+    var text = String(payload.text == null ? '' : payload.text);
+    if (!text.trim()) {
+      return Promise.reject(new RuntimeError(
+        '笔记内容为空', 'BW_READER_NOTE_TEXT'
+      ));
+    }
+    if (text.length > 240000) {
+      return Promise.reject(new RuntimeError(
+        '笔记内容过长', 'BW_READER_NOTE_TEXT'
+      ));
+    }
+    var title = String(payload.title == null ? '' : payload.title).trim();
+    if (title.length > 240) {
+      return Promise.reject(new RuntimeError(
+        '笔记标题过长', 'BW_READER_NOTE_TITLE'
+      ));
+    }
+    var surface = nativeInterfaceSurface;
+    if (surface !== 'pdf' && surface !== 'epub') {
+      return Promise.reject(new RuntimeError(
+        '当前阅读界面不支持存笔记', 'BW_READER_NOTE_SURFACE'
+      ));
+    }
+    var file = localFileRef();
+    return bootPromise.then(function () {
+      return readState('reading-position', null);
+    }).then(function (position) {
+      var page = Number(position && position.page);
+      if (!Number.isFinite(page) || page < 0) page = 0;
+      if (!title) {
+        var book = String(file).split(/[\\/]/).pop()
+          .replace(/\.[^.]+$/, '').trim();
+        title = ('阅读笔记 · ' + (book || '当前书') + ' · 第 '
+          + Math.trunc(page) + ' 页');
+      }
+      return root.fetch(localBasePath() + '/pdf/api/to-note', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          name: title.slice(0, 240),
+          text: text,
+          file: String(file).slice(0, 8000),
+          page: Math.trunc(page)
+        })
+      });
+    }).then(function (response) {
+      return response.json().then(function (data) {
+        if (!response.ok || !data || data.ok !== true) {
+          throw new RuntimeError(
+            String((data && data.error) || '笔记未能保存'),
+            String((data && data.code) || 'BW_READER_NOTE_FAILED')
+          );
+        }
+        return {
+          ok: true, surface: surface, title: title,
+          note_path: String(data.note_path || '')
+        };
+      });
+    });
+  }
+
   function nativeReaderUndoLast(operationID) {
     operationID = String(operationID || '');
     if (!/^rundo_[0-9a-f]{24}$/.test(operationID)) {
@@ -10393,6 +10461,7 @@
     search: nativeReaderSearch,
     toc: nativeReaderTableOfContents,
     pageText: nativeReaderPageText,
+    makeNote: nativeReaderMakeNote,
     savePDFHighlight: function (payload) {
       var allowed = new Set([
         'file', 'id', 'page', 'rects', 'color', 'text', 'note', 'kind',
@@ -10500,6 +10569,9 @@
   };
   root._nativeReaderPageText = function (input) {
     return api.pageText(input);
+  };
+  root._nativeReaderMakeNote = function (input) {
+    return api.makeNote(input);
   };
 
   // The shell deliberately loads this bootstrap before the legacy Reader

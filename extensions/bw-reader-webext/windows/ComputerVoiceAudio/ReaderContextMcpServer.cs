@@ -23,6 +23,7 @@ internal sealed class ReaderContextMcpServer
     internal const string SearchToolName = "reader_search";
     internal const string TocToolName = "reader_toc";
     internal const string PageTextToolName = "reader_page_text";
+    internal const string MakeNoteToolName = "reader_make_note";
     internal const string CapabilityGuideToolName =
         "reader_capability_guide";
     internal const string ServerName = "bw-reader-context-snapshot";
@@ -723,6 +724,51 @@ internal sealed class ReaderContextMcpServer
                     ["readOnlyHint"] = true,
                     ["destructiveHint"] = false,
                     ["idempotentHint"] = true,
+                    ["openWorldHint"] = false,
+                },
+            });
+            tools.Add(new JsonObject
+            {
+                ["name"] = MakeNoteToolName,
+                ["description"] =
+                    "Save a passage as a note file in the notes folder the "
+                    + "App is configured with - a document, not the sticky "
+                    + "note reader_note_create pins on the page. The book and "
+                    + "page are filled in by the Reader. A title is optional: "
+                    + "leave it out and the Reader names the note from the "
+                    + "book and page it is actually on, which is more "
+                    + "reliable than guessing. Returns the path it was "
+                    + "written to. Do not retry an unknown outcome - a second "
+                    + "attempt writes a second file.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["text"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["minLength"] = 1,
+                            ["maxLength"] = 240000,
+                            ["description"] = "The note's body.",
+                        },
+                        ["title"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["maxLength"] = 240,
+                            ["description"] =
+                                "Optional title. Pass an empty string to let "
+                                + "the Reader name it.",
+                        },
+                    },
+                    ["required"] = new JsonArray { "text", "title" },
+                    ["additionalProperties"] = false,
+                },
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = false,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = false,
                     ["openWorldHint"] = false,
                 },
             });
@@ -1507,6 +1553,51 @@ internal sealed class ReaderContextMcpServer
                 id,
                 arguments,
                 "highlight-text",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (
+            toolName == MakeNoteToolName
+            && _sendOutputAsync is not null
+        )
+        {
+            string madeText = arguments.ValueKind == JsonValueKind.Object
+                && arguments.TryGetProperty("text", out JsonElement madeValue)
+                && madeValue.ValueKind == JsonValueKind.String
+                ? madeValue.GetString() ?? string.Empty
+                : string.Empty;
+            string madeTitle = arguments.ValueKind == JsonValueKind.Object
+                && arguments.TryGetProperty("title", out JsonElement titleValue)
+                && titleValue.ValueKind == JsonValueKind.String
+                ? titleValue.GetString() ?? string.Empty
+                : string.Empty;
+            if (string.IsNullOrWhiteSpace(madeText)
+                || madeText.Length > 240_000
+                || madeTitle.Length > 240)
+            {
+                await WriteErrorAsync(
+                    id,
+                    -32602,
+                    "Invalid Reader note document",
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            JsonObject madePayload = new()
+            {
+                ["fn"] = "_nativeReaderMakeNote",
+                ["args"] = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["title"] = madeTitle,
+                        ["text"] = madeText,
+                    },
+                },
+            };
+            await SendReaderOutputAsync(
+                id,
+                "client-action",
+                madePayload,
                 cancellationToken).ConfigureAwait(false);
             return;
         }

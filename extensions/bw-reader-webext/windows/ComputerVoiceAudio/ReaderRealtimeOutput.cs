@@ -338,7 +338,8 @@ internal static class ReaderRealtimeOutputProtocol
         if (fn is not (
             "_nativeReaderUndoLast"
             or "_nativeReaderCreateNote"
-            or "_nativeReaderEditNote"))
+            or "_nativeReaderEditNote"
+            or "_nativeReaderMakeNote"))
         {
             throw Invalid("Reader 客户端动作不在白名单内");
         }
@@ -346,6 +347,31 @@ internal static class ReaderRealtimeOutputProtocol
         if (args.ValueKind != JsonValueKind.Array)
         {
             throw Invalid("Reader 客户端动作参数必须是数组");
+        }
+        if (fn is "_nativeReaderMakeNote")
+        {
+            // 标题可选：给了就用，没给由 App 按书名和时间生成。让桥接编一个，
+            // 出来的会是它以为用户在读的那本书。
+            if (args.GetArrayLength() != 1
+                || args[0].ValueKind != JsonValueKind.Object)
+            {
+                throw Invalid("Reader 笔记需要一个内容对象");
+            }
+            JsonElement made = args[0];
+            DirectJsonValidation.RequireNoDuplicateKeys(made);
+            Exact(made, "title", "text");
+            string madeText = Text(made, "text", 240_000);
+            if (string.IsNullOrWhiteSpace(madeText))
+            {
+                throw Invalid("Reader 笔记内容为空");
+            }
+            if (made.GetProperty("title").ValueKind != JsonValueKind.String
+                || (made.GetProperty("title").GetString() ?? string.Empty)
+                    .Length > 240)
+            {
+                throw Invalid("Reader 笔记标题无效");
+            }
+            return;
         }
         if (fn is "_nativeReaderEditNote")
         {
