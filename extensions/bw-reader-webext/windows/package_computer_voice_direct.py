@@ -126,8 +126,6 @@ class InstallServiceController(Protocol):
 
     def stop(self, install_root: Path) -> None: ...
 
-    def start(self, install_root: Path) -> None: ...
-
 
 class InstallMcpController(Protocol):
     def quiesce(self, install_root: Path) -> int: ...
@@ -276,17 +274,6 @@ class BridgeCoreInstallServiceController:
             self._runner,
         ):
             _fail("Direct 服务在安装前未确认停止")
-
-    def start(self, install_root: Path) -> None:
-        paths = self._paths(install_root)
-        self._module.start_direct_service(paths, self._runner)
-        deadline = time.monotonic() + 10.0
-        while time.monotonic() < deadline:
-            if self._module.read_direct_status(paths, self._runner).service_online:
-                return
-            time.sleep(0.1)
-        _fail("Direct 服务重启后 10 秒内未进入在线状态")
-
 
 def _same_windows_path(left: Path | str, right: Path | str) -> bool:
     def normalized(value: Path | str) -> str:
@@ -1819,13 +1806,16 @@ def _install_verified_payload(
             installed_payload,
             runner=runner,
         )
-        if was_running:
-            service_controller.start(install_root)
         receipt = {
             "backup": str(backup),
             "installedVersion": installed_manifest["version"],
             "previousVersion": current_manifest["version"],
-            "serviceRestored": was_running,
+            # ReaderPC owns Direct through its process handle. Recreating the
+            # stopped generation here would necessarily omit that owner and
+            # escape the server lifecycle. Leave it stopped; a still-running
+            # ReaderPC monitor will create one fresh owned generation.
+            "serviceRestored": False,
+            "serviceRestartDeferredToReaderPC": was_running,
             "mcpProcessesStopped": mcp_processes_stopped,
         }
         (backup / "install-receipt.json").write_text(
@@ -1852,11 +1842,6 @@ def _install_verified_payload(
                 _verified_install_directory(install_root, label="自动回滚后的 Direct")
             except Exception as exc:
                 recovery_errors.append(f"恢复旧 payload 失败: {exc}")
-        if was_running:
-            try:
-                service_controller.start(install_root)
-            except Exception as exc:
-                recovery_errors.append(f"恢复旧 Direct 服务失败: {exc}")
         detail = f"安装失败，已自动回滚: {install_error}"
         if recovery_errors:
             detail += "; " + "; ".join(recovery_errors)

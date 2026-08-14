@@ -159,11 +159,6 @@ class FakeInstallService:
             raise AssertionError("service was not running")
         self.running = False
 
-    def start(self, install_root: Path) -> None:
-        self.events.append("start")
-        self.running = True
-
-
 class FakeMcpController:
     def __init__(self, *, stopped: int = 0) -> None:
         self.stopped = stopped
@@ -325,7 +320,7 @@ class DirectPackageTests(unittest.TestCase):
         (install_root / "dotnet8" / "dotnet.exe").write_bytes(b"dotnet-must-survive")
         return old_manifest, old_payload
 
-    def test_atomic_install_backs_up_payload_preserves_state_and_restores_service(self) -> None:
+    def test_atomic_install_defers_service_restart_to_readerpc_owner(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             archive = self._candidate(root)
@@ -349,12 +344,14 @@ class DirectPackageTests(unittest.TestCase):
             self.assertEqual(receipt["installedVersion"], "0.4.1")
             self.assertEqual(receipt["previousVersion"], "0.4.0")
             self.assertEqual(receipt["mcpProcessesStopped"], 2)
+            self.assertFalse(receipt["serviceRestored"])
+            self.assertTrue(receipt["serviceRestartDeferredToReaderPC"])
             self.assertEqual(mcp.events, ["quiesce"])
             self.assertEqual(
                 service.events,
-                ["is-running", "stop", "start"],
+                ["is-running", "stop"],
             )
-            self.assertTrue(service.running)
+            self.assertFalse(service.running)
             installed, _ = package._verified_install_directory(
                 install_root, label="test installed"
             )
@@ -378,6 +375,9 @@ class DirectPackageTests(unittest.TestCase):
             self.assertEqual(backed_manifest, old_manifest)
             self.assertEqual(backed_payload, old_payload)
 
+            # Model ReaderPC's monitor creating a fresh owned generation
+            # before a later explicit rollback transaction.
+            service.running = True
             rollback_receipt = package.rollback_install(
                 backup,
                 install_root=install_root,
@@ -387,6 +387,10 @@ class DirectPackageTests(unittest.TestCase):
                 runner=FakeRunner(),
             )
             self.assertEqual(rollback_receipt["installedVersion"], "0.4.0")
+            self.assertFalse(rollback_receipt["serviceRestored"])
+            self.assertTrue(
+                rollback_receipt["serviceRestartDeferredToReaderPC"]
+            )
             self.assertEqual(mcp.events, ["quiesce", "quiesce"])
             rolled_back, rolled_back_payload = package._verified_install_directory(
                 install_root, label="test explicit rollback"
@@ -396,12 +400,13 @@ class DirectPackageTests(unittest.TestCase):
             self.assertEqual(
                 service.events,
                 [
-                    "is-running", "stop", "start",
-                    "is-running", "stop", "start",
+                    "is-running", "stop",
+                    "is-running", "stop",
                 ],
             )
+            self.assertFalse(service.running)
 
-    def test_partial_install_failure_restores_old_payload_and_service(self) -> None:
+    def test_partial_install_failure_restores_payload_but_not_ownerless_service(self) -> None:
         with tempfile.TemporaryDirectory() as raw:
             root = Path(raw)
             archive = self._candidate(root)
@@ -440,11 +445,11 @@ class DirectPackageTests(unittest.TestCase):
             )
             self.assertEqual(restored_manifest, old_manifest)
             self.assertEqual(restored_payload, old_payload)
-            self.assertTrue(service.running)
+            self.assertFalse(service.running)
             self.assertEqual(mcp.events, ["quiesce", "quiesce"])
             self.assertEqual(
                 service.events,
-                ["is-running", "stop", "is-running", "start"],
+                ["is-running", "stop", "is-running"],
             )
             self.assertEqual(
                 (install_root / "runtime" / "state.json").read_text(),
@@ -513,8 +518,9 @@ class DirectPackageTests(unittest.TestCase):
             self.assertEqual(backend.terminated, [])
             self.assertEqual(
                 service.events,
-                ["is-running", "stop", "is-running", "start"],
+                ["is-running", "stop", "is-running"],
             )
+            self.assertFalse(service.running)
             restored_manifest, restored_payload = package._verified_install_directory(
                 install_root, label="test unfamiliar owner unchanged"
             )

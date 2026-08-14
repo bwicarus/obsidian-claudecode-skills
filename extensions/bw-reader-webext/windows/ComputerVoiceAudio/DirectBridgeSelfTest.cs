@@ -754,6 +754,107 @@ internal static class DirectBridgeSelfTest
         await CheckReaderBrowserControlAsync(
             root,
             checks).ConfigureAwait(false);
+        await CheckReaderPcOwnerLeaseAsync(checks)
+            .ConfigureAwait(false);
+    }
+
+    private static async Task CheckReaderPcOwnerLeaseAsync(
+        ICollection<string> checks)
+    {
+        bool missingRejected = false;
+        try
+        {
+            _ = DirectReaderPcOwnerLease.Open(null);
+        }
+        catch (DirectProtocolException exception)
+            when (
+                exception.Code
+                    == "BW_COMPUTER_VOICE_READERPC_OWNER_PID_INVALID"
+            )
+        {
+            missingRejected = true;
+        }
+        bool selfRejected = false;
+        try
+        {
+            _ = DirectReaderPcOwnerLease.Open(
+                Environment.ProcessId.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture));
+        }
+        catch (DirectProtocolException exception)
+            when (
+                exception.Code
+                    == "BW_COMPUTER_VOICE_READERPC_OWNER_PID_INVALID"
+            )
+        {
+            selfRejected = true;
+        }
+        bool unavailableRejected = false;
+        try
+        {
+            _ = DirectReaderPcOwnerLease.Open(
+                int.MaxValue.ToString(
+                    System.Globalization.CultureInfo.InvariantCulture));
+        }
+        catch (DirectProtocolException exception)
+            when (
+                exception.Code
+                    == "BW_COMPUTER_VOICE_READERPC_OWNER_UNAVAILABLE"
+            )
+        {
+            unavailableRejected = true;
+        }
+        Require(
+            missingRejected && selfRejected && unavailableRejected,
+            "readerpc-owner-pid-missing-invalid-and-unavailable-fail-closed",
+            checks);
+
+        string commandProcessor =
+            Environment.GetEnvironmentVariable("ComSpec")
+            ?? System.IO.Path.Combine(
+                Environment.SystemDirectory,
+                "cmd.exe");
+        ProcessStartInfo startInfo = new()
+        {
+            FileName = commandProcessor,
+            Arguments = "/d /s /c \"ping -n 30 127.0.0.1 >nul\"",
+            UseShellExecute = false,
+            CreateNoWindow = true,
+        };
+        using Process owner = Process.Start(startInfo)
+            ?? throw new InvalidOperationException(
+                "self-test failed to start ReaderPC owner process");
+        try
+        {
+            using DirectReaderPcOwnerLease lease =
+                DirectReaderPcOwnerLease.Open(
+                    owner.Id.ToString(
+                        System.Globalization.CultureInfo.InvariantCulture));
+            using CancellationTokenSource serviceLifetime = new();
+            using CancellationTokenSource monitorLifetime = new(
+                TimeSpan.FromSeconds(5));
+            Task monitor = lease.CancelServiceWhenExitedAsync(
+                serviceLifetime,
+                monitorLifetime.Token);
+            owner.Kill(entireProcessTree: true);
+            await owner.WaitForExitAsync().WaitAsync(
+                TimeSpan.FromSeconds(5)).ConfigureAwait(false);
+            await monitor.WaitAsync(TimeSpan.FromSeconds(5))
+                .ConfigureAwait(false);
+            Require(
+                lease.OwnerProcessId == owner.Id
+                && serviceLifetime.IsCancellationRequested,
+                "readerpc-owner-original-process-exit-cancels-direct-lifetime",
+                checks);
+        }
+        finally
+        {
+            if (!owner.HasExited)
+            {
+                owner.Kill(entireProcessTree: true);
+                await owner.WaitForExitAsync().ConfigureAwait(false);
+            }
+        }
     }
 
     private static async Task CheckDictionaryFallbackProtocolAsync(
@@ -4092,6 +4193,17 @@ internal static class DirectBridgeSelfTest
             (active, before, cancellationToken) =>
             {
                 cancellationToken.ThrowIfCancellationRequested();
+                if (!active)
+                {
+                    firstAttemptF24Count++;
+                    firstAttemptState =
+                        CodexVoiceActivitySnapshot.Available(
+                            before.LastUsedTimeStart,
+                            Math.Max(
+                                before.LastUsedTimeStart,
+                                before.LastUsedTimeStop) + 1);
+                    return Task.FromResult(firstAttemptState);
+                }
                 Require(
                     coldStartLauncher.EnsureRunningCount == 1
                     && coldStartLauncher.WaitReadyCount == 1
@@ -4187,6 +4299,16 @@ internal static class DirectBridgeSelfTest
                 cancellationToken.ThrowIfCancellationRequested();
                 recoveryTransitions++;
                 recoverySequence.Add("f24");
+                if (!active)
+                {
+                    recoveryState =
+                        CodexVoiceActivitySnapshot.Available(
+                            before.LastUsedTimeStart,
+                            Math.Max(
+                                before.LastUsedTimeStart,
+                                before.LastUsedTimeStop) + 1);
+                    return Task.FromResult(recoveryState);
+                }
                 if (recoveryTransitions == 1)
                 {
                     throw new DirectProtocolException(
@@ -4252,9 +4374,16 @@ internal static class DirectBridgeSelfTest
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 preparedTransitionCount++;
-                preparedState = CodexVoiceActivitySnapshot.Available(
-                    lastUsedTimeStart: 701,
-                    lastUsedTimeStop: before.LastUsedTimeStop);
+                preparedState = active
+                    ? CodexVoiceActivitySnapshot.Available(
+                        lastUsedTimeStart: 701,
+                        lastUsedTimeStop: before.LastUsedTimeStop)
+                    : CodexVoiceActivitySnapshot.Available(
+                        lastUsedTimeStart: before.LastUsedTimeStart,
+                        lastUsedTimeStop:
+                            Math.Max(
+                                before.LastUsedTimeStart,
+                                before.LastUsedTimeStop) + 1);
                 return Task.FromResult(preparedState);
             },
             prepareStartAsync: async (_, cancellationToken) =>
@@ -4307,10 +4436,20 @@ internal static class DirectBridgeSelfTest
             {
                 cancellationToken.ThrowIfCancellationRequested();
                 startupTransitionCount++;
-                startupState = CodexVoiceActivitySnapshot.Available(
-                    lastUsedTimeStart: 901,
-                    lastUsedTimeStop: before.LastUsedTimeStop);
-                startupActivated.TrySetResult(true);
+                startupState = active
+                    ? CodexVoiceActivitySnapshot.Available(
+                        lastUsedTimeStart: 901,
+                        lastUsedTimeStop: before.LastUsedTimeStop)
+                    : CodexVoiceActivitySnapshot.Available(
+                        lastUsedTimeStart: before.LastUsedTimeStart,
+                        lastUsedTimeStop:
+                            Math.Max(
+                                before.LastUsedTimeStart,
+                                before.LastUsedTimeStop) + 1);
+                if (active)
+                {
+                    startupActivated.TrySetResult(true);
+                }
                 return Task.FromResult(startupState);
             },
             keepActivePath: startupKeepActivePath,
@@ -4516,7 +4655,11 @@ internal static class DirectBridgeSelfTest
         int automaticFailureTransitions = 0;
         int automaticFailurePreparations = 0;
         int automaticFailureRestarts = 0;
+        int automaticFailureNotifications = 0;
+        int automaticFailureBackoffs = 0;
         TaskCompletionSource<Exception> automaticFailureSeen = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        TaskCompletionSource<bool> automaticFailureExhausted = new(
             TaskCreationOptions.RunContinuationsAsynchronously);
         await using DirectCodexVoiceControl automaticFailureControl = new(
             () => CodexVoiceActivitySnapshot.Available(1000, 1100),
@@ -4545,22 +4688,130 @@ internal static class DirectBridgeSelfTest
                 return Task.CompletedTask;
             },
             automaticRecoveryFailed: exception =>
-                automaticFailureSeen.TrySetResult(exception));
+            {
+                automaticFailureNotifications++;
+                automaticFailureSeen.TrySetResult(exception);
+                if (
+                    automaticFailureNotifications
+                        == DirectCodexVoiceControl
+                            .MaximumAutomaticRecoveryFailuresPerIntent
+                )
+                {
+                    automaticFailureExhausted.TrySetResult(true);
+                }
+            },
+            automaticRecoveryDelayAsync: (delay, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                Require(
+                    delay
+                        == DirectCodexVoiceControl
+                            .AutomaticRecoveryRetryDelay,
+                    "direct-codex-voice-persistent-failure-uses-bounded-backoff",
+                    checks);
+                automaticFailureBackoffs++;
+                return Task.Delay(
+                    TimeSpan.FromMilliseconds(50),
+                    cancellationToken);
+            });
         Exception recordedAutomaticFailure =
             await automaticFailureSeen.Task.WaitAsync(
                 TimeSpan.FromSeconds(2)).ConfigureAwait(false);
-        await Task.Delay(TimeSpan.FromMilliseconds(1200))
+        _ = await automaticFailureExhausted.Task.WaitAsync(
+            TimeSpan.FromSeconds(2)).ConfigureAwait(false);
+        await Task.Delay(TimeSpan.FromMilliseconds(250))
             .ConfigureAwait(false);
         Require(
             automaticFailureControl.KeepActive
-            && automaticFailureTransitions == 2
-            && automaticFailurePreparations == 1
-            && automaticFailureRestarts == 1
+            && automaticFailureTransitions == 4
+            && automaticFailurePreparations == 2
+            && automaticFailureRestarts == 2
+            && automaticFailureNotifications == 2
+            && automaticFailureBackoffs == 1
             && recordedAutomaticFailure is DirectProtocolException
             {
                 Code: CodexVoiceActivityController.StartNotConfirmedCode,
             },
             "direct-codex-voice-automatic-failure-is-bounded-and-visible",
+            checks);
+
+        string transientAutomaticFailurePath = System.IO.Path.Combine(
+            installationRoot,
+            "runtime",
+            "codex-voice-keepalive-transient-failure.json");
+        await File.WriteAllTextAsync(
+            transientAutomaticFailurePath,
+            """{"contract":"reader-codex-voice-keepalive/1","enabled":true}""")
+            .ConfigureAwait(false);
+        CodexVoiceActivitySnapshot transientAutomaticState =
+            CodexVoiceActivitySnapshot.Available(1600, 1700);
+        int transientAutomaticPreparations = 0;
+        int transientAutomaticTransitions = 0;
+        int transientAutomaticBackoffs = 0;
+        TaskCompletionSource<bool> transientAutomaticRecovered = new(
+            TaskCreationOptions.RunContinuationsAsynchronously);
+        await using DirectCodexVoiceControl transientAutomaticControl = new(
+            () => transientAutomaticState,
+            (active, before, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                transientAutomaticTransitions++;
+                transientAutomaticState = active
+                    ? CodexVoiceActivitySnapshot.Available(
+                        Math.Max(
+                            before.LastUsedTimeStart,
+                            before.LastUsedTimeStop) + 1,
+                        before.LastUsedTimeStop)
+                    : CodexVoiceActivitySnapshot.Available(
+                        before.LastUsedTimeStart,
+                        Math.Max(
+                            before.LastUsedTimeStart,
+                            before.LastUsedTimeStop) + 1);
+                if (active)
+                {
+                    transientAutomaticRecovered.TrySetResult(true);
+                }
+                return Task.FromResult(transientAutomaticState);
+            },
+            keepActivePath: transientAutomaticFailurePath,
+            keepActivePollInterval: TimeSpan.FromSeconds(1),
+            prepareStartAsync: (_, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                transientAutomaticPreparations++;
+                if (transientAutomaticPreparations == 1)
+                {
+                    throw new DirectProtocolException(
+                        "BW_COMPUTER_VOICE_DIRECT_APP_AMBIGUOUS",
+                        "temporary duplicate Codex process tree");
+                }
+                return Task.CompletedTask;
+            },
+            automaticRecoveryDelayAsync: (delay, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                Require(
+                    delay
+                        == DirectCodexVoiceControl
+                            .AutomaticRecoveryRetryDelay,
+                    "direct-codex-voice-transient-retry-uses-bounded-backoff",
+                    checks);
+                transientAutomaticBackoffs++;
+                return Task.Delay(
+                    TimeSpan.FromMilliseconds(100),
+                    cancellationToken);
+            });
+        _ = await transientAutomaticRecovered.Task.WaitAsync(
+            TimeSpan.FromMilliseconds(2500)).ConfigureAwait(false);
+        await Task.Delay(TimeSpan.FromMilliseconds(1200))
+            .ConfigureAwait(false);
+        Require(
+            transientAutomaticControl.KeepActive
+            && transientAutomaticState.Active
+            && transientAutomaticPreparations == 2
+            && transientAutomaticTransitions == 1
+            && transientAutomaticBackoffs == 1,
+            "direct-codex-voice-transient-automatic-failure-rearms-once",
             checks);
 
         CodexVoiceActivitySnapshot cancelState =
@@ -4952,6 +5203,85 @@ internal static class DirectBridgeSelfTest
                 RequireSuccess(reply, "codex-voice-set")
                     .GetProperty("shortcutSent").GetBoolean()),
             "direct-codex-voice-set-is-serialized-across-connections",
+            checks);
+
+        string disposeKeepActivePath = System.IO.Path.Combine(
+            installationRoot,
+            "runtime",
+            "codex-voice-keepalive-dispose.json");
+        await WriteKeepActiveIntentAsync(
+            disposeKeepActivePath,
+            enabled: true).ConfigureAwait(false);
+        CodexVoiceActivitySnapshot disposeState =
+            CodexVoiceActivitySnapshot.Available(
+                lastUsedTimeStart: 3200,
+                lastUsedTimeStop: 3100);
+        List<bool> disposeTransitions = [];
+        DirectCodexVoiceControl disposeControl = new(
+            () => disposeState,
+            (active, before, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                disposeTransitions.Add(active);
+                disposeState = CodexVoiceActivitySnapshot.Available(
+                    lastUsedTimeStart: before.LastUsedTimeStart,
+                    lastUsedTimeStop: before.LastUsedTimeStart + 1);
+                return Task.FromResult(disposeState);
+            },
+            keepActivePath: disposeKeepActivePath,
+            keepActivePollInterval: TimeSpan.FromSeconds(10));
+        await disposeControl.DisposeAsync().ConfigureAwait(false);
+        await disposeControl.DisposeAsync().ConfigureAwait(false);
+        using JsonDocument disposedIntent = JsonDocument.Parse(
+            await File.ReadAllTextAsync(disposeKeepActivePath)
+                .ConfigureAwait(false));
+        Require(
+            !disposeControl.KeepActive
+            && !disposeState.Active
+            && disposeTransitions.SequenceEqual(new[] { false })
+            && disposedIntent.RootElement
+                .GetProperty("enabled").GetBoolean() == false,
+            "direct-dispose-revokes-keepalive-and-stops-active-voice-once",
+            checks);
+
+        string failedDisposePath = System.IO.Path.Combine(
+            installationRoot,
+            "runtime",
+            "codex-voice-keepalive-dispose-failed.json");
+        await WriteKeepActiveIntentAsync(
+            failedDisposePath,
+            enabled: true).ConfigureAwait(false);
+        DirectCodexVoiceControl failedDisposeControl = new(
+            () => CodexVoiceActivitySnapshot.Available(4200, 4100),
+            (_, _, cancellationToken) =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                throw new DirectProtocolException(
+                    "BW_COMPUTER_VOICE_DIRECT_FAKE_DISPOSE_STOP_FAILED",
+                    "fake dispose stop failed");
+            },
+            keepActivePath: failedDisposePath,
+            keepActivePollInterval: TimeSpan.FromSeconds(10));
+        string? failedDisposeCode = null;
+        try
+        {
+            await failedDisposeControl.DisposeAsync()
+                .ConfigureAwait(false);
+        }
+        catch (DirectProtocolException exception)
+        {
+            failedDisposeCode = exception.Code;
+        }
+        using JsonDocument failedDisposeIntent = JsonDocument.Parse(
+            await File.ReadAllTextAsync(failedDisposePath)
+                .ConfigureAwait(false));
+        Require(
+            failedDisposeCode
+                == "BW_COMPUTER_VOICE_DIRECT_FAKE_DISPOSE_STOP_FAILED"
+            && !failedDisposeControl.KeepActive
+            && !failedDisposeIntent.RootElement
+                .GetProperty("enabled").GetBoolean(),
+            "direct-dispose-stop-failure-is-visible-after-intent-revocation",
             checks);
     }
 

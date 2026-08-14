@@ -1,3 +1,5 @@
+using System.Diagnostics;
+using System.Globalization;
 using System.Text.Json;
 
 namespace BwReader.ComputerVoiceAudio;
@@ -136,57 +138,12 @@ internal static class Program
                     CancellationToken.None).ConfigureAwait(false));
             }
             if (
-                args.Length == 3
+                args.Length >= 1
                 && args[0] == "--direct-serve"
-                && args[1] == "--config"
             )
             {
-                if (!Path.IsPathFullyQualified(args[2]))
-                {
-                    throw new DirectProtocolException(
-                        "BW_COMPUTER_VOICE_DIRECT_CONFIG_PATH_INVALID",
-                        "直连配置必须使用绝对路径");
-                }
-                string configPath = Path.GetFullPath(args[2]);
-                using Mutex directServeMutex = new(
-                    initiallyOwned: false,
-                    DirectServeMutexName);
-                bool ownsDirectServeMutex;
-                try
-                {
-                    ownsDirectServeMutex = directServeMutex.WaitOne(0);
-                }
-                catch (AbandonedMutexException)
-                {
-                    ownsDirectServeMutex = true;
-                }
-                if (!ownsDirectServeMutex)
-                {
-                    return 0;
-                }
-                try
-                {
-                    DirectBridgeConfigStore configStore = new(configPath);
-                    _ = configStore.Load();
-                    await using DirectBridgeServer server = new(
-                        configStore,
-                        new WindowsDirectAppLauncher(),
-                        new WindowsDirectMediaAdapter(
-                            configStore.InstallationRoot),
-                        new NamedPipeDirectContextAdapter(),
-                        new FileDirectSnapshotContextAdapter(
-                            Path.Combine(
-                                configStore.InstallationRoot,
-                                "runtime",
-                                FileDirectSnapshotContextAdapter
-                                    .SnapshotFileName)));
-                    return await server.RunAsync(CancellationToken.None)
-                        .ConfigureAwait(false);
-                }
-                finally
-                {
-                    directServeMutex.ReleaseMutex();
-                }
+                return await RunDirectServiceAsync(args)
+                    .ConfigureAwait(false);
             }
             if (
                 args.Length == 3
@@ -249,6 +206,18 @@ internal static class Program
             }
             return RejectUnknownCommand();
         }
+        catch (DirectProtocolException exception)
+        {
+            Console.Error.WriteLine(JsonSerializer.Serialize(new
+            {
+                contract = AudioBridgeContract.Contract,
+                ok = false,
+                error = exception.Code,
+                retryable = exception.Retryable,
+                detail = exception.Message,
+            }, JsonOptions));
+            return 1;
+        }
         catch (Exception exception)
         {
             Console.Error.WriteLine(JsonSerializer.Serialize(new
@@ -259,6 +228,115 @@ internal static class Program
                 detail = exception.ToString(),
             }, JsonOptions));
             return 1;
+        }
+    }
+
+    private static async Task<int> RunDirectServiceAsync(string[] args)
+    {
+        string? readerPcOwnerPid = null;
+        if (
+            args.Length == 3
+            && args[1] == "--config"
+        )
+        {
+            // Retained for package self-tests and legacy standalone callers.
+        }
+        else if (
+            args.Length == 5
+            && args[1] == "--config"
+            && args[3] == "--readerpc-owner-pid"
+        )
+        {
+            readerPcOwnerPid = args[4];
+        }
+        else
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_ARGUMENTS_INVALID",
+                "直连服务参数无效；ReaderPC 所有权模式必须提供 owner PID");
+        }
+
+        if (!Path.IsPathFullyQualified(args[2]))
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_DIRECT_CONFIG_PATH_INVALID",
+                "直连配置必须使用绝对路径");
+        }
+        string configPath = Path.GetFullPath(args[2]);
+        using DirectReaderPcOwnerLease? ownerLease =
+            readerPcOwnerPid is null
+                ? null
+                : DirectReaderPcOwnerLease.Open(readerPcOwnerPid);
+        using Mutex directServeMutex = new(
+            initiallyOwned: false,
+            DirectServeMutexName);
+        bool ownsDirectServeMutex;
+        try
+        {
+            ownsDirectServeMutex = directServeMutex.WaitOne(0);
+        }
+        catch (AbandonedMutexException)
+        {
+            ownsDirectServeMutex = true;
+        }
+        if (!ownsDirectServeMutex)
+        {
+            if (ownerLease is not null)
+            {
+                throw new DirectProtocolException(
+                    "BW_COMPUTER_VOICE_READERPC_OWNER_NOT_BOUND",
+                    "已有 Direct 实例运行，新的 ReaderPC owner 未获得服务所有权");
+            }
+            return 0;
+        }
+        try
+        {
+            DirectBridgeConfigStore configStore = new(configPath);
+            _ = configStore.Load();
+            await using DirectBridgeServer server = new(
+                configStore,
+                new WindowsDirectAppLauncher(),
+                new WindowsDirectMediaAdapter(
+                    configStore.InstallationRoot),
+                new NamedPipeDirectContextAdapter(),
+                new FileDirectSnapshotContextAdapter(
+                    Path.Combine(
+                        configStore.InstallationRoot,
+                        "runtime",
+                        FileDirectSnapshotContextAdapter
+                            .SnapshotFileName)));
+            if (ownerLease is null)
+            {
+                return await server.RunAsync(CancellationToken.None)
+                    .ConfigureAwait(false);
+            }
+
+            using CancellationTokenSource serviceLifetime = new();
+            using CancellationTokenSource ownerMonitorLifetime = new();
+            Task ownerMonitor = ownerLease.CancelServiceWhenExitedAsync(
+                serviceLifetime,
+                ownerMonitorLifetime.Token);
+            try
+            {
+                return await server.RunAsync(serviceLifetime.Token)
+                    .ConfigureAwait(false);
+            }
+            finally
+            {
+                ownerMonitorLifetime.Cancel();
+                try
+                {
+                    await ownerMonitor.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                    when (ownerMonitorLifetime.IsCancellationRequested)
+                {
+                }
+            }
+        }
+        finally
+        {
+            directServeMutex.ReleaseMutex();
         }
     }
 
@@ -310,6 +388,8 @@ internal static class Program
                 "--probe-direct-output-route --config <absolute-path>",
                 "--diagnose-direct-audio-no-start --config <absolute-path>",
                 "--direct-serve --config <absolute-path>",
+                "--direct-serve --config <absolute-path> "
+                    + "--readerpc-owner-pid <positive-pid>",
                 "--reader-context-mcp --state <absolute-path>",
                 "--reader-context-view --state <absolute-path>",
                 "Chrome Native Messaging origin (registered host only)",
@@ -365,5 +445,101 @@ internal static class Program
             appLaunched = false,
         }, JsonOptions));
         return ok ? 0 : 1;
+    }
+}
+
+internal sealed class DirectReaderPcOwnerLease : IDisposable
+{
+    private readonly Process _owner;
+    private bool _disposed;
+
+    private DirectReaderPcOwnerLease(Process owner)
+    {
+        _owner = owner;
+    }
+
+    internal int OwnerProcessId => _owner.Id;
+
+    internal static DirectReaderPcOwnerLease Open(string? rawOwnerPid)
+    {
+        if (
+            !int.TryParse(
+                rawOwnerPid,
+                NumberStyles.None,
+                CultureInfo.InvariantCulture,
+                out int ownerPid)
+            || ownerPid <= 0
+            || ownerPid == Environment.ProcessId
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_READERPC_OWNER_PID_INVALID",
+                "ReaderPC owner PID 必须是另一个仍在运行的正整数进程");
+        }
+
+        Process? owner = null;
+        try
+        {
+            owner = Process.GetProcessById(ownerPid);
+            // Force the waitable process handle to open now. Holding this
+            // handle binds the lease to the original process even if Windows
+            // later recycles the numeric PID.
+            _ = owner.SafeHandle;
+            if (owner.HasExited)
+            {
+                throw new InvalidOperationException(
+                    "ReaderPC owner already exited");
+            }
+            return new DirectReaderPcOwnerLease(owner);
+        }
+        catch (Exception exception)
+            when (
+                exception is ArgumentException
+                or InvalidOperationException
+                or System.ComponentModel.Win32Exception
+            )
+        {
+            owner?.Dispose();
+            throw new DirectProtocolException(
+                "BW_COMPUTER_VOICE_READERPC_OWNER_UNAVAILABLE",
+                "ReaderPC owner 进程不存在、已退出或无法等待",
+                retryable: false,
+                innerException: exception);
+        }
+    }
+
+    internal async Task CancelServiceWhenExitedAsync(
+        CancellationTokenSource serviceLifetime,
+        CancellationToken cancellationToken)
+    {
+        ObjectDisposedException.ThrowIf(_disposed, this);
+        ArgumentNullException.ThrowIfNull(serviceLifetime);
+        try
+        {
+            await _owner.WaitForExitAsync(cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (OperationCanceledException)
+            when (cancellationToken.IsCancellationRequested)
+        {
+            return;
+        }
+        finally
+        {
+            if (!cancellationToken.IsCancellationRequested)
+            {
+                serviceLifetime.Cancel();
+            }
+        }
+    }
+
+    public void Dispose()
+    {
+        if (_disposed)
+        {
+            return;
+        }
+        _disposed = true;
+        _owner.Dispose();
     }
 }

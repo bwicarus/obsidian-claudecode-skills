@@ -181,6 +181,7 @@ class ReaderContextStatus:
 class CodexVoiceActivityStatus:
     status: str
     active: bool | None
+    generation: int | None = None
 
 
 def _nonnegative_filetime(value: object) -> int | None:
@@ -206,7 +207,7 @@ def read_codex_voice_activity(
 
     if value_reader is None:
         if os.name != "nt":
-            return CodexVoiceActivityStatus("unavailable", None)
+            return CodexVoiceActivityStatus("unavailable", None, None)
 
         def value_reader() -> tuple[object, object] | None:
             import winreg
@@ -227,16 +228,18 @@ def read_codex_voice_activity(
     try:
         values = value_reader()
     except (OSError, PermissionError, ValueError):
-        return CodexVoiceActivityStatus("error", None)
+        return CodexVoiceActivityStatus("error", None, None)
     if values is None:
-        return CodexVoiceActivityStatus("unavailable", None)
+        return CodexVoiceActivityStatus("unavailable", None, None)
     start = _nonnegative_filetime(values[0])
     stop = _nonnegative_filetime(values[1])
     if start is None or stop is None:
-        return CodexVoiceActivityStatus("error", None)
+        return CodexVoiceActivityStatus("error", None, None)
+    active = start > 0 and (stop == 0 or start > stop)
     return CodexVoiceActivityStatus(
         "available",
-        start > 0 and (stop == 0 or start > stop),
+        active,
+        start if active else None,
     )
 
 def read_reader_context_status(

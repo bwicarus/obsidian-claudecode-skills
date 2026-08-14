@@ -1142,13 +1142,25 @@ def _require_exact_native_paths(paths: BridgePaths) -> tuple[Path, Path]:
     return expected_host, expected_config
 
 
-def build_start_command(paths: BridgePaths) -> tuple[str, ...]:
+def build_start_command(
+    paths: BridgePaths,
+    *,
+    readerpc_owner_pid: int | None = None,
+) -> tuple[str, ...]:
     host, config = _require_exact_native_paths(paths)
-    return (
+    command = (
         str(host),
         "--direct-serve",
         "--config",
         str(config),
+    )
+    if readerpc_owner_pid is None:
+        return command
+    if not isinstance(readerpc_owner_pid, int) or readerpc_owner_pid <= 0:
+        raise BridgeError("ReaderPC owner PID 无效。")
+    return command + (
+        "--readerpc-owner-pid",
+        str(readerpc_owner_pid),
     )
 
 
@@ -1370,6 +1382,7 @@ def start_direct_service(
     runner: ProcessRunner,
     *,
     now: datetime | None = None,
+    readerpc_owner_pid: int | None = None,
 ) -> int:
     migrate_native_app_origin(paths)
     config = load_direct_config(paths)
@@ -1394,7 +1407,10 @@ def start_direct_service(
                 "固定直连代理进程仍存在但状态无效；"
                 "请先显式停止，拒绝启动第二实例。"
             )
-    command = build_start_command(paths)
+    command = build_start_command(
+        paths,
+        readerpc_owner_pid=readerpc_owner_pid,
+    )
     pid = runner.start(command, cwd=paths.native_host.parent.resolve())
     if not isinstance(pid, int) or pid <= 0:
         raise BridgeError("直连代理没有返回有效 PID。")
@@ -1827,6 +1843,30 @@ class WindowsShortcutBroker:
         thread.join(timeout=SHORTCUT_BROKER_READY_TIMEOUT_SECONDS)
         self._thread = None
 
+    @classmethod
+    def probe_available(cls) -> bool:
+        """Check that the local owned pipe exists without sending F24."""
+
+        if os.name != "nt":
+            return False
+        try:
+            kernel32 = cls._configure_kernel32()
+            handle = kernel32.CreateFileW(
+                SHORTCUT_BROKER_PIPE_PATH,
+                cls.GENERIC_READ | cls.GENERIC_WRITE,
+                0,
+                None,
+                cls.OPEN_EXISTING,
+                0,
+                None,
+            )
+            if handle != cls.INVALID_HANDLE_VALUE:
+                kernel32.CloseHandle(handle)
+                return True
+            return ctypes.get_last_error() == cls.ERROR_PIPE_BUSY
+        except OSError:
+            return False
+
     @staticmethod
     def _configure_kernel32() -> Any:
         kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
@@ -2126,8 +2166,17 @@ class WindowsProcessRunner:
         expected_config = (
             executable.parent / "computer-voice-direct.config.json"
         ).resolve()
+        owner_args_valid = (
+            len(command) == 4
+            or (
+                len(command) == 6
+                and command[4] == "--readerpc-owner-pid"
+                and command[5].isdigit()
+                and int(command[5]) > 0
+            )
+        )
         if (
-            len(command) != 4
+            not owner_args_valid
             or command[1] != "--direct-serve"
             or command[2] != "--config"
             or not _same_path(command[3], expected_config)

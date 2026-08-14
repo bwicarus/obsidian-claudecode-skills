@@ -5,7 +5,7 @@ from pathlib import Path
 import sys
 import tempfile
 import unittest
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
 
 SOURCE_ROOT = Path(__file__).resolve().parents[1]
@@ -14,7 +14,6 @@ sys.path.insert(0, str(SOURCE_ROOT))
 from bridge_core import CaptureEndpoint  # noqa: E402
 from bridge_core import BridgeError, DirectStatus  # noqa: E402
 from bridge_core import RenderEndpoint  # noqa: E402
-from control_plane import TaskInspection  # noqa: E402
 from desktop_launcher import (  # noqa: E402
     BridgeWindow,
     history_sync_enabled,
@@ -60,13 +59,12 @@ class DesktopLauncherTests(unittest.TestCase):
         window = BridgeWindow.__new__(BridgeWindow)
         window.busy = False
         window.enable_button = FakeWidget()
-        window.start_button = FakeWidget()
         window.refresh_button = FakeWidget()
         window.footer = FakeWidget()
         window.set_busy(True, "working")
         self.assertTrue(window.busy)
         self.assertEqual(
-            window.start_button.values[-1],
+            window.enable_button.values[-1],
             {"state": "disabled"},
         )
         self.assertEqual(
@@ -274,7 +272,6 @@ class DesktopLauncherTests(unittest.TestCase):
         calls: list[str] = []
         window.run_task = lambda *_: calls.append("mutation")
         for method in (
-            window.on_install_bootstrap,
             window.on_remove_bootstrap,
             window.on_apply_tailscale,
             window.on_remove_tailscale,
@@ -301,13 +298,36 @@ class DesktopLauncherTests(unittest.TestCase):
             return_value=False,
         ):
             window.on_enable_config()
-            window.on_start()
         with patch(
             "desktop_launcher.messagebox.askyesno",
             return_value=False,
         ):
             window.on_disable_config()
         self.assertEqual(calls, [])
+
+    def test_retired_ownerless_start_and_task_install_fail_closed(self) -> None:
+        window = BridgeWindow.__new__(BridgeWindow)
+        window.root = object()
+        window.run_task = Mock()
+        with patch("desktop_launcher.messagebox.showerror") as show_error:
+            window.on_start()
+            window.on_install_bootstrap()
+        self.assertEqual(show_error.call_count, 2)
+        self.assertIn(
+            "ReaderPC Server",
+            show_error.call_args_list[0].args[1],
+        )
+        self.assertIn(
+            "不能重新创建",
+            show_error.call_args_list[1].args[1],
+        )
+        window.run_task.assert_not_called()
+        source = (SOURCE_ROOT / "desktop_launcher.py").read_text(
+            encoding="utf-8"
+        )
+        self.assertNotIn("install_bootstrap_task", source)
+        self.assertNotIn("run_bootstrap_task_if_owned", source)
+        self.assertNotIn("start_direct_service", source)
 
     def test_disable_and_stop_uses_atomic_bounded_helper(self) -> None:
         window = BridgeWindow.__new__(BridgeWindow)
@@ -493,185 +513,6 @@ class DesktopLauncherTests(unittest.TestCase):
             save.call_args.kwargs["active_capture_endpoints"]
         )
 
-    def test_start_prefers_owned_task_after_atomic_opt_in(self) -> None:
-        window = BridgeWindow.__new__(BridgeWindow)
-        window.root = object()
-        window.paths = object()
-        window.control_paths = object()
-        window.control_runner = object()
-        window.process_runner = object()
-        window.selected_virtual_endpoints = lambda: (
-            VIRTUAL_MICROPHONE,
-            VIRTUAL_SPEAKER,
-        )
-        window.selected_virtual_microphone_capture_endpoint = (
-            lambda: None
-        )
-        window.render_endpoint_provider = lambda: [
-            VIRTUAL_MICROPHONE,
-            VIRTUAL_SPEAKER,
-        ]
-        window._confirm_mutation = lambda *_: True
-        window.footer = FakeWidget()
-        window.refresh_static = lambda: None
-        order: list[str] = []
-
-        def immediate(_label, action, success):
-            success(action())
-
-        window.run_task = immediate
-        with (
-            patch(
-                "desktop_launcher.legacy_microphone_config_requires_migration",
-                return_value=False,
-            ),
-            patch(
-                "desktop_launcher.inspect_bootstrap_task",
-                return_value=TaskInspection(True, True, "S-1-5-21-1"),
-            ),
-            patch(
-                "desktop_launcher.save_enabled_config",
-                side_effect=lambda *_args, **_kwargs:
-                    order.append("opt-in") or {},
-            ),
-            patch(
-                "desktop_launcher.run_bootstrap_task_if_owned",
-                side_effect=lambda *_: order.append("run-task") or True,
-            ),
-            patch(
-                "desktop_launcher.start_direct_service",
-            ) as direct,
-        ):
-            window.on_start()
-        self.assertEqual(order, ["opt-in", "run-task"])
-        direct.assert_not_called()
-        self.assertIn(
-            "supervisor",
-            str(window.footer.values[-1]["text"]),
-        )
-
-    def test_start_without_task_is_explicitly_unsupervised(self) -> None:
-        window = BridgeWindow.__new__(BridgeWindow)
-        window.root = object()
-        window.paths = object()
-        window.control_paths = object()
-        window.control_runner = object()
-        window.process_runner = object()
-        window.selected_virtual_endpoints = lambda: (
-            VIRTUAL_MICROPHONE,
-            VIRTUAL_SPEAKER,
-        )
-        window.selected_virtual_microphone_capture_endpoint = (
-            lambda: None
-        )
-        window.render_endpoint_provider = lambda: [
-            VIRTUAL_MICROPHONE,
-            VIRTUAL_SPEAKER,
-        ]
-        window._confirm_mutation = lambda *_: True
-        window.footer = FakeWidget()
-        window.refresh_static = lambda: None
-        order: list[str] = []
-
-        def immediate(_label, action, success):
-            success(action())
-
-        window.run_task = immediate
-        with (
-            patch(
-                "desktop_launcher.legacy_microphone_config_requires_migration",
-                return_value=False,
-            ),
-            patch(
-                "desktop_launcher.inspect_bootstrap_task",
-                return_value=TaskInspection(False, False, "S-1-5-21-1"),
-            ),
-            patch(
-                "desktop_launcher.save_enabled_config",
-                side_effect=lambda *_args, **_kwargs:
-                    order.append("opt-in") or {},
-            ),
-            patch(
-                "desktop_launcher.run_bootstrap_task_if_owned",
-                side_effect=lambda *_: order.append("task-missing") or False,
-            ),
-            patch(
-                "desktop_launcher.start_direct_service",
-                side_effect=lambda *_: order.append("direct") or 4242,
-            ),
-            patch(
-                "desktop_launcher.start_history_sync_worker",
-                side_effect=lambda *_: order.append("history") or 4343,
-            ),
-        ):
-            window.on_start()
-        self.assertEqual(
-            order,
-            ["opt-in", "task-missing", "direct", "history"],
-        )
-        self.assertIn(
-            "侧栏同步 worker PID 4343",
-            str(window.footer.values[-1]["text"]),
-        )
-        self.assertIn(
-            "未受后台 supervisor",
-            str(window.footer.values[-1]["text"]),
-        )
-
-    def test_start_refuses_unknown_task_before_opt_in_or_run(self) -> None:
-        window = BridgeWindow.__new__(BridgeWindow)
-        window.root = object()
-        window.paths = object()
-        window.control_paths = object()
-        window.control_runner = object()
-        window.process_runner = object()
-        window.selected_virtual_endpoints = lambda: (
-            VIRTUAL_MICROPHONE,
-            VIRTUAL_SPEAKER,
-        )
-        window.selected_virtual_microphone_capture_endpoint = (
-            lambda: None
-        )
-        window.render_endpoint_provider = lambda: [
-            VIRTUAL_MICROPHONE,
-            VIRTUAL_SPEAKER,
-        ]
-        window._confirm_mutation = lambda *_: True
-        errors: list[Exception] = []
-
-        def immediate(_label, action, _success):
-            try:
-                action()
-            except Exception as error:
-                errors.append(error)
-
-        window.run_task = immediate
-        with (
-            patch(
-                "desktop_launcher.legacy_microphone_config_requires_migration",
-                return_value=False,
-            ),
-            patch(
-                "desktop_launcher.inspect_bootstrap_task",
-                return_value=TaskInspection(True, False, "S-1-5-21-1"),
-            ),
-            patch(
-                "desktop_launcher.save_enabled_config",
-            ) as save,
-            patch(
-                "desktop_launcher.run_bootstrap_task_if_owned",
-            ) as run,
-            patch(
-                "desktop_launcher.start_direct_service",
-            ) as direct,
-        ):
-            window.on_start()
-        self.assertEqual(len(errors), 1)
-        self.assertIsInstance(errors[0], BridgeError)
-        save.assert_not_called()
-        run.assert_not_called()
-        direct.assert_not_called()
-
     def test_confirmed_control_button_is_only_mutation_entry(self) -> None:
         window = BridgeWindow.__new__(BridgeWindow)
         window._confirm_mutation = lambda *_: True
@@ -694,35 +535,21 @@ class DesktopLauncherTests(unittest.TestCase):
             window.control_runner,
         )
 
-    def test_bootstrap_cli_is_exact_and_bypasses_gui(self) -> None:
-        sentinel_paths = object()
+    def test_retired_bootstrap_cli_is_a_side_effect_free_tombstone(self) -> None:
         with (
             patch.object(
                 sys,
                 "argv",
                 ["desktop_launcher.py", "--bootstrap"],
             ),
-            patch(
-                "desktop_launcher.BridgePaths.discover",
-                return_value=sentinel_paths,
-            ),
-            patch(
-                "desktop_launcher.WindowsProcessRunner",
-                return_value=object(),
-            ),
-            patch(
-                "desktop_launcher.run_bootstrap_with_history_sync",
-                return_value=7,
-            ) as bootstrap,
-            patch(
-                "desktop_launcher.WindowsShortcutBroker",
-            ) as broker,
+            patch("desktop_launcher.BridgePaths.discover") as discover,
+            patch("desktop_launcher.WindowsProcessRunner") as runner,
+            patch("desktop_launcher.tk.Tk") as make_root,
         ):
-            self.assertEqual(main(), 7)
-        broker.assert_called_once_with()
-        broker.return_value.__enter__.assert_called_once_with()
-        broker.return_value.__exit__.assert_called_once()
-        bootstrap.assert_called_once()
+            self.assertEqual(main(), 0)
+        discover.assert_not_called()
+        runner.assert_not_called()
+        make_root.assert_not_called()
 
     def test_history_worker_cli_is_exact_and_headless(self) -> None:
         sentinel_paths = type(

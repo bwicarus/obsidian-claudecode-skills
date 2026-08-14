@@ -46,6 +46,11 @@ internal static class AudioBridgeContract
         directServer = new
         {
             command = "--direct-serve --config <absolute-path>",
+            readerPcOwnedCommand =
+                "--direct-serve --config <absolute-path> "
+                + "--readerpc-owner-pid <positive-pid>",
+            readerPcOwnerExitPolicy =
+                "stop-codex-voice-close-snapshot-viewer-exit-direct",
             bind = "127.0.0.1-only",
             defaultPort = DirectBridgeContract.DefaultListenPort,
             transport = "tailnet-wss-fixed-pcm-and-context",

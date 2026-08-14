@@ -108,11 +108,14 @@ class ReaderPCServicesTests(unittest.TestCase):
         stopped = read_codex_voice_activity(lambda: (101, 102))
         never_started = read_codex_voice_activity(lambda: (0, 0))
         self.assertEqual((active.status, active.active), ("available", True))
+        self.assertEqual(active.generation, 101)
         self.assertEqual((stopped.status, stopped.active), ("available", False))
+        self.assertIsNone(stopped.generation)
         self.assertEqual(
             (never_started.status, never_started.active),
             ("available", False),
         )
+        self.assertIsNone(never_started.generation)
 
     def test_codex_voice_activity_distinguishes_unavailable_and_invalid(self) -> None:
         unavailable = read_codex_voice_activity(lambda: None)

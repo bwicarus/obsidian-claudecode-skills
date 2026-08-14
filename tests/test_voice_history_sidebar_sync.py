@@ -442,6 +442,38 @@ class VoiceHistorySidebarSyncTest(unittest.TestCase):
             ),
         )
 
+    def test_active_voice_generation_change_rebinds_history_thread(self):
+        self.recent([msg("user", "old-u"), msg("assistant", "old-a")])
+        syncer = SYNC.CaptureBoundHistorySynchronizer(
+            root=self.root,
+            publisher=lambda *_args, **_kwargs: {"ok": True},
+            global_state_path=self.global_state,
+            continuity_path=self.continuity,
+            state_path=self.state,
+            archive_path=self.archive,
+        )
+        first = syncer.observe(
+            service_online=True,
+            capture_active=True,
+            snapshot_mode=True,
+            capture_generation=101,
+        )
+        self.assertEqual(first["threadId"], THREAD)
+
+        self.bind(OTHER)
+        self.recent(
+            [msg("user", "other-old-u"), msg("assistant", "other-old-a")],
+            thread=OTHER,
+        )
+        rebound = syncer.observe(
+            service_online=True,
+            capture_active=True,
+            snapshot_mode=True,
+            capture_generation=202,
+        )
+        self.assertEqual(rebound["threadId"], OTHER)
+        self.assertEqual(syncer._capture_generation, 202)
+
     def test_capture_lease_never_sends_pending_turn_to_another_reader_source(self):
         self.recent([msg("user", "old-u"), msg("assistant", "old-a")])
         snapshot = self.root / "reader-context-snapshot.json"

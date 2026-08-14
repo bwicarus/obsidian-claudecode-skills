@@ -103,6 +103,8 @@ function makeHarness() {
   elements.set("result-content", resultContent);
   const vocabActions = new FakeElement("vocab-actions");
   elements.set("vocab-actions", vocabActions);
+  elements.set("jp-ai-btn", new FakeElement("jp-ai-btn"));
+  elements.set("jp-ai-out", new FakeElement("jp-ai-out"));
   const documentListeners = new Map();
 
   const document = {
@@ -228,6 +230,9 @@ test("App v3 日语词典小框恢复当前形/原形、中文富字段且不混
   const { sandbox, pop, resultContent } = makeHarness();
   const translatedExample = new FakeElement("translated-example");
   pop.jpExampleTarget = translatedExample;
+  sandbox.fetch = async () => {
+    throw new Error("例句缺中文不得重新查询整词");
+  };
   const translationRequests = [];
   let finishTranslation;
   sandbox.RC.reqJson = async (method, url, body) => {
@@ -303,7 +308,13 @@ test("App v3 日语词典小框恢复当前形/原形、中文富字段且不混
   assert.match(pop.innerHTML, /意見を纏める/);
   assert.match(pop.innerHTML, /集中意見/);
   assert.match(pop.innerHTML, /意見を纏めた。/);
-  assert.match(pop.innerHTML, /Pi 中文翻译中/);
+  assert.match(pop.innerHTML, /data-jpex-id=/);
+  assert.doesNotMatch(pop.innerHTML, /中文翻译(?:中|暂不可用)/);
+  assert.doesNotMatch(
+    WORDPOP,
+    /Pi 中文翻译暂不可用|无中文释义；可(?:展开后)?手动使用 Pi/,
+    "词典内容区不得显示迁移后自创的 Pi 失败/手动提示",
+  );
   assert.match(pop.innerHTML, /点这里展开完整字典/);
   assert.match(pop.innerHTML, /☆ 标记掌握/);
   assert.match(pop.innerHTML, /📊 语法/);
@@ -332,6 +343,47 @@ test("App v3 日语词典小框恢复当前形/原形、中文富字段且不混
   assert.doesNotMatch(resultContent.innerHTML, /The opinions were summarized/);
   assert.doesNotMatch(resultContent.innerHTML, /一段动词|及物动词/);
   assert.equal(translationRequests.length, 1, "完整框应复用 exact JA 的会话/Pi 缓存");
+});
+
+test("例句中文回填失败不显示 Pi 传输提示，再次点词会按原句重试并原位替换", async () => {
+  const { sandbox, pop } = makeHarness();
+  const translatedExample = new FakeElement("retry-example");
+  pop.jpExampleTarget = translatedExample;
+  const requests = [];
+  sandbox.RC.reqJson = async (_method, _url, body) => {
+    requests.push(body.text);
+    if (requests.length === 1) return { ok: false, error: "temporary" };
+    return { ok: true, zh: "重新查询后得到中文。" };
+  };
+  sandbox.RC.offlineDictionary = {
+    CONTRACT: "bw-offline-dictionary/1",
+    isLocalMode: () => true,
+    lookupJapaneseLegacy: async () => ({
+      ok: true,
+      jp: true,
+      word: "確かめる",
+      lemma: "確かめる",
+      reading: "たしかめる",
+      accent: 4,
+      zh_senses: [{ glosses: ["确认，查明"] }],
+      examples: [{ ja: "事実を確かめる。", en: "Check the facts." }],
+      source: "local-jmdict",
+      local_zh: true,
+    }),
+  };
+  vm.runInContext(WORDPOP, vm.createContext(sandbox), { filename: "rc-wordpop.js" });
+
+  sandbox.RC.wordpop.show({ word: "確かめる", langs: ["ja"], noBreathe: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(requests, ["事実を確かめる。"]);
+  assert.equal(translatedExample.textContent, "");
+  assert.doesNotMatch(pop.innerHTML, /Pi 中文翻译暂不可用|Check the facts/);
+
+  sandbox.RC.wordpop.show({ word: "確かめる", langs: ["ja"], noBreathe: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(requests, ["事実を確かめる。", "事実を確かめる。"]);
+  assert.equal(translatedExample.textContent, "重新查询后得到中文。");
+  assert.equal(translatedExample.dataset.zhdone, "1");
 });
 
 test("本地例句的迟到 Pi 中文回填不得覆盖后来打开的查词框", async () => {
@@ -481,24 +533,67 @@ test("新词本地 lookup 尚未返回时也立即取消旧词待执行的 Pi �
   assert.deepEqual(requested, ["旧词第一句。", "新词例句。"]);
 });
 
-test("App 本地词典未命中的自定义日语词组不自动交给 ReaderPC 或 Pi", async () => {
+test("App 本地词典未命中时恢复原文呼吸查询并把中文结果原位填回小框", async () => {
   const { sandbox, pop } = makeHarness();
   const lookupRequests = [];
-  const cachedResults = [];
-  let piRequests = 0;
-  sandbox.fetch = async () => {
-    piRequests += 1;
-    throw new Error("unexpected Pi dictionary request");
+  const requestUrls = [];
+  let releaseRemote;
+  let breatheTimer;
+  let unwrapped = 0;
+  const classes = new Set();
+  const mark = {
+    classList: {
+      add(name) { classes.add(name); },
+      remove(name) { classes.delete(name); },
+    },
+    addEventListener() {},
+    getBoundingClientRect() {
+      return { left: 20, top: 30, right: 180, bottom: 50, width: 160, height: 20 };
+    },
+    remove() {},
+  };
+  sandbox.setTimeout = (callback, delay) => {
+    if (delay === 400) breatheTimer = callback;
+    return 1;
+  };
+  sandbox.fetch = (url) => {
+    requestUrls.push(String(url));
+    return new Promise((resolve) => {
+      releaseRemote = () => resolve({
+        ok: true,
+        json: async () => ({
+          ok: true,
+          jp: true,
+          word: "それどころではない",
+          lemma: "それどころではない",
+          reading: "それどころではない",
+          accent: 0,
+          translation: "根本顾不上那件事",
+          examples: [{
+            ja: "締切が迫っていて、それどころではない。",
+            zh: "截止日期逼近，根本顾不上那件事。",
+          }],
+        }),
+      });
+    });
   };
   sandbox.RC.offlineDictionary = {
     CONTRACT: "bw-offline-dictionary/1",
     isLocalMode: () => true,
     lookupJapaneseLegacy: async (term) => ({
-      ok: false,
+      ok: true,
       jp: true,
-      query: term,
+      word: term,
+      lemma: term,
+      reading: "それどころではない",
+      romaji: "sore dokoro de wa nai",
+      translation: "not the time for that",
+      meaning_language: "en",
+      examples: [{
+        ja: "締切が迫っていて、それどころではない。",
+        en: "The deadline is near, so this is no time for that.",
+      }],
       source: "local-jmdict",
-      code: "BW_OFFLINE_DICTIONARY_NO_MATCH",
     }),
   };
   sandbox.RC.computerVoice = {
@@ -514,18 +609,6 @@ test("App 本地词典未命中的自定义日语词组不自动交给 ReaderPC 
       };
     },
   };
-  sandbox.__BW_READER_RUNTIME__ = {
-    dictionaryFallbackCache: {
-      async get() { return null; },
-      async put(request, result) {
-        cachedResults.push({
-          request: structuredClone(request),
-          result: structuredClone(result),
-        });
-        return { ...result, cached: true };
-      },
-    },
-  };
   vm.runInContext(WORDPOP, vm.createContext(sandbox), {
     filename: "rc-wordpop.js",
   });
@@ -534,27 +617,104 @@ test("App 本地词典未命中的自定义日语词组不自动交给 ReaderPC 
     word: "それどころではない",
     ctx: "締切が迫っていて、それどころではない。",
     langs: ["ja"],
-    noBreathe: true,
+    breathe: {
+      wrap() { return mark; },
+      unwrap(element) {
+        assert.equal(element, mark);
+        unwrapped += 1;
+      },
+    },
     rect: { left: 20, top: 30, right: 180, bottom: 50 },
   });
-  await Promise.resolve();
-  await Promise.resolve();
-  await Promise.resolve();
   await new Promise((resolve) => setImmediate(resolve));
 
+  assert.equal(requestUrls.length, 1);
+  assert.match(requestUrls[0], /^\/pdf\/api\/dict-quick\?/);
+  assert.match(requestUrls[0], /context=/);
   assert.equal(lookupRequests.length, 0);
-  assert.equal(cachedResults.length, 0);
-  assert.equal(piRequests, 0);
-  assert.match(pop.innerHTML, /未查到/);
+  assert.equal(typeof breatheTimer, "function");
+  breatheTimer();
+  assert.equal(classes.has("breathe"), true, "慢查询时必须让原文进入既有呼吸状态");
+
+  releaseRemote();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(pop.innerHTML, /根本顾不上那件事/);
+  assert.match(pop.innerHTML, /截止日期逼近，根本顾不上那件事/);
+  assert.doesNotMatch(pop.innerHTML, /Pi 中文翻译暂不可用|手动使用 Pi|未查到/);
+  assert.equal(unwrapped, 1, "结果到达后必须移除原文呼吸标记并在同一小框填回");
 });
 
-test("扩展没有 App 私有词典时不自动调用 ReaderPC 或 Pi", async () => {
+test("两级词典仍未命中时沿旧释义区入口自动深度解释，不再要求手动点 Pi", async () => {
+  const { sandbox, pop, resultContent } = makeHarness();
+  const requested = [];
+  sandbox.fetch = async (url) => {
+    requested.push(String(url));
+    if (String(url).startsWith("/pdf/api/dict-jp-ai?")) {
+      return {
+        ok: true,
+        status: 200,
+        headers: { get: () => "application/json" },
+        json: async () => ({ ok: true, translation: "结合上下文得到的中文解释。" }),
+      };
+    }
+    return {
+      ok: true,
+      json: async () => ({ ok: false, jp: true, word: "伊部" }),
+    };
+  };
+  sandbox.RC.offlineDictionary = {
+    CONTRACT: "bw-offline-dictionary/1",
+    isLocalMode: () => true,
+    lookupJapaneseLegacy: async () => ({
+      ok: false,
+      jp: true,
+      word: "伊部",
+      code: "BW_OFFLINE_DICTIONARY_NO_MATCH",
+      source: "local-jmdict",
+    }),
+  };
+  vm.runInContext(WORDPOP, vm.createContext(sandbox), { filename: "rc-wordpop.js" });
+
+  sandbox.RC.wordpop.show({ word: "伊部", ctx: "伊部さん", langs: ["ja"], noBreathe: true });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.match(pop.innerHTML, /暂无词典释义\(可能是复合词\/专有名词\)。点此展开,让 AI 结合上下文讲解/);
+  assert.doesNotMatch(pop.innerHTML, /手动使用 Pi|改用 Pi/);
+
+  const expand = new FakeElement("expand-definition");
+  expand.setAttribute("data-wp-act", "expand");
+  expand.closest = (selector) => selector === "[data-wp-act]" ? expand : null;
+  pop.dispatchClick(expand);
+  await new Promise((resolve) => setImmediate(resolve));
+  await new Promise((resolve) => setImmediate(resolve));
+
+  assert.match(resultContent.innerHTML, /暂无词典释义（可能是人名\/专有名词），已请 AI 讲解/);
+  assert.equal(requested.filter((url) => url.startsWith("/pdf/api/dict-jp-ai?")).length, 1);
+  assert.equal(
+    sandbox.document.getElementById("jp-ai-out").innerHTML,
+    "结合上下文得到的中文解释。",
+  );
+  assert.doesNotMatch(WORDPOP, /改用 Pi 深度解释（可选）/);
+});
+
+test("扩展没有 App 私有词典时沿用旧 dict-quick 查询且不绕到 ReaderPC", async () => {
   const { sandbox, pop } = makeHarness();
   const lookupRequests = [];
-  let piRequests = 0;
-  sandbox.fetch = async () => {
-    piRequests += 1;
-    throw new Error("unexpected Pi dictionary request");
+  const requestUrls = [];
+  sandbox.fetch = async (url) => {
+    requestUrls.push(String(url));
+    return {
+      ok: true,
+      json: async () => ({
+        ok: true,
+        jp: true,
+        word: "手がないわけではない",
+        lemma: "手がないわけではない",
+        reading: "てがないわけではない",
+        accent: 0,
+        translation: "并非无计可施",
+        examples: [{ ja: "まだ手がないわけではない。", zh: "还不是无计可施。" }],
+      }),
+    };
   };
   sandbox.RC.computerVoice = {
     async lookupJapaneseFallback(request) {
@@ -585,9 +745,12 @@ test("扩展没有 App 私有词典时不自动调用 ReaderPC 或 Pi", async ()
   await Promise.resolve();
   await new Promise((resolve) => setImmediate(resolve));
 
-  assert.equal(piRequests, 0);
+  assert.equal(requestUrls.length, 1);
+  assert.match(requestUrls[0], /^\/pdf\/api\/dict-quick\?/);
   assert.equal(lookupRequests.length, 0);
-  assert.match(pop.innerHTML, /未查到/);
+  assert.match(pop.innerHTML, /并非无计可施/);
+  assert.match(pop.innerHTML, /还不是无计可施/);
+  assert.doesNotMatch(pop.innerHTML, /Pi 中文翻译暂不可用|手动使用 Pi|未查到/);
 });
 
 test("扩展日语预热既不静默访问 Pi 也不自动占用 ReaderPC CLI", async () => {

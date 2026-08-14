@@ -360,7 +360,7 @@ test("电脑客户端保留原按钮与设置标签，App 与扩展按宿主分�
   );
 });
 
-test("电脑客户端设置读取真实 Codex 语音状态并按目标状态控制一次快捷键", () => {
+test("电脑客户端设置只读 Codex 语音状态且不再拥有服务器生命周期", () => {
   assert.match(runtime, /\["codexVoice"\][\s\S]*STATUS 响应/);
   assert.match(
     runtime,
@@ -370,27 +370,10 @@ test("电脑客户端设置读取真实 Codex 语音状态并按目标状态控�
     runtime,
     /function normalizeCodexVoicePayload[\s\S]*\["keepActive"\][\s\S]*typeof value\.keepActive !== "boolean"/,
   );
-
-  const setStart = runtime.indexOf("function setCodexVoiceActive(desiredActive)");
-  const setEnd = runtime.indexOf("function makeAudioSurface()", setStart);
-  assert.ok(setStart >= 0 && setEnd > setStart);
-  const setBody = runtime.slice(setStart, setEnd);
-  assert.match(
-    setBody,
-    /opened\.request\([\s\S]*"codex-voice-set"[\s\S]*\{ active: desiredActive \}/,
-  );
-  assert.match(setBody, /if \(codexVoiceSetPromise\) return codexVoiceSetPromise/);
-  assert.doesNotMatch(setBody, /request\(\s*"(?:start|stop)"/);
-  assert.match(
-    setBody,
-    /function setCodexVoiceKeepActive\(enabled\)[\s\S]*"codex-voice-keepalive-set"[\s\S]*\{ enabled: enabled \}/,
-  );
-  assert.match(
-    setBody,
-    /"codex-voice-set"[\s\S]*\{ active: desiredActive \},[\s\S]*CODEX_VOICE_CONTROL_TIMEOUT_MS/,
-    "a bounded Codex restart and fresh F24 attempt must fit inside the control request",
-  );
-  assert.match(runtime, /CODEX_VOICE_CONTROL_TIMEOUT_MS = 120000/);
+  assert.doesNotMatch(runtime, /"codex-voice-set"/);
+  assert.doesNotMatch(runtime, /"codex-voice-keepalive-set"/);
+  assert.doesNotMatch(runtime, /function setCodexVoiceActive/);
+  assert.doesNotMatch(runtime, /function setCodexVoiceKeepActive/);
 
   const borrowStart = runtime.indexOf(
     "function borrowSnapshotChannelForStatus(attempt)",
@@ -408,40 +391,25 @@ test("电脑客户端设置读取真实 Codex 语音状态并按目标状态控�
   const settingsEnd = runtime.indexOf("// Preference-only read", settingsStart);
   const settingsBody = runtime.slice(settingsStart, settingsEnd);
   assert.match(settingsBody, /data-role="codex-voice-status"/);
-  assert.match(settingsBody, /data-role="codex-voice-toggle"/);
-  assert.match(settingsBody, /data-role="codex-voice-keepalive"/);
-  assert.match(settingsBody, /● Codex 正在使用麦克风（通常表示语音已开启）/);
-  assert.match(settingsBody, /○ Codex 当前未使用麦克风（通常表示语音已关闭）/);
+  assert.doesNotMatch(settingsBody, /data-role="codex-voice-toggle"/);
+  assert.doesNotMatch(settingsBody, /data-role="codex-voice-keepalive"/);
+  assert.doesNotMatch(settingsBody, /data-role="codex-voice-error"/);
+  assert.match(settingsBody, /● Codex 语音正在运行（由 ReaderPC 服务器管理）。/);
+  assert.match(settingsBody, /○ Codex 语音当前未运行（由 ReaderPC 服务器管理）。/);
   assert.match(
     settingsBody,
-    /lastKnownCodexVoiceKeepActive = value\.keepActive[\s\S]*Windows 桥接器暂时离线；已保存的持续运行设置仍然有效/,
-    "a transient bridge outage must not visually erase the persisted keep-alive preference",
+    /实时快照与 Codex 语音随 ReaderPC 服务器进程一起启动和停止/,
   );
   assert.doesNotMatch(
     settingsBody,
-    /当前 Windows 桥版本尚未提供 Codex 语音状态/,
-    "offline status must not be misreported as an unsupported Windows version",
-  );
-  assert.match(
-    settingsBody,
-    /var desiredActive = !latestCodexVoice\.active;[\s\S]*setCodexVoiceActive\(desiredActive\)/,
-  );
-  assert.match(
-    settingsBody,
-    /codexVoiceToggle\.addEventListener\("click", function \(event\)[\s\S]*event\.isTrusted !== true[\s\S]*setCodexVoiceActive\(desiredActive\)/,
-    "a third-party host must not synthesize the privileged Windows shortcut click",
-  );
-  assert.match(
-    settingsBody,
-    /codexVoiceKeepAlive\.addEventListener\("change", function \(event\)[\s\S]*event\.isTrusted !== true[\s\S]*setCodexVoiceKeepActive\(enabled\)/,
-    "persistent Windows voice recovery must also require a real user action",
+    /setCodexVoiceActive|setCodexVoiceKeepActive|codexVoiceToggle|codexVoiceKeepAlive/,
   );
 
   const refreshStart = settingsBody.indexOf("function refresh()");
   const refreshEnd = settingsBody.indexOf("root.__rcComputerVoiceRefresh", refreshStart);
   const refreshBody = settingsBody.slice(refreshStart, refreshEnd);
   assert.match(refreshBody, /availability\(\)\.then\(render\)/);
-  assert.doesNotMatch(refreshBody, /setCodexVoiceActive|codex-voice-set/);
+  assert.doesNotMatch(refreshBody, /setCodexVoice|codex-voice-(?:set|keepalive-set)/);
 });
 
 test("电脑按钮按宿主分流，普通电话保持独立", () => {

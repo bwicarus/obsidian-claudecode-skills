@@ -1006,6 +1006,27 @@ class DirectDesktopCoreTests(unittest.TestCase):
             [(pid, self.paths.native_host.resolve())],
         )
 
+    def test_readerpc_owned_start_passes_exact_positive_owner_pid(self) -> None:
+        self.enable_config()
+        runner = FakeProcessRunner()
+        pid = start_direct_service(
+            self.paths,
+            runner,
+            now=NOW,
+            readerpc_owner_pid=4242,
+        )
+        self.assertEqual(pid, runner.next_pid)
+        self.assertEqual(
+            runner.starts[0][0],
+            build_start_command(self.paths, readerpc_owner_pid=4242),
+        )
+        self.assertEqual(
+            runner.starts[0][0][-2:],
+            ("--readerpc-owner-pid", "4242"),
+        )
+        with self.assertRaisesRegex(BridgeError, "owner PID"):
+            build_start_command(self.paths, readerpc_owner_pid=0)
+
     def test_default_runner_validates_full_command_before_popen(self) -> None:
         self.enable_config()
         runner = WindowsProcessRunner()
@@ -1020,6 +1041,19 @@ class DirectDesktopCoreTests(unittest.TestCase):
                 5151,
             )
             self.assertFalse(popen.call_args.kwargs["shell"])
+        owner_command = build_start_command(
+            self.paths,
+            readerpc_owner_pid=4242,
+        )
+        with patch("bridge_core.subprocess.Popen") as popen:
+            popen.return_value.pid = 5152
+            self.assertEqual(
+                runner.start(
+                    owner_command,
+                    cwd=self.paths.native_host.parent.resolve(),
+                ),
+                5152,
+            )
         with patch("bridge_core.subprocess.Popen") as popen:
             with self.assertRaises(BridgeError):
                 runner.start(

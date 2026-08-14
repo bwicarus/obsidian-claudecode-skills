@@ -1546,6 +1546,7 @@ class CaptureBoundHistorySynchronizer:
         self.was_active = False
         self.tail_polls = 0
         self._lease_thread_id: str | None = None
+        self._capture_generation: int | None = None
         self._minimum_assistant_index: int | None = None
         self._lease_source_instance_id: str | None = None
         self._failure_backoff_polls = 0
@@ -1572,6 +1573,7 @@ class CaptureBoundHistorySynchronizer:
         """Drop the in-memory capture lease without publishing a final turn."""
         self.was_active = False
         self.tail_polls = 0
+        self._capture_generation = None
         self._release_lease()
 
     def _arm(self) -> dict[str, Any]:
@@ -1658,6 +1660,21 @@ class CaptureBoundHistorySynchronizer:
                     PUBLISH_FAILURE_BACKOFF_POLLS
                 )
         return self.last_result
+
+    def _arm_current_generation(
+        self,
+        capture_generation: int | None,
+    ) -> dict[str, Any]:
+        """Arm one Voice generation, leaving a failed arm retryable."""
+
+        self.was_active = True
+        self.tail_polls = 0
+        self._capture_generation = capture_generation
+        result = self._arm()
+        if self._lease_thread_id is None:
+            self.was_active = False
+            self._capture_generation = None
+        return result
 
     def _continuity_signature(self) -> tuple[int, int] | None:
         try:
@@ -1960,6 +1977,7 @@ class CaptureBoundHistorySynchronizer:
         service_online: bool,
         capture_active: bool,
         snapshot_mode: bool,
+        capture_generation: int | None = None,
     ) -> dict[str, Any] | None:
         if snapshot_mode is not True:
             self.cancel()
@@ -1970,15 +1988,29 @@ class CaptureBoundHistorySynchronizer:
         active = bool(service_online and capture_active)
         if active:
             if not self.was_active:
-                self.tail_polls = 0
                 self._release_lease()
-                self.was_active = True
-                return self._arm()
+                return self._arm_current_generation(capture_generation)
+            if (
+                capture_generation is not None
+                and self._capture_generation is not None
+                and capture_generation != self._capture_generation
+            ):
+                previous_result = None
+                if self._lease_thread_id is not None:
+                    previous_result = self._sync(force_history_read=True)
+                self._release_lease()
+                return (
+                    self._arm_current_generation(capture_generation)
+                    or previous_result
+                )
+            if self._capture_generation is None:
+                self._capture_generation = capture_generation
             self.was_active = True
             self.tail_polls = 0
             return self._sync()
         if self.was_active:
             self.was_active = False
+            self._capture_generation = None
             if self._lease_thread_id is not None:
                 self.tail_polls = FINAL_TAIL_POLLS
         if self.tail_polls > 0:
@@ -2022,13 +2054,20 @@ def monitor_capture_history(
                 status = status_provider()
                 service_online = status.service_online is True
                 capture_active = status.capture_active is True
+                capture_generation = getattr(
+                    status,
+                    "capture_generation",
+                    None,
+                )
             except Exception:
                 service_online = False
                 capture_active = False
+                capture_generation = None
             synchronizer.observe(
                 service_online=service_online,
                 capture_active=capture_active,
                 snapshot_mode=snapshot_mode,
+                capture_generation=capture_generation,
             )
             stop_event.wait(poll_seconds)
     finally:
@@ -2111,13 +2150,20 @@ def run_service_bound_history_worker(
                     status = status_provider()
                     service_online = status.service_online is True
                     capture_active = status.capture_active is True
+                    capture_generation = getattr(
+                        status,
+                        "capture_generation",
+                        None,
+                    )
                 except Exception:
                     service_online = False
                     capture_active = False
+                    capture_generation = None
                 synchronizer.observe(
                     service_online=service_online,
                     capture_active=capture_active,
                     snapshot_mode=True,
+                    capture_generation=capture_generation,
                 )
                 if service_online:
                     seen_online = True

@@ -4255,3 +4255,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **安装事实**：Direct `0.1.130` 已原子安装，7 个 payload 哈希一致；总开关恢复 `true`，viewer HTTP 200、Codex 麦克风 active、`lastError=null`，回滚点 `install-0.1.130-20260814T103727Z-e8f113b9`。
 - **发布事实**：功能源 `a5e8aa7d`、App 版本提交 `c35cdf54`；Actions `31794113201` 上传 TestFlight `1.1.56 (303)`，`31794724008` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
 - **边界/下一步**：未部署 Pi 或桌面扩展正式渠道；Claude 的 ReaderQuery 工具批次未混入。待 App 前台后真机验收 PDF 长跨行重复段、EPUB 长章后半与翻页后旧 marker 拒绝。
+
+## Codex：ReaderPC 单一生命周期与旧式日语查词交互候选（2026-08-14 JST）
+- **改了什么**：ReaderPC 进程成为 Direct、实时快照页与 Codex 语音的唯一 owner；旧登录任务和 App 独立启停入口退役，安装器不再恢复 ownerless Direct，暂时性目标歧义只做一次有界恢复。
+- **查词**：本地缺中文时恢复旧版原文呼吸查询并原位填回；两级 miss 展开后自动深度解释，例句中文自动回填，不再显示“手动使用 Pi”或“Pi 中文翻译暂不可用”。
+- **怎么验的**：Reader 合同全量、ReaderPC/安装事务专项、Direct Release 0 警告 0 错误与完整自检、ReaderBundle 及不可变候选 verify/self-test 均通过。
+- **Windows 安装**：Direct `0.1.132`、ReaderPC `0.1.26` 已原子安装但保持停机；相关进程与 43128 监听均为零，旧计划任务不存在，keepalive=false、Codex 麦克风 inactive；Direct 回滚点 `install-0.1.132-20260814T123432Z-dc46bd66`。
+- **边界/下一步**：未部署 Pi 或桌面扩展正式渠道；App `1.1.57` 待本提交推送后由既有 iOS workflow 上传，用户手动启动 ReaderPC 后再验收唯一生命周期与查词动画。

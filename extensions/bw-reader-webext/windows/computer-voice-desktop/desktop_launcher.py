@@ -24,9 +24,7 @@ from bridge_core import (
     FIXED_LISTEN_PORT,
     FIXED_OUTPUT_SCOPE,
     FIXED_SHORTCUT,
-    ProcessRunner,
     RenderEndpoint,
-    WindowsShortcutBroker,
     WindowsProcessRunner,
     build_self_test_report,
     disable_and_stop_direct_service,
@@ -35,9 +33,7 @@ from bridge_core import (
     legacy_microphone_config_requires_migration,
     load_direct_config,
     read_direct_status,
-    run_idle_bootstrap,
     save_enabled_config,
-    start_direct_service,
 )
 from control_plane import (
     ControlPaths,
@@ -48,15 +44,10 @@ from control_plane import (
     apply_tailscale_serve,
     inspect_bootstrap_task,
     inspect_tailscale_serve,
-    install_bootstrap_task,
     remove_bootstrap_task,
     remove_tailscale_serve,
-    run_bootstrap_task_if_owned,
 )
 from voice_history_sidebar_sync import (
-    CaptureBoundHistorySynchronizer,
-    history_worker_lease,
-    monitor_capture_history,
     run_service_bound_history_worker,
 )
 from readerpc_services import write_disabled_reader_context_snapshot
@@ -103,47 +94,12 @@ def start_history_sync_worker(paths: BridgePaths) -> int:
     return process.pid
 
 
-def run_bootstrap_with_history_sync(
-    paths: BridgePaths,
-    runner: ProcessRunner,
-) -> int:
-    """Keep one leased history synchronizer beside the direct supervisor."""
-
-    stop_event = threading.Event()
-    synchronizer = CaptureBoundHistorySynchronizer(root=paths.root)
-
-    def monitor() -> None:
-        with history_worker_lease(paths.root) as owned:
-            if not owned:
-                return
-            monitor_capture_history(
-                stop_event=stop_event,
-                status_provider=lambda: read_direct_status(paths, runner),
-                enabled_provider=lambda: history_sync_enabled(paths),
-                synchronizer=synchronizer,
-            )
-
-    thread = threading.Thread(
-        target=monitor,
-        name="reader-sidebar-history",
-        daemon=True,
-    )
-    thread.start()
-    try:
-        return run_idle_bootstrap(paths, runner)
-    finally:
-        stop_event.set()
-        thread.join(timeout=3)
-
-
 class BridgeWindow:
     _ACTION_BUTTON_NAMES = (
         "enable_button",
-        "start_button",
         "disable_button",
         "refresh_button",
         "control_refresh_button",
-        "bootstrap_install_button",
         "bootstrap_remove_button",
         "tailscale_apply_button",
         "tailscale_remove_button",
@@ -454,12 +410,6 @@ class BridgeWindow:
 
         service_buttons = ttk.Frame(config_frame)
         service_buttons.pack(fill="x", pady=(9, 0))
-        self.start_button = ttk.Button(
-            service_buttons,
-            text="启用并启动直连服务",
-            command=self.on_start,
-        )
-        self.start_button.pack(side="left")
         self.refresh_button = ttk.Button(
             service_buttons,
             text="刷新真实状态",
@@ -469,12 +419,12 @@ class BridgeWindow:
 
         bootstrap_frame = self._section(
             outer,
-            "登录后台引导器与 Tailscale Serve",
+            "已退休的登录任务与 Tailscale Serve",
         )
         ttk.Label(
             bootstrap_frame,
             text=(
-                "所有安装或回滚都必须先点按钮，再在确认框中确认。"
+                "旧登录任务只允许精确移除，不能再创建或启动 Direct。"
                 "状态刷新只查询；不会注册任务、修改 Serve、启动服务、"
                 "采音、启动 GPT 或发送快捷键。"
             ),
@@ -496,18 +446,12 @@ class BridgeWindow:
 
         task_buttons = ttk.Frame(bootstrap_frame)
         task_buttons.pack(fill="x", pady=(10, 0))
-        self.bootstrap_install_button = ttk.Button(
-            task_buttons,
-            text="安装登录后台引导器",
-            command=self.on_install_bootstrap,
-        )
-        self.bootstrap_install_button.pack(side="left")
         self.bootstrap_remove_button = ttk.Button(
             task_buttons,
-            text="回滚登录后台引导器",
+            text="移除旧登录后台引导器",
             command=self.on_remove_bootstrap,
         )
-        self.bootstrap_remove_button.pack(side="left", padx=(8, 0))
+        self.bootstrap_remove_button.pack(side="left")
 
         serve_buttons = ttk.Frame(bootstrap_frame)
         serve_buttons.pack(fill="x", pady=(8, 0))
@@ -1024,120 +968,11 @@ class BridgeWindow:
         )
 
     def on_start(self) -> None:
-        try:
-            virtual_microphone, virtual_speaker = (
-                self.selected_virtual_endpoints()
-            )
-            virtual_microphone_capture = (
-                self.selected_virtual_microphone_capture_endpoint()
-            )
-            context_delivery_mode = (
-                self.selected_context_delivery_mode()
-            )
-        except BridgeError as error:
-            messagebox.showerror(APP_TITLE, str(error), parent=self.root)
-            return
-        legacy_migration = legacy_microphone_config_requires_migration(
-            self.paths
-        )
-        if not self._confirm_mutation(
-            (
-                "启用并启动空闲直连服务"
-                if virtual_microphone_capture is not None
-                else "以 /4 兼容模式启动（自动路由未启用）"
-            ),
-            (
-                "先原子保存两个虚拟播放端点并写入 localOptIn=true；"
-                + (
-                    "另行选择的虚拟麦克风 eCapture 将启用 /5 "
-                    "按应用自动路由；"
-                    if virtual_microphone_capture is not None
-                    else "未选择虚拟麦克风 eCapture，将明确使用 /4，"
-                    "按应用自动路由不会启用；"
-                )
-                + f"上下文交付模式为 {context_delivery_mode}；"
-                + (
-                    "旧 microphoneEndpointId 将被明确替换；"
-                    if legacy_migration else ""
-                )
-                + "若已安装且 ownership "
-                "通过则只运行后台 supervisor，否则直接启动固定 C# "
-                "监听器并明确标记本登录未受监督。"
-            ),
-        ):
-            return
-
-        def action() -> tuple[str, int | None, int | None]:
-            task = inspect_bootstrap_task(
-                self.paths,
-                self.control_paths,
-                self.control_runner,
-            )
-            if task.exists and not task.owned:
-                raise BridgeError(
-                    "同名后台任务 ownership 未通过；"
-                    "拒绝启用或旁路启动。"
-                )
-            active = self.render_endpoint_provider()
-            active_capture = (
-                self.capture_endpoint_provider()
-                if virtual_microphone_capture is not None
-                else None
-            )
-            save_enabled_config(
-                self.paths,
-                virtual_microphone,
-                virtual_speaker,
-                active_render_endpoints=active,
-                active_capture_endpoints=active_capture,
-                allow_legacy_migration=legacy_migration,
-                context_delivery_mode=context_delivery_mode,
-                virtual_microphone_capture_endpoint_id=(
-                    virtual_microphone_capture.endpoint_id
-                    if virtual_microphone_capture is not None
-                    else None
-                ),
-            )
-            if run_bootstrap_task_if_owned(
-                self.paths,
-                self.control_paths,
-                self.control_runner,
-            ):
-                return "supervised", None, None
-            pid = start_direct_service(
-                self.paths,
-                self.process_runner,
-            )
-            history_pid = start_history_sync_worker(self.paths)
-            return "direct", pid, history_pid
-
-        def success(
-            result: tuple[str, int | None, int | None]
-        ) -> None:
-            mode, pid, history_pid = result
-            self.refresh_static()
-            if mode == "supervised":
-                self.footer.configure(
-                    text=(
-                        "已请求运行 ownership 通过的后台 supervisor；"
-                        "在线仍以新鲜 runtime status 为准。"
-                    ),
-                    foreground="#245c3b",
-                )
-            else:
-                self.footer.configure(
-                    text=(
-                        f"直连监听器已请求启动（PID {pid}）；"
-                        f"侧栏同步 worker PID {history_pid}；"
-                        "本登录未受后台 supervisor 保护。"
-                    ),
-                    foreground="#9a6700",
-                )
-
-        self.run_task(
-            "正在启用配置并选择受监督启动路径…",
-            action,
-            success,
+        messagebox.showerror(
+            APP_TITLE,
+            "此处启动 Direct 的旧入口已退休；请启动 ReaderPC Server，"
+            "由它以当前进程 PID 严格持有电脑语音与实时快照生命周期。",
+            parent=self.root,
         )
 
     def on_refresh(self) -> None:
@@ -1185,8 +1020,8 @@ class BridgeWindow:
         serve: ServeInspection,
     ) -> None:
         if task.exists and task.owned:
-            task_text = "● 登录后台引导器：已安装且合同匹配"
-            task_color = "#167347"
+            task_text = "⚠ 旧登录后台引导器：待 ReaderPC 精确移除"
+            task_color = "#9a6700"
         elif task.exists:
             task_text = "⚠ 登录后台引导器：同名未知任务，拒绝改动"
             task_color = "#9a6700"
@@ -1246,46 +1081,12 @@ class BridgeWindow:
         self.run_task("正在只读查询安装状态…", action, success)
 
     def on_install_bootstrap(self) -> None:
-        if not self._confirm_mutation(
-            "安装登录后台引导器",
-            (
-                "将为当前 Windows 用户创建固定同名的交互式、"
-                "隐藏、失败可重启任务；不会覆盖任何已有同名任务。"
-            ),
-        ):
-            return
-
-        def action() -> bool:
-            if self.temporary_directory_factory is None:
-                return install_bootstrap_task(
-                    self.paths,
-                    self.control_paths,
-                    self.control_runner,
-                )
-            return install_bootstrap_task(
-                self.paths,
-                self.control_paths,
-                self.control_runner,
-                temporary_directory_factory=(
-                    self.temporary_directory_factory
-                ),
-            )
-
-        def success(changed: bool) -> None:
-            if changed:
-                self.bootstrap_install_status.configure(
-                    text="● 登录后台引导器：已安装且合同匹配",
-                    foreground="#167347",
-                )
-            self.footer.configure(
-                text=(
-                    "登录后台引导器已安装。"
-                    if changed
-                    else "登录后台引导器状态未改变。"
-                )
-            )
-
-        self.run_task("正在安装登录后台引导器…", action, success)
+        messagebox.showerror(
+            APP_TITLE,
+            "登录后台引导器已退休，不能重新创建。"
+            "Direct 只允许由 ReaderPC Server 以 owner PID 启动。",
+            parent=self.root,
+        )
 
     def on_remove_bootstrap(self) -> None:
         if not self._confirm_mutation(
@@ -1401,13 +1202,11 @@ def main() -> int:
             print(json.dumps(report, ensure_ascii=False, indent=2))
         return 0 if report["ok"] else 1
     if sys.argv[1:] == ["--bootstrap"]:
-        # The interactive current-user bootstrap owns the only keyboard
-        # injection surface.  Do not start the native direct child until its
-        # authenticated local pipe is already accepting requests.
-        with WindowsShortcutBroker():
-            return run_bootstrap_with_history_sync(
-                BridgePaths.discover(), WindowsProcessRunner()
-            )
+        # A previously installed task can still invoke this exact argument
+        # before ReaderPC gets a chance to delete the task.  Keep the old CLI
+        # shape as a fail-closed tombstone: it must never recreate an
+        # ownerless Direct generation.
+        return 0
     if sys.argv[1:] == ["--history-sync-worker"]:
         paths = BridgePaths.discover()
         runner = WindowsProcessRunner()

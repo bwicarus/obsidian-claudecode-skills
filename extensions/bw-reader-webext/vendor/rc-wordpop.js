@@ -185,7 +185,7 @@ if (window.__bwPwaProviderOnly) return;
           : fetch('/pdf/api/dict-quick?word=' + encodeURIComponent(ww) + '&prewarm=1')
               .then(function (r) { return r.json(); });
         operation
-          .then(function (d) { if (d && d.ok) { _dictCache.set(ww, d); if (_dictCache.size > _DICT_CACHE_MAX) _dictCache.delete(_dictCache.keys().next().value); } })
+          .then(function (d) { _cacheDictResult(ww, d); })
           .catch(function () {})
           .then(function () { _prewarmActive--; if (_prewarmQ.length) _schedPump(); });
       })(w);
@@ -619,6 +619,56 @@ if (window.__bwPwaProviderOnly) return;
       }).join(' ');
   }
 
+  // 用户主动点词时，本地富词典若没有中文义，沿用迁移前的
+  // /dict-quick 查询。这个 Promise 仍由 show() 的既有呼吸高亮状态机持有：
+  // 慢请求闪烁、成功后原位填回；后台 prewarm 不经过这里，仍保持纯本地。
+  function _lookupJapaneseRemote(word, ctx) {
+    var url = '/pdf/api/dict-quick?word=' + encodeURIComponent(word) +
+      '&file=' + encodeURIComponent(_ctx.file || '') +
+      '&page=' + (_ctx.page || 0) +
+      '&context=' + encodeURIComponent(ctx || '') +
+      '&langs=' + encodeURIComponent((_ctx.langs || []).join(','));
+    // @interaction dictionary.quick.read
+    return fetch(url).then(function (response) { return response.json(); });
+  }
+
+  function _japaneseLookupNeedsRemote(result) {
+    if (!result || result.ok === false) return true;
+    return !_jpMeaningText(result);
+  }
+
+  function _mergeJapaneseRemoteLookup(localResult, remoteResult) {
+    if (!remoteResult || remoteResult.ok === false) return localResult || remoteResult;
+    if (!localResult || localResult.ok === false) {
+      return Object.assign({ source: 'pi-dict-quick', meaning_source: 'pi-dict-quick' }, remoteResult);
+    }
+    var merged = Object.assign({}, localResult);
+    var remoteMeaning = _jpMeaningText(remoteResult);
+    if (!_jpMeaningText(merged) && remoteMeaning) {
+      merged.zh = remoteMeaning;
+      merged.translation = remoteMeaning;
+      merged.meaning_source = 'pi-dict-quick';
+    }
+    var remoteExamples = Array.isArray(remoteResult.examples) ? remoteResult.examples : [];
+    if (!Array.isArray(merged.examples) || !merged.examples.length) {
+      merged.examples = remoteExamples.slice();
+    } else if (remoteExamples.length) {
+      var byJapanese = Object.create(null);
+      remoteExamples.forEach(function (example) {
+        var ja = String(example && example.ja || '').trim();
+        var zh = String(example && example.zh || '').trim();
+        if (ja && zh) byJapanese[ja] = zh;
+      });
+      merged.examples = merged.examples.map(function (example) {
+        var ja = String(example && example.ja || '').trim();
+        return (!example.zh && byJapanese[ja])
+          ? Object.assign({}, example, { zh: byJapanese[ja] })
+          : example;
+      });
+    }
+    return merged;
+  }
+
   async function _lookupJapaneseLocalFirst(word, ctx) {
     var dictionary = RC.offlineDictionary;
     var local = _offlineJapaneseDictionary();
@@ -631,20 +681,28 @@ if (window.__bwPwaProviderOnly) return;
           : !dictionary.isLocalMode ? '缺 isLocalMode()'
           : 'isLocalMode() 为假(词典未下载或未开启)'
       ));
-      return {
+      return _lookupJapaneseRemote(word, ctx).catch(function () { return {
         ok: false, jp: true, unavailable: true,
         code: 'BW_OFFLINE_DICTIONARY_NOT_LOCAL'
-      };
+      }; });
     }
-    // 保持"直接返回本地查词结果"这一形态:合同测试守护的正是它(不得绕道 Pi),
-    // 诊断挂在后面,不插进调用与返回之间。
+    // 保持本地词典为第一查询源；只有用户主动点词且本地结果缺中文时，才在
+    // 这个 Promise 内接回旧 /dict-quick。后台 prewarm 不会进入这条远端分支。
     return local.lookupJapaneseLegacy(word).then(function (result) {
       _dictDiag('本地查词「' + word + '」→ ' + (
         result && result.ok === false
           ? ('失败 ' + (result.code || '未给出错误码'))
           : _dictFieldReport(result)
       ));
-      return result;
+      if (!_japaneseLookupNeedsRemote(result)) return result;
+      return _lookupJapaneseRemote(word, ctx).then(function (remoteResult) {
+        var merged = _mergeJapaneseRemoteLookup(result, remoteResult);
+        // 两级词典都没有中文义时，回到旧版“无词条”分支：小框仍可点
+        // 整个释义区展开，完整框随后自动进入深度解释。
+        return _jpMeaningText(merged) ? merged : Object.assign({}, merged || result, { ok: false, jp: true });
+      }).catch(function () {
+        return Object.assign({}, result, { ok: false, jp: true });
+      });
     });
   }
 
@@ -657,6 +715,7 @@ if (window.__bwPwaProviderOnly) return;
       '&page=' + (_ctx.page || 0) +
       '&context=' + encodeURIComponent(_ctx.ctx || '') +
       '&langs=' + encodeURIComponent((_ctx.langs || []).join(','));
+    // @interaction dictionary.quick.read
     return fetch(url).then(function (r) { return r.json(); });
   }
 
@@ -711,6 +770,18 @@ if (window.__bwPwaProviderOnly) return;
     });
     (Array.isArray(d && d.examples) ? d.examples : []).forEach(add);
     return result;
+  }
+
+  function _cacheDictResult(word, result) {
+    if (!result || !result.ok) return;
+    // 中文义仍缺失时不缓存：用户再次点原词会重新进入原有呼吸查询，而
+    // 不会被一条残缺的会话缓存永久短路。例句缺中文有自己的 exact-JA
+    // 原位回填链，不应再次触发整词查询。
+    if (result.jp && !_jpMeaningText(result)) return;
+    try {
+      _dictCache.set(word, result);
+      if (_dictCache.size > _DICT_CACHE_MAX) _dictCache.delete(_dictCache.keys().next().value);
+    } catch (_) {}
   }
 
   function _pruneJapaneseExampleZhPending() {
@@ -800,9 +871,7 @@ if (window.__bwPwaProviderOnly) return;
         if (zh) {
           node.textContent = zh;
           if (node.dataset) node.dataset.zhdone = '1';
-        } else {
-          node.textContent = 'Pi 中文翻译暂不可用';
-        }
+        } else node.textContent = '';
       });
     });
   }
@@ -815,15 +884,12 @@ if (window.__bwPwaProviderOnly) return;
       if (_isJaWord(word)) {
         // 词典无此词(常见=复合词/专有名词,2026-07-21 用户实锤「豆腐汁」):不再自动糊 AI 大框——
         // 合成兜底词条走标准小框(掌握/语法/发音/定位全套白拿);「展开完整字典」→ AI 讲解成为用户主动动作
-        var unavailableReason = d && d.unavailable
-          ? 'App 本地日语词典尚未下载'
-          : 'App 本地日语词典未命中；可展开后手动使用 Pi 深度解释';
         d = { ok: true, jp: true, word: word, lemma: word, forms: [],
-              translation: '', definition: unavailableReason,
+              translation: '', definition: '暂无词典释义(可能是复合词/专有名词)。点此展开,让 AI 结合上下文讲解',
               source: 'local-jmdict', mastered: false };
       } else { pop.style.display = 'none'; window._expandWordFull(word, ctx); return; }   // 英文 ecdict 没有 → 三源完整(原行为)
     }
-    try { _dictCache.set(word, d); if (_dictCache.size > 600) _dictCache.delete(_dictCache.keys().next().value); } catch (_) {}
+    _cacheDictResult(word, d);
     _wordPopState.lemma = d.lemma || word;
     _wordPopState.forms = Array.isArray(d.forms) ? d.forms.slice() : [];
     _wordPopState.jp = !!d.jp;                                      // 掌握按钮按语言分流(jp/en 不同 store)
@@ -859,7 +925,6 @@ if (window.__bwPwaProviderOnly) return;
       return !!d.mastered;
     })();
     var definition = d.jp ? _jpMeaningText(d) : (d.translation || d.definition || '');
-    if (d.jp && !definition) definition = '本地词典暂无中文释义；可展开后手动使用 Pi 深度解释';
     var defLines = (definition || '(无释义)').split('\n').filter(Boolean).slice(0, 3).map(esc).join('<br>');
     // 用户给出的旧界面基准明确划掉了这一块：日语小框与完整字典页
     // 都不恢复词性标签；英语仍保留原有标签。
@@ -879,7 +944,7 @@ if (window.__bwPwaProviderOnly) return;
         return '<div class="wp-ex-ja">' + esc(e.ja) + '</div>' +
                '<div class="wp-ex-zh" data-jpex-id="' + smallExampleKey + '-' + index + '"' +
                (e.zh ? ' data-zhdone="1"' : '') + '>' +
-               esc(e.zh || 'Pi 中文翻译中…') + '</div>';
+               esc(e.zh || '') + '</div>';
       }).join('') + '</div>';
     }
     pop.style.display = 'block';
@@ -900,7 +965,7 @@ if (window.__bwPwaProviderOnly) return;
       (_ctx.markHighlight ? '<button data-wp-act="mark" title="把该词标为高亮">🖌 标记</button>' : '') +
       '<button data-wp-act="grammar" title="对该词所在整句做语法分析（分词/结构/跟踪知识点）">📊 语法</button>' +
       '</div>';
-    if (d.jp && d.source === 'local-jmdict') {
+    if (d.jp) {
       _fillJapaneseExampleZh(pop, quickRows, smallExampleKey, function () {
         return _wordPopState && _wordPopState.word === word &&
           smallExampleKey === 'small-' + _jpSmallExampleSeq;
@@ -1024,7 +1089,7 @@ if (window.__bwPwaProviderOnly) return;
       _wordPopOwnerId = ++_wordHlSeq;
       _popPosHook = _ctx.positionPop;
       _renderWordPop(word, _ctx.ctx, cached, _ctx.rect);
-      _lookupFetch(word).then(function (d) { if (d && d.ok) _dictCache.set(word, d); }).catch(function () {});
+      _lookupFetch(word).then(function (d) { _cacheDictResult(word, d); }).catch(function () {});
       return;
     }
     // 已知词(有生词下划线,本 session 没查过 → _dictCache 空,但服务器有缓存查询很快):不呼吸,
@@ -1036,9 +1101,9 @@ if (window.__bwPwaProviderOnly) return;
       pop.innerHTML = '<div style="padding:14px;color:#8a9bb4">⏳ 查询中…</div>';
       _positionPop(pop, _ctx.rect);
       _lookupFetch(word).then(function (d) {
-        if (d && d.ok) _dictCache.set(word, d);
+        _cacheDictResult(word, d);
         if (_wordPopOwnerId !== _oid) return;   // 期间点了别的词 → 不覆盖
-        if (d && d.ok) { _popPosHook = _ctx.positionPop; _renderWordPop(word, _ctx.ctx, d, _ctx.rect); }
+        if ((d && d.ok) || _isJaWord(word)) { _popPosHook = _ctx.positionPop; _renderWordPop(word, _ctx.ctx, d, _ctx.rect); }
         else if (_ctx.onFallback) { try { pop.style.display = 'none'; _ctx.onFallback(word); } catch (_) {} }
         else pop.innerHTML = '<div style="padding:14px;color:#8a9bb4">未查到</div>';
       }).catch(function () { if (_wordPopOwnerId === _oid) pop.innerHTML = '<div style="padding:14px;color:#c88">查询失败</div>'; });
@@ -1326,7 +1391,7 @@ if (window.__bwPwaProviderOnly) return;
   };
 
   // ─────────────────────────── 日语完整框(照搬 19-dict.js)───────────────────────────
-  // 轮询 /api/dict-jp-zh,拿后台翻好的例句/汉字字义中文,原地替换英文(跟英文单词一致,不增加等待)。
+  // 轮询 /api/dict-jp-zh，拿后台翻好的例句/汉字字义中文并原位补入。
   function _jpPollZh(word) {
     clearInterval(_jpPollTimer);
     var tries = 0;
@@ -1379,18 +1444,12 @@ if (window.__bwPwaProviderOnly) return;
     if (myReq !== _resReqId()) return false;
     if (!d.ok) {
       if (_isJaWord(word)) {
-        var localUnavailable = d.unavailable === true;
-        var localMessage = localUnavailable
-          ? 'App 离线词典尚未下载；可在“原生阅读工具 → 离线日语词典”中选择下载。'
-          : '「' + esc(word) + '」本地中文词典未命中或不可用。';
-        if (d.chinese_fallback_error) {
-          localMessage += '<br>ReaderPC 中文释义失败：' +
-            esc(d.chinese_fallback_error);
-        }
-        contentEl.innerHTML = '<div style="padding:6px 2px 10px;color:#8a9bb4">' + localMessage + '</div>' +
-          '<button id="jp-ai-btn" class="jp-ai-btn">改用 Pi 深度解释（可选）</button><div id="jp-ai-out" class="jp-ai-out"></div>';
-        var missAiButton = contentEl.querySelector('#jp-ai-btn');
-        if (missAiButton) missAiButton.addEventListener('click', function () { jpAiDeep(word); });
+        // App 1.1.35 的旧交互：用户已通过小框释义区主动展开；完整词典仍
+        // 未命中时直接开始深度解释，不再要求再点一次“手动使用 Pi”。
+        contentEl.innerHTML = '<div style="padding:6px 2px 10px;color:#8a9bb4">「' + esc(word) +
+          '」暂无词典释义（可能是人名/专有名词），已请 AI 讲解：</div>' +
+          '<button id="jp-ai-btn" style="display:none"></button><div id="jp-ai-out" class="jp-ai-out"></div>';
+        try { jpAiDeep(word); } catch (_) {}
         return false;
       }
       return dictStream(word, ctx);   // 也许其实是英文词 → 回退三源框
@@ -1405,8 +1464,6 @@ if (window.__bwPwaProviderOnly) return;
     var fullMeaning = _jpMeaningText(d);
     if (fullMeaning) {
       html += '<div class="jp-zh">' + esc(fullMeaning) + '</div>';
-    } else {
-      html += '<div class="jp-zh">本地词典暂无中文释义；可手动使用 Pi 深度解释</div>';
     }
     if (d.meaning_source === 'pc-codex-cli') {
       html += '<div style="margin-top:4px;color:#6f7e96;font-size:10.5px">电脑 ReaderPC · Codex CLI 上下文中文释义' +
@@ -1431,7 +1488,7 @@ if (window.__bwPwaProviderOnly) return;
         html += '<div class="jp-ex-ja">' + esc(e.ja) + '</div>' +
                 '<div class="jp-ex-zh" data-exi="' + ei + '" data-jpex-id="' + fullExampleKey + '-' + ei + '"' +
                 (e.zh ? ' data-zhdone="1"' : '') + '>' +
-                esc(e.zh || (d.source === 'local-jmdict' ? 'Pi 中文翻译中…' : '')) + '</div>';
+                esc(e.zh || '') + '</div>';
       });
       html += '</div>';
     }
@@ -1452,7 +1509,7 @@ if (window.__bwPwaProviderOnly) return;
         return myReq === _resReqId() && fullExampleKey === 'full-' + _jpFullExampleSeq;
       });
     }
-    // 有未翻的例句/汉字字义 → 后台翻 + 轮询替换英文(不增加等待)
+    // 有未翻的例句/汉字字义 → 后台翻 + 轮询原位补入(不增加等待)
     if (d.source !== 'local-jmdict' &&
         ((d.examples || []).some(function (e) { return !e.zh; }) ||
          _jpKanjiData.some(function (k) { return !k.meanings_zh; }))) _jpPollZh(word);

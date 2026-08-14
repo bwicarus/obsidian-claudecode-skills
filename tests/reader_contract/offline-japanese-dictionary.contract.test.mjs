@@ -252,7 +252,7 @@ test("App download stays in private Application Support and outside backup/sync"
   assert.match(settings, /不进入书籍附件、Pi、Safari 扩展或设置同步/);
 });
 
-test("Japanese UI stays on the App dictionary and exposes Pi only as an explicit fallback", () => {
+test("Japanese UI queries the App dictionary first and restores the old explicit expand-to-AI fallback", () => {
   const wordpop = read("_server_deploy/static/pdf/rc-wordpop.js");
   const phrasepop = read("_server_deploy/static/pdf/rc-phrasepop.js");
   const computerVoice = read("_server_deploy/static/pdf/rc-computer-voice.js");
@@ -260,7 +260,9 @@ test("Japanese UI stays on the App dictionary and exposes Pi only as an explicit
   const protocol = read(
     "extensions/bw-reader-webext/windows/ComputerVoiceAudio/DirectBridgeProtocol.cs",
   );
-  assert.match(wordpop, /改用 Pi 深度解释（可选）/);
+  assert.match(wordpop, /暂无词典释义\(可能是复合词\/专有名词\)。点此展开,让 AI 结合上下文讲解/);
+  assert.match(wordpop, /try \{ jpAiDeep\(word\); \} catch \(_\) \{\}/);
+  assert.doesNotMatch(wordpop, /改用 Pi 深度解释（可选）|手动使用 Pi 深度解释/);
   assert.match(wordpop, /_lookupJapaneseLocalFirst/);
   assert.match(phrasepop, /_lookupPhraseLocalFirst/);
   assert.doesNotMatch(wordpop, /lookupJapaneseFallback\s*\(/);
@@ -273,6 +275,6 @@ test("Japanese UI stays on the App dictionary and exposes Pi only as an explicit
   assert.match(computerVoice, /"dictionary-lookup"/);
   assert.match(nativeRuntime, /dictionaryFallbackCache/);
   assert.match(protocol, /HandleDictionaryLookupAsync/);
-  assert.doesNotMatch(wordpop, /暂无词典释义（可能是人名\/专有名词），已请 AI 讲解/);
+  assert.match(wordpop, /暂无词典释义（可能是人名\/专有名词），已请 AI 讲解/);
   assert.match(phrasepop, /改用 Pi 旧版精释/);
 });

@@ -3,7 +3,8 @@
  * 控制与固定帧 PCM 音频只走固定的 tailnet WSS，不经过 Pi。Tailnet 身份和
  * 固定 Origin 由 Windows 端校验；Reader 不保存身份或凭据。选择模型、加载
  * 设置和 STATUS 都不会启动 Windows 应用或采音；电脑按钮的一次真实用户操作
- * 只发送 START，设置里的 Codex 语音控制按钮则只发送显式的状态目标。
+ * 只发送 START。实时快照与 Codex 语音由 ReaderPC 服务器进程统一管理，Reader
+ * 只读取其运行状态，不发送独立启停或持续运行目标。
  */
 (function () {
   "use strict";
@@ -24,7 +25,6 @@
   var CLOSE_TIMEOUT_MS = 1500;
   var REQUEST_TIMEOUT_MS = 7000;
   var START_TIMEOUT_MS = 45000;
-  var CODEX_VOICE_CONTROL_TIMEOUT_MS = 120000;
   var HEARTBEAT_INTERVAL_MS = 5000;
   var HEARTBEAT_TIMEOUT_MS = 15000;
   var START_GESTURE_LEASE_TTL_MS = 5000;
@@ -111,8 +111,6 @@
   var requestSequence = 0;
   var statusListeners = [];
   var availabilityAttempt = null;
-  var codexVoiceSetPromise = null;
-  var lastKnownCodexVoiceKeepActive = null;
   var lastClientFailure = null;
   var computerTarget = COMPUTER_TARGET_CODEX;
   var computerTargetLoaded = false;
@@ -4030,9 +4028,9 @@
     var state = snapshotLink;
     // The App keeps its snapshot on /reader-context/v1.  That endpoint is
     // deliberately context-only and must never receive STATUS or the
-    // privileged codex-voice-set action.  Only borrow a snapshot channel when
-    // it is already the full computer-voice endpoint; otherwise availability()
-    // opens a bounded, short-lived voice channel for the settings read.
+    // status request. Only borrow a snapshot channel when it is already the
+    // full computer-voice endpoint; otherwise availability() opens a bounded,
+    // short-lived voice channel for the settings read.
     if (
       !state ||
       state.stopped ||
@@ -4180,75 +4178,6 @@
       });
     });
     return attempt.promise;
-  }
-
-  // Explicit settings action. It never sends START/STOP and never acquires
-  // audio ownership. Windows first reads the real Codex microphone ledger;
-  // only a requested state transition may emit one F24 through the existing
-  // broker. Keeping the desired state in the contract avoids two devices
-  // blindly toggling each other back.
-  function setCodexVoiceActive(desiredActive) {
-    if (typeof desiredActive !== "boolean") {
-      return Promise.reject(directError(
-        "Codex 语音目标状态无效",
-        "BW_COMPUTER_VOICE_DIRECT_SCHEMA",
-        false
-      ));
-    }
-    if (codexVoiceSetPromise) return codexVoiceSetPromise;
-    var channel = null;
-    var work = openDirect(null, function (created) {
-      channel = created;
-    }).then(function (opened) {
-      return opened.request(
-        "codex-voice-set",
-        { active: desiredActive },
-        CODEX_VOICE_CONTROL_TIMEOUT_MS
-      );
-    }).then(function (value) {
-      return normalizeCodexVoicePayload(value, "Codex 语音控制响应");
-    });
-    var tracked = work.finally(function () {
-      var closePromise = channel ? channel.close() : Promise.resolve();
-      channel = null;
-      return closePromise;
-    });
-    codexVoiceSetPromise = tracked;
-    return tracked.finally(function () {
-      if (codexVoiceSetPromise === tracked) codexVoiceSetPromise = null;
-    });
-  }
-
-  function setCodexVoiceKeepActive(enabled) {
-    if (typeof enabled !== "boolean") {
-      return Promise.reject(directError(
-        "Codex 语音持续运行目标状态无效",
-        "BW_COMPUTER_VOICE_DIRECT_SCHEMA",
-        false
-      ));
-    }
-    if (codexVoiceSetPromise) return codexVoiceSetPromise;
-    var channel = null;
-    var work = openDirect(null, function (created) {
-      channel = created;
-    }).then(function (opened) {
-      return opened.request(
-        "codex-voice-keepalive-set",
-        { enabled: enabled },
-        CODEX_VOICE_CONTROL_TIMEOUT_MS
-      );
-    }).then(function (value) {
-      return normalizeCodexVoicePayload(value, "Codex 语音持续运行响应");
-    });
-    var tracked = work.finally(function () {
-      var closePromise = channel ? channel.close() : Promise.resolve();
-      channel = null;
-      return closePromise;
-    });
-    codexVoiceSetPromise = tracked;
-    return tracked.finally(function () {
-      if (codexVoiceSetPromise === tracked) codexVoiceSetPromise = null;
-    });
   }
 
   function makeAudioSurface() {
@@ -7780,18 +7709,6 @@
       '</div>' +
       '<div class="ams-tdef" data-role="codex-voice-status" ' +
       'style="margin-top:10px">正在读取 Codex 语音状态…</div>' +
-      '<div class="ams-row" style="margin-top:7px">' +
-      '<button type="button" class="ams-btn" data-role="codex-voice-toggle" ' +
-      'disabled>Codex 语音状态不可用</button>' +
-      '</div>' +
-      '<label class="ams-tdef" style="display:flex;align-items:center;' +
-      'gap:8px;margin-top:9px">' +
-      '<input type="checkbox" data-role="codex-voice-keepalive" disabled>' +
-      '<span>保持 Codex 语音开启（自动关闭后由 Windows 恢复）</span>' +
-      '</label>' +
-      '<div class="ams-tdef" data-role="codex-voice-error" ' +
-      'style="display:none;margin-top:7px;white-space:pre-wrap;' +
-      'user-select:text;color:#ffb4a8"></div>' +
       '<div class="ams-tdef" data-role="detail" style="margin-top:6px"></div>' +
       '<div class="ams-tdef" data-role="error" ' +
       'style="display:none;margin-top:7px;white-space:pre-wrap;' +
@@ -7804,21 +7721,8 @@
     var codexVoiceStatus = root.querySelector(
       '[data-role="codex-voice-status"]'
     );
-    var codexVoiceToggle = root.querySelector(
-      '[data-role="codex-voice-toggle"]'
-    );
-    var codexVoiceKeepAlive = root.querySelector(
-      '[data-role="codex-voice-keepalive"]'
-    );
-    var codexVoiceError = root.querySelector(
-      '[data-role="codex-voice-error"]'
-    );
     var detail = root.querySelector('[data-role="detail"]');
     var errorDetail = root.querySelector('[data-role="error"]');
-    var latestCodexVoice = null;
-    var latestCodexVoiceValue = null;
-    var latestCodexVoiceKeepActive = null;
-    var codexVoiceControlError = "";
     var refreshRetryTimer = null;
 
     function renderTarget() {
@@ -7829,70 +7733,25 @@
         ? "GPT Classic：语音启停与音频回传以 GPT Classic 为目标；" +
           "文字接力仅在“测试旧版文字注入”开启时发送到 GPT Classic，" +
           "实时快照/MCP 仍属于 Codex。"
-        : "Codex：电脑按钮只建立音频桥接；下方独立按钮读取并控制 Codex 语音；" +
-          "音频回传和已有上下文工具/文字接力仍以 Codex 为目标。";
+        : "Codex：电脑按钮只建立音频桥接；实时快照与 Codex 语音由 " +
+          "ReaderPC 服务器进程统一管理；音频回传和已有上下文工具/文字接力" +
+          "仍以 Codex 为目标。";
     }
 
     function renderCodexVoice(value, connectionState) {
-      latestCodexVoiceValue = value || null;
-      if (value && typeof value.keepActive === "boolean") {
-        lastKnownCodexVoiceKeepActive = value.keepActive;
-      }
-      latestCodexVoiceKeepActive = value &&
-          typeof value.keepActive === "boolean"
-        ? value.keepActive
-        : lastKnownCodexVoiceKeepActive;
-      latestCodexVoice = value && value.status === "available"
-        ? value
-        : null;
-      if (latestCodexVoice) {
-        codexVoiceStatus.textContent = latestCodexVoice.active
-          ? "● Codex 正在使用麦克风（通常表示语音已开启）。"
-          : "○ Codex 当前未使用麦克风（通常表示语音已关闭）。";
-        codexVoiceToggle.disabled = false;
-        codexVoiceToggle.textContent = latestCodexVoice.active
-          ? "关闭 Codex 语音"
-          : "开启 Codex 语音";
-        codexVoiceKeepAlive.disabled =
-          typeof latestCodexVoice.keepActive !== "boolean";
-        codexVoiceKeepAlive.checked =
-          latestCodexVoiceKeepActive === true;
-        if (latestCodexVoiceKeepActive === true) {
-          codexVoiceStatus.textContent +=
-            " Windows 持续运行已开启，异常关闭后会自动恢复。";
-        }
+      if (value && value.status === "available") {
+        codexVoiceStatus.textContent = value.active
+          ? "● Codex 语音正在运行（由 ReaderPC 服务器管理）。"
+          : "○ Codex 语音当前未运行（由 ReaderPC 服务器管理）。";
       } else if (value && value.status === "error") {
         codexVoiceStatus.textContent = "○ Codex 语音状态读取失败。";
-        codexVoiceToggle.disabled = true;
-        codexVoiceToggle.textContent = "Codex 语音状态不可用";
-        codexVoiceKeepAlive.disabled = true;
-        codexVoiceKeepAlive.checked =
-          latestCodexVoiceKeepActive === true;
       } else if (value && value.status === "unavailable") {
         codexVoiceStatus.textContent =
           "○ Codex 语音状态不可读取（Codex 可能尚未运行）。";
-        codexVoiceToggle.disabled = true;
-        codexVoiceToggle.textContent = "Codex 语音状态不可用";
-        codexVoiceKeepAlive.disabled =
-          typeof latestCodexVoiceKeepActive !== "boolean";
-        codexVoiceKeepAlive.checked =
-          latestCodexVoiceKeepActive === true;
       } else {
         codexVoiceStatus.textContent = connectionState === "offline"
-          ? "○ Windows 桥接器暂时离线；已保存的持续运行设置仍然有效，连接恢复后会自动继续。"
-          : "○ 暂未取得 Codex 语音状态；不会清除已保存的持续运行设置。";
-        codexVoiceToggle.disabled = true;
-        codexVoiceToggle.textContent = "Codex 语音状态不可用";
-        codexVoiceKeepAlive.disabled = true;
-        codexVoiceKeepAlive.checked =
-          latestCodexVoiceKeepActive === true;
-      }
-      if (codexVoiceControlError) {
-        codexVoiceError.style.display = "";
-        codexVoiceError.textContent = codexVoiceControlError;
-      } else {
-        codexVoiceError.style.display = "none";
-        codexVoiceError.textContent = "";
+          ? "○ Windows 桥接器暂时离线。"
+          : "○ 暂未取得 Codex 语音状态。";
       }
     }
 
@@ -7915,8 +7774,8 @@
         "电脑按钮才会申请当前网页麦克风并送入 Windows 虚拟麦克风；" +
         "所选目标的输出固定到独立虚拟扬声器后按进程树回传。" +
         "切换目标或刷新状态不会启动应用或采音。" +
-        "通话中不能切换目标；挂断只停止音频桥接，不会自动切换 Codex 语音；" +
-        "上方按钮可独立控制 Codex 语音。";
+        "通话中不能切换目标；挂断只停止音频桥接。" +
+        "实时快照与 Codex 语音随 ReaderPC 服务器进程一起启动和停止。";
       renderCodexVoice(
         value.status && value.status.codexVoice,
         value.state
@@ -7954,11 +7813,7 @@
     function refresh() {
       status.textContent = "正在直连 Windows 桥接器读取状态…";
       refreshButton.disabled = true;
-      codexVoiceControlError = "";
       codexVoiceStatus.textContent = "正在读取 Codex 语音状态…";
-      codexVoiceToggle.disabled = true;
-      codexVoiceToggle.textContent = "正在读取…";
-      codexVoiceKeepAlive.disabled = true;
       return availability().then(render).catch(function (error) {
         status.textContent = "直连状态读取失败：" +
           (error.message || "未知错误");
@@ -7988,70 +7843,6 @@
     });
     window.addEventListener("bw-native-computer-voice-state", renderTarget);
     refreshButton.addEventListener("click", refresh);
-    codexVoiceToggle.addEventListener("click", function (event) {
-      // This button can emit the global Codex shortcut on Windows. The settings
-      // card lives in an open shadow root on third-party pages, so a host script
-      // can call element.click(); only a browser-authenticated user activation
-      // may cross that privilege boundary.
-      if (!event || event.isTrusted !== true) return;
-      if (!latestCodexVoice || codexVoiceSetPromise) return;
-      var desiredActive = !latestCodexVoice.active;
-      codexVoiceControlError = "";
-      refreshButton.disabled = true;
-      codexVoiceToggle.disabled = true;
-      codexVoiceToggle.textContent = desiredActive
-        ? "正在开启 Codex 语音…"
-        : "正在关闭 Codex 语音…";
-      var update = desiredActive || latestCodexVoice.keepActive !== true
-        ? setCodexVoiceActive(desiredActive)
-        : setCodexVoiceKeepActive(false).then(function () {
-            return setCodexVoiceActive(false);
-          });
-      update.then(function (value) {
-        renderCodexVoice(value);
-        if (RC && typeof RC.toast === "function") {
-          RC.toast(value.active ? "Codex 语音已开启" : "Codex 语音已关闭");
-        }
-      }).catch(function (error) {
-        codexVoiceControlError =
-          "Codex 语音控制失败\n" +
-          String(error && (error.code || error.message) || "未知错误");
-        renderCodexVoice(latestCodexVoice);
-      }).finally(function () {
-        refreshButton.disabled = false;
-      });
-    });
-    codexVoiceKeepAlive.addEventListener("change", function (event) {
-      if (!event || event.isTrusted !== true) {
-        renderCodexVoice(latestCodexVoiceValue);
-        return;
-      }
-      if (codexVoiceSetPromise ||
-          typeof latestCodexVoiceKeepActive !== "boolean") {
-        renderCodexVoice(latestCodexVoiceValue);
-        return;
-      }
-      var enabled = codexVoiceKeepAlive.checked === true;
-      codexVoiceControlError = "";
-      refreshButton.disabled = true;
-      codexVoiceToggle.disabled = true;
-      codexVoiceKeepAlive.disabled = true;
-      setCodexVoiceKeepActive(enabled).then(function (value) {
-        renderCodexVoice(value);
-        if (RC && typeof RC.toast === "function") {
-          RC.toast(enabled
-            ? "Windows 将保持 Codex 语音开启"
-            : "已停止自动恢复 Codex 语音");
-        }
-      }).catch(function (error) {
-        codexVoiceControlError =
-          "Codex 语音持续运行设置失败\n" +
-          String(error && (error.code || error.message) || "未知错误");
-        renderCodexVoice(latestCodexVoiceValue);
-      }).finally(function () {
-        refreshButton.disabled = false;
-      });
-    });
     renderTarget();
     loadComputerTarget().then(renderTarget).catch(renderTarget);
     refresh();
