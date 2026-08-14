@@ -443,9 +443,30 @@ iOS App 与浏览器扩展提供，Pi 不再提供一份 App 已经能提供的�
 
 | 类 | 条数 | 处置 |
 |---|---|---|
-| **A** App 已有实现 | 10 | **改指向 App**，不需要新写能力 |
-| **B** App 缺此能力 | 14 | 要先在 App 里补齐，`html-highlights` 优先（网页高亮是扩展独有场景） |
+| **A** App 已有实现 | 10 | **改指向 App**，不需要新写能力 ✅ 已完成 |
+| ~~**B** App 缺此能力~~ | ~~14~~ → **0** | **这一类实际是空的**，见下 |
 | **C** 本就该服务端 | 30 | 保持，走普通联网 API |
+
+> **B 类是误判，已纠正（2026-08-15）。** 逐条核实后：
+> - **11 条只出现在 `background.js` 的允许清单里、扩展从没调用过**
+>   （`ai-stream-result`、`job-status`、`lookup-event`、`review-answer`、
+>   `run-save`、`snippets-to-async`、`sync-batch`、`favorites`、
+>   `phrase-mark`、`phrases`、`review-queue`）
+> - **2 条只在 `hostMode === 'html'` 下触发**（`html-highlights`、
+>   `context-sync`），即 PWA 的 HTML 阅读器 → **随 PWA 一起退役**
+> - **1 条本就该打 Pi**：`ping` 是探测 Pi 可达性的，属于 C 类
+>
+> 错因：把「扩展源码里出现过这个路径」当成了「扩展在用它」。
+> `BW_FETCH_ROUTE_METHODS` 是**允许清单**（若有人请求则放行哪些方法），
+> 不是调用记录。
+>
+> 其中一条判断反得尤其彻底：曾断言「`html-highlights` 是扩展独有场景、
+> App 没有对应物、应优先做」。实际**扩展在普通网页上的高亮早已完全本地化** ——
+> `src/web-highlights.js`，存 `webHighlightsV1`，exact quote + prefix/suffix +
+> DOM 文本位置复合锚，渲染走 CSS Highlights API，一次都不碰 Pi。
+>
+> **结论：iPad 上「扩展只依赖 App」这个目标，A 类改完就基本达成，
+> 不需要先在 App 里补一批新能力。**
 
 A 类：`highlights` / `epub-highlights` / `notes` / `note-composite` /
 `reading-pos` / `userpages` / `video-player-prefs` / `toc` / `to-note` / `img-proxy`
@@ -522,9 +543,9 @@ Pi 真正不可替代的只剩一个角色：**同步中继**（永远在线、�
 - [ ] **启动器接同步与领任务**（Codex 已做启动器本体）
 - [ ] **「同步中」状态暴露给 AI**，防止启动阶段的否定性误答
 - [ ] OCR/YOLO 产物补 GPU 标识与权重哈希（现有 provenance 已够用，模型换版本时才需要）
-- [ ] **B 类 14 条：App 补齐能力**（第 19 条）。`html-highlights` 优先 ——
-      网页高亮是扩展独有场景，App 里没有对应物。其余：`context-sync`、
-      `sync-batch`、`favorites`、`phrases`、`review-queue`、`lookup-event` 等
+- [x] ~~B 类 14 条：App 补齐能力~~ —— **已核实为空**，无需补（见第 19 条注）
+- [ ] **清理 `BW_FETCH_ROUTE_METHODS` 里从未被调用的 11 条**：它们让允许面
+      大于实际使用面，也正是这次误判的来源
 - [ ] **A 类改指向后，Pi 侧对应实现移入 `_retired/`**（不是删 —— 将来 App 版
       某个边界行为可疑时，最有用的对照就是"Pi 版当时怎么处理的"；
       从 git 历史里刨比从一个明确的目录里找难得多）
@@ -551,6 +572,9 @@ Pi 真正不可替代的只剩一个角色：**同步中继**（永远在线、�
   曾因此打破 7 个既有测试（`BWRouteDestination is not defined`）。
   解法是解耦而非改测试：缺模块时安全落 `"pi"`，调用点比较字面量 `"app"`
   并用一条断言把字面量与常量钉在一起 —— 否则分支永远不成立、请求静默继续打 Pi
+- **「源码里出现」≠「在用」**：`BW_FETCH_ROUTE_METHODS` 是允许清单，不是调用
+  记录。据它列出的 14 条「扩展依赖」里，10 条从未被调用过。判断依赖要看
+  真实调用点及其触发条件（`hostMode === 'html'` 这种条件本身就说明它属于 PWA）
 - **单文件二进制的 `grep` 不可信**：曾 grep 189MB 单文件发布的桥接，
   漏报三个工具、又把无关字符串当成工具名。要问它自己（`--self-test` / `tools/list`）
 - **`tests/reader_contract/` 已 125 个文件**，一次跑完接近 10 分钟命令上限，
