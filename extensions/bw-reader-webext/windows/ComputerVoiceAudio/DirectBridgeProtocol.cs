@@ -1075,6 +1075,8 @@ internal sealed class DirectBridgeProtocolSession
         ReaderVisualDeliveryAck> _acceptReaderVisual;
     private readonly Action<ReaderBrowserControlResponse>
         _acceptReaderBrowserControl;
+    private readonly Action<ReaderQueryResponse>
+        _acceptReaderQuery;
     private readonly Action<ReaderRealtimeOutputAck>
         _acceptReaderRealtimeOutput;
     private readonly Action<string> _contextDeliveryModeChanged;
@@ -1103,6 +1105,8 @@ internal sealed class DirectBridgeProtocolSession
             ReaderVisualDeliveryAck>? acceptReaderVisual = null,
         Action<ReaderBrowserControlResponse>?
             acceptReaderBrowserControl = null,
+        Action<ReaderQueryResponse>?
+            acceptReaderQuery = null,
         Action<ReaderRealtimeOutputAck>?
             acceptReaderRealtimeOutput = null,
         Action<string>? contextDeliveryModeChanged = null,
@@ -1136,6 +1140,11 @@ internal sealed class DirectBridgeProtocolSession
             ?? (_ => throw new DirectProtocolException(
                 "BW_READER_BROWSER_CONTROL_UNAVAILABLE",
                 "Reader 浏览控制接收器尚未接线",
+                retryable: true));
+        _acceptReaderQuery = acceptReaderQuery
+            ?? (_ => throw new DirectProtocolException(
+                "BW_READER_QUERY_UNAVAILABLE",
+                "Reader 查询接收器尚未接线",
                 retryable: true));
         _acceptReaderRealtimeOutput = acceptReaderRealtimeOutput
             ?? (_ => throw new DirectProtocolException(
@@ -1240,6 +1249,9 @@ internal sealed class DirectBridgeProtocolSession
                     break;
                 case ReaderBrowserControlProtocol.ResponseType:
                     payload = HandleReaderBrowserControl(message);
+                    break;
+                case ReaderQueryProtocol.ResponseType:
+                    payload = HandleReaderQuery(message);
                     break;
                 case ReaderRealtimeOutputProtocol.AckType:
                     payload = HandleReaderRealtimeOutput(message);
@@ -1590,6 +1602,43 @@ internal sealed class DirectBridgeProtocolSession
                 "Reader 浏览控制回传来源与当前连接不匹配");
         }
         _acceptReaderBrowserControl(response);
+        return new
+        {
+            correlation = response.Correlation,
+            accepted = true,
+        };
+    }
+
+    // 与浏览控制同样的三道守卫：必须是快照模式、必须是纯上下文连接、来源必须
+    // 就是本连接注册的那一个。少任何一道，另一个页面就能替这本书回答。
+    private object HandleReaderQuery(JsonElement message)
+    {
+        if (
+            RequireContextDeliveryMode()
+                != DirectContextDeliveryMode.SnapshotMcp
+            || _phase != DirectProtocolPhase.ContextOnly
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_READER_QUERY_CONTEXT_ONLY_REQUIRED",
+                "Reader 查询只允许在纯上下文连接中回传");
+        }
+        ReaderQueryResponse response =
+            ReaderQueryProtocol.ValidateResponse(message);
+        RequireContextOnlySession(response.SessionId);
+        if (
+            _registeredSourceInstanceId is null
+            || !string.Equals(
+                _registeredSourceInstanceId,
+                response.SourceInstanceId,
+                StringComparison.Ordinal)
+        )
+        {
+            throw new DirectProtocolException(
+                "BW_READER_QUERY_SOURCE_MISMATCH",
+                "Reader 查询回传来源与当前连接不匹配");
+        }
+        _acceptReaderQuery(response);
         return new
         {
             correlation = response.Correlation,

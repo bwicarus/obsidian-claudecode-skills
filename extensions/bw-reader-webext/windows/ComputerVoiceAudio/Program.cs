@@ -165,6 +165,7 @@ internal static class Program
                 NamedPipeReaderBrowserControlRpcClient browserControlClient =
                     new();
                 NamedPipeReaderRealtimeOutputRpcClient outputClient = new();
+                NamedPipeReaderQueryRpcClient queryClient = new();
                 ReaderContextMcpServer server = new(
                     Path.GetFullPath(args[2]),
                     Console.In,
@@ -172,7 +173,8 @@ internal static class Program
                     fetchVisualAsync: visualClient.RequestAsync,
                     controlBrowserAsync: browserControlClient.RequestAsync,
                     sendOutputAsync: outputClient.SendAsync,
-                    probeOutputSourceAsync: outputClient.ProbeSourceAsync);
+                    probeOutputSourceAsync: outputClient.ProbeSourceAsync,
+                    queryReaderAsync: queryClient.RequestAsync);
                 return await server.RunAsync(CancellationToken.None)
                     .ConfigureAwait(false);
             }

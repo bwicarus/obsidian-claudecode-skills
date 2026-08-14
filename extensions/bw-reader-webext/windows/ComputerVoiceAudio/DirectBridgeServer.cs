@@ -49,6 +49,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
     private readonly ReaderBrowserControlBroker _readerBrowserControlBroker;
     private readonly NamedPipeReaderBrowserControlRpcServer
         _readerBrowserControlRpcServer;
+    private readonly ReaderQueryBroker _readerQueryBroker;
+    private readonly NamedPipeReaderQueryRpcServer _readerQueryRpcServer;
     private readonly ReaderRealtimeOutputBroker _readerRealtimeOutputBroker;
     private readonly NamedPipeReaderRealtimeOutputRpcServer
         _readerRealtimeOutputRpcServer;
@@ -127,6 +129,9 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         _readerBrowserControlRpcServer =
             new NamedPipeReaderBrowserControlRpcServer(
                 _readerBrowserControlBroker);
+        _readerQueryBroker = new ReaderQueryBroker(_readerSourceRouter);
+        _readerQueryRpcServer = new NamedPipeReaderQueryRpcServer(
+            _readerQueryBroker);
         _readerRealtimeOutputBroker = new ReaderRealtimeOutputBroker(
             _readerSourceRouter);
         _readerRealtimeOutputRpcServer =
@@ -230,6 +235,8 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         Task? browserControlRpcTask = null;
         CancellationTokenSource? realtimeOutputRpcLifetime = null;
         Task? realtimeOutputRpcTask = null;
+        CancellationTokenSource? queryRpcLifetime = null;
+        Task? queryRpcTask = null;
         try
         {
             await app.StartAsync(cancellationToken).ConfigureAwait(false);
@@ -243,6 +250,11 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                     cancellationToken);
             browserControlRpcTask = _readerBrowserControlRpcServer.RunAsync(
                 browserControlRpcLifetime.Token);
+            queryRpcLifetime =
+                CancellationTokenSource.CreateLinkedTokenSource(
+                    cancellationToken);
+            queryRpcTask = _readerQueryRpcServer.RunAsync(
+                queryRpcLifetime.Token);
             realtimeOutputRpcLifetime =
                 CancellationTokenSource.CreateLinkedTokenSource(
                     cancellationToken);
@@ -278,6 +290,21 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
         }
         finally
         {
+            if (queryRpcLifetime is not null)
+            {
+                queryRpcLifetime.Cancel();
+            }
+            if (queryRpcTask is not null)
+            {
+                try
+                {
+                    await queryRpcTask.ConfigureAwait(false);
+                }
+                catch (OperationCanceledException)
+                {
+                }
+            }
+            queryRpcLifetime?.Dispose();
             if (realtimeOutputRpcLifetime is not null)
             {
                 realtimeOutputRpcLifetime.Cancel();
@@ -1006,6 +1033,15 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                         retryable: true);
                 _readerBrowserControlBroker.Accept(lease, response);
             },
+            acceptReaderQuery: response =>
+            {
+                ReaderContextSourceLease lease = sourceLease
+                    ?? throw new DirectProtocolException(
+                        "BW_READER_QUERY_SOURCE_NOT_REGISTERED",
+                        "Reader 查询来源尚未注册",
+                        retryable: true);
+                _readerQueryBroker.Accept(lease, response);
+            },
             acceptReaderRealtimeOutput: ack =>
             {
                 ReaderContextSourceLease lease = sourceLease
@@ -1134,6 +1170,7 @@ internal sealed class DirectBridgeServer : IAsyncDisposable
                 ReaderVisualDeliveryProtocol.RegisterType or
                 ReaderVisualDeliveryProtocol.ChunkType or
                 ReaderBrowserControlProtocol.ResponseType or
+                ReaderQueryProtocol.ResponseType or
                 ReaderRealtimeOutputProtocol.AckType;
         }
         catch (JsonException)

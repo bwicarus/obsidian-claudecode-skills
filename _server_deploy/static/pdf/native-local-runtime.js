@@ -10047,6 +10047,90 @@
     });
   }
 
+  // 助手读高亮：直接读本机那份，不经 Pi。
+  //
+  // 只回助手用得上的字段。rects 是渲染几何，占掉的体积能顶好几条正文，而助手
+  // 拿它什么也做不了 —— 它要的是"划了什么、在哪一页、什么颜色"，以及能拿去
+  // 撤销的那个 id。
+  //
+  // 装不下时截断并把 truncated 报上去。一个被悄悄截短的列表跟完整的长得一样，
+  // 助手会据此说"你一共划了 12 条" —— 那比不回答更糟。
+  function nativeReaderHighlights(input) {
+    var payload = input && typeof input === 'object' && !Array.isArray(input)
+      ? input : {};
+    var surface = nativeInterfaceSurface;
+    if (surface !== 'pdf' && surface !== 'epub') {
+      return Promise.reject(new RuntimeError(
+        '当前阅读界面没有本机高亮', 'BW_READER_QUERY_SURFACE'
+      ));
+    }
+    var wantPage = null;
+    if (payload.page !== undefined && payload.page !== null) {
+      wantPage = Number(payload.page);
+      if (!Number.isInteger(wantPage) || wantPage < 1) {
+        return Promise.reject(new RuntimeError(
+          '页码无效', 'BW_READER_QUERY_PARAMS'
+        ));
+      }
+    }
+    var contains = payload.contains == null ? '' : String(payload.contains);
+    if (contains.length > 256) {
+      return Promise.reject(new RuntimeError(
+        '过滤文字过长', 'BW_READER_QUERY_PARAMS'
+      ));
+    }
+    var needle = contains.trim().toLowerCase();
+    var kind = surface === 'epub' ? 'epub-highlights' : 'document-highlights';
+    return bootPromise.then(function () {
+      return readState(kind, [], {
+        transactionTimeoutMs: EXACT_HIGHLIGHT_IDB_TIMEOUT_MS
+      });
+    }).then(function (stored) {
+      var items = Array.isArray(stored) ? stored : [];
+      var matched = [];
+      for (var index = 0; index < items.length; index += 1) {
+        var item = items[index];
+        if (!item || typeof item !== 'object') continue;
+        var page = Number(
+          item.page != null ? item.page : item.section
+        );
+        if (!Number.isFinite(page)) page = null;
+        if (wantPage !== null && page !== wantPage) continue;
+        var text = String(item.text == null ? '' : item.text);
+        if (needle && text.toLowerCase().indexOf(needle) < 0) continue;
+        matched.push({
+          id: String(item.id == null ? '' : item.id),
+          page: page,
+          color: String(item.color == null ? '' : item.color),
+          text: text.length > 600 ? text.slice(0, 600) : text
+        });
+      }
+      matched.sort(function (a, b) {
+        return (a.page || 0) - (b.page || 0);
+      });
+      // 逐条累加真实序列化长度，装不下就停 —— 估一个"平均每条多少字节"
+      // 在长引文面前必然失准，而失准的方向恰好是超限被整个丢掉。
+      var budget = 32 * 1024;
+      var used = 0;
+      var kept = [];
+      var truncated = false;
+      for (var m = 0; m < matched.length; m += 1) {
+        var size = JSON.stringify(matched[m]).length + 1;
+        if (used + size > budget) { truncated = true; break; }
+        used += size;
+        kept.push(matched[m]);
+      }
+      return {
+        ok: true,
+        surface: surface,
+        highlights: kept,
+        matched: matched.length,
+        returned: kept.length,
+        truncated: truncated
+      };
+    });
+  }
+
   function nativeReaderUndoLast(operationID) {
     operationID = String(operationID || '');
     if (!/^rundo_[0-9a-f]{24}$/.test(operationID)) {
@@ -10085,6 +10169,7 @@
     undoLast: nativeReaderUndoLast,
     createNote: nativeReaderCreateNote,
     editNote: nativeReaderEditNote,
+    highlights: nativeReaderHighlights,
     savePDFHighlight: function (payload) {
       var allowed = new Set([
         'file', 'id', 'page', 'rects', 'color', 'text', 'note', 'kind',
@@ -10177,6 +10262,9 @@
   };
   root._nativeReaderEditNote = function (input) {
     return api.editNote(input);
+  };
+  root._nativeReaderHighlights = function (input) {
+    return api.highlights(input);
   };
 
   // The shell deliberately loads this bootstrap before the legacy Reader

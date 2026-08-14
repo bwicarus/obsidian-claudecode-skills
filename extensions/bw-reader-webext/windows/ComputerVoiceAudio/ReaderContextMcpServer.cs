@@ -18,6 +18,7 @@ internal sealed class ReaderContextMcpServer
     internal const string UndoLastToolName = "reader_undo_last";
     internal const string NoteCreateToolName = "reader_note_create";
     internal const string NoteEditToolName = "reader_note_edit";
+    internal const string HighlightsToolName = "reader_highlights";
     internal const string CapabilityGuideToolName =
         "reader_capability_guide";
     internal const string ServerName = "bw-reader-context-snapshot";
@@ -56,6 +57,10 @@ internal sealed class ReaderContextMcpServer
         CancellationToken,
         Task<ReaderRealtimeOutputAck>>? _sendOutputAsync;
     private readonly Func<
+        ReaderQueryRequest,
+        CancellationToken,
+        Task<ReaderQueryResponse>>? _queryReaderAsync;
+    private readonly Func<
         string,
         CancellationToken,
         Task<ReaderRealtimeOutputSourceStatus>>? _probeOutputSourceAsync;
@@ -90,7 +95,11 @@ internal sealed class ReaderContextMcpServer
             CancellationToken,
             Task<ReaderRealtimeOutputSourceStatus>>?
                 probeOutputSourceAsync = null,
-        ReaderCapabilityCatalog? capabilityCatalog = null)
+        ReaderCapabilityCatalog? capabilityCatalog = null,
+        Func<
+            ReaderQueryRequest,
+            CancellationToken,
+            Task<ReaderQueryResponse>>? queryReaderAsync = null)
     {
         if (!Path.IsPathFullyQualified(statePath))
         {
@@ -106,6 +115,7 @@ internal sealed class ReaderContextMcpServer
         _fetchVisualAsync = fetchVisualAsync;
         _controlBrowserAsync = controlBrowserAsync;
         _sendOutputAsync = sendOutputAsync;
+        _queryReaderAsync = queryReaderAsync;
         _probeOutputSourceAsync = probeOutputSourceAsync;
         _capabilityCatalog = capabilityCatalog ?? new ReaderCapabilityCatalog();
         _startedAt = _utcNow().ToString("O");
@@ -642,6 +652,52 @@ internal sealed class ReaderContextMcpServer
                     ["readOnlyHint"] = false,
                     ["destructiveHint"] = false,
                     ["idempotentHint"] = false,
+                    ["openWorldHint"] = false,
+                },
+            });
+            tools.Add(new JsonObject
+            {
+                ["name"] = HighlightsToolName,
+                ["description"] =
+                    "Read the highlights the user has made in the book that "
+                    + "is open, straight from the Reader's own store. "
+                    + "Optionally narrow to one page, or to highlights whose "
+                    + "text contains a phrase. Returns each highlight's id, "
+                    + "page, colour and quoted text; the id is what "
+                    + "reader_undo_last takes. If the result did not fit, "
+                    + "truncated is true and the list is a prefix, not the "
+                    + "whole set - say so rather than concluding from it. "
+                    + "Works only while a PDF or EPUB is open. Safe to retry.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["page"] = new JsonObject
+                        {
+                            ["type"] = "integer",
+                            ["minimum"] = 1,
+                            ["description"] =
+                                "Restrict to this page (PDF) or section "
+                                + "(EPUB). Omit for the whole book.",
+                        },
+                        ["contains"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["minLength"] = 1,
+                            ["maxLength"] = 256,
+                            ["description"] =
+                                "Restrict to highlights whose quoted text "
+                                + "contains this phrase.",
+                        },
+                    },
+                    ["additionalProperties"] = false,
+                },
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = true,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = true,
                     ["openWorldHint"] = false,
                 },
             });
@@ -1306,6 +1362,57 @@ internal sealed class ReaderContextMcpServer
             return;
         }
         if (
+            toolName == HighlightsToolName
+            && _queryReaderAsync is not null
+        )
+        {
+            JsonObject queryParameters = new();
+            if (arguments.ValueKind == JsonValueKind.Object)
+            {
+                if (arguments.TryGetProperty("page", out JsonElement pageValue))
+                {
+                    if (pageValue.ValueKind != JsonValueKind.Number
+                        || !pageValue.TryGetInt64(out long pageNumber)
+                        || pageNumber < 1
+                        || pageNumber > int.MaxValue)
+                    {
+                        await WriteErrorAsync(
+                            id,
+                            -32602,
+                            "Invalid Reader highlight page",
+                            cancellationToken).ConfigureAwait(false);
+                        return;
+                    }
+                    queryParameters["page"] = pageNumber;
+                }
+                if (arguments.TryGetProperty(
+                        "contains",
+                        out JsonElement containsValue))
+                {
+                    if (containsValue.ValueKind != JsonValueKind.String
+                        || containsValue.GetString() is not string contains
+                        || contains.Length == 0
+                        || contains.Length
+                            > ReaderQueryProtocol.MaximumQueryTextCharacters)
+                    {
+                        await WriteErrorAsync(
+                            id,
+                            -32602,
+                            "Invalid Reader highlight filter",
+                            cancellationToken).ConfigureAwait(false);
+                        return;
+                    }
+                    queryParameters["contains"] = contains;
+                }
+            }
+            await RunReaderQueryAsync(
+                id,
+                HighlightsToolName,
+                queryParameters,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (
             toolName == NoteEditToolName
             && _sendOutputAsync is not null
         )
@@ -1643,6 +1750,83 @@ internal sealed class ReaderContextMcpServer
             id,
             "client-action",
             payload,
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    // 查询的失败必须能被区分。「没有高亮」和「这本书还没就绪」在助手那里会导出
+    // 完全不同的话；把两者都答成一个空列表，它就会替用户断定「你没有划过」。
+    private async Task RunReaderQueryAsync(
+        JsonNode id,
+        string query,
+        JsonObject parameters,
+        CancellationToken cancellationToken)
+    {
+        JsonObject snapshot = BuildToolPayload();
+        ReaderQueryRequest? request = BuildQueryRequest(
+            snapshot,
+            query,
+            parameters);
+        if (request is null)
+        {
+            await WriteReaderOutputToolErrorAsync(
+                id,
+                "BW_READER_QUERY_SOURCE_NOT_READY",
+                "当前快照没有已就绪的 PDF/EPUB 阅读来源。请先打开书或重新读取 Reader 上下文。",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        ReaderQueryResponse response;
+        try
+        {
+            response = await _queryReaderAsync!(request, cancellationToken)
+                .ConfigureAwait(false);
+        }
+        catch (ReaderQueryException exception)
+        {
+            await WriteReaderOutputToolErrorAsync(
+                id,
+                exception.Code,
+                exception.Message,
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (response.Status != "ok")
+        {
+            await WriteReaderOutputToolErrorAsync(
+                id,
+                response.Status == "unsupported"
+                    ? "BW_READER_QUERY_UNSUPPORTED"
+                    : "BW_READER_QUERY_UNAVAILABLE",
+                response.Status == "unsupported"
+                    ? "当前阅读界面不支持该查询。"
+                    : "Reader 暂时无法回答该查询。",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        JsonObject result = new()
+        {
+            ["query"] = query,
+            ["file"] = request.File,
+            ["revision"] = request.SnapshotRevision,
+            // 截断状态永远显式出现，即使是 false。缺省它就等于让读到的人
+            // 自行假设「全都在这儿了」—— 那正是静默截断最有害的地方。
+            ["truncated"] = response.Truncated,
+            ["result"] = JsonNode.Parse(response.Result.GetRawText()),
+        };
+        await WriteResultAsync(
+            id,
+            new JsonObject
+            {
+                ["content"] = new JsonArray
+                {
+                    new JsonObject
+                    {
+                        ["type"] = "text",
+                        ["text"] = result.ToJsonString(
+                            DirectBridgeContract.JsonOptions),
+                    },
+                },
+            },
             cancellationToken).ConfigureAwait(false);
     }
 
@@ -2559,6 +2743,39 @@ internal sealed class ReaderContextMcpServer
             action,
             target,
             selectionId);
+    }
+
+    // 查询面向书，不面向网页：本机高亮库属于 PDF/EPUB 阅读器，普通网页没有它。
+    // 这跟 browser-control 只认 web 正好互补，两者都不该去猜对方的场景。
+    internal static ReaderQueryRequest? BuildQueryRequest(
+        JsonObject payload,
+        string query,
+        JsonObject parameters)
+    {
+        if (
+            !ReaderQueryProtocol.IsQuery(query)
+            || LongValue(payload["revision"]) is not long revision
+            || revision < 0
+            || payload["contextStatus"]?.GetValue<string>() != "ready"
+            || payload["activeReading"] is not JsonObject active
+            || StringValue(active["kind"]) is not string kind
+            || kind is not ("pdf" or "epub")
+            || StringValue(active["sourceInstanceId"])
+                is not string activeSource
+            || !DirectBridgeContract.IsSafeId(activeSource)
+            || StringValue(active["file"]) is not string file
+            || string.IsNullOrWhiteSpace(file)
+        )
+        {
+            return null;
+        }
+        return new ReaderQueryRequest(
+            "query-" + Guid.NewGuid().ToString("N"),
+            activeSource,
+            revision,
+            file,
+            query,
+            parameters);
     }
 
     internal static bool BrowserControlRequestStillCurrent(
