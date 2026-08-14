@@ -4247,3 +4247,10 @@ MCP 保留为"需要实时真值/页面控制"的能力层；跨机状态与命�
 - **已知门禁**：Windows 全量 Python/handoff 仍只命中已登记的 POSIX `fcntl`、Linux 路径/fixture 与本机测试数据基线；本批定向与跨格式合同均通过。
 - **发布事实**：Direct `0.1.126` 已原子安装并恢复 viewer HTTP 200、Codex 麦克风 active、`lastError=null`，回滚点 `install-0.1.126-20260814T034115Z-3c1ebd1e`；Actions `31767661941` 上传 TestFlight `1.1.55 (296)`，`31768179124` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
 - **边界/下一步**：未部署 Pi 或桌面扩展正式渠道；既有 ReaderPC/Direct 原子更新、候选分支推送和 TestFlight 内测上传以后无需逐次确认，失败时自动回滚或取日志后重试。
+
+## Codex：App 实时快照跟随服务器总开关常驻（2026-08-14 JST）
+- **改了什么**：服务器 `snapshot-mcp` 成为 App 快照连接的唯一生命周期权威；App inactive/background 不再主动断开，前台事件只验活/重建，关闭总开关仍会停用。
+- **续鲜**：静止页心跳从 60 秒收紧到 20 秒，低于 ReaderPC 35 秒 freshness，消除健康连接周期性显示过期。
+- **怎么验的**：后台初始建链、连接后进入后台不关闭/不误探测、前台重建及 20 秒真实时钟边界合同通过；Reader Node 全量、vendor 构建、ReaderBundle 314 文件与发布管线通过。
+- **发布事实**：提交 `e87ba1ed`；Actions `31770279842` 上传 TestFlight `1.1.56 (299)`，`31770790508` 确认 `COMPLETE / VALID / IN_BETA_TESTING` 且零错误警告。
+- **边界/下一步**：Direct `0.1.126`、ReaderPC `0.1.22` 不需更新，Pi/桌面扩展正式渠道未动；Windows handoff 仍只命中已登记的 POSIX `fcntl` 平台基线，真机更新后验证后台切换与自动恢复。
