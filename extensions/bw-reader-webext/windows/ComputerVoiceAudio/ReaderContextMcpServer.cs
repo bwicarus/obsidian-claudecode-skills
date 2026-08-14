@@ -14,6 +14,8 @@ internal sealed class ReaderContextMcpServer
     internal const string PracticePageToolName = "reader_practice_page";
     internal const string CardToolName = "reader_card";
     internal const string CommandToolName = "reader_command";
+    // 尚未注册为 MCP 工具，见下方 tools 列表处的说明。保留常量是为了让
+    // "为什么没有这个工具" 有一处可查，而不是让人以为漏加了。
     internal const string UndoLastToolName = "reader_undo_last";
     internal const string CapabilityGuideToolName =
         "reader_capability_guide";
@@ -635,34 +637,19 @@ internal sealed class ReaderContextMcpServer
                     ["openWorldHint"] = false,
                 },
             });
-            tools.Add(new JsonObject
-            {
-                ["name"] = UndoLastToolName,
-                ["description"] =
-                    "Undo the Reader's most recent local change to this book "
-                    + "(a highlight the assistant just created, or a sticky "
-                    + "note it created or edited). The App owns the undo "
-                    + "stack and performs the undo itself; this tool only "
-                    + "asks for it. The Reader refuses when nothing is "
-                    + "undoable or when the record changed underneath, and "
-                    + "reports that as an error. Do not retry a timeout or "
-                    + "unknown outcome blindly - ask the user instead.",
-                ["inputSchema"] = new JsonObject
-                {
-                    ["type"] = "object",
-                    ["properties"] = new JsonObject(),
-                    ["additionalProperties"] = false,
-                },
-                ["annotations"] = new JsonObject
-                {
-                    ["readOnlyHint"] = false,
-                    // 它撤销的是用户已经完成的改动，必须标记为破坏性。
-                    ["destructiveHint"] = true,
-                    // 每次带一枚一次性操作编号，重放会被本机拒绝。
-                    ["idempotentHint"] = false,
-                    ["openWorldHint"] = false,
-                },
-            });
+            // reader_undo_last 暂不注册。
+            //
+            // 它下发的 _nativePDFUndoLast 只有 PDF 宿主实现；EPUB 宿主没有该函数，
+            // 而 EPUB 的等价能力要求给出具体 action 记录（POST /pdf/api/epub-action
+            // {op:'undo',...}），目前没有"撤销最近一次"的无参入口。
+            //
+            // 以 PDF 专用的形式发布会让同一句"撤销刚才那个"在 EPUB 上失效 ——
+            // 那正是本地化不得降低可见效果这一条要防的事。等 App 本地的 EPUB
+            // 最近动作权威栈、无参取最后可撤销 action、强类型回执与冲突/未知
+            // fail-closed 都就位后，再在此处注册。
+            //
+            // 注意：Pi 经 client_action 下发的 _nativePDFUndoLast 不受影响 ——
+            // 那条路属于原生 Realtime，白名单仍然放行。
             tools.Add(new JsonObject
             {
                 ["name"] = AnkiDraftToolName,
@@ -1262,32 +1249,6 @@ internal sealed class ReaderContextMcpServer
                 id,
                 arguments,
                 "highlight-text",
-                cancellationToken).ConfigureAwait(false);
-            return;
-        }
-        if (
-            toolName == UndoLastToolName
-            && _sendOutputAsync is not null
-        )
-        {
-            // 零新逻辑：撤销栈在 App 本机（native-local-runtime 已实现
-            // highlight-create / note-create / note-edit 三类，上限 80，
-            // 带修订冲突检测）。这里只下发一条指令，执行与拒绝都由本机决定。
-            //
-            // 操作编号每次新生成且一次性：本机据此拒绝重放，所以这个工具
-            // 不是幂等的——重复调用会撤掉更早的一次改动，而不是无操作。
-            JsonObject undoPayload = new()
-            {
-                ["fn"] = "_nativePDFUndoLast",
-                ["args"] = new JsonArray
-                {
-                    "npdf_" + Guid.NewGuid().ToString("N")[..24],
-                },
-            };
-            await SendReaderOutputAsync(
-                id,
-                "client-action",
-                undoPayload,
                 cancellationToken).ConfigureAwait(false);
             return;
         }
