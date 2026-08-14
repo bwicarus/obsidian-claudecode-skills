@@ -1510,16 +1510,29 @@ def _validate_mcp_smoke_output(result: CommandResult) -> None:
 
     list_result = by_id[2].get("result")
     tools = list_result.get("tools") if isinstance(list_result, dict) else None
+    # 顺序与内容都锁死：工具面是给模型看的契约，少一个或多一个都会改变它的
+    # 行为，而这种改变在运行时表现为"模型忽然不会用某个功能"，极难追。
+    # 更新方法是实测 tools/list 后照抄，别手写 —— 手写过一次就会漂。
     expected_tools = (
         "reader_context_snapshot",
         "reader_capability_guide",
         "reader_visual_image",
         "reader_browser_control",
         "reader_highlight_range",
+        "reader_mark_vocab",
+        "reader_make_note",
+        "reader_note_edit",
+        "reader_note_create",
         "reader_undo_last",
         "reader_anki_draft",
         "reader_card",
         "reader_command",
+        "reader_notes",
+        "reader_toc",
+        "reader_lookup_word",
+        "reader_page_text",
+        "reader_search",
+        "reader_highlights",
     )
     if (
         not isinstance(tools, list)
@@ -1528,8 +1541,21 @@ def _validate_mcp_smoke_output(result: CommandResult) -> None:
             for item in tools
         ) != expected_tools
     ):
-        _fail("包内 stdio MCP 未暴露精确 9 工具合同")
-    command_schema = tools[-1].get("inputSchema")
+        _fail(f"包内 stdio MCP 未暴露精确 {len(expected_tools)} 工具合同")
+    # 按名字取，不按位置。以前 reader_command 恰好排最后，于是这里写了
+    # tools[-1] —— 加一个工具就会静默改成检查别的工具的 schema，
+    # 而断言仍然"通过"或以看不懂的理由失败。
+    command_tool = next(
+        (
+            item
+            for item in tools
+            if isinstance(item, dict) and item.get("name") == "reader_command"
+        ),
+        None,
+    )
+    if not isinstance(command_tool, dict):
+        _fail("包内 stdio MCP 缺少 reader_command")
+    command_schema = command_tool.get("inputSchema")
     command_variants = (
         command_schema.get("oneOf")
         if isinstance(command_schema, dict)
