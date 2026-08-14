@@ -328,13 +328,14 @@ internal static class ReaderRealtimeOutputProtocol
         && value[2..].All(character => character is
             >= '0' and <= '9' or >= 'a' and <= 'z');
 
-    // 桥接只用这一种输出承载 Reader 本机撤销。助手高亮的卡片条由本地落库成功
-    // 分支直接产生，不走跨进程动态函数通道。这里因此只允许一个受信语义入口；
-    // normalizer 与执行侧还会分别再卡一次，不能把任意 window 函数暴露给桥接。
+    // 桥接以这种输出承载 Reader 本机的受信语义入口。助手高亮的卡片条由本地落库
+    // 成功分支直接产生，不走跨进程动态函数通道。这里只允许名单内的入口，且每个
+    // 入口的参数各自校验；normalizer 与执行侧还会分别再卡一次，任何时候都不能
+    // 把任意 window 函数暴露给桥接。
     private static void ValidateClientAction(JsonElement root)
     {
         string fn = Text(root, "fn", 64);
-        if (fn != "_nativeReaderUndoLast")
+        if (fn is not ("_nativeReaderUndoLast" or "_nativeReaderCreateNote"))
         {
             throw Invalid("Reader 客户端动作不在白名单内");
         }
@@ -342,6 +343,25 @@ internal static class ReaderRealtimeOutputProtocol
         if (args.ValueKind != JsonValueKind.Array)
         {
             throw Invalid("Reader 客户端动作参数必须是数组");
+        }
+        if (fn is "_nativeReaderCreateNote")
+        {
+            // 只传内容。位置由 App 用受信的当前界面与页码自己填 ——
+            // 桥接不知道此刻在哪一页，让它给坐标等于把它没有的事实写进协议。
+            if (args.GetArrayLength() != 1
+                || args[0].ValueKind != JsonValueKind.Object)
+            {
+                throw Invalid("Reader 便签需要一个内容对象");
+            }
+            JsonElement note = args[0];
+            DirectJsonValidation.RequireNoDuplicateKeys(note);
+            Exact(note, "text");
+            string noteText = Text(note, "text", 4_000);
+            if (string.IsNullOrWhiteSpace(noteText))
+            {
+                throw Invalid("Reader 便签内容为空");
+            }
+            return;
         }
         if (args.GetArrayLength() != 1
             || args[0].ValueKind != JsonValueKind.String)

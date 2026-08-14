@@ -1802,17 +1802,39 @@
         // nativeInterfaceSurface 分流 PDF/EPUB，并再次校验一次性编号。
         var _caFn = String(p.fn || '');
         var _caArgs = Array.isArray(p.args) ? p.args : [];
-        var _caId = _caArgs.length === 1 ? String(_caArgs[0] || '') : '';
-        if (_caFn !== '_nativeReaderUndoLast' || !/^rundo_[0-9a-f]{24}$/.test(_caId)) {
+        // 显式映射，仍不动态分派：每个入口自带参数校验，且只认这张表里的名字。
+        // 表按名字取函数，而不是按消息里的字符串去 window 上找 —— 后者会把
+        // 一条跨进程消息升级成"调用页面任意函数"。
+        var _caTarget = null;
+        var _caCall = null;
+        if (_caFn === '_nativeReaderUndoLast') {
+          var _caId = _caArgs.length === 1 ? String(_caArgs[0] || '') : '';
+          if (!/^rundo_[0-9a-f]{24}$/.test(_caId)) {
+            throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
+          }
+          _caTarget = window._nativeReaderUndoLast;
+          _caCall = function (target) { return target.call(window, _caId); };
+        } else if (_caFn === '_nativeReaderCreateNote') {
+          var _caNote = _caArgs.length === 1 && _caArgs[0] &&
+            typeof _caArgs[0] === 'object' && !Array.isArray(_caArgs[0])
+            ? _caArgs[0] : null;
+          var _caText = _caNote ? String(_caNote.text == null ? '' : _caNote.text) : '';
+          if (!_caNote || !_caText.trim() || _caText.length > 4000) {
+            throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
+          }
+          _caTarget = window._nativeReaderCreateNote;
+          _caCall = function (target) {
+            return target.call(window, { text: _caText });
+          };
+        } else {
           throw new Error('BW_READER_CLIENT_ACTION_INVALID:' + _caFn);
         }
-        var _caTarget = window._nativeReaderUndoLast;
         if (typeof _caTarget !== 'function') {
           throw new Error(
             'BW_READER_CLIENT_ACTION_UNAVAILABLE:' + _caFn
           );
         }
-        work = Promise.resolve(_caTarget.call(window, _caId));
+        work = Promise.resolve(_caCall(_caTarget));
       } else {
         throw new Error('BW_READER_REALTIME_OUTPUT_KIND_UNSUPPORTED');
       }

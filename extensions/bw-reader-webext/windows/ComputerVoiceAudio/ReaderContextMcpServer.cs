@@ -16,6 +16,7 @@ internal sealed class ReaderContextMcpServer
     internal const string CardToolName = "reader_card";
     internal const string CommandToolName = "reader_command";
     internal const string UndoLastToolName = "reader_undo_last";
+    internal const string NoteCreateToolName = "reader_note_create";
     internal const string CapabilityGuideToolName =
         "reader_capability_guide";
     internal const string ServerName = "bw-reader-context-snapshot";
@@ -645,6 +646,41 @@ internal sealed class ReaderContextMcpServer
             });
             tools.Add(new JsonObject
             {
+                ["name"] = NoteCreateToolName,
+                ["description"] =
+                    "Write a sticky note into the open book, stored locally by "
+                    + "the Reader. Pass only the text: the Reader anchors it "
+                    + "using the page it is actually showing, because the "
+                    + "bridge cannot know where the reader is. Works in PDF "
+                    + "and EPUB. Refuses on an empty note, on a surface that "
+                    + "has no notes, and when the write does not commit; each "
+                    + "is a distinct error. Do not retry an unknown outcome.",
+                ["inputSchema"] = new JsonObject
+                {
+                    ["type"] = "object",
+                    ["properties"] = new JsonObject
+                    {
+                        ["text"] = new JsonObject
+                        {
+                            ["type"] = "string",
+                            ["minLength"] = 1,
+                            ["maxLength"] = 4000,
+                            ["description"] = "The note's contents.",
+                        },
+                    },
+                    ["required"] = new JsonArray { "text" },
+                    ["additionalProperties"] = false,
+                },
+                ["annotations"] = new JsonObject
+                {
+                    ["readOnlyHint"] = false,
+                    ["destructiveHint"] = false,
+                    ["idempotentHint"] = false,
+                    ["openWorldHint"] = false,
+                },
+            });
+            tools.Add(new JsonObject
+            {
                 ["name"] = UndoLastToolName,
                 ["description"] =
                     "Undo the most recent undoable assistant change recorded "
@@ -1223,6 +1259,40 @@ internal sealed class ReaderContextMcpServer
                 id,
                 arguments,
                 "highlight-text",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+        if (
+            toolName == NoteCreateToolName
+            && _sendOutputAsync is not null
+        )
+        {
+            string noteText = arguments.ValueKind == JsonValueKind.Object
+                && arguments.TryGetProperty("text", out JsonElement noteValue)
+                && noteValue.ValueKind == JsonValueKind.String
+                ? noteValue.GetString() ?? string.Empty
+                : string.Empty;
+            if (string.IsNullOrWhiteSpace(noteText) || noteText.Length > 4_000)
+            {
+                await WriteErrorAsync(
+                    id,
+                    -32602,
+                    "Invalid Reader note text",
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+            JsonObject notePayload = new()
+            {
+                ["fn"] = "_nativeReaderCreateNote",
+                ["args"] = new JsonArray
+                {
+                    new JsonObject { ["text"] = noteText },
+                },
+            };
+            await SendReaderOutputAsync(
+                id,
+                "client-action",
+                notePayload,
                 cancellationToken).ConfigureAwait(false);
             return;
         }

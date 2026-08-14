@@ -9936,6 +9936,64 @@
     }
   }
 
+  // 助手创建便签的受信入口。
+  //
+  // 位置不由调用方给。桥接那侧只知道"用户想记一条"，不知道此刻在哪一页、哪一节；
+  // 让它传坐标等于把一个它没有的事实编进协议，写错了还会把便签落到别的书上。
+  // 这里用受信的当前界面与页码自己构造锚点，调用方只负责内容。
+  //
+  // 走本地 /pdf/api/notes 而不是另写一份持久化：校验、事务边界与状态迁移都在那条
+  // 路上，绕开它就等于让同一种数据有两套写法。
+  function nativeReaderCreateNote(input) {
+    var payload = input && typeof input === 'object' && !Array.isArray(input)
+      ? input : {};
+    var text = String(payload.text == null ? '' : payload.text);
+    if (!text.trim()) {
+      return Promise.reject(new RuntimeError(
+        '便签内容为空', 'BW_READER_NOTE_TEXT'
+      ));
+    }
+    if (text.length > 4000) {
+      return Promise.reject(new RuntimeError(
+        '便签内容过长', 'BW_READER_NOTE_TEXT'
+      ));
+    }
+    var surface = nativeInterfaceSurface;
+    if (surface !== 'pdf' && surface !== 'epub') {
+      return Promise.reject(new RuntimeError(
+        '当前阅读界面不支持便签', 'BW_READER_NOTE_SURFACE'
+      ));
+    }
+    return bootPromise.then(function () {
+      return readState('reading-position', null);
+    }).then(function (position) {
+      var page = Number(position && position.page) || 1;
+      var body = {
+        file: localFileRef(),
+        anchor: surface === 'epub'
+          ? { kind: 'epub', section: page, x: 0.12, y: 0.12 }
+          : { kind: 'pdf', page: page, x: 0.12, y: 0.12 },
+        text: text,
+        color: '#ffffff'
+      };
+      return root.fetch(localBasePath() + '/pdf/api/notes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body)
+      }).then(function (response) {
+        return response.json().then(function (data) {
+          if (!response.ok || !data || data.ok !== true) {
+            throw new RuntimeError(
+              String((data && data.error) || '便签未能保存'),
+              String((data && data.code) || 'BW_READER_NOTE_FAILED')
+            );
+          }
+          return { ok: true, surface: surface, page: page, id: data.id || null };
+        });
+      });
+    });
+  }
+
   function nativeReaderUndoLast(operationID) {
     operationID = String(operationID || '');
     if (!/^rundo_[0-9a-f]{24}$/.test(operationID)) {
@@ -9972,6 +10030,7 @@
     localBookId: bookId,
     ready: function () { return bootPromise; },
     undoLast: nativeReaderUndoLast,
+    createNote: nativeReaderCreateNote,
     savePDFHighlight: function (payload) {
       var allowed = new Set([
         'file', 'id', 'page', 'rects', 'color', 'text', 'note', 'kind',
@@ -10056,6 +10115,11 @@
   runtimeRoot.nativeLocalRuntime = api;
   root._nativeReaderUndoLast = function (operationID) {
     return api.undoLast(operationID);
+  };
+  // 与撤销同一形态的受信入口：经 api 转一道，调用方拿不到内部实现，
+  // 也无法绕过其中的界面与内容校验。
+  root._nativeReaderCreateNote = function (input) {
+    return api.createNote(input);
   };
 
   // The shell deliberately loads this bootstrap before the legacy Reader
