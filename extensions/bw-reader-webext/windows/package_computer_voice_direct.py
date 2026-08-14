@@ -47,6 +47,7 @@ DEFAULT_BACKUP_ROOT = Path.home() / "bw-computer-voice-bridge-backups"
 
 PACKAGE_CONTRACT = "reader-computer-voice-direct-package/1"
 MANIFEST_SCHEMA = 1
+READER_CONTEXT_MCP_SERVER_VERSION = "1.5.0"
 ARCHIVE_STAMP = (1980, 1, 1, 0, 0, 0)
 RID = "win-x64"
 VERSION_RE = re.compile(r"(?:0|[1-9]\d*)(?:\.(?:0|[1-9]\d*)){0,3}\Z")
@@ -1512,9 +1513,13 @@ def _validate_mcp_smoke_output(result: CommandResult) -> None:
     if (
         not isinstance(server_info, dict)
         or server_info.get("name") != "bw-reader-context-snapshot"
-        or server_info.get("version") != "1.4.0"
+        or server_info.get("version") != READER_CONTEXT_MCP_SERVER_VERSION
     ):
-        _fail("包内 stdio MCP serverInfo 不是 1.4.0 合同")
+        _fail(
+            "包内 stdio MCP serverInfo 不是 "
+            + READER_CONTEXT_MCP_SERVER_VERSION
+            + " 合同"
+        )
 
     list_result = by_id[2].get("result")
     tools = list_result.get("tools") if isinstance(list_result, dict) else None
@@ -1524,6 +1529,7 @@ def _validate_mcp_smoke_output(result: CommandResult) -> None:
         "reader_visual_image",
         "reader_browser_control",
         "reader_highlight_text",
+        "reader_undo_last",
         "reader_anki_draft",
         "reader_card",
         "reader_command",
@@ -1535,7 +1541,7 @@ def _validate_mcp_smoke_output(result: CommandResult) -> None:
             for item in tools
         ) != expected_tools
     ):
-        _fail("包内 stdio MCP 未暴露精确 8 工具合同")
+        _fail("包内 stdio MCP 未暴露精确 9 工具合同")
     command_schema = tools[-1].get("inputSchema")
     command_variants = (
         command_schema.get("oneOf")
